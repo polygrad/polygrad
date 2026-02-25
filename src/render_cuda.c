@@ -152,7 +152,10 @@ static void cuda_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
     snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
       ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1); break;
   case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
-  case POLY_OP_MULACC: snprintf(buf, cap, "((%s*%s)+%s)", s0, s1, s2); break;
+  case POLY_OP_MULACC:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "fma(%s,%s,%s)" : "__fmaf_rn(%s,%s,%s)", s0, s1, s2);
+    break;
   default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
   }
 }
@@ -173,14 +176,16 @@ static int cuda_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool cre
 PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* Inline codegen passes to insert group_for_reduce between sym and pm_reduce.
    * Pipeline: sym → group_for_reduce → pm_reduce(with sink END merge)
-   *        → sym → decomp → transcendental → decomp → gpudims */
+   *        → sym → decomp → transcendental → decomp → gpudims
+   * CUDA has native FMA: decomp preserves MULACC and fuses MUL+ADD→MULACC. */
+  PolyRendererCaps cuda_caps = { .has_mulacc = true };
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   sink = poly_group_for_reduce(ctx, sink, 256);
   sink = poly_apply_pm_reduce(ctx, sink);
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(cuda_caps));
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(cuda_caps));
   sink = poly_add_gpudims(ctx, sink);
   sink = poly_apply_control_flow(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);

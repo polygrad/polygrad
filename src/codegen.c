@@ -854,8 +854,8 @@ static PolyUOp *rule_mod_to_and(PolyCtx *ctx, PolyUOp *root,
 
 /*
  * rule_mulacc_to_mul_add — MULACC(a, b, c) → ADD(MUL(a, b), c)
- * For renderers without native FMA.  Currently unconditional; CUDA should
- * keep MULACC once renderer capabilities are threaded through PolyRewriteOpts.
+ * For renderers without native FMA (CPU/ClangRenderer).
+ * Gated on !caps.has_mulacc in poly_pm_decomp_with_caps().
  */
 static PolyUOp *rule_mulacc_to_mul_add(PolyCtx *ctx, PolyUOp *root,
                                         const PolyBindings *b) {
@@ -865,6 +865,31 @@ static PolyUOp *rule_mulacc_to_mul_add(PolyCtx *ctx, PolyUOp *root,
                              root->src[0], root->src[1], poly_arg_none());
   return poly_uop2(ctx, POLY_OP_ADD, root->dtype,
                     mul, root->src[2], poly_arg_none());
+}
+
+/*
+ * rule_mul_add_to_mulacc — ADD(MUL(a, b), c) → MULACC(a, b, c)
+ * Fusion rule for renderers with native FMA (CUDA).  Float scalars only.
+ * Port of tinygrad: if Ops.MULACC in ops: a*b+c → MULACC(a,b,c)
+ * Gated on caps.has_mulacc in poly_pm_decomp_with_caps().
+ */
+static PolyUOp *rule_mul_add_to_mulacc(PolyCtx *ctx, PolyUOp *root,
+                                        const PolyBindings *b) {
+  (void)b;
+  if (root->op != POLY_OP_ADD || root->n_src != 2) return NULL;
+  if (!poly_dtype_is_float(root->dtype)) return NULL;
+  if (root->dtype.count != 1) return NULL;  /* scalar only */
+  PolyUOp *mul = NULL, *add = NULL;
+  if (root->src[0]->op == POLY_OP_MUL) {
+    mul = root->src[0]; add = root->src[1];
+  } else if (root->src[1]->op == POLY_OP_MUL) {
+    mul = root->src[1]; add = root->src[0];
+  } else return NULL;
+  if (mul->n_src != 2) return NULL;
+  if (!poly_dtype_eq(mul->dtype, root->dtype)) return NULL;
+  if (!poly_dtype_eq(add->dtype, root->dtype)) return NULL;
+  PolyUOp *srcs[3] = { mul->src[0], mul->src[1], add };
+  return poly_uop(ctx, POLY_OP_MULACC, root->dtype, srcs, 3, poly_arg_none());
 }
 
 /*
@@ -927,44 +952,63 @@ static PolyUOp *rule_mul_fdiv1_to_fdiv(PolyCtx *ctx, PolyUOp *root,
   return NULL;
 }
 
-static PolyPatternMatcher *g_pm_decomp = NULL;
+/* Two cached variants: CPU (no MULACC) and FMA-capable (has MULACC). */
+static PolyPatternMatcher *g_pm_decomp_no_mulacc = NULL;
+static PolyPatternMatcher *g_pm_decomp_has_mulacc = NULL;
 
-static PolyPatternMatcher *poly_pm_decomp(void) {
-  if (g_pm_decomp) return g_pm_decomp;
+static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc) {
+  PolyPatternMatcher **target = has_mulacc
+    ? &g_pm_decomp_has_mulacc : &g_pm_decomp_no_mulacc;
+  if (*target) return *target;
 
   PolyOpSet max_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_MAX);
-  PolyRule rules[] = {
-    { poly_pat_ops(max_set, NULL, 0, NULL), rule_decomp_max },
-    /* MUL(x:int, c:const) → SHL(x, log2(c)) when c is power of 2 */
-    { poly_pat_op2(POLY_OP_MUL, poly_pat_any("x"), poly_pat_cvar("c"), NULL),
-      rule_mul_to_shl },
-    /* x * (-1) → NEG(x) */
-    { poly_pat_op2(POLY_OP_MUL, poly_pat_any("x"), poly_pat_cvar("c"), NULL),
-      rule_mul_neg1_to_neg },
-    /* IDIV(x:int, c:const) → SHR(x, log2(c)) when c is power of 2 */
-    { poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_cvar("c"), NULL),
-      rule_idiv_to_shr },
-    /* MOD(x:int, c:const) → AND(x, c-1) when c is power of 2 */
-    { poly_pat_op2(POLY_OP_MOD, poly_pat_any("x"), poly_pat_cvar("c"), NULL),
-      rule_mod_to_and },
-    /* x + NEG(y) → SUB(x, y) */
-    { poly_pat_op2(POLY_OP_ADD, poly_pat_any("x"),
-        poly_pat_op1(POLY_OP_NEG, poly_pat_any("y"), NULL), NULL),
-      rule_add_neg_to_sub },
-    /* MULACC(a, b, c) → ADD(MUL(a, b), c) */
-    { poly_pat_ops(poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_MULACC),
-        NULL, 0, NULL), rule_mulacc_to_mul_add },
-    /* RECIPROCAL(x) → FDIV(1, x) */
-    { poly_pat_op1(POLY_OP_RECIPROCAL, poly_pat_any("x"), NULL),
-      rule_recip_to_fdiv },
-    /* a * (1 / b) → a / b */
-    { poly_pat_op2(POLY_OP_MUL, poly_pat_any("a"),
-        poly_pat_op2(POLY_OP_FDIV, poly_pat_cvar("one"),
-          poly_pat_any("b"), NULL), NULL),
-      rule_mul_fdiv1_to_fdiv },
-  };
-  g_pm_decomp = poly_pm_new(rules, sizeof(rules) / sizeof(rules[0]));
-  return g_pm_decomp;
+  PolyRule rules[16];
+  int n = 0;
+  rules[n++] = (PolyRule){ poly_pat_ops(max_set, NULL, 0, NULL), rule_decomp_max };
+  /* MUL(x:int, c:const) → SHL(x, log2(c)) when c is power of 2 */
+  rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_MUL, poly_pat_any("x"),
+      poly_pat_cvar("c"), NULL), rule_mul_to_shl };
+  /* x * (-1) → NEG(x) */
+  rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_MUL, poly_pat_any("x"),
+      poly_pat_cvar("c"), NULL), rule_mul_neg1_to_neg };
+  /* IDIV(x:int, c:const) → SHR(x, log2(c)) when c is power of 2 */
+  rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"),
+      poly_pat_cvar("c"), NULL), rule_idiv_to_shr };
+  /* MOD(x:int, c:const) → AND(x, c-1) when c is power of 2 */
+  rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_MOD, poly_pat_any("x"),
+      poly_pat_cvar("c"), NULL), rule_mod_to_and };
+  /* x + NEG(y) → SUB(x, y) */
+  rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_ADD, poly_pat_any("x"),
+      poly_pat_op1(POLY_OP_NEG, poly_pat_any("y"), NULL), NULL),
+    rule_add_neg_to_sub };
+
+  if (!has_mulacc) {
+    /* CPU path: decompose MULACC → MUL+ADD */
+    rules[n++] = (PolyRule){ poly_pat_ops(
+        poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_MULACC),
+        NULL, 0, NULL), rule_mulacc_to_mul_add };
+  } else {
+    /* FMA path: fuse ADD(MUL(a,b), c) → MULACC(a,b,c) for float scalars */
+    PolyOpSet add_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_ADD);
+    rules[n++] = (PolyRule){ poly_pat_ops(add_set, NULL, 0, NULL),
+      rule_mul_add_to_mulacc };
+  }
+
+  /* RECIPROCAL(x) → FDIV(1, x) */
+  rules[n++] = (PolyRule){ poly_pat_op1(POLY_OP_RECIPROCAL, poly_pat_any("x"),
+      NULL), rule_recip_to_fdiv };
+  /* a * (1 / b) → a / b */
+  rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_MUL, poly_pat_any("a"),
+      poly_pat_op2(POLY_OP_FDIV, poly_pat_cvar("one"),
+        poly_pat_any("b"), NULL), NULL), rule_mul_fdiv1_to_fdiv };
+
+  *target = poly_pm_new(rules, n);
+  return *target;
+}
+
+/* Default: CPU decomp (no MULACC support). */
+static PolyPatternMatcher *poly_pm_decomp(void) {
+  return poly_pm_decomp_with_caps(false);
 }
 
 /* ── pm_transcendental: EXP2 → polynomial approximation ──────────────── */
@@ -2785,6 +2829,9 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
 
 PolyPatternMatcher *poly_pm_reduce_pass(void)        { return poly_pm_reduce(); }
 PolyPatternMatcher *poly_pm_decomp_pass(void)         { return poly_pm_decomp(); }
+PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps) {
+  return poly_pm_decomp_with_caps(caps.has_mulacc);
+}
 PolyPatternMatcher *poly_pm_transcendental_pass(void)  { return poly_pm_transcendental(); }
 void poly_reset_acc_num(void)                         { }
 
@@ -2828,14 +2875,15 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
   }
 
-  /* 4. pm_decomp: late decompositions (MAX→WHERE, MUL→SHL, IDIV→SHR) */
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp());
+  /* 4. pm_decomp: late decompositions (MAX→WHERE, MUL→SHL, IDIV→SHR)
+   *    Caps-aware: CPU decomposes MULACC; CUDA fuses MUL+ADD→MULACC. */
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc));
 
   /* 5. pm_transcendental: EXP2 → polynomial (creates new IDIV ops) */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental());
 
   /* 6. Final decomp: catch IDIV ops created by transcendental pass */
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc));
 
   /* 7. Expander cleanup: remove identity UNROLL/CONTRACT nodes */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());

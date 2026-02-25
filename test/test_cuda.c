@@ -91,6 +91,46 @@ TEST(cuda, render_vecadd) {
   PASS();
 }
 
+TEST(cuda, render_mulacc_fma) {
+  /* CUDA renderer must emit __fmaf_rn for MULACC -- no GPU needed.
+   * Build MUL+ADD pattern; CUDA pipeline fuses to MULACC; renderer emits FMA. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *p3 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(3));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, range, poly_arg_none());
+  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p3, range, poly_arg_none());
+  PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
+  PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
+  /* Build MUL+ADD (no MULACC in input) -- CUDA pipeline should fuse */
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ld0, ld1, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, ld2, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin;
+  PolyUOp **lin = poly_linearize_cuda(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *src = poly_render_cuda(lin, n_lin, "fma_test", 256);
+  free(lin);
+  ASSERT_NOT_NULL(src);
+  /* Only assert presence -- don't negative-check for decomposed patterns,
+   * source will contain * and + for indexing/gpudims/etc. */
+  ASSERT_TRUE(strstr(src, "__fmaf_rn(") != NULL);
+  free(src);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(cuda, linearize_reduce_merge_shared_end) {
   /* CUDA rewrite path should merge shared reduce END chains exactly once. */
   PolyCtx *ctx = poly_ctx_new();

@@ -172,6 +172,112 @@ TEST(decomp, mulacc_to_mul_add) {
   PASS();
 }
 
+/*
+ * MULACC preserved when caps.has_mulacc = true (CUDA-style pipeline).
+ * Same kernel as mulacc_to_mul_add but using _ex with FMA caps.
+ */
+TEST(decomp, mulacc_caps_preserves) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *p3 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(3));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, range, poly_arg_none());
+  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p3, range, poly_arg_none());
+  PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
+  PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
+  PolyUOp *mulacc_srcs[3] = { ld0, ld1, ld2 };
+  PolyUOp *mulacc = poly_uop(ctx, POLY_OP_MULACC, POLY_FLOAT32, mulacc_srcs, 3, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, mulacc, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
+                            .caps = { .has_mulacc = true } };
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(n_mulacc > 0);  /* MULACC preserved with FMA caps */
+  PASS();
+}
+
+/*
+ * ADD(MUL(a,b), c) fuses to MULACC when caps.has_mulacc = true.
+ * Builds a*b+c pattern (no explicit MULACC), verifies fusion fires.
+ */
+TEST(decomp, mul_add_fuses_to_mulacc) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *p3 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(3));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, range, poly_arg_none());
+  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p3, range, poly_arg_none());
+  PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
+  PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
+  /* Build a*b+c as MUL+ADD (no MULACC in input) */
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ld0, ld1, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, ld2, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
+                            .caps = { .has_mulacc = true } };
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
+  poly_ctx_destroy(ctx);
+  ASSERT_TRUE(n_mulacc > 0);  /* MUL+ADD fused to MULACC */
+  PASS();
+}
+
+/*
+ * MUL+ADD does NOT fuse to MULACC for integer types.
+ * Fusion rule is float-only to match FMA semantics.
+ */
+TEST(decomp, mul_add_int_no_fuse) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(2));
+  PolyUOp *p3 = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(3));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, p2, range, poly_arg_none());
+  PolyUOp *idx3 = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, p3, range, poly_arg_none());
+  PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, idx0, poly_arg_none());
+  PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, idx1, poly_arg_none());
+  PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, idx2, poly_arg_none());
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ld0, ld1, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, mul, ld2, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
+                            .caps = { .has_mulacc = true } };
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(n_mulacc, 0);  /* No fusion for int types */
+  PASS();
+}
+
 /* x * (-1) → NEG(x). Ref: tinygrad get_late_rewrite_patterns */
 TEST(decomp, mul_neg1_to_neg) {
   PolyCtx *ctx = poly_ctx_new();
@@ -1012,5 +1118,24 @@ TEST(conformance, exp2_bitpattern_sweep) {
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_EXP2, in, out, n), 0);
   for (int i = 0; i < n; i++)
     ASSERT_FLOAT_NEAR(out[i], exp2f(in[i]), 128, 1e-6f);
+  PASS();
+}
+
+/* FMA rounding divergence: prove fmaf(a,b,c) != (a*b)+c for a known float32
+ * triple. Validates that MULACC conditionality has real semantic impact.
+ * a*b rounds to exactly 1.0f in float32, so (a*b)+c = 0.
+ * fmaf keeps the product error, giving a small nonzero result. */
+TEST(conformance, fma_rounding_divergence) {
+  volatile float a = 1e10f;
+  volatile float b = 1e-10f;
+  volatile float c = -1.0f;
+  /* Force non-fused mul+add (volatile prevents compiler FMA contraction) */
+  volatile float prod = a * b;
+  float mul_add_result = prod + c;
+  /* Fused multiply-add */
+  float fma_result = fmaf((float)a, (float)b, (float)c);
+  ASSERT_TRUE(mul_add_result == 0.0f);        /* double-rounded: exact zero */
+  ASSERT_TRUE(fma_result != mul_add_result);   /* FMA: nonzero */
+  ASSERT_TRUE(fma_result > 0.0f);             /* sanity: positive residual */
   PASS();
 }

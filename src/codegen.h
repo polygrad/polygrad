@@ -13,9 +13,16 @@
 #include "pat.h"
 #include <stdbool.h>
 
+/* Renderer capability flags -- determines which ops survive into rendered code.
+ * Mirrors tinygrad's code_for_op / supported_ops gating in get_late_rewrite_patterns. */
+typedef struct {
+  bool has_mulacc;  /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
+} PolyRendererCaps;
+
 typedef struct {
   bool optimize;     /* tinygrad optimize path (UPCAST/UNROLL + late pipeline) */
   int devectorize;   /* tinygrad DEVECTORIZE level (0/1/2) */
+  PolyRendererCaps caps;  /* renderer capabilities (zero-init = CPU defaults) */
 } PolyRewriteOpts;
 
 /* Linearize: full codegen pipeline + priority-based toposort.
@@ -44,6 +51,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
  * poly_symbolic_simple() is declared in pat.h. */
 PolyPatternMatcher *poly_pm_reduce_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass(void);
+PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps);
 PolyPatternMatcher *poly_pm_transcendental_pass(void);
 /* Apply pm_reduce with pass-local state (preferred over manual graph_rewrite). */
 PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink);

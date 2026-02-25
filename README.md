@@ -117,7 +117,7 @@ This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test          # build + run 277 C tests (ASan/UBSan)
+make test          # build + run 295 C tests (ASan/UBSan)
 make test-wasm     # build + run 47 WASM tests
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
