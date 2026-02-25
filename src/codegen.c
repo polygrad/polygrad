@@ -854,7 +854,8 @@ static PolyUOp *rule_mod_to_and(PolyCtx *ctx, PolyUOp *root,
 
 /*
  * rule_mulacc_to_mul_add — MULACC(a, b, c) → ADD(MUL(a, b), c)
- * For renderers without native FMA.
+ * For renderers without native FMA.  Currently unconditional; CUDA should
+ * keep MULACC once renderer capabilities are threaded through PolyRewriteOpts.
  */
 static PolyUOp *rule_mulacc_to_mul_add(PolyCtx *ctx, PolyUOp *root,
                                         const PolyBindings *b) {

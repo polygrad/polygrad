@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <float.h>
 
 typedef void (*TestFn)(int *passed, int *failed);
 
@@ -71,6 +73,54 @@ extern int g_n_tests;
 #define ASSERT_FLOAT_EQ(a, b, tol) do { \
   double _a = (a), _b = (b); \
   if (fabs(_a - _b) > (tol)) FAIL("%s = %.8f, expected %.8f (tol=%.1e)", #a, _a, _b, (tol)); \
+} while(0)
+
+#define ASSERT_FLOAT_NAN(a) do { \
+  double _a = (double)(a); \
+  if (!isnan(_a)) FAIL("%s = %.8g, expected NaN", #a, _a); \
+} while(0)
+
+#define ASSERT_FLOAT_INF(a, sign) do { \
+  double _a = (double)(a); \
+  if (!isinf(_a) || ((sign) > 0 && _a < 0) || ((sign) < 0 && _a > 0)) \
+    FAIL("%s = %.8g, expected %sinf", #a, _a, (sign) < 0 ? "-" : "+"); \
+} while(0)
+
+/* Real ULP distance via bitwise float ordering.  Handles subnormals and
+ * near-zero values correctly (unlike relative-error hacks). */
+static inline int32_t poly_float_ulp_index(float f) {
+  int32_t i;
+  memcpy(&i, &f, sizeof(i));
+  if (i < 0) i = (int32_t)(0x80000000u - (uint32_t)i);
+  return i;
+}
+
+#define ASSERT_FLOAT_ULP(a, b, max_ulps) do { \
+  float _fa = (float)(a), _fb = (float)(b); \
+  if (isnan(_fa) && isnan(_fb)) { /* ok */ } \
+  else if (isnan(_fa) || isnan(_fb)) \
+    FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb); \
+  else if (isinf(_fa) || isinf(_fb)) { \
+    if (!(isinf(_fa) && isinf(_fb) && ((_fa > 0) == (_fb > 0)))) \
+      FAIL("%s=%.8g, expected %.8g (inf mismatch)", #a, (double)_fa, (double)_fb); \
+  } else { \
+    int32_t _ia = poly_float_ulp_index(_fa), _ib = poly_float_ulp_index(_fb); \
+    int64_t _d = llabs((int64_t)_ia - (int64_t)_ib); \
+    if (_d > (max_ulps)) \
+      FAIL("%s=%.8g, expected %.8g (%lld ulps, max %d)", \
+        #a, (double)_fa, (double)_fb, (long long)_d, (int)(max_ulps)); \
+  } \
+} while(0)
+
+/* NaN-aware absolute tolerance (use for switchover regions where ULP is noisy). */
+#define ASSERT_FLOAT_ABS(a, b, tol) do { \
+  float _fa = (float)(a), _fb = (float)(b); \
+  if (isnan(_fa) && isnan(_fb)) { /* ok */ } \
+  else if (isnan(_fa) || isnan(_fb)) \
+    FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb); \
+  else if (fabsf(_fa - _fb) > (float)(tol)) \
+    FAIL("%s=%.8g, expected %.8g (abs err %.8g, tol %.8g)", \
+      #a, (double)_fa, (double)_fb, (double)fabsf(_fa - _fb), (double)(tol)); \
 } while(0)
 
 #define ASSERT_PTR_EQ(a, b) do { \

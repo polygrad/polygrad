@@ -1,19 +1,19 @@
 /*
- * test_future_passes.c — Tests for tinygrad passes not yet ported to polygrad.
+ * test_future_passes.c -- Tests for codegen pass correctness and conformance.
  *
- * These tests FAIL until each pass is ported. They track progress:
- *   - Missing transcendental decompositions (LOG2, SIN)
- *   - Missing late decompositions (MOD→AND, MULACC→MUL+ADD)
- *   - Missing symbolic rules (divmod cancel, bool algebra, nested WHERE, etc.)
- *   - Expander pass (UNROLL/CONTRACT expansion)
- *   - Devectorizer pass (VECTORIZE const fold)
+ * Sections:
+ *   1-2. Transcendental + late decomposition IR tests (verify ops eliminated)
+ *   3. Symbolic simplification rule tests
+ *   4. Expander pass tests
+ *   5. Regression tests (e2e correctness for each pass)
+ *   6. Pass-order audit tests (validate multi-pass dependencies)
+ *   7. Transcendental conformance tests (special values, dense sweeps)
  *
- * Tests for already-ported passes (EXP2, MAX→WHERE, MUL→SHL, IDIV→SHR,
- * double_mod, LOG2/SIN e2e) serve as regression tests and must always PASS.
- *
- * Run with filter:  build/polygrad_test sym_future
- *                   build/polygrad_test transcendental
- *                   build/polygrad_test decomp
+ * All tests must PASS. Run with filter:
+ *   build/polygrad_test pass_order
+ *   build/polygrad_test conformance
+ *   build/polygrad_test transcendental
+ *   build/polygrad_test regression
  */
 
 #include "test_harness.h"
@@ -714,5 +714,226 @@ TEST(regression, fdiv_e2e) {
   free(src);
   free(lin);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 6: Pass-order audit tests — validate multi-pass dependencies
+ *
+ * The codegen pipeline is: sym → pm_decomp → pm_transcendental → pm_decomp.
+ * pm_transcendental creates ops (RECIPROCAL, IDIV) that the second pm_decomp
+ * must clean up.  These tests catch regressions where stages are reordered
+ * or removed.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * LOG2 creates RECIPROCAL during decomposition (for -0 detection, codegen.c:1197).
+ * The second pm_decomp converts RECIPROCAL → FDIV(1, x).
+ */
+TEST(pass_order, log2_reciprocal_lifecycle) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_LOG2, 4);
+
+  /* Apply the exact mini-pipeline: sym → pm_decomp → pm_transcendental */
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
+
+  /* After transcendental: LOG2 is gone, RECIPROCAL introduced */
+  int n_log2 = count_ops_in(ctx, sink, POLY_OP_LOG2);
+  int n_recip = count_ops_in(ctx, sink, POLY_OP_RECIPROCAL);
+
+  /* Apply second pm_decomp (step 6 of pipeline) */
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
+  int n_recip_after = count_ops_in(ctx, sink, POLY_OP_RECIPROCAL);
+
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(n_log2, 0);
+  ASSERT_TRUE(n_recip > 0);
+  ASSERT_INT_EQ(n_recip_after, 0);
+  PASS();
+}
+
+/*
+ * EXP2 creates IDIV(q, 2) in ldexp2k (codegen.c:1061).
+ * The second pm_decomp converts IDIV → SHR.
+ */
+TEST(pass_order, exp2_idiv_lifecycle) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_EXP2, 4);
+
+  /* Apply the exact mini-pipeline: sym → pm_decomp → pm_transcendental */
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
+
+  int n_exp2 = count_ops_in(ctx, sink, POLY_OP_EXP2);
+  int n_idiv = count_ops_in(ctx, sink, POLY_OP_IDIV);
+
+  /* Apply second pm_decomp */
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
+  int n_idiv_after = count_ops_in(ctx, sink, POLY_OP_IDIV);
+
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(n_exp2, 0);
+  ASSERT_TRUE(n_idiv > 0);
+  ASSERT_INT_EQ(n_idiv_after, 0);
+  PASS();
+}
+
+/*
+ * Full pipeline: no high-level ops should survive.
+ */
+TEST(pass_order, full_pipeline_no_residual) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_SIN, 4);
+  PolyUOp *result = poly_full_rewrite_to_sink(ctx, sink);
+
+  int n_sin = count_ops_in(ctx, result, POLY_OP_SIN);
+  int n_recip = count_ops_in(ctx, result, POLY_OP_RECIPROCAL);
+  int n_max = count_ops_in(ctx, result, POLY_OP_MAX);
+
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(n_sin, 0);
+  ASSERT_INT_EQ(n_recip, 0);
+  ASSERT_INT_EQ(n_max, 0);
+  PASS();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 7: Transcendental conformance tests — edge cases + sweeps
+ *
+ * Validates numerical accuracy of the polynomial decompositions for
+ * EXP2, LOG2, and SIN.  Uses ASSERT_FLOAT_ULP for precision checks
+ * and ASSERT_FLOAT_ABS near switchover boundaries.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* Helper: run a unary kernel end-to-end through the full codegen pipeline. */
+static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_unary_kernel(ctx, op, n);
+  int nlin;
+  PolyUOp **lin = poly_linearize(ctx, sink, &nlin);
+  char name[64];
+  snprintf(name, sizeof(name), "conformance_%d", op);
+  char *src = poly_render_c(lin, nlin, name);
+  PolyProgram *prog = poly_compile_c(src, name);
+  if (!prog) { free(src); free(lin); poly_ctx_destroy(ctx); return -1; }
+  float *in_copy = (float *)malloc((size_t)n * sizeof(float));
+  memcpy(in_copy, in, (size_t)n * sizeof(float));
+  void *args[2] = { in_copy, out };
+  poly_program_call(prog, args, 2);
+  poly_program_destroy(prog);
+  free(src); free(lin); free(in_copy);
+  poly_ctx_destroy(ctx);
+  return 0;
+}
+
+/* LOG2: special values (zero, negative zero, inf, -inf, NaN, denormal, FLT_MAX) */
+TEST(conformance, log2_special_values) {
+  float in[8] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
+                   (float)NAN, 1e-40f, 1.0f, FLT_MAX };
+  float out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_LOG2, in, out, 8), 0);
+
+  ASSERT_FLOAT_INF(out[0], -1);                   /* log2(0)    = -inf */
+  ASSERT_FLOAT_INF(out[1], -1);                   /* log2(-0)   = -inf */
+  ASSERT_FLOAT_INF(out[2], +1);                   /* log2(+inf) = +inf */
+  ASSERT_FLOAT_NAN(out[3]);                        /* log2(-inf) = NaN  */
+  ASSERT_FLOAT_NAN(out[4]);                        /* log2(NaN)  = NaN  */
+  ASSERT_FLOAT_ULP(out[5], log2f(1e-40f), 128);   /* denormal          */
+  ASSERT_FLOAT_ULP(out[6], 0.0f, 0);              /* log2(1) = 0 exact */
+  ASSERT_FLOAT_ULP(out[7], log2f(FLT_MAX), 8);    /* large             */
+
+  PASS();
+}
+
+/* LOG2: all negative inputs must return NaN */
+TEST(conformance, log2_negative_domain) {
+  float in[4] = { -1.0f, -100.0f, -FLT_MIN, -FLT_MAX };
+  float out[4] = {0};
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_LOG2, in, out, 4), 0);
+
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_NAN(out[i]);
+
+  PASS();
+}
+
+/* LOG2: dense sweep from 0.001 to 1e6 (log-spaced, 64 values) */
+TEST(conformance, log2_dense_sweep) {
+  float in[64], out[64];
+  for (int i = 0; i < 64; i++)
+    in[i] = powf(10.0f, -3.0f + 9.0f * (float)i / 63.0f);
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_LOG2, in, out, 64), 0);
+
+  for (int i = 0; i < 64; i++)
+    ASSERT_FLOAT_ULP(out[i], log2f(in[i]), 128);
+
+  PASS();
+}
+
+/* SIN: special values */
+TEST(conformance, sin_special_values) {
+  float in[6] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
+                   (float)NAN, 3.14159265f };
+  float out[6] = {0};
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, 6), 0);
+
+  ASSERT_FLOAT_ABS(out[0], 0.0f, 1e-7f);          /* sin(0)    = 0    */
+  ASSERT_FLOAT_ABS(out[1], 0.0f, 1e-7f);          /* sin(-0)   = 0    */
+  ASSERT_FLOAT_NAN(out[2]);                         /* sin(+inf) = NaN  */
+  ASSERT_FLOAT_NAN(out[3]);                         /* sin(-inf) = NaN  */
+  ASSERT_FLOAT_NAN(out[4]);                         /* sin(NaN)  = NaN  */
+  ASSERT_FLOAT_ABS(out[5], sinf(3.14159265f), 1e-3f); /* sin(pi) ~ 0  */
+
+  PASS();
+}
+
+/* SIN: quadrant boundaries (all < 30, uses Cody-Waite path).
+ * Uses ASSERT_FLOAT_ABS because sin(pi) ~ 0 and ULP distance near zero
+ * is meaningless (tiny absolute error becomes huge ULP count). */
+TEST(conformance, sin_quadrant_boundaries) {
+  float pi = 3.14159265358979f;
+  float in[8] = { pi/6, pi/4, pi/3, pi/2, 2*pi/3, 3*pi/4, 5*pi/6, pi };
+  float out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, 8), 0);
+
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_ABS(out[i], sinf(in[i]), 1e-5f);
+
+  PASS();
+}
+
+/* SIN: Cody-Waite / Payne-Hanek switchover at 30.0 */
+TEST(conformance, sin_switchover_boundary) {
+  float in[8] = { 29.0f, 29.5f, 29.9f, 30.0f, 30.1f, 30.5f, 31.0f, 32.0f };
+  float out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, 8), 0);
+
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_ABS(out[i], sinf(in[i]), 2e-3f);
+
+  PASS();
+}
+
+/* EXP2: special values (zero, -0, inf, -inf, NaN, overflow, underflow) */
+TEST(conformance, exp2_special_values) {
+  float in[7] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
+                   (float)NAN, 128.0f, -150.0f };
+  float out[7] = {0};
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_EXP2, in, out, 7), 0);
+
+  ASSERT_FLOAT_ULP(out[0], 1.0f, 0);              /* exp2(0)    = 1    */
+  ASSERT_FLOAT_ULP(out[1], 1.0f, 0);              /* exp2(-0)   = 1    */
+  ASSERT_FLOAT_INF(out[2], +1);                    /* exp2(+inf) = +inf */
+  ASSERT_FLOAT_ABS(out[3], 0.0f, 1e-44f); /* exp2(-inf) = 0    */
+  ASSERT_FLOAT_NAN(out[4]);                         /* exp2(NaN)  = NaN  */
+  ASSERT_FLOAT_INF(out[5], +1);                    /* exp2(128)  = +inf */
+  ASSERT_FLOAT_ABS(out[6], 0.0f, 1e-44f); /* exp2(-150) = 0    */
+
   PASS();
 }
