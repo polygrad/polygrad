@@ -1,0 +1,11 @@
+Package: polygrad
+Type: Package
+Title: Tensor Compiler Frontend
+Version: 0.0.1
+Description: R frontend for the polygrad tensor compiler. CPU-only, float32-only.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports: methods
+Suggests: testthat (>= 3.0.0)
+SystemRequirements: libpolygrad.so (built from polygrad C core)
+NeedsCompilation: yes

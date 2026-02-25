@@ -1,0 +1,2 @@
+useDynLib(polygrad, .registration = TRUE)
+export(Tensor, tensor_zeros, tensor_ones, tensor_full, tensor_arange)

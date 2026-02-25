@@ -1,0 +1,78 @@
+{
+    "name": "gpt2",
+    "version": "1.0.0",
+    "description": "Canonical GPT-2 definition matching the original OpenAI specs.",
+    "config_schema": {
+        "vocab_size": 50257,
+        "max_seq_len": 1024,
+        "dim": 768,
+        "n_layers": 12,
+        "n_heads": 12
+    },
+    "parameters": [
+        {
+            "name": "wte.weight",
+            "shape": [
+                "vocab_size",
+                "dim"
+            ],
+            "dtype": "float32"
+        },
+        {
+            "name": "wpe.weight",
+            "shape": [
+                "max_seq_len",
+                "dim"
+            ],
+            "dtype": "float32"
+        },
+        {
+            "name": "blocks.0.ln_1.weight",
+            "shape": [
+                "dim"
+            ],
+            "dtype": "float32"
+        },
+        {
+            "name": "blocks.0.attn.c_attn.weight",
+            "shape": [
+                "dim",
+                "3 * dim"
+            ],
+            "dtype": "float32"
+        }
+    ],
+    "inputs": [
+        {
+            "name": "input_ids",
+            "shape": [
+                "batch_size",
+                "seq_len"
+            ],
+            "dtype": "int32"
+        }
+    ],
+    "outputs": [
+        {
+            "name": "logits",
+            "shape": [
+                "batch_size",
+                "seq_len",
+                "vocab_size"
+            ],
+            "dtype": "float32"
+        }
+    ],
+    "golden_tests": [
+        {
+            "config": {
+                "vocab_size": 50257,
+                "n_layers": 2,
+                "dim": 128,
+                "n_heads": 4
+            },
+            "test_type": "forward_logits",
+            "artifact": "s3://polygrad-artifacts/gpt2_128_tiny_fwd.npz"
+        }
+    ]
+}

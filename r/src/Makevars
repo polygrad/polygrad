@@ -1,0 +1,3 @@
+POLYGRAD_ROOT = /home/anton/projects/polygrad/polygrad
+PKG_CFLAGS = -I$(POLYGRAD_ROOT)/src -std=c11
+PKG_LIBS = -L$(POLYGRAD_ROOT)/build -lpolygrad -lm -ldl -Wl,-rpath,$(POLYGRAD_ROOT)/build
