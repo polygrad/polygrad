@@ -123,6 +123,28 @@ static inline int32_t poly_float_ulp_index(float f) {
       #a, (double)_fa, (double)_fb, (double)fabsf(_fa - _fb), (double)(tol)); \
 } while(0)
 
+/* Combined ULP + absolute tolerance: passes if EITHER metric is within bounds.
+ * Use for sweeps where near-zero values need abs tolerance but normal range
+ * needs ULP precision. */
+#define ASSERT_FLOAT_NEAR(a, b, max_ulps, abs_tol) do { \
+  float _fa = (float)(a), _fb = (float)(b); \
+  if (isnan(_fa) && isnan(_fb)) { /* ok */ } \
+  else if (isnan(_fa) || isnan(_fb)) \
+    FAIL("%s=%.8g, expected %.8g (NaN mismatch)", #a, (double)_fa, (double)_fb); \
+  else if (isinf(_fa) && isinf(_fb) && ((_fa > 0) == (_fb > 0))) { /* ok */ } \
+  else if (isinf(_fa) || isinf(_fb)) \
+    FAIL("%s=%.8g, expected %.8g (inf mismatch)", #a, (double)_fa, (double)_fb); \
+  else if (fabsf(_fa - _fb) <= (float)(abs_tol)) { /* within abs tol */ } \
+  else { \
+    int32_t _ia = poly_float_ulp_index(_fa), _ib = poly_float_ulp_index(_fb); \
+    int64_t _d = llabs((int64_t)_ia - (int64_t)_ib); \
+    if (_d > (max_ulps)) \
+      FAIL("%s=%.8g, expected %.8g (%lld ulps, max %d; abs %.8g, tol %.8g)", \
+        #a, (double)_fa, (double)_fb, (long long)_d, (int)(max_ulps), \
+        (double)fabsf(_fa - _fb), (double)(abs_tol)); \
+  } \
+} while(0)
+
 #define ASSERT_PTR_EQ(a, b) do { \
   const void *_a = (a), *_b = (b); \
   if (_a != _b) FAIL("%s = %p, expected %p (same pointer)", #a, _a, _b); \

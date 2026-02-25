@@ -832,6 +832,42 @@ static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
   return 0;
 }
 
+/* Deterministic PRNG for reproducible bit-pattern generation. */
+static uint32_t xorshift32(uint32_t *state) {
+  uint32_t x = *state;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  *state = x;
+  return x;
+}
+
+/* Stratified bit-pattern sweep: 5 specials + 4 samples per exponent band (0-254).
+ * Returns actual count written. Exponent band 0 = subnormals, 1-254 = normals.
+ * If include_negative: randomly flip sign bit on half the samples. */
+static int gen_stratified_sweep(float *out, int max_n, uint32_t seed,
+                                int include_negative) {
+  uint32_t state = seed;
+  int n = 0;
+  /* Explicit specials: +0, -0, +inf, -inf, NaN */
+  uint32_t sp[] = {0x00000000u, 0x80000000u, 0x7F800000u, 0xFF800000u,
+                   0x7FC00000u};
+  for (int i = 0; i < 5 && n < max_n; i++)
+    memcpy(&out[n++], &sp[i], sizeof(float));
+  /* Stratified: 4 samples per exponent band */
+  for (int exp = 0; exp <= 254 && n < max_n; exp++) {
+    uint32_t base = (uint32_t)exp << 23;
+    for (int j = 0; j < 4 && n < max_n; j++) {
+      uint32_t mantissa = xorshift32(&state) & 0x7FFFFFu;
+      uint32_t bits = base | mantissa;
+      if (include_negative && (xorshift32(&state) & 1))
+        bits |= 0x80000000u;
+      memcpy(&out[n++], &bits, sizeof(float));
+    }
+  }
+  return n;
+}
+
 /* LOG2: special values (zero, negative zero, inf, -inf, NaN, denormal, FLT_MAX) */
 TEST(conformance, log2_special_values) {
   float in[8] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
@@ -935,5 +971,46 @@ TEST(conformance, exp2_special_values) {
   ASSERT_FLOAT_INF(out[5], +1);                    /* exp2(128)  = +inf */
   ASSERT_FLOAT_ABS(out[6], 0.0f, 1e-44f); /* exp2(-150) = 0    */
 
+  PASS();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 8: Dense bit-pattern sweep tests
+ *
+ * Stratified sampling across all 255 IEEE 754 exponent bands (0=subnormal,
+ * 1-254=normal) with 4 random mantissa values per band.  Catches
+ * exponent-dependent bugs that uniform-in-value sampling misses.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* LOG2: 1025 stratified bit patterns (positive domain + specials).
+ * Tolerance: 128 ULP or 1e-6 absolute. */
+TEST(conformance, log2_bitpattern_sweep) {
+  float in[1025], out[1025];
+  int n = gen_stratified_sweep(in, 1025, 0xDEAD0001u, 0);
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_LOG2, in, out, n), 0);
+  for (int i = 0; i < n; i++)
+    ASSERT_FLOAT_NEAR(out[i], log2f(in[i]), 128, 1e-6f);
+  PASS();
+}
+
+/* SIN: 1025 stratified bit patterns (full domain including negatives).
+ * Tolerance: 256 ULP or 1e-5 absolute (wider due to argument reduction). */
+TEST(conformance, sin_bitpattern_sweep) {
+  float in[1025], out[1025];
+  int n = gen_stratified_sweep(in, 1025, 0xDEAD0002u, 1);
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, n), 0);
+  for (int i = 0; i < n; i++)
+    ASSERT_FLOAT_NEAR(out[i], sinf(in[i]), 256, 1e-5f);
+  PASS();
+}
+
+/* EXP2: 1025 stratified bit patterns (full domain including negatives).
+ * Tolerance: 128 ULP or 1e-6 absolute. */
+TEST(conformance, exp2_bitpattern_sweep) {
+  float in[1025], out[1025];
+  int n = gen_stratified_sweep(in, 1025, 0xDEAD0003u, 1);
+  ASSERT_INT_EQ(run_unary_e2e(POLY_OP_EXP2, in, out, n), 0);
+  for (int i = 0; i < n; i++)
+    ASSERT_FLOAT_NEAR(out[i], exp2f(in[i]), 128, 1e-6f);
   PASS();
 }
