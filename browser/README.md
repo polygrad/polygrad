@@ -1,8 +1,3 @@
----
-title: Browser (WASM)
-nav_order: 4
----
-
 # Polygrad Browser (WASM)
 
 Run polygrad tensors in the browser via WebAssembly. Same API as the Node.js package, compiled with Emscripten.

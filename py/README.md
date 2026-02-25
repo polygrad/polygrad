@@ -1,8 +1,3 @@
----
-title: Python
-nav_order: 2
----
-
 # Polygrad Python
 
 tinygrad-compatible Tensor API for Python. Thin ctypes wrapper around the C core — each method is one FFI call.

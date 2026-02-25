@@ -1,8 +1,3 @@
----
-title: JavaScript (Node)
-nav_order: 3
----
-
 # Polygrad JavaScript (Node.js)
 
 tinygrad-compatible Tensor API for Node.js. Thin koffi FFI wrapper around the C core — each method is one native call.

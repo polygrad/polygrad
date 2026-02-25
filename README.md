@@ -1,8 +1,3 @@
----
-title: Home
-nav_order: 1
----
-
 # Polygrad
 
 A C11 port of tinygrad's compiler core. Same IR, same pattern-matcher-driven rewrites, same codegen pipeline — but in plain C11.

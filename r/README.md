@@ -1,8 +1,3 @@
----
-title: R
-nav_order: 5
----
-
 # Polygrad R
 
 Tensor API for R via `.Call()` FFI to the C core. R operator overloads for natural syntax.
