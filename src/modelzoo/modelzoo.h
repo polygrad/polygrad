@@ -2,7 +2,7 @@
 #define POLYGRAD_MODELZOO_H
 
 #include "../polygrad.h"
-#include "../poly_instance.h"
+#include "../instance.h"
 
 /* ── Model configuration (cJSON wrapper) ──────────────────────────── */
 

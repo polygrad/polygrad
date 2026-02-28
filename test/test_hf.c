@@ -6,7 +6,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/poly_safetensors.h"
+#include "../src/safetensors.h"
 #include "../src/modelzoo/modelzoo.h"
 #include "../src/frontend.h"
 #include "../src/sched.h"

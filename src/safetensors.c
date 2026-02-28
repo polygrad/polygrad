@@ -16,7 +16,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "poly_safetensors.h"
+#include "safetensors.h"
 #include "../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>

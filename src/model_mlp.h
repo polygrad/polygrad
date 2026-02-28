@@ -8,7 +8,7 @@
 #ifndef POLY_MODEL_MLP_H
 #define POLY_MODEL_MLP_H
 
-#include "poly_instance.h"
+#include "instance.h"
 #include <stdint.h>
 
 #ifdef __cplusplus

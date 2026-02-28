@@ -2,7 +2,7 @@
  * poly_wlrn.c -- WLRN bundle view/slice reader
  */
 
-#include "poly_wlrn.h"
+#include "wlrn.h"
 #include <stdio.h>
 #include <string.h>
 

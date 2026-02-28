@@ -3,8 +3,8 @@
  */
 
 #include "test_harness.h"
-#include "../src/poly_model_mlp.h"
-#include "../src/poly_instance.h"
+#include "../src/model_mlp.h"
+#include "../src/instance.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>

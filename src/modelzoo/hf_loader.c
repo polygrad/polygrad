@@ -13,8 +13,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "modelzoo.h"
-#include "../poly_safetensors.h"
-#include "../poly_instance.h"
+#include "../safetensors.h"
+#include "../instance.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>

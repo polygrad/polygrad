@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/poly_wlrn.h"
+#include "../src/wlrn.h"
 #include <string.h>
 #include <stdlib.h>
 

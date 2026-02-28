@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/poly_safetensors.h"
+#include "../src/safetensors.h"
 #include <string.h>
 #include <stdlib.h>
 

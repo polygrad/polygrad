@@ -6,11 +6,11 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "poly_model_mlp.h"
-#include "poly_ir.h"
+#include "model_mlp.h"
+#include "ir.h"
 #include "frontend.h"
 #include "sched.h"
-#include "poly_safetensors.h"
+#include "safetensors.h"
 #include "../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>

@@ -136,7 +136,7 @@ module.exports = {
   poly_einsum, poly_rearrange,
   OPS, koffi,
 
-  // PolyInstance (poly_instance.h)
+  // PolyInstance (instance.h)
   poly_instance_from_ir: lib.func('void *poly_instance_from_ir(const uint8_t *ir_data, int ir_len, const uint8_t *weights_data, int weights_len)'),
   poly_instance_free: lib.func('void poly_instance_free(void *inst)'),
   poly_instance_param_count: lib.func('int poly_instance_param_count(void *inst)'),

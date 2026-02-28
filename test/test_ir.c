@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/poly_ir.h"
+#include "../src/ir.h"
 #include "../src/frontend.h"
 #include "../src/sched.h"
 #include <string.h>

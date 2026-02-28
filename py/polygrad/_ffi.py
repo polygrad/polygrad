@@ -275,7 +275,7 @@ _lib.poly_step_n_kernels.argtypes = [_ptr]
 _lib.poly_step_n_intermediates.restype = ctypes.c_int
 _lib.poly_step_n_intermediates.argtypes = [_ptr]
 
-# --- PolyInstance (poly_instance.h) ---
+# --- PolyInstance (instance.h) ---
 
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
@@ -343,7 +343,7 @@ _lib.poly_instance_set_optimizer.argtypes = [_ptr, ctypes.c_int,
     ctypes.c_float, ctypes.c_float, ctypes.c_float,
     ctypes.c_float, ctypes.c_float]
 
-# MLP family builder (poly_model_mlp.h)
+# MLP family builder (model_mlp.h)
 _lib.poly_mlp_instance.restype = _ptr
 _lib.poly_mlp_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
 

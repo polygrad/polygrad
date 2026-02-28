@@ -6,9 +6,9 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "poly_instance.h"
-#include "poly_ir.h"
-#include "poly_safetensors.h"
+#include "instance.h"
+#include "ir.h"
+#include "safetensors.h"
 #include "frontend.h"
 #include <stdlib.h>
 #include <string.h>
@@ -117,12 +117,9 @@ PolyInstance *poly_instance_from_ir(
            spec.bufs[i].ndim * sizeof(int64_t));
     inst->bufs[i].numel = compute_numel(spec.bufs[i].shape, spec.bufs[i].ndim);
 
-    /* Allocate data for param/output/aux (instance-owned) */
-    if (spec.bufs[i].role == POLY_ROLE_PARAM ||
-        spec.bufs[i].role == POLY_ROLE_OUTPUT ||
-        spec.bufs[i].role == POLY_ROLE_AUX) {
-      inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
-    }
+    /* Allocate data for all buffers (instance-owned).
+     * INPUT buffers need storage too: callers populate them before forward. */
+    inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
     if (spec.bufs[i].role == POLY_ROLE_PARAM) n_params++;
   }
 
@@ -358,11 +355,12 @@ int poly_instance_forward(PolyInstance *inst,
     bindings[i].data = inst->bufs[i].data; /* NULL for input/target */
   }
 
-  /* Override input bindings from caller */
+  /* Override input bindings from caller (skip NULL to keep instance data) */
   for (int i = 0; i < n_inputs; i++) {
     int bi = find_buf_by_name(inst, inputs[i].name);
     if (bi >= 0) {
-      bindings[bi].data = inputs[i].data;
+      if (inputs[i].data)
+        bindings[bi].data = inputs[i].data;
     } else {
       fprintf(stderr, "poly_instance_forward: unknown input '%s'\n",
               inputs[i].name);
