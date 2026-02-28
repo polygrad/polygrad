@@ -134,5 +134,25 @@ module.exports = {
   // Shape-aware
   poly_max_reduce, poly_mean_reduce, poly_dot,
   poly_einsum, poly_rearrange,
-  OPS, koffi
+  OPS, koffi,
+
+  // PolyInstance (poly_instance.h)
+  poly_instance_from_ir: lib.func('void *poly_instance_from_ir(const uint8_t *ir_data, int ir_len, const uint8_t *weights_data, int weights_len)'),
+  poly_instance_free: lib.func('void poly_instance_free(void *inst)'),
+  poly_instance_param_count: lib.func('int poly_instance_param_count(void *inst)'),
+  poly_instance_param_name: lib.func('const char *poly_instance_param_name(void *inst, int i)'),
+  poly_instance_param_shape: lib.func('int poly_instance_param_shape(void *inst, int i, int64_t *shape_out, int max_dims)'),
+  poly_instance_param_data: lib.func('float *poly_instance_param_data(void *inst, int i, int64_t *numel_out)'),
+  poly_instance_buf_count: lib.func('int poly_instance_buf_count(void *inst)'),
+  poly_instance_buf_name: lib.func('const char *poly_instance_buf_name(void *inst, int i)'),
+  poly_instance_buf_role: lib.func('int poly_instance_buf_role(void *inst, int i)'),
+  poly_instance_buf_shape: lib.func('int poly_instance_buf_shape(void *inst, int i, int64_t *shape_out, int max_dims)'),
+  poly_instance_buf_data: lib.func('float *poly_instance_buf_data(void *inst, int i, int64_t *numel_out)'),
+  poly_instance_export_weights: lib.func('void *poly_instance_export_weights(void *inst, int *out_len)'),
+  poly_instance_import_weights: lib.func('int poly_instance_import_weights(void *inst, const uint8_t *data, int len)'),
+  poly_instance_export_ir: lib.func('void *poly_instance_export_ir(void *inst, int *out_len)'),
+  poly_instance_forward: lib.func('int poly_instance_forward(void *inst, void *inputs, int n_inputs)'),
+  poly_instance_train_step: lib.func('int poly_instance_train_step(void *inst, void *io, int n_io, float *loss_out)'),
+  poly_instance_set_optimizer: lib.func('int poly_instance_set_optimizer(void *inst, int kind, float lr, float beta1, float beta2, float eps, float weight_decay)'),
+  poly_mlp_instance: lib.func('void *poly_mlp_instance(const char *spec_json, int spec_len)')
 }

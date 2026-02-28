@@ -274,3 +274,75 @@ _lib.poly_step_n_kernels.argtypes = [_ptr]
 
 _lib.poly_step_n_intermediates.restype = ctypes.c_int
 _lib.poly_step_n_intermediates.argtypes = [_ptr]
+
+# --- PolyInstance (poly_instance.h) ---
+
+class PolyIOBinding(ctypes.Structure):
+    _fields_ = [('name', ctypes.c_char_p),
+                ('data', ctypes.POINTER(ctypes.c_float))]
+
+_u8p = ctypes.POINTER(ctypes.c_uint8)
+_fp = ctypes.POINTER(ctypes.c_float)
+
+# Lifecycle
+_lib.poly_instance_from_ir.restype = _ptr
+_lib.poly_instance_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
+
+_lib.poly_instance_free.restype = None
+_lib.poly_instance_free.argtypes = [_ptr]
+
+# Param enumeration
+_lib.poly_instance_param_count.restype = ctypes.c_int
+_lib.poly_instance_param_count.argtypes = [_ptr]
+
+_lib.poly_instance_param_name.restype = ctypes.c_char_p
+_lib.poly_instance_param_name.argtypes = [_ptr, ctypes.c_int]
+
+_lib.poly_instance_param_shape.restype = ctypes.c_int
+_lib.poly_instance_param_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
+
+_lib.poly_instance_param_data.restype = _fp
+_lib.poly_instance_param_data.argtypes = [_ptr, ctypes.c_int, _i64p]
+
+# Buffer enumeration
+_lib.poly_instance_buf_count.restype = ctypes.c_int
+_lib.poly_instance_buf_count.argtypes = [_ptr]
+
+_lib.poly_instance_buf_name.restype = ctypes.c_char_p
+_lib.poly_instance_buf_name.argtypes = [_ptr, ctypes.c_int]
+
+_lib.poly_instance_buf_role.restype = ctypes.c_int
+_lib.poly_instance_buf_role.argtypes = [_ptr, ctypes.c_int]
+
+_lib.poly_instance_buf_shape.restype = ctypes.c_int
+_lib.poly_instance_buf_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]
+
+_lib.poly_instance_buf_data.restype = _fp
+_lib.poly_instance_buf_data.argtypes = [_ptr, ctypes.c_int, _i64p]
+
+# Weight I/O
+_lib.poly_instance_export_weights.restype = _u8p
+_lib.poly_instance_export_weights.argtypes = [_ptr, _ip]
+
+_lib.poly_instance_import_weights.restype = ctypes.c_int
+_lib.poly_instance_import_weights.argtypes = [_ptr, _u8p, ctypes.c_int]
+
+# IR export
+_lib.poly_instance_export_ir.restype = _u8p
+_lib.poly_instance_export_ir.argtypes = [_ptr, _ip]
+
+# Execution
+_lib.poly_instance_forward.restype = ctypes.c_int
+_lib.poly_instance_forward.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
+
+_lib.poly_instance_train_step.restype = ctypes.c_int
+_lib.poly_instance_train_step.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int, _fp]
+
+_lib.poly_instance_set_optimizer.restype = ctypes.c_int
+_lib.poly_instance_set_optimizer.argtypes = [_ptr, ctypes.c_int,
+    ctypes.c_float, ctypes.c_float, ctypes.c_float,
+    ctypes.c_float, ctypes.c_float]
+
+# MLP family builder (poly_model_mlp.h)
+_lib.poly_mlp_instance.restype = _ptr
+_lib.poly_mlp_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
