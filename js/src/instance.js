@@ -61,6 +61,31 @@ class Instance {
     return new Instance(ffi.poly_mlp_instance(buf, buf.length))
   }
 
+  /**
+   * Load a HuggingFace model from config JSON + safetensors buffers.
+   * @param {string|object} configJson - config.json content or parsed object.
+   * @param {Buffer[]} weightBuffers - Array of safetensors file Buffers.
+   * @param {number} [maxBatch=1] - Maximum batch size.
+   * @param {number} [maxSeqLen=0] - Maximum sequence length (0 = config default).
+   */
+  static fromHF(configJson, weightBuffers, maxBatch = 1, maxSeqLen = 0) {
+    if (typeof configJson === 'object') configJson = JSON.stringify(configJson)
+    const configBuf = Buffer.from(configJson, 'utf-8')
+
+    const n = weightBuffers.length
+    // Build parallel arrays of pointers and lengths for koffi
+    const filePtrs = weightBuffers.map(b => Buffer.from(b))
+    const fileLens = new BigInt64Array(n)
+    for (let i = 0; i < n; i++) fileLens[i] = BigInt(filePtrs[i].length)
+
+    const ptr = ffi.poly_hf_load(
+      configBuf, configBuf.length,
+      filePtrs, fileLens,
+      n, maxBatch, maxSeqLen
+    )
+    return new Instance(ptr)
+  }
+
   // ── Param Enumeration ─────────────────────────────────────────
 
   get paramCount() {
@@ -83,6 +108,16 @@ class Instance {
     if (!ptr) return null
     const n = Number(numel[0])
     return koffi.decode(ptr, 'float', n)
+  }
+
+  setParamData(i, arr) {
+    const numel = new BigInt64Array(1)
+    const ptr = ffi.poly_instance_param_data(this._ptr, i, numel)
+    if (!ptr) return
+    const n = Number(numel[0])
+    const data = arr instanceof Float32Array ? arr : new Float32Array(arr)
+    const type = koffi.array('float', n)
+    koffi.encode(ptr, 0, type, Array.from(data.subarray(0, n)))
   }
 
   // ── Buffer Enumeration ────────────────────────────────────────
@@ -111,6 +146,16 @@ class Instance {
     if (!ptr) return null
     const n = Number(numel[0])
     return koffi.decode(ptr, 'float', n)
+  }
+
+  setBufData(i, arr) {
+    const numel = new BigInt64Array(1)
+    const ptr = ffi.poly_instance_buf_data(this._ptr, i, numel)
+    if (!ptr) return
+    const n = Number(numel[0])
+    const data = arr instanceof Float32Array ? arr : new Float32Array(arr)
+    const type = koffi.array('float', n)
+    koffi.encode(ptr, 0, type, Array.from(data.subarray(0, n)))
   }
 
   findBuf(name) {
@@ -173,6 +218,7 @@ class Instance {
   _makeBindings(ioObj) {
     const entries = Object.entries(ioObj)
     const n = entries.length
+    if (n === 0) return { buf: null, n: 0 }
     const ptr = koffi.alloc(PolyIOBinding, n)
 
     // Keep references alive during the call
