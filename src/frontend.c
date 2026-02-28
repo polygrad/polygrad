@@ -945,6 +945,9 @@ static void cpu_cache_put(uint32_t h, PolyProgram *prog) {
     cpu_prog_cache[cpu_prog_cache_n].hash = h;
     cpu_prog_cache[cpu_prog_cache_n].prog = prog;
     cpu_prog_cache_n++;
+  } else {
+    /* Cache full: destroy program immediately to avoid leak */
+    poly_program_destroy(prog);
   }
 }
 

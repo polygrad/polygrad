@@ -513,7 +513,8 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   /* LM head: h @ wte.T -> logits (B, T, V) -- weight tying */
   int64_t wte_T_shape[] = { D, V };
   int64_t perm_01[] = { 1, 0 };
-  PolyUOp *wte_T = poly_permute(ctx, wte, perm_01, 2);
+  PolyUOp *wte_2d = poly_reshape(ctx, wte, wte_shape, 2);
+  PolyUOp *wte_T = poly_permute(ctx, wte_2d, perm_01, 2);
 
   int64_t logits_shape[8];
   int logits_ndim;
@@ -524,10 +525,35 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   PolyUOp *fwd_store = poly_store_val(ctx, out_buf, logits);
   PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
 
+  /* ── Loss computation (surrogate: sum of logits^2) ──────────── */
+  /* Matches Python training test: loss = (logits * logits).sum()
+   * This is sufficient to verify autograd through the full GPT-2 graph.
+   * The loss is computed from the logits UOp (not out_buf) so autograd
+   * can trace back to all parameters. */
+
+  PolyUOp *loss_buf = poly_buffer_f32(ctx, 1);
+  buflist_add(&bl, "loss", POLY_IR_ROLE_OUTPUT, loss_buf, (int64_t[]){1}, 1);
+
+  PolyUOp *logits_sq = poly_alu2(ctx, POLY_OP_MUL, logits, logits);
+
+  /* Reduce over all 3 axes: (B, T, V) -> (1, 1, 1) */
+  int64_t reduce_all[] = { 0, 1, 2 };
+  PolyUOp *loss_sum = poly_reduce_axis(ctx, POLY_OP_ADD, logits_sq, reduce_all, 3);
+
+  /* Reshape to (1,) scalar for loss buffer */
+  int64_t scalar_shape[] = { 1 };
+  PolyUOp *loss_val = poly_reshape(ctx, loss_sum, scalar_shape, 1);
+
+  PolyUOp *loss_store = poly_store_val(ctx, loss_buf, loss_val);
+  PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
+
   /* ── Export to IR and create Instance ────────────────────────── */
 
-  PolyIrEntrypoint eps_arr[1] = {{ "forward", fwd_sink }};
-  PolyIrSpec spec = { ctx, bl.bufs, bl.n_bufs, eps_arr, 1 };
+  PolyIrEntrypoint eps_arr[2] = {
+    { "forward", fwd_sink },
+    { "loss", loss_sink }
+  };
+  PolyIrSpec spec = { ctx, bl.bufs, bl.n_bufs, eps_arr, 2 };
 
   int ir_len = 0;
   uint8_t *ir_data = poly_ir_export(&spec, &ir_len);

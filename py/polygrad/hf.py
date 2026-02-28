@@ -104,6 +104,9 @@ def download_hf(repo_id, cache_dir=None):
 def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
     """Autoregressive text generation.
 
+    The model runs at fixed max_seq_len (buffers pre-allocated). Input is padded
+    to max_seq_len, and logits are extracted at the actual last token position.
+
     Args:
         instance: PolyInstance with forward pass.
         tokens: Initial token IDs as numpy array of shape (1, seq_len).
@@ -118,23 +121,32 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
     if tokens.ndim == 1:
         tokens = tokens.reshape(1, -1)
 
-    for _ in range(max_new_tokens):
-        seq_len = tokens.shape[1]
-        positions = np.arange(seq_len, dtype=np.float32).reshape(1, -1)
-        arange = np.arange(seq_len, dtype=np.float32)
+    vocab_size = _get_vocab_size(instance)
+    max_seq_len = _get_max_seq_len(instance)
 
-        outputs = instance.forward(x=tokens, positions=positions, arange=arange)
+    for _ in range(max_new_tokens):
+        actual_len = tokens.shape[1]
+        if actual_len > max_seq_len:
+            raise RuntimeError(
+                f'Sequence length {actual_len} exceeds max_seq_len {max_seq_len}')
+
+        # Pad input to max_seq_len
+        x_padded = np.zeros((1, max_seq_len), dtype=np.float32)
+        x_padded[0, :actual_len] = tokens[0]
+
+        positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
+        arange = np.arange(max_seq_len, dtype=np.float32)
+
+        outputs = instance.forward(x=x_padded, positions=positions, arange=arange)
         logits = outputs.get('output')
         if logits is None:
             raise RuntimeError('Model did not produce output buffer')
 
-        # Reshape logits to (batch, seq, vocab) if flat
-        if logits.ndim == 1:
-            vocab_size = _get_vocab_size(instance)
-            logits = logits.reshape(1, seq_len, vocab_size)
+        # Reshape to (batch, max_seq_len, vocab)
+        logits = logits.reshape(1, max_seq_len, vocab_size)
 
-        # Get logits for last position
-        next_logits = logits[:, -1, :]  # (1, vocab)
+        # Get logits at actual last token position
+        next_logits = logits[:, actual_len - 1, :]  # (1, vocab)
 
         # Temperature scaling
         if temperature != 1.0:
@@ -221,3 +233,13 @@ def _get_vocab_size(instance):
             if len(shape) >= 1:
                 return shape[0]
     return 50257  # GPT-2 default
+
+
+def _get_max_seq_len(instance):
+    """Infer max_seq_len from x input buffer shape."""
+    for i in range(instance.buf_count):
+        if instance.buf_name(i) == 'x':
+            shape = instance.buf_shape(i)
+            if len(shape) >= 2:
+                return shape[1]
+    return 1024  # GPT-2 default

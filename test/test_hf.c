@@ -482,6 +482,156 @@ TEST(hf, poly_causal_mask_shape) {
   PASS();
 }
 
+/* ── GPT-2 forward pass e2e ───────────────────────────────────── */
+
+TEST(hf, gpt2_forward_e2e) {
+  GPT2Config cfg = {
+    .vocab_size = 32,
+    .n_embd = 16,
+    .n_head = 2,
+    .n_layer = 1,
+    .max_seq_len = 8,
+    .norm_eps = 1e-5f
+  };
+
+  PolyInstance *inst = poly_gpt2_build(&cfg, 1);
+  ASSERT_NOT_NULL(inst);
+
+  /* Initialize weights with small random values */
+  int np = poly_instance_param_count(inst);
+  for (int i = 0; i < np; i++) {
+    int64_t numel;
+    float *data = poly_instance_param_data(inst, i, &numel);
+    const char *name = poly_instance_param_name(inst, i);
+    /* LayerNorm weights init to 1, biases to 0 */
+    if (strstr(name, "ln_") && strstr(name, "weight")) {
+      for (int64_t j = 0; j < numel; j++) data[j] = 1.0f;
+    } else if (strstr(name, "bias")) {
+      for (int64_t j = 0; j < numel; j++) data[j] = 0.0f;
+    } else {
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = 0.02f * ((float)(j % 100) / 100.0f - 0.5f);
+    }
+  }
+
+  /* Set input tokens: [0, 1, 2, 3] */
+  int nb = poly_instance_buf_count(inst);
+  for (int i = 0; i < nb; i++) {
+    const char *name = poly_instance_buf_name(inst, i);
+    int64_t numel;
+    float *data = poly_instance_buf_data(inst, i, &numel);
+    if (strcmp(name, "x") == 0) {
+      /* 1 batch, T=8 but only first 4 tokens matter */
+      for (int64_t j = 0; j < numel; j++) data[j] = (float)(j % 4);
+    } else if (strcmp(name, "positions") == 0) {
+      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+    } else if (strcmp(name, "arange") == 0) {
+      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+    }
+  }
+
+  /* Run forward pass */
+  int ret = poly_instance_forward(inst, NULL, 0);
+  ASSERT_INT_EQ(ret, 0);
+
+  /* Check output: (1, 8, 32) logits */
+  int out_idx = -1;
+  for (int i = 0; i < nb; i++) {
+    if (strcmp(poly_instance_buf_name(inst, i), "output") == 0) {
+      out_idx = i;
+      break;
+    }
+  }
+  ASSERT_TRUE(out_idx >= 0);
+
+  int64_t numel;
+  float *out = poly_instance_buf_data(inst, out_idx, &numel);
+  ASSERT_INT_EQ(numel, 1 * 8 * 32);
+
+  /* Verify output is finite and not all zero */
+  int all_zero = 1;
+  for (int64_t i = 0; i < numel; i++) {
+    ASSERT_TRUE(isfinite(out[i]));
+    if (fabsf(out[i]) > 1e-10f) all_zero = 0;
+  }
+  ASSERT_FALSE(all_zero);
+
+  poly_instance_free(inst);
+  PASS();
+}
+
+/* ── GPT-2 training: loss decreases ─────────────────────────────── */
+
+TEST(hf, gpt2_training_loss_decreases) {
+  GPT2Config cfg = {
+    .vocab_size = 32,
+    .n_embd = 16,
+    .n_head = 2,
+    .n_layer = 1,
+    .max_seq_len = 8,
+    .norm_eps = 1e-5f
+  };
+
+  PolyInstance *inst = poly_gpt2_build(&cfg, 1);
+  ASSERT_NOT_NULL(inst);
+
+  /* Initialize weights with small random values */
+  int np = poly_instance_param_count(inst);
+  for (int i = 0; i < np; i++) {
+    int64_t numel;
+    float *data = poly_instance_param_data(inst, i, &numel);
+    const char *name = poly_instance_param_name(inst, i);
+    if (strstr(name, "ln_") && strstr(name, "weight")) {
+      for (int64_t j = 0; j < numel; j++) data[j] = 1.0f;
+    } else if (strstr(name, "bias")) {
+      for (int64_t j = 0; j < numel; j++) data[j] = 0.0f;
+    } else {
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = 0.02f * ((float)((j * 7 + 13) % 100) / 100.0f - 0.5f);
+    }
+  }
+
+  /* Set input tokens and positions */
+  int nb = poly_instance_buf_count(inst);
+  for (int i = 0; i < nb; i++) {
+    const char *name = poly_instance_buf_name(inst, i);
+    int64_t numel;
+    float *data = poly_instance_buf_data(inst, i, &numel);
+    if (strcmp(name, "x") == 0) {
+      for (int64_t j = 0; j < numel; j++) data[j] = (float)(j % 4);
+    } else if (strcmp(name, "positions") == 0) {
+      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+    } else if (strcmp(name, "arange") == 0) {
+      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+    }
+  }
+
+  /* Configure Adam optimizer */
+  int ret = poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM,
+                                         0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);
+  ASSERT_INT_EQ(ret, 0);
+
+  /* Train for 5 steps */
+  float losses[5];
+  for (int step = 0; step < 5; step++) {
+    ret = poly_instance_train_step(inst, NULL, 0, &losses[step]);
+    ASSERT_INT_EQ(ret, 0);
+    ASSERT_TRUE(isfinite(losses[step]));
+  }
+
+  /* Loss should decrease */
+  ASSERT_TRUE(losses[4] < losses[0]);
+
+  /* All losses should be finite and positive (sum of squares) */
+  for (int i = 0; i < 5; i++) {
+    ASSERT_TRUE(losses[i] >= 0.0f);
+    ASSERT_TRUE(isfinite(losses[i]));
+  }
+
+  poly_instance_free(inst);
+  PASS();
+}
+
 /* ── Unsupported model type ──────────────────────────────────────── */
 
 TEST(hf, hf_load_unsupported_type) {

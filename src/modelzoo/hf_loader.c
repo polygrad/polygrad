@@ -143,6 +143,12 @@ PolyInstance *poly_hf_load(
             memcpy(buf_data, f32_data, numel * sizeof(float));
             loaded_count++;
             found = 1;
+          } else if (buf_data && numel < views[i].numel) {
+            /* Instance buffer is smaller (e.g. wpe with truncated seq_len).
+             * Copy the first `numel` elements (row-major prefix). */
+            memcpy(buf_data, f32_data, numel * sizeof(float));
+            loaded_count++;
+            found = 1;
           } else if (buf_data) {
             fprintf(stderr, "poly_hf_load: shape mismatch for '%s' "
                     "(instance %lld vs file %lld)\n", name,
