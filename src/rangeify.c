@@ -1039,8 +1039,12 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
       if (u->n_src > 0)
         reduce_src[n_rsrc++] = new_src[0];
 
-      /* Identify reduce ranges (in input but not output) */
+      /* Identify reduce ranges (in input but not output).
+       * Only append actual RANGE nodes -- singleton dims produce CONST(0)
+       * pseudo-ranges that must not enter REDUCE sources (tinygrad invariant:
+       * reduce sources are loop ranges only). */
       for (int d = 0; d < re->n_in; d++) {
+        if (re->in_rngs[d]->op != POLY_OP_RANGE) continue;
         bool is_output = false;
         for (int k = 0; k < re->n_out; k++) {
           if (re->in_rngs[d] == re->out_rngs[k]) { is_output = true; break; }
@@ -1053,6 +1057,20 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
       PolyArg reduce_arg = poly_arg_int((int64_t)u->arg.reduce_axis.op);
       result = poly_uop(ctx, POLY_OP_REDUCE, u->dtype,
                          reduce_src, n_rsrc, reduce_arg);
+
+      /* Invariant: all trailing REDUCE sources must be RANGE nodes.
+       * Debug builds: assert.  This catches any future regression where
+       * non-RANGE nodes (e.g. CONST(0) from singleton dims) leak through. */
+#ifndef NDEBUG
+      for (int chk = 1; chk < n_rsrc; chk++) {
+        if (reduce_src[chk]->op != POLY_OP_RANGE) {
+          fprintf(stderr, "polygrad: rangeify: REDUCE source[%d] is %s, expected RANGE\n",
+                  chk, poly_op_name(reduce_src[chk]->op));
+          assert(0 && "REDUCE trailing sources must be RANGE nodes");
+        }
+      }
+#endif
+
       transformed_compute = true;
       /* Record mapping: post-rangeify REDUCE → pre-rangeify REDUCE_AXIS */
       rmap_set(ictx->reduce_origin, result, u);

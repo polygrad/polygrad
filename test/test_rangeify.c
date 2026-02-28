@@ -2669,3 +2669,113 @@ TEST(rangeify, define_var_cache_hit) {
   ASSERT_FLOAT_EQ(r2[8], 0.0f, 1e-5);  /* untouched */
   PASS();
 }
+
+/* ── Regression: chained reductions (singleton + real) ─────────────── */
+/* Verifies that REDUCE_AXIS with a singleton dim (size 1) followed by
+ * a real reduction (size > 1) compiles and executes correctly via
+ * poly_realize.  Regression for the bug where CONST(0) pseudo-ranges
+ * from singleton dims entered REDUCE sources, producing END(CONST)
+ * that corrupted scope depth in the C renderer.
+ *
+ * Graph shape: (1,4) * (1,4) → reduce axis 0 (singleton, keepdim) → (1,4)
+ *              → reduce axis 1 (real sum of 4) → (1,1) → store
+ *
+ * REDUCE_AXIS keeps dims (sets reduced axis to 1), so reducing axis 0
+ * of (1,4) gives (1,4) (no-op), and reducing axis 1 of (1,4) gives (1,1).
+ */
+TEST(rangeify, chained_singleton_reduce_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *w_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+
+  /* a reshaped to (1,4) via expand, w reshaped to (1,4) */
+  int64_t sh14[] = { 1, 4 };
+  PolyUOp *a_r = poly_reshape(ctx, a_buf, (int64_t[]){1, 1}, 2);
+  PolyUOp *a_e = poly_expand(ctx, a_r, sh14, 2);
+  PolyUOp *w_r = poly_reshape(ctx, w_buf, sh14, 2);
+
+  /* Elementwise multiply: (1,4) * (1,4) -> (1,4) */
+  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, a_e, w_r);
+
+  /* Reduce axis 0 (size 1 -- singleton): (1,4) -> (1,4) [keepdim, no-op] */
+  int64_t ax0[] = { 0 };
+  PolyUOp *r0 = poly_reduce_axis(ctx, POLY_OP_ADD, mul, ax0, 1);
+
+  /* Reduce axis 1 (size 4 -- real sum): (1,4) -> (1,1) */
+  int64_t ax1[] = { 1 };
+  PolyUOp *r1 = poly_reduce_axis(ctx, POLY_OP_ADD, r0, ax1, 1);
+
+  /* Reshape to (1,) for store into scalar buffer */
+  PolyUOp *r1_flat = poly_reshape(ctx, r1, (int64_t[]){1}, 1);
+
+  /* Store + SINK */
+  PolyUOp *store = poly_store_val(ctx, out_buf, r1_flat);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  /* Execute */
+  float a_data[] = { 2.0f };
+  float w_data[] = { 1.0f, 2.0f, 3.0f, 4.0f };
+  float out_data[] = { 0.0f };
+
+  PolyBufferBinding bindings[] = {
+    { a_buf, a_data },
+    { w_buf, w_data },
+    { out_buf, out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(ret, 0);
+  /* Expected: 2*(1+2+3+4) = 20 */
+  ASSERT_FLOAT_EQ(out_data[0], 20.0f, 1e-4);
+  PASS();
+}
+
+/* ── Regression: mixed multi-axis reduction with singleton ─────────── */
+/* Reduce over axes [0,2] where axis 0 is singleton (size 1) and axis 2
+ * is real (size 3).  Ensures:
+ *   - singleton axes don't generate loop ranges
+ *   - non-singleton axes still generate RANGE(3)
+ *   - generated kernel accumulates correctly */
+TEST(rangeify, mixed_multiaxis_singleton_reduce_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* Input: (1, 2, 3) tensor stored flat in 6 elements */
+  PolyUOp *in_buf  = poly_buffer_f32(ctx, 6);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 2);  /* output: (1, 2, 1) → flat (2) */
+
+  /* Reshape to (1, 2, 3) */
+  int64_t sh123[] = { 1, 2, 3 };
+  PolyUOp *inp = poly_reshape(ctx, in_buf, sh123, 3);
+
+  /* Reduce axes 0 and 2: (1, 2, 3) → (1, 2, 1) */
+  int64_t axes[] = { 0, 2 };
+  PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_ADD, inp, axes, 2);
+
+  /* Reshape to (2) for store */
+  PolyUOp *r_flat = poly_reshape(ctx, r, (int64_t[]){2}, 1);
+
+  /* Store + SINK */
+  PolyUOp *store = poly_store_val(ctx, out_buf, r_flat);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  /* Execute: [[1,2,3],[4,5,6]] → row sums [6, 15] */
+  float in_data[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
+  float out_data[] = { 0.0f, 0.0f };
+
+  PolyBufferBinding bindings[] = {
+    { in_buf,  in_data },
+    { out_buf, out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_data[0], 6.0f, 1e-4);   /* 1+2+3 */
+  ASSERT_FLOAT_EQ(out_data[1], 15.0f, 1e-4);   /* 4+5+6 */
+  PASS();
+}

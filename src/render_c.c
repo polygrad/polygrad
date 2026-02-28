@@ -1102,6 +1102,19 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         continue;
       }
 
+      /* Defensive: END with non-RANGE source is a structural violation.
+       * Upstream invariant (rangeify/codegen) should prevent this.
+       * Debug: abort loudly.  Release: skip silently as safety belt. */
+      if (u->op == POLY_OP_END && u->n_src > 1 && u->src[1]->op != POLY_OP_RANGE) {
+#ifndef NDEBUG
+        fprintf(stderr, "polygrad: render_c: END node references non-RANGE source "
+                "(op=%s) -- structural invariant violation\n",
+                poly_op_name(u->src[1]->op));
+        assert(0 && "END source must be RANGE");
+#endif
+        continue;
+      }
+
       depth--;
       for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
       sb_puts(&body, "}\n");

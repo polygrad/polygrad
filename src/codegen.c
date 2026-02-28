@@ -544,8 +544,17 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root,
   (void)b;
   PolyUOp *red = root;
   PolyUOp *inp = red->src[0];
-  int n_reduce_range = red->n_src - 1;
   PolyOps reduce_op = red->arg.ops;
+
+  /* Filter reduce ranges to actual RANGE nodes only.
+   * Singleton dims may produce CONST(0) pseudo-ranges from rangeify;
+   * these must not enter the AFTER/END chains (tinygrad invariant). */
+  PolyUOp *reduce_ranges[POLY_MAX_DIMS];
+  int n_reduce_range = 0;
+  for (int j = 1; j < red->n_src; j++) {
+    if (red->src[j]->op == POLY_OP_RANGE)
+      reduce_ranges[n_reduce_range++] = red->src[j];
+  }
   PolyUOp *lst[128];
   int n_lst = horizontal_reduce_terms(ctx, inp, red->dtype, lst, 128);
   if (n_lst <= 0) return inp;
@@ -584,7 +593,7 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root,
     /* Skip reduce ranges */
     bool is_reduce = false;
     for (int j = 0; j < n_reduce_range; j++) {
-      if (topo[i] == red->src[j + 1]) { is_reduce = true; break; }
+      if (topo[i] == reduce_ranges[j]) { is_reduce = true; break; }
     }
     /* Skip already-ended ranges */
     if (!is_reduce) {
@@ -650,7 +659,7 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root,
   loop_srcs[0] = acc;
   loop_srcs[1] = acc_init;
   for (int i = 0; i < n_reduce_range; i++)
-    loop_srcs[i + 2] = red->src[i + 1];
+    loop_srcs[i + 2] = reduce_ranges[i];
   PolyUOp *loop_after = poly_uop(ctx, POLY_OP_AFTER, acc_ptr,
                                  loop_srcs, n_reduce_range + 2,
                                  poly_arg_none());
@@ -673,11 +682,11 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root,
   /* Build END chain (innermost first to match tinygrad) */
   PolyUOp *chain = acc_store;
   for (int i = n_reduce_range - 1; i >= 0; i--) {
-    PolyUOp *end_srcs[2] = { chain, red->src[i + 1] };
+    PolyUOp *end_srcs[2] = { chain, reduce_ranges[i] };
     chain = poly_uop(ctx, POLY_OP_END, POLY_VOID,
                       end_srcs, 2, poly_arg_none());
   }
-  reduce_ctx_add_end(rctx, &red->src[1], n_reduce_range, chain);
+  reduce_ctx_add_end(rctx, reduce_ranges, n_reduce_range, chain);
 
   /* ── Final read: acc.after(end).index(0) + LOAD ────────────────────── */
   PolyUOp *final_srcs[2] = { acc, chain };
