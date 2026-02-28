@@ -9,7 +9,8 @@ LDFLAGS_DEBUG = -lm -ldl -fsanitize=address,undefined
 HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 
 SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/sched.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/runtime_cpu.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/rangeify.c src/indexing.c src/nn.c
-TEST_SRC = test/test_main.c test/test_uop.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_sched.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_nn.c test/test_future_passes.c
+CODEC_SRC = vendor/cjson/cJSON.c src/poly_safetensors.c src/poly_wlrn.c src/poly_ir.c src/poly_instance.c src/poly_model_mlp.c
+TEST_SRC = test/test_main.c test/test_uop.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_sched.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_nn.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c
 
 ifeq ($(HAS_CUDA), 1)
   SRC += src/render_cuda.c src/runtime_cuda.c
@@ -28,13 +29,13 @@ WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_op_count,_poly_op_name,_pol
 
 all: build/libpolygrad.a build/libpolygrad.so
 
-build/libpolygrad.a: $(SRC)
+build/libpolygrad.a: $(SRC) $(CODEC_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -c $(SRC)
+	$(CC) $(CFLAGS_RELEASE) -c $(SRC) $(CODEC_SRC)
 	ar rcs $@ *.o
 	@rm -f *.o
 
-build/libpolygrad.so: $(SRC)
+build/libpolygrad.so: $(SRC) $(CODEC_SRC)
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -fPIC -shared -o $@ $^ -lm -ldl
 
@@ -50,7 +51,7 @@ test-parity: build/polygrad_parity_runner
 test-parity-opt: build/polygrad_parity_runner
 	ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 POLY_OPTIMIZE=1 POLY_EXPERIMENTAL_LATE=1 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
 
-build/polygrad_test: $(SRC) $(TEST_SRC)
+build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	$(CC) $(CFLAGS_DEBUG) -o $@ $^ $(LDFLAGS_DEBUG)
 
@@ -152,7 +153,7 @@ format-check:
 test-msan: build/polygrad_test_msan
 	./build/polygrad_test_msan
 
-build/polygrad_test_msan: $(SRC) $(TEST_SRC)
+build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	clang -std=c11 -g -O1 -fsanitize=memory -fno-omit-frame-pointer \
 		-o $@ $^ -lm -ldl -fsanitize=memory
