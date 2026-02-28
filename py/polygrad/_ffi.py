@@ -346,3 +346,15 @@ _lib.poly_instance_set_optimizer.argtypes = [_ptr, ctypes.c_int,
 # MLP family builder (poly_model_mlp.h)
 _lib.poly_mlp_instance.restype = _ptr
 _lib.poly_mlp_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
+# HF loader (modelzoo/hf_loader.c)
+_lib.poly_hf_load.restype = _ptr
+_lib.poly_hf_load.argtypes = [
+    ctypes.c_char_p,                       # config_json
+    ctypes.c_int,                          # config_len
+    ctypes.POINTER(_u8p),                  # weight_files[]
+    ctypes.POINTER(ctypes.c_int64),        # weight_lens[]
+    ctypes.c_int,                          # n_weight_files
+    ctypes.c_int,                          # max_batch
+    ctypes.c_int,                          # max_seq_len
+]

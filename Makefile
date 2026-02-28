@@ -9,8 +9,8 @@ LDFLAGS_DEBUG = -lm -ldl -fsanitize=address,undefined
 HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 
 SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/sched.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/runtime_cpu.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/rangeify.c src/indexing.c src/nn.c
-CODEC_SRC = vendor/cjson/cJSON.c src/poly_safetensors.c src/poly_wlrn.c src/poly_ir.c src/poly_instance.c src/poly_model_mlp.c
-TEST_SRC = test/test_main.c test/test_uop.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_sched.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_nn.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c
+CODEC_SRC = vendor/cjson/cJSON.c src/poly_safetensors.c src/poly_wlrn.c src/poly_ir.c src/poly_instance.c src/poly_model_mlp.c src/modelzoo/modelzoo.c src/modelzoo/models/gpt2.c src/modelzoo/hf_loader.c
+TEST_SRC = test/test_main.c test/test_uop.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_sched.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_nn.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c test/test_hf.c
 
 ifeq ($(HAS_CUDA), 1)
   SRC += src/render_cuda.c src/runtime_cuda.c

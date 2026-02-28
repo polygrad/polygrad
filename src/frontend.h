@@ -215,6 +215,42 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
                         int n_axis_sizes,
                         int64_t *out_shape, int *out_ndim);
 
+/* ── Transformer building blocks ───────────────────────────────────── */
+
+/* Gather rows from table by integer indices (embedding lookup).
+ * table: (N, D) weight matrix
+ * indices: (...) integer indices (as floats, cast internally)
+ * Returns: (..., D) gathered rows
+ * Lowered as: out[..., j] = table[int(indices[...]), j]
+ * Avoids O(vocab) materialization of one-hot mask. */
+PolyUOp *poly_gather(PolyCtx *ctx,
+                      PolyUOp *table, const int64_t *table_shape, int table_ndim,
+                      PolyUOp *indices, const int64_t *idx_shape, int idx_ndim,
+                      int64_t *out_shape, int *out_ndim);
+
+/* Layer normalization: (x - mean) / sqrt(var + eps).
+ * Normalizes over the last axis. No affine (caller applies weight/bias). */
+PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
+                         const int64_t *shape, int ndim,
+                         int axis, double eps,
+                         int64_t *out_shape, int *out_ndim);
+
+/* Build causal attention mask for sequence length T.
+ * Returns (T, T) mask: 0 where allowed, -1e9 where masked (upper triangle).
+ * T_val: const UOp (value = sequence length). */
+PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
+                           int64_t *out_shape, int *out_ndim);
+
+/* Linear projection: x @ weight.T + bias.
+ * x: (..., in_features), weight: (out_features, in_features)
+ * bias: (out_features,) or NULL for no bias.
+ * Returns: (..., out_features). */
+PolyUOp *poly_linear(PolyCtx *ctx,
+                      PolyUOp *x, const int64_t *x_shape, int x_ndim,
+                      PolyUOp *weight, const int64_t *w_shape, int w_ndim,
+                      PolyUOp *bias, const int64_t *bias_shape, int bias_ndim,
+                      int64_t *out_shape, int *out_ndim);
+
 /* Debug: print UOp info to stderr */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u);
 void poly_debug_opsets(void);

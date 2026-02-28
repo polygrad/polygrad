@@ -2779,6 +2779,202 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
   return result;
 }
 
+/* ── Transformer building blocks ───────────────────────────────────── */
+
+PolyUOp *poly_gather(PolyCtx *ctx,
+                      PolyUOp *table, const int64_t *table_shape, int table_ndim,
+                      PolyUOp *indices, const int64_t *idx_shape, int idx_ndim,
+                      int64_t *out_shape, int *out_ndim) {
+  if (!ctx || !table || !indices || table_ndim != 2 || idx_ndim < 1) return NULL;
+
+  /*
+   * Embedding lookup: table[indices, :] using the same arange==idx trick
+   * as tinygrad's Tensor._embedding_fwd, but with a reshape that avoids
+   * materializing a (vocab_size) one-hot per token.
+   *
+   * For table (V, D) and indices (...):
+   *   arange(V) -> (V,)
+   *   indices.unsqueeze(-1) -> (..., 1)
+   *   mask = (indices.unsqueeze(-1) == arange) -> (..., V)
+   *   mask.unsqueeze(-1) * table -> (..., V, D)
+   *   sum over V axis -> (..., D)
+   *
+   * This is the standard tinygrad embedding approach.
+   * A future GATHER UOp can replace this with O(1) per token.
+   */
+  int64_t V = table_shape[0];
+  int64_t D = table_shape[1];
+
+  /* arange(V): flat buffer of size V */
+  PolyUOp *arange_buf = poly_buffer_f32(ctx, V);
+
+  /* indices.unsqueeze(-1): add trailing dim of 1 */
+  int64_t idx_us_shape[POLY_MAX_DIMS];
+  int idx_us_ndim = idx_ndim + 1;
+  for (int i = 0; i < idx_ndim; i++) idx_us_shape[i] = idx_shape[i];
+  idx_us_shape[idx_ndim] = 1;
+  PolyUOp *idx_us = poly_reshape(ctx, indices, idx_us_shape, idx_us_ndim);
+
+  /* Broadcast idx_us to (..., V) */
+  int64_t idx_bcast[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_ndim; i++) idx_bcast[i] = idx_shape[i];
+  idx_bcast[idx_ndim] = V;
+  PolyUOp *idx_exp = poly_expand(ctx, idx_us, idx_bcast, idx_us_ndim);
+
+  /* Reshape arange to broadcastable (1,...,1, V) */
+  int64_t arange_shape[POLY_MAX_DIMS];
+  int arange_ndim = idx_us_ndim;
+  for (int i = 0; i < idx_ndim; i++) arange_shape[i] = 1;
+  arange_shape[idx_ndim] = V;
+  PolyUOp *arange_r = poly_reshape(ctx, arange_buf, arange_shape, arange_ndim);
+  PolyUOp *arange_exp = poly_expand(ctx, arange_r, idx_bcast, arange_ndim);
+
+  /* mask = eq(idx_exp, arange_exp) -> (..., V) bool */
+  PolyUOp *mask = poly_eq(ctx, idx_exp, arange_exp);
+
+  /* mask.unsqueeze(-1) -> (..., V, 1) */
+  int64_t mask_us_shape[POLY_MAX_DIMS];
+  int mask_us_ndim = idx_us_ndim + 1;
+  for (int i = 0; i < idx_us_ndim; i++) mask_us_shape[i] = idx_bcast[i];
+  mask_us_shape[idx_us_ndim] = 1;
+  PolyUOp *mask_us = poly_reshape(ctx, mask, mask_us_shape, mask_us_ndim);
+
+  /* Broadcast mask to (..., V, D) */
+  int64_t mask_bcast[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_us_ndim; i++) mask_bcast[i] = idx_bcast[i];
+  mask_bcast[idx_us_ndim] = D;
+  PolyUOp *mask_exp = poly_expand(ctx, mask_us, mask_bcast, mask_us_ndim);
+
+  /* Reshape table to (1,...,1, V, D) and broadcast to (..., V, D) */
+  int64_t tbl_shape[POLY_MAX_DIMS];
+  int tbl_ndim = mask_us_ndim;
+  for (int i = 0; i < idx_ndim; i++) tbl_shape[i] = 1;
+  tbl_shape[idx_ndim] = V;
+  tbl_shape[idx_ndim + 1] = D;
+  PolyUOp *tbl_r = poly_reshape(ctx, table, tbl_shape, tbl_ndim);
+  PolyUOp *tbl_exp = poly_expand(ctx, tbl_r, mask_bcast, tbl_ndim);
+
+  /* where(mask, table, 0) -> (..., V, D) */
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *selected = poly_where_op(ctx, mask_exp, tbl_exp, zero);
+
+  /* Sum over the V axis (idx_ndim-th axis in the result, 0-indexed) */
+  int64_t reduce_axes[] = { idx_ndim };
+  PolyUOp *gathered = poly_reduce_axis(ctx, POLY_OP_ADD, selected,
+                                        reduce_axes, 1);
+
+  /* Output shape: (..., D) */
+  *out_ndim = idx_ndim + 1;
+  for (int i = 0; i < idx_ndim; i++) out_shape[i] = idx_shape[i];
+  out_shape[idx_ndim] = D;
+
+  return gathered;
+}
+
+PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
+                         const int64_t *shape, int ndim,
+                         int axis, double eps,
+                         int64_t *out_shape, int *out_ndim) {
+  if (!ctx || !x || ndim < 1) return NULL;
+  if (axis < 0) axis += ndim;
+
+  /* mean = sum(x, axis) / N */
+  int64_t mean_shape[POLY_MAX_DIMS];
+  int mean_ndim;
+  PolyUOp *mean = poly_mean_reduce(ctx, x, shape, ndim, axis, 1,
+                                     mean_shape, &mean_ndim);
+
+  /* Expand mean back to original shape for broadcast */
+  PolyUOp *mean_exp = poly_expand(ctx, mean, (int64_t *)shape, ndim);
+
+  /* x - mean */
+  PolyUOp *centered = poly_alu2(ctx, POLY_OP_ADD, x,
+                                 poly_alu1(ctx, POLY_OP_NEG, mean_exp));
+
+  /* var = mean((x - mean)^2, axis) */
+  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, centered, centered);
+  int64_t var_shape[POLY_MAX_DIMS];
+  int var_ndim;
+  PolyUOp *var = poly_mean_reduce(ctx, sq, shape, ndim, axis, 1,
+                                    var_shape, &var_ndim);
+  PolyUOp *var_exp = poly_expand(ctx, var, (int64_t *)shape, ndim);
+
+  /* (x - mean) / sqrt(var + eps) */
+  PolyUOp *eps_c = poly_const_float(ctx, eps);
+  PolyUOp *denom = poly_alu1(ctx, POLY_OP_SQRT,
+                              poly_alu2(ctx, POLY_OP_ADD, var_exp, eps_c));
+  PolyUOp *result = poly_alu2(ctx, POLY_OP_MUL, centered,
+                               poly_alu1(ctx, POLY_OP_RECIPROCAL, denom));
+
+  memcpy(out_shape, shape, ndim * sizeof(int64_t));
+  *out_ndim = ndim;
+  return result;
+}
+
+PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
+                           int64_t *out_shape, int *out_ndim) {
+  if (!ctx || T <= 0) return NULL;
+
+  /* arange(T) as row: (T, 1) */
+  PolyUOp *arange_buf = poly_buffer_f32(ctx, T);
+  int64_t row_shape[] = { T, 1 };
+  PolyUOp *row = poly_reshape(ctx, arange_buf, row_shape, 2);
+  int64_t row_exp_shape[] = { T, T };
+  PolyUOp *row_exp = poly_expand(ctx, row, row_exp_shape, 2);
+
+  /* arange(T) as col: (1, T) */
+  int64_t col_shape[] = { 1, T };
+  PolyUOp *col = poly_reshape(ctx, arange_buf, col_shape, 2);
+  PolyUOp *col_exp = poly_expand(ctx, col, row_exp_shape, 2);
+
+  /* mask = row < col (upper triangle = True where masked) */
+  PolyUOp *mask = poly_alu2(ctx, POLY_OP_CMPLT, row_exp, col_exp);
+
+  /* where(mask, -1e9, 0) */
+  PolyUOp *neg_inf = poly_const_float(ctx, -1e9);
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *result = poly_where_op(ctx, mask, neg_inf, zero);
+
+  out_shape[0] = T;
+  out_shape[1] = T;
+  *out_ndim = 2;
+  return result;
+}
+
+PolyUOp *poly_linear(PolyCtx *ctx,
+                      PolyUOp *x, const int64_t *x_shape, int x_ndim,
+                      PolyUOp *weight, const int64_t *w_shape, int w_ndim,
+                      PolyUOp *bias, const int64_t *bias_shape, int bias_ndim,
+                      int64_t *out_shape, int *out_ndim) {
+  if (!ctx || !x || !weight || x_ndim < 1 || w_ndim != 2) return NULL;
+
+  /* weight.T: (out_features, in_features) -> (in_features, out_features) */
+  int64_t perm[] = { 1, 0 };
+  PolyUOp *wt = poly_permute(ctx, weight, perm, 2);
+  int64_t wt_shape[] = { w_shape[1], w_shape[0] };
+
+  /* x @ weight.T */
+  int64_t dot_shape[POLY_MAX_DIMS];
+  int dot_ndim;
+  PolyUOp *result = poly_dot(ctx, x, x_shape, x_ndim, wt, wt_shape, 2,
+                              dot_shape, &dot_ndim);
+
+  /* + bias */
+  if (bias) {
+    /* Reshape bias to match output: (1,...,1, out_features) */
+    int64_t b_shape[POLY_MAX_DIMS];
+    for (int i = 0; i < dot_ndim - 1; i++) b_shape[i] = 1;
+    b_shape[dot_ndim - 1] = w_shape[0];
+    PolyUOp *b_r = poly_reshape(ctx, bias, b_shape, dot_ndim);
+    PolyUOp *b_exp = poly_expand(ctx, b_r, dot_shape, dot_ndim);
+    result = poly_alu2(ctx, POLY_OP_ADD, result, b_exp);
+  }
+
+  memcpy(out_shape, dot_shape, dot_ndim * sizeof(int64_t));
+  *out_ndim = dot_ndim;
+  return result;
+}
+
 /* Debug helper — print UOp info */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u) {
   if (!u) { fprintf(stderr, "poly_debug_uop: NULL\n"); return; }
