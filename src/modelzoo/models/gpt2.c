@@ -6,13 +6,17 @@
  *
  * Reference: py/polygrad/nn/gpt2.py (Python GPT-2 implementation)
  * Weight naming: matches HF GPT2 minus "transformer." prefix.
+ *
+ * Important: CONTIGUOUS barriers are placed at the same points as
+ * the Python GPT-2's .realize() calls to keep kernel sizes manageable.
  */
 
 #define _POSIX_C_SOURCE 200809L
 #include "../modelzoo.h"
 #include "../../frontend.h"
-#include "../../poly_ir.h"
-#include "../../poly_safetensors.h"
+#include "../../instance.h"
+#include "../../ir.h"
+#include "../../safetensors.h"
 #include "../../sched.h"
 #include "../../nn.h"
 #include "../../../vendor/cjson/cJSON.h"
@@ -21,14 +25,17 @@
 #include <stdio.h>
 #include <math.h>
 
-/* Max buffers: params + input + output.
+/* Max buffers: params + input + output + aux.
  * Per layer: ln_1 weight/bias, attn c_attn weight/bias, attn c_proj weight/bias,
  *            ln_2 weight/bias, mlp c_fc weight/bias, mlp c_proj weight/bias = 12
  * Plus: wte, wpe, ln_f weight/bias = 4
- * Plus: x (input), output, positions = 3
- * Plus: causal_mask arange buffer = 1 */
+ * Plus: x (input), output, positions, arange = 4
+ * Plus: vocab_arange (aux) = 1 */
 #define GPT2_MAX_LAYERS 128
-#define GPT2_MAX_BUFS (GPT2_MAX_LAYERS * 12 + 4 + 4)
+#define GPT2_MAX_BUFS (GPT2_MAX_LAYERS * 12 + 4 + 5)
+
+/* Insert a CONTIGUOUS realize barrier (same as Python .realize()) */
+#define REALIZE(u) poly_uop1(ctx, POLY_OP_CONTIGUOUS, (u)->dtype, (u), poly_arg_none())
 
 /* ── Helper: add named param buffer ─────────────────────────────── */
 
@@ -47,6 +54,118 @@ static void buflist_add(BufList *bl, const char *name, uint8_t role,
   e->buffer = buffer;
   e->ndim = ndim;
   for (int i = 0; i < ndim; i++) e->shape[i] = shape[i];
+}
+
+/* ── HF Conv1D linear (no weight transpose) ─────────────────────── */
+
+/* HF GPT-2 uses Conv1D convention: y = x @ weight + bias
+ * Weight stored as (in_features, out_features), NOT PyTorch (out, in).
+ * poly_linear() expects PyTorch convention, so we use poly_dot directly. */
+static PolyUOp *hf_linear(PolyCtx *ctx,
+                            PolyUOp *x, const int64_t *x_shape, int x_ndim,
+                            PolyUOp *weight, const int64_t *w_shape, int w_ndim,
+                            PolyUOp *bias, int64_t bias_features,
+                            int64_t *out_shape, int *out_ndim) {
+  /* x @ weight (no transpose) */
+  PolyUOp *result = poly_dot(ctx, x, x_shape, x_ndim, weight, w_shape, w_ndim,
+                               out_shape, out_ndim);
+
+  /* + bias: reshape to (1,...,1, out_features) and broadcast */
+  if (bias) {
+    int64_t b_shape[POLY_MAX_DIMS];
+    for (int i = 0; i < *out_ndim - 1; i++) b_shape[i] = 1;
+    b_shape[*out_ndim - 1] = bias_features;
+    PolyUOp *b_r = poly_reshape(ctx, bias, b_shape, *out_ndim);
+    PolyUOp *b_exp = poly_expand(ctx, b_r, out_shape, *out_ndim);
+    result = poly_alu2(ctx, POLY_OP_ADD, result, b_exp);
+  }
+  return result;
+}
+
+/* ── Inline embedding (no anonymous buffers) ────────────────────── */
+
+/* Embedding lookup using registered arange buffer.
+ * Same algorithm as poly_gather but uses caller-provided arange buffer
+ * instead of creating an anonymous one.
+ *
+ * table: (N, D), indices: (...), arange_buf: (N,) with 0,1,...,N-1
+ * result: (..., D) */
+static PolyUOp *embedding(PolyCtx *ctx,
+                           PolyUOp *table, int64_t N, int64_t D,
+                           PolyUOp *indices, const int64_t *idx_shape, int idx_ndim,
+                           PolyUOp *arange_buf) {
+  /* indices.unsqueeze(-1) -> (..., 1) */
+  int64_t idx_us_shape[POLY_MAX_DIMS];
+  int idx_us_ndim = idx_ndim + 1;
+  for (int i = 0; i < idx_ndim; i++) idx_us_shape[i] = idx_shape[i];
+  idx_us_shape[idx_ndim] = 1;
+  PolyUOp *idx_us = poly_reshape(ctx, indices, idx_us_shape, idx_us_ndim);
+
+  /* Broadcast to (..., N) */
+  int64_t idx_bcast[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_ndim; i++) idx_bcast[i] = idx_shape[i];
+  idx_bcast[idx_ndim] = N;
+  PolyUOp *idx_exp = poly_expand(ctx, idx_us, idx_bcast, idx_us_ndim);
+
+  /* Reshape arange to (1,...,1, N) and broadcast to (..., N) */
+  int64_t arange_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_ndim; i++) arange_shape[i] = 1;
+  arange_shape[idx_ndim] = N;
+  PolyUOp *arange_r = poly_reshape(ctx, arange_buf, arange_shape, idx_us_ndim);
+  PolyUOp *arange_exp = poly_expand(ctx, arange_r, idx_bcast, idx_us_ndim);
+
+  /* mask = eq(idx, arange) -> (..., N) */
+  PolyUOp *mask = poly_eq(ctx, idx_exp, arange_exp);
+
+  /* mask.unsqueeze(-1) -> (..., N, 1), broadcast to (..., N, D) */
+  int mask_us_ndim = idx_us_ndim + 1;
+  int64_t mask_us_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_us_ndim; i++) mask_us_shape[i] = idx_bcast[i];
+  mask_us_shape[idx_us_ndim] = 1;
+  PolyUOp *mask_us = poly_reshape(ctx, mask, mask_us_shape, mask_us_ndim);
+
+  int64_t mask_bcast[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_us_ndim; i++) mask_bcast[i] = idx_bcast[i];
+  mask_bcast[idx_us_ndim] = D;
+  PolyUOp *mask_exp = poly_expand(ctx, mask_us, mask_bcast, mask_us_ndim);
+
+  /* table -> (1,...,1, N, D) -> (..., N, D) */
+  int64_t tbl_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < idx_ndim; i++) tbl_shape[i] = 1;
+  tbl_shape[idx_ndim] = N;
+  tbl_shape[idx_ndim + 1] = D;
+  PolyUOp *tbl_r = poly_reshape(ctx, table, tbl_shape, mask_us_ndim);
+  PolyUOp *tbl_exp = poly_expand(ctx, tbl_r, mask_bcast, mask_us_ndim);
+
+  /* where(mask, table, 0) -> sum over N axis */
+  PolyUOp *selected = poly_where_op(ctx, mask_exp, tbl_exp,
+                                      poly_const_float(ctx, 0.0));
+  int64_t reduce_axes[] = { idx_ndim };
+  PolyUOp *gathered = poly_reduce_axis(ctx, POLY_OP_ADD, selected, reduce_axes, 1);
+
+  /* REDUCE_AXIS keeps dim (keepdim=true): (..., 1, D).
+   * Reshape to squeeze the reduced V axis: (..., D). */
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = idx_ndim + 1;
+  for (int i = 0; i < idx_ndim; i++) out_shape[i] = idx_shape[i];
+  out_shape[idx_ndim] = D;
+  return poly_reshape(ctx, gathered, out_shape, out_ndim);
+}
+
+/* ── Post-init: populate arange AUX buffers ─────────────────────── */
+
+static void populate_arange_bufs(PolyInstance *inst) {
+  int n = poly_instance_buf_count(inst);
+  for (int i = 0; i < n; i++) {
+    const char *name = poly_instance_buf_name(inst, i);
+    if (strcmp(name, "vocab_arange") == 0) {
+      int64_t numel;
+      float *data = poly_instance_buf_data(inst, i, &numel);
+      if (data) {
+        for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+      }
+    }
+  }
 }
 
 /* ── GPT-2 Builder ───────────────────────────────────────────────── */
@@ -170,7 +289,7 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   PolyUOp *ln_f_b = poly_buffer_f32(ctx, D);
   ADD_PARAM("ln_f.bias", ln_f_b, d_shape, 1);
 
-  /* ── Input/output buffers ────────────────────────────────────── */
+  /* ── Input/output/aux buffers ──────────────────────────────────── */
 
   /* Input tokens: (B_max, T_max) */
   int64_t x_shape[] = { B_max, T_max };
@@ -187,38 +306,42 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   PolyUOp *pos_buf = poly_buffer_f32(ctx, T_max);
   buflist_add(&bl, "positions", POLY_IR_ROLE_INPUT, pos_buf, pos_shape, 2);
 
-  /* Arange buffer for causal mask: (T_max,) -- filled with 0,1,...,T-1 */
+  /* Arange buffer for causal mask + position embedding: (T_max,)
+   * Filled at runtime with 0,1,...,T-1 */
   int64_t arange_shape[] = { T_max };
   PolyUOp *arange_buf = poly_buffer_f32(ctx, T_max);
   buflist_add(&bl, "arange", POLY_IR_ROLE_INPUT, arange_buf, arange_shape, 1);
+
+  /* Vocab arange: (V,) -- AUX buffer, auto-populated with 0,1,...,V-1 */
+  int64_t varange_shape[] = { V };
+  PolyUOp *varange_buf = poly_buffer_f32(ctx, V);
+  buflist_add(&bl, "vocab_arange", POLY_IR_ROLE_AUX, varange_buf, varange_shape, 1);
 
   /* ── Build forward graph ─────────────────────────────────────── */
 
   int B = B_max;
   int T = T_max;
 
-  /* Token embeddings: gather(wte, tokens) -> (B, T, D) */
-  int64_t tok_emb_shape[8];
-  int tok_emb_ndim;
-  PolyUOp *tok_emb = poly_gather(ctx, wte, wte_shape, 2,
-                                   x_buf, x_shape, 2,
-                                   tok_emb_shape, &tok_emb_ndim);
+  /* Token embeddings: embedding(wte, tokens, vocab_arange) -> (B, T, D) */
+  PolyUOp *tok_emb = embedding(ctx, wte, V, D, x_buf, x_shape, 2, varange_buf);
+  tok_emb = REALIZE(tok_emb);
 
-  /* Position embeddings: gather(wpe, positions) -> (1, T, D) */
-  int64_t pos_emb_shape[8];
-  int pos_emb_ndim;
-  PolyUOp *pos_emb = poly_gather(ctx, wpe, wpe_shape, 2,
-                                   pos_buf, pos_shape, 2,
-                                   pos_emb_shape, &pos_emb_ndim);
+  /* Position embeddings: embedding(wpe, positions, arange_buf)
+   * Note: we reuse arange_buf (size T_max) as the position arange since
+   * position indices are also 0..T-1. But wpe has T_max rows, so the
+   * arange for position embedding lookup needs size T_max -- same buffer. */
+  PolyUOp *pos_emb = embedding(ctx, wpe, T_max, D, pos_buf, pos_shape, 2, arange_buf);
+  pos_emb = REALIZE(pos_emb);
 
   /* Broadcast pos_emb to (B, T, D) */
   int64_t h_shape[] = { B, T, D };
   PolyUOp *pos_exp = poly_expand(ctx, pos_emb, h_shape, 3);
 
-  /* h = tok_emb + pos_emb */
+  /* h = tok_emb + pos_emb, realize */
   PolyUOp *h = poly_alu2(ctx, POLY_OP_ADD, tok_emb, pos_exp);
+  h = REALIZE(h);
 
-  /* Build causal mask: (T, T) -> (1, 1, T, T) */
+  /* Build causal mask: (T, T) -> (1, 1, T, T), realize */
   int64_t mask_row_shape[] = { T, 1 };
   PolyUOp *mask_row = poly_reshape(ctx, arange_buf, mask_row_shape, 2);
   int64_t mask_row_exp_shape[] = { T, T };
@@ -230,20 +353,18 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   PolyUOp *mask_val = poly_where_op(ctx, mask_cmp,
                                       poly_const_float(ctx, -1e9),
                                       poly_const_float(ctx, 0.0));
-  /* Reshape to (1, 1, T, T) for broadcast with (B, H, T, T) */
   int64_t mask_4d[] = { 1, 1, T, T };
   PolyUOp *mask = poly_reshape(ctx, mask_val, mask_4d, 4);
+  mask = REALIZE(mask);
 
   /* ── Transformer blocks ──────────────────────────────────────── */
 
   for (int i = 0; i < L; i++) {
-    /* LayerNorm 1 */
+    /* LayerNorm 1 + affine, realize */
     int64_t ln_shape[8];
     int ln_ndim;
     PolyUOp *ln1 = poly_layernorm(ctx, h, h_shape, 3, -1, (double)eps,
                                     ln_shape, &ln_ndim);
-
-    /* Apply affine: ln1 * weight + bias */
     int64_t w1d[] = { 1, 1, D };
     PolyUOp *ln1_w_r = poly_reshape(ctx, lp[i].ln1_w, w1d, 3);
     PolyUOp *ln1_w_e = poly_expand(ctx, ln1_w_r, h_shape, 3);
@@ -251,23 +372,24 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     PolyUOp *ln1_b_e = poly_expand(ctx, ln1_b_r, h_shape, 3);
     ln1 = poly_alu2(ctx, POLY_OP_ADD,
                      poly_alu2(ctx, POLY_OP_MUL, ln1, ln1_w_e), ln1_b_e);
+    ln1 = REALIZE(ln1);
 
-    /* Multi-head attention */
-    /* QKV projection: (B, T, D) @ (D, 3D).T + bias -> (B, T, 3D) */
+    /* QKV projection: (B, T, D) @ (D, 3D) + bias -> (B, T, 3D), realize */
     int64_t qkv_shape[8];
     int qkv_ndim;
-    PolyUOp *qkv = poly_linear(ctx, ln1, h_shape, 3,
-                                 lp[i].c_attn_w, (int64_t[]){ D, 3 * D }, 2,
-                                 lp[i].c_attn_b, (int64_t[]){ 3 * D }, 1,
-                                 qkv_shape, &qkv_ndim);
+    PolyUOp *qkv = hf_linear(ctx, ln1, h_shape, 3,
+                               lp[i].c_attn_w, (int64_t[]){ D, 3 * D }, 2,
+                               lp[i].c_attn_b, 3 * D,
+                               qkv_shape, &qkv_ndim);
+    qkv = REALIZE(qkv);
 
-    /* Split Q, K, V via shrink */
+    /* Split Q, K, V via shrink, realize each */
     int64_t shrink_q[][2] = { {0, B}, {0, T}, {0, D} };
     int64_t shrink_k[][2] = { {0, B}, {0, T}, {D, 2*D} };
     int64_t shrink_v[][2] = { {0, B}, {0, T}, {2*D, 3*D} };
-    PolyUOp *q = poly_shrink(ctx, qkv, shrink_q, 3);
-    PolyUOp *k = poly_shrink(ctx, qkv, shrink_k, 3);
-    PolyUOp *v = poly_shrink(ctx, qkv, shrink_v, 3);
+    PolyUOp *q = REALIZE(poly_shrink(ctx, qkv, shrink_q, 3));
+    PolyUOp *k = REALIZE(poly_shrink(ctx, qkv, shrink_k, 3));
+    PolyUOp *v = REALIZE(poly_shrink(ctx, qkv, shrink_v, 3));
 
     /* Reshape to multi-head: (B, T, H, head_dim) -> permute (B, H, T, head_dim) */
     int64_t mh_shape[] = { B, T, H, head_dim };
@@ -276,45 +398,47 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     v = poly_reshape(ctx, v, mh_shape, 4);
 
     int64_t perm_0213[] = { 0, 2, 1, 3 };
-    q = poly_permute(ctx, q, perm_0213, 4);  /* (B, H, T, head_dim) */
+    q = poly_permute(ctx, q, perm_0213, 4);
     k = poly_permute(ctx, k, perm_0213, 4);
     v = poly_permute(ctx, v, perm_0213, 4);
 
-    /* Scaled dot-product attention */
-    /* scores = Q @ K.T / sqrt(head_dim) */
-    int64_t q_4d[] = { B, H, T, head_dim };
-
     /* K transpose: (B, H, T, head_dim) -> (B, H, head_dim, T) */
+    int64_t q_4d[] = { B, H, T, head_dim };
     int64_t perm_0132[] = { 0, 1, 3, 2 };
     PolyUOp *kt = poly_permute(ctx, k, perm_0132, 4);
     int64_t kt_shape[] = { B, H, head_dim, T };
 
+    /* scores = Q @ K.T, realize */
     int64_t scores_shape[8];
     int scores_ndim;
     PolyUOp *scores = poly_dot(ctx, q, q_4d, 4, kt, kt_shape, 4,
                                 scores_shape, &scores_ndim);
+    scores = REALIZE(scores);
 
     /* Scale by 1/sqrt(head_dim) */
     double scale = 1.0 / sqrt((double)head_dim);
     scores = poly_alu2(ctx, POLY_OP_MUL, scores,
                         poly_const_float(ctx, scale));
 
-    /* Apply causal mask: scores + mask */
+    /* Apply causal mask: scores + mask, realize */
     int64_t mask_bcast[] = { B, H, T, T };
     PolyUOp *mask_exp = poly_expand(ctx, mask, mask_bcast, 4);
     scores = poly_alu2(ctx, POLY_OP_ADD, scores, mask_exp);
+    scores = REALIZE(scores);
 
-    /* Softmax over last axis */
+    /* Softmax, realize */
     int64_t scores_4d[] = { B, H, T, T };
     PolyUOp *attn = poly_softmax(ctx, scores, scores_4d, 4, -1);
+    attn = REALIZE(attn);
 
-    /* Attention @ V: (B, H, T, T) @ (B, H, T, head_dim) -> (B, H, T, head_dim) */
+    /* Attention @ V, realize */
     int64_t attn_4d[] = { B, H, T, T };
     int64_t v_4d[] = { B, H, T, head_dim };
     int64_t attn_out_shape[8];
     int attn_out_ndim;
     PolyUOp *attn_out = poly_dot(ctx, attn, attn_4d, 4, v, v_4d, 4,
                                    attn_out_shape, &attn_out_ndim);
+    attn_out = REALIZE(attn_out);
 
     /* Merge heads: (B, H, T, head_dim) -> (B, T, H, head_dim) -> (B, T, D) */
     int64_t perm_0213_back[] = { 0, 2, 1, 3 };
@@ -322,58 +446,61 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     int64_t merge_shape[] = { B, T, D };
     attn_out = poly_reshape(ctx, attn_out, merge_shape, 3);
 
-    /* Output projection */
+    /* Output projection, realize */
     int64_t proj_out_shape[8];
     int proj_out_ndim;
-    attn_out = poly_linear(ctx, attn_out, merge_shape, 3,
-                            lp[i].c_proj_w, (int64_t[]){ D, D }, 2,
-                            lp[i].c_proj_b, d_shape, 1,
-                            proj_out_shape, &proj_out_ndim);
+    attn_out = hf_linear(ctx, attn_out, merge_shape, 3,
+                          lp[i].c_proj_w, (int64_t[]){ D, D }, 2,
+                          lp[i].c_proj_b, D,
+                          proj_out_shape, &proj_out_ndim);
+    attn_out = REALIZE(attn_out);
 
-    /* Residual: h = h + attn_out */
+    /* Residual: h = h + attn_out, realize */
     h = poly_alu2(ctx, POLY_OP_ADD, h, attn_out);
+    h = REALIZE(h);
 
-    /* LayerNorm 2 */
+    /* LayerNorm 2 + affine, realize */
     int64_t ln2_shape[8];
     int ln2_ndim;
     PolyUOp *ln2 = poly_layernorm(ctx, h, h_shape, 3, -1, (double)eps,
                                     ln2_shape, &ln2_ndim);
-
-    /* Apply affine */
     PolyUOp *ln2_w_r = poly_reshape(ctx, lp[i].ln2_w, w1d, 3);
     PolyUOp *ln2_w_e = poly_expand(ctx, ln2_w_r, h_shape, 3);
     PolyUOp *ln2_b_r = poly_reshape(ctx, lp[i].ln2_b, w1d, 3);
     PolyUOp *ln2_b_e = poly_expand(ctx, ln2_b_r, h_shape, 3);
     ln2 = poly_alu2(ctx, POLY_OP_ADD,
                      poly_alu2(ctx, POLY_OP_MUL, ln2, ln2_w_e), ln2_b_e);
+    ln2 = REALIZE(ln2);
 
-    /* FFN: fc -> gelu -> proj */
+    /* FFN: fc, realize, gelu, realize, proj, realize */
     int64_t fc_out_shape[8];
     int fc_out_ndim;
-    PolyUOp *ffn = poly_linear(ctx, ln2, h_shape, 3,
-                                lp[i].fc_w, (int64_t[]){ D, 4 * D }, 2,
-                                lp[i].fc_b, (int64_t[]){ 4 * D }, 1,
-                                fc_out_shape, &fc_out_ndim);
+    PolyUOp *ffn = hf_linear(ctx, ln2, h_shape, 3,
+                              lp[i].fc_w, (int64_t[]){ D, 4 * D }, 2,
+                              lp[i].fc_b, 4 * D,
+                              fc_out_shape, &fc_out_ndim);
+    ffn = REALIZE(ffn);
     ffn = poly_gelu(ctx, ffn);
+    ffn = REALIZE(ffn);
 
     int64_t ffn_shape[] = { B, T, 4 * D };
     int64_t proj_shape[8];
     int proj_ndim;
-    ffn = poly_linear(ctx, ffn, ffn_shape, 3,
-                       lp[i].proj_w, (int64_t[]){ 4 * D, D }, 2,
-                       lp[i].proj_b, d_shape, 1,
-                       proj_shape, &proj_ndim);
+    ffn = hf_linear(ctx, ffn, ffn_shape, 3,
+                     lp[i].proj_w, (int64_t[]){ 4 * D, D }, 2,
+                     lp[i].proj_b, D,
+                     proj_shape, &proj_ndim);
+    ffn = REALIZE(ffn);
 
-    /* Residual: h = h + ffn */
+    /* Residual: h = h + ffn, realize */
     h = poly_alu2(ctx, POLY_OP_ADD, h, ffn);
+    h = REALIZE(h);
   }
 
-  /* Final layer norm */
+  /* Final layer norm + affine, realize */
   int64_t lnf_shape[8];
   int lnf_ndim;
   h = poly_layernorm(ctx, h, h_shape, 3, -1, (double)eps, lnf_shape, &lnf_ndim);
-
-  /* Apply affine */
   int64_t w1d_f[] = { 1, 1, D };
   PolyUOp *lnf_w_r = poly_reshape(ctx, ln_f_w, w1d_f, 3);
   PolyUOp *lnf_w_e = poly_expand(ctx, lnf_w_r, h_shape, 3);
@@ -381,6 +508,7 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   PolyUOp *lnf_b_e = poly_expand(ctx, lnf_b_r, h_shape, 3);
   h = poly_alu2(ctx, POLY_OP_ADD,
                  poly_alu2(ctx, POLY_OP_MUL, h, lnf_w_e), lnf_b_e);
+  h = REALIZE(h);
 
   /* LM head: h @ wte.T -> logits (B, T, V) -- weight tying */
   int64_t wte_T_shape[] = { D, V };
@@ -408,6 +536,11 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   if (ir_data) {
     inst = poly_instance_from_ir(ir_data, ir_len, NULL, 0);
     free(ir_data);
+  }
+
+  /* Populate AUX arange buffers */
+  if (inst) {
+    populate_arange_bufs(inst);
   }
 
   /* Cleanup */

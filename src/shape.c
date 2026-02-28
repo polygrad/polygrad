@@ -194,7 +194,14 @@ static PolyShape compute_shape(PolyUOp *u, PolyMap *cache) {
         int64_t a = (ai >= 0) ? out_dims[ai] : 1;
         int64_t b = (bi >= 0) ? si.dims[bi] : 1;
         if (!(a == b || a == 1 || b == 1)) {
-          fprintf(stderr, "polygrad: shape mismatch in %s\n", poly_op_name(op));
+          fprintf(stderr, "polygrad: shape mismatch in %s axis %d: %lld vs %lld (shapes: [",
+                  poly_op_name(op), ax, (long long)a, (long long)b);
+          for (int d2 = 0; d2 < out_ndim; d2++)
+            fprintf(stderr, "%s%lld", d2 ? "," : "", (long long)out_dims[d2]);
+          fprintf(stderr, "] vs [");
+          for (int d2 = 0; d2 < si.ndim; d2++)
+            fprintf(stderr, "%s%lld", d2 ? "," : "", (long long)si.dims[d2]);
+          fprintf(stderr, "])\n");
           return POLY_SHAPE_NONE;
         }
         merged[ndim - 1 - ax] = (a == 1) ? b : a;

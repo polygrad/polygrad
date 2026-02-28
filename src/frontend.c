@@ -555,8 +555,26 @@ PolyUOp *poly_dot(PolyCtx *ctx,
     bc_shape[i] = xd > wd ? xd : wd;
   }
 
-  PolyUOp *x_exp = xn < max_ndim ? poly_reshape(ctx, xr, bc_shape, max_ndim) : xr;
-  PolyUOp *w_exp = wn < max_ndim ? poly_reshape(ctx, wt, bc_shape, max_ndim) : wt;
+  /* Left-pad smaller tensor with 1s before expand (not bc_shape!) */
+  PolyUOp *x_exp, *w_exp;
+  if (xn < max_ndim) {
+    int64_t padded[16];
+    int pad = max_ndim - xn;
+    for (int i = 0; i < pad; i++) padded[i] = 1;
+    for (int i = 0; i < xn; i++) padded[pad + i] = xs[i];
+    x_exp = poly_reshape(ctx, xr, padded, max_ndim);
+  } else {
+    x_exp = xr;
+  }
+  if (wn < max_ndim) {
+    int64_t padded[16];
+    int pad = max_ndim - wn;
+    for (int i = 0; i < pad; i++) padded[i] = 1;
+    for (int i = 0; i < wn; i++) padded[pad + i] = wt_shape[i];
+    w_exp = poly_reshape(ctx, wt, padded, max_ndim);
+  } else {
+    w_exp = wt;
+  }
   x_exp = poly_expand(ctx, x_exp, bc_shape, max_ndim);
   w_exp = poly_expand(ctx, w_exp, bc_shape, max_ndim);
 
@@ -628,7 +646,7 @@ PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x,
 
 /* ── Shared helpers ──────────────────────────────────────────────────── */
 
-#define MAX_REALIZE_BUFS 64
+#define MAX_REALIZE_BUFS 256
 
 /* Reconstruct the buffer-to-PARAM ordering that poly_schedule() uses:
  * 1. Output buffers (STORE targets in SINK source order)
@@ -685,7 +703,7 @@ static uint32_t ptr_hash(const void *p) {
  * nodes as positional placeholders (first encountered = 0, etc.).
  */
 
-#define MAX_STRUCT_NODES 256
+#define MAX_STRUCT_NODES 8192
 
 typedef struct {
   PolyUOp *uop;
@@ -749,8 +767,10 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
 }
 
 static uint32_t structural_hash(PolyUOp *u) {
-  StructHashCtx ctx = { .n_visited = 0, .n_bufs = 0 };
-  return struct_hash_impl(u, &ctx);
+  StructHashCtx *ctx = calloc(1, sizeof(StructHashCtx));
+  uint32_t h = struct_hash_impl(u, ctx);
+  free(ctx);
+  return h;
 }
 
 /* ── Structural equality ─────────────────────────────────────────────── */
@@ -1628,8 +1648,8 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
    * strip_bind_values may rewrite BUFFERs that have BIND sources,
    * producing new UOp pointers. We store the pre-strip ordering in
    * the step so runtime find_buf_position matches caller pointers. */
-  PolyUOp *buf_order_orig[MAX_REALIZE_BUFS];
-  PolyUOp *dfs_visited[MAX_STRUCT_NODES];
+  PolyUOp **buf_order_orig = calloc(MAX_REALIZE_BUFS, sizeof(PolyUOp *));
+  PolyUOp **dfs_visited = calloc(MAX_STRUCT_NODES, sizeof(PolyUOp *));
   int n_bufs_orig = 0, n_dfs = 0;
   collect_buf_order(tensor_sink, buf_order_orig, &n_bufs_orig, dfs_visited, &n_dfs);
 
@@ -1642,16 +1662,21 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
   /* Collect DFS buffer ordering AFTER strip for mapping build.
    * The scheduler operates on the post-strip graph, so param_to_buf
    * references post-strip BUFFER pointers. */
-  PolyUOp *buf_order_post[MAX_REALIZE_BUFS];
+  PolyUOp **buf_order_post = calloc(MAX_REALIZE_BUFS, sizeof(PolyUOp *));
   int n_bufs_post = 0;
   n_dfs = 0;
   collect_buf_order(tensor_sink, buf_order_post, &n_bufs_post, dfs_visited, &n_dfs);
+  free(dfs_visited);
 
   uint32_t graph_hash = structural_hash(tensor_sink) ^ (SCHED_CACHE_VERSION * 2654435761u);
 
   /* Schedule */
   PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
-  if (sr.n_kernels < 1) { poly_schedule_result_free(&sr); return NULL; }
+  if (sr.n_kernels < 1) {
+    free(buf_order_orig); free(buf_order_post);
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
 
   /* Allocate step */
   PolyStep *step = calloc(1, sizeof(PolyStep));
@@ -1800,10 +1825,14 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fprintf(stderr, "\n");
   }
 
+  free(buf_order_orig);
+  free(buf_order_post);
   poly_schedule_result_free(&sr);
   return step;
 
 cleanup:
+  free(buf_order_orig);
+  free(buf_order_post);
   if (step->kernels) {
     for (int k = 0; k < sr.n_kernels; k++) {
       PolyStepKernel *sk = &step->kernels[k];
@@ -2863,12 +2892,13 @@ PolyUOp *poly_gather(PolyCtx *ctx,
   PolyUOp *gathered = poly_reduce_axis(ctx, POLY_OP_ADD, selected,
                                         reduce_axes, 1);
 
-  /* Output shape: (..., D) */
+  /* REDUCE_AXIS keeps dim (keepdim=true): (..., 1, D).
+   * Reshape to squeeze the reduced V axis: (..., D). */
   *out_ndim = idx_ndim + 1;
   for (int i = 0; i < idx_ndim; i++) out_shape[i] = idx_shape[i];
   out_shape[idx_ndim] = D;
 
-  return gathered;
+  return poly_reshape(ctx, gathered, out_shape, *out_ndim);
 }
 
 PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
