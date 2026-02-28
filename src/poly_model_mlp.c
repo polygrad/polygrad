@@ -250,8 +250,10 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
   int n_eps = 0;
   eps[n_eps++] = (PolyIrEntrypoint){ "forward", fwd_sink };
 
-  /* Loss graph (MSE) */
-  if (loss_type && strcmp(loss_type, "mse") == 0) {
+  /* Loss graph */
+  int has_loss = (loss_type && (strcmp(loss_type, "mse") == 0 ||
+                                strcmp(loss_type, "cross_entropy") == 0));
+  if (has_loss) {
     /* Target buffer */
     PolyUOp *y_buf = poly_buffer_f32(ctx, out_numel);
     bufs[n_bufs++] = (PolyIrBufEntry){
@@ -264,23 +266,44 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
       "loss", POLY_IR_ROLE_OUTPUT, loss_buf, { 1 }, 1
     };
 
-    /* MSE = mean((forward_output - y)^2) */
-    PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, x,
-                                poly_alu1(ctx, POLY_OP_NEG, y_buf));
-    PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
+    PolyUOp *loss_val;
+    if (strcmp(loss_type, "mse") == 0) {
+      /* MSE = mean((forward_output - y)^2) */
+      PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, x,
+                                  poly_alu1(ctx, POLY_OP_NEG, y_buf));
+      PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
 
-    /* Reduce over all dims */
-    int64_t axes0[] = { 0 };
-    PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes0, 1);
-    int64_t axes1[] = { 0 };
-    PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes1, 1);
+      /* Reduce over all dims */
+      int64_t axes0[] = { 0 };
+      PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes0, 1);
+      int64_t axes1[] = { 0 };
+      PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes1, 1);
 
-    /* Scale by 1/(batch_size * out_dim) */
-    double scale = 1.0 / ((double)batch_size * out_dim);
-    PolyUOp *mse = poly_alu2(ctx, POLY_OP_MUL, sum1,
-                               poly_const_float(ctx, scale));
+      /* Scale by 1/(batch_size * out_dim) */
+      double scale = 1.0 / ((double)batch_size * out_dim);
+      loss_val = poly_alu2(ctx, POLY_OP_MUL, sum1,
+                           poly_const_float(ctx, scale));
+    } else {
+      /* Cross-entropy = -mean(sum(target * log_softmax(x), axis=-1))
+       * target is one-hot: (batch_size, out_dim)
+       * log_softmax over axis 1 (class axis) */
+      int64_t logits_shape[] = { batch_size, out_dim };
+      PolyUOp *log_probs = poly_log_softmax(ctx, x, logits_shape, 2, 1);
 
-    PolyUOp *loss_store = poly_store_val(ctx, loss_buf, mse);
+      /* -(target * log_probs) summed over class axis, then mean over batch */
+      PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y_buf, log_probs);
+      int64_t axes_class[] = { 1 };
+      PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes_class, 1);
+      int64_t axes_batch[] = { 0 };
+      PolyUOp *sum_batch = poly_reduce_axis(ctx, POLY_OP_ADD, sum_class, axes_batch, 1);
+
+      /* Scale by -1/batch_size */
+      double scale = -1.0 / (double)batch_size;
+      loss_val = poly_alu2(ctx, POLY_OP_MUL, sum_batch,
+                           poly_const_float(ctx, scale));
+    }
+
+    PolyUOp *loss_store = poly_store_val(ctx, loss_buf, loss_val);
     PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
     eps[n_eps++] = (PolyIrEntrypoint){ "loss", loss_sink };
   }

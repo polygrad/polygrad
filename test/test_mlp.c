@@ -324,3 +324,40 @@ TEST(mlp, train_multi_layer) {
   poly_instance_free(inst);
   PASS();
 }
+
+TEST(mlp, train_cross_entropy) {
+  /* 3-class classification: 2 -> 4 -> 3 with cross-entropy loss */
+  const char *spec =
+    "{\"layers\":[2,4,3],\"activation\":\"relu\",\"bias\":true,"
+    "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
+
+  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  ASSERT_NOT_NULL(inst);
+
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
+                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  /* x=[1, 0], target=class 1 (one-hot: [0, 1, 0]) */
+  float x[] = { 1.0f, 0.0f };
+  float y[] = { 0.0f, 1.0f, 0.0f };
+  PolyIOBinding io[] = {
+    { "x", x },
+    { "y", y },
+  };
+
+  float first_loss = -1.0f;
+  float prev_loss = 1e10f;
+  for (int step = 0; step < 100; step++) {
+    float loss;
+    int ret = poly_instance_train_step(inst, io, 2, &loss);
+    ASSERT_INT_EQ(ret, 0);
+    ASSERT_TRUE(isfinite(loss));
+    if (step == 0) first_loss = loss;
+    prev_loss = loss;
+  }
+
+  ASSERT_TRUE(prev_loss < first_loss);
+
+  poly_instance_free(inst);
+  PASS();
+}
