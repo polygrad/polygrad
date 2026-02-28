@@ -309,6 +309,44 @@ for i in range(100):
 - `n_kernels` -- number of compiled kernels
 - `n_intermediates` -- number of pre-allocated intermediate buffers
 
+## HuggingFace Model Loading
+
+Load pre-trained models directly from HuggingFace format (config.json + safetensors).
+
+```python
+from polygrad.hf import load_hf, download_hf, generate
+import numpy as np
+
+# Download a model from HuggingFace Hub
+model_path = download_hf('gpt2')
+
+# Load into a PolyInstance
+inst = load_hf(model_path, max_batch=1, max_seq_len=128)
+
+# Run forward pass
+outputs = inst.forward(
+    x=np.array([[50256, 464, 3616, 286, 1204, 318]], dtype=np.float32),
+    positions=np.arange(6, dtype=np.float32).reshape(1, -1),
+    arange=np.arange(128, dtype=np.float32)
+)
+logits = outputs['output']  # (1, max_seq_len, vocab_size)
+
+# Autoregressive generation
+tokens = np.array([[50256, 464, 3616, 286, 1204, 318]], dtype=np.float32)
+result = generate(inst, tokens, max_new_tokens=20, temperature=0.8, top_k=40)
+```
+
+### HF API
+
+| Function | Description |
+|----------|-------------|
+| `load_hf(path, max_batch=1, max_seq_len=0)` | Load model from local directory |
+| `load_hf_bytes(config, weights, ...)` | Load from raw bytes (no filesystem) |
+| `download_hf(repo_id, cache_dir=None)` | Download from HuggingFace Hub |
+| `generate(inst, tokens, max_new_tokens, ...)` | Autoregressive text generation |
+
+Supported model types: GPT-2. Weight formats: F32, F16, BF16 safetensors (single or sharded).
+
 ## How It Works
 
 1. **Lazy evaluation**: Operations build a UOp graph in the C core. No computation happens until `realize()`, `numpy()`, `item()`, or `backward()`.
@@ -325,5 +363,5 @@ for i in range(100):
 ## Tests
 
 ```bash
-python -m pytest py/tests/ -v   # 87 tests (tensor + nn + compiled step + GPT-2)
+python -m pytest py/tests/ -v   # 110 tests (tensor + nn + compiled step + GPT-2 + HF loading)
 ```

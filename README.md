@@ -45,9 +45,9 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────┘    └──────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python, JS, and Browser. C core handles: UOp IR → schedule → codegen → linearize → render (C or WASM) → execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers (all using `assign()` for in-place parameter updates). GPT-2 model training (segment-wise backward through realize boundaries). 31/31 IR parity with tinygrad.
+**What works today:** Full tinygrad-compatible Tensor API from Python, JS, and Browser. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 (or any supported architecture) directly from config.json + safetensors, run inference, fine-tune. Verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
 
-**What's next:** GPU backends (WGSL/WebGPU, CUDA, Metal).
+**What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
 ## Documentation
 
@@ -117,14 +117,16 @@ This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test          # build + run 295 C tests (ASan/UBSan)
+make test          # build + run 346 C tests (ASan/UBSan)
 make test-wasm     # build + run 47 WASM tests
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
 
 # Frontend tests
-python -m pytest py/tests/ -v   # 87 Python tests
+python -m pytest py/tests/ -v        # 110 Python tests
 node js/test/test_tensor.js          # 62 JS tests
+node js/test/test_instance.js        # 192 JS tests (MLP Instance)
+node js/test/test_hf.js              # 36 JS tests (HF model loading)
 ```
 
 ## Status
@@ -145,18 +147,29 @@ node js/test/test_tensor.js          # 62 JS tests
 - [x] **31/31 IR parity** with tinygrad ClangRenderer (CPU, no vectorization)
 - [x] ASSIGN + WAR ordering (in-place buffer writes, WAR/WAW dependency edges, `Tensor.assign()`)
 
+### Model Zoo
+- [x] PolyInstance runtime (forward, train_step, optimizer, weight import/export)
+- [x] MLP builder (`poly_mlp_instance`) with configurable layers, activations, loss
+- [x] HuggingFace model loading (`poly_hf_load`): config.json + safetensors -> PolyInstance
+- [x] GPT-2 builder: full transformer (attention, FFN, layernorm, causal mask, weight tying)
+- [x] Safetensors decoder with multi-dtype support (F32, F16, BF16, F64, integers)
+- [x] GPT-2 training (forward + backward + optimizer via PolyInstance)
+- [x] Autoregressive text generation (Python)
+
 ### Language Frontends
 - [x] Python Tensor API (ctypes FFI, lazy eval, autograd, tinygrad-compatible)
 - [x] Python nn module (Linear, LayerNorm, RMSNorm, Embedding, Dropout, SGD, Adam, AdamW)
-- [x] GPT-2 model training (segment-wise backward through realize boundaries)
+- [x] Python HF loader (`load_hf`, `download_hf`, `generate`)
 - [x] JS Node Tensor API (koffi FFI, full op coverage)
+- [x] JS Node Instance API (MLP + HF loading, param/buf read/write)
 - [x] Browser WASM Tensor API (Emscripten FFI, same API as Node)
 
 ### Planned
 - [ ] GPU backends (WGSL/WebGPU, Metal)
+- [ ] More model families (LLaMA, BERT)
 - [ ] Expander, devectorizer
 
-473 tests (277 C + 87 Python + 62 JS + 47 WASM), ASan/UBSan clean.
+793 tests (346 C + 110 Python + 290 JS + 47 WASM), ASan/UBSan clean.
 
 ## Reference
 

@@ -216,6 +216,66 @@ console.log(x.grad.toArray())  // Float32Array [2, 4, 6]
 | `leaky_relu()` | `leakyRelu()` | camelCase |
 | `log_softmax()` | `logSoftmax()` | camelCase |
 
+## Instance API (MLP + HuggingFace)
+
+The Instance API provides direct access to PolyInstance models (MLP builder and HuggingFace loader) without the Tensor abstraction.
+
+### MLP
+
+```javascript
+const { Instance, OPTIM_SGD } = require('./src/instance')
+
+const inst = Instance.mlp({
+  layers: [2, 4, 1],
+  activation: 'relu',
+  bias: true,
+  loss: 'mse',
+  batch_size: 1,
+  seed: 42
+})
+
+inst.setOptimizer(OPTIM_SGD, 0.05)
+const loss = inst.trainStep({ x: new Float32Array([1, 2]), y: new Float32Array([5]) })
+inst.free()
+```
+
+### HuggingFace Model Loading
+
+```javascript
+const { Instance } = require('./src/instance')
+const fs = require('fs')
+
+// Load config and safetensors
+const config = JSON.parse(fs.readFileSync('model/config.json', 'utf-8'))
+const weights = [fs.readFileSync('model/model.safetensors')]
+
+const inst = Instance.fromHF(config, weights, 1, 128)  // maxBatch=1, maxSeqLen=128
+
+// Set input buffers and run forward
+inst.forward({})
+const output = inst.bufData(inst.findBuf('output'))
+
+inst.free()
+```
+
+### Instance Methods
+
+| Method | Description |
+|--------|-------------|
+| `Instance.mlp(spec)` | Create MLP from JSON spec |
+| `Instance.fromHF(config, weights, maxBatch?, maxSeqLen?)` | Load HuggingFace model |
+| `Instance.fromIR(irBytes, weightsBytes?)` | Load from IR bytes |
+| `forward(inputs)` | Run forward pass |
+| `trainStep(io)` | Forward + backward + optimizer step |
+| `setOptimizer(kind, lr, ...)` | Set optimizer (SGD, Adam, AdamW) |
+| `paramCount`, `paramName(i)`, `paramShape(i)` | Parameter introspection |
+| `paramData(i)`, `setParamData(i, arr)` | Read/write parameter data |
+| `bufCount`, `bufName(i)`, `bufRole(i)`, `bufShape(i)` | Buffer introspection |
+| `bufData(i)`, `setBufData(i, arr)` | Read/write buffer data |
+| `findBuf(name)` | Find buffer index by name |
+| `exportWeights()`, `importWeights(data)` | Weight serialization |
+| `free()` | Release native resources |
+
 ## How It Works
 
 Same architecture as Python: each method calls one C function via koffi FFI. The C core handles all op composition. Lazy evaluation with explicit `realize()`.
@@ -223,5 +283,7 @@ Same architecture as Python: each method calls one C function via koffi FFI. The
 ## Tests
 
 ```bash
-node js/test/test_tensor.js   # 62 tests
+node js/test/test_tensor.js      # 62 tests (Tensor API)
+node js/test/test_instance.js    # 192 tests (MLP Instance)
+node js/test/test_hf.js          # 36 tests (HF model loading)
 ```
