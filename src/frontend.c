@@ -2714,6 +2714,11 @@ int poly_step_buffer_info(const PolyStep *step, int idx, PolyStepBufferInfo *out
   return 0;
 }
 
+PolyUOp *poly_step_buf_uop(const PolyStep *step, int idx) {
+  if (!step || idx < 0 || idx >= step->n_bufs) return NULL;
+  return step->buf_order[idx];
+}
+
 int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
                      PolyUOp **buffers, void **datas, int n) {
   PolyBufferBinding bindings[MAX_REALIZE_BUFS];

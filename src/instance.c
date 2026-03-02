@@ -58,6 +58,8 @@ struct PolyInstance {
   PolyUOp *train_sink;        /* combined fwd+bwd+update SINK */
   PolyUOp *loss_buf;          /* BUFFER UOp for loss output */
   float loss_data;
+  int train_loss_buf_idx;     /* loss buffer position in train_step->buf_order */
+  int *train_grad_buf_idxs;   /* malloc'd [n_params] grad buffer positions */
 
   /* Optimizer update buffers (for non-ASSIGN path) */
   PolyUOp **grad_bufs;        /* [n_params] gradient BUFFER UOps */
@@ -176,6 +178,8 @@ void poly_instance_free(PolyInstance *inst) {
   /* Free compiled steps */
   if (inst->forward_step) poly_step_destroy(inst->forward_step);
   if (inst->train_step) poly_step_destroy(inst->train_step);
+  free(inst->train_grad_buf_idxs);
+  inst->train_grad_buf_idxs = NULL;
 
   /* Free gradient/update buffers */
   if (inst->grad_bufs) {
@@ -466,8 +470,8 @@ static void apply_optimizer_update(PolyInstance *inst,
 /* ── Train Step ──────────────────────────────────────────────────────── */
 
 /* Build the training execution: forward + loss + gradients + optimizer.
- * This uses poly_realize for simplicity (scheduler cache handles caching).
- * A future optimization would build a single compiled PolyStep. */
+ * On first call, compiles a single PolyStep for all fwd+bwd computation
+ * via poly_compile_value_and_grad. Subsequent calls reuse the compiled step. */
 int poly_instance_train_step(PolyInstance *inst,
                              PolyIOBinding *io, int n_io,
                              float *loss_out) {
@@ -484,29 +488,77 @@ int poly_instance_train_step(PolyInstance *inst,
     return -1;
   }
 
-  /* Allocate gradient buffers on first call */
-  if (!inst->grad_bufs) {
-    inst->grad_bufs = calloc(inst->n_params, sizeof(PolyUOp *));
-    inst->grad_datas = calloc(inst->n_params, sizeof(float *));
+  /* Compile training step on first call */
+  if (!inst->train_step) {
+    PolyUOp *loss_sink = inst->entrypoints[loss_ep].sink;
+    PolyUOp *loss_store = loss_sink->src[0]; /* SINK src[0] = STORE */
+    PolyUOp *loss_value = loss_store->src[1]; /* STORE src[1] = value */
+
+    /* Build param buffer UOp array */
+    PolyUOp **param_bufs = malloc((size_t)inst->n_params * sizeof(PolyUOp *));
+    if (!param_bufs) return -1;
+    for (int i = 0; i < inst->n_params; i++)
+      param_bufs[i] = inst->bufs[inst->param_indices[i]].buffer;
+
+    /* Allocate grad data storage (grad_bufs sentinel + grad_datas) */
+    inst->grad_bufs = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
+    inst->grad_datas = calloc((size_t)inst->n_params, sizeof(float *));
+    if (!inst->grad_bufs || !inst->grad_datas) {
+      free(param_bufs);
+      return -1;
+    }
     for (int i = 0; i < inst->n_params; i++) {
       NamedBuf *b = &inst->bufs[inst->param_indices[i]];
-      inst->grad_bufs[i] = poly_buffer_f32(inst->ctx, b->numel);
-      inst->grad_datas[i] = calloc(b->numel, sizeof(float));
+      inst->grad_datas[i] = calloc((size_t)b->numel, sizeof(float));
+      if (!inst->grad_datas[i]) {
+        free(param_bufs);
+        return -1;
+      }
+    }
+
+    /* Compile combined fwd+bwd step */
+    inst->train_grad_buf_idxs = malloc((size_t)inst->n_params * sizeof(int));
+    if (!inst->train_grad_buf_idxs) {
+      free(param_bufs);
+      return -1;
+    }
+    inst->train_step = poly_compile_value_and_grad(inst->ctx, loss_value,
+                           param_bufs, inst->n_params,
+                           &inst->train_loss_buf_idx,
+                           inst->train_grad_buf_idxs);
+    free(param_bufs);
+
+    if (!inst->train_step) {
+      fprintf(stderr, "poly_instance_train_step: compile failed\n");
+      free(inst->train_grad_buf_idxs);
+      inst->train_grad_buf_idxs = NULL;
+      return -1;
+    }
+
+    /* Guard: loss and grad output buffers must be float32 so host float*
+     * bindings are valid.  poly_compile_value_and_grad preserves the input
+     * dtype (float16/bfloat16 would pass through), which would silently
+     * corrupt the host-side scalar and optimizer state. */
+    PolyUOp *loss_out_uop = poly_step_buf_uop(inst->train_step,
+                                               inst->train_loss_buf_idx);
+    if (loss_out_uop &&
+        !poly_dtype_eq(poly_dtype_scalar(loss_out_uop->dtype), POLY_FLOAT32)) {
+      fprintf(stderr,
+              "poly_instance_train_step: loss output is %s, expected float32\n",
+              poly_dtype_name(loss_out_uop->dtype));
+      poly_step_destroy(inst->train_step);
+      inst->train_step = NULL;
+      free(inst->train_grad_buf_idxs);
+      inst->train_grad_buf_idxs = NULL;
+      return -1;
     }
   }
 
-  /* Step 1: Run loss forward (using poly_realize for simplicity) */
-  PolyUOp *loss_sink = inst->entrypoints[loss_ep].sink;
+  /* Build bindings: instance buffers + loss output + grad outputs */
+  int n_bindings = inst->n_bufs + 1 + inst->n_params;
+  PolyBufferBinding *bindings = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+  if (!bindings) return -1;
 
-  /* Find the loss output buffer -- look for role=OUTPUT named "loss" */
-  int loss_buf_idx = find_buf_by_name(inst, "loss");
-  float loss_val = 0.0f;
-  float *loss_ptr = (loss_buf_idx >= 0 && inst->bufs[loss_buf_idx].data)
-                    ? inst->bufs[loss_buf_idx].data : &loss_val;
-
-  /* Build bindings for loss forward */
-  int n_bindings = inst->n_bufs;
-  PolyBufferBinding *bindings = malloc(n_bindings * sizeof(PolyBufferBinding));
   for (int i = 0; i < inst->n_bufs; i++) {
     bindings[i].buffer = inst->bufs[i].buffer;
     bindings[i].data = inst->bufs[i].data;
@@ -518,53 +570,32 @@ int poly_instance_train_step(PolyInstance *inst,
     if (bi >= 0) bindings[bi].data = io[i].data;
   }
 
-  /* Execute loss forward */
-  int ret = poly_realize(inst->ctx, loss_sink, bindings, n_bindings);
-  if (ret != 0) {
-    free(bindings);
-    return ret;
-  }
+  /* Loss output binding */
+  bindings[inst->n_bufs] = (PolyBufferBinding){
+    poly_step_buf_uop(inst->train_step, inst->train_loss_buf_idx),
+    &inst->loss_data
+  };
 
-  if (loss_out) *loss_out = *loss_ptr;
-
-  /* Step 2: Compute gradients for each parameter.
-   * We need to find the loss UOp (the value being stored by the loss SINK).
-   * The loss SINK -> STORE -> value. We grad w.r.t. the STORE's value src. */
-  PolyUOp *loss_store = loss_sink->src[0]; /* SINK src[0] = STORE */
-  PolyUOp *loss_value = loss_store->src[1]; /* STORE src[1] = value */
-
-  /* Compute gradients for all params */
+  /* Grad output bindings */
   for (int i = 0; i < inst->n_params; i++) {
-    NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-    PolyUOp *grad_uop = poly_grad(inst->ctx, loss_value, pb->buffer);
-    if (!grad_uop) {
-      fprintf(stderr, "poly_instance_train_step: grad failed for '%s'\n",
-              pb->name);
-      free(bindings);
-      return -1;
-    }
-
-    /* Store gradient into grad buffer */
-    PolyUOp *grad_store = poly_store_val(inst->ctx, inst->grad_bufs[i], grad_uop);
-    PolyUOp *grad_sink = poly_sink1(inst->ctx, grad_store);
-
-    /* Add grad buffer binding */
-    int total_bindings = n_bindings + 1;
-    PolyBufferBinding *gb = malloc(total_bindings * sizeof(PolyBufferBinding));
-    memcpy(gb, bindings, n_bindings * sizeof(PolyBufferBinding));
-    gb[n_bindings] = (PolyBufferBinding){ inst->grad_bufs[i], inst->grad_datas[i] };
-
-    ret = poly_realize(inst->ctx, grad_sink, gb, total_bindings);
-    free(gb);
-    if (ret != 0) {
-      free(bindings);
-      return ret;
-    }
+    bindings[inst->n_bufs + 1 + i] = (PolyBufferBinding){
+      poly_step_buf_uop(inst->train_step, inst->train_grad_buf_idxs[i]),
+      inst->grad_datas[i]
+    };
   }
 
+  int ret = poly_step_run_ex(inst->train_step, bindings, n_bindings, NULL, 0);
   free(bindings);
+  if (ret != 0) return ret;
 
-  /* Step 3: Apply optimizer updates (host-side for simplicity) */
+  /* Update instance "loss" buffer so consumers see the current value */
+  int loss_named_idx = find_buf_by_name(inst, "loss");
+  if (loss_named_idx >= 0 && inst->bufs[loss_named_idx].data)
+    inst->bufs[loss_named_idx].data[0] = inst->loss_data;
+
+  if (loss_out) *loss_out = inst->loss_data;
+
+  /* Apply optimizer updates (host-side) */
   inst->optim.step++;
   int64_t moment_offset = 0;
   for (int i = 0; i < inst->n_params; i++) {

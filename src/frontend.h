@@ -370,6 +370,10 @@ int poly_step_n_buffers(const PolyStep *step);
 int poly_step_n_bindable_buffers(const PolyStep *step);
 int poly_step_buffer_info(const PolyStep *step, int idx, PolyStepBufferInfo *out);
 
+/* Return the BUFFER UOp at position idx in the step's DFS buffer ordering.
+ * Valid range: [0, poly_step_n_bindable_buffers(step)). Returns NULL on error. */
+PolyUOp *poly_step_buf_uop(const PolyStep *step, int idx);
+
 /* ── Cache cleanup (for leak-free shutdown) ───────────────────────────── */
 
 /* Free all cached compiled CPU programs (dlclose + free). */
