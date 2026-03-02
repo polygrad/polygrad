@@ -758,19 +758,32 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
 /* ── Render helpers ──────────────────────────────────────────────────── */
 
-/* Render a float constant with f suffix, ensuring a decimal point. */
-static char *render_float_const(double v, char *buf, int cap) {
+/* Render a float constant, dtype-aware: f64 gets full precision with no suffix,
+ * f32 (and all other float types) get %.9g with the 'f' suffix. */
+static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
+  bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
   if (isinf(v)) {
-    snprintf(buf, cap, v > 0 ? "__builtin_inff()" : "(-__builtin_inff())");
+    if (is_f64)
+      snprintf(buf, cap, v > 0 ? "__builtin_inf()" : "(-__builtin_inf())");
+    else
+      snprintf(buf, cap, v > 0 ? "__builtin_inff()" : "(-__builtin_inff())");
     return buf;
   }
   if (isnan(v)) {
-    snprintf(buf, cap, "__builtin_nanf(\"\")");
+    snprintf(buf, cap, is_f64 ? "__builtin_nan(\"\")" : "__builtin_nanf(\"\")");
     return buf;
   }
-  /* Use enough digits to round-trip float32 constants through text. */
+  if (is_f64) {
+    /* Full precision double literal: enough digits to round-trip, no suffix. */
+    snprintf(buf, cap, "%.17g", v);
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+      int len = (int)strlen(buf);
+      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    }
+    return buf;
+  }
+  /* Float32 (and other float types): truncate to float32, add 'f' suffix. */
   snprintf(buf, cap, "%.9g", (double)(float)v);
-  /* ensure decimal point for C float literal */
   if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
     int len = (int)strlen(buf);
     if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
@@ -972,7 +985,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_CONST) {
       char val[64];
       if (poly_dtype_is_float(u->dtype)) {
-        render_float_const(u->arg.f, val, sizeof(val));
+        render_float_const(u->arg.f, u->dtype, val, sizeof(val));
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {
@@ -1136,9 +1149,10 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
       char initval[64];
       if (u->arg.kind == POLY_ARG_FLOAT)
-        render_float_const(u->arg.f, initval, sizeof(initval));
+        render_float_const(u->arg.f, u->dtype, initval, sizeof(initval));
       else
-        snprintf(initval, sizeof(initval), "0.0f");
+        snprintf(initval, sizeof(initval),
+                 poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_FLOAT64) ? "0.0" : "0.0f");
 
       char dtype_s[128];
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));

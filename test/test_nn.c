@@ -1092,6 +1092,20 @@ static float eval_scalar_f32(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), float xval) {
   return (rc == 0) ? result : NAN;
 }
 
+/* Helper: compile a scalar f64 function, evaluate at given input, return output */
+static double eval_scalar_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double xval) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer_f64(ctx, 1);
+  PolyUOp *y = fn(ctx, x);
+  PolyUOp *out = poly_buffer_f64(ctx, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
+  double inv = xval, result = 0.0;
+  PolyBufferBinding binds[] = { {x, &inv}, {out, &result} };
+  int rc = poly_realize(ctx, sink, binds, 2);
+  poly_ctx_destroy(ctx);
+  return (rc == 0) ? result : (double)NAN;
+}
+
 TEST(nn, special_math_erf) {
   /* Reference: A&S Table 7.1, DLMF 7.2.1 */
   struct { float x; float ref; } cases[] = {
@@ -1306,6 +1320,83 @@ TEST(nn, special_math_logsumexp) {
   }
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── f64 accuracy tests — verify dtype-correct constants ─────────────── */
+
+TEST(nn, special_math_f64_lgamma) {
+  /* lgamma() is ISO C99 <math.h>; use it as reference for f64 accuracy. */
+  struct { double x; double tol; } cases[] = {
+    { 1.0,  1e-12 },   /* lgamma(1) = 0 exactly */
+    { 2.0,  1e-12 },   /* lgamma(2) = 0 exactly */
+    { 0.5,  1e-12 },   /* ln(sqrt(pi)) */
+    { 1.5,  1e-12 },
+    { 10.0, 1e-10 },
+  };
+  for (int i = 0; i < 5; i++) {
+    double got = eval_scalar_f64(poly_lgamma, cases[i].x);
+    double ref = lgamma(cases[i].x);
+    double err = fabs(got - ref);
+    ASSERT_TRUE(err < cases[i].tol);
+  }
+  PASS();
+}
+
+TEST(nn, special_math_f64_digamma) {
+  /* digamma() is not in ISO C — use baked high-precision constants.
+   * ψ(1) = -γ, ψ(2) = 1 - γ (via ψ(n+1) = ψ(n) + 1/n),
+   * ψ(5) = precomputed.
+   * Tolerance note: the algorithm uses 6 recurrence steps + 4-term Bernoulli
+   * asymptotic at x=6, giving ~2-3e-9 truncation error.  Tolerances are set
+   * to 1e-7 to stay well above this while still requiring f64 precision
+   * (f32 gives ~1e-5 error due to transcendental polynomial approximation). */
+  struct { double x; double ref; double tol; } cases[] = {
+    { 1.0, -0.5772156649015328606, 1e-7 },  /* Euler-Mascheroni */
+    { 2.0,  0.4227843350984671394, 1e-7 },  /* 1 - γ */
+    { 5.0,  1.5061176684318004727, 1e-7 },  /* precomputed */
+  };
+  for (int i = 0; i < 3; i++) {
+    double got = eval_scalar_f64(poly_digamma, cases[i].x);
+    double err = fabs(got - cases[i].ref);
+    ASSERT_TRUE(err < cases[i].tol);
+  }
+  /* Recurrence check: ψ(x+1) = ψ(x) + 1/x */
+  double psi15 = eval_scalar_f64(poly_digamma, 1.5);
+  double psi25 = eval_scalar_f64(poly_digamma, 2.5);
+  ASSERT_TRUE(fabs(psi25 - (psi15 + 1.0/1.5)) < 1e-10);
+  PASS();
+}
+
+TEST(nn, special_math_f64_log1p) {
+  /* log1p() is ISO C99 <math.h> */
+  struct { double x; double tol; } cases[] = {
+    { 1e-10, 1e-18 },   /* tiny x: f32 loses most digits */
+    { 1.0,   1e-14 },   /* ln(2) */
+    { 0.2,   1e-13 },
+  };
+  for (int i = 0; i < 3; i++) {
+    double got = eval_scalar_f64(poly_log1p, cases[i].x);
+    double ref = log1p(cases[i].x);
+    double err = fabs(got - ref);
+    ASSERT_TRUE(err < cases[i].tol);
+  }
+  PASS();
+}
+
+TEST(nn, special_math_f64_expm1) {
+  /* expm1() is ISO C99 <math.h> */
+  struct { double x; double tol; } cases[] = {
+    { 1e-10, 1e-18 },   /* tiny x: f32 loses most digits */
+    { 1.0,   1e-14 },   /* e - 1 */
+    { 0.2,   1e-13 },
+  };
+  for (int i = 0; i < 3; i++) {
+    double got = eval_scalar_f64(poly_expm1, cases[i].x);
+    double ref = expm1(cases[i].x);
+    double err = fabs(got - ref);
+    ASSERT_TRUE(err < cases[i].tol);
+  }
   PASS();
 }
 

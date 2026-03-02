@@ -139,9 +139,14 @@ PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
 
 /* ── Composed elementwise ops (exact tinygrad decompositions) ─────────── */
 
-/* Helper: float constant */
+/* Helper: float constant (f32 hardcoded — for non-special-math ops) */
 static inline PolyUOp *cf(PolyCtx *ctx, double v) {
   return poly_const_float(ctx, v);
+}
+
+/* Helper: const with explicit dtype — use in special-math ops for dtype correctness */
+static inline PolyUOp *cdt(PolyCtx *ctx, PolyDType dt, double v) {
+  return poly_const_typed(ctx, dt, v);
 }
 
 static void const_registry_add(PolyCtx *ctx, PolyUOp *buf, void *data);
@@ -197,41 +202,45 @@ static PolyUOp *make_const_u32_tensor(PolyCtx *ctx, const uint32_t *src,
 
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x) {
   /* exp(x) = exp2(x * (1/ln2)) */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   return poly_alu1(ctx, POLY_OP_EXP2,
-    poly_alu2(ctx, POLY_OP_MUL, x, cf(ctx, 1.0 / M_LN2)));
+    poly_alu2(ctx, POLY_OP_MUL, x, cdt(ctx, dt, 1.0 / M_LN2)));
 }
 
 PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x) {
   /* log(x) = log2(x) * ln2 */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   return poly_alu2(ctx, POLY_OP_MUL,
-    poly_alu1(ctx, POLY_OP_LOG2, x), cf(ctx, M_LN2));
+    poly_alu1(ctx, POLY_OP_LOG2, x), cdt(ctx, dt, M_LN2));
 }
 
 PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x) {
   /* Stable near zero: log(1+x) ~ x - x^2/2 + x^3/3 */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   PolyUOp *ax = poly_abs(ctx, x);
-  PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cf(ctx, 1e-4));
+  PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cdt(ctx, dt, 1e-4));
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
   PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x2, x);
   PolyUOp *poly = poly_alu2(ctx, POLY_OP_ADD, x,
                  poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -0.5), x2),
-                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/3.0), x3)));
-  PolyUOp *direct = poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.0), x));
+                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -0.5), x2),
+                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0/3.0), x3)));
+  PolyUOp *direct = poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 1.0), x));
   return poly_alu3(ctx, POLY_OP_WHERE, small, poly, direct);
 }
 
 PolyUOp *poly_expm1(PolyCtx *ctx, PolyUOp *x) {
   /* Stable near zero: expm1(x) ~ x + x^2/2 + x^3/6 */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   PolyUOp *ax = poly_abs(ctx, x);
-  PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cf(ctx, 1e-4));
+  PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cdt(ctx, dt, 1e-4));
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
   PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x2, x);
   PolyUOp *poly = poly_alu2(ctx, POLY_OP_ADD, x,
                  poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.5), x2),
-                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/6.0), x3)));
-  PolyUOp *direct = poly_alu2(ctx, POLY_OP_SUB, poly_exp(ctx, x), cf(ctx, 1.0));
+                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.5), x2),
+                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0/6.0), x3)));
+  PolyUOp *direct = poly_alu2(ctx, POLY_OP_SUB, poly_exp(ctx, x), cdt(ctx, dt, 1.0));
   return poly_alu3(ctx, POLY_OP_WHERE, small, poly, direct);
 }
 
@@ -254,46 +263,49 @@ PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x) {
  * erf(x) = sign(x) * (1 - tau(|x|)).
  * erfc(x) = tau(x) for x >= 0, 2 - tau(|x|) for x < 0.
  * Computing tau directly avoids the 1-erf(x) cancellation in erfc. */
-static PolyUOp *erf_tau(PolyCtx *ctx, PolyUOp *ax) {
+static PolyUOp *erf_tau(PolyCtx *ctx, PolyUOp *ax, PolyDType dt) {
   PolyUOp *t = poly_alu1(ctx, POLY_OP_RECIPROCAL,
-             poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.0),
-             poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.3275911), ax)));
-  PolyUOp *p = cf(ctx, 1.061405429);
-  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, -1.453152027), poly_alu2(ctx, POLY_OP_MUL, t, p));
-  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.421413741), poly_alu2(ctx, POLY_OP_MUL, t, p));
-  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, -0.284496736), poly_alu2(ctx, POLY_OP_MUL, t, p));
-  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 0.254829592), poly_alu2(ctx, POLY_OP_MUL, t, p));
+             poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 1.0),
+             poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.3275911), ax)));
+  PolyUOp *p = cdt(ctx, dt, 1.061405429);
+  p = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, -1.453152027), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  p = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 1.421413741), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  p = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, -0.284496736), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  p = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 0.254829592), poly_alu2(ctx, POLY_OP_MUL, t, p));
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, ax, ax);
   PolyUOp *e = poly_exp(ctx, poly_alu1(ctx, POLY_OP_NEG, x2));
   return poly_alu2(ctx, POLY_OP_MUL, t, poly_alu2(ctx, POLY_OP_MUL, p, e));
 }
 
 PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x) {
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   PolyUOp *sign = poly_sign(ctx, x);
   PolyUOp *ax = poly_abs(ctx, x);
-  PolyUOp *tau = erf_tau(ctx, ax);
-  return poly_alu2(ctx, POLY_OP_MUL, sign, poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 1.0), tau));
+  PolyUOp *tau = erf_tau(ctx, ax, dt);
+  return poly_alu2(ctx, POLY_OP_MUL, sign, poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, 1.0), tau));
 }
 
 PolyUOp *poly_erfc(PolyCtx *ctx, PolyUOp *x) {
   /* erfc(x) = tau(|x|) for x >= 0, 2 - tau(|x|) for x < 0.
    * No 1-erf(x) cancellation -- tau is computed directly. */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   PolyUOp *ax = poly_abs(ctx, x);
-  PolyUOp *tau = erf_tau(ctx, ax);
-  PolyUOp *neg = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, 0.0));
-  PolyUOp *erfc_neg = poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 2.0), tau);
+  PolyUOp *tau = erf_tau(ctx, ax, dt);
+  PolyUOp *neg = poly_alu2(ctx, POLY_OP_CMPLT, x, cdt(ctx, dt, 0.0));
+  PolyUOp *erfc_neg = poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, 2.0), tau);
   return poly_alu3(ctx, POLY_OP_WHERE, neg, erfc_neg, tau);
 }
 
 PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x) {
   /* Winitzki approximation (a=0.147). */
-  PolyUOp *a = cf(ctx, 0.147);
-  PolyUOp *one = cf(ctx, 1.0);
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  PolyUOp *a = cdt(ctx, dt, 0.147);
+  PolyUOp *one = cdt(ctx, dt, 1.0);
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
   PolyUOp *ln = poly_log(ctx, poly_alu2(ctx, POLY_OP_SUB, one, x2));
   PolyUOp *term1 = poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_FDIV, cf(ctx, 2.0/(M_PI*0.147)), one),
-                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.5), ln));
+                   poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, 2.0/(M_PI*0.147)), one),
+                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.5), ln));
   PolyUOp *term2 = poly_alu2(ctx, POLY_OP_FDIV, ln, a);
   PolyUOp *inside = poly_alu2(ctx, POLY_OP_SUB,
                     poly_alu2(ctx, POLY_OP_MUL, term1, term1), term2);
@@ -304,20 +316,22 @@ PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_ndtri(PolyCtx *ctx, PolyUOp *x) {
   /* ndtri(p) = sqrt(2) * erfinv(2p-1) */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
   PolyUOp *arg = poly_alu2(ctx, POLY_OP_SUB,
-                poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 2.0), x), cf(ctx, 1.0));
-  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, sqrt(2.0)), poly_erfinv(ctx, arg));
+                poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 2.0), x), cdt(ctx, dt, 1.0));
+  return poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, sqrt(2.0)), poly_erfinv(ctx, arg));
 }
 
 PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x) {
   /* First-order asymptotic with recurrence to x>=6. */
-  PolyUOp *acc = cf(ctx, 0.0);
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  PolyUOp *acc = cdt(ctx, dt, 0.0);
   PolyUOp *xx = x;
   for (int i = 0; i < 6; i++) {
-    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, xx, cf(ctx, 6.0));
+    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, xx, cdt(ctx, dt, 6.0));
     PolyUOp *inv = poly_alu1(ctx, POLY_OP_RECIPROCAL, xx);
     acc = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_SUB, acc, inv), acc);
-    xx = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_ADD, xx, cf(ctx, 1.0)), xx);
+    xx = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_ADD, xx, cdt(ctx, dt, 1.0)), xx);
   }
   PolyUOp *inv = poly_alu1(ctx, POLY_OP_RECIPROCAL, xx);
   PolyUOp *inv2 = poly_alu2(ctx, POLY_OP_MUL, inv, inv);
@@ -325,16 +339,16 @@ PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *inv6 = poly_alu2(ctx, POLY_OP_MUL, inv4, inv2);
   PolyUOp *asym = poly_alu2(ctx, POLY_OP_ADD, poly_log(ctx, xx),
                 poly_alu2(ctx, POLY_OP_ADD,
-                  poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -0.5), inv),
+                  poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -0.5), inv),
                   poly_alu2(ctx, POLY_OP_ADD,
-                    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -1.0/12.0), inv2),
+                    poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -1.0/12.0), inv2),
                     poly_alu2(ctx, POLY_OP_ADD,
-                      poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/120.0), inv4),
-                      poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -1.0/252.0), inv6)))));
+                      poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0/120.0), inv4),
+                      poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -1.0/252.0), inv6)))));
   return poly_alu2(ctx, POLY_OP_ADD, acc, asym);
 }
 
-static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x) {
+static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x, PolyDType dt) {
   /* Lanczos approximation with reflection. */
   const double g = 7.0;
   const double c0 = 0.99999999999980993;
@@ -344,49 +358,50 @@ static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x) {
     9.9843695780195716e-6, 1.5056327351493116e-7
   };
 
-  PolyUOp *xm1 = poly_alu2(ctx, POLY_OP_SUB, x, cf(ctx, 1.0));
-  PolyUOp *a = cf(ctx, c0);
+  PolyUOp *xm1 = poly_alu2(ctx, POLY_OP_SUB, x, cdt(ctx, dt, 1.0));
+  PolyUOp *a = cdt(ctx, dt, c0);
   for (int i = 0; i < 8; i++) {
-    PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1, cf(ctx, (double)(i + 1)));
+    PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, (double)(i + 1)));
     a = poly_alu2(ctx, POLY_OP_ADD, a,
-         poly_alu2(ctx, POLY_OP_FDIV, cf(ctx, c[i]), den));
+         poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, c[i]), den));
   }
-  PolyUOp *t = poly_alu2(ctx, POLY_OP_ADD, xm1, cf(ctx, g + 0.5));
-  PolyUOp *lg_pos = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 0.91893853320467274178),
+  PolyUOp *t = poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, g + 0.5));
+  PolyUOp *lg_pos = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 0.91893853320467274178),
                  poly_alu2(ctx, POLY_OP_ADD,
                    poly_alu2(ctx, POLY_OP_MUL,
-                     poly_alu2(ctx, POLY_OP_ADD, xm1, cf(ctx, 0.5)),
+                     poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, 0.5)),
                      poly_log(ctx, t)),
                    poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, a), t)));
 
-  PolyUOp *one_minus_x = poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 1.0), x);
-  PolyUOp *xm1r = poly_alu2(ctx, POLY_OP_SUB, one_minus_x, cf(ctx, 1.0));
-  PolyUOp *ar = cf(ctx, c0);
+  PolyUOp *one_minus_x = poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, 1.0), x);
+  PolyUOp *xm1r = poly_alu2(ctx, POLY_OP_SUB, one_minus_x, cdt(ctx, dt, 1.0));
+  PolyUOp *ar = cdt(ctx, dt, c0);
   for (int i = 0; i < 8; i++) {
-    PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1r, cf(ctx, (double)(i + 1)));
+    PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, (double)(i + 1)));
     ar = poly_alu2(ctx, POLY_OP_ADD, ar,
-         poly_alu2(ctx, POLY_OP_FDIV, cf(ctx, c[i]), den));
+         poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, c[i]), den));
   }
-  PolyUOp *tr = poly_alu2(ctx, POLY_OP_ADD, xm1r, cf(ctx, g + 0.5));
-  PolyUOp *lg_ref_base = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 0.91893853320467274178),
+  PolyUOp *tr = poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, g + 0.5));
+  PolyUOp *lg_ref_base = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 0.91893853320467274178),
                       poly_alu2(ctx, POLY_OP_ADD,
                         poly_alu2(ctx, POLY_OP_MUL,
-                          poly_alu2(ctx, POLY_OP_ADD, xm1r, cf(ctx, 0.5)),
+                          poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, 0.5)),
                           poly_log(ctx, tr)),
                         poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, ar), tr)));
-  PolyUOp *sinpix = poly_sin(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, M_PI), x));
+  PolyUOp *sinpix = poly_sin(ctx, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, M_PI), x));
   PolyUOp *lg_ref = poly_alu2(ctx, POLY_OP_SUB,
-                  poly_alu2(ctx, POLY_OP_SUB, cf(ctx, log(M_PI)),
+                  poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, log(M_PI)),
                     poly_log(ctx, poly_abs(ctx, sinpix))),
                   lg_ref_base);
-  PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, 0.5));
+  PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cdt(ctx, dt, 0.5));
   return poly_alu3(ctx, POLY_OP_WHERE, cond, lg_ref, lg_pos);
 }
 
 PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x) {
   /* Explicit VJP override:
    * y = detach(f(x)) + (x - detach(x))*digamma(x) */
-  PolyUOp *fwd = poly_lgamma_forward_lanczos(ctx, x);
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  PolyUOp *fwd = poly_lgamma_forward_lanczos(ctx, x, dt);
   PolyUOp *dx = poly_uop1(ctx, POLY_OP_DETACH, x->dtype, x, poly_arg_none());
   PolyUOp *df = poly_uop1(ctx, POLY_OP_DETACH, fwd->dtype, fwd, poly_arg_none());
   PolyUOp *delta = poly_alu2(ctx, POLY_OP_SUB, x, dx);
