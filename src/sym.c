@@ -7,6 +7,25 @@
 
 #include "pat.h"
 #include <math.h>
+#include <stdint.h>
+#include <limits.h>
+
+/* ── Overflow-safe int64 helpers ─────────────────────────────────────── */
+
+static bool i64_add_ok(int64_t a, int64_t b, int64_t *out) {
+  return !__builtin_add_overflow(a, b, out);
+}
+static bool i64_sub_ok(int64_t a, int64_t b, int64_t *out) {
+  return !__builtin_sub_overflow(a, b, out);
+}
+static bool i64_mul_ok(int64_t a, int64_t b, int64_t *out) {
+  return !__builtin_mul_overflow(a, b, out);
+}
+static bool i64_neg_ok(int64_t a, int64_t *out) {
+  if (a == INT64_MIN) return false;
+  *out = -a;
+  return true;
+}
 
 /* ── vmin/vmax bounds (port of tinygrad's UOp._min_max) ──────────────── */
 
@@ -38,13 +57,17 @@ static void poly_uop_minmax(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
     int64_t a0, a1, b0, b1;
     poly_uop_minmax(u->src[0], &a0, &a1);
     poly_uop_minmax(u->src[1], &b0, &b1);
-    int64_t v[4] = { a0*b0, a0*b1, a1*b0, a1*b1 };
-    *vmin = v[0]; *vmax = v[0];
-    for (int i = 1; i < 4; i++) {
-      if (v[i] < *vmin) *vmin = v[i];
-      if (v[i] > *vmax) *vmax = v[i];
+    int64_t v[4];
+    if (i64_mul_ok(a0, b0, &v[0]) && i64_mul_ok(a0, b1, &v[1]) &&
+        i64_mul_ok(a1, b0, &v[2]) && i64_mul_ok(a1, b1, &v[3])) {
+      *vmin = v[0]; *vmax = v[0];
+      for (int i = 1; i < 4; i++) {
+        if (v[i] < *vmin) *vmin = v[i];
+        if (v[i] > *vmax) *vmax = v[i];
+      }
+      return;
     }
-    return;
+    /* overflow: fall through to conservative dtype bounds */
   }
   if (u->op == POLY_OP_MOD && u->n_src == 2 && poly_dtype_is_int(u->dtype)) {
     int64_t a0, a1, b0, b1;
@@ -166,6 +189,12 @@ static PolyUOp *rule_or_one(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) 
 /* Constant folding: Unary(CONST) -> CONST */
 static PolyUOp *rule_const_fold_unary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
+  /* Guard int64 NEG against INT64_MIN overflow */
+  if (a->op == POLY_OP_NEG && poly_dtype_is_int(a->dtype) && a->dtype.bitsize == 64 &&
+      a->src[0]->arg.kind == POLY_ARG_INT) {
+    int64_t v;
+    if (!i64_neg_ok(a->src[0]->arg.i, &v)) return NULL;
+  }
   PolyArg operand = a->src[0]->arg;
   PolyArg result = poly_exec_alu(a->op, a->dtype, &operand, 1);
   return poly_const_like(ctx, a, result);
@@ -174,6 +203,14 @@ static PolyUOp *rule_const_fold_unary(PolyCtx *ctx, PolyUOp *root, const PolyBin
 /* Constant folding: Binary(CONST, CONST) -> CONST */
 static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
+  /* Guard int64 ADD/SUB/MUL against overflow (UB in C for signed int64) */
+  if (poly_dtype_is_int(a->dtype) && a->dtype.bitsize == 64 &&
+      a->src[0]->arg.kind == POLY_ARG_INT && a->src[1]->arg.kind == POLY_ARG_INT) {
+    int64_t av = a->src[0]->arg.i, bv = a->src[1]->arg.i, rv;
+    if (a->op == POLY_OP_ADD && !i64_add_ok(av, bv, &rv)) return NULL;
+    if (a->op == POLY_OP_SUB && !i64_sub_ok(av, bv, &rv)) return NULL;
+    if (a->op == POLY_OP_MUL && !i64_mul_ok(av, bv, &rv)) return NULL;
+  }
   PolyArg operands[2] = { a->src[0]->arg, a->src[1]->arg };
   PolyArg result = poly_exec_alu(a->op, a->dtype, operands, 2);
   return poly_const_like(ctx, a, result);
@@ -323,7 +360,8 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
   poly_uop_minmax(y, &y_min, &y_max);
 
   /* 1. cancel_divmod: all corners give same quotient */
-  if (y_min * y_max > 0) {
+  /* Use same-sign check instead of y_min*y_max>0 to avoid int64 overflow */
+  if ((y_min > 0 && y_max > 0) || (y_min < 0 && y_max < 0)) {
     int64_t q00 = cdiv(x_min, y_min), q01 = cdiv(x_min, y_max);
     int64_t q10 = cdiv(x_max, y_min), q11 = cdiv(x_max, y_max);
     if (q00 == q01 && q00 == q10 && q00 == q11) {

@@ -123,6 +123,18 @@ uint8_t *poly_safetensors_encode(const PolySafetensorEntry *entries, int n,
   if (!json_str) { free(order); free(offsets); return NULL; }
 
   uint64_t header_size = (uint64_t)strlen(json_str);
+  /* Pad JSON header to 4-byte alignment so float data starts at a 4-byte
+   * aligned offset. Total header region = 8 + header_size; since 8%4==0,
+   * we need header_size%4==0. Pad with trailing spaces (valid JSON whitespace). */
+  uint64_t pad = (4 - header_size % 4) % 4;
+  if (pad > 0) {
+    char *padded = realloc(json_str, header_size + pad + 1);
+    if (!padded) { free(json_str); free(order); free(offsets); return NULL; }
+    json_str = padded;
+    for (uint64_t p = 0; p < pad; p++) json_str[header_size + p] = ' ';
+    json_str[header_size + pad] = '\0';
+    header_size += pad;
+  }
   uint64_t total_size = 8 + header_size + data_offset;
 
   uint8_t *buf = malloc((size_t)total_size);

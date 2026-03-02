@@ -134,7 +134,7 @@ Tier 2 (statistical): mean/variance within expected bounds. Tested by `c2c_rand_
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test          # build + run 393 C tests (ASan/UBSan)
+make test          # build + run 401 C tests (ASan/UBSan)
 make test-wasm     # build + run 47 WASM tests
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
@@ -161,6 +161,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Multi-kernel execution (`poly_schedule_v2` → `poly_realize` with intermediate buffer allocation)
 - [x] Codegen pipeline (`full_rewrite_to_sink`): pm_reduce, pm_decomp, pm_transcendental, pm_add_control_flow
 - [x] Frontend composed ops (~35): elementwise math, comparisons, matmul, softmax, layernorm, cross_entropy
+- [x] Dtype-correct special math: lgamma, digamma, erf/erfc/erfinv, ndtri, log1p, expm1 propagate input dtype through all internal constants (f64 inputs get f64 kernels)
 - [x] **31/31 IR parity** with tinygrad ClangRenderer (CPU, no vectorization)
 - [x] ASSIGN + WAR ordering (in-place buffer writes, WAR/WAW dependency edges, `Tensor.assign()`)
 
@@ -186,7 +187,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [ ] More model families (LLaMA, BERT)
 - [ ] Expander, devectorizer
 
-793 tests (346 C + 110 Python + 290 JS + 47 WASM), ASan/UBSan clean.
+848 tests (401 C + 110 Python + 290 JS + 47 WASM), ASan/UBSan clean.
 
 ## Reference
 
