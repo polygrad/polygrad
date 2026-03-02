@@ -52,12 +52,48 @@ const poly_realize_begin = lib.func('void poly_realize_begin(void *ctx)')
 const poly_realize_bind = lib.func('void poly_realize_bind(void *ctx, void *buffer, void *data)')
 const poly_realize_exec = lib.func('int poly_realize_exec(void *ctx, void *sink)')
 
+// Compiled step
+const poly_compile_step = lib.func('void *poly_compile_step(void *ctx, void *sink)')
+const poly_compile_value_and_grad = lib.func('void *poly_compile_value_and_grad(void *ctx, void *loss, void **params, int n_params, int *out_loss_buf_idx, int *out_grad_buf_idxs)')
+const poly_step_run = lib.func('int poly_step_run(void *step, void *bindings, int n_bindings)')
+const poly_step_run_ex = lib.func('int poly_step_run_ex(void *step, void *bindings, int n_bindings, void *var_bindings, int n_var_bindings)')
+const poly_step_run_indexed = lib.func('int poly_step_run_indexed(void *step, void **buffer_data, int n_buffers)')
+const poly_step_run_indexed_ex = lib.func('int poly_step_run_indexed_ex(void *step, void **buffer_data, int n_buffers, void *var_bindings, int n_var_bindings)')
+const poly_step_destroy = lib.func('void poly_step_destroy(void *step)')
+const poly_step_n_kernels = lib.func('int poly_step_n_kernels(void *step)')
+const poly_step_n_intermediates = lib.func('int poly_step_n_intermediates(void *step)')
+const poly_step_n_buffers = lib.func('int poly_step_n_buffers(void *step)')
+const poly_step_n_bindable_buffers = lib.func('int poly_step_n_bindable_buffers(void *step)')
+const poly_step_buffer_info = lib.func('int poly_step_buffer_info(void *step, int idx, void *out)')
+const poly_render_step_wasm_plan = lib.func('void *poly_render_step_wasm_plan(void *ctx, void *sink)')
+const poly_wasm_stepplan_n_kernels = lib.func('int poly_wasm_stepplan_n_kernels(void *plan)')
+const poly_wasm_stepplan_kernel_bytes = lib.func('const uint8_t *poly_wasm_stepplan_kernel_bytes(void *plan, int k, int *len)')
+const poly_wasm_stepplan_kernel_n_params = lib.func('int poly_wasm_stepplan_kernel_n_params(void *plan, int k)')
+const poly_wasm_stepplan_n_buffers = lib.func('int poly_wasm_stepplan_n_buffers(void *plan)')
+const poly_wasm_stepplan_n_bindable_buffers = lib.func('int poly_wasm_stepplan_n_bindable_buffers(void *plan)')
+const poly_wasm_stepplan_kernel_param_buf_index = lib.func('int poly_wasm_stepplan_kernel_param_buf_index(void *plan, int k, int param_idx)')
+const poly_wasm_stepplan_exec_order = lib.func('const int *poly_wasm_stepplan_exec_order(void *plan, int *n)')
+const poly_wasm_stepplan_destroy = lib.func('void poly_wasm_stepplan_destroy(void *plan)')
+
+const POLY_STEP_BUF_INPUT = 0
+const POLY_STEP_BUF_OUTPUT = 1
+const POLY_STEP_BUF_TEMP = 2
+const POLY_STEP_BUF_CONSTANT = 3
+
 // --- Composed elementwise ops ---
 const poly_exp = lib.func('void *poly_exp(void *ctx, void *x)')
 const poly_log = lib.func('void *poly_log(void *ctx, void *x)')
+const poly_log1p = lib.func('void *poly_log1p(void *ctx, void *x)')
+const poly_expm1 = lib.func('void *poly_expm1(void *ctx, void *x)')
 const poly_sin = lib.func('void *poly_sin(void *ctx, void *x)')
 const poly_cos = lib.func('void *poly_cos(void *ctx, void *x)')
 const poly_tan = lib.func('void *poly_tan(void *ctx, void *x)')
+const poly_erf = lib.func('void *poly_erf(void *ctx, void *x)')
+const poly_erfc = lib.func('void *poly_erfc(void *ctx, void *x)')
+const poly_erfinv = lib.func('void *poly_erfinv(void *ctx, void *x)')
+const poly_ndtri = lib.func('void *poly_ndtri(void *ctx, void *x)')
+const poly_digamma = lib.func('void *poly_digamma(void *ctx, void *x)')
+const poly_lgamma = lib.func('void *poly_lgamma(void *ctx, void *x)')
 const poly_sigmoid = lib.func('void *poly_sigmoid(void *ctx, void *x)')
 const poly_tanh_act = lib.func('void *poly_tanh_act(void *ctx, void *x)')
 const poly_abs = lib.func('void *poly_abs(void *ctx, void *x)')
@@ -94,10 +130,22 @@ const poly_where_op = lib.func('void *poly_where_op(void *ctx, void *cond, void 
 const poly_maximum = lib.func('void *poly_maximum(void *ctx, void *a, void *b)')
 const poly_minimum = lib.func('void *poly_minimum(void *ctx, void *a, void *b)')
 const poly_clamp = lib.func('void *poly_clamp(void *ctx, void *x, double lo, double hi)')
+const poly_detach = lib.func('void *poly_detach(void *ctx, void *x)')
+const poly_rand = lib.func('void *poly_rand(void *ctx, int64_t *shape, int ndim, uint64_t seed)')
+const poly_randn = lib.func('void *poly_randn(void *ctx, int64_t *shape, int ndim, uint64_t seed)')
+const poly_arange = lib.func('void *poly_arange(void *ctx, double start, double stop, double step)')
+const poly_eye = lib.func('void *poly_eye(void *ctx, int64_t n)')
+const poly_linspace = lib.func('void *poly_linspace(void *ctx, double start, double stop, int64_t steps)')
+const poly_full = lib.func('void *poly_full(void *ctx, int64_t *shape, int ndim, double fill_value)')
+const poly_tril = lib.func('void *poly_tril(void *ctx, void *x, int64_t *shape, int ndim, int diagonal)')
+const poly_triu = lib.func('void *poly_triu(void *ctx, void *x, int64_t *shape, int ndim, int diagonal)')
+const poly_cholesky = lib.func('void *poly_cholesky(void *ctx, void *x, int64_t *shape, int ndim, int upper)')
+const poly_triangular_solve = lib.func('void *poly_triangular_solve(void *ctx, void *a, int64_t *a_shape, int a_ndim, void *b, int64_t *b_shape, int b_ndim, int upper, int transpose_a, int unit_diagonal, int64_t *out_shape, int *out_ndim)')
 
 // Shape-aware ops
 const poly_max_reduce = lib.func('void *poly_max_reduce(void *ctx, void *x, int64_t *shape, int ndim, int axis, int keepdim, int64_t *out_shape, int *out_ndim)')
 const poly_mean_reduce = lib.func('void *poly_mean_reduce(void *ctx, void *x, int64_t *shape, int ndim, int axis, int keepdim, int64_t *out_shape, int *out_ndim)')
+const poly_logsumexp = lib.func('void *poly_logsumexp(void *ctx, void *x, int64_t *shape, int ndim, int axis, int keepdim, int64_t *out_shape, int *out_ndim)')
 const poly_dot = lib.func('void *poly_dot(void *ctx, void *x, int64_t *x_shape, int x_ndim, void *w, int64_t *w_shape, int w_ndim, int64_t *out_shape, int *out_ndim)')
 
 // Einsum + Rearrange
@@ -121,8 +169,20 @@ module.exports = {
   poly_reshape, poly_expand, poly_reduce_axis,
   poly_permute, poly_shrink, poly_flip, poly_pad,
   poly_grad, poly_realize_begin, poly_realize_bind, poly_realize_exec,
+  // Compiled step
+  poly_compile_step, poly_compile_value_and_grad,
+  poly_step_run, poly_step_run_ex, poly_step_run_indexed, poly_step_run_indexed_ex,
+  poly_step_destroy, poly_step_n_kernels, poly_step_n_intermediates,
+  poly_step_n_buffers, poly_step_n_bindable_buffers, poly_step_buffer_info,
+  poly_render_step_wasm_plan, poly_wasm_stepplan_n_kernels,
+  poly_wasm_stepplan_kernel_bytes, poly_wasm_stepplan_kernel_n_params,
+  poly_wasm_stepplan_n_buffers, poly_wasm_stepplan_n_bindable_buffers,
+  poly_wasm_stepplan_kernel_param_buf_index,
+  poly_wasm_stepplan_exec_order, poly_wasm_stepplan_destroy,
+  POLY_STEP_BUF_INPUT, POLY_STEP_BUF_OUTPUT, POLY_STEP_BUF_TEMP, POLY_STEP_BUF_CONSTANT,
   // Composed ops
-  poly_exp, poly_log, poly_sin, poly_cos, poly_tan,
+  poly_exp, poly_log, poly_log1p, poly_expm1, poly_sin, poly_cos, poly_tan,
+  poly_erf, poly_erfc, poly_erfinv, poly_ndtri, poly_digamma, poly_lgamma,
   poly_sigmoid, poly_tanh_act, poly_abs, poly_sign, poly_square, poly_rsqrt,
   poly_ceil, poly_floor, poly_round_f, poly_isinf, poly_isnan,
   // Activations
@@ -130,9 +190,11 @@ module.exports = {
   poly_elu, poly_softplus, poly_mish, poly_hardtanh, poly_hardswish, poly_hardsigmoid,
   // Comparisons
   poly_eq, poly_ne, poly_gt, poly_ge, poly_le,
-  poly_where_op, poly_maximum, poly_minimum, poly_clamp,
+  poly_where_op, poly_maximum, poly_minimum, poly_clamp, poly_detach,
+  poly_rand, poly_randn, poly_arange, poly_eye, poly_linspace, poly_full,
+  poly_tril, poly_triu, poly_cholesky, poly_triangular_solve,
   // Shape-aware
-  poly_max_reduce, poly_mean_reduce, poly_dot,
+  poly_max_reduce, poly_mean_reduce, poly_logsumexp, poly_dot,
   poly_einsum, poly_rearrange,
   OPS, koffi,
 

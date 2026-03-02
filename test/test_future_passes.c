@@ -278,6 +278,72 @@ TEST(decomp, mul_add_int_no_fuse) {
   PASS();
 }
 
+/*
+ * THREEFRY lowers to integer ALU when renderer lacks native THREEFRY support.
+ */
+TEST(decomp, threefry_lowered_when_no_native_support) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_u32 = poly_dtype_ptr(POLY_UINT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(2));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p2, range, poly_arg_none());
+  PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx0, poly_arg_none());
+  PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx1, poly_arg_none());
+  PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, ld0, ld1, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, thr, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
+  int n_threefry = count_ops_in(ctx, rewritten, POLY_OP_THREEFRY);
+  int n_add = count_ops_in(ctx, rewritten, POLY_OP_ADD);
+  int n_xor = count_ops_in(ctx, rewritten, POLY_OP_XOR);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(n_threefry, 0);  /* must be fully lowered */
+  ASSERT_TRUE(n_add > 0);
+  ASSERT_TRUE(n_xor > 0);
+  PASS();
+}
+
+/*
+ * THREEFRY is preserved when renderer advertises native THREEFRY support.
+ */
+TEST(decomp, threefry_preserved_with_native_caps) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_u32 = poly_dtype_ptr(POLY_UINT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(2));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p2, range, poly_arg_none());
+  PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx0, poly_arg_none());
+  PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx1, poly_arg_none());
+  PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, ld0, ld1, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, thr, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
+                           .caps = { .has_mulacc = false, .has_threefry = true } };
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  int n_threefry = count_ops_in(ctx, rewritten, POLY_OP_THREEFRY);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_TRUE(n_threefry > 0);  /* native-cap path must preserve THREEFRY */
+  PASS();
+}
+
 /* x * (-1) → NEG(x). Ref: tinygrad get_late_rewrite_patterns */
 TEST(decomp, mul_neg1_to_neg) {
   PolyCtx *ctx = poly_ctx_new();

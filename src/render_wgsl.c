@@ -102,6 +102,7 @@ static void wsm_destroy(WgslStrMap *m) {
 static const char *wgsl_type_name(PolyDType dt) {
   if (poly_dtype_is_float(dt)) return "f32";
   if (poly_dtype_is_bool(dt)) return "bool";
+  if (poly_dtype_is_unsigned(dt)) return "u32";
   return "i32";
 }
 
@@ -222,7 +223,10 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%s", u->arg.b ? "true" : "false");
       } else {
-        snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
+        if (poly_dtype_is_unsigned(u->dtype))
+          snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)u->arg.i);
+        else
+          snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
       }
       wsm_set(&names, u, strdup(val));
       continue;

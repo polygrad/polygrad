@@ -416,6 +416,58 @@ TEST(codegen, render_wgsl_where) {
   PASS();
 }
 
+TEST(codegen, render_wgsl_uint32_ops) {
+  /* out[i] = where(a[i] < b[i], (a[i] >> 1) + (a[i] % 31), a[i] // b[i]) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_u32 = poly_dtype_ptr(POLY_UINT32, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(2));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p2, range, poly_arg_none());
+
+  PolyUOp *la = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx0, poly_arg_none());
+  PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx1, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(1));
+  PolyUOp *thirty_one = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(31));
+
+  PolyUOp *cond = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, la, lb, poly_arg_none());
+  PolyUOp *rhs = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32,
+                           poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, la, one, poly_arg_none()),
+                           poly_uop2(ctx, POLY_OP_MOD, POLY_UINT32, la, thirty_one, poly_arg_none()),
+                           poly_arg_none());
+  PolyUOp *lhs = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT32, la, lb, poly_arg_none());
+  PolyUOp *sel_src[3] = { cond, rhs, lhs };
+  PolyUOp *sel = poly_uop(ctx, POLY_OP_WHERE, POLY_UINT32, sel_src, 3, poly_arg_none());
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, sel, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n);
+  char *src = poly_render_wgsl(lin, n, "vecu32");
+
+  ASSERT_NOT_NULL(strstr(src, "array<u32>"));
+  ASSERT_NOT_NULL(strstr(src, "var val0: u32"));
+  ASSERT_NOT_NULL(strstr(src, "31u"));
+  ASSERT_NOT_NULL(strstr(src, ">>"));
+  ASSERT_NOT_NULL(strstr(src, "%"));
+  ASSERT_NOT_NULL(strstr(src, "select("));
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, render_wgsl_reduce) {
   /* out[0] = sum(a[0..9]) — reduce with accumulator */
   PolyCtx *ctx = poly_ctx_new();

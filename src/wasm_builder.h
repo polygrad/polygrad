@@ -115,7 +115,9 @@ void wb_append(WasmBuf *dst, const WasmBuf *src);
 #define WASM_OP_I32_SUB       0x6B
 #define WASM_OP_I32_MUL       0x6C
 #define WASM_OP_I32_DIV_S     0x6D
+#define WASM_OP_I32_DIV_U     0x6E
 #define WASM_OP_I32_REM_S     0x6F
+#define WASM_OP_I32_REM_U     0x70
 #define WASM_OP_I32_AND       0x71
 #define WASM_OP_I32_OR        0x72
 #define WASM_OP_I32_XOR       0x73

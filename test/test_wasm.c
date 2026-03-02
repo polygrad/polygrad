@@ -356,6 +356,61 @@ TEST(wasm, render_chain) {
   PASS();
 }
 
+TEST(wasm, render_unsigned_alu_opcodes) {
+  /* out[i] = (a[i] // b[i]) + (a[i] % b[i]) + (a[i] >> 1), uint32 path */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_u32 = poly_dtype_ptr(POLY_UINT32, -1, POLY_ADDR_GLOBAL);
+  int N = 8;
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u32, poly_arg_int(2));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u32, p2, range, poly_arg_none());
+
+  PolyUOp *la = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx0, poly_arg_none());
+  PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx1, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(1));
+
+  PolyUOp *idiv = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT32, la, lb, poly_arg_none());
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, POLY_UINT32, la, lb, poly_arg_none());
+  PolyUOp *shr = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, la, one, poly_arg_none());
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, idiv, mod, poly_arg_none());
+  PolyUOp *out = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, sum, shr, poly_arg_none());
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, out, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+
+  bool found_div_u = false, found_rem_u = false, found_shr_u = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_OP_I32_DIV_U) found_div_u = true;
+    if (wasm[i] == WASM_OP_I32_REM_U) found_rem_u = true;
+    if (wasm[i] == WASM_OP_I32_SHR_U) found_shr_u = true;
+  }
+  ASSERT_TRUE(found_div_u);
+  ASSERT_TRUE(found_rem_u);
+  ASSERT_TRUE(found_shr_u);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, render_simd_flag) {
   /* Render with SIMD enabled — verify SIMD prefix byte appears */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 16);

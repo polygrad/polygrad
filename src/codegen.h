@@ -17,6 +17,7 @@
  * Mirrors tinygrad's code_for_op / supported_ops gating in get_late_rewrite_patterns. */
 typedef struct {
   bool has_mulacc;  /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
+  bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
 } PolyRendererCaps;
 
 typedef struct {

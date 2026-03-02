@@ -38,6 +38,12 @@ PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
 }
 
+PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
+  if (poly_dtype_is_float(dt))
+    return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
+  return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)value));
+}
+
 /* ── ALU ops ──────────────────────────────────────────────────────────── */
 
 PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
@@ -87,10 +93,14 @@ PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
   return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
 }
 
-/* ── Float32 buffer shortcut ──────────────────────────────────────────── */
+/* ── Buffer shortcuts ─────────────────────────────────────────────────── */
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT32, size);
+}
+
+PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
+  return poly_buffer(ctx, POLY_FLOAT64, size);
 }
 
 /* ── Dynamic shapes (DEFINE_VAR / BIND) ──────────────────────────────── */
@@ -134,6 +144,55 @@ static inline PolyUOp *cf(PolyCtx *ctx, double v) {
   return poly_const_float(ctx, v);
 }
 
+static void const_registry_add(PolyCtx *ctx, PolyUOp *buf, void *data);
+static void *const_registry_lookup(PolyCtx *ctx, PolyUOp *buf);
+static bool const_registry_has(PolyCtx *ctx, PolyUOp *buf);
+
+static int64_t shape_numel_checked(const int64_t *shape, int ndim) {
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return -1;
+  if (ndim == 0) return 1;
+  if (!shape) return -1;
+  int64_t n = 1;
+  for (int i = 0; i < ndim; i++) {
+    if (shape[i] <= 0) return -1;
+    if (n > INT64_MAX / shape[i]) return -1;
+    n *= shape[i];
+  }
+  return n;
+}
+
+static PolyUOp *make_const_buffer_tensor(PolyCtx *ctx, PolyDType dt,
+                                         const void *src, size_t elem_size,
+                                         const int64_t *shape, int ndim) {
+  int64_t numel = shape_numel_checked(shape, ndim);
+  if (numel <= 0 || !src || elem_size == 0) return NULL;
+  if (numel > (1LL << 20)) {
+    fprintf(stderr, "polygrad: large constant-backed tensor (%lld elems); "
+            "prefer explicit bindings/device-generated paths for hot loops\n",
+            (long long)numel);
+  }
+  if ((size_t)numel > SIZE_MAX / elem_size) return NULL;
+  size_t nbytes = (size_t)numel * elem_size;
+  void *copy = malloc(nbytes);
+  if (!copy) return NULL;
+  memcpy(copy, src, nbytes);
+
+  PolyUOp *buf = poly_buffer(ctx, dt, numel);
+  const_registry_add(ctx, buf, copy);
+  if (ndim == 1) return buf;
+  return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
+}
+
+static PolyUOp *make_const_f32_tensor(PolyCtx *ctx, const float *src,
+                                      const int64_t *shape, int ndim) {
+  return make_const_buffer_tensor(ctx, POLY_FLOAT32, src, sizeof(float), shape, ndim);
+}
+
+static PolyUOp *make_const_u32_tensor(PolyCtx *ctx, const uint32_t *src,
+                                      const int64_t *shape, int ndim) {
+  return make_const_buffer_tensor(ctx, POLY_UINT32, src, sizeof(uint32_t), shape, ndim);
+}
+
 /* Math */
 
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x) {
@@ -146,6 +205,34 @@ PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x) {
   /* log(x) = log2(x) * ln2 */
   return poly_alu2(ctx, POLY_OP_MUL,
     poly_alu1(ctx, POLY_OP_LOG2, x), cf(ctx, M_LN2));
+}
+
+PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x) {
+  /* Stable near zero: log(1+x) ~ x - x^2/2 + x^3/3 */
+  PolyUOp *ax = poly_abs(ctx, x);
+  PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cf(ctx, 1e-4));
+  PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
+  PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x2, x);
+  PolyUOp *poly = poly_alu2(ctx, POLY_OP_ADD, x,
+                 poly_alu2(ctx, POLY_OP_ADD,
+                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -0.5), x2),
+                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/3.0), x3)));
+  PolyUOp *direct = poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.0), x));
+  return poly_alu3(ctx, POLY_OP_WHERE, small, poly, direct);
+}
+
+PolyUOp *poly_expm1(PolyCtx *ctx, PolyUOp *x) {
+  /* Stable near zero: expm1(x) ~ x + x^2/2 + x^3/6 */
+  PolyUOp *ax = poly_abs(ctx, x);
+  PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cf(ctx, 1e-4));
+  PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
+  PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x2, x);
+  PolyUOp *poly = poly_alu2(ctx, POLY_OP_ADD, x,
+                 poly_alu2(ctx, POLY_OP_ADD,
+                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.5), x2),
+                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/6.0), x3)));
+  PolyUOp *direct = poly_alu2(ctx, POLY_OP_SUB, poly_exp(ctx, x), cf(ctx, 1.0));
+  return poly_alu3(ctx, POLY_OP_WHERE, small, poly, direct);
 }
 
 PolyUOp *poly_sin(PolyCtx *ctx, PolyUOp *x) {
@@ -161,6 +248,150 @@ PolyUOp *poly_cos(PolyCtx *ctx, PolyUOp *x) {
 PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x) {
   /* tan(x) = sin(x) / cos(x) */
   return poly_alu2(ctx, POLY_OP_FDIV, poly_sin(ctx, x), poly_cos(ctx, x));
+}
+
+/* A&S 7.1.26: tau(|x|) = t * P(t) * exp(-x^2) where t = 1/(1+p*|x|).
+ * erf(x) = sign(x) * (1 - tau(|x|)).
+ * erfc(x) = tau(x) for x >= 0, 2 - tau(|x|) for x < 0.
+ * Computing tau directly avoids the 1-erf(x) cancellation in erfc. */
+static PolyUOp *erf_tau(PolyCtx *ctx, PolyUOp *ax) {
+  PolyUOp *t = poly_alu1(ctx, POLY_OP_RECIPROCAL,
+             poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.0),
+             poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.3275911), ax)));
+  PolyUOp *p = cf(ctx, 1.061405429);
+  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, -1.453152027), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.421413741), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, -0.284496736), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  p = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 0.254829592), poly_alu2(ctx, POLY_OP_MUL, t, p));
+  PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, ax, ax);
+  PolyUOp *e = poly_exp(ctx, poly_alu1(ctx, POLY_OP_NEG, x2));
+  return poly_alu2(ctx, POLY_OP_MUL, t, poly_alu2(ctx, POLY_OP_MUL, p, e));
+}
+
+PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *sign = poly_sign(ctx, x);
+  PolyUOp *ax = poly_abs(ctx, x);
+  PolyUOp *tau = erf_tau(ctx, ax);
+  return poly_alu2(ctx, POLY_OP_MUL, sign, poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 1.0), tau));
+}
+
+PolyUOp *poly_erfc(PolyCtx *ctx, PolyUOp *x) {
+  /* erfc(x) = tau(|x|) for x >= 0, 2 - tau(|x|) for x < 0.
+   * No 1-erf(x) cancellation -- tau is computed directly. */
+  PolyUOp *ax = poly_abs(ctx, x);
+  PolyUOp *tau = erf_tau(ctx, ax);
+  PolyUOp *neg = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, 0.0));
+  PolyUOp *erfc_neg = poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 2.0), tau);
+  return poly_alu3(ctx, POLY_OP_WHERE, neg, erfc_neg, tau);
+}
+
+PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x) {
+  /* Winitzki approximation (a=0.147). */
+  PolyUOp *a = cf(ctx, 0.147);
+  PolyUOp *one = cf(ctx, 1.0);
+  PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
+  PolyUOp *ln = poly_log(ctx, poly_alu2(ctx, POLY_OP_SUB, one, x2));
+  PolyUOp *term1 = poly_alu2(ctx, POLY_OP_ADD,
+                   poly_alu2(ctx, POLY_OP_FDIV, cf(ctx, 2.0/(M_PI*0.147)), one),
+                   poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.5), ln));
+  PolyUOp *term2 = poly_alu2(ctx, POLY_OP_FDIV, ln, a);
+  PolyUOp *inside = poly_alu2(ctx, POLY_OP_SUB,
+                    poly_alu2(ctx, POLY_OP_MUL, term1, term1), term2);
+  PolyUOp *root = poly_alu1(ctx, POLY_OP_SQRT,
+                  poly_alu2(ctx, POLY_OP_SUB, poly_alu1(ctx, POLY_OP_SQRT, inside), term1));
+  return poly_alu2(ctx, POLY_OP_MUL, poly_sign(ctx, x), root);
+}
+
+PolyUOp *poly_ndtri(PolyCtx *ctx, PolyUOp *x) {
+  /* ndtri(p) = sqrt(2) * erfinv(2p-1) */
+  PolyUOp *arg = poly_alu2(ctx, POLY_OP_SUB,
+                poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 2.0), x), cf(ctx, 1.0));
+  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, sqrt(2.0)), poly_erfinv(ctx, arg));
+}
+
+PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x) {
+  /* First-order asymptotic with recurrence to x>=6. */
+  PolyUOp *acc = cf(ctx, 0.0);
+  PolyUOp *xx = x;
+  for (int i = 0; i < 6; i++) {
+    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, xx, cf(ctx, 6.0));
+    PolyUOp *inv = poly_alu1(ctx, POLY_OP_RECIPROCAL, xx);
+    acc = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_SUB, acc, inv), acc);
+    xx = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_ADD, xx, cf(ctx, 1.0)), xx);
+  }
+  PolyUOp *inv = poly_alu1(ctx, POLY_OP_RECIPROCAL, xx);
+  PolyUOp *inv2 = poly_alu2(ctx, POLY_OP_MUL, inv, inv);
+  PolyUOp *inv4 = poly_alu2(ctx, POLY_OP_MUL, inv2, inv2);
+  PolyUOp *inv6 = poly_alu2(ctx, POLY_OP_MUL, inv4, inv2);
+  PolyUOp *asym = poly_alu2(ctx, POLY_OP_ADD, poly_log(ctx, xx),
+                poly_alu2(ctx, POLY_OP_ADD,
+                  poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -0.5), inv),
+                  poly_alu2(ctx, POLY_OP_ADD,
+                    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -1.0/12.0), inv2),
+                    poly_alu2(ctx, POLY_OP_ADD,
+                      poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/120.0), inv4),
+                      poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -1.0/252.0), inv6)))));
+  return poly_alu2(ctx, POLY_OP_ADD, acc, asym);
+}
+
+static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x) {
+  /* Lanczos approximation with reflection. */
+  const double g = 7.0;
+  const double c0 = 0.99999999999980993;
+  const double c[8] = {
+    676.5203681218851, -1259.1392167224028, 771.32342877765313,
+    -176.61502916214059, 12.507343278686905, -0.13857109526572012,
+    9.9843695780195716e-6, 1.5056327351493116e-7
+  };
+
+  PolyUOp *xm1 = poly_alu2(ctx, POLY_OP_SUB, x, cf(ctx, 1.0));
+  PolyUOp *a = cf(ctx, c0);
+  for (int i = 0; i < 8; i++) {
+    PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1, cf(ctx, (double)(i + 1)));
+    a = poly_alu2(ctx, POLY_OP_ADD, a,
+         poly_alu2(ctx, POLY_OP_FDIV, cf(ctx, c[i]), den));
+  }
+  PolyUOp *t = poly_alu2(ctx, POLY_OP_ADD, xm1, cf(ctx, g + 0.5));
+  PolyUOp *lg_pos = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 0.91893853320467274178),
+                 poly_alu2(ctx, POLY_OP_ADD,
+                   poly_alu2(ctx, POLY_OP_MUL,
+                     poly_alu2(ctx, POLY_OP_ADD, xm1, cf(ctx, 0.5)),
+                     poly_log(ctx, t)),
+                   poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, a), t)));
+
+  PolyUOp *one_minus_x = poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 1.0), x);
+  PolyUOp *xm1r = poly_alu2(ctx, POLY_OP_SUB, one_minus_x, cf(ctx, 1.0));
+  PolyUOp *ar = cf(ctx, c0);
+  for (int i = 0; i < 8; i++) {
+    PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1r, cf(ctx, (double)(i + 1)));
+    ar = poly_alu2(ctx, POLY_OP_ADD, ar,
+         poly_alu2(ctx, POLY_OP_FDIV, cf(ctx, c[i]), den));
+  }
+  PolyUOp *tr = poly_alu2(ctx, POLY_OP_ADD, xm1r, cf(ctx, g + 0.5));
+  PolyUOp *lg_ref_base = poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 0.91893853320467274178),
+                      poly_alu2(ctx, POLY_OP_ADD,
+                        poly_alu2(ctx, POLY_OP_MUL,
+                          poly_alu2(ctx, POLY_OP_ADD, xm1r, cf(ctx, 0.5)),
+                          poly_log(ctx, tr)),
+                        poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, ar), tr)));
+  PolyUOp *sinpix = poly_sin(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, M_PI), x));
+  PolyUOp *lg_ref = poly_alu2(ctx, POLY_OP_SUB,
+                  poly_alu2(ctx, POLY_OP_SUB, cf(ctx, log(M_PI)),
+                    poly_log(ctx, poly_abs(ctx, sinpix))),
+                  lg_ref_base);
+  PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, 0.5));
+  return poly_alu3(ctx, POLY_OP_WHERE, cond, lg_ref, lg_pos);
+}
+
+PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x) {
+  /* Explicit VJP override:
+   * y = detach(f(x)) + (x - detach(x))*digamma(x) */
+  PolyUOp *fwd = poly_lgamma_forward_lanczos(ctx, x);
+  PolyUOp *dx = poly_uop1(ctx, POLY_OP_DETACH, x->dtype, x, poly_arg_none());
+  PolyUOp *df = poly_uop1(ctx, POLY_OP_DETACH, fwd->dtype, fwd, poly_arg_none());
+  PolyUOp *delta = poly_alu2(ctx, POLY_OP_SUB, x, dx);
+  PolyUOp *forced = poly_alu2(ctx, POLY_OP_MUL, delta, poly_digamma(ctx, x));
+  return poly_alu2(ctx, POLY_OP_ADD, df, forced);
 }
 
 PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x) {
@@ -416,6 +647,167 @@ PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi) {
   return poly_alu3(ctx, POLY_OP_WHERE, gt_hi, hi_c, clamped_lo);
 }
 
+PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x) {
+  return poly_uop1(ctx, POLY_OP_DETACH, x->dtype, x, poly_arg_none());
+}
+
+PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value) {
+  int64_t numel = shape_numel_checked(shape, ndim);
+  if (numel < 0) return NULL;
+  if (numel == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+  float *data = malloc((size_t)numel * sizeof(float));
+  if (!data) return NULL;
+  for (int64_t i = 0; i < numel; i++) data[i] = (float)fill_value;
+  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, ndim);
+  free(data);
+  return u;
+}
+
+PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step) {
+  if (step == 0.0) {
+    fprintf(stderr, "polygrad: arange: step must be non-zero\n");
+    return NULL;
+  }
+  int64_t n = 0;
+  if ((step > 0.0 && start < stop) || (step < 0.0 && start > stop)) {
+    double span = (stop - start) / step;
+    n = (int64_t)ceil(span - 1e-12);
+    if (n < 0) n = 0;
+  }
+  if (n == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+  float *data = malloc((size_t)n * sizeof(float));
+  if (!data) return NULL;
+  for (int64_t i = 0; i < n; i++) data[i] = (float)(start + (double)i * step);
+  int64_t shape[1] = { n };
+  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, 1);
+  free(data);
+  return u;
+}
+
+PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps) {
+  if (steps <= 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+  float *data = malloc((size_t)steps * sizeof(float));
+  if (!data) return NULL;
+  if (steps == 1) data[0] = (float)start;
+  else {
+    for (int64_t i = 0; i < steps; i++)
+      data[i] = (float)(start + (stop - start) * (double)i / (double)(steps - 1));
+  }
+  int64_t shape[1] = { steps };
+  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, 1);
+  free(data);
+  return u;
+}
+
+PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
+  if (n <= 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+  if ((size_t)n > SIZE_MAX / (size_t)n) return NULL;
+  size_t numel = (size_t)n * (size_t)n;
+  float *data = calloc(numel, sizeof(float));
+  if (!data) return NULL;
+  for (int64_t i = 0; i < n; i++) data[(size_t)i * (size_t)n + (size_t)i] = 1.0f;
+  int64_t shape[2] = { n, n };
+  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, 2);
+  free(data);
+  return u;
+}
+
+static PolyUOp *tri_mask(PolyCtx *ctx, const int64_t *shape, int diagonal, bool upper) {
+  if (!shape || shape[0] <= 0 || shape[1] <= 0) return NULL;
+  int64_t rows = shape[0], cols = shape[1];
+  if ((size_t)rows > SIZE_MAX / (size_t)cols) return NULL;
+  size_t numel = (size_t)rows * (size_t)cols;
+  float *m = malloc(numel * sizeof(float));
+  if (!m) return NULL;
+  for (int64_t i = 0; i < rows; i++) {
+    for (int64_t j = 0; j < cols; j++) {
+      bool keep = upper ? (j >= i + diagonal) : (j <= i + diagonal);
+      m[(size_t)i * (size_t)cols + (size_t)j] = keep ? 1.0f : 0.0f;
+    }
+  }
+  PolyUOp *mask = make_const_f32_tensor(ctx, m, shape, 2);
+  free(m);
+  return mask;
+}
+
+PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int diagonal) {
+  if (!x || !shape || ndim != 2) {
+    fprintf(stderr, "polygrad: tril: only 2D tensors are supported\n");
+    return NULL;
+  }
+  PolyUOp *mask = tri_mask(ctx, shape, diagonal, false);
+  if (!mask) return NULL;
+  return poly_alu2(ctx, POLY_OP_MUL, x, mask);
+}
+
+PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int diagonal) {
+  if (!x || !shape || ndim != 2) {
+    fprintf(stderr, "polygrad: triu: only 2D tensors are supported\n");
+    return NULL;
+  }
+  PolyUOp *mask = tri_mask(ctx, shape, diagonal, true);
+  if (!mask) return NULL;
+  return poly_alu2(ctx, POLY_OP_MUL, x, mask);
+}
+
+PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
+  int64_t numel = shape_numel_checked(shape, ndim);
+  if (numel <= 0) return NULL;
+  if ((size_t)numel > SIZE_MAX / sizeof(uint32_t)) return NULL;
+  uint32_t *counter = malloc((size_t)numel * sizeof(uint32_t));
+  if (!counter) {
+    return NULL;
+  }
+
+  uint32_t key_lo = (uint32_t)(seed & 0xffffffffu);
+  uint32_t key_hi = (uint32_t)(seed >> 32);
+  uint32_t mixed_key = key_lo ^ ((key_hi << 16) | (key_hi >> 16));
+  for (int64_t i = 0; i < numel; i++) {
+    counter[i] = (uint32_t)i;
+  }
+
+  PolyUOp *counter_t = make_const_u32_tensor(ctx, counter, shape, ndim);
+  free(counter);
+  if (!counter_t) return NULL;
+  PolyUOp *key_t = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int((int64_t)mixed_key));
+
+  PolyUOp *bits = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
+  PolyUOp *sh = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(8));
+  PolyUOp *hi24 = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, bits, sh, poly_arg_none());
+  PolyUOp *as_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, hi24, poly_arg_none());
+  return poly_alu2(ctx, POLY_OP_MUL, as_f, cf(ctx, 1.0 / 16777216.0));
+}
+
+PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
+  PolyUOp *u1 = poly_rand(ctx, shape, ndim, seed);
+  PolyUOp *u2 = poly_rand(ctx, shape, ndim, seed ^ 0x9E3779B97F4A7C15ull);
+  if (!u1 || !u2) return NULL;
+  PolyUOp *u1_safe = poly_maximum(ctx, u1, cf(ctx, 1e-7));
+  PolyUOp *r = poly_alu1(ctx, POLY_OP_SQRT,
+              poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -2.0), poly_log(ctx, u1_safe)));
+  PolyUOp *theta = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 2.0 * M_PI), u2);
+  return poly_alu2(ctx, POLY_OP_MUL, r, poly_cos(ctx, theta));
+}
+
+PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int upper) {
+  (void)ctx; (void)x; (void)shape; (void)ndim; (void)upper;
+  fprintf(stderr, "polygrad: cholesky: Track C fallback not yet implemented in frontend graph builder\n");
+  return NULL;
+}
+
+PolyUOp *poly_triangular_solve(PolyCtx *ctx,
+                               PolyUOp *a, const int64_t *a_shape, int a_ndim,
+                               PolyUOp *b, const int64_t *b_shape, int b_ndim,
+                               int upper, int transpose_a, int unit_diagonal,
+                               int64_t *out_shape, int *out_ndim) {
+  (void)ctx; (void)a; (void)a_shape; (void)a_ndim; (void)b;
+  (void)b_shape; (void)b_ndim; (void)upper; (void)transpose_a; (void)unit_diagonal;
+  if (out_shape && b_shape && b_ndim > 0) memcpy(out_shape, b_shape, (size_t)b_ndim * sizeof(int64_t));
+  if (out_ndim) *out_ndim = b_ndim;
+  fprintf(stderr, "polygrad: triangular_solve: Track C fallback not yet implemented in frontend graph builder\n");
+  return NULL;
+}
+
 /* ── Shape-aware composed ops ────────────────────────────────────────── */
 
 /* Internal: compute output shape for a single-axis reduction */
@@ -497,6 +889,39 @@ PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
   double divisor = (double)(count - correction);
   if (divisor <= 0.0) divisor = 1.0;
   return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, divisor));
+}
+
+PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x,
+                        const int64_t *shape, int ndim,
+                        int axis, int keepdim,
+                        int64_t *out_shape, int *out_ndim) {
+  if (axis < 0) axis += ndim;
+  int64_t keep_shape[POLY_MAX_DIMS];
+  int keep_ndim = 0;
+  PolyUOp *m = poly_max_reduce(ctx, x, shape, ndim, axis, 1, keep_shape, &keep_ndim);
+  PolyUOp *shifted = poly_alu2(ctx, POLY_OP_SUB, x, m); /* keepdim=1 broadcasts */
+  PolyUOp *e = poly_exp(ctx, shifted);
+  PolyUOp *s = poly_sum_reduce(ctx, e, shape, ndim, axis, 1, keep_shape, &keep_ndim);
+  PolyUOp *lse_keep = poly_alu2(ctx, POLY_OP_ADD, poly_log(ctx, s), m);
+  if (keepdim) {
+    memcpy(out_shape, keep_shape, (size_t)keep_ndim * sizeof(int64_t));
+    *out_ndim = keep_ndim;
+    return lse_keep;
+  }
+
+  int64_t final_shape[POLY_MAX_DIMS];
+  int fn = 0;
+  for (int i = 0; i < ndim; i++) {
+    if (i == axis) continue;
+    final_shape[fn++] = shape[i];
+  }
+  if (fn == 0) {
+    *out_ndim = 0;
+    return poly_reshape(ctx, lse_keep, NULL, 0);
+  }
+  memcpy(out_shape, final_shape, (size_t)fn * sizeof(int64_t));
+  *out_ndim = fn;
+  return poly_reshape(ctx, lse_keep, final_shape, fn);
 }
 
 PolyUOp *poly_dot(PolyCtx *ctx,
@@ -692,6 +1117,74 @@ static bool ptr_eq(const void *a, const void *b) { return a == b; }
 static uint32_t ptr_hash(const void *p) {
   uintptr_t v = (uintptr_t)p;
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
+}
+
+/* ── Constant buffer registry (ctx-scoped) ─────────────────────────────
+ *
+ * Some additive frontend creation helpers (arange/full/rand/...) return
+ * BUFFER-backed tensors. We retain host data here and auto-bind it when a
+ * caller omits bindings for those buffers.
+ */
+
+typedef struct {
+  PolyCtx *ctx;
+  PolyUOp *buf;
+  void *data;
+} PolyConstBindingEntry;
+
+static PolyConstBindingEntry *g_const_bindings = NULL;
+static int g_const_bindings_n = 0;
+static int g_const_bindings_cap = 0;
+
+static void const_registry_add(PolyCtx *ctx, PolyUOp *buf, void *data) {
+  if (!ctx || !buf || !data) return;
+  for (int i = 0; i < g_const_bindings_n; i++) {
+    if (g_const_bindings[i].ctx == ctx && g_const_bindings[i].buf == buf) {
+      free(g_const_bindings[i].data);
+      g_const_bindings[i].data = data;
+      return;
+    }
+  }
+  if (g_const_bindings_n == g_const_bindings_cap) {
+    int new_cap = (g_const_bindings_cap == 0) ? 64 : (g_const_bindings_cap * 2);
+    PolyConstBindingEntry *nb = realloc(g_const_bindings, (size_t)new_cap * sizeof(*nb));
+    if (!nb) {
+      free(data);
+      return;
+    }
+    g_const_bindings = nb;
+    g_const_bindings_cap = new_cap;
+  }
+  g_const_bindings[g_const_bindings_n++] = (PolyConstBindingEntry){
+    .ctx = ctx, .buf = buf, .data = data
+  };
+}
+
+static void *const_registry_lookup(PolyCtx *ctx, PolyUOp *buf) {
+  if (!ctx || !buf) return NULL;
+  for (int i = 0; i < g_const_bindings_n; i++) {
+    if (g_const_bindings[i].ctx == ctx && g_const_bindings[i].buf == buf)
+      return g_const_bindings[i].data;
+  }
+  return NULL;
+}
+
+static bool const_registry_has(PolyCtx *ctx, PolyUOp *buf) {
+  return const_registry_lookup(ctx, buf) != NULL;
+}
+
+void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
+  if (!ctx || g_const_bindings_n == 0) return;
+  int wr = 0;
+  for (int i = 0; i < g_const_bindings_n; i++) {
+    if (g_const_bindings[i].ctx == ctx) {
+      free(g_const_bindings[i].data);
+      continue;
+    }
+    if (wr != i) g_const_bindings[wr] = g_const_bindings[i];
+    wr++;
+  }
+  g_const_bindings_n = wr;
 }
 
 /* ── Structural hash/eq for kernel cache ─────────────────────────────
@@ -1490,6 +1983,9 @@ static int realize_impl(PolyCtx *ctx, PolyUOp *tensor_sink,
           PolyUOp *v = poly_map_get(inter_set, ptr_hash(buf), buf, ptr_eq);
           if (v) args[i] = intermediates[(int)((intptr_t)v - 1)];
         }
+        if (!args[i]) {
+          args[i] = const_registry_lookup(ctx, buf);
+        }
         if (getenv("POLY_DEBUG_REALIZE"))
           fprintf(stderr, "    param[%d] = BUFFER %p -> %p\n", i, (void*)buf, args[i]);
       } else {
@@ -1623,12 +2119,23 @@ typedef struct {
   PolyUOp **var_ptrs;      /* malloc'd [n_vars] */
 } PolyStepKernel;
 
+typedef struct {
+  PolyStepBufRole role;
+  PolyDType dtype;
+  int64_t numel;
+  int64_t nbytes;
+} PolyStepBufMeta;
+
 struct PolyStep {
+  PolyCtx *ctx;                  /* owning context (for constant auto-bind lookup) */
   int n_kernels;
   PolyStepKernel *kernels;      /* malloc'd [n_kernels] */
   int *exec_order;              /* malloc'd [n_kernels] */
   int n_bufs;                   /* total BUFFER nodes in DFS order */
   PolyUOp **buf_order;          /* malloc'd [n_bufs] -- DFS buffer ordering */
+  int n_output_bufs;            /* prefix of buf_order that are outputs */
+  PolyStepBufMeta *buf_meta;    /* malloc'd [n_bufs + n_intermediates] */
+  int n_total_buf_meta;         /* external + intermediates */
 
   int n_intermediates;
   void **intermediates;         /* malloc'd array of malloc'd buffers */
@@ -1639,6 +2146,23 @@ struct PolyStep {
 
   uint32_t graph_hash;
 };
+
+static int collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int cap) {
+  if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) return 0;
+  int n_seen = 0;
+  for (int i = 0; i < tensor_sink->n_src; i++) {
+    PolyUOp *store = tensor_sink->src[i];
+    if (!store || store->op != POLY_OP_STORE || store->n_src < 1) continue;
+    PolyUOp *buf = store->src[0];
+    if (!buf || buf->op != POLY_OP_BUFFER) continue;
+    bool dup = false;
+    for (int j = 0; j < n_seen; j++) {
+      if (out[j] == buf) { dup = true; break; }
+    }
+    if (!dup && n_seen < cap) out[n_seen++] = buf;
+  }
+  return n_seen;
+}
 
 PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
@@ -1655,6 +2179,8 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
   PolyUOp **dfs_visited = calloc(MAX_STRUCT_NODES, sizeof(PolyUOp *));
   int n_bufs_orig = 0, n_dfs = 0;
   collect_buf_order(tensor_sink, buf_order_orig, &n_bufs_orig, dfs_visited, &n_dfs);
+  PolyUOp *output_bufs[MAX_REALIZE_BUFS];
+  int n_output_bufs = collect_output_buffers_in_sink(tensor_sink, output_bufs, MAX_REALIZE_BUFS);
 
   /* Strip BIND values, extract compile-time defaults (same as realize_impl) */
   PolyVarBinding bind_vals[16];
@@ -1685,6 +2211,7 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
   PolyStep *step = calloc(1, sizeof(PolyStep));
   if (!step) { poly_schedule_result_free(&sr); return NULL; }
   step->n_kernels = sr.n_kernels;
+  step->ctx = ctx;
   step->kernels = calloc((size_t)sr.n_kernels, sizeof(PolyStepKernel));
   step->graph_hash = graph_hash;
 
@@ -1697,6 +2224,8 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
 
   /* Store pre-strip buffer ordering (for runtime find_buf_position) */
   step->n_bufs = n_bufs_orig;
+  step->n_output_bufs = n_output_bufs;
+  if (step->n_output_bufs > step->n_bufs) step->n_output_bufs = step->n_bufs;
   if (n_bufs_orig > 0) {
     step->buf_order = malloc((size_t)n_bufs_orig * sizeof(PolyUOp *));
     memcpy(step->buf_order, buf_order_orig, (size_t)n_bufs_orig * sizeof(PolyUOp *));
@@ -1720,6 +2249,41 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
       step->intermediates[b] = calloc((size_t)sz, (size_t)itemsize);
       if (!step->intermediates[b]) goto cleanup;
     }
+  }
+
+  /* Build stable buffer metadata table:
+   *   [0..n_bufs)                    -> external buffers (input/output)
+   *   [n_bufs..n_bufs+n_intermediates) -> temporaries */
+  step->n_total_buf_meta = step->n_bufs + step->n_intermediates;
+  if (step->n_total_buf_meta > 0) {
+    step->buf_meta = calloc((size_t)step->n_total_buf_meta, sizeof(PolyStepBufMeta));
+    if (!step->buf_meta) goto cleanup;
+  }
+  for (int i = 0; i < step->n_bufs; i++) {
+    PolyUOp *buf = step->buf_order ? step->buf_order[i] : NULL;
+    PolyStepBufMeta *m = &step->buf_meta[i];
+    bool is_output = false;
+    for (int j = 0; j < step->n_output_bufs; j++) {
+      if (output_bufs[j] == buf) { is_output = true; break; }
+    }
+    if (is_output) m->role = POLY_STEP_BUF_OUTPUT;
+    else if (const_registry_has(ctx, buf)) m->role = POLY_STEP_BUF_CONSTANT;
+    else m->role = POLY_STEP_BUF_INPUT;
+    m->dtype = buf ? poly_dtype_scalar(buf->dtype) : POLY_FLOAT32;
+    m->numel = (buf && buf->arg.kind == POLY_ARG_INT) ? buf->arg.i : 0;
+    if (m->numel > 0) m->nbytes = m->numel * poly_dtype_itemsize(m->dtype);
+  }
+  for (int b = 0; b < step->n_intermediates; b++) {
+    int idx = step->n_bufs + b;
+    PolyStepBufMeta *m = &step->buf_meta[idx];
+    m->role = POLY_STEP_BUF_TEMP;
+    if (sr.intermediate_buf_uops && sr.intermediate_buf_uops[b]) {
+      m->dtype = poly_dtype_scalar(sr.intermediate_buf_uops[b]->dtype);
+    } else {
+      m->dtype = POLY_FLOAT32;
+    }
+    m->numel = sr.intermediate_sizes ? sr.intermediate_sizes[b] : 0;
+    m->nbytes = (int64_t)(step->intermediate_bytes ? step->intermediate_bytes[b] : 0);
   }
 
   /* Build intermediate lookup (same as realize_impl's inter_set) */
@@ -1854,9 +2418,126 @@ cleanup:
   free(step->default_vars);
   free(step->exec_order);
   free(step->buf_order);
+  free(step->buf_meta);
   free(step);
   poly_schedule_result_free(&sr);
   return NULL;
+}
+
+static int64_t static_numel_of_uop(PolyCtx *ctx, PolyUOp *u) {
+  PolyShape s = poly_uop_shape(ctx, u);
+  if (s.ndim < 0) {
+    if (s.dims) free(s.dims);
+    return -1;
+  }
+  if (s.ndim == 0) return 1;
+  int64_t n = 1;
+  for (int i = 0; i < s.ndim; i++) {
+    if (s.dims[i] <= 0) { free(s.dims); return -1; }
+    if (n > INT64_MAX / s.dims[i]) { free(s.dims); return -1; }
+    n *= s.dims[i];
+  }
+  free(s.dims);
+  return n;
+}
+
+PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
+                                      PolyUOp **params, int n_params,
+                                      int *out_loss_buf_idx,
+                                      int *out_grad_buf_idxs) {
+  if (!ctx || !loss || !params || n_params <= 0 || !out_loss_buf_idx || !out_grad_buf_idxs) {
+    fprintf(stderr, "polygrad: compile_value_and_grad: invalid arguments\n");
+    return NULL;
+  }
+
+  /* Build gradients in one reverse pass. */
+  PolyUOp **grads = calloc((size_t)n_params, sizeof(PolyUOp *));
+  if (!grads) return NULL;
+  if (poly_grad_many(ctx, loss, NULL, params, n_params, grads) != 0) {
+    fprintf(stderr, "polygrad: compile_value_and_grad: poly_grad_many failed\n");
+    free(grads);
+    return NULL;
+  }
+
+  /* Build output stores:
+   *   store[0]   -> scalar loss (as 1-element vector)
+   *   store[i+1] -> flattened grad[i] */
+  int n_stores = n_params + 1;
+  PolyUOp **stores = calloc((size_t)n_stores, sizeof(PolyUOp *));
+  PolyUOp **grad_out_bufs = calloc((size_t)n_params, sizeof(PolyUOp *));
+  if (!stores || !grad_out_bufs) {
+    free(stores);
+    free(grad_out_bufs);
+    free(grads);
+    return NULL;
+  }
+
+  PolyDType out_dt = poly_dtype_scalar(loss->dtype);
+  if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
+
+  /* Loss output buffer (1 element). */
+  PolyUOp *loss_buf = poly_buffer(ctx, out_dt, 1);
+  PolyUOp *loss_flat = loss;
+  if (static_numel_of_uop(ctx, loss) != 1) {
+    int64_t one_shape[1] = {1};
+    loss_flat = poly_reshape(ctx, loss, one_shape, 1);
+  }
+  stores[0] = poly_store_val(ctx, loss_buf, loss_flat);
+
+  for (int i = 0; i < n_params; i++) {
+    int64_t numel = static_numel_of_uop(ctx, grads[i]);
+    if (numel <= 0) {
+      fprintf(stderr, "polygrad: compile_value_and_grad: grad[%d] has unknown/invalid shape\n", i);
+      free(stores);
+      free(grad_out_bufs);
+      free(grads);
+      return NULL;
+    }
+    PolyDType gdt = poly_dtype_scalar(grads[i]->dtype);
+    if (!poly_dtype_is_float(gdt)) gdt = POLY_FLOAT32;
+    PolyUOp *gbuf = poly_buffer(ctx, gdt, numel);
+    grad_out_bufs[i] = gbuf;
+    PolyUOp *gflat = grads[i];
+    PolyShape gs = poly_uop_shape(ctx, grads[i]);
+    if (gs.ndim != 1 || (gs.ndim == 1 && gs.dims[0] != numel)) {
+      int64_t flat_shape[1] = { numel };
+      gflat = poly_reshape(ctx, grads[i], flat_shape, 1);
+    }
+    if (gs.dims) free(gs.dims);
+    stores[i + 1] = poly_store_val(ctx, gbuf, gflat);
+  }
+
+  PolyUOp *sink = poly_sink_n(ctx, stores, n_stores);
+  PolyStep *step = poly_compile_step(ctx, sink);
+
+  free(stores);
+  free(grads);
+
+  if (!step) {
+    free(grad_out_bufs);
+    return NULL;
+  }
+
+  int loss_idx = find_buf_position(loss_buf, step->buf_order, step->n_bufs);
+  if (loss_idx < 0) {
+    fprintf(stderr, "polygrad: compile_value_and_grad: loss buffer index not found\n");
+    free(grad_out_bufs);
+    poly_step_destroy(step);
+    return NULL;
+  }
+  *out_loss_buf_idx = loss_idx;
+  for (int i = 0; i < n_params; i++) {
+    int gi = find_buf_position(grad_out_bufs[i], step->buf_order, step->n_bufs);
+    if (gi < 0) {
+      fprintf(stderr, "polygrad: compile_value_and_grad: grad buffer %d index not found\n", i);
+      free(grad_out_bufs);
+      poly_step_destroy(step);
+      return NULL;
+    }
+    out_grad_buf_idxs[i] = gi;
+  }
+  free(grad_out_bufs);
+  return step;
 }
 
 int poly_step_run_ex(PolyStep *step,
@@ -1925,6 +2606,10 @@ int poly_step_run_ex(PolyStep *step,
                  m->intermediate_idx < step->n_intermediates) {
         args[i] = step->intermediates[m->intermediate_idx];
       }
+      if (!args[i] && m->buf_position >= 0 && m->buf_position < step->n_bufs) {
+        PolyUOp *buf = step->buf_order[m->buf_position];
+        args[i] = const_registry_lookup(step->ctx, buf);
+      }
       if (!args[i]) {
         fprintf(stderr, "polygrad: step_run: missing binding for param %d kernel %d "
                 "(pos=%d, inter=%d)\n",
@@ -1968,6 +2653,28 @@ int poly_step_run(PolyStep *step,
   return poly_step_run_ex(step, bindings, n_bindings, NULL, 0);
 }
 
+int poly_step_run_indexed_ex(PolyStep *step, void **buffer_data, int n_buffers,
+                             PolyVarBinding *var_bindings, int n_var_bindings) {
+  if (!step || !buffer_data || n_buffers <= 0) return -1;
+  int n = (n_buffers < step->n_bufs) ? n_buffers : step->n_bufs;
+  PolyBufferBinding *bindings = calloc((size_t)n, sizeof(PolyBufferBinding));
+  if (!bindings) return -1;
+  int nb = 0;
+  for (int i = 0; i < n; i++) {
+    if (!buffer_data[i]) continue;
+    bindings[nb].buffer = step->buf_order[i];
+    bindings[nb].data = buffer_data[i];
+    nb++;
+  }
+  int ret = poly_step_run_ex(step, bindings, nb, var_bindings, n_var_bindings);
+  free(bindings);
+  return ret;
+}
+
+int poly_step_run_indexed(PolyStep *step, void **buffer_data, int n_buffers) {
+  return poly_step_run_indexed_ex(step, buffer_data, n_buffers, NULL, 0);
+}
+
 void poly_step_destroy(PolyStep *step) {
   if (!step) return;
   for (int k = 0; k < step->n_kernels; k++) {
@@ -1986,11 +2693,26 @@ void poly_step_destroy(PolyStep *step) {
   }
   free(step->intermediate_bytes);
   free(step->default_vars);
+  free(step->buf_meta);
   free(step);
 }
 
 int poly_step_n_kernels(const PolyStep *step) { return step ? step->n_kernels : 0; }
 int poly_step_n_intermediates(const PolyStep *step) { return step ? step->n_intermediates : 0; }
+int poly_step_n_buffers(const PolyStep *step) { return step ? step->n_total_buf_meta : 0; }
+int poly_step_n_bindable_buffers(const PolyStep *step) { return step ? step->n_bufs : 0; }
+
+int poly_step_buffer_info(const PolyStep *step, int idx, PolyStepBufferInfo *out) {
+  if (!step || !out || idx < 0 || idx >= step->n_total_buf_meta) return -1;
+  PolyStepBufMeta *m = &step->buf_meta[idx];
+  out->version = POLY_STEP_BUFFER_INFO_VERSION;
+  out->index = idx;
+  out->role = m->role;
+  out->dtype = m->dtype;
+  out->numel = m->numel;
+  out->nbytes = m->nbytes;
+  return 0;
+}
 
 int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
                      PolyUOp **buffers, void **datas, int n) {
@@ -2347,6 +3069,19 @@ int poly_cuda_copyback(PolyBufferBinding *bindings, int n_bindings) {
 static PolyUOp *g_kernel_bufs[MAX_REALIZE_BUFS];
 static int g_kernel_n_bufs = 0;
 
+struct PolyWasmStepPlan {
+  int n_kernels;
+  uint8_t **kernel_bytes;
+  int *kernel_lens;
+  int *kernel_n_params;
+  int **kernel_param_buf_idxs;
+  int n_total_buffers;
+  int n_bindable_buffers;
+  int *exec_order;
+};
+
+void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p);
+
 uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
                                  int *wasm_len, int *n_bufs_out) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
@@ -2425,6 +3160,143 @@ PolyUOp *poly_kernel_buf(PolyCtx *ctx, int index) {
   (void)ctx;
   if (index < 0 || index >= g_kernel_n_bufs) return NULL;
   return g_kernel_bufs[index];
+}
+
+PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink) {
+  if (!ctx || !tensor_sink || tensor_sink->op != POLY_OP_SINK) {
+    fprintf(stderr, "polygrad: wasm_stepplan: expected SINK\n");
+    return NULL;
+  }
+
+  PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
+  if (sr.n_kernels <= 0 || !sr.kernels) {
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
+
+  PolyWasmStepPlan *p = calloc(1, sizeof(*p));
+  if (!p) {
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
+  p->n_kernels = sr.n_kernels;
+  p->kernel_bytes = calloc((size_t)p->n_kernels, sizeof(uint8_t *));
+  p->kernel_lens = calloc((size_t)p->n_kernels, sizeof(int));
+  p->kernel_n_params = calloc((size_t)p->n_kernels, sizeof(int));
+  p->kernel_param_buf_idxs = calloc((size_t)p->n_kernels, sizeof(int *));
+  p->exec_order = calloc((size_t)p->n_kernels, sizeof(int));
+  if (!p->kernel_bytes || !p->kernel_lens || !p->kernel_n_params ||
+      !p->kernel_param_buf_idxs || !p->exec_order) {
+    poly_wasm_stepplan_destroy(p);
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
+
+  PolyUOp *ext_bufs[MAX_REALIZE_BUFS];
+  int n_ext = collect_ordered_buffers(ctx, tensor_sink, ext_bufs, MAX_REALIZE_BUFS);
+  p->n_bindable_buffers = n_ext;
+  p->n_total_buffers = n_ext + sr.n_intermediates;
+
+  for (int k = 0; k < p->n_kernels; k++) {
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize(ctx, sr.kernels[k], &n_lin);
+    if (!lin) {
+      poly_wasm_stepplan_destroy(p);
+      poly_schedule_result_free(&sr);
+      return NULL;
+    }
+    int len = 0;
+    uint8_t *bytes = poly_render_wasm(lin, n_lin, &len, false);
+    free(lin);
+    if (!bytes || len <= 0) {
+      free(bytes);
+      poly_wasm_stepplan_destroy(p);
+      poly_schedule_result_free(&sr);
+      return NULL;
+    }
+    p->kernel_bytes[k] = bytes;
+    p->kernel_lens[k] = len;
+    int n_params = (sr.kernel_n_params ? sr.kernel_n_params[k] : 0);
+    p->kernel_n_params[k] = n_params;
+    if (n_params > 0) {
+      p->kernel_param_buf_idxs[k] = malloc((size_t)n_params * sizeof(int));
+      if (!p->kernel_param_buf_idxs[k]) {
+        poly_wasm_stepplan_destroy(p);
+        poly_schedule_result_free(&sr);
+        return NULL;
+      }
+      for (int i = 0; i < n_params; i++) p->kernel_param_buf_idxs[k][i] = -1;
+      for (int i = 0; i < n_params; i++) {
+        PolyUOp *pb = (sr.param_to_buf && sr.param_to_buf[k]) ? sr.param_to_buf[k][i] : NULL;
+        int idx = -1;
+        if (pb) idx = find_buf_position(pb, ext_bufs, n_ext);
+        if (idx < 0 && pb && sr.intermediate_buf_uops && sr.n_intermediates > 0) {
+          int ib = find_buf_position(pb, sr.intermediate_buf_uops, sr.n_intermediates);
+          if (ib >= 0) idx = n_ext + ib;
+        }
+        if (idx < 0 && (!sr.param_to_buf || !sr.param_to_buf[k]) && i < n_ext) idx = i;
+        p->kernel_param_buf_idxs[k][i] = idx;
+      }
+    }
+  }
+
+  if (sr.exec_order) memcpy(p->exec_order, sr.exec_order, (size_t)p->n_kernels * sizeof(int));
+  else for (int i = 0; i < p->n_kernels; i++) p->exec_order[i] = i;
+
+  poly_schedule_result_free(&sr);
+  return p;
+}
+
+int poly_wasm_stepplan_n_kernels(const PolyWasmStepPlan *p) {
+  return p ? p->n_kernels : 0;
+}
+
+const uint8_t *poly_wasm_stepplan_kernel_bytes(const PolyWasmStepPlan *p, int k, int *len) {
+  if (!p || k < 0 || k >= p->n_kernels) return NULL;
+  if (len) *len = p->kernel_lens[k];
+  return p->kernel_bytes[k];
+}
+
+int poly_wasm_stepplan_kernel_n_params(const PolyWasmStepPlan *p, int k) {
+  if (!p || k < 0 || k >= p->n_kernels) return 0;
+  return p->kernel_n_params[k];
+}
+
+int poly_wasm_stepplan_n_buffers(const PolyWasmStepPlan *p) {
+  return p ? p->n_total_buffers : 0;
+}
+
+int poly_wasm_stepplan_n_bindable_buffers(const PolyWasmStepPlan *p) {
+  return p ? p->n_bindable_buffers : 0;
+}
+
+int poly_wasm_stepplan_kernel_param_buf_index(const PolyWasmStepPlan *p, int k, int param_idx) {
+  if (!p || k < 0 || k >= p->n_kernels) return -1;
+  if (param_idx < 0 || param_idx >= p->kernel_n_params[k]) return -1;
+  return p->kernel_param_buf_idxs && p->kernel_param_buf_idxs[k]
+    ? p->kernel_param_buf_idxs[k][param_idx] : -1;
+}
+
+const int *poly_wasm_stepplan_exec_order(const PolyWasmStepPlan *p, int *n) {
+  if (!p) return NULL;
+  if (n) *n = p->n_kernels;
+  return p->exec_order;
+}
+
+void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
+  if (!p) return;
+  if (p->kernel_bytes) {
+    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_bytes[i]);
+    free(p->kernel_bytes);
+  }
+  if (p->kernel_param_buf_idxs) {
+    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_param_buf_idxs[i]);
+    free(p->kernel_param_buf_idxs);
+  }
+  free(p->kernel_lens);
+  free(p->kernel_n_params);
+  free(p->exec_order);
+  free(p);
 }
 
 /* Debug helper — check opset state */

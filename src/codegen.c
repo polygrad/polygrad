@@ -961,17 +961,111 @@ static PolyUOp *rule_mul_fdiv1_to_fdiv(PolyCtx *ctx, PolyUOp *root,
   return NULL;
 }
 
-/* Two cached variants: CPU (no MULACC) and FMA-capable (has MULACC). */
-static PolyPatternMatcher *g_pm_decomp_no_mulacc = NULL;
-static PolyPatternMatcher *g_pm_decomp_has_mulacc = NULL;
+static PolyUOp *u32_const(PolyCtx *ctx, uint32_t v) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int((int64_t)v));
+}
 
-static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc) {
-  PolyPatternMatcher **target = has_mulacc
-    ? &g_pm_decomp_has_mulacc : &g_pm_decomp_no_mulacc;
+static PolyUOp *u64_const(PolyCtx *ctx, uint64_t v) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)v));
+}
+
+static PolyUOp *u32_cast(PolyCtx *ctx, PolyUOp *u) {
+  if (poly_dtype_eq(u->dtype, POLY_UINT32)) return u;
+  return poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, u, poly_arg_none());
+}
+
+static PolyUOp *u64_cast(PolyCtx *ctx, PolyUOp *u) {
+  if (poly_dtype_eq(u->dtype, POLY_UINT64)) return u;
+  return poly_uop1(ctx, POLY_OP_CAST, POLY_UINT64, u, poly_arg_none());
+}
+
+static PolyUOp *u32_rol(PolyCtx *ctx, PolyUOp *x, int r) {
+  PolyUOp *l = poly_uop2(ctx, POLY_OP_SHL, POLY_UINT32, x, u32_const(ctx, (uint32_t)r), poly_arg_none());
+  PolyUOp *rr = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, x, u32_const(ctx, (uint32_t)(32 - r)), poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_OR, POLY_UINT32, l, rr, poly_arg_none());
+}
+
+/*
+ * rule_decomp_threefry32 — lower THREEFRY to pure integer ALU UOps.
+ * This mirrors tinygrad's decomposition strategy (threefry2x32) but
+ * emits a 32-bit lane value directly for current backends.
+ */
+static PolyUOp *rule_decomp_threefry32(PolyCtx *ctx, PolyUOp *root,
+                                       const PolyBindings *b) {
+  (void)b;
+  if (root->op != POLY_OP_THREEFRY || root->n_src != 2) return NULL;
+
+  /* Tinygrad-parity path: for uint64 THREEFRY, split into two uint32 lanes.
+   * For uint32 input (legacy elementwise usage), high lanes are zero. */
+  PolyUOp *x0, *x1, *key0, *key1;
+  if (poly_dtype_eq(root->dtype, POLY_UINT64)) {
+    PolyUOp *x64 = u64_cast(ctx, root->src[0]);
+    PolyUOp *k64 = u64_cast(ctx, root->src[1]);
+    PolyUOp *mask32 = u64_const(ctx, 0xFFFFFFFFull);
+    PolyUOp *sh32 = u64_const(ctx, 32);
+    x0 = u32_cast(ctx, poly_uop2(ctx, POLY_OP_AND, POLY_UINT64, x64, mask32, poly_arg_none()));
+    x1 = u32_cast(ctx, poly_uop2(ctx, POLY_OP_AND, POLY_UINT64,
+                                 poly_uop2(ctx, POLY_OP_SHR, POLY_UINT64, x64, sh32, poly_arg_none()),
+                                 mask32, poly_arg_none()));
+    key0 = u32_cast(ctx, poly_uop2(ctx, POLY_OP_AND, POLY_UINT64, k64, mask32, poly_arg_none()));
+    key1 = u32_cast(ctx, poly_uop2(ctx, POLY_OP_AND, POLY_UINT64,
+                                   poly_uop2(ctx, POLY_OP_SHR, POLY_UINT64, k64, sh32, poly_arg_none()),
+                                   mask32, poly_arg_none()));
+  } else {
+    x0 = u32_cast(ctx, root->src[0]);
+    x1 = u32_const(ctx, 0);
+    key0 = u32_cast(ctx, root->src[1]);
+    key1 = u32_const(ctx, 0);
+  }
+
+  PolyUOp *ks[3];
+  ks[0] = key1;
+  ks[1] = poly_uop2(ctx, POLY_OP_XOR, POLY_UINT32,
+                    poly_uop2(ctx, POLY_OP_XOR, POLY_UINT32, key0, key1, poly_arg_none()),
+                    u32_const(ctx, 0x1BD11BDAu), poly_arg_none());
+  ks[2] = key0;
+
+  PolyUOp *xr0 = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, x0, ks[2], poly_arg_none());
+  PolyUOp *xr1 = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, x1, ks[0], poly_arg_none());
+
+  static const int rotations[2][4] = {
+    {13, 15, 26, 6},
+    {17, 29, 16, 24},
+  };
+
+  for (int i = 0; i < 5; i++) {
+    for (int j = 0; j < 4; j++) {
+      int r = rotations[i & 1][j];
+      PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, xr0, xr1, poly_arg_none());
+      xr1 = poly_uop2(ctx, POLY_OP_XOR, POLY_UINT32, sum, u32_rol(ctx, xr1, r), poly_arg_none());
+      xr0 = sum;
+    }
+    PolyUOp *round = u32_const(ctx, (uint32_t)(i + 1));
+    xr0 = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, xr0, ks[i % 3], poly_arg_none());
+    xr1 = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32,
+                    poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, xr1, ks[(i + 1) % 3], poly_arg_none()),
+                    round, poly_arg_none());
+  }
+
+  if (poly_dtype_eq(root->dtype, POLY_UINT32)) return xr0;
+  if (poly_dtype_eq(root->dtype, POLY_UINT64)) {
+    PolyUOp *lo = u64_cast(ctx, xr0);
+    PolyUOp *hi = poly_uop2(ctx, POLY_OP_SHL, POLY_UINT64, u64_cast(ctx, xr1),
+                            u64_const(ctx, 32), poly_arg_none());
+    return poly_uop2(ctx, POLY_OP_OR, POLY_UINT64, hi, lo, poly_arg_none());
+  }
+  return poly_uop1(ctx, POLY_OP_CAST, root->dtype, xr0, poly_arg_none());
+}
+
+/* Cached variants by (has_mulacc, has_threefry_native). */
+static PolyPatternMatcher *g_pm_decomp_caps[2][2] = {{NULL, NULL}, {NULL, NULL}};
+
+static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_threefry) {
+  PolyPatternMatcher **target = &g_pm_decomp_caps[has_mulacc ? 1 : 0][has_threefry ? 1 : 0];
   if (*target) return *target;
 
   PolyOpSet max_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_MAX);
-  PolyRule rules[16];
+  PolyRule rules[18];
   int n = 0;
   rules[n++] = (PolyRule){ poly_pat_ops(max_set, NULL, 0, NULL), rule_decomp_max };
   /* MUL(x:int, c:const) → SHL(x, log2(c)) when c is power of 2 */
@@ -990,6 +1084,11 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc) {
   rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_ADD, poly_pat_any("x"),
       poly_pat_op1(POLY_OP_NEG, poly_pat_any("y"), NULL), NULL),
     rule_add_neg_to_sub };
+
+  if (!has_threefry) {
+    PolyOpSet threefry_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_THREEFRY);
+    rules[n++] = (PolyRule){ poly_pat_ops(threefry_set, NULL, 0, NULL), rule_decomp_threefry32 };
+  }
 
   if (!has_mulacc) {
     /* CPU path: decompose MULACC → MUL+ADD */
@@ -1017,7 +1116,7 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc) {
 
 /* Default: CPU decomp (no MULACC support). */
 static PolyPatternMatcher *poly_pm_decomp(void) {
-  return poly_pm_decomp_with_caps(false);
+  return poly_pm_decomp_with_caps(false, false);
 }
 
 /* ── pm_transcendental: EXP2 → polynomial approximation ──────────────── */
@@ -2839,7 +2938,7 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
 PolyPatternMatcher *poly_pm_reduce_pass(void)        { return poly_pm_reduce(); }
 PolyPatternMatcher *poly_pm_decomp_pass(void)         { return poly_pm_decomp(); }
 PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps) {
-  return poly_pm_decomp_with_caps(caps.has_mulacc);
+  return poly_pm_decomp_with_caps(caps.has_mulacc, caps.has_threefry);
 }
 PolyPatternMatcher *poly_pm_transcendental_pass(void)  { return poly_pm_transcendental(); }
 void poly_reset_acc_num(void)                         { }
@@ -2886,13 +2985,13 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 
   /* 4. pm_decomp: late decompositions (MAX→WHERE, MUL→SHL, IDIV→SHR)
    *    Caps-aware: CPU decomposes MULACC; CUDA fuses MUL+ADD→MULACC. */
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc));
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry));
 
   /* 5. pm_transcendental: EXP2 → polynomial (creates new IDIV ops) */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental());
 
   /* 6. Final decomp: catch IDIV ops created by transcendental pass */
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc));
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry));
 
   /* 7. Expander cleanup: remove identity UNROLL/CONTRACT nodes */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());

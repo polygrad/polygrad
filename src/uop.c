@@ -202,7 +202,11 @@ static void free_cached_kernel(const void *key, void *value, void *userdata) {
   free(ck);
 }
 
+/* Optional frontend cleanup hook (defined in frontend.c). */
+void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
+
 void poly_ctx_destroy(PolyCtx *ctx) {
+  if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
   poly_map_destroy(ctx->cse);

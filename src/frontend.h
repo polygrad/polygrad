@@ -26,6 +26,7 @@ int poly_op_count(void);
 
 PolyUOp *poly_const_float(PolyCtx *ctx, double value);
 PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value);
+PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value);
 
 /* ── ALU ops (no PolyArg needed) ───────────────────────────────────────── */
 
@@ -47,9 +48,10 @@ PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n);
  * (no intermediate allocation). WAR edges ensure readers complete first. */
 PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
 
-/* ── Float32 buffer shortcut ──────────────────────────────────────────── */
+/* ── Buffer shortcuts ─────────────────────────────────────────────────── */
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
+PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
 
 /* ── Dynamic shapes (DEFINE_VAR / BIND) ──────────────────────────────── */
 
@@ -115,14 +117,36 @@ uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
 /* After poly_render_kernel_wasm(), get the i-th buffer UOp in PARAM order. */
 PolyUOp *poly_kernel_buf(PolyCtx *ctx, int index);
 
+/* Step-level WASM render plan for multi-kernel compiled steps.
+ * Browser hosts can compile/instantiate each kernel once, then reuse.
+ * kernel bytes pointers are owned by the plan and valid until destroy(). */
+typedef struct PolyWasmStepPlan PolyWasmStepPlan;
+PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink);
+int poly_wasm_stepplan_n_kernels(const PolyWasmStepPlan *p);
+const uint8_t *poly_wasm_stepplan_kernel_bytes(const PolyWasmStepPlan *p, int k, int *len);
+int poly_wasm_stepplan_kernel_n_params(const PolyWasmStepPlan *p, int k);
+int poly_wasm_stepplan_n_buffers(const PolyWasmStepPlan *p);
+int poly_wasm_stepplan_n_bindable_buffers(const PolyWasmStepPlan *p);
+int poly_wasm_stepplan_kernel_param_buf_index(const PolyWasmStepPlan *p, int k, int param_idx);
+const int *poly_wasm_stepplan_exec_order(const PolyWasmStepPlan *p, int *n);
+void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p);
+
 /* ── Composed elementwise ops (shape-free, UOp-level) ────────────────── */
 
 /* Math */
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_expm1(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_sin(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_cos(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_erfc(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_ndtri(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x);
+PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_tanh_act(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x);
@@ -159,6 +183,25 @@ PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);
 PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi);
+PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x);
+
+/* Deterministic RNG helpers (stateless seed -> tensor). */
+PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
+PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
+
+/* Creation helpers (constant-backed tensors). */
+PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step);
+PolyUOp *poly_eye(PolyCtx *ctx, int64_t n);
+PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps);
+PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value);
+PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int diagonal);
+PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int diagonal);
+PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int upper);
+PolyUOp *poly_triangular_solve(PolyCtx *ctx,
+                               PolyUOp *a, const int64_t *a_shape, int a_ndim,
+                               PolyUOp *b, const int64_t *b_shape, int b_ndim,
+                               int upper, int transpose_a, int unit_diagonal,
+                               int64_t *out_shape, int *out_ndim);
 
 /* ── Shape-aware composed ops ────────────────────────────────────────── */
 
@@ -178,6 +221,10 @@ PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
                          const int64_t *shape, int ndim,
                          int axis, int keepdim, int correction,
                          int64_t *out_shape, int *out_ndim);
+PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x,
+                        const int64_t *shape, int ndim,
+                        int axis, int keepdim,
+                        int64_t *out_shape, int *out_ndim);
 
 PolyUOp *poly_dot(PolyCtx *ctx,
                   PolyUOp *x, const int64_t *x_shape, int x_ndim,
@@ -259,6 +306,23 @@ void poly_debug_opsets(void);
 
 typedef struct PolyStep PolyStep;
 
+typedef enum {
+  POLY_STEP_BUF_INPUT = 0,
+  POLY_STEP_BUF_OUTPUT = 1,
+  POLY_STEP_BUF_TEMP = 2,
+  POLY_STEP_BUF_CONSTANT = 3,
+} PolyStepBufRole;
+
+#define POLY_STEP_BUFFER_INFO_VERSION 1
+typedef struct {
+  int version;
+  int index;
+  PolyStepBufRole role;
+  PolyDType dtype;
+  int64_t numel;
+  int64_t nbytes;
+} PolyStepBufferInfo;
+
 /* Compile a tensor-level SINK into a reusable execution step.
  * Schedules, compiles all kernels, pre-allocates intermediates.
  * BIND values are extracted as compile-time defaults for DEFINE_VAR params.
@@ -266,6 +330,17 @@ typedef struct PolyStep PolyStep;
  * Not thread-safe: concurrent poly_step_run on the same step is undefined.
  * Returns NULL on failure. */
 PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink);
+
+/* Compile a scalar loss + parameter gradients into a reusable step.
+ * The compiled step writes:
+ *   output buffer[0]   -> loss (1 element)
+ *   output buffer[i+1] -> grad for params[i] (flattened)
+ * out_loss_buf_idx receives the loss output buffer index.
+ * out_grad_buf_idxs must point to caller-allocated array of n_params ints. */
+PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
+                                      PolyUOp **params, int n_params,
+                                      int *out_loss_buf_idx,
+                                      int *out_grad_buf_idxs);
 
 /* Execute a compiled step with buffer bindings.
  * Uses compile-time BIND defaults for DEFINE_VAR params. */
@@ -277,12 +352,23 @@ int poly_step_run_ex(PolyStep *step,
                      PolyBufferBinding *bindings, int n_bindings,
                      PolyVarBinding *var_bindings, int n_var_bindings);
 
+/* Execute using index-based buffer pointers (no PolyUOp exposure).
+ * buffer_data[idx] maps to PolyStepBufferInfo.index.
+ * Bindable slots are [0 .. poly_step_n_bindable_buffers(step)-1] (external buffers).
+ * TEMP/CONSTANT metadata entries beyond that range are informational. */
+int poly_step_run_indexed(PolyStep *step, void **buffer_data, int n_buffers);
+int poly_step_run_indexed_ex(PolyStep *step, void **buffer_data, int n_buffers,
+                             PolyVarBinding *var_bindings, int n_var_bindings);
+
 /* Free a compiled step (programs, intermediates, all allocations). */
 void poly_step_destroy(PolyStep *step);
 
 /* Metadata queries. */
 int poly_step_n_kernels(const PolyStep *step);
 int poly_step_n_intermediates(const PolyStep *step);
+int poly_step_n_buffers(const PolyStep *step);
+int poly_step_n_bindable_buffers(const PolyStep *step);
+int poly_step_buffer_info(const PolyStep *step, int idx, PolyStepBufferInfo *out);
 
 /* ── Cache cleanup (for leak-free shutdown) ───────────────────────────── */
 

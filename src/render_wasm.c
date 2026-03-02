@@ -230,6 +230,7 @@ static void build_export_section(WasmBuf *mod, int kernel_func_idx) {
 static void emit_alu_scalar(WasmBuf *code, PolyOps op, PolyDType dtype,
                             MathImports *math, int n_imported_funcs) {
   bool is_int = !poly_dtype_is_float(dtype);
+  bool is_unsigned = poly_dtype_is_unsigned(dtype);
   switch (op) {
   /* Unary */
   case POLY_OP_NEG:
@@ -275,15 +276,18 @@ static void emit_alu_scalar(WasmBuf *code, PolyOps op, PolyDType dtype,
   case POLY_OP_MUL:   wb_byte(code, is_int ? WASM_OP_I32_MUL : WASM_OP_F32_MUL); break;
   case POLY_OP_FDIV:  wb_byte(code, WASM_OP_F32_DIV); break;
   case POLY_OP_MAX:   wb_byte(code, WASM_OP_F32_MAX); break;
-  case POLY_OP_CMPLT: wb_byte(code, is_int ? WASM_OP_I32_LT_S : WASM_OP_F32_LT); break;
+  case POLY_OP_CMPLT:
+    wb_byte(code, is_int ? (is_unsigned ? WASM_OP_I32_LT_U : WASM_OP_I32_LT_S)
+                         : WASM_OP_F32_LT);
+    break;
   case POLY_OP_CMPEQ: wb_byte(code, is_int ? WASM_OP_I32_EQ : WASM_OP_F32_EQ); break;
   case POLY_OP_CMPNE: wb_byte(code, is_int ? WASM_OP_I32_NE : WASM_OP_F32_NE); break;
 
   /* Integer-only ops */
-  case POLY_OP_IDIV:  wb_byte(code, WASM_OP_I32_DIV_S); break;
-  case POLY_OP_MOD:   wb_byte(code, WASM_OP_I32_REM_S); break;
+  case POLY_OP_IDIV:  wb_byte(code, is_unsigned ? WASM_OP_I32_DIV_U : WASM_OP_I32_DIV_S); break;
+  case POLY_OP_MOD:   wb_byte(code, is_unsigned ? WASM_OP_I32_REM_U : WASM_OP_I32_REM_S); break;
   case POLY_OP_SHL:   wb_byte(code, WASM_OP_I32_SHL); break;
-  case POLY_OP_SHR:   wb_byte(code, WASM_OP_I32_SHR_S); break;
+  case POLY_OP_SHR:   wb_byte(code, is_unsigned ? WASM_OP_I32_SHR_U : WASM_OP_I32_SHR_S); break;
   case POLY_OP_AND:   wb_byte(code, WASM_OP_I32_AND); break;
   case POLY_OP_OR:    wb_byte(code, WASM_OP_I32_OR); break;
   case POLY_OP_XOR:   wb_byte(code, WASM_OP_I32_XOR); break;
@@ -401,7 +405,10 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       bool is_reg_load = (u->src[0]->op == POLY_OP_INDEX &&
                           u->src[0]->src[0]->dtype.is_ptr &&
                           u->src[0]->src[0]->dtype.addrspace == POLY_ADDR_REG);
-      if (!is_reg_load) n_locals_f32++;
+      if (!is_reg_load) {
+        if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
+        else n_locals_i32++;
+      }
     }
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
@@ -636,12 +643,13 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         int acc_local = lm_get(&locals, u->src[0]);
         lm_set(&locals, u, acc_local);
       } else {
-        int local_idx = next_f32++;
+        bool is_float = poly_dtype_is_float(u->dtype);
+        int local_idx = is_float ? next_f32++ : next_i32++;
         int addr = lm_get(&locals, u->src[0]);
 
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
-        wb_byte(&body, WASM_OP_F32_LOAD);
+        wb_byte(&body, is_float ? WASM_OP_F32_LOAD : WASM_OP_I32_LOAD);
         wb_uleb128(&body, 2);  /* align: 2^2 = 4 bytes */
         wb_uleb128(&body, 0);  /* offset: 0 */
         wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -671,13 +679,14 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         wb_byte(&body, WASM_OP_LOCAL_SET);
         wb_uleb128(&body, acc_local);
       } else {
-        /* Buffer store: f32.store */
+        /* Buffer store */
         int addr = lm_get(&locals, u->src[0]);
+        bool val_is_float = poly_dtype_is_float(u->src[1]->dtype);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, val);
-        wb_byte(&body, WASM_OP_F32_STORE);
+        wb_byte(&body, val_is_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
         wb_uleb128(&body, 2);  /* align */
         wb_uleb128(&body, 0);  /* offset */
       }
@@ -705,10 +714,12 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
           wb_byte(&body, WASM_OP_F32_REINTERPRET_I32);
         /* same type: no-op */
       } else { /* CAST */
+        bool src_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
+        bool dst_unsigned = poly_dtype_is_unsigned(u->dtype);
         if (src_float && !dst_float)
-          wb_byte(&body, WASM_OP_I32_TRUNC_F32_S);
+          wb_byte(&body, dst_unsigned ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
         else if (!src_float && dst_float)
-          wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
+          wb_byte(&body, src_unsigned ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
         /* same type: no-op */
       }
 

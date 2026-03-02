@@ -91,7 +91,10 @@ def _binary(name):
     fn.argtypes = [_ptr, _ptr, _ptr]
 
 # Math
-for _n in ['poly_exp', 'poly_log', 'poly_sin', 'poly_cos', 'poly_tan',
+for _n in ['poly_exp', 'poly_log', 'poly_log1p', 'poly_expm1',
+           'poly_sin', 'poly_cos', 'poly_tan',
+           'poly_erf', 'poly_erfc', 'poly_erfinv', 'poly_ndtri',
+           'poly_digamma', 'poly_lgamma',
            'poly_sigmoid', 'poly_tanh_act', 'poly_abs', 'poly_sign',
            'poly_square', 'poly_rsqrt', 'poly_ceil', 'poly_floor',
            'poly_round_f', 'poly_isinf', 'poly_isnan',
@@ -115,6 +118,44 @@ _lib.poly_where_op.argtypes = [_ptr, _ptr, _ptr, _ptr]
 _lib.poly_clamp.restype = _ptr
 _lib.poly_clamp.argtypes = [_ptr, _ptr, ctypes.c_double, ctypes.c_double]
 
+_lib.poly_detach.restype = _ptr
+_lib.poly_detach.argtypes = [_ptr, _ptr]
+
+_lib.poly_rand.restype = _ptr
+_lib.poly_rand.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
+
+_lib.poly_randn.restype = _ptr
+_lib.poly_randn.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
+
+_lib.poly_arange.restype = _ptr
+_lib.poly_arange.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+
+_lib.poly_eye.restype = _ptr
+_lib.poly_eye.argtypes = [_ptr, ctypes.c_int64]
+
+_lib.poly_linspace.restype = _ptr
+_lib.poly_linspace.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64]
+
+_lib.poly_full.restype = _ptr
+_lib.poly_full.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double]
+
+_lib.poly_tril.restype = _ptr
+_lib.poly_tril.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+
+_lib.poly_triu.restype = _ptr
+_lib.poly_triu.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+
+_lib.poly_cholesky.restype = _ptr
+_lib.poly_cholesky.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+
+_lib.poly_triangular_solve.restype = _ptr
+_lib.poly_triangular_solve.argtypes = [
+    _ptr, _ptr, _i64p, ctypes.c_int,
+    _ptr, _i64p, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    _i64p, _ip
+]
+
 # --- Shape-aware composed ops ---
 
 _lib.poly_sum_reduce.restype = _ptr
@@ -133,6 +174,10 @@ _lib.poly_var_reduce.restype = _ptr
 _lib.poly_var_reduce.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
                                   ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                   _i64p, _ip]
+
+_lib.poly_logsumexp.restype = _ptr
+_lib.poly_logsumexp.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_int, _i64p, _ip]
 
 _lib.poly_dot.restype = _ptr
 _lib.poly_dot.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
@@ -258,12 +303,29 @@ _lib.poly_rearrange.argtypes = [
 _lib.poly_compile_step.restype = _ptr
 _lib.poly_compile_step.argtypes = [_ptr, _ptr]
 
+_lib.poly_compile_value_and_grad.restype = _ptr
+_lib.poly_compile_value_and_grad.argtypes = [
+    _ptr,                              # ctx
+    _ptr,                              # loss
+    ctypes.POINTER(_ptr),              # params[]
+    ctypes.c_int,                      # n_params
+    _ip,                               # out_loss_buf_idx
+    _ip,                               # out_grad_buf_idxs[]
+]
+
 _lib.poly_step_run.restype = ctypes.c_int
 _lib.poly_step_run.argtypes = [_ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int]
 
 _lib.poly_step_run_ex.restype = ctypes.c_int
 _lib.poly_step_run_ex.argtypes = [_ptr,
     ctypes.POINTER(PolyBufferBinding), ctypes.c_int,
+    ctypes.POINTER(PolyVarBinding), ctypes.c_int]
+
+_lib.poly_step_run_indexed.restype = ctypes.c_int
+_lib.poly_step_run_indexed.argtypes = [_ptr, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int]
+
+_lib.poly_step_run_indexed_ex.restype = ctypes.c_int
+_lib.poly_step_run_indexed_ex.argtypes = [_ptr, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int,
     ctypes.POINTER(PolyVarBinding), ctypes.c_int]
 
 _lib.poly_step_destroy.restype = None
@@ -274,6 +336,71 @@ _lib.poly_step_n_kernels.argtypes = [_ptr]
 
 _lib.poly_step_n_intermediates.restype = ctypes.c_int
 _lib.poly_step_n_intermediates.argtypes = [_ptr]
+
+_lib.poly_step_n_buffers.restype = ctypes.c_int
+_lib.poly_step_n_buffers.argtypes = [_ptr]
+
+_lib.poly_step_n_bindable_buffers.restype = ctypes.c_int
+_lib.poly_step_n_bindable_buffers.argtypes = [_ptr]
+
+class PolyDType(ctypes.Structure):
+    _fields_ = [
+        ('priority', ctypes.c_int8),
+        ('bitsize', ctypes.c_uint16),
+        ('name', ctypes.c_char_p),
+        ('fmt', ctypes.c_char),
+        ('count', ctypes.c_uint16),
+        ('is_ptr', ctypes.c_bool),
+        ('addrspace', ctypes.c_int),
+        ('vcount', ctypes.c_uint16),
+        ('ptr_size', ctypes.c_int64),
+    ]
+
+POLY_STEP_BUF_INPUT = 0
+POLY_STEP_BUF_OUTPUT = 1
+POLY_STEP_BUF_TEMP = 2
+POLY_STEP_BUF_CONSTANT = 3
+
+class PolyStepBufferInfo(ctypes.Structure):
+    _fields_ = [
+        ('version', ctypes.c_int),
+        ('index', ctypes.c_int),
+        ('role', ctypes.c_int),
+        ('dtype', PolyDType),
+        ('numel', ctypes.c_int64),
+        ('nbytes', ctypes.c_int64),
+    ]
+
+_lib.poly_step_buffer_info.restype = ctypes.c_int
+_lib.poly_step_buffer_info.argtypes = [_ptr, ctypes.c_int, ctypes.POINTER(PolyStepBufferInfo)]
+
+# --- WASM step plan ---
+_lib.poly_render_step_wasm_plan.restype = _ptr
+_lib.poly_render_step_wasm_plan.argtypes = [_ptr, _ptr]
+
+_lib.poly_wasm_stepplan_n_kernels.restype = ctypes.c_int
+_lib.poly_wasm_stepplan_n_kernels.argtypes = [_ptr]
+
+_lib.poly_wasm_stepplan_kernel_bytes.restype = ctypes.POINTER(ctypes.c_uint8)
+_lib.poly_wasm_stepplan_kernel_bytes.argtypes = [_ptr, ctypes.c_int, _ip]
+
+_lib.poly_wasm_stepplan_kernel_n_params.restype = ctypes.c_int
+_lib.poly_wasm_stepplan_kernel_n_params.argtypes = [_ptr, ctypes.c_int]
+
+_lib.poly_wasm_stepplan_n_buffers.restype = ctypes.c_int
+_lib.poly_wasm_stepplan_n_buffers.argtypes = [_ptr]
+
+_lib.poly_wasm_stepplan_n_bindable_buffers.restype = ctypes.c_int
+_lib.poly_wasm_stepplan_n_bindable_buffers.argtypes = [_ptr]
+
+_lib.poly_wasm_stepplan_kernel_param_buf_index.restype = ctypes.c_int
+_lib.poly_wasm_stepplan_kernel_param_buf_index.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
+
+_lib.poly_wasm_stepplan_exec_order.restype = _ip
+_lib.poly_wasm_stepplan_exec_order.argtypes = [_ptr, _ip]
+
+_lib.poly_wasm_stepplan_destroy.restype = None
+_lib.poly_wasm_stepplan_destroy.argtypes = [_ptr]
 
 # --- PolyInstance (instance.h) ---
 

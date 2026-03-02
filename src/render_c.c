@@ -825,9 +825,15 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_TRUNC:
     snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
       ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)", s0); break;
-  case POLY_OP_EXP2:       snprintf(buf, cap, "exp2f(%s)", s0); break;
-  case POLY_OP_LOG2:       snprintf(buf, cap, "log2f(%s)", s0); break;
-  case POLY_OP_SIN:        snprintf(buf, cap, "sinf(%s)", s0); break;
+  case POLY_OP_EXP2:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "exp2(%s)" : "exp2f(%s)", s0); break;
+  case POLY_OP_LOG2:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "log2(%s)" : "log2f(%s)", s0); break;
+  case POLY_OP_SIN:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "sin(%s)" : "sinf(%s)", s0); break;
   case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
   /* binary */
   case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;

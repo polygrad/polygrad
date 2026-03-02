@@ -178,7 +178,7 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
    * Pipeline: sym → group_for_reduce → pm_reduce(with sink END merge)
    *        → sym → decomp → transcendental → decomp → gpudims
    * CUDA has native FMA: decomp preserves MULACC and fuses MUL+ADD→MULACC. */
-  PolyRendererCaps cuda_caps = { .has_mulacc = true };
+  PolyRendererCaps cuda_caps = { .has_mulacc = true, .has_threefry = false };
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   sink = poly_group_for_reduce(ctx, sink, 256);
   sink = poly_apply_pm_reduce(ctx, sink);

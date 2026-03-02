@@ -111,13 +111,30 @@ This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c
 | Kahn's algorithm for segment processing order | N/A (single pass) | Shared intermediates (e.g., qkv split into q/k/v in attention) must receive ALL upstream gradient contributions before processing; Kahn's topological sort ensures correct ordering |
 | Numpy fallback for reduce-max backward | Autograd handles all ops uniformly | The MAX gradient rule creates reduce→expand→alu patterns that the scheduler can't realize correctly; the max backward is computed in numpy instead |
 | Eager gradient realization (no double-backward) | Lazy gradient tensors (double-backward possible) | Gradients are realized eagerly per segment into numpy arrays, so `grad(grad(loss))` isn't possible. First-order optimization (SGD/Adam/AdamW) is unaffected |
+| Frontend creation helpers (`rand`, `randn`, `arange`, `full`, `eye`, `linspace`, `tril`, `triu`) use ctx-scoped constant-buffer auto-binding as a convenience path | Device-native RNG/creation flow in Tensor runtime | Track C kept this additive to avoid breaking `PolyStep`/FFI contracts; for large tensors or hot loops, prefer explicit buffer bindings/device-resident generation |
+| `poly_rand` uses top-24-bit extraction (SHR 8, CAST f32, MUL 2^-24) producing 2^24 distinct uniform [0,1) values | Mantissa-bit randomization (set exponent=1, bitcast, subtract 1.0) | Simpler codegen path; both produce uniform [0,1) but float bit patterns differ for same THREEFRY output |
 
+## RNG contract
+
+`poly_rand` is deterministic given (seed, shape). No hidden stream state. The pipeline is:
+
+1. Counter tensor: `[0, 1, ..., numel-1]` as uint32
+2. Seed mixing: `mixed_key = key_lo ^ ((key_hi << 16) | (key_hi >> 16))` where `key_lo = seed & 0xffffffff`, `key_hi = seed >> 32`
+3. `THREEFRY(counter, mixed_key)` -- threefry2x32 with 5 rounds, fully decomposed to integer ALU by codegen
+4. Extract top 24 bits: `SHR(bits, 8)`
+5. Convert: `CAST(uint32 -> float32) * (1.0 / 16777216.0)` producing uniform [0,1)
+
+`poly_randn` applies Box-Muller to two `poly_rand` calls (second uses `seed ^ 0x9E3779B97F4A7C15`).
+
+Tier 1 (bitwise): same platform + binary + seed -> identical floats. Tested by `c2c_rand_bitpattern_8` and `c2c_rand_determinism`.
+
+Tier 2 (statistical): mean/variance within expected bounds. Tested by `c2c_rand_range_and_stats` and `c2c_randn_tails`.
 
 ## Building
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test          # build + run 346 C tests (ASan/UBSan)
+make test          # build + run 393 C tests (ASan/UBSan)
 make test-wasm     # build + run 47 WASM tests
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
