@@ -125,6 +125,31 @@ void wb_append(WasmBuf *dst, const WasmBuf *src);
 #define WASM_OP_I32_SHR_S     0x75
 #define WASM_OP_I32_SHR_U     0x76
 
+/* ── WASM opcodes: i64 ───────────────────────────────────────────────── */
+
+#define WASM_OP_I64_CONST     0x42
+#define WASM_OP_I64_EQZ       0x50
+#define WASM_OP_I64_EQ        0x51
+#define WASM_OP_I64_NE        0x52
+#define WASM_OP_I64_LT_S      0x53
+#define WASM_OP_I64_LT_U      0x54
+#define WASM_OP_I64_GT_S      0x55
+#define WASM_OP_I64_GT_U      0x56
+#define WASM_OP_I64_LE_S      0x57
+#define WASM_OP_I64_LE_U      0x58
+#define WASM_OP_I64_GE_S      0x59
+#define WASM_OP_I64_GE_U      0x5A
+#define WASM_OP_I64_ADD       0x7C
+#define WASM_OP_I64_SUB       0x7D
+#define WASM_OP_I64_MUL       0x7E
+#define WASM_OP_I64_DIV_S     0x7F
+#define WASM_OP_I64_AND       0x83
+#define WASM_OP_I64_OR        0x84
+#define WASM_OP_I64_XOR       0x85
+#define WASM_OP_I64_SHL       0x86
+#define WASM_OP_I64_SHR_S     0x87
+#define WASM_OP_I64_SHR_U     0x88
+
 /* ── WASM opcodes: f32 ───────────────────────────────────────────────── */
 
 #define WASM_OP_F32_CONST     0x43
@@ -146,14 +171,51 @@ void wb_append(WasmBuf *dst, const WasmBuf *src);
 #define WASM_OP_F32_MAX       0x97
 #define WASM_OP_F32_COPYSIGN  0x98
 
+/* ── WASM opcodes: f64 ───────────────────────────────────────────────── */
+
+#define WASM_OP_F64_CONST     0x44
+#define WASM_OP_F64_EQ        0x61
+#define WASM_OP_F64_NE        0x62
+#define WASM_OP_F64_LT        0x63
+#define WASM_OP_F64_GT        0x64
+#define WASM_OP_F64_LE        0x65
+#define WASM_OP_F64_GE        0x66
+#define WASM_OP_F64_ABS       0x99
+#define WASM_OP_F64_NEG       0x9A
+#define WASM_OP_F64_CEIL      0x9B
+#define WASM_OP_F64_FLOOR     0x9C
+#define WASM_OP_F64_TRUNC     0x9D
+#define WASM_OP_F64_SQRT      0x9F
+#define WASM_OP_F64_ADD       0xA0
+#define WASM_OP_F64_SUB       0xA1
+#define WASM_OP_F64_MUL       0xA2
+#define WASM_OP_F64_DIV       0xA3
+#define WASM_OP_F64_MIN       0xA4
+#define WASM_OP_F64_MAX       0xA5
+#define WASM_OP_F64_COPYSIGN  0xA6
+
 /* ── WASM opcodes: conversions ───────────────────────────────────────── */
 
-#define WASM_OP_I32_TRUNC_F32_S     0xA8
-#define WASM_OP_I32_TRUNC_F32_U     0xA9
-#define WASM_OP_F32_CONVERT_I32_S   0xB2
-#define WASM_OP_F32_CONVERT_I32_U   0xB3
-#define WASM_OP_I32_REINTERPRET_F32 0xBC
-#define WASM_OP_F32_REINTERPRET_I32 0xBE
+#define WASM_OP_I32_WRAP_I64         0xA7
+#define WASM_OP_I32_TRUNC_F32_S      0xA8
+#define WASM_OP_I32_TRUNC_F32_U      0xA9
+#define WASM_OP_I32_TRUNC_F64_S      0xAA
+#define WASM_OP_I32_TRUNC_F64_U      0xAB
+#define WASM_OP_I64_EXTEND_I32_S     0xAC
+#define WASM_OP_I64_EXTEND_I32_U     0xAD
+#define WASM_OP_I64_TRUNC_F64_S      0xB0
+#define WASM_OP_I64_TRUNC_F64_U      0xB1
+#define WASM_OP_F32_CONVERT_I32_S    0xB2
+#define WASM_OP_F32_CONVERT_I32_U    0xB3
+#define WASM_OP_F32_DEMOTE_F64       0xB6
+#define WASM_OP_F64_CONVERT_I32_S    0xB7
+#define WASM_OP_F64_CONVERT_I32_U    0xB8
+#define WASM_OP_F64_CONVERT_I64_S    0xB9
+#define WASM_OP_F64_PROMOTE_F32      0xBB
+#define WASM_OP_I32_REINTERPRET_F32  0xBC
+#define WASM_OP_I64_REINTERPRET_F64  0xBD
+#define WASM_OP_F32_REINTERPRET_I32  0xBE
+#define WASM_OP_F64_REINTERPRET_I64  0xBF
 
 /* ── WASM SIMD prefix + opcodes ──────────────────────────────────────── */
 
@@ -175,6 +237,30 @@ void wb_append(WasmBuf *dst, const WasmBuf *src);
 #define WASM_SIMD_F32X4_MIN       0xE8
 #define WASM_SIMD_F32X4_MAX       0xE9
 #define WASM_SIMD_V128_BITSELECT  0x52
+
+/* f64x2 SIMD (prefixed: 0xFD + LEB128 sub-opcode) */
+#define WASM_SIMD_F64X2_EXTRACT   0x1D
+#define WASM_SIMD_F64X2_REPLACE   0x1E
+#define WASM_SIMD_F64X2_ABS       0xEC
+#define WASM_SIMD_F64X2_NEG       0xED
+#define WASM_SIMD_F64X2_SQRT      0xEF
+#define WASM_SIMD_F64X2_ADD       0xF0
+#define WASM_SIMD_F64X2_SUB       0xF1
+#define WASM_SIMD_F64X2_MUL       0xF2
+#define WASM_SIMD_F64X2_DIV       0xF3
+#define WASM_SIMD_F64X2_MIN       0xF4
+#define WASM_SIMD_F64X2_MAX       0xF5
+#define WASM_SIMD_F64X2_SPLAT     0x14
+
+/* i64x2 SIMD (prefixed: 0xFD + LEB128 sub-opcode) */
+#define WASM_SIMD_I64X2_SPLAT     0x12
+#define WASM_SIMD_I64X2_EXTRACT   0x1C
+#define WASM_SIMD_I64X2_ADD       0xCE
+#define WASM_SIMD_I64X2_SUB       0xD1
+#define WASM_SIMD_I64X2_MUL       0xD5
+#define WASM_SIMD_I64X2_SHL       0xCB
+#define WASM_SIMD_I64X2_SHR_S     0xCC
+#define WASM_SIMD_I64X2_SHR_U     0xCD
 
 /* ── Block types ─────────────────────────────────────────────────────── */
 

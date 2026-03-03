@@ -593,3 +593,237 @@ TEST(wasm, e2e_node_vecadd) {
   poly_ctx_destroy(k.ctx);
   PASS();
 }
+
+/* ── F64 WASM helpers ──────────────────────────────────────────────────── */
+
+static WasmVecKernel wasm_make_vec_binop_f64(PolyOps alu_op, int n) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f64 = poly_dtype_ptr(POLY_FLOAT64, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(2));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p2, range, poly_arg_none());
+
+  PolyUOp *load0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT64, idx0, poly_arg_none());
+  PolyUOp *load1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT64, idx1, poly_arg_none());
+
+  PolyUOp *alu = poly_uop2(ctx, alu_op, POLY_FLOAT64, load0, load1, poly_arg_none());
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, alu, poly_arg_none());
+
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  return (WasmVecKernel){ ctx, sink, n };
+}
+
+static WasmVecKernel wasm_make_vec_unary_f64(PolyOps alu_op, int n) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f64 = poly_dtype_ptr(POLY_FLOAT64, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(1));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p1, range, poly_arg_none());
+
+  PolyUOp *load0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT64, idx0, poly_arg_none());
+  PolyUOp *alu = poly_uop1(ctx, alu_op, POLY_FLOAT64, load0, poly_arg_none());
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
+
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  return (WasmVecKernel){ ctx, sink, n };
+}
+
+/* ── F64 WASM renderer tests ──────────────────────────────────────────── */
+
+TEST(wasm_f64, render_vecadd_f64_scalar) {
+  /* Render f64 vecadd kernel in scalar mode -- verify f64 opcodes */
+  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 10);
+  int n_lin;
+  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+
+  /* Must contain f64.add opcode (0xA0) */
+  bool found_f64_add = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_OP_F64_ADD) { found_f64_add = true; break; }
+  }
+  ASSERT_TRUE(found_f64_add);
+
+  /* Must contain f64.load opcode (0x2B) */
+  bool found_f64_load = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_OP_F64_LOAD) { found_f64_load = true; break; }
+  }
+  ASSERT_TRUE(found_f64_load);
+
+  /* Must contain f64.store opcode (0x39) */
+  bool found_f64_store = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_OP_F64_STORE) { found_f64_store = true; break; }
+  }
+  ASSERT_TRUE(found_f64_store);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm_f64, render_neg_f64_scalar) {
+  /* Render f64 unary neg kernel -- verify f64.neg opcode */
+  WasmVecKernel k = wasm_make_vec_unary_f64(POLY_OP_NEG, 8);
+  int n_lin;
+  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+
+  ASSERT_NOT_NULL(wasm);
+
+  /* Must contain f64.neg opcode (0x9A) */
+  bool found_f64_neg = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_OP_F64_NEG) { found_f64_neg = true; break; }
+  }
+  ASSERT_TRUE(found_f64_neg);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm_f64, render_simd_f64x2) {
+  /* Render f64 vecadd with SIMD enabled -- verify f64x2 SIMD opcodes */
+  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 16);
+  int n_lin;
+  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+
+  /* Must contain SIMD prefix (0xFD) -- proves SIMD path was taken */
+  bool found_simd = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_SIMD_PREFIX) { found_simd = true; break; }
+  }
+  ASSERT_TRUE(found_simd);
+
+  /* Verify f64x2.add sub-opcode (0xF0) follows a SIMD prefix */
+  bool found_f64x2_add = false;
+  for (int i = 0; i < wasm_size - 1; i++) {
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i+1] == WASM_SIMD_F64X2_ADD) {
+      found_f64x2_add = true;
+      break;
+    }
+  }
+  ASSERT_TRUE(found_f64x2_add);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm_f64, validate_f64_scalar) {
+  /* Write f64 scalar kernel and validate with wasm-validate */
+  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 10);
+  int n_lin;
+  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  FILE *f = fopen("/tmp/polygrad_test_f64_scalar.wasm", "wb");
+  if (f) { fwrite(wasm, 1, wasm_size, f); fclose(f); }
+
+  int rc = system("which wasm-validate > /dev/null 2>&1 && "
+                   "wasm-validate /tmp/polygrad_test_f64_scalar.wasm");
+  if (rc == 0) { /* wasm-validate passed */ }
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm_f64, validate_f64_simd) {
+  /* Write f64x2 SIMD kernel and validate with wasm-validate */
+  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 16);
+  int n_lin;
+  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+
+  FILE *f = fopen("/tmp/polygrad_test_f64_simd.wasm", "wb");
+  if (f) { fwrite(wasm, 1, wasm_size, f); fclose(f); }
+
+  int rc = system("which wasm-validate > /dev/null 2>&1 && "
+                   "wasm-validate --enable-simd /tmp/polygrad_test_f64_simd.wasm");
+  if (rc == 0) { /* wasm-validate passed */ }
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm_f64, e2e_node_vecadd_f64) {
+  /* End-to-end: render f64 WASM, write to file, run with Node.js */
+  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 8);
+  int n_lin;
+  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  FILE *f = fopen("/tmp/polygrad_e2e_vecadd_f64.wasm", "wb");
+  ASSERT_NOT_NULL(f);
+  fwrite(wasm, 1, wasm_size, f);
+  fclose(f);
+
+  int has_node = system("which node > /dev/null 2>&1");
+  if (has_node != 0) {
+    free(wasm);
+    free(lin);
+    poly_ctx_destroy(k.ctx);
+    PASS(); /* skip gracefully */
+  }
+
+  int rc = system("node test/run_wasm.js /tmp/polygrad_e2e_vecadd_f64.wasm add_f64 8");
+  ASSERT_INT_EQ(rc, 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}

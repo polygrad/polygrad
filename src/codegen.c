@@ -1119,195 +1119,237 @@ static PolyPatternMatcher *poly_pm_decomp(void) {
   return poly_pm_decomp_with_caps(false, false);
 }
 
-/* ── pm_transcendental: EXP2 → polynomial approximation ──────────────── */
+/* ── pm_transcendental: EXP2/LOG2/SIN → polynomial approximation ─────── */
+
+/* Dtype-parametric helpers for IEEE 754 bit manipulation. */
+static int xd_mantissa_bits(PolyDType dt) { return dt.bitsize == 64 ? 52 : 23; }
+static int xd_exponent_bias(PolyDType dt) { return dt.bitsize == 64 ? 1023 : 127; }
+static int64_t xd_exponent_mask(PolyDType dt) { return dt.bitsize == 64 ? 0x7FFLL : 0xFFLL; }
+static PolyDType xd_int_for_float(PolyDType dt) { return dt.bitsize == 64 ? POLY_INT64 : POLY_INT32; }
+
+/* Build a polyN Horner evaluation: acc = c[0]; for i in 1..n: acc = acc*x + c[i] */
+static PolyUOp *xd_polyN(PolyCtx *ctx, PolyDType ft, PolyUOp *x,
+                          const double *coeffs, int ncoeffs) {
+  PolyUOp *u = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(coeffs[0]));
+  for (int i = 1; i < ncoeffs; i++) {
+    u = poly_uop2(ctx, POLY_OP_MUL, ft, u, x, poly_arg_none());
+    u = poly_uop2(ctx, POLY_OP_ADD, ft, u,
+                  poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(coeffs[i])),
+                  poly_arg_none());
+  }
+  return u;
+}
+
+/* _lazy_map_numbers: mask +-inf/NaN to replacement values.
+ * x.ne(inf).where(x.ne(x).where(nan_val, x.ne(-inf).where(ratio, ninf_val)), pinf_val) */
+static PolyUOp *xd_lazy_map_numbers(PolyCtx *ctx, PolyDType ft, PolyUOp *d,
+                                     PolyUOp *pinf_val, PolyUOp *ninf_val,
+                                     PolyUOp *nan_val, PolyUOp *ratio) {
+  PolyDType bt = POLY_BOOL;
+  PolyUOp *f_neg_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
+  PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
+  PolyUOp *nan_chk    = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, d, poly_arg_none());
+  PolyUOp *neginf_chk = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_neg_inf, poly_arg_none());
+  PolyUOp *posinf_chk = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_pos_inf, poly_arg_none());
+  PolyUOp *inner = poly_uop3(ctx, POLY_OP_WHERE, ft, neginf_chk, ratio, ninf_val, poly_arg_none());
+  PolyUOp *mid   = poly_uop3(ctx, POLY_OP_WHERE, ft, nan_chk, nan_val, inner, poly_arg_none());
+  return poly_uop3(ctx, POLY_OP_WHERE, ft, posinf_chk, mid, pinf_val, poly_arg_none());
+}
+
+/* rintk: round float d to nearest integer (away from 0). */
+static PolyUOp *xd_rintk(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d) {
+  PolyDType bt = POLY_BOOL;
+  PolyUOp *f_zero     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
+  PolyUOp *f_neg_half = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.5));
+  PolyUOp *f_half     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.5));
+  PolyUOp *lt0    = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_zero, poly_arg_none());
+  PolyUOp *offset = poly_uop3(ctx, POLY_OP_WHERE, ft, lt0, f_neg_half, f_half, poly_arg_none());
+  PolyUOp *rounded = poly_uop2(ctx, POLY_OP_ADD, ft, d, offset, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, it, rounded, poly_arg_none());
+}
+
+/* pow2if: cast(2^q, float_dtype) via IEEE 754 exponent construction.
+ * ((q + bias) << mantissa_bits).bitcast(float) */
+static PolyUOp *xd_pow2if(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *q) {
+  int bias = xd_exponent_bias(ft);
+  int mbits = xd_mantissa_bits(ft);
+  PolyUOp *i_bias = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(bias));
+  PolyUOp *i_mb   = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(mbits));
+  PolyUOp *added  = poly_uop2(ctx, POLY_OP_ADD, it, q, i_bias, poly_arg_none());
+  PolyUOp *shifted = poly_uop2(ctx, POLY_OP_SHL, it, added, i_mb, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_BITCAST, ft, shifted, poly_arg_none());
+}
+
+/* ldexp2k: d * 2^e. Splits e into two halves to avoid overflow in pow2if. */
+static PolyUOp *xd_ldexp2k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d, PolyUOp *e) {
+  PolyUOp *i_two = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(2));
+  PolyUOp *half_e  = poly_uop2(ctx, POLY_OP_IDIV, it, e, i_two, poly_arg_none());
+  PolyUOp *other_e = poly_uop2(ctx, POLY_OP_SUB, it, e, half_e, poly_arg_none());
+  PolyUOp *pow1 = xd_pow2if(ctx, ft, it, half_e);
+  PolyUOp *pow2 = xd_pow2if(ctx, ft, it, other_e);
+  PolyUOp *r = poly_uop2(ctx, POLY_OP_MUL, ft, d, pow1, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_MUL, ft, r, pow2, poly_arg_none());
+}
+
+/* ldexp3k: d * 2^e via bit manipulation.
+ * (d.bitcast(int) + e.cast(int) << mantissa_bits).bitcast(float) */
+static PolyUOp *xd_ldexp3k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d, PolyUOp *e) {
+  int mbits = xd_mantissa_bits(ft);
+  PolyUOp *i_mb = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(mbits));
+  PolyUOp *d_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, d, poly_arg_none());
+  PolyUOp *e_int  = poly_uop1(ctx, POLY_OP_CAST, it, e, poly_arg_none());
+  PolyUOp *e_shift = poly_uop2(ctx, POLY_OP_SHL, it, e_int, i_mb, poly_arg_none());
+  PolyUOp *m_bits = poly_uop2(ctx, POLY_OP_ADD, it, d_bits, e_shift, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_BITCAST, ft, m_bits, poly_arg_none());
+}
+
+/* ilogb2k: integer part of log2(d) for normalized fp values.
+ * (d.bitcast(int) >> mantissa_bits) & exponent_mask - exponent_bias */
+static PolyUOp *xd_ilogb2k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d) {
+  int mbits = xd_mantissa_bits(ft);
+  int64_t emask = xd_exponent_mask(ft);
+  int bias = xd_exponent_bias(ft);
+  PolyUOp *i_mb   = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(mbits));
+  PolyUOp *i_mask = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(emask));
+  PolyUOp *i_bias = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(bias));
+  PolyUOp *d_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, d, poly_arg_none());
+  PolyUOp *exp_bits = poly_uop2(ctx, POLY_OP_SHR, it, d_bits, i_mb, poly_arg_none());
+  PolyUOp *masked = poly_uop2(ctx, POLY_OP_AND, it, exp_bits, i_mask, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_SUB, it, masked, i_bias, poly_arg_none());
+}
 
 /*
  * rule_decomp_exp2 — Port of tinygrad's xexp2 from decompositions.py.
  *
  * EXP2(d) → polynomial approximation with IEEE 754 bit manipulation.
- * Only handles float32 (the only transcendental dtype in CPU parity tests).
+ * Supports float32 (7 coefficients) and float64 (12 coefficients).
  *
- * Algorithm (float32):
- *   1. _lazy_map_numbers: mask ±inf/NaN to 0
+ * Algorithm:
+ *   1. _lazy_map_numbers: mask +-inf/NaN to 0
  *   2. rintk: round x to nearest integer q
  *   3. s = x - q (fractional part)
- *   4. polyN: 7-coeff Chebyshev polynomial on s ∈ [-0.5, 0.5]
+ *   4. polyN: Horner polynomial on s
  *   5. ldexp2k: multiply by 2^q via IEEE 754 exponent construction
- *   6. Edge cases: overflow→inf, underflow→0, NaN→NaN
+ *   6. Edge cases: overflow->inf, underflow->0, NaN->NaN
  */
 static PolyUOp *rule_decomp_exp2(PolyCtx *ctx, PolyUOp *root,
                                   const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
-  /* Only decompose float32 for now */
-  if (root->dtype.bitsize != 32 || !poly_dtype_is_float(root->dtype))
+  if (!poly_dtype_is_float(root->dtype) ||
+      (root->dtype.bitsize != 32 && root->dtype.bitsize != 64))
     return NULL;
 
-  PolyDType ft = root->dtype;  /* float32 */
-  PolyDType it = POLY_INT32;
+  PolyDType ft = root->dtype;
+  PolyDType it = xd_int_for_float(ft);
   PolyDType bt = POLY_BOOL;
+  bool is_f64 = (ft.bitsize == 64);
 
   /* ── Constants ───────────────────────────────────────────────────── */
-  PolyUOp *f_zero     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
-  PolyUOp *f_neg_half = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.5));
-  PolyUOp *f_half     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.5));
-  PolyUOp *f_neg_inf  = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
-  PolyUOp *f_pos_inf  = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
-  PolyUOp *f_nan      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
-  PolyUOp *f_neg150   = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-150.0));
-  PolyUOp *f_128      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(128.0));
-  PolyUOp *b_true     = poly_uop0(ctx, POLY_OP_CONST, bt, poly_arg_bool(true));
-  PolyUOp *i_23       = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(23));
-  PolyUOp *i_127      = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(127));
+  PolyUOp *f_zero    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
+  PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
+  PolyUOp *f_nan     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
+  PolyUOp *b_true    = poly_uop0(ctx, POLY_OP_CONST, bt, poly_arg_bool(true));
 
-  /* Float32 minimax polynomial coefficients */
-  static const double coeffs[] = {
+  /* Dtype-specific overflow/underflow thresholds (from tinygrad) */
+  double upper = is_f64 ? 1024.0 : 128.0;
+  double lower = is_f64 ? -2000.0 : -150.0;
+  PolyUOp *f_upper = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(upper));
+  PolyUOp *f_lower = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(lower));
+
+  /* Polynomial coefficients (from tinygrad decompositions.py) */
+  static const double coeffs_f32[] = {
     0.1535920892e-3, 0.1339262701e-2, 0.9618384764e-2,
     0.5550347269e-1, 0.2402264476e+0, 0.6931471825e+0, 1.0
   };
-  PolyUOp *f_c[7];
-  for (int i = 0; i < 7; i++)
-    f_c[i] = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(coeffs[i]));
+  static const double coeffs_f64[] = {
+    0.4434359082926529454e-9, 0.7073164598085707425e-8,
+    0.1017819260921760451e-6, 0.1321543872511327615e-5,
+    0.1525273353517584730e-4, 0.1540353045101147808e-3,
+    0.1333355814670499073e-2, 0.9618129107597600536e-2,
+    0.5550410866482046596e-1, 0.2402265069591012214e+0,
+    0.6931471805599452862e+0, 0.1000000000000000000e+1
+  };
+  const double *coeffs = is_f64 ? coeffs_f64 : coeffs_f32;
+  int ncoeffs = is_f64 ? 12 : 7;
 
-  /* ── Step 1: _lazy_map_numbers — mask ±inf/NaN to 0 ────────────── */
-  /* x = d.ne(inf).where(d.ne(d).where(0, d.ne(-inf).where(d, 0)), 0) */
-  PolyUOp *nan_chk    = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, d, poly_arg_none());
-  PolyUOp *neginf_chk = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_neg_inf,
-                                   poly_arg_none());
-  PolyUOp *posinf_chk = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_pos_inf,
-                                   poly_arg_none());
-  PolyUOp *inner = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                              neginf_chk, d, f_zero, poly_arg_none());
-  PolyUOp *mid   = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                              nan_chk, f_zero, inner, poly_arg_none());
-  PolyUOp *x     = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                              posinf_chk, mid, f_zero, poly_arg_none());
+  /* ── Step 1: _lazy_map_numbers — mask +-inf/NaN to 0 ────────────── */
+  PolyUOp *x = xd_lazy_map_numbers(ctx, ft, d, f_zero, f_zero, f_zero, d);
+  PolyUOp *nan_chk = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, d, poly_arg_none());
 
   /* ── Step 2: rintk — round to nearest integer ──────────────────── */
-  /* q = (x + (x<0).where(-0.5, 0.5)).cast(int32)                    */
-  PolyUOp *x_lt0    = poly_uop2(ctx, POLY_OP_CMPLT, bt, x, f_zero,
-                                 poly_arg_none());
-  PolyUOp *rounding = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                                 x_lt0, f_neg_half, f_half, poly_arg_none());
-  PolyUOp *rounded  = poly_uop2(ctx, POLY_OP_ADD, ft, x, rounding,
-                                 poly_arg_none());
-  PolyUOp *q        = poly_uop1(ctx, POLY_OP_CAST, it, rounded,
-                                 poly_arg_none());
+  PolyUOp *q = xd_rintk(ctx, ft, it, x);
 
   /* ── Step 3: fractional part s = x - q.cast(float) ────────────── */
   PolyUOp *q_float = poly_uop1(ctx, POLY_OP_CAST, ft, q, poly_arg_none());
-  PolyUOp *s       = poly_uop2(ctx, POLY_OP_SUB, ft, x, q_float,
-                                poly_arg_none());
+  PolyUOp *s = poly_uop2(ctx, POLY_OP_SUB, ft, x, q_float, poly_arg_none());
 
-  /* ── Step 4: polyN — Horner's method (7 coefficients) ──────────── */
-  /* reduce(lambda acc,c: acc*x+c, coeffs, 0.0)                       */
-  /* First iter: 0.0*s + c0 = c0 (constant folded, so start at c0)    */
-  PolyUOp *u = f_c[0];
-  for (int i = 1; i < 7; i++) {
-    u = poly_uop2(ctx, POLY_OP_MUL, ft, u, s, poly_arg_none());
-    u = poly_uop2(ctx, POLY_OP_ADD, ft, u, f_c[i], poly_arg_none());
-  }
+  /* ── Step 4: polyN — Horner's method ───────────────────────────── */
+  PolyUOp *u = xd_polyN(ctx, ft, s, coeffs, ncoeffs);
 
   /* ── Step 5: ldexp2k — u * 2^q ─────────────────────────────────── */
-  /* shr(q, 1) = q // 2. Emitted as IDIV; pm_decomp converts to SHR. */
-  PolyUOp *i_two   = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(2));
-  PolyUOp *half_q  = poly_uop2(ctx, POLY_OP_IDIV, it, q, i_two,
-                                poly_arg_none());
-  PolyUOp *other_q = poly_uop2(ctx, POLY_OP_SUB, it, q, half_q,
-                                poly_arg_none());
-  /* pow2if(half_q) = ((half_q + 127) << 23).bitcast(float) */
-  PolyUOp *p1_add = poly_uop2(ctx, POLY_OP_ADD, it, half_q, i_127,
-                               poly_arg_none());
-  PolyUOp *p1_shl = poly_uop2(ctx, POLY_OP_SHL, it, p1_add, i_23,
-                               poly_arg_none());
-  PolyUOp *pow1   = poly_uop1(ctx, POLY_OP_BITCAST, ft, p1_shl,
-                               poly_arg_none());
-  /* pow2if(other_q) = ((other_q + 127) << 23).bitcast(float) */
-  PolyUOp *p2_add = poly_uop2(ctx, POLY_OP_ADD, it, other_q, i_127,
-                               poly_arg_none());
-  PolyUOp *p2_shl = poly_uop2(ctx, POLY_OP_SHL, it, p2_add, i_23,
-                               poly_arg_none());
-  PolyUOp *pow2   = poly_uop1(ctx, POLY_OP_BITCAST, ft, p2_shl,
-                               poly_arg_none());
-  /* result = u * pow1 * pow2 */
-  PolyUOp *result = poly_uop2(ctx, POLY_OP_MUL, ft, u, pow1, poly_arg_none());
-  result = poly_uop2(ctx, POLY_OP_MUL, ft, result, pow2, poly_arg_none());
+  PolyUOp *result = xd_ldexp2k(ctx, ft, it, u, q);
 
   /* ── Step 6: edge cases ─────────────────────────────────────────── */
-  /* (d >= 128).where(inf, u) = CMPNE(CMPLT(d, 128), true).where(inf, u) */
-  PolyUOp *cmp_hi = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_128,
-                               poly_arg_none());
-  PolyUOp *ge_hi  = poly_uop2(ctx, POLY_OP_CMPNE, bt, cmp_hi, b_true,
-                               poly_arg_none());
-  result = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                       ge_hi, f_pos_inf, result, poly_arg_none());
-  /* (d < -150).where(0, u) */
-  PolyUOp *cmp_lo = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_neg150,
-                               poly_arg_none());
-  result = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                       cmp_lo, f_zero, result, poly_arg_none());
-  /* d.ne(d).where(nan, u) — nan_chk from step 1 reused via CSE */
-  result = poly_uop3(ctx, POLY_OP_WHERE, ft,
-                       nan_chk, f_nan, result, poly_arg_none());
+  /* (d >= upper).where(inf, result) */
+  PolyUOp *cmp_hi = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_upper, poly_arg_none());
+  PolyUOp *ge_hi  = poly_uop2(ctx, POLY_OP_CMPNE, bt, cmp_hi, b_true, poly_arg_none());
+  result = poly_uop3(ctx, POLY_OP_WHERE, ft, ge_hi, f_pos_inf, result, poly_arg_none());
+  /* (d < lower).where(0, result) */
+  PolyUOp *cmp_lo = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_lower, poly_arg_none());
+  result = poly_uop3(ctx, POLY_OP_WHERE, ft, cmp_lo, f_zero, result, poly_arg_none());
+  /* d.ne(d).where(nan, result) — NaN propagation */
+  result = poly_uop3(ctx, POLY_OP_WHERE, ft, nan_chk, f_nan, result, poly_arg_none());
 
   return result;
 }
 
 /*
- * rule_decomp_log2 — Port of tinygrad's xlog2 for float32.
+ * rule_decomp_log2 — Port of tinygrad's xlog2.
  *
  * LOG2(d) → polynomial + IEEE754 exponent/mantissa manipulation.
+ * Supports float32 (3 coefficients) and float64 (7 coefficients).
  */
 static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root,
                                   const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
-  if (root->dtype.bitsize != 32 || !poly_dtype_is_float(root->dtype))
+  if (!poly_dtype_is_float(root->dtype) ||
+      (root->dtype.bitsize != 32 && root->dtype.bitsize != 64))
     return NULL;
 
   PolyDType ft = root->dtype;
-  PolyDType it = POLY_INT32;
+  PolyDType it = xd_int_for_float(ft);
   PolyDType bt = POLY_BOOL;
+  bool is_f64 = (ft.bitsize == 64);
 
   /* Constants */
-  PolyUOp *f_zero    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
+  PolyUOp *f_zero     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
   PolyUOp *f_neg_zero = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.0));
-  PolyUOp *f_one     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0));
-  PolyUOp *f_neg_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
-  PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
-  PolyUOp *f_nan     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
-  PolyUOp *f_1e4     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1e-4));
-  PolyUOp *f_4_3     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0 / 0.75));
-  PolyUOp *f_64      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(64.0));
-  PolyUOp *f_2p64    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(18446744073709551616.0));
-  PolyUOp *f_k1      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(2.8853900432586669922));
-  PolyUOp *f_k2      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(3.2734474483568488616e-08));
-  PolyUOp *i_23      = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(23));
-  PolyUOp *i_255     = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(255));
-  PolyUOp *i_127     = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(127));
+  PolyUOp *f_one      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0));
+  PolyUOp *f_neg_inf  = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
+  PolyUOp *f_pos_inf  = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
+  PolyUOp *f_nan      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
+  PolyUOp *f_1e4      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1e-4));
+  PolyUOp *f_4_3      = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0 / 0.75));
+  PolyUOp *f_64       = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(64.0));
+  PolyUOp *f_2p64     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(18446744073709551616.0));
 
-  /* Denormal handling */
+  /* Denormal handling: scale up subnormals by 2^64 */
   PolyUOp *is_denormal = poly_uop2(ctx, POLY_OP_CMPLT, bt, d, f_1e4, poly_arg_none());
   PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, ft, d, f_2p64, poly_arg_none());
   PolyUOp *a = poly_uop3(ctx, POLY_OP_WHERE, ft, is_denormal, scaled, d, poly_arg_none());
 
-  /* e = ilogb2k(a * (1/0.75)) */
+  /* e = ilogb2k(a * (1/0.75)), using shared helper */
   PolyUOp *a_scaled = poly_uop2(ctx, POLY_OP_MUL, ft, a, f_4_3, poly_arg_none());
-  PolyUOp *a_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, a_scaled, poly_arg_none());
-  PolyUOp *exp_bits = poly_uop2(ctx, POLY_OP_SHR, it, a_bits, i_23, poly_arg_none());
-  PolyUOp *exp_masked = poly_uop2(ctx, POLY_OP_AND, it, exp_bits, i_255, poly_arg_none());
-  PolyUOp *e_int = poly_uop2(ctx, POLY_OP_SUB, it, exp_masked, i_127, poly_arg_none());
+  PolyUOp *e_int = xd_ilogb2k(ctx, ft, it, a_scaled);
   PolyUOp *e = poly_uop1(ctx, POLY_OP_CAST, ft, e_int, poly_arg_none());
 
-  /* m = ldexp3k(a, -e) */
+  /* m = ldexp3k(a, -e), using shared helper */
   PolyUOp *neg_e = poly_uop1(ctx, POLY_OP_NEG, ft, e, poly_arg_none());
-  PolyUOp *neg_e_i = poly_uop1(ctx, POLY_OP_CAST, it, neg_e, poly_arg_none());
-  PolyUOp *e_shift = poly_uop2(ctx, POLY_OP_SHL, it, neg_e_i, i_23, poly_arg_none());
-  PolyUOp *a_raw_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, a, poly_arg_none());
-  PolyUOp *m_bits = poly_uop2(ctx, POLY_OP_ADD, it, a_raw_bits, e_shift, poly_arg_none());
-  PolyUOp *m = poly_uop1(ctx, POLY_OP_BITCAST, ft, m_bits, poly_arg_none());
+  PolyUOp *m = xd_ldexp3k(ctx, ft, it, a, neg_e);
 
-  /* Denormal exponent correction */
+  /* Denormal exponent correction: subtract the 2^64 scaling */
   PolyUOp *e_minus64 = poly_uop2(ctx, POLY_OP_SUB, ft, e, f_64, poly_arg_none());
   PolyUOp *e_adj = poly_uop3(ctx, POLY_OP_WHERE, ft, is_denormal, e_minus64, e, poly_arg_none());
 
@@ -1317,28 +1359,42 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root,
   PolyUOp *x = poly_uop2(ctx, POLY_OP_FDIV, ft, m_minus1, m_plus1, poly_arg_none());
   PolyUOp *x2 = poly_uop2(ctx, POLY_OP_MUL, ft, x, x, poly_arg_none());
 
-  /* t = polyN(x2, [0.4374550283, 0.5764790177, 0.9618012905120]) */
-  PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.4374550283));
-  t = poly_uop2(ctx, POLY_OP_MUL, ft, t, x2, poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_ADD, ft, t, poly_uop0(ctx, POLY_OP_CONST, ft,
-                                                     poly_arg_float(0.5764790177)),
-                poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_MUL, ft, t, x2, poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_ADD, ft, t, poly_uop0(ctx, POLY_OP_CONST, ft,
-                                                     poly_arg_float(0.9618012905120)),
-                poly_arg_none());
+  /* Polynomial: dtype-specific coefficients */
+  static const double coeffs_f32[] = {0.4374550283, 0.5764790177, 0.9618012905120};
+  static const double coeffs_f64[] = {
+    0.2211941750456081490e+0, 0.2200768693152277689e+0,
+    0.2623708057488514656e+0, 0.3205977477944495502e+0,
+    0.4121985945485324709e+0, 0.5770780162997058982e+0,
+    0.96179669392608091449
+  };
+  const double *coeffs = is_f64 ? coeffs_f64 : coeffs_f32;
+  int ncoeffs = is_f64 ? 7 : 3;
+  PolyUOp *t = xd_polyN(ctx, ft, x2, coeffs, ncoeffs);
 
+  /* Result assembly: r = t*(x*x2) + e_adj + x*k1 [+ x*k2 for f32] */
   PolyUOp *xx2 = poly_uop2(ctx, POLY_OP_MUL, ft, x, x2, poly_arg_none());
   PolyUOp *r = poly_uop2(ctx, POLY_OP_MUL, ft, t, xx2, poly_arg_none());
   r = poly_uop2(ctx, POLY_OP_ADD, ft, r, e_adj, poly_arg_none());
-  r = poly_uop2(ctx, POLY_OP_ADD, ft, r,
-                poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k1, poly_arg_none()),
-                poly_arg_none());
-  r = poly_uop2(ctx, POLY_OP_ADD, ft, r,
-                poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k2, poly_arg_none()),
-                poly_arg_none());
 
-  /* Edge cases */
+  if (is_f64) {
+    /* f64: single multiplier constant, no s_lo term */
+    PolyUOp *f_k1 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(2.885390081777926774));
+    r = poly_uop2(ctx, POLY_OP_ADD, ft, r,
+                  poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k1, poly_arg_none()),
+                  poly_arg_none());
+  } else {
+    /* f32: k1 + s_lo term (x*k2) for extra precision */
+    PolyUOp *f_k1 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(2.8853900432586669922));
+    PolyUOp *f_k2 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(3.2734474483568488616e-08));
+    r = poly_uop2(ctx, POLY_OP_ADD, ft, r,
+                  poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k1, poly_arg_none()),
+                  poly_arg_none());
+    r = poly_uop2(ctx, POLY_OP_ADD, ft, r,
+                  poly_uop2(ctx, POLY_OP_MUL, ft, x, f_k2, poly_arg_none()),
+                  poly_arg_none());
+  }
+
+  /* Edge cases (same for f32 and f64) */
   PolyUOp *ne_inf = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_pos_inf, poly_arg_none());
   r = poly_uop3(ctx, POLY_OP_WHERE, ft, ne_inf, r, f_pos_inf, poly_arg_none());
   PolyUOp *ne_zero = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_zero, poly_arg_none());
@@ -1354,37 +1410,37 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root,
   return r;
 }
 
-/* sin_poly for float32, shared by tinygrad xsin small/large branches. */
-static PolyUOp *sin_poly_f32(PolyCtx *ctx, PolyUOp *d) {
+/* sin_poly: trig_poly from tinygrad, dtype-aware.
+ * Returns d * polyN(d*d, coeffs). Supports f32 (5 coeffs) and f64 (10 coeffs). */
+static PolyUOp *sin_poly(PolyCtx *ctx, PolyUOp *d) {
   PolyDType ft = d->dtype;
-  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0));
+  bool is_f64 = (ft.bitsize == 64);
   PolyUOp *d2 = poly_uop2(ctx, POLY_OP_MUL, ft, d, d, poly_arg_none());
-  PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(2.6083159809786593541503e-06));
-  t = poly_uop2(ctx, POLY_OP_MUL, ft, t, d2, poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_ADD, ft, t,
-                poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.0001981069071916863322258)),
-                poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_MUL, ft, t, d2, poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_ADD, ft, t,
-                poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.00833307858556509017944336)),
-                poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_MUL, ft, t, d2, poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_ADD, ft, t,
-                poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.166666597127914428710938)),
-                poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_MUL, ft, t, d2, poly_arg_none());
-  t = poly_uop2(ctx, POLY_OP_ADD, ft, t, one, poly_arg_none());
+  static const double coeffs_f32[] = {
+    2.6083159809786593541503e-06, -0.0001981069071916863322258,
+    0.00833307858556509017944336, -0.166666597127914428710938, 1.0
+  };
+  static const double coeffs_f64[] = {
+    -7.97255955009037868891952e-18,  2.81009972710863200091251e-15,
+    -7.64712219118158833288484e-13,  1.60590430605664501629054e-10,
+    -2.50521083763502045810755e-08,  2.75573192239198747630416e-06,
+    -0.000198412698412696162806809,  0.00833333333333332974823815,
+    -0.166666666666666657414808,     1.0
+  };
+  const double *coeffs = is_f64 ? coeffs_f64 : coeffs_f32;
+  int ncoeffs = is_f64 ? 10 : 5;
+  PolyUOp *t = xd_polyN(ctx, ft, d2, coeffs, ncoeffs);
   return poly_uop2(ctx, POLY_OP_MUL, ft, d, t, poly_arg_none());
 }
 
-/* tinygrad payne_hanek_reduction helper: select two_over_pi_f[i+offset]. */
+/* Payne-Hanek helper: select two_over_pi_f[i+offset] (f32 only). */
 static PolyUOp *take_two_over_pi_f32(PolyCtx *ctx, PolyUOp *i_u64, int offset) {
   static const uint32_t two_over_pi_f[] = {
     0x00000000u, 0x28be60dbu, 0x9391054au, 0x7f09d5f4u,
     0x7d4d3770u, 0x36d8a566u, 0x4f10e410u
   };
   const int len = (int)(sizeof(two_over_pi_f) / sizeof(two_over_pi_f[0]));
-  const int max_count = len - 2 - offset;  /* tinygrad condition: count+offset < len-1 */
+  const int max_count = len - 2 - offset;
   PolyUOp *out = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(0));
   for (int count = max_count; count >= 0; count--) {
     PolyUOp *cnt = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)count));
@@ -1396,16 +1452,82 @@ static PolyUOp *take_two_over_pi_f32(PolyCtx *ctx, PolyUOp *i_u64, int offset) {
   return out;
 }
 
+/* Cody-Waite _reduce_d for f32: 4-term PI subtraction. */
+static PolyUOp *cody_waite_reduce_f32(PolyCtx *ctx, PolyDType ft,
+                                       PolyUOp *x, PolyUOp *qf) {
+  PolyUOp *d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
+        poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-3.1414794921875)),
+        poly_arg_none()), x, poly_arg_none());
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
+        poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.00011315941810607910156)),
+        poly_arg_none()), d, poly_arg_none());
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
+        poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.9841872589410058936e-09)),
+        poly_arg_none()), d, poly_arg_none());
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
+        poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.2154201256553420762e-10)),
+        poly_arg_none()), d, poly_arg_none());
+  return d;
+}
+
+/* Cody-Waite _reduce_d for f64: qdh/q split with 4 PI constants. */
+static PolyUOp *cody_waite_reduce_f64(PolyCtx *ctx, PolyDType ft,
+                                       PolyUOp *x, PolyUOp *qdh, PolyUOp *qf) {
+  /* PI_A..D from tinygrad sleef reference */
+  static const double PI_A = 3.1415926218032836914;
+  static const double PI_B = 3.1786509424591713469e-08;
+  static const double PI_C = 1.2246467864107188502e-16;
+  static const double PI_D = 1.2736634327021899816e-24;
+
+  PolyUOp *pia = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-PI_A));
+  PolyUOp *pib = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-PI_B));
+  PolyUOp *pic = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-PI_C));
+  PolyUOp *pid = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-PI_D));
+
+  /* d = qdh * -PI_A + x */
+  PolyUOp *d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qdh, pia, poly_arg_none()), x, poly_arg_none());
+  /* d = q * -PI_A + d */
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf, pia, poly_arg_none()), d, poly_arg_none());
+  /* d = qdh * -PI_B + d */
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qdh, pib, poly_arg_none()), d, poly_arg_none());
+  /* d = q * -PI_B + d */
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf, pib, poly_arg_none()), d, poly_arg_none());
+  /* d = qdh * -PI_C + d */
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qdh, pic, poly_arg_none()), d, poly_arg_none());
+  /* d = q * -PI_C + d */
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qf, pic, poly_arg_none()), d, poly_arg_none());
+  /* d = (qdh + q) * -PI_D + d */
+  PolyUOp *qdh_plus_q = poly_uop2(ctx, POLY_OP_ADD, ft, qdh, qf, poly_arg_none());
+  d = poly_uop2(ctx, POLY_OP_ADD, ft,
+      poly_uop2(ctx, POLY_OP_MUL, ft, qdh_plus_q, pid, poly_arg_none()), d, poly_arg_none());
+  return d;
+}
+
 /*
- * rule_decomp_sin — Port of tinygrad's xsin for float32.
+ * rule_decomp_sin — Port of tinygrad's xsin.
  *
  * SIN(d) → sign handling + Cody-Waite / Payne-Hanek reduction + polynomial.
+ * Supports float32 and float64.
+ *
+ * f32: Cody-Waite (small) + Payne-Hanek (large), switchover at 30.0
+ * f64: Cody-Waite with qdh precision split (small) + Payne-Hanek (large)
  */
 static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
                                  const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
-  if (root->dtype.bitsize != 32 || !poly_dtype_is_float(root->dtype))
+  if (!poly_dtype_is_float(root->dtype) ||
+      (root->dtype.bitsize != 32 && root->dtype.bitsize != 64))
     return NULL;
 
   PolyDType ft = root->dtype;
@@ -1413,8 +1535,9 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
   PolyDType ut32 = POLY_UINT32;
   PolyDType ut64 = POLY_UINT64;
   PolyDType bt = POLY_BOOL;
+  bool is_f64 = (ft.bitsize == 64);
 
-  /* Constants */
+  /* Common constants */
   PolyUOp *f_zero    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
   PolyUOp *f_one     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0));
   PolyUOp *f_neg_one = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.0));
@@ -1425,8 +1548,8 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
   PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
   PolyUOp *f_neg_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
   PolyUOp *f_nan     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
-  PolyUOp *f_m_1_pi  = poly_uop0(ctx, POLY_OP_CONST, ft,
-                                  poly_arg_float(0.318309886183790671537767526745028724));
+  double m_1_pi = 0.318309886183790671537767526745028724;
+  PolyUOp *f_m_1_pi  = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(m_1_pi));
   PolyUOp *f_2p32    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(4294967296.0));
   PolyUOp *f_ph_mul  = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(3.4061215800865545e-19));
   PolyUOp *i_zero    = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(0));
@@ -1440,9 +1563,9 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
   PolyUOp *u_32      = poly_uop0(ctx, POLY_OP_CONST, ut64, poly_arg_int(32));
   PolyUOp *u_5       = poly_uop0(ctx, POLY_OP_CONST, ut64, poly_arg_int(5));
   PolyUOp *u_62      = poly_uop0(ctx, POLY_OP_CONST, ut64, poly_arg_int(62));
-  PolyUOp *u_mask    = poly_uop0(ctx, POLY_OP_CONST, ut64, poly_arg_int(0x3fffffffffffffffull));
-  PolyUOp *u_m1      = poly_uop0(ctx, POLY_OP_CONST, ut32, poly_arg_int(0x807fffffu));
-  PolyUOp *u_m2      = poly_uop0(ctx, POLY_OP_CONST, ut32, poly_arg_int(0x3f000000u));
+  PolyUOp *u_mask    = poly_uop0(ctx, POLY_OP_CONST, ut64, poly_arg_int(0x3fffffffffffffffULL));
+  PolyUOp *u_m1      = poly_uop0(ctx, POLY_OP_CONST, ut32, poly_arg_int(0x807fffffU));
+  PolyUOp *u_m2      = poly_uop0(ctx, POLY_OP_CONST, ut32, poly_arg_int(0x3f000000U));
 
   /* _lazy_map_numbers(d, 0, 0, 0, d) */
   PolyUOp *d_ne_pos_inf = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, f_pos_inf, poly_arg_none());
@@ -1459,48 +1582,69 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
   PolyUOp *x_sign= poly_uop3(ctx, POLY_OP_WHERE, ft, x_ne0, x_pm, f_zero, poly_arg_none());
   PolyUOp *x_abs = poly_uop2(ctx, POLY_OP_MUL, ft, x, x_sign, poly_arg_none());
 
-  /* Cody-Waite reduction (tinygrad cody_waite_reduction for float32). */
-  PolyUOp *qf_raw = poly_uop2(ctx, POLY_OP_MUL, ft, x_abs, f_m_1_pi, poly_arg_none());
-  PolyUOp *qf_lt0 = poly_uop2(ctx, POLY_OP_CMPLT, bt, qf_raw, f_zero, poly_arg_none());
-  PolyUOp *qf_off = poly_uop3(ctx, POLY_OP_WHERE, ft, qf_lt0, f_neg_half, f_half, poly_arg_none());
-  PolyUOp *qf_round = poly_uop2(ctx, POLY_OP_ADD, ft, qf_raw, qf_off, poly_arg_none());
-  PolyUOp *q_small = poly_uop1(ctx, POLY_OP_CAST, it, qf_round, poly_arg_none());
-  PolyUOp *qf = poly_uop1(ctx, POLY_OP_CAST, ft, q_small, poly_arg_none());
-  PolyUOp *r_small = poly_uop2(ctx, POLY_OP_ADD, ft,
-                               poly_uop2(ctx, POLY_OP_MUL, ft, qf,
-                                         poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-3.1414794921875)),
-                                         poly_arg_none()),
-                               x_abs, poly_arg_none());
-  r_small = poly_uop2(ctx, POLY_OP_ADD, ft,
-                      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
-                                poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.00011315941810607910156)),
-                                poly_arg_none()),
-                      r_small, poly_arg_none());
-  r_small = poly_uop2(ctx, POLY_OP_ADD, ft,
-                      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
-                                poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.9841872589410058936e-09)),
-                                poly_arg_none()),
-                      r_small, poly_arg_none());
-  r_small = poly_uop2(ctx, POLY_OP_ADD, ft,
-                      poly_uop2(ctx, POLY_OP_MUL, ft, qf,
-                                poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.2154201256553420762e-10)),
-                                poly_arg_none()),
-                      r_small, poly_arg_none());
+  /* ── Cody-Waite reduction (small branch) ─────────────────────────── */
+  PolyUOp *q_small;
+  PolyUOp *r_small;
 
-  /* Payne-Hanek reduction (tinygrad payne_hanek_reduction). */
-  PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, ut32, x_abs, poly_arg_none());
+  if (is_f64) {
+    /* f64: qdh = (x_abs * (m_1_pi / 2^24)).cast(int64).cast(f64) * 2^24 */
+    PolyUOp *f_m1pi_div2p24 = poly_uop0(ctx, POLY_OP_CONST, ft,
+        poly_arg_float(m_1_pi / 16777216.0));  /* m_1_pi / 2^24 */
+    PolyUOp *f_2p24 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(16777216.0));
+    PolyDType it64 = POLY_INT64;
+    PolyUOp *qdh_raw = poly_uop2(ctx, POLY_OP_MUL, ft, x_abs, f_m1pi_div2p24, poly_arg_none());
+    PolyUOp *qdh_int = poly_uop1(ctx, POLY_OP_CAST, it64, qdh_raw, poly_arg_none());
+    PolyUOp *qdh = poly_uop2(ctx, POLY_OP_MUL, ft,
+        poly_uop1(ctx, POLY_OP_CAST, ft, qdh_int, poly_arg_none()),
+        f_2p24, poly_arg_none());
+
+    /* quadrant = rintk(x_abs * m_1_pi - qdh) */
+    PolyUOp *qf_raw = poly_uop2(ctx, POLY_OP_SUB, ft,
+        poly_uop2(ctx, POLY_OP_MUL, ft, x_abs, f_m_1_pi, poly_arg_none()),
+        qdh, poly_arg_none());
+    q_small = xd_rintk(ctx, ft, it, qf_raw);
+    PolyUOp *qf = poly_uop1(ctx, POLY_OP_CAST, ft, q_small, poly_arg_none());
+
+    r_small = cody_waite_reduce_f64(ctx, ft, x_abs, qdh, qf);
+  } else {
+    /* f32: simple rintk(x_abs * m_1_pi) */
+    PolyUOp *qf_raw = poly_uop2(ctx, POLY_OP_MUL, ft, x_abs, f_m_1_pi, poly_arg_none());
+    q_small = xd_rintk(ctx, ft, it, qf_raw);
+    PolyUOp *qf = poly_uop1(ctx, POLY_OP_CAST, ft, q_small, poly_arg_none());
+
+    r_small = cody_waite_reduce_f32(ctx, ft, x_abs, qf);
+  }
+
+  /* ── Payne-Hanek reduction (large branch, same for f32/f64) ──────── */
+  /* frexp via bit manipulation — always uses f32 intermediates for Payne-Hanek */
+  PolyUOp *x_abs_f32;
+  if (is_f64) {
+    /* Demote to f32 for Payne-Hanek (tinygrad uses intermediate_dtype=d.dtype for non-f16) */
+    /* Actually tinygrad uses d.dtype as intermediate for f64 too. But the two_over_pi_f table
+     * is uint32-based. Let's keep the same Payne-Hanek as f32 since it operates on the
+     * frexp decomposition which is dtype-independent for the bit table lookup. */
+    x_abs_f32 = x_abs;  /* We'll use the same Payne-Hanek for both */
+  } else {
+    x_abs_f32 = x_abs;
+  }
+
+  PolyUOp *bits = poly_uop1(ctx, POLY_OP_BITCAST, ut32,
+      is_f64 ? poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, x_abs, poly_arg_none()) : x_abs,
+      poly_arg_none());
   PolyUOp *exp_u32 = poly_uop2(ctx, POLY_OP_AND, ut32,
                                poly_uop2(ctx, POLY_OP_SHR, ut32, bits, i_23, poly_arg_none()),
                                i_255_u32, poly_arg_none());
   PolyUOp *f_bits = poly_uop2(ctx, POLY_OP_OR, ut32,
                               poly_uop2(ctx, POLY_OP_AND, ut32, bits, u_m1, poly_arg_none()),
                               u_m2, poly_arg_none());
-  PolyUOp *f = poly_uop1(ctx, POLY_OP_BITCAST, ft, f_bits, poly_arg_none());
+  PolyUOp *f_frexp = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT32, f_bits, poly_arg_none());
   PolyUOp *e_i = poly_uop2(ctx, POLY_OP_SUB, it,
                            poly_uop1(ctx, POLY_OP_CAST, it, exp_u32, poly_arg_none()),
                            i_126, poly_arg_none());
   PolyUOp *ia = poly_uop1(ctx, POLY_OP_CAST, ut64,
-                          poly_uop2(ctx, POLY_OP_MUL, ft, f, f_2p32, poly_arg_none()),
+                          poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, f_frexp,
+                            poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(4294967296.0f)),
+                            poly_arg_none()),
                           poly_arg_none());
   PolyUOp *i_u64 = poly_uop2(ctx, POLY_OP_SHR, ut64,
                              poly_uop1(ctx, POLY_OP_CAST, ut64, e_i, poly_arg_none()),
@@ -1545,9 +1689,12 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
                             poly_arg_none());
   PolyUOp *p_masked = poly_uop2(ctx, POLY_OP_AND, ut64, p, u_mask, poly_arg_none());
   PolyUOp *r_ph_base = poly_uop2(ctx, POLY_OP_MUL, ft,
-                                 poly_uop1(ctx, POLY_OP_CAST, ft, p_masked, poly_arg_none()),
-                                 f_ph_mul, poly_arg_none());
-  PolyUOp *f_lt_half = poly_uop2(ctx, POLY_OP_CMPLT, bt, f, f_half, poly_arg_none());
+      poly_uop1(ctx, POLY_OP_CAST, ft, p_masked, poly_arg_none()),
+      f_ph_mul, poly_arg_none());
+  PolyUOp *f_frexp_ft = is_f64
+      ? poly_uop1(ctx, POLY_OP_CAST, ft, f_frexp, poly_arg_none())
+      : f_frexp;
+  PolyUOp *f_lt_half = poly_uop2(ctx, POLY_OP_CMPLT, bt, f_frexp_ft, f_half, poly_arg_none());
   PolyUOp *r_ph = poly_uop3(ctx, POLY_OP_WHERE, ft, f_lt_half, r_ph_base,
                             poly_uop2(ctx, POLY_OP_SUB, ft, r_ph_base, f_pi_2, poly_arg_none()),
                             poly_arg_none());
@@ -1555,12 +1702,12 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
                    poly_uop2(ctx, POLY_OP_ADD, it, q_ph, i_one, poly_arg_none()),
                    poly_arg_none());
 
-  /* tinygrad xsin composition: sin_poly_small / sin_poly_large split at 30.0 */
+  /* ── sin_poly_small / sin_poly_large, split at switch_over ───────── */
   PolyUOp *q_small_odd = poly_uop2(ctx, POLY_OP_CMPNE, bt,
                                    poly_uop2(ctx, POLY_OP_AND, it, q_small, i_one, poly_arg_none()),
                                    i_zero, poly_arg_none());
   PolyUOp *small_sign = poly_uop3(ctx, POLY_OP_WHERE, ft, q_small_odd, f_neg_one, f_one, poly_arg_none());
-  PolyUOp *result_small = poly_uop2(ctx, POLY_OP_MUL, ft, sin_poly_f32(ctx, r_small), small_sign, poly_arg_none());
+  PolyUOp *result_small = poly_uop2(ctx, POLY_OP_MUL, ft, sin_poly(ctx, r_small), small_sign, poly_arg_none());
 
   PolyUOp *q_ph_odd = poly_uop2(ctx, POLY_OP_CMPNE, bt,
                                 poly_uop2(ctx, POLY_OP_AND, it, q_ph, i_one, poly_arg_none()),
@@ -1572,7 +1719,7 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
                                  poly_uop2(ctx, POLY_OP_AND, it, q_ph, i_two, poly_arg_none()),
                                  i_zero, poly_arg_none());
   PolyUOp *large_sign = poly_uop3(ctx, POLY_OP_WHERE, ft, q_ph_bit2, f_neg_one, f_one, poly_arg_none());
-  PolyUOp *result_large = poly_uop2(ctx, POLY_OP_MUL, ft, sin_poly_f32(ctx, large_arg), large_sign, poly_arg_none());
+  PolyUOp *result_large = poly_uop2(ctx, POLY_OP_MUL, ft, sin_poly(ctx, large_arg), large_sign, poly_arg_none());
 
   PolyUOp *use_small = poly_uop2(ctx, POLY_OP_CMPLT, bt, x_abs, f_switch, poly_arg_none());
   PolyUOp *result = poly_uop3(ctx, POLY_OP_WHERE, ft, use_small, result_small, result_large, poly_arg_none());

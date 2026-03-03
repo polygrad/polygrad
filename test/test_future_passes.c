@@ -1187,6 +1187,162 @@ TEST(conformance, exp2_bitpattern_sweep) {
   PASS();
 }
 
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 9: Float64 transcendental conformance tests
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* Build a f64 unary kernel: out[i] = OP(in[i]) for i in [0, n) */
+static PolyUOp *make_unary_kernel_f64(PolyCtx *ctx, PolyOps op, int n) {
+  PolyDType ptr_f64 = poly_dtype_ptr(POLY_FLOAT64, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, p1, range, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT64, idx0, poly_arg_none());
+  PolyUOp *alu = poly_uop1(ctx, op, POLY_FLOAT64, load, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+}
+
+/* Helper: run a f64 unary kernel end-to-end. */
+static int run_unary_e2e_f64(PolyOps op, const double *in, double *out, int n) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_unary_kernel_f64(ctx, op, n);
+  int nlin;
+  PolyUOp **lin = poly_linearize(ctx, sink, &nlin);
+  char name[64];
+  snprintf(name, sizeof(name), "conformance_f64_%d", op);
+  char *src = poly_render_c(lin, nlin, name);
+  PolyProgram *prog = poly_compile_c(src, name);
+  if (!prog) { free(src); free(lin); poly_ctx_destroy(ctx); return -1; }
+  double *in_copy = (double *)malloc((size_t)n * sizeof(double));
+  memcpy(in_copy, in, (size_t)n * sizeof(double));
+  void *args[2] = { in_copy, out };
+  poly_program_call(prog, args, 2);
+  poly_program_destroy(prog);
+  free(src); free(lin); free(in_copy);
+  poly_ctx_destroy(ctx);
+  return 0;
+}
+
+/* EXP2 f64: special values */
+TEST(conformance_f64, exp2_special_values) {
+  double in[7] = { 0.0, -0.0, INFINITY, -INFINITY, NAN, 1024.0, -2000.0 };
+  double out[7] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_EXP2, in, out, 7), 0);
+
+  ASSERT_DOUBLE_ULP(out[0], 1.0, 0);               /* exp2(0)     = 1    */
+  ASSERT_DOUBLE_ULP(out[1], 1.0, 0);               /* exp2(-0)    = 1    */
+  ASSERT_DOUBLE_INF(out[2], +1);                    /* exp2(+inf)  = +inf */
+  ASSERT_DOUBLE_ABS(out[3], 0.0, 1e-300);          /* exp2(-inf)  = 0    */
+  ASSERT_DOUBLE_NAN(out[4]);                         /* exp2(NaN)   = NaN  */
+  ASSERT_DOUBLE_INF(out[5], +1);                    /* exp2(1024)  = +inf */
+  ASSERT_DOUBLE_ABS(out[6], 0.0, 1e-300);          /* exp2(-2000) = 0    */
+
+  PASS();
+}
+
+/* EXP2 f64: normal range values */
+TEST(conformance_f64, exp2_normal_range) {
+  double in[8] = { 1.0, -1.0, 10.0, -10.0, 0.5, -0.5, 100.0, -100.0 };
+  double out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_EXP2, in, out, 8), 0);
+
+  for (int i = 0; i < 8; i++)
+    ASSERT_DOUBLE_ULP(out[i], exp2(in[i]), 4);
+
+  PASS();
+}
+
+/* LOG2 f64: special values */
+TEST(conformance_f64, log2_special_values) {
+  double in[8] = { 0.0, -0.0, INFINITY, -INFINITY, NAN, 5e-324, 1.0, DBL_MAX };
+  double out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_LOG2, in, out, 8), 0);
+
+  ASSERT_DOUBLE_INF(out[0], -1);                    /* log2(0)    = -inf */
+  ASSERT_DOUBLE_INF(out[1], -1);                    /* log2(-0)   = -inf */
+  ASSERT_DOUBLE_INF(out[2], +1);                    /* log2(+inf) = +inf */
+  ASSERT_DOUBLE_NAN(out[3]);                         /* log2(-inf) = NaN  */
+  ASSERT_DOUBLE_NAN(out[4]);                         /* log2(NaN)  = NaN  */
+  ASSERT_DOUBLE_ULP(out[5], log2(5e-324), 256);     /* denormal (subnormal min) */
+  ASSERT_DOUBLE_ULP(out[6], 0.0, 0);               /* log2(1) = 0 exact */
+  ASSERT_DOUBLE_ULP(out[7], log2(DBL_MAX), 16);     /* large */
+
+  PASS();
+}
+
+/* LOG2 f64: negative domain returns NaN */
+TEST(conformance_f64, log2_negative_domain) {
+  double in[4] = { -1.0, -100.0, -DBL_MIN, -DBL_MAX };
+  double out[4] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_LOG2, in, out, 4), 0);
+
+  for (int i = 0; i < 4; i++)
+    ASSERT_DOUBLE_NAN(out[i]);
+
+  PASS();
+}
+
+/* LOG2 f64: dense sweep 0.001 to 1e6 */
+TEST(conformance_f64, log2_dense_sweep) {
+  double in[64], out[64];
+  for (int i = 0; i < 64; i++)
+    in[i] = pow(10.0, -3.0 + 9.0 * (double)i / 63.0);
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_LOG2, in, out, 64), 0);
+
+  for (int i = 0; i < 64; i++)
+    ASSERT_DOUBLE_ULP(out[i], log2(in[i]), 256);
+
+  PASS();
+}
+
+/* SIN f64: special values */
+TEST(conformance_f64, sin_special_values) {
+  double pi = 3.14159265358979323846;
+  double in[6] = { 0.0, -0.0, INFINITY, -INFINITY, NAN, pi };
+  double out[6] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_SIN, in, out, 6), 0);
+
+  ASSERT_DOUBLE_ABS(out[0], 0.0, 1e-15);           /* sin(0)    = 0    */
+  ASSERT_DOUBLE_ABS(out[1], 0.0, 1e-15);           /* sin(-0)   = 0    */
+  ASSERT_DOUBLE_NAN(out[2]);                         /* sin(+inf) = NaN  */
+  ASSERT_DOUBLE_NAN(out[3]);                         /* sin(-inf) = NaN  */
+  ASSERT_DOUBLE_NAN(out[4]);                         /* sin(NaN)  = NaN  */
+  ASSERT_DOUBLE_ABS(out[5], sin(pi), 1e-7);         /* sin(pi) ~ 0     */
+
+  PASS();
+}
+
+/* SIN f64: quadrant boundaries (Cody-Waite path) */
+TEST(conformance_f64, sin_quadrant_boundaries) {
+  double pi = 3.14159265358979323846;
+  double in[8] = { pi/6, pi/4, pi/3, pi/2, 2*pi/3, 3*pi/4, 5*pi/6, pi };
+  double out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_SIN, in, out, 8), 0);
+
+  for (int i = 0; i < 8; i++)
+    ASSERT_DOUBLE_ABS(out[i], sin(in[i]), 1e-10);
+
+  PASS();
+}
+
+/* SIN f64: switchover boundary */
+TEST(conformance_f64, sin_switchover_boundary) {
+  double in[8] = { 29.0, 29.5, 29.9, 30.0, 30.1, 30.5, 31.0, 32.0 };
+  double out[8] = {0};
+  ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_SIN, in, out, 8), 0);
+
+  for (int i = 0; i < 8; i++)
+    ASSERT_DOUBLE_ABS(out[i], sin(in[i]), 1e-5);
+
+  PASS();
+}
+
 /* FMA rounding divergence: prove fmaf(a,b,c) != (a*b)+c for a known float32
  * triple. Validates that MULACC conditionality has real semantic impact.
  * a*b rounds to exactly 1.0f in float32, so (a*b)+c = 0.

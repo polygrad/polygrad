@@ -81,17 +81,31 @@ function heapU8() {
   return Module.__heapU8
 }
 
+function heapF64() {
+  if (Module.HEAPF64) return Module.HEAPF64
+  const mem = Module.wasmMemory || (Module.asm && Module.asm.memory)
+  if (!mem) throw new Error('No wasmMemory; export HEAPF64 via EXPORTED_RUNTIME_METHODS')
+  if (!Module.__heapF64 || Module.__heapF64.buffer !== mem.buffer) {
+    Module.__heapF64 = new Float64Array(mem.buffer)
+  }
+  return Module.__heapF64
+}
+
 /**
  * Core kernel execution via step plan: schedule → render all kernels → execute in order.
  * Handles single-kernel and multi-kernel operations uniformly.
- * Shared by _realize() and backward(). Returns Float32Array with output data.
+ * Shared by _realize() and backward(). Returns typed array with output data.
  *
- * bufferDataFn(bufUop) should return the Float32Array data for a given buffer UOp.
+ * bufferDataFn(bufUop) should return the typed array data for a given buffer UOp.
+ * isF64: if true, uses Float64Array (8 bytes/elem) instead of Float32Array (4 bytes/elem).
  */
-function _renderAndExec(ctx, sink, outBuf, numel, bufferDataFn) {
+function _renderAndExec(ctx, sink, outBuf, numel, bufferDataFn, isF64) {
   // 1. Create step plan (schedules, linearizes, renders all kernels)
   const plan = _ffi.poly_render_step_wasm_plan(ctx, sink)
   if (!plan) throw new Error('poly_render_step_wasm_plan failed')
+
+  const elemSize = isF64 ? 8 : 4
+  const ArrayType = isF64 ? Float64Array : Float32Array
 
   try {
     const nKernels = _ffi.poly_wasm_stepplan_n_kernels(plan)
@@ -100,7 +114,7 @@ function _renderAndExec(ctx, sink, outBuf, numel, bufferDataFn) {
 
     // 2. Collect buffer data (bindable) and compute sizes (all buffers)
     const bufSizes = new Array(nBufs)    // element count per buffer
-    const bufData = new Array(nBufs)     // Float32Array or null
+    const bufData = new Array(nBufs)     // typed array or null
 
     for (let i = 0; i < nBindable; i++) {
       const bufUop = Module._poly_kernel_buf(ctx, i)
@@ -120,16 +134,17 @@ function _renderAndExec(ctx, sink, outBuf, numel, bufferDataFn) {
     let totalBytes = 0
     for (let i = 0; i < nBufs; i++) {
       offsets[i] = totalBytes
-      totalBytes += bufSizes[i] * 4  // float32 = 4 bytes
+      totalBytes += bufSizes[i] * elemSize
     }
 
     const neededPages = Math.max(1, Math.ceil(totalBytes / 65536))
     const memory = new WebAssembly.Memory({ initial: neededPages })
 
     // 4. Copy bindable buffer data into shared WASM memory
-    const memView = new Float32Array(memory.buffer)
+    const memView = new ArrayType(memory.buffer)
+    const elemShift = isF64 ? 3 : 2  // /8 vs /4
     for (let i = 0; i < nBindable; i++) {
-      if (bufData[i]) memView.set(bufData[i], offsets[i] / 4)
+      if (bufData[i]) memView.set(bufData[i], offsets[i] >> elemShift)
     }
 
     // 5. Read execution order
@@ -166,9 +181,9 @@ function _renderAndExec(ctx, sink, outBuf, numel, bufferDataFn) {
     }
 
     // 7. Copy output data back (buffer 0 is always the output)
-    const outView = new Float32Array(memory.buffer)
-    const result = new Float32Array(numel)
-    result.set(outView.subarray(offsets[0] / 4, offsets[0] / 4 + numel))
+    const outView = new ArrayType(memory.buffer)
+    const result = new ArrayType(numel)
+    result.set(outView.subarray(offsets[0] >> elemShift, (offsets[0] >> elemShift) + numel))
 
     return result
   } finally {
@@ -198,6 +213,7 @@ async function init() {
     poly_ctx_new: Module._poly_ctx_new,
     poly_ctx_destroy: Module._poly_ctx_destroy,
     poly_const_float: Module._poly_const_float,
+    poly_const_double: Module._poly_const_double,
     poly_const_int: (ctx, val) => Module._poly_const_int(ctx, BigInt(val)),
     poly_alu1: Module._poly_alu1,
     poly_alu2: Module._poly_alu2,
@@ -205,6 +221,7 @@ async function init() {
     poly_store_val: Module._poly_store_val,
     poly_sink1: Module._poly_sink1,
     poly_buffer_f32: (ctx, size) => Module._poly_buffer_f32(ctx, BigInt(size)),
+    poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
     poly_reshape: cwrapReshape,
     poly_expand: cwrapExpand,
     poly_reduce_axis: Module._poly_reduce_axis,
@@ -381,17 +398,18 @@ function writeShapeToScratch(shape) {
 }
 
 /**
- * Flatten a nested JS array and return { data: Float32Array, shape: number[] }.
+ * Flatten a nested JS array and return { data: TypedArray, shape: number[] }.
  */
-function flattenArray(arr) {
+function flattenArray(arr, dtype) {
+  const AT = dtype === 'float64' ? Float64Array : Float32Array
   if (typeof arr === 'number') {
-    return { data: new Float32Array([arr]), shape: [1] }
+    return { data: new AT([arr]), shape: [1] }
   }
-  if (arr instanceof Float32Array) {
-    return { data: new Float32Array(arr), shape: [arr.length] }
+  if (arr instanceof Float32Array || arr instanceof Float64Array) {
+    return { data: new AT(arr), shape: [arr.length] }
   }
   if (!Array.isArray(arr)) {
-    throw new Error('Expected number, array, or Float32Array')
+    throw new Error('Expected number, array, Float32Array, or Float64Array')
   }
 
   const shape = []
@@ -411,7 +429,7 @@ function flattenArray(arr) {
   }
   recurse(arr)
 
-  return { data: new Float32Array(flat), shape }
+  return { data: new AT(flat), shape }
 }
 
 /**
@@ -443,18 +461,34 @@ class Tensor {
       this._data = opts._data || null
       this._shape = opts._shape ? [...opts._shape] : []
       this._inputs = opts._inputs || []
-    } else if (data instanceof Float32Array) {
+      this._dtype = opts._dtype || 'float32'
+    } else if (data instanceof Float64Array) {
+      // Fast path: Float64Array input
+      this._shape = [data.length]
+      this._data = new Float64Array(data)
+      this._buffer = _ffi.poly_buffer_f64(this._ctx, data.length)
+      this._uop = this._buffer
+      this._inputs = []
+      this._dtype = 'float64'
+    } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
       // Fast path: Float32Array input (most common in training loops)
       this._shape = [data.length]
       this._data = new Float32Array(data)
       this._buffer = _ffi.poly_buffer_f32(this._ctx, data.length)
       this._uop = this._buffer
       this._inputs = []
+      this._dtype = 'float32'
     } else {
-      const { data: flat, shape } = flattenArray(data)
+      const dt = opts.dtype || 'float32'
+      this._dtype = dt
+      const { data: flat, shape } = flattenArray(data, dt)
       this._shape = shape
       this._data = flat
-      this._buffer = _ffi.poly_buffer_f32(this._ctx, flat.length)
+      if (dt === 'float64') {
+        this._buffer = _ffi.poly_buffer_f64(this._ctx, flat.length)
+      } else {
+        this._buffer = _ffi.poly_buffer_f32(this._ctx, flat.length)
+      }
       if (shape.length > 1) {
         this._uop = callWithInt64Array(_ffi.poly_reshape, this._ctx, this._buffer, shape, shape.length)
       } else {
@@ -465,7 +499,7 @@ class Tensor {
   }
 
   get shape() { return [...this._shape] }
-  get dtype() { return 'float32' }
+  get dtype() { return this._dtype }
   get device() { return 'CPU' }
   get ndim() { return this._shape.length }
   get requiresGrad() { return this._requiresGrad }
@@ -522,16 +556,20 @@ class Tensor {
     if (this._isLeaf()) return
 
     const numel = this._shape.reduce((a, b) => a * b, 1) || 1
-    const outBuf = _ffi.poly_buffer_f32(this._ctx, numel)
+    const isF64 = this._dtype === 'float64'
+    const AT = isF64 ? Float64Array : Float32Array
+    const outBuf = isF64
+      ? _ffi.poly_buffer_f64(this._ctx, numel)
+      : _ffi.poly_buffer_f32(this._ctx, numel)
     const store = _ffi.poly_store_val(this._ctx, outBuf, this._uop)
     const sink = _ffi.poly_sink1(this._ctx, store)
 
     // Build buffer→data map (single traversal)
     const leafMap = this._collectLeafMap()
-    const outData = new Float32Array(numel)
+    const outData = new AT(numel)
     leafMap.set(outBuf, outData)
 
-    const result = _renderAndExec(this._ctx, sink, outBuf, numel, (bufUop) => leafMap.get(bufUop))
+    const result = _renderAndExec(this._ctx, sink, outBuf, numel, (bufUop) => leafMap.get(bufUop), isF64)
 
     this._data = result
     this._buffer = outBuf
@@ -551,7 +589,8 @@ class Tensor {
 
   toArray() {
     this._realize()
-    return new Float32Array(this._data)
+    const AT = this._dtype === 'float64' ? Float64Array : Float32Array
+    return new AT(this._data)
   }
 
   item() {
@@ -568,11 +607,11 @@ class Tensor {
   }
 
   detach() {
-    return new Tensor(this.toArray())
+    return new Tensor(this.toArray(), { dtype: this._dtype })
   }
 
   clone() {
-    const t = new Tensor(this.toArray())
+    const t = new Tensor(this.toArray(), { dtype: this._dtype })
     t._requiresGrad = this._requiresGrad
     return t
   }
@@ -582,11 +621,17 @@ class Tensor {
   // --- Internal helpers ---
 
   _makeResult(uop, shape, inputs) {
+    // Infer dtype from inputs: if any input is float64, result is float64
+    let dt = 'float32'
+    for (let i = 0; i < inputs.length; i++) {
+      if (inputs[i]._dtype === 'float64') { dt = 'float64'; break }
+    }
     const t = new Tensor(null, {
       _ctx: this._ctx,
       _uop: uop,
       _shape: shape,
-      _inputs: inputs
+      _inputs: inputs,
+      _dtype: dt
     })
     for (let i = 0; i < inputs.length; i++) {
       if (inputs[i]._requiresGrad) { t._requiresGrad = true; break }
@@ -597,8 +642,11 @@ class Tensor {
   _ensureTensor(other) {
     if (other instanceof Tensor) return other
     if (typeof other === 'number') {
-      const c = _ffi.poly_const_float(this._ctx, other)
-      return new Tensor(null, { _ctx: this._ctx, _uop: c, _shape: [], _inputs: [] })
+      const c = this._dtype === 'float64'
+        ? _ffi.poly_const_double(this._ctx, other)
+        : _ffi.poly_const_float(this._ctx, other)
+      return new Tensor(null, { _ctx: this._ctx, _uop: c, _shape: [], _inputs: [],
+                                _dtype: this._dtype })
     }
     throw new TypeError(`Cannot convert ${typeof other} to Tensor`)
   }
@@ -1327,15 +1375,18 @@ class Tensor {
       }
 
       const numel = leaf._shape.reduce((a, b) => a * b, 1) || 1
-      const gradBuf = _ffi.poly_buffer_f32(this._ctx, numel)
+      const isF64 = leaf._dtype === 'float64'
+      const gradBuf = isF64
+        ? _ffi.poly_buffer_f64(this._ctx, numel)
+        : _ffi.poly_buffer_f32(this._ctx, numel)
       const store = _ffi.poly_store_val(this._ctx, gradBuf, gradUop)
       const sink = _ffi.poly_sink1(this._ctx, store)
 
-      leafMap.set(gradBuf, new Float32Array(numel))
+      leafMap.set(gradBuf, isF64 ? new Float64Array(numel) : new Float32Array(numel))
 
-      const gradResult = _renderAndExec(this._ctx, sink, gradBuf, numel, (bufUop) => leafMap.get(bufUop))
+      const gradResult = _renderAndExec(this._ctx, sink, gradBuf, numel, (bufUop) => leafMap.get(bufUop), isF64)
 
-      const gradTensor = new Tensor(gradResult, { _ctx: this._ctx })
+      const gradTensor = new Tensor(gradResult, { _ctx: this._ctx, dtype: leaf._dtype })
       if (leaf._grad) {
         leaf._grad = leaf._grad.add(gradTensor)
       } else {
@@ -1346,48 +1397,78 @@ class Tensor {
 
   // --- Static constructors ---
 
-  static zeros(...shape) {
+  static _resolveArrayType(opts) {
+    return (opts && opts.dtype === 'float64') ? Float64Array : Float32Array
+  }
+
+  static zeros(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel).fill(0))
+    const t = new Tensor(new AT(numel).fill(0), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static ones(...shape) {
+  static ones(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel).fill(1))
+    const t = new Tensor(new AT(numel).fill(1), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static full(shape, fillValue) {
+  static full(shape, fillValue, opts) {
     if (typeof shape === 'number') shape = [shape]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel).fill(fillValue))
+    const t = new Tensor(new AT(numel).fill(fillValue), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static arange(stop, start = 0, step = 1) {
+  static arange(stop, start = 0, step = 1, opts) {
+    const AT = Tensor._resolveArrayType(opts)
     const arr = []
     for (let i = start; i < stop; i += step) arr.push(i)
-    return new Tensor(new Float32Array(arr))
+    return new Tensor(new AT(arr), opts)
   }
 
-  static rand(...shape) {
+  static rand(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
     if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const data = new Float32Array(numel)
+    const data = new AT(numel)
     for (let i = 0; i < numel; i++) data[i] = Math.random()
-    const t = new Tensor(data)
+    const t = new Tensor(data, opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static randn(...shape) {
+  static randn(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
     if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const data = new Float32Array(numel)
+    const data = new AT(numel)
     for (let i = 0; i < numel; i += 2) {
       const u1 = Math.random() || 1e-10
       const u2 = Math.random()
@@ -1395,41 +1476,50 @@ class Tensor {
       data[i] = r * Math.cos(2 * Math.PI * u2)
       if (i + 1 < numel) data[i + 1] = r * Math.sin(2 * Math.PI * u2)
     }
-    const t = new Tensor(data)
+    const t = new Tensor(data, opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static randint(low, high, shape) {
+  static randint(low, high, shape, opts) {
     if (high === undefined) { high = low; low = 0 }
     if (typeof shape === 'number') shape = [shape]
     if (!shape) shape = [1]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const data = new Float32Array(numel)
+    const data = new AT(numel)
     for (let i = 0; i < numel; i++) data[i] = Math.floor(Math.random() * (high - low)) + low
-    const t = new Tensor(data)
+    const t = new Tensor(data, opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static linspace(start, stop, steps) {
-    const data = new Float32Array(steps)
+  static linspace(start, stop, steps, opts) {
+    const AT = Tensor._resolveArrayType(opts)
+    const data = new AT(steps)
     for (let i = 0; i < steps; i++) {
       data[i] = start + (stop - start) * i / (steps - 1)
     }
-    return new Tensor(data)
+    return new Tensor(data, opts)
   }
 
-  static eye(n) {
-    const data = new Float32Array(n * n)
+  static eye(n, opts) {
+    const AT = Tensor._resolveArrayType(opts)
+    const data = new AT(n * n)
     for (let i = 0; i < n; i++) data[i * n + i] = 1
-    return new Tensor(data).reshape(n, n)
+    return new Tensor(data, opts).reshape(n, n)
   }
 
-  static empty(...shape) {
+  static empty(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
     if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel))
+    const t = new Tensor(new AT(numel), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }

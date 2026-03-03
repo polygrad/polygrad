@@ -23,6 +23,7 @@ const poly_op_count = lib.func('int poly_op_count()')
 const poly_op_name = lib.func('const char *poly_op_name(int op)')
 
 const poly_const_float = lib.func('void *poly_const_float(void *ctx, double value)')
+const poly_const_double = lib.func('void *poly_const_double(void *ctx, double value)')
 const poly_const_int = lib.func('void *poly_const_int(void *ctx, int64_t value)')
 
 const poly_alu1 = lib.func('void *poly_alu1(void *ctx, int op, void *src)')
@@ -34,6 +35,7 @@ const poly_sink1 = lib.func('void *poly_sink1(void *ctx, void *store)')
 const poly_sink_n = lib.func('void *poly_sink_n(void *ctx, void **stores, int n)')
 
 const poly_buffer_f32 = lib.func('void *poly_buffer_f32(void *ctx, int64_t size)')
+const poly_buffer_f64 = lib.func('void *poly_buffer_f64(void *ctx, int64_t size)')
 
 // Movement/Scheduling
 const poly_reshape = lib.func('void *poly_reshape(void *ctx, void *src, int64_t *dims, int ndim)')
@@ -162,10 +164,10 @@ for (let i = 0; i < opCount; i++) {
 
 module.exports = {
   poly_ctx_new, poly_ctx_destroy,
-  poly_const_float, poly_const_int,
+  poly_const_float, poly_const_double, poly_const_int,
   poly_alu1, poly_alu2, poly_alu3,
   poly_store_val, poly_sink1, poly_sink_n,
-  poly_buffer_f32,
+  poly_buffer_f32, poly_buffer_f64,
   poly_reshape, poly_expand, poly_reduce_axis,
   poly_permute, poly_shrink, poly_flip, poly_pad,
   poly_grad, poly_realize_begin, poly_realize_bind, poly_realize_exec,

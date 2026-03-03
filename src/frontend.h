@@ -25,6 +25,7 @@ int poly_op_count(void);
 /* ── Constants ────────────────────────────────────────────────────────── */
 
 PolyUOp *poly_const_float(PolyCtx *ctx, double value);
+PolyUOp *poly_const_double(PolyCtx *ctx, double value);
 PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value);
 PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value);
 

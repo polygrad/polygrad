@@ -235,3 +235,134 @@ test('repr: toString', (t) => {
   t.ok(x.toString().includes('float32'))
   t.end()
 })
+
+// --- Float64 ---
+
+test('f64: creation from array', (t) => {
+  const x = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+  t.equal(x.dtype, 'float64')
+  t.deepEqual(x.shape, [3])
+  const arr = x.toArray()
+  t.ok(arr instanceof Float64Array, 'should be Float64Array')
+  assertClose(t, arr, [1, 2, 3])
+  t.end()
+})
+
+test('f64: creation 2D', (t) => {
+  const x = new Tensor([[1, 2], [3, 4]], { dtype: 'float64' })
+  t.equal(x.dtype, 'float64')
+  t.deepEqual(x.shape, [2, 2])
+  const arr = x.toArray()
+  t.ok(arr instanceof Float64Array, 'should be Float64Array')
+  assertClose(t, arr, [1, 2, 3, 4])
+  t.end()
+})
+
+test('f64: zeros', (t) => {
+  const x = Tensor.zeros(4, { dtype: 'float64' })
+  t.equal(x.dtype, 'float64')
+  assertClose(t, x.toArray(), [0, 0, 0, 0])
+  t.end()
+})
+
+test('f64: ones', (t) => {
+  const x = Tensor.ones(3, { dtype: 'float64' })
+  t.equal(x.dtype, 'float64')
+  assertClose(t, x.toArray(), [1, 1, 1])
+  t.end()
+})
+
+test('f64: add', (t) => {
+  const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+  const b = new Tensor([4.0, 5.0, 6.0], { dtype: 'float64' })
+  const c = a.add(b)
+  t.equal(c.dtype, 'float64')
+  const arr = c.toArray()
+  t.ok(arr instanceof Float64Array, 'should be Float64Array')
+  assertClose(t, arr, [5, 7, 9])
+  t.end()
+})
+
+test('f64: mul', (t) => {
+  const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+  const b = new Tensor([4.0, 5.0, 6.0], { dtype: 'float64' })
+  const c = a.mul(b)
+  t.equal(c.dtype, 'float64')
+  assertClose(t, c.toArray(), [4, 10, 18])
+  t.end()
+})
+
+test('f64: neg', (t) => {
+  const a = new Tensor([1.0, -2.0, 3.0], { dtype: 'float64' })
+  const c = a.neg()
+  t.equal(c.dtype, 'float64')
+  assertClose(t, c.toArray(), [-1, 2, -3])
+  t.end()
+})
+
+test('f64: scalar add', (t) => {
+  const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+  const c = a.add(10.0)
+  t.equal(c.dtype, 'float64')
+  assertClose(t, c.toArray(), [11, 12, 13])
+  t.end()
+})
+
+test('f64: sum', (t) => {
+  const a = new Tensor([1.0, 2.0, 3.0, 4.0], { dtype: 'float64' })
+  const s = a.sum().item()
+  t.ok(Math.abs(s - 10.0) < 1e-10, `expected 10, got ${s}`)
+  t.end()
+})
+
+test('f64: exp', (t) => {
+  const a = new Tensor([0.0, 1.0, 2.0], { dtype: 'float64' })
+  const c = a.exp()
+  t.equal(c.dtype, 'float64')
+  const arr = c.toArray()
+  for (let i = 0; i < arr.length; i++) {
+    const expected = Math.exp([0, 1, 2][i])
+    t.ok(Math.abs(arr[i] - expected) < 1e-10,
+      `exp[${i}]: ${arr[i]} vs ${expected}`)
+  }
+  t.end()
+})
+
+test('f64: sqrt', (t) => {
+  const a = new Tensor([1.0, 4.0, 9.0], { dtype: 'float64' })
+  const c = a.sqrt()
+  t.equal(c.dtype, 'float64')
+  assertClose(t, c.toArray(), [1, 2, 3])
+  t.end()
+})
+
+test('f64: chain ops', (t) => {
+  const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+  const b = new Tensor([4.0, 5.0, 6.0], { dtype: 'float64' })
+  const c = a.add(b).mul(a).sub(b)
+  t.equal(c.dtype, 'float64')
+  assertClose(t, c.toArray(), [(1+4)*1-4, (2+5)*2-5, (3+6)*3-6])
+  t.end()
+})
+
+test('f64: reshape', (t) => {
+  const a = new Tensor([1, 2, 3, 4, 5, 6], { dtype: 'float64' })
+  const b = a.reshape(2, 3)
+  t.equal(b.dtype, 'float64')
+  t.deepEqual(b.shape, [2, 3])
+  assertClose(t, b.toArray(), [1, 2, 3, 4, 5, 6])
+  t.end()
+})
+
+test('f64: default is f32', (t) => {
+  const a = new Tensor([1.0, 2.0])
+  t.equal(a.dtype, 'float32')
+  t.ok(a.toArray() instanceof Float32Array, 'default should be Float32Array')
+  t.end()
+})
+
+test('f64: repr includes float64', (t) => {
+  const x = new Tensor([1, 2, 3], { dtype: 'float64' })
+  t.ok(x.toString().includes('float64'))
+  t.end()
+})

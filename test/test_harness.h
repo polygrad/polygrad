@@ -145,6 +145,71 @@ static inline int32_t poly_float_ulp_index(float f) {
   } \
 } while(0)
 
+/* Double-precision ULP distance. */
+static inline int64_t poly_double_ulp_index(double f) {
+  int64_t i;
+  memcpy(&i, &f, sizeof(i));
+  if (i < 0) i = (int64_t)((uint64_t)0x8000000000000000ULL - (uint64_t)i);
+  return i;
+}
+
+#define ASSERT_DOUBLE_NAN(a) do { \
+  double _a = (double)(a); \
+  if (!isnan(_a)) FAIL("%s = %.17g, expected NaN", #a, _a); \
+} while(0)
+
+#define ASSERT_DOUBLE_INF(a, sign) do { \
+  double _a = (double)(a); \
+  if (!isinf(_a) || ((sign) > 0 && _a < 0) || ((sign) < 0 && _a > 0)) \
+    FAIL("%s = %.17g, expected %sinf", #a, _a, (sign) < 0 ? "-" : "+"); \
+} while(0)
+
+#define ASSERT_DOUBLE_ABS(a, b, tol) do { \
+  double _da = (double)(a), _db = (double)(b); \
+  if (isnan(_da) && isnan(_db)) { /* ok */ } \
+  else if (isnan(_da) || isnan(_db)) \
+    FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db); \
+  else if (fabs(_da - _db) > (double)(tol)) \
+    FAIL("%s=%.17g, expected %.17g (abs err %.17g, tol %.17g)", \
+      #a, _da, _db, fabs(_da - _db), (double)(tol)); \
+} while(0)
+
+#define ASSERT_DOUBLE_ULP(a, b, max_ulps) do { \
+  double _da = (double)(a), _db = (double)(b); \
+  if (isnan(_da) && isnan(_db)) { /* ok */ } \
+  else if (isnan(_da) || isnan(_db)) \
+    FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db); \
+  else if (isinf(_da) || isinf(_db)) { \
+    if (!(isinf(_da) && isinf(_db) && ((_da > 0) == (_db > 0)))) \
+      FAIL("%s=%.17g, expected %.17g (inf mismatch)", #a, _da, _db); \
+  } else { \
+    int64_t _ia = poly_double_ulp_index(_da), _ib = poly_double_ulp_index(_db); \
+    int64_t _d = llabs(_ia - _ib); \
+    if (_d > (int64_t)(max_ulps)) \
+      FAIL("%s=%.17g, expected %.17g (%lld ulps, max %lld)", \
+        #a, _da, _db, (long long)_d, (long long)(max_ulps)); \
+  } \
+} while(0)
+
+#define ASSERT_DOUBLE_NEAR(a, b, max_ulps, abs_tol) do { \
+  double _da = (double)(a), _db = (double)(b); \
+  if (isnan(_da) && isnan(_db)) { /* ok */ } \
+  else if (isnan(_da) || isnan(_db)) \
+    FAIL("%s=%.17g, expected %.17g (NaN mismatch)", #a, _da, _db); \
+  else if (isinf(_da) && isinf(_db) && ((_da > 0) == (_db > 0))) { /* ok */ } \
+  else if (isinf(_da) || isinf(_db)) \
+    FAIL("%s=%.17g, expected %.17g (inf mismatch)", #a, _da, _db); \
+  else if (fabs(_da - _db) <= (double)(abs_tol)) { /* within abs tol */ } \
+  else { \
+    int64_t _ia = poly_double_ulp_index(_da), _ib = poly_double_ulp_index(_db); \
+    int64_t _d = llabs(_ia - _ib); \
+    if (_d > (int64_t)(max_ulps)) \
+      FAIL("%s=%.17g, expected %.17g (%lld ulps, max %lld; abs %.17g, tol %.17g)", \
+        #a, _da, _db, (long long)_d, (long long)(max_ulps), \
+        fabs(_da - _db), (double)(abs_tol)); \
+  } \
+} while(0)
+
 #define ASSERT_PTR_EQ(a, b) do { \
   const void *_a = (a), *_b = (b); \
   if (_a != _b) FAIL("%s = %p, expected %p (same pointer)", #a, _a, _b); \

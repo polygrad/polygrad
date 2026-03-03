@@ -45,7 +45,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────┘    └──────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python, JS, and Browser. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 (or any supported architecture) directly from config.json + safetensors, run inference, fine-tune. Verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
+**What works today:** Full tinygrad-compatible Tensor API from Python, JS, and Browser. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64 (double) support across all layers: C core transcendentals (EXP2/LOG2/SIN), WASM renderer (scalar + f64x2 SIMD), and all three frontends (Python, JS, Browser). Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 (or any supported architecture) directly from config.json + safetensors, run inference, fine-tune. Verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
 
 **What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
@@ -134,14 +134,14 @@ Tier 2 (statistical): mean/variance within expected bounds. Tested by `c2c_rand_
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test          # build + run 401 C tests (ASan/UBSan)
-make test-wasm     # build + run 47 WASM tests
+make test          # build + run 415 C tests (ASan/UBSan)
+make test-wasm     # build + run 68 WASM tests
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
 
 # Frontend tests
-python -m pytest py/tests/ -v        # 110 Python tests
-node js/test/test_tensor.js          # 62 JS tests
+python -m pytest py/tests/ -v        # 130 Python tests
+node js/test/test_tensor.js          # 109 JS tests
 node js/test/test_instance.js        # 192 JS tests (MLP Instance)
 node js/test/test_hf.js              # 36 JS tests (HF model loading)
 ```
@@ -153,7 +153,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Pattern matcher + symbolic simplification (~25 rules)
 - [x] Linearizer + C renderer + CPU runtime (end-to-end)
 - [x] Shape inference + tensor-to-kernel scheduler (elementwise, reshape, expand, broadcast)
-- [x] WASM binary renderer (scalar f32 + f32x4 SIMD) + binary builder
+- [x] WASM binary renderer (scalar f32/f64 + f32x4/f64x2 SIMD) + binary builder
 - [x] Reduce ops (REDUCE_AXIS → accumulation kernel: sum, max, product)
 - [x] Movement ops (PERMUTE, SHRINK, FLIP, PAD index transforms)
 - [x] Reverse-mode autograd core (`poly_grad`) for ALU/movement/reduce-sum paths
@@ -175,19 +175,20 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Autoregressive text generation (Python)
 
 ### Language Frontends
-- [x] Python Tensor API (ctypes FFI, lazy eval, autograd, tinygrad-compatible)
+- [x] Float64 support (transcendentals, WASM renderer, all frontends)
+- [x] Python Tensor API (ctypes FFI, lazy eval, autograd, f64, tinygrad-compatible)
 - [x] Python nn module (Linear, LayerNorm, RMSNorm, Embedding, Dropout, SGD, Adam, AdamW)
 - [x] Python HF loader (`load_hf`, `download_hf`, `generate`)
-- [x] JS Node Tensor API (koffi FFI, full op coverage)
+- [x] JS Node Tensor API (koffi FFI, full op coverage, f64)
 - [x] JS Node Instance API (MLP + HF loading, param/buf read/write)
-- [x] Browser WASM Tensor API (Emscripten FFI, same API as Node)
+- [x] Browser WASM Tensor API (Emscripten FFI, same API as Node, f64)
 
 ### Planned
 - [ ] GPU backends (WGSL/WebGPU, Metal)
 - [ ] More model families (LLaMA, BERT)
 - [ ] Expander, devectorizer
 
-848 tests (401 C + 110 Python + 290 JS + 47 WASM), ASan/UBSan clean.
+722 tests (415 C + 130 Python + 109 JS + 68 WASM), ASan/UBSan clean.
 
 ## Reference
 

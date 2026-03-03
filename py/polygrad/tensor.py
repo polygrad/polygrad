@@ -1,6 +1,6 @@
 """
 Tensor class for polygrad — lazy evaluation backed by C compiler core.
-CPU-only, float32-only for v0.
+CPU-only. Supports float32 (default) and float64 dtypes.
 """
 
 import ctypes
@@ -95,8 +95,8 @@ class Tensor:
     _compile_mode = False  # suppress realize() for compile_step tracing
     _compile_assigns_ordered = []  # class-level: ASSIGN UOps in program order
 
-    def __init__(self, data=None, requires_grad=False, *, _ctx=None, _uop=None,
-                 _buffer=None, _data=None, _shape=None, _inputs=None):
+    def __init__(self, data=None, requires_grad=False, *, dtype=None, _ctx=None, _uop=None,
+                 _buffer=None, _data=None, _shape=None, _inputs=None, _dtype=None):
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
         self._ctx = _ctx or _default_ctx
@@ -108,14 +108,24 @@ class Tensor:
             self._data = _data
             self._shape = tuple(_shape) if _shape is not None else ()
             self._inputs = _inputs or []
+            self._dtype_str = _dtype or 'float32'
         else:
             # User construction from data
             if isinstance(data, (int, float)):
                 data = [data]
-            arr = np.asarray(data, dtype=np.float32)
+            # Resolve dtype string
+            dt = dtype or 'float32'
+            if hasattr(dt, '__class__') and dt.__class__.__name__ == 'dtypes':
+                dt = str(dt)
+            np_dt = np.float64 if dt == 'float64' else np.float32
+            arr = np.asarray(data, dtype=np_dt)
             self._shape = arr.shape
             self._data = arr.flatten().copy()
-            self._buffer = _ffi._lib.poly_buffer_f32(self._ctx, len(self._data))
+            self._dtype_str = dt
+            if dt == 'float64':
+                self._buffer = _ffi._lib.poly_buffer_f64(self._ctx, len(self._data))
+            else:
+                self._buffer = _ffi._lib.poly_buffer_f32(self._ctx, len(self._data))
             # For multi-dimensional tensors, insert a RESHAPE UOp so the
             # scheduler knows the shape (BUFFER alone is flat/1D).
             if len(self._shape) > 1:
@@ -144,7 +154,7 @@ class Tensor:
 
     @property
     def dtype(self):
-        return 'float32'
+        return self._dtype_str
 
     @property
     def device(self):
@@ -252,10 +262,15 @@ class Tensor:
         # Collect all leaf tensor bindings
         leaves = self._collect_leaves()
 
-        # Build output buffer
+        # Build output buffer with correct dtype
         numel = int(np.prod(self._shape)) if self._shape else 1
-        out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
-        out_data = np.zeros(numel, dtype=np.float32)
+        is_f64 = self._dtype_str == 'float64'
+        np_dt = np.float64 if is_f64 else np.float32
+        if is_f64:
+            out_buf = _ffi._lib.poly_buffer_f64(self._ctx, numel)
+        else:
+            out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
+        out_data = np.zeros(numel, dtype=np_dt)
 
         # Build STORE + SINK
         store = _ffi._lib.poly_store_val(self._ctx, out_buf, self._uop)
@@ -372,6 +387,7 @@ class Tensor:
         ref._is_param = False
         ref._saved_uop = None
         ref._saved_inputs = None
+        ref._dtype_str = self._dtype_str
         return ref
 
     def _realize_assign(self):
@@ -463,10 +479,10 @@ class Tensor:
         return self.numpy().tolist()
 
     def detach(self):
-        return Tensor(self.numpy())
+        return Tensor(self.numpy(), dtype=self._dtype_str)
 
     def clone(self):
-        return Tensor(self.numpy(), requires_grad=self._requires_grad)
+        return Tensor(self.numpy(), requires_grad=self._requires_grad, dtype=self._dtype_str)
 
     def contiguous(self):
         return self  # no-op for now
@@ -474,18 +490,29 @@ class Tensor:
     # --- Internal helpers ---
 
     def _make_result(self, uop, shape, inputs):
+        # Infer dtype from inputs: if any input is float64, result is float64
+        dt = 'float32'
+        for t in inputs:
+            if hasattr(t, '_dtype_str') and t._dtype_str == 'float64':
+                dt = 'float64'
+                break
         return Tensor(
             _ctx=self._ctx, _uop=uop, _shape=shape, _inputs=inputs,
             requires_grad=any(t._requires_grad for t in inputs),
+            _dtype=dt,
         )
 
     def _ensure_tensor(self, other):
         if isinstance(other, Tensor):
             return other
         if isinstance(other, (int, float)):
-            # Scalar constant — create a CONST UOp (broadcasts automatically)
-            c = _ffi._lib.poly_const_float(self._ctx, float(other))
-            return Tensor(_ctx=self._ctx, _uop=c, _shape=(), _inputs=[])
+            # Scalar constant — create a CONST UOp with matching dtype
+            if self._dtype_str == 'float64':
+                c = _ffi._lib.poly_const_double(self._ctx, float(other))
+            else:
+                c = _ffi._lib.poly_const_float(self._ctx, float(other))
+            return Tensor(_ctx=self._ctx, _uop=c, _shape=(), _inputs=[],
+                          _dtype=self._dtype_str)
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
 
     def _broadcast_shape(self, other_shape):
@@ -1191,38 +1218,49 @@ class Tensor:
     # --- Static constructors ---
 
     @staticmethod
+    def _resolve_np_dtype(kwargs):
+        dt = kwargs.get('dtype', 'float32')
+        return np.float64 if dt == 'float64' else np.float32
+
+    @staticmethod
     def zeros(*shape, **kwargs):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        return Tensor(np.zeros(shape, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.zeros(shape, dtype=np_dt), **kwargs)
 
     @staticmethod
     def ones(*shape, **kwargs):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        return Tensor(np.ones(shape, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.ones(shape, dtype=np_dt), **kwargs)
 
     @staticmethod
     def full(shape, fill_value, **kwargs):
         if isinstance(shape, int):
             shape = (shape,)
-        return Tensor(np.full(shape, fill_value, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.full(shape, fill_value, dtype=np_dt), **kwargs)
 
     @staticmethod
     def arange(stop, start=0, step=1, **kwargs):
-        return Tensor(np.arange(start, stop, step, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.arange(start, stop, step, dtype=np_dt), **kwargs)
 
     @staticmethod
     def rand(*shape, **kwargs):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        return Tensor(np.random.rand(*shape).astype(np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.random.rand(*shape).astype(np_dt), **kwargs)
 
     @staticmethod
     def randn(*shape, **kwargs):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        return Tensor(np.random.randn(*shape).astype(np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.random.randn(*shape).astype(np_dt), **kwargs)
 
     @staticmethod
     def randint(low, high=None, shape=(1,), **kwargs):
@@ -1231,21 +1269,25 @@ class Tensor:
             low = 0
         if isinstance(shape, int):
             shape = (shape,)
-        return Tensor(np.random.randint(low, high, size=shape).astype(np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.random.randint(low, high, size=shape).astype(np_dt), **kwargs)
 
     @staticmethod
     def linspace(start, stop, steps, **kwargs):
-        return Tensor(np.linspace(start, stop, steps, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.linspace(start, stop, steps, dtype=np_dt), **kwargs)
 
     @staticmethod
     def eye(n, **kwargs):
-        return Tensor(np.eye(n, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.eye(n, dtype=np_dt), **kwargs)
 
     @staticmethod
     def empty(*shape, **kwargs):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        return Tensor(np.empty(shape, dtype=np.float32), **kwargs)
+        np_dt = Tensor._resolve_np_dtype(kwargs)
+        return Tensor(np.empty(shape, dtype=np_dt), **kwargs)
 
     @staticmethod
     def manual_seed(seed):

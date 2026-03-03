@@ -168,3 +168,131 @@ class TestRepr:
         t = Tensor([1, 2, 3])
         assert 'shape=(3,)' in repr(t)
         assert 'float32' in repr(t)
+
+    def test_repr_f64(self):
+        t = Tensor([1, 2, 3], dtype='float64')
+        assert 'float64' in repr(t)
+
+
+class TestFloat64:
+    """Tests for float64 dtype support."""
+
+    def test_creation_from_list(self):
+        t = Tensor([1.0, 2.0, 3.0], dtype='float64')
+        assert t.dtype == 'float64'
+        assert t.shape == (3,)
+        assert t.numpy().dtype == np.float64
+        np.testing.assert_allclose(t.numpy(), [1, 2, 3])
+
+    def test_creation_2d(self):
+        t = Tensor([[1, 2], [3, 4]], dtype='float64')
+        assert t.dtype == 'float64'
+        assert t.shape == (2, 2)
+        assert t.numpy().dtype == np.float64
+        np.testing.assert_allclose(t.numpy(), [[1, 2], [3, 4]])
+
+    def test_zeros_f64(self):
+        t = Tensor.zeros(4, dtype='float64')
+        assert t.dtype == 'float64'
+        assert t.numpy().dtype == np.float64
+        np.testing.assert_allclose(t.numpy(), [0, 0, 0, 0])
+
+    def test_ones_f64(self):
+        t = Tensor.ones(3, dtype='float64')
+        assert t.dtype == 'float64'
+        np.testing.assert_allclose(t.numpy(), [1, 1, 1])
+
+    def test_full_f64(self):
+        t = Tensor.full((2, 3), 7.0, dtype='float64')
+        assert t.dtype == 'float64'
+        np.testing.assert_allclose(t.numpy(), np.full((2, 3), 7.0))
+
+    def test_eye_f64(self):
+        t = Tensor.eye(3, dtype='float64')
+        assert t.dtype == 'float64'
+        np.testing.assert_allclose(t.numpy(), np.eye(3))
+
+    def test_arange_f64(self):
+        t = Tensor.arange(5, dtype='float64')
+        assert t.dtype == 'float64'
+        np.testing.assert_allclose(t.numpy(), [0, 1, 2, 3, 4])
+
+    def test_add_f64(self):
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64')
+        b = Tensor([4.0, 5.0, 6.0], dtype='float64')
+        c = (a + b).numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, [5, 7, 9])
+
+    def test_mul_f64(self):
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64')
+        b = Tensor([4.0, 5.0, 6.0], dtype='float64')
+        c = (a * b).numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, [4, 10, 18])
+
+    def test_neg_f64(self):
+        a = Tensor([1.0, -2.0, 3.0], dtype='float64')
+        c = (-a).numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, [-1, 2, -3])
+
+    def test_scalar_add_f64(self):
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64')
+        c = (a + 10.0).numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, [11, 12, 13])
+
+    def test_sum_f64(self):
+        a = Tensor([1.0, 2.0, 3.0, 4.0], dtype='float64')
+        s = a.sum().item()
+        np.testing.assert_allclose(s, 10.0)
+
+    def test_exp_f64(self):
+        a = Tensor([0.0, 1.0, 2.0], dtype='float64')
+        c = a.exp().numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, np.exp([0, 1, 2]), rtol=1e-10)
+
+    def test_sqrt_f64(self):
+        a = Tensor([1.0, 4.0, 9.0], dtype='float64')
+        c = a.sqrt().numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, [1, 2, 3], rtol=1e-14)
+
+    def test_chain_f64(self):
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64')
+        b = Tensor([4.0, 5.0, 6.0], dtype='float64')
+        c = ((a + b) * a - b).numpy()
+        assert c.dtype == np.float64
+        np.testing.assert_allclose(c, [(1+4)*1-4, (2+5)*2-5, (3+6)*3-6])
+
+    def test_reshape_f64(self):
+        a = Tensor([1, 2, 3, 4, 5, 6], dtype='float64')
+        b = a.reshape(2, 3).numpy()
+        assert b.dtype == np.float64
+        np.testing.assert_allclose(b, [[1, 2, 3], [4, 5, 6]])
+
+    def test_backward_f64(self):
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64', requires_grad=True)
+        b = Tensor([4.0, 5.0, 6.0], dtype='float64')
+        loss = (a * b).sum()
+        loss.backward()
+        assert a.grad is not None
+        np.testing.assert_allclose(a.grad.numpy(), [4, 5, 6], rtol=1e-14)
+
+    def test_dtype_propagation(self):
+        """Ensure dtype propagates through ops."""
+        a = Tensor([1.0, 2.0], dtype='float64')
+        b = a + 1.0
+        assert b.dtype == 'float64'
+        c = b * 2.0
+        assert c.dtype == 'float64'
+        d = c.exp()
+        assert d.dtype == 'float64'
+
+    def test_default_is_f32(self):
+        """Ensure default dtype is still float32."""
+        a = Tensor([1.0, 2.0])
+        assert a.dtype == 'float32'
+        assert a.numpy().dtype == np.float32

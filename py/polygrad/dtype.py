@@ -3,6 +3,7 @@
 
 class dtypes:
     float32 = 'float32'
+    float64 = 'float64'
     float16 = 'float16'
     int32 = 'int32'
     int64 = 'int64'
@@ -10,12 +11,13 @@ class dtypes:
     uint8 = 'uint8'
     bool = 'bool'
     float = float32
+    double = float64
     half = float16
     default_float = float32
 
     @staticmethod
     def is_float(d):
-        return d in ('float32', 'float16')
+        return d in ('float32', 'float64', 'float16')
 
     @staticmethod
     def is_int(d):

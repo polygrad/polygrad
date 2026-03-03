@@ -1,6 +1,6 @@
 /**
  * tensor.js — Lazy Tensor class backed by polygrad's C11 compiler core.
- * CPU-only, float32-only for v0.
+ * CPU-only. Supports float32 (default) and float64 dtypes.
  */
 
 'use strict'
@@ -8,17 +8,18 @@
 const ffi = require('./ffi')
 
 /**
- * Flatten a nested JS array and return { data: Float32Array, shape: number[] }.
+ * Flatten a nested JS array and return { data: TypedArray, shape: number[] }.
  */
-function flattenArray(arr) {
+function flattenArray(arr, dtype) {
+  const ArrayType = dtype === 'float64' ? Float64Array : Float32Array
   if (typeof arr === 'number') {
-    return { data: new Float32Array([arr]), shape: [1] }
+    return { data: new ArrayType([arr]), shape: [1] }
   }
-  if (arr instanceof Float32Array) {
-    return { data: new Float32Array(arr), shape: [arr.length] }
+  if (arr instanceof Float32Array || arr instanceof Float64Array) {
+    return { data: new ArrayType(arr), shape: [arr.length] }
   }
   if (!Array.isArray(arr)) {
-    throw new Error('Expected number, array, or Float32Array')
+    throw new Error('Expected number, array, Float32Array, or Float64Array')
   }
 
   const shape = []
@@ -38,7 +39,7 @@ function flattenArray(arr) {
   }
   recurse(arr)
 
-  return { data: new Float32Array(flat), shape }
+  return { data: new ArrayType(flat), shape }
 }
 
 class Tensor {
@@ -58,12 +59,19 @@ class Tensor {
       this._data = opts._data || null
       this._shape = opts._shape ? [...opts._shape] : []
       this._inputs = opts._inputs || []
+      this._dtype = opts._dtype || 'float32'
     } else {
       // User construction from data
-      const { data: flat, shape } = flattenArray(data)
+      const dt = opts.dtype || 'float32'
+      this._dtype = dt
+      const { data: flat, shape } = flattenArray(data, dt)
       this._shape = shape
       this._data = flat
-      this._buffer = ffi.poly_buffer_f32(this._ctx, flat.length)
+      if (dt === 'float64') {
+        this._buffer = ffi.poly_buffer_f64(this._ctx, flat.length)
+      } else {
+        this._buffer = ffi.poly_buffer_f32(this._ctx, flat.length)
+      }
       // For multi-dimensional tensors, insert RESHAPE so scheduler knows shape
       if (shape.length > 1) {
         this._uop = ffi.poly_reshape(this._ctx, this._buffer, shape, shape.length)
@@ -75,7 +83,7 @@ class Tensor {
   }
 
   get shape() { return [...this._shape] }
-  get dtype() { return 'float32' }
+  get dtype() { return this._dtype }
   get device() { return 'CPU' }
   get ndim() { return this._shape.length }
   get requiresGrad() { return this._requiresGrad }
@@ -118,8 +126,11 @@ class Tensor {
 
     const leaves = this._collectLeaves()
     const numel = this._shape.reduce((a, b) => a * b, 1) || 1
-    const outBuf = ffi.poly_buffer_f32(this._ctx, numel)
-    const outData = new Float32Array(numel)
+    const isF64 = this._dtype === 'float64'
+    const outBuf = isF64
+      ? ffi.poly_buffer_f64(this._ctx, numel)
+      : ffi.poly_buffer_f32(this._ctx, numel)
+    const outData = isF64 ? new Float64Array(numel) : new Float32Array(numel)
 
     const store = ffi.poly_store_val(this._ctx, outBuf, this._uop)
     const sink = ffi.poly_sink1(this._ctx, store)
@@ -156,11 +167,12 @@ class Tensor {
   }
 
   /**
-   * Realize and return a Float32Array copy.
+   * Realize and return a typed array copy.
    */
   toArray() {
     this._realize()
-    return new Float32Array(this._data)
+    const ArrayType = this._dtype === 'float64' ? Float64Array : Float32Array
+    return new ArrayType(this._data)
   }
 
   /**
@@ -180,11 +192,11 @@ class Tensor {
   }
 
   detach() {
-    return new Tensor(this.toArray())
+    return new Tensor(this.toArray(), { dtype: this._dtype })
   }
 
   clone() {
-    const t = new Tensor(this.toArray())
+    const t = new Tensor(this.toArray(), { dtype: this._dtype })
     t._requiresGrad = this._requiresGrad
     return t
   }
@@ -196,11 +208,17 @@ class Tensor {
   // --- Internal helpers ---
 
   _makeResult(uop, shape, inputs) {
+    // Infer dtype from inputs: if any input is float64, result is float64
+    let dt = 'float32'
+    for (let i = 0; i < inputs.length; i++) {
+      if (inputs[i]._dtype === 'float64') { dt = 'float64'; break }
+    }
     const t = new Tensor(null, {
       _ctx: this._ctx,
       _uop: uop,
       _shape: shape,
-      _inputs: inputs
+      _inputs: inputs,
+      _dtype: dt
     })
     for (let i = 0; i < inputs.length; i++) {
       if (inputs[i]._requiresGrad) { t._requiresGrad = true; break }
@@ -211,8 +229,11 @@ class Tensor {
   _ensureTensor(other) {
     if (other instanceof Tensor) return other
     if (typeof other === 'number') {
-      const c = ffi.poly_const_float(this._ctx, other)
-      return new Tensor(null, { _ctx: this._ctx, _uop: c, _shape: [], _inputs: [] })
+      const c = this._dtype === 'float64'
+        ? ffi.poly_const_double(this._ctx, other)
+        : ffi.poly_const_float(this._ctx, other)
+      return new Tensor(null, { _ctx: this._ctx, _uop: c, _shape: [], _inputs: [],
+                                _dtype: this._dtype })
     }
     throw new TypeError(`Cannot convert ${typeof other} to Tensor`)
   }
@@ -936,48 +957,78 @@ class Tensor {
 
   // --- Static constructors ---
 
-  static zeros(...shape) {
+  static _resolveArrayType(opts) {
+    return (opts && opts.dtype === 'float64') ? Float64Array : Float32Array
+  }
+
+  static zeros(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel).fill(0))
+    const t = new Tensor(new AT(numel).fill(0), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static ones(...shape) {
+  static ones(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel).fill(1))
+    const t = new Tensor(new AT(numel).fill(1), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static full(shape, fillValue) {
+  static full(shape, fillValue, opts) {
     if (typeof shape === 'number') shape = [shape]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel).fill(fillValue))
+    const t = new Tensor(new AT(numel).fill(fillValue), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static arange(stop, start = 0, step = 1) {
+  static arange(stop, start = 0, step = 1, opts) {
+    const AT = Tensor._resolveArrayType(opts)
     const arr = []
     for (let i = start; i < stop; i += step) arr.push(i)
-    return new Tensor(new Float32Array(arr))
+    return new Tensor(new AT(arr), opts)
   }
 
-  static rand(...shape) {
+  static rand(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
     if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const data = new Float32Array(numel)
+    const data = new AT(numel)
     for (let i = 0; i < numel; i++) data[i] = Math.random()
-    const t = new Tensor(data)
+    const t = new Tensor(data, opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static randn(...shape) {
+  static randn(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
     if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const data = new Float32Array(numel)
+    const data = new AT(numel)
     // Box-Muller transform
     for (let i = 0; i < numel; i += 2) {
       const u1 = Math.random() || 1e-10
@@ -986,41 +1037,50 @@ class Tensor {
       data[i] = r * Math.cos(2 * Math.PI * u2)
       if (i + 1 < numel) data[i + 1] = r * Math.sin(2 * Math.PI * u2)
     }
-    const t = new Tensor(data)
+    const t = new Tensor(data, opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static randint(low, high, shape) {
+  static randint(low, high, shape, opts) {
     if (high === undefined) { high = low; low = 0 }
     if (typeof shape === 'number') shape = [shape]
     if (!shape) shape = [1]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const data = new Float32Array(numel)
+    const data = new AT(numel)
     for (let i = 0; i < numel; i++) data[i] = Math.floor(Math.random() * (high - low)) + low
-    const t = new Tensor(data)
+    const t = new Tensor(data, opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }
 
-  static linspace(start, stop, steps) {
-    const data = new Float32Array(steps)
+  static linspace(start, stop, steps, opts) {
+    const AT = Tensor._resolveArrayType(opts)
+    const data = new AT(steps)
     for (let i = 0; i < steps; i++) {
       data[i] = start + (stop - start) * i / (steps - 1)
     }
-    return new Tensor(data)
+    return new Tensor(data, opts)
   }
 
-  static eye(n) {
-    const data = new Float32Array(n * n)
+  static eye(n, opts) {
+    const AT = Tensor._resolveArrayType(opts)
+    const data = new AT(n * n)
     for (let i = 0; i < n; i++) data[i * n + i] = 1
-    return new Tensor(data).reshape(n, n)
+    return new Tensor(data, opts).reshape(n, n)
   }
 
-  static empty(...shape) {
+  static empty(...args) {
+    let shape = args, opts
+    if (args.length > 0 && typeof args[args.length - 1] === 'object'
+        && !(args[args.length - 1] instanceof Array)) {
+      opts = args[args.length - 1]; shape = args.slice(0, -1)
+    }
     if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+    const AT = Tensor._resolveArrayType(opts)
     const numel = shape.reduce((a, b) => a * b, 1)
-    const t = new Tensor(new Float32Array(numel))
+    const t = new Tensor(new AT(numel), opts)
     if (shape.length > 1) return t.reshape(...shape)
     return t
   }

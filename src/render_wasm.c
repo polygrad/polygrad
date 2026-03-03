@@ -225,27 +225,48 @@ static void build_export_section(WasmBuf *mod, int kernel_func_idx) {
   wb_free(&sec);
 }
 
+/* ── Dtype helpers ───────────────────────────────────────────────────── */
+
+static bool dt_is_f64(PolyDType dt) { return poly_dtype_is_float(dt) && dt.bitsize == 64; }
+static bool dt_is_i64(PolyDType dt) { return !poly_dtype_is_float(dt) && !poly_dtype_is_bool(dt) && dt.bitsize == 64; }
+static bool dt_is_64(PolyDType dt) { return dt.bitsize == 64; }
+
+/* Which local bucket: 0=i32, 1=i64, 2=f32, 3=f64 */
+static int dt_bucket(PolyDType dt) {
+  if (poly_dtype_is_float(dt)) return dt.bitsize == 64 ? 3 : 2;
+  return dt.bitsize == 64 ? 1 : 0;
+}
+
+/* Element size in bytes for buffer data */
+static int dt_elem_size(PolyDType dt) {
+  return dt.bitsize <= 32 ? 4 : 8;
+}
+
+/* Log2 alignment for WASM load/store */
+static int dt_align_log2(PolyDType dt) {
+  return dt.bitsize <= 32 ? 2 : 3;
+}
+
 /* ── Emit scalar ALU opcode ──────────────────────────────────────────── */
 
 static void emit_alu_scalar(WasmBuf *code, PolyOps op, PolyDType dtype,
                             MathImports *math, int n_imported_funcs) {
   bool is_int = !poly_dtype_is_float(dtype);
   bool is_unsigned = poly_dtype_is_unsigned(dtype);
+  bool b64 = dt_is_64(dtype);
   switch (op) {
   /* Unary */
   case POLY_OP_NEG:
     if (poly_dtype_is_bool(dtype)) {
-      /* Boolean NOT: i32.eqz (0→1, non-zero→0) */
       wb_byte(code, WASM_OP_I32_EQZ);
     } else if (is_int) {
-      /* Integer NEG: i32.const 0; src; i32.sub (caller pushes 0 first) */
-      wb_byte(code, WASM_OP_I32_SUB);
+      wb_byte(code, b64 ? WASM_OP_I64_SUB : WASM_OP_I32_SUB);
     } else {
-      wb_byte(code, WASM_OP_F32_NEG);
+      wb_byte(code, b64 ? WASM_OP_F64_NEG : WASM_OP_F32_NEG);
     }
     break;
-  case POLY_OP_SQRT:       wb_byte(code, WASM_OP_F32_SQRT); break;
-  case POLY_OP_TRUNC:      wb_byte(code, WASM_OP_F32_TRUNC); break;
+  case POLY_OP_SQRT:  wb_byte(code, b64 ? WASM_OP_F64_SQRT : WASM_OP_F32_SQRT); break;
+  case POLY_OP_TRUNC: wb_byte(code, b64 ? WASM_OP_F64_TRUNC : WASM_OP_F32_TRUNC); break;
   case POLY_OP_EXP2: {
     int idx = 0;
     (void)math;
@@ -265,38 +286,67 @@ static void emit_alu_scalar(WasmBuf *code, PolyOps op, PolyDType dtype,
     wb_uleb128(code, idx);
     break;
   }
-  case POLY_OP_RECIPROCAL: {
-    wb_byte(code, WASM_OP_F32_DIV);
+  case POLY_OP_RECIPROCAL:
+    wb_byte(code, b64 ? WASM_OP_F64_DIV : WASM_OP_F32_DIV);
     break;
-  }
 
-  /* Binary — dtype-aware for ADD/SUB/MUL */
-  case POLY_OP_ADD:   wb_byte(code, is_int ? WASM_OP_I32_ADD : WASM_OP_F32_ADD); break;
-  case POLY_OP_SUB:   wb_byte(code, is_int ? WASM_OP_I32_SUB : WASM_OP_F32_SUB); break;
-  case POLY_OP_MUL:   wb_byte(code, is_int ? WASM_OP_I32_MUL : WASM_OP_F32_MUL); break;
-  case POLY_OP_FDIV:  wb_byte(code, WASM_OP_F32_DIV); break;
-  case POLY_OP_MAX:   wb_byte(code, WASM_OP_F32_MAX); break;
-  case POLY_OP_CMPLT:
-    wb_byte(code, is_int ? (is_unsigned ? WASM_OP_I32_LT_U : WASM_OP_I32_LT_S)
-                         : WASM_OP_F32_LT);
+  /* Binary */
+  case POLY_OP_ADD:
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_ADD : WASM_OP_I32_ADD)
+                         : (b64 ? WASM_OP_F64_ADD : WASM_OP_F32_ADD));
     break;
-  case POLY_OP_CMPEQ: wb_byte(code, is_int ? WASM_OP_I32_EQ : WASM_OP_F32_EQ); break;
-  case POLY_OP_CMPNE: wb_byte(code, is_int ? WASM_OP_I32_NE : WASM_OP_F32_NE); break;
+  case POLY_OP_SUB:
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_SUB : WASM_OP_I32_SUB)
+                         : (b64 ? WASM_OP_F64_SUB : WASM_OP_F32_SUB));
+    break;
+  case POLY_OP_MUL:
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_MUL : WASM_OP_I32_MUL)
+                         : (b64 ? WASM_OP_F64_MUL : WASM_OP_F32_MUL));
+    break;
+  case POLY_OP_FDIV:
+    wb_byte(code, b64 ? WASM_OP_F64_DIV : WASM_OP_F32_DIV);
+    break;
+  case POLY_OP_MAX:
+    wb_byte(code, b64 ? WASM_OP_F64_MAX : WASM_OP_F32_MAX);
+    break;
+  case POLY_OP_CMPLT:
+    if (is_int) wb_byte(code, b64 ? (is_unsigned ? WASM_OP_I64_LT_U : WASM_OP_I64_LT_S)
+                                  : (is_unsigned ? WASM_OP_I32_LT_U : WASM_OP_I32_LT_S));
+    else wb_byte(code, b64 ? WASM_OP_F64_LT : WASM_OP_F32_LT);
+    break;
+  case POLY_OP_CMPEQ:
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_EQ : WASM_OP_I32_EQ)
+                         : (b64 ? WASM_OP_F64_EQ : WASM_OP_F32_EQ));
+    break;
+  case POLY_OP_CMPNE:
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_NE : WASM_OP_I32_NE)
+                         : (b64 ? WASM_OP_F64_NE : WASM_OP_F32_NE));
+    break;
 
   /* Integer-only ops */
-  case POLY_OP_IDIV:  wb_byte(code, is_unsigned ? WASM_OP_I32_DIV_U : WASM_OP_I32_DIV_S); break;
-  case POLY_OP_MOD:   wb_byte(code, is_unsigned ? WASM_OP_I32_REM_U : WASM_OP_I32_REM_S); break;
-  case POLY_OP_SHL:   wb_byte(code, WASM_OP_I32_SHL); break;
-  case POLY_OP_SHR:   wb_byte(code, is_unsigned ? WASM_OP_I32_SHR_U : WASM_OP_I32_SHR_S); break;
-  case POLY_OP_AND:   wb_byte(code, WASM_OP_I32_AND); break;
-  case POLY_OP_OR:    wb_byte(code, WASM_OP_I32_OR); break;
-  case POLY_OP_XOR:   wb_byte(code, WASM_OP_I32_XOR); break;
+  case POLY_OP_IDIV:
+    wb_byte(code, b64 ? WASM_OP_I64_DIV_S
+                      : (is_unsigned ? WASM_OP_I32_DIV_U : WASM_OP_I32_DIV_S));
+    break;
+  case POLY_OP_MOD:
+    wb_byte(code, is_unsigned ? WASM_OP_I32_REM_U : WASM_OP_I32_REM_S);
+    break;
+  case POLY_OP_SHL:  wb_byte(code, b64 ? WASM_OP_I64_SHL : WASM_OP_I32_SHL); break;
+  case POLY_OP_SHR:
+    if (b64) wb_byte(code, is_unsigned ? WASM_OP_I64_SHR_U : WASM_OP_I64_SHR_S);
+    else wb_byte(code, is_unsigned ? WASM_OP_I32_SHR_U : WASM_OP_I32_SHR_S);
+    break;
+  case POLY_OP_AND:  wb_byte(code, b64 ? WASM_OP_I64_AND : WASM_OP_I32_AND); break;
+  case POLY_OP_OR:   wb_byte(code, b64 ? WASM_OP_I64_OR  : WASM_OP_I32_OR); break;
+  case POLY_OP_XOR:  wb_byte(code, b64 ? WASM_OP_I64_XOR : WASM_OP_I32_XOR); break;
 
   /* Ternary */
   case POLY_OP_WHERE: wb_byte(code, WASM_OP_SELECT); break;
   case POLY_OP_MULACC:
-    wb_byte(code, is_int ? WASM_OP_I32_MUL : WASM_OP_F32_MUL);
-    wb_byte(code, is_int ? WASM_OP_I32_ADD : WASM_OP_F32_ADD);
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_MUL : WASM_OP_I32_MUL)
+                         : (b64 ? WASM_OP_F64_MUL : WASM_OP_F32_MUL));
+    wb_byte(code, is_int ? (b64 ? WASM_OP_I64_ADD : WASM_OP_I32_ADD)
+                         : (b64 ? WASM_OP_F64_ADD : WASM_OP_F32_ADD));
     break;
 
   case POLY_OP_POW: {
@@ -314,42 +364,33 @@ static void emit_alu_scalar(WasmBuf *code, PolyOps op, PolyDType dtype,
   (void)n_imported_funcs;
 }
 
-/* ── Emit SIMD ALU opcode ────────────────────────────────────────────── */
+/* ── Emit SIMD ALU opcode (f32x4) ────────────────────────────────────── */
 
-static void emit_alu_simd(WasmBuf *code, PolyOps op) {
+static void emit_alu_simd_f32x4(WasmBuf *code, PolyOps op) {
   switch (op) {
-  case POLY_OP_NEG:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_NEG);
-    break;
-  case POLY_OP_SQRT:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_SQRT);
-    break;
-  case POLY_OP_ADD:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_ADD);
-    break;
-  case POLY_OP_SUB:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_SUB);
-    break;
-  case POLY_OP_MUL:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_MUL);
-    break;
-  case POLY_OP_FDIV:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_DIV);
-    break;
-  case POLY_OP_MAX:
-    wb_byte(code, WASM_SIMD_PREFIX);
-    wb_uleb128(code, WASM_SIMD_F32X4_MAX);
-    break;
-  default:
-    /* Fallback: not all ops have SIMD equivalents.
-     * For unsupported ops, the caller should use scalar path. */
-    break;
+  case POLY_OP_NEG:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_NEG); break;
+  case POLY_OP_SQRT: wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_SQRT); break;
+  case POLY_OP_ADD:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_ADD); break;
+  case POLY_OP_SUB:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_SUB); break;
+  case POLY_OP_MUL:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_MUL); break;
+  case POLY_OP_FDIV: wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_DIV); break;
+  case POLY_OP_MAX:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F32X4_MAX); break;
+  default: break;
+  }
+}
+
+/* ── Emit SIMD ALU opcode (f64x2) ────────────────────────────────────── */
+
+static void emit_alu_simd_f64x2(WasmBuf *code, PolyOps op) {
+  switch (op) {
+  case POLY_OP_NEG:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_NEG); break;
+  case POLY_OP_SQRT: wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_SQRT); break;
+  case POLY_OP_ADD:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_ADD); break;
+  case POLY_OP_SUB:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_SUB); break;
+  case POLY_OP_MUL:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_MUL); break;
+  case POLY_OP_FDIV: wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_DIV); break;
+  case POLY_OP_MAX:  wb_byte(code, WASM_SIMD_PREFIX); wb_uleb128(code, WASM_SIMD_F64X2_MAX); break;
+  default: break;
   }
 }
 
@@ -367,6 +408,18 @@ static bool has_simd_op(PolyOps op) {
 }
 
 /* ── Check if entire kernel is SIMD-able ─────────────────────────────── */
+
+/* Detect whether the kernel operates on f64 data (check LOAD dtypes) */
+static bool kernel_is_f64(PolyUOp **uops, int n) {
+  for (int i = 0; i < n; i++) {
+    if (uops[i]->op == POLY_OP_LOAD && dt_is_f64(uops[i]->dtype))
+      return true;
+    if (uops[i]->op == POLY_OP_STORE && uops[i]->src[0]->dtype.is_ptr &&
+        dt_is_f64(uops[i]->src[0]->dtype))
+      return true;
+  }
+  return false;
+}
 
 static bool kernel_is_simdable(PolyUOp **uops, int n) {
   for (int i = 0; i < n; i++) {
@@ -390,82 +443,91 @@ static bool kernel_is_simdable(PolyUOp **uops, int n) {
 
 /* ── Build code section (scalar) ─────────────────────────────────────── */
 
+/* Allocate a local in the right bucket for a dtype */
+static int alloc_local(PolyDType dt, int *next_i32, int *next_i64,
+                       int *next_f32, int *next_f64) {
+  int b = dt_bucket(dt);
+  switch (b) {
+  case 0: return (*next_i32)++;
+  case 1: return (*next_i64)++;
+  case 2: return (*next_f32)++;
+  case 3: return (*next_f64)++;
+  }
+  return (*next_i32)++;
+}
+
+/* Increment the right local counter during the counting pass */
+static void count_local(PolyDType dt, int *ni32, int *ni64, int *nf32, int *nf64) {
+  int b = dt_bucket(dt);
+  switch (b) {
+  case 0: (*ni32)++; break;
+  case 1: (*ni64)++; break;
+  case 2: (*nf32)++; break;
+  case 3: (*nf64)++; break;
+  }
+}
+
 static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
                               int n_params, MathImports *math,
                               int n_imported_funcs) {
   /* --- Count locals needed (beyond function params) --- */
-  int n_locals_i32 = 0, n_locals_f32 = 0;
+  int n_locals_i32 = 0, n_locals_i64 = 0, n_locals_f32 = 0, n_locals_f64 = 0;
 
   /* First pass: count locals */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_RANGE) n_locals_i32++;  /* loop counter */
+    if (u->op == POLY_OP_RANGE) n_locals_i32++;  /* loop counter always i32 */
     if (u->op == POLY_OP_LOAD) {
-      /* Register LOADs alias the accumulator local — no new local needed */
       bool is_reg_load = (u->src[0]->op == POLY_OP_INDEX &&
                           u->src[0]->src[0]->dtype.is_ptr &&
                           u->src[0]->src[0]->dtype.addrspace == POLY_ADDR_REG);
-      if (!is_reg_load) {
-        if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
-        else n_locals_i32++;
-      }
+      if (!is_reg_load)
+        count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
     }
-    if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
-      else n_locals_i32++;
-    }
-    if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) {
-      if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
-      else n_locals_i32++;
-    }
-    if (u->op == POLY_OP_DEFINE_LOCAL) {
-      if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
-      else n_locals_i32++;
-    }
+    if (poly_opset_has(POLY_GROUP_ALU, u->op))
+      count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
+    if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST)
+      count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
+    if (u->op == POLY_OP_DEFINE_LOCAL)
+      count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
     if (u->op == POLY_OP_DEFINE_REG) {
-      /* Register accumulator: allocate a scalar local for the value */
       PolyDType base = poly_dtype_scalar(u->dtype);
-      if (poly_dtype_is_float(base)) n_locals_f32++;
-      else n_locals_i32++;
+      count_local(base, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
     }
-    /* AFTER: no local needed (pass-through to src[0]) */
     if (u->op == POLY_OP_INDEX) {
-      /* Register-based INDEX doesn't need a local (reuses accumulator) */
       if (!(u->src[0]->dtype.is_ptr && u->src[0]->dtype.addrspace == POLY_ADDR_REG))
-        n_locals_i32++;
+        n_locals_i32++;  /* byte offsets always i32 */
     }
-    if (u->op == POLY_OP_CONST) {
-      if (poly_dtype_is_float(u->dtype)) n_locals_f32++;
-      else n_locals_i32++;
-    }
+    if (u->op == POLY_OP_CONST)
+      count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
   }
 
   /* Locals declaration: count of (count, type) pairs */
   int n_local_types = 0;
   if (n_locals_i32 > 0) n_local_types++;
+  if (n_locals_i64 > 0) n_local_types++;
   if (n_locals_f32 > 0) n_local_types++;
+  if (n_locals_f64 > 0) n_local_types++;
 
-  /* Function body buffer (locals + instructions) */
+  /* Function body buffer */
   WasmBuf body;
   wb_init(&body);
 
   wb_uleb128(&body, n_local_types);
-  if (n_locals_i32 > 0) {
-    wb_uleb128(&body, n_locals_i32);
-    wb_byte(&body, WASM_TYPE_I32);
-  }
-  if (n_locals_f32 > 0) {
-    wb_uleb128(&body, n_locals_f32);
-    wb_byte(&body, WASM_TYPE_F32);
-  }
+  if (n_locals_i32 > 0) { wb_uleb128(&body, n_locals_i32); wb_byte(&body, WASM_TYPE_I32); }
+  if (n_locals_i64 > 0) { wb_uleb128(&body, n_locals_i64); wb_byte(&body, WASM_TYPE_I64); }
+  if (n_locals_f32 > 0) { wb_uleb128(&body, n_locals_f32); wb_byte(&body, WASM_TYPE_F32); }
+  if (n_locals_f64 > 0) { wb_uleb128(&body, n_locals_f64); wb_byte(&body, WASM_TYPE_F64); }
 
   /* --- Assign local indices --- */
   LocalMap locals;
   lm_init(&locals, n * 2);
 
-  /* Params occupy local indices 0..n_params-1 */
-  int next_i32 = n_params;  /* i32 locals start after params */
-  int next_f32 = n_params + n_locals_i32;  /* f32 locals start after all i32 */
+  /* Local layout: [params(i32)] [i32] [i64] [f32] [f64] */
+  int next_i32 = n_params;
+  int next_i64 = n_params + n_locals_i32;
+  int next_f32 = n_params + n_locals_i32 + n_locals_i64;
+  int next_f64 = n_params + n_locals_i32 + n_locals_i64 + n_locals_f32;
 
   /* --- Second pass: emit instructions --- */
   for (int i = 0; i < n; i++) {
@@ -474,21 +536,25 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
       continue;
 
-    /* --- PARAM: already a function parameter --- */
+    /* --- PARAM --- */
     if (u->op == POLY_OP_PARAM || u->op == POLY_OP_DEFINE_VAR) {
       lm_set(&locals, u, (int)u->arg.i);
       continue;
     }
 
-    /* --- CONST: push literal onto stack, store to local --- */
+    /* --- CONST --- */
     if (u->op == POLY_OP_CONST) {
-      int local_idx;
-      if (poly_dtype_is_float(u->dtype)) {
-        local_idx = next_f32++;
+      int local_idx = alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
+      if (dt_is_f64(u->dtype)) {
+        wb_byte(&body, WASM_OP_F64_CONST);
+        wb_f64(&body, u->arg.f);
+      } else if (poly_dtype_is_float(u->dtype)) {
         wb_byte(&body, WASM_OP_F32_CONST);
         wb_f32(&body, (float)u->arg.f);
+      } else if (dt_is_i64(u->dtype)) {
+        wb_byte(&body, WASM_OP_I64_CONST);
+        wb_sleb128(&body, u->arg.i);
       } else {
-        local_idx = next_i32++;
         wb_byte(&body, WASM_OP_I32_CONST);
         wb_sleb128(&body, u->arg.i);
       }
@@ -498,16 +564,22 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- DEFINE_LOCAL: accumulator initialization --- */
+    /* --- DEFINE_LOCAL --- */
     if (u->op == POLY_OP_DEFINE_LOCAL) {
-      int local_idx;
-      if (poly_dtype_is_float(u->dtype)) {
-        local_idx = next_f32++;
+      int local_idx = alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
+      if (dt_is_f64(u->dtype)) {
+        wb_byte(&body, WASM_OP_F64_CONST);
+        double init = (u->arg.kind == POLY_ARG_FLOAT) ? u->arg.f : 0.0;
+        wb_f64(&body, init);
+      } else if (poly_dtype_is_float(u->dtype)) {
         wb_byte(&body, WASM_OP_F32_CONST);
         float init = (u->arg.kind == POLY_ARG_FLOAT) ? (float)u->arg.f : 0.0f;
         wb_f32(&body, init);
+      } else if (dt_is_i64(u->dtype)) {
+        wb_byte(&body, WASM_OP_I64_CONST);
+        int64_t init = (u->arg.kind == POLY_ARG_INT) ? u->arg.i : 0;
+        wb_sleb128(&body, init);
       } else {
-        local_idx = next_i32++;
         wb_byte(&body, WASM_OP_I32_CONST);
         int64_t init = (u->arg.kind == POLY_ARG_INT) ? u->arg.i : 0;
         wb_sleb128(&body, init);
@@ -518,16 +590,20 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- DEFINE_REG: register accumulator (like DEFINE_LOCAL) --- */
+    /* --- DEFINE_REG --- */
     if (u->op == POLY_OP_DEFINE_REG) {
       PolyDType base = poly_dtype_scalar(u->dtype);
-      int local_idx;
-      if (poly_dtype_is_float(base)) {
-        local_idx = next_f32++;
+      int local_idx = alloc_local(base, &next_i32, &next_i64, &next_f32, &next_f64);
+      if (dt_is_f64(base)) {
+        wb_byte(&body, WASM_OP_F64_CONST);
+        wb_f64(&body, 0.0);
+      } else if (poly_dtype_is_float(base)) {
         wb_byte(&body, WASM_OP_F32_CONST);
-        wb_f32(&body, 0.0f);  /* will be initialized by STORE */
+        wb_f32(&body, 0.0f);
+      } else if (dt_is_i64(base)) {
+        wb_byte(&body, WASM_OP_I64_CONST);
+        wb_sleb128(&body, 0);
       } else {
-        local_idx = next_i32++;
         wb_byte(&body, WASM_OP_I32_CONST);
         wb_sleb128(&body, 0);
       }
@@ -537,7 +613,7 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- AFTER: pass-through (maps to same local as src[0]) --- */
+    /* --- AFTER --- */
     if (u->op == POLY_OP_AFTER) {
       int src_local = lm_get(&locals, u->src[0]);
       if (src_local >= 0)
@@ -545,9 +621,8 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- INDEX: base + idx * 4 (byte offset), or register pass-through --- */
+    /* --- INDEX: base + idx * elem_size (byte offset) --- */
     if (u->op == POLY_OP_INDEX) {
-      /* Register-based INDEX: just map to the accumulator local */
       if (u->src[0]->dtype.is_ptr &&
           u->src[0]->dtype.addrspace == POLY_ADDR_REG) {
         int acc_local = lm_get(&locals, u->src[0]);
@@ -556,13 +631,14 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         int local_idx = next_i32++;
         int base = lm_get(&locals, u->src[0]);
         int idx  = lm_get(&locals, u->src[1]);
+        int elem_size = dt_elem_size(u->src[0]->dtype);
 
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, base);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, idx);
         wb_byte(&body, WASM_OP_I32_CONST);
-        wb_sleb128(&body, 4);  /* sizeof(float) */
+        wb_sleb128(&body, elem_size);
         wb_byte(&body, WASM_OP_I32_MUL);
         wb_byte(&body, WASM_OP_I32_ADD);
         wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -572,26 +648,21 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- RANGE: for loop → block + loop + br_if --- */
+    /* --- RANGE --- */
     if (u->op == POLY_OP_RANGE) {
       int counter = next_i32++;
       lm_set(&locals, u, counter);
 
-      /* Initialize counter to 0 */
       wb_byte(&body, WASM_OP_I32_CONST);
       wb_sleb128(&body, 0);
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, counter);
 
-      /* block $break */
       wb_byte(&body, WASM_OP_BLOCK);
       wb_byte(&body, WASM_BLOCKTYPE_VOID);
-
-      /* loop $continue */
       wb_byte(&body, WASM_OP_LOOP);
       wb_byte(&body, WASM_BLOCKTYPE_VOID);
 
-      /* if (counter >= bound) break */
       int bound = lm_get(&locals, u->src[0]);
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, counter);
@@ -599,20 +670,18 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       wb_uleb128(&body, bound);
       wb_byte(&body, WASM_OP_I32_GE_U);
       wb_byte(&body, WASM_OP_BR_IF);
-      wb_uleb128(&body, 1);  /* branch to block (1 level out) */
+      wb_uleb128(&body, 1);
       continue;
     }
 
-    /* --- END: increment counter, branch to loop start, close --- */
+    /* --- END --- */
     if (u->op == POLY_OP_END) {
-      /* Find the RANGE this END closes (src[1] is the RANGE) */
       PolyUOp *range = NULL;
       for (int j = 0; j < u->n_src; j++) {
         if (u->src[j]->op == POLY_OP_RANGE) { range = u->src[j]; break; }
       }
       if (range) {
         int counter = lm_get(&locals, range);
-        /* counter++ */
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, counter);
         wb_byte(&body, WASM_OP_I32_CONST);
@@ -620,38 +689,38 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         wb_byte(&body, WASM_OP_I32_ADD);
         wb_byte(&body, WASM_OP_LOCAL_SET);
         wb_uleb128(&body, counter);
-
-        /* br $continue (0 = innermost loop) */
         wb_byte(&body, WASM_OP_BR);
         wb_uleb128(&body, 0);
       }
-
-      /* end loop, end block */
       wb_byte(&body, WASM_OP_END);
       wb_byte(&body, WASM_OP_END);
       continue;
     }
 
-    /* --- LOAD: f32.load from memory, or local.get for register acc --- */
+    /* --- LOAD --- */
     if (u->op == POLY_OP_LOAD) {
-      /* Check if loading from a register accumulator (INDEX → AFTER → DEFINE_REG) */
       bool is_reg = (u->src[0]->op == POLY_OP_INDEX &&
                      u->src[0]->src[0]->dtype.is_ptr &&
                      u->src[0]->src[0]->dtype.addrspace == POLY_ADDR_REG);
       if (is_reg) {
-        /* Register load: just alias to the accumulator local */
         int acc_local = lm_get(&locals, u->src[0]);
         lm_set(&locals, u, acc_local);
       } else {
-        bool is_float = poly_dtype_is_float(u->dtype);
-        int local_idx = is_float ? next_f32++ : next_i32++;
+        int local_idx = alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
         int addr = lm_get(&locals, u->src[0]);
 
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
-        wb_byte(&body, is_float ? WASM_OP_F32_LOAD : WASM_OP_I32_LOAD);
-        wb_uleb128(&body, 2);  /* align: 2^2 = 4 bytes */
-        wb_uleb128(&body, 0);  /* offset: 0 */
+
+        /* Pick load opcode by dtype */
+        if (dt_is_f64(u->dtype))           wb_byte(&body, WASM_OP_F64_LOAD);
+        else if (poly_dtype_is_float(u->dtype)) wb_byte(&body, WASM_OP_F32_LOAD);
+        else                                     wb_byte(&body, WASM_OP_I32_LOAD);
+        /* i64 LOAD would be: wb_byte(&body, WASM_OP_I64_LOAD) -- not needed yet
+         * since i64 values only appear as intermediates in transcendental decompositions,
+         * never as buffer data. */
+        wb_uleb128(&body, dt_align_log2(u->dtype));
+        wb_uleb128(&body, 0);
         wb_byte(&body, WASM_OP_LOCAL_SET);
         wb_uleb128(&body, local_idx);
         lm_set(&locals, u, local_idx);
@@ -659,10 +728,9 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- STORE: f32.store to memory or local.set to accumulator --- */
+    /* --- STORE --- */
     if (u->op == POLY_OP_STORE) {
       int val = lm_get(&locals, u->src[1]);
-      /* Check for register accumulator store (target is INDEX into reg) */
       bool is_reg = false;
       if (u->src[0]->op == POLY_OP_DEFINE_LOCAL) {
         is_reg = true;
@@ -672,29 +740,45 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         is_reg = true;
       }
       if (is_reg) {
-        /* Accumulator store: local.set */
         int acc_local = lm_get(&locals, u->src[0]);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, val);
         wb_byte(&body, WASM_OP_LOCAL_SET);
         wb_uleb128(&body, acc_local);
       } else {
-        /* Buffer store */
         int addr = lm_get(&locals, u->src[0]);
-        bool val_is_float = poly_dtype_is_float(u->src[1]->dtype);
+        PolyDType val_dt = u->src[1]->dtype;
+        bool val_is_float = poly_dtype_is_float(val_dt);
         bool buf_is_float = u->src[0]->dtype.is_ptr &&
                             poly_dtype_is_float(u->src[0]->dtype);
+        bool buf_is_f64 = u->src[0]->dtype.is_ptr && dt_is_f64(u->src[0]->dtype);
+
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, val);
-        /* Convert i32→f32 when storing bool/int result into float buffer */
-        if (buf_is_float && !val_is_float) {
+
+        /* Type conversions for mismatched value/buffer dtypes */
+        if (buf_is_f64 && !val_is_float) {
+          /* i32/i64 → f64 */
+          if (dt_is_i64(val_dt)) wb_byte(&body, WASM_OP_F64_CONVERT_I64_S);
+          else wb_byte(&body, WASM_OP_F64_CONVERT_I32_S);
+        } else if (buf_is_float && !buf_is_f64 && !val_is_float) {
+          /* i32 → f32 */
           wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
         }
-        bool store_float = val_is_float || buf_is_float;
-        wb_byte(&body, store_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
-        wb_uleb128(&body, 2);  /* align */
+
+        /* Pick store opcode */
+        if (buf_is_f64) {
+          wb_byte(&body, WASM_OP_F64_STORE);
+          wb_uleb128(&body, 3);  /* align: 2^3 = 8 bytes */
+        } else if (buf_is_float || val_is_float) {
+          wb_byte(&body, WASM_OP_F32_STORE);
+          wb_uleb128(&body, 2);  /* align: 2^2 = 4 bytes */
+        } else {
+          wb_byte(&body, WASM_OP_I32_STORE);
+          wb_uleb128(&body, 2);
+        }
         wb_uleb128(&body, 0);  /* offset */
       }
       continue;
@@ -702,32 +786,62 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
 
     /* --- CAST / BITCAST --- */
     if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) {
-      int local_idx;
-      if (poly_dtype_is_float(u->dtype)) local_idx = next_f32++;
-      else local_idx = next_i32++;
-
+      int local_idx = alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
       int src = lm_get(&locals, u->src[0]);
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, src);
 
-      /* Determine conversion opcode */
-      bool src_float = poly_dtype_is_float(u->src[0]->dtype);
-      bool dst_float = poly_dtype_is_float(u->dtype);
+      PolyDType src_dt = u->src[0]->dtype;
+      PolyDType dst_dt = u->dtype;
+      bool src_float = poly_dtype_is_float(src_dt);
+      bool dst_float = poly_dtype_is_float(dst_dt);
+      bool src_64 = dt_is_64(src_dt);
+      bool dst_64 = dt_is_64(dst_dt);
 
       if (u->op == POLY_OP_BITCAST) {
-        if (src_float && !dst_float)
-          wb_byte(&body, WASM_OP_I32_REINTERPRET_F32);
-        else if (!src_float && dst_float)
-          wb_byte(&body, WASM_OP_F32_REINTERPRET_I32);
-        /* same type: no-op */
-      } else { /* CAST */
-        bool src_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
-        bool dst_unsigned = poly_dtype_is_unsigned(u->dtype);
-        if (src_float && !dst_float)
-          wb_byte(&body, dst_unsigned ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
-        else if (!src_float && dst_float)
-          wb_byte(&body, src_unsigned ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
-        /* same type: no-op */
+        /* Bit-level reinterpret */
+        if (src_float && !dst_float) {
+          if (src_64) wb_byte(&body, WASM_OP_I64_REINTERPRET_F64);
+          else        wb_byte(&body, WASM_OP_I32_REINTERPRET_F32);
+        } else if (!src_float && dst_float) {
+          if (dst_64) wb_byte(&body, WASM_OP_F64_REINTERPRET_I64);
+          else        wb_byte(&body, WASM_OP_F32_REINTERPRET_I32);
+        }
+        /* same category: no-op (i32→i32, f32→f32) */
+      } else {
+        /* Value-converting CAST */
+        if (src_float && dst_float) {
+          /* f32→f64 or f64→f32 */
+          if (!src_64 && dst_64)  wb_byte(&body, WASM_OP_F64_PROMOTE_F32);
+          else if (src_64 && !dst_64) wb_byte(&body, WASM_OP_F32_DEMOTE_F64);
+        } else if (src_float && !dst_float) {
+          /* float→int */
+          if (src_64 && dst_64) wb_byte(&body, WASM_OP_I64_TRUNC_F64_S);
+          else if (src_64 && !dst_64) wb_byte(&body, WASM_OP_I32_TRUNC_F64_S);
+          else if (!src_64 && dst_64) {
+            wb_byte(&body, WASM_OP_I32_TRUNC_F32_S);
+            wb_byte(&body, WASM_OP_I64_EXTEND_I32_S);
+          } else {
+            bool dst_u = poly_dtype_is_unsigned(dst_dt);
+            wb_byte(&body, dst_u ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
+          }
+        } else if (!src_float && dst_float) {
+          /* int→float */
+          if (src_64 && dst_64) wb_byte(&body, WASM_OP_F64_CONVERT_I64_S);
+          else if (src_64 && !dst_64) {
+            wb_byte(&body, WASM_OP_I32_WRAP_I64);
+            wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
+          } else if (!src_64 && dst_64) wb_byte(&body, WASM_OP_F64_CONVERT_I32_S);
+          else {
+            bool src_u = poly_dtype_is_unsigned(src_dt);
+            wb_byte(&body, src_u ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
+          }
+        } else {
+          /* int→int */
+          if (!src_64 && dst_64) wb_byte(&body, WASM_OP_I64_EXTEND_I32_S);
+          else if (src_64 && !dst_64) wb_byte(&body, WASM_OP_I32_WRAP_I64);
+          /* same size: no-op */
+        }
       }
 
       wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -736,35 +850,37 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       continue;
     }
 
-    /* --- ALU: push sources, emit op, store result --- */
+    /* --- ALU --- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      int local_idx;
-      if (poly_dtype_is_float(u->dtype)) local_idx = next_f32++;
-      else local_idx = next_i32++;
+      int local_idx = alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
 
-      /* RECIPROCAL: push 1.0f first, then src, then div */
+      /* RECIPROCAL: push 1.0 first, then src, then div */
       if (u->op == POLY_OP_RECIPROCAL) {
-        wb_byte(&body, WASM_OP_F32_CONST);
-        float one = 1.0f;
-        wb_f32(&body, one);
+        if (dt_is_f64(u->dtype)) {
+          wb_byte(&body, WASM_OP_F64_CONST);
+          wb_f64(&body, 1.0);
+        } else {
+          wb_byte(&body, WASM_OP_F32_CONST);
+          wb_f32(&body, 1.0f);
+        }
       }
 
-      /* Integer NEG (non-bool): emit i32.const 0 before src, then i32.sub.
-       * Boolean NEG uses i32.eqz (unary, no prefix needed). */
+      /* Integer NEG (non-bool): emit 0 before src */
       if (u->op == POLY_OP_NEG && !poly_dtype_is_float(u->dtype) && !poly_dtype_is_bool(u->dtype)) {
-        wb_byte(&body, WASM_OP_I32_CONST);
-        wb_sleb128(&body, 0);
+        if (dt_is_i64(u->dtype)) {
+          wb_byte(&body, WASM_OP_I64_CONST);
+          wb_sleb128(&body, 0);
+        } else {
+          wb_byte(&body, WASM_OP_I32_CONST);
+          wb_sleb128(&body, 0);
+        }
       }
 
-      /* Push source operands.
-       * Only emit actual operands (not dependency-only extra srcs).
-       * Unary: 1, Binary: 2, Ternary: 3.
-       * WHERE needs special order: WASM select expects (true, false, cond)
-       * but polygrad has src[0]=cond, src[1]=true, src[2]=false. */
+      /* Push operands (WHERE needs special order for WASM select) */
       if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
-        int s1 = lm_get(&locals, u->src[1]); /* true */
-        int s2 = lm_get(&locals, u->src[2]); /* false */
-        int s0 = lm_get(&locals, u->src[0]); /* cond */
+        int s1 = lm_get(&locals, u->src[1]);
+        int s2 = lm_get(&locals, u->src[2]);
+        int s0 = lm_get(&locals, u->src[0]);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, s1);
         wb_byte(&body, WASM_OP_LOCAL_GET);
@@ -774,7 +890,7 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
       } else {
         int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op) ? 3
                        : poly_opset_has(POLY_GROUP_BINARY, u->op) ? 2
-                       : 1; /* unary */
+                       : 1;
         if (n_operands > u->n_src) n_operands = u->n_src;
         for (int j = 0; j < n_operands; j++) {
           int src = lm_get(&locals, u->src[j]);
@@ -783,9 +899,7 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         }
       }
 
-      /* For comparison ops, use the INPUT dtype to pick the right
-       * instruction (e.g. f32.lt not i32.lt_s for float comparisons),
-       * since the result dtype is always bool (i32). */
+      /* Use input dtype for comparison ops */
       PolyDType alu_dtype = u->dtype;
       if (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ ||
           u->op == POLY_OP_CMPNE) {
@@ -822,8 +936,8 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
   /* Wrap in code section */
   WasmBuf sec;
   wb_init(&sec);
-  wb_uleb128(&sec, 1);            /* 1 function body */
-  wb_uleb128(&sec, body.len);     /* body size in bytes */
+  wb_uleb128(&sec, 1);
+  wb_uleb128(&sec, body.len);
   wb_append(&sec, &body);
   wb_section(mod, WASM_SEC_CODE, &sec);
 
@@ -838,8 +952,8 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
                             int n_params, MathImports *math,
                             int n_imported_funcs) {
   /* SIMD codegen: split the innermost loop into:
-   *   main loop:  i += 4, v128 ops
-   *   epilogue:   i += 1, f32 ops (for remainder)
+   *   main loop:  i += lanes, v128 ops (f32x4: 4 lanes, f64x2: 2 lanes)
+   *   epilogue:   i += 1, scalar ops (for remainder)
    *
    * For now, find the single RANGE/END pair and generate both loops.
    * If the kernel is not SIMD-able, fall back to scalar. */
@@ -864,14 +978,19 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     return;
   }
 
+  /* --- Detect kernel dtype for SIMD lane width --- */
+  bool is_f64_kernel = kernel_is_f64(uops, n);
+  int lanes = is_f64_kernel ? 2 : 4;       /* f64x2: 2 lanes, f32x4: 4 lanes */
+  int lane_mask = ~(lanes - 1);             /* ~1 for f64x2, ~3 for f32x4 */
+  int scalar_elem_size = is_f64_kernel ? 8 : 4;
+
   /* --- Count locals --- */
   /* For SIMD we need: i32 counter, i32 bound, i32 simd_bound,
-   * plus i32 for each INDEX (×2 for simd+scalar),
+   * plus i32 for each INDEX (x2 for simd+scalar),
    * v128 for each LOAD and ALU (SIMD path),
-   * f32 for each LOAD and ALU (scalar path).
-   * This gets complex. For the initial implementation, allocate generously. */
+   * f32/f64 for each LOAD and ALU (scalar path). */
 
-  int n_locals_i32 = 0, n_locals_f32 = 0, n_locals_v128 = 0;
+  int n_locals_i32 = 0, n_locals_f32 = 0, n_locals_f64 = 0, n_locals_v128 = 0;
 
   /* Count ops that need locals */
   int n_indices = 0, n_loads = 0, n_alus = 0;
@@ -881,12 +1000,16 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     if (u->op == POLY_OP_LOAD) n_loads++;
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) n_alus++;
     if (u->op == POLY_OP_CONST && !poly_dtype_is_float(u->dtype)) n_locals_i32++;
-    if (u->op == POLY_OP_CONST && poly_dtype_is_float(u->dtype)) n_locals_f32++;
+    if (u->op == POLY_OP_CONST && poly_dtype_is_float(u->dtype)) {
+      if (dt_is_f64(u->dtype)) n_locals_f64++;
+      else n_locals_f32++;
+    }
   }
 
   /* SIMD loop needs: counter, bound const, simd_bound */
   n_locals_i32 += 3 + n_indices * 2; /* indices for both simd and scalar paths */
-  n_locals_f32 += n_loads + n_alus;  /* scalar epilogue */
+  if (is_f64_kernel) n_locals_f64 += n_loads + n_alus;  /* scalar epilogue */
+  else               n_locals_f32 += n_loads + n_alus;
   n_locals_v128 += n_loads + n_alus; /* SIMD main loop */
 
   /* Function body */
@@ -897,6 +1020,7 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
   int n_local_types = 0;
   if (n_locals_i32 > 0) n_local_types++;
   if (n_locals_f32 > 0) n_local_types++;
+  if (n_locals_f64 > 0) n_local_types++;
   if (n_locals_v128 > 0) n_local_types++;
 
   wb_uleb128(&body, n_local_types);
@@ -907,6 +1031,10 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
   if (n_locals_f32 > 0) {
     wb_uleb128(&body, n_locals_f32);
     wb_byte(&body, WASM_TYPE_F32);
+  }
+  if (n_locals_f64 > 0) {
+    wb_uleb128(&body, n_locals_f64);
+    wb_byte(&body, WASM_TYPE_F64);
   }
   if (n_locals_v128 > 0) {
     wb_uleb128(&body, n_locals_v128);
@@ -920,7 +1048,8 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
   /* Params: 0..n_params-1 */
   int next_i32 = n_params;
   int next_f32 = n_params + n_locals_i32;
-  int next_v128 = n_params + n_locals_i32 + n_locals_f32;
+  int next_f64 = n_params + n_locals_i32 + n_locals_f32;
+  int next_v128 = n_params + n_locals_i32 + n_locals_f32 + n_locals_f64;
 
   /* Assign PARAM locals */
   for (int i = 0; i < n; i++) {
@@ -933,7 +1062,11 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_CONST) {
       int local_idx;
-      if (poly_dtype_is_float(u->dtype)) {
+      if (dt_is_f64(u->dtype)) {
+        local_idx = next_f64++;
+        wb_byte(&body, WASM_OP_F64_CONST);
+        wb_f64(&body, u->arg.f);
+      } else if (poly_dtype_is_float(u->dtype)) {
         local_idx = next_f32++;
         wb_byte(&body, WASM_OP_F32_CONST);
         wb_f32(&body, (float)u->arg.f);
@@ -956,16 +1089,16 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
   int counter_local = next_i32++;
   int simd_bound_local = next_i32++;
 
-  /* Compute simd_bound = bound & ~3 */
+  /* Compute simd_bound = bound & lane_mask (f32x4: ~3, f64x2: ~1) */
   wb_byte(&body, WASM_OP_LOCAL_GET);
   wb_uleb128(&body, range_bound_local);
   wb_byte(&body, WASM_OP_I32_CONST);
-  wb_sleb128(&body, ~3);
+  wb_sleb128(&body, lane_mask);
   wb_byte(&body, WASM_OP_I32_AND);
   wb_byte(&body, WASM_OP_LOCAL_SET);
   wb_uleb128(&body, simd_bound_local);
 
-  /* ═══ SIMD main loop: for (i = 0; i < simd_bound; i += 4) ═══ */
+  /* ═══ SIMD main loop: for (i = 0; i < simd_bound; i += lanes) ═══ */
   wb_byte(&body, WASM_OP_I32_CONST);
   wb_sleb128(&body, 0);
   wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -1002,7 +1135,7 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, idx);
       wb_byte(&body, WASM_OP_I32_CONST);
-      wb_sleb128(&body, 16); /* 4 floats × 4 bytes */
+      wb_sleb128(&body, 16); /* v128 = 16 bytes (f32x4: 4×4, f64x2: 2×8) */
       wb_byte(&body, WASM_OP_I32_MUL);
       wb_byte(&body, WASM_OP_I32_ADD);
       wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -1035,7 +1168,8 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
         wb_uleb128(&body, src);
       }
 
-      emit_alu_simd(&body, u->op);
+      if (is_f64_kernel) emit_alu_simd_f64x2(&body, u->op);
+      else               emit_alu_simd_f32x4(&body, u->op);
 
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, local_idx);
@@ -1057,11 +1191,11 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     }
   }
 
-  /* counter += 4 */
+  /* counter += lanes */
   wb_byte(&body, WASM_OP_LOCAL_GET);
   wb_uleb128(&body, counter_local);
   wb_byte(&body, WASM_OP_I32_CONST);
-  wb_sleb128(&body, 4);
+  wb_sleb128(&body, lanes);
   wb_byte(&body, WASM_OP_I32_ADD);
   wb_byte(&body, WASM_OP_LOCAL_SET);
   wb_uleb128(&body, counter_local);
@@ -1089,7 +1223,7 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
   wb_byte(&body, WASM_OP_BR_IF);
   wb_uleb128(&body, 1);
 
-  /* Scalar body */
+  /* Scalar epilogue body */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
 
@@ -1102,7 +1236,7 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, counter_local); /* use counter directly */
       wb_byte(&body, WASM_OP_I32_CONST);
-      wb_sleb128(&body, 4);
+      wb_sleb128(&body, scalar_elem_size); /* 4 for f32, 8 for f64 */
       wb_byte(&body, WASM_OP_I32_MUL);
       wb_byte(&body, WASM_OP_I32_ADD);
       wb_byte(&body, WASM_OP_LOCAL_SET);
@@ -1111,13 +1245,13 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     }
 
     if (u->op == POLY_OP_LOAD) {
-      int local_idx = next_f32++;
+      int local_idx = is_f64_kernel ? next_f64++ : next_f32++;
       int addr = lm_get(&locals, u->src[0]);
 
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, addr);
-      wb_byte(&body, WASM_OP_F32_LOAD);
-      wb_uleb128(&body, 2);
+      wb_byte(&body, is_f64_kernel ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD);
+      wb_uleb128(&body, is_f64_kernel ? 3 : 2); /* align */
       wb_uleb128(&body, 0);
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, local_idx);
@@ -1125,7 +1259,7 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     }
 
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      int local_idx = next_f32++;
+      int local_idx = is_f64_kernel ? next_f64++ : next_f32++;
 
       for (int j = 0; j < u->n_src; j++) {
         int src = lm_get(&locals, u->src[j]);
@@ -1148,20 +1282,26 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
     if (u->op == POLY_OP_STORE) {
       int addr = lm_get(&locals, u->src[0]);
       int val  = lm_get(&locals, u->src[1]);
+      bool buf_f64 = u->src[0]->dtype.is_ptr && dt_is_f64(u->src[0]->dtype);
+      bool buf_float = u->src[0]->dtype.is_ptr && poly_dtype_is_float(u->src[0]->dtype);
 
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, addr);
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, val);
-      /* Convert i32→f32 when storing bool/int result into float buffer */
-      if (!poly_dtype_is_float(u->src[1]->dtype) &&
-          u->src[0]->dtype.is_ptr && poly_dtype_is_float(u->src[0]->dtype)) {
-        wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
+      /* Convert i32 → float when storing bool/int result into float buffer */
+      if (!poly_dtype_is_float(u->src[1]->dtype) && buf_float) {
+        if (buf_f64) wb_byte(&body, WASM_OP_F64_CONVERT_I32_S);
+        else         wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
       }
-      bool store_float = poly_dtype_is_float(u->src[1]->dtype) ||
-                          (u->src[0]->dtype.is_ptr && poly_dtype_is_float(u->src[0]->dtype));
-      wb_byte(&body, store_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
-      wb_uleb128(&body, 2);
+      if (buf_f64) {
+        wb_byte(&body, WASM_OP_F64_STORE);
+        wb_uleb128(&body, 3); /* align: 2^3 = 8 */
+      } else {
+        bool store_float = poly_dtype_is_float(u->src[1]->dtype) || buf_float;
+        wb_byte(&body, store_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
+        wb_uleb128(&body, 2);
+      }
       wb_uleb128(&body, 0);
     }
   }

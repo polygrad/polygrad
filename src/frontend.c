@@ -34,6 +34,10 @@ PolyUOp *poly_const_float(PolyCtx *ctx, double value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(value));
 }
 
+PolyUOp *poly_const_double(PolyCtx *ctx, double value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT64, poly_arg_float(value));
+}
+
 PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
 }
@@ -139,8 +143,13 @@ PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
 
 /* ── Composed elementwise ops (exact tinygrad decompositions) ─────────── */
 
-/* Helper: float constant (f32 hardcoded — for non-special-math ops) */
-static inline PolyUOp *cf(PolyCtx *ctx, double v) {
+/* Helper: float constant matching the dtype of a given UOp.
+ * For float inputs: creates a constant with the same float dtype.
+ * For non-float inputs (comparisons producing bool): defaults to float32. */
+static inline PolyUOp *cf(PolyCtx *ctx, PolyUOp *ref, double v) {
+  PolyDType dt = poly_dtype_scalar(ref->dtype);
+  if (poly_dtype_is_float(dt))
+    return poly_const_typed(ctx, dt, v);
   return poly_const_float(ctx, v);
 }
 
@@ -251,7 +260,7 @@ PolyUOp *poly_sin(PolyCtx *ctx, PolyUOp *x) {
 PolyUOp *poly_cos(PolyCtx *ctx, PolyUOp *x) {
   /* cos(x) = sin(pi/2 - x) */
   return poly_alu1(ctx, POLY_OP_SIN,
-    poly_alu2(ctx, POLY_OP_SUB, cf(ctx, M_PI / 2.0), x));
+    poly_alu2(ctx, POLY_OP_SUB, cf(ctx, x, M_PI / 2.0), x));
 }
 
 PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x) {
@@ -411,18 +420,18 @@ PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x) {
   /* sigmoid(x) = (1 + exp2(x * (-1/ln2)))^-1 */
-  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, x, cf(ctx, -1.0 / M_LN2));
+  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, x, cf(ctx, x, -1.0 / M_LN2));
   PolyUOp *e = poly_alu1(ctx, POLY_OP_EXP2, scaled);
   return poly_alu1(ctx, POLY_OP_RECIPROCAL,
-    poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.0), e));
+    poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), e));
 }
 
 PolyUOp *poly_tanh_act(PolyCtx *ctx, PolyUOp *x) {
   /* tanh(x) = 2*sigmoid(2x) - 1 */
-  PolyUOp *two_x = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 2.0), x);
+  PolyUOp *two_x = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), x);
   return poly_alu2(ctx, POLY_OP_SUB,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 2.0), poly_sigmoid(ctx, two_x)),
-    cf(ctx, 1.0));
+    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), poly_sigmoid(ctx, two_x)),
+    cf(ctx, x, 1.0));
 }
 
 PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x) {
@@ -433,10 +442,10 @@ PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x) {
 PolyUOp *poly_sign(PolyCtx *ctx, PolyUOp *x) {
   /* sign(x) = ne(x,0).where(lt(x,0).where(-1, 1), 0) + x*0
    * The +x*0 preserves NaN (NaN*0=NaN, NaN+0=NaN) */
-  PolyUOp *zero = cf(ctx, 0.0);
+  PolyUOp *zero = cf(ctx, x, 0.0);
   PolyUOp *is_nonzero = poly_alu2(ctx, POLY_OP_CMPNE, x, zero);
   PolyUOp *is_neg = poly_alu2(ctx, POLY_OP_CMPLT, x, zero);
-  PolyUOp *neg_or_pos = poly_alu3(ctx, POLY_OP_WHERE, is_neg, cf(ctx, -1.0), cf(ctx, 1.0));
+  PolyUOp *neg_or_pos = poly_alu3(ctx, POLY_OP_WHERE, is_neg, cf(ctx, x, -1.0), cf(ctx, x, 1.0));
   PolyUOp *result = poly_alu3(ctx, POLY_OP_WHERE, is_nonzero, neg_or_pos, zero);
   /* +x*0 to propagate NaN */
   return poly_alu2(ctx, POLY_OP_ADD, result,
@@ -456,7 +465,7 @@ PolyUOp *poly_ceil(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *b = poly_alu1(ctx, POLY_OP_TRUNC, x);
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, b, x); /* b < x ≡ x > b */
   return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_alu2(ctx, POLY_OP_ADD, b, cf(ctx, 1.0)), b);
+    poly_alu2(ctx, POLY_OP_ADD, b, cf(ctx, x, 1.0)), b);
 }
 
 PolyUOp *poly_floor(PolyCtx *ctx, PolyUOp *x) {
@@ -464,16 +473,16 @@ PolyUOp *poly_floor(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *b = poly_alu1(ctx, POLY_OP_TRUNC, x);
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, b); /* x < b */
   return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_alu2(ctx, POLY_OP_SUB, b, cf(ctx, 1.0)), b);
+    poly_alu2(ctx, POLY_OP_SUB, b, cf(ctx, x, 1.0)), b);
 }
 
 PolyUOp *poly_round_f(PolyCtx *ctx, PolyUOp *x) {
   /* round(x) with banker's rounding (round half to even):
    * (x > 0) == (trunc(x/2) == trunc(trunc(x)/2)) ? ceil(x-0.5) : floor(x+0.5) */
-  PolyUOp *half = cf(ctx, 0.5);
-  PolyUOp *two = cf(ctx, 2.0);
+  PolyUOp *half = cf(ctx, x, 0.5);
+  PolyUOp *two = cf(ctx, x, 2.0);
   PolyUOp *b = poly_alu1(ctx, POLY_OP_TRUNC, x);
-  PolyUOp *x_gt_0 = poly_alu2(ctx, POLY_OP_CMPLT, cf(ctx, 0.0), x);
+  PolyUOp *x_gt_0 = poly_alu2(ctx, POLY_OP_CMPLT, cf(ctx, x, 0.0), x);
   PolyUOp *b_half = poly_alu2(ctx, POLY_OP_FDIV, b, two);
   PolyUOp *x_half = poly_alu2(ctx, POLY_OP_FDIV, x, two);
   PolyUOp *trunc_b_half = poly_alu1(ctx, POLY_OP_TRUNC, b_half);
@@ -495,7 +504,7 @@ PolyUOp *poly_isinf(PolyCtx *ctx, PolyUOp *x) {
    * No -- let's just do: NOT isnan AND (x*0 != 0 is false for inf but...)
    * Cleanest: cmpne(x, x) is false for inf. (x - x) is NaN for inf.
    * So: isinf(x) = NOT(isnan(x)) AND isnan(x - x) AND cmpne(x, 0) */
-  PolyUOp *zero = cf(ctx, 0.0);
+  PolyUOp *zero = cf(ctx, x, 0.0);
   PolyUOp *x_minus_x = poly_alu2(ctx, POLY_OP_SUB, x, x);
   PolyUOp *not_nan = poly_eq(ctx, x, x); /* true if not NaN */
   PolyUOp *sub_nan = poly_ne(ctx, x_minus_x, x_minus_x); /* true if x-x is NaN (inf case) */
@@ -514,7 +523,7 @@ PolyUOp *poly_isnan(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_relu(PolyCtx *ctx, PolyUOp *x) {
   /* relu(x) = where(0 < x, x, 0) */
-  PolyUOp *zero = cf(ctx, 0.0);
+  PolyUOp *zero = cf(ctx, x, 0.0);
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, zero, x);
   return poly_alu3(ctx, POLY_OP_WHERE, cond, x, zero);
 }
@@ -523,32 +532,32 @@ PolyUOp *poly_relu6(PolyCtx *ctx, PolyUOp *x) {
   /* relu6(x) = relu(x) - relu(x - 6) */
   return poly_alu2(ctx, POLY_OP_SUB,
     poly_relu(ctx, x),
-    poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, x, cf(ctx, 6.0))));
+    poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, x, cf(ctx, x, 6.0))));
 }
 
 PolyUOp *poly_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope) {
   /* leaky_relu(x) = where(x < 0, neg_slope * x, x) */
-  PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, 0.0));
+  PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, x, 0.0));
   return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, neg_slope), x), x);
+    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, neg_slope), x), x);
 }
 
 PolyUOp *poly_gelu(PolyCtx *ctx, PolyUOp *x) {
   /* gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))) */
   PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x, poly_alu2(ctx, POLY_OP_MUL, x, x));
   PolyUOp *inner = poly_alu2(ctx, POLY_OP_ADD, x,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.044715), x3));
+    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 0.044715), x3));
   PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL,
-    cf(ctx, sqrt(2.0 / M_PI)), inner);
-  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 0.5),
+    cf(ctx, x, sqrt(2.0 / M_PI)), inner);
+  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 0.5),
     poly_alu2(ctx, POLY_OP_MUL, x,
-      poly_alu2(ctx, POLY_OP_ADD, cf(ctx, 1.0), poly_tanh_act(ctx, scaled))));
+      poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), poly_tanh_act(ctx, scaled))));
 }
 
 PolyUOp *poly_quick_gelu(PolyCtx *ctx, PolyUOp *x) {
   /* quick_gelu(x) = x * sigmoid(1.702 * x) */
   return poly_alu2(ctx, POLY_OP_MUL, x,
-    poly_sigmoid(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.702), x)));
+    poly_sigmoid(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.702), x)));
 }
 
 PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x) {
@@ -560,23 +569,23 @@ PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha) {
   /* elu(x, α) = relu(x) - α * relu(1 - exp(x)) */
   return poly_alu2(ctx, POLY_OP_SUB,
     poly_relu(ctx, x),
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, alpha),
+    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, alpha),
       poly_relu(ctx,
-        poly_alu2(ctx, POLY_OP_SUB, cf(ctx, 1.0), poly_exp(ctx, x)))));
+        poly_alu2(ctx, POLY_OP_SUB, cf(ctx, x, 1.0), poly_exp(ctx, x)))));
 }
 
 PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta) {
   /* softplus(x, β) = (1/β) * log(1 + exp(β*x))
    * = (1/β) * logaddexp(β*x, 0)
    * logaddexp(a, b) = max(a,b) + log(exp(a-max) + exp(b-max)) */
-  PolyUOp *bx = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, beta), x);
-  PolyUOp *zero = cf(ctx, 0.0);
+  PolyUOp *bx = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, beta), x);
+  PolyUOp *zero = cf(ctx, x, 0.0);
   PolyUOp *m = poly_alu2(ctx, POLY_OP_MAX, bx, zero);
   PolyUOp *ea = poly_exp(ctx, poly_alu2(ctx, POLY_OP_SUB, bx, m));
   PolyUOp *eb = poly_exp(ctx, poly_alu2(ctx, POLY_OP_SUB, zero, m));
   PolyUOp *lae = poly_alu2(ctx, POLY_OP_ADD, m,
     poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, ea, eb)));
-  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0 / beta), lae);
+  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.0 / beta), lae);
 }
 
 PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x) {
@@ -594,17 +603,17 @@ PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x) {
   /* hardswish(x) = x * relu6(x + 3) * (1/6) */
   return poly_alu2(ctx, POLY_OP_MUL,
     poly_alu2(ctx, POLY_OP_MUL, x,
-      poly_relu6(ctx, poly_alu2(ctx, POLY_OP_ADD, x, cf(ctx, 3.0)))),
-    cf(ctx, 1.0 / 6.0));
+      poly_relu6(ctx, poly_alu2(ctx, POLY_OP_ADD, x, cf(ctx, x, 3.0)))),
+    cf(ctx, x, 1.0 / 6.0));
 }
 
 PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
   /* hardsigmoid(x) = relu(x/6 + 0.5) - relu(x/6 + 0.5 - 1) */
   PolyUOp *t = poly_alu2(ctx, POLY_OP_ADD,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 1.0/6.0), x), cf(ctx, 0.5));
+    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.0/6.0), x), cf(ctx, x, 0.5));
   return poly_alu2(ctx, POLY_OP_SUB,
     poly_relu(ctx, t),
-    poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, t, cf(ctx, 1.0))));
+    poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, t, cf(ctx, x, 1.0))));
 }
 
 /* Comparisons */
@@ -612,7 +621,7 @@ PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   /* eq(a,b) = ne(a,b).logical_not() = where(cmpne(a,b), 0, 1) */
   PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
-  return poly_alu3(ctx, POLY_OP_WHERE, ne, cf(ctx, 0.0), cf(ctx, 1.0));
+  return poly_alu3(ctx, POLY_OP_WHERE, ne, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
 
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
@@ -627,13 +636,13 @@ PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   /* ge(a,b) = NOT(cmplt(a,b)) = where(cmplt(a,b), 0, 1) */
   PolyUOp *lt = poly_alu2(ctx, POLY_OP_CMPLT, a, b);
-  return poly_alu3(ctx, POLY_OP_WHERE, lt, cf(ctx, 0.0), cf(ctx, 1.0));
+  return poly_alu3(ctx, POLY_OP_WHERE, lt, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
 
 PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   /* le(a,b) = NOT(cmplt(b,a)) = where(cmplt(b,a), 0, 1) */
   PolyUOp *gt_val = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
-  return poly_alu3(ctx, POLY_OP_WHERE, gt_val, cf(ctx, 0.0), cf(ctx, 1.0));
+  return poly_alu3(ctx, POLY_OP_WHERE, gt_val, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
 
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
@@ -654,8 +663,8 @@ PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 
 PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi) {
   /* clamp(x, lo, hi) = where(x < lo, lo, where(x > hi, hi, x)) */
-  PolyUOp *lo_c = cf(ctx, lo);
-  PolyUOp *hi_c = cf(ctx, hi);
+  PolyUOp *lo_c = cf(ctx, x, lo);
+  PolyUOp *hi_c = cf(ctx, x, hi);
   PolyUOp *lt_lo = poly_alu2(ctx, POLY_OP_CMPLT, x, lo_c);
   PolyUOp *clamped_lo = poly_alu3(ctx, POLY_OP_WHERE, lt_lo, lo_c, x);
   PolyUOp *gt_hi = poly_alu2(ctx, POLY_OP_CMPLT, hi_c, clamped_lo);
@@ -790,17 +799,17 @@ PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) 
   PolyUOp *sh = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(8));
   PolyUOp *hi24 = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, bits, sh, poly_arg_none());
   PolyUOp *as_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, hi24, poly_arg_none());
-  return poly_alu2(ctx, POLY_OP_MUL, as_f, cf(ctx, 1.0 / 16777216.0));
+  return poly_alu2(ctx, POLY_OP_MUL, as_f, cf(ctx, as_f, 1.0 / 16777216.0));
 }
 
 PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
   PolyUOp *u1 = poly_rand(ctx, shape, ndim, seed);
   PolyUOp *u2 = poly_rand(ctx, shape, ndim, seed ^ 0x9E3779B97F4A7C15ull);
   if (!u1 || !u2) return NULL;
-  PolyUOp *u1_safe = poly_maximum(ctx, u1, cf(ctx, 1e-7));
+  PolyUOp *u1_safe = poly_maximum(ctx, u1, cf(ctx, u1, 1e-7));
   PolyUOp *r = poly_alu1(ctx, POLY_OP_SQRT,
-              poly_alu2(ctx, POLY_OP_MUL, cf(ctx, -2.0), poly_log(ctx, u1_safe)));
-  PolyUOp *theta = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, 2.0 * M_PI), u2);
+              poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u1, -2.0), poly_log(ctx, u1_safe)));
+  PolyUOp *theta = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u2, 2.0 * M_PI), u2);
   return poly_alu2(ctx, POLY_OP_MUL, r, poly_cos(ctx, theta));
 }
 
@@ -879,7 +888,7 @@ PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x,
   int64_t count = shape[axis];
   PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, x, shape, ndim, axis, keepdim,
                           out_shape, out_ndim);
-  return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, (double)count));
+  return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, x, (double)count));
 }
 
 PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
@@ -903,7 +912,7 @@ PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
                           out_shape, out_ndim);
   double divisor = (double)(count - correction);
   if (divisor <= 0.0) divisor = 1.0;
-  return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, divisor));
+  return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, x, divisor));
 }
 
 PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x,
@@ -3799,7 +3808,7 @@ PolyUOp *poly_gather(PolyCtx *ctx,
   PolyUOp *tbl_exp = poly_expand(ctx, tbl_r, mask_bcast, tbl_ndim);
 
   /* where(mask, table, 0) -> (..., V, D) */
-  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *zero = cf(ctx, tbl_exp, 0.0);
   PolyUOp *selected = poly_where_op(ctx, mask_exp, tbl_exp, zero);
 
   /* Sum over the V axis (idx_ndim-th axis in the result, 0-indexed) */
@@ -3845,7 +3854,7 @@ PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
   PolyUOp *var_exp = poly_expand(ctx, var, (int64_t *)shape, ndim);
 
   /* (x - mean) / sqrt(var + eps) */
-  PolyUOp *eps_c = poly_const_float(ctx, eps);
+  PolyUOp *eps_c = cf(ctx, x, eps);
   PolyUOp *denom = poly_alu1(ctx, POLY_OP_SQRT,
                               poly_alu2(ctx, POLY_OP_ADD, var_exp, eps_c));
   PolyUOp *result = poly_alu2(ctx, POLY_OP_MUL, centered,

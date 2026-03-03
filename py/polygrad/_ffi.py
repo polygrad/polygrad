@@ -44,6 +44,9 @@ for _i in range(_op_count):
 _lib.poly_const_float.restype = _ptr
 _lib.poly_const_float.argtypes = [_ptr, ctypes.c_double]
 
+_lib.poly_const_double.restype = _ptr
+_lib.poly_const_double.argtypes = [_ptr, ctypes.c_double]
+
 _lib.poly_const_int.restype = _ptr
 _lib.poly_const_int.argtypes = [_ptr, ctypes.c_int64]
 
@@ -67,6 +70,9 @@ _lib.poly_sink_n.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
 _lib.poly_buffer_f32.restype = _ptr
 _lib.poly_buffer_f32.argtypes = [_ptr, ctypes.c_int64]
+
+_lib.poly_buffer_f64.restype = _ptr
+_lib.poly_buffer_f64.argtypes = [_ptr, ctypes.c_int64]
 
 # --- Composed elementwise ops (shape-free) ---
 

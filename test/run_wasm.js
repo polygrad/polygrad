@@ -44,42 +44,47 @@ async function main() {
   }
 
   const kernel = module.instance.exports.kernel;
-  const view = new Float32Array(memory.buffer);
+
+  // Detect f64 ops (op name ends with _f64)
+  const isF64 = op.endsWith('_f64');
+  const baseOp = isF64 ? op.slice(0, -4) : op;
+  const elemSize = isF64 ? 8 : 4;
+  const view = isF64 ? new Float64Array(memory.buffer) : new Float32Array(memory.buffer);
 
   // Compute byte offsets for buffers
-  // For binary ops: a (offset 0), b (offset N*4), c (offset N*8)
-  // For unary ops:  a (offset 0), b (offset N*4)
+  // For binary ops: a (offset 0), b (offset N*elemSize), c (offset N*2*elemSize)
+  // For unary ops:  a (offset 0), b (offset N*elemSize)
   const offA = 0;
-  const offB = N * 4;
-  const offC = N * 8;
+  const offB = N * elemSize;
+  const offC = N * 2 * elemSize;
 
   // Initialize input data
   for (let i = 0; i < N; i++) {
-    view[offA / 4 + i] = i + 1;       // a = [1, 2, 3, ...]
-    view[offB / 4 + i] = (i + 1) * 2; // b = [2, 4, 6, ...]
-    view[offC / 4 + i] = 0;           // c = [0, ...]
+    view[offA / elemSize + i] = i + 1;       // a = [1, 2, 3, ...]
+    view[offB / elemSize + i] = (i + 1) * 2; // b = [2, 4, 6, ...]
+    view[offC / elemSize + i] = 0;           // c = [0, ...]
   }
 
   // Call kernel
-  if (op === 'add' || op === 'mul' || op === 'sub' || op === 'pow') {
+  if (baseOp === 'add' || baseOp === 'mul' || baseOp === 'sub' || baseOp === 'pow') {
     kernel(offA, offB, offC);
-  } else if (op === 'neg' || op === 'sqrt') {
+  } else if (baseOp === 'neg' || baseOp === 'sqrt') {
     kernel(offA, offB); // unary: b = op(a)
   } else {
-    console.error('Unknown op:', op);
+    console.error('Unknown op:', baseOp);
     process.exit(1);
   }
 
   // Verify output
   let pass = true;
-  const tol = 1e-5;
+  const tol = isF64 ? 1e-14 : 1e-5;
 
   for (let i = 0; i < N; i++) {
     const a = i + 1;
     const b = (i + 1) * 2;
     let expected;
 
-    switch (op) {
+    switch (baseOp) {
       case 'add': expected = a + b; break;
       case 'mul': expected = a * b; break;
       case 'sub': expected = a - b; break;
@@ -91,10 +96,10 @@ async function main() {
 
     // Read result from appropriate buffer
     let result;
-    if (op === 'neg' || op === 'sqrt') {
-      result = view[offB / 4 + i]; // unary: result in b
+    if (baseOp === 'neg' || baseOp === 'sqrt') {
+      result = view[offB / elemSize + i]; // unary: result in b
     } else {
-      result = view[offC / 4 + i]; // binary: result in c
+      result = view[offC / elemSize + i]; // binary: result in c
     }
 
     if (Math.abs(result - expected) > tol) {

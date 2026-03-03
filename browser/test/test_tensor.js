@@ -330,6 +330,132 @@ async function main() {
     assertArrayEq(await y.toArray(), [2, 3, 4])
   })
 
+  // --- Float64 ---
+  console.log('\n── Float64 ──')
+
+  await test('f64: creation from array', async () => {
+    const x = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertShapeEq(x.shape, [3])
+    const arr = await x.toArray()
+    assert(arr instanceof Float64Array, 'should be Float64Array')
+    assertArrayEq(arr, [1, 2, 3])
+  })
+
+  await test('f64: creation 2D', async () => {
+    const x = new Tensor([[1, 2], [3, 4]], { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertShapeEq(x.shape, [2, 2])
+    const arr = await x.toArray()
+    assert(arr instanceof Float64Array, 'should be Float64Array')
+    assertArrayEq(arr, [1, 2, 3, 4])
+  })
+
+  await test('f64: zeros', async () => {
+    const x = Tensor.zeros(4, { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertArrayEq(await x.toArray(), [0, 0, 0, 0])
+  })
+
+  await test('f64: ones', async () => {
+    const x = Tensor.ones(3, { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertArrayEq(await x.toArray(), [1, 1, 1])
+  })
+
+  await test('f64: full', async () => {
+    const x = Tensor.full([2, 2], 7, { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertArrayEq(await x.toArray(), [7, 7, 7, 7])
+  })
+
+  await test('f64: arange', async () => {
+    const x = Tensor.arange(5, 0, 1, { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertArrayEq(await x.toArray(), [0, 1, 2, 3, 4])
+  })
+
+  await test('f64: eye', async () => {
+    const x = Tensor.eye(2, { dtype: 'float64' })
+    assert(x.dtype === 'float64', `expected float64, got ${x.dtype}`)
+    assertArrayEq(await x.toArray(), [1, 0, 0, 1])
+  })
+
+  await test('f64: add', async () => {
+    const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+    const b = new Tensor([4.0, 5.0, 6.0], { dtype: 'float64' })
+    const c = a.add(b)
+    assert(c.dtype === 'float64', `expected float64, got ${c.dtype}`)
+    const arr = await c.toArray()
+    assert(arr instanceof Float64Array, 'should be Float64Array')
+    assertArrayEq(arr, [5, 7, 9])
+  })
+
+  await test('f64: mul', async () => {
+    const a = new Tensor([2.0, 3.0, 4.0], { dtype: 'float64' })
+    const b = new Tensor([5.0, 6.0, 7.0], { dtype: 'float64' })
+    const c = a.mul(b)
+    assert(c.dtype === 'float64', `expected float64, got ${c.dtype}`)
+    assertArrayEq(await c.toArray(), [10, 18, 28])
+  })
+
+  await test('f64: neg', async () => {
+    const a = new Tensor([1.0, -2.0, 3.0], { dtype: 'float64' })
+    const c = a.neg()
+    assert(c.dtype === 'float64', `expected float64, got ${c.dtype}`)
+    assertArrayEq(await c.toArray(), [-1, 2, -3])
+  })
+
+  await test('f64: scalar add', async () => {
+    const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+    const c = a.add(10)
+    assert(c.dtype === 'float64', `expected float64, got ${c.dtype}`)
+    assertArrayEq(await c.toArray(), [11, 12, 13])
+  })
+
+  await test('f64: sum', async () => {
+    const a = new Tensor([1.0, 2.0, 3.0, 4.0], { dtype: 'float64' })
+    const s = await a.sum().item()
+    assert(Math.abs(s - 10) < 1e-10, `expected 10, got ${s}`)
+  })
+
+  await test('f64: chain ops', async () => {
+    const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64' })
+    const b = new Tensor([4.0, 5.0, 6.0], { dtype: 'float64' })
+    const c = a.add(b).mul(a).sub(b)
+    assert(c.dtype === 'float64', `expected float64, got ${c.dtype}`)
+    assertArrayEq(await c.toArray(), [(1+4)*1-4, (2+5)*2-5, (3+6)*3-6])
+  })
+
+  await test('f64: reshape', async () => {
+    const a = new Tensor([1, 2, 3, 4, 5, 6], { dtype: 'float64' })
+    const b = a.reshape(2, 3)
+    assert(b.dtype === 'float64', `expected float64, got ${b.dtype}`)
+    assertShapeEq(b.shape, [2, 3])
+    assertArrayEq(await b.toArray(), [1, 2, 3, 4, 5, 6])
+  })
+
+  await test('f64: default is f32', async () => {
+    const a = new Tensor([1.0, 2.0])
+    assert(a.dtype === 'float32', `expected float32, got ${a.dtype}`)
+    const arr = await a.toArray()
+    assert(arr instanceof Float32Array, 'default should be Float32Array')
+  })
+
+  await test('f64: repr includes float64', async () => {
+    const x = new Tensor([1, 2, 3], { dtype: 'float64' })
+    assert(x.toString().includes('float64'), 'repr should include float64')
+  })
+
+  await test('f64: backward', async () => {
+    const a = new Tensor([1.0, 2.0, 3.0], { dtype: 'float64', requiresGrad: true })
+    const b = new Tensor([4.0, 5.0, 6.0], { dtype: 'float64' })
+    const loss = a.mul(b).sum()
+    loss.backward()
+    assert(a.grad !== null, 'grad should not be null')
+    assertArrayEq(await a.grad.toArray(), [4, 5, 6])
+  })
+
   // Summary
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`)
   process.exit(failed > 0 ? 1 : 0)
