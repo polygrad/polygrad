@@ -189,10 +189,15 @@ async function main() {
     assertArrayEq(await new Tensor([1, 2, 3]).eq(new Tensor([1, 3, 3])).toArray(), [1, 0, 1])
   })
 
-  // gt skipped: WASM renderer doesn't handle CMPLT→f32 type promotion yet
-  // await test('gt', async () => {
-  //   assertArrayEq(await new Tensor([1, 2, 3]).gt(new Tensor([0, 2, 4])).toArray(), [1, 0, 0])
-  // })
+  await test('gt', async () => {
+    assertArrayEq(await new Tensor([1, 2, 3]).gt(new Tensor([0, 2, 4])).toArray(), [1, 0, 0])
+  })
+
+  await test('where with gt mask', async () => {
+    const mask = new Tensor([3, 1, 4]).gt(new Tensor([2, 2, 2]))
+    const r = mask.where(new Tensor([10, 20, 30]), new Tensor([0, 0, 0]))
+    assertArrayEq(await r.toArray(), [10, 0, 30])
+  })
 
   await test('maximum', async () => {
     assertArrayEq(await new Tensor([1, 5, 3]).maximum(new Tensor([2, 4, 3])).toArray(), [2, 5, 3])
@@ -269,6 +274,12 @@ async function main() {
       await new Tensor([[1, 2], [3, 4]]).matmul(new Tensor([[5, 6], [7, 8]])).toArray(),
       [19, 22, 43, 50]
     )
+  })
+
+  await test('multi-kernel: mean+div', async () => {
+    // mean = sum/count, requires 2 kernels (reduce + elementwise)
+    const r = await new Tensor([[1, 2], [3, 4]]).mean(1).toArray()
+    assertArrayEq(r, [1.5, 3.5], 'mean axis=1')
   })
 
   console.log('\n── Autograd ──')

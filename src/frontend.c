@@ -1349,6 +1349,34 @@ static bool structural_eq(const void *a, const void *b) {
   return struct_eq_impl((PolyUOp *)a, (PolyUOp *)b, &bp, &ev);
 }
 
+/* DFS to assign positional IDs to BUFFER nodes, matching structural_hash order.
+ * Children are visited left-to-right, same as struct_hash_impl().
+ * n_bufs counts total BUFFERs found (may exceed buf_order capacity).
+ * buf_order is only written up to MAX_REALIZE_BUFS entries.
+ * Callers must check *n_bufs <= MAX_REALIZE_BUFS after the call. */
+static void collect_buf_order(PolyUOp *u, PolyUOp **buf_order, int *n_bufs,
+                               PolyUOp **visited, int *n_visited) {
+  if (!u) return;
+  for (int i = 0; i < *n_visited; i++)
+    if (visited[i] == u) return;
+  if (*n_visited < MAX_STRUCT_NODES) visited[(*n_visited)++] = u;
+
+  if (u->op == POLY_OP_BUFFER) {
+    if (*n_bufs < MAX_REALIZE_BUFS)
+      buf_order[*n_bufs] = u;
+    (*n_bufs)++;  /* always count, even past capacity */
+    return;
+  }
+  for (int i = 0; i < u->n_src; i++)
+    collect_buf_order(u->src[i], buf_order, n_bufs, visited, n_visited);
+}
+
+static int find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {
+  for (int i = 0; i < n_bufs; i++)
+    if (buf_order[i] == buf) return i;
+  return -1;
+}
+
 /* ── CPU realize (not available in Emscripten) ───────────────────────── */
 
 #ifndef __EMSCRIPTEN__
@@ -1508,34 +1536,6 @@ static SchedCacheEntry *sched_cache_get(uint32_t h) {
   for (int i = 0; i < sched_cache_n; i++)
     if (sched_cache[i].hash == h) return &sched_cache[i];
   return NULL;
-}
-
-/* DFS to assign positional IDs to BUFFER nodes, matching structural_hash order.
- * Children are visited left-to-right, same as struct_hash_impl().
- * n_bufs counts total BUFFERs found (may exceed buf_order capacity).
- * buf_order is only written up to MAX_REALIZE_BUFS entries.
- * Callers must check *n_bufs <= MAX_REALIZE_BUFS after the call. */
-static void collect_buf_order(PolyUOp *u, PolyUOp **buf_order, int *n_bufs,
-                               PolyUOp **visited, int *n_visited) {
-  if (!u) return;
-  for (int i = 0; i < *n_visited; i++)
-    if (visited[i] == u) return;
-  if (*n_visited < MAX_STRUCT_NODES) visited[(*n_visited)++] = u;
-
-  if (u->op == POLY_OP_BUFFER) {
-    if (*n_bufs < MAX_REALIZE_BUFS)
-      buf_order[*n_bufs] = u;
-    (*n_bufs)++;  /* always count, even past capacity */
-    return;
-  }
-  for (int i = 0; i < u->n_src; i++)
-    collect_buf_order(u->src[i], buf_order, n_bufs, visited, n_visited);
-}
-
-static int find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {
-  for (int i = 0; i < n_bufs; i++)
-    if (buf_order[i] == buf) return i;
-  return -1;
 }
 
 static void sched_cache_put(uint32_t h, PolyScheduleResult *sr,
@@ -3098,6 +3098,7 @@ struct PolyWasmStepPlan {
   int n_total_buffers;
   int n_bindable_buffers;
   int *exec_order;
+  int64_t *buffer_sizes;  /* element count per buffer (bindable + intermediate) */
 };
 
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p);
@@ -3217,6 +3218,19 @@ PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink)
   p->n_bindable_buffers = n_ext;
   p->n_total_buffers = n_ext + sr.n_intermediates;
 
+  /* Populate global buffer list so poly_kernel_buf() works with step plan */
+  g_kernel_n_bufs = n_ext;
+  if (n_ext > 0) memcpy(g_kernel_bufs, ext_bufs, (size_t)n_ext * sizeof(PolyUOp *));
+
+  /* Store per-buffer element counts (bindable from UOp arg, intermediate from schedule) */
+  p->buffer_sizes = calloc((size_t)p->n_total_buffers, sizeof(int64_t));
+  if (p->buffer_sizes) {
+    for (int i = 0; i < n_ext; i++)
+      p->buffer_sizes[i] = ext_bufs[i]->arg.i;
+    for (int i = 0; i < sr.n_intermediates; i++)
+      p->buffer_sizes[n_ext + i] = sr.intermediate_sizes ? sr.intermediate_sizes[i] : 0;
+  }
+
   for (int k = 0; k < p->n_kernels; k++) {
     int n_lin = 0;
     PolyUOp **lin = poly_linearize(ctx, sr.kernels[k], &n_lin);
@@ -3303,6 +3317,11 @@ const int *poly_wasm_stepplan_exec_order(const PolyWasmStepPlan *p, int *n) {
   return p->exec_order;
 }
 
+int64_t poly_wasm_stepplan_buf_size(const PolyWasmStepPlan *p, int buf_idx) {
+  if (!p || buf_idx < 0 || buf_idx >= p->n_total_buffers) return 0;
+  return p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
+}
+
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
   if (!p) return;
   if (p->kernel_bytes) {
@@ -3316,6 +3335,7 @@ void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
   free(p->kernel_lens);
   free(p->kernel_n_params);
   free(p->exec_order);
+  free(p->buffer_sizes);
   free(p);
 }
 

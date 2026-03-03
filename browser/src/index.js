@@ -56,75 +56,124 @@ const mathImports = {
 }
 
 /**
- * Core kernel execution: render → cache lookup → copy data → execute → copy result.
+ * Lazy, buffer-checked heap view accessors.
+ * When Emscripten exports HEAP32/HEAPU8 via EXPORTED_RUNTIME_METHODS, these
+ * return the managed views directly (auto-refreshed after memory growth).
+ * Fallback: construct views from wasmMemory and re-create if the buffer changes.
+ */
+function heap32() {
+  if (Module.HEAP32) return Module.HEAP32
+  const mem = Module.wasmMemory || (Module.asm && Module.asm.memory)
+  if (!mem) throw new Error('No wasmMemory; export HEAP32 via EXPORTED_RUNTIME_METHODS')
+  if (!Module.__heap32 || Module.__heap32.buffer !== mem.buffer) {
+    Module.__heap32 = new Int32Array(mem.buffer)
+  }
+  return Module.__heap32
+}
+
+function heapU8() {
+  if (Module.HEAPU8) return Module.HEAPU8
+  const mem = Module.wasmMemory || (Module.asm && Module.asm.memory)
+  if (!mem) throw new Error('No wasmMemory; export HEAPU8 via EXPORTED_RUNTIME_METHODS')
+  if (!Module.__heapU8 || Module.__heapU8.buffer !== mem.buffer) {
+    Module.__heapU8 = new Uint8Array(mem.buffer)
+  }
+  return Module.__heapU8
+}
+
+/**
+ * Core kernel execution via step plan: schedule → render all kernels → execute in order.
+ * Handles single-kernel and multi-kernel operations uniformly.
  * Shared by _realize() and backward(). Returns Float32Array with output data.
  *
  * bufferDataFn(bufUop) should return the Float32Array data for a given buffer UOp.
  */
 function _renderAndExec(ctx, sink, outBuf, numel, bufferDataFn) {
-  // 1. Render kernel (C-side cache hit after first call)
-  const wasmPtr = Module._poly_render_kernel_wasm(ctx, sink, _scratchLenPtr, _scratchNBufsPtr)
-  // Direct HEAP32 access — faster than Module.getValue(ptr, 'i32')
-  const wasmLen = Module.HEAP32[_scratchLenPtr >> 2]
-  const nBufs = Module.HEAP32[_scratchNBufsPtr >> 2]
+  // 1. Create step plan (schedules, linearizes, renders all kernels)
+  const plan = _ffi.poly_render_step_wasm_plan(ctx, sink)
+  if (!plan) throw new Error('poly_render_step_wasm_plan failed')
 
-  if (!wasmPtr || wasmLen === 0) {
-    throw new Error('poly_render_kernel_wasm failed')
-  }
+  try {
+    const nKernels = _ffi.poly_wasm_stepplan_n_kernels(plan)
+    const nBufs = _ffi.poly_wasm_stepplan_n_buffers(plan)
+    const nBindable = _ffi.poly_wasm_stepplan_n_bindable_buffers(plan)
 
-  // 2. Get current buffer UOps and their data (must be done every call
-  //    since buffer UOp pointers change between training steps)
-  const bufData = new Array(nBufs)
-  for (let i = 0; i < nBufs; i++) {
-    const bufUop = Module._poly_kernel_buf(ctx, i)
-    const data = bufferDataFn(bufUop)
-    if (!data) throw new Error(`No data binding for kernel buffer param ${i}`)
-    bufData[i] = data
-  }
+    // 2. Collect buffer data (bindable) and compute sizes (all buffers)
+    const bufSizes = new Array(nBufs)    // element count per buffer
+    const bufData = new Array(nBufs)     // Float32Array or null
 
-  // 3. Cache lookup: instance + memory + offsets (stable for same kernel)
-  const wasmBytes = new Uint8Array(Module.HEAPU8.buffer, wasmPtr, wasmLen)
-  const key = hashBytes(wasmBytes)
-  let exec = _execCache.get(key)
+    for (let i = 0; i < nBindable; i++) {
+      const bufUop = Module._poly_kernel_buf(ctx, i)
+      const data = bufferDataFn(bufUop)
+      if (!data) throw new Error(`No data binding for bindable buffer ${i}`)
+      bufData[i] = data
+      bufSizes[i] = data.length
+    }
 
-  if (!exec) {
-    // Cache miss: compute offsets, compile, instantiate
+    for (let i = nBindable; i < nBufs; i++) {
+      bufSizes[i] = Number(_ffi.poly_wasm_stepplan_buf_size(plan, i))
+      bufData[i] = null
+    }
+
+    // 3. Compute memory layout: contiguous buffer offsets
     const offsets = new Array(nBufs)
     let totalBytes = 0
     for (let i = 0; i < nBufs; i++) {
       offsets[i] = totalBytes
-      totalBytes += bufData[i].length * 4
+      totalBytes += bufSizes[i] * 4  // float32 = 4 bytes
     }
 
     const neededPages = Math.max(1, Math.ceil(totalBytes / 65536))
     const memory = new WebAssembly.Memory({ initial: neededPages })
-    const module = new WebAssembly.Module(wasmBytes)
-    const instance = new WebAssembly.Instance(module, {
-      env: { memory },
-      math: mathImports
-    })
 
-    exec = { instance, memory, memPages: neededPages, nBufs, offsets, totalBytes }
-    _execCache.set(key, exec)
+    // 4. Copy bindable buffer data into shared WASM memory
+    const memView = new Float32Array(memory.buffer)
+    for (let i = 0; i < nBindable; i++) {
+      if (bufData[i]) memView.set(bufData[i], offsets[i] / 4)
+    }
+
+    // 5. Read execution order
+    const execOrderPtr = _ffi.poly_wasm_stepplan_exec_order(plan, _scratchLenPtr)
+    const execOrder = []
+    for (let i = 0; i < nKernels; i++) {
+      execOrder.push(heap32()[(execOrderPtr >> 2) + i])
+    }
+
+    // 6. Execute each kernel in order, all sharing the same memory
+    for (const ki of execOrder) {
+      const bytesPtr = _ffi.poly_wasm_stepplan_kernel_bytes(plan, ki, _scratchLenPtr)
+      const bytesLen = heap32()[_scratchLenPtr >> 2]
+      if (!bytesPtr || bytesLen <= 0) throw new Error(`No WASM bytes for kernel ${ki}`)
+
+      const wasmBytes = new Uint8Array(heapU8().buffer, bytesPtr, bytesLen).slice()
+
+      const nParams = _ffi.poly_wasm_stepplan_kernel_n_params(plan, ki)
+      const paramOffsets = []
+      for (let p = 0; p < nParams; p++) {
+        const bufIdx = _ffi.poly_wasm_stepplan_kernel_param_buf_index(plan, ki, p)
+        if (bufIdx < 0 || bufIdx >= nBufs) {
+          throw new Error(`Invalid buffer index ${bufIdx} for kernel ${ki} param ${p}`)
+        }
+        paramOffsets.push(offsets[bufIdx])
+      }
+
+      const module = new WebAssembly.Module(wasmBytes)
+      const instance = new WebAssembly.Instance(module, {
+        env: { memory },
+        math: mathImports
+      })
+      instance.exports.kernel(...paramOffsets)
+    }
+
+    // 7. Copy output data back (buffer 0 is always the output)
+    const outView = new Float32Array(memory.buffer)
+    const result = new Float32Array(numel)
+    result.set(outView.subarray(offsets[0] / 4, offsets[0] / 4 + numel))
+
+    return result
+  } finally {
+    _ffi.poly_wasm_stepplan_destroy(plan)
   }
-
-  Module._free(wasmPtr)
-
-  // 4. Copy input data into persistent WASM memory
-  const memView = new Float32Array(exec.memory.buffer)
-  for (let i = 0; i < nBufs; i++) {
-    memView.set(bufData[i], exec.offsets[i] / 4)
-  }
-
-  // 5. Execute kernel
-  exec.instance.exports.kernel(...exec.offsets)
-
-  // 6. Copy output data back
-  const outView = new Float32Array(exec.memory.buffer)
-  const result = new Float32Array(numel)
-  result.set(outView.subarray(exec.offsets[0] / 4, exec.offsets[0] / 4 + numel))
-
-  return result
 }
 
 /**
@@ -175,6 +224,7 @@ async function init() {
     poly_wasm_stepplan_kernel_param_buf_index: Module._poly_wasm_stepplan_kernel_param_buf_index,
     poly_wasm_stepplan_exec_order: Module._poly_wasm_stepplan_exec_order,
     poly_wasm_stepplan_destroy: Module._poly_wasm_stepplan_destroy,
+    poly_wasm_stepplan_buf_size: Module._poly_wasm_stepplan_buf_size,
     // Composed elementwise ops
     poly_exp: Module._poly_exp,
     poly_log: Module._poly_log,
@@ -260,6 +310,14 @@ async function init() {
   _scratchOutShapePtr = Module._malloc(64)
   _scratchOutNdimPtr = Module._malloc(4)
 
+  // Verify heap views are accessible
+  if (!heap32() || !heapU8()) {
+    throw new Error(
+      'Polygrad WASM requires HEAPU8/HEAP32 exported. ' +
+      'Build with -s EXPORTED_RUNTIME_METHODS=[...,"HEAPU8","HEAP32","HEAPF32"]'
+    )
+  }
+
   // Create default context
   Tensor._defaultCtx = _ffi.poly_ctx_new()
 }
@@ -271,12 +329,11 @@ async function init() {
  */
 function writeInt64Array(arr) {
   const ptr = Module._malloc(arr.length * 8)
-  const h = Module.HEAP32
   for (let i = 0; i < arr.length; i++) {
     const base = (ptr >> 2) + i * 2
     const val = arr[i]
-    h[base] = val & 0xFFFFFFFF
-    h[base + 1] = val < 0 ? -1 : 0
+    heap32()[base] = val & 0xFFFFFFFF
+    heap32()[base + 1] = val < 0 ? -1 : 0
   }
   return ptr
 }
@@ -286,12 +343,11 @@ function writeInt64Array(arr) {
  * Returns scratch pointer (DO NOT free). Only for small arrays (<=8 elements).
  */
 function writeInt64Scratch(arr) {
-  const h = Module.HEAP32
   for (let i = 0; i < arr.length; i++) {
     const base = (_scratchAxisPtr >> 2) + i * 2
     const val = arr[i]
-    h[base] = val & 0xFFFFFFFF
-    h[base + 1] = val < 0 ? -1 : 0
+    heap32()[base] = val & 0xFFFFFFFF
+    heap32()[base + 1] = val < 0 ? -1 : 0
   }
   return _scratchAxisPtr
 }
@@ -300,12 +356,12 @@ function writeInt64Scratch(arr) {
  * Read output shape from the scratch out_shape/out_ndim pointers.
  */
 function readOutShape() {
-  const ndim = Module.HEAP32[_scratchOutNdimPtr >> 2]
+  const ndim = heap32()[_scratchOutNdimPtr >> 2]
   const shape = []
   for (let i = 0; i < ndim; i++) {
     const base = (_scratchOutShapePtr >> 2) + i * 2
-    const lo = Module.HEAP32[base] >>> 0
-    const hi = Module.HEAP32[base + 1]
+    const lo = heap32()[base] >>> 0
+    const hi = heap32()[base + 1]
     shape.push(hi >= 0 ? (hi * 0x100000000 + lo) : -(~hi * 0x100000000 + (~lo >>> 0) + 1))
   }
   return shape
@@ -315,12 +371,11 @@ function readOutShape() {
  * Write shape to scratch out buffer and return the pointer.
  */
 function writeShapeToScratch(shape) {
-  const h = Module.HEAP32
   for (let i = 0; i < shape.length; i++) {
     const base = (_scratchOutShapePtr >> 2) + i * 2
     const val = shape[i]
-    h[base] = val & 0xFFFFFFFF
-    h[base + 1] = val < 0 ? -1 : 0
+    heap32()[base] = val & 0xFFFFFFFF
+    heap32()[base + 1] = val < 0 ? -1 : 0
   }
   return _scratchOutShapePtr
 }
@@ -1035,7 +1090,7 @@ class Tensor {
       let result = this
       for (let i = this._shape.length - 1; i >= 0; i--) {
         const shPtr = writeInt64Array(result._shape)
-        Module.HEAP32[_scratchOutNdimPtr >> 2] = 0
+        heap32()[_scratchOutNdimPtr >> 2] = 0
         const uop = _ffi.poly_max_reduce(this._ctx, result._uop,
           shPtr, result._shape.length, i, keepdim ? 1 : 0,
           _scratchOutShapePtr, _scratchOutNdimPtr)
@@ -1047,7 +1102,7 @@ class Tensor {
 
     if (axis < 0) axis += this._shape.length
     const shPtr = writeInt64Array(this._shape)
-    Module.HEAP32[_scratchOutNdimPtr >> 2] = 0
+    heap32()[_scratchOutNdimPtr >> 2] = 0
     const uop = _ffi.poly_max_reduce(this._ctx, this._uop,
       shPtr, this._shape.length, axis, keepdim ? 1 : 0,
       _scratchOutShapePtr, _scratchOutNdimPtr)
@@ -1065,7 +1120,7 @@ class Tensor {
     }
     if (axis < 0) axis += this._shape.length
     const shPtr = writeInt64Array(this._shape)
-    Module.HEAP32[_scratchOutNdimPtr >> 2] = 0
+    heap32()[_scratchOutNdimPtr >> 2] = 0
     const uop = _ffi.poly_mean_reduce(this._ctx, this._uop,
       shPtr, this._shape.length, axis, keepdim ? 1 : 0,
       _scratchOutShapePtr, _scratchOutNdimPtr)
@@ -1100,7 +1155,7 @@ class Tensor {
     }
     const xShPtr = writeInt64Array(this._shape)
     const wShPtr = writeInt64Array(w._shape)
-    Module.HEAP32[_scratchOutNdimPtr >> 2] = 0
+    heap32()[_scratchOutNdimPtr >> 2] = 0
     const uop = _ffi.poly_dot(this._ctx,
       this._uop, xShPtr, this._shape.length,
       w._uop, wShPtr, w._shape.length,
@@ -1176,7 +1231,7 @@ class Tensor {
     // Allocate arrays in WASM heap
     const tensorPtrs = Module._malloc(n * 4)
     for (let i = 0; i < n; i++) {
-      Module.HEAP32[(tensorPtrs >> 2) + i] = operands[i]._uop
+      heap32()[(tensorPtrs >> 2) + i] = operands[i]._uop
     }
 
     const shapePtrs = Module._malloc(n * 4)
@@ -1184,20 +1239,20 @@ class Tensor {
     for (let i = 0; i < n; i++) {
       const shPtr = writeInt64Array(operands[i]._shape)
       shapeArrays.push(shPtr)
-      Module.HEAP32[(shapePtrs >> 2) + i] = shPtr
+      heap32()[(shapePtrs >> 2) + i] = shPtr
     }
 
     const ndimPtr = Module._malloc(n * 4)
     for (let i = 0; i < n; i++) {
-      Module.HEAP32[(ndimPtr >> 2) + i] = operands[i]._shape.length
+      heap32()[(ndimPtr >> 2) + i] = operands[i]._shape.length
     }
 
     // Allocate formula string
     const formulaBytes = new TextEncoder().encode(formula + '\0')
     const formulaPtr = Module._malloc(formulaBytes.length)
-    Module.HEAPU8.set(formulaBytes, formulaPtr)
+    heapU8().set(formulaBytes, formulaPtr)
 
-    Module.HEAP32[_scratchOutNdimPtr >> 2] = 0
+    heap32()[_scratchOutNdimPtr >> 2] = 0
     const uop = _ffi.poly_einsum(ctx, formulaPtr,
       tensorPtrs, shapePtrs, ndimPtr, n,
       _scratchOutShapePtr, _scratchOutNdimPtr)
@@ -1223,7 +1278,7 @@ class Tensor {
     // Allocate formula string
     const formulaBytes = new TextEncoder().encode(formula + '\0')
     const formulaPtr = Module._malloc(formulaBytes.length)
-    Module.HEAPU8.set(formulaBytes, formulaPtr)
+    heapU8().set(formulaBytes, formulaPtr)
 
     // Shape
     const shPtr = writeInt64Array(this._shape)
@@ -1235,11 +1290,11 @@ class Tensor {
       const namesStr = names.join(' ') + '\0'
       const namesBytes = new TextEncoder().encode(namesStr)
       namesPtr = Module._malloc(namesBytes.length)
-      Module.HEAPU8.set(namesBytes, namesPtr)
+      heapU8().set(namesBytes, namesPtr)
       valuesPtr = writeInt64Array(values)
     }
 
-    Module.HEAP32[_scratchOutNdimPtr >> 2] = 0
+    heap32()[_scratchOutNdimPtr >> 2] = 0
     const uop = _ffi.poly_rearrange(this._ctx, formulaPtr,
       this._uop, shPtr, this._shape.length,
       namesPtr, valuesPtr, n,

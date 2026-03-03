@@ -682,11 +682,18 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         /* Buffer store */
         int addr = lm_get(&locals, u->src[0]);
         bool val_is_float = poly_dtype_is_float(u->src[1]->dtype);
+        bool buf_is_float = u->src[0]->dtype.is_ptr &&
+                            poly_dtype_is_float(u->src[0]->dtype);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, val);
-        wb_byte(&body, val_is_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
+        /* Convert i32→f32 when storing bool/int result into float buffer */
+        if (buf_is_float && !val_is_float) {
+          wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
+        }
+        bool store_float = val_is_float || buf_is_float;
+        wb_byte(&body, store_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
         wb_uleb128(&body, 2);  /* align */
         wb_uleb128(&body, 0);  /* offset */
       }
@@ -1146,7 +1153,14 @@ static void build_code_simd(WasmBuf *mod, PolyUOp **uops, int n,
       wb_uleb128(&body, addr);
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, val);
-      wb_byte(&body, WASM_OP_F32_STORE);
+      /* Convert i32→f32 when storing bool/int result into float buffer */
+      if (!poly_dtype_is_float(u->src[1]->dtype) &&
+          u->src[0]->dtype.is_ptr && poly_dtype_is_float(u->src[0]->dtype)) {
+        wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
+      }
+      bool store_float = poly_dtype_is_float(u->src[1]->dtype) ||
+                          (u->src[0]->dtype.is_ptr && poly_dtype_is_float(u->src[0]->dtype));
+      wb_byte(&body, store_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
       wb_uleb128(&body, 2);
       wb_uleb128(&body, 0);
     }
