@@ -480,6 +480,14 @@ _lib.poly_instance_set_optimizer.argtypes = [_ptr, ctypes.c_int,
 _lib.poly_mlp_instance.restype = _ptr
 _lib.poly_mlp_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
 
+# TabM family builder (model_tabm.h)
+_lib.poly_tabm_instance.restype = _ptr
+_lib.poly_tabm_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
+# NAM family builder (model_nam.h)
+_lib.poly_nam_instance.restype = _ptr
+_lib.poly_nam_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
+
 # HF loader (modelzoo/hf_loader.c)
 _lib.poly_hf_load.restype = _ptr
 _lib.poly_hf_load.argtypes = [

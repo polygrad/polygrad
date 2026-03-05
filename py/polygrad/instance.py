@@ -73,6 +73,26 @@ class Instance:
         ptr = _lib.poly_mlp_instance(spec, len(spec))
         return Instance(ptr)
 
+    @staticmethod
+    def tabm(spec):
+        """Create a TabM (BatchEnsemble MLP) from a spec dict or JSON string."""
+        if isinstance(spec, dict):
+            spec = json.dumps(spec)
+        if isinstance(spec, str):
+            spec = spec.encode('utf-8')
+        ptr = _lib.poly_tabm_instance(spec, len(spec))
+        return Instance(ptr)
+
+    @staticmethod
+    def nam(spec):
+        """Create a NAM (Neural Additive Model) from a spec dict or JSON string."""
+        if isinstance(spec, dict):
+            spec = json.dumps(spec)
+        if isinstance(spec, str):
+            spec = spec.encode('utf-8')
+        ptr = _lib.poly_nam_instance(spec, len(spec))
+        return Instance(ptr)
+
     # ── Param Enumeration ────────────────────────────────────────────
 
     @property

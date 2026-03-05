@@ -61,6 +61,18 @@ class Instance {
     return new Instance(ffi.poly_mlp_instance(buf, buf.length))
   }
 
+  static tabm(spec) {
+    if (typeof spec === 'object') spec = JSON.stringify(spec)
+    const buf = Buffer.from(spec, 'utf-8')
+    return new Instance(ffi.poly_tabm_instance(buf, buf.length))
+  }
+
+  static nam(spec) {
+    if (typeof spec === 'object') spec = JSON.stringify(spec)
+    const buf = Buffer.from(spec, 'utf-8')
+    return new Instance(ffi.poly_nam_instance(buf, buf.length))
+  }
+
   /**
    * Load a HuggingFace model from config JSON + safetensors buffers.
    * @param {string|object} configJson - config.json content or parsed object.

@@ -219,6 +219,8 @@ module.exports = {
   poly_instance_train_step: lib.func('int poly_instance_train_step(void *inst, void *io, int n_io, float *loss_out)'),
   poly_instance_set_optimizer: lib.func('int poly_instance_set_optimizer(void *inst, int kind, float lr, float beta1, float beta2, float eps, float weight_decay)'),
   poly_mlp_instance: lib.func('void *poly_mlp_instance(const char *spec_json, int spec_len)'),
+  poly_tabm_instance: lib.func('void *poly_tabm_instance(const char *spec_json, int spec_len)'),
+  poly_nam_instance: lib.func('void *poly_nam_instance(const char *spec_json, int spec_len)'),
 
   // HF loader (modelzoo/hf_loader.c)
   poly_hf_load: lib.func('void *poly_hf_load(const char *config_json, int config_len, const uint8_t **weight_files, const int64_t *weight_lens, int n_weight_files, int max_batch, int max_seq_len)')
