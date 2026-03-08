@@ -1,289 +1,108 @@
-# Polygrad JavaScript (Node.js)
+# polygrad
 
-tinygrad-compatible Tensor API for Node.js. Thin koffi FFI wrapper around the C core — each method is one native call.
+Tensor computation library with automatic differentiation. Native (N-API) and WASM backends.
 
-## Installation
+## Install
 
 ```bash
-# Build the C shared library first
-make
-
-# Install JS dependencies
-cd js && npm install
-
-# Or set POLYGRAD_LIB to point to your libpolygrad.so
-export POLYGRAD_LIB=/path/to/libpolygrad.so
+npm install polygrad
 ```
 
-Requires: Node.js >= 18, koffi (native FFI).
+On Node.js, the native addon builds automatically during install. If the build fails (missing compiler, etc.), the package falls back to the WASM backend. Set `POLYGRAD_SKIP_NATIVE=1` to skip the native build entirely.
 
-## Quick Start
+## Usage
 
-```javascript
-const { Tensor } = require('./js')
+```js
+const polygrad = require('polygrad')
 
-// Create tensors
-const a = Tensor.rand(3, 4)
-const b = Tensor.rand(4, 5)
+const pg = await polygrad.create()  // auto: native > wasm
+const { Tensor } = pg
 
-// Matrix multiply + softmax
-const c = a.matmul(b).softmax(-1)
-console.log(c.toArray())
+const x = new Tensor([1, 2, 3])
+const y = x.mul(2).add(1)
+console.log(await y.toArray())  // [3, 5, 7]
 
 // Autograd
-const x = new Tensor([1.0, 2.0, 3.0], { requiresGrad: true })
-const loss = x.mul(x).sum()
-loss.backward()
-console.log(x.grad.toArray())  // Float32Array [2, 4, 6]
+const a = new Tensor([2, 3], { requiresGrad: true })
+const loss = a.mul(a).sum()
+await loss.backward()
+console.log(await a.grad.toArray())  // [4, 6]
+
+await pg.dispose()
 ```
 
-## Tensor API
+## Backend selection
 
-### Construction
+```js
+// Force a specific backend
+const pg = await polygrad.create({ backend: 'native' })
+const pg = await polygrad.create({ backend: 'wasm' })
 
-| Method | Description |
-|--------|-------------|
-| `new Tensor(data, opts?)` | From number, array, or Float32Array |
-| `Tensor.zeros(...shape)` | Tensor of zeros |
-| `Tensor.ones(...shape)` | Tensor of ones |
-| `Tensor.full(shape, val)` | Filled tensor |
-| `Tensor.rand(...shape)` | Uniform random [0, 1) |
-| `Tensor.randn(...shape)` | Standard normal |
-| `Tensor.randint(low, high, shape)` | Random integers |
-| `Tensor.arange(stop, start?, step?)` | Range tensor |
-| `Tensor.linspace(start, stop, steps)` | Evenly spaced values |
-| `Tensor.eye(n)` | Identity matrix |
-| `Tensor.empty(...shape)` | Uninitialized tensor |
-
-### Properties
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `shape` | number[] | Dimension sizes |
-| `ndim` | number | Number of dimensions |
-| `dtype` | string | Always `'float32'` |
-| `device` | string | Always `'CPU'` |
-| `T` | Tensor | Transpose of last two dims |
-| `requiresGrad` | boolean | Settable; enables autograd |
-| `grad` | Tensor/null | Gradient after `.backward()` |
-
-### Realization & Conversion
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `realize()` | Tensor | Execute lazy graph, return self |
-| `toArray()` | Float32Array | Realize and return typed array |
-| `item()` | number | Scalar value |
-| `tolist()` | array | Nested JS arrays |
-| `numel()` | number | Total elements |
-| `size(dim?)` | number/number[] | Shape or dimension size |
-| `detach()` | Tensor | Copy without graph |
-| `clone()` | Tensor | Copy preserving requiresGrad |
-
-### Arithmetic
-
-| Method | Description |
-|--------|-------------|
-| `add(other)` | Addition (broadcasting) |
-| `sub(other)` | Subtraction |
-| `mul(other)` | Multiplication |
-| `div(other)` | Division |
-| `neg()` | Negation |
-| `pow(other)` | Exponentiation |
-
-All accept Tensor or number.
-
-### Comparisons
-
-| Method | Description |
-|--------|-------------|
-| `lt(other)` | Less than |
-| `eq(other)` | Equal |
-| `ne(other)` | Not equal |
-| `gt(other)` | Greater than |
-| `ge(other)` | Greater or equal |
-| `le(other)` | Less or equal |
-
-### Element-wise Math
-
-| Method | Description |
-|--------|-------------|
-| `exp()`, `log()` | Natural exp/log |
-| `exp2()`, `log2()` | Base-2 exp/log |
-| `sqrt()`, `rsqrt()` | Square root, reciprocal sqrt |
-| `square()`, `abs()`, `sign()` | Square, abs, sign |
-| `reciprocal()` | 1/x |
-| `sin()`, `cos()`, `tan()` | Trigonometric |
-| `ceil()`, `floor()`, `round()`, `trunc()` | Rounding |
-| `isnan()`, `isinf()` | NaN/Inf detection |
-| `where(x, y)` | Conditional select |
-| `maximum(other)`, `minimum(other)` | Element-wise max/min |
-| `clamp(lo, hi)` | Clamp to range |
-
-### Activations
-
-| Method | Description |
-|--------|-------------|
-| `relu()` | max(0, x) |
-| `relu6()` | clamp(relu(x), 0, 6) |
-| `leakyRelu(negSlope=0.01)` | Leaky ReLU |
-| `sigmoid()` | 1 / (1 + e^-x) |
-| `tanh()` | Hyperbolic tangent |
-| `gelu()` | GELU |
-| `quickGelu()` | Fast GELU |
-| `silu()` / `swish()` | x * sigmoid(x) |
-| `elu(alpha=1.0)` | ELU |
-| `softplus(beta=1.0)` | Softplus |
-| `mish()` | Mish |
-| `hardtanh(minVal, maxVal)` | Hard tanh |
-| `hardswish()` | Hard swish |
-| `hardsigmoid()` | Hard sigmoid |
-
-### Reductions
-
-| Method | Description |
-|--------|-------------|
-| `sum(axis?, keepdim?)` | Sum |
-| `max({axis?, keepdim?})` | Maximum |
-| `min({axis?, keepdim?})` | Minimum |
-| `mean(axis?, keepdim?)` | Mean |
-| `var(axis?, keepdim?, correction?)` | Variance |
-| `std(axis?, keepdim?, correction?)` | Standard deviation |
-
-### Movement / Shape
-
-| Method | Description |
-|--------|-------------|
-| `reshape(...shape)` / `view(...)` | Reshape (supports -1) |
-| `permute(...order)` | Permute dimensions |
-| `transpose(dim0?, dim1?)` | Swap two dims |
-| `expand(...shape)` | Broadcast to shape |
-| `squeeze(dim?)` | Remove size-1 dims |
-| `unsqueeze(dim)` | Add size-1 dim |
-| `flatten(startDim?, endDim?)` | Flatten dim range |
-| `unflatten(dim, sizes)` | Split one dim |
-| `shrink(arg)` | Slice: [[s,e], ...] |
-| `pad(arg)` | Pad: [[b,a], ...] |
-| `flip(axis)` | Reverse along axes |
-| `repeat(...repeats)` | Tile tensor |
-
-### Linear Algebra
-
-| Method | Description |
-|--------|-------------|
-| `dot(w)` / `matmul(w)` | Matrix multiply |
-| `linear(weight, bias?)` | x @ weight.T + bias |
-
-### Normalization & Loss
-
-| Method | Description |
-|--------|-------------|
-| `softmax(axis=-1)` | Softmax |
-| `logSoftmax(axis=-1)` | Log-softmax |
-| `layernorm(axis?, eps?)` | Layer normalization |
-| `crossEntropy(target, axis?)` | Cross-entropy loss |
-| `binaryCrossEntropy(target)` | Binary cross-entropy |
-
-### Advanced
-
-| Method | Description |
-|--------|-------------|
-| `Tensor.einsum(formula, ...ops)` | Einstein summation |
-| `rearrange(formula, kwargs?)` | einops-style rearrange |
-| `Tensor.cat(...tensors, {dim})` | Concatenate |
-| `Tensor.stack(...tensors, {dim})` | Stack |
-| `split(sizes, dim?)` | Split into chunks |
-| `chunk(n, dim?)` | Split into n chunks |
-| `getitem(...idx)` | Indexing (int, [start,stop], null) |
-
-### Autograd
-
-```javascript
-const x = new Tensor([1, 2, 3], { requiresGrad: true })
-const loss = x.mul(x).sum()
-loss.backward()
-console.log(x.grad.toArray())  // Float32Array [2, 4, 6]
+// Or via environment variable
+// POLY_BACKEND=wasm node app.js
 ```
 
-## Differences from Python API
+| Environment | `'auto'` (default) | `'native'` | `'wasm'` |
+|---|---|---|---|
+| Node.js with addon | Native | Native | WASM |
+| Node.js without addon | WASM | Error | WASM |
+| Browser | WASM | Error | WASM |
 
-| Python | JavaScript | Notes |
-|--------|-----------|-------|
-| `a + b` | `a.add(b)` | JS has no operator overloading |
-| `a @ b` | `a.matmul(b)` | |
-| `a.numpy()` | `a.toArray()` | Returns Float32Array |
-| `requires_grad` | `requiresGrad` | camelCase |
-| `leaky_relu()` | `leakyRelu()` | camelCase |
-| `log_softmax()` | `logSoftmax()` | camelCase |
+## Browser bundles
 
-## Instance API (MLP + HuggingFace)
-
-The Instance API provides direct access to PolyInstance models (MLP builder and HuggingFace loader) without the Tensor abstraction.
-
-### MLP
-
-```javascript
-const { Instance, OPTIM_SGD } = require('./src/instance')
-
-const inst = Instance.mlp({
-  layers: [2, 4, 1],
-  activation: 'relu',
-  bias: true,
-  loss: 'mse',
-  batch_size: 1,
-  seed: 42
-})
-
-inst.setOptimizer(OPTIM_SGD, 0.05)
-const loss = inst.trainStep({ x: new Float32Array([1, 2]), y: new Float32Array([5]) })
-inst.free()
-```
-
-### HuggingFace Model Loading
-
-```javascript
-const { Instance } = require('./src/instance')
-const fs = require('fs')
-
-// Load config and safetensors
-const config = JSON.parse(fs.readFileSync('model/config.json', 'utf-8'))
-const weights = [fs.readFileSync('model/model.safetensors')]
-
-const inst = Instance.fromHF(config, weights, 1, 128)  // maxBatch=1, maxSeqLen=128
-
-// Set input buffers and run forward
-inst.forward({})
-const output = inst.bufData(inst.findBuf('output'))
-
-inst.free()
-```
-
-### Instance Methods
-
-| Method | Description |
-|--------|-------------|
-| `Instance.mlp(spec)` | Create MLP from JSON spec |
-| `Instance.fromHF(config, weights, maxBatch?, maxSeqLen?)` | Load HuggingFace model |
-| `Instance.fromIR(irBytes, weightsBytes?)` | Load from IR bytes |
-| `forward(inputs)` | Run forward pass |
-| `trainStep(io)` | Forward + backward + optimizer step |
-| `setOptimizer(kind, lr, ...)` | Set optimizer (SGD, Adam, AdamW) |
-| `paramCount`, `paramName(i)`, `paramShape(i)` | Parameter introspection |
-| `paramData(i)`, `setParamData(i, arr)` | Read/write parameter data |
-| `bufCount`, `bufName(i)`, `bufRole(i)`, `bufShape(i)` | Buffer introspection |
-| `bufData(i)`, `setBufData(i, arr)` | Read/write buffer data |
-| `findBuf(name)` | Find buffer index by name |
-| `exportWeights()`, `importWeights(data)` | Weight serialization |
-| `free()` | Release native resources |
-
-## How It Works
-
-Same architecture as Python: each method calls one C function via koffi FFI. The C core handles all op composition. Lazy evaluation with explicit `realize()`.
-
-## Tests
+Build the one-file browser bundles after generating the packaged WASM module:
 
 ```bash
-node js/test/test_tensor.js      # 62 tests (Tensor API)
-node js/test/test_instance.js    # 192 tests (MLP Instance)
-node js/test/test_hf.js          # 36 tests (HF model loading)
+make -C .. wasm-pkg
+npm run build:browser
 ```
+
+This produces:
+
+- `dist/polygrad.js` -- browser global bundle for `<script src="...">`
+- `dist/polygrad.mjs` -- browser ESM bundle for `<script type="module">`
+
+Example:
+
+```html
+<script src="./dist/polygrad.js"></script>
+<script>
+  polygrad.create().then(async (pg) => {
+    const x = new pg.Tensor([1, 2, 3])
+    console.log(await x.mul(2).toArray())
+    await pg.dispose()
+  })
+</script>
+```
+
+## API
+
+### `polygrad.create(opts?)` -> `Promise<PolyRuntime>`
+
+Creates a runtime with the selected backend. Options:
+
+- `backend`: `'auto'` (default), `'native'`, or `'wasm'`
+
+### `PolyRuntime`
+
+- `pg.Tensor` -- runtime-bound Tensor class
+- `pg.backend` -- `'native'` or `'wasm'`
+- `pg.dispose()` -- release resources
+
+### `Tensor`
+
+Creation: `new Tensor(data, opts?)`, `Tensor.zeros(...)`, `Tensor.ones(...)`, `Tensor.rand(...)`, `Tensor.randn(...)`, `Tensor.eye(n)`, `Tensor.arange(start, stop, step?)`
+
+Elementwise: `add`, `sub`, `mul`, `div`, `neg`, `exp`, `log`, `sqrt`, `square`, `abs`, `sigmoid`, `relu`, `tanh`, `gelu`, `silu`
+
+Reduce: `sum`, `mean`, `max`, `var`, `std`, `softmax`
+
+Movement: `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`
+
+Comparison: `eq`, `gt`, `where`, `clamp`, `maximum`
+
+Other: `dot` (matmul), `backward`, `realize`, `toArray`, `tolist`, `repr`
+
+## License
+
+MIT

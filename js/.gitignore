@@ -1,0 +1,6 @@
+build/
+csrc/
+dist/
+node_modules/
+polygrad-*.tgz
+wasm/
