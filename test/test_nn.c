@@ -1961,6 +1961,68 @@ TEST(wasm, step_plan_rand_threefry_decomposed) {
   PASS();
 }
 
+TEST(wasm, step_plan_buf_nbytes) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 8);
+  PolyUOp *out = poly_buffer_f32(ctx, 8);
+  PolyUOp *v = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0));
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, v));
+
+  PolyWasmStepPlan *p = poly_render_step_wasm_plan(ctx, sink);
+  ASSERT_NOT_NULL(p);
+
+  /* f32 buffers: 8 elements * 4 bytes = 32 */
+  int n_bindable = poly_wasm_stepplan_n_bindable_buffers(p);
+  ASSERT_TRUE(n_bindable >= 2);
+  for (int i = 0; i < n_bindable; i++) {
+    int64_t nbytes = poly_wasm_stepplan_buf_nbytes(p, i);
+    int64_t nelems = poly_wasm_stepplan_buf_size(p, i);
+    ASSERT_INT_EQ(nbytes, nelems * 4);  /* f32 = 4 bytes */
+  }
+
+  /* bindable_buf_index is identity today */
+  for (int i = 0; i < n_bindable; i++) {
+    ASSERT_INT_EQ(poly_wasm_stepplan_bindable_buf_index(p, i), i);
+  }
+  /* out of range returns -1 */
+  ASSERT_INT_EQ(poly_wasm_stepplan_bindable_buf_index(p, -1), -1);
+  ASSERT_INT_EQ(poly_wasm_stepplan_bindable_buf_index(p, n_bindable), -1);
+
+  poly_wasm_stepplan_destroy(p);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, step_plan_buf_nbytes_f64) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f64(ctx, 4);
+  PolyUOp *out = poly_buffer_f64(ctx, 4);
+  PolyUOp *v = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_double(ctx, 1.0));
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, v));
+
+  PolyWasmStepPlan *p = poly_render_step_wasm_plan(ctx, sink);
+  ASSERT_NOT_NULL(p);
+
+  /* f64 buffers: 4 elements * 8 bytes = 32 */
+  int n_bindable = poly_wasm_stepplan_n_bindable_buffers(p);
+  ASSERT_TRUE(n_bindable >= 2);
+  for (int i = 0; i < n_bindable; i++) {
+    int64_t nbytes = poly_wasm_stepplan_buf_nbytes(p, i);
+    int64_t nelems = poly_wasm_stepplan_buf_size(p, i);
+    ASSERT_INT_EQ(nbytes, nelems * 8);  /* f64 = 8 bytes */
+  }
+
+  poly_wasm_stepplan_destroy(p);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, abi_version) {
+  ASSERT_INT_EQ(poly_abi_version(), POLYGRAD_ABI_VERSION);
+  ASSERT_TRUE(poly_abi_version() >= 1);
+  PASS();
+}
+
 /* ── C3: Float64 pipeline tests ──────────────────────────────────────── */
 
 TEST(f64, const_typed) {

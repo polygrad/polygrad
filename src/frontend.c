@@ -3108,6 +3108,7 @@ struct PolyWasmStepPlan {
   int n_bindable_buffers;
   int *exec_order;
   int64_t *buffer_sizes;  /* element count per buffer (bindable + intermediate) */
+  int *buffer_itemsizes;  /* bytes per element per buffer (e.g. 4 for f32, 8 for f64) */
 };
 
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p);
@@ -3240,6 +3241,15 @@ PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink)
       p->buffer_sizes[n_ext + i] = sr.intermediate_sizes ? sr.intermediate_sizes[i] : 0;
   }
 
+  /* Store per-buffer itemsizes (bytes per element, dtype-aware) */
+  p->buffer_itemsizes = calloc((size_t)p->n_total_buffers, sizeof(int));
+  if (p->buffer_itemsizes) {
+    for (int i = 0; i < n_ext; i++)
+      p->buffer_itemsizes[i] = poly_dtype_itemsize(poly_dtype_scalar(ext_bufs[i]->dtype));
+    for (int i = 0; i < sr.n_intermediates; i++)
+      p->buffer_itemsizes[n_ext + i] = sr.intermediate_itemsizes ? sr.intermediate_itemsizes[i] : 4;
+  }
+
   for (int k = 0; k < p->n_kernels; k++) {
     int n_lin = 0;
     PolyUOp **lin = poly_linearize(ctx, sr.kernels[k], &n_lin);
@@ -3331,6 +3341,27 @@ int64_t poly_wasm_stepplan_buf_size(const PolyWasmStepPlan *p, int buf_idx) {
   return p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
 }
 
+int64_t poly_wasm_stepplan_buf_nbytes(const PolyWasmStepPlan *p, int buf_idx) {
+  if (!p || buf_idx < 0 || buf_idx >= p->n_total_buffers) return 0;
+  int64_t elems = p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
+  int itemsize = (p->buffer_itemsizes && buf_idx < p->n_total_buffers)
+                   ? p->buffer_itemsizes[buf_idx] : 4;
+  return elems * itemsize;
+}
+
+int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi) {
+  if (!p || bi < 0 || bi >= p->n_bindable_buffers) return -1;
+  return bi;  /* identity today; explicit contract for future indirection */
+}
+
+const void *poly_const_buffer_data(PolyCtx *ctx, PolyUOp *buf) {
+  return const_registry_lookup(ctx, buf);
+}
+
+int poly_abi_version(void) {
+  return POLYGRAD_ABI_VERSION;
+}
+
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
   if (!p) return;
   if (p->kernel_bytes) {
@@ -3345,6 +3376,7 @@ void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
   free(p->kernel_n_params);
   free(p->exec_order);
   free(p->buffer_sizes);
+  free(p->buffer_itemsizes);
   free(p);
 }
 

@@ -14,6 +14,8 @@
 
 #include "polygrad.h"
 
+#define POLYGRAD_ABI_VERSION 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -131,6 +133,16 @@ int poly_wasm_stepplan_n_bindable_buffers(const PolyWasmStepPlan *p);
 int poly_wasm_stepplan_kernel_param_buf_index(const PolyWasmStepPlan *p, int k, int param_idx);
 const int *poly_wasm_stepplan_exec_order(const PolyWasmStepPlan *p, int *n);
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p);
+
+int64_t poly_wasm_stepplan_buf_size(const PolyWasmStepPlan *p, int buf_idx);
+int64_t poly_wasm_stepplan_buf_nbytes(const PolyWasmStepPlan *p, int buf_idx);
+int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi);
+
+/* Query constant buffer data. Returns NULL if buf is not a registered constant. */
+const void *poly_const_buffer_data(PolyCtx *ctx, PolyUOp *buf);
+
+/* ABI version (callers check at load time for compatibility). */
+int poly_abi_version(void);
 
 /* ── Composed elementwise ops (shape-free, UOp-level) ────────────────── */
 
