@@ -37,5 +37,19 @@
   "engines": {
     "node": ">=18"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/polygrad/polygrad.git",
+    "directory": "js"
+  },
+  "keywords": [
+    "polygrad",
+    "tensor",
+    "autograd",
+    "wasm",
+    "node-api",
+    "machine-learning"
+  ],
+  "author": "Anton Troynikov",
   "license": "MIT"
 }
