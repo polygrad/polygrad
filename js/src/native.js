@@ -15,7 +15,7 @@ function loadNativeBinding() {
 function createNativeBackend() {
   const binding = loadNativeBinding()
   if (!binding) {
-    throw new Error('polygrad: native backend unavailable (N-API addon not built)')
+    throw new Error('polygrad: target=\'native\' unavailable (N-API addon not built)')
   }
 
   const ctx = binding.poly_ctx_new()
@@ -58,7 +58,7 @@ function createNativeBackend() {
     ctx,
     ops,
     realize,
-    caps: { simd: false, f64: true, backend: 'native' },
+    caps: { simd: false, f64: true, target: 'native', device: 'cpu' },
     destroy() {
       binding.poly_ctx_destroy(ctx)
       binding.poly_cpu_cache_flush()

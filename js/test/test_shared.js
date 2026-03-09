@@ -1,6 +1,6 @@
 /**
  * Shared test suite for the polygrad Tensor class.
- * Backend-agnostic: runs against WASM or native backends.
+ * Target-agnostic: runs against WASM or native bindings.
  *
  * Usage: require this module and call runTests(pg).
  */
@@ -44,7 +44,7 @@ async function runTests(pg) {
     }
   }
 
-  console.log('Backend: ' + pg.backend + '\n')
+  console.log(`Target: ${pg.target}, device: ${pg.device}\n`)
 
   // -- Creation --
   console.log('-- Creation --')

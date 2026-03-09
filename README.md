@@ -37,15 +37,15 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 │  └──────────┘  └──────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────┘
         │                    │                    │
-  ┌─────┴─────┐     ┌───────┴──────┐    ┌───────┴──────────┐
-  │  Python   │     │  JS (Node)   │    │ Browser (WASM)   │
-  │  ctypes   │     │  koffi FFI   │    │ Emscripten FFI   │
-  │  tensor.py│     │  tensor.js   │    │ index.js         │
-  │  nn/      │     │              │    │                  │
-  └───────────┘     └──────────────┘    └──────────────────┘
+  ┌─────┴─────┐     ┌───────┴──────────────┐    ┌────────┴──────────┐
+  │  Python   │     │  JS package (`js/`)  │    │ Browser dist       │
+  │  ctypes   │     │  Node-API + WASM     │    │ dist/polygrad.js   │
+  │  tensor.py│     │  src/index.js        │    │ dist/polygrad.mjs  │
+  │  nn/      │     │  src/runtime.js      │    │ src/browser.js     │
+  └───────────┘     └──────────────────────┘    └────────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python, JS, and Browser. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64 (double) support across all layers: C core transcendentals (EXP2/LOG2/SIN), WASM renderer (scalar + f64x2 SIMD), and all three frontends (Python, JS, Browser). Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 (or any supported architecture) directly from config.json + safetensors, run inference, fine-tune. Verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
+**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64 (double) support across all layers: C core transcendentals (EXP2/LOG2/SIN), WASM renderer (scalar + f64x2 SIMD), and all frontends. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles at `js/dist/polygrad.js` and `js/dist/polygrad.mjs`. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 (or any supported architecture) directly from config.json + safetensors, run inference, fine-tune. Verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
 
 **What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
@@ -54,8 +54,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 | Frontend | API Docs | Install |
 |----------|----------|---------|
 | [Python](py/) | Tensor, nn module, optimizers | `pip install -e py/` |
-| [JavaScript (Node)](js/) | Tensor (koffi FFI) | `cd js && npm install` |
-| [Browser (WASM)](browser/) | Tensor (Emscripten) | `make wasm` |
+| [JavaScript + Browser](js/) | Unified npm package (`create({ target, device })`), Node-API + WASM, browser dist bundles | `cd js && npm install` |
 | [R](r/) | Tensor (.Call FFI) | `R CMD INSTALL r/` |
 
 ## Parity
@@ -179,9 +178,8 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Python Tensor API (ctypes FFI, lazy eval, autograd, f64, tinygrad-compatible)
 - [x] Python nn module (Linear, LayerNorm, RMSNorm, Embedding, Dropout, SGD, Adam, AdamW)
 - [x] Python HF loader (`load_hf`, `download_hf`, `generate`)
-- [x] JS Node Tensor API (koffi FFI, full op coverage, f64)
-- [x] JS Node Instance API (MLP + HF loading, param/buf read/write)
-- [x] Browser WASM Tensor API (Emscripten FFI, same API as Node, f64)
+- [x] Unified JS package (`js/`): CommonJS Node entry, Node-API native path, WASM fallback, browser dist bundles, f64
+- [ ] JS model/Instance parity with Python (builders, model runtime, HF loading, weight I/O) in the unified package
 
 ### Planned
 - [ ] GPU backends (WGSL/WebGPU, Metal)

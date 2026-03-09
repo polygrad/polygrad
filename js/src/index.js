@@ -1,8 +1,12 @@
 'use strict'
 
-const { createRuntime } = require('./runtime')
+const { createRuntime, normalizeOptions } = require('./runtime')
 
-async function resolveNodeBackend(name) {
+async function resolveNodeTarget(name, opts) {
+  if (opts.device !== 'auto' && opts.device !== 'cpu') {
+    throw new Error(`polygrad: only device='cpu' is supported today (got ${opts.device})`)
+  }
+
   if (name === 'wasm') {
     const { createWasmBackend } = require('./wasm')
     return createWasmBackend()
@@ -14,7 +18,7 @@ async function resolveNodeBackend(name) {
   }
 
   if (name !== 'auto') {
-    throw new Error(`polygrad: unknown backend '${name}'`)
+    throw new Error(`polygrad: unknown target '${name}'`)
   }
 
   try {
@@ -27,11 +31,18 @@ async function resolveNodeBackend(name) {
 }
 
 async function create(opts) {
-  const options = opts ? { ...opts } : {}
-  if (!options.backend && typeof process !== 'undefined' && process.env && process.env.POLY_BACKEND) {
-    options.backend = process.env.POLY_BACKEND
+  const options = normalizeOptions(opts)
+  if (options.target === 'auto' && typeof process !== 'undefined' && process.env) {
+    if (process.env.POLY_TARGET) {
+      options.target = process.env.POLY_TARGET
+    } else if (process.env.POLY_BACKEND) {
+      options.target = process.env.POLY_BACKEND
+    }
   }
-  return createRuntime(options, resolveNodeBackend)
+  if (options.device === 'auto' && typeof process !== 'undefined' && process.env && process.env.POLY_DEVICE) {
+    options.device = process.env.POLY_DEVICE
+  }
+  return createRuntime(options, resolveNodeTarget)
 }
 
 module.exports = { create }

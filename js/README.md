@@ -15,38 +15,43 @@ On Node.js, the native addon builds automatically during install. If the build f
 ```js
 const polygrad = require('polygrad')
 
-const pg = await polygrad.create()  // auto: native > wasm
-const { Tensor } = pg
+;(async () => {
+  const pg = await polygrad.create()  // auto target: native > wasm
+  const { Tensor } = pg
 
-const x = new Tensor([1, 2, 3])
-const y = x.mul(2).add(1)
-console.log(await y.toArray())  // [3, 5, 7]
+  const x = new Tensor([1, 2, 3])
+  const y = x.mul(2).add(1)
+  console.log(await y.toArray())  // [3, 5, 7]
 
-// Autograd
-const a = new Tensor([2, 3], { requiresGrad: true })
-const loss = a.mul(a).sum()
-await loss.backward()
-console.log(await a.grad.toArray())  // [4, 6]
+  // Autograd
+  const a = new Tensor([2, 3], { requiresGrad: true })
+  const loss = a.mul(a).sum()
+  await loss.backward()
+  console.log(await a.grad.toArray())  // [4, 6]
 
-await pg.dispose()
+  await pg.dispose()
+})().catch(console.error)
 ```
 
-## Backend selection
+## Target and device selection
 
 ```js
-// Force a specific backend
-const pg = await polygrad.create({ backend: 'native' })
-const pg = await polygrad.create({ backend: 'wasm' })
+// Force a specific target
+const pg = await polygrad.create({ target: 'native' })
+const pg = await polygrad.create({ target: 'wasm' })
 
-// Or via environment variable
-// POLY_BACKEND=wasm node app.js
+// Environment variables
+// POLY_TARGET=wasm node app.js
+// POLY_DEVICE=cpu node app.js
 ```
 
-| Environment | `'auto'` (default) | `'native'` | `'wasm'` |
-|---|---|---|---|
-| Node.js with addon | Native | Native | WASM |
-| Node.js without addon | WASM | Error | WASM |
-| Browser | WASM | Error | WASM |
+`backend` is still accepted as a compatibility alias for `target`, but new code should use `target`.
+
+| Environment | `target: 'auto'` | `target: 'native'` | `target: 'wasm'` | `device` |
+|---|---|---|---|---|
+| Node.js with addon | Native | Native | WASM | `cpu` today |
+| Node.js without addon | WASM | Error | WASM | `cpu` today |
+| Browser | WASM | Error | WASM | `cpu` today |
 
 ## Browser bundles
 
@@ -79,14 +84,18 @@ Example:
 
 ### `polygrad.create(opts?)` -> `Promise<PolyRuntime>`
 
-Creates a runtime with the selected backend. Options:
+Creates a runtime with the selected target. Options:
 
-- `backend`: `'auto'` (default), `'native'`, or `'wasm'`
+- `target`: `'auto'` (default), `'native'`, or `'wasm'`
+- `device`: `'auto'` (default) or `'cpu'`
+- `backend`: compatibility alias for `target`
 
 ### `PolyRuntime`
 
 - `pg.Tensor` -- runtime-bound Tensor class
-- `pg.backend` -- `'native'` or `'wasm'`
+- `pg.target` -- `'native'` or `'wasm'`
+- `pg.device` -- `'cpu'` today
+- `pg.backend` -- compatibility alias for `pg.target`
 - `pg.dispose()` -- release resources
 
 ### `Tensor`

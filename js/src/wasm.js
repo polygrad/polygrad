@@ -597,7 +597,7 @@ async function createWasmBackend() {
     int64: BigInt,
     readShape: readOutShape,
     realize: renderAndExec,
-    caps: { simd: true, f64: true, backend: 'wasm' },
+    caps: { simd: true, f64: true, target: 'wasm', device: 'cpu' },
     destroy: () => {
       ffi.poly_ctx_destroy(ctx)
       _ctxMemory.delete(ctx)
