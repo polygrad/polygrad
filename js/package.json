@@ -23,7 +23,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "prepack": "node scripts/sync-csrc.js",
+    "prepack": "node scripts/prepack.js",
     "install": "node scripts/install-native.js",
     "build:native": "node scripts/sync-csrc.js && node-gyp rebuild",
     "build:browser": "bash scripts/build-browser.sh",
