@@ -109,8 +109,19 @@ async function createWasmBackend() {
     return Module.__heapF64
   }
 
+  function heapF32() {
+    if (Module.HEAPF32) return Module.HEAPF32
+    const mem = Module.wasmMemory || (Module.asm && Module.asm.memory)
+    if (!mem) throw new Error('No wasmMemory')
+    if (!Module.__heapF32 || Module.__heapF32.buffer !== mem.buffer) {
+      Module.__heapF32 = new Float32Array(mem.buffer)
+    }
+    return Module.__heapF32
+  }
+
   // --- Scratch pointers ---
   const _scratchLenPtr = Module._malloc(4)
+  const _scratchNumelPtr = Module._malloc(8)
   const _scratchAxisPtr = Module._malloc(64)  // 8 dims * 8 bytes
   const _scratchOutShapePtr = Module._malloc(64)
   const _scratchOutNdimPtr = Module._malloc(4)
@@ -139,13 +150,21 @@ async function createWasmBackend() {
 
   function readOutShape() {
     const ndim = heap32()[_scratchOutNdimPtr >> 2]
+    return readShapeFromPtr(_scratchOutShapePtr, ndim)
+  }
+
+  function readInt64At(ptr) {
+    const base = ptr >> 2
+    const lo = heap32()[base] >>> 0
+    const hi = heap32()[base + 1]
+    return hi >= 0
+      ? hi * 0x100000000 + lo
+      : -(~hi * 0x100000000 + (~lo >>> 0) + 1)
+  }
+
+  function readShapeFromPtr(ptr, ndim) {
     const shape = []
-    for (let i = 0; i < ndim; i++) {
-      const base = (_scratchOutShapePtr >> 2) + i * 2
-      const lo = heap32()[base] >>> 0
-      const hi = heap32()[base + 1]
-      shape.push(hi >= 0 ? (hi * 0x100000000 + lo) : -(~hi * 0x100000000 + (~lo >>> 0) + 1))
-    }
+    for (let i = 0; i < ndim; i++) shape.push(readInt64At(ptr + i * 8))
     return shape
   }
 
@@ -164,6 +183,20 @@ async function createWasmBackend() {
     const ptr = Module._malloc(bytes.length)
     heapU8().set(bytes, ptr)
     return ptr
+  }
+
+  function allocBytes(bytes) {
+    const ptr = Module._malloc(bytes.length || 1)
+    if (bytes.length > 0) heapU8().set(bytes, ptr)
+    return ptr
+  }
+
+  function readCString(ptr) {
+    if (!ptr) return null
+    const bytes = heapU8()
+    let end = ptr
+    while (bytes[end] !== 0) end++
+    return new TextDecoder().decode(bytes.subarray(ptr, end))
   }
 
   // --- C math imports for WASM kernels ---
@@ -590,6 +623,171 @@ async function createWasmBackend() {
   // Create context
   const ctx = ffi.poly_ctx_new()
 
+  const instance = {
+    fromIR(irBytes, weightsBytes) {
+      const irPtr = allocBytes(irBytes)
+      let weightsPtr = 0
+      let weightsLen = 0
+      if (weightsBytes && weightsBytes.length > 0) {
+        weightsPtr = allocBytes(weightsBytes)
+        weightsLen = weightsBytes.length
+      }
+      const inst = Module._poly_instance_from_ir(irPtr, irBytes.length, weightsPtr, weightsLen)
+      Module._free(irPtr)
+      if (weightsPtr) Module._free(weightsPtr)
+      return inst || null
+    },
+
+    mlp(specJson) {
+      const bytes = new TextEncoder().encode(specJson)
+      const specPtr = allocBytes(bytes)
+      const inst = Module._poly_mlp_instance(specPtr, bytes.length)
+      Module._free(specPtr)
+      return inst || null
+    },
+
+    tabm(specJson) {
+      const bytes = new TextEncoder().encode(specJson)
+      const specPtr = allocBytes(bytes)
+      const inst = Module._poly_tabm_instance(specPtr, bytes.length)
+      Module._free(specPtr)
+      return inst || null
+    },
+
+    nam(specJson) {
+      const bytes = new TextEncoder().encode(specJson)
+      const specPtr = allocBytes(bytes)
+      const inst = Module._poly_nam_instance(specPtr, bytes.length)
+      Module._free(specPtr)
+      return inst || null
+    },
+
+    free(instPtr) {
+      Module._poly_instance_free(instPtr)
+    },
+
+    paramCount(instPtr) {
+      return Module._poly_instance_param_count(instPtr)
+    },
+
+    paramName(instPtr, i) {
+      return readCString(Module._poly_instance_param_name(instPtr, i))
+    },
+
+    paramShape(instPtr, i) {
+      const ndim = Module._poly_instance_param_shape(instPtr, i, _scratchOutShapePtr, 8)
+      return readShapeFromPtr(_scratchOutShapePtr, ndim)
+    },
+
+    paramData(instPtr, i) {
+      const dataPtr = Module._poly_instance_param_data(instPtr, i, _scratchNumelPtr)
+      if (!dataPtr) return null
+      const numel = readInt64At(_scratchNumelPtr)
+      return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+    },
+
+    bufCount(instPtr) {
+      return Module._poly_instance_buf_count(instPtr)
+    },
+
+    bufName(instPtr, i) {
+      return readCString(Module._poly_instance_buf_name(instPtr, i))
+    },
+
+    bufRole(instPtr, i) {
+      return Module._poly_instance_buf_role(instPtr, i)
+    },
+
+    bufShape(instPtr, i) {
+      const ndim = Module._poly_instance_buf_shape(instPtr, i, _scratchOutShapePtr, 8)
+      return readShapeFromPtr(_scratchOutShapePtr, ndim)
+    },
+
+    bufData(instPtr, i) {
+      const dataPtr = Module._poly_instance_buf_data(instPtr, i, _scratchNumelPtr)
+      if (!dataPtr) return null
+      const numel = readInt64At(_scratchNumelPtr)
+      return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+    },
+
+    exportWeights(instPtr) {
+      const bytesPtr = Module._poly_instance_export_weights(instPtr, _scratchLenPtr)
+      if (!bytesPtr) return null
+      const len = heap32()[_scratchLenPtr >> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      Module._free(bytesPtr)
+      return bytes
+    },
+
+    importWeights(instPtr, bytes) {
+      const bytesPtr = allocBytes(bytes)
+      const rc = Module._poly_instance_import_weights(instPtr, bytesPtr, bytes.length)
+      Module._free(bytesPtr)
+      return rc
+    },
+
+    exportIR(instPtr) {
+      const bytesPtr = Module._poly_instance_export_ir(instPtr, _scratchLenPtr)
+      if (!bytesPtr) return null
+      const len = heap32()[_scratchLenPtr >> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      Module._free(bytesPtr)
+      return bytes
+    },
+
+    setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay) {
+      return Module._poly_instance_set_optimizer(
+        instPtr, kind, lr, beta1, beta2, eps, weightDecay)
+    },
+
+    forward(instPtr, names, arrays) {
+      const n = names.length
+      const bindingPtr = Module._malloc(Math.max(1, n) * 8)
+      const namePtrs = new Array(n)
+      const dataPtrs = new Array(n)
+
+      for (let i = 0; i < n; i++) {
+        namePtrs[i] = allocString(names[i])
+        dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
+        const base = (bindingPtr >> 2) + i * 2
+        heap32()[base] = namePtrs[i]
+        heap32()[base + 1] = dataPtrs[i]
+      }
+
+      const rc = Module._poly_instance_forward(instPtr, bindingPtr, n)
+
+      for (const ptr of dataPtrs) Module._free(ptr)
+      for (const ptr of namePtrs) Module._free(ptr)
+      Module._free(bindingPtr)
+      return rc
+    },
+
+    trainStep(instPtr, names, arrays) {
+      const n = names.length
+      const bindingPtr = Module._malloc(Math.max(1, n) * 8)
+      const namePtrs = new Array(n)
+      const dataPtrs = new Array(n)
+
+      for (let i = 0; i < n; i++) {
+        namePtrs[i] = allocString(names[i])
+        dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
+        const base = (bindingPtr >> 2) + i * 2
+        heap32()[base] = namePtrs[i]
+        heap32()[base + 1] = dataPtrs[i]
+      }
+
+      const lossPtr = Module._malloc(4)
+      const rc = Module._poly_instance_train_step(instPtr, bindingPtr, n, lossPtr)
+      const loss = rc === 0 ? heapF32()[lossPtr >> 2] : null
+
+      Module._free(lossPtr)
+      for (const ptr of dataPtrs) Module._free(ptr)
+      for (const ptr of namePtrs) Module._free(ptr)
+      Module._free(bindingPtr)
+      return loss
+    }
+  }
+
   return {
     ffi,
     ctx,
@@ -603,6 +801,7 @@ async function createWasmBackend() {
       _ctxMemory.delete(ctx)
       _realizeChains.delete(ctx)
       Module._free(_scratchLenPtr)
+      Module._free(_scratchNumelPtr)
       Module._free(_scratchAxisPtr)
       Module._free(_scratchOutShapePtr)
       Module._free(_scratchOutNdimPtr)

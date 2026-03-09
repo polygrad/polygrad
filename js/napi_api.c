@@ -12,6 +12,10 @@
 
 #include "polygrad.h"
 #include "frontend.h"
+#include "instance.h"
+#include "model_mlp.h"
+#include "model_tabm.h"
+#include "model_nam.h"
 #include "sched.h"
 
 /* ── Error-checking macro ──────────────────────────────────────────────── */
@@ -68,6 +72,134 @@ static napi_value make_shape_result(napi_env env, void *uop_ptr,
   NAPI_CALL(env, napi_set_named_property(env, obj, "uop", uop_val));
   NAPI_CALL(env, napi_set_named_property(env, obj, "shape", shape_arr));
   return obj;
+}
+
+static char *read_utf8_arg(napi_env env, napi_value val, size_t *out_len) {
+  size_t len = 0;
+  NAPI_CALL(env, napi_get_value_string_utf8(env, val, NULL, 0, &len));
+  char *buf = malloc(len + 1);
+  if (!buf) {
+    napi_throw_error(env, NULL, "malloc failed");
+    return NULL;
+  }
+  NAPI_CALL(env, napi_get_value_string_utf8(env, val, buf, len + 1, &len));
+  if (out_len) *out_len = len;
+  return buf;
+}
+
+static napi_value make_float32_array_copy(napi_env env, const float *src, size_t len) {
+  if (!src) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+
+  void *dst = NULL;
+  napi_value arraybuf, typed;
+  NAPI_CALL(env, napi_create_arraybuffer(env, len * sizeof(float), &dst, &arraybuf));
+  memcpy(dst, src, len * sizeof(float));
+  NAPI_CALL(env, napi_create_typedarray(
+    env, napi_float32_array, len, arraybuf, 0, &typed));
+  return typed;
+}
+
+static napi_value make_uint8_array_copy(napi_env env, const uint8_t *src, size_t len) {
+  if (!src) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+
+  void *dst = NULL;
+  napi_value arraybuf, typed;
+  NAPI_CALL(env, napi_create_arraybuffer(env, len, &dst, &arraybuf));
+  memcpy(dst, src, len);
+  NAPI_CALL(env, napi_create_typedarray(
+    env, napi_uint8_array, len, arraybuf, 0, &typed));
+  return typed;
+}
+
+static int read_io_bindings(
+    napi_env env,
+    napi_value names_val,
+    napi_value arrays_val,
+    PolyIOBinding **out_bindings,
+    char ***out_names,
+    int *out_n)
+{
+  uint32_t n_names = 0, n_arrays = 0;
+  napi_get_array_length(env, names_val, &n_names);
+  napi_get_array_length(env, arrays_val, &n_arrays);
+  if (n_names != n_arrays) {
+    napi_throw_error(env, NULL, "polygrad: binding names/data length mismatch");
+    return 0;
+  }
+
+  PolyIOBinding *bindings = calloc(n_names ? n_names : 1, sizeof(PolyIOBinding));
+  char **names = calloc(n_names ? n_names : 1, sizeof(char *));
+  if (!bindings || !names) {
+    free(bindings);
+    free(names);
+    napi_throw_error(env, NULL, "malloc failed");
+    return 0;
+  }
+
+  for (uint32_t i = 0; i < n_names; i++) {
+    napi_value name_val, data_val;
+    napi_get_element(env, names_val, i, &name_val);
+    napi_get_element(env, arrays_val, i, &data_val);
+
+    names[i] = read_utf8_arg(env, name_val, NULL);
+    if (!names[i]) {
+      for (uint32_t j = 0; j < i; j++) free(names[j]);
+      free(names);
+      free(bindings);
+      return 0;
+    }
+
+    napi_typedarray_type type;
+    size_t length;
+    void *data = NULL;
+    size_t byte_offset;
+    napi_value arraybuf;
+    napi_status status = napi_get_typedarray_info(
+      env, data_val, &type, &length, &data, &arraybuf, &byte_offset);
+    if (status != napi_ok) {
+      for (uint32_t j = 0; j <= i; j++) free(names[j]);
+      free(names);
+      free(bindings);
+      {
+        const napi_extended_error_info *ei = NULL;
+        napi_get_last_error_info(env, &ei);
+        napi_throw_error(env, NULL,
+          ei && ei->error_message ? ei->error_message : "N-API error");
+      }
+      return 0;
+    }
+    if (type != napi_float32_array) {
+      for (uint32_t j = 0; j <= i; j++) free(names[j]);
+      free(names);
+      free(bindings);
+      napi_throw_error(env, NULL, "polygrad: instance bindings must be Float32Array");
+      return 0;
+    }
+
+    bindings[i].name = names[i];
+    bindings[i].data = (float *)data;
+  }
+
+  *out_bindings = bindings;
+  *out_names = names;
+  *out_n = (int)n_names;
+  return 1;
+}
+
+static void free_io_bindings(char **names, PolyIOBinding *bindings, int n) {
+  if (names) {
+    for (int i = 0; i < n; i++) free(names[i]);
+    free(names);
+  }
+  free(bindings);
 }
 
 /* ── Macros for repetitive wrappers ────────────────────────────────────── */
@@ -743,6 +875,7 @@ static napi_value napi_poly_realize_bind(napi_env env, napi_callback_info info) 
   napi_value arraybuf;
   NAPI_CALL(env, napi_get_typedarray_info(env, argv[2], &type, &length,
                                            &data, &arraybuf, &byte_offset));
+  (void)type;
   poly_realize_bind(ctx, buf, data);
   napi_value undef;
   napi_get_undefined(env, &undef);
@@ -941,6 +1074,356 @@ static napi_value napi_poly_sched_cache_flush(napi_env env, napi_callback_info i
   return undef;
 }
 
+/* ── PolyInstance / model runtime ────────────────────────────────────── */
+
+static napi_value napi_poly_instance_from_ir(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+
+  napi_typedarray_type ir_type;
+  size_t ir_len = 0;
+  void *ir_data = NULL;
+  size_t ir_offset;
+  napi_value ir_buf;
+  NAPI_CALL(env, napi_get_typedarray_info(
+    env, argv[0], &ir_type, &ir_len, &ir_data, &ir_buf, &ir_offset));
+  (void)ir_type;
+
+  const uint8_t *weights_data = NULL;
+  size_t weights_len = 0;
+  if (argc > 1) {
+    napi_valuetype weights_type;
+    napi_typeof(env, argv[1], &weights_type);
+    if (weights_type != napi_null && weights_type != napi_undefined) {
+      napi_typedarray_type wa_type;
+      void *wa_data = NULL;
+      size_t wa_offset;
+      napi_value wa_buf;
+      NAPI_CALL(env, napi_get_typedarray_info(
+        env, argv[1], &wa_type, &weights_len, &wa_data, &wa_buf, &wa_offset));
+      (void)wa_type;
+      weights_data = (const uint8_t *)wa_data;
+    }
+  }
+
+  PolyInstance *inst = poly_instance_from_ir(
+    (const uint8_t *)ir_data, (int)ir_len,
+    weights_data, (int)weights_len);
+
+  if (!inst) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+  return make_external(env, inst);
+}
+
+static napi_value napi_poly_instance_free(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  poly_instance_free(inst);
+  napi_value undef;
+  napi_get_undefined(env, &undef);
+  return undef;
+}
+
+static napi_value napi_poly_mlp_instance(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  size_t spec_len = 0;
+  char *spec = read_utf8_arg(env, argv[0], &spec_len);
+  if (!spec) return NULL;
+  PolyInstance *inst = poly_mlp_instance(spec, (int)spec_len);
+  free(spec);
+  if (!inst) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+  return make_external(env, inst);
+}
+
+static napi_value napi_poly_tabm_instance(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  size_t spec_len = 0;
+  char *spec = read_utf8_arg(env, argv[0], &spec_len);
+  if (!spec) return NULL;
+  PolyInstance *inst = poly_tabm_instance(spec, (int)spec_len);
+  free(spec);
+  if (!inst) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+  return make_external(env, inst);
+}
+
+static napi_value napi_poly_nam_instance(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  size_t spec_len = 0;
+  char *spec = read_utf8_arg(env, argv[0], &spec_len);
+  if (!spec) return NULL;
+  PolyInstance *inst = poly_nam_instance(spec, (int)spec_len);
+  free(spec);
+  if (!inst) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+  return make_external(env, inst);
+}
+
+static napi_value napi_poly_instance_param_count(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, poly_instance_param_count(inst), &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_param_name(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  const char *name = poly_instance_param_name(inst, i);
+  napi_value result;
+  if (name) {
+    NAPI_CALL(env, napi_create_string_utf8(env, name, strlen(name), &result));
+  } else {
+    napi_get_null(env, &result);
+  }
+  return result;
+}
+
+static napi_value napi_poly_instance_param_shape(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  int64_t shape[8];
+  int ndim = poly_instance_param_shape(inst, i, shape, 8);
+  napi_value result;
+  NAPI_CALL(env, napi_create_array_with_length(env, (size_t)(ndim > 0 ? ndim : 0), &result));
+  for (int j = 0; j < ndim; j++) {
+    napi_value v;
+    NAPI_CALL(env, napi_create_int64(env, shape[j], &v));
+    NAPI_CALL(env, napi_set_element(env, result, (uint32_t)j, v));
+  }
+  return result;
+}
+
+static napi_value napi_poly_instance_param_data(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  int64_t numel = 0;
+  float *data = poly_instance_param_data(inst, i, &numel);
+  return make_float32_array_copy(env, data, (size_t)(numel > 0 ? numel : 0));
+}
+
+static napi_value napi_poly_instance_buf_count(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, poly_instance_buf_count(inst), &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_buf_name(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  const char *name = poly_instance_buf_name(inst, i);
+  napi_value result;
+  if (name) {
+    NAPI_CALL(env, napi_create_string_utf8(env, name, strlen(name), &result));
+  } else {
+    napi_get_null(env, &result);
+  }
+  return result;
+}
+
+static napi_value napi_poly_instance_buf_role(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, poly_instance_buf_role(inst, i), &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_buf_shape(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  int64_t shape[8];
+  int ndim = poly_instance_buf_shape(inst, i, shape, 8);
+  napi_value result;
+  NAPI_CALL(env, napi_create_array_with_length(env, (size_t)(ndim > 0 ? ndim : 0), &result));
+  for (int j = 0; j < ndim; j++) {
+    napi_value v;
+    NAPI_CALL(env, napi_create_int64(env, shape[j], &v));
+    NAPI_CALL(env, napi_set_element(env, result, (uint32_t)j, v));
+  }
+  return result;
+}
+
+static napi_value napi_poly_instance_buf_data(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t i;
+  napi_get_value_int32(env, argv[1], &i);
+  int64_t numel = 0;
+  float *data = poly_instance_buf_data(inst, i, &numel);
+  return make_float32_array_copy(env, data, (size_t)(numel > 0 ? numel : 0));
+}
+
+static napi_value napi_poly_instance_export_weights(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int out_len = 0;
+  uint8_t *bytes = poly_instance_export_weights(inst, &out_len);
+  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
+  free(bytes);
+  return result;
+}
+
+static napi_value napi_poly_instance_import_weights(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  napi_typedarray_type type;
+  size_t len = 0;
+  void *data = NULL;
+  size_t offset;
+  napi_value arraybuf;
+  NAPI_CALL(env, napi_get_typedarray_info(
+    env, argv[1], &type, &len, &data, &arraybuf, &offset));
+  (void)type;
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(
+    env,
+    poly_instance_import_weights(inst, (const uint8_t *)data, (int)len),
+    &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_export_ir(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int out_len = 0;
+  uint8_t *bytes = poly_instance_export_ir(inst, &out_len);
+  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
+  free(bytes);
+  return result;
+}
+
+static napi_value napi_poly_instance_set_optimizer(napi_env env, napi_callback_info info) {
+  napi_value argv[7];
+  size_t argc = 7;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t kind;
+  double lr, beta1, beta2, eps, weight_decay;
+  napi_get_value_int32(env, argv[1], &kind);
+  napi_get_value_double(env, argv[2], &lr);
+  napi_get_value_double(env, argv[3], &beta1);
+  napi_get_value_double(env, argv[4], &beta2);
+  napi_get_value_double(env, argv[5], &eps);
+  napi_get_value_double(env, argv[6], &weight_decay);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(
+    env,
+    poly_instance_set_optimizer(
+      inst, kind, (float)lr, (float)beta1, (float)beta2, (float)eps, (float)weight_decay),
+    &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_forward(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+
+  PolyIOBinding *bindings = NULL;
+  char **names = NULL;
+  int n = 0;
+  if (!read_io_bindings(env, argv[1], argv[2], &bindings, &names, &n)) {
+    return NULL;
+  }
+
+  int rc = poly_instance_forward(inst, bindings, n);
+  free_io_bindings(names, bindings, n);
+
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, rc, &result));
+  return result;
+}
+
+static napi_value napi_poly_instance_train_step(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+
+  PolyIOBinding *bindings = NULL;
+  char **names = NULL;
+  int n = 0;
+  if (!read_io_bindings(env, argv[1], argv[2], &bindings, &names, &n)) {
+    return NULL;
+  }
+
+  float loss = 0.0f;
+  int rc = poly_instance_train_step(inst, bindings, n, &loss);
+  free_io_bindings(names, bindings, n);
+  if (rc != 0) {
+    napi_value result;
+    napi_get_null(env, &result);
+    return result;
+  }
+
+  napi_value result;
+  NAPI_CALL(env, napi_create_double(env, (double)loss, &result));
+  return result;
+}
+
 /* ── Module registration ───────────────────────────────────────────────── */
 
 #define DECLARE_NAPI_METHOD(name, fn) \
@@ -1073,6 +1556,28 @@ NAPI_MODULE_INIT() {
     /* Cache cleanup */
     DECLARE_NAPI_METHOD("poly_cpu_cache_flush", napi_poly_cpu_cache_flush),
     DECLARE_NAPI_METHOD("poly_sched_cache_flush", napi_poly_sched_cache_flush),
+
+    /* PolyInstance / model runtime */
+    DECLARE_NAPI_METHOD("poly_instance_from_ir", napi_poly_instance_from_ir),
+    DECLARE_NAPI_METHOD("poly_instance_free", napi_poly_instance_free),
+    DECLARE_NAPI_METHOD("poly_mlp_instance", napi_poly_mlp_instance),
+    DECLARE_NAPI_METHOD("poly_tabm_instance", napi_poly_tabm_instance),
+    DECLARE_NAPI_METHOD("poly_nam_instance", napi_poly_nam_instance),
+    DECLARE_NAPI_METHOD("poly_instance_param_count", napi_poly_instance_param_count),
+    DECLARE_NAPI_METHOD("poly_instance_param_name", napi_poly_instance_param_name),
+    DECLARE_NAPI_METHOD("poly_instance_param_shape", napi_poly_instance_param_shape),
+    DECLARE_NAPI_METHOD("poly_instance_param_data", napi_poly_instance_param_data),
+    DECLARE_NAPI_METHOD("poly_instance_buf_count", napi_poly_instance_buf_count),
+    DECLARE_NAPI_METHOD("poly_instance_buf_name", napi_poly_instance_buf_name),
+    DECLARE_NAPI_METHOD("poly_instance_buf_role", napi_poly_instance_buf_role),
+    DECLARE_NAPI_METHOD("poly_instance_buf_shape", napi_poly_instance_buf_shape),
+    DECLARE_NAPI_METHOD("poly_instance_buf_data", napi_poly_instance_buf_data),
+    DECLARE_NAPI_METHOD("poly_instance_export_weights", napi_poly_instance_export_weights),
+    DECLARE_NAPI_METHOD("poly_instance_import_weights", napi_poly_instance_import_weights),
+    DECLARE_NAPI_METHOD("poly_instance_export_ir", napi_poly_instance_export_ir),
+    DECLARE_NAPI_METHOD("poly_instance_set_optimizer", napi_poly_instance_set_optimizer),
+    DECLARE_NAPI_METHOD("poly_instance_forward", napi_poly_instance_forward),
+    DECLARE_NAPI_METHOD("poly_instance_train_step", napi_poly_instance_train_step),
   };
 
   NAPI_CALL(env, napi_define_properties(

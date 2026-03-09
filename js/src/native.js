@@ -53,8 +53,72 @@ function createNativeBackend() {
     return new AT(outData)
   }
 
+  const instance = {
+    fromIR(irBytes, weightsBytes) {
+      return binding.poly_instance_from_ir(irBytes, weightsBytes ?? null)
+    },
+    mlp(specJson) {
+      return binding.poly_mlp_instance(specJson)
+    },
+    tabm(specJson) {
+      return binding.poly_tabm_instance(specJson)
+    },
+    nam(specJson) {
+      return binding.poly_nam_instance(specJson)
+    },
+    free(inst) {
+      binding.poly_instance_free(inst)
+    },
+    paramCount(inst) {
+      return binding.poly_instance_param_count(inst)
+    },
+    paramName(inst, i) {
+      return binding.poly_instance_param_name(inst, i)
+    },
+    paramShape(inst, i) {
+      return binding.poly_instance_param_shape(inst, i)
+    },
+    paramData(inst, i) {
+      return binding.poly_instance_param_data(inst, i)
+    },
+    bufCount(inst) {
+      return binding.poly_instance_buf_count(inst)
+    },
+    bufName(inst, i) {
+      return binding.poly_instance_buf_name(inst, i)
+    },
+    bufRole(inst, i) {
+      return binding.poly_instance_buf_role(inst, i)
+    },
+    bufShape(inst, i) {
+      return binding.poly_instance_buf_shape(inst, i)
+    },
+    bufData(inst, i) {
+      return binding.poly_instance_buf_data(inst, i)
+    },
+    exportWeights(inst) {
+      return binding.poly_instance_export_weights(inst)
+    },
+    importWeights(inst, bytes) {
+      return binding.poly_instance_import_weights(inst, bytes)
+    },
+    exportIR(inst) {
+      return binding.poly_instance_export_ir(inst)
+    },
+    setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay) {
+      return binding.poly_instance_set_optimizer(inst, kind, lr, beta1, beta2, eps, weightDecay)
+    },
+    forward(inst, names, arrays) {
+      return binding.poly_instance_forward(inst, names, arrays)
+    },
+    trainStep(inst, names, arrays) {
+      return binding.poly_instance_train_step(inst, names, arrays)
+    }
+  }
+
   return {
     ffi: binding,
+    instance,
     ctx,
     ops,
     realize,

@@ -1,5 +1,6 @@
 'use strict'
 
+const { createBoundInstanceClass } = require('./instance')
 const { createBoundTensorClass } = require('./tensor')
 
 function normalizeOptions(opts) {
@@ -21,7 +22,18 @@ function normalizeOptions(opts) {
 class PolyRuntime {
   constructor(binding) {
     this._backend = binding
+    this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
+    this.Instance = createBoundInstanceClass(this)
+    this.ROLE_PARAM = this.Instance.ROLE_PARAM
+    this.ROLE_INPUT = this.Instance.ROLE_INPUT
+    this.ROLE_TARGET = this.Instance.ROLE_TARGET
+    this.ROLE_OUTPUT = this.Instance.ROLE_OUTPUT
+    this.ROLE_AUX = this.Instance.ROLE_AUX
+    this.OPTIM_NONE = this.Instance.OPTIM_NONE
+    this.OPTIM_SGD = this.Instance.OPTIM_SGD
+    this.OPTIM_ADAM = this.Instance.OPTIM_ADAM
+    this.OPTIM_ADAMW = this.Instance.OPTIM_ADAMW
   }
 
   get target() { return this._backend.caps.target }

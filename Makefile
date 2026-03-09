@@ -116,7 +116,7 @@ test-all: test test-parity test-js test-js-browser test-py
 
 wasm: build/polygrad.js build/polygrad.wasm
 
-build/polygrad.js build/polygrad.wasm: $(WASM_SRC)
+build/polygrad.js build/polygrad.wasm: $(WASM_SRC) Makefile
 	@mkdir -p build
 	emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter \
 		-s WASM=1 -s MODULARIZE=1 -s EXPORT_NAME=PolygradModule \
@@ -130,7 +130,7 @@ wasm-pkg: build/polygrad-pkg.js
 	@mkdir -p js/wasm
 	cp build/polygrad-pkg.js js/wasm/polygrad.js
 
-build/polygrad-pkg.js: $(WASM_SRC)
+build/polygrad-pkg.js: $(WASM_SRC) Makefile
 	@mkdir -p build
 	emcc -O2 -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter \
 		-s WASM=1 -s MODULARIZE=1 -s EXPORT_NAME=createPolygrad \
