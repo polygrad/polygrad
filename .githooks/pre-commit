@@ -1,0 +1,8 @@
+#!/bin/bash
+# Pre-commit hook: run fast test subset with ASan/UBSan
+set -e
+
+echo "Running pre-commit: fast tests with sanitizers..."
+make test-fast
+
+echo "Pre-commit checks passed."

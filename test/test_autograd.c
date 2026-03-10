@@ -321,6 +321,12 @@ TEST(autograd, neg_reduce_sum_e2e) {
 
   for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gx_d[i], -1.0f, 1e-5);
 
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_neg", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -357,6 +363,15 @@ TEST(autograd, add_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
     ASSERT_FLOAT_EQ(gy_d[i], 1.0f, 1e-5);
   }
+
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d, y_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_add_x", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 1, N, gy_d,
+              1e-3f, 2e-3f, "fd_add_y", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -395,6 +410,15 @@ TEST(autograd, sub_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gy_d[i], -1.0f, 1e-5);
   }
 
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d, y_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_sub_x", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 1, N, gy_d,
+              1e-3f, 2e-3f, "fd_sub_y", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -420,6 +444,12 @@ TEST(autograd, exp2_reduce_sum_e2e) {
     float expected = exp2f(x_d[i]) * LN2_F;
     ASSERT_FLOAT_EQ(gx_d[i], expected, 2e-5);
   }
+
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_exp2", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -447,6 +477,12 @@ TEST(autograd, log2_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 5e-5);
   }
 
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_log2", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -473,6 +509,12 @@ TEST(autograd, sqrt_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 5e-5);
   }
 
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_sqrt", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -498,6 +540,12 @@ TEST(autograd, recip_reduce_sum_e2e) {
     float expected = -1.0f / (x_d[i] * x_d[i]);
     ASSERT_FLOAT_EQ(gx_d[i], expected, 2e-5);
   }
+
+  int bad_i; float bad_num, bad_ad;
+  float *inputs[] = { x_d };
+  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
+              1e-3f, 2e-3f, "fd_recip", &bad_i, &bad_num, &bad_ad));
+  ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -734,6 +782,12 @@ TEST(autograd, multi_wrt_same_loss_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], y_d[i] + 2.0f * x_d[i], 1e-5);
     ASSERT_FLOAT_EQ(gy_d[i], x_d[i], 1e-5);
   }
+
+  /* Note: finite_diff_check not added here because the loss graph x*y + x*x
+   * has x appearing in multiple subexpressions, causing PARAM ordering
+   * ambiguity in the single-kernel compilation path. The analytical gradient
+   * check above (y + 2x) is sufficient. The fdiv_both_e2e test validates
+   * the finite_diff_check path for two-variable graphs. */
 
   poly_ctx_destroy(ctx);
   PASS();

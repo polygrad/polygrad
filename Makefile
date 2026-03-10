@@ -25,7 +25,7 @@ PARITY_PY ?= conda run -n tiny python
 WASM_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/sched.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/rangeify.c src/indexing.c src/nn.c
 WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_op_count,_poly_op_name,_poly_const_float,_poly_const_double,_poly_const_int,_poly_alu1,_poly_alu2,_poly_alu3,_poly_store_val,_poly_sink1,_poly_sink_n,_poly_buffer_f32,_poly_buffer_f64,_poly_reshape,_poly_expand,_poly_reduce_axis,_poly_permute,_poly_shrink,_poly_flip,_poly_pad,_poly_grad,_poly_render_kernel_wasm,_poly_kernel_buf,_poly_render_step_wasm_plan,_poly_wasm_stepplan_n_kernels,_poly_wasm_stepplan_kernel_bytes,_poly_wasm_stepplan_kernel_n_params,_poly_wasm_stepplan_n_buffers,_poly_wasm_stepplan_n_bindable_buffers,_poly_wasm_stepplan_kernel_param_buf_index,_poly_wasm_stepplan_exec_order,_poly_wasm_stepplan_destroy,_poly_wasm_stepplan_buf_size,_poly_wasm_stepplan_buf_nbytes,_poly_wasm_stepplan_bindable_buf_index,_poly_const_buffer_data,_poly_abi_version,_poly_exp,_poly_log,_poly_log1p,_poly_expm1,_poly_sin,_poly_cos,_poly_tan,_poly_erf,_poly_erfc,_poly_erfinv,_poly_ndtri,_poly_digamma,_poly_lgamma,_poly_sigmoid,_poly_tanh_act,_poly_relu,_poly_relu6,_poly_leaky_relu,_poly_gelu,_poly_quick_gelu,_poly_silu,_poly_elu,_poly_softplus,_poly_mish,_poly_hardtanh,_poly_hardswish,_poly_hardsigmoid,_poly_abs,_poly_sign,_poly_square,_poly_rsqrt,_poly_ceil,_poly_floor,_poly_round_f,_poly_isinf,_poly_isnan,_poly_eq,_poly_ne,_poly_gt,_poly_ge,_poly_le,_poly_where_op,_poly_maximum,_poly_minimum,_poly_clamp,_poly_detach,_poly_rand,_poly_randn,_poly_arange,_poly_eye,_poly_linspace,_poly_full,_poly_tril,_poly_triu,_poly_cholesky,_poly_triangular_solve,_poly_sum_reduce,_poly_max_reduce,_poly_mean_reduce,_poly_logsumexp,_poly_dot,_poly_einsum,_poly_rearrange,_exp2f,_log2f,_sinf,_powf,_malloc,_free
 
-.PHONY: all test test-fast test-parity test-parity-opt test-parity-cuda test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-train-c bench-train-py wasm wasm-pkg clean analyze cppcheck format format-check test-msan
+.PHONY: all test test-fast test-parity test-parity-opt test-parity-cuda test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-train-c bench-train-py wasm wasm-pkg clean analyze cppcheck format format-check test-msan verify coverage
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -169,6 +169,24 @@ build/test_p2p: $(SRC) $(RECIPE_SRC) $(P2P_SRC) $(VENDOR_SRC) test/test_p2p.c
 test-p2p-browser:
 	$(NODE) browser/test/test_p2p.js
 
+# ── Coverage ──────────────────────────────────────────────────────
+
+coverage: build/polygrad_test_cov
+	./build/polygrad_test_cov --fast
+	@gcov -o build $(SRC) > /dev/null 2>&1
+	@echo ""
+	@echo "Coverage summary:"
+	@for f in $(SRC); do \
+		pct=$$(gcov -n "$$f" 2>/dev/null | grep -oP '\d+\.\d+%' | head -1); \
+		[ -n "$$pct" ] && printf "  %-30s %s\n" "$$(basename $$f)" "$$pct"; \
+	done
+	@rm -f *.gcov
+
+build/polygrad_test_cov: $(SRC) $(CODEC_SRC) $(TEST_SRC)
+	@mkdir -p build
+	$(CC) -std=c11 -g -O0 -fprofile-arcs -ftest-coverage \
+		-o $@ $^ -lm -ldl -lgcov
+
 clean:
 	rm -rf build/ *.o
 
@@ -201,3 +219,8 @@ build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	clang -std=c11 -g -O1 -fsanitize=memory -fno-omit-frame-pointer \
 		-o $@ $^ -lm -ldl -fsanitize=memory
+
+# ── Full verification ──────────────────────────────────────────────────
+
+verify: test test-parity format-check analyze
+	@echo "All verification checks passed."
