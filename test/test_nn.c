@@ -657,7 +657,7 @@ TEST(nn, log_softmax_non_last_axis_flat_buffer) {
     0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0
   };
-  float out_data[] = {0};
+  float out_data[12] = {0};
   PolyBufferBinding bindings[] = {
     { .buffer = x, .data = x_data },
     { .buffer = out_buf, .data = out_data },
@@ -693,7 +693,7 @@ TEST(nn, layernorm_non_last_axis_flat_buffer) {
     0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0
   };
-  float out_data[] = {0};
+  float out_data[12] = {0};
   PolyBufferBinding bindings[] = {
     { .buffer = x, .data = x_data },
     { .buffer = out_buf, .data = out_data },

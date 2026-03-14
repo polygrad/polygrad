@@ -1168,7 +1168,11 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx,
   const bool sparse_targets = shape_equal_except_axis(logits_shape, logits_ndim, target_shape, target_ndim, axis);
   if (!dense_targets && !sparse_targets) return NULL;
 
-  PolyUOp *weights = target;
+  /* For dense targets, wrap in reshape so the scheduler treats it as a loadable
+   * tensor (raw BUFFER in ALU tree renders as pointer, not loaded value). */
+  PolyUOp *weights = dense_targets
+    ? poly_reshape(ctx, target, (int64_t *)target_shape, target_ndim)
+    : target;
   if (sparse_targets) {
     const int64_t classes = logits_shape[axis];
     int64_t target_us_shape[POLY_MAX_DIMS];
