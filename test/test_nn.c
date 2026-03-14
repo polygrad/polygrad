@@ -480,7 +480,7 @@ TEST(nn, matmul_broadcast_batch_numeric) {
 
   float a_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float b_data[] = {1, 10, 100, 1000};
-  float out_data[] = {0};
+  float out_data[8] = {0};
   float expected[] = {201, 2010, 403, 4030, 605, 6050, 807, 8070};
   PolyBufferBinding bindings[] = {
     { .buffer = a, .data = a_data },
