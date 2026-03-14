@@ -9,7 +9,7 @@
 #include "model_mlp.h"
 #include "ir.h"
 #include "frontend.h"
-#include "sched.h"
+#include "scheduler.h"
 #include "safetensors.h"
 #include "../vendor/cjson/cJSON.h"
 #include <stdlib.h>

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polygrad"
+version = "0.2.0"
+description = "Tensor computation library with automatic differentiation"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://polygrad.org"
+Documentation = "https://polygrad.org"
+Repository = "https://github.com/polygrad/polygrad"
+Issues = "https://github.com/polygrad/polygrad/issues"
+
+[tool.setuptools.packages.find]
+include = ["polygrad*"]
+
+[tool.setuptools.package-data]
+polygrad = ["_native.c"]

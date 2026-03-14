@@ -17,7 +17,7 @@
 #include "../../instance.h"
 #include "../../ir.h"
 #include "../../safetensors.h"
-#include "../../sched.h"
+#include "../../scheduler.h"
 #include "../../nn.h"
 #include "../../../vendor/cjson/cJSON.h"
 #include <stdlib.h>

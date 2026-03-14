@@ -16,7 +16,7 @@
 #include "model_mlp.h"
 #include "model_tabm.h"
 #include "model_nam.h"
-#include "sched.h"
+#include "scheduler.h"
 
 /* ── Error-checking macro ──────────────────────────────────────────────── */
 

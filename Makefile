@@ -222,5 +222,10 @@ build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 
 # ── Full verification ──────────────────────────────────────────────────
 
+publish-python:
+	cd py && rm -rf csrc dist build *.egg-info && \
+		python scripts/sync-csrc.py && \
+		python -m build --sdist && twine upload dist/*.tar.gz
+
 verify: test test-parity format-check analyze
 	@echo "All verification checks passed."

@@ -1,5 +1,5 @@
 /*
- * sched.h — Tensor-to-kernel scheduler API
+ * scheduler.h — Tensor-to-kernel scheduler API
  *
  * Converts tensor-level UOp graphs (BUFFER + ALU ops with shapes)
  * into kernel-level IR (PARAM/RANGE/INDEX/LOAD/STORE/END/SINK)

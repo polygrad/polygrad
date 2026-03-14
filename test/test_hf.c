@@ -9,7 +9,7 @@
 #include "../src/safetensors.h"
 #include "../src/modelzoo/modelzoo.h"
 #include "../src/frontend.h"
-#include "../src/sched.h"
+#include "../src/scheduler.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>

@@ -1,0 +1,2 @@
+recursive-include csrc *.c *.h
+include polygrad/_native.c

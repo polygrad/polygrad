@@ -8,7 +8,7 @@
 
 #define _GNU_SOURCE
 #include "frontend.h"
-#include "sched.h"
+#include "scheduler.h"
 #include "rangeify.h"
 #include "codegen.h"
 #include <assert.h>

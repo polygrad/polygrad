@@ -10,7 +10,7 @@
  * Reference: tinygrad schedule/rangeify.py, schedule/indexing.py
  */
 
-#include "sched.h"
+#include "scheduler.h"
 #include "rangeify.h"
 #include "codegen.h"  /* for linearize/render/compile if needed */
 #include <stdio.h>

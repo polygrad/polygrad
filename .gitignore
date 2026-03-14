@@ -19,3 +19,5 @@ temp/
 *.egg-info
 .pytest_cache/
 out*.txt
+py/csrc/
+py/dist/

@@ -13,7 +13,7 @@
 #include "../src/rangeify.h"
 #include "../src/frontend.h"
 #include "../src/codegen.h"
-#include "../src/sched.h"
+#include "../src/scheduler.h"
 
 /* ── M1: Creation + elementwise + movement + realize ─────────────────── */
 

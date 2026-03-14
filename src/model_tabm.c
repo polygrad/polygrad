@@ -14,7 +14,7 @@
 #include "model_mlp.h"  /* poly_init_param_kaiming */
 #include "ir.h"
 #include "frontend.h"
-#include "sched.h"
+#include "scheduler.h"
 #include "safetensors.h"
 #include "../vendor/cjson/cJSON.h"
 #include <stdlib.h>

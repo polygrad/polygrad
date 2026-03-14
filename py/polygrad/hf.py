@@ -23,8 +23,8 @@ import numpy as np
 from . import _ffi
 from .instance import Instance
 
-_lib = _ffi._lib
-_u8p = _ffi._u8p
+_get_lib = _ffi.get_lib
+_u8p = ctypes.POINTER(ctypes.c_uint8)
 
 
 def load_hf(model_path, max_batch=1, max_seq_len=0):
@@ -213,7 +213,7 @@ def _load_from_bytes(config_bytes, weight_data_list, max_batch, max_seq_len):
         file_ptrs[i] = ctypes.cast(buf, _u8p)
         file_lens[i] = len(data)
 
-    ptr = _lib.poly_hf_load(
+    ptr = _get_lib().poly_hf_load(
         config_bytes, len(config_bytes),
         file_ptrs, file_lens,
         n_files, max_batch, max_seq_len

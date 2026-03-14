@@ -5,7 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "test_harness.h"
 #include "../src/rangeify.h"
-#include "../src/sched.h"
+#include "../src/scheduler.h"
 #include "../src/indexing.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"

@@ -2,20 +2,31 @@
 
 tinygrad-compatible Tensor API for Python. Thin ctypes wrapper around the C core — each method is one FFI call.
 
+Project home and docs: https://polygrad.org
+Source code and issue tracker: https://github.com/polygrad/polygrad
+
 ## Installation
 
 ```bash
-# Build the C shared library first
-make
-
-# Install Python package (editable)
-pip install -e py/
-
-# Or set POLYGRAD_LIB to point to your libpolygrad.so
-export POLYGRAD_LIB=/path/to/libpolygrad.so
+pip install polygrad
 ```
 
-Requires: Python >= 3.9, numpy.
+**Build requirements:** C compiler (gcc or clang) and Python development headers (`python3-dev`).
+
+**Runtime requirement:** `clang` must be on PATH. polygrad compiles compute kernels at runtime via clang.
+
+Install requirements: Python >= 3.9, numpy. Linux only (uses POSIX fork/dlopen).
+
+For development:
+
+```bash
+# Editable install (compiles C sources, auto-syncs from repo)
+pip install -e py/
+
+# Or build the shared library manually and point to it
+make
+export POLYGRAD_LIB=/path/to/build/libpolygrad.so
+```
 
 ## Quick Start
 
@@ -363,5 +374,5 @@ Supported model types: GPT-2. Weight formats: F32, F16, BF16 safetensors (single
 ## Tests
 
 ```bash
-python -m pytest py/tests/ -v   # 110 tests (tensor + nn + compiled step + GPT-2 + HF loading)
+python -m pytest py/tests/ -v   # 130 tests (tensor + nn + compiled step + GPT-2 + HF loading + instance)
 ```

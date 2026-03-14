@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/sched.h"
+#include "../src/scheduler.h"
 #include "../src/codegen.h"
 #include "../src/rangeify.h"
 #include "../src/frontend.h"

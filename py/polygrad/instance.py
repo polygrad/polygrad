@@ -11,7 +11,7 @@ import json
 import numpy as np
 from . import _ffi
 
-_lib = _ffi._lib
+_get_lib = _ffi.get_lib
 
 # libc free for caller-frees byte arrays
 _libc = ctypes.CDLL(ctypes.util.find_library('c'))
@@ -42,7 +42,7 @@ class Instance:
 
     def free(self):
         if self._ptr:
-            _lib.poly_instance_free(self._ptr)
+            _get_lib().poly_instance_free(self._ptr)
             self._ptr = None
 
     def __del__(self):
@@ -60,7 +60,7 @@ class Instance:
         if weights_bytes:
             w_buf = (ctypes.c_uint8 * len(weights_bytes)).from_buffer_copy(weights_bytes)
             w_len = len(weights_bytes)
-        ptr = _lib.poly_instance_from_ir(ir_buf, len(ir_bytes), w_buf, w_len)
+        ptr = _get_lib().poly_instance_from_ir(ir_buf, len(ir_bytes), w_buf, w_len)
         return Instance(ptr)
 
     @staticmethod
@@ -70,7 +70,7 @@ class Instance:
             spec = json.dumps(spec)
         if isinstance(spec, str):
             spec = spec.encode('utf-8')
-        ptr = _lib.poly_mlp_instance(spec, len(spec))
+        ptr = _get_lib().poly_mlp_instance(spec, len(spec))
         return Instance(ptr)
 
     @staticmethod
@@ -80,7 +80,7 @@ class Instance:
             spec = json.dumps(spec)
         if isinstance(spec, str):
             spec = spec.encode('utf-8')
-        ptr = _lib.poly_tabm_instance(spec, len(spec))
+        ptr = _get_lib().poly_tabm_instance(spec, len(spec))
         return Instance(ptr)
 
     @staticmethod
@@ -90,28 +90,28 @@ class Instance:
             spec = json.dumps(spec)
         if isinstance(spec, str):
             spec = spec.encode('utf-8')
-        ptr = _lib.poly_nam_instance(spec, len(spec))
+        ptr = _get_lib().poly_nam_instance(spec, len(spec))
         return Instance(ptr)
 
     # ── Param Enumeration ────────────────────────────────────────────
 
     @property
     def param_count(self):
-        return _lib.poly_instance_param_count(self._ptr)
+        return _get_lib().poly_instance_param_count(self._ptr)
 
     def param_name(self, i):
-        name = _lib.poly_instance_param_name(self._ptr, i)
+        name = _get_lib().poly_instance_param_name(self._ptr, i)
         return name.decode('utf-8') if name else None
 
     def param_shape(self, i):
         shape_buf = (ctypes.c_int64 * 8)()
-        ndim = _lib.poly_instance_param_shape(self._ptr, i, shape_buf, 8)
+        ndim = _get_lib().poly_instance_param_shape(self._ptr, i, shape_buf, 8)
         return tuple(shape_buf[d] for d in range(ndim))
 
     def param_data(self, i):
         """Return a numpy view of param data (mutable, zero-copy)."""
         numel = ctypes.c_int64(0)
-        ptr = _lib.poly_instance_param_data(self._ptr, i, ctypes.byref(numel))
+        ptr = _get_lib().poly_instance_param_data(self._ptr, i, ctypes.byref(numel))
         if not ptr:
             return None
         return np.ctypeslib.as_array(ptr, shape=(numel.value,))
@@ -125,24 +125,24 @@ class Instance:
 
     @property
     def buf_count(self):
-        return _lib.poly_instance_buf_count(self._ptr)
+        return _get_lib().poly_instance_buf_count(self._ptr)
 
     def buf_name(self, i):
-        name = _lib.poly_instance_buf_name(self._ptr, i)
+        name = _get_lib().poly_instance_buf_name(self._ptr, i)
         return name.decode('utf-8') if name else None
 
     def buf_role(self, i):
-        return _lib.poly_instance_buf_role(self._ptr, i)
+        return _get_lib().poly_instance_buf_role(self._ptr, i)
 
     def buf_shape(self, i):
         shape_buf = (ctypes.c_int64 * 8)()
-        ndim = _lib.poly_instance_buf_shape(self._ptr, i, shape_buf, 8)
+        ndim = _get_lib().poly_instance_buf_shape(self._ptr, i, shape_buf, 8)
         return tuple(shape_buf[d] for d in range(ndim))
 
     def buf_data(self, i):
         """Return a numpy view of buffer data (mutable, zero-copy)."""
         numel = ctypes.c_int64(0)
-        ptr = _lib.poly_instance_buf_data(self._ptr, i, ctypes.byref(numel))
+        ptr = _get_lib().poly_instance_buf_data(self._ptr, i, ctypes.byref(numel))
         if not ptr:
             return None
         return np.ctypeslib.as_array(ptr, shape=(numel.value,))
@@ -159,7 +159,7 @@ class Instance:
     def export_weights(self):
         """Export param weights as safetensors bytes."""
         out_len = ctypes.c_int(0)
-        ptr = _lib.poly_instance_export_weights(self._ptr, ctypes.byref(out_len))
+        ptr = _get_lib().poly_instance_export_weights(self._ptr, ctypes.byref(out_len))
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -169,14 +169,14 @@ class Instance:
     def import_weights(self, data):
         """Import weights from safetensors bytes."""
         buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
-        ret = _lib.poly_instance_import_weights(self._ptr, buf, len(data))
+        ret = _get_lib().poly_instance_import_weights(self._ptr, buf, len(data))
         if ret != 0:
             raise RuntimeError(f'import_weights failed (ret={ret})')
 
     def export_ir(self):
         """Export IR graph as binary bytes."""
         out_len = ctypes.c_int(0)
-        ptr = _lib.poly_instance_export_ir(self._ptr, ctypes.byref(out_len))
+        ptr = _get_lib().poly_instance_export_ir(self._ptr, ctypes.byref(out_len))
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -188,7 +188,7 @@ class Instance:
     def set_optimizer(self, kind, lr=0.01, beta1=0.9, beta2=0.999,
                       eps=1e-8, weight_decay=0.0):
         """Configure optimizer before first train_step."""
-        ret = _lib.poly_instance_set_optimizer(
+        ret = _get_lib().poly_instance_set_optimizer(
             self._ptr, kind,
             ctypes.c_float(lr), ctypes.c_float(beta1), ctypes.c_float(beta2),
             ctypes.c_float(eps), ctypes.c_float(weight_decay))
@@ -201,7 +201,7 @@ class Instance:
         Returns dict of output buffer names to numpy arrays.
         """
         bindings, n = self._make_bindings(inputs)
-        ret = _lib.poly_instance_forward(self._ptr, bindings, n)
+        ret = _get_lib().poly_instance_forward(self._ptr, bindings, n)
         if ret != 0:
             raise RuntimeError(f'forward failed (ret={ret})')
         return self._collect_outputs()
@@ -213,7 +213,7 @@ class Instance:
         """
         bindings, n = self._make_bindings(io)
         loss = ctypes.c_float(0.0)
-        ret = _lib.poly_instance_train_step(
+        ret = _get_lib().poly_instance_train_step(
             self._ptr, bindings, n, ctypes.byref(loss))
         if ret != 0:
             raise RuntimeError(f'train_step failed (ret={ret})')

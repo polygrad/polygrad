@@ -12,7 +12,7 @@
 
 /* Include polygrad headers */
 #include "../../../src/frontend.h"
-#include "../../../src/sched.h"
+#include "../../../src/scheduler.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 

@@ -1,14 +1,14 @@
 /*
  * nn.c — Tensor + neural network implementation
  *
- * Composes polygrad's low-level UOp primitives (sched.h, frontend.h, autograd.c)
+ * Composes polygrad's low-level UOp primitives (scheduler.h, frontend.h, autograd.c)
  * into a high-level Tensor API with layers and optimizers.
  */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include "nn.h"
-#include "sched.h"
+#include "scheduler.h"
 #include "frontend.h"
 #include "codegen.h"
 #include <stdlib.h>

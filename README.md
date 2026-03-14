@@ -53,9 +53,13 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 
 | Frontend | API Docs | Install |
 |----------|----------|---------|
-| [Python](py/) | Tensor, nn module, optimizers | `pip install -e py/` |
-| [JavaScript + Browser](js/) | Unified npm package (`create({ target, device })`), Node-API + WASM, browser dist bundles | `cd js && npm install` |
+| [Python](py/) | Tensor, nn module, optimizers | `pip install polygrad` |
+| [JavaScript + Browser](js/) | Unified npm package (`create({ target, device })`), Node-API + WASM, browser dist bundles | `npm install polygrad` |
 | [R](r/) | Tensor (.Call FFI) | `R CMD INSTALL r/` |
+
+## Versioning
+
+Package versions use semver, but `major.minor` tracks the shared C core line across frontends. The `patch` version is frontend-specific, so Python and JS can ship wrapper-only fixes independently while still advertising the same underlying core generation. ABI compatibility is tracked separately by `POLYGRAD_ABI_VERSION` in `src/frontend.h`.
 
 ## Parity
 

@@ -19,7 +19,7 @@
 #define POLY_RECIPE_H
 
 #include "frontend.h"
-#include "sched.h"
+#include "scheduler.h"
 
 #ifdef __cplusplus
 extern "C" {

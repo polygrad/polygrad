@@ -10,7 +10,7 @@
 #include "test_harness.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
-#include "../src/sched.h"
+#include "../src/scheduler.h"
 #include "../src/rangeify.h"
 
 /* Skip helper: PASS immediately if no GPU */

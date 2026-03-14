@@ -11,7 +11,7 @@
  */
 
 #include "../src/codegen.h"
-#include "../src/sched.h"
+#include "../src/scheduler.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
