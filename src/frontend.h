@@ -55,6 +55,7 @@ PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
+PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int64_t size, int dtype_id);
 
 /* ── Dynamic shapes (DEFINE_VAR / BIND) ──────────────────────────────── */
 

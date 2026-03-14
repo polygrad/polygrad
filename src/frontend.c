@@ -97,6 +97,16 @@ PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
   return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
 }
 
+/* ── Dtype table for FFI (shared by poly_buffer_by_id and poly_cast_by_id) ─ */
+
+static const PolyDType *_dtype_table_ffi[] = {
+  &POLY_VOID, &POLY_BOOL, &POLY_INT8, &POLY_UINT8,
+  &POLY_INT16, &POLY_UINT16, &POLY_INT32, &POLY_UINT32,
+  &POLY_INT64, &POLY_UINT64, &POLY_FLOAT16, &POLY_BFLOAT16,
+  &POLY_FLOAT32, &POLY_FLOAT64,
+};
+#define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
+
 /* ── Buffer shortcuts ─────────────────────────────────────────────────── */
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
@@ -105,6 +115,11 @@ PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
 
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT64, size);
+}
+
+PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int64_t size, int dtype_id) {
+  if (dtype_id < 0 || dtype_id >= N_DTYPE_FFI) return NULL;
+  return poly_buffer(ctx, *_dtype_table_ffi[dtype_id], size);
 }
 
 /* ── Dynamic shapes (DEFINE_VAR / BIND) ──────────────────────────────── */
@@ -670,18 +685,9 @@ PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
   return poly_uop1(ctx, POLY_OP_CAST, target, x, poly_arg_none());
 }
 
-/* Cast by dtype index (for FFI): 0=void,1=bool,2=int8,...12=float32,13=float64 */
-static const PolyDType *_cast_dtype_table[] = {
-  &POLY_VOID, &POLY_BOOL, &POLY_INT8, &POLY_UINT8,
-  &POLY_INT16, &POLY_UINT16, &POLY_INT32, &POLY_UINT32,
-  &POLY_INT64, &POLY_UINT64, &POLY_FLOAT16, &POLY_BFLOAT16,
-  &POLY_FLOAT32, &POLY_FLOAT64,
-};
-#define N_CAST_DTYPES ((int)(sizeof(_cast_dtype_table) / sizeof(_cast_dtype_table[0])))
-
 PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
-  if (dtype_id < 0 || dtype_id >= N_CAST_DTYPES) return NULL;
-  return poly_cast(ctx, x, *_cast_dtype_table[dtype_id]);
+  if (dtype_id < 0 || dtype_id >= N_DTYPE_FFI) return NULL;
+  return poly_cast(ctx, x, *_dtype_table_ffi[dtype_id]);
 }
 
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {

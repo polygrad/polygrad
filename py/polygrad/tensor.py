@@ -268,9 +268,19 @@ class Tensor:
 
         # Build output buffer with correct dtype
         numel = int(np.prod(self._shape)) if self._shape else 1
-        is_f64 = self._dtype_str == 'float64'
-        np_dt = np.float64 if is_f64 else np.float32
-        if is_f64:
+        _DTYPE_NP = {
+            'float32': np.float32, 'float64': np.float64,
+            'int32': np.int32, 'int64': np.int64,
+            'int16': np.int16, 'int8': np.int8,
+            'uint8': np.uint8, 'uint16': np.uint16,
+            'uint32': np.uint32, 'uint64': np.uint64,
+            'bool': np.bool_,
+        }
+        np_dt = _DTYPE_NP.get(self._dtype_str, np.float32)
+        dtype_id = self._DTYPE_IDS.get(self._dtype_str)
+        if dtype_id is not None:
+            out_buf = _ffi._lib.poly_buffer_by_id(self._ctx, numel, dtype_id)
+        elif self._dtype_str == 'float64':
             out_buf = _ffi._lib.poly_buffer_f64(self._ctx, numel)
         else:
             out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
