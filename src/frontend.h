@@ -192,6 +192,8 @@ PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
+PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);
 PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);

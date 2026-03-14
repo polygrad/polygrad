@@ -666,6 +666,24 @@ PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return poly_alu3(ctx, POLY_OP_WHERE, gt_val, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
 
+PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
+  return poly_uop1(ctx, POLY_OP_CAST, target, x, poly_arg_none());
+}
+
+/* Cast by dtype index (for FFI): 0=void,1=bool,2=int8,...12=float32,13=float64 */
+static const PolyDType *_cast_dtype_table[] = {
+  &POLY_VOID, &POLY_BOOL, &POLY_INT8, &POLY_UINT8,
+  &POLY_INT16, &POLY_UINT16, &POLY_INT32, &POLY_UINT32,
+  &POLY_INT64, &POLY_UINT64, &POLY_FLOAT16, &POLY_BFLOAT16,
+  &POLY_FLOAT32, &POLY_FLOAT64,
+};
+#define N_CAST_DTYPES ((int)(sizeof(_cast_dtype_table) / sizeof(_cast_dtype_table[0])))
+
+PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
+  if (dtype_id < 0 || dtype_id >= N_CAST_DTYPES) return NULL;
+  return poly_cast(ctx, x, *_cast_dtype_table[dtype_id]);
+}
+
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
   return poly_alu3(ctx, POLY_OP_WHERE, cond, x, y);
 }
@@ -3552,7 +3570,7 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
   }
   if (n_inputs != n_tensors) return NULL;
 
-  /* Build size dict */
+  /* Build size dict (first pass — before trace reduction) */
   int64_t sz[26];
   bool has_letter[26];
   memset(has_letter, 0, sizeof(has_letter));
@@ -3572,6 +3590,134 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
     }
   }
 
+  /* Trace: extract diagonal when a letter repeats in a single input.
+   * Matches tinygrad: for 2D, use diagonal(). For higher dims, permute
+   * repeated dims to end, then flatten+pad+unflatten+shrink.
+   * Diagonal trick: flatten last 2 dims (n,n)->(n*n), pad to (n*n+n),
+   * reshape to (n, n+1), take column 0 via shrink -> (n,). */
+  char trace_specs[MAX_EINSUM_TENSORS][64];
+  PolyUOp *trace_tensors[MAX_EINSUM_TENSORS];
+  int trace_ndims[MAX_EINSUM_TENSORS];
+  int64_t trace_shapes[MAX_EINSUM_TENSORS][POLY_MAX_DIMS];
+
+  for (int t = 0; t < n_tensors; t++) {
+    strcpy(trace_specs[t], input_specs[t]);
+    trace_tensors[t] = tensors[t];
+    trace_ndims[t] = ndims[t];
+    for (int d = 0; d < ndims[t]; d++)
+      trace_shapes[t][d] = shapes[t][d];
+  }
+
+  for (int t = 0; t < n_tensors; t++) {
+    char *s = trace_specs[t];
+    int slen = (int)strlen(s);
+    PolyUOp *x = trace_tensors[t];
+    int x_ndim = trace_ndims[t];
+    int64_t *x_shape = trace_shapes[t];
+
+    /* For each unique letter, while it appears more than once, extract diagonal */
+    for (int ci = 0; ci < slen; ci++) {
+      char c = s[ci];
+      /* Find second occurrence */
+      int ki = -1;
+      for (int k = ci + 1; k < slen; k++)
+        if (s[k] == c) { ki = k; break; }
+      if (ki < 0) continue;
+
+      int64_t n = x_shape[ci];
+      /* Dims ci and ki hold the repeated index; extract diagonal */
+
+      /* Permute: move dims ci,ki to the end */
+      int64_t perm[POLY_MAX_DIMS];
+      int pi = 0;
+      for (int d = 0; d < x_ndim; d++)
+        if (d != ci && d != ki) perm[pi++] = d;
+      perm[pi++] = ci;
+      perm[pi++] = ki;
+      x = poly_permute(ctx, x, perm, x_ndim);
+
+      /* Update shape after permute */
+      int64_t pshape[POLY_MAX_DIMS];
+      for (int d = 0; d < x_ndim; d++)
+        pshape[d] = x_shape[perm[d]];
+      memcpy(x_shape, pshape, x_ndim * sizeof(int64_t));
+
+      /* Flatten last 2 dims: (..., n, n) -> (..., n*n) */
+      int64_t flat_shape[POLY_MAX_DIMS];
+      int flat_ndim = x_ndim - 1;
+      for (int d = 0; d < flat_ndim - 1; d++)
+        flat_shape[d] = x_shape[d];
+      flat_shape[flat_ndim - 1] = n * n;
+      x = poly_reshape(ctx, x, flat_shape, flat_ndim);
+
+      /* Pad last dim by n: (..., n*n) -> (..., n*n + n) */
+      int64_t pad_pairs[POLY_MAX_DIMS][2];
+      for (int d = 0; d < flat_ndim; d++) {
+        pad_pairs[d][0] = 0;
+        pad_pairs[d][1] = 0;
+      }
+      pad_pairs[flat_ndim - 1][1] = n;
+      x = poly_pad(ctx, x, pad_pairs, flat_ndim);
+
+      /* Reshape to (..., n, n+1) */
+      int64_t uf_shape[POLY_MAX_DIMS];
+      int uf_ndim = flat_ndim + 1;
+      for (int d = 0; d < flat_ndim - 1; d++)
+        uf_shape[d] = flat_shape[d];
+      uf_shape[flat_ndim - 1] = n;
+      uf_shape[flat_ndim] = n + 1;
+      x = poly_reshape(ctx, x, uf_shape, uf_ndim);
+
+      /* Shrink last dim to take column 0: (..., n, n+1) -> (..., n, 1) */
+      int64_t shrink_pairs[POLY_MAX_DIMS][2];
+      for (int d = 0; d < uf_ndim; d++) {
+        shrink_pairs[d][0] = 0;
+        shrink_pairs[d][1] = uf_shape[d];
+      }
+      shrink_pairs[uf_ndim - 1][0] = 0;
+      shrink_pairs[uf_ndim - 1][1] = 1;
+      x = poly_shrink(ctx, x, shrink_pairs, uf_ndim);
+
+      /* Reshape to drop the trailing 1: (..., n, 1) -> (..., n) */
+      int64_t final_shape[POLY_MAX_DIMS];
+      int final_ndim = uf_ndim - 1;
+      for (int d = 0; d < final_ndim; d++)
+        final_shape[d] = uf_shape[d];
+      x = poly_reshape(ctx, x, final_shape, final_ndim);
+
+      /* Update spec: remove the second occurrence of c */
+      for (int k = ki; k < slen - 1; k++)
+        s[k] = s[k + 1];
+      s[slen - 1] = '\0';
+      slen--;
+
+      /* Update shape array: the new shape is final_shape */
+      x_ndim = final_ndim;
+      memcpy(x_shape, final_shape, final_ndim * sizeof(int64_t));
+
+      /* Re-check from the same position in case there are more repeats */
+      ci--;
+    }
+
+    trace_tensors[t] = x;
+    trace_ndims[t] = x_ndim;
+    input_specs[t] = trace_specs[t];
+  }
+
+  /* Rebuild size dict after trace reduction */
+  memset(has_letter, 0, sizeof(has_letter));
+  for (int t = 0; t < n_tensors; t++) {
+    const char *spec = input_specs[t];
+    int spec_len = (int)strlen(spec);
+    for (int d = 0; d < spec_len; d++) {
+      int li = spec[d] - 'a';
+      if (!has_letter[li]) {
+        sz[li] = trace_shapes[t][d];
+        has_letter[li] = true;
+      }
+    }
+  }
+
   /* Sorted alphabet */
   char alpha[26];
   int n_alpha = 0;
@@ -3583,7 +3729,7 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
   for (int t = 0; t < n_tensors; t++) {
     const char *spec = input_specs[t];
     int spec_len = (int)strlen(spec);
-    PolyUOp *x = tensors[t];
+    PolyUOp *x = trace_tensors[t];
     if (spec_len == 0) { aligned[t] = x; continue; }
 
     /* Sort spec chars */
