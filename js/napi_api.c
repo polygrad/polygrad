@@ -594,6 +594,10 @@ static napi_value napi_poly_dot(napi_env env, napi_callback_info info) {
   int out_ndim = 0;
   PolyUOp *r = poly_dot(ctx, a_uop, a_shape, a_ndim, b_uop, b_shape, b_ndim,
                          out_shape, &out_ndim);
+  if (!r) {
+    napi_throw_range_error(env, NULL, "cannot dot the provided shapes");
+    return NULL;
+  }
   return make_shape_result(env, r, out_shape, out_ndim);
 }
 
@@ -623,6 +627,35 @@ static napi_value napi_poly_log_softmax(napi_env env, napi_callback_info info) {
   read_int64_array(env, argv[2], shape, MAX_DIMS);
   napi_get_value_int32(env, argv[4], &axis);
   return make_external(env, poly_log_softmax(ctx, uop, shape, ndim, axis));
+}
+
+static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info) {
+  napi_value argv[8];
+  size_t argc = 8;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *logits_uop = get_external(env, argv[1]);
+  int64_t logits_shape[MAX_DIMS];
+  int32_t logits_ndim;
+  napi_get_value_int32(env, argv[3], &logits_ndim);
+  read_int64_array(env, argv[2], logits_shape, MAX_DIMS);
+  PolyUOp *target_uop = get_external(env, argv[4]);
+  int64_t target_shape[MAX_DIMS];
+  int32_t target_ndim, axis;
+  napi_get_value_int32(env, argv[6], &target_ndim);
+  read_int64_array(env, argv[5], target_shape, MAX_DIMS);
+  napi_get_value_int32(env, argv[7], &axis);
+  int64_t out_shape[MAX_DIMS];
+  int out_ndim = 0;
+  PolyUOp *r = poly_cross_entropy(ctx,
+                                  logits_uop, logits_shape, logits_ndim,
+                                  target_uop, target_shape, target_ndim,
+                                  axis, out_shape, &out_ndim);
+  if (!r) {
+    napi_throw_range_error(env, NULL, "poly_cross_entropy shape mismatch");
+    return NULL;
+  }
+  return make_shape_result(env, r, out_shape, out_ndim);
 }
 
 /* ── Composed elementwise (unary) ──────────────────────────────────────── */
@@ -1477,6 +1510,7 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_dot", napi_poly_dot),
     DECLARE_NAPI_METHOD("poly_softmax", napi_poly_softmax),
     DECLARE_NAPI_METHOD("poly_log_softmax", napi_poly_log_softmax),
+    DECLARE_NAPI_METHOD("poly_cross_entropy", napi_poly_cross_entropy),
     DECLARE_NAPI_METHOD("poly_layernorm", napi_poly_layernorm),
     DECLARE_NAPI_METHOD("poly_gather", napi_poly_gather),
     DECLARE_NAPI_METHOD("poly_linear", napi_poly_linear),

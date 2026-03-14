@@ -462,6 +462,20 @@ async function createWasmBackend() {
       return { uop: result, shape: readOutShape() }
     },
 
+    poly_cross_entropy: (ctx, logitsUop, logitsShape, logitsNshape, targetUop, targetShape, targetNshape, axis) => {
+      const logitsPtr = writeInt64Array(logitsShape)
+      const targetPtr = writeInt64Array(targetShape)
+      heap32()[_scratchOutNdimPtr >> 2] = 0
+      const result = Module._poly_cross_entropy(
+        ctx, logitsUop, logitsPtr, logitsNshape,
+        targetUop, targetPtr, targetNshape,
+        axis, _scratchOutShapePtr, _scratchOutNdimPtr
+      )
+      Module._free(logitsPtr)
+      Module._free(targetPtr)
+      return { uop: result, shape: readOutShape() }
+    },
+
     poly_einsum: (ctx, formula, operands) => {
       const n = operands.length
 

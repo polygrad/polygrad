@@ -60,7 +60,33 @@ static int graph_has_compute_ops(PolyCtx *ctx, PolyUOp *tensor_sink) {
 static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
                           ParityBinding *bindings, int n_bindings,
                           float *out_data, int out_n) {
-  /* 1. Schedule */
+  int use_cuda = env_enabled("POLY_PARITY_CUDA");
+
+  /* 1. Execute first.
+   * Use the production realize path so parity values do not drift from the
+   * actual runtime just because this harness reimplemented kernel dispatch.
+   * Some lowering paths also mutate graph state, so execute before extracting
+   * kernel metadata for parity reporting. */
+  int ok = 1;
+  if (bindings && n_bindings > 0) {
+    PolyBufferBinding *bb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+    for (int j = 0; j < n_bindings; j++) {
+      bb[j].buffer = bindings[j].buffer;
+      bb[j].data = bindings[j].data;
+    }
+#ifdef POLY_HAS_CUDA
+    if (use_cuda) {
+      ok = (poly_realize_cuda(ctx, tensor_sink, bb, n_bindings) == 0);
+      if (ok) poly_cuda_copyback(bb, n_bindings);
+    } else
+#endif
+    {
+      ok = (poly_realize(ctx, tensor_sink, bb, n_bindings) == 0);
+    }
+    free(bb);
+  }
+
+  /* 2. Schedule and linearize for kernel metadata. */
   PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
   if (sr.n_kernels < 1) {
     fprintf(stderr, "parity: schedule produced 0 kernels\n");
@@ -68,9 +94,6 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     return 0;
   }
 
-  int use_cuda = env_enabled("POLY_PARITY_CUDA");
-
-  /* 2. Per-kernel: linearize + collect op names */
   PolyUOp ***all_lin = calloc(sr.n_kernels, sizeof(PolyUOp **));
   int *all_n_lin = calloc(sr.n_kernels, sizeof(int));
 
@@ -94,90 +117,7 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     }
   }
 
-  /* 3. Execute (only if bindings provided) */
-  int ok = 1;
-  if (bindings && n_bindings > 0) {
-#ifdef POLY_HAS_CUDA
-    if (use_cuda) {
-      /* CUDA path: use poly_realize_cuda + poly_cuda_copyback */
-      PolyBufferBinding *bb = malloc(n_bindings * sizeof(PolyBufferBinding));
-      for (int j = 0; j < n_bindings; j++) {
-        bb[j].buffer = bindings[j].buffer;
-        bb[j].data = bindings[j].data;
-      }
-      ok = (poly_realize_cuda(ctx, tensor_sink, bb, n_bindings) == 0);
-      if (ok) poly_cuda_copyback(bb, n_bindings);
-      free(bb);
-    } else
-#endif
-    {
-      /* CPU path: per-kernel render_c → compile_c → program_call */
-      int n_int = sr.n_intermediates;
-      void **intermediates = NULL;
-      if (n_int > 0) {
-        intermediates = calloc(n_int, sizeof(void *));
-        for (int b = 0; b < n_int; b++)
-          intermediates[b] = calloc(sr.intermediate_sizes[b], sizeof(float));
-      }
-
-      for (int k = 0; k < sr.n_kernels && ok; k++) {
-        int n_params = sr.kernel_n_params[k];
-        void **args = calloc(n_params, sizeof(void *));
-
-        for (int i = 0; i < n_params; i++) {
-          PolyUOp *buf = sr.param_to_buf[k][i];
-          if (buf->op == POLY_OP_BUFFER) {
-            for (int j = 0; j < n_bindings; j++) {
-              if (bindings[j].buffer == buf) {
-                args[i] = bindings[j].data;
-                break;
-              }
-            }
-            /* New split path: intermediate buffers are BUFFER+LUNIQUE, not BUFFERIZE */
-            if (!args[i]) {
-              for (int b = 0; b < n_int; b++) {
-                if (sr.param_to_buf[b] && sr.param_to_buf[b][0] == buf) {
-                  args[i] = intermediates[b];
-                  break;
-                }
-              }
-            }
-          } else if (buf->op == POLY_OP_BUFFERIZE) {
-            for (int b = 0; b < n_int; b++) {
-              if (sr.param_to_buf[b] && sr.param_to_buf[b][0] == buf) {
-                args[i] = intermediates[b];
-                break;
-              }
-            }
-          }
-          if (!args[i]) {
-            fprintf(stderr, "parity: no binding for param %d in kernel %d\n", i, k);
-            ok = 0;
-          }
-        }
-
-        if (ok) {
-          char fn_name[32];
-          snprintf(fn_name, sizeof(fn_name), "par_k%d", k);
-          char *src = poly_render_c(all_lin[k], all_n_lin[k], fn_name);
-          if (!src) { ok = 0; free(args); continue; }
-          PolyProgram *prog = poly_compile_c(src, fn_name);
-          free(src);
-          if (!prog) { ok = 0; free(args); continue; }
-          poly_program_call(prog, args, n_params);
-          poly_program_destroy(prog);
-        }
-        free(args);
-      }
-
-      if (intermediates) {
-        for (int b = 0; b < n_int; b++) free(intermediates[b]);
-        free(intermediates);
-      }
-    }
-  }
-
-  /* 4. Emit JSON */
+  /* 3. Emit JSON */
   if (ok) {
     int movement_as_copy = env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") &&
                            !graph_has_compute_ops(ctx, tensor_sink);
@@ -954,6 +894,56 @@ static int case_matmul_small(void) {
   return ok;
 }
 
+static int case_matmul_broadcast(void) {
+  float a_d[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float b_d[4] = {1, 10, 100, 1000};
+  float out_d[8] = {0};
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 8);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = 0;
+
+  PolyUOp *dot = poly_dot(ctx,
+                          a, (int64_t[]){2, 2, 2}, 3,
+                          b, (int64_t[]){1, 2, 2}, 3,
+                          out_shape, &out_ndim);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, dot, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  ParityBinding bindings[] = {{out, out_d}, {a, a_d}, {b, b_d}};
+  int ok = run_and_report(ctx, sink, bindings, 3, out_d, 8);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_cross_entropy_nonlast_axis(void) {
+  float logits_d[12] = {0};
+  float target_d[4] = {0, 2, 1, 0};
+  float out_d[1] = {0};
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = poly_buffer_f32(ctx, 12);
+  PolyUOp *target = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = 0;
+
+  PolyUOp *loss = poly_cross_entropy(ctx,
+                                     logits, (int64_t[]){2, 3, 2}, 3,
+                                     target, (int64_t[]){2, 2}, 2,
+                                     -2, out_shape, &out_ndim);
+  PolyUOp *store = poly_store_val(ctx, out, loss);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  ParityBinding bindings[] = {{out, out_d}, {logits, logits_d}, {target, target_d}};
+  int ok = run_and_report(ctx, sink, bindings, 3, out_d, 1);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
 /* ── Case dispatch ────────────────────────────────────────────────── */
 
 typedef int (*CaseFn)(void);
@@ -1000,6 +990,8 @@ static CaseEntry CASES[] = {
   {"grad_multi_use", case_grad_multi_use},
   /* Tier 5: NN */
   {"matmul_small", case_matmul_small},
+  {"matmul_broadcast", case_matmul_broadcast},
+  {"cross_entropy_nonlast_axis", case_cross_entropy_nonlast_axis},
 };
 
 static int run_case(const char *name) {

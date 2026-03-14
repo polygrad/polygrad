@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from polygrad import Tensor
+from polygrad import Device, Tensor
 
 
 class TestCreation:
@@ -134,6 +134,76 @@ class TestReduce:
         np.testing.assert_allclose(s.numpy(), [6, 15])
 
 
+class TestMatmulAndLoss:
+    def test_matmul_shape_mismatch_raises(self):
+        a = Tensor([[1.0, 2.0], [3.0, 4.0]])
+        b = Tensor([[1.0, 2.0, 3.0]])
+        with pytest.raises(ValueError, match='cannot dot'):
+            a @ b
+
+    def test_matmul_broadcast_batch_values(self):
+        a_np = np.array([
+            [[1.0, 2.0], [3.0, 4.0]],
+            [[5.0, 6.0], [7.0, 8.0]],
+        ], dtype=np.float32)
+        b_np = np.array([
+            [[1.0, 10.0], [100.0, 1000.0]],
+        ], dtype=np.float32)
+        out = Tensor(a_np) @ Tensor(b_np)
+        assert out.shape == (2, 2, 2)
+        np.testing.assert_allclose(out.numpy(), np.matmul(a_np, b_np), rtol=1e-6)
+
+    def test_matmul_broadcast_mismatch_raises(self):
+        a = Tensor(np.zeros((2, 3, 4), dtype=np.float32))
+        b = Tensor(np.zeros((5, 4, 6), dtype=np.float32))
+        with pytest.raises(ValueError, match='cannot dot'):
+            a @ b
+
+    def test_cross_entropy_sparse_targets(self):
+        logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        target = Tensor([0.0, 2.0])
+        loss = logits.cross_entropy(target)
+        assert loss.shape == ()
+        np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
+
+    def test_cross_entropy_dense_targets(self):
+        logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        target = Tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        loss = logits.cross_entropy(target)
+        assert loss.shape == ()
+        np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
+
+    def test_cross_entropy_sparse_targets_non_last_axis(self):
+        logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
+        target = Tensor(np.array([[0.0, 2.0], [1.0, 0.0]], dtype=np.float32))
+        loss = logits.cross_entropy(target, axis=-2)
+        assert loss.shape == ()
+        np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
+
+    def test_cross_entropy_default_matches_tinygrad_class_axis(self):
+        logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
+        target = Tensor(np.array([[0.0, 2.0], [1.0, 0.0]], dtype=np.float32))
+        loss = logits.cross_entropy(target)
+        assert loss.shape == ()
+        np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
+
+    def test_cross_entropy_dense_targets_non_last_axis(self):
+        logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
+        target = Tensor(np.array([
+            [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0]],
+            [[0.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+        ], dtype=np.float32))
+        loss = logits.cross_entropy(target, axis=1)
+        assert loss.shape == ()
+        np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
+
+    def test_cross_entropy_shape_mismatch_raises(self):
+        logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        target = Tensor([[1.0, 0.0], [0.0, 1.0]])
+        with pytest.raises(ValueError, match='shape mismatch'):
+            logits.cross_entropy(target)
+
+
 class TestAutograd:
     def test_grad_mul_sum(self):
         x = Tensor([1, 2, 3, 4], requires_grad=True)
@@ -156,11 +226,33 @@ class TestAutograd:
         np.testing.assert_allclose(x.grad.numpy(), [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
 
 
-class TestStubs:
-    def test_to_raises(self):
-        a = Tensor([1])
-        with pytest.raises(AttributeError):
-            a.to('cuda')
+class TestDevice:
+    def test_device_lookup(self):
+        assert Device['cpu'] == 'CPU'
+        assert Device['CUDA'] == 'CUDA'
+
+    def test_requires_grad_inplace(self):
+        a = Tensor([1.0])
+        assert a.requires_grad_(True) is a
+        assert a.requires_grad is True
+
+    def test_to_device_roundtrip(self):
+        a = Tensor([1.0, 2.0, 3.0], dtype='float64')
+        b = (a + 1).to('cuda')
+        assert b.device == 'CUDA'
+
+        c = b.to('cpu')
+        assert c.device == 'CPU'
+        np.testing.assert_allclose(c.numpy(), [2.0, 3.0, 4.0])
+
+    def test_to_cuda_runtime_behavior(self):
+        a = Tensor([1.0, 2.0, 3.0])
+        b = (a * 2).to('cuda')
+        if Device.cuda_available():
+            np.testing.assert_allclose(b.numpy(), [2.0, 4.0, 6.0])
+        else:
+            with pytest.raises(RuntimeError, match='CUDA'):
+                b.numpy()
 
 
 class TestRepr:

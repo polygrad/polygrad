@@ -438,6 +438,275 @@ TEST(nn, matmul_numeric) {
   PASS();
 }
 
+TEST(nn, matmul_invalid_shape_returns_null) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 3);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *r = poly_dot(ctx,
+                        a, (int64_t[]){2, 2}, 2,
+                        b, (int64_t[]){1, 3}, 2,
+                        out_shape, &out_ndim);
+
+  ASSERT_TRUE(r == NULL);
+  ASSERT_INT_EQ(out_ndim, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, matmul_broadcast_batch_numeric) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 8);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *r = poly_dot(ctx,
+                        a, (int64_t[]){2, 2, 2}, 3,
+                        b, (int64_t[]){1, 2, 2}, 3,
+                        out_shape, &out_ndim);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(out_ndim, 3);
+  ASSERT_INT_EQ(out_shape[0], 2);
+  ASSERT_INT_EQ(out_shape[1], 2);
+  ASSERT_INT_EQ(out_shape[2], 2);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 8);
+  PolyUOp *store = poly_store_val(ctx, out_buf, r);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float a_data[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float b_data[] = {1, 10, 100, 1000};
+  float out_data[] = {0};
+  float expected[] = {201, 2010, 403, 4030, 605, 6050, 807, 8070};
+  PolyBufferBinding bindings[] = {
+    { .buffer = a, .data = a_data },
+    { .buffer = b, .data = b_data },
+    { .buffer = out_buf, .data = out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, matmul_invalid_broadcast_returns_null) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 24);
+  PolyUOp *b = poly_buffer_f32(ctx, 120);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *r = poly_dot(ctx,
+                        a, (int64_t[]){2, 3, 4}, 3,
+                        b, (int64_t[]){5, 4, 6}, 3,
+                        out_shape, &out_ndim);
+
+  ASSERT_TRUE(r == NULL);
+  ASSERT_INT_EQ(out_ndim, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, cross_entropy_sparse_targets) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = poly_buffer_f32(ctx, 6);
+  PolyUOp *target = poly_buffer_f32(ctx, 2);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *loss = poly_cross_entropy(ctx,
+                                     logits, (int64_t[]){2, 3}, 2,
+                                     target, (int64_t[]){2}, 1,
+                                     1, out_shape, &out_ndim);
+  ASSERT_NOT_NULL(loss);
+  ASSERT_INT_EQ(out_ndim, 0);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *store = poly_store_val(ctx, out_buf, loss);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float logits_data[] = {0, 0, 0, 0, 0, 0};
+  float target_data[] = {0, 2};
+  float out_data[] = {0};
+  PolyBufferBinding bindings[] = {
+    { .buffer = logits, .data = logits_data },
+    { .buffer = target, .data = target_data },
+    { .buffer = out_buf, .data = out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, cross_entropy_dense_targets) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = poly_buffer_f32(ctx, 6);
+  PolyUOp *target = poly_buffer_f32(ctx, 6);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *loss = poly_cross_entropy(ctx,
+                                     logits, (int64_t[]){2, 3}, 2,
+                                     target, (int64_t[]){2, 3}, 2,
+                                     1, out_shape, &out_ndim);
+  ASSERT_NOT_NULL(loss);
+  ASSERT_INT_EQ(out_ndim, 0);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *store = poly_store_val(ctx, out_buf, loss);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float logits_data[] = {0, 0, 0, 0, 0, 0};
+  float target_data[] = {1, 0, 0, 0, 0, 1};
+  float out_data[] = {0};
+  PolyBufferBinding bindings[] = {
+    { .buffer = logits, .data = logits_data },
+    { .buffer = target, .data = target_data },
+    { .buffer = out_buf, .data = out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, cross_entropy_sparse_targets_non_last_axis) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = poly_buffer_f32(ctx, 12);
+  PolyUOp *target = poly_buffer_f32(ctx, 4);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *loss = poly_cross_entropy(ctx,
+                                     logits, (int64_t[]){2, 3, 2}, 3,
+                                     target, (int64_t[]){2, 2}, 2,
+                                     -2, out_shape, &out_ndim);
+  ASSERT_NOT_NULL(loss);
+  ASSERT_INT_EQ(out_ndim, 0);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *store = poly_store_val(ctx, out_buf, loss);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float logits_data[] = {
+    0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0
+  };
+  float target_data[] = {0, 2, 1, 0};
+  float out_data[] = {0};
+  PolyBufferBinding bindings[] = {
+    { .buffer = logits, .data = logits_data },
+    { .buffer = target, .data = target_data },
+    { .buffer = out_buf, .data = out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, cross_entropy_invalid_shape_returns_null) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = poly_buffer_f32(ctx, 6);
+  PolyUOp *target = poly_buffer_f32(ctx, 4);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *loss = poly_cross_entropy(ctx,
+                                     logits, (int64_t[]){2, 3}, 2,
+                                     target, (int64_t[]){2, 2}, 2,
+                                     1, out_shape, &out_ndim);
+
+  ASSERT_TRUE(loss == NULL);
+  ASSERT_INT_EQ(out_ndim, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, log_softmax_non_last_axis_flat_buffer) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer_f32(ctx, 12);
+
+  PolyUOp *y = poly_log_softmax(ctx, x, (int64_t[]){2, 3, 2}, 3, 1);
+  ASSERT_NOT_NULL(y);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *store = poly_store_val(ctx, out_buf, y);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float x_data[] = {
+    0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0
+  };
+  float out_data[] = {0};
+  PolyBufferBinding bindings[] = {
+    { .buffer = x, .data = x_data },
+    { .buffer = out_buf, .data = out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 2);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], -logf(3.0f), 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, layernorm_non_last_axis_flat_buffer) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer_f32(ctx, 12);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = -1;
+
+  PolyUOp *y = poly_layernorm(ctx, x, (int64_t[]){2, 3, 2}, 3, 1, 1e-5,
+                              out_shape, &out_ndim);
+  ASSERT_NOT_NULL(y);
+  ASSERT_INT_EQ(out_ndim, 3);
+  ASSERT_INT_EQ(out_shape[0], 2);
+  ASSERT_INT_EQ(out_shape[1], 3);
+  ASSERT_INT_EQ(out_shape[2], 2);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *store = poly_store_val(ctx, out_buf, y);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float x_data[] = {
+    0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0
+  };
+  float out_data[] = {0};
+  PolyBufferBinding bindings[] = {
+    { .buffer = x, .data = x_data },
+    { .buffer = out_buf, .data = out_data },
+  };
+
+  int ret = poly_realize(ctx, sink, bindings, 2);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], 0.0f, 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── Compiled Step tests ─────────────────────────────────────────────── */
 
 TEST(step, compile_step_basic) {

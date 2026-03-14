@@ -279,6 +279,13 @@ def _declare_signatures(lib):
     lib.poly_dot.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
                               _ptr, _i64p, ctypes.c_int, _i64p, _ip]
 
+    lib.poly_cross_entropy.restype = _ptr
+    lib.poly_cross_entropy.argtypes = [
+        _ptr, _ptr, _i64p, ctypes.c_int,
+        _ptr, _i64p, ctypes.c_int,
+        ctypes.c_int, _i64p, _ip
+    ]
+
     lib.poly_softmax.restype = _ptr
     lib.poly_softmax.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
 

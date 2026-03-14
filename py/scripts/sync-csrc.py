@@ -3,9 +3,8 @@
 sync-csrc.py -- Copy C sources from the polygrad repo into py/csrc/.
 
 Manifest-driven: the SOURCES list below must match the Makefile's SRC +
-CODEC_SRC (minus CUDA files). HEADERS lists all headers needed for
-compilation. This is the single source of truth for which C files ship
-in the Python sdist.
+CODEC_SRC. HEADERS lists all headers needed for compilation. This is the
+single source of truth for which C files ship in the Python sdist.
 
 Usage:
     python scripts/sync-csrc.py          # run from py/
@@ -16,7 +15,7 @@ import os
 import shutil
 import sys
 
-# Authoritative source list -- must match Makefile SRC + CODEC_SRC minus CUDA
+# Authoritative source list -- must match Makefile SRC + CODEC_SRC
 SOURCES = [
     # SRC (core)
     'src/ops.c',
@@ -32,8 +31,10 @@ SOURCES = [
     'src/autograd.c',
     'src/codegen.c',
     'src/render_c.c',
+    'src/render_cuda.c',
     'src/render_wgsl.c',
     'src/runtime_cpu.c',
+    'src/runtime_cuda.c',
     'src/wasm_builder.c',
     'src/render_wasm.c',
     'src/frontend.c',
@@ -110,7 +111,9 @@ def main():
         src = os.path.join(repo_root, f)
         dst = os.path.join(csrc_dir, f)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(src, dst)
+        # Do not preserve mtimes here: editable builds rely on fresh csrc/
+        # timestamps so setuptools recompiles changed native sources.
+        shutil.copy(src, dst)
         copied += 1
 
     print(f'sync-csrc: copied {copied} files to {csrc_dir}')

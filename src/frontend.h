@@ -248,6 +248,10 @@ PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x,
                       const int64_t *shape, int ndim, int axis);
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x,
                           const int64_t *shape, int ndim, int axis);
+PolyUOp *poly_cross_entropy(PolyCtx *ctx,
+                            PolyUOp *logits, const int64_t *logits_shape, int logits_ndim,
+                            PolyUOp *target, const int64_t *target_shape, int target_ndim,
+                            int axis, int64_t *out_shape, int *out_ndim);
 
 /* ── Einsum ────────────────────────────────────────────────────────── */
 

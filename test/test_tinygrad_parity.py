@@ -231,6 +231,23 @@ def build_matmul_small() -> tuple[Tensor, ...]:
     return ((ae * be).sum(axis=2),)
 
 
+def build_matmul_broadcast() -> tuple[Tensor, ...]:
+    a = Tensor(np.array([
+        [[1, 2], [3, 4]],
+        [[5, 6], [7, 8]],
+    ], dtype=np.float32))
+    b = Tensor(np.array([
+        [[1, 10], [100, 1000]],
+    ], dtype=np.float32))
+    return (a.matmul(b),)
+
+
+def build_cross_entropy_nonlast_axis() -> tuple[Tensor, ...]:
+    logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
+    target = Tensor(np.array([[0, 2], [1, 0]], dtype=np.int32))
+    return (logits.cross_entropy(target),)
+
+
 CaseBuilder = Callable[[], tuple[Tensor, ...]]
 CASES: dict[str, CaseBuilder] = {
     "vecadd": build_vecadd,
@@ -264,6 +281,8 @@ CASES: dict[str, CaseBuilder] = {
     "grad_where_sum": build_grad_where_sum,
     "grad_multi_use": build_grad_multi_use,
     "matmul_small": build_matmul_small,
+    "matmul_broadcast": build_matmul_broadcast,
+    "cross_entropy_nonlast_axis": build_cross_entropy_nonlast_axis,
 }
 
 STRUCTURE_KEYS: tuple[str, ...] = (

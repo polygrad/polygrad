@@ -266,6 +266,121 @@ async function runTests(pg) {
     assertClose(await a.dot(b).toArray(), [19, 22, 43, 50])
   })
 
+  await test('matmul shape mismatch throws', async () => {
+    const a = new Tensor([[1, 2], [3, 4]])
+    const b = new Tensor([[1, 2, 3]])
+    let threw = false
+    try {
+      a.dot(b)
+    } catch (err) {
+      threw = /cannot dot/.test(String(err))
+    }
+    assert(threw, 'expected matmul shape mismatch to throw')
+  })
+
+  await test('matmul broadcast batch', async () => {
+    const a = new Tensor([
+      [[1, 2], [3, 4]],
+      [[5, 6], [7, 8]]
+    ])
+    const b = new Tensor([
+      [[1, 10], [100, 1000]]
+    ])
+    const out = a.dot(b)
+    assertShape(out.shape, [2, 2, 2])
+    assertClose(await out.toArray(), [201, 2010, 403, 4030, 605, 6050, 807, 8070])
+  })
+
+  await test('matmul broadcast mismatch throws', async () => {
+    const a = new Tensor([
+      [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+      [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]
+    ])
+    const b = new Tensor(new Array(5).fill(0).map(() => [
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0]
+    ]))
+    let threw = false
+    try {
+      a.dot(b)
+    } catch (err) {
+      threw = /cannot dot/.test(String(err))
+    }
+    assert(threw, 'expected broadcast mismatch to throw')
+  })
+
+  await test('crossEntropy with sparse targets', async () => {
+    const logits = new Tensor([[0, 0, 0], [0, 0, 0]])
+    const target = new Tensor([0, 2])
+    const loss = await logits.crossEntropy(target)
+    assertShape(loss.shape, [])
+    assertClose(await loss.toArray(), [Math.log(3)])
+  })
+
+  await test('crossEntropy with dense targets', async () => {
+    const logits = new Tensor([[0, 0, 0], [0, 0, 0]])
+    const target = new Tensor([[1, 0, 0], [0, 0, 1]])
+    const loss = await logits.crossEntropy(target)
+    assertShape(loss.shape, [])
+    assertClose(await loss.toArray(), [Math.log(3)])
+  })
+
+  await test('crossEntropy with sparse targets on non-last axis', async () => {
+    const logits = new Tensor([
+      [[0, 0], [0, 0], [0, 0]],
+      [[0, 0], [0, 0], [0, 0]]
+    ])
+    const target = new Tensor([
+      [0, 2],
+      [1, 0]
+    ])
+    const loss = await logits.crossEntropy(target, -2)
+    assertShape(loss.shape, [])
+    assertClose(await loss.toArray(), [Math.log(3)])
+  })
+
+  await test('crossEntropy default matches tinygrad class axis', async () => {
+    const logits = new Tensor([
+      [[0, 0], [0, 0], [0, 0]],
+      [[0, 0], [0, 0], [0, 0]]
+    ])
+    const target = new Tensor([
+      [0, 2],
+      [1, 0]
+    ])
+    const loss = await logits.crossEntropy(target)
+    assertShape(loss.shape, [])
+    assertClose(await loss.toArray(), [Math.log(3)])
+  })
+
+  await test('crossEntropy with dense targets on non-last axis', async () => {
+    const logits = new Tensor([
+      [[0, 0], [0, 0], [0, 0]],
+      [[0, 0], [0, 0], [0, 0]]
+    ])
+    const target = new Tensor([
+      [[1, 0], [0, 0], [0, 1]],
+      [[0, 1], [1, 0], [0, 0]]
+    ])
+    const loss = await logits.crossEntropy(target, 1)
+    assertShape(loss.shape, [])
+    assertClose(await loss.toArray(), [Math.log(3)])
+  })
+
+  await test('crossEntropy shape mismatch throws', async () => {
+    const logits = new Tensor([[0, 0, 0], [0, 0, 0]])
+    const target = new Tensor([[1, 0], [0, 1]])
+    let threw = false
+    try {
+      await logits.crossEntropy(target)
+    } catch (err) {
+      threw = /shape mismatch/.test(String(err))
+    }
+    assert(threw, 'expected crossEntropy shape mismatch to throw')
+  })
+
   // -- Autograd --
   console.log('\n-- Autograd --')
 

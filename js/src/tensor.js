@@ -869,6 +869,9 @@ function createBoundTensorClass(runtime) {
       const r = ffi.poly_dot(this._ctx,
         this._uop, this._shape, this._shape.length,
         w._uop, w._shape, w._shape.length)
+      if (!r.uop) {
+        throw new Error(`cannot dot ${JSON.stringify(this._shape)} and ${JSON.stringify(w._shape)}`)
+      }
       return this._makeResult(r.uop, r.shape, [this, w])
     }
 
@@ -883,9 +886,17 @@ function createBoundTensorClass(runtime) {
     // --- Loss functions ---
 
     async crossEntropy(target, axis) {
-      if (axis === undefined) axis = -1
-      const logProbs = await this.logSoftmax(axis)
-      return target.mul(logProbs).neg().sum(axis).mean()
+      if (axis === undefined) axis = this._shape.length === 1 ? 0 : 1
+      if (!(target instanceof Tensor)) target = new Tensor(target)
+      const { ffi } = this._rt._backend
+      const r = ffi.poly_cross_entropy(this._ctx,
+        this._uop, this._shape, this._shape.length,
+        target._uop, target._shape, target._shape.length,
+        axis)
+      if (!r.uop) {
+        throw new Error(`shape mismatch: self.shape=${JSON.stringify(this._shape)}, target.shape=${JSON.stringify(target._shape)}`)
+      }
+      return this._makeResult(r.uop, r.shape, [this, target])
     }
 
     binaryCrossEntropy(target) {

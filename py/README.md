@@ -1,9 +1,13 @@
 # Polygrad Python
 
-tinygrad-compatible Tensor API for Python. Thin ctypes wrapper around the C core — each method is one FFI call.
+Python bindings for polygrad, a C11 port of tinygrad's compiler core.
 
-Project home and docs: https://polygrad.org
-Source code and issue tracker: https://github.com/polygrad/polygrad
+Polygrad moves the compiler and runtime out of Python and into a reusable native library that can be called from multiple frontends, including Python, JavaScript, and R.
+
+This package exposes that core as a lazy Tensor API with autograd, neural network layers, compiled training steps, and HuggingFace model loading.
+
+- Project home and docs: https://polygrad.org
+- Source code and issue tracker: https://github.com/polygrad/polygrad
 
 ## Installation
 
@@ -11,11 +15,19 @@ Source code and issue tracker: https://github.com/polygrad/polygrad
 pip install polygrad
 ```
 
-**Build requirements:** C compiler (gcc or clang) and Python development headers (`python3-dev`).
+**Build requirements:** A C compiler (`gcc` or `clang`) and Python development headers (`python3-dev`).
 
-**Runtime requirement:** `clang` must be on PATH. polygrad compiles compute kernels at runtime via clang.
+**Runtime requirement:** `clang` must be on `PATH`. polygrad compiles compute kernels at runtime.
 
-Install requirements: Python >= 3.9, numpy. Linux only (uses POSIX fork/dlopen).
+Package requirements: Python >= 3.9 and `numpy`.
+
+Platform support: Linux only. The current CPU runtime uses POSIX `fork()` and `dlopen()`.
+
+PyPI package notes:
+- `float32` and `float64` dtypes
+- tinygrad-style `device=` and `.to(...)`
+- CPU works by default, CUDA is detected at runtime
+- `download_hf()` additionally requires `huggingface_hub`
 
 For development:
 
@@ -47,6 +59,22 @@ x.requires_grad = True
 loss = (x * x).sum()
 loss.backward()
 print(x.grad.numpy())  # [2.0, 4.0, 6.0]
+```
+
+## Devices
+
+```python
+from polygrad import Device, Tensor
+
+x = Tensor.rand(4)
+
+if Device.cuda_available():
+    y = (x * 2).to('cuda')
+    print(y.device)      # CUDA
+    print(y.numpy())     # executes on CUDA, returns host numpy array
+else:
+    y = (x * 2).to('cpu')
+    print(y.device)      # CPU
 ```
 
 ## Training Example
@@ -95,8 +123,8 @@ print(f"loss: {loss.item():.4f}")
 |----------|------|-------------|
 | `shape` | tuple | Dimension sizes |
 | `ndim` | int | Number of dimensions |
-| `dtype` | str | Always `'float32'` |
-| `device` | str | Always `'CPU'` |
+| `dtype` | str | `'float32'` or `'float64'` |
+| `device` | str | Current tensor device (`'CPU'` or `'CUDA'`) |
 | `T` | Tensor | Transpose of last two dims |
 | `requires_grad` | bool | Settable; enables autograd |
 | `grad` | Tensor/None | Gradient after `.backward()` |
@@ -109,6 +137,8 @@ print(f"loss: {loss.item():.4f}")
 | `numpy()` | ndarray | Realize and return numpy array |
 | `item()` | float | Scalar value |
 | `tolist()` | list | Nested Python list |
+| `to(device)` | Tensor | Copy tensor view to `'cpu'` or `'cuda'` |
+| `cpu()` / `cuda()` | Tensor | Convenience wrappers for `to(...)` |
 | `numel()` | int | Total elements |
 | `size(dim=None)` | tuple/int | Shape or dimension size |
 | `detach()` | Tensor | Copy without graph |
@@ -322,29 +352,40 @@ for i in range(100):
 
 ## HuggingFace Model Loading
 
-Load pre-trained models directly from HuggingFace format (config.json + safetensors).
+Load pre-trained models directly from HuggingFace format (`config.json` + safetensors).
+
+To use `download_hf()`, install the optional Hub client first:
+
+```bash
+pip install huggingface_hub
+```
 
 ```python
 from polygrad.hf import load_hf, download_hf, generate
 import numpy as np
+import json
+from pathlib import Path
 
-# Download a model from HuggingFace Hub
-model_path = download_hf('gpt2')
+# Download a small GPT-2 checkpoint from HuggingFace Hub
+model_path = download_hf('hf-internal-testing/tiny-random-gpt2')
+config = json.loads((Path(model_path) / 'config.json').read_text())
+vocab_size = config['vocab_size']
+max_seq_len = 16
 
 # Load into a PolyInstance
-inst = load_hf(model_path, max_batch=1, max_seq_len=128)
+inst = load_hf(model_path, max_batch=1, max_seq_len=max_seq_len)
 
 # Run forward pass
+tokens = np.array([[1, 2, 3, 4]], dtype=np.float32)
 outputs = inst.forward(
-    x=np.array([[50256, 464, 3616, 286, 1204, 318]], dtype=np.float32),
-    positions=np.arange(6, dtype=np.float32).reshape(1, -1),
-    arange=np.arange(128, dtype=np.float32)
+    x=tokens,
+    positions=np.arange(tokens.shape[1], dtype=np.float32).reshape(1, -1),
+    arange=np.arange(max_seq_len, dtype=np.float32)
 )
-logits = outputs['output']  # (1, max_seq_len, vocab_size)
+logits = outputs['output'].reshape(1, max_seq_len, vocab_size)
 
 # Autoregressive generation
-tokens = np.array([[50256, 464, 3616, 286, 1204, 318]], dtype=np.float32)
-result = generate(inst, tokens, max_new_tokens=20, temperature=0.8, top_k=40)
+result = generate(inst, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
 ```
 
 ### HF API
@@ -367,8 +408,7 @@ Supported model types: GPT-2. Weight formats: F32, F16, BF16 safetensors (single
 
 ## Limitations
 
-- float32 only
-- CPU only (GPU backends planned)
+- CPU is the default path. CUDA execution requires a working CUDA runtime (`libcuda` and `libnvrtc`) on the host.
 - Conv2d and BatchNorm are stubs (forward raises NotImplementedError)
 
 ## Tests

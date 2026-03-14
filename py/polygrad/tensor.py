@@ -1,6 +1,6 @@
 """
-Tensor class for polygrad — lazy evaluation backed by C compiler core.
-CPU-only. Supports float32 (default) and float64 dtypes.
+Tensor class for polygrad, lazy evaluation backed by the C compiler core.
+Supports float32 (default) and float64 dtypes.
 """
 
 import ctypes
@@ -95,11 +95,13 @@ class Tensor:
     _compile_mode = False  # suppress realize() for compile_step tracing
     _compile_assigns_ordered = []  # class-level: ASSIGN UOps in program order
 
-    def __init__(self, data=None, requires_grad=False, *, dtype=None, _ctx=None, _uop=None,
-                 _buffer=None, _data=None, _shape=None, _inputs=None, _dtype=None):
+    def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
+                 _buffer=None, _data=None, _shape=None, _inputs=None, _dtype=None, _device=None):
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
+        from .device import Device
         self._ctx = _ctx or _default_ctx
+        self._device = Device.canonicalize(_device if _device is not None else device)
 
         if _uop is not None:
             # Internal construction (from ops)
@@ -158,8 +160,7 @@ class Tensor:
 
     @property
     def device(self):
-        from .device import Device
-        return Device.DEFAULT
+        return self._device
 
     @property
     def requires_grad(self):
@@ -168,6 +169,10 @@ class Tensor:
     @requires_grad.setter
     def requires_grad(self, val):
         self._requires_grad = val
+
+    def requires_grad_(self, val=True):
+        self._requires_grad = val
+        return self
 
     @property
     def grad(self):
@@ -255,8 +260,7 @@ class Tensor:
         if self._data is not None:
             return
 
-        from .device import Device
-        if Device.DEFAULT == 'CUDA':
+        if self._device == 'CUDA':
             return self._realize_cuda()
 
         # Collect all leaf tensor bindings
@@ -307,13 +311,23 @@ class Tensor:
 
     def _realize_cuda(self):
         """Execute the lazy graph on GPU via CUDA backend."""
+        if not _ffi._has_cuda_ffi:
+            raise RuntimeError('polygrad was built without CUDA support')
+        if not _ffi._lib.poly_cuda_available():
+            raise RuntimeError('CUDA not available')
+
         # Collect all leaf tensor bindings
         leaves = self._collect_leaves()
 
         # Build output buffer
         numel = int(np.prod(self._shape)) if self._shape else 1
-        out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
-        out_data = np.zeros(numel, dtype=np.float32)
+        is_f64 = self._dtype_str == 'float64'
+        np_dt = np.float64 if is_f64 else np.float32
+        if is_f64:
+            out_buf = _ffi._lib.poly_buffer_f64(self._ctx, numel)
+        else:
+            out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
+        out_data = np.zeros(numel, dtype=np_dt)
 
         # Build STORE + SINK
         store = _ffi._lib.poly_store_val(self._ctx, out_buf, self._uop)
@@ -334,7 +348,7 @@ class Tensor:
         # Run on GPU
         ret = _ffi._lib.poly_realize_cuda(self._ctx, sink, c_bindings, n)
         if ret != 0:
-            raise RuntimeError('poly_realize_cuda failed')
+            raise RuntimeError(f'poly_realize_cuda failed ({ret})')
 
         # Copy results back from GPU to host
         _ffi._lib.poly_cuda_copyback(c_bindings, n)
@@ -388,6 +402,7 @@ class Tensor:
         ref._saved_uop = None
         ref._saved_inputs = None
         ref._dtype_str = self._dtype_str
+        ref._device = self._device
         return ref
 
     def _realize_assign(self):
@@ -479,10 +494,45 @@ class Tensor:
         return self.numpy().tolist()
 
     def detach(self):
-        return Tensor(self.numpy(), dtype=self._dtype_str)
+        return Tensor(self.numpy(), dtype=self._dtype_str, device=self._device)
 
     def clone(self):
-        return Tensor(self.numpy(), requires_grad=self._requires_grad, dtype=self._dtype_str)
+        return Tensor(
+            self.numpy(),
+            requires_grad=self._requires_grad,
+            dtype=self._dtype_str,
+            device=self._device,
+        )
+
+    def to(self, device):
+        from .device import Device
+
+        dev = Device.canonicalize(device)
+        if dev == self._device:
+            return self
+
+        out = Tensor(
+            _ctx=self._ctx,
+            _uop=self._uop,
+            _buffer=self._buffer,
+            _data=self._data,
+            _shape=self._shape,
+            _inputs=self._inputs[:],
+            _dtype=self._dtype_str,
+            _device=dev,
+            requires_grad=self._requires_grad,
+        )
+        out._grad = self._grad.to(dev) if self._grad is not None else None
+        out._is_param = self._is_param
+        out._saved_uop = self._saved_uop
+        out._saved_inputs = self._saved_inputs[:] if self._saved_inputs is not None else None
+        return out
+
+    def cpu(self):
+        return self.to('cpu')
+
+    def cuda(self):
+        return self.to('cuda')
 
     def contiguous(self):
         return self  # no-op for now
@@ -492,6 +542,7 @@ class Tensor:
     def _make_result(self, uop, shape, inputs):
         # Infer dtype from inputs: if any input is float64, result is float64
         dt = 'float32'
+        dev = self._infer_device(inputs)
         for t in inputs:
             if hasattr(t, '_dtype_str') and t._dtype_str == 'float64':
                 dt = 'float64'
@@ -500,7 +551,22 @@ class Tensor:
             _ctx=self._ctx, _uop=uop, _shape=shape, _inputs=inputs,
             requires_grad=any(t._requires_grad for t in inputs),
             _dtype=dt,
+            _device=dev,
         )
+
+    def _infer_device(self, inputs):
+        from .device import Device
+
+        devices = {
+            t._device
+            for t in inputs
+            if hasattr(t, '_device')
+        }
+        if not devices:
+            return self._device
+        if len(devices) != 1:
+            raise RuntimeError(f'Mixed devices are not supported: {sorted(devices)}')
+        return Device.canonicalize(next(iter(devices)))
 
     def _ensure_tensor(self, other):
         if isinstance(other, Tensor):
@@ -512,7 +578,7 @@ class Tensor:
             else:
                 c = _ffi._lib.poly_const_float(self._ctx, float(other))
             return Tensor(_ctx=self._ctx, _uop=c, _shape=(), _inputs=[],
-                          _dtype=self._dtype_str)
+                          _dtype=self._dtype_str, _device=self._device)
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
 
     def _broadcast_shape(self, other_shape):
@@ -657,7 +723,10 @@ class Tensor:
         x = self._ensure_tensor(x)
         y = self._ensure_tensor(y)
         out_shape = self._broadcast_shape(x._shape)
-        out_shape = Tensor(_ctx=self._ctx, _uop=self._uop, _shape=out_shape, _inputs=[])._broadcast_shape(y._shape)
+        out_shape = Tensor(
+            _ctx=self._ctx, _uop=self._uop, _shape=out_shape, _inputs=[],
+            _device=self._device,
+        )._broadcast_shape(y._shape)
         c_uop = self._broadcast_uop(out_shape)
         x_uop = x._broadcast_uop(out_shape)
         y_uop = y._broadcast_uop(out_shape)
@@ -1078,6 +1147,8 @@ class Tensor:
         uop = _ffi._lib.poly_dot(self._ctx,
             self._uop, x_sh, x_n, w._uop, w_sh, w_n,
             out_shape, ctypes.byref(out_ndim))
+        if not uop:
+            raise ValueError(f'cannot dot {self._shape} and {w._shape}')
         return self._make_result(uop, _read_shape(out_shape, out_ndim), [self, w])
 
     def matmul(self, other):
@@ -1099,11 +1170,25 @@ class Tensor:
 
     # --- Loss functions ---
 
-    def cross_entropy(self, target, axis=-1):
-        """Cross-entropy loss: -log_softmax(self, axis)[target]."""
-        log_probs = self.log_softmax(axis=axis)
-        # Simple implementation: -(target * log_probs).sum(-1).mean()
-        return -(target * log_probs).sum(axis=axis).mean()
+    def cross_entropy(self, target, axis=None):
+        """Cross-entropy loss for class-index or same-shape probability targets."""
+        if not isinstance(target, Tensor):
+            target = Tensor(target, device=self._device)
+        target = target.to(self._device)
+        if axis is None:
+            axis = 0 if self.ndim == 1 else 1
+        logits_sh, logits_n = _shape_array(self._shape)
+        target_sh, target_n = _shape_array(target._shape)
+        out_shape, out_ndim = _out_shape()
+        uop = _ffi._lib.poly_cross_entropy(
+            self._ctx,
+            self._uop, logits_sh, logits_n,
+            target._uop, target_sh, target_n,
+            axis, out_shape, ctypes.byref(out_ndim)
+        )
+        if not uop:
+            raise ValueError(f'shape mismatch: self.shape={self._shape}, target.shape={target._shape}')
+        return self._make_result(uop, _read_shape(out_shape, out_ndim), [self, target])
 
     def binary_crossentropy(self, target):
         return -(target * self.log() + (1.0 - target) * (1.0 - self).log()).mean()
@@ -1187,7 +1272,8 @@ class Tensor:
         if not uop:
             raise ValueError(f'poly_einsum failed for formula: {formula}')
         shape = tuple(out_shape[i] for i in range(out_ndim.value))
-        return Tensor(_ctx=ctx, _uop=uop, _shape=shape, _inputs=list(operands))
+        dev = operands[0]._infer_device(list(operands))
+        return Tensor(_ctx=ctx, _uop=uop, _shape=shape, _inputs=list(operands), _device=dev)
 
     # --- Rearrange (C core, einops-style) ---
 
@@ -1484,8 +1570,14 @@ class Tensor:
 
             snap_leaves = []
             for l in all_leaves:
-                snap_leaves.append(Tensor(_ctx=self._ctx, _uop=l._uop, _buffer=l._buffer, _data=l._data, _shape=l._shape))
-            grad_tensor = Tensor(_ctx=self._ctx, _uop=grad_uop, _shape=leaf._shape, _inputs=snap_leaves)
+                snap_leaves.append(Tensor(
+                    _ctx=self._ctx, _uop=l._uop, _buffer=l._buffer, _data=l._data,
+                    _shape=l._shape, _dtype=l._dtype_str, _device=l._device,
+                ))
+            grad_tensor = Tensor(
+                _ctx=self._ctx, _uop=grad_uop, _shape=leaf._shape, _inputs=snap_leaves,
+                _dtype=leaf._dtype_str, _device=leaf._device,
+            )
             if leaf._grad is not None:
                 leaf._grad = leaf._grad + grad_tensor
             else:
@@ -1702,18 +1794,27 @@ class Tensor:
 
                 # Also set _grad if this intermediate wants gradients
                 if t._requires_grad:
-                    t._grad = Tensor(g_data.reshape(t._shape), _ctx=self._ctx)
+                    t._grad = Tensor(g_data.reshape(t._shape), _ctx=self._ctx, device=t._device)
 
             elif t._requires_grad:
                 # Non-intermediate params/tensors: lazy gradient (UOp graph
                 # wraps the gradient computation, realized when consumed).
                 inputs = []
                 for l in all_leaves:
-                    inputs.append(Tensor(_ctx=self._ctx, _uop=l._uop, _buffer=l._buffer, _data=l._data, _shape=l._shape))
+                    inputs.append(Tensor(
+                        _ctx=self._ctx, _uop=l._uop, _buffer=l._buffer, _data=l._data,
+                        _shape=l._shape, _dtype=l._dtype_str, _device=l._device,
+                    ))
                 if extra_bufs is not None:
                     for buf, data in extra_bufs:
-                        inputs.append(Tensor(_ctx=self._ctx, _uop=buf, _buffer=buf, _data=data, _shape=(len(data),)))
-                grad_tensor = Tensor(_ctx=self._ctx, _uop=grad_val, _shape=t._shape, _inputs=inputs)
+                        inputs.append(Tensor(
+                            _ctx=self._ctx, _uop=buf, _buffer=buf, _data=data,
+                            _shape=(len(data),), _device=t._device,
+                        ))
+                grad_tensor = Tensor(
+                    _ctx=self._ctx, _uop=grad_val, _shape=t._shape, _inputs=inputs,
+                    _dtype=t._dtype_str, _device=t._device,
+                )
                 if t._grad is not None:
                     t._grad = t._grad + grad_tensor
                 else:

@@ -1,6 +1,7 @@
 """polygrad -- Python frontend for the polygrad C11 tensor compiler."""
 
 import atexit
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from . import _ffi
 
@@ -13,4 +14,8 @@ from .dtype import dtypes
 from .device import Device
 
 __all__ = ['Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device']
-__version__ = '0.2.0'
+
+try:
+    __version__ = _pkg_version('polygrad')
+except PackageNotFoundError:
+    __version__ = '0+unknown'
