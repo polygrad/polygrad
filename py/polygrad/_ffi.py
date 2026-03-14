@@ -187,6 +187,9 @@ def _declare_signatures(lib):
     lib.poly_buffer_f64.restype = _ptr
     lib.poly_buffer_f64.argtypes = [_ptr, ctypes.c_int64]
 
+    lib.poly_cast_by_id.restype = _ptr
+    lib.poly_cast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
+
     # --- Composed elementwise ops (shape-free) ---
     for n in ['poly_exp', 'poly_log', 'poly_log1p', 'poly_expm1',
               'poly_sin', 'poly_cos', 'poly_tan',

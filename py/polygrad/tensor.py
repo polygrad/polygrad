@@ -537,6 +537,68 @@ class Tensor:
     def contiguous(self):
         return self  # no-op for now
 
+    # --- Dtype casting ---
+
+    # Dtype name -> cast_by_id index mapping
+    _DTYPE_IDS = {
+        'bool': 1, 'int8': 2, 'uint8': 3,
+        'int16': 4, 'uint16': 5, 'int32': 6, 'uint32': 7,
+        'int64': 8, 'uint64': 9, 'float16': 10, 'bfloat16': 11,
+        'float32': 12, 'float64': 13,
+    }
+
+    def cast(self, dtype):
+        """Cast tensor to the given dtype. No-op if already that dtype."""
+        from .dtype import dtypes
+        if isinstance(dtype, str):
+            target_name = dtype
+        elif hasattr(dtype, 'name'):
+            target_name = dtype.name
+        else:
+            target_name = str(dtype)
+        if target_name == self._dtype_str:
+            return self
+        dtype_id = self._DTYPE_IDS.get(target_name)
+        if dtype_id is None:
+            raise ValueError(f'unsupported cast target dtype: {target_name}')
+        uop = _ffi._lib.poly_cast_by_id(self._ctx, self._uop, dtype_id)
+        if not uop:
+            raise RuntimeError(f'poly_cast_by_id failed for dtype {target_name}')
+        return Tensor(_ctx=self._ctx, _uop=uop, _shape=self._shape,
+                      _inputs=[self], _dtype=target_name, _device=self._device)
+
+    def half(self):
+        """Cast to float16."""
+        return self.cast('float16')
+
+    def float(self):
+        """Cast to float32."""
+        return self.cast('float32')
+
+    def double(self):
+        """Cast to float64."""
+        return self.cast('float64')
+
+    def int(self):
+        """Cast to int32."""
+        return self.cast('int32')
+
+    def long(self):
+        """Cast to int64."""
+        return self.cast('int64')
+
+    def short(self):
+        """Cast to int16."""
+        return self.cast('int16')
+
+    def bool(self):
+        """Cast to bool."""
+        return self.cast('bool')
+
+    def bfloat16(self):
+        """Cast to bfloat16."""
+        return self.cast('bfloat16')
+
     # --- Internal helpers ---
 
     def _make_result(self, uop, shape, inputs):
