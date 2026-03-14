@@ -490,7 +490,7 @@ class Tensor:
     def numpy(self):
         """Realize the computation and return as numpy array."""
         if self._data is None:
-            self._realize()
+            self.realize()
         return self._data.reshape(self._shape).copy()
 
     def item(self):
