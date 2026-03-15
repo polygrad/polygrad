@@ -265,6 +265,22 @@ typedef struct {
   int failed_item_index; /* which exec item failed, -1 if N/A */
 } PolyExecStatus;
 
+/* ── Prepared step construction ───────────────────────────────────────── */
+/*
+ * Build a backend-neutral execution plan from a tensor-level SINK.
+ * Calls poly_schedule_v2() internally, populates exec items from the
+ * schedule result, and builds the buffer slot table.
+ *
+ * All items are POLY_EXEC_COMPUTE in the current implementation.
+ * The prepared step stores scheduled kernel roots (pre-lowering).
+ *
+ * Returns NULL on error.
+ */
+PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
+                                    PolyCompileMode mode);
+
+void poly_prepared_step_free(PolyPreparedStep *step);
+
 #ifdef __cplusplus
 }
 #endif
