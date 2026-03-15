@@ -281,6 +281,41 @@ PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
 
 void poly_prepared_step_free(PolyPreparedStep *step);
 
+/* ── Executable step construction ────────────────────────────────────── */
+/*
+ * Lower a prepared step into a backend-specific executable for a device.
+ * For each COMPUTE item, calls the backend's linearize -> render -> compile
+ * pipeline and populates a PolyRunner. Allocates intermediate buffers.
+ *
+ * ctx is needed for linearization (arena allocation of rewritten UOps).
+ * Currently only POLY_DEVICE_CPU is implemented.
+ *
+ * Returns NULL on error.
+ */
+PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
+                                    PolyDeviceId device);
+
+/*
+ * Execute a lowered step with bound buffer data.
+ *
+ * slot_data is indexed by prepared step buf_slot index. External slots
+ * must have non-NULL data pointers. Intermediate slots are ignored
+ * (the executable step owns its own intermediate buffers).
+ *
+ * var_bindings override the prepared step's default_vars (same var -> last wins).
+ *
+ * Returns 0 on success, <0 on error.
+ */
+int poly_executable_step_run(PolyExecutableStep *step,
+                             void **slot_data, int n_slots,
+                             struct PolyVarBinding *var_bindings, int n_var_bindings);
+
+void poly_executable_step_free(PolyExecutableStep *step);
+
+/* ── CPU allocator ───────────────────────────────────────────────────── */
+
+extern const PolyAllocator POLY_CPU_ALLOCATOR;
+
 #ifdef __cplusplus
 }
 #endif

@@ -168,3 +168,150 @@ TEST(exec_plan, prepare_graph_hash) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ── Phase 3: Lower + Run ─────────────────────────────────────────────── */
+
+TEST(exec_plan, lower_and_run_vecadd) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+
+  PolyExecutableStep *es = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+  ASSERT_INT_EQ(es->n_runners, ps->n_items);
+  ASSERT_EQ(es->device, POLY_DEVICE_CPU);
+
+  /* Prepare data */
+  float da[] = {1, 2, 3, 4};
+  float db[] = {10, 20, 30, 40};
+  float dout[4] = {0};
+
+  /* Build slot_data array indexed by buf_slot */
+  void *slot_data[3];
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+    else slot_data[i] = NULL;
+  }
+
+  int ret = poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0);
+  ASSERT_INT_EQ(ret, 0);
+
+  ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-6);
+  ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-6);
+  ASSERT_FLOAT_EQ(dout[2], 33.0f, 1e-6);
+  ASSERT_FLOAT_EQ(dout[3], 44.0f, 1e-6);
+
+  poly_executable_step_free(es);
+  poly_prepared_step_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, lower_and_run_multikernel) {
+  /* sum(a) -> reshape -> expand -> add(b) -> out
+   * Multi-kernel: reduce produces intermediate. */
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
+
+  int64_t axes[] = {0};
+  int64_t one_sh[] = {1};
+  int64_t exp_sh[] = {N};
+  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *s1 = poly_reshape(ctx, s, one_sh, 1);
+  PolyUOp *se = poly_expand(ctx, s1, exp_sh, 1);
+  PolyUOp *c = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, se, b, poly_arg_none());
+  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, c, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
+
+  PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+
+  PolyExecutableStep *es = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+  ASSERT_TRUE(es->n_intermediates > 0);
+
+  /* a = [1..8], sum = 36, b = [10..17], out = 36 + b */
+  float da[8], db[8], dout[8];
+  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); db[i] = (float)(i + 10); }
+  memset(dout, 0, sizeof(dout));
+
+  void *slot_data[16] = {0};
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+  }
+
+  int ret = poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0);
+  ASSERT_INT_EQ(ret, 0);
+
+  /* sum(1..8) = 36, out[i] = 36 + (i + 10) */
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(dout[i], 36.0f + (float)(i + 10), 1e-5);
+
+  poly_executable_step_free(es);
+  poly_prepared_step_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, lower_matches_old_compile_step) {
+  /* Same graph through both old (poly_compile_step) and new (prepare+lower+run).
+   * Results must be identical. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[] = {2, 3, 4, 5};
+  float db[] = {10, 20, 30, 40};
+
+  /* Old path */
+  float dout_old[4] = {0};
+  PolyStep *old_step = poly_compile_step(ctx, sink);
+  ASSERT_TRUE(old_step != NULL);
+  PolyBufferBinding bindings[] = {
+    {a, da}, {b, db}, {out, dout_old}
+  };
+  ASSERT_INT_EQ(poly_step_run(old_step, bindings, 3), 0);
+
+  /* New path */
+  float dout_new[4] = {0};
+  PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyExecutableStep *es = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+
+  void *slot_data[16] = {0};
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout_new;
+  }
+  ASSERT_INT_EQ(poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
+
+  /* Must match exactly */
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(dout_new[i], dout_old[i], 0.0);
+
+  poly_executable_step_free(es);
+  poly_prepared_step_free(ps);
+  poly_step_destroy(old_step);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
