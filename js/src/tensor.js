@@ -426,6 +426,43 @@ function createBoundTensorClass(runtime) {
       return this._makeResult(uop, [...this._shape], [this])
     }
 
+    // --- Cast ---
+
+    cast(dtype) {
+      const DTYPE_IDS = {
+        bool: 1, int8: 2, uint8: 3, int16: 4, uint16: 5,
+        int32: 6, uint32: 7, int64: 8, uint64: 9,
+        float16: 10, bfloat16: 11, float32: 12, float64: 13
+      }
+      if (dtype === this._dtype) return this
+      const id = DTYPE_IDS[dtype]
+      if (id === undefined) throw new Error(`unsupported cast target dtype: ${dtype}`)
+      const { ffi } = this._rt._backend
+      const uop = ffi.poly_cast_by_id(this._ctx, this._uop, id)
+      if (!uop) throw new Error(`poly_cast_by_id failed for dtype ${dtype}`)
+      return new Tensor(null, {
+        _ctx: this._ctx, _uop: uop, _shape: [...this._shape],
+        _inputs: [this], _dtype: dtype, _device: this._device
+      })
+    }
+
+    half() { return this.cast('float16') }
+    double() { return this.cast('float64') }
+
+    // --- Triu/Tril ---
+
+    triu(diagonal = 0) {
+      const { ffi } = this._rt._backend
+      const uop = ffi.poly_triu(this._ctx, this._uop, this._shape, this._shape.length, diagonal)
+      return this._makeResult(uop, [...this._shape], [this])
+    }
+
+    tril(diagonal = 0) {
+      const { ffi } = this._rt._backend
+      const uop = ffi.poly_tril(this._ctx, this._uop, this._shape, this._shape.length, diagonal)
+      return this._makeResult(uop, [...this._shape], [this])
+    }
+
     // --- Unary math (C core composed ops) ---
 
     exp2() {
@@ -755,8 +792,8 @@ function createBoundTensorClass(runtime) {
       const newShape = []
       const expShape = []
       for (let i = 0; i < nd; i++) {
-        newShape.push(shape[i], 1)
-        expShape.push(shape[i], repeats[i])
+        newShape.push(1, shape[i])
+        expShape.push(repeats[i], shape[i])
       }
       const finalShape = shape.map((s, i) => s * repeats[i])
       return this.reshape(newShape).expand(expShape).reshape(finalShape)
@@ -934,6 +971,56 @@ function createBoundTensorClass(runtime) {
           const [start, stop] = i
           const arg = result._shape.map((s, d) => d === dim ? [start, stop] : [0, s])
           result = result.shrink(arg)
+          dim += 1
+        } else if (typeof i === 'object' && i !== null && 'step' in i) {
+          // Slice with step: {start, stop, step}
+          // Reimplements Python's slice.indices(size)
+          const size = result._shape[dim]
+          let step = i.step != null ? i.step : 1
+          if (step === 0) throw new Error('slice step cannot be zero')
+          let start, stop
+          if (step > 0) {
+            start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, 0) : Math.min(i.start, size)) : 0
+            stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, 0) : Math.min(i.stop, size)) : size
+          } else {
+            start = i.start != null ? (i.start < 0 ? Math.max(i.start + size, -1) : Math.min(i.start, size - 1)) : size - 1
+            stop = i.stop != null ? (i.stop < 0 ? Math.max(i.stop + size, -1) : Math.min(i.stop, size - 1)) : -1
+          }
+          // Compute boundary and stride (matching tinygrad _getitem)
+          let boundary = [start, stop]
+          const stride = step
+          if (stride * (boundary[1] - boundary[0]) < 0) {
+            boundary = [0, 0]
+          } else if (stride < 0) {
+            boundary = [boundary[1] + 1, boundary[0] + 1]
+          }
+          // shrink to boundary
+          const shrinkArg = result._shape.map((s, d) => d === dim ? boundary : [0, s])
+          result = result.shrink(shrinkArg)
+          // flip if negative stride
+          if (stride < 0) result = result.flip(dim)
+          const absStride = Math.abs(stride)
+          // apply stride via pad+reshape+shrink+reshape
+          if (absStride !== 1) {
+            const sh = [...result._shape]
+            // pad to multiple of stride
+            const rem = sh[dim] % absStride
+            if (rem !== 0) {
+              const padAmt = absStride - rem
+              const padding = sh.map((_, d) => d === dim ? [0, padAmt] : [0, 0])
+              result = result.pad(padding)
+              sh[dim] += padAmt
+            }
+            // reshape: split dim into (n_groups, stride)
+            const newSh = [...sh.slice(0, dim), sh[dim] / absStride, absStride, ...sh.slice(dim + 1)]
+            result = result.reshape(...newSh)
+            // shrink to first element of each stride group
+            const shrinkArg2 = result._shape.map((s, d) => d === dim + 1 ? [0, 1] : [0, s])
+            result = result.shrink(shrinkArg2)
+            // reshape back, collapsing the stride dim
+            const finalSh = [...result._shape.slice(0, dim), result._shape[dim], ...result._shape.slice(dim + 2)]
+            result = result.reshape(...finalSh)
+          }
           dim += 1
         } else {
           throw new Error(`Unsupported index type: ${typeof i}`)

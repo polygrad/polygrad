@@ -45,7 +45,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────────────┘    └────────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64 (double) support across all layers: C core transcendentals (EXP2/LOG2/SIN), WASM renderer (scalar + f64x2 SIMD), and all frontends. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles at `js/dist/polygrad.js` and `js/dist/polygrad.mjs`. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 (or any supported architecture) directly from config.json + safetensors, run inference, fine-tune. Verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
+**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
 
 **What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
@@ -133,17 +133,42 @@ Tier 1 (bitwise): same platform + binary + seed -> identical floats. Tested by `
 
 Tier 2 (statistical): mean/variance within expected bounds. Tested by `c2c_rand_range_and_stats` and `c2c_randn_tails`.
 
+## Performance
+
+Polygrad compiles tensor operations into fused C kernels at runtime. A disk cache (`~/.cache/polygrad/`) persists compiled kernels across process restarts.
+
+| Metric | Value |
+|--------|-------|
+| Cold compilation (first run) | ~170ms per kernel |
+| Warm cache hit | ~0.5ms per kernel (300x+ speedup) |
+| Tensor creation from numpy | Zero-copy (no memcpy for contiguous arrays) |
+| numpy() readback | Zero-copy (returns view) |
+
+**Kernel fusion advantage:** Polygrad fuses chains of element-wise operations into a single kernel that makes one pass over memory. Numpy executes each operation separately (one pass per op). At large array sizes, this cache-locality advantage is significant:
+
+```
+5-op chain (a+b)*(a-b)+a*b on 5M float32 elements:
+  numpy:    ~19ms  (5 passes over 20MB)
+  polygrad: ~2.8ms (1 fused pass)
+  polygrad is 7x faster
+```
+
+Environment variables:
+- `POLY_OPT=0|1|2` -- optimization level for kernel compilation (default: 2)
+- `POLY_CACHE=0` -- disable disk cache (always recompile)
+- `POLY_DUMP_KERNELS=1` -- print generated C kernel source
+
 ## Building
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test          # build + run 415 C tests (ASan/UBSan)
+make test           # build + run 453 C tests (ASan/UBSan)
 make test-wasm     # build + run 68 WASM tests
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
 
 # Frontend tests
-python -m pytest py/tests/ -v        # 130 Python tests
+python -m pytest py/tests/ -v        # 164 Python tests (tensor, nn, hf, instance, perf)
 node js/test/test_tensor.js          # 109 JS tests
 node js/test/test_instance.js        # 192 JS tests (MLP Instance)
 node js/test/test_hf.js              # 36 JS tests (HF model loading)
@@ -167,6 +192,8 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Dtype-correct special math: lgamma, digamma, erf/erfc/erfinv, ndtri, log1p, expm1 propagate input dtype through all internal constants (f64 inputs get f64 kernels)
 - [x] **31/31 IR parity** with tinygrad ClangRenderer (CPU, no vectorization)
 - [x] ASSIGN + WAR ordering (in-place buffer writes, WAR/WAW dependency edges, `Tensor.assign()`)
+- [x] Float16 (`__fp16`) and BFloat16 (`__bf16`) end-to-end on CPU (cast, arithmetic, mixed precision)
+- [x] Disk cache for compiled kernels (`~/.cache/polygrad/<hash>.so`, 300x+ speedup on cache hit)
 
 ### Model Zoo
 - [x] PolyInstance runtime (forward, train_step, optimizer, weight import/export)
@@ -179,7 +206,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 
 ### Language Frontends
 - [x] Float64 support (transcendentals, WASM renderer, all frontends)
-- [x] Python Tensor API (ctypes FFI, lazy eval, autograd, f64, tinygrad-compatible)
+- [x] Python Tensor API (ctypes FFI, lazy eval, autograd, f64, zero-copy numpy I/O, tinygrad-compatible)
 - [x] Python nn module (Linear, LayerNorm, RMSNorm, Embedding, Dropout, SGD, Adam, AdamW)
 - [x] Python HF loader (`load_hf`, `download_hf`, `generate`)
 - [x] Unified JS package (`js/`): CommonJS Node entry, Node-API native path, WASM fallback, browser dist bundles, f64
@@ -190,7 +217,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [ ] More model families (LLaMA, BERT)
 - [ ] Expander, devectorizer
 
-722 tests (415 C + 130 Python + 109 JS + 68 WASM), ASan/UBSan clean.
+915 tests (453 C + 164 Python + 101 JS native + 95 JS WASM/browser + 71 WASM C + 31 parity), ASan/UBSan clean.
 
 ## Reference
 

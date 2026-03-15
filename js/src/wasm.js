@@ -401,6 +401,7 @@ async function createWasmBackend() {
     poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
     poly_grad: Module._poly_grad,
     poly_detach: Module._poly_detach,
+    poly_cast_by_id: Module._poly_cast_by_id,
 
     // Shape-taking ops (accept JS number[])
     poly_reshape: (ctx, uop, shape, len) => callWithInt64(cwrapReshape, ctx, uop, shape, len),
@@ -610,8 +611,18 @@ async function createWasmBackend() {
     poly_eye: Module._poly_eye,
     poly_linspace: Module._poly_linspace,
     poly_full: Module._poly_full,
-    poly_tril: Module._poly_tril,
-    poly_triu: Module._poly_triu,
+    poly_tril: (ctx, uop, shape, ndim, diagonal) => {
+      const ptr = writeInt64Array(shape)
+      const result = Module._poly_tril(ctx, uop, ptr, ndim, diagonal)
+      Module._free(ptr)
+      return result
+    },
+    poly_triu: (ctx, uop, shape, ndim, diagonal) => {
+      const ptr = writeInt64Array(shape)
+      const result = Module._poly_triu(ctx, uop, ptr, ndim, diagonal)
+      Module._free(ptr)
+      return result
+    },
     poly_cholesky: Module._poly_cholesky,
     poly_triangular_solve: Module._poly_triangular_solve,
 

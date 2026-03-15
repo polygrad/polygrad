@@ -120,9 +120,9 @@ class Tensor:
             if hasattr(dt, '__class__') and dt.__class__.__name__ == 'dtypes':
                 dt = str(dt)
             np_dt = np.float64 if dt == 'float64' else np.float32
-            arr = np.asarray(data, dtype=np_dt)
+            arr = np.ascontiguousarray(data, dtype=np_dt)
             self._shape = arr.shape
-            self._data = arr.flatten().copy()
+            self._data = arr.ravel()  # view if already contiguous, copy only if needed
             self._dtype_str = dt
             if dt == 'float64':
                 self._buffer = _ffi._lib.poly_buffer_f64(self._ctx, len(self._data))
@@ -488,10 +488,12 @@ class Tensor:
         return self
 
     def numpy(self):
-        """Realize the computation and return as numpy array."""
+        """Realize the computation and return as numpy array.
+        Returns a view into the internal buffer (zero-copy).
+        Caller should .copy() if they need to mutate the result."""
         if self._data is None:
             self.realize()
-        return self._data.reshape(self._shape).copy()
+        return self._data.reshape(self._shape)
 
     def item(self):
         """Return scalar value."""
@@ -1114,12 +1116,12 @@ class Tensor:
         nd = max(len(self._shape), len(repeats))
         shape = (1,) * (nd - len(self._shape)) + self._shape
         repeats = (1,) * (nd - len(repeats)) + repeats
-        # Interleave: reshape to (s0, 1, s1, 1, ...), expand to (s0, r0, s1, r1, ...), flatten pairs
+        # Interleave: reshape to (1, s0, 1, s1, ...), expand to (r0, s0, r1, s1, ...), flatten pairs
         new_shape = []
         exp_shape = []
         for s, r in zip(shape, repeats):
-            new_shape.extend([s, 1])
-            exp_shape.extend([s, r])
+            new_shape.extend([1, s])
+            exp_shape.extend([r, s])
         result = self.reshape(tuple(new_shape)).expand(tuple(exp_shape))
         final_shape = tuple(s * r for s, r in zip(shape, repeats))
         return result.reshape(final_shape)
@@ -1301,12 +1303,48 @@ class Tensor:
                           for d, s in enumerate(result._shape)))
                 result = result.squeeze(dim)
             elif isinstance(i, slice):
-                start, stop, step = i.indices(result._shape[dim])
-                if step != 1:
-                    raise IndexError('Step != 1 not supported')
+                size = result._shape[dim]
+                start, stop, step = i.indices(size)
+                if step == 0:
+                    raise ValueError('slice step cannot be zero')
+                # Normalize boundary and stride (matching tinygrad _getitem)
+                boundary = [start, stop]
+                stride = step
+                if stride * (boundary[1] - boundary[0]) < 0:
+                    boundary = [0, 0]
+                elif stride < 0:
+                    boundary = [boundary[1] + 1, boundary[0] + 1]
+                new_size = -(-abs(boundary[1] - boundary[0]) // abs(stride))  # ceildiv
+                # shrink to boundary
                 result = result.shrink(
-                    tuple((start, stop) if d == dim else (0, s)
+                    tuple(tuple(boundary) if d == dim else (0, s)
                           for d, s in enumerate(result._shape)))
+                # flip if negative stride
+                if stride < 0:
+                    result = result.flip(dim)
+                abs_stride = abs(stride)
+                # apply stride via pad+reshape+shrink+reshape
+                if abs_stride != 1:
+                    sh = list(result._shape)
+                    # pad to multiple of stride
+                    rem = sh[dim] % abs_stride
+                    if rem != 0:
+                        pad_amt = abs_stride - rem
+                        padding = tuple((0, pad_amt) if d == dim else (0, 0)
+                                        for d in range(len(sh)))
+                        result = result.pad(padding)
+                        sh[dim] += pad_amt
+                    # reshape: split dim into (n_groups, stride)
+                    new_sh = sh[:dim] + [sh[dim] // abs_stride, abs_stride] + sh[dim+1:]
+                    result = result.reshape(*new_sh)
+                    # shrink to first element of each stride group
+                    result = result.shrink(
+                        tuple((0, 1) if d == dim + 1 else (0, s)
+                              for d, s in enumerate(result._shape)))
+                    # reshape back, collapsing the stride dim
+                    final_sh = list(result._shape)
+                    final_sh = final_sh[:dim] + [final_sh[dim]] + final_sh[dim+2:]
+                    result = result.reshape(*final_sh)
                 dim += 1
             else:
                 raise IndexError(f'Unsupported index type: {type(i)}')

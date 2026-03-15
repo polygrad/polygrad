@@ -225,6 +225,124 @@ async function runTests(pg) {
     assertClose(await p.toArray(), [0, 1, 2, 3, 0])
   })
 
+  // -- Step slicing --
+  console.log('\n-- Step slicing --')
+
+  await test('step2 1d', async () => {
+    const t = new Tensor([1, 2, 3, 4, 5, 6, 7, 8])
+    const r = t.getitem({ start: 0, stop: 8, step: 2 })
+    assertShape(r.shape, [4])
+    assertClose(await r.toArray(), [1, 3, 5, 7])
+  })
+
+  await test('step3 1d', async () => {
+    const t = new Tensor([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    const r = t.getitem({ start: 0, stop: 9, step: 3 })
+    assertShape(r.shape, [3])
+    assertClose(await r.toArray(), [1, 4, 7])
+  })
+
+  await test('step2 with start stop', async () => {
+    const t = new Tensor([0, 1, 2, 3, 4, 5, 6, 7])
+    const r = t.getitem({ start: 1, stop: 7, step: 2 })
+    assertShape(r.shape, [3])
+    assertClose(await r.toArray(), [1, 3, 5])
+  })
+
+  await test('step non-divisible', async () => {
+    const t = new Tensor([0, 1, 2, 3, 4, 5, 6])
+    const r = t.getitem({ start: 0, stop: 7, step: 3 })
+    assertShape(r.shape, [3])
+    assertClose(await r.toArray(), [0, 3, 6])
+  })
+
+  await test('negative step (reverse)', async () => {
+    const t = new Tensor([1, 2, 3, 4, 5, 6])
+    const r = t.getitem({ step: -1 })
+    assertClose(await r.toArray(), [6, 5, 4, 3, 2, 1])
+  })
+
+  await test('negative step2', async () => {
+    const t = new Tensor([1, 2, 3, 4, 5, 6])
+    const r = t.getitem({ step: -2 })
+    assertShape(r.shape, [3])
+    assertClose(await r.toArray(), [6, 4, 2])
+  })
+
+  await test('step 2d axis0', async () => {
+    const t = new Tensor([[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]])
+    const r = t.getitem({ start: 0, stop: 4, step: 2 })
+    assertShape(r.shape, [2, 3])
+    assertClose(await r.toArray(), [0, 1, 2, 6, 7, 8])
+  })
+
+  await test('step 2d both axes', async () => {
+    const t = new Tensor([[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]])
+    const r = t.getitem({ start: 0, stop: 4, step: 2 }, { start: 0, stop: 4, step: 2 })
+    assertShape(r.shape, [2, 2])
+    assertClose(await r.toArray(), [0, 2, 8, 10])
+  })
+
+  // -- Cast --
+  console.log('\n-- Cast --')
+
+  await test('cast float32 to float64', async () => {
+    const t = new Tensor([1, 2, 3])
+    const r = t.cast('float64')
+    assert(r.dtype === 'float64', `expected float64, got ${r.dtype}`)
+    assertClose(await r.toArray(), [1, 2, 3])
+  })
+
+  await test('cast float64 to float32', async () => {
+    const t = new Tensor([1.5, 2.5, 3.5], { dtype: 'float64' })
+    const r = t.cast('float32')
+    assert(r.dtype === 'float32', `expected float32, got ${r.dtype}`)
+    assertClose(await r.toArray(), [1.5, 2.5, 3.5])
+  })
+
+  await test('cast no-op same dtype', async () => {
+    const t = new Tensor([1, 2, 3])
+    const r = t.cast('float32')
+    assertClose(await r.toArray(), [1, 2, 3])
+  })
+
+  await test('half and double convenience', async () => {
+    const t = new Tensor([1, 2, 3])
+    const d = t.double()
+    assert(d.dtype === 'float64', `expected float64, got ${d.dtype}`)
+    assertClose(await d.toArray(), [1, 2, 3])
+    const h = t.half()
+    assert(h.dtype === 'float16', `expected float16, got ${h.dtype}`)
+    assertClose(await h.toArray(), [1, 2, 3])
+  })
+
+  await test('cast then compute', async () => {
+    const t = new Tensor([1, 2, 3]).cast('float64')
+    const r = t.add(new Tensor([10, 20, 30], { dtype: 'float64' }))
+    assertClose(await r.toArray(), [11, 22, 33])
+  })
+
+  // -- Triu/Tril --
+  console.log('\n-- Triu/Tril --')
+
+  await test('triu 2d', async () => {
+    const t = new Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+    const r = t.triu()
+    assertClose(await r.toArray(), [1, 2, 3, 0, 5, 6, 0, 0, 9])
+  })
+
+  await test('tril 2d', async () => {
+    const t = new Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+    const r = t.tril()
+    assertClose(await r.toArray(), [1, 0, 0, 4, 5, 0, 7, 8, 9])
+  })
+
+  await test('triu with diagonal', async () => {
+    const t = new Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+    const r = t.triu(1)
+    assertClose(await r.toArray(), [0, 2, 3, 0, 0, 6, 0, 0, 0])
+  })
+
   // -- Reduction --
   console.log('\n-- Reduction --')
 
@@ -513,6 +631,158 @@ async function runTests(pg) {
   await test('f64: default is f32', async () => {
     const a = new Tensor([1, 2, 3])
     assert(a.dtype === 'float32', `expected float32, got ${a.dtype}`)
+  })
+
+  // -- Kernel cache consistency --
+  console.log('\n-- Cache consistency --')
+
+  await test('repeated realize produces identical results', async () => {
+    // Exercises the in-memory schedule cache + disk cache (native) or
+    // WASM step plan cache. Same graph structure, same data = same result.
+    const a = new Tensor([1, 2, 3, 4])
+    const b = new Tensor([10, 20, 30, 40])
+    const r1 = await a.add(b).toArray()
+    const r2 = await (new Tensor([1, 2, 3, 4])).add(new Tensor([10, 20, 30, 40])).toArray()
+    const r3 = await (new Tensor([1, 2, 3, 4])).add(new Tensor([10, 20, 30, 40])).toArray()
+    assertClose(r1, [11, 22, 33, 44])
+    assertClose(r2, [11, 22, 33, 44])
+    assertClose(r3, [11, 22, 33, 44])
+  })
+
+  await test('repeated fused chain produces identical results', async () => {
+    // Fused multi-op chain through cache: (a+b)*a-b
+    const a = [2, 3, 4]
+    const b = [1, 1, 1]
+    const expected = [(2+1)*2-1, (3+1)*3-1, (4+1)*4-1]
+    for (let i = 0; i < 3; i++) {
+      const ta = new Tensor(a), tb = new Tensor(b)
+      const r = await ta.add(tb).mul(ta).sub(tb).toArray()
+      assertClose(r, expected)
+    }
+  })
+
+  // -- Missing math ops --
+  console.log('\n-- Missing math ops --')
+
+  await test('pow integer', async () => {
+    const t = new Tensor([2, 3, 4])
+    const r = t.pow(2)
+    assertClose(await r.toArray(), [4, 9, 16])
+  })
+
+  await test('pow float', async () => {
+    const t = new Tensor([4, 9, 16])
+    const r = t.pow(0.5)
+    assertClose(await r.toArray(), [2, 3, 4])
+  })
+
+  await test('reciprocal', async () => {
+    const t = new Tensor([2, 4, 5])
+    const r = t.reciprocal()
+    assertClose(await r.toArray(), [0.5, 0.25, 0.2])
+  })
+
+  await test('exp2', async () => {
+    const t = new Tensor([0, 1, 2, 3])
+    const r = t.exp2()
+    assertClose(await r.toArray(), [1, 2, 4, 8])
+  })
+
+  await test('log2', async () => {
+    const t = new Tensor([1, 2, 4, 8])
+    const r = t.log2()
+    assertClose(await r.toArray(), [0, 1, 2, 3])
+  })
+
+  await test('trunc', async () => {
+    const t = new Tensor([1.7, -2.3, 3.9])
+    const r = t.trunc()
+    assertClose(await r.toArray(), [1, -2, 3])
+  })
+
+  // -- Aliases --
+  console.log('\n-- Aliases --')
+
+  await test('swish is silu', async () => {
+    const t = new Tensor([1, 2, -1])
+    assertClose(await t.swish().toArray(), await t.silu().toArray())
+  })
+
+  await test('view is reshape', async () => {
+    const t = new Tensor([1, 2, 3, 4, 5, 6])
+    assertShape(t.view(2, 3).shape, [2, 3])
+    assertClose(await t.view(2, 3).toArray(), [1, 2, 3, 4, 5, 6])
+  })
+
+  await test('matmul is dot', async () => {
+    const a = new Tensor([[1, 2], [3, 4]])
+    const b = new Tensor([[5, 6], [7, 8]])
+    assertClose(await a.matmul(b).toArray(), await a.dot(b).toArray())
+  })
+
+  // -- Composed ops --
+  console.log('\n-- Composed ops --')
+
+  await test('layernorm', async () => {
+    const t = new Tensor([[1, 2, 3], [4, 5, 6]])
+    const r = await t.layernorm()
+    const arr = await r.toArray()
+    // Each row should have mean ~0 and std ~1
+    const row0 = arr.slice(0, 3)
+    const mean0 = row0.reduce((a, b) => a + b) / 3
+    assert(Math.abs(mean0) < 1e-4, `Row 0 mean should be ~0, got ${mean0}`)
+  })
+
+  await test('binaryCrossEntropy', async () => {
+    const pred = new Tensor([0.9, 0.1, 0.8])
+    const target = new Tensor([1, 0, 1])
+    const loss = await pred.binaryCrossEntropy(target).item()
+    // -mean(t*log(p) + (1-t)*log(1-p))
+    const expected = -(Math.log(0.9) + Math.log(0.9) + Math.log(0.8)) / 3
+    assert(Math.abs(loss - expected) < 1e-3, `Expected ~${expected}, got ${loss}`)
+  })
+
+  await test('cat 1d', async () => {
+    const a = new Tensor([1, 2, 3])
+    const b = new Tensor([4, 5, 6])
+    const r = Tensor.cat(a, b)
+    assertShape(r.shape, [6])
+    assertClose(await r.toArray(), [1, 2, 3, 4, 5, 6])
+  })
+
+  await test('cat 2d axis0', async () => {
+    const a = new Tensor([[1, 2], [3, 4]])
+    const b = new Tensor([[5, 6]])
+    const r = Tensor.cat(a, b, { dim: 0 })
+    assertShape(r.shape, [3, 2])
+    assertClose(await r.toArray(), [1, 2, 3, 4, 5, 6])
+  })
+
+  await test('stack', async () => {
+    const a = new Tensor([1, 2, 3])
+    const b = new Tensor([4, 5, 6])
+    const r = Tensor.stack(a, b)
+    assertShape(r.shape, [2, 3])
+    assertClose(await r.toArray(), [1, 2, 3, 4, 5, 6])
+  })
+
+  await test('repeat', async () => {
+    const t = new Tensor([1, 2, 3])
+    const r = t.repeat(3)
+    assertShape(r.shape, [9])
+    assertClose(await r.toArray(), [1, 2, 3, 1, 2, 3, 1, 2, 3])
+  })
+
+  await test('repeat 2d', async () => {
+    const t = new Tensor([[1, 2], [3, 4]])
+    const r = t.repeat(2, 3)
+    assertShape(r.shape, [4, 6])
+    assertClose(await r.toArray(), [
+      1, 2, 1, 2, 1, 2,
+      3, 4, 3, 4, 3, 4,
+      1, 2, 1, 2, 1, 2,
+      3, 4, 3, 4, 3, 4
+    ])
   })
 
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`)

@@ -377,6 +377,24 @@ static napi_value napi_poly_grad(napi_env env, napi_callback_info info) {
 
 NAPI_UNARY(poly_detach)
 
+/* ── Cast ──────────────────────────────────────────────────────────────── */
+
+static napi_value napi_poly_cast_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t dtype_id;
+  napi_get_value_int32(env, argv[2], &dtype_id);
+  PolyUOp *r = poly_cast_by_id(ctx, x, dtype_id);
+  if (!r) {
+    napi_throw_range_error(env, NULL, "poly_cast_by_id failed");
+    return NULL;
+  }
+  return make_external(env, r);
+}
+
 /* ── Shape-taking movement ops ─────────────────────────────────────────── */
 
 #define MAX_DIMS 16
@@ -1491,6 +1509,7 @@ NAPI_MODULE_INIT() {
     /* Autograd */
     DECLARE_NAPI_METHOD("poly_grad", napi_poly_grad),
     DECLARE_NAPI_METHOD("poly_detach", napi_poly_detach),
+    DECLARE_NAPI_METHOD("poly_cast_by_id", napi_poly_cast_by_id),
 
     /* Movement ops (shape-taking) */
     DECLARE_NAPI_METHOD("poly_reshape", napi_poly_reshape),

@@ -122,6 +122,70 @@ class TestMovement:
         np.testing.assert_allclose(b.numpy(), [0, 1, 2, 3, 0])
 
 
+class TestStepSlicing:
+    def test_step2_1d(self):
+        a = Tensor([1, 2, 3, 4, 5, 6, 7, 8])
+        b = a[::2]
+        assert b.shape == (4,)
+        np.testing.assert_allclose(b.numpy(), [1, 3, 5, 7])
+
+    def test_step3_1d(self):
+        a = Tensor([1, 2, 3, 4, 5, 6, 7, 8, 9])
+        b = a[::3]
+        assert b.shape == (3,)
+        np.testing.assert_allclose(b.numpy(), [1, 4, 7])
+
+    def test_step2_with_start_stop(self):
+        a = Tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        b = a[1:7:2]
+        assert b.shape == (3,)
+        np.testing.assert_allclose(b.numpy(), [1, 3, 5])
+
+    def test_step_non_divisible(self):
+        # 7 elements, step 3 -> ceildiv(7,3)=3 elements
+        a = Tensor([0, 1, 2, 3, 4, 5, 6])
+        b = a[::3]
+        assert b.shape == (3,)
+        np.testing.assert_allclose(b.numpy(), [0, 3, 6])
+
+    def test_negative_step(self):
+        a = Tensor([1, 2, 3, 4, 5, 6])
+        b = a[::-1]
+        np.testing.assert_allclose(b.numpy(), [6, 5, 4, 3, 2, 1])
+
+    def test_negative_step2(self):
+        a = Tensor([1, 2, 3, 4, 5, 6])
+        b = a[::-2]
+        assert b.shape == (3,)
+        np.testing.assert_allclose(b.numpy(), [6, 4, 2])
+
+    def test_step_2d_axis0(self):
+        a = Tensor(np.arange(12, dtype=np.float32).reshape(4, 3).tolist())
+        b = a[::2]
+        assert b.shape == (2, 3)
+        np.testing.assert_allclose(b.numpy(), [[0, 1, 2], [6, 7, 8]])
+
+    def test_step_2d_axis1(self):
+        a = Tensor(np.arange(12, dtype=np.float32).reshape(3, 4).tolist())
+        b = a[:, ::2]
+        assert b.shape == (3, 2)
+        np.testing.assert_allclose(b.numpy(), [[0, 2], [4, 6], [8, 10]])
+
+    def test_step_2d_both(self):
+        a = Tensor(np.arange(16, dtype=np.float32).reshape(4, 4).tolist())
+        b = a[::2, ::2]
+        assert b.shape == (2, 2)
+        np.testing.assert_allclose(b.numpy(), [[0, 2], [8, 10]])
+
+    def test_step_backward(self):
+        a = Tensor([1, 2, 3, 4, 5, 6, 7, 8], requires_grad=True)
+        b = a[::2]  # [1, 3, 5, 7]
+        c = b.sum()
+        c.backward()
+        # grad should be [1,0,1,0,1,0,1,0]
+        np.testing.assert_allclose(a.grad.numpy(), [1, 0, 1, 0, 1, 0, 1, 0])
+
+
 class TestReduce:
     def test_sum_all(self):
         a = Tensor([1, 2, 3, 4])

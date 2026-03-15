@@ -16,6 +16,7 @@ oracle/
 temp/
 *.md
 !README.md
+!CHANGELOG.md
 *.egg-info
 .pytest_cache/
 out*.txt
