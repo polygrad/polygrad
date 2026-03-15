@@ -74,12 +74,12 @@ PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
 
 /* ── Realize: full pipeline in one call ───────────────────────────────── */
 
-typedef struct {
+typedef struct PolyBufferBinding {
   PolyUOp *buffer;   /* tensor-level BUFFER UOp */
   void *data;       /* pointer to host memory (float* for f32) */
 } PolyBufferBinding;
 
-typedef struct {
+typedef struct PolyVarBinding {
   PolyUOp *var;     /* DEFINE_VAR UOp */
   int32_t value;    /* concrete runtime value */
 } PolyVarBinding;
