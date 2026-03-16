@@ -48,14 +48,14 @@ typedef struct {
 typedef struct {
   int ep_idx;
   PolyCompileMode mode;
-  PolyPreparedStep *prep;
+  PolySchedule *prep;
 } PrepCacheEntry;
 
 typedef struct {
   int ep_idx;
   PolyCompileMode mode;
   PolyDeviceId device;
-  PolyExecutableStep *exec;
+  PolyCompiledPlan *exec;
 } ExecCacheEntry;
 
 /* ── Value-and-grad metadata (built lazily on first train call) ──────── */
@@ -129,7 +129,7 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
 
 /* ── Cache helpers ───────────────────────────────────────────────────── */
 
-static PolyPreparedStep *prep_cache_lookup(const PolyInstance *inst,
+static PolySchedule *prep_cache_lookup(const PolyInstance *inst,
                                             int ep_idx, PolyCompileMode mode) {
   for (int i = 0; i < inst->n_prep_cached; i++)
     if (inst->prep_cache[i].ep_idx == ep_idx &&
@@ -139,7 +139,7 @@ static PolyPreparedStep *prep_cache_lookup(const PolyInstance *inst,
 }
 
 static void prep_cache_insert(PolyInstance *inst, int ep_idx,
-                               PolyCompileMode mode, PolyPreparedStep *prep) {
+                               PolyCompileMode mode, PolySchedule *prep) {
   if (inst->n_prep_cached >= inst->prep_cache_cap) {
     int new_cap = inst->prep_cache_cap ? inst->prep_cache_cap * 2 : 4;
     inst->prep_cache = realloc(inst->prep_cache, (size_t)new_cap * sizeof(PrepCacheEntry));
@@ -150,7 +150,7 @@ static void prep_cache_insert(PolyInstance *inst, int ep_idx,
   };
 }
 
-static PolyExecutableStep *exec_cache_lookup(const PolyInstance *inst,
+static PolyCompiledPlan *exec_cache_lookup(const PolyInstance *inst,
                                               int ep_idx, PolyCompileMode mode,
                                               PolyDeviceId device) {
   for (int i = 0; i < inst->n_exec_cached; i++)
@@ -163,7 +163,7 @@ static PolyExecutableStep *exec_cache_lookup(const PolyInstance *inst,
 
 static void exec_cache_insert(PolyInstance *inst, int ep_idx,
                                PolyCompileMode mode, PolyDeviceId device,
-                               PolyExecutableStep *exec) {
+                               PolyCompiledPlan *exec) {
   if (inst->n_exec_cached >= inst->exec_cache_cap) {
     int new_cap = inst->exec_cache_cap ? inst->exec_cache_cap * 2 : 4;
     inst->exec_cache = realloc(inst->exec_cache, (size_t)new_cap * sizeof(ExecCacheEntry));
@@ -176,7 +176,7 @@ static void exec_cache_insert(PolyInstance *inst, int ep_idx,
 
 /* ── Slot-data builder ───────────────────────────────────────────────── */
 /*
- * Build the slot_data[] array for poly_executable_step_run().
+ * Build the slot_data[] array for poly_compiled_plan_run().
  * Maps each prepared step buf_slot to a host data pointer:
  *   - External slots: find the instance buffer whose buf_uop matches
  *   - IO bindings override by name
@@ -185,7 +185,7 @@ static void exec_cache_insert(PolyInstance *inst, int ep_idx,
  */
 
 static void **build_slot_data(PolyInstance *inst,
-                               const PolyPreparedStep *prep,
+                               const PolySchedule *prep,
                                PolyIOBinding *io, int n_io,
                                /* extra buf_uop -> data mappings */
                                PolyUOp **extra_uops, float **extra_datas, int n_extra) {
@@ -342,11 +342,11 @@ void poly_instance_free(PolyInstance *inst) {
    * Order: exec cache first (holds pointers into prepared steps),
    * then prepared cache, then context (arena-frees all UOps). */
   for (int i = 0; i < inst->n_exec_cached; i++)
-    poly_executable_step_free(inst->exec_cache[i].exec);
+    poly_compiled_plan_free(inst->exec_cache[i].exec);
   free(inst->exec_cache);
 
   for (int i = 0; i < inst->n_prep_cached; i++)
-    poly_prepared_step_free(inst->prep_cache[i].prep);
+    poly_schedule_free(inst->prep_cache[i].prep);
   free(inst->prep_cache);
 
   /* Free value-and-grad state */
@@ -552,9 +552,9 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
   }
 
   /* Lookup or build prepared step */
-  PolyPreparedStep *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_CALL);
+  PolySchedule *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_CALL);
   if (!prep) {
-    prep = poly_prepare_step(inst->ctx, inst->entrypoints[ep_idx].sink,
+    prep = poly_schedule_for(inst->ctx, inst->entrypoints[ep_idx].sink,
                               POLY_MODE_CALL);
     if (!prep) {
       fprintf(stderr, "poly_instance_call: prepare failed for '%s'\n", entrypoint);
@@ -564,10 +564,10 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
   }
 
   /* Lookup or build executable step */
-  PolyExecutableStep *exec = exec_cache_lookup(inst, ep_idx, POLY_MODE_CALL,
+  PolyCompiledPlan *exec = exec_cache_lookup(inst, ep_idx, POLY_MODE_CALL,
                                                 inst->device);
   if (!exec) {
-    exec = poly_lower_step(inst->ctx, prep, inst->device);
+    exec = poly_compile_schedule(inst->ctx, prep, inst->device);
     if (!exec) {
       fprintf(stderr, "poly_instance_call: lower failed for '%s' on device %d\n",
               entrypoint, inst->device);
@@ -580,7 +580,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
   void **slot_data = build_slot_data(inst, prep, io, n_io, NULL, NULL, 0);
   if (!slot_data) return -1;
 
-  int ret = poly_executable_step_run(exec, slot_data, prep->n_buf_slots,
+  int ret = poly_compiled_plan_run(exec, slot_data, prep->n_buf_slots,
                                       NULL, 0);
   free(slot_data);
   return ret;
@@ -773,7 +773,7 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
 
 /* Resolve loss/grad buf_slot indices from a prepared step.
  * Called once after the first prepare_step for this vag graph. */
-static int resolve_vag_slots(PolyInstance *inst, const PolyPreparedStep *prep) {
+static int resolve_vag_slots(PolyInstance *inst, const PolySchedule *prep) {
   VagState *vag = inst->vag;
   if (vag->slots_resolved) return 0;
 
@@ -829,9 +829,9 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
    * so we use a dedicated cache entry. */
 
   /* Lookup or build prepared step for the combined graph */
-  PolyPreparedStep *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD);
+  PolySchedule *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD);
   if (!prep) {
-    prep = poly_prepare_step(inst->ctx, vag->combined_sink, POLY_MODE_CALL);
+    prep = poly_schedule_for(inst->ctx, vag->combined_sink, POLY_MODE_CALL);
     if (!prep) {
       fprintf(stderr, "poly_instance_value_and_grad: prepare failed\n");
       return -1;
@@ -843,11 +843,11 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   }
 
   /* Lookup or build executable step */
-  PolyExecutableStep *exec = exec_cache_lookup(inst, ep_idx,
+  PolyCompiledPlan *exec = exec_cache_lookup(inst, ep_idx,
                                                 POLY_MODE_VALUE_AND_GRAD,
                                                 inst->device);
   if (!exec) {
-    exec = poly_lower_step(inst->ctx, prep, inst->device);
+    exec = poly_compile_schedule(inst->ctx, prep, inst->device);
     if (!exec) {
       fprintf(stderr, "poly_instance_value_and_grad: lower failed\n");
       return -1;
@@ -873,7 +873,7 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   free(extra_datas);
   if (!slot_data) return -1;
 
-  int ret = poly_executable_step_run(exec, slot_data, prep->n_buf_slots,
+  int ret = poly_compiled_plan_run(exec, slot_data, prep->n_buf_slots,
                                       NULL, 0);
   free(slot_data);
   if (ret != 0) return ret;

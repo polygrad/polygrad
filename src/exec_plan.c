@@ -2,10 +2,10 @@
  * exec_plan.c -- Execution plan: prepare, lower, run, free
  *
  * Contains all exec_plan API implementations:
- *   - poly_prepare_step: backend-neutral scheduling
- *   - poly_lower_step: dispatches to backend-specific lowering via vtable
- *   - poly_executable_step_run: dispatches to backend-specific execution
- *   - poly_executable_step_free: cleanup via backend vtable
+ *   - poly_schedule_for: backend-neutral scheduling
+ *   - poly_compile_schedule: dispatches to backend-specific lowering via vtable
+ *   - poly_compiled_plan_run: dispatches to backend-specific execution
+ *   - poly_compiled_plan_free: cleanup via backend vtable
  *   - Backend descriptors for CPU, INTERP, WASM_JIT, CUDA
  *   - POLY_CPU_ALLOCATOR, POLY_CUDA_ALLOCATOR
  *
@@ -25,7 +25,7 @@
 
 /* ── Prepared step construction ───────────────────────────────────────── */
 
-PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
+PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
                                     PolyCompileMode mode) {
   if (!sink || sink->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: prepare_step: expected SINK\n");
@@ -66,7 +66,7 @@ PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
   }
 
   /* --- Allocate prepared step ------------------------------------------- */
-  PolyPreparedStep *ps = calloc(1, sizeof(PolyPreparedStep));
+  PolySchedule *ps = calloc(1, sizeof(PolySchedule));
   if (!ps) {
     free(buf_order_orig); free(buf_order_post);
     poly_schedule_result_free(&sr);
@@ -89,11 +89,11 @@ PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
   ps->n_buf_slots = n_external + n_intermediate;
 
   if (ps->n_buf_slots > 0) {
-    ps->buf_slots = calloc((size_t)ps->n_buf_slots, sizeof(PolyPreparedBufSlot));
+    ps->buf_slots = calloc((size_t)ps->n_buf_slots, sizeof(PolyScheduleBufSlot));
 
     /* External buffer slots */
     for (int i = 0; i < n_external; i++) {
-      PolyPreparedBufSlot *slot = &ps->buf_slots[i];
+      PolyScheduleBufSlot *slot = &ps->buf_slots[i];
       PolyUOp *buf = buf_order_orig[i];
       slot->buf_uop = buf;
       slot->is_intermediate = false;
@@ -106,7 +106,7 @@ PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
 
     /* Intermediate buffer slots */
     for (int b = 0; b < n_intermediate; b++) {
-      PolyPreparedBufSlot *slot = &ps->buf_slots[n_external + b];
+      PolyScheduleBufSlot *slot = &ps->buf_slots[n_external + b];
       slot->is_intermediate = true;
       slot->external_buf_idx = -1;
       if (sr.intermediate_buf_uops && sr.intermediate_buf_uops[b]) {
@@ -136,10 +136,10 @@ PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
 
   /* --- Build exec items ------------------------------------------------- */
   ps->n_items = sr.n_kernels;
-  ps->items = calloc((size_t)sr.n_kernels, sizeof(PolyExecItemSpec));
+  ps->items = calloc((size_t)sr.n_kernels, sizeof(PolyExecItem));
 
   for (int k = 0; k < sr.n_kernels; k++) {
-    PolyExecItemSpec *item = &ps->items[k];
+    PolyExecItem *item = &ps->items[k];
     item->kind = POLY_EXEC_COMPUTE;
     item->root = sr.kernels[k];
 
@@ -189,12 +189,12 @@ PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
 cleanup:
   free(buf_order_orig);
   free(buf_order_post);
-  poly_prepared_step_free(ps);
+  poly_schedule_free(ps);
   poly_schedule_result_free(&sr);
   return NULL;
 }
 
-void poly_prepared_step_free(PolyPreparedStep *step) {
+void poly_schedule_free(PolySchedule *step) {
   if (!step) return;
   for (int i = 0; i < step->n_items; i++)
     free(step->items[i].buf_slot_indices);
@@ -642,7 +642,7 @@ const PolyBackendDesc *poly_backend_get(PolyDeviceId device) {
 /*  Executable step: lower, run, free                                    */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
+PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared,
                                     PolyDeviceId device) {
   if (!ctx || !prepared) return NULL;
 
@@ -654,7 +654,7 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
 
   const PolyAllocator *alloc = backend->get_allocator();
 
-  PolyExecutableStep *es = calloc(1, sizeof(PolyExecutableStep));
+  PolyCompiledPlan *es = calloc(1, sizeof(PolyCompiledPlan));
   if (!es) return NULL;
   es->prepared = prepared;
   es->device = device;
@@ -689,7 +689,7 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
   /* Lower each COMPUTE item via backend vtable */
   static int lower_counter = 0;
   for (int k = 0; k < prepared->n_items; k++) {
-    PolyExecItemSpec *item = &prepared->items[k];
+    PolyExecItem *item = &prepared->items[k];
     PolyRunner *runner = &es->runners[k];
 
     if (item->kind != POLY_EXEC_COMPUTE) {
@@ -726,15 +726,15 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
   return es;
 
 cleanup:
-  poly_executable_step_free(es);
+  poly_compiled_plan_free(es);
   return NULL;
 }
 
-int poly_executable_step_run(PolyExecutableStep *step,
+int poly_compiled_plan_run(PolyCompiledPlan *step,
                              void **slot_data, int n_slots,
                              PolyVarBinding *var_bindings, int n_var_bindings) {
   if (!step || !step->prepared) return -1;
-  PolyPreparedStep *ps = step->prepared;
+  PolySchedule *ps = step->prepared;
 
   const PolyBackendDesc *backend = poly_backend_get(step->device);
   if (!backend) return -1;
@@ -830,7 +830,7 @@ int poly_executable_step_run(PolyExecutableStep *step,
   return ret;
 }
 
-void poly_executable_step_free(PolyExecutableStep *step) {
+void poly_compiled_plan_free(PolyCompiledPlan *step) {
   if (!step) return;
 
   const PolyBackendDesc *backend = poly_backend_get(step->device);

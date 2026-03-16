@@ -5,8 +5,8 @@
  *
  *   Artifact (bundle file)
  *     -> PolyInstance (loaded model + mutable execution state)
- *       -> PolyPreparedStep (backend-neutral scheduled exec items)
- *         -> PolyExecutableStep (backend-specific compiled runners)
+ *       -> PolySchedule (backend-neutral scheduled exec items)
+ *         -> PolyCompiledPlan (backend-specific compiled runners)
  *
  * Phase 1: types only, no constructors or behavior.
  */
@@ -112,7 +112,7 @@ typedef struct {
   PolyUOp *buf_uop;       /* pointer into PolyCtx arena */
   bool is_intermediate;
   int external_buf_idx;    /* index into PolyInstance.bufs[], or -1 */
-} PolyPreparedBufSlot;
+} PolyScheduleBufSlot;
 
 /* ── Exec item spec ──────────────────────────────────────────────────── */
 /*
@@ -128,14 +128,14 @@ typedef struct {
   PolyExecItemKind kind;
   PolyUOp *root; /* scheduled root UOp (pre-lowering) */
 
-  /* Buffer slot references (indices into PolyPreparedStep.buf_slots) */
+  /* Buffer slot references (indices into PolySchedule.buf_slots) */
   int *buf_slot_indices;
   int n_buf_slots;
 
   /* Fixed vars for this item (from BIND stripping) */
   struct PolyVarBinding *fixedvars;
   int n_fixedvars;
-} PolyExecItemSpec;
+} PolyExecItem;
 
 /* ── Prepared step ───────────────────────────────────────────────────── */
 /*
@@ -149,11 +149,11 @@ typedef struct {
   uint32_t graph_hash; /* structural hash of the entrypoint SINK */
 
   /* Logical buffer slots (external + intermediate) */
-  PolyPreparedBufSlot *buf_slots;
+  PolyScheduleBufSlot *buf_slots;
   int n_buf_slots;
 
   /* Ordered exec items */
-  PolyExecItemSpec *items;
+  PolyExecItem *items;
   int n_items;
 
   /* Execution order (topological sort of item dependency graph) */
@@ -166,7 +166,7 @@ typedef struct {
   /* Mode-specific metadata (VALUE_AND_GRAD only) */
   int loss_buf_slot;  /* which slot is the loss output, or -1 */
   int *grad_buf_slots; /* [n_params] grad output slots, or NULL */
-} PolyPreparedStep;
+} PolySchedule;
 
 /* ── Runner ──────────────────────────────────────────────────────────── */
 /*
@@ -207,7 +207,7 @@ typedef struct {
  */
 
 typedef struct {
-  PolyPreparedStep *prepared; /* retained reference, not owned */
+  PolySchedule *prepared; /* retained reference, not owned */
   PolyDeviceId device;
   const PolyAllocator *allocator;
 
@@ -217,7 +217,7 @@ typedef struct {
   /* Runtime buffer handles for intermediates */
   PolyBufferHandle *intermediate_handles;
   int n_intermediates;
-} PolyExecutableStep;
+} PolyCompiledPlan;
 
 /* ── Backend descriptor ──────────────────────────────────────────────── */
 /*
@@ -276,10 +276,10 @@ typedef struct {
  *
  * Returns NULL on error.
  */
-PolyPreparedStep *poly_prepare_step(PolyCtx *ctx, PolyUOp *sink,
+PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
                                     PolyCompileMode mode);
 
-void poly_prepared_step_free(PolyPreparedStep *step);
+void poly_schedule_free(PolySchedule *step);
 
 /* ── Executable step construction ────────────────────────────────────── */
 /*
@@ -292,7 +292,7 @@ void poly_prepared_step_free(PolyPreparedStep *step);
  *
  * Returns NULL on error.
  */
-PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
+PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared,
                                     PolyDeviceId device);
 
 /*
@@ -306,11 +306,11 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
  *
  * Returns 0 on success, <0 on error.
  */
-int poly_executable_step_run(PolyExecutableStep *step,
+int poly_compiled_plan_run(PolyCompiledPlan *step,
                              void **slot_data, int n_slots,
                              struct PolyVarBinding *var_bindings, int n_var_bindings);
 
-void poly_executable_step_free(PolyExecutableStep *step);
+void poly_compiled_plan_free(PolyCompiledPlan *step);
 
 /* ── Allocators ──────────────────────────────────────────────────────── */
 
@@ -325,6 +325,19 @@ extern const PolyAllocator POLY_CUDA_ALLOCATOR;
 /* Returns the backend descriptor for a device, or NULL if unsupported
  * in this build. */
 const PolyBackendDesc *poly_backend_get(PolyDeviceId device);
+
+/* ── Backward compatibility ──────────────────────────────────────────── */
+
+typedef PolyScheduleBufSlot PolyPreparedBufSlot;
+typedef PolyExecItem PolyExecItemSpec;
+typedef PolySchedule PolyPreparedStep;
+typedef PolyCompiledPlan PolyExecutableStep;
+
+#define poly_prepare_step      poly_schedule_for
+#define poly_prepared_step_free poly_schedule_free
+#define poly_lower_step        poly_compile_schedule
+#define poly_executable_step_run  poly_compiled_plan_run
+#define poly_executable_step_free poly_compiled_plan_free
 
 #ifdef __cplusplus
 }
