@@ -12,6 +12,7 @@
 #include "scheduler.h"
 #include "rangeify.h"
 #include "codegen.h"
+#include "interp.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3095,13 +3096,19 @@ const PolyAllocator POLY_CPU_ALLOCATOR = {
   .dev_ctx = NULL,
 };
 
-/* ── Executable step construction (CPU) ──────────────────────────────── */
+/* ── Executable step construction (CPU + INTERP) ─────────────────────── */
+
+/* Interpreter runner handle: linearized UOp array + count */
+typedef struct {
+  PolyUOp **lin;
+  int n_lin;
+} InterpHandle;
 
 PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
                                     PolyDeviceId device) {
   if (!ctx || !prepared) return NULL;
-  if (device != POLY_DEVICE_CPU) {
-    fprintf(stderr, "polygrad: lower_step: only CPU device implemented\n");
+  if (device != POLY_DEVICE_CPU && device != POLY_DEVICE_INTERP) {
+    fprintf(stderr, "polygrad: lower_step: unsupported device %d\n", device);
     return NULL;
   }
 
@@ -3137,7 +3144,7 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
     }
   }
 
-  /* Lower each COMPUTE item: linearize -> render C -> compile */
+  /* Lower each COMPUTE item */
   static int lower_counter = 0;
   for (int k = 0; k < prepared->n_items; k++) {
     PolyExecItemSpec *item = &prepared->items[k];
@@ -3153,30 +3160,43 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
       goto cleanup;
     }
 
+    /* Linearize (shared by both CPU and INTERP) */
     int n_lin;
     PolyUOp **lin = poly_linearize(ctx, item->root, &n_lin);
     if (!lin) goto cleanup;
 
-    char fn_name[64];
-    snprintf(fn_name, sizeof(fn_name), "lower%d_k%d", lower_counter, k);
-    char *src = poly_render_c(lin, n_lin, fn_name);
-    free(lin);
-    if (!src) goto cleanup;
+    if (device == POLY_DEVICE_INTERP) {
+      /* INTERP: store linearized UOps directly, no render/compile */
+      InterpHandle *ih = malloc(sizeof(InterpHandle));
+      if (!ih) { free(lin); goto cleanup; }
+      ih->lin = lin;
+      ih->n_lin = n_lin;
+      runner->kind = POLY_RUNNER_INTERP;
+      runner->handle = ih;
+      runner->handle_size = 0;
+    } else {
+      /* CPU: render C -> compile -> dlopen */
+      char fn_name[64];
+      snprintf(fn_name, sizeof(fn_name), "lower%d_k%d", lower_counter, k);
+      char *src = poly_render_c(lin, n_lin, fn_name);
+      free(lin);
+      if (!src) goto cleanup;
 
-    if (getenv("POLY_DUMP_KERNELS"))
-      fprintf(stderr, "=== LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+      if (getenv("POLY_DUMP_KERNELS"))
+        fprintf(stderr, "=== LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
 
-    PolyProgram *prog = poly_compile_c(src, fn_name);
-    if (!prog) {
-      fprintf(stderr, "=== FAILED LOWER KERNEL %d ===\n%s\n=== END ===\n", k, src);
+      PolyProgram *prog = poly_compile_c(src, fn_name);
+      if (!prog) {
+        fprintf(stderr, "=== FAILED LOWER KERNEL %d ===\n%s\n=== END ===\n", k, src);
+        free(src);
+        goto cleanup;
+      }
       free(src);
-      goto cleanup;
-    }
-    free(src);
 
-    runner->kind = POLY_RUNNER_COMPILED;
-    runner->handle = prog;
-    runner->handle_size = 0;
+      runner->kind = POLY_RUNNER_COMPILED;
+      runner->handle = prog;
+      runner->handle_size = 0;
+    }
 
     /* Copy buf_slot_indices as param_to_slot */
     runner->n_params = item->n_buf_slots;
@@ -3251,27 +3271,13 @@ int poly_executable_step_run(PolyExecutableStep *step,
     int k = ps->exec_order[s];
     PolyRunner *runner = &step->runners[k];
 
-    if (runner->kind != POLY_RUNNER_COMPILED || !runner->handle) {
-      fprintf(stderr, "polygrad: exec_step_run: runner %d not compiled\n", k);
+    if (!runner->handle) {
+      fprintf(stderr, "polygrad: exec_step_run: runner %d has no handle\n", k);
       ret = -1; break;
     }
 
-    /* Count DEFINE_VAR params from the kernel root */
-    int n_kernel_vars = 0;
-    PolyExecItemSpec *item = &ps->items[k];
-
-    /* Scan the kernel root's linearized PARAM list to find DEFINE_VARs.
-     * In the current architecture, vars follow buffer params in the _call
-     * signature. We need to discover how many vars this kernel has.
-     * Use the same approach as poly_compile_step: walk the scheduled root
-     * to count DEFINE_VAR nodes. But we don't store that separately yet.
-     *
-     * For now, we pass only buffer args. Var support will be added
-     * when we store var info in the runner (Phase 5+). */
-    (void)n_kernel_vars;
     (void)all_vars;
     (void)n_all;
-    (void)item;
 
     int n_args = runner->n_params;
     void **args = calloc((size_t)n_args, sizeof(void *));
@@ -3288,7 +3294,16 @@ int poly_executable_step_run(PolyExecutableStep *step,
     }
 
     if (ret == 0 && args) {
-      poly_program_call((PolyProgram *)runner->handle, args, n_args);
+      if (runner->kind == POLY_RUNNER_COMPILED) {
+        poly_program_call((PolyProgram *)runner->handle, args, n_args);
+      } else if (runner->kind == POLY_RUNNER_INTERP) {
+        InterpHandle *ih = (InterpHandle *)runner->handle;
+        ret = poly_interp_eval(ih->lin, ih->n_lin, args, n_args);
+      } else {
+        fprintf(stderr, "polygrad: exec_step_run: unsupported runner kind %d\n",
+                runner->kind);
+        ret = -1;
+      }
       free(args);
     }
   }
@@ -3302,6 +3317,11 @@ void poly_executable_step_free(PolyExecutableStep *step) {
     PolyRunner *r = &step->runners[i];
     if (r->kind == POLY_RUNNER_COMPILED && r->handle)
       poly_program_destroy((PolyProgram *)r->handle);
+    if (r->kind == POLY_RUNNER_INTERP && r->handle) {
+      InterpHandle *ih = (InterpHandle *)r->handle;
+      free(ih->lin);
+      free(ih);
+    }
     free(r->param_to_slot);
     free(r->var_indices);
   }
