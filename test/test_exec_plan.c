@@ -1,11 +1,64 @@
 /*
- * test_exec_plan.c -- Tests for PolyPreparedStep construction
+ * test_exec_plan.c -- Tests for the cross-platform execution plan
+ *
+ * Phase 1-2: PolyPreparedStep construction
+ * Phase 3:   CPU executable step (lower + run)
+ * Phase 4:   Interpreter backend (CPU vs INTERP parity)
  */
 
 #include "test_harness.h"
 #include "../src/frontend.h"
 #include "../src/exec_plan.h"
 #include "../src/scheduler.h"
+
+/* ── Helper: run same graph on CPU and INTERP, compare outputs ────────── */
+
+static int cpu_interp_parity(PolyCtx *ctx, PolyUOp *sink,
+                             PolyUOp **bufs, void **datas, int n_bufs,
+                             PolyUOp *out_buf, float *out_cpu, float *out_interp,
+                             int out_numel, float tol) {
+  PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+  if (!ps) return -1;
+
+  /* CPU path */
+  PolyExecutableStep *cpu = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
+  if (!cpu) { poly_prepared_step_free(ps); return -2; }
+  memset(out_cpu, 0, (size_t)out_numel * sizeof(float));
+  void *slot_cpu[16] = {0};
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    for (int j = 0; j < n_bufs; j++) {
+      if (ps->buf_slots[i].buf_uop == bufs[j])
+        slot_cpu[i] = (bufs[j] == out_buf) ? out_cpu : datas[j];
+    }
+  }
+  int rc = poly_executable_step_run(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
+  poly_executable_step_free(cpu);
+  if (rc < 0) { poly_prepared_step_free(ps); return -3; }
+
+  /* INTERP path */
+  PolyExecutableStep *interp = poly_lower_step(ctx, ps, POLY_DEVICE_INTERP);
+  if (!interp) { poly_prepared_step_free(ps); return -4; }
+  memset(out_interp, 0, (size_t)out_numel * sizeof(float));
+  void *slot_interp[16] = {0};
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    for (int j = 0; j < n_bufs; j++) {
+      if (ps->buf_slots[i].buf_uop == bufs[j])
+        slot_interp[i] = (bufs[j] == out_buf) ? out_interp : datas[j];
+    }
+  }
+  rc = poly_executable_step_run(interp, slot_interp, ps->n_buf_slots, NULL, 0);
+  poly_executable_step_free(interp);
+  poly_prepared_step_free(ps);
+  if (rc < 0) return -5;
+
+  /* Compare */
+  for (int i = 0; i < out_numel; i++) {
+    float diff = out_cpu[i] - out_interp[i];
+    if (diff < 0) diff = -diff;
+    if (diff > tol) return i + 1; /* 1-based index of first mismatch */
+  }
+  return 0;
+}
 
 /* ── Single-kernel: vecadd ─────────────────────────────────────────────── */
 
@@ -492,6 +545,171 @@ TEST(exec_plan, interp_transcendental) {
 
   poly_executable_step_free(es);
   poly_prepared_step_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── CPU vs INTERP parity suite ──────────────────────────────────────── */
+
+TEST(exec_plan, parity_chain) {
+  /* (a + b) * (a - b) -- 3-op elementwise chain */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 8);
+  PolyUOp *b = poly_buffer_f32(ctx, 8);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sub = poly_alu2(ctx, POLY_OP_SUB, a, b);
+  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, add, sub);
+  PolyUOp *out = poly_buffer_f32(ctx, 8);
+  PolyUOp *st = poly_store_val(ctx, out, mul);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float db[] = {0.5f, 1, 1.5f, 2, 2.5f, 3, 3.5f, 4};
+  float out_cpu[8], out_interp[8];
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
+                             out, out_cpu, out_interp, 8, 0.0f);
+  ASSERT_INT_EQ(rc, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, parity_neg_sqrt) {
+  /* sqrt(a) + neg(b) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *sa = poly_alu1(ctx, POLY_OP_SQRT, a);
+  PolyUOp *nb = poly_alu1(ctx, POLY_OP_NEG, b);
+  PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, sa, nb);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *st = poly_store_val(ctx, out, r);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[] = {1, 4, 9, 16};
+  float db[] = {0.5f, 1, 1.5f, 2};
+  float out_cpu[4], out_interp[4];
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
+                             out, out_cpu, out_interp, 4, 1e-6f);
+  ASSERT_INT_EQ(rc, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, parity_reduce_sum) {
+  /* sum(a) -> scalar output */
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
+
+  int64_t axes[] = {0};
+  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, s, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
+
+  float da[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float out_cpu[1], out_interp[1];
+  PolyUOp *bufs[] = {a, out};
+  void *datas[] = {da, NULL};
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2,
+                             out, out_cpu, out_interp, 1, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(out_cpu[0], 36.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, parity_where) {
+  /* where(a > 0, a, b) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *cmp = poly_alu2(ctx, POLY_OP_CMPLT, zero, a);
+  PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *st = poly_store_val(ctx, out, w);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[] = {-1, 2, -3, 4};
+  float db[] = {10, 20, 30, 40};
+  float out_cpu[4], out_interp[4];
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
+                             out, out_cpu, out_interp, 4, 0.0f);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(out_cpu[0], 10.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out_cpu[1],  2.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out_cpu[2], 30.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out_cpu[3],  4.0f, 1e-6);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, parity_exp2_log2) {
+  /* exp2(log2(a)) ~= a (through decomposed polynomial path) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *lg = poly_alu1(ctx, POLY_OP_LOG2, a);
+  PolyUOp *ex = poly_alu1(ctx, POLY_OP_EXP2, lg);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *st = poly_store_val(ctx, out, ex);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[] = {0.5f, 1.0f, 2.0f, 8.0f};
+  float out_cpu[4], out_interp[4];
+  PolyUOp *bufs[] = {a, out};
+  void *datas[] = {da, NULL};
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2,
+                             out, out_cpu, out_interp, 4, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, parity_multikernel_reduce_chain) {
+  /* sum(a) -> expand -> add(b): multi-kernel with intermediate */
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
+
+  int64_t axes[] = {0};
+  int64_t one_sh[] = {1};
+  int64_t exp_sh[] = {N};
+  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *s1 = poly_reshape(ctx, s, one_sh, 1);
+  PolyUOp *se = poly_expand(ctx, s1, exp_sh, 1);
+  PolyUOp *c = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, se, b, poly_arg_none());
+  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, c, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
+
+  float da[8], db[8];
+  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); db[i] = (float)(i * 10); }
+  float out_cpu[8], out_interp[8];
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
+                             out, out_cpu, out_interp, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

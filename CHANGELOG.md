@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+- Cross-platform execution plan types (`exec_plan.h`): `PolyDeviceId`, `PolyCompileMode`, `PolyPreparedStep`, `PolyExecutableStep`, `PolyRunner`, `PolyBackendDesc`, `PolyAllocator`, `PolyBufferHandle`. Foundation for multi-backend PolyInstance.
+- `poly_prepare_step()`: backend-neutral scheduling that produces `PolyPreparedStep` from a tensor SINK. Shared by all backends.
+- `poly_lower_step()`: lowers a prepared step into a backend-specific `PolyExecutableStep`. Supports `POLY_DEVICE_CPU` (fork+clang+dlopen) and `POLY_DEVICE_INTERP` (linearize-then-interpret).
+- `poly_executable_step_run()`: executes a lowered step with slot-indexed buffer data. Works for both CPU compiled and interpreter runners.
+- Interpreter backend (`interp.c`): walks linearized UOps directly in C without external compiler. Handles all scalar types, BITCAST (int32/float32 bit reinterpretation), RANGE/END loops, DEFINE_REG accumulators, and the full codegen decomposition pipeline (EXP2 polynomial, LOG2, SIN). Serves as correctness oracle.
+- CPU allocator (`POLY_CPU_ALLOCATOR`): trivial malloc/free/memcpy implementation for host memory.
+- 18 new C tests: 5 prepared step, 3 CPU executable step, 4 interpreter, 6 CPU-vs-INTERP parity (chain, neg+sqrt, reduce_sum, where, exp2+log2, multi-kernel reduce chain).
+
 ### Fixed
 - Einsum trace: repeated indices in a single input (e.g. `'ii->'`) now correctly extract the diagonal instead of producing wrong results. Ported tinygrad's diagonal extraction algorithm (permute + flatten + pad + reshape + shrink).
 - Float16 C renderer: changed dtype name from `"half"` to `"__fp16"` (matching tinygrad ClangRenderer `type_map`). `half()` and `bfloat16()` now work end-to-end on CPU. 14 new C tests in `test_f16.c`.
