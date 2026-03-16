@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/instance.h"
+#include "../src/exec_plan.h"
 #include "../src/ir.h"
 #include "../src/frontend.h"
 #include "../src/scheduler.h"
@@ -317,5 +318,199 @@ TEST(instance, null_safety) {
   ASSERT_TRUE(poly_instance_param_name(NULL, 0) == NULL);
   ASSERT_TRUE(poly_instance_param_data(NULL, 0, NULL) == NULL);
   poly_instance_free(NULL);  /* should not crash */
+  PASS();
+}
+
+/* ── Phase 5: Backend-aware PolyInstance tests ────────────────────────── */
+
+TEST(instance, call_basic) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  float a_data[] = { 1.0f, 2.0f, 3.0f, 4.0f };
+  float b_data[] = { 10.0f, 20.0f, 30.0f, 40.0f };
+  PolyIOBinding io[] = { { "a", a_data }, { "b", b_data } };
+
+  /* Use poly_instance_call instead of poly_instance_forward */
+  int ret = poly_instance_call(inst, "forward", io, 2);
+  ASSERT_INT_EQ(ret, 0);
+
+  int64_t numel;
+  float *out = poly_instance_buf_data(inst, 2, &numel);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(fabsf(out[0] - 11.0f) < 1e-5f);
+  ASSERT_TRUE(fabsf(out[1] - 22.0f) < 1e-5f);
+  ASSERT_TRUE(fabsf(out[2] - 33.0f) < 1e-5f);
+  ASSERT_TRUE(fabsf(out[3] - 44.0f) < 1e-5f);
+
+  poly_instance_free(inst);
+  free(ir);
+  PASS();
+}
+
+TEST(instance, set_device_interp) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  /* Switch to interpreter */
+  int ret = poly_instance_set_device(inst, POLY_DEVICE_INTERP);
+  ASSERT_INT_EQ(ret, 0);
+
+  float a_data[] = { 5.0f, 6.0f, 7.0f, 8.0f };
+  float b_data[] = { 100.0f, 200.0f, 300.0f, 400.0f };
+  PolyIOBinding io[] = { { "a", a_data }, { "b", b_data } };
+
+  ret = poly_instance_forward(inst, io, 2);
+  ASSERT_INT_EQ(ret, 0);
+
+  int64_t numel;
+  float *out = poly_instance_buf_data(inst, 2, &numel);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(fabsf(out[0] - 105.0f) < 1e-5f);
+  ASSERT_TRUE(fabsf(out[1] - 206.0f) < 1e-5f);
+  ASSERT_TRUE(fabsf(out[2] - 307.0f) < 1e-5f);
+  ASSERT_TRUE(fabsf(out[3] - 408.0f) < 1e-5f);
+
+  poly_instance_free(inst);
+  free(ir);
+  PASS();
+}
+
+TEST(instance, cpu_vs_interp_forward) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+
+  /* Run on CPU */
+  PolyInstance *inst_cpu = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst_cpu);
+
+  float a_data[] = { 1.5f, 2.5f, 3.5f, 4.5f };
+  float b_data[] = { 0.1f, 0.2f, 0.3f, 0.4f };
+  PolyIOBinding io[] = { { "a", a_data }, { "b", b_data } };
+
+  ASSERT_INT_EQ(poly_instance_forward(inst_cpu, io, 2), 0);
+  int64_t numel;
+  float *cpu_out = poly_instance_buf_data(inst_cpu, 2, &numel);
+
+  /* Run on INTERP */
+  PolyInstance *inst_interp = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst_interp);
+  ASSERT_INT_EQ(poly_instance_set_device(inst_interp, POLY_DEVICE_INTERP), 0);
+  ASSERT_INT_EQ(poly_instance_forward(inst_interp, io, 2), 0);
+  float *interp_out = poly_instance_buf_data(inst_interp, 2, &numel);
+
+  /* Compare outputs */
+  for (int i = 0; i < 4; i++)
+    ASSERT_TRUE(fabsf(cpu_out[i] - interp_out[i]) < 1e-6f);
+
+  poly_instance_free(inst_cpu);
+  poly_instance_free(inst_interp);
+  free(ir);
+  PASS();
+}
+
+TEST(instance, cpu_vs_interp_train) {
+  int ir_len = 0;
+  uint8_t *ir = make_train_ir(4, &ir_len);
+
+  float x[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+  float y[] = { 3.0f, 3.0f, 3.0f, 3.0f };
+  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+
+  /* CPU training */
+  PolyInstance *inst_cpu = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst_cpu);
+  { int64_t n; float *w = poly_instance_param_data(inst_cpu, 0, &n);
+    for (int i = 0; i < 4; i++) w[i] = 1.0f; }
+  poly_instance_set_optimizer(inst_cpu, POLY_OPTIM_SGD,
+                               0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  float cpu_losses[5];
+  for (int s = 0; s < 5; s++) {
+    ASSERT_INT_EQ(poly_instance_train_step(inst_cpu, io, 2, &cpu_losses[s]), 0);
+  }
+
+  /* INTERP training */
+  PolyInstance *inst_interp = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst_interp);
+  ASSERT_INT_EQ(poly_instance_set_device(inst_interp, POLY_DEVICE_INTERP), 0);
+  { int64_t n; float *w = poly_instance_param_data(inst_interp, 0, &n);
+    for (int i = 0; i < 4; i++) w[i] = 1.0f; }
+  poly_instance_set_optimizer(inst_interp, POLY_OPTIM_SGD,
+                               0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  float interp_losses[5];
+  for (int s = 0; s < 5; s++) {
+    ASSERT_INT_EQ(poly_instance_train_step(inst_interp, io, 2, &interp_losses[s]), 0);
+  }
+
+  /* Compare loss trajectories */
+  for (int s = 0; s < 5; s++)
+    ASSERT_TRUE(fabsf(cpu_losses[s] - interp_losses[s]) < 1e-4f);
+
+  /* Both should decrease */
+  ASSERT_TRUE(cpu_losses[4] < cpu_losses[0]);
+
+  poly_instance_free(inst_cpu);
+  poly_instance_free(inst_interp);
+  free(ir);
+  PASS();
+}
+
+TEST(instance, set_device_roundtrip) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  float a[] = { 1.0f, 2.0f, 3.0f, 4.0f };
+  float b[] = { 10.0f, 20.0f, 30.0f, 40.0f };
+  PolyIOBinding io[] = { { "a", a }, { "b", b } };
+  float expected[] = { 11.0f, 22.0f, 33.0f, 44.0f };
+  int64_t numel;
+
+  /* Run on CPU */
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 2), 0);
+  float *out = poly_instance_buf_data(inst, 2, &numel);
+  for (int i = 0; i < 4; i++)
+    ASSERT_TRUE(fabsf(out[i] - expected[i]) < 1e-5f);
+
+  /* Switch to INTERP and run */
+  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_INTERP), 0);
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 2), 0);
+  out = poly_instance_buf_data(inst, 2, &numel);
+  for (int i = 0; i < 4; i++)
+    ASSERT_TRUE(fabsf(out[i] - expected[i]) < 1e-5f);
+
+  /* Switch back to CPU (should hit exec cache) */
+  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 2), 0);
+  out = poly_instance_buf_data(inst, 2, &numel);
+  for (int i = 0; i < 4; i++)
+    ASSERT_TRUE(fabsf(out[i] - expected[i]) < 1e-5f);
+
+  poly_instance_free(inst);
+  free(ir);
+  PASS();
+}
+
+TEST(instance, set_device_unsupported) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  /* CUDA not supported in this build */
+  ASSERT_TRUE(poly_instance_set_device(inst, POLY_DEVICE_CUDA) < 0);
+
+  /* set_device(NULL) */
+  ASSERT_TRUE(poly_instance_set_device(NULL, POLY_DEVICE_CPU) < 0);
+
+  poly_instance_free(inst);
+  free(ir);
   PASS();
 }

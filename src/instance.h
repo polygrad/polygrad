@@ -5,6 +5,11 @@
  * Created from IR bytes (poly.ir.uops@1) or family builders (MLP, etc.).
  * Provides: forward pass, training step, weight export/import.
  *
+ * Backend-aware: the same instance can execute on different devices
+ * (CPU, interpreter, CUDA, WASM JIT) via poly_instance_set_device().
+ * Default device is CPU. Prepared step cache survives device changes;
+ * executable step cache retains entries for all previously-used devices.
+ *
  * This is a "product layer" above the tinygrad-aligned compiler core.
  */
 
@@ -12,6 +17,7 @@
 #define POLY_INSTANCE_H
 
 #include "polygrad.h"
+#include "exec_plan.h" /* PolyDeviceId */
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -77,6 +83,18 @@ int poly_instance_import_weights(PolyInstance *inst,
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
 
+/* ── Device configuration ────────────────────────────────────────────── */
+
+/* Set the execution device. Default is POLY_DEVICE_CPU.
+ * May be called more than once. Changing device:
+ *   - prepared step cache survives (backend-neutral)
+ *   - executable step cache retains entries for all previously-used devices
+ *   - weight materialization transfers data to the new memory domain
+ *     (no-op for CPU/INTERP since both use host malloc)
+ * POLY_DEVICE_AUTO resolves to CPU on native builds.
+ * Returns 0 on success, <0 if device is unsupported. */
+int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device);
+
 /* ── Execution ───────────────────────────────────────────────────────── */
 
 /* I/O binding for forward/train calls. */
@@ -85,16 +103,28 @@ typedef struct {
     float *data;
 } PolyIOBinding;
 
-/* Forward pass. Compiles "forward" entrypoint lazily on first call.
- * Input bindings required for all role=INPUT buffers.
- * Output written to instance-owned output buffers
- * (retrieve via poly_instance_buf_data). Returns 0 on success. */
+/* Generic entrypoint execution. Compiles lazily on first call.
+ * I/O bindings match instance buffer names. Output written to
+ * instance-owned buffers (retrieve via poly_instance_buf_data).
+ * Returns 0 on success. */
+int poly_instance_call(PolyInstance *inst, const char *entrypoint,
+                       PolyIOBinding *io, int n_io);
+
+/* Forward + backward for a differentiable entrypoint.
+ * Builds autograd graph lazily on first call. Computes loss value
+ * and per-parameter gradients. Does NOT apply optimizer updates.
+ * Returns 0 on success, loss value via *loss_out. */
+int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
+                                 PolyIOBinding *io, int n_io,
+                                 float *loss_out);
+
+/* ── Convenience wrappers ────────────────────────────────────────────── */
+
+/* forward() = call("forward", ...) */
 int poly_instance_forward(PolyInstance *inst,
                           PolyIOBinding *inputs, int n_inputs);
 
-/* Single train step. Requires "loss" entrypoint in IR.
- * Builds backward + update graphs lazily on first call.
- * Returns loss value via *loss_out. Returns 0 on success. */
+/* train_step() = value_and_grad("loss", ...) + host optimizer update */
 int poly_instance_train_step(PolyInstance *inst,
                              PolyIOBinding *io, int n_io,
                              float *loss_out);

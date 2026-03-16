@@ -2,7 +2,12 @@
  * poly_instance.c -- Runtime for portable tensor-level model instances
  *
  * Product layer above the tinygrad-aligned compiler core.
- * Owns graph + named buffers + compiled steps + optimizer state.
+ * Owns graph + named buffers + execution caches + optimizer state.
+ *
+ * Backend-aware: uses the exec_plan API (prepare + lower + run) for
+ * all execution. Device selection at runtime via set_device().
+ * Prepared step cache is backend-neutral and survives device changes.
+ * Executable step cache retains entries for all previously-used devices.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -10,6 +15,8 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "frontend.h"
+#include "exec_plan.h"
+#include "scheduler.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,7 +30,7 @@ typedef struct {
   PolyUOp *buffer;
   int64_t shape[8];
   int ndim;
-  float *data;       /* owned for param/output/aux; NULL for input/target */
+  float *data;       /* owned, allocated for all roles */
   int64_t numel;
 } NamedBuf;
 
@@ -35,6 +42,36 @@ typedef struct {
   float *v;         /* concatenated second moments (all params) */
   int64_t total_numel; /* total param elements */
 } OptimState;
+
+/* ── Execution cache entry types ─────────────────────────────────────── */
+
+typedef struct {
+  int ep_idx;
+  PolyCompileMode mode;
+  PolyPreparedStep *prep;
+} PrepCacheEntry;
+
+typedef struct {
+  int ep_idx;
+  PolyCompileMode mode;
+  PolyDeviceId device;
+  PolyExecutableStep *exec;
+} ExecCacheEntry;
+
+/* ── Value-and-grad metadata (built lazily on first train call) ──────── */
+
+typedef struct {
+  PolyUOp *combined_sink;           /* combined fwd+bwd SINK */
+  PolyUOp *loss_out_buf;            /* BUFFER UOp for loss output */
+  PolyUOp **grad_out_bufs;          /* [n_params] gradient BUFFER UOps */
+  float **grad_datas;               /* [n_params] gradient host data */
+  float loss_data;                  /* scalar loss value */
+
+  /* Cached slot indices (set after first prepare_step) */
+  int loss_slot;                    /* buf_slot index for loss output */
+  int *grad_slots;                  /* [n_params] buf_slot indices for grads */
+  bool slots_resolved;              /* true after first resolution */
+} VagState;
 
 struct PolyInstance {
   PolyCtx *ctx;
@@ -50,23 +87,23 @@ struct PolyInstance {
   struct { char *name; PolyUOp *sink; } *entrypoints;
   int n_entrypoints;
 
-  /* Compiled steps (lazy) */
-  PolyStep *forward_step;
-  PolyStep *train_step;
+  /* ── Device and allocator ── */
+  PolyDeviceId device;
+  const PolyAllocator *allocator;
 
-  /* Train-step graph pieces (built lazily) */
-  PolyUOp *train_sink;        /* combined fwd+bwd+update SINK */
-  PolyUOp *loss_buf;          /* BUFFER UOp for loss output */
-  float loss_data;
-  int train_loss_buf_idx;     /* loss buffer position in train_step->buf_order */
-  int *train_grad_buf_idxs;   /* malloc'd [n_params] grad buffer positions */
+  /* ── Execution caches ── */
+  PrepCacheEntry *prep_cache;
+  int n_prep_cached;
+  int prep_cache_cap;
 
-  /* Optimizer update buffers (for non-ASSIGN path) */
-  PolyUOp **grad_bufs;        /* [n_params] gradient BUFFER UOps */
-  float **grad_datas;          /* [n_params] gradient host data */
-  PolyUOp **update_bufs;      /* [n_params] updated param BUFFER UOps */
-  float **update_datas;        /* [n_params] updated param host data */
+  ExecCacheEntry *exec_cache;
+  int n_exec_cached;
+  int exec_cache_cap;
 
+  /* ── Value-and-grad state (lazy, per-entrypoint -- currently only "loss") ── */
+  VagState *vag;                    /* NULL until first value_and_grad call */
+
+  /* ── Optimizer state ── */
   OptimState optim;
 };
 
@@ -90,6 +127,113 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
   return -1;
 }
 
+/* ── Cache helpers ───────────────────────────────────────────────────── */
+
+static PolyPreparedStep *prep_cache_lookup(const PolyInstance *inst,
+                                            int ep_idx, PolyCompileMode mode) {
+  for (int i = 0; i < inst->n_prep_cached; i++)
+    if (inst->prep_cache[i].ep_idx == ep_idx &&
+        inst->prep_cache[i].mode == mode)
+      return inst->prep_cache[i].prep;
+  return NULL;
+}
+
+static void prep_cache_insert(PolyInstance *inst, int ep_idx,
+                               PolyCompileMode mode, PolyPreparedStep *prep) {
+  if (inst->n_prep_cached >= inst->prep_cache_cap) {
+    int new_cap = inst->prep_cache_cap ? inst->prep_cache_cap * 2 : 4;
+    inst->prep_cache = realloc(inst->prep_cache, (size_t)new_cap * sizeof(PrepCacheEntry));
+    inst->prep_cache_cap = new_cap;
+  }
+  inst->prep_cache[inst->n_prep_cached++] = (PrepCacheEntry){
+    .ep_idx = ep_idx, .mode = mode, .prep = prep
+  };
+}
+
+static PolyExecutableStep *exec_cache_lookup(const PolyInstance *inst,
+                                              int ep_idx, PolyCompileMode mode,
+                                              PolyDeviceId device) {
+  for (int i = 0; i < inst->n_exec_cached; i++)
+    if (inst->exec_cache[i].ep_idx == ep_idx &&
+        inst->exec_cache[i].mode == mode &&
+        inst->exec_cache[i].device == device)
+      return inst->exec_cache[i].exec;
+  return NULL;
+}
+
+static void exec_cache_insert(PolyInstance *inst, int ep_idx,
+                               PolyCompileMode mode, PolyDeviceId device,
+                               PolyExecutableStep *exec) {
+  if (inst->n_exec_cached >= inst->exec_cache_cap) {
+    int new_cap = inst->exec_cache_cap ? inst->exec_cache_cap * 2 : 4;
+    inst->exec_cache = realloc(inst->exec_cache, (size_t)new_cap * sizeof(ExecCacheEntry));
+    inst->exec_cache_cap = new_cap;
+  }
+  inst->exec_cache[inst->n_exec_cached++] = (ExecCacheEntry){
+    .ep_idx = ep_idx, .mode = mode, .device = device, .exec = exec
+  };
+}
+
+/* ── Slot-data builder ───────────────────────────────────────────────── */
+/*
+ * Build the slot_data[] array for poly_executable_step_run().
+ * Maps each prepared step buf_slot to a host data pointer:
+ *   - External slots: find the instance buffer whose buf_uop matches
+ *   - IO bindings override by name
+ *   - Intermediate slots: NULL (the executable step owns those)
+ *   - Extra buffers (loss/grad): matched by buf_uop pointer
+ */
+
+static void **build_slot_data(PolyInstance *inst,
+                               const PolyPreparedStep *prep,
+                               PolyIOBinding *io, int n_io,
+                               /* extra buf_uop -> data mappings */
+                               PolyUOp **extra_uops, float **extra_datas, int n_extra) {
+  void **slot_data = calloc((size_t)prep->n_buf_slots, sizeof(void *));
+  if (!slot_data) return NULL;
+
+  for (int s = 0; s < prep->n_buf_slots; s++) {
+    if (prep->buf_slots[s].is_intermediate) continue;
+
+    PolyUOp *slot_uop = prep->buf_slots[s].buf_uop;
+
+    /* Check extra mappings first (loss/grad buffers) */
+    bool found = false;
+    for (int e = 0; e < n_extra; e++) {
+      if (extra_uops[e] == slot_uop) {
+        slot_data[s] = extra_datas[e];
+        found = true;
+        break;
+      }
+    }
+    if (found) continue;
+
+    /* Match to instance buffer by buf_uop pointer */
+    for (int b = 0; b < inst->n_bufs; b++) {
+      if (inst->bufs[b].buffer == slot_uop) {
+        slot_data[s] = inst->bufs[b].data;
+        break;
+      }
+    }
+  }
+
+  /* Override with IO bindings by name */
+  for (int i = 0; i < n_io; i++) {
+    if (!io[i].data) continue;
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (bi < 0) continue;
+    PolyUOp *buf_uop = inst->bufs[bi].buffer;
+    for (int s = 0; s < prep->n_buf_slots; s++) {
+      if (prep->buf_slots[s].buf_uop == buf_uop) {
+        slot_data[s] = io[i].data;
+        break;
+      }
+    }
+  }
+
+  return slot_data;
+}
+
 /* ── Lifecycle ───────────────────────────────────────────────────────── */
 
 PolyInstance *poly_instance_from_ir(
@@ -105,6 +249,10 @@ PolyInstance *poly_instance_from_ir(
 
   PolyInstance *inst = calloc(1, sizeof(PolyInstance));
   inst->ctx = spec.ctx;
+
+  /* Default device and allocator */
+  inst->device = POLY_DEVICE_CPU;
+  inst->allocator = &POLY_CPU_ALLOCATOR;
 
   /* Copy buffers */
   inst->n_bufs = spec.n_bufs;
@@ -159,13 +307,24 @@ PolyInstance *poly_instance_from_ir(
   return inst;
 }
 
+static void vag_free(VagState *vag, int n_params) {
+  if (!vag) return;
+  if (vag->grad_datas) {
+    for (int i = 0; i < n_params; i++) free(vag->grad_datas[i]);
+    free(vag->grad_datas);
+  }
+  free(vag->grad_out_bufs);
+  free(vag->grad_slots);
+  free(vag);
+}
+
 void poly_instance_free(PolyInstance *inst) {
   if (!inst) return;
 
   /* Free named buffers */
   for (int i = 0; i < inst->n_bufs; i++) {
     free(inst->bufs[i].name);
-    free(inst->bufs[i].data);  /* safe: NULL for input/target */
+    free(inst->bufs[i].data);
   }
   free(inst->bufs);
   free(inst->param_indices);
@@ -175,23 +334,19 @@ void poly_instance_free(PolyInstance *inst) {
     free(inst->entrypoints[i].name);
   free(inst->entrypoints);
 
-  /* Free compiled steps */
-  if (inst->forward_step) poly_step_destroy(inst->forward_step);
-  if (inst->train_step) poly_step_destroy(inst->train_step);
-  free(inst->train_grad_buf_idxs);
-  inst->train_grad_buf_idxs = NULL;
+  /* Free execution caches.
+   * Order: exec cache first (holds pointers into prepared steps),
+   * then prepared cache, then context (arena-frees all UOps). */
+  for (int i = 0; i < inst->n_exec_cached; i++)
+    poly_executable_step_free(inst->exec_cache[i].exec);
+  free(inst->exec_cache);
 
-  /* Free gradient/update buffers */
-  if (inst->grad_bufs) {
-    for (int i = 0; i < inst->n_params; i++) free(inst->grad_datas[i]);
-    free(inst->grad_bufs);
-    free(inst->grad_datas);
-  }
-  if (inst->update_bufs) {
-    for (int i = 0; i < inst->n_params; i++) free(inst->update_datas[i]);
-    free(inst->update_bufs);
-    free(inst->update_datas);
-  }
+  for (int i = 0; i < inst->n_prep_cached; i++)
+    poly_prepared_step_free(inst->prep_cache[i].prep);
+  free(inst->prep_cache);
+
+  /* Free value-and-grad state */
+  vag_free(inst->vag, inst->n_params);
 
   /* Free optimizer state */
   free(inst->optim.m);
@@ -339,52 +494,91 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
   return bytes;
 }
 
-/* ── Forward Execution ───────────────────────────────────────────────── */
+/* ── Device configuration ────────────────────────────────────────────── */
 
-int poly_instance_forward(PolyInstance *inst,
-                          PolyIOBinding *inputs, int n_inputs) {
+int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   if (!inst) return -1;
 
-  int ep = find_entrypoint(inst, "forward");
-  if (ep < 0) {
-    fprintf(stderr, "poly_instance_forward: no 'forward' entrypoint\n");
+  /* Resolve AUTO */
+  PolyDeviceId resolved = device;
+  if (resolved == POLY_DEVICE_AUTO) {
+#ifdef __EMSCRIPTEN__
+    resolved = POLY_DEVICE_WASM_JIT;
+#else
+    resolved = POLY_DEVICE_CPU;
+#endif
+  }
+
+  /* Validate supported devices */
+  if (resolved != POLY_DEVICE_CPU && resolved != POLY_DEVICE_INTERP) {
+    fprintf(stderr, "poly_instance_set_device: unsupported device %d\n", resolved);
     return -1;
   }
 
-  /* Build buffer bindings */
-  int n_bindings = inst->n_bufs;
-  PolyBufferBinding *bindings = malloc(n_bindings * sizeof(PolyBufferBinding));
-  for (int i = 0; i < inst->n_bufs; i++) {
-    bindings[i].buffer = inst->bufs[i].buffer;
-    bindings[i].data = inst->bufs[i].data; /* NULL for input/target */
+  /* Set device and allocator.
+   * CPU and INTERP both use host malloc -- no weight transfer needed. */
+  inst->device = resolved;
+  inst->allocator = &POLY_CPU_ALLOCATOR;
+
+  /* Note: prepared cache survives device changes (backend-neutral).
+   * Executable cache retains entries for all previously-used devices --
+   * switching back to a previously-used device hits the cache. */
+
+  return 0;
+}
+
+/* ── Generic entrypoint execution ────────────────────────────────────── */
+
+int poly_instance_call(PolyInstance *inst, const char *entrypoint,
+                       PolyIOBinding *io, int n_io) {
+  if (!inst || !entrypoint) return -1;
+
+  int ep_idx = find_entrypoint(inst, entrypoint);
+  if (ep_idx < 0) {
+    fprintf(stderr, "poly_instance_call: no '%s' entrypoint\n", entrypoint);
+    return -1;
   }
 
-  /* Override input bindings from caller (skip NULL to keep instance data) */
-  for (int i = 0; i < n_inputs; i++) {
-    int bi = find_buf_by_name(inst, inputs[i].name);
-    if (bi >= 0) {
-      if (inputs[i].data)
-        bindings[bi].data = inputs[i].data;
-    } else {
-      fprintf(stderr, "poly_instance_forward: unknown input '%s'\n",
-              inputs[i].name);
-    }
-  }
-
-  /* Lazy compile */
-  if (!inst->forward_step) {
-    inst->forward_step = poly_compile_step(inst->ctx,
-                                            inst->entrypoints[ep].sink);
-    if (!inst->forward_step) {
-      free(bindings);
-      fprintf(stderr, "poly_instance_forward: compilation failed\n");
+  /* Lookup or build prepared step */
+  PolyPreparedStep *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_CALL);
+  if (!prep) {
+    prep = poly_prepare_step(inst->ctx, inst->entrypoints[ep_idx].sink,
+                              POLY_MODE_CALL);
+    if (!prep) {
+      fprintf(stderr, "poly_instance_call: prepare failed for '%s'\n", entrypoint);
       return -1;
     }
+    prep_cache_insert(inst, ep_idx, POLY_MODE_CALL, prep);
   }
 
-  int ret = poly_step_run(inst->forward_step, bindings, n_bindings);
-  free(bindings);
+  /* Lookup or build executable step */
+  PolyExecutableStep *exec = exec_cache_lookup(inst, ep_idx, POLY_MODE_CALL,
+                                                inst->device);
+  if (!exec) {
+    exec = poly_lower_step(inst->ctx, prep, inst->device);
+    if (!exec) {
+      fprintf(stderr, "poly_instance_call: lower failed for '%s' on device %d\n",
+              entrypoint, inst->device);
+      return -1;
+    }
+    exec_cache_insert(inst, ep_idx, POLY_MODE_CALL, inst->device, exec);
+  }
+
+  /* Build slot_data and execute */
+  void **slot_data = build_slot_data(inst, prep, io, n_io, NULL, NULL, 0);
+  if (!slot_data) return -1;
+
+  int ret = poly_executable_step_run(exec, slot_data, prep->n_buf_slots,
+                                      NULL, 0);
+  free(slot_data);
   return ret;
+}
+
+/* ── Convenience wrapper ─────────────────────────────────────────────── */
+
+int poly_instance_forward(PolyInstance *inst,
+                          PolyIOBinding *inputs, int n_inputs) {
+  return poly_instance_call(inst, "forward", inputs, n_inputs);
 }
 
 /* ── Optimizer ───────────────────────────────────────────────────────── */
@@ -467,11 +661,217 @@ static void apply_optimizer_update(PolyInstance *inst,
   }
 }
 
+/* ── Value and Grad ──────────────────────────────────────────────────── */
+
+/* Compute numel from shape inference. Returns -1 on failure. */
+static int64_t uop_numel(PolyCtx *ctx, PolyUOp *u) {
+  PolyShape s = poly_uop_shape(ctx, u);
+  if (s.ndim < 0) {
+    if (s.dims) free(s.dims);
+    return -1;
+  }
+  int64_t n = poly_shape_numel(s);
+  if (s.dims) free(s.dims);
+  return n;
+}
+
+/* Build the combined fwd+bwd SINK for value_and_grad (lazy, once). */
+static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
+  if (inst->vag) return 0;  /* already built */
+
+  PolyUOp *loss_sink = inst->entrypoints[loss_ep_idx].sink;
+  PolyUOp *loss_store = loss_sink->src[0]; /* SINK src[0] = STORE */
+  PolyUOp *loss_value = loss_store->src[1]; /* STORE src[1] = value */
+
+  /* Build param buffer array */
+  PolyUOp **param_bufs = malloc((size_t)inst->n_params * sizeof(PolyUOp *));
+  if (!param_bufs) return -1;
+  for (int i = 0; i < inst->n_params; i++)
+    param_bufs[i] = inst->bufs[inst->param_indices[i]].buffer;
+
+  /* Compute gradients */
+  PolyUOp **grads = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
+  if (!grads) { free(param_bufs); return -1; }
+  if (poly_grad_many(inst->ctx, loss_value, NULL, param_bufs, inst->n_params, grads) != 0) {
+    fprintf(stderr, "poly_instance: value_and_grad: autograd failed\n");
+    free(grads); free(param_bufs);
+    return -1;
+  }
+
+  /* Allocate VagState */
+  VagState *vag = calloc(1, sizeof(VagState));
+  vag->grad_out_bufs = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
+  vag->grad_datas = calloc((size_t)inst->n_params, sizeof(float *));
+  vag->grad_slots = calloc((size_t)inst->n_params, sizeof(int));
+
+  /* Build output stores: loss + per-param gradients */
+  int n_stores = inst->n_params + 1;
+  PolyUOp **stores = calloc((size_t)n_stores, sizeof(PolyUOp *));
+
+  /* Loss output buffer (1 element) */
+  PolyDType out_dt = poly_dtype_scalar(loss_value->dtype);
+  if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
+  vag->loss_out_buf = poly_buffer(inst->ctx, out_dt, 1);
+
+  PolyUOp *loss_flat = loss_value;
+  if (uop_numel(inst->ctx, loss_value) != 1) {
+    int64_t one_shape[1] = {1};
+    loss_flat = poly_reshape(inst->ctx, loss_value, one_shape, 1);
+  }
+  stores[0] = poly_store_val(inst->ctx, vag->loss_out_buf, loss_flat);
+
+  /* Gradient output buffers */
+  for (int i = 0; i < inst->n_params; i++) {
+    int64_t numel = uop_numel(inst->ctx, grads[i]);
+    if (numel <= 0) {
+      fprintf(stderr, "poly_instance: value_and_grad: grad[%d] has unknown shape\n", i);
+      free(stores); free(grads); free(param_bufs); vag_free(vag, inst->n_params);
+      return -1;
+    }
+    PolyDType gdt = poly_dtype_scalar(grads[i]->dtype);
+    if (!poly_dtype_is_float(gdt)) gdt = POLY_FLOAT32;
+    PolyUOp *gbuf = poly_buffer(inst->ctx, gdt, numel);
+    vag->grad_out_bufs[i] = gbuf;
+
+    /* Flatten gradient if needed */
+    PolyUOp *gflat = grads[i];
+    PolyShape gs = poly_uop_shape(inst->ctx, grads[i]);
+    if (gs.ndim != 1 || (gs.ndim == 1 && gs.dims[0] != numel)) {
+      int64_t flat_shape[1] = { numel };
+      gflat = poly_reshape(inst->ctx, grads[i], flat_shape, 1);
+    }
+    if (gs.dims) free(gs.dims);
+    stores[i + 1] = poly_store_val(inst->ctx, gbuf, gflat);
+
+    /* Allocate host storage for gradient data */
+    NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+    vag->grad_datas[i] = calloc((size_t)pb->numel, sizeof(float));
+  }
+
+  vag->combined_sink = poly_sink_n(inst->ctx, stores, n_stores);
+  vag->slots_resolved = false;
+
+  free(stores);
+  free(grads);
+  free(param_bufs);
+
+  inst->vag = vag;
+  return 0;
+}
+
+/* Resolve loss/grad buf_slot indices from a prepared step.
+ * Called once after the first prepare_step for this vag graph. */
+static int resolve_vag_slots(PolyInstance *inst, const PolyPreparedStep *prep) {
+  VagState *vag = inst->vag;
+  if (vag->slots_resolved) return 0;
+
+  /* Find loss slot */
+  vag->loss_slot = -1;
+  for (int s = 0; s < prep->n_buf_slots; s++) {
+    if (prep->buf_slots[s].buf_uop == vag->loss_out_buf) {
+      vag->loss_slot = s;
+      break;
+    }
+  }
+  if (vag->loss_slot < 0) {
+    fprintf(stderr, "poly_instance: value_and_grad: loss buffer slot not found\n");
+    return -1;
+  }
+
+  /* Find grad slots */
+  for (int i = 0; i < inst->n_params; i++) {
+    vag->grad_slots[i] = -1;
+    for (int s = 0; s < prep->n_buf_slots; s++) {
+      if (prep->buf_slots[s].buf_uop == vag->grad_out_bufs[i]) {
+        vag->grad_slots[i] = s;
+        break;
+      }
+    }
+    if (vag->grad_slots[i] < 0) {
+      fprintf(stderr, "poly_instance: value_and_grad: grad[%d] buffer slot not found\n", i);
+      return -1;
+    }
+  }
+
+  vag->slots_resolved = true;
+  return 0;
+}
+
+int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
+                                 PolyIOBinding *io, int n_io,
+                                 float *loss_out) {
+  if (!inst || !entrypoint) return -1;
+
+  int ep_idx = find_entrypoint(inst, entrypoint);
+  if (ep_idx < 0) {
+    fprintf(stderr, "poly_instance_value_and_grad: no '%s' entrypoint\n", entrypoint);
+    return -1;
+  }
+
+  /* Build combined fwd+bwd graph lazily */
+  if (ensure_vag_graph(inst, ep_idx) != 0) return -1;
+  VagState *vag = inst->vag;
+
+  /* Use a synthetic cache key: ep_idx with VALUE_AND_GRAD mode.
+   * The combined_sink is different from the original entrypoint sink,
+   * so we use a dedicated cache entry. */
+
+  /* Lookup or build prepared step for the combined graph */
+  PolyPreparedStep *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD);
+  if (!prep) {
+    prep = poly_prepare_step(inst->ctx, vag->combined_sink, POLY_MODE_CALL);
+    if (!prep) {
+      fprintf(stderr, "poly_instance_value_and_grad: prepare failed\n");
+      return -1;
+    }
+    prep_cache_insert(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD, prep);
+
+    /* Resolve slot indices on first prepare */
+    if (resolve_vag_slots(inst, prep) != 0) return -1;
+  }
+
+  /* Lookup or build executable step */
+  PolyExecutableStep *exec = exec_cache_lookup(inst, ep_idx,
+                                                POLY_MODE_VALUE_AND_GRAD,
+                                                inst->device);
+  if (!exec) {
+    exec = poly_lower_step(inst->ctx, prep, inst->device);
+    if (!exec) {
+      fprintf(stderr, "poly_instance_value_and_grad: lower failed\n");
+      return -1;
+    }
+    exec_cache_insert(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD,
+                       inst->device, exec);
+  }
+
+  /* Build extra buf_uop -> data mappings for loss and grad outputs */
+  int n_extra = 1 + inst->n_params;
+  PolyUOp **extra_uops = malloc((size_t)n_extra * sizeof(PolyUOp *));
+  float **extra_datas = malloc((size_t)n_extra * sizeof(float *));
+  extra_uops[0] = vag->loss_out_buf;
+  extra_datas[0] = &vag->loss_data;
+  for (int i = 0; i < inst->n_params; i++) {
+    extra_uops[1 + i] = vag->grad_out_bufs[i];
+    extra_datas[1 + i] = vag->grad_datas[i];
+  }
+
+  void **slot_data = build_slot_data(inst, prep, io, n_io,
+                                      extra_uops, extra_datas, n_extra);
+  free(extra_uops);
+  free(extra_datas);
+  if (!slot_data) return -1;
+
+  int ret = poly_executable_step_run(exec, slot_data, prep->n_buf_slots,
+                                      NULL, 0);
+  free(slot_data);
+  if (ret != 0) return ret;
+
+  if (loss_out) *loss_out = vag->loss_data;
+  return 0;
+}
+
 /* ── Train Step ──────────────────────────────────────────────────────── */
 
-/* Build the training execution: forward + loss + gradients + optimizer.
- * On first call, compiles a single PolyStep for all fwd+bwd computation
- * via poly_compile_value_and_grad. Subsequent calls reuse the compiled step. */
 int poly_instance_train_step(PolyInstance *inst,
                              PolyIOBinding *io, int n_io,
                              float *loss_out) {
@@ -481,126 +881,21 @@ int poly_instance_train_step(PolyInstance *inst,
     return -1;
   }
 
-  /* Find loss entrypoint */
-  int loss_ep = find_entrypoint(inst, "loss");
-  if (loss_ep < 0) {
-    fprintf(stderr, "poly_instance_train_step: no 'loss' entrypoint\n");
-    return -1;
-  }
-
-  /* Compile training step on first call */
-  if (!inst->train_step) {
-    PolyUOp *loss_sink = inst->entrypoints[loss_ep].sink;
-    PolyUOp *loss_store = loss_sink->src[0]; /* SINK src[0] = STORE */
-    PolyUOp *loss_value = loss_store->src[1]; /* STORE src[1] = value */
-
-    /* Build param buffer UOp array */
-    PolyUOp **param_bufs = malloc((size_t)inst->n_params * sizeof(PolyUOp *));
-    if (!param_bufs) return -1;
-    for (int i = 0; i < inst->n_params; i++)
-      param_bufs[i] = inst->bufs[inst->param_indices[i]].buffer;
-
-    /* Allocate grad data storage (grad_bufs sentinel + grad_datas) */
-    inst->grad_bufs = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
-    inst->grad_datas = calloc((size_t)inst->n_params, sizeof(float *));
-    if (!inst->grad_bufs || !inst->grad_datas) {
-      free(param_bufs);
-      return -1;
-    }
-    for (int i = 0; i < inst->n_params; i++) {
-      NamedBuf *b = &inst->bufs[inst->param_indices[i]];
-      inst->grad_datas[i] = calloc((size_t)b->numel, sizeof(float));
-      if (!inst->grad_datas[i]) {
-        free(param_bufs);
-        return -1;
-      }
-    }
-
-    /* Compile combined fwd+bwd step */
-    inst->train_grad_buf_idxs = malloc((size_t)inst->n_params * sizeof(int));
-    if (!inst->train_grad_buf_idxs) {
-      free(param_bufs);
-      return -1;
-    }
-    inst->train_step = poly_compile_value_and_grad(inst->ctx, loss_value,
-                           param_bufs, inst->n_params,
-                           &inst->train_loss_buf_idx,
-                           inst->train_grad_buf_idxs);
-    free(param_bufs);
-
-    if (!inst->train_step) {
-      fprintf(stderr, "poly_instance_train_step: compile failed\n");
-      free(inst->train_grad_buf_idxs);
-      inst->train_grad_buf_idxs = NULL;
-      return -1;
-    }
-
-    /* Guard: loss and grad output buffers must be float32 so host float*
-     * bindings are valid.  poly_compile_value_and_grad preserves the input
-     * dtype (float16/bfloat16 would pass through), which would silently
-     * corrupt the host-side scalar and optimizer state. */
-    PolyUOp *loss_out_uop = poly_step_buf_uop(inst->train_step,
-                                               inst->train_loss_buf_idx);
-    if (loss_out_uop &&
-        !poly_dtype_eq(poly_dtype_scalar(loss_out_uop->dtype), POLY_FLOAT32)) {
-      fprintf(stderr,
-              "poly_instance_train_step: loss output is %s, expected float32\n",
-              poly_dtype_name(loss_out_uop->dtype));
-      poly_step_destroy(inst->train_step);
-      inst->train_step = NULL;
-      free(inst->train_grad_buf_idxs);
-      inst->train_grad_buf_idxs = NULL;
-      return -1;
-    }
-  }
-
-  /* Build bindings: instance buffers + loss output + grad outputs */
-  int n_bindings = inst->n_bufs + 1 + inst->n_params;
-  PolyBufferBinding *bindings = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
-  if (!bindings) return -1;
-
-  for (int i = 0; i < inst->n_bufs; i++) {
-    bindings[i].buffer = inst->bufs[i].buffer;
-    bindings[i].data = inst->bufs[i].data;
-  }
-
-  /* Override I/O from caller */
-  for (int i = 0; i < n_io; i++) {
-    int bi = find_buf_by_name(inst, io[i].name);
-    if (bi >= 0) bindings[bi].data = io[i].data;
-  }
-
-  /* Loss output binding */
-  bindings[inst->n_bufs] = (PolyBufferBinding){
-    poly_step_buf_uop(inst->train_step, inst->train_loss_buf_idx),
-    &inst->loss_data
-  };
-
-  /* Grad output bindings */
-  for (int i = 0; i < inst->n_params; i++) {
-    bindings[inst->n_bufs + 1 + i] = (PolyBufferBinding){
-      poly_step_buf_uop(inst->train_step, inst->train_grad_buf_idxs[i]),
-      inst->grad_datas[i]
-    };
-  }
-
-  int ret = poly_step_run_ex(inst->train_step, bindings, n_bindings, NULL, 0);
-  free(bindings);
+  /* Run value_and_grad for the "loss" entrypoint */
+  int ret = poly_instance_value_and_grad(inst, "loss", io, n_io, loss_out);
   if (ret != 0) return ret;
 
   /* Update instance "loss" buffer so consumers see the current value */
   int loss_named_idx = find_buf_by_name(inst, "loss");
   if (loss_named_idx >= 0 && inst->bufs[loss_named_idx].data)
-    inst->bufs[loss_named_idx].data[0] = inst->loss_data;
-
-  if (loss_out) *loss_out = inst->loss_data;
+    inst->bufs[loss_named_idx].data[0] = inst->vag->loss_data;
 
   /* Apply optimizer updates (host-side) */
   inst->optim.step++;
   int64_t moment_offset = 0;
   for (int i = 0; i < inst->n_params; i++) {
     NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-    apply_optimizer_update(inst, i, inst->grad_datas[i], pb->numel, moment_offset);
+    apply_optimizer_update(inst, i, inst->vag->grad_datas[i], pb->numel, moment_offset);
     moment_offset += pb->numel;
   }
 

@@ -10,6 +10,9 @@
 - Interpreter backend (`interp.c`): walks linearized UOps directly in C without external compiler. Handles all scalar types, BITCAST (int32/float32 bit reinterpretation), RANGE/END loops, DEFINE_REG accumulators, and the full codegen decomposition pipeline (EXP2 polynomial, LOG2, SIN). Serves as correctness oracle.
 - CPU allocator (`POLY_CPU_ALLOCATOR`): trivial malloc/free/memcpy implementation for host memory.
 - 18 new C tests: 5 prepared step, 3 CPU executable step, 4 interpreter, 6 CPU-vs-INTERP parity (chain, neg+sqrt, reduce_sum, where, exp2+log2, multi-kernel reduce chain).
+- Backend-aware PolyInstance: `poly_instance_set_device()` for runtime device selection (CPU, INTERP). `poly_instance_call()` for generic entrypoint execution. `poly_instance_value_and_grad()` for forward+backward without optimizer. Prepared step cache survives device changes; executable step cache retains entries for all previously-used devices.
+- `poly_instance_forward()` and `poly_instance_train_step()` rewritten as thin wrappers over `call()` and `value_and_grad()` respectively.
+- 6 new instance tests: call_basic, set_device_interp, cpu_vs_interp_forward, cpu_vs_interp_train, set_device_roundtrip, set_device_unsupported.
 
 ### Fixed
 - Einsum trace: repeated indices in a single input (e.g. `'ii->'`) now correctly extract the diagonal instead of producing wrong results. Ported tinygrad's diagonal extraction algorithm (permute + flatten + pad + reshape + shrink).
