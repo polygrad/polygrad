@@ -412,20 +412,12 @@ void poly_sched_cache_flush(void);
 
 #ifdef POLY_HAS_CUDA
 
-/* GPU version of poly_realize(). Same interface: schedule → linearize_cuda →
- * render_cuda → compile_cuda → GPU alloc/copy/launch/copy-back.
- * Returns 0 on success, -1 on error. */
+/* DEPRECATED: use poly_realize() with CUDA-domain PolyBufferHandle bindings.
+ * Legacy standalone CUDA realize path. Retained for Python/JS frontend compat. */
 int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
                      PolyBufferBinding *bindings, int n_bindings);
-
-/* Free all cached GPU buffer allocations */
 void poly_cuda_flush_buffers(void);
-
-/* Free all cached compiled CUDA programs. */
 void poly_cuda_prog_cache_flush(void);
-
-/* Copy GPU-resident output buffers back to host memory.
- * Call after poly_realize_cuda() to read results. */
 int poly_cuda_copyback(PolyBufferBinding *bindings, int n_bindings);
 
 #endif /* POLY_HAS_CUDA */

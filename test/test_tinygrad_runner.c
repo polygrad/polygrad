@@ -76,8 +76,45 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     }
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
-      ok = (poly_realize_cuda(ctx, tensor_sink, bb, n_bindings) == 0);
-      if (ok) poly_cuda_copyback(bb, n_bindings);
+      /* Build CUDA-domain bindings, realize via unified path, readback */
+      PolyBufferBinding *cb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+      int alloc_ok = 1;
+      for (int j = 0; j < n_bindings; j++) {
+        PolyUOp *buf = bindings[j].buffer;
+        size_t nbytes = (size_t)buf->arg.i *
+            poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+        unsigned long long dptr = poly_cuda_alloc(nbytes);
+        if (!dptr) { alloc_ok = 0; break; }
+        if (bindings[j].data)
+          poly_cuda_copy_htod(dptr, bindings[j].data, nbytes);
+        else
+          poly_cuda_memset(dptr, 0, nbytes);
+        cb[j].buffer = buf;
+        cb[j].handle = (PolyBufferHandle){
+          (void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true
+        };
+      }
+      if (alloc_ok)
+        ok = (poly_realize(ctx, tensor_sink, cb, n_bindings) == 0);
+      else
+        ok = 0;
+      /* Readback all bindings to host */
+      if (ok) {
+        for (int j = 0; j < n_bindings; j++) {
+          if (!bindings[j].data) continue;
+          PolyUOp *buf = bindings[j].buffer;
+          size_t nbytes = (size_t)buf->arg.i *
+              poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+          poly_cuda_copy_dtoh(bindings[j].data,
+              (unsigned long long)(uintptr_t)cb[j].handle.ptr, nbytes);
+        }
+      }
+      /* Free device memory */
+      for (int j = 0; j < n_bindings; j++) {
+        if (cb[j].handle.owned)
+          poly_cuda_free((unsigned long long)(uintptr_t)cb[j].handle.ptr);
+      }
+      free(cb);
     } else
 #endif
     {
