@@ -173,6 +173,18 @@ function createBoundInstanceClass(runtime) {
       return this._rt._backend.instance.exportIR(this._handle)
     }
 
+    saveBundle() {
+      return this._rt._backend.instance.saveBundle(this._handle)
+    }
+
+    static fromBundle(bytes) {
+      const api = _runtime._backend.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this target')
+      const handle = api.fromBundle(bytes)
+      if (!handle) throw new Error('polygrad: fromBundle failed')
+      return new Instance(handle)
+    }
+
     setOptimizer(kind, lr = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weightDecay = 0.0) {
       const rc = this._rt._backend.instance.setOptimizer(
         this._handle, kind, lr, beta1, beta2, eps, weightDecay

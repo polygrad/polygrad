@@ -13,6 +13,7 @@
 #include "polygrad.h"
 #include "frontend.h"
 #include "instance.h"
+#include "bundle.h"
 #include "model_mlp.h"
 #include "model_tabm.h"
 #include "model_nam.h"
@@ -1405,6 +1406,37 @@ static napi_value napi_poly_instance_export_ir(napi_env env, napi_callback_info 
   return result;
 }
 
+static napi_value napi_poly_instance_save_bundle(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int out_len = 0;
+  uint8_t *bytes = poly_instance_save_bundle(inst, &out_len);
+  napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
+  free(bytes);
+  return result;
+}
+
+static napi_value napi_poly_instance_from_bundle(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  uint8_t *data = NULL;
+  size_t len = 0;
+  napi_typedarray_type type;
+  napi_value arraybuf;
+  size_t offset;
+  NAPI_CALL(env, napi_get_typedarray_info(env, argv[0], &type, &len, (void **)&data, &arraybuf, &offset));
+  PolyInstance *inst = poly_instance_from_bundle(data, (int)len);
+  if (!inst) {
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+  }
+  return make_external(env, inst);
+}
+
 static napi_value napi_poly_instance_set_optimizer(napi_env env, napi_callback_info info) {
   napi_value argv[7];
   size_t argc = 7;
@@ -1628,6 +1660,8 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_instance_export_weights", napi_poly_instance_export_weights),
     DECLARE_NAPI_METHOD("poly_instance_import_weights", napi_poly_instance_import_weights),
     DECLARE_NAPI_METHOD("poly_instance_export_ir", napi_poly_instance_export_ir),
+    DECLARE_NAPI_METHOD("poly_instance_save_bundle", napi_poly_instance_save_bundle),
+    DECLARE_NAPI_METHOD("poly_instance_from_bundle", napi_poly_instance_from_bundle),
     DECLARE_NAPI_METHOD("poly_instance_set_optimizer", napi_poly_instance_set_optimizer),
     DECLARE_NAPI_METHOD("poly_instance_forward", napi_poly_instance_forward),
     DECLARE_NAPI_METHOD("poly_instance_train_step", napi_poly_instance_train_step),

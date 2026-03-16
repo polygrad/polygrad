@@ -105,6 +105,12 @@ function createNativeBackend() {
     exportIR(inst) {
       return binding.poly_instance_export_ir(inst)
     },
+    saveBundle(inst) {
+      return binding.poly_instance_save_bundle(inst)
+    },
+    fromBundle(bytes) {
+      return binding.poly_instance_from_bundle(bytes)
+    },
     setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay) {
       return binding.poly_instance_set_optimizer(inst, kind, lr, beta1, beta2, eps, weightDecay)
     },

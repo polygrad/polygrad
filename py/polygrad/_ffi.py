@@ -496,6 +496,13 @@ def _declare_signatures(lib):
     lib.poly_instance_export_ir.restype = _u8p
     lib.poly_instance_export_ir.argtypes = [_ptr, _ip]
 
+    # Bundle format
+    lib.poly_instance_save_bundle.restype = _u8p
+    lib.poly_instance_save_bundle.argtypes = [_ptr, _ip]
+
+    lib.poly_instance_from_bundle.restype = _ptr
+    lib.poly_instance_from_bundle.argtypes = [_u8p, ctypes.c_int]
+
     lib.poly_instance_forward.restype = ctypes.c_int
     lib.poly_instance_forward.argtypes = [_ptr, ctypes.POINTER(PolyIOBinding), ctypes.c_int]
 

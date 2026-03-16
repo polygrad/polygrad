@@ -183,6 +183,25 @@ class Instance:
         _libc.free(ptr)
         return data
 
+    # ── Bundle I/O ───────────────────────────────────────────────────
+
+    def save_bundle(self):
+        """Save as a poly.bundle@1 byte array (IR + weights + metadata)."""
+        out_len = ctypes.c_int(0)
+        ptr = _get_lib().poly_instance_save_bundle(self._ptr, ctypes.byref(out_len))
+        if not ptr:
+            return None
+        data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
+        _libc.free(ptr)
+        return data
+
+    @staticmethod
+    def from_bundle(data):
+        """Load from a poly.bundle@1 byte array."""
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        ptr = _get_lib().poly_instance_from_bundle(buf, len(data))
+        return Instance(ptr)
+
     # ── Execution ────────────────────────────────────────────────────
 
     def set_optimizer(self, kind, lr=0.01, beta1=0.9, beta2=0.999,

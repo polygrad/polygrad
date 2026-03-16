@@ -760,6 +760,22 @@ async function createWasmBackend() {
       return bytes
     },
 
+    saveBundle(instPtr) {
+      const bytesPtr = Module._poly_instance_save_bundle(instPtr, _scratchLenPtr)
+      if (!bytesPtr) return null
+      const len = heap32()[_scratchLenPtr >> 2]
+      const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+      Module._free(bytesPtr)
+      return bytes
+    },
+
+    fromBundle(bytes) {
+      const ptr = allocBytes(bytes)
+      const inst = Module._poly_instance_from_bundle(ptr, bytes.length)
+      Module._free(ptr)
+      return inst || null
+    },
+
     setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay) {
       return Module._poly_instance_set_optimizer(
         instPtr, kind, lr, beta1, beta2, eps, weightDecay)
