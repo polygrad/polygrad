@@ -817,6 +817,7 @@ async function createWasmBackend() {
     ffi,
     ctx,
     ops,
+    instance,
     int64: BigInt,
     readShape: readOutShape,
     realize: renderAndExec,

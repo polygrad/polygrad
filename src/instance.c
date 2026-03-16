@@ -251,7 +251,11 @@ PolyInstance *poly_instance_from_ir(
   inst->ctx = spec.ctx;
 
   /* Default device and allocator */
+#ifdef __EMSCRIPTEN__
+  inst->device = POLY_DEVICE_WASM_JIT;
+#else
   inst->device = POLY_DEVICE_CPU;
+#endif
   inst->allocator = &POLY_CPU_ALLOCATOR;
 
   /* Copy buffers */
@@ -510,13 +514,21 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   }
 
   /* Validate supported devices */
+#ifdef __EMSCRIPTEN__
+  if (resolved != POLY_DEVICE_INTERP && resolved != POLY_DEVICE_WASM_JIT) {
+    fprintf(stderr, "poly_instance_set_device: unsupported device %d in WASM build\n", resolved);
+    return -1;
+  }
+#else
   if (resolved != POLY_DEVICE_CPU && resolved != POLY_DEVICE_INTERP) {
     fprintf(stderr, "poly_instance_set_device: unsupported device %d\n", resolved);
     return -1;
   }
+#endif
 
   /* Set device and allocator.
-   * CPU and INTERP both use host malloc -- no weight transfer needed. */
+   * CPU, INTERP, and WASM_JIT all use host malloc (Emscripten heap for WASM).
+   * No weight transfer needed between these domains. */
   inst->device = resolved;
   inst->allocator = &POLY_CPU_ALLOCATOR;
 

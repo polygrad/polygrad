@@ -13,6 +13,7 @@
 - Backend-aware PolyInstance: `poly_instance_set_device()` for runtime device selection (CPU, INTERP). `poly_instance_call()` for generic entrypoint execution. `poly_instance_value_and_grad()` for forward+backward without optimizer. Prepared step cache survives device changes; executable step cache retains entries for all previously-used devices.
 - `poly_instance_forward()` and `poly_instance_train_step()` rewritten as thin wrappers over `call()` and `value_and_grad()` respectively.
 - 6 new instance tests: call_basic, set_device_interp, cpu_vs_interp_forward, cpu_vs_interp_train, set_device_roundtrip, set_device_unsupported.
+- WASM executable step: `poly_lower_step(..., POLY_DEVICE_WASM_JIT)` renders WASM kernel bytes and compiles them via EM_JS bridge. Two-phase design: compile once during lowering (cached by kernel_id), execute many times. PolyInstance works on WASM with full forward and training support. Instance functions exported from Emscripten build. MLP, TabM, NAM model builders available in WASM.
 
 ### Fixed
 - Einsum trace: repeated indices in a single input (e.g. `'ii->'`) now correctly extract the diagonal instead of producing wrong results. Ported tinygrad's diagonal extraction algorithm (permute + flatten + pad + reshape + shrink).
