@@ -1,0 +1,33 @@
+poly_realize benchmark: refactor/polyinstance-backend (322e37e) vs main
+======================================================================
+
+Median of 3 runs per branch. All times in microseconds (us).
+
+Cached (warm) calls -- per-call latency:
+-----------------------------------------
+                         main     branch    delta     speedup
+vecadd N=64              3.8       1.7      -2.1      2.2x
+vecadd N=1024            3.1       1.7      -1.4      1.8x
+vecadd N=65536          11.3      11.1      -0.2      1.0x
+reduce_chain N=64        2.2       2.1      -0.1      1.0x
+reduce_chain N=1024      3.4       2.7      -0.7      1.3x
+
+Cold compile latency (first call, includes graph build + schedule + compile + run):
+------------------------------------------------------------------------------------
+NOTE: main uses a global static sched_cache that persists across benchmark
+functions -- cold_compile hits the cache from earlier warm-up calls, so
+its "cold" numbers are really warm-cache numbers. The branch uses
+per-context caches, so cold_compile is a true cold path (fork + cc + dlopen).
+These are NOT directly comparable.
+
+                         main     branch
+cold_compile N=64        7.8     104.8
+cold_compile N=1024      4.3     104.8
+cold_compile N=65536     70.0    360.2
+
+Summary:
+- The branch's per-context cache gives ~1.3-2.2x faster warm calls at
+  small sizes (N=64..1024), likely due to less overhead in the cache
+  lookup path (exec_plan's PolyCompiledPlan vs main's global sched_cache).
+- At large N (65536) compute dominates and both are equivalent (~11 us).
+- Cold compile is not meaningfully comparable due to caching differences.

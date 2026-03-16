@@ -3131,7 +3131,10 @@ int poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink) {
   return ret;
 }
 
-/* ── CUDA realize ────────────────────────────────────────────────────── */
+/* ── CUDA realize (DEPRECATED stubs) ─────────────────────────────────
+ * These are kept for Python/JS frontend backward compatibility.
+ * New code should use poly_realize() with CUDA-domain PolyBufferHandle bindings.
+ */
 
 #ifdef POLY_HAS_CUDA
 

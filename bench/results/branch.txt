@@ -1,0 +1,51 @@
+=== branch run 1 ===
+
+  polygrad poly_realize benchmark
+  ================================
+
+  Cached (warm) calls:
+  vecadd        N=64             1.5 us/call  (1000 iters)
+  vecadd        N=1024           1.7 us/call  (500 iters)
+  vecadd        N=65536         10.9 us/call  (100 iters)
+  reduce_chain  N=64             1.8 us/call  (500 iters)
+  reduce_chain  N=1024           2.6 us/call  (200 iters)
+
+  Cold compile latency:
+  cold_compile  N=64           104.8 us (graph build + schedule + compile + run)
+  cold_compile  N=1024         104.8 us (graph build + schedule + compile + run)
+  cold_compile  N=65536        360.2 us (graph build + schedule + compile + run)
+
+=== branch run 2 ===
+
+  polygrad poly_realize benchmark
+  ================================
+
+  Cached (warm) calls:
+  vecadd        N=64             1.7 us/call  (1000 iters)
+  vecadd        N=1024           1.7 us/call  (500 iters)
+  vecadd        N=65536         11.1 us/call  (100 iters)
+  reduce_chain  N=64             2.1 us/call  (500 iters)
+  reduce_chain  N=1024           2.7 us/call  (200 iters)
+
+  Cold compile latency:
+  cold_compile  N=64           134.5 us (graph build + schedule + compile + run)
+  cold_compile  N=1024         127.0 us (graph build + schedule + compile + run)
+  cold_compile  N=65536        475.9 us (graph build + schedule + compile + run)
+
+=== branch run 3 ===
+
+  polygrad poly_realize benchmark
+  ================================
+
+  Cached (warm) calls:
+  vecadd        N=64             1.9 us/call  (1000 iters)
+  vecadd        N=1024           1.8 us/call  (500 iters)
+  vecadd        N=65536         12.6 us/call  (100 iters)
+  reduce_chain  N=64             3.2 us/call  (500 iters)
+  reduce_chain  N=1024           2.8 us/call  (200 iters)
+
+  Cold compile latency:
+  cold_compile  N=64           104.7 us (graph build + schedule + compile + run)
+  cold_compile  N=1024          99.5 us (graph build + schedule + compile + run)
+  cold_compile  N=65536        353.7 us (graph build + schedule + compile + run)
+

@@ -6,12 +6,27 @@
  * repeated calls (cache hit path) at various sizes.
  */
 
+#include "../src/polygrad.h"
 #include "../src/frontend.h"
 #include "../src/codegen.h"
+#include "../src/scheduler.h"
+#ifdef POLY_EXEC_PLAN_H
+/* already pulled in by frontend.h on the branch */
+#endif
+/* If frontend.h doesn't pull in exec_plan.h (main), POLY_BIND_HOST won't
+ * be defined and we fall back to the old PolyBufferBinding layout. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Compatibility: branch has PolyBufferBinding with .handle (PolyBufferHandle),
+ * main has PolyBufferBinding with .data (void*).  Detect via POLY_BIND_HOST. */
+#ifndef POLY_BIND_HOST
+#define MAKE_BIND(buf, ptr) ((PolyBufferBinding){ (buf), (ptr) })
+#else
+#define MAKE_BIND(buf, ptr) POLY_BIND_HOST(buf, ptr)
+#endif
 
 static double now_us(void) {
   struct timespec ts;
@@ -23,9 +38,9 @@ static double now_us(void) {
 
 static void bench_vecadd(int n, int iters) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *a = poly_buffer_f32(ctx, n);
+  PolyUOp *b = poly_buffer_f32(ctx, n);
+  PolyUOp *c = poly_buffer_f32(ctx, n);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *store = poly_store_val(ctx, c, add);
   PolyUOp *sink = poly_sink1(ctx, store);
@@ -36,7 +51,7 @@ static void bench_vecadd(int n, int iters) {
   for (int i = 0; i < n; i++) { ha[i] = (float)i * 0.001f; hb[i] = 1.0f; }
 
   PolyBufferBinding binds[] = {
-    POLY_BIND_HOST(c, hc), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb)
+    MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
   };
 
   /* Warmup (includes first compile) */
@@ -58,9 +73,9 @@ static void bench_vecadd(int n, int iters) {
 
 static void bench_reduce_chain(int n, int iters) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *a = poly_buffer_f32(ctx, n);
+  PolyUOp *b = poly_buffer_f32(ctx, n);
+  PolyUOp *out = poly_buffer_f32(ctx, n);
 
   int64_t axes[] = {0};
   int64_t one_sh[] = {1};
@@ -78,7 +93,7 @@ static void bench_reduce_chain(int n, int iters) {
   for (int i = 0; i < n; i++) { ha[i] = (float)(i + 1); hb[i] = (float)(i * 10); }
 
   PolyBufferBinding binds[] = {
-    POLY_BIND_HOST(out, hout), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb)
+    MAKE_BIND(out, hout), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
   };
 
   poly_realize(ctx, sink, binds, 3);
@@ -99,9 +114,9 @@ static void bench_reduce_chain(int n, int iters) {
 static void bench_cold_compile(int n) {
   double t0 = now_us();
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, n);
-  PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, n);
+  PolyUOp *a = poly_buffer_f32(ctx, n);
+  PolyUOp *b = poly_buffer_f32(ctx, n);
+  PolyUOp *c = poly_buffer_f32(ctx, n);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *store = poly_store_val(ctx, c, add);
   PolyUOp *sink = poly_sink1(ctx, store);
@@ -111,7 +126,7 @@ static void bench_cold_compile(int n) {
   float *hc = calloc(n, sizeof(float));
 
   PolyBufferBinding binds[] = {
-    POLY_BIND_HOST(c, hc), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb)
+    MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
   };
   poly_realize(ctx, sink, binds, 3);
   double us = now_us() - t0;

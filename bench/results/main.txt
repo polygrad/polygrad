@@ -1,0 +1,51 @@
+=== main run 1 ===
+
+  polygrad poly_realize benchmark
+  ================================
+
+  Cached (warm) calls:
+  vecadd        N=64             3.2 us/call  (1000 iters)
+  vecadd        N=1024           2.9 us/call  (500 iters)
+  vecadd        N=65536         11.2 us/call  (100 iters)
+  reduce_chain  N=64             2.1 us/call  (500 iters)
+  reduce_chain  N=1024           2.9 us/call  (200 iters)
+
+  Cold compile latency:
+  cold_compile  N=64             5.6 us (graph build + schedule + compile + run)
+  cold_compile  N=1024           3.5 us (graph build + schedule + compile + run)
+  cold_compile  N=65536         36.9 us (graph build + schedule + compile + run)
+
+=== main run 2 ===
+
+  polygrad poly_realize benchmark
+  ================================
+
+  Cached (warm) calls:
+  vecadd        N=64             3.8 us/call  (1000 iters)
+  vecadd        N=1024           3.5 us/call  (500 iters)
+  vecadd        N=65536         13.4 us/call  (100 iters)
+  reduce_chain  N=64             2.2 us/call  (500 iters)
+  reduce_chain  N=1024           3.4 us/call  (200 iters)
+
+  Cold compile latency:
+  cold_compile  N=64             7.8 us (graph build + schedule + compile + run)
+  cold_compile  N=1024           4.3 us (graph build + schedule + compile + run)
+  cold_compile  N=65536         70.0 us (graph build + schedule + compile + run)
+
+=== main run 3 ===
+
+  polygrad poly_realize benchmark
+  ================================
+
+  Cached (warm) calls:
+  vecadd        N=64             4.2 us/call  (1000 iters)
+  vecadd        N=1024           3.1 us/call  (500 iters)
+  vecadd        N=65536         11.3 us/call  (100 iters)
+  reduce_chain  N=64             3.1 us/call  (500 iters)
+  reduce_chain  N=1024           4.1 us/call  (200 iters)
+
+  Cold compile latency:
+  cold_compile  N=64            19.5 us (graph build + schedule + compile + run)
+  cold_compile  N=1024           5.1 us (graph build + schedule + compile + run)
+  cold_compile  N=65536         99.7 us (graph build + schedule + compile + run)
+
