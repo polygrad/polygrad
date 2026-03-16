@@ -312,9 +312,19 @@ int poly_executable_step_run(PolyExecutableStep *step,
 
 void poly_executable_step_free(PolyExecutableStep *step);
 
-/* ── CPU allocator ───────────────────────────────────────────────────── */
+/* ── Allocators ──────────────────────────────────────────────────────── */
 
 extern const PolyAllocator POLY_CPU_ALLOCATOR;
+
+#ifdef POLY_HAS_CUDA
+extern const PolyAllocator POLY_CUDA_ALLOCATOR;
+#endif
+
+/* ── Backend registry ────────────────────────────────────────────────── */
+
+/* Returns the backend descriptor for a device, or NULL if unsupported
+ * in this build. */
+const PolyBackendDesc *poly_backend_get(PolyDeviceId device);
 
 #ifdef __cplusplus
 }

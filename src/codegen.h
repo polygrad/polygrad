@@ -122,6 +122,7 @@ int poly_cuda_launch(PolyCudaProgram *prog, void **args, int n_args,
                      int gx, int gy, int gz, int bx, int by, int bz);
 int poly_cuda_sync(void);
 void poly_cuda_program_destroy(PolyCudaProgram *prog);
+int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
 
 #endif /* POLY_HAS_CUDA */
 

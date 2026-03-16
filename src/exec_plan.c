@@ -3,16 +3,14 @@
  *
  * Contains all exec_plan API implementations:
  *   - poly_prepare_step: backend-neutral scheduling
- *   - poly_lower_step: backend-specific lowering (CPU, INTERP, WASM_JIT)
+ *   - poly_lower_step: dispatches to backend-specific lowering via vtable
  *   - poly_executable_step_run: dispatches to backend-specific execution
- *   - poly_executable_step_free: cleanup
- *   - POLY_CPU_ALLOCATOR: trivial malloc/free allocator
+ *   - poly_executable_step_free: cleanup via backend vtable
+ *   - Backend descriptors for CPU, INTERP, WASM_JIT, CUDA
+ *   - POLY_CPU_ALLOCATOR, POLY_CUDA_ALLOCATOR
  *
- * Compiled into both native and Emscripten builds. Backend-specific code
- * is guarded by #ifdef __EMSCRIPTEN__ / #ifndef __EMSCRIPTEN__.
- *
- * Shared helpers (strip_bind_values, validate_kernel_graph, etc.) are
- * declared in frontend_internal.h and implemented in frontend.c.
+ * Compiled into both native and Emscripten builds. Backend availability
+ * depends on build flags (POLY_HAS_CUDA, __EMSCRIPTEN__).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -208,6 +206,10 @@ void poly_prepared_step_free(PolyPreparedStep *step) {
   free(step);
 }
 
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Allocators                                                          */
+/* ══════════════════════════════════════════════════════════════════════ */
+
 /* ── CPU allocator ────────────────────────────────────────────────────── */
 
 static void *cpu_alloc(size_t nbytes, void *dev_ctx) {
@@ -215,7 +217,7 @@ static void *cpu_alloc(size_t nbytes, void *dev_ctx) {
   return calloc(1, nbytes);
 }
 
-static void cpu_free(void *handle, void *dev_ctx) {
+static void cpu_free_alloc(void *handle, void *dev_ctx) {
   (void)dev_ctx;
   free(handle);
 }
@@ -240,34 +242,79 @@ static int cpu_copy_between(void *dst, const void *src, size_t n, void *dev_ctx)
 
 const PolyAllocator POLY_CPU_ALLOCATOR = {
   .alloc = cpu_alloc,
-  .free = cpu_free,
+  .free = cpu_free_alloc,
   .copy_in = cpu_copy_in,
   .copy_out = cpu_copy_out,
   .copy_between = cpu_copy_between,
   .dev_ctx = NULL,
 };
 
-/* ── Executable step construction ─────────────────────────────────────── */
+/* ── CUDA allocator ───────────────────────────────────────────────────── */
 
-/* Interpreter runner handle: linearized UOp array + count */
+#ifdef POLY_HAS_CUDA
+
+static void *cuda_alloc_fn(size_t nbytes, void *dev_ctx) {
+  (void)dev_ctx;
+  unsigned long long dptr = poly_cuda_alloc(nbytes);
+  return dptr ? (void *)(uintptr_t)dptr : NULL;
+}
+
+static void cuda_free_fn(void *handle, void *dev_ctx) {
+  (void)dev_ctx;
+  if (handle) poly_cuda_free((unsigned long long)(uintptr_t)handle);
+}
+
+static int cuda_copy_in_fn(void *dst, const void *src, size_t n, void *dev_ctx) {
+  (void)dev_ctx;
+  return poly_cuda_copy_htod((unsigned long long)(uintptr_t)dst, src, n);
+}
+
+static int cuda_copy_out_fn(void *dst, const void *src, size_t n, void *dev_ctx) {
+  (void)dev_ctx;
+  return poly_cuda_copy_dtoh(dst, (unsigned long long)(uintptr_t)src, n);
+}
+
+static int cuda_copy_between_fn(void *dst, const void *src, size_t n, void *dev_ctx) {
+  (void)dev_ctx; (void)dst; (void)src; (void)n;
+  fprintf(stderr, "polygrad: cuda_copy_between: not implemented\n");
+  return -1;
+}
+
+const PolyAllocator POLY_CUDA_ALLOCATOR = {
+  .alloc = cuda_alloc_fn,
+  .free = cuda_free_fn,
+  .copy_in = cuda_copy_in_fn,
+  .copy_out = cuda_copy_out_fn,
+  .copy_between = cuda_copy_between_fn,
+  .dev_ctx = NULL,
+};
+
+#endif /* POLY_HAS_CUDA */
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Backend-specific runner handle types                                 */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+/* Interpreter: linearized UOp array */
 typedef struct {
   PolyUOp **lin;
   int n_lin;
 } InterpHandle;
 
+/* CUDA: compiled program handle */
+#ifdef POLY_HAS_CUDA
+typedef struct {
+  PolyCudaProgram *prog;
+} CudaRunnerHandle;
+#endif
+
+/* WASM JIT: JS-side kernel cache index */
+typedef struct {
+  int kernel_id;
+} WasmJitHandle;
+
 /* ── WASM JIT EM_JS bridge (Emscripten only) ─────────────────────────── */
-/*
- * Two-phase design: compile during poly_lower_step (once per kernel),
- * execute during poly_executable_step_run (many times).
- *
- * js_compile_wasm_kernel: compiles WASM bytes into a WebAssembly.Instance,
- *   stores it in a JS-side cache, returns an integer kernel_id.
- *   Uses synchronous WebAssembly.Module() -- works for kernels under 4KB
- *   on browser main thread, no limit in Node.js or Web Workers.
- *
- * js_exec_wasm_kernel: executes a previously compiled kernel by kernel_id.
- *   args is a heap pointer to an int32 array of buffer offsets.
- */
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 
@@ -307,38 +354,316 @@ EM_JS(void, js_free_wasm_kernel, (int kernel_id), {
 });
 #endif /* __EMSCRIPTEN__ */
 
-/* WASM JIT runner handle: stores JS-side kernel_id for cached instance */
-typedef struct {
-  int kernel_id;
-} WasmJitHandle;
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Backend implementations (lower_item / execute / free_runner)         */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+/* ── CPU backend ──────────────────────────────────────────────────────── */
+
+#ifndef __EMSCRIPTEN__
+
+static int cpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                          const char *fn_name, PolyRunner *out) {
+  int n_lin;
+  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  if (!lin) return -1;
+
+  char *src = poly_render_c(lin, n_lin, fn_name);
+  free(lin);
+  if (!src) return -1;
+
+  if (getenv("POLY_DUMP_KERNELS"))
+    fprintf(stderr, "=== LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+
+  PolyProgram *prog = poly_compile_c(src, fn_name);
+  if (!prog) {
+    fprintf(stderr, "=== FAILED LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+    free(src);
+    return -1;
+  }
+  free(src);
+
+  out->kind = POLY_RUNNER_COMPILED;
+  out->handle = prog;
+  out->handle_size = 0;
+  return 0;
+}
+
+static int cpu_execute(PolyRunner *runner, void **args, int n_args) {
+  (void)n_args;
+  poly_program_call((PolyProgram *)runner->handle, args, n_args);
+  return 0;
+}
+
+static void cpu_free_runner(PolyRunner *runner) {
+  if (runner->handle) poly_program_destroy((PolyProgram *)runner->handle);
+}
+
+static const PolyAllocator *cpu_get_allocator(void) {
+  return &POLY_CPU_ALLOCATOR;
+}
+
+#endif /* !__EMSCRIPTEN__ */
+
+/* ── Interpreter backend ──────────────────────────────────────────────── */
+
+static int interp_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                             const char *fn_name, PolyRunner *out) {
+  (void)fn_name;
+  int n_lin;
+  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  if (!lin) return -1;
+
+  InterpHandle *ih = malloc(sizeof(InterpHandle));
+  if (!ih) { free(lin); return -1; }
+  ih->lin = lin;
+  ih->n_lin = n_lin;
+
+  out->kind = POLY_RUNNER_INTERP;
+  out->handle = ih;
+  out->handle_size = 0;
+  return 0;
+}
+
+static int interp_execute(PolyRunner *runner, void **args, int n_args) {
+  InterpHandle *ih = (InterpHandle *)runner->handle;
+  return poly_interp_eval(ih->lin, ih->n_lin, args, n_args);
+}
+
+static void interp_free_runner(PolyRunner *runner) {
+  if (runner->handle) {
+    InterpHandle *ih = (InterpHandle *)runner->handle;
+    free(ih->lin);
+    free(ih);
+  }
+}
+
+static const PolyAllocator *interp_get_allocator(void) {
+  return &POLY_CPU_ALLOCATOR;
+}
+
+/* ── WASM JIT backend ─────────────────────────────────────────────────── */
+
+#ifdef __EMSCRIPTEN__
+
+static int wasm_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                           const char *fn_name, PolyRunner *out) {
+  (void)fn_name;
+  int n_lin;
+  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  if (!lin) return -1;
+
+  int wasm_len = 0;
+  uint8_t *wasm_bytes = poly_render_wasm(lin, n_lin, &wasm_len, false);
+  free(lin);
+  if (!wasm_bytes || wasm_len <= 0) return -1;
+
+  int kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+  free(wasm_bytes);
+  if (kernel_id < 0) return -1;
+
+  WasmJitHandle *wh = malloc(sizeof(WasmJitHandle));
+  if (!wh) return -1;
+  wh->kernel_id = kernel_id;
+
+  out->kind = POLY_RUNNER_COMPILED;
+  out->handle = wh;
+  out->handle_size = 0;
+  return 0;
+}
+
+static int wasm_execute(PolyRunner *runner, void **args, int n_args) {
+  WasmJitHandle *wh = (WasmJitHandle *)runner->handle;
+  int *iargs = malloc((size_t)n_args * sizeof(int));
+  if (!iargs) return -1;
+  for (int i = 0; i < n_args; i++)
+    iargs[i] = (int)(intptr_t)args[i];
+  int ret = js_exec_wasm_kernel(wh->kernel_id, iargs, n_args);
+  free(iargs);
+  return ret;
+}
+
+static void wasm_free_runner(PolyRunner *runner) {
+  if (runner->handle) {
+    WasmJitHandle *wh = (WasmJitHandle *)runner->handle;
+    js_free_wasm_kernel(wh->kernel_id);
+    free(wh);
+  }
+}
+
+static const PolyAllocator *wasm_get_allocator(void) {
+  return &POLY_CPU_ALLOCATOR;
+}
+
+#endif /* __EMSCRIPTEN__ */
+
+/* ── CUDA backend ─────────────────────────────────────────────────────── */
+
+#ifdef POLY_HAS_CUDA
+
+static int cuda_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                           const char *fn_name, PolyRunner *out) {
+  int n_lin;
+  PolyUOp **lin = poly_linearize_cuda(ctx, scheduled_root, &n_lin);
+  if (!lin) return -1;
+
+  /* Extract grid/block from SPECIAL ops */
+  int grid_size = 0, local_size = 0;
+  for (int j = 0; j < n_lin; j++) {
+    if (lin[j]->op == POLY_OP_SPECIAL && lin[j]->n_src > 0 &&
+        lin[j]->src[0]->op == POLY_OP_CONST) {
+      const char *sn = lin[j]->arg.str;
+      if (sn && sn[0] == 'l')
+        local_size = (int)lin[j]->src[0]->arg.i;
+      else
+        grid_size = (int)lin[j]->src[0]->arg.i;
+    }
+  }
+
+  int block_size = local_size > 0 ? local_size : 256;
+
+  char *src = poly_render_cuda(lin, n_lin, fn_name, block_size);
+  free(lin);
+  if (!src) return -1;
+
+  if (getenv("POLY_DUMP_KERNELS"))
+    fprintf(stderr, "=== CUDA KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+
+  PolyCudaProgram *prog = poly_compile_cuda(src, fn_name);
+  if (!prog) {
+    fprintf(stderr, "=== FAILED CUDA KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+    free(src);
+    return -1;
+  }
+  free(src);
+
+  /* Compute grid dimensions */
+  int gx;
+  if (local_size > 0 && grid_size > 0) gx = grid_size;
+  else if (local_size > 0)             gx = 1;
+  else if (grid_size > 0)              gx = (grid_size + block_size - 1) / block_size;
+  else                                 gx = 1;
+
+  CudaRunnerHandle *ch = malloc(sizeof(CudaRunnerHandle));
+  if (!ch) { poly_cuda_program_destroy(prog); return -1; }
+  ch->prog = prog;
+
+  out->kind = POLY_RUNNER_COMPILED;
+  out->handle = ch;
+  out->handle_size = 0;
+  out->grid[0] = gx;    out->grid[1] = 1; out->grid[2] = 1;
+  out->block[0] = block_size; out->block[1] = 1; out->block[2] = 1;
+  return 0;
+}
+
+static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
+  CudaRunnerHandle *ch = (CudaRunnerHandle *)runner->handle;
+
+  /* cuLaunchKernel needs void** where each element points TO a CUdeviceptr.
+   * args[] already contains device pointers (cast to void*), but the CUDA
+   * driver API requires one level of indirection: args[i] = &dptr[i]. */
+  unsigned long long *dptrs = malloc((size_t)n_args * sizeof(unsigned long long));
+  void **cuda_args = malloc((size_t)n_args * sizeof(void *));
+  if (!dptrs || !cuda_args) {
+    free(dptrs); free(cuda_args);
+    return -1;
+  }
+  for (int i = 0; i < n_args; i++) {
+    dptrs[i] = (unsigned long long)(uintptr_t)args[i];
+    cuda_args[i] = &dptrs[i];
+  }
+
+  int ret = poly_cuda_launch(ch->prog, cuda_args, n_args,
+                              runner->grid[0], runner->grid[1], runner->grid[2],
+                              runner->block[0], runner->block[1], runner->block[2]);
+  if (ret == 0) ret = poly_cuda_sync();
+
+  free(dptrs);
+  free(cuda_args);
+  return ret;
+}
+
+static void cuda_free_runner(PolyRunner *runner) {
+  if (runner->handle) {
+    CudaRunnerHandle *ch = (CudaRunnerHandle *)runner->handle;
+    poly_cuda_program_destroy(ch->prog);
+    free(ch);
+  }
+}
+
+static const PolyAllocator *cuda_get_allocator(void) {
+  return &POLY_CUDA_ALLOCATOR;
+}
+
+#endif /* POLY_HAS_CUDA */
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Backend registry                                                     */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+static const PolyBackendDesc BACKENDS[] = {
+  [POLY_DEVICE_AUTO]  = { NULL, POLY_DEVICE_AUTO, false, NULL, NULL, NULL, NULL },
+#ifndef __EMSCRIPTEN__
+  [POLY_DEVICE_CPU]   = { "cpu",    POLY_DEVICE_CPU,   false,
+                          cpu_lower_item, cpu_execute, cpu_free_runner,
+                          cpu_get_allocator },
+#else
+  [POLY_DEVICE_CPU]   = { NULL, POLY_DEVICE_CPU, false, NULL, NULL, NULL, NULL },
+#endif
+  [POLY_DEVICE_INTERP]= { "interp", POLY_DEVICE_INTERP, false,
+                          interp_lower_item, interp_execute, interp_free_runner,
+                          interp_get_allocator },
+#ifdef POLY_HAS_CUDA
+  [POLY_DEVICE_CUDA]  = { "cuda",   POLY_DEVICE_CUDA,  false,
+                          cuda_lower_item, cuda_execute, cuda_free_runner,
+                          cuda_get_allocator },
+#else
+  [POLY_DEVICE_CUDA]  = { NULL, POLY_DEVICE_CUDA, false, NULL, NULL, NULL, NULL },
+#endif
+#ifdef __EMSCRIPTEN__
+  [POLY_DEVICE_WASM_JIT] = { "wasm", POLY_DEVICE_WASM_JIT, true,
+                             wasm_lower_item, wasm_execute, wasm_free_runner,
+                             wasm_get_allocator },
+#else
+  [POLY_DEVICE_WASM_JIT] = { NULL, POLY_DEVICE_WASM_JIT, false, NULL, NULL, NULL, NULL },
+#endif
+  [POLY_DEVICE_WEBGPU] = { NULL, POLY_DEVICE_WEBGPU, false, NULL, NULL, NULL, NULL },
+};
+
+#define N_BACKENDS (sizeof(BACKENDS) / sizeof(BACKENDS[0]))
+
+const PolyBackendDesc *poly_backend_get(PolyDeviceId device) {
+  if (device < 0 || (size_t)device >= N_BACKENDS) return NULL;
+  if (!BACKENDS[device].name) return NULL;
+  return &BACKENDS[device];
+}
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Executable step: lower, run, free                                    */
+/* ══════════════════════════════════════════════════════════════════════ */
 
 PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
                                     PolyDeviceId device) {
   if (!ctx || !prepared) return NULL;
 
-  /* Validate supported devices for this build */
-#ifdef __EMSCRIPTEN__
-  if (device != POLY_DEVICE_INTERP && device != POLY_DEVICE_WASM_JIT) {
-    fprintf(stderr, "polygrad: lower_step: unsupported device %d in WASM build\n", device);
-    return NULL;
-  }
-#else
-  if (device != POLY_DEVICE_CPU && device != POLY_DEVICE_INTERP) {
+  const PolyBackendDesc *backend = poly_backend_get(device);
+  if (!backend) {
     fprintf(stderr, "polygrad: lower_step: unsupported device %d\n", device);
     return NULL;
   }
-#endif
+
+  const PolyAllocator *alloc = backend->get_allocator();
 
   PolyExecutableStep *es = calloc(1, sizeof(PolyExecutableStep));
   if (!es) return NULL;
   es->prepared = prepared;
   es->device = device;
-  es->allocator = &POLY_CPU_ALLOCATOR;
+  es->allocator = alloc;
   es->n_runners = prepared->n_items;
   es->runners = calloc((size_t)prepared->n_items, sizeof(PolyRunner));
   if (!es->runners) { free(es); return NULL; }
 
-  /* Allocate intermediate buffers (malloc works in all builds) */
+  /* Allocate intermediate buffers via backend allocator */
   int n_inter = 0;
   for (int i = 0; i < prepared->n_buf_slots; i++)
     if (prepared->buf_slots[i].is_intermediate) n_inter++;
@@ -351,7 +676,7 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
       if (!prepared->buf_slots[i].is_intermediate) continue;
       size_t nbytes = (size_t)prepared->buf_slots[i].nbytes;
       if (nbytes == 0) nbytes = sizeof(float);
-      void *ptr = calloc(1, nbytes);
+      void *ptr = alloc->alloc(nbytes, alloc->dev_ctx);
       if (!ptr) goto cleanup;
       es->intermediate_handles[idx] = (PolyBufferHandle){
         .ptr = ptr, .nbytes = nbytes,
@@ -361,7 +686,7 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
     }
   }
 
-  /* Lower each COMPUTE item */
+  /* Lower each COMPUTE item via backend vtable */
   static int lower_counter = 0;
   for (int k = 0; k < prepared->n_items; k++) {
     PolyExecItemSpec *item = &prepared->items[k];
@@ -377,69 +702,14 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
       goto cleanup;
     }
 
-    /* Linearize (shared by all backends) */
-    int n_lin;
-    PolyUOp **lin = poly_linearize(ctx, item->root, &n_lin);
-    if (!lin) goto cleanup;
+    char fn_name[64];
+    snprintf(fn_name, sizeof(fn_name), "lower%d_k%d", lower_counter, k);
 
-    if (device == POLY_DEVICE_INTERP) {
-      /* INTERP: store linearized UOps directly, no render/compile */
-      InterpHandle *ih = malloc(sizeof(InterpHandle));
-      if (!ih) { free(lin); goto cleanup; }
-      ih->lin = lin;
-      ih->n_lin = n_lin;
-      runner->kind = POLY_RUNNER_INTERP;
-      runner->handle = ih;
-      runner->handle_size = 0;
-#ifdef __EMSCRIPTEN__
-    } else if (device == POLY_DEVICE_WASM_JIT) {
-      /* WASM JIT: render to WASM bytes, compile via EM_JS, cache kernel_id */
-      int wasm_len = 0;
-      uint8_t *wasm_bytes = poly_render_wasm(lin, n_lin, &wasm_len, false);
-      free(lin);
-      if (!wasm_bytes || wasm_len <= 0) {
-        fprintf(stderr, "polygrad: lower_step: WASM render failed for kernel %d\n", k);
-        goto cleanup;
-      }
-
-      int kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
-      free(wasm_bytes);
-      if (kernel_id < 0) {
-        fprintf(stderr, "polygrad: lower_step: WASM compile failed for kernel %d\n", k);
-        goto cleanup;
-      }
-
-      WasmJitHandle *wh = malloc(sizeof(WasmJitHandle));
-      if (!wh) goto cleanup;
-      wh->kernel_id = kernel_id;
-      runner->kind = POLY_RUNNER_COMPILED;
-      runner->handle = wh;
-      runner->handle_size = 0;
-#endif /* __EMSCRIPTEN__ */
-#ifndef __EMSCRIPTEN__
-    } else {
-      /* CPU: render C -> compile -> dlopen (native builds only) */
-      char fn_name[64];
-      snprintf(fn_name, sizeof(fn_name), "lower%d_k%d", lower_counter, k);
-      char *src = poly_render_c(lin, n_lin, fn_name);
-      free(lin);
-      if (!src) goto cleanup;
-
-      if (getenv("POLY_DUMP_KERNELS"))
-        fprintf(stderr, "=== LOWER KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
-
-      PolyProgram *prog = poly_compile_c(src, fn_name);
-      if (!prog) {
-        fprintf(stderr, "=== FAILED LOWER KERNEL %d ===\n%s\n=== END ===\n", k, src);
-        free(src);
-        goto cleanup;
-      }
-      free(src);
-
-      runner->kind = POLY_RUNNER_COMPILED;
-      runner->handle = prog;
-      runner->handle_size = 0;
-#endif /* !__EMSCRIPTEN__ */
+    int ret = backend->lower_item(ctx, item->root, fn_name, runner);
+    if (ret != 0) {
+      fprintf(stderr, "polygrad: lower_step: backend '%s' failed for kernel %d\n",
+              backend->name, k);
+      goto cleanup;
     }
 
     /* Copy buf_slot_indices as param_to_slot */
@@ -448,7 +718,6 @@ PolyExecutableStep *poly_lower_step(PolyCtx *ctx, PolyPreparedStep *prepared,
     memcpy(runner->param_to_slot, item->buf_slot_indices,
            (size_t)item->n_buf_slots * sizeof(int));
 
-    /* No var mapping yet -- vars handled at run time via prepared step */
     runner->n_vars = 0;
     runner->var_indices = NULL;
   }
@@ -467,10 +736,25 @@ int poly_executable_step_run(PolyExecutableStep *step,
   if (!step || !step->prepared) return -1;
   PolyPreparedStep *ps = step->prepared;
 
+  const PolyBackendDesc *backend = poly_backend_get(step->device);
+  if (!backend) return -1;
+
   /* Zero intermediate buffers (needed for REDUCE accumulators) */
-  for (int i = 0; i < step->n_intermediates; i++)
-    memset(step->intermediate_handles[i].ptr, 0,
-           step->intermediate_handles[i].nbytes);
+  for (int i = 0; i < step->n_intermediates; i++) {
+    PolyBufferHandle *h = &step->intermediate_handles[i];
+    if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP
+#ifdef __EMSCRIPTEN__
+        || h->domain == POLY_DEVICE_WASM_JIT
+#endif
+    ) {
+      memset(h->ptr, 0, h->nbytes);
+    }
+#ifdef POLY_HAS_CUDA
+    else if (h->domain == POLY_DEVICE_CUDA) {
+      poly_cuda_memset((unsigned long long)(uintptr_t)h->ptr, 0, h->nbytes);
+    }
+#endif
+  }
 
   /* Build slot_to_data: maps buf_slot index -> data pointer.
    * External slots come from slot_data, intermediates from our handles. */
@@ -509,7 +793,7 @@ int poly_executable_step_run(PolyExecutableStep *step,
     if (!found) all_vars[n_all++] = var_bindings[i];
   }
 
-  /* Execute runners in exec_order */
+  /* Execute runners in exec_order via backend vtable */
   int ret = 0;
   for (int s = 0; s < ps->n_items && ret == 0; s++) {
     int k = ps->exec_order[s];
@@ -538,34 +822,7 @@ int poly_executable_step_run(PolyExecutableStep *step,
     }
 
     if (ret == 0 && args) {
-      if (runner->kind == POLY_RUNNER_COMPILED) {
-#ifdef __EMSCRIPTEN__
-        /* WASM JIT: build int32 arg array and dispatch via EM_JS */
-        if (step->device == POLY_DEVICE_WASM_JIT) {
-          WasmJitHandle *wh = (WasmJitHandle *)runner->handle;
-          int *iargs = malloc((size_t)n_args * sizeof(int));
-          if (!iargs) { ret = -1; } else {
-            for (int p = 0; p < n_args; p++)
-              iargs[p] = (int)(intptr_t)args[p];
-            ret = js_exec_wasm_kernel(wh->kernel_id, iargs, n_args);
-            free(iargs);
-          }
-        } else {
-          fprintf(stderr, "polygrad: exec_step_run: COMPILED runner not "
-                  "supported on device %d in WASM build\n", step->device);
-          ret = -1;
-        }
-#else
-        poly_program_call((PolyProgram *)runner->handle, args, n_args);
-#endif
-      } else if (runner->kind == POLY_RUNNER_INTERP) {
-        InterpHandle *ih = (InterpHandle *)runner->handle;
-        ret = poly_interp_eval(ih->lin, ih->n_lin, args, n_args);
-      } else {
-        fprintf(stderr, "polygrad: exec_step_run: unsupported runner kind %d\n",
-                runner->kind);
-        ret = -1;
-      }
+      ret = backend->execute(runner, args, n_args);
       free(args);
     }
   }
@@ -575,33 +832,28 @@ int poly_executable_step_run(PolyExecutableStep *step,
 
 void poly_executable_step_free(PolyExecutableStep *step) {
   if (!step) return;
+
+  const PolyBackendDesc *backend = poly_backend_get(step->device);
+
   for (int i = 0; i < step->n_runners; i++) {
     PolyRunner *r = &step->runners[i];
-    if (r->kind == POLY_RUNNER_COMPILED && r->handle) {
-#ifdef __EMSCRIPTEN__
-      /* WASM JIT: free JS-side cached instance, then the handle */
-      if (step->device == POLY_DEVICE_WASM_JIT) {
-        WasmJitHandle *wh = (WasmJitHandle *)r->handle;
-        js_free_wasm_kernel(wh->kernel_id);
-        free(wh);
-      }
-#else
-      poly_program_destroy((PolyProgram *)r->handle);
-#endif
-    }
-    if (r->kind == POLY_RUNNER_INTERP && r->handle) {
-      InterpHandle *ih = (InterpHandle *)r->handle;
-      free(ih->lin);
-      free(ih);
-    }
+    if (r->handle && backend)
+      backend->free_runner(r);
     free(r->param_to_slot);
     free(r->var_indices);
   }
   free(step->runners);
+
   if (step->intermediate_handles) {
-    for (int i = 0; i < step->n_intermediates; i++)
-      if (step->intermediate_handles[i].owned)
-        free(step->intermediate_handles[i].ptr);
+    for (int i = 0; i < step->n_intermediates; i++) {
+      if (step->intermediate_handles[i].owned && step->intermediate_handles[i].ptr) {
+        if (step->allocator)
+          step->allocator->free(step->intermediate_handles[i].ptr,
+                                step->allocator->dev_ctx);
+        else
+          free(step->intermediate_handles[i].ptr);
+      }
+    }
     free(step->intermediate_handles);
   }
   free(step);

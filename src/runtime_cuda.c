@@ -61,6 +61,7 @@ typedef CUresult (*cuLaunchKernel_fn)(CUfunction, unsigned int, unsigned int, un
                                        unsigned int, unsigned int, unsigned int,
                                        unsigned int, void *, void **, void **);
 typedef CUresult (*cuCtxSynchronize_fn)(void);
+typedef CUresult (*cuMemsetD8_v2_fn)(CUdeviceptr, unsigned char, size_t);
 typedef CUresult (*cuModuleUnload_fn)(CUmodule);
 
 /* NVRTC */
@@ -92,6 +93,7 @@ static struct {
   cuModuleGetFunction_fn cuModuleGetFunction;
   cuLaunchKernel_fn cuLaunchKernel;
   cuCtxSynchronize_fn cuCtxSynchronize;
+  cuMemsetD8_v2_fn cuMemsetD8_v2;
   cuModuleUnload_fn cuModuleUnload;
 
   /* nvrtc */
@@ -161,6 +163,7 @@ static bool load_cuda_libs(void) {
   LOAD_CUDA(cuModuleGetFunction);
   LOAD_CUDA(cuLaunchKernel);
   LOAD_CUDA(cuCtxSynchronize);
+  LOAD_CUDA(cuMemsetD8_v2);
   LOAD_CUDA(cuModuleUnload);
 
 #undef LOAD_CUDA
@@ -418,6 +421,17 @@ void poly_cuda_program_destroy(PolyCudaProgram *prog) {
     cuda_api.cuModuleUnload((CUmodule)prog->module);
   }
   free(prog);
+}
+
+int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes) {
+  if (cuda_state != CUDA_INIT_OK) return -1;
+  if (ptr == 0 || bytes == 0) return 0;
+  CUresult err = cuda_api.cuMemsetD8_v2((CUdeviceptr)ptr, val, bytes);
+  if (err != CUDA_SUCCESS) {
+    fprintf(stderr, "polygrad: cuda: cuMemsetD8_v2 failed (CUresult=%d)\n", err);
+    return -1;
+  }
+  return 0;
 }
 
 #endif /* POLY_HAS_CUDA */
