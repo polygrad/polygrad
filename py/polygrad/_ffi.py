@@ -28,8 +28,16 @@ _ip = ctypes.POINTER(ctypes.c_int)
 class PolyVarBinding(ctypes.Structure):
     _fields_ = [('var', _ptr), ('value', ctypes.c_int32)]
 
+class PolyBufferHandle(ctypes.Structure):
+    _fields_ = [
+        ('ptr', _ptr),
+        ('nbytes', ctypes.c_size_t),
+        ('domain', ctypes.c_int),    # PolyDeviceId
+        ('owned', ctypes.c_bool),
+    ]
+
 class PolyBufferBinding(ctypes.Structure):
-    _fields_ = [('buffer', _ptr), ('data', _ptr)]
+    _fields_ = [('buffer', _ptr), ('handle', PolyBufferHandle)]
 
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),

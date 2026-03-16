@@ -45,7 +45,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────────────┘    └────────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. 31/31 IR parity with tinygrad.
+**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences.
 
 **What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
@@ -64,15 +64,16 @@ Package versions use semver, but `major.minor` tracks the shared C core line acr
 ## Parity
 
 Current parity snapshot against tinygrad `ClangRenderer` (CPU, `DEVECTORIZE=0`, `optimize=False`):
-- Value parity: **31/31**
-- Full IR parity (kernel count + structure + op sequence): **31/31**
+- Value parity: **33/33**
+- Full IR parity (kernel count + structure + op sequence): **31/33**
+- Remaining structural divergences: `matmul_broadcast`, `cross_entropy_nonlast_axis`
 
 The parity test (`make test-parity`) schedules each case through both polygrad and tinygrad, linearizes, and compares:
 - kernel count
 - per-kernel structural signature (`RANGE/END/REDUCE/INDEX/LOAD/STORE` counts and loop-depth balance)
 - full per-kernel op sequence
 
-The parity suite covers 31 cases:
+The parity suite covers 33 cases:
 
 | Category | Cases |
 |----------|-------|
@@ -82,7 +83,7 @@ The parity suite covers 31 cases:
 | Multi-kernel | reduce_scalar_chain, reduce_vector_chain, shared_scalar_reduce_branches |
 | Movement | permute_2d, shrink_2d, pad_2d, chain_pad_flip, multi_movement |
 | Autograd | grad_mul_sum, grad_exp2_sum, grad_fdiv_sum_x, grad_fdiv_sum_y, grad_chain_movement, grad_log2_sum, grad_sqrt_sum, grad_where_sum, grad_multi_use |
-| NN | matmul_small |
+| NN | matmul_small, matmul_broadcast, cross_entropy_nonlast_axis |
 
 ```bash
 # Run parity tests (requires conda env 'tiny' with tinygrad)
@@ -190,7 +191,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Codegen pipeline (`full_rewrite_to_sink`): pm_reduce, pm_decomp, pm_transcendental, pm_add_control_flow
 - [x] Frontend composed ops (~35): elementwise math, comparisons, matmul, softmax, layernorm, cross_entropy
 - [x] Dtype-correct special math: lgamma, digamma, erf/erfc/erfinv, ndtri, log1p, expm1 propagate input dtype through all internal constants (f64 inputs get f64 kernels)
-- [x] **31/31 IR parity** with tinygrad ClangRenderer (CPU, no vectorization)
+- [~] **33/33 value parity, 31/33 full IR parity** with tinygrad ClangRenderer (CPU, no vectorization)
 - [x] ASSIGN + WAR ordering (in-place buffer writes, WAR/WAW dependency edges, `Tensor.assign()`)
 - [x] Float16 (`__fp16`) and BFloat16 (`__bf16`) end-to-end on CPU (cast, arithmetic, mixed precision)
 - [x] Disk cache for compiled kernels (`~/.cache/polygrad/<hash>.so`, 300x+ speedup on cache hit)

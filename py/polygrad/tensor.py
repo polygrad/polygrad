@@ -300,7 +300,7 @@ class Tensor:
         c_bindings = (_ffi.PolyBufferBinding * n)()
         for i, (buf, data) in enumerate(all_bindings):
             c_bindings[i].buffer = buf
-            c_bindings[i].data = data
+            c_bindings[i].handle.ptr = data
 
         ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, n)
         if ret != 0:
@@ -353,7 +353,7 @@ class Tensor:
         c_bindings = (_ffi.PolyBufferBinding * n)()
         for i, (buf, data) in enumerate(all_bindings):
             c_bindings[i].buffer = buf
-            c_bindings[i].data = data
+            c_bindings[i].handle.ptr = data
 
         # Run on GPU
         ret = _ffi._lib.poly_realize_cuda(self._ctx, sink, c_bindings, n)
@@ -441,7 +441,7 @@ class Tensor:
         c_bindings = (_ffi.PolyBufferBinding * n)()
         for i, (buf, data) in enumerate(all_bindings):
             c_bindings[i].buffer = buf
-            c_bindings[i].data = data
+            c_bindings[i].handle.ptr = data
 
         ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, n)
         if ret != 0:
@@ -1586,7 +1586,7 @@ class Tensor:
         c_bindings = (_ffi.PolyBufferBinding * n)()
         for i, (buf, data) in enumerate(all_bindings):
             c_bindings[i].buffer = buf
-            c_bindings[i].data = data
+            c_bindings[i].handle.ptr = data
 
         ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, n)
         if ret == 0:
@@ -1888,7 +1888,7 @@ class Tensor:
                 c_bindings = (_ffi.PolyBufferBinding * nb)()
                 for j, (buf, data) in enumerate(bindings):
                     c_bindings[j].buffer = buf
-                    c_bindings[j].data = data
+                    c_bindings[j].handle.ptr = data
 
                 ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, nb)
                 if ret != 0:
@@ -1976,10 +1976,10 @@ class CompiledStep:
         for i, (buf_uop, holder) in enumerate(self._buf_bindings):
             c_bindings[i].buffer = buf_uop
             if isinstance(holder, Tensor):
-                c_bindings[i].data = ctypes.cast(
+                c_bindings[i].handle.ptr = ctypes.cast(
                     holder._data.ctypes.data, ctypes.c_void_p)
             else:
-                c_bindings[i].data = ctypes.cast(
+                c_bindings[i].handle.ptr = ctypes.cast(
                     holder.ctypes.data, ctypes.c_void_p)
         ret = _ffi._lib.poly_step_run(self._step, c_bindings, n)
         if ret != 0:
