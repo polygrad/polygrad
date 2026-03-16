@@ -47,6 +47,8 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 
 **What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences.
 
+**Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, interpreter, CUDA, WASM JIT). Device is inferred from buffer handles, not stored on the instance. `PolyInstance` is a thin wrapper that builds bindings and calls `poly_realize()`. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
+
 **What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
 ## Documentation
