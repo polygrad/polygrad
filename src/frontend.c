@@ -1330,19 +1330,26 @@ static bool const_registry_has(PolyCtx *ctx, PolyUOp *buf) {
   return const_registry_lookup(ctx, buf) != NULL;
 }
 
+#ifndef __EMSCRIPTEN__
+static void realize_cache_purge(PolyCtx *ctx); /* defined below */
+
 void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
-  if (!ctx || g_const_bindings_n == 0) return;
-  int wr = 0;
-  for (int i = 0; i < g_const_bindings_n; i++) {
-    if (g_const_bindings[i].ctx == ctx) {
-      free(g_const_bindings[i].data);
-      continue;
+  if (!ctx) return;
+  realize_cache_purge(ctx);
+  if (g_const_bindings_n > 0) {
+    int wr = 0;
+    for (int i = 0; i < g_const_bindings_n; i++) {
+      if (g_const_bindings[i].ctx == ctx) {
+        free(g_const_bindings[i].data);
+        continue;
+      }
+      if (wr != i) g_const_bindings[wr] = g_const_bindings[i];
+      wr++;
     }
-    if (wr != i) g_const_bindings[wr] = g_const_bindings[i];
-    wr++;
+    g_const_bindings_n = wr;
   }
-  g_const_bindings_n = wr;
 }
+#endif
 
 /* ── Structural hash/eq for kernel cache ─────────────────────────────
  *
@@ -2879,6 +2886,91 @@ PolyUOp *poly_step_buf_uop(const PolyStep *step, int idx) {
  * have been moved to exec_plan.c for cross-build compilation. */
 
 /* ══════════════════════════════════════════════════════════════════════ */
+/*  Per-context caches for poly_realize                                  */
+/*  Schedule cache: keyed by (ctx, graph_hash, mode)                     */
+/*  Compiled plan cache: keyed by (ctx, graph_hash, mode, device)        */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+#define REALIZE_SCHED_CACHE_CAP 128
+#define REALIZE_PLAN_CACHE_CAP  256
+
+typedef struct {
+  PolyCtx *ctx;
+  PolyUOp *sink;           /* identity key (CSE-deduped pointer) */
+  uint32_t hash;
+  PolyCompileMode mode;
+  PolySchedule *sched;
+} RealizeSchedCacheEntry;
+
+typedef struct {
+  PolyCtx *ctx;
+  PolyUOp *sink;           /* identity key */
+  uint32_t hash;
+  PolyCompileMode mode;
+  PolyDeviceId device;
+  PolyCompiledPlan *plan;
+} RealizePlanCacheEntry;
+
+static RealizeSchedCacheEntry r_sched_cache[REALIZE_SCHED_CACHE_CAP];
+static int r_sched_n = 0;
+
+static RealizePlanCacheEntry r_plan_cache[REALIZE_PLAN_CACHE_CAP];
+static int r_plan_n = 0;
+
+static PolySchedule *r_sched_get(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCompileMode m) {
+  for (int i = 0; i < r_sched_n; i++)
+    if (r_sched_cache[i].ctx == ctx && r_sched_cache[i].sink == sink &&
+        r_sched_cache[i].hash == h && r_sched_cache[i].mode == m)
+      return r_sched_cache[i].sched;
+  return NULL;
+}
+
+static void r_sched_put(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCompileMode m, PolySchedule *s) {
+  if (r_sched_n < REALIZE_SCHED_CACHE_CAP)
+    r_sched_cache[r_sched_n++] = (RealizeSchedCacheEntry){ ctx, sink, h, m, s };
+}
+
+static PolyCompiledPlan *r_plan_get(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCompileMode m, PolyDeviceId d) {
+  for (int i = 0; i < r_plan_n; i++)
+    if (r_plan_cache[i].ctx == ctx && r_plan_cache[i].sink == sink &&
+        r_plan_cache[i].hash == h && r_plan_cache[i].mode == m &&
+        r_plan_cache[i].device == d)
+      return r_plan_cache[i].plan;
+  return NULL;
+}
+
+static void r_plan_put(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCompileMode m, PolyDeviceId d, PolyCompiledPlan *p) {
+  if (r_plan_n < REALIZE_PLAN_CACHE_CAP)
+    r_plan_cache[r_plan_n++] = (RealizePlanCacheEntry){ ctx, sink, h, m, d, p };
+}
+
+/* Purge realize caches for a destroyed context.
+ * Called from poly_frontend_ctx_cleanup (defined per-build below). */
+static void realize_cache_purge(PolyCtx *ctx) {
+  for (int i = r_plan_n - 1; i >= 0; i--) {
+    if (r_plan_cache[i].ctx == ctx) {
+      poly_compiled_plan_free(r_plan_cache[i].plan);
+      r_plan_cache[i] = r_plan_cache[--r_plan_n];
+    }
+  }
+  for (int i = r_sched_n - 1; i >= 0; i--) {
+    if (r_sched_cache[i].ctx == ctx) {
+      poly_schedule_free(r_sched_cache[i].sched);
+      r_sched_cache[i] = r_sched_cache[--r_sched_n];
+    }
+  }
+}
+
+#ifdef __EMSCRIPTEN__
+/* WASM builds: the native poly_frontend_ctx_cleanup is inside #ifndef __EMSCRIPTEN__.
+ * Provide one for WASM that purges the realize caches. */
+void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
+  if (!ctx) return;
+  realize_cache_purge(ctx);
+}
+#endif
+
+/* ══════════════════════════════════════════════════════════════════════ */
 /*  poly_realize: available in ALL builds (native + WASM)                */
 /* ══════════════════════════════════════════════════════════════════════ */
 
@@ -2957,25 +3049,31 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
 #endif
 
   PolyDeviceId device = infer_device(bindings, n_bindings);
+  uint32_t hash = poly_structural_hash(tensor_sink)
+                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
 
-  PolySchedule *sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
-  if (!sched) return -1;
-
-  PolyCompiledPlan *plan = poly_compile_schedule(ctx, sched, device);
-  if (!plan) { poly_schedule_free(sched); return -1; }
-
-  void **slot_data = build_slot_data_from_bindings(ctx, sched, bindings, n_bindings);
-  if (!slot_data) {
-    poly_compiled_plan_free(plan);
-    poly_schedule_free(sched);
-    return -1;
+  /* Schedule cache: per-context, keyed by sink pointer (CSE identity) */
+  PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
+  if (!sched) {
+    sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
+    if (!sched) return -1;
+    r_sched_put(ctx, tensor_sink, hash, POLY_MODE_CALL, sched);
   }
 
-  int ret = poly_compiled_plan_run(plan, slot_data, sched->n_buf_slots, NULL, 0);
+  /* Compiled plan cache: per-context + per-device */
+  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device);
+  if (!plan) {
+    plan = poly_compile_schedule(ctx, sched, device);
+    if (!plan) return -1;
+    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, plan);
+  }
 
+  /* Build slot_data from bindings and execute */
+  void **slot_data = build_slot_data_from_bindings(ctx, sched, bindings, n_bindings);
+  if (!slot_data) return -1;
+
+  int ret = poly_compiled_plan_run(plan, slot_data, sched->n_buf_slots, NULL, 0);
   free(slot_data);
-  poly_compiled_plan_free(plan);
-  poly_schedule_free(sched);
   return ret;
 }
 
