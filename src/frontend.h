@@ -13,6 +13,7 @@
 #define POLY_FRONTEND_H
 
 #include "polygrad.h"
+#include "exec_plan.h"  /* PolyBufferHandle, PolyDeviceId */
 
 #define POLYGRAD_ABI_VERSION 1
 
@@ -75,9 +76,14 @@ PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
 /* ── Realize: full pipeline in one call ───────────────────────────────── */
 
 typedef struct PolyBufferBinding {
-  PolyUOp *buffer;   /* tensor-level BUFFER UOp */
-  void *data;       /* pointer to host memory (float* for f32) */
+  PolyUOp *buffer;       /* tensor-level BUFFER UOp */
+  PolyBufferHandle handle; /* ptr + domain + nbytes (device-aware) */
 } PolyBufferBinding;
+
+/* Convenience: build a CPU host-memory binding.
+ * POLY_BIND_HOST(buf, ptr) sets domain=CPU, nbytes=0 (inferred from buf). */
+#define POLY_BIND_HOST(buf, ptr) \
+  ((PolyBufferBinding){ (buf), { (ptr), 0, POLY_DEVICE_CPU, false } })
 
 typedef struct PolyVarBinding {
   PolyUOp *var;     /* DEFINE_VAR UOp */

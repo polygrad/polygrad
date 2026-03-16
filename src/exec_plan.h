@@ -199,24 +199,21 @@ typedef struct {
   int n_vars;
 } PolyRunner;
 
-/* ── Executable step ─────────────────────────────────────────────────── */
+/* ── Compiled plan ────────────────────────────────────────────────────── */
 /*
- * Backend-specific lowered execution plan. Produced by lowering a
- * prepared step for a specific device. Contains compiled runners
- * and allocated intermediate buffer handles.
+ * Backend-specific lowered execution plan. Immutable after construction.
+ * Produced by compiling a schedule for a specific device. Contains compiled
+ * runners but NOT intermediate buffers -- those are allocated per-invocation
+ * inside poly_compiled_plan_run() to allow safe concurrent/sequential reuse.
  */
 
 typedef struct {
-  PolySchedule *prepared; /* retained reference, not owned */
+  PolySchedule *schedule; /* retained reference, not owned */
   PolyDeviceId device;
   const PolyAllocator *allocator;
 
-  PolyRunner *runners; /* [prepared->n_items], one per exec item */
+  PolyRunner *runners; /* [schedule->n_items], one per exec item */
   int n_runners;
-
-  /* Runtime buffer handles for intermediates */
-  PolyBufferHandle *intermediate_handles;
-  int n_intermediates;
 } PolyCompiledPlan;
 
 /* ── Backend descriptor ──────────────────────────────────────────────── */

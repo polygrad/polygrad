@@ -16,6 +16,7 @@
 #include "safetensors.h"
 #include "frontend.h"
 #include "exec_plan.h"
+#include "codegen.h"   /* poly_cuda_available (POLY_HAS_CUDA) */
 #include "scheduler.h"
 #include <stdlib.h>
 #include <string.h>
@@ -87,15 +88,15 @@ struct PolyInstance {
   struct { char *name; PolyUOp *sink; } *entrypoints;
   int n_entrypoints;
 
-  /* ── Device and allocator ── */
+  /* ── Buffer handles (one per named buffer, carries domain) ── */
+  PolyBufferHandle *buf_handles;    /* [n_bufs], ptr + domain + nbytes */
+
+  /* ── Legacy fields (used by value_and_grad, to be migrated) ── */
   PolyDeviceId device;
   const PolyAllocator *allocator;
-
-  /* ── Execution caches ── */
   PrepCacheEntry *prep_cache;
   int n_prep_cached;
   int prep_cache_cap;
-
   ExecCacheEntry *exec_cache;
   int n_exec_cached;
   int exec_cache_cap;
@@ -277,6 +278,17 @@ PolyInstance *poly_instance_from_ir(
     if (spec.bufs[i].role == POLY_ROLE_PARAM) n_params++;
   }
 
+  /* Initialize buffer handles (CPU domain, pointing at host data) */
+  inst->buf_handles = calloc(spec.n_bufs, sizeof(PolyBufferHandle));
+  for (int i = 0; i < spec.n_bufs; i++) {
+    inst->buf_handles[i] = (PolyBufferHandle){
+      .ptr = inst->bufs[i].data,
+      .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
+      .domain = POLY_DEVICE_CPU,
+      .owned = false,  /* data owned by NamedBuf, not the handle */
+    };
+  }
+
   /* Build param index table */
   inst->n_params = n_params;
   inst->param_indices = malloc(n_params * sizeof(int));
@@ -324,6 +336,18 @@ static void vag_free(VagState *vag, int n_params) {
 
 void poly_instance_free(PolyInstance *inst) {
   if (!inst) return;
+
+  /* Free device-owned buffer handles */
+  if (inst->buf_handles) {
+    for (int i = 0; i < inst->n_bufs; i++) {
+      PolyBufferHandle *h = &inst->buf_handles[i];
+      if (h->owned && h->ptr) {
+        const PolyBackendDesc *be = poly_backend_get(h->domain);
+        if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
+      }
+    }
+    free(inst->buf_handles);
+  }
 
   /* Free named buffers */
   for (int i = 0; i < inst->n_bufs; i++) {
@@ -385,8 +409,12 @@ int poly_instance_param_shape(const PolyInstance *inst, int i,
 float *poly_instance_param_data(PolyInstance *inst, int i,
                                  int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_params) return NULL;
-  NamedBuf *b = &inst->bufs[inst->param_indices[i]];
+  int bi = inst->param_indices[i];
+  NamedBuf *b = &inst->bufs[bi];
   if (numel_out) *numel_out = b->numel;
+  /* Device-memory backends: host data may be stale */
+  if (inst->buf_handles && inst->buf_handles[bi].domain == POLY_DEVICE_CUDA)
+    return NULL;
   return b->data;
 }
 
@@ -418,7 +446,60 @@ float *poly_instance_buf_data(PolyInstance *inst, int i,
                                int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_bufs) return NULL;
   if (numel_out) *numel_out = inst->bufs[i].numel;
+  /* Device-memory backends: host data may be stale */
+  if (inst->buf_handles && inst->buf_handles[i].domain == POLY_DEVICE_CUDA)
+    return NULL;
   return inst->bufs[i].data;
+}
+
+/* ── Readback / Upload ──────────────────────────────────────────────── */
+
+static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
+  if (!h || !h->ptr || !dst || len == 0) return -1;
+  if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP) {
+    memcpy(dst, h->ptr, len);
+    return 0;
+  }
+  const PolyBackendDesc *be = poly_backend_get(h->domain);
+  if (!be) return -1;
+  return be->get_allocator()->copy_out(dst, h->ptr, len,
+                                        be->get_allocator()->dev_ctx);
+}
+
+static int upload_handle(PolyBufferHandle *h, const void *src, size_t len) {
+  if (!h || !h->ptr || !src || len == 0) return -1;
+  if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP) {
+    memcpy(h->ptr, src, len);
+    return 0;
+  }
+  const PolyBackendDesc *be = poly_backend_get(h->domain);
+  if (!be) return -1;
+  return be->get_allocator()->copy_in(h->ptr, src, len,
+                                       be->get_allocator()->dev_ctx);
+}
+
+int poly_instance_readback_buf(PolyInstance *inst, int i,
+                               void *host_dst, size_t dst_len) {
+  if (!inst || i < 0 || i >= inst->n_bufs || !inst->buf_handles) return -1;
+  return readback_handle(&inst->buf_handles[i], host_dst, dst_len);
+}
+
+int poly_instance_upload_buf(PolyInstance *inst, int i,
+                             const void *host_src, size_t src_len) {
+  if (!inst || i < 0 || i >= inst->n_bufs || !inst->buf_handles) return -1;
+  return upload_handle(&inst->buf_handles[i], host_src, src_len);
+}
+
+int poly_instance_readback_param(PolyInstance *inst, int i,
+                                 void *host_dst, size_t dst_len) {
+  if (!inst || i < 0 || i >= inst->n_params) return -1;
+  return poly_instance_readback_buf(inst, inst->param_indices[i], host_dst, dst_len);
+}
+
+int poly_instance_upload_param(PolyInstance *inst, int i,
+                               const void *host_src, size_t src_len) {
+  if (!inst || i < 0 || i >= inst->n_params) return -1;
+  return poly_instance_upload_buf(inst, inst->param_indices[i], host_src, src_len);
 }
 
 /* ── Weight I/O ──────────────────────────────────────────────────────── */
@@ -513,33 +594,112 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
 #endif
   }
 
-  /* Validate supported devices */
-#ifdef __EMSCRIPTEN__
-  if (resolved != POLY_DEVICE_INTERP && resolved != POLY_DEVICE_WASM_JIT) {
-    fprintf(stderr, "poly_instance_set_device: unsupported device %d in WASM build\n", resolved);
+  /* Validate: backend must exist for this build */
+  const PolyBackendDesc *backend = poly_backend_get(resolved);
+  if (!backend) {
+    fprintf(stderr, "poly_instance_set_device: unsupported device %d\n", resolved);
     return -1;
   }
-#else
-  if (resolved != POLY_DEVICE_CPU && resolved != POLY_DEVICE_INTERP) {
-    fprintf(stderr, "poly_instance_set_device: unsupported device %d\n", resolved);
+
+#ifdef POLY_HAS_CUDA
+  if (resolved == POLY_DEVICE_CUDA && !poly_cuda_available()) {
+    fprintf(stderr, "poly_instance_set_device: CUDA not available\n");
     return -1;
   }
 #endif
 
-  /* Set device and allocator.
-   * CPU, INTERP, and WASM_JIT all use host malloc (Emscripten heap for WASM).
-   * No weight transfer needed between these domains. */
-  inst->device = resolved;
-  inst->allocator = &POLY_CPU_ALLOCATOR;
+  const PolyAllocator *alloc = backend->get_allocator();
 
-  /* Note: prepared cache survives device changes (backend-neutral).
-   * Executable cache retains entries for all previously-used devices --
-   * switching back to a previously-used device hits the cache. */
+  /* Bulk rematerialization: move all buffer handles to the new domain */
+  for (int i = 0; i < inst->n_bufs; i++) {
+    PolyBufferHandle *h = &inst->buf_handles[i];
+    if (h->domain == resolved) continue;  /* already there */
+
+    size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
+    if (nbytes == 0) continue;
+
+    /* For host-memory devices (CPU, INTERP, WASM_JIT), point at existing data */
+    if (resolved == POLY_DEVICE_CPU || resolved == POLY_DEVICE_INTERP
+#ifdef __EMSCRIPTEN__
+        || resolved == POLY_DEVICE_WASM_JIT
+#endif
+    ) {
+      /* Free old device handle if it was device-owned */
+      if (h->owned && h->domain != POLY_DEVICE_CPU && h->domain != POLY_DEVICE_INTERP) {
+        const PolyBackendDesc *old_be = poly_backend_get(h->domain);
+        if (old_be) {
+          const PolyAllocator *old_alloc = old_be->get_allocator();
+          /* Readback to host before freeing device memory */
+          if (inst->bufs[i].data)
+            old_alloc->copy_out(inst->bufs[i].data, h->ptr, nbytes, old_alloc->dev_ctx);
+          old_alloc->free(h->ptr, old_alloc->dev_ctx);
+        }
+      }
+      *h = (PolyBufferHandle){
+        .ptr = inst->bufs[i].data, .nbytes = nbytes,
+        .domain = resolved, .owned = false,
+      };
+      continue;
+    }
+
+    /* For device-memory backends (CUDA, future WEBGPU): allocate + upload */
+    void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
+    if (!dptr) {
+      fprintf(stderr, "poly_instance_set_device: alloc failed for buffer %d\n", i);
+      return -1;
+    }
+    if (inst->bufs[i].data)
+      alloc->copy_in(dptr, inst->bufs[i].data, nbytes, alloc->dev_ctx);
+
+    /* Free old device handle if owned and from a different device-memory domain */
+    if (h->owned && h->ptr && h->domain != POLY_DEVICE_CPU) {
+      const PolyBackendDesc *old_be = poly_backend_get(h->domain);
+      if (old_be) old_be->get_allocator()->free(h->ptr,
+                    old_be->get_allocator()->dev_ctx);
+    }
+
+    *h = (PolyBufferHandle){
+      .ptr = dptr, .nbytes = nbytes,
+      .domain = resolved, .owned = true,
+    };
+  }
+
+  /* Legacy fields (used by value_and_grad path) */
+  inst->device = resolved;
+  inst->allocator = alloc;
 
   return 0;
 }
 
 /* ── Generic entrypoint execution ────────────────────────────────────── */
+
+/* Build PolyBufferBinding[] from instance named buffers + IO overrides. */
+static PolyBufferBinding *build_bindings_for_realize(
+    PolyInstance *inst, int ep_idx, PolyIOBinding *io, int n_io, int *n_out) {
+  /* Start with all instance buffers */
+  int n = inst->n_bufs;
+  PolyBufferBinding *bindings = calloc((size_t)n, sizeof(PolyBufferBinding));
+  if (!bindings) { *n_out = 0; return NULL; }
+
+  for (int i = 0; i < n; i++) {
+    bindings[i].buffer = inst->bufs[i].buffer;
+    bindings[i].handle = inst->buf_handles[i];
+  }
+
+  /* Override with IO bindings by name.
+   * IO data is host memory -- for device-memory domains, the core handles
+   * upload inside poly_realize (future: explicit upload). For now, IO
+   * overrides point directly at host memory (works for CPU/INTERP/WASM). */
+  for (int i = 0; i < n_io; i++) {
+    if (!io[i].data) continue;
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (bi < 0) continue;
+    bindings[bi].handle.ptr = io[i].data;
+  }
+
+  *n_out = n;
+  return bindings;
+}
 
 int poly_instance_call(PolyInstance *inst, const char *entrypoint,
                        PolyIOBinding *io, int n_io) {
@@ -551,38 +711,16 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
     return -1;
   }
 
-  /* Lookup or build prepared step */
-  PolySchedule *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_CALL);
-  if (!prep) {
-    prep = poly_schedule_for(inst->ctx, inst->entrypoints[ep_idx].sink,
-                              POLY_MODE_CALL);
-    if (!prep) {
-      fprintf(stderr, "poly_instance_call: prepare failed for '%s'\n", entrypoint);
-      return -1;
-    }
-    prep_cache_insert(inst, ep_idx, POLY_MODE_CALL, prep);
-  }
+  /* Build bindings from instance buffers + IO overrides */
+  int n_bindings = 0;
+  PolyBufferBinding *bindings = build_bindings_for_realize(
+    inst, ep_idx, io, n_io, &n_bindings);
+  if (!bindings) return -1;
 
-  /* Lookup or build executable step */
-  PolyCompiledPlan *exec = exec_cache_lookup(inst, ep_idx, POLY_MODE_CALL,
-                                                inst->device);
-  if (!exec) {
-    exec = poly_compile_schedule(inst->ctx, prep, inst->device);
-    if (!exec) {
-      fprintf(stderr, "poly_instance_call: lower failed for '%s' on device %d\n",
-              entrypoint, inst->device);
-      return -1;
-    }
-    exec_cache_insert(inst, ep_idx, POLY_MODE_CALL, inst->device, exec);
-  }
-
-  /* Build slot_data and execute */
-  void **slot_data = build_slot_data(inst, prep, io, n_io, NULL, NULL, 0);
-  if (!slot_data) return -1;
-
-  int ret = poly_compiled_plan_run(exec, slot_data, prep->n_buf_slots,
-                                      NULL, 0);
-  free(slot_data);
+  /* Call the core -- device inferred, caching automatic */
+  int ret = poly_realize(inst->ctx, inst->entrypoints[ep_idx].sink,
+                          bindings, n_bindings);
+  free(bindings);
   return ret;
 }
 

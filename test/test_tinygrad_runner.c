@@ -72,7 +72,7 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     PolyBufferBinding *bb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
     for (int j = 0; j < n_bindings; j++) {
       bb[j].buffer = bindings[j].buffer;
-      bb[j].data = bindings[j].data;
+      bb[j].handle = (PolyBufferHandle){ bindings[j].data, 0, POLY_DEVICE_CPU, false };
     }
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {

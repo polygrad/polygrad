@@ -691,7 +691,7 @@ TEST(autograd, max_reduce_backward_e2e) {
   PolyUOp *store = poly_store_val(ctx, out, gx);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  PolyBufferBinding bindings[] = { {x, x_d}, {out, gx_d} };
+  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d) };
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 

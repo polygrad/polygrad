@@ -1892,7 +1892,7 @@ static int realize_from_sched_cache(PolyCtx *ctx, SchedCacheEntry *se,
   memset(pos_to_data, 0, sizeof(pos_to_data));
   for (int j = 0; j < n_bindings; j++) {
     int pos = poly_find_buf_position(bindings[j].buffer, buf_order, n_bufs);
-    if (pos >= 0) pos_to_data[pos] = bindings[j].data;
+    if (pos >= 0) pos_to_data[pos] = bindings[j].handle.ptr;
   }
 
   int n_int = se->n_intermediates;
@@ -2155,7 +2155,7 @@ static int realize_impl(PolyCtx *ctx, PolyUOp *tensor_sink,
       if (buf->op == POLY_OP_BUFFER) {
         for (int j = 0; j < n_bindings; j++) {
           if (bindings[j].buffer == buf) {
-            args[i] = bindings[j].data;
+            args[i] = bindings[j].handle.ptr;
             break;
           }
         }
@@ -2271,17 +2271,7 @@ static int realize_impl(PolyCtx *ctx, PolyUOp *tensor_sink,
   return ret;
 }
 
-int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
-                PolyBufferBinding *bindings, int n_bindings) {
-  return realize_impl(ctx, tensor_sink, bindings, n_bindings, NULL, 0);
-}
-
-int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
-                    PolyBufferBinding *bindings, int n_bindings,
-                    PolyVarBinding *var_bindings, int n_var_bindings) {
-  return realize_impl(ctx, tensor_sink, bindings, n_bindings,
-                      var_bindings, n_var_bindings);
-}
+/* poly_realize and helpers moved below #endif to be available in all builds */
 
 /* ── Compiled Step (persistent sched-cache entry) ──────────────────────
  *
@@ -2741,11 +2731,11 @@ int poly_step_run_ex(PolyStep *step,
               poly_op_name(step->buf_order[p]->op));
     for (int j = 0; j < n_bindings; j++)
       fprintf(stderr, "  binding[%d] = buf=%p data=%p\n", j,
-              (void*)bindings[j].buffer, bindings[j].data);
+              (void*)bindings[j].buffer, bindings[j].handle.ptr);
   }
   for (int j = 0; j < n_bindings; j++) {
     int pos = poly_find_buf_position(bindings[j].buffer, step->buf_order, step->n_bufs);
-    if (pos >= 0) pos_to_data[pos] = bindings[j].data;
+    if (pos >= 0) pos_to_data[pos] = bindings[j].handle.ptr;
     else if (getenv("POLY_DEBUG_STEP"))
       fprintf(stderr, "  binding[%d] NOT FOUND in buf_order!\n", j);
   }
@@ -2827,7 +2817,7 @@ int poly_step_run_indexed_ex(PolyStep *step, void **buffer_data, int n_buffers,
   for (int i = 0; i < n; i++) {
     if (!buffer_data[i]) continue;
     bindings[nb].buffer = step->buf_order[i];
-    bindings[nb].data = buffer_data[i];
+    bindings[nb].handle = (PolyBufferHandle){ buffer_data[i], 0, POLY_DEVICE_CPU, false };
     nb++;
   }
   int ret = poly_step_run_ex(step, bindings, nb, var_bindings, n_var_bindings);
@@ -2885,8 +2875,122 @@ PolyUOp *poly_step_buf_uop(const PolyStep *step, int idx) {
 
 #endif /* !__EMSCRIPTEN__ -- end CPU-only realize/compile block */
 
-/* Exec plan functions (poly_prepare_step, poly_lower_step, etc.)
+/* Exec plan functions (poly_schedule_for, poly_compile_schedule, etc.)
  * have been moved to exec_plan.c for cross-build compilation. */
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  poly_realize: available in ALL builds (native + WASM)                */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+static PolyDeviceId infer_device(PolyBufferBinding *bindings, int n) {
+  /* Check if any binding is on a non-CPU device */
+  for (int i = 0; i < n; i++)
+    if (bindings[i].handle.domain != POLY_DEVICE_CPU
+        && bindings[i].handle.domain != POLY_DEVICE_AUTO)
+      return bindings[i].handle.domain;
+  /* Default: CPU on native builds, WASM_JIT on Emscripten */
+#ifdef __EMSCRIPTEN__
+  return POLY_DEVICE_WASM_JIT;
+#else
+  return POLY_DEVICE_CPU;
+#endif
+}
+
+static void **build_slot_data_from_bindings(PolyCtx *ctx, const PolySchedule *sched,
+                                             PolyBufferBinding *bindings, int n_bindings) {
+  void **slot_data = calloc((size_t)sched->n_buf_slots, sizeof(void *));
+  if (!slot_data) return NULL;
+
+  for (int s = 0; s < sched->n_buf_slots; s++) {
+    if (sched->buf_slots[s].is_intermediate) continue;
+    PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
+    for (int j = 0; j < n_bindings; j++) {
+      if (bindings[j].buffer == slot_uop) {
+        slot_data[s] = bindings[j].handle.ptr;
+        break;
+      }
+    }
+    if (!slot_data[s] && ctx)
+      slot_data[s] = const_registry_lookup(ctx, slot_uop);
+  }
+  return slot_data;
+}
+
+#ifndef __EMSCRIPTEN__
+/* Check if a graph contains BIND or DEFINE_VAR nodes.
+ * On native builds, these fall back to realize_impl until exec_plan handles vars. */
+static bool graph_has_vars(PolyUOp *root) {
+  if (!root) return false;
+  PolyUOp *stack[4096];
+  int sp = 0;
+  stack[sp++] = root;
+  PolyUOp *visited[8192];
+  int n_visited = 0;
+  while (sp > 0) {
+    PolyUOp *u = stack[--sp];
+    if (u->op == POLY_OP_BIND || u->op == POLY_OP_DEFINE_VAR)
+      return true;
+    bool seen = false;
+    for (int i = 0; i < n_visited; i++) {
+      if (visited[i] == u) { seen = true; break; }
+    }
+    if (seen) continue;
+    if (n_visited < 8192) visited[n_visited++] = u;
+    for (int i = 0; i < u->n_src && sp < 4096; i++)
+      if (u->src[i]) stack[sp++] = u->src[i];
+  }
+  return false;
+}
+#endif
+
+int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
+                PolyBufferBinding *bindings, int n_bindings) {
+  if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
+    fprintf(stderr, "polygrad: realize: expected SINK\n");
+    return -1;
+  }
+
+#ifndef __EMSCRIPTEN__
+  /* Graphs with DEFINE_VAR/BIND use legacy path (native only) */
+  if (graph_has_vars(tensor_sink))
+    return realize_impl(ctx, tensor_sink, bindings, n_bindings, NULL, 0);
+#endif
+
+  PolyDeviceId device = infer_device(bindings, n_bindings);
+
+  PolySchedule *sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
+  if (!sched) return -1;
+
+  PolyCompiledPlan *plan = poly_compile_schedule(ctx, sched, device);
+  if (!plan) { poly_schedule_free(sched); return -1; }
+
+  void **slot_data = build_slot_data_from_bindings(ctx, sched, bindings, n_bindings);
+  if (!slot_data) {
+    poly_compiled_plan_free(plan);
+    poly_schedule_free(sched);
+    return -1;
+  }
+
+  int ret = poly_compiled_plan_run(plan, slot_data, sched->n_buf_slots, NULL, 0);
+
+  free(slot_data);
+  poly_compiled_plan_free(plan);
+  poly_schedule_free(sched);
+  return ret;
+}
+
+int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
+                    PolyBufferBinding *bindings, int n_bindings,
+                    PolyVarBinding *var_bindings, int n_var_bindings) {
+#ifndef __EMSCRIPTEN__
+  if (n_var_bindings > 0)
+    return realize_impl(ctx, tensor_sink, bindings, n_bindings,
+                        var_bindings, n_var_bindings);
+#else
+  (void)var_bindings; (void)n_var_bindings;
+#endif
+  return poly_realize(ctx, tensor_sink, bindings, n_bindings);
+}
 
 #ifndef __EMSCRIPTEN__
 
@@ -2896,7 +3000,7 @@ int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
   if (n > POLY_MAX_REALIZE_BUFS) n = POLY_MAX_REALIZE_BUFS;
   for (int i = 0; i < n; i++) {
     bindings[i].buffer = buffers[i];
-    bindings[i].data = datas[i];
+    bindings[i].handle = (PolyBufferHandle){ datas[i], 0, POLY_DEVICE_CPU, false };
   }
   return poly_realize(ctx, tensor_sink, bindings, n);
 }
@@ -2919,7 +3023,7 @@ void poly_realize_bind(PolyCtx *ctx, PolyUOp *buffer, void *data) {
     return;
   }
   g_realize_bindings[g_realize_n].buffer = buffer;
-  g_realize_bindings[g_realize_n].data = data;
+  g_realize_bindings[g_realize_n].handle = (PolyBufferHandle){ data, 0, POLY_DEVICE_CPU, false };
   g_realize_n++;
 }
 
@@ -3046,7 +3150,7 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
      * Host pointers can be reused by malloc after free, so cached GPU data
      * may be stale even when the host pointer matches. */
     unsigned long long dptr = 0;
-    GpuBufCacheEntry *cached_buf = gpu_buf_lookup(bindings[i].data, bytes);
+    GpuBufCacheEntry *cached_buf = gpu_buf_lookup(bindings[i].handle.ptr, bytes);
     if (cached_buf) {
       dptr = cached_buf->gpu_ptr;
     } else {
@@ -3061,10 +3165,10 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
         return -1;
       }
       /* Cache the allocation */
-      gpu_buf_insert(bindings[i].data, bytes, dptr);
+      gpu_buf_insert(bindings[i].handle.ptr, bytes, dptr);
     }
     /* Always copy host → device (host data may have changed since last cache) */
-    poly_cuda_copy_htod(dptr, bindings[i].data, bytes);
+    poly_cuda_copy_htod(dptr, bindings[i].handle.ptr, bytes);
 
     bound_bufs[n_bound] = buf;
     bound_dptrs[n_bound] = dptr;
@@ -3228,9 +3332,9 @@ int poly_cuda_copyback(PolyBufferBinding *bindings, int n_bindings) {
     int64_t n_elems = bindings[i].buffer->arg.i;
     size_t bytes = (size_t)n_elems * poly_dtype_itemsize(
         poly_dtype_scalar(bindings[i].buffer->dtype));
-    GpuBufCacheEntry *cached = gpu_buf_lookup(bindings[i].data, bytes);
+    GpuBufCacheEntry *cached = gpu_buf_lookup(bindings[i].handle.ptr, bytes);
     if (cached) {
-      poly_cuda_copy_dtoh(bindings[i].data, cached->gpu_ptr, bytes);
+      poly_cuda_copy_dtoh(bindings[i].handle.ptr, cached->gpu_ptr, bytes);
     }
   }
   return 0;

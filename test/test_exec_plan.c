@@ -293,7 +293,11 @@ TEST(exec_plan, lower_and_run_multikernel) {
 
   PolyExecutableStep *es = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
   ASSERT_TRUE(es != NULL);
-  ASSERT_TRUE(es->n_intermediates > 0);
+  /* Plan has intermediate buffer slots (intermediates are per-run now) */
+  int n_inter = 0;
+  for (int i = 0; i < ps->n_buf_slots; i++)
+    if (ps->buf_slots[i].is_intermediate) n_inter++;
+  ASSERT_TRUE(n_inter > 0);
 
   /* a = [1..8], sum = 36, b = [10..17], out = 36 + b */
   float da[8], db[8], dout[8];
@@ -339,7 +343,7 @@ TEST(exec_plan, lower_matches_old_compile_step) {
   PolyStep *old_step = poly_compile_step(ctx, sink);
   ASSERT_TRUE(old_step != NULL);
   PolyBufferBinding bindings[] = {
-    {a, da}, {b, db}, {out, dout_old}
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout_old)
   };
   ASSERT_INT_EQ(poly_step_run(old_step, bindings, 3), 0);
 

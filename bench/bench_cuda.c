@@ -42,10 +42,10 @@ static void bench_vecadd(int n, int iters) {
   for (int i = 0; i < n; i++) { ha[i] = (float)i * 0.001f; hb[i] = 1.0f; }
 
   /* Warmup */
-  PolyBufferBinding binds[] = { { c, hc_cpu }, { a, ha }, { b, hb } };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(c, hc_cpu), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb) };
   poly_realize(ctx, sink, binds, 3);
 
-  PolyBufferBinding gbinds[] = { { c, hc_gpu }, { a, ha }, { b, hb } };
+  PolyBufferBinding gbinds[] = { POLY_BIND_HOST(c, hc_gpu), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb) };
   poly_realize_cuda(ctx, sink, gbinds, 3);
 
   /* CPU timing */
@@ -86,10 +86,10 @@ static void bench_mul(int n, int iters) {
   float *hc_gpu = calloc(n, sizeof(float));
   for (int i = 0; i < n; i++) { ha[i] = (float)i * 0.001f; hb[i] = 2.0f; }
 
-  PolyBufferBinding binds[] = { { c, hc_cpu }, { a, ha }, { b, hb } };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(c, hc_cpu), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb) };
   poly_realize(ctx, sink, binds, 3);
 
-  PolyBufferBinding gbinds[] = { { c, hc_gpu }, { a, ha }, { b, hb } };
+  PolyBufferBinding gbinds[] = { POLY_BIND_HOST(c, hc_gpu), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb) };
   poly_realize_cuda(ctx, sink, gbinds, 3);
 
   double t0 = now_us();
@@ -122,10 +122,10 @@ static void bench_reduce_sum(int n, int iters) {
   float c_cpu = 0, c_gpu = 0;
   for (int i = 0; i < n; i++) ha[i] = 1.0f;
 
-  PolyBufferBinding binds[] = { { c, &c_cpu }, { a, ha } };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(c, &c_cpu), POLY_BIND_HOST(a, ha) };
   poly_realize(ctx, sink, binds, 2);
 
-  PolyBufferBinding gbinds[] = { { c, &c_gpu }, { a, ha } };
+  PolyBufferBinding gbinds[] = { POLY_BIND_HOST(c, &c_gpu), POLY_BIND_HOST(a, ha) };
   poly_realize_cuda(ctx, sink, gbinds, 2);
 
   double t0 = now_us();

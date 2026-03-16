@@ -684,7 +684,7 @@ TEST(sched, reduce_vector_chain_e2e) {
     c_d[i] = 0.0f;
   }
   PolyBufferBinding bindings[] = {
-    { c, c_d }, { a, a_d }, { b, b_d }
+    POLY_BIND_HOST(c, c_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d)
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 3), 0);
 
@@ -751,9 +751,9 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
   }
 
   PolyBufferBinding bindings[] = {
-    { .buffer = c, .data = c_d },
-    { .buffer = e, .data = e_d },
-    { .buffer = a, .data = a_d },
+    POLY_BIND_HOST(c, c_d),
+    POLY_BIND_HOST(e, e_d),
+    POLY_BIND_HOST(a, a_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
@@ -1234,7 +1234,7 @@ TEST(sched, realize_vecadd) {
     c_d[i] = 0;
   }
 
-  PolyBufferBinding bindings[] = { {a, a_d}, {b, b_d}, {c, c_d} };
+  PolyBufferBinding bindings[] = { POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d), POLY_BIND_HOST(c, c_d) };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
@@ -1256,7 +1256,7 @@ TEST(sched, realize_reduce_sum) {
   float x_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_d[] = {0};
 
-  PolyBufferBinding bindings[] = { {x, x_d}, {out, out_d} };
+  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, out_d) };
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_d[0], 36.0f, 1e-5);
@@ -1282,7 +1282,7 @@ TEST(sched, realize_grad_chain) {
   float x_d[] = {1, 2, 3, 4};
   float gx_d[] = {0, 0, 0, 0};
 
-  PolyBufferBinding bindings[] = { {x, x_d}, {out, gx_d} };
+  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d) };
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)

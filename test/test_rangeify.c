@@ -1199,8 +1199,8 @@ TEST(rangeify, multi_kernel_shared_computed_e2e) {
   }
 
   PolyBufferBinding bindings[] = {
-    { out1, o1_d }, { out2, o2_d },
-    { a, a_d }, { b, b_d }, { c, c_d },
+    POLY_BIND_HOST(out1, o1_d), POLY_BIND_HOST(out2, o2_d),
+    POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d), POLY_BIND_HOST(c, c_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
@@ -1232,7 +1232,7 @@ TEST(rangeify, schedule_v2_switchover_parity) {
   for (int i = 0; i < N; i++) { a_d[i] = (float)i; b_d[i] = (float)(N - i); }
 
   PolyBufferBinding bindings[] = {
-    { out, o_d }, { a, a_d }, { b, b_d },
+    POLY_BIND_HOST(out, o_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
@@ -1261,7 +1261,7 @@ TEST(rangeify, stats_clean_vecadd_no_workarounds) {
   for (int i = 0; i < N; i++) { a_d[i] = (float)i; b_d[i] = (float)(N - i); }
 
   PolyBufferBinding bindings[] = {
-    { out, o_d }, { a, a_d }, { b, b_d },
+    POLY_BIND_HOST(out, o_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d),
   };
 
   poly_rangeify_stats_reset();
@@ -1301,7 +1301,7 @@ TEST(rangeify, stats_clean_reduce_no_workarounds) {
   for (int i = 0; i < R * C; i++) a_d[i] = (float)(i + 1);
 
   PolyBufferBinding bindings[] = {
-    { out, o_d }, { a_flat, a_d },
+    POLY_BIND_HOST(out, o_d), POLY_BIND_HOST(a_flat, a_d),
   };
 
   poly_rangeify_stats_reset();
@@ -1348,7 +1348,7 @@ TEST(rangeify, bufferize_same_size_dims_e2e) {
   PolyUOp *store = poly_store_val(ctx, out, gx);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  PolyBufferBinding bindings[] = { {x, x_d}, {out, gx_d} };
+  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d) };
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
@@ -1486,8 +1486,8 @@ TEST(rangeify, bufferize_foreign_range_same_size_dims_e2e) {
   }
 
   PolyBufferBinding bindings[] = {
-    { out1_flat, o1_d }, { out2_flat, o2_d },
-    { a_flat, a_d }, { b_flat, b_d }, { c_flat, c_d },
+    POLY_BIND_HOST(out1_flat, o1_d), POLY_BIND_HOST(out2_flat, o2_d),
+    POLY_BIND_HOST(a_flat, a_d), POLY_BIND_HOST(b_flat, b_d), POLY_BIND_HOST(c_flat, c_d),
   };
   poly_rangeify_stats_reset();
   int ret = poly_realize(ctx, sink, bindings, 5);
@@ -1557,7 +1557,7 @@ TEST(rangeify, bufferize_movement_chain_alt_ranges_e2e) {
   for (int i = 0; i < 75; i++) x_d[i] = (float)(i + 1);
 
   PolyBufferBinding bindings[] = {
-    { out, o_d }, { x_flat, x_d },
+    POLY_BIND_HOST(out, o_d), POLY_BIND_HOST(x_flat, x_d),
   };
 
   poly_rangeify_stats_reset();
@@ -1885,8 +1885,8 @@ TEST(rangeify, split_store_structural_parity) {
   memset(o2_d, 0, sizeof(o2_d));
 
   PolyBufferBinding bindings[] = {
-    { out1_flat, o1_d }, { out2_flat, o2_d },
-    { a_flat, a_d }, { b_flat, b_d }, { c_flat, c_d },
+    POLY_BIND_HOST(out1_flat, o1_d), POLY_BIND_HOST(out2_flat, o2_d),
+    POLY_BIND_HOST(a_flat, a_d), POLY_BIND_HOST(b_flat, b_d), POLY_BIND_HOST(c_flat, c_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
@@ -1995,8 +1995,8 @@ TEST(rangeify, shared_scalar_reduce_branches_e2e) {
   }
 
   PolyBufferBinding bindings[] = {
-    { oc, oc_d }, { oe, oe_d },
-    { a, a_d }, { c0, c0_d }, { e0, e0_d },
+    POLY_BIND_HOST(oc, oc_d), POLY_BIND_HOST(oe, oe_d),
+    POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(c0, c0_d), POLY_BIND_HOST(e0, e0_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 5);
   poly_ctx_destroy(ctx);
@@ -2035,7 +2035,7 @@ TEST(rangeify, const_through_bufferize) {
   float a_d[] = {1, 2, 3, 4};
   float out_d[4] = {0};
   PolyBufferBinding bindings[] = {
-    { out, out_d }, { a, a_d },
+    POLY_BIND_HOST(out, out_d), POLY_BIND_HOST(a, a_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
@@ -2069,7 +2069,7 @@ TEST(rangeify, earliest_reshape_merge) {
   float a_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_d[8] = {0};
   PolyBufferBinding bindings[] = {
-    { out, out_d }, { a, a_d },
+    POLY_BIND_HOST(out, out_d), POLY_BIND_HOST(a, a_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
@@ -2101,7 +2101,7 @@ TEST(rangeify, earliest_detach_removal) {
   float b_d[] = {10, 20, 30, 40};
   float out_d[4] = {0};
   PolyBufferBinding bindings[] = {
-    { out, out_d }, { a, a_d }, { b, b_d },
+    POLY_BIND_HOST(out, out_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
@@ -2196,9 +2196,9 @@ TEST(rangeify, limit_bufs_e2e) {
   float out_d[16] = {0};
 
   PolyBufferBinding bindings[12]; /* out + 10 inputs */
-  bindings[0] = (PolyBufferBinding){ out, out_d };
+  bindings[0] = POLY_BIND_HOST(out, out_d );
   for (int i = 0; i < N_BUFS; i++)
-    bindings[1 + i] = (PolyBufferBinding){ bufs[i], buf_data[i] };
+    bindings[1 + i] = POLY_BIND_HOST(bufs[i], buf_data[i] );
 
   int ret = poly_realize(ctx, sink, bindings, 1 + N_BUFS);
 
@@ -2316,8 +2316,8 @@ TEST(rangeify, assign_e2e) {
   float b_data[4] = { 10.0f, 20.0f, 30.0f, 40.0f };
 
   PolyBufferBinding bindings[2] = {
-    { .buffer = buf_a, .data = a_data },
-    { .buffer = buf_b, .data = b_data },
+    POLY_BIND_HOST(buf_a, a_data ),
+    POLY_BIND_HOST(buf_b, b_data ),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 2);
@@ -2406,8 +2406,8 @@ TEST(rangeify, assign_war_ordering) {
   float out_data[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
   PolyBufferBinding bindings[2] = {
-    { .buffer = buf_a, .data = a_data },
-    { .buffer = buf_out, .data = out_data },
+    POLY_BIND_HOST(buf_a, a_data ),
+    POLY_BIND_HOST(buf_out, out_data ),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 2);
@@ -2449,7 +2449,7 @@ TEST(rangeify, assign_self_rhs) {
   float a_data[4] = { 3.0f, 5.0f, 7.0f, 11.0f };
 
   PolyBufferBinding bindings[1] = {
-    { .buffer = buf_a, .data = a_data },
+    POLY_BIND_HOST(buf_a, a_data ),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 1);
@@ -2491,8 +2491,8 @@ TEST(rangeify, define_var_1d_e2e) {
   memset(out_data, 0, sizeof(out_data));
 
   PolyBufferBinding bindings[2] = {
-    { .buffer = buf_a,   .data = a_data },
-    { .buffer = buf_out,  .data = out_data },
+    POLY_BIND_HOST(buf_a, a_data ),
+    POLY_BIND_HOST(buf_out, out_data ),
   };
   PolyVarBinding var_bindings[1] = {
     { .var = N, .value = 4 },
@@ -2539,8 +2539,8 @@ TEST(rangeify, define_var_2d_e2e) {
   memset(out_data, 0, sizeof(out_data));
 
   PolyBufferBinding bindings[2] = {
-    { .buffer = buf_a,   .data = a_data },
-    { .buffer = buf_out,  .data = out_data },
+    POLY_BIND_HOST(buf_a, a_data ),
+    POLY_BIND_HOST(buf_out, out_data ),
   };
 
   /* Execute with N=3 (12 elements) */
@@ -2594,8 +2594,8 @@ TEST(rangeify, bind_auto_extract) {
   memset(out_data, 0, sizeof(out_data));
 
   PolyBufferBinding bindings[2] = {
-    { .buffer = buf_a,   .data = a_data },
-    { .buffer = buf_out,  .data = out_data },
+    POLY_BIND_HOST(buf_a, a_data ),
+    POLY_BIND_HOST(buf_out, out_data ),
   };
 
   int ret = poly_realize_ex(ctx, sink, bindings, 2, NULL, 0);
@@ -2634,8 +2634,8 @@ TEST(rangeify, define_var_cache_hit) {
   for (int i = 0; i < 16; i++) a_data[i] = (float)(i * 10);
 
   PolyBufferBinding bindings[2] = {
-    { .buffer = buf_a,   .data = a_data },
-    { .buffer = buf_out,  .data = out_data },
+    POLY_BIND_HOST(buf_a, a_data ),
+    POLY_BIND_HOST(buf_out, out_data ),
   };
 
   /* First call: N=4 (compiles kernel) */
@@ -2720,9 +2720,9 @@ TEST(rangeify, chained_singleton_reduce_e2e) {
   float out_data[] = { 0.0f };
 
   PolyBufferBinding bindings[] = {
-    { a_buf, a_data },
-    { w_buf, w_data },
-    { out_buf, out_data },
+    POLY_BIND_HOST(a_buf, a_data),
+    POLY_BIND_HOST(w_buf, w_data),
+    POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 3);
@@ -2767,8 +2767,8 @@ TEST(rangeify, mixed_multiaxis_singleton_reduce_e2e) {
   float out_data[] = { 0.0f, 0.0f };
 
   PolyBufferBinding bindings[] = {
-    { in_buf,  in_data },
-    { out_buf, out_data },
+    POLY_BIND_HOST(in_buf, in_data),
+    POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 2);

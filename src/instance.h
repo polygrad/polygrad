@@ -1,16 +1,17 @@
 /*
  * poly_instance.h -- Runtime for portable tensor-level model instances
  *
- * PolyInstance owns a UOp graph + named buffers + compiled execution steps.
- * Created from IR bytes (poly.ir.uops@1) or family builders (MLP, etc.).
- * Provides: forward pass, training step, weight export/import.
+ * PolyInstance is a thin product-layer container over the core:
+ *   - Named buffers with roles, shapes, dtypes
+ *   - Entrypoints (forward, loss, etc.)
+ *   - Optimizer state
  *
- * Backend-aware: the same instance can execute on different devices
- * (CPU, interpreter, CUDA, WASM JIT) via poly_instance_set_device().
- * Default device is CPU. Prepared step cache survives device changes;
- * executable step cache retains entries for all previously-used devices.
+ * Execution goes through poly_realize() in the core. The instance
+ * builds PolyBufferBinding[] from its named buffers and calls
+ * poly_realize(). Device is implicit in buffer handles.
  *
- * This is a "product layer" above the tinygrad-aligned compiler core.
+ * set_device() is a bulk rematerialization API that moves all buffer
+ * handles to a new memory domain.
  */
 
 #ifndef POLY_INSTANCE_H
@@ -57,6 +58,9 @@ int         poly_instance_param_count(const PolyInstance *inst);
 const char *poly_instance_param_name(const PolyInstance *inst, int i);
 int         poly_instance_param_shape(const PolyInstance *inst, int i,
                                       int64_t *shape_out, int max_dims);
+/* Returns host pointer for host-memory domains (CPU, INTERP, WASM_JIT).
+ * Returns NULL for device-memory domains (CUDA, future WEBGPU).
+ * Use readback/upload APIs for device-resident data. */
 float      *poly_instance_param_data(PolyInstance *inst, int i,
                                      int64_t *numel_out);
 
@@ -67,6 +71,8 @@ const char *poly_instance_buf_name(const PolyInstance *inst, int i);
 int         poly_instance_buf_role(const PolyInstance *inst, int i);
 int         poly_instance_buf_shape(const PolyInstance *inst, int i,
                                     int64_t *shape_out, int max_dims);
+/* Returns host pointer for host-memory domains, NULL for device-memory.
+ * Use readback/upload APIs for device-resident data. */
 float      *poly_instance_buf_data(PolyInstance *inst, int i,
                                    int64_t *numel_out);
 
@@ -85,15 +91,23 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
 
 /* ── Device configuration ────────────────────────────────────────────── */
 
-/* Set the execution device. Default is POLY_DEVICE_CPU.
- * May be called more than once. Changing device:
- *   - prepared step cache survives (backend-neutral)
- *   - executable step cache retains entries for all previously-used devices
- *   - weight materialization transfers data to the new memory domain
- *     (no-op for CPU/INTERP since both use host malloc)
- * POLY_DEVICE_AUTO resolves to CPU on native builds.
- * Returns 0 on success, <0 if device is unsupported. */
+/* Bulk rematerialization: moves all buffer handles to the target domain.
+ * After set_device(CUDA), all buf_handles[].domain are CUDA.
+ * The next poly_instance_call() builds CUDA-domain bindings,
+ * poly_realize() infers CUDA, compiles for CUDA, runs on CUDA.
+ * Returns 0 on success, <0 if device is unsupported or unavailable. */
 int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device);
+
+/* ── Explicit readback/upload for device-resident buffers ────────────── */
+
+int poly_instance_readback_buf(PolyInstance *inst, int i,
+                               void *host_dst, size_t dst_len);
+int poly_instance_upload_buf(PolyInstance *inst, int i,
+                             const void *host_src, size_t src_len);
+int poly_instance_readback_param(PolyInstance *inst, int i,
+                                 void *host_dst, size_t dst_len);
+int poly_instance_upload_param(PolyInstance *inst, int i,
+                               const void *host_src, size_t src_len);
 
 /* ── Execution ───────────────────────────────────────────────────────── */
 

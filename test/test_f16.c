@@ -89,7 +89,7 @@ TEST(f16, cast_f32_to_f16_e2e) {
   float in_data[] = {1.0f, 2.0f, -0.5f, 0.0f};
   uint16_t out_data[4] = {0};
 
-  PolyBufferBinding binds[] = { {in, in_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -119,7 +119,7 @@ TEST(f16, cast_f16_to_f32_e2e) {
   };
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {in, in_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -152,7 +152,7 @@ TEST(f16, add_f16_e2e) {
   };
   uint16_t out_data[4] = {0};
 
-  PolyBufferBinding binds[] = { {a, a_data}, {b, b_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -184,7 +184,7 @@ TEST(f16, mul_f16_e2e) {
   };
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {a, a_data}, {b, b_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -211,7 +211,7 @@ TEST(f16, neg_f16_e2e) {
   };
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {a, a_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -239,7 +239,7 @@ TEST(f16, const_f16_e2e) {
   };
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {a, a_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -268,7 +268,7 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
   };
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {in, in_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -293,7 +293,7 @@ TEST(f16, cast_f64_to_f16_e2e) {
   double in_data[] = {1.5, -2.5};
   uint16_t out_data[2] = {0};
 
-  PolyBufferBinding binds[] = { {in, in_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -317,7 +317,7 @@ TEST(f16, cast_f32_to_bf16_e2e) {
   float in_data[] = {1.0f, -2.0f, 0.5f};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {in, in_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -346,7 +346,7 @@ TEST(f16, cast_bf16_to_f32_e2e) {
   };
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {in, in_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -377,7 +377,7 @@ TEST(f16, add_bf16_e2e) {
   };
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {a, a_data}, {b, b_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -408,7 +408,7 @@ TEST(f16, mul_bf16_e2e) {
   };
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { {a, a_data}, {b, b_data}, {out, out_data} };
+  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
