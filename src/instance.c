@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <math.h>
 
 /* ── Internal types ──────────────────────────────────────────────────── */
 
@@ -39,25 +40,7 @@ typedef struct {
   int kind;
   float lr, beta1, beta2, eps, weight_decay;
   int step;
-  float *m;         /* concatenated first moments (all params) */
-  float *v;         /* concatenated second moments (all params) */
-  int64_t total_numel; /* total param elements */
 } OptimState;
-
-/* ── Execution cache entry types ─────────────────────────────────────── */
-
-typedef struct {
-  int ep_idx;
-  PolyCompileMode mode;
-  PolySchedule *prep;
-} PrepCacheEntry;
-
-typedef struct {
-  int ep_idx;
-  PolyCompileMode mode;
-  PolyDeviceId device;
-  PolyCompiledPlan *exec;
-} ExecCacheEntry;
 
 /* ── Value-and-grad metadata (built lazily on first train call) ──────── */
 
@@ -66,6 +49,8 @@ typedef struct {
   PolyUOp *loss_out_buf;            /* BUFFER UOp for loss output */
   PolyUOp **grad_out_bufs;          /* [n_params] gradient BUFFER UOps */
   float **grad_datas;               /* [n_params] gradient host data */
+  PolyUOp **grad_uops;             /* [n_params] raw gradient UOp expressions */
+  PolyUOp *loss_value;             /* loss value UOp (pre-store) */
   float loss_data;                  /* scalar loss value */
 
   /* Cached slot indices (set after first prepare_step) */
@@ -73,6 +58,35 @@ typedef struct {
   int *grad_slots;                  /* [n_params] buf_slot indices for grads */
   bool slots_resolved;              /* true after first resolution */
 } VagState;
+
+/* ── Training state (optimizer graph, built lazily) ──────────────────── */
+
+typedef struct {
+  PolyUOp *combined_sink;           /* fwd+bwd+optimizer SINK */
+  PolyUOp *loss_out_buf;            /* BUFFER UOp for loss scalar output */
+  float loss_data;                  /* scalar loss value after step */
+
+  /* Moment buffers (Adam/AdamW only) */
+  PolyUOp **m_bufs;                /* [n_params] first moment BUFFER UOps */
+  PolyUOp **v_bufs;                /* [n_params] second moment BUFFER UOps */
+  int n_moment_bufs;
+
+  /* Moment host data (for initialization + set_device upload) */
+  float **m_datas;                 /* [n_params] first moment host data */
+  float **v_datas;                 /* [n_params] second moment host data */
+
+  /* Moment buffer handles (for bindings) */
+  PolyBufferHandle *m_handles;     /* [n_params] */
+  PolyBufferHandle *v_handles;     /* [n_params] */
+
+  /* Bias correction scalar buffers (Adam/AdamW only) */
+  PolyUOp *bc1_buf;               /* 1-element buffer for bc1 */
+  PolyUOp *bc2_buf;               /* 1-element buffer for bc2 */
+  float bc1_data;                  /* host value for bc1 */
+  float bc2_data;                  /* host value for bc2 */
+  PolyBufferHandle bc1_handle;
+  PolyBufferHandle bc2_handle;
+} TrainState;
 
 struct PolyInstance {
   PolyCtx *ctx;
@@ -91,18 +105,11 @@ struct PolyInstance {
   /* ── Buffer handles (one per named buffer, carries domain) ── */
   PolyBufferHandle *buf_handles;    /* [n_bufs], ptr + domain + nbytes */
 
-  /* ── Legacy fields (used by value_and_grad, to be migrated) ── */
-  PolyDeviceId device;
-  const PolyAllocator *allocator;
-  PrepCacheEntry *prep_cache;
-  int n_prep_cached;
-  int prep_cache_cap;
-  ExecCacheEntry *exec_cache;
-  int n_exec_cached;
-  int exec_cache_cap;
-
   /* ── Value-and-grad state (lazy, per-entrypoint -- currently only "loss") ── */
   VagState *vag;                    /* NULL until first value_and_grad call */
+
+  /* ── Training state (optimizer graph, built lazily) ── */
+  TrainState *train;                /* NULL until first train_step call */
 
   /* ── Optimizer state ── */
   OptimState optim;
@@ -128,113 +135,6 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
   return -1;
 }
 
-/* ── Cache helpers ───────────────────────────────────────────────────── */
-
-static PolySchedule *prep_cache_lookup(const PolyInstance *inst,
-                                            int ep_idx, PolyCompileMode mode) {
-  for (int i = 0; i < inst->n_prep_cached; i++)
-    if (inst->prep_cache[i].ep_idx == ep_idx &&
-        inst->prep_cache[i].mode == mode)
-      return inst->prep_cache[i].prep;
-  return NULL;
-}
-
-static void prep_cache_insert(PolyInstance *inst, int ep_idx,
-                               PolyCompileMode mode, PolySchedule *prep) {
-  if (inst->n_prep_cached >= inst->prep_cache_cap) {
-    int new_cap = inst->prep_cache_cap ? inst->prep_cache_cap * 2 : 4;
-    inst->prep_cache = realloc(inst->prep_cache, (size_t)new_cap * sizeof(PrepCacheEntry));
-    inst->prep_cache_cap = new_cap;
-  }
-  inst->prep_cache[inst->n_prep_cached++] = (PrepCacheEntry){
-    .ep_idx = ep_idx, .mode = mode, .prep = prep
-  };
-}
-
-static PolyCompiledPlan *exec_cache_lookup(const PolyInstance *inst,
-                                              int ep_idx, PolyCompileMode mode,
-                                              PolyDeviceId device) {
-  for (int i = 0; i < inst->n_exec_cached; i++)
-    if (inst->exec_cache[i].ep_idx == ep_idx &&
-        inst->exec_cache[i].mode == mode &&
-        inst->exec_cache[i].device == device)
-      return inst->exec_cache[i].exec;
-  return NULL;
-}
-
-static void exec_cache_insert(PolyInstance *inst, int ep_idx,
-                               PolyCompileMode mode, PolyDeviceId device,
-                               PolyCompiledPlan *exec) {
-  if (inst->n_exec_cached >= inst->exec_cache_cap) {
-    int new_cap = inst->exec_cache_cap ? inst->exec_cache_cap * 2 : 4;
-    inst->exec_cache = realloc(inst->exec_cache, (size_t)new_cap * sizeof(ExecCacheEntry));
-    inst->exec_cache_cap = new_cap;
-  }
-  inst->exec_cache[inst->n_exec_cached++] = (ExecCacheEntry){
-    .ep_idx = ep_idx, .mode = mode, .device = device, .exec = exec
-  };
-}
-
-/* ── Slot-data builder ───────────────────────────────────────────────── */
-/*
- * Build the slot_data[] array for poly_compiled_plan_run().
- * Maps each prepared step buf_slot to a host data pointer:
- *   - External slots: find the instance buffer whose buf_uop matches
- *   - IO bindings override by name
- *   - Intermediate slots: NULL (the executable step owns those)
- *   - Extra buffers (loss/grad): matched by buf_uop pointer
- */
-
-static void **build_slot_data(PolyInstance *inst,
-                               const PolySchedule *prep,
-                               PolyIOBinding *io, int n_io,
-                               /* extra buf_uop -> data mappings */
-                               PolyUOp **extra_uops, float **extra_datas, int n_extra) {
-  void **slot_data = calloc((size_t)prep->n_buf_slots, sizeof(void *));
-  if (!slot_data) return NULL;
-
-  for (int s = 0; s < prep->n_buf_slots; s++) {
-    if (prep->buf_slots[s].is_intermediate) continue;
-
-    PolyUOp *slot_uop = prep->buf_slots[s].buf_uop;
-
-    /* Check extra mappings first (loss/grad buffers) */
-    bool found = false;
-    for (int e = 0; e < n_extra; e++) {
-      if (extra_uops[e] == slot_uop) {
-        slot_data[s] = extra_datas[e];
-        found = true;
-        break;
-      }
-    }
-    if (found) continue;
-
-    /* Match to instance buffer by buf_uop pointer */
-    for (int b = 0; b < inst->n_bufs; b++) {
-      if (inst->bufs[b].buffer == slot_uop) {
-        slot_data[s] = inst->bufs[b].data;
-        break;
-      }
-    }
-  }
-
-  /* Override with IO bindings by name */
-  for (int i = 0; i < n_io; i++) {
-    if (!io[i].data) continue;
-    int bi = find_buf_by_name(inst, io[i].name);
-    if (bi < 0) continue;
-    PolyUOp *buf_uop = inst->bufs[bi].buffer;
-    for (int s = 0; s < prep->n_buf_slots; s++) {
-      if (prep->buf_slots[s].buf_uop == buf_uop) {
-        slot_data[s] = io[i].data;
-        break;
-      }
-    }
-  }
-
-  return slot_data;
-}
-
 /* ── Lifecycle ───────────────────────────────────────────────────────── */
 
 PolyInstance *poly_instance_from_ir(
@@ -250,14 +150,6 @@ PolyInstance *poly_instance_from_ir(
 
   PolyInstance *inst = calloc(1, sizeof(PolyInstance));
   inst->ctx = spec.ctx;
-
-  /* Default device and allocator */
-#ifdef __EMSCRIPTEN__
-  inst->device = POLY_DEVICE_WASM_JIT;
-#else
-  inst->device = POLY_DEVICE_CPU;
-#endif
-  inst->allocator = &POLY_CPU_ALLOCATOR;
 
   /* Copy buffers */
   inst->n_bufs = spec.n_bufs;
@@ -330,8 +222,26 @@ static void vag_free(VagState *vag, int n_params) {
     free(vag->grad_datas);
   }
   free(vag->grad_out_bufs);
+  free(vag->grad_uops);
   free(vag->grad_slots);
   free(vag);
+}
+
+static void train_free(TrainState *ts, int n_params) {
+  if (!ts) return;
+  if (ts->m_datas) {
+    for (int i = 0; i < n_params; i++) free(ts->m_datas[i]);
+    free(ts->m_datas);
+  }
+  if (ts->v_datas) {
+    for (int i = 0; i < n_params; i++) free(ts->v_datas[i]);
+    free(ts->v_datas);
+  }
+  free(ts->m_bufs);
+  free(ts->v_bufs);
+  free(ts->m_handles);
+  free(ts->v_handles);
+  free(ts);
 }
 
 void poly_instance_free(PolyInstance *inst) {
@@ -364,21 +274,13 @@ void poly_instance_free(PolyInstance *inst) {
 
   /* Free execution caches.
    * Order: exec cache first (holds pointers into prepared steps),
-   * then prepared cache, then context (arena-frees all UOps). */
-  for (int i = 0; i < inst->n_exec_cached; i++)
-    poly_compiled_plan_free(inst->exec_cache[i].exec);
-  free(inst->exec_cache);
-
-  for (int i = 0; i < inst->n_prep_cached; i++)
-    poly_schedule_free(inst->prep_cache[i].prep);
-  free(inst->prep_cache);
+   * then context (arena-frees all UOps). */
 
   /* Free value-and-grad state */
   vag_free(inst->vag, inst->n_params);
 
-  /* Free optimizer state */
-  free(inst->optim.m);
-  free(inst->optim.v);
+  /* Free training state */
+  train_free(inst->train, inst->n_params);
 
   /* Free context (arena-frees all UOps) */
   if (inst->ctx) poly_ctx_destroy(inst->ctx);
@@ -664,9 +566,53 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     };
   }
 
-  /* Legacy fields (used by value_and_grad path) */
-  inst->device = resolved;
-  inst->allocator = alloc;
+  /* Migrate training state moment handles if they exist */
+  if (inst->train) {
+    TrainState *ts = inst->train;
+    for (int i = 0; i < ts->n_moment_bufs; i++) {
+      /* m handles */
+      if (ts->m_handles[i].domain != resolved) {
+        void *mp = alloc->alloc(ts->m_handles[i].nbytes, alloc->dev_ctx);
+        if (mp) {
+          if (ts->m_datas[i])
+            alloc->copy_in(mp, ts->m_datas[i], ts->m_handles[i].nbytes, alloc->dev_ctx);
+          ts->m_handles[i] = (PolyBufferHandle){
+            .ptr = mp, .nbytes = ts->m_handles[i].nbytes,
+            .domain = resolved, .owned = true,
+          };
+        }
+      }
+      /* v handles */
+      if (ts->v_handles[i].domain != resolved) {
+        void *vp = alloc->alloc(ts->v_handles[i].nbytes, alloc->dev_ctx);
+        if (vp) {
+          if (ts->v_datas[i])
+            alloc->copy_in(vp, ts->v_datas[i], ts->v_handles[i].nbytes, alloc->dev_ctx);
+          ts->v_handles[i] = (PolyBufferHandle){
+            .ptr = vp, .nbytes = ts->v_handles[i].nbytes,
+            .domain = resolved, .owned = true,
+          };
+        }
+      }
+    }
+    /* Migrate bc scalar handles */
+    if (ts->bc1_handle.domain != resolved) {
+      void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
+      if (bp1) {
+        alloc->copy_in(bp1, &ts->bc1_data, sizeof(float), alloc->dev_ctx);
+        ts->bc1_handle = (PolyBufferHandle){
+          .ptr = bp1, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+        };
+      }
+      void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
+      if (bp2) {
+        alloc->copy_in(bp2, &ts->bc2_data, sizeof(float), alloc->dev_ctx);
+        ts->bc2_handle = (PolyBufferHandle){
+          .ptr = bp2, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+        };
+      }
+    }
+  }
 
   return 0;
 }
@@ -687,18 +633,51 @@ static PolyBufferBinding *build_bindings_for_realize(
   }
 
   /* Override with IO bindings by name.
-   * IO data is host memory -- for device-memory domains, the core handles
-   * upload inside poly_realize (future: explicit upload). For now, IO
-   * overrides point directly at host memory (works for CPU/INTERP/WASM). */
+   * For device-memory domains, upload host data into existing device buffer.
+   * For CPU/INTERP/WASM, point directly at host memory (zero-copy). */
   for (int i = 0; i < n_io; i++) {
     if (!io[i].data) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) continue;
-    bindings[bi].handle.ptr = io[i].data;
+    if (bindings[bi].handle.domain != POLY_DEVICE_CPU) {
+      /* Upload host IO data into device buffer */
+      const PolyBackendDesc *bd = poly_backend_get(bindings[bi].handle.domain);
+      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
+      if (a && a->copy_in) {
+        size_t nbytes = bindings[bi].handle.nbytes;
+        a->copy_in(bindings[bi].handle.ptr, io[i].data, nbytes, a->dev_ctx);
+      }
+      /* handle.ptr stays as device pointer */
+    } else {
+      bindings[bi].handle.ptr = io[i].data;
+    }
   }
 
   *n_out = n;
   return bindings;
+}
+
+/* Extended version: instance buffers + IO overrides + extra buffer/handle pairs.
+ * Used by value_and_grad to include vag output buffers in the bindings. */
+static PolyBufferBinding *build_bindings_extended(
+    PolyInstance *inst, int ep_idx, PolyIOBinding *io, int n_io,
+    PolyUOp **extra_bufs, PolyBufferHandle *extra_handles, int n_extra,
+    int *n_out) {
+  int n_base = 0;
+  PolyBufferBinding *base = build_bindings_for_realize(inst, ep_idx, io, n_io, &n_base);
+  if (!base) { *n_out = 0; return NULL; }
+
+  int n_total = n_base + n_extra;
+  PolyBufferBinding *all = realloc(base, (size_t)n_total * sizeof(PolyBufferBinding));
+  if (!all) { free(base); *n_out = 0; return NULL; }
+
+  for (int i = 0; i < n_extra; i++) {
+    all[n_base + i].buffer = extra_bufs[i];
+    all[n_base + i].handle = extra_handles[i];
+  }
+
+  *n_out = n_total;
+  return all;
 }
 
 int poly_instance_call(PolyInstance *inst, const char *entrypoint,
@@ -746,69 +725,13 @@ int poly_instance_set_optimizer(PolyInstance *inst, int kind,
   inst->optim.weight_decay = weight_decay;
   inst->optim.step = 0;
 
-  /* Free old state if re-configuring */
-  free(inst->optim.m);
-  free(inst->optim.v);
-  inst->optim.m = NULL;
-  inst->optim.v = NULL;
-
-  /* Allocate moment buffers for Adam/AdamW */
-  if (kind == POLY_OPTIM_ADAM || kind == POLY_OPTIM_ADAMW) {
-    int64_t total = 0;
-    for (int i = 0; i < inst->n_params; i++)
-      total += inst->bufs[inst->param_indices[i]].numel;
-    inst->optim.total_numel = total;
-    inst->optim.m = calloc(total, sizeof(float));
-    inst->optim.v = calloc(total, sizeof(float));
+  /* Invalidate training state (will be rebuilt lazily with new optimizer) */
+  if (inst->train) {
+    train_free(inst->train, inst->n_params);
+    inst->train = NULL;
   }
 
   return 0;
-}
-
-/* Apply optimizer update to param data in-place (CPU host side) */
-static void apply_optimizer_update(PolyInstance *inst,
-                                    int param_idx,
-                                    const float *grad,
-                                    int64_t numel,
-                                    int64_t moment_offset) {
-  NamedBuf *b = &inst->bufs[inst->param_indices[param_idx]];
-  float *param = b->data;
-  OptimState *o = &inst->optim;
-
-  switch (o->kind) {
-  case POLY_OPTIM_SGD:
-    for (int64_t j = 0; j < numel; j++)
-      param[j] -= o->lr * grad[j];
-    break;
-
-  case POLY_OPTIM_ADAM:
-  case POLY_OPTIM_ADAMW: {
-    float *m = o->m + moment_offset;
-    float *v = o->v + moment_offset;
-    float bc1 = 1.0f - powf(o->beta1, (float)(o->step));
-    float bc2 = 1.0f - powf(o->beta2, (float)(o->step));
-
-    for (int64_t j = 0; j < numel; j++) {
-      float g = grad[j];
-
-      /* Weight decay (AdamW decoupled) */
-      if (o->kind == POLY_OPTIM_ADAMW && o->weight_decay > 0.0f)
-        param[j] *= (1.0f - o->lr * o->weight_decay);
-
-      /* Update moments */
-      m[j] = o->beta1 * m[j] + (1.0f - o->beta1) * g;
-      v[j] = o->beta2 * v[j] + (1.0f - o->beta2) * g * g;
-
-      /* Bias-corrected update */
-      float m_hat = m[j] / bc1;
-      float v_hat = v[j] / bc2;
-      param[j] -= o->lr * m_hat / (sqrtf(v_hat) + o->eps);
-    }
-    break;
-  }
-  default:
-    break;
-  }
 }
 
 /* ── Value and Grad ──────────────────────────────────────────────────── */
@@ -853,6 +776,8 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   vag->grad_out_bufs = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
   vag->grad_datas = calloc((size_t)inst->n_params, sizeof(float *));
   vag->grad_slots = calloc((size_t)inst->n_params, sizeof(int));
+  vag->grad_uops = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
+  vag->loss_value = loss_value;
 
   /* Build output stores: loss + per-param gradients */
   int n_stores = inst->n_params + 1;
@@ -869,6 +794,10 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
     loss_flat = poly_reshape(inst->ctx, loss_value, one_shape, 1);
   }
   stores[0] = poly_store_val(inst->ctx, vag->loss_out_buf, loss_flat);
+
+  /* Save raw gradient UOps for optimizer graph construction */
+  for (int i = 0; i < inst->n_params; i++)
+    vag->grad_uops[i] = grads[i];
 
   /* Gradient output buffers */
   for (int i = 0; i < inst->n_params; i++) {
@@ -962,61 +891,225 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   if (ensure_vag_graph(inst, ep_idx) != 0) return -1;
   VagState *vag = inst->vag;
 
-  /* Use a synthetic cache key: ep_idx with VALUE_AND_GRAD mode.
-   * The combined_sink is different from the original entrypoint sink,
-   * so we use a dedicated cache entry. */
-
-  /* Lookup or build prepared step for the combined graph */
-  PolySchedule *prep = prep_cache_lookup(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD);
-  if (!prep) {
-    prep = poly_schedule_for(inst->ctx, vag->combined_sink, POLY_MODE_CALL);
-    if (!prep) {
-      fprintf(stderr, "poly_instance_value_and_grad: prepare failed\n");
-      return -1;
-    }
-    prep_cache_insert(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD, prep);
-
-    /* Resolve slot indices on first prepare */
-    if (resolve_vag_slots(inst, prep) != 0) return -1;
-  }
-
-  /* Lookup or build executable step */
-  PolyCompiledPlan *exec = exec_cache_lookup(inst, ep_idx,
-                                                POLY_MODE_VALUE_AND_GRAD,
-                                                inst->device);
-  if (!exec) {
-    exec = poly_compile_schedule(inst->ctx, prep, inst->device);
-    if (!exec) {
-      fprintf(stderr, "poly_instance_value_and_grad: lower failed\n");
-      return -1;
-    }
-    exec_cache_insert(inst, ep_idx, POLY_MODE_VALUE_AND_GRAD,
-                       inst->device, exec);
-  }
-
-  /* Build extra buf_uop -> data mappings for loss and grad outputs */
+  /* Build extra bindings for vag output buffers (loss + grads) */
   int n_extra = 1 + inst->n_params;
-  PolyUOp **extra_uops = malloc((size_t)n_extra * sizeof(PolyUOp *));
-  float **extra_datas = malloc((size_t)n_extra * sizeof(float *));
-  extra_uops[0] = vag->loss_out_buf;
-  extra_datas[0] = &vag->loss_data;
-  for (int i = 0; i < inst->n_params; i++) {
-    extra_uops[1 + i] = vag->grad_out_bufs[i];
-    extra_datas[1 + i] = vag->grad_datas[i];
+  PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
+  PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
+  if (!extra_bufs || !extra_handles) {
+    free(extra_bufs); free(extra_handles);
+    return -1;
   }
 
-  void **slot_data = build_slot_data(inst, prep, io, n_io,
-                                      extra_uops, extra_datas, n_extra);
-  free(extra_uops);
-  free(extra_datas);
-  if (!slot_data) return -1;
+  /* Loss output buffer -- always host-resident for readback */
+  extra_bufs[0] = vag->loss_out_buf;
+  extra_handles[0] = (PolyBufferHandle){
+    .ptr = &vag->loss_data, .nbytes = sizeof(float),
+    .domain = POLY_DEVICE_CPU, .owned = false,
+  };
 
-  int ret = poly_compiled_plan_run(exec, slot_data, prep->n_buf_slots,
-                                      NULL, 0);
-  free(slot_data);
+  /* Gradient output buffers -- host-resident for readback */
+  for (int i = 0; i < inst->n_params; i++) {
+    NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+    extra_bufs[1 + i] = vag->grad_out_bufs[i];
+    extra_handles[1 + i] = (PolyBufferHandle){
+      .ptr = vag->grad_datas[i],
+      .nbytes = (size_t)pb->numel * sizeof(float),
+      .domain = POLY_DEVICE_CPU, .owned = false,
+    };
+  }
+
+  /* Build combined bindings: instance buffers + IO + vag outputs */
+  int n_bindings = 0;
+  PolyBufferBinding *bindings = build_bindings_extended(
+    inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
+  free(extra_bufs);
+  free(extra_handles);
+  if (!bindings) return -1;
+
+  /* Route through core poly_realize -- caching is automatic */
+  int ret = poly_realize(inst->ctx, vag->combined_sink, bindings, n_bindings);
+  free(bindings);
   if (ret != 0) return ret;
 
   if (loss_out) *loss_out = vag->loss_data;
+  return 0;
+}
+
+/* ── Optimizer Graph Builder ─────────────────────────────────────────── */
+
+/* Build optimizer UOp graph (fwd+bwd+optimizer as a single combined SINK).
+ * Gradients are consumed directly by ASSIGN ops -- not materialized to
+ * separate output buffers (D1: no grad stores in optimizer SINK). */
+static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
+  if (inst->train) return 0;  /* already built */
+
+  /* Build fwd+bwd first (gives us loss_value and grad UOps) */
+  if (ensure_vag_graph(inst, loss_ep_idx) != 0) return -1;
+  VagState *vag = inst->vag;
+
+  PolyCtx *ctx = inst->ctx;
+  OptimState *o = &inst->optim;
+  int np = inst->n_params;
+
+  TrainState *ts = calloc(1, sizeof(TrainState));
+  if (!ts) return -1;
+
+  /* Loss output buffer (1 scalar, same as vag) */
+  PolyDType out_dt = poly_dtype_scalar(vag->loss_value->dtype);
+  if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
+  ts->loss_out_buf = poly_buffer(ctx, out_dt, 1);
+
+  /* Count SINK sources: loss_store + param assigns + moment assigns */
+  int has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
+  int n_sink_srcs = 1 + np;  /* loss_store + param assigns */
+  if (has_moments) n_sink_srcs += 2 * np;  /* + m assigns + v assigns */
+
+  PolyUOp **sink_srcs = calloc((size_t)n_sink_srcs, sizeof(PolyUOp *));
+  if (!sink_srcs) { train_free(ts, np); return -1; }
+
+  /* Loss store */
+  PolyUOp *loss_flat = vag->loss_value;
+  if (uop_numel(ctx, vag->loss_value) != 1) {
+    int64_t one_shape[1] = {1};
+    loss_flat = poly_reshape(ctx, vag->loss_value, one_shape, 1);
+  }
+  sink_srcs[0] = poly_store_val(ctx, ts->loss_out_buf, loss_flat);
+
+  /* Allocate moment buffers for Adam/AdamW */
+  if (has_moments) {
+    ts->m_bufs = calloc((size_t)np, sizeof(PolyUOp *));
+    ts->v_bufs = calloc((size_t)np, sizeof(PolyUOp *));
+    ts->m_datas = calloc((size_t)np, sizeof(float *));
+    ts->v_datas = calloc((size_t)np, sizeof(float *));
+    ts->m_handles = calloc((size_t)np, sizeof(PolyBufferHandle));
+    ts->v_handles = calloc((size_t)np, sizeof(PolyBufferHandle));
+    ts->n_moment_bufs = np;
+
+    /* Bias correction scalar buffers */
+    ts->bc1_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
+    ts->bc2_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
+    ts->bc1_data = 1.0f;  /* will be updated before each step */
+    ts->bc2_data = 1.0f;
+    ts->bc1_handle = (PolyBufferHandle){
+      .ptr = &ts->bc1_data, .nbytes = sizeof(float),
+      .domain = POLY_DEVICE_CPU, .owned = false,
+    };
+    ts->bc2_handle = (PolyBufferHandle){
+      .ptr = &ts->bc2_data, .nbytes = sizeof(float),
+      .domain = POLY_DEVICE_CPU, .owned = false,
+    };
+
+    for (int i = 0; i < np; i++) {
+      NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+      int64_t numel = pb->numel;
+
+      ts->m_bufs[i] = poly_buffer(ctx, POLY_FLOAT32, numel);
+      ts->v_bufs[i] = poly_buffer(ctx, POLY_FLOAT32, numel);
+
+      ts->m_datas[i] = calloc((size_t)numel, sizeof(float));
+      ts->v_datas[i] = calloc((size_t)numel, sizeof(float));
+
+      size_t nbytes = (size_t)numel * sizeof(float);
+      ts->m_handles[i] = (PolyBufferHandle){
+        .ptr = ts->m_datas[i], .nbytes = nbytes,
+        .domain = POLY_DEVICE_CPU, .owned = false,
+      };
+      ts->v_handles[i] = (PolyBufferHandle){
+        .ptr = ts->v_datas[i], .nbytes = nbytes,
+        .domain = POLY_DEVICE_CPU, .owned = false,
+      };
+    }
+  }
+
+  /* Build optimizer update graph for each parameter */
+  PolyUOp *lr_const = poly_const_float(ctx, (double)o->lr);
+  int si = 1;  /* sink_srcs index (0 = loss_store) */
+
+  for (int i = 0; i < np; i++) {
+    PolyUOp *param_buf = inst->bufs[inst->param_indices[i]].buffer;
+    PolyUOp *grad = vag->grad_uops[i];
+
+    switch (o->kind) {
+    case POLY_OPTIM_SGD: {
+      /* p_new = p - lr * grad */
+      PolyUOp *update = poly_alu2(ctx, POLY_OP_MUL, lr_const, grad);
+      PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, param_buf, update);
+      sink_srcs[si++] = poly_assign(ctx, param_buf, p_new);
+      break;
+    }
+    case POLY_OPTIM_ADAM:
+    case POLY_OPTIM_ADAMW: {
+      PolyUOp *m_buf = ts->m_bufs[i];
+      PolyUOp *v_buf = ts->v_bufs[i];
+      NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+      int64_t numel = pb->numel;
+
+      /* Expand scalar bc buffers to match param shape */
+      int64_t param_shape[1] = { numel };
+      PolyUOp *bc1_expanded = poly_expand(ctx, ts->bc1_buf, param_shape, 1);
+      PolyUOp *bc2_expanded = poly_expand(ctx, ts->bc2_buf, param_shape, 1);
+
+      PolyUOp *beta1 = poly_const_float(ctx, (double)o->beta1);
+      PolyUOp *beta2 = poly_const_float(ctx, (double)o->beta2);
+      PolyUOp *one_minus_b1 = poly_const_float(ctx, 1.0 - (double)o->beta1);
+      PolyUOp *one_minus_b2 = poly_const_float(ctx, 1.0 - (double)o->beta2);
+      PolyUOp *eps = poly_const_float(ctx, (double)o->eps);
+
+      /* AdamW: decoupled weight decay on param first */
+      PolyUOp *p_cur = param_buf;
+      if (o->kind == POLY_OPTIM_ADAMW && o->weight_decay > 0.0f) {
+        PolyUOp *wd_factor = poly_const_float(ctx,
+          1.0 - (double)o->lr * (double)o->weight_decay);
+        p_cur = poly_alu2(ctx, POLY_OP_MUL, param_buf, wd_factor);
+      }
+
+      /* m_new = beta1 * m + (1 - beta1) * grad */
+      PolyUOp *m_new = poly_alu2(ctx, POLY_OP_ADD,
+        poly_alu2(ctx, POLY_OP_MUL, beta1, m_buf),
+        poly_alu2(ctx, POLY_OP_MUL, one_minus_b1, grad));
+
+      /* v_new = beta2 * v + (1 - beta2) * grad * grad */
+      PolyUOp *g_sq = poly_alu2(ctx, POLY_OP_MUL, grad, grad);
+      PolyUOp *v_new = poly_alu2(ctx, POLY_OP_ADD,
+        poly_alu2(ctx, POLY_OP_MUL, beta2, v_buf),
+        poly_alu2(ctx, POLY_OP_MUL, one_minus_b2, g_sq));
+
+      /* Bias-corrected: m_hat = m_new * bc1, v_hat = v_new * bc2 */
+      PolyUOp *m_hat = poly_alu2(ctx, POLY_OP_MUL, m_new, bc1_expanded);
+      PolyUOp *v_hat = poly_alu2(ctx, POLY_OP_MUL, v_new, bc2_expanded);
+
+      /* p_new = p_cur - lr * m_hat / (sqrt(v_hat) + eps) */
+      PolyUOp *v_sqrt = poly_alu1(ctx, POLY_OP_SQRT, v_hat);
+      PolyUOp *denom = poly_alu2(ctx, POLY_OP_ADD, v_sqrt, eps);
+      PolyUOp *step_val = poly_alu2(ctx, POLY_OP_MUL, lr_const,
+        poly_alu2(ctx, POLY_OP_MUL, m_hat,
+          poly_alu1(ctx, POLY_OP_RECIPROCAL, denom)));
+      PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, p_cur, step_val);
+
+      /* ASSIGN all three: param, m, v */
+      sink_srcs[si++] = poly_assign(ctx, param_buf, p_new);
+      sink_srcs[1 + np + 2*i] = poly_assign(ctx, m_buf, m_new);
+      sink_srcs[1 + np + 2*i + 1] = poly_assign(ctx, v_buf, v_new);
+      break;
+    }
+    default:
+      fprintf(stderr, "ensure_train_graph: unsupported optimizer %d\n", o->kind);
+      free(sink_srcs); train_free(ts, np);
+      return -1;
+    }
+  }
+
+  /* For Adam/AdamW, si covered param assigns (1..np), moment assigns
+   * were written directly to their positions. Verify: */
+  if (has_moments) {
+    /* param assigns: indices 1..np (written by si++)
+     * moment assigns: indices (1+np)..(1+np+2*np-1) (written directly) */
+  }
+
+  ts->combined_sink = poly_sink_n(ctx, sink_srcs, n_sink_srcs);
+  free(sink_srcs);
+
+  inst->train = ts;
   return 0;
 }
 
@@ -1031,23 +1124,91 @@ int poly_instance_train_step(PolyInstance *inst,
     return -1;
   }
 
-  /* Run value_and_grad for the "loss" entrypoint */
-  int ret = poly_instance_value_and_grad(inst, "loss", io, n_io, loss_out);
-  if (ret != 0) return ret;
+  /* Find loss entrypoint */
+  int ep_idx = find_entrypoint(inst, "loss");
+  if (ep_idx < 0) {
+    fprintf(stderr, "poly_instance_train_step: no 'loss' entrypoint\n");
+    return -1;
+  }
 
-  /* Update instance "loss" buffer so consumers see the current value */
+  /* Build combined fwd+bwd+optimizer graph lazily */
+  if (ensure_train_graph(inst, ep_idx) != 0) return -1;
+  TrainState *ts = inst->train;
+  OptimState *o = &inst->optim;
+  int np = inst->n_params;
+
+  /* Update bias correction scalars (Adam/AdamW) */
+  o->step++;
+  if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
+    float bc1 = 1.0f / (1.0f - powf(o->beta1, (float)o->step));
+    float bc2 = 1.0f / (1.0f - powf(o->beta2, (float)o->step));
+
+    /* Device-aware update (D2) */
+    if (ts->bc1_handle.domain != POLY_DEVICE_CPU) {
+      const PolyBackendDesc *bd = poly_backend_get(ts->bc1_handle.domain);
+      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
+      if (a && a->copy_in) {
+        a->copy_in(ts->bc1_handle.ptr, &bc1, sizeof(float), a->dev_ctx);
+        a->copy_in(ts->bc2_handle.ptr, &bc2, sizeof(float), a->dev_ctx);
+      }
+    } else {
+      ts->bc1_data = bc1;
+      ts->bc2_data = bc2;
+    }
+  }
+
+  /* Build bindings: instance buffers + IO + loss output + moment buffers + bc scalars */
+  int n_extra = 1;  /* loss output */
+  if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW)
+    n_extra += 2 * np + 2;  /* m + v + bc1 + bc2 */
+
+  PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
+  PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
+  if (!extra_bufs || !extra_handles) {
+    free(extra_bufs); free(extra_handles);
+    return -1;
+  }
+
+  /* Loss output */
+  extra_bufs[0] = ts->loss_out_buf;
+  extra_handles[0] = (PolyBufferHandle){
+    .ptr = &ts->loss_data, .nbytes = sizeof(float),
+    .domain = POLY_DEVICE_CPU, .owned = false,
+  };
+
+  /* Moment buffers + bc scalars for Adam/AdamW */
+  if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
+    for (int i = 0; i < np; i++) {
+      extra_bufs[1 + i] = ts->m_bufs[i];
+      extra_handles[1 + i] = ts->m_handles[i];
+      extra_bufs[1 + np + i] = ts->v_bufs[i];
+      extra_handles[1 + np + i] = ts->v_handles[i];
+    }
+    extra_bufs[1 + 2*np] = ts->bc1_buf;
+    extra_handles[1 + 2*np] = ts->bc1_handle;
+    extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
+    extra_handles[1 + 2*np + 1] = ts->bc2_handle;
+  }
+
+  int n_bindings = 0;
+  PolyBufferBinding *bindings = build_bindings_extended(
+    inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
+  free(extra_bufs);
+  free(extra_handles);
+  if (!bindings) return -1;
+
+  /* Single poly_realize call: fwd + bwd + optimizer */
+  int ret = poly_realize(inst->ctx, ts->combined_sink, bindings, n_bindings);
+  free(bindings);
+  if (ret != 0) { o->step--; return ret; }
+
+  /* Read back loss */
+  if (loss_out) *loss_out = ts->loss_data;
+
+  /* Update instance "loss" named buffer for consumers */
   int loss_named_idx = find_buf_by_name(inst, "loss");
   if (loss_named_idx >= 0 && inst->bufs[loss_named_idx].data)
-    inst->bufs[loss_named_idx].data[0] = inst->vag->loss_data;
-
-  /* Apply optimizer updates (host-side) */
-  inst->optim.step++;
-  int64_t moment_offset = 0;
-  for (int i = 0; i < inst->n_params; i++) {
-    NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-    apply_optimizer_update(inst, i, inst->vag->grad_datas[i], pb->numel, moment_offset);
-    moment_offset += pb->numel;
-  }
+    inst->bufs[loss_named_idx].data[0] = ts->loss_data;
 
   return 0;
 }

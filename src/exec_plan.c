@@ -39,8 +39,9 @@ PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
   poly_collect_buf_order(sink, buf_order_orig, &n_bufs_orig, dfs_visited, &n_dfs);
 
   /* Identify output buffers */
-  PolyUOp *output_bufs[POLY_MAX_REALIZE_BUFS];
-  int n_output_bufs = poly_collect_output_buffers_in_sink(sink, output_bufs, POLY_MAX_REALIZE_BUFS);
+  int max_out = n_bufs_orig > 0 ? n_bufs_orig : POLY_MAX_REALIZE_BUFS;
+  PolyUOp **output_bufs = calloc((size_t)max_out, sizeof(PolyUOp *));
+  int n_output_bufs = poly_collect_output_buffers_in_sink(sink, output_bufs, max_out);
   (void)n_output_bufs;
 
   /* --- Extract BIND defaults and strip ---------------------------------- */
@@ -60,7 +61,7 @@ PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
   /* --- Schedule --------------------------------------------------------- */
   PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
   if (sr.n_kernels < 1) {
-    free(buf_order_orig); free(buf_order_post);
+    free(buf_order_orig); free(buf_order_post); free(output_bufs);
     poly_schedule_result_free(&sr);
     return NULL;
   }
@@ -68,7 +69,7 @@ PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
   /* --- Allocate prepared step ------------------------------------------- */
   PolySchedule *ps = calloc(1, sizeof(PolySchedule));
   if (!ps) {
-    free(buf_order_orig); free(buf_order_post);
+    free(buf_order_orig); free(buf_order_post); free(output_bufs);
     poly_schedule_result_free(&sr);
     return NULL;
   }
@@ -183,12 +184,14 @@ PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
 
   free(buf_order_orig);
   free(buf_order_post);
+  free(output_bufs);
   poly_schedule_result_free(&sr);
   return ps;
 
 cleanup:
   free(buf_order_orig);
   free(buf_order_post);
+  free(output_bufs);
   poly_schedule_free(ps);
   poly_schedule_result_free(&sr);
   return NULL;
@@ -714,6 +717,9 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
   const PolyBackendDesc *backend = poly_backend_get(plan->device);
   if (!backend) return -1;
 
+  int ret = 0;
+  void **slot_to_data = NULL;
+
   /* ── Allocate per-invocation intermediates ────────────────────────── */
   int n_inter = 0;
   for (int i = 0; i < sched->n_buf_slots; i++)
@@ -729,7 +735,7 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
       size_t nbytes = (size_t)sched->buf_slots[i].nbytes;
       if (nbytes == 0) nbytes = sizeof(float);
       void *ptr = plan->allocator->alloc(nbytes, plan->allocator->dev_ctx);
-      if (!ptr) goto free_intermediates;
+      if (!ptr) goto cleanup_inter;
       inter_handles[idx] = (PolyBufferHandle){
         .ptr = ptr, .nbytes = nbytes,
         .domain = plan->device, .owned = true,
@@ -756,11 +762,13 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
   }
 
   /* ── Build slot_to_data ───────────────────────────────────────────── */
-  void *slot_to_data[POLY_MAX_REALIZE_BUFS];
-  memset(slot_to_data, 0, sizeof(slot_to_data));
+  int n_total_slots = sched->n_buf_slots;
+  slot_to_data = calloc((size_t)(n_total_slots > 0 ? n_total_slots : 1),
+                        sizeof(void *));
+  if (!slot_to_data) { ret = -1; goto cleanup_inter; }
 
   /* Fill external slots from caller data */
-  for (int i = 0; i < sched->n_buf_slots && i < POLY_MAX_REALIZE_BUFS; i++) {
+  for (int i = 0; i < n_total_slots; i++) {
     if (!sched->buf_slots[i].is_intermediate && i < n_slots && slot_data[i])
       slot_to_data[i] = slot_data[i];
   }
@@ -768,7 +776,7 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
   /* Fill intermediate slots from per-run handles */
   {
     int idx = 0;
-    for (int i = 0; i < sched->n_buf_slots && i < POLY_MAX_REALIZE_BUFS; i++) {
+    for (int i = 0; i < n_total_slots; i++) {
       if (sched->buf_slots[i].is_intermediate && idx < n_inter) {
         slot_to_data[i] = inter_handles[idx].ptr;
         idx++;
@@ -794,7 +802,6 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
   }
 
   /* ── Execute runners in exec_order via backend vtable ─────────────── */
-  int ret = 0;
   for (int s = 0; s < sched->n_items && ret == 0; s++) {
     int k = sched->exec_order[s];
     PolyRunner *runner = &plan->runners[k];
@@ -812,7 +819,7 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
 
     for (int i = 0; i < runner->n_params; i++) {
       int slot = runner->param_to_slot[i];
-      if (slot >= 0 && slot < POLY_MAX_REALIZE_BUFS)
+      if (slot >= 0 && slot < n_total_slots)
         args[i] = slot_to_data[slot];
       if (!args[i]) {
         fprintf(stderr, "polygrad: plan_run: missing data for param %d "
@@ -827,8 +834,9 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
     }
   }
 
-  /* ── Free per-invocation intermediates ────────────────────────────── */
-free_intermediates:
+  /* ── Free per-invocation resources ───────────────────────────────── */
+cleanup_inter:
+  free(slot_to_data);
   if (inter_handles) {
     for (int i = 0; i < n_inter; i++) {
       if (inter_handles[i].ptr)

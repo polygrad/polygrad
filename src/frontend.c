@@ -3094,13 +3094,16 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
 
 int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
                      PolyUOp **buffers, void **datas, int n) {
-  PolyBufferBinding bindings[POLY_MAX_REALIZE_BUFS];
-  if (n > POLY_MAX_REALIZE_BUFS) n = POLY_MAX_REALIZE_BUFS;
+  PolyBufferBinding *bindings = calloc((size_t)(n > 0 ? n : 1),
+                                       sizeof(PolyBufferBinding));
+  if (!bindings) return -1;
   for (int i = 0; i < n; i++) {
     bindings[i].buffer = buffers[i];
     bindings[i].handle = (PolyBufferHandle){ datas[i], 0, POLY_DEVICE_CPU, false };
   }
-  return poly_realize(ctx, tensor_sink, bindings, n);
+  int ret = poly_realize(ctx, tensor_sink, bindings, n);
+  free(bindings);
+  return ret;
 }
 
 /* ── Stateful realize builder ────────────────────────────────────────── */
