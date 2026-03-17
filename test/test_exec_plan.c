@@ -717,3 +717,117 @@ TEST(exec_plan, parity_multikernel_reduce_chain) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ── Phase 5: Persistent workspace ───────────────────────────────────── */
+
+TEST(exec_plan, workspace_reuse) {
+  /* Run same plan 100 times with different data. Persistent intermediates
+   * are zeroed each call (reduce accumulators). No per-call allocations. */
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
+
+  int64_t axes[] = {0};
+  int64_t one_sh[] = {1};
+  int64_t exp_sh[] = {N};
+  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *s1 = poly_reshape(ctx, s, one_sh, 1);
+  PolyUOp *se = poly_expand(ctx, s1, exp_sh, 1);
+  PolyUOp *c = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, se, b, poly_arg_none());
+  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, c, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
+
+  PolySchedule *ps = poly_schedule_for(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+
+  PolyCompiledPlan *plan = poly_compile_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(plan != NULL);
+
+  /* Verify persistent intermediates were allocated */
+  int n_inter = 0;
+  for (int i = 0; i < ps->n_buf_slots; i++)
+    if (ps->buf_slots[i].is_intermediate) n_inter++;
+  ASSERT_TRUE(n_inter > 0);
+  ASSERT_INT_EQ(plan->n_intermediates, n_inter);
+
+  /* Run 100 times with different multipliers */
+  for (int iter = 0; iter < 100; iter++) {
+    float da[8], db[8], dout[8];
+    float mult = (float)(iter + 1);
+    for (int i = 0; i < N; i++) {
+      da[i] = (float)(i + 1) * mult;
+      db[i] = (float)(i + 10);
+    }
+    memset(dout, 0, sizeof(dout));
+
+    void *slot_data[16] = {0};
+    for (int i = 0; i < ps->n_buf_slots; i++) {
+      if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
+      else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
+      else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+    }
+
+    int ret = poly_compiled_plan_run(plan, slot_data, ps->n_buf_slots, NULL, 0);
+    ASSERT_INT_EQ(ret, 0);
+
+    /* sum(1..8 * mult) = 36*mult, out[i] = 36*mult + (i+10) */
+    float expected_sum = 36.0f * mult;
+    for (int i = 0; i < N; i++)
+      ASSERT_FLOAT_EQ(dout[i], expected_sum + (float)(i + 10), 1e-3);
+  }
+
+  poly_compiled_plan_free(plan);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(exec_plan, workspace_reduce_zeroed) {
+  /* Verify reduce accumulators are zero at start of each run despite
+   * persistent intermediates. Two consecutive reduce runs must each
+   * produce correct independent results. */
+  PolyCtx *ctx = poly_ctx_new();
+  int N = 4;
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
+
+  int64_t axes[] = {0};
+  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, s, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
+
+  PolySchedule *ps = poly_schedule_for(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+
+  PolyCompiledPlan *plan = poly_compile_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(plan != NULL);
+
+  /* Run 1: sum([1,2,3,4]) = 10 */
+  float da1[] = {1, 2, 3, 4};
+  float dout1 = 0;
+  void *slot1[8] = {0};
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a) slot1[i] = da1;
+    else if (ps->buf_slots[i].buf_uop == out) slot1[i] = &dout1;
+  }
+  ASSERT_INT_EQ(poly_compiled_plan_run(plan, slot1, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_FLOAT_EQ(dout1, 10.0f, 1e-6);
+
+  /* Run 2: sum([10,20,30,40]) = 100, NOT 110 (accumulated from run 1) */
+  float da2[] = {10, 20, 30, 40};
+  float dout2 = 0;
+  void *slot2[8] = {0};
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a) slot2[i] = da2;
+    else if (ps->buf_slots[i].buf_uop == out) slot2[i] = &dout2;
+  }
+  ASSERT_INT_EQ(poly_compiled_plan_run(plan, slot2, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_FLOAT_EQ(dout2, 100.0f, 1e-5);
+
+  poly_compiled_plan_free(plan);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}

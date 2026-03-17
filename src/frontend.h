@@ -114,6 +114,13 @@ void poly_realize_begin(PolyCtx *ctx);
 void poly_realize_bind(PolyCtx *ctx, PolyUOp *buffer, void *data);
 int  poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink);
 
+/* Get (or create) the compiled plan for a tensor-level SINK on a device.
+ * Does schedule cache lookup + plan cache lookup, creating on miss.
+ * The returned plan is cache-owned; caller must NOT free it.
+ * Returns NULL on error. */
+PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink,
+                                PolyDeviceId device);
+
 /* ── WASM kernel rendering (for browser execution) ───────────────────── */
 
 /* Render a tensor SINK to a WASM binary module.

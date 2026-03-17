@@ -2208,6 +2208,30 @@ static void **build_slot_data_from_bindings(PolyCtx *ctx, const PolySchedule *sc
   return slot_data;
 }
 
+PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink,
+                                PolyDeviceId device) {
+  if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) return NULL;
+
+  uint32_t hash = poly_structural_hash(tensor_sink)
+                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+
+  PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
+  if (!sched) {
+    sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
+    if (!sched) return NULL;
+    r_sched_put(ctx, tensor_sink, hash, POLY_MODE_CALL, sched);
+  }
+
+  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device);
+  if (!plan) {
+    plan = poly_compile_schedule(ctx, sched, device);
+    if (!plan) return NULL;
+    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, plan);
+  }
+
+  return plan;
+}
+
 int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
                 PolyBufferBinding *bindings, int n_bindings) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {

@@ -88,6 +88,22 @@ typedef struct {
   PolyBufferHandle bc2_handle;
 } TrainState;
 
+/* ── Cached slot table (avoids O(n_slots×n_bufs) scan each call) ────── */
+
+typedef struct {
+  PolyCompiledPlan *plan;      /* cache-owned, do NOT free */
+  void **slot_data;            /* [n_slots], pre-filled */
+  int n_slots;
+
+  /* Mapping: slot index -> instance buf index, or -1 */
+  int *slot_to_buf;
+
+  /* IO fast-patch: which slots to update from IO bindings */
+  int *io_slot_indices;        /* [n_io] */
+  int *io_buf_indices;         /* [n_io] instance buf index */
+  int n_io;
+} SlotCache;
+
 struct PolyInstance {
   PolyCtx *ctx;
 
@@ -113,7 +129,83 @@ struct PolyInstance {
 
   /* ── Optimizer state ── */
   OptimState optim;
+
+  /* ── Cached slot tables (one per entrypoint path) ── */
+  SlotCache *call_cache;            /* for poly_instance_call */
+  SlotCache *train_cache;           /* for poly_instance_train_step */
 };
+
+/* ── Slot table cache ────────────────────────────────────────────────── */
+
+static void slot_cache_free(SlotCache *c) {
+  if (!c) return;
+  free(c->slot_data);
+  free(c->slot_to_buf);
+  free(c->io_slot_indices);
+  free(c->io_buf_indices);
+  free(c);
+}
+
+/* Build a cached slot table for a given sink + device.
+ * Maps each schedule slot to the instance buf index whose buffer UOp matches.
+ * extra_bufs/extra_ptrs provide non-instance buffers (loss output, moments, etc.).
+ * Returns NULL on error. The plan is cache-owned; the SlotCache does NOT free it. */
+static SlotCache *slot_cache_build(
+    PolyInstance *inst, PolyUOp *sink, PolyDeviceId device,
+    PolyUOp **extra_bufs, void **extra_ptrs, int n_extra) {
+  PolyCompiledPlan *plan = poly_get_plan(inst->ctx, sink, device);
+  if (!plan) return NULL;
+  PolySchedule *sched = plan->schedule;
+
+  SlotCache *c = calloc(1, sizeof(SlotCache));
+  c->plan = plan;
+  c->n_slots = sched->n_buf_slots;
+  c->slot_data = calloc((size_t)(c->n_slots > 0 ? c->n_slots : 1), sizeof(void *));
+  c->slot_to_buf = malloc((size_t)(c->n_slots > 0 ? c->n_slots : 1) * sizeof(int));
+
+  /* Build slot -> instance buf mapping and fill initial slot_data */
+  for (int s = 0; s < c->n_slots; s++) {
+    c->slot_to_buf[s] = -1;
+    if (sched->buf_slots[s].is_intermediate) continue;
+    PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
+
+    /* Check instance buffers */
+    for (int j = 0; j < inst->n_bufs; j++) {
+      if (inst->bufs[j].buffer == slot_uop) {
+        c->slot_to_buf[s] = j;
+        c->slot_data[s] = inst->buf_handles[j].ptr;
+        break;
+      }
+    }
+
+    /* Check extra buffers */
+    if (c->slot_to_buf[s] < 0 && extra_bufs) {
+      for (int j = 0; j < n_extra; j++) {
+        if (extra_bufs[j] == slot_uop) {
+          c->slot_data[s] = extra_ptrs[j];
+          break;
+        }
+      }
+    }
+  }
+
+  /* Build IO fast-patch table: which slots correspond to INPUT/TARGET */
+  int max_io = inst->n_bufs;
+  c->io_slot_indices = malloc((size_t)max_io * sizeof(int));
+  c->io_buf_indices = malloc((size_t)max_io * sizeof(int));
+  c->n_io = 0;
+  for (int s = 0; s < c->n_slots; s++) {
+    int bi = c->slot_to_buf[s];
+    if (bi >= 0 && (inst->bufs[bi].role == POLY_ROLE_INPUT ||
+                    inst->bufs[bi].role == POLY_ROLE_TARGET)) {
+      c->io_slot_indices[c->n_io] = s;
+      c->io_buf_indices[c->n_io] = bi;
+      c->n_io++;
+    }
+  }
+
+  return c;
+}
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -281,6 +373,10 @@ void poly_instance_free(PolyInstance *inst) {
 
   /* Free training state */
   train_free(inst->train, inst->n_params);
+
+  /* Free slot caches (plans are cache-owned, not freed here) */
+  slot_cache_free(inst->call_cache);
+  slot_cache_free(inst->train_cache);
 
   /* Free context (arena-frees all UOps) */
   if (inst->ctx) poly_ctx_destroy(inst->ctx);
@@ -486,6 +582,10 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
 int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   if (!inst) return -1;
 
+  /* Invalidate slot caches (buffer handles change domain) */
+  slot_cache_free(inst->call_cache);  inst->call_cache = NULL;
+  slot_cache_free(inst->train_cache); inst->train_cache = NULL;
+
   /* Resolve AUTO */
   PolyDeviceId resolved = device;
   if (resolved == POLY_DEVICE_AUTO) {
@@ -690,17 +790,39 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
     return -1;
   }
 
-  /* Build bindings from instance buffers + IO overrides */
-  int n_bindings = 0;
-  PolyBufferBinding *bindings = build_bindings_for_realize(
-    inst, ep_idx, io, n_io, &n_bindings);
-  if (!bindings) return -1;
+  PolyUOp *sink = inst->entrypoints[ep_idx].sink;
+  PolyDeviceId device = inst->buf_handles[0].domain;
 
-  /* Call the core -- device inferred, caching automatic */
-  int ret = poly_realize(inst->ctx, inst->entrypoints[ep_idx].sink,
-                          bindings, n_bindings);
-  free(bindings);
-  return ret;
+  /* Build cached slot table on first call (or after invalidation) */
+  SlotCache *c = inst->call_cache;
+  if (!c) {
+    inst->call_cache = slot_cache_build(inst, sink, device, NULL, NULL, 0);
+    c = inst->call_cache;
+    if (!c) return -1;
+  }
+
+  /* Patch IO slots by name */
+  for (int i = 0; i < n_io; i++) {
+    if (!io[i].data || !io[i].name) continue;
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (bi < 0) continue;
+    if (inst->buf_handles[bi].domain != POLY_DEVICE_CPU) {
+      const PolyBackendDesc *bd = poly_backend_get(inst->buf_handles[bi].domain);
+      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
+      if (a && a->copy_in)
+        a->copy_in(inst->buf_handles[bi].ptr, io[i].data,
+                   inst->buf_handles[bi].nbytes, a->dev_ctx);
+    } else {
+      for (int j = 0; j < c->n_io; j++) {
+        if (c->io_buf_indices[j] == bi) {
+          c->slot_data[c->io_slot_indices[j]] = io[i].data;
+          break;
+        }
+      }
+    }
+  }
+
+  return poly_compiled_plan_run(c->plan, c->slot_data, c->n_slots, NULL, 0);
 }
 
 /* ── Convenience wrapper ─────────────────────────────────────────────── */
@@ -725,11 +847,13 @@ int poly_instance_set_optimizer(PolyInstance *inst, int kind,
   inst->optim.weight_decay = weight_decay;
   inst->optim.step = 0;
 
-  /* Invalidate training state (will be rebuilt lazily with new optimizer) */
+  /* Invalidate training state and slot cache (will be rebuilt lazily) */
   if (inst->train) {
     train_free(inst->train, inst->n_params);
     inst->train = NULL;
   }
+  slot_cache_free(inst->train_cache);
+  inst->train_cache = NULL;
 
   return 0;
 }
@@ -1157,49 +1281,67 @@ int poly_instance_train_step(PolyInstance *inst,
     }
   }
 
-  /* Build bindings: instance buffers + IO + loss output + moment buffers + bc scalars */
-  int n_extra = 1;  /* loss output */
-  if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW)
-    n_extra += 2 * np + 2;  /* m + v + bc1 + bc2 */
+  /* Build cached slot table on first call */
+  SlotCache *c = inst->train_cache;
+  if (!c) {
+    int n_extra = 1;  /* loss output */
+    if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW)
+      n_extra += 2 * np + 2;  /* m + v + bc1 + bc2 */
 
-  PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
-  PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
-  if (!extra_bufs || !extra_handles) {
-    free(extra_bufs); free(extra_handles);
-    return -1;
-  }
-
-  /* Loss output */
-  extra_bufs[0] = ts->loss_out_buf;
-  extra_handles[0] = (PolyBufferHandle){
-    .ptr = &ts->loss_data, .nbytes = sizeof(float),
-    .domain = POLY_DEVICE_CPU, .owned = false,
-  };
-
-  /* Moment buffers + bc scalars for Adam/AdamW */
-  if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
-    for (int i = 0; i < np; i++) {
-      extra_bufs[1 + i] = ts->m_bufs[i];
-      extra_handles[1 + i] = ts->m_handles[i];
-      extra_bufs[1 + np + i] = ts->v_bufs[i];
-      extra_handles[1 + np + i] = ts->v_handles[i];
+    PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
+    void **extra_ptrs = malloc((size_t)n_extra * sizeof(void *));
+    if (!extra_bufs || !extra_ptrs) {
+      free(extra_bufs); free(extra_ptrs);
+      o->step--;
+      return -1;
     }
-    extra_bufs[1 + 2*np] = ts->bc1_buf;
-    extra_handles[1 + 2*np] = ts->bc1_handle;
-    extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
-    extra_handles[1 + 2*np + 1] = ts->bc2_handle;
+
+    extra_bufs[0] = ts->loss_out_buf;
+    extra_ptrs[0] = &ts->loss_data;
+    if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
+      for (int i = 0; i < np; i++) {
+        extra_bufs[1 + i] = ts->m_bufs[i];
+        extra_ptrs[1 + i] = ts->m_handles[i].ptr;
+        extra_bufs[1 + np + i] = ts->v_bufs[i];
+        extra_ptrs[1 + np + i] = ts->v_handles[i].ptr;
+      }
+      extra_bufs[1 + 2*np] = ts->bc1_buf;
+      extra_ptrs[1 + 2*np] = &ts->bc1_data;
+      extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
+      extra_ptrs[1 + 2*np + 1] = &ts->bc2_data;
+    }
+
+    PolyDeviceId device = inst->buf_handles[0].domain;
+    inst->train_cache = slot_cache_build(inst, ts->combined_sink, device,
+                                          extra_bufs, extra_ptrs, n_extra);
+    free(extra_bufs);
+    free(extra_ptrs);
+    c = inst->train_cache;
+    if (!c) { o->step--; return -1; }
   }
 
-  int n_bindings = 0;
-  PolyBufferBinding *bindings = build_bindings_extended(
-    inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
-  free(extra_bufs);
-  free(extra_handles);
-  if (!bindings) return -1;
+  /* Patch IO slots */
+  for (int i = 0; i < n_io; i++) {
+    if (!io[i].data || !io[i].name) continue;
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (bi < 0) continue;
+    if (inst->buf_handles[bi].domain != POLY_DEVICE_CPU) {
+      const PolyBackendDesc *bd = poly_backend_get(inst->buf_handles[bi].domain);
+      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
+      if (a && a->copy_in)
+        a->copy_in(inst->buf_handles[bi].ptr, io[i].data,
+                   inst->buf_handles[bi].nbytes, a->dev_ctx);
+    } else {
+      for (int j = 0; j < c->n_io; j++) {
+        if (c->io_buf_indices[j] == bi) {
+          c->slot_data[c->io_slot_indices[j]] = io[i].data;
+          break;
+        }
+      }
+    }
+  }
 
-  /* Single poly_realize call: fwd + bwd + optimizer */
-  int ret = poly_realize(inst->ctx, ts->combined_sink, bindings, n_bindings);
-  free(bindings);
+  int ret = poly_compiled_plan_run(c->plan, c->slot_data, c->n_slots, NULL, 0);
   if (ret != 0) { o->step--; return ret; }
 
   /* Read back loss */

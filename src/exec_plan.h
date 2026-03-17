@@ -207,10 +207,12 @@ typedef struct {
 
 /* ── Compiled plan ────────────────────────────────────────────────────── */
 /*
- * Backend-specific lowered execution plan. Immutable after construction.
+ * Backend-specific lowered execution plan with persistent workspace.
  * Produced by compiling a schedule for a specific device. Contains compiled
- * runners but NOT intermediate buffers -- those are allocated per-invocation
- * inside poly_compiled_plan_run() to allow safe concurrent/sequential reuse.
+ * runners AND persistent intermediate buffers, args arrays, and slot tables.
+ * Intermediates are zeroed at each run (reduce accumulators need it) but
+ * never re-allocated. This makes plan_run zero-alloc in the steady state.
+ * NOT reentrant: concurrent calls to plan_run on the same plan are unsafe.
  */
 
 typedef struct {
@@ -220,6 +222,25 @@ typedef struct {
 
   PolyRunner *runners; /* [schedule->n_items], one per exec item */
   int n_runners;
+
+  /* Persistent workspace: allocated once at compile time, reused every run.
+   * Intermediates are zeroed at each run (reduce accumulators need it).
+   * Args arrays are filled at each run (slot pointers change). */
+  PolyBufferHandle *intermediates;   /* [n_intermediates] */
+  int n_intermediates;
+
+  void ***kernel_args;               /* [n_runners], each is void*[n_params + n_vars] */
+
+  void **slot_to_data;               /* [schedule->n_buf_slots], reused per run */
+  int n_slot_to_data;
+
+  /* Merged variable bindings array (reused per run) */
+  struct PolyVarBinding *merged_vars;
+  int merged_vars_cap;
+
+  /* Per-kernel var int storage (reused per run) */
+  int *var_int_storage;
+  int var_int_cap;
 } PolyCompiledPlan;
 
 /* ── Backend descriptor ──────────────────────────────────────────────── */
@@ -299,14 +320,15 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared,
                                     PolyDeviceId device);
 
 /*
- * Execute a lowered step with bound buffer data.
+ * Execute a lowered step with bound buffer data. Zero-alloc in steady state.
  *
  * slot_data is indexed by prepared step buf_slot index. External slots
  * must have non-NULL data pointers. Intermediate slots are ignored
- * (the executable step owns its own intermediate buffers).
+ * (the plan owns persistent intermediate buffers, zeroed each call).
  *
  * var_bindings override the prepared step's default_vars (same var -> last wins).
  *
+ * NOT reentrant: the plan's persistent workspace is shared across calls.
  * Returns 0 on success, <0 on error.
  */
 int poly_compiled_plan_run(PolyCompiledPlan *step,

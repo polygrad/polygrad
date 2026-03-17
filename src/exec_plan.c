@@ -711,6 +711,73 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule,
   }
   lower_counter++;
 
+  /* ── Allocate persistent intermediates ─────────────────────────────── */
+  plan->n_intermediates = 0;
+  for (int i = 0; i < schedule->n_buf_slots; i++)
+    if (schedule->buf_slots[i].is_intermediate) plan->n_intermediates++;
+
+  if (plan->n_intermediates > 0) {
+    plan->intermediates = calloc((size_t)plan->n_intermediates, sizeof(PolyBufferHandle));
+    if (!plan->intermediates) goto cleanup;
+    int idx = 0;
+    for (int i = 0; i < schedule->n_buf_slots; i++) {
+      if (!schedule->buf_slots[i].is_intermediate) continue;
+      size_t nbytes = (size_t)schedule->buf_slots[i].nbytes;
+      if (nbytes == 0) nbytes = sizeof(float);
+      void *ptr = plan->allocator->alloc(nbytes, plan->allocator->dev_ctx);
+      if (!ptr) goto cleanup;
+      plan->intermediates[idx] = (PolyBufferHandle){
+        .ptr = ptr, .nbytes = nbytes,
+        .domain = plan->device, .owned = true,
+      };
+      idx++;
+    }
+  }
+
+  /* ── Allocate persistent per-kernel args arrays ────────────────────── */
+  plan->kernel_args = calloc((size_t)plan->n_runners, sizeof(void **));
+  if (!plan->kernel_args) goto cleanup;
+  for (int k = 0; k < plan->n_runners; k++) {
+    PolyExecItem *item = &schedule->items[k];
+    int n_args = plan->runners[k].n_params + item->n_var_uops;
+    plan->kernel_args[k] = calloc((size_t)(n_args > 0 ? n_args : 1), sizeof(void *));
+    if (!plan->kernel_args[k]) goto cleanup;
+  }
+
+  /* ── Allocate persistent slot_to_data ──────────────────────────────── */
+  plan->n_slot_to_data = schedule->n_buf_slots;
+  plan->slot_to_data = calloc((size_t)(plan->n_slot_to_data > 0 ? plan->n_slot_to_data : 1),
+                              sizeof(void *));
+  if (!plan->slot_to_data) goto cleanup;
+
+  /* Pre-fill intermediate slot pointers (these don't change between runs) */
+  {
+    int idx = 0;
+    for (int i = 0; i < plan->n_slot_to_data; i++) {
+      if (schedule->buf_slots[i].is_intermediate && idx < plan->n_intermediates) {
+        plan->slot_to_data[i] = plan->intermediates[idx].ptr;
+        idx++;
+      }
+    }
+  }
+
+  /* ── Allocate merged vars array ────────────────────────────────────── */
+  {
+    int total_vars = schedule->n_default_vars + 16; /* room for runtime overrides */
+    plan->merged_vars = calloc((size_t)total_vars, sizeof(PolyVarBinding));
+    plan->merged_vars_cap = total_vars;
+  }
+
+  /* ── Allocate var int storage ──────────────────────────────────────── */
+  {
+    int total_var_ints = 0;
+    for (int k = 0; k < schedule->n_items; k++)
+      total_var_ints += schedule->items[k].n_var_uops;
+    if (total_var_ints == 0) total_var_ints = 16;
+    plan->var_int_storage = calloc((size_t)total_var_ints, sizeof(int));
+    plan->var_int_cap = total_var_ints;
+  }
+
   return plan;
 
 cleanup:
@@ -728,90 +795,59 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
   if (!backend) return -1;
 
   int ret = 0;
-  void **slot_to_data = NULL;
 
-  /* ── Allocate per-invocation intermediates ────────────────────────── */
-  int n_inter = 0;
-  for (int i = 0; i < sched->n_buf_slots; i++)
-    if (sched->buf_slots[i].is_intermediate) n_inter++;
-
-  PolyBufferHandle *inter_handles = NULL;
-  if (n_inter > 0) {
-    inter_handles = calloc((size_t)n_inter, sizeof(PolyBufferHandle));
-    if (!inter_handles) return -1;
-    int idx = 0;
-    for (int i = 0; i < sched->n_buf_slots; i++) {
-      if (!sched->buf_slots[i].is_intermediate) continue;
-      size_t nbytes = (size_t)sched->buf_slots[i].nbytes;
-      if (nbytes == 0) nbytes = sizeof(float);
-      void *ptr = plan->allocator->alloc(nbytes, plan->allocator->dev_ctx);
-      if (!ptr) goto cleanup_inter;
-      inter_handles[idx] = (PolyBufferHandle){
-        .ptr = ptr, .nbytes = nbytes,
-        .domain = plan->device, .owned = true,
-      };
-      idx++;
-    }
-
-    /* Zero intermediates (needed for REDUCE accumulators) */
-    for (int i = 0; i < n_inter; i++) {
-      PolyBufferHandle *h = &inter_handles[i];
-      if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP
+  /* ── Zero persistent intermediates (reduce accumulators need this) ── */
+  for (int i = 0; i < plan->n_intermediates; i++) {
+    PolyBufferHandle *h = &plan->intermediates[i];
+    if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP
 #ifdef __EMSCRIPTEN__
-          || h->domain == POLY_DEVICE_WASM_JIT
+        || h->domain == POLY_DEVICE_WASM_JIT
 #endif
-      ) {
-        memset(h->ptr, 0, h->nbytes);
-      }
+    ) {
+      memset(h->ptr, 0, h->nbytes);
+    }
 #ifdef POLY_HAS_CUDA
-      else if (h->domain == POLY_DEVICE_CUDA) {
-        poly_cuda_memset((unsigned long long)(uintptr_t)h->ptr, 0, h->nbytes);
-      }
+    else if (h->domain == POLY_DEVICE_CUDA) {
+      poly_cuda_memset((unsigned long long)(uintptr_t)h->ptr, 0, h->nbytes);
+    }
 #endif
-    }
   }
 
-  /* ── Build slot_to_data ───────────────────────────────────────────── */
-  int n_total_slots = sched->n_buf_slots;
-  slot_to_data = calloc((size_t)(n_total_slots > 0 ? n_total_slots : 1),
-                        sizeof(void *));
-  if (!slot_to_data) { ret = -1; goto cleanup_inter; }
-
-  /* Fill external slots from caller data */
-  for (int i = 0; i < n_total_slots; i++) {
-    if (!sched->buf_slots[i].is_intermediate && i < n_slots && slot_data[i])
-      slot_to_data[i] = slot_data[i];
-  }
-
-  /* Fill intermediate slots from per-run handles */
-  {
-    int idx = 0;
-    for (int i = 0; i < n_total_slots; i++) {
-      if (sched->buf_slots[i].is_intermediate && idx < n_inter) {
-        slot_to_data[i] = inter_handles[idx].ptr;
-        idx++;
-      }
+  /* ── Fill external slots in persistent slot_to_data ────────────────── */
+  for (int i = 0; i < plan->n_slot_to_data; i++) {
+    if (!sched->buf_slots[i].is_intermediate) {
+      plan->slot_to_data[i] = (i < n_slots && slot_data[i]) ? slot_data[i] : NULL;
     }
+    /* intermediate slots are pre-filled at compile time and don't change */
   }
 
   /* ── Merge default vars with runtime overrides ────────────────────── */
-  PolyVarBinding all_vars[32];
   int n_all = 0;
-  for (int i = 0; i < sched->n_default_vars && n_all < 32; i++)
-    all_vars[n_all++] = sched->default_vars[i];
-  for (int i = 0; i < n_var_bindings && n_all < 32; i++) {
+
+  /* Grow merged_vars if needed */
+  int needed = sched->n_default_vars + n_var_bindings;
+  if (needed > plan->merged_vars_cap) {
+    free(plan->merged_vars);
+    plan->merged_vars = calloc((size_t)needed, sizeof(PolyVarBinding));
+    plan->merged_vars_cap = needed;
+  }
+
+  for (int i = 0; i < sched->n_default_vars; i++)
+    plan->merged_vars[n_all++] = sched->default_vars[i];
+  for (int i = 0; i < n_var_bindings; i++) {
     bool found = false;
     for (int j = 0; j < n_all; j++) {
-      if (all_vars[j].var == var_bindings[i].var) {
-        all_vars[j].value = var_bindings[i].value;
+      if (plan->merged_vars[j].var == var_bindings[i].var) {
+        plan->merged_vars[j].value = var_bindings[i].value;
         found = true;
         break;
       }
     }
-    if (!found) all_vars[n_all++] = var_bindings[i];
+    if (!found) plan->merged_vars[n_all++] = var_bindings[i];
   }
 
   /* ── Execute runners in exec_order via backend vtable ─────────────── */
+  int var_int_idx = 0;
   for (int s = 0; s < sched->n_items && ret == 0; s++) {
     int k = sched->exec_order[s];
     PolyRunner *runner = &plan->runners[k];
@@ -824,31 +860,36 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
     PolyExecItem *item = &sched->items[k];
     int n_vars = item->n_var_uops;
     int n_args = runner->n_params + n_vars;
-    void **args = calloc((size_t)(n_args > 0 ? n_args : 1), sizeof(void *));
-    int var_int_storage[16];
-    int n_var_ints = 0;
+    void **args = plan->kernel_args[k];
 
     for (int i = 0; i < runner->n_params; i++) {
       int slot = runner->param_to_slot[i];
-      if (slot >= 0 && slot < n_total_slots)
-        args[i] = slot_to_data[slot];
+      if (slot >= 0 && slot < plan->n_slot_to_data)
+        args[i] = plan->slot_to_data[slot];
       if (!args[i]) {
         fprintf(stderr, "polygrad: plan_run: missing data for param %d "
                 "(slot %d) in kernel %d\n", i, slot, k);
-        ret = -1; free(args); args = NULL; break;
+        ret = -1; break;
       }
     }
 
     /* Fill var params (DEFINE_VAR values as int* pointers) */
-    if (ret == 0 && args && n_vars > 0 && item->var_uops) {
-      for (int v = 0; v < n_vars && n_var_ints < 16; v++) {
+    if (ret == 0 && n_vars > 0 && item->var_uops) {
+      for (int v = 0; v < n_vars; v++) {
         PolyUOp *var = item->var_uops[v];
         bool found = false;
         for (int vb = 0; vb < n_all; vb++) {
-          if (all_vars[vb].var == var) {
-            var_int_storage[n_var_ints] = (int)all_vars[vb].value;
-            args[runner->n_params + v] = &var_int_storage[n_var_ints];
-            n_var_ints++;
+          if (plan->merged_vars[vb].var == var) {
+            if (var_int_idx >= plan->var_int_cap) {
+              /* grow var int storage */
+              int new_cap = plan->var_int_cap * 2;
+              plan->var_int_storage = realloc(plan->var_int_storage,
+                                              (size_t)new_cap * sizeof(int));
+              plan->var_int_cap = new_cap;
+            }
+            plan->var_int_storage[var_int_idx] = (int)plan->merged_vars[vb].value;
+            args[runner->n_params + v] = &plan->var_int_storage[var_int_idx];
+            var_int_idx++;
             found = true;
             break;
           }
@@ -856,26 +897,14 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
         if (!found) {
           fprintf(stderr, "polygrad: plan_run: no binding for DEFINE_VAR "
                   "in kernel %d\n", k);
-          ret = -1; free(args); args = NULL; break;
+          ret = -1; break;
         }
       }
     }
 
-    if (ret == 0 && args) {
+    if (ret == 0) {
       ret = backend->execute(runner, args, n_args);
-      free(args);
     }
-  }
-
-  /* ── Free per-invocation resources ───────────────────────────────── */
-cleanup_inter:
-  free(slot_to_data);
-  if (inter_handles) {
-    for (int i = 0; i < n_inter; i++) {
-      if (inter_handles[i].ptr)
-        plan->allocator->free(inter_handles[i].ptr, plan->allocator->dev_ctx);
-    }
-    free(inter_handles);
   }
 
   return ret;
@@ -895,7 +924,24 @@ void poly_compiled_plan_free(PolyCompiledPlan *plan) {
   }
   free(plan->runners);
 
-  /* Note: intermediates are per-invocation (allocated/freed in plan_run).
-   * The plan itself is immutable and owns only runners + mappings. */
+  /* Free persistent intermediates */
+  if (plan->intermediates) {
+    for (int i = 0; i < plan->n_intermediates; i++) {
+      if (plan->intermediates[i].ptr)
+        plan->allocator->free(plan->intermediates[i].ptr, plan->allocator->dev_ctx);
+    }
+    free(plan->intermediates);
+  }
+
+  /* Free persistent per-kernel args arrays */
+  if (plan->kernel_args) {
+    for (int i = 0; i < plan->n_runners; i++)
+      free(plan->kernel_args[i]);
+    free(plan->kernel_args);
+  }
+
+  free(plan->slot_to_data);
+  free(plan->merged_vars);
+  free(plan->var_int_storage);
   free(plan);
 }
