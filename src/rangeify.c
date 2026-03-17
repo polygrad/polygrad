@@ -1870,9 +1870,10 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
         result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
       }
 
-      /* C4e: assign_to_contiguous — target must be PARAM/BUFFER (raw buffer).
-       * If target has movement ops, wrap in CONTIGUOUS to materialize.
-       * The ASSIGN writes to the materialized buffer (intermediate).
+      /* C4e: assign_to_contiguous — safety net.
+       * poly_assign() normalizes targets to base BUFFERs at construction
+       * time. This rule catches edge cases that bypass the frontend:
+       * if target is not PARAM/BUFFER/ASSIGN/CONTIGUOUS, wrap in CONTIGUOUS.
        * Ref: tinygrad earliest_rewrites assign_to_contiguous */
       if (!result && target->op != POLY_OP_PARAM &&
           target->op != POLY_OP_BUFFER && target->op != POLY_OP_ASSIGN &&

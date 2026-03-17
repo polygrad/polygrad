@@ -2850,18 +2850,14 @@ TEST(rangeify, earliest_nested_assign_chain) {
 }
 
 TEST(rangeify, earliest_assign_to_contiguous) {
-  /* C4e: ASSIGN(RESHAPE(buf), value) — target has movement ops.
-   * C4e wraps target in CONTIGUOUS. The CONTIGUOUS materializes to an
-   * intermediate. ASSIGN writes value to that intermediate.
-   * Original buf is unchanged (the tensor layer updates its reference).
-   *
-   * Test: verify ASSIGN executes without error. The CONTIGUOUS
-   * target gets realized as an intermediate buffer. */
+  /* poly_assign() normalizes RESHAPE(buf) target to base BUFFER and
+   * reshapes value to flat shape. The ASSIGN writes to buf in-place.
+   * C4e (safety net) never fires because target is already BUFFER. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 8);
   PolyUOp *src = poly_buffer(ctx, POLY_FLOAT32, 8);
 
-  /* Reshape target: view buf as [4,2] */
+  /* Reshape target: view buf as [4,2] — base is BUFFER, safe */
   int64_t sh42[] = {4, 2};
   PolyUOp *reshaped = poly_reshape(ctx, buf, sh42, 2);
 
@@ -2874,8 +2870,10 @@ TEST(rangeify, earliest_assign_to_contiguous) {
   /* ASSIGN(RESHAPE(buf, [4,2]), value) — target is not PARAM/BUFFER.
    * C4e wraps in CONTIGUOUS: ASSIGN(CONTIGUOUS(RESHAPE(buf)), value).
    * The CONTIGUOUS materializes to intermediate. */
-  PolyUOp *assign_src[2] = { reshaped, value };
-  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, assign_src, 2, poly_arg_none());
+  /* Use poly_assign() which normalizes RESHAPE(buf) → BUFFER target */
+  PolyUOp *assign = poly_assign(ctx, reshaped, value);
+  /* Verify normalization: target should be base BUFFER, not RESHAPE */
+  ASSERT_TRUE(assign->src[0] == buf);  /* target normalized to BUFFER */
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
 
   float buf_d[] = {99, 99, 99, 99, 99, 99, 99, 99};
@@ -2885,10 +2883,9 @@ TEST(rangeify, earliest_assign_to_contiguous) {
   };
   int ret = poly_realize(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
-  /* Execution should succeed. Original buf is NOT modified (the ASSIGN
-   * writes to the materialized intermediate, not to buf). */
+  /* poly_assign normalizes to BUFFER target, ASSIGN writes in-place */
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 8; i++)
-    ASSERT_FLOAT_EQ(buf_d[i], 99.0f, 1e-5);  /* buf unchanged */
+    ASSERT_FLOAT_EQ(buf_d[i], src_d[i] + 1.0f, 1e-5);
   PASS();
 }

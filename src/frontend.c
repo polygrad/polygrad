@@ -96,6 +96,25 @@ PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n) {
 /* ── In-place assignment ──────────────────────────────────────────────── */
 
 PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
+  /* Normalize: walk target through movement ops to the base BUFFER.
+   * Reshape value to the base buffer's flat shape so the ASSIGN target
+   * is always a raw BUFFER. This ensures in-place writes go directly to
+   * the buffer data without the scheduler needing to handle movement ops
+   * on ASSIGN targets. */
+  PolyUOp *base = target;
+  while (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) && base->n_src > 0)
+    base = base->src[0];
+
+  if (base != target && base->op == POLY_OP_BUFFER) {
+    /* Base is a BUFFER with a flat shape. Reshape value to match. */
+    int64_t numel = (base->arg.kind == POLY_ARG_INT) ? base->arg.i : 0;
+    if (numel > 0) {
+      int64_t flat_shape[1] = { numel };
+      value = poly_reshape(ctx, value, flat_shape, 1);
+    }
+    target = base;
+  }
+
   PolyUOp *srcs[2] = { target, value };
   return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
 }
