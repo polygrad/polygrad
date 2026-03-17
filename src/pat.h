@@ -103,6 +103,12 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
 PolyUOp *poly_graph_rewrite(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm);
 PolyUOp *poly_graph_rewrite_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
                                bool bottom_up);
+/* MLIR-style walk_rewrite: single-pass, no re-traversal into rewritten subtrees.
+ * pm = top-down (after rebuild), bpm = bottom-up (before descent, short-circuits).
+ * Either can be NULL. */
+PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
+                                 PolyPatternMatcher *pm, PolyPatternMatcher *bpm,
+                                 void *user_ctx, bool enter_calls);
 /* Returns current graph_rewrite user_ctx for callbacks in the active pass. */
 void *poly_graph_rewrite_userctx(void);
 

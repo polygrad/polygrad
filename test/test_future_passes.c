@@ -1480,3 +1480,26 @@ TEST(sym_future, cast_bool_to_cmpne) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* SHL+ADD fuses to MULACC with FMA caps.  Ref: tinygrad decompositions.py:480 */
+TEST(decomp, shl_add_fuses_to_mulacc) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *n = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
+  PolyUOp *shl = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, x, n, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, shl, c, poly_arg_none());
+
+  /* With MULACC caps, ADD(SHL(x,3), c) -> MULACC(x, 8, c) */
+  PolyRendererCaps caps = { .has_mulacc = true };
+  PolyPatternMatcher *pm = poly_pm_decomp_pass_caps(caps);
+  PolyUOp *r = poly_graph_rewrite(ctx, add, pm);
+  ASSERT_NOT_NULL(r);
+  ASSERT_TRUE(r->op == POLY_OP_MULACC);
+  ASSERT_TRUE(r->n_src == 3);
+  /* src[1] should be CONST(8) = 2^3 */
+  ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST);
+  ASSERT_TRUE(r->src[1]->arg.i == 8);
+  poly_ctx_destroy(ctx);
+  PASS();
+}

@@ -530,6 +530,88 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
   return result ? result : sink;
 }
 
+/* ── walk_rewrite: MLIR-style single-pass, no re-traversal ──────────── */
+
+PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
+                                 PolyPatternMatcher *pm, PolyPatternMatcher *bpm,
+                                 void *user_ctx, bool enter_calls) {
+  void *prev_userctx = g_graph_rewrite_userctx;
+  g_graph_rewrite_userctx = user_ctx;
+
+  PolyMap *replace = poly_map_new(256);
+  WorkStack ws = { NULL, 0, 0 };
+
+  ws_push(&ws, sink, 0, sink);
+
+  while (ws.top > 0) {
+    WorkItem wi = ws.items[--ws.top];
+    PolyUOp *n = wi.n;
+
+    if (replace_get(replace, n)) continue;
+
+    if (wi.stage == 0) {
+      /* Bottom-up: try bpm first. If it rewrites, use result as-is
+       * (no descent into replacement — this is the key walk_rewrite property). */
+      if (bpm) {
+        PolyUOp *r = poly_pm_rewrite(bpm, ctx, n);
+        if (r && r != n) {
+          replace_set(replace, n, r);
+          continue;
+        }
+      }
+
+      /* Push for rebuild, then push children */
+      ws_push(&ws, n, 1, n);
+
+      /* CALL gating: identity-map entire callee subgraph */
+      if (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 0) {
+        int n_callee = 0;
+        PolyUOp **ct = poly_toposort(ctx, n->src[0], &n_callee);
+        for (int i = 0; i < n_callee; i++)
+          replace_set(replace, ct[i], ct[i]);
+      }
+
+      int start = (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 1) ? 1 : 0;
+      for (int i = n->n_src - 1; i >= start; i--) {
+        if (!replace_get(replace, n->src[i]))
+          ws_push(&ws, n->src[i], 0, n->src[i]);
+      }
+    } else {
+      /* Rebuild with rewritten sources */
+      bool heap_src = (n->n_src > 16);
+      PolyUOp *new_src_buf[16];
+      PolyUOp **new_src = heap_src ?
+        malloc(n->n_src * sizeof(PolyUOp *)) : new_src_buf;
+      bool changed = false;
+
+      for (int i = 0; i < n->n_src; i++) {
+        PolyUOp *r = replace_get(replace, n->src[i]);
+        new_src[i] = r ? r : n->src[i];
+        if (new_src[i] != n->src[i]) changed = true;
+      }
+
+      PolyUOp *new_n = changed ?
+        poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg) : n;
+
+      /* Top-down: try pm on rebuilt node. Use result as-is (no re-traversal). */
+      if (pm) {
+        PolyUOp *r = poly_pm_rewrite(pm, ctx, new_n);
+        if (r && r != new_n) new_n = r;
+      }
+
+      replace_set(replace, n, new_n);
+      if (heap_src) free(new_src);
+    }
+  }
+
+  PolyUOp *result = replace_get(replace, sink);
+
+  free(ws.items);
+  poly_map_destroy(replace);
+  g_graph_rewrite_userctx = prev_userctx;
+  return result ? result : sink;
+}
+
 PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
                                    void *user_ctx, bool bottom_up) {
   return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, user_ctx, bottom_up, true);

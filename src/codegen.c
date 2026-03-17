@@ -902,6 +902,33 @@ static PolyUOp *rule_mul_add_to_mulacc(PolyCtx *ctx, PolyUOp *root,
 }
 
 /*
+ * rule_shl_add_to_mulacc — ADD(SHL(x, n), c) → MULACC(x, 2^n, c)
+ * When MUL(x, pow2) was already decomposed to SHL by an earlier pass,
+ * the ADD fusion needs to recognize the shifted form.
+ * Ref: tinygrad decompositions.py:480
+ */
+static PolyUOp *rule_shl_add_to_mulacc(PolyCtx *ctx, PolyUOp *root,
+                                         const PolyBindings *b) {
+  (void)b;
+  if (root->op != POLY_OP_ADD || root->n_src != 2) return NULL;
+  if (!poly_dtype_is_int(root->dtype)) return NULL;
+  PolyUOp *shl = NULL, *c = NULL;
+  if (root->src[0]->op == POLY_OP_SHL) {
+    shl = root->src[0]; c = root->src[1];
+  } else if (root->src[1]->op == POLY_OP_SHL) {
+    shl = root->src[1]; c = root->src[0];
+  } else return NULL;
+  if (shl->n_src != 2) return NULL;
+  PolyUOp *n_const = shl->src[1];
+  if (n_const->op != POLY_OP_CONST || n_const->arg.kind != POLY_ARG_INT) return NULL;
+  int64_t shift = n_const->arg.i;
+  if (shift < 0 || shift > 30) return NULL;
+  PolyUOp *factor = poly_const_like_int(ctx, shl->src[0], 1LL << shift);
+  PolyUOp *srcs[3] = { shl->src[0], factor, c };
+  return poly_uop(ctx, POLY_OP_MULACC, root->dtype, srcs, 3, poly_arg_none());
+}
+
+/*
  * rule_mul_neg1_to_neg — Port of tinygrad late rewrite:
  * x * (-1) → NEG(x)
  */
@@ -1065,7 +1092,7 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
   if (*target) return *target;
 
   PolyOpSet max_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_MAX);
-  PolyRule rules[18];
+  PolyRule rules[20];
   int n = 0;
   rules[n++] = (PolyRule){ poly_pat_ops(max_set, NULL, 0, NULL), rule_decomp_max };
   /* MUL(x:int, c:const) → SHL(x, log2(c)) when c is power of 2 */
@@ -1100,6 +1127,9 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
     PolyOpSet add_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_ADD);
     rules[n++] = (PolyRule){ poly_pat_ops(add_set, NULL, 0, NULL),
       rule_mul_add_to_mulacc };
+    /* SHL fusion: ADD(SHL(x,n), c) → MULACC(x, 2^n, c) for ints */
+    rules[n++] = (PolyRule){ poly_pat_ops(add_set, NULL, 0, NULL),
+      rule_shl_add_to_mulacc };
   }
 
   /* RECIPROCAL(x) → FDIV(1, x) */

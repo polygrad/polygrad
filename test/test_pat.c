@@ -379,3 +379,84 @@ TEST(pat, graph_rewrite_skips_call_body) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ── walk_rewrite tests ──────────────────────────────────────────────── */
+
+static PolyUOp *rewrite_const5_to_const6(PolyCtx *ctx, PolyUOp *root,
+                                          const PolyBindings *b) {
+  (void)b;
+  if (root->op == POLY_OP_CONST && root->arg.kind == POLY_ARG_INT && root->arg.i == 5)
+    return poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(6));
+  return NULL;
+}
+
+static PolyUOp *rewrite_const6_to_const7(PolyCtx *ctx, PolyUOp *root,
+                                          const PolyBindings *b) {
+  (void)b;
+  if (root->op == POLY_OP_CONST && root->arg.kind == POLY_ARG_INT && root->arg.i == 6)
+    return poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(7));
+  return NULL;
+}
+
+TEST(pat, walk_rewrite_no_retraversal) {
+  /* Substitution: CONST(5) -> CONST(6) via bpm.
+   * A second rule: CONST(6) -> CONST(7) via pm.
+   * With walk_rewrite: bpm fires on CONST(5) -> CONST(6), result stored as-is.
+   * The pm rule (6->7) does NOT fire because walk_rewrite doesn't re-traverse
+   * into the bpm result.
+   * With unified_rewrite: both rules would fire (5->6->7). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c5 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, c5, c1, poly_arg_none());
+
+  /* bpm: 5 -> 6 */
+  PolyPat *p_bpm = poly_pat_cvar("c");
+  PolyRule r_bpm[] = {{ p_bpm, rewrite_const5_to_const6 }};
+  PolyPatternMatcher *bpm = poly_pm_new(r_bpm, 1);
+
+  /* pm: 6 -> 7 */
+  PolyPat *p_pm = poly_pat_cvar("c");
+  PolyRule r_pm[] = {{ p_pm, rewrite_const6_to_const7 }};
+  PolyPatternMatcher *pm = poly_pm_new(r_pm, 1);
+
+  PolyUOp *result = poly_graph_walk_rewrite(ctx, add, pm, bpm, NULL, true);
+  ASSERT_NOT_NULL(result);
+  /* The 5 was rewritten to 6 by bpm, but pm (6->7) did NOT fire on it
+   * because walk_rewrite doesn't re-traverse bpm results. */
+  ASSERT_TRUE(result->op == POLY_OP_ADD);
+  PolyUOp *left = result->src[0];
+  ASSERT_TRUE(left->op == POLY_OP_CONST && left->arg.i == 6);  /* 6, not 7 */
+
+  poly_pm_destroy(bpm);
+  poly_pm_destroy(pm);
+  poly_pat_free(p_bpm);
+  poly_pat_free(p_pm);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, walk_rewrite_bpm_short_circuits) {
+  /* bpm rewrites NEG(x) -> CONST(0). Children of NEG should NOT be visited. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
+  PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, neg, c2, poly_arg_none());
+
+  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyRule r_bpm[] = {{ neg_pat, rewrite_neg_to_zero }};
+  PolyPatternMatcher *bpm = poly_pm_new(r_bpm, 1);
+
+  PolyUOp *result = poly_graph_walk_rewrite(ctx, add, NULL, bpm, NULL, true);
+  ASSERT_NOT_NULL(result);
+  /* NEG was rewritten to CONST(0) by bpm */
+  ASSERT_TRUE(result->op == POLY_OP_ADD);
+  ASSERT_TRUE(result->src[0]->op == POLY_OP_CONST);
+  ASSERT_TRUE(result->src[0]->arg.f == 0.0);
+
+  poly_pm_destroy(bpm);
+  poly_pat_free(neg_pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
