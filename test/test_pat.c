@@ -328,3 +328,54 @@ TEST(pat, pm_concat) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ── CALL gating in graph_rewrite ────────────────────────────────────── */
+
+static PolyUOp *rewrite_neg_to_zero(PolyCtx *ctx, PolyUOp *root,
+                                     const PolyBindings *b) {
+  (void)root; (void)b;
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+}
+
+TEST(pat, graph_rewrite_skips_call_body) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* Build: CALL(callee, ADD(NEG(c1), c2))
+   * callee = NEG(c3)
+   *
+   * A rewrite rule NEG->0 should fire on the outer NEG(c1)
+   * but NOT on the callee's NEG(c3) when enter_calls=false. */
+  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *c3 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.0));
+  PolyUOp *callee_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c3, poly_arg_none());
+  PolyUOp *outer_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, outer_neg, c2, poly_arg_none());
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee_neg, add, poly_arg_none());
+
+  /* Pattern: NEG(x) -> CONST(0) */
+  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyRule rules[] = {{ neg_pat, rewrite_neg_to_zero }};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  /* enter_calls=true: both NEGs rewritten */
+  PolyUOp *result_enter = poly_graph_rewrite_ctx_ex2(ctx, call, pm, NULL, false, true);
+  ASSERT_NOT_NULL(result_enter);
+  ASSERT_TRUE(result_enter->op == POLY_OP_CALL);
+  ASSERT_TRUE(result_enter->src[0]->op == POLY_OP_CONST); /* callee NEG was rewritten */
+
+  /* enter_calls=false: only outer NEG rewritten, callee NEG preserved */
+  PolyUOp *result_skip = poly_graph_rewrite_ctx_ex2(ctx, call, pm, NULL, false, false);
+  ASSERT_NOT_NULL(result_skip);
+  ASSERT_TRUE(result_skip->op == POLY_OP_CALL);
+  ASSERT_TRUE(result_skip->src[0]->op == POLY_OP_NEG); /* callee NEG preserved */
+  /* But the outer NEG in ADD should have been rewritten */
+  PolyUOp *add_result = result_skip->src[1]; /* the ADD arg */
+  ASSERT_TRUE(add_result->op == POLY_OP_ADD);
+  ASSERT_TRUE(add_result->src[0]->op == POLY_OP_CONST); /* outer NEG was rewritten to 0 */
+
+  poly_pm_destroy(pm);
+  poly_pat_free(neg_pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}

@@ -329,7 +329,8 @@ static uint32_t ptr_hash(const void *p) {
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
 }
 
-PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
+PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
+                           bool (*gate)(PolyUOp *), bool enter_calls) {
   int cap = 256;
   int n = 0;
   PolyUOp **result = poly_arena_alloc(ctx->arena, cap * sizeof(PolyUOp*), _Alignof(PolyUOp*));
@@ -358,9 +359,16 @@ PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
     }
 
     if (s == 0) {
+      /* Gate check: if gate returns false, skip this subtree entirely */
+      if (gate && !gate(u)) {
+        stack_top--;
+        continue;
+      }
       /* First visit: push children in reverse order */
       state[stack_top - 1] = 1;
-      for (int i = u->n_src - 1; i >= 0; i--) {
+      /* For CALL nodes with enter_calls=false, skip src[0] (the callee body) */
+      int start = (!enter_calls && u->op == POLY_OP_CALL && u->n_src > 1) ? 1 : 0;
+      for (int i = u->n_src - 1; i >= start; i--) {
         uint32_t ch = ptr_hash(u->src[i]);
         if (poly_map_get(visited, ch, u->src[i], ptr_eq) != NULL) continue;
         if (stack_top >= stack_cap) {
@@ -395,6 +403,10 @@ PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
   poly_map_destroy(visited);
   *n_out = n;
   return result;
+}
+
+PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
+  return poly_toposort_ex(ctx, root, n_out, NULL, true);
 }
 
 /* ── Pretty-print ─────────────────────────────────────────────────────── */

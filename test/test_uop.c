@@ -360,3 +360,65 @@ TEST(hashmap, grow) {
   poly_map_destroy(m);
   PASS();
 }
+
+/* ── Toposort gate and enter_calls ───────────────────────────────────── */
+
+static bool gate_skip_neg(PolyUOp *u) {
+  return u->op != POLY_OP_NEG;
+}
+
+TEST(uop, toposort_gate_skips_subtree) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, a, poly_arg_none());
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  /* ADD(NEG(a), b) -- gate skips NEG, so NEG and a should not appear */
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, neg, b, poly_arg_none());
+
+  int n = 0;
+  PolyUOp **topo = poly_toposort_ex(ctx, add, &n, gate_skip_neg, true);
+  /* Only b and add should be in the result (NEG subtree skipped) */
+  ASSERT_INT_EQ(n, 2);
+  bool found_neg = false, found_a = false;
+  for (int i = 0; i < n; i++) {
+    if (topo[i] == neg) found_neg = true;
+    if (topo[i] == a) found_a = true;
+  }
+  ASSERT_TRUE(!found_neg);
+  ASSERT_TRUE(!found_a);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, toposort_enter_calls_false) {
+  PolyCtx *ctx = poly_ctx_new();
+  /* Build: CALL(callee_body, arg1)
+   * callee_body = ADD(c1, c2)
+   * arg1 = CONST(42) */
+  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *callee_body = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
+  PolyUOp *arg1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(42.0));
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee_body, arg1, poly_arg_none());
+
+  /* enter_calls=true: should see c1, c2, callee_body, arg1, call */
+  int n_all = 0;
+  PolyUOp **topo_all = poly_toposort_ex(ctx, call, &n_all, NULL, true);
+  ASSERT_INT_EQ(n_all, 5);
+
+  /* enter_calls=false: should see arg1 and call only (callee body skipped) */
+  int n_no = 0;
+  PolyUOp **topo_no = poly_toposort_ex(ctx, call, &n_no, NULL, false);
+  ASSERT_INT_EQ(n_no, 2);
+  bool found_callee = false;
+  for (int i = 0; i < n_no; i++) {
+    if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2)
+      found_callee = true;
+  }
+  ASSERT_TRUE(!found_callee);
+  ASSERT_TRUE(topo_no[0] == arg1);
+  ASSERT_TRUE(topo_no[1] == call);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}

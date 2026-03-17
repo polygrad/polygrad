@@ -407,8 +407,8 @@ void *poly_graph_rewrite_userctx(void) {
   return g_graph_rewrite_userctx;
 }
 
-PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
-                                   void *user_ctx, bool bottom_up) {
+PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
+                                    void *user_ctx, bool bottom_up, bool enter_calls) {
   void *prev_userctx = g_graph_rewrite_userctx;
   g_graph_rewrite_userctx = user_ctx;
 
@@ -447,9 +447,21 @@ PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatch
         new_n = cur;
       }
 
+      /* CALL gating: when enter_calls=false, set identity mappings for the
+       * entire callee subgraph (src[0]) so stage 1 lookups resolve immediately
+       * instead of stalling in the waitlist. */
+      if (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 0) {
+        PolyUOp *callee = new_n->src[0];
+        int n_callee = 0;
+        PolyUOp **callee_topo = poly_toposort(ctx, callee, &n_callee);
+        for (int ci = 0; ci < n_callee; ci++)
+          replace_set(replace, callee_topo[ci], callee_topo[ci]);
+      }
+
       /* Stage 1 rebuilds from rewritten sources and applies top-down rewrite. */
       ws_push(&ws, n, 1, new_n);
-      for (int i = new_n->n_src - 1; i >= 0; i--) {
+      int src_start = (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 1) ? 1 : 0;
+      for (int i = new_n->n_src - 1; i >= src_start; i--) {
         PolyUOp *x = new_n->src[i];
         if (poly_map_get(on_stack, ptr_hash(x), x, ptr_eq)) continue;
         poly_map_set(on_stack, ptr_hash(x), x, (void*)(uintptr_t)1, ptr_eq);
@@ -518,18 +530,23 @@ PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatch
   return result ? result : sink;
 }
 
+PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
+                                   void *user_ctx, bool bottom_up) {
+  return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, user_ctx, bottom_up, true);
+}
+
 PolyUOp *poly_graph_rewrite_ctx(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
                                 void *user_ctx) {
-  return poly_graph_rewrite_ctx_ex(ctx, sink, pm, user_ctx, false);
+  return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, user_ctx, false, true);
 }
 
 PolyUOp *poly_graph_rewrite(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm) {
-  return poly_graph_rewrite_ctx_ex(ctx, sink, pm, NULL, false);
+  return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, NULL, false, true);
 }
 
 PolyUOp *poly_graph_rewrite_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
                                bool bottom_up) {
-  return poly_graph_rewrite_ctx_ex(ctx, sink, pm, NULL, bottom_up);
+  return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, NULL, bottom_up, true);
 }
 
 /* ── UOp helpers for rewrite callbacks ────────────────────────────────── */

@@ -96,6 +96,9 @@ PolyUOp *poly_graph_rewrite_ctx(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher 
                                 void *user_ctx);
 PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
                                    void *user_ctx, bool bottom_up);
+/* Full variant: enter_calls=false skips CALL src[0] (callee body). */
+PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
+                                    void *user_ctx, bool bottom_up, bool enter_calls);
 /* Legacy convenience wrapper (no user context). */
 PolyUOp *poly_graph_rewrite(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm);
 PolyUOp *poly_graph_rewrite_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,

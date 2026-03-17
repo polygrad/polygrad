@@ -398,8 +398,12 @@ PolyUOp *poly_uop1(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyA
 PolyUOp *poly_uop2(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyUOp *s1, PolyArg arg);
 PolyUOp *poly_uop3(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyUOp *s1, PolyUOp *s2, PolyArg arg);
 
-/* Toposort: returns arena-allocated array of UOp pointers, sets *n_out */
+/* Toposort: returns arena-allocated array of UOp pointers, sets *n_out.
+ * _ex variant: gate callback (NULL=visit all, return false to skip subtree),
+ * enter_calls (false = skip CALL src[0], process src[1:] only). */
 PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out);
+PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
+                           bool (*gate)(PolyUOp *), bool enter_calls);
 
 /* Pretty-print a UOp graph to a buffer (returns malloc'd string, caller frees) */
 char *poly_uop_str(PolyUOp *u);
