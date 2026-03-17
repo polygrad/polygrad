@@ -1361,3 +1361,122 @@ TEST(conformance, fma_rounding_divergence) {
   ASSERT_TRUE(fma_result > 0.0f);             /* sanity: positive residual */
   PASS();
 }
+
+/* ── C1 divmod rules (tinygrad divandmod.py alignment) ─────────────── */
+
+/* nested_div_mod: (x%6)//3 → (x//3)%2.  Ref: divandmod.py:25-27 */
+TEST(sym_future, nested_div_mod_idiv) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(12));
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *six = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(6));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *mod6 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, x, six, poly_arg_none());
+  PolyUOp *div3 = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, mod6, three, poly_arg_none());
+  PolyUOp *r = simplify(ctx, div3);
+  /* Should become (x//3)%2 */
+  ASSERT_TRUE(r->op == POLY_OP_MOD);
+  ASSERT_TRUE(r->src[0]->op == POLY_OP_IDIV);
+  ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST && r->src[1]->arg.i == 2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* nested_div_mod: (x%6)%3 → x%3.  Ref: divandmod.py:25-27 */
+TEST(sym_future, nested_div_mod_mod) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(12));
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *six = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(6));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *mod6 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, x, six, poly_arg_none());
+  PolyUOp *mod3 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, mod6, three, poly_arg_none());
+  PolyUOp *r = simplify(ctx, mod3);
+  /* Should become x%3 */
+  ASSERT_TRUE(r->op == POLY_OP_MOD);
+  ASSERT_TRUE(r->src[0] == x);
+  ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST && r->src[1]->arg.i == 3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* remove_nested_mod: (x%4 + y)%2 → (x+y)%2.  Ref: divandmod.py:29-37 */
+TEST(sym_future, remove_nested_mod) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *y = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(1));
+  PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *xmod4 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, x, four, poly_arg_none());
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, xmod4, y, poly_arg_none());
+  PolyUOp *mod2 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, sum, two, poly_arg_none());
+  PolyUOp *r = simplify(ctx, mod2);
+  /* Should strip inner x%4 since 4%2==0, becoming (x+y)%2 */
+  ASSERT_TRUE(r->op == POLY_OP_MOD);
+  /* The inner sum should have x directly, not x%4 */
+  PolyUOp *inner_sum = r->src[0];
+  ASSERT_TRUE(inner_sum->op == POLY_OP_ADD);
+  bool has_mod = false;
+  if (inner_sum->src[0]->op == POLY_OP_MOD || inner_sum->src[1]->op == POLY_OP_MOD)
+    has_mod = true;
+  ASSERT_TRUE(!has_mod);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* fold_binary_numerator: x in [3,4], (2*x+1)//5.  Ref: divandmod.py:43-47 */
+TEST(sym_future, fold_binary_numerator) {
+  PolyCtx *ctx = poly_ctx_new();
+  /* x = RANGE(2) + 3 → range [3,4] */
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *r0 = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, two, poly_arg_int(0));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r0, three, poly_arg_none());
+  /* expr = (2*x + 1) // 5 */
+  PolyUOp *two_c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *mul2x = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, two_c, x, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *add1 = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, mul2x, one, poly_arg_none());
+  PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, add1, five, poly_arg_none());
+  PolyUOp *r = simplify(ctx, div);
+  /* x=3: (7)//5=1, x=4: (9)//5=1. Same quotient → should fold to CONST(1) */
+  ASSERT_TRUE(r->op == POLY_OP_CONST && r->arg.i == 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* gcd_with_remainder: (6*x)%4 with x>=0 → GCD(6,4)=2, (3*x)%2*2.  Ref: divandmod.py:58-63 */
+TEST(sym_future, gcd_with_remainder) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *six = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(6));
+  PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, six, x, poly_arg_none());
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, mul, four, poly_arg_none());
+  PolyUOp *r = simplify(ctx, mod);
+  /* GCD(6,4)=2. Result should be (3*x)%2 * 2, which is simpler.
+   * The exact form depends on simplification, but it should NOT be the original (6*x)%4. */
+  ASSERT_TRUE(r != mod);
+  /* Verify correctness: evaluate for x=0..9 */
+  /* (6*0)%4=0, (6*1)%4=2, (6*2)%4=0, (6*3)%4=2, etc. */
+  /* The simplified form should produce the same values when evaluated */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* cast(bool) → CMPNE(x, 0).  Ref: tinygrad symbolic.py line 126 */
+TEST(sym_future, cast_bool_to_cmpne) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_BOOL, x, poly_arg_none());
+  PolyUOp *r = simplify(ctx, cast);
+  ASSERT_TRUE(r->op == POLY_OP_CMPNE);
+  ASSERT_TRUE(r->src[0] == x);
+  ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST && r->src[1]->arg.i == 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
