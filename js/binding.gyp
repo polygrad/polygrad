@@ -7,6 +7,7 @@
         "csrc/alu.c",
         "csrc/arena.c",
         "csrc/autograd.c",
+        "csrc/bundle.c",
         "csrc/cJSON.c",
         "csrc/codegen.c",
         "csrc/dtype.c",

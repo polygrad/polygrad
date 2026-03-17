@@ -135,6 +135,12 @@ typedef struct {
   /* Fixed vars for this item (from BIND stripping) */
   struct PolyVarBinding *fixedvars;
   int n_fixedvars;
+
+  /* DEFINE_VAR UOps for this kernel's var parameters.
+   * At execution time, var values are resolved from var_bindings by
+   * matching these UOp pointers. */
+  PolyUOp **var_uops;
+  int n_var_uops;
 } PolyExecItem;
 
 /* ── Prepared step ───────────────────────────────────────────────────── */

@@ -2280,21 +2280,14 @@ static int realize_impl(PolyCtx *ctx, PolyUOp *tensor_sink,
 
 /* poly_realize and helpers moved below #endif to be available in all builds */
 
-/* ── Compiled Step (persistent sched-cache entry) ──────────────────────
+/* ── Compiled Step ─────────────────────────────────────────────────────
  *
- * PolyStep is a first-class compiled execution step. It pre-compiles all
- * kernels, pre-allocates intermediates, and stores the binding layout so
- * poly_step_run() has zero scheduling overhead. Mirrors the existing
- * sched_cache_put + realize_from_sched_cache fast path, but made durable.
+ * PolyStep is a thin wrapper over the exec_plan infrastructure.
+ * poly_compile_step() schedules and compiles via poly_schedule_for() +
+ * poly_compile_schedule(). poly_step_run() delegates to
+ * poly_compiled_plan_run(). Buffer metadata and pre-strip buf_order
+ * are kept for backward-compatible query APIs.
  */
-
-typedef struct {
-  PolyProgram *prog;       /* compiled kernel (owned by step) */
-  int n_params;            /* buffer params */
-  int n_vars;              /* DEFINE_VAR params */
-  ParamMapping *mappings;  /* malloc'd [n_params] */
-  PolyUOp **var_ptrs;      /* malloc'd [n_vars] */
-} PolyStepKernel;
 
 typedef struct {
   PolyStepBufRole role;
@@ -2304,22 +2297,17 @@ typedef struct {
 } PolyStepBufMeta;
 
 struct PolyStep {
-  PolyCtx *ctx;                  /* owning context (for constant auto-bind lookup) */
-  int n_kernels;
-  PolyStepKernel *kernels;      /* malloc'd [n_kernels] */
-  int *exec_order;              /* malloc'd [n_kernels] */
-  int n_bufs;                   /* total BUFFER nodes in DFS order */
-  PolyUOp **buf_order;          /* malloc'd [n_bufs] -- DFS buffer ordering */
-  int n_output_bufs;            /* prefix of buf_order that are outputs */
-  PolyStepBufMeta *buf_meta;    /* malloc'd [n_bufs + n_intermediates] */
-  int n_total_buf_meta;         /* external + intermediates */
+  PolyCtx *ctx;
+  PolySchedule *schedule;        /* owned, from poly_schedule_for */
+  PolyCompiledPlan *plan;        /* owned, from poly_compile_schedule */
 
-  int n_intermediates;
-  void **intermediates;         /* malloc'd array of malloc'd buffers */
-  size_t *intermediate_bytes;   /* precomputed: (size_t)size * itemsize */
+  /* Pre-strip buffer ordering for callers that bind by original UOp pointer */
+  int n_bufs;
+  PolyUOp **buf_order;           /* malloc'd [n_bufs] */
 
-  int n_default_vars;
-  PolyVarBinding *default_vars; /* malloc'd [n_default_vars] -- BIND defaults */
+  /* Query API metadata */
+  PolyStepBufMeta *buf_meta;     /* malloc'd [n_buf_slots] */
+  int n_total_buf_meta;
 
   uint32_t graph_hash;
 };
@@ -2331,258 +2319,79 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
     return NULL;
   }
 
-  /* Collect DFS buffer ordering BEFORE poly_strip_bind_values.
-   * Callers know the original BUFFER UOp pointers (pre-strip).
-   * poly_strip_bind_values may rewrite BUFFERs that have BIND sources,
-   * producing new UOp pointers. We store the pre-strip ordering in
-   * the step so runtime poly_find_buf_position matches caller pointers. */
-  PolyUOp **buf_order_orig = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
-  PolyUOp **dfs_visited = calloc(POLY_MAX_STRUCT_NODES, sizeof(PolyUOp *));
-  int n_bufs_orig = 0, n_dfs = 0;
-  poly_collect_buf_order(tensor_sink, buf_order_orig, &n_bufs_orig, dfs_visited, &n_dfs);
-  PolyUOp *output_bufs[POLY_MAX_REALIZE_BUFS];
-  int n_output_bufs = poly_collect_output_buffers_in_sink(tensor_sink, output_bufs, POLY_MAX_REALIZE_BUFS);
+  /* Schedule via exec_plan (handles BIND stripping, buffer ordering,
+   * intermediate allocation, kernel scheduling internally) */
+  PolySchedule *sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
+  if (!sched) return NULL;
 
-  /* Strip BIND values, extract compile-time defaults (same as realize_impl) */
-  PolyVarBinding bind_vals[16];
-  int n_bind_vals = 0;
-  tensor_sink = poly_strip_bind_values(ctx, tensor_sink, bind_vals, &n_bind_vals, 16,
-                                   NULL, 0);
-
-  /* Collect DFS buffer ordering AFTER strip for mapping build.
-   * The scheduler operates on the post-strip graph, so param_to_buf
-   * references post-strip BUFFER pointers. */
-  PolyUOp **buf_order_post = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
-  int n_bufs_post = 0;
-  n_dfs = 0;
-  poly_collect_buf_order(tensor_sink, buf_order_post, &n_bufs_post, dfs_visited, &n_dfs);
-  free(dfs_visited);
-
-  uint32_t graph_hash = poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-
-  /* Schedule */
-  PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
-  if (sr.n_kernels < 1) {
-    free(buf_order_orig); free(buf_order_post);
-    poly_schedule_result_free(&sr);
+  /* Compile for CPU via exec_plan backend vtable */
+  PolyCompiledPlan *plan = poly_compile_schedule(ctx, sched, POLY_DEVICE_CPU);
+  if (!plan) {
+    poly_schedule_free(sched);
     return NULL;
   }
 
-  /* Allocate step */
+  /* Allocate step wrapper */
   PolyStep *step = calloc(1, sizeof(PolyStep));
-  if (!step) { poly_schedule_result_free(&sr); return NULL; }
-  step->n_kernels = sr.n_kernels;
+  if (!step) {
+    poly_compiled_plan_free(plan);
+    poly_schedule_free(sched);
+    return NULL;
+  }
   step->ctx = ctx;
-  step->kernels = calloc((size_t)sr.n_kernels, sizeof(PolyStepKernel));
-  step->graph_hash = graph_hash;
+  step->schedule = sched;
+  step->plan = plan;
+  step->graph_hash = sched->graph_hash;
 
-  /* Copy BIND defaults */
-  step->n_default_vars = n_bind_vals;
-  if (n_bind_vals > 0) {
-    step->default_vars = malloc((size_t)n_bind_vals * sizeof(PolyVarBinding));
-    memcpy(step->default_vars, bind_vals, (size_t)n_bind_vals * sizeof(PolyVarBinding));
+  /* Build pre-strip buf_order from schedule's external buf_slots.
+   * poly_schedule_for stores pre-strip buf_uop pointers in external slots. */
+  int n_external = 0;
+  for (int i = 0; i < sched->n_buf_slots; i++)
+    if (!sched->buf_slots[i].is_intermediate) n_external++;
+
+  step->n_bufs = n_external;
+  if (n_external > 0) {
+    step->buf_order = malloc((size_t)n_external * sizeof(PolyUOp *));
+    int idx = 0;
+    for (int i = 0; i < sched->n_buf_slots; i++)
+      if (!sched->buf_slots[i].is_intermediate)
+        step->buf_order[idx++] = sched->buf_slots[i].buf_uop;
   }
 
-  /* Store pre-strip buffer ordering (for runtime poly_find_buf_position) */
-  step->n_bufs = n_bufs_orig;
-  step->n_output_bufs = n_output_bufs;
-  if (step->n_output_bufs > step->n_bufs) step->n_output_bufs = step->n_bufs;
-  if (n_bufs_orig > 0) {
-    step->buf_order = malloc((size_t)n_bufs_orig * sizeof(PolyUOp *));
-    memcpy(step->buf_order, buf_order_orig, (size_t)n_bufs_orig * sizeof(PolyUOp *));
-  }
-
-  /* Pre-allocate intermediates with overflow guard */
-  step->n_intermediates = sr.n_intermediates;
-  if (sr.n_intermediates > 0) {
-    step->intermediate_bytes = malloc((size_t)sr.n_intermediates * sizeof(size_t));
-    step->intermediates = calloc((size_t)sr.n_intermediates, sizeof(void *));
-    for (int b = 0; b < sr.n_intermediates; b++) {
-      int itemsize = (sr.intermediate_itemsizes && sr.intermediate_itemsizes[b] > 0)
-                       ? sr.intermediate_itemsizes[b] : (int)sizeof(float);
-      int64_t sz = sr.intermediate_sizes[b];
-      if (sz > 0 && (size_t)sz > SIZE_MAX / (size_t)itemsize) {
-        fprintf(stderr, "polygrad: compile_step: intermediate %d overflow (%lld * %d)\n",
-                b, (long long)sz, itemsize);
-        goto cleanup;
-      }
-      step->intermediate_bytes[b] = (size_t)sz * (size_t)itemsize;
-      step->intermediates[b] = calloc((size_t)sz, (size_t)itemsize);
-      if (!step->intermediates[b]) goto cleanup;
-    }
-  }
-
-  /* Build stable buffer metadata table:
-   *   [0..n_bufs)                    -> external buffers (input/output)
-   *   [n_bufs..n_bufs+n_intermediates) -> temporaries */
-  step->n_total_buf_meta = step->n_bufs + step->n_intermediates;
-  if (step->n_total_buf_meta > 0) {
-    step->buf_meta = calloc((size_t)step->n_total_buf_meta, sizeof(PolyStepBufMeta));
-    if (!step->buf_meta) goto cleanup;
-  }
-  for (int i = 0; i < step->n_bufs; i++) {
-    PolyUOp *buf = step->buf_order ? step->buf_order[i] : NULL;
-    PolyStepBufMeta *m = &step->buf_meta[i];
-    bool is_output = false;
-    for (int j = 0; j < step->n_output_bufs; j++) {
-      if (output_bufs[j] == buf) { is_output = true; break; }
-    }
-    if (is_output) m->role = POLY_STEP_BUF_OUTPUT;
-    else if (const_registry_has(ctx, buf)) m->role = POLY_STEP_BUF_CONSTANT;
-    else m->role = POLY_STEP_BUF_INPUT;
-    m->dtype = buf ? poly_dtype_scalar(buf->dtype) : POLY_FLOAT32;
-    m->numel = (buf && buf->arg.kind == POLY_ARG_INT) ? buf->arg.i : 0;
-    if (m->numel > 0) m->nbytes = m->numel * poly_dtype_itemsize(m->dtype);
-  }
-  for (int b = 0; b < step->n_intermediates; b++) {
-    int idx = step->n_bufs + b;
-    PolyStepBufMeta *m = &step->buf_meta[idx];
-    m->role = POLY_STEP_BUF_TEMP;
-    if (sr.intermediate_buf_uops && sr.intermediate_buf_uops[b]) {
-      m->dtype = poly_dtype_scalar(sr.intermediate_buf_uops[b]->dtype);
-    } else {
-      m->dtype = POLY_FLOAT32;
-    }
-    m->numel = sr.intermediate_sizes ? sr.intermediate_sizes[b] : 0;
-    m->nbytes = (int64_t)(step->intermediate_bytes ? step->intermediate_bytes[b] : 0);
-  }
-
-  /* Build intermediate lookup (same as realize_impl's inter_set) */
-  PolyMap *inter_set = NULL;
-  if (sr.n_intermediates > 0 && sr.intermediate_buf_uops) {
-    inter_set = poly_map_new((size_t)(sr.n_intermediates < 4 ? 4 : sr.n_intermediates));
-    for (int b = 0; b < sr.n_intermediates; b++) {
-      PolyUOp *ib = sr.intermediate_buf_uops[b];
-      poly_map_set(inter_set, poly_ptr_hash(ib), ib,
-                   (PolyUOp *)(intptr_t)(b + 1), poly_ptr_eq);
-    }
-  }
-
-  /* For each kernel: validate, compile, build mapping */
-  static int step_counter = 0;
-  for (int k = 0; k < sr.n_kernels; k++) {
-    PolyStepKernel *sk = &step->kernels[k];
-
-    if (!poly_validate_kernel_graph(ctx, sr.kernels[k])) {
-      fprintf(stderr, "polygrad: compile_step: kernel %d validation failed\n", k);
-      if (inter_set) poly_map_destroy(inter_set);
-      goto cleanup;
-    }
-
-    int n_lin;
-    PolyUOp **lin = poly_linearize(ctx, sr.kernels[k], &n_lin);
-    if (!lin) { if (inter_set) poly_map_destroy(inter_set); goto cleanup; }
-
-    char fn_name[64];
-    snprintf(fn_name, sizeof(fn_name), "step%d_k%d", step_counter, k);
-    char *src = poly_render_c(lin, n_lin, fn_name);
-    free(lin);
-    if (!src) { if (inter_set) poly_map_destroy(inter_set); goto cleanup; }
-
-    if (getenv("POLY_DUMP_KERNELS"))
-      fprintf(stderr, "=== STEP KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
-
-    sk->prog = poly_compile_c(src, fn_name);
-    if (!sk->prog) {
-      fprintf(stderr, "=== FAILED STEP KERNEL %d ===\n%s\n=== END ===\n", k, src);
-      free(src);
-      if (inter_set) poly_map_destroy(inter_set);
-      goto cleanup;
-    }
-    free(src);
-
-    /* Build ParamMapping (same logic as sched_cache_put) */
-    int np = sr.kernel_n_params[k];
-    sk->n_params = np;
-    sk->mappings = calloc((size_t)np, sizeof(ParamMapping));
-    for (int i = 0; i < np; i++) {
-      PolyUOp *buf = sr.param_to_buf[k][i];
-      sk->mappings[i].buf_position = -1;
-      sk->mappings[i].intermediate_idx = -1;
-
-      if (buf->op == POLY_OP_BUFFER) {
-        int pos = poly_find_buf_position(buf, buf_order_post, n_bufs_post);
-        if (pos >= 0) {
-          sk->mappings[i].buf_position = pos;
-        } else if (inter_set) {
-          PolyUOp *v = poly_map_get(inter_set, poly_ptr_hash(buf), buf, poly_ptr_eq);
-          if (v) sk->mappings[i].intermediate_idx = (int)((intptr_t)v - 1);
+  /* Build buffer metadata from schedule buf_slots */
+  step->n_total_buf_meta = sched->n_buf_slots;
+  if (sched->n_buf_slots > 0) {
+    step->buf_meta = calloc((size_t)sched->n_buf_slots, sizeof(PolyStepBufMeta));
+    for (int i = 0; i < sched->n_buf_slots; i++) {
+      PolyScheduleBufSlot *slot = &sched->buf_slots[i];
+      PolyStepBufMeta *m = &step->buf_meta[i];
+      if (slot->is_intermediate) {
+        m->role = POLY_STEP_BUF_TEMP;
+      } else {
+        /* Determine role: output if it's a SINK source's STORE target */
+        PolyUOp *buf = slot->buf_uop;
+        bool is_output = false;
+        if (tensor_sink->op == POLY_OP_SINK) {
+          for (int s = 0; s < tensor_sink->n_src; s++) {
+            PolyUOp *st = tensor_sink->src[s];
+            if (st && st->op == POLY_OP_STORE && st->n_src > 0 &&
+                st->src[0] == buf) {
+              is_output = true;
+              break;
+            }
+          }
         }
+        if (is_output) m->role = POLY_STEP_BUF_OUTPUT;
+        else if (const_registry_has(ctx, buf)) m->role = POLY_STEP_BUF_CONSTANT;
+        else m->role = POLY_STEP_BUF_INPUT;
       }
-      if (sk->mappings[i].buf_position < 0 &&
-          sk->mappings[i].intermediate_idx < 0) {
-        fprintf(stderr, "polygrad: compile_step: unresolved param %d in kernel %d "
-                "(buf=%p, op=%s)\n",
-                i, k, (void*)buf, poly_op_name(buf->op));
-        if (inter_set) poly_map_destroy(inter_set);
-        goto cleanup;
-      }
-    }
-
-    /* Build var mapping (malloc'd, no caps) */
-    int nv = (sr.kernel_n_vars ? sr.kernel_n_vars[k] : 0);
-    sk->n_vars = nv;
-    if (nv > 0) {
-      sk->var_ptrs = malloc((size_t)nv * sizeof(PolyUOp *));
-      for (int v = 0; v < nv; v++) {
-        sk->var_ptrs[v] = (sr.var_to_buf && sr.var_to_buf[k])
-                            ? sr.var_to_buf[k][v] : NULL;
-        if (!sk->var_ptrs[v]) {
-          fprintf(stderr, "polygrad: compile_step: NULL var %d in kernel %d\n", v, k);
-          if (inter_set) poly_map_destroy(inter_set);
-          goto cleanup;
-        }
-      }
+      m->dtype = slot->dtype;
+      m->numel = slot->numel;
+      m->nbytes = slot->nbytes;
     }
   }
-  step_counter++;
 
-  if (inter_set) poly_map_destroy(inter_set);
-
-  /* Deep-copy exec_order */
-  step->exec_order = malloc((size_t)sr.n_kernels * sizeof(int));
-  if (sr.exec_order)
-    memcpy(step->exec_order, sr.exec_order, (size_t)sr.n_kernels * sizeof(int));
-  else
-    for (int k = 0; k < sr.n_kernels; k++) step->exec_order[k] = k;
-
-  if (getenv("POLY_DEBUG_STEP")) {
-    fprintf(stderr, "[compile_step] exec_order:");
-    for (int k = 0; k < sr.n_kernels; k++)
-      fprintf(stderr, " %d", step->exec_order[k]);
-    fprintf(stderr, "\n");
-  }
-
-  free(buf_order_orig);
-  free(buf_order_post);
-  poly_schedule_result_free(&sr);
   return step;
-
-cleanup:
-  free(buf_order_orig);
-  free(buf_order_post);
-  if (step->kernels) {
-    for (int k = 0; k < sr.n_kernels; k++) {
-      PolyStepKernel *sk = &step->kernels[k];
-      if (sk->prog) poly_program_destroy(sk->prog);
-      free(sk->mappings);
-      free(sk->var_ptrs);
-    }
-    free(step->kernels);
-  }
-  if (step->intermediates) {
-    for (int b = 0; b < step->n_intermediates; b++)
-      free(step->intermediates[b]);
-    free(step->intermediates);
-  }
-  free(step->intermediate_bytes);
-  free(step->default_vars);
-  free(step->exec_order);
-  free(step->buf_order);
-  free(step->buf_meta);
-  free(step);
-  poly_schedule_result_free(&sr);
-  return NULL;
 }
 
 static int64_t static_numel_of_uop(PolyCtx *ctx, PolyUOp *u) {
@@ -2704,108 +2513,31 @@ PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
 int poly_step_run_ex(PolyStep *step,
                      PolyBufferBinding *bindings, int n_bindings,
                      PolyVarBinding *var_bindings, int n_var_bindings) {
-  if (!step) return -1;
+  if (!step || !step->schedule || !step->plan) return -1;
 
-  /* Zero all intermediate buffers (needed for REDUCE accumulators) */
-  for (int b = 0; b < step->n_intermediates; b++)
-    memset(step->intermediates[b], 0, step->intermediate_bytes[b]);
+  /* Map caller's bindings (keyed by pre-strip buf_uop pointers) to
+   * schedule buf_slot indices, then delegate to poly_compiled_plan_run. */
+  PolySchedule *sched = step->schedule;
+  int n_slots = sched->n_buf_slots;
+  void **slot_data = calloc((size_t)(n_slots > 0 ? n_slots : 1), sizeof(void *));
+  if (!slot_data) return -1;
 
-  /* Merge default vars with runtime overrides (overrides win).
-   * Same pattern as realize_impl's BIND merge. */
-  PolyVarBinding all_var_vals[32];
-  int n_all_vars = 0;
-  for (int i = 0; i < step->n_default_vars && n_all_vars < 32; i++)
-    all_var_vals[n_all_vars++] = step->default_vars[i];
-  for (int i = 0; i < n_var_bindings && n_all_vars < 32; i++) {
-    bool found = false;
-    for (int j = 0; j < n_all_vars; j++) {
-      if (all_var_vals[j].var == var_bindings[i].var) {
-        all_var_vals[j].value = var_bindings[i].value;
-        found = true;
-        break;
-      }
-    }
-    if (!found) all_var_vals[n_all_vars++] = var_bindings[i];
-  }
-
-  /* Build pos_to_data[] from bindings (same as realize_from_sched_cache) */
-  void *pos_to_data[POLY_MAX_REALIZE_BUFS];
-  memset(pos_to_data, 0, sizeof(pos_to_data));
-  if (getenv("POLY_DEBUG_STEP")) {
-    fprintf(stderr, "[step_run] n_bufs=%d n_bindings=%d\n", step->n_bufs, n_bindings);
-    for (int p = 0; p < step->n_bufs; p++)
-      fprintf(stderr, "  buf_order[%d] = %p (op=%s)\n", p, (void*)step->buf_order[p],
-              poly_op_name(step->buf_order[p]->op));
-    for (int j = 0; j < n_bindings; j++)
-      fprintf(stderr, "  binding[%d] = buf=%p data=%p\n", j,
-              (void*)bindings[j].buffer, bindings[j].handle.ptr);
-  }
+  /* Fill external slots from bindings */
   for (int j = 0; j < n_bindings; j++) {
     int pos = poly_find_buf_position(bindings[j].buffer, step->buf_order, step->n_bufs);
-    if (pos >= 0) pos_to_data[pos] = bindings[j].handle.ptr;
-    else if (getenv("POLY_DEBUG_STEP"))
-      fprintf(stderr, "  binding[%d] NOT FOUND in buf_order!\n", j);
+    if (pos >= 0 && pos < n_slots)
+      slot_data[pos] = bindings[j].handle.ptr;
   }
 
-  /* Execute kernels in exec_order */
-  int ret = 0;
-  int var_int_storage[16]; /* persists through _call dispatch */
-  for (int s = 0; s < step->n_kernels && ret == 0; s++) {
-    int k = step->exec_order[s];
-    PolyStepKernel *sk = &step->kernels[k];
-    int n_total = sk->n_params + sk->n_vars;
-    int n_var_ints = 0;
-
-    void **args = calloc((size_t)n_total, sizeof(void *));
-
-    /* Fill buffer params via ParamMapping (O(1) per param) */
-    for (int i = 0; i < sk->n_params; i++) {
-      ParamMapping *m = &sk->mappings[i];
-      if (m->buf_position >= 0 && m->buf_position < step->n_bufs) {
-        args[i] = pos_to_data[m->buf_position];
-      } else if (step->intermediates && m->intermediate_idx >= 0 &&
-                 m->intermediate_idx < step->n_intermediates) {
-        args[i] = step->intermediates[m->intermediate_idx];
-      }
-      if (!args[i] && m->buf_position >= 0 && m->buf_position < step->n_bufs) {
-        PolyUOp *buf = step->buf_order[m->buf_position];
-        args[i] = const_registry_lookup(step->ctx, buf);
-      }
-      if (!args[i]) {
-        fprintf(stderr, "polygrad: step_run: missing binding for param %d kernel %d "
-                "(pos=%d, inter=%d)\n",
-                i, k, m->buf_position, m->intermediate_idx);
-        ret = -1; free(args); args = NULL; break;
-      }
-    }
-
-    /* Fill var params (same int* semantics as realize_from_sched_cache) */
-    if (ret == 0 && args && sk->n_vars > 0) {
-      for (int v = 0; v < sk->n_vars; v++) {
-        PolyUOp *var = sk->var_ptrs[v];
-        bool found = false;
-        for (int vb = 0; vb < n_all_vars; vb++) {
-          if (all_var_vals[vb].var == var) {
-            var_int_storage[n_var_ints] = (int)all_var_vals[vb].value;
-            args[sk->n_params + v] = &var_int_storage[n_var_ints];
-            n_var_ints++;
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          fprintf(stderr, "polygrad: step_run: no binding for DEFINE_VAR in kernel %d\n", k);
-          ret = -1; free(args); args = NULL; break;
-        }
-      }
-    }
-
-    if (ret == 0 && args) {
-      poly_program_call(sk->prog, args, n_total);
-      free(args);
-    }
+  /* Fill const-registry entries for unbound external slots */
+  for (int i = 0; i < n_slots; i++) {
+    if (!slot_data[i] && !sched->buf_slots[i].is_intermediate && step->ctx)
+      slot_data[i] = const_registry_lookup(step->ctx, sched->buf_slots[i].buf_uop);
   }
 
+  int ret = poly_compiled_plan_run(step->plan, slot_data, n_slots,
+                                   var_bindings, n_var_bindings);
+  free(slot_data);
   return ret;
 }
 
@@ -2838,28 +2570,23 @@ int poly_step_run_indexed(PolyStep *step, void **buffer_data, int n_buffers) {
 
 void poly_step_destroy(PolyStep *step) {
   if (!step) return;
-  for (int k = 0; k < step->n_kernels; k++) {
-    PolyStepKernel *sk = &step->kernels[k];
-    if (sk->prog) poly_program_destroy(sk->prog);
-    free(sk->mappings);
-    free(sk->var_ptrs);
-  }
-  free(step->kernels);
-  free(step->exec_order);
+  if (step->plan) poly_compiled_plan_free(step->plan);
+  if (step->schedule) poly_schedule_free(step->schedule);
   free(step->buf_order);
-  if (step->intermediates) {
-    for (int b = 0; b < step->n_intermediates; b++)
-      free(step->intermediates[b]);
-    free(step->intermediates);
-  }
-  free(step->intermediate_bytes);
-  free(step->default_vars);
   free(step->buf_meta);
   free(step);
 }
 
-int poly_step_n_kernels(const PolyStep *step) { return step ? step->n_kernels : 0; }
-int poly_step_n_intermediates(const PolyStep *step) { return step ? step->n_intermediates : 0; }
+int poly_step_n_kernels(const PolyStep *step) {
+  return (step && step->schedule) ? step->schedule->n_items : 0;
+}
+int poly_step_n_intermediates(const PolyStep *step) {
+  if (!step || !step->schedule) return 0;
+  int n = 0;
+  for (int i = 0; i < step->schedule->n_buf_slots; i++)
+    if (step->schedule->buf_slots[i].is_intermediate) n++;
+  return n;
+}
 int poly_step_n_buffers(const PolyStep *step) { return step ? step->n_total_buf_meta : 0; }
 int poly_step_n_bindable_buffers(const PolyStep *step) { return step ? step->n_bufs : 0; }
 

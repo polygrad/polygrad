@@ -171,6 +171,14 @@ PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
         goto cleanup;
       }
     }
+
+    /* Store DEFINE_VAR UOp pointers for this kernel */
+    int nv = (sr.kernel_n_vars ? sr.kernel_n_vars[k] : 0);
+    item->n_var_uops = nv;
+    if (nv > 0 && sr.var_to_buf && sr.var_to_buf[k]) {
+      item->var_uops = malloc((size_t)nv * sizeof(PolyUOp *));
+      memcpy(item->var_uops, sr.var_to_buf[k], (size_t)nv * sizeof(PolyUOp *));
+    }
   }
 
   if (inter_set) poly_map_destroy(inter_set);
@@ -199,8 +207,10 @@ cleanup:
 
 void poly_schedule_free(PolySchedule *step) {
   if (!step) return;
-  for (int i = 0; i < step->n_items; i++)
+  for (int i = 0; i < step->n_items; i++) {
     free(step->items[i].buf_slot_indices);
+    free(step->items[i].var_uops);
+  }
   free(step->items);
   free(step->buf_slots);
   free(step->exec_order);
@@ -811,11 +821,12 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
       ret = -1; break;
     }
 
-    (void)all_vars;
-    (void)n_all;
-
-    int n_args = runner->n_params;
-    void **args = calloc((size_t)n_args, sizeof(void *));
+    PolyExecItem *item = &sched->items[k];
+    int n_vars = item->n_var_uops;
+    int n_args = runner->n_params + n_vars;
+    void **args = calloc((size_t)(n_args > 0 ? n_args : 1), sizeof(void *));
+    int var_int_storage[16];
+    int n_var_ints = 0;
 
     for (int i = 0; i < runner->n_params; i++) {
       int slot = runner->param_to_slot[i];
@@ -825,6 +836,28 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
         fprintf(stderr, "polygrad: plan_run: missing data for param %d "
                 "(slot %d) in kernel %d\n", i, slot, k);
         ret = -1; free(args); args = NULL; break;
+      }
+    }
+
+    /* Fill var params (DEFINE_VAR values as int* pointers) */
+    if (ret == 0 && args && n_vars > 0 && item->var_uops) {
+      for (int v = 0; v < n_vars && n_var_ints < 16; v++) {
+        PolyUOp *var = item->var_uops[v];
+        bool found = false;
+        for (int vb = 0; vb < n_all; vb++) {
+          if (all_vars[vb].var == var) {
+            var_int_storage[n_var_ints] = (int)all_vars[vb].value;
+            args[runner->n_params + v] = &var_int_storage[n_var_ints];
+            n_var_ints++;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          fprintf(stderr, "polygrad: plan_run: no binding for DEFINE_VAR "
+                  "in kernel %d\n", k);
+          ret = -1; free(args); args = NULL; break;
+        }
       }
     }
 
