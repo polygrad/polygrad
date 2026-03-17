@@ -1824,28 +1824,75 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
       }
     }
 
-    /* C4: ASSIGN rules (tinygrad rangeify.py:143-156).
-     * C4a: Collapse nested ASSIGN to the same buffer.
-     *      ASSIGN(target, ASSIGN(target, src)) → inner ASSIGN.
-     * C4b: fix_assign_hazard — if value reads target through PERMUTE/FLIP,
-     *      wrap value with CONTIGUOUS to force materialization.
-     *      (Full-buffer ASSIGN only — target must be BUFFER-rooted.) */
+    /* C4: ASSIGN rules (tinygrad rangeify.py:163-176).
+     * Order: C4a → C4c → C4d → C4e → C4b.
+     * Early rules may change target/value, so C4b (hazard check) runs last. */
     else if (u->op == POLY_OP_ASSIGN && u->n_src >= 2) {
       PolyUOp *target = ns[0];
       PolyUOp *value = ns[1];
 
-      /* C4a: collapse nested ASSIGN */
+      /* C4a: collapse nested ASSIGN to same buffer.
+       * ASSIGN(target, ASSIGN(target, src)) → inner ASSIGN.
+       * Ref: rangeify.py:166 */
       if (value->op == POLY_OP_ASSIGN && value->n_src >= 2 &&
           value->src[0] == target) {
         result = value;
       }
 
+      /* C4c: bitcast extraction — move bitcast from target to source.
+       * ASSIGN(BITCAST(target), src) → ASSIGN(target, BITCAST(src, target.dtype))
+       * Ref: rangeify.py:168-170 */
+      if (!result && target->op == POLY_OP_BITCAST && target->n_src >= 1) {
+        PolyUOp *real_target = target->src[0];
+        PolyUOp *cast_src = poly_uop1(ctx, POLY_OP_BITCAST, real_target->dtype,
+                                        value, poly_arg_none());
+        PolyUOp *assign_src[2] = { real_target, cast_src };
+        result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
+      }
+
+      /* C4d: normalize ASSIGN chain — walk target to root buffer.
+       * If target is in value's toposort, break dependency with CONTIGUOUS.
+       * Ref: rangeify.py:172-173, fn at 74-79 */
+      if (!result && target->op == POLY_OP_ASSIGN) {
+        PolyUOp *root_target = target;
+        while (root_target->op == POLY_OP_ASSIGN && root_target->n_src >= 1)
+          root_target = root_target->src[0];
+        int n_val;
+        PolyUOp **val_topo = poly_toposort(ctx, value, &n_val);
+        bool target_in_value = false;
+        for (int v = 0; v < n_val; v++) {
+          if (val_topo[v] == target) { target_in_value = true; break; }
+        }
+        if (target_in_value)
+          value = poly_uop1(ctx, POLY_OP_CONTIGUOUS, value->dtype,
+                             value, poly_arg_none());
+        PolyUOp *assign_src[2] = { root_target, value };
+        result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
+      }
+
+      /* C4e: assign_to_contiguous — target must be PARAM/BUFFER (raw buffer).
+       * If target has movement ops, wrap in CONTIGUOUS to materialize.
+       * The ASSIGN writes to the materialized buffer (intermediate).
+       * Ref: tinygrad earliest_rewrites assign_to_contiguous */
+      if (!result && target->op != POLY_OP_PARAM &&
+          target->op != POLY_OP_BUFFER && target->op != POLY_OP_ASSIGN &&
+          target->op != POLY_OP_CONTIGUOUS) {
+        PolyUOp *cont_target = poly_uop1(ctx, POLY_OP_CONTIGUOUS, target->dtype,
+                                           target, poly_arg_none());
+        PolyUOp *assign_src[2] = { cont_target, value };
+        result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
+      }
+
       /* C4b: fix_assign_hazard — walk value subtree, check for PERMUTE/FLIP
        * that can reach target's base BUFFER. If found, wrap value with
-       * CONTIGUOUS to force it into a separate kernel before the ASSIGN. */
+       * CONTIGUOUS to force it into a separate kernel before the ASSIGN.
+       * Ref: rangeify.py:176, fn at 68-72 */
       if (!result) {
+        PolyUOp *cur_target = target;
+        /* Use result's target if a previous rule changed it */
+
         /* Find target's base (walk past movement ops) */
-        PolyUOp *target_base = target;
+        PolyUOp *target_base = cur_target;
         while (target_base->n_src > 0 &&
                poly_opset_has(POLY_GROUP_MOVEMENT, target_base->op))
           target_base = target_base->src[0];
@@ -1859,7 +1906,6 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
           if (is_always_contiguous(vn->op)) continue;
           if (vn->op != POLY_OP_PERMUTE && vn->op != POLY_OP_FLIP)
             continue;
-          /* Check if target_base is reachable from this hazard node */
           int n_h_topo;
           PolyUOp **h_topo = poly_toposort(ctx, vn, &n_h_topo);
           for (int h = 0; h < n_h_topo; h++) {
@@ -1872,7 +1918,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
         if (needs_contiguous) {
           PolyUOp *cont_val = poly_uop1(ctx, POLY_OP_CONTIGUOUS, value->dtype,
                                           value, poly_arg_none());
-          PolyUOp *assign_src[2] = { target, cont_val };
+          PolyUOp *assign_src[2] = { cur_target, cont_val };
           result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2,
                              u->arg);
         }

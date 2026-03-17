@@ -2779,3 +2779,116 @@ TEST(rangeify, mixed_multiaxis_singleton_reduce_e2e) {
   ASSERT_FLOAT_EQ(out_data[1], 15.0f, 1e-4);   /* 4+5+6 */
   PASS();
 }
+
+/* ── C4 ASSIGN normalization in earliest_rewrites ───────────────────── */
+
+TEST(rangeify, earliest_assign_bitcast) {
+  /* C4c: ASSIGN(BITCAST(buf, f16), value) → ASSIGN(buf, BITCAST(value, buf.dtype))
+   * Test via e2e: build ASSIGN with BITCAST target, verify correct execution. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *src = poly_buffer(ctx, POLY_FLOAT32, 4);
+
+  /* BITCAST target to same type (simplest test — BITCAST f32→f32 is identity) */
+  PolyUOp *bc_target = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT32, buf, poly_arg_none());
+  /* value = src * 2 */
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  int64_t sh4[] = {4};
+  PolyUOp *two_exp = poly_expand(ctx, poly_reshape(ctx, two, sh4, 1), sh4, 1);
+  PolyUOp *value = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, src, two_exp, poly_arg_none());
+
+  /* ASSIGN(BITCAST(buf), value) */
+  PolyUOp *assign_src[2] = { bc_target, value };
+  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, assign_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
+
+  /* After earliest_rewrites, C4c should move BITCAST from target to source.
+   * Execute: buf should become src * 2 */
+  float buf_d[] = {1, 2, 3, 4};
+  float src_d[] = {10, 20, 30, 40};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(buf, buf_d), POLY_BIND_HOST(src, src_d),
+  };
+  int ret = poly_realize(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(buf_d[i], src_d[i] * 2.0f, 1e-5);
+  PASS();
+}
+
+TEST(rangeify, earliest_nested_assign_chain) {
+  /* C4d: ASSIGN(ASSIGN(buf, v1), v2) → ASSIGN(buf, v2)
+   * Chain of ASSIGNs collapses to root buffer target. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *v1  = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *v2  = poly_buffer(ctx, POLY_FLOAT32, 4);
+
+  /* Inner: ASSIGN(buf, v1) */
+  PolyUOp *inner_src[2] = { buf, v1 };
+  PolyUOp *inner = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, inner_src, 2, poly_arg_none());
+
+  /* Outer: ASSIGN(inner_assign, v2) — target is ASSIGN, not PARAM */
+  PolyUOp *outer_src[2] = { inner, v2 };
+  PolyUOp *outer = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, outer_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, outer, poly_arg_none());
+
+  /* Execute: C4d walks chain to buf. Result: buf = v2 data */
+  float buf_d[] = {0, 0, 0, 0};
+  float v1_d[]  = {1, 2, 3, 4};
+  float v2_d[]  = {10, 20, 30, 40};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(buf, buf_d), POLY_BIND_HOST(v1, v1_d), POLY_BIND_HOST(v2, v2_d),
+  };
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(buf_d[i], v2_d[i], 1e-5);
+  PASS();
+}
+
+TEST(rangeify, earliest_assign_to_contiguous) {
+  /* C4e: ASSIGN(RESHAPE(buf), value) — target has movement ops.
+   * C4e wraps target in CONTIGUOUS. The CONTIGUOUS materializes to an
+   * intermediate. ASSIGN writes value to that intermediate.
+   * Original buf is unchanged (the tensor layer updates its reference).
+   *
+   * Test: verify ASSIGN executes without error. The CONTIGUOUS
+   * target gets realized as an intermediate buffer. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *src = poly_buffer(ctx, POLY_FLOAT32, 8);
+
+  /* Reshape target: view buf as [4,2] */
+  int64_t sh42[] = {4, 2};
+  PolyUOp *reshaped = poly_reshape(ctx, buf, sh42, 2);
+
+  /* value = src + 1 */
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  int64_t sh8[] = {8};
+  PolyUOp *one_exp = poly_expand(ctx, poly_reshape(ctx, one, sh8, 1), sh8, 1);
+  PolyUOp *value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, src, one_exp, poly_arg_none());
+
+  /* ASSIGN(RESHAPE(buf, [4,2]), value) — target is not PARAM/BUFFER.
+   * C4e wraps in CONTIGUOUS: ASSIGN(CONTIGUOUS(RESHAPE(buf)), value).
+   * The CONTIGUOUS materializes to intermediate. */
+  PolyUOp *assign_src[2] = { reshaped, value };
+  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, assign_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
+
+  float buf_d[] = {99, 99, 99, 99, 99, 99, 99, 99};
+  float src_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(buf, buf_d), POLY_BIND_HOST(src, src_d),
+  };
+  int ret = poly_realize(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  /* Execution should succeed. Original buf is NOT modified (the ASSIGN
+   * writes to the materialized intermediate, not to buf). */
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(buf_d[i], 99.0f, 1e-5);  /* buf unchanged */
+  PASS();
+}
