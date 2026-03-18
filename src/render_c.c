@@ -1077,7 +1077,14 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- RANGE: for loop -------------------------------------------- */
     if (u->op == POLY_OP_RANGE) {
       char name[32];
-      snprintf(name, sizeof(name), "ridx%lld", (long long)poly_range_axis_id(u->arg));
+      int64_t aid = poly_range_axis_id(u->arg);
+      int n_extra = poly_range_n_extra(u->arg);
+      if (n_extra > 0) {
+        const int64_t *extra = poly_range_extra(u->arg);
+        snprintf(name, sizeof(name), "ridx%lld_%lld", (long long)aid, (long long)extra[n_extra - 1]);
+      } else {
+        snprintf(name, sizeof(name), "ridx%lld", (long long)aid);
+      }
       smap_set(&names, u, strdup(name));
 
       char *bound = smap_get(&names, u->src[0]);

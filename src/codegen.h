@@ -54,6 +54,7 @@ PolyPatternMatcher *poly_pm_reduce_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps);
 PolyPatternMatcher *poly_pm_transcendental_pass(void);
+PolyPatternMatcher *poly_pm_devectorize_pass(void);
 /* Apply pm_reduce with pass-local state (preferred over manual graph_rewrite). */
 PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink);
 

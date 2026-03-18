@@ -449,6 +449,7 @@ static PolyUOp *poly_apply_opts_basic(PolyCtx *ctx, PolyUOp *sink) {
   PolyUOp *from[1] = { target };
   PolyUOp *to[1] = { sub_axis };
   PolyUOp *out = poly_uop_substitute(ctx, sink, from, to, 1);
+  /* END chains are fixed by pm_split_ends after apply_opts_basic returns. */
   out = poly_graph_rewrite(ctx, out, poly_symbolic_simple());
   out = poly_graph_rewrite(ctx, out, poly_pm_flatten_range());
   return out;
@@ -2557,6 +2558,165 @@ static PolyPatternMatcher *poly_pm_load_store_folding(void) {
   return g_pm_load_store_folding;
 }
 
+/* ── pm_split_ends (tinygrad codegen/late/linearizer.py:88-96) ────────── */
+/*
+ * After range substitution (pm_split_ranges, apply_opts_basic), an END's
+ * ended_ranges src[1:] may contain arithmetic expressions instead of RANGEs.
+ * This pass walks backward from each src to find all actual RANGEs, then
+ * rebuilds the END as a nested chain: END(END(...END(store, r_last)..., r1), r0).
+ */
+
+static void collect_ranges_backward(PolyCtx *ctx, PolyUOp *u,
+                                     PolyUOp **out, int *n, int cap) {
+  if (!u || *n >= cap) return;
+  if (u->op == POLY_OP_RANGE) {
+    /* Deduplicate */
+    for (int i = 0; i < *n; i++) if (out[i] == u) return;
+    out[(*n)++] = u;
+    return;
+  }
+  for (int i = 0; i < u->n_src; i++)
+    collect_ranges_backward(ctx, u->src[i], out, n, cap);
+}
+
+static int cmp_range_axis_id(const void *a, const void *b) {
+  const PolyUOp *ra = *(const PolyUOp *const *)a;
+  const PolyUOp *rb = *(const PolyUOp *const *)b;
+  int64_t ia = poly_range_axis_id(ra->arg);
+  int64_t ib = poly_range_axis_id(rb->arg);
+  return (ia > ib) - (ia < ib);
+}
+
+static PolyUOp *rule_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *b) {
+  (void)b;
+  if (end->op != POLY_OP_END || end->n_src < 2) return NULL;
+
+  /* Check if any ended source is not a RANGE (broken by substitution) */
+  bool needs_split = false;
+  for (int j = 1; j < end->n_src; j++) {
+    if (end->src[j]->op != POLY_OP_RANGE) { needs_split = true; break; }
+  }
+  /* Also split multi-RANGE ENDs into nested single-RANGE ENDs */
+  if (!needs_split && end->n_src <= 2) return NULL;
+
+  /* Collect all RANGE UOps reachable from src[1:] */
+  PolyUOp *ranges[64];
+  int n_ranges = 0;
+  for (int j = 1; j < end->n_src; j++)
+    collect_ranges_backward(ctx, end->src[j], ranges, &n_ranges, 64);
+
+  if (n_ranges == 0) return NULL;
+
+  /* Sort by axis_id (ascending = outermost first) */
+  qsort(ranges, (size_t)n_ranges, sizeof(PolyUOp *), cmp_range_axis_id);
+
+  /* Build nested END chain: END(END(...END(store, r_last)..., r1), r0)
+   * Innermost (highest axis_id) is deepest in the chain. */
+  PolyUOp *ret = end->src[0]; /* store or inner END */
+  for (int i = n_ranges - 1; i >= 0; i--) {
+    PolyUOp *end_srcs[2] = { ret, ranges[i] };
+    ret = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none());
+  }
+  return ret;
+}
+
+static PolyPatternMatcher *g_pm_split_ends = NULL;
+static PolyPatternMatcher *poly_pm_split_ends(void) {
+  if (g_pm_split_ends) return g_pm_split_ends;
+  PolyRule rules[] = {
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_END, NULL, 0, "end")), rule_split_ends },
+  };
+  g_pm_split_ends = poly_pm_new(rules, 1);
+  return g_pm_split_ends;
+}
+
+/* Forward declarations for devectorize (defined in pm_render_subset section below) */
+static PolyUOp *rule_vectorize_single(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b);
+static PolyUOp *lane_or_gep(PolyCtx *ctx, PolyUOp *src, int lane);
+
+/* ── devectorize (tinygrad codegen/late/devectorizer.py) ─────────────── */
+/*
+ * Scatters vectorized ALU/CAST/BITCAST ops into per-element scalar ops
+ * wrapped in VECTORIZE. This ensures the renderer only sees scalar ALU.
+ * Vector LOAD/STORE survive and are handled by load_store_folding.
+ *
+ * OP(vec_a, vec_b) → VECTORIZE(OP(GEP(a,0), GEP(b,0)), OP(GEP(a,1), GEP(b,1)), ...)
+ */
+
+static PolyUOp *rule_no_vectorized_alu(PolyCtx *ctx, PolyUOp *alu, const PolyBindings *b) {
+  (void)b;
+  if (alu->dtype.count <= 1) return NULL;
+  int lanes = alu->dtype.count;
+  if (lanes > 128) return NULL;
+  PolyDType sdt = poly_dtype_scalar(alu->dtype);
+  PolyUOp *elts[128];
+  for (int i = 0; i < lanes; i++) {
+    PolyUOp *srcs[8];
+    int ns = alu->n_src;
+    if (ns > 8) return NULL;
+    for (int j = 0; j < ns; j++)
+      srcs[j] = lane_or_gep(ctx, alu->src[j], i);
+    if (ns == 0)      elts[i] = poly_uop0(ctx, alu->op, sdt, alu->arg);
+    else if (ns == 1) elts[i] = poly_uop1(ctx, alu->op, sdt, srcs[0], alu->arg);
+    else if (ns == 2) elts[i] = poly_uop2(ctx, alu->op, sdt, srcs[0], srcs[1], alu->arg);
+    else if (ns == 3) elts[i] = poly_uop3(ctx, alu->op, sdt, srcs[0], srcs[1], srcs[2], alu->arg);
+    else              elts[i] = poly_uop(ctx, alu->op, sdt, srcs, ns, alu->arg);
+  }
+  return poly_uop(ctx, POLY_OP_VECTORIZE, alu->dtype, elts, lanes, poly_arg_none());
+}
+
+/* INDEX(buf, idx, true) → INDEX(buf, idx) — drop unconditional validity gate */
+static PolyUOp *rule_drop_true_gate(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
+  (void)b;
+  if (idx->op != POLY_OP_INDEX || idx->n_src < 3) return NULL;
+  PolyUOp *gate = idx->src[2];
+  if (gate->op != POLY_OP_CONST || !poly_dtype_is_bool(gate->dtype)) return NULL;
+  if (gate->arg.kind != POLY_ARG_INT || gate->arg.i != 1) return NULL;
+  return poly_uop2(ctx, POLY_OP_INDEX, idx->dtype, idx->src[0], idx->src[1], idx->arg);
+}
+
+static PolyPatternMatcher *g_pm_devectorize = NULL;
+static PolyPatternMatcher *poly_pm_devectorize(void) {
+  if (g_pm_devectorize) return g_pm_devectorize;
+
+  /* Build rules for all ALU + CAST + BITCAST ops */
+  PolyRule rules[80];
+  int n = 0;
+
+  /* ALU ops (Unary + Binary + Ternary) */
+  static const PolyOps alu_ops[] = {
+    POLY_OP_NEG, POLY_OP_EXP2, POLY_OP_LOG2, POLY_OP_SIN, POLY_OP_SQRT,
+    POLY_OP_RECIPROCAL, POLY_OP_TRUNC,
+    POLY_OP_ADD, POLY_OP_MUL, POLY_OP_SUB, POLY_OP_FDIV, POLY_OP_IDIV,
+    POLY_OP_MOD, POLY_OP_MAX, POLY_OP_SHL, POLY_OP_SHR,
+    POLY_OP_CMPLT, POLY_OP_CMPNE, POLY_OP_CMPEQ,
+    POLY_OP_XOR, POLY_OP_OR, POLY_OP_AND,
+    POLY_OP_WHERE, POLY_OP_MULACC,
+    POLY_OP_CAST, POLY_OP_BITCAST,
+  };
+  for (int i = 0; i < (int)(sizeof(alu_ops)/sizeof(alu_ops[0])); i++) {
+    rules[n++] = (PolyRule){
+      poly_pat_allow_any_len(poly_pat_op(alu_ops[i], NULL, 0, "alu")),
+      rule_no_vectorized_alu
+    };
+  }
+
+  /* Drop true gate from INDEX */
+  rules[n++] = (PolyRule){
+    poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
+    rule_drop_true_gate
+  };
+
+  /* VECTORIZE(single) → unwrap */
+  rules[n++] = (PolyRule){
+    poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"),
+    rule_vectorize_single
+  };
+
+  g_pm_devectorize = poly_pm_new(rules, n);
+  return g_pm_devectorize;
+}
+
 /* ── pm_render subset (constants + vector WHERE scalarization) ───────── */
 
 static PolyUOp *rule_render_vconst(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -3113,6 +3273,7 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
 /* ── Public accessors for individual passes (used by CUDA linearizer) ── */
 
 PolyPatternMatcher *poly_pm_reduce_pass(void)        { return poly_pm_reduce(); }
+PolyPatternMatcher *poly_pm_devectorize_pass(void)   { return poly_pm_devectorize(); }
 PolyPatternMatcher *poly_pm_decomp_pass(void)         { return poly_pm_decomp(); }
 PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps) {
   return poly_pm_decomp_with_caps(caps.has_mulacc, caps.has_threefry);
@@ -3130,8 +3291,16 @@ PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink) {
 /* ── Full rewrite-to-sink pipeline ───────────────────────────────────── */
 
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts) {
-  if (opts.optimize && getenv("POLY_EXPERIMENTAL_LATE")) {
-    /* tinygrad preprocess: split/flatten/simplify ranges before late lowering. */
+  /*
+   * Pipeline matches tinygrad codegen/__init__.py:26-111.
+   * `optimize` gates preprocessing (split_ranges, simplify, apply_opts).
+   * `devectorize` gates add_loads/devectorize/folding.
+   * Expander, pm_reduce, decomp, split_ends, control_flow run unconditionally.
+   */
+
+  /* ── 1. Preprocessing (gated by optimize) ──────────────────────────── */
+  if (opts.optimize) {
+    /* tinygrad lines 42-51: split ranges + flatten + sym + simplify */
     SplitRangeCtx srctx = {0};
     sink = poly_graph_rewrite_ctx(ctx, sink, poly_pm_split_ranges(), &srctx);
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
@@ -3139,42 +3308,50 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     sink = poly_graph_rewrite(ctx, sink, poly_pm_simplify_ranges());
 
+    /* tinygrad line 54: apply_opts (UPCAST injection heuristic) */
     sink = poly_apply_opts_basic(ctx, sink);
-    sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander());
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_load_store_folding());
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
   }
 
-  /* 1. Symbolic simplification */
+  /* ── 2. Expander (unconditional, tinygrad lines 57-60) ─────────────── */
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
+
+  /* ── 3. Symbolic (unconditional) ───────────────────────────────────── */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
 
-  /* 2. pm_reduce: REDUCE → DEFINE_REG + END merge on SINK */
+  /* ── 4. pm_reduce (unconditional, tinygrad line 67) ────────────────── */
   sink = poly_apply_pm_reduce(ctx, sink);
 
-  /* 3. Post-reduce symbolic simplification */
+  /* ── 5. Post-reduce symbolic ───────────────────────────────────────── */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  if (opts.optimize && getenv("POLY_EXPERIMENTAL_LATE")) {
+
+  /* ── 6. Add loads + devectorize (gated by devectorize, tinygrad lines 75-81) ── */
+  if (opts.devectorize >= 0) {
+    /* tinygrad line 75: add loads */
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());
+
+    /* tinygrad lines 78-81: devectorize based on level */
+    if (opts.devectorize >= 1)
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_devectorize());
+
+    /* load/store folding + render subset (always when devectorize path active) */
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_load_store_folding());
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
+
+    /* post-devectorize symbolic */
+    sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   }
 
-  /* 4. pm_decomp: late decompositions (MAX→WHERE, MUL→SHL, IDIV→SHR)
-   *    Caps-aware: CPU decomposes MULACC; CUDA fuses MUL+ADD→MULACC. */
+  /* ── 7. Decompositions (unconditional, tinygrad lines 91-100) ──────── */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry));
-
-  /* 5. pm_transcendental: EXP2 → polynomial (creates new IDIV ops) */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental());
-
-  /* 6. Final decomp: catch IDIV ops created by transcendental pass */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry));
 
-  /* 7. Expander cleanup: remove identity UNROLL/CONTRACT nodes */
+  /* ── 8. Final rewrite: expander cleanup + split_ends + render (tinygrad line 104) ── */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
-  if (opts.optimize && getenv("POLY_EXPERIMENTAL_LATE")) {
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
-  }
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_split_ends());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
 
   return sink;
 }

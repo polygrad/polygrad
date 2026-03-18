@@ -18,6 +18,7 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
+#include "../src/frontend.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -1500,6 +1501,131 @@ TEST(decomp, shl_add_fuses_to_mulacc) {
   /* src[1] should be CONST(8) = 2^3 */
   ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST);
   ASSERT_TRUE(r->src[1]->arg.i == 8);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Devectorize                                                          */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+/* Verify no_vectorized_alu: vec4 ADD → VECTORIZE(scalar ADD × 4) */
+TEST(devectorize, alu_scatter) {
+  PolyCtx *ctx = poly_ctx_new();
+  /* Build: VECTORIZE(a0,a1,a2,a3) + VECTORIZE(b0,b1,b2,b3) */
+  PolyDType f32 = POLY_FLOAT32;
+  PolyDType f32x4 = poly_dtype_vec(f32, 4);
+  PolyUOp *a[4], *b[4];
+  for (int i = 0; i < 4; i++) {
+    a[i] = poly_uop0(ctx, POLY_OP_CONST, f32, poly_arg_float((double)(i + 1)));
+    b[i] = poly_uop0(ctx, POLY_OP_CONST, f32, poly_arg_float((double)(i + 10)));
+  }
+  PolyUOp *va = poly_uop(ctx, POLY_OP_VECTORIZE, f32x4, a, 4, poly_arg_none());
+  PolyUOp *vb = poly_uop(ctx, POLY_OP_VECTORIZE, f32x4, b, 4, poly_arg_none());
+  PolyUOp *vadd = poly_uop2(ctx, POLY_OP_ADD, f32x4, va, vb, poly_arg_none());
+
+  /* Apply devectorize */
+  PolyRewriteOpts opts = { .optimize = false, .devectorize = 1 };
+  (void)opts;
+  PolyUOp *r = poly_graph_rewrite(ctx, vadd, poly_pm_devectorize_pass());
+
+  /* Result should be VECTORIZE of 4 scalar ADDs */
+  ASSERT_TRUE(r->op == POLY_OP_VECTORIZE);
+  ASSERT_INT_EQ(r->n_src, 4);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(r->src[i]->op == POLY_OP_ADD);
+    ASSERT_TRUE(r->src[i]->dtype.count == 1);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Verify: vec4 MUL with scalar broadcast → VECTORIZE(scalar MUL × 4) */
+TEST(devectorize, alu_broadcast_src) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType f32 = POLY_FLOAT32;
+  PolyDType f32x4 = poly_dtype_vec(f32, 4);
+  PolyUOp *elts[4];
+  for (int i = 0; i < 4; i++)
+    elts[i] = poly_uop0(ctx, POLY_OP_CONST, f32, poly_arg_float((double)(i + 1)));
+  PolyUOp *va = poly_uop(ctx, POLY_OP_VECTORIZE, f32x4, elts, 4, poly_arg_none());
+  /* Scalar constant — devectorizer should GEP or pass through */
+  PolyUOp *scalar = poly_uop0(ctx, POLY_OP_CONST, f32, poly_arg_float(2.0));
+  /* MUL(vec4, scalar) — scalar src has count=1, should be broadcast */
+  PolyUOp *vmul = poly_uop2(ctx, POLY_OP_MUL, f32x4, va, scalar, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, vmul, poly_pm_devectorize_pass());
+  ASSERT_TRUE(r->op == POLY_OP_VECTORIZE);
+  ASSERT_INT_EQ(r->n_src, 4);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(r->src[i]->op == POLY_OP_MUL);
+    ASSERT_TRUE(r->src[i]->dtype.count == 1);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Verify: scalar ALU (count=1) passes through unmodified */
+TEST(devectorize, scalar_passthrough) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, add, poly_pm_devectorize_pass());
+  /* Should be unchanged — scalar ADD has count=1 */
+  ASSERT_TRUE(r == add);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Verify: drop true gate from INDEX */
+TEST(devectorize, drop_true_gate) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *gate = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_int(1));
+  PolyUOp *srcs[3] = { buf, idx, gate };
+  PolyUOp *index = poly_uop(ctx, POLY_OP_INDEX, ptr_f32, srcs, 3, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, index, poly_pm_devectorize_pass());
+  /* Gate should be dropped: 3 srcs → 2 srcs */
+  ASSERT_TRUE(r->op == POLY_OP_INDEX);
+  ASSERT_INT_EQ(r->n_src, 2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* E2E: vecadd through full devectorize pipeline produces correct results */
+TEST(devectorize, e2e_vecadd) {
+  /* Build tensor-level: out = a + b, N=8 (divisible by 4 for UPCAST) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 8);
+  PolyUOp *b = poly_buffer_f32(ctx, 8);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, 8);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float db[] = {10, 20, 30, 40, 50, 60, 70, 80};
+  float dout[8] = {0};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+  };
+
+  /* Use POLY_OPTIMIZE + POLY_DEVECTORIZE via env to test full pipeline */
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  unsetenv("POLY_OPTIMIZE");
+  unsetenv("POLY_DEVECTORIZE");
+
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(dout[i], da[i] + db[i], 1e-6);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
