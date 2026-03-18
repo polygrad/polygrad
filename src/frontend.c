@@ -2725,7 +2725,7 @@ uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
 
   /* 3. Linearize */
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
+  PolyUOp **lin = poly_linearize_env(ctx, kernel, &n_lin);
   if (!lin) { *wasm_len = 0; *n_bufs_out = 0; return NULL; }
 
   /* 4. Render to WASM binary */
@@ -2820,7 +2820,7 @@ PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink)
 
   for (int k = 0; k < p->n_kernels; k++) {
     int n_lin = 0;
-    PolyUOp **lin = poly_linearize(ctx, sr.kernels[k], &n_lin);
+    PolyUOp **lin = poly_linearize_env(ctx, sr.kernels[k], &n_lin);
     if (!lin) {
       poly_wasm_stepplan_destroy(p);
       poly_schedule_result_free(&sr);

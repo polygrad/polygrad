@@ -378,7 +378,7 @@ EM_JS(void, js_free_wasm_kernel, (int kernel_id), {
 static int cpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
                           const char *fn_name, PolyRunner *out) {
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  PolyUOp **lin = poly_linearize_env(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
 
   char *src = poly_render_c(lin, n_lin, fn_name);
@@ -424,7 +424,7 @@ static int interp_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
                              const char *fn_name, PolyRunner *out) {
   (void)fn_name;
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  PolyUOp **lin = poly_linearize_env(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
 
   InterpHandle *ih = malloc(sizeof(InterpHandle));
@@ -463,7 +463,7 @@ static int wasm_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
                            const char *fn_name, PolyRunner *out) {
   (void)fn_name;
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  PolyUOp **lin = poly_linearize_env(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
 
   int wasm_len = 0;

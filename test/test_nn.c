@@ -1769,7 +1769,15 @@ TEST(nn, c2c_rand_bitpattern_8) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, r));
   float result[8] = {0};
   PolyBufferBinding bind = POLY_BIND_HOST(out, result);
+  /* Use non-optimized pipeline for bit-exact reference values.
+   * Optimization changes THREEFRY kernel structure (UPCAST reorders ops). */
+  char save_opt[32] = "", save_dev[32] = "";
+  const char *e;
+  if ((e = getenv("POLY_OPTIMIZE"))) { strncpy(save_opt, e, 31); unsetenv("POLY_OPTIMIZE"); }
+  if ((e = getenv("POLY_DEVECTORIZE"))) { strncpy(save_dev, e, 31); unsetenv("POLY_DEVECTORIZE"); }
   ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  if (save_opt[0]) setenv("POLY_OPTIMIZE", save_opt, 1);
+  if (save_dev[0]) setenv("POLY_DEVECTORIZE", save_dev, 1);
   /* Bit-exact comparison via memcmp -- true Tier 1 contract */
   if (memcmp(result, expected, sizeof(expected)) != 0) {
     for (int i = 0; i < 8; i++) {

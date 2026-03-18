@@ -748,12 +748,24 @@ static bool env_true(const char *name) {
 }
 
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  PolyRewriteOpts opts = { .optimize = env_true("POLY_OPTIMIZE"), .devectorize = 0 };
-  const char *dev = getenv("POLY_DEVECTORIZE");
-  if (dev && dev[0] != '\0') opts.devectorize = atoi(dev);
+  /* Default: non-optimized pipeline. Tests and production code that want
+   * optimization should use poly_linearize_ex() or set opts explicitly. */
+  sink = poly_full_rewrite_to_sink(ctx, sink);
+  sink = poly_apply_control_flow(ctx, sink);
+  return poly_linearize_rewritten(ctx, sink, n_out);
+}
+
+PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out) {
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   sink = poly_apply_control_flow(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);
+}
+
+PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  PolyRewriteOpts opts = { .optimize = env_true("POLY_OPTIMIZE"), .devectorize = 0 };
+  const char *dev = getenv("POLY_DEVECTORIZE");
+  if (dev && dev[0] != '\0') opts.devectorize = atoi(dev);
+  return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 
 /* ── Render helpers ──────────────────────────────────────────────────── */

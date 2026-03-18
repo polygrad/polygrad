@@ -30,6 +30,9 @@ typedef struct {
  * Returns malloc'd array of UOp pointers in execution order.
  * Caller must free() the returned array. */
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out);
+/* Like poly_linearize but reads POLY_OPTIMIZE/POLY_DEVECTORIZE from env. */
+PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Linearize an already-rewritten sink (skip full_rewrite_to_sink).
  * Used by GPU backends that insert passes between rewrite and linearization. */
