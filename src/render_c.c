@@ -1228,7 +1228,28 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
       for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
-      sb_printf(&body, "%s = (%s)(%s);\n", name, dtype_s, src_s);
+
+      /* Vector → vector CAST: __builtin_convertvector (tinygrad cstyle.py:24) */
+      if (u->dtype.count > 1 && u->src[0]->dtype.count > 1 && !u->dtype.is_ptr) {
+        sb_printf(&body, "%s = __builtin_convertvector(%s, %s);\n", name, src_s, dtype_s);
+      }
+      /* Scalar → vector CAST (non-pointer): broadcast via initializer */
+      else if (u->dtype.count > 1 && u->src[0]->dtype.count <= 1 && !u->dtype.is_ptr) {
+        char scalar_type[128];
+        render_ctype(poly_dtype_scalar(u->dtype), scalar_type, sizeof(scalar_type));
+        sb_printf(&body, "{ %s _sc = (%s)(%s); ", scalar_type, scalar_type, src_s);
+        sb_printf(&body, "%s = (%s){", name, dtype_s);
+        for (int vi = 0; vi < u->dtype.count; vi++)
+          sb_printf(&body, "%s_sc", vi > 0 ? "," : "");
+        sb_printf(&body, "}; }\n");
+      }
+      /* Vector → scalar: extract element 0, then cast */
+      else if (u->dtype.count <= 1 && u->src[0]->dtype.count > 1) {
+        sb_printf(&body, "%s = (%s)((%s)[0]);\n", name, dtype_s, src_s);
+      }
+      else {
+        sb_printf(&body, "%s = (%s)(%s);\n", name, dtype_s, src_s);
+      }
       continue;
     }
 
@@ -1244,8 +1265,16 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       render_ctype(u->dtype, dst_type, sizeof(dst_type));
       sb_printf(&decls, "  %s %s;\n", dst_type, name);
       for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
-      sb_printf(&body, "{ %s _bc = %s; memcpy(&%s, &_bc, sizeof(%s)); }\n",
-                src_type, src_s, name, name);
+      /* Vector → scalar bitcast: extract element 0, then reinterpret */
+      if (u->dtype.count <= 1 && u->src[0]->dtype.count > 1) {
+        char elem_type[128];
+        render_ctype(poly_dtype_scalar(u->src[0]->dtype), elem_type, sizeof(elem_type));
+        sb_printf(&body, "{ %s _bc = (%s)[0]; memcpy(&%s, &_bc, sizeof(%s)); }\n",
+                  elem_type, src_s, name, name);
+      } else {
+        sb_printf(&body, "{ %s _bc = %s; memcpy(&%s, &_bc, sizeof(%s)); }\n",
+                  src_type, src_s, name, name);
+      }
       continue;
     }
 
