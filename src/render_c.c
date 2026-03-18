@@ -762,9 +762,12 @@ PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, i
 }
 
 PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  PolyRewriteOpts opts = { .optimize = env_true("POLY_OPTIMIZE"), .devectorize = 0 };
+  bool opt = env_true("POLY_OPTIMIZE");
   const char *dev = getenv("POLY_DEVECTORIZE");
-  if (dev && dev[0] != '\0') opts.devectorize = atoi(dev);
+  /* Default: OPTIMIZE=1 implies DEVECTORIZE=1 (vec load/store, scalar ALU — safe).
+   * DEVECTORIZE=0 (full vec ALU) is opt-in only. */
+  int devec = dev && dev[0] != '\0' ? atoi(dev) : (opt ? 1 : 0);
+  PolyRewriteOpts opts = { .optimize = opt, .devectorize = devec };
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 
@@ -868,8 +871,17 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
     }
     break;
   case POLY_OP_SQRT:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-      ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)", s0); break;
+    if (is_vec) {
+      /* Vec SQRT: per-element via initializer (no vec builtin) */
+      char vt[128]; render_ctype(dtype, vt, sizeof(vt));
+      const char *fn = poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_sqrt" : "__builtin_sqrtf";
+      snprintf(buf, cap, "((%s){%s(%s[0]),%s(%s[1]),%s(%s[2]),%s(%s[3])})",
+               vt, fn, s0, fn, s0, fn, s0, fn, s0);
+    } else {
+      snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
+        ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)", s0);
+    }
+    break;
   case POLY_OP_TRUNC:
     snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)", s0); break;
@@ -882,7 +894,16 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_SIN:
     snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "sin(%s)" : "sinf(%s)", s0); break;
-  case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
+  case POLY_OP_RECIPROCAL:
+    if (is_vec) {
+      /* Vec RECIPROCAL: (type){1.0f,...} / x */
+      char vt[128]; render_ctype(dtype, vt, sizeof(vt));
+      char one[128]; render_ctype(dtype, one, sizeof(one));
+      snprintf(buf, cap, "((%s){1.0f,1.0f,1.0f,1.0f}/%s)", vt, s0);
+    } else {
+      snprintf(buf, cap, "(1/%s)", s0);
+    }
+    break;
   /* binary — +, -, *, /, <<, >>, &, |, ^, <, !=, == all work on GCC vectors */
   case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
   case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
