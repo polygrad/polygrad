@@ -761,6 +761,61 @@ static PolyUOp *rule_gep_identity(PolyCtx *ctx, PolyUOp *root, const PolyBinding
   return src;
 }
 
+/* GEP through ALU: GEP(ALU(a,b), i) → ALU(GEP(a,i), GEP(b,i))
+ * (tinygrad symbolic.py:192-194, gep_pushing) */
+static PolyUOp *rule_gep_through_alu(PolyCtx *ctx, PolyUOp *gep, const PolyBindings *b) {
+  (void)b;
+  if (gep->op != POLY_OP_GEP || gep->n_src < 1) return NULL;
+  if (gep->dtype.is_ptr) return NULL;
+  /* Only push GEP through integer ALU (index arithmetic).
+   * tinygrad gates on dtype=dtypes.index; polygrad uses POLY_INT32 for indices. */
+  if (!poly_dtype_is_int(poly_dtype_scalar(gep->dtype))) return NULL;
+  PolyUOp *alu = gep->src[0];
+  if (!alu || alu->dtype.is_ptr) return NULL;
+  if (!poly_opset_has(POLY_GROUP_ALU, alu->op) &&
+      alu->op != POLY_OP_CAST && alu->op != POLY_OP_BITCAST) return NULL;
+  if (alu->dtype.count <= 1) return NULL;  /* already scalar */
+  /* Build new ALU with GEP pushed to each source */
+  PolyUOp *srcs[8];
+  if (alu->n_src > 8) return NULL;
+  int gep_count = 1;
+  if (gep->arg.kind == POLY_ARG_INT_TUPLE) gep_count = gep->arg.int_tuple.n;
+  PolyDType new_dt = (gep_count > 1)
+    ? poly_dtype_vec(poly_dtype_scalar(alu->dtype), gep_count)
+    : poly_dtype_scalar(alu->dtype);
+  for (int i = 0; i < alu->n_src; i++) {
+    PolyUOp *s = alu->src[i];
+    if (s->dtype.count > 1) {
+      PolyDType s_new_dt = (gep_count > 1)
+        ? poly_dtype_vec(poly_dtype_scalar(s->dtype), gep_count)
+        : poly_dtype_scalar(s->dtype);
+      srcs[i] = poly_uop1(ctx, POLY_OP_GEP, s_new_dt, s, gep->arg);
+    } else {
+      srcs[i] = s;  /* scalar source passes through */
+    }
+  }
+  if (alu->n_src == 1) return poly_uop1(ctx, alu->op, new_dt, srcs[0], alu->arg);
+  if (alu->n_src == 2) return poly_uop2(ctx, alu->op, new_dt, srcs[0], srcs[1], alu->arg);
+  if (alu->n_src == 3) return poly_uop3(ctx, alu->op, new_dt, srcs[0], srcs[1], srcs[2], alu->arg);
+  return poly_uop(ctx, alu->op, new_dt, srcs, alu->n_src, alu->arg);
+}
+
+/* ── GEP pushing PM (for combined devec pass) ────────────────────────── */
+
+static PolyPatternMatcher *g_pm_gep_pushing = NULL;
+
+PolyPatternMatcher *poly_pm_gep_pushing(void) {
+  if (g_pm_gep_pushing) return g_pm_gep_pushing;
+  PolyRule rules[] = {
+    { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_vectorize },
+    { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_const },
+    { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_identity },
+    { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_through_alu },
+  };
+  g_pm_gep_pushing = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  return g_pm_gep_pushing;
+}
+
 /* ── Build the symbolic_simple PatternMatcher ─────────────────────────── */
 
 static PolyPatternMatcher *g_symbolic_simple = NULL;

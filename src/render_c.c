@@ -830,37 +830,60 @@ static void render_ctype(PolyDType dt, char *buf, int cap) {
   PolyDType base = dt;
   base.is_ptr = false;
   base.addrspace = POLY_ADDR_GLOBAL;
-  base.vcount = 1;
   base.ptr_size = 0;
+  /* Vec pointer: vcount > 1 means pointer to vector type.
+   * float vec4_ptr → "float __attribute__((vector_size(16)))*"
+   * Scalar pointer → "float*" */
+  if (dt.vcount > 1) {
+    /* bitsize for the base scalar element (ptr bitsize = element bitsize) */
+    uint16_t elem_bits = base.bitsize;  /* e.g. 32 for float ptr */
+    base.count = dt.vcount;
+    base.bitsize = elem_bits * (uint16_t)dt.vcount;  /* 32*4=128 for vec4 */
+  } else {
+    base.count = 1;
+  }
+  base.vcount = 1;
   char bt[128];
   render_ctype_nonptr(base, bt, sizeof(bt));
   snprintf(buf, cap, "%s*", bt);
 }
 
-/* Render an ALU expression. */
+/* Render an ALU expression.
+ * For vec4 types, GCC vector extensions handle +, -, *, /, <<, >>, &, |, ^,
+ * <, !=, == natively.  WHERE/MAX/NEG-bool need special handling. */
 static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
                        const char *s0, const char *s1, const char *s2) {
+  bool is_vec = (dtype.count > 1);
+  PolyDType sdt = poly_dtype_scalar(dtype);
   switch (op) {
   /* unary */
   case POLY_OP_NEG:
-    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0); break;
+    if (poly_dtype_is_bool(sdt)) {
+      if (is_vec)
+        snprintf(buf, cap, "(~%s)", s0);  /* vec bool NEG: bitwise NOT */
+      else
+        snprintf(buf, cap, "(!%s)", s0);
+    } else {
+      snprintf(buf, cap, "(-%s)", s0);  /* works on vectors */
+    }
+    break;
   case POLY_OP_SQRT:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)", s0); break;
   case POLY_OP_TRUNC:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)", s0); break;
   case POLY_OP_EXP2:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "exp2(%s)" : "exp2f(%s)", s0); break;
   case POLY_OP_LOG2:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "log2(%s)" : "log2f(%s)", s0); break;
   case POLY_OP_SIN:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "sin(%s)" : "sinf(%s)", s0); break;
   case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
-  /* binary */
+  /* binary — +, -, *, /, <<, >>, &, |, ^, <, !=, == all work on GCC vectors */
   case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
   case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
   case POLY_OP_MUL:   snprintf(buf, cap, "(%s*%s)", s0, s1); break;
@@ -875,12 +898,41 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_CMPLT: snprintf(buf, cap, "(%s<%s)", s0, s1); break;
   case POLY_OP_CMPNE: snprintf(buf, cap, "(%s!=%s)", s0, s1); break;
   case POLY_OP_CMPEQ: snprintf(buf, cap, "(%s==%s)", s0, s1); break;
-  case POLY_OP_MAX:   snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1); break;
+  case POLY_OP_MAX:
+    if (is_vec) {
+      /* vec MAX: bitwise select using comparison mask.
+       * GCC vec comparison returns -1 (all bits set) or 0 per lane. */
+      char int_type[128];
+      PolyDType idt = poly_dtype_is_float(sdt) ? POLY_INT32 : sdt;
+      render_ctype(poly_dtype_vec(idt, dtype.count), int_type, sizeof(int_type));
+      char dst_type[128];
+      render_ctype(dtype, dst_type, sizeof(dst_type));
+      snprintf(buf, cap, "((%s)(((%s)(%s>%s) & (%s)%s) | (~(%s)(%s>%s) & (%s)%s)))",
+               dst_type, int_type, s0, s1, int_type, s0,
+               int_type, s0, s1, int_type, s1);
+    } else {
+      snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
+    }
+    break;
   case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
       ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1); break;
   /* ternary */
-  case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
+  case POLY_OP_WHERE:
+    if (is_vec) {
+      /* vec WHERE(mask, a, b): bitwise select.
+       * mask is int-typed (from CMPLT: -1 or 0 per lane). */
+      char int_type[128];
+      PolyDType idt = poly_dtype_is_float(sdt) ? POLY_INT32 : sdt;
+      render_ctype(poly_dtype_vec(idt, dtype.count), int_type, sizeof(int_type));
+      char dst_type[128];
+      render_ctype(dtype, dst_type, sizeof(dst_type));
+      snprintf(buf, cap, "((%s)((%s & (%s)%s) | (~%s & (%s)%s)))",
+               dst_type, s0, int_type, s1, s0, int_type, s2);
+    } else {
+      snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
+    }
+    break;
   case POLY_OP_MULACC: snprintf(buf, cap, "((%s*%s)+%s)", s0, s1, s2); break;
   default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
   }
@@ -996,20 +1048,39 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- CONST: inline literal -------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char val[64];
-      if (poly_dtype_is_float(u->dtype)) {
-        render_float_const(u->arg.f, u->dtype, val, sizeof(val));
-      } else if (poly_dtype_is_bool(u->dtype)) {
-        snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
-      } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {
+      PolyDType sdt = poly_dtype_scalar(u->dtype);
+      if (poly_dtype_is_float(sdt)) {
+        render_float_const(u->arg.f, sdt, val, sizeof(val));
+      } else if (poly_dtype_is_bool(sdt)) {
+        /* Vec bool: GCC vec comparisons return -1 (all bits set) for true.
+         * Scalar bool: standard C true = 1. */
+        if (u->dtype.count > 1)
+          snprintf(val, sizeof(val), "%d", u->arg.b ? -1 : 0);
+        else
+          snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
+      } else if (poly_dtype_eq(sdt, POLY_INT64)) {
         snprintf(val, sizeof(val), "%lldll", (long long)u->arg.i);
-      } else if (poly_dtype_eq(u->dtype, POLY_UINT64)) {
+      } else if (poly_dtype_eq(sdt, POLY_UINT64)) {
         snprintf(val, sizeof(val), "%lluull", (unsigned long long)(uint64_t)u->arg.i);
-      } else if (poly_dtype_eq(u->dtype, POLY_UINT32)) {
+      } else if (poly_dtype_eq(sdt, POLY_UINT32)) {
         snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)u->arg.i);
       } else {
         snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
       }
-      smap_set(&names, u, strdup(val));
+      /* Vec CONST: broadcast scalar to all lanes */
+      if (u->dtype.count > 1) {
+        char dtype_s[128];
+        render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
+        StrBuf vexpr;
+        sb_init(&vexpr);
+        sb_printf(&vexpr, "((%s){", dtype_s);
+        for (int j = 0; j < u->dtype.count; j++)
+          sb_printf(&vexpr, "%s%s", j > 0 ? "," : "", val);
+        sb_puts(&vexpr, "})");
+        smap_set(&names, u, vexpr.buf);
+      } else {
+        smap_set(&names, u, strdup(val));
+      }
       continue;
     }
 

@@ -782,7 +782,9 @@ static PolyUOp *rule_decomp_max(PolyCtx *ctx, PolyUOp *root,
                                 const PolyBindings *b) {
   (void)b;
   PolyUOp *a = root->src[0];
-  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, a, root->src[1],
+  PolyDType cmp_bt = (root->dtype.count > 1)
+    ? poly_dtype_vec(POLY_BOOL, root->dtype.count) : POLY_BOOL;
+  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, cmp_bt, a, root->src[1],
                            poly_arg_none());
   return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cmp, root->src[1], a,
                     poly_arg_none());
@@ -835,7 +837,9 @@ static PolyUOp *rule_idiv_to_shr(PolyCtx *ctx, PolyUOp *root,
                       poly_arg_none());
   /* Signed: (x + (x<0).where(c-1, 0)) >> shift */
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(0));
-  PolyUOp *cmplt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
+  PolyDType cmp_bt = (root->dtype.count > 1)
+    ? poly_dtype_vec(POLY_BOOL, root->dtype.count) : POLY_BOOL;
+  PolyUOp *cmplt = poly_uop2(ctx, POLY_OP_CMPLT, cmp_bt,
                               x_node, zero, poly_arg_none());
   PolyUOp *cm1 = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(c - 1));
   PolyUOp *correction = poly_uop3(ctx, POLY_OP_WHERE, root->dtype,
@@ -1159,7 +1163,11 @@ static PolyPatternMatcher *poly_pm_decomp(void) {
 static int xd_mantissa_bits(PolyDType dt) { return dt.bitsize == 64 ? 52 : 23; }
 static int xd_exponent_bias(PolyDType dt) { return dt.bitsize == 64 ? 1023 : 127; }
 static int64_t xd_exponent_mask(PolyDType dt) { return dt.bitsize == 64 ? 0x7FFLL : 0xFFLL; }
-static PolyDType xd_int_for_float(PolyDType dt) { return dt.bitsize == 64 ? POLY_INT64 : POLY_INT32; }
+static PolyDType xd_int_for_float(PolyDType dt) {
+  PolyDType sdt = poly_dtype_scalar(dt);
+  PolyDType it = (sdt.bitsize == 64) ? POLY_INT64 : POLY_INT32;
+  return (dt.count > 1) ? poly_dtype_vec(it, dt.count) : it;
+}
 
 /* Build a polyN Horner evaluation: acc = c[0]; for i in 1..n: acc = acc*x + c[i] */
 static PolyUOp *xd_polyN(PolyCtx *ctx, PolyDType ft, PolyUOp *x,
@@ -1179,7 +1187,7 @@ static PolyUOp *xd_polyN(PolyCtx *ctx, PolyDType ft, PolyUOp *x,
 static PolyUOp *xd_lazy_map_numbers(PolyCtx *ctx, PolyDType ft, PolyUOp *d,
                                      PolyUOp *pinf_val, PolyUOp *ninf_val,
                                      PolyUOp *nan_val, PolyUOp *ratio) {
-  PolyDType bt = POLY_BOOL;
+  PolyDType bt = (ft.count > 1) ? poly_dtype_vec(POLY_BOOL, ft.count) : POLY_BOOL;
   PolyUOp *f_neg_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
   PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
   PolyUOp *nan_chk    = poly_uop2(ctx, POLY_OP_CMPNE, bt, d, d, poly_arg_none());
@@ -1192,7 +1200,7 @@ static PolyUOp *xd_lazy_map_numbers(PolyCtx *ctx, PolyDType ft, PolyUOp *d,
 
 /* rintk: round float d to nearest integer (away from 0). */
 static PolyUOp *xd_rintk(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d) {
-  PolyDType bt = POLY_BOOL;
+  PolyDType bt = (ft.count > 1) ? poly_dtype_vec(POLY_BOOL, ft.count) : POLY_BOOL;
   PolyUOp *f_zero     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
   PolyUOp *f_neg_half = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.5));
   PolyUOp *f_half     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.5));
@@ -1270,14 +1278,15 @@ static PolyUOp *rule_decomp_exp2(PolyCtx *ctx, PolyUOp *root,
                                   const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
-  if (!poly_dtype_is_float(root->dtype) ||
-      (root->dtype.bitsize != 32 && root->dtype.bitsize != 64))
+  PolyDType sft = poly_dtype_scalar(root->dtype);
+  if (!poly_dtype_is_float(sft) ||
+      (sft.bitsize != 32 && sft.bitsize != 64))
     return NULL;
 
-  PolyDType ft = root->dtype;
+  PolyDType ft = root->dtype;  /* may be vec */
   PolyDType it = xd_int_for_float(ft);
-  PolyDType bt = POLY_BOOL;
-  bool is_f64 = (ft.bitsize == 64);
+  PolyDType bt = (ft.count > 1) ? poly_dtype_vec(POLY_BOOL, ft.count) : POLY_BOOL;
+  bool is_f64 = (sft.bitsize == 64);
 
   /* ── Constants ───────────────────────────────────────────────────── */
   PolyUOp *f_zero    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
@@ -1348,14 +1357,15 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root,
                                   const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
-  if (!poly_dtype_is_float(root->dtype) ||
-      (root->dtype.bitsize != 32 && root->dtype.bitsize != 64))
+  PolyDType sft = poly_dtype_scalar(root->dtype);
+  if (!poly_dtype_is_float(sft) ||
+      (sft.bitsize != 32 && sft.bitsize != 64))
     return NULL;
 
-  PolyDType ft = root->dtype;
+  PolyDType ft = root->dtype;  /* may be vec */
   PolyDType it = xd_int_for_float(ft);
-  PolyDType bt = POLY_BOOL;
-  bool is_f64 = (ft.bitsize == 64);
+  PolyDType bt = (ft.count > 1) ? poly_dtype_vec(POLY_BOOL, ft.count) : POLY_BOOL;
+  bool is_f64 = (sft.bitsize == 64);
 
   /* Constants */
   PolyUOp *f_zero     = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
@@ -1560,16 +1570,18 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
                                  const PolyBindings *b) {
   (void)b;
   PolyUOp *d = root->src[0];
-  if (!poly_dtype_is_float(root->dtype) ||
-      (root->dtype.bitsize != 32 && root->dtype.bitsize != 64))
+  PolyDType sft = poly_dtype_scalar(root->dtype);
+  if (!poly_dtype_is_float(sft) ||
+      (sft.bitsize != 32 && sft.bitsize != 64))
     return NULL;
 
-  PolyDType ft = root->dtype;
-  PolyDType it = POLY_INT32;
-  PolyDType ut32 = POLY_UINT32;
-  PolyDType ut64 = POLY_UINT64;
-  PolyDType bt = POLY_BOOL;
-  bool is_f64 = (ft.bitsize == 64);
+  PolyDType ft = root->dtype;  /* may be vec */
+  int vc = ft.count;
+  PolyDType it = (vc > 1) ? poly_dtype_vec(POLY_INT32, vc) : POLY_INT32;
+  PolyDType ut32 = (vc > 1) ? poly_dtype_vec(POLY_UINT32, vc) : POLY_UINT32;
+  PolyDType ut64 = (vc > 1) ? poly_dtype_vec(POLY_UINT64, vc) : POLY_UINT64;
+  PolyDType bt = (vc > 1) ? poly_dtype_vec(POLY_BOOL, vc) : POLY_BOOL;
+  bool is_f64 = (sft.bitsize == 64);
 
   /* Common constants */
   PolyUOp *f_zero    = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
@@ -2421,141 +2433,366 @@ static PolyUOp *build_scalar_lane_index(PolyCtx *ctx, PolyUOp *idx, PolyUOp *buf
   return poly_uop(ctx, POLY_OP_INDEX, buf_base->dtype, srcs, n_srcs, idx->arg);
 }
 
-/* tinygrad load_store_folding core behavior for this shape:
- * INDEX(VECTORIZE(buf,...), ADD(VECTORIZE(base,...), VCONST(0..N-1)))
- *   -> CAST(INDEX(buf, base), vec_ptr_dtype)
- */
-static PolyUOp *rule_fold_vectorized_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
+/* ── load_store_folding: PTRCAT pipeline (tinygrad devectorizer.py:63-136) ── */
+
+/* expand_index (tinygrad devectorizer.py:63-66):
+ * INDEX(VECTORIZE(buf,...), vec_idx) → VECTORIZE(INDEX(buf, GEP(vec,0)), ..., INDEX(buf, GEP(vec,N-1)))
+ * Scatters a vectorized INDEX into per-element scalar INDEXes. */
+static PolyUOp *rule_expand_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   (void)b;
   if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
   PolyUOp *buf_vec = idx->src[0];
-  PolyUOp *vidx = idx->src[1];
-  PolyUOp *buf_base = NULL;
-  int lanes = 0;
-  if (!is_vectorize_of_same(buf_vec, &buf_base, &lanes) || !buf_base || lanes <= 1) return NULL;
-  if (!lanes_supported_for_fold(lanes)) return NULL;
-  if (!vidx || vidx->dtype.count != lanes) return NULL;
+  if (!buf_vec || buf_vec->op != POLY_OP_VECTORIZE || buf_vec->n_src <= 1) return NULL;
+  /* All VECTORIZE sources must be Defines (PARAM) or AFTER */
+  PolyUOp *buf = buf_vec->src[0];
+  if (!buf) return NULL;
+  if (buf->op != POLY_OP_PARAM && buf->op != POLY_OP_DEFINE_LOCAL &&
+      buf->op != POLY_OP_DEFINE_REG && buf->op != POLY_OP_AFTER) return NULL;
+  for (int i = 1; i < buf_vec->n_src; i++)
+    if (buf_vec->src[i] != buf) return NULL;  /* all same buf */
 
-  PolyUOp *common_terms[64];
-  int n_common_terms = 0;
-  int64_t base_const = 0;
-  if (!match_contiguous_lane_pattern(ctx, vidx, lanes,
-                                     common_terms, &n_common_terms, &base_const)) return NULL;
+  PolyUOp *vec = idx->src[1];
+  int cnt = buf_vec->n_src;
+  if (cnt > 128) return NULL;
 
-  PolyDType idx_dt = poly_dtype_scalar(vidx->dtype);
-  PolyUOp *base_scalar = build_add_expr(ctx, idx_dt, common_terms, n_common_terms, base_const);
-
-  PolyUOp *new_src[64];
-  int n_new = 0;
-  new_src[n_new++] = buf_base;
-  new_src[n_new++] = base_scalar;
-  for (int i = 2; i < idx->n_src && n_new < 64; i++) new_src[n_new++] = idx->src[i];
-
-  PolyUOp *base_idx = poly_uop(ctx, POLY_OP_INDEX, buf_base->dtype, new_src, n_new, idx->arg);
-  PolyDType vec_ptr = poly_dtype_vec(buf_base->dtype, lanes);
-  return poly_uop1(ctx, POLY_OP_CAST, vec_ptr, base_idx, poly_arg_none());
+  PolyUOp *elems[128];
+  for (int i = 0; i < cnt; i++) {
+    PolyUOp *gi = make_gep_lane(ctx, vec, i);
+    /* Build INDEX(buf, gi) with ptr output (same as buf->dtype) */
+    PolyUOp *idx_srcs[64];
+    int ns = 0;
+    idx_srcs[ns++] = buf;
+    idx_srcs[ns++] = gi;
+    for (int j = 2; j < idx->n_src && ns < 64; j++) idx_srcs[ns++] = idx->src[j];
+    elems[i] = poly_uop(ctx, POLY_OP_INDEX, buf->dtype, idx_srcs, ns, idx->arg);
+  }
+  return poly_uop(ctx, POLY_OP_VECTORIZE, buf->dtype, elems, cnt, poly_arg_none());
 }
 
-static PolyUOp *rule_split_vector_load(PolyCtx *ctx, PolyUOp *ld, const PolyBindings *b) {
+/* fold_expanded_index (tinygrad devectorizer.py:68-104):
+ * VECTORIZE(INDEX(buf,off0), INDEX(buf,off1), ...) → PTRCAT(...).gep(remap)
+ * Groups contiguous offsets into vector pointer CASTs, wraps in PTRCAT. */
+static PolyUOp *rule_fold_expanded_index(PolyCtx *ctx, PolyUOp *midx, const PolyBindings *b) {
+  (void)b;
+  if (!midx || midx->op != POLY_OP_VECTORIZE || midx->n_src <= 1) return NULL;
+  /* All sources must be INDEX ops */
+  for (int i = 0; i < midx->n_src; i++)
+    if (!midx->src[i] || midx->src[i]->op != POLY_OP_INDEX) return NULL;
+  /* All INDEX ops must reference the same buffer */
+  PolyUOp *buf = midx->src[0]->src[0];
+  if (!buf) return NULL;
+  for (int i = 1; i < midx->n_src; i++)
+    if (midx->src[i]->src[0] != buf) return NULL;
+  /* All INDEX outputs must be pointer types */
+  for (int i = 0; i < midx->n_src; i++)
+    if (!midx->src[i]->dtype.is_ptr) return NULL;
+
+  int n = midx->n_src;
+
+  /* Extract offsets: decompose each INDEX's idx expr into (root_src, const_offset).
+   * Polygrad simplified model: INDEX.src[1] is the offset directly (no get_idx/get_valid). */
+  typedef struct { PolyUOp *root; int64_t offset; int orig_idx; } OffsetEntry;
+  OffsetEntry entries[128];
+  for (int i = 0; i < n; i++) {
+    PolyUOp *idx_expr = midx->src[i]->src[1];
+    entries[i].orig_idx = i;
+    /* Decompose idx_expr into root + const offset */
+    LaneAffineExpr ae = {.n_terms = 0, .cst = 0, .ok = true};
+    collect_add_terms(ctx, idx_expr, &ae, false);
+    if (!ae.ok) { entries[i].root = idx_expr; entries[i].offset = 0; continue; }
+    qsort(ae.terms, (size_t)ae.n_terms, sizeof(ae.terms[0]), uop_ptr_cmp);
+    entries[i].offset = ae.cst;
+    entries[i].root = build_add_expr(ctx, poly_dtype_scalar(idx_expr->dtype), ae.terms, ae.n_terms, 0);
+  }
+
+  /* Group entries by root_src, then find contiguous offset sequences */
+  /* Simple approach: group entries with same root pointer, sort by offset, find contiguous runs */
+  PolyUOp *ret_srcs[128];
+  int n_ret = 0;
+  int64_t idxs[128]; /* remap: original lane → position in PTRCAT output */
+  for (int i = 0; i < n; i++) idxs[i] = -1;
+  int global_offset = 0;
+
+  bool used[128];
+  for (int i = 0; i < n; i++) used[i] = false;
+
+  for (int i = 0; i < n; i++) {
+    if (used[i]) continue;
+    /* Collect all entries with same root */
+    int group[128];
+    int64_t group_offsets[128];
+    int ng = 0;
+    for (int j = i; j < n; j++) {
+      if (used[j]) continue;
+      if (entries[j].root == entries[i].root) {
+        group[ng] = j;
+        group_offsets[ng] = entries[j].offset;
+        ng++;
+      }
+    }
+    /* Sort group by offset */
+    for (int a = 0; a < ng - 1; a++)
+      for (int bb = a + 1; bb < ng; bb++)
+        if (group_offsets[a] > group_offsets[bb]) {
+          int64_t to = group_offsets[a]; group_offsets[a] = group_offsets[bb]; group_offsets[bb] = to;
+          int ti = group[a]; group[a] = group[bb]; group[bb] = ti;
+        }
+    /* Find contiguous runs within the group */
+    int run_start = 0;
+    while (run_start < ng) {
+      int run_end = run_start + 1;
+      while (run_end < ng && group_offsets[run_end] == group_offsets[run_end-1] + 1) run_end++;
+      int run_len = run_end - run_start;
+      /* Use the first INDEX in the run as the base pointer */
+      PolyUOp *lidx = midx->src[group[run_start]];
+      if (run_len > 1) {
+        /* CAST to vec pointer: CAST(INDEX(buf, base), vec_N_ptr) */
+        PolyDType vec_ptr = buf->dtype;
+        vec_ptr.vcount = (uint16_t)run_len;
+        lidx = poly_uop1(ctx, POLY_OP_CAST, vec_ptr, lidx, poly_arg_none());
+      }
+      /* Map original lanes to PTRCAT positions */
+      for (int k = run_start; k < run_end; k++) {
+        idxs[entries[group[k]].orig_idx] = global_offset + (k - run_start);
+        used[group[k]] = true;
+      }
+      ret_srcs[n_ret++] = lidx;
+      global_offset += run_len;
+      run_start = run_end;
+    }
+  }
+
+  /* Verify all lanes mapped */
+  for (int i = 0; i < n; i++) if (idxs[i] < 0) return NULL;
+
+  /* Build PTRCAT */
+  PolyDType ptrcat_dt = buf->dtype;
+  ptrcat_dt.vcount = (uint16_t)global_offset;
+  PolyUOp *ptrcat = poly_uop(ctx, POLY_OP_PTRCAT, ptrcat_dt, ret_srcs, n_ret, poly_arg_none());
+
+  /* Apply GEP remap */
+  return poly_uop1(ctx, POLY_OP_GEP, midx->dtype, ptrcat, poly_arg_int_tuple_local(idxs, n));
+}
+
+/* GEP after LOAD (tinygrad devectorizer.py:127-128):
+ * LOAD(GEP(ptr, arg)) → LOAD(ptr, wider_dtype).gep(arg)
+ * Pushes GEP through LOAD so the LOAD reads the full vector. */
+static PolyUOp *rule_gep_after_load(PolyCtx *ctx, PolyUOp *ld, const PolyBindings *b) {
   (void)b;
   if (!ld || ld->op != POLY_OP_LOAD || ld->n_src < 1) return NULL;
-  PolyUOp *idx = ld->src[0];
-  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
-  PolyUOp *buf_base = NULL;
-  int lanes = 0;
-  if (!is_vectorize_of_same(idx->src[0], &buf_base, &lanes) || !buf_base || lanes <= 1) return NULL;
-  if (ld->dtype.count != lanes || idx->src[1]->dtype.count != lanes) return NULL;
-  if (lanes > 128) return NULL;
-  if (ld->n_src == 1 && lanes > 4) {
-    PolyUOp *common_terms[64];
-    int n_common_terms = 0;
-    int64_t base_const = 0;
-    if (match_contiguous_lane_pattern(ctx, idx->src[1], lanes,
-                                      common_terms, &n_common_terms, &base_const)) {
-      PolyUOp *elts[128];
-      int p = 0;
-      PolyDType sdt = poly_dtype_scalar(ld->dtype);
-      PolyDType idx_dt = poly_dtype_scalar(idx->src[1]->dtype);
-      for (int off = 0; off < lanes;) {
-        int chunk = (lanes - off >= 4) ? 4 : 1;
-        PolyUOp *base_scalar = build_add_expr(ctx, idx_dt, common_terms, n_common_terms, base_const + off);
-        PolyUOp *chunk_idx = poly_uop2(ctx, POLY_OP_INDEX, buf_base->dtype, buf_base, base_scalar, idx->arg);
-        if (chunk == 1) {
-          elts[p++] = poly_uop1(ctx, POLY_OP_LOAD, sdt, chunk_idx, ld->arg);
-        } else {
-          PolyDType vec_ptr = poly_dtype_vec(buf_base->dtype, chunk);
-          PolyUOp *cast_idx = poly_uop1(ctx, POLY_OP_CAST, vec_ptr, chunk_idx, poly_arg_none());
-          PolyUOp *vload = poly_uop1(ctx, POLY_OP_LOAD, poly_dtype_vec(sdt, chunk), cast_idx, ld->arg);
-          for (int i = 0; i < chunk; i++) {
-            int64_t lane = i;
-            elts[p++] = poly_uop1(ctx, POLY_OP_GEP, sdt, vload, poly_arg_int_tuple_local(&lane, 1));
-          }
-        }
-        off += chunk;
-      }
-      return poly_uop(ctx, POLY_OP_VECTORIZE, ld->dtype, elts, p, poly_arg_none());
-    }
-  }
-
-  PolyUOp *elts[128];
-  PolyDType sdt = poly_dtype_scalar(ld->dtype);
-  for (int i = 0; i < lanes; i++) {
-    PolyUOp *lane_idx = build_scalar_lane_index(ctx, idx, buf_base, i);
-    if (!lane_idx) return NULL;
-    PolyUOp *lane_src[64];
-    int n_lane_src = 0;
-    lane_src[n_lane_src++] = lane_idx;
-    for (int j = 1; j < ld->n_src && n_lane_src < 64; j++) {
-      PolyUOp *s = ld->src[j];
-      if (s && s->dtype.count > 1) s = scalarize_lane_expr(ctx, s, i);
-      if (!s) return NULL;
-      lane_src[n_lane_src++] = s;
-    }
-    elts[i] = poly_uop(ctx, POLY_OP_LOAD, sdt, lane_src, n_lane_src, ld->arg);
-  }
-  return poly_uop(ctx, POLY_OP_VECTORIZE, ld->dtype, elts, lanes, poly_arg_none());
+  PolyUOp *gep = ld->src[0];
+  if (!gep || gep->op != POLY_OP_GEP || gep->n_src < 1) return NULL;
+  /* Build wider LOAD: dtype = scalar.vec(gep source vcount) */
+  int src_count = gep->src[0]->dtype.is_ptr ? gep->src[0]->dtype.vcount : gep->src[0]->dtype.count;
+  if (src_count <= 1) return NULL;
+  PolyDType wider_dt = poly_dtype_vec(poly_dtype_scalar(ld->dtype), src_count);
+  PolyUOp *ld_srcs[64];
+  int ns = 0;
+  ld_srcs[ns++] = gep->src[0];
+  for (int i = 1; i < ld->n_src && ns < 64; i++) ld_srcs[ns++] = ld->src[i];
+  PolyUOp *wider_load = poly_uop(ctx, POLY_OP_LOAD, wider_dt, ld_srcs, ns, ld->arg);
+  return poly_uop1(ctx, POLY_OP_GEP, ld->dtype, wider_load, gep->arg);
 }
 
-static PolyUOp *rule_split_vector_store(PolyCtx *ctx, PolyUOp *st, const PolyBindings *b) {
+/* GEP on STORE data (tinygrad devectorizer.py:115-121):
+ * STORE(GEP(ptr, arg), data) → STORE(ptr.src[0], data.gep(inverted_arg)) */
+static PolyUOp *rule_gep_on_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings *b) {
   (void)b;
-  if (!st || st->op != POLY_OP_STORE || st->n_src < 2) return NULL;
-  PolyUOp *idx = st->src[0];
-  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
-  PolyUOp *buf_base = NULL;
-  int lanes = 0;
-  if (!is_vectorize_of_same(idx->src[0], &buf_base, &lanes) || !buf_base || lanes <= 1) return NULL;
-  if (idx->src[1]->dtype.count != lanes) return NULL;
-  if (lanes > 128) return NULL;
-
-  PolyUOp *stores[128];
-  PolyDType val_sdt = poly_dtype_scalar(st->src[1]->dtype);
-  for (int i = 0; i < lanes; i++) {
-    PolyUOp *lane_idx = build_scalar_lane_index(ctx, idx, buf_base, i);
-    if (!lane_idx) return NULL;
-    PolyUOp *lane_val = st->src[1];
-    if (lane_val && lane_val->dtype.count > 1) lane_val = scalarize_lane_expr(ctx, lane_val, i);
-    if (!lane_val) return NULL;
-
-    PolyUOp *lane_src[64];
-    int n_lane_src = 0;
-    lane_src[n_lane_src++] = lane_idx;
-    if (val_sdt.count == 1 && lane_val->dtype.count > 1)
-      lane_src[n_lane_src++] = poly_uop1(ctx, POLY_OP_CAST, val_sdt, lane_val, poly_arg_none());
-    else
-      lane_src[n_lane_src++] = lane_val;
-    for (int j = 2; j < st->n_src && n_lane_src < 64; j++) lane_src[n_lane_src++] = st->src[j];
-    stores[i] = poly_uop(ctx, POLY_OP_STORE, st->dtype, lane_src, n_lane_src, st->arg);
+  if (!sto || sto->op != POLY_OP_STORE || sto->n_src < 2) return NULL;
+  PolyUOp *gep = sto->src[0];
+  if (!gep || gep->op != POLY_OP_GEP || gep->n_src < 1) return NULL;
+  if (gep->arg.kind != POLY_ARG_INT_TUPLE || gep->arg.int_tuple.n <= 0) return NULL;
+  /* Invert the GEP permutation: argsort */
+  int gn = gep->arg.int_tuple.n;
+  int64_t new_arg[128];
+  if (gn > 128) return NULL;
+  /* Build inverse: for each position in gep->arg, map value→index */
+  for (int i = 0; i < gn; i++) {
+    int64_t v = gep->arg.int_tuple.vals[i];
+    if (v < 0 || v >= gn) return NULL;
+    new_arg[v] = i;
   }
-  return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, lanes, poly_arg_none());
+  PolyUOp *st_data = sto->src[1];
+  PolyUOp *reordered_data = poly_uop1(ctx, POLY_OP_GEP, st_data->dtype, st_data,
+                                        poly_arg_int_tuple_local(new_arg, gn));
+  PolyUOp *st_srcs[64];
+  int ns = 0;
+  st_srcs[ns++] = gep->src[0];
+  st_srcs[ns++] = reordered_data;
+  for (int i = 2; i < sto->n_src && ns < 64; i++) st_srcs[ns++] = sto->src[i];
+  return poly_uop(ctx, POLY_OP_STORE, sto->dtype, st_srcs, ns, sto->arg);
+}
+
+/* PTRCAT after LOAD (tinygrad devectorizer.py:131-133):
+ * LOAD(PTRCAT(ptr0, ptr1, ...)) → CAT(LOAD(ptr0), LOAD(ptr1), ...)
+ * Each LOAD reads the vector width of its pointer source. */
+static PolyUOp *rule_ptrcat_after_load(PolyCtx *ctx, PolyUOp *ld, const PolyBindings *b) {
+  (void)b;
+  if (!ld || ld->op != POLY_OP_LOAD || ld->n_src < 1) return NULL;
+  PolyUOp *cat = ld->src[0];
+  if (!cat || cat->op != POLY_OP_PTRCAT || cat->n_src <= 0) return NULL;
+  int total_count = 0;
+  PolyUOp *loads[128];
+  int nl = 0;
+  PolyDType sdt = poly_dtype_scalar(ld->dtype);
+  for (int i = 0; i < cat->n_src && nl < 128; i++) {
+    PolyUOp *ptr = cat->src[i];
+    int ptr_count = ptr->dtype.is_ptr ? ptr->dtype.vcount : 1;
+    if (ptr_count <= 0) ptr_count = 1;
+    PolyDType ld_dt = (ptr_count > 1) ? poly_dtype_vec(sdt, ptr_count) : sdt;
+    PolyUOp *ld_srcs[64];
+    int ns = 0;
+    ld_srcs[ns++] = ptr;
+    for (int j = 1; j < ld->n_src && ns < 64; j++) ld_srcs[ns++] = ld->src[j];
+    loads[nl++] = poly_uop(ctx, POLY_OP_LOAD, ld_dt, ld_srcs, ns, ld->arg);
+    total_count += ptr_count;
+  }
+  PolyDType cat_dt = poly_dtype_vec(sdt, total_count);
+  return poly_uop(ctx, POLY_OP_CAT, cat_dt, loads, nl, poly_arg_none());
+}
+
+/* PTRCAT after STORE (tinygrad devectorizer.py:106-113):
+ * STORE(PTRCAT(ptr0, ptr1, ...), data) → GROUP(STORE(ptr0, GEP(data,0..n0)), ...) */
+static PolyUOp *rule_ptrcat_after_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings *b) {
+  (void)b;
+  if (!sto || sto->op != POLY_OP_STORE || sto->n_src < 2) return NULL;
+  PolyUOp *cat = sto->src[0];
+  if (!cat || cat->op != POLY_OP_PTRCAT || cat->n_src <= 0) return NULL;
+  PolyUOp *data = sto->src[1];
+  int offset = 0;
+  PolyUOp *stores[128];
+  int ns_out = 0;
+  for (int i = 0; i < cat->n_src && ns_out < 128; i++) {
+    PolyUOp *ptr = cat->src[i];
+    int ptr_count = ptr->dtype.is_ptr ? ptr->dtype.vcount : 1;
+    if (ptr_count <= 0) ptr_count = 1;
+    /* GEP to extract this slice of data */
+    int64_t gep_args[128];
+    for (int j = 0; j < ptr_count; j++) gep_args[j] = offset + j;
+    PolyDType slice_dt = (ptr_count > 1)
+      ? poly_dtype_vec(poly_dtype_scalar(data->dtype), ptr_count)
+      : poly_dtype_scalar(data->dtype);
+    PolyUOp *slice = poly_uop1(ctx, POLY_OP_GEP, slice_dt, data,
+                                poly_arg_int_tuple_local(gep_args, ptr_count));
+    PolyUOp *st_srcs[64];
+    int ns = 0;
+    st_srcs[ns++] = ptr;
+    st_srcs[ns++] = slice;
+    for (int j = 2; j < sto->n_src && ns < 64; j++) st_srcs[ns++] = sto->src[j];
+    stores[ns_out++] = poly_uop(ctx, POLY_OP_STORE, sto->dtype, st_srcs, ns, sto->arg);
+    offset += ptr_count;
+  }
+  return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, ns_out, poly_arg_none());
+}
+
+/* split_load_store (tinygrad devectorizer.py:140-184):
+ * LOAD/STORE(CAST(INDEX, vec_ptr)) → split to hardware-supported widths.
+ * Matches correct_load_store pattern: LOAD/STORE with CAST(INDEX) source.
+ * For CPU with supports_float4: fold_lengths = [4, 2, 1]. */
+static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindings *b) {
+  (void)b;
+  if (!ls) return NULL;
+  bool is_load = (ls->op == POLY_OP_LOAD);
+  bool is_store = (ls->op == POLY_OP_STORE);
+  if (!is_load && !is_store) return NULL;
+  if (ls->n_src < 1) return NULL;
+  /* Match CAST(INDEX) source — the vec pointer form */
+  PolyUOp *cast = ls->src[0];
+  if (!cast || cast->op != POLY_OP_CAST) return NULL;
+  if (cast->n_src < 1 || !cast->src[0] || cast->src[0]->op != POLY_OP_INDEX) return NULL;
+  PolyUOp *idx = cast->src[0];
+  int sz = cast->dtype.is_ptr ? cast->dtype.vcount : cast->dtype.count;
+  if (sz <= 1) return NULL;  /* nothing to split */
+  PolyUOp *buf = idx->src[0];
+  if (!buf) return NULL;
+
+  /* Determine fold lengths for CPU: [4, 2, 1] (supports_float4) */
+  int fold_lengths[] = {4, 2, 1};
+  int n_folds = 3;
+
+  /* Split into chunks */
+  PolyUOp *ret[128];
+  int n_ret = 0;
+  int global_offset = 0;
+  PolyDType sdt = is_load ? poly_dtype_scalar(ls->dtype) : poly_dtype_scalar(ls->src[1]->dtype);
+
+  while (global_offset < sz) {
+    int fold_length = 1;
+    for (int f = 0; f < n_folds; f++) {
+      if (global_offset + fold_lengths[f] <= sz) { fold_length = fold_lengths[f]; break; }
+    }
+    /* Build INDEX at (original_offset + global_offset) */
+    PolyUOp *off_idx;
+    if (global_offset == 0) {
+      off_idx = idx;
+    } else {
+      PolyUOp *off_const = poly_uop0(ctx, POLY_OP_CONST, poly_dtype_scalar(idx->src[1]->dtype),
+                                       poly_arg_int(global_offset));
+      PolyUOp *new_offset = poly_uop2(ctx, POLY_OP_ADD, idx->src[1]->dtype,
+                                        idx->src[1], off_const, poly_arg_none());
+      PolyUOp *idx_srcs[64];
+      int ins = 0;
+      idx_srcs[ins++] = buf;
+      idx_srcs[ins++] = new_offset;
+      for (int j = 2; j < idx->n_src && ins < 64; j++) idx_srcs[ins++] = idx->src[j];
+      off_idx = poly_uop(ctx, POLY_OP_INDEX, buf->dtype, idx_srcs, ins, idx->arg);
+    }
+    PolyUOp *src_ptr = off_idx;
+    if (fold_length > 1) {
+      PolyDType vec_ptr = buf->dtype;
+      vec_ptr.vcount = (uint16_t)fold_length;
+      src_ptr = poly_uop1(ctx, POLY_OP_CAST, vec_ptr, off_idx, poly_arg_none());
+    }
+    if (is_load) {
+      PolyDType ld_dt = (fold_length > 1) ? poly_dtype_vec(sdt, fold_length) : sdt;
+      PolyUOp *ld_srcs[64];
+      int lns = 0;
+      ld_srcs[lns++] = src_ptr;
+      for (int j = 1; j < ls->n_src && lns < 64; j++) ld_srcs[lns++] = ls->src[j];
+      ret[n_ret++] = poly_uop(ctx, POLY_OP_LOAD, ld_dt, ld_srcs, lns, ls->arg);
+    } else {
+      int64_t gep_args[128];
+      for (int j = 0; j < fold_length; j++) gep_args[j] = global_offset + j;
+      PolyDType slice_dt = (fold_length > 1) ? poly_dtype_vec(sdt, fold_length) : sdt;
+      PolyUOp *slice = poly_uop1(ctx, POLY_OP_GEP, slice_dt, ls->src[1],
+                                   poly_arg_int_tuple_local(gep_args, fold_length));
+      PolyUOp *st_srcs[64];
+      int sns = 0;
+      st_srcs[sns++] = src_ptr;
+      st_srcs[sns++] = slice;
+      for (int j = 2; j < ls->n_src && sns < 64; j++) st_srcs[sns++] = ls->src[j];
+      ret[n_ret++] = poly_uop(ctx, POLY_OP_STORE, ls->dtype, st_srcs, sns, ls->arg);
+    }
+    global_offset += fold_length;
+  }
+  if (n_ret <= 1) return NULL;  /* no split needed */
+  if (is_load) {
+    PolyDType cat_dt = poly_dtype_vec(sdt, sz);
+    return poly_uop(ctx, POLY_OP_CAT, cat_dt, ret, n_ret, poly_arg_none());
+  } else {
+    return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, ret, n_ret, poly_arg_none());
+  }
 }
 
 static PolyPatternMatcher *g_pm_load_store_folding = NULL;
 static PolyPatternMatcher *poly_pm_load_store_folding(void) {
   if (g_pm_load_store_folding) return g_pm_load_store_folding;
   PolyRule rules[] = {
-    { poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_fold_vectorized_index },
-    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ld")), rule_split_vector_load },
-    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "st")), rule_split_vector_store },
+    /* expand_index: INDEX(VECTORIZE(buf), vec) → VECTORIZE(INDEX(buf, gep(vec,i)), ...) */
+    { poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_expand_index },
+    /* fold_expanded_index: VECTORIZE(INDEX, INDEX, ...) → PTRCAT(...).gep(remap) */
+    { poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "midx"), rule_fold_expanded_index },
+    /* GEP after LOAD: LOAD(GEP(ptr)) → LOAD(ptr).gep(arg) */
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ld")), rule_gep_after_load },
+    /* GEP on STORE: STORE(GEP(ptr), data) → STORE(ptr, data.gep(inv)) */
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "sto")), rule_gep_on_store },
+    /* PTRCAT after LOAD: LOAD(PTRCAT) → CAT(LOAD, LOAD, ...) */
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ld")), rule_ptrcat_after_load },
+    /* PTRCAT after STORE: STORE(PTRCAT, data) → GROUP(STORE, STORE, ...) */
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "sto")), rule_ptrcat_after_store },
+    /* correct_load_store: split oversized LOAD/STORE(CAST(INDEX)) */
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ls")), rule_split_load_store },
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "ls")), rule_split_load_store },
   };
   g_pm_load_store_folding = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_load_store_folding;
@@ -2649,6 +2886,10 @@ static PolyUOp *lane_or_gep(PolyCtx *ctx, PolyUOp *src, int lane);
 static PolyUOp *rule_no_vectorized_alu(PolyCtx *ctx, PolyUOp *alu, const PolyBindings *b) {
   (void)b;
   if (alu->dtype.count <= 1) return NULL;
+  /* Skip pointer types: vec_ptr CASTs from fold_vectorized_index are pointer
+   * type conversions, not value ALU. tinygrad: PtrDType.vcount returns 1,
+   * so no_vectorized_alu naturally skips them. */
+  if (alu->dtype.is_ptr) return NULL;
   int lanes = alu->dtype.count;
   if (lanes > 128) return NULL;
   PolyDType sdt = poly_dtype_scalar(alu->dtype);
@@ -2804,11 +3045,33 @@ static PolyUOp *rule_vector_bool_neg_to_scalarized_vector(PolyCtx *ctx, PolyUOp 
   return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, lanes, poly_arg_none());
 }
 
+/* CAT → VECTORIZE(GEP, GEP, ...) lowering (tinygrad symbolic.py:196):
+ * CAT can't be rendered; expand to VECTORIZE of per-element GEPs. */
+static PolyUOp *rule_cat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
+  (void)b;
+  if (!x || x->op != POLY_OP_CAT || x->n_src <= 0) return NULL;
+  if (x->dtype.is_ptr) return NULL;  /* don't expand pointer CATs */
+  PolyUOp *elts[128];
+  int p = 0;
+  PolyDType sdt = poly_dtype_scalar(x->dtype);
+  for (int i = 0; i < x->n_src; i++) {
+    PolyUOp *src = x->src[i];
+    int cnt = src->dtype.count;
+    if (cnt <= 0) cnt = 1;
+    for (int j = 0; j < cnt && p < 128; j++)
+      elts[p++] = make_gep_lane(ctx, src, j);
+  }
+  return poly_uop(ctx, POLY_OP_VECTORIZE, x->dtype, elts, p, poly_arg_none());
+}
+
+/* Render subset: full (DEVECTORIZE>=1) scatters vec CMP/WHERE to scalar.
+ * Minimal (DEVECTORIZE=0) keeps vec ALU, only lowers VCONST/CAT. */
 static PolyPatternMatcher *g_pm_render_subset = NULL;
 static PolyPatternMatcher *poly_pm_render_subset(void) {
   if (g_pm_render_subset) return g_pm_render_subset;
   PolyRule rules[] = {
     { poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst },
+    { poly_pat_op(POLY_OP_CAT, NULL, 0, "x"), rule_cat_to_vectorize },
     { poly_pat_op(POLY_OP_CMPLT, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
     { poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
     { poly_pat_op(POLY_OP_CMPEQ, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
@@ -2818,6 +3081,45 @@ static PolyPatternMatcher *poly_pm_render_subset(void) {
   };
   g_pm_render_subset = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_render_subset;
+}
+
+static PolyPatternMatcher *g_pm_render_subset_vec = NULL;
+static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
+  if (g_pm_render_subset_vec) return g_pm_render_subset_vec;
+  PolyRule rules[] = {
+    { poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst },
+    { poly_pat_op(POLY_OP_CAT, NULL, 0, "x"), rule_cat_to_vectorize },
+    { poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single },
+  };
+  g_pm_render_subset_vec = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  return g_pm_render_subset_vec;
+}
+
+/* ── Combined devectorize pass (cached) ─────────────────────────────── */
+/*
+ * Matches tinygrad codegen/__init__.py:79:
+ *   pm_devectorize = sym+devectorize+load_store_folding+correct_load_store+load_store_indexing
+ * All rules in ONE graph_rewrite so folding sees vectorized INDEX before devectorize scatters.
+ */
+
+static PolyPatternMatcher *g_combined_devec = NULL;
+static PolyPatternMatcher *poly_pm_combined_devec(void) {
+  if (g_combined_devec) return g_combined_devec;
+  /* Matches tinygrad codegen/__init__.py:79:
+   *   pm_devectorize = sym+devectorize+load_store_folding+correct_load_store+load_store_indexing
+   * Include gep_pushing (from sym) so GEP(ALU) resolves between expand_index and fold.
+   * Full sym excluded (render_subset's VCONST→VECTORIZE causes cycles). */
+  static PolyPatternMatcher *gep_devec = NULL;
+  if (!gep_devec) gep_devec = poly_pm_concat(poly_pm_gep_pushing(), poly_pm_devectorize());
+  g_combined_devec = poly_pm_concat(gep_devec, poly_pm_load_store_folding());
+  return g_combined_devec;
+}
+
+static PolyPatternMatcher *g_combined_nodevec = NULL;
+static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
+  if (g_combined_nodevec) return g_combined_nodevec;
+  g_combined_nodevec = poly_pm_load_store_folding();
+  return g_combined_nodevec;
 }
 
 /* ── GPU dims: replace outermost RANGE with SPECIAL ─────────────────── */
@@ -3334,16 +3636,16 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     /* tinygrad line 75: add loads */
     sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());
 
-    /* tinygrad lines 78-81: devectorize based on level */
-    if (opts.devectorize >= 1)
-      sink = poly_graph_rewrite(ctx, sink, poly_pm_devectorize());
+    sink = poly_graph_rewrite(ctx, sink,
+        (opts.devectorize >= 1) ? poly_pm_combined_devec() : poly_pm_combined_nodevec());
 
-    /* load/store folding + render subset (always when devectorize path active) */
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_load_store_folding());
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
-
-    /* post-devectorize symbolic */
+    /* post-devectorize: render subset + symbolic cleanup.
+     * DEVECTORIZE>=1: scatter vec CMP/WHERE to scalar (ALU already scattered).
+     * DEVECTORIZE=0: keep vec ALU, only lower VCONST/CAT. */
+    sink = poly_graph_rewrite(ctx, sink,
+        (opts.devectorize >= 1) ? poly_pm_render_subset() : poly_pm_render_subset_vec());
     sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+
   }
 
   /* ── 7. Decompositions (unconditional, tinygrad lines 91-100) ──────── */
@@ -3354,7 +3656,9 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   /* ── 8. Final rewrite: expander cleanup + split_ends + render (tinygrad line 104) ── */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_split_ends());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
+  sink = poly_graph_rewrite(ctx, sink,
+      (opts.devectorize >= 1 || opts.devectorize < 0)
+        ? poly_pm_render_subset() : poly_pm_render_subset_vec());
 
   return sink;
 }

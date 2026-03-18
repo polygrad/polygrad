@@ -126,6 +126,7 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *operands, int n_ops)
 /* ── Symbolic simplification rules ────────────────────────────────────── */
 
 PolyPatternMatcher *poly_symbolic_simple(void);
+PolyPatternMatcher *poly_pm_gep_pushing(void);
 
 /* ── Codegen pipeline (port of full_rewrite_to_sink) ─────────────────── */
 
