@@ -383,11 +383,14 @@ static PolyUOp *poly_unroll_reduce_ranges(PolyCtx *ctx, PolyUOp *sink) {
 }
 
 static PolyUOp *poly_apply_opts_basic(PolyCtx *ctx, PolyUOp *sink) {
-  sink = poly_unroll_reduce_ranges(ctx, sink);
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
 
-  /* Keep non-reduce upcast conservative until reduce-side apply_opts parity is complete. */
+  /* Keep non-reduce upcast conservative until reduce-side apply_opts parity is complete.
+   * NOTE: poly_unroll_reduce_ranges was previously called here unconditionally,
+   * but it converts reduce RANGEs to UNROLL type which breaks pm_reduce when
+   * the full optimization framework isn't ready. Only call it when reduce
+   * optimization is fully implemented. */
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_REDUCE_AXIS)
       return sink;
