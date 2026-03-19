@@ -2889,3 +2889,162 @@ TEST(rangeify, earliest_assign_to_contiguous) {
     ASSERT_FLOAT_EQ(buf_d[i], src_d[i] + 1.0f, 1e-5);
   PASS();
 }
+
+
+/* ── Item 5: range_start_for_op covers CALL/COPY/BUFFER_VIEW ────────── */
+
+TEST(rangeify, range_start_for_op_all) {
+  /* Verify range_start_for_op returns correct values for all 8 ops.
+   * Matches tinygrad: {BUFFERIZE:1, REDUCE:1, STORE:2, WMMA:3, END:1,
+   *                    CALL:1, COPY:2, BUFFER_VIEW:1} */
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_BUFFERIZE), 1);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_STORE), 2);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_WMMA), 3);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_END), 1);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_CALL), 1);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_COPY), 2);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_BUFFER_VIEW), 1);
+  /* Unknown ops should return -1 */
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_ADD), -1);
+  ASSERT_INT_EQ(range_start_for_op(POLY_OP_CONST), -1);
+  PASS();
+}
+
+
+/* ── Item 7: fix_assign_hazard SHRINK handling ──────────────────────── */
+
+TEST(rangeify, assign_shrink_hazard) {
+  /* a[:5].assign(a[3:8]) — overlapping SHRINK regions create write-before-read
+   * aliasing. fix_assign_hazard should force materialization of the source
+   * before writing. Build ASSIGN manually (not via poly_assign which
+   * normalizes target) to preserve SHRINK on target.
+   *
+   * Verify: CONTIGUOUS insertion causes 2+ kernels (materialization + ASSIGN).
+   * Without the SHRINK hazard check, source would fuse into one kernel and
+   * reads would see partially-written data. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, 8);
+
+  /* a[3:8] — source SHRINK */
+  int64_t src_pairs[][2] = {{3, 8}};
+  PolyUOp *a_3_8 = poly_shrink(ctx, buf_a, src_pairs, 1);
+
+  /* a[:5] — target SHRINK */
+  int64_t tgt_pairs[][2] = {{0, 5}};
+  PolyUOp *a_0_5 = poly_shrink(ctx, buf_a, tgt_pairs, 1);
+
+  /* ASSIGN(a[:5], a[3:8]) — construct directly, preserving SHRINK on target */
+  PolyUOp *assign_srcs[2] = { a_0_5, a_3_8 };
+  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32,
+                               assign_srcs, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign,
+                              poly_arg_none());
+
+  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+
+  /* The CONTIGUOUS insertion should produce 2+ kernels:
+   * one for materializing the source, one for the ASSIGN write. */
+  ASSERT_TRUE(sr.n_kernels >= 2);
+
+  poly_schedule_result_free(&sr);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, assign_shrink_no_hazard_different_buf) {
+  /* a[:3].assign(b[:3]) — SHRINK on target but source is different buffer.
+   * Source SHRINK does NOT reach target_base in backward slice.
+   * No hazard, so CONTIGUOUS should not be inserted for hazard reasons.
+   * (CONTIGUOUS may appear for other scheduling reasons like C4e.) */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT32, 8);
+
+  int64_t src_pairs[][2] = {{0, 3}};
+  PolyUOp *b_0_3 = poly_shrink(ctx, buf_b, src_pairs, 1);
+
+  int64_t tgt_pairs[][2] = {{0, 3}};
+  PolyUOp *a_0_3 = poly_shrink(ctx, buf_a, tgt_pairs, 1);
+
+  /* ASSIGN(a[:3], b[:3]) — construct directly */
+  PolyUOp *assign_srcs[2] = { a_0_3, b_0_3 };
+  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32,
+                               assign_srcs, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign,
+                              poly_arg_none());
+
+  /* This should schedule successfully */
+  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  ASSERT_TRUE(sr.n_kernels >= 1);
+
+  poly_schedule_result_free(&sr);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+
+/* ── Item 6: realize_assign_src optimization ────────────────────────── */
+
+TEST(rangeify, realize_assign_src_copy_unrealized) {
+  /* ASSIGN(buf, COPY(src)) — COPY is the direct source of ASSIGN with
+   * no movement ops on target. COPY should be un-realized (eliminated
+   * as an intermediate). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *src = poly_buffer(ctx, POLY_FLOAT32, 4);
+
+  /* COPY(src) — a device-level copy */
+  PolyUOp *copy = poly_uop1(ctx, POLY_OP_COPY, POLY_FLOAT32, src,
+                              poly_arg_none());
+
+  /* ASSIGN(buf, COPY(src)) */
+  PolyUOp *assign_src[2] = { buf, copy };
+  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32,
+                               assign_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign,
+                              poly_arg_none());
+
+  poly_realize_map_build(ictx, sink);
+
+  /* COPY should NOT be realized (un-realized by realize_assign_src) */
+  ASSERT_FALSE(poly_is_realized(ictx, copy));
+  /* ASSIGN itself should still be realized */
+  ASSERT_TRUE(poly_is_realized(ictx, assign));
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, realize_assign_src_war_forces_realize) {
+  /* ASSIGN(buf, buf + 1) — target base appears in RHS backward slice.
+   * WAR hazard: RHS should be force-realized. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *one = poly_const_float(ctx, 1.0);
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf, one,
+                             poly_arg_none());
+
+  /* ASSIGN(buf, buf + 1) */
+  PolyUOp *assign_src[2] = { buf, add };
+  PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32,
+                               assign_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign,
+                              poly_arg_none());
+
+  poly_realize_map_build(ictx, sink);
+
+  /* RHS (add) should be realized due to WAR hazard */
+  ASSERT_TRUE(poly_is_realized(ictx, add));
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}

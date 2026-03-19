@@ -25,7 +25,7 @@ typedef struct {
   TestFn fn;
 } TestEntry;
 
-#define MAX_TESTS 512
+#define MAX_TESTS 1024
 extern TestEntry g_tests[MAX_TESTS];
 extern int g_n_tests;
 

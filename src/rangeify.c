@@ -304,6 +304,24 @@ static void realize_mark(PolyIndexingCtx *ictx, PolyUOp *u) {
   poly_map_set(ictx->realize_map, h, u, ri, ptr_eq);
 }
 
+static void realize_unmark(PolyIndexingCtx *ictx, PolyUOp *u) {
+  uint32_t h = ptr_hash(u);
+  PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, h, u, ptr_eq);
+  if (ri) {
+    free(ri);
+    poly_map_remove(ictx->realize_map, h, u, ptr_eq);
+  }
+}
+
+/* Check if any node in uop's backward slice (including self) has the given op. */
+static bool uop_has_op_in_backward_slice(PolyCtx *ctx, PolyUOp *uop, PolyOps op) {
+  int n;
+  PolyUOp **topo = poly_toposort(ctx, uop, &n);
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == op) return true;
+  return false;
+}
+
 void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
   if (sink->op != POLY_OP_SINK) return;
 
@@ -338,6 +356,48 @@ void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
     }
   }
 
+  /* Rule 3: realize_assign_src — optimize ASSIGN sources.
+   * Ref: tinygrad indexing.py:20-26 realize_assign_src
+   *
+   * Part 1: Un-realize COPY/BUFFER_VIEW when direct source of ASSIGN
+   * and target has no movement ops (SHRINK/PERMUTE/FLIP/PAD) — the
+   * ASSIGN target buffer IS the output, so no intermediate needed.
+   *
+   * Part 2: WAR hazard — if target base appears in RHS backward slice,
+   * force-realize the RHS to prevent read-write aliasing. */
+  for (int i = 0; i < n_uops; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_ASSIGN || u->n_src < 2) continue;
+    PolyUOp *buf = u->src[0];  /* target */
+    PolyUOp *x = u->src[1];    /* source */
+
+    /* Part 1: un-realize COPY/BUFFER_VIEW when direct ASSIGN source */
+    if ((x->op == POLY_OP_COPY || x->op == POLY_OP_BUFFER_VIEW) &&
+        poly_is_realized(ictx, x)) {
+      bool has_movement = uop_has_op_in_backward_slice(ictx->ctx, buf, POLY_OP_SHRINK) ||
+                          uop_has_op_in_backward_slice(ictx->ctx, buf, POLY_OP_PERMUTE) ||
+                          uop_has_op_in_backward_slice(ictx->ctx, buf, POLY_OP_FLIP) ||
+                          uop_has_op_in_backward_slice(ictx->ctx, buf, POLY_OP_PAD);
+      if (!has_movement)
+        realize_unmark(ictx, x);
+    }
+
+    /* Part 2: WAR hazard — if target base is in RHS backward slice,
+     * force-realize RHS */
+    PolyUOp *buf_base = buf;
+    while (buf_base->n_src > 0 &&
+           poly_opset_has(POLY_GROUP_MOVEMENT, buf_base->op))
+      buf_base = buf_base->src[0];
+
+    int n_x_topo;
+    PolyUOp **x_topo = poly_toposort(ictx->ctx, x, &n_x_topo);
+    for (int j = 0; j < n_x_topo; j++) {
+      if (x_topo[j] == buf_base) {
+        realize_mark(ictx, x);
+        break;
+      }
+    }
+  }
 }
 
 bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u) {
@@ -1870,27 +1930,18 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
         result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
       }
 
-      /* C4e: assign_to_contiguous — safety net.
-       * poly_assign() normalizes targets to base BUFFERs at construction
-       * time. This rule catches edge cases that bypass the frontend:
-       * if target is not PARAM/BUFFER/ASSIGN/CONTIGUOUS, wrap in CONTIGUOUS.
-       * Ref: tinygrad earliest_rewrites assign_to_contiguous */
-      if (!result && target->op != POLY_OP_PARAM &&
-          target->op != POLY_OP_BUFFER && target->op != POLY_OP_ASSIGN &&
-          target->op != POLY_OP_CONTIGUOUS) {
-        PolyUOp *cont_target = poly_uop1(ctx, POLY_OP_CONTIGUOUS, target->dtype,
-                                           target, poly_arg_none());
-        PolyUOp *assign_src[2] = { cont_target, value };
-        result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
-      }
-
-      /* C4b: fix_assign_hazard — walk value subtree, check for PERMUTE/FLIP
-       * that can reach target's base BUFFER. If found, wrap value with
-       * CONTIGUOUS to force it into a separate kernel before the ASSIGN.
-       * Ref: rangeify.py:176, fn at 68-72 */
+      /* C4b: fix_assign_hazard — walk value subtree, check for unsafe
+       * movement ops that can reach target's base BUFFER. If found, wrap
+       * value with CONTIGUOUS to force materialization before the ASSIGN.
+       * PERMUTE and FLIP always reorder indices. SHRINK can create
+       * overlapping regions when the target is also shrunk.
+       * Ref: rangeify.py:176, fn at 68-72
+       *
+       * Must run before C4e (assign_to_contiguous), matching tinygrad's
+       * pattern order. C4e would wrap the target in CONTIGUOUS, hiding
+       * the SHRINK from the hazard check. */
       if (!result) {
         PolyUOp *cur_target = target;
-        /* Use result's target if a previous rule changed it */
 
         /* Find target's base (walk past movement ops) */
         PolyUOp *target_base = cur_target;
@@ -1898,14 +1949,28 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
                poly_opset_has(POLY_GROUP_MOVEMENT, target_base->op))
           target_base = target_base->src[0];
 
-        /* Walk value subtree looking for PERMUTE/FLIP */
+        /* Check if target's backward slice contains SHRINK */
+        bool target_has_shrink = false;
+        {
+          int n_t_topo;
+          PolyUOp **t_topo = poly_toposort(ctx, cur_target, &n_t_topo);
+          for (int t = 0; t < n_t_topo; t++) {
+            if (t_topo[t]->op == POLY_OP_SHRINK) {
+              target_has_shrink = true;
+              break;
+            }
+          }
+        }
+
+        /* Walk value subtree looking for unsafe movement ops */
         int n_val_topo;
         PolyUOp **val_topo = poly_toposort(ctx, value, &n_val_topo);
         bool needs_contiguous = false;
         for (int v = 0; v < n_val_topo && !needs_contiguous; v++) {
           PolyUOp *vn = val_topo[v];
           if (is_always_contiguous(vn->op)) continue;
-          if (vn->op != POLY_OP_PERMUTE && vn->op != POLY_OP_FLIP)
+          if (vn->op != POLY_OP_PERMUTE && vn->op != POLY_OP_FLIP &&
+              !(target_has_shrink && vn->op == POLY_OP_SHRINK))
             continue;
           int n_h_topo;
           PolyUOp **h_topo = poly_toposort(ctx, vn, &n_h_topo);
@@ -1923,6 +1988,20 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
           result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2,
                              u->arg);
         }
+      }
+
+      /* C4e: assign_to_contiguous — safety net.
+       * poly_assign() normalizes targets to base BUFFERs at construction
+       * time. This rule catches edge cases that bypass the frontend:
+       * if target is not PARAM/BUFFER/ASSIGN/CONTIGUOUS, wrap in CONTIGUOUS.
+       * Ref: tinygrad earliest_rewrites assign_to_contiguous */
+      if (!result && target->op != POLY_OP_PARAM &&
+          target->op != POLY_OP_BUFFER && target->op != POLY_OP_ASSIGN &&
+          target->op != POLY_OP_CONTIGUOUS) {
+        PolyUOp *cont_target = poly_uop1(ctx, POLY_OP_CONTIGUOUS, target->dtype,
+                                           target, poly_arg_none());
+        PolyUOp *assign_src[2] = { cont_target, value };
+        result = poly_uop(ctx, POLY_OP_ASSIGN, u->dtype, assign_src, 2, u->arg);
       }
     }
 

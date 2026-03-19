@@ -83,13 +83,16 @@ static PolyUOp *substitute_node(PolyCtx *ctx, PolyUOp *node,
 
 /* ── Optimize preprocess (ports from tinygrad codegen/simplify.py) ───── */
 
-static int range_start_for_op(PolyOps op) {
+int range_start_for_op(PolyOps op) {
   switch (op) {
     case POLY_OP_BUFFERIZE: return 1;
     case POLY_OP_REDUCE: return 1;
     case POLY_OP_STORE: return 2;
     case POLY_OP_WMMA: return 3;
     case POLY_OP_END: return 1;
+    case POLY_OP_CALL: return 1;
+    case POLY_OP_COPY: return 2;
+    case POLY_OP_BUFFER_VIEW: return 1;
     default: return -1;
   }
 }

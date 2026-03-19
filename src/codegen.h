@@ -52,6 +52,10 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);
 
+/* Range start offset for ops that have trailing RANGE sources.
+ * Returns index of first RANGE source, or -1 if op has no range sources. */
+int range_start_for_op(PolyOps op);
+
 /* Individual codegen pass getters (for GPU linearizer to insert passes between them).
  * poly_symbolic_simple() is declared in pat.h. */
 PolyPatternMatcher *poly_pm_reduce_pass(void);
