@@ -909,7 +909,13 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink) {
  * Action space: UPCAST and UNROLL with various axis/amount combos.
  * For each beam member, enumerate all valid actions, compile candidates,
  * time them on actual hardware, sort by execution time, keep top beam_width.
+ *
+ * Requires native runtime (fork+clang for compilation, clock_gettime for
+ * timing). Disabled in WASM builds. Future: use WASM JIT backend for
+ * compile+time, IndexedDB for cache.
  * ────────────────────────────────────────────────────────────────────── */
+
+#ifndef __EMSCRIPTEN__
 
 typedef enum { POLY_OPT_UPCAST, POLY_OPT_UNROLL } PolyOptOp;
 
@@ -1301,6 +1307,18 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink,
   free(candidates);
   return result;
 }
+
+#else /* __EMSCRIPTEN__ */
+
+/* WASM stub: BEAM search requires native compilation (fork+clang).
+ * Falls back to heuristic. Future: use WASM JIT backend for timing. */
+static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink,
+                                  int beam_width, PolyRewriteOpts opts) {
+  (void)beam_width; (void)opts;
+  return poly_apply_opts_heuristic(ctx, sink);
+}
+
+#endif /* __EMSCRIPTEN__ */
 
 typedef struct {
   PolyUOp **ranges;
