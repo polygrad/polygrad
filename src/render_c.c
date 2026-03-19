@@ -540,39 +540,102 @@ static int dtype_lt_cmp(PolyDType a, PolyDType b) {
   return 0;
 }
 
-static int tuplize_cmp(PolyUOp *a, PolyUOp *b) {
-  /* Recursive comparison matching Python's tuple comparison of
-   * (op.value, arg, dtype) + tuple(src.tuplize for src in src).
-   *
-   * Python DType quirk: DType.__eq__ is not defined, so __ne__ uses identity.
-   * When two PtrDTypes have the same __lt__ key (priority, bitsize, name, fmt,
-   * count) but are different objects (e.g. float.ptr(1,REG) vs float.ptr(4)),
-   * Python's tuple comparison sees a[i] != b[i] (identity), calls a[i] < b[i]
-   * which returns False, and immediately returns False — without proceeding to
-   * later elements. sorted() then preserves the original (toposort) order.
-   *
-   * To match: when dtypes differ structurally but __lt__ fields are equal,
-   * return 0 to stop recursion. The insertion sort's topo-index tiebreaker
-   * will preserve the original order, matching Python's stable sort. */
-  if (a == b) return 0;
+/* Precompute tuplize ranks for all UOps in toposort order (bottom-up).
+ *
+ * Reproduces tinygrad's @cached_property tuplize + Python sorted() semantics:
+ *   tuplize = (op.value, arg, dtype) + tuple(src.tuplize for src in src)
+ *
+ * Each UOp gets a rank (int) such that rank ordering matches the lexicographic
+ * order of tinygrad's tuplize tuples. Nodes with identical tuplize get the same
+ * rank. The linearizer sort then uses ranks for O(1) comparison.
+ *
+ * Algorithm: for each node i (bottom-up), build a key = (op, arg, dtype,
+ * src_rank_0, src_rank_1, ...). Sort nodes by key to assign ranks. Two nodes
+ * with identical keys get the same rank. Since sources are processed first,
+ * their ranks are available when processing consumers.
+ *
+ * Returns malloc'd array of n ranks (caller frees). */
+typedef struct {
+  int orig_idx;    /* index in topo array */
+  int op;
+  PolyArg arg;
+  PolyDType dtype;
+  int src_ranks[8]; /* ranks of sources (max 8 for comparison; extras use 0) */
+  int n_src;
+} TuplizeKey;
+
+static int tuplize_key_cmp(const void *ap, const void *bp) {
+  const TuplizeKey *a = (const TuplizeKey *)ap;
+  const TuplizeKey *b = (const TuplizeKey *)bp;
+  /* Lexicographic: op, arg, dtype, src_ranks... (matches tinygrad tuple order) */
   if (a->op != b->op) return a->op < b->op ? -1 : 1;
   int ac = arg_cmp(a->arg, b->arg);
   if (ac != 0) return ac;
-  /* DType comparison: match Python's identity + __lt__ semantics */
   if (!poly_dtype_eq(a->dtype, b->dtype)) {
     int dc = dtype_lt_cmp(a->dtype, b->dtype);
     if (dc != 0) return dc;
-    /* __lt__ fields match but dtypes are different objects → "incomparable"
-     * in Python. Return 0 to let stable sort preserve topo order. */
     return 0;
   }
-  /* Dtypes structurally equal → proceed to source comparison */
   int min_src = a->n_src < b->n_src ? a->n_src : b->n_src;
+  if (min_src > 8) min_src = 8;
   for (int i = 0; i < min_src; i++) {
-    int sc = tuplize_cmp(a->src[i], b->src[i]);
-    if (sc != 0) return sc;
+    if (a->src_ranks[i] != b->src_ranks[i])
+      return a->src_ranks[i] < b->src_ranks[i] ? -1 : 1;
   }
   return a->n_src < b->n_src ? -1 : (a->n_src > b->n_src ? 1 : 0);
+}
+
+static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
+  int *ranks = (int *)malloc((size_t)n * sizeof(int));
+  TuplizeKey *keys = (TuplizeKey *)malloc((size_t)n * sizeof(TuplizeKey));
+
+  /* Build keys bottom-up (toposort order ensures sources are ranked first) */
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    keys[i].orig_idx = i;
+    keys[i].op = (int)u->op;
+    keys[i].arg = u->arg;
+    keys[i].dtype = u->dtype;
+    keys[i].n_src = u->n_src;
+    for (int j = 0; j < u->n_src && j < 8; j++) {
+      int si = imap_get(idx, u->src[j]);
+      keys[i].src_ranks[j] = ranks[si];
+    }
+    for (int j = u->n_src; j < 8; j++)
+      keys[i].src_ranks[j] = 0;
+    /* Assign a temporary rank = i (will be reassigned after sort) */
+    ranks[i] = i;
+  }
+
+  /* Sort keys to determine rank ordering.
+   * Use a separate sorted index array to avoid losing the orig_idx mapping. */
+  int *sorted_idx = (int *)malloc((size_t)n * sizeof(int));
+  for (int i = 0; i < n; i++) sorted_idx[i] = i;
+
+  /* Insertion sort on sorted_idx by keys[sorted_idx[i]] (stable, O(n^2) but
+   * each comparison is O(max_src) = O(1), and n is typically < 5000). */
+  for (int i = 1; i < n; i++) {
+    int ki = sorted_idx[i];
+    int j = i - 1;
+    while (j >= 0 && tuplize_key_cmp(&keys[ki], &keys[sorted_idx[j]]) < 0) {
+      sorted_idx[j + 1] = sorted_idx[j];
+      j--;
+    }
+    sorted_idx[j + 1] = ki;
+  }
+
+  /* Assign ranks: equal keys get the same rank */
+  int cur_rank = 0;
+  ranks[sorted_idx[0]] = 0;
+  for (int i = 1; i < n; i++) {
+    if (tuplize_key_cmp(&keys[sorted_idx[i]], &keys[sorted_idx[i - 1]]) != 0)
+      cur_rank++;
+    ranks[sorted_idx[i]] = cur_rank;
+  }
+
+  free(keys);
+  free(sorted_idx);
+  return ranks;
 }
 
 PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
@@ -644,8 +707,12 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     if (u->op == POLY_OP_PARAM) extra[i] = u->arg.i;
   }
 
-  /* 5. Build ideal order: sort by (run_count, priority, extra, topo_idx).
-   * Matches tinygrad's sorted(lst, key=lambda x: priorities[x]). */
+  /* 5. Precompute tuplize ranks for O(1) structural comparison.
+   * Matches tinygrad's @cached_property tuplize + sorted(key=...+x.tuplize). */
+  int *tup_ranks = compute_tuplize_ranks(topo, n, &idx);
+
+  /* 6. Build ideal order: sort by (run_count, priority, extra, tuplize_hash, topo_idx).
+   * Matches tinygrad's sorted(lst, key=lambda x: priorities[x]+x.tuplize). */
   int *ideal = malloc(n * sizeof(int));
   for (int i = 0; i < n; i++) ideal[i] = i;
 
@@ -666,10 +733,10 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       if (prio[ji] < kp) break;
       if (extra[ji] > ke) { ideal[j + 1] = ideal[j]; j--; continue; }
       if (extra[ji] < ke) break;
-      /* Tiebreak: tuplize comparison (matches TUPLE_ORDER=1 in tinygrad) */
-      int tc = tuplize_cmp(topo[ji], topo[ki]);
-      if (tc > 0) { ideal[j + 1] = ideal[j]; j--; continue; }
-      if (tc < 0) break;
+      /* Tiebreak: tuplize rank comparison (matches TUPLE_ORDER=1 in tinygrad).
+       * Precomputed ranks reproduce @cached_property tuplize ordering in O(1). */
+      if (tup_ranks[ji] > tup_ranks[ki]) { ideal[j + 1] = ideal[j]; j--; continue; }
+      if (tup_ranks[ji] < tup_ranks[ki]) break;
       /* Final tiebreak: topo index */
       if (ji > ki) { ideal[j + 1] = ideal[j]; j--; }
       else break;
@@ -736,6 +803,7 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   free(extra);
   free(ideal);
   free(nkey);
+  free(tup_ranks);
 
   *n_out = rlen;
   return result;
@@ -1279,8 +1347,21 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       smap_set(&names, u, strdup(name));
 
-      PolyDType base = poly_dtype_scalar(u->dtype);
-      sb_printf(&decls, "  %s %s[1];\n", base.name, name);
+      /* Extract the pointer's base type (preserves vec count for vec accumulators).
+       * poly_dtype_scalar strips both ptr and vec; we need ptr stripped but vec kept.
+       * PtrDType stores the pointee in the base dtype fields. For ptr(float.vec(4)),
+       * is_ptr=true, count=4, bitsize=128. We need "float vec4" not "float". */
+      PolyDType base = u->dtype;
+      base.is_ptr = false;
+      base.addrspace = 0;
+      if (base.count > 1) {
+        /* Vec accumulator: float __attribute__((vector_size(N))) r0[1]; */
+        PolyDType elem = poly_dtype_scalar(u->dtype);
+        int vbytes = (int)(elem.bitsize / 8) * base.count;
+        sb_printf(&decls, "  %s __attribute__((vector_size(%d))) %s[1];\n", elem.name, vbytes, name);
+      } else {
+        sb_printf(&decls, "  %s %s[1];\n", base.name, name);
+      }
       continue;
     }
 
