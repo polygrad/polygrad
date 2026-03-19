@@ -660,6 +660,7 @@ async function createWasmBackend() {
       const inst = Module._poly_instance_from_ir(irPtr, irBytes.length, weightsPtr, weightsLen)
       Module._free(irPtr)
       if (weightsPtr) Module._free(weightsPtr)
+      if (inst) Module._poly_instance_set_device(inst, 0)
       return inst || null
     },
 
@@ -668,6 +669,7 @@ async function createWasmBackend() {
       const specPtr = allocBytes(bytes)
       const inst = Module._poly_mlp_instance(specPtr, bytes.length)
       Module._free(specPtr)
+      if (inst) Module._poly_instance_set_device(inst, 0)
       return inst || null
     },
 
@@ -676,6 +678,7 @@ async function createWasmBackend() {
       const specPtr = allocBytes(bytes)
       const inst = Module._poly_tabm_instance(specPtr, bytes.length)
       Module._free(specPtr)
+      if (inst) Module._poly_instance_set_device(inst, 0)
       return inst || null
     },
 
@@ -684,6 +687,7 @@ async function createWasmBackend() {
       const specPtr = allocBytes(bytes)
       const inst = Module._poly_nam_instance(specPtr, bytes.length)
       Module._free(specPtr)
+      if (inst) Module._poly_instance_set_device(inst, 0)
       return inst || null
     },
 
@@ -773,6 +777,7 @@ async function createWasmBackend() {
       const ptr = allocBytes(bytes)
       const inst = Module._poly_instance_from_bundle(ptr, bytes.length)
       Module._free(ptr)
+      if (inst) Module._poly_instance_set_device(inst, 0)
       return inst || null
     },
 

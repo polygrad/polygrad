@@ -55,16 +55,24 @@ function createNativeBackend() {
 
   const instance = {
     fromIR(irBytes, weightsBytes) {
-      return binding.poly_instance_from_ir(irBytes, weightsBytes ?? null)
+      const inst = binding.poly_instance_from_ir(irBytes, weightsBytes ?? null)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
     },
     mlp(specJson) {
-      return binding.poly_mlp_instance(specJson)
+      const inst = binding.poly_mlp_instance(specJson)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
     },
     tabm(specJson) {
-      return binding.poly_tabm_instance(specJson)
+      const inst = binding.poly_tabm_instance(specJson)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
     },
     nam(specJson) {
-      return binding.poly_nam_instance(specJson)
+      const inst = binding.poly_nam_instance(specJson)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
     },
     free(inst) {
       binding.poly_instance_free(inst)
@@ -109,7 +117,9 @@ function createNativeBackend() {
       return binding.poly_instance_save_bundle(inst)
     },
     fromBundle(bytes) {
-      return binding.poly_instance_from_bundle(bytes)
+      const inst = binding.poly_instance_from_bundle(bytes)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
     },
     setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay) {
       return binding.poly_instance_set_optimizer(inst, kind, lr, beta1, beta2, eps, weightDecay)

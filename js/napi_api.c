@@ -1182,6 +1182,18 @@ static napi_value napi_poly_instance_free(napi_env env, napi_callback_info info)
   return undef;
 }
 
+static napi_value napi_poly_instance_set_device(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyInstance *inst = get_external(env, argv[0]);
+  int32_t device;
+  napi_get_value_int32(env, argv[1], &device);
+  napi_value result;
+  NAPI_CALL(env, napi_create_int32(env, poly_instance_set_device(inst, device), &result));
+  return result;
+}
+
 static napi_value napi_poly_mlp_instance(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -1645,6 +1657,7 @@ NAPI_MODULE_INIT() {
     /* PolyInstance / model runtime */
     DECLARE_NAPI_METHOD("poly_instance_from_ir", napi_poly_instance_from_ir),
     DECLARE_NAPI_METHOD("poly_instance_free", napi_poly_instance_free),
+    DECLARE_NAPI_METHOD("poly_instance_set_device", napi_poly_instance_set_device),
     DECLARE_NAPI_METHOD("poly_mlp_instance", napi_poly_mlp_instance),
     DECLARE_NAPI_METHOD("poly_tabm_instance", napi_poly_tabm_instance),
     DECLARE_NAPI_METHOD("poly_nam_instance", napi_poly_nam_instance),

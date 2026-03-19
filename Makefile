@@ -49,7 +49,7 @@ test-parity: build/polygrad_parity_runner
 	ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full --no-opt
 
 test-parity-opt: build/polygrad_parity_runner
-	ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 POLY_OPTIMIZE=1 POLY_EXPERIMENTAL_LATE=1 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
+	ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 POLY_OPTIMIZE=1 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
 
 build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
