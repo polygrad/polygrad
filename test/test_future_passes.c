@@ -19,6 +19,7 @@
 #include "test_harness.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
+#include "../src/scheduler.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -1625,6 +1626,205 @@ TEST(devectorize, e2e_vecadd) {
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 8; i++)
     ASSERT_FLOAT_EQ(dout[i], da[i] + db[i], 1e-6);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 8: BEAM search optimizer tests
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* BEAM search produces correct results for vecadd (at least as good as no opts) */
+TEST(beam, vecadd_correct) {
+  PolyCtx *ctx = poly_ctx_new();
+  int N = 64;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[64], db[64], dout[64];
+  for (int i = 0; i < N; i++) { da[i] = (float)i; db[i] = (float)(100 + i); }
+  memset(dout, 0, sizeof(dout));
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+  };
+
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+  setenv("POLY_BEAM", "2", 1);
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  unsetenv("POLY_OPTIMIZE");
+  unsetenv("POLY_DEVECTORIZE");
+  unsetenv("POLY_BEAM");
+
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(dout[i], da[i] + db[i], 1e-6);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* BEAM search handles reduce kernels correctly */
+TEST(beam, reduce_correct) {
+  PolyCtx *ctx = poly_ctx_new();
+  int N = 32;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  int64_t axis = 0;
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, &axis, 1);
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *st = poly_store_val(ctx, out, sum);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[32], dout[1] = {0};
+  float expected = 0;
+  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); expected += da[i]; }
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(out, dout)
+  };
+
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+  setenv("POLY_BEAM", "2", 1);
+  int ret = poly_realize(ctx, sink, bindings, 2);
+  unsetenv("POLY_OPTIMIZE");
+  unsetenv("POLY_DEVECTORIZE");
+  unsetenv("POLY_BEAM");
+
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(dout[0], expected, 1e-3);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* BEAM=0 falls back to heuristic (same as no BEAM env) */
+TEST(beam, zero_is_heuristic) {
+  PolyCtx *ctx = poly_ctx_new();
+  int N = 16;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[16], db[16], dout[16];
+  for (int i = 0; i < N; i++) { da[i] = (float)i; db[i] = 1.0f; }
+  memset(dout, 0, sizeof(dout));
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+  };
+
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+  setenv("POLY_BEAM", "0", 1);
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  unsetenv("POLY_OPTIMIZE");
+  unsetenv("POLY_DEVECTORIZE");
+  unsetenv("POLY_BEAM");
+
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(dout[i], da[i] + db[i], 1e-6);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* BEAM disk cache: second run should hit cache and produce same results */
+TEST(beam, cache_roundtrip) {
+  PolyCtx *ctx = poly_ctx_new();
+  int N = 64;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[64], db[64], dout1[64], dout2[64];
+  for (int i = 0; i < N; i++) { da[i] = (float)(i * 3); db[i] = (float)(i + 7); }
+
+  PolyBufferBinding bindings1[] = {
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout1)
+  };
+
+  /* First run: populates cache */
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+  setenv("POLY_BEAM", "2", 1);
+  int ret1 = poly_realize(ctx, sink, bindings1, 3);
+  ASSERT_INT_EQ(ret1, 0);
+
+  /* Second run: should hit cache */
+  PolyCtx *ctx2 = poly_ctx_new();
+  PolyUOp *a2 = poly_buffer_f32(ctx2, N);
+  PolyUOp *b2 = poly_buffer_f32(ctx2, N);
+  PolyUOp *c2 = poly_alu2(ctx2, POLY_OP_ADD, a2, b2);
+  PolyUOp *out2 = poly_buffer_f32(ctx2, N);
+  PolyUOp *st2 = poly_store_val(ctx2, out2, c2);
+  PolyUOp *sink2 = poly_sink1(ctx2, st2);
+
+  PolyBufferBinding bindings2[] = {
+    POLY_BIND_HOST(a2, da), POLY_BIND_HOST(b2, db), POLY_BIND_HOST(out2, dout2)
+  };
+  int ret2 = poly_realize(ctx2, sink2, bindings2, 3);
+  unsetenv("POLY_OPTIMIZE");
+  unsetenv("POLY_DEVECTORIZE");
+  unsetenv("POLY_BEAM");
+
+  ASSERT_INT_EQ(ret2, 0);
+  for (int i = 0; i < N; i++) {
+    ASSERT_FLOAT_EQ(dout1[i], da[i] + db[i], 1e-6);
+    ASSERT_FLOAT_EQ(dout2[i], da[i] + db[i], 1e-6);
+  }
+
+  poly_ctx_destroy(ctx);
+  poly_ctx_destroy(ctx2);
+  PASS();
+}
+
+/* BEAM search produces correct results for a chain kernel (a * b + c) */
+TEST(beam, chain_correct) {
+  PolyCtx *ctx = poly_ctx_new();
+  int N = 128;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_buffer_f32(ctx, N);
+  PolyUOp *ab = poly_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *abc = poly_alu2(ctx, POLY_OP_ADD, ab, c);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, abc);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[128], db[128], dc[128], dout[128];
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i + 1);
+    db[i] = 2.0f;
+    dc[i] = (float)(i * 10);
+  }
+  memset(dout, 0, sizeof(dout));
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db),
+    POLY_BIND_HOST(c, dc), POLY_BIND_HOST(out, dout)
+  };
+
+  setenv("POLY_OPTIMIZE", "1", 1);
+  setenv("POLY_DEVECTORIZE", "1", 1);
+  setenv("POLY_BEAM", "2", 1);
+  int ret = poly_realize(ctx, sink, bindings, 4);
+  unsetenv("POLY_OPTIMIZE");
+  unsetenv("POLY_DEVECTORIZE");
+  unsetenv("POLY_BEAM");
+
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(dout[i], da[i] * db[i] + dc[i], 1e-3);
 
   poly_ctx_destroy(ctx);
   PASS();

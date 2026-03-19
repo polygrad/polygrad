@@ -835,7 +835,10 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* Default: OPTIMIZE=1 implies DEVECTORIZE=1 (vec load/store, scalar ALU — safe).
    * DEVECTORIZE=0 (full vec ALU) is opt-in only. */
   int devec = dev && dev[0] != '\0' ? atoi(dev) : (opt ? 1 : 0);
-  PolyRewriteOpts opts = { .optimize = opt, .devectorize = devec };
+  int beam = 0;
+  const char *bv = getenv("POLY_BEAM");
+  if (bv && bv[0] != '\0') beam = atoi(bv);
+  PolyRewriteOpts opts = { .optimize = opt, .devectorize = devec, .beam_width = beam };
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 

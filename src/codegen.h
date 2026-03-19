@@ -23,6 +23,7 @@ typedef struct {
 typedef struct {
   bool optimize;     /* tinygrad optimize path (UPCAST/UNROLL + late pipeline) */
   int devectorize;   /* tinygrad DEVECTORIZE level (0/1/2) */
+  int beam_width;    /* BEAM search width (0 = heuristic, >0 = BEAM search) */
   PolyRendererCaps caps;  /* renderer capabilities (zero-init = CPU defaults) */
 } PolyRewriteOpts;
 

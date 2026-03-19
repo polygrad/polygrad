@@ -8,11 +8,17 @@
  *   - pm_transcendental: EXP2 → polynomial approximation (xexp2)
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "codegen.h"
 #include <math.h>
 #include <float.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 static bool ptr_eq(const void *a, const void *b) { return a == b; }
 static uint32_t ptr_hash(const void *p) {
@@ -892,6 +898,408 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink) {
   }
 
   return s.ast;
+}
+
+/* ── BEAM search optimizer ──────────────────────────────────────────────
+ *
+ * Explores the optimization space by trying many candidate optimizations,
+ * compiling and timing each, and keeping the top-k. Finds better
+ * optimizations than the heuristic for non-trivial kernels.
+ *
+ * Action space: UPCAST and UNROLL with various axis/amount combos.
+ * For each beam member, enumerate all valid actions, compile candidates,
+ * time them on actual hardware, sort by execution time, keep top beam_width.
+ * ────────────────────────────────────────────────────────────────────── */
+
+typedef enum { POLY_OPT_UPCAST, POLY_OPT_UNROLL } PolyOptOp;
+
+typedef struct {
+  PolyOptOp op;
+  int axis;
+  int64_t amount;
+} PolyBeamAction;
+
+/* Static action table */
+static const int64_t beam_upcast_amounts[] = {2, 3, 4, 5, 7, 8};
+static const int beam_n_upcast_amounts = 6;
+static const int64_t beam_unroll_amounts[] = {2, 3, 4, 7};
+static const int beam_n_unroll_amounts = 4;
+#define BEAM_MAX_AXIS 8
+#define BEAM_MAX_ACTIONS ((6 * BEAM_MAX_AXIS) + (4 * 5))  /* 68 */
+#define BEAM_MAX_BEAM 16
+#define BEAM_MAX_ITERS 5
+#define BEAM_MAX_CANDIDATES (BEAM_MAX_BEAM * BEAM_MAX_ACTIONS)
+
+typedef struct {
+  OptScheduler sched;
+  double time_us;
+  PolyBeamAction actions[BEAM_MAX_ITERS];
+  int n_actions;
+} BeamEntry;
+
+typedef struct {
+  OptScheduler sched;
+  double time_us;
+  PolyBeamAction actions[BEAM_MAX_ITERS];
+  int n_actions;
+} BeamCandidate;
+
+/* Copy an OptScheduler. Shallow copy is sufficient because sched_shift_to
+ * creates new UOps via poly_uop_substitute (the old AST is untouched). */
+static void sched_copy(OptScheduler *dst, const OptScheduler *src) {
+  *dst = *src;
+}
+
+/* Try to apply a single BEAM action to a scheduler. Returns true on success. */
+static bool sched_apply_action(OptScheduler *s, PolyBeamAction act) {
+  int dims[SCHED_MAX_RNGS];
+  int n_dims;
+
+  if (act.op == POLY_OPT_UPCAST) {
+    n_dims = sched_upcastable_dims(s, dims, SCHED_MAX_RNGS);
+  } else {
+    n_dims = sched_unrollable_dims(s, dims, SCHED_MAX_RNGS);
+  }
+
+  if (act.axis >= n_dims) return false;
+  int idx = dims[act.axis];
+  if (idx >= s->n_rngs) return false;
+  if (s->shape[idx] <= 1) return false;
+  if (s->shape[idx] % act.amount != 0) return false;
+
+  /* Limit total upcast+unroll product to prevent code explosion.
+   * 64 is reasonable: e.g. UPCAST 4 on two axes = 16, or UPCAST 8 + UNROLL 4 = 32. */
+  int64_t cur_prod = sched_upcast_size(s);
+  if (cur_prod * act.amount > 64) return false;
+
+  PolyAxisType new_type = (act.op == POLY_OPT_UPCAST) ? POLY_AXIS_UPCAST : POLY_AXIS_UNROLL;
+  PolyUOp *result = sched_shift_to(s, s->rngs[idx], act.amount, new_type, false);
+  return result != NULL;
+}
+
+/* Time a single kernel execution using clock_gettime (CLOCK_MONOTONIC). */
+static double time_us_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
+
+/* Compile a kernel AST through the full post-optimization pipeline,
+ * render to C, compile with clang, allocate test buffers, and time execution.
+ * Returns median time in microseconds. Returns INFINITY on failure. */
+static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink,
+                                    PolyRewriteOpts opts, int reps) {
+  /* Run through the rest of the codegen pipeline (post-optimization stages).
+   * Setting optimize=false skips the preprocessing+apply_opts pass since
+   * opts have already been applied by the BEAM search. */
+  PolyRewriteOpts post_opts = opts;
+  post_opts.optimize = false;
+  post_opts.beam_width = 0;
+  sink = poly_full_rewrite_to_sink_ex(ctx, sink, post_opts);
+
+  /* Control flow */
+  sink = poly_apply_control_flow(ctx, sink);
+
+  /* Linearize */
+  int n_uops = 0;
+  PolyUOp **uops = poly_linearize_rewritten(ctx, sink, &n_uops);
+  if (!uops || n_uops == 0) return INFINITY;
+
+  /* UOp count filter: skip huge kernels */
+  if (n_uops > 3000) {
+    free(uops);
+    return INFINITY;
+  }
+
+  /* Render C */
+  char fn_name[64];
+  snprintf(fn_name, sizeof(fn_name), "beam_%d", (int)(uintptr_t)sink & 0xFFFF);
+  char *source = poly_render_c(uops, n_uops, fn_name);
+  free(uops);
+  if (!source) return INFINITY;
+
+  /* Compile */
+  PolyProgram *prog = poly_compile_c(source, fn_name);
+  free(source);
+  if (!prog) return INFINITY;
+
+  /* Collect PARAM count and buffer sizes from the sink's toposort */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  int n_params = 0;
+  int64_t param_sizes[64];
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_PARAM && n_params < 64) {
+      /* Estimate buffer size from dtype ptr size field */
+      int64_t sz = topo[i]->dtype.ptr_size;
+      if (sz <= 0) sz = 1024;  /* default */
+      param_sizes[n_params] = sz;
+      n_params++;
+    }
+  }
+
+  if (n_params == 0) {
+    poly_program_destroy(prog);
+    return INFINITY;
+  }
+
+  /* Allocate test buffers (random float32 data) */
+  void *bufs[64];
+  for (int i = 0; i < n_params; i++) {
+    int64_t nbytes = param_sizes[i] * 4;  /* float32 */
+    if (nbytes <= 0) nbytes = 4096;
+    bufs[i] = calloc(1, (size_t)nbytes);
+    /* Fill with small random values to avoid NaN/inf in transcendentals */
+    float *fp = (float *)bufs[i];
+    int n_elems = (int)(nbytes / 4);
+    for (int j = 0; j < n_elems; j++)
+      fp[j] = 0.1f + (float)(j % 100) * 0.01f;
+  }
+
+  /* Warm up */
+  poly_program_call(prog, bufs, n_params);
+
+  /* Time execution */
+  double times[16];
+  if (reps > 16) reps = 16;
+  if (reps < 1) reps = 1;
+  for (int r = 0; r < reps; r++) {
+    double t0 = time_us_now();
+    poly_program_call(prog, bufs, n_params);
+    double t1 = time_us_now();
+    times[r] = t1 - t0;
+  }
+
+  /* Sort times, take median */
+  for (int i = 0; i < reps - 1; i++)
+    for (int j = i + 1; j < reps; j++)
+      if (times[j] < times[i]) { double t = times[i]; times[i] = times[j]; times[j] = t; }
+  double median = times[reps / 2];
+
+  /* Cleanup */
+  for (int i = 0; i < n_params; i++) free(bufs[i]);
+  poly_program_destroy(prog);
+
+  return median;
+}
+
+/* ── Disk cache for BEAM results ─────────────────────────────────────── */
+
+/* FNV-1a hash over the AST toposort (structural hash for cache key) */
+static uint64_t beam_ast_hash(PolyCtx *ctx, PolyUOp *sink) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (int i = 0; i < n_topo; i++) {
+    h ^= (uint64_t)topo[i]->op;
+    h *= 0x100000001b3ULL;
+    h ^= (uint64_t)topo[i]->dtype.bitsize;
+    h *= 0x100000001b3ULL;
+    h ^= poly_arg_hash(topo[i]->arg);
+    h *= 0x100000001b3ULL;
+    h ^= (uint64_t)topo[i]->n_src;
+    h *= 0x100000001b3ULL;
+  }
+  return h;
+}
+
+static int beam_cache_dir(char *dir, int cap) {
+  const char *xdg = getenv("XDG_CACHE_HOME");
+  const char *home = getenv("HOME");
+  if (xdg && xdg[0])
+    snprintf(dir, cap, "%s/polygrad/beam", xdg);
+  else if (home && home[0])
+    snprintf(dir, cap, "%s/.cache/polygrad/beam", home);
+  else
+    return -1;
+
+  /* mkdir -p: create parent dirs */
+  char parent[512];
+  snprintf(parent, sizeof(parent), "%s", dir);
+  char *s = parent + 1;
+  while (*s) {
+    if (*s == '/') {
+      *s = '\0';
+      mkdir(parent, 0755);
+      *s = '/';
+    }
+    s++;
+  }
+  if (mkdir(dir, 0755) == -1 && errno != EEXIST) return -1;
+  return 0;
+}
+
+/* Cache entry: [n_actions:uint8][actions: n * (op:uint8, axis:uint8, amount:int64)] */
+static bool beam_cache_load(uint64_t key, PolyBeamAction *actions, int *n_actions) {
+  char dir[512], path[576];
+  if (beam_cache_dir(dir, sizeof(dir)) != 0) return false;
+  snprintf(path, sizeof(path), "%s/%016llx.bin", dir, (unsigned long long)key);
+
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+
+  uint8_t n;
+  if (fread(&n, 1, 1, f) != 1 || n > BEAM_MAX_ITERS) { fclose(f); return false; }
+  *n_actions = n;
+  for (int i = 0; i < n; i++) {
+    uint8_t op_byte, axis_byte;
+    int64_t amount;
+    if (fread(&op_byte, 1, 1, f) != 1) { fclose(f); return false; }
+    if (fread(&axis_byte, 1, 1, f) != 1) { fclose(f); return false; }
+    if (fread(&amount, sizeof(amount), 1, f) != 1) { fclose(f); return false; }
+    actions[i] = (PolyBeamAction){ .op = (PolyOptOp)op_byte, .axis = axis_byte, .amount = amount };
+  }
+  fclose(f);
+  return true;
+}
+
+static void beam_cache_save(uint64_t key, const PolyBeamAction *actions, int n_actions) {
+  char dir[512], path[576];
+  if (beam_cache_dir(dir, sizeof(dir)) != 0) return;
+  snprintf(path, sizeof(path), "%s/%016llx.bin", dir, (unsigned long long)key);
+
+  FILE *f = fopen(path, "wb");
+  if (!f) return;
+  uint8_t n = (uint8_t)n_actions;
+  fwrite(&n, 1, 1, f);
+  for (int i = 0; i < n_actions; i++) {
+    uint8_t op_byte = (uint8_t)actions[i].op;
+    uint8_t axis_byte = (uint8_t)actions[i].axis;
+    fwrite(&op_byte, 1, 1, f);
+    fwrite(&axis_byte, 1, 1, f);
+    fwrite(&actions[i].amount, sizeof(actions[i].amount), 1, f);
+  }
+  fclose(f);
+}
+
+/* ── Main BEAM search loop ────────────────────────────────────────────── */
+
+static int beam_candidate_cmp(const void *a, const void *b) {
+  const BeamCandidate *ca = (const BeamCandidate *)a;
+  const BeamCandidate *cb = (const BeamCandidate *)b;
+  if (ca->time_us < cb->time_us) return -1;
+  if (ca->time_us > cb->time_us) return 1;
+  return 0;
+}
+
+static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink,
+                                  int beam_width, PolyRewriteOpts opts) {
+  if (beam_width <= 0) return sink;
+  if (beam_width > BEAM_MAX_BEAM) beam_width = BEAM_MAX_BEAM;
+
+  /* Check disk cache */
+  uint64_t cache_key = beam_ast_hash(ctx, sink);
+  PolyBeamAction cached_actions[BEAM_MAX_ITERS];
+  int cached_n = 0;
+  if (beam_cache_load(cache_key, cached_actions, &cached_n) && cached_n > 0) {
+    /* Replay cached actions */
+    OptScheduler s;
+    sched_init(&s, ctx, sink);
+    for (int i = 0; i < cached_n; i++) {
+      OptScheduler copy;
+      sched_copy(&copy, &s);
+      if (!sched_apply_action(&copy, cached_actions[i])) break;
+      s = copy;
+    }
+    return s.ast;
+  }
+
+  /* Initialize beam with unoptimized baseline */
+  BeamEntry *beam = (BeamEntry *)calloc(BEAM_MAX_BEAM, sizeof(BeamEntry));
+  sched_init(&beam[0].sched, ctx, sink);
+  beam[0].time_us = INFINITY;
+  beam[0].n_actions = 0;
+  int beam_size = 1;
+
+  /* Time the baseline */
+  beam[0].time_us = beam_compile_and_time(ctx, beam[0].sched.ast, opts, 3);
+
+  /* Build action list */
+  PolyBeamAction all_actions[BEAM_MAX_ACTIONS];
+  int n_actions = 0;
+  for (int axis = 0; axis < BEAM_MAX_AXIS; axis++) {
+    for (int ai = 0; ai < beam_n_upcast_amounts; ai++) {
+      all_actions[n_actions++] = (PolyBeamAction){
+        .op = POLY_OPT_UPCAST, .axis = axis, .amount = beam_upcast_amounts[ai]
+      };
+    }
+  }
+  for (int axis = 0; axis < 5; axis++) {
+    for (int ai = 0; ai < beam_n_unroll_amounts; ai++) {
+      all_actions[n_actions++] = (PolyBeamAction){
+        .op = POLY_OPT_UNROLL, .axis = axis, .amount = beam_unroll_amounts[ai]
+      };
+    }
+  }
+
+  BeamCandidate *candidates = (BeamCandidate *)calloc(BEAM_MAX_CANDIDATES, sizeof(BeamCandidate));
+
+  for (int iter = 0; iter < BEAM_MAX_ITERS; iter++) {
+    int n_cand = 0;
+
+    /* Generate candidates from all beam members */
+    for (int b = 0; b < beam_size; b++) {
+      if (beam[b].n_actions >= BEAM_MAX_ITERS) continue;
+      for (int a = 0; a < n_actions && n_cand < BEAM_MAX_CANDIDATES; a++) {
+        OptScheduler copy;
+        sched_copy(&copy, &beam[b].sched);
+        if (!sched_apply_action(&copy, all_actions[a])) continue;
+
+        candidates[n_cand].sched = copy;
+        candidates[n_cand].n_actions = beam[b].n_actions + 1;
+        memcpy(candidates[n_cand].actions, beam[b].actions,
+               (size_t)beam[b].n_actions * sizeof(PolyBeamAction));
+        candidates[n_cand].actions[beam[b].n_actions] = all_actions[a];
+        candidates[n_cand].time_us = INFINITY;
+        n_cand++;
+      }
+    }
+
+    if (n_cand == 0) break;
+
+    /* Compile and time each candidate */
+    for (int i = 0; i < n_cand; i++) {
+      candidates[i].time_us = beam_compile_and_time(
+          ctx, candidates[i].sched.ast, opts, 3);
+
+      /* Early stop: if > 3x slower than current best after timing, skip remaining reps */
+      if (candidates[i].time_us > beam[0].time_us * 3.0 && beam[0].time_us < INFINITY)
+        candidates[i].time_us = INFINITY;
+    }
+
+    /* Sort by time */
+    qsort(candidates, (size_t)n_cand, sizeof(BeamCandidate), beam_candidate_cmp);
+
+    /* Check convergence: best candidate not better than current best */
+    if (n_cand > 0 && candidates[0].time_us >= beam[0].time_us - 0.01)
+      break;
+
+    /* Keep top beam_width */
+    int new_size = n_cand < beam_width ? n_cand : beam_width;
+    /* Filter out INF candidates */
+    while (new_size > 0 && candidates[new_size - 1].time_us >= INFINITY)
+      new_size--;
+    if (new_size == 0) break;
+
+    for (int i = 0; i < new_size; i++) {
+      beam[i].sched = candidates[i].sched;
+      beam[i].time_us = candidates[i].time_us;
+      beam[i].n_actions = candidates[i].n_actions;
+      memcpy(beam[i].actions, candidates[i].actions,
+             (size_t)candidates[i].n_actions * sizeof(PolyBeamAction));
+    }
+    beam_size = new_size;
+  }
+
+  /* Save best result to disk cache */
+  if (beam[0].n_actions > 0 && beam[0].time_us < INFINITY) {
+    beam_cache_save(cache_key, beam[0].actions, beam[0].n_actions);
+  }
+
+  PolyUOp *result = beam[0].sched.ast;
+  free(beam);
+  free(candidates);
+  return result;
 }
 
 typedef struct {
@@ -4037,8 +4445,11 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     sink = poly_graph_rewrite(ctx, sink, poly_pm_simplify_ranges());
 
-    /* tinygrad line 54: apply_opts (hand_coded_optimizations heuristic) */
-    sink = poly_apply_opts_heuristic(ctx, sink);
+    /* tinygrad line 54: apply_opts (hand_coded_optimizations or BEAM search) */
+    if (opts.beam_width > 0)
+      sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
+    else
+      sink = poly_apply_opts_heuristic(ctx, sink);
   }
 
   /* ── 2. Expander (unconditional, tinygrad lines 57-60) ─────────────── */
