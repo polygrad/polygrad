@@ -32,6 +32,7 @@ typedef enum {
   POLY_DEVICE_CUDA,     /* NVIDIA GPU (PTX via cuModuleLoad) */
   POLY_DEVICE_WASM_JIT, /* WASM: C renders bytes, host compiles+executes */
   POLY_DEVICE_WEBGPU,   /* WebGPU: C renders WGSL, host compiles+executes */
+  POLY_DEVICE_X64_JIT,  /* x86-64 JIT: C emits machine code, mmap+execute */
 } PolyDeviceId;
 
 /* ── Compilation mode ────────────────────────────────────────────────── */

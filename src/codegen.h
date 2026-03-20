@@ -135,4 +135,22 @@ int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
 
 #endif /* POLY_HAS_CUDA */
 
+/* ── x86-64 JIT support (conditional on POLY_HAS_X64) ──────────────── */
+
+#ifdef POLY_HAS_X64
+
+/* Render linearized UOps to x86-64 machine code.
+ * Returns malloc'd byte array. Caller must free().
+ * *size_out receives the byte count. */
+uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out);
+
+/* x86-64 JIT Runtime */
+typedef struct PolyX64Program PolyX64Program;
+
+PolyX64Program *poly_compile_x64(uint8_t *code, int code_size);
+void poly_x64_program_call(PolyX64Program *prog, void **args, int n_args);
+void poly_x64_program_destroy(PolyX64Program *prog);
+
+#endif /* POLY_HAS_X64 */
+
 #endif /* POLY_CODEGEN_H */

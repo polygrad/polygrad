@@ -3942,9 +3942,21 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
   PolyRule rules[] = {
     { poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst },
     { poly_pat_op(POLY_OP_CAT, NULL, 0, "x"), rule_cat_to_vectorize },
+    /* Scatter vec CMP/WHERE to per-lane scalar (same as render_subset).
+     * tinygrad does this even with DEVECTORIZE=0 — comparison semantics
+     * require per-element evaluation, not packed SSE cmpps. */
+    { poly_pat_op(POLY_OP_CMPLT, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
+    { poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
+    { poly_pat_op(POLY_OP_CMPEQ, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
+    { poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_where_to_scalar },
+    { poly_pat_op(POLY_OP_NEG, NULL, 0, "u"), rule_vector_bool_neg_to_scalarized_vector },
     { poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single },
   };
-  g_pm_render_subset_vec = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  /* Include gep_pushing so VECTORIZE(GEP(x,0),...) → x identity fires.
+   * The expander at stage 8 creates GEP+VECTORIZE that need cleanup. */
+  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_render_subset_vec = poly_pm_concat(base, poly_pm_gep_pushing());
+  poly_pm_destroy(base); /* concat copied rules; base infra no longer needed */
   return g_pm_render_subset_vec;
 }
 
@@ -3971,7 +3983,10 @@ static PolyPatternMatcher *poly_pm_combined_devec(void) {
 static PolyPatternMatcher *g_combined_nodevec = NULL;
 static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
   if (g_combined_nodevec) return g_combined_nodevec;
-  g_combined_nodevec = poly_pm_load_store_folding();
+  /* Matches tinygrad pm_no_devec = sym + load_store_folding + ...
+   * gep_pushing (from sym) is required so GEP nodes simplify between
+   * expand_index and fold_expanded_index for contiguity detection. */
+  g_combined_nodevec = poly_pm_concat(poly_pm_gep_pushing(), poly_pm_load_store_folding());
   return g_combined_nodevec;
 }
 

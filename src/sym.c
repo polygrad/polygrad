@@ -800,6 +800,47 @@ static PolyUOp *rule_gep_through_alu(PolyCtx *ctx, PolyUOp *gep, const PolyBindi
   return poly_uop(ctx, alu->op, new_dt, srcs, alu->n_src, alu->arg);
 }
 
+/* VECTORIZE(GEP(x, a0), GEP(x, a1), ...) where all GEPs share same source x
+ * → x.gep((a0, a1, ...))  (collapse to single GEP with tuple arg)
+ * Port of tinygrad symbolic.py:199:
+ *   (UPat(Ops.VECTORIZE, src=UPat(Ops.GEP, src=(UPat.var("x"),))),
+ *    lambda v,x: x.gep(tuple(get_single_element(i.arg) for i in v.src))) */
+static PolyUOp *rule_vectorize_same_gep(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (root->op != POLY_OP_VECTORIZE || root->n_src < 2) return NULL;
+
+  /* All sources must be single-lane GEP from the same source UOp */
+  PolyUOp *base = NULL;
+  for (int i = 0; i < root->n_src; i++) {
+    PolyUOp *s = root->src[i];
+    if (!s || s->op != POLY_OP_GEP || s->n_src < 1) return NULL;
+    /* Accept both INT arg and INT_TUPLE with n=1 (tinygrad uses tuple form) */
+    if (s->arg.kind != POLY_ARG_INT &&
+        !(s->arg.kind == POLY_ARG_INT_TUPLE && s->arg.int_tuple.n == 1))
+      return NULL;
+    if (i == 0) base = s->src[0];
+    else if (s->src[0] != base) return NULL;
+  }
+  if (!base) return NULL;
+
+  /* Collect lane indices into tuple (stack — poly_uop copies to arena) */
+  int n = root->n_src;
+  if (n > 128) return NULL;
+  int64_t lanes[128];
+  for (int i = 0; i < n; i++) {
+    PolyUOp *s = root->src[i];
+    lanes[i] = (s->arg.kind == POLY_ARG_INT) ? s->arg.i : s->arg.int_tuple.vals[0];
+  }
+
+  /* Create single GEP with tuple arg: base.gep((lane0, lane1, ...))
+   * Then rule_gep_identity handles (0,1,...,N-1) → identity. */
+  PolyArg tup;
+  tup.kind = POLY_ARG_INT_TUPLE;
+  tup.int_tuple.vals = lanes;
+  tup.int_tuple.n = n;
+  return poly_uop1(ctx, POLY_OP_GEP, root->dtype, base, tup);
+}
+
 /* ── GEP pushing PM (for combined devec pass) ────────────────────────── */
 
 static PolyPatternMatcher *g_pm_gep_pushing = NULL;
@@ -811,6 +852,9 @@ PolyPatternMatcher *poly_pm_gep_pushing(void) {
     { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_const },
     { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_identity },
     { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_through_alu },
+    /* VECTORIZE(GEP(x,a0), GEP(x,a1), ...) → x.gep((a0,a1,...))
+     * tinygrad symbolic.py:199 */
+    { poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, NULL), rule_vectorize_same_gep },
   };
   g_pm_gep_pushing = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_gep_pushing;
@@ -918,6 +962,8 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
     { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_vectorize },
     { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_const },
     { poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_identity },
+    /* VECTORIZE(GEP(x,a0), ...) → x.gep((a0,...)) is in gep_pushing (tinygrad symbolic.py:199).
+     * Then rule_gep_identity handles the (0,1,...,N-1) → identity case. */
 
     /* -- Cast folding -- */
     /* CAST(CONST) -> CONST */

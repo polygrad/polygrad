@@ -610,6 +610,44 @@ static const PolyAllocator *cuda_get_allocator(void) {
 
 #endif /* POLY_HAS_CUDA */
 
+/* ── x86-64 JIT backend ─────────────────────────────────────────────── */
+
+#ifdef POLY_HAS_X64
+
+static int x64_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                           const char *fn_name, PolyRunner *out) {
+  (void)fn_name;
+  int n_lin;
+  /* x64 JIT: use env-controlled pipeline (POLY_OPTIMIZE=1 for SIMD) */
+  PolyUOp **lin = poly_linearize_env(ctx, scheduled_root, &n_lin);
+  if (!lin) return -1;
+
+  int code_size;
+  uint8_t *code = poly_render_x64(lin, n_lin, &code_size);
+  free(lin);
+  if (!code) return -1;
+
+  PolyX64Program *prog = poly_compile_x64(code, code_size);
+  free(code);
+  if (!prog) return -1;
+
+  out->kind = POLY_RUNNER_COMPILED;
+  out->handle = prog;
+  out->handle_size = 0;
+  return 0;
+}
+
+static int x64_execute(PolyRunner *runner, void **args, int n_args) {
+  poly_x64_program_call((PolyX64Program *)runner->handle, args, n_args);
+  return 0;
+}
+
+static void x64_free_runner(PolyRunner *runner) {
+  if (runner->handle) poly_x64_program_destroy((PolyX64Program *)runner->handle);
+}
+
+#endif /* POLY_HAS_X64 */
+
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Backend registry                                                     */
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -641,6 +679,13 @@ static const PolyBackendDesc BACKENDS[] = {
   [POLY_DEVICE_WASM_JIT] = { NULL, POLY_DEVICE_WASM_JIT, false, NULL, NULL, NULL, NULL },
 #endif
   [POLY_DEVICE_WEBGPU] = { NULL, POLY_DEVICE_WEBGPU, false, NULL, NULL, NULL, NULL },
+#ifdef POLY_HAS_X64
+  [POLY_DEVICE_X64_JIT] = { "x64_jit", POLY_DEVICE_X64_JIT, false,
+                             x64_lower_item, x64_execute, x64_free_runner,
+                             cpu_get_allocator },
+#else
+  [POLY_DEVICE_X64_JIT] = { NULL, POLY_DEVICE_X64_JIT, false, NULL, NULL, NULL, NULL },
+#endif
 };
 
 #define N_BACKENDS (sizeof(BACKENDS) / sizeof(BACKENDS[0]))
