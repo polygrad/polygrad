@@ -178,21 +178,13 @@ enum {
  * After prologue: push rbp, r15, r14, r13, r12, rbx = 6 callee saves.
  * Slots start at [rbp - SLOT_BASE - 8*slot_index]. */
 #define SLOT_BASE 48
-/* Each slot is 16 bytes (SSE-aligned). Scalar values use 4-8 bytes of the slot.
- * Packed SSE values use all 16 bytes. AVX2 would need 32 (2 slots).
- * 16-byte slots eliminate overlap between scalar and packed values. */
-#define SLOT_BYTES 16
+/* Each slot is 32 bytes (AVX2-aligned). Scalar values use 4-8 bytes,
+ * SSE packed uses 16 bytes, AVX2 packed uses all 32 bytes.
+ * 32-byte slots ensure YMM spills never overlap adjacent values. */
+#define SLOT_BYTES 32
 
 static int slot_offset(int slot_idx) {
   return SLOT_BASE + SLOT_BYTES * slot_idx;
-}
-
-/* Number of slots needed for a given vector width.
- * scalar/SSE (width 0-4): 1 slot = 16 bytes (enough for SSE)
- * AVX2 (width 8): 2 slots = 32 bytes */
-static int slots_for_width(int vec_width) {
-  if (vec_width >= 8) return 2;
-  return 1;
 }
 
 /* ── Vector configuration: parameterizes emission for SSE vs AVX2 ──── */
@@ -204,6 +196,8 @@ typedef struct {
 
 /* SSE configuration (current default) */
 static const VecConfig VCFG_SSE = { .width = 4, .reg_bits = 128, .use_vex = false };
+/* AVX2 configuration */
+static const VecConfig VCFG_AVX2 = { .width = 8, .reg_bits = 256, .use_vex = true };
 
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  x86-64 instruction encoding helpers                                  */
@@ -959,44 +953,262 @@ static void emit_cmp_r64_imm32(X64Buf *b, int reg, int32_t imm) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
-/*  Width-parameterized vector load/store helpers (Phase 5b)             */
-/*  These dispatch to SSE (movss/movups) or AVX2 (vmovss/vmovups) based  */
-/*  on VecConfig. Currently only SSE is implemented; AVX2 stubs added    */
-/*  in Phase 7.                                                          */
+/*  VEX-encoded AVX2 instruction helpers (Phase 6)                        */
+/*  2-byte VEX: C5 [R vvvv L pp]                                         */
+/*  3-byte VEX: C4 [RXB mmmmm] [W vvvv L pp]                             */
+/*  R/X/B are inverted REX bits. vvvv is inverted src reg (1111=unused).  */
+/*  L=0 for XMM (128-bit), L=1 for YMM (256-bit).                        */
+/*  pp: 00=none, 01=66, 10=F3, 11=F2.  mmmmm: 01=0F, 02=0F38, 03=0F3A. */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-/* Load vector from stack slot to XMM/YMM register */
-static void emit_vec_load_rbp(X64Buf *b, const VecConfig *vc, int reg, int disp) {
-  (void)vc; /* future: VEX prefix for AVX2 */
-  emit_movups_xmm_rbp(b, reg, disp); /* 128-bit for SSE */
+/* 2-byte VEX: C5 [R vvvv L pp] — for 0F-map ops with no X/B extension */
+static void emit_vex2(X64Buf *b, int R, int vvvv, int L, int pp) {
+  xb_byte(b, 0xC5);
+  xb_byte(b, (uint8_t)(((R & 1) << 7) | ((~vvvv & 0xF) << 3) | ((L & 1) << 2) | (pp & 3)));
 }
 
-/* Store vector from XMM/YMM register to stack slot */
-static void emit_vec_store_rbp(X64Buf *b, const VecConfig *vc, int reg, int disp) {
-  (void)vc;
-  emit_movups_rbp_xmm(b, reg, disp);
+/* 3-byte VEX: C4 [RXB mmmmm] [W vvvv L pp] — for 0F38/0F3A maps or R8+ regs */
+static void emit_vex3(X64Buf *b, int R, int X, int B, int mmmmm,
+                      int W, int vvvv, int L, int pp) {
+  xb_byte(b, 0xC4);
+  xb_byte(b, (uint8_t)(((R & 1) << 7) | ((X & 1) << 6) | ((B & 1) << 5) | (mmmmm & 0x1F)));
+  xb_byte(b, (uint8_t)(((W & 1) << 7) | ((~vvvv & 0xF) << 3) | ((L & 1) << 2) | (pp & 3)));
 }
 
-/* Load scalar from stack slot to XMM register */
-static void emit_scalar_load_rbp(X64Buf *b, int reg, int disp) {
-  emit_movss_xmm_rbp(b, reg, disp);
+/* Helper: emit VEX prefix choosing 2-byte or 3-byte form.
+ * 2-byte form is only valid when: map=0F, W=0, X=1, B=1 (no ext needed). */
+static void emit_vex_auto(X64Buf *b, int dst, int src1, int src2_or_rm,
+                           int L, int pp, int mmmmm, int W) {
+  int R = (dst < 8) ? 1 : 0;
+  int X = 1; /* no index extension in reg-reg */
+  int B = (src2_or_rm < 8) ? 1 : 0;
+  int vvvv = src1; /* will be inverted in emit functions */
+  if (mmmmm == 1 && W == 0 && X == 1 && B == 1) {
+    emit_vex2(b, R, vvvv, L, pp);
+  } else {
+    emit_vex3(b, R, X, B, mmmmm, W, vvvv, L, pp);
+  }
 }
 
-/* Store scalar from XMM register to stack slot */
-static void emit_scalar_store_rbp(X64Buf *b, int reg, int disp) {
-  emit_movss_rbp_xmm(b, reg, disp);
+/* vmovups ymm, [rbp+disp32] — VEX.256 0F 10 /r (pp=00, L=1) */
+static void emit_vmovups_ymm_rbp(X64Buf *b, int ymm, int disp) {
+  int R = (ymm < 8) ? 1 : 0;
+  /* RBP base: B=1 (rbp < 8) */
+  emit_vex2(b, R, 0, 1, 0x00); /* vvvv=0 → inverted to 1111 (unused), L=1, pp=00 */
+  xb_byte(b, 0x10);
+  emit_modrm_rbp_disp32(b, ymm, disp);
 }
 
-/* Width-aware load: dispatches to scalar or vector based on vec_width */
-static void emit_width_load_rbp(X64Buf *b, const VecConfig *vc, int reg, int disp, int vec_width) {
-  if (vec_width >= 4) emit_vec_load_rbp(b, vc, reg, disp);
-  else emit_scalar_load_rbp(b, reg, disp);
+/* vmovups [rbp+disp32], ymm — VEX.256 0F 11 /r */
+static void emit_vmovups_rbp_ymm(X64Buf *b, int ymm, int disp) {
+  int R = (ymm < 8) ? 1 : 0;
+  emit_vex2(b, R, 0, 1, 0x00);
+  xb_byte(b, 0x11);
+  emit_modrm_rbp_disp32(b, ymm, disp);
 }
 
-/* Width-aware store: dispatches to scalar or vector based on vec_width */
-static void emit_width_store_rbp(X64Buf *b, const VecConfig *vc, int reg, int disp, int vec_width) {
-  if (vec_width >= 4) emit_vec_store_rbp(b, vc, reg, disp);
-  else emit_scalar_store_rbp(b, reg, disp);
+/* vmovups ymm, [base+index*scale] — VEX.256 0F 10 /r with SIB */
+static void emit_vmovups_ymm_sib(X64Buf *b, int ymm, int base, int index, int scale) {
+  int ss = 0;
+  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int R = (ymm < 8) ? 1 : 0;
+  int X = (index < 8) ? 1 : 0;
+  int B = (base < 8) ? 1 : 0;
+  emit_vex3(b, R, X, B, 1, 0, 0, 1, 0x00);
+  xb_byte(b, 0x10);
+  if ((base & 7) == RBP) {
+    emit_modrm(b, 1, ymm, 4);
+    xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
+    xb_byte(b, 0);
+  } else {
+    emit_modrm(b, 0, ymm, 4);
+    xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
+  }
+}
+
+/* vmovups [base+index*scale], ymm — VEX.256 0F 11 /r with SIB */
+static void emit_vmovups_sib_ymm(X64Buf *b, int ymm, int base, int index, int scale) {
+  int ss = 0;
+  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int R = (ymm < 8) ? 1 : 0;
+  int X = (index < 8) ? 1 : 0;
+  int B = (base < 8) ? 1 : 0;
+  emit_vex3(b, R, X, B, 1, 0, 0, 1, 0x00);
+  xb_byte(b, 0x11);
+  if ((base & 7) == RBP) {
+    emit_modrm(b, 1, ymm, 4);
+    xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
+    xb_byte(b, 0);
+  } else {
+    emit_modrm(b, 0, ymm, 4);
+    xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
+  }
+}
+
+/* vmovups ymm, ymm — VEX.256 0F 10 /r (reg-reg) */
+static void emit_vmovups_ymm_ymm(X64Buf *b, int dst, int src) {
+  int R = (dst < 8) ? 1 : 0;
+  int B = (src < 8) ? 1 : 0;
+  if (B)
+    emit_vex2(b, R, 0, 1, 0x00);
+  else
+    emit_vex3(b, R, 1, B, 1, 0, 0, 1, 0x00);
+  xb_byte(b, 0x10);
+  emit_modrm(b, 3, dst, src);
+}
+
+/* vmovups ymm, [rax+0] — VEX.256 0F 10 /r (base reg, no disp) */
+static void emit_vmovups_ymm_mem(X64Buf *b, int ymm, int base) {
+  int R = (ymm < 8) ? 1 : 0;
+  int B = (base < 8) ? 1 : 0;
+  if (B)
+    emit_vex2(b, R, 0, 1, 0x00);
+  else
+    emit_vex3(b, R, 1, B, 1, 0, 0, 1, 0x00);
+  xb_byte(b, 0x10);
+  emit_modrm(b, 0, ymm, base);
+}
+
+/* vmovups [rax+0], ymm — VEX.256 0F 11 /r (base reg, no disp) */
+static void emit_vmovups_mem_ymm(X64Buf *b, int ymm, int base) {
+  int R = (ymm < 8) ? 1 : 0;
+  int B = (base < 8) ? 1 : 0;
+  if (B)
+    emit_vex2(b, R, 0, 1, 0x00);
+  else
+    emit_vex3(b, R, 1, B, 1, 0, 0, 1, 0x00);
+  xb_byte(b, 0x11);
+  emit_modrm(b, 0, ymm, base);
+}
+
+/* VEX packed ALU reg-reg: vaddps/vmulps/vsubps/vdivps/vmaxps
+ * 3-operand: dst = src1 op src2.  VEX.pp=00 (no prefix), map=0F. */
+static void emit_vex_packed_rrr(X64Buf *b, uint8_t opc, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x00, 1, 0);
+  xb_byte(b, opc);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* VEX packed ALU with SIB memory operand: dst = src1 op [base+idx*scale] */
+static void emit_vex_packed_rr_sib(X64Buf *b, uint8_t opc, int dst, int src1,
+                                    int base, int idx, int scale, int L) {
+  int ss = 0;
+  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int R = (dst < 8) ? 1 : 0;
+  int X = (idx < 8) ? 1 : 0;
+  int B = (base < 8) ? 1 : 0;
+  emit_vex3(b, R, X, B, 1, 0, src1, L, 0x00);
+  xb_byte(b, opc);
+  if ((base & 7) == RBP) {
+    emit_modrm(b, 1, dst, 4);
+    xb_byte(b, (uint8_t)((ss << 6) | ((idx & 7) << 3) | (base & 7)));
+    xb_byte(b, 0);
+  } else {
+    emit_modrm(b, 0, dst, 4);
+    xb_byte(b, (uint8_t)((ss << 6) | ((idx & 7) << 3) | (base & 7)));
+  }
+}
+
+/* VEX packed unary (sqrt): vsqrtps dst, src — VEX 0F 51 */
+static void emit_vex_packed_sqrt(X64Buf *b, int dst, int src, int L) {
+  emit_vex_auto(b, dst, 0, src, L, 0x00, 1, 0); /* vvvv=0 → unused */
+  xb_byte(b, 0x51);
+  emit_modrm(b, 3, dst, src);
+}
+
+/* vxorps dst, src1, src2 — VEX 0F 57 */
+static void emit_vxorps(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x00, 1, 0);
+  xb_byte(b, 0x57);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vandps dst, src1, src2 — VEX 0F 54 */
+static void emit_vandps(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x00, 1, 0);
+  xb_byte(b, 0x54);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vandnps dst, src1, src2 — VEX 0F 55 (dst = ~src1 & src2) */
+static void emit_vandnps(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x00, 1, 0);
+  xb_byte(b, 0x55);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vorps dst, src1, src2 — VEX 0F 56 */
+static void emit_vorps(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x00, 1, 0);
+  xb_byte(b, 0x56);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vbroadcastss ymm, xmm — VEX.256 0F38 18 /r (AVX2) */
+static void emit_vbroadcastss_ymm_xmm(X64Buf *b, int dst, int src) {
+  int R = (dst < 8) ? 1 : 0;
+  int B = (src < 8) ? 1 : 0;
+  emit_vex3(b, R, 1, B, 2, 0, 0, 1, 0x01); /* map=0F38, pp=01(66), L=1 */
+  xb_byte(b, 0x18);
+  emit_modrm(b, 3, dst, src);
+}
+
+/* vfmadd231ps/ss dst, src1, src2 — VEX 0F38 B8/B9 /r (FMA3)
+ * dst = src1 * src2 + dst
+ * Packed (B8): vfmadd231ps, L selects 128/256-bit
+ * Scalar (B9): vfmadd231ss, L ignored (LIG) */
+static void emit_vfmadd231(X64Buf *b, int dst, int src1, int src2, int L, bool scalar) {
+  int R = (dst < 8) ? 1 : 0;
+  int B = (src2 < 8) ? 1 : 0;
+  emit_vex3(b, R, 1, B, 2, 0, src1, scalar ? 0 : L, 0x01); /* map=0F38, pp=01(66) */
+  xb_byte(b, scalar ? 0xB9 : 0xB8);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vextractf128 xmm, ymm, imm8 — VEX.256 0F3A 19 /r ib */
+static void emit_vextractf128(X64Buf *b, int dst, int src, uint8_t imm) {
+  int R = (src < 8) ? 1 : 0; /* note: src in reg field, dst in r/m */
+  int B = (dst < 8) ? 1 : 0;
+  emit_vex3(b, R, 1, B, 3, 0, 0, 1, 0x01); /* map=0F3A, pp=01(66), L=1 */
+  xb_byte(b, 0x19);
+  emit_modrm(b, 3, src, dst);
+  xb_byte(b, imm);
+}
+
+/* vpshufd dst, src, imm8 — VEX 0F 70 /r ib (pp=01 for 66 prefix) */
+static void emit_vpshufd(X64Buf *b, int dst, int src, uint8_t imm, int L) {
+  emit_vex_auto(b, dst, 0, src, L, 0x01, 1, 0); /* vvvv=0 → unused, pp=01(66) */
+  xb_byte(b, 0x70);
+  emit_modrm(b, 3, dst, src);
+  xb_byte(b, imm);
+}
+
+/* vzeroupper — C5 F8 77 (clears upper 128 bits of all YMM regs) */
+static void emit_vzeroupper(X64Buf *b) {
+  xb_byte(b, 0xC5);
+  xb_byte(b, 0xF8);
+  xb_byte(b, 0x77);
+}
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Width-parameterized vector load/store helpers (Phase 5b + Phase 6)   */
+/*  Dispatch to SSE (movss/movups) or AVX2 (vmovups YMM) based on       */
+/*  VecConfig.                                                           */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+/* Width-aware vector load from stack slot.
+ * vec_width determines instruction: >=8→vmovups YMM, 2-4→movups XMM, 0-1→movss */
+static void emit_width_load_rbp(X64Buf *b, int reg, int disp, int vec_width) {
+  if (vec_width >= 8)      emit_vmovups_ymm_rbp(b, reg, disp);
+  else if (vec_width >= 2) emit_movups_xmm_rbp(b, reg, disp);
+  else                     emit_movss_xmm_rbp(b, reg, disp);
+}
+
+/* Width-aware vector store to stack slot */
+static void emit_width_store_rbp(X64Buf *b, int reg, int disp, int vec_width) {
+  if (vec_width >= 8)      emit_vmovups_rbp_ymm(b, reg, disp);
+  else if (vec_width >= 2) emit_movups_rbp_xmm(b, reg, disp);
+  else                     emit_movss_rbp_xmm(b, reg, disp);
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -1070,7 +1282,7 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot, int avoid1, int av
   if (best_ei < 0) best_ei = 0; /* shouldn't happen */
   int reg = XF_BASE + best_ei;
   if (f->e[best_ei].dirty) {
-    emit_width_store_rbp(buf, &VCFG_SSE, reg,
+    emit_width_store_rbp(buf, reg,
                          -slot_offset(f->e[best_ei].slot), f->e[best_ei].vec_width);
   }
   f->e[best_ei] = (XfEntry){ .slot = slot };
@@ -1093,13 +1305,13 @@ static int xf_get(XmmFile *f, X64Buf *buf, int slot) {
   return r;
 }
 
-/* Get slot's register for packed value (width=4 for SSE, 8 for AVX2) */
-static int xf_get_packed(XmmFile *f, X64Buf *buf, int slot) {
+/* Get slot's register for packed value, loading with the given width */
+static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot, int width) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
   r = xf_alloc(f, buf, slot, -1, -1);
-  emit_vec_load_rbp(buf, &VCFG_SSE, r, -slot_offset(slot));
-  f->e[r - XF_BASE].vec_width = VCFG_SSE.width;
+  emit_width_load_rbp(buf, r, -slot_offset(slot), width);
+  f->e[r - XF_BASE].vec_width = width;
   return r;
 }
 
@@ -1108,11 +1320,11 @@ static void xf_clear(XmmFile *f) {
   for (int i = 0; i < XF_SIZE; i++) f->e[i] = (XfEntry){ .slot = -1 };
 }
 
-/* Flush: spill all dirty, then clear */
+/* Flush: spill all dirty entries using per-entry vec_width, then clear */
 static void xf_flush(XmmFile *f, X64Buf *buf) {
   for (int i = 0; i < XF_SIZE; i++) {
     if (f->e[i].slot >= 0 && f->e[i].dirty) {
-      emit_width_store_rbp(buf, &VCFG_SSE, XF_BASE + i,
+      emit_width_store_rbp(buf, XF_BASE + i,
                            -slot_offset(f->e[i].slot), f->e[i].vec_width);
     }
   }
@@ -1158,10 +1370,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   LocalMap locals;
   lm_init(&locals, n * 2);
 
-  /* ── Pre-scan: count slots, RANGEs, PARAMs for register allocation ─ */
+  /* ── Pre-scan: count slots, RANGEs, PARAMs, detect max vec width ─── */
   int n_slots = 0;
   int n_params = 0;
   int n_ranges = 0;
+  int max_vec_width = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP ||
@@ -1172,8 +1385,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     if (u->op == POLY_OP_END) continue;
     if (u->op == POLY_OP_PARAM) n_params++;
     if (u->op == POLY_OP_RANGE) n_ranges++;
+    if (u->dtype.count > max_vec_width) max_vec_width = u->dtype.count;
     n_slots++;
   }
+
+  /* Select VecConfig based on IR vector width and CPU caps */
+  X64CpuCaps cpu = get_cpu_caps();
+  bool use_avx2 = (max_vec_width >= 8) && cpu.has_avx2 && cpu.os_avx_ok;
+  (void)VCFG_AVX2; (void)VCFG_SSE; /* used by helper functions */
 
   /* ── Phase 3a: precompute last consumer index per UOp ────────────── */
   /* last_consumer[i] = the latest UOp index j that references uops[i]
@@ -1248,12 +1467,31 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   xb_byte(&buf, 0x89);
   emit_modrm(&buf, 3, RDI, R15);
 
-  /* Preload sign mask for NEG: XMM0 = {0x80000000, 0x80000000, 0x80000000, 0x80000000} */
+  /* Preload sign mask for NEG: broadcast 0x80000000 to all lanes */
   emit_mov_r32_imm32(&buf, RAX, (int32_t)0x80000000u);
   emit_movd_xmm_r32(&buf, XMM0, RAX);
-  /* shufps xmm0, xmm0, 0 — broadcast to all 4 lanes */
-  xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-  emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+  if (use_avx2) {
+    /* vbroadcastss ymm0, xmm0 — broadcast to all 8 lanes */
+    emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
+  } else {
+    /* shufps xmm0, xmm0, 0 — broadcast to all 4 lanes */
+    xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
+    emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+  }
+
+  /* Macro to reload sign mask in XMM0 (AVX2-aware).
+   * Used after XMM0 is clobbered by scratch operations. */
+  #define RELOAD_SIGN_MASK() do { \
+    emit_mov_r32_imm32(&buf, RAX, (int32_t)0x80000000u); \
+    emit_movd_xmm_r32(&buf, XMM0, RAX); \
+    if (use_avx2) { \
+      emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0); \
+    } else { \
+      xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6); \
+      emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00); \
+    } \
+    rax_slot = -1; \
+  } while(0)
 
   /* ── Walk UOps ───────────────────────────────────────────────────── */
   int next_slot = 0;
@@ -1366,16 +1604,17 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           /* Vec CONST: broadcast to all lanes via XMM0 scratch */
           emit_mov_r32_imm32(&buf, RAX, bits);
           emit_movd_xmm_r32(&buf, XMM0, RAX);
-          /* shufps xmm0, xmm0, 0 — broadcast lane 0 */
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-          emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
-          emit_movups_rbp_xmm(&buf, XMM0, off);
-          /* Reload sign mask in XMM0 */
-          emit_mov_r32_imm32(&buf, RAX, (int32_t)0x80000000u);
-          emit_movd_xmm_r32(&buf, XMM0, RAX);
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-          emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
-          rax_slot = -1;
+          if (use_avx2 && u->dtype.count >= 8) {
+            /* vbroadcastss ymm0, xmm0 — broadcast to all 8 lanes */
+            emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
+            emit_vmovups_rbp_ymm(&buf, XMM0, off);
+          } else {
+            /* shufps xmm0, xmm0, 0 — broadcast lane 0 */
+            xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
+            emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+            emit_movups_rbp_xmm(&buf, XMM0, off);
+          }
+          RELOAD_SIGN_MASK();
         } else {
           emit_mov_rbp_imm32(&buf, off, bits);
         }
@@ -1541,12 +1780,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
             /* Not deferred: emit fused SIB LOAD */
             int dst = xf_alloc(&xf, &buf, slot, -1, -1);
-            if (packed)
+            if (packed && u->dtype.count >= 8)
+              emit_vmovups_ymm_sib(&buf, dst, base_reg, idx_reg, is);
+            else if (packed)
               emit_movups_xmm_sib(&buf, dst, base_reg, idx_reg, is);
             else
               emit_movss_xmm_sib(&buf, dst, base_reg, idx_reg, is);
             xf.e[dst - XF_BASE].dirty = true;
-            xf.e[dst - XF_BASE].vec_width = packed ? 4 : 0;
+            xf.e[dst - XF_BASE].vec_width = packed ? u->dtype.count : 0;
             LM_SET(u, slot);
             continue;
           }
@@ -1557,12 +1798,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           int dst2 = xf_alloc(&xf, &buf, slot, -1, -1);
           if (ptr_slot != rax_slot)
             emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
-          if (packed)
+          if (packed && u->dtype.count >= 8)
+            emit_vmovups_ymm_mem(&buf, dst2, RAX);
+          else if (packed)
             emit_movups_xmm_mem(&buf, dst2, RAX);
           else
             emit_movss_xmm_mem(&buf, dst2, RAX);
           xf.e[dst2 - XF_BASE].dirty = true;
-          xf.e[dst2 - XF_BASE].vec_width = packed ? 4 : 0;
+          xf.e[dst2 - XF_BASE].vec_width = packed ? u->dtype.count : 0;
           LM_SET(u, slot);
           continue;
         }
@@ -1615,11 +1858,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       if (dtype_is_float(u->src[1]->dtype)) {
         bool packed = dtype_is_vec_float(u->src[1]->dtype);
+        int sw = u->src[1]->dtype.count;
         /* Get value from register file (or load from stack) */
         int vr = xf_find(&xf, val_slot);
         if (vr < 0) {
           vr = XMM0;
-          if (packed) emit_movups_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
+          if (packed && sw >= 8) emit_vmovups_ymm_rbp(&buf, XMM0, -slot_offset(val_slot));
+          else if (packed) emit_movups_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
           else emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
         }
 
@@ -1634,7 +1879,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
             is = idx_uop->src[0]->dtype.bitsize / 8;
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
-            if (packed) emit_movups_sib_xmm(&buf, vr, base_reg, idx_reg, is);
+            if (packed && sw >= 8) emit_vmovups_sib_ymm(&buf, vr, base_reg, idx_reg, is);
+            else if (packed) emit_movups_sib_xmm(&buf, vr, base_reg, idx_reg, is);
             else emit_movss_sib_xmm(&buf, vr, base_reg, idx_reg, is);
             continue;
           }
@@ -1643,7 +1889,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* Non-fused: store via pointer in RAX */
         if (ptr_slot != rax_slot)
           emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
-        if (packed) emit_movups_mem_xmm(&buf, vr, RAX);
+        if (packed && sw >= 8) emit_vmovups_mem_ymm(&buf, vr, RAX);
+        else if (packed) emit_movups_mem_xmm(&buf, vr, RAX);
         else emit_movss_mem_xmm(&buf, vr, RAX);
       } else {
         if (u->src[1]->dtype.bitsize <= 32) {
@@ -1837,11 +2084,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── GEP: extract scalar lane from vec4 XMM register ────────── */
+    /* ── GEP: extract scalar lane from vector register ──────────── */
     if (u->op == POLY_OP_GEP && u->n_src >= 1 && dtype_is_float(u->dtype) &&
         u->dtype.count == 1 && u->src[0]->dtype.count > 1) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
+      (void)off;
       int lane = 0;
       if (u->arg.kind == POLY_ARG_INT) lane = (int)u->arg.i;
       else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1)
@@ -1849,12 +2097,27 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       /* Get source vec from register file */
       int sr = xf_find(&xf, lm_get(&locals, u->src[0]));
-      if (sr < 0) sr = xf_get_packed(&xf, &buf, lm_get(&locals, u->src[0]));
+      if (sr < 0) sr = xf_get_packed_w(&xf, &buf, lm_get(&locals, u->src[0]), u->src[0]->dtype.count);
 
       /* Allocate scalar destination (avoid evicting source) */
       int dr = xf_alloc(&xf, &buf, slot, sr, -1);
 
-      if (lane == 0) {
+      if (use_avx2 && u->src[0]->dtype.count >= 8 && lane >= 4) {
+        /* High 128 bits of YMM: vextractf128 to XMM0, then pshufd */
+        emit_vextractf128(&buf, XMM0, sr, 1);
+        int hilo_lane = lane - 4;
+        if (hilo_lane == 0) {
+          emit_movss_xmm_xmm(&buf, dr, XMM0);
+        } else {
+          uint8_t imm = (uint8_t)(hilo_lane | (hilo_lane << 2) | (hilo_lane << 4) | (hilo_lane << 6));
+          /* pshufd: 66 0F 70 /r ib */
+          xb_byte(&buf, 0x66);
+          if (dr >= 8) emit_rex(&buf, 0, dr >> 3, 0, 0);
+          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x70);
+          emit_modrm(&buf, 3, dr, XMM0);
+          xb_byte(&buf, imm);
+        }
+      } else if (lane == 0) {
         /* Lane 0: just movss (low 32 bits) */
         emit_movss_xmm_xmm(&buf, dr, sr);
       } else {
@@ -1862,12 +2125,16 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
          * imm8 selects source lane for each output lane. We only care about lane 0.
          * imm8 = lane | (lane<<2) | (lane<<4) | (lane<<6) broadcasts the lane. */
         uint8_t imm = (uint8_t)(lane | (lane << 2) | (lane << 4) | (lane << 6));
-        /* pshufd: 66 0F 70 /r ib */
-        xb_byte(&buf, 0x66);
-        if (dr >= 8 || sr >= 8) emit_rex(&buf, 0, dr >> 3, 0, sr >> 3);
-        xb_byte(&buf, 0x0F); xb_byte(&buf, 0x70);
-        emit_modrm(&buf, 3, dr, sr);
-        xb_byte(&buf, imm);
+        if (use_avx2) {
+          emit_vpshufd(&buf, dr, sr, imm, 0); /* VEX.128 pshufd */
+        } else {
+          /* pshufd: 66 0F 70 /r ib */
+          xb_byte(&buf, 0x66);
+          if (dr >= 8 || sr >= 8) emit_rex(&buf, 0, dr >> 3, 0, sr >> 3);
+          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x70);
+          emit_modrm(&buf, 3, dr, sr);
+          xb_byte(&buf, imm);
+        }
       }
       xf.e[dr - XF_BASE].dirty = true;
       xf.e[dr - XF_BASE].vec_width = 0; /* result is scalar */
@@ -1875,11 +2142,38 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── VECTORIZE: construct vec4 from 4 scalar values ──────────── */
+    /* ── VECTORIZE: construct vector from scalar values ──────────── */
     if (u->op == POLY_OP_VECTORIZE && u->n_src >= 2 && dtype_is_float(u->dtype) &&
         u->dtype.count > 1) {
       int slot = next_slot++;
       int n_lanes = u->n_src;
+      int voff = -slot_offset(slot);
+
+      if (n_lanes > 4 && n_lanes <= 8) {
+        /* 5-8 wide: store all scalars to stack, load as YMM vector.
+         * Zero the full 32-byte slot first to avoid reading uninitialized
+         * bytes when n_lanes < 8 (e.g. 5, 6, 7). */
+        if (n_lanes < 8) {
+          /* Zero the slot via two 64-bit zero stores */
+          emit_mov_rbp_imm64_sx(&buf, voff, 0);
+          emit_mov_rbp_imm64_sx(&buf, voff + 8, 0);
+          emit_mov_rbp_imm64_sx(&buf, voff + 16, 0);
+          emit_mov_rbp_imm64_sx(&buf, voff + 24, 0);
+        }
+        for (int j = 0; j < n_lanes; j++) {
+          int sj = lm_get(&locals, u->src[j]);
+          int srj = (sj >= 0) ? xf_find(&xf, sj) : -1;
+          if (srj < 0 && sj >= 0) srj = xf_get(&xf, &buf, sj);
+          if (srj >= 0) emit_movss_rbp_xmm(&buf, srj, voff + j * 4);
+        }
+        int dr = xf_alloc(&xf, &buf, slot, -1, -1);
+        emit_vmovups_ymm_rbp(&buf, dr, voff);
+        xf.e[dr - XF_BASE].dirty = true;
+        xf.e[dr - XF_BASE].vec_width = n_lanes;
+        RELOAD_SIGN_MASK();
+        LM_SET(u, slot);
+        continue;
+      }
 
       /* Get all scalar sources from register file */
       int sr[4] = {-1, -1, -1, -1};
@@ -1919,21 +2213,15 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_modrm(&buf, 3, dr, XMM0);
       } else {
         /* Fallback for non-4-wide: store to stack slots, load as packed */
-        int off = -slot_offset(slot);
         for (int j = 0; j < n_lanes; j++) {
-          if (sr[j] >= 0) emit_movss_rbp_xmm(&buf, sr[j], off + j * 4);
+          if (sr[j] >= 0) emit_movss_rbp_xmm(&buf, sr[j], voff + j * 4);
         }
-        emit_movups_xmm_rbp(&buf, dr, off);
+        emit_movups_xmm_rbp(&buf, dr, voff);
       }
 
       xf.e[dr - XF_BASE].dirty = true;
       xf.e[dr - XF_BASE].vec_width = 4;
-      /* Reload sign mask in XMM0 (clobbered by VECTORIZE scratch) */
-      emit_mov_r32_imm32(&buf, RAX, (int32_t)0x80000000u);
-      emit_movd_xmm_r32(&buf, XMM0, RAX);
-      xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-      emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
-      rax_slot = -1;
+      RELOAD_SIGN_MASK();
       LM_SET(u, slot);
       continue;
     }
@@ -1964,7 +2252,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* Get src0 from register file */
         int sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
         if (sr0 < 0 && s0 >= 0) {
-          sr0 = pk ? xf_get_packed(&xf, &buf, s0) : xf_get(&xf, &buf, s0);
+          sr0 = pk ? xf_get_packed_w(&xf, &buf, s0, u->dtype.count) : xf_get(&xf, &buf, s0);
         }
 
         /* For binary ops: check if src1 was deferred (can fuse as SIB operand) */
@@ -1981,7 +2269,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             u->op != POLY_OP_RECIPROCAL && u->op != POLY_OP_TRUNC &&
             u->op != POLY_OP_EXP2 && u->op != POLY_OP_LOG2 &&
             u->op != POLY_OP_SIN) {
-          sr1 = pk ? xf_get_packed(&xf, &buf, s1) : xf_get(&xf, &buf, s1);
+          sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count) : xf_get(&xf, &buf, s1);
         }
 
         /* Allocate destination register.
@@ -2009,7 +2297,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                 if (fj->src[k] == src0_uop) { src0_used_later = true; break; }
             }
             if (src0_used_later) {
-              emit_width_store_rbp(&buf, &VCFG_SSE, sr0,
+              emit_width_store_rbp(&buf, sr0,
                                    -slot_offset(xf.e[si].slot), xf.e[si].vec_width);
             }
             xf.e[si].dirty = false;
@@ -2037,7 +2325,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               case POLY_OP_MAX:  opc = 0x5F; break;
               default: break;
             }
-            if (pk) {
+            if (pk && use_avx2) {
+              /* AVX 3-operand: dst = sr0 op sr1 (non-destructive) */
+              int vL = (u->dtype.count >= 8) ? 1 : 0;
+              if (ds1)
+                emit_vex_packed_rr_sib(&buf, opc, dr, sr0, ds1->base_reg, ds1->idx_reg, ds1->itemsize, vL);
+              else
+                emit_vex_packed_rrr(&buf, opc, dr, sr0, sr1, vL);
+            } else if (pk) {
               if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
               if (ds1)
                 emit_sse_packed_sib(&buf, opc, dr, ds1->base_reg, ds1->idx_reg, ds1->itemsize);
@@ -2056,16 +2351,23 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           /* Unary */
           case POLY_OP_NEG:
             /* XOR with sign mask (preloaded in XMM0 in prologue) */
-            if (dr != sr0) {
-              if (dtype_is_vec_float(u->dtype))
-                emit_movups_xmm_xmm(&buf, dr, sr0);
-              else
-                emit_movss_xmm_xmm(&buf, dr, sr0);
+            if (use_avx2 && dtype_is_vec_float(u->dtype)) {
+              int vL = (u->dtype.count >= 8) ? 1 : 0;
+              emit_vxorps(&buf, dr, sr0, XMM0, vL);
+            } else {
+              if (dr != sr0) {
+                if (dtype_is_vec_float(u->dtype))
+                  emit_movups_xmm_xmm(&buf, dr, sr0);
+                else
+                  emit_movss_xmm_xmm(&buf, dr, sr0);
+              }
+              emit_xorps(&buf, dr, XMM0);
             }
-            emit_xorps(&buf, dr, XMM0);
             break;
           case POLY_OP_SQRT:
-            if (dtype_is_vec_float(u->dtype))
+            if (use_avx2 && dtype_is_vec_float(u->dtype))
+              emit_vex_packed_sqrt(&buf, dr, sr0, (u->dtype.count >= 8) ? 1 : 0);
+            else if (dtype_is_vec_float(u->dtype))
               emit_sse_packed_rr(&buf, 0x51, dr, sr0);
             else
               emit_sse_scalar_rr(&buf, 0x51, dr, sr0);
@@ -2074,7 +2376,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* 1.0 / x: load 1.0f into XMM0 (scratch), divide by sr0, store in dr */
             emit_mov_r32_imm32(&buf, RAX, 0x3F800000);
             emit_movd_xmm_r32(&buf, XMM0, RAX);
-            if (dtype_is_vec_float(u->dtype)) {
+            if (use_avx2 && dtype_is_vec_float(u->dtype)) {
+              int vL = (u->dtype.count >= 8) ? 1 : 0;
+              if (vL) emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
+              else { xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
+                     emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00); }
+              emit_vex_packed_rrr(&buf, 0x5E, dr, XMM0, sr0, vL);
+            } else if (dtype_is_vec_float(u->dtype)) {
               /* Broadcast 1.0f to all lanes: shufps xmm0, xmm0, 0 */
               xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
               emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
@@ -2084,12 +2392,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               emit_sse_scalar_rr(&buf, 0x5E, XMM0, sr0);
               if (dr != XMM0) emit_movss_xmm_xmm(&buf, dr, XMM0);
             }
-            rax_slot = -1;
-            /* Reload sign mask into XMM0 for NEG (clobbered by 1.0f) */
-            emit_mov_r32_imm32(&buf, RAX, (int32_t)0x80000000u);
-            emit_movd_xmm_r32(&buf, XMM0, RAX);
-            xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-            emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+            RELOAD_SIGN_MASK();
             break;
           }
           case POLY_OP_TRUNC:
@@ -2134,11 +2437,27 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           }
 
           case POLY_OP_MULACC: {
+            /* MULACC: dst = src0 * src1 + src2 */
             int sr_s2 = xf_find(&xf, s2);
-            if (sr_s2 < 0) sr_s2 = xf_get(&xf, &buf, s2);
-            if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
-            emit_sse_scalar_rr(&buf, 0x59, dr, sr1); /* mulss */
-            emit_sse_scalar_rr(&buf, 0x58, dr, sr_s2); /* addss */
+            if (sr_s2 < 0) sr_s2 = pk ? xf_get_packed_w(&xf, &buf, s2, u->dtype.count) : xf_get(&xf, &buf, s2);
+            if (use_avx2 && cpu.has_fma) {
+              int vL = pk ? ((u->dtype.count >= 8) ? 1 : 0) : 0;
+              /* vfmadd231ps/ss: dst += sr0 * sr1 (dst must hold src2) */
+              if (dr != sr_s2) {
+                if (pk && vL) emit_vmovups_ymm_ymm(&buf, dr, sr_s2);
+                else if (pk) emit_movups_xmm_xmm(&buf, dr, sr_s2);
+                else emit_movss_xmm_xmm(&buf, dr, sr_s2);
+              }
+              emit_vfmadd231(&buf, dr, sr0, sr1, vL, !pk);
+            } else if (pk) {
+              if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
+              emit_sse_packed_rr(&buf, 0x59, dr, sr1); /* mulps */
+              emit_sse_packed_rr(&buf, 0x58, dr, sr_s2); /* addps */
+            } else {
+              if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
+              emit_sse_scalar_rr(&buf, 0x59, dr, sr1); /* mulss */
+              emit_sse_scalar_rr(&buf, 0x58, dr, sr_s2); /* addss */
+            }
             break;
           }
 
@@ -2179,7 +2498,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (u->op != POLY_OP_CMPLT && u->op != POLY_OP_CMPEQ &&
             u->op != POLY_OP_CMPNE) {
           xf.e[dr - XF_BASE].dirty = true;
-          xf.e[dr - XF_BASE].vec_width = pk ? 4 : 0;
+          xf.e[dr - XF_BASE].vec_width = pk ? u->dtype.count : 0;
         }
       } else {
         /* ── Integer ALU ────────────────────────────────────────── */
@@ -2370,6 +2689,7 @@ skip_slot:
   }
 
   /* ── Epilogue ────────────────────────────────────────────────────── */
+  if (use_avx2) emit_vzeroupper(&buf);
   emit_add_rsp_imm32(&buf, frame_size);
   emit_pop(&buf, RBX);
   emit_pop(&buf, R12);
@@ -2378,6 +2698,7 @@ skip_slot:
   emit_pop(&buf, R15);
   emit_pop(&buf, RBP);
   emit_ret(&buf);
+  #undef RELOAD_SIGN_MASK
 
   lm_destroy(&locals);
   free(last_consumer);
@@ -2418,12 +2739,10 @@ PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   opts.devectorize = devec;
   opts.beam_width = beam;
 
-  /* x64-specific caps from CPUID.
-   * has_mulacc: false until renderer emits vfmadd (Phase 7).
-   * max_vec_width: 4 (SSE) until renderer handles YMM (Phase 7). */
-  opts.caps.has_mulacc = false; /* TODO Phase 7: cpu.has_fma */
+  /* x64-specific caps from CPUID */
+  opts.caps.has_mulacc = cpu.has_fma && cpu.has_avx2 && cpu.os_avx_ok;
   opts.caps.has_threefry = false;
-  opts.caps.max_vec_width = 4; /* TODO Phase 7: cpu.has_avx2 ? 8 : 4 */
+  opts.caps.max_vec_width = (cpu.has_avx2 && cpu.os_avx_ok) ? 8 : 4;
 
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }

@@ -31,6 +31,14 @@ static uint32_t ptr_hash(const void *p) {
 static PolyArg poly_arg_int_tuple_local(int64_t *vals, int n);
 static PolyUOp *scalarize_lane_expr(PolyCtx *ctx, PolyUOp *u, int lane);
 
+/* Max hardware vector fold width for load/store splitting.
+ * Set by the pipeline before running correct_load_store pass.
+ * Default 4 (SSE). Set to 8 for AVX2.
+ * NOT THREAD-SAFE: concurrent codegen with different caps will race.
+ * Acceptable for now (single-threaded); thread-safe fix requires passing
+ * fold width through rewrite context instead of a mutable global. */
+static int g_max_fold_width = 4;
+
 /* ── Reduce identity helper ────────────────────────────────────────────── */
 
 static double codegen_reduce_identity(PolyOps op) {
@@ -688,7 +696,7 @@ static int split_uop_add(PolyUOp *u, PolyUOp **out, int max_n) {
 }
 
 /* ── hand_coded_optimizations (heuristic.py:8-190, CPU-relevant subset) ── */
-static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink) {
+static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   /* tinygrad apply_opts guard (postrange.py:352): skip heuristic for multi-block kernels. */
   {
     int n_topo = 0;
@@ -889,13 +897,18 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink) {
   }
 
   /* == Default upcast fallback (heuristic.py:151-154) ==
-   * If nothing upcasted and last upcastable dim % 4 == 0, upcast by 4. */
+   * If nothing upcasted and last upcastable dim % upcast_amount == 0,
+   * upcast by that amount. Use max_vec_width from caps (4 for SSE, 8 for AVX2). */
   if (!sched_upcasted(&s)) {
+    int upcast_amount = (caps.max_vec_width >= 8) ? 8 : 4;
     int up_dims[SCHED_MAX_RNGS];
     int n_up = sched_upcastable_dims(&s, up_dims, SCHED_MAX_RNGS);
     if (n_up > 0) {
       int last = up_dims[n_up - 1];
-      if (s.shape[last] % 4 == 0 && last < s.n_rngs)
+      /* Try preferred width first, fall back to 4 if not divisible */
+      if (s.shape[last] % upcast_amount == 0 && last < s.n_rngs)
+        sched_shift_to(&s, s.rngs[last], upcast_amount, POLY_AXIS_UPCAST, false);
+      else if (upcast_amount > 4 && s.shape[last] % 4 == 0 && last < s.n_rngs)
         sched_shift_to(&s, s.rngs[last], 4, POLY_AXIS_UPCAST, false);
     }
   }
@@ -1317,8 +1330,8 @@ static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink,
  * Falls back to heuristic. Future: use WASM JIT backend for timing. */
 static PolyUOp *poly_beam_search(PolyCtx *ctx, PolyUOp *sink,
                                   int beam_width, PolyRewriteOpts opts) {
-  (void)beam_width; (void)opts;
-  return poly_apply_opts_heuristic(ctx, sink);
+  (void)beam_width;
+  return poly_apply_opts_heuristic(ctx, sink, opts.caps);
 }
 
 #endif /* __EMSCRIPTEN__ */
@@ -1760,7 +1773,6 @@ static PolyUOp *rule_mul_add_to_mulacc(PolyCtx *ctx, PolyUOp *root,
   (void)b;
   if (root->op != POLY_OP_ADD || root->n_src != 2) return NULL;
   if (!poly_dtype_is_float(root->dtype)) return NULL;
-  if (root->dtype.count != 1) return NULL;  /* scalar only */
   PolyUOp *mul = NULL, *add = NULL;
   if (root->src[0]->op == POLY_OP_MUL) {
     mul = root->src[0]; add = root->src[1];
@@ -1996,7 +2008,7 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
         poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_MULACC),
         NULL, 0, NULL), rule_mulacc_to_mul_add };
   } else {
-    /* FMA path: fuse ADD(MUL(a,b), c) → MULACC(a,b,c) for float scalars */
+    /* FMA path: fuse ADD(MUL(a,b), c) → MULACC(a,b,c) for floats (scalar + vector) */
     PolyOpSet add_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_ADD);
     rules[n++] = (PolyRule){ poly_pat_ops(add_set, NULL, 0, NULL),
       rule_mul_add_to_mulacc };
@@ -3571,9 +3583,14 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   PolyUOp *buf = idx->src[0];
   if (!buf) return NULL;
 
-  /* Determine fold lengths for CPU: [4, 2, 1] (supports_float4) */
-  int fold_lengths[] = {4, 2, 1};
-  int n_folds = 3;
+  /* Determine fold lengths based on hardware vector width.
+   * g_max_fold_width is set by the pipeline before running this pass. */
+  int fold_lengths[4];
+  int n_folds = 0;
+  if (g_max_fold_width >= 8) fold_lengths[n_folds++] = 8;
+  fold_lengths[n_folds++] = 4;
+  fold_lengths[n_folds++] = 2;
+  fold_lengths[n_folds++] = 1;
 
   /* Split into chunks */
   PolyUOp *ret[128];
@@ -4493,7 +4510,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     if (opts.beam_width > 0)
       sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
     else
-      sink = poly_apply_opts_heuristic(ctx, sink);
+      sink = poly_apply_opts_heuristic(ctx, sink, opts.caps);
   }
 
   /* ── 2. Expander (unconditional, tinygrad lines 57-60) ─────────────── */
@@ -4511,6 +4528,8 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
 
   /* ── 6. Add loads + devectorize (gated by devectorize, tinygrad lines 75-81) ── */
+  /* Set max fold width for load/store splitting (AVX2 allows 8-wide) */
+  g_max_fold_width = (opts.caps.max_vec_width >= 8) ? 8 : 4;
   if (opts.devectorize >= 0) {
     /* tinygrad line 75: add loads */
     sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());

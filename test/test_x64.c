@@ -755,4 +755,242 @@ TEST(x64, large_n) {
   poly_ctx_destroy(ctx); PASS();
 }
 
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  AVX2 + FMA tests (Phase 6)                                          */
+/*  These test the 8-wide (YMM) path. Skipped at runtime if the CPU     */
+/*  doesn't support AVX2.                                               */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+#include <cpuid.h>
+
+static bool test_has_avx2(void) {
+  unsigned int eax, ebx, ecx, edx;
+  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+  bool osxsave = (ecx >> 27) & 1;
+  if (!osxsave) return false;
+  unsigned int xcr0_lo, xcr0_hi;
+  __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+  if ((xcr0_lo & 0x6) != 0x6) return false;
+  if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) return false;
+  return (ebx >> 5) & 1;
+}
+
+static bool test_has_fma(void) {
+  unsigned int eax, ebx, ecx, edx;
+  if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return false;
+  return (ecx >> 12) & 1;
+}
+
+/* Run kernel via x64 JIT with AVX2 caps (max_vec_width=8) */
+static int x64_run_avx2(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
+  PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
+  opts.caps.max_vec_width = 8;
+  opts.caps.has_mulacc = test_has_fma();
+  int nl; PolyUOp **lin = poly_linearize_ex(ctx, sink, opts, &nl);
+  if (!lin) return -1;
+  int sz; uint8_t *code = poly_render_x64(lin, nl, &sz);
+  free(lin); if (!code) return -1;
+  PolyX64Program *p = poly_compile_x64(code, sz);
+  free(code); if (!p) return -1;
+  poly_x64_program_call(p, args, n);
+  poly_x64_program_destroy(p);
+  return 0;
+}
+
+/* Parity helper: CPU vs AVX2 x64 */
+static int check_parity_avx2(K k, void **args, int n_args,
+                              float *c_cpu, float *c_x64, int N, float tol) {
+  memset(c_cpu, 0, N * sizeof(float));
+  memset(c_x64, 0, N * sizeof(float));
+  args[n_args - 1] = c_cpu;
+  if (cpu_run(k.ctx, k.sink, args, n_args) != 0) return -1;
+  args[n_args - 1] = c_x64;
+  if (x64_run_avx2(k.ctx, k.sink, args, n_args) != 0) return -2;
+  for (int i = 0; i < N; i++)
+    if (fabsf(c_cpu[i] - c_x64[i]) > tol) return i + 1;
+  return 0;
+}
+
+/* Parity: SSE vec4 vs AVX2 vec8 */
+static int check_parity_sse_vs_avx2(K k, void **args, int n_args,
+                                     float *c_sse, float *c_avx, int N, float tol) {
+  memset(c_sse, 0, N * sizeof(float));
+  memset(c_avx, 0, N * sizeof(float));
+  args[n_args - 1] = c_sse;
+  if (x64_run_vec(k.ctx, k.sink, args, n_args) != 0) return -1;
+  args[n_args - 1] = c_avx;
+  if (x64_run_avx2(k.ctx, k.sink, args, n_args) != 0) return -2;
+  for (int i = 0; i < N; i++)
+    if (fabsf(c_sse[i] - c_avx[i]) > tol) return i + 1;
+  return 0;
+}
+
+TEST(x64, avx2_vecadd) {
+  if (!test_has_avx2()) PASS(); /* skip gracefully */
+  int N = 64;
+  float a[64], b[64], c_cpu[64], c_x64[64];
+  for (int i = 0; i < N; i++) { a[i] = (float)i * 0.5f; b[i] = (float)(N - i) * 0.3f; }
+  K k = make_binop(POLY_OP_ADD, N);
+  void *args[3] = {a, b, NULL};
+  int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_vecmul) {
+  if (!test_has_avx2()) PASS();
+  int N = 64;
+  float a[64], b[64], c_cpu[64], c_x64[64];
+  for (int i = 0; i < N; i++) { a[i] = (float)(i + 1) * 0.1f; b[i] = (float)(N - i) * 0.2f; }
+  K k = make_binop(POLY_OP_MUL, N);
+  void *args[3] = {a, b, NULL};
+  int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-4f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_vecsub) {
+  if (!test_has_avx2()) PASS();
+  int N = 64;
+  float a[64], b[64], c_cpu[64], c_x64[64];
+  for (int i = 0; i < N; i++) { a[i] = (float)i * 1.5f; b[i] = (float)i * 0.5f; }
+  K k = make_binop(POLY_OP_SUB, N);
+  void *args[3] = {a, b, NULL};
+  int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_neg) {
+  if (!test_has_avx2()) PASS();
+  int N = 64;
+  float a[64], c_cpu[64], c_x64[64];
+  for (int i = 0; i < N; i++) a[i] = (float)i * 0.7f - 20.0f;
+  K k = make_unary(POLY_OP_NEG, N);
+  void *args[3] = {a, NULL};
+  int rc = check_parity_avx2(k, args, 2, c_cpu, c_x64, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_sqrt) {
+  if (!test_has_avx2()) PASS();
+  int N = 64;
+  float a[64], c_cpu[64], c_x64[64];
+  for (int i = 0; i < N; i++) a[i] = (float)(i + 1) * 0.5f;
+  K k = make_unary(POLY_OP_SQRT, N);
+  void *args[3] = {a, NULL};
+  int rc = check_parity_avx2(k, args, 2, c_cpu, c_x64, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_reciprocal) {
+  if (!test_has_avx2()) PASS();
+  int N = 64;
+  float a[64], c_cpu[64], c_x64[64];
+  for (int i = 0; i < N; i++) a[i] = (float)(i + 1) * 0.3f;
+  K k = make_unary(POLY_OP_RECIPROCAL, N);
+  void *args[3] = {a, NULL};
+  int rc = check_parity_avx2(k, args, 2, c_cpu, c_x64, N, 1e-4f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_reduce_sum) {
+  if (!test_has_avx2()) PASS();
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 64);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
+  int64_t axes[] = {0};
+  PolyUOp *s = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *st = poly_store_val(ctx, out, s);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[64];
+  for (int i = 0; i < 64; i++) da[i] = (float)(i + 1);
+  float out_cpu[1], out_interp[1], out_x64[1];
+  PolyUOp *bufs[] = {a, out};
+  void *datas[] = {da, NULL};
+
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
+                            out, out_cpu, out_interp, out_x64, 1, 1e-3f);
+  ASSERT_INT_EQ(rc, 0);
+  /* sum(1..64) = 2080 */
+  ASSERT_FLOAT_EQ(out_x64[0], 2080.0f, 1e-2);
+  poly_ctx_destroy(ctx); PASS();
+}
+
+TEST(x64, avx2_non_pow2) {
+  if (!test_has_avx2()) PASS();
+  /* N=13: not divisible by 8, exercises masked epilogue */
+  int N = 13;
+  float a[13], b[13], c_cpu[13], c_x64[13];
+  for (int i = 0; i < N; i++) { a[i] = (float)i; b[i] = (float)(N - i); }
+  K k = make_binop(POLY_OP_ADD, N);
+  void *args[3] = {a, b, NULL};
+  int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(c_x64[i], (float)N, 1e-5);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_parity_sse) {
+  if (!test_has_avx2()) PASS();
+  /* Same kernel forced SSE vs AVX2, identical results */
+  int N = 64;
+  float a[64], b[64], c_sse[64], c_avx[64];
+  for (int i = 0; i < N; i++) { a[i] = (float)i * 0.5f; b[i] = (float)(N - i) * 0.3f; }
+  K k = make_binop(POLY_OP_ADD, N);
+  void *args[3] = {a, b, NULL};
+  int rc = check_parity_sse_vs_avx2(k, args, 3, c_sse, c_avx, N, 1e-5f);
+  ASSERT_INT_EQ(rc, 0);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_large_n) {
+  if (!test_has_avx2()) PASS();
+  int N = 1048576; /* 1M elements */
+  float *a = malloc(N * sizeof(float));
+  float *b = malloc(N * sizeof(float));
+  float *c_cpu = malloc(N * sizeof(float));
+  float *c_x64 = malloc(N * sizeof(float));
+  for (int i = 0; i < N; i++) { a[i] = (float)(i % 1000) * 0.001f; b[i] = 1.0f; }
+  K k = make_binop(POLY_OP_ADD, N);
+  void *args[3] = {a, b, NULL};
+  int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-3f);
+  ASSERT_INT_EQ(rc, 0);
+  free(a); free(b); free(c_cpu); free(c_x64);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+TEST(x64, avx2_fma_chain) {
+  if (!test_has_avx2() || !test_has_fma()) PASS();
+  /* c[i] = a[i] * b[i] + a[i] — should use FMA when MULACC is preserved */
+  int N = 64;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, a, b);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, mul, a);
+  PolyUOp *st = poly_store_val(ctx, out, add);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  float da[64], db[64];
+  float out_cpu[64], out_interp[64], out_x64[64];
+  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1) * 0.1f; db[i] = 2.0f; }
+
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
+                            out, out_cpu, out_interp, out_x64, N, 1e-3f);
+  ASSERT_INT_EQ(rc, 0);
+  /* a[0]*b[0]+a[0] = 0.1*2.0+0.1 = 0.3 */
+  ASSERT_FLOAT_EQ(out_x64[0], 0.3f, 1e-4);
+  poly_ctx_destroy(ctx); PASS();
+}
+
 #endif /* POLY_HAS_X64 */
