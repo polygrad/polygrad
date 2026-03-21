@@ -2070,15 +2070,38 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── BITCAST: reinterpret bits ───────────────────────────────── */
+    /* ── BITCAST: reinterpret bits across float/int domains ──────── */
     if (u->op == POLY_OP_BITCAST) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
       int s0 = lm_get(&locals, u->src[0]);
       if (s0 < 0) goto skip_slot;
 
-      emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
-      emit_mov_rbp_r64(&buf, RAX, off);
+      bool src_float = dtype_is_float(u->src[0]->dtype);
+      int src_bits = u->src[0]->dtype.count > 1
+        ? (u->src[0]->dtype.bitsize / u->src[0]->dtype.count)
+        : u->src[0]->dtype.bitsize;
+      bool wide = (src_bits > 32);
+
+      /* If source is in XMM register file (float), spill to stack first */
+      if (src_float) {
+        int xr = xf_find(&xf, s0);
+        if (xr >= 0 && xf.e[xr - XF_BASE].dirty) {
+          emit_width_store_rbp(&buf, xr, -slot_offset(s0), xf.e[xr - XF_BASE].vec_width);
+          xf.e[xr - XF_BASE].dirty = false;
+        }
+      }
+
+      /* Width-correct copy: use 32-bit moves for 32-bit types to avoid
+       * reading/writing garbage in upper bits. Critical for pow2if where
+       * ((q+127)<<23) must be an exact 32-bit pattern. */
+      if (wide) {
+        emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
+        emit_mov_rbp_r64(&buf, RAX, off);
+      } else {
+        emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
+        emit_mov_rbp_r32(&buf, RAX, off);
+      }
       rax_slot = slot; xmm0_slot = -1;
       LM_SET(u, slot);
       continue;
@@ -2420,11 +2443,17 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
           /* Ternary */
           case POLY_OP_WHERE: {
-            /* cond is int (in stack), true/false are float (in reg file) */
+            /* cond is int (in stack), true/false are float (in reg file).
+             * Load both sources first, then revalidate dr to prevent
+             * eviction of the pre-allocated destination. */
             int sr_true = xf_find(&xf, s1);
             if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1);
             int sr_false = xf_find(&xf, s2);
             if (sr_false < 0) sr_false = xf_get(&xf, &buf, s2);
+            /* Revalidate dr: loading sr_true/sr_false may have evicted it */
+            if (xf_find(&xf, slot) < 0)
+              dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false,
+                                    slot_last_use, i);
             emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
             emit_neg_r32(&buf, RAX);
             emit_movd_xmm_r32(&buf, XMM0, RAX);
@@ -2433,13 +2462,23 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_andnps(&buf, XMM0, sr_false);
             emit_orps(&buf, dr, XMM0);
             rax_slot = -1;
+            /* WHERE clobbers XMM0 (used for sign mask); reload */
+            RELOAD_SIGN_MASK();
             break;
           }
 
           case POLY_OP_MULACC: {
-            /* MULACC: dst = src0 * src1 + src2 */
+            /* MULACC: dst = src0 * src1 + src2
+             * Load src2 first, then re-allocate dr protecting all three
+             * source registers to prevent eviction conflicts. */
             int sr_s2 = xf_find(&xf, s2);
             if (sr_s2 < 0) sr_s2 = pk ? xf_get_packed_w(&xf, &buf, s2, u->dtype.count) : xf_get(&xf, &buf, s2);
+            /* Re-allocate dr with sr_s2 protected (pre-switch dr may have
+             * been evicted by the sr_s2 load above) */
+            if (xf_find(&xf, slot) < 0) {
+              dr = xf_alloc_belady(&xf, &buf, slot, sr_s2, sr0 >= 0 ? sr0 : -1,
+                                    slot_last_use, i);
+            }
             if (use_avx2 && cpu.has_fma) {
               int vL = pk ? ((u->dtype.count >= 8) ? 1 : 0) : 0;
               /* vfmadd231ps/ss: dst += sr0 * sr1 (dst must hold src2) */
