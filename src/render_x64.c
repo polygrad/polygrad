@@ -1191,6 +1191,58 @@ static void emit_vzeroupper(X64Buf *b) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
+/*  Packed integer SIMD instructions (Phase 8: SIMD integer in XMM/YMM)  */
+/*  All use VEX pp=01(66) map=01(0F). 3-operand NDS form for reg-reg,    */
+/*  NDD form for immediate shifts. L=0 for 128-bit, L=1 for 256-bit.    */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+/* vpaddd dst, src1, src2 — VEX.66.0F FE /r (packed int32 add) */
+static void emit_vpaddd(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x01, 1, 0);
+  xb_byte(b, 0xFE);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vpsubd dst, src1, src2 — VEX.66.0F FA /r (packed int32 subtract) */
+static void emit_vpsubd(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x01, 1, 0);
+  xb_byte(b, 0xFA);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vpand dst, src1, src2 — VEX.66.0F DB /r (packed bitwise AND) */
+static void emit_vpand(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x01, 1, 0);
+  xb_byte(b, 0xDB);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vpor dst, src1, src2 — VEX.66.0F EB /r (packed bitwise OR) */
+static void emit_vpor(X64Buf *b, int dst, int src1, int src2, int L) {
+  emit_vex_auto(b, dst, src1, src2, L, 0x01, 1, 0);
+  xb_byte(b, 0xEB);
+  emit_modrm(b, 3, dst, src2);
+}
+
+/* vpslld dst, src, imm8 — VEX.66.0F 72 /6 ib (packed int32 shift left)
+ * NDD form: vvvv=dst, r/m=src, reg=6 (opcode extension) */
+static void emit_vpslld_imm(X64Buf *b, int dst, int src, uint8_t imm, int L) {
+  emit_vex_auto(b, 6, dst, src, L, 0x01, 1, 0); /* reg=6 (/6), vvvv=dst */
+  xb_byte(b, 0x72);
+  emit_modrm(b, 3, 6, src);
+  xb_byte(b, imm);
+}
+
+/* vpsrld dst, src, imm8 — VEX.66.0F 72 /2 ib (packed int32 logical shift right)
+ * NDD form: vvvv=dst, r/m=src, reg=2 (opcode extension) */
+static void emit_vpsrld_imm(X64Buf *b, int dst, int src, uint8_t imm, int L) {
+  emit_vex_auto(b, 2, dst, src, L, 0x01, 1, 0); /* reg=2 (/2), vvvv=dst */
+  xb_byte(b, 0x72);
+  emit_modrm(b, 3, 2, src);
+  xb_byte(b, imm);
+}
+
+/* ══════════════════════════════════════════════════════════════════════ */
 /*  Width-parameterized vector load/store helpers (Phase 5b + Phase 6)   */
 /*  Dispatch to SSE (movss/movups) or AVX2 (vmovups YMM) based on       */
 /*  VecConfig.                                                           */
@@ -1216,7 +1268,7 @@ static void emit_width_store_rbp(X64Buf *b, int reg, int disp, int vec_width) {
 /*  stack round-trips. XMM0 reserved as scratch for non-file ops.        */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-#define XF_SIZE 7      /* XMM1 through XMM7 */
+#define XF_SIZE 15     /* XMM1 through XMM15 */
 #define XF_BASE 1      /* first allocatable XMM register number */
 
 typedef struct {
