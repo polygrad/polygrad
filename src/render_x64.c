@@ -1296,14 +1296,16 @@ static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2) {
 }
 
 /* Get slot's register, loading from stack if not cached.
- * Uses movups for packed slots, movss for scalar. */
-static int xf_get(XmmFile *f, X64Buf *buf, int slot) {
+ * avoid1 = register not to evict (-1 = no constraint). */
+static int xf_get_avoid(XmmFile *f, X64Buf *buf, int slot, int avoid1) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
-  r = xf_alloc(f, buf, slot, -1, -1);
-  /* Default to scalar load; caller sets packed flag if needed */
+  r = xf_alloc(f, buf, slot, avoid1, -1);
   emit_movss_xmm_rbp(buf, r, -slot_offset(slot));
   return r;
+}
+static int xf_get(XmmFile *f, X64Buf *buf, int slot) {
+  return xf_get_avoid(f, buf, slot, -1);
 }
 
 /* Get slot's register for packed value, loading with the given width */
@@ -2088,24 +2090,69 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int off = -slot_offset(slot);
 
       if (src_float && !dst_float) {
-        /* Spill source from XMM register file if dirty */
+        /* float → int: spill XMM if dirty, then cvttss2si */
         int xr = xf_find(&xf, s0);
         if (xr >= 0 && xf.e[xr - XF_BASE].dirty) {
           emit_width_store_rbp(&buf, xr, -slot_offset(s0), xf.e[xr - XF_BASE].vec_width);
           xf.e[xr - XF_BASE].dirty = false;
         }
         emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(s0));
-        emit_cvttss2si(&buf, RAX, XMM0);
+        if (u->dtype.bitsize > 32) {
+          /* cvttss2si rax, xmm0 (64-bit): F3 REX.W 0F 2C /r */
+          xb_byte(&buf, 0xF3);
+          emit_rex_always(&buf, 1, 0, 0, 0);
+          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2C);
+          emit_modrm(&buf, 3, RAX, XMM0);
+        } else {
+          emit_cvttss2si(&buf, RAX, XMM0);
+        }
         emit_mov_rbp_r64(&buf, RAX, off);
-        rax_slot = -1; xmm0_slot = -1;
+        RELOAD_SIGN_MASK();
       } else if (!src_float && dst_float) {
-        emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
-        emit_cvtsi2ss(&buf, XMM0, RAX);
+        /* int → float: load with correct width, cvtsi2ss */
+        if (u->src[0]->dtype.bitsize > 32) {
+          emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
+          /* cvtsi2ss xmm0, rax (64-bit source) */
+          xb_byte(&buf, 0xF3);
+          emit_rex_always(&buf, 1, 0, 0, 0);
+          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2A);
+          emit_modrm(&buf, 3, XMM0, RAX);
+        } else {
+          emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
+          emit_cvtsi2ss(&buf, XMM0, RAX);
+        }
         emit_movss_rbp_xmm(&buf, XMM0, off);
-        rax_slot = -1; xmm0_slot = slot;
+        RELOAD_SIGN_MASK();
       } else {
-        emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
-        emit_mov_rbp_r64(&buf, RAX, off);
+        /* int → int: width-and-signedness-correct extension/truncation */
+        int src_bits = u->src[0]->dtype.bitsize;
+        int dst_bits = u->dtype.bitsize;
+        bool src_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
+        if (dst_bits > src_bits) {
+          /* Widening: zero-extend or sign-extend */
+          if (src_bits <= 32) {
+            if (src_unsigned) {
+              /* Zero-extend: mov eax, [slot] (implicit zero-extension to 64-bit) */
+              emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
+            } else {
+              /* Sign-extend: movsxd rax, [slot] */
+              emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
+              emit_movsxd(&buf, RAX, RAX);
+            }
+          } else {
+            emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
+          }
+        } else {
+          /* Narrowing or same-width: just copy */
+          if (dst_bits <= 32)
+            emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
+          else
+            emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
+        }
+        if (dst_bits <= 32)
+          emit_mov_rbp_r32(&buf, RAX, off);
+        else
+          emit_mov_rbp_r64(&buf, RAX, off);
         rax_slot = slot; xmm0_slot = -1;
       }
       LM_SET(u, slot);
@@ -2334,7 +2381,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             u->op != POLY_OP_RECIPROCAL && u->op != POLY_OP_TRUNC &&
             u->op != POLY_OP_EXP2 && u->op != POLY_OP_LOG2 &&
             u->op != POLY_OP_SIN) {
-          sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count) : xf_get(&xf, &buf, s1);
+          sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count) : xf_get_avoid(&xf, &buf, s1, sr0);
         }
 
         /* Allocate destination register.
@@ -2480,6 +2527,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* Free the destination XMM since result is int (in stack) */
             xf.e[dr - XF_BASE].slot = -1;
             xf.e[dr - XF_BASE].dirty = false;
+            RELOAD_SIGN_MASK();
             break;
           }
 
@@ -2491,7 +2539,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             int sr_true = xf_find(&xf, s1);
             if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1);
             int sr_false = xf_find(&xf, s2);
-            if (sr_false < 0) sr_false = xf_get(&xf, &buf, s2);
+            if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true);
+            /* Revalidate sr_true after sr_false load (may have evicted it) */
+            int sr_true_check = xf_find(&xf, s1);
+            if (sr_true_check < 0) sr_true = xf_get_avoid(&xf, &buf, s1, sr_false);
+            else sr_true = sr_true_check;
             /* Revalidate dr: loading sr_true/sr_false may have evicted it */
             if (xf_find(&xf, slot) < 0)
               dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
@@ -2514,7 +2566,15 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
              * Load src2 first, then re-allocate dr protecting all three
              * source registers to prevent eviction conflicts. */
             int sr_s2 = xf_find(&xf, s2);
-            if (sr_s2 < 0) sr_s2 = pk ? xf_get_packed_w(&xf, &buf, s2, u->dtype.count) : xf_get(&xf, &buf, s2);
+            if (sr_s2 < 0) {
+              /* Load sr_s2 avoiding eviction of sr0 and sr1 */
+              if (pk)
+                sr_s2 = xf_get_packed_w(&xf, &buf, s2, u->dtype.count);
+              else {
+                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1);
+                emit_movss_xmm_rbp(&buf, sr_s2, -slot_offset(s2));
+              }
+            }
             /* Re-allocate dr protecting all 3 source registers.
              * Pre-switch dr may have been evicted by sr_s2 load;
              * sr1 must also be protected from eviction. */
@@ -2652,15 +2712,17 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             }
             break;
           }
-          case POLY_OP_SHR:
+          case POLY_OP_SHR: {
             emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
             emit_alu_r_rbp(&buf, 0, 0x8B, RCX, -slot_offset(s1));
-            /* sar rax/eax, cl (arithmetic shift right) */
+            /* Use logical shr for unsigned types, arithmetic sar for signed */
+            bool is_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
             emit_rex_always(&buf, w, 0, 0, 0);
             xb_byte(&buf, 0xD3);
-            emit_modrm(&buf, 3, 7, RAX); /* /7 = sar */
+            emit_modrm(&buf, 3, is_unsigned ? 5 : 7, RAX); /* /5=shr, /7=sar */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
+          }
           case POLY_OP_AND:
             emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
             emit_alu_r_rbp(&buf, w, 0x23, RAX, -slot_offset(s1)); /* and */

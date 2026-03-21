@@ -690,14 +690,9 @@ TEST(x64, float_cast) {
 /*  Transcendental via x64 (three-way)                                   */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-/* TODO: transcendental tests have ~0.5% precision mismatch (exp2(3)=7.957 vs 8.0).
- * Root cause: x64 path has has_mulacc=true (FMA fusion) while CPU path has
- * has_mulacc=false (separate mul+add). The decomposed Horner polynomial produces
- * different rounding. 0.5% is too large for pure FMA rounding (should be ULP-level),
- * suggesting an additional execution bug in the x64 renderer's BITCAST/integer chain
- * for ldexp2k/pow2if. Needs instrumented debugging to trace intermediate values.
- * BITCAST handler was fixed (XMM spill before bit extraction), WHERE/MULACC register
- * safety improved, but the precision issue persists. */
+/* Transcendental tests: exp2, log2, sin via decomposed polynomial IR.
+ * Root causes fixed: CAST/BITCAST XMM spill, integer SIB LOAD,
+ * CAST int->float sign mask reload, comparison sign mask reload. */
 
 TEST(x64, e2e_exp2) {
   /* precision bug fixed: CAST float->int now spills XMM before cvttss2si */
@@ -723,7 +718,7 @@ TEST(x64, e2e_exp2) {
 }
 
 TEST(x64, e2e_log2) {
-  PASS(); /* log2 still has ~2x error; needs separate fix */
+  /* fixed: CAST int->float now reloads sign mask */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
@@ -746,7 +741,7 @@ TEST(x64, e2e_log2) {
 }
 
 TEST(x64, e2e_sin) {
-  PASS(); /* sin still has errors; needs same fix as log2 */
+  /* fixed: xf_get_avoid prevents source register eviction */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
@@ -768,7 +763,7 @@ TEST(x64, e2e_sin) {
 }
 
 TEST(x64, e2e_exp2_log2_chain) {
-  PASS(); /* depends on log2 fix */
+  /* fixed: CAST int->float now reloads sign mask */
   /* exp2(log2(x)) should roundtrip to x */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
