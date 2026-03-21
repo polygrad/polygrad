@@ -1245,10 +1245,11 @@ static int xf_find(XmmFile *f, int slot) {
 }
 
 /* Allocate register for slot, evicting if needed.
- * avoid1/avoid2 = regs not to evict.
+ * avoid1/avoid2/avoid3 = regs not to evict (-1 = unused).
  * slot_last_use + cur_pos enable Belady's eviction (evict furthest next_use).
  * Pass slot_last_use=NULL for legacy round-robin fallback. */
-static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2,
+static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
+                           int avoid1, int avoid2, int avoid3,
                            const int *slot_last_use, int cur_pos) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
@@ -1265,7 +1266,7 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot, int avoid1, int av
   int best_ei = -1, best_dist = -1;
   for (int i = 0; i < XF_SIZE; i++) {
     int reg = XF_BASE + i;
-    if (reg == avoid1 || reg == avoid2) continue;
+    if (reg == avoid1 || reg == avoid2 || reg == avoid3) continue;
     if (f->e[i].pinned) continue; /* never evict pinned (accumulator) */
     if (slot_last_use) {
       int dist = (f->e[i].slot >= 0) ? slot_last_use[f->e[i].slot] - cur_pos : 0;
@@ -1291,7 +1292,7 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot, int avoid1, int av
 
 /* Legacy wrapper: round-robin eviction (no Belady's info) */
 static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2) {
-  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, NULL, 0);
+  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0);
 }
 
 /* Get slot's register, loading from stack if not cached.
@@ -1811,7 +1812,42 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
       }
 
-      /* Integer LOAD: use stack slots (no register file) */
+      /* Integer LOAD: use stack slots (no register file).
+       * Check for fused SIB addressing (INDEX was skipped). */
+      {
+        PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
+        if (idx_uop) {
+          int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
+          int idx_reg = resolve_index_to_gpr(&buf, idx_uop->src[1],
+                                              reg_assigns, n_reg_assigns, &locals);
+          int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
+          if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
+            is = idx_uop->src[0]->dtype.bitsize / 8;
+          if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
+            /* SIB integer LOAD: mov r32/r64, [base + idx * scale] */
+            int ss = 0;
+            switch (is) { case 1:ss=0;break; case 2:ss=1;break; case 4:ss=2;break; case 8:ss=3;break; }
+            bool w64 = (u->dtype.bitsize > 32);
+            if (w64 || base_reg >= 8 || idx_reg >= 8)
+              emit_rex_always(&buf, w64 ? 1 : 0, RAX >> 3, idx_reg >> 3, base_reg >> 3);
+            xb_byte(&buf, 0x8B); /* mov r, [base+idx*scale] */
+            if ((base_reg & 7) == RBP) {
+              emit_modrm(&buf, 1, RAX, 4);
+              xb_byte(&buf, (uint8_t)((ss << 6) | ((idx_reg & 7) << 3) | (base_reg & 7)));
+              xb_byte(&buf, 0);
+            } else {
+              emit_modrm(&buf, 0, RAX, 4);
+              xb_byte(&buf, (uint8_t)((ss << 6) | ((idx_reg & 7) << 3) | (base_reg & 7)));
+            }
+            if (w64) emit_mov_rbp_r64(&buf, RAX, off);
+            else emit_mov_rbp_r32(&buf, RAX, off);
+            rax_slot = slot;
+            LM_SET(u, slot);
+            continue;
+          }
+        }
+      }
+      /* Non-fused integer LOAD: dereference pointer from slot */
       if (ptr_slot != rax_slot)
         emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
       if (u->dtype.bitsize <= 32) {
@@ -2452,7 +2488,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             if (sr_false < 0) sr_false = xf_get(&xf, &buf, s2);
             /* Revalidate dr: loading sr_true/sr_false may have evicted it */
             if (xf_find(&xf, slot) < 0)
-              dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false,
+              dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
                                     slot_last_use, i);
             emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
             emit_neg_r32(&buf, RAX);
@@ -2473,10 +2509,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
              * source registers to prevent eviction conflicts. */
             int sr_s2 = xf_find(&xf, s2);
             if (sr_s2 < 0) sr_s2 = pk ? xf_get_packed_w(&xf, &buf, s2, u->dtype.count) : xf_get(&xf, &buf, s2);
-            /* Re-allocate dr with sr_s2 protected (pre-switch dr may have
-             * been evicted by the sr_s2 load above) */
+            /* Re-allocate dr protecting all 3 source registers.
+             * Pre-switch dr may have been evicted by sr_s2 load;
+             * sr1 must also be protected from eviction. */
             if (xf_find(&xf, slot) < 0) {
-              dr = xf_alloc_belady(&xf, &buf, slot, sr_s2, sr0 >= 0 ? sr0 : -1,
+              dr = xf_alloc_belady(&xf, &buf, slot, sr0, sr1, sr_s2,
                                     slot_last_use, i);
             }
             if (use_avx2 && cpu.has_fma) {
