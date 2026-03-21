@@ -30,6 +30,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 │  │ arena.c  │  │          │  │ shape.c    │  │ wasm_builder.c │ │
 │  │ hashmap.c│  │          │  │            │  │ codegen.c      │ │
 │  └──────────┘  └──────────┘  └────────────┘  │ runtime_cpu.c  │ │
+│                                               │ render_x64.c   │ │
 │                                               └────────────────┘ │
 │  ┌──────────┐  ┌──────────────────────────────────────────────┐  │
 │  │ Autograd │  │ Frontend (FFI surface + ~35 composed ops)    │  │
@@ -45,9 +46,11 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────────────┘    └────────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C or WASM) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences.
+**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> codegen -> linearize -> render (C, x86-64 JIT, WASM, or CUDA) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences. 545 C tests (including 30 x64 JIT), 164 Python, 101 JS native, 95 JS WASM/browser.
 
-**Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, interpreter, CUDA, WASM JIT). Device is inferred from buffer handles, not stored on the instance. `PolyInstance` uses cached slot tables and calls `poly_compiled_plan_run()` directly -- zero per-step allocations in the training loop. Persistent intermediates are allocated once and zeroed per-run. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
+**Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, x64 JIT, interpreter, CUDA, WASM JIT). The x64 JIT (`render_x64.c`) emits x86-64 machine code directly -- no C compiler dependency, zero compile latency, SSE2 packed vectorization. Matches clang -O2 on elementwise kernels. Device is inferred from buffer handles, not stored on the instance. `PolyInstance` uses cached slot tables and calls `poly_compiled_plan_run()` directly -- zero per-step allocations in the training loop. Persistent intermediates are allocated once and zeroed per-run. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
+
+**Codegen optimization:** Late pipeline matches tinygrad's architecture (codegen/__init__.py). Devectorizer scatters vectorized ALU ops to scalar, load/store folding regroups contiguous accesses into vector loads. `POLY_OPTIMIZE=1 POLY_DEVECTORIZE=1` enables UPCAST + devectorize for CPU SIMD. BEAM search optimizer (`POLY_BEAM=N`) explores the optimization space by compiling and timing candidates, with disk cache for results. All 510 tests pass in both default and optimized modes.
 
 **What's next:** GPU backends (WGSL/WebGPU, Metal), more model families (LLaMA).
 
@@ -147,14 +150,53 @@ Polygrad compiles tensor operations into fused C kernels at runtime. A disk cach
 | Tensor creation from numpy | Zero-copy (no memcpy for contiguous arrays) |
 | numpy() readback | Zero-copy (returns view) |
 
-**Kernel fusion advantage:** Polygrad fuses chains of element-wise operations into a single kernel that makes one pass over memory. Numpy executes each operation separately (one pass per op). At large array sizes, this cache-locality advantage is significant:
+### Kernel fusion
+
+Polygrad fuses chains of element-wise operations into a single kernel that makes one pass over memory. Numpy executes each operation separately, allocating a temporary array for each intermediate result.
+
+For a chain of N ops on an array of M elements:
+- Numpy: N passes over memory, N temporary allocations (each M * 4 bytes for float32)
+- Polygrad: 1 pass, 0 temporary allocations (intermediates stay in CPU registers)
+
+**Crossover point:** polygrad beats numpy when the fused kernel's single-pass advantage outweighs the per-call scheduling overhead (~200us). This happens at large arrays with many ops:
 
 ```
-5-op chain (a+b)*(a-b)+a*b on 5M float32 elements:
-  numpy:    ~19ms  (5 passes over 20MB)
-  polygrad: ~2.8ms (1 fused pass)
-  polygrad is 7x faster
+N=10M float32 elements, fused chain r = r * a + b (repeated):
+
+  ops    numpy       polygrad    speedup
+  5      160ms       224ms       0.7x  (numpy faster -- scheduling overhead dominates)
+  10     311ms       246ms       1.3x  (polygrad faster)
+  20     860ms       267ms       3.2x  (polygrad faster)
 ```
+
+Speedup = numpy_time / polygrad_time. Numpy time scales linearly with op count (one memory pass per op). Polygrad time stays nearly flat (one fused kernel regardless of op count).
+
+**Memory:** For the 20-op chain on 10M elements (40MB per array), numpy allocates and frees 20 temporary arrays (800MB total transient allocation). Polygrad allocates only the input and output buffers (120MB total), with all intermediates in registers.
+
+This is relevant for workloads like Monte Carlo simulation, where millions of samples pass through a chain of numeric transforms (pricing models, risk calculations). The compute phase fuses into a single kernel with bounded memory, regardless of model complexity.
+
+### Relative benchmarks
+
+`make bench-ratios` runs polygrad against numpy, tinygrad, and PyTorch on a standard workload suite. Results are reported as speedup ratios (polygrad_time / baseline_time) which are stable across hardware:
+
+```
+make bench-ratios       # run benchmarks, output JSON
+make bench-compare      # compare to stored baseline, flag regressions >10%
+make bench-regression   # run + compare (exit 1 on regression)
+```
+
+**JS (WASM vs native, instance API -- compile once, execute many):**
+
+```
+workload                 native    wasm    wasm/native
+mlp_forward (in=64)        3us      5us    1.5x
+mlp_forward (in=1024)     52us     55us    1.1x
+mlp_forward (in=16384)   880us    881us    1.0x
+mlp_train (in=64)          6us     17us    2.7x
+mlp_train (in=1024)      104us    225us    2.2x
+```
+
+WASM JIT matches native CPU at larger model sizes. At small sizes, WASM dispatch overhead adds 1.5-2.7x.
 
 Environment variables:
 - `POLY_OPT=0|1|2` -- optimization level for kernel compilation (default: 2)

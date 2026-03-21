@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- BEAM search optimizer (`POLY_BEAM=N` env var). Explores UPCAST/UNROLL action space by compiling and timing candidates, keeps top-N per iteration (up to 5 iterations). Disk cache in `~/.cache/polygrad/beam/`. Integrated into `poly_full_rewrite_to_sink_ex` and `poly_linearize_env`. 5 new C tests (beam suite).
 - Cross-platform execution plan types (`exec_plan.h`): `PolyDeviceId`, `PolyCompileMode`, `PolyPreparedStep`, `PolyExecutableStep`, `PolyRunner`, `PolyBackendDesc`, `PolyAllocator`, `PolyBufferHandle`. Foundation for multi-backend PolyInstance.
 - `poly_prepare_step()`: backend-neutral scheduling that produces `PolyPreparedStep` from a tensor SINK. Shared by all backends.
 - `poly_lower_step()`: lowers a prepared step into a backend-specific `PolyExecutableStep`. Supports `POLY_DEVICE_CPU` (fork+clang+dlopen) and `POLY_DEVICE_INTERP` (linearize-then-interpret).
@@ -14,6 +15,20 @@
 - `poly_instance_forward()` and `poly_instance_train_step()` rewritten as thin wrappers over `call()` and `value_and_grad()` respectively.
 - 6 new instance tests: call_basic, set_device_interp, cpu_vs_interp_forward, cpu_vs_interp_train, set_device_roundtrip, set_device_unsupported.
 - WASM executable step: `poly_lower_step(..., POLY_DEVICE_WASM_JIT)` renders WASM kernel bytes and compiles them via EM_JS bridge. Two-phase design: compile once during lowering (cached by kernel_id), execute many times. PolyInstance works on WASM with full forward and training support. Instance functions exported from Emscripten build. MLP, TabM, NAM model builders available in WASM.
+- Graph-compiled optimizer: SGD/Adam/AdamW emit UOp graphs with ASSIGN, executed via `poly_realize()`. Moment buffers are proper `PolyBufferHandle`s. Training uses one execution path (no host-side optimizer loop).
+- DEFINE_VAR support in exec_plan: `PolyExecItem.var_uops[]` stores per-kernel DEFINE_VAR UOps. `poly_compiled_plan_run()` resolves var values from bindings at runtime.
+
+### Changed
+- `poly_compile_step()` is now a thin wrapper over `poly_schedule_for()` + `poly_compile_schedule()`. PolyStep holds references to `PolySchedule*` and `PolyCompiledPlan*` instead of its own compiled kernels.
+- `poly_step_run()` delegates to `poly_compiled_plan_run()`. No more parallel execution infrastructure.
+- `poly_realize_ex()` passes var_bindings through the exec_plan path. No legacy fallback.
+
+### Removed
+- `realize_impl()`: legacy monolithic realize path with inline scheduling, compilation, and execution. All execution now routes through exec_plan.
+- `graph_has_vars()`: fixed-size stack traversal (4096/8192 arrays with silent truncation) that gated the realize_impl fallback. No longer needed.
+- Old schedule cache (`SchedCacheEntry`, `sched_cache_get/put`, `realize_from_sched_cache`, `compile_and_run`): 300+ lines of duplicate caching infrastructure replaced by per-context exec_plan caches.
+- `PolyStepKernel`, `ParamMapping`: internal types for PolyStep's own compilation. Replaced by `PolyRunner` in exec_plan.
+- Deleted from PolyInstance: `device`, `allocator`, `prep_cache`, `exec_cache`, `apply_optimizer_update()`, `build_slot_data()`, `resolve_vag_slots()`.
 
 ### Fixed
 - Einsum trace: repeated indices in a single input (e.g. `'ii->'`) now correctly extract the diagonal instead of producing wrong results. Ported tinygrad's diagonal extraction algorithm (permute + flatten + pad + reshape + shrink).

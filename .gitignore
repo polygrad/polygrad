@@ -20,5 +20,6 @@ temp/
 *.egg-info
 .pytest_cache/
 out*.txt
+bench/results/2*.json
 py/csrc/
 py/dist/
