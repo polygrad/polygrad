@@ -22,6 +22,59 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <math.h>
+#include <cpuid.h>
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  CPU feature detection (Phase 4)                                      */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+typedef struct {
+  bool has_sse2;   /* always true on x86-64 */
+  bool has_avx2;   /* cpuid leaf 7, ebx bit 5 */
+  bool has_fma;    /* cpuid leaf 1, ecx bit 12 */
+  bool os_avx_ok;  /* OSXSAVE + XGETBV confirms YMM state is saved */
+} X64CpuCaps;
+
+static X64CpuCaps g_cpu_caps;
+static bool g_cpu_caps_detected = false;
+
+static X64CpuCaps detect_cpu_caps(void) {
+  X64CpuCaps caps = { .has_sse2 = true };
+  unsigned int eax, ebx, ecx, edx;
+
+  /* Leaf 1: check FMA + OSXSAVE */
+  if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+    caps.has_fma = (ecx >> 12) & 1;
+    bool osxsave = (ecx >> 27) & 1;
+
+    /* Check OS support for YMM state (mandatory before any AVX codegen) */
+    if (osxsave) {
+      unsigned int xcr0_lo, xcr0_hi;
+      __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+      caps.os_avx_ok = (xcr0_lo & 0x6) == 0x6; /* bits 1 (SSE) + 2 (AVX) */
+    }
+  }
+
+  /* Leaf 7: check AVX2 */
+  if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+    caps.has_avx2 = (ebx >> 5) & 1;
+  }
+
+  /* Gate AVX2/FMA on OS support */
+  if (!caps.os_avx_ok) {
+    caps.has_avx2 = false;
+    caps.has_fma = false;
+  }
+  return caps;
+}
+
+static X64CpuCaps get_cpu_caps(void) {
+  if (!g_cpu_caps_detected) {
+    g_cpu_caps = detect_cpu_caps();
+    g_cpu_caps_detected = true;
+  }
+  return g_cpu_caps;
+}
 #include <dlfcn.h>
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -887,6 +940,7 @@ typedef struct {
   int slot;    /* stack slot this register mirrors (-1 = free) */
   bool dirty;  /* value only in register, not yet in stack */
   bool packed; /* true if this is a 128-bit packed value (movups), false for 32-bit scalar (movss) */
+  bool pinned; /* true if pinned (accumulator); never evicted */
 } XfEntry;
 
 typedef struct {
@@ -895,7 +949,7 @@ typedef struct {
 } XmmFile;
 
 static void xf_init(XmmFile *f) {
-  for (int i = 0; i < XF_SIZE; i++) f->e[i] = (XfEntry){ -1, false, false };
+  for (int i = 0; i < XF_SIZE; i++) f->e[i] = (XfEntry){ -1, false, false, false };
   f->next_evict = 0;
 }
 
@@ -907,35 +961,56 @@ static int xf_find(XmmFile *f, int slot) {
   return -1;
 }
 
-/* Allocate register for slot, evicting if needed. avoid1/avoid2 = regs not to evict. */
-static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2) {
+/* Allocate register for slot, evicting if needed.
+ * avoid1/avoid2 = regs not to evict.
+ * slot_last_use + cur_pos enable Belady's eviction (evict furthest next_use).
+ * Pass slot_last_use=NULL for legacy round-robin fallback. */
+static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2,
+                           const int *slot_last_use, int cur_pos) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
 
   /* Find free */
   for (int i = 0; i < XF_SIZE; i++) {
     if (f->e[i].slot < 0) {
-      f->e[i] = (XfEntry){ slot, false };
+      f->e[i] = (XfEntry){ slot, false, false, false };
       return XF_BASE + i;
     }
   }
 
-  /* Evict round-robin, skipping avoid registers */
-  for (int t = 0; t < XF_SIZE; t++) {
-    int ei = f->next_evict;
-    f->next_evict = (f->next_evict + 1) % XF_SIZE;
-    int reg = XF_BASE + ei;
+  /* Evict: Belady's (evict furthest next_use) or round-robin fallback */
+  int best_ei = -1, best_dist = -1;
+  for (int i = 0; i < XF_SIZE; i++) {
+    int reg = XF_BASE + i;
     if (reg == avoid1 || reg == avoid2) continue;
-    if (f->e[ei].dirty) {
-      if (f->e[ei].packed)
-        emit_movups_rbp_xmm(buf, reg, -slot_offset(f->e[ei].slot));
-      else
-        emit_movss_rbp_xmm(buf, reg, -slot_offset(f->e[ei].slot));
+    if (f->e[i].pinned) continue; /* never evict pinned (accumulator) */
+    if (slot_last_use) {
+      int dist = (f->e[i].slot >= 0) ? slot_last_use[f->e[i].slot] - cur_pos : 0;
+      if (dist > best_dist) { best_dist = dist; best_ei = i; }
+    } else {
+      /* Round-robin fallback */
+      best_ei = f->next_evict;
+      f->next_evict = (f->next_evict + 1) % XF_SIZE;
+      if ((XF_BASE + best_ei) != avoid1 && (XF_BASE + best_ei) != avoid2 && !f->e[best_ei].pinned)
+        break;
+      best_ei = -1; /* try next */
     }
-    f->e[ei] = (XfEntry){ slot, false, false };
-    return reg;
   }
-  return XF_BASE; /* shouldn't happen with 7 regs and max 2 avoids */
+  if (best_ei < 0) best_ei = 0; /* shouldn't happen */
+  int reg = XF_BASE + best_ei;
+  if (f->e[best_ei].dirty) {
+    if (f->e[best_ei].packed)
+      emit_movups_rbp_xmm(buf, reg, -slot_offset(f->e[best_ei].slot));
+    else
+      emit_movss_rbp_xmm(buf, reg, -slot_offset(f->e[best_ei].slot));
+  }
+  f->e[best_ei] = (XfEntry){ slot, false, false, false };
+  return reg;
+}
+
+/* Legacy wrapper: round-robin eviction (no Belady's info) */
+static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2) {
+  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, NULL, 0);
 }
 
 /* Get slot's register, loading from stack if not cached.
@@ -997,6 +1072,20 @@ static bool dtype_is_int(PolyDType dt) {
   return !dtype_is_float(dt) && dt.bitsize > 0;
 }
 
+/* Walk through AFTER/CAST/BITCAST/INDEX to find the underlying DEFINE_REG
+ * or DEFINE_LOCAL.  The core's pm_reduce emits AFTER(DEFINE_REG, ...)
+ * chains, so INDEX(AFTER(DEFINE_REG)) must resolve to the DEFINE_REG for
+ * accumulator LOAD/STORE fast paths. */
+static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
+  if (!u) return NULL;
+  if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
+  if (u->op == POLY_OP_AFTER && u->n_src > 0)   return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_CAST && u->n_src > 0)    return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_BITCAST && u->n_src > 0)  return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_INDEX && u->n_src > 0)    return resolve_acc_base_fn(u->src[0]);
+  return NULL;
+}
+
 uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   X64Buf buf = {0};
   LocalMap locals;
@@ -1018,6 +1107,41 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     if (u->op == POLY_OP_RANGE) n_ranges++;
     n_slots++;
   }
+
+  /* ── Phase 3a: precompute last consumer index per UOp ────────────── */
+  /* last_consumer[i] = the latest UOp index j that references uops[i]
+   * as a source. Used for dead-value freeing and Belady's eviction.
+   * Build a ptr→index map for O(1) source lookups. */
+  int *last_consumer = calloc((size_t)n, sizeof(int));
+  for (int i = 0; i < n; i++) last_consumer[i] = i; /* default: self */
+  /* Simple open-addressing hash map: UOp* → linearized index */
+  typedef struct { PolyUOp *key; int idx; } UOpMapEntry;
+  int uop_map_cap = n < 32 ? 64 : (n * 4);
+  UOpMapEntry *uop_map = calloc((size_t)uop_map_cap, sizeof(UOpMapEntry));
+  for (int i = 0; i < n; i++) {
+    uint64_t h = ((uint64_t)(uintptr_t)uops[i] >> 3) * 0x9E3779B97F4A7C15ULL;
+    int pos = (int)(h % (uint64_t)uop_map_cap);
+    while (uop_map[pos].key) pos = (pos + 1) % uop_map_cap;
+    uop_map[pos].key = uops[i];
+    uop_map[pos].idx = i;
+  }
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = uops[i];
+    for (int k = 0; k < u->n_src; k++) {
+      /* Find source's index via hash map */
+      uint64_t sh = ((uint64_t)(uintptr_t)u->src[k] >> 3) * 0x9E3779B97F4A7C15ULL;
+      int sp = (int)(sh % (uint64_t)uop_map_cap);
+      int j = -1;
+      while (uop_map[sp].key) {
+        if (uop_map[sp].key == u->src[k]) { j = uop_map[sp].idx; break; }
+        sp = (sp + 1) % uop_map_cap;
+      }
+      if (j >= 0 && i > last_consumer[j]) last_consumer[j] = i;
+    }
+  }
+  /* Per-slot last-use tracking (filled during rendering) */
+  int *slot_last_use = calloc((size_t)(n_slots + 16), sizeof(int));
+  for (int i = 0; i < n_slots + 16; i++) slot_last_use[i] = INT32_MAX;
 
   /* GPR allocation plan: LOOP_GPRS = {R12, R13, R14, RBX}
    * Reserve first n_ranges GPRs for loop counters.
@@ -1087,6 +1211,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   DeferredSIB deferred[32];
   int n_deferred = 0;
 
+  /* Wrap lm_set to also track slot last-use for Belady's eviction.
+   * IMPORTANT: `i` must be the current UOp index in scope. */
+  #define LM_SET(u_ptr, slot_val) do { \
+    lm_set(&locals, (u_ptr), (slot_val)); \
+    if ((slot_val) >= 0 && (slot_val) < n_slots + 16) \
+      slot_last_use[slot_val] = last_consumer[i]; \
+  } while(0)
+
   /* IF forward-jump patch stack */
   int if_patch_stack[MAX_LOOP_DEPTH];
   int if_depth = 0;
@@ -1097,6 +1229,15 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     /* Skip non-code UOps */
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
       continue;
+
+    /* ── Phase 3a: free dead XMM entries ──────────────────────────── */
+    for (int ri = 0; ri < XF_SIZE; ri++) {
+      int s = xf.e[ri].slot;
+      if (s >= 0 && !xf.e[ri].pinned && slot_last_use[s] < i) {
+        /* Last consumer already processed; free without spill */
+        xf.e[ri] = (XfEntry){ -1, false, false, false };
+      }
+    }
 
     /* ── PARAM: load buffer pointer from args array ──────────────── */
     if (u->op == POLY_OP_PARAM) {
@@ -1122,7 +1263,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       if (gpr >= 0) {
         emit_mov_rbp_r64(&buf, gpr, off);
       }
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1139,7 +1280,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       emit_movsxd(&buf, RAX, RAX);
       /* mov [rbp - off], rax */
       emit_mov_rbp_r64(&buf, RAX, off);
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1180,7 +1321,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           emit_mov_rbp_r64(&buf, RAX, off);
         }
       }
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1190,14 +1331,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int off = -slot_offset(slot);
       /* Initialize to 0 (zero the full 8 bytes) */
       emit_mov_rbp_imm64_sx(&buf, off, 0);
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
     /* ── AFTER: alias to src[0] ──────────────────────────────────── */
     if (u->op == POLY_OP_AFTER) {
       int s0 = lm_get(&locals, u->src[0]);
-      if (s0 >= 0) lm_set(&locals, u, s0);
+      if (s0 >= 0) LM_SET(u, s0);
       continue;
     }
 
@@ -1237,7 +1378,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           }
         }
         if (all_fuse) {
-          lm_set(&locals, u, slot);
+          LM_SET(u, slot);
           continue; /* skip INDEX emission */
         }
       }
@@ -1264,7 +1405,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       emit_mov_rbp_r64(&buf, RAX, off);
       rax_slot = slot;
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1276,14 +1417,17 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int ptr_slot = lm_get(&locals, u->src[0]);
       if (ptr_slot < 0) goto skip_slot;
 
-      /* Check if this is a register load (DEFINE_REG accumulator) */
-      if (u->src[0]->op == POLY_OP_INDEX &&
-          u->src[0]->src[0]->op == POLY_OP_DEFINE_REG) {
-        int reg_slot = lm_get(&locals, u->src[0]->src[0]);
-        if (reg_slot >= 0) {
-          lm_set(&locals, u, reg_slot);
-          next_slot--;
-          continue;
+      /* Check if this is a register load (DEFINE_REG accumulator).
+       * Walk through AFTER/INDEX chains to find the underlying DEFINE_REG. */
+      {
+        PolyUOp *acc = resolve_acc_base_fn(u->src[0]);
+        if (acc) {
+          int reg_slot = lm_get(&locals, acc);
+          if (reg_slot >= 0) {
+            LM_SET(u, reg_slot);
+            next_slot--;
+            continue;
+          }
         }
       }
 
@@ -1319,7 +1463,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             }
             if (can_defer && n_consumers == 1 && n_deferred < 32) {
               deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_reg, is };
-              lm_set(&locals, u, slot);
+              LM_SET(u, slot);
               continue;
             }
 
@@ -1331,7 +1475,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               emit_movss_xmm_sib(&buf, dst, base_reg, idx_reg, is);
             xf.e[dst - XF_BASE].dirty = true;
             xf.e[dst - XF_BASE].packed = packed;
-            lm_set(&locals, u, slot);
+            LM_SET(u, slot);
             continue;
           }
         }
@@ -1347,7 +1491,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_movss_xmm_mem(&buf, dst2, RAX);
           xf.e[dst2 - XF_BASE].dirty = true;
           xf.e[dst2 - XF_BASE].packed = packed;
-          lm_set(&locals, u, slot);
+          LM_SET(u, slot);
           continue;
         }
       }
@@ -1363,7 +1507,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_rbp_r64(&buf, RAX, off);
       }
       rax_slot = slot;
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1373,33 +1517,28 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int val_slot = lm_get(&locals, u->src[1]);
       if (ptr_slot < 0 || val_slot < 0) continue;
 
-      /* Check if storing to a DEFINE_LOCAL/DEFINE_REG (accumulator) */
-      if (u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
-          u->src[0]->op == POLY_OP_DEFINE_REG ||
-          (u->src[0]->op == POLY_OP_INDEX &&
-           u->src[0]->src[0]->op == POLY_OP_DEFINE_REG)) {
-        /* Store to accumulator slot */
-        int acc_slot;
-        if (u->src[0]->op == POLY_OP_INDEX)
-          acc_slot = lm_get(&locals, u->src[0]->src[0]);
-        else
-          acc_slot = ptr_slot;
-
-        if (acc_slot >= 0) {
-          if (dtype_is_float(u->src[1]->dtype)) {
-            int vr = xf_find(&xf, val_slot);
-            if (vr < 0) { vr = XMM0; emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot)); }
-            emit_movss_rbp_xmm(&buf, vr, -slot_offset(acc_slot));
-            /* Update register file: acc_slot now has this value */
-            int ar = xf_find(&xf, acc_slot);
-            if (ar >= 0) emit_movss_xmm_xmm(&buf, ar, vr);
-          } else {
-            emit_mov_r64_rbp(&buf, RAX, -slot_offset(val_slot));
-            emit_mov_rbp_r64(&buf, RAX, -slot_offset(acc_slot));
-            rax_slot = acc_slot;
+      /* Check if storing to a DEFINE_LOCAL/DEFINE_REG (accumulator).
+       * Walk through AFTER/INDEX chains to find the underlying DEFINE_REG. */
+      {
+        PolyUOp *acc = resolve_acc_base_fn(u->src[0]);
+        if (acc) {
+          int acc_slot = lm_get(&locals, acc);
+          if (acc_slot >= 0) {
+            if (dtype_is_float(u->src[1]->dtype)) {
+              int vr = xf_find(&xf, val_slot);
+              if (vr < 0) { vr = XMM0; emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot)); }
+              emit_movss_rbp_xmm(&buf, vr, -slot_offset(acc_slot));
+              /* Update register file: acc_slot now has this value */
+              int ar = xf_find(&xf, acc_slot);
+              if (ar >= 0) emit_movss_xmm_xmm(&buf, ar, vr);
+            } else {
+              emit_mov_r64_rbp(&buf, RAX, -slot_offset(val_slot));
+              emit_mov_rbp_r64(&buf, RAX, -slot_offset(acc_slot));
+              rax_slot = acc_slot;
+            }
           }
+          continue;
         }
-        continue;
       }
 
       if (dtype_is_float(u->src[1]->dtype)) {
@@ -1454,7 +1593,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     /* ── RANGE: loop start ───────────────────────────────────────── */
     if (u->op == POLY_OP_RANGE) {
       int slot = next_slot++;
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
 
       int bound_slot = lm_get(&locals, u->src[0]);
       if (bound_slot < 0) goto skip_slot;
@@ -1585,7 +1724,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       /* Pointer reinterpretation (same bits, different ptr type): alias */
       if ((src_float == dst_float) && u->src[0]->dtype.is_ptr && u->dtype.is_ptr) {
-        lm_set(&locals, u, s0); /* alias to source slot */
+        LM_SET(u, s0); /* alias to source slot */
         continue;
       }
 
@@ -1607,7 +1746,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_rbp_r64(&buf, RAX, off);
         rax_slot = slot; xmm0_slot = -1;
       }
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1621,7 +1760,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       emit_mov_r64_rbp(&buf, RAX, -slot_offset(s0));
       emit_mov_rbp_r64(&buf, RAX, off);
       rax_slot = slot; xmm0_slot = -1;
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1659,7 +1798,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
       xf.e[dr - XF_BASE].dirty = true;
       xf.e[dr - XF_BASE].packed = false; /* result is scalar */
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1722,7 +1861,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
       emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
       rax_slot = -1;
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
@@ -1961,9 +2100,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           }
 
           default:
-            /* Unsupported float op — store 0 */
-            emit_mov_rbp_imm32(&buf, off, 0);
-            break;
+            fprintf(stderr, "x64 jit: unhandled float ALU op %s at index %d\n",
+                    poly_op_name(u->op), i);
+            goto x64_fail;
         }
         /* Mark destination register as dirty (value not in stack) */
         if (u->op != POLY_OP_CMPLT && u->op != POLY_OP_CMPEQ &&
@@ -2137,19 +2276,22 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             break;
 
           default:
-            emit_mov_rbp_imm64_sx(&buf, off, 0);
-            break;
+            fprintf(stderr, "x64 jit: unhandled int ALU op %s at index %d\n",
+                    poly_op_name(u->op), i);
+            goto x64_fail;
         }
         /* Integer ALU clobbers RAX */
         rax_slot = -1;
         xmm0_slot = -1; /* be conservative: int ops may interleave with float */
       }
-      lm_set(&locals, u, slot);
+      LM_SET(u, slot);
       continue;
     }
 
-    /* ── Unhandled: skip ─────────────────────────────────────────── */
-    continue;
+    /* ── Unhandled: hard-fail ────────────────────────────────────── */
+    fprintf(stderr, "x64 jit: unhandled UOp %s (op=%d) at index %d\n",
+            poly_op_name(u->op), u->op, i);
+    goto x64_fail;
 
 skip_slot:
     next_slot--; /* reclaim slot on error */
@@ -2167,9 +2309,52 @@ skip_slot:
   emit_ret(&buf);
 
   lm_destroy(&locals);
+  free(last_consumer);
+  free(slot_last_use);
+  free(uop_map);
 
   *size_out = buf.len;
   return buf.data;
+
+x64_fail:
+  lm_destroy(&locals);
+  free(last_consumer);
+  free(slot_last_use);
+  free(uop_map);
+  free(buf.data);
+  return NULL;
+}
+
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Linearize with x64-specific caps (Phase 4)                           */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  X64CpuCaps cpu = get_cpu_caps();
+  PolyRewriteOpts opts = {0};
+
+  /* Read env overrides (matching poly_linearize_env behavior exactly).
+   * env_true: returns true if set and not "0"/"false".
+   * Default: OPTIMIZE=1 implies DEVECTORIZE=1 (scalar ALU, vec load/store). */
+  const char *ov = getenv("POLY_OPTIMIZE");
+  bool opt = ov && ov[0] != '\0' && strcmp(ov, "0") != 0 && strcmp(ov, "false") != 0;
+  const char *dv = getenv("POLY_DEVECTORIZE");
+  int devec = (dv && dv[0] != '\0') ? atoi(dv) : (opt ? 1 : 0);
+  int beam = 0;
+  const char *bv = getenv("POLY_BEAM");
+  if (bv && bv[0] != '\0') beam = atoi(bv);
+  opts.optimize = opt;
+  opts.devectorize = devec;
+  opts.beam_width = beam;
+
+  /* x64-specific caps from CPUID.
+   * has_mulacc: false until renderer emits vfmadd (Phase 7).
+   * max_vec_width: 4 (SSE) until renderer handles YMM (Phase 7). */
+  opts.caps.has_mulacc = false; /* TODO Phase 7: cpu.has_fma */
+  opts.caps.has_threefry = false;
+  opts.caps.max_vec_width = 4; /* TODO Phase 7: cpu.has_avx2 ? 8 : 4 */
+
+  return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */

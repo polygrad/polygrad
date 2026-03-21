@@ -618,8 +618,8 @@ static int x64_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
                            const char *fn_name, PolyRunner *out) {
   (void)fn_name;
   int n_lin;
-  /* x64 JIT: use env-controlled pipeline (POLY_OPTIMIZE=1 for SIMD) */
-  PolyUOp **lin = poly_linearize_env(ctx, scheduled_root, &n_lin);
+  /* x64 JIT: use CPUID-aware pipeline with x64-specific caps */
+  PolyUOp **lin = poly_linearize_x64(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
 
   int code_size;

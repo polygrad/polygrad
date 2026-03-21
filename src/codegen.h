@@ -14,10 +14,12 @@
 #include <stdbool.h>
 
 /* Renderer capability flags -- determines which ops survive into rendered code.
- * Mirrors tinygrad's code_for_op / supported_ops gating in get_late_rewrite_patterns. */
+ * Mirrors tinygrad's code_for_op / supported_ops gating in get_late_rewrite_patterns.
+ * max_vec_width is a polygrad extension (tinygrad uses boolean supports_float4). */
 typedef struct {
-  bool has_mulacc;  /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
-  bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
+  bool has_mulacc;    /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
+  bool has_threefry;  /* Backend supports native THREEFRY op without decomposition */
+  int  max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
 } PolyRendererCaps;
 
 typedef struct {
@@ -138,6 +140,9 @@ int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
 /* ── x86-64 JIT support (conditional on POLY_HAS_X64) ──────────────── */
 
 #ifdef POLY_HAS_X64
+
+/* x86-64 linearizer: rewrite with CPUID-based caps + linearize. */
+PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Render linearized UOps to x86-64 machine code.
  * Returns malloc'd byte array. Caller must free().
