@@ -96,7 +96,7 @@ static const char *op_names[] = {
   [POLY_OP_ALLREDUCE] = "ALLREDUCE",
   [POLY_OP_UNROLL] = "UNROLL",
   [POLY_OP_CONTRACT] = "CONTRACT",
-  [POLY_OP_CAT] = "CAT",
+  [POLY_OP_VCAT] = "VCAT",
   [POLY_OP_PTRCAT] = "PTRCAT",
 };
 

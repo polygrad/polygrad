@@ -122,7 +122,7 @@ typedef enum {
   POLY_OP_ALLREDUCE,
   POLY_OP_UNROLL,
   POLY_OP_CONTRACT,
-  POLY_OP_CAT,
+  POLY_OP_VCAT,
   POLY_OP_PTRCAT,
 
   POLY_OP_COUNT  /* sentinel — total number of ops */

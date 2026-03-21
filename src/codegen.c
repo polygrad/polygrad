@@ -2836,7 +2836,7 @@ static PolyUOp *do_expand(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
       int n_cat = (int)expand_sz;
       if (n_cat > 128) return NULL;
       for (int j = 0; j < n_cat; j++) cat_srcs[j] = src;
-      new_srcs[n_new_srcs++] = poly_uop(ctx, POLY_OP_CAT,
+      new_srcs[n_new_srcs++] = poly_uop(ctx, POLY_OP_VCAT,
                                         poly_dtype_vec(poly_dtype_scalar(src->dtype), n_cat * src->dtype.count),
                                         cat_srcs, n_cat, poly_arg_none());
     } else {
@@ -3489,7 +3489,7 @@ static PolyUOp *rule_gep_on_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings
 }
 
 /* PTRCAT after LOAD (tinygrad devectorizer.py:131-133):
- * LOAD(PTRCAT(ptr0, ptr1, ...)) → CAT(LOAD(ptr0), LOAD(ptr1), ...)
+ * LOAD(PTRCAT(ptr0, ptr1, ...)) → VCAT(LOAD(ptr0), LOAD(ptr1), ...)
  * Each LOAD reads the vector width of its pointer source. */
 static PolyUOp *rule_ptrcat_after_load(PolyCtx *ctx, PolyUOp *ld, const PolyBindings *b) {
   (void)b;
@@ -3513,7 +3513,7 @@ static PolyUOp *rule_ptrcat_after_load(PolyCtx *ctx, PolyUOp *ld, const PolyBind
     total_count += ptr_count;
   }
   PolyDType cat_dt = poly_dtype_vec(sdt, total_count);
-  return poly_uop(ctx, POLY_OP_CAT, cat_dt, loads, nl, poly_arg_none());
+  return poly_uop(ctx, POLY_OP_VCAT, cat_dt, loads, nl, poly_arg_none());
 }
 
 /* PTRCAT after STORE (tinygrad devectorizer.py:106-113):
@@ -3633,7 +3633,7 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   if (n_ret <= 1) return NULL;  /* no split needed */
   if (is_load) {
     PolyDType cat_dt = poly_dtype_vec(sdt, sz);
-    return poly_uop(ctx, POLY_OP_CAT, cat_dt, ret, n_ret, poly_arg_none());
+    return poly_uop(ctx, POLY_OP_VCAT, cat_dt, ret, n_ret, poly_arg_none());
   } else {
     return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, ret, n_ret, poly_arg_none());
   }
@@ -3651,7 +3651,7 @@ static PolyPatternMatcher *poly_pm_load_store_folding(void) {
     { poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ld")), rule_gep_after_load },
     /* GEP on STORE: STORE(GEP(ptr), data) → STORE(ptr, data.gep(inv)) */
     { poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "sto")), rule_gep_on_store },
-    /* PTRCAT after LOAD: LOAD(PTRCAT) → CAT(LOAD, LOAD, ...) */
+    /* PTRCAT after LOAD: LOAD(PTRCAT) → VCAT(LOAD, LOAD, ...) */
     { poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ld")), rule_ptrcat_after_load },
     /* PTRCAT after STORE: STORE(PTRCAT, data) → GROUP(STORE, STORE, ...) */
     { poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "sto")), rule_ptrcat_after_store },
@@ -3898,11 +3898,11 @@ static PolyUOp *rule_vector_bool_neg_to_scalarized_vector(PolyCtx *ctx, PolyUOp 
   return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, lanes, poly_arg_none());
 }
 
-/* CAT → VECTORIZE(GEP, GEP, ...) lowering (tinygrad symbolic.py:196):
- * CAT can't be rendered; expand to VECTORIZE of per-element GEPs. */
+/* VCAT → VECTORIZE(GEP, GEP, ...) lowering (tinygrad symbolic.py:196):
+ * VCAT can't be rendered; expand to VECTORIZE of per-element GEPs. */
 static PolyUOp *rule_cat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   (void)b;
-  if (!x || x->op != POLY_OP_CAT || x->n_src <= 0) return NULL;
+  if (!x || x->op != POLY_OP_VCAT || x->n_src <= 0) return NULL;
   if (x->dtype.is_ptr) return NULL;  /* don't expand pointer CATs */
   PolyUOp *elts[128];
   int p = 0;
@@ -3918,13 +3918,13 @@ static PolyUOp *rule_cat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindin
 }
 
 /* Render subset: full (DEVECTORIZE>=1) scatters vec CMP/WHERE to scalar.
- * Minimal (DEVECTORIZE=0) keeps vec ALU, only lowers VCONST/CAT. */
+ * Minimal (DEVECTORIZE=0) keeps vec ALU, only lowers VCONST/VCAT. */
 static PolyPatternMatcher *g_pm_render_subset = NULL;
 static PolyPatternMatcher *poly_pm_render_subset(void) {
   if (g_pm_render_subset) return g_pm_render_subset;
   PolyRule rules[] = {
     { poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst },
-    { poly_pat_op(POLY_OP_CAT, NULL, 0, "x"), rule_cat_to_vectorize },
+    { poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_cat_to_vectorize },
     { poly_pat_op(POLY_OP_CMPLT, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
     { poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
     { poly_pat_op(POLY_OP_CMPEQ, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector },
@@ -3941,7 +3941,7 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
   if (g_pm_render_subset_vec) return g_pm_render_subset_vec;
   PolyRule rules[] = {
     { poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst },
-    { poly_pat_op(POLY_OP_CAT, NULL, 0, "x"), rule_cat_to_vectorize },
+    { poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_cat_to_vectorize },
     /* Scatter vec CMP/WHERE to per-lane scalar (same as render_subset).
      * tinygrad does this even with DEVECTORIZE=0 — comparison semantics
      * require per-element evaluation, not packed SSE cmpps. */
@@ -3983,10 +3983,18 @@ static PolyPatternMatcher *poly_pm_combined_devec(void) {
 static PolyPatternMatcher *g_combined_nodevec = NULL;
 static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
   if (g_combined_nodevec) return g_combined_nodevec;
-  /* Matches tinygrad pm_no_devec = sym + load_store_folding + ...
+  /* Matches tinygrad pm_no_devec = sym + load_store_folding + correct_load_store + load_store_indexing.
    * gep_pushing (from sym) is required so GEP nodes simplify between
-   * expand_index and fold_expanded_index for contiguity detection. */
-  g_combined_nodevec = poly_pm_concat(poly_pm_gep_pushing(), poly_pm_load_store_folding());
+   * expand_index and fold_expanded_index for contiguity detection.
+   * load_store_indexing: drop_true_gate is the only non-image rule. */
+  PolyRule indexing_rules[] = {
+    { poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_drop_true_gate },
+  };
+  PolyPatternMatcher *pm_indexing = poly_pm_new(indexing_rules, 1);
+  PolyPatternMatcher *base = poly_pm_concat(poly_pm_gep_pushing(), poly_pm_load_store_folding());
+  g_combined_nodevec = poly_pm_concat(base, pm_indexing);
+  poly_pm_destroy(base);       /* concat copied rules */
+  poly_pm_destroy(pm_indexing); /* concat copied rules */
   return g_combined_nodevec;
 }
 
@@ -4511,7 +4519,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 
     /* post-devectorize: render subset + symbolic cleanup.
      * DEVECTORIZE>=1: scatter vec CMP/WHERE to scalar (ALU already scattered).
-     * DEVECTORIZE=0: keep vec ALU, only lower VCONST/CAT. */
+     * DEVECTORIZE=0: keep vec ALU, only lower VCONST/VCAT. */
     sink = poly_graph_rewrite(ctx, sink,
         (opts.devectorize >= 1) ? poly_pm_render_subset() : poly_pm_render_subset_vec());
     sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());

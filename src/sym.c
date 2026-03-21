@@ -637,9 +637,116 @@ static PolyUOp *rule_cancel_divmod(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   return fold_divmod_general(ctx, root);
 }
 
-/* (x % c) + (x // c) * c → x.  Ref: tinygrad symbolic_simple line 50 */
-static PolyUOp *rule_divmod_cancel(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  return poly_bind(b, "x");
+/* fold_add_divmod_recombine: dynamic divmod cancellation on ADD.
+ * Port of tinygrad symbolic.py:28-48.  Replaces the old hardcoded pattern.
+ * Handles:
+ *   (base%div)*mul + (base//div)*(div*mul) -> base*mul
+ *   ((base//d)%div)*mul + (base//(d*div))*(div*mul) -> (base//d)*mul
+ *   ((base//div)%d)*div + base%div -> base%(div*d)
+ */
+static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (root->op != POLY_OP_ADD) return NULL;
+  /* only on int types (tinygrad gates on dtypes.weakint/index) */
+  if (poly_dtype_is_float(root->dtype) || root->dtype.bitsize == 1) return NULL;
+
+  PolyUOp *terms[32];
+  int n = split_add_terms(root, terms, 32);
+  if (n < 2) return NULL;
+
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = terms[i];
+    PolyUOp *base = NULL;
+    int64_t div_val = 0, mul_val = 0;
+
+    /* Match: base%div (mul=1) */
+    if (u->op == POLY_OP_MOD && u->n_src == 2 &&
+        u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT) {
+      base = u->src[0];
+      div_val = u->src[1]->arg.i;
+      mul_val = 1;
+    }
+    /* Match: (base%div)*mul */
+    else if (u->op == POLY_OP_MUL && u->n_src == 2 &&
+             u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT) {
+      PolyUOp *m = u->src[0];
+      if (m->op == POLY_OP_MOD && m->n_src == 2 &&
+          m->src[1]->op == POLY_OP_CONST && m->src[1]->arg.kind == POLY_ARG_INT) {
+        base = m->src[0];
+        div_val = m->src[1]->arg.i;
+        mul_val = u->src[1]->arg.i;
+      }
+    }
+    if (!base || div_val == 0) continue;
+
+    for (int j = 0; j < n; j++) {
+      if (i == j) continue;
+      PolyUOp *v = terms[j];
+      /* v must be MUL(q, div*mul) */
+      if (v->op != POLY_OP_MUL || v->n_src != 2 ||
+          v->src[1]->op != POLY_OP_CONST || v->src[1]->arg.kind != POLY_ARG_INT ||
+          v->src[1]->arg.i != div_val * mul_val) continue;
+      PolyUOp *q = v->src[0];
+      bool exact = false;
+
+      /* (base%div)*mul + (base//div)*(div*mul) -> base*mul */
+      if (q->op == POLY_OP_IDIV && q->n_src == 2 &&
+          q->src[1]->op == POLY_OP_CONST && q->src[1]->arg.kind == POLY_ARG_INT &&
+          q->src[1]->arg.i == div_val && q->src[0] == base) {
+        exact = true;
+      }
+      /* ((base//d)%div)*mul + (base//(d*div))*(div*mul) -> (base//d)*mul */
+      if (!exact && base->op == POLY_OP_IDIV && base->n_src == 2 &&
+          base->src[1]->op == POLY_OP_CONST && base->src[1]->arg.kind == POLY_ARG_INT) {
+        if (q->op == POLY_OP_IDIV && q->n_src == 2 &&
+            q->src[1]->op == POLY_OP_CONST && q->src[1]->arg.kind == POLY_ARG_INT &&
+            q->src[0] == base->src[0] &&
+            q->src[1]->arg.i == base->src[1]->arg.i * div_val) {
+          exact = true;
+        }
+      }
+      if (exact) {
+        /* result = base * mul + sum of remaining terms */
+        PolyUOp *result;
+        if (mul_val == 1) {
+          result = base;
+        } else {
+          PolyUOp *mc = poly_const_like_int(ctx, root, mul_val);
+          PolyUOp *ms[2] = { base, mc };
+          result = poly_uop(ctx, POLY_OP_MUL, root->dtype, ms, 2, poly_arg_none());
+        }
+        for (int k = 0; k < n; k++) {
+          if (k == i || k == j) continue;
+          PolyUOp *as[2] = { result, terms[k] };
+          result = poly_uop(ctx, POLY_OP_ADD, root->dtype, as, 2, poly_arg_none());
+        }
+        return result;
+      }
+
+      /* ((base//div)%d)*div + base%div -> base%(div*d) */
+      if (mul_val == 1 && div_val > 0 &&
+          q->op == POLY_OP_MOD && q->n_src == 2 &&
+          q->src[1]->op == POLY_OP_CONST && q->src[1]->arg.kind == POLY_ARG_INT) {
+        int64_t d = q->src[1]->arg.i;
+        if (d > 0 && q->src[0]->op == POLY_OP_IDIV && q->src[0]->n_src == 2 &&
+            q->src[0]->src[0] == base &&
+            q->src[0]->src[1]->op == POLY_OP_CONST &&
+            q->src[0]->src[1]->arg.kind == POLY_ARG_INT &&
+            q->src[0]->src[1]->arg.i == div_val) {
+          PolyUOp *new_mod_c = poly_const_like_int(ctx, root, div_val * d);
+          PolyUOp *ms[2] = { base, new_mod_c };
+          PolyUOp *result = poly_uop(ctx, POLY_OP_MOD, root->dtype, ms, 2, poly_arg_none());
+          for (int k = 0; k < n; k++) {
+            if (k == i || k == j) continue;
+            PolyUOp *as[2] = { result, terms[k] };
+            result = poly_uop(ctx, POLY_OP_ADD, root->dtype, as, 2, poly_arg_none());
+          }
+          return result;
+        }
+      }
+    }
+  }
+  return NULL;
 }
 
 /* (x * y) / y → x.  Ref: tinygrad symbolic_simple line 90 */
@@ -938,6 +1045,9 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
     /* x ^ x -> 0 */
     { poly_pat_op2(POLY_OP_XOR, poly_pat_any("x"),
         poly_pat_any("x"), NULL), rule_xor_self },
+    /* x & 0 -> 0 (tinygrad symbolic.py:98) */
+    { poly_pat_op2c(POLY_OP_AND, poly_pat_any("x"),
+        poly_pat_const_val(poly_arg_int(0)), NULL), rule_mul_zero },
     /* x * 0 -> 0 */
     { poly_pat_op2c(POLY_OP_MUL, poly_pat_any("x"),
         poly_pat_const_val(poly_arg_int(0)), NULL), rule_mul_zero },
@@ -1014,13 +1124,9 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
         poly_pat_op2c(POLY_OP_ADD, poly_pat_any("a"), poly_pat_any("x"), NULL),
         poly_pat_any("x"), NULL), rule_add_assoc_self },
 
-    /* -- divmod cancel: (x%c) + (x//c)*c → x -- */
-    { poly_pat_op2c(POLY_OP_ADD,
-        poly_pat_op2(POLY_OP_MOD, poly_pat_any("x"), poly_pat_any("c"), NULL),
-        poly_pat_op2(POLY_OP_MUL,
-          poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_any("c"), NULL),
-          poly_pat_any("c"), NULL),
-        NULL), rule_divmod_cancel },
+    /* -- divmod recombine (dynamic): handles all divmod cancel patterns -- */
+    /* (base%div)*mul + (base//div)*(div*mul) -> base*mul and variants */
+    { poly_pat_op(POLY_OP_ADD, NULL, 0, NULL), rule_fold_add_divmod_recombine },
 
     /* -- cancel_divmod: MOD/IDIV simplification via vmin/vmax -- */
     { poly_pat_ops2(poly_opset_add(poly_opset_add((PolyOpSet){{0,0}},
