@@ -397,6 +397,14 @@ static void emit_add_rsp_imm32(X64Buf *b, int32_t imm) {
   xb_i32(b, imm);
 }
 
+/* add r64, imm32 — REX.W 81 /0 id */
+static void emit_add_r64_imm32(X64Buf *b, int reg, int32_t imm) {
+  emit_rex_always(b, 1, 0, 0, reg >> 3);
+  xb_byte(b, 0x81);
+  emit_modrm(b, 3, 0, reg);
+  xb_i32(b, imm);
+}
+
 /* ret */
 static void emit_ret(X64Buf *b) { xb_byte(b, 0xC3); }
 
@@ -433,6 +441,22 @@ static void emit_movss_xmm_mem(X64Buf *b, int xmm, int base) {
     emit_modrm(b, 0, xmm, base);
     if ((base & 7) == RSP) xb_byte(b, 0x24);
   }
+}
+
+/* movups xmm, [r64] — 0F 10 /r with base register (packed 128-bit load) */
+static void emit_movups_xmm_mem(X64Buf *b, int xmm, int base) {
+  if (xmm >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, 0, base >> 3);
+  xb_byte(b, 0x0F); xb_byte(b, 0x10);
+  if ((base & 7) == RBP) { emit_modrm(b, 1, xmm, base); xb_byte(b, 0); }
+  else { emit_modrm(b, 0, xmm, base); if ((base & 7) == RSP) xb_byte(b, 0x24); }
+}
+
+/* movups [r64], xmm — 0F 11 /r (packed 128-bit store) */
+static void emit_movups_mem_xmm(X64Buf *b, int xmm, int base) {
+  if (xmm >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, 0, base >> 3);
+  xb_byte(b, 0x0F); xb_byte(b, 0x11);
+  if ((base & 7) == RBP) { emit_modrm(b, 1, xmm, base); xb_byte(b, 0); }
+  else { emit_modrm(b, 0, xmm, base); if ((base & 7) == RSP) xb_byte(b, 0x24); }
 }
 
 /* movss [r64], xmm — F3 0F 11 /r */
@@ -894,22 +918,6 @@ static void emit_movups_sib_xmm(X64Buf *b, int xmm, int base, int index, int sca
   }
 }
 
-/* movups xmm, [r64] — 0F 10 /r with base register */
-static void emit_movups_xmm_mem(X64Buf *b, int xmm, int base) {
-  if (xmm >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, 0, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x10);
-  if ((base & 7) == RBP) { emit_modrm(b, 1, xmm, base); xb_byte(b, 0); }
-  else { emit_modrm(b, 0, xmm, base); if ((base & 7) == RSP) xb_byte(b, 0x24); }
-}
-
-/* movups [r64], xmm — 0F 11 /r */
-static void emit_movups_mem_xmm(X64Buf *b, int xmm, int base) {
-  if (xmm >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, 0, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x11);
-  if ((base & 7) == RBP) { emit_modrm(b, 1, xmm, base); xb_byte(b, 0); }
-  else { emit_modrm(b, 0, xmm, base); if ((base & 7) == RSP) xb_byte(b, 0x24); }
-}
-
 /* Packed SSE op: (REX) 0F <opcode> xmm, xmm — no F3 prefix */
 static void emit_sse_packed_rr(X64Buf *b, uint8_t opcode, int dst, int src) {
   if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
@@ -1202,6 +1210,95 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   int *slot_last_use = calloc((size_t)(n_slots + 16), sizeof(int));
   for (int i = 0; i < n_slots + 16; i++) slot_last_use[i] = INT32_MAX;
 
+  /* ── Phase 6: detect call-free kernel for expanded GPR pool ───────── */
+  /* Kernels without libm calls (EXP2/LOG2/SIN on non-f32, POW) can use
+   * caller-saved R8-R11 for induction variables. */
+  bool kernel_has_calls = false;
+  for (int i = 0; i < n; i++) {
+    PolyOps op = uops[i]->op;
+    if (op == POLY_OP_POW) { kernel_has_calls = true; break; }
+    /* EXP2/LOG2/SIN are decomposed to ALU for f32; other dtypes call libm */
+    if ((op == POLY_OP_EXP2 || op == POLY_OP_LOG2 || op == POLY_OP_SIN) &&
+        !poly_dtype_eq(poly_dtype_scalar(uops[i]->dtype), POLY_FLOAT32)) {
+      kernel_has_calls = true; break;
+    }
+  }
+
+  /* ── Phase 6: detect affine INDEX patterns for induction variables ── */
+  /* An induction variable replaces per-iteration INDEX(PARAM, SHL(RANGE, k))
+   * with a GPR that starts at base_ptr and increments by stride each iteration.
+   * Saves: LEA/IMUL per iteration. Costs: 1 GPR per induction variable. */
+  typedef struct {
+    PolyUOp *range;     /* the RANGE UOp */
+    PolyUOp *param;     /* the PARAM base pointer */
+    PolyUOp *index;     /* the INDEX UOp to replace */
+    int stride;         /* bytes per iteration (itemsize << shift) */
+    int gpr;            /* assigned GPR (-1 = not yet assigned) */
+  } InductionVar;
+  #define MAX_INDUCTION 8
+  InductionVar induction[MAX_INDUCTION];
+  int n_induction = 0;
+
+  /* TODO: induction vars cause regressions in raw-UOp path tests.
+   * The detection is correct but interferes with the existing SHL->R8
+   * special case and the INDEX fusion skip logic. Needs more careful
+   * integration. Disabled for now; re-enable after fixing interactions. */
+  (void)kernel_has_calls;
+  if (0)
+  for (int i = 0; i < n && n_induction < MAX_INDUCTION; i++) {
+    PolyUOp *u = uops[i];
+    if (u->op != POLY_OP_INDEX || u->n_src < 2) continue;
+    PolyUOp *base = u->src[0];
+    PolyUOp *idx = u->src[1];
+    if (base->op != POLY_OP_PARAM) continue;
+
+    int itemsize = poly_dtype_itemsize(base->dtype);
+    if (base->dtype.is_ptr && base->dtype.bitsize > 0)
+      itemsize = base->dtype.bitsize / 8;
+
+    PolyUOp *range = NULL;
+    int shift = 0;
+
+    /* Pattern 1: INDEX(PARAM, RANGE) — stride = itemsize */
+    if (idx->op == POLY_OP_RANGE) {
+      range = idx; shift = 0;
+    }
+    /* Pattern 2: INDEX(PARAM, SHL(RANGE, const)) — stride = itemsize << const */
+    else if (idx->op == POLY_OP_SHL && idx->n_src == 2 &&
+             idx->src[0]->op == POLY_OP_RANGE &&
+             idx->src[1]->op == POLY_OP_CONST &&
+             idx->src[1]->arg.kind == POLY_ARG_INT) {
+      range = idx->src[0];
+      shift = (int)idx->src[1]->arg.i;
+    }
+    if (!range) continue;
+
+    /* Check all consumers of this INDEX are LOAD/STORE (fusable) */
+    bool all_mem = true;
+    for (int j = i + 1; j < n && all_mem; j++) {
+      for (int k = 0; k < uops[j]->n_src; k++) {
+        if (uops[j]->src[k] == u) {
+          PolyOps cop = uops[j]->op;
+          if (cop != POLY_OP_LOAD && cop != POLY_OP_STORE && cop != POLY_OP_CAST)
+            all_mem = false;
+        }
+      }
+    }
+    if (!all_mem) continue;
+
+    /* Don't duplicate: same PARAM+RANGE already has an induction var */
+    bool dup = false;
+    for (int k = 0; k < n_induction; k++) {
+      if (induction[k].range == range && induction[k].param == base) { dup = true; break; }
+    }
+    if (dup) continue;
+
+    induction[n_induction++] = (InductionVar){
+      .range = range, .param = base, .index = u,
+      .stride = itemsize << shift, .gpr = -1
+    };
+  }
+
   /* GPR allocation plan: LOOP_GPRS = {R12, R13, R14, RBX}
    * Reserve first n_ranges GPRs for loop counters.
    * Remaining GPRs go to PARAMs (base pointers). */
@@ -1210,6 +1307,16 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   int n_param_gprs = n_params < n_param_gprs_avail ? n_params : n_param_gprs_avail;
   /* PARAM GPRs start after range GPRs in LOOP_GPRS array */
   int param_gpr_start = n_range_gprs;
+
+  /* Assign GPRs for induction variables (Phase 6).
+   * Call-free kernels can use R8-R11 (caller-saved, safe when no libm calls).
+   * Kernels with calls: no extra GPRs available for induction vars. */
+  static const int CALLER_SAVED_GPRS[] = { R8, R9, R10, R11 };
+  int n_caller_avail = (!kernel_has_calls) ? 4 : 0;
+  int n_ind_assigned = 0;
+  for (int k = 0; k < n_induction && n_ind_assigned < n_caller_avail; k++) {
+    induction[k].gpr = CALLER_SAVED_GPRS[n_ind_assigned++];
+  }
 
   /* Frame size: must leave RSP 16-byte aligned.
    * We push 6 callee-saved regs (RBP, R15, R14, R13, R12, RBX).
@@ -1405,6 +1512,26 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
     /* ── INDEX: pointer arithmetic (base + idx * itemsize) ───────── */
     if (u->op == POLY_OP_INDEX) {
+      /* Phase 6: check if this INDEX has an induction variable.
+       * If so, the address is computed incrementally in the GPR;
+       * skip the INDEX computation entirely. */
+      {
+        bool has_ind = false;
+        for (int k = 0; k < n_induction; k++) {
+          if (induction[k].index == u && induction[k].gpr >= 0) {
+            has_ind = true;
+            break;
+          }
+        }
+        if (has_ind) {
+          /* The induction GPR is already register-assigned to this INDEX
+           * (done at RANGE entry). Skip slot allocation and emission. */
+          int slot = next_slot++;
+          LM_SET(u, slot);
+          continue;
+        }
+      }
+
       int slot = next_slot++;
       int off = -slot_offset(slot);
 
@@ -1495,6 +1622,26 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       /* Float LOAD (scalar or packed): use register file */
       if (dtype_is_float(u->dtype)) {
         bool packed = dtype_is_vec_float(u->dtype);
+
+        /* Phase 6: check if the INDEX source has an induction variable GPR.
+         * If so, the GPR already points to the current element; use [gpr] directly. */
+        {
+          PolyUOp *idx_uop_check = find_index_through_cast(u->src[0]);
+          if (idx_uop_check) {
+            int ind_gpr = find_reg(reg_assigns, n_reg_assigns, idx_uop_check);
+            if (ind_gpr >= 0) {
+              int dst = xf_alloc(&xf, &buf, slot, -1, -1);
+              if (packed)
+                emit_movups_xmm_mem(&buf, dst, ind_gpr);
+              else
+                emit_movss_xmm_mem(&buf, dst, ind_gpr);
+              xf.e[dst - XF_BASE].dirty = true;
+              xf.e[dst - XF_BASE].vec_width = packed ? 4 : 0;
+              LM_SET(u, slot);
+              continue;
+            }
+          }
+        }
 
         /* Check for fusable INDEX (walk through pointer CAST/BITCAST) */
         PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
@@ -1612,6 +1759,21 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           else emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
         }
 
+        /* Phase 6: check for induction variable on STORE target */
+        {
+          PolyUOp *st_check = find_index_through_cast(u->src[0]);
+          if (st_check) {
+            int ind_gpr = find_reg(reg_assigns, n_reg_assigns, st_check);
+            if (ind_gpr >= 0) {
+              if (packed)
+                emit_movups_mem_xmm(&buf, vr, ind_gpr);
+              else
+                emit_movss_mem_xmm(&buf, vr, ind_gpr);
+              continue;
+            }
+          }
+        }
+
         /* Check for fused INDEX store (walk through pointer CAST/BITCAST) */
         PolyUOp *st_idx = find_index_through_cast(u->src[0]);
         if (st_idx) {
@@ -1708,6 +1870,24 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           .gpr = gpr,
         };
       }
+
+      /* Phase 6: initialize induction variables for this RANGE.
+       * ind_gpr = PARAM_base_ptr (start at element 0). */
+      for (int k = 0; k < n_induction; k++) {
+        if (induction[k].range == u && induction[k].gpr >= 0) {
+          int param_reg = find_reg(reg_assigns, n_reg_assigns, induction[k].param);
+          if (param_reg >= 0) {
+            emit_alu_rr(&buf, 1, 0x8B, induction[k].gpr, param_reg);
+          } else {
+            int ps = lm_get(&locals, induction[k].param);
+            if (ps >= 0)
+              emit_mov_r64_rbp(&buf, induction[k].gpr, -slot_offset(ps));
+          }
+          /* Register-assign the INDEX UOp to this GPR */
+          if (n_reg_assigns < MAX_REG_ASSIGNS)
+            reg_assigns[n_reg_assigns++] = (RegAssign){ induction[k].index, induction[k].gpr };
+        }
+      }
       continue;
     }
 
@@ -1731,6 +1911,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       rax_slot = -1;
       xmm0_slot = -1;
       xf_clear(&xf); /* discard iteration-local values (no spill needed) */
+
+      /* Phase 6: increment induction variables for this RANGE */
+      for (int k = 0; k < n_induction; k++) {
+        if (induction[k].range == range && induction[k].gpr >= 0) {
+          /* add ind_gpr, stride */
+          emit_add_r64_imm32(&buf, induction[k].gpr, induction[k].stride);
+        }
+      }
 
       /* Increment counter */
       if (lp.gpr >= 0) {

@@ -125,8 +125,8 @@ static int check_parity_vec(K k, void **args, int n_args, float *c_cpu, float *c
   return 0;
 }
 
-/* Build: c[i] = a[i] OP b[i] (int32) */
-static K make_int_binop(PolyOps op, int N) {
+/* Build: c[i] = a[i] OP b[i] (int32) -- reserved for future int tests */
+static K __attribute__((unused)) make_int_binop(PolyOps op, int N) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pi = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, pi, poly_arg_int(0));
@@ -146,8 +146,8 @@ static K make_int_binop(PolyOps op, int N) {
   return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
 }
 
-/* Parity helper for int32 ops */
-static int check_parity_int(K k, void **args, int n_args, int32_t *c_cpu, int32_t *c_x64, int N) {
+/* Parity helper for int32 ops -- reserved for future int tests */
+static int __attribute__((unused)) check_parity_int(K k, void **args, int n_args, int32_t *c_cpu, int32_t *c_x64, int N) {
   memset(c_cpu, 0, N * sizeof(int32_t));
   memset(c_x64, 0, N * sizeof(int32_t));
   args[n_args - 1] = c_cpu;
@@ -159,8 +159,8 @@ static int check_parity_int(K k, void **args, int n_args, int32_t *c_cpu, int32_
   return 0;
 }
 
-/* Build: c[i] = WHERE(a[i] > 0, a[i], b[i]) */
-static K make_where_kernel(int N) {
+/* Build: c[i] = WHERE(a[i] > 0, a[i], b[i]) -- reserved for future tests */
+static K __attribute__((unused)) make_where_kernel(int N) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(0));
@@ -183,8 +183,8 @@ static K make_where_kernel(int N) {
   return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
 }
 
-/* Build: c[i] = CAST(float, a_int[i]) */
-static K make_cast_int_to_float(int N) {
+/* Build: c[i] = CAST(float, a_int[i]) -- reserved for future tests */
+static K __attribute__((unused)) make_cast_int_to_float(int N) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pi = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
   PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
