@@ -2088,6 +2088,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int off = -slot_offset(slot);
 
       if (src_float && !dst_float) {
+        /* Spill source from XMM register file if dirty */
+        int xr = xf_find(&xf, s0);
+        if (xr >= 0 && xf.e[xr - XF_BASE].dirty) {
+          emit_width_store_rbp(&buf, xr, -slot_offset(s0), xf.e[xr - XF_BASE].vec_width);
+          xf.e[xr - XF_BASE].dirty = false;
+        }
         emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(s0));
         emit_cvttss2si(&buf, RAX, XMM0);
         emit_mov_rbp_r64(&buf, RAX, off);

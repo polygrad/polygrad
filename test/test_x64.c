@@ -700,7 +700,7 @@ TEST(x64, float_cast) {
  * safety improved, but the precision issue persists. */
 
 TEST(x64, e2e_exp2) {
-  PASS(); /* skip until precision bug is fixed */
+  /* precision bug fixed: CAST float->int now spills XMM before cvttss2si */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
@@ -723,7 +723,7 @@ TEST(x64, e2e_exp2) {
 }
 
 TEST(x64, e2e_log2) {
-  PASS(); /* skip until precision bug is fixed */
+  PASS(); /* log2 still has ~2x error; needs separate fix */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
@@ -746,7 +746,7 @@ TEST(x64, e2e_log2) {
 }
 
 TEST(x64, e2e_sin) {
-  PASS(); /* skip until precision bug is fixed */
+  PASS(); /* sin still has errors; needs same fix as log2 */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
@@ -768,7 +768,7 @@ TEST(x64, e2e_sin) {
 }
 
 TEST(x64, e2e_exp2_log2_chain) {
-  PASS(); /* skip until precision bug is fixed */
+  PASS(); /* depends on log2 fix */
   /* exp2(log2(x)) should roundtrip to x */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
