@@ -30,6 +30,8 @@
 
 typedef struct {
   bool has_sse2;   /* always true on x86-64 */
+  bool has_sse41;  /* cpuid leaf 1, ecx bit 19 (roundps, pextrd, pmulld) */
+  bool has_avx;    /* cpuid leaf 1, ecx bit 28 + os_avx_ok (VEX.128 legal) */
   bool has_avx2;   /* cpuid leaf 7, ebx bit 5 */
   bool has_fma;    /* cpuid leaf 1, ecx bit 12 */
   bool os_avx_ok;  /* OSXSAVE + XGETBV confirms YMM state is saved */
@@ -42,10 +44,12 @@ static X64CpuCaps detect_cpu_caps(void) {
   X64CpuCaps caps = { .has_sse2 = true };
   unsigned int eax, ebx, ecx, edx;
 
-  /* Leaf 1: check FMA + OSXSAVE */
+  /* Leaf 1: check SSE4.1, FMA, AVX, OSXSAVE */
   if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
     caps.has_fma = (ecx >> 12) & 1;
+    caps.has_sse41 = (ecx >> 19) & 1;
     bool osxsave = (ecx >> 27) & 1;
+    bool hw_avx = (ecx >> 28) & 1;
 
     /* Check OS support for YMM state (mandatory before any AVX codegen) */
     if (osxsave) {
@@ -53,6 +57,7 @@ static X64CpuCaps detect_cpu_caps(void) {
       __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
       caps.os_avx_ok = (xcr0_lo & 0x6) == 0x6; /* bits 1 (SSE) + 2 (AVX) */
     }
+    caps.has_avx = hw_avx && caps.os_avx_ok;
   }
 
   /* Leaf 7: check AVX2 */
@@ -64,6 +69,7 @@ static X64CpuCaps detect_cpu_caps(void) {
   if (!caps.os_avx_ok) {
     caps.has_avx2 = false;
     caps.has_fma = false;
+    caps.has_avx = false;
   }
   return caps;
 }
@@ -1141,18 +1147,58 @@ static void emit_vroundss(X64Buf *b, int dst, int src1, int src2, int imm) {
   xb_byte(b, (uint8_t)imm);
 }
 
-/* SSE4.1 roundps xmm, xmm, imm8 — 66 0F 3A 08 /r ib */
+/* SSE4.1 roundps xmm, xmm, imm8 — 66 (REX) 0F 3A 08 /r ib */
 static void emit_roundps(X64Buf *b, int dst, int src, int imm) {
-  xb_byte(b, 0x66); xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x08);
+  xb_byte(b, 0x66);
+  if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
+  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x08);
   emit_modrm(b, 3, dst, src);
   xb_byte(b, (uint8_t)imm);
 }
 
-/* SSE4.1 roundss xmm, xmm, imm8 — 66 0F 3A 0A /r ib */
+/* SSE4.1 roundss xmm, xmm, imm8 — 66 (REX) 0F 3A 0A /r ib */
 static void emit_roundss(X64Buf *b, int dst, int src, int imm) {
-  xb_byte(b, 0x66); xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x0A);
+  xb_byte(b, 0x66);
+  if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
+  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x0A);
   emit_modrm(b, 3, dst, src);
   xb_byte(b, (uint8_t)imm);
+}
+
+/* ── Per-lane variable shift helpers (SSE4.1, for !AVX2 fallback) ─────── */
+
+/* pextrd r32, xmm, imm8 — 66 (REX) 0F 3A 16 /r ib
+ * ModRM.reg = xmm (source), ModRM.r/m = r32 (destination) */
+static void emit_pextrd(X64Buf *b, int gpr, int xmm, int imm) {
+  xb_byte(b, 0x66);
+  if (xmm >= 8 || gpr >= 8) emit_rex(b, 0, xmm >> 3, 0, gpr >> 3);
+  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x16);
+  emit_modrm(b, 3, xmm, gpr);
+  xb_byte(b, (uint8_t)imm);
+}
+
+/* pinsrd xmm, r32, imm8 — 66 (REX) 0F 3A 22 /r ib
+ * ModRM.reg = xmm (destination), ModRM.r/m = r32 (source) */
+static void emit_pinsrd(X64Buf *b, int xmm, int gpr, int imm) {
+  xb_byte(b, 0x66);
+  if (xmm >= 8 || gpr >= 8) emit_rex(b, 0, xmm >> 3, 0, gpr >> 3);
+  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x22);
+  emit_modrm(b, 3, xmm, gpr);
+  xb_byte(b, (uint8_t)imm);
+}
+
+/* shl r32, cl — (REX.B if reg>=8) D3 /4 */
+static void emit_shl_r32_cl(X64Buf *b, int reg) {
+  if (reg >= 8) emit_rex(b, 0, 0, 0, 1);
+  xb_byte(b, 0xD3);
+  emit_modrm(b, 3, 4, reg);
+}
+
+/* shr r64, cl — REX.W (+ .B if reg>=8) D3 /5 (64-bit logical right shift) */
+static void emit_shr_r64_cl(X64Buf *b, int reg) {
+  emit_rex_always(b, 1, 0, 0, reg >> 3); /* REX.W for 64-bit */
+  xb_byte(b, 0xD3);
+  emit_modrm(b, 3, 5, reg);
 }
 
 /* vxorps dst, src1, src2 — VEX 0F 57 */
@@ -1485,6 +1531,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
   /* Select VecConfig based on IR vector width and CPU caps */
   X64CpuCaps cpu = get_cpu_caps();
+  bool use_avx = cpu.has_avx;  /* VEX.128 legal (for packed vec4 ops) */
   bool use_avx2 = (max_vec_width >= 8) && cpu.has_avx2 && cpu.os_avx_ok;
   (void)VCFG_AVX2; (void)VCFG_SSE; /* used by helper functions */
 
@@ -2707,11 +2754,31 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             if (pk) {
               if (use_avx2)
                 emit_vroundps(&buf, dr, sr0, 0x0B, (u->dtype.count >= 8) ? 1 : 0);
-              else
+              else if (use_avx)
+                emit_vroundps(&buf, dr, sr0, 0x0B, 0); /* VEX.128 roundps */
+              else if (cpu.has_sse41)
                 { if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0); emit_roundps(&buf, dr, dr, 0x0B); }
+              else {
+                /* Pre-SSE4.1 fallback: cvttss2si + cvtsi2ss per lane (only reachable with devec=1) */
+                fprintf(stderr, "x64 jit: packed TRUNC without SSE4.1 not supported\n");
+                goto x64_fail;
+              }
             } else {
-              if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
-              emit_roundss(&buf, dr, dr, 0x0B);
+              if (use_avx)
+                emit_vroundss(&buf, dr, sr0, sr0, 0x0B); /* VEX.128 roundss */
+              else if (cpu.has_sse41) {
+                if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
+                emit_roundss(&buf, dr, dr, 0x0B);
+              } else {
+                /* Pre-SSE4.1: cvttss2si + cvtsi2ss */
+                /* cvttss2si eax, xmm — F3 0F 2C /r */
+                xb_byte(&buf, 0xF3); xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2C);
+                emit_modrm(&buf, 3, RAX, sr0);
+                /* cvtsi2ss xmm, eax — F3 0F 2A /r */
+                xb_byte(&buf, 0xF3); xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2A);
+                emit_modrm(&buf, 3, dr, RAX);
+                rax_slot = -1;
+              }
             }
             break;
 
@@ -2942,6 +3009,17 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                 emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
                 xb_byte(&buf, 0x47);
                 emit_modrm(&buf, 3, dr, sr1);
+              } else if (sr1 >= 0 && vw <= 4) {
+                /* Per-lane scalar SHL fallback (SSE4.1 pextrd/pinsrd).
+                 * SHL shift counts come from e_lo = e_i & 31, always 0..31,
+                 * so 32-bit shl r32,cl is correct (masks mod 32 = identity). */
+                for (int lane = 0; lane < vw; lane++) {
+                  emit_pextrd(&buf, RCX, sr1, lane); /* shift[lane] → ECX (CL) */
+                  emit_pextrd(&buf, RAX, sr0, lane); /* value[lane] → EAX */
+                  emit_shl_r32_cl(&buf, RAX);         /* EAX <<= CL */
+                  emit_pinsrd(&buf, dr, RAX, lane);   /* dr[lane] = EAX */
+                }
+                rax_slot = -1;
               } else {
                 fprintf(stderr, "x64 jit: SSE vector SHL with variable shift not supported\n");
                 goto x64_fail;
@@ -2964,6 +3042,22 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                 emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
                 xb_byte(&buf, 0x45);
                 emit_modrm(&buf, 3, dr, sr1);
+              } else if (sr1 >= 0 && vw <= 4) {
+                /* Per-lane scalar SHR fallback (SSE4.1 pextrd/pinsrd).
+                 * SHR shift counts come from offset = 32 - e_lo, range 1..32.
+                 * vpsrlvd zeros a lane when count >= 32; scalar shr r32,cl masks
+                 * count mod 32 (count 32 acts like 0). Fix: use 64-bit shr rax,cl
+                 * after zero-extending EAX to RAX — shr r64,cl masks mod 64, so
+                 * count 32 correctly shifts a zero-extended 32-bit value to 0. */
+                for (int lane = 0; lane < vw; lane++) {
+                  emit_pextrd(&buf, RCX, sr1, lane); /* shift[lane] → ECX (CL) */
+                  emit_pextrd(&buf, RAX, sr0, lane); /* value[lane] → EAX */
+                  /* Zero-extend EAX to RAX: writing a 32-bit register clears upper 32.
+                   * pextrd already writes only to EAX, so RAX[63:32] = 0. */
+                  emit_shr_r64_cl(&buf, RAX);         /* RAX >>= CL (64-bit logical) */
+                  emit_pinsrd(&buf, dr, RAX, lane);   /* dr[lane] = EAX (low 32 bits) */
+                }
+                rax_slot = -1;
               } else {
                 fprintf(stderr, "x64 jit: SSE vector SHR with variable shift not supported\n");
                 goto x64_fail;
@@ -3324,6 +3418,11 @@ PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   opts.caps.has_threefry = false;
   opts.caps.has_simd_int = true; /* x64 always has paddd/pslld; AVX2 adds vpaddd/vpslld */
   opts.caps.max_vec_width = (cpu.has_avx2 && cpu.os_avx_ok) ? 8 : 4;
+
+  /* Non-AVX CPUs must use devec>=1: packed vec4 paths emit VEX.128 encoding
+   * (vcmpps, vandps, vpaddd, etc.) which requires AVX hardware support. */
+  if (!cpu.has_avx && opts.devectorize < 1)
+    opts.devectorize = 1;
 
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
