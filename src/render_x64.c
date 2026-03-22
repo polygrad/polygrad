@@ -1109,6 +1109,15 @@ static void emit_vex_packed_rr_sib(X64Buf *b, uint8_t opc, int dst, int src1,
   }
 }
 
+/* VEX packed ALU with [rbp+disp32] memory operand: dst = src1 op [rbp+disp] */
+static void emit_vex_packed_rr_rbp(X64Buf *b, uint8_t opc, int dst, int src1, int disp, int L) {
+  int R = (dst < 8) ? 1 : 0;
+  /* RBP base: B=1 (rbp < 8) */
+  emit_vex2(b, R, src1, L, 0x00); /* pp=00 (no prefix), map=0F implied by vex2 */
+  xb_byte(b, opc);
+  emit_modrm_rbp_disp32(b, dst, disp);
+}
+
 /* VEX packed unary (sqrt): vsqrtps dst, src — VEX 0F 51 */
 static void emit_vex_packed_sqrt(X64Buf *b, int dst, int src, int L) {
   emit_vex_auto(b, dst, 0, src, L, 0x00, 1, 0); /* vvvv=0 → unused */
@@ -2517,14 +2526,24 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             if (deferred[d].uop == u->src[1]) { ds1 = &deferred[d]; break; }
         }
 
-        /* Get src1 from register file (only if not deferred) */
+        /* Get src1 from register file (only if not deferred).
+         * For VEX packed binary ops, try to find in regfile first; if not cached,
+         * leave sr1=-1 and fold as [rbp+slot] memory operand in the ALU handler. */
         int sr1 = -1;
         if (!ds1 && s1 >= 0 && u->n_src > 1 &&
             u->op != POLY_OP_NEG && u->op != POLY_OP_SQRT &&
             u->op != POLY_OP_RECIPROCAL && u->op != POLY_OP_TRUNC &&
             u->op != POLY_OP_EXP2 && u->op != POLY_OP_LOG2 &&
             u->op != POLY_OP_SIN) {
-          sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count) : xf_get_avoid(&xf, &buf, s1, sr0);
+          bool can_fold_mem = pk && use_avx2 &&
+            (u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL ||
+             u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX);
+          if (can_fold_mem) {
+            /* Try to find in regfile; if not cached, will fold as memory operand */
+            sr1 = xf_find(&xf, s1);
+          } else {
+            sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count) : xf_get_avoid(&xf, &buf, s1, sr0);
+          }
         }
 
         /* Allocate destination register.
@@ -2585,7 +2604,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               int vL = (u->dtype.count >= 8) ? 1 : 0;
               if (ds1)
                 emit_vex_packed_rr_sib(&buf, opc, dr, sr0, ds1->base_reg, ds1->idx_reg, ds1->itemsize, vL);
-              else
+              else if (s1 >= 0 && xf_find(&xf, s1) < 0) {
+                /* src1 not in register: fold as memory operand from stack slot */
+                emit_vex_packed_rr_rbp(&buf, opc, dr, sr0, -slot_offset(s1), vL);
+              } else
                 emit_vex_packed_rrr(&buf, opc, dr, sr0, sr1, vL);
             } else if (pk) {
               if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
