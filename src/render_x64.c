@@ -1719,7 +1719,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     if (u->op == POLY_OP_DEFINE_VAR) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
-      int var_idx = (int)u->arg.i;
+      /* Vars are appended after buffer PARAMs in the args array.
+       * u->arg.i is the var's own index; offset by n_params to skip buffers. */
+      int var_idx = n_params + (int)u->arg.i;
       /* mov rax, [r15 + 8*var_idx] */
       emit_mov_r64_mem(&buf, RAX, R15, 8 * var_idx);
       /* mov eax, [rax] — dereference to get int value */
@@ -2038,7 +2040,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               int ar = xf_find(&xf, acc_slot);
               if (ar >= 0) emit_movss_xmm_xmm(&buf, ar, vr);
             } else {
-              emit_mov_r64_rbp(&buf, RAX, -slot_offset(val_slot));
+              int vw = u->src[1]->dtype.bitsize <= 32 ? 0 : 1;
+              emit_load_int_src(&buf, RAX, vw, u->src[1], val_slot,
+                                reg_assigns, n_reg_assigns);
               emit_mov_rbp_r64(&buf, RAX, -slot_offset(acc_slot));
               rax_slot = acc_slot;
             }
@@ -2084,17 +2088,19 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         else if (packed) emit_movups_mem_xmm(&buf, vr, RAX);
         else emit_movss_mem_xmm(&buf, vr, RAX);
       } else {
-        if (u->src[1]->dtype.bitsize <= 32) {
-          emit_mov_r32_rbp(&buf, RCX, -slot_offset(val_slot));
-          if (RCX >= 8 || RAX >= 8) emit_rex(&buf, 0, RCX >> 3, 0, RAX >> 3);
-          xb_byte(&buf, 0x89);
-          emit_modrm(&buf, 0, RCX, RAX);
-        } else {
-          emit_mov_r64_rbp(&buf, RCX, -slot_offset(val_slot));
+        /* Integer store: reload pointer + use GPR-aware value load */
+        if (ptr_slot != rax_slot)
+          emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
+        int vw = u->src[1]->dtype.bitsize <= 32 ? 0 : 1;
+        emit_load_int_src(&buf, RCX, vw, u->src[1], val_slot,
+                          reg_assigns, n_reg_assigns);
+        if (vw) {
           emit_rex_always(&buf, 1, RCX >> 3, 0, RAX >> 3);
-          xb_byte(&buf, 0x89);
-          emit_modrm(&buf, 0, RCX, RAX);
+        } else {
+          if (RCX >= 8 || RAX >= 8) emit_rex(&buf, 0, RCX >> 3, 0, RAX >> 3);
         }
+        xb_byte(&buf, 0x89);
+        emit_modrm(&buf, 0, RCX, RAX);
       }
       rax_slot = -1;
       continue;
@@ -2126,10 +2132,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_rbp_imm64_sx(&buf, -slot_offset(slot), 0);
       }
 
-      /* Invalidate caches at loop entry */
+      /* Flush dirty XMM values to stack at loop entry — outer-loop values
+       * must survive inner-loop register pressure (xf_clear would discard them). */
+      xf_flush(&xf, &buf);
       rax_slot = -1;
       xmm0_slot = -1;
-      xf_clear(&xf);
 
       /* Loop condition check (backward jump target) */
       int loop_start = buf.len;
@@ -3169,34 +3176,41 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
         int w = wide ? 1 : 0;
 
+        /* Use emit_load_int_src to honor GPR-assigned sources (RANGE counters).
+         * Stack slots for GPR-assigned values are stale after the first iteration. */
+        #define ILOAD(dst, src_idx) emit_load_int_src(&buf, dst, w, u->src[src_idx], \
+                                      lm_get(&locals, u->src[src_idx]), reg_assigns, n_reg_assigns)
+
         switch (u->op) {
           case POLY_OP_ADD:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0)); /* mov */
-            emit_alu_r_rbp(&buf, w, 0x03, RAX, -slot_offset(s1)); /* add */
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x03, RAX, RCX); /* add */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_SUB:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x2B, RAX, -slot_offset(s1)); /* sub */
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x2B, RAX, RCX); /* sub */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_MUL:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
             if (wide) emit_imul_r64_r64(&buf, RAX, RCX);
             else emit_imul_r32_r32(&buf, RAX, RCX);
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_IDIV:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
             if (wide) { emit_cqo(&buf); emit_idiv_r64(&buf, RCX); }
             else { emit_cdq(&buf); emit_idiv_r32(&buf, RCX); }
             emit_mov_rbp_r64(&buf, RAX, off); /* quotient in RAX */
             break;
           case POLY_OP_MOD:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
             if (wide) { emit_cqo(&buf); emit_idiv_r64(&buf, RCX); }
             else { emit_cdq(&buf); emit_idiv_r32(&buf, RCX); }
             emit_mov_rbp_r64(&buf, RDX, off); /* remainder in RDX */
@@ -3227,8 +3241,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             break;
           }
           case POLY_OP_SHR: {
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, 0, 0x8B, RCX, -slot_offset(s1));
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
             /* Use logical shr for unsigned types, arithmetic sar for signed */
             bool is_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
             emit_rex_always(&buf, w, 0, 0, 0);
@@ -3238,31 +3252,41 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             break;
           }
           case POLY_OP_AND:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x23, RAX, -slot_offset(s1)); /* and */
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x23, RAX, RCX); /* and */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_OR:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x0B, RAX, -slot_offset(s1)); /* or */
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x0B, RAX, RCX); /* or */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_XOR:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x33, RAX, -slot_offset(s1)); /* xor */
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x33, RAX, RCX); /* xor */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_NEG:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            if (wide) emit_neg_r64(&buf, RAX);
-            else emit_neg_r32(&buf, RAX);
+            ILOAD(RAX, 0);
+            if (poly_dtype_is_bool(u->src[0]->dtype)) {
+              /* Bool NEG = logical NOT: xor eax, 1 (flip 0↔1).
+               * Plain neg turns 1→-1 which corrupts subsequent AND/OR. */
+              if (RAX >= 8) emit_rex(&buf, 0, 0, 0, RAX >> 3);
+              xb_byte(&buf, 0x83); emit_modrm(&buf, 3, 6, RAX); xb_byte(&buf, 1);
+            } else if (wide) {
+              emit_neg_r64(&buf, RAX);
+            } else {
+              emit_neg_r32(&buf, RAX);
+            }
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_MAX:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
-            /* cmp rax, rcx; cmovl rax, rcx */
-            emit_alu_rr(&buf, w, 0x3B, RAX, RCX);
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
             /* cmovl: 0F 4C /r */
             emit_rex_always(&buf, w, RAX >> 3, 0, RCX >> 3);
             xb_byte(&buf, 0x0F);
@@ -3273,22 +3297,25 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
           /* Integer comparisons */
           case POLY_OP_CMPLT:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x3B, RAX, -slot_offset(s1)); /* cmp */
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
             emit_setcc(&buf, 0x0C, RAX); /* setl al */
             emit_movzx_r32_r8(&buf, RAX, RAX);
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_CMPEQ:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x3B, RAX, -slot_offset(s1));
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
             emit_setcc(&buf, 0x04, RAX); /* sete al */
             emit_movzx_r32_r8(&buf, RAX, RAX);
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
           case POLY_OP_CMPNE:
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x3B, RAX, -slot_offset(s1));
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
             emit_setcc(&buf, 0x05, RAX); /* setne al */
             emit_movzx_r32_r8(&buf, RAX, RAX);
             emit_mov_rbp_r64(&buf, RAX, off);
@@ -3296,9 +3323,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
           case POLY_OP_WHERE:
             /* Integer WHERE: test cond, cmov */
-            emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond */
-            emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1)); /* true */
-            emit_alu_r_rbp(&buf, w, 0x8B, RDX, -slot_offset(s2)); /* false */
+            ILOAD(RAX, 0); /* cond */
+            ILOAD(RCX, 1); /* true */
+            ILOAD(RDX, 2); /* false */
             emit_test_r32(&buf, RAX, RAX);
             /* cmovz rcx, rdx (if cond==0, take false) */
             emit_rex_always(&buf, w, RCX >> 3, 0, RDX >> 3);
@@ -3310,25 +3337,25 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
           case POLY_OP_MULACC:
             {
-            /* When src[1] is power-of-2 (from SHL+ADD fusion), use shl+add */
             bool is_pow2 = (u->src[1]->op == POLY_OP_CONST &&
                             u->src[1]->arg.kind == POLY_ARG_INT &&
                             u->src[1]->arg.i > 0 &&
                             (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
-            emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
+            ILOAD(RAX, 0);
             if (is_pow2) {
               int shift = 0;
               for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1) shift++;
               emit_rex_always(&buf, w, 0, 0, 0);
               xb_byte(&buf, 0xC1);
-              emit_modrm(&buf, 3, 4, RAX); /* shl rax/eax, imm8 */
+              emit_modrm(&buf, 3, 4, RAX);
               xb_byte(&buf, (uint8_t)shift);
             } else {
-              emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
+              ILOAD(RCX, 1);
               if (wide) emit_imul_r64_r64(&buf, RAX, RCX);
               else emit_imul_r32_r32(&buf, RAX, RCX);
             }
-            emit_alu_r_rbp(&buf, w, 0x03, RAX, -slot_offset(s2)); /* add */
+            ILOAD(RCX, 2);
+            emit_alu_rr(&buf, w, 0x03, RAX, RCX); /* add */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
             }
@@ -3344,6 +3371,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                     poly_op_name(u->op), i);
             goto x64_fail;
         }
+        #undef ILOAD
         /* Integer ALU clobbers RAX */
         rax_slot = -1;
         xmm0_slot = -1; /* be conservative: int ops may interleave with float */

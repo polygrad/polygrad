@@ -375,6 +375,9 @@ EM_JS(void, js_free_wasm_kernel, (int kernel_id), {
 
 #ifndef __EMSCRIPTEN__
 
+static int cpu_execute_fn(void *self, void **args, int n_args);
+static void cpu_free_fn(void *self);
+
 static int cpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
                           const char *fn_name, PolyRunner *out) {
   int n_lin;
@@ -399,17 +402,26 @@ static int cpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = prog;
   out->handle_size = 0;
+  out->execute = cpu_execute_fn;
+  out->free_handle = cpu_free_fn;
   return 0;
 }
 
-static int cpu_execute(PolyRunner *runner, void **args, int n_args) {
-  (void)n_args;
+static int cpu_execute_fn(void *self, void **args, int n_args) {
+  PolyRunner *runner = (PolyRunner *)self;
   poly_program_call((PolyProgram *)runner->handle, args, n_args);
   return 0;
 }
+static int cpu_execute(PolyRunner *runner, void **args, int n_args) {
+  return cpu_execute_fn(runner, args, n_args);
+}
 
-static void cpu_free_runner(PolyRunner *runner) {
+static void cpu_free_fn(void *self) {
+  PolyRunner *runner = (PolyRunner *)self;
   if (runner->handle) poly_program_destroy((PolyProgram *)runner->handle);
+}
+static void cpu_free_runner(PolyRunner *runner) {
+  cpu_free_fn(runner);
 }
 
 static const PolyAllocator *cpu_get_allocator(void) {
@@ -614,36 +626,116 @@ static const PolyAllocator *cuda_get_allocator(void) {
 
 #ifdef POLY_HAS_X64
 
-static int x64_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
-                           const char *fn_name, PolyRunner *out) {
-  (void)fn_name;
-  int n_lin;
-  /* x64 JIT: use CPUID-aware pipeline with x64-specific caps */
-  PolyUOp **lin = poly_linearize_x64(ctx, scheduled_root, &n_lin);
-  if (!lin) return -1;
-
-  int code_size;
-  uint8_t *code = poly_render_x64(lin, n_lin, &code_size);
-  free(lin);
-  if (!code) return -1;
-
-  PolyX64Program *prog = poly_compile_x64(code, code_size);
-  free(code);
-  if (!prog) return -1;
-
-  out->kind = POLY_RUNNER_COMPILED;
-  out->handle = prog;
-  out->handle_size = 0;
-  return 0;
-}
-
-static int x64_execute(PolyRunner *runner, void **args, int n_args) {
+static int x64_execute_fn(void *self, void **args, int n_args) {
+  PolyRunner *runner = (PolyRunner *)self;
   poly_x64_program_call((PolyX64Program *)runner->handle, args, n_args);
   return 0;
 }
 
-static void x64_free_runner(PolyRunner *runner) {
+static void x64_free_fn(void *self) {
+  PolyRunner *runner = (PolyRunner *)self;
   if (runner->handle) poly_x64_program_destroy((PolyX64Program *)runner->handle);
+}
+
+/* Check if the kernel uses only dtypes the x64 renderer supports (f32, int32, bool).
+ * Returns false if f64, f16, bf16 or other unsupported types are found.
+ * Simple iterative DFS over the DAG. */
+/* Check if kernel uses only features the x64 renderer handles correctly.
+ * Rejects: f64/f16/bf16 dtypes, multi-range reduce patterns (DEFINE_REG with
+ * nested RANGEs and AFTER chains — the renderer compiles but produces wrong code).
+ * Iterative DFS with simple open-addressing pointer set. */
+static bool x64_can_handle(PolyUOp *root) {
+  int cap = 256, top = 0;
+  PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
+  if (!stack) return false;
+  int set_cap = 512;
+  PolyUOp **set = calloc((size_t)set_cap, sizeof(PolyUOp *));
+  if (!set) { free(stack); return false; }
+  bool ok = true;
+  int n_ranges = 0, n_stores = 0;
+
+  stack[top++] = root;
+  while (top > 0) {
+    PolyUOp *u = stack[--top];
+    uint32_t h = (uint32_t)((uintptr_t)u >> 3) % (uint32_t)set_cap;
+    bool found = false;
+    for (int probe = 0; probe < set_cap; probe++) {
+      uint32_t idx = (h + (uint32_t)probe) % (uint32_t)set_cap;
+      if (!set[idx]) { set[idx] = u; break; }
+      if (set[idx] == u) { found = true; break; }
+    }
+    if (found) continue;
+
+    /* Reject unsupported dtypes */
+    PolyDType dt = u->dtype;
+    if (!dt.is_ptr && !poly_dtype_eq(dt, POLY_VOID) &&
+        poly_dtype_is_float(dt) && poly_dtype_scalar(dt).bitsize != 32) {
+      ok = false; break;
+    }
+    if (u->op == POLY_OP_RANGE) n_ranges++;
+    if (u->op == POLY_OP_STORE) n_stores++;
+    /* Note: DEFINE_REG, REDUCE, AFTER are handled by the x64 renderer.
+     * Only unsupported dtypes cause fallback to CPU. */
+
+    for (int i = 0; i < u->n_src; i++) {
+      if (top >= cap) { cap *= 2; stack = realloc(stack, (size_t)cap * sizeof(PolyUOp *)); }
+      stack[top++] = u->src[i];
+    }
+  }
+  /* Reject multi-store + multi-range patterns (reduce chains) — x64 renderer
+   * compiles them but produces incorrect code for complex AFTER ordering. */
+  if (ok && n_stores > 1 && n_ranges > 1) ok = false;
+
+  free(stack);
+  free(set);
+  return ok;
+}
+
+static int x64_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                           const char *fn_name, PolyRunner *out) {
+  /* Pre-check: fall back to CPU for unsupported patterns/dtypes */
+  if (!x64_can_handle(scheduled_root)) goto fallback;
+
+  int n_lin;
+  /* Use CPU-style linearization (poly_linearize_env) to avoid x64-specific
+   * caps producing IR with indexing patterns the renderer can't handle yet
+   * (broadcast/expand intermediates, fused SIB for reduce consumers). */
+  PolyUOp **lin = poly_linearize_env(ctx, scheduled_root, &n_lin);
+  if (!lin) goto fallback;
+
+  int code_size;
+  uint8_t *code = poly_render_x64(lin, n_lin, &code_size);
+  free(lin);
+  if (!code) goto fallback;
+
+  PolyX64Program *prog = poly_compile_x64(code, code_size);
+  free(code);
+  if (!prog) goto fallback;
+
+  out->kind = POLY_RUNNER_COMPILED;
+  out->handle = prog;
+  out->handle_size = 0;
+  out->execute = x64_execute_fn;
+  out->free_handle = x64_free_fn;
+  return 0;
+
+fallback:
+  /* x64 renderer doesn't support all ops yet (DEFINE_LOCAL, BARRIER, etc.).
+   * Fall back to CPU compiled backend for unsupported kernels.
+   * Both use host memory, so buffer layout is compatible. */
+#ifndef __EMSCRIPTEN__
+  return cpu_lower_item(ctx, scheduled_root, fn_name, out);
+#else
+  return -1;
+#endif
+}
+
+static int x64_execute(PolyRunner *runner, void **args, int n_args) {
+  return runner->execute(runner, args, n_args);
+}
+
+static void x64_free_runner(PolyRunner *runner) {
+  if (runner->free_handle) runner->free_handle(runner);
 }
 
 #endif /* POLY_HAS_X64 */
@@ -709,6 +801,9 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule,
     fprintf(stderr, "polygrad: compile_schedule: unsupported device %d\n", device);
     return NULL;
   }
+
+  /* x64 JIT uses per-runner dispatch: x64_execute delegates to runner->execute,
+   * which is either x64_execute_fn (native) or cpu_execute_fn (fallback). */
 
   PolyCompiledPlan *plan = calloc(1, sizeof(PolyCompiledPlan));
   if (!plan) return NULL;
@@ -845,6 +940,9 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
   for (int i = 0; i < plan->n_intermediates; i++) {
     PolyBufferHandle *h = &plan->intermediates[i];
     if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP
+#ifdef POLY_HAS_X64
+        || h->domain == POLY_DEVICE_X64_JIT
+#endif
 #ifdef __EMSCRIPTEN__
         || h->domain == POLY_DEVICE_WASM_JIT
 #endif

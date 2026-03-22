@@ -2198,9 +2198,17 @@ static PolyDeviceId infer_device(PolyBufferBinding *bindings, int n) {
     if (bindings[i].handle.domain != POLY_DEVICE_CPU
         && bindings[i].handle.domain != POLY_DEVICE_AUTO)
       return bindings[i].handle.domain;
-  /* Default: CPU on native builds, WASM_JIT on Emscripten */
+  /* Default: best available backend for platform.
+   * x64 JIT opt-in via POLY_X64=1 (renderer doesn't support all ops yet). */
 #ifdef __EMSCRIPTEN__
   return POLY_DEVICE_WASM_JIT;
+#elif defined(POLY_HAS_X64)
+  {
+    const char *x64_env = getenv("POLY_X64");
+    if (x64_env && x64_env[0] == '1')
+      return POLY_DEVICE_X64_JIT;
+  }
+  return POLY_DEVICE_CPU;
 #else
   return POLY_DEVICE_CPU;
 #endif

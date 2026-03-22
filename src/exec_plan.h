@@ -193,6 +193,10 @@ typedef struct {
   void *handle;
   int handle_size; /* byte length for rendered-only handles (WASM, WGSL) */
 
+  /* Per-runner dispatch (set when runner compiled via fallback backend) */
+  int (*execute)(void *self, void **args, int n_args);
+  void (*free_handle)(void *self);
+
   /* GPU launch metadata (ignored by non-GPU backends) */
   int grid[3];
   int block[3];
