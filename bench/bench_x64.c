@@ -155,19 +155,22 @@ static Row bench(const char *name, Kernel k, void **args, int n_args, int iters)
     if (p) { r.scalar_us = time_x64(p, args, n_args, iters); poly_x64_program_destroy(p); }
   }
 
-  /* x64 SSE vec4 (optimize, devec=0, max_vec_width=4) */
+  /* x64 SSE vec4 (optimize, devec=0, max_vec_width=4, has_simd_int) */
   {
     PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
     opts.caps.max_vec_width = 4;
+    opts.caps.has_simd_int = true;
+    opts.caps.has_mulacc = has_fma();
     PolyX64Program *p = compile_x64(k.ctx, k.sink, opts);
     if (p) { r.sse4_us = time_x64(p, args, n_args, iters); poly_x64_program_destroy(p); }
   }
 
-  /* x64 AVX2 vec8+FMA (optimize, devec=0, max_vec_width=8) */
+  /* x64 AVX2 vec8+FMA (optimize, devec=0, max_vec_width=8, has_simd_int) */
   if (has_avx2()) {
     PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
     opts.caps.max_vec_width = 8;
     opts.caps.has_mulacc = has_fma();
+    opts.caps.has_simd_int = true;
     PolyX64Program *p = compile_x64(k.ctx, k.sink, opts);
     if (p) { r.avx2_us = time_x64(p, args, n_args, iters); poly_x64_program_destroy(p); }
   }

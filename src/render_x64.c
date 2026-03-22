@@ -2657,50 +2657,83 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             rax_slot = -1;
             break;
 
-          /* Comparisons: use XMM0 as scratch, result is int → goes to stack */
+          /* Comparisons */
           case POLY_OP_CMPLT:
           case POLY_OP_CMPEQ:
           case POLY_OP_CMPNE: {
             uint8_t pred = u->op == POLY_OP_CMPLT ? 1 : u->op == POLY_OP_CMPEQ ? 0 : 4;
-            emit_movss_xmm_xmm(&buf, XMM0, sr0);
-            emit_cmpss_rr(&buf, XMM0, sr1, pred);
-            emit_movd_r32_xmm(&buf, RAX, XMM0);
-            emit_and_r32_imm32(&buf, RAX, 1);
-            emit_mov_rbp_r64(&buf, RAX, off);
-            /* Free the destination XMM since result is int (in stack) */
-            xf.e[dr - XF_BASE].slot = -1;
-            xf.e[dr - XF_BASE].dirty = false;
-            RELOAD_SIGN_MASK();
+            if (pk) {
+              /* Packed CMP: vcmpps dst, sr0, sr1, imm8 — result is mask in XMM/YMM */
+              int vL = (u->src[0]->dtype.count >= 8) ? 1 : 0;
+              /* VEX.NDS.pp=00.0F C2 /r ib */
+              emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x00, 1, 0);
+              xb_byte(&buf, 0xC2);
+              emit_modrm(&buf, 3, dr, sr1);
+              xb_byte(&buf, pred);
+              /* Result is vector mask, keep in register file */
+              xf.e[dr - XF_BASE].dirty = true;
+              xf.e[dr - XF_BASE].vec_width = u->src[0]->dtype.count;
+            } else {
+              /* Scalar CMP: use XMM0 as scratch, result is int → goes to stack */
+              emit_movss_xmm_xmm(&buf, XMM0, sr0);
+              emit_cmpss_rr(&buf, XMM0, sr1, pred);
+              emit_movd_r32_xmm(&buf, RAX, XMM0);
+              emit_and_r32_imm32(&buf, RAX, 1);
+              emit_mov_rbp_r64(&buf, RAX, off);
+              /* Free the destination XMM since result is int (in stack) */
+              xf.e[dr - XF_BASE].slot = -1;
+              xf.e[dr - XF_BASE].dirty = false;
+              RELOAD_SIGN_MASK();
+            }
             break;
           }
 
           /* Ternary */
           case POLY_OP_WHERE: {
-            /* cond is int (in stack), true/false are float (in reg file).
-             * Load both sources first, then revalidate dr to prevent
-             * eviction of the pre-allocated destination. */
-            int sr_true = xf_find(&xf, s1);
-            if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1);
-            int sr_false = xf_find(&xf, s2);
-            if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true);
-            /* Revalidate sr_true after sr_false load (may have evicted it) */
-            int sr_true_check = xf_find(&xf, s1);
-            if (sr_true_check < 0) sr_true = xf_get_avoid(&xf, &buf, s1, sr_false);
-            else sr_true = sr_true_check;
-            /* Revalidate dr: loading sr_true/sr_false may have evicted it */
-            if (xf_find(&xf, slot) < 0)
-              dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
-                                    slot_last_use, i);
-            emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
-            emit_neg_r32(&buf, RAX);
-            emit_movd_xmm_r32(&buf, XMM0, RAX);
-            if (dr != sr_true) emit_movss_xmm_xmm(&buf, dr, sr_true);
-            emit_andps(&buf, dr, XMM0);
-            emit_andnps(&buf, XMM0, sr_false);
-            emit_orps(&buf, dr, XMM0);
-            rax_slot = -1;
-            /* WHERE clobbers XMM0 (used for sign mask); reload */
-            RELOAD_SIGN_MASK();
+            if (pk && u->src[0]->dtype.count > 1) {
+              /* Packed WHERE: mask is vector (from packed CMP), in register file.
+               * WHERE(mask, true_val, false_val) = (mask & true) | (~mask & false) */
+              int vw = u->dtype.count;
+              int vL = (vw >= 8) ? 1 : 0;
+              int sr_mask = xf_find(&xf, s0);
+              if (sr_mask < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
+              int sr_true = xf_find(&xf, s1);
+              if (sr_true < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw);
+              int sr_false = xf_find(&xf, s2);
+              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true);
+              /* Revalidate after loads */
+              if (xf_find(&xf, s1) < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw);
+              if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
+              if (xf_find(&xf, slot) < 0)
+                dr = xf_alloc_belady(&xf, &buf, slot, sr_mask, sr_true, sr_false,
+                                      slot_last_use, i);
+              /* dr = (mask & true) | (~mask & false) */
+              emit_vandps(&buf, dr, sr_mask, sr_true, vL);
+              emit_vandnps(&buf, XMM0, sr_mask, sr_false, vL);
+              emit_vorps(&buf, dr, dr, XMM0, vL);
+              RELOAD_SIGN_MASK();
+            } else {
+              /* Scalar WHERE: cond is int (in stack), true/false are float (in reg file) */
+              int sr_true = xf_find(&xf, s1);
+              if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1);
+              int sr_false = xf_find(&xf, s2);
+              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true);
+              int sr_true_check = xf_find(&xf, s1);
+              if (sr_true_check < 0) sr_true = xf_get_avoid(&xf, &buf, s1, sr_false);
+              else sr_true = sr_true_check;
+              if (xf_find(&xf, slot) < 0)
+                dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
+                                      slot_last_use, i);
+              emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
+              emit_neg_r32(&buf, RAX);
+              emit_movd_xmm_r32(&buf, XMM0, RAX);
+              if (dr != sr_true) emit_movss_xmm_xmm(&buf, dr, sr_true);
+              emit_andps(&buf, dr, XMM0);
+              emit_andnps(&buf, XMM0, sr_false);
+              emit_orps(&buf, dr, XMM0);
+              rax_slot = -1;
+              RELOAD_SIGN_MASK();
+            }
             break;
           }
 
@@ -2883,6 +2916,50 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               emit_modrm(&buf, 3, dr, sr1);
               /* dr = tmp + c */
               emit_vpaddd(&buf, dr, dr, sr_s2, vL);
+              break;
+            }
+            case POLY_OP_WHERE: {
+              /* Packed int WHERE: mask is vector, use vpand/vpandn/vpor */
+              int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
+              int sr_mask = (s0 >= 0) ? xf_find(&xf, s0) : -1;
+              if (sr_mask < 0 && s0 >= 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
+              int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
+              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw);
+              /* dr = (mask & sr1) | (~mask & sr_s2) */
+              emit_vpand(&buf, dr, sr_mask, sr1, vL);
+              emit_vandnps(&buf, XMM0, sr_mask, sr_s2, vL);
+              emit_vpor(&buf, dr, dr, XMM0, vL);
+              RELOAD_SIGN_MASK();
+              break;
+            }
+            case POLY_OP_CMPLT: {
+              /* vpcmpgtd: VEX.66.0F 66 /r (a > b, so swap for a < b) */
+              /* CMPLT(a,b) = b > a, so: vpcmpgtd(dr, sr1, sr0) */
+              emit_vex_auto(&buf, dr, sr1, sr0, vL, 0x01, 1, 0);
+              xb_byte(&buf, 0x66);
+              emit_modrm(&buf, 3, dr, sr0);
+              break;
+            }
+            case POLY_OP_CMPEQ: {
+              /* vpcmpeqd: VEX.66.0F 76 /r */
+              emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x01, 1, 0);
+              xb_byte(&buf, 0x76);
+              emit_modrm(&buf, 3, dr, sr1);
+              break;
+            }
+            case POLY_OP_CMPNE: {
+              /* vpcmpeqd + vpxor with all-1s (NOT) -- or simpler: vpcmpeqd then negate */
+              /* For now: compare equal, then XOR with all-1s */
+              emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x01, 1, 0);
+              xb_byte(&buf, 0x76); /* vpcmpeqd */
+              emit_modrm(&buf, 3, dr, sr1);
+              /* Generate all-1s in XMM0 via vpcmpeqd xmm0, xmm0, xmm0 */
+              emit_vex_auto(&buf, XMM0, XMM0, XMM0, vL, 0x01, 1, 0);
+              xb_byte(&buf, 0x76);
+              emit_modrm(&buf, 3, XMM0, XMM0);
+              /* XOR with all-1s to negate */
+              emit_vxorps(&buf, dr, dr, XMM0, vL);
+              RELOAD_SIGN_MASK();
               break;
             }
             default:
