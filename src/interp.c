@@ -196,10 +196,11 @@ static InterpVal eval_alu(PolyOps op, PolyDType dt, InterpVal *srcs, int n_src) 
   case POLY_OP_SIN:        return iv_flt(sin(a));
   case POLY_OP_TRUNC:      return iv_flt(trunc(a));
 
-  /* Binary arithmetic */
-  case POLY_OP_ADD:  return is_flt ? iv_flt(a + b) : iv_int(ai + bi);
-  case POLY_OP_SUB:  return is_flt ? iv_flt(a - b) : iv_int(ai - bi);
-  case POLY_OP_MUL:  return is_flt ? iv_flt(a * b) : iv_int(ai * bi);
+  /* Binary arithmetic — wrapping add/sub/mul to avoid signed overflow UB.
+   * tinygrad's Python uses arbitrary-precision ints; in C we wrap via unsigned cast. */
+  case POLY_OP_ADD:  return is_flt ? iv_flt(a + b) : iv_int((int64_t)((uint64_t)ai + (uint64_t)bi));
+  case POLY_OP_SUB:  return is_flt ? iv_flt(a - b) : iv_int((int64_t)((uint64_t)ai - (uint64_t)bi));
+  case POLY_OP_MUL:  return is_flt ? iv_flt(a * b) : iv_int((int64_t)((uint64_t)ai * (uint64_t)bi));
   case POLY_OP_FDIV: return iv_flt(a / b);
   case POLY_OP_IDIV: return bi != 0 ? iv_int(ai / bi) : iv_int(0);
   case POLY_OP_MOD:  return bi != 0 ? iv_int(ai % bi) : iv_int(0);

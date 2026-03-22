@@ -1125,6 +1125,36 @@ static void emit_vex_packed_sqrt(X64Buf *b, int dst, int src, int L) {
   emit_modrm(b, 3, dst, src);
 }
 
+/* vroundps dst, src, imm8 — VEX.66.0F3A 08 /r ib (pp=01, map=3) */
+static void emit_vroundps(X64Buf *b, int dst, int src, int imm, int L) {
+  emit_vex_auto(b, dst, 0, src, L, 0x01, 3, 0); /* pp=01(66), map=3(0F3A) */
+  xb_byte(b, 0x08);
+  emit_modrm(b, 3, dst, src);
+  xb_byte(b, (uint8_t)imm);
+}
+
+/* vroundss dst, src1, src2, imm8 — VEX.66.0F3A 0A /r ib (pp=01, map=3) */
+static void emit_vroundss(X64Buf *b, int dst, int src1, int src2, int imm) {
+  emit_vex_auto(b, dst, src1, src2, 0, 0x01, 3, 0); /* L=0, pp=01(66), map=3(0F3A) */
+  xb_byte(b, 0x0A);
+  emit_modrm(b, 3, dst, src2);
+  xb_byte(b, (uint8_t)imm);
+}
+
+/* SSE4.1 roundps xmm, xmm, imm8 — 66 0F 3A 08 /r ib */
+static void emit_roundps(X64Buf *b, int dst, int src, int imm) {
+  xb_byte(b, 0x66); xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x08);
+  emit_modrm(b, 3, dst, src);
+  xb_byte(b, (uint8_t)imm);
+}
+
+/* SSE4.1 roundss xmm, xmm, imm8 — 66 0F 3A 0A /r ib */
+static void emit_roundss(X64Buf *b, int dst, int src, int imm) {
+  xb_byte(b, 0x66); xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x0A);
+  emit_modrm(b, 3, dst, src);
+  xb_byte(b, (uint8_t)imm);
+}
+
 /* vxorps dst, src1, src2 — VEX 0F 57 */
 static void emit_vxorps(X64Buf *b, int dst, int src1, int src2, int L) {
   emit_vex_auto(b, dst, src1, src2, L, 0x00, 1, 0);
@@ -2673,10 +2703,16 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             break;
           }
           case POLY_OP_TRUNC:
-            if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
-            emit_cvttss2si(&buf, RAX, dr);
-            emit_cvtsi2ss(&buf, dr, RAX);
-            rax_slot = -1;
+            /* roundps/vroundps imm=0x0B: truncate toward zero (imm[1:0]=11, bit2=1 force imm) */
+            if (pk) {
+              if (use_avx2)
+                emit_vroundps(&buf, dr, sr0, 0x0B, (u->dtype.count >= 8) ? 1 : 0);
+              else
+                { if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0); emit_roundps(&buf, dr, dr, 0x0B); }
+            } else {
+              if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
+              emit_roundss(&buf, dr, dr, 0x0B);
+            }
             break;
 
           /* Comparisons */

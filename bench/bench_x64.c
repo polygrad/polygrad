@@ -155,9 +155,11 @@ static Row bench(const char *name, Kernel k, void **args, int n_args, int iters)
     if (p) { r.scalar_us = time_x64(p, args, n_args, iters); poly_x64_program_destroy(p); }
   }
 
-  /* x64 SSE vec4 (optimize, devec=0, max_vec_width=4, has_simd_int) */
+  /* x64 SSE vec4 (optimize, devec=1, max_vec_width=4, has_simd_int).
+   * devec=1: scatter vec ALU to scalar. Required because SSE4 lacks per-lane
+   * variable shifts (vpsllvd is AVX2-only), which sin's Payne-Hanek needs. */
   {
-    PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
+    PolyRewriteOpts opts = { .optimize = true, .devectorize = 1 };
     opts.caps.max_vec_width = 4;
     opts.caps.has_simd_int = true;
     opts.caps.has_mulacc = has_fma();
