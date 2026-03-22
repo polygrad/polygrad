@@ -2555,7 +2555,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         int dr;
         if (sr0 >= XF_BASE && sr0 < XF_BASE + XF_SIZE &&
             (u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL ||
-             u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX || u->op == POLY_OP_MULACC ||
+             u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX ||
              u->op == POLY_OP_NEG || u->op == POLY_OP_SQRT) &&
             u->op != POLY_OP_RECIPROCAL) {
           /* Reuse sr0's register as destination — saves a movss copy.
@@ -2761,26 +2761,43 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
           case POLY_OP_MULACC: {
             /* MULACC: dst = src0 * src1 + src2
-             * Load src2 first, then re-allocate dr protecting all three
-             * source registers to prevent eviction conflicts. */
+             * All three sources must be live simultaneously. Load each
+             * with the others protected from eviction. */
+
+            /* Step 1: ensure sr_s2 is loaded */
             int sr_s2 = xf_find(&xf, s2);
             if (sr_s2 < 0) {
-              /* Load sr_s2 avoiding eviction of sr0 and sr1 */
-              if (pk)
-                sr_s2 = xf_get_packed_w(&xf, &buf, s2, u->dtype.count);
-              else {
+              if (pk) {
+                /* Allocate with sr0/sr1 protected */
+                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1);
+                emit_width_load_rbp(&buf, sr_s2, -slot_offset(s2), u->dtype.count);
+                xf.e[sr_s2 - XF_BASE].vec_width = u->dtype.count;
+              } else {
                 sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1);
                 emit_movss_xmm_rbp(&buf, sr_s2, -slot_offset(s2));
               }
             }
-            /* Re-allocate dr protecting all 3 source registers.
-             * Pre-switch dr may have been evicted by sr_s2 load;
-             * sr1 must also be protected from eviction. */
+
+            /* Step 2: re-find sr0 and sr1 (they may have been evicted) */
+            sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
+            if (sr0 < 0 && s0 >= 0) {
+              sr0 = xf_alloc(&xf, &buf, s0, sr_s2, -1);
+              emit_width_load_rbp(&buf, sr0, -slot_offset(s0), pk ? u->dtype.count : 0);
+              if (pk) xf.e[sr0 - XF_BASE].vec_width = u->dtype.count;
+            }
+            sr1 = (s1 >= 0) ? xf_find(&xf, s1) : -1;
+            if (sr1 < 0 && s1 >= 0) {
+              sr1 = xf_alloc(&xf, &buf, s1, sr_s2, sr0);
+              emit_width_load_rbp(&buf, sr1, -slot_offset(s1), pk ? u->dtype.count : 0);
+              if (pk) xf.e[sr1 - XF_BASE].vec_width = u->dtype.count;
+            }
+
+            /* Step 3: allocate dr protecting all 3 */
             if (xf_find(&xf, slot) < 0) {
               dr = xf_alloc_belady(&xf, &buf, slot, sr0, sr1, sr_s2,
                                     slot_last_use, i);
             }
-            if (use_avx2 && cpu.has_fma) {
+            if (cpu.has_fma) {
               int vL = pk ? ((u->dtype.count >= 8) ? 1 : 0) : 0;
               /* vfmadd231ps/ss: dst += sr0 * sr1 (dst must hold src2) */
               if (dr != sr_s2) {
@@ -2926,17 +2943,32 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               break;
             }
             case POLY_OP_MULACC: {
-              /* MULACC(a,b,c) = a*b+c: vpmulld + vpaddd */
+              /* MULACC(a,b,c) = a*b+c. When b is power-of-2 constant (from
+               * SHL+ADD fusion), use vpslld+vpaddd instead of slow vpmulld. */
               int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
               int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
               if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw);
-              /* tmp = a * b */
-              int R = (dr < 8) ? 1 : 0;
-              int B = (sr1 < 8) ? 1 : 0;
-              emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
-              xb_byte(&buf, 0x40);
-              emit_modrm(&buf, 3, dr, sr1);
-              /* dr = tmp + c */
+              bool is_pow2 = (u->src[1]->op == POLY_OP_CONST &&
+                              u->src[1]->arg.kind == POLY_ARG_INT &&
+                              u->src[1]->arg.i > 0 &&
+                              (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
+              if (is_pow2) {
+                /* vpslld(a, log2(b)) + vpaddd(result, c) */
+                int shift = 0;
+                for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1) shift++;
+                if (dr != sr0) {
+                  if (vL) emit_vmovups_ymm_ymm(&buf, dr, sr0);
+                  else emit_movups_xmm_xmm(&buf, dr, sr0);
+                }
+                emit_vpslld_imm(&buf, dr, dr, (uint8_t)shift, vL);
+              } else {
+                /* vpmulld: VEX.66.0F38 40 /r */
+                int R = (dr < 8) ? 1 : 0;
+                int B2 = (sr1 < 8) ? 1 : 0;
+                emit_vex3(&buf, R, 1, B2, 2, 0, sr0, vL, 0x01);
+                xb_byte(&buf, 0x40);
+                emit_modrm(&buf, 3, dr, sr1);
+              }
               emit_vpaddd(&buf, dr, dr, sr_s2, vL);
               break;
             }
@@ -3147,13 +3179,29 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             break;
 
           case POLY_OP_MULACC:
+            {
+            /* When src[1] is power-of-2 (from SHL+ADD fusion), use shl+add */
+            bool is_pow2 = (u->src[1]->op == POLY_OP_CONST &&
+                            u->src[1]->arg.kind == POLY_ARG_INT &&
+                            u->src[1]->arg.i > 0 &&
+                            (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
             emit_alu_r_rbp(&buf, w, 0x8B, RAX, -slot_offset(s0));
-            emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
-            if (wide) emit_imul_r64_r64(&buf, RAX, RCX);
-            else emit_imul_r32_r32(&buf, RAX, RCX);
+            if (is_pow2) {
+              int shift = 0;
+              for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1) shift++;
+              emit_rex_always(&buf, w, 0, 0, 0);
+              xb_byte(&buf, 0xC1);
+              emit_modrm(&buf, 3, 4, RAX); /* shl rax/eax, imm8 */
+              xb_byte(&buf, (uint8_t)shift);
+            } else {
+              emit_alu_r_rbp(&buf, w, 0x8B, RCX, -slot_offset(s1));
+              if (wide) emit_imul_r64_r64(&buf, RAX, RCX);
+              else emit_imul_r32_r32(&buf, RAX, RCX);
+            }
             emit_alu_r_rbp(&buf, w, 0x03, RAX, -slot_offset(s2)); /* add */
             emit_mov_rbp_r64(&buf, RAX, off);
             break;
+            }
 
           case POLY_OP_THREEFRY:
             /* THREEFRY is decomposed by pm_decomp before reaching renderer.
@@ -3236,7 +3284,7 @@ PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   opts.beam_width = beam;
 
   /* x64-specific caps from CPUID */
-  opts.caps.has_mulacc = cpu.has_fma && cpu.has_avx2 && cpu.os_avx_ok;
+  opts.caps.has_mulacc = cpu.has_fma; /* FMA3 works with VEX.128 (SSE) too */
   opts.caps.has_threefry = false;
   opts.caps.has_simd_int = true; /* x64 always has paddd/pslld; AVX2 adds vpaddd/vpslld */
   opts.caps.max_vec_width = (cpu.has_avx2 && cpu.os_avx_ok) ? 8 : 4;
