@@ -2013,6 +2013,7 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
     rules[n++] = (PolyRule){ poly_pat_ops(add_set, NULL, 0, NULL),
       rule_mul_add_to_mulacc };
     /* SHL fusion: ADD(SHL(x,n), c) → MULACC(x, 2^n, c) for ints */
+    /* SHL fusion: ADD(SHL(x,n), c) → MULACC(x, 2^n, c) for ints */
     rules[n++] = (PolyRule){ poly_pat_ops(add_set, NULL, 0, NULL),
       rule_shl_add_to_mulacc };
   }

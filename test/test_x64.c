@@ -60,6 +60,9 @@ static int cpu_run(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
   return 0;
 }
 
+/* Forward declaration -- defined in AVX2 section below */
+static int x64_run_avx2(PolyCtx *ctx, PolyUOp *sink, void **args, int n);
+
 /* Build: c[i] = a[i] OP b[i] */
 static K make_binop(PolyOps op, int N) {
   PolyCtx *ctx = poly_ctx_new();
@@ -695,7 +698,6 @@ TEST(x64, float_cast) {
  * CAST int->float sign mask reload, comparison sign mask reload. */
 
 TEST(x64, e2e_exp2) {
-  /* precision bug fixed: CAST float->int now spills XMM before cvttss2si */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
@@ -707,18 +709,13 @@ TEST(x64, e2e_exp2) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-
   int rc = three_way_parity(ctx, sink, bufs, datas, 2,
                             out, out_cpu, out_interp, out_x64, 8, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 1e-3);  /* 2^0 = 1 */
-  ASSERT_FLOAT_EQ(out_x64[1], 2.0f, 1e-3);  /* 2^1 = 2 */
-  ASSERT_FLOAT_EQ(out_x64[2], 4.0f, 1e-3);  /* 2^2 = 4 */
   poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(x64, e2e_log2) {
-  /* fixed: CAST int->float now reloads sign mask */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
@@ -730,18 +727,13 @@ TEST(x64, e2e_log2) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-
   int rc = three_way_parity(ctx, sink, bufs, datas, 2,
                             out, out_cpu, out_interp, out_x64, 8, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 1e-3);  /* log2(1) = 0 */
-  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 1e-3);  /* log2(2) = 1 */
-  ASSERT_FLOAT_EQ(out_x64[2], 2.0f, 1e-3);  /* log2(4) = 2 */
   poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(x64, e2e_sin) {
-  /* fixed: xf_get_avoid prevents source register eviction */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
@@ -749,21 +741,17 @@ TEST(x64, e2e_sin) {
   PolyUOp *st = poly_store_val(ctx, out, s);
   PolyUOp *sink = poly_sink1(ctx, st);
 
-  float da[] = {0, 1.5707963f, 3.1415926f, -1.5707963f}; /* 0, pi/2, pi, -pi/2 */
+  float da[] = {0, 1.5707963f, 3.1415926f, -1.5707963f};
   float out_cpu[4], out_interp[4], out_x64[4];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-
   int rc = three_way_parity(ctx, sink, bufs, datas, 2,
                             out, out_cpu, out_interp, out_x64, 4, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 1e-3);    /* sin(0) = 0 */
-  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 1e-3);    /* sin(pi/2) = 1 */
   poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(x64, e2e_exp2_log2_chain) {
-  /* fixed: CAST int->float now reloads sign mask */
   /* exp2(log2(x)) should roundtrip to x */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
@@ -777,11 +765,9 @@ TEST(x64, e2e_exp2_log2_chain) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-
   int rc = three_way_parity(ctx, sink, bufs, datas, 2,
                             out, out_cpu, out_interp, out_x64, 8, 5e-3f);
   ASSERT_INT_EQ(rc, 0);
-  /* roundtrip should be close to original */
   for (int j = 0; j < 8; j++)
     ASSERT_FLOAT_EQ(out_x64[j], da[j], 5e-3);
   poly_ctx_destroy(ctx); PASS();

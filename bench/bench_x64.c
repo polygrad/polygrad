@@ -160,7 +160,6 @@ static Row bench(const char *name, Kernel k, void **args, int n_args, int iters)
     PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
     opts.caps.max_vec_width = 4;
     opts.caps.has_simd_int = true;
-    opts.caps.has_mulacc = has_fma();
     PolyX64Program *p = compile_x64(k.ctx, k.sink, opts);
     if (p) { r.sse4_us = time_x64(p, args, n_args, iters); poly_x64_program_destroy(p); }
   }
