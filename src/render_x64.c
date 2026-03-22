@@ -1673,8 +1673,23 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         } else {
           emit_mov_rbp_imm32(&buf, off, bits);
         }
+      } else if (u->dtype.count > 1) {
+        /* Vector integer CONST: broadcast int32 to all lanes via XMM0 */
+        int32_t iv32 = (int32_t)u->arg.i;
+        emit_mov_r32_imm32(&buf, RAX, iv32);
+        emit_movd_xmm_r32(&buf, XMM0, RAX);
+        if (use_avx2 && u->dtype.count >= 8) {
+          emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
+          emit_vmovups_rbp_ymm(&buf, XMM0, off);
+        } else {
+          /* shufps xmm0, xmm0, 0 — broadcast to 4 lanes */
+          xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
+          emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+          emit_movups_rbp_xmm(&buf, XMM0, off);
+        }
+        RELOAD_SIGN_MASK();
       } else {
-        /* Integer constant */
+        /* Scalar integer constant */
         int64_t iv = u->arg.i;
         if (iv >= INT32_MIN && iv <= INT32_MAX) {
           emit_mov_rbp_imm64_sx(&buf, off, (int32_t)iv);
@@ -2124,7 +2139,49 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── CAST: type conversion ───────────────────────────────────── */
+    /* ── Vector CAST: packed float↔int conversion in XMM/YMM ────── */
+    if (u->op == POLY_OP_CAST && u->dtype.count > 1) {
+      int s0 = lm_get(&locals, u->src[0]);
+      if (s0 < 0) { next_slot++; goto skip_slot; }
+      bool src_float = dtype_is_float(u->src[0]->dtype);
+      bool dst_float = dtype_is_float(u->dtype);
+      int vw = u->dtype.count > u->src[0]->dtype.count ? u->dtype.count : u->src[0]->dtype.count;
+      int vL = (vw >= 8) ? 1 : 0;
+
+      if (src_float && !dst_float) {
+        /* vcvttps2dq: VEX.66.0F 5B /r — float vec → int32 vec (truncate) */
+        int slot = next_slot++;
+        int sr = xf_find(&xf, s0);
+        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, s0, vw);
+        int dr = xf_alloc(&xf, &buf, slot, sr, -1);
+        emit_vex_auto(&buf, dr, 0, sr, vL, 0x01, 1, 0); /* pp=01(66), map=0F */
+        xb_byte(&buf, 0x5B);
+        emit_modrm(&buf, 3, dr, sr);
+        xf.e[dr - XF_BASE].dirty = true;
+        xf.e[dr - XF_BASE].vec_width = vw;
+        LM_SET(u, slot);
+        continue;
+      } else if (!src_float && dst_float) {
+        /* vcvtdq2ps: VEX.0F 5B /r — int32 vec → float vec */
+        int slot = next_slot++;
+        int sr = xf_find(&xf, s0);
+        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, s0, vw);
+        int dr = xf_alloc(&xf, &buf, slot, sr, -1);
+        emit_vex_auto(&buf, dr, 0, sr, vL, 0x00, 1, 0); /* pp=00(none), map=0F */
+        xb_byte(&buf, 0x5B);
+        emit_modrm(&buf, 3, dr, sr);
+        xf.e[dr - XF_BASE].dirty = true;
+        xf.e[dr - XF_BASE].vec_width = vw;
+        LM_SET(u, slot);
+        continue;
+      } else {
+        /* Same domain vector cast: alias */
+        LM_SET(u, s0);
+        continue;
+      }
+    }
+
+    /* ── Scalar CAST: type conversion ──────────────────────────── */
     if (u->op == POLY_OP_CAST) {
       int s0 = lm_get(&locals, u->src[0]);
       if (s0 < 0) { next_slot++; goto skip_slot; }
@@ -2211,7 +2268,16 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── BITCAST: reinterpret bits across float/int domains ──────── */
+    /* ── Vector BITCAST: no-op retag in XMM register file ────────── */
+    if (u->op == POLY_OP_BITCAST && u->dtype.count > 1) {
+      int s0 = lm_get(&locals, u->src[0]);
+      if (s0 < 0) { next_slot++; goto skip_slot; }
+      /* Just alias to the same slot -- bits stay in the same XMM register */
+      LM_SET(u, s0);
+      continue;
+    }
+
+    /* ── Scalar BITCAST: reinterpret bits across float/int domains ── */
     if (u->op == POLY_OP_BITCAST) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
@@ -2307,6 +2373,31 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     }
 
     /* ── VECTORIZE: construct vector from scalar values ──────────── */
+    /* Integer VECTORIZE: construct int vec from scalar ints.
+     * Store each scalar int32 to consecutive stack positions, load as packed XMM. */
+    if (u->op == POLY_OP_VECTORIZE && u->n_src >= 2 && dtype_is_int(u->dtype) &&
+        u->dtype.count > 1) {
+      int slot = next_slot++;
+      int voff = -slot_offset(slot);
+      int n_lanes = u->n_src;
+      for (int j = 0; j < n_lanes; j++) {
+        int sj = lm_get(&locals, u->src[j]);
+        if (sj >= 0) {
+          emit_mov_r32_rbp(&buf, RAX, -slot_offset(sj));
+          emit_mov_rbp_r32(&buf, RAX, voff + j * 4);
+        }
+      }
+      /* Load as packed XMM/YMM into register file */
+      int dr = xf_alloc(&xf, &buf, slot, -1, -1);
+      int vw = n_lanes;
+      emit_width_load_rbp(&buf, dr, voff, vw);
+      xf.e[dr - XF_BASE].dirty = true;
+      xf.e[dr - XF_BASE].vec_width = vw;
+      rax_slot = -1;
+      LM_SET(u, slot);
+      continue;
+    }
+    /* Float VECTORIZE */
     if (u->op == POLY_OP_VECTORIZE && u->n_src >= 2 && dtype_is_float(u->dtype) &&
         u->dtype.count > 1) {
       int slot = next_slot++;
@@ -2695,7 +2786,117 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           xf.e[dr - XF_BASE].vec_width = pk ? u->dtype.count : 0;
         }
       } else {
-        /* ── Integer ALU ────────────────────────────────────────── */
+        /* ── Vector Integer ALU (SIMD in XMM/YMM) ──────────────── */
+        if (u->dtype.count > 1 && dtype_is_int(u->dtype)) {
+          int s0 = (u->n_src > 0) ? lm_get(&locals, u->src[0]) : -1;
+          int s1 = (u->n_src > 1) ? lm_get(&locals, u->src[1]) : -1;
+          int vw = u->dtype.count;
+          int vL = (vw >= 8) ? 1 : 0;
+
+          /* Load sources from register file (they're in XMM/YMM) */
+          int sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
+          if (sr0 < 0 && s0 >= 0) sr0 = xf_get_packed_w(&xf, &buf, s0, vw);
+          int sr1 = -1;
+          if (s1 >= 0 && u->n_src > 1) {
+            sr1 = xf_find(&xf, s1);
+            if (sr1 < 0) sr1 = xf_get_packed_w(&xf, &buf, s1, vw);
+          }
+
+          int dr = xf_alloc(&xf, &buf, slot, sr0, sr1 >= 0 ? sr1 : -1);
+
+          switch (u->op) {
+            case POLY_OP_ADD:
+              emit_vpaddd(&buf, dr, sr0, sr1, vL);
+              break;
+            case POLY_OP_SUB:
+              emit_vpsubd(&buf, dr, sr0, sr1, vL);
+              break;
+            case POLY_OP_AND:
+              emit_vpand(&buf, dr, sr0, sr1, vL);
+              break;
+            case POLY_OP_OR:
+              emit_vpor(&buf, dr, sr0, sr1, vL);
+              break;
+            case POLY_OP_SHL:
+              if (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
+                  u->src[1]->arg.kind == POLY_ARG_INT) {
+                /* Immediate shift: vpslld dst, src, imm8 */
+                int shift = (int)u->src[1]->arg.i;
+                if (dr != sr0) {
+                  if (vL) emit_vmovups_ymm_ymm(&buf, dr, sr0);
+                  else emit_movups_xmm_xmm(&buf, dr, sr0);
+                }
+                emit_vpslld_imm(&buf, dr, dr, (uint8_t)shift, vL);
+              } else if (sr1 >= 0 && use_avx2) {
+                /* AVX2 per-lane variable shift: vpsllvd VEX.66.0F38 47 /r */
+                int R = (dr < 8) ? 1 : 0;
+                int B = (sr1 < 8) ? 1 : 0;
+                emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
+                xb_byte(&buf, 0x47);
+                emit_modrm(&buf, 3, dr, sr1);
+              } else {
+                fprintf(stderr, "x64 jit: SSE vector SHL with variable shift not supported\n");
+                goto x64_fail;
+              }
+              break;
+            case POLY_OP_SHR:
+              if (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
+                  u->src[1]->arg.kind == POLY_ARG_INT) {
+                /* Immediate shift: vpsrld dst, src, imm8 */
+                int shift = (int)u->src[1]->arg.i;
+                if (dr != sr0) {
+                  if (vL) emit_vmovups_ymm_ymm(&buf, dr, sr0);
+                  else emit_movups_xmm_xmm(&buf, dr, sr0);
+                }
+                emit_vpsrld_imm(&buf, dr, dr, (uint8_t)shift, vL);
+              } else if (sr1 >= 0 && use_avx2) {
+                /* AVX2 per-lane variable shift: vpsrlvd VEX.66.0F38 45 /r */
+                int R = (dr < 8) ? 1 : 0;
+                int B = (sr1 < 8) ? 1 : 0;
+                emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
+                xb_byte(&buf, 0x45);
+                emit_modrm(&buf, 3, dr, sr1);
+              } else {
+                fprintf(stderr, "x64 jit: SSE vector SHR with variable shift not supported\n");
+                goto x64_fail;
+              }
+              break;
+            case POLY_OP_MUL: {
+              /* vpmulld: VEX.66.0F38 40 /r (packed int32 multiply low dword) */
+              int R = (dr < 8) ? 1 : 0;
+              int B = (sr1 < 8) ? 1 : 0;
+              emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01); /* map=0F38, pp=01(66) */
+              xb_byte(&buf, 0x40);
+              emit_modrm(&buf, 3, dr, sr1);
+              break;
+            }
+            case POLY_OP_MULACC: {
+              /* MULACC(a,b,c) = a*b+c: vpmulld + vpaddd */
+              int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
+              int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
+              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw);
+              /* tmp = a * b */
+              int R = (dr < 8) ? 1 : 0;
+              int B = (sr1 < 8) ? 1 : 0;
+              emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
+              xb_byte(&buf, 0x40);
+              emit_modrm(&buf, 3, dr, sr1);
+              /* dr = tmp + c */
+              emit_vpaddd(&buf, dr, dr, sr_s2, vL);
+              break;
+            }
+            default:
+              fprintf(stderr, "x64 jit: unhandled vec int ALU op %s at index %d\n",
+                      poly_op_name(u->op), i);
+              goto x64_fail;
+          }
+          xf.e[dr - XF_BASE].dirty = true;
+          xf.e[dr - XF_BASE].vec_width = vw;
+          LM_SET(u, slot);
+          continue;
+        }
+
+        /* ── Scalar Integer ALU (GPR) ──────────────────────────── */
         int s0 = (u->n_src > 0) ? lm_get(&locals, u->src[0]) : -1;
         int s1 = (u->n_src > 1) ? lm_get(&locals, u->src[1]) : -1;
         int s2 = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
@@ -2938,6 +3139,7 @@ PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* x64-specific caps from CPUID */
   opts.caps.has_mulacc = cpu.has_fma && cpu.has_avx2 && cpu.os_avx_ok;
   opts.caps.has_threefry = false;
+  opts.caps.has_simd_int = true; /* x64 always has paddd/pslld; AVX2 adds vpaddd/vpslld */
   opts.caps.max_vec_width = (cpu.has_avx2 && cpu.os_avx_ok) ? 8 : 4;
 
   return poly_linearize_ex(ctx, sink, opts, n_out);

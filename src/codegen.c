@@ -3977,6 +3977,23 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
   return g_pm_render_subset_vec;
 }
 
+/* Render subset for x64 with SIMD integer: keep vector CMP/WHERE packed.
+ * Unlike render_subset_vec, does NOT scatter CMP/WHERE to per-lane scalar. */
+static PolyPatternMatcher *g_pm_render_subset_x64 = NULL;
+static PolyPatternMatcher *poly_pm_render_subset_x64(void) {
+  if (g_pm_render_subset_x64) return g_pm_render_subset_x64;
+  PolyRule rules[] = {
+    { poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst },
+    { poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_cat_to_vectorize },
+    /* Keep vector CMP/WHERE packed -- x64 handles them natively */
+    { poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single },
+  };
+  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_render_subset_x64 = poly_pm_concat(base, poly_pm_gep_pushing());
+  poly_pm_destroy(base);
+  return g_pm_render_subset_x64;
+}
+
 /* ── Combined devectorize pass (cached) ─────────────────────────────── */
 /*
  * Matches tinygrad codegen/__init__.py:79:
@@ -4539,8 +4556,12 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     /* post-devectorize: render subset + symbolic cleanup.
      * DEVECTORIZE>=1: scatter vec CMP/WHERE to scalar (ALU already scattered).
      * DEVECTORIZE=0: keep vec ALU, only lower VCONST/VCAT. */
-    sink = poly_graph_rewrite(ctx, sink,
-        (opts.devectorize >= 1) ? poly_pm_render_subset() : poly_pm_render_subset_vec());
+    if (opts.devectorize >= 1)
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
+    else if (opts.caps.has_simd_int)
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_x64());
+    else
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_vec());
     sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   }
 
@@ -4552,9 +4573,12 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   /* ── 8. Final rewrite: expander cleanup + split_ends + render (tinygrad line 104) ── */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_split_ends());
-  sink = poly_graph_rewrite(ctx, sink,
-      (opts.devectorize >= 1 || opts.devectorize < 0)
-        ? poly_pm_render_subset() : poly_pm_render_subset_vec());
+  if (opts.devectorize >= 1 || opts.devectorize < 0)
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
+  else if (opts.caps.has_simd_int)
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_x64());
+  else
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_vec());
 
   return sink;
 }

@@ -19,6 +19,7 @@
 typedef struct {
   bool has_mulacc;    /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
   bool has_threefry;  /* Backend supports native THREEFRY op without decomposition */
+  bool has_simd_int;  /* Backend supports packed integer ops in vector regs (vpaddd etc) */
   int  max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
 } PolyRendererCaps;
 
