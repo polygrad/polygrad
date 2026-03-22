@@ -666,16 +666,21 @@ static bool x64_can_handle(PolyUOp *root) {
     }
     if (found) continue;
 
-    /* Reject unsupported dtypes */
+    /* Reject unsupported dtypes: non-float32 floats (f64, f16, bf16) */
     PolyDType dt = u->dtype;
     if (!dt.is_ptr && !poly_dtype_eq(dt, POLY_VOID) &&
         poly_dtype_is_float(dt) && poly_dtype_scalar(dt).bitsize != 32) {
       ok = false; break;
     }
+    /* Reject 64-bit integers (uint64 from THREEFRY, etc.) */
+    if (!dt.is_ptr && !poly_dtype_eq(dt, POLY_VOID) &&
+        !poly_dtype_is_float(dt) && poly_dtype_scalar(dt).bitsize > 32) {
+      ok = false; break;
+    }
+    /* Reject unsupported ops */
+    if (u->op == POLY_OP_THREEFRY) { ok = false; break; }
     if (u->op == POLY_OP_RANGE) n_ranges++;
     if (u->op == POLY_OP_STORE) n_stores++;
-    /* Note: DEFINE_REG, REDUCE, AFTER are handled by the x64 renderer.
-     * Only unsupported dtypes cause fallback to CPU. */
 
     for (int i = 0; i < u->n_src; i++) {
       if (top >= cap) { cap *= 2; stack = realloc(stack, (size_t)cap * sizeof(PolyUOp *)); }

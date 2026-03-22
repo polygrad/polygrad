@@ -1513,6 +1513,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   /* ── Pre-scan: count slots, RANGEs, PARAMs, detect max vec width ─── */
   int n_slots = 0;
   int n_params = 0;
+  int n_define_vars = 0;
   int n_ranges = 0;
   int max_vec_width = 0;
   for (int i = 0; i < n; i++) {
@@ -1720,8 +1721,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
       /* Vars are appended after buffer PARAMs in the args array.
-       * u->arg.i is the var's own index; offset by n_params to skip buffers. */
-      int var_idx = n_params + (int)u->arg.i;
+       * n_define_vars tracks the sequential position of this DEFINE_VAR. */
+      int var_idx = n_params + n_define_vars;
+      n_define_vars++;
       /* mov rax, [r15 + 8*var_idx] */
       emit_mov_r64_mem(&buf, RAX, R15, 8 * var_idx);
       /* mov eax, [rax] — dereference to get int value */
@@ -1900,9 +1902,54 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
       }
 
+      /* Detect gated INDEX: INDEX(buf, idx, valid_gate).
+       * Created by pm_move_where_on_load for PAD-style conditional loads. */
+      PolyUOp *gate_uop = NULL;
+      {
+        PolyUOp *idx_src = u->src[0];
+        if (idx_src->op == POLY_OP_INDEX && idx_src->n_src >= 3)
+          gate_uop = idx_src->src[2];
+        else {
+          PolyUOp *found = find_index_through_cast(idx_src);
+          if (found && found->n_src >= 3) gate_uop = found->src[2];
+        }
+      }
+      int gate_jmp_done_fixup = -1;
+
       /* Float LOAD (scalar or packed): use register file */
       if (dtype_is_float(u->dtype)) {
         bool packed = dtype_is_vec_float(u->dtype);
+
+        /* For gated float LOADs, pre-allocate XMM and emit gate branch.
+         * The XMM must be allocated BEFORE the branch so both paths
+         * (zero and load) use the same register, keeping the register
+         * file consistent across loop iterations. */
+        int gated_dr = -1;
+        if (gate_uop) {
+          int gate_slot_v = lm_get(&locals, gate_uop);
+          if (gate_slot_v >= 0) {
+            gated_dr = xf_alloc(&xf, &buf, slot, -1, -1);
+            /* test gate; jnz valid_load; xorps dr,dr; jmp done; valid_load: */
+            emit_mov_r32_rbp(&buf, RAX, -slot_offset(gate_slot_v));
+            rax_slot = -1;
+            /* test eax, eax */
+            xb_byte(&buf, 0x85); emit_modrm(&buf, 3, RAX, RAX);
+            /* jnz valid_load (skip zero path) */
+            xb_byte(&buf, 0x75);
+            int jnz_fixup = buf.len;
+            xb_byte(&buf, 0); /* placeholder */
+            /* Zero the XMM register */
+            emit_xorps(&buf, gated_dr, gated_dr);
+            xf.e[gated_dr - XF_BASE].dirty = true;
+            xf.e[gated_dr - XF_BASE].vec_width = packed ? u->dtype.count : 0;
+            /* jmp load_done */
+            xb_byte(&buf, 0xEB);
+            gate_jmp_done_fixup = buf.len;
+            xb_byte(&buf, 0); /* placeholder */
+            /* valid_load: */
+            buf.data[jnz_fixup] = (uint8_t)(buf.len - jnz_fixup - 1);
+          }
+        }
 
         /* Check for fusable INDEX (walk through pointer CAST/BITCAST) */
         PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
@@ -1914,30 +1961,30 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
             is = idx_uop->src[0]->dtype.bitsize / 8;
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
-            /* Check if this LOAD can be deferred into a consumer ALU op.
-             * Only for scalar (deferred SIB assumes stable idx_reg; SHL-computed
-             * RCX may be clobbered between deferred emit and ALU consumption). */
-            int n_consumers = 0;
-            bool can_defer = false;
-            for (int j = i + 1; j < n && n_consumers <= 1; j++) {
-              PolyUOp *fj = uops[j];
-              for (int k = 0; k < fj->n_src; k++) {
-                if (fj->src[k] == u) {
-                  n_consumers++;
-                  if (k == 1 && !packed && poly_opset_has(POLY_GROUP_ALU, fj->op) &&
-                      dtype_is_float(fj->dtype) && fj->n_src >= 2)
-                    can_defer = true;
+            /* No deferred loads for gated LOADs */
+            if (gated_dr < 0) {
+              int n_consumers = 0;
+              bool can_defer = false;
+              for (int j = i + 1; j < n && n_consumers <= 1; j++) {
+                PolyUOp *fj = uops[j];
+                for (int k = 0; k < fj->n_src; k++) {
+                  if (fj->src[k] == u) {
+                    n_consumers++;
+                    if (k == 1 && !packed && poly_opset_has(POLY_GROUP_ALU, fj->op) &&
+                        dtype_is_float(fj->dtype) && fj->n_src >= 2)
+                      can_defer = true;
+                  }
                 }
               }
-            }
-            if (can_defer && n_consumers == 1 && n_deferred < 32) {
-              deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_reg, is };
-              LM_SET(u, slot);
-              continue;
+              if (can_defer && n_consumers == 1 && n_deferred < 32) {
+                deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_reg, is };
+                LM_SET(u, slot);
+                goto x64_load_done;
+              }
             }
 
-            /* Not deferred: emit fused SIB LOAD */
-            int dst = xf_alloc(&xf, &buf, slot, -1, -1);
+            /* Emit fused SIB LOAD (use pre-allocated XMM if gated) */
+            int dst = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1);
             if (packed && u->dtype.count >= 8)
               emit_vmovups_ymm_sib(&buf, dst, base_reg, idx_reg, is);
             else if (packed)
@@ -1947,13 +1994,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             xf.e[dst - XF_BASE].dirty = true;
             xf.e[dst - XF_BASE].vec_width = packed ? u->dtype.count : 0;
             LM_SET(u, slot);
-            continue;
+            goto x64_load_done;
           }
         }
 
         /* Non-fused float LOAD via pointer */
         {
-          int dst2 = xf_alloc(&xf, &buf, slot, -1, -1);
+          int dst2 = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1);
           if (ptr_slot != rax_slot)
             emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
           if (packed && u->dtype.count >= 8)
@@ -1965,12 +2012,30 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           xf.e[dst2 - XF_BASE].dirty = true;
           xf.e[dst2 - XF_BASE].vec_width = packed ? u->dtype.count : 0;
           LM_SET(u, slot);
-          continue;
+          goto x64_load_done;
         }
       }
 
       /* Integer LOAD: use stack slots (no register file).
-       * Check for fused SIB addressing (INDEX was skipped). */
+       * For gated integer LOADs, zero the stack slot and branch around. */
+      if (gate_uop && gate_jmp_done_fixup < 0) {
+        int gate_slot_v = lm_get(&locals, gate_uop);
+        if (gate_slot_v >= 0) {
+          emit_mov_r32_rbp(&buf, RAX, -slot_offset(gate_slot_v));
+          rax_slot = -1;
+          xb_byte(&buf, 0x85); emit_modrm(&buf, 3, RAX, RAX); /* test eax,eax */
+          xb_byte(&buf, 0x75); /* jnz valid_load */
+          int jnz_fixup = buf.len;
+          xb_byte(&buf, 0);
+          emit_mov_rbp_imm32(&buf, off, 0);
+          LM_SET(u, slot);
+          xb_byte(&buf, 0xEB); /* jmp done */
+          gate_jmp_done_fixup = buf.len;
+          xb_byte(&buf, 0);
+          buf.data[jnz_fixup] = (uint8_t)(buf.len - jnz_fixup - 1);
+        }
+      }
+      /* Check for fused SIB addressing (INDEX was skipped). */
       {
         PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
         if (idx_uop) {
@@ -2000,7 +2065,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             else emit_mov_rbp_r32(&buf, RAX, off);
             rax_slot = slot;
             LM_SET(u, slot);
-            continue;
+            goto x64_load_done;
           }
         }
       }
@@ -2016,6 +2081,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
       rax_slot = slot;
       LM_SET(u, slot);
+
+    x64_load_done:
+      /* Patch the gated LOAD's jmp-done target if we emitted one */
+      if (gate_jmp_done_fixup >= 0) {
+        buf.data[gate_jmp_done_fixup] = (uint8_t)(buf.len - gate_jmp_done_fixup - 1);
+      }
       continue;
     }
 
@@ -2034,11 +2105,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           if (acc_slot >= 0) {
             if (dtype_is_float(u->src[1]->dtype)) {
               int vr = xf_find(&xf, val_slot);
-              if (vr < 0) { vr = XMM0; emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot)); }
+              bool used_xmm0 = false;
+              if (vr < 0) { vr = XMM0; emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot)); used_xmm0 = true; }
               emit_movss_rbp_xmm(&buf, vr, -slot_offset(acc_slot));
               /* Update register file: acc_slot now has this value */
               int ar = xf_find(&xf, acc_slot);
               if (ar >= 0) emit_movss_xmm_xmm(&buf, ar, vr);
+              if (used_xmm0) RELOAD_SIGN_MASK();
             } else {
               int vw = u->src[1]->dtype.bitsize <= 32 ? 0 : 1;
               emit_load_int_src(&buf, RAX, vw, u->src[1], val_slot,
@@ -3216,28 +3289,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_mov_rbp_r64(&buf, RDX, off); /* remainder in RDX */
             break;
           case POLY_OP_SHL: {
-            /* Check if src[0] is RANGE_in_reg and src[1] is CONST:
-             * compute into R8 (caller-saved, stable in loop body) for reuse. */
-            int src_gpr = find_reg(reg_assigns, n_reg_assigns, u->src[0]);
-            bool const_shift = (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
-                                u->src[1]->arg.kind == POLY_ARG_INT);
-            if (src_gpr >= 0 && const_shift && n_reg_assigns < MAX_REG_ASSIGNS) {
-              int shift = (int)u->src[1]->arg.i;
-              emit_alu_rr(&buf, 1, 0x8B, R8, src_gpr); /* mov r8, range_reg */
-              emit_rex_always(&buf, 1, 0, 0, R8 >> 3);
-              xb_byte(&buf, 0xC1);
-              emit_modrm(&buf, 3, 4, R8); /* shl r8, imm8 */
-              xb_byte(&buf, (uint8_t)shift);
-              /* R8 is register-assigned; skip slot store (consumers use find_reg) */
-              reg_assigns[n_reg_assigns++] = (RegAssign){ u, R8 };
-            } else {
-              emit_load_int_src(&buf, RAX, w, u->src[0], s0, reg_assigns, n_reg_assigns);
-              emit_load_int_src(&buf, RCX, 0, u->src[1], s1, reg_assigns, n_reg_assigns);
-              emit_rex_always(&buf, w, 0, 0, 0);
-              xb_byte(&buf, 0xD3);
-              emit_modrm(&buf, 3, 4, RAX);
-              emit_mov_rbp_r64(&buf, RAX, off);
-            }
+            ILOAD(RAX, 0);
+            ILOAD(RCX, 1);
+            emit_rex_always(&buf, w, 0, 0, 0);
+            xb_byte(&buf, 0xD3);
+            emit_modrm(&buf, 3, 4, RAX); /* shl rax, cl */
+            emit_mov_rbp_r64(&buf, RAX, off);
             break;
           }
           case POLY_OP_SHR: {

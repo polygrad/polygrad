@@ -1387,7 +1387,16 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
       for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
-      sb_printf(&body, "%s = (*%s);\n", name, bidx);
+
+      /* Check for gated INDEX: INDEX(buf, idx, valid_gate).
+       * Emit conditional load: gate ? *ptr : (type)0 */
+      PolyUOp *idx_uop = u->src[0];
+      if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3) {
+        char *gate_s = smap_get(&names, idx_uop->src[2]);
+        sb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, dtype_s);
+      } else {
+        sb_printf(&body, "%s = (*%s);\n", name, bidx);
+      }
       continue;
     }
 

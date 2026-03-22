@@ -283,7 +283,7 @@ TEST(x64, e2e_neg) {
   float b[8];
   void *args[2] = { a, b };
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 2), 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(b[i], -a[i], 0);
+  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(b[i], -a[i], 0.0f);
   poly_ctx_destroy(k.ctx); PASS();
 }
 
