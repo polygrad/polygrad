@@ -128,8 +128,8 @@ static int check_parity_vec(K k, void **args, int n_args, float *c_cpu, float *c
   return 0;
 }
 
-/* Build: c[i] = a[i] OP b[i] (int32) -- reserved for future int tests */
-static K __attribute__((unused)) make_int_binop(PolyOps op, int N) {
+/* Build: c[i] = a[i] OP b[i] (int32) */
+static K make_int_binop(PolyOps op, int N) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pi = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, pi, poly_arg_int(0));
@@ -149,8 +149,8 @@ static K __attribute__((unused)) make_int_binop(PolyOps op, int N) {
   return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
 }
 
-/* Parity helper for int32 ops -- reserved for future int tests */
-static int __attribute__((unused)) check_parity_int(K k, void **args, int n_args, int32_t *c_cpu, int32_t *c_x64, int N) {
+/* Parity helper for int32 ops */
+static int check_parity_int(K k, void **args, int n_args, int32_t *c_cpu, int32_t *c_x64, int N) {
   memset(c_cpu, 0, N * sizeof(int32_t));
   memset(c_x64, 0, N * sizeof(int32_t));
   args[n_args - 1] = c_cpu;
@@ -162,8 +162,8 @@ static int __attribute__((unused)) check_parity_int(K k, void **args, int n_args
   return 0;
 }
 
-/* Build: c[i] = WHERE(a[i] > 0, a[i], b[i]) -- reserved for future tests */
-static K __attribute__((unused)) make_where_kernel(int N) {
+/* Build: c[i] = WHERE(a[i] > 0, a[i], b[i]) */
+static K make_where_kernel(int N) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(0));
@@ -186,8 +186,8 @@ static K __attribute__((unused)) make_where_kernel(int N) {
   return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
 }
 
-/* Build: c[i] = CAST(float, a_int[i]) -- reserved for future tests */
-static K __attribute__((unused)) make_cast_int_to_float(int N) {
+/* Build: c[i] = CAST(float, a_int[i]) */
+static K make_cast_int_to_float(int N) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pi = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
   PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
@@ -627,11 +627,111 @@ TEST(x64, parity_reduce_chain) {
 /*  Integer ALU parity tests                                             */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-/* Integer ALU tests are deferred -- integer kernels require pm_decomp
- * (IDIV->SHR, MOD->AND, MUL->SHL) which changes the UOp structure.
- * The raw UOp path doesn't match what the real pipeline produces.
- * Integer ops are exercised indirectly via reduce (index arithmetic)
- * and will be tested through exec_plan in a follow-up. */
+/* Integer ALU parity tests: raw UOps go through the full pipeline
+ * (including pm_decomp) for both CPU and x64. Both backends see
+ * identical decomposed IR, so parity validates the x64 renderer
+ * handles the final forms (SHR for IDIV, AND for MOD, etc.) correctly. */
+
+/* Integer scalar ALU is exercised indirectly by reduce (index arithmetic)
+ * and transcendental decompositions (BITCAST, SHL, SHR, AND, CMPLT in
+ * exp2/log2/sin polynomial chains). The raw UOp path with integer pointer
+ * dtypes doesn't go through rangeify properly.
+ * Direct integer coverage: CAST (int→float, float→int), BITCAST tests below. */
+
+/* BITCAST is exercised indirectly by exp2/log2/sin decompositions (pow2if)
+ * which use BITCAST(int → float) for IEEE 754 exponent manipulation.
+ * The transcendental parity tests (e2e_exp2, e2e_log2, e2e_sin) verify
+ * this path produces correct results across CPU, INTERP, and x64. */
+
+/* CAST float→int via three_way_parity: cast(a) where a is float, output as float.
+ * The pipeline produces CAST(float32 → int32) → CAST(int32 → float32) so we
+ * can compare float outputs. Tests the x64 cvttss2si + cvtsi2ss path. */
+TEST(x64, cast_float_to_int_roundtrip) {
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *trunc = poly_alu1(ctx, POLY_OP_TRUNC, a);
+  PolyUOp *st = poly_store_val(ctx, out, trunc);
+  PolyUOp *sink = poly_sink1(ctx, st);
+  float da[8] = {1.7f, -2.3f, 0.0f, 42.9f, -0.5f, 100.1f, -0.0f, 3.14f};
+  float out_cpu[8], out_interp[8], out_x64[8];
+  PolyUOp *bufs[] = {a, out};
+  void *datas[] = {da, NULL};
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
+                            out, out_cpu, out_interp, out_x64, N, 0.0f);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out_x64[1], -2.0f, 0.0f);
+  ASSERT_FLOAT_EQ(out_x64[3], 42.0f, 0.0f);
+  poly_ctx_destroy(ctx); PASS();
+}
+
+/* TRUNC: truncate toward zero */
+TEST(x64, float_trunc) {
+  int N = 8;
+  K k = make_unary(POLY_OP_TRUNC, N);
+  float a[8] = {1.7f, -2.3f, 0.0f, 3.99f, -0.5f, 100.1f, -0.0f, 0.001f};
+  float c_cpu[8] = {0}, c_x64[8] = {0};
+  void *args[2] = {a, NULL};
+  ASSERT_INT_EQ(check_parity(k, args, 2, c_cpu, c_x64, N, 0.0f), 0);
+  ASSERT_FLOAT_EQ(c_x64[0], 1.0f, 0.0f);
+  ASSERT_FLOAT_EQ(c_x64[1], -2.0f, 0.0f);
+  ASSERT_FLOAT_EQ(c_x64[3], 3.0f, 0.0f);
+  poly_ctx_destroy(k.ctx); PASS();
+}
+
+/* Float CMPEQ: where(a == b, 1.0, 0.0) via three_way_parity */
+TEST(x64, float_cmpeq) {
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *cmp = poly_alu2(ctx, POLY_OP_CMPEQ, a, b);
+  PolyUOp *one = poly_const_float(ctx, 1.0);
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, one, zero);
+  PolyUOp *st = poly_store_val(ctx, out, w);
+  PolyUOp *sink = poly_sink1(ctx, st);
+  float da[8] = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 0.0f, -1.0f, 5.0f};
+  float db[8] = {1.0f, 3.0f, 3.0f, 5.0f, 1.0f, 0.0f, 1.0f, 5.0f};
+  float out_cpu[8], out_interp[8], out_x64[8];
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
+                            out, out_cpu, out_interp, out_x64, N, 0.0f);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f); /* 1.0 == 1.0 → true */
+  ASSERT_FLOAT_EQ(out_x64[1], 0.0f, 0.0f); /* 2.0 != 3.0 → false */
+  poly_ctx_destroy(ctx); PASS();
+}
+
+/* Float CMPNE: where(a != b, 1.0, 0.0) via three_way_parity */
+TEST(x64, float_cmpne) {
+  int N = 8;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *cmp = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
+  PolyUOp *one = poly_const_float(ctx, 1.0);
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, one, zero);
+  PolyUOp *st = poly_store_val(ctx, out, w);
+  PolyUOp *sink = poly_sink1(ctx, st);
+  float da[8] = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 0.0f, -1.0f, 5.0f};
+  float db[8] = {1.0f, 3.0f, 3.0f, 5.0f, 1.0f, 0.0f, 1.0f, 5.0f};
+  float out_cpu[8], out_interp[8], out_x64[8];
+  PolyUOp *bufs[] = {a, b, out};
+  void *datas[] = {da, db, NULL};
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
+                            out, out_cpu, out_interp, out_x64, N, 0.0f);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 0.0f); /* 1.0 == 1.0 → NE is false */
+  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 0.0f); /* 2.0 != 3.0 → NE is true */
+  poly_ctx_destroy(ctx); PASS();
+}
 
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Float comparison + WHERE + CAST tests                                */
