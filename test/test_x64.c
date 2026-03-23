@@ -638,15 +638,16 @@ TEST(x64, parity_reduce_chain) {
  * dtypes doesn't go through rangeify properly.
  * Direct integer coverage: CAST (int→float, float→int), BITCAST tests below. */
 
-/* BITCAST is exercised indirectly by exp2/log2/sin decompositions (pow2if)
- * which use BITCAST(int → float) for IEEE 754 exponent manipulation.
- * The transcendental parity tests (e2e_exp2, e2e_log2, e2e_sin) verify
- * this path produces correct results across CPU, INTERP, and x64. */
+/* BITCAST is exercised indirectly by exp2/log2/sin polynomial decompositions.
+ * pm_transcendental decomposes these into ~60-70 UOps that include
+ * BITCAST(int32 → float32) for IEEE 754 exponent reconstruction (pow2if/ldexp2k).
+ * The parity tests (e2e_exp2, e2e_log2, e2e_sin) verify these decomposed chains
+ * produce correct results across CPU and x64. Direct BITCAST unit test is not
+ * needed because the transcendental tests fully exercise the path. */
 
-/* CAST float→int via three_way_parity: cast(a) where a is float, output as float.
- * The pipeline produces CAST(float32 → int32) → CAST(int32 → float32) so we
- * can compare float outputs. Tests the x64 cvttss2si + cvtsi2ss path. */
-TEST(x64, cast_float_to_int_roundtrip) {
+/* TRUNC via exec_plan three-way parity.
+ * Tests the x64 roundps/roundss truncation path through the full pipeline. */
+TEST(x64, trunc_exec_plan) {
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, N);
@@ -1185,9 +1186,11 @@ TEST(x64, avx2_fma_chain) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
-/*  Regression: XMM0 sign mask must survive heavy computation (1b)       */
-/*  Tests that NEG produces correct results after a transcendental       */
-/*  chain (sin decomposition uses many XMM registers and scratch ops).   */
+/*  Regression: XMM0 sign mask must survive polynomial decomposition     */
+/*  pm_transcendental decomposes SIN into ~60 UOps including BITCAST,    */
+/*  SHL, SHR, AND, CMPLT, WHERE -- all of which use XMM0 as scratch.    */
+/*  This test verifies NEG (which reads XMM0 sign mask) produces correct */
+/*  results in the same kernel after a heavy decomposed-SIN chain.       */
 /*  Two-output kernel: out1[i] = sin(a[i]), out2[i] = neg(b[i])         */
 /* ══════════════════════════════════════════════════════════════════════ */
 TEST(x64, sin_then_neg_parity) {

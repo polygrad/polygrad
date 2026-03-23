@@ -1430,33 +1430,32 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
   return reg;
 }
 
-/* Legacy wrapper: round-robin eviction (no Belady's info).
- * jit_ok: abort flag, set to false on allocation failure. */
-static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2) {
-  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0, NULL);
-}
-static int xf_alloc_ok(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2, bool *jit_ok) {
+/* Round-robin eviction wrapper. All wrappers thread jit_ok through
+ * to xf_alloc_belady so the all-pinned failure is caught everywhere. */
+static int xf_alloc(XmmFile *f, X64Buf *buf, int slot,
+                    int avoid1, int avoid2, bool *jit_ok) {
   return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0, jit_ok);
 }
 
-/* Get slot's register, loading from stack if not cached.
- * avoid1 = register not to evict (-1 = no constraint). */
-static int xf_get_avoid(XmmFile *f, X64Buf *buf, int slot, int avoid1) {
+/* Get slot's register, loading from stack if not cached. */
+static int xf_get_avoid(XmmFile *f, X64Buf *buf, int slot,
+                        int avoid1, bool *jit_ok) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
-  r = xf_alloc(f, buf, slot, avoid1, -1);
+  r = xf_alloc(f, buf, slot, avoid1, -1, jit_ok);
   emit_movss_xmm_rbp(buf, r, -slot_offset(slot));
   return r;
 }
-static int xf_get(XmmFile *f, X64Buf *buf, int slot) {
-  return xf_get_avoid(f, buf, slot, -1);
+static int xf_get(XmmFile *f, X64Buf *buf, int slot, bool *jit_ok) {
+  return xf_get_avoid(f, buf, slot, -1, jit_ok);
 }
 
 /* Get slot's register for packed value, loading with the given width */
-static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot, int width) {
+static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot,
+                           int width, bool *jit_ok) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
-  r = xf_alloc(f, buf, slot, -1, -1);
+  r = xf_alloc(f, buf, slot, -1, -1, jit_ok);
   emit_width_load_rbp(buf, r, -slot_offset(slot), width);
   f->e[r - XF_BASE].vec_width = width;
   return r;
@@ -1943,7 +1942,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (gate_uop) {
           int gate_slot_v = lm_get(&locals, gate_uop);
           if (gate_slot_v >= 0) {
-            gated_dr = xf_alloc(&xf, &buf, slot, -1, -1);
+            gated_dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
             /* test gate; jnz valid_load; xorps dr,dr; jmp done; valid_load: */
             emit_mov_r32_rbp(&buf, RAX, -slot_offset(gate_slot_v));
             rax_slot = -1;
@@ -2006,7 +2005,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             }
 
             /* Emit fused SIB LOAD (use pre-allocated XMM if gated) */
-            int dst = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1);
+            int dst = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
             if (packed && u->dtype.count >= 8)
               emit_vmovups_ymm_sib(&buf, dst, base_reg, idx_reg, is);
             else if (packed)
@@ -2022,7 +2021,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
         /* Non-fused float LOAD via pointer */
         {
-          int dst2 = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1);
+          int dst2 = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
           if (ptr_slot != rax_slot)
             emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
           if (packed && u->dtype.count >= 8)
@@ -2353,8 +2352,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* vcvttps2dq: VEX.66.0F 5B /r — float vec → int32 vec (truncate) */
         int slot = next_slot++;
         int sr = xf_find(&xf, s0);
-        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, s0, vw);
-        int dr = xf_alloc(&xf, &buf, slot, sr, -1);
+        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
+        int dr = xf_alloc(&xf, &buf, slot, sr, -1, &jit_ok);
         emit_vex_auto(&buf, dr, 0, sr, vL, 0x01, 1, 0); /* pp=01(66), map=0F */
         xb_byte(&buf, 0x5B);
         emit_modrm(&buf, 3, dr, sr);
@@ -2366,8 +2365,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* vcvtdq2ps: VEX.0F 5B /r — int32 vec → float vec */
         int slot = next_slot++;
         int sr = xf_find(&xf, s0);
-        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, s0, vw);
-        int dr = xf_alloc(&xf, &buf, slot, sr, -1);
+        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
+        int dr = xf_alloc(&xf, &buf, slot, sr, -1, &jit_ok);
         emit_vex_auto(&buf, dr, 0, sr, vL, 0x00, 1, 0); /* pp=00(none), map=0F */
         xb_byte(&buf, 0x5B);
         emit_modrm(&buf, 3, dr, sr);
@@ -2526,10 +2525,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       /* Get source vec from register file */
       int sr = xf_find(&xf, lm_get(&locals, u->src[0]));
-      if (sr < 0) sr = xf_get_packed_w(&xf, &buf, lm_get(&locals, u->src[0]), u->src[0]->dtype.count);
+      if (sr < 0) sr = xf_get_packed_w(&xf, &buf, lm_get(&locals, u->src[0]), u->src[0]->dtype.count, &jit_ok);
 
       /* Allocate scalar destination (avoid evicting source) */
-      int dr = xf_alloc(&xf, &buf, slot, sr, -1);
+      int dr = xf_alloc(&xf, &buf, slot, sr, -1, &jit_ok);
 
       if (use_avx2 && u->src[0]->dtype.count >= 8 && lane >= 4) {
         /* High 128 bits of YMM: vextractf128 to XMM0, then pshufd */
@@ -2587,7 +2586,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
       }
       /* Load as packed XMM/YMM into register file */
-      int dr = xf_alloc(&xf, &buf, slot, -1, -1);
+      int dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
       int vw = n_lanes;
       emit_width_load_rbp(&buf, dr, voff, vw);
       xf.e[dr - XF_BASE].dirty = true;
@@ -2617,10 +2616,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         for (int j = 0; j < n_lanes; j++) {
           int sj = lm_get(&locals, u->src[j]);
           int srj = (sj >= 0) ? xf_find(&xf, sj) : -1;
-          if (srj < 0 && sj >= 0) srj = xf_get(&xf, &buf, sj);
+          if (srj < 0 && sj >= 0) srj = xf_get(&xf, &buf, sj, &jit_ok);
           if (srj >= 0) emit_movss_rbp_xmm(&buf, srj, voff + j * 4);
         }
-        int dr = xf_alloc(&xf, &buf, slot, -1, -1);
+        int dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
         emit_vmovups_ymm_rbp(&buf, dr, voff);
         xf.e[dr - XF_BASE].dirty = true;
         xf.e[dr - XF_BASE].vec_width = n_lanes;
@@ -2634,11 +2633,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       for (int j = 0; j < n_lanes && j < 4; j++) {
         int sj = lm_get(&locals, u->src[j]);
         sr[j] = (sj >= 0) ? xf_find(&xf, sj) : -1;
-        if (sr[j] < 0 && sj >= 0) sr[j] = xf_get(&xf, &buf, sj);
+        if (sr[j] < 0 && sj >= 0) sr[j] = xf_get(&xf, &buf, sj, &jit_ok);
       }
 
       /* Allocate packed destination */
-      int dr = xf_alloc(&xf, &buf, slot, sr[0], sr[1]);
+      int dr = xf_alloc(&xf, &buf, slot, sr[0], sr[1], &jit_ok);
 
       if (n_lanes == 4) {
         /* SSE2 construction: unpcklps + movlhps
@@ -2706,7 +2705,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* Get src0 from register file */
         int sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
         if (sr0 < 0 && s0 >= 0) {
-          sr0 = pk ? xf_get_packed_w(&xf, &buf, s0, u->dtype.count) : xf_get(&xf, &buf, s0);
+          sr0 = pk ? xf_get_packed_w(&xf, &buf, s0, u->dtype.count, &jit_ok) : xf_get(&xf, &buf, s0, &jit_ok);
         }
 
         /* For binary ops: check if src1 was deferred (can fuse as SIB operand) */
@@ -2732,7 +2731,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* Try to find in regfile; if not cached, will fold as memory operand */
             sr1 = xf_find(&xf, s1);
           } else {
-            sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count) : xf_get_avoid(&xf, &buf, s1, sr0);
+            sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count, &jit_ok) : xf_get_avoid(&xf, &buf, s1, sr0, &jit_ok);
           }
         }
 
@@ -2769,7 +2768,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           xf.e[si].slot = slot;
           dr = sr0;
         } else {
-          dr = xf_alloc(&xf, &buf, slot, sr0, sr1 >= 0 ? sr1 : -1);
+          dr = xf_alloc(&xf, &buf, slot, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
         }
 
         switch (u->op) {
@@ -2934,14 +2933,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               int vw = u->dtype.count;
               int vL = (vw >= 8) ? 1 : 0;
               int sr_mask = xf_find(&xf, s0);
-              if (sr_mask < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
+              if (sr_mask < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
               int sr_true = xf_find(&xf, s1);
-              if (sr_true < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw);
+              if (sr_true < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
               int sr_false = xf_find(&xf, s2);
-              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true);
+              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
               /* Revalidate after loads */
-              if (xf_find(&xf, s1) < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw);
-              if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
+              if (xf_find(&xf, s1) < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
+              if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
               if (xf_find(&xf, slot) < 0)
                 dr = xf_alloc_belady(&xf, &buf, slot, sr_mask, sr_true, sr_false,
                                       slot_last_use, i, &jit_ok);
@@ -2953,11 +2952,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             } else {
               /* Scalar WHERE: cond is int (in stack), true/false are float (in reg file) */
               int sr_true = xf_find(&xf, s1);
-              if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1);
+              if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1, &jit_ok);
               int sr_false = xf_find(&xf, s2);
-              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true);
+              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
               int sr_true_check = xf_find(&xf, s1);
-              if (sr_true_check < 0) sr_true = xf_get_avoid(&xf, &buf, s1, sr_false);
+              if (sr_true_check < 0) sr_true = xf_get_avoid(&xf, &buf, s1, sr_false, &jit_ok);
               else sr_true = sr_true_check;
               if (xf_find(&xf, slot) < 0)
                 dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
@@ -2985,11 +2984,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             if (sr_s2 < 0) {
               if (pk) {
                 /* Allocate with sr0/sr1 protected */
-                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1);
+                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
                 emit_width_load_rbp(&buf, sr_s2, -slot_offset(s2), u->dtype.count);
                 xf.e[sr_s2 - XF_BASE].vec_width = u->dtype.count;
               } else {
-                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1);
+                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
                 emit_movss_xmm_rbp(&buf, sr_s2, -slot_offset(s2));
               }
             }
@@ -2997,13 +2996,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* Step 2: re-find sr0 and sr1 (they may have been evicted) */
             sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
             if (sr0 < 0 && s0 >= 0) {
-              sr0 = xf_alloc(&xf, &buf, s0, sr_s2, -1);
+              sr0 = xf_alloc(&xf, &buf, s0, sr_s2, -1, &jit_ok);
               emit_width_load_rbp(&buf, sr0, -slot_offset(s0), pk ? u->dtype.count : 0);
               if (pk) xf.e[sr0 - XF_BASE].vec_width = u->dtype.count;
             }
             sr1 = (s1 >= 0) ? xf_find(&xf, s1) : -1;
             if (sr1 < 0 && s1 >= 0) {
-              sr1 = xf_alloc(&xf, &buf, s1, sr_s2, sr0);
+              sr1 = xf_alloc(&xf, &buf, s1, sr_s2, sr0, &jit_ok);
               emit_width_load_rbp(&buf, sr1, -slot_offset(s1), pk ? u->dtype.count : 0);
               if (pk) xf.e[sr1 - XF_BASE].vec_width = u->dtype.count;
             }
@@ -3047,7 +3046,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_mov_r64_imm64(&buf, RAX, (int64_t)(uintptr_t)fn_addr);
             emit_call_r64(&buf, RAX);
             /* Result in XMM0, put in register file */
-            dr = xf_alloc(&xf, &buf, slot, -1, -1);
+            dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
             emit_movss_xmm_xmm(&buf, dr, XMM0);
             /* libm call clobbers XMM0 and RAX -- restore invariants */
             RELOAD_SIGN_MASK();
@@ -3060,7 +3059,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_movss_xmm_rbp(&buf, XMM1, -slot_offset(s1));
             emit_mov_r64_imm64(&buf, RAX, (int64_t)(uintptr_t)powf);
             emit_call_r64(&buf, RAX);
-            dr = xf_alloc(&xf, &buf, slot, -1, -1);
+            dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
             emit_movss_xmm_xmm(&buf, dr, XMM0);
             RELOAD_SIGN_MASK();
             rax_slot = -1;
@@ -3088,14 +3087,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
           /* Load sources from register file (they're in XMM/YMM) */
           int sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
-          if (sr0 < 0 && s0 >= 0) sr0 = xf_get_packed_w(&xf, &buf, s0, vw);
+          if (sr0 < 0 && s0 >= 0) sr0 = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
           int sr1 = -1;
           if (s1 >= 0 && u->n_src > 1) {
             sr1 = xf_find(&xf, s1);
-            if (sr1 < 0) sr1 = xf_get_packed_w(&xf, &buf, s1, vw);
+            if (sr1 < 0) sr1 = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
           }
 
-          int dr = xf_alloc(&xf, &buf, slot, sr0, sr1 >= 0 ? sr1 : -1);
+          int dr = xf_alloc(&xf, &buf, slot, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
 
           switch (u->op) {
             case POLY_OP_ADD:
@@ -3195,7 +3194,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                * SHL+ADD fusion), use vpslld+vpaddd instead of slow vpmulld. */
               int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
               int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
-              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw);
+              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw, &jit_ok);
               bool is_pow2 = (u->src[1]->op == POLY_OP_CONST &&
                               u->src[1]->arg.kind == POLY_ARG_INT &&
                               u->src[1]->arg.i > 0 &&
@@ -3224,9 +3223,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               /* Packed int WHERE: mask is vector, use vpand/vpandn/vpor */
               int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
               int sr_mask = (s0 >= 0) ? xf_find(&xf, s0) : -1;
-              if (sr_mask < 0 && s0 >= 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
+              if (sr_mask < 0 && s0 >= 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
               int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
-              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw);
+              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw, &jit_ok);
               /* dr = (mask & sr1) | (~mask & sr_s2) */
               emit_vpand(&buf, dr, sr_mask, sr1, vL);
               emit_vandnps(&buf, XMM0, sr_mask, sr_s2, vL);
