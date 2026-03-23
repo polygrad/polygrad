@@ -193,6 +193,11 @@ static int slot_offset(int slot_idx) {
   return SLOT_BASE + SLOT_BYTES * slot_idx;
 }
 
+/* Convert SIB scale factor (1/2/4/8) to the 2-bit SS encoding */
+static inline int scale_to_ss(int scale) {
+  switch (scale) { case 2: return 1; case 4: return 2; case 8: return 3; default: return 0; }
+}
+
 /* ── Vector configuration: parameterizes emission for SSE vs AVX2 ──── */
 typedef struct {
   int width;       /* elements per vector: 4 (SSE) or 8 (AVX2) */
@@ -765,8 +770,7 @@ static void emit_inc_r64(X64Buf *b, int reg) {
 
 /* movss xmm, [base + index*scale] — F3 (REX) 0F 10 ModRM SIB */
 static void emit_movss_xmm_sib(X64Buf *b, int xmm, int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   xb_byte(b, 0xF3);
   if (xmm >= 8 || index >= 8 || base >= 8)
     emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
@@ -784,8 +788,7 @@ static void emit_movss_xmm_sib(X64Buf *b, int xmm, int base, int index, int scal
 
 /* movss [base + index*scale], xmm — F3 (REX) 0F 11 ModRM SIB */
 static void emit_movss_sib_xmm(X64Buf *b, int xmm, int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   xb_byte(b, 0xF3);
   if (xmm >= 8 || index >= 8 || base >= 8)
     emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
@@ -804,8 +807,7 @@ static void emit_movss_sib_xmm(X64Buf *b, int xmm, int base, int index, int scal
 /* SSE scalar op with SIB addressing: F3 (REX) 0F <opcode> xmm, [base+index*scale] */
 static void emit_sse_scalar_sib(X64Buf *b, uint8_t opcode, int xmm,
                                  int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   xb_byte(b, 0xF3);
   if (xmm >= 8 || index >= 8 || base >= 8)
     emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
@@ -886,8 +888,7 @@ static void emit_movups_rbp_xmm(X64Buf *b, int xmm, int disp) {
 
 /* movups xmm, [base+index*scale] — (REX) 0F 10 ModRM SIB */
 static void emit_movups_xmm_sib(X64Buf *b, int xmm, int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   if (xmm >= 8 || index >= 8 || base >= 8)
     emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x0F); xb_byte(b, 0x10);
@@ -903,8 +904,7 @@ static void emit_movups_xmm_sib(X64Buf *b, int xmm, int base, int index, int sca
 
 /* movups [base+index*scale], xmm — (REX) 0F 11 ModRM SIB */
 static void emit_movups_sib_xmm(X64Buf *b, int xmm, int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   if (xmm >= 8 || index >= 8 || base >= 8)
     emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x0F); xb_byte(b, 0x11);
@@ -928,8 +928,7 @@ static void emit_sse_packed_rr(X64Buf *b, uint8_t opcode, int dst, int src) {
 /* Packed SSE op with SIB: (REX) 0F <opcode> xmm, [base+index*scale] */
 static void emit_sse_packed_sib(X64Buf *b, uint8_t opcode, int xmm,
                                  int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   if (xmm >= 8 || index >= 8 || base >= 8)
     emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x0F); xb_byte(b, opcode);
@@ -1015,8 +1014,7 @@ static void emit_vmovups_rbp_ymm(X64Buf *b, int ymm, int disp) {
 
 /* vmovups ymm, [base+index*scale] — VEX.256 0F 10 /r with SIB */
 static void emit_vmovups_ymm_sib(X64Buf *b, int ymm, int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   int R = (ymm < 8) ? 1 : 0;
   int X = (index < 8) ? 1 : 0;
   int B = (base < 8) ? 1 : 0;
@@ -1034,8 +1032,7 @@ static void emit_vmovups_ymm_sib(X64Buf *b, int ymm, int base, int index, int sc
 
 /* vmovups [base+index*scale], ymm — VEX.256 0F 11 /r with SIB */
 static void emit_vmovups_sib_ymm(X64Buf *b, int ymm, int base, int index, int scale) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   int R = (ymm < 8) ? 1 : 0;
   int X = (index < 8) ? 1 : 0;
   int B = (base < 8) ? 1 : 0;
@@ -1098,8 +1095,7 @@ static void emit_vex_packed_rrr(X64Buf *b, uint8_t opc, int dst, int src1, int s
 /* VEX packed ALU with SIB memory operand: dst = src1 op [base+idx*scale] */
 static void emit_vex_packed_rr_sib(X64Buf *b, uint8_t opc, int dst, int src1,
                                     int base, int idx, int scale, int L) {
-  int ss = 0;
-  switch (scale) { case 1: ss=0; break; case 2: ss=1; break; case 4: ss=2; break; case 8: ss=3; break; }
+  int ss = scale_to_ss(scale);
   int R = (dst < 8) ? 1 : 0;
   int X = (idx < 8) ? 1 : 0;
   int B = (base < 8) ? 1 : 0;
@@ -1387,7 +1383,8 @@ static int xf_find(XmmFile *f, int slot) {
  * Pass slot_last_use=NULL for legacy round-robin fallback. */
 static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
                            int avoid1, int avoid2, int avoid3,
-                           const int *slot_last_use, int cur_pos) {
+                           const int *slot_last_use, int cur_pos,
+                           bool *jit_ok) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
 
@@ -1417,7 +1414,13 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
       best_ei = -1; /* try next */
     }
   }
-  if (best_ei < 0) best_ei = 0; /* shouldn't happen */
+  if (best_ei < 0) {
+    /* All registers pinned/avoided -- signal abort (LuaJIT-style flag).
+     * Return XMM1 as a harmless placeholder; the caller checks jit_ok
+     * at the top of the main loop and aborts before executing. */
+    if (jit_ok) *jit_ok = false;
+    return XF_BASE;
+  }
   int reg = XF_BASE + best_ei;
   if (f->e[best_ei].dirty) {
     emit_width_store_rbp(buf, reg,
@@ -1427,9 +1430,13 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
   return reg;
 }
 
-/* Legacy wrapper: round-robin eviction (no Belady's info) */
+/* Legacy wrapper: round-robin eviction (no Belady's info).
+ * jit_ok: abort flag, set to false on allocation failure. */
 static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2) {
-  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0);
+  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0, NULL);
+}
+static int xf_alloc_ok(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2, bool *jit_ok) {
+  return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0, jit_ok);
 }
 
 /* Get slot's register, loading from stack if not cached.
@@ -1508,7 +1515,7 @@ static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
 uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   X64Buf buf = {0};
   LocalMap locals;
-  lm_init(&locals, n * 2);
+  lm_init(&locals, n * 4); /* 25% load factor for safe open addressing */
 
   /* ── Pre-scan: count slots, RANGEs, PARAMs, detect max vec width ─── */
   int n_slots = 0;
@@ -1648,7 +1655,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
   /* Value caches */
   int rax_slot = -1;
-  int xmm0_slot = -1; /* legacy: for non-register-file paths */
+  /* xmm0_slot removed: was write-only dead state from before the XMM register file */
 
   /* XMM register file for float values */
   XmmFile xf;
@@ -1672,8 +1679,19 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   int if_patch_stack[MAX_LOOP_DEPTH];
   int if_depth = 0;
 
+  /* Abort flag: set by xf_alloc_belady when all XMM registers are
+   * pinned/avoided and no eviction is possible (LuaJIT-style pattern).
+   * Checked once per main-loop iteration to avoid threading error
+   * returns through 22+ xf_alloc call sites. */
+  bool jit_ok = true;
+
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
+
+    if (!jit_ok) {
+      fprintf(stderr, "x64 jit: XMM register allocation failed at UOp index %d\n", i);
+      goto x64_fail;
+    }
 
     /* Skip non-code UOps */
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
@@ -1812,9 +1830,6 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
     /* ── INDEX: pointer arithmetic (base + idx * itemsize) ───────── */
     if (u->op == POLY_OP_INDEX) {
-      {
-      }
-
       int slot = next_slot++;
       int off = -slot_offset(slot);
 
@@ -1946,8 +1961,15 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             xb_byte(&buf, 0xEB);
             gate_jmp_done_fixup = buf.len;
             xb_byte(&buf, 0); /* placeholder */
-            /* valid_load: */
-            buf.data[jnz_fixup] = (uint8_t)(buf.len - jnz_fixup - 1);
+            /* valid_load: patch jnz with 8-bit displacement */
+            {
+              int disp = buf.len - jnz_fixup - 1;
+              if (disp > 127) {
+                fprintf(stderr, "x64 jit: gated load jnz displacement %d > 127\n", disp);
+                goto x64_fail;
+              }
+              buf.data[jnz_fixup] = (uint8_t)disp;
+            }
           }
         }
 
@@ -2032,7 +2054,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           xb_byte(&buf, 0xEB); /* jmp done */
           gate_jmp_done_fixup = buf.len;
           xb_byte(&buf, 0);
-          buf.data[jnz_fixup] = (uint8_t)(buf.len - jnz_fixup - 1);
+          { int disp = buf.len - jnz_fixup - 1;
+            if (disp > 127) { fprintf(stderr, "x64 jit: int gated load jnz disp %d > 127\n", disp); goto x64_fail; }
+            buf.data[jnz_fixup] = (uint8_t)disp; }
         }
       }
       /* Check for fused SIB addressing (INDEX was skipped). */
@@ -2047,8 +2071,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             is = idx_uop->src[0]->dtype.bitsize / 8;
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
             /* SIB integer LOAD: mov r32/r64, [base + idx * scale] */
-            int ss = 0;
-            switch (is) { case 1:ss=0;break; case 2:ss=1;break; case 4:ss=2;break; case 8:ss=3;break; }
+            int ss = scale_to_ss(is);
             bool w64 = (u->dtype.bitsize > 32);
             if (w64 || base_reg >= 8 || idx_reg >= 8)
               emit_rex_always(&buf, w64 ? 1 : 0, RAX >> 3, idx_reg >> 3, base_reg >> 3);
@@ -2085,7 +2108,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     x64_load_done:
       /* Patch the gated LOAD's jmp-done target if we emitted one */
       if (gate_jmp_done_fixup >= 0) {
-        buf.data[gate_jmp_done_fixup] = (uint8_t)(buf.len - gate_jmp_done_fixup - 1);
+        int disp = buf.len - gate_jmp_done_fixup - 1;
+        if (disp > 127) {
+          fprintf(stderr, "x64 jit: gated load jmp displacement %d > 127\n", disp);
+          goto x64_fail;
+        }
+        buf.data[gate_jmp_done_fixup] = (uint8_t)disp;
       }
       continue;
     }
@@ -2193,13 +2221,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                              bound_uop->arg.kind == POLY_ARG_INT);
       int64_t bound_val = bound_is_const ? bound_uop->arg.i : 0;
 
-      /* Try to assign a dedicated GPR for the loop counter */
+      /* Try to assign a dedicated GPR for the loop counter.
+       * Only allocate if we can also track it in reg_assigns --
+       * otherwise find_reg won't find it and the GPR gets clobbered. */
       int gpr = -1;
-      if (n_loop_regs < N_LOOP_GPRS) {
+      if (n_loop_regs < N_LOOP_GPRS && n_reg_assigns < MAX_REG_ASSIGNS) {
         gpr = LOOP_GPRS[n_loop_regs++];
-        if (n_reg_assigns < MAX_REG_ASSIGNS)
-          reg_assigns[n_reg_assigns++] = (RegAssign){ u, gpr };
-
+        reg_assigns[n_reg_assigns++] = (RegAssign){ u, gpr };
         emit_alu_rr(&buf, 1, 0x33, gpr, gpr);
       } else {
         emit_mov_rbp_imm64_sx(&buf, -slot_offset(slot), 0);
@@ -2209,7 +2237,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
        * must survive inner-loop register pressure (xf_clear would discard them). */
       xf_flush(&xf, &buf);
       rax_slot = -1;
-      xmm0_slot = -1;
+
 
       /* Loop condition check (backward jump target) */
       int loop_start = buf.len;
@@ -2228,7 +2256,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       int jge_off = emit_jge_rel32(&buf, 0);
 
-      if (loop_depth < MAX_LOOP_DEPTH) {
+      if (loop_depth >= MAX_LOOP_DEPTH) {
+        fprintf(stderr, "x64 jit: loop nesting depth %d exceeds MAX_LOOP_DEPTH\n", loop_depth);
+        goto x64_fail;
+      }
+      {
         loop_stack[loop_depth++] = (LoopPatch){
           .range = u,
           .jge_disp_offset = jge_off,
@@ -2259,7 +2291,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       /* Invalidate caches before backward jump */
       rax_slot = -1;
-      xmm0_slot = -1;
+
       xf_clear(&xf); /* discard iteration-local values (no spill needed) */
 
       /* Increment counter */
@@ -2291,8 +2323,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       emit_test_r32(&buf, RAX, RAX);
       int je_off = emit_je_rel32(&buf, 0);
 
-      if (if_depth < MAX_LOOP_DEPTH)
-        if_patch_stack[if_depth++] = je_off;
+      if (if_depth >= MAX_LOOP_DEPTH) {
+        fprintf(stderr, "x64 jit: IF nesting depth %d exceeds limit\n", if_depth);
+        goto x64_fail;
+      }
+      if_patch_stack[if_depth++] = je_off;
       continue;
     }
 
@@ -2428,8 +2463,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           emit_mov_rbp_r32(&buf, RAX, off);
         else
           emit_mov_rbp_r64(&buf, RAX, off);
-        rax_slot = slot; xmm0_slot = -1;
-      }
+        rax_slot = slot;      }
       LM_SET(u, slot);
       continue;
     }
@@ -2475,8 +2509,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
         emit_mov_rbp_r32(&buf, RAX, off);
       }
-      rax_slot = slot; xmm0_slot = -1;
-      LM_SET(u, slot);
+      rax_slot = slot;      LM_SET(u, slot);
       continue;
     }
 
@@ -2911,7 +2944,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw);
               if (xf_find(&xf, slot) < 0)
                 dr = xf_alloc_belady(&xf, &buf, slot, sr_mask, sr_true, sr_false,
-                                      slot_last_use, i);
+                                      slot_last_use, i, &jit_ok);
               /* dr = (mask & true) | (~mask & false) */
               emit_vandps(&buf, dr, sr_mask, sr_true, vL);
               emit_vandnps(&buf, XMM0, sr_mask, sr_false, vL);
@@ -2928,7 +2961,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               else sr_true = sr_true_check;
               if (xf_find(&xf, slot) < 0)
                 dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
-                                      slot_last_use, i);
+                                      slot_last_use, i, &jit_ok);
               emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
               emit_neg_r32(&buf, RAX);
               emit_movd_xmm_r32(&buf, XMM0, RAX);
@@ -2978,7 +3011,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* Step 3: allocate dr protecting all 3 */
             if (xf_find(&xf, slot) < 0) {
               dr = xf_alloc_belady(&xf, &buf, slot, sr0, sr1, sr_s2,
-                                    slot_last_use, i);
+                                    slot_last_use, i, &jit_ok);
             }
             if (cpu.has_fma) {
               int vL = pk ? ((u->dtype.count >= 8) ? 1 : 0) : 0;
@@ -3016,6 +3049,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* Result in XMM0, put in register file */
             dr = xf_alloc(&xf, &buf, slot, -1, -1);
             emit_movss_xmm_xmm(&buf, dr, XMM0);
+            /* libm call clobbers XMM0 and RAX -- restore invariants */
+            RELOAD_SIGN_MASK();
+            rax_slot = -1;
             break;
           }
           case POLY_OP_POW: {
@@ -3026,6 +3062,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_call_r64(&buf, RAX);
             dr = xf_alloc(&xf, &buf, slot, -1, -1);
             emit_movss_xmm_xmm(&buf, dr, XMM0);
+            RELOAD_SIGN_MASK();
+            rax_slot = -1;
             break;
           }
 
@@ -3418,10 +3456,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             }
 
           case POLY_OP_THREEFRY:
-            /* THREEFRY is decomposed by pm_decomp before reaching renderer.
-             * If it survives, just store 0 as fallback. */
-            emit_mov_rbp_imm64_sx(&buf, off, 0);
-            break;
+            /* THREEFRY should be decomposed by pm_decomp before reaching the
+             * renderer, and x64_can_handle rejects it. If it somehow survives,
+             * fail rather than silently producing wrong results. */
+            fprintf(stderr, "x64 jit: unexpected THREEFRY op at index %d\n", i);
+            goto x64_fail;
 
           default:
             fprintf(stderr, "x64 jit: unhandled int ALU op %s at index %d\n",
@@ -3431,7 +3470,6 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         #undef ILOAD
         /* Integer ALU clobbers RAX */
         rax_slot = -1;
-        xmm0_slot = -1; /* be conservative: int ops may interleave with float */
       }
       LM_SET(u, slot);
       continue;
@@ -3443,8 +3481,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     goto x64_fail;
 
 skip_slot:
-    next_slot--; /* reclaim slot on error */
-    continue;
+    /* A source slot was unresolved -- the kernel graph is broken.
+     * Silently continuing would emit incomplete code that produces
+     * wrong results. Fail so the exec_plan layer falls back to CPU. */
+    fprintf(stderr, "x64 jit: unresolved source slot at UOp index %d (op=%s)\n",
+            i, poly_op_name(u->op));
+    goto x64_fail;
   }
 
   /* ── Epilogue ────────────────────────────────────────────────────── */

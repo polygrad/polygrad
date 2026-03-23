@@ -1084,4 +1084,58 @@ TEST(x64, avx2_fma_chain) {
   poly_ctx_destroy(ctx); PASS();
 }
 
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Regression: XMM0 sign mask must survive heavy computation (1b)       */
+/*  Tests that NEG produces correct results after a transcendental       */
+/*  chain (sin decomposition uses many XMM registers and scratch ops).   */
+/*  Two-output kernel: out1[i] = sin(a[i]), out2[i] = neg(b[i])         */
+/* ══════════════════════════════════════════════════════════════════════ */
+TEST(x64, sin_then_neg_parity) {
+  int N = 16;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *pa = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(0));
+  PolyUOp *pb = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(1));
+  PolyUOp *po1 = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(2));
+  PolyUOp *po2 = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(3));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *ia = poly_uop2(ctx, POLY_OP_INDEX, pf, pa, range, poly_arg_none());
+  PolyUOp *ib = poly_uop2(ctx, POLY_OP_INDEX, pf, pb, range, poly_arg_none());
+  PolyUOp *io1 = poly_uop2(ctx, POLY_OP_INDEX, pf, po1, range, poly_arg_none());
+  PolyUOp *io2 = poly_uop2(ctx, POLY_OP_INDEX, pf, po2, range, poly_arg_none());
+  PolyUOp *la = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, ia, poly_arg_none());
+  PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, ib, poly_arg_none());
+  PolyUOp *s = poly_uop1(ctx, POLY_OP_SIN, POLY_FLOAT32, la, poly_arg_none());
+  PolyUOp *ng = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, lb, poly_arg_none());
+  PolyUOp *st1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, io1, s, poly_arg_none());
+  PolyUOp *st2 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, io2, ng, poly_arg_none());
+  PolyUOp *end_srcs[3] = { st1, st2, range };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  float a[16], b[16], o1_cpu[16], o2_cpu[16], o1_x64[16], o2_x64[16];
+  for (int i = 0; i < N; i++) { a[i] = 0.5f * (float)(i + 1); b[i] = (float)(i + 1); }
+
+  /* CPU reference */
+  memset(o1_cpu, 0, sizeof(o1_cpu)); memset(o2_cpu, 0, sizeof(o2_cpu));
+  void *args_cpu[4] = {a, b, o1_cpu, o2_cpu};
+  ASSERT_INT_EQ(cpu_run(ctx, sink, args_cpu, 4), 0);
+
+  /* x64 */
+  memset(o1_x64, 0, sizeof(o1_x64)); memset(o2_x64, 0, sizeof(o2_x64));
+  void *args_x64[4] = {a, b, o1_x64, o2_x64};
+  ASSERT_INT_EQ(x64_run(ctx, sink, args_x64, 4), 0);
+
+  /* SIN parity */
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(o1_x64[i], o1_cpu[i], 1e-4);
+  /* NEG parity -- the critical check: sign mask must not be corrupted
+   * by the sin decomposition's heavy use of XMM0 as scratch */
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(o2_x64[i], o2_cpu[i], 1e-6);
+
+  poly_ctx_destroy(ctx); PASS();
+}
+
 #endif /* POLY_HAS_X64 */
