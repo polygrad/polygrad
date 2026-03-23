@@ -684,7 +684,10 @@ TEST(x64, float_trunc) {
 
 /* Float CMPEQ: where(a == b, 1.0, 0.0) via three_way_parity */
 TEST(x64, float_cmpeq) {
-  int N = 8;
+  /* Includes IEEE edge cases: NaN, +Inf, -Inf, +0 vs -0 */
+  int N = 12;
+  float nan_val = 0.0f / 0.0f;
+  float inf_val = 1.0f / 0.0f;
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, N);
   PolyUOp *b = poly_buffer_f32(ctx, N);
@@ -695,22 +698,29 @@ TEST(x64, float_cmpeq) {
   PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, one, zero);
   PolyUOp *st = poly_store_val(ctx, out, w);
   PolyUOp *sink = poly_sink1(ctx, st);
-  float da[8] = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 0.0f, -1.0f, 5.0f};
-  float db[8] = {1.0f, 3.0f, 3.0f, 5.0f, 1.0f, 0.0f, 1.0f, 5.0f};
-  float out_cpu[8], out_interp[8], out_x64[8];
+  float da[12] = {1.0f, 2.0f, 3.0f, nan_val, inf_val, -inf_val, 0.0f, -0.0f, nan_val, inf_val, 1.0f, 0.0f};
+  float db[12] = {1.0f, 3.0f, 3.0f, nan_val, inf_val, -inf_val, -0.0f, 0.0f, 1.0f,   -inf_val, 0.0f, 0.0f};
+  /* Expected: T, F, T, F(NaN!=NaN), T, T, T(+0==-0), T(-0==+0), F, F, F, T */
+  float out_cpu[12], out_interp[12], out_x64[12];
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
   int rc = three_way_parity(ctx, sink, bufs, datas, 3,
                             out, out_cpu, out_interp, out_x64, N, 0.0f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f); /* 1.0 == 1.0 → true */
-  ASSERT_FLOAT_EQ(out_x64[1], 0.0f, 0.0f); /* 2.0 != 3.0 → false */
+  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f);  /* 1.0 == 1.0 */
+  ASSERT_FLOAT_EQ(out_x64[1], 0.0f, 0.0f);  /* 2.0 != 3.0 */
+  ASSERT_FLOAT_EQ(out_x64[3], 0.0f, 0.0f);  /* NaN != NaN (IEEE 754) */
+  ASSERT_FLOAT_EQ(out_x64[4], 1.0f, 0.0f);  /* +Inf == +Inf */
+  ASSERT_FLOAT_EQ(out_x64[6], 1.0f, 0.0f);  /* +0 == -0 */
+  ASSERT_FLOAT_EQ(out_x64[7], 1.0f, 0.0f);  /* -0 == +0 */
   poly_ctx_destroy(ctx); PASS();
 }
 
-/* Float CMPNE: where(a != b, 1.0, 0.0) via three_way_parity */
+/* Float CMPNE with IEEE edge cases */
 TEST(x64, float_cmpne) {
-  int N = 8;
+  int N = 12;
+  float nan_val = 0.0f / 0.0f;
+  float inf_val = 1.0f / 0.0f;
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, N);
   PolyUOp *b = poly_buffer_f32(ctx, N);
@@ -721,16 +731,21 @@ TEST(x64, float_cmpne) {
   PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, one, zero);
   PolyUOp *st = poly_store_val(ctx, out, w);
   PolyUOp *sink = poly_sink1(ctx, st);
-  float da[8] = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 0.0f, -1.0f, 5.0f};
-  float db[8] = {1.0f, 3.0f, 3.0f, 5.0f, 1.0f, 0.0f, 1.0f, 5.0f};
-  float out_cpu[8], out_interp[8], out_x64[8];
+  float da[12] = {1.0f, 2.0f, 3.0f, nan_val, inf_val, -inf_val, 0.0f, -0.0f, nan_val, inf_val, 1.0f, 0.0f};
+  float db[12] = {1.0f, 3.0f, 3.0f, nan_val, inf_val, -inf_val, -0.0f, 0.0f, 1.0f,   -inf_val, 0.0f, 0.0f};
+  /* Expected: F, T, F, T(NaN!=NaN), F, F, F(+0==-0), F(-0==+0), T, T, T, F */
+  float out_cpu[12], out_interp[12], out_x64[12];
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
   int rc = three_way_parity(ctx, sink, bufs, datas, 3,
                             out, out_cpu, out_interp, out_x64, N, 0.0f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 0.0f); /* 1.0 == 1.0 → NE is false */
-  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 0.0f); /* 2.0 != 3.0 → NE is true */
+  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 0.0f);  /* 1.0 == 1.0 → NE false */
+  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 0.0f);  /* 2.0 != 3.0 → NE true */
+  ASSERT_FLOAT_EQ(out_x64[3], 1.0f, 0.0f);  /* NaN != NaN → NE true (IEEE 754) */
+  ASSERT_FLOAT_EQ(out_x64[4], 0.0f, 0.0f);  /* +Inf == +Inf → NE false */
+  ASSERT_FLOAT_EQ(out_x64[6], 0.0f, 0.0f);  /* +0 == -0 → NE false */
+  ASSERT_FLOAT_EQ(out_x64[7], 0.0f, 0.0f);  /* -0 == +0 → NE false */
   poly_ctx_destroy(ctx); PASS();
 }
 

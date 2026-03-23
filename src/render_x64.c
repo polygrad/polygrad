@@ -838,19 +838,24 @@ static void emit_load_int_src(X64Buf *buf, int dst_gpr, int w,
   }
 }
 
-/* Resolve the index operand of an INDEX UOp to a GPR.
- * Handles direct register assignments (RANGE counter) and
- * SHL(RANGE_in_reg, CONST) patterns from the vec UPCAST path.
- * Returns the GPR number, or -1 if the index must be loaded from stack.
- * When SHL is detected, emits inline computation into RCX. */
-static int resolve_index_to_gpr(X64Buf *buf, PolyUOp *idx_src,
-                                 RegAssign *regs, int n_regs,
-                                 LocalMap *locals) {
-  /* Direct: RANGE counter in a register */
+/* Check if the index operand can be resolved to a GPR, without emitting code.
+ * Returns the GPR number if already in a register (RANGE counter), or RCX if
+ * the value is in a stack slot (will need a load), or -1 if unresolvable. */
+static int query_index_gpr(PolyUOp *idx_src, RegAssign *regs, int n_regs,
+                           LocalMap *locals) {
   int r = find_reg(regs, n_regs, idx_src);
   if (r >= 0) return r;
+  if (locals && lm_get(locals, idx_src) >= 0) return RCX;
+  return -1;
+}
 
-  /* Fallback: load from stack slot into RCX */
+/* Materialize the index operand into a GPR, emitting a load if needed.
+ * Call only after query_index_gpr returned >= 0. */
+static int materialize_index_gpr(X64Buf *buf, PolyUOp *idx_src,
+                                 RegAssign *regs, int n_regs,
+                                 LocalMap *locals) {
+  int r = find_reg(regs, n_regs, idx_src);
+  if (r >= 0) return r;
   if (locals) {
     int slot = lm_get(locals, idx_src);
     if (slot >= 0) {
@@ -1596,6 +1601,80 @@ static void ctx_free(X64RenderCtx *c) {
   free(c->slot_last_use);
 }
 
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Extracted UOp handlers (take X64RenderCtx, return false on failure)   */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+static bool x64_emit_param(X64RenderCtx *c, PolyUOp *u, int i) {
+  int slot = c->next_slot++;
+  int off = -slot_offset(slot);
+  int param_idx = (int)u->arg.i;
+  int gpr = -1;
+  if (c->n_param_gprs_assigned < c->n_param_gprs &&
+      c->n_reg_assigns < MAX_REG_ASSIGNS) {
+    gpr = LOOP_GPRS[c->param_gpr_start + c->n_param_gprs_assigned];
+    c->n_param_gprs_assigned++;
+    c->reg_assigns[c->n_reg_assigns++] = (RegAssign){ u, gpr };
+    emit_mov_r64_mem(&c->buf, gpr, R15, 8 * param_idx);
+  } else {
+    emit_mov_r64_mem(&c->buf, RAX, R15, 8 * param_idx);
+    emit_mov_rbp_r64(&c->buf, RAX, off);
+    c->rax_slot = slot;
+  }
+  if (gpr >= 0) emit_mov_rbp_r64(&c->buf, gpr, off);
+  ctx_bind_slot(c, u, slot, i);
+  return true;
+}
+
+static bool x64_emit_define_var(X64RenderCtx *c, PolyUOp *u, int i) {
+  int slot = c->next_slot++;
+  int off = -slot_offset(slot);
+  int var_idx = c->n_params + c->n_define_vars;
+  c->n_define_vars++;
+  emit_mov_r64_mem(&c->buf, RAX, R15, 8 * var_idx);
+  emit_mov_r32_mem_base(&c->buf, RAX, RAX);
+  emit_movsxd(&c->buf, RAX, RAX);
+  emit_mov_rbp_r64(&c->buf, RAX, off);
+  ctx_bind_slot(c, u, slot, i);
+  return true;
+}
+
+static bool x64_emit_define_acc(X64RenderCtx *c, PolyUOp *u, int i) {
+  int slot = c->next_slot++;
+  int off = -slot_offset(slot);
+  emit_mov_rbp_imm64_sx(&c->buf, off, 0);
+  ctx_bind_slot(c, u, slot, i);
+  return true;
+}
+
+static bool x64_emit_after(X64RenderCtx *c, PolyUOp *u, int i) {
+  int s0 = lm_get(&c->locals, u->src[0]);
+  if (s0 >= 0) ctx_bind_slot(c, u, s0, i);
+  return true;
+}
+
+static bool x64_emit_if(X64RenderCtx *c, PolyUOp *u) {
+  int cond_slot = lm_get(&c->locals, u->src[0]);
+  if (cond_slot < 0) return true; /* no slot = skip */
+  emit_mov_r32_rbp(&c->buf, RAX, -slot_offset(cond_slot));
+  emit_test_r32(&c->buf, RAX, RAX);
+  int je_off = emit_je_rel32(&c->buf, 0);
+  if (c->if_depth >= MAX_LOOP_DEPTH) {
+    fprintf(stderr, "x64 jit: IF nesting depth %d exceeds limit\n", c->if_depth);
+    return false;
+  }
+  c->if_patch_stack[c->if_depth++] = je_off;
+  return true;
+}
+
+static bool x64_emit_endif(X64RenderCtx *c) {
+  if (c->if_depth > 0) {
+    int je_off = c->if_patch_stack[--c->if_depth];
+    patch_rel32(&c->buf, je_off, c->buf.len);
+  }
+  return true;
+}
+
 uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   X64RenderCtx c = { .jit_ok = true, .rax_slot = -1 };
   c.uops = uops;
@@ -1639,6 +1718,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
    * Build a ptr→index map for O(1) source lookups. */
   c.last_consumer = calloc((size_t)n, sizeof(int));
   int *last_consumer = c.last_consumer; /* local alias for readability */
+  int *n_consumers = calloc((size_t)n, sizeof(int)); /* total consumer count per UOp */
   for (int i = 0; i < n; i++) last_consumer[i] = i; /* default: self */
   /* Simple open-addressing hash map: UOp* → linearized index */
   typedef struct { PolyUOp *key; int idx; } UOpMapEntry;
@@ -1654,7 +1734,6 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
     for (int k = 0; k < u->n_src; k++) {
-      /* Find source's index via hash map */
       uint64_t sh = ((uint64_t)(uintptr_t)u->src[k] >> 3) * 0x9E3779B97F4A7C15ULL;
       int sp = (int)(sh % (uint64_t)uop_map_cap);
       int j = -1;
@@ -1662,7 +1741,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (uop_map[sp].key == u->src[k]) { j = uop_map[sp].idx; break; }
         sp = (sp + 1) % uop_map_cap;
       }
-      if (j >= 0 && i > last_consumer[j]) last_consumer[j] = i;
+      if (j >= 0) {
+        if (i > last_consumer[j]) last_consumer[j] = i;
+        n_consumers[j]++;
+      }
     }
   }
   /* Per-slot last-use tracking (filled during rendering) */
@@ -1772,49 +1854,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
     /* ── PARAM: load buffer pointer from args array ──────────────── */
     if (u->op == POLY_OP_PARAM) {
-      int slot = next_slot++;
-      int off = -slot_offset(slot);
-      int param_idx = (int)u->arg.i;
-
-      /* Try to assign a dedicated GPR for this base pointer */
-      int gpr = -1;
-      if (n_param_gprs_assigned < n_param_gprs && n_reg_assigns < MAX_REG_ASSIGNS) {
-        gpr = LOOP_GPRS[param_gpr_start + n_param_gprs_assigned];
-        n_param_gprs_assigned++;
-        reg_assigns[n_reg_assigns++] = (RegAssign){ u, gpr };
-        /* Load base pointer directly into dedicated GPR */
-        emit_mov_r64_mem(&buf, gpr, R15, 8 * param_idx);
-      } else {
-        /* Fallback: load to RAX, store to slot */
-        emit_mov_r64_mem(&buf, RAX, R15, 8 * param_idx);
-        emit_mov_rbp_r64(&buf, RAX, off);
-        rax_slot = slot;
-      }
-      /* Also store to slot for fallback consumers */
-      if (gpr >= 0) {
-        emit_mov_rbp_r64(&buf, gpr, off);
-      }
-      LM_SET(u, slot);
+      if (!x64_emit_param(&c, u, i)) goto x64_fail;
       continue;
     }
 
     /* ── DEFINE_VAR: load int variable from args array ───────────── */
     if (u->op == POLY_OP_DEFINE_VAR) {
-      int slot = next_slot++;
-      int off = -slot_offset(slot);
-      /* Vars are appended after buffer PARAMs in the args array.
-       * n_define_vars tracks the sequential position of this DEFINE_VAR. */
-      int var_idx = n_params + n_define_vars;
-      n_define_vars++;
-      /* mov rax, [r15 + 8*var_idx] */
-      emit_mov_r64_mem(&buf, RAX, R15, 8 * var_idx);
-      /* mov eax, [rax] — dereference to get int value */
-      emit_mov_r32_mem_base(&buf, RAX, RAX);
-      /* movsxd rax, eax — sign-extend to 64-bit */
-      emit_movsxd(&buf, RAX, RAX);
-      /* mov [rbp - off], rax */
-      emit_mov_rbp_r64(&buf, RAX, off);
-      LM_SET(u, slot);
+      if (!x64_emit_define_var(&c, u, i)) goto x64_fail;
       continue;
     }
 
@@ -1877,18 +1923,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
     /* ── DEFINE_LOCAL / DEFINE_REG: initialize accumulator ───────── */
     if (u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG) {
-      int slot = next_slot++;
-      int off = -slot_offset(slot);
-      /* Initialize to 0 (zero the full 8 bytes) */
-      emit_mov_rbp_imm64_sx(&buf, off, 0);
-      LM_SET(u, slot);
+      if (!x64_emit_define_acc(&c, u, i)) goto x64_fail;
       continue;
     }
 
     /* ── AFTER: alias to src[0] ──────────────────────────────────── */
     if (u->op == POLY_OP_AFTER) {
-      int s0 = lm_get(&locals, u->src[0]);
-      if (s0 >= 0) LM_SET(u, s0);
+      if (!x64_emit_after(&c, u, i)) goto x64_fail;
       continue;
     }
 
@@ -1909,16 +1950,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       /* Check if all consumers of this INDEX can fuse via SIB.
        * If so, skip emission — LOAD/STORE will use [base+idx*scale] directly. */
       int base_reg = find_reg(reg_assigns, n_reg_assigns, u->src[0]);
-      int idx_reg_check = resolve_index_to_gpr(&buf, u->src[1],
-                                                reg_assigns, n_reg_assigns, &locals);
-      /* Undo any code emitted by resolve (it was just a check) — actually
-       * resolve_index_to_gpr may emit a load from slot. But for find_reg hit
-       * (RANGE or R8-assigned SHL), no code is emitted. Safe for the check. */
+      int idx_reg_check = query_index_gpr(u->src[1],
+                                          reg_assigns, n_reg_assigns, &locals);
+      /* Pure query: no code emitted, safe to check before deciding to skip INDEX */
       if (base_reg >= 0 && idx_reg_check >= 0 && valid_sib_scale(itemsize)) {
-        /* Check all consumers: every consumer must be LOAD/STORE/CAST that
-         * chains to LOAD/STORE (which can fuse via find_index_through_cast). */
+        /* Check all consumers: every consumer must be LOAD/STORE/CAST.
+         * Scan only up to last_consumer[i] (precomputed) instead of n. */
         bool all_fuse = true;
-        for (int j = i + 1; j < n && all_fuse; j++) {
+        for (int j = i + 1; j <= last_consumer[i] && all_fuse; j++) {
           for (int k = 0; k < uops[j]->n_src; k++) {
             if (uops[j]->src[k] == u) {
               PolyOps cop = uops[j]->op;
@@ -1938,7 +1977,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_r64_rbp(&buf, RAX, -slot_offset(base_slot));
       }
 
-      int idx_reg = resolve_index_to_gpr(&buf, u->src[1],
+      int idx_reg = materialize_index_gpr(&buf, u->src[1],
                                           reg_assigns, n_reg_assigns, &locals);
       if (idx_reg >= 0) {
         if (idx_reg != RCX) emit_alu_rr(&buf, 1, 0x8B, RCX, idx_reg);
@@ -2041,28 +2080,24 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
-          int idx_reg = resolve_index_to_gpr(&buf, idx_uop->src[1],
+          int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
                                               reg_assigns, n_reg_assigns, &locals);
           int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
             is = idx_uop->src[0]->dtype.bitsize / 8;
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
             /* No deferred loads for gated LOADs */
-            if (gated_dr < 0) {
-              int n_consumers = 0;
+            if (gated_dr < 0 && n_consumers[i] == 1) {
+              /* Single consumer -- check if it's a float ALU op that can fuse SIB */
               bool can_defer = false;
-              for (int j = i + 1; j < n && n_consumers <= 1; j++) {
-                PolyUOp *fj = uops[j];
-                for (int k = 0; k < fj->n_src; k++) {
-                  if (fj->src[k] == u) {
-                    n_consumers++;
-                    if (k == 1 && !packed && poly_opset_has(POLY_GROUP_ALU, fj->op) &&
-                        dtype_is_float(fj->dtype) && fj->n_src >= 2)
-                      can_defer = true;
-                  }
-                }
+              PolyUOp *fj = uops[last_consumer[i]];
+              for (int k = 0; k < fj->n_src; k++) {
+                if (fj->src[k] == u && k == 1 && !packed &&
+                    poly_opset_has(POLY_GROUP_ALU, fj->op) &&
+                    dtype_is_float(fj->dtype) && fj->n_src >= 2)
+                  can_defer = true;
               }
-              if (can_defer && n_consumers == 1 && n_deferred < 32) {
+              if (can_defer && n_deferred < 32) {
                 deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_reg, is };
                 LM_SET(u, slot);
                 goto x64_load_done;
@@ -2128,7 +2163,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
-          int idx_reg = resolve_index_to_gpr(&buf, idx_uop->src[1],
+          int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
                                               reg_assigns, n_reg_assigns, &locals);
           int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
@@ -2233,7 +2268,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (st_idx) {
           PolyUOp *idx_uop = st_idx;
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
-          int idx_reg = resolve_index_to_gpr(&buf, idx_uop->src[1],
+          int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
                                               reg_assigns, n_reg_assigns, &locals);
           int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
@@ -2379,28 +2414,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
     /* ── IF: conditional forward jump ────────────────────────────── */
     if (u->op == POLY_OP_IF) {
-      int cond_slot = lm_get(&locals, u->src[0]);
-      if (cond_slot < 0) continue;
-
-      /* Load condition, test, jump if zero */
-      emit_mov_r32_rbp(&buf, RAX, -slot_offset(cond_slot));
-      emit_test_r32(&buf, RAX, RAX);
-      int je_off = emit_je_rel32(&buf, 0);
-
-      if (if_depth >= MAX_LOOP_DEPTH) {
-        fprintf(stderr, "x64 jit: IF nesting depth %d exceeds limit\n", if_depth);
-        goto x64_fail;
-      }
-      if_patch_stack[if_depth++] = je_off;
+      if (!x64_emit_if(&c, u)) goto x64_fail;
       continue;
     }
 
     /* ── ENDIF: patch IF forward jump ────────────────────────────── */
     if (u->op == POLY_OP_ENDIF) {
-      if (if_depth > 0) {
-        int je_off = if_patch_stack[--if_depth];
-        patch_rel32(&buf, je_off, buf.len);
-      }
+      if (!x64_emit_endif(&c)) goto x64_fail;
       continue;
     }
 
@@ -2816,13 +2836,20 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
            * Only spill if src0 is used again later (check remaining UOps). */
           int si = sr0 - XF_BASE;
           if (xf.e[si].dirty) {
-            /* Check if src0's UOp is referenced by any later UOp */
-            bool src0_used_later = false;
-            PolyUOp *src0_uop = u->src[0];
-            for (int j = i + 1; j < n && !src0_used_later; j++) {
-              PolyUOp *fj = uops[j];
-              for (int k = 0; k < fj->n_src; k++)
-                if (fj->src[k] == src0_uop) { src0_used_later = true; break; }
+            /* Check if src0 is referenced by any later UOp using precomputed data.
+             * Find src0's linearized index via the uop_map, then check last_consumer. */
+            bool src0_used_later = (n_consumers[i] > 0); /* conservative default */
+            {
+              PolyUOp *src0_uop = u->src[0];
+              uint64_t sh = ((uint64_t)(uintptr_t)src0_uop >> 3) * 0x9E3779B97F4A7C15ULL;
+              int sp = (int)(sh % (uint64_t)uop_map_cap);
+              while (uop_map[sp].key) {
+                if (uop_map[sp].key == src0_uop) {
+                  src0_used_later = (last_consumer[uop_map[sp].idx] > i);
+                  break;
+                }
+                sp = (sp + 1) % uop_map_cap;
+              }
             }
             if (src0_used_later) {
               emit_width_store_rbp(&buf, sr0,
@@ -3586,6 +3613,7 @@ skip_slot:
 
   ctx_free(&c);
   free(uop_map);
+  free(n_consumers);
 
   *size_out = c.buf.len;
   return c.buf.data;
@@ -3593,6 +3621,7 @@ skip_slot:
 x64_fail:
   ctx_free(&c);
   free(uop_map);
+  free(n_consumers);
   free(c.buf.data);
   return NULL;
 }

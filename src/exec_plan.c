@@ -687,9 +687,10 @@ static bool x64_can_handle(PolyUOp *root) {
       stack[top++] = u->src[i];
     }
   }
-  /* Reject multi-store + multi-range patterns (reduce chains) — x64 renderer
-   * compiles them but produces incorrect code for complex AFTER ordering. */
-  if (ok && n_stores > 1 && n_ranges > 1) ok = false;
+  /* Previously rejected multi-store + multi-range patterns due to SHL R8
+   * clobber in nested loops (fixed in commit 439f957). The renderer now
+   * handles these correctly. Keeping the check commented for reference:
+   * if (ok && n_stores > 1 && n_ranges > 1) ok = false; */
 
   free(stack);
   free(set);
