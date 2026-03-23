@@ -1511,17 +1511,101 @@ static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
   return NULL;
 }
 
-uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
-  X64Buf buf = {0};
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Render context: all shared mutable state for the x64 JIT emitter.    */
+/*  Grouping these into a struct makes invariants explicit and enables    */
+/*  extraction of per-UOp handler functions.                              */
+/* ══════════════════════════════════════════════════════════════════════ */
+
+typedef struct { PolyUOp *uop; int base_reg, idx_reg, itemsize; } DeferredSIB;
+
+typedef struct {
+  /* Code buffer */
+  X64Buf buf;
+  /* IR */
+  PolyUOp **uops;
+  int n;
+  /* UOp → stack slot map */
   LocalMap locals;
-  lm_init(&locals, n * 4); /* 25% load factor for safe open addressing */
+  int next_slot;
+  int n_slots;
+  /* Liveness */
+  int *last_consumer;   /* [n] last UOp index that references uops[i] */
+  int *slot_last_use;   /* [n_slots+16] last consumer for Belady's eviction */
+  /* CPU/config */
+  X64CpuCaps cpu;
+  bool use_avx;
+  bool use_avx2;
+  int frame_size;
+  int n_params;
+  int n_define_vars;
+  /* GPR register assignments (loop counters + PARAM base pointers) */
+  RegAssign reg_assigns[MAX_REG_ASSIGNS];
+  int n_reg_assigns;
+  int n_loop_regs;
+  int n_param_gprs;
+  int param_gpr_start;
+  int n_param_gprs_assigned;
+  /* Value caches */
+  int rax_slot;
+  /* XMM register file */
+  XmmFile xf;
+  /* Deferred SIB loads (fused into consumer ALU ops) */
+  DeferredSIB deferred[32];
+  int n_deferred;
+  /* Control-flow stacks */
+  LoopPatch loop_stack[MAX_LOOP_DEPTH];
+  int loop_depth;
+  int if_patch_stack[MAX_LOOP_DEPTH];
+  int if_depth;
+  /* Abort flag (LuaJIT-style: set by xf_alloc, checked once per iteration) */
+  bool jit_ok;
+} X64RenderCtx;
+
+/* ── Context helpers (replace former macros) ─────────────────────────── */
+
+static void ctx_bind_slot(X64RenderCtx *c, PolyUOp *u, int slot, int uop_idx) {
+  lm_set(&c->locals, u, slot);
+  if (slot >= 0 && slot < c->n_slots + 16)
+    c->slot_last_use[slot] = c->last_consumer[uop_idx];
+}
+
+static void ctx_reload_sign_mask(X64RenderCtx *c) {
+  emit_mov_r32_imm32(&c->buf, RAX, (int32_t)0x80000000u);
+  emit_movd_xmm_r32(&c->buf, XMM0, RAX);
+  if (c->use_avx2) {
+    emit_vbroadcastss_ymm_xmm(&c->buf, XMM0, XMM0);
+  } else {
+    xb_byte(&c->buf, 0x0F); xb_byte(&c->buf, 0xC6);
+    emit_modrm(&c->buf, 3, XMM0, XMM0); xb_byte(&c->buf, 0x00);
+  }
+  c->rax_slot = -1;
+}
+
+static void ctx_load_int_src(X64RenderCtx *c, int dst_gpr, int w,
+                             PolyUOp *src_uop, int src_slot) {
+  emit_load_int_src(&c->buf, dst_gpr, w, src_uop, src_slot,
+                    c->reg_assigns, c->n_reg_assigns);
+}
+
+/* ── Cleanup helpers ─────────────────────────────────────────────────── */
+
+static void ctx_free(X64RenderCtx *c) {
+  lm_destroy(&c->locals);
+  free(c->last_consumer);
+  free(c->slot_last_use);
+}
+
+uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
+  X64RenderCtx c = { .jit_ok = true, .rax_slot = -1 };
+  c.uops = uops;
+  c.n = n;
+  /* buf is a macro alias to c.buf so all emit helpers write to the ctx buffer */
+  #define buf c.buf
+  lm_init(&c.locals, n * 4); /* 25% load factor for safe open addressing */
 
   /* ── Pre-scan: count slots, RANGEs, PARAMs, detect max vec width ─── */
-  int n_slots = 0;
-  int n_params = 0;
-  int n_define_vars = 0;
-  int n_ranges = 0;
-  int max_vec_width = 0;
+  int n_slots = 0, n_params = 0, n_define_vars = 0, n_ranges = 0, max_vec_width = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP ||
@@ -1536,17 +1620,25 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     n_slots++;
   }
 
+  c.n_slots = n_slots;
+  c.n_params = n_params;
+  c.n_define_vars = 0; /* filled during rendering */
+
   /* Select VecConfig based on IR vector width and CPU caps */
   X64CpuCaps cpu = get_cpu_caps();
+  c.cpu = cpu;
   bool use_avx = cpu.has_avx;  /* VEX.128 legal (for packed vec4 ops) */
   bool use_avx2 = (max_vec_width >= 8) && cpu.has_avx2 && cpu.os_avx_ok;
+  c.use_avx = use_avx;
+  c.use_avx2 = use_avx2;
   (void)VCFG_AVX2; (void)VCFG_SSE; /* used by helper functions */
 
   /* ── Phase 3a: precompute last consumer index per UOp ────────────── */
   /* last_consumer[i] = the latest UOp index j that references uops[i]
    * as a source. Used for dead-value freeing and Belady's eviction.
    * Build a ptr→index map for O(1) source lookups. */
-  int *last_consumer = calloc((size_t)n, sizeof(int));
+  c.last_consumer = calloc((size_t)n, sizeof(int));
+  int *last_consumer = c.last_consumer; /* local alias for readability */
   for (int i = 0; i < n; i++) last_consumer[i] = i; /* default: self */
   /* Simple open-addressing hash map: UOp* → linearized index */
   typedef struct { PolyUOp *key; int idx; } UOpMapEntry;
@@ -1574,7 +1666,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     }
   }
   /* Per-slot last-use tracking (filled during rendering) */
-  int *slot_last_use = calloc((size_t)(n_slots + 16), sizeof(int));
+  c.slot_last_use = calloc((size_t)(n_slots + 16), sizeof(int));
+  int *slot_last_use = c.slot_last_use; /* local alias */
   for (int i = 0; i < n_slots + 16; i++) slot_last_use[i] = INT32_MAX;
 
   /* GPR allocation plan: LOOP_GPRS = {R12, R13, R14, RBX}
@@ -1583,8 +1676,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   int n_range_gprs = n_ranges < N_LOOP_GPRS ? n_ranges : N_LOOP_GPRS;
   int n_param_gprs_avail = N_LOOP_GPRS - n_range_gprs;
   int n_param_gprs = n_params < n_param_gprs_avail ? n_params : n_param_gprs_avail;
-  /* PARAM GPRs start after range GPRs in LOOP_GPRS array */
   int param_gpr_start = n_range_gprs;
+  c.n_param_gprs = n_param_gprs;
+  c.param_gpr_start = param_gpr_start;
 
   /* Frame size: must leave RSP 16-byte aligned.
    * We push 6 callee-saved regs (RBP, R15, R14, R13, R12, RBX).
@@ -1595,6 +1689,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   int raw_frame = n_slots * SLOT_BYTES;
   int frame_size = ((raw_frame + 31) & ~31) + 8; /* 8 mod 16 for RSP alignment */
   if (frame_size < 8) frame_size = 8;
+  c.frame_size = frame_size;
 
   /* ── Prologue ────────────────────────────────────────────────────── */
   emit_push(&buf, RBP);
@@ -1627,62 +1722,32 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
   }
 
-  /* Macro to reload sign mask in XMM0 (AVX2-aware).
-   * Used after XMM0 is clobbered by scratch operations. */
-  #define RELOAD_SIGN_MASK() do { \
-    emit_mov_r32_imm32(&buf, RAX, (int32_t)0x80000000u); \
-    emit_movd_xmm_r32(&buf, XMM0, RAX); \
-    if (use_avx2) { \
-      emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0); \
-    } else { \
-      xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6); \
-      emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00); \
-    } \
-    rax_slot = -1; \
-  } while(0)
+  /* RELOAD_SIGN_MASK / LM_SET now dispatch to ctx helpers.
+   * The macros are thin wrappers that capture the local `c` and `i`. */
+  #define RELOAD_SIGN_MASK() ctx_reload_sign_mask(&c)
+  #define LM_SET(u_ptr, slot_val) ctx_bind_slot(&c, (u_ptr), (slot_val), i)
 
   /* ── Walk UOps ───────────────────────────────────────────────────── */
-  int next_slot = 0;
-  LoopPatch loop_stack[MAX_LOOP_DEPTH];
-  int loop_depth = 0;
-  int n_loop_regs = 0; /* how many LOOP_GPRS have been assigned */
+  xf_init(&c.xf);
 
-  /* Register assignments for loop counters and PARAM base pointers */
-  RegAssign reg_assigns[MAX_REG_ASSIGNS];
-  int n_reg_assigns = 0;
-  int n_param_gprs_assigned = 0;
-
-  /* Value caches */
-  int rax_slot = -1;
-  /* xmm0_slot removed: was write-only dead state from before the XMM register file */
-
-  /* XMM register file for float values */
-  XmmFile xf;
-  xf_init(&xf);
-
-  /* Deferred LOADs: single-use LOADs from fusable INDEX that get folded
-   * into their consumer ALU op as SIB memory operands. */
-  typedef struct { PolyUOp *uop; int base_reg, idx_reg, itemsize; } DeferredSIB;
-  DeferredSIB deferred[32];
-  int n_deferred = 0;
-
-  /* Wrap lm_set to also track slot last-use for Belady's eviction.
-   * IMPORTANT: `i` must be the current UOp index in scope. */
-  #define LM_SET(u_ptr, slot_val) do { \
-    lm_set(&locals, (u_ptr), (slot_val)); \
-    if ((slot_val) >= 0 && (slot_val) < n_slots + 16) \
-      slot_last_use[slot_val] = last_consumer[i]; \
-  } while(0)
-
-  /* IF forward-jump patch stack */
-  int if_patch_stack[MAX_LOOP_DEPTH];
-  int if_depth = 0;
-
-  /* Abort flag: set by xf_alloc_belady when all XMM registers are
-   * pinned/avoided and no eviction is possible (LuaJIT-style pattern).
-   * Checked once per main-loop iteration to avoid threading error
-   * returns through 22+ xf_alloc call sites. */
-  bool jit_ok = true;
+  /* Local aliases for heavily-used context fields.
+   * These reference the ctx struct so extracted handlers can use `c.` directly. */
+  #define locals    c.locals
+  #define xf        c.xf
+  #define rax_slot  c.rax_slot
+  #define jit_ok    c.jit_ok
+  #define reg_assigns    c.reg_assigns
+  #define n_reg_assigns  c.n_reg_assigns
+  #define n_loop_regs    c.n_loop_regs
+  #define loop_stack     c.loop_stack
+  #define loop_depth     c.loop_depth
+  #define if_patch_stack c.if_patch_stack
+  #define if_depth       c.if_depth
+  #define deferred       c.deferred
+  #define n_deferred     c.n_deferred
+  #define next_slot      c.next_slot
+  #define n_define_vars  c.n_define_vars
+  #define n_param_gprs_assigned c.n_param_gprs_assigned
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
@@ -3498,22 +3563,37 @@ skip_slot:
   emit_pop(&buf, R15);
   emit_pop(&buf, RBP);
   emit_ret(&buf);
+  /* Undefine local aliases */
+  #undef locals
+  #undef xf
+  #undef rax_slot
+  #undef jit_ok
+  #undef reg_assigns
+  #undef n_reg_assigns
+  #undef n_loop_regs
+  #undef loop_stack
+  #undef loop_depth
+  #undef if_patch_stack
+  #undef if_depth
+  #undef deferred
+  #undef n_deferred
+  #undef next_slot
+  #undef n_define_vars
+  #undef n_param_gprs_assigned
+  #undef buf
   #undef RELOAD_SIGN_MASK
+  #undef LM_SET
 
-  lm_destroy(&locals);
-  free(last_consumer);
-  free(slot_last_use);
+  ctx_free(&c);
   free(uop_map);
 
-  *size_out = buf.len;
-  return buf.data;
+  *size_out = c.buf.len;
+  return c.buf.data;
 
 x64_fail:
-  lm_destroy(&locals);
-  free(last_consumer);
-  free(slot_last_use);
+  ctx_free(&c);
   free(uop_map);
-  free(buf.data);
+  free(c.buf.data);
   return NULL;
 }
 
