@@ -2275,6 +2275,127 @@ static bool needs_device_migration(PolyDeviceId device, PolyBufferBinding *bindi
   return true;
 }
 
+/* ── Shared device migration helpers ─────────────────────────────────── */
+
+/* Allocate device memory for user bindings + const-registry buffers.
+ * Returns 0 on success, -1 on error. On success, *out_dev and *out_total
+ * are set; caller must call unmigrate_from_device to clean up. */
+static int migrate_to_device(PolyCtx *ctx, PolyUOp *tensor_sink,
+                             PolyBufferBinding *bindings, int n_bindings,
+                             PolyDeviceId device,
+                             PolyBufferBinding **out_dev, int *out_total) {
+  const PolyBackendDesc *be = poly_backend_get(device);
+  if (!be) return -1;
+  const PolyAllocator *alloc = be->get_allocator();
+
+  PolyBufferBinding *dev = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+  if (!dev) return -1;
+
+  /* Alloc + upload user bindings */
+  for (int i = 0; i < n_bindings; i++) {
+    PolyUOp *buf = bindings[i].buffer;
+    size_t nbytes = (size_t)buf->arg.i *
+        poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+    if (nbytes == 0) nbytes = sizeof(float);
+    void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
+    if (!dptr) {
+      for (int j = 0; j < i; j++) alloc->free(dev[j].handle.ptr, alloc->dev_ctx);
+      free(dev);
+      return -1;
+    }
+    if (bindings[i].handle.ptr)
+      alloc->copy_in(dptr, bindings[i].handle.ptr, nbytes, alloc->dev_ctx);
+    dev[i].buffer = buf;
+    dev[i].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
+  }
+
+  /* Discover and migrate const-registry buffers */
+  int total = n_bindings;
+  uint32_t hash = poly_structural_hash(tensor_sink)
+                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
+  if (!sched) {
+    sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
+    if (sched) r_sched_put(ctx, tensor_sink, hash, POLY_MODE_CALL, sched);
+  }
+
+  if (sched) {
+    int n_consts = 0;
+    for (int s = 0; s < sched->n_buf_slots; s++) {
+      if (sched->buf_slots[s].is_intermediate) continue;
+      PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
+      bool is_bound = false;
+      for (int j = 0; j < n_bindings; j++)
+        if (dev[j].buffer == slot_uop) { is_bound = true; break; }
+      if (is_bound) continue;
+      if (const_registry_lookup(ctx, slot_uop)) n_consts++;
+    }
+
+    if (n_consts > 0) {
+      total = n_bindings + n_consts;
+      PolyBufferBinding *grown = realloc(dev, (size_t)total * sizeof(PolyBufferBinding));
+      if (!grown) {
+        for (int j = 0; j < n_bindings; j++) alloc->free(dev[j].handle.ptr, alloc->dev_ctx);
+        free(dev);
+        return -1;
+      }
+      dev = grown;
+
+      int ci = 0;
+      for (int s = 0; s < sched->n_buf_slots; s++) {
+        if (sched->buf_slots[s].is_intermediate) continue;
+        PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
+        bool is_bound = false;
+        for (int j = 0; j < n_bindings; j++)
+          if (dev[j].buffer == slot_uop) { is_bound = true; break; }
+        if (is_bound) continue;
+        void *host = const_registry_lookup(ctx, slot_uop);
+        if (!host) continue;
+        size_t nbytes = (size_t)sched->buf_slots[s].nbytes;
+        if (nbytes == 0) nbytes = (size_t)sched->buf_slots[s].numel *
+            poly_dtype_itemsize(poly_dtype_scalar(sched->buf_slots[s].dtype));
+        void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
+        if (!dptr) {
+          for (int k = 0; k < ci; k++)
+            alloc->free(dev[n_bindings + k].handle.ptr, alloc->dev_ctx);
+          for (int k = 0; k < n_bindings; k++)
+            alloc->free(dev[k].handle.ptr, alloc->dev_ctx);
+          free(dev);
+          return -1;
+        }
+        alloc->copy_in(dptr, host, nbytes, alloc->dev_ctx);
+        dev[n_bindings + ci].buffer = slot_uop;
+        dev[n_bindings + ci].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
+        ci++;
+      }
+    }
+  }
+
+  *out_dev = dev;
+  *out_total = total;
+  return 0;
+}
+
+/* Readback user buffers to host, free all device memory, free dev array. */
+static void unmigrate_from_device(PolyBufferBinding *host_bindings, int n_user,
+                                  PolyBufferBinding *dev, int n_total,
+                                  PolyDeviceId device, bool readback) {
+  const PolyBackendDesc *be = poly_backend_get(device);
+  if (!be) { free(dev); return; }
+  const PolyAllocator *alloc = be->get_allocator();
+
+  if (readback) {
+    for (int i = 0; i < n_user; i++) {
+      if (!host_bindings[i].handle.ptr) continue;
+      alloc->copy_out(host_bindings[i].handle.ptr, dev[i].handle.ptr,
+                      dev[i].handle.nbytes, alloc->dev_ctx);
+    }
+  }
+  for (int i = 0; i < n_total; i++)
+    alloc->free(dev[i].handle.ptr, alloc->dev_ctx);
+  free(dev);
+}
+
 int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
                 PolyBufferBinding *bindings, int n_bindings) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
@@ -2289,121 +2410,12 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
    * auto-migrate: alloc device mem, copy in, execute, copy out, free.
    * This lets POLY_HIP=1 make test route all 500+ tests through HIP. */
   if (needs_device_migration(device, bindings, n_bindings)) {
-    const PolyBackendDesc *be = poly_backend_get(device);
-    if (!be) return -1;
-    const PolyAllocator *alloc = be->get_allocator();
-
-    PolyBufferBinding *dev_bindings = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
-    if (!dev_bindings) return -1;
-
-    /* Alloc + upload user bindings */
-    for (int i = 0; i < n_bindings; i++) {
-      PolyUOp *buf = bindings[i].buffer;
-      size_t nbytes = (size_t)buf->arg.i *
-          poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
-      if (nbytes == 0) nbytes = sizeof(float);
-      void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-      if (!dptr) {
-        for (int j = 0; j < i; j++) alloc->free(dev_bindings[j].handle.ptr, alloc->dev_ctx);
-        free(dev_bindings);
-        return -1;
-      }
-      if (bindings[i].handle.ptr)
-        alloc->copy_in(dptr, bindings[i].handle.ptr, nbytes, alloc->dev_ctx);
-      dev_bindings[i].buffer = buf;
-      dev_bindings[i].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
-    }
-
-    /* Also migrate const-registry buffers to device.
-     * Instead of mutating the registry (which has ownership issues with
-     * device pointers vs glibc free), append const buffers as explicit
-     * bindings. build_slot_data_from_bindings() prefers explicit bindings
-     * over the registry, so the device pointers will be used. */
-    uint32_t hash = poly_structural_hash(tensor_sink)
-                    ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-    PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
-    if (!sched) {
-      sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
-      if (sched) r_sched_put(ctx, tensor_sink, hash, POLY_MODE_CALL, sched);
-    }
-
-    int n_consts = 0;
-    int total_bindings = n_bindings;
-
-    if (sched) {
-      /* Count unbound const slots */
-      for (int s = 0; s < sched->n_buf_slots; s++) {
-        if (sched->buf_slots[s].is_intermediate) continue;
-        PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
-        bool is_bound = false;
-        for (int j = 0; j < n_bindings; j++)
-          if (dev_bindings[j].buffer == slot_uop) { is_bound = true; break; }
-        if (is_bound) continue;
-        if (const_registry_lookup(ctx, slot_uop)) n_consts++;
-      }
-
-      if (n_consts > 0) {
-        /* Grow dev_bindings to hold user bindings + const bindings */
-        total_bindings = n_bindings + n_consts;
-        PolyBufferBinding *grown = realloc(dev_bindings,
-            (size_t)total_bindings * sizeof(PolyBufferBinding));
-        if (!grown) {
-          for (int j = 0; j < n_bindings; j++)
-            alloc->free(dev_bindings[j].handle.ptr, alloc->dev_ctx);
-          free(dev_bindings);
-          return -1;
-        }
-        dev_bindings = grown;
-
-        int ci = 0;
-        for (int s = 0; s < sched->n_buf_slots; s++) {
-          if (sched->buf_slots[s].is_intermediate) continue;
-          PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
-          bool is_bound = false;
-          for (int j = 0; j < n_bindings; j++)
-            if (dev_bindings[j].buffer == slot_uop) { is_bound = true; break; }
-          if (is_bound) continue;
-          void *host = const_registry_lookup(ctx, slot_uop);
-          if (!host) continue;
-          size_t nbytes = (size_t)sched->buf_slots[s].nbytes;
-          if (nbytes == 0) nbytes = (size_t)sched->buf_slots[s].numel *
-              poly_dtype_itemsize(poly_dtype_scalar(sched->buf_slots[s].dtype));
-          void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-          if (!dptr) {
-            /* Cleanup already-migrated consts + user bindings */
-            for (int k = 0; k < ci; k++)
-              alloc->free(dev_bindings[n_bindings + k].handle.ptr, alloc->dev_ctx);
-            for (int k = 0; k < n_bindings; k++)
-              alloc->free(dev_bindings[k].handle.ptr, alloc->dev_ctx);
-            free(dev_bindings);
-            return -1;
-          }
-          alloc->copy_in(dptr, host, nbytes, alloc->dev_ctx);
-          dev_bindings[n_bindings + ci].buffer = slot_uop;
-          dev_bindings[n_bindings + ci].handle =
-              (PolyBufferHandle){ dptr, nbytes, device, true };
-          ci++;
-        }
-      }
-    }
-
-    /* Execute on device -- const buffers are explicit bindings now */
-    int ret = poly_realize(ctx, tensor_sink, dev_bindings, total_bindings);
-
-    /* Readback user buffers to host */
-    if (ret == 0) {
-      for (int i = 0; i < n_bindings; i++) {
-        if (!bindings[i].handle.ptr) continue;
-        size_t nbytes = dev_bindings[i].handle.nbytes;
-        alloc->copy_out(bindings[i].handle.ptr, dev_bindings[i].handle.ptr,
-                        nbytes, alloc->dev_ctx);
-      }
-    }
-
-    /* Free all device memory (user bindings + const bindings) */
-    for (int i = 0; i < total_bindings; i++)
-      alloc->free(dev_bindings[i].handle.ptr, alloc->dev_ctx);
-    free(dev_bindings);
+    PolyBufferBinding *dev = NULL;
+    int total = 0;
+    if (migrate_to_device(ctx, tensor_sink, bindings, n_bindings, device, &dev, &total) != 0)
+      return -1;
+    int ret = poly_realize(ctx, tensor_sink, dev, total);
+    unmigrate_from_device(bindings, n_bindings, dev, total, device, ret == 0);
     return ret;
   }
 
@@ -2446,45 +2458,15 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
 
   PolyDeviceId device = infer_device(bindings, n_bindings);
 
-  /* Transparent device migration (same as poly_realize) */
+  /* Transparent device migration (shared with poly_realize) */
   if (needs_device_migration(device, bindings, n_bindings)) {
-    const PolyBackendDesc *be = poly_backend_get(device);
-    if (!be) return -1;
-    const PolyAllocator *alloc = be->get_allocator();
-
-    PolyBufferBinding *dev_bindings = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
-    if (!dev_bindings) return -1;
-
-    for (int i = 0; i < n_bindings; i++) {
-      PolyUOp *buf = bindings[i].buffer;
-      size_t nbytes = (size_t)buf->arg.i *
-          poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
-      if (nbytes == 0) nbytes = sizeof(float);
-      void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-      if (!dptr) {
-        for (int j = 0; j < i; j++) alloc->free(dev_bindings[j].handle.ptr, alloc->dev_ctx);
-        free(dev_bindings);
-        return -1;
-      }
-      if (bindings[i].handle.ptr)
-        alloc->copy_in(dptr, bindings[i].handle.ptr, nbytes, alloc->dev_ctx);
-      dev_bindings[i].buffer = buf;
-      dev_bindings[i].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
-    }
-
-    int ret = poly_realize_ex(ctx, tensor_sink, dev_bindings, n_bindings,
+    PolyBufferBinding *dev = NULL;
+    int total = 0;
+    if (migrate_to_device(ctx, tensor_sink, bindings, n_bindings, device, &dev, &total) != 0)
+      return -1;
+    int ret = poly_realize_ex(ctx, tensor_sink, dev, total,
                               var_bindings, n_var_bindings);
-
-    if (ret == 0) {
-      for (int i = 0; i < n_bindings; i++) {
-        if (!bindings[i].handle.ptr) continue;
-        alloc->copy_out(bindings[i].handle.ptr, dev_bindings[i].handle.ptr,
-                        dev_bindings[i].handle.nbytes, alloc->dev_ctx);
-      }
-    }
-    for (int i = 0; i < n_bindings; i++)
-      alloc->free(dev_bindings[i].handle.ptr, alloc->dev_ctx);
-    free(dev_bindings);
+    unmigrate_from_device(bindings, n_bindings, dev, total, device, ret == 0);
     return ret;
   }
 

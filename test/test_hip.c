@@ -490,4 +490,40 @@ TEST(hip, instance_hip_roundtrip) {
   PASS();
 }
 
+/* ── Regression: realize_ex with const-registry buffers on GPU ─────────── */
+/* poly_full creates a const-registry buffer. The shared migration helper
+ * must migrate it to device; without that, the kernel accesses host memory. */
+TEST(hip, realize_ex_const_registry) {
+  SKIP_IF_NO_HIP();
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* out[N] = full(3.14)[N] + a[N], with N as DEFINE_VAR */
+  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+  int64_t shape_max[] = {16};
+  PolyUOp *fill = poly_full(ctx, shape_max, 1, 3.14);
+  PolyUOp *buf_a = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *buf_out = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, fill, buf_a);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_out, add, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  float a_data[16] = {1, 2, 3, 4};
+  float out_data[16] = {0};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(buf_a, a_data),
+    POLY_BIND_HOST(buf_out, out_data),
+  };
+  PolyVarBinding vars[] = {{ .var = N, .value = 4 }};
+
+  int ret = poly_realize_ex(ctx, sink, bindings, 2, vars, 1);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_data[0], 4.14f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[1], 5.14f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[2], 6.14f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[3], 7.14f, 1e-4);
+  PASS();
+}
+
 #endif /* POLY_HAS_HIP */

@@ -15,7 +15,7 @@ os.environ.setdefault("CACHELEVEL", "0")
 os.environ.setdefault("DEVECTORIZE", "-1")
 # Always use CPU for value evaluation; CUDA flag only affects IR extraction
 os.environ["DEV"] = "CPU"
-sys.path.insert(0, str(ROOT / "references" / "tinygrad"))
+sys.path.insert(0, str(ROOT / "references" / "tinygrad_latest"))
 
 from tinygrad import Context, Tensor  # noqa: E402
 from tinygrad.codegen import get_program, full_rewrite_to_sink  # noqa: E402

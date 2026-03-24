@@ -78,7 +78,7 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
       /* Build CUDA-domain bindings, realize via unified path, readback */
-      PolyBufferBinding *cb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+      PolyBufferBinding *cb = calloc((size_t)n_bindings, sizeof(PolyBufferBinding));
       int alloc_ok = 1;
       for (int j = 0; j < n_bindings; j++) {
         PolyUOp *buf = bindings[j].buffer;
