@@ -98,7 +98,8 @@ static void csmap_destroy(CudaStrMap *m) {
 
 /* ── Render helpers ──────────────────────────────────────────────────── */
 
-static char *cuda_render_float_const(double v, char *buf, int cap) {
+static char *cuda_render_float_const(double v, PolyDType dt, char *buf, int cap) {
+  bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
   if (isinf(v)) {
     snprintf(buf, cap, v > 0 ? "INFINITY" : "(-INFINITY)");
     return buf;
@@ -107,14 +108,21 @@ static char *cuda_render_float_const(double v, char *buf, int cap) {
     snprintf(buf, cap, "NAN");
     return buf;
   }
-  /* Use enough digits to round-trip float32 constants through text. */
-  snprintf(buf, cap, "%.9g", (double)(float)v);
-  if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+  if (is_f64) {
+    snprintf(buf, cap, "%.17g", v);
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+      int len = (int)strlen(buf);
+      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    }
+  } else {
+    snprintf(buf, cap, "%.9g", (double)(float)v);
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+      int len = (int)strlen(buf);
+      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    }
     int len = (int)strlen(buf);
-    if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
   }
-  int len = (int)strlen(buf);
-  if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
   return buf;
 }
 
@@ -129,9 +137,15 @@ static void cuda_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_TRUNC:
     snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
       ? "trunc(%s)" : "truncf(%s)", s0); break;
-  case POLY_OP_EXP2:       snprintf(buf, cap, "exp2f(%s)", s0); break;
-  case POLY_OP_LOG2:       snprintf(buf, cap, "log2f(%s)", s0); break;
-  case POLY_OP_SIN:        snprintf(buf, cap, "sinf(%s)", s0); break;
+  case POLY_OP_EXP2:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "exp2(%s)" : "exp2f(%s)", s0); break;
+  case POLY_OP_LOG2:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "log2(%s)" : "log2f(%s)", s0); break;
+  case POLY_OP_SIN:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "sin(%s)" : "sinf(%s)", s0); break;
   case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
   case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
   case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
@@ -281,7 +295,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     if (u->op == POLY_OP_CONST) {
       char val[64];
       if (poly_dtype_is_float(u->dtype)) {
-        cuda_render_float_const(u->arg.f, val, sizeof(val));
+        cuda_render_float_const(u->arg.f, u->dtype, val, sizeof(val));
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {

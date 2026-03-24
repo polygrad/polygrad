@@ -2445,6 +2445,49 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
   }
 
   PolyDeviceId device = infer_device(bindings, n_bindings);
+
+  /* Transparent device migration (same as poly_realize) */
+  if (needs_device_migration(device, bindings, n_bindings)) {
+    const PolyBackendDesc *be = poly_backend_get(device);
+    if (!be) return -1;
+    const PolyAllocator *alloc = be->get_allocator();
+
+    PolyBufferBinding *dev_bindings = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+    if (!dev_bindings) return -1;
+
+    for (int i = 0; i < n_bindings; i++) {
+      PolyUOp *buf = bindings[i].buffer;
+      size_t nbytes = (size_t)buf->arg.i *
+          poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+      if (nbytes == 0) nbytes = sizeof(float);
+      void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
+      if (!dptr) {
+        for (int j = 0; j < i; j++) alloc->free(dev_bindings[j].handle.ptr, alloc->dev_ctx);
+        free(dev_bindings);
+        return -1;
+      }
+      if (bindings[i].handle.ptr)
+        alloc->copy_in(dptr, bindings[i].handle.ptr, nbytes, alloc->dev_ctx);
+      dev_bindings[i].buffer = buf;
+      dev_bindings[i].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
+    }
+
+    int ret = poly_realize_ex(ctx, tensor_sink, dev_bindings, n_bindings,
+                              var_bindings, n_var_bindings);
+
+    if (ret == 0) {
+      for (int i = 0; i < n_bindings; i++) {
+        if (!bindings[i].handle.ptr) continue;
+        alloc->copy_out(bindings[i].handle.ptr, dev_bindings[i].handle.ptr,
+                        dev_bindings[i].handle.nbytes, alloc->dev_ctx);
+      }
+    }
+    for (int i = 0; i < n_bindings; i++)
+      alloc->free(dev_bindings[i].handle.ptr, alloc->dev_ctx);
+    free(dev_bindings);
+    return ret;
+  }
+
   uint32_t hash = poly_structural_hash(tensor_sink)
                   ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
 

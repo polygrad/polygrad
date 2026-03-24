@@ -106,23 +106,36 @@ static void hsmap_destroy(HipStrMap *m) {
 
 /* ── Render helpers ───────────────────────────────────────────────── */
 
-static char *hip_render_float_const(double v, char *buf, int cap) {
+static char *hip_render_float_const(double v, PolyDType dt, char *buf, int cap) {
+  bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
   if (isinf(v)) {
-    snprintf(buf, cap, v > 0 ? "(__builtin_inff())" : "(-__builtin_inff())");
+    if (is_f64)
+      snprintf(buf, cap, v > 0 ? "(__builtin_inf())" : "(-__builtin_inf())");
+    else
+      snprintf(buf, cap, v > 0 ? "(__builtin_inff())" : "(-__builtin_inff())");
     return buf;
   }
   if (isnan(v)) {
-    snprintf(buf, cap, "(__builtin_nanf(\"\"))");
+    snprintf(buf, cap, is_f64 ? "(__builtin_nan(\"\"))" : "(__builtin_nanf(\"\"))");
     return buf;
   }
-  /* Use enough digits to round-trip float32 constants through text. */
-  snprintf(buf, cap, "%.9g", (double)(float)v);
-  if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+  if (is_f64) {
+    /* Full precision double literal: enough digits to round-trip, no suffix. */
+    snprintf(buf, cap, "%.17g", v);
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+      int len = (int)strlen(buf);
+      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    }
+  } else {
+    /* f32: round-trip float32 through text with 'f' suffix. */
+    snprintf(buf, cap, "%.9g", (double)(float)v);
+    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
+      int len = (int)strlen(buf);
+      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    }
     int len = (int)strlen(buf);
-    if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
   }
-  int len = (int)strlen(buf);
-  if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
   return buf;
 }
 
@@ -137,9 +150,15 @@ static void hip_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_TRUNC:
     snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
       ? "__ocml_trunc_f64(%s)" : "__ocml_trunc_f32(%s)", s0); break;
-  case POLY_OP_EXP2:       snprintf(buf, cap, "__ocml_exp2_f32(%s)", s0); break;
-  case POLY_OP_LOG2:       snprintf(buf, cap, "__ocml_log2_f32(%s)", s0); break;
-  case POLY_OP_SIN:        snprintf(buf, cap, "__ocml_sin_f32(%s)", s0); break;
+  case POLY_OP_EXP2:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "__ocml_exp2_f64(%s)" : "__ocml_exp2_f32(%s)", s0); break;
+  case POLY_OP_LOG2:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "__ocml_log2_f64(%s)" : "__ocml_log2_f32(%s)", s0); break;
+  case POLY_OP_SIN:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
+      ? "__ocml_sin_f64(%s)" : "__ocml_sin_f32(%s)", s0); break;
   case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
   case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
   case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
@@ -162,7 +181,7 @@ static void hip_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
   case POLY_OP_MULACC:
     snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "fma(%s,%s,%s)" : "__builtin_fmaf(%s,%s,%s)", s0, s1, s2);
+      ? "__builtin_fma(%s,%s,%s)" : "__builtin_fmaf(%s,%s,%s)", s0, s1, s2);
     break;
   default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
   }
@@ -321,7 +340,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     if (u->op == POLY_OP_CONST) {
       char val[64];
       if (poly_dtype_is_float(u->dtype)) {
-        hip_render_float_const(u->arg.f, val, sizeof(val));
+        hip_render_float_const(u->arg.f, u->dtype, val, sizeof(val));
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {
