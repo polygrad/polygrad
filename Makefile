@@ -104,13 +104,6 @@ build/polygrad_parity_runner_cuda: $(SRC) $(PARITY_RUNNER_SRC)
 endif
 
 ifeq ($(HAS_HIP), 1)
-bench-hip: build/bench_hip
-	./build/bench_hip
-
-build/bench_hip: $(SRC) bench/bench_hip.c
-	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
-
 test-parity-hip: build/polygrad_parity_runner_hip
 	CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) \
 		--runner build/polygrad_parity_runner_hip --hip --mode values --atol 1e-4

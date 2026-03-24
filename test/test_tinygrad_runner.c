@@ -61,6 +61,7 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
                           ParityBinding *bindings, int n_bindings,
                           float *out_data, int out_n) {
   int use_cuda = env_enabled("POLY_PARITY_CUDA");
+  int use_hip = env_enabled("POLY_PARITY_HIP");
 
   /* 1. Execute first.
    * Use the production realize path so parity values do not drift from the
@@ -117,7 +118,45 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
       free(cb);
     } else
 #endif
+#ifdef POLY_HAS_HIP
+    if (use_hip) {
+      PolyBufferBinding *hb = calloc((size_t)n_bindings, sizeof(PolyBufferBinding));
+      int alloc_ok = 1;
+      for (int j = 0; j < n_bindings; j++) {
+        PolyUOp *buf = bindings[j].buffer;
+        size_t nbytes = (size_t)buf->arg.i *
+            poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+        void *dptr = poly_hip_alloc(nbytes);
+        if (!dptr) { alloc_ok = 0; break; }
+        if (bindings[j].data)
+          poly_hip_copy_htod(dptr, bindings[j].data, nbytes);
+        else
+          poly_hip_memset(dptr, 0, nbytes);
+        hb[j].buffer = buf;
+        hb[j].handle = (PolyBufferHandle){ dptr, nbytes, POLY_DEVICE_HIP, true };
+      }
+      if (alloc_ok)
+        ok = (poly_realize(ctx, tensor_sink, hb, n_bindings) == 0);
+      else
+        ok = 0;
+      if (ok) {
+        for (int j = 0; j < n_bindings; j++) {
+          if (!bindings[j].data) continue;
+          PolyUOp *buf = bindings[j].buffer;
+          size_t nbytes = (size_t)buf->arg.i *
+              poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+          poly_hip_copy_dtoh(bindings[j].data, hb[j].handle.ptr, nbytes);
+        }
+      }
+      for (int j = 0; j < n_bindings; j++) {
+        if (hb[j].handle.owned)
+          poly_hip_free(hb[j].handle.ptr);
+      }
+      free(hb);
+    } else
+#endif
     {
+      (void)use_hip;
       ok = (poly_realize(ctx, tensor_sink, bb, n_bindings) == 0);
     }
     free(bb);
@@ -140,8 +179,14 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
       all_lin[k] = poly_linearize_cuda(ctx, sr.kernels[k], &all_n_lin[k]);
     } else
 #endif
+#ifdef POLY_HAS_HIP
+    if (use_hip) {
+      all_lin[k] = poly_linearize_hip(ctx, sr.kernels[k], &all_n_lin[k]);
+    } else
+#endif
     {
       (void)use_cuda;
+      (void)use_hip;
       all_lin[k] = poly_linearize(ctx, sr.kernels[k], &all_n_lin[k]);
     }
     if (!all_lin[k]) {

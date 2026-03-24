@@ -632,18 +632,21 @@ static int cuda_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
 static int cuda_execute(PolyRunner *runner, void **args, int n_args) {
   CudaRunnerHandle *ch = (CudaRunnerHandle *)runner->handle;
 
-  /* cuLaunchKernel needs void** where each element points TO a CUdeviceptr.
-   * args[] already contains device pointers (cast to void*), but the CUDA
-   * driver API requires one level of indirection: args[i] = &dptr[i]. */
+  /* cuLaunchKernel kernelParams: each element points TO the arg value.
+   * Buffer params (0..n_params-1): args[i] is a device ptr; cast to CUdeviceptr.
+   * Scalar params (n_params..): args[i] is already &int_val; use directly. */
   unsigned long long *dptrs = malloc((size_t)n_args * sizeof(unsigned long long));
   void **cuda_args = malloc((size_t)n_args * sizeof(void *));
   if (!dptrs || !cuda_args) {
     free(dptrs); free(cuda_args);
     return -1;
   }
-  for (int i = 0; i < n_args; i++) {
+  for (int i = 0; i < runner->n_params; i++) {
     dptrs[i] = (unsigned long long)(uintptr_t)args[i];
     cuda_args[i] = &dptrs[i];
+  }
+  for (int i = runner->n_params; i < n_args; i++) {
+    cuda_args[i] = args[i];
   }
 
   int ret = poly_cuda_launch(ch->prog, cuda_args, n_args,
@@ -732,13 +735,15 @@ static int hip_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
 static int hip_execute(PolyRunner *runner, void **args, int n_args) {
   HipRunnerHandle *hh = (HipRunnerHandle *)runner->handle;
 
-  /* hipModuleLaunchKernel uses the same kernelParams pattern as CUDA:
-   * args[i] must point TO the device pointer (one level of indirection). */
+  /* hipModuleLaunchKernel kernelParams: each element points TO the arg value.
+   * Buffer params (0..n_params-1): args[i] is the device ptr, so &args[i] works.
+   * Scalar params (n_params..): args[i] is already &int_val, use it directly. */
   void **hip_args = malloc((size_t)n_args * sizeof(void *));
   if (!hip_args) return -1;
-  for (int i = 0; i < n_args; i++) {
+  for (int i = 0; i < runner->n_params; i++)
     hip_args[i] = &args[i];
-  }
+  for (int i = runner->n_params; i < n_args; i++)
+    hip_args[i] = args[i];
 
   int ret = poly_hip_launch(hh->prog, hip_args, n_args,
                              runner->grid[0], runner->grid[1], runner->grid[2],

@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "references" / "tinygrad"))
 from tinygrad import Context, Tensor  # noqa: E402
 from tinygrad.codegen import get_program, full_rewrite_to_sink  # noqa: E402
 from tinygrad.codegen.late.linearizer import linearize  # noqa: E402
-from tinygrad.renderer.cstyle import ClangRenderer, CUDARenderer  # noqa: E402
+from tinygrad.renderer.cstyle import ClangRenderer, CUDARenderer, AMDHIPRenderer  # noqa: E402
 from tinygrad.uop.ops import Ops  # noqa: E402
 
 
@@ -318,13 +318,16 @@ def kernel_structure(ops: list[str]) -> dict[str, int]:
     return counts
 
 
-def run_polygrad_case(runner: pathlib.Path, case: str, mode: str, cuda: bool = False) -> dict:
+def run_polygrad_case(runner: pathlib.Path, case: str, mode: str,
+                      cuda: bool = False, hip: bool = False) -> dict:
     env = os.environ.copy()
     if mode == "full":
         env["POLY_SPLIT_SINK_STORES"] = "1"
         env["POLY_PARITY_MOVEMENT_AS_COPY"] = "1"
     if cuda:
         env["POLY_PARITY_CUDA"] = "1"
+    if hip:
+        env["POLY_PARITY_HIP"] = "1"
     raw = subprocess.check_output([str(runner), case], text=True, env=env)
     payload = json.loads(raw)
 
@@ -476,6 +479,7 @@ def main() -> int:
     parser.add_argument("--dump", action="store_true", help="dump per-kernel op sequences")
     parser.add_argument("--no-opt", action="store_true", help="disable tinygrad optimization (no UPCAST/UNROLL)")
     parser.add_argument("--cuda", action="store_true", help="use CUDA backend (CUDARenderer) instead of CPU")
+    parser.add_argument("--hip", action="store_true", help="use HIP backend (AMDHIPRenderer) instead of CPU")
     parser.add_argument("cases", nargs="*", help="subset of cases to run")
     args = parser.parse_args()
 
@@ -494,12 +498,15 @@ def main() -> int:
         return 2
 
     if args.cuda:
-        import subprocess
-        arch = subprocess.check_output(
+        import subprocess as _sp
+        arch = _sp.check_output(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
             text=True,
         ).strip().split("\n")[0]
         renderer = CUDARenderer("sm_" + arch.replace(".", ""))
+    elif args.hip:
+        hip_arch = os.environ.get("HIP_ARCH", "gfx90a")
+        renderer = AMDHIPRenderer(hip_arch)
     else:
         renderer = ClangRenderer()
 
@@ -511,7 +518,8 @@ def main() -> int:
         builder = CASES[case]
 
         try:
-            polygrad_report = run_polygrad_case(args.runner, case, args.mode, cuda=args.cuda)
+            polygrad_report = run_polygrad_case(args.runner, case, args.mode,
+                                                  cuda=args.cuda, hip=args.hip)
         except Exception as exc:  # noqa: BLE001
             failures.append((case, f"runner error: {exc}"))
             print(f"[FAIL] {case} runner error")
