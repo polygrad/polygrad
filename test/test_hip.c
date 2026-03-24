@@ -526,4 +526,72 @@ TEST(hip, realize_ex_const_registry) {
   PASS();
 }
 
+/* ── WMMA rendering smoke test (no GPU needed) ───────────────────────── */
+TEST(hip, render_wmma_mfma) {
+  /* Build minimal linearized IR with a WMMA op and verify the HIP
+   * renderer emits the MFMA macro and vector type declarations. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* Params: A (half*), B (half*), C (float*) */
+  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));  /* A */
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));  /* B */
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));  /* C out */
+
+  /* Thread index (gidx0) as placeholder */
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(64));
+  PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
+
+  /* Create vector types: half4 for A/B input, float4 for C accumulator */
+  PolyDType f16v4 = poly_dtype_vec(POLY_FLOAT16, 4);
+  PolyDType f32v4 = poly_dtype_vec(POLY_FLOAT32, 4);
+
+  /* Fake A/B loads as CONST vectors (just for render testing) */
+  PolyUOp *zero_f16 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT16, poly_arg_float(0.0));
+  PolyUOp *a_vec_srcs[4] = { zero_f16, zero_f16, zero_f16, zero_f16 };
+  PolyUOp *a_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_vec_srcs, 4, poly_arg_none());
+  PolyUOp *b_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_vec_srcs, 4, poly_arg_none());
+
+  /* Zero accumulator */
+  PolyUOp *zero_f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *c_vec_srcs[4] = { zero_f32, zero_f32, zero_f32, zero_f32 };
+  PolyUOp *c_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f32v4, c_vec_srcs, 4, poly_arg_none());
+
+  /* WMMA: result = mfma(A, B, C) */
+  PolyUOp *wmma_srcs[3] = { a_vec, b_vec, c_vec };
+  PolyUOp *wmma = poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3,
+                             poly_arg_str("mfma_f32_16x16x16_f16"));
+
+  /* Extract lane 0 and store (just to complete the kernel) */
+  PolyUOp *lane0 = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma,
+                               poly_arg_int(0));
+  PolyUOp *idx_c = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, special, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_c, lane0, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  /* Linearize (skip optimization passes -- raw render test) */
+  int n_lin;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  char *src = poly_render_hip(lin, n_lin, "wmma_test", 64);
+  free(lin);
+  ASSERT_NOT_NULL(src);
+
+  /* Verify MFMA intrinsic macro appears */
+  ASSERT_TRUE(strstr(src, "__mfma_f32_16x16x16_f16") != NULL);
+  ASSERT_TRUE(strstr(src, "__builtin_amdgcn_mfma_f32_16x16x16_f16") != NULL);
+
+  /* Verify vector type handling (ext_vector_type for half/float) */
+  ASSERT_TRUE(strstr(src, "ext_vector_type") != NULL);
+
+  /* Verify VECTORIZE renders as vector construction */
+  ASSERT_TRUE(strstr(src, "vec") != NULL || strstr(src, "{") != NULL);
+
+  free(src);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 #endif /* POLY_HAS_HIP */

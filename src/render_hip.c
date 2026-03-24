@@ -104,6 +104,28 @@ static void hsmap_destroy(HipStrMap *m) {
   free(m->vals);
 }
 
+/* ── Type rendering ──────────────────────────────────────────────── */
+
+/* Render a HIP C++ type for a PolyDType, including vector forms.
+ * Uses ext_vector_type for HIP (supports .x/.y component access). */
+static void hip_render_ctype(PolyDType dt, char *buf, int cap) {
+  PolyDType s = poly_dtype_scalar(dt);
+  if (dt.count <= 1) {
+    if (poly_dtype_eq(s, POLY_FLOAT16))
+      snprintf(buf, cap, "_Float16");
+    else
+      snprintf(buf, cap, "%s", s.name);
+    return;
+  }
+  /* Vector type: use ext_vector_type for HIP C++ */
+  const char *base;
+  if (poly_dtype_eq(s, POLY_FLOAT16))
+    base = "_Float16";
+  else
+    base = s.name;
+  snprintf(buf, cap, "%s __attribute__((ext_vector_type(%d)))", base, (int)dt.count);
+}
+
 /* ── Render helpers ───────────────────────────────────────────────── */
 
 static char *hip_render_float_const(double v, PolyDType dt, char *buf, int cap) {
@@ -231,6 +253,10 @@ typedef struct {
   bool uses_sin_f64;
   bool uses_sqrt_f64;
   bool uses_trunc_f64;
+  bool uses_wmma;
+  /* Collect unique WMMA intrinsic names for macro definitions */
+  const char *wmma_names[16];
+  int n_wmma_names;
 } HipUsedFuncs;
 
 static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
@@ -245,6 +271,17 @@ static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
     case POLY_OP_SIN:   if (is_f64) used->uses_sin_f64   = true; else used->uses_sin_f32   = true; break;
     case POLY_OP_SQRT:  if (is_f64) used->uses_sqrt_f64  = true; else used->uses_sqrt_f32  = true; break;
     case POLY_OP_TRUNC: if (is_f64) used->uses_trunc_f64 = true; else used->uses_trunc_f32 = true; break;
+    case POLY_OP_WMMA: {
+      used->uses_wmma = true;
+      const char *wn = (u->arg.kind == POLY_ARG_STRING && u->arg.str) ? u->arg.str : NULL;
+      if (wn && used->n_wmma_names < 16) {
+        bool dup = false;
+        for (int j = 0; j < used->n_wmma_names; j++)
+          if (strcmp(used->wmma_names[j], wn) == 0) { dup = true; break; }
+        if (!dup) used->wmma_names[used->n_wmma_names++] = wn;
+      }
+      break;
+    }
     default: break;
     }
   }
@@ -498,7 +535,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *bidx = hsmap_get(&names, u->src[0]);
-      hsb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
+      { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+      hsb_printf(&decls, "  %s %s;\n", ctype, name); }
       for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
       hsb_printf(&body, "%s = (*%s);\n", name, bidx);
       continue;
@@ -523,9 +561,11 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *src_s = hsmap_get(&names, u->src[0]);
-      hsb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
+      { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+      hsb_printf(&decls, "  %s %s;\n", ctype, name); }
       for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
-      hsb_printf(&body, "%s = (%s)(%s);\n", name, u->dtype.name, src_s);
+      { char ctype2[128]; hip_render_ctype(u->dtype, ctype2, sizeof(ctype2));
+      hsb_printf(&body, "%s = (%s)(%s);\n", name, ctype2, src_s); }
       continue;
     }
 
@@ -536,8 +576,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *src_s = hsmap_get(&names, u->src[0]);
-      const char *dst_type = u->dtype.name;
-      const char *src_type = u->src[0]->dtype.name;
+      char dst_type[128], src_type[128];
+      hip_render_ctype(u->dtype, dst_type, sizeof(dst_type));
+      hip_render_ctype(u->src[0]->dtype, src_type, sizeof(src_type));
       hsb_printf(&decls, "  %s %s;\n", dst_type, name);
       for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
       hsb_printf(&body, "%s = tg_bitcast<%s>((%s)(%s));\n",
@@ -557,7 +598,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       snprintf(name, sizeof(name), "alu%d", c_alu++);
       hsmap_set(&names, u, strdup(name));
 
-      hsb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
+      { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+      hsb_printf(&decls, "  %s %s;\n", ctype, name); }
       for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
       hsb_printf(&body, "%s = %s;\n", name, expr);
       continue;
@@ -569,6 +611,89 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
       hsb_printf(&body, "if (%s) {\n", cond_s);
       depth++;
+      continue;
+    }
+
+    /* --- VECTORIZE / VCONST: vector literal -------------------------- */
+    if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+      char name[32];
+      snprintf(name, sizeof(name), "vec%d", c_alu++);
+      hsmap_set(&names, u, strdup(name));
+
+      char ctype[128];
+      hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+      hsb_printf(&decls, "  %s %s;\n", ctype, name);
+      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+
+      if (u->n_src == 1) {
+        char *s = hsmap_get(&names, u->src[0]);
+        hsb_printf(&body, "%s = (%s)(%s);\n", name, ctype, s ? s : "0");
+      } else {
+        hsb_printf(&body, "%s = (%s){", name, ctype);
+        for (int j = 0; j < u->n_src; j++) {
+          if (j) hsb_puts(&body, ", ");
+          char *s = hsmap_get(&names, u->src[j]);
+          hsb_puts(&body, s ? s : "0");
+        }
+        hsb_puts(&body, "};\n");
+      }
+      continue;
+    }
+
+    /* --- GEP: vector lane extract ------------------------------------ */
+    if (u->op == POLY_OP_GEP) {
+      char name[32];
+      snprintf(name, sizeof(name), "gep%d", c_alu++);
+      hsmap_set(&names, u, strdup(name));
+
+      char ctype[128];
+      hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+      hsb_printf(&decls, "  %s %s;\n", ctype, name);
+      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+
+      char *src_s = hsmap_get(&names, u->src[0]);
+      if (u->arg.kind == POLY_ARG_INT) {
+        int idx = (int)u->arg.i;
+        hsb_printf(&body, "%s = %s[%d];\n", name, src_s ? src_s : "0", idx);
+      } else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1) {
+        int idx = (int)u->arg.int_tuple.vals[0];
+        /* Use array-style indexing for ext_vector_type */
+        hsb_printf(&body, "%s = %s[%d];\n", name, src_s ? src_s : "0", idx);
+      } else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 1) {
+        /* Multi-lane GEP: construct vector from selected lanes */
+        hsb_printf(&body, "%s = (%s){", name, ctype);
+        for (int j = 0; j < u->arg.int_tuple.n; j++) {
+          if (j) hsb_puts(&body, ", ");
+          hsb_printf(&body, "%s[%d]", src_s ? src_s : "0", (int)u->arg.int_tuple.vals[j]);
+        }
+        hsb_puts(&body, "};\n");
+      } else {
+        hsb_printf(&body, "%s = %s;\n", name, src_s ? src_s : "0");
+      }
+      continue;
+    }
+
+    /* --- WMMA: matrix multiply-accumulate ----------------------------- */
+    if (u->op == POLY_OP_WMMA) {
+      char name[32];
+      snprintf(name, sizeof(name), "wmma%d", c_alu++);
+      hsmap_set(&names, u, strdup(name));
+
+      char ctype[128];
+      hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+      hsb_printf(&decls, "  %s %s;\n", ctype, name);
+      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+
+      /* WMMA has 3 sources: A, B, C(accumulator). Arg is the intrinsic name. */
+      char *a_s = (u->n_src > 0) ? hsmap_get(&names, u->src[0]) : "0";
+      char *b_s = (u->n_src > 1) ? hsmap_get(&names, u->src[1]) : "0";
+      char *c_s = (u->n_src > 2) ? hsmap_get(&names, u->src[2]) : "0";
+
+      /* Emit: wmma0 = __WMMA_name(A, B, C); */
+      const char *wmma_name = (u->arg.kind == POLY_ARG_STRING && u->arg.str)
+                              ? u->arg.str : "WMMA_UNKNOWN";
+      hsb_printf(&body, "%s = __%s(%s, %s, %s);\n",
+                 name, wmma_name, a_s ? a_s : "0", b_s ? b_s : "0", c_s ? c_s : "0");
       continue;
     }
   }
@@ -633,6 +758,15 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
   EMIT_OCML_F64(uses_sqrt_f64,  "sqrt",  ", const");
   EMIT_OCML_F64(uses_sin_f64,   "sin",   "");
   EMIT_OCML_F64(uses_trunc_f64, "trunc", "");
+
+  /* WMMA intrinsic declarations.
+   * Convention: WMMA arg = builtin name (e.g. "mfma_f32_16x16x16_f16").
+   * Renderer emits: __mfma_f32_16x16x16_f16(A, B, C)
+   * Prefix defines: #define __mfma_f32_16x16x16_f16 __builtin_amdgcn_mfma_f32_16x16x16_f16 */
+  for (int wi = 0; wi < used.n_wmma_names; wi++) {
+    const char *wn = used.wmma_names[wi];
+    hsb_printf(&out, "#define __%s __builtin_amdgcn_%s\n", wn, wn);
+  }
 
 #undef EMIT_OCML
 #undef EMIT_OCML_F64
