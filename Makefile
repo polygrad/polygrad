@@ -18,6 +18,18 @@ ifeq ($(HAS_CUDA), 1)
   CFLAGS_COMMON += -DPOLY_HAS_CUDA=1
 endif
 
+# Detect HIP/ROCm availability (check ROCM_PATH, /opt/rocm, and versioned paths)
+ROCM_PATH ?= $(shell ls -d /opt/rocm-* 2>/dev/null | sort -V | tail -1)
+ifeq ($(ROCM_PATH),)
+  ROCM_PATH := /opt/rocm
+endif
+HAS_HIP := $(shell test -f $(ROCM_PATH)/include/hip/hip_runtime.h && echo 1 || echo 0)
+ifeq ($(HAS_HIP), 1)
+  SRC += src/render_hip.c src/runtime_hip.c
+  TEST_SRC += test/test_hip.c
+  CFLAGS_COMMON += -DPOLY_HAS_HIP=1
+endif
+
 # Detect x86-64 (not available in Emscripten WASM builds)
 HAS_X64 := $(shell uname -m | grep -c x86_64)
 ifeq ($(HAS_X64), 1)
@@ -87,6 +99,23 @@ test-parity-cuda: build/polygrad_parity_runner_cuda
 		--runner build/polygrad_parity_runner_cuda --cuda --mode values --atol 1e-4
 
 build/polygrad_parity_runner_cuda: $(SRC) $(PARITY_RUNNER_SRC)
+	@mkdir -p build
+	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+endif
+
+ifeq ($(HAS_HIP), 1)
+bench-hip: build/bench_hip
+	./build/bench_hip
+
+build/bench_hip: $(SRC) bench/bench_hip.c
+	@mkdir -p build
+	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+
+test-parity-hip: build/polygrad_parity_runner_hip
+	CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) \
+		--runner build/polygrad_parity_runner_hip --hip --mode values --atol 1e-4
+
+build/polygrad_parity_runner_hip: $(SRC) $(PARITY_RUNNER_SRC)
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
 endif

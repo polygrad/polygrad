@@ -304,6 +304,47 @@ const PolyAllocator POLY_CUDA_ALLOCATOR = {
 
 #endif /* POLY_HAS_CUDA */
 
+/* ── HIP allocator ───────────────────────────────────────────────────── */
+
+#ifdef POLY_HAS_HIP
+
+static void *hip_alloc_fn(size_t nbytes, void *dev_ctx) {
+  (void)dev_ctx;
+  return poly_hip_alloc(nbytes);
+}
+
+static void hip_free_fn(void *handle, void *dev_ctx) {
+  (void)dev_ctx;
+  if (handle) poly_hip_free(handle);
+}
+
+static int hip_copy_in_fn(void *dst, const void *src, size_t n, void *dev_ctx) {
+  (void)dev_ctx;
+  return poly_hip_copy_htod(dst, src, n);
+}
+
+static int hip_copy_out_fn(void *dst, const void *src, size_t n, void *dev_ctx) {
+  (void)dev_ctx;
+  return poly_hip_copy_dtoh(dst, src, n);
+}
+
+static int hip_copy_between_fn(void *dst, const void *src, size_t n, void *dev_ctx) {
+  (void)dev_ctx; (void)dst; (void)src; (void)n;
+  fprintf(stderr, "polygrad: hip_copy_between: not implemented\n");
+  return -1;
+}
+
+const PolyAllocator POLY_HIP_ALLOCATOR = {
+  .alloc = hip_alloc_fn,
+  .free = hip_free_fn,
+  .copy_in = hip_copy_in_fn,
+  .copy_out = hip_copy_out_fn,
+  .copy_between = hip_copy_between_fn,
+  .dev_ctx = NULL,
+};
+
+#endif /* POLY_HAS_HIP */
+
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Backend-specific runner handle types                                 */
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -319,6 +360,13 @@ typedef struct {
 typedef struct {
   PolyCudaProgram *prog;
 } CudaRunnerHandle;
+#endif
+
+/* HIP: compiled program handle */
+#ifdef POLY_HAS_HIP
+typedef struct {
+  PolyHipProgram *prog;
+} HipRunnerHandle;
 #endif
 
 /* WASM JIT: JS-side kernel cache index */
@@ -622,6 +670,99 @@ static const PolyAllocator *cuda_get_allocator(void) {
 
 #endif /* POLY_HAS_CUDA */
 
+/* ── HIP backend ──────────────────────────────────────────────────────── */
+
+#ifdef POLY_HAS_HIP
+
+static int hip_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root,
+                          const char *fn_name, PolyRunner *out) {
+  int n_lin;
+  PolyUOp **lin = poly_linearize_hip(ctx, scheduled_root, &n_lin);
+  if (!lin) return -1;
+
+  /* Extract grid/block from SPECIAL ops */
+  int grid_size = 0, local_size = 0;
+  for (int j = 0; j < n_lin; j++) {
+    if (lin[j]->op == POLY_OP_SPECIAL && lin[j]->n_src > 0 &&
+        lin[j]->src[0]->op == POLY_OP_CONST) {
+      const char *sn = lin[j]->arg.str;
+      if (sn && sn[0] == 'l')
+        local_size = (int)lin[j]->src[0]->arg.i;
+      else
+        grid_size = (int)lin[j]->src[0]->arg.i;
+    }
+  }
+
+  int block_size = local_size > 0 ? local_size : 256;
+
+  char *src = poly_render_hip(lin, n_lin, fn_name, block_size);
+  free(lin);
+  if (!src) return -1;
+
+  if (getenv("POLY_DUMP_KERNELS"))
+    fprintf(stderr, "=== HIP KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+
+  PolyHipProgram *prog = poly_compile_hip(src, fn_name);
+  if (!prog) {
+    fprintf(stderr, "=== FAILED HIP KERNEL %s ===\n%s\n=== END ===\n", fn_name, src);
+    free(src);
+    return -1;
+  }
+  free(src);
+
+  /* Compute grid dimensions */
+  int gx;
+  if (local_size > 0 && grid_size > 0) gx = grid_size;
+  else if (local_size > 0)             gx = 1;
+  else if (grid_size > 0)              gx = (grid_size + block_size - 1) / block_size;
+  else                                 gx = 1;
+
+  HipRunnerHandle *hh = malloc(sizeof(HipRunnerHandle));
+  if (!hh) { poly_hip_program_destroy(prog); return -1; }
+  hh->prog = prog;
+
+  out->kind = POLY_RUNNER_COMPILED;
+  out->handle = hh;
+  out->handle_size = 0;
+  out->grid[0] = gx;    out->grid[1] = 1; out->grid[2] = 1;
+  out->block[0] = block_size; out->block[1] = 1; out->block[2] = 1;
+  return 0;
+}
+
+static int hip_execute(PolyRunner *runner, void **args, int n_args) {
+  HipRunnerHandle *hh = (HipRunnerHandle *)runner->handle;
+
+  /* hipModuleLaunchKernel uses the same kernelParams pattern as CUDA:
+   * args[i] must point TO the device pointer (one level of indirection). */
+  void **hip_args = malloc((size_t)n_args * sizeof(void *));
+  if (!hip_args) return -1;
+  for (int i = 0; i < n_args; i++) {
+    hip_args[i] = &args[i];
+  }
+
+  int ret = poly_hip_launch(hh->prog, hip_args, n_args,
+                             runner->grid[0], runner->grid[1], runner->grid[2],
+                             runner->block[0], runner->block[1], runner->block[2]);
+  if (ret == 0) ret = poly_hip_sync();
+
+  free(hip_args);
+  return ret;
+}
+
+static void hip_free_runner(PolyRunner *runner) {
+  if (runner->handle) {
+    HipRunnerHandle *hh = (HipRunnerHandle *)runner->handle;
+    poly_hip_program_destroy(hh->prog);
+    free(hh);
+  }
+}
+
+static const PolyAllocator *hip_get_allocator(void) {
+  return &POLY_HIP_ALLOCATOR;
+}
+
+#endif /* POLY_HAS_HIP */
+
 /* ── x86-64 JIT backend ─────────────────────────────────────────────── */
 
 #ifdef POLY_HAS_X64
@@ -783,6 +924,13 @@ static const PolyBackendDesc BACKENDS[] = {
                              cpu_get_allocator },
 #else
   [POLY_DEVICE_X64_JIT] = { NULL, POLY_DEVICE_X64_JIT, false, NULL, NULL, NULL, NULL },
+#endif
+#ifdef POLY_HAS_HIP
+  [POLY_DEVICE_HIP]    = { "hip",    POLY_DEVICE_HIP,   false,
+                            hip_lower_item, hip_execute, hip_free_runner,
+                            hip_get_allocator },
+#else
+  [POLY_DEVICE_HIP]    = { NULL, POLY_DEVICE_HIP, false, NULL, NULL, NULL, NULL },
 #endif
 };
 
@@ -958,6 +1106,11 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
 #ifdef POLY_HAS_CUDA
     else if (h->domain == POLY_DEVICE_CUDA) {
       poly_cuda_memset((unsigned long long)(uintptr_t)h->ptr, 0, h->nbytes);
+    }
+#endif
+#ifdef POLY_HAS_HIP
+    else if (h->domain == POLY_DEVICE_HIP) {
+      poly_hip_memset(h->ptr, 0, h->nbytes);
     }
 #endif
   }

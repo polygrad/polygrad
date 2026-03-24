@@ -138,6 +138,37 @@ int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
 
 #endif /* POLY_HAS_CUDA */
 
+/* ── HIP/ROCm support (conditional on POLY_HAS_HIP) ────────────────── */
+
+#ifdef POLY_HAS_HIP
+
+/* HIP linearizer: rewrite + gpudims + linearize (same pipeline as CUDA). */
+PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+
+/* Render linearized UOps to HIP C++ source code.
+ * Returns malloc'd string. Caller must free(). */
+char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bounds);
+
+/* HIP Runtime */
+typedef struct PolyHipProgram PolyHipProgram;
+
+int poly_hip_init(void);
+bool poly_hip_available(void);
+int poly_hip_wave_size(void);
+const char *poly_hip_arch(void);
+void *poly_hip_alloc(size_t bytes);
+void poly_hip_free(void *ptr);
+int poly_hip_copy_htod(void *dst, const void *src, size_t bytes);
+int poly_hip_copy_dtoh(void *dst, const void *src, size_t bytes);
+PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name);
+int poly_hip_launch(PolyHipProgram *prog, void **args, int n_args,
+                    int gx, int gy, int gz, int bx, int by, int bz);
+int poly_hip_sync(void);
+void poly_hip_program_destroy(PolyHipProgram *prog);
+int poly_hip_memset(void *ptr, unsigned char val, size_t bytes);
+
+#endif /* POLY_HAS_HIP */
+
 /* ── x86-64 JIT support (conditional on POLY_HAS_X64) ──────────────── */
 
 #ifdef POLY_HAS_X64

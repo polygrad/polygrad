@@ -413,6 +413,10 @@ float *poly_instance_param_data(PolyInstance *inst, int i,
   /* Device-memory backends: host data may be stale */
   if (inst->buf_handles && inst->buf_handles[bi].domain == POLY_DEVICE_CUDA)
     return NULL;
+#ifdef POLY_HAS_HIP
+  if (inst->buf_handles && inst->buf_handles[bi].domain == POLY_DEVICE_HIP)
+    return NULL;
+#endif
   return b->data;
 }
 
@@ -447,6 +451,10 @@ float *poly_instance_buf_data(PolyInstance *inst, int i,
   /* Device-memory backends: host data may be stale */
   if (inst->buf_handles && inst->buf_handles[i].domain == POLY_DEVICE_CUDA)
     return NULL;
+#ifdef POLY_HAS_HIP
+  if (inst->buf_handles && inst->buf_handles[i].domain == POLY_DEVICE_HIP)
+    return NULL;
+#endif
   return inst->bufs[i].data;
 }
 
@@ -606,6 +614,12 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
 #ifdef POLY_HAS_CUDA
   if (resolved == POLY_DEVICE_CUDA && !poly_cuda_available()) {
     fprintf(stderr, "poly_instance_set_device: CUDA not available\n");
+    return -1;
+  }
+#endif
+#ifdef POLY_HAS_HIP
+  if (resolved == POLY_DEVICE_HIP && !poly_hip_available()) {
+    fprintf(stderr, "poly_instance_set_device: HIP not available\n");
     return -1;
   }
 #endif

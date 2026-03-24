@@ -33,6 +33,7 @@ typedef enum {
   POLY_DEVICE_WASM_JIT, /* WASM: C renders bytes, host compiles+executes */
   POLY_DEVICE_WEBGPU,   /* WebGPU: C renders WGSL, host compiles+executes */
   POLY_DEVICE_X64_JIT,  /* x86-64 JIT: C emits machine code, mmap+execute */
+  POLY_DEVICE_HIP,      /* AMD GPU (HSACO via hipModule) */
 } PolyDeviceId;
 
 /* ── Compilation mode ────────────────────────────────────────────────── */
@@ -71,6 +72,7 @@ typedef enum {
  * Device-specific buffer reference. The ptr field is opaque:
  *   CPU/INTERP: host malloc'd pointer
  *   CUDA:       CUdeviceptr (cast to void*)
+ *   HIP:        hipDeviceptr_t (void*)
  *   WASM_JIT:   offset into Emscripten heap
  *   WEBGPU:     GPUBuffer (host-managed, wrapped)
  */
@@ -182,6 +184,7 @@ typedef struct {
  * handle is a backend-owned opaque payload:
  *   COMPILED (CPU):  PolyProgram*
  *   COMPILED (CUDA): PolyCudaProgram*
+ *   COMPILED (HIP):  PolyHipProgram*
  *   COMPILED (WASM): WASM bytes (malloc'd, handle_size = byte length)
  *   INTERP:          PolyUOp* (scheduled root, lives in PolyCtx arena)
  *   COPY/VIEW:       NULL
@@ -256,6 +259,7 @@ typedef struct {
  *
  *   CPU:      poly_linearize -> poly_render_c -> poly_compile_c
  *   CUDA:     poly_linearize_cuda -> poly_render_cuda -> poly_compile_cuda
+ *   HIP:      poly_linearize_hip -> poly_render_hip -> poly_compile_hip
  *   WASM_JIT: poly_linearize -> poly_render_wasm -> store bytes (no compile)
  *   INTERP:   store scheduled root UOp (no linearize, no render, no compile)
  *   WEBGPU:   linearize -> poly_render_wgsl -> store source (no compile)
@@ -348,6 +352,10 @@ extern const PolyAllocator POLY_CPU_ALLOCATOR;
 
 #ifdef POLY_HAS_CUDA
 extern const PolyAllocator POLY_CUDA_ALLOCATOR;
+#endif
+
+#ifdef POLY_HAS_HIP
+extern const PolyAllocator POLY_HIP_ALLOCATOR;
 #endif
 
 /* ── Backend registry ────────────────────────────────────────────────── */
