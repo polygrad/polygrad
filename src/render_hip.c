@@ -106,24 +106,44 @@ static void hsmap_destroy(HipStrMap *m) {
 
 /* ── Type rendering ──────────────────────────────────────────────── */
 
-/* Render a HIP C++ type for a PolyDType, including vector forms.
- * Uses ext_vector_type for HIP (supports .x/.y component access). */
+/* Map scalar PolyDType to a short identifier-safe name for vector typedefs.
+ * E.g. POLY_FLOAT16 -> "half", POLY_FLOAT32 -> "float", POLY_INT32 -> "int".
+ * Returns the raw C type for scalars and the typedef alias for vectors. */
+static const char *hip_scalar_alias(PolyDType s) {
+  if (poly_dtype_eq(s, POLY_FLOAT16))  return "half";
+  if (poly_dtype_eq(s, POLY_BFLOAT16)) return "bfloat16";
+  if (poly_dtype_eq(s, POLY_FLOAT32))  return "float";
+  if (poly_dtype_eq(s, POLY_FLOAT64))  return "double";
+  if (poly_dtype_eq(s, POLY_INT8))     return "char";
+  if (poly_dtype_eq(s, POLY_UINT8))    return "uchar";
+  if (poly_dtype_eq(s, POLY_INT16))    return "short";
+  if (poly_dtype_eq(s, POLY_UINT16))   return "ushort";
+  if (poly_dtype_eq(s, POLY_INT32))    return "int";
+  if (poly_dtype_eq(s, POLY_UINT32))   return "uint";
+  if (poly_dtype_eq(s, POLY_INT64))    return "long";
+  if (poly_dtype_eq(s, POLY_UINT64))   return "ulong";
+  if (poly_dtype_eq(s, POLY_BOOL))     return "bool";
+  return s.name;
+}
+
+/* Map scalar PolyDType to the actual C type used in HIP code. */
+static const char *hip_scalar_ctype(PolyDType s) {
+  if (poly_dtype_eq(s, POLY_FLOAT16))  return "_Float16";
+  if (poly_dtype_eq(s, POLY_BFLOAT16)) return "unsigned short";
+  return s.name;
+}
+
+/* Render a HIP C++ type for a PolyDType.
+ * Scalars: raw C type (_Float16, float, int, etc.)
+ * Vectors: typedef alias (half4, float4, int4, etc.)
+ * Vector typedefs must be emitted in the kernel prefix. */
 static void hip_render_ctype(PolyDType dt, char *buf, int cap) {
   PolyDType s = poly_dtype_scalar(dt);
   if (dt.count <= 1) {
-    if (poly_dtype_eq(s, POLY_FLOAT16))
-      snprintf(buf, cap, "_Float16");
-    else
-      snprintf(buf, cap, "%s", s.name);
+    snprintf(buf, cap, "%s", hip_scalar_ctype(s));
     return;
   }
-  /* Vector type: use ext_vector_type for HIP C++ */
-  const char *base;
-  if (poly_dtype_eq(s, POLY_FLOAT16))
-    base = "_Float16";
-  else
-    base = s.name;
-  snprintf(buf, cap, "%s __attribute__((ext_vector_type(%d)))", base, (int)dt.count);
+  snprintf(buf, cap, "%s%d", hip_scalar_alias(s), (int)dt.count);
 }
 
 /* ── Render helpers ───────────────────────────────────────────────── */
@@ -254,9 +274,12 @@ typedef struct {
   bool uses_sqrt_f64;
   bool uses_trunc_f64;
   bool uses_wmma;
-  /* Collect unique WMMA intrinsic names for macro definitions */
+  /* Collect unique WMMA intrinsic names */
   const char *wmma_names[16];
   int n_wmma_names;
+  /* Collect unique vector dtypes that need typedefs */
+  PolyDType vec_dtypes[32];
+  int n_vec_dtypes;
 } HipUsedFuncs;
 
 static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
@@ -283,6 +306,18 @@ static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
       break;
     }
     default: break;
+    }
+    /* Collect vector dtypes for typedef emission */
+    if (u->dtype.count > 1 && !u->dtype.is_ptr && used->n_vec_dtypes < 32) {
+      bool dup = false;
+      for (int j = 0; j < used->n_vec_dtypes; j++) {
+        if (poly_dtype_eq(poly_dtype_scalar(used->vec_dtypes[j]),
+                          poly_dtype_scalar(u->dtype)) &&
+            used->vec_dtypes[j].count == u->dtype.count) {
+          dup = true; break;
+        }
+      }
+      if (!dup) used->vec_dtypes[used->n_vec_dtypes++] = u->dtype;
     }
   }
 }
@@ -689,10 +724,11 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       char *b_s = (u->n_src > 1) ? hsmap_get(&names, u->src[1]) : "0";
       char *c_s = (u->n_src > 2) ? hsmap_get(&names, u->src[2]) : "0";
 
-      /* Emit: wmma0 = __WMMA_name(A, B, C); */
+      /* Emit: wmma0 = __builtin_amdgcn_<name>(A, B, C, 0, 0, 0);
+       * MFMA builtins take 6 args: A, B, C, cbsz, abid, blgp. */
       const char *wmma_name = (u->arg.kind == POLY_ARG_STRING && u->arg.str)
                               ? u->arg.str : "WMMA_UNKNOWN";
-      hsb_printf(&body, "%s = __%s(%s, %s, %s);\n",
+      hsb_printf(&body, "%s = __builtin_amdgcn_%s(%s, %s, %s, 0, 0, 0);\n",
                  name, wmma_name, a_s ? a_s : "0", b_s ? b_s : "0", c_s ? c_s : "0");
       continue;
     }
@@ -759,17 +795,20 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
   EMIT_OCML_F64(uses_sin_f64,   "sin",   "");
   EMIT_OCML_F64(uses_trunc_f64, "trunc", "");
 
-  /* WMMA intrinsic declarations.
-   * Convention: WMMA arg = builtin name (e.g. "mfma_f32_16x16x16_f16").
-   * Renderer emits: __mfma_f32_16x16x16_f16(A, B, C)
-   * Prefix defines: #define __mfma_f32_16x16x16_f16 __builtin_amdgcn_mfma_f32_16x16x16_f16 */
-  for (int wi = 0; wi < used.n_wmma_names; wi++) {
-    const char *wn = used.wmma_names[wi];
-    hsb_printf(&out, "#define __%s __builtin_amdgcn_%s\n", wn, wn);
-  }
+  /* WMMA: builtins emitted directly in body, no #define needed. */
 
 #undef EMIT_OCML
 #undef EMIT_OCML_F64
+
+  /* Vector type typedefs (ext_vector_type requires typedef in HIP C++) */
+  for (int vi = 0; vi < used.n_vec_dtypes; vi++) {
+    PolyDType vdt = used.vec_dtypes[vi];
+    char tname[64];
+    hip_render_ctype(vdt, tname, sizeof(tname));
+    const char *sctype = hip_scalar_ctype(poly_dtype_scalar(vdt));
+    hsb_printf(&out, "typedef %s %s __attribute__((ext_vector_type(%d)));\n",
+               sctype, tname, (int)vdt.count);
+  }
 
   hsb_puts(&out, "\n");
 

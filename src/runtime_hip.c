@@ -268,8 +268,11 @@ static char *comgr_get_data_bytes(amd_comgr_data_set_t ds, int kind, size_t *out
     return NULL;
   size_t sz = 0;
   hip_api.get_data(data, &sz, NULL);
-  char *buf = malloc(sz);
-  if (buf) hip_api.get_data(data, &sz, buf);
+  char *buf = calloc(1, sz + 2);
+  if (buf) {
+    hip_api.get_data(data, &sz, buf);
+    buf[sz] = '\0';
+  }
   hip_api.release_data(data);
   if (out_size) *out_size = sz;
   return buf;

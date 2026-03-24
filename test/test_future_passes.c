@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /*
  * test_future_passes.c -- Tests for codegen pass correctness and conformance.
  *

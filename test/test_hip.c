@@ -561,7 +561,7 @@ TEST(hip, render_wmma_mfma) {
   /* WMMA: result = mfma(A, B, C) */
   PolyUOp *wmma_srcs[3] = { a_vec, b_vec, c_vec };
   PolyUOp *wmma = poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3,
-                             poly_arg_str("mfma_f32_16x16x16_f16"));
+                             poly_arg_str("mfma_f32_16x16x16f16"));
 
   /* Extract lane 0 and store (just to complete the kernel) */
   PolyUOp *lane0 = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma,
@@ -579,9 +579,9 @@ TEST(hip, render_wmma_mfma) {
   free(lin);
   ASSERT_NOT_NULL(src);
 
-  /* Verify MFMA intrinsic macro appears */
-  ASSERT_TRUE(strstr(src, "__mfma_f32_16x16x16_f16") != NULL);
-  ASSERT_TRUE(strstr(src, "__builtin_amdgcn_mfma_f32_16x16x16_f16") != NULL);
+  /* Verify MFMA builtin call appears directly with 6 args */
+  ASSERT_TRUE(strstr(src, "__builtin_amdgcn_mfma_f32_16x16x16f16") != NULL);
+  ASSERT_TRUE(strstr(src, ", 0, 0, 0)") != NULL);
 
   /* Verify vector type handling (ext_vector_type for half/float) */
   ASSERT_TRUE(strstr(src, "ext_vector_type") != NULL);
@@ -591,6 +591,147 @@ TEST(hip, render_wmma_mfma) {
 
   free(src);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── E2E MFMA smoke test: all-ones matmul on GPU ─────────────────────── */
+TEST(hip, wmma_mfma_e2e) {
+  SKIP_IF_NO_HIP();
+  if (poly_hip_wave_size() != 64) { PASS(); } /* CDNA wave64 only */
+
+  /* Build hand-crafted kernel IR:
+   *   Each of 64 threads loads half4 from A and B, runs mfma_f32_16x16x16f16,
+   *   stores float4 result to C. With all inputs = 1.0h, every output = 16.0f. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType f16v4 = poly_dtype_vec(POLY_FLOAT16, 4);
+  PolyDType f32v4 = poly_dtype_vec(POLY_FLOAT32, 4);
+
+  /* Kernel params: A (half*), B (half*), C (float*) */
+  PolyUOp *pA = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));
+  PolyUOp *pB = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
+  PolyUOp *pC = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+
+  /* Thread index: lidx0 in [0, 64) */
+  PolyUOp *bound64 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(64));
+  PolyUOp *tid = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound64,
+                             poly_arg_str("lidx0"));
+
+  /* Per-thread offset: tid * 4 */
+  PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *offset = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, tid, four, poly_arg_none());
+
+  /* Load A[tid*4 .. tid*4+3] as 4 individual halves, then VECTORIZE */
+  PolyUOp *a_elems[4], *b_elems[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *ci = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+    PolyUOp *idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, offset, ci, poly_arg_none());
+
+    PolyUOp *a_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, idx, poly_arg_none());
+    a_elems[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, a_ptr, poly_arg_none());
+
+    PolyUOp *b_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, idx, poly_arg_none());
+    b_elems[i] = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, b_ptr, poly_arg_none());
+  }
+  PolyUOp *a_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_elems, 4, poly_arg_none());
+  PolyUOp *b_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, b_elems, 4, poly_arg_none());
+
+  /* Zero accumulator (float4) */
+  PolyUOp *zero_f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *c_elems[4] = { zero_f32, zero_f32, zero_f32, zero_f32 };
+  PolyUOp *c_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f32v4, c_elems, 4, poly_arg_none());
+
+  /* WMMA: D = A * B + C */
+  PolyUOp *wmma_srcs[3] = { a_vec, b_vec, c_vec };
+  PolyUOp *d_vec = poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3,
+                              poly_arg_str("mfma_f32_16x16x16f16"));
+
+  /* Store all 4 output lanes */
+  PolyUOp *stores[4];
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *lane = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, d_vec, poly_arg_int(i));
+    PolyUOp *ci = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+    PolyUOp *idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, offset, ci, poly_arg_none());
+    PolyUOp *c_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, idx, poly_arg_none());
+    stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c_ptr, lane, poly_arg_none());
+  }
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 4, poly_arg_none());
+
+  /* Linearize (raw IR, no optimization passes) */
+  int n_lin;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  /* Render to HIP source */
+  char *src = poly_render_hip(lin, n_lin, "mfma_e2e", 64);
+  free(lin);
+  ASSERT_NOT_NULL(src);
+
+  /* Compile to HSACO via comgr */
+  PolyHipProgram *prog = poly_compile_hip(src, "mfma_e2e");
+  if (!prog) {
+    fprintf(stderr, "  mfma_e2e: rendered source:\n%s\n", src);
+    free(src);
+    poly_ctx_destroy(ctx);
+    FAIL("poly_compile_hip failed for MFMA kernel");
+  }
+  free(src);
+
+  /* Allocate device buffers:
+   *   A: 256 halves (64 threads * 4 elements), all = 1.0h
+   *   B: 256 halves, all = 1.0h
+   *   C: 256 floats, zeroed */
+  size_t a_bytes = 256 * sizeof(uint16_t);
+  size_t c_bytes = 256 * sizeof(float);
+
+  uint16_t h_a[256], h_b[256];
+  for (int i = 0; i < 256; i++) { h_a[i] = 0x3C00; h_b[i] = 0x3C00; } /* 1.0h */
+
+  void *d_a = poly_hip_alloc(a_bytes);
+  void *d_b = poly_hip_alloc(a_bytes);
+  void *d_c = poly_hip_alloc(c_bytes);
+  ASSERT_NOT_NULL(d_a);
+  ASSERT_NOT_NULL(d_b);
+  ASSERT_NOT_NULL(d_c);
+
+  poly_hip_copy_htod(d_a, h_a, a_bytes);
+  poly_hip_copy_htod(d_b, h_b, a_bytes);
+  poly_hip_memset(d_c, 0, c_bytes);
+
+  /* Launch: 1 block of 64 threads (one wave) */
+  void *args[3] = { &d_a, &d_b, &d_c };
+  int rc = poly_hip_launch(prog, args, 3, /*grid*/ 1, 1, 1, /*block*/ 64, 1, 1);
+  ASSERT_INT_EQ(rc, 0);
+  rc = poly_hip_sync();
+  ASSERT_INT_EQ(rc, 0);
+
+  /* Readback and verify all 256 outputs */
+  float h_c[256];
+  poly_hip_copy_dtoh(h_c, d_c, c_bytes);
+
+  int n_wrong = 0;
+  for (int i = 0; i < 256; i++) {
+    float diff = h_c[i] - 16.0f;
+    if (diff < -0.5f || diff > 0.5f) {
+      if (n_wrong < 5)
+        fprintf(stderr, "  mfma_e2e: h_c[%d] = %.4f (expected 16.0)\n", i, h_c[i]);
+      n_wrong++;
+    }
+  }
+  if (n_wrong > 0) {
+    fprintf(stderr, "  mfma_e2e: %d/256 outputs wrong\n", n_wrong);
+  }
+
+  /* Cleanup */
+  poly_hip_free(d_a);
+  poly_hip_free(d_b);
+  poly_hip_free(d_c);
+  poly_hip_program_destroy(prog);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(n_wrong, 0);
   PASS();
 }
 

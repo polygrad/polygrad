@@ -1,5 +1,6 @@
+#define _POSIX_C_SOURCE 200809L
 /*
- * test_nn.c — Tests for the Tensor + neural network API
+ * test_nn.c -- Tests for the Tensor + neural network API
  */
 
 #include <math.h>
