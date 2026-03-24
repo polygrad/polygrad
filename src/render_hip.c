@@ -578,21 +578,24 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
   HipStrBuf out;
   hsb_init(&out);
 
-  /* Prefix: HIP-specific defines */
+  /* Prefix: compiled via comgr with -nogpuinc (no built-in headers).
+   * All device function declarations must be provided explicitly,
+   * matching tinygrad's AMDHIPRenderer (cstyle.py:466-563). */
   hsb_puts(&out, "typedef long unsigned int size_t;\n");
   hsb_puts(&out, "#define INFINITY (__builtin_inff())\n");
   hsb_puts(&out, "#define NAN (__builtin_nanf(\"\"))\n");
 
-  /* Bitcast template helper (same as CUDA) */
-  hsb_puts(&out, "template <class T, class F> __device__ __forceinline__ T tg_bitcast(F v) {\n");
+  /* Bitcast template helper. With -nogpuinc, __device__/__forceinline__
+   * are unavailable; use __attribute__ equivalents. */
+  hsb_puts(&out, "template <class T, class F> __attribute__((device, always_inline)) T tg_bitcast(F v) {\n");
   hsb_puts(&out, "  union U { F f; T t; }; U u; u.f = v; return u.t;\n");
   hsb_puts(&out, "}\n");
 
   /* OCKL workitem function declarations (only when SPECIAL ops are used) */
   if (used.uses_special) {
-    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) unsigned int __ockl_get_local_id(size_t);\n");
-    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) unsigned int __ockl_get_group_id(size_t);\n");
-    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) unsigned int __ockl_get_local_size(size_t);\n");
+    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) size_t __ockl_get_local_id(unsigned int);\n");
+    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) size_t __ockl_get_group_id(unsigned int);\n");
+    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) size_t __ockl_get_local_size(unsigned int);\n");
   }
 
   /* OCML math function declarations (only what's used) */
