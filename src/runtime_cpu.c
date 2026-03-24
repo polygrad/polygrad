@@ -125,8 +125,15 @@ static int compile_to_so(const char *source, const char *c_path, const char *so_
     return -1;
   }
   if (pid == 0) {
-    execlp("clang", "clang", opt_flag(), "-shared", "-fPIC",
+    const char *cc = getenv("CC");
+    if (!cc) cc = "clang";
+    execlp(cc, cc, opt_flag(), "-shared", "-fPIC",
            "-fno-math-errno", "-o", so_path, c_path, "-lm", (char *)NULL);
+    /* clang not found — try gcc as fallback */
+    if (!getenv("CC")) {
+      execlp("gcc", "gcc", opt_flag(), "-shared", "-fPIC",
+             "-fno-math-errno", "-o", so_path, c_path, "-lm", (char *)NULL);
+    }
     _exit(127);
   }
   int status;
@@ -149,11 +156,18 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
 
   if (use_cache) {
     h = source_hash(source);
-    /* Include opt level in hash so -O0 and -O2 caches are separate */
+    /* Include opt level and compiler name in hash so caches are separate */
     const char *of = opt_flag();
     for (; *of; of++) {
       h ^= (uint64_t)(unsigned char)*of;
       h *= 0x100000001b3ULL;
+    }
+    const char *cc_env = getenv("CC");
+    if (cc_env) {
+      for (const char *p = cc_env; *p; p++) {
+        h ^= (uint64_t)(unsigned char)*p;
+        h *= 0x100000001b3ULL;
+      }
     }
 
     if (ensure_cache_dir(cache_dir, sizeof(cache_dir)) == 0) {
@@ -181,7 +195,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
   int ret = compile_to_so(source, c_path, so_path);
   if (ret != 0) {
     /* DEBUG: dump failed kernel source */
-    fprintf(stderr, "polygrad: clang failed (exit %d)\n", ret);
+    fprintf(stderr, "polygrad: C compiler failed (exit %d)\n", ret);
     fprintf(stderr, "%s\n", source);
     return NULL;
   }
