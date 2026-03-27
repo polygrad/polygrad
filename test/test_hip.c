@@ -735,4 +735,235 @@ TEST(hip, wmma_mfma_e2e) {
   PASS();
 }
 
+/* ── f16 helper: convert f32 to IEEE 754 half ──────────────────────── */
+static uint16_t f32_to_f16(float f) {
+  uint32_t x;
+  memcpy(&x, &f, 4);
+  uint32_t sign = (x >> 16) & 0x8000;
+  int exp = ((x >> 23) & 0xFF) - 127 + 15;
+  uint32_t mant = (x >> 13) & 0x3FF;
+  if (exp <= 0) return (uint16_t)sign;        /* underflow -> zero */
+  if (exp >= 31) return (uint16_t)(sign | 0x7C00); /* overflow -> inf */
+  return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
+}
+
+/* ── Automatic TC E2E: 16x16x16 f16 matmul through poly_realize ──── */
+
+TEST(hip, tc_auto_matmul_e2e) {
+  SKIP_IF_NO_HIP();
+  if (poly_hip_wave_size() != 64) { PASS(); } /* CDNA wave64 only */
+
+  /* Build 16x16x16 matmul: C[i,j] = sum_k(A[i,k] * B[k,j])
+   * A, B are f16, accumulation and output C are f32.
+   * Pattern: reshape + expand + MUL(f16) + CAST(f32) + REDUCE(ADD) */
+  const int M = 16, N = 16, K = 16;
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT16, M * K);   /* f16[256] */
+  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT16, K * N);   /* f16[256] */
+  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, M * N);   /* f32[256] */
+
+  /* A: [M*K] -> [M, 1, K] -> expand [M, N, K] */
+  int64_t a_3d[] = {M, 1, K};
+  PolyUOp *ar = poly_reshape(ctx, buf_a, a_3d, 3);
+  int64_t a_exp[] = {M, N, K};
+  PolyUOp *ae = poly_expand(ctx, ar, a_exp, 3);
+
+  /* B: [K*N] -> [K, N] -> permute(1,0) -> [N, K] -> [1, N, K] -> expand [M, N, K] */
+  int64_t b_2d[] = {K, N};
+  PolyUOp *br = poly_reshape(ctx, buf_b, b_2d, 2);
+  int64_t b_perm[] = {1, 0};
+  PolyUOp *bp = poly_permute(ctx, br, b_perm, 2);
+  int64_t b_3d[] = {1, N, K};
+  PolyUOp *br2 = poly_reshape(ctx, bp, b_3d, 3);
+  int64_t b_exp[] = {M, N, K};
+  PolyUOp *be = poly_expand(ctx, br2, b_exp, 3);
+
+  /* MUL in f16, CAST to f32, REDUCE(ADD) on axis 2 (K) */
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, ae, be, poly_arg_none());
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
+  int64_t red_axes[] = {2};
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, cast, red_axes, 1);
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_c, sum, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  /* Host data: all ones (result = 16.0f for every element) */
+  uint16_t h_a[M * K], h_b[K * N];
+  for (int i = 0; i < M * K; i++) h_a[i] = 0x3C00; /* 1.0h */
+  for (int i = 0; i < K * N; i++) h_b[i] = 0x3C00;
+  float h_c[M * N];
+  memset(h_c, 0, sizeof(h_c));
+
+  /* Allocate HIP buffers and copy input data */
+  size_t a_bytes = (size_t)(M * K) * 2;  /* f16 = 2 bytes */
+  size_t b_bytes = (size_t)(K * N) * 2;
+  size_t c_bytes = (size_t)(M * N) * 4;  /* f32 = 4 bytes */
+
+  void *d_a = poly_hip_alloc(a_bytes);
+  void *d_b = poly_hip_alloc(b_bytes);
+  void *d_c = poly_hip_alloc(c_bytes);
+  ASSERT_NOT_NULL(d_a); ASSERT_NOT_NULL(d_b); ASSERT_NOT_NULL(d_c);
+
+  poly_hip_copy_htod(d_a, h_a, a_bytes);
+  poly_hip_copy_htod(d_b, h_b, b_bytes);
+  poly_hip_memset(d_c, 0, c_bytes);
+
+  /* Build HIP bindings manually (f16 buffers need raw void* handling) */
+  PolyBufferBinding hip_binds[3] = {
+    { .buffer = buf_c, .handle = { d_c, c_bytes, POLY_DEVICE_HIP, true } },
+    { .buffer = buf_a, .handle = { d_a, a_bytes, POLY_DEVICE_HIP, true } },
+    { .buffer = buf_b, .handle = { d_b, b_bytes, POLY_DEVICE_HIP, true } },
+  };
+
+  /* Execute through full poly_realize path */
+  setenv("POLY_TC_OPT", "1", 1);
+  setenv("POLY_USE_TC", "1", 1);
+  int ret = poly_realize(ctx, sink, hip_binds, 3);
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+
+  if (ret != 0) {
+    fprintf(stderr, "  tc_auto_matmul: poly_realize failed (ret=%d)\n", ret);
+    /* Preflight diagnostic: dump the scheduled kernel shape */
+    fprintf(stderr, "  (check POLY_DUMP_KERNELS=1 for kernel IR before HIP lowering)\n");
+  }
+  ASSERT_INT_EQ(ret, 0);
+
+  /* Readback and verify: all 256 outputs should be 16.0f */
+  poly_hip_copy_dtoh(h_c, d_c, c_bytes);
+
+  int n_wrong = 0;
+  for (int i = 0; i < M * N; i++) {
+    float diff = h_c[i] - 16.0f;
+    if (diff < -0.5f || diff > 0.5f) {
+      if (n_wrong < 5)
+        fprintf(stderr, "  tc_auto_matmul: h_c[%d] = %.4f (expected 16.0)\n", i, h_c[i]);
+      n_wrong++;
+    }
+  }
+  if (n_wrong > 0)
+    fprintf(stderr, "  tc_auto_matmul: %d/%d outputs wrong\n", n_wrong, M * N);
+
+  poly_hip_free(d_a); poly_hip_free(d_b); poly_hip_free(d_c);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(n_wrong, 0);
+  PASS();
+}
+
+TEST(hip, tc_auto_matmul_unique_values) {
+  SKIP_IF_NO_HIP();
+  if (poly_hip_wave_size() != 64) { PASS(); }
+
+  /* 16x16x16 matmul with unique values to catch swizzle/lane-mapping bugs.
+   * A[i][k] = (i*16+k+1) as f16, B[k][j] = (k*16+j+1) as f16.
+   * C_ref[i][j] = sum_k(A[i][k] * B[k][j]) computed in f32 on CPU. */
+  const int M = 16, N = 16, K = 16;
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT16, M * K);
+  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT16, K * N);
+  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, M * N);
+
+  /* Same matmul graph as tc_auto_matmul_e2e */
+  int64_t a_3d[] = {M, 1, K};
+  PolyUOp *ar = poly_reshape(ctx, buf_a, a_3d, 3);
+  int64_t a_exp[] = {M, N, K};
+  PolyUOp *ae = poly_expand(ctx, ar, a_exp, 3);
+
+  int64_t b_2d[] = {K, N};
+  PolyUOp *br = poly_reshape(ctx, buf_b, b_2d, 2);
+  int64_t b_perm[] = {1, 0};
+  PolyUOp *bp = poly_permute(ctx, br, b_perm, 2);
+  int64_t b_3d[] = {1, N, K};
+  PolyUOp *br2 = poly_reshape(ctx, bp, b_3d, 3);
+  int64_t b_exp[] = {M, N, K};
+  PolyUOp *be = poly_expand(ctx, br2, b_exp, 3);
+
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, ae, be, poly_arg_none());
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
+  int64_t red_axes[] = {2};
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, cast, red_axes, 1);
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_c, sum, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  /* Host data: unique per-element values, scaled to 0.01x to keep products in f16 range.
+   * A[i][k] = 0.01*(i*16+k+1), B[k][j] = 0.01*(k*16+j+1).
+   * Max value: 0.01*256 = 2.56. Max product: ~6.5. Sum of 16: ~50. Safe for f16. */
+  uint16_t h_a[M * K], h_b[K * N];
+  for (int i = 0; i < M; i++)
+    for (int k = 0; k < K; k++)
+      h_a[i * K + k] = f32_to_f16(0.01f * (float)(i * K + k + 1));
+  for (int k = 0; k < K; k++)
+    for (int j = 0; j < N; j++)
+      h_b[k * N + j] = f32_to_f16(0.01f * (float)(k * N + j + 1));
+
+  /* CPU reference in f32. Use the same f16-rounded values the GPU sees. */
+  float c_ref[M * N];
+  for (int i = 0; i < M; i++) {
+    for (int j = 0; j < N; j++) {
+      float acc = 0.0f;
+      for (int k = 0; k < K; k++) {
+        float a_val = 0.01f * (float)(i * K + k + 1);
+        float b_val = 0.01f * (float)(k * N + j + 1);
+        acc += a_val * b_val;
+      }
+      c_ref[i * N + j] = acc;
+    }
+  }
+
+  size_t a_bytes = (size_t)(M * K) * 2;
+  size_t b_bytes = (size_t)(K * N) * 2;
+  size_t c_bytes = (size_t)(M * N) * 4;
+
+  void *d_a = poly_hip_alloc(a_bytes);
+  void *d_b = poly_hip_alloc(b_bytes);
+  void *d_c = poly_hip_alloc(c_bytes);
+  ASSERT_NOT_NULL(d_a); ASSERT_NOT_NULL(d_b); ASSERT_NOT_NULL(d_c);
+
+  poly_hip_copy_htod(d_a, h_a, a_bytes);
+  poly_hip_copy_htod(d_b, h_b, b_bytes);
+  poly_hip_memset(d_c, 0, c_bytes);
+
+  PolyBufferBinding hip_binds[3] = {
+    { .buffer = buf_c, .handle = { d_c, c_bytes, POLY_DEVICE_HIP, true } },
+    { .buffer = buf_a, .handle = { d_a, a_bytes, POLY_DEVICE_HIP, true } },
+    { .buffer = buf_b, .handle = { d_b, b_bytes, POLY_DEVICE_HIP, true } },
+  };
+
+  setenv("POLY_TC_OPT", "1", 1);
+  setenv("POLY_USE_TC", "1", 1);
+  int ret = poly_realize(ctx, sink, hip_binds, 3);
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+  ASSERT_INT_EQ(ret, 0);
+
+  float h_c[M * N];
+  poly_hip_copy_dtoh(h_c, d_c, c_bytes);
+
+  /* Compare: relative tolerance for f16 multiply + f32 accumulation.
+   * Values are small (max ~2.56) so f16 precision is good. */
+  int n_wrong = 0;
+  for (int i = 0; i < M * N; i++) {
+    float diff = h_c[i] - c_ref[i];
+    if (diff < 0) diff = -diff;
+    float atol = (c_ref[i] < 0 ? -c_ref[i] : c_ref[i]) * 0.01f; /* 1% relative */
+    if (atol < 0.01f) atol = 0.01f;
+    if (diff > atol) {
+      if (n_wrong < 5)
+        fprintf(stderr, "  unique_matmul: h_c[%d] = %.2f, expected %.2f (diff=%.2f)\n",
+                i, h_c[i], c_ref[i], diff);
+      n_wrong++;
+    }
+  }
+  if (n_wrong > 0)
+    fprintf(stderr, "  unique_matmul: %d/%d outputs wrong\n", n_wrong, M * N);
+
+  poly_hip_free(d_a); poly_hip_free(d_b); poly_hip_free(d_c);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(n_wrong, 0);
+  PASS();
+}
+
 #endif /* POLY_HAS_HIP */

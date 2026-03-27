@@ -2110,6 +2110,8 @@ typedef struct {
   PolyDeviceId device;
   int8_t optimize;         /* codegen optimization level */
   int8_t devectorize;      /* devectorize level (-1, 0, 1) */
+  int8_t tc_opt;           /* POLY_TC_OPT env (TC strictness level) */
+  int8_t use_tc;           /* POLY_USE_TC env (0=off, 1=full, 2=shape-only) */
   PolyCompiledPlan *plan;
 } RealizePlanCacheEntry;
 
@@ -2134,21 +2136,25 @@ static void r_sched_put(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCompileMode
 
 static PolyCompiledPlan *r_plan_get(PolyCtx *ctx, PolyUOp *sink, uint32_t h,
                                     PolyCompileMode m, PolyDeviceId d,
-                                    int8_t opt, int8_t devec) {
+                                    int8_t opt, int8_t devec,
+                                    int8_t tc_opt, int8_t use_tc) {
   for (int i = 0; i < r_plan_n; i++)
     if (r_plan_cache[i].ctx == ctx && r_plan_cache[i].sink == sink &&
         r_plan_cache[i].hash == h && r_plan_cache[i].mode == m &&
         r_plan_cache[i].device == d &&
-        r_plan_cache[i].optimize == opt && r_plan_cache[i].devectorize == devec)
+        r_plan_cache[i].optimize == opt && r_plan_cache[i].devectorize == devec &&
+        r_plan_cache[i].tc_opt == tc_opt && r_plan_cache[i].use_tc == use_tc)
       return r_plan_cache[i].plan;
   return NULL;
 }
 
 static void r_plan_put(PolyCtx *ctx, PolyUOp *sink, uint32_t h,
                         PolyCompileMode m, PolyDeviceId d,
-                        int8_t opt, int8_t devec, PolyCompiledPlan *p) {
+                        int8_t opt, int8_t devec,
+                        int8_t tc_opt, int8_t use_tc,
+                        PolyCompiledPlan *p) {
   if (r_plan_n < REALIZE_PLAN_CACHE_CAP)
-    r_plan_cache[r_plan_n++] = (RealizePlanCacheEntry){ ctx, sink, h, m, d, opt, devec, p };
+    r_plan_cache[r_plan_n++] = (RealizePlanCacheEntry){ ctx, sink, h, m, d, opt, devec, tc_opt, use_tc, p };
 }
 
 /* Read current codegen optimization settings from env vars.
@@ -2160,6 +2166,14 @@ static int8_t r_env_optimize(void) {
 static int8_t r_env_devectorize(void) {
   const char *v = getenv("POLY_DEVECTORIZE");
   return v && v[0] != '\0' ? (int8_t)atoi(v) : 0;
+}
+static int8_t r_env_tc_opt(void) {
+  const char *v = getenv("POLY_TC_OPT");
+  return v && v[0] != '\0' ? (int8_t)atoi(v) : 0;
+}
+static int8_t r_env_use_tc(void) {
+  const char *v = getenv("POLY_USE_TC");
+  return v && v[0] != '\0' ? (int8_t)atoi(v) : 1; /* default: TC enabled */
 }
 
 /* Purge realize caches for a destroyed context.
@@ -2256,11 +2270,12 @@ PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink,
   }
 
   int8_t opt = r_env_optimize(), devec = r_env_devectorize();
-  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec);
+  int8_t tc_opt = r_env_tc_opt(), use_tc = r_env_use_tc();
+  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
   if (!plan) {
     plan = poly_compile_schedule(ctx, sched, device);
     if (!plan) return NULL;
-    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, plan);
+    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc, plan);
   }
 
   return plan;
@@ -2430,13 +2445,14 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
     r_sched_put(ctx, tensor_sink, hash, POLY_MODE_CALL, sched);
   }
 
-  /* Compiled plan cache: per-context + per-device + per-optimization */
+  /* Compiled plan cache: per-context + per-device + per-optimization + per-TC-mode */
   int8_t opt = r_env_optimize(), devec = r_env_devectorize();
-  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec);
+  int8_t tc_opt = r_env_tc_opt(), use_tc = r_env_use_tc();
+  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
   if (!plan) {
     plan = poly_compile_schedule(ctx, sched, device);
     if (!plan) return -1;
-    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, plan);
+    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc, plan);
   }
 
   /* Build slot_data from bindings and execute */
@@ -2481,11 +2497,12 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
   }
 
   int8_t opt = r_env_optimize(), devec = r_env_devectorize();
-  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec);
+  int8_t tc_opt = r_env_tc_opt(), use_tc = r_env_use_tc();
+  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
   if (!plan) {
     plan = poly_compile_schedule(ctx, sched, device);
     if (!plan) return -1;
-    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, plan);
+    r_plan_put(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc, plan);
   }
 
   void **slot_data = build_slot_data_from_bindings(ctx, sched, bindings, n_bindings);
