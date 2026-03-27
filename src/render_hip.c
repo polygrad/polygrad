@@ -306,15 +306,25 @@ PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
    *        -> transcendental -> decomp -> bf16 -> gpudims -> control_flow */
   PolyRendererCaps hip_caps = poly_hip_renderer_caps();
 
-  /* Preprocessing + TC detection (matches shared pipeline optimize stage) */
+  /* TC detection only -- do not apply CPU-oriented upcast/unroll heuristics */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_apply_opts_heuristic_ex(ctx, sink, hip_caps);
+  sink = poly_apply_tc_opt(ctx, sink, hip_caps);
 
-  /* Expander: lowers CONTRACT/UNROLL/WMMA structure from TC detection */
-  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander_pass());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_expander_pass());
-  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  /* Expander: lowers CONTRACT/UNROLL/WMMA structure from TC detection.
+   * Only run if TC was detected (WMMA exists) to avoid perturbing non-TC kernels. */
+  {
+    int n_t = 0;
+    PolyUOp **t = poly_toposort(ctx, sink, &n_t);
+    bool has_wmma = false;
+    for (int i = 0; i < n_t && !has_wmma; i++)
+      if (t[i]->op == POLY_OP_WMMA) has_wmma = true;
+    if (has_wmma) {
+      sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander_pass());
+      sink = poly_graph_rewrite(ctx, sink, poly_pm_expander_pass());
+      sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+    }
+  }
 
   /* Existing HIP pipeline */
   sink = poly_group_for_reduce(ctx, sink, 256);

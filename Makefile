@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS_COMMON = -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter
+CFLAGS_COMMON = -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -Wno-unused-parameter
 CFLAGS_RELEASE = $(CFLAGS_COMMON) -O2
 CFLAGS_DEBUG = $(CFLAGS_COMMON) -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
 LDFLAGS = -lm

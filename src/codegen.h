@@ -76,6 +76,10 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink);
  * at the pre-expander stage where CONTRACT/UNROLL/WMMA are still visible. */
 PolyUOp *poly_apply_opts_heuristic_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps);
 
+/* Apply only the TC detection part of the heuristic. Does not apply CPU-oriented
+ * upcast/unroll heuristics. For GPU linearizers that handle their own scheduling. */
+PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps);
+
 /* TensorCore helpers (internal, exposed for testing) */
 int tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]);
 int tc_count_local(const PolyTensorCore *tc);

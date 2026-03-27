@@ -5377,6 +5377,53 @@ PolyPatternMatcher *poly_pm_pre_expander_pass(void)    { return poly_pm_pre_expa
 PolyPatternMatcher *poly_pm_expander_pass(void)        { return poly_pm_expander(); }
 void poly_reset_acc_num(void)                         { }
 
+PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
+  if (caps.n_tensor_cores <= 0) return sink;
+  OptScheduler s;
+  sched_init(&s, ctx, sink);
+  if (s.n_rngs == 0) return sink;
+
+  int n_reduce = 0;
+  for (int i = 0; i < s.n_rngs; i++)
+    if (s.types[i] == POLY_AXIS_GROUP_REDUCE || s.types[i] == POLY_AXIS_REDUCE)
+      n_reduce++;
+
+  int tc_opt_env = 0;
+  { const char *e = getenv("POLY_TC_OPT"); if (e) tc_opt_env = atoi(e); }
+  int use_tc_env = 1;
+  { const char *e = getenv("POLY_USE_TC"); if (e) use_tc_env = atoi(e); }
+
+  if (use_tc_env > 0 && (n_reduce == 1 || tc_opt_env >= 1)) {
+    OptScheduler tk;
+    sched_copy(&tk, &s);
+    PolyUOp *tc_axes[3];
+    bool tc_ok = sched_apply_tc_opt(&tk, 0, -1, tc_opt_env, use_tc_env,
+                                     caps.tensor_cores, caps.n_tensor_cores, tc_axes);
+    if (tc_ok) {
+      for (int tc_dim = 1; tc_dim >= 0; tc_dim--) {
+        int64_t bound = 0;
+        if (tc_axes[tc_dim] && tc_axes[tc_dim]->n_src > 0 &&
+            tc_axes[tc_dim]->src[0]->op == POLY_OP_CONST)
+          bound = tc_axes[tc_dim]->src[0]->arg.i;
+        if (bound <= 1) continue;
+        int szs[] = {5, 4, 3, 2};
+        for (int si = 0; si < 4; si++) {
+          if (bound % szs[si] == 0) {
+            int idx = -1;
+            for (int ri = 0; ri < tk.n_rngs; ri++)
+              if (tk.rngs[ri] == tc_axes[tc_dim]) { idx = ri; break; }
+            if (idx >= 0)
+              tc_axes[tc_dim] = sched_shift_to(&tk, tk.rngs[idx], szs[si], POLY_AXIS_UPCAST, false);
+            break;
+          }
+        }
+      }
+      return tk.ast;
+    }
+  }
+  return sink;
+}
+
 PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink) {
   ReduceContext local_ctx = {0};
   PolyUOp *out = poly_graph_rewrite_ctx(ctx, sink, poly_pm_reduce(), &local_ctx);
