@@ -594,9 +594,11 @@ static void sched_refresh(OptScheduler *s) {
  *   This is used for TC WARP modular arithmetic (e.g. warp%2).
  * out_new_rng: if non-NULL, receives the new range expression (the split-off part).
  * Returns the replaced range UOp (the one that keeps the old axis type), or NULL on failure. */
-static PolyUOp *sched_shift_to_ex(OptScheduler *s, PolyUOp *rng, int64_t amount,
-                                   PolyAxisType new_type, bool top,
-                                   PolyUOp *input_new_rng, PolyUOp **out_new_rng) {
+/* Core shift_to: substitute only + refresh. Matches tinygrad's shift_to semantics.
+ * Does NOT run graph_rewrite -- callers that need simplification do it themselves. */
+static PolyUOp *sched_shift_to_core(OptScheduler *s, PolyUOp *rng, int64_t amount,
+                                     PolyAxisType new_type, bool top,
+                                     PolyUOp *input_new_rng, PolyUOp **out_new_rng) {
   int64_t bound = 0;
   if (rng->n_src > 0 && rng->src[0]->op == POLY_OP_CONST && rng->src[0]->arg.kind == POLY_ARG_INT)
     bound = rng->src[0]->arg.i;
@@ -637,15 +639,25 @@ static PolyUOp *sched_shift_to_ex(OptScheduler *s, PolyUOp *rng, int64_t amount,
   PolyUOp *from[1] = { rng };
   PolyUOp *to[1] = { sub_axis };
   s->ast = poly_uop_substitute(ctx, s->ast, from, to, 1);
-  s->ast = poly_graph_rewrite(ctx, s->ast, poly_symbolic_simple());
-  s->ast = poly_graph_rewrite(ctx, s->ast, poly_pm_flatten_range());
-
   sched_refresh(s);
   if (out_new_rng) *out_new_rng = new_rng;
   return replaced;
 }
 
-/* Backward-compat wrapper: existing callers don't need input_new_rng/out_new_rng. */
+/* Convenience: shift_to + symbolic simplification + flatten.
+ * Used by the CPU heuristic path where callers expect simplified state after each shift. */
+static PolyUOp *sched_shift_to_ex(OptScheduler *s, PolyUOp *rng, int64_t amount,
+                                   PolyAxisType new_type, bool top,
+                                   PolyUOp *input_new_rng, PolyUOp **out_new_rng) {
+  PolyUOp *result = sched_shift_to_core(s, rng, amount, new_type, top, input_new_rng, out_new_rng);
+  if (result) {
+    s->ast = poly_graph_rewrite(s->ctx, s->ast, poly_symbolic_simple());
+    s->ast = poly_graph_rewrite(s->ctx, s->ast, poly_pm_flatten_range());
+    sched_refresh(s);
+  }
+  return result;
+}
+
 static PolyUOp *sched_shift_to(OptScheduler *s, PolyUOp *rng, int64_t amount,
                                 PolyAxisType new_type, bool top) {
   return sched_shift_to_ex(s, rng, amount, new_type, top, NULL, NULL);
@@ -1026,10 +1038,10 @@ static bool sched_apply_tc_opt(OptScheduler *s, int axis, int tc_select, int tc_
       if (otype == 'l') {
         PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
         PolyUOp *warp_mod2 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, warp, two, poly_arg_none());
-        axes[odim] = sched_shift_to_ex(s, axes[odim], 2, POLY_AXIS_LOCAL, false, warp_mod2, &new_rng);
+        axes[odim] = sched_shift_to_core(s, axes[odim], 2, POLY_AXIS_LOCAL, false, warp_mod2, &new_rng);
         warp = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, warp, two, poly_arg_none());
       } else if (otype == 'u') {
-        axes[odim] = sched_shift_to_ex(s, axes[odim], 2, POLY_AXIS_UPCAST, false, NULL, &new_rng);
+        axes[odim] = sched_shift_to_core(s, axes[odim], 2, POLY_AXIS_UPCAST, false, NULL, &new_rng);
       }
       if (!axes[odim]) {
         return false;
@@ -1042,7 +1054,7 @@ static bool sched_apply_tc_opt(OptScheduler *s, int axis, int tc_select, int tc_
     int n_ra = tc_get_reduce_axes(tc, ra);
     for (int i = 0; i < n_ra; i++) {
       PolyUOp *new_rng = NULL;
-      axes[2] = sched_shift_to_ex(s, axes[2], ra[i][1], POLY_AXIS_UNROLL, false, NULL, &new_rng);
+      axes[2] = sched_shift_to_core(s, axes[2], ra[i][1], POLY_AXIS_UNROLL, false, NULL, &new_rng);
       if (!axes[2]) {
         return false;
       }
@@ -1054,6 +1066,8 @@ static bool sched_apply_tc_opt(OptScheduler *s, int axis, int tc_select, int tc_
       /* Re-find the tagged reduceop */
       int n_topo2 = 0;
       PolyUOp **topo2 = poly_toposort(ctx, s->ast, &n_topo2);
+
+      /* Debug: check how many ne[] pointers are present in the current AST */
       PolyUOp *found_red = NULL;
       for (int i = 0; i < n_topo2; i++) {
         if (topo2[i]->op == POLY_OP_REDUCE && topo2[i]->tag == TC_TAG) {
@@ -1062,15 +1076,12 @@ static bool sched_apply_tc_opt(OptScheduler *s, int axis, int tc_select, int tc_
       }
       if (!found_red) return false;
 
-      /* Create tagged copies of ne[] (postrange.py:283: tne = [x.replace(tag=1) for x in ne]) */
+      /* Create tagged copies of ne[] (postrange.py:283: tne = [x.replace(tag=1) for x in ne]).
+       * Tags ALL elements (RANGE, ALU expressions like warp%2, etc.) -- not just RANGEs. */
       PolyUOp *tne[32];
       for (int i = 0; i < n_ne; i++) {
-        if (ne[i]->op == POLY_OP_RANGE) {
-          tne[i] = poly_uop_tagged(ctx, POLY_OP_RANGE, ne[i]->dtype,
-                                    ne[i]->src, ne[i]->n_src, ne[i]->arg, 1);
-        } else {
-          tne[i] = ne[i];
-        }
+        tne[i] = poly_uop_tagged(ctx, ne[i]->op, ne[i]->dtype,
+                                  ne[i]->src, ne[i]->n_src, ne[i]->arg, 1);
       }
 
       /* Substitute ne -> tne in found_red to isolate the MUL operands (postrange.py:284-285) */

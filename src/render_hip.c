@@ -311,14 +311,16 @@ PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   sink = poly_apply_tc_opt(ctx, sink, hip_caps);
 
   /* Expander: lowers CONTRACT/UNROLL/WMMA structure from TC detection.
-   * Only run if TC was detected (WMMA exists) to avoid perturbing non-TC kernels. */
+   * Run if TC produced any expandable ops (WMMA, CONTRACT, or UNROLL).
+   * use_tc=1 creates all three; use_tc=2 (shape-only) creates UNROLL without WMMA. */
   {
     int n_t = 0;
     PolyUOp **t = poly_toposort(ctx, sink, &n_t);
-    bool has_wmma = false;
-    for (int i = 0; i < n_t && !has_wmma; i++)
-      if (t[i]->op == POLY_OP_WMMA) has_wmma = true;
-    if (has_wmma) {
+    bool needs_expand = false;
+    for (int i = 0; i < n_t && !needs_expand; i++)
+      if (t[i]->op == POLY_OP_WMMA || t[i]->op == POLY_OP_CONTRACT || t[i]->op == POLY_OP_UNROLL)
+        needs_expand = true;
+    if (needs_expand) {
       sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
       sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander_pass());
       sink = poly_graph_rewrite(ctx, sink, poly_pm_expander_pass());

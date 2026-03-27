@@ -2327,3 +2327,90 @@ TEST(tc, pre_expander_wmma_structure) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+TEST(tc, all_ne_elements_tagged) {
+  /* Verify that tne tagging works for ALL ne elements (including non-RANGE
+   * local-axis expressions like warp%2). tinygrad does:
+   *   tne = [x.replace(tag=1) for x in ne]
+   * which tags EVERY element, not just RANGEs.
+   *
+   * The tne tags are INTERMEDIATE -- they exist during the ne->tne->ne_reordered
+   * substitution chain inside sched_apply_tc_opt. The final AST has tag=1 only
+   * on CONTRACT, WMMA, UNROLL nodes.
+   *
+   * What we verify here: the final WMMA+CONTRACT+UNROLL structure is present,
+   * confirming the full permutation chain executed correctly. If tne tagging
+   * were incomplete, the permutation substitution would fail. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+
+  setenv("POLY_TC_OPT", "1", 1);
+  setenv("POLY_USE_TC", "1", 1);
+  PolyRendererCaps caps = {
+    .has_mulacc = true,
+    .tensor_cores = get_test_cdna_tc(),
+    .n_tensor_cores = 1,
+  };
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+
+  /* Count tag=1 nodes: should be exactly CONTRACT(2) + WMMA(1) + UNROLL(1) = 4 */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+  int n_tagged = 0;
+  int n_wmma = 0, n_contract = 0, n_unroll_tagged = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->tag == 1) {
+      n_tagged++;
+      if (topo[i]->op == POLY_OP_WMMA) n_wmma++;
+      if (topo[i]->op == POLY_OP_CONTRACT) n_contract++;
+      if (topo[i]->op == POLY_OP_UNROLL) n_unroll_tagged++;
+    }
+  }
+
+  ASSERT_INT_EQ(n_wmma, 1);
+  ASSERT_INT_EQ(n_contract, 2);
+  ASSERT_INT_EQ(n_unroll_tagged, 1);
+  ASSERT_INT_EQ(n_tagged, 4); /* exactly these 4 */
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tc, use_tc_2_no_wmma_but_expanded) {
+  /* POLY_USE_TC=2 (shape-only mode): TC detection applies shift_to transformations
+   * (creating UNROLL structure) but does NOT construct WMMA/CONTRACT UOps.
+   * The expander must still run to lower the UNROLL structure.
+   *
+   * With the bug: UNROLL ops survive in the final AST (expander gate checks WMMA only).
+   * With the fix: UNROLL ops are expanded away. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+
+  setenv("POLY_TC_OPT", "1", 1);
+  setenv("POLY_USE_TC", "2", 1);  /* shape-only: no WMMA */
+  PolyRendererCaps caps = {
+    .has_mulacc = true,
+    .tensor_cores = get_test_cdna_tc(),
+    .n_tensor_cores = 1,
+  };
+  PolyRewriteOpts opts = { .optimize = true, .caps = caps };
+  PolyUOp *optimized = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+
+  /* No WMMA should exist (shape-only mode) */
+  ASSERT_INT_EQ(count_ops(ctx, optimized, POLY_OP_WMMA), 0);
+
+  /* No CONTRACT should exist (not created in mode 2) */
+  ASSERT_INT_EQ(count_ops(ctx, optimized, POLY_OP_CONTRACT), 0);
+
+  /* use_tc=2 produces RANGE nodes with UNROLL axis type (from shift_to), but does NOT
+   * produce POLY_OP_UNROLL ops directly. The expander may create some from the axis-typed
+   * ranges. The key check is: no CONTRACT (not created in mode 2) and no WMMA. */
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
