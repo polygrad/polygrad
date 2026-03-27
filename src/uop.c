@@ -229,11 +229,11 @@ PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) { return ctx->kernel_cache; }
 
 /* ── UOp creation with CSE ────────────────────────────────────────────── */
 
-PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                 PolyUOp **src, int n_src, PolyArg arg)
+static PolyUOp *poly_uop_internal(PolyCtx *ctx, PolyOps op, PolyDType dtype,
+                                   PolyUOp **src, int n_src, PolyArg arg, int32_t tag)
 {
   /* Build a CSE key on the stack */
-  CseKey key = { op, dtype, src, (uint16_t)n_src, arg, 0 };
+  CseKey key = { op, dtype, src, (uint16_t)n_src, arg, tag };
   uint32_t h = cse_hash(&key);
 
   /* DEFINE_LOCAL represents mutable accumulators — each REDUCE needs its
@@ -252,7 +252,7 @@ PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
   u->dtype = dtype;
   u->n_src = (uint16_t)n_src;
   u->arg = arg;
-  u->tag = 0;
+  u->tag = tag;
   u->hash = h;
 
   /* Copy src pointers into arena */
@@ -294,10 +294,20 @@ PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
 
   /* Also store the CSE key in the arena so it persists for hash map lookups */
   CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));
-  *stored_key = (CseKey){ op, dtype, u->src, (uint16_t)n_src, u->arg, 0 };
+  *stored_key = (CseKey){ op, dtype, u->src, (uint16_t)n_src, u->arg, tag };
 
   poly_map_set(ctx->cse, h, stored_key, u, cse_eq);
   return u;
+}
+
+PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
+                 PolyUOp **src, int n_src, PolyArg arg) {
+  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, 0);
+}
+
+PolyUOp *poly_uop_tagged(PolyCtx *ctx, PolyOps op, PolyDType dtype,
+                          PolyUOp **src, int n_src, PolyArg arg, int32_t tag) {
+  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, tag);
 }
 
 PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg) {

@@ -13,6 +13,25 @@
 #include "pat.h"
 #include <stdbool.h>
 
+/* Tensor core spec -- port of tinygrad tc.py TensorCore dataclass.
+ * Describes a hardware matrix multiply-accumulate instruction.
+ * D(M,N) = A(M,K) * B(K,N) + C(M,N) across a warp of threads. */
+#define POLY_TC_MAX_OPTS 8
+#define POLY_TC_MAX_SWIZZLE 8
+
+typedef struct {
+  int dims[3];                          /* N, M, K */
+  int threads;                          /* warp size (64 for CDNA, 32 for CUDA/RDNA) */
+  int elements_per_thread[3];           /* per-thread elements for A, B, C */
+  PolyDType dtype_in;                   /* A and B input dtype */
+  PolyDType dtype_out;                  /* C and D output dtype */
+  struct { char type; int dim; } opts[POLY_TC_MAX_OPTS];  /* 'l'=LOCAL, 'u'=UPCAST */
+  int n_opts;
+  const char *swizzle[2][3][POLY_TC_MAX_SWIZZLE]; /* [input][local/upcast/reduce][axis] */
+  int swizzle_len[2][3];
+  const char *intrinsic_name;           /* e.g. "mfma_f32_16x16x16f16" */
+} PolyTensorCore;
+
 /* Renderer capability flags -- determines which ops survive into rendered code.
  * Mirrors tinygrad's code_for_op / supported_ops gating in get_late_rewrite_patterns.
  * max_vec_width is a polygrad extension (tinygrad uses boolean supports_float4). */
@@ -21,6 +40,8 @@ typedef struct {
   bool has_threefry;  /* Backend supports native THREEFRY op without decomposition */
   bool has_simd_int;  /* Backend supports packed integer ops in vector regs (vpaddd etc) */
   int  max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
+  const PolyTensorCore *tensor_cores;  /* array of available TC specs (NULL if none) */
+  int n_tensor_cores;                  /* number of TC specs */
 } PolyRendererCaps;
 
 typedef struct {
@@ -51,6 +72,20 @@ PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink);
  * Applied after full_rewrite_to_sink, before linearize. */
 PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink);
 
+/* Apply heuristic optimizer only (no expander/decomp). For testing TC detection
+ * at the pre-expander stage where CONTRACT/UNROLL/WMMA are still visible. */
+PolyUOp *poly_apply_opts_heuristic_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps);
+
+/* TensorCore helpers (internal, exposed for testing) */
+int tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]);
+int tc_count_local(const PolyTensorCore *tc);
+int tc_count_upcast(const PolyTensorCore *tc);
+int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n);
+int tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n);
+void tc_permute_for_shape_str(const PolyTensorCore *tc, int swz_idx,
+                               const char *shape_str[], int n_shape,
+                               int perm[], int max_n);
+
 /* Codegen pipeline: full rewrite to sink (sym → reduce → decomp → transcendental) */
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);
@@ -65,6 +100,9 @@ PolyPatternMatcher *poly_pm_reduce_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps);
 PolyPatternMatcher *poly_pm_transcendental_pass(void);
+PolyPatternMatcher *poly_pm_bf16_non_native(void);
+PolyPatternMatcher *poly_pm_pre_expander_pass(void);
+PolyPatternMatcher *poly_pm_expander_pass(void);
 PolyPatternMatcher *poly_pm_devectorize_pass(void);
 /* Apply pm_reduce with pass-local state (preferred over manual graph_rewrite). */
 PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink);

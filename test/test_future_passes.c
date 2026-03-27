@@ -1,4 +1,3 @@
-#define _POSIX_C_SOURCE 200809L
 /*
  * test_future_passes.c -- Tests for codegen pass correctness and conformance.
  *
@@ -1826,6 +1825,504 @@ TEST(beam, chain_correct) {
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(dout[i], da[i] * db[i] + dc[i], 1e-3);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── Section 8: Tensor core helper tests (tc.py port) ───────────────── */
+
+/* AMD CDNA 16x16x16 half->float spec for testing.
+ * Initialized at first use because POLY_FLOAT16/POLY_FLOAT32 are extern const. */
+static PolyTensorCore test_cdna_tc;
+static int test_cdna_tc_init = 0;
+
+static const PolyTensorCore *get_test_cdna_tc(void) {
+  if (!test_cdna_tc_init) {
+    test_cdna_tc_init = 1;
+    memset(&test_cdna_tc, 0, sizeof(test_cdna_tc));
+    test_cdna_tc.dims[0] = 16; test_cdna_tc.dims[1] = 16; test_cdna_tc.dims[2] = 16;
+    test_cdna_tc.threads = 64;
+    test_cdna_tc.elements_per_thread[0] = 4;
+    test_cdna_tc.elements_per_thread[1] = 4;
+    test_cdna_tc.elements_per_thread[2] = 4;
+    test_cdna_tc.dtype_in = POLY_FLOAT16;
+    test_cdna_tc.dtype_out = POLY_FLOAT32;
+    struct { char type; int dim; } opts[] = {
+      {'l',0},{'l',0},{'l',0},{'l',0},{'u',1},{'u',1},{'l',1},{'l',1}
+    };
+    for (int i = 0; i < 8; i++) { test_cdna_tc.opts[i].type = opts[i].type; test_cdna_tc.opts[i].dim = opts[i].dim; }
+    test_cdna_tc.n_opts = 8;
+    /* swizzle[0] */
+    test_cdna_tc.swizzle[0][0][0]="u0"; test_cdna_tc.swizzle[0][0][1]="u1"; test_cdna_tc.swizzle[0][0][2]="l4";
+    test_cdna_tc.swizzle[0][0][3]="l5"; test_cdna_tc.swizzle[0][0][4]="r2"; test_cdna_tc.swizzle[0][0][5]="r3";
+    test_cdna_tc.swizzle[0][1][0]="r0"; test_cdna_tc.swizzle[0][1][1]="r1";
+    test_cdna_tc.swizzle[0][2][0]="l0"; test_cdna_tc.swizzle[0][2][1]="l1"; test_cdna_tc.swizzle[0][2][2]="l2"; test_cdna_tc.swizzle[0][2][3]="l3";
+    /* swizzle[1] */
+    test_cdna_tc.swizzle[1][0][0]="l0"; test_cdna_tc.swizzle[1][0][1]="l1"; test_cdna_tc.swizzle[1][0][2]="l2";
+    test_cdna_tc.swizzle[1][0][3]="l3"; test_cdna_tc.swizzle[1][0][4]="r2"; test_cdna_tc.swizzle[1][0][5]="r3";
+    test_cdna_tc.swizzle[1][1][0]="r0"; test_cdna_tc.swizzle[1][1][1]="r1";
+    test_cdna_tc.swizzle[1][2][0]="l4"; test_cdna_tc.swizzle[1][2][1]="l5"; test_cdna_tc.swizzle[1][2][2]="u0"; test_cdna_tc.swizzle[1][2][3]="u1";
+    test_cdna_tc.swizzle_len[0][0]=6; test_cdna_tc.swizzle_len[0][1]=2; test_cdna_tc.swizzle_len[0][2]=4;
+    test_cdna_tc.swizzle_len[1][0]=6; test_cdna_tc.swizzle_len[1][1]=2; test_cdna_tc.swizzle_len[1][2]=4;
+    test_cdna_tc.intrinsic_name = "mfma_f32_16x16x16f16";
+  }
+  return &test_cdna_tc;
+}
+
+TEST(tc, get_reduce_axes) {
+  int ra[16][2];
+  int n = tc_get_reduce_axes(get_test_cdna_tc(), ra);
+  /* K=16 -> log2(16)=4 pairs, each with amt=2 */
+  ASSERT_INT_EQ(n, 4);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_INT_EQ(ra[i][0], i);
+    ASSERT_INT_EQ(ra[i][1], 2);
+  }
+  PASS();
+}
+
+TEST(tc, count_local_upcast) {
+  ASSERT_INT_EQ(tc_count_local(get_test_cdna_tc()), 6);  /* l0,l0,l0,l0,l1,l1 */
+  ASSERT_INT_EQ(tc_count_upcast(get_test_cdna_tc()), 2);  /* u1,u1 */
+  PASS();
+}
+
+TEST(tc, base_shape_str) {
+  const char *out[32];
+  int n = tc_base_shape_str(get_test_cdna_tc(), out, 32);
+  /* 8 opts + 4 reduce = 12 entries */
+  ASSERT_INT_EQ(n, 12);
+  /* Expected: l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3 */
+  const char *expected[] = {"l0","l1","l2","l3","u0","u1","l4","l5","r0","r1","r2","r3"};
+  for (int i = 0; i < 12; i++) {
+    if (strcmp(out[i], expected[i]) != 0) {
+      FAIL("base_shape_str[%d]: got '%s', expected '%s'", i, out[i], expected[i]);
+    }
+  }
+  PASS();
+}
+
+TEST(tc, base_upcast_axes) {
+  const char *out[32];
+  int n = tc_base_upcast_axes(get_test_cdna_tc(), out, 32);
+  /* reversed [r0,r1,r2,r3,u0,u1] -> [u1,u0,r3,r2,r1,r0] */
+  ASSERT_INT_EQ(n, 6);
+  const char *expected[] = {"u1","u0","r3","r2","r1","r0"};
+  for (int i = 0; i < 6; i++) {
+    if (strcmp(out[i], expected[i]) != 0) {
+      FAIL("base_upcast_axes[%d]: got '%s', expected '%s'", i, out[i], expected[i]);
+    }
+  }
+  PASS();
+}
+
+TEST(tc, permute_for_shape_str) {
+  /* Use base_shape_str as input (identity-like case) */
+  const char *shape_str[32];
+  int n = tc_base_shape_str(get_test_cdna_tc(), shape_str, 32);
+  ASSERT_INT_EQ(n, 12);
+
+  int perm0[32], perm1[32];
+  tc_permute_for_shape_str(get_test_cdna_tc(), 0, shape_str, n, perm0, 32);
+  tc_permute_for_shape_str(get_test_cdna_tc(), 1, shape_str, n, perm1, 32);
+
+  /* swizzle[0] flattened: u0,u1,l4,l5,r2,r3, r0,r1, l0,l1,l2,l3
+   * fwd (base_shape_str): l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3
+   * remap[0]: l0->u0, l1->u1, l2->l4, l3->l5, u0->r2, u1->r3, l4->r0, l5->r1, r0->l0, r1->l1, r2->l2, r3->l3
+   *
+   * For shape_str = base_shape_str:
+   *   perm0[0] = shape_str.index(remap["l0"]) = index("u0") = 4
+   *   perm0[1] = index("u1") = 5
+   *   perm0[2] = index("l4") = 6
+   *   perm0[3] = index("l5") = 7
+   *   perm0[4] = index("r2") = 10
+   *   perm0[5] = index("r3") = 11
+   *   perm0[6] = index("r0") = 8
+   *   perm0[7] = index("r1") = 9
+   *   perm0[8] = index("l0") = 0
+   *   perm0[9] = index("l1") = 1
+   *   perm0[10] = index("l2") = 2
+   *   perm0[11] = index("l3") = 3
+   */
+  int expected0[] = {4, 5, 6, 7, 10, 11, 8, 9, 0, 1, 2, 3};
+  for (int i = 0; i < 12; i++) {
+    if (perm0[i] != expected0[i]) {
+      FAIL("perm0[%d]: got %d, expected %d", i, perm0[i], expected0[i]);
+    }
+  }
+
+  /* swizzle[1] flattened: l0,l1,l2,l3,r2,r3, r0,r1, l4,l5,u0,u1
+   * remap[1]: l0->l0, l1->l1, l2->l2, l3->l3, u0->r2, u1->r3, l4->r0, l5->r1, r0->l4, r1->l5, r2->u0, r3->u1
+   *   perm1[0] = index("l0") = 0
+   *   perm1[1] = index("l1") = 1
+   *   perm1[2] = index("l2") = 2
+   *   perm1[3] = index("l3") = 3
+   *   perm1[4] = index("r2") = 10
+   *   perm1[5] = index("r3") = 11
+   *   perm1[6] = index("r0") = 8
+   *   perm1[7] = index("r1") = 9
+   *   perm1[8] = index("l4") = 6
+   *   perm1[9] = index("l5") = 7
+   *   perm1[10] = index("u0") = 4
+   *   perm1[11] = index("u1") = 5
+   */
+  int expected1[] = {0, 1, 2, 3, 10, 11, 8, 9, 6, 7, 4, 5};
+  for (int i = 0; i < 12; i++) {
+    if (perm1[i] != expected1[i]) {
+      FAIL("perm1[%d]: got %d, expected %d", i, perm1[i], expected1[i]);
+    }
+  }
+
+  PASS();
+}
+
+/* ── Section 9: TC structural detection tests ───────────────────────── */
+
+/* Build a minimal 16x16x16 matmul kernel AST:
+ * C[i,j] = sum_k( CAST_f32(A[i,k] * B[k,j]) )  where i,j,k in [0,16)
+ * f16 inputs, f32 accumulation. Returns SINK. */
+static PolyUOp *build_matmul_16x16x16_ast(PolyCtx *ctx) {
+  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, 0);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, 0);
+
+  PolyUOp *pA = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));
+  PolyUOp *pB = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
+  PolyUOp *pC = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+
+  PolyUOp *c16 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
+  PolyUOp *rng_i = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16,
+                               poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_j = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16,
+                               poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_k = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16,
+                               poly_arg_range(2, POLY_AXIS_REDUCE));
+
+  PolyUOp *c16b = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
+  PolyUOp *a_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, c16b, poly_arg_none()),
+                    rng_k, poly_arg_none());
+  PolyUOp *a_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, a_idx, poly_arg_none());
+  PolyUOp *a_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, a_ptr, poly_arg_none());
+
+  PolyUOp *b_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_k, c16b, poly_arg_none()),
+                    rng_j, poly_arg_none());
+  PolyUOp *b_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, b_idx, poly_arg_none());
+  PolyUOp *b_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, b_ptr, poly_arg_none());
+
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, a_val, b_val, poly_arg_none());
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
+
+  PolyUOp *red_srcs[2] = { cast, rng_k };
+  PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+  PolyUOp *reduce = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, red_arg);
+
+  PolyUOp *c_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, c16b, poly_arg_none()),
+                    rng_j, poly_arg_none());
+  PolyUOp *c_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, c_idx, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c_ptr, reduce, poly_arg_none());
+
+  PolyUOp *end_srcs[3] = { store, rng_i, rng_j };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+}
+
+static int count_ops(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
+  int n_topo = 0, count = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == op) count++;
+  return count;
+}
+
+TEST(tc, structural_matmul_ast_shape) {
+  /* Verify the test AST has the expected structure: REDUCE(ADD, CAST(MUL(f16,f16))) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_WMMA), 0);
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_CONTRACT), 0);
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_REDUCE), 1);
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_MUL) >= 1);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  bool found = false;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_REDUCE &&
+        topo[i]->arg.kind == POLY_ARG_OPS && topo[i]->arg.ops == POLY_OP_ADD &&
+        topo[i]->src[0]->op == POLY_OP_CAST &&
+        topo[i]->src[0]->src[0]->op == POLY_OP_MUL) {
+      found = true;
+      ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(topo[i]->src[0]->src[0]->dtype), POLY_FLOAT16));
+      ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(topo[i]->dtype), POLY_FLOAT32));
+    }
+  }
+  ASSERT_TRUE(found);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tc, detect_wmma_in_heuristic) {
+  /* Run poly_apply_opts_heuristic with TC-enabled caps on a matmul AST.
+   * Verify WMMA, CONTRACT, UNROLL appear in the optimized output.
+   * This is the core structural detection test -- no GPU needed. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+
+  /* Precondition: no WMMA before */
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_WMMA), 0);
+
+  /* Run heuristic with CDNA TC spec (tc_opt=1 to allow CAST'd MUL) */
+  PolyRendererCaps caps = {
+    .has_mulacc = true,
+    .tensor_cores = get_test_cdna_tc(),
+    .n_tensor_cores = 1,
+  };
+
+  /* Set env for tc_opt=1 (allow CAST) */
+  setenv("POLY_TC_OPT", "1", 1);
+  setenv("POLY_USE_TC", "1", 1);
+
+  /* poly_apply_opts_heuristic is static, so we go through poly_full_rewrite_to_sink_ex
+   * which calls it when optimize=true. */
+  PolyRewriteOpts opts = { .optimize = true, .caps = caps };
+  PolyUOp *optimized = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+
+  /* Postcondition: WMMA, CONTRACT, UNROLL should appear */
+  int n_wmma = count_ops(ctx, optimized, POLY_OP_WMMA);
+  int n_contract = count_ops(ctx, optimized, POLY_OP_CONTRACT);
+  int n_unroll = count_ops(ctx, optimized, POLY_OP_UNROLL);
+
+  if (n_wmma == 0) {
+    fprintf(stderr, "  detect_wmma: no WMMA found after heuristic (n_contract=%d n_unroll=%d)\n",
+            n_contract, n_unroll);
+    /* Dump op counts for debugging */
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+    for (int i = 0; i < n_topo; i++) {
+      if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_WMMA ||
+          topo[i]->op == POLY_OP_CONTRACT || topo[i]->op == POLY_OP_UNROLL)
+        fprintf(stderr, "    op[%d] = %d (REDUCE=%d WMMA=%d)\n", i, topo[i]->op,
+                POLY_OP_REDUCE, POLY_OP_WMMA);
+    }
+  }
+
+  ASSERT_TRUE(n_wmma > 0);
+  /* CONTRACT and UNROLL may be lowered by the expander pass -- that's correct.
+   * The key assertion is WMMA present and REDUCE(ADD) gone. */
+  (void)n_contract; (void)n_unroll;
+
+  /* The original REDUCE(ADD) should be gone (replaced by WMMA) */
+  int n_reduce = 0;
+  {
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+    for (int i = 0; i < n_topo; i++) {
+      if (topo[i]->op == POLY_OP_REDUCE &&
+          topo[i]->arg.kind == POLY_ARG_OPS && topo[i]->arg.ops == POLY_OP_ADD)
+        n_reduce++;
+    }
+  }
+  ASSERT_INT_EQ(n_reduce, 0);
+
+  /* No lingering TC tags */
+  {
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+    for (int i = 0; i < n_topo; i++) {
+      if (topo[i]->tag == 0x5443) { /* TC_TAG */
+        FAIL("lingering TC tag on op %d at topo[%d]", topo[i]->op, i);
+      }
+    }
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Helper: run heuristic with TC caps and return optimized sink */
+static PolyUOp *run_tc_heuristic(PolyCtx *ctx, PolyUOp *sink, const char *tc_opt_val) {
+  setenv("POLY_TC_OPT", tc_opt_val, 1);
+  setenv("POLY_USE_TC", "1", 1);
+  PolyRendererCaps caps = {
+    .has_mulacc = true,
+    .tensor_cores = get_test_cdna_tc(),
+    .n_tensor_cores = 1,
+  };
+  PolyRewriteOpts opts = { .optimize = true, .caps = caps };
+  PolyUOp *result = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+  return result;
+}
+
+TEST(tc, strict_rejects_cast) {
+  /* tc_opt=0 rejects CAST(MUL(f16,f16)) -- our matmul AST uses CAST */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+  PolyUOp *optimized = run_tc_heuristic(ctx, sink, "0");
+  ASSERT_INT_EQ(count_ops(ctx, optimized, POLY_OP_WMMA), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Build 15x15x15 matmul (not divisible by 16x16x16 TC tile) */
+static PolyUOp *build_matmul_NxNxN_ast(PolyCtx *ctx, int N) {
+  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, 0);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, 0);
+  PolyUOp *pA = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));
+  PolyUOp *pB = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
+  PolyUOp *pC = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *cN = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *rng_i = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_j = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_k = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(2, POLY_AXIS_REDUCE));
+  PolyUOp *cNb = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *a_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, cNb, poly_arg_none()),
+                    rng_k, poly_arg_none());
+  PolyUOp *a_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16,
+                    poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, a_idx, poly_arg_none()), poly_arg_none());
+  PolyUOp *b_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_k, cNb, poly_arg_none()),
+                    rng_j, poly_arg_none());
+  PolyUOp *b_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16,
+                    poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, b_idx, poly_arg_none()), poly_arg_none());
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, a_val, b_val, poly_arg_none());
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
+  PolyUOp *red_srcs[2] = { cast, rng_k };
+  PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+  PolyUOp *reduce = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, red_arg);
+  PolyUOp *c_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, cNb, poly_arg_none()),
+                    rng_j, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID,
+                    poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, c_idx, poly_arg_none()),
+                    reduce, poly_arg_none());
+  PolyUOp *end_srcs[3] = { store, rng_i, rng_j };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+}
+
+TEST(tc, rejects_nondivisible) {
+  /* 15x15x15 not divisible by TC tile 16x16x16 */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_NxNxN_ast(ctx, 15);
+  PolyUOp *optimized = run_tc_heuristic(ctx, sink, "1");
+  ASSERT_INT_EQ(count_ops(ctx, optimized, POLY_OP_WMMA), 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tc, pre_expander_wmma_structure) {
+  /* Run heuristic only (no expander) to inspect CONTRACT/UNROLL/WMMA structure.
+   * Verifies that:
+   * - WMMA has 3 sources: CONTRACT(A), CONTRACT(B), VECTORIZE(zeros)
+   * - CONTRACT nodes carry pair-tuple args (axis_id, 2) for upcast axes
+   * - UNROLL wraps WMMA with pair-tuple arg for output upcast axes
+   * - All tag=1 on CONTRACT/WMMA/UNROLL (tinygrad sets tag=1 on these)
+   * This tests the permutation/swizzle correctness at the IR level. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
+
+  /* Run preprocessing (split_ranges + simplify) then heuristic only */
+  setenv("POLY_TC_OPT", "1", 1);
+  setenv("POLY_USE_TC", "1", 1);
+  PolyRendererCaps caps = {
+    .has_mulacc = true,
+    .tensor_cores = get_test_cdna_tc(),
+    .n_tensor_cores = 1,
+  };
+
+  /* Run the preprocessing that normally happens before heuristic */
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  unsetenv("POLY_TC_OPT");
+  unsetenv("POLY_USE_TC");
+
+  /* Find WMMA node */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
+  PolyUOp *wmma = NULL;
+  int n_contract = 0, n_unroll = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_WMMA) wmma = topo[i];
+    if (topo[i]->op == POLY_OP_CONTRACT) n_contract++;
+    if (topo[i]->op == POLY_OP_UNROLL) n_unroll++;
+  }
+
+  if (!wmma) {
+    /* Dump ops for debugging */
+    for (int i = 0; i < n_topo; i++)
+      fprintf(stderr, "  [%d] op=%d tag=%d\n", i, topo[i]->op, topo[i]->tag);
+    FAIL("no WMMA found in pre-expander IR");
+  }
+
+  /* WMMA must have 3 sources */
+  ASSERT_INT_EQ(wmma->n_src, 3);
+
+  /* src[0] and src[1] must be CONTRACT */
+  ASSERT_INT_EQ(wmma->src[0]->op, POLY_OP_CONTRACT);
+  ASSERT_INT_EQ(wmma->src[1]->op, POLY_OP_CONTRACT);
+
+  /* src[2] must be VECTORIZE (zero accumulator) */
+  ASSERT_INT_EQ(wmma->src[2]->op, POLY_OP_VECTORIZE);
+
+  /* CONTRACT nodes must have tag=1 */
+  ASSERT_INT_EQ(wmma->src[0]->tag, 1);
+  ASSERT_INT_EQ(wmma->src[1]->tag, 1);
+
+  /* WMMA must have tag=1 */
+  ASSERT_INT_EQ(wmma->tag, 1);
+
+  /* WMMA arg must be the intrinsic name */
+  ASSERT_TRUE(wmma->arg.kind == POLY_ARG_STRING);
+  ASSERT_TRUE(strcmp(wmma->arg.str, "mfma_f32_16x16x16f16") == 0);
+
+  /* WMMA dtype must be vec(float32, 4) for CDNA ept[2]=4 */
+  ASSERT_INT_EQ(wmma->dtype.count, 4);
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(wmma->dtype), POLY_FLOAT32));
+
+  /* CONTRACT dtypes: vec(float16, 4) for CDNA ept[0]=ept[1]=4 */
+  ASSERT_INT_EQ(wmma->src[0]->dtype.count, 4);
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(wmma->src[0]->dtype), POLY_FLOAT16));
+  ASSERT_INT_EQ(wmma->src[1]->dtype.count, 4);
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(wmma->src[1]->dtype), POLY_FLOAT16));
+
+  /* CONTRACT args must be pair tuples with (axis_id, 2) entries */
+  ASSERT_TRUE(wmma->src[0]->arg.kind == POLY_ARG_PAIR_TUPLE);
+  ASSERT_TRUE(wmma->src[1]->arg.kind == POLY_ARG_PAIR_TUPLE);
+  /* For CDNA ept[0]=4, log2(4)=2 pairs; ept[1]=4, log2(4)=2 pairs */
+  ASSERT_INT_EQ(wmma->src[0]->arg.pair_tuple.n, 2);
+  ASSERT_INT_EQ(wmma->src[1]->arg.pair_tuple.n, 2);
+  /* Each pair has size=2 */
+  for (int i = 0; i < 2; i++) {
+    ASSERT_INT_EQ(wmma->src[0]->arg.pair_tuple.pairs[i][1], 2);
+    ASSERT_INT_EQ(wmma->src[1]->arg.pair_tuple.pairs[i][1], 2);
+  }
+
+  /* Find the UNROLL that wraps WMMA */
+  PolyUOp *unroll = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_UNROLL && topo[i]->n_src > 0 && topo[i]->src[0] == wmma)
+      unroll = topo[i];
+  }
+  ASSERT_NOT_NULL(unroll);
+  ASSERT_INT_EQ(unroll->tag, 1);
+  ASSERT_TRUE(unroll->arg.kind == POLY_ARG_PAIR_TUPLE);
+  /* CDNA ept[2]=4, log2(4)=2 pairs */
+  ASSERT_INT_EQ(unroll->arg.pair_tuple.n, 2);
+
+  /* Verify expected op counts */
+  ASSERT_INT_EQ(n_contract, 2); /* one per operand */
+  ASSERT_TRUE(n_unroll >= 1);   /* at least the WMMA wrapper */
 
   poly_ctx_destroy(ctx);
   PASS();

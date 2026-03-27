@@ -392,6 +392,12 @@ PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx);
 PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
                  PolyUOp **src, int n_src, PolyArg arg);
 
+/* Create a UOp with a non-zero tag. Tag is part of the CSE key,
+ * so a tagged node is distinct from an untagged node with the same
+ * (op, dtype, src, arg). Matches tinygrad's UOp.replace(tag=...). */
+PolyUOp *poly_uop_tagged(PolyCtx *ctx, PolyOps op, PolyDType dtype,
+                          PolyUOp **src, int n_src, PolyArg arg, int32_t tag);
+
 /* Convenience: create a UOp with 0, 1, 2, or 3 sources */
 PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg);
 PolyUOp *poly_uop1(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyArg arg);

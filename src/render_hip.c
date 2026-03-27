@@ -109,27 +109,32 @@ static void hsmap_destroy(HipStrMap *m) {
 /* Map scalar PolyDType to a short identifier-safe name for vector typedefs.
  * E.g. POLY_FLOAT16 -> "half", POLY_FLOAT32 -> "float", POLY_INT32 -> "int".
  * Returns the raw C type for scalars and the typedef alias for vectors. */
+/* Match by priority (not full poly_dtype_eq) so pointer-derived dtypes work. */
 static const char *hip_scalar_alias(PolyDType s) {
-  if (poly_dtype_eq(s, POLY_FLOAT16))  return "half";
-  if (poly_dtype_eq(s, POLY_BFLOAT16)) return "bfloat16";
-  if (poly_dtype_eq(s, POLY_FLOAT32))  return "float";
-  if (poly_dtype_eq(s, POLY_FLOAT64))  return "double";
-  if (poly_dtype_eq(s, POLY_INT8))     return "char";
-  if (poly_dtype_eq(s, POLY_UINT8))    return "uchar";
-  if (poly_dtype_eq(s, POLY_INT16))    return "short";
-  if (poly_dtype_eq(s, POLY_UINT16))   return "ushort";
-  if (poly_dtype_eq(s, POLY_INT32))    return "int";
-  if (poly_dtype_eq(s, POLY_UINT32))   return "uint";
-  if (poly_dtype_eq(s, POLY_INT64))    return "long";
-  if (poly_dtype_eq(s, POLY_UINT64))   return "ulong";
-  if (poly_dtype_eq(s, POLY_BOOL))     return "bool";
-  return s.name;
+  switch (s.priority) {
+  case  0: return "bool";
+  case  1: return "char";
+  case  2: return "uchar";
+  case  3: return "short";
+  case  4: return "ushort";
+  case  5: return "int";
+  case  6: return "uint";
+  case  7: return "long";
+  case  8: return "ulong";
+  case 11: return "half";
+  case 12: return "bfloat16";
+  case 13: return "float";
+  case 14: return "double";
+  default: return s.name;
+  }
 }
 
-/* Map scalar PolyDType to the actual C type used in HIP code. */
+/* Map scalar PolyDType to the actual C type used in HIP code.
+ * Matches by priority+bitsize (not full poly_dtype_eq) so pointer-derived
+ * dtypes also resolve correctly. */
 static const char *hip_scalar_ctype(PolyDType s) {
-  if (poly_dtype_eq(s, POLY_FLOAT16))  return "_Float16";
-  if (poly_dtype_eq(s, POLY_BFLOAT16)) return "unsigned short";
+  if (s.priority == POLY_FLOAT16.priority  && s.bitsize == 16) return "_Float16";
+  if (s.priority == POLY_BFLOAT16.priority && s.bitsize == 16) return "unsigned short";
   return s.name;
 }
 
@@ -240,20 +245,85 @@ static int hip_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool crea
   return *n_ranges - 1;
 }
 
+/* ── AMD CDNA Tensor Core specs (port of tc.py:112-116) ────────────── */
+
+static PolyTensorCore hip_cdna_tc_specs_storage[2];
+static int hip_cdna_tc_specs_init = 0;
+
+static void init_hip_cdna_tc_specs(void) {
+  if (hip_cdna_tc_specs_init) return;
+  hip_cdna_tc_specs_init = 1;
+
+  /* half -> float (mfma_f32_16x16x16f16) */
+  PolyTensorCore *tc0 = &hip_cdna_tc_specs_storage[0];
+  memset(tc0, 0, sizeof(*tc0));
+  tc0->dims[0] = 16; tc0->dims[1] = 16; tc0->dims[2] = 16;
+  tc0->threads = 64;
+  tc0->elements_per_thread[0] = 4; tc0->elements_per_thread[1] = 4; tc0->elements_per_thread[2] = 4;
+  tc0->dtype_in = POLY_FLOAT16;
+  tc0->dtype_out = POLY_FLOAT32;
+  struct { char type; int dim; } opts0[] = {
+    {'l',0},{'l',0},{'l',0},{'l',0},{'u',1},{'u',1},{'l',1},{'l',1}
+  };
+  for (int i = 0; i < 8; i++) { tc0->opts[i].type = opts0[i].type; tc0->opts[i].dim = opts0[i].dim; }
+  tc0->n_opts = 8;
+  /* swizzle[0] */
+  tc0->swizzle[0][0][0]="u0"; tc0->swizzle[0][0][1]="u1"; tc0->swizzle[0][0][2]="l4";
+  tc0->swizzle[0][0][3]="l5"; tc0->swizzle[0][0][4]="r2"; tc0->swizzle[0][0][5]="r3";
+  tc0->swizzle[0][1][0]="r0"; tc0->swizzle[0][1][1]="r1";
+  tc0->swizzle[0][2][0]="l0"; tc0->swizzle[0][2][1]="l1"; tc0->swizzle[0][2][2]="l2"; tc0->swizzle[0][2][3]="l3";
+  /* swizzle[1] */
+  tc0->swizzle[1][0][0]="l0"; tc0->swizzle[1][0][1]="l1"; tc0->swizzle[1][0][2]="l2";
+  tc0->swizzle[1][0][3]="l3"; tc0->swizzle[1][0][4]="r2"; tc0->swizzle[1][0][5]="r3";
+  tc0->swizzle[1][1][0]="r0"; tc0->swizzle[1][1][1]="r1";
+  tc0->swizzle[1][2][0]="l4"; tc0->swizzle[1][2][1]="l5"; tc0->swizzle[1][2][2]="u0"; tc0->swizzle[1][2][3]="u1";
+  tc0->swizzle_len[0][0]=6; tc0->swizzle_len[0][1]=2; tc0->swizzle_len[0][2]=4;
+  tc0->swizzle_len[1][0]=6; tc0->swizzle_len[1][1]=2; tc0->swizzle_len[1][2]=4;
+  tc0->intrinsic_name = "mfma_f32_16x16x16f16";
+
+  /* bfloat16 -> float (mfma_f32_16x16x16bf16_1k) -- same structure */
+  PolyTensorCore *tc1 = &hip_cdna_tc_specs_storage[1];
+  memcpy(tc1, tc0, sizeof(*tc1));
+  tc1->dtype_in = POLY_BFLOAT16;
+  tc1->intrinsic_name = "mfma_f32_16x16x16bf16_1k";
+}
+
+static PolyRendererCaps poly_hip_renderer_caps(void) {
+  init_hip_cdna_tc_specs();
+  return (PolyRendererCaps){
+    .has_mulacc = true,
+    .has_threefry = false,
+    .tensor_cores = hip_cdna_tc_specs_storage,
+    .n_tensor_cores = 2,
+  };
+}
+
 /* ── HIP Linearizer ──────────────────────────────────────────────── */
 
 PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  /* Same pipeline as CUDA: HIP GPUs also have FMA.
-   * Pipeline: sym -> group_for_reduce -> pm_reduce(with sink END merge)
-   *        -> sym -> decomp -> transcendental -> decomp -> gpudims */
-  PolyRendererCaps hip_caps = { .has_mulacc = true, .has_threefry = false };
+  /* Pipeline: sym -> heuristic(TC) -> pre_expander -> expander -> sym
+   *        -> group_for_reduce -> pm_reduce -> sym -> decomp
+   *        -> transcendental -> decomp -> bf16 -> gpudims -> control_flow */
+  PolyRendererCaps hip_caps = poly_hip_renderer_caps();
+
+  /* Preprocessing + TC detection (matches shared pipeline optimize stage) */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_apply_opts_heuristic_ex(ctx, sink, hip_caps);
+
+  /* Expander: lowers CONTRACT/UNROLL/WMMA structure from TC detection */
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_expander_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+
+  /* Existing HIP pipeline */
   sink = poly_group_for_reduce(ctx, sink, 256);
   sink = poly_apply_pm_reduce(ctx, sink);
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(hip_caps));
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(hip_caps));
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_bf16_non_native());
   sink = poly_add_gpudims(ctx, sink);
   sink = poly_apply_control_flow(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);
@@ -388,7 +458,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
       PolyDType base = poly_dtype_scalar(u->dtype);
       char type[64];
-      snprintf(type, sizeof(type), "%s*", base.name);
+      snprintf(type, sizeof(type), "%s*", hip_scalar_ctype(base));
       param_types[n_params] = strdup(type);
       param_names[n_params] = strdup(name);
       param_order[n_params] = (int)u->arg.i;
@@ -541,7 +611,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       int smem_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
       PolyDType base = poly_dtype_scalar(u->dtype);
       hsb_printf(&decls, "  __attribute__((shared, aligned(16))) %s %s[%d];\n",
-                 base.name, name, smem_size);
+                 hip_scalar_ctype(base), name, smem_size);
       continue;
     }
 
@@ -552,7 +622,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       PolyDType base = poly_dtype_scalar(u->dtype);
-      hsb_printf(&decls, "  %s %s[1];\n", base.name, name);
+      hsb_printf(&decls, "  %s %s[1];\n", hip_scalar_ctype(base), name);
       continue;
     }
 

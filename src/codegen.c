@@ -144,7 +144,11 @@ static PolyUOp *rule_flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   int n_new = 0;
   for (int i = 0; i < off; i++) new_src[n_new++] = root->src[i];
   for (int i = 0; i < n_flat; i++) new_src[n_new++] = flat_rngs[i];
-  return poly_uop(ctx, root->op, root->dtype, new_src, n_new, root->arg);
+  /* Preserve tag: this is a replace(src=...) operation, matching tinygrad's
+   * UOp.replace() which preserves tag (ops.py:142). */
+  return (root->tag != 0)
+    ? poly_uop_tagged(ctx, root->op, root->dtype, new_src, n_new, root->arg, root->tag)
+    : poly_uop(ctx, root->op, root->dtype, new_src, n_new, root->arg);
 }
 
 static PolyPatternMatcher *g_pm_flatten_range = NULL;
@@ -583,12 +587,16 @@ static void sched_refresh(OptScheduler *s) {
   }
 }
 
-/* shift_to: split a RANGE into two. Port of tinygrad Scheduler.shift_to.
+/* shift_to_ex: split a RANGE into two. Port of tinygrad Scheduler.shift_to.
  * top=false: old_range = replaced * amount + new_rng
  * top=true:  old_range = new_rng * old_sz + replaced
- * Returns the replaced range UOp (the one that keeps the old axis type). */
-static PolyUOp *sched_shift_to(OptScheduler *s, PolyUOp *rng, int64_t amount,
-                                PolyAxisType new_type, bool top) {
+ * input_new_rng: if non-NULL, use this expression instead of creating a fresh RANGE.
+ *   This is used for TC WARP modular arithmetic (e.g. warp%2).
+ * out_new_rng: if non-NULL, receives the new range expression (the split-off part).
+ * Returns the replaced range UOp (the one that keeps the old axis type), or NULL on failure. */
+static PolyUOp *sched_shift_to_ex(OptScheduler *s, PolyUOp *rng, int64_t amount,
+                                   PolyAxisType new_type, bool top,
+                                   PolyUOp *input_new_rng, PolyUOp **out_new_rng) {
   int64_t bound = 0;
   if (rng->n_src > 0 && rng->src[0]->op == POLY_OP_CONST && rng->src[0]->arg.kind == POLY_ARG_INT)
     bound = rng->src[0]->arg.i;
@@ -598,10 +606,15 @@ static PolyUOp *sched_shift_to(OptScheduler *s, PolyUOp *rng, int64_t amount,
   PolyCtx *ctx = s->ctx;
   PolyDType dt = rng->dtype;
 
-  /* Create new range for the split axis */
-  PolyUOp *new_sz = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(amount));
-  PolyUOp *new_rng = poly_uop1(ctx, POLY_OP_RANGE, dt, new_sz,
-                                poly_arg_range(s->opt_range_next++, new_type));
+  /* Create or use provided new range */
+  PolyUOp *new_rng;
+  if (input_new_rng) {
+    new_rng = input_new_rng;
+  } else {
+    PolyUOp *new_sz = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(amount));
+    new_rng = poly_uop1(ctx, POLY_OP_RANGE, dt, new_sz,
+                         poly_arg_range(s->opt_range_next++, new_type));
+  }
 
   /* Create complementary range with reduced bound */
   PolyUOp *rep_sz = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(old_sz));
@@ -610,13 +623,11 @@ static PolyUOp *sched_shift_to(OptScheduler *s, PolyUOp *rng, int64_t amount,
   /* Compute substitution expression */
   PolyUOp *sub_axis;
   if (top) {
-    /* new_rng * old_sz + replaced */
     PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(old_sz));
     sub_axis = poly_uop2(ctx, POLY_OP_ADD, dt,
                          poly_uop2(ctx, POLY_OP_MUL, dt, new_rng, c, poly_arg_none()),
                          replaced, poly_arg_none());
   } else {
-    /* replaced * amount + new_rng */
     PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(amount));
     sub_axis = poly_uop2(ctx, POLY_OP_ADD, dt,
                          poly_uop2(ctx, POLY_OP_MUL, dt, replaced, c, poly_arg_none()),
@@ -630,7 +641,14 @@ static PolyUOp *sched_shift_to(OptScheduler *s, PolyUOp *rng, int64_t amount,
   s->ast = poly_graph_rewrite(ctx, s->ast, poly_pm_flatten_range());
 
   sched_refresh(s);
+  if (out_new_rng) *out_new_rng = new_rng;
   return replaced;
+}
+
+/* Backward-compat wrapper: existing callers don't need input_new_rng/out_new_rng. */
+static PolyUOp *sched_shift_to(OptScheduler *s, PolyUOp *rng, int64_t amount,
+                                PolyAxisType new_type, bool top) {
+  return sched_shift_to_ex(s, rng, amount, new_type, top, NULL, NULL);
 }
 
 /* Helper: get indices of upcastable dims (GLOBAL/LOCAL/LOOP with size > 1) */
@@ -695,6 +713,506 @@ static int split_uop_add(PolyUOp *u, PolyUOp **out, int max_n) {
   return 0;
 }
 
+/* ── TensorCore helpers (port of tc.py) ──────────────────────────────── */
+
+/* tc.py:33 -- get_reduce_axes: returns [(0,2), (1,2), ...] for K dimension */
+int tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]) {
+  int k = tc->dims[2], n = 0;
+  while (k > 1) { out[n][0] = n; out[n][1] = 2; n++; k /= 2; }
+  return n;
+}
+
+/* tc.py:34-35 -- count local/upcast opts */
+int tc_count_local(const PolyTensorCore *tc) {
+  int n = 0;
+  for (int i = 0; i < tc->n_opts; i++) if (tc->opts[i].type == 'l') n++;
+  return n;
+}
+int tc_count_upcast(const PolyTensorCore *tc) {
+  int n = 0;
+  for (int i = 0; i < tc->n_opts; i++) if (tc->opts[i].type == 'u') n++;
+  return n;
+}
+
+/* tc.py:25-32 -- base_shape_str: build axis name list from opts + reduce axes.
+ * Returns count of entries written to out[]. Each entry is a string like "l0","u1","r3". */
+int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n) {
+  int n = 0, cnt_l = 0, cnt_u = 0;
+  for (int i = 0; i < tc->n_opts && n < max_n; i++) {
+    static const char *l_names[] = {"l0","l1","l2","l3","l4","l5","l6","l7"};
+    static const char *u_names[] = {"u0","u1","u2","u3","u4","u5","u6","u7"};
+    if (tc->opts[i].type == 'l') out[n++] = l_names[cnt_l++];
+    else                          out[n++] = u_names[cnt_u++];
+  }
+  /* Append reduce axes */
+  int ra[16][2];
+  int n_ra = tc_get_reduce_axes(tc, ra);
+  static const char *r_names[] = {"r0","r1","r2","r3","r4","r5","r6","r7"};
+  for (int i = 0; i < n_ra && n < max_n; i++) out[n++] = r_names[i];
+  return n;
+}
+
+/* tc.py:36-38 -- base_upcast_axes: reversed list of reduce + upcast axis names */
+int tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n) {
+  int n_upcast = tc_count_upcast(tc);
+  int ra[16][2];
+  int n_ra = tc_get_reduce_axes(tc, ra);
+  /* Build forward: [r0..rN, u0..uM] then reverse */
+  const char *fwd[32];
+  int n_fwd = 0;
+  static const char *r_names[] = {"r0","r1","r2","r3","r4","r5","r6","r7"};
+  static const char *u_names[] = {"u0","u1","u2","u3","u4","u5","u6","u7"};
+  for (int i = 0; i < n_ra && n_fwd < 32; i++) fwd[n_fwd++] = r_names[i];
+  for (int i = 0; i < n_upcast && n_fwd < 32; i++) fwd[n_fwd++] = u_names[i];
+  int n = 0;
+  for (int i = n_fwd - 1; i >= 0 && n < max_n; i--) out[n++] = fwd[i];
+  return n;
+}
+
+/* tc.py:17-20 -- _remaps: build two remap dicts from swizzle.
+ * fwd_st = base_shape_str, remap[i] maps fwd_st[j] -> swizzle[i] flattened.
+ * Returns remap as parallel arrays: remap_from[k], remap_to[k] for k in 0..n-1. */
+int tc_build_remap(const PolyTensorCore *tc, int swz_idx,
+                          const char *remap_from[], const char *remap_to[], int max_n) {
+  const char *fwd[32];
+  int n_fwd = tc_base_shape_str(tc, fwd, 32);
+  /* Flatten swizzle[swz_idx]: [local_axes] + [upcast_axes] + [reduce_axes] */
+  const char *flat[32];
+  int n_flat = 0;
+  for (int g = 0; g < 3; g++)
+    for (int j = 0; j < tc->swizzle_len[swz_idx][g] && n_flat < 32; j++)
+      flat[n_flat++] = tc->swizzle[swz_idx][g][j];
+  int n = (n_fwd < n_flat) ? n_fwd : n_flat;
+  if (n > max_n) n = max_n;
+  for (int i = 0; i < n; i++) { remap_from[i] = fwd[i]; remap_to[i] = flat[i]; }
+  return n;
+}
+
+/* tc.py:21-23 -- permutes_for_shape_str: given shape_str, apply remap and return permutation.
+ * shape_str[i] is an axis name. Output perm[i] = shape_str.index(remap[shape_str[i]]).
+ * If shape_str[i] is not in remap, perm[i] = i. */
+void tc_permute_for_shape_str(const PolyTensorCore *tc, int swz_idx,
+                                      const char *shape_str[], int n_shape,
+                                      int perm[], int max_n) {
+  const char *rf[32], *rt[32];
+  int n_remap = tc_build_remap(tc, swz_idx, rf, rt, 32);
+  for (int i = 0; i < n_shape && i < max_n; i++) {
+    /* Find shape_str[i] in remap_from -> get remap_to */
+    const char *mapped = NULL;
+    for (int r = 0; r < n_remap; r++) {
+      if (strcmp(shape_str[i], rf[r]) == 0) { mapped = rt[r]; break; }
+    }
+    if (!mapped) { perm[i] = i; continue; }
+    /* Find mapped in shape_str -> get index */
+    perm[i] = i; /* default if not found */
+    for (int j = 0; j < n_shape; j++) {
+      if (strcmp(shape_str[j], mapped) == 0) { perm[i] = j; break; }
+    }
+  }
+}
+
+/* ── Axis letter mapping (ops.py:20-21) ──────────────────────────────── */
+static const char *axis_letter(PolyAxisType t) {
+  switch (t) {
+    case POLY_AXIS_GLOBAL:       return "g";
+    case POLY_AXIS_LOCAL:        return "l";
+    case POLY_AXIS_WARP:         return "w";
+    case POLY_AXIS_UPCAST:       return "u";
+    case POLY_AXIS_GROUP_REDUCE: return "G";
+    case POLY_AXIS_REDUCE:       return "R";
+    case POLY_AXIS_UNROLL:       return "r";
+    case POLY_AXIS_LOOP:         return "L";
+    default:                     return "?";
+  }
+}
+
+/* postrange.py:36-42 -- shape_str: build axis name array from scheduler state */
+static int sched_shape_str(const OptScheduler *s, const char *out[], int max_n) {
+  int n = 0;
+  int cnt[16] = {0}; /* count per axis type */
+  static char buf[64][8]; /* static buffer for generated strings */
+  for (int i = 0; i < s->n_rngs && n < max_n && n < 64; i++) {
+    int t = (int)s->types[i];
+    snprintf(buf[n], 8, "%s%d", axis_letter(s->types[i]), cnt[t]++);
+    out[n] = buf[n];
+    n++;
+  }
+  return n;
+}
+
+/* Collect RANGE ops reachable from a UOp via backward walk.
+ * Returns bitmask: bit j set if s->rngs[j] is reachable from u. */
+static uint64_t collect_ranges_from(const OptScheduler *s, PolyUOp *u) {
+  /* Simple DFS -- limited depth for scheduler-level graphs */
+  uint64_t mask = 0;
+  PolyUOp *stack[512];
+  int sp = 0;
+  stack[sp++] = u;
+  /* Visited set using a simple pointer set (arena-allocated UOps have unique addresses) */
+  PolyMap *visited = poly_map_new(256);
+  while (sp > 0) {
+    PolyUOp *cur = stack[--sp];
+    if (poly_map_get(visited, ptr_hash(cur), cur, ptr_eq)) continue;
+    poly_map_set(visited, ptr_hash(cur), cur, cur, ptr_eq);
+    if (cur->op == POLY_OP_RANGE) {
+      for (int j = 0; j < s->n_rngs; j++) {
+        if (s->rngs[j] == cur) { mask |= (1ULL << j); break; }
+      }
+    }
+    /* Don't recurse past RANGE (tinygrad: ended_ranges) */
+    int rs = range_start_for_op(cur->op);
+    int end = (rs >= 0) ? rs : cur->n_src;
+    for (int i = 0; i < end && sp < 510; i++)
+      stack[sp++] = cur->src[i];
+  }
+  poly_map_destroy(visited);
+  return mask;
+}
+
+/* Forward declarations */
+static PolyArg poly_arg_pair_tuple(int64_t (*pairs)[2], int n);
+static void sched_copy(OptScheduler *dst, const OptScheduler *src);
+
+/* ── sched_apply_tc_opt (port of postrange.py:221-314) ──────────────── */
+#define TC_TAG 0x5443 /* 'TC' */
+
+/* Sort helper: sort UOp* array by axis_id descending */
+static int cmp_axis_id_desc(const void *a, const void *b) {
+  int64_t ia = poly_range_axis_id((*(const PolyUOp *const *)a)->arg);
+  int64_t ib = poly_range_axis_id((*(const PolyUOp *const *)b)->arg);
+  return (ib > ia) - (ib < ia);
+}
+
+/* Returns true on success. On success, tc_axes_out[0..2] are the replaced N,M,K ranges.
+ * use_tc: 1 = full WMMA construction, 2 = shape only (no WMMA UOps).
+ * tc_select: -1 = try all, >=0 = specific TC index.
+ * tc_opt: 0 = strict (single reduce axis, direct load->mul),
+ *         1 = allow CAST'd buffers + multiple reduce axes.
+ *         (2 = reserved for future PADTO; currently same as 1) */
+static bool sched_apply_tc_opt(OptScheduler *s, int axis, int tc_select, int tc_opt,
+                                int use_tc, const PolyTensorCore *tcs, int n_tcs,
+                                PolyUOp *tc_axes_out[3]) {
+  PolyCtx *ctx = s->ctx;
+
+  /* 1. Find REDUCE(ADD) and its MUL (postrange.py:222-227) */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, s->ast, &n_topo);
+  PolyUOp *reduceop = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_REDUCE &&
+        topo[i]->arg.kind == POLY_ARG_OPS && topo[i]->arg.ops == POLY_OP_ADD) {
+      reduceop = topo[i];
+      break;
+    }
+  }
+  if (!reduceop || !use_tc) return false;
+
+  PolyUOp *mul = reduceop->src[0];
+  /* tc_opt >= 1 allows CAST'd buffers (postrange.py:225) */
+  if (mul->op == POLY_OP_CAST && mul->n_src > 0) {
+    if (tc_opt < 1) {
+      return false;
+    }
+    mul = mul->src[0];
+  }
+  if (mul->op != POLY_OP_MUL || mul->n_src < 2) {
+    return false;
+  }
+
+  PolyUOp *in0 = mul->src[0], *in1 = mul->src[1];
+
+  /* 2. Try each TC spec (postrange.py:232-248) */
+  const PolyTensorCore *tc_list = tcs;
+  int tc_count = n_tcs;
+  if (tc_select >= 0 && tc_select < n_tcs) { tc_list = &tcs[tc_select]; tc_count = 1; }
+  else if (tc_select >= n_tcs) return false;
+
+  for (int tci = 0; tci < tc_count; tci++) {
+    const PolyTensorCore *tc = &tc_list[tci];
+
+    /* Check dtype match */
+    PolyDType in0_scalar = poly_dtype_scalar(in0->dtype);
+    PolyDType in1_scalar = poly_dtype_scalar(in1->dtype);
+    PolyDType red_scalar = poly_dtype_scalar(reduceop->dtype);
+    if (!poly_dtype_eq(tc->dtype_in, in0_scalar) || !poly_dtype_eq(tc->dtype_in, in1_scalar)) continue;
+    if (!poly_dtype_eq(tc->dtype_out, red_scalar)) continue;
+
+    /* 3. Classify ranges (postrange.py:236-238) */
+    uint64_t in0_reach = collect_ranges_from(s, in0);
+    uint64_t in1_reach = collect_ranges_from(s, in1);
+
+    PolyUOp *in0_ranges[SCHED_MAX_RNGS], *in1_ranges[SCHED_MAX_RNGS];
+    int n_in0 = 0, n_in1 = 0;
+    for (int i = 0; i < s->n_rngs; i++) {
+      uint64_t bit = 1ULL << i;
+      if ((in0_reach & bit) && !(in1_reach & bit) && n_in0 < SCHED_MAX_RNGS)
+        in0_ranges[n_in0++] = s->rngs[i];
+      if ((in1_reach & bit) && !(in0_reach & bit) && n_in1 < SCHED_MAX_RNGS)
+        in1_ranges[n_in1++] = s->rngs[i];
+    }
+
+    /* red_ranges from REDUCE's trailing RANGE sources */
+    PolyUOp *red_ranges[SCHED_MAX_RNGS];
+    int n_red = 0;
+    int rs = range_start_for_op(POLY_OP_REDUCE);
+    for (int i = rs; i < reduceop->n_src && n_red < SCHED_MAX_RNGS; i++) {
+      if (reduceop->src[i]->op == POLY_OP_RANGE)
+        red_ranges[n_red++] = reduceop->src[i];
+    }
+
+    /* Sort all three by axis_id descending (postrange.py:236-238) */
+    if (n_in0 > 1) qsort(in0_ranges, (size_t)n_in0, sizeof(PolyUOp *), cmp_axis_id_desc);
+    if (n_in1 > 1) qsort(in1_ranges, (size_t)n_in1, sizeof(PolyUOp *), cmp_axis_id_desc);
+    if (n_red > 1) qsort(red_ranges, (size_t)n_red, sizeof(PolyUOp *), cmp_axis_id_desc);
+
+    if (n_in0 == 0 || n_in1 == 0 || n_red == 0) continue;
+
+    /* tc_opt == 0: strict mode requires exactly one reduce axis (heuristic.py:28) */
+    if (tc_opt == 0 && n_red > 1) continue;
+
+    /* 4. Axis choices: product(in1_ranges, in0_ranges, red_ranges) -- note swap */
+    int n_choices = n_in1 * n_in0 * n_red;
+    if (axis >= n_choices) continue;
+    int red_idx = axis % n_red;
+    int in0_idx = (axis / n_red) % n_in0;
+    int in1_idx = (axis / n_red / n_in0) % n_in1;
+
+    PolyUOp *axes[3] = { in1_ranges[in1_idx], in0_ranges[in0_idx], red_ranges[red_idx] };
+
+    /* 5. Tag reduceop via tagged clone + substitute (matches tinygrad's
+     * self.ast.substitute({reduceop: reduceop.replace(tag="TC")})).
+     * poly_uop_tagged includes tag in CSE key, creating a distinct node. */
+    PolyUOp *tagged_red = poly_uop_tagged(ctx, reduceop->op, reduceop->dtype,
+                                           reduceop->src, reduceop->n_src, reduceop->arg, TC_TAG);
+    {
+      PolyUOp *from_tag[1] = { reduceop };
+      PolyUOp *to_tag[1] = { tagged_red };
+      s->ast = poly_uop_substitute(ctx, s->ast, from_tag, to_tag, 1);
+      sched_refresh(s);
+    }
+
+    /* 6. Check divisibility -- reject non-const bounds (postrange.py:254-262) */
+    bool pad_ok = true;
+    for (int i = 0; i < 3; i++) {
+      if (axes[i]->n_src == 0 || axes[i]->src[0]->op != POLY_OP_CONST ||
+          axes[i]->src[0]->arg.kind != POLY_ARG_INT) {
+        pad_ok = false; break; /* non-const bound: hard reject */
+      }
+      int64_t sz = axes[i]->src[0]->arg.i;
+      if (sz <= 0 || sz % tc->dims[i] != 0) {
+        if (tc_opt < 2) { pad_ok = false; break; }
+        /* TODO: PADTO support */
+        pad_ok = false; break;
+      }
+    }
+    if (!pad_ok) {
+      continue;
+    }
+    /* Verify tag survived the substitute+refresh */
+
+    /* 7. Create WARP range and apply opts (postrange.py:264-274) */
+    PolyUOp *warp_sz = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(tc->threads));
+    PolyUOp *warp = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, warp_sz,
+                               poly_arg_range(-1, POLY_AXIS_WARP));
+
+    PolyUOp *ne[32];
+    int n_ne = 0;
+
+    for (int oi = 0; oi < tc->n_opts; oi++) {
+      char otype = tc->opts[oi].type;
+      int odim = tc->opts[oi].dim;
+      PolyUOp *new_rng = NULL;
+
+      if (otype == 'l') {
+        PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+        PolyUOp *warp_mod2 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, warp, two, poly_arg_none());
+        axes[odim] = sched_shift_to_ex(s, axes[odim], 2, POLY_AXIS_LOCAL, false, warp_mod2, &new_rng);
+        warp = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, warp, two, poly_arg_none());
+      } else if (otype == 'u') {
+        axes[odim] = sched_shift_to_ex(s, axes[odim], 2, POLY_AXIS_UPCAST, false, NULL, &new_rng);
+      }
+      if (!axes[odim]) {
+        return false;
+      }
+      if (new_rng) ne[n_ne++] = new_rng;
+    }
+
+    /* 8. Apply reduce axes (postrange.py:276-278) */
+    int ra[16][2];
+    int n_ra = tc_get_reduce_axes(tc, ra);
+    for (int i = 0; i < n_ra; i++) {
+      PolyUOp *new_rng = NULL;
+      axes[2] = sched_shift_to_ex(s, axes[2], ra[i][1], POLY_AXIS_UNROLL, false, NULL, &new_rng);
+      if (!axes[2]) {
+        return false;
+      }
+      if (new_rng) ne[n_ne++] = new_rng;
+    }
+
+    /* 9. Build WMMA UOps if use_tc == 1 (postrange.py:280-313) */
+    if (use_tc == 1) {
+      /* Re-find the tagged reduceop */
+      int n_topo2 = 0;
+      PolyUOp **topo2 = poly_toposort(ctx, s->ast, &n_topo2);
+      PolyUOp *found_red = NULL;
+      for (int i = 0; i < n_topo2; i++) {
+        if (topo2[i]->op == POLY_OP_REDUCE && topo2[i]->tag == TC_TAG) {
+          found_red = topo2[i]; break;
+        }
+      }
+      if (!found_red) return false;
+
+      /* Create tagged copies of ne[] (postrange.py:283: tne = [x.replace(tag=1) for x in ne]) */
+      PolyUOp *tne[32];
+      for (int i = 0; i < n_ne; i++) {
+        if (ne[i]->op == POLY_OP_RANGE) {
+          tne[i] = poly_uop_tagged(ctx, POLY_OP_RANGE, ne[i]->dtype,
+                                    ne[i]->src, ne[i]->n_src, ne[i]->arg, 1);
+        } else {
+          tne[i] = ne[i];
+        }
+      }
+
+      /* Substitute ne -> tne in found_red to isolate the MUL operands (postrange.py:284-285) */
+      PolyUOp *ret = poly_uop_substitute(ctx, found_red, ne, tne, n_ne);
+      PolyUOp *ret_mul = ret->src[0];
+      if (ret_mul->op == POLY_OP_CAST && ret_mul->n_src > 0) ret_mul = ret_mul->src[0];
+      PolyUOp *srcs[2] = { ret_mul->src[0], ret_mul->src[1] };
+
+      /* Apply swizzle permutations (postrange.py:286):
+       * srcs[k] = x.substitute(dict(zip(tne, [ne[i] for i in argsort(p)])))
+       * where p = tc.permutes_for_shape_str(tc.base_shape_str()) */
+      const char *bss[32];
+      int n_bss = tc_base_shape_str(tc, bss, 32);
+
+      int perm0[32], perm1[32];
+      tc_permute_for_shape_str(tc, 0, bss, n_bss, perm0, 32);
+      tc_permute_for_shape_str(tc, 1, bss, n_bss, perm1, 32);
+
+      /* argsort(perm): inverse permutation. argsort[j] = i where perm[i] = j */
+      int argsort0[32], argsort1[32];
+      for (int i = 0; i < n_bss; i++) { argsort0[i] = i; argsort1[i] = i; }
+      for (int i = 0; i < n_bss; i++) {
+        if (perm0[i] < n_bss) argsort0[perm0[i]] = i;
+        if (perm1[i] < n_bss) argsort1[perm1[i]] = i;
+      }
+
+      /* Build reordered ne[] for each source (postrange.py:286):
+       * ne_reordered[i] = ne[argsort[i]] -- permute the ne list itself */
+      PolyUOp *ne_reordered0[32], *ne_reordered1[32];
+      for (int i = 0; i < n_ne; i++) {
+        int idx0 = (i < n_bss) ? argsort0[i] : i;
+        int idx1 = (i < n_bss) ? argsort1[i] : i;
+        ne_reordered0[i] = (idx0 >= 0 && idx0 < n_ne) ? ne[idx0] : ne[i];
+        ne_reordered1[i] = (idx1 >= 0 && idx1 < n_ne) ? ne[idx1] : ne[i];
+      }
+      srcs[0] = poly_uop_substitute(ctx, srcs[0], tne, ne_reordered0, n_ne);
+      srcs[1] = poly_uop_substitute(ctx, srcs[1], tne, ne_reordered1, n_ne);
+
+      /* Compute tc_reduce_axes and tc_upcast_axes (postrange.py:289-295) */
+      const char *shape_str[64];
+      int n_ss = sched_shape_str(s, shape_str, 64);
+
+      const char *bua[32];
+      int n_bua = tc_base_upcast_axes(tc, bua, 32);
+
+      /* tc_reduce_axes: axis ids for "r0","r1",... in scheduler shape_str */
+      int tc_reduce_axis_ids[16];
+      int n_tc_ra = 0;
+      for (int ri = 0; ri < n_ra; ri++) {
+        char rname[8];
+        snprintf(rname, 8, "r%d", ri);
+        for (int si = 0; si < n_ss; si++) {
+          if (strcmp(shape_str[si], rname) == 0) {
+            tc_reduce_axis_ids[n_tc_ra++] = (int)poly_range_axis_id(s->rngs[si]->arg);
+            break;
+          }
+        }
+      }
+
+      /* tc_upcast_axes[dim]: first log2(ept[dim]) entries of base_upcast_axes, mapped to axis ids */
+      int64_t upcast_pairs[3][16][2];
+      int n_upcast[3] = {0, 0, 0};
+      for (int dim = 0; dim < 3; dim++) {
+        int need = 0;
+        { int v = tc->elements_per_thread[dim]; while (v > 1) { need++; v /= 2; } }
+        for (int ui = 0; ui < need && ui < n_bua; ui++) {
+          for (int si = 0; si < n_ss; si++) {
+            if (strcmp(shape_str[si], bua[ui]) == 0) {
+              upcast_pairs[dim][n_upcast[dim]][0] = poly_range_axis_id(s->rngs[si]->arg);
+              upcast_pairs[dim][n_upcast[dim]][1] = 2;
+              n_upcast[dim]++;
+              break;
+            }
+          }
+        }
+      }
+
+      /* Build CONTRACT + WMMA + UNROLL (postrange.py:301-306) */
+      PolyDType vec_in0 = poly_dtype_vec(tc->dtype_in, tc->elements_per_thread[0]);
+      PolyDType vec_in1 = poly_dtype_vec(tc->dtype_in, tc->elements_per_thread[1]);
+      PolyDType vec_out = poly_dtype_vec(tc->dtype_out, tc->elements_per_thread[2]);
+
+      PolyUOp *ca_src[1] = { srcs[0] };
+      PolyUOp *contract_a = poly_uop_tagged(ctx, POLY_OP_CONTRACT, vec_in0, ca_src, 1,
+                                              poly_arg_pair_tuple(upcast_pairs[0], n_upcast[0]), 1);
+      PolyUOp *cb_src[1] = { srcs[1] };
+      PolyUOp *contract_b = poly_uop_tagged(ctx, POLY_OP_CONTRACT, vec_in1, cb_src, 1,
+                                              poly_arg_pair_tuple(upcast_pairs[1], n_upcast[1]), 1);
+
+      /* Zero accumulator */
+      PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, tc->dtype_out, poly_arg_float(0.0));
+      PolyUOp *zero_elems[16];
+      for (int i = 0; i < tc->elements_per_thread[2] && i < 16; i++) zero_elems[i] = zero;
+      PolyUOp *zero_vec = poly_uop(ctx, POLY_OP_VECTORIZE, vec_out, zero_elems,
+                                     tc->elements_per_thread[2], poly_arg_none());
+
+      PolyUOp *wmma_srcs[3] = { contract_a, contract_b, zero_vec };
+      PolyUOp *wmma = poly_uop_tagged(ctx, POLY_OP_WMMA, vec_out, wmma_srcs, 3,
+                                        poly_arg_str(tc->intrinsic_name), 1);
+
+      PolyUOp *unroll_src[1] = { wmma };
+      PolyUOp *tc_uop = poly_uop_tagged(ctx, POLY_OP_UNROLL, tc->dtype_out, unroll_src, 1,
+                                          poly_arg_pair_tuple(upcast_pairs[2], n_upcast[2]), 1);
+
+      /* Preserve extra reduce ranges not consumed by TC (postrange.py:309-310) */
+      int rs2 = range_start_for_op(POLY_OP_REDUCE);
+      PolyUOp *extra_rngs[16];
+      int n_extra = 0;
+      for (int i = rs2; i < found_red->n_src && n_extra < 16; i++) {
+        if (found_red->src[i]->op != POLY_OP_RANGE) continue;
+        int64_t aid = poly_range_axis_id(found_red->src[i]->arg);
+        bool in_tc = false;
+        for (int r = 0; r < n_tc_ra; r++)
+          if (tc_reduce_axis_ids[r] == (int)aid) { in_tc = true; break; }
+        if (!in_tc) extra_rngs[n_extra++] = found_red->src[i];
+      }
+      if (n_extra > 0) {
+        PolyUOp *red_srcs[18];
+        red_srcs[0] = tc_uop;
+        for (int i = 0; i < n_extra; i++) red_srcs[i + 1] = extra_rngs[i];
+        PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+        tc_uop = poly_uop(ctx, POLY_OP_REDUCE, tc_uop->dtype, red_srcs, n_extra + 1, red_arg);
+      }
+
+      /* Substitute found_red -> tc_uop in AST */
+      PolyUOp *from_r[1] = { found_red };
+      PolyUOp *to_r[1] = { tc_uop };
+      s->ast = poly_uop_substitute(ctx, s->ast, from_r, to_r, 1);
+    }
+
+    if (tc_axes_out) {
+      tc_axes_out[0] = axes[0];
+      tc_axes_out[1] = axes[1];
+      tc_axes_out[2] = axes[2];
+    }
+    sched_refresh(s);
+    return true;
+  }
+
+  return false;
+}
+
 /* ── hand_coded_optimizations (heuristic.py:8-190, CPU-relevant subset) ── */
 static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   /* tinygrad apply_opts guard (postrange.py:352): skip heuristic for multi-block kernels. */
@@ -709,6 +1227,52 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
   OptScheduler s;
   sched_init(&s, ctx, sink);
   if (s.n_rngs == 0) return sink;
+
+  /* == Tensor core optimization (heuristic.py:28-46) ==
+   * Try TC before other heuristics. On success, return immediately. */
+  if (caps.n_tensor_cores > 0) {
+    /* Count reduce axes */
+    int n_reduce = 0;
+    for (int i = 0; i < s.n_rngs; i++) {
+      if (s.types[i] == POLY_AXIS_GROUP_REDUCE || s.types[i] == POLY_AXIS_REDUCE)
+        n_reduce++;
+    }
+    int tc_opt_env = 0;
+    { const char *e = getenv("POLY_TC_OPT"); if (e) tc_opt_env = atoi(e); }
+    int use_tc_env = 1;
+    { const char *e = getenv("POLY_USE_TC"); if (e) use_tc_env = atoi(e); }
+
+    if (use_tc_env > 0 && (n_reduce == 1 || tc_opt_env >= 1)) {
+      OptScheduler tk;
+      sched_copy(&tk, &s);
+      PolyUOp *tc_axes[3];
+      bool tc_ok = sched_apply_tc_opt(&tk, 0, -1, tc_opt_env, use_tc_env,
+                                       caps.tensor_cores, caps.n_tensor_cores, tc_axes);
+      if (tc_ok) {
+        /* Post-TC upcasts on M and N (heuristic.py:39-45) */
+        for (int tc_dim = 1; tc_dim >= 0; tc_dim--) {
+          int64_t bound = 0;
+          if (tc_axes[tc_dim] && tc_axes[tc_dim]->n_src > 0 &&
+              tc_axes[tc_dim]->src[0]->op == POLY_OP_CONST)
+            bound = tc_axes[tc_dim]->src[0]->arg.i;
+          if (bound <= 1) continue;
+          int szs[] = {5, 4, 3, 2};
+          for (int si = 0; si < 4; si++) {
+            if (bound % szs[si] == 0) {
+              int idx = -1;
+              for (int ri = 0; ri < tk.n_rngs; ri++) {
+                if (tk.rngs[ri] == tc_axes[tc_dim]) { idx = ri; break; }
+              }
+              if (idx >= 0)
+                tc_axes[tc_dim] = sched_shift_to(&tk, tk.rngs[idx], szs[si], POLY_AXIS_UPCAST, false);
+              break;
+            }
+          }
+        }
+        return tk.ast;
+      }
+    }
+  }
 
   /* == Masked upcast (heuristic.py:96-105) ==
    * Upcast small dims (<=7) that appear in WHERE gates */
@@ -2659,6 +3223,221 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
   return out;
 }
 
+/* ── BF16 non-native type rewrites ────────────────────────────────────
+ * Mirrors tinygrad's create_non_native_float_pats() + pm_manual_bf16_cast.
+ * BF16 is stored as unsigned short on most targets (HIP, OpenCL, CPU).
+ * ALU ops must be promoted to float32, and CAST bf16<->f32 uses bitwise ops.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+static bool is_bf16(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  return s.priority == POLY_BFLOAT16.priority && s.bitsize == 16;
+}
+
+/* Rule: ALU(bf16, ...) -> CAST(ALU(CAST(src0, f32), ..., f32), bf16)
+ * Applies to unary and binary float ALU ops with bf16 output. */
+static PolyUOp *rule_bf16_alu_promote(PolyCtx *ctx, PolyUOp *root,
+                                       const PolyBindings *b) {
+  (void)b;
+  if (!is_bf16(root->dtype)) return NULL;
+
+  /* Cast all sources from bf16 to f32, preserving non-bf16 sources */
+  PolyUOp *new_src[4];
+  for (int i = 0; i < root->n_src && i < 4; i++) {
+    if (is_bf16(root->src[i]->dtype))
+      new_src[i] = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[i], poly_arg_none());
+    else
+      new_src[i] = root->src[i];
+  }
+
+  /* Perform ALU in f32 */
+  PolyUOp *f32_result = poly_uop(ctx, root->op, POLY_FLOAT32,
+                                   new_src, root->n_src, root->arg);
+
+  /* Cast result back to bf16 */
+  return poly_uop1(ctx, POLY_OP_CAST, root->dtype, f32_result, poly_arg_none());
+}
+
+/* Rule: CMP(bf16, bf16) -> CMP(CAST(x, f32), CAST(y, f32))
+ * Comparison ops with bf16 operands; result is bool, no cast back. */
+static PolyUOp *rule_bf16_cmp_promote(PolyCtx *ctx, PolyUOp *root,
+                                       const PolyBindings *b) {
+  (void)b;
+  if (root->n_src < 2) return NULL;
+  if (!is_bf16(root->src[0]->dtype) && !is_bf16(root->src[1]->dtype)) return NULL;
+
+  PolyUOp *s0 = is_bf16(root->src[0]->dtype)
+    ? poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none())
+    : root->src[0];
+  PolyUOp *s1 = is_bf16(root->src[1]->dtype)
+    ? poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[1], poly_arg_none())
+    : root->src[1];
+
+  return poly_uop2(ctx, root->op, root->dtype, s0, s1, root->arg);
+}
+
+/* Rule: WHERE(cond, x:bf16, y:bf16) -> CAST(WHERE(cond, CAST(x,f32), CAST(y,f32)), bf16) */
+static PolyUOp *rule_bf16_where_promote(PolyCtx *ctx, PolyUOp *root,
+                                         const PolyBindings *b) {
+  (void)b;
+  if (!is_bf16(root->dtype)) return NULL;
+
+  PolyUOp *cond = root->src[0];
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[1], poly_arg_none());
+  PolyUOp *y = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[2], poly_arg_none());
+  PolyUOp *where_f32 = poly_uop3(ctx, POLY_OP_WHERE, POLY_FLOAT32, cond, x, y, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, root->dtype, where_f32, poly_arg_none());
+}
+
+/* Rule: CAST(x:bf16, f32) -> bitcast(CAST(bitcast(x, u16), u32) << 16, f32)
+ * Tinygrad pm_manual_bf16_cast: (x.bitcast(ushort).cast(uint)<<16).bitcast(float) */
+static PolyUOp *rule_bf16_to_f32_cast(PolyCtx *ctx, PolyUOp *root,
+                                       const PolyBindings *b) {
+  (void)b;
+  if (!poly_dtype_eq(root->dtype, POLY_FLOAT32)) return NULL;
+  if (root->n_src < 1 || !is_bf16(root->src[0]->dtype)) return NULL;
+
+  PolyUOp *x = root->src[0];
+  /* bitcast bf16 -> u16 */
+  PolyUOp *u16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT16, x, poly_arg_none());
+  /* cast u16 -> u32 (zero extend) */
+  PolyUOp *u32 = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, u16, poly_arg_none());
+  /* shift left 16 */
+  PolyUOp *c16 = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(16));
+  PolyUOp *shifted = poly_uop2(ctx, POLY_OP_SHL, POLY_UINT32, u32, c16, poly_arg_none());
+  /* bitcast u32 -> f32 */
+  return poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT32, shifted, poly_arg_none());
+}
+
+/* Rule: CAST(x:f32, bf16) -> bitcast((round_to_bf16(bitcast(x, u32)) >> 16) as u16, bf16)
+ * Tinygrad cast_float_to_bf16: handles rounding and special values. */
+static PolyUOp *rule_f32_to_bf16_cast(PolyCtx *ctx, PolyUOp *root,
+                                       const PolyBindings *b) {
+  (void)b;
+  if (!is_bf16(root->dtype)) return NULL;
+  if (root->n_src < 1 || !poly_dtype_eq(root->src[0]->dtype, POLY_FLOAT32)) return NULL;
+
+  PolyUOp *x = root->src[0];
+  /* bitcast f32 -> u32 */
+  PolyUOp *u = poly_uop1(ctx, POLY_OP_BITCAST, POLY_UINT32, x, poly_arg_none());
+
+  /* Constants */
+  PolyUOp *c0x7f800000 = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(0x7f800000));
+  PolyUOp *c0xffff     = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(0xffff));
+  PolyUOp *c0x10000    = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(0x10000));
+  PolyUOp *c0x7fff     = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(0x7fff));
+  PolyUOp *c16         = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(16));
+  PolyUOp *c1          = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(1));
+  PolyUOp *c0          = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(0));
+
+  /* neg_u = -u  (actually NEG for uint = two's complement negate) */
+  PolyUOp *neg_u = poly_uop1(ctx, POLY_OP_NEG, POLY_UINT32, u, poly_arg_none());
+
+  /* exponent check: (-u & 0x7f800000) != 0  (not zero/denorm) */
+  PolyUOp *exp_masked = poly_uop2(ctx, POLY_OP_AND, POLY_UINT32, neg_u, c0x7f800000, poly_arg_none());
+  PolyUOp *exp_nonzero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, exp_masked, c0, poly_arg_none());
+
+  /* round: u + ((u >> 16) & 1) + 0x7fff */
+  PolyUOp *u_shr16 = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, u, c16, poly_arg_none());
+  PolyUOp *lsb = poly_uop2(ctx, POLY_OP_AND, POLY_UINT32, u_shr16, c1, poly_arg_none());
+  PolyUOp *rounded = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, u, lsb, poly_arg_none());
+  rounded = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, rounded, c0x7fff, poly_arg_none());
+
+  /* mantissa check: (u & 0xffff) != 0 */
+  PolyUOp *mant_masked = poly_uop2(ctx, POLY_OP_AND, POLY_UINT32, u, c0xffff, poly_arg_none());
+  PolyUOp *mant_nonzero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, mant_masked, c0, poly_arg_none());
+
+  /* denorm/zero path: if mantissa != 0, set sticky bit; else keep u */
+  PolyUOp *sticky = poly_uop2(ctx, POLY_OP_OR, POLY_UINT32, u, c0x10000, poly_arg_none());
+  PolyUOp *denorm_result = poly_uop3(ctx, POLY_OP_WHERE, POLY_UINT32, mant_nonzero, sticky, u, poly_arg_none());
+
+  /* final: if exponent nonzero -> rounded, else -> denorm_result */
+  PolyUOp *final_u32 = poly_uop3(ctx, POLY_OP_WHERE, POLY_UINT32, exp_nonzero, rounded, denorm_result, poly_arg_none());
+
+  /* shift right 16 -> u16 -> bitcast bf16 */
+  PolyUOp *shifted = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, final_u32, c16, poly_arg_none());
+  PolyUOp *u16val = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT16, shifted, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, u16val, poly_arg_none());
+}
+
+/* Rule: CAST(x:bf16, non-f32) or CAST(x:non-f32, bf16) -> go through f32 */
+static PolyUOp *rule_bf16_cast_via_f32(PolyCtx *ctx, PolyUOp *root,
+                                        const PolyBindings *b) {
+  (void)b;
+  if (root->n_src < 1) return NULL;
+  PolyDType src_dt = root->src[0]->dtype;
+  PolyDType dst_dt = root->dtype;
+
+  /* bf16 -> non-f32: go through f32 */
+  if (is_bf16(src_dt) && !poly_dtype_eq(dst_dt, POLY_FLOAT32) && !is_bf16(dst_dt)) {
+    PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none());
+    return poly_uop1(ctx, POLY_OP_CAST, dst_dt, f32, poly_arg_none());
+  }
+  /* non-f32 -> bf16: go through f32 */
+  if (is_bf16(dst_dt) && !poly_dtype_eq(src_dt, POLY_FLOAT32) && !is_bf16(src_dt)) {
+    PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, root->src[0], poly_arg_none());
+    return poly_uop1(ctx, POLY_OP_CAST, dst_dt, f32, poly_arg_none());
+  }
+  return NULL;
+}
+
+/* Rule: CONST(bf16, val) -> cast_float_to_bf16(CONST(f32, val))
+ * Tinygrad HIP extra_matcher: bf16 consts rendered as bit pattern via rounding. */
+static PolyUOp *rule_bf16_const(PolyCtx *ctx, PolyUOp *root,
+                                 const PolyBindings *b) {
+  (void)b;
+  if (!is_bf16(root->dtype)) return NULL;
+  /* Create f32 CONST with same value, then apply f32->bf16 rounding */
+  PolyUOp *f32_const = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(root->arg.f));
+  return poly_uop1(ctx, POLY_OP_CAST, POLY_BFLOAT16, f32_const, poly_arg_none());
+}
+
+static PolyPatternMatcher *g_pm_bf16_non_native = NULL;
+
+PolyPatternMatcher *poly_pm_bf16_non_native(void) {
+  if (g_pm_bf16_non_native) return g_pm_bf16_non_native;
+
+  /* ALU ops that need bf16->f32 promotion */
+  PolyOpSet alu_set = {{0,0}};
+  PolyOps alu_ops[] = {
+    POLY_OP_ADD, POLY_OP_MUL, POLY_OP_SUB, POLY_OP_FDIV, POLY_OP_NEG,
+    POLY_OP_SQRT, POLY_OP_RECIPROCAL, POLY_OP_EXP2, POLY_OP_LOG2,
+    POLY_OP_SIN, POLY_OP_MAX, POLY_OP_TRUNC, POLY_OP_POW, POLY_OP_MULACC
+  };
+  for (int i = 0; i < (int)(sizeof(alu_ops)/sizeof(alu_ops[0])); i++)
+    alu_set = poly_opset_add(alu_set, alu_ops[i]);
+
+  /* Comparison ops that need bf16 operand promotion */
+  PolyOpSet cmp_set = {{0,0}};
+  cmp_set = poly_opset_add(cmp_set, POLY_OP_CMPLT);
+  cmp_set = poly_opset_add(cmp_set, POLY_OP_CMPNE);
+  cmp_set = poly_opset_add(cmp_set, POLY_OP_CMPEQ);
+
+  PolyOpSet where_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_WHERE);
+  PolyOpSet cast_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_CAST);
+  PolyOpSet const_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_CONST);
+
+  PolyRule rules[] = {
+    /* 0. bf16 CONST: rewrite to f32 const + cast (renders as bit pattern) */
+    { poly_pat_ops(const_set, NULL, 0, NULL), rule_bf16_const },
+    /* 1. ALU ops: promote bf16 -> f32 -> bf16 */
+    { poly_pat_ops(alu_set, NULL, 0, NULL), rule_bf16_alu_promote },
+    /* 2. CMP ops: promote bf16 operands to f32 */
+    { poly_pat_ops(cmp_set, NULL, 0, NULL), rule_bf16_cmp_promote },
+    /* 3. WHERE: promote bf16 branches to f32 */
+    { poly_pat_ops(where_set, NULL, 0, NULL), rule_bf16_where_promote },
+    /* 4. CAST bf16->f32: bitwise expansion */
+    { poly_pat_ops(cast_set, NULL, 0, NULL), rule_bf16_to_f32_cast },
+    /* 5. CAST f32->bf16: bitwise with rounding */
+    { poly_pat_ops(cast_set, NULL, 0, NULL), rule_f32_to_bf16_cast },
+    /* 6. CAST bf16<->other: go through f32 */
+    { poly_pat_ops(cast_set, NULL, 0, NULL), rule_bf16_cast_via_f32 },
+  };
+
+  g_pm_bf16_non_native = poly_pm_new(rules, (int)(sizeof(rules)/sizeof(rules[0])));
+  return g_pm_bf16_non_native;
+}
+
 /* ── Build the pm_transcendental PatternMatcher ──────────────────────── */
 
 static PolyPatternMatcher *g_pm_transcendental = NULL;
@@ -4580,6 +5359,11 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
   return new_sink;
 }
 
+/* ── Public wrapper for heuristic (used by tests) ──────────────────── */
+PolyUOp *poly_apply_opts_heuristic_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
+  return poly_apply_opts_heuristic(ctx, sink, caps);
+}
+
 /* ── Public accessors for individual passes (used by CUDA linearizer) ── */
 
 PolyPatternMatcher *poly_pm_reduce_pass(void)        { return poly_pm_reduce(); }
@@ -4589,6 +5373,8 @@ PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps) {
   return poly_pm_decomp_with_caps(caps.has_mulacc, caps.has_threefry);
 }
 PolyPatternMatcher *poly_pm_transcendental_pass(void)  { return poly_pm_transcendental(); }
+PolyPatternMatcher *poly_pm_pre_expander_pass(void)    { return poly_pm_pre_expander(); }
+PolyPatternMatcher *poly_pm_expander_pass(void)        { return poly_pm_expander(); }
 void poly_reset_acc_num(void)                         { }
 
 PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink) {

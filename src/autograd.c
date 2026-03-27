@@ -835,7 +835,9 @@ static PolyUOp *substitute_rec(PolyCtx *ctx, PolyUOp *u,
   if (!changed) {
     result = u;
   } else {
-    result = poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
+    result = (u->tag != 0)
+      ? poly_uop_tagged(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag)
+      : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
   }
   poly_map_set(memo, ptr_hash(u), u, result, ptr_eq);
   return result;
@@ -847,6 +849,7 @@ PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root,
 
   PolyMap *sub_map = poly_map_new((size_t)n * 2 + 16);
   for (int i = 0; i < n; i++) {
+    if (from[i] == to[i]) continue;  /* skip identity maps (would infinite-recurse) */
     poly_map_set(sub_map, ptr_hash(from[i]), from[i], to[i], ptr_eq);
   }
 

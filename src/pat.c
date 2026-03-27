@@ -498,8 +498,9 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
           continue;
         }
       } else {
-        new_src_n = poly_uop(ctx, new_n->op, new_n->dtype,
-                             new_src, new_n->n_src, new_n->arg);
+        new_src_n = (new_n->tag != 0)
+          ? poly_uop_tagged(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg, new_n->tag)
+          : poly_uop(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg);
       }
       if (heap_src) free(new_src);
 
@@ -590,8 +591,14 @@ PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
         if (new_src[i] != n->src[i]) changed = true;
       }
 
-      PolyUOp *new_n = changed ?
-        poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg) : n;
+      PolyUOp *new_n;
+      if (changed) {
+        new_n = (n->tag != 0)
+          ? poly_uop_tagged(ctx, n->op, n->dtype, new_src, n->n_src, n->arg, n->tag)
+          : poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg);
+      } else {
+        new_n = n;
+      }
 
       /* Top-down: try pm on rebuilt node. Use result as-is (no re-traversal). */
       if (pm) {
