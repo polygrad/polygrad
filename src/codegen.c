@@ -1507,6 +1507,12 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
  * compile+time, IndexedDB for cache.
  * ────────────────────────────────────────────────────────────────────── */
 
+/* Shallow-copy an OptScheduler. Used by TC optimization and BEAM search.
+ * Safe because sched_shift_to creates new UOps via poly_uop_substitute. */
+static void sched_copy(OptScheduler *dst, const OptScheduler *src) {
+  *dst = *src;
+}
+
 #ifndef __EMSCRIPTEN__
 
 typedef enum { POLY_OPT_UPCAST, POLY_OPT_UNROLL } PolyOptOp;
@@ -1541,12 +1547,6 @@ typedef struct {
   PolyBeamAction actions[BEAM_MAX_ITERS];
   int n_actions;
 } BeamCandidate;
-
-/* Copy an OptScheduler. Shallow copy is sufficient because sched_shift_to
- * creates new UOps via poly_uop_substitute (the old AST is untouched). */
-static void sched_copy(OptScheduler *dst, const OptScheduler *src) {
-  *dst = *src;
-}
 
 /* Try to apply a single BEAM action to a scheduler. Returns true on success. */
 static bool sched_apply_action(OptScheduler *s, PolyBeamAction act) {
