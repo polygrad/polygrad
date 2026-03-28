@@ -235,6 +235,22 @@ static InterpVal eval_alu(PolyOps op, PolyDType dt, InterpVal *srcs, int n_src) 
   }
 }
 
+/* Truncate integer result to dtype width (matches alu.c truncate_result). */
+static InterpVal interp_truncate(InterpVal v, PolyDType dt) {
+  if (poly_dtype_is_float(dt) || poly_dtype_is_bool(dt)) return v;
+  int bits = dt.bitsize;
+  if (bits <= 0 || bits >= 64) return v;
+  if (poly_dtype_is_unsigned(dt)) {
+    v.u &= ((uint64_t)1 << bits) - 1;
+  } else {
+    uint64_t mask = ((uint64_t)1 << bits) - 1;
+    v.i &= (int64_t)mask;
+    if (v.i & ((int64_t)1 << (bits - 1)))
+      v.i |= ~(int64_t)mask; /* sign extend */
+  }
+  return v;
+}
+
 /* ── UOp index map ───────────────────────────────────────────────────── */
 /*
  * Maps UOp pointers to their position in the linearized array.
@@ -319,11 +335,18 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
       break;
 
     case POLY_OP_DEFINE_VAR: {
-      if (u->arg.i >= 0 && u->arg.i < n_args && args[u->arg.i]) {
-        int *vp = (int *)args[u->arg.i];
+      /* Var bindings are placed after buffer params in args[].
+       * Count PARAMs and DEFINE_VARs seen so far to compute the slot. */
+      int n_buf_params = 0, var_ord = 0;
+      for (int j = 0; j < i; j++) {
+        if (lin[j]->op == POLY_OP_PARAM) n_buf_params++;
+        if (lin[j]->op == POLY_OP_DEFINE_VAR) var_ord++;
+      }
+      int slot = n_buf_params + var_ord;
+      if (slot >= 0 && slot < n_args && args[slot]) {
+        int *vp = (int *)args[slot];
         vals[i] = iv_int(*vp);
       } else {
-        /* Var not bound (e.g. DEFINE_VAR beyond provided args). Default to 0. */
         vals[i] = iv_int(0);
       }
       break;
@@ -441,9 +464,9 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
       if (poly_dtype_is_float(u->dtype))
         vals[i] = iv_flt(as_float(vals[src0], src_dt));
       else if (poly_dtype_is_unsigned(u->dtype))
-        vals[i] = iv_uint(as_uint(vals[src0], src_dt));
+        vals[i] = interp_truncate(iv_uint(as_uint(vals[src0], src_dt)), u->dtype);
       else
-        vals[i] = iv_int(as_int(vals[src0], src_dt));
+        vals[i] = interp_truncate(iv_int(as_int(vals[src0], src_dt)), u->dtype);
       break;
     }
 
@@ -487,6 +510,26 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
       break;
     }
 
+    case POLY_OP_GEP: {
+      /* Lane extraction. Interpreter is scalar-only, so for single-lane
+       * GEP (the common case after devectorization) just pass through src. */
+      int src0 = uop_index_map_get(idx_map, u->src[0]);
+      vals[i] = (src0 >= 0) ? vals[src0] : iv_int(0);
+      break;
+    }
+
+    case POLY_OP_VECTORIZE: {
+      /* Vector construction. Interpreter is scalar-only.
+       * After devectorization, VECTORIZE(scalar) is just passthrough. */
+      if (u->n_src > 0) {
+        int src0 = uop_index_map_get(idx_map, u->src[0]);
+        vals[i] = (src0 >= 0) ? vals[src0] : iv_int(0);
+      } else {
+        vals[i] = iv_int(0);
+      }
+      break;
+    }
+
     case POLY_OP_SINK:
     case POLY_OP_NOOP:
     case POLY_OP_GROUP:
@@ -508,7 +551,7 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
           int sj = uop_index_map_get(idx_map, u->src[j]);
           src_vals[j] = (sj >= 0) ? vals[sj] : iv_int(0);
         }
-        vals[i] = eval_alu(u->op, alu_dt, src_vals, u->n_src);
+        vals[i] = interp_truncate(eval_alu(u->op, alu_dt, src_vals, u->n_src), u->dtype);
       } else {
         fprintf(stderr, "polygrad: interp: unhandled op %s (%d)\n",
                 poly_op_name(u->op), u->op);
