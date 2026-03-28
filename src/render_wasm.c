@@ -709,6 +709,23 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         int local_idx = alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
         int addr = lm_get(&locals, u->src[0]);
 
+        /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
+        PolyUOp *ld_idx = poly_find_index_through_cast(u->src[0]);
+        bool gated = ld_idx && ld_idx->n_src >= 3;
+
+        if (gated) {
+          /* if (gate) { val = load } else { val = alt/0 } */
+          int gate_local = lm_get(&locals, ld_idx->src[2]);
+          wb_byte(&body, WASM_OP_LOCAL_GET);
+          wb_uleb128(&body, gate_local);
+          /* blocktype: result type of if-else */
+          uint8_t bt = dt_is_f64(u->dtype) ? WASM_TYPE_F64
+                     : poly_dtype_is_float(u->dtype) ? WASM_TYPE_F32
+                     : WASM_TYPE_I32;
+          wb_byte(&body, WASM_OP_IF);
+          wb_byte(&body, bt);
+        }
+
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
 
@@ -716,11 +733,24 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         if (dt_is_f64(u->dtype))           wb_byte(&body, WASM_OP_F64_LOAD);
         else if (poly_dtype_is_float(u->dtype)) wb_byte(&body, WASM_OP_F32_LOAD);
         else                                     wb_byte(&body, WASM_OP_I32_LOAD);
-        /* i64 LOAD would be: wb_byte(&body, WASM_OP_I64_LOAD) -- not needed yet
-         * since i64 values only appear as intermediates in transcendental decompositions,
-         * never as buffer data. */
         wb_uleb128(&body, dt_align_log2(u->dtype));
         wb_uleb128(&body, 0);
+
+        if (gated) {
+          wb_byte(&body, WASM_OP_ELSE);
+          /* Push alt value: use src[1] if 2-source LOAD, else const 0 */
+          if (u->n_src >= 2) {
+            int alt_local = lm_get(&locals, u->src[1]);
+            wb_byte(&body, WASM_OP_LOCAL_GET);
+            wb_uleb128(&body, alt_local);
+          } else {
+            if (dt_is_f64(u->dtype))           { wb_byte(&body, WASM_OP_F64_CONST); wb_f64(&body, 0.0); }
+            else if (poly_dtype_is_float(u->dtype)) { wb_byte(&body, WASM_OP_F32_CONST); wb_f32(&body, 0.0f); }
+            else                                     { wb_byte(&body, WASM_OP_I32_CONST); wb_sleb128(&body, 0); }
+          }
+          wb_byte(&body, WASM_OP_END);
+        }
+
         wb_byte(&body, WASM_OP_LOCAL_SET);
         wb_uleb128(&body, local_idx);
         lm_set(&locals, u, local_idx);

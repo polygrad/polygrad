@@ -291,7 +291,19 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       char *bidx = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      wsb_printf(&body, "var %s: %s = %s;\n", name, tn, bidx);
+
+      /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
+      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
+        char *gate_s = wsm_get(&names, idx_uop->src[2]);
+        char *alt_s = wsm_get(&names, u->src[1]);
+        wsb_printf(&body, "var %s: %s = select(%s, %s, %s);\n", name, tn, alt_s, bidx, gate_s);
+      } else if (idx_uop && idx_uop->n_src >= 3) {
+        char *gate_s = wsm_get(&names, idx_uop->src[2]);
+        wsb_printf(&body, "var %s: %s = select(%s(0), %s, %s);\n", name, tn, tn, bidx, gate_s);
+      } else {
+        wsb_printf(&body, "var %s: %s = %s;\n", name, tn, bidx);
+      }
       continue;
     }
 

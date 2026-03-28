@@ -1388,15 +1388,14 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
       for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
 
-      /* Gated load: LOAD(INDEX(buf, idx, gate), alt_value)
-       * Emit: gate ? *ptr : alt_value (tinygrad parity: 2-source LOAD) */
-      PolyUOp *idx_uop = u->src[0];
-      if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3 && u->n_src >= 2) {
+      /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt)
+       * Walks through pointer casts to find the underlying gated INDEX. */
+      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
         char *gate_s = smap_get(&names, idx_uop->src[2]);
         char *alt_s = smap_get(&names, u->src[1]);
         sb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
-      } else if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3) {
-        /* Legacy 1-source gated load (fallback to zero) */
+      } else if (idx_uop && idx_uop->n_src >= 3) {
         char *gate_s = smap_get(&names, idx_uop->src[2]);
         sb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, dtype_s);
       } else {

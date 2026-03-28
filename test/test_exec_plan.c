@@ -831,3 +831,45 @@ TEST(exec_plan, workspace_reduce_zeroed) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+TEST(exec_plan, interp_gated_load_pad_shrink) {
+  /* Pad+shrink+expand+reduce: verifies gated INDEX (from move_where_on_load)
+   * is correctly handled by the interpreter LOAD. Without the fix, pad guards
+   * are ignored and the result is 800 instead of 740. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x_flat = poly_buffer(ctx, POLY_FLOAT32, 75);
+  int64_t x_shape[] = {1, 3, 5, 5};
+  PolyUOp *x = poly_reshape(ctx, x_flat, x_shape, 4);
+  int64_t pad_pairs[][2] = {{0,0},{0,0},{1,1},{1,1}};
+  PolyUOp *xp = poly_pad(ctx, x, pad_pairs, 4);
+  int64_t s1_pairs[][2] = {{0,1},{0,1},{0,5},{0,5}};
+  int64_t s2_pairs[][2] = {{0,1},{0,1},{0,5},{1,6}};
+  PolyUOp *s1 = poly_shrink(ctx, xp, s1_pairs, 4);
+  PolyUOp *s2 = poly_shrink(ctx, xp, s2_pairs, 4);
+  int64_t out_shape[] = {1, 2, 5, 5};
+  PolyUOp *e1 = poly_expand(ctx, s1, out_shape, 4);
+  PolyUOp *e2 = poly_expand(ctx, s2, out_shape, 4);
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, e1, e2, poly_arg_none());
+  int64_t red_axes[] = {1, 2, 3};
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, sum, red_axes, 3);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, loss, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  float x_d[75];
+  for (int i = 0; i < 75; i++) x_d[i] = (float)(i + 1);
+  float out_cpu[1], out_interp[1];
+  PolyUOp *bufs[] = { x_flat, out };
+  void *datas[] = { x_d, NULL };
+
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, 1, 1e-5f);
+  if (rc != 0)
+    fprintf(stderr, "  gated_load: cpu=%.1f interp=%.1f rc=%d\n",
+            (double)out_cpu[0], (double)out_interp[0], rc);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(out_cpu[0], 740.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}

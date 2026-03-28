@@ -102,6 +102,16 @@ void tc_permute_for_shape_str(const PolyTensorCore *tc, int swz_idx,
                                const char *shape_str[], int n_shape,
                                int perm[], int max_n);
 
+/* Walk through transparent pointer casts to find the underlying INDEX.
+ * Returns the INDEX UOp if found, NULL otherwise. Used by renderers to
+ * detect gated loads: LOAD(CAST(INDEX(buf, idx, gate)), alt). */
+static inline PolyUOp *poly_find_index_through_cast(PolyUOp *u) {
+  while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST)
+         && u->n_src > 0 && u->dtype.is_ptr)
+    u = u->src[0];
+  return (u && u->op == POLY_OP_INDEX) ? u : NULL;
+}
+
 /* Codegen pipeline: full rewrite to sink (sym → reduce → decomp → transcendental) */
 PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts);

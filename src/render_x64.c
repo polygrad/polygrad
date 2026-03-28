@@ -866,14 +866,7 @@ static int materialize_index_gpr(X64Buf *buf, PolyUOp *idx_src,
   return -1;
 }
 
-/* Walk through transparent pointer casts to find the underlying INDEX.
- * The vec path produces LOAD→CAST→INDEX (pointer type cast for vec ptr). */
-static PolyUOp *find_index_through_cast(PolyUOp *u) {
-  while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST)
-         && u->n_src > 0 && u->dtype.is_ptr)
-    u = u->src[0];
-  return (u && u->op == POLY_OP_INDEX) ? u : NULL;
-}
+/* Use shared poly_find_index_through_cast from codegen.h */
 
 /* ── Packed SSE (no F3 prefix — operates on all 4 float lanes) ──────── */
 
@@ -2028,7 +2021,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (idx_src->op == POLY_OP_INDEX && idx_src->n_src >= 3)
           gate_uop = idx_src->src[2];
         else {
-          PolyUOp *found = find_index_through_cast(idx_src);
+          PolyUOp *found = poly_find_index_through_cast(idx_src);
           if (found && found->n_src >= 3) gate_uop = found->src[2];
         }
       }
@@ -2077,7 +2070,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
 
         /* Check for fusable INDEX (walk through pointer CAST/BITCAST) */
-        PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
+        PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
           int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
@@ -2160,7 +2153,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
       /* Check for fused SIB addressing (INDEX was skipped). */
       {
-        PolyUOp *idx_uop = find_index_through_cast(u->src[0]);
+        PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
           int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
@@ -2264,7 +2257,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
 
         /* Check for fused INDEX store (walk through pointer CAST/BITCAST) */
-        PolyUOp *st_idx = find_index_through_cast(u->src[0]);
+        PolyUOp *st_idx = poly_find_index_through_cast(u->src[0]);
         if (st_idx) {
           PolyUOp *idx_uop = st_idx;
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);

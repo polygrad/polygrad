@@ -188,7 +188,9 @@ static InterpVal eval_alu(PolyOps op, PolyDType dt, InterpVal *srcs, int n_src) 
 
   switch (op) {
   /* Unary */
-  case POLY_OP_NEG:        return is_flt ? iv_flt(-a) : iv_int(-ai);
+  case POLY_OP_NEG:
+    if (poly_dtype_is_bool(poly_dtype_scalar(dt))) return iv_int(srcs[0].i ? 0 : 1);
+    return is_flt ? iv_flt(-a) : iv_int(-ai);
   case POLY_OP_SQRT:       return iv_flt(sqrt(a));
   case POLY_OP_RECIPROCAL: return iv_flt(1.0 / a);
   case POLY_OP_EXP2:       return iv_flt(exp2(a));
@@ -382,6 +384,21 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
     case POLY_OP_LOAD: {
       int src0 = uop_index_map_get(idx_map, u->src[0]);
       if (src0 < 0) { fprintf(stderr, "polygrad: interp: LOAD src not found\n"); return -1; }
+      /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
+      PolyUOp *ld_idx = poly_find_index_through_cast(u->src[0]);
+      if (ld_idx && ld_idx->n_src >= 3) {
+        int gate_i = uop_index_map_get(idx_map, ld_idx->src[2]);
+        if (gate_i >= 0 && !as_int(vals[gate_i], ld_idx->src[2]->dtype)) {
+          /* Gate is false: use alt value (src[1]) or zero */
+          if (u->n_src >= 2) {
+            int alt_i = uop_index_map_get(idx_map, u->src[1]);
+            vals[i] = (alt_i >= 0) ? vals[alt_i] : iv_flt(0.0);
+          } else {
+            vals[i] = iv_flt(0.0);
+          }
+          break;
+        }
+      }
       vals[i] = mem_load(vals[src0].p, u->dtype);
       break;
     }
