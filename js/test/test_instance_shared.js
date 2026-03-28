@@ -159,6 +159,62 @@ async function runInstanceTests(pg) {
     }
   })
 
+  await test('mlp batch_size=32 forward produces correct shape', async () => {
+    const inst = Instance.mlp({
+      layers: [4, 8, 3],
+      activation: 'relu',
+      bias: true,
+      loss: 'cross_entropy',
+      batch_size: 32,
+      seed: 42
+    })
+    try {
+      const x = new Float32Array(32 * 4)
+      for (let i = 0; i < x.length; i++) x[i] = Math.random()
+      const outputs = inst.forward({ x })
+      assert(outputs.output instanceof Float32Array, 'output should be Float32Array')
+      assert(outputs.output.length === 32 * 3,
+        `expected output length ${32 * 3}, got ${outputs.output.length}`)
+      for (let i = 0; i < outputs.output.length; i++) {
+        assert(Number.isFinite(outputs.output[i]),
+          `output[${i}] should be finite, got ${outputs.output[i]}`)
+      }
+    } finally {
+      inst.dispose()
+    }
+  })
+
+  // Known bug: batch_size>1 cross_entropy backward has shape mismatch in codegen
+  // Reproduces on CPU too (not WASM-specific). See PLAN.md P0.
+  await test('mlp batch_size=32 train step decreases loss (P0)', async () => {
+    const inst = Instance.mlp({
+      layers: [4, 8, 3],
+      activation: 'relu',
+      bias: true,
+      loss: 'cross_entropy',
+      batch_size: 32,
+      seed: 42
+    })
+    try {
+      inst.setOptimizer(pg.OPTIM_SGD, 0.01)
+      const x = new Float32Array(32 * 4)
+      const y = new Float32Array(32 * 3)
+      for (let i = 0; i < x.length; i++) x[i] = (i % 7) * 0.1
+      for (let i = 0; i < 32; i++) y[i * 3 + (i % 3)] = 1.0
+      let first = null
+      let last = null
+      for (let step = 0; step < 30; step++) {
+        last = inst.trainStep({ x, y })
+        if (first == null) first = last
+      }
+      assert(Number.isFinite(first), `first loss should be finite, got ${first}`)
+      assert(Number.isFinite(last), `last loss should be finite, got ${last}`)
+      assert(last < first, `expected loss to decrease (${first} -> ${last})`)
+    } finally {
+      inst.dispose()
+    }
+  })
+
   await test('tabm and nam builders are available', async () => {
     const tabm = Instance.tabm({
       layers: [2, 4, 1],
