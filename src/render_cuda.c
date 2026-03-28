@@ -189,6 +189,9 @@ static int cuda_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool cre
 /* ── CUDA Linearizer ─────────────────────────────────────────────────── */
 
 PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  /* TODO: CUDA tensor core specs not yet ported. tinygrad selects from
+   * cuda_sm75/sm80/sm89 based on arch (tc.py). Until ported, POLY_OPT_TC_ONLY
+   * with empty tensor_cores is a no-op on CUDA. */
   PolyRewriteOpts opts = {
     .optimize    = true,           /* shared optimized pipeline (tinygrad parity) */
     .devectorize = -1,             /* CUDA: no add_loads/devectorize */

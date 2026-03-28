@@ -2695,8 +2695,16 @@ TEST(unify_pre, control_flow_adds_predecessors) {
       max_range_srcs_after = topo[i]->n_src;
   }
 
-  /* With 2 ranges, control_flow should add at least one predecessor edge */
+  /* Control flow adds predecessor edges when ordering is needed.
+   * For a pure elementwise kernel the pass may be a no-op (no hazards).
+   * Assert it at least doesn't break: no RANGE should lose sources. */
   ASSERT_TRUE(max_range_srcs_after >= max_range_srcs_before);
+
+  /* The pass should not crash or corrupt the graph */
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_TRUE(n_lin > 0);
+  free(lin);
 
   poly_ctx_destroy(ctx);
   PASS();

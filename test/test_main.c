@@ -73,5 +73,9 @@ int main(int argc, char **argv) {
 
   printf("\n  Results: %d passed, %d failed, %d skipped, %d total\n\n",
          total_passed, total_failed, skipped, total_passed + total_failed + skipped);
+  if (filter && total_passed == 0 && total_failed == 0) {
+    printf("  ERROR: no tests matched filter '%s'\n\n", filter);
+    return 1;
+  }
   return total_failed > 0 ? 1 : 0;
 }

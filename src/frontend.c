@@ -2212,8 +2212,35 @@ static PolyDeviceId infer_device(PolyBufferBinding *bindings, int n) {
     if (bindings[i].handle.domain != POLY_DEVICE_CPU
         && bindings[i].handle.domain != POLY_DEVICE_AUTO)
       return bindings[i].handle.domain;
-  /* Default: best available backend for platform.
-   * Opt-in via env vars: POLY_X64=1, POLY_HIP=1 */
+  /* POLY_DEVICE=cpu|cuda|hip|x64|interp — unified backend selector.
+   * Strict: if set but unavailable, warn (don't silently fall back to CPU). */
+  const char *dev_env = getenv("POLY_DEVICE");
+  if (dev_env && dev_env[0]) {
+    if (strcmp(dev_env, "cpu") == 0) return POLY_DEVICE_CPU;
+    if (strcmp(dev_env, "interp") == 0) return POLY_DEVICE_INTERP;
+#ifdef POLY_HAS_CUDA
+    if (strcmp(dev_env, "cuda") == 0) {
+      if (poly_cuda_available()) return POLY_DEVICE_CUDA;
+      fprintf(stderr, "polygrad: POLY_DEVICE=cuda but CUDA not available\n");
+      return POLY_DEVICE_CPU;
+    }
+#endif
+#ifdef POLY_HAS_HIP
+    if (strcmp(dev_env, "hip") == 0) {
+      if (poly_hip_available()) return POLY_DEVICE_HIP;
+      fprintf(stderr, "polygrad: POLY_DEVICE=hip but HIP not available\n");
+      return POLY_DEVICE_CPU;
+    }
+#endif
+#ifdef POLY_HAS_X64
+    if (strcmp(dev_env, "x64") == 0) return POLY_DEVICE_X64_JIT;
+#endif
+    if (strcmp(dev_env, "cpu") != 0)
+      fprintf(stderr, "polygrad: unknown or unsupported POLY_DEVICE=%s, using CPU\n", dev_env);
+    return POLY_DEVICE_CPU;
+  }
+
+  /* Legacy env vars (backward compat) */
 #ifdef __EMSCRIPTEN__
   return POLY_DEVICE_WASM_JIT;
 #else
