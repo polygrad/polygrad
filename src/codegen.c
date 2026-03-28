@@ -3155,18 +3155,35 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root,
   PolyUOp *a1 = take_two_over_pi_f32(ctx, i_u64, 1);
   PolyUOp *a2 = take_two_over_pi_f32(ctx, i_u64, 2);
   PolyUOp *a3 = take_two_over_pi_f32(ctx, i_u64, 3);
-  PolyUOp *hi = poly_uop2(ctx, POLY_OP_OR, ut32,
-                          poly_uop2(ctx, POLY_OP_SHL, ut32, a0, e_lo, poly_arg_none()),
-                          poly_uop2(ctx, POLY_OP_SHR, ut32, a1, offset, poly_arg_none()),
-                          poly_arg_none());
-  PolyUOp *mi = poly_uop2(ctx, POLY_OP_OR, ut32,
-                          poly_uop2(ctx, POLY_OP_SHL, ut32, a1, e_lo, poly_arg_none()),
-                          poly_uop2(ctx, POLY_OP_SHR, ut32, a2, offset, poly_arg_none()),
-                          poly_arg_none());
-  PolyUOp *lo = poly_uop2(ctx, POLY_OP_OR, ut32,
-                          poly_uop2(ctx, POLY_OP_SHL, ut32, a2, e_lo, poly_arg_none()),
-                          poly_uop2(ctx, POLY_OP_SHR, ut32, a3, offset, poly_arg_none()),
-                          poly_arg_none());
+  /* Payne-Hanek word assembly: shift and OR adjacent 2/pi words.
+   * When e_lo == 0, offset == 32 and (uint32 >> 32) is UB in C.
+   * Fix: do shifts in uint64, then truncate to uint32. */
+  PolyUOp *e_lo_64 = poly_uop1(ctx, POLY_OP_CAST, ut64, e_lo, poly_arg_none());
+  PolyUOp *offset_64 = poly_uop1(ctx, POLY_OP_CAST, ut64, offset, poly_arg_none());
+  PolyUOp *hi = poly_uop1(ctx, POLY_OP_CAST, ut32,
+                  poly_uop2(ctx, POLY_OP_OR, ut64,
+                    poly_uop2(ctx, POLY_OP_SHL, ut64,
+                      poly_uop1(ctx, POLY_OP_CAST, ut64, a0, poly_arg_none()), e_lo_64, poly_arg_none()),
+                    poly_uop2(ctx, POLY_OP_SHR, ut64,
+                      poly_uop1(ctx, POLY_OP_CAST, ut64, a1, poly_arg_none()), offset_64, poly_arg_none()),
+                    poly_arg_none()),
+                  poly_arg_none());
+  PolyUOp *mi = poly_uop1(ctx, POLY_OP_CAST, ut32,
+                  poly_uop2(ctx, POLY_OP_OR, ut64,
+                    poly_uop2(ctx, POLY_OP_SHL, ut64,
+                      poly_uop1(ctx, POLY_OP_CAST, ut64, a1, poly_arg_none()), e_lo_64, poly_arg_none()),
+                    poly_uop2(ctx, POLY_OP_SHR, ut64,
+                      poly_uop1(ctx, POLY_OP_CAST, ut64, a2, poly_arg_none()), offset_64, poly_arg_none()),
+                    poly_arg_none()),
+                  poly_arg_none());
+  PolyUOp *lo = poly_uop1(ctx, POLY_OP_CAST, ut32,
+                  poly_uop2(ctx, POLY_OP_OR, ut64,
+                    poly_uop2(ctx, POLY_OP_SHL, ut64,
+                      poly_uop1(ctx, POLY_OP_CAST, ut64, a2, poly_arg_none()), e_lo_64, poly_arg_none()),
+                    poly_uop2(ctx, POLY_OP_SHR, ut64,
+                      poly_uop1(ctx, POLY_OP_CAST, ut64, a3, poly_arg_none()), offset_64, poly_arg_none()),
+                    poly_arg_none()),
+                  poly_arg_none());
 
   PolyUOp *hp_hi = poly_uop2(ctx, POLY_OP_MUL, ut64, ia,
                              poly_uop1(ctx, POLY_OP_CAST, ut64, hi, poly_arg_none()),
