@@ -4630,7 +4630,11 @@ static PolyUOp *rule_where_on_load(PolyCtx *ctx, PolyUOp *w, const PolyBindings 
   /* Create gated INDEX: INDEX(buf, idx_expr, gate) */
   PolyUOp *new_srcs[3] = { idx->src[0], idx->src[1], gate };
   PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, new_srcs, 3, idx->arg);
-  return poly_uop1(ctx, POLY_OP_LOAD, true_val->dtype, gated_idx, true_val->arg);
+
+  /* 2-source LOAD: LOAD(gated_INDEX, alt_value) -- tinygrad parity.
+   * Alt value is the original false_val (the zero constant). */
+  PolyUOp *load_srcs[2] = { gated_idx, false_val };
+  return poly_uop(ctx, POLY_OP_LOAD, true_val->dtype, load_srcs, 2, true_val->arg);
 }
 
 /* Also handle reversed: WHERE(cond, CONST(0), LOAD(INDEX(buf, idx)))
@@ -4663,7 +4667,11 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
 
   PolyUOp *new_srcs[3] = { idx->src[0], idx->src[1], gate };
   PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, new_srcs, 3, idx->arg);
-  return poly_uop1(ctx, POLY_OP_LOAD, false_val->dtype, gated_idx, false_val->arg);
+
+  /* 2-source LOAD: LOAD(gated_INDEX, alt_value) -- tinygrad parity.
+   * Alt value is the original true_val (the zero constant, since this is the reversed form). */
+  PolyUOp *load_srcs[2] = { gated_idx, true_val };
+  return poly_uop(ctx, POLY_OP_LOAD, false_val->dtype, load_srcs, 2, false_val->arg);
 }
 
 static PolyPatternMatcher *g_pm_move_where_on_load = NULL;

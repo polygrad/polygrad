@@ -456,9 +456,14 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
       for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
 
-      /* Gated INDEX: INDEX(buf, idx, valid_gate) → conditional load. */
+      /* Gated load: LOAD(INDEX(buf, idx, gate), alt_value)
+       * Tinygrad parity: 2-source LOAD with explicit alt value. */
       PolyUOp *idx_uop = u->src[0];
-      if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3) {
+      if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3 && u->n_src >= 2) {
+        char *gate_s = csmap_get(&names, idx_uop->src[2]);
+        char *alt_s = csmap_get(&names, u->src[1]);
+        csb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
+      } else if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3) {
         char *gate_s = csmap_get(&names, idx_uop->src[2]);
         csb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, u->dtype.name);
       } else {
