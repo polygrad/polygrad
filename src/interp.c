@@ -309,12 +309,23 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
     switch (u->op) {
 
     case POLY_OP_PARAM:
-      vals[i] = iv_ptr(args[u->arg.i]);
+      if (u->arg.i >= 0 && u->arg.i < n_args)
+        vals[i] = iv_ptr(args[u->arg.i]);
+      else {
+        fprintf(stderr, "polygrad: interp: PARAM index %lld out of range (n_args=%d)\n",
+                (long long)u->arg.i, n_args);
+        return -1;
+      }
       break;
 
     case POLY_OP_DEFINE_VAR: {
-      int *vp = (int *)args[u->arg.i];
-      vals[i] = iv_int(vp ? *vp : 0);
+      if (u->arg.i >= 0 && u->arg.i < n_args && args[u->arg.i]) {
+        int *vp = (int *)args[u->arg.i];
+        vals[i] = iv_int(*vp);
+      } else {
+        /* Var not bound (e.g. DEFINE_VAR beyond provided args). Default to 0. */
+        vals[i] = iv_int(0);
+      }
       break;
     }
 
@@ -501,6 +512,7 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
       } else {
         fprintf(stderr, "polygrad: interp: unhandled op %s (%d)\n",
                 poly_op_name(u->op), u->op);
+        return -1;
       }
       break;
     }
