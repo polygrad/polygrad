@@ -44,11 +44,23 @@ typedef struct {
   int n_tensor_cores;                  /* number of TC specs */
 } PolyRendererCaps;
 
+/* Optimization policy: explicit discriminator for what the heuristic does.
+ * Wrappers set this directly instead of inferring from caps. */
+typedef enum {
+  POLY_OPT_HEURISTIC = 0, /* CPU: full heuristic (masked upcast, stride upcast, reduce unroll) */
+  POLY_OPT_TC_ONLY,       /* GPU: TC detection only, no CPU-oriented scheduling */
+} PolyOptPolicy;
+
 typedef struct {
   bool optimize;     /* tinygrad optimize path (UPCAST/UNROLL + late pipeline) */
   int devectorize;   /* tinygrad DEVECTORIZE level (0/1/2) */
   int beam_width;    /* BEAM search width (0 = heuristic, >0 = BEAM search) */
   PolyRendererCaps caps;  /* renderer capabilities (zero-init = CPU defaults) */
+  /* Renderer config for unified pipeline (Phase 4) */
+  int device;                            /* PolyDeviceId from exec_plan.h (0 = CPU) */
+  PolyOptPolicy opt_policy;              /* explicit optimization strategy */
+  PolyPatternMatcher *extra_matcher;     /* renderer-specific final rewrite (NULL = none) */
+  int gpu_block_size;                    /* group_for_reduce block size (0 = skip) */
 } PolyRewriteOpts;
 
 /* Linearize: full codegen pipeline + priority-based toposort.

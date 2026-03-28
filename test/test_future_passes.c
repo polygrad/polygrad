@@ -2414,3 +2414,377 @@ TEST(tc, use_tc_2_no_wmma_but_expanded) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 7B: Regression — HIP opts on pad+shrink+reduce kernel
+ * ════════════════════════════════════════════════════════════════════════ */
+
+#include "../src/scheduler.h"
+#include "../src/exec_plan.h"
+
+TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
+  /* Reproduces bufferize_movement_chain_alt_ranges_e2e failure on HIP.
+   * Builds the same pad+shrink+expand+reduce graph, schedules it, then
+   * runs the scheduled kernel through GPU-like opts (TC_ONLY, gpu_block_size=256,
+   * device=GPU) but renders to C and executes on CPU. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x_flat = poly_buffer(ctx, POLY_FLOAT32, 75);
+  int64_t x_shape[] = {1, 3, 5, 5};
+  PolyUOp *x = poly_reshape(ctx, x_flat, x_shape, 4);
+
+  int64_t pad_pairs[][2] = {{0, 0}, {0, 0}, {1, 1}, {1, 1}};
+  PolyUOp *xp = poly_pad(ctx, x, pad_pairs, 4);
+
+  int64_t s1_pairs[][2] = {{0, 1}, {0, 1}, {0, 5}, {0, 5}};
+  int64_t s2_pairs[][2] = {{0, 1}, {0, 1}, {0, 5}, {1, 6}};
+  PolyUOp *s1 = poly_shrink(ctx, xp, s1_pairs, 4);
+  PolyUOp *s2 = poly_shrink(ctx, xp, s2_pairs, 4);
+
+  int64_t out_shape[] = {1, 2, 5, 5};
+  PolyUOp *e1 = poly_expand(ctx, s1, out_shape, 4);
+  PolyUOp *e2 = poly_expand(ctx, s2, out_shape, 4);
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, e1, e2, poly_arg_none());
+
+  int64_t red_axes[] = {1, 2, 3};
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, sum, red_axes, 3);
+
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, loss, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  /* Schedule */
+  PolySchedule *sched = poly_schedule_for(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->n_items > 0);
+
+  /* Run each scheduled kernel through GPU-like opts but render to C */
+  float x_d[75], o_d[1] = {0.0f};
+  for (int i = 0; i < 75; i++) x_d[i] = (float)(i + 1);
+
+  for (int k = 0; k < sched->n_items; k++) {
+    PolyExecItem *item = &sched->items[k];
+    if (item->kind != POLY_EXEC_COMPUTE) continue;
+
+    /* Exact HIP opts with optimize=true (the tinygrad-parity path) */
+    PolyRewriteOpts opts = {
+      .optimize    = true,
+      .devectorize = -1,
+      .caps        = { .has_mulacc = true },
+      .device      = POLY_DEVICE_HIP,
+      .opt_policy  = POLY_OPT_TC_ONLY,
+      .gpu_block_size = 256,
+    };
+    PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, item->root, opts);
+
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+    if (!lin || n_lin == 0) {
+      fprintf(stderr, "  pad_shrink_reduce: linearize failed for kernel %d\n", k);
+      continue;
+    }
+
+    char fn_name[32];
+    snprintf(fn_name, sizeof(fn_name), "test_gpu_k%d", k);
+    char *src = poly_render_c(lin, n_lin, fn_name);
+    free(lin);
+    if (!src) {
+      fprintf(stderr, "  pad_shrink_reduce: render failed for kernel %d\n", k);
+      continue;
+    }
+
+    if (getenv("POLY_DUMP_KERNELS"))
+      fprintf(stderr, "=== GPU-opts C kernel %d ===\n%s\n=== END ===\n", k, src);
+
+    PolyProgram *prog = poly_compile_c(src, fn_name);
+    free(src);
+    if (!prog) {
+      fprintf(stderr, "  pad_shrink_reduce: compile failed for kernel %d\n", k);
+      continue;
+    }
+
+    /* Build args from slot indices */
+    void *bufs[2] = { o_d, x_d };
+    void *args[16];
+    for (int p = 0; p < item->n_buf_slots && p < 16; p++)
+      args[p] = bufs[item->buf_slot_indices[p]];
+
+    poly_program_call(prog, args, item->n_buf_slots);
+    poly_program_destroy(prog);
+  }
+
+  if (o_d[0] != 740.0f) {
+    fprintf(stderr, "  pad_shrink_reduce: got %.1f, expected 740.0 (delta=%.1f)\n",
+            (double)o_d[0], (double)(o_d[0] - 740.0f));
+  }
+  ASSERT_FLOAT_EQ(o_d[0], 740.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * SECTION 8: Phase 4A — Pre-unification regression tests
+ *
+ * These tests capture current GPU pipeline behavior BEFORE linearizer
+ * unification. They become regression guards for Phase 4C/4D.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* Helper: build a large reduction kernel: out = sum(in[0..N)) */
+static PolyUOp *build_large_reduction_ast(PolyCtx *ctx, int N) {
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p_in  = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p_out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound,
+                               poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_in, range, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx, poly_arg_none());
+
+  PolyUOp *red_srcs[2] = { load, range };
+  PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+  PolyUOp *reduce = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, red_arg);
+
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_out, zero, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, reduce, poly_arg_none());
+  PolyUOp *end = poly_uop1(ctx, POLY_OP_END, POLY_VOID, store, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+}
+
+/* Helper: build a 2-range elementwise kernel: out[i*N+j] = in[i*N+j] + 1 */
+static PolyUOp *build_2range_kernel(PolyCtx *ctx, int M, int N) {
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *p_in  = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p_out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+
+  PolyUOp *cm = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(M));
+  PolyUOp *cn = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *rng_i = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cm,
+                               poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_j = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cn,
+                               poly_arg_range(1, POLY_AXIS_GLOBAL));
+
+  PolyUOp *stride = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *flat = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
+                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, stride, poly_arg_none()),
+                    rng_j, poly_arg_none());
+
+  PolyUOp *in_idx  = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_in, flat, poly_arg_none());
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_out, flat, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_idx, poly_arg_none());
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, one, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, add, poly_arg_none());
+
+  PolyUOp *end_srcs[3] = { store, rng_i, rng_j };
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+}
+
+TEST(unify_pre, large_reduction_structural) {
+  /* N=1024 reduction through group_for_reduce(block_size=256) should produce
+   * DEFINE_LOCAL, BARRIER, and a second REDUCE (partial + final). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
+
+  /* Apply sym + group_for_reduce (same as GPU pipeline) */
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_group_for_reduce(ctx, sink, 256);
+
+  int n_define_local = count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL);
+  int n_barrier      = count_ops(ctx, sink, POLY_OP_BARRIER);
+  int n_reduce       = count_ops(ctx, sink, POLY_OP_REDUCE);
+
+  ASSERT_TRUE(n_define_local >= 1);
+  ASSERT_TRUE(n_barrier >= 1);
+  ASSERT_TRUE(n_reduce >= 2); /* partial + final */
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, large_reduction_gpudims_special) {
+  /* After group_for_reduce + gpudims, the group range should become a
+   * SPECIAL(lidx0) and the original global range should be gone (no range
+   * left to iterate — it's a pure reduction). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
+
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_group_for_reduce(ctx, sink, 256);
+  sink = poly_apply_pm_reduce(ctx, sink);
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_add_gpudims(ctx, sink);
+
+  int n_special = count_ops(ctx, sink, POLY_OP_SPECIAL);
+  ASSERT_TRUE(n_special >= 1); /* at least lidx0 */
+
+  /* Verify SPECIAL names contain "lidx" */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  bool has_lidx = false;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_SPECIAL && topo[i]->arg.kind == POLY_ARG_STRING &&
+        topo[i]->arg.str && strstr(topo[i]->arg.str, "lidx"))
+      has_lidx = true;
+  }
+  ASSERT_TRUE(has_lidx);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, gpudims_replaces_outermost_range) {
+  /* 2-range kernel: gpudims should replace the outermost RANGE with SPECIAL(gidx0).
+   * After gpudims, SPECIAL ops should exist and at least one global RANGE should be gone. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_2range_kernel(ctx, 32, 64);
+
+  int n_range_before = count_ops(ctx, sink, POLY_OP_RANGE);
+  ASSERT_INT_EQ(n_range_before, 2);
+
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_add_gpudims(ctx, sink);
+
+  int n_special = count_ops(ctx, sink, POLY_OP_SPECIAL);
+  int n_range_after = count_ops(ctx, sink, POLY_OP_RANGE);
+
+  ASSERT_TRUE(n_special >= 1);
+  ASSERT_TRUE(n_range_after < n_range_before);
+
+  /* Verify gidx0 exists */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  bool has_gidx = false;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_SPECIAL && topo[i]->arg.kind == POLY_ARG_STRING &&
+        topo[i]->arg.str && strstr(topo[i]->arg.str, "gidx"))
+      has_gidx = true;
+  }
+  ASSERT_TRUE(has_gidx);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, control_flow_adds_predecessors) {
+  /* After control_flow, RANGE nodes that need ordering should have additional
+   * sources (predecessor edges). For a 2-range kernel the inner RANGE should
+   * get the outer RANGE as a predecessor. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_2range_kernel(ctx, 32, 64);
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+
+  /* Count max RANGE src count before control_flow */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  int max_range_srcs_before = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_RANGE && topo[i]->n_src > max_range_srcs_before)
+      max_range_srcs_before = topo[i]->n_src;
+  }
+
+  sink = poly_apply_control_flow(ctx, sink);
+
+  topo = poly_toposort(ctx, sink, &n_topo);
+  int max_range_srcs_after = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_RANGE && topo[i]->n_src > max_range_srcs_after)
+      max_range_srcs_after = topo[i]->n_src;
+  }
+
+  /* With 2 ranges, control_flow should add at least one predecessor edge */
+  ASSERT_TRUE(max_range_srcs_after >= max_range_srcs_before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, full_gpu_pipeline_structural) {
+  /* Run the full GPU-style pipeline (no TC) on a large reduction and verify
+   * the final IR has SPECIAL + DEFINE_LOCAL + BARRIER + no raw RANGE. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
+  PolyRendererCaps caps = { .has_mulacc = true };
+
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_group_for_reduce(ctx, sink, 256);
+  sink = poly_apply_pm_reduce(ctx, sink);
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(caps));
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(caps));
+  sink = poly_add_gpudims(ctx, sink);
+  sink = poly_apply_control_flow(ctx, sink);
+
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_SPECIAL) >= 1);
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL) >= 1);
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_BARRIER) >= 1);
+
+  /* Linearize should succeed */
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_TRUE(n_lin > 0);
+  ASSERT_NOT_NULL(lin);
+  free(lin);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, full_rewrite_composition) {
+  /* Verify the shared poly_full_rewrite_to_sink_ex applies expander + split_ends
+   * + render_subset as expected. A simple kernel should have no lingering
+   * internal-only ops after the full pipeline. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_EXP2, 256);
+
+  PolyRewriteOpts opts = { .optimize = false, .devectorize = -1 };
+  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+
+  /* EXP2 should be decomposed */
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_EXP2), 0);
+
+  /* No CONTRACT/UNROLL should survive */
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_CONTRACT), 0);
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_UNROLL), 0);
+
+  /* Linearize should succeed */
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_TRUE(n_lin > 0);
+  free(lin);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, gpu_pipeline_2range_elementwise) {
+  /* 2-range elementwise kernel through GPU pipeline: verify SPECIAL ops
+   * and successful linearization. Captures baseline for CUDA path. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_2range_kernel(ctx, 64, 128);
+  PolyRendererCaps caps = { .has_mulacc = true };
+
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  /* No group_for_reduce needed (no reduction) */
+  sink = poly_apply_pm_reduce(ctx, sink);
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(caps));
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(caps));
+  sink = poly_add_gpudims(ctx, sink);
+  sink = poly_apply_control_flow(ctx, sink);
+
+  ASSERT_TRUE(count_ops(ctx, sink, POLY_OP_SPECIAL) >= 1);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_TRUE(n_lin > 0);
+  free(lin);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}

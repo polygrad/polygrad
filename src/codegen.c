@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "exec_plan.h"
 #include <math.h>
 #include <float.h>
 #include <stdlib.h>
@@ -5444,15 +5445,27 @@ PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink) {
 
 /* ── Full rewrite-to-sink pipeline ───────────────────────────────────── */
 
+static bool device_is_gpu(int device) {
+  return device == POLY_DEVICE_CUDA || device == POLY_DEVICE_HIP ||
+         device == POLY_DEVICE_WEBGPU;
+}
+
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts) {
   /*
-   * Pipeline matches tinygrad codegen/__init__.py:26-111.
-   * `optimize` gates preprocessing (split_ranges, simplify, apply_opts).
-   * `devectorize` gates add_loads/devectorize/folding.
-   * Expander, pm_reduce, decomp, split_ends, control_flow run unconditionally.
+   * Unified pipeline matching tinygrad codegen/__init__.py full_rewrite_to_sink.
+   * Backend-specific behavior is controlled by renderer config fields in opts,
+   * not by if-device branches.
+   *
+   * New Phase 4 fields used here:
+   *   opt_policy      — POLY_OPT_HEURISTIC (CPU) or POLY_OPT_TC_ONLY (GPU)
+   *   gpu_block_size  — group_for_reduce block size (0 = skip)
+   *   device          — PolyDeviceId, gates gpudims/control_flow
+   *   extra_matcher   — renderer-specific final rewrite patterns (NULL = none)
    */
 
-  /* ── 1. Preprocessing (gated by optimize) ──────────────────────────── */
+  /* ── 1. Preprocessing + optimization (gated by optimize) ─────────────
+   * Matches tinygrad: optimize gates both preprocessing and apply_opts.
+   * Backend differences come from opt_policy, not from skipping stages. */
   if (opts.optimize) {
     /* tinygrad lines 42-51: split ranges + flatten + sym + simplify */
     SplitRangeCtx srctx = {0};
@@ -5462,40 +5475,42 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     sink = poly_graph_rewrite(ctx, sink, poly_pm_simplify_ranges());
 
-    /* tinygrad line 54: apply_opts (hand_coded_optimizations or BEAM search) */
-    if (opts.beam_width > 0)
+    /* tinygrad line 54: apply_opts — renderer-aware optimization */
+    if (opts.beam_width > 0) {
       sink = poly_beam_search(ctx, sink, opts.beam_width, opts);
-    else
+    } else if (opts.opt_policy == POLY_OPT_TC_ONLY) {
+      /* GPU: TC detection only, no CPU-oriented upcast/unroll */
+      sink = poly_apply_tc_opt(ctx, sink, opts.caps);
+    } else {
+      /* CPU: full heuristic (includes TC when caps have tensor cores) */
       sink = poly_apply_opts_heuristic(ctx, sink, opts.caps);
+    }
   }
 
-  /* ── 2. Postopt symbolic + move WHERE on load (tinygrad line 57) ───── */
+  /* ── 2. Postopt symbolic + move WHERE on load + expander ────────────── */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_move_where_on_load());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
 
-  /* ── 3. Symbolic (unconditional) ───────────────────────────────────── */
+  /* ── 3. Symbolic ────────────────────────────────────────────────────── */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
 
-  /* ── 4. pm_reduce (unconditional, tinygrad line 67) ────────────────── */
+  /* ── 4. GPU parallel reduction (gated by gpu_block_size > 0) ────────── */
+  if (opts.gpu_block_size > 0)
+    sink = poly_group_for_reduce(ctx, sink, opts.gpu_block_size);
+
+  /* ── 5. pm_reduce + symbolic ────────────────────────────────────────── */
   sink = poly_apply_pm_reduce(ctx, sink);
-
-  /* ── 5. Post-reduce symbolic ───────────────────────────────────────── */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
 
-  /* ── 6. Add loads + devectorize (gated by devectorize, tinygrad lines 75-81) ── */
-  /* Set max fold width for load/store splitting (AVX2 allows 8-wide) */
+  /* ── 6. Add loads + devectorize (gated by devectorize >= 0) ─────────── */
   g_max_fold_width = (opts.caps.max_vec_width >= 8) ? 8 : 4;
   if (opts.devectorize >= 0) {
-    /* tinygrad line 75: add loads */
     sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());
     sink = poly_graph_rewrite(ctx, sink,
         (opts.devectorize >= 1) ? poly_pm_combined_devec() : poly_pm_combined_nodevec());
 
-    /* post-devectorize: render subset + symbolic cleanup.
-     * DEVECTORIZE>=1: scatter vec CMP/WHERE to scalar (ALU already scattered).
-     * DEVECTORIZE=0: keep vec ALU, only lower VCONST/VCAT. */
     if (opts.devectorize >= 1)
       sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
     else if (opts.caps.has_simd_int)
@@ -5505,12 +5520,14 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   }
 
-  /* ── 7. Decompositions (unconditional, tinygrad lines 91-100) ──────── */
+  /* ── 7. Decompositions ──────────────────────────────────────────────── */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry));
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry));
 
-  /* ── 8. Final rewrite: expander cleanup + split_ends + render (tinygrad line 104) ── */
+  /* ── 8. Final rewrite: extra_matcher + expander + split_ends + render ── */
+  if (opts.extra_matcher)
+    sink = poly_graph_rewrite(ctx, sink, opts.extra_matcher);
   sink = poly_graph_rewrite(ctx, sink, poly_pm_expander());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_split_ends());
   if (opts.devectorize >= 1 || opts.devectorize < 0)
@@ -5519,6 +5536,12 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_x64());
   else
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_vec());
+
+  /* ── 9. GPU dims + control flow (gated by device is GPU) ────────────── */
+  if (device_is_gpu(opts.device)) {
+    sink = poly_add_gpudims(ctx, sink);
+    sink = poly_apply_control_flow(ctx, sink);
+  }
 
   return sink;
 }

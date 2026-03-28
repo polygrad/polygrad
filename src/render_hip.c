@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "exec_plan.h"
 #include "pat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -301,43 +302,16 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
 /* ── HIP Linearizer ──────────────────────────────────────────────── */
 
 PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  /* Pipeline: sym -> heuristic(TC) -> pre_expander -> expander -> sym
-   *        -> group_for_reduce -> pm_reduce -> sym -> decomp
-   *        -> transcendental -> decomp -> bf16 -> gpudims -> control_flow */
-  PolyRendererCaps hip_caps = poly_hip_renderer_caps();
-
-  /* TC detection only -- do not apply CPU-oriented upcast/unroll heuristics */
-  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_apply_tc_opt(ctx, sink, hip_caps);
-
-  /* Expander: lowers CONTRACT/UNROLL/WMMA structure from TC detection.
-   * Run if TC produced any expandable ops (WMMA, CONTRACT, or UNROLL).
-   * use_tc=1 creates all three; use_tc=2 (shape-only) creates UNROLL without WMMA. */
-  {
-    int n_t = 0;
-    PolyUOp **t = poly_toposort(ctx, sink, &n_t);
-    bool needs_expand = false;
-    for (int i = 0; i < n_t && !needs_expand; i++)
-      if (t[i]->op == POLY_OP_WMMA || t[i]->op == POLY_OP_CONTRACT || t[i]->op == POLY_OP_UNROLL)
-        needs_expand = true;
-    if (needs_expand) {
-      sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-      sink = poly_graph_rewrite(ctx, sink, poly_pm_pre_expander_pass());
-      sink = poly_graph_rewrite(ctx, sink, poly_pm_expander_pass());
-      sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-    }
-  }
-
-  /* Existing HIP pipeline */
-  sink = poly_group_for_reduce(ctx, sink, 256);
-  sink = poly_apply_pm_reduce(ctx, sink);
-  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(hip_caps));
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass_caps(hip_caps));
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_bf16_non_native());
-  sink = poly_add_gpudims(ctx, sink);
-  sink = poly_apply_control_flow(ctx, sink);
+  PolyRewriteOpts opts = {
+    .optimize    = true,           /* shared optimized pipeline (tinygrad parity) */
+    .devectorize = -1,             /* HIP: no add_loads/devectorize */
+    .caps        = poly_hip_renderer_caps(),
+    .device      = POLY_DEVICE_HIP,
+    .opt_policy  = POLY_OPT_TC_ONLY,
+    .extra_matcher = poly_pm_bf16_non_native(),
+    .gpu_block_size = 256,
+  };
+  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 
@@ -655,7 +629,17 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
       hsb_printf(&decls, "  %s %s;\n", ctype, name); }
       for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
-      hsb_printf(&body, "%s = (*%s);\n", name, bidx);
+
+      /* Gated INDEX: INDEX(buf, idx, valid_gate) → conditional load.
+       * move_where_on_load moves pad guards from WHERE into INDEX src[2]. */
+      PolyUOp *idx_uop = u->src[0];
+      if (idx_uop->op == POLY_OP_INDEX && idx_uop->n_src >= 3) {
+        char *gate_s = hsmap_get(&names, idx_uop->src[2]);
+        char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+        hsb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
+      } else {
+        hsb_printf(&body, "%s = (*%s);\n", name, bidx);
+      }
       continue;
     }
 
