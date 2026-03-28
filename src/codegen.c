@@ -1594,9 +1594,7 @@ static double beam_compile_and_time(PolyCtx *ctx, PolyUOp *sink,
   post_opts.optimize = false;
   post_opts.beam_width = 0;
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, post_opts);
-
-  /* Control flow */
-  sink = poly_apply_control_flow(ctx, sink);
+  /* Control flow now runs inside poly_full_rewrite_to_sink_ex (tinygrad parity). */
 
   /* Linearize */
   int n_uops = 0;
@@ -5545,11 +5543,12 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   else
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_vec());
 
-  /* ── 9. GPU dims + control flow (gated by device is GPU) ────────────── */
-  if (device_is_gpu(opts.device)) {
+  /* ── 9. GPU dims (gated by device is GPU) ─────────────────────────── */
+  if (device_is_gpu(opts.device))
     sink = poly_add_gpudims(ctx, sink);
-    sink = poly_apply_control_flow(ctx, sink);
-  }
+
+  /* ── 10. Control flow (unconditional, tinygrad parity) ──────────────── */
+  sink = poly_apply_control_flow(ctx, sink);
 
   return sink;
 }

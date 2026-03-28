@@ -816,16 +816,13 @@ static bool env_true(const char *name) {
 }
 
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  /* Default: non-optimized pipeline. Tests and production code that want
-   * optimization should use poly_linearize_ex() or set opts explicitly. */
+  /* Control flow is now applied inside poly_full_rewrite_to_sink (tinygrad parity). */
   sink = poly_full_rewrite_to_sink(ctx, sink);
-  sink = poly_apply_control_flow(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 
 PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out) {
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
-  sink = poly_apply_control_flow(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 
