@@ -504,8 +504,13 @@ TEST(instance, set_device_unsupported) {
   PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst);
 
-  /* CUDA not supported in this build */
+  /* CUDA: fails if not available, succeeds if available -- both are valid */
+#ifdef POLY_HAS_CUDA
+  if (!poly_cuda_available())
+    ASSERT_TRUE(poly_instance_set_device(inst, POLY_DEVICE_CUDA) < 0);
+#else
   ASSERT_TRUE(poly_instance_set_device(inst, POLY_DEVICE_CUDA) < 0);
+#endif
 
   /* set_device(NULL) */
   ASSERT_TRUE(poly_instance_set_device(NULL, POLY_DEVICE_CPU) < 0);

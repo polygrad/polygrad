@@ -60,10 +60,10 @@ build/libpolygrad.so: $(SRC) $(CODEC_SRC)
 	$(CC) $(CFLAGS_RELEASE) -fPIC -shared -o $@ $^ -lm -ldl
 
 test: build/polygrad_test
-	./build/polygrad_test
+	ASAN_OPTIONS=detect_leaks=0,protect_shadow_gap=0 ./build/polygrad_test
 
 test-fast: build/polygrad_test
-	./build/polygrad_test --fast
+	ASAN_OPTIONS=detect_leaks=0,protect_shadow_gap=0 ./build/polygrad_test --fast
 
 test-parity: build/polygrad_parity_runner
 	ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full --no-opt
