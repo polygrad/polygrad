@@ -266,11 +266,17 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
       "loss", POLY_IR_ROLE_OUTPUT, loss_buf, { 1 }, 1
     };
 
+    /* Wrap y_buf in reshape so the scheduler treats it as a shaped tensor.
+     * Raw BUFFER in ALU tree renders as pointer, not loaded value.
+     * Same fix as frontend.c:poly_cross_entropy (line 1199). */
+    int64_t y_shape[] = { batch_size, out_dim };
+    PolyUOp *y = poly_reshape(ctx, y_buf, y_shape, 2);
+
     PolyUOp *loss_val;
     if (strcmp(loss_type, "mse") == 0) {
       /* MSE = mean((forward_output - y)^2) */
       PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, x,
-                                  poly_alu1(ctx, POLY_OP_NEG, y_buf));
+                                  poly_alu1(ctx, POLY_OP_NEG, y));
       PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
 
       /* Reduce over all dims */
@@ -291,7 +297,7 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
       PolyUOp *log_probs = poly_log_softmax(ctx, x, logits_shape, 2, 1);
 
       /* -(target * log_probs) summed over class axis, then mean over batch */
-      PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y_buf, log_probs);
+      PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y, log_probs);
       int64_t axes_class[] = { 1 };
       PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes_class, 1);
       int64_t axes_batch[] = { 0 };
