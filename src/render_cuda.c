@@ -127,27 +127,44 @@ static char *cuda_render_float_const(double v, PolyDType dt, char *buf, int cap)
   return buf;
 }
 
+/* CUDA type name mapping (tinygrad parity: half, nv_bfloat16).
+ * Match by priority (not poly_dtype_eq) so pointer-derived dtypes work --
+ * poly_dtype_scalar doesn't strip ptr fields. Same approach as HIP. */
+static const char *cuda_ctype(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  if (s.priority == POLY_FLOAT16.priority)  return "half";
+  if (s.priority == POLY_BFLOAT16.priority) return "nv_bfloat16";
+  return s.name;
+}
+
+static bool cuda_is_half(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  return s.priority == POLY_FLOAT16.priority || s.priority == POLY_BFLOAT16.priority;
+}
+
 static void cuda_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
                              const char *s0, const char *s1, const char *s2) {
+  bool is_half = cuda_is_half(dtype);
   switch (op) {
   case POLY_OP_NEG:
     snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0); break;
   case POLY_OP_SQRT:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "sqrt(%s)" : "sqrtf(%s)", s0); break;
+    snprintf(buf, cap, is_half ? "hsqrt(%s)" :
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "sqrt(%s)" : "sqrtf(%s)", s0); break;
   case POLY_OP_TRUNC:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "trunc(%s)" : "truncf(%s)", s0); break;
+    snprintf(buf, cap, is_half ? "htrunc(%s)" :
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "trunc(%s)" : "truncf(%s)", s0); break;
   case POLY_OP_EXP2:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "exp2(%s)" : "exp2f(%s)", s0); break;
+    snprintf(buf, cap, is_half ? "hexp2(%s)" :
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "exp2(%s)" : "exp2f(%s)", s0); break;
   case POLY_OP_LOG2:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "log2(%s)" : "log2f(%s)", s0); break;
+    snprintf(buf, cap, is_half ? "hlog2(%s)" :
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "log2(%s)" : "log2f(%s)", s0); break;
   case POLY_OP_SIN:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "sin(%s)" : "sinf(%s)", s0); break;
-  case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
+    snprintf(buf, cap, is_half ? "hsin(%s)" :
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "sin(%s)" : "sinf(%s)", s0); break;
+  case POLY_OP_RECIPROCAL:
+    snprintf(buf, cap, is_half ? "hrcp(%s)" : "(1/%s)", s0); break;
   case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
   case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
   case POLY_OP_MUL:   snprintf(buf, cap, "(%s*%s)", s0, s1); break;
@@ -168,8 +185,9 @@ static void cuda_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
       ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1); break;
   case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
   case POLY_OP_MULACC:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "fma(%s,%s,%s)" : "__fmaf_rn(%s,%s,%s)", s0, s1, s2);
+    snprintf(buf, cap, is_half ? "__hfma(%s,%s,%s)" :
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "fma(%s,%s,%s)" : "__fmaf_rn(%s,%s,%s)",
+      s0, s1, s2);
     break;
   default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
   }
@@ -192,13 +210,17 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* TODO: CUDA tensor core specs not yet ported. tinygrad selects from
    * cuda_sm75/sm80/sm89 based on arch (tc.py). Until ported, POLY_OPT_TC_ONLY
    * with empty tensor_cores is a no-op on CUDA. */
+  /* bf16: native on sm_80+ (nv_bfloat16 + h* intrinsics), non-native on older */
+  PolyPatternMatcher *extra = NULL;
+  if (poly_cuda_arch_major() < 8)
+    extra = poly_pm_bf16_non_native();
   PolyRewriteOpts opts = {
     .optimize    = true,           /* shared optimized pipeline (tinygrad parity) */
     .devectorize = -1,             /* CUDA: no add_loads/devectorize */
     .caps        = { .has_mulacc = true },
     .device      = POLY_DEVICE_CUDA,
     .opt_policy  = POLY_OPT_TC_ONLY,
-    .extra_matcher = NULL,
+    .extra_matcher = extra,
     .gpu_block_size = 256,
   };
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
@@ -269,9 +291,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       snprintf(name, sizeof(name), "data%lld", (long long)u->arg.i);
       csmap_set(&names, u, strdup(name));
 
-      PolyDType base = poly_dtype_scalar(u->dtype);
       char type[64];
-      snprintf(type, sizeof(type), "%s*", base.name);
+      snprintf(type, sizeof(type), "%s*", cuda_ctype(u->dtype));
       param_types[n_params] = strdup(type);
       param_names[n_params] = strdup(name);
       param_order[n_params] = (int)u->arg.i;
@@ -294,7 +315,13 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     /* --- CONST -------------------------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char val[64];
-      if (poly_dtype_is_float(u->dtype)) {
+      if (poly_dtype_eq(u->dtype, POLY_FLOAT16)) {
+        char tmp[32]; cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
+        snprintf(val, sizeof(val), "__float2half(%s)", tmp);
+      } else if (poly_dtype_eq(u->dtype, POLY_BFLOAT16)) {
+        char tmp[32]; cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
+        snprintf(val, sizeof(val), "__float2bfloat16(%s)", tmp);
+      } else if (poly_dtype_is_float(u->dtype)) {
         cuda_render_float_const(u->arg.f, u->dtype, val, sizeof(val));
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
@@ -426,8 +453,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
       /* Render as __shared__ array. Size from pointer dtype's ptr_size. */
       int smem_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
-      PolyDType base = poly_dtype_scalar(u->dtype);
-      csb_printf(&decls, "  __shared__ %s %s[%d];\n", base.name, name, smem_size);
+      csb_printf(&decls, "  __shared__ %s %s[%d];\n", cuda_ctype(u->dtype), name, smem_size);
       continue;
     }
 
@@ -437,8 +463,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       csmap_set(&names, u, strdup(name));
 
-      PolyDType base = poly_dtype_scalar(u->dtype);
-      csb_printf(&decls, "  %s %s[1];\n", base.name, name);
+      csb_printf(&decls, "  %s %s[1];\n", cuda_ctype(u->dtype), name);
       continue;
     }
 
@@ -456,7 +481,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *bidx = csmap_get(&names, u->src[0]);
-      csb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
+      const char *ctype = cuda_ctype(u->dtype);
+      csb_printf(&decls, "  %s %s;\n", ctype, name);
       for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
 
       /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
@@ -467,7 +493,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
         csb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
       } else if (idx_uop && idx_uop->n_src >= 3) {
         char *gate_s = csmap_get(&names, idx_uop->src[2]);
-        csb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, u->dtype.name);
+        csb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
       } else {
         csb_printf(&body, "%s = (*%s);\n", name, bidx);
       }
@@ -493,9 +519,10 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *src_s = csmap_get(&names, u->src[0]);
-      csb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
+      const char *ctype = cuda_ctype(u->dtype);
+      csb_printf(&decls, "  %s %s;\n", ctype, name);
       for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
-      csb_printf(&body, "%s = (%s)(%s);\n", name, u->dtype.name, src_s);
+      csb_printf(&body, "%s = (%s)(%s);\n", name, ctype, src_s);
       continue;
     }
 
@@ -506,8 +533,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *src_s = csmap_get(&names, u->src[0]);
-      const char *dst_type = u->dtype.name;
-      const char *src_type = u->src[0]->dtype.name;
+      const char *dst_type = cuda_ctype(u->dtype);
+      const char *src_type = cuda_ctype(u->src[0]->dtype);
       csb_printf(&decls, "  %s %s;\n", dst_type, name);
       for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
       csb_printf(&body, "%s = tg_bitcast<%s>((%s)(%s));\n",
@@ -527,7 +554,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       snprintf(name, sizeof(name), "alu%d", c_alu++);
       csmap_set(&names, u, strdup(name));
 
-      csb_printf(&decls, "  %s %s;\n", u->dtype.name, name);
+      csb_printf(&decls, "  %s %s;\n", cuda_ctype(u->dtype), name);
       for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
       csb_printf(&body, "%s = %s;\n", name, expr);
       continue;
@@ -568,7 +595,20 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
   csb_puts(&out, "#define NAN (__int_as_float(0x7fffffff))\n");
   csb_puts(&out, "template <class T, class F> __device__ __forceinline__ T tg_bitcast(F v) {\n");
   csb_puts(&out, "  union U { F f; T t; }; U u; u.f = v; return u.t;\n");
-  csb_puts(&out, "}\n\n");
+  csb_puts(&out, "}\n");
+
+  /* Conditional includes for half-precision types */
+  {
+    bool uses_f16 = false, uses_bf16 = false;
+    for (int i = 0; i < n; i++) {
+      PolyDType s = poly_dtype_scalar(uops[i]->dtype);
+      if (s.priority == POLY_FLOAT16.priority)  uses_f16 = true;
+      if (s.priority == POLY_BFLOAT16.priority) uses_bf16 = true;
+    }
+    if (uses_f16)  csb_puts(&out, "#include <cuda_fp16.h>\n");
+    if (uses_bf16) csb_puts(&out, "#include <cuda_bf16.h>\n");
+  }
+  csb_puts(&out, "\n");
 
   /* Kernel signature */
   csb_printf(&out, "extern \"C\" __global__ void __launch_bounds__(%d) %s(",

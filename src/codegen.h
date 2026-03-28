@@ -189,6 +189,7 @@ typedef struct PolyCudaProgram PolyCudaProgram;
 
 int poly_cuda_init(void);
 bool poly_cuda_available(void);
+int poly_cuda_arch_major(void);
 unsigned long long poly_cuda_alloc(size_t bytes);
 void poly_cuda_free(unsigned long long ptr);
 int poly_cuda_copy_htod(unsigned long long dst, const void *src, size_t bytes);

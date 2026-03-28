@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <unistd.h>
 #include <dlfcn.h>
 
 /* ── CUDA driver API types ───────────────────────────────────────────── */
@@ -242,6 +243,11 @@ bool poly_cuda_available(void) {
   return cuda_state == CUDA_INIT_OK;
 }
 
+int poly_cuda_arch_major(void) {
+  if (cuda_state == CUDA_NOT_TRIED) poly_cuda_init();
+  return cuda_arch_major;
+}
+
 
 unsigned long long poly_cuda_alloc(size_t bytes) {
   if (cuda_state != CUDA_INIT_OK) {
@@ -309,8 +315,19 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   snprintf(arch_opt, sizeof(arch_opt), "--gpu-architecture=compute_%d%d",
            cuda_arch_major, cuda_arch_minor);
 
-  const char *opts[] = { arch_opt };
-  nv_err = cuda_api.nvrtcCompileProgram(prog, 1, opts);
+  /* Include path for cuda_fp16.h / cuda_bf16.h.
+   * NVRTC doesn't search system include dirs by default. */
+  char inc_opt[256] = "";
+  const char *cuda_path = getenv("CUDA_PATH");
+  if (cuda_path)
+    snprintf(inc_opt, sizeof(inc_opt), "-I%s/include", cuda_path);
+  else if (access("/usr/local/cuda/include/cuda_fp16.h", 0) == 0)
+    snprintf(inc_opt, sizeof(inc_opt), "-I/usr/local/cuda/include");
+  else
+    snprintf(inc_opt, sizeof(inc_opt), "-I/usr/include");
+
+  const char *opts[] = { arch_opt, inc_opt };
+  nv_err = cuda_api.nvrtcCompileProgram(prog, 2, opts);
   if (nv_err != NVRTC_SUCCESS) {
     /* Print compilation log */
     size_t log_size = 0;
