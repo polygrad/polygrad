@@ -6,10 +6,10 @@ const path = require('path')
 const srcDir = path.resolve(__dirname, '..', '..', 'src')
 const dstDir = path.resolve(__dirname, '..', 'csrc')
 
-// Exclude renderers/runtimes not needed for N-API addon
+// Exclude WASM/browser-only files. All other backends (CUDA, HIP, x64)
+// are included -- binding.gyp conditionally compiles them at install time.
 const EXCLUDE = new Set([
   'render_wasm.c', 'wasm_builder.c',
-  'render_cuda.c', 'runtime_cuda.c',
   'render_wgsl.c'
 ])
 

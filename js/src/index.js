@@ -3,16 +3,18 @@
 const { createRuntime, normalizeOptions } = require('./runtime')
 
 async function resolveNodeTarget(name, opts) {
-  if (opts.device !== 'auto' && opts.device !== 'cpu') {
-    throw new Error(`polygrad: only device='cpu' is supported today (got ${opts.device})`)
-  }
-
   if (name === 'wasm') {
+    /* WASM target runs inside Emscripten -- only cpu/auto device makes sense */
+    if (opts.device !== 'auto' && opts.device !== 'cpu') {
+      throw new Error(`polygrad: wasm target only supports device='cpu' (got ${opts.device})`)
+    }
     const { createWasmBackend } = require('./wasm')
     return createWasmBackend()
   }
 
   if (name === 'native') {
+    /* Native target delegates device selection to the C library via POLY_DEVICE
+     * env var. The C backend validates and routes to cpu/x64/cuda/hip/interp. */
     const { createNativeBackend } = require('./native')
     return createNativeBackend()
   }

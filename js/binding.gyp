@@ -13,7 +13,6 @@
         "csrc/dtype.c",
         "csrc/exec_plan.c",
         "csrc/frontend.c",
-        "csrc/frontend_internal.h",
         "csrc/hashmap.c",
         "csrc/indexing.c",
         "csrc/instance.c",
@@ -53,6 +52,18 @@
             "OTHER_CFLAGS": ["-std=c11"]
           },
           "libraries": ["-ldl", "-lm"]
+        }],
+        ["target_arch=='x64'", {
+          "sources": ["csrc/render_x64.c"],
+          "defines": ["POLY_HAS_X64=1"]
+        }],
+        ["'<!(test -f /usr/include/cuda.h && echo 1 || echo 0)'=='1'", {
+          "sources": ["csrc/render_cuda.c", "csrc/runtime_cuda.c"],
+          "defines": ["POLY_HAS_CUDA=1"]
+        }],
+        ["'<!(test -f /opt/rocm/include/hip/hip_runtime.h && echo 1 || ls -d /opt/rocm-*/include/hip/hip_runtime.h 2>/dev/null | head -1 | xargs test -f 2>/dev/null && echo 1 || echo 0)'=='1'", {
+          "sources": ["csrc/render_hip.c", "csrc/runtime_hip.c"],
+          "defines": ["POLY_HAS_HIP=1"]
         }]
       ]
     }
