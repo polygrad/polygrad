@@ -2543,6 +2543,43 @@ static PolyUOp *rule_decomp_threefry32(PolyCtx *ctx, PolyUOp *root,
   return poly_uop1(ctx, POLY_OP_CAST, root->dtype, xr0, poly_arg_none());
 }
 
+/*
+ * rule_store_dtype_cast — Insert CAST when STORE value dtype mismatches buffer dtype.
+ * STORE(INDEX(ptr<T>), value<U>) → STORE(INDEX(ptr<T>), CAST<T>(value)) when T != U.
+ * This is a safety net: frontends should match dtypes, but if they don't, the codegen
+ * pipeline normalizes it here so renderers never see cross-type stores.
+ */
+static PolyUOp *rule_store_dtype_cast(PolyCtx *ctx, PolyUOp *root,
+                                      const PolyBindings *b) {
+  (void)b;
+  if (root->n_src < 2) return NULL;
+  PolyUOp *idx = root->src[0];  /* INDEX node */
+  PolyUOp *val = root->src[1];  /* value to store */
+  if (!idx->dtype.is_ptr) return NULL;
+  /* Extract the pointed-to value type from the pointer dtype.
+   * poly_dtype_scalar only strips vector count, not is_ptr/addrspace.
+   * We need a clean non-pointer scalar for the CAST target. */
+  PolyDType buf_scalar = poly_dtype_scalar(idx->dtype);
+  buf_scalar.is_ptr = false;
+  buf_scalar.addrspace = 0;
+  buf_scalar.ptr_size = 0;
+  buf_scalar.vcount = 0;
+  PolyDType val_scalar = poly_dtype_scalar(val->dtype);
+  /* Match by priority+bitsize (not poly_dtype_eq, which checks ptr metadata) */
+  if (buf_scalar.priority == val_scalar.priority &&
+      buf_scalar.bitsize == val_scalar.bitsize) return NULL;
+  /* Insert CAST: value → buffer's scalar type (respecting vector width) */
+  PolyDType cast_dt = (val->dtype.count > 1)
+    ? poly_dtype_vec(buf_scalar, val->dtype.count) : buf_scalar;
+  PolyUOp *casted = poly_uop1(ctx, POLY_OP_CAST, cast_dt, val, poly_arg_none());
+  PolyUOp *st_srcs[64];
+  int ns = 0;
+  st_srcs[ns++] = idx;
+  st_srcs[ns++] = casted;
+  for (int i = 2; i < root->n_src && ns < 64; i++) st_srcs[ns++] = root->src[i];
+  return poly_uop(ctx, POLY_OP_STORE, root->dtype, st_srcs, ns, root->arg);
+}
+
 /* Cached variants by (has_mulacc, has_threefry_native). */
 static PolyPatternMatcher *g_pm_decomp_caps[2][2] = {{NULL, NULL}, {NULL, NULL}};
 
@@ -2600,6 +2637,13 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
   rules[n++] = (PolyRule){ poly_pat_op2(POLY_OP_MUL, poly_pat_any("a"),
       poly_pat_op2(POLY_OP_FDIV, poly_pat_cvar("one"),
         poly_pat_any("b"), NULL), NULL), rule_mul_fdiv1_to_fdiv };
+
+  /* STORE(ptr<T>, value<U>) → STORE(ptr<T>, CAST<T>(value)) when T != U */
+  {
+    PolyOpSet store_set = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_STORE);
+    rules[n++] = (PolyRule){ poly_pat_ops(store_set, NULL, 0, NULL),
+      rule_store_dtype_cast };
+  }
 
   *target = poly_pm_new(rules, n);
   return *target;
