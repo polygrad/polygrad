@@ -5,8 +5,8 @@ A C11 port of tinygrad's compiler core. Same IR, same pattern-matcher-driven rew
 **Why C11?** A single library that every language can call natively:
 
 ```
-              ┌── Python (ctypes / cffi)
-              ├── JavaScript (WASM)
+              ┌── Python (ctypes / cffi)       ✓ 170 tests
+              ├── JavaScript (Node-API + WASM)  ✓ 109 tests
 polygrad (C11) ──┼── Rust (FFI)
               ├── Go (cgo)
               ├── Julia (ccall)
@@ -46,13 +46,13 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────────────┘    └────────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> unified codegen pipeline -> render (C, x86-64 JIT, CUDA, HIP, WASM, interpreter) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support across all backends. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences. 607 C tests, 164 Python, 101 JS native, 95 JS WASM/browser. All five native backends (CPU, x64, CUDA, HIP, interpreter) pass the full test suite.
+**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> unified codegen pipeline -> render (C, x86-64 JIT, CUDA, HIP, WASM, interpreter) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support across all backends. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node (with CUDA/HIP/x64 support), falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences. 609 C tests, 170 Python, 109 JS native, 109 JS WASM/browser. All five native backends (CPU, x64, CUDA, HIP, interpreter) pass the full C test suite. Instance API supports GPU training with auto-readback via `host_addressable` allocator flag.
 
 **Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, x64 JIT, CUDA, HIP, interpreter, WASM JIT). All backends share one unified linearizer pipeline (`poly_full_rewrite_to_sink_ex`), with backend differences expressed via `PolyRewriteOpts`. The x64 JIT (`render_x64.c`) emits x86-64 machine code directly -- no C compiler dependency, zero compile latency, SSE2 packed vectorization. CUDA uses native `half`/`nv_bfloat16` types with h* intrinsics. HIP supports AMD MI250X with MFMA tensor core codegen. The interpreter supports vector operations via a lane-array value model with pre-allocated arena. Backend selection via `POLY_DEVICE=cpu|cuda|hip|x64|interp`. `PolyInstance` uses cached slot tables and calls `poly_compiled_plan_run()` directly -- zero per-step allocations in the training loop. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
 
 **Codegen optimization:** Late pipeline matches tinygrad's architecture (codegen/__init__.py). Devectorizer scatters vectorized ALU ops to scalar, load/store folding regroups contiguous accesses into vector loads. `POLY_OPTIMIZE=1 POLY_DEVECTORIZE=1` enables UPCAST + devectorize for CPU SIMD. BEAM search optimizer (`POLY_BEAM=N`) explores the optimization space by compiling and timing candidates, with disk cache for results. All 607 tests pass in both default and optimized modes across all backends.
 
-**What's next:** WASM build fix, WebGPU backend, more model families (LLaMA).
+**What's next:** WebGPU backend, more model families (LLaMA), x64 gt segfault fix.
 
 ## Documentation
 
