@@ -594,13 +594,30 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   slot_cache_free(inst->call_cache);  inst->call_cache = NULL;
   slot_cache_free(inst->train_cache); inst->train_cache = NULL;
 
-  /* Resolve AUTO */
+  /* Resolve AUTO: check POLY_DEVICE env var, same logic as infer_device()
+   * in frontend.c so that Instance and Tensor paths use the same selector. */
   PolyDeviceId resolved = device;
   if (resolved == POLY_DEVICE_AUTO) {
 #ifdef __EMSCRIPTEN__
     resolved = POLY_DEVICE_WASM_JIT;
 #else
-    resolved = POLY_DEVICE_CPU;
+    const char *dev_env = getenv("POLY_DEVICE");
+    if (dev_env && dev_env[0]) {
+      if (strcmp(dev_env, "cpu") == 0) resolved = POLY_DEVICE_CPU;
+      else if (strcmp(dev_env, "interp") == 0) resolved = POLY_DEVICE_INTERP;
+#ifdef POLY_HAS_CUDA
+      else if (strcmp(dev_env, "cuda") == 0) resolved = POLY_DEVICE_CUDA;
+#endif
+#ifdef POLY_HAS_HIP
+      else if (strcmp(dev_env, "hip") == 0) resolved = POLY_DEVICE_HIP;
+#endif
+#ifdef POLY_HAS_X64
+      else if (strcmp(dev_env, "x64") == 0) resolved = POLY_DEVICE_X64_JIT;
+#endif
+      else resolved = POLY_DEVICE_CPU;
+    } else {
+      resolved = POLY_DEVICE_CPU;
+    }
 #endif
   }
 
