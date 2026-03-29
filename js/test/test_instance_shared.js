@@ -244,6 +244,83 @@ async function runInstanceTests(pg) {
     }
   })
 
+  await test('mlp train step with Adam', async () => {
+    const inst = Instance.mlp({
+      layers: [2, 4, 1],
+      activation: 'relu',
+      bias: true,
+      loss: 'mse',
+      batch_size: 1,
+      seed: 42
+    })
+    try {
+      inst.setOptimizer(pg.OPTIM_ADAM, 0.01)
+      const x = new Float32Array([1, 2])
+      const y = new Float32Array([3])
+      let first = null
+      let last = null
+      for (let step = 0; step < 50; step++) {
+        last = inst.trainStep({ x, y })
+        if (first == null) first = last
+      }
+      assert(last < first, `expected loss to decrease (${first} -> ${last})`)
+    } finally {
+      inst.dispose()
+    }
+  })
+
+  await test('mlp batch_size=4 mse train', async () => {
+    const inst = Instance.mlp({
+      layers: [2, 4, 2],
+      activation: 'relu',
+      bias: true,
+      loss: 'mse',
+      batch_size: 4,
+      seed: 42
+    })
+    try {
+      inst.setOptimizer(pg.OPTIM_SGD, 0.01)
+      const x = new Float32Array(4 * 2).fill(0.5)
+      const y = new Float32Array(4 * 2).fill(0.3)
+      let first = null
+      let last = null
+      for (let step = 0; step < 50; step++) {
+        last = inst.trainStep({ x, y })
+        if (first == null) first = last
+      }
+      assert(Number.isFinite(first), `first loss should be finite, got ${first}`)
+      assert(Number.isFinite(last), `last loss should be finite, got ${last}`)
+      assert(last < first, `expected loss to decrease (${first} -> ${last})`)
+    } finally {
+      inst.dispose()
+    }
+  })
+
+  await test('mlp 100-step convergence', async () => {
+    const inst = Instance.mlp({
+      layers: [2, 8, 1],
+      activation: 'relu',
+      bias: true,
+      loss: 'mse',
+      batch_size: 1,
+      seed: 42
+    })
+    try {
+      inst.setOptimizer(pg.OPTIM_SGD, 0.01)
+      const x = new Float32Array([1, 2])
+      const y = new Float32Array([5])
+      let first = null
+      let last = null
+      for (let step = 0; step < 100; step++) {
+        last = inst.trainStep({ x, y })
+        if (first == null) first = last
+      }
+      assert(last < first * 0.1, `expected >90% loss reduction (${first} -> ${last})`)
+    } finally {
+      inst.dispose()
+    }
+  })
+
   console.log(`\nInstance tests: ${passed} passed, ${failed} failed`)
   return { passed, failed }
 }

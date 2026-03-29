@@ -361,3 +361,61 @@ TEST(mlp, train_cross_entropy) {
   poly_instance_free(inst);
   PASS();
 }
+
+TEST(mlp, train_batch2_mse) {
+  /* batch_size=2: 2 -> 3 -> 2, relu, MSE (P0 regression) */
+  const char *spec =
+    "{\"layers\":[2,3,2],\"activation\":\"relu\",\"bias\":false,"
+    "\"loss\":\"mse\",\"batch_size\":2,\"seed\":42}";
+
+  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  ASSERT_NOT_NULL(inst);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
+                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  float x[] = { 0.5f, 0.5f,  0.5f, 0.5f };
+  float y[] = { 0.3f, 0.3f,  0.3f, 0.3f };
+  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+
+  float first_loss = -1.0f, prev_loss = 1e10f;
+  for (int step = 0; step < 50; step++) {
+    float loss;
+    ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+    ASSERT_TRUE(isfinite(loss));
+    if (step == 0) first_loss = loss;
+    prev_loss = loss;
+  }
+  ASSERT_TRUE(prev_loss < first_loss);
+  poly_instance_free(inst);
+  PASS();
+}
+
+TEST(mlp, train_batch4_cross_entropy) {
+  /* batch_size=4: 4 -> 8 -> 3, relu, cross-entropy (P0 regression) */
+  const char *spec =
+    "{\"layers\":[4,8,3],\"activation\":\"relu\",\"bias\":true,"
+    "\"loss\":\"cross_entropy\",\"batch_size\":4,\"seed\":42}";
+
+  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  ASSERT_NOT_NULL(inst);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
+                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+
+  float x[4 * 4], y[4 * 3];
+  for (int i = 0; i < 16; i++) x[i] = (float)(i % 7) * 0.1f;
+  memset(y, 0, sizeof(y));
+  for (int i = 0; i < 4; i++) y[i * 3 + (i % 3)] = 1.0f;
+  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+
+  float first_loss = -1.0f, prev_loss = 1e10f;
+  for (int step = 0; step < 30; step++) {
+    float loss;
+    ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+    ASSERT_TRUE(isfinite(loss));
+    if (step == 0) first_loss = loss;
+    prev_loss = loss;
+  }
+  ASSERT_TRUE(prev_loss < first_loss);
+  poly_instance_free(inst);
+  PASS();
+}

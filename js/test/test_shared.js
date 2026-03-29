@@ -519,6 +519,33 @@ async function runTests(pg) {
     assertClose(await a.grad.toArray(), [-1, -1, -1])
   })
 
+  await test('grad: matmul backward', async () => {
+    const W = new Tensor([[1, 2], [3, 4]], { requiresGrad: true })
+    const x = new Tensor([[1, 0]])
+    const loss = x.dot(W).sum()
+    await loss.backward()
+    assert(W.grad, 'W.grad is null')
+    // dL/dW = x^T @ ones = [[1,1],[0,0]]
+    assertClose(await W.grad.toArray(), [1, 1, 0, 0])
+  })
+
+  await test('grad: relu backward', async () => {
+    const a = new Tensor([-1, 2, -3, 4], { requiresGrad: true })
+    const loss = a.relu().sum()
+    await loss.backward()
+    assert(a.grad, 'grad is null')
+    // relu grad: 0 where input<=0, 1 where input>0
+    assertClose(await a.grad.toArray(), [0, 1, 0, 1])
+  })
+
+  await test('grad: chain backward', async () => {
+    const a = new Tensor([1, 2, 3], { requiresGrad: true })
+    const loss = a.mul(a).sum()  // d/da(a^2) = 2a
+    await loss.backward()
+    assert(a.grad, 'grad is null')
+    assertClose(await a.grad.toArray(), [2, 4, 6])
+  })
+
   // -- Static constructors --
   console.log('\n-- Static constructors --')
 
