@@ -375,16 +375,23 @@ TEST(hip, instance_set_device_hip) {
   PolyInstance *inst = hip_make_test_mlp(2, 3);
   ASSERT_NOT_NULL(inst);
 
+  /* Read initial host data */
+  int64_t numel;
+  float *cpu_data = poly_instance_buf_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(cpu_data);
+  float saved = cpu_data[0];
+
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
 
-  /* buf_data should return NULL on HIP device */
-  int64_t numel;
-  ASSERT_TRUE(poly_instance_buf_data(inst, 0, &numel) == NULL);
+  /* buf_data auto-readbacks from GPU (tinygrad-style) */
+  float *gpu_data = poly_instance_buf_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(gpu_data);
+  ASSERT_FLOAT_EQ(gpu_data[0], saved, 1e-6);
 
   /* Switch back to CPU */
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
 
-  /* buf_data should work again on CPU */
+  /* buf_data still works on CPU */
   ASSERT_NOT_NULL(poly_instance_buf_data(inst, 0, &numel));
 
   poly_instance_free(inst);

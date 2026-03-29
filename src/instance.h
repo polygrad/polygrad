@@ -58,9 +58,9 @@ int         poly_instance_param_count(const PolyInstance *inst);
 const char *poly_instance_param_name(const PolyInstance *inst, int i);
 int         poly_instance_param_shape(const PolyInstance *inst, int i,
                                       int64_t *shape_out, int max_dims);
-/* Returns host pointer for host-memory domains (CPU, INTERP, WASM_JIT).
- * Returns NULL for device-memory domains (CUDA, future WEBGPU).
- * Use readback/upload APIs for device-resident data. */
+/* Returns host pointer to param data. For GPU domains, automatically
+ * copies device data to the host shadow buffer first (like tinygrad's
+ * Tensor.numpy()). Returns NULL only on error. */
 float      *poly_instance_param_data(PolyInstance *inst, int i,
                                      int64_t *numel_out);
 
@@ -71,8 +71,9 @@ const char *poly_instance_buf_name(const PolyInstance *inst, int i);
 int         poly_instance_buf_role(const PolyInstance *inst, int i);
 int         poly_instance_buf_shape(const PolyInstance *inst, int i,
                                     int64_t *shape_out, int max_dims);
-/* Returns host pointer for host-memory domains, NULL for device-memory.
- * Use readback/upload APIs for device-resident data. */
+/* Returns host pointer to buffer data. For GPU domains, automatically
+ * copies device data to the host shadow buffer first. Returns NULL
+ * only on error. */
 float      *poly_instance_buf_data(PolyInstance *inst, int i,
                                    int64_t *numel_out);
 

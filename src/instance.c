@@ -404,20 +404,25 @@ int poly_instance_param_shape(const PolyInstance *inst, int i,
   return b->ndim;
 }
 
+static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len);
+
+/* Sync device buffer to host shadow if on a non-host domain.
+ * Returns 0 on success or if already on host; -1 on readback failure. */
+static int sync_buf_to_host(PolyInstance *inst, int bi) {
+  if (!inst->buf_handles) return 0;
+  PolyDeviceId dom = inst->buf_handles[bi].domain;
+  if (dom == POLY_DEVICE_CPU || dom == POLY_DEVICE_INTERP) return 0;
+  size_t nbytes = (size_t)inst->bufs[bi].numel * sizeof(float);
+  return readback_handle(&inst->buf_handles[bi], inst->bufs[bi].data, nbytes);
+}
+
 float *poly_instance_param_data(PolyInstance *inst, int i,
                                  int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_params) return NULL;
   int bi = inst->param_indices[i];
-  NamedBuf *b = &inst->bufs[bi];
-  if (numel_out) *numel_out = b->numel;
-  /* Device-memory backends: host data may be stale */
-  if (inst->buf_handles && inst->buf_handles[bi].domain == POLY_DEVICE_CUDA)
-    return NULL;
-#ifdef POLY_HAS_HIP
-  if (inst->buf_handles && inst->buf_handles[bi].domain == POLY_DEVICE_HIP)
-    return NULL;
-#endif
-  return b->data;
+  if (numel_out) *numel_out = inst->bufs[bi].numel;
+  if (sync_buf_to_host(inst, bi) != 0) return NULL;
+  return inst->bufs[bi].data;
 }
 
 /* ── Buffer Enumeration ──────────────────────────────────────────────── */
@@ -448,13 +453,7 @@ float *poly_instance_buf_data(PolyInstance *inst, int i,
                                int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_bufs) return NULL;
   if (numel_out) *numel_out = inst->bufs[i].numel;
-  /* Device-memory backends: host data may be stale */
-  if (inst->buf_handles && inst->buf_handles[i].domain == POLY_DEVICE_CUDA)
-    return NULL;
-#ifdef POLY_HAS_HIP
-  if (inst->buf_handles && inst->buf_handles[i].domain == POLY_DEVICE_HIP)
-    return NULL;
-#endif
+  if (sync_buf_to_host(inst, i) != 0) return NULL;
   return inst->bufs[i].data;
 }
 
@@ -512,6 +511,10 @@ int poly_instance_upload_param(PolyInstance *inst, int i,
 
 uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
   if (!inst || inst->n_params == 0) { *out_len = 0; return NULL; }
+
+  /* Readback all params from device to host before serializing */
+  for (int i = 0; i < inst->n_params; i++)
+    sync_buf_to_host(inst, inst->param_indices[i]);
 
   PolySafetensorEntry *entries = malloc(inst->n_params * sizeof(PolySafetensorEntry));
   for (int i = 0; i < inst->n_params; i++) {
