@@ -45,7 +45,7 @@ PARITY_PY ?= conda run -n tiny python
 WASM_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/sched.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/rangeify.c src/indexing.c src/nn.c src/exec_plan.c src/interp.c vendor/cjson/cJSON.c src/safetensors.c src/ir.c src/bundle.c src/instance.c src/model_mlp.c src/model_tabm.c src/model_nam.c
 WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_op_count,_poly_op_name,_poly_const_float,_poly_const_double,_poly_const_int,_poly_alu1,_poly_alu2,_poly_alu3,_poly_store_val,_poly_sink1,_poly_sink_n,_poly_buffer_f32,_poly_buffer_f64,_poly_reshape,_poly_expand,_poly_reduce_axis,_poly_permute,_poly_shrink,_poly_flip,_poly_pad,_poly_grad,_poly_render_kernel_wasm,_poly_kernel_buf,_poly_render_step_wasm_plan,_poly_wasm_stepplan_n_kernels,_poly_wasm_stepplan_kernel_bytes,_poly_wasm_stepplan_kernel_n_params,_poly_wasm_stepplan_n_buffers,_poly_wasm_stepplan_n_bindable_buffers,_poly_wasm_stepplan_kernel_param_buf_index,_poly_wasm_stepplan_exec_order,_poly_wasm_stepplan_destroy,_poly_wasm_stepplan_buf_size,_poly_wasm_stepplan_buf_nbytes,_poly_wasm_stepplan_bindable_buf_index,_poly_const_buffer_data,_poly_abi_version,_poly_exp,_poly_log,_poly_log1p,_poly_expm1,_poly_sin,_poly_cos,_poly_tan,_poly_erf,_poly_erfc,_poly_erfinv,_poly_ndtri,_poly_digamma,_poly_lgamma,_poly_sigmoid,_poly_tanh_act,_poly_relu,_poly_relu6,_poly_leaky_relu,_poly_gelu,_poly_quick_gelu,_poly_silu,_poly_elu,_poly_softplus,_poly_mish,_poly_hardtanh,_poly_hardswish,_poly_hardsigmoid,_poly_abs,_poly_sign,_poly_square,_poly_rsqrt,_poly_ceil,_poly_floor,_poly_round_f,_poly_isinf,_poly_isnan,_poly_eq,_poly_ne,_poly_gt,_poly_ge,_poly_le,_poly_where_op,_poly_maximum,_poly_minimum,_poly_clamp,_poly_detach,_poly_cast_by_id,_poly_rand,_poly_randn,_poly_arange,_poly_eye,_poly_linspace,_poly_full,_poly_tril,_poly_triu,_poly_cholesky,_poly_triangular_solve,_poly_sum_reduce,_poly_max_reduce,_poly_mean_reduce,_poly_logsumexp,_poly_dot,_poly_cross_entropy,_poly_einsum,_poly_rearrange,_exp2f,_log2f,_sinf,_powf,_malloc,_free,_poly_instance_from_ir,_poly_instance_free,_poly_instance_set_device,_poly_instance_call,_poly_instance_value_and_grad,_poly_instance_forward,_poly_instance_train_step,_poly_instance_set_optimizer,_poly_instance_param_count,_poly_instance_param_name,_poly_instance_param_data,_poly_instance_param_shape,_poly_instance_buf_count,_poly_instance_buf_name,_poly_instance_buf_role,_poly_instance_buf_data,_poly_instance_buf_shape,_poly_instance_export_weights,_poly_instance_import_weights,_poly_instance_export_ir,_poly_mlp_instance,_poly_tabm_instance,_poly_nam_instance,_poly_instance_save_bundle,_poly_instance_from_bundle
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-c bench-train-py bench-ratios bench-compare bench-regression bench-update-baseline wasm wasm-pkg clean analyze cppcheck format format-check test-msan verify coverage
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-c bench-train-py bench-ratios bench-compare bench-regression bench-update-baseline wasm wasm-pkg clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -160,15 +160,37 @@ NODE ?= $(shell which node 2>/dev/null || echo node)
 test-wasm: test-js-browser
 
 test-py: build/libpolygrad.so
-	python -m pytest py/tests/ -v
+	POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/ -v
 
 test-js: test-js-wasm test-js-native
 
 test-js-wasm: wasm-pkg
 	$(NODE) js/test/test_wasm.js
 
-test-js-native:
-	cd js && npm run build:native && cd .. && $(NODE) js/test/test_native.js
+test-js-native: js/build/Release/polygrad_napi.node
+	$(NODE) js/test/test_native.js
+
+js/build/Release/polygrad_napi.node: build/libpolygrad.a
+	cd js && npm run build:native
+
+test-js-native-cpu: js/build/Release/polygrad_napi.node
+	POLY_DEVICE=cpu $(NODE) js/test/test_native.js
+
+test-js-native-x64: js/build/Release/polygrad_napi.node
+	POLY_DEVICE=x64 $(NODE) js/test/test_native.js
+
+test-js-native-interp: js/build/Release/polygrad_napi.node
+	POLY_DEVICE=interp $(NODE) js/test/test_native.js
+
+ifeq ($(HAS_CUDA), 1)
+test-js-native-cuda: js/build/Release/polygrad_napi.node
+	POLY_DEVICE=cuda $(NODE) js/test/test_native.js
+endif
+
+ifeq ($(HAS_HIP), 1)
+test-js-native-hip: js/build/Release/polygrad_napi.node
+	POLY_DEVICE=hip $(NODE) js/test/test_native.js
+endif
 
 test-js-browser: wasm-pkg
 	$(NODE) js/test/test_browser.js
@@ -185,7 +207,22 @@ test-native-legacy: build/libpolygrad.so
 test-browser-legacy: wasm-pkg
 	$(NODE) js_legacy/polygrad/test/browser/test_browser.js
 
-test-all: test test-parity test-js test-js-browser test-py
+# Full cross-backend test suite:
+#   C:      cpu (default), x64, interp, cuda*, hip*
+#   JS:     wasm core + wasm backend
+#           native core + cpu/x64/interp/cuda*/hip* backends
+#   Python: py/tests/
+#   * only when hardware is available
+TEST_ALL_DEPS = test test-x64 test-interp test-js-wasm test-js-native-cpu test-js-native-x64 test-js-native-interp test-py
+ifeq ($(HAS_CUDA), 1)
+  TEST_ALL_DEPS += test-cuda test-js-native-cuda
+endif
+ifeq ($(HAS_HIP), 1)
+  TEST_ALL_DEPS += test-hip test-js-native-hip
+endif
+test-all: $(TEST_ALL_DEPS)
+	@echo ""
+	@echo "=== test-all: all backends passed ==="
 
 wasm: build/polygrad.js build/polygrad.wasm
 
