@@ -279,11 +279,11 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
                                   poly_alu1(ctx, POLY_OP_NEG, y));
       PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
 
-      /* Reduce over all dims */
-      int64_t axes0[] = { 0 };
-      PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes0, 1);
-      int64_t axes1[] = { 0 };
-      PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes1, 1);
+      /* Reduce over all dims: axis 1 (class) then axis 0 (batch) */
+      int64_t axes_class[] = { 1 };
+      PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes_class, 1);
+      int64_t axes_batch[] = { 0 };
+      PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes_batch, 1);
 
       /* Scale by 1/(batch_size * out_dim) */
       double scale = 1.0 / ((double)batch_size * out_dim);

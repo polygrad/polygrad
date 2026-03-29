@@ -894,11 +894,39 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   PolyUOp *loss_store = loss_sink->src[0]; /* SINK src[0] = STORE */
   PolyUOp *loss_value = loss_store->src[1]; /* STORE src[1] = value */
 
-  /* Build param buffer array */
+  /* Build param target array: use shaped views (RESHAPE) from the loss graph,
+   * not raw BUFFERs. Autograd needs the shaped view to produce correct
+   * gradient kernels. Raw BUFFER(N) is flat -- differentiating w.r.t. it
+   * loses shape context and produces wrong kernel fusion.
+   * Mirrors nn.c:490 pattern (param_bufs vs param_uops). */
   PolyUOp **param_bufs = malloc((size_t)inst->n_params * sizeof(PolyUOp *));
   if (!param_bufs) return -1;
-  for (int i = 0; i < inst->n_params; i++)
-    param_bufs[i] = inst->bufs[inst->param_indices[i]].buffer;
+
+  int n_topo;
+  PolyUOp **topo = poly_toposort(inst->ctx, loss_value, &n_topo);
+
+  for (int i = 0; i < inst->n_params; i++) {
+    NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+    PolyUOp *raw_buf = pb->buffer;
+    PolyUOp *shaped = NULL;
+
+    /* Find the RESHAPE in the loss graph whose src[0] is this raw buffer
+     * and whose shape matches the declared param shape. */
+    for (int j = 0; j < n_topo; j++) {
+      if (topo[j]->op != POLY_OP_RESHAPE || topo[j]->n_src < 1 ||
+          topo[j]->src[0] != raw_buf) continue;
+      PolyShape rs = poly_uop_shape(inst->ctx, topo[j]);
+      bool match = (rs.ndim == pb->ndim);
+      if (match) {
+        for (int d = 0; d < rs.ndim; d++) {
+          if (rs.dims[d] != pb->shape[d]) { match = false; break; }
+        }
+      }
+      if (rs.ndim > 0 && rs.dims) free(rs.dims);
+      if (match) { shaped = topo[j]; break; }
+    }
+    param_bufs[i] = shaped ? shaped : raw_buf;
+  }
 
   /* Compute gradients */
   PolyUOp **grads = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
@@ -1165,7 +1193,20 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 
   for (int i = 0; i < np; i++) {
     PolyUOp *param_buf = inst->bufs[inst->param_indices[i]].buffer;
+    NamedBuf *pb_opt = &inst->bufs[inst->param_indices[i]];
+
+    /* Flatten gradient to 1D to match the flat param buffer.
+     * The grad UOp may be shaped (e.g. [3,2]) because autograd now
+     * differentiates w.r.t. the shaped view, not the raw buffer. */
     PolyUOp *grad = vag->grad_uops[i];
+    {
+      PolyShape gs = poly_uop_shape(ctx, grad);
+      if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != pb_opt->numel)) {
+        int64_t flat[1] = { pb_opt->numel };
+        grad = poly_reshape(ctx, grad, flat, 1);
+      }
+      if (gs.dims) free(gs.dims);
+    }
 
     switch (o->kind) {
     case POLY_OPTIM_SGD: {
