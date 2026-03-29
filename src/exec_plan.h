@@ -100,6 +100,7 @@ typedef struct {
   int (*copy_between)(void *dst_handle, const void *src_handle, size_t nbytes,
                       void *dev_ctx);
   void *dev_ctx; /* NULL for CPU, CUcontext* for CUDA, etc. */
+  bool host_addressable; /* true if alloc'd pointers are host-dereferenceable */
 } PolyAllocator;
 
 /* ── Prepared buffer slot ────────────────────────────────────────────── */
@@ -363,6 +364,9 @@ extern const PolyAllocator POLY_HIP_ALLOCATOR;
 /* Returns the backend descriptor for a device, or NULL if unsupported
  * in this build. */
 const PolyBackendDesc *poly_backend_get(PolyDeviceId device);
+
+/* True if the device's allocator produces host-dereferenceable pointers. */
+bool poly_device_is_host_addressable(PolyDeviceId device);
 
 /* ── Backward compatibility ──────────────────────────────────────────── */
 

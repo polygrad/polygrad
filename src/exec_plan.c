@@ -259,6 +259,7 @@ const PolyAllocator POLY_CPU_ALLOCATOR = {
   .copy_in = cpu_copy_in,
   .copy_out = cpu_copy_out,
   .copy_between = cpu_copy_between,
+  .host_addressable = true,
   .dev_ctx = NULL,
 };
 
@@ -945,6 +946,11 @@ const PolyBackendDesc *poly_backend_get(PolyDeviceId device) {
   if (device < 0 || (size_t)device >= N_BACKENDS) return NULL;
   if (!BACKENDS[device].name) return NULL;
   return &BACKENDS[device];
+}
+
+bool poly_device_is_host_addressable(PolyDeviceId device) {
+  const PolyBackendDesc *be = poly_backend_get(device);
+  return be && be->get_allocator()->host_addressable;
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */

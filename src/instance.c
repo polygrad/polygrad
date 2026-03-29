@@ -65,6 +65,7 @@ typedef struct {
   PolyUOp *combined_sink;           /* fwd+bwd+optimizer SINK */
   PolyUOp *loss_out_buf;            /* BUFFER UOp for loss scalar output */
   float loss_data;                  /* scalar loss value after step */
+  PolyBufferHandle loss_handle;     /* device-aware handle for loss output */
 
   /* Moment buffers (Adam/AdamW only) */
   PolyUOp **m_bufs;                /* [n_params] first moment BUFFER UOps */
@@ -410,8 +411,7 @@ static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len);
  * Returns 0 on success or if already on host; -1 on readback failure. */
 static int sync_buf_to_host(PolyInstance *inst, int bi) {
   if (!inst->buf_handles) return 0;
-  PolyDeviceId dom = inst->buf_handles[bi].domain;
-  if (dom == POLY_DEVICE_CPU || dom == POLY_DEVICE_INTERP) return 0;
+  if (poly_device_is_host_addressable(inst->buf_handles[bi].domain)) return 0;
   size_t nbytes = (size_t)inst->bufs[bi].numel * sizeof(float);
   return readback_handle(&inst->buf_handles[bi], inst->bufs[bi].data, nbytes);
 }
@@ -461,7 +461,7 @@ float *poly_instance_buf_data(PolyInstance *inst, int i,
 
 static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
   if (!h || !h->ptr || !dst || len == 0) return -1;
-  if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP) {
+  if (poly_device_is_host_addressable(h->domain)) {
     memcpy(dst, h->ptr, len);
     return 0;
   }
@@ -473,7 +473,7 @@ static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
 
 static int upload_handle(PolyBufferHandle *h, const void *src, size_t len) {
   if (!h || !h->ptr || !src || len == 0) return -1;
-  if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP) {
+  if (poly_device_is_host_addressable(h->domain)) {
     memcpy(h->ptr, src, len);
     return 0;
   }
@@ -548,6 +548,11 @@ int poly_instance_import_weights(PolyInstance *inst,
       /* Continue - non-fatal */
     } else if (inst->bufs[bi].data && views[i].numel == inst->bufs[bi].numel) {
       memcpy(inst->bufs[bi].data, views[i].data, views[i].numel * sizeof(float));
+      /* Sync to device if buffer handle is on non-host memory */
+      if (inst->buf_handles &&
+          !poly_device_is_host_addressable(inst->buf_handles[bi].domain))
+        upload_handle(&inst->buf_handles[bi], inst->bufs[bi].data,
+                      views[i].numel * sizeof(float));
     } else if (inst->bufs[bi].data) {
       fprintf(stderr, "poly_instance_import_weights: shape mismatch for '%s' "
               "(expected %lld, got %lld)\n", views[i].name,
@@ -654,14 +659,10 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
     if (nbytes == 0) continue;
 
-    /* For host-memory devices (CPU, INTERP, WASM_JIT), point at existing data */
-    if (resolved == POLY_DEVICE_CPU || resolved == POLY_DEVICE_INTERP
-#ifdef __EMSCRIPTEN__
-        || resolved == POLY_DEVICE_WASM_JIT
-#endif
-    ) {
+    /* For host-addressable devices, point at existing data */
+    if (poly_device_is_host_addressable(resolved)) {
       /* Free old device handle if it was device-owned */
-      if (h->owned && h->domain != POLY_DEVICE_CPU && h->domain != POLY_DEVICE_INTERP) {
+      if (h->owned && !poly_device_is_host_addressable(h->domain)) {
         const PolyBackendDesc *old_be = poly_backend_get(h->domain);
         if (old_be) {
           const PolyAllocator *old_alloc = old_be->get_allocator();
@@ -687,8 +688,8 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     if (inst->bufs[i].data)
       alloc->copy_in(dptr, inst->bufs[i].data, nbytes, alloc->dev_ctx);
 
-    /* Free old device handle if owned and from a different device-memory domain */
-    if (h->owned && h->ptr && h->domain != POLY_DEVICE_CPU) {
+    /* Free old device handle if owned and from a non-host domain */
+    if (h->owned && h->ptr && !poly_device_is_host_addressable(h->domain)) {
       const PolyBackendDesc *old_be = poly_backend_get(h->domain);
       if (old_be) old_be->get_allocator()->free(h->ptr,
                     old_be->get_allocator()->dev_ctx);
@@ -724,6 +725,23 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
             alloc->copy_in(vp, ts->v_datas[i], ts->v_handles[i].nbytes, alloc->dev_ctx);
           ts->v_handles[i] = (PolyBufferHandle){
             .ptr = vp, .nbytes = ts->v_handles[i].nbytes,
+            .domain = resolved, .owned = true,
+          };
+        }
+      }
+    }
+    /* Migrate loss output handle */
+    if (ts->loss_handle.domain != resolved) {
+      if (poly_device_is_host_addressable(resolved)) {
+        ts->loss_handle = (PolyBufferHandle){
+          .ptr = &ts->loss_data, .nbytes = sizeof(float),
+          .domain = resolved, .owned = false,
+        };
+      } else {
+        void *lp = alloc->alloc(sizeof(float), alloc->dev_ctx);
+        if (lp) {
+          ts->loss_handle = (PolyBufferHandle){
+            .ptr = lp, .nbytes = sizeof(float),
             .domain = resolved, .owned = true,
           };
         }
@@ -773,7 +791,7 @@ static PolyBufferBinding *build_bindings_for_realize(
     if (!io[i].data) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) continue;
-    if (bindings[bi].handle.domain != POLY_DEVICE_CPU) {
+    if (!poly_device_is_host_addressable(bindings[bi].handle.domain)) {
       /* Upload host IO data into device buffer */
       const PolyBackendDesc *bd = poly_backend_get(bindings[bi].handle.domain);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
@@ -840,7 +858,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
     if (!io[i].data || !io[i].name) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) continue;
-    if (inst->buf_handles[bi].domain != POLY_DEVICE_CPU) {
+    if (!poly_device_is_host_addressable(inst->buf_handles[bi].domain)) {
       const PolyBackendDesc *bd = poly_backend_get(inst->buf_handles[bi].domain);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in)
@@ -1123,6 +1141,28 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
 
 /* ── Optimizer Graph Builder ─────────────────────────────────────────── */
 
+/* Create a buffer handle on the given device. For host-addressable devices,
+ * points directly at host_data. For device memory, allocates and uploads. */
+static PolyBufferHandle make_handle(void *host_data, size_t nbytes,
+                                     PolyDeviceId dev,
+                                     const PolyAllocator *alloc) {
+  if (poly_device_is_host_addressable(dev)) {
+    return (PolyBufferHandle){
+      .ptr = host_data, .nbytes = nbytes, .domain = dev, .owned = false,
+    };
+  }
+  void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
+  if (!dptr) {
+    fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
+    return (PolyBufferHandle){ .ptr = NULL, .nbytes = 0, .domain = dev, .owned = false };
+  }
+  if (host_data)
+    alloc->copy_in(dptr, host_data, nbytes, alloc->dev_ctx);
+  return (PolyBufferHandle){
+    .ptr = dptr, .nbytes = nbytes, .domain = dev, .owned = true,
+  };
+}
+
 /* Build optimizer UOp graph (fwd+bwd+optimizer as a single combined SINK).
  * Gradients are consumed directly by ASSIGN ops -- not materialized to
  * separate output buffers (D1: no grad stores in optimizer SINK). */
@@ -1144,6 +1184,14 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   PolyDType out_dt = poly_dtype_scalar(vag->loss_value->dtype);
   if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
   ts->loss_out_buf = poly_buffer(ctx, out_dt, 1);
+
+  /* Initialize all train handles on the current device so kernels write
+   * to the correct memory domain (host or device). */
+  PolyDeviceId cur_dev = inst->buf_handles ? inst->buf_handles[0].domain
+                                            : POLY_DEVICE_CPU;
+  const PolyBackendDesc *cur_be = poly_backend_get(cur_dev);
+  const PolyAllocator *alloc = cur_be ? cur_be->get_allocator() : NULL;
+  ts->loss_handle = make_handle(&ts->loss_data, sizeof(float), cur_dev, alloc);
 
   /* Count SINK sources: loss_store + param assigns + moment assigns */
   int has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
@@ -1176,14 +1224,8 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     ts->bc2_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
     ts->bc1_data = 1.0f;  /* will be updated before each step */
     ts->bc2_data = 1.0f;
-    ts->bc1_handle = (PolyBufferHandle){
-      .ptr = &ts->bc1_data, .nbytes = sizeof(float),
-      .domain = POLY_DEVICE_CPU, .owned = false,
-    };
-    ts->bc2_handle = (PolyBufferHandle){
-      .ptr = &ts->bc2_data, .nbytes = sizeof(float),
-      .domain = POLY_DEVICE_CPU, .owned = false,
-    };
+    ts->bc1_handle = make_handle(&ts->bc1_data, sizeof(float), cur_dev, alloc);
+    ts->bc2_handle = make_handle(&ts->bc2_data, sizeof(float), cur_dev, alloc);
 
     for (int i = 0; i < np; i++) {
       NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
@@ -1196,14 +1238,8 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       ts->v_datas[i] = calloc((size_t)numel, sizeof(float));
 
       size_t nbytes = (size_t)numel * sizeof(float);
-      ts->m_handles[i] = (PolyBufferHandle){
-        .ptr = ts->m_datas[i], .nbytes = nbytes,
-        .domain = POLY_DEVICE_CPU, .owned = false,
-      };
-      ts->v_handles[i] = (PolyBufferHandle){
-        .ptr = ts->v_datas[i], .nbytes = nbytes,
-        .domain = POLY_DEVICE_CPU, .owned = false,
-      };
+      ts->m_handles[i] = make_handle(ts->m_datas[i], nbytes, cur_dev, alloc);
+      ts->v_handles[i] = make_handle(ts->v_datas[i], nbytes, cur_dev, alloc);
     }
   }
 
@@ -1343,7 +1379,7 @@ int poly_instance_train_step(PolyInstance *inst,
     float bc2 = 1.0f / (1.0f - powf(o->beta2, (float)o->step));
 
     /* Device-aware update (D2) */
-    if (ts->bc1_handle.domain != POLY_DEVICE_CPU) {
+    if (!poly_device_is_host_addressable(ts->bc1_handle.domain)) {
       const PolyBackendDesc *bd = poly_backend_get(ts->bc1_handle.domain);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in) {
@@ -1372,7 +1408,7 @@ int poly_instance_train_step(PolyInstance *inst,
     }
 
     extra_bufs[0] = ts->loss_out_buf;
-    extra_ptrs[0] = &ts->loss_data;
+    extra_ptrs[0] = ts->loss_handle.ptr;
     if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
       for (int i = 0; i < np; i++) {
         extra_bufs[1 + i] = ts->m_bufs[i];
@@ -1381,9 +1417,9 @@ int poly_instance_train_step(PolyInstance *inst,
         extra_ptrs[1 + np + i] = ts->v_handles[i].ptr;
       }
       extra_bufs[1 + 2*np] = ts->bc1_buf;
-      extra_ptrs[1 + 2*np] = &ts->bc1_data;
+      extra_ptrs[1 + 2*np] = ts->bc1_handle.ptr;
       extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
-      extra_ptrs[1 + 2*np + 1] = &ts->bc2_data;
+      extra_ptrs[1 + 2*np + 1] = ts->bc2_handle.ptr;
     }
 
     PolyDeviceId device = inst->buf_handles[0].domain;
@@ -1400,7 +1436,7 @@ int poly_instance_train_step(PolyInstance *inst,
     if (!io[i].data || !io[i].name) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) continue;
-    if (inst->buf_handles[bi].domain != POLY_DEVICE_CPU) {
+    if (!poly_device_is_host_addressable(inst->buf_handles[bi].domain)) {
       const PolyBackendDesc *bd = poly_backend_get(inst->buf_handles[bi].domain);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in)
@@ -1419,7 +1455,9 @@ int poly_instance_train_step(PolyInstance *inst,
   int ret = poly_compiled_plan_run(c->plan, c->slot_data, c->n_slots, NULL, 0);
   if (ret != 0) { o->step--; return ret; }
 
-  /* Read back loss */
+  /* Read back loss from device to host if not host-addressable */
+  if (!poly_device_is_host_addressable(ts->loss_handle.domain))
+    readback_handle(&ts->loss_handle, &ts->loss_data, sizeof(float));
   if (loss_out) *loss_out = ts->loss_data;
 
   /* Update instance "loss" named buffer for consumers */
