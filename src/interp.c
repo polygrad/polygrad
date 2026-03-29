@@ -557,12 +557,18 @@ static int interp_region(PolyUOp **lin, int n_lin, int start, int end,
         return -1;
       }
       PolyDType store_dt = poly_dtype_scalar(u->src[0]->dtype);
+      PolyDType val_dt = poly_dtype_scalar(u->src[1]->dtype);
       int scalar_size = poly_dtype_itemsize(store_dt);
       if (scalar_size < 1) scalar_size = 1;
       char *ptr = (char *)iv_get(&vals[src0], 0).p;
       int cnt = vals[src1].count;
-      for (int k = 0; k < cnt; k++)
-        mem_store_scalar(ptr + k * scalar_size, iv_get(&vals[src1], k), store_dt);
+      bool need_cast = (store_dt.bitsize != val_dt.bitsize ||
+                        poly_dtype_is_float(store_dt) != poly_dtype_is_float(val_dt));
+      for (int k = 0; k < cnt; k++) {
+        InterpLane v = iv_get(&vals[src1], k);
+        if (need_cast) v = cast_lane(v, val_dt, store_dt);
+        mem_store_scalar(ptr + k * scalar_size, v, store_dt);
+      }
       break;
     }
 
