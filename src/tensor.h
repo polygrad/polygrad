@@ -147,6 +147,12 @@ PolyExpr pe_rope(PolyExpr x, PolyExpr freqs_cos, PolyExpr freqs_sin);
 PolyExpr pe_repeat_interleave(PolyExpr x, int repeats, int dim);
 PolyExpr pe_chunk(PolyExpr x, int n_chunks, int dim, PolyExpr *out_chunks);
 
+/* ── Loss functions ────────────────────────────────────────────────────── */
+
+PolyExpr pe_mse_loss(PolyExpr pred, PolyExpr target);
+PolyExpr pe_mae_loss(PolyExpr pred, PolyExpr target);
+PolyExpr pe_bce_loss(PolyExpr input, PolyExpr target);
+
 /* ── Inference utilities ───────────────────────────────────────────────── */
 
 PolyExpr pe_argmax(PolyExpr x, int axis);

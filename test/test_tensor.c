@@ -530,6 +530,63 @@ TEST(pe, nn_params_collection) {
   PASS();
 }
 
+/* ── Loss functions ───────────────────────────────────────────────────── */
+
+TEST(pe, mse_loss_e2e) {
+  /* mse([1,2,3], [1,2,3]) = 0 */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr pred = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr tgt = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
+  PolyExpr r = pe_mse_loss(pred, tgt);
+  ASSERT_TRUE(pe_valid(r));
+
+  float dp[] = {1, 2, 3}, dt[] = {1, 2, 3};
+  float dout[1] = {999};
+  PolyExpr leaves[] = {pred, tgt};
+  float *ld[] = {dp, dt};
+  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, ld, 2), 0);
+  ASSERT_FLOAT_EQ(dout[0], 0.0f, 1e-6);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, mse_loss_nonzero) {
+  /* mse([1,2,3], [4,5,6]) = mean([9,9,9]) = 9 */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr pred = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr tgt = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
+  PolyExpr r = pe_mse_loss(pred, tgt);
+
+  float dp[] = {1, 2, 3}, dt[] = {4, 5, 6};
+  float dout[1] = {0};
+  PolyExpr leaves[] = {pred, tgt};
+  float *ld[] = {dp, dt};
+  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, ld, 2), 0);
+  ASSERT_FLOAT_EQ(dout[0], 9.0f, 1e-4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, mae_loss_e2e) {
+  /* mae([1,2,3], [4,6,3]) = mean([3,4,0]) = 7/3 = 2.333 */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr pred = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr tgt = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
+  PolyExpr r = pe_mae_loss(pred, tgt);
+
+  float dp[] = {1, 2, 3}, dt[] = {4, 6, 3};
+  float dout[1] = {0};
+  PolyExpr leaves[] = {pred, tgt};
+  float *ld[] = {dp, dt};
+  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, ld, 2), 0);
+  ASSERT_FLOAT_EQ(dout[0], 7.0f / 3.0f, 1e-4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── Argmax / Argmin ──────────────────────────────────────────────────── */
 
 TEST(pe, argmax_1d) {

@@ -585,6 +585,44 @@ PolyExpr pe_chunk(PolyExpr x, int n_chunks, int dim, PolyExpr *out_chunks) {
   return out_chunks[0];  /* return first chunk for convenience */
 }
 
+/* ── Loss functions ────────────────────────────────────────────────────── */
+
+PolyExpr pe_mse_loss(PolyExpr pred, PolyExpr target) {
+  /* mean((pred - target)^2) */
+  if (!pe_valid(pred) || !pe_valid(target)) return fail();
+  PolyExpr diff = pe_sub(pred, target);
+  PolyExpr sq = pe_square(diff);
+  /* Reduce all dims */
+  PolyExpr r = sq;
+  for (int i = r.ndim - 1; i >= 0; i--)
+    r = pe_mean(r, i, 0);
+  return r;
+}
+
+PolyExpr pe_mae_loss(PolyExpr pred, PolyExpr target) {
+  /* mean(|pred - target|) */
+  if (!pe_valid(pred) || !pe_valid(target)) return fail();
+  PolyExpr diff = pe_abs(pe_sub(pred, target));
+  PolyExpr r = diff;
+  for (int i = r.ndim - 1; i >= 0; i--)
+    r = pe_mean(r, i, 0);
+  return r;
+}
+
+PolyExpr pe_bce_loss(PolyExpr input, PolyExpr target) {
+  /* -mean(target * log(input) + (1-target) * log(1-input)) */
+  if (!pe_valid(input) || !pe_valid(target)) return fail();
+  PolyExpr log_in = pe_log(input);
+  PolyExpr one = pe_const_float(input.ctx, 1.0);
+  PolyExpr log_1m = pe_log(pe_sub(pe_expand(one, input.shape, input.ndim), input));
+  PolyExpr loss = pe_neg(pe_add(pe_mul(target, log_in),
+                                pe_mul(pe_sub(pe_expand(one, target.shape, target.ndim), target), log_1m)));
+  PolyExpr r = loss;
+  for (int i = r.ndim - 1; i >= 0; i--)
+    r = pe_mean(r, i, 0);
+  return r;
+}
+
 /* ── Inference utilities ───────────────────────────────────────────────── */
 
 PolyExpr pe_argmax(PolyExpr x, int axis) {
