@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/model_nam.h"
+#include "../src/models/nam.h"
 #include "../src/instance.h"
 #include <string.h>
 #include <stdlib.h>

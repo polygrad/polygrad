@@ -520,7 +520,7 @@ TEST(cuda, realize_unified_reduce) {
 /* ══════════════════════════════════════════════════════════════════════ */
 
 #include "../src/instance.h"
-#include "../src/model_mlp.h"
+#include "../src/models/mlp.h"
 
 static PolyInstance *make_test_mlp(int n_in, int n_out) {
   char spec[256];

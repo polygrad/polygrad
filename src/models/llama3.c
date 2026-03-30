@@ -1,5 +1,5 @@
-#include "../modelzoo.h"
-#include "../../nn.h"
+#include "models.h"
+#include "../nn.h"
 #include <stdlib.h>
 #include <string.h>
 

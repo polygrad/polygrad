@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/model_mlp.h"
+#include "../src/models/mlp.h"
 #include "../src/instance.h"
 #include <string.h>
 #include <stdlib.h>

@@ -359,7 +359,7 @@ TEST(hip, e2e_reduce_sum) {
 /* ── Instance-level HIP tests ────────────────────────────────────────── */
 
 #include "../src/instance.h"
-#include "../src/model_mlp.h"
+#include "../src/models/mlp.h"
 
 static PolyInstance *hip_make_test_mlp(int n_in, int n_out) {
   char spec[256];
