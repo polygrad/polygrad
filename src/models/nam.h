@@ -13,7 +13,7 @@
 #ifndef POLY_MODEL_NAM_H
 #define POLY_MODEL_NAM_H
 
-#include "instance.h"
+#include "../instance.h"
 
 /*
  * Create a NAM instance from a JSON spec.

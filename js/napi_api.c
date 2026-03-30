@@ -14,9 +14,9 @@
 #include "frontend.h"
 #include "instance.h"
 #include "bundle.h"
-#include "model_mlp.h"
-#include "model_tabm.h"
-#include "model_nam.h"
+#include "models/mlp.h"
+#include "models/tabm.h"
+#include "models/nam.h"
 #include "scheduler.h"
 
 /* ── Error-checking macro ──────────────────────────────────────────────── */

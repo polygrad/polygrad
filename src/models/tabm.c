@@ -10,13 +10,13 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "model_tabm.h"
-#include "model_mlp.h"  /* poly_init_param_kaiming */
-#include "ir.h"
-#include "frontend.h"
-#include "scheduler.h"
-#include "safetensors.h"
-#include "../vendor/cjson/cJSON.h"
+#include "tabm.h"
+#include "mlp.h"  /* poly_init_param_kaiming */
+#include "../ir.h"
+#include "../frontend.h"
+#include "../scheduler.h"
+#include "../safetensors.h"
+#include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

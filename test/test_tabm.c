@@ -3,7 +3,7 @@
  */
 
 #include "test_harness.h"
-#include "../src/model_tabm.h"
+#include "../src/models/tabm.h"
 #include "../src/instance.h"
 #include <string.h>
 #include <stdlib.h>

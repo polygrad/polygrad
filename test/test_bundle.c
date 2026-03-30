@@ -7,7 +7,7 @@
 #include "../src/ir.h"
 #include "../src/instance.h"
 #include "../src/frontend.h"
-#include "../src/model_mlp.h"
+#include "../src/models/mlp.h"
 #include <string.h>
 
 /* ── Basic encode/decode ─────────────────────────────────────────────── */

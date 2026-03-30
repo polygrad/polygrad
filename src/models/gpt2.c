@@ -12,14 +12,14 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "../modelzoo.h"
-#include "../../frontend.h"
-#include "../../instance.h"
-#include "../../ir.h"
-#include "../../safetensors.h"
-#include "../../scheduler.h"
-#include "../../nn.h"
-#include "../../../vendor/cjson/cJSON.h"
+#include "models.h"
+#include "../frontend.h"
+#include "../instance.h"
+#include "../ir.h"
+#include "../safetensors.h"
+#include "../scheduler.h"
+#include "../nn.h"
+#include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

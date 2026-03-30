@@ -12,7 +12,7 @@
 #ifndef POLY_MODEL_TABM_H
 #define POLY_MODEL_TABM_H
 
-#include "instance.h"
+#include "../instance.h"
 
 /*
  * Create a TabM instance from a JSON spec.

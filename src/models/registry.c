@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "modelzoo.h"
+#include "models.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <string.h>
 #include <stdlib.h>
