@@ -104,9 +104,16 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
                     PolyVarBinding *var_bindings, int n_var_bindings);
 
 /* FFI-friendlier variant: separate arrays of buffer pointers and data pointers.
- * buffers[i] is a BUFFER UOp, datas[i] is the corresponding host pointer. */
+ * buffers[i] is a BUFFER UOp, datas[i] is the corresponding host pointer.
+ * Device is inferred from POLY_DEVICE env var or defaults to CPU/WASM_JIT. */
 int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
                      PolyUOp **buffers, void **datas, int n);
+
+/* Same as poly_realize_flat but with explicit device selection.
+ * Use POLY_DEVICE_AUTO for default, or POLY_DEVICE_INTERP etc. */
+int poly_realize_flat_device(PolyCtx *ctx, PolyUOp *tensor_sink,
+                             PolyUOp **buffers, void **datas, int n,
+                             PolyDeviceId device);
 
 /* Stateful realize builder — simplest FFI surface (one pointer pair per call).
  * Usage: poly_realize_begin(ctx) → N× poly_realize_bind(ctx, buf, data) → poly_realize_exec(ctx, sink) */

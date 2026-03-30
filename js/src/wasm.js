@@ -75,7 +75,8 @@ function moduleCacheKey(hash, len) {
  * Create a WASM backend instance.
  * Returns a Promise<backend>.
  */
-async function createWasmBackend() {
+async function createWasmBackend(device) {
+  const deviceName = device || 'auto'
   const Module = await getModuleFactory()()
 
   // --- Heap accessors ---
@@ -118,6 +119,12 @@ async function createWasmBackend() {
     }
     return Module.__heapF32
   }
+
+  // --- Device selection (PolyDeviceId enum from exec_plan.h) ---
+  const DEVICE_IDS = { auto: 4, cpu: 4, interp: 2, wasm: 4, webgpu: 5 }
+  if (!(deviceName in DEVICE_IDS))
+    throw new Error('polygrad: unsupported WASM device \'' + deviceName + '\'')
+  const deviceId = DEVICE_IDS[deviceName]
 
   // --- Scratch pointers ---
   const _scratchLenPtr = Module._malloc(4)
@@ -256,7 +263,46 @@ async function createWasmBackend() {
     return next
   }
 
-  // --- Core kernel execution ---
+  // --- Realize via C backend vtable (interp, future webgpu) ---
+  async function realizeViaBackend(ctx, sink, numel, leafMap, isF64) {
+    return serializeRealize(ctx, async () => {
+      const ArrayType = isF64 ? Float64Array : Float32Array
+      const entries = [...leafMap.entries()]
+      const n = entries.length
+
+      const bufsPtr = Module._malloc(n * 4)
+      const datasPtr = Module._malloc(n * 4)
+      const heapPtrs = []
+
+      try {
+        for (let i = 0; i < n; i++) {
+          const [bufUop, jsArr] = entries[i]
+          const nbytes = jsArr.byteLength
+          const hPtr = Module._malloc(nbytes)
+          heapPtrs.push(hPtr)
+          heapU8().set(new Uint8Array(jsArr.buffer, jsArr.byteOffset, nbytes), hPtr)
+          Module.HEAP32[(bufsPtr >> 2) + i] = bufUop
+          Module.HEAP32[(datasPtr >> 2) + i] = hPtr
+        }
+
+        const rc = Module._poly_realize_flat_device(ctx, sink, bufsPtr, datasPtr, n, deviceId)
+        if (rc !== 0) throw new Error('poly_realize_flat_device failed (rc=' + rc + ')')
+
+        // Copy output from last binding (same convention as native.js)
+        const lastPtr = heapPtrs[heapPtrs.length - 1]
+        const lastArr = entries[entries.length - 1][1]
+        const out = new ArrayType(lastArr.length)
+        out.set(new ArrayType(Module.HEAPF32.buffer, lastPtr, lastArr.length))
+        return out
+      } finally {
+        for (const p of heapPtrs) Module._free(p)
+        Module._free(bufsPtr)
+        Module._free(datasPtr)
+      }
+    })
+  }
+
+  // --- Core WASM kernel execution ---
   async function renderAndExec(ctx, sink, numel, leafMap, isF64) {
     return serializeRealize(ctx, async () => {
       const plan = Module._poly_render_step_wasm_plan(ctx, sink)
@@ -660,7 +706,10 @@ async function createWasmBackend() {
       const inst = Module._poly_instance_from_ir(irPtr, irBytes.length, weightsPtr, weightsLen)
       Module._free(irPtr)
       if (weightsPtr) Module._free(weightsPtr)
-      if (inst) Module._poly_instance_set_device(inst, 0)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed for device ' + deviceName)
+      }
       return inst || null
     },
 
@@ -669,7 +718,10 @@ async function createWasmBackend() {
       const specPtr = allocBytes(bytes)
       const inst = Module._poly_mlp_instance(specPtr, bytes.length)
       Module._free(specPtr)
-      if (inst) Module._poly_instance_set_device(inst, 0)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed for device ' + deviceName)
+      }
       return inst || null
     },
 
@@ -678,7 +730,10 @@ async function createWasmBackend() {
       const specPtr = allocBytes(bytes)
       const inst = Module._poly_tabm_instance(specPtr, bytes.length)
       Module._free(specPtr)
-      if (inst) Module._poly_instance_set_device(inst, 0)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed for device ' + deviceName)
+      }
       return inst || null
     },
 
@@ -687,7 +742,10 @@ async function createWasmBackend() {
       const specPtr = allocBytes(bytes)
       const inst = Module._poly_nam_instance(specPtr, bytes.length)
       Module._free(specPtr)
-      if (inst) Module._poly_instance_set_device(inst, 0)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed for device ' + deviceName)
+      }
       return inst || null
     },
 
@@ -777,7 +835,10 @@ async function createWasmBackend() {
       const ptr = allocBytes(bytes)
       const inst = Module._poly_instance_from_bundle(ptr, bytes.length)
       Module._free(ptr)
-      if (inst) Module._poly_instance_set_device(inst, 0)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed for device ' + deviceName)
+      }
       return inst || null
     },
 
@@ -841,8 +902,8 @@ async function createWasmBackend() {
     instance,
     int64: BigInt,
     readShape: readOutShape,
-    realize: renderAndExec,
-    caps: { simd: true, f64: true, target: 'wasm', device: 'cpu' },
+    realize: deviceId === DEVICE_IDS.wasm ? renderAndExec : realizeViaBackend,
+    caps: { simd: true, f64: true, target: 'wasm', device: deviceName },
     destroy: () => {
       ffi.poly_ctx_destroy(ctx)
       _ctxMemory.delete(ctx)

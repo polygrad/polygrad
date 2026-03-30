@@ -2541,21 +2541,37 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
   return ret;
 }
 
-#ifndef __EMSCRIPTEN__
-
 int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
                      PolyUOp **buffers, void **datas, int n) {
+  return poly_realize_flat_device(ctx, tensor_sink, buffers, datas, n,
+                                  POLY_DEVICE_AUTO);
+}
+
+int poly_realize_flat_device(PolyCtx *ctx, PolyUOp *tensor_sink,
+                             PolyUOp **buffers, void **datas, int n,
+                             PolyDeviceId device) {
+  /* datas[] are host pointers -- only host-addressable devices are valid.
+   * For device-memory backends (CUDA/HIP), use poly_realize with proper
+   * PolyBufferHandle bindings that carry device pointers. */
+  PolyDeviceId dom = (device == POLY_DEVICE_AUTO) ? POLY_DEVICE_CPU : device;
+  if (dom != POLY_DEVICE_AUTO && !poly_device_is_host_addressable(dom)) {
+    fprintf(stderr, "poly_realize_flat_device: device %d is not host-addressable, "
+            "use poly_realize with device-memory bindings\n", dom);
+    return -1;
+  }
   PolyBufferBinding *bindings = calloc((size_t)(n > 0 ? n : 1),
                                        sizeof(PolyBufferBinding));
   if (!bindings) return -1;
   for (int i = 0; i < n; i++) {
     bindings[i].buffer = buffers[i];
-    bindings[i].handle = (PolyBufferHandle){ datas[i], 0, POLY_DEVICE_CPU, false };
+    bindings[i].handle = (PolyBufferHandle){ datas[i], 0, dom, false };
   }
   int ret = poly_realize(ctx, tensor_sink, bindings, n);
   free(bindings);
   return ret;
 }
+
+#ifndef __EMSCRIPTEN__
 
 /* ── Stateful realize builder ────────────────────────────────────────── */
 

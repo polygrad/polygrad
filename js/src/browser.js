@@ -2,9 +2,11 @@
 
 const { createRuntime, normalizeOptions } = require('./runtime')
 
+const BROWSER_DEVICES = new Set(['auto', 'cpu', 'interp'])
+
 async function resolveBrowserTarget(name, opts) {
-  if (opts.device !== 'auto' && opts.device !== 'cpu') {
-    throw new Error(`polygrad: browser bundle only supports device='cpu' today (got ${opts.device})`)
+  if (!BROWSER_DEVICES.has(opts.device)) {
+    throw new Error(`polygrad: browser supports device=${[...BROWSER_DEVICES].join('/')} (got ${opts.device})`)
   }
   if (name === 'native') {
     throw new Error('polygrad: browser bundle does not support target=\'native\'')
@@ -13,7 +15,7 @@ async function resolveBrowserTarget(name, opts) {
     throw new Error(`polygrad: browser bundle only supports target='wasm' (got ${name})`)
   }
   const { createWasmBackend } = require('./wasm')
-  return createWasmBackend()
+  return createWasmBackend(opts.device)
 }
 
 async function create(opts) {

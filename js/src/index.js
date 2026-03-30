@@ -4,12 +4,8 @@ const { createRuntime, normalizeOptions } = require('./runtime')
 
 async function resolveNodeTarget(name, opts) {
   if (name === 'wasm') {
-    /* WASM target runs inside Emscripten -- only cpu/auto device makes sense */
-    if (opts.device !== 'auto' && opts.device !== 'cpu') {
-      throw new Error(`polygrad: wasm target only supports device='cpu' (got ${opts.device})`)
-    }
     const { createWasmBackend } = require('./wasm')
-    return createWasmBackend()
+    return createWasmBackend(opts.device)
   }
 
   if (name === 'native') {
@@ -29,7 +25,7 @@ async function resolveNodeTarget(name, opts) {
   } catch (e) { /* fall through to WASM */ }
 
   const { createWasmBackend } = require('./wasm')
-  return createWasmBackend()
+  return createWasmBackend(opts.device)
 }
 
 async function create(opts) {
