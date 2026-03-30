@@ -530,6 +530,87 @@ TEST(pe, nn_params_collection) {
   PASS();
 }
 
+/* ── Argmax / Argmin ──────────────────────────────────────────────────── */
+
+TEST(pe, argmax_1d) {
+  /* Reference (tinygrad): argmax([1,5,3,2,4]) = 1 */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){5}, 1);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
+  PolyExpr r = pe_argmax(x, 0);
+  ASSERT_TRUE(pe_valid(r));
+
+  /* argmax returns int32, cast to float for output buffer */
+  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
+  float dx[] = {1.0f, 5.0f, 3.0f, 2.0f, 4.0f};
+  float dout[1] = {0};
+  PolyExpr leaves[] = {x};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, argmax_2d_axis1) {
+  /* Reference (tinygrad): argmax([[1,5,3],[4,2,6]], axis=1) = [1, 2] */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2}, 1);
+  PolyExpr r = pe_argmax(x, 1);
+  ASSERT_TRUE(pe_valid(r));
+
+  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
+  float dx[] = {1,5,3, 4,2,6};
+  float dout[2] = {0};
+  PolyExpr leaves[] = {x};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);  /* index of 5 in [1,5,3] */
+  ASSERT_FLOAT_EQ(dout[1], 2.0f, 1e-4);  /* index of 6 in [4,2,6] */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, argmax_2d_axis0) {
+  /* Reference (tinygrad): argmax([[1,5,3],[4,2,6]], axis=0) = [1, 0, 1] */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
+  PolyExpr r = pe_argmax(x, 0);
+  ASSERT_TRUE(pe_valid(r));
+
+  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
+  float dx[] = {1,5,3, 4,2,6};
+  float dout[3] = {0};
+  PolyExpr leaves[] = {x};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);  /* max of col 0: 4 at row 1 */
+  ASSERT_FLOAT_EQ(dout[1], 0.0f, 1e-4);  /* max of col 1: 5 at row 0 */
+  ASSERT_FLOAT_EQ(dout[2], 1.0f, 1e-4);  /* max of col 2: 6 at row 1 */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, argmin_1d) {
+  /* argmin([1,5,3,2,4]) = 0 */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){5}, 1);
+  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
+  PolyExpr r = pe_argmin(x, 0);
+  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
+
+  float dx[] = {1.0f, 5.0f, 3.0f, 2.0f, 4.0f};
+  float dout[1] = {0};
+  PolyExpr leaves[] = {x};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 0.0f, 1e-4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── Softmax via PolyExpr ─────────────────────────────────────────────── */
 
 TEST(pe, softmax_e2e) {

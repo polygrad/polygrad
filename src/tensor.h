@@ -147,6 +147,11 @@ PolyExpr pe_rope(PolyExpr x, PolyExpr freqs_cos, PolyExpr freqs_sin);
 PolyExpr pe_repeat_interleave(PolyExpr x, int repeats, int dim);
 PolyExpr pe_chunk(PolyExpr x, int n_chunks, int dim, PolyExpr *out_chunks);
 
+/* ── Inference utilities ───────────────────────────────────────────────── */
+
+PolyExpr pe_argmax(PolyExpr x, int axis);
+PolyExpr pe_argmin(PolyExpr x, int axis);
+
 /* ── Precompute helpers ───────────────────────────────────────────────── */
 
 PolyExpr pe_precompute_freqs_cos(PolyCtx *ctx, int64_t dim, int64_t seq_len, double theta);

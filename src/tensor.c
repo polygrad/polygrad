@@ -585,6 +585,61 @@ PolyExpr pe_chunk(PolyExpr x, int n_chunks, int dim, PolyExpr *out_chunks) {
   return out_chunks[0];  /* return first chunk for convenience */
 }
 
+/* ── Inference utilities ───────────────────────────────────────────────── */
+
+PolyExpr pe_argmax(PolyExpr x, int axis) {
+  /*
+   * Port of tinygrad Tensor.argmax:
+   *   m = (x == x.max(axis, keepdim=True))
+   *   idx = m.float() * arange(N, 0, -1).reshape(...)
+   *   return N - idx.max(axis).cast(int32)
+   *
+   * The descending arange ensures first-occurrence wins on ties.
+   */
+  if (!pe_valid(x)) return fail();
+  if (axis < 0) axis += x.ndim;
+  if (axis < 0 || axis >= x.ndim) return fail();
+
+  int64_t N = x.shape[axis];
+
+  /* max with keepdim */
+  PolyExpr x_max = pe_max(x, axis, 1);
+
+  /* Broadcast x_max to match x shape for comparison */
+  PolyExpr x_max_bc = pe_expand(x_max, x.shape, x.ndim);
+
+  /* m = (x == x_max) as float */
+  PolyExpr m = pe_eq(x, x_max_bc);
+  PolyExpr m_f = pe_cast(m, POLY_FLOAT32);
+
+  /* Build descending arange: [N, N-1, ..., 1] reshaped for broadcasting */
+  /* arange(N, 0, -1) = N - arange(0, N, 1) */
+  PolyExpr rng = pe_arange(x.ctx, 0.0, (double)N, 1.0);
+  PolyExpr desc = pe_add_scalar(pe_neg(rng), (double)N);  /* N - arange */
+
+  /* Reshape desc to broadcast along the target axis */
+  int64_t bc_shape[PE_MAX_DIMS];
+  for (int i = 0; i < x.ndim; i++) bc_shape[i] = 1;
+  bc_shape[axis] = N;
+  PolyExpr desc_r = pe_reshape(desc, bc_shape, x.ndim);
+  PolyExpr desc_bc = pe_expand(desc_r, x.shape, x.ndim);
+
+  /* idx = m * desc_arange */
+  PolyExpr idx = pe_mul(m_f, desc_bc);
+
+  /* result = N - idx.max(axis) */
+  PolyExpr idx_max = pe_max(idx, axis, 0);
+  PolyExpr result = pe_add_scalar(pe_neg(idx_max), (double)N);
+
+  /* Cast to int32 */
+  return pe_cast(result, POLY_INT32);
+}
+
+PolyExpr pe_argmin(PolyExpr x, int axis) {
+  /* argmin(x) = argmax(-x) */
+  return pe_argmax(pe_neg(x), axis);
+}
+
 /* ── Precompute helpers ───────────────────────────────────────────────── */
 
 /* Precompute cos/sin for RoPE: freqs = 1/(theta^(arange(0,dim,2)/dim))
