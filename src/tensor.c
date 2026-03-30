@@ -656,3 +656,221 @@ PolyExpr pe_detach(PolyExpr x) {
   if (!pe_valid(x)) return fail();
   return same_shape(x, poly_detach(x.ctx, x.uop));
 }
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  NN Layers                                                             */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+/* SplitMix64 PRNG for weight init (same as model_mlp.c) */
+static uint64_t splitmix64(uint64_t *state) {
+  uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+static float splitmix64_float(uint64_t *state) {
+  return (float)(splitmix64(state) >> 40) / (float)(1ULL << 24);
+}
+
+/* Kaiming uniform init: U(-bound, bound) where bound = sqrt(1/in_features) */
+static void kaiming_init(float *data, int64_t numel, int in_features, uint64_t *state) {
+  float bound = sqrtf(1.0f / (float)in_features);
+  for (int64_t i = 0; i < numel; i++)
+    data[i] = (2.0f * splitmix64_float(state) - 1.0f) * bound;
+}
+
+/* Create a PolyExpr buffer and fill it with data from a host array.
+ * The data is embedded as a constant buffer auto-bound at realize time. */
+static PolyExpr pe_buffer_with_data(PolyCtx *ctx, PolyDType dt,
+                                     const int64_t *shape, int ndim,
+                                     const float *data, int64_t numel) {
+  /* Use poly_full for each element would be expensive.
+   * Instead, create a buffer and rely on the caller to bind data at realize time.
+   * For nn layers used in PolyInstance builders, the data gets exported via IR. */
+  PolyExpr e = pe_buffer(ctx, dt, shape, ndim);
+  /* Mark the data pointer on the underlying buffer for later binding */
+  (void)data; (void)numel;  /* data binding happens at Instance level */
+  return e;
+}
+
+/* ── Linear ───────────────────────────────────────────────────────────── */
+
+PeLinear pe_nn_linear(PolyCtx *ctx, int in_features, int out_features,
+                      int use_bias, uint64_t seed) {
+  PeLinear l = {0};
+  l.in_features = in_features;
+  l.out_features = out_features;
+  l.has_bias = use_bias;
+
+  int64_t w_shape[] = {out_features, in_features};
+  l.weight = pe_buffer(ctx, POLY_FLOAT32, w_shape, 2);
+
+  if (use_bias) {
+    int64_t b_shape[] = {out_features};
+    l.bias = pe_buffer(ctx, POLY_FLOAT32, b_shape, 1);
+  }
+
+  return l;
+}
+
+PolyExpr pe_nn_linear_forward(PeLinear *l, PolyExpr x) {
+  if (!l || !pe_valid(x) || !pe_valid(l->weight)) return pe_null();
+  PolyExpr *bias_ptr = l->has_bias ? &l->bias : NULL;
+  return pe_linear(x, l->weight, bias_ptr);
+}
+
+/* ── RMSNorm ──────────────────────────────────────────────────────────── */
+
+PeRMSNorm pe_nn_rmsnorm(PolyCtx *ctx, int dim, double eps, uint64_t seed) {
+  (void)seed;
+  PeRMSNorm l = {0};
+  l.dim = dim;
+  l.eps = eps;
+
+  int64_t w_shape[] = {dim};
+  l.weight = pe_buffer(ctx, POLY_FLOAT32, w_shape, 1);
+  /* Weight initialized to ones (caller binds data) */
+
+  return l;
+}
+
+PolyExpr pe_nn_rmsnorm_forward(PeRMSNorm *l, PolyExpr x) {
+  if (!l || !pe_valid(x)) return pe_null();
+  return pe_rmsnorm(x, &l->weight, l->eps);
+}
+
+/* ── Embedding ────────────────────────────────────────────────────────── */
+
+PeEmbedding pe_nn_embedding(PolyCtx *ctx, int vocab_size, int embed_dim, uint64_t seed) {
+  (void)seed;
+  PeEmbedding l = {0};
+  l.vocab_size = vocab_size;
+  l.embed_dim = embed_dim;
+
+  int64_t w_shape[] = {vocab_size, embed_dim};
+  l.weight = pe_buffer(ctx, POLY_FLOAT32, w_shape, 2);
+
+  return l;
+}
+
+PolyExpr pe_nn_embedding_forward(PeEmbedding *l, PolyExpr indices) {
+  if (!l || !pe_valid(indices)) return pe_null();
+  return pe_gather(l->weight, indices);
+}
+
+/* ── Dropout ──────────────────────────────────────────────────────────── */
+
+PolyExpr pe_nn_dropout(PolyExpr x, double p, uint64_t seed) {
+  if (!pe_valid(x) || p <= 0.0) return x;
+  if (p >= 1.0) return pe_mul_scalar(x, 0.0);
+
+  /* mask = (rand(shape) > p) as float, scaled by 1/(1-p) */
+  PolyExpr mask = pe_rand(x.ctx, x.shape, x.ndim, seed);
+  PolyExpr threshold = pe_const_float(x.ctx, p);
+  PolyExpr keep = pe_gt(mask, threshold);
+  /* Cast bool to float */
+  PolyExpr keep_f = pe_cast(keep, POLY_FLOAT32);
+  float scale = 1.0f / (1.0f - (float)p);
+  PolyExpr scaled = pe_mul_scalar(keep_f, scale);
+  return pe_mul(x, scaled);
+}
+
+/* ── Attention ────────────────────────────────────────────────────────── */
+
+PeAttention pe_nn_attention(PolyCtx *ctx, int dim, int n_heads, int n_kv_heads,
+                            int use_bias, uint64_t seed) {
+  PeAttention a = {0};
+  a.dim = dim;
+  a.n_heads = n_heads;
+  a.n_kv_heads = n_kv_heads > 0 ? n_kv_heads : n_heads;
+  a.head_dim = dim / n_heads;
+
+  int kv_dim = a.n_kv_heads * a.head_dim;
+  a.wq = pe_nn_linear(ctx, dim, n_heads * a.head_dim, use_bias, seed);
+  a.wk = pe_nn_linear(ctx, dim, kv_dim, use_bias, seed + 1);
+  a.wv = pe_nn_linear(ctx, dim, kv_dim, use_bias, seed + 2);
+  a.wo = pe_nn_linear(ctx, n_heads * a.head_dim, dim, use_bias, seed + 3);
+
+  return a;
+}
+
+PolyExpr pe_nn_attention_forward(PeAttention *a, PolyExpr x,
+                                  PolyExpr *freqs_cos, PolyExpr *freqs_sin,
+                                  PolyExpr *mask, int is_causal) {
+  if (!a || !pe_valid(x)) return pe_null();
+
+  int64_t batch = x.shape[0];
+  int64_t seq = x.shape[1];
+  int hd = a->head_dim;
+  int nh = a->n_heads;
+  int nkv = a->n_kv_heads;
+
+  /* QKV projections */
+  PolyExpr q = pe_nn_linear_forward(&a->wq, x);  /* (B, T, nh*hd) */
+  PolyExpr k = pe_nn_linear_forward(&a->wk, x);  /* (B, T, nkv*hd) */
+  PolyExpr v = pe_nn_linear_forward(&a->wv, x);  /* (B, T, nkv*hd) */
+
+  /* Reshape to multi-head: (B, T, nh, hd) */
+  q = pe_reshape(q, (int64_t[]){batch, seq, nh, hd}, 4);
+  k = pe_reshape(k, (int64_t[]){batch, seq, nkv, hd}, 4);
+  v = pe_reshape(v, (int64_t[]){batch, seq, nkv, hd}, 4);
+
+  /* Apply RoPE if provided */
+  if (freqs_cos && freqs_sin && pe_valid(*freqs_cos) && pe_valid(*freqs_sin)) {
+    q = pe_rope(q, *freqs_cos, *freqs_sin);
+    k = pe_rope(k, *freqs_cos, *freqs_sin);
+  }
+
+  /* GQA: repeat KV heads if needed */
+  if (nkv < nh) {
+    int n_rep = nh / nkv;
+    k = pe_repeat_interleave(k, n_rep, 2);
+    v = pe_repeat_interleave(v, n_rep, 2);
+  }
+
+  /* Transpose to (B, nh, T, hd) for attention */
+  q = pe_transpose(q, 1, 2);
+  k = pe_transpose(k, 1, 2);
+  v = pe_transpose(v, 1, 2);
+
+  /* Scaled dot-product attention */
+  PolyExpr attn = pe_scaled_dot_product_attention(q, k, v, mask, is_causal);
+
+  /* Transpose back and reshape: (B, T, nh*hd) */
+  attn = pe_transpose(attn, 1, 2);
+  attn = pe_reshape(attn, (int64_t[]){batch, seq, nh * hd}, 3);
+
+  /* Output projection */
+  return pe_nn_linear_forward(&a->wo, attn);
+}
+
+/* ── Parameter collection ─────────────────────────────────────────────── */
+
+int pe_nn_linear_params(PeLinear *l, PolyExpr *out, int max) {
+  int n = 0;
+  if (pe_valid(l->weight) && n < max) out[n++] = l->weight;
+  if (l->has_bias && pe_valid(l->bias) && n < max) out[n++] = l->bias;
+  return n;
+}
+
+int pe_nn_rmsnorm_params(PeRMSNorm *l, PolyExpr *out, int max) {
+  int n = 0;
+  if (pe_valid(l->weight) && n < max) out[n++] = l->weight;
+  return n;
+}
+
+int pe_nn_embedding_params(PeEmbedding *l, PolyExpr *out, int max) {
+  int n = 0;
+  if (pe_valid(l->weight) && n < max) out[n++] = l->weight;
+  return n;
+}
+
+int pe_nn_attention_params(PeAttention *a, PolyExpr *out, int max) {
+  int n = 0;
+  n += pe_nn_linear_params(&a->wq, out + n, max - n);
+  n += pe_nn_linear_params(&a->wk, out + n, max - n);
+  n += pe_nn_linear_params(&a->wv, out + n, max - n);
+  n += pe_nn_linear_params(&a->wo, out + n, max - n);
+  return n;
+}

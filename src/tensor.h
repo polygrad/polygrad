@@ -160,6 +160,76 @@ PolyUOp *pe_sink1(PolyUOp *store);
 PolyExpr pe_assign(PolyExpr target, PolyExpr value);
 PolyExpr pe_detach(PolyExpr x);
 
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  NN Layers -- stateful modules using PolyExpr                          */
+/*  Mirrors tinygrad nn/__init__.py                                       */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Linear ───────────────────────────────────────────────────────────── */
+
+typedef struct {
+  PolyExpr weight;       /* (out_features, in_features) */
+  PolyExpr bias;         /* (out_features,) -- .uop=NULL if no bias */
+  int in_features;
+  int out_features;
+  int has_bias;
+} PeLinear;
+
+PeLinear pe_nn_linear(PolyCtx *ctx, int in_features, int out_features,
+                      int use_bias, uint64_t seed);
+PolyExpr pe_nn_linear_forward(PeLinear *l, PolyExpr x);
+
+/* ── RMSNorm ──────────────────────────────────────────────────────────── */
+
+typedef struct {
+  PolyExpr weight;       /* (dim,) */
+  int dim;
+  double eps;
+} PeRMSNorm;
+
+PeRMSNorm pe_nn_rmsnorm(PolyCtx *ctx, int dim, double eps, uint64_t seed);
+PolyExpr  pe_nn_rmsnorm_forward(PeRMSNorm *l, PolyExpr x);
+
+/* ── Embedding ────────────────────────────────────────────────────────── */
+
+typedef struct {
+  PolyExpr weight;       /* (vocab_size, embed_dim) */
+  int vocab_size;
+  int embed_dim;
+} PeEmbedding;
+
+PeEmbedding pe_nn_embedding(PolyCtx *ctx, int vocab_size, int embed_dim, uint64_t seed);
+PolyExpr    pe_nn_embedding_forward(PeEmbedding *l, PolyExpr indices);
+
+/* ── Dropout ──────────────────────────────────────────────────────────── */
+
+PolyExpr pe_nn_dropout(PolyExpr x, double p, uint64_t seed);
+
+/* ── Attention (multi-head) ───────────────────────────────────────────── */
+
+typedef struct {
+  PeLinear wq, wk, wv, wo;
+  int n_heads;
+  int n_kv_heads;       /* for GQA; == n_heads if no GQA */
+  int head_dim;
+  int dim;
+} PeAttention;
+
+PeAttention pe_nn_attention(PolyCtx *ctx, int dim, int n_heads, int n_kv_heads,
+                            int use_bias, uint64_t seed);
+PolyExpr    pe_nn_attention_forward(PeAttention *a, PolyExpr x,
+                                    PolyExpr *freqs_cos, PolyExpr *freqs_sin,
+                                    PolyExpr *mask, int is_causal);
+
+/* ── Layer parameter collection ───────────────────────────────────────── */
+
+/* Append all trainable PolyExpr params from a layer to the array.
+ * Returns number of params added. */
+int pe_nn_linear_params(PeLinear *l, PolyExpr *out, int max);
+int pe_nn_rmsnorm_params(PeRMSNorm *l, PolyExpr *out, int max);
+int pe_nn_embedding_params(PeEmbedding *l, PolyExpr *out, int max);
+int pe_nn_attention_params(PeAttention *a, PolyExpr *out, int max);
+
 #ifdef __cplusplus
 }
 #endif

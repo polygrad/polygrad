@@ -398,6 +398,138 @@ TEST(pe, rope_e2e) {
   PASS();
 }
 
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  NN Layer tests                                                        */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+TEST(pe, nn_linear_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PeLinear l = pe_nn_linear(ctx, 3, 4, 1, 42);
+  ASSERT_TRUE(pe_valid(l.weight));
+  ASSERT_INT_EQ(l.weight.ndim, 2);
+  ASSERT_INT_EQ(l.weight.shape[0], 4);
+  ASSERT_INT_EQ(l.weight.shape[1], 3);
+  ASSERT_TRUE(l.has_bias);
+  ASSERT_TRUE(pe_valid(l.bias));
+  ASSERT_INT_EQ(l.bias.shape[0], 4);
+
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
+  PolyExpr out = pe_nn_linear_forward(&l, x);
+  ASSERT_TRUE(pe_valid(out));
+  ASSERT_INT_EQ(out.ndim, 2);
+  ASSERT_INT_EQ(out.shape[0], 2);
+  ASSERT_INT_EQ(out.shape[1], 4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_linear_no_bias) {
+  PolyCtx *ctx = poly_ctx_new();
+  PeLinear l = pe_nn_linear(ctx, 5, 3, 0, 42);
+  ASSERT_TRUE(!l.has_bias);
+  ASSERT_TRUE(!pe_valid(l.bias));
+
+  PolyExpr params[4];
+  int np = pe_nn_linear_params(&l, params, 4);
+  ASSERT_INT_EQ(np, 1);  /* weight only */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_rmsnorm_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PeRMSNorm l = pe_nn_rmsnorm(ctx, 64, 1e-5, 42);
+  ASSERT_INT_EQ(l.dim, 64);
+  ASSERT_TRUE(pe_valid(l.weight));
+  ASSERT_INT_EQ(l.weight.shape[0], 64);
+
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 8, 64}, 3);
+  PolyExpr out = pe_nn_rmsnorm_forward(&l, x);
+  ASSERT_TRUE(pe_valid(out));
+  ASSERT_INT_EQ(out.ndim, 3);
+  ASSERT_INT_EQ(out.shape[2], 64);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_embedding_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PeEmbedding l = pe_nn_embedding(ctx, 100, 32, 42);
+  ASSERT_INT_EQ(l.vocab_size, 100);
+  ASSERT_INT_EQ(l.embed_dim, 32);
+  ASSERT_TRUE(pe_valid(l.weight));
+  ASSERT_INT_EQ(l.weight.shape[0], 100);
+  ASSERT_INT_EQ(l.weight.shape[1], 32);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_attention_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  /* 4 heads, 4 kv heads (no GQA), dim=32 */
+  PeAttention a = pe_nn_attention(ctx, 32, 4, 4, 0, 42);
+  ASSERT_INT_EQ(a.n_heads, 4);
+  ASSERT_INT_EQ(a.n_kv_heads, 4);
+  ASSERT_INT_EQ(a.head_dim, 8);
+  ASSERT_INT_EQ(a.dim, 32);
+
+  /* Count params: 4 linear layers, no bias = 4 weights */
+  PolyExpr params[16];
+  int np = pe_nn_attention_params(&a, params, 16);
+  ASSERT_INT_EQ(np, 4);
+
+  /* Forward shape: (1, 4, 32) -> (1, 4, 32) */
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 4, 32}, 3);
+  PolyExpr out = pe_nn_attention_forward(&a, x, NULL, NULL, NULL, 1);
+  ASSERT_TRUE(pe_valid(out));
+  ASSERT_INT_EQ(out.ndim, 3);
+  ASSERT_INT_EQ(out.shape[0], 1);
+  ASSERT_INT_EQ(out.shape[1], 4);
+  ASSERT_INT_EQ(out.shape[2], 32);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_attention_gqa_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  /* 8 heads, 2 kv heads (GQA 4:1) */
+  PeAttention a = pe_nn_attention(ctx, 64, 8, 2, 0, 42);
+  ASSERT_INT_EQ(a.n_heads, 8);
+  ASSERT_INT_EQ(a.n_kv_heads, 2);
+  ASSERT_INT_EQ(a.head_dim, 8);
+
+  /* wq: (64, 64), wk: (16, 64), wv: (16, 64), wo: (64, 64) */
+  ASSERT_INT_EQ(a.wq.weight.shape[0], 64);
+  ASSERT_INT_EQ(a.wk.weight.shape[0], 16);
+  ASSERT_INT_EQ(a.wv.weight.shape[0], 16);
+  ASSERT_INT_EQ(a.wo.weight.shape[0], 64);
+
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 4, 64}, 3);
+  PolyExpr out = pe_nn_attention_forward(&a, x, NULL, NULL, NULL, 1);
+  ASSERT_TRUE(pe_valid(out));
+  ASSERT_INT_EQ(out.shape[0], 1);
+  ASSERT_INT_EQ(out.shape[1], 4);
+  ASSERT_INT_EQ(out.shape[2], 64);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_params_collection) {
+  PolyCtx *ctx = poly_ctx_new();
+  PeLinear lin = pe_nn_linear(ctx, 8, 4, 1, 1);    /* 2 params */
+  PeRMSNorm rms = pe_nn_rmsnorm(ctx, 4, 1e-5, 2);  /* 1 param */
+  PeEmbedding emb = pe_nn_embedding(ctx, 10, 4, 3); /* 1 param */
+
+  PolyExpr params[16];
+  int n = 0;
+  n += pe_nn_linear_params(&lin, params + n, 16 - n);
+  n += pe_nn_rmsnorm_params(&rms, params + n, 16 - n);
+  n += pe_nn_embedding_params(&emb, params + n, 16 - n);
+  ASSERT_INT_EQ(n, 4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── Softmax via PolyExpr ─────────────────────────────────────────────── */
 
 TEST(pe, softmax_e2e) {
