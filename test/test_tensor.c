@@ -530,6 +530,64 @@ TEST(pe, nn_params_collection) {
   PASS();
 }
 
+/* ── GroupNorm ─────────────────────────────────────────────────────────── */
+
+TEST(pe, nn_groupnorm_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PeGroupNorm gn = pe_nn_groupnorm(ctx, 2, 6, 1e-5, 1, 42);
+  ASSERT_INT_EQ(gn.num_groups, 2);
+  ASSERT_INT_EQ(gn.num_channels, 6);
+  ASSERT_TRUE(gn.has_affine);
+  ASSERT_TRUE(pe_valid(gn.weight));
+  ASSERT_TRUE(pe_valid(gn.bias));
+
+  PolyExpr params[4];
+  int np = pe_nn_groupnorm_params(&gn, params, 4);
+  ASSERT_INT_EQ(np, 2);
+
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 6, 2}, 3);
+  PolyExpr out = pe_nn_groupnorm_forward(&gn, x);
+  ASSERT_TRUE(pe_valid(out));
+  ASSERT_INT_EQ(out.ndim, 3);
+  ASSERT_INT_EQ(out.shape[0], 1);
+  ASSERT_INT_EQ(out.shape[1], 6);
+  ASSERT_INT_EQ(out.shape[2], 2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, nn_groupnorm_e2e) {
+  /* Reference (tinygrad, weight=1, bias=0):
+   * GroupNorm(2, 6) on (1, 6, 2):
+   * [[[-1.4638, -0.8783], [-0.2928, 0.2928], [0.8783, 1.4638],
+   *   [-1.4638, -0.8783], [-0.2928, 0.2928], [0.8783, 1.4638]]] */
+  PolyCtx *ctx = poly_ctx_new();
+  PeGroupNorm gn = pe_nn_groupnorm(ctx, 2, 6, 1e-5, 1, 42);
+  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 6, 2}, 3);
+  PolyExpr outb = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 6, 2}, 3);
+  PolyExpr r = pe_nn_groupnorm_forward(&gn, x);
+
+  float dx[] = {1,2,3,4,5,6, 7,8,9,10,11,12};
+  float dw[] = {1,1,1,1,1,1};
+  float db[] = {0,0,0,0,0,0};
+  float dout[12] = {0};
+  PolyExpr leaves[] = {x, gn.weight, gn.bias};
+  float *ld[] = {dx, dw, db};
+  ASSERT_INT_EQ(realize_expr(r, outb, dout, leaves, ld, 3), 0);
+
+  ASSERT_FLOAT_EQ(dout[0], -1.4638f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[1], -0.8783f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[2], -0.2928f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[3],  0.2928f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[4],  0.8783f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[5],  1.4638f, 1e-3);
+  /* Group 2 (channels 3-5) should be same pattern */
+  ASSERT_FLOAT_EQ(dout[6], -1.4638f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[11], 1.4638f, 1e-3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── Loss functions ───────────────────────────────────────────────────── */
 
 TEST(pe, mse_loss_e2e) {

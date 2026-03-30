@@ -232,6 +232,22 @@ PolyExpr    pe_nn_attention_forward(PeAttention *a, PolyExpr x,
                                     PolyExpr *freqs_cos, PolyExpr *freqs_sin,
                                     PolyExpr *mask, int is_causal);
 
+/* ── GroupNorm ─────────────────────────────────────────────────────────── */
+
+typedef struct {
+  PolyExpr weight;       /* (num_channels,) */
+  PolyExpr bias;         /* (num_channels,) */
+  int num_groups;
+  int num_channels;
+  double eps;
+  int has_affine;
+} PeGroupNorm;
+
+PeGroupNorm pe_nn_groupnorm(PolyCtx *ctx, int num_groups, int num_channels,
+                            double eps, int affine, uint64_t seed);
+PolyExpr    pe_nn_groupnorm_forward(PeGroupNorm *l, PolyExpr x);
+int         pe_nn_groupnorm_params(PeGroupNorm *l, PolyExpr *out, int max);
+
 /* ── Layer parameter collection ───────────────────────────────────────── */
 
 /* Append all trainable PolyExpr params from a layer to the array.

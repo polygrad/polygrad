@@ -938,6 +938,90 @@ PolyExpr pe_nn_attention_forward(PeAttention *a, PolyExpr x,
   return pe_nn_linear_forward(&a->wo, attn);
 }
 
+/* ── GroupNorm ─────────────────────────────────────────────────────────── */
+
+PeGroupNorm pe_nn_groupnorm(PolyCtx *ctx, int num_groups, int num_channels,
+                            double eps, int affine, uint64_t seed) {
+  (void)seed;
+  PeGroupNorm l = {0};
+  l.num_groups = num_groups;
+  l.num_channels = num_channels;
+  l.eps = eps;
+  l.has_affine = affine;
+
+  if (affine) {
+    int64_t w_shape[] = {num_channels};
+    l.weight = pe_buffer(ctx, POLY_FLOAT32, w_shape, 1);
+    l.bias = pe_buffer(ctx, POLY_FLOAT32, w_shape, 1);
+  }
+
+  return l;
+}
+
+PolyExpr pe_nn_groupnorm_forward(PeGroupNorm *l, PolyExpr x) {
+  /*
+   * GroupNorm: reshape (B, C, ...) -> (B, G, C/G, ...), layernorm, reshape back
+   * Matches tinygrad nn.GroupNorm.__call__
+   */
+  if (!l || !pe_valid(x) || x.ndim < 2) return pe_null();
+
+  int G = l->num_groups;
+  int C = l->num_channels;
+  int CpG = C / G;
+
+  /* Reshape: (B, C, ...) -> (B, G, C/G, ...) */
+  int64_t gn_shape[PE_MAX_DIMS];
+  gn_shape[0] = x.shape[0];
+  gn_shape[1] = G;
+  gn_shape[2] = CpG;
+  int gn_ndim = x.ndim + 1;
+  for (int i = 2; i < x.ndim; i++) gn_shape[i + 1] = x.shape[i];
+
+  PolyExpr reshaped = pe_reshape(x, gn_shape, gn_ndim);
+
+  /* Flatten group dims for layernorm: (B*G, C/G * ...) */
+  int64_t flat_size = CpG;
+  for (int i = 2; i < x.ndim; i++) flat_size *= x.shape[i];
+  int64_t flat_shape[] = {x.shape[0] * G, flat_size};
+  PolyExpr flat = pe_reshape(reshaped, flat_shape, 2);
+
+  /* Layernorm over last axis */
+  PolyExpr normed = pe_layernorm(flat, -1, l->eps);
+
+  /* Reshape back to (B, C, ...) */
+  PolyExpr result = pe_reshape(normed, x.shape, x.ndim);
+
+  /* Affine: result * weight + bias (weight/bias broadcast over spatial dims) */
+  if (l->has_affine && pe_valid(l->weight)) {
+    /* Reshape weight/bias to (1, C, 1, 1, ...) for broadcasting */
+    int64_t wb_shape[PE_MAX_DIMS];
+    wb_shape[0] = 1;
+    wb_shape[1] = C;
+    for (int i = 2; i < x.ndim; i++) wb_shape[i] = 1;
+
+    PolyExpr w_bc = pe_reshape(l->weight, wb_shape, x.ndim);
+    w_bc = pe_expand(w_bc, x.shape, x.ndim);
+    result = pe_mul(result, w_bc);
+
+    if (pe_valid(l->bias)) {
+      PolyExpr b_bc = pe_reshape(l->bias, wb_shape, x.ndim);
+      b_bc = pe_expand(b_bc, x.shape, x.ndim);
+      result = pe_add(result, b_bc);
+    }
+  }
+
+  return result;
+}
+
+int pe_nn_groupnorm_params(PeGroupNorm *l, PolyExpr *out, int max) {
+  int n = 0;
+  if (l->has_affine) {
+    if (pe_valid(l->weight) && n < max) out[n++] = l->weight;
+    if (pe_valid(l->bias) && n < max) out[n++] = l->bias;
+  }
+  return n;
+}
+
 /* ── Parameter collection ─────────────────────────────────────────────── */
 
 int pe_nn_linear_params(PeLinear *l, PolyExpr *out, int max) {
