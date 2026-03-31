@@ -441,6 +441,16 @@ PolyUOp *poly_gather_v2(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
 PolyUOp *poly_tril_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_triu_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
 
+/* New composed ops (v2 only) */
+PolyUOp *poly_rmsnorm_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *weight, double eps);
+PolyUOp *poly_sdpa_v2(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
+                       PolyUOp *mask, int is_causal);
+PolyUOp *poly_rope_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin);
+PolyUOp *poly_repeat_interleave_v2(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);
+PolyUOp *poly_argmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
+PolyUOp *poly_mse_loss_v2(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
+PolyUOp *poly_mae_loss_v2(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
+
 /* ── CUDA realize ────────────────────────────────────────────────────── */
 
 #ifdef POLY_HAS_CUDA
