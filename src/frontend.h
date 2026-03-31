@@ -422,6 +422,25 @@ void poly_cpu_cache_flush(void);
 /* Free cached schedule results (param-to-binding mappings). */
 void poly_sched_cache_flush(void);
 
+/* ── v2 API: shape read from UOp, no explicit shape params ─────────── */
+/* These are thin wrappers that read shape from the UOp's cached
+ * _shape_ndim/_shape_dims fields, then delegate to the v1 function.
+ * Result shape is readable from the returned UOp's shape fields. */
+
+PolyUOp *poly_sum_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
+PolyUOp *poly_max_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
+PolyUOp *poly_mean_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
+PolyUOp *poly_var_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction);
+PolyUOp *poly_softmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
+PolyUOp *poly_log_softmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
+PolyUOp *poly_dot_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
+PolyUOp *poly_layernorm_v2(PolyCtx *ctx, PolyUOp *x, int axis, double eps);
+PolyUOp *poly_cross_entropy_v2(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis);
+PolyUOp *poly_linear_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *bias);
+PolyUOp *poly_gather_v2(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
+PolyUOp *poly_tril_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
+PolyUOp *poly_triu_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
+
 /* ── CUDA realize ────────────────────────────────────────────────────── */
 
 #ifdef POLY_HAS_CUDA

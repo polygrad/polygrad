@@ -780,3 +780,81 @@ TEST(pe, linear_e2e) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  v2 API tests (shape read from UOp)                                    */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+TEST(pe, v2_softmax) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {3};
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 3), shape, 1);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
+
+  PolyUOp *sm = poly_softmax_v2(ctx, x, 0);
+  ASSERT_NOT_NULL(sm);
+  ASSERT_INT_EQ(poly_uop_ndim(sm), 1);
+  ASSERT_INT_EQ(poly_uop_dims(sm)[0], 3);
+
+  PolyUOp *store = poly_store_val(ctx, out_buf, sm);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  float dx[] = {1.0f, 2.0f, 3.0f};
+  float dout[3] = {0};
+  PolyUOp *bufs[] = {poly_buffer_f32(ctx, 3), out_buf};
+  /* Need the underlying buffer for x, not the reshape */
+  poly_realize_begin(ctx);
+  poly_realize_bind(ctx, x->src[0], dx);  /* BUFFER under RESHAPE */
+  poly_realize_bind(ctx, out_buf, dout);
+  int rc = poly_realize_exec(ctx, sink);
+  ASSERT_INT_EQ(rc, 0);
+  ASSERT_FLOAT_EQ(dout[0], 0.0900f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[1], 0.2447f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[2], 0.6652f, 1e-3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, v2_dot) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_buffer_f32(ctx, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_buffer_f32(ctx, 6), (int64_t[]){3, 2}, 2);
+
+  PolyUOp *r = poly_dot_v2(ctx, a, b);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, v2_layernorm) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 6), (int64_t[]){2, 3}, 2);
+
+  PolyUOp *r = poly_layernorm_v2(ctx, x, -1, 1e-5);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, v2_reduce_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 12), (int64_t[]){3, 4}, 2);
+
+  PolyUOp *s = poly_sum_reduce_v2(ctx, x, 1, 0);
+  ASSERT_NOT_NULL(s);
+  ASSERT_INT_EQ(poly_uop_ndim(s), 1);
+  ASSERT_INT_EQ(poly_uop_dims(s)[0], 3);
+
+  PolyUOp *sk = poly_sum_reduce_v2(ctx, x, 1, 1);
+  ASSERT_NOT_NULL(sk);
+  ASSERT_INT_EQ(poly_uop_ndim(sk), 2);
+  ASSERT_INT_EQ(poly_uop_dims(sk)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(sk)[1], 1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
