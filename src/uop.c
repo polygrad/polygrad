@@ -226,6 +226,7 @@ bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p) {
 }
 
 PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) { return ctx->kernel_cache; }
+PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
 
 /* ── UOp creation with CSE ────────────────────────────────────────────── */
 
@@ -291,6 +292,10 @@ static PolyUOp *poly_uop_internal(PolyCtx *ctx, PolyOps op, PolyDType dtype,
     memcpy(s, arg.define_var.name, len + 1);
     u->arg.define_var.name = s;
   }
+
+  /* Compute and cache shape eagerly (sources already have shapes) */
+  void poly_uop_compute_shape(PolyCtx *ctx, PolyUOp *u);
+  poly_uop_compute_shape(ctx, u);
 
   /* Also store the CSE key in the arena so it persists for hash map lookups */
   CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));

@@ -369,7 +369,14 @@ struct PolyUOp {
   PolyArg arg;
   int32_t tag;
   uint32_t hash;
+  int8_t _shape_ndim;     /* -1 = no shape, 0 = scalar, 1..16 = tensor dims */
+  int64_t *_shape_dims;   /* arena-allocated, NULL if scalar or no shape */
 };
+
+/* ── Shape accessors (O(1), no allocation) ────────────────────────────── */
+
+static inline int poly_uop_ndim(const PolyUOp *u) { return u->_shape_ndim; }
+static inline const int64_t *poly_uop_dims(const PolyUOp *u) { return u->_shape_dims; }
 
 /* Cached rendered kernel (used by kernel_cache in PolyCtx) */
 #define POLY_MAX_KERNEL_BUFS 64
@@ -387,6 +394,7 @@ PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
 PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx);
+PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* Create a UOp (with CSE deduplication) */
 PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,

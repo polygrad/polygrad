@@ -254,3 +254,243 @@ PolyShape poly_uop_shape(PolyCtx *ctx, PolyUOp *u) {
 
   return out;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  Eager shape computation — called once at UOp creation time            */
+/*  Reads source shapes from src[i]->_shape_* (already computed)          */
+/*  Corrected rules verified against tinygrad ops.py:206-318              */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+static void shape_set_none(PolyUOp *u) {
+  u->_shape_ndim = -1;
+  u->_shape_dims = NULL;
+}
+
+static void shape_set_scalar(PolyUOp *u) {
+  u->_shape_ndim = 0;
+  u->_shape_dims = NULL;
+}
+
+static void shape_set_1d(PolyCtx *ctx, PolyUOp *u, int64_t dim0) {
+  u->_shape_ndim = 1;
+  u->_shape_dims = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(int64_t), _Alignof(int64_t));
+  u->_shape_dims[0] = dim0;
+}
+
+static void shape_set_dims(PolyCtx *ctx, PolyUOp *u, const int64_t *dims, int ndim) {
+  u->_shape_ndim = (int8_t)ndim;
+  if (ndim > 0) {
+    u->_shape_dims = poly_arena_alloc(poly_ctx_arena(ctx), ndim * sizeof(int64_t), _Alignof(int64_t));
+    memcpy(u->_shape_dims, dims, ndim * sizeof(int64_t));
+  } else {
+    u->_shape_dims = NULL;
+  }
+}
+
+static void shape_passthrough_src0(PolyCtx *ctx, PolyUOp *u) {
+  if (u->n_src >= 1 && u->src[0]->_shape_ndim >= 0) {
+    shape_set_dims(ctx, u, u->src[0]->_shape_dims, u->src[0]->_shape_ndim);
+  } else {
+    shape_set_none(u);
+  }
+}
+
+void poly_uop_compute_shape(PolyCtx *ctx, PolyUOp *u) {
+  PolyOps op = u->op;
+
+  /* ── No-shape ops (kernel-level, never have tensor shapes) ────────── */
+  if (op == POLY_OP_RANGE || op == POLY_OP_LOAD || op == POLY_OP_STORE ||
+      op == POLY_OP_SINK || op == POLY_OP_IF || op == POLY_OP_ENDIF ||
+      op == POLY_OP_BARRIER || op == POLY_OP_SPECIAL ||
+      op == POLY_OP_VECTORIZE || op == POLY_OP_GEP ||
+      op == POLY_OP_LINEAR || op == POLY_OP_PROGRAM || op == POLY_OP_SOURCE ||
+      op == POLY_OP_BINARY || op == POLY_OP_INS || op == POLY_OP_CUSTOM ||
+      op == POLY_OP_CUSTOMI || op == POLY_OP_UNIQUE || op == POLY_OP_LUNIQUE ||
+      op == POLY_OP_UNROLL || op == POLY_OP_CONTRACT ||
+      op == POLY_OP_VCAT || op == POLY_OP_PTRCAT || op == POLY_OP_CALL) {
+    shape_set_none(u);
+    return;
+  }
+
+  /* ── Scalar constants ─────────────────────────────────────────────── */
+  if (op == POLY_OP_CONST || op == POLY_OP_VCONST ||
+      op == POLY_OP_DEFINE_VAR || op == POLY_OP_BIND) {
+    shape_set_scalar(u);
+    return;
+  }
+
+  /* ── BUFFER ───────────────────────────────────────────────────────── */
+  if (op == POLY_OP_BUFFER) {
+    if (u->arg.kind == POLY_ARG_INT) {
+      shape_set_1d(ctx, u, u->arg.i);
+    } else {
+      shape_set_none(u);
+    }
+    return;
+  }
+
+  /* ── DEFINE_LOCAL, DEFINE_REG: shape from pointer dtype size ──────── */
+  if (op == POLY_OP_DEFINE_LOCAL || op == POLY_OP_DEFINE_REG) {
+    if (u->dtype.is_ptr && u->dtype.ptr_size > 0) {
+      shape_set_1d(ctx, u, u->dtype.ptr_size);
+    } else {
+      shape_set_none(u);
+    }
+    return;
+  }
+
+  /* ── PARAM: shape from pointer dtype size, else no shape ──────────── */
+  if (op == POLY_OP_PARAM) {
+    if (u->dtype.is_ptr && u->dtype.ptr_size > 0) {
+      shape_set_1d(ctx, u, u->dtype.ptr_size);
+    } else {
+      shape_set_none(u);
+    }
+    return;
+  }
+
+  /* ── INDEX: conditional shape for pointer types ───────────────────── */
+  if (op == POLY_OP_INDEX) {
+    if (!u->dtype.is_ptr) { shape_set_none(u); return; }
+    if (u->n_src < 1 || u->src[0]->_shape_ndim <= 0) { shape_set_none(u); return; }
+    int8_t src_ndim = u->src[0]->_shape_ndim;
+    int n_indices = u->n_src - 1;
+    if (n_indices >= src_ndim) { shape_set_none(u); return; }
+    int remaining = src_ndim - n_indices;
+    shape_set_dims(ctx, u, u->src[0]->_shape_dims + n_indices, remaining);
+    return;
+  }
+
+  /* ── BUFFERIZE: shape from range bounds ───────────────────────────── */
+  if (op == POLY_OP_BUFFERIZE) {
+    int n_ranges = u->n_src - 1;
+    if (n_ranges <= 0) { shape_set_none(u); return; }
+    int64_t dims[POLY_MAX_DIMS];
+    for (int i = 0; i < n_ranges && i < POLY_MAX_DIMS; i++) {
+      PolyUOp *rng = u->src[1 + i];
+      if (rng->op == POLY_OP_RANGE && rng->n_src >= 1 &&
+          rng->src[0]->op == POLY_OP_CONST && rng->src[0]->arg.kind == POLY_ARG_INT) {
+        dims[i] = rng->src[0]->arg.i;
+      } else {
+        dims[i] = -1;  /* symbolic, resolved later */
+      }
+    }
+    shape_set_dims(ctx, u, dims, n_ranges);
+    return;
+  }
+
+  /* ── RESHAPE, EXPAND: shape from int_tuple arg ────────────────────── */
+  if ((op == POLY_OP_RESHAPE || op == POLY_OP_EXPAND) &&
+      u->arg.kind == POLY_ARG_INT_TUPLE) {
+    shape_set_dims(ctx, u, u->arg.int_tuple.vals, u->arg.int_tuple.n);
+    return;
+  }
+
+  /* ── PERMUTE: reorder src[0] shape ────────────────────────────────── */
+  if (op == POLY_OP_PERMUTE && u->n_src >= 1 && u->arg.kind == POLY_ARG_INT_TUPLE) {
+    int8_t in_ndim = u->src[0]->_shape_ndim;
+    if (in_ndim <= 0) { shape_set_none(u); return; }
+    int n = u->arg.int_tuple.n;
+    int64_t dims[POLY_MAX_DIMS];
+    for (int i = 0; i < n && i < in_ndim; i++)
+      dims[i] = u->src[0]->_shape_dims[u->arg.int_tuple.vals[i]];
+    shape_set_dims(ctx, u, dims, n);
+    return;
+  }
+
+  /* ── PAD: output = input + begin + end per axis ───────────────────── */
+  if (op == POLY_OP_PAD && u->n_src >= 1 && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
+    int8_t in_ndim = u->src[0]->_shape_ndim;
+    if (in_ndim <= 0) { shape_set_none(u); return; }
+    int64_t dims[POLY_MAX_DIMS];
+    for (int i = 0; i < in_ndim && i < u->arg.pair_tuple.n; i++)
+      dims[i] = u->src[0]->_shape_dims[i] + u->arg.pair_tuple.pairs[i][0] + u->arg.pair_tuple.pairs[i][1];
+    shape_set_dims(ctx, u, dims, in_ndim);
+    return;
+  }
+
+  /* ── SHRINK: output = end - begin per axis ────────────────────────── */
+  if (op == POLY_OP_SHRINK && u->n_src >= 1 && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
+    int8_t in_ndim = u->src[0]->_shape_ndim;
+    if (in_ndim <= 0) { shape_set_none(u); return; }
+    int64_t dims[POLY_MAX_DIMS];
+    for (int i = 0; i < in_ndim && i < u->arg.pair_tuple.n; i++)
+      dims[i] = u->arg.pair_tuple.pairs[i][1] - u->arg.pair_tuple.pairs[i][0];
+    shape_set_dims(ctx, u, dims, in_ndim);
+    return;
+  }
+
+  /* ── FLIP: same shape as src[0] ───────────────────────────────────── */
+  if (op == POLY_OP_FLIP) { shape_passthrough_src0(ctx, u); return; }
+
+  /* ── REDUCE_AXIS: dims at reduction axes become 1 ─────────────────── */
+  if (op == POLY_OP_REDUCE_AXIS && u->n_src >= 1 && u->arg.kind == POLY_ARG_REDUCE_AXIS) {
+    int8_t in_ndim = u->src[0]->_shape_ndim;
+    if (in_ndim <= 0) { shape_set_none(u); return; }
+    int64_t dims[POLY_MAX_DIMS];
+    memcpy(dims, u->src[0]->_shape_dims, in_ndim * sizeof(int64_t));
+    for (int i = 0; i < u->arg.reduce_axis.n; i++) {
+      int ax = (int)u->arg.reduce_axis.axes[i];
+      if (ax >= 0 && ax < in_ndim) dims[ax] = 1;
+    }
+    shape_set_dims(ctx, u, dims, in_ndim);
+    return;
+  }
+
+  /* ── Passthrough ops: inherit src[0] shape ────────────────────────── */
+  if (op == POLY_OP_CONTIGUOUS || op == POLY_OP_DETACH ||
+      op == POLY_OP_CONTIGUOUS_BACKWARD || op == POLY_OP_COPY ||
+      op == POLY_OP_NOOP || op == POLY_OP_ASSIGN ||
+      op == POLY_OP_REDUCE || op == POLY_OP_AFTER || op == POLY_OP_END ||
+      op == POLY_OP_GROUP) {
+    shape_passthrough_src0(ctx, u);
+    return;
+  }
+
+  /* ── BITCAST: scale last dim if itemsize differs ──────────────────── */
+  if (op == POLY_OP_BITCAST && u->n_src >= 1) {
+    int8_t in_ndim = u->src[0]->_shape_ndim;
+    if (in_ndim < 0) { shape_set_none(u); return; }
+    if (in_ndim == 0) { shape_set_scalar(u); return; }
+    int out_sz = poly_dtype_itemsize(poly_dtype_scalar(u->dtype));
+    int in_sz = poly_dtype_itemsize(poly_dtype_scalar(u->src[0]->dtype));
+    if (out_sz != in_sz && in_sz > 0 && out_sz > 0) {
+      int64_t dims[POLY_MAX_DIMS];
+      memcpy(dims, u->src[0]->_shape_dims, in_ndim * sizeof(int64_t));
+      dims[in_ndim - 1] = (u->src[0]->_shape_dims[in_ndim - 1] * in_sz) / out_sz;
+      shape_set_dims(ctx, u, dims, in_ndim);
+    } else {
+      shape_passthrough_src0(ctx, u);
+    }
+    return;
+  }
+
+  /* ── CAST: ptr→non-ptr returns no shape; else same as ALU ─────────── */
+  if (op == POLY_OP_CAST && u->n_src >= 1) {
+    if (u->src[0]->dtype.is_ptr && !u->dtype.is_ptr) {
+      shape_set_none(u);
+      return;
+    }
+    /* Fall through to ALU handling */
+  }
+
+  /* ── ALU + CAST (same-type): all sources must have same shape ─────── */
+  if (poly_opset_has(POLY_GROUP_ALU, op) || op == POLY_OP_CAST) {
+    int8_t found_ndim = -1;
+    const int64_t *found_dims = NULL;
+    for (int i = 0; i < u->n_src; i++) {
+      if (u->src[i]->_shape_ndim < 0) continue;
+      if (found_ndim < 0) {
+        found_ndim = u->src[i]->_shape_ndim;
+        found_dims = u->src[i]->_shape_dims;
+      }
+      /* tinygrad asserts all_same; we silently take first found */
+    }
+    if (found_ndim < 0) { shape_set_none(u); return; }
+    shape_set_dims(ctx, u, found_dims, found_ndim);
+    return;
+  }
+
+  /* ── Default: no shape ────────────────────────────────────────────── */
+  shape_set_none(u);
+}
