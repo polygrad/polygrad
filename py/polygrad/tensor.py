@@ -148,11 +148,21 @@ class Tensor:
 
     @property
     def shape(self):
-        return self._shape
+        """Read shape from cached UOp fields (O(1), no allocation)."""
+        if self._uop is None:
+            return self._shape
+        lib = _ffi._lib
+        ndim = lib.poly_uop_ndim(self._uop)
+        if ndim <= 0:
+            return ()
+        dims = lib.poly_uop_dims(self._uop)
+        return tuple(dims[i] for i in range(ndim))
 
     @property
     def ndim(self):
-        return len(self._shape)
+        if self._uop is None:
+            return len(self._shape)
+        return max(0, _ffi._lib.poly_uop_ndim(self._uop))
 
     @property
     def dtype(self):
@@ -1130,28 +1140,27 @@ class Tensor:
 
     def sum(self, axis=None, keepdim=False):
         if axis is None:
-            axis = tuple(range(len(self._shape)))
+            axis = tuple(range(self.ndim))
         elif isinstance(axis, int):
             axis = (axis,)
         # Normalize negative axes
-        nd = len(self._shape)
+        nd = self.ndim
         axis = tuple(a + nd if a < 0 else a for a in axis)
 
         arr, n = _int64_array(axis)
         uop = _ffi._lib.poly_reduce_axis(self._ctx, _ffi.OPS['ADD'], self._uop, arr, n)
 
-        # Compute output shape
-        new_shape = []
-        for i, s in enumerate(self._shape):
-            if i in axis:
-                if keepdim:
-                    new_shape.append(1)
-            else:
-                new_shape.append(s)
-        if not new_shape:
-            new_shape = ()
-        new_shape = tuple(new_shape)
+        # REDUCE_AXIS keeps all dims (reduced→1). If keepdim=False, reshape to squeeze.
+        if not keepdim and axis:
+            new_shape = tuple(s for i, s in enumerate(self.shape) if i not in axis)
+            if not new_shape:
+                new_shape = ()
+            dims, ndim = _int64_array(new_shape) if new_shape else (None, 0)
+            uop = _ffi._lib.poly_reshape(self._ctx, uop, dims, ndim)
+            return self._make_result(uop, new_shape, [self])
 
+        # keepdim=True: shape has 1 at reduced axes
+        new_shape = tuple(1 if i in axis else s for i, s in enumerate(self.shape))
         return self._make_result(uop, new_shape, [self])
 
     def max(self, axis=None, keepdim=False):
