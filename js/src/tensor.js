@@ -71,6 +71,22 @@ function _buildNested(data, shape, dim, offset) {
 
 // --- Class factory ---
 
+function _broadcastShapes(a, b) {
+  if (!a.length) return [...b]
+  if (!b.length) return [...a]
+  const ndim = Math.max(a.length, b.length)
+  const pa = new Array(ndim - a.length).fill(1).concat(a)
+  const pb = new Array(ndim - b.length).fill(1).concat(b)
+  const result = []
+  for (let i = 0; i < ndim; i++) {
+    if (pa[i] === pb[i]) result.push(pa[i])
+    else if (pa[i] === 1) result.push(pb[i])
+    else if (pb[i] === 1) result.push(pa[i])
+    else throw new Error(`Cannot broadcast shapes [${a}] and [${b}]`)
+  }
+  return result
+}
+
 function createBoundTensorClass(runtime) {
   const _runtime = runtime
   let _seed = 0
@@ -89,22 +105,19 @@ function createBoundTensorClass(runtime) {
       this._grad = null
 
       if (opts._uop) {
-        // Internal construction from ops
+        // Internal construction from ops -- shape is on the UOp
         this._uop = opts._uop
         this._buffer = opts._buffer || null
         this._data = opts._data || null
-        this._shape = opts._shape ? [...opts._shape] : []
         this._inputs = opts._inputs || []
         this._dtype = opts._dtype || 'float32'
       } else if (data instanceof Float64Array) {
-        this._shape = [data.length]
         this._data = new Float64Array(data)
         this._buffer = backend.ffi.poly_buffer_f64(this._ctx, data.length)
         this._uop = this._buffer
         this._inputs = []
         this._dtype = 'float64'
       } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
-        this._shape = [data.length]
         this._data = new Float32Array(data)
         this._buffer = backend.ffi.poly_buffer_f32(this._ctx, data.length)
         this._uop = this._buffer
@@ -114,7 +127,6 @@ function createBoundTensorClass(runtime) {
         const dt = (opts && opts.dtype) || 'float32'
         this._dtype = dt
         const { data: flat, shape } = flattenArray(data, dt)
-        this._shape = shape
         this._data = flat
         if (dt === 'float64') {
           this._buffer = backend.ffi.poly_buffer_f64(this._ctx, flat.length)
@@ -130,23 +142,27 @@ function createBoundTensorClass(runtime) {
       }
     }
 
-    get shape() { return [...this._shape] }
+    get shape() {
+      const { ffi } = this._rt._backend
+      if (!this._uop) return []
+      return ffi.poly_uop_dims(this._uop)
+    }
     get dtype() { return this._dtype }
     get device() { return 'CPU' }
-    get ndim() { return this._shape.length }
+    get ndim() { return this._rt._backend.ffi.poly_uop_ndim(this._uop) || 0 }
     get requiresGrad() { return this._requiresGrad }
     set requiresGrad(v) { this._requiresGrad = v }
     get grad() { return this._grad }
     get T() { return this.transpose() }
 
     numel() {
-      return this._shape.reduce((a, b) => a * b, 1) || 1
+      return this.shape.reduce((a, b) => a * b, 1) || 1
     }
 
     size(dim) {
-      if (dim === undefined || dim === null) return [...this._shape]
-      if (dim < 0) dim += this._shape.length
-      return this._shape[dim]
+      if (dim === undefined || dim === null) return [...this.shape]
+      if (dim < 0) dim += this.shape.length
+      return this.shape[dim]
     }
 
     _isLeaf() {
@@ -188,7 +204,7 @@ function createBoundTensorClass(runtime) {
 
       const backend = this._rt._backend
       const { ffi, ctx } = backend
-      const numel = this._shape.reduce((a, b) => a * b, 1) || 1
+      const numel = this.shape.reduce((a, b) => a * b, 1) || 1
       const isF64 = this._dtype === 'float64'
       const outBuf = isF64
         ? ffi.poly_buffer_f64(ctx, numel)
@@ -204,8 +220,8 @@ function createBoundTensorClass(runtime) {
 
       this._data = result
       this._buffer = outBuf
-      if (this._shape.length > 1) {
-        this._uop = ffi.poly_reshape(ctx, outBuf, this._shape, this._shape.length)
+      if (this.shape.length > 1) {
+        this._uop = ffi.poly_reshape(ctx, outBuf, this.shape, this.shape.length)
       } else {
         this._uop = outBuf
       }
@@ -226,14 +242,14 @@ function createBoundTensorClass(runtime) {
     async item() {
       await this._realize()
       if (this._data.length !== 1) {
-        throw new Error(`item() requires scalar tensor, got shape [${this._shape}]`)
+        throw new Error(`item() requires scalar tensor, got shape [${this.shape}]`)
       }
       return this._data[0]
     }
 
     async tolist() {
       await this._realize()
-      return _buildNested(this._data, this._shape, 0, 0).value
+      return _buildNested(this._data, this.shape, 0, 0).value
     }
 
     async detach() {
@@ -284,7 +300,7 @@ function createBoundTensorClass(runtime) {
     }
 
     _broadcastShape(otherShape) {
-      const a = this._shape
+      const a = this.shape
       const b = otherShape
       if (!a.length) return [...b]
       if (!b.length) return [...a]
@@ -302,10 +318,10 @@ function createBoundTensorClass(runtime) {
     }
 
     _broadcastUop(targetShape) {
-      if (arraysEqual(this._shape, targetShape)) return this._uop
+      if (arraysEqual(this.shape, targetShape)) return this._uop
       const { ffi } = this._rt._backend
       let uop = this._uop
-      let curShape = [...this._shape]
+      let curShape = [...this.shape]
       if (!curShape.length && this._buffer === null) return uop
       const targetNd = targetShape.length
       if (curShape.length < targetNd) {
@@ -321,7 +337,7 @@ function createBoundTensorClass(runtime) {
     _binop(other, opName) {
       const { ffi, ops } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const xUop = this._broadcastUop(outShape)
       const yUop = other._broadcastUop(outShape)
       const uop = ffi.poly_alu2(this._ctx, ops[opName], xUop, yUop)
@@ -340,7 +356,7 @@ function createBoundTensorClass(runtime) {
     neg() {
       const { ffi, ops } = this._rt._backend
       const uop = ffi.poly_alu1(this._ctx, ops.NEG, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     // --- Comparisons (C core) ---
@@ -348,7 +364,7 @@ function createBoundTensorClass(runtime) {
     eq(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_eq(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -356,7 +372,7 @@ function createBoundTensorClass(runtime) {
     ne(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_ne(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -364,7 +380,7 @@ function createBoundTensorClass(runtime) {
     gt(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_gt(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -372,7 +388,7 @@ function createBoundTensorClass(runtime) {
     ge(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_ge(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -380,7 +396,7 @@ function createBoundTensorClass(runtime) {
     le(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_le(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -389,9 +405,8 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._backend
       x = this._ensureTensor(x)
       y = this._ensureTensor(y)
-      let outShape = this._broadcastShape(x._shape)
-      const tmp = new Tensor(null, { _ctx: this._ctx, _uop: this._uop, _shape: outShape, _inputs: [] })
-      outShape = tmp._broadcastShape(y._shape)
+      let outShape = _broadcastShapes(this.shape, x.shape)
+      outShape = _broadcastShapes(outShape, y.shape)
       const cUop = this._broadcastUop(outShape)
       const xUop = x._broadcastUop(outShape)
       const yUop = y._broadcastUop(outShape)
@@ -402,7 +417,7 @@ function createBoundTensorClass(runtime) {
     maximum(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_maximum(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -410,7 +425,7 @@ function createBoundTensorClass(runtime) {
     minimum(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other._shape)
+      const outShape = this._broadcastShape(other.shape)
       const uop = ffi.poly_minimum(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
       return this._makeResult(uop, outShape, [this, other])
     }
@@ -423,7 +438,7 @@ function createBoundTensorClass(runtime) {
       lo = lo !== undefined ? lo : -1e38
       hi = hi !== undefined ? hi : 1e38
       const uop = ffi.poly_clamp(this._ctx, this._uop, lo, hi)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     // --- Cast ---
@@ -441,7 +456,7 @@ function createBoundTensorClass(runtime) {
       const uop = ffi.poly_cast_by_id(this._ctx, this._uop, id)
       if (!uop) throw new Error(`poly_cast_by_id failed for dtype ${dtype}`)
       return new Tensor(null, {
-        _ctx: this._ctx, _uop: uop, _shape: [...this._shape],
+        _ctx: this._ctx, _uop: uop, _shape: [...this.shape],
         _inputs: [this], _dtype: dtype, _device: this._device
       })
     }
@@ -453,14 +468,14 @@ function createBoundTensorClass(runtime) {
 
     triu(diagonal = 0) {
       const { ffi } = this._rt._backend
-      const uop = ffi.poly_triu(this._ctx, this._uop, this._shape, this._shape.length, diagonal)
-      return this._makeResult(uop, [...this._shape], [this])
+      const uop = ffi.poly_triu(this._ctx, this._uop, this.shape, this.shape.length, diagonal)
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     tril(diagonal = 0) {
       const { ffi } = this._rt._backend
-      const uop = ffi.poly_tril(this._ctx, this._uop, this._shape, this._shape.length, diagonal)
-      return this._makeResult(uop, [...this._shape], [this])
+      const uop = ffi.poly_tril(this._ctx, this._uop, this.shape, this.shape.length, diagonal)
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     // --- Unary math (C core composed ops) ---
@@ -468,154 +483,154 @@ function createBoundTensorClass(runtime) {
     exp2() {
       const { ffi, ops } = this._rt._backend
       const uop = ffi.poly_alu1(this._ctx, ops.EXP2, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     log2() {
       const { ffi, ops } = this._rt._backend
       const uop = ffi.poly_alu1(this._ctx, ops.LOG2, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     sqrt() {
       const { ffi, ops } = this._rt._backend
       const uop = ffi.poly_alu1(this._ctx, ops.SQRT, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     reciprocal() {
       const { ffi, ops } = this._rt._backend
       const uop = ffi.poly_alu1(this._ctx, ops.RECIPROCAL, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     trunc() {
       const { ffi, ops } = this._rt._backend
       const uop = ffi.poly_alu1(this._ctx, ops.TRUNC, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     exp() {
       const uop = this._rt._backend.ffi.poly_exp(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     log() {
       const uop = this._rt._backend.ffi.poly_log(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     log1p() {
       const uop = this._rt._backend.ffi.poly_log1p(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     expm1() {
       const uop = this._rt._backend.ffi.poly_expm1(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     sin() {
       const uop = this._rt._backend.ffi.poly_sin(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     cos() {
       const uop = this._rt._backend.ffi.poly_cos(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     tan() {
       const uop = this._rt._backend.ffi.poly_tan(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     sigmoid() {
       const uop = this._rt._backend.ffi.poly_sigmoid(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     tanh() {
       const uop = this._rt._backend.ffi.poly_tanh_act(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     abs() {
       const uop = this._rt._backend.ffi.poly_abs(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     sign() {
       const uop = this._rt._backend.ffi.poly_sign(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     square() {
       const uop = this._rt._backend.ffi.poly_square(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     rsqrt() {
       const uop = this._rt._backend.ffi.poly_rsqrt(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     ceil() {
       const uop = this._rt._backend.ffi.poly_ceil(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     floor() {
       const uop = this._rt._backend.ffi.poly_floor(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     round() {
       const uop = this._rt._backend.ffi.poly_round_f(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     isinf() {
       const uop = this._rt._backend.ffi.poly_isinf(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     isnan() {
       const uop = this._rt._backend.ffi.poly_isnan(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     // --- Activations (C core composed ops) ---
 
     relu() {
       const uop = this._rt._backend.ffi.poly_relu(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     relu6() {
       const uop = this._rt._backend.ffi.poly_relu6(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     leakyRelu(negSlope) {
       if (negSlope === undefined) negSlope = 0.01
       const uop = this._rt._backend.ffi.poly_leaky_relu(this._ctx, this._uop, negSlope)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     gelu() {
       const uop = this._rt._backend.ffi.poly_gelu(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     quickGelu() {
       const uop = this._rt._backend.ffi.poly_quick_gelu(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     silu() {
       const uop = this._rt._backend.ffi.poly_silu(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     swish() { return this.silu() }
@@ -623,35 +638,35 @@ function createBoundTensorClass(runtime) {
     elu(alpha) {
       if (alpha === undefined) alpha = 1.0
       const uop = this._rt._backend.ffi.poly_elu(this._ctx, this._uop, alpha)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     softplus(beta) {
       if (beta === undefined) beta = 1.0
       const uop = this._rt._backend.ffi.poly_softplus(this._ctx, this._uop, beta)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     mish() {
       const uop = this._rt._backend.ffi.poly_mish(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     hardtanh(minVal, maxVal) {
       if (minVal === undefined) minVal = -1
       if (maxVal === undefined) maxVal = 1
       const uop = this._rt._backend.ffi.poly_hardtanh(this._ctx, this._uop, minVal, maxVal)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     hardswish() {
       const uop = this._rt._backend.ffi.poly_hardswish(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     hardsigmoid() {
       const uop = this._rt._backend.ffi.poly_hardsigmoid(this._ctx, this._uop)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     // --- Softmax ---
@@ -693,7 +708,7 @@ function createBoundTensorClass(runtime) {
     permute(...order) {
       if (order.length === 1 && Array.isArray(order[0])) order = order[0]
       const uop = this._rt._backend.ffi.poly_permute(this._ctx, this._uop, order, order.length)
-      const newShape = order.map(i => this._shape[i])
+      const newShape = order.map(i => this.shape[i])
       return this._makeResult(uop, newShape, [this])
     }
 
@@ -719,20 +734,20 @@ function createBoundTensorClass(runtime) {
         flat.push(arg[i][0], arg[i][1])
       }
       const uop = this._rt._backend.ffi.poly_pad(this._ctx, this._uop, flat, arg.length)
-      const newShape = this._shape.map((s, i) => s + arg[i][0] + arg[i][1])
+      const newShape = this.shape.map((s, i) => s + arg[i][0] + arg[i][1])
       return this._makeResult(uop, newShape, [this])
     }
 
     flip(axis) {
       if (typeof axis === 'number') axis = [axis]
       const uop = this._rt._backend.ffi.poly_flip(this._ctx, this._uop, axis, axis.length)
-      return this._makeResult(uop, [...this._shape], [this])
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     transpose(dim0, dim1) {
       if (dim0 === undefined) dim0 = -2
       if (dim1 === undefined) dim1 = -1
-      const nd = this._shape.length
+      const nd = this.shape.length
       if (nd < 2) return this
       if (dim0 < 0) dim0 += nd
       if (dim1 < 0) dim1 += nd
@@ -745,21 +760,21 @@ function createBoundTensorClass(runtime) {
 
     squeeze(dim) {
       if (dim !== undefined && dim !== null) {
-        if (dim < 0) dim += this._shape.length
-        if (this._shape[dim] !== 1) return this
-        const newShape = this._shape.filter((_, i) => i !== dim)
+        if (dim < 0) dim += this.shape.length
+        if (this.shape[dim] !== 1) return this
+        const newShape = this.shape.filter((_, i) => i !== dim)
         if (!newShape.length) return this.reshape(1)
         return this.reshape(newShape)
       }
-      const newShape = this._shape.filter(s => s !== 1)
+      const newShape = this.shape.filter(s => s !== 1)
       if (!newShape.length) return this.reshape(1)
-      if (arraysEqual(newShape, this._shape)) return this
+      if (arraysEqual(newShape, this.shape)) return this
       return this.reshape(newShape)
     }
 
     unsqueeze(dim) {
-      if (dim < 0) dim += this._shape.length + 1
-      const newShape = [...this._shape]
+      if (dim < 0) dim += this.shape.length + 1
+      const newShape = [...this.shape]
       newShape.splice(dim, 0, 1)
       return this.reshape(newShape)
     }
@@ -767,18 +782,18 @@ function createBoundTensorClass(runtime) {
     flatten(startDim, endDim) {
       if (startDim === undefined) startDim = 0
       if (endDim === undefined) endDim = -1
-      if (endDim < 0) endDim += this._shape.length
-      const before = this._shape.slice(0, startDim)
+      if (endDim < 0) endDim += this.shape.length
+      const before = this.shape.slice(0, startDim)
       let flatDim = 1
-      for (let i = startDim; i <= endDim; i++) flatDim *= this._shape[i]
-      const after = this._shape.slice(endDim + 1)
+      for (let i = startDim; i <= endDim; i++) flatDim *= this.shape[i]
+      const after = this.shape.slice(endDim + 1)
       return this.reshape([...before, flatDim, ...after])
     }
 
     unflatten(dim, sizes) {
-      if (dim < 0) dim += this._shape.length
-      const before = this._shape.slice(0, dim)
-      const after = this._shape.slice(dim + 1)
+      if (dim < 0) dim += this.shape.length
+      const before = this.shape.slice(0, dim)
+      const after = this.shape.slice(dim + 1)
       return this.reshape([...before, ...sizes, ...after])
     }
 
@@ -786,8 +801,8 @@ function createBoundTensorClass(runtime) {
 
     repeat(...repeats) {
       if (repeats.length === 1 && Array.isArray(repeats[0])) repeats = repeats[0]
-      const nd = Math.max(this._shape.length, repeats.length)
-      const shape = new Array(nd - this._shape.length).fill(1).concat(this._shape)
+      const nd = Math.max(this.shape.length, repeats.length)
+      const shape = new Array(nd - this.shape.length).fill(1).concat(this.shape)
       repeats = new Array(nd - repeats.length).fill(1).concat(repeats)
       const newShape = []
       const expShape = []
@@ -804,27 +819,27 @@ function createBoundTensorClass(runtime) {
     sum(axis, keepdim) {
       if (keepdim === undefined) keepdim = false
       if (axis === undefined || axis === null) {
-        axis = this._shape.map((_, i) => i)
+        axis = this.shape.map((_, i) => i)
       } else if (typeof axis === 'number') {
         axis = [axis]
       }
-      const nd = this._shape.length
+      const nd = this.shape.length
       axis = axis.map(a => a < 0 ? a + nd : a)
 
       const { ffi, ops } = this._rt._backend
-      const uop = ffi.poly_reduce_axis(this._ctx, ops.ADD, this._uop, axis, axis.length)
+      let uop = ffi.poly_reduce_axis(this._ctx, ops.ADD, this._uop, axis, axis.length)
 
-      const axisSet = new Set(axis)
-      const newShape = []
-      for (let i = 0; i < this._shape.length; i++) {
-        if (axisSet.has(i)) {
-          if (keepdim) newShape.push(1)
+      // REDUCE_AXIS keeps all dims (reduced→1). If !keepdim, reshape to squeeze.
+      if (!keepdim && axis.length > 0) {
+        const axisSet = new Set(axis)
+        const newShape = this.shape.filter((_, i) => !axisSet.has(i))
+        if (newShape.length > 0) {
+          uop = ffi.poly_reshape(this._ctx, uop, newShape, newShape.length)
         } else {
-          newShape.push(this._shape[i])
+          uop = ffi.poly_reshape(this._ctx, uop, [], 0)
         }
       }
-
-      return this._makeResult(uop, newShape, [this])
+      return this._makeResult(uop, null, [this])
     }
 
     max(opts) {
@@ -842,17 +857,17 @@ function createBoundTensorClass(runtime) {
 
       if (axis === undefined || axis === null) {
         let result = this
-        for (let i = this._shape.length - 1; i >= 0; i--) {
+        for (let i = this.shape.length - 1; i >= 0; i--) {
           const r = ffi.poly_max_reduce(this._ctx, result._uop,
-            result._shape, result._shape.length, i, keepdim ? 1 : 0)
+            result.shape, result.shape.length, i, keepdim ? 1 : 0)
           result = this._makeResult(r.uop, r.shape, [result])
         }
         return result
       }
 
-      if (axis < 0) axis += this._shape.length
+      if (axis < 0) axis += this.shape.length
       const r = ffi.poly_max_reduce(this._ctx, this._uop,
-        this._shape, this._shape.length, axis, keepdim ? 1 : 0)
+        this.shape, this.shape.length, axis, keepdim ? 1 : 0)
       return this._makeResult(r.uop, r.shape, [this])
     }
 
@@ -866,10 +881,10 @@ function createBoundTensorClass(runtime) {
       if (axis === undefined || axis === null) {
         return this.sum(null, keepdim).div(this.numel())
       }
-      if (axis < 0) axis += this._shape.length
+      if (axis < 0) axis += this.shape.length
       const { ffi } = this._rt._backend
       const r = ffi.poly_mean_reduce(this._ctx, this._uop,
-        this._shape, this._shape.length, axis, keepdim ? 1 : 0)
+        this.shape, this.shape.length, axis, keepdim ? 1 : 0)
       return this._makeResult(r.uop, r.shape, [this])
     }
 
@@ -882,11 +897,11 @@ function createBoundTensorClass(runtime) {
         const sq = diff.mul(diff)
         return sq.sum().div(this.numel() - correction)
       }
-      if (axis < 0) axis += this._shape.length
+      if (axis < 0) axis += this.shape.length
       const m = await this.mean(axis, true).realize()
       const diff = this.sub(m)
       const sq = diff.mul(diff)
-      const dimSize = this._shape[axis]
+      const dimSize = this.shape[axis]
       return sq.sum(axis, keepdim).div(dimSize - correction)
     }
 
@@ -904,10 +919,10 @@ function createBoundTensorClass(runtime) {
       }
       const { ffi } = this._rt._backend
       const r = ffi.poly_dot(this._ctx,
-        this._uop, this._shape, this._shape.length,
-        w._uop, w._shape, w._shape.length)
+        this._uop, this.shape, this.shape.length,
+        w._uop, w.shape, w.shape.length)
       if (!r.uop) {
-        throw new Error(`cannot dot ${JSON.stringify(this._shape)} and ${JSON.stringify(w._shape)}`)
+        throw new Error(`cannot dot ${JSON.stringify(this.shape)} and ${JSON.stringify(w.shape)}`)
       }
       return this._makeResult(r.uop, r.shape, [this, w])
     }
@@ -923,15 +938,15 @@ function createBoundTensorClass(runtime) {
     // --- Loss functions ---
 
     async crossEntropy(target, axis) {
-      if (axis === undefined) axis = this._shape.length === 1 ? 0 : 1
+      if (axis === undefined) axis = this.shape.length === 1 ? 0 : 1
       if (!(target instanceof Tensor)) target = new Tensor(target)
       const { ffi } = this._rt._backend
       const r = ffi.poly_cross_entropy(this._ctx,
-        this._uop, this._shape, this._shape.length,
-        target._uop, target._shape, target._shape.length,
+        this._uop, this.shape, this.shape.length,
+        target._uop, target.shape, target.shape.length,
         axis)
       if (!r.uop) {
-        throw new Error(`shape mismatch: self.shape=${JSON.stringify(this._shape)}, target.shape=${JSON.stringify(target._shape)}`)
+        throw new Error(`shape mismatch: self.shape=${JSON.stringify(this.shape)}, target.shape=${JSON.stringify(target.shape)}`)
       }
       return this._makeResult(r.uop, r.shape, [this, target])
     }
@@ -963,19 +978,19 @@ function createBoundTensorClass(runtime) {
           dim += 1
         } else if (typeof i === 'number') {
           let ii = i
-          if (ii < 0) ii += result._shape[dim]
-          const arg = result._shape.map((s, d) => d === dim ? [ii, ii + 1] : [0, s])
+          if (ii < 0) ii += result.shape[dim]
+          const arg = result.shape.map((s, d) => d === dim ? [ii, ii + 1] : [0, s])
           result = result.shrink(arg)
           result = result.squeeze(dim)
         } else if (Array.isArray(i) && i.length === 2) {
           const [start, stop] = i
-          const arg = result._shape.map((s, d) => d === dim ? [start, stop] : [0, s])
+          const arg = result.shape.map((s, d) => d === dim ? [start, stop] : [0, s])
           result = result.shrink(arg)
           dim += 1
         } else if (typeof i === 'object' && i !== null && 'step' in i) {
           // Slice with step: {start, stop, step}
           // Reimplements Python's slice.indices(size)
-          const size = result._shape[dim]
+          const size = result.shape[dim]
           let step = i.step != null ? i.step : 1
           if (step === 0) throw new Error('slice step cannot be zero')
           let start, stop
@@ -995,14 +1010,14 @@ function createBoundTensorClass(runtime) {
             boundary = [boundary[1] + 1, boundary[0] + 1]
           }
           // shrink to boundary
-          const shrinkArg = result._shape.map((s, d) => d === dim ? boundary : [0, s])
+          const shrinkArg = result.shape.map((s, d) => d === dim ? boundary : [0, s])
           result = result.shrink(shrinkArg)
           // flip if negative stride
           if (stride < 0) result = result.flip(dim)
           const absStride = Math.abs(stride)
           // apply stride via pad+reshape+shrink+reshape
           if (absStride !== 1) {
-            const sh = [...result._shape]
+            const sh = [...result.shape]
             // pad to multiple of stride
             const rem = sh[dim] % absStride
             if (rem !== 0) {
@@ -1015,10 +1030,10 @@ function createBoundTensorClass(runtime) {
             const newSh = [...sh.slice(0, dim), sh[dim] / absStride, absStride, ...sh.slice(dim + 1)]
             result = result.reshape(...newSh)
             // shrink to first element of each stride group
-            const shrinkArg2 = result._shape.map((s, d) => d === dim + 1 ? [0, 1] : [0, s])
+            const shrinkArg2 = result.shape.map((s, d) => d === dim + 1 ? [0, 1] : [0, s])
             result = result.shrink(shrinkArg2)
             // reshape back, collapsing the stride dim
-            const finalSh = [...result._shape.slice(0, dim), result._shape[dim], ...result._shape.slice(dim + 2)]
+            const finalSh = [...result.shape.slice(0, dim), result.shape[dim], ...result.shape.slice(dim + 2)]
             result = result.reshape(...finalSh)
           }
           dim += 1
@@ -1046,7 +1061,7 @@ function createBoundTensorClass(runtime) {
     rearrange(formula, kwargs) {
       if (!kwargs) kwargs = {}
       const { ffi } = this._rt._backend
-      const r = ffi.poly_rearrange(this._ctx, formula, this._uop, this._shape, kwargs)
+      const r = ffi.poly_rearrange(this._ctx, formula, this._uop, this.shape, kwargs)
       if (!r.uop) throw new Error(`poly_rearrange failed for formula: ${formula}`)
       return this._makeResult(r.uop, r.shape, [this])
     }
@@ -1069,7 +1084,7 @@ function createBoundTensorClass(runtime) {
           throw new Error('poly_grad returned NULL for a leaf tensor')
         }
 
-        const numel = leaf._shape.reduce((a, b) => a * b, 1) || 1
+        const numel = leaf.shape.reduce((a, b) => a * b, 1) || 1
         const isF64 = leaf._dtype === 'float64'
         const gradBuf = isF64
           ? ffi.poly_buffer_f64(this._ctx, numel)
@@ -1085,7 +1100,7 @@ function createBoundTensorClass(runtime) {
         if (leaf._grad) {
           leaf._grad = leaf._grad.add(gradTensor)
         } else {
-          leaf._grad = leaf._shape.length > 1 ? gradTensor.reshape(...leaf._shape) : gradTensor
+          leaf._grad = leaf.shape.length > 1 ? gradTensor.reshape(...leaf.shape) : gradTensor
         }
       }
     }
@@ -1231,10 +1246,10 @@ function createBoundTensorClass(runtime) {
       if (tensors.length === 1 && Array.isArray(tensors[0])) tensors = tensors[0]
       if (!tensors.length) throw new Error('cat requires at least one tensor')
 
-      const ndim = tensors[0]._shape.length
+      const ndim = tensors[0].shape.length
       if (dim < 0) dim += ndim
-      const outShape = [...tensors[0]._shape]
-      outShape[dim] = tensors.reduce((acc, t) => acc + t._shape[dim], 0)
+      const outShape = [...tensors[0].shape]
+      outShape[dim] = tensors.reduce((acc, t) => acc + t.shape[dim], 0)
 
       let offset = 0
       let result = null
@@ -1242,11 +1257,11 @@ function createBoundTensorClass(runtime) {
         const padBefore = new Array(ndim).fill(0)
         const padAfter = new Array(ndim).fill(0)
         padBefore[dim] = offset
-        padAfter[dim] = outShape[dim] - offset - t._shape[dim]
+        padAfter[dim] = outShape[dim] - offset - t.shape[dim]
         const padArg = Array.from({ length: ndim }, (_, i) => [padBefore[i], padAfter[i]])
         const padded = t.pad(padArg)
         result = result ? result.add(padded) : padded
-        offset += t._shape[dim]
+        offset += t.shape[dim]
       }
       return result
     }
@@ -1264,9 +1279,9 @@ function createBoundTensorClass(runtime) {
 
     split(sizes, dim) {
       if (dim === undefined) dim = 0
-      if (dim < 0) dim += this._shape.length
+      if (dim < 0) dim += this.shape.length
       if (typeof sizes === 'number') {
-        const total = this._shape[dim]
+        const total = this.shape[dim]
         const chunkSize = sizes
         sizes = []
         for (let i = 0; i < total; i += chunkSize) {
@@ -1276,7 +1291,7 @@ function createBoundTensorClass(runtime) {
       const results = []
       let offset = 0
       for (const sz of sizes) {
-        const arg = this._shape.map((s, d) => d === dim ? [offset, offset + sz] : [0, s])
+        const arg = this.shape.map((s, d) => d === dim ? [offset, offset + sz] : [0, s])
         results.push(this.shrink(arg))
         offset += sz
       }
@@ -1285,14 +1300,14 @@ function createBoundTensorClass(runtime) {
 
     chunk(n, dim) {
       if (dim === undefined) dim = 0
-      if (dim < 0) dim += this._shape.length
-      const total = this._shape[dim]
+      if (dim < 0) dim += this.shape.length
+      const total = this.shape[dim]
       const chunkSize = Math.ceil(total / n)
       return this.split(chunkSize, dim)
     }
 
     toString() {
-      return `Tensor(shape=[${this._shape}], dtype=${this.dtype}, realized=${this._isLeaf()})`
+      return `Tensor(shape=[${this.shape}], dtype=${this.dtype}, realized=${this._isLeaf()})`
     }
   }
 

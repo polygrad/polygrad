@@ -23,9 +23,8 @@ if (fs.existsSync(dstDir)) {
 }
 fs.mkdirSync(dstDir, { recursive: true })
 
-// Also copy modelzoo subdirectories
-const modelzooSrc = path.join(srcDir, 'modelzoo')
-const modelzooModels = path.join(modelzooSrc, 'models')
+// Copy src/ flat files
+const modelsSrc = path.join(srcDir, 'models')
 
 let copied = 0
 for (const f of fs.readdirSync(srcDir)) {
@@ -47,24 +46,14 @@ if (fs.existsSync(cjsonDir)) {
   }
 }
 
-// Copy modelzoo files
-if (fs.existsSync(modelzooSrc)) {
-  const mzDst = path.join(dstDir, 'modelzoo')
-  fs.mkdirSync(mzDst, { recursive: true })
-  for (const f of fs.readdirSync(modelzooSrc)) {
+// Copy models/ directory
+if (fs.existsSync(modelsSrc)) {
+  const modelsDst = path.join(dstDir, 'models')
+  fs.mkdirSync(modelsDst, { recursive: true })
+  for (const f of fs.readdirSync(modelsSrc)) {
     if (f.endsWith('.c') || f.endsWith('.h')) {
-      fs.copyFileSync(path.join(modelzooSrc, f), path.join(mzDst, f))
+      fs.copyFileSync(path.join(modelsSrc, f), path.join(modelsDst, f))
       copied++
-    }
-  }
-  if (fs.existsSync(modelzooModels)) {
-    const modelsDst = path.join(mzDst, 'models')
-    fs.mkdirSync(modelsDst, { recursive: true })
-    for (const f of fs.readdirSync(modelzooModels)) {
-      if (f.endsWith('.c') || f.endsWith('.h')) {
-        fs.copyFileSync(path.join(modelzooModels, f), path.join(modelsDst, f))
-        copied++
-      }
     }
   }
 }
