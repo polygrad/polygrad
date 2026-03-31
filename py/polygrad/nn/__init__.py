@@ -75,7 +75,7 @@ def _snapshot_tensor(t):
         'buffer': t._buffer,
         'inputs': t._inputs[:],
         'grad': t._grad,
-        'shape': t._shape,
+        'shape': t.shape,
         'requires_grad': t._requires_grad,
     }
     if hasattr(t, '_assign_data'):
@@ -94,7 +94,7 @@ def _restore_tensor(t, snap):
     t._buffer = snap['buffer']
     t._inputs = snap['inputs']
     t._grad = snap['grad']
-    t._shape = snap['shape']
+    # shape is on the UOp -- restoring _uop is sufficient
     t._requires_grad = snap['requires_grad']
     if 'assign_data' in snap:
         t._assign_data = snap['assign_data']
@@ -215,7 +215,7 @@ def compile_step(step_fn, model, opt, *sample_inputs):
         raise RuntimeError('compile_step: no ASSIGN ops found (optimizer must use assign)')
 
     # Add loss output: STORE(loss_buf, loss_uop)
-    numel = int(np.prod(loss._shape)) if loss._shape else 1
+    numel = int(np.prod(loss.shape)) if loss.shape else 1
     loss_buf = _ffi._lib.poly_buffer_f32(ctx, numel)
     loss_data = np.zeros(numel, dtype=np.float32)
     loss_store = _ffi._lib.poly_store_val(ctx, loss_buf, loss._uop)

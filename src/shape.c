@@ -479,21 +479,38 @@ void poly_uop_compute_shape(PolyCtx *ctx, PolyUOp *u) {
     /* Fall through to ALU handling */
   }
 
-  /* ── ALU + CAST: take the source with highest ndim ───────────────── */
-  /* In tinygrad, all ALU sources have the same shape (broadcasting done
-   * before ALU creation). In polygrad, scalar CONSTs can appear as ALU
-   * sources alongside tensors. Take the highest-ndim source's shape. */
+  /* ── ALU + CAST: broadcast shapes across all sources ─────────────── */
+  /* Full NumPy broadcasting: align trailing dims, max(a,b) per axis,
+   * a==1 or b==1 for expansion. Ported from old compute_shape(). */
   if (poly_opset_has(POLY_GROUP_ALU, op) || op == POLY_OP_CAST) {
-    int8_t best_ndim = -1;
-    const int64_t *best_dims = NULL;
+    int64_t out_dims[POLY_MAX_DIMS];
+    int out_ndim = -1;
     for (int i = 0; i < u->n_src; i++) {
-      if (u->src[i]->_shape_ndim > best_ndim) {
-        best_ndim = u->src[i]->_shape_ndim;
-        best_dims = u->src[i]->_shape_dims;
+      int8_t si_ndim = u->src[i]->_shape_ndim;
+      if (si_ndim < 0) continue;
+      const int64_t *si_dims = u->src[i]->_shape_dims;
+      if (out_ndim < 0) {
+        out_ndim = si_ndim;
+        if (si_ndim > 0) memcpy(out_dims, si_dims, si_ndim * sizeof(int64_t));
+        continue;
       }
+      int ndim = (out_ndim > si_ndim) ? out_ndim : si_ndim;
+      int64_t merged[POLY_MAX_DIMS];
+      for (int ax = 0; ax < ndim; ax++) {
+        int ai = out_ndim - 1 - ax;
+        int bi = si_ndim - 1 - ax;
+        int64_t a = (ai >= 0) ? out_dims[ai] : 1;
+        int64_t b = (bi >= 0) ? si_dims[bi] : 1;
+        if (a != b && a != 1 && b != 1) {
+          shape_set_none(u); return;
+        }
+        merged[ndim - 1 - ax] = (a > b) ? a : b;
+      }
+      out_ndim = ndim;
+      memcpy(out_dims, merged, ndim * sizeof(int64_t));
     }
-    if (best_ndim < 0) { shape_set_none(u); return; }
-    shape_set_dims(ctx, u, best_dims, best_ndim);
+    if (out_ndim < 0) { shape_set_none(u); return; }
+    shape_set_dims(ctx, u, out_dims, out_ndim);
     return;
   }
 

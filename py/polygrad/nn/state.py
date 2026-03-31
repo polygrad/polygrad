@@ -76,7 +76,6 @@ def load_state_dict(obj, state_dict, strict=True):
             target._uop = new_t._uop
             target._buffer = new_t._buffer
             target._data = new_t._data
-            target._shape = new_t._shape
             target._inputs = []
         elif strict:
             raise KeyError(f'Unexpected key: {key}')
