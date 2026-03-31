@@ -375,8 +375,8 @@ struct PolyUOp {
 
 /* ── Shape accessors (O(1), no allocation) ────────────────────────────── */
 
-static inline int poly_uop_ndim(const PolyUOp *u) { return u->_shape_ndim; }
-static inline const int64_t *poly_uop_dims(const PolyUOp *u) { return u->_shape_dims; }
+int poly_uop_ndim(const PolyUOp *u);
+const int64_t *poly_uop_dims(const PolyUOp *u);
 
 /* Cached rendered kernel (used by kernel_cache in PolyCtx) */
 #define POLY_MAX_KERNEL_BUFS 64

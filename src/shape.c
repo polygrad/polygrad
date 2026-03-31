@@ -30,6 +30,11 @@ static PolyShape heap_shape(int64_t *dims, int ndim) {
   return (PolyShape){ copy, ndim };
 }
 
+/* ── Shape accessors ──────────────────────────────────────────────────── */
+
+int poly_uop_ndim(const PolyUOp *u) { return u ? u->_shape_ndim : -1; }
+const int64_t *poly_uop_dims(const PolyUOp *u) { return u ? u->_shape_dims : NULL; }
+
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 int64_t poly_shape_numel(PolyShape s) {
