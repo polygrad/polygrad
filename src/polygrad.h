@@ -438,6 +438,11 @@ PolyShape poly_uop_shape(PolyCtx *ctx, PolyUOp *u);
 int64_t  poly_shape_numel(PolyShape s);
 bool     poly_shape_eq(PolyShape a, PolyShape b);
 
+/* O(1) cached shape read -- returns arena-owned dims, do NOT free */
+static inline PolyShape poly_uop_shape_cached(const PolyUOp *u) {
+  return (PolyShape){ (int64_t *)u->_shape_dims, u->_shape_ndim };
+}
+
 /* ── Autograd ─────────────────────────────────────────────────────────── */
 /* Reverse-mode gradient of loss w.r.t. wrt.
  * Returns a UOp expression for d(loss)/d(wrt), or NULL on unsupported path. */

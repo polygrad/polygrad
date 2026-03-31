@@ -474,20 +474,21 @@ void poly_uop_compute_shape(PolyCtx *ctx, PolyUOp *u) {
     /* Fall through to ALU handling */
   }
 
-  /* ── ALU + CAST (same-type): all sources must have same shape ─────── */
+  /* ── ALU + CAST: take the source with highest ndim ───────────────── */
+  /* In tinygrad, all ALU sources have the same shape (broadcasting done
+   * before ALU creation). In polygrad, scalar CONSTs can appear as ALU
+   * sources alongside tensors. Take the highest-ndim source's shape. */
   if (poly_opset_has(POLY_GROUP_ALU, op) || op == POLY_OP_CAST) {
-    int8_t found_ndim = -1;
-    const int64_t *found_dims = NULL;
+    int8_t best_ndim = -1;
+    const int64_t *best_dims = NULL;
     for (int i = 0; i < u->n_src; i++) {
-      if (u->src[i]->_shape_ndim < 0) continue;
-      if (found_ndim < 0) {
-        found_ndim = u->src[i]->_shape_ndim;
-        found_dims = u->src[i]->_shape_dims;
+      if (u->src[i]->_shape_ndim > best_ndim) {
+        best_ndim = u->src[i]->_shape_ndim;
+        best_dims = u->src[i]->_shape_dims;
       }
-      /* tinygrad asserts all_same; we silently take first found */
     }
-    if (found_ndim < 0) { shape_set_none(u); return; }
-    shape_set_dims(ctx, u, found_dims, found_ndim);
+    if (best_ndim < 0) { shape_set_none(u); return; }
+    shape_set_dims(ctx, u, best_dims, best_ndim);
     return;
   }
 
