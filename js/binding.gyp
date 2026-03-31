@@ -19,7 +19,6 @@
         "csrc/interp.c",
         "csrc/ir.c",
         "csrc/nn.c",
-        "csrc/tensor.c",
         "csrc/ops.c",
         "csrc/pat.c",
         "csrc/rangeify.c",

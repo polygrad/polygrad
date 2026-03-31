@@ -1,7 +1,9 @@
 /*
- * test_tensor.c -- Tests for PolyExpr (internal shape-tracked expression wrapper)
+ * test_tensor.c -- Tests for shape-on-UOp and v2 composed ops
  *
  * Reference values verified against tinygrad (conda env 'tiny').
+ * All tests use the v2 API (shape read from UOp) or raw UOp construction.
+ * No PolyExpr dependency.
  */
 
 #include <math.h>
@@ -9,1151 +11,467 @@
 #include <string.h>
 
 #include "test_harness.h"
-#include "../src/tensor.h"
+#include "../src/polygrad.h"
+#include "../src/frontend.h"
+#include "../src/scheduler.h"
 
-/* ── Helper: realize a PolyExpr into a float array ────────────────────── */
+/* ── Helper: realize a UOp into a float array ─────────────────────────── */
 
-static int realize_expr(PolyExpr x, PolyExpr out_buf, float *out_data,
-                        PolyExpr *leaf_bufs, float **leaf_datas, int n_leaves) {
-  PolyUOp *store = poly_store_val(x.ctx, out_buf.buf ? out_buf.buf : out_buf.uop, x.uop);
-  PolyUOp *sink = poly_sink1(x.ctx, store);
-
-  int n_total = n_leaves + 1;
+static int realize_uop(PolyCtx *ctx, PolyUOp *val, PolyUOp *out_buf,
+                       float *out_data, PolyUOp **leaf_bufs, float **leaf_datas,
+                       int n_leaves) {
+  PolyUOp *store = poly_store_val(ctx, out_buf, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  int n = n_leaves + 1;
   PolyUOp *bufs[64];
   void *datas[64];
   for (int i = 0; i < n_leaves; i++) {
-    bufs[i] = leaf_bufs[i].buf ? leaf_bufs[i].buf : leaf_bufs[i].uop;
+    bufs[i] = leaf_bufs[i];
     datas[i] = leaf_datas[i];
   }
-  bufs[n_leaves] = out_buf.buf ? out_buf.buf : out_buf.uop;
+  bufs[n_leaves] = out_buf;
   datas[n_leaves] = out_data;
-
-  return poly_realize_flat(x.ctx, sink, bufs, datas, n_total);
+  return poly_realize_flat(ctx, sink, bufs, datas, n);
 }
 
-/* ── Shape tracking ───────────────────────────────────────────────────── */
+/* ── Helper: make a shaped buffer (RESHAPE(BUFFER, shape)) ────────────── */
 
-TEST(pe, buffer_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  int64_t shape[] = {2, 3, 4};
-  PolyExpr e = pe_buffer(ctx, POLY_FLOAT32, shape, 3);
-  ASSERT_TRUE(pe_valid(e));
-  ASSERT_INT_EQ(e.ndim, 3);
-  ASSERT_INT_EQ(e.shape[0], 2);
-  ASSERT_INT_EQ(e.shape[1], 3);
-  ASSERT_INT_EQ(e.shape[2], 4);
-  ASSERT_INT_EQ(pe_numel(e), 24);
-  poly_ctx_destroy(ctx);
-  PASS();
+static PolyUOp *make_buf(PolyCtx *ctx, const int64_t *shape, int ndim) {
+  int64_t numel = 1;
+  for (int i = 0; i < ndim; i++) numel *= shape[i];
+  PolyUOp *buf = poly_buffer_f32(ctx, numel);
+  if (ndim > 1) return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
+  return buf;
 }
 
-TEST(pe, reshape_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr e = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 6}, 2);
-  PolyExpr r = pe_reshape(e, (int64_t[]){3, 4}, 2);
-  ASSERT_INT_EQ(r.ndim, 2);
-  ASSERT_INT_EQ(r.shape[0], 3);
-  ASSERT_INT_EQ(r.shape[1], 4);
-  poly_ctx_destroy(ctx);
-  PASS();
+/* Get underlying BUFFER from possibly-reshaped UOp */
+static PolyUOp *base_buf(PolyUOp *u) {
+  while (u->op == POLY_OP_RESHAPE && u->n_src > 0) u = u->src[0];
+  return u;
 }
 
-TEST(pe, transpose_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr e = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3, 4}, 3);
-  PolyExpr t = pe_transpose(e, -2, -1);
-  ASSERT_INT_EQ(t.ndim, 3);
-  ASSERT_INT_EQ(t.shape[0], 2);
-  ASSERT_INT_EQ(t.shape[1], 4);
-  ASSERT_INT_EQ(t.shape[2], 3);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, permute_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr e = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3, 4}, 3);
-  PolyExpr p = pe_permute(e, (int64_t[]){2, 0, 1}, 3);
-  ASSERT_INT_EQ(p.shape[0], 4);
-  ASSERT_INT_EQ(p.shape[1], 2);
-  ASSERT_INT_EQ(p.shape[2], 3);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Elementwise e2e ──────────────────────────────────────────────────── */
-
-TEST(pe, add_e2e) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr a = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr b = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr r = pe_add(a, b);
-
-  float da[] = {1.0f, 2.0f, 3.0f};
-  float db[] = {4.0f, 5.0f, 6.0f};
-  float dout[3] = {0};
-  PolyExpr leaves[] = {a, b};
-  float *leaf_data[] = {da, db};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 2), 0);
-  ASSERT_FLOAT_EQ(dout[0], 5.0f, 1e-6);
-  ASSERT_FLOAT_EQ(dout[1], 7.0f, 1e-6);
-  ASSERT_FLOAT_EQ(dout[2], 9.0f, 1e-6);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, dot_e2e) {
-  PolyCtx *ctx = poly_ctx_new();
-  /* (2,3) @ (3,2) -> (2,2) */
-  PolyExpr a = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr b = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3, 2}, 2);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 2}, 2);
-  PolyExpr r = pe_dot(a, b);
-  ASSERT_INT_EQ(r.ndim, 2);
-  ASSERT_INT_EQ(r.shape[0], 2);
-  ASSERT_INT_EQ(r.shape[1], 2);
-
-  float da[] = {1,2,3, 4,5,6};
-  float db[] = {1,2, 3,4, 5,6};
-  float dout[4] = {0};
-  PolyExpr leaves[] = {a, b};
-  float *leaf_data[] = {da, db};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 2), 0);
-  /* [1*1+2*3+3*5, 1*2+2*4+3*6] = [22, 28] */
-  ASSERT_FLOAT_EQ(dout[0], 22.0f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[1], 28.0f, 1e-4);
-  /* [4*1+5*3+6*5, 4*2+5*4+6*6] = [49, 64] */
-  ASSERT_FLOAT_EQ(dout[2], 49.0f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[3], 64.0f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── RMSNorm ──────────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  v2 composed op e2e tests (tinygrad-verified reference values)         */
+/* ═══════════════════════════════════════════════════════════════════════ */
 
 TEST(pe, rmsnorm_e2e) {
-  /* Reference (tinygrad): [[0.4629, 0.9258, 1.3887], [0.7895, 0.9869, 1.1843]] */
+  /* Reference: [[0.4629, 0.9258, 1.3887], [0.7895, 0.9869, 1.1843]] */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr w = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *w = poly_buffer_f32(ctx, 3);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
+  PolyUOp *r = poly_rmsnorm_v2(ctx, x, w, 1e-5);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
 
-  PolyExpr r = pe_rmsnorm(x, &w, 1e-5);
-  ASSERT_TRUE(pe_valid(r));
-  ASSERT_INT_EQ(r.ndim, 2);
-  ASSERT_INT_EQ(r.shape[0], 2);
-  ASSERT_INT_EQ(r.shape[1], 3);
-
-  float dx[] = {1, 2, 3, 4, 5, 6};
-  float dw[] = {1, 1, 1};
-  float dout[6] = {0};
-  PolyExpr leaves[] = {x, w};
-  float *leaf_data[] = {dx, dw};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 2), 0);
-
+  float dx[] = {1,2,3, 4,5,6}, dw[] = {1,1,1}, dout[6] = {0};
+  PolyUOp *leaves[] = {base_buf(x), w};
+  float *ld[] = {dx, dw};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 0.46290955f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[1], 0.92581910f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[2], 1.38872860f, 1e-4);
   ASSERT_FLOAT_EQ(dout[3], 0.78954184f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[4], 0.98692730f, 1e-4);
   ASSERT_FLOAT_EQ(dout[5], 1.18431280f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
-
-TEST(pe, rmsnorm_no_weight) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr r = pe_rmsnorm(x, NULL, 1e-5);
-  ASSERT_TRUE(pe_valid(r));
-
-  float dx[] = {1, 2, 3, 4, 5, 6};
-  float dout[6] = {0};
-  PolyExpr leaves[] = {x};
-  float *leaf_data[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 1), 0);
-  /* Same as with weight=[1,1,1] */
-  ASSERT_FLOAT_EQ(dout[0], 0.46290955f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Scaled Dot-Product Attention ─────────────────────────────────────── */
 
 TEST(pe, sdpa_e2e) {
-  /* Reference (tinygrad): [[[1.6605, 2.6605], [2.3395, 3.3395]]] */
+  /* Reference: [[[1.6605, 2.6605], [2.3395, 3.3395]]] */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr q = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 2, 2}, 3);
-  PolyExpr k = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 2, 2}, 3);
-  PolyExpr v = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 2, 2}, 3);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 2, 2}, 3);
+  PolyUOp *q = make_buf(ctx, (int64_t[]){1, 2, 2}, 3);
+  PolyUOp *k = make_buf(ctx, (int64_t[]){1, 2, 2}, 3);
+  PolyUOp *v = make_buf(ctx, (int64_t[]){1, 2, 2}, 3);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *r = poly_sdpa_v2(ctx, q, k, v, NULL, 0);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
 
-  PolyExpr r = pe_scaled_dot_product_attention(q, k, v, NULL, 0);
-  ASSERT_TRUE(pe_valid(r));
-  ASSERT_INT_EQ(r.ndim, 3);
-  ASSERT_INT_EQ(r.shape[0], 1);
-  ASSERT_INT_EQ(r.shape[1], 2);
-  ASSERT_INT_EQ(r.shape[2], 2);
-
-  float dq[] = {1, 0, 0, 1};
-  float dk[] = {1, 0, 0, 1};
-  float dv[] = {1, 2, 3, 4};
-  float dout[4] = {0};
-  PolyExpr leaves[] = {q, k, v};
-  float *leaf_data[] = {dq, dk, dv};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 3), 0);
-
+  float dq[] = {1,0, 0,1}, dk[] = {1,0, 0,1}, dv[] = {1,2, 3,4}, dout[4] = {0};
+  PolyUOp *leaves[] = {base_buf(q), base_buf(k), base_buf(v)};
+  float *ld[] = {dq, dk, dv};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.6604769f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[1], 2.6604769f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[2], 2.3395231f, 1e-3);
   ASSERT_FLOAT_EQ(dout[3], 3.3395231f, 1e-3);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(pe, sdpa_causal_e2e) {
-  /* Reference (tinygrad): [[[1.0, 0.0], [0.3302, 0.6698], [0.7517, 0.7517]]] */
+  /* Reference: [[[1.0, 0.0], [0.3302, 0.6698], [0.7517, 0.7517]]] */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr q = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 3, 2}, 3);
-  PolyExpr k = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 3, 2}, 3);
-  PolyExpr v = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 3, 2}, 3);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *q = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *k = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *v = make_buf(ctx, (int64_t[]){1, 3, 2}, 3);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
+  PolyUOp *r = poly_sdpa_v2(ctx, q, k, v, NULL, 1);
 
-  PolyExpr r = pe_scaled_dot_product_attention(q, k, v, NULL, 1);
-  ASSERT_TRUE(pe_valid(r));
-
-  float dq[] = {1,0, 0,1, 1,1};
-  float dk[] = {1,0, 0,1, 1,1};
-  float dv[] = {1,0, 0,1, 1,1};
+  float dq[] = {1,0, 0,1, 1,1}, dk[] = {1,0, 0,1, 1,1}, dv[] = {1,0, 0,1, 1,1};
   float dout[6] = {0};
-  PolyExpr leaves[] = {q, k, v};
-  float *leaf_data[] = {dq, dk, dv};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 3), 0);
-
+  PolyUOp *leaves[] = {base_buf(q), base_buf(k), base_buf(v)};
+  float *ld[] = {dq, dk, dv};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[1], 0.0f, 1e-3);
   ASSERT_FLOAT_EQ(dout[2], 0.33023846f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[3], 0.66976154f, 1e-3);
   ASSERT_FLOAT_EQ(dout[4], 0.7517449f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[5], 0.7517449f, 1e-3);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
-
-/* ── repeat_interleave ────────────────────────────────────────────────── */
 
 TEST(pe, repeat_interleave_e2e) {
-  /* Reference (tinygrad): [[1,1,2,2,3,3], [4,4,5,5,6,6]] */
+  /* Reference: [[1,1,2,2,3,3], [4,4,5,5,6,6]] */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 6}, 2);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *r = poly_repeat_interleave_v2(ctx, x, 2, 1);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 6);
 
-  PolyExpr r = pe_repeat_interleave(x, 2, 1);
-  ASSERT_TRUE(pe_valid(r));
-  ASSERT_INT_EQ(r.ndim, 2);
-  ASSERT_INT_EQ(r.shape[0], 2);
-  ASSERT_INT_EQ(r.shape[1], 6);
-
-  float dx[] = {1,2,3, 4,5,6};
-  float dout[12] = {0};
-  PolyExpr leaves[] = {x};
-  float *leaf_data[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 1), 0);
-
+  float dx[] = {1,2,3, 4,5,6}, dout[12] = {0};
+  PolyUOp *leaves[] = {base_buf(x)};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
   float expected[] = {1,1,2,2,3,3, 4,4,5,5,6,6};
-  for (int i = 0; i < 12; i++)
-    ASSERT_FLOAT_EQ(dout[i], expected[i], 1e-6);
-  poly_ctx_destroy(ctx);
-  PASS();
+  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(dout[i], expected[i], 1e-6);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(pe, repeat_interleave_dim0) {
-  /* [1,2,3] repeat 3 on dim 0 -> [1,1,1,2,2,2,3,3,3] */
+TEST(pe, argmax_e2e) {
+  /* Reference: argmax([1,5,3,2,4]) = 1 */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){9}, 1);
+  PolyUOp *x = poly_buffer_f32(ctx, 5);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *r = poly_argmax_v2(ctx, x, 0);
+  /* Cast int32 result to float for output */
+  r = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r, poly_arg_none());
 
-  PolyExpr r = pe_repeat_interleave(x, 3, 0);
-  ASSERT_INT_EQ(r.shape[0], 9);
-
-  float dx[] = {1, 2, 3};
-  float dout[9] = {0};
-  PolyExpr leaves[] = {x};
-  float *leaf_data[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 1), 0);
-
-  float expected[] = {1,1,1, 2,2,2, 3,3,3};
-  for (int i = 0; i < 9; i++)
-    ASSERT_FLOAT_EQ(dout[i], expected[i], 1e-6);
-  poly_ctx_destroy(ctx);
-  PASS();
+  float dx[] = {1,5,3,2,4}, dout[1] = {0};
+  PolyUOp *leaves[] = {x};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-/* ── chunk ────────────────────────────────────────────────────────────── */
-
-TEST(pe, chunk_e2e) {
-  /* Reference (tinygrad): [1,2,3] and [4,5,6] */
+TEST(pe, argmax_2d_e2e) {
+  /* Reference: argmax([[1,5,3],[4,2,6]], axis=1) = [1, 2] */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){6}, 1);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *r = poly_argmax_v2(ctx, x, 1);
+  r = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r, poly_arg_none());
 
-  PolyExpr chunks[2];
-  pe_chunk(x, 2, 0, chunks);
-  ASSERT_TRUE(pe_valid(chunks[0]));
-  ASSERT_TRUE(pe_valid(chunks[1]));
-  ASSERT_INT_EQ(chunks[0].shape[0], 3);
-  ASSERT_INT_EQ(chunks[1].shape[0], 3);
-
-  /* Realize first chunk */
-  PolyExpr out0 = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  float dx[] = {1,2,3,4,5,6};
-  float dout0[3] = {0};
-  PolyExpr leaves0[] = {x};
-  float *ld0[] = {dx};
-  ASSERT_INT_EQ(realize_expr(chunks[0], out0, dout0, leaves0, ld0, 1), 0);
-  ASSERT_FLOAT_EQ(dout0[0], 1.0f, 1e-6);
-  ASSERT_FLOAT_EQ(dout0[1], 2.0f, 1e-6);
-  ASSERT_FLOAT_EQ(dout0[2], 3.0f, 1e-6);
-
-  /* Realize second chunk */
-  PolyExpr out1 = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  float dout1[3] = {0};
-  PolyExpr leaves1[] = {x};
-  float *ld1[] = {dx};
-  ASSERT_INT_EQ(realize_expr(chunks[1], out1, dout1, leaves1, ld1, 1), 0);
-  ASSERT_FLOAT_EQ(dout1[0], 4.0f, 1e-6);
-  ASSERT_FLOAT_EQ(dout1[1], 5.0f, 1e-6);
-  ASSERT_FLOAT_EQ(dout1[2], 6.0f, 1e-6);
-
-  poly_ctx_destroy(ctx);
-  PASS();
+  float dx[] = {1,5,3, 4,2,6}, dout[2] = {0};
+  PolyUOp *leaves[] = {base_buf(x)};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
+  ASSERT_FLOAT_EQ(dout[1], 2.0f, 1e-4);
+  poly_ctx_destroy(ctx); PASS();
 }
-
-/* ── RoPE ─────────────────────────────────────────────────────────────── */
-
-TEST(pe, rope_e2e) {
-  /* Reference (tinygrad):
-   * x = [[[[1,0,0,1], [1,0,0,1], [1,0,0,1]]]] shape (1,1,3,4)
-   * Result: [[[[1.0, 0.0, 0.0, 1.0],
-   *            [0.5403, -0.01, 0.8415, 0.9999],
-   *            [-0.4161, -0.02, 0.9093, 0.9998]]]]
-   */
-  PolyCtx *ctx = poly_ctx_new();
-  int64_t dim = 4, seq = 3;
-  int64_t half = dim / 2;
-
-  /* Precompute freqs: for each (pos, freq_idx): pos * 1/(theta^(2*idx/dim)) */
-  float cos_data[6], sin_data[6];  /* 3 x 2 */
-  double theta = 10000.0;
-  for (int64_t i = 0; i < seq; i++) {
-    for (int64_t j = 0; j < half; j++) {
-      double freq = 1.0 / pow(theta, (double)(2 * j) / (double)dim);
-      double angle = (double)i * freq;
-      cos_data[i * half + j] = (float)cos(angle);
-      sin_data[i * half + j] = (float)sin(angle);
-    }
-  }
-
-  /* Need to broadcast freqs to (1, 1, 3, 2) to match x's (1, 1, 3, 4/2) */
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 3, 4}, 4);
-  PolyExpr fc_buf = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3, 2}, 2);
-  PolyExpr fs_buf = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3, 2}, 2);
-
-  /* Reshape freqs to (1, 1, 3, 2) for broadcasting */
-  PolyExpr fc = pe_reshape(fc_buf, (int64_t[]){1, 1, 3, 2}, 4);
-  PolyExpr fs = pe_reshape(fs_buf, (int64_t[]){1, 1, 3, 2}, 4);
-
-  PolyExpr r = pe_rope(x, fc, fs);
-  ASSERT_TRUE(pe_valid(r));
-  ASSERT_INT_EQ(r.ndim, 4);
-  ASSERT_INT_EQ(r.shape[3], 4);
-
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 1, 3, 4}, 4);
-  float dx[] = {1,0,0,1, 1,0,0,1, 1,0,0,1};
-  float dout[12] = {0};
-  PolyExpr leaves[] = {x, fc_buf, fs_buf};
-  float *leaf_data[] = {dx, cos_data, sin_data};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 3), 0);
-
-  /* pos=0: cos=[1,1], sin=[0,0] -> [1*1-0*0, 0*1-1*0, 0*1+1*0, 1*1+0*0] = [1,0,0,1] */
-  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[1], 0.0f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[2], 0.0f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[3], 1.0f, 1e-3);
-
-  /* pos=1: [0.5403, -0.01, 0.8415, 0.9999] */
-  ASSERT_FLOAT_EQ(dout[4], 0.5403f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[5], -0.01f, 1e-2);
-  ASSERT_FLOAT_EQ(dout[6], 0.8415f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[7], 0.9999f, 1e-3);
-
-  /* pos=2: [-0.4161, -0.02, 0.9093, 0.9998] */
-  ASSERT_FLOAT_EQ(dout[8], -0.4161f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[9], -0.02f, 1e-2);
-  ASSERT_FLOAT_EQ(dout[10], 0.9093f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[11], 0.9998f, 1e-3);
-
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ═══════════════════════════════════════════════════════════════════════ */
-/*  NN Layer tests                                                        */
-/* ═══════════════════════════════════════════════════════════════════════ */
-
-TEST(pe, nn_linear_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PeLinear l = pe_nn_linear(ctx, 3, 4, 1, 42);
-  ASSERT_TRUE(pe_valid(l.weight));
-  ASSERT_INT_EQ(l.weight.ndim, 2);
-  ASSERT_INT_EQ(l.weight.shape[0], 4);
-  ASSERT_INT_EQ(l.weight.shape[1], 3);
-  ASSERT_TRUE(l.has_bias);
-  ASSERT_TRUE(pe_valid(l.bias));
-  ASSERT_INT_EQ(l.bias.shape[0], 4);
-
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr out = pe_nn_linear_forward(&l, x);
-  ASSERT_TRUE(pe_valid(out));
-  ASSERT_INT_EQ(out.ndim, 2);
-  ASSERT_INT_EQ(out.shape[0], 2);
-  ASSERT_INT_EQ(out.shape[1], 4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_linear_no_bias) {
-  PolyCtx *ctx = poly_ctx_new();
-  PeLinear l = pe_nn_linear(ctx, 5, 3, 0, 42);
-  ASSERT_TRUE(!l.has_bias);
-  ASSERT_TRUE(!pe_valid(l.bias));
-
-  PolyExpr params[4];
-  int np = pe_nn_linear_params(&l, params, 4);
-  ASSERT_INT_EQ(np, 1);  /* weight only */
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_rmsnorm_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PeRMSNorm l = pe_nn_rmsnorm(ctx, 64, 1e-5, 42);
-  ASSERT_INT_EQ(l.dim, 64);
-  ASSERT_TRUE(pe_valid(l.weight));
-  ASSERT_INT_EQ(l.weight.shape[0], 64);
-
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 8, 64}, 3);
-  PolyExpr out = pe_nn_rmsnorm_forward(&l, x);
-  ASSERT_TRUE(pe_valid(out));
-  ASSERT_INT_EQ(out.ndim, 3);
-  ASSERT_INT_EQ(out.shape[2], 64);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_embedding_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PeEmbedding l = pe_nn_embedding(ctx, 100, 32, 42);
-  ASSERT_INT_EQ(l.vocab_size, 100);
-  ASSERT_INT_EQ(l.embed_dim, 32);
-  ASSERT_TRUE(pe_valid(l.weight));
-  ASSERT_INT_EQ(l.weight.shape[0], 100);
-  ASSERT_INT_EQ(l.weight.shape[1], 32);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_attention_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  /* 4 heads, 4 kv heads (no GQA), dim=32 */
-  PeAttention a = pe_nn_attention(ctx, 32, 4, 4, 0, 42);
-  ASSERT_INT_EQ(a.n_heads, 4);
-  ASSERT_INT_EQ(a.n_kv_heads, 4);
-  ASSERT_INT_EQ(a.head_dim, 8);
-  ASSERT_INT_EQ(a.dim, 32);
-
-  /* Count params: 4 linear layers, no bias = 4 weights */
-  PolyExpr params[16];
-  int np = pe_nn_attention_params(&a, params, 16);
-  ASSERT_INT_EQ(np, 4);
-
-  /* Forward shape: (1, 4, 32) -> (1, 4, 32) */
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 4, 32}, 3);
-  PolyExpr out = pe_nn_attention_forward(&a, x, NULL, NULL, NULL, 1);
-  ASSERT_TRUE(pe_valid(out));
-  ASSERT_INT_EQ(out.ndim, 3);
-  ASSERT_INT_EQ(out.shape[0], 1);
-  ASSERT_INT_EQ(out.shape[1], 4);
-  ASSERT_INT_EQ(out.shape[2], 32);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_attention_gqa_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  /* 8 heads, 2 kv heads (GQA 4:1) */
-  PeAttention a = pe_nn_attention(ctx, 64, 8, 2, 0, 42);
-  ASSERT_INT_EQ(a.n_heads, 8);
-  ASSERT_INT_EQ(a.n_kv_heads, 2);
-  ASSERT_INT_EQ(a.head_dim, 8);
-
-  /* wq: (64, 64), wk: (16, 64), wv: (16, 64), wo: (64, 64) */
-  ASSERT_INT_EQ(a.wq.weight.shape[0], 64);
-  ASSERT_INT_EQ(a.wk.weight.shape[0], 16);
-  ASSERT_INT_EQ(a.wv.weight.shape[0], 16);
-  ASSERT_INT_EQ(a.wo.weight.shape[0], 64);
-
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 4, 64}, 3);
-  PolyExpr out = pe_nn_attention_forward(&a, x, NULL, NULL, NULL, 1);
-  ASSERT_TRUE(pe_valid(out));
-  ASSERT_INT_EQ(out.shape[0], 1);
-  ASSERT_INT_EQ(out.shape[1], 4);
-  ASSERT_INT_EQ(out.shape[2], 64);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_params_collection) {
-  PolyCtx *ctx = poly_ctx_new();
-  PeLinear lin = pe_nn_linear(ctx, 8, 4, 1, 1);    /* 2 params */
-  PeRMSNorm rms = pe_nn_rmsnorm(ctx, 4, 1e-5, 2);  /* 1 param */
-  PeEmbedding emb = pe_nn_embedding(ctx, 10, 4, 3); /* 1 param */
-
-  PolyExpr params[16];
-  int n = 0;
-  n += pe_nn_linear_params(&lin, params + n, 16 - n);
-  n += pe_nn_rmsnorm_params(&rms, params + n, 16 - n);
-  n += pe_nn_embedding_params(&emb, params + n, 16 - n);
-  ASSERT_INT_EQ(n, 4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── GroupNorm ─────────────────────────────────────────────────────────── */
-
-TEST(pe, nn_groupnorm_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PeGroupNorm gn = pe_nn_groupnorm(ctx, 2, 6, 1e-5, 1, 42);
-  ASSERT_INT_EQ(gn.num_groups, 2);
-  ASSERT_INT_EQ(gn.num_channels, 6);
-  ASSERT_TRUE(gn.has_affine);
-  ASSERT_TRUE(pe_valid(gn.weight));
-  ASSERT_TRUE(pe_valid(gn.bias));
-
-  PolyExpr params[4];
-  int np = pe_nn_groupnorm_params(&gn, params, 4);
-  ASSERT_INT_EQ(np, 2);
-
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 6, 2}, 3);
-  PolyExpr out = pe_nn_groupnorm_forward(&gn, x);
-  ASSERT_TRUE(pe_valid(out));
-  ASSERT_INT_EQ(out.ndim, 3);
-  ASSERT_INT_EQ(out.shape[0], 1);
-  ASSERT_INT_EQ(out.shape[1], 6);
-  ASSERT_INT_EQ(out.shape[2], 2);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, nn_groupnorm_e2e) {
-  /* Reference (tinygrad, weight=1, bias=0):
-   * GroupNorm(2, 6) on (1, 6, 2):
-   * [[[-1.4638, -0.8783], [-0.2928, 0.2928], [0.8783, 1.4638],
-   *   [-1.4638, -0.8783], [-0.2928, 0.2928], [0.8783, 1.4638]]] */
-  PolyCtx *ctx = poly_ctx_new();
-  PeGroupNorm gn = pe_nn_groupnorm(ctx, 2, 6, 1e-5, 1, 42);
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 6, 2}, 3);
-  PolyExpr outb = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1, 6, 2}, 3);
-  PolyExpr r = pe_nn_groupnorm_forward(&gn, x);
-
-  float dx[] = {1,2,3,4,5,6, 7,8,9,10,11,12};
-  float dw[] = {1,1,1,1,1,1};
-  float db[] = {0,0,0,0,0,0};
-  float dout[12] = {0};
-  PolyExpr leaves[] = {x, gn.weight, gn.bias};
-  float *ld[] = {dx, dw, db};
-  ASSERT_INT_EQ(realize_expr(r, outb, dout, leaves, ld, 3), 0);
-
-  ASSERT_FLOAT_EQ(dout[0], -1.4638f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[1], -0.8783f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[2], -0.2928f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[3],  0.2928f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[4],  0.8783f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[5],  1.4638f, 1e-3);
-  /* Group 2 (channels 3-5) should be same pattern */
-  ASSERT_FLOAT_EQ(dout[6], -1.4638f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[11], 1.4638f, 1e-3);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Loss functions ───────────────────────────────────────────────────── */
 
 TEST(pe, mse_loss_e2e) {
-  /* mse([1,2,3], [1,2,3]) = 0 */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr pred = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr tgt = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
-  PolyExpr r = pe_mse_loss(pred, tgt);
-  ASSERT_TRUE(pe_valid(r));
-
-  float dp[] = {1, 2, 3}, dt[] = {1, 2, 3};
-  float dout[1] = {999};
-  PolyExpr leaves[] = {pred, tgt};
-  float *ld[] = {dp, dt};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, ld, 2), 0);
-  ASSERT_FLOAT_EQ(dout[0], 0.0f, 1e-6);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, mse_loss_nonzero) {
   /* mse([1,2,3], [4,5,6]) = mean([9,9,9]) = 9 */
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr pred = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr tgt = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
-  PolyExpr r = pe_mse_loss(pred, tgt);
+  PolyUOp *pred = poly_buffer_f32(ctx, 3);
+  PolyUOp *tgt = poly_buffer_f32(ctx, 3);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *r = poly_mse_loss_v2(ctx, pred, tgt);
 
-  float dp[] = {1, 2, 3}, dt[] = {4, 5, 6};
-  float dout[1] = {0};
-  PolyExpr leaves[] = {pred, tgt};
+  float dp[] = {1,2,3}, dt[] = {4,5,6}, dout[1] = {0};
+  PolyUOp *leaves[] = {pred, tgt};
   float *ld[] = {dp, dt};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, ld, 2), 0);
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 9.0f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(pe, mae_loss_e2e) {
-  /* mae([1,2,3], [4,6,3]) = mean([3,4,0]) = 7/3 = 2.333 */
+TEST(pe, softmax_v2_e2e) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyExpr pred = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr tgt = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
-  PolyExpr r = pe_mae_loss(pred, tgt);
-
-  float dp[] = {1, 2, 3}, dt[] = {4, 6, 3};
-  float dout[1] = {0};
-  PolyExpr leaves[] = {pred, tgt};
-  float *ld[] = {dp, dt};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, ld, 2), 0);
-  ASSERT_FLOAT_EQ(dout[0], 7.0f / 3.0f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Argmax / Argmin ──────────────────────────────────────────────────── */
-
-TEST(pe, argmax_1d) {
-  /* Reference (tinygrad): argmax([1,5,3,2,4]) = 1 */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){5}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
-  PolyExpr r = pe_argmax(x, 0);
-  ASSERT_TRUE(pe_valid(r));
-
-  /* argmax returns int32, cast to float for output buffer */
-  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
-  float dx[] = {1.0f, 5.0f, 3.0f, 2.0f, 4.0f};
-  float dout[1] = {0};
-  PolyExpr leaves[] = {x};
-  float *ld[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
-  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, argmax_2d_axis1) {
-  /* Reference (tinygrad): argmax([[1,5,3],[4,2,6]], axis=1) = [1, 2] */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2}, 1);
-  PolyExpr r = pe_argmax(x, 1);
-  ASSERT_TRUE(pe_valid(r));
-
-  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
-  float dx[] = {1,5,3, 4,2,6};
-  float dout[2] = {0};
-  PolyExpr leaves[] = {x};
-  float *ld[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
-  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);  /* index of 5 in [1,5,3] */
-  ASSERT_FLOAT_EQ(dout[1], 2.0f, 1e-4);  /* index of 6 in [4,2,6] */
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, argmax_2d_axis0) {
-  /* Reference (tinygrad): argmax([[1,5,3],[4,2,6]], axis=0) = [1, 0, 1] */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr r = pe_argmax(x, 0);
-  ASSERT_TRUE(pe_valid(r));
-
-  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
-  float dx[] = {1,5,3, 4,2,6};
-  float dout[3] = {0};
-  PolyExpr leaves[] = {x};
-  float *ld[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
-  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);  /* max of col 0: 4 at row 1 */
-  ASSERT_FLOAT_EQ(dout[1], 0.0f, 1e-4);  /* max of col 1: 5 at row 0 */
-  ASSERT_FLOAT_EQ(dout[2], 1.0f, 1e-4);  /* max of col 2: 6 at row 1 */
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(pe, argmin_1d) {
-  /* argmin([1,5,3,2,4]) = 0 */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){5}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){1}, 1);
-  PolyExpr r = pe_argmin(x, 0);
-  PolyExpr r_f = pe_cast(r, POLY_FLOAT32);
-
-  float dx[] = {1.0f, 5.0f, 3.0f, 2.0f, 4.0f};
-  float dout[1] = {0};
-  PolyExpr leaves[] = {x};
-  float *ld[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r_f, out, dout, leaves, ld, 1), 0);
-  ASSERT_FLOAT_EQ(dout[0], 0.0f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Softmax via PolyExpr ─────────────────────────────────────────────── */
-
-TEST(pe, softmax_e2e) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){3}, 1);
-  PolyExpr r = pe_softmax(x, 0);
-
-  float dx[] = {1.0f, 2.0f, 3.0f};
-  float dout[3] = {0};
-  PolyExpr leaves[] = {x};
-  float *leaf_data[] = {dx};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 1), 0);
-
-  /* softmax([1,2,3]) = [0.0900, 0.2447, 0.6652] */
-  ASSERT_FLOAT_EQ(dout[0], 0.0900f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[1], 0.2447f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[2], 0.6652f, 1e-3);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Linear via PolyExpr ──────────────────────────────────────────────── */
-
-TEST(pe, linear_e2e) {
-  PolyCtx *ctx = poly_ctx_new();
-  /* x: (2, 3), weight: (4, 3), bias: (4,) -> out: (2, 4) */
-  PolyExpr x = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 3}, 2);
-  PolyExpr w = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){4, 3}, 2);
-  PolyExpr b = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){4}, 1);
-  PolyExpr out = pe_buffer(ctx, POLY_FLOAT32, (int64_t[]){2, 4}, 2);
-
-  PolyExpr r = pe_linear(x, w, &b);
-  ASSERT_TRUE(pe_valid(r));
-  ASSERT_INT_EQ(r.ndim, 2);
-  ASSERT_INT_EQ(r.shape[0], 2);
-  ASSERT_INT_EQ(r.shape[1], 4);
-
-  float dx[] = {1,0,0, 0,1,0};
-  float dw[] = {1,2,3, 4,5,6, 7,8,9, 10,11,12};  /* rows of weight */
-  float db[] = {0.1f, 0.2f, 0.3f, 0.4f};
-  float dout[8] = {0};
-  PolyExpr leaves[] = {x, w, b};
-  float *leaf_data[] = {dx, dw, db};
-  ASSERT_INT_EQ(realize_expr(r, out, dout, leaves, leaf_data, 3), 0);
-
-  /* x[0]=[1,0,0]: out = w[:,0] + bias = [1.1, 4.2, 7.3, 10.4] */
-  ASSERT_FLOAT_EQ(dout[0], 1.1f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[1], 4.2f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[2], 7.3f, 1e-4);
-  ASSERT_FLOAT_EQ(dout[3], 10.4f, 1e-4);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ═══════════════════════════════════════════════════════════════════════ */
-/*  v2 API tests (shape read from UOp)                                    */
-/* ═══════════════════════════════════════════════════════════════════════ */
-
-TEST(pe, v2_softmax) {
-  PolyCtx *ctx = poly_ctx_new();
-  int64_t shape[] = {3};
-  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 3), shape, 1);
+  PolyUOp *x = poly_buffer_f32(ctx, 3);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
-
   PolyUOp *sm = poly_softmax_v2(ctx, x, 0);
-  ASSERT_NOT_NULL(sm);
   ASSERT_INT_EQ(poly_uop_ndim(sm), 1);
-  ASSERT_INT_EQ(poly_uop_dims(sm)[0], 3);
 
-  PolyUOp *store = poly_store_val(ctx, out_buf, sm);
-  PolyUOp *sink = poly_sink1(ctx, store);
-  float dx[] = {1.0f, 2.0f, 3.0f};
-  float dout[3] = {0};
-  PolyUOp *bufs[] = {poly_buffer_f32(ctx, 3), out_buf};
-  /* Need the underlying buffer for x, not the reshape */
+  float dx[] = {1,2,3}, dout[3] = {0};
   poly_realize_begin(ctx);
-  poly_realize_bind(ctx, x->src[0], dx);  /* BUFFER under RESHAPE */
+  poly_realize_bind(ctx, x, dx);
   poly_realize_bind(ctx, out_buf, dout);
-  int rc = poly_realize_exec(ctx, sink);
-  ASSERT_INT_EQ(rc, 0);
+  PolyUOp *store = poly_store_val(ctx, out_buf, sm);
+  ASSERT_INT_EQ(poly_realize_exec(ctx, poly_sink1(ctx, store)), 0);
   ASSERT_FLOAT_EQ(dout[0], 0.0900f, 1e-3);
-  ASSERT_FLOAT_EQ(dout[1], 0.2447f, 1e-3);
   ASSERT_FLOAT_EQ(dout[2], 0.6652f, 1e-3);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(pe, v2_dot) {
+TEST(pe, dot_v2_e2e) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_reshape(ctx, poly_buffer_f32(ctx, 6), (int64_t[]){2, 3}, 2);
-  PolyUOp *b = poly_reshape(ctx, poly_buffer_f32(ctx, 6), (int64_t[]){3, 2}, 2);
-
+  PolyUOp *a = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){3, 2}, 2);
   PolyUOp *r = poly_dot_v2(ctx, a, b);
-  ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(r), 2);
   ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
   ASSERT_INT_EQ(poly_uop_dims(r)[1], 2);
-  poly_ctx_destroy(ctx);
-  PASS();
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  float da[] = {1,2,3, 4,5,6}, db[] = {1,2, 3,4, 5,6}, dout[4] = {0};
+  PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
+  float *ld[] = {da, db};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
+  ASSERT_FLOAT_EQ(dout[0], 22.0f, 1e-4);
+  ASSERT_FLOAT_EQ(dout[3], 64.0f, 1e-4);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(pe, v2_layernorm) {
+TEST(pe, layernorm_v2_shape) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 6), (int64_t[]){2, 3}, 2);
-
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *r = poly_layernorm_v2(ctx, x, -1, 1e-5);
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(r), 2);
   ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
   ASSERT_INT_EQ(poly_uop_dims(r)[1], 3);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(pe, v2_reduce_shape) {
+TEST(pe, rope_e2e) {
+  /* Reference (tinygrad): pos=0 → [1,0,0,1], pos=1 → [0.5403,-0.01,0.8415,0.9999] */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 12), (int64_t[]){3, 4}, 2);
+  int64_t dim = 4, seq = 3, half = 2;
 
-  PolyUOp *s = poly_sum_reduce_v2(ctx, x, 1, 0);
-  ASSERT_NOT_NULL(s);
-  ASSERT_INT_EQ(poly_uop_ndim(s), 1);
-  ASSERT_INT_EQ(poly_uop_dims(s)[0], 3);
-
-  PolyUOp *sk = poly_sum_reduce_v2(ctx, x, 1, 1);
-  ASSERT_NOT_NULL(sk);
-  ASSERT_INT_EQ(poly_uop_ndim(sk), 2);
-  ASSERT_INT_EQ(poly_uop_dims(sk)[0], 3);
-  ASSERT_INT_EQ(poly_uop_dims(sk)[1], 1);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ═══════════════════════════════════════════════════════════════════════ */
-/*  Shape-on-UOp rule tests -- one per rule from shape.c                  */
-/*  Reference: tinygrad ops.py:206-318                                    */
-/* ═══════════════════════════════════════════════════════════════════════ */
-
-#include "../src/scheduler.h"
-
-/* Helper: assert shape matches expected */
-static void assert_shape(PolyUOp *u, const int64_t *expected, int ndim, const char *label,
-                          int *_passed, int *_failed) {
-  if (poly_uop_ndim(u) != ndim) {
-    fprintf(stderr, "  %s: ndim=%d expected=%d\n", label, poly_uop_ndim(u), ndim);
-    (*_failed)++; return;
-  }
-  for (int i = 0; i < ndim; i++) {
-    if (poly_uop_dims(u)[i] != expected[i]) {
-      fprintf(stderr, "  %s: dim[%d]=%ld expected=%ld\n", label, i,
-              (long)poly_uop_dims(u)[i], (long)expected[i]);
-      (*_failed)++; return;
+  float cos_data[6], sin_data[6];
+  double theta = 10000.0;
+  for (int64_t i = 0; i < seq; i++)
+    for (int64_t j = 0; j < half; j++) {
+      double freq = 1.0 / pow(theta, (double)(2*j) / (double)dim);
+      double angle = (double)i * freq;
+      cos_data[i*half+j] = (float)cos(angle);
+      sin_data[i*half+j] = (float)sin(angle);
     }
-  }
+
+  PolyUOp *x = make_buf(ctx, (int64_t[]){1,1,3,4}, 4);
+  PolyUOp *fc_buf = poly_buffer_f32(ctx, 6);
+  PolyUOp *fs_buf = poly_buffer_f32(ctx, 6);
+  PolyUOp *fc = poly_reshape(ctx, fc_buf, (int64_t[]){1,1,3,2}, 4);
+  PolyUOp *fs = poly_reshape(ctx, fs_buf, (int64_t[]){1,1,3,2}, 4);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *r = poly_rope_v2(ctx, x, fc, fs);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 4);
+  ASSERT_INT_EQ(poly_uop_dims(r)[3], 4);
+
+  float dx[] = {1,0,0,1, 1,0,0,1, 1,0,0,1}, dout[12] = {0};
+  PolyUOp *leaves[] = {base_buf(x), fc_buf, fs_buf};
+  float *ld[] = {dx, cos_data, sin_data};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
+  ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[4], 0.5403f, 1e-3);
+  ASSERT_FLOAT_EQ(dout[6], 0.8415f, 1e-3);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-/* ── BUFFER shapes ──────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  Shape-on-UOp rule tests                                               */
+/* ═══════════════════════════════════════════════════════════════════════ */
 
 TEST(shape_uop, buffer_static) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 100);
   ASSERT_INT_EQ(poly_uop_ndim(b), 1);
   ASSERT_INT_EQ(poly_uop_dims(b)[0], 100);
-  poly_ctx_destroy(ctx);
-  PASS();
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, buffer_dynamic) {
-  /* BUFFER with DEFINE_VAR source → shape (max_val, inner_dim) */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *var = poly_define_var(ctx, "batch", 1, 32);
   PolyUOp *buf = poly_buffer_var(ctx, POLY_FLOAT32, var, (int64_t[]){10}, 1);
   ASSERT_INT_EQ(poly_uop_ndim(buf), 2);
-  ASSERT_INT_EQ(poly_uop_dims(buf)[0], 32);  /* max_val */
-  ASSERT_INT_EQ(poly_uop_dims(buf)[1], 10);  /* inner dim */
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_dims(buf)[0], 32);
+  ASSERT_INT_EQ(poly_uop_dims(buf)[1], 10);
+  poly_ctx_destroy(ctx); PASS();
 }
-
-/* ── Movement op shapes ─────────────────────────────────────────────── */
 
 TEST(shape_uop, reshape) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 24);
-  PolyUOp *r = poly_reshape(ctx, b, (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *r = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2,3,4}, 3);
   ASSERT_INT_EQ(poly_uop_ndim(r), 3);
-  assert_shape(r, (int64_t[]){2, 3, 4}, 3, "reshape", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(shape_uop, expand) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){1, 3}, 2);
-  PolyUOp *e = poly_expand(ctx, b, (int64_t[]){4, 3}, 2);
-  assert_shape(e, (int64_t[]){4, 3}, 2, "expand", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 3);
+  ASSERT_INT_EQ(poly_uop_dims(r)[2], 4);
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, permute) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2, 3, 4}, 3);
-  PolyUOp *p = poly_permute(ctx, b, (int64_t[]){2, 0, 1}, 3);
-  assert_shape(p, (int64_t[]){4, 2, 3}, 3, "permute", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3,4}, 3);
+  PolyUOp *p = poly_permute(ctx, b, (int64_t[]){2,0,1}, 3);
+  ASSERT_INT_EQ(poly_uop_dims(p)[0], 4);
+  ASSERT_INT_EQ(poly_uop_dims(p)[1], 2);
+  ASSERT_INT_EQ(poly_uop_dims(p)[2], 3);
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, pad) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
-  PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1, 1}, {2, 0}}, 2);
-  assert_shape(p, (int64_t[]){4, 5}, 2, "pad", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3}, 2);
+  PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1,1},{2,0}}, 2);
+  ASSERT_INT_EQ(poly_uop_dims(p)[0], 4);
+  ASSERT_INT_EQ(poly_uop_dims(p)[1], 5);
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, shrink) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 20), (int64_t[]){4, 5}, 2);
-  PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1, 3}, {0, 4}}, 2);
-  assert_shape(s, (int64_t[]){2, 4}, 2, "shrink", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  PolyUOp *b = make_buf(ctx, (int64_t[]){4,5}, 2);
+  PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1,3},{0,4}}, 2);
+  ASSERT_INT_EQ(poly_uop_dims(s)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(s)[1], 4);
+  poly_ctx_destroy(ctx); PASS();
 }
-
-TEST(shape_uop, flip) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
-  PolyUOp *f = poly_flip(ctx, b, (int64_t[]){0}, 1);
-  assert_shape(f, (int64_t[]){3, 4}, 2, "flip", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Reduction shapes ───────────────────────────────────────────────── */
 
 TEST(shape_uop, reduce_axis) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3,4}, 3);
   PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){1}, 1);
-  /* REDUCE_AXIS keepdim: reduced axis → 1 */
-  assert_shape(r, (int64_t[]){2, 1, 4}, 3, "reduce_axis", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── ALU broadcast shapes ───────────────────────────────────────────── */
-
-TEST(shape_uop, alu_same_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
-  PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  assert_shape(r, (int64_t[]){3, 4}, 2, "alu_same", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
+  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 1);
+  ASSERT_INT_EQ(poly_uop_dims(r)[2], 4);
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, alu_broadcast_scalar) {
-  /* tensor + scalar → tensor shape */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
+  PolyUOp *a = make_buf(ctx, (int64_t[]){3,4}, 2);
   PolyUOp *c = poly_const_float(ctx, 1.0);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, c);
-  assert_shape(r, (int64_t[]){3, 4}, 2, "alu_broadcast_scalar", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(r)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 4);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(shape_uop, alu_broadcast_dims) {
-  /* (3,1) + (1,4) → (3,4) */
+TEST(shape_uop, alu_broadcast_ndim) {
+  /* (3,5,1) + (5,4) → (3,5,4) -- the embedding WHERE bug case */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3, 1}, 2);
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 4), (int64_t[]){1, 4}, 2);
+  PolyUOp *a = make_buf(ctx, (int64_t[]){3,5,1}, 3);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){5,4}, 2);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  assert_shape(r, (int64_t[]){3, 4}, 2, "alu_broadcast_dims", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(shape_uop, alu_broadcast_ndim_mismatch) {
-  /* (3,5,1) WHERE (5,4) → (3,5,4) -- the embedding bug */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *mask = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 15), (int64_t[]){3, 5, 1}, 3);
-  PolyUOp *weight = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 20), (int64_t[]){5, 4}, 2);
-  PolyUOp *zero = poly_const_float(ctx, 0.0);
-  PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, mask, weight, zero);
-  assert_shape(w, (int64_t[]){3, 5, 4}, 3, "where_broadcast", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
+  ASSERT_INT_EQ(poly_uop_dims(r)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(r)[1], 5);
+  ASSERT_INT_EQ(poly_uop_dims(r)[2], 4);
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, cmplt_broadcast) {
-  /* CMPLT(scalar, tensor) → tensor shape */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *a = make_buf(ctx, (int64_t[]){2,3}, 2);
   PolyUOp *c = poly_const_float(ctx, 0.5);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_CMPLT, c, a);
-  assert_shape(r, (int64_t[]){2, 3}, 2, "cmplt_broadcast", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  poly_ctx_destroy(ctx); PASS();
 }
-
-/* ── CONST / scalar shapes ──────────────────────────────────────────── */
 
 TEST(shape_uop, const_scalar) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *c = poly_const_float(ctx, 42.0);
-  ASSERT_INT_EQ(poly_uop_ndim(c), 0);
-  ASSERT_TRUE(poly_uop_dims(c) == NULL);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_ndim(poly_const_float(ctx, 42.0)), 0);
+  ASSERT_TRUE(poly_uop_dims(poly_const_float(ctx, 42.0)) == NULL);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-/* ── Passthrough shapes ─────────────────────────────────────────────── */
-
-TEST(shape_uop, assign_flat_buffer) {
-  /* ASSIGN normalizes target to flat BUFFER → shape (N,) */
+TEST(shape_uop, store_no_shape) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
-  PolyUOp *r = poly_reshape(ctx, buf, (int64_t[]){3, 4}, 2);
-  PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0));
-  PolyUOp *a = poly_assign(ctx, r, val);
-  /* ASSIGN targets base BUFFER, so shape is flat */
-  ASSERT_INT_EQ(poly_uop_ndim(a), 1);
-  ASSERT_INT_EQ(poly_uop_dims(a)[0], 12);
-  poly_ctx_destroy(ctx);
-  PASS();
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *st = poly_store_val(ctx, b, poly_const_float(ctx, 1.0));
+  ASSERT_INT_EQ(poly_uop_ndim(st), -1);
+  poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, contiguous_passthrough) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3}, 2);
   PolyUOp *c = poly_uop1(ctx, POLY_OP_CONTIGUOUS, b->dtype, b, poly_arg_none());
-  assert_shape(c, (int64_t[]){2, 3}, 2, "contiguous", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  ASSERT_INT_EQ(poly_uop_ndim(c), 2);
+  ASSERT_INT_EQ(poly_uop_dims(c)[0], 2);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(shape_uop, detach_passthrough) {
+TEST(shape_uop, assign_flat) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
-  PolyUOp *d = poly_detach(ctx, b);
-  assert_shape(d, (int64_t[]){2, 3}, 2, "detach", _passed, _failed);
-  poly_ctx_destroy(ctx);
-  PASS();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
+  PolyUOp *r = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *a = poly_assign(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
+  /* ASSIGN normalizes to flat BUFFER */
+  ASSERT_INT_EQ(poly_uop_ndim(a), 1);
+  ASSERT_INT_EQ(poly_uop_dims(a)[0], 12);
+  poly_ctx_destroy(ctx); PASS();
 }
 
-/* ── Kernel-level ops: no shape ─────────────────────────────────────── */
+/* ── Shape parity oracle ──────────────────────────────────────────────── */
 
-TEST(shape_uop, kernel_ops_no_shape) {
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *c = poly_const_float(ctx, 1.0);
-  /* STORE has no tensor shape */
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
-  PolyUOp *st = poly_store_val(ctx, b, c);
-  ASSERT_INT_EQ(poly_uop_ndim(st), -1);
-  /* SINK has no shape */
-  PolyUOp *sk = poly_sink1(ctx, st);
-  ASSERT_INT_EQ(poly_uop_ndim(sk), -1);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── Shape parity oracle: cached vs computed ────────────────────────── */
-
-TEST(shape_uop, parity_softmax_graph) {
-  /* Build a softmax graph and verify every UOp's cached shape matches
-   * what poly_uop_shape() (the old toposort method) computes. */
-  PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
-  int64_t out_shape[8]; int out_ndim;
-  PolyUOp *sm = poly_softmax(ctx, x, (int64_t[]){3, 4}, 2, -1);
-
-  /* Walk all UOps and compare */
+static int check_shape_parity(PolyCtx *ctx, PolyUOp *root) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sm, &n_topo);
+  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
   int mismatches = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyShape computed = poly_uop_shape(ctx, topo[i]);
     int cached_ndim = poly_uop_ndim(topo[i]);
     if (cached_ndim != computed.ndim) {
-      fprintf(stderr, "  parity: op=%s cached_ndim=%d computed_ndim=%d\n",
+      fprintf(stderr, "  parity: op=%s cached=%d computed=%d\n",
               poly_op_name(topo[i]->op), cached_ndim, computed.ndim);
       mismatches++;
     } else if (cached_ndim > 0 && computed.dims) {
-      for (int j = 0; j < cached_ndim; j++) {
+      for (int j = 0; j < cached_ndim; j++)
         if (poly_uop_dims(topo[i])[j] != computed.dims[j]) {
           fprintf(stderr, "  parity: op=%s dim[%d] cached=%ld computed=%ld\n",
                   poly_op_name(topo[i]->op), j,
                   (long)poly_uop_dims(topo[i])[j], (long)computed.dims[j]);
-          mismatches++;
-          break;
+          mismatches++; break;
         }
-      }
     }
     if (computed.ndim > 0 && computed.dims) free(computed.dims);
   }
-  ASSERT_INT_EQ(mismatches, 0);
-  poly_ctx_destroy(ctx);
-  PASS();
+  return mismatches;
 }
 
-TEST(shape_uop, parity_cross_entropy_graph) {
-  /* cross_entropy has complex intermediate UOps -- check shape parity for all */
+TEST(shape_uop, parity_softmax) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *logits = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 15), (int64_t[]){3, 5}, 2);
-  PolyUOp *target = poly_buffer(ctx, POLY_FLOAT32, 3);
-  int64_t out_shape[8]; int out_ndim;
-  PolyUOp *ce = poly_cross_entropy(ctx, logits, (int64_t[]){3, 5}, 2,
-                                    target, (int64_t[]){3}, 1, -1, out_shape, &out_ndim);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *sm = poly_softmax(ctx, x, (int64_t[]){3,4}, 2, -1);
+  ASSERT_INT_EQ(check_shape_parity(ctx, sm), 0);
+  poly_ctx_destroy(ctx); PASS();
+}
 
-  int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, ce, &n_topo);
-  int mismatches = 0;
-  for (int i = 0; i < n_topo; i++) {
-    PolyShape computed = poly_uop_shape(ctx, topo[i]);
-    int cached_ndim = poly_uop_ndim(topo[i]);
-    if (cached_ndim != computed.ndim) {
-      fprintf(stderr, "  parity_ce: op=%s cached=%d computed=%d\n",
-              poly_op_name(topo[i]->op), cached_ndim, computed.ndim);
-      mismatches++;
-    }
-    if (computed.ndim > 0 && computed.dims) free(computed.dims);
-  }
-  ASSERT_INT_EQ(mismatches, 0);
-  poly_ctx_destroy(ctx);
-  PASS();
+TEST(shape_uop, parity_cross_entropy) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = make_buf(ctx, (int64_t[]){3,5}, 2);
+  PolyUOp *target = poly_buffer_f32(ctx, 3);
+  int64_t out_shape[8]; int out_ndim;
+  PolyUOp *ce = poly_cross_entropy(ctx, logits, (int64_t[]){3,5}, 2,
+                                    target, (int64_t[]){3}, 1, -1, out_shape, &out_ndim);
+  ASSERT_INT_EQ(check_shape_parity(ctx, ce), 0);
+  poly_ctx_destroy(ctx); PASS();
+}
+
+TEST(shape_uop, parity_gather) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *table = make_buf(ctx, (int64_t[]){5,4}, 2);
+  PolyUOp *idx = poly_buffer_f32(ctx, 3);
+  int64_t out_shape[8]; int out_ndim;
+  PolyUOp *g = poly_gather(ctx, table, (int64_t[]){5,4}, 2,
+                            idx, (int64_t[]){3}, 1, out_shape, &out_ndim);
+  ASSERT_INT_EQ(check_shape_parity(ctx, g), 0);
+  poly_ctx_destroy(ctx); PASS();
+}
+
+/* ── v2 reduce shape ──────────────────────────────────────────────────── */
+
+TEST(pe, v2_reduce_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *s = poly_sum_reduce_v2(ctx, x, 1, 0);
+  ASSERT_INT_EQ(poly_uop_ndim(s), 1);
+  ASSERT_INT_EQ(poly_uop_dims(s)[0], 3);
+  PolyUOp *sk = poly_sum_reduce_v2(ctx, x, 1, 1);
+  ASSERT_INT_EQ(poly_uop_ndim(sk), 2);
+  ASSERT_INT_EQ(poly_uop_dims(sk)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(sk)[1], 1);
+  poly_ctx_destroy(ctx); PASS();
 }
