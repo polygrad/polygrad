@@ -534,14 +534,14 @@ async function createWasmBackend(device) {
       const shapePtrs = Module._malloc(n * 4)
       const shapeArrays = []
       for (let i = 0; i < n; i++) {
-        const shPtr = writeInt64Array(operands[i]._shape)
+        const shPtr = writeInt64Array(operands[i].shape)
         shapeArrays.push(shPtr)
         heap32()[(shapePtrs >> 2) + i] = shPtr
       }
 
       const ndimPtr = Module._malloc(n * 4)
       for (let i = 0; i < n; i++) {
-        heap32()[(ndimPtr >> 2) + i] = operands[i]._shape.length
+        heap32()[(ndimPtr >> 2) + i] = operands[i].shape.length
       }
 
       const formulaPtr = allocString(formula)
