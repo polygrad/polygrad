@@ -858,3 +858,302 @@ TEST(pe, v2_reduce_shape) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/*  Shape-on-UOp rule tests -- one per rule from shape.c                  */
+/*  Reference: tinygrad ops.py:206-318                                    */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+#include "../src/scheduler.h"
+
+/* Helper: assert shape matches expected */
+static void assert_shape(PolyUOp *u, const int64_t *expected, int ndim, const char *label,
+                          int *_passed, int *_failed) {
+  if (poly_uop_ndim(u) != ndim) {
+    fprintf(stderr, "  %s: ndim=%d expected=%d\n", label, poly_uop_ndim(u), ndim);
+    (*_failed)++; return;
+  }
+  for (int i = 0; i < ndim; i++) {
+    if (poly_uop_dims(u)[i] != expected[i]) {
+      fprintf(stderr, "  %s: dim[%d]=%ld expected=%ld\n", label, i,
+              (long)poly_uop_dims(u)[i], (long)expected[i]);
+      (*_failed)++; return;
+    }
+  }
+}
+
+/* ── BUFFER shapes ──────────────────────────────────────────────────── */
+
+TEST(shape_uop, buffer_static) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 100);
+  ASSERT_INT_EQ(poly_uop_ndim(b), 1);
+  ASSERT_INT_EQ(poly_uop_dims(b)[0], 100);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, buffer_dynamic) {
+  /* BUFFER with DEFINE_VAR source → shape (max_val, inner_dim) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *var = poly_define_var(ctx, "batch", 1, 32);
+  PolyUOp *buf = poly_buffer_var(ctx, POLY_FLOAT32, var, (int64_t[]){10}, 1);
+  ASSERT_INT_EQ(poly_uop_ndim(buf), 2);
+  ASSERT_INT_EQ(poly_uop_dims(buf)[0], 32);  /* max_val */
+  ASSERT_INT_EQ(poly_uop_dims(buf)[1], 10);  /* inner dim */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── Movement op shapes ─────────────────────────────────────────────── */
+
+TEST(shape_uop, reshape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 24);
+  PolyUOp *r = poly_reshape(ctx, b, (int64_t[]){2, 3, 4}, 3);
+  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
+  assert_shape(r, (int64_t[]){2, 3, 4}, 3, "reshape", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, expand) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){1, 3}, 2);
+  PolyUOp *e = poly_expand(ctx, b, (int64_t[]){4, 3}, 2);
+  assert_shape(e, (int64_t[]){4, 3}, 2, "expand", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, permute) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *p = poly_permute(ctx, b, (int64_t[]){2, 0, 1}, 3);
+  assert_shape(p, (int64_t[]){4, 2, 3}, 3, "permute", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, pad) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1, 1}, {2, 0}}, 2);
+  assert_shape(p, (int64_t[]){4, 5}, 2, "pad", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, shrink) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 20), (int64_t[]){4, 5}, 2);
+  PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1, 3}, {0, 4}}, 2);
+  assert_shape(s, (int64_t[]){2, 4}, 2, "shrink", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, flip) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
+  PolyUOp *f = poly_flip(ctx, b, (int64_t[]){0}, 1);
+  assert_shape(f, (int64_t[]){3, 4}, 2, "flip", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── Reduction shapes ───────────────────────────────────────────────── */
+
+TEST(shape_uop, reduce_axis) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){1}, 1);
+  /* REDUCE_AXIS keepdim: reduced axis → 1 */
+  assert_shape(r, (int64_t[]){2, 1, 4}, 3, "reduce_axis", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── ALU broadcast shapes ───────────────────────────────────────────── */
+
+TEST(shape_uop, alu_same_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
+  PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  assert_shape(r, (int64_t[]){3, 4}, 2, "alu_same", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, alu_broadcast_scalar) {
+  /* tensor + scalar → tensor shape */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
+  PolyUOp *c = poly_const_float(ctx, 1.0);
+  PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, c);
+  assert_shape(r, (int64_t[]){3, 4}, 2, "alu_broadcast_scalar", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, alu_broadcast_dims) {
+  /* (3,1) + (1,4) → (3,4) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 3), (int64_t[]){3, 1}, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 4), (int64_t[]){1, 4}, 2);
+  PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  assert_shape(r, (int64_t[]){3, 4}, 2, "alu_broadcast_dims", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, alu_broadcast_ndim_mismatch) {
+  /* (3,5,1) WHERE (5,4) → (3,5,4) -- the embedding bug */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *mask = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 15), (int64_t[]){3, 5, 1}, 3);
+  PolyUOp *weight = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 20), (int64_t[]){5, 4}, 2);
+  PolyUOp *zero = poly_const_float(ctx, 0.0);
+  PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, mask, weight, zero);
+  assert_shape(w, (int64_t[]){3, 5, 4}, 3, "where_broadcast", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, cmplt_broadcast) {
+  /* CMPLT(scalar, tensor) → tensor shape */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *c = poly_const_float(ctx, 0.5);
+  PolyUOp *r = poly_alu2(ctx, POLY_OP_CMPLT, c, a);
+  assert_shape(r, (int64_t[]){2, 3}, 2, "cmplt_broadcast", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── CONST / scalar shapes ──────────────────────────────────────────── */
+
+TEST(shape_uop, const_scalar) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_const_float(ctx, 42.0);
+  ASSERT_INT_EQ(poly_uop_ndim(c), 0);
+  ASSERT_TRUE(poly_uop_dims(c) == NULL);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── Passthrough shapes ─────────────────────────────────────────────── */
+
+TEST(shape_uop, assign_flat_buffer) {
+  /* ASSIGN normalizes target to flat BUFFER → shape (N,) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
+  PolyUOp *r = poly_reshape(ctx, buf, (int64_t[]){3, 4}, 2);
+  PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0));
+  PolyUOp *a = poly_assign(ctx, r, val);
+  /* ASSIGN targets base BUFFER, so shape is flat */
+  ASSERT_INT_EQ(poly_uop_ndim(a), 1);
+  ASSERT_INT_EQ(poly_uop_dims(a)[0], 12);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, contiguous_passthrough) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *c = poly_uop1(ctx, POLY_OP_CONTIGUOUS, b->dtype, b, poly_arg_none());
+  assert_shape(c, (int64_t[]){2, 3}, 2, "contiguous", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, detach_passthrough) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 6), (int64_t[]){2, 3}, 2);
+  PolyUOp *d = poly_detach(ctx, b);
+  assert_shape(d, (int64_t[]){2, 3}, 2, "detach", _passed, _failed);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── Kernel-level ops: no shape ─────────────────────────────────────── */
+
+TEST(shape_uop, kernel_ops_no_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_const_float(ctx, 1.0);
+  /* STORE has no tensor shape */
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *st = poly_store_val(ctx, b, c);
+  ASSERT_INT_EQ(poly_uop_ndim(st), -1);
+  /* SINK has no shape */
+  PolyUOp *sk = poly_sink1(ctx, st);
+  ASSERT_INT_EQ(poly_uop_ndim(sk), -1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── Shape parity oracle: cached vs computed ────────────────────────── */
+
+TEST(shape_uop, parity_softmax_graph) {
+  /* Build a softmax graph and verify every UOp's cached shape matches
+   * what poly_uop_shape() (the old toposort method) computes. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 12), (int64_t[]){3, 4}, 2);
+  int64_t out_shape[8]; int out_ndim;
+  PolyUOp *sm = poly_softmax(ctx, x, (int64_t[]){3, 4}, 2, -1);
+
+  /* Walk all UOps and compare */
+  int n_topo;
+  PolyUOp **topo = poly_toposort(ctx, sm, &n_topo);
+  int mismatches = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyShape computed = poly_uop_shape(ctx, topo[i]);
+    int cached_ndim = poly_uop_ndim(topo[i]);
+    if (cached_ndim != computed.ndim) {
+      fprintf(stderr, "  parity: op=%s cached_ndim=%d computed_ndim=%d\n",
+              poly_op_name(topo[i]->op), cached_ndim, computed.ndim);
+      mismatches++;
+    } else if (cached_ndim > 0 && computed.dims) {
+      for (int j = 0; j < cached_ndim; j++) {
+        if (poly_uop_dims(topo[i])[j] != computed.dims[j]) {
+          fprintf(stderr, "  parity: op=%s dim[%d] cached=%ld computed=%ld\n",
+                  poly_op_name(topo[i]->op), j,
+                  (long)poly_uop_dims(topo[i])[j], (long)computed.dims[j]);
+          mismatches++;
+          break;
+        }
+      }
+    }
+    if (computed.ndim > 0 && computed.dims) free(computed.dims);
+  }
+  ASSERT_INT_EQ(mismatches, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, parity_cross_entropy_graph) {
+  /* cross_entropy has complex intermediate UOps -- check shape parity for all */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 15), (int64_t[]){3, 5}, 2);
+  PolyUOp *target = poly_buffer(ctx, POLY_FLOAT32, 3);
+  int64_t out_shape[8]; int out_ndim;
+  PolyUOp *ce = poly_cross_entropy(ctx, logits, (int64_t[]){3, 5}, 2,
+                                    target, (int64_t[]){3}, 1, -1, out_shape, &out_ndim);
+
+  int n_topo;
+  PolyUOp **topo = poly_toposort(ctx, ce, &n_topo);
+  int mismatches = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyShape computed = poly_uop_shape(ctx, topo[i]);
+    int cached_ndim = poly_uop_ndim(topo[i]);
+    if (cached_ndim != computed.ndim) {
+      fprintf(stderr, "  parity_ce: op=%s cached=%d computed=%d\n",
+              poly_op_name(topo[i]->op), cached_ndim, computed.ndim);
+      mismatches++;
+    }
+    if (computed.ndim > 0 && computed.dims) free(computed.dims);
+  }
+  ASSERT_INT_EQ(mismatches, 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
