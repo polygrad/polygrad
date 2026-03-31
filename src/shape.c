@@ -327,7 +327,17 @@ void poly_uop_compute_shape(PolyCtx *ctx, PolyUOp *u) {
   /* ── BUFFER ───────────────────────────────────────────────────────── */
   if (op == POLY_OP_BUFFER) {
     if (u->arg.kind == POLY_ARG_INT) {
-      shape_set_1d(ctx, u, u->arg.i);
+      /* Dynamic buffer: BUFFER(src=(UNIQUE, DEFINE_VAR, CONST...)) → (max_val, K, ...) */
+      if (u->n_src >= 2 && u->src[1]->op == POLY_OP_DEFINE_VAR) {
+        int ndim = u->n_src - 1;
+        int64_t dims[POLY_MAX_DIMS];
+        dims[0] = u->src[1]->arg.define_var.max_val;
+        for (int i = 1; i < ndim && i < POLY_MAX_DIMS; i++)
+          dims[i] = u->src[1 + i]->arg.i;
+        shape_set_dims(ctx, u, dims, ndim);
+      } else {
+        shape_set_1d(ctx, u, u->arg.i);
+      }
     } else {
       shape_set_none(u);
     }

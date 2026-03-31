@@ -494,8 +494,9 @@ class Tensor:
                 Tensor._compile_assigns_ordered.append(self._uop)
                 self._data = self._assign_data
                 self._buffer = self._assign_buffer
-                if len(self.shape) > 1:
-                    dims, ndim = _int64_array(self.shape)
+                orig_shape = getattr(self, '_assign_shape', self.shape)
+                if len(orig_shape) > 1:
+                    dims, ndim = _int64_array(orig_shape)
                     self._uop = _ffi._lib.poly_reshape(self._ctx, self._buffer, dims, ndim)
                 else:
                     self._uop = self._buffer
