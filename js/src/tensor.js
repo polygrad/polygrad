@@ -145,11 +145,11 @@ function createBoundTensorClass(runtime) {
     get shape() {
       const { ffi } = this._rt._backend
       if (!this._uop) return []
-      return ffi.poly_uop_dims(this._uop)
+      return ffi.poly_uop_dims(this._ctx, this._uop)
     }
     get dtype() { return this._dtype }
     get device() { return 'CPU' }
-    get ndim() { return this._rt._backend.ffi.poly_uop_ndim(this._uop) || 0 }
+    get ndim() { return this._rt._backend.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }
     get requiresGrad() { return this._requiresGrad }
     set requiresGrad(v) { this._requiresGrad = v }
     get grad() { return this._grad }

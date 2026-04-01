@@ -369,14 +369,7 @@ struct PolyUOp {
   PolyArg arg;
   int32_t tag;
   uint32_t hash;
-  int8_t _shape_ndim;     /* -1 = no shape, 0 = scalar, 1..16 = tensor dims */
-  int64_t *_shape_dims;   /* arena-allocated, NULL if scalar or no shape */
 };
-
-/* ── Shape accessors (O(1), no allocation) ────────────────────────────── */
-
-int poly_uop_ndim(const PolyUOp *u);
-const int64_t *poly_uop_dims(const PolyUOp *u);
 
 /* Cached rendered kernel (used by kernel_cache in PolyCtx) */
 #define POLY_MAX_KERNEL_BUFS 64
@@ -438,10 +431,12 @@ PolyShape poly_uop_shape(PolyCtx *ctx, PolyUOp *u);
 int64_t  poly_shape_numel(PolyShape s);
 bool     poly_shape_eq(PolyShape a, PolyShape b);
 
-/* O(1) cached shape read -- returns arena-owned dims, do NOT free */
-static inline PolyShape poly_uop_shape_cached(const PolyUOp *u) {
-  return (PolyShape){ (int64_t *)u->_shape_dims, u->_shape_ndim };
-}
+/* Lazy cached shape accessors -- computes on first access, O(1) thereafter.
+ * Returns arena-owned dims, do NOT free. */
+int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u);
+const int64_t *poly_uop_dims(PolyCtx *ctx, const PolyUOp *u);
+PolyShape poly_uop_shape_cached(PolyCtx *ctx, const PolyUOp *u);
+PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* ── Autograd ─────────────────────────────────────────────────────────── */
 /* Reverse-mode gradient of loss w.r.t. wrt.

@@ -166,17 +166,17 @@ class Tensor:
         if self._uop is None:
             return ()
         lib = _ffi._lib
-        ndim = lib.poly_uop_ndim(self._uop)
+        ndim = lib.poly_uop_ndim(self._ctx, self._uop)
         if ndim <= 0:
             return ()
-        dims = lib.poly_uop_dims(self._uop)
+        dims = lib.poly_uop_dims(self._ctx, self._uop)
         return tuple(dims[i] for i in range(ndim))
 
     @property
     def ndim(self):
         if self._uop is None:
             return 0
-        return max(0, _ffi._lib.poly_uop_ndim(self._uop))
+        return max(0, _ffi._lib.poly_uop_ndim(self._ctx, self._uop))
 
     @property
     def dtype(self):

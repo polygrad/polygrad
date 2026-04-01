@@ -537,10 +537,10 @@ def _declare_signatures(lib):
 
     # --- Shape-on-UOp accessors ---
     lib.poly_uop_ndim.restype = ctypes.c_int
-    lib.poly_uop_ndim.argtypes = [_ptr]
+    lib.poly_uop_ndim.argtypes = [_ptr, _ptr]
 
     lib.poly_uop_dims.restype = _i64p
-    lib.poly_uop_dims.argtypes = [_ptr]
+    lib.poly_uop_dims.argtypes = [_ptr, _ptr]
 
     # --- v2 composed ops (shape read from UOp) ---
     lib.poly_softmax_v2.restype = _ptr

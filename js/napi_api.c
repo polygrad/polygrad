@@ -1522,20 +1522,22 @@ static napi_value napi_poly_instance_train_step(napi_env env, napi_callback_info
 /* ── Shape-on-UOp accessors ────────────────────────────────────────────── */
 
 static napi_value napi_poly_uop_ndim(napi_env env, napi_callback_info info) {
-  napi_value argv[1]; size_t argc = 1;
+  napi_value argv[2]; size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyUOp *u = get_external(env, argv[0]);
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *u = get_external(env, argv[1]);
   napi_value result;
-  napi_create_int32(env, poly_uop_ndim(u), &result);
+  napi_create_int32(env, poly_uop_ndim(ctx, u), &result);
   return result;
 }
 
 static napi_value napi_poly_uop_dims(napi_env env, napi_callback_info info) {
-  napi_value argv[1]; size_t argc = 1;
+  napi_value argv[2]; size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyUOp *u = get_external(env, argv[0]);
-  int ndim = poly_uop_ndim(u);
-  const int64_t *dims = poly_uop_dims(u);
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *u = get_external(env, argv[1]);
+  int ndim = poly_uop_ndim(ctx, u);
+  const int64_t *dims = poly_uop_dims(ctx, u);
   napi_value arr;
   napi_create_array_with_length(env, ndim > 0 ? ndim : 0, &arr);
   for (int i = 0; i < ndim; i++) {

@@ -62,7 +62,7 @@ TEST(pe, rmsnorm_e2e) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
   PolyUOp *r = poly_rmsnorm_v2(ctx, x, w, 1e-5);
   ASSERT_NOT_NULL(r);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
 
   float dx[] = {1,2,3, 4,5,6}, dw[] = {1,1,1}, dout[6] = {0};
   PolyUOp *leaves[] = {base_buf(x), w};
@@ -83,7 +83,7 @@ TEST(pe, sdpa_e2e) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
   PolyUOp *r = poly_sdpa_v2(ctx, q, k, v, NULL, 0);
   ASSERT_NOT_NULL(r);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
 
   float dq[] = {1,0, 0,1}, dk[] = {1,0, 0,1}, dv[] = {1,2, 3,4}, dout[4] = {0};
   PolyUOp *leaves[] = {base_buf(q), base_buf(k), base_buf(v)};
@@ -120,8 +120,8 @@ TEST(pe, repeat_interleave_e2e) {
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
   PolyUOp *r = poly_repeat_interleave_v2(ctx, x, 2, 1);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 6);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 6);
 
   float dx[] = {1,2,3, 4,5,6}, dout[12] = {0};
   PolyUOp *leaves[] = {base_buf(x)};
@@ -187,7 +187,7 @@ TEST(pe, softmax_v2_e2e) {
   PolyUOp *x = poly_buffer_f32(ctx, 3);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   PolyUOp *sm = poly_softmax_v2(ctx, x, 0);
-  ASSERT_INT_EQ(poly_uop_ndim(sm), 1);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, sm), 1);
 
   float dx[] = {1,2,3}, dout[3] = {0};
   poly_realize_begin(ctx);
@@ -205,9 +205,9 @@ TEST(pe, dot_v2_e2e) {
   PolyUOp *a = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *b = make_buf(ctx, (int64_t[]){3, 2}, 2);
   PolyUOp *r = poly_dot_v2(ctx, a, b);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 2);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 2);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
   float da[] = {1,2,3, 4,5,6}, db[] = {1,2, 3,4, 5,6}, dout[4] = {0};
@@ -224,9 +224,9 @@ TEST(pe, layernorm_v2_shape) {
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *r = poly_layernorm_v2(ctx, x, -1, 1e-5);
   ASSERT_NOT_NULL(r);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 3);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 3);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -252,8 +252,8 @@ TEST(pe, rope_e2e) {
   PolyUOp *fs = poly_reshape(ctx, fs_buf, (int64_t[]){1,1,3,2}, 4);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
   PolyUOp *r = poly_rope_v2(ctx, x, fc, fs);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 4);
-  ASSERT_INT_EQ(poly_uop_dims(r)[3], 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 4);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[3], 4);
 
   float dx[] = {1,0,0,1, 1,0,0,1, 1,0,0,1}, dout[12] = {0};
   PolyUOp *leaves[] = {base_buf(x), fc_buf, fs_buf};
@@ -272,8 +272,8 @@ TEST(pe, rope_e2e) {
 TEST(shape_uop, buffer_static) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 100);
-  ASSERT_INT_EQ(poly_uop_ndim(b), 1);
-  ASSERT_INT_EQ(poly_uop_dims(b)[0], 100);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, b), 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, b)[0], 100);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -281,19 +281,19 @@ TEST(shape_uop, buffer_dynamic) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *var = poly_define_var(ctx, "batch", 1, 32);
   PolyUOp *buf = poly_buffer_var(ctx, POLY_FLOAT32, var, (int64_t[]){10}, 1);
-  ASSERT_INT_EQ(poly_uop_ndim(buf), 2);
-  ASSERT_INT_EQ(poly_uop_dims(buf)[0], 32);
-  ASSERT_INT_EQ(poly_uop_dims(buf)[1], 10);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, buf), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, buf)[0], 32);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, buf)[1], 10);
   poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, reshape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2,3,4}, 3);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
-  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 3);
-  ASSERT_INT_EQ(poly_uop_dims(r)[2], 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[2], 4);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -301,9 +301,9 @@ TEST(shape_uop, permute) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){2,3,4}, 3);
   PolyUOp *p = poly_permute(ctx, b, (int64_t[]){2,0,1}, 3);
-  ASSERT_INT_EQ(poly_uop_dims(p)[0], 4);
-  ASSERT_INT_EQ(poly_uop_dims(p)[1], 2);
-  ASSERT_INT_EQ(poly_uop_dims(p)[2], 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, p)[0], 4);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, p)[1], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, p)[2], 3);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -311,8 +311,8 @@ TEST(shape_uop, pad) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){2,3}, 2);
   PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1,1},{2,0}}, 2);
-  ASSERT_INT_EQ(poly_uop_dims(p)[0], 4);
-  ASSERT_INT_EQ(poly_uop_dims(p)[1], 5);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, p)[0], 4);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, p)[1], 5);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -320,8 +320,8 @@ TEST(shape_uop, shrink) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){4,5}, 2);
   PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1,3},{0,4}}, 2);
-  ASSERT_INT_EQ(poly_uop_dims(s)[0], 2);
-  ASSERT_INT_EQ(poly_uop_dims(s)[1], 4);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, s)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, s)[1], 4);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -329,10 +329,10 @@ TEST(shape_uop, reduce_axis) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){2,3,4}, 3);
   PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){1}, 1);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
-  ASSERT_INT_EQ(poly_uop_dims(r)[0], 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 1);
-  ASSERT_INT_EQ(poly_uop_dims(r)[2], 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[2], 4);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -341,9 +341,9 @@ TEST(shape_uop, alu_broadcast_scalar) {
   PolyUOp *a = make_buf(ctx, (int64_t[]){3,4}, 2);
   PolyUOp *c = poly_const_float(ctx, 1.0);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, c);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
-  ASSERT_INT_EQ(poly_uop_dims(r)[0], 3);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 4);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -353,10 +353,10 @@ TEST(shape_uop, alu_broadcast_ndim) {
   PolyUOp *a = make_buf(ctx, (int64_t[]){3,5,1}, 3);
   PolyUOp *b = make_buf(ctx, (int64_t[]){5,4}, 2);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, b);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 3);
-  ASSERT_INT_EQ(poly_uop_dims(r)[0], 3);
-  ASSERT_INT_EQ(poly_uop_dims(r)[1], 5);
-  ASSERT_INT_EQ(poly_uop_dims(r)[2], 4);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 5);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[2], 4);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -365,14 +365,14 @@ TEST(shape_uop, cmplt_broadcast) {
   PolyUOp *a = make_buf(ctx, (int64_t[]){2,3}, 2);
   PolyUOp *c = poly_const_float(ctx, 0.5);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_CMPLT, c, a);
-  ASSERT_INT_EQ(poly_uop_ndim(r), 2);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
   poly_ctx_destroy(ctx); PASS();
 }
 
 TEST(shape_uop, const_scalar) {
   PolyCtx *ctx = poly_ctx_new();
-  ASSERT_INT_EQ(poly_uop_ndim(poly_const_float(ctx, 42.0)), 0);
-  ASSERT_TRUE(poly_uop_dims(poly_const_float(ctx, 42.0)) == NULL);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_const_float(ctx, 42.0)), 0);
+  ASSERT_TRUE(poly_uop_dims(ctx, poly_const_float(ctx, 42.0)) == NULL);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -380,7 +380,7 @@ TEST(shape_uop, store_no_shape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = poly_buffer_f32(ctx, 4);
   PolyUOp *st = poly_store_val(ctx, b, poly_const_float(ctx, 1.0));
-  ASSERT_INT_EQ(poly_uop_ndim(st), -1);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, st), -1);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -388,8 +388,8 @@ TEST(shape_uop, contiguous_passthrough) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){2,3}, 2);
   PolyUOp *c = poly_uop1(ctx, POLY_OP_CONTIGUOUS, b->dtype, b, poly_arg_none());
-  ASSERT_INT_EQ(poly_uop_ndim(c), 2);
-  ASSERT_INT_EQ(poly_uop_dims(c)[0], 2);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, c), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, c)[0], 2);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -399,8 +399,8 @@ TEST(shape_uop, assign_flat) {
   PolyUOp *r = make_buf(ctx, (int64_t[]){3,4}, 2);
   PolyUOp *a = poly_assign(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
   /* ASSIGN normalizes to flat BUFFER */
-  ASSERT_INT_EQ(poly_uop_ndim(a), 1);
-  ASSERT_INT_EQ(poly_uop_dims(a)[0], 12);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, a), 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, a)[0], 12);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -412,17 +412,17 @@ static int check_shape_parity(PolyCtx *ctx, PolyUOp *root) {
   int mismatches = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyShape computed = poly_uop_shape(ctx, topo[i]);
-    int cached_ndim = poly_uop_ndim(topo[i]);
+    int cached_ndim = poly_uop_ndim(ctx, topo[i]);
     if (cached_ndim != computed.ndim) {
       fprintf(stderr, "  parity: op=%s cached=%d computed=%d\n",
               poly_op_name(topo[i]->op), cached_ndim, computed.ndim);
       mismatches++;
     } else if (cached_ndim > 0 && computed.dims) {
       for (int j = 0; j < cached_ndim; j++)
-        if (poly_uop_dims(topo[i])[j] != computed.dims[j]) {
+        if (poly_uop_dims(ctx, topo[i])[j] != computed.dims[j]) {
           fprintf(stderr, "  parity: op=%s dim[%d] cached=%ld computed=%ld\n",
                   poly_op_name(topo[i]->op), j,
-                  (long)poly_uop_dims(topo[i])[j], (long)computed.dims[j]);
+                  (long)poly_uop_dims(ctx, topo[i])[j], (long)computed.dims[j]);
           mismatches++; break;
         }
     }
@@ -467,11 +467,11 @@ TEST(pe, v2_reduce_shape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){3,4}, 2);
   PolyUOp *s = poly_sum_reduce_v2(ctx, x, 1, 0);
-  ASSERT_INT_EQ(poly_uop_ndim(s), 1);
-  ASSERT_INT_EQ(poly_uop_dims(s)[0], 3);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, s), 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, s)[0], 3);
   PolyUOp *sk = poly_sum_reduce_v2(ctx, x, 1, 1);
-  ASSERT_INT_EQ(poly_uop_ndim(sk), 2);
-  ASSERT_INT_EQ(poly_uop_dims(sk)[0], 3);
-  ASSERT_INT_EQ(poly_uop_dims(sk)[1], 1);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, sk), 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, sk)[0], 3);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, sk)[1], 1);
   poly_ctx_destroy(ctx); PASS();
 }

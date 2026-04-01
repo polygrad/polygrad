@@ -176,6 +176,7 @@ struct PolyCtx {
   PolyArena *arena;
   PolyMap *cse;
   PolyMap *kernel_cache;  /* computation UOp* → PolyCachedKernel* (rendered bytes) */
+  PolyMap *shape_cache;   /* UOp* → ShapeCacheEntry* (lazy shape cache) */
 };
 
 PolyCtx *poly_ctx_new(void) {
@@ -185,10 +186,12 @@ PolyCtx *poly_ctx_new(void) {
   ctx->arena = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
   ctx->kernel_cache = poly_map_new(16);
-  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache) {
+  ctx->shape_cache = poly_map_new(64);
+  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->kernel_cache) poly_map_destroy(ctx->kernel_cache);
+    if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     free(ctx);
     return NULL;
   }
@@ -209,6 +212,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
+  poly_map_destroy(ctx->shape_cache);  /* entries are arena-owned, no per-entry free */
   poly_map_destroy(ctx->cse);
   poly_arena_destroy(ctx->arena);
   free(ctx);
@@ -227,6 +231,7 @@ bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p) {
 
 PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) { return ctx->kernel_cache; }
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
+PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
 
 /* ── UOp creation with CSE ────────────────────────────────────────────── */
 
@@ -292,10 +297,6 @@ static PolyUOp *poly_uop_internal(PolyCtx *ctx, PolyOps op, PolyDType dtype,
     memcpy(s, arg.define_var.name, len + 1);
     u->arg.define_var.name = s;
   }
-
-  /* Compute and cache shape eagerly (sources already have shapes) */
-  void poly_uop_compute_shape(PolyCtx *ctx, PolyUOp *u);
-  poly_uop_compute_shape(ctx, u);
 
   /* Also store the CSE key in the arena so it persists for hash map lookups */
   CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));
