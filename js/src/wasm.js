@@ -449,6 +449,24 @@ async function createWasmBackend(device) {
     poly_detach: Module._poly_detach,
     poly_cast_by_id: Module._poly_cast_by_id,
 
+    // Shape-on-UOp accessors (lazy, cached on ctx)
+    poly_uop_ndim: (ctx, uop) => Module._poly_uop_ndim(ctx, uop),
+    poly_uop_dims: (ctx, uop) => {
+      const ndim = Module._poly_uop_ndim(ctx, uop)
+      if (ndim <= 0) return []
+      const dimsPtr = Module._poly_uop_dims(ctx, uop)
+      if (!dimsPtr) return []
+      // Read int64 dims from WASM heap (little-endian, 8 bytes each)
+      const result = []
+      const h32 = heap32()
+      for (let i = 0; i < ndim; i++) {
+        const lo = h32[(dimsPtr >> 2) + i * 2]
+        const hi = h32[(dimsPtr >> 2) + i * 2 + 1]
+        result.push(lo + hi * 0x100000000)
+      }
+      return result
+    },
+
     // Shape-taking ops (accept JS number[])
     poly_reshape: (ctx, uop, shape, len) => callWithInt64(cwrapReshape, ctx, uop, shape, len),
     poly_expand: (ctx, uop, shape, len) => callWithInt64(cwrapExpand, ctx, uop, shape, len),
