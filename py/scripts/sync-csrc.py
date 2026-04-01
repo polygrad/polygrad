@@ -50,12 +50,12 @@ SOURCES = [
     'src/wlrn.c',
     'src/ir.c',
     'src/instance.c',
-    'src/model_mlp.c',
-    'src/model_tabm.c',
-    'src/model_nam.c',
-    'src/modelzoo/modelzoo.c',
-    'src/modelzoo/models/gpt2.c',
-    'src/modelzoo/hf_loader.c',
+    'src/models/mlp.c',
+    'src/models/tabm.c',
+    'src/models/nam.c',
+    'src/models/registry.c',
+    'src/models/gpt2.c',
+    'src/models/hf_loader.c',
 ]
 
 # Headers needed for compilation
@@ -71,9 +71,10 @@ HEADERS = [
     'src/indexing.h',
     'src/instance.h',
     'src/ir.h',
-    'src/model_mlp.h',
-    'src/model_nam.h',
-    'src/model_tabm.h',
+    'src/models/mlp.h',
+    'src/models/nam.h',
+    'src/models/tabm.h',
+    'src/models/models.h',
     'src/nn.h',
     'src/pat.h',
     'src/rangeify.h',
@@ -82,7 +83,6 @@ HEADERS = [
     'src/scheduler.h',
     'src/wasm_builder.h',
     'src/wlrn.h',
-    'src/modelzoo/modelzoo.h',
     'vendor/cjson/cJSON.h',
 ]
 

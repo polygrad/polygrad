@@ -408,8 +408,6 @@ class Tensor:
         if self.shape != x.shape:
             x = x._broadcast_to(self.shape)
         assert self._buffer is not None, "assign target must be a realized tensor"
-        # Save logical shape before assign (ASSIGN normalizes to flat BUFFER)
-        self._assign_shape = self.shape
         target_uop = self._uop
         assign_uop = _ffi._lib.poly_assign(self._ctx, target_uop, x._uop)
         self._assign_data = self._data
@@ -471,7 +469,7 @@ class Tensor:
         # Restore: data was updated in-place, point UOp back to buffer
         self._data = target_data
         self._buffer = target_buffer
-        orig_shape = getattr(self, '_assign_shape', ())
+        orig_shape = self.shape  # reads logical shape from ASSIGN UOp arg
         if len(orig_shape) > 1:
             dims, ndim = _int64_array(orig_shape)
             self._uop = _ffi._lib.poly_reshape(self._ctx, self._buffer, dims, ndim)
@@ -492,9 +490,9 @@ class Tensor:
                 #   m.assign(new_m).realize()
                 #   m_hat = m * bc1   <-- must use m_buffer, not ASSIGN UOp
                 Tensor._compile_assigns_ordered.append(self._uop)
+                orig_shape = self.shape  # reads from ASSIGN UOp before restore
                 self._data = self._assign_data
                 self._buffer = self._assign_buffer
-                orig_shape = getattr(self, '_assign_shape', self.shape)
                 if len(orig_shape) > 1:
                     dims, ndim = _int64_array(orig_shape)
                     self._uop = _ffi._lib.poly_reshape(self._ctx, self._buffer, dims, ndim)

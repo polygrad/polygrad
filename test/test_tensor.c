@@ -376,11 +376,13 @@ TEST(shape_uop, const_scalar) {
   poly_ctx_destroy(ctx); PASS();
 }
 
-TEST(shape_uop, store_no_shape) {
+TEST(shape_uop, store_inherits_value_shape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = poly_buffer_f32(ctx, 4);
   PolyUOp *st = poly_store_val(ctx, b, poly_const_float(ctx, 1.0));
-  ASSERT_INT_EQ(poly_uop_ndim(ctx, st), -1);
+  /* STORE inherits shape from its value source (src[1]).
+   * A scalar const has shape (), so ndim=0. */
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, st), 0);
   poly_ctx_destroy(ctx); PASS();
 }
 
@@ -398,7 +400,7 @@ TEST(shape_uop, assign_flat) {
   PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *r = make_buf(ctx, (int64_t[]){3,4}, 2);
   PolyUOp *a = poly_assign(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
-  /* ASSIGN normalizes to flat BUFFER */
+  /* ASSIGN normalizes to flat BUFFER (shape fix deferred) */
   ASSERT_INT_EQ(poly_uop_ndim(ctx, a), 1);
   ASSERT_INT_EQ(poly_uop_dims(ctx, a)[0], 12);
   poly_ctx_destroy(ctx); PASS();
