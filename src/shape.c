@@ -184,6 +184,10 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     }
   }
 
+  /* ── BUFFER_VIEW: 1D shape from arg tuple first element ────────────── */
+  if (op == POLY_OP_BUFFER_VIEW && u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0)
+    return make_entry_1d(ctx, u->arg.int_tuple.vals[0]);
+
   /* ── DEFINE_LOCAL, DEFINE_REG: shape from pointer dtype size ──────── */
   if (op == POLY_OP_DEFINE_LOCAL || op == POLY_OP_DEFINE_REG) {
     if (u->dtype.is_ptr && u->dtype.ptr_size > 0) {
