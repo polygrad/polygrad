@@ -16,6 +16,7 @@
 #ifdef POLY_HAS_X64
 
 #include "codegen.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1515,7 +1516,7 @@ static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
 /*  extraction of per-UOp handler functions.                              */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-typedef struct { PolyUOp *uop; int base_reg, idx_reg, itemsize; } DeferredSIB;
+typedef struct { PolyUOp *uop; int base_reg; PolyUOp *idx_src; int itemsize; } DeferredSIB;
 
 typedef struct {
   /* Code buffer */
@@ -2091,7 +2092,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                   can_defer = true;
               }
               if (can_defer && n_deferred < 32) {
-                deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_reg, is };
+                /* Store the index UOp, not the materialized GPR.
+                 * materialize_index_gpr is called at consumption time
+                 * so the GPR value is fresh (RCX may be clobbered by
+                 * SHL/SHR or other int ops between deferral and use). */
+                deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_uop->src[1], is };
                 LM_SET(u, slot);
                 goto x64_load_done;
               }
@@ -2788,9 +2793,20 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
         /* For binary ops: check if src1 was deferred (can fuse as SIB operand) */
         DeferredSIB *ds1 = NULL;
+        int ds1_idx_reg = -1;
         if (u->n_src > 1) {
           for (int d = 0; d < n_deferred; d++)
             if (deferred[d].uop == u->src[1]) { ds1 = &deferred[d]; break; }
+        }
+        /* Materialize the index GPR now (not at deferral time) so it's
+         * fresh — RCX may have been clobbered since the LOAD was deferred.
+         * Note: nothing between here and emit_*_sib() may clobber RCX. */
+        if (ds1) {
+          ds1_idx_reg = materialize_index_gpr(&buf, ds1->idx_src,
+                                               reg_assigns, n_reg_assigns, &locals);
+          /* Should always succeed: deferral only happens when
+           * query_index_gpr returned >= 0 at the producer site. */
+          assert(ds1_idx_reg >= 0);
         }
 
         /* Get src1 from register file (only if not deferred).
@@ -2877,7 +2893,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               /* AVX 3-operand: dst = sr0 op sr1 (non-destructive) */
               int vL = (u->dtype.count >= 8) ? 1 : 0;
               if (ds1)
-                emit_vex_packed_rr_sib(&buf, opc, dr, sr0, ds1->base_reg, ds1->idx_reg, ds1->itemsize, vL);
+                emit_vex_packed_rr_sib(&buf, opc, dr, sr0, ds1->base_reg, ds1_idx_reg, ds1->itemsize, vL);
               else if (s1 >= 0 && xf_find(&xf, s1) < 0) {
                 /* src1 not in register: fold as memory operand from stack slot */
                 emit_vex_packed_rr_rbp(&buf, opc, dr, sr0, -slot_offset(s1), vL);
@@ -2886,13 +2902,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             } else if (pk) {
               if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
               if (ds1)
-                emit_sse_packed_sib(&buf, opc, dr, ds1->base_reg, ds1->idx_reg, ds1->itemsize);
+                emit_sse_packed_sib(&buf, opc, dr, ds1->base_reg, ds1_idx_reg, ds1->itemsize);
               else
                 emit_sse_packed_rr(&buf, opc, dr, sr1);
             } else {
               if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
               if (ds1)
-                emit_sse_scalar_sib(&buf, opc, dr, ds1->base_reg, ds1->idx_reg, ds1->itemsize);
+                emit_sse_scalar_sib(&buf, opc, dr, ds1->base_reg, ds1_idx_reg, ds1->itemsize);
               else
                 emit_sse_scalar_rr(&buf, opc, dr, sr1);
             }
