@@ -4666,21 +4666,26 @@ static PolyUOp *rule_where_on_load(PolyCtx *ctx, PolyUOp *w, const PolyBindings 
   PolyUOp *true_val = w->src[1];
   PolyUOp *false_val = w->src[2];
 
-  /* Match: WHERE(cond, LOAD(INDEX(buf, idx)), CONST(0)) */
-  if (true_val->op != POLY_OP_LOAD || true_val->n_src != 1) return NULL;
-  PolyUOp *idx = true_val->src[0];
-  if (idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
+  /* Match two patterns:
+   * A) WHERE(cond, LOAD(INDEX(buf, idx)), CONST(0))  -- post pm_add_loads
+   * B) WHERE(cond, INDEX(buf, idx), CONST(0))         -- pre pm_add_loads (PAD path) */
+  PolyUOp *idx = NULL;
+  bool has_load = false;
+  if (true_val->op == POLY_OP_LOAD && true_val->n_src >= 1) {
+    idx = true_val->src[0];
+    has_load = true;
+  } else if (true_val->op == POLY_OP_INDEX) {
+    idx = true_val;
+  }
+  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
   if (false_val->op != POLY_OP_CONST) return NULL;
-  /* Check false_val is zero */
   if (false_val->arg.kind == POLY_ARG_FLOAT && false_val->arg.f != 0.0) return NULL;
   if (false_val->arg.kind == POLY_ARG_INT && false_val->arg.i != 0) return NULL;
 
-  /* Guard: reject if cond depends on loaded data (contains LOAD in subtree).
-   * PAD bounds checks are pure index math (RANGE/CONST/ALU); data-dependent
-   * conditions like WHERE(x>0, x, 0) contain LOAD and must stay as WHERE. */
+  /* Guard: reject if cond depends on loaded data */
   if (uop_tree_contains_load(cond)) return NULL;
 
-  /* Merge cond with existing gate (AND them) if INDEX already has a gate */
+  /* Merge cond with existing gate */
   PolyUOp *gate = cond;
   if (idx->n_src >= 3) {
     gate = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, idx->src[2], cond, poly_arg_none());
@@ -4690,10 +4695,14 @@ static PolyUOp *rule_where_on_load(PolyCtx *ctx, PolyUOp *w, const PolyBindings 
   PolyUOp *new_srcs[3] = { idx->src[0], idx->src[1], gate };
   PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, new_srcs, 3, idx->arg);
 
-  /* 2-source LOAD: LOAD(gated_INDEX, alt_value) -- tinygrad parity.
-   * Alt value is the original false_val (the zero constant). */
-  PolyUOp *load_srcs[2] = { gated_idx, false_val };
-  return poly_uop(ctx, POLY_OP_LOAD, true_val->dtype, load_srcs, 2, true_val->arg);
+  if (has_load) {
+    /* Pattern A: rebuild LOAD with gated INDEX + alt value */
+    PolyUOp *load_srcs[2] = { gated_idx, false_val };
+    return poly_uop(ctx, POLY_OP_LOAD, true_val->dtype, load_srcs, 2, true_val->arg);
+  } else {
+    /* Pattern B: return gated INDEX directly (pm_add_loads wraps in LOAD later) */
+    return gated_idx;
+  }
 }
 
 /* Also handle reversed: WHERE(cond, CONST(0), LOAD(INDEX(buf, idx)))
@@ -4705,20 +4714,23 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
   PolyUOp *true_val = w->src[1];
   PolyUOp *false_val = w->src[2];
 
-  /* Match: WHERE(cond, CONST(0), LOAD(INDEX(buf, idx))) */
-  if (false_val->op != POLY_OP_LOAD || false_val->n_src != 1) return NULL;
-  PolyUOp *idx = false_val->src[0];
-  if (idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
+  /* Match: WHERE(cond, CONST(0), LOAD(INDEX(buf, idx))) or WHERE(cond, CONST(0), INDEX(buf, idx)) */
+  PolyUOp *idx = NULL;
+  bool has_load = false;
+  if (false_val->op == POLY_OP_LOAD && false_val->n_src >= 1) {
+    idx = false_val->src[0];
+    has_load = true;
+  } else if (false_val->op == POLY_OP_INDEX) {
+    idx = false_val;
+  }
+  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
   if (true_val->op != POLY_OP_CONST) return NULL;
   if (true_val->arg.kind == POLY_ARG_FLOAT && true_val->arg.f != 0.0) return NULL;
   if (true_val->arg.kind == POLY_ARG_INT && true_val->arg.i != 0) return NULL;
 
-  /* Same guard as rule_where_on_load: reject data-dependent conditions */
   if (uop_tree_contains_load(cond)) return NULL;
 
-  /* Gate is negated condition */
   PolyUOp *neg_cond = poly_uop1(ctx, POLY_OP_NEG, cond->dtype, cond, poly_arg_none());
-
   PolyUOp *gate = neg_cond;
   if (idx->n_src >= 3) {
     gate = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, idx->src[2], neg_cond, poly_arg_none());
@@ -4727,10 +4739,12 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
   PolyUOp *new_srcs[3] = { idx->src[0], idx->src[1], gate };
   PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, new_srcs, 3, idx->arg);
 
-  /* 2-source LOAD: LOAD(gated_INDEX, alt_value) -- tinygrad parity.
-   * Alt value is the original true_val (the zero constant, since this is the reversed form). */
-  PolyUOp *load_srcs[2] = { gated_idx, true_val };
-  return poly_uop(ctx, POLY_OP_LOAD, false_val->dtype, load_srcs, 2, false_val->arg);
+  if (has_load) {
+    PolyUOp *load_srcs[2] = { gated_idx, true_val };
+    return poly_uop(ctx, POLY_OP_LOAD, false_val->dtype, load_srcs, 2, false_val->arg);
+  } else {
+    return gated_idx;
+  }
 }
 
 static PolyPatternMatcher *g_pm_move_where_on_load = NULL;

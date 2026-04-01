@@ -212,25 +212,31 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
         continue;
       }
       int64_t begin = arg.pair_tuple.pairs[i][0];
+      PolyUOp *shifted;
       if (begin == 0) {
-        in_rngs[i] = out_rngs[i];
+        shifted = out_rngs[i];
       } else {
         PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(begin));
-        in_rngs[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i],
+        shifted = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i],
             poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()),
             poly_arg_none());
       }
-      /* valid_i = (in_idx >= 0) AND (in_idx < in_dim) */
+      /* valid_i = (shifted >= 0) AND (shifted < in_dim) */
       PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
       PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
                                poly_arg_int(in_shape.dims[i]));
       PolyUOp *ge_zero = poly_uop1(ctx, POLY_OP_NEG, POLY_BOOL,
-          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, in_rngs[i], zero,
+          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, zero,
                     poly_arg_none()), poly_arg_none());
       PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                  in_rngs[i], dim, poly_arg_none());
+                                  shifted, dim, poly_arg_none());
       PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
                               ge_zero, lt_dim, poly_arg_none());
+      /* Clamp index to valid range: WHERE(valid, shifted, 0).
+       * Matches tinygrad indexing.py:137: valid.where(r-s, UOp.invalid()).
+       * Prevents negative INDEX offsets that crash non-short-circuiting backends. */
+      in_rngs[i] = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32,
+                              dv, shifted, zero, poly_arg_none());
       valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
                                 valid, dv, poly_arg_none()) : dv;
     }
