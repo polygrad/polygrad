@@ -50,6 +50,12 @@ PolyInstance *poly_instance_from_ir(
     const uint8_t *ir_data, int ir_len,
     const uint8_t *weights_data, int weights_len);
 
+/* Create from a PolyCtx with named buffer registry + entrypoints.
+ * Requires at least one entrypoint registered. The ctx is NOT owned
+ * by the instance (caller manages ctx lifetime, must outlive the instance).
+ * Returns NULL on error (zero entrypoints, allocation failure). */
+PolyInstance *poly_instance_from_ctx(PolyCtx *ctx);
+
 void poly_instance_free(PolyInstance *inst);
 
 /* ── Param Enumeration ───────────────────────────────────────────────── */
@@ -148,6 +154,24 @@ int poly_instance_train_step(PolyInstance *inst,
 int poly_instance_set_optimizer(PolyInstance *inst, int kind,
                                 float lr, float beta1, float beta2,
                                 float eps, float weight_decay);
+
+/* ── Named accessor helpers ─────────────────────────────────────────── */
+
+/* Return the ctx backing this instance. */
+PolyCtx *poly_instance_ctx(const PolyInstance *inst);
+
+/* Lookup a BUFFER UOp by named buffer name. Returns NULL if not found. */
+PolyUOp *poly_instance_get_buffer(const PolyInstance *inst, const char *name);
+
+/* Lookup a SINK UOp by entrypoint name. Returns NULL if not found. */
+PolyUOp *poly_instance_get_sink(const PolyInstance *inst, const char *name);
+
+/* Get host data pointer for a named buffer. Sets *numel_out if non-NULL. */
+float *poly_instance_buf_data_named(PolyInstance *inst, const char *name,
+                                    int64_t *numel_out);
+
+/* Get numel for a named buffer. Returns 0 if not found. */
+int64_t poly_instance_buf_numel_named(const PolyInstance *inst, const char *name);
 
 #ifdef __cplusplus
 }

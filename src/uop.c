@@ -592,9 +592,9 @@ static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
   uint32_t h = reg_str_hash(name);
   PolyRegEntry *existing = poly_map_get(ctx->name_map, h, name, reg_str_eq);
   if (existing) {
-    /* Validate dtype: compare scalar type (strip pointer wrapper) */
-    PolyDType existing_scalar = poly_dtype_scalar(existing->buffer->dtype);
-    if (existing_scalar.priority != dt.priority || existing_scalar.bitsize != dt.bitsize) {
+    /* Validate dtype: compare by priority+bitsize (works for both scalar and ptr dtypes) */
+    if (existing->buffer->dtype.priority != dt.priority ||
+        existing->buffer->dtype.bitsize != dt.bitsize) {
       fprintf(stderr, "poly_register: '%s' already registered with different dtype\n", name);
       return NULL;
     }
@@ -617,9 +617,10 @@ static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
   int64_t numel = 1;
   for (int i = 0; i < ndim; i++) numel *= shape[i];
 
-  /* Create BUFFER UOp with unique tag to avoid CSE dedup */
-  PolyDType ptr_dt = poly_dtype_ptr(dt, numel, POLY_ADDR_GLOBAL);
-  PolyUOp *buf = poly_uop_tagged(ctx, POLY_OP_BUFFER, ptr_dt, NULL, 0,
+  /* Create BUFFER UOp with unique tag to avoid CSE dedup.
+   * Use scalar dtype (not PtrDType) — matches poly_buffer() in sched.c.
+   * The scheduling pipeline creates proper PARAM ptrs during lowering. */
+  PolyUOp *buf = poly_uop_tagged(ctx, POLY_OP_BUFFER, dt, NULL, 0,
                                   poly_arg_int(numel), ctx->next_buf_tag++);
 
   /* Arena-alloc entry */

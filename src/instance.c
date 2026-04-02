@@ -34,6 +34,7 @@ typedef struct {
   int ndim;
   float *data;       /* owned, allocated for all roles */
   int64_t numel;
+  bool owns_data;    /* false for aliases sharing another entry's allocation */
 } NamedBuf;
 
 typedef struct {
@@ -107,6 +108,7 @@ typedef struct {
 
 struct PolyInstance {
   PolyCtx *ctx;
+  bool owns_ctx;     /* true: poly_instance_free destroys ctx */
 
   NamedBuf *bufs;
   int n_bufs;
@@ -230,42 +232,49 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
 
 /* ── Lifecycle ───────────────────────────────────────────────────────── */
 
-PolyInstance *poly_instance_from_ir(
-    const uint8_t *ir_data, int ir_len,
-    const uint8_t *weights_data, int weights_len)
-{
-  /* Import IR */
-  PolyIrSpec spec;
-  if (poly_ir_import(ir_data, ir_len, &spec) != 0) {
-    fprintf(stderr, "poly_instance_from_ir: IR import failed\n");
-    return NULL;
-  }
-
+/* Build a PolyInstance from a PolyIrSpec.
+ * owns_ctx: if true, the instance takes ownership of spec->ctx.
+ * free_spec: if true, calls poly_ir_spec_free after building.
+ * Handles alias data sharing: entries with the same buffer UOp share one allocation. */
+static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool free_spec) {
   PolyInstance *inst = calloc(1, sizeof(PolyInstance));
-  inst->ctx = spec.ctx;
+  inst->ctx = spec->ctx;
+  inst->owns_ctx = owns_ctx;
 
-  /* Copy buffers */
-  inst->n_bufs = spec.n_bufs;
-  inst->bufs = calloc(spec.n_bufs, sizeof(NamedBuf));
+  /* Copy buffers with alias data sharing */
+  inst->n_bufs = spec->n_bufs;
+  inst->bufs = calloc(spec->n_bufs, sizeof(NamedBuf));
   int n_params = 0;
-  for (int i = 0; i < spec.n_bufs; i++) {
-    inst->bufs[i].name = strdup(spec.bufs[i].name);
-    inst->bufs[i].role = spec.bufs[i].role;
-    inst->bufs[i].buffer = spec.bufs[i].buffer;
-    inst->bufs[i].ndim = spec.bufs[i].ndim;
-    memcpy(inst->bufs[i].shape, spec.bufs[i].shape,
-           spec.bufs[i].ndim * sizeof(int64_t));
-    inst->bufs[i].numel = compute_numel(spec.bufs[i].shape, spec.bufs[i].ndim);
+  for (int i = 0; i < spec->n_bufs; i++) {
+    inst->bufs[i].name = strdup(spec->bufs[i].name);
+    inst->bufs[i].role = spec->bufs[i].role;
+    inst->bufs[i].buffer = spec->bufs[i].buffer;
+    inst->bufs[i].ndim = spec->bufs[i].ndim;
+    memcpy(inst->bufs[i].shape, spec->bufs[i].shape,
+           spec->bufs[i].ndim * sizeof(int64_t));
+    inst->bufs[i].numel = compute_numel(spec->bufs[i].shape, spec->bufs[i].ndim);
 
-    /* Allocate data for all buffers (instance-owned).
-     * INPUT buffers need storage too: callers populate them before forward. */
-    inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
-    if (spec.bufs[i].role == POLY_ROLE_PARAM) n_params++;
+    /* Check if an earlier entry shares the same buffer UOp (alias) */
+    float *shared = NULL;
+    for (int j = 0; j < i; j++) {
+      if (inst->bufs[j].buffer == spec->bufs[i].buffer) {
+        shared = inst->bufs[j].data;
+        break;
+      }
+    }
+    if (shared) {
+      inst->bufs[i].data = shared;
+      inst->bufs[i].owns_data = false;
+    } else {
+      inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
+      inst->bufs[i].owns_data = true;
+    }
+    if (spec->bufs[i].role == POLY_ROLE_PARAM) n_params++;
   }
 
   /* Initialize buffer handles (CPU domain, pointing at host data) */
-  inst->buf_handles = calloc(spec.n_bufs, sizeof(PolyBufferHandle));
-  for (int i = 0; i < spec.n_bufs; i++) {
+  inst->buf_handles = calloc(spec->n_bufs, sizeof(PolyBufferHandle));
+  for (int i = 0; i < spec->n_bufs; i++) {
     inst->buf_handles[i] = (PolyBufferHandle){
       .ptr = inst->bufs[i].data,
       .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
@@ -278,20 +287,38 @@ PolyInstance *poly_instance_from_ir(
   inst->n_params = n_params;
   inst->param_indices = malloc(n_params * sizeof(int));
   int pi = 0;
-  for (int i = 0; i < spec.n_bufs; i++)
-    if (spec.bufs[i].role == POLY_ROLE_PARAM)
+  for (int i = 0; i < spec->n_bufs; i++)
+    if (spec->bufs[i].role == POLY_ROLE_PARAM)
       inst->param_indices[pi++] = i;
 
   /* Copy entrypoints */
-  inst->n_entrypoints = spec.n_entrypoints;
-  inst->entrypoints = calloc(spec.n_entrypoints, sizeof(*inst->entrypoints));
-  for (int i = 0; i < spec.n_entrypoints; i++) {
-    inst->entrypoints[i].name = strdup(spec.entrypoints[i].name);
-    inst->entrypoints[i].sink = spec.entrypoints[i].sink;
+  inst->n_entrypoints = spec->n_entrypoints;
+  inst->entrypoints = calloc(spec->n_entrypoints, sizeof(*inst->entrypoints));
+  for (int i = 0; i < spec->n_entrypoints; i++) {
+    inst->entrypoints[i].name = strdup(spec->entrypoints[i].name);
+    inst->entrypoints[i].sink = spec->entrypoints[i].sink;
   }
 
-  /* Free spec arrays (but NOT ctx, we took ownership) */
-  poly_ir_spec_free(&spec);
+  if (free_spec) poly_ir_spec_free(spec);
+
+  /* Default optimizer: none */
+  inst->optim.kind = POLY_OPTIM_NONE;
+
+  return inst;
+}
+
+PolyInstance *poly_instance_from_ir(
+    const uint8_t *ir_data, int ir_len,
+    const uint8_t *weights_data, int weights_len)
+{
+  /* Import IR */
+  PolyIrSpec spec;
+  if (poly_ir_import(ir_data, ir_len, &spec) != 0) {
+    fprintf(stderr, "poly_instance_from_ir: IR import failed\n");
+    return NULL;
+  }
+
+  PolyInstance *inst = instance_from_spec(&spec, true, true);
 
   /* Import weights if provided */
   if (weights_data && weights_len > 0) {
@@ -302,9 +329,74 @@ PolyInstance *poly_instance_from_ir(
     }
   }
 
-  /* Default optimizer: none */
-  inst->optim.kind = POLY_OPTIM_NONE;
+  return inst;
+}
 
+/* ── Instance from PolyCtx registry ────────────────────────────────── */
+
+#include "frontend_internal.h"  /* poly_ptr_hash, poly_ptr_eq */
+
+PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
+  if (!ctx) return NULL;
+  int n_ep = poly_ctx_entrypoint_count(ctx);
+  if (n_ep == 0) {
+    fprintf(stderr, "poly_instance_from_ctx: zero entrypoints\n");
+    return NULL;
+  }
+
+  /* Collect reachable BUFFER UOps from all entrypoint SINKs */
+  PolyMap *reachable = poly_map_new(32);
+  for (int i = 0; i < n_ep; i++) {
+    PolyUOp *sink = poly_ctx_entrypoint_sink(ctx, i);
+    int n_topo;
+    PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+    for (int j = 0; j < n_topo; j++) {
+      if (topo[j]->op == POLY_OP_BUFFER) {
+        uint32_t h = poly_ptr_hash(topo[j]);
+        if (!poly_map_get(reachable, h, topo[j], poly_ptr_eq))
+          poly_map_set(reachable, h, topo[j], topo[j], poly_ptr_eq);
+      }
+    }
+  }
+
+  /* Build PolyIrBufEntry array from registry entries (reachable only) */
+  int n_reg = poly_ctx_named_count(ctx);
+  PolyIrBufEntry *bufs = calloc(n_reg, sizeof(PolyIrBufEntry));
+  int n_bufs = 0;
+  for (int i = 0; i < n_reg; i++) {
+    const PolyRegEntry *e = poly_ctx_named_entry(ctx, i);
+    uint32_t h = poly_ptr_hash(e->buffer);
+    if (!poly_map_get(reachable, h, e->buffer, poly_ptr_eq)) continue;
+    bufs[n_bufs] = (PolyIrBufEntry){
+      .name = e->name,
+      .role = (uint8_t)e->role,
+      .buffer = e->buffer,
+      .ndim = e->ndim,
+    };
+    memcpy(bufs[n_bufs].shape, e->shape, e->ndim * sizeof(int64_t));
+    n_bufs++;
+  }
+  poly_map_destroy(reachable);
+
+  /* Build entrypoints array */
+  PolyIrEntrypoint *eps = calloc(n_ep, sizeof(PolyIrEntrypoint));
+  for (int i = 0; i < n_ep; i++) {
+    eps[i].name = poly_ctx_entrypoint_name(ctx, i);
+    eps[i].sink = poly_ctx_entrypoint_sink(ctx, i);
+  }
+
+  /* Build spec and create instance (does NOT own ctx) */
+  PolyIrSpec spec = {
+    .ctx = ctx,
+    .bufs = bufs,
+    .n_bufs = n_bufs,
+    .entrypoints = eps,
+    .n_entrypoints = n_ep,
+  };
+  PolyInstance *inst = instance_from_spec(&spec, false, false);
+
+  free(bufs);
+  free(eps);
   return inst;
 }
 
@@ -355,7 +447,7 @@ void poly_instance_free(PolyInstance *inst) {
   /* Free named buffers */
   for (int i = 0; i < inst->n_bufs; i++) {
     free(inst->bufs[i].name);
-    free(inst->bufs[i].data);
+    if (inst->bufs[i].owns_data) free(inst->bufs[i].data);
   }
   free(inst->bufs);
   free(inst->param_indices);
@@ -379,8 +471,8 @@ void poly_instance_free(PolyInstance *inst) {
   slot_cache_free(inst->call_cache);
   slot_cache_free(inst->train_cache);
 
-  /* Free context (arena-frees all UOps) */
-  if (inst->ctx) poly_ctx_destroy(inst->ctx);
+  /* Free context (arena-frees all UOps) -- only if we own it */
+  if (inst->owns_ctx && inst->ctx) poly_ctx_destroy(inst->ctx);
 
   free(inst);
 }
@@ -1466,4 +1558,37 @@ int poly_instance_train_step(PolyInstance *inst,
     inst->bufs[loss_named_idx].data[0] = ts->loss_data;
 
   return 0;
+}
+
+/* ── Named accessor helpers ─────────────────────────────────────────── */
+
+PolyCtx *poly_instance_ctx(const PolyInstance *inst) {
+  return inst ? inst->ctx : NULL;
+}
+
+PolyUOp *poly_instance_get_buffer(const PolyInstance *inst, const char *name) {
+  if (!inst || !name) return NULL;
+  int idx = find_buf_by_name(inst, name);
+  return (idx >= 0) ? inst->bufs[idx].buffer : NULL;
+}
+
+PolyUOp *poly_instance_get_sink(const PolyInstance *inst, const char *name) {
+  if (!inst || !name) return NULL;
+  int idx = find_entrypoint(inst, name);
+  return (idx >= 0) ? inst->entrypoints[idx].sink : NULL;
+}
+
+float *poly_instance_buf_data_named(PolyInstance *inst, const char *name,
+                                    int64_t *numel_out) {
+  if (!inst || !name) return NULL;
+  int idx = find_buf_by_name(inst, name);
+  if (idx < 0) return NULL;
+  if (numel_out) *numel_out = inst->bufs[idx].numel;
+  return inst->bufs[idx].data;
+}
+
+int64_t poly_instance_buf_numel_named(const PolyInstance *inst, const char *name) {
+  if (!inst || !name) return 0;
+  int idx = find_buf_by_name(inst, name);
+  return (idx >= 0) ? inst->bufs[idx].numel : 0;
 }
