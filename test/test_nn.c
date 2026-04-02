@@ -1,5 +1,5 @@
 /*
- * test_nn.c -- Tests for the Tensor + neural network API
+ * test_nn.c -- Tests for nn convenience builders + frontend composed ops
  */
 
 #include <math.h>
@@ -10,436 +10,156 @@
 
 #include "test_harness.h"
 #include "../src/nn.h"
+#include "../src/instance.h"
 #include "../src/rangeify.h"
 #include "../src/frontend.h"
 #include "../src/codegen.h"
 #include "../src/scheduler.h"
 
-/* ── M1: Creation + elementwise + movement + realize ─────────────────── */
+/* ── Convenience builder tests ──────────────────────────────────────── */
 
-TEST(nn, create_zeros) {
-  int64_t shape[] = {2, 3};
-  PolyTensor *t = poly_tensor_zeros(shape, 2);
-  ASSERT_NOT_NULL(t);
-  ASSERT_INT_EQ(t->ndim, 2);
-  ASSERT_INT_EQ(t->shape[0], 2);
-  ASSERT_INT_EQ(t->shape[1], 3);
-  ASSERT_INT_EQ(t->numel, 6);
-  ASSERT_NOT_NULL(t->data);
-  for (int i = 0; i < 6; i++)
-    ASSERT_FLOAT_EQ(t->data[i], 0.0f, 1e-7);
-  poly_tensor_free(t);
-  PASS();
-}
-
-TEST(nn, realize_add) {
-  float a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
-  float b_data[] = {10.0f, 20.0f, 30.0f, 40.0f};
-
+TEST(nn, nn_linear_registers_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, a_data, (int64_t[]){4}, 1);
-  PolyTensor *b = poly_tensor_input(ctx, b_data, (int64_t[]){4}, 1);
-  PolyTensor *c = poly_tensor_add(a, b);
+  int64_t xs[] = {2, 4};
+  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 2, "x");
+  PolyUOp *x = poly_reshape(ctx, x_buf, xs, 2);
 
-  int rc = poly_tensor_realize(c);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_NOT_NULL(c->data);
-  ASSERT_FLOAT_EQ(c->data[0], 11.0f, 1e-5);
-  ASSERT_FLOAT_EQ(c->data[1], 22.0f, 1e-5);
-  ASSERT_FLOAT_EQ(c->data[2], 33.0f, 1e-5);
-  ASSERT_FLOAT_EQ(c->data[3], 44.0f, 1e-5);
+  PolyUOp *out = poly_nn_linear(ctx, "fc1", x, 4, 8, true);
+  ASSERT_TRUE(out != NULL);
 
-  poly_tensor_free(c);
-  poly_tensor_free(a);
-  poly_tensor_free(b);
+  /* Check registered params */
+  ASSERT_TRUE(poly_ctx_get(ctx, "fc1.weight") != NULL);
+  ASSERT_TRUE(poly_ctx_get(ctx, "fc1.bias") != NULL);
+
+  const PolyRegEntry *we = poly_ctx_get_entry(ctx, "fc1.weight");
+  ASSERT_INT_EQ(we->ndim, 2);
+  ASSERT_INT_EQ(we->shape[0], 8);
+  ASSERT_INT_EQ(we->shape[1], 4);
+  ASSERT_INT_EQ(we->role, POLY_ROLE_PARAM);
+
+  const PolyRegEntry *be = poly_ctx_get_entry(ctx, "fc1.bias");
+  ASSERT_INT_EQ(be->ndim, 1);
+  ASSERT_INT_EQ(be->shape[0], 8);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, realize_chain) {
-  float a_data[] = {1.0f, 2.0f, 3.0f};
-  float b_data[] = {10.0f, 20.0f, 30.0f};
-  float c_data[] = {2.0f, 2.0f, 2.0f};
-
+TEST(nn, nn_linear_no_bias) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, a_data, (int64_t[]){3}, 1);
-  PolyTensor *b = poly_tensor_input(ctx, b_data, (int64_t[]){3}, 1);
-  PolyTensor *c = poly_tensor_input(ctx, c_data, (int64_t[]){3}, 1);
-  PolyTensor *ab = poly_tensor_add(a, b);
-  PolyTensor *result = poly_tensor_mul(ab, c);
+  int64_t xs[] = {1, 4};
+  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  int rc = poly_tensor_realize(result);
-  ASSERT_INT_EQ(rc, 0);
-  /* (1+10)*2=22, (2+20)*2=44, (3+30)*2=66 */
-  ASSERT_FLOAT_EQ(result->data[0], 22.0f, 1e-5);
-  ASSERT_FLOAT_EQ(result->data[1], 44.0f, 1e-5);
-  ASSERT_FLOAT_EQ(result->data[2], 66.0f, 1e-5);
+  PolyUOp *out = poly_nn_linear(ctx, "fc", x, 4, 2, false);
+  ASSERT_TRUE(out != NULL);
+  ASSERT_TRUE(poly_ctx_get(ctx, "fc.weight") != NULL);
+  ASSERT_EQ(poly_ctx_get(ctx, "fc.bias"), NULL);
 
-  poly_tensor_free(result);
-  poly_tensor_free(ab);
-  poly_tensor_free(a);
-  poly_tensor_free(b);
-  poly_tensor_free(c);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, realize_reshape_2d) {
-  float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-
+TEST(nn, nn_linear_idempotent_reuse) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, data, (int64_t[]){6}, 1);
-  PolyTensor *r = poly_tensor_reshape(a, (int64_t[]){2, 3}, 2);
+  int64_t xs[] = {1, 4};
+  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  ASSERT_INT_EQ(r->ndim, 2);
-  ASSERT_INT_EQ(r->shape[0], 2);
-  ASSERT_INT_EQ(r->shape[1], 3);
+  /* Two calls with same prefix reuse the same weight buffers */
+  poly_nn_linear(ctx, "shared", x, 4, 8, true);
+  int count_after_first = poly_ctx_named_count(ctx);
+  poly_nn_linear(ctx, "shared", x, 4, 8, true);
+  ASSERT_INT_EQ(poly_ctx_named_count(ctx), count_after_first);
 
-  int rc = poly_tensor_realize(r);
-  ASSERT_INT_EQ(rc, 0);
-  for (int i = 0; i < 6; i++)
-    ASSERT_FLOAT_EQ(r->data[i], data[i], 1e-7);
-
-  poly_tensor_free(r);
-  poly_tensor_free(a);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── M2: Reductions + matmul + activations ───────────────────────────── */
-
-TEST(nn, sum_axis) {
-  /* 2x3 matrix: [[1,2,3],[4,5,6]], sum axis=1 → [6, 15] */
-  float data[] = {1, 2, 3, 4, 5, 6};
-
+TEST(nn, nn_linear_e2e) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, data, (int64_t[]){2, 3}, 2);
-  PolyTensor *s = poly_tensor_sum(a, 1);
+  int64_t xs[] = {1, 2};
+  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 2, "x");
+  PolyUOp *x = poly_reshape(ctx, x_buf, xs, 2);
+  int64_t os[] = {1, 3};
+  PolyUOp *o_buf = poly_output(ctx, POLY_FLOAT32, os, 2, "output");
 
-  ASSERT_INT_EQ(s->ndim, 1);
-  ASSERT_INT_EQ(s->shape[0], 2);
+  PolyUOp *out = poly_nn_linear(ctx, "fc", x, 2, 3, true);
+  ASSERT_TRUE(out != NULL);
 
-  int rc = poly_tensor_realize(s);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(s->data[0], 6.0f, 1e-5);
-  ASSERT_FLOAT_EQ(s->data[1], 15.0f, 1e-5);
+  PolyUOp *store = poly_store_val(ctx, o_buf, out);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  poly_register_entrypoint(ctx, "forward", sink);
 
-  poly_tensor_free(s);
-  poly_tensor_free(a);
+  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  ASSERT_TRUE(inst != NULL);
+
+  /* Set weights: W = [[1,0],[0,1],[1,1]], b = [0,0,0] */
+  float *wd = poly_instance_buf_data_named(inst, "fc.weight", NULL);
+  float w_init[] = {1,0, 0,1, 1,1};
+  memcpy(wd, w_init, sizeof(w_init));
+
+  float *bd = poly_instance_buf_data_named(inst, "fc.bias", NULL);
+  memset(bd, 0, 3 * sizeof(float));
+
+  /* Execute: x = [2, 3], expect [2, 3, 5] */
+  float x_data[] = {2.0f, 3.0f};
+  PolyIOBinding io[] = { { "x", x_data } };
+  ASSERT_INT_EQ(poly_instance_call(inst, "forward", io, 1), 0);
+
+  float *od = poly_instance_buf_data_named(inst, "output", NULL);
+  ASSERT_FLOAT_EQ(od[0], 2.0f, 1e-5);
+  ASSERT_FLOAT_EQ(od[1], 3.0f, 1e-5);
+  ASSERT_FLOAT_EQ(od[2], 5.0f, 1e-5);
+
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, mean_all) {
-  float data[] = {2, 4, 6, 8};
-
+TEST(nn, nn_layernorm_registers_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, data, (int64_t[]){4}, 1);
-  PolyTensor *m = poly_tensor_mean(a, -1);
+  int64_t xs[] = {2, 4};
+  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  int rc = poly_tensor_realize(m);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(m->data[0], 5.0f, 1e-5);
+  PolyUOp *out = poly_nn_layernorm(ctx, "ln", x, 4, 1e-5);
+  ASSERT_TRUE(out != NULL);
+  ASSERT_TRUE(poly_ctx_get(ctx, "ln.weight") != NULL);
+  ASSERT_TRUE(poly_ctx_get(ctx, "ln.bias") != NULL);
 
-  poly_tensor_free(m);
-  poly_tensor_free(a);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, matmul_2x2) {
-  /* [[1,2],[3,4]] @ [[5,6],[7,8]] = [[19,22],[43,50]] */
-  float a_data[] = {1, 2, 3, 4};
-  float b_data[] = {5, 6, 7, 8};
-
+TEST(nn, nn_rmsnorm_registers_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, a_data, (int64_t[]){2, 2}, 2);
-  PolyTensor *b = poly_tensor_input(ctx, b_data, (int64_t[]){2, 2}, 2);
-  PolyTensor *c = poly_tensor_matmul(a, b);
+  int64_t xs[] = {2, 4};
+  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  ASSERT_INT_EQ(c->ndim, 2);
-  ASSERT_INT_EQ(c->shape[0], 2);
-  ASSERT_INT_EQ(c->shape[1], 2);
+  PolyUOp *out = poly_nn_rmsnorm(ctx, "rms", x, 4, 1e-6);
+  ASSERT_TRUE(out != NULL);
+  ASSERT_TRUE(poly_ctx_get(ctx, "rms.weight") != NULL);
 
-  int rc = poly_tensor_realize(c);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(c->data[0], 19.0f, 1e-4);
-  ASSERT_FLOAT_EQ(c->data[1], 22.0f, 1e-4);
-  ASSERT_FLOAT_EQ(c->data[2], 43.0f, 1e-4);
-  ASSERT_FLOAT_EQ(c->data[3], 50.0f, 1e-4);
-
-  poly_tensor_free(c);
-  poly_tensor_free(a);
-  poly_tensor_free(b);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, relu_values) {
-  float data[] = {-3.0f, -1.0f, 0.0f, 0.5f, 2.0f};
-
+TEST(nn, nn_embedding_registers_params) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, data, (int64_t[]){5}, 1);
-  PolyTensor *r = poly_tensor_relu(a);
+  int64_t ts[] = {3};
+  PolyUOp *tok = poly_reshape(ctx, poly_input(ctx, POLY_INT32, ts, 1, "tokens"), ts, 1);
 
-  int rc = poly_tensor_realize(r);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(r->data[0], 0.0f, 1e-6);
-  ASSERT_FLOAT_EQ(r->data[1], 0.0f, 1e-6);
-  ASSERT_FLOAT_EQ(r->data[2], 0.0f, 1e-6);
-  ASSERT_FLOAT_EQ(r->data[3], 0.5f, 1e-6);
-  ASSERT_FLOAT_EQ(r->data[4], 2.0f, 1e-6);
+  PolyUOp *out = poly_nn_embedding(ctx, "emb", tok, 100, 64);
+  ASSERT_TRUE(out != NULL);
 
-  poly_tensor_free(r);
-  poly_tensor_free(a);
+  const PolyRegEntry *we = poly_ctx_get_entry(ctx, "emb.weight");
+  ASSERT_TRUE(we != NULL);
+  ASSERT_INT_EQ(we->shape[0], 100);
+  ASSERT_INT_EQ(we->shape[1], 64);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, sigmoid_values) {
-  float data[] = {0.0f, 10.0f, -10.0f};
-
-  PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, data, (int64_t[]){3}, 1);
-  PolyTensor *s = poly_tensor_sigmoid(a);
-
-  int rc = poly_tensor_realize(s);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(s->data[0], 0.5f, 1e-5);
-  ASSERT_TRUE(s->data[1] > 0.999f);   /* sigmoid(10) ≈ 1 */
-  ASSERT_TRUE(s->data[2] < 0.001f);   /* sigmoid(-10) ≈ 0 */
-
-  poly_tensor_free(s);
-  poly_tensor_free(a);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── M3: Autograd backward ───────────────────────────────────────────── */
-
-TEST(nn, backward_mul) {
-  /* loss = sum(a * b), d(loss)/da = b */
-  float a_data[] = {1, 2, 3, 4};
-  float b_data[] = {5, 6, 7, 8};
-
-  PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, a_data, (int64_t[]){4}, 1);
-  PolyTensor *b = poly_tensor_input(ctx, b_data, (int64_t[]){4}, 1);
-  PolyTensor *prod = poly_tensor_mul(a, b);
-  PolyTensor *loss = poly_tensor_sum(prod, -1);
-
-  PolyTensor *params[] = {a};
-  PolyTensor **grads = poly_tensor_backward(ctx, loss, params, 1);
-  ASSERT_NOT_NULL(grads);
-  ASSERT_NOT_NULL(grads[0]);
-
-  int rc = poly_tensor_realize(grads[0]);
-  ASSERT_INT_EQ(rc, 0);
-  for (int i = 0; i < 4; i++)
-    ASSERT_FLOAT_EQ(grads[0]->data[i], b_data[i], 1e-5);
-
-  poly_tensor_free(grads[0]);
-  free(grads);
-  poly_tensor_free(loss);
-  poly_tensor_free(prod);
-  poly_tensor_free(a);
-  poly_tensor_free(b);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-/* ── M4: nn layers + SGD optimizer ───────────────────────────────────── */
-
-TEST(nn, linear_forward) {
-  /* Linear(2→3, no bias): out = x @ w^T
-   * x = [[1,2]], w = [[1,0],[0,1],[1,1]]
-   * out = [[1,2,3]] */
-  PolyLinear *l = poly_nn_linear(2, 3, false);
-  /* Override weights for deterministic test */
-  l->weight->data[0] = 1; l->weight->data[1] = 0;  /* row 0 */
-  l->weight->data[2] = 0; l->weight->data[3] = 1;  /* row 1 */
-  l->weight->data[4] = 1; l->weight->data[5] = 1;  /* row 2 */
-
-  float x_data[] = {1, 2};
-  PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *x = poly_tensor_input(ctx, x_data, (int64_t[]){1, 2}, 2);
-  PolyTensor *out = poly_nn_linear_forward(l, ctx, x);
-
-  ASSERT_INT_EQ(out->ndim, 2);
-  ASSERT_INT_EQ(out->shape[0], 1);
-  ASSERT_INT_EQ(out->shape[1], 3);
-
-  int rc = poly_tensor_realize(out);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out->data[0], 1.0f, 1e-5);  /* 1*1 + 2*0 */
-  ASSERT_FLOAT_EQ(out->data[1], 2.0f, 1e-5);  /* 1*0 + 2*1 */
-  ASSERT_FLOAT_EQ(out->data[2], 3.0f, 1e-5);  /* 1*1 + 2*1 */
-
-  poly_tensor_free(out);
-  poly_tensor_free(x);
-  poly_ctx_destroy(ctx);
-  poly_nn_linear_free(l);
-  PASS();
-}
-
-TEST(nn, sgd_simple_step) {
-  /* Simple: param w=[1,1], loss = sum(w*w) = 2, grad = [2,2]
-   * After SGD step (lr=0.1): w = [1,1] - 0.1*[2,2] = [0.8, 0.8] */
-  PolyTensor *w = poly_tensor_from_data((float[]){1.0f, 1.0f}, (int64_t[]){2}, 1);
-  w->requires_grad = true;
-  PolyTensor *params[] = {w};
-  PolySGD sgd = poly_sgd_new(params, 1, 0.1f);
-
-  PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *pw = poly_tensor_wrap(ctx, w);
-  PolyTensor *sq = poly_tensor_mul(pw, pw);
-  PolyTensor *loss = poly_tensor_sum(sq, -1);
-
-  float loss_val = -1.0f;
-  int rc = poly_sgd_step(&sgd, ctx, loss, &loss_val);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(loss_val, 2.0f, 1e-5);
-
-  /* Check param updated: w = [0.8, 0.8] */
-  ASSERT_FLOAT_EQ(w->data[0], 0.8f, 1e-5);
-  ASSERT_FLOAT_EQ(w->data[1], 0.8f, 1e-5);
-
-  poly_tensor_free(loss);
-  poly_tensor_free(sq);
-  poly_tensor_free(pw);
-  poly_ctx_destroy(ctx);
-  free(sgd.params);
-  poly_tensor_free(w);
-  PASS();
-}
-
-TEST(nn, sgd_loss_decreases) {
-  /* Two steps: verify loss decreases */
-  PolyTensor *w = poly_tensor_from_data((float[]){2.0f, 3.0f}, (int64_t[]){2}, 1);
-  w->requires_grad = true;
-  PolyTensor *params[] = {w};
-  PolySGD sgd = poly_sgd_new(params, 1, 0.1f);
-
-  float loss1 = 0.0f, loss2 = 0.0f;
-
-  /* Step 1 */
-  PolyCtx *ctx1 = poly_ctx_new();
-  PolyTensor *pw1 = poly_tensor_wrap(ctx1, w);
-  PolyTensor *sq1 = poly_tensor_mul(pw1, pw1);
-  PolyTensor *l1 = poly_tensor_sum(sq1, -1);
-  ASSERT_INT_EQ(poly_sgd_step(&sgd, ctx1, l1, &loss1), 0);
-  poly_tensor_free(l1); poly_tensor_free(sq1); poly_tensor_free(pw1);
-  poly_ctx_destroy(ctx1);
-
-  /* Step 2 */
-  PolyCtx *ctx2 = poly_ctx_new();
-  PolyTensor *pw2 = poly_tensor_wrap(ctx2, w);
-  PolyTensor *sq2 = poly_tensor_mul(pw2, pw2);
-  PolyTensor *l2 = poly_tensor_sum(sq2, -1);
-  ASSERT_INT_EQ(poly_sgd_step(&sgd, ctx2, l2, &loss2), 0);
-  poly_tensor_free(l2); poly_tensor_free(sq2); poly_tensor_free(pw2);
-  poly_ctx_destroy(ctx2);
-
-  ASSERT_TRUE(loss2 < loss1);
-
-  free(sgd.params);
-  poly_tensor_free(w);
-  PASS();
-}
-
-/* ── M5: XOR training ────────────────────────────────────────────────── */
-
-TEST(nn, xor_training) {
-  poly_nn_seed(42);  /* reproducible initialization */
-  poly_rangeify_stats_reset();
-  float x_data[] = {0, 0, 0, 1, 1, 0, 1, 1};
-  float y_data[] = {0, 1, 1, 0};
-
-  /* Model: Linear(2→8) → relu → Linear(8→1) → sigmoid */
-  PolyLinear *l1 = poly_nn_linear(2, 8, true);
-  PolyLinear *l2 = poly_nn_linear(8, 1, true);
-
-  /* Collect params */
-  PolyTensor *params[4];
-  int np = 0;
-  np += poly_nn_linear_params(l1, params + np, 4 - np);
-  np += poly_nn_linear_params(l2, params + np, 4 - np);
-  PolySGD sgd = poly_sgd_new(params, np, 0.5f);
-
-  float loss_val = 1.0f;
-  float prev_loss = 2.0f;
-  int n_decreasing = 0;
-  for (int step = 0; step < 50 && loss_val > 0.01f; step++) {
-    PolyCtx *ctx = poly_ctx_new();
-    PolyTensor *x = poly_tensor_input(ctx, x_data, (int64_t[]){4, 2}, 2);
-    PolyTensor *y = poly_tensor_input(ctx, y_data, (int64_t[]){4, 1}, 2);
-
-    PolyTensor *h_lin = poly_nn_linear_forward(l1, ctx, x);
-    PolyTensor *h = poly_tensor_relu(h_lin);
-    PolyTensor *out_lin = poly_nn_linear_forward(l2, ctx, h);
-    PolyTensor *out = poly_tensor_sigmoid(out_lin);
-    PolyTensor *loss = poly_tensor_mse(out, y);
-
-    int rc = poly_sgd_step(&sgd, ctx, loss, &loss_val);
-    if (rc != 0) {
-      poly_ctx_destroy(ctx);
-      FAIL("sgd_step failed at step %d", step);
-    }
-    if (loss_val < prev_loss) n_decreasing++;
-    prev_loss = loss_val;
-
-    /* Free intermediate wrappers (UOps are arena-managed, freed by ctx_destroy) */
-    poly_tensor_free(loss);
-    poly_tensor_free(out);
-    poly_tensor_free(out_lin);
-    poly_tensor_free(h);
-    poly_tensor_free(h_lin);
-    poly_tensor_free(x);
-    poly_tensor_free(y);
-    poly_ctx_destroy(ctx);
-  }
-
-  /* Loss must be monotonically decreasing for the majority of steps */
-  ASSERT_TRUE(n_decreasing >= 40);
-  PolyRangeifyStats stats = poly_rangeify_stats_get();
-  ASSERT_INT_EQ(stats.remap_unique_bound_matches, 0);
-  ASSERT_INT_EQ(stats.remap_bound_matches, 0);
-
-  free(sgd.params);
-  poly_nn_linear_free(l1);
-  poly_nn_linear_free(l2);
-  PASS();
-}
-
-/* ── M6: Direct matmul numeric test ─────────────────────────────────── */
-/* Regression test for accumulator placement in multi-range kernels.
- * (2,3) @ (3,4) = (2,4) — K=3, M*N=8, so K < M*N.
- * Each K contributes uniquely, so "last-K-only" would be obviously wrong.
- * A = [[1,2,3],[4,5,6]], B = [[1,2,3,4],[5,6,7,8],[9,10,11,12]]
- * Expected C = A@B = [[38,44,50,56],[83,98,113,128]] */
-TEST(nn, matmul_numeric) {
-  float a_data[] = {1, 2, 3, 4, 5, 6};
-  float b_data[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-  float expected[] = {38, 44, 50, 56, 83, 98, 113, 128};
-
-  PolyCtx *ctx = poly_ctx_new();
-  PolyTensor *a = poly_tensor_input(ctx, a_data, (int64_t[]){2, 3}, 2);
-  PolyTensor *b = poly_tensor_input(ctx, b_data, (int64_t[]){3, 4}, 2);
-  PolyTensor *c = poly_tensor_matmul(a, b);
-
-  int rc = poly_tensor_realize(c);
-  ASSERT_INT_EQ(rc, 0);
-  ASSERT_NOT_NULL(c->data);
-
-  for (int i = 0; i < 8; i++)
-    ASSERT_FLOAT_EQ(c->data[i], expected[i], 1e-5);
-
-  poly_tensor_free(c);
-  poly_tensor_free(a);
-  poly_tensor_free(b);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
+/* ── Existing composed op tests (kept, no PolyTensor dependency) ────── */
 
 TEST(nn, matmul_invalid_shape_returns_null) {
   PolyCtx *ctx = poly_ctx_new();
