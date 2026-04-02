@@ -438,6 +438,63 @@ const int64_t *poly_uop_dims(PolyCtx *ctx, const PolyUOp *u);
 PolyShape poly_uop_shape_cached(PolyCtx *ctx, const PolyUOp *u);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
+/* ── Named buffer registry ────────────────────────────────────────────── */
+
+typedef enum {
+  POLY_ROLE_PARAM  = 0,
+  POLY_ROLE_INPUT  = 1,
+  POLY_ROLE_TARGET = 2,
+  POLY_ROLE_OUTPUT = 3,
+  POLY_ROLE_AUX    = 4,
+} PolyBufRole;
+
+typedef struct {
+  const char *name;      /* arena-allocated */
+  PolyBufRole role;
+  PolyUOp *buffer;       /* BUFFER UOp */
+  int64_t shape[8];
+  int ndim;
+  bool is_alias;
+} PolyRegEntry;
+
+/* Register a named BUFFER on ctx. Returns the BUFFER UOp.
+ * Re-registration with same (name, dtype, shape) returns existing buffer.
+ * Mismatch (same name, different dtype or shape) returns NULL. */
+PolyUOp *poly_param(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                    const char *fmt, ...) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_input(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                    const char *fmt, ...) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_output(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                     const char *fmt, ...) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_target(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                     const char *fmt, ...) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                  const char *fmt, ...) __attribute__((format(printf, 5, 6)));
+
+/* Create an alias: alias_name resolves to the same buffer as existing_name.
+ * Returns 0 on success, -1 on error (existing_name not found, or alias_name
+ * already taken by a different buffer). */
+int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name);
+
+/* Lookup a named buffer by name. Returns the BUFFER UOp, or NULL. */
+PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+/* Lookup a registry entry by name. Returns NULL if not found. */
+const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name);
+
+/* Enumeration of all named entries (including aliases). */
+int poly_ctx_named_count(PolyCtx *ctx);
+const PolyRegEntry *poly_ctx_named_entry(PolyCtx *ctx, int i);
+
+/* Register a named entrypoint (SINK UOp). Returns 0 on success, -1 on error. */
+int poly_register_entrypoint(PolyCtx *ctx, const char *name, PolyUOp *sink);
+
+/* Entrypoint enumeration. */
+int poly_ctx_entrypoint_count(PolyCtx *ctx);
+const char *poly_ctx_entrypoint_name(PolyCtx *ctx, int i);
+PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i);
+
 /* ── Autograd ─────────────────────────────────────────────────────────── */
 /* Reverse-mode gradient of loss w.r.t. wrt.
  * Returns a UOp expression for d(loss)/d(wrt), or NULL on unsupported path. */

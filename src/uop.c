@@ -177,6 +177,16 @@ struct PolyCtx {
   PolyMap *cse;
   PolyMap *kernel_cache;  /* computation UOp* → PolyCachedKernel* (rendered bytes) */
   PolyMap *shape_cache;   /* UOp* → ShapeCacheEntry* (lazy shape cache) */
+  /* Named buffer registry */
+  PolyRegEntry **entries;  /* malloc'd array of ptrs to arena-allocated entries */
+  int n_entries;
+  int entries_cap;
+  PolyMap *name_map;       /* str hash → PolyRegEntry* */
+  /* Named entrypoints */
+  struct { const char *name; PolyUOp *sink; } *ep;
+  int n_ep;
+  int ep_cap;
+  int32_t next_buf_tag;  /* auto-incrementing tag for unique registry BUFFERs */
 };
 
 PolyCtx *poly_ctx_new(void) {
@@ -187,14 +197,23 @@ PolyCtx *poly_ctx_new(void) {
   ctx->cse = poly_map_new(256);
   ctx->kernel_cache = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
-  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache) {
+  ctx->name_map = poly_map_new(16);
+  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->kernel_cache) poly_map_destroy(ctx->kernel_cache);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
+    if (ctx->name_map) poly_map_destroy(ctx->name_map);
     free(ctx);
     return NULL;
   }
+  ctx->entries = NULL;
+  ctx->n_entries = 0;
+  ctx->entries_cap = 0;
+  ctx->ep = NULL;
+  ctx->n_ep = 0;
+  ctx->ep_cap = 0;
+  ctx->next_buf_tag = 1;  /* start at 1; tag=0 is the default (untagged) */
   return ctx;
 }
 
@@ -213,7 +232,10 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
   poly_map_destroy(ctx->shape_cache);  /* entries are arena-owned, no per-entry free */
+  poly_map_destroy(ctx->name_map);     /* entries are arena-owned */
   poly_map_destroy(ctx->cse);
+  free(ctx->entries);                  /* array of ptrs, entries themselves arena-owned */
+  free(ctx->ep);                       /* ep names are arena-owned */
   poly_arena_destroy(ctx->arena);
   free(ctx);
 }
@@ -517,4 +539,247 @@ char *poly_graph_str(PolyUOp *root) {
   /* Simple: just print the root node for now */
   /* A full graph print would need toposort, but that needs a ctx */
   return poly_uop_str(root);
+}
+
+/* ── Named buffer registry ──────────────────────────────────────────── */
+
+#include <stdarg.h>
+
+static uint32_t reg_str_hash(const char *s) {
+  uint32_t h = 2166136261u;
+  for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+  return h;
+}
+
+static bool reg_str_eq(const void *a, const void *b) {
+  return strcmp((const char *)a, (const char *)b) == 0;
+}
+
+static char *arena_strdup(PolyArena *a, const char *s) {
+  size_t len = strlen(s) + 1;
+  char *p = poly_arena_alloc(a, len, 1);
+  if (p) memcpy(p, s, len);
+  return p;
+}
+
+static char *arena_vsprintf(PolyArena *a, const char *fmt, va_list ap) {
+  va_list ap2;
+  va_copy(ap2, ap);
+  int len = vsnprintf(NULL, 0, fmt, ap2);
+  va_end(ap2);
+  if (len < 0) return NULL;
+  char *p = poly_arena_alloc(a, (size_t)len + 1, 1);
+  if (p) vsnprintf(p, (size_t)len + 1, fmt, ap);
+  return p;
+}
+
+/* Internal: grow the entries array */
+static int reg_grow_entries(PolyCtx *ctx) {
+  int new_cap = ctx->entries_cap ? ctx->entries_cap * 2 : 16;
+  PolyRegEntry **p = realloc(ctx->entries, (size_t)new_cap * sizeof(PolyRegEntry *));
+  if (!p) return -1;
+  ctx->entries = p;
+  ctx->entries_cap = new_cap;
+  return 0;
+}
+
+/* Internal: register a named buffer with given role */
+static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
+                                const int64_t *shape, int ndim, const char *name) {
+  if (!ctx || !name || ndim < 0 || ndim > 8) return NULL;
+
+  /* Check for re-registration */
+  uint32_t h = reg_str_hash(name);
+  PolyRegEntry *existing = poly_map_get(ctx->name_map, h, name, reg_str_eq);
+  if (existing) {
+    /* Validate dtype: compare scalar type (strip pointer wrapper) */
+    PolyDType existing_scalar = poly_dtype_scalar(existing->buffer->dtype);
+    if (existing_scalar.priority != dt.priority || existing_scalar.bitsize != dt.bitsize) {
+      fprintf(stderr, "poly_register: '%s' already registered with different dtype\n", name);
+      return NULL;
+    }
+    /* Validate shape */
+    if (existing->ndim != ndim) {
+      fprintf(stderr, "poly_register: '%s' already registered with different ndim (%d vs %d)\n",
+              name, existing->ndim, ndim);
+      return NULL;
+    }
+    for (int i = 0; i < ndim; i++) {
+      if (existing->shape[i] != shape[i]) {
+        fprintf(stderr, "poly_register: '%s' already registered with different shape\n", name);
+        return NULL;
+      }
+    }
+    return existing->buffer;
+  }
+
+  /* Compute numel */
+  int64_t numel = 1;
+  for (int i = 0; i < ndim; i++) numel *= shape[i];
+
+  /* Create BUFFER UOp with unique tag to avoid CSE dedup */
+  PolyDType ptr_dt = poly_dtype_ptr(dt, numel, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop_tagged(ctx, POLY_OP_BUFFER, ptr_dt, NULL, 0,
+                                  poly_arg_int(numel), ctx->next_buf_tag++);
+
+  /* Arena-alloc entry */
+  PolyRegEntry *entry = poly_arena_alloc(ctx->arena, sizeof(PolyRegEntry), _Alignof(PolyRegEntry));
+  if (!entry) return NULL;
+  entry->name = arena_strdup(ctx->arena, name);
+  entry->role = role;
+  entry->buffer = buf;
+  entry->ndim = ndim;
+  entry->is_alias = false;
+  for (int i = 0; i < ndim; i++) entry->shape[i] = shape[i];
+
+  /* Append to entries array */
+  if (ctx->n_entries >= ctx->entries_cap && reg_grow_entries(ctx) < 0) return NULL;
+  ctx->entries[ctx->n_entries++] = entry;
+
+  /* Insert into name map */
+  poly_map_set(ctx->name_map, h, entry->name, entry, reg_str_eq);
+
+  return buf;
+}
+
+/* Public registration wrappers */
+
+PolyUOp *poly_param(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                    const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char *name = arena_vsprintf(ctx->arena, fmt, ap);
+  va_end(ap);
+  if (!name) return NULL;
+  return register_named(ctx, POLY_ROLE_PARAM, dt, shape, ndim, name);
+}
+
+PolyUOp *poly_input(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                    const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char *name = arena_vsprintf(ctx->arena, fmt, ap);
+  va_end(ap);
+  if (!name) return NULL;
+  return register_named(ctx, POLY_ROLE_INPUT, dt, shape, ndim, name);
+}
+
+PolyUOp *poly_output(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                     const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char *name = arena_vsprintf(ctx->arena, fmt, ap);
+  va_end(ap);
+  if (!name) return NULL;
+  return register_named(ctx, POLY_ROLE_OUTPUT, dt, shape, ndim, name);
+}
+
+PolyUOp *poly_target(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                     const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char *name = arena_vsprintf(ctx->arena, fmt, ap);
+  va_end(ap);
+  if (!name) return NULL;
+  return register_named(ctx, POLY_ROLE_TARGET, dt, shape, ndim, name);
+}
+
+PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
+                  const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  char *name = arena_vsprintf(ctx->arena, fmt, ap);
+  va_end(ap);
+  if (!name) return NULL;
+  return register_named(ctx, POLY_ROLE_AUX, dt, shape, ndim, name);
+}
+
+/* Alias */
+
+int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name) {
+  if (!ctx || !alias_name || !existing_name) return -1;
+
+  uint32_t eh = reg_str_hash(existing_name);
+  PolyRegEntry *existing = poly_map_get(ctx->name_map, eh, existing_name, reg_str_eq);
+  if (!existing) return -1;
+
+  uint32_t ah = reg_str_hash(alias_name);
+  PolyRegEntry *check = poly_map_get(ctx->name_map, ah, alias_name, reg_str_eq);
+  if (check) {
+    return (check->buffer == existing->buffer) ? 0 : -1;
+  }
+
+  PolyRegEntry *entry = poly_arena_alloc(ctx->arena, sizeof(PolyRegEntry), _Alignof(PolyRegEntry));
+  if (!entry) return -1;
+  entry->name = arena_strdup(ctx->arena, alias_name);
+  entry->role = existing->role;
+  entry->buffer = existing->buffer;
+  entry->ndim = existing->ndim;
+  entry->is_alias = true;
+  for (int i = 0; i < existing->ndim; i++) entry->shape[i] = existing->shape[i];
+
+  if (ctx->n_entries >= ctx->entries_cap && reg_grow_entries(ctx) < 0) return -1;
+  ctx->entries[ctx->n_entries++] = entry;
+  poly_map_set(ctx->name_map, ah, entry->name, entry, reg_str_eq);
+  return 0;
+}
+
+/* Lookup */
+
+PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...) {
+  if (!ctx || !fmt) return NULL;
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  PolyRegEntry *entry = poly_map_get(ctx->name_map, reg_str_hash(buf), buf, reg_str_eq);
+  return entry ? entry->buffer : NULL;
+}
+
+const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name) {
+  if (!ctx || !name) return NULL;
+  return poly_map_get(ctx->name_map, reg_str_hash(name), name, reg_str_eq);
+}
+
+/* Enumeration */
+
+int poly_ctx_named_count(PolyCtx *ctx) {
+  return ctx ? ctx->n_entries : 0;
+}
+
+const PolyRegEntry *poly_ctx_named_entry(PolyCtx *ctx, int i) {
+  if (!ctx || i < 0 || i >= ctx->n_entries) return NULL;
+  return ctx->entries[i];
+}
+
+/* Entrypoints */
+
+int poly_register_entrypoint(PolyCtx *ctx, const char *name, PolyUOp *sink) {
+  if (!ctx || !name || !sink) return -1;
+  if (ctx->n_ep >= ctx->ep_cap) {
+    int new_cap = ctx->ep_cap ? ctx->ep_cap * 2 : 4;
+    void *p = realloc(ctx->ep, (size_t)new_cap * sizeof(ctx->ep[0]));
+    if (!p) return -1;
+    ctx->ep = p;
+    ctx->ep_cap = new_cap;
+  }
+  ctx->ep[ctx->n_ep].name = arena_strdup(ctx->arena, name);
+  ctx->ep[ctx->n_ep].sink = sink;
+  ctx->n_ep++;
+  return 0;
+}
+
+int poly_ctx_entrypoint_count(PolyCtx *ctx) {
+  return ctx ? ctx->n_ep : 0;
+}
+
+const char *poly_ctx_entrypoint_name(PolyCtx *ctx, int i) {
+  if (!ctx || i < 0 || i >= ctx->n_ep) return NULL;
+  return ctx->ep[i].name;
+}
+
+PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i) {
+  if (!ctx || i < 0 || i >= ctx->n_ep) return NULL;
+  return ctx->ep[i].sink;
 }
