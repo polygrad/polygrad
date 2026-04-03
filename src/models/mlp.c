@@ -7,10 +7,10 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "mlp.h"
-#include "../ir.h"
+#include "../nn.h"
+#include "../instance.h"
 #include "../frontend.h"
 #include "../scheduler.h"
-#include "../safetensors.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
@@ -120,190 +120,64 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
 
   if (batch_size < 1) batch_size = 1;
 
-  /* Build graph */
+  /* Build graph using named buffer registry */
   PolyCtx *ctx = poly_ctx_new();
   int n_linear = n_layers - 1;
-  int n_params = n_linear * (use_bias ? 2 : 1);
-
-  /* Allocate interface table entries */
-  int max_bufs = n_params + 4;  /* params + x + output + y + loss */
-  PolyIrBufEntry *bufs = calloc(max_bufs, sizeof(PolyIrBufEntry));
-  int n_bufs = 0;
-
-  /* Param init data (temporary, will be passed via weights) */
-  float **param_datas = calloc(n_params, sizeof(float *));
-  int64_t *param_numels = calloc(n_params, sizeof(int64_t));
-  char **param_names = calloc(n_params, sizeof(char *));
-  PolyUOp **param_buf_uops = calloc(n_params, sizeof(PolyUOp *));
-  int pi = 0;
-
-  /* Create weight and bias buffers */
-  for (int l = 0; l < n_linear; l++) {
-    int in_dim = layer_sizes[l];
-    int out_dim = layer_sizes[l + 1];
-
-    /* Weight: flat (out_dim * in_dim) */
-    int64_t w_numel = (int64_t)out_dim * in_dim;
-    char w_name[128];
-    snprintf(w_name, sizeof(w_name), "layers.%d.weight", l);
-
-    PolyUOp *w_buf = poly_buffer_f32(ctx, w_numel);
-    float *w_data = malloc(w_numel * sizeof(float));
-    poly_init_param_kaiming(seed, w_name, w_data, w_numel, (int64_t)in_dim);
-
-    param_buf_uops[pi] = w_buf;
-    param_datas[pi] = w_data;
-    param_numels[pi] = w_numel;
-    param_names[pi] = strdup(w_name);
-
-    bufs[n_bufs++] = (PolyIrBufEntry){
-      param_names[pi], POLY_IR_ROLE_PARAM, w_buf,
-      { out_dim, in_dim }, 2
-    };
-    pi++;
-
-    /* Bias: flat (out_dim) */
-    if (use_bias) {
-      int64_t b_numel = (int64_t)out_dim;
-      char b_name[128];
-      snprintf(b_name, sizeof(b_name), "layers.%d.bias", l);
-
-      PolyUOp *b_buf = poly_buffer_f32(ctx, b_numel);
-      float *b_data = calloc(b_numel, sizeof(float)); /* zero init */
-
-      param_buf_uops[pi] = b_buf;
-      param_datas[pi] = b_data;
-      param_numels[pi] = b_numel;
-      param_names[pi] = strdup(b_name);
-
-      bufs[n_bufs++] = (PolyIrBufEntry){
-        param_names[pi], POLY_IR_ROLE_PARAM, b_buf,
-        { out_dim }, 1
-      };
-      pi++;
-    }
-  }
-
-  /* Input buffer */
   int in_dim = layer_sizes[0];
   int out_dim = layer_sizes[n_layers - 1];
-  int64_t x_numel = (int64_t)batch_size * in_dim;
-  PolyUOp *x_buf = poly_buffer_f32(ctx, x_numel);
-  bufs[n_bufs++] = (PolyIrBufEntry){
-    "x", POLY_IR_ROLE_INPUT, x_buf, { batch_size, in_dim }, 2
-  };
 
-  /* Output buffer */
-  int64_t out_numel = (int64_t)batch_size * out_dim;
-  PolyUOp *out_buf = poly_buffer_f32(ctx, out_numel);
-  bufs[n_bufs++] = (PolyIrBufEntry){
-    "output", POLY_IR_ROLE_OUTPUT, out_buf, { batch_size, out_dim }, 2
-  };
+  /* Register I/O buffers */
+  int64_t x_shape[] = { batch_size, in_dim };
+  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, x_shape, 2, "x");
+  int64_t out_shape[] = { batch_size, out_dim };
+  PolyUOp *out_buf = poly_output(ctx, POLY_FLOAT32, out_shape, 2, "output");
 
-  /* Build forward graph: chain of linear + activation */
-  PolyUOp *x = x_buf;
-  pi = 0;
+  /* Build forward graph: chain of linear + activation using nn builders */
+  PolyUOp *x = poly_reshape(ctx, x_buf, x_shape, 2);
   for (int l = 0; l < n_linear; l++) {
-    int l_in = layer_sizes[l];
-    int l_out = layer_sizes[l + 1];
-
-    PolyUOp *w = param_buf_uops[pi++];
-
-    /* Reshape weight from flat to 2D: (out, in) */
-    int64_t w_2d[] = { l_out, l_in };
-    PolyUOp *w_2d_op = poly_reshape(ctx, w, w_2d, 2);
-
-    /* Transpose: (out, in) -> (in, out) */
-    int64_t perm[] = { 1, 0 };
-    PolyUOp *wt = poly_permute(ctx, w_2d_op, perm, 2);
-
-    /* Matmul: (batch, in) @ (in, out) -> (batch, out) */
-    int64_t x_shape[] = { batch_size, l_in };
-    int64_t wt_shape[] = { l_in, l_out };
-    int64_t dot_shape[8];
-    int dot_ndim;
-    x = poly_dot(ctx, x, x_shape, 2, wt, wt_shape, 2, dot_shape, &dot_ndim);
-
-    /* Add bias */
-    if (use_bias) {
-      PolyUOp *b = param_buf_uops[pi++];
-      int64_t b_reshape[] = { 1, l_out };
-      PolyUOp *br = poly_reshape(ctx, b, b_reshape, 2);
-      int64_t b_expand[] = { batch_size, l_out };
-      PolyUOp *be = poly_expand(ctx, br, b_expand, 2);
-      x = poly_alu2(ctx, POLY_OP_ADD, x, be);
-    }
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "layers.%d", l);
+    x = poly_linear(ctx, prefix, x, layer_sizes[l], layer_sizes[l + 1], use_bias);
 
     /* Activation (skip on last layer) */
-    if (l < n_linear - 1) {
+    if (l < n_linear - 1)
       x = apply_activation(ctx, x, activation);
-    }
   }
 
   /* Store forward result */
   PolyUOp *fwd_store = poly_store_val(ctx, out_buf, x);
   PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
-
-  /* Build entrypoints */
-  int max_eps = 2;
-  PolyIrEntrypoint eps[2];
-  int n_eps = 0;
-  eps[n_eps++] = (PolyIrEntrypoint){ "forward", fwd_sink };
+  poly_register_entrypoint(ctx, "forward", fwd_sink);
 
   /* Loss graph */
   int has_loss = (loss_type && (strcmp(loss_type, "mse") == 0 ||
                                 strcmp(loss_type, "cross_entropy") == 0));
   if (has_loss) {
-    /* Target buffer */
-    PolyUOp *y_buf = poly_buffer_f32(ctx, out_numel);
-    bufs[n_bufs++] = (PolyIrBufEntry){
-      "y", POLY_IR_ROLE_TARGET, y_buf, { batch_size, out_dim }, 2
-    };
-
-    /* Loss output buffer */
-    PolyUOp *loss_buf = poly_buffer_f32(ctx, 1);
-    bufs[n_bufs++] = (PolyIrBufEntry){
-      "loss", POLY_IR_ROLE_OUTPUT, loss_buf, { 1 }, 1
-    };
-
-    /* Wrap y_buf in reshape so the scheduler treats it as a shaped tensor.
-     * Raw BUFFER in ALU tree renders as pointer, not loaded value.
-     * Same fix as frontend.c:poly_cross_entropy (line 1199). */
     int64_t y_shape[] = { batch_size, out_dim };
-    PolyUOp *y = poly_reshape(ctx, y_buf, y_shape, 2);
+    PolyUOp *y_buf = poly_target(ctx, POLY_FLOAT32, y_shape, 2, "y");
+    PolyUOp *loss_buf = poly_output(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, "loss");
 
+    PolyUOp *y = poly_reshape(ctx, y_buf, y_shape, 2);
     PolyUOp *loss_val;
     if (strcmp(loss_type, "mse") == 0) {
-      /* MSE = mean((forward_output - y)^2) */
       PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, x,
                                   poly_alu1(ctx, POLY_OP_NEG, y));
       PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
-
-      /* Reduce over all dims: axis 1 (class) then axis 0 (batch) */
-      int64_t axes_class[] = { 1 };
-      PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes_class, 1);
-      int64_t axes_batch[] = { 0 };
-      PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes_batch, 1);
-
-      /* Scale by 1/(batch_size * out_dim) */
+      int64_t axes1[] = { 1 };
+      PolyUOp *sum0 = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes1, 1);
+      int64_t axes0[] = { 0 };
+      PolyUOp *sum1 = poly_reduce_axis(ctx, POLY_OP_ADD, sum0, axes0, 1);
       double scale = 1.0 / ((double)batch_size * out_dim);
       loss_val = poly_alu2(ctx, POLY_OP_MUL, sum1,
                            poly_const_float(ctx, scale));
     } else {
-      /* Cross-entropy = -mean(sum(target * log_softmax(x), axis=-1))
-       * target is one-hot: (batch_size, out_dim)
-       * log_softmax over axis 1 (class axis) */
       int64_t logits_shape[] = { batch_size, out_dim };
       PolyUOp *log_probs = poly_log_softmax(ctx, x, logits_shape, 2, 1);
-
-      /* -(target * log_probs) summed over class axis, then mean over batch */
       PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y, log_probs);
-      int64_t axes_class[] = { 1 };
-      PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes_class, 1);
-      int64_t axes_batch[] = { 0 };
-      PolyUOp *sum_batch = poly_reduce_axis(ctx, POLY_OP_ADD, sum_class, axes_batch, 1);
-
-      /* Scale by -1/batch_size */
+      int64_t axes1[] = { 1 };
+      PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes1, 1);
+      int64_t axes0[] = { 0 };
+      PolyUOp *sum_batch = poly_reduce_axis(ctx, POLY_OP_ADD, sum_class, axes0, 1);
       double scale = -1.0 / (double)batch_size;
       loss_val = poly_alu2(ctx, POLY_OP_MUL, sum_batch,
                            poly_const_float(ctx, scale));
@@ -311,57 +185,30 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
 
     PolyUOp *loss_store = poly_store_val(ctx, loss_buf, loss_val);
     PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
-    eps[n_eps++] = (PolyIrEntrypoint){ "loss", loss_sink };
+    poly_register_entrypoint(ctx, "loss", loss_sink);
   }
 
-  (void)max_eps;
+  /* Create instance from ctx registry */
+  PolyInstance *inst = poly_instance_from_ctx(ctx);
 
-  /* Export to IR */
-  PolyIrSpec spec = { ctx, bufs, n_bufs, eps, n_eps };
-  int ir_len = 0;
-  uint8_t *ir_data = poly_ir_export(&spec, &ir_len);
-
-  /* Encode weights as safetensors */
-  PolySafetensorEntry *st_entries = malloc(pi * sizeof(PolySafetensorEntry));
-  int n_st = 0;
-  for (int i = 0; i < pi; i++) {
-    /* Find the buf entry for this param to get its shape */
-    for (int j = 0; j < n_bufs; j++) {
-      if (strcmp(bufs[j].name, param_names[i]) == 0) {
-        st_entries[n_st].name = param_names[i];
-        st_entries[n_st].data = param_datas[i];
-        st_entries[n_st].shape = bufs[j].shape;
-        st_entries[n_st].ndim = bufs[j].ndim;
-        n_st++;
-        break;
-      }
+  /* Initialize weights (Kaiming) directly in instance buffers */
+  if (inst) {
+    for (int l = 0; l < n_linear; l++) {
+      int l_in = layer_sizes[l];
+      int l_out = layer_sizes[l + 1];
+      int64_t w_numel = (int64_t)l_out * l_in;
+      char name[128];
+      snprintf(name, sizeof(name), "layers.%d.weight", l);
+      float *w_data = poly_instance_buf_data_named(inst, name, NULL);
+      if (w_data) poly_init_param_kaiming(seed, name, w_data, w_numel, (int64_t)l_in);
+      /* Bias stays zero-initialized (calloc in instance_from_spec) */
     }
   }
-  int st_len = 0;
-  uint8_t *st_data = poly_safetensors_encode(st_entries, n_st, NULL, &st_len);
-  free(st_entries);
 
-  /* Create instance from IR + weights */
-  PolyInstance *inst = NULL;
-  if (ir_data && st_data) {
-    inst = poly_instance_from_ir(ir_data, ir_len, st_data, st_len);
-  }
+  /* Transfer ctx ownership to instance (builder-created ctx) */
+  if (inst) poly_instance_own_ctx(inst);
 
-  /* Cleanup */
-  for (int i = 0; i < pi; i++) {
-    free(param_datas[i]);
-    free(param_names[i]);
-  }
-  free(param_datas);
-  free(param_numels);
-  free(param_names);
-  free(param_buf_uops);
-  free(bufs);
   free(layer_sizes);
-  free(ir_data);
-  free(st_data);
-  poly_ctx_destroy(ctx);
   cJSON_Delete(root);
-
   return inst;
 }

@@ -1566,6 +1566,10 @@ PolyCtx *poly_instance_ctx(const PolyInstance *inst) {
   return inst ? inst->ctx : NULL;
 }
 
+void poly_instance_own_ctx(PolyInstance *inst) {
+  if (inst) inst->owns_ctx = true;
+}
+
 PolyUOp *poly_instance_get_buffer(const PolyInstance *inst, const char *name) {
   if (!inst || !name) return NULL;
   int idx = find_buf_by_name(inst, name);

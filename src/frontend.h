@@ -315,12 +315,6 @@ PolyUOp *poly_gather(PolyCtx *ctx,
                       PolyUOp *indices, const int64_t *idx_shape, int idx_ndim,
                       int64_t *out_shape, int *out_ndim);
 
-/* Layer normalization: (x - mean) / sqrt(var + eps).
- * Normalizes over the last axis. No affine (caller applies weight/bias). */
-PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
-                         const int64_t *shape, int ndim,
-                         int axis, double eps,
-                         int64_t *out_shape, int *out_ndim);
 
 /* Build causal attention mask for sequence length T.
  * Returns (T, T) mask: 0 where allowed, -1e9 where masked (upper triangle).
@@ -328,15 +322,6 @@ PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
 PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
                            int64_t *out_shape, int *out_ndim);
 
-/* Linear projection: x @ weight.T + bias.
- * x: (..., in_features), weight: (out_features, in_features)
- * bias: (out_features,) or NULL for no bias.
- * Returns: (..., out_features). */
-PolyUOp *poly_linear(PolyCtx *ctx,
-                      PolyUOp *x, const int64_t *x_shape, int x_ndim,
-                      PolyUOp *weight, const int64_t *w_shape, int w_ndim,
-                      PolyUOp *bias, const int64_t *bias_shape, int bias_ndim,
-                      int64_t *out_shape, int *out_ndim);
 
 /* Debug: print UOp info to stderr */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u);
@@ -434,9 +419,7 @@ PolyUOp *poly_var_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int
 PolyUOp *poly_softmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_log_softmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_dot_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
-PolyUOp *poly_layernorm_v2(PolyCtx *ctx, PolyUOp *x, int axis, double eps);
 PolyUOp *poly_cross_entropy_v2(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis);
-PolyUOp *poly_linear_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *bias);
 PolyUOp *poly_gather_v2(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
 PolyUOp *poly_tril_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_triu_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);

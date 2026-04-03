@@ -1045,31 +1045,25 @@ static napi_value napi_poly_linear(napi_env env, napi_callback_info info) {
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *x = get_external(env, argv[1]);
-  int64_t x_shape[MAX_DIMS];
-  int32_t x_ndim;
-  read_int64_array(env, argv[2], x_shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[3], &x_ndim);
+  /* argv[2], argv[3]: x_shape, x_ndim (ignored — shape on UOp) */
   PolyUOp *w = get_external(env, argv[4]);
-  int64_t w_shape[MAX_DIMS];
-  int32_t w_ndim;
-  read_int64_array(env, argv[5], w_shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[6], &w_ndim);
-  /* bias can be null (JS passes null -> napi_null) */
+  /* argv[5], argv[6]: w_shape, w_ndim (ignored) */
   napi_valuetype bias_type;
   napi_typeof(env, argv[7], &bias_type);
   PolyUOp *bias = NULL;
-  int64_t bias_shape[MAX_DIMS];
-  int32_t bias_ndim = 0;
-  if (bias_type == napi_external) {
-    bias = get_external(env, argv[7]);
-    read_int64_array(env, argv[8], bias_shape, MAX_DIMS);
-    napi_get_value_int32(env, argv[9], &bias_ndim);
-  }
+  if (bias_type == napi_external) bias = get_external(env, argv[7]);
+
+  /* dot + bias add (shape-on-UOp, no explicit shapes needed) */
+  PolyUOp *r = poly_dot_v2(ctx, x, w);
+  if (r && bias) r = poly_alu2(ctx, POLY_OP_ADD, r, bias);
+
   int64_t out_shape[MAX_DIMS];
   int out_ndim = 0;
-  PolyUOp *r = poly_linear(ctx, x, x_shape, x_ndim, w, w_shape, w_ndim,
-                            bias, bias_shape, bias_ndim,
-                            out_shape, &out_ndim);
+  if (r) {
+    PolyShape s = poly_uop_shape(ctx, r);
+    out_ndim = s.ndim;
+    if (s.ndim > 0) memcpy(out_shape, s.dims, s.ndim * sizeof(int64_t));
+  }
   return make_shape_result(env, r, out_shape, out_ndim);
 }
 

@@ -15,10 +15,10 @@
 #include "models.h"
 #include "../frontend.h"
 #include "../instance.h"
+#include "../nn.h"
 #include "../ir.h"
 #include "../safetensors.h"
 #include "../scheduler.h"
-#include "../nn.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
@@ -361,10 +361,7 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
 
   for (int i = 0; i < L; i++) {
     /* LayerNorm 1 + affine, realize */
-    int64_t ln_shape[8];
-    int ln_ndim;
-    PolyUOp *ln1 = poly_layernorm(ctx, h, h_shape, 3, -1, (double)eps,
-                                    ln_shape, &ln_ndim);
+    PolyUOp *ln1 = poly_layernorm_apply(ctx, h, NULL, NULL, -1, (double)eps);
     int64_t w1d[] = { 1, 1, D };
     PolyUOp *ln1_w_r = poly_reshape(ctx, lp[i].ln1_w, w1d, 3);
     PolyUOp *ln1_w_e = poly_expand(ctx, ln1_w_r, h_shape, 3);
@@ -460,10 +457,7 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     h = REALIZE(h);
 
     /* LayerNorm 2 + affine, realize */
-    int64_t ln2_shape[8];
-    int ln2_ndim;
-    PolyUOp *ln2 = poly_layernorm(ctx, h, h_shape, 3, -1, (double)eps,
-                                    ln2_shape, &ln2_ndim);
+    PolyUOp *ln2 = poly_layernorm_apply(ctx, h, NULL, NULL, -1, (double)eps);
     PolyUOp *ln2_w_r = poly_reshape(ctx, lp[i].ln2_w, w1d, 3);
     PolyUOp *ln2_w_e = poly_expand(ctx, ln2_w_r, h_shape, 3);
     PolyUOp *ln2_b_r = poly_reshape(ctx, lp[i].ln2_b, w1d, 3);
@@ -498,9 +492,7 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   }
 
   /* Final layer norm + affine, realize */
-  int64_t lnf_shape[8];
-  int lnf_ndim;
-  h = poly_layernorm(ctx, h, h_shape, 3, -1, (double)eps, lnf_shape, &lnf_ndim);
+  h = poly_layernorm_apply(ctx, h, NULL, NULL, -1, (double)eps);
   int64_t w1d_f[] = { 1, 1, D };
   PolyUOp *lnf_w_r = poly_reshape(ctx, ln_f_w, w1d_f, 3);
   PolyUOp *lnf_w_e = poly_expand(ctx, lnf_w_r, h_shape, 3);

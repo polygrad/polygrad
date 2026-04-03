@@ -578,9 +578,12 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       goto fail_nodes;
     }
 
-    /* Create UOp (with tag) -- poly_uop copies arg data into arena */
-    PolyUOp *u = poly_uop(ctx, (PolyOps)op_val, *dtype_table[dtype_idx],
-                           srcs, n_src, arg);
+    /* Create UOp -- restore tag to preserve BUFFER CSE-distinctness */
+    PolyUOp *u = (tag != 0)
+      ? poly_uop_tagged(ctx, (PolyOps)op_val, *dtype_table[dtype_idx],
+                         srcs, n_src, arg, tag)
+      : poly_uop(ctx, (PolyOps)op_val, *dtype_table[dtype_idx],
+                  srcs, n_src, arg);
 
     /* Free temporary malloc'd arg buffers (arena has its own copy now) */
     if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.vals)

@@ -14,6 +14,7 @@
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
 #include "../src/scheduler.h"
+#include "../src/nn.h"
 
 /* ── Helper: realize a UOp into a float array ─────────────────────────── */
 
@@ -222,7 +223,7 @@ TEST(pe, dot_v2_e2e) {
 TEST(pe, layernorm_v2_shape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
-  PolyUOp *r = poly_layernorm_v2(ctx, x, -1, 1e-5);
+  PolyUOp *r = poly_layernorm_apply(ctx, x, NULL, NULL, -1, 1e-5);
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);

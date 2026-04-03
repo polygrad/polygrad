@@ -3807,47 +3807,6 @@ PolyUOp *poly_gather(PolyCtx *ctx,
   return poly_reshape(ctx, gathered, out_shape, *out_ndim);
 }
 
-PolyUOp *poly_layernorm(PolyCtx *ctx, PolyUOp *x,
-                         const int64_t *shape, int ndim,
-                         int axis, double eps,
-                         int64_t *out_shape, int *out_ndim) {
-  if (!ctx || !x || ndim < 1) return NULL;
-  if (axis < 0) axis += ndim;
-  PolyUOp *x_view = reshape_logical_input(ctx, x, shape, ndim);
-  if (!x_view) return NULL;
-
-  /* mean = sum(x, axis) / N */
-  int64_t mean_shape[POLY_MAX_DIMS];
-  int mean_ndim;
-  PolyUOp *mean = poly_mean_reduce(ctx, x_view, shape, ndim, axis, 1,
-                                     mean_shape, &mean_ndim);
-
-  /* Expand mean back to original shape for broadcast */
-  PolyUOp *mean_exp = poly_expand(ctx, mean, (int64_t *)shape, ndim);
-
-  /* x - mean */
-  PolyUOp *centered = poly_alu2(ctx, POLY_OP_ADD, x_view,
-                                 poly_alu1(ctx, POLY_OP_NEG, mean_exp));
-
-  /* var = mean((x - mean)^2, axis) */
-  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, centered, centered);
-  int64_t var_shape[POLY_MAX_DIMS];
-  int var_ndim;
-  PolyUOp *var = poly_mean_reduce(ctx, sq, shape, ndim, axis, 1,
-                                    var_shape, &var_ndim);
-  PolyUOp *var_exp = poly_expand(ctx, var, (int64_t *)shape, ndim);
-
-  /* (x - mean) / sqrt(var + eps) */
-  PolyUOp *eps_c = cf(ctx, x, eps);
-  PolyUOp *denom = poly_alu1(ctx, POLY_OP_SQRT,
-                              poly_alu2(ctx, POLY_OP_ADD, var_exp, eps_c));
-  PolyUOp *result = poly_alu2(ctx, POLY_OP_MUL, centered,
-                               poly_alu1(ctx, POLY_OP_RECIPROCAL, denom));
-
-  memcpy(out_shape, shape, ndim * sizeof(int64_t));
-  *out_ndim = ndim;
-  return result;
-}
 
 PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
                            int64_t *out_shape, int *out_ndim) {
@@ -3879,39 +3838,6 @@ PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
   return result;
 }
 
-PolyUOp *poly_linear(PolyCtx *ctx,
-                      PolyUOp *x, const int64_t *x_shape, int x_ndim,
-                      PolyUOp *weight, const int64_t *w_shape, int w_ndim,
-                      PolyUOp *bias, const int64_t *bias_shape, int bias_ndim,
-                      int64_t *out_shape, int *out_ndim) {
-  if (!ctx || !x || !weight || x_ndim < 1 || w_ndim != 2) return NULL;
-
-  /* weight.T: (out_features, in_features) -> (in_features, out_features) */
-  int64_t perm[] = { 1, 0 };
-  PolyUOp *wt = poly_permute(ctx, weight, perm, 2);
-  int64_t wt_shape[] = { w_shape[1], w_shape[0] };
-
-  /* x @ weight.T */
-  int64_t dot_shape[POLY_MAX_DIMS];
-  int dot_ndim;
-  PolyUOp *result = poly_dot(ctx, x, x_shape, x_ndim, wt, wt_shape, 2,
-                              dot_shape, &dot_ndim);
-
-  /* + bias */
-  if (bias) {
-    /* Reshape bias to match output: (1,...,1, out_features) */
-    int64_t b_shape[POLY_MAX_DIMS];
-    for (int i = 0; i < dot_ndim - 1; i++) b_shape[i] = 1;
-    b_shape[dot_ndim - 1] = w_shape[0];
-    PolyUOp *b_r = poly_reshape(ctx, bias, b_shape, dot_ndim);
-    PolyUOp *b_exp = poly_expand(ctx, b_r, dot_shape, dot_ndim);
-    result = poly_alu2(ctx, POLY_OP_ADD, result, b_exp);
-  }
-
-  memcpy(out_shape, dot_shape, dot_ndim * sizeof(int64_t));
-  *out_ndim = dot_ndim;
-  return result;
-}
 
 /* Debug helper — print UOp info */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u) {
@@ -4013,13 +3939,6 @@ PolyUOp *poly_dot_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   return poly_dot(ctx, x, x_shape, x_ndim, w, w_shape, w_ndim, out_shape, &out_ndim);
 }
 
-PolyUOp *poly_layernorm_v2(PolyCtx *ctx, PolyUOp *x, int axis, double eps) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
-  ndim = uop_shape(ctx, x, shape);
-  if (ndim < 0) return NULL;
-  int64_t out_shape[POLY_MAX_DIMS]; int out_ndim;
-  return poly_layernorm(ctx, x, shape, ndim, axis, eps, out_shape, &out_ndim);
-}
 
 PolyUOp *poly_cross_entropy_v2(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis) {
   int64_t l_shape[POLY_MAX_DIMS], t_shape[POLY_MAX_DIMS]; int l_ndim, t_ndim;
@@ -4030,17 +3949,6 @@ PolyUOp *poly_cross_entropy_v2(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, i
   return poly_cross_entropy(ctx, logits, l_shape, l_ndim, target, t_shape, t_ndim, axis, out_shape, &out_ndim);
 }
 
-PolyUOp *poly_linear_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *bias) {
-  int64_t x_shape[POLY_MAX_DIMS], w_shape[POLY_MAX_DIMS]; int x_ndim, w_ndim;
-  x_ndim = uop_shape(ctx, x, x_shape);
-  w_ndim = uop_shape(ctx, w, w_shape);
-  if (x_ndim < 0 || w_ndim < 0) return NULL;
-  int64_t b_shape[POLY_MAX_DIMS] = {0}; int b_ndim = 0;
-  if (bias) { b_ndim = uop_shape(ctx, bias, b_shape); }
-  int64_t out_shape[POLY_MAX_DIMS]; int out_ndim;
-  return poly_linear(ctx, x, x_shape, x_ndim, w, w_shape, w_ndim,
-                     bias, b_shape, b_ndim, out_shape, &out_ndim);
-}
 
 PolyUOp *poly_gather_v2(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   int64_t t_shape[POLY_MAX_DIMS], i_shape[POLY_MAX_DIMS]; int t_ndim, i_ndim;

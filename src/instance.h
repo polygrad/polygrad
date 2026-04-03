@@ -160,6 +160,11 @@ int poly_instance_set_optimizer(PolyInstance *inst, int kind,
 /* Return the ctx backing this instance. */
 PolyCtx *poly_instance_ctx(const PolyInstance *inst);
 
+/* Transfer ctx ownership to the instance. After this call, the instance
+ * will destroy the ctx when freed. Use for model builders that create
+ * their own ctx internally. */
+void poly_instance_own_ctx(PolyInstance *inst);
+
 /* Lookup a BUFFER UOp by named buffer name. Returns NULL if not found. */
 PolyUOp *poly_instance_get_buffer(const PolyInstance *inst, const char *name);
 

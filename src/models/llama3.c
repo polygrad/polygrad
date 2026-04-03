@@ -1,5 +1,4 @@
 #include "models.h"
-#include "../nn.h"
 #include <stdlib.h>
 #include <string.h>
 

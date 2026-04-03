@@ -8,6 +8,7 @@
 #include "test_harness.h"
 #include "../src/safetensors.h"
 #include "../src/models/models.h"
+#include "../src/nn.h"
 #include "../src/frontend.h"
 #include "../src/scheduler.h"
 #include <string.h>
@@ -404,18 +405,15 @@ TEST(hf, poly_gather_2d_indices) {
 TEST(hf, poly_layernorm_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
-  int64_t shape[] = { 2, 3, 4 };
-  PolyUOp *x = poly_buffer_f32(ctx, 24);
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 24), (int64_t[]){2, 3, 4}, 3);
 
-  int64_t out_shape[8];
-  int out_ndim;
-  PolyUOp *result = poly_layernorm(ctx, x, shape, 3, -1, 1e-5,
-                                     out_shape, &out_ndim);
+  PolyUOp *result = poly_layernorm_apply(ctx, x, NULL, NULL, -1, 1e-5);
   ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(out_ndim, 3);
-  ASSERT_INT_EQ(out_shape[0], 2);
-  ASSERT_INT_EQ(out_shape[1], 3);
-  ASSERT_INT_EQ(out_shape[2], 4);
+  PolyShape s = poly_uop_shape(ctx, result);
+  ASSERT_INT_EQ(s.ndim, 3);
+  ASSERT_INT_EQ(s.dims[0], 2);
+  ASSERT_INT_EQ(s.dims[1], 3);
+  ASSERT_INT_EQ(s.dims[2], 4);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -425,22 +423,18 @@ TEST(hf, poly_linear_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* x: (2, 3, 4), weight: (8, 4), bias: (8,) */
-  int64_t x_shape[] = { 2, 3, 4 };
-  PolyUOp *x = poly_buffer_f32(ctx, 24);
-  int64_t w_shape[] = { 8, 4 };
-  PolyUOp *w = poly_buffer_f32(ctx, 32);
-  int64_t b_shape[] = { 8 };
-  PolyUOp *b = poly_buffer_f32(ctx, 8);
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 24), (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *w = poly_reshape(ctx, poly_buffer_f32(ctx, 32), (int64_t[]){8, 4}, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_buffer_f32(ctx, 8), (int64_t[]){8}, 1);
 
-  int64_t out_shape[8];
-  int out_ndim;
-  PolyUOp *result = poly_linear(ctx, x, x_shape, 3, w, w_shape, 2,
-                                  b, b_shape, 1, out_shape, &out_ndim);
+  PolyUOp *result = poly_linear_apply(ctx, x, w, b);
   ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(out_ndim, 3);
-  ASSERT_INT_EQ(out_shape[0], 2);
-  ASSERT_INT_EQ(out_shape[1], 3);
-  ASSERT_INT_EQ(out_shape[2], 8);  /* out_features */
+
+  PolyShape s = poly_uop_shape(ctx, result);
+  ASSERT_INT_EQ(s.ndim, 3);
+  ASSERT_INT_EQ(s.dims[0], 2);
+  ASSERT_INT_EQ(s.dims[1], 3);
+  ASSERT_INT_EQ(s.dims[2], 8);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -449,19 +443,16 @@ TEST(hf, poly_linear_shape) {
 TEST(hf, poly_linear_no_bias) {
   PolyCtx *ctx = poly_ctx_new();
 
-  int64_t x_shape[] = { 4, 8 };
-  PolyUOp *x = poly_buffer_f32(ctx, 32);
-  int64_t w_shape[] = { 16, 8 };
-  PolyUOp *w = poly_buffer_f32(ctx, 128);
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, 32), (int64_t[]){4, 8}, 2);
+  PolyUOp *w = poly_reshape(ctx, poly_buffer_f32(ctx, 128), (int64_t[]){16, 8}, 2);
 
-  int64_t out_shape[8];
-  int out_ndim;
-  PolyUOp *result = poly_linear(ctx, x, x_shape, 2, w, w_shape, 2,
-                                  NULL, NULL, 0, out_shape, &out_ndim);
+  PolyUOp *result = poly_linear_apply(ctx, x, w, NULL);
   ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(out_ndim, 2);
-  ASSERT_INT_EQ(out_shape[0], 4);
-  ASSERT_INT_EQ(out_shape[1], 16);
+
+  PolyShape s = poly_uop_shape(ctx, result);
+  ASSERT_INT_EQ(s.ndim, 2);
+  ASSERT_INT_EQ(s.dims[0], 4);
+  ASSERT_INT_EQ(s.dims[1], 16);
 
   poly_ctx_destroy(ctx);
   PASS();

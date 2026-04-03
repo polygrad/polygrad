@@ -24,7 +24,7 @@ TEST(nn, nn_linear_registers_params) {
   PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 2, "x");
   PolyUOp *x = poly_reshape(ctx, x_buf, xs, 2);
 
-  PolyUOp *out = poly_nn_linear(ctx, "fc1", x, 4, 8, true);
+  PolyUOp *out = poly_linear(ctx, "fc1", x, 4, 8, true);
   ASSERT_TRUE(out != NULL);
 
   /* Check registered params */
@@ -50,7 +50,7 @@ TEST(nn, nn_linear_no_bias) {
   int64_t xs[] = {1, 4};
   PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  PolyUOp *out = poly_nn_linear(ctx, "fc", x, 4, 2, false);
+  PolyUOp *out = poly_linear(ctx, "fc", x, 4, 2, false);
   ASSERT_TRUE(out != NULL);
   ASSERT_TRUE(poly_ctx_get(ctx, "fc.weight") != NULL);
   ASSERT_EQ(poly_ctx_get(ctx, "fc.bias"), NULL);
@@ -65,9 +65,9 @@ TEST(nn, nn_linear_idempotent_reuse) {
   PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
   /* Two calls with same prefix reuse the same weight buffers */
-  poly_nn_linear(ctx, "shared", x, 4, 8, true);
+  poly_linear(ctx, "shared", x, 4, 8, true);
   int count_after_first = poly_ctx_named_count(ctx);
-  poly_nn_linear(ctx, "shared", x, 4, 8, true);
+  poly_linear(ctx, "shared", x, 4, 8, true);
   ASSERT_INT_EQ(poly_ctx_named_count(ctx), count_after_first);
 
   poly_ctx_destroy(ctx);
@@ -82,7 +82,7 @@ TEST(nn, nn_linear_e2e) {
   int64_t os[] = {1, 3};
   PolyUOp *o_buf = poly_output(ctx, POLY_FLOAT32, os, 2, "output");
 
-  PolyUOp *out = poly_nn_linear(ctx, "fc", x, 2, 3, true);
+  PolyUOp *out = poly_linear(ctx, "fc", x, 2, 3, true);
   ASSERT_TRUE(out != NULL);
 
   PolyUOp *store = poly_store_val(ctx, o_buf, out);
@@ -120,7 +120,7 @@ TEST(nn, nn_layernorm_registers_params) {
   int64_t xs[] = {2, 4};
   PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  PolyUOp *out = poly_nn_layernorm(ctx, "ln", x, 4, 1e-5);
+  PolyUOp *out = poly_layernorm(ctx, "ln", x, 4, 1e-5);
   ASSERT_TRUE(out != NULL);
   ASSERT_TRUE(poly_ctx_get(ctx, "ln.weight") != NULL);
   ASSERT_TRUE(poly_ctx_get(ctx, "ln.bias") != NULL);
@@ -134,7 +134,7 @@ TEST(nn, nn_rmsnorm_registers_params) {
   int64_t xs[] = {2, 4};
   PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
 
-  PolyUOp *out = poly_nn_rmsnorm(ctx, "rms", x, 4, 1e-6);
+  PolyUOp *out = poly_rmsnorm(ctx, "rms", x, 4, 1e-6);
   ASSERT_TRUE(out != NULL);
   ASSERT_TRUE(poly_ctx_get(ctx, "rms.weight") != NULL);
 
@@ -147,7 +147,7 @@ TEST(nn, nn_embedding_registers_params) {
   int64_t ts[] = {3};
   PolyUOp *tok = poly_reshape(ctx, poly_input(ctx, POLY_INT32, ts, 1, "tokens"), ts, 1);
 
-  PolyUOp *out = poly_nn_embedding(ctx, "emb", tok, 100, 64);
+  PolyUOp *out = poly_embedding(ctx, "emb", tok, 100, 64);
   ASSERT_TRUE(out != NULL);
 
   const PolyRegEntry *we = poly_ctx_get_entry(ctx, "emb.weight");
@@ -394,38 +394,40 @@ TEST(nn, log_softmax_non_last_axis_flat_buffer) {
   PASS();
 }
 
-TEST(nn, layernorm_non_last_axis_flat_buffer) {
+TEST(nn, layernorm_non_last_axis) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = poly_buffer_f32(ctx, 12);
-  int64_t out_shape[POLY_MAX_DIMS];
-  int out_ndim = -1;
+  int64_t xs[] = {2, 3, 2};
+  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 3, "x");
+  PolyUOp *x = poly_reshape(ctx, x_buf, xs, 3);
 
-  PolyUOp *y = poly_layernorm(ctx, x, (int64_t[]){2, 3, 2}, 3, 1, 1e-5,
-                              out_shape, &out_ndim);
+  PolyUOp *y = poly_layernorm_apply(ctx, x, NULL, NULL, 1, 1e-5);
   ASSERT_NOT_NULL(y);
-  ASSERT_INT_EQ(out_ndim, 3);
-  ASSERT_INT_EQ(out_shape[0], 2);
-  ASSERT_INT_EQ(out_shape[1], 3);
-  ASSERT_INT_EQ(out_shape[2], 2);
+  PolyShape s = poly_uop_shape(ctx, y);
+  ASSERT_INT_EQ(s.ndim, 3);
+  ASSERT_INT_EQ(s.dims[0], 2);
+  ASSERT_INT_EQ(s.dims[1], 3);
+  ASSERT_INT_EQ(s.dims[2], 2);
 
-  PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
+  int64_t os[] = {12};
+  PolyUOp *out_buf = poly_output(ctx, POLY_FLOAT32, os, 1, "output");
   PolyUOp *store = poly_store_val(ctx, out_buf, y);
   PolyUOp *sink = poly_sink1(ctx, store);
+  poly_register_entrypoint(ctx, "forward", sink);
 
-  float x_data[] = {
-    0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0
-  };
-  float out_data[12] = {0};
-  PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(x, x_data ),
-    POLY_BIND_HOST(out_buf, out_data ),
-  };
+  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  ASSERT_NOT_NULL(inst);
 
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  /* All-zero input → layernorm output is 0/0 → NaN, but 0-0=0 so var=0.
+   * Actually: (0-0)/sqrt(0+eps) = 0. Output should be 0. */
+  float x_data[12] = {0};
+  PolyIOBinding io[] = { { "x", x_data } };
+  int ret = poly_instance_call(inst, "forward", io, 1);
   ASSERT_INT_EQ(ret, 0);
+
+  float *out_data = poly_instance_buf_data_named(inst, "output", NULL);
   for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], 0.0f, 1e-5f);
 
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
