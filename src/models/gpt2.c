@@ -60,23 +60,22 @@ static void buflist_add(BufList *bl, const char *name, uint8_t role,
 
 /* HF GPT-2 uses Conv1D convention: y = x @ weight + bias
  * Weight stored as (in_features, out_features), NOT PyTorch (out, in).
- * poly_linear() expects PyTorch convention, so we use poly_dot directly. */
+ * poly_linear() expects PyTorch convention, so we use poly_dot directly.
+ * UOps carry their shapes (shape-on-UOp), so no explicit shapes needed. */
 static PolyUOp *hf_linear(PolyCtx *ctx,
-                            PolyUOp *x, const int64_t *x_shape, int x_ndim,
-                            PolyUOp *weight, const int64_t *w_shape, int w_ndim,
-                            PolyUOp *bias, int64_t bias_features,
-                            int64_t *out_shape, int *out_ndim) {
-  /* x @ weight (no transpose) */
-  PolyUOp *result = poly_dot(ctx, x, x_shape, x_ndim, weight, w_shape, w_ndim,
-                               out_shape, out_ndim);
+                            PolyUOp *x, PolyUOp *weight,
+                            PolyUOp *bias, int64_t bias_features) {
+  /* x @ weight (no transpose) -- shapes read from UOps */
+  PolyUOp *result = poly_dot(ctx, x, weight);
 
   /* + bias: reshape to (1,...,1, out_features) and broadcast */
   if (bias) {
+    PolyShape rs = poly_uop_shape(ctx, result);
     int64_t b_shape[POLY_MAX_DIMS];
-    for (int i = 0; i < *out_ndim - 1; i++) b_shape[i] = 1;
-    b_shape[*out_ndim - 1] = bias_features;
-    PolyUOp *b_r = poly_reshape(ctx, bias, b_shape, *out_ndim);
-    PolyUOp *b_exp = poly_expand(ctx, b_r, out_shape, *out_ndim);
+    for (int i = 0; i < rs.ndim - 1; i++) b_shape[i] = 1;
+    b_shape[rs.ndim - 1] = bias_features;
+    PolyUOp *b_r = poly_reshape(ctx, bias, b_shape, rs.ndim);
+    PolyUOp *b_exp = poly_expand(ctx, b_r, rs.dims, rs.ndim);
     result = poly_alu2(ctx, POLY_OP_ADD, result, b_exp);
   }
   return result;
@@ -372,12 +371,8 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     ln1 = REALIZE(ln1);
 
     /* QKV projection: (B, T, D) @ (D, 3D) + bias -> (B, T, 3D), realize */
-    int64_t qkv_shape[8];
-    int qkv_ndim;
-    PolyUOp *qkv = hf_linear(ctx, ln1, h_shape, 3,
-                               lp[i].c_attn_w, (int64_t[]){ D, 3 * D }, 2,
-                               lp[i].c_attn_b, 3 * D,
-                               qkv_shape, &qkv_ndim);
+    PolyUOp *attn_w = poly_reshape(ctx, lp[i].c_attn_w, (int64_t[]){ D, 3 * D }, 2);
+    PolyUOp *qkv = hf_linear(ctx, ln1, attn_w, lp[i].c_attn_b, 3 * D);
     qkv = REALIZE(qkv);
 
     /* Split Q, K, V via shrink, realize each */
@@ -400,16 +395,11 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     v = poly_permute(ctx, v, perm_0213, 4);
 
     /* K transpose: (B, H, T, head_dim) -> (B, H, head_dim, T) */
-    int64_t q_4d[] = { B, H, T, head_dim };
     int64_t perm_0132[] = { 0, 1, 3, 2 };
     PolyUOp *kt = poly_permute(ctx, k, perm_0132, 4);
-    int64_t kt_shape[] = { B, H, head_dim, T };
 
     /* scores = Q @ K.T, realize */
-    int64_t scores_shape[8];
-    int scores_ndim;
-    PolyUOp *scores = poly_dot(ctx, q, q_4d, 4, kt, kt_shape, 4,
-                                scores_shape, &scores_ndim);
+    PolyUOp *scores = poly_dot(ctx, q, kt);
     scores = REALIZE(scores);
 
     /* Scale by 1/sqrt(head_dim) */
@@ -424,17 +414,11 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     scores = REALIZE(scores);
 
     /* Softmax, realize */
-    int64_t scores_4d[] = { B, H, T, T };
-    PolyUOp *attn = poly_softmax(ctx, scores, scores_4d, 4, -1);
+    PolyUOp *attn = poly_softmax(ctx, scores, -1);
     attn = REALIZE(attn);
 
     /* Attention @ V, realize */
-    int64_t attn_4d[] = { B, H, T, T };
-    int64_t v_4d[] = { B, H, T, head_dim };
-    int64_t attn_out_shape[8];
-    int attn_out_ndim;
-    PolyUOp *attn_out = poly_dot(ctx, attn, attn_4d, 4, v, v_4d, 4,
-                                   attn_out_shape, &attn_out_ndim);
+    PolyUOp *attn_out = poly_dot(ctx, attn, v);
     attn_out = REALIZE(attn_out);
 
     /* Merge heads: (B, H, T, head_dim) -> (B, T, H, head_dim) -> (B, T, D) */
@@ -444,12 +428,8 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     attn_out = poly_reshape(ctx, attn_out, merge_shape, 3);
 
     /* Output projection, realize */
-    int64_t proj_out_shape[8];
-    int proj_out_ndim;
-    attn_out = hf_linear(ctx, attn_out, merge_shape, 3,
-                          lp[i].c_proj_w, (int64_t[]){ D, D }, 2,
-                          lp[i].c_proj_b, D,
-                          proj_out_shape, &proj_out_ndim);
+    PolyUOp *c_proj_w = poly_reshape(ctx, lp[i].c_proj_w, (int64_t[]){ D, D }, 2);
+    attn_out = hf_linear(ctx, attn_out, c_proj_w, lp[i].c_proj_b, D);
     attn_out = REALIZE(attn_out);
 
     /* Residual: h = h + attn_out, realize */
@@ -467,23 +447,14 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     ln2 = REALIZE(ln2);
 
     /* FFN: fc, realize, gelu, realize, proj, realize */
-    int64_t fc_out_shape[8];
-    int fc_out_ndim;
-    PolyUOp *ffn = hf_linear(ctx, ln2, h_shape, 3,
-                              lp[i].fc_w, (int64_t[]){ D, 4 * D }, 2,
-                              lp[i].fc_b, 4 * D,
-                              fc_out_shape, &fc_out_ndim);
+    PolyUOp *fc_w = poly_reshape(ctx, lp[i].fc_w, (int64_t[]){ D, 4 * D }, 2);
+    PolyUOp *ffn = hf_linear(ctx, ln2, fc_w, lp[i].fc_b, 4 * D);
     ffn = REALIZE(ffn);
     ffn = poly_gelu(ctx, ffn);
     ffn = REALIZE(ffn);
 
-    int64_t ffn_shape[] = { B, T, 4 * D };
-    int64_t proj_shape[8];
-    int proj_ndim;
-    ffn = hf_linear(ctx, ffn, ffn_shape, 3,
-                     lp[i].proj_w, (int64_t[]){ 4 * D, D }, 2,
-                     lp[i].proj_b, D,
-                     proj_shape, &proj_ndim);
+    PolyUOp *proj_w = poly_reshape(ctx, lp[i].proj_w, (int64_t[]){ 4 * D, D }, 2);
+    ffn = hf_linear(ctx, ffn, proj_w, lp[i].proj_b, D);
     ffn = REALIZE(ffn);
 
     /* Residual: h = h + ffn, realize */
@@ -503,15 +474,11 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   h = REALIZE(h);
 
   /* LM head: h @ wte.T -> logits (B, T, V) -- weight tying */
-  int64_t wte_T_shape[] = { D, V };
   int64_t perm_01[] = { 1, 0 };
   PolyUOp *wte_2d = poly_reshape(ctx, wte, wte_shape, 2);
   PolyUOp *wte_T = poly_permute(ctx, wte_2d, perm_01, 2);
 
-  int64_t logits_shape[8];
-  int logits_ndim;
-  PolyUOp *logits = poly_dot(ctx, h, h_shape, 3, wte_T, wte_T_shape, 2,
-                               logits_shape, &logits_ndim);
+  PolyUOp *logits = poly_dot(ctx, h, wte_T);
 
   /* Store logits -> output buffer */
   PolyUOp *fwd_store = poly_store_val(ctx, out_buf, logits);

@@ -251,60 +251,50 @@ def _declare_signatures(lib):
     lib.poly_full.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double]
 
     lib.poly_tril.restype = _ptr
-    lib.poly_tril.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+    lib.poly_tril.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_triu.restype = _ptr
-    lib.poly_triu.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+    lib.poly_triu.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_cholesky.restype = _ptr
-    lib.poly_cholesky.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+    lib.poly_cholesky.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_triangular_solve.restype = _ptr
     lib.poly_triangular_solve.argtypes = [
-        _ptr, _ptr, _i64p, ctypes.c_int,
-        _ptr, _i64p, ctypes.c_int,
+        _ptr, _ptr, _ptr,
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-        _i64p, _ip
     ]
 
-    # --- Shape-aware composed ops ---
+    # --- Shape-aware composed ops (shape read from UOp) ---
     lib.poly_sum_reduce.restype = _ptr
-    lib.poly_sum_reduce.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
-                                     ctypes.c_int, ctypes.c_int, _i64p, _ip]
+    lib.poly_sum_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
     lib.poly_max_reduce.restype = _ptr
-    lib.poly_max_reduce.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
-                                     ctypes.c_int, ctypes.c_int, _i64p, _ip]
+    lib.poly_max_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
     lib.poly_mean_reduce.restype = _ptr
-    lib.poly_mean_reduce.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
-                                      ctypes.c_int, ctypes.c_int, _i64p, _ip]
+    lib.poly_mean_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
     lib.poly_var_reduce.restype = _ptr
-    lib.poly_var_reduce.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
-                                     ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                     _i64p, _ip]
+    lib.poly_var_reduce.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 
     lib.poly_logsumexp.restype = _ptr
-    lib.poly_logsumexp.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
-                                    ctypes.c_int, ctypes.c_int, _i64p, _ip]
+    lib.poly_logsumexp.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
     lib.poly_dot.restype = _ptr
-    lib.poly_dot.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int,
-                              _ptr, _i64p, ctypes.c_int, _i64p, _ip]
+    lib.poly_dot.argtypes = [_ptr, _ptr, _ptr]
 
     lib.poly_cross_entropy.restype = _ptr
-    lib.poly_cross_entropy.argtypes = [
-        _ptr, _ptr, _i64p, ctypes.c_int,
-        _ptr, _i64p, ctypes.c_int,
-        ctypes.c_int, _i64p, _ip
-    ]
+    lib.poly_cross_entropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
 
     lib.poly_softmax.restype = _ptr
-    lib.poly_softmax.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+    lib.poly_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     lib.poly_log_softmax.restype = _ptr
-    lib.poly_log_softmax.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, ctypes.c_int]
+    lib.poly_log_softmax.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_gather.restype = _ptr
+    lib.poly_gather.argtypes = [_ptr, _ptr, _ptr]
 
     # --- ASSIGN ---
     lib.poly_assign.restype = _ptr
@@ -366,21 +356,15 @@ def _declare_signatures(lib):
     lib.poly_einsum.argtypes = [
         _ptr, ctypes.c_char_p,
         ctypes.POINTER(_ptr),
-        ctypes.POINTER(ctypes.POINTER(ctypes.c_int64)),
-        ctypes.POINTER(ctypes.c_int),
         ctypes.c_int,
-        ctypes.POINTER(ctypes.c_int64),
-        _ip,
     ]
 
     # --- Rearrange ---
     lib.poly_rearrange.restype = _ptr
     lib.poly_rearrange.argtypes = [
         _ptr, ctypes.c_char_p, _ptr,
-        ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
-        ctypes.POINTER(ctypes.c_int64), _ip,
     ]
 
     # --- Compiled Step ---
@@ -542,66 +526,27 @@ def _declare_signatures(lib):
     lib.poly_uop_dims.restype = _i64p
     lib.poly_uop_dims.argtypes = [_ptr, _ptr]
 
-    # --- v2 composed ops (shape read from UOp) ---
-    lib.poly_softmax_v2.restype = _ptr
-    lib.poly_softmax_v2.argtypes = [_ptr, _ptr, ctypes.c_int]
+    # --- Additional composed ops (shape read from UOp) ---
+    lib.poly_rmsnorm_apply.restype = _ptr
+    lib.poly_rmsnorm_apply.argtypes = [_ptr, _ptr, _ptr, ctypes.c_double]
 
-    lib.poly_log_softmax_v2.restype = _ptr
-    lib.poly_log_softmax_v2.argtypes = [_ptr, _ptr, ctypes.c_int]
+    lib.poly_sdpa.restype = _ptr
+    lib.poly_sdpa.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_int]
 
-    lib.poly_dot_v2.restype = _ptr
-    lib.poly_dot_v2.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_rope.restype = _ptr
+    lib.poly_rope.argtypes = [_ptr, _ptr, _ptr, _ptr]
 
-    lib.poly_layernorm_v2.restype = _ptr
-    lib.poly_layernorm_v2.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_double]
+    lib.poly_repeat_interleave.restype = _ptr
+    lib.poly_repeat_interleave.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
 
-    lib.poly_cross_entropy_v2.restype = _ptr
-    lib.poly_cross_entropy_v2.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
+    lib.poly_argmax.restype = _ptr
+    lib.poly_argmax.argtypes = [_ptr, _ptr, ctypes.c_int]
 
-    lib.poly_linear_v2.restype = _ptr
-    lib.poly_linear_v2.argtypes = [_ptr, _ptr, _ptr, _ptr]
+    lib.poly_mse_loss.restype = _ptr
+    lib.poly_mse_loss.argtypes = [_ptr, _ptr, _ptr]
 
-    lib.poly_gather_v2.restype = _ptr
-    lib.poly_gather_v2.argtypes = [_ptr, _ptr, _ptr]
-
-    lib.poly_sum_reduce_v2.restype = _ptr
-    lib.poly_sum_reduce_v2.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_max_reduce_v2.restype = _ptr
-    lib.poly_max_reduce_v2.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_mean_reduce_v2.restype = _ptr
-    lib.poly_mean_reduce_v2.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_var_reduce_v2.restype = _ptr
-    lib.poly_var_reduce_v2.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_tril_v2.restype = _ptr
-    lib.poly_tril_v2.argtypes = [_ptr, _ptr, ctypes.c_int]
-
-    lib.poly_triu_v2.restype = _ptr
-    lib.poly_triu_v2.argtypes = [_ptr, _ptr, ctypes.c_int]
-
-    lib.poly_rmsnorm_v2.restype = _ptr
-    lib.poly_rmsnorm_v2.argtypes = [_ptr, _ptr, _ptr, ctypes.c_double]
-
-    lib.poly_sdpa_v2.restype = _ptr
-    lib.poly_sdpa_v2.argtypes = [_ptr, _ptr, _ptr, _ptr, _ptr, ctypes.c_int]
-
-    lib.poly_rope_v2.restype = _ptr
-    lib.poly_rope_v2.argtypes = [_ptr, _ptr, _ptr, _ptr]
-
-    lib.poly_repeat_interleave_v2.restype = _ptr
-    lib.poly_repeat_interleave_v2.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_argmax_v2.restype = _ptr
-    lib.poly_argmax_v2.argtypes = [_ptr, _ptr, ctypes.c_int]
-
-    lib.poly_mse_loss_v2.restype = _ptr
-    lib.poly_mse_loss_v2.argtypes = [_ptr, _ptr, _ptr]
-
-    lib.poly_mae_loss_v2.restype = _ptr
-    lib.poly_mae_loss_v2.argtypes = [_ptr, _ptr, _ptr]
+    lib.poly_mae_loss.restype = _ptr
+    lib.poly_mae_loss.argtypes = [_ptr, _ptr, _ptr]
 
     # --- CUDA realize (conditional) ---
     has_cuda = hasattr(lib, 'poly_realize_cuda')

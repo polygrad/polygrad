@@ -43,6 +43,15 @@ def _read_shape(out_shape, out_ndim):
     return tuple(out_shape[i] for i in range(out_ndim.value))
 
 
+def _shape_from_uop(ctx, uop):
+    """Read shape tuple from a UOp via poly_uop_ndim/poly_uop_dims."""
+    ndim = _ffi._lib.poly_uop_ndim(ctx, uop)
+    if ndim <= 0:
+        return ()
+    dims = _ffi._lib.poly_uop_dims(ctx, uop)
+    return tuple(dims[i] for i in range(ndim))
+
+
 class Variable:
     """Symbolic integer variable for dynamic tensor dimensions.
 
@@ -1177,23 +1186,19 @@ class Tensor:
             # Reduce all
             result = self
             for i in range(len(self.shape) - 1, -1, -1):
-                sh, ndim = _shape_array(result.shape)
-                out_shape, out_ndim = _out_shape()
                 uop = _ffi._lib.poly_max_reduce(self._ctx, result._uop,
-                                                  sh, ndim, i, int(keepdim),
-                                                  out_shape, ctypes.byref(out_ndim))
-                result = self._make_result(uop, _read_shape(out_shape, out_ndim), [result])
+                                                  i, int(keepdim))
+                new_shape = _shape_from_uop(self._ctx, uop)
+                result = self._make_result(uop, new_shape, [result])
             return result
         # Normalize negative axis
         nd = len(self.shape)
         if axis < 0:
             axis = axis + nd
-        sh, ndim = _shape_array(self.shape)
-        out_shape, out_ndim = _out_shape()
-        uop = _ffi._lib.poly_max_reduce(self._ctx, self._uop, sh, ndim,
-                                          axis, int(keepdim),
-                                          out_shape, ctypes.byref(out_ndim))
-        result = self._make_result(uop, _read_shape(out_shape, out_ndim), [self])
+        uop = _ffi._lib.poly_max_reduce(self._ctx, self._uop,
+                                          axis, int(keepdim))
+        new_shape = _shape_from_uop(self._ctx, uop)
+        result = self._make_result(uop, new_shape, [self])
         return result
 
     def min(self, axis=None, keepdim=False):
@@ -1202,12 +1207,10 @@ class Tensor:
     def mean(self, axis=None, keepdim=False):
         if axis is None:
             return self.sum(keepdim=keepdim) / self.numel()
-        sh, ndim = _shape_array(self.shape)
-        out_shape, out_ndim = _out_shape()
-        uop = _ffi._lib.poly_mean_reduce(self._ctx, self._uop, sh, ndim,
-                                           axis, int(keepdim),
-                                           out_shape, ctypes.byref(out_ndim))
-        return self._make_result(uop, _read_shape(out_shape, out_ndim), [self])
+        uop = _ffi._lib.poly_mean_reduce(self._ctx, self._uop,
+                                           axis, int(keepdim))
+        new_shape = _shape_from_uop(self._ctx, uop)
+        return self._make_result(uop, new_shape, [self])
 
     def var(self, axis=None, keepdim=False, correction=1):
         if axis is None:
@@ -1233,15 +1236,11 @@ class Tensor:
     def dot(self, w):
         if not isinstance(w, Tensor):
             raise TypeError(f'Expected Tensor, got {type(w)}')
-        x_sh, x_n = _shape_array(self.shape)
-        w_sh, w_n = _shape_array(w.shape)
-        out_shape, out_ndim = _out_shape()
-        uop = _ffi._lib.poly_dot(self._ctx,
-            self._uop, x_sh, x_n, w._uop, w_sh, w_n,
-            out_shape, ctypes.byref(out_ndim))
+        uop = _ffi._lib.poly_dot(self._ctx, self._uop, w._uop)
         if not uop:
             raise ValueError(f'cannot dot {self.shape} and {w.shape}')
-        return self._make_result(uop, _read_shape(out_shape, out_ndim), [self, w])
+        new_shape = _shape_from_uop(self._ctx, uop)
+        return self._make_result(uop, new_shape, [self, w])
 
     def matmul(self, other):
         return self.dot(other)
@@ -1269,18 +1268,13 @@ class Tensor:
         target = target.to(self._device)
         if axis is None:
             axis = 0 if self.ndim == 1 else 1
-        logits_sh, logits_n = _shape_array(self.shape)
-        target_sh, target_n = _shape_array(target.shape)
-        out_shape, out_ndim = _out_shape()
         uop = _ffi._lib.poly_cross_entropy(
-            self._ctx,
-            self._uop, logits_sh, logits_n,
-            target._uop, target_sh, target_n,
-            axis, out_shape, ctypes.byref(out_ndim)
+            self._ctx, self._uop, target._uop, axis
         )
         if not uop:
             raise ValueError(f'shape mismatch: self.shape={self.shape}, target.shape={target.shape}')
-        return self._make_result(uop, _read_shape(out_shape, out_ndim), [self, target])
+        new_shape = _shape_from_uop(self._ctx, uop)
+        return self._make_result(uop, new_shape, [self, target])
 
     def binary_crossentropy(self, target):
         return -(target * self.log() + (1.0 - target) * (1.0 - self).log()).mean()
@@ -1380,26 +1374,14 @@ class Tensor:
         ctx = operands[0]._ctx
         n = len(operands)
 
-        # Build C arrays
         tensor_arr = (_ffi._ptr * n)(*[t._uop for t in operands])
-        shape_arrays = []
-        for t in operands:
-            sa = (ctypes.c_int64 * len(t.shape))(*t.shape)
-            shape_arrays.append(sa)
-        shape_ptrs = (ctypes.POINTER(ctypes.c_int64) * n)(
-            *[ctypes.cast(sa, ctypes.POINTER(ctypes.c_int64)) for sa in shape_arrays])
-        ndim_arr = (ctypes.c_int * n)(*[len(t.shape) for t in operands])
-
-        out_shape = (ctypes.c_int64 * 8)()
-        out_ndim = ctypes.c_int(0)
 
         uop = _ffi._lib.poly_einsum(
             ctx, formula.encode('utf-8'),
-            tensor_arr, shape_ptrs, ndim_arr, n,
-            out_shape, ctypes.byref(out_ndim))
+            tensor_arr, n)
         if not uop:
             raise ValueError(f'poly_einsum failed for formula: {formula}')
-        shape = tuple(out_shape[i] for i in range(out_ndim.value))
+        shape = _shape_from_uop(ctx, uop)
         dev = operands[0]._infer_device(list(operands))
         return Tensor(_ctx=ctx, _uop=uop, _shape=shape, _inputs=list(operands), _device=dev)
 
@@ -1407,7 +1389,6 @@ class Tensor:
 
     def rearrange(self, formula, **kwargs):
         """Einops-style rearrange. E.g. t.rearrange('b c h w -> b (c h) w')."""
-        # Build axis_names and axis_values from kwargs
         names = list(kwargs.keys())
         values = [kwargs[k] for k in names]
         n = len(names)
@@ -1415,18 +1396,13 @@ class Tensor:
         axis_names = ' '.join(names).encode('utf-8') if names else None
         axis_values = (ctypes.c_int64 * n)(*values) if n > 0 else None
 
-        sh, ndim = _int64_array(self.shape)
-        out_shape = (ctypes.c_int64 * 8)()
-        out_ndim = ctypes.c_int(0)
-
         uop = _ffi._lib.poly_rearrange(
             self._ctx, formula.encode('utf-8'),
-            self._uop, sh, ndim,
-            axis_names, axis_values, n,
-            out_shape, ctypes.byref(out_ndim))
+            self._uop,
+            axis_names, axis_values, n)
         if not uop:
             raise ValueError(f'poly_rearrange failed for formula: {formula}')
-        shape = tuple(out_shape[i] for i in range(out_ndim.value))
+        shape = _shape_from_uop(self._ctx, uop)
         return self._make_result(uop, shape, [self])
 
     # --- Static constructors ---

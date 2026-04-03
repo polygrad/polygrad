@@ -515,6 +515,23 @@ int poly_grad_many(PolyCtx *ctx, PolyUOp *loss, PolyUOp *initial_grad,
 PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root,
                                PolyUOp **from, PolyUOp **to, int n);
 
+/* ── UOp construction helpers ────────────────────────────────────────── */
+
+int poly_op_count(void);
+
+PolyUOp *poly_const_float(PolyCtx *ctx, double value);
+PolyUOp *poly_const_double(PolyCtx *ctx, double value);
+PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value);
+PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value);
+
+PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src);
+PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c);
+
+PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value);
+PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store);
+PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n);
+
 #ifdef __cplusplus
 }
 #endif

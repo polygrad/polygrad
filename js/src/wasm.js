@@ -160,6 +160,22 @@ async function createWasmBackend(device) {
     return readShapeFromPtr(_scratchOutShapePtr, ndim)
   }
 
+  function readUopShape(ctx, uop) {
+    if (!uop) return []
+    const ndim = Module._poly_uop_ndim(ctx, uop)
+    if (ndim <= 0) return []
+    const dimsPtr = Module._poly_uop_dims(ctx, uop)
+    if (!dimsPtr) return []
+    const result = []
+    const h32 = heap32()
+    for (let i = 0; i < ndim; i++) {
+      const lo = h32[(dimsPtr >> 2) + i * 2]
+      const hi = h32[(dimsPtr >> 2) + i * 2 + 1]
+      result.push(lo + hi * 0x100000000)
+    }
+    return result
+  }
+
   function readInt64At(ptr) {
     const base = ptr >> 2
     const lo = heap32()[base] >>> 0
@@ -549,33 +565,14 @@ async function createWasmBackend(device) {
         heap32()[(tensorPtrs >> 2) + i] = operands[i]._uop
       }
 
-      const shapePtrs = Module._malloc(n * 4)
-      const shapeArrays = []
-      for (let i = 0; i < n; i++) {
-        const shPtr = writeInt64Array(operands[i].shape)
-        shapeArrays.push(shPtr)
-        heap32()[(shapePtrs >> 2) + i] = shPtr
-      }
-
-      const ndimPtr = Module._malloc(n * 4)
-      for (let i = 0; i < n; i++) {
-        heap32()[(ndimPtr >> 2) + i] = operands[i].shape.length
-      }
-
       const formulaPtr = allocString(formula)
-      heap32()[_scratchOutNdimPtr >> 2] = 0
 
-      const result = Module._poly_einsum(ctx, formulaPtr,
-        tensorPtrs, shapePtrs, ndimPtr, n,
-        _scratchOutShapePtr, _scratchOutNdimPtr)
+      const result = Module._poly_einsum(ctx, formulaPtr, tensorPtrs, n)
 
       Module._free(formulaPtr)
-      Module._free(ndimPtr)
-      for (const ptr of shapeArrays) Module._free(ptr)
-      Module._free(shapePtrs)
       Module._free(tensorPtrs)
 
-      return { uop: result, shape: readOutShape() }
+      return { uop: result, shape: readUopShape(ctx, result) }
     },
 
     poly_rearrange: (ctx, formula, uop, shape, kwargs) => {
@@ -584,7 +581,6 @@ async function createWasmBackend(device) {
       const n = names.length
 
       const formulaPtr = allocString(formula)
-      const shPtr = writeInt64Array(shape)
 
       let namesPtr = 0
       let valuesPtr = 0
@@ -593,18 +589,14 @@ async function createWasmBackend(device) {
         valuesPtr = writeInt64Array(values)
       }
 
-      heap32()[_scratchOutNdimPtr >> 2] = 0
       const result = Module._poly_rearrange(ctx, formulaPtr,
-        uop, shPtr, shape.length,
-        namesPtr, valuesPtr, n,
-        _scratchOutShapePtr, _scratchOutNdimPtr)
+        uop, namesPtr, valuesPtr, n)
 
       Module._free(formulaPtr)
-      Module._free(shPtr)
       if (namesPtr) Module._free(namesPtr)
       if (valuesPtr) Module._free(valuesPtr)
 
-      return { uop: result, shape: readOutShape() }
+      return { uop: result, shape: readUopShape(ctx, result) }
     },
 
     // Composed elementwise ops

@@ -13,6 +13,7 @@
         "csrc/dtype.c",
         "csrc/exec_plan.c",
         "csrc/frontend.c",
+        "csrc/tensor.c",
         "csrc/hashmap.c",
         "csrc/indexing.c",
         "csrc/instance.c",

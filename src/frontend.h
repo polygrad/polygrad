@@ -13,6 +13,7 @@
 #define POLY_FRONTEND_H
 
 #include "polygrad.h"
+#include "tensor.h"
 #include "exec_plan.h"  /* PolyBufferHandle, PolyDeviceId */
 
 #define POLYGRAD_ABI_VERSION 1
@@ -20,29 +21,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ── Op enum helpers ──────────────────────────────────────────────────── */
-
-int poly_op_count(void);
-
-/* ── Constants ────────────────────────────────────────────────────────── */
-
-PolyUOp *poly_const_float(PolyCtx *ctx, double value);
-PolyUOp *poly_const_double(PolyCtx *ctx, double value);
-PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value);
-PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value);
-
-/* ── ALU ops (no PolyArg needed) ───────────────────────────────────────── */
-
-PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src);
-PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c);
-
-/* ── Graph construction ───────────────────────────────────────────────── */
-
-PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value);
-PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store);
-PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n);
 
 /* ── In-place assignment ──────────────────────────────────────────────── */
 
@@ -159,168 +137,9 @@ int64_t poly_wasm_stepplan_buf_size(const PolyWasmStepPlan *p, int buf_idx);
 int64_t poly_wasm_stepplan_buf_nbytes(const PolyWasmStepPlan *p, int buf_idx);
 int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi);
 
-/* Query constant buffer data. Returns NULL if buf is not a registered constant. */
-const void *poly_const_buffer_data(PolyCtx *ctx, PolyUOp *buf);
 
 /* ABI version (callers check at load time for compatibility). */
 int poly_abi_version(void);
-
-/* ── Composed elementwise ops (shape-free, UOp-level) ────────────────── */
-
-/* Math */
-PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_expm1(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_sin(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_cos(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_erf(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_erfc(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_ndtri(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_tanh_act(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_sign(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_square(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_rsqrt(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_ceil(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_floor(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_round_f(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_isinf(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_isnan(PolyCtx *ctx, PolyUOp *x);
-
-/* Activations */
-PolyUOp *poly_relu(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_relu6(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope);
-PolyUOp *poly_gelu(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_quick_gelu(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha);
-PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta);
-PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val);
-PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x);
-PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x);
-
-/* Comparisons */
-PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
-PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
-PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);
-PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
-PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi);
-PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x);
-
-/* Deterministic RNG helpers (stateless seed -> tensor). */
-PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
-PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
-
-/* Creation helpers (constant-backed tensors). */
-PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step);
-PolyUOp *poly_eye(PolyCtx *ctx, int64_t n);
-PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps);
-PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value);
-PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int diagonal);
-PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int diagonal);
-PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim, int upper);
-PolyUOp *poly_triangular_solve(PolyCtx *ctx,
-                               PolyUOp *a, const int64_t *a_shape, int a_ndim,
-                               PolyUOp *b, const int64_t *b_shape, int b_ndim,
-                               int upper, int transpose_a, int unit_diagonal,
-                               int64_t *out_shape, int *out_ndim);
-
-/* ── Shape-aware composed ops ────────────────────────────────────────── */
-
-PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x,
-                         const int64_t *shape, int ndim,
-                         int axis, int keepdim,
-                         int64_t *out_shape, int *out_ndim);
-PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x,
-                         const int64_t *shape, int ndim,
-                         int axis, int keepdim,
-                         int64_t *out_shape, int *out_ndim);
-PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x,
-                          const int64_t *shape, int ndim,
-                          int axis, int keepdim,
-                          int64_t *out_shape, int *out_ndim);
-PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
-                         const int64_t *shape, int ndim,
-                         int axis, int keepdim, int correction,
-                         int64_t *out_shape, int *out_ndim);
-PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x,
-                        const int64_t *shape, int ndim,
-                        int axis, int keepdim,
-                        int64_t *out_shape, int *out_ndim);
-
-PolyUOp *poly_dot(PolyCtx *ctx,
-                  PolyUOp *x, const int64_t *x_shape, int x_ndim,
-                  PolyUOp *w, const int64_t *w_shape, int w_ndim,
-                  int64_t *out_shape, int *out_ndim);
-
-PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x,
-                      const int64_t *shape, int ndim, int axis);
-PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x,
-                          const int64_t *shape, int ndim, int axis);
-PolyUOp *poly_cross_entropy(PolyCtx *ctx,
-                            PolyUOp *logits, const int64_t *logits_shape, int logits_ndim,
-                            PolyUOp *target, const int64_t *target_shape, int target_ndim,
-                            int axis, int64_t *out_shape, int *out_ndim);
-
-/* ── Einsum ────────────────────────────────────────────────────────── */
-
-/* Einstein summation: parse subscript formula, align+mul+sum+permute.
- * formula: e.g. "ij,jk->ik"   (lowercase a-z indices only, no ellipsis)
- * tensors/shapes/ndims: parallel arrays for each input operand
- * out_shape/out_ndim: written with result shape
- * Returns the result UOp, or NULL on parse/shape error. */
-PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
-                     PolyUOp **tensors, const int64_t **shapes, const int *ndims,
-                     int n_tensors, int64_t *out_shape, int *out_ndim);
-
-/* ── Rearrange (einops) ───────────────────────────────────────────── */
-
-/* Einops-style rearrange: parse formula, unflatten→permute→flatten.
- * formula: e.g. "b c h w -> b (c h) w"
- * x/shape/ndim: input tensor
- * axis_sizes: name→size pairs for unflatten. Format: names as space-separated
- *             string in axis_names, values in axis_values, n_axis_sizes count.
- * out_shape/out_ndim: written with result shape
- * Returns the result UOp, or NULL on error. */
-PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
-                        PolyUOp *x, const int64_t *shape, int ndim,
-                        const char *axis_names, const int64_t *axis_values,
-                        int n_axis_sizes,
-                        int64_t *out_shape, int *out_ndim);
-
-/* ── Transformer building blocks ───────────────────────────────────── */
-
-/* Gather rows from table by integer indices (embedding lookup).
- * table: (N, D) weight matrix
- * indices: (...) integer indices (as floats, cast internally)
- * Returns: (..., D) gathered rows
- * Lowered as: out[..., j] = table[int(indices[...]), j]
- * Avoids O(vocab) materialization of one-hot mask. */
-PolyUOp *poly_gather(PolyCtx *ctx,
-                      PolyUOp *table, const int64_t *table_shape, int table_ndim,
-                      PolyUOp *indices, const int64_t *idx_shape, int idx_ndim,
-                      int64_t *out_shape, int *out_ndim);
-
-
-/* Build causal attention mask for sequence length T.
- * Returns (T, T) mask: 0 where allowed, -1e9 where masked (upper triangle).
- * T_val: const UOp (value = sequence length). */
-PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
-                           int64_t *out_shape, int *out_ndim);
 
 
 /* Debug: print UOp info to stderr */
@@ -406,33 +225,6 @@ void poly_cpu_cache_flush(void);
 
 /* Free cached schedule results (param-to-binding mappings). */
 void poly_sched_cache_flush(void);
-
-/* ── v2 API: shape read from UOp, no explicit shape params ─────────── */
-/* These are thin wrappers that read shape from the UOp's cached
- * _shape_ndim/_shape_dims fields, then delegate to the v1 function.
- * Result shape is readable from the returned UOp's shape fields. */
-
-PolyUOp *poly_sum_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_max_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_mean_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
-PolyUOp *poly_var_reduce_v2(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction);
-PolyUOp *poly_softmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
-PolyUOp *poly_log_softmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
-PolyUOp *poly_dot_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
-PolyUOp *poly_cross_entropy_v2(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis);
-PolyUOp *poly_gather_v2(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
-PolyUOp *poly_tril_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
-PolyUOp *poly_triu_v2(PolyCtx *ctx, PolyUOp *x, int diagonal);
-
-/* New composed ops (v2 only) */
-PolyUOp *poly_rmsnorm_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *weight, double eps);
-PolyUOp *poly_sdpa_v2(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
-                       PolyUOp *mask, int is_causal);
-PolyUOp *poly_rope_v2(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin);
-PolyUOp *poly_repeat_interleave_v2(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);
-PolyUOp *poly_argmax_v2(PolyCtx *ctx, PolyUOp *x, int axis);
-PolyUOp *poly_mse_loss_v2(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
-PolyUOp *poly_mae_loss_v2(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
 
 /* ── CUDA realize ────────────────────────────────────────────────────── */
 

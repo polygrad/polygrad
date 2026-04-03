@@ -784,3 +784,60 @@ PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i) {
   if (!ctx || i < 0 || i >= ctx->n_ep) return NULL;
   return ctx->ep[i].sink;
 }
+
+/* ── UOp construction helpers (moved from frontend.c) ───────────────── */
+
+int poly_op_count(void) { return (int)POLY_OP_COUNT; }
+
+PolyUOp *poly_const_float(PolyCtx *ctx, double value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(value));
+}
+
+PolyUOp *poly_const_double(PolyCtx *ctx, double value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT64, poly_arg_float(value));
+}
+
+PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
+}
+
+PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
+  if (poly_dtype_is_float(dt))
+    return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
+  return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)value));
+}
+
+PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {
+  return poly_uop1(ctx, op, src->dtype, src, poly_arg_none());
+}
+
+PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
+  PolyDType dt;
+  if (op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) {
+    dt = POLY_BOOL;
+  } else if (poly_dtype_is_float(a->dtype)) {
+    dt = a->dtype;
+  } else if (poly_dtype_is_float(b->dtype)) {
+    dt = b->dtype;
+  } else {
+    dt = a->dtype;
+  }
+  return poly_uop2(ctx, op, dt, a, b, poly_arg_none());
+}
+
+PolyUOp *poly_alu3(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b, PolyUOp *c) {
+  PolyDType dt = (op == POLY_OP_WHERE) ? b->dtype : a->dtype;
+  return poly_uop3(ctx, op, dt, a, b, c, poly_arg_none());
+}
+
+PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value) {
+  return poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf, value, poly_arg_none());
+}
+
+PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store) {
+  return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &store, 1, poly_arg_none());
+}
+
+PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n) {
+  return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, n, poly_arg_none());
+}

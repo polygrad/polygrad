@@ -165,11 +165,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len) {
     PolyUOp *wt = poly_permute(ctx, w_reshaped, perm, 2);
 
     /* (k, l_in) @ (l_in, l_out) -> (k, l_out) */
-    int64_t x_shape[] = { k, l_in };
-    int64_t wt_shape[] = { l_in, l_out };
-    int64_t dot_shape[8];
-    int dot_ndim;
-    x = poly_dot(ctx, x, x_shape, 2, wt, wt_shape, 2, dot_shape, &dot_ndim);
+    x = poly_dot(ctx, x, wt);
 
     /* Step 3: Output scaling: s * x -> (k, l_out) */
     int64_t s_shape[] = { k, l_out };
@@ -228,8 +224,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len) {
                            poly_const_float(ctx, mse_scale));
     } else {
       /* Cross-entropy on mean prediction */
-      int64_t logits_shape[] = { batch_size, out_dim };
-      PolyUOp *log_probs = poly_log_softmax(ctx, fwd_result, logits_shape, 2, 1);
+      PolyUOp *log_probs = poly_log_softmax(ctx, fwd_result, 1);
       PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y, log_probs);
       int64_t axes_class[] = { 1 };
       PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes_class, 1);

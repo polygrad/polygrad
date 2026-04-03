@@ -354,23 +354,20 @@ TEST(hf, hf_load_ignores_attn_bias) {
 TEST(hf, poly_gather_basic) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* table: (4, 3) weight matrix */
+  /* table: (4, 3) weight matrix -- reshape buffer to give it a shape */
   int64_t table_shape[] = { 4, 3 };
-  PolyUOp *table = poly_buffer_f32(ctx, 12);
+  PolyUOp *table = poly_reshape(ctx, poly_buffer_f32(ctx, 12), table_shape, 2);
 
-  /* indices: (2,) */
+  /* indices: (2,) -- reshape buffer to give it a shape */
   int64_t idx_shape[] = { 2 };
-  PolyUOp *indices = poly_buffer_f32(ctx, 2);
+  PolyUOp *indices = poly_reshape(ctx, poly_buffer_f32(ctx, 2), idx_shape, 1);
 
-  int64_t out_shape[8];
-  int out_ndim;
-  PolyUOp *result = poly_gather(ctx, table, table_shape, 2,
-                                  indices, idx_shape, 1,
-                                  out_shape, &out_ndim);
+  PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(out_ndim, 2);
-  ASSERT_INT_EQ(out_shape[0], 2);  /* num indices */
-  ASSERT_INT_EQ(out_shape[1], 3);  /* embedding dim */
+  PolyShape s = poly_uop_shape(ctx, result);
+  ASSERT_INT_EQ(s.ndim, 2);
+  ASSERT_INT_EQ(s.dims[0], 2);  /* num indices */
+  ASSERT_INT_EQ(s.dims[1], 3);  /* embedding dim */
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -379,24 +376,21 @@ TEST(hf, poly_gather_basic) {
 TEST(hf, poly_gather_2d_indices) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* table: (10, 4) */
+  /* table: (10, 4) -- reshape buffer to give it a shape */
   int64_t table_shape[] = { 10, 4 };
-  PolyUOp *table = poly_buffer_f32(ctx, 40);
+  PolyUOp *table = poly_reshape(ctx, poly_buffer_f32(ctx, 40), table_shape, 2);
 
-  /* indices: (2, 3) -- batch of indices */
+  /* indices: (2, 3) -- batch of indices, reshape buffer to give it a shape */
   int64_t idx_shape[] = { 2, 3 };
-  PolyUOp *indices = poly_buffer_f32(ctx, 6);
+  PolyUOp *indices = poly_reshape(ctx, poly_buffer_f32(ctx, 6), idx_shape, 2);
 
-  int64_t out_shape[8];
-  int out_ndim;
-  PolyUOp *result = poly_gather(ctx, table, table_shape, 2,
-                                  indices, idx_shape, 2,
-                                  out_shape, &out_ndim);
+  PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(out_ndim, 3);
-  ASSERT_INT_EQ(out_shape[0], 2);   /* batch */
-  ASSERT_INT_EQ(out_shape[1], 3);   /* seq_len */
-  ASSERT_INT_EQ(out_shape[2], 4);   /* embed_dim */
+  PolyShape s = poly_uop_shape(ctx, result);
+  ASSERT_INT_EQ(s.ndim, 3);
+  ASSERT_INT_EQ(s.dims[0], 2);   /* batch */
+  ASSERT_INT_EQ(s.dims[1], 3);   /* seq_len */
+  ASSERT_INT_EQ(s.dims[2], 4);   /* embed_dim */
 
   poly_ctx_destroy(ctx);
   PASS();

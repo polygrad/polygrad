@@ -171,8 +171,7 @@ PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len) {
       loss_val = poly_alu2(ctx, POLY_OP_MUL, sum1,
                            poly_const_float(ctx, scale));
     } else {
-      int64_t logits_shape[] = { batch_size, out_dim };
-      PolyUOp *log_probs = poly_log_softmax(ctx, x, logits_shape, 2, 1);
+      PolyUOp *log_probs = poly_log_softmax(ctx, x, 1);
       PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y, log_probs);
       int64_t axes1[] = { 1 };
       PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes1, 1);

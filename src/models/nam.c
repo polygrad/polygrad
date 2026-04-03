@@ -156,11 +156,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
       PolyUOp *wt = poly_permute(ctx, w_2d, perm, 2);
 
       /* xk @ W^T: (batch, in_dim) @ (in_dim, out_dim) -> (batch, out_dim) */
-      int64_t xk_shape[] = { batch_size, in_dim };
-      int64_t wt_shape[] = { in_dim, out_dim };
-      int64_t dot_shape[8];
-      int dot_ndim;
-      xk = poly_dot(ctx, xk, xk_shape, 2, wt, wt_shape, 2, dot_shape, &dot_ndim);
+      xk = poly_dot(ctx, xk, wt);
 
       /* Add bias: reshape bias to (1, out_dim), expand to (batch, out_dim) */
       int64_t b_1d[] = { 1, out_dim };
@@ -237,8 +233,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
                            poly_const_float(ctx, mse_scale));
     } else {
       /* Cross-entropy */
-      int64_t logits_shape[] = { batch_size, n_outputs };
-      PolyUOp *log_probs = poly_log_softmax(ctx, fwd_result, logits_shape, 2, 1);
+      PolyUOp *log_probs = poly_log_softmax(ctx, fwd_result, 1);
       PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, y, log_probs);
       int64_t axes_class[] = { 1 };
       PolyUOp *sum_class = poly_reduce_axis(ctx, POLY_OP_ADD, prod, axes_class, 1);

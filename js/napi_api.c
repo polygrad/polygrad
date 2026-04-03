@@ -496,183 +496,24 @@ static napi_value napi_poly_reduce_axis(napi_env env, napi_callback_info info) {
   return make_external(env, poly_reduce_axis(ctx, (PolyOps)op, uop, axes, naxes));
 }
 
-/* ── Shape-returning ops ───────────────────────────────────────────────── */
+/* Old explicit-shape ops removed -- merged into v2 section below */
 
-static napi_value napi_poly_max_reduce(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis, keepdim;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  napi_get_value_int32(env, argv[5], &keepdim);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_max_reduce(ctx, uop, shape, ndim, axis, keepdim,
-                                out_shape, &out_ndim);
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
-
-static napi_value napi_poly_mean_reduce(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis, keepdim;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  napi_get_value_int32(env, argv[5], &keepdim);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_mean_reduce(ctx, uop, shape, ndim, axis, keepdim,
-                                 out_shape, &out_ndim);
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
-
-static napi_value napi_poly_sum_reduce(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis, keepdim;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  napi_get_value_int32(env, argv[5], &keepdim);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_sum_reduce(ctx, uop, shape, ndim, axis, keepdim,
-                                out_shape, &out_ndim);
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
-
-static napi_value napi_poly_var_reduce(napi_env env, napi_callback_info info) {
-  napi_value argv[7];
-  size_t argc = 7;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis, keepdim, correction;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  napi_get_value_int32(env, argv[5], &keepdim);
-  napi_get_value_int32(env, argv[6], &correction);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_var_reduce(ctx, uop, shape, ndim, axis, keepdim, correction,
-                                out_shape, &out_ndim);
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
-
+/* logsumexp: shape read from UOp */
 static napi_value napi_poly_logsumexp(napi_env env, napi_callback_info info) {
-  napi_value argv[6];
-  size_t argc = 6;
+  napi_value argv[4];
+  size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis, keepdim;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  napi_get_value_int32(env, argv[5], &keepdim);
+  int32_t axis, keepdim;
+  napi_get_value_int32(env, argv[2], &axis);
+  napi_get_value_int32(env, argv[3], &keepdim);
+  PolyUOp *r = poly_logsumexp(ctx, uop, axis, keepdim);
   int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_logsumexp(ctx, uop, shape, ndim, axis, keepdim,
-                               out_shape, &out_ndim);
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
-
-static napi_value napi_poly_dot(napi_env env, napi_callback_info info) {
-  napi_value argv[7];
-  size_t argc = 7;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *a_uop = get_external(env, argv[1]);
-  int64_t a_shape[MAX_DIMS];
-  int32_t a_ndim;
-  napi_get_value_int32(env, argv[3], &a_ndim);
-  read_int64_array(env, argv[2], a_shape, MAX_DIMS);
-  PolyUOp *b_uop = get_external(env, argv[4]);
-  int64_t b_shape[MAX_DIMS];
-  int32_t b_ndim;
-  napi_get_value_int32(env, argv[6], &b_ndim);
-  read_int64_array(env, argv[5], b_shape, MAX_DIMS);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_dot(ctx, a_uop, a_shape, a_ndim, b_uop, b_shape, b_ndim,
-                         out_shape, &out_ndim);
-  if (!r) {
-    napi_throw_range_error(env, NULL, "cannot dot the provided shapes");
-    return NULL;
-  }
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
-
-static napi_value napi_poly_softmax(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  return make_external(env, poly_softmax(ctx, uop, shape, ndim, axis));
-}
-
-static napi_value napi_poly_log_softmax(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *uop = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, axis;
-  napi_get_value_int32(env, argv[3], &ndim);
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[4], &axis);
-  return make_external(env, poly_log_softmax(ctx, uop, shape, ndim, axis));
-}
-
-static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info) {
-  napi_value argv[8];
-  size_t argc = 8;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *logits_uop = get_external(env, argv[1]);
-  int64_t logits_shape[MAX_DIMS];
-  int32_t logits_ndim;
-  napi_get_value_int32(env, argv[3], &logits_ndim);
-  read_int64_array(env, argv[2], logits_shape, MAX_DIMS);
-  PolyUOp *target_uop = get_external(env, argv[4]);
-  int64_t target_shape[MAX_DIMS];
-  int32_t target_ndim, axis;
-  napi_get_value_int32(env, argv[6], &target_ndim);
-  read_int64_array(env, argv[5], target_shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[7], &axis);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_cross_entropy(ctx,
-                                  logits_uop, logits_shape, logits_ndim,
-                                  target_uop, target_shape, target_ndim,
-                                  axis, out_shape, &out_ndim);
-  if (!r) {
-    napi_throw_range_error(env, NULL, "poly_cross_entropy shape mismatch");
-    return NULL;
+  int out_ndim = poly_uop_ndim(ctx, (const PolyUOp *)r);
+  if (out_ndim > 0) {
+    const int64_t *dims = poly_uop_dims(ctx, (const PolyUOp *)r);
+    if (dims) memcpy(out_shape, dims, out_ndim * sizeof(int64_t));
   }
   return make_shape_result(env, r, out_shape, out_ndim);
 }
@@ -873,31 +714,23 @@ static napi_value napi_poly_full(napi_env env, napi_callback_info info) {
 }
 
 static napi_value napi_poly_tril(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
+  napi_value argv[3]; size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *x = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, diagonal;
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[3], &ndim);
-  napi_get_value_int32(env, argv[4], &diagonal);
-  return make_external(env, poly_tril(ctx, x, shape, ndim, diagonal));
+  int32_t diagonal;
+  napi_get_value_int32(env, argv[2], &diagonal);
+  return make_external(env, poly_tril(ctx, x, diagonal));
 }
 
 static napi_value napi_poly_triu(napi_env env, napi_callback_info info) {
-  napi_value argv[5];
-  size_t argc = 5;
+  napi_value argv[3]; size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *x = get_external(env, argv[1]);
-  int64_t shape[MAX_DIMS];
-  int32_t ndim, diagonal;
-  read_int64_array(env, argv[2], shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[3], &ndim);
-  napi_get_value_int32(env, argv[4], &diagonal);
-  return make_external(env, poly_triu(ctx, x, shape, ndim, diagonal));
+  int32_t diagonal;
+  napi_get_value_int32(env, argv[2], &diagonal);
+  return make_external(env, poly_triu(ctx, x, diagonal));
 }
 
 /* ── Realize (stateful builder) ────────────────────────────────────────── */
@@ -1012,30 +845,7 @@ static napi_value napi_poly_layernorm(napi_env env, napi_callback_info info) {
   return make_shape_result(env, r, out_shape, out_ndim);
 }
 
-/* ── Gather ────────────────────────────────────────────────────────────── */
-
-static napi_value napi_poly_gather(napi_env env, napi_callback_info info) {
-  napi_value argv[7];
-  size_t argc = 7;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *table = get_external(env, argv[1]);
-  int64_t t_shape[MAX_DIMS];
-  int32_t t_ndim;
-  read_int64_array(env, argv[2], t_shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[3], &t_ndim);
-  PolyUOp *indices = get_external(env, argv[4]);
-  int64_t i_shape[MAX_DIMS];
-  int32_t i_ndim;
-  read_int64_array(env, argv[5], i_shape, MAX_DIMS);
-  napi_get_value_int32(env, argv[6], &i_ndim);
-  int64_t out_shape[MAX_DIMS];
-  int out_ndim = 0;
-  PolyUOp *r = poly_gather(ctx, table, t_shape, t_ndim,
-                            indices, i_shape, i_ndim,
-                            out_shape, &out_ndim);
-  return make_shape_result(env, r, out_shape, out_ndim);
-}
+/* Old gather removed -- merged into v2 section below */
 
 /* ── Linear ────────────────────────────────────────────────────────────── */
 
@@ -1054,7 +864,7 @@ static napi_value napi_poly_linear(napi_env env, napi_callback_info info) {
   if (bias_type == napi_external) bias = get_external(env, argv[7]);
 
   /* dot + bias add (shape-on-UOp, no explicit shapes needed) */
-  PolyUOp *r = poly_dot_v2(ctx, x, w);
+  PolyUOp *r = poly_dot(ctx, x, w);
   if (r && bias) r = poly_alu2(ctx, POLY_OP_ADD, r, bias);
 
   int64_t out_shape[MAX_DIMS];
@@ -1544,31 +1354,31 @@ static napi_value napi_poly_uop_dims(napi_env env, napi_callback_info info) {
 
 /* ── v2 composed ops (shape read from UOp) ─────────────────────────────── */
 
-static napi_value napi_poly_softmax_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_softmax(napi_env env, napi_callback_info info) {
   napi_value argv[3]; size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *x = get_external(env, argv[1]);
   int32_t axis; napi_get_value_int32(env, argv[2], &axis);
-  return make_external(env, poly_softmax_v2(ctx, x, axis));
+  return make_external(env, poly_softmax(ctx, x, axis));
 }
 
-static napi_value napi_poly_log_softmax_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_log_softmax(napi_env env, napi_callback_info info) {
   napi_value argv[3]; size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *x = get_external(env, argv[1]);
   int32_t axis; napi_get_value_int32(env, argv[2], &axis);
-  return make_external(env, poly_log_softmax_v2(ctx, x, axis));
+  return make_external(env, poly_log_softmax(ctx, x, axis));
 }
 
-static napi_value napi_poly_dot_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_dot(napi_env env, napi_callback_info info) {
   napi_value argv[3]; size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *x = get_external(env, argv[1]);
   PolyUOp *w = get_external(env, argv[2]);
-  return make_external(env, poly_dot_v2(ctx, x, w));
+  return make_external(env, poly_dot(ctx, x, w));
 }
 
 static napi_value napi_poly_layernorm_v2(napi_env env, napi_callback_info info) {
@@ -1581,14 +1391,14 @@ static napi_value napi_poly_layernorm_v2(napi_env env, napi_callback_info info) 
   return make_external(env, poly_layernorm_v2(ctx, x, axis, eps));
 }
 
-static napi_value napi_poly_cross_entropy_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info) {
   napi_value argv[4]; size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *logits = get_external(env, argv[1]);
   PolyUOp *target = get_external(env, argv[2]);
   int32_t axis; napi_get_value_int32(env, argv[3], &axis);
-  return make_external(env, poly_cross_entropy_v2(ctx, logits, target, axis));
+  return make_external(env, poly_cross_entropy(ctx, logits, target, axis));
 }
 
 static napi_value napi_poly_linear_v2(napi_env env, napi_callback_info info) {
@@ -1601,16 +1411,16 @@ static napi_value napi_poly_linear_v2(napi_env env, napi_callback_info info) {
   return make_external(env, poly_linear_v2(ctx, x, w, bias));
 }
 
-static napi_value napi_poly_gather_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_gather(napi_env env, napi_callback_info info) {
   napi_value argv[3]; size_t argc = 3;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
   PolyUOp *table = get_external(env, argv[1]);
   PolyUOp *indices = get_external(env, argv[2]);
-  return make_external(env, poly_gather_v2(ctx, table, indices));
+  return make_external(env, poly_gather(ctx, table, indices));
 }
 
-static napi_value napi_poly_sum_reduce_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_sum_reduce(napi_env env, napi_callback_info info) {
   napi_value argv[4]; size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
@@ -1618,10 +1428,10 @@ static napi_value napi_poly_sum_reduce_v2(napi_env env, napi_callback_info info)
   int32_t axis, keepdim;
   napi_get_value_int32(env, argv[2], &axis);
   napi_get_value_int32(env, argv[3], &keepdim);
-  return make_external(env, poly_sum_reduce_v2(ctx, x, axis, keepdim));
+  return make_external(env, poly_sum_reduce(ctx, x, axis, keepdim));
 }
 
-static napi_value napi_poly_max_reduce_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_max_reduce(napi_env env, napi_callback_info info) {
   napi_value argv[4]; size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
@@ -1629,10 +1439,10 @@ static napi_value napi_poly_max_reduce_v2(napi_env env, napi_callback_info info)
   int32_t axis, keepdim;
   napi_get_value_int32(env, argv[2], &axis);
   napi_get_value_int32(env, argv[3], &keepdim);
-  return make_external(env, poly_max_reduce_v2(ctx, x, axis, keepdim));
+  return make_external(env, poly_max_reduce(ctx, x, axis, keepdim));
 }
 
-static napi_value napi_poly_mean_reduce_v2(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_mean_reduce(napi_env env, napi_callback_info info) {
   napi_value argv[4]; size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyCtx *ctx = get_external(env, argv[0]);
@@ -1640,7 +1450,19 @@ static napi_value napi_poly_mean_reduce_v2(napi_env env, napi_callback_info info
   int32_t axis, keepdim;
   napi_get_value_int32(env, argv[2], &axis);
   napi_get_value_int32(env, argv[3], &keepdim);
-  return make_external(env, poly_mean_reduce_v2(ctx, x, axis, keepdim));
+  return make_external(env, poly_mean_reduce(ctx, x, axis, keepdim));
+}
+
+static napi_value napi_poly_var_reduce(napi_env env, napi_callback_info info) {
+  napi_value argv[5]; size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t axis, keepdim, correction;
+  napi_get_value_int32(env, argv[2], &axis);
+  napi_get_value_int32(env, argv[3], &keepdim);
+  napi_get_value_int32(env, argv[4], &correction);
+  return make_external(env, poly_var_reduce(ctx, x, axis, keepdim, correction));
 }
 
 /* ── Module registration ───────────────────────────────────────────────── */
@@ -1688,18 +1510,9 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_pad", napi_poly_pad),
     DECLARE_NAPI_METHOD("poly_reduce_axis", napi_poly_reduce_axis),
 
-    /* Shape-returning ops */
-    DECLARE_NAPI_METHOD("poly_max_reduce", napi_poly_max_reduce),
-    DECLARE_NAPI_METHOD("poly_mean_reduce", napi_poly_mean_reduce),
-    DECLARE_NAPI_METHOD("poly_sum_reduce", napi_poly_sum_reduce),
-    DECLARE_NAPI_METHOD("poly_var_reduce", napi_poly_var_reduce),
+    /* Shape-returning ops (kept: layernorm, causal_mask, logsumexp, var_reduce, linear) */
     DECLARE_NAPI_METHOD("poly_logsumexp", napi_poly_logsumexp),
-    DECLARE_NAPI_METHOD("poly_dot", napi_poly_dot),
-    DECLARE_NAPI_METHOD("poly_softmax", napi_poly_softmax),
-    DECLARE_NAPI_METHOD("poly_log_softmax", napi_poly_log_softmax),
-    DECLARE_NAPI_METHOD("poly_cross_entropy", napi_poly_cross_entropy),
     DECLARE_NAPI_METHOD("poly_layernorm", napi_poly_layernorm),
-    DECLARE_NAPI_METHOD("poly_gather", napi_poly_gather),
     DECLARE_NAPI_METHOD("poly_linear", napi_poly_linear),
     DECLARE_NAPI_METHOD("poly_causal_mask", napi_poly_causal_mask),
 
@@ -1806,16 +1619,17 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_uop_ndim", napi_poly_uop_ndim),
     DECLARE_NAPI_METHOD("poly_uop_dims", napi_poly_uop_dims),
     /* v2 composed ops */
-    DECLARE_NAPI_METHOD("poly_softmax_v2", napi_poly_softmax_v2),
-    DECLARE_NAPI_METHOD("poly_log_softmax_v2", napi_poly_log_softmax_v2),
-    DECLARE_NAPI_METHOD("poly_dot_v2", napi_poly_dot_v2),
+    DECLARE_NAPI_METHOD("poly_softmax", napi_poly_softmax),
+    DECLARE_NAPI_METHOD("poly_log_softmax", napi_poly_log_softmax),
+    DECLARE_NAPI_METHOD("poly_dot", napi_poly_dot),
     DECLARE_NAPI_METHOD("poly_layernorm_v2", napi_poly_layernorm_v2),
-    DECLARE_NAPI_METHOD("poly_cross_entropy_v2", napi_poly_cross_entropy_v2),
+    DECLARE_NAPI_METHOD("poly_cross_entropy", napi_poly_cross_entropy),
     DECLARE_NAPI_METHOD("poly_linear_v2", napi_poly_linear_v2),
-    DECLARE_NAPI_METHOD("poly_gather_v2", napi_poly_gather_v2),
-    DECLARE_NAPI_METHOD("poly_sum_reduce_v2", napi_poly_sum_reduce_v2),
-    DECLARE_NAPI_METHOD("poly_max_reduce_v2", napi_poly_max_reduce_v2),
-    DECLARE_NAPI_METHOD("poly_mean_reduce_v2", napi_poly_mean_reduce_v2),
+    DECLARE_NAPI_METHOD("poly_gather", napi_poly_gather),
+    DECLARE_NAPI_METHOD("poly_sum_reduce", napi_poly_sum_reduce),
+    DECLARE_NAPI_METHOD("poly_max_reduce", napi_poly_max_reduce),
+    DECLARE_NAPI_METHOD("poly_mean_reduce", napi_poly_mean_reduce),
+    DECLARE_NAPI_METHOD("poly_var_reduce", napi_poly_var_reduce),
   };
 
   NAPI_CALL(env, napi_define_properties(
