@@ -57,16 +57,17 @@ PolyInstance *poly_hf_load(
 
   if (strcmp(model_type, "gpt2") == 0) {
     /* Build GPT-2 config */
-    GPT2Config gpt2_cfg;
-    gpt2_cfg.vocab_size = poly_model_config_get_int(cfg, "vocab_size", 50257);
-    gpt2_cfg.n_embd = poly_model_config_get_int(cfg, "n_embd", 768);
-    gpt2_cfg.n_head = poly_model_config_get_int(cfg, "n_head", 12);
-    gpt2_cfg.n_layer = poly_model_config_get_int(cfg, "n_layer", 12);
+    GPT2Config gpt2_cfg = poly_gpt2_config_default();
+    gpt2_cfg.vocab_size  = poly_model_config_get_int(cfg, "vocab_size", gpt2_cfg.vocab_size);
+    gpt2_cfg.n_embd      = poly_model_config_get_int(cfg, "n_embd", gpt2_cfg.n_embd);
+    gpt2_cfg.n_head      = poly_model_config_get_int(cfg, "n_head", gpt2_cfg.n_head);
+    gpt2_cfg.n_layer     = poly_model_config_get_int(cfg, "n_layer", gpt2_cfg.n_layer);
     gpt2_cfg.max_seq_len = max_seq_len > 0 ? max_seq_len :
-        poly_model_config_get_int(cfg, "n_positions", 1024);
-    gpt2_cfg.norm_eps = poly_model_config_get_float(cfg, "layer_norm_epsilon", 1e-5f);
+        poly_model_config_get_int(cfg, "n_positions", gpt2_cfg.max_seq_len);
+    gpt2_cfg.norm_eps    = poly_model_config_get_float(cfg, "layer_norm_epsilon", gpt2_cfg.norm_eps);
+    gpt2_cfg.batch_size  = max_batch > 0 ? max_batch : 1;
 
-    inst = poly_gpt2_build(&gpt2_cfg, max_batch > 0 ? max_batch : 1);
+    inst = poly_gpt2(&gpt2_cfg);
   } else {
     fprintf(stderr, "poly_hf_load: unsupported model_type '%s'\n", model_type);
     poly_model_config_free(cfg);

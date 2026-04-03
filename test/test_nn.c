@@ -159,6 +159,7 @@ TEST(nn, nn_embedding_registers_params) {
   PASS();
 }
 
+
 TEST(nn, embedding_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 

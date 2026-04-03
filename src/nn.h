@@ -49,6 +49,13 @@ PolyUOp *poly_embedding(PolyCtx *ctx, const char *prefix, PolyUOp *tokens,
 /* Causal attention mask: (T, T), 0 where allowed, -1e9 where masked. */
 PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T);
 
+/* ── Multi-Head Attention ──────────────────────────────────────────── */
+
+/* SDPA: Q @ K.T / sqrt(d) + mask + softmax → @ V. No projections. */
+PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
+                   PolyUOp *mask, int is_causal);
+
+
 #ifdef __cplusplus
 }
 #endif

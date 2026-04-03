@@ -1789,48 +1789,6 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
 
 /* ── Additional composed ops ─────────────────────────────────────────── */
 
-PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
-                       PolyUOp *mask, int is_causal) {
-  int64_t q_shape[POLY_MAX_DIMS], k_shape[POLY_MAX_DIMS], v_shape[POLY_MAX_DIMS];
-  int q_ndim, k_ndim, v_ndim;
-  q_ndim = uop_shape(ctx, q, q_shape);
-  k_ndim = uop_shape(ctx, k, k_shape);
-  v_ndim = uop_shape(ctx, v, v_shape);
-  if (q_ndim < 2 || k_ndim < 2 || v_ndim < 2) return NULL;
-
-  int64_t d_k = q_shape[q_ndim - 1];
-  double scale = 1.0 / sqrt((double)d_k);
-
-  int64_t k_perm[POLY_MAX_DIMS];
-  for (int i = 0; i < k_ndim; i++) k_perm[i] = i;
-  k_perm[k_ndim - 2] = k_ndim - 1;
-  k_perm[k_ndim - 1] = k_ndim - 2;
-  PolyUOp *k_t = poly_permute(ctx, k, k_perm, k_ndim);
-
-  PolyUOp *scores = poly_dot(ctx, q, k_t);
-  scores = poly_alu2(ctx, POLY_OP_MUL, scores, poly_const_float(ctx, scale));
-
-  if (is_causal) {
-    int64_t seq_q = q_shape[q_ndim - 2];
-    int64_t seq_k = k_shape[k_ndim - 2];
-    PolyUOp *ones = poly_full(ctx, (int64_t[]){seq_q, seq_k}, 2, 1.0);
-    PolyUOp *tril_m = poly_tril(ctx, ones, 0);
-    PolyUOp *zero = poly_const_float(ctx, 0.0);
-    PolyUOp *neg_inf = poly_const_float(ctx, -1e9);
-    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, tril_m, poly_const_float(ctx, 0.5));
-    PolyUOp *cmask = poly_alu3(ctx, POLY_OP_WHERE, cond, neg_inf, zero);
-    scores = poly_add(ctx, scores, cmask);
-  }
-
-  if (mask) {
-    scores = poly_add(ctx, scores, mask);
-  }
-
-  PolyUOp *attn = poly_softmax(ctx, scores, -1);
-
-  return poly_dot(ctx, attn, v);
-}
-
 PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x,
                        PolyUOp *freqs_cos, PolyUOp *freqs_sin) {
   int64_t shape[POLY_MAX_DIMS]; int ndim;

@@ -208,3 +208,47 @@ PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T) {
       poly_const_float(ctx, 0.0)
   );
 }
+
+/* ── Scaled Dot-Product Attention ───────────────────────────────────── */
+
+PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
+                   PolyUOp *mask, int is_causal) {
+  int64_t q_shape[POLY_MAX_DIMS], k_shape[POLY_MAX_DIMS];
+  int q_ndim = poly_uop_ndim(ctx, q);
+  int k_ndim = poly_uop_ndim(ctx, k);
+  int v_ndim = poly_uop_ndim(ctx, v);
+  if (q_ndim < 2 || k_ndim < 2 || v_ndim < 2) return NULL;
+  const int64_t *q_dims = poly_uop_dims(ctx, q);
+  const int64_t *k_dims = poly_uop_dims(ctx, k);
+  if (!q_dims || !k_dims) return NULL;
+
+  int64_t d_k = q_dims[q_ndim - 1];
+  double scale = 1.0 / sqrt((double)d_k);
+
+  int64_t k_perm[POLY_MAX_DIMS];
+  for (int i = 0; i < k_ndim; i++) k_perm[i] = i;
+  k_perm[k_ndim - 2] = k_ndim - 1;
+  k_perm[k_ndim - 1] = k_ndim - 2;
+  PolyUOp *k_t = poly_permute(ctx, k, k_perm, k_ndim);
+
+  PolyUOp *scores = poly_dot(ctx, q, k_t);
+  scores = poly_alu2(ctx, POLY_OP_MUL, scores, poly_const_float(ctx, scale));
+
+  if (is_causal) {
+    int64_t seq_q = q_dims[q_ndim - 2];
+    int64_t seq_k = k_dims[k_ndim - 2];
+    PolyUOp *ones = poly_full(ctx, (int64_t[]){seq_q, seq_k}, 2, 1.0);
+    PolyUOp *tril_m = poly_tril(ctx, ones, 0);
+    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, tril_m,
+                               poly_const_float(ctx, 0.5));
+    PolyUOp *cmask = poly_alu3(ctx, POLY_OP_WHERE, cond,
+                                poly_const_float(ctx, -1e9),
+                                poly_const_float(ctx, 0.0));
+    scores = poly_add(ctx, scores, cmask);
+  }
+
+  if (mask) scores = poly_add(ctx, scores, mask);
+
+  return poly_dot(ctx, poly_softmax(ctx, scores, -1), v);
+}
+

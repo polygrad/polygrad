@@ -726,7 +726,7 @@ async function createWasmBackend(device) {
     mlp(specJson) {
       const bytes = new TextEncoder().encode(specJson)
       const specPtr = allocBytes(bytes)
-      const inst = Module._poly_mlp_instance(specPtr, bytes.length)
+      const inst = Module._poly_mlp_from_json(specPtr, bytes.length)
       Module._free(specPtr)
       if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
         Module._poly_instance_free(inst)

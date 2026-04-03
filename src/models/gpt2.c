@@ -10,12 +10,13 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "models.h"
+#include "gpt2.h"
 #include "../nn.h"
 #include "../tensor.h"
 #include "../instance.h"
 #include "../frontend.h"
 #include "../scheduler.h"
+#include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,9 +24,23 @@
 
 
 
+/* ── GPT-2 Config ───────────────────────────────────────────────── */
+
+GPT2Config poly_gpt2_config_default(void) {
+  return (GPT2Config){
+    .vocab_size  = 50257,
+    .n_embd      = 768,
+    .n_head      = 12,
+    .n_layer     = 12,
+    .max_seq_len = 1024,
+    .batch_size  = 1,
+    .norm_eps    = 1e-5f,
+  };
+}
+
 /* ── GPT-2 Builder ───────────────────────────────────────────────── */
 
-PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
+PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1)
     return NULL;
 
@@ -34,12 +49,12 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   int H = cfg->n_head;
   int L = cfg->n_layer;
   int T = cfg->max_seq_len;
-  int B = max_batch > 0 ? max_batch : 1;
+  int B = cfg->batch_size > 0 ? cfg->batch_size : 1;
   int head_dim = D / H;
   double eps = cfg->norm_eps > 0 ? (double)cfg->norm_eps : 1e-5;
 
   if (D % H != 0) {
-    fprintf(stderr, "poly_gpt2_build: n_embd (%d) not divisible by n_head (%d)\n", D, H);
+    fprintf(stderr, "poly_gpt2: n_embd (%d) not divisible by n_head (%d)\n", D, H);
     return NULL;
   }
 
@@ -104,19 +119,8 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
     k = poly_permute(ctx, poly_reshape(ctx, k, mh, 4), perm, 4);
     v = poly_permute(ctx, poly_reshape(ctx, v, mh, 4), perm, 4);
 
-    /* scores = Q @ K.T / sqrt(hd) + mask */
-    PolyUOp *kt = poly_permute(ctx, k, (int64_t[]){ 0, 1, 3, 2 }, 4);
-    PolyUOp *scores = poly_contiguous(ctx,poly_dot(ctx, q, kt));
-    scores = poly_alu2(
-        ctx, POLY_OP_MUL, scores,
-        poly_const_float(ctx, 1.0 / sqrt((double)head_dim))
-    );
-    PolyUOp *mask_exp = poly_expand(ctx, mask, (int64_t[]){ B, H, T, T }, 4);
-    scores = poly_contiguous(ctx,poly_alu2(ctx, POLY_OP_ADD, scores, mask_exp));
-
-    /* softmax -> attn @ V */
-    PolyUOp *attn = poly_contiguous(ctx,poly_softmax(ctx, scores, -1));
-    PolyUOp *attn_out = poly_contiguous(ctx,poly_dot(ctx, attn, v));
+    /* Scaled dot-product attention with causal mask */
+    PolyUOp *attn_out = poly_contiguous(ctx, poly_sdpa(ctx, q, k, v, mask, 0));
 
     /* Merge heads: (B,H,T,hd) -> (B,T,D) */
     attn_out = poly_reshape(
@@ -146,12 +150,10 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   /* Final layernorm */
   h = poly_contiguous(ctx,poly_layernorm(ctx, "ln_f", h, D, eps));
 
-  /* LM head: h @ wte.T (weight tying) */
+  /* LM head: weight-tied linear (h @ wte.T, no bias) */
   PolyUOp *wte = poly_ctx_get(ctx, "wte.weight");
   int64_t wte_shape[] = { V, D };
-  PolyUOp *wte_2d = poly_reshape(ctx, wte, wte_shape, 2);
-  int64_t perm_t[] = { 1, 0 };
-  PolyUOp *logits = poly_dot(ctx, h, poly_permute(ctx, wte_2d, perm_t, 2));
+  PolyUOp *logits = poly_linear_apply(ctx, h, poly_reshape(ctx, wte, wte_shape, 2), NULL);
 
   /* Store output */
   PolyUOp *fwd_store = poly_store_val(ctx, out_buf, logits);
@@ -171,5 +173,26 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   PolyInstance *inst = poly_instance_from_ctx(ctx);
   if (inst) poly_instance_own_ctx(inst);
 
+  return inst;
+}
+
+PolyInstance *poly_gpt2_from_json(const char *json, int len) {
+  if (!json || len <= 0) return NULL;
+
+  cJSON *root = cJSON_ParseWithLength(json, (size_t)len);
+  if (!root) return NULL;
+
+  GPT2Config cfg = poly_gpt2_config_default();
+  cJSON *v;
+  if ((v = cJSON_GetObjectItem(root, "vocab_size")))          cfg.vocab_size  = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_embd")))              cfg.n_embd      = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_head")))              cfg.n_head      = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_layer")))             cfg.n_layer     = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "n_positions")))         cfg.max_seq_len = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "batch_size")))          cfg.batch_size  = v->valueint;
+  if ((v = cJSON_GetObjectItem(root, "layer_norm_epsilon")))  cfg.norm_eps    = (float)v->valuedouble;
+
+  PolyInstance *inst = poly_gpt2(&cfg);
+  cJSON_Delete(root);
   return inst;
 }

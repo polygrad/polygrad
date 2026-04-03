@@ -212,10 +212,11 @@ TEST(hf, gpt2_build_tiny) {
     .n_head = 2,
     .n_layer = 1,
     .max_seq_len = 8,
+    .batch_size = 1,
     .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2_build(&cfg, 1);
+  PolyInstance *inst = poly_gpt2(&cfg);
   ASSERT_NOT_NULL(inst);
 
   /* Check param count: wte + wpe + 1 layer (12 params) + ln_f (2) = 16 */
@@ -258,10 +259,11 @@ TEST(hf, gpt2_build_multi_layer) {
     .n_head = 4,
     .n_layer = 3,
     .max_seq_len = 16,
+    .batch_size = 2,
     .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2_build(&cfg, 2);
+  PolyInstance *inst = poly_gpt2(&cfg);
   ASSERT_NOT_NULL(inst);
 
   /* 2 (wte+wpe) + 3*12 (layers) + 2 (ln_f) = 40 params */
@@ -475,10 +477,11 @@ TEST(hf, gpt2_forward_e2e) {
     .n_head = 2,
     .n_layer = 1,
     .max_seq_len = 8,
+    .batch_size = 1,
     .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2_build(&cfg, 1);
+  PolyInstance *inst = poly_gpt2(&cfg);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */
@@ -553,10 +556,11 @@ TEST(hf, gpt2_training_loss_decreases) {
     .n_head = 2,
     .n_layer = 1,
     .max_seq_len = 8,
+    .batch_size = 1,
     .norm_eps = 1e-5f
   };
 
-  PolyInstance *inst = poly_gpt2_build(&cfg, 1);
+  PolyInstance *inst = poly_gpt2(&cfg);
   ASSERT_NOT_NULL(inst);
 
   /* Initialize weights with small random values */

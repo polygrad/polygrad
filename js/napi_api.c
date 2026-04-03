@@ -1007,14 +1007,14 @@ static napi_value napi_poly_instance_set_device(napi_env env, napi_callback_info
   return result;
 }
 
-static napi_value napi_poly_mlp_instance(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_mlp_from_json(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   size_t spec_len = 0;
   char *spec = read_utf8_arg(env, argv[0], &spec_len);
   if (!spec) return NULL;
-  PolyInstance *inst = poly_mlp_instance(spec, (int)spec_len);
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)spec_len);
   free(spec);
   if (!inst) {
     napi_value result;
@@ -1605,7 +1605,7 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_instance_from_ir", napi_poly_instance_from_ir),
     DECLARE_NAPI_METHOD("poly_instance_free", napi_poly_instance_free),
     DECLARE_NAPI_METHOD("poly_instance_set_device", napi_poly_instance_set_device),
-    DECLARE_NAPI_METHOD("poly_mlp_instance", napi_poly_mlp_instance),
+    DECLARE_NAPI_METHOD("poly_mlp_from_json", napi_poly_mlp_from_json),
     DECLARE_NAPI_METHOD("poly_tabm_instance", napi_poly_tabm_instance),
     DECLARE_NAPI_METHOD("poly_nam_instance", napi_poly_nam_instance),
     DECLARE_NAPI_METHOD("poly_instance_param_count", napi_poly_instance_param_count),

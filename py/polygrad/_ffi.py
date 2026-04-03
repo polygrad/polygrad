@@ -502,8 +502,8 @@ def _declare_signatures(lib):
         ctypes.c_float, ctypes.c_float]
 
     # MLP family builder (model_mlp.h)
-    lib.poly_mlp_instance.restype = _ptr
-    lib.poly_mlp_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.poly_mlp_from_json.restype = _ptr
+    lib.poly_mlp_from_json.argtypes = [ctypes.c_char_p, ctypes.c_int]
 
     # TabM family builder (model_tabm.h)
     lib.poly_tabm_instance.restype = _ptr

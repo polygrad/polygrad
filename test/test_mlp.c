@@ -22,7 +22,7 @@ static const char *no_bias_spec =
 /* ── Tests ───────────────────────────────────────────────────────────── */
 
 TEST(mlp, create_simple) {
-  PolyInstance *inst = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
                                           (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
@@ -62,7 +62,7 @@ TEST(mlp, create_simple) {
 }
 
 TEST(mlp, create_no_bias) {
-  PolyInstance *inst = poly_mlp_instance(no_bias_spec,
+  PolyInstance *inst = poly_mlp_from_json(no_bias_spec,
                                           (int)strlen(no_bias_spec));
   ASSERT_NOT_NULL(inst);
 
@@ -82,9 +82,9 @@ TEST(mlp, create_no_bias) {
 
 TEST(mlp, deterministic_init) {
   /* Same seed should produce identical weights */
-  PolyInstance *inst1 = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec,
                                            (int)strlen(simple_mlp_spec));
-  PolyInstance *inst2 = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst2 = poly_mlp_from_json(simple_mlp_spec,
                                            (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
@@ -107,9 +107,9 @@ TEST(mlp, cross_seed_divergence) {
     "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":99}";
 
-  PolyInstance *inst1 = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec,
                                            (int)strlen(simple_mlp_spec));
-  PolyInstance *inst2 = poly_mlp_instance(spec_seed99,
+  PolyInstance *inst2 = poly_mlp_from_json(spec_seed99,
                                            (int)strlen(spec_seed99));
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
@@ -132,7 +132,7 @@ TEST(mlp, cross_seed_divergence) {
 
 TEST(mlp, kaiming_bounds) {
   /* Kaiming init: values should be within [-sqrt(6/fan_in), +sqrt(6/fan_in)] */
-  PolyInstance *inst = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
                                           (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
@@ -155,7 +155,7 @@ TEST(mlp, kaiming_bounds) {
 }
 
 TEST(mlp, forward_produces_output) {
-  PolyInstance *inst = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
                                           (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
@@ -188,7 +188,7 @@ TEST(mlp, forward_produces_output) {
 
 TEST(mlp, forward_deterministic) {
   /* Same instance, same input -> same output */
-  PolyInstance *inst = poly_mlp_instance(simple_mlp_spec,
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
                                           (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
@@ -229,18 +229,18 @@ TEST(mlp, forward_deterministic) {
 
 TEST(mlp, null_and_invalid) {
   /* NULL input */
-  ASSERT_TRUE(poly_mlp_instance(NULL, 0) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json(NULL, 0) == NULL);
 
   /* Empty JSON */
-  ASSERT_TRUE(poly_mlp_instance("{}", 2) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json("{}", 2) == NULL);
 
   /* Missing layers */
   const char *no_layers = "{\"activation\":\"relu\"}";
-  ASSERT_TRUE(poly_mlp_instance(no_layers, (int)strlen(no_layers)) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json(no_layers, (int)strlen(no_layers)) == NULL);
 
   /* Too few layers */
   const char *one_layer = "{\"layers\":[4]}";
-  ASSERT_TRUE(poly_mlp_instance(one_layer, (int)strlen(one_layer)) == NULL);
+  ASSERT_TRUE(poly_mlp_from_json(one_layer, (int)strlen(one_layer)) == NULL);
 
   PASS();
 }
@@ -251,7 +251,7 @@ TEST(mlp, train_single_layer) {
     "{\"layers\":[2,1],\"activation\":\"none\",\"bias\":true,"
     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
@@ -293,7 +293,7 @@ TEST(mlp, train_multi_layer) {
     "{\"layers\":[1,4,1],\"activation\":\"relu\",\"bias\":true,"
     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
@@ -331,7 +331,7 @@ TEST(mlp, train_cross_entropy) {
     "{\"layers\":[2,4,3],\"activation\":\"relu\",\"bias\":true,"
     "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
 
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
@@ -368,7 +368,7 @@ TEST(mlp, train_batch2_mse) {
     "{\"layers\":[2,3,2],\"activation\":\"relu\",\"bias\":false,"
     "\"loss\":\"mse\",\"batch_size\":2,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
                                0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -396,7 +396,7 @@ TEST(mlp, train_batch4_cross_entropy) {
     "{\"layers\":[4,8,3],\"activation\":\"relu\",\"bias\":true,"
     "\"loss\":\"cross_entropy\",\"batch_size\":4,\"seed\":42}";
 
-  PolyInstance *inst = poly_mlp_instance(spec, (int)strlen(spec));
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
   poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
                                0.01f, 0.0f, 0.0f, 0.0f, 0.0f);

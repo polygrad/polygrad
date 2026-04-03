@@ -527,7 +527,7 @@ static PolyInstance *make_test_mlp(int n_in, int n_out) {
   snprintf(spec, sizeof(spec),
     "{\"layers\":[%d,4,%d],\"activation\":\"relu\",\"bias\":true,"
     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}", n_in, n_out);
-  return poly_mlp_instance(spec, (int)strlen(spec));
+  return poly_mlp_from_json(spec, (int)strlen(spec));
 }
 
 TEST(cuda, instance_set_device_cuda) {

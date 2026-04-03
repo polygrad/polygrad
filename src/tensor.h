@@ -152,8 +152,6 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
 
 /* ── Additional composed ops ─────────────────────────────────────── */
 
-PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
-                    PolyUOp *mask, int is_causal);
 PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin);
 PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);
 PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis);

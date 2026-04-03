@@ -70,7 +70,7 @@ class Instance:
             spec = json.dumps(spec)
         if isinstance(spec, str):
             spec = spec.encode('utf-8')
-        ptr = _get_lib().poly_mlp_instance(spec, len(spec))
+        ptr = _get_lib().poly_mlp_from_json(spec, len(spec))
         return Instance(ptr)
 
     @staticmethod

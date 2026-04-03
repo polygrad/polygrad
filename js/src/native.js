@@ -60,7 +60,7 @@ function createNativeBackend() {
       return inst
     },
     mlp(specJson) {
-      const inst = binding.poly_mlp_instance(specJson)
+      const inst = binding.poly_mlp_from_json(specJson)
       if (inst) binding.poly_instance_set_device(inst, 0)
       return inst
     },

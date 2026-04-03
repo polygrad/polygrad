@@ -1,7 +1,6 @@
 /*
  * poly_model_mlp.h -- MLP family builder for PolyInstance
  *
- * Creates PolyInstance from a JSON spec describing an MLP architecture.
  * Deterministic weight initialization via SplitMix64 PRNG.
  */
 
@@ -15,20 +14,21 @@
 extern "C" {
 #endif
 
-/* Create an MLP PolyInstance from JSON spec.
- *
- * Spec format:
- *   {
- *     "layers": [n_in, h1, ..., n_out],
- *     "activation": "relu"|"gelu"|"silu"|"tanh"|"sigmoid"|"none",
- *     "bias": true|false,
- *     "loss": "mse"|"none",
- *     "batch_size": N,
- *     "seed": 42
- *   }
- *
- * Returns NULL on error. */
-PolyInstance *poly_mlp_instance(const char *spec_json, int spec_len);
+#define POLY_MLP_MAX_LAYERS 32
+
+typedef struct {
+  int layers[POLY_MLP_MAX_LAYERS];  /* layer sizes: [n_in, h1, ..., n_out] */
+  int n_layers;                      /* number of entries in layers[] */
+  const char *activation;            /* "relu"|"gelu"|"silu"|"tanh"|"sigmoid"|"none" */
+  int use_bias;                      /* 1 = bias, 0 = no bias */
+  const char *loss;                  /* "mse"|"cross_entropy"|"none" */
+  int batch_size;
+  uint64_t seed;
+} MLPConfig;
+
+MLPConfig poly_mlp_config_default(void);
+PolyInstance *poly_mlp(const MLPConfig *cfg);
+PolyInstance *poly_mlp_from_json(const char *json, int len);
 
 /* Deterministic parameter initialization.
  * Uses SplitMix64 PRNG seeded by (seed, FNV1a(name)).
