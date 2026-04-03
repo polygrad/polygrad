@@ -91,6 +91,24 @@ SEXP C_poly_alu2(SEXP ctx_ptr, SEXP op, SEXP a, SEXP b) {
   return wrap_ptr(poly_alu2(ctx, asInteger(op), unwrap_ptr(a), unwrap_ptr(b)));
 }
 
+/* ── Broadcasting binary ops ─────────────────────────────────────────── */
+
+SEXP C_poly_add(SEXP ctx_ptr, SEXP a, SEXP b) {
+  return wrap_ptr(poly_add(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+}
+
+SEXP C_poly_sub(SEXP ctx_ptr, SEXP a, SEXP b) {
+  return wrap_ptr(poly_sub(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+}
+
+SEXP C_poly_mul(SEXP ctx_ptr, SEXP a, SEXP b) {
+  return wrap_ptr(poly_mul(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+}
+
+SEXP C_poly_div(SEXP ctx_ptr, SEXP a, SEXP b) {
+  return wrap_ptr(poly_div(unwrap_ptr(ctx_ptr), unwrap_ptr(a), unwrap_ptr(b)));
+}
+
 /* ── Movement ops ────────────────────────────────────────────────────── */
 
 SEXP C_poly_reshape(SEXP ctx_ptr, SEXP src, SEXP dims) {
@@ -259,6 +277,10 @@ static const R_CallMethodDef CallEntries[] = {
   {"C_poly_buffer_f32",    (DL_FUNC) &C_poly_buffer_f32,    2},
   {"C_poly_alu1",          (DL_FUNC) &C_poly_alu1,          3},
   {"C_poly_alu2",          (DL_FUNC) &C_poly_alu2,          4},
+  {"C_poly_add",           (DL_FUNC) &C_poly_add,           3},
+  {"C_poly_sub",           (DL_FUNC) &C_poly_sub,           3},
+  {"C_poly_mul",           (DL_FUNC) &C_poly_mul,           3},
+  {"C_poly_div",           (DL_FUNC) &C_poly_div,           3},
   {"C_poly_reshape",       (DL_FUNC) &C_poly_reshape,       3},
   {"C_poly_permute",       (DL_FUNC) &C_poly_permute,       3},
   {"C_poly_flip",          (DL_FUNC) &C_poly_flip,          3},

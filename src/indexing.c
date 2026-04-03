@@ -24,8 +24,15 @@ PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim,
 
   int64_t strides[POLY_MAX_DIMS];
   strides[ndim - 1] = 1;
-  for (int i = ndim - 2; i >= 0; i--)
+  for (int i = ndim - 2; i >= 0; i--) {
     strides[i] = strides[i + 1] * shape.dims[i + 1];
+    if (__builtin_mul_overflow(strides[i + 1], shape.dims[i + 1], &strides[i])) {
+      fprintf(stderr, "poly_compute_flat_index: stride overflow at dim %d: %lld * %lld\n",
+              i, (long long)strides[i+1], (long long)shape.dims[i+1]);
+      for (int j = 0; j < ndim; j++)
+        fprintf(stderr, "  shape[%d] = %lld\n", j, (long long)shape.dims[j]);
+    }
+  }
 
   PolyUOp *flat = NULL;
   for (int i = 0; i < ndim; i++) {
@@ -186,12 +193,14 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
   /* RESHAPE: flatten + decompose */
   case POLY_OP_RESHAPE: {
     if (arg.kind != POLY_ARG_INT_TUPLE) return false;
-    /* out_shape comes from the arg (the target shape) */
     PolyShape out_shape;
     out_shape.dims = arg.int_tuple.vals;
     out_shape.ndim = arg.int_tuple.n;
 
-    poly_reshape_indices(ctx, out_rngs, n_out, out_shape,
+    /* Use the RESHAPE arg's ndim as the authoritative output ndim,
+     * not n_out (which may differ if range propagation assigned
+     * a different number of ranges to this node). */
+    poly_reshape_indices(ctx, out_rngs, out_shape.ndim, out_shape,
                          in_rngs, in_shape.ndim, in_shape);
     *n_in_out = in_shape.ndim;
     return true;

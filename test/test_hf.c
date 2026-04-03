@@ -455,13 +455,12 @@ TEST(hf, poly_linear_no_bias) {
 TEST(hf, poly_causal_mask_shape) {
   PolyCtx *ctx = poly_ctx_new();
 
-  int64_t out_shape[8];
-  int out_ndim;
-  PolyUOp *mask = poly_causal_mask(ctx, 5, out_shape, &out_ndim);
+  PolyUOp *mask = poly_causal_mask(ctx, 5);
   ASSERT_NOT_NULL(mask);
-  ASSERT_INT_EQ(out_ndim, 2);
-  ASSERT_INT_EQ(out_shape[0], 5);
-  ASSERT_INT_EQ(out_shape[1], 5);
+  PolyShape s = poly_uop_shape(ctx, mask);
+  ASSERT_INT_EQ(s.ndim, 2);
+  ASSERT_INT_EQ(s.dims[0], 5);
+  ASSERT_INT_EQ(s.dims[1], 5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -499,7 +498,7 @@ TEST(hf, gpt2_forward_e2e) {
     }
   }
 
-  /* Set input tokens: [0, 1, 2, 3] */
+  /* Set input tokens */
   int nb = poly_instance_buf_count(inst);
   for (int i = 0; i < nb; i++) {
     const char *name = poly_instance_buf_name(inst, i);

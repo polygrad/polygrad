@@ -190,6 +190,12 @@ static SlotCache *slot_cache_build(
         }
       }
     }
+
+    /* Check const_registry for anonymous constant buffers (e.g. arange in gather) */
+    if (!c->slot_data[s]) {
+      void *const_data = poly_const_registry_lookup(inst->ctx, slot_uop);
+      if (const_data) c->slot_data[s] = const_data;
+    }
   }
 
   /* Build IO fast-patch table: which slots correspond to INPUT/TARGET */

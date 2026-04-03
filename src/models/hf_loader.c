@@ -139,7 +139,29 @@ PolyInstance *poly_hf_load(
         if (buf_name && strcmp(buf_name, name) == 0) {
           int64_t numel;
           float *buf_data = poly_instance_buf_data(inst, b, &numel);
-          if (buf_data && numel == views[i].numel) {
+
+          /* Check for Conv1D transpose: HF stores (in, out), model expects (out, in).
+           * Detect: same numel, both 2D, dims swapped. */
+          int64_t buf_shape[8];
+          int buf_ndim = poly_instance_buf_shape(inst, b, buf_shape, 8);
+          int needs_transpose = 0;
+          if (buf_data && numel == views[i].numel &&
+              buf_ndim == 2 && views[i].ndim == 2 &&
+              buf_shape[0] == views[i].shape[1] &&
+              buf_shape[1] == views[i].shape[0] &&
+              buf_shape[0] != buf_shape[1]) {
+            needs_transpose = 1;
+          }
+
+          if (buf_data && numel == views[i].numel && needs_transpose) {
+            /* Transpose (R, C) -> (C, R) */
+            int64_t R = views[i].shape[0], C = views[i].shape[1];
+            for (int64_t r = 0; r < R; r++)
+              for (int64_t c = 0; c < C; c++)
+                buf_data[c * R + r] = f32_data[r * C + c];
+            loaded_count++;
+            found = 1;
+          } else if (buf_data && numel == views[i].numel) {
             memcpy(buf_data, f32_data, numel * sizeof(float));
             loaded_count++;
             found = 1;

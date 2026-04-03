@@ -327,6 +327,109 @@ static PolyUOp *tri_mask(PolyCtx *ctx, const int64_t *shape, int diagonal, bool 
 /*  Public functions                                                     */
 /* ══════════════════════════════════════════════════════════════════════ */
 
+/* ── Broadcasting (tinygrad _broadcasted / _broadcast_to) ────────────── */
+
+PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x,
+                           const int64_t *shape, int ndim) {
+  if (!ctx || !x || !shape || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  int64_t x_shape[POLY_MAX_DIMS];
+  int x_ndim = uop_shape(ctx, x, x_shape);
+  if (x_ndim < 0) return x;  /* shapeless (CONST scalar) -- pass through */
+  if (ndim < x_ndim) return NULL;  /* can't broadcast to fewer dims */
+
+  /* Already matching */
+  if (x_ndim == ndim) {
+    bool same = true;
+    for (int i = 0; i < ndim; i++)
+      if (x_shape[i] != shape[i]) { same = false; break; }
+    if (same) return x;
+  }
+
+  /* Left-pad with 1s to match ndim (tinygrad _align_left) */
+  int64_t aligned[POLY_MAX_DIMS];
+  int pad = ndim - x_ndim;
+  for (int i = 0; i < pad; i++) aligned[i] = 1;
+  for (int i = 0; i < x_ndim; i++) aligned[pad + i] = x_shape[i];
+
+  /* Validate: each aligned dim must be 1 or equal to target */
+  for (int i = 0; i < ndim; i++) {
+    if (aligned[i] != shape[i] && aligned[i] != 1) {
+      fprintf(stderr, "poly_broadcast_to: incompatible dim %d: %lld vs %lld\n",
+              i, (long long)aligned[i], (long long)shape[i]);
+      return NULL;
+    }
+  }
+
+  PolyUOp *r = poly_reshape(ctx, x, aligned, ndim);
+
+  /* Expand where aligned[i]==1 and shape[i]>1 */
+  bool need_expand = false;
+  for (int i = 0; i < ndim; i++)
+    if (aligned[i] != shape[i]) { need_expand = true; break; }
+  if (need_expand)
+    r = poly_expand(ctx, r, (int64_t *)shape, ndim);
+  return r;
+}
+
+bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b,
+                         int64_t *out_shape, int *out_ndim) {
+  int64_t sa[POLY_MAX_DIMS], sb[POLY_MAX_DIMS];
+  int na = uop_shape(ctx, *a, sa);
+  int nb = uop_shape(ctx, *b, sb);
+
+  /* Scalars or shapeless -- no broadcast needed */
+  if (na <= 0 && nb <= 0) { *out_ndim = 0; return true; }
+  if (na <= 0) { na = 0; }
+  if (nb <= 0) { nb = 0; }
+
+  /* Compute broadcast shape (tinygrad _broadcast_shape) */
+  int nd = na > nb ? na : nb;
+  if (nd > POLY_MAX_DIMS) { *out_ndim = 0; return false; }
+  int pa = nd - na, pb = nd - nb;
+  for (int i = 0; i < nd; i++) {
+    int64_t da = (i >= pa) ? sa[i - pa] : 1;
+    int64_t db = (i >= pb) ? sb[i - pb] : 1;
+    if (da != db && da != 1 && db != 1) {
+      fprintf(stderr, "poly_broadcast_pair: incompatible shapes at dim %d: %lld vs %lld\n",
+              i, (long long)da, (long long)db);
+      *out_ndim = 0;
+      return false;
+    }
+    out_shape[i] = da > db ? da : db;
+  }
+  *out_ndim = nd;
+
+  *a = poly_broadcast_to(ctx, *a, out_shape, nd);
+  *b = poly_broadcast_to(ctx, *b, out_shape, nd);
+  return true;
+}
+
+/* ── Broadcasting binary ops ──────────────────────────────────────────── */
+
+PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
+  return poly_alu2(ctx, POLY_OP_ADD, a, b);
+}
+
+PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
+  return poly_alu2(ctx, POLY_OP_SUB, a, b);
+}
+
+PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
+  return poly_alu2(ctx, POLY_OP_MUL, a, b);
+}
+
+PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
+  return poly_alu2(ctx, POLY_OP_FDIV, a, b);
+}
+
 /* ── Math ────────────────────────────────────────────────────────────── */
 
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x) {
@@ -648,27 +751,37 @@ PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
     poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, t, cf(ctx, x, 1.0))));
 }
 
-/* ── Comparisons ─────────────────────────────────────────────────────── */
+/* ── Comparisons (broadcasting) ──────────────────────────────────────── */
 
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
   return poly_alu3(ctx, POLY_OP_WHERE, ne, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
 
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu2(ctx, POLY_OP_CMPNE, a, b);
 }
 
 PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu2(ctx, POLY_OP_CMPLT, b, a);
 }
 
 PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *lt = poly_alu2(ctx, POLY_OP_CMPLT, a, b);
   return poly_alu3(ctx, POLY_OP_WHERE, lt, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
 
 PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *gt_val = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
   return poly_alu3(ctx, POLY_OP_WHERE, gt_val, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
 }
@@ -683,14 +796,21 @@ PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
 }
 
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &x, &y, s, &nd);
+  poly_broadcast_pair(ctx, &cond, &x, s, &nd);
   return poly_alu3(ctx, POLY_OP_WHERE, cond, x, y);
 }
 
 PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu2(ctx, POLY_OP_MAX, a, b);
 }
 
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t s[POLY_MAX_DIMS]; int nd;
+  poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu1(ctx, POLY_OP_NEG,
     poly_alu2(ctx, POLY_OP_MAX,
       poly_alu1(ctx, POLY_OP_NEG, a),
@@ -915,10 +1035,10 @@ PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
   int64_t keep_shape[POLY_MAX_DIMS];
   int keep_ndim = 0;
   PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1, keep_shape, &keep_ndim);
-  PolyUOp *shifted = poly_alu2(ctx, POLY_OP_SUB, x_view, m); /* keepdim=1 broadcasts */
+  PolyUOp *shifted = poly_sub(ctx, x_view, m);
   PolyUOp *e = poly_exp(ctx, shifted);
   PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1, keep_shape, &keep_ndim);
-  PolyUOp *lse_keep = poly_alu2(ctx, POLY_OP_ADD, poly_log(ctx, s), m);
+  PolyUOp *lse_keep = poly_add(ctx, poly_log(ctx, s), m);
   if (keepdim) return lse_keep;
 
   int64_t final_shape[POLY_MAX_DIMS];
@@ -1605,7 +1725,7 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   int64_t V = table_shape[0];
   int64_t D = table_shape[1];
 
-  PolyUOp *arange_buf = poly_buffer_f32(ctx, V);
+  PolyUOp *arange_buf = poly_arange(ctx, 0.0, (double)V, 1.0);
 
   int64_t idx_us_shape[POLY_MAX_DIMS];
   int idx_us_ndim = idx_ndim + 1;
@@ -1693,21 +1813,11 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
     PolyUOp *neg_inf = poly_const_float(ctx, -1e9);
     PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, tril_m, poly_const_float(ctx, 0.5));
     PolyUOp *cmask = poly_alu3(ctx, POLY_OP_WHERE, cond, neg_inf, zero);
-    int64_t scores_shape[POLY_MAX_DIMS]; int scores_ndim;
-    scores_ndim = uop_shape(ctx, scores, scores_shape);
-    if (scores_ndim > 2) {
-      int64_t bc[POLY_MAX_DIMS];
-      for (int i = 0; i < scores_ndim - 2; i++) bc[i] = 1;
-      bc[scores_ndim - 2] = seq_q;
-      bc[scores_ndim - 1] = seq_k;
-      cmask = poly_reshape(ctx, cmask, bc, scores_ndim);
-      cmask = poly_expand(ctx, cmask, scores_shape, scores_ndim);
-    }
-    scores = poly_alu2(ctx, POLY_OP_ADD, scores, cmask);
+    scores = poly_add(ctx, scores, cmask);
   }
 
   if (mask) {
-    scores = poly_alu2(ctx, POLY_OP_ADD, scores, mask);
+    scores = poly_add(ctx, scores, mask);
   }
 
   PolyUOp *attn = poly_softmax(ctx, scores, -1);

@@ -47,8 +47,7 @@ PolyUOp *poly_embedding(PolyCtx *ctx, const char *prefix, PolyUOp *tokens,
 /* ── Transformer building blocks ───────────────────────────────────── */
 
 /* Causal attention mask: (T, T), 0 where allowed, -1e9 where masked. */
-PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T,
-                           int64_t *out_shape, int *out_ndim);
+PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T);
 
 #ifdef __cplusplus
 }

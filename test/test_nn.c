@@ -159,6 +159,59 @@ TEST(nn, nn_embedding_registers_params) {
   PASS();
 }
 
+TEST(nn, embedding_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* table: (4, 3) weight matrix */
+  PolyUOp *table_buf = poly_buffer_f32(ctx, 12);
+  int64_t table_shape[] = { 4, 3 };
+  PolyUOp *table = poly_reshape(ctx, table_buf, table_shape, 2);
+
+  /* indices: (2,) tokens */
+  PolyUOp *idx_buf = poly_buffer_f32(ctx, 2);
+  int64_t idx_shape[] = { 2 };
+  PolyUOp *indices = poly_reshape(ctx, idx_buf, idx_shape, 1);
+
+  PolyUOp *result = poly_embedding_apply(ctx, indices, table);
+  ASSERT_NOT_NULL(result);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
+  PolyUOp *store = poly_store_val(ctx, out_buf, result);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float table_data[] = {
+    1.0f, 2.0f, 3.0f,
+    4.0f, 5.0f, 6.0f,
+    7.0f, 8.0f, 9.0f,
+    10.0f, 11.0f, 12.0f
+  };
+  float idx_data[] = { 0.0f, 2.0f };
+  float out_data[6] = {0};
+
+  /* poly_gather internally creates an arange const buffer --
+   * const_registry fallback in build_slot_data_from_bindings should bind it */
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(out_buf, out_data),
+    POLY_BIND_HOST(idx_buf, idx_data),
+    POLY_BIND_HOST(table_buf, table_data),
+  };
+  int ret = poly_realize(ctx, sink, bindings, 3);
+  ASSERT_INT_EQ(ret, 0);
+
+  fprintf(stderr, "  embedding out: [%.1f %.1f %.1f | %.1f %.1f %.1f]\n",
+          out_data[0], out_data[1], out_data[2],
+          out_data[3], out_data[4], out_data[5]);
+  ASSERT_FLOAT_EQ(out_data[0], 1.0f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[1], 2.0f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[2], 3.0f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[3], 7.0f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[4], 8.0f, 1e-4);
+  ASSERT_FLOAT_EQ(out_data[5], 9.0f, 1e-4);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── Existing composed op tests (kept, no PolyTensor dependency) ────── */
 
 TEST(nn, matmul_invalid_shape_returns_null) {

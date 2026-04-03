@@ -27,6 +27,25 @@ void poly_const_registry_cleanup(PolyCtx *ctx);
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
 
+/* ── Broadcasting (matches tinygrad's _broadcasted) ─────────────────── */
+
+/* Broadcast a UOp to a target shape via reshape + expand.
+ * Equivalent to tinygrad's _broadcast_to: left-pad dims with 1, then expand. */
+PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim);
+
+/* Broadcast two UOps to a common shape (tinygrad's _broadcasted).
+ * Returns the broadcast shape via out_shape/out_ndim. Returns false on
+ * incompatible shapes. */
+bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b,
+                         int64_t *out_shape, int *out_ndim);
+
+/* ── Broadcasting binary ops (like tinygrad Tensor.add/mul/sub) ─────── */
+
+PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+
 /* ── Composed elementwise ops (shape-free, UOp-level) ────────────────── */
 
 /* Math */

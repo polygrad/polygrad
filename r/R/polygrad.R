@@ -185,25 +185,25 @@ Tensor <- setRefClass("Tensor",
 
     add = function(other) {
       other <- ensure_tensor(other)
-      u <- .Call(C_poly_alu2, ctx, .polygrad_env$OPS$ADD, uop, other$uop)
+      u <- .Call(C_poly_add, ctx, uop, other$uop)
       make_result(u, broadcast_shape(other$shape), list(.self, other))
     },
 
     sub = function(other) {
       other <- ensure_tensor(other)
-      u <- .Call(C_poly_alu2, ctx, .polygrad_env$OPS$SUB, uop, other$uop)
+      u <- .Call(C_poly_sub, ctx, uop, other$uop)
       make_result(u, broadcast_shape(other$shape), list(.self, other))
     },
 
     mul = function(other) {
       other <- ensure_tensor(other)
-      u <- .Call(C_poly_alu2, ctx, .polygrad_env$OPS$MUL, uop, other$uop)
+      u <- .Call(C_poly_mul, ctx, uop, other$uop)
       make_result(u, broadcast_shape(other$shape), list(.self, other))
     },
 
     fdiv = function(other) {
       other <- ensure_tensor(other)
-      u <- .Call(C_poly_alu2, ctx, .polygrad_env$OPS$FDIV, uop, other$uop)
+      u <- .Call(C_poly_div, ctx, uop, other$uop)
       make_result(u, broadcast_shape(other$shape), list(.self, other))
     },
 

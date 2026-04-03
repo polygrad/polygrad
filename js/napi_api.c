@@ -863,9 +863,9 @@ static napi_value napi_poly_linear(napi_env env, napi_callback_info info) {
   PolyUOp *bias = NULL;
   if (bias_type == napi_external) bias = get_external(env, argv[7]);
 
-  /* dot + bias add (shape-on-UOp, no explicit shapes needed) */
+  /* dot + bias add (poly_add handles broadcasting) */
   PolyUOp *r = poly_dot(ctx, x, w);
-  if (r && bias) r = poly_alu2(ctx, POLY_OP_ADD, r, bias);
+  if (r && bias) r = poly_add(ctx, r, bias);
 
   int64_t out_shape[MAX_DIMS];
   int out_ndim = 0;
