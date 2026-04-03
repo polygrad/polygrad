@@ -171,6 +171,9 @@ def _declare_signatures(lib):
     lib.poly_const_int.restype = _ptr
     lib.poly_const_int.argtypes = [_ptr, ctypes.c_int64]
 
+    lib.poly_contiguous.restype = _ptr
+    lib.poly_contiguous.argtypes = [_ptr, _ptr]
+
     lib.poly_alu1.restype = _ptr
     lib.poly_alu1.argtypes = [_ptr, ctypes.c_int, _ptr]
 

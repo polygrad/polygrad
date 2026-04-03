@@ -579,7 +579,8 @@ class Tensor:
         return self.to('cuda')
 
     def contiguous(self):
-        return self  # no-op for now
+        uop = _ffi._lib.poly_contiguous(self._ctx, self._uop)
+        return Tensor._from_uop(uop, self.shape, self._ctx, [self])
 
     # --- Dtype casting ---
 

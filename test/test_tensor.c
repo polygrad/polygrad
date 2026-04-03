@@ -474,3 +474,80 @@ TEST(pe, v2_reduce_shape) {
   ASSERT_INT_EQ(poly_uop_dims(ctx, sk)[1], 1);
   poly_ctx_destroy(ctx); PASS();
 }
+
+/* ── Contiguous ──────────────────────────────────────────────────────── */
+
+TEST(tensor, contiguous_passthrough) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *a = poly_reshape(ctx, a_buf, (int64_t[]){4}, 1);
+  PolyUOp *c = poly_contiguous(ctx, a);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *store = poly_store_val(ctx, out_buf, c);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float in[] = {1, 2, 3, 4};
+  float out[4] = {0};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(out_buf, out),
+    POLY_BIND_HOST(a_buf, in),
+  };
+  ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
+  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(out[i], in[i], 1e-6);
+  poly_ctx_destroy(ctx); PASS();
+}
+
+TEST(tensor, contiguous_expand_materializes) {
+  /* expand (4,1)->(4,4) then contiguous forces a real copy */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *a = poly_reshape(ctx, a_buf, (int64_t[]){4, 1}, 2);
+  PolyUOp *expanded = poly_expand(ctx, a, (int64_t[]){4, 4}, 2);
+  PolyUOp *c = poly_contiguous(ctx, expanded);
+  PolyUOp *result = poly_add(ctx, c, poly_const_float(ctx, 1.0));
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 16);
+  PolyUOp *store = poly_store_val(ctx, out_buf, result);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float in[] = {10, 20, 30, 40};
+  float out[16] = {0};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(out_buf, out),
+    POLY_BIND_HOST(a_buf, in),
+  };
+  ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
+  for (int r = 0; r < 4; r++)
+    for (int c2 = 0; c2 < 4; c2++)
+      ASSERT_FLOAT_EQ(out[r * 4 + c2], in[r] + 1.0f, 1e-6);
+  poly_ctx_destroy(ctx); PASS();
+}
+
+TEST(tensor, contiguous_chain) {
+  /* a*2 -> contiguous -> +1 -> contiguous -> output */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 3);
+  PolyUOp *a = poly_reshape(ctx, a_buf, (int64_t[]){3}, 1);
+
+  PolyUOp *doubled = poly_contiguous(ctx,
+      poly_alu2(ctx, POLY_OP_MUL, a, poly_const_float(ctx, 2.0)));
+  PolyUOp *result = poly_contiguous(ctx,
+      poly_add(ctx, doubled, poly_const_float(ctx, 1.0)));
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
+  PolyUOp *store = poly_store_val(ctx, out_buf, result);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float in[] = {5, 10, 15};
+  float out[3] = {0};
+  PolyBufferBinding bindings[] = {
+    POLY_BIND_HOST(out_buf, out),
+    POLY_BIND_HOST(a_buf, in),
+  };
+  ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
+  ASSERT_FLOAT_EQ(out[0], 11.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out[1], 21.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out[2], 31.0f, 1e-6);
+  poly_ctx_destroy(ctx); PASS();
+}

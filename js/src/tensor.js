@@ -263,7 +263,9 @@ function createBoundTensorClass(runtime) {
     }
 
     contiguous() {
-      return this  // no-op for now
+      const { ffi } = this._rt._backend
+      const uop = ffi.poly_contiguous(this._ctx, this._uop)
+      return this._makeResult(uop, [...this.shape], [this])
     }
 
     // --- Internal helpers ---

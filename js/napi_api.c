@@ -283,6 +283,15 @@ static napi_value napi_poly_const_int(napi_env env, napi_callback_info info) {
 
 /* ── ALU ops ───────────────────────────────────────────────────────────── */
 
+static napi_value napi_poly_contiguous(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  return make_external(env, poly_contiguous(ctx, x));
+}
+
 static napi_value napi_poly_alu1(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -1482,6 +1491,7 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_const_int", napi_poly_const_int),
 
     /* ALU */
+    DECLARE_NAPI_METHOD("poly_contiguous", napi_poly_contiguous),
     DECLARE_NAPI_METHOD("poly_alu1", napi_poly_alu1),
     DECLARE_NAPI_METHOD("poly_alu2", napi_poly_alu2),
     DECLARE_NAPI_METHOD("poly_alu3", napi_poly_alu3),
