@@ -21,7 +21,6 @@
 #include <stdio.h>
 #include <math.h>
 
-#define REALIZE(u) poly_uop1(ctx, POLY_OP_CONTIGUOUS, (u)->dtype, (u), poly_arg_none())
 
 
 /* ── GPT-2 Builder ───────────────────────────────────────────────── */
@@ -62,19 +61,19 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
   /* Token + position embeddings */
   PolyUOp *x_shaped = poly_reshape(ctx, x_buf, x_shape, 2);
   PolyUOp *tok_emb = poly_embedding(ctx, "wte", x_shaped, V, D);
-  tok_emb = REALIZE(tok_emb);
+  tok_emb = poly_contiguous(ctx,tok_emb);
 
   PolyUOp *pos_shaped = poly_reshape(ctx, pos_buf, pos_shape, 2);
   PolyUOp *pos_emb = poly_embedding(ctx, "wpe", pos_shaped, T, D);
-  pos_emb = REALIZE(pos_emb);
+  pos_emb = poly_contiguous(ctx,pos_emb);
 
   int64_t h_shape[] = { B, T, D };
   PolyUOp *pos_exp = poly_expand(ctx, pos_emb, h_shape, 3);
   PolyUOp *h = poly_alu2(ctx, POLY_OP_ADD, tok_emb, pos_exp);
-  h = REALIZE(h);
+  h = poly_contiguous(ctx,h);
 
   /* Causal mask: (T, T) -> (1, 1, T, T) */
-  PolyUOp *mask = REALIZE(poly_reshape(ctx, poly_causal_mask(ctx, T),
+  PolyUOp *mask = poly_contiguous(ctx,poly_reshape(ctx, poly_causal_mask(ctx, T),
                                         (int64_t[]){ 1, 1, T, T }, 4));
 
   /* ── Transformer blocks ──────────────────────────────────────── */
@@ -84,19 +83,19 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
 
     /* LayerNorm 1 */
     snprintf(prefix, sizeof(prefix), "h.%d.ln_1", i);
-    PolyUOp *ln1 = REALIZE(poly_layernorm(ctx, prefix, h, D, eps));
+    PolyUOp *ln1 = poly_contiguous(ctx,poly_layernorm(ctx, prefix, h, D, eps));
 
     /* QKV = Linear(D, 3D) */
     snprintf(prefix, sizeof(prefix), "h.%d.attn.c_attn", i);
-    PolyUOp *qkv = REALIZE(poly_linear(ctx, prefix, ln1, D, 3 * D, true));
+    PolyUOp *qkv = poly_contiguous(ctx,poly_linear(ctx, prefix, ln1, D, 3 * D, true));
 
     /* Split Q, K, V via shrink */
     int64_t shrink_q[][2] = { {0, B}, {0, T}, {0, D} };
     int64_t shrink_k[][2] = { {0, B}, {0, T}, {D, 2*D} };
     int64_t shrink_v[][2] = { {0, B}, {0, T}, {2*D, 3*D} };
-    PolyUOp *q = REALIZE(poly_shrink(ctx, qkv, shrink_q, 3));
-    PolyUOp *k = REALIZE(poly_shrink(ctx, qkv, shrink_k, 3));
-    PolyUOp *v = REALIZE(poly_shrink(ctx, qkv, shrink_v, 3));
+    PolyUOp *q = poly_contiguous(ctx,poly_shrink(ctx, qkv, shrink_q, 3));
+    PolyUOp *k = poly_contiguous(ctx,poly_shrink(ctx, qkv, shrink_k, 3));
+    PolyUOp *v = poly_contiguous(ctx,poly_shrink(ctx, qkv, shrink_v, 3));
 
     /* Multi-head reshape + permute: (B,T,D) -> (B,H,T,hd) */
     int64_t mh[] = { B, T, H, head_dim };
@@ -107,17 +106,17 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
 
     /* scores = Q @ K.T / sqrt(hd) + mask */
     PolyUOp *kt = poly_permute(ctx, k, (int64_t[]){ 0, 1, 3, 2 }, 4);
-    PolyUOp *scores = REALIZE(poly_dot(ctx, q, kt));
+    PolyUOp *scores = poly_contiguous(ctx,poly_dot(ctx, q, kt));
     scores = poly_alu2(
         ctx, POLY_OP_MUL, scores,
         poly_const_float(ctx, 1.0 / sqrt((double)head_dim))
     );
     PolyUOp *mask_exp = poly_expand(ctx, mask, (int64_t[]){ B, H, T, T }, 4);
-    scores = REALIZE(poly_alu2(ctx, POLY_OP_ADD, scores, mask_exp));
+    scores = poly_contiguous(ctx,poly_alu2(ctx, POLY_OP_ADD, scores, mask_exp));
 
     /* softmax -> attn @ V */
-    PolyUOp *attn = REALIZE(poly_softmax(ctx, scores, -1));
-    PolyUOp *attn_out = REALIZE(poly_dot(ctx, attn, v));
+    PolyUOp *attn = poly_contiguous(ctx,poly_softmax(ctx, scores, -1));
+    PolyUOp *attn_out = poly_contiguous(ctx,poly_dot(ctx, attn, v));
 
     /* Merge heads: (B,H,T,hd) -> (B,T,D) */
     attn_out = poly_reshape(
@@ -128,24 +127,24 @@ PolyInstance *poly_gpt2_build(const GPT2Config *cfg, int max_batch) {
 
     /* Output projection + residual */
     snprintf(prefix, sizeof(prefix), "h.%d.attn.c_proj", i);
-    attn_out = REALIZE(poly_linear(ctx, prefix, attn_out, D, D, true));
-    h = REALIZE(poly_alu2(ctx, POLY_OP_ADD, h, attn_out));
+    attn_out = poly_contiguous(ctx,poly_linear(ctx, prefix, attn_out, D, D, true));
+    h = poly_contiguous(ctx,poly_alu2(ctx, POLY_OP_ADD, h, attn_out));
 
     /* LayerNorm 2 + FFN + residual */
     snprintf(prefix, sizeof(prefix), "h.%d.ln_2", i);
-    PolyUOp *ln2 = REALIZE(poly_layernorm(ctx, prefix, h, D, eps));
+    PolyUOp *ln2 = poly_contiguous(ctx,poly_layernorm(ctx, prefix, h, D, eps));
 
     snprintf(prefix, sizeof(prefix), "h.%d.mlp.c_fc", i);
-    PolyUOp *ffn = REALIZE(poly_linear(ctx, prefix, ln2, D, 4 * D, true));
-    ffn = REALIZE(poly_gelu(ctx, ffn));
+    PolyUOp *ffn = poly_contiguous(ctx,poly_linear(ctx, prefix, ln2, D, 4 * D, true));
+    ffn = poly_contiguous(ctx,poly_gelu(ctx, ffn));
 
     snprintf(prefix, sizeof(prefix), "h.%d.mlp.c_proj", i);
-    ffn = REALIZE(poly_linear(ctx, prefix, ffn, 4 * D, D, true));
-    h = REALIZE(poly_alu2(ctx, POLY_OP_ADD, h, ffn));
+    ffn = poly_contiguous(ctx,poly_linear(ctx, prefix, ffn, 4 * D, D, true));
+    h = poly_contiguous(ctx,poly_alu2(ctx, POLY_OP_ADD, h, ffn));
   }
 
   /* Final layernorm */
-  h = REALIZE(poly_layernorm(ctx, "ln_f", h, D, eps));
+  h = poly_contiguous(ctx,poly_layernorm(ctx, "ln_f", h, D, eps));
 
   /* LM head: h @ wte.T (weight tying) */
   PolyUOp *wte = poly_ctx_get(ctx, "wte.weight");

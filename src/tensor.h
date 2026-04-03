@@ -46,6 +46,10 @@ PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
+/* ── Contiguous (realize barrier) ───────────────────────────────────── */
+
+PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x);
+
 /* ── Composed elementwise ops (shape-free, UOp-level) ────────────────── */
 
 /* Math */

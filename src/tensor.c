@@ -430,6 +430,12 @@ PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return poly_alu2(ctx, POLY_OP_FDIV, a, b);
 }
 
+/* ── Contiguous (realize barrier) ──────────────────────────────────── */
+
+PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
+  return poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
+}
+
 /* ── Math ────────────────────────────────────────────────────────────── */
 
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x) {
