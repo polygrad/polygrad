@@ -14,12 +14,14 @@
 /* gpt2.c */
 extern PolyInstance *poly_gpt2_from_hf_decoded_generic(
     const PolyHfDecoded *hf, const PolyGenericImportOpts *opts);
+extern PolyInstance *poly_gpt2_from_gguf_decoded_generic(
+    const PolyGgufDecoded *gguf, const PolyGenericImportOpts *opts);
 
 static const PolyImportDesc g_import_descs[] = {
     {
         .model_type        = "gpt2",
         .from_hf_decoded   = poly_gpt2_from_hf_decoded_generic,
-        .from_gguf_decoded = NULL,
+        .from_gguf_decoded = poly_gpt2_from_gguf_decoded_generic,
     },
 };
 

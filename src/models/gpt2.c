@@ -342,3 +342,148 @@ PolyInstance *poly_gpt2_from_hf_decoded_generic(
       opts ? opts->max_batch : 0,
       opts ? opts->max_seq_len : 0);
 }
+
+/* ── GGUF import (model-specific) ───────────────────────────────── */
+
+#include "../loaders/gguf_decode.h"
+
+/*
+ * GGUF name remapping: matches tinygrad gpt2.py _remap_gguf_key().
+ * GGUF uses "blk.N.attn_qkv.weight", polygrad uses "h.N.attn.c_attn.weight".
+ */
+static const char *gpt2_gguf_remap[][2] = {
+    { "blk.",                "h." },
+    { ".attn_qkv.bias",     ".attn.c_attn.bias" },
+    { ".attn_qkv.weight",   ".attn.c_attn.weight" },
+    { ".ffn_norm.bias",      ".ln_2.bias" },
+    { ".ffn_norm.weight",    ".ln_2.weight" },
+    { ".attn_norm.bias",     ".ln_1.bias" },
+    { ".attn_norm.weight",   ".ln_1.weight" },
+    { ".attn_output.bias",   ".attn.c_proj.bias" },
+    { ".attn_output.weight", ".attn.c_proj.weight" },
+    { ".ffn_up.bias",        ".mlp.c_fc.bias" },
+    { ".ffn_up.weight",      ".mlp.c_fc.weight" },
+    { ".ffn_down.bias",      ".mlp.c_proj.bias" },
+    { ".ffn_down.weight",    ".mlp.c_proj.weight" },
+    { "token_embd.weight",   "wte.weight" },
+    { "output.weight",       "lm_head.weight" },
+    { "output_norm.bias",    "ln_f.bias" },
+    { "output_norm.weight",  "ln_f.weight" },
+    { "position_embd.weight","wpe.weight" },
+    { NULL, NULL }
+};
+
+static const char *gpt2_gguf_map_name(const char *name, char *buf, int buf_size) {
+    /* Apply all replacements in order */
+    strncpy(buf, name, (size_t)(buf_size - 1));
+    buf[buf_size - 1] = '\0';
+
+    for (int i = 0; gpt2_gguf_remap[i][0]; i++) {
+        const char *old_s = gpt2_gguf_remap[i][0];
+        const char *new_s = gpt2_gguf_remap[i][1];
+        char *pos = strstr(buf, old_s);
+        if (!pos) continue;
+        size_t old_len = strlen(old_s);
+        size_t new_len = strlen(new_s);
+        size_t tail_len = strlen(pos + old_len);
+        if ((pos - buf) + new_len + tail_len >= (size_t)(buf_size - 1)) continue;
+        memmove(pos + new_len, pos + old_len, tail_len + 1);
+        memcpy(pos, new_s, new_len);
+    }
+
+    /* Skip lm_head.weight (weight tying with wte) */
+    if (strcmp(buf, "lm_head.weight") == 0) return NULL;
+
+    return buf;
+}
+
+PolyInstance *poly_gpt2_from_gguf_decoded(
+    const PolyGgufDecoded *gguf,
+    int max_batch, int max_seq_len)
+{
+  if (!gguf) return NULL;
+
+  /* Extract config from GGUF KV metadata */
+  GPT2Config cfg = poly_gpt2_config_default();
+  cfg.n_embd     = poly_gguf_kv_int(gguf, "gpt2.embedding_length", cfg.n_embd);
+  cfg.n_head     = poly_gguf_kv_int(gguf, "gpt2.attention.head_count", cfg.n_head);
+  cfg.n_layer    = poly_gguf_kv_int(gguf, "gpt2.block_count", cfg.n_layer);
+  cfg.max_seq_len = poly_gguf_kv_int(gguf, "gpt2.context_length", cfg.max_seq_len);
+  cfg.norm_eps   = (float)poly_gguf_kv_float(gguf, "gpt2.attention.layer_norm_epsilon",
+                                              (double)cfg.norm_eps);
+  /* vocab_size from token_embd.weight shape (not always in KV) */
+  for (int i = 0; i < gguf->n_tensors; i++) {
+      if (strcmp(gguf->tensors[i].name, "token_embd.weight") == 0 &&
+          gguf->tensors[i].ndim == 2) {
+          cfg.vocab_size = (int)gguf->tensors[i].shape[0];
+          break;
+      }
+  }
+
+  if (max_batch > 0) cfg.batch_size = max_batch;
+  if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
+
+  PolyInstance *inst = poly_gpt2(&cfg);
+  if (!inst) return NULL;
+
+  PolyBindIndex *idx = poly_bind_index_create(inst);
+  int loaded = 0, skipped = 0;
+  char name_buf[256];
+
+  for (int i = 0; i < gguf->n_tensors; i++) {
+    const PolyDecodedTensor *t = &gguf->tensors[i];
+
+    /* Remap GGUF name to polygrad internal name */
+    const char *name = gpt2_gguf_map_name(t->name, name_buf, sizeof(name_buf));
+    if (!name) { skipped++; continue; }
+
+    /* Convert to F32 (dequantize if needed) */
+    float *f32 = poly_decoded_tensor_to_f32(t);
+    if (!f32) {
+        fprintf(stderr, "poly_gpt2_from_gguf: failed to convert '%s' (type=%d)\n",
+                t->name, t->dtype);
+        continue;
+    }
+
+    /*
+     * GGUF weights are stored in the model's native convention
+     * (not Conv1D). No transpose needed -- GGUF stores (out, in)
+     * which matches polygrad's linear layer convention.
+     */
+    int rc = poly_import_copy_named_tensor(
+        idx, name, f32, t->shape, t->ndim, 0);
+    if (rc == 1) loaded++;
+    else if (rc == 0)
+        fprintf(stderr, "poly_gpt2_from_gguf: no buffer for '%s' (was '%s')\n",
+                name, t->name);
+
+    free(f32);
+  }
+
+  poly_bind_index_destroy(idx);
+  fprintf(stderr, "poly_gpt2_from_gguf: loaded %d parameters, skipped %d\n",
+          loaded, skipped);
+  return inst;
+}
+
+PolyInstance *poly_gpt2_from_gguf(
+    const uint8_t *data, int64_t len,
+    int max_batch, int max_seq_len)
+{
+  PolyGgufDecoded *gguf = NULL;
+  if (poly_gguf_decode(data, len, &gguf) != 0 || !gguf)
+    return NULL;
+  PolyInstance *inst = poly_gpt2_from_gguf_decoded(gguf, max_batch, max_seq_len);
+  poly_gguf_decoded_free(gguf);
+  return inst;
+}
+
+/* GGUF registry adapter */
+PolyInstance *poly_gpt2_from_gguf_decoded_generic(
+    const PolyGgufDecoded *gguf,
+    const PolyGenericImportOpts *opts)
+{
+  return poly_gpt2_from_gguf_decoded(gguf,
+      opts ? opts->max_batch : 0,
+      opts ? opts->max_seq_len : 0);
+}

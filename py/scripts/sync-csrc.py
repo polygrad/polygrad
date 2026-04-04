@@ -62,6 +62,8 @@ SOURCES = [
     'src/loaders/import_error.c',
     'src/loaders/bind.c',
     'src/loaders/hf_decode.c',
+    'src/loaders/gguf_decode.c',
+    'src/loaders/gguf_loader.c',
     'src/loaders/import_desc.c',
 ]
 

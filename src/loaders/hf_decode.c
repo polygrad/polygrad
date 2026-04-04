@@ -79,6 +79,8 @@ int poly_hf_decode(
             dt->data  = views[i].raw_data;
             dt->ndim  = views[i].ndim;
             dt->numel = views[i].numel;
+            /* Map PolySafetensorDType to unified POLY_DECODED_* codes.
+             * The enum values 0-9 happen to match (both start F32,F16,...). */
             dt->dtype = (int)views[i].dtype;
             for (int d = 0; d < views[i].ndim && d < 8; d++)
                 dt->shape[d] = views[i].shape[d];
