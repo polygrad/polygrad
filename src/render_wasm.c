@@ -907,7 +907,12 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         }
       }
 
-      /* Push operands (WHERE needs special order for WASM select) */
+      /* Push operands (WHERE needs special order for WASM select).
+       *
+       * WASM select: (val_true, val_false, i32_cond).
+       * The condition may be f32 (e.g. from poly_eq which returns a
+       * float mask via WHERE(cmplt, 0.0, 1.0)). Convert to i32 via
+       * f32.ne 0.0 before select. Same for f64 and i64 conditions. */
       if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
         int s1 = lm_get(&locals, u->src[1]);
         int s2 = lm_get(&locals, u->src[2]);
@@ -916,8 +921,23 @@ static void build_code_scalar(WasmBuf *mod, PolyUOp **uops, int n,
         wb_uleb128(&body, s1);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, s2);
+        /* Emit condition as i32 */
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, s0);
+        PolyDType cond_dt = u->src[0]->dtype;
+        if (poly_dtype_is_float(cond_dt)) {
+          if (cond_dt.bitsize == 64) {
+            wb_byte(&body, WASM_OP_F64_CONST); wb_f64(&body, 0.0);
+            wb_byte(&body, WASM_OP_F64_NE);
+          } else {
+            wb_byte(&body, WASM_OP_F32_CONST); wb_f32(&body, 0.0f);
+            wb_byte(&body, WASM_OP_F32_NE);
+          }
+        } else if (cond_dt.bitsize == 64) {
+          wb_byte(&body, WASM_OP_I64_CONST); wb_sleb128(&body, 0);
+          wb_byte(&body, WASM_OP_I64_NE);
+        }
+        /* i32/bool: already valid for select */
       } else {
         int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op) ? 3
                        : poly_opset_has(POLY_GROUP_BINARY, u->op) ? 2
