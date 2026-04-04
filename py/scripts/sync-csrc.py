@@ -57,6 +57,12 @@ SOURCES = [
     'src/models/registry.c',
     'src/models/gpt2.c',
     'src/models/hf_loader.c',
+    # LOADER_SRC
+    'src/loaders/decoded.c',
+    'src/loaders/import_error.c',
+    'src/loaders/bind.c',
+    'src/loaders/hf_decode.c',
+    'src/loaders/import_desc.c',
 ]
 
 # Headers needed for compilation
@@ -86,6 +92,16 @@ HEADERS = [
     'src/wasm_builder.h',
     'src/wlrn.h',
     'vendor/cjson/cJSON.h',
+    # Loader headers
+    'src/loaders/decoded.h',
+    'src/loaders/import_error.h',
+    'src/loaders/bind.h',
+    'src/loaders/hf_decode.h',
+    'src/loaders/gguf_decode.h',
+    'src/loaders/import_desc.h',
+    # Model headers referenced by gpt2.c
+    'src/models/gpt2.h',
+    'src/models/hf_loader.h',
 ]
 
 

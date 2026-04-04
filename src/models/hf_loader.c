@@ -1,42 +1,15 @@
 /*
- * hf_loader.c -- HuggingFace model loader
+ * hf_loader.c -- HuggingFace model loader (thin auto-dispatch wrapper)
  *
- * Loads models from config.json + safetensors files into PolyInstance.
- * No file I/O: caller reads files and passes byte buffers.
- *
- * Flow:
- *   1. Parse config.json -> PolyModelConfig
- *   2. Read model_type -> dispatch to builder (gpt2)
- *   3. Builder creates PolyInstance with named param buffers
- *   4. For each safetensors file: decode, convert to F32, match by name
+ * Decodes config.json + safetensors, looks up model by model_type,
+ * dispatches to model-owned import function. Zero model-specific logic.
  */
 
 #define _POSIX_C_SOURCE 200809L
-#include "models.h"
-#include "../safetensors.h"
-#include "../instance.h"
-#include "../../vendor/cjson/cJSON.h"
-#include <stdlib.h>
-#include <string.h>
+#include "hf_loader.h"
+#include "../loaders/import_desc.h"
+#include "../loaders/import_error.h"
 #include <stdio.h>
-
-/* Strip "transformer." prefix from HF GPT-2 weight keys */
-static const char *strip_prefix(const char *name, const char *prefix) {
-  size_t plen = strlen(prefix);
-  if (strncmp(name, prefix, plen) == 0) return name + plen;
-  return name;
-}
-
-/* Check if a weight name should be ignored (non-parameter buffers) */
-static int should_ignore_weight(const char *name) {
-  /* HF GPT-2 stores constant causal masks as attn.bias and attn.masked_bias */
-  if (strstr(name, "attn.bias") != NULL && strstr(name, "c_attn") == NULL &&
-      strstr(name, "c_proj") == NULL)
-    return 1;
-  if (strstr(name, "attn.masked_bias") != NULL)
-    return 1;
-  return 0;
-}
 
 PolyInstance *poly_hf_load(
     const char *config_json, int config_len,
@@ -44,156 +17,32 @@ PolyInstance *poly_hf_load(
     int n_weight_files,
     int max_batch, int max_seq_len)
 {
-  if (!config_json || config_len <= 0) return NULL;
+  poly_import_error_clear();
 
-  /* Parse config.json */
-  PolyModelConfig *cfg = poly_model_config_from_json(config_json, config_len);
-  if (!cfg) return NULL;
+  /* 1. Generic decode */
+  PolyHfDecoded *hf = NULL;
+  if (poly_hf_decode(config_json, config_len,
+                     weight_files, weight_lens, n_weight_files,
+                     &hf) != 0 || !hf)
+    return NULL;
 
-  /* Determine model type */
-  const char *model_type = poly_model_config_get_string(cfg, "model_type", "");
-
-  PolyInstance *inst = NULL;
-
-  if (strcmp(model_type, "gpt2") == 0) {
-    /* Build GPT-2 config */
-    GPT2Config gpt2_cfg = poly_gpt2_config_default();
-    gpt2_cfg.vocab_size  = poly_model_config_get_int(cfg, "vocab_size", gpt2_cfg.vocab_size);
-    gpt2_cfg.n_embd      = poly_model_config_get_int(cfg, "n_embd", gpt2_cfg.n_embd);
-    gpt2_cfg.n_head      = poly_model_config_get_int(cfg, "n_head", gpt2_cfg.n_head);
-    gpt2_cfg.n_layer     = poly_model_config_get_int(cfg, "n_layer", gpt2_cfg.n_layer);
-    gpt2_cfg.max_seq_len = max_seq_len > 0 ? max_seq_len :
-        poly_model_config_get_int(cfg, "n_positions", gpt2_cfg.max_seq_len);
-    gpt2_cfg.norm_eps    = poly_model_config_get_float(cfg, "layer_norm_epsilon", gpt2_cfg.norm_eps);
-    gpt2_cfg.batch_size  = max_batch > 0 ? max_batch : 1;
-
-    inst = poly_gpt2(&gpt2_cfg);
-  } else {
-    fprintf(stderr, "poly_hf_load: unsupported model_type '%s'\n", model_type);
-    poly_model_config_free(cfg);
+  /* 2. Lookup model descriptor */
+  const PolyImportDesc *desc = poly_import_desc_find(hf->model_type);
+  if (!desc || !desc->from_hf_decoded) {
+    poly_import_error_set(POLY_IMPORT_ERR_UNSUPPORTED_MODEL,
+        "unsupported model_type '%s'", hf->model_type);
+    poly_hf_decoded_free(hf);
     return NULL;
   }
 
-  poly_model_config_free(cfg);
-  if (!inst) return NULL;
+  /* 3. Dispatch to model-owned importer */
+  PolyGenericImportOpts opts = {
+    .max_batch   = max_batch,
+    .max_seq_len = max_seq_len,
+  };
+  PolyInstance *inst = desc->from_hf_decoded(hf, &opts);
 
-  /* Load weights from safetensors files */
-  int warned_ignored = 0;
-  int loaded_count = 0;
-  int skipped_count = 0;
-
-  for (int f = 0; f < n_weight_files; f++) {
-    if (!weight_files[f] || weight_lens[f] <= 0) continue;
-
-    int n_views = 0;
-    char *metadata = NULL;
-    PolySafetensorViewEx *views = poly_safetensors_decode_ex(
-        weight_files[f], weight_lens[f], &n_views, &metadata);
-    free(metadata);
-
-    if (!views) {
-      fprintf(stderr, "poly_hf_load: failed to decode weight file %d\n", f);
-      continue;
-    }
-
-    for (int i = 0; i < n_views; i++) {
-      /* Strip "transformer." prefix (HF GPT-2 convention) */
-      const char *name = strip_prefix(views[i].name, "transformer.");
-
-      /* Also strip "model." prefix (some HF models use it) */
-      name = strip_prefix(name, "model.");
-
-      /* Check if this is a non-parameter buffer to ignore */
-      if (should_ignore_weight(name)) {
-        if (!warned_ignored) {
-          fprintf(stderr, "poly_hf_load: ignoring non-parameter buffer '%s' "
-                  "(and similar)\n", views[i].name);
-          warned_ignored = 1;
-        }
-        skipped_count++;
-        free(views[i].name);
-        continue;
-      }
-
-      /* Handle lm_head.weight -> aliased to wte.weight for GPT-2 */
-      if (strcmp(name, "lm_head.weight") == 0) {
-        /* GPT-2 uses weight tying: lm_head = wte. Check if wte exists */
-        /* For now, just skip it -- wte.weight already serves as lm_head */
-        free(views[i].name);
-        continue;
-      }
-
-      /* Convert to F32 */
-      float *f32_data = poly_safetensors_to_f32(&views[i]);
-      if (!f32_data) {
-        fprintf(stderr, "poly_hf_load: failed to convert '%s' to F32\n",
-                views[i].name);
-        free(views[i].name);
-        continue;
-      }
-
-      /* Find matching buffer in instance */
-      int n_bufs = poly_instance_buf_count(inst);
-      int found = 0;
-      for (int b = 0; b < n_bufs; b++) {
-        const char *buf_name = poly_instance_buf_name(inst, b);
-        if (buf_name && strcmp(buf_name, name) == 0) {
-          int64_t numel;
-          float *buf_data = poly_instance_buf_data(inst, b, &numel);
-
-          /* Check for Conv1D transpose: HF stores (in, out), model expects (out, in).
-           * Detect: same numel, both 2D, dims swapped. */
-          int64_t buf_shape[8];
-          int buf_ndim = poly_instance_buf_shape(inst, b, buf_shape, 8);
-          int needs_transpose = 0;
-          if (buf_data && numel == views[i].numel &&
-              buf_ndim == 2 && views[i].ndim == 2 &&
-              buf_shape[0] == views[i].shape[1] &&
-              buf_shape[1] == views[i].shape[0] &&
-              buf_shape[0] != buf_shape[1]) {
-            needs_transpose = 1;
-          }
-
-          if (buf_data && numel == views[i].numel && needs_transpose) {
-            /* Transpose (R, C) -> (C, R) */
-            int64_t R = views[i].shape[0], C = views[i].shape[1];
-            for (int64_t r = 0; r < R; r++)
-              for (int64_t c = 0; c < C; c++)
-                buf_data[c * R + r] = f32_data[r * C + c];
-            loaded_count++;
-            found = 1;
-          } else if (buf_data && numel == views[i].numel) {
-            memcpy(buf_data, f32_data, numel * sizeof(float));
-            loaded_count++;
-            found = 1;
-          } else if (buf_data && numel < views[i].numel) {
-            /* Instance buffer is smaller (e.g. wpe with truncated seq_len).
-             * Copy the first `numel` elements (row-major prefix). */
-            memcpy(buf_data, f32_data, numel * sizeof(float));
-            loaded_count++;
-            found = 1;
-          } else if (buf_data) {
-            fprintf(stderr, "poly_hf_load: shape mismatch for '%s' "
-                    "(instance %lld vs file %lld)\n", name,
-                    (long long)numel, (long long)views[i].numel);
-          }
-          break;
-        }
-      }
-
-      if (!found) {
-        fprintf(stderr, "poly_hf_load: no matching buffer for '%s'\n", name);
-      }
-
-      free(f32_data);
-      free(views[i].name);
-    }
-
-    free(views);
-  }
-
-  fprintf(stderr, "poly_hf_load: loaded %d parameters, skipped %d non-parameter buffers\n",
-          loaded_count, skipped_count);
-
+  /* 4. Cleanup */
+  poly_hf_decoded_free(hf);
   return inst;
 }

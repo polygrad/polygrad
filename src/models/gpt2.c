@@ -1,12 +1,25 @@
 /*
- * gpt2.c -- GPT-2 model builder
+ * gpt2.c -- GPT-2 model builder + HF import semantics
  *
  * Uses the nn.h layer API (poly_linear, poly_layernorm, poly_embedding)
  * and the named buffer registry (poly_param/poly_input/poly_output).
  *
  * Weight naming matches HuggingFace GPT-2 (minus "transformer." prefix).
- * Weights stored in PyTorch convention (out, in). The HF loader transposes
- * Conv1D weights (in, out) -> (out, in) during import.
+ * Weights stored in PyTorch nn.Linear convention: (out, in).
+ *
+ * Conv1D transpose during HF import:
+ *
+ *   HF GPT-2 uses OpenAI's Conv1D class (not nn.Linear). Conv1D stores
+ *   weights as (in, out) and computes x @ w. Polygrad stores (out, in)
+ *   and computes x @ w.T (standard nn.Linear convention).
+ *
+ *   All Conv1D weights must be transposed during import. This includes
+ *   both rectangular weights (c_attn: 768x2304, c_fc: 768x3072) and
+ *   square weights (c_proj: 768x768). Detection is by name: any weight
+ *   containing ".c_" is Conv1D.
+ *
+ *   tinygrad handles this identically -- see gpt2.py lines 133-137
+ *   where it transposes the same four weight families by explicit name.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -195,4 +208,137 @@ PolyInstance *poly_gpt2_from_json(const char *json, int len) {
   PolyInstance *inst = poly_gpt2(&cfg);
   cJSON_Delete(root);
   return inst;
+}
+
+/* ── HF import (model-specific) ─────────────────────────────────── */
+
+#include "../loaders/hf_decode.h"
+#include "../loaders/bind.h"
+#include "../loaders/import_desc.h"
+#include "../loaders/import_error.h"
+
+static const char *gpt2_strip_prefix(const char *name, const char *prefix) {
+  size_t plen = strlen(prefix);
+  if (strncmp(name, prefix, plen) == 0) return name + plen;
+  return name;
+}
+
+static int gpt2_should_skip(const char *name) {
+  if (strstr(name, "attn.bias") != NULL &&
+      strstr(name, "c_attn") == NULL &&
+      strstr(name, "c_proj") == NULL)
+    return 1;
+  if (strstr(name, "attn.masked_bias") != NULL)
+    return 1;
+  if (strcmp(name, "lm_head.weight") == 0)
+    return 1;
+  return 0;
+}
+
+static int gpt2_needs_transpose(
+    const char *name,
+    int src_ndim, int dst_ndim)
+{
+  /*
+   * HF GPT-2 uses Conv1D layers which store weights as (in, out).
+   * Polygrad's linear layer stores (out, in) and computes x @ w.T.
+   * All Conv1D weights need transposing during import, including
+   * square ones (attn.c_proj is 768x768).
+   *
+   * Conv1D layers: c_attn, c_proj, c_fc (all contain ".c_" in name).
+   * Non-Conv1D 2D weights: wte.weight, wpe.weight (embeddings).
+   */
+  if (src_ndim != 2 || dst_ndim != 2) return 0;
+  if (strstr(name, ".c_") != NULL) return 1;
+  return 0;
+}
+
+PolyInstance *poly_gpt2_from_hf_decoded(
+    const PolyHfDecoded *hf,
+    int max_batch, int max_seq_len)
+{
+  if (!hf || !hf->config) return NULL;
+
+  GPT2Config cfg = poly_gpt2_config_default();
+  cJSON *v;
+  if ((v = cJSON_GetObjectItem(hf->config, "vocab_size")))
+    cfg.vocab_size = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_embd")))
+    cfg.n_embd = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_head")))
+    cfg.n_head = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_layer")))
+    cfg.n_layer = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "n_positions")))
+    cfg.max_seq_len = v->valueint;
+  if ((v = cJSON_GetObjectItem(hf->config, "layer_norm_epsilon")))
+    cfg.norm_eps = (float)v->valuedouble;
+  if (max_batch > 0) cfg.batch_size = max_batch;
+  if (max_seq_len > 0) cfg.max_seq_len = max_seq_len;
+
+  PolyInstance *inst = poly_gpt2(&cfg);
+  if (!inst) return NULL;
+
+  PolyBindIndex *idx = poly_bind_index_create(inst);
+  int loaded = 0, skipped = 0;
+
+  for (int i = 0; i < hf->n_tensors; i++) {
+    const PolyDecodedTensor *t = &hf->tensors[i];
+
+    const char *name = gpt2_strip_prefix(t->name, "transformer.");
+    name = gpt2_strip_prefix(name, "model.");
+
+    if (gpt2_should_skip(name)) {
+      skipped++;
+      continue;
+    }
+
+    float *f32 = poly_decoded_tensor_to_f32(t);
+    if (!f32) continue;
+
+    int64_t dst_shape[8];
+    int dst_ndim = poly_bind_index_dst_shape(idx, name, dst_shape, 8);
+    int transpose = (dst_ndim > 0)
+        ? gpt2_needs_transpose(name, t->ndim, dst_ndim)
+        : 0;
+
+    int rc = poly_import_copy_named_tensor(
+        idx, name, f32, t->shape, t->ndim, transpose);
+    if (rc == 1) loaded++;
+    else if (rc == 0)
+      fprintf(stderr, "poly_gpt2_from_hf: no buffer for '%s'\n", name);
+
+    free(f32);
+  }
+
+  poly_bind_index_destroy(idx);
+  fprintf(stderr, "poly_gpt2_from_hf: loaded %d parameters, skipped %d\n",
+          loaded, skipped);
+  return inst;
+}
+
+PolyInstance *poly_gpt2_from_hf(
+    const char *config_json, int config_len,
+    const uint8_t **weight_files, const int64_t *weight_lens,
+    int n_weight_files,
+    int max_batch, int max_seq_len)
+{
+  PolyHfDecoded *hf = NULL;
+  if (poly_hf_decode(config_json, config_len,
+                     weight_files, weight_lens, n_weight_files,
+                     &hf) != 0 || !hf)
+    return NULL;
+  PolyInstance *inst = poly_gpt2_from_hf_decoded(hf, max_batch, max_seq_len);
+  poly_hf_decoded_free(hf);
+  return inst;
+}
+
+/* Registry adapter */
+PolyInstance *poly_gpt2_from_hf_decoded_generic(
+    const PolyHfDecoded *hf,
+    const PolyGenericImportOpts *opts)
+{
+  return poly_gpt2_from_hf_decoded(hf,
+      opts ? opts->max_batch : 0,
+      opts ? opts->max_seq_len : 0);
 }

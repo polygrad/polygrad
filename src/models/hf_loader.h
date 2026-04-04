@@ -2,6 +2,8 @@
 #define POLY_MODEL_HF_LOADER_H
 
 #include "../instance.h"
+#include "../loaders/hf_decode.h"
+#include "../loaders/import_error.h"
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -21,11 +23,8 @@ void poly_model_config_set_int(PolyModelConfig *config, const char *key, int val
 void poly_model_config_set_float(PolyModelConfig *config, const char *key, float value);
 void poly_model_config_free(PolyModelConfig *config);
 
-/* ── HuggingFace loader ──────────────────────────────────────────── */
+/* ── HuggingFace loader (auto-dispatch by model_type) ──────────── */
 
-/* Load a HF model from config.json + safetensors weight files.
- * No file I/O: caller reads files and passes byte buffers.
- * Returns ready-to-use PolyInstance or NULL on error. */
 PolyInstance *poly_hf_load(
     const char *config_json, int config_len,
     const uint8_t **weight_files, const int64_t *weight_lens,
