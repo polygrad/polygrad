@@ -38,9 +38,15 @@
         "csrc/models/registry.c",
         "csrc/models/hf_loader.c",
         "csrc/models/gpt2.c",
-        "csrc/models/llama3.c",
-        "csrc/models/resnet.c",
-        "csrc/models/vit.c"
+        "csrc/models/qwen3.c",
+        "csrc/loaders/decoded.c",
+        "csrc/loaders/import_error.c",
+        "csrc/loaders/bind.c",
+        "csrc/loaders/hf_decode.c",
+        "csrc/loaders/gguf_decode.c",
+        "csrc/loaders/gguf_loader.c",
+        "csrc/loaders/import_desc.c",
+        "csrc/tokenizer.c"
       ],
       "include_dirs": ["csrc"],
       "cflags": ["-std=c11", "-O2", "-Wall", "-D_POSIX_C_SOURCE=200809L"],

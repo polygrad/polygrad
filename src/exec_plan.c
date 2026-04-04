@@ -953,6 +953,13 @@ bool poly_device_is_host_addressable(PolyDeviceId device) {
   return be && be->get_allocator()->host_addressable;
 }
 
+/* ── Cache flush (called from napi_api.c) ────────────────────────────── */
+
+void poly_sched_cache_flush(void) {
+  /* Per-context schedule caches are flushed when context is destroyed.
+   * This global entry point is a no-op placeholder for the N-API layer. */
+}
+
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Executable step: lower, run, free                                    */
 /* ══════════════════════════════════════════════════════════════════════ */

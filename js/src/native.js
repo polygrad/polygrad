@@ -141,7 +141,9 @@ function createNativeBackend() {
       return binding.poly_tokenizer_from_json(jsonBytes, jsonBytes.length)
     },
     tokenize(tokPtr, text) { return binding.poly_tokenize(tokPtr, text) },
-    detokenize(tokPtr, ids) { return binding.poly_detokenize(tokPtr, ids) },
+    detokenize(tokPtr, ids) {
+      return binding.poly_detokenize(tokPtr, Array.from(ids))
+    },
     tokenizerFree(tokPtr) { binding.poly_tokenizer_free(tokPtr) },
     tokenizerVocabSize(tokPtr) { return binding.poly_tokenizer_vocab_size(tokPtr) },
     tokenizerBosId(tokPtr) { return binding.poly_tokenizer_bos_id(tokPtr) },

@@ -58,6 +58,19 @@ if (fs.existsSync(modelsSrc)) {
   }
 }
 
+// Copy loaders/ directory
+const loadersSrc = path.join(srcDir, 'loaders')
+if (fs.existsSync(loadersSrc)) {
+  const loadersDst = path.join(dstDir, 'loaders')
+  fs.mkdirSync(loadersDst, { recursive: true })
+  for (const f of fs.readdirSync(loadersSrc)) {
+    if (f.endsWith('.c') || f.endsWith('.h')) {
+      fs.copyFileSync(path.join(loadersSrc, f), path.join(loadersDst, f))
+      copied++
+    }
+  }
+}
+
 // Rewrite vendor includes to flat includes (cJSON.h is now in csrc/)
 function rewriteIncludes(dir) {
   for (const f of fs.readdirSync(dir, { withFileTypes: true })) {

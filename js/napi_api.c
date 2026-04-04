@@ -13,6 +13,10 @@
 #include "polygrad.h"
 #include "frontend.h"
 #include "instance.h"
+#include "tokenizer.h"
+#include "loaders/hf_decode.h"
+#include "loaders/gguf_decode.h"
+#include "loaders/import_error.h"
 #include "bundle.h"
 #include "models/mlp.h"
 #include "models/tabm.h"
@@ -1479,6 +1483,107 @@ static napi_value napi_poly_var_reduce(napi_env env, napi_callback_info info) {
 #define DECLARE_NAPI_METHOD(name, fn) \
   { (name), NULL, (fn), NULL, NULL, NULL, napi_default, NULL }
 
+/* ── Tokenizer N-API wrappers ──────────────────────────────────────────── */
+
+static napi_value napi_poly_tokenizer_from_json(napi_env env, napi_callback_info info) {
+  napi_value argv[2]; size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  void *data; size_t len;
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
+  PolyTokenizer *tok = poly_tokenizer_from_json((const char *)data, (int)len);
+  if (!tok) { napi_value n; napi_get_null(env, &n); return n; }
+  return make_external(env, tok);
+}
+
+static napi_value napi_poly_tokenize(napi_env env, napi_callback_info info) {
+  napi_value argv[2]; size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyTokenizer *tok = get_external(env, argv[0]);
+  size_t text_len;
+  NAPI_CALL(env, napi_get_value_string_utf8(env, argv[1], NULL, 0, &text_len));
+  char *text = malloc(text_len + 1);
+  NAPI_CALL(env, napi_get_value_string_utf8(env, argv[1], text, text_len + 1, &text_len));
+  int ids[4096];
+  int n = poly_tokenize(tok, text, ids, 4096);
+  free(text);
+  napi_value result;
+  NAPI_CALL(env, napi_create_array_with_length(env, (size_t)n, &result));
+  for (int i = 0; i < n; i++) {
+    napi_value v;
+    NAPI_CALL(env, napi_create_int32(env, ids[i], &v));
+    NAPI_CALL(env, napi_set_element(env, result, (uint32_t)i, v));
+  }
+  return result;
+}
+
+static napi_value napi_poly_detokenize(napi_env env, napi_callback_info info) {
+  napi_value argv[2]; size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyTokenizer *tok = get_external(env, argv[0]);
+  uint32_t n;
+  NAPI_CALL(env, napi_get_array_length(env, argv[1], &n));
+  int *ids = malloc(n * sizeof(int));
+  for (uint32_t i = 0; i < n; i++) {
+    napi_value el;
+    NAPI_CALL(env, napi_get_element(env, argv[1], i, &el));
+    NAPI_CALL(env, napi_get_value_int32(env, el, &ids[i]));
+  }
+  char buf[8192];
+  poly_detokenize(tok, ids, (int)n, buf, sizeof(buf));
+  free(ids);
+  napi_value result;
+  NAPI_CALL(env, napi_create_string_utf8(env, buf, NAPI_AUTO_LENGTH, &result));
+  return result;
+}
+
+static napi_value napi_poly_tokenizer_free(napi_env env, napi_callback_info info) {
+  napi_value argv[1]; size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  poly_tokenizer_free(get_external(env, argv[0]));
+  napi_value undef;
+  napi_get_undefined(env, &undef);
+  return undef;
+}
+
+static napi_value napi_poly_tokenizer_vocab_size(napi_env env, napi_callback_info info) {
+  napi_value argv[1]; size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  napi_value r;
+  NAPI_CALL(env, napi_create_int32(env, poly_tokenizer_vocab_size(get_external(env, argv[0])), &r));
+  return r;
+}
+
+static napi_value napi_poly_tokenizer_bos_id(napi_env env, napi_callback_info info) {
+  napi_value argv[1]; size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  napi_value r;
+  NAPI_CALL(env, napi_create_int32(env, poly_tokenizer_bos_id(get_external(env, argv[0])), &r));
+  return r;
+}
+
+static napi_value napi_poly_tokenizer_eos_id(napi_env env, napi_callback_info info) {
+  napi_value argv[1]; size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  napi_value r;
+  NAPI_CALL(env, napi_create_int32(env, poly_tokenizer_eos_id(get_external(env, argv[0])), &r));
+  return r;
+}
+
+static napi_value napi_poly_import_error_code(napi_env env, napi_callback_info info) {
+  (void)info;
+  napi_value r;
+  NAPI_CALL(env, napi_create_int32(env, (int)poly_import_last_error_code(), &r));
+  return r;
+}
+
+static napi_value napi_poly_import_error_msg(napi_env env, napi_callback_info info) {
+  (void)info;
+  const char *msg = poly_import_last_error_message();
+  napi_value r;
+  NAPI_CALL(env, napi_create_string_utf8(env, msg ? msg : "", NAPI_AUTO_LENGTH, &r));
+  return r;
+}
+
 NAPI_MODULE_INIT() {
   napi_property_descriptor props[] = {
     /* Context */
@@ -1640,6 +1745,19 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_max_reduce", napi_poly_max_reduce),
     DECLARE_NAPI_METHOD("poly_mean_reduce", napi_poly_mean_reduce),
     DECLARE_NAPI_METHOD("poly_var_reduce", napi_poly_var_reduce),
+
+    /* Tokenizer */
+    DECLARE_NAPI_METHOD("poly_tokenizer_from_json", napi_poly_tokenizer_from_json),
+    DECLARE_NAPI_METHOD("poly_tokenize", napi_poly_tokenize),
+    DECLARE_NAPI_METHOD("poly_detokenize", napi_poly_detokenize),
+    DECLARE_NAPI_METHOD("poly_tokenizer_free", napi_poly_tokenizer_free),
+    DECLARE_NAPI_METHOD("poly_tokenizer_vocab_size", napi_poly_tokenizer_vocab_size),
+    DECLARE_NAPI_METHOD("poly_tokenizer_bos_id", napi_poly_tokenizer_bos_id),
+    DECLARE_NAPI_METHOD("poly_tokenizer_eos_id", napi_poly_tokenizer_eos_id),
+
+    /* Import error */
+    DECLARE_NAPI_METHOD("poly_import_last_error_code", napi_poly_import_error_code),
+    DECLARE_NAPI_METHOD("poly_import_last_error_message", napi_poly_import_error_msg),
   };
 
   NAPI_CALL(env, napi_define_properties(
