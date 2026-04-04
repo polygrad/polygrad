@@ -39,6 +39,13 @@ PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf);
 PolyTokenizer *poly_tokenizer_create(
     const char **tokens, const int *types, int n_tokens);
 
+/*
+ * Create tokenizer from HF tokenizer.json content.
+ * Parses model.vocab and added_tokens from the JSON.
+ * json_data must be null-terminated.
+ */
+PolyTokenizer *poly_tokenizer_from_json(const char *json_data, int json_len);
+
 void poly_tokenizer_free(PolyTokenizer *tok);
 
 /* ── Encode / Decode ────────────────────────────────────────────── */

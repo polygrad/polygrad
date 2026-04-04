@@ -18,6 +18,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tokenizer.h"
 #include "loaders/gguf_decode.h"
+#include "../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -164,6 +165,10 @@ typedef struct {
     int token_id;
 } SpecialToken;
 
+/* Pre-tokenizer regex variant */
+#define POLY_TOK_PRESET_LLAMA 0  /* LLaMA/Qwen: [N]{1,3} */
+#define POLY_TOK_PRESET_GPT2  1  /* GPT-2: ' ?[N]+' (space+digits) */
+
 struct PolyTokenizer {
     VocabMap normal;        /* byte_seq -> token_id for normal tokens */
     /* Reverse map: token_id -> byte sequence */
@@ -172,6 +177,7 @@ struct PolyTokenizer {
     int vocab_size;
     int bos_id;
     int eos_id;
+    int preset;             /* POLY_TOK_PRESET_* */
     /* Special tokens for sentence-level splitting */
     SpecialToken *specials;
     int n_specials;
@@ -320,7 +326,7 @@ typedef void (*word_callback)(const uint8_t *word, int len, void *ctx);
  * Each alternation is tried at the current position.
  */
 static void split_to_words(const uint8_t *text, int text_len,
-                           word_callback cb, void *ctx)
+                           int preset, word_callback cb, void *ctx)
 {
     int i = 0;
     while (i < text_len) {
@@ -328,24 +334,40 @@ static void split_to_words(const uint8_t *text, int text_len,
         int clen = match_contraction(text + i, text_len - i);
         if (clen > 0) { cb(text + i, clen, ctx); i += clen; continue; }
 
-        /* Alt 2: [^LN]?[L]+ -- optional non-letter/non-digit then letters.
-         * The leading char must NOT be \r or \n. */
+        /* Alt 2: letter word with optional prefix.
+         * GPT-2:  ' ?[L]+'          (optional space)
+         * LLaMA:  '[^LN\r\n]?[L]+' (optional non-letter/digit, not newline) */
         {
             int j = i;
-            if (j < text_len && !is_letter(text[j]) && !is_digit(text[j]) &&
-                !is_newline(text[j]))
-                j++;
+            if (preset == POLY_TOK_PRESET_GPT2) {
+                if (j < text_len && text[j] == ' ') j++;
+            } else {
+                if (j < text_len && !is_letter(text[j]) && !is_digit(text[j]) &&
+                    !is_newline(text[j]))
+                    j++;
+            }
             if (j < text_len && is_letter(text[j])) {
                 while (j < text_len && is_letter(text[j])) j++;
                 cb(text + i, j - i, ctx); i = j; continue;
             }
         }
 
-        /* Alt 3: [N]{1,3} -- 1-3 digits */
-        if (is_digit(text[i])) {
-            int j = i, d = 0;
-            while (j < text_len && is_digit(text[j]) && d < 3) { j++; d++; }
-            cb(text + i, j - i, ctx); i = j; continue;
+        /* Alt 3: digit sequence.
+         * GPT-2:  ' ?[N]+'    (optional space, unlimited digits)
+         * LLaMA:  '[N]{1,3}'  (max 3 digits, no space) */
+        {
+            int j = i;
+            if (preset == POLY_TOK_PRESET_GPT2 && j < text_len && text[j] == ' ')
+                j++;
+            if (j < text_len && is_digit(text[j])) {
+                int d = 0;
+                if (preset == POLY_TOK_PRESET_GPT2) {
+                    while (j < text_len && is_digit(text[j])) j++;
+                } else {
+                    while (j < text_len && is_digit(text[j]) && d < 3) { j++; d++; }
+                }
+                cb(text + i, j - i, ctx); i = j; continue;
+            }
         }
 
         /* Alt 4: ' ?[^ws,L,N]+[\r\n]*' -- optional space, then 1+ punct/symbols,
@@ -379,8 +401,8 @@ static void split_to_words(const uint8_t *text, int text_len,
                 j++;
             }
 
-            /* Alt 5: consume up to last newline */
-            if (last_nl_end >= 0) {
+            /* Alt 5: [ws]*[\r\n]+ -- LLaMA only (GPT-2 has no newline alt) */
+            if (preset != POLY_TOK_PRESET_GPT2 && last_nl_end >= 0) {
                 cb(text + i, last_nl_end - i, ctx);
                 i = last_nl_end; continue;
             }
@@ -474,6 +496,115 @@ PolyTokenizer *poly_tokenizer_create(
     return tok;
 }
 
+/*
+ * Load tokenizer from HF tokenizer.json.
+ *
+ * Format:
+ *   model.vocab: { "token_string": id, ... }
+ *   added_tokens: [ { "id": N, "content": "...", "special": true/false }, ... ]
+ *
+ * We build parallel arrays (tokens[], types[]) sorted by ID, then call
+ * poly_tokenizer_create(). Special tokens from added_tokens get type != 1.
+ */
+PolyTokenizer *poly_tokenizer_from_json(const char *json_data, int json_len) {
+    if (!json_data || json_len <= 0) return NULL;
+
+    cJSON *root = cJSON_ParseWithLength(json_data, (size_t)json_len);
+    if (!root) {
+        fprintf(stderr, "poly_tokenizer_from_json: JSON parse error\n");
+        return NULL;
+    }
+
+    cJSON *model = cJSON_GetObjectItem(root, "model");
+    cJSON *vocab = model ? cJSON_GetObjectItem(model, "vocab") : NULL;
+    if (!vocab || !cJSON_IsObject(vocab)) {
+        fprintf(stderr, "poly_tokenizer_from_json: no model.vocab\n");
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    /* Count tokens */
+    int n_tokens = 0;
+    cJSON *item;
+    cJSON_ArrayForEach(item, vocab) {
+        int id = item->valueint;
+        if (id >= n_tokens) n_tokens = id + 1;
+    }
+
+    /* Also check added_tokens for max id */
+    cJSON *added = cJSON_GetObjectItem(root, "added_tokens");
+    if (added && cJSON_IsArray(added)) {
+        cJSON_ArrayForEach(item, added) {
+            cJSON *id_obj = cJSON_GetObjectItem(item, "id");
+            if (id_obj && cJSON_IsNumber(id_obj)) {
+                int id = id_obj->valueint;
+                if (id >= n_tokens) n_tokens = id + 1;
+            }
+        }
+    }
+
+    /* Allocate arrays */
+    const char **tokens = calloc((size_t)n_tokens, sizeof(char *));
+    int *types = calloc((size_t)n_tokens, sizeof(int));
+    /* Default all to type 1 (normal) */
+    for (int i = 0; i < n_tokens; i++) types[i] = 1;
+
+    /* Fill from model.vocab */
+    cJSON_ArrayForEach(item, vocab) {
+        int id = item->valueint;
+        if (id >= 0 && id < n_tokens)
+            tokens[id] = item->string;  /* borrowed from cJSON */
+    }
+
+    /* Override with added_tokens (may include special tokens) */
+    if (added && cJSON_IsArray(added)) {
+        cJSON_ArrayForEach(item, added) {
+            cJSON *id_obj = cJSON_GetObjectItem(item, "id");
+            cJSON *content = cJSON_GetObjectItem(item, "content");
+            cJSON *special = cJSON_GetObjectItem(item, "special");
+            if (!id_obj || !content) continue;
+            int id = id_obj->valueint;
+            if (id >= 0 && id < n_tokens) {
+                tokens[id] = content->valuestring;
+                if (special && cJSON_IsTrue(special))
+                    types[id] = 3;  /* special/control */
+            }
+        }
+    }
+
+    PolyTokenizer *tok = poly_tokenizer_create(tokens, types, n_tokens);
+
+    /* Find BOS/EOS from added_tokens */
+    if (tok && added && cJSON_IsArray(added)) {
+        cJSON_ArrayForEach(item, added) {
+            cJSON *content = cJSON_GetObjectItem(item, "content");
+            cJSON *id_obj = cJSON_GetObjectItem(item, "id");
+            if (!content || !id_obj) continue;
+            const char *s = content->valuestring;
+            if (strcmp(s, "<|endoftext|>") == 0)
+                tok->eos_id = tok->bos_id = id_obj->valueint;
+            else if (strstr(s, "bos") || strcmp(s, "<s>") == 0)
+                tok->bos_id = id_obj->valueint;
+            else if (strstr(s, "eos") || strcmp(s, "</s>") == 0)
+                tok->eos_id = id_obj->valueint;
+        }
+    }
+
+    /* Detect preset from pre_tokenizer type */
+    if (tok) {
+        cJSON *pre_tok = cJSON_GetObjectItem(root, "pre_tokenizer");
+        cJSON *pt_type = pre_tok ? cJSON_GetObjectItem(pre_tok, "type") : NULL;
+        if (pt_type && cJSON_IsString(pt_type) &&
+            strcmp(pt_type->valuestring, "ByteLevel") == 0)
+            tok->preset = POLY_TOK_PRESET_GPT2;
+    }
+
+    free(tokens);
+    free(types);
+    cJSON_Delete(root);
+    return tok;
+}
+
 PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf) {
     if (!gguf) return NULL;
 
@@ -496,6 +627,12 @@ PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf) {
 
     tok->bos_id = poly_gguf_kv_int(gguf, "tokenizer.ggml.bos_token_id", -1);
     tok->eos_id = poly_gguf_kv_int(gguf, "tokenizer.ggml.eos_token_id", -1);
+
+    /* Detect preset from tokenizer.ggml.pre */
+    const char *pre = poly_gguf_kv_string(gguf, "tokenizer.ggml.pre", "");
+    if (strcmp(pre, "gpt-2") == 0)
+        tok->preset = POLY_TOK_PRESET_GPT2;
+    /* "llama-bpe", "qwen2", "llama3" etc. all use LLAMA preset (default) */
 
     return tok;
 }
@@ -535,7 +672,7 @@ static void encode_word_cb(const uint8_t *word, int len, void *ctx_) {
 static int encode_chunk(const PolyTokenizer *tok, const uint8_t *text, int len,
                         int *ids_out, int max_ids) {
     EncodeCtx ctx = { .tok = tok, .ids = ids_out, .max_ids = max_ids, .count = 0 };
-    split_to_words(text, len, encode_word_cb, &ctx);
+    split_to_words(text, len, tok->preset, encode_word_cb, &ctx);
     return ctx.count;
 }
 
