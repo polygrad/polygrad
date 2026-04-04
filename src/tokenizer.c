@@ -157,6 +157,13 @@ static int vocab_map_find(const VocabMap *m, const uint8_t *key, int key_len) {
 
 /* ── Tokenizer struct ───────────────────────────────────────────── */
 
+/* Special token entry for sentence-level splitting */
+typedef struct {
+    char *text;     /* literal UTF-8 string (e.g. "<think>") */
+    int text_len;
+    int token_id;
+} SpecialToken;
+
 struct PolyTokenizer {
     VocabMap normal;        /* byte_seq -> token_id for normal tokens */
     /* Reverse map: token_id -> byte sequence */
@@ -165,6 +172,9 @@ struct PolyTokenizer {
     int vocab_size;
     int bos_id;
     int eos_id;
+    /* Special tokens for sentence-level splitting */
+    SpecialToken *specials;
+    int n_specials;
 };
 
 /* ── BPE core ───────────────────────────────────────────────────── */
@@ -255,52 +265,144 @@ static int bpe_encode_word(const PolyTokenizer *tok,
 /* ── Pre-tokenization (word splitting) ──────────────────────────── */
 
 /*
- * Simplified pre-tokenizer matching GPT-2/LLaMA pattern behavior.
- * Splits text into words at whitespace and punctuation boundaries.
- * Leading spaces are attached to the following word.
+ * Port of the GPT-2/LLaMA pre-tokenization regex from tinygrad.
+ * Splits text into words before BPE is applied independently per word.
  *
- * This is simpler than the full Unicode-category regex in tinygrad
- * but handles the common cases correctly.
+ * The regex alternations (in priority order):
+ *   1. (?i:'s|'t|'re|'ve|'m|'ll|'d)  -- contractions
+ *   2. [^LN]?[L]+                      -- optional non-letter/digit + letters
+ *   3. [N]{1,3}                         -- 1-3 digits
+ *   4.  ?[^ws,L,N]+[\r\n]*             -- opt space + punct seq + opt newlines
+ *   5. [ws]*[\r\n]+                     -- whitespace before newlines
+ *   6. [ws]+(?![^ws])                   -- trailing whitespace (end of string)
+ *   7. [ws]+                            -- whitespace
+ *
+ * ASCII approximation: L = [A-Za-z\x80-\xFF], N = [0-9],
+ *                      ws = [ \t\n\r\v\f]
  */
 
 static int is_letter(uint8_t c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-           c >= 0xC0;  /* rough: Latin extended and beyond */
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c >= 0x80;
 }
 
 static int is_digit(uint8_t c) {
     return c >= '0' && c <= '9';
 }
 
+static int is_ws(uint8_t c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+           c == '\v' || c == '\f';
+}
+
+static int is_newline(uint8_t c) {
+    return c == '\n' || c == '\r';
+}
+
+/* Case-insensitive contraction check. Returns length matched or 0. */
+static int match_contraction(const uint8_t *p, int remaining) {
+    if (remaining < 2 || p[0] != '\'') return 0;
+    uint8_t c = p[1] | 0x20;  /* lowercase */
+    if (c == 's' || c == 't' || c == 'm' || c == 'd') return 2;
+    if (remaining >= 3) {
+        uint8_t c2 = p[2] | 0x20;
+        if (c == 'r' && c2 == 'e') return 3;
+        if (c == 'v' && c2 == 'e') return 3;
+        if (c == 'l' && c2 == 'l') return 3;
+    }
+    return 0;
+}
+
 typedef void (*word_callback)(const uint8_t *word, int len, void *ctx);
 
+/*
+ * Implements the GPT-2/LLaMA pre-tokenization regex.
+ * The regex tries alternations in order, first match wins.
+ * Each alternation is tried at the current position.
+ */
 static void split_to_words(const uint8_t *text, int text_len,
                            word_callback cb, void *ctx)
 {
     int i = 0;
     while (i < text_len) {
-        int start = i;
+        /* Alt 1: contraction ('s, 't, 're, 've, 'm, 'll, 'd) */
+        int clen = match_contraction(text + i, text_len - i);
+        if (clen > 0) { cb(text + i, clen, ctx); i += clen; continue; }
 
-        /* Consume optional leading space */
-        if (i < text_len && text[i] == ' ') i++;
-
-        if (i < text_len && is_letter(text[i])) {
-            /* Letter word (with optional leading space) */
-            while (i < text_len && is_letter(text[i])) i++;
-        } else if (i < text_len && is_digit(text[i])) {
-            /* Digit sequence (1-3 digits like tinygrad) */
-            int d = 0;
-            while (i < text_len && is_digit(text[i]) && d < 3) { i++; d++; }
-        } else if (i < text_len && (text[i] == '\n' || text[i] == '\r')) {
-            /* Newline sequence */
-            while (i < text_len && (text[i] == '\n' || text[i] == '\r')) i++;
-        } else if (i < text_len) {
-            /* Single other character (punctuation, etc.) */
-            i++;
+        /* Alt 2: [^LN]?[L]+ -- optional non-letter/non-digit then letters.
+         * The leading char must NOT be \r or \n. */
+        {
+            int j = i;
+            if (j < text_len && !is_letter(text[j]) && !is_digit(text[j]) &&
+                !is_newline(text[j]))
+                j++;
+            if (j < text_len && is_letter(text[j])) {
+                while (j < text_len && is_letter(text[j])) j++;
+                cb(text + i, j - i, ctx); i = j; continue;
+            }
         }
 
-        if (i > start)
-            cb(text + start, i - start, ctx);
+        /* Alt 3: [N]{1,3} -- 1-3 digits */
+        if (is_digit(text[i])) {
+            int j = i, d = 0;
+            while (j < text_len && is_digit(text[j]) && d < 3) { j++; d++; }
+            cb(text + i, j - i, ctx); i = j; continue;
+        }
+
+        /* Alt 4: ' ?[^ws,L,N]+[\r\n]*' -- optional space, then 1+ punct/symbols,
+         * then optional newlines. */
+        {
+            int j = i;
+            if (j < text_len && text[j] == ' ') j++;
+            int k = j;
+            while (k < text_len && !is_ws(text[k]) &&
+                   !is_letter(text[k]) && !is_digit(text[k]))
+                k++;
+            if (k > j) {
+                while (k < text_len && is_newline(text[k])) k++;
+                cb(text + i, k - i, ctx); i = k; continue;
+            }
+        }
+
+        /* Alt 5 / 6 / 7: whitespace handling.
+         *
+         * Scan maximal whitespace run, then apply regex semantics:
+         *   Alt 5: [ws]*[\r\n]+ -- match up to last newline in run
+         *   Alt 6: [ws]+(?![^ws]) -- trailing ws or ws before more ws
+         *          (backtrack by 1 if followed by non-ws)
+         *   Alt 7: [ws]+ -- single ws byte fallback
+         */
+        if (is_ws(text[i])) {
+            int j = i;
+            int last_nl_end = -1;
+            while (j < text_len && is_ws(text[j])) {
+                if (is_newline(text[j])) last_nl_end = j + 1;
+                j++;
+            }
+
+            /* Alt 5: consume up to last newline */
+            if (last_nl_end >= 0) {
+                cb(text + i, last_nl_end - i, ctx);
+                i = last_nl_end; continue;
+            }
+
+            /* Alt 6: trailing whitespace at end of input */
+            if (j == text_len) {
+                cb(text + i, j - i, ctx); i = j; continue;
+            }
+
+            /* Alt 6: whitespace before non-ws -- leave 1 byte for next alt */
+            if (j - i > 1) {
+                cb(text + i, j - i - 1, ctx);
+                i = j - 1; continue;
+            }
+
+            /* Alt 7: single whitespace byte */
+            cb(text + i, 1, ctx); i++; continue;
+        }
+
+        /* Fallback: single byte */
+        cb(text + i, 1, ctx);
+        i++;
     }
 }
 
@@ -326,7 +428,9 @@ PolyTokenizer *poly_tokenizer_create(
     uint8_t buf[1024];
     for (int i = 0; i < n_tokens; i++) {
         if (!tokens[i]) continue;
-        int is_special = types && types[i] == 3;  /* control/special token */
+        /* tinygrad: type==1 is normal, everything else is special
+         * (type 3=control, 4=user-defined, 6=unused, etc.) */
+        int is_special = types && types[i] != 1;
 
         /* Convert token string to raw bytes via GPT-2 byte encoding */
         int blen;
@@ -347,6 +451,24 @@ PolyTokenizer *poly_tokenizer_create(
         /* Normal tokens go in the BPE lookup map */
         if (!is_special)
             vocab_map_insert(&tok->normal, buf, blen, i);
+    }
+
+    /* Collect special tokens for sentence-level splitting */
+    int n_special = 0;
+    for (int i = 0; i < n_tokens; i++)
+        if (tokens[i] && types && types[i] != 1) n_special++;
+
+    if (n_special > 0) {
+        tok->specials = calloc((size_t)n_special, sizeof(SpecialToken));
+        tok->n_specials = 0;
+        for (int i = 0; i < n_tokens; i++) {
+            if (!tokens[i] || !types || types[i] == 1) continue;
+            int slen = (int)strlen(tokens[i]);
+            tok->specials[tok->n_specials].text = strdup(tokens[i]);
+            tok->specials[tok->n_specials].text_len = slen;
+            tok->specials[tok->n_specials].token_id = i;
+            tok->n_specials++;
+        }
     }
 
     return tok;
@@ -385,6 +507,9 @@ void poly_tokenizer_free(PolyTokenizer *tok) {
         free(tok->id_to_bytes[i]);
     free(tok->id_to_bytes);
     free(tok->id_to_len);
+    for (int i = 0; i < tok->n_specials; i++)
+        free(tok->specials[i].text);
+    free(tok->specials);
     free(tok);
 }
 
@@ -406,13 +531,80 @@ static void encode_word_cb(const uint8_t *word, int len, void *ctx_) {
     ctx->count += n;
 }
 
+/* Encode a chunk of normal text (no special tokens) via word split + BPE */
+static int encode_chunk(const PolyTokenizer *tok, const uint8_t *text, int len,
+                        int *ids_out, int max_ids) {
+    EncodeCtx ctx = { .tok = tok, .ids = ids_out, .max_ids = max_ids, .count = 0 };
+    split_to_words(text, len, encode_word_cb, &ctx);
+    return ctx.count;
+}
+
+/* Find the earliest special token match in text[pos..end) */
+static int find_special(const PolyTokenizer *tok, const char *text, int pos, int end,
+                        int *match_len, int *token_id) {
+    int best_pos = end;
+    int best_len = 0;
+    int best_id = -1;
+    for (int s = 0; s < tok->n_specials; s++) {
+        const char *needle = tok->specials[s].text;
+        int nlen = tok->specials[s].text_len;
+        /* Search for needle starting at pos */
+        for (int j = pos; j + nlen <= end; j++) {
+            if (memcmp(text + j, needle, (size_t)nlen) == 0) {
+                if (j < best_pos || (j == best_pos && nlen > best_len)) {
+                    best_pos = j;
+                    best_len = nlen;
+                    best_id = tok->specials[s].token_id;
+                }
+                break;  /* first occurrence of this special token */
+            }
+        }
+    }
+    if (best_id >= 0) {
+        *match_len = best_len;
+        *token_id = best_id;
+    }
+    return best_pos;
+}
+
 int poly_tokenize(const PolyTokenizer *tok, const char *text,
                   int *ids_out, int max_ids)
 {
     if (!tok || !text) return 0;
-    EncodeCtx ctx = { .tok = tok, .ids = ids_out, .max_ids = max_ids, .count = 0 };
-    split_to_words((const uint8_t *)text, (int)strlen(text), encode_word_cb, &ctx);
-    return ctx.count;
+    int text_len = (int)strlen(text);
+    int count = 0;
+    int pos = 0;
+
+    /*
+     * Two-level split matching tinygrad:
+     * 1. Split on special tokens (sentence level)
+     * 2. For each non-special chunk, split into words + BPE
+     */
+    while (pos < text_len && count < max_ids) {
+        int match_len = 0, token_id = -1;
+        int sp = (tok->n_specials > 0)
+            ? find_special(tok, text, pos, text_len, &match_len, &token_id)
+            : text_len;
+
+        /* Encode text before the special token */
+        if (sp > pos) {
+            int remaining = max_ids - count;
+            int n = encode_chunk(tok, (const uint8_t *)text + pos, sp - pos,
+                                 ids_out ? ids_out + count : NULL, remaining);
+            count += n;
+        }
+
+        /* Emit the special token */
+        if (token_id >= 0 && count < max_ids) {
+            if (ids_out) ids_out[count] = token_id;
+            count++;
+            pos = sp + match_len;
+        } else {
+            pos = sp;
+        }
+    }
+
+    return count;
 }
 
 int poly_detokenize(const PolyTokenizer *tok, const int *ids, int n_ids,

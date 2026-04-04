@@ -169,13 +169,13 @@ static int read_kv_value(GgufReader *r, PolyGgufKV *kv) {
                 char **strs = calloc(count, sizeof(char *));
                 for (uint64_t i = 0; i < count; i++)
                     strs[i] = read_string(r);
-                kv->val.arr_strings = strs;
+                kv->arr_data = strs;
             } else if (elem_type == GGUF_TYPE_INT32 || elem_type == GGUF_TYPE_UINT32) {
                 /* Store int32 array */
                 int32_t *ints = calloc(count, sizeof(int32_t));
                 for (uint64_t i = 0; i < count; i++)
                     ints[i] = read_i32(r);
-                kv->val.arr_ints = ints;
+                kv->arr_data = ints;
             } else {
                 /* Skip other array types */
                 for (uint64_t i = 0; i < count; i++) {
@@ -363,15 +363,13 @@ void poly_gguf_decoded_free(PolyGgufDecoded *gguf) {
         free(gguf->kv[i].key);
         if (gguf->kv[i].type == GGUF_TYPE_STRING)
             free(gguf->kv[i].val.s.str);
-        else if (gguf->kv[i].type == GGUF_TYPE_ARRAY) {
+        else if (gguf->kv[i].type == GGUF_TYPE_ARRAY && gguf->kv[i].arr_data) {
             if (gguf->kv[i].arr_type == GGUF_TYPE_STRING) {
+                char **strs = (char **)gguf->kv[i].arr_data;
                 for (int j = 0; j < gguf->kv[i].arr_count; j++)
-                    free(gguf->kv[i].val.arr_strings[j]);
-                free(gguf->kv[i].val.arr_strings);
-            } else if (gguf->kv[i].arr_type == GGUF_TYPE_INT32 ||
-                       gguf->kv[i].arr_type == GGUF_TYPE_UINT32) {
-                free(gguf->kv[i].val.arr_ints);
+                    free(strs[j]);
             }
+            free(gguf->kv[i].arr_data);
         }
     }
     free(gguf->kv);
@@ -423,7 +421,7 @@ const char **poly_gguf_kv_string_array(const PolyGgufDecoded *g, const char *key
             g->kv[i].type == GGUF_TYPE_ARRAY &&
             g->kv[i].arr_type == GGUF_TYPE_STRING) {
             if (count_out) *count_out = g->kv[i].arr_count;
-            return (const char **)g->kv[i].val.arr_strings;
+            return (const char **)g->kv[i].arr_data;
         }
     }
     if (count_out) *count_out = 0;
@@ -437,7 +435,7 @@ const int32_t *poly_gguf_kv_int_array(const PolyGgufDecoded *g, const char *key,
             g->kv[i].type == GGUF_TYPE_ARRAY &&
             (g->kv[i].arr_type == GGUF_TYPE_INT32 || g->kv[i].arr_type == GGUF_TYPE_UINT32)) {
             if (count_out) *count_out = g->kv[i].arr_count;
-            return g->kv[i].val.arr_ints;
+            return (const int32_t *)g->kv[i].arr_data;
         }
     }
     if (count_out) *count_out = 0;

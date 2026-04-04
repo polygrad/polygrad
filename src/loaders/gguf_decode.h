@@ -25,10 +25,9 @@ typedef struct {
         int64_t  i64;
         double   f64;
         struct { char *str; int len; } s;
-        /* For arrays: arr_strings (string arrays), arr_ints (int arrays) */
-        char **arr_strings;     /* owned string array (if arr_type==STRING) */
-        int32_t *arr_ints;      /* owned int array (if arr_type is int) */
     } val;
+    /* Array data stored outside the union to avoid aliasing */
+    void *arr_data;     /* owned: char** if string array, int32_t* if int array */
 } PolyGgufKV;
 
 typedef struct {
