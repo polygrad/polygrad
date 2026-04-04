@@ -56,6 +56,7 @@ SOURCES = [
     'src/models/nam.c',
     'src/models/registry.c',
     'src/models/gpt2.c',
+    'src/models/qwen3.c',
     'src/models/hf_loader.c',
     # LOADER_SRC
     'src/loaders/decoded.c',
@@ -103,6 +104,7 @@ HEADERS = [
     'src/loaders/import_desc.h',
     # Model headers referenced by gpt2.c
     'src/models/gpt2.h',
+    'src/models/qwen3.h',
     'src/models/hf_loader.h',
 ]
 
