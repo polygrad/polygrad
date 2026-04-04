@@ -17,12 +17,17 @@ extern "C" {
 
 typedef struct {
     char *key;
-    int type;
+    int type;           /* GGUF value type (scalar types or ARRAY=9) */
+    int arr_type;       /* element type if type==ARRAY, else 0 */
+    int arr_count;      /* element count if type==ARRAY, else 0 */
     union {
         uint64_t u64;
         int64_t  i64;
         double   f64;
         struct { char *str; int len; } s;
+        /* For arrays: arr_strings (string arrays), arr_ints (int arrays) */
+        char **arr_strings;     /* owned string array (if arr_type==STRING) */
+        int32_t *arr_ints;      /* owned int array (if arr_type is int) */
     } val;
 } PolyGgufKV;
 
@@ -40,6 +45,8 @@ void poly_gguf_decoded_free(PolyGgufDecoded *gguf);
 int         poly_gguf_kv_int(const PolyGgufDecoded *g, const char *key, int def);
 double      poly_gguf_kv_float(const PolyGgufDecoded *g, const char *key, double def);
 const char *poly_gguf_kv_string(const PolyGgufDecoded *g, const char *key, const char *def);
+const char **poly_gguf_kv_string_array(const PolyGgufDecoded *g, const char *key, int *count_out);
+const int32_t *poly_gguf_kv_int_array(const PolyGgufDecoded *g, const char *key, int *count_out);
 
 #ifdef __cplusplus
 }
