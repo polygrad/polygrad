@@ -185,6 +185,29 @@ function createBoundInstanceClass(runtime) {
       return new Instance(handle)
     }
 
+    static loadHF(configBytes, weightFiles, opts = {}) {
+      const api = _runtime._backend.instance
+      const cfg = normalizeBytes(configBytes, 'config')
+      const wf = weightFiles.map((f, i) => normalizeBytes(f, `weight file ${i}`))
+      const handle = api.loadHF(cfg, wf, opts.maxBatch, opts.maxSeqLen)
+      if (!handle) {
+        const err = api.importLastError && api.importLastError()
+        throw new Error('polygrad: loadHF failed' + (err ? ': ' + err.message : ''))
+      }
+      return new Instance(handle)
+    }
+
+    static loadGGUF(ggufBytes, opts = {}) {
+      const api = _runtime._backend.instance
+      const bytes = normalizeBytes(ggufBytes, 'gguf')
+      const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
+      if (!handle) {
+        const err = api.importLastError && api.importLastError()
+        throw new Error('polygrad: loadGGUF failed' + (err ? ': ' + err.message : ''))
+      }
+      return new Instance(handle)
+    }
+
     setOptimizer(kind, lr = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weightDecay = 0.0) {
       const rc = this._rt._backend.instance.setOptimizer(
         this._handle, kind, lr, beta1, beta2, eps, weightDecay

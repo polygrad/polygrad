@@ -85,11 +85,17 @@ int poly_import_copy_named_tensor(
     int transpose_2d)
 {
     int bi = bind_find(idx, dst_name);
-    if (bi < 0) return 0;
+    if (bi < 0) return 0;  /* not found */
 
     int64_t dst_numel;
     float *dst_data = poly_instance_buf_data(idx->inst, bi, &dst_numel);
-    if (!dst_data) return 0;
+    if (!dst_data) {
+        /* Check raw data pointer to distinguish alloc failure from sync failure */
+        poly_import_error_set(POLY_IMPORT_ERR_INTERNAL,
+            "buffer '%s' data is NULL (bi=%d, numel=%lld)", dst_name, bi,
+            (long long)dst_numel);
+        return -1;
+    }
 
     int64_t src_numel = 1;
     for (int d = 0; d < src_ndim; d++) src_numel *= src_shape[d];

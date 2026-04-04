@@ -36,6 +36,32 @@ typedef enum {
   POLY_DEVICE_HIP,      /* AMD GPU (HSACO via hipModule) */
 } PolyDeviceId;
 
+/*
+ * Host-addressable device for this build target.
+ *
+ * Instance buffers are tagged with a device domain so that
+ * poly_instance_buf_data() knows whether a buffer is directly
+ * readable (host-addressable) or needs a device-to-host copy.
+ *
+ * In native builds, host memory is POLY_DEVICE_CPU (the CPU backend
+ * is registered and recognized as host-addressable).
+ *
+ * In Emscripten/WASM builds, the CPU backend is NOT registered
+ * (there is no fork+clang+dlopen in WASM). Only POLY_DEVICE_WASM_JIT
+ * is registered and recognized as host-addressable. If buffers are
+ * tagged POLY_DEVICE_CPU in WASM, poly_device_is_host_addressable()
+ * returns false, sync_buf_to_host() fails, and buf_data() returns NULL
+ * even though the data pointer is valid host memory.
+ *
+ * POLY_DEVICE_HOST resolves to the correct host device per build target,
+ * ensuring buffers created during model import are always accessible.
+ */
+#ifdef __EMSCRIPTEN__
+#define POLY_DEVICE_HOST POLY_DEVICE_WASM_JIT
+#else
+#define POLY_DEVICE_HOST POLY_DEVICE_CPU
+#endif
+
 /* ── Compilation mode ────────────────────────────────────────────────── */
 
 typedef enum {

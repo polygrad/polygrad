@@ -121,6 +121,31 @@ function createNativeBackend() {
       if (inst) binding.poly_instance_set_device(inst, 0)
       return inst
     },
+    loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
+      const inst = binding.poly_hf_load(configBytes, weightFilesBytes,
+        maxBatch || 1, maxSeqLen || 0)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
+    },
+    loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
+      const inst = binding.poly_gguf_load(ggufBytes, maxBatch || 1, maxSeqLen || 0)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
+    },
+    importLastError() {
+      const code = binding.poly_import_last_error_code()
+      if (code === 0) return null
+      return { code, message: binding.poly_import_last_error_message() || 'unknown' }
+    },
+    tokenizerFromJSON(jsonBytes) {
+      return binding.poly_tokenizer_from_json(jsonBytes, jsonBytes.length)
+    },
+    tokenize(tokPtr, text) { return binding.poly_tokenize(tokPtr, text) },
+    detokenize(tokPtr, ids) { return binding.poly_detokenize(tokPtr, ids) },
+    tokenizerFree(tokPtr) { binding.poly_tokenizer_free(tokPtr) },
+    tokenizerVocabSize(tokPtr) { return binding.poly_tokenizer_vocab_size(tokPtr) },
+    tokenizerBosId(tokPtr) { return binding.poly_tokenizer_bos_id(tokPtr) },
+    tokenizerEosId(tokPtr) { return binding.poly_tokenizer_eos_id(tokPtr) },
     setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay) {
       return binding.poly_instance_set_optimizer(inst, kind, lr, beta1, beta2, eps, weightDecay)
     },

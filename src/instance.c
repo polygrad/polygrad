@@ -273,19 +273,33 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
       inst->bufs[i].owns_data = false;
     } else {
       inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
+      if (!inst->bufs[i].data && inst->bufs[i].numel > 0)
+        fprintf(stderr, "poly_instance: calloc FAILED for '%s' (%lld floats = %lld MB)\n",
+                spec->bufs[i].name ? spec->bufs[i].name : "?",
+                (long long)inst->bufs[i].numel,
+                (long long)(inst->bufs[i].numel * 4 / 1024 / 1024));
       inst->bufs[i].owns_data = true;
     }
     if (spec->bufs[i].role == POLY_ROLE_PARAM) n_params++;
   }
 
-  /* Initialize buffer handles (CPU domain, pointing at host data) */
+  /* Initialize buffer handles with host device domain.
+   *
+   * Uses POLY_DEVICE_HOST (not hardcoded POLY_DEVICE_CPU) because in
+   * Emscripten/WASM builds the CPU backend is not registered -- only
+   * POLY_DEVICE_WASM_JIT is. Tagging buffers as CPU in WASM causes
+   * poly_device_is_host_addressable() to return false, making
+   * poly_instance_buf_data() return NULL even though the data pointer
+   * is valid host memory. Fixed in commit after 9a061b9 (which added
+   * the host_addressable flag but didn't handle the WASM case).
+   */
   inst->buf_handles = calloc(spec->n_bufs, sizeof(PolyBufferHandle));
   for (int i = 0; i < spec->n_bufs; i++) {
     inst->buf_handles[i] = (PolyBufferHandle){
       .ptr = inst->bufs[i].data,
       .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
-      .domain = POLY_DEVICE_CPU,
-      .owned = false,  /* data owned by NamedBuf, not the handle */
+      .domain = POLY_DEVICE_HOST,
+      .owned = false,
     };
   }
 
@@ -1206,7 +1220,7 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   extra_bufs[0] = vag->loss_out_buf;
   extra_handles[0] = (PolyBufferHandle){
     .ptr = &vag->loss_data, .nbytes = sizeof(float),
-    .domain = POLY_DEVICE_CPU, .owned = false,
+    .domain = POLY_DEVICE_HOST, .owned = false,
   };
 
   /* Gradient output buffers -- host-resident for readback */
@@ -1216,7 +1230,7 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
     extra_handles[1 + i] = (PolyBufferHandle){
       .ptr = vag->grad_datas[i],
       .nbytes = (size_t)pb->numel * sizeof(float),
-      .domain = POLY_DEVICE_CPU, .owned = false,
+      .domain = POLY_DEVICE_HOST, .owned = false,
     };
   }
 

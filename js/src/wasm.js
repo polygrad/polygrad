@@ -852,6 +852,99 @@ async function createWasmBackend(device) {
       return inst || null
     },
 
+    /* ── Model loading ────────────────────────────────────────── */
+
+    loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
+      const cfgPtr = allocBytes(configBytes)
+      const n = weightFilesBytes.length
+      const ptrArr = Module._malloc(n * 4)
+      const lenArr = Module._malloc(n * 8)
+      const filePtrs = []
+      for (let i = 0; i < n; i++) {
+        const fp = allocBytes(weightFilesBytes[i])
+        filePtrs.push(fp)
+        heap32()[(ptrArr >> 2) + i] = fp
+        heap32()[(lenArr >> 2) + i * 2] = weightFilesBytes[i].length
+        heap32()[(lenArr >> 2) + i * 2 + 1] = 0
+      }
+      const inst = Module._poly_hf_load(
+        cfgPtr, configBytes.length, ptrArr, lenArr, n,
+        maxBatch || 1, maxSeqLen || 0)
+      for (const fp of filePtrs) Module._free(fp)
+      Module._free(ptrArr); Module._free(lenArr); Module._free(cfgPtr)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed')
+      }
+      return inst || null
+    },
+
+    loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
+      const ptr = allocBytes(ggufBytes)
+      const inst = Module._poly_gguf_load(
+        ptr, BigInt(ggufBytes.length), maxBatch || 1, maxSeqLen || 0)
+      Module._free(ptr)
+      if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+        Module._poly_instance_free(inst)
+        throw new Error('polygrad: set_device failed')
+      }
+      return inst || null
+    },
+
+    importLastError() {
+      const code = Module._poly_import_last_error_code()
+      if (code === 0) return null
+      const msgPtr = Module._poly_import_last_error_message()
+      return { code, message: msgPtr ? readCString(msgPtr) : 'unknown' }
+    },
+
+    /* ── Tokenizer ───────────────────────────────────────────── */
+
+    tokenizerFromGGUF(ggufBytes) {
+      const ptr = allocBytes(ggufBytes)
+      const outPtr = Module._malloc(4)
+      Module._poly_gguf_decode(ptr, BigInt(ggufBytes.length), outPtr)
+      const decoded = heap32()[outPtr >> 2]
+      Module._free(outPtr)
+      if (!decoded) { Module._free(ptr); return null }
+      const tok = Module._poly_tokenizer_from_gguf(decoded)
+      Module._poly_gguf_decoded_free(decoded)
+      Module._free(ptr)
+      return tok || null
+    },
+
+    tokenizerFromJSON(jsonBytes) {
+      const ptr = allocBytes(jsonBytes)
+      const tok = Module._poly_tokenizer_from_json(ptr, jsonBytes.length)
+      Module._free(ptr)
+      return tok || null
+    },
+
+    tokenize(tokPtr, text) {
+      const textPtr = allocString(text)
+      const idsPtr = Module._malloc(4096 * 4)
+      const n = Module._poly_tokenize(tokPtr, textPtr, idsPtr, 4096)
+      const ids = new Int32Array(n)
+      for (let i = 0; i < n; i++) ids[i] = heap32()[(idsPtr >> 2) + i]
+      Module._free(idsPtr); Module._free(textPtr)
+      return ids
+    },
+
+    detokenize(tokPtr, ids) {
+      const idsPtr = Module._malloc(ids.length * 4)
+      for (let i = 0; i < ids.length; i++) heap32()[(idsPtr >> 2) + i] = ids[i]
+      const bufPtr = Module._malloc(8192)
+      Module._poly_detokenize(tokPtr, idsPtr, ids.length, bufPtr, 8192)
+      const text = readCString(bufPtr)
+      Module._free(bufPtr); Module._free(idsPtr)
+      return text
+    },
+
+    tokenizerFree(tokPtr) { Module._poly_tokenizer_free(tokPtr) },
+    tokenizerVocabSize(tokPtr) { return Module._poly_tokenizer_vocab_size(tokPtr) },
+    tokenizerBosId(tokPtr) { return Module._poly_tokenizer_bos_id(tokPtr) },
+    tokenizerEosId(tokPtr) { return Module._poly_tokenizer_eos_id(tokPtr) },
+
     setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay) {
       return Module._poly_instance_set_optimizer(
         instPtr, kind, lr, beta1, beta2, eps, weightDecay)

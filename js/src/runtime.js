@@ -2,6 +2,7 @@
 
 const { createBoundInstanceClass } = require('./instance')
 const { createBoundTensorClass } = require('./tensor')
+const { createBoundTokenizerClass } = require('./tokenizer')
 
 function normalizeOptions(opts) {
   const options = opts ? { ...opts } : {}
@@ -25,6 +26,7 @@ class PolyRuntime {
     this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
     this.Instance = createBoundInstanceClass(this)
+    this.Tokenizer = createBoundTokenizerClass(this)
     this.ROLE_PARAM = this.Instance.ROLE_PARAM
     this.ROLE_INPUT = this.Instance.ROLE_INPUT
     this.ROLE_TARGET = this.Instance.ROLE_TARGET
