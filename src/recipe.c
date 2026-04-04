@@ -430,12 +430,7 @@ PolyUOp *poly_mlp_forward(PolyMLP *model, PolyUOp *x, int batch_size) {
     PolyUOp *wt = poly_permute(ctx, w_2d, w_perm, 2);
 
     /* x @ wt: (batch, in_dim) × (in_dim, out_dim) → (batch, out_dim) */
-    int64_t x_shape[] = { batch_size, in_dim };
-    int64_t wt_shape[] = { in_dim, out_dim };
-    int64_t dot_out_shape[16];
-    int dot_out_ndim;
-    x = poly_dot(ctx, x, x_shape, 2, wt, wt_shape, 2,
-                 dot_out_shape, &dot_out_ndim);
+    x = poly_dot(ctx, x, wt);
 
     /* Add bias: reshape (out_dim) → (1, out_dim), expand → (batch, out_dim) */
     int64_t b_reshape[] = { 1, out_dim };
