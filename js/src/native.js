@@ -137,6 +137,9 @@ function createNativeBackend() {
       if (code === 0) return null
       return { code, message: binding.poly_import_last_error_message() || 'unknown' }
     },
+    tokenizerFromGGUF(ggufBytes) {
+      return binding.poly_tokenizer_from_gguf(ggufBytes)
+    },
     tokenizerFromJSON(jsonBytes) {
       return binding.poly_tokenizer_from_json(jsonBytes, jsonBytes.length)
     },

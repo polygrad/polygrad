@@ -1569,6 +1569,83 @@ static napi_value napi_poly_tokenizer_eos_id(napi_env env, napi_callback_info in
   return r;
 }
 
+/* ── HF / GGUF loaders ─────────────────────────────────────────────────── */
+
+extern PolyInstance *poly_hf_load(
+    const char *config_json, int config_len,
+    const uint8_t **weight_files, const int64_t *weight_lens,
+    int n_weight_files, int max_batch, int max_seq_len);
+
+extern PolyInstance *poly_gguf_load(
+    const uint8_t *data, int64_t len, int max_batch, int max_seq_len);
+
+static napi_value napi_poly_hf_load(napi_env env, napi_callback_info info) {
+  napi_value argv[4]; size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+
+  /* argv[0] = config Buffer, argv[1] = weight Buffers array, argv[2] = maxBatch, argv[3] = maxSeqLen */
+  void *cfg_data; size_t cfg_len;
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &cfg_data, &cfg_len));
+
+  uint32_t n_files;
+  NAPI_CALL(env, napi_get_array_length(env, argv[1], &n_files));
+
+  const uint8_t **file_ptrs = malloc(n_files * sizeof(uint8_t *));
+  int64_t *file_lens = malloc(n_files * sizeof(int64_t));
+  for (uint32_t i = 0; i < n_files; i++) {
+    napi_value el;
+    NAPI_CALL(env, napi_get_element(env, argv[1], i, &el));
+    void *fdata; size_t flen;
+    NAPI_CALL(env, napi_get_buffer_info(env, el, &fdata, &flen));
+    file_ptrs[i] = (const uint8_t *)fdata;
+    file_lens[i] = (int64_t)flen;
+  }
+
+  int32_t max_batch, max_seq_len;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_batch));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &max_seq_len));
+
+  PolyInstance *inst = poly_hf_load(
+      (const char *)cfg_data, (int)cfg_len,
+      file_ptrs, file_lens, (int)n_files,
+      max_batch, max_seq_len);
+
+  free(file_ptrs);
+  free(file_lens);
+
+  if (!inst) { napi_value n; napi_get_null(env, &n); return n; }
+  return make_external(env, inst);
+}
+
+static napi_value napi_poly_gguf_load(napi_env env, napi_callback_info info) {
+  napi_value argv[3]; size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  void *data; size_t len;
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
+  int32_t max_batch, max_seq_len;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &max_batch));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &max_seq_len));
+  PolyInstance *inst = poly_gguf_load((const uint8_t *)data, (int64_t)len,
+                                      max_batch, max_seq_len);
+  if (!inst) { napi_value n; napi_get_null(env, &n); return n; }
+  return make_external(env, inst);
+}
+
+static napi_value napi_poly_tokenizer_from_gguf(napi_env env, napi_callback_info info) {
+  napi_value argv[1]; size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  void *data; size_t len;
+  NAPI_CALL(env, napi_get_buffer_info(env, argv[0], &data, &len));
+  PolyGgufDecoded *gguf = NULL;
+  if (poly_gguf_decode((const uint8_t *)data, (int64_t)len, &gguf) != 0 || !gguf) {
+    napi_value n; napi_get_null(env, &n); return n;
+  }
+  PolyTokenizer *tok = poly_tokenizer_from_gguf(gguf);
+  poly_gguf_decoded_free(gguf);
+  if (!tok) { napi_value n; napi_get_null(env, &n); return n; }
+  return make_external(env, tok);
+}
+
 static napi_value napi_poly_import_error_code(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value r;
@@ -1754,6 +1831,11 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_tokenizer_vocab_size", napi_poly_tokenizer_vocab_size),
     DECLARE_NAPI_METHOD("poly_tokenizer_bos_id", napi_poly_tokenizer_bos_id),
     DECLARE_NAPI_METHOD("poly_tokenizer_eos_id", napi_poly_tokenizer_eos_id),
+
+    /* Loaders */
+    DECLARE_NAPI_METHOD("poly_hf_load", napi_poly_hf_load),
+    DECLARE_NAPI_METHOD("poly_gguf_load", napi_poly_gguf_load),
+    DECLARE_NAPI_METHOD("poly_tokenizer_from_gguf", napi_poly_tokenizer_from_gguf),
 
     /* Import error */
     DECLARE_NAPI_METHOD("poly_import_last_error_code", napi_poly_import_error_code),
