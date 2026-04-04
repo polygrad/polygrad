@@ -20,7 +20,7 @@ extern "C" {
 
 /* ── Constants ───────────────────────────────────────────────────────── */
 
-#define POLY_MAX_REALIZE_BUFS 256
+#define POLY_MAX_REALIZE_BUFS 2048
 #define POLY_MAX_STRUCT_NODES 8192
 #define POLY_SCHED_CACHE_VERSION 3u
 
