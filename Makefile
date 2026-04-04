@@ -10,7 +10,7 @@ HAS_CUDA := $(shell test -f /usr/include/cuda.h && echo 1 || echo 0)
 
 SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/sched.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/runtime_cpu.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/tensor.c src/rangeify.c src/indexing.c src/nn.c src/exec_plan.c src/interp.c
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
-CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/instance.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/hf_loader.c $(LOADER_SRC)
+CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/instance.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_sched.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_nn.c test/test_tensor.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_f16.c test/test_exec_plan.c test/test_bundle.c test/test_registry.c
 
 ifeq ($(HAS_CUDA), 1)

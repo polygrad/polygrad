@@ -17,11 +17,20 @@ extern PolyInstance *poly_gpt2_from_hf_decoded_generic(
 extern PolyInstance *poly_gpt2_from_gguf_decoded_generic(
     const PolyGgufDecoded *gguf, const PolyGenericImportOpts *opts);
 
+/* qwen3.c */
+extern PolyInstance *poly_qwen3_from_gguf_decoded_generic(
+    const PolyGgufDecoded *gguf, const PolyGenericImportOpts *opts);
+
 static const PolyImportDesc g_import_descs[] = {
     {
         .model_type        = "gpt2",
         .from_hf_decoded   = poly_gpt2_from_hf_decoded_generic,
         .from_gguf_decoded = poly_gpt2_from_gguf_decoded_generic,
+    },
+    {
+        .model_type        = "qwen3",
+        .from_hf_decoded   = NULL,
+        .from_gguf_decoded = poly_qwen3_from_gguf_decoded_generic,
     },
 };
 
