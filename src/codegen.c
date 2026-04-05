@@ -5150,6 +5150,94 @@ PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
 
     if (changed) {
       PolyUOp *new_u = poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
+
+      /* ── Gated STORE for GLOBAL buffers missing local dims ──────────
+       *
+       * Matches tinygrad gpudims.py:92-99.  After group_for_reduce, all
+       * threads participate in the per-thread accumulation + shared-memory
+       * reduction.  But only thread 0 should write the final result to the
+       * global output buffer.  Without a guard, every thread STOREs the
+       * same scalar → a benign-but-incorrect write race.
+       *
+       * Tinygrad solves this by adding a gated INDEX (3-source:
+       * INDEX(ptr, offset, gate)) on the global STORE, where gate =
+       * AND(lidxN == 0 for each missing local).  The renderer later emits
+       * `if (gate) { *ptr = val; }`.
+       *
+       * We detect: STORE whose src[0] is INDEX with a GLOBAL-addrspace
+       * pointer, where the INDEX subtree contains no lidx SPECIAL.  For
+       * those, add gate = CMPLT(lidx0, 1) as 3rd INDEX source. */
+      if (new_u->op == POLY_OP_STORE && n_group > 0 && new_u->n_src >= 2) {
+        PolyUOp *idx = new_u->src[0];
+        /* Walk through CAST to find the INDEX */
+        PolyUOp *raw_idx = idx;
+        while (raw_idx->op == POLY_OP_CAST && raw_idx->n_src > 0)
+          raw_idx = raw_idx->src[0];
+
+        if (raw_idx->op == POLY_OP_INDEX && raw_idx->n_src == 2 &&
+            raw_idx->dtype.is_ptr &&
+            raw_idx->dtype.addrspace == POLY_ADDR_GLOBAL) {
+          /* Check if any lidx SPECIAL appears in the INDEX subtree */
+          int idx_n = 0;
+          PolyUOp **idx_topo = poly_toposort(ctx, raw_idx, &idx_n);
+          bool has_lidx = false;
+          for (int j = 0; j < idx_n; j++) {
+            if (idx_topo[j]->op == POLY_OP_SPECIAL &&
+                idx_topo[j]->arg.kind == POLY_ARG_STRING &&
+                idx_topo[j]->arg.str &&
+                strncmp(idx_topo[j]->arg.str, "lidx", 4) == 0) {
+              has_lidx = true;
+              break;
+            }
+          }
+
+          if (!has_lidx) {
+            /* Build gate: AND(lidxN == 0) for all local dims.
+             * For single local dim (common case): gate = lidx0 < 1. */
+            PolyUOp *gate = NULL;
+            for (int g = 0; g < n_group; g++) {
+              /* Find the lidx SPECIAL we created for this group range */
+              PolyUOp *lidx = NULL;
+              for (int k = 0; k < n_subs; k++) {
+                if (sub_old[k] == group_ranges[g]) { lidx = sub_new[k]; break; }
+              }
+              if (!lidx) continue;
+              PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
+                                        poly_arg_int(0));
+              PolyUOp *eq_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
+                                           lidx, poly_uop0(ctx, POLY_OP_CONST,
+                                           POLY_INT32, poly_arg_int(1)),
+                                           poly_arg_none());
+              gate = gate ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
+                                      gate, eq_zero, poly_arg_none())
+                          : eq_zero;
+            }
+
+            if (gate) {
+              /* Rebuild INDEX with gate as 3rd source */
+              PolyUOp *gated_srcs[3] = { raw_idx->src[0], raw_idx->src[1], gate };
+              PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, raw_idx->dtype,
+                                            gated_srcs, 3, raw_idx->arg);
+
+              /* If idx was wrapped in CAST, re-wrap */
+              PolyUOp *final_idx = gated_idx;
+              if (idx != raw_idx) {
+                final_idx = poly_uop1(ctx, idx->op, idx->dtype,
+                                      gated_idx, idx->arg);
+              }
+
+              /* Rebuild STORE with gated INDEX */
+              PolyUOp *store_srcs[64];
+              store_srcs[0] = final_idx;
+              for (int j = 1; j < new_u->n_src && j < 64; j++)
+                store_srcs[j] = new_u->src[j];
+              new_u = poly_uop(ctx, new_u->op, new_u->dtype,
+                               store_srcs, new_u->n_src, new_u->arg);
+            }
+          }
+        }
+      }
+
       sub_old[n_subs] = u;
       sub_new[n_subs] = new_u;
       n_subs++;
@@ -5357,31 +5445,8 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
     return sink;
   }
 
-  /* Apply substitutions bottom-up through the graph.
-   * Also wrap STORE ops that consumed a transformed REDUCE with IF guard. */
-
-  /* Collect group ranges from substitutions to add IF guards */
-  PolyUOp *group_range_for_guard = NULL;
-  for (int i = 0; i < n_subs; i++) {
-    /* The substituted reduce's final value traces back to a group range.
-     * Find the group range by looking at the new reduce's ancestry. */
-    PolyUOp *nr = sub_new[i];
-    /* Walk the final reduce's load → after → smem → and find the group range
-     * by looking for RANGE with arg >= 1000 in the toposort */
-    int nt = 0;
-    PolyUOp **sub_topo = poly_toposort(ctx, nr, &nt);
-    for (int j = 0; j < nt; j++) {
-      if (sub_topo[j]->op == POLY_OP_RANGE &&
-          poly_arg_is_range(sub_topo[j]->arg) &&
-          poly_range_axis_type(sub_topo[j]->arg) == POLY_AXIS_GROUP_REDUCE) {
-        group_range_for_guard = sub_topo[j];
-        break;
-      }
-    }
-    break;  /* only handle first reduce for now */
-  }
-
-  /* Bottom-up graph rebuild with substitutions */
+  /* Bottom-up graph rebuild: substitute original REDUCE → final_reduce.
+   * No IF/ENDIF here -- the guard moves to add_gpudims (gated INDEX). */
   PolyUOp *new_sink = sink;
 
   /* Re-toposort since we modified things */
@@ -5412,33 +5477,16 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
     }
 
     if (changed) {
-      /* If this is a STORE consuming a transformed reduce, wrap with IF guard */
-      if (u->op == POLY_OP_STORE && group_range_for_guard) {
-        /* Check if value (src[1]) was a substituted reduce */
-        bool val_subst = false;
-        for (int k = 0; k < n_subs; k++) {
-          if (sub_old[k] == u->src[1]) { val_subst = true; break; }
-        }
-        if (val_subst) {
-          /* Create: IF(group_range < 1) { STORE(...) } ENDIF */
-          PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
-          PolyUOp *guard = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                     group_range_for_guard, one, poly_arg_none());
-          PolyUOp *if_op = poly_uop1(ctx, POLY_OP_IF, POLY_VOID,
-                                     guard, poly_arg_none());
-          PolyUOp *new_store = poly_uop(ctx, u->op, u->dtype,
-                                        new_srcs, ns, u->arg);
-          PolyUOp *endif_srcs[2] = { new_store, if_op };
-          PolyUOp *endif_op = poly_uop(ctx, POLY_OP_ENDIF, POLY_VOID,
-                                       endif_srcs, 2, poly_arg_none());
-          sub_old[n_subs] = u;
-          sub_new[n_subs] = endif_op;
-          n_subs++;
-          if (u == sink) new_sink = endif_op;
-          continue;
-        }
-      }
-
+      /* Do NOT create IF/ENDIF here.  Tinygrad's fix_group_for_reduce
+       * (expander.py) never injects IF; the single-writer guard is added
+       * later by add_gpudims as a gated 3-source INDEX on the global STORE.
+       *
+       * Creating IF/ENDIF in the DAG causes the IF (linearizer priority 0)
+       * to float above the accumulation RANGE (priority 5), wrapping the
+       * entire kernel body in `if (lidx0 < 1)`.  Only thread 0 executes,
+       * so the inner loop checks vocab indices at stride 256 (0, 256, 512,
+       * ...) and misses all non-stride-aligned indices -- e.g. token 785
+       * is between 768 and 1024 and never gets checked. */
       PolyUOp *new_u = poly_uop(ctx, u->op, u->dtype, new_srcs, ns, u->arg);
       sub_old[n_subs] = u;
       sub_new[n_subs] = new_u;

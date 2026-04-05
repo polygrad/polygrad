@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+- CUDA group_for_reduce: removed premature IF/ENDIF creation from `poly_group_for_reduce` that caused the IF guard to float above the accumulation RANGE during linearization. Only thread 0 executed the inner loop, checking vocab indices at stride 256 and missing all non-aligned indices. Qwen3 0.6B embedding lookups for non-zero tokens produced all-zero output. Fix defers the single-writer guard to `poly_add_gpudims` as a gated 3-source INDEX on global stores missing local dims, matching tinygrad's gpudims.py approach.
+- CUDA gated STORE rendering: taught `render_cuda.c` to emit `if (gate) { *ptr = val; }` when a STORE's INDEX has a 3rd boolean source. Previously only gated LOADs were supported.
+- CUDA integer MULACC: added `(%s*%s+%s)` fallback for non-float MULACC in `render_cuda.c`. Previously rendered as `__fmaf_rn(a,b,c)` which is wrong for integer index math.
+- `poly_eq` type mismatch: changed from `CMPNE(ne, INT32(1))` to `CMPNE(ne, BOOL(true))`. The bool/int32 operand mismatch produced incorrect comparison results on CUDA.
+- Instance const_registry CUDA migration: anonymous constant buffers (arange in gather, causal mask) are now uploaded to device memory in `slot_cache_build`. Previously passed as host pointers to CUDA kernels.
+
 ### Added
 - BEAM search optimizer (`POLY_BEAM=N` env var). Explores UPCAST/UNROLL action space by compiling and timing candidates, keeps top-N per iteration (up to 5 iterations). Disk cache in `~/.cache/polygrad/beam/`. Integrated into `poly_full_rewrite_to_sink_ex` and `poly_linearize_env`. 5 new C tests (beam suite).
 - Cross-platform execution plan types (`exec_plan.h`): `PolyDeviceId`, `PolyCompileMode`, `PolyPreparedStep`, `PolyExecutableStep`, `PolyRunner`, `PolyBackendDesc`, `PolyAllocator`, `PolyBufferHandle`. Foundation for multi-backend PolyInstance.

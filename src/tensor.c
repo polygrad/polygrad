@@ -763,7 +763,8 @@ PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t s[POLY_MAX_DIMS]; int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
-  return poly_alu3(ctx, POLY_OP_WHERE, ne, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
+  PolyUOp *t = poly_const_typed(ctx, POLY_BOOL, 1);
+  return poly_alu2(ctx, POLY_OP_CMPNE, ne, t);
 }
 
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {

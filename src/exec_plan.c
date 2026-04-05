@@ -1224,6 +1224,11 @@ int poly_compiled_plan_run(PolyCompiledPlan *plan,
 
     if (ret == 0) {
       ret = backend->execute(runner, args, n_args);
+      if (ret != 0) {
+        fprintf(stderr, "polygrad: kernel %d/%d failed (params=%d grid=%d block=%d)\n",
+                s, sched->n_items, runner->n_params,
+                runner->grid[0], runner->block[0]);
+      }
     }
   }
 

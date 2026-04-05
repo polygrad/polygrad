@@ -186,7 +186,8 @@ static void cuda_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
   case POLY_OP_MULACC:
     snprintf(buf, cap, is_half ? "__hfma(%s,%s,%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "fma(%s,%s,%s)" : "__fmaf_rn(%s,%s,%s)",
+      poly_dtype_eq(dtype, POLY_FLOAT64) ? "fma(%s,%s,%s)" :
+      poly_dtype_is_float(dtype) ? "__fmaf_rn(%s,%s,%s)" : "(%s*%s+%s)",
       s0, s1, s2);
     break;
   default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
@@ -504,11 +505,34 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     if (u->op == POLY_OP_STORE) {
       char *target = csmap_get(&names, u->src[0]);
       char *val    = csmap_get(&names, u->src[1]);
+
+      /* Gated STORE: if the INDEX has a 3rd source (boolean gate), wrap
+       * the store in `if (gate) { ... }`.  This is the CUDA-side lowering
+       * of the gated INDEX added by add_gpudims for GLOBAL stores that
+       * don't reference any local threadIdx dim.  Matches tinygrad's
+       * pm_linearize_cleanups which converts gated INDEX+STORE into
+       * IF/STORE/ENDIF post-linearization. */
+      PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
+      bool gated_store = (store_idx && store_idx->n_src >= 3 &&
+                          u->src[0]->op != POLY_OP_DEFINE_LOCAL);
+      if (gated_store) {
+        char *gate_s = csmap_get(&names, store_idx->src[2]);
+        for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+        csb_printf(&body, "if (%s) {\n", gate_s);
+        depth++;
+      }
+
       for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
       if (u->src[0]->op == POLY_OP_DEFINE_LOCAL)
         csb_printf(&body, "%s = %s;\n", target, val);
       else
         csb_printf(&body, "*%s = %s;\n", target, val);
+
+      if (gated_store) {
+        depth--;
+        for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+        csb_puts(&body, "}\n");
+      }
       continue;
     }
 

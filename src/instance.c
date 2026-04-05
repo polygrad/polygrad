@@ -104,6 +104,11 @@ typedef struct {
   int *io_slot_indices;        /* [n_io] */
   int *io_buf_indices;         /* [n_io] instance buf index */
   int n_io;
+
+  /* Device-migrated const-registry buffers (owned, freed on cache teardown) */
+  void **migrated_consts;      /* device pointers to free */
+  int n_migrated;
+  PolyDeviceId device;         /* which device owns migrated_consts */
 } SlotCache;
 
 struct PolyInstance {
@@ -142,6 +147,15 @@ struct PolyInstance {
 
 static void slot_cache_free(SlotCache *c) {
   if (!c) return;
+  /* Free device-migrated const buffers */
+  if (c->migrated_consts && c->n_migrated > 0) {
+    const PolyBackendDesc *be = poly_backend_get(c->device);
+    const PolyAllocator *alloc = be ? be->get_allocator() : NULL;
+    for (int i = 0; i < c->n_migrated; i++)
+      if (alloc && c->migrated_consts[i])
+        alloc->free(c->migrated_consts[i], alloc->dev_ctx);
+    free(c->migrated_consts);
+  }
   free(c->slot_data);
   free(c->slot_to_buf);
   free(c->io_slot_indices);
@@ -162,6 +176,7 @@ static SlotCache *slot_cache_build(
 
   SlotCache *c = calloc(1, sizeof(SlotCache));
   c->plan = plan;
+  c->device = device;
   c->n_slots = sched->n_buf_slots;
   c->slot_data = calloc((size_t)(c->n_slots > 0 ? c->n_slots : 1), sizeof(void *));
   c->slot_to_buf = malloc((size_t)(c->n_slots > 0 ? c->n_slots : 1) * sizeof(int));
@@ -191,10 +206,33 @@ static SlotCache *slot_cache_build(
       }
     }
 
-    /* Check const_registry for anonymous constant buffers (e.g. arange in gather) */
+    /* Check const_registry for anonymous constant buffers (e.g. arange in gather).
+     * These live in host memory. For non-host-addressable devices (CUDA, HIP),
+     * we must allocate device memory and upload the data -- otherwise the kernel
+     * receives a host pointer as a device arg → CUDA_ERROR_ILLEGAL_ADDRESS. */
     if (!c->slot_data[s]) {
       void *const_data = poly_const_registry_lookup(inst->ctx, slot_uop);
-      if (const_data) c->slot_data[s] = const_data;
+      if (const_data) {
+        if (!poly_device_is_host_addressable(device)) {
+          size_t nbytes = (size_t)sched->buf_slots[s].nbytes;
+          const PolyBackendDesc *be = poly_backend_get(device);
+          const PolyAllocator *alloc = be ? be->get_allocator() : NULL;
+          if (alloc && alloc->alloc) {
+            void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
+            if (dptr) {
+              alloc->copy_in(dptr, const_data, nbytes, alloc->dev_ctx);
+              c->slot_data[s] = dptr;
+              /* Track for cleanup on cache teardown */
+              int idx = c->n_migrated++;
+              c->migrated_consts = realloc(c->migrated_consts,
+                  (size_t)c->n_migrated * sizeof(void *));
+              c->migrated_consts[idx] = dptr;
+            }
+          }
+        } else {
+          c->slot_data[s] = const_data;
+        }
+      }
     }
   }
 
