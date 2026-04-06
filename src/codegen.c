@@ -4771,6 +4771,75 @@ static PolyUOp *rule_drop_true_gate(PolyCtx *ctx, PolyUOp *idx, const PolyBindin
   return poly_uop2(ctx, POLY_OP_INDEX, idx->dtype, idx->src[0], idx->src[1], idx->arg);
 }
 
+/* ── no_vectorized_buf: scalarize DEFINE_REG/DEFINE_LOCAL with vector dtype.
+ * Tinygrad devectorizer.py:241-242. */
+static PolyUOp *rule_no_vectorized_buf(PolyCtx *ctx, PolyUOp *buf, const PolyBindings *b) {
+  (void)b;
+  PolyDType dt = buf->dtype;
+  if (!dt.is_ptr || dt.count <= 1) return NULL;
+  PolyDType base = poly_dtype_scalar(dt);
+  PolyDType scalar_ptr = poly_dtype_ptr(base, dt.ptr_size * dt.count, dt.addrspace);
+  PolyUOp *scalar_buf = poly_uop0(ctx, buf->op, scalar_ptr, buf->arg);
+  return poly_uop1(ctx, POLY_OP_CAST, dt, scalar_buf, poly_arg_none());
+}
+
+/* ── CAST-after-AFTER canonicalization (tinygrad devectorizer.py:269).
+ * AFTER(CAST(x), deps) → CAST(AFTER(x, deps)) */
+static PolyUOp *rule_cast_after_after(PolyCtx *ctx, PolyUOp *after, const PolyBindings *b) {
+  (void)b;
+  if (after->op != POLY_OP_AFTER || after->n_src < 1) return NULL;
+  if (after->src[0]->op != POLY_OP_CAST || after->src[0]->n_src < 1) return NULL;
+  PolyUOp *cast = after->src[0];
+  PolyUOp *new_srcs[128];
+  new_srcs[0] = cast->src[0];
+  int nd = after->n_src - 1;
+  for (int i = 0; i < nd && i < 127; i++) new_srcs[1 + i] = after->src[1 + i];
+  PolyUOp *new_after = poly_uop(ctx, POLY_OP_AFTER, cast->src[0]->dtype, new_srcs, 1 + nd, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, cast->dtype, new_after, poly_arg_none());
+}
+
+/* ── no_vectorized_index: adjust INDEX on scalarized registers.
+ * Tinygrad devectorizer.py:244-256.
+ * Match: INDEX( CAST(buf_or_after) , idx ) where CAST has vec dtype, buf is scalar.
+ * Output: INDEX( VECTORIZE(buf*count), VECTORIZE(idx*count+0, ..., idx*count+(count-1)) ) */
+static PolyUOp *rule_no_vectorized_index(PolyCtx *ctx, PolyUOp *idx_uop, const PolyBindings *b) {
+  (void)b;
+  if (idx_uop->op != POLY_OP_INDEX || idx_uop->n_src < 2) return NULL;
+  PolyUOp *cast_node = idx_uop->src[0];
+  if (cast_node->op != POLY_OP_CAST || cast_node->n_src < 1) return NULL;
+  PolyUOp *buf = cast_node->src[0];
+  PolyUOp *def = buf;
+  if (def->op == POLY_OP_AFTER && def->n_src > 0) def = def->src[0];
+  if (def->op != POLY_OP_DEFINE_REG && def->op != POLY_OP_DEFINE_LOCAL) return NULL;
+  int count = cast_node->dtype.count;
+  if (count <= 1 || count > 16 || def->dtype.count > 1) return NULL;
+
+  PolyUOp *orig_idx = idx_uop->src[1];
+  PolyDType vec_buf_dt = buf->dtype; vec_buf_dt.count = count;
+  PolyDType vec_idx_dt = orig_idx->dtype; vec_idx_dt.count = count;
+
+  /* buf.broadcast(count) = VECTORIZE(buf, buf, ...) */
+  PolyUOp *bsrcs[16];
+  for (int i = 0; i < count; i++) bsrcs[i] = buf;
+  PolyUOp *bcast_buf = poly_uop(ctx, POLY_OP_VECTORIZE, vec_buf_dt, bsrcs, count, poly_arg_none());
+
+  /* idx.gep((0,0,...)) * count + VCONST(0,1,...,count-1) */
+  PolyUOp *isrcs[16], *csrcs[16], *osrcs[16];
+  PolyUOp *cnt = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(count));
+  for (int i = 0; i < count; i++) {
+    isrcs[i] = orig_idx;
+    csrcs[i] = cnt;
+    osrcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+  }
+  PolyUOp *idx_v = poly_uop(ctx, POLY_OP_VECTORIZE, vec_idx_dt, isrcs, count, poly_arg_none());
+  PolyUOp *cnt_v = poly_uop(ctx, POLY_OP_VECTORIZE, vec_idx_dt, csrcs, count, poly_arg_none());
+  PolyUOp *off_v = poly_uop(ctx, POLY_OP_VECTORIZE, vec_idx_dt, osrcs, count, poly_arg_none());
+  PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, vec_idx_dt, idx_v, cnt_v, poly_arg_none());
+  PolyUOp *final_idx = poly_uop2(ctx, POLY_OP_ADD, vec_idx_dt, scaled, off_v, poly_arg_none());
+
+  return poly_uop2(ctx, POLY_OP_INDEX, idx_uop->dtype, bcast_buf, final_idx, poly_arg_none());
+}
+
 static PolyPatternMatcher *g_pm_devectorize = NULL;
 static PolyPatternMatcher *poly_pm_devectorize(void) {
   if (g_pm_devectorize) return g_pm_devectorize;
@@ -4778,20 +4847,40 @@ static PolyPatternMatcher *poly_pm_devectorize(void) {
   PolyRule rules[80];
   int n = 0;
 
-  /* Scatter ALL elementwise ops (ALU + CAST + BITCAST) from vec to scalar.
-   * Matches tinygrad devectorizer.py:283: UPat((*GroupOp.ALU, Ops.CAST, Ops.BITCAST), ...) */
+  /* 0. CAST-after-AFTER canonicalization (must fire before index rules) */
+  rules[n++] = (PolyRule){
+    poly_pat_allow_any_len(poly_pat_op(POLY_OP_AFTER, NULL, 0, "a")),
+    rule_cast_after_after
+  };
+
+  /* 1. Scatter ALL elementwise ops (ALU + CAST + BITCAST) from vec to scalar */
   rules[n++] = (PolyRule){
     poly_pat_allow_any_len(poly_pat_ops(POLY_GROUP_ELEMENTWISE, NULL, 0, "alu")),
     rule_no_vectorized_alu
   };
 
-  /* Drop true gate from INDEX */
+  /* 2. Scalarize DEFINE_REG/DEFINE_LOCAL with vector dtype */
+  PolyOpSet buf_set = {{0,0}};
+  buf_set = poly_opset_add(buf_set, POLY_OP_DEFINE_REG);
+  buf_set = poly_opset_add(buf_set, POLY_OP_DEFINE_LOCAL);
+  rules[n++] = (PolyRule){
+    poly_pat_ops(buf_set, NULL, 0, "buf"),
+    rule_no_vectorized_buf
+  };
+
+  /* 3. Adjust INDEX on scalarized registers */
+  rules[n++] = (PolyRule){
+    poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
+    rule_no_vectorized_index
+  };
+
+  /* 4. Drop true gate from INDEX */
   rules[n++] = (PolyRule){
     poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
     rule_drop_true_gate
   };
 
-  /* VECTORIZE(single) → unwrap */
+  /* 5. VECTORIZE(single) → unwrap */
   rules[n++] = (PolyRule){
     poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"),
     rule_vectorize_single
