@@ -3,169 +3,57 @@
 <head><meta charset="utf-8"><title>polygrad browser tests</title></head>
 <body>
 <pre id="log"></pre>
-<script src="../../dist/polygrad.js"></script>
+<script src="/dist/polygrad.js"></script>
+<script src="/test/browser/tests.js"></script>
 <script>
 const log = document.getElementById('log')
-function print(msg) {
-  log.textContent += msg + '\n'
-  console.log(msg)
+const _origLog = console.log
+console.log = function(...args) {
+  log.textContent += args.join(' ') + '\n'
+  _origLog.apply(console, args)
 }
 
 const params = new URLSearchParams(location.search)
 const device = params.get('device') || 'auto'
+const isWebGpu = device === 'webgpu'
 
-async function runTests() {
-  let passed = 0, failed = 0, skipped = 0
+async function main() {
+  console.log('=== device: ' + device + ' ===\n')
 
-  async function test(name, fn) {
-    try {
-      await fn()
-      print('[PASS] ' + name)
-      passed++
-    } catch (e) {
-      print('[FAIL] ' + name + ': ' + e.message)
-      failed++
-    }
+  let pg
+  try {
+    pg = await polygrad.create({ target: 'wasm', device: device })
+  } catch (e) {
+    console.log('FATAL: create failed: ' + e.message)
+    window.__testResults = { passed: 0, failed: 1, error: e.message }
+    return
   }
 
-  function skip(name) {
-    print('[SKIP] ' + name)
-    skipped++
-  }
+  // Run the full shared tensor test suite
+  const tensorResult = await window.__runTests(pg)
 
-  function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed') }
-  function assertClose(arr, expected, tol) {
-    if (tol === undefined) tol = 1e-4
-    if (arr.length !== expected.length) throw new Error('Length mismatch: ' + arr.length + ' vs ' + expected.length)
-    for (let i = 0; i < arr.length; i++) {
-      if (Math.abs(arr[i] - expected[i]) > tol) throw new Error('Mismatch at [' + i + ']: ' + arr[i] + ' vs ' + expected[i])
-    }
-  }
-
-  const isWebGpu = device === 'webgpu'
-
-  print('=== device: ' + device + ' ===')
-  const pg = await polygrad.create({ target: 'wasm', device: device })
-  const Tensor = pg.Tensor
-  const Instance = pg.Instance
-
-  // -- WebGPU smoke test --
+  // Run instance tests (skip on WebGPU: no C vtable backend)
+  let instanceResult = { passed: 0, failed: 0 }
   if (isWebGpu) {
-    await test('webgpu smoke: device is webgpu', async () => {
-      assert(pg.device === 'webgpu', 'expected webgpu, got ' + pg.device)
-    })
-  }
-
-  // -- Tensor basics --
-  await test('create vector', async () => {
-    assertClose(await new Tensor([1, 2, 3]).toArray(), [1, 2, 3])
-  })
-
-  await test('add', async () => {
-    assertClose(await new Tensor([1, 2, 3]).add(new Tensor([4, 5, 6])).toArray(), [5, 7, 9])
-  })
-
-  await test('mul', async () => {
-    assertClose(await new Tensor([2, 3]).mul(new Tensor([4, 5])).toArray(), [8, 15])
-  })
-
-  await test('matmul', async () => {
-    assertClose(await new Tensor([[1, 2], [3, 4]]).dot(new Tensor([[5, 6], [7, 8]])).toArray(), [19, 22, 43, 50])
-  })
-
-  await test('relu', async () => {
-    assertClose(await new Tensor([-1, 0, 1, 2]).relu().toArray(), [0, 0, 1, 2])
-  })
-
-  await test('sum', async () => {
-    assertClose(await new Tensor([1, 2, 3, 4]).sum().toArray(), [10])
-  })
-
-  await test('reshape', async () => {
-    assertClose(await new Tensor([1, 2, 3, 4, 5, 6]).reshape([2, 3]).toArray(), [1, 2, 3, 4, 5, 6])
-  })
-
-  await test('neg', async () => {
-    assertClose(await new Tensor([1, -2, 3]).neg().toArray(), [-1, 2, -3])
-  })
-
-  await test('exp', async () => {
-    const out = await new Tensor([0, 1]).exp().toArray()
-    assertClose(out, [1.0, 2.7183], 1e-3)
-  })
-
-  await test('sub', async () => {
-    assertClose(await new Tensor([5, 3]).sub(new Tensor([1, 2])).toArray(), [4, 1])
-  })
-
-  // -- Comparisons --
-  await test('eq', async () => {
-    assertClose(await new Tensor([1, 5, 3]).eq(new Tensor([2, 5, 3])).toArray(), [0, 1, 1])
-  })
-
-  await test('gt', async () => {
-    assertClose(await new Tensor([1, 5, 3]).gt(new Tensor([2, 3, 3])).toArray(), [0, 1, 0])
-  })
-
-  // -- Autograd --
-  await test('backward mul sum', async () => {
-    const a = new Tensor([1, 2, 3], { requiresGrad: true })
-    const loss = a.mul(new Tensor([4, 5, 6])).sum()
-    await loss.backward()
-    assert(a.grad, 'grad is null')
-    assertClose(await a.grad.toArray(), [4, 5, 6])
-  })
-
-  await test('backward relu', async () => {
-    const a = new Tensor([-1, 2, -3, 4], { requiresGrad: true })
-    await a.relu().sum().backward()
-    assert(a.grad, 'grad is null')
-    assertClose(await a.grad.toArray(), [0, 1, 0, 1])
-  })
-
-  // -- Instance (skip on WebGPU: no C vtable backend) --
-  if (isWebGpu) {
-    skip('instance forward (no WebGPU C backend)')
-    skip('instance train (no WebGPU C backend)')
+    console.log('\n== Instance ==')
+    console.log('  [SKIP] Instance tests (no WebGPU C backend)')
   } else {
-    await test('instance forward', async () => {
-      const inst = Instance.mlp({
-        layers: [2, 4, 1], activation: 'relu', bias: true,
-        loss: 'mse', batch_size: 1, seed: 42
-      })
-      try {
-        const out = inst.forward({ x: new Float32Array([1, 2]) })
-        assert(out.output instanceof Float32Array, 'output should be Float32Array')
-        assert(Number.isFinite(out.output[0]), 'output should be finite')
-      } finally { inst.dispose() }
-    })
-
-    await test('instance train', async () => {
-      const inst = Instance.mlp({
-        layers: [2, 1], activation: 'none', bias: true,
-        loss: 'mse', batch_size: 1, seed: 42
-      })
-      try {
-        inst.setOptimizer(pg.OPTIM_SGD, 0.05)
-        const x = new Float32Array([1, 2])
-        const y = new Float32Array([5])
-        let first = null, last = null
-        for (let i = 0; i < 50; i++) {
-          last = inst.trainStep({ x, y })
-          if (first == null) first = last
-        }
-        assert(Number.isFinite(last), 'loss should be finite')
-        assert(last < first, 'loss should decrease: ' + first + ' -> ' + last)
-      } finally { inst.dispose() }
-    })
+    instanceResult = await window.__runInstanceTests(pg)
   }
 
-  window.__testResults = { passed, failed, skipped, device }
-  print('\nResults: ' + passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped')
+  const totalPassed = tensorResult.passed + instanceResult.passed
+  const totalFailed = tensorResult.failed + instanceResult.failed
+  console.log('\nTotal: ' + totalPassed + ' passed, ' + totalFailed + ' failed')
+
+  window.__testResults = {
+    passed: totalPassed,
+    failed: totalFailed,
+    device: device
+  }
 }
 
-runTests().catch(e => {
-  print('FATAL: ' + e.message + '\n' + e.stack)
+main().catch(e => {
+  console.log('FATAL: ' + e.message + '\n' + e.stack)
   window.__testResults = { passed: 0, failed: 1, error: e.message }
 })
 </script>

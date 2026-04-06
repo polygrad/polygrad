@@ -97,6 +97,13 @@ async function runForDevice(browser, port, device) {
 }
 
 async function main() {
+  // Build browser test bundle from test_shared.js + test_instance_shared.js
+  const { execSync } = require('child_process')
+  execSync('npx esbuild test/browser/test_browser_entry.js --bundle --format=iife --platform=browser --outfile=test/browser/tests.js', {
+    cwd: path.resolve(__dirname, '..', '..'),
+    stdio: 'inherit'
+  })
+
   const { chromium } = require('playwright')
 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))

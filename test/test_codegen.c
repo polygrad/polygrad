@@ -531,8 +531,9 @@ TEST(codegen, render_wgsl_reduce) {
   PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
   char *src = poly_render_wgsl(lin, n_lin, "reduce_sum");
 
-  /* accumulator: var acc0: f32 = 0.0; */
-  ASSERT_NOT_NULL(strstr(src, "var acc0: f32 = 0.0"));
+  /* accumulator declaration hoisted to function scope, init in body */
+  ASSERT_NOT_NULL(strstr(src, "var acc0: f32;"));
+  ASSERT_NOT_NULL(strstr(src, "acc0 = 0.0"));
   /* loop present */
   ASSERT_NOT_NULL(strstr(src, "for (var ridx0: i32 = 0;"));
   /* accumulator store (not array write) */

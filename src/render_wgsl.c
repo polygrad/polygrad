@@ -188,6 +188,12 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   WgslStrBuf body;
   wsb_init(&body);
 
+  /* Function-scope declarations buffer (WGSL has block scoping, so
+   * variables used across loop boundaries must be declared at function scope).
+   * Mirrors render_c.c's decls buffer pattern. */
+  WgslStrBuf decls;
+  wsb_init(&decls);
+
   WgslStrMap names;
   wsm_init(&names, n);
 
@@ -403,8 +409,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
           snprintf(initval, sizeof(initval), "0.0");
 
         const char *tn = wgsl_type_name(u->dtype);
+        wsb_printf(&decls, "  var %s: %s;\n", name, tn);
         for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-        wsb_printf(&body, "var %s: %s = %s;\n", name, tn, initval);
+        wsb_printf(&body, "%s = %s;\n", name, initval);
       }
       continue;
     }
@@ -418,8 +425,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       /* tinygrad: var rN: array<type, SIZE>; (wgsl.py:75) */
       int reg_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
       const char *base_tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
-      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      wsb_printf(&body, "var %s: array<%s,%d>;\n", name, base_tn, reg_size);
+      wsb_printf(&decls, "  var %s: array<%s,%d>;\n", name, base_tn, reg_size);
       continue;
     }
 
@@ -440,17 +446,18 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       const char *tn = wgsl_type_name(u->dtype);
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
 
+      wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
         char *gate_s = wsm_get(&names, idx_uop->src[2]);
         char *alt_s = wsm_get(&names, u->src[1]);
-        wsb_printf(&body, "var %s: %s = select(%s, %s, %s);\n", name, tn, alt_s, bidx, gate_s);
+        wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, bidx, gate_s);
       } else if (idx_uop && idx_uop->n_src >= 3) {
         char *gate_s = wsm_get(&names, idx_uop->src[2]);
-        wsb_printf(&body, "var %s: %s = select(%s(0), %s, %s);\n", name, tn, tn, bidx, gate_s);
+        wsb_printf(&body, "%s = select(%s(0), %s, %s);\n", name, tn, bidx, gate_s);
       } else {
-        wsb_printf(&body, "var %s: %s = %s;\n", name, tn, bidx);
+        wsb_printf(&body, "%s = %s;\n", name, bidx);
       }
       continue;
     }
@@ -568,8 +575,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         snprintf(expr, sizeof(expr), "%s(%s)", tn, src_s);
       }
 
+      wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      wsb_printf(&body, "var %s: %s = %s;\n", name, tn, expr);
+      wsb_printf(&body, "%s = %s;\n", name, expr);
       continue;
     }
 
@@ -595,8 +603,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       wsm_set(&names, u, strdup(name));
 
       const char *tn = wgsl_type_name(u->dtype);
+      wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      wsb_printf(&body, "var %s: %s = %s;\n", name, tn, expr);
+      wsb_printf(&body, "%s = %s;\n", name, expr);
       continue;
     }
   }
@@ -654,16 +663,70 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
   wsb_puts(&out, "@builtin(workgroup_id) gindex: vec3<u32>,");
   wsb_puts(&out, "@builtin(local_invocation_id) lindex: vec3<u32>) {\n");
+  /* Function-scope declarations first, then body (WGSL block scoping). */
+  wsb_puts(&out, decls.buf);
   wsb_puts(&out, body.buf);
   wsb_puts(&out, "}\n");
 
   /* cleanup */
   for (int i = 0; i < n_bindings; i++)
     free(binding_names[i]);
+  free(decls.buf);
   free(body.buf);
   wsm_destroy(&names);
 
   return out.buf;
+}
+
+/* ── WGSL extra matcher (tinygrad wgsl_matcher, wgsl.py:40-53) ─────── */
+
+/* Rule: SHL/SHR with non-u32 shift amount → cast shift to u32.
+ * WGSL spec requires shift amounts to be u32. tinygrad wgsl.py:49-50. */
+static PolyUOp *rule_wgsl_shift_u32(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (u->n_src < 2) return NULL;
+  PolyUOp *amount = u->src[1];
+  /* Already u32? No rewrite. */
+  if (poly_dtype_eq(poly_dtype_scalar(amount->dtype), POLY_UINT32)) return NULL;
+  /* Cast shift amount to u32 */
+  PolyUOp *cast_amount = poly_uop1(ctx, POLY_OP_CAST, POLY_UINT32, amount, poly_arg_none());
+  return poly_uop2(ctx, u->op, u->dtype, u->src[0], cast_amount, u->arg);
+}
+
+/* Rule: CMPLT/XOR on bools → cast to i32, apply op, cast back to bool.
+ * WGSL doesn't support comparison/xor on bool operands. tinygrad wgsl.py:41-42. */
+static PolyUOp *rule_wgsl_bool_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
+  (void)bindings;
+  if (u->n_src < 2) return NULL;
+  if (!poly_dtype_is_bool(u->src[0]->dtype)) return NULL;
+  PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[0], poly_arg_none());
+  PolyUOp *b = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[1], poly_arg_none());
+  PolyUOp *result = poly_uop2(ctx, u->op, POLY_INT32, a, b, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, POLY_BOOL, result, poly_arg_none());
+}
+
+static PolyPatternMatcher *g_pm_wgsl_extra = NULL;
+
+PolyPatternMatcher *poly_pm_wgsl_extra(void) {
+  if (g_pm_wgsl_extra) return g_pm_wgsl_extra;
+
+  PolyOpSet shift_set = {{0,0}};
+  shift_set = poly_opset_add(shift_set, POLY_OP_SHL);
+  shift_set = poly_opset_add(shift_set, POLY_OP_SHR);
+
+  PolyOpSet bool_alu_set = {{0,0}};
+  bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_CMPLT);
+  bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_XOR);
+
+  PolyRule rules[] = {
+    /* WGSL shift amounts must be u32 (tinygrad wgsl.py:49-50) */
+    { poly_pat_ops(shift_set, NULL, 0, NULL), rule_wgsl_shift_u32 },
+    /* WGSL bool CMPLT/XOR: cast to i32, apply, cast back (tinygrad wgsl.py:41-42) */
+    { poly_pat_ops(bool_alu_set, NULL, 0, NULL), rule_wgsl_bool_alu },
+  };
+
+  g_pm_wgsl_extra = poly_pm_new(rules, (int)(sizeof(rules)/sizeof(rules[0])));
+  return g_pm_wgsl_extra;
 }
 
 /* ── WebGPU linearizer ───────────────────────────────────────────────── */
@@ -677,7 +740,8 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
  *   - supports_float4=false → devectorize=1
  *   - local_max=(256,256,64) → gpu_block_size=256
  *   - No MULACC/THREEFRY hardware support
- *   - No tensor cores */
+ *   - No tensor cores
+ *   - extra_matcher: shift u32 normalization, bool CMPLT/XOR */
 PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   PolyRewriteOpts opts = {
     .optimize     = true,
@@ -690,7 +754,7 @@ PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     },
     .device         = POLY_DEVICE_WEBGPU,
     .opt_policy     = POLY_OPT_HEURISTIC,
-    .extra_matcher  = NULL,   /* Phase 8: poly_pm_wgsl_extra() */
+    .extra_matcher  = poly_pm_wgsl_extra(),
     .gpu_block_size = 256,    /* WebGPU local_max[0] */
   };
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);

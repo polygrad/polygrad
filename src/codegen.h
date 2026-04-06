@@ -152,6 +152,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name);
  * Returns malloc'd string. Caller must free(). */
 char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name);
 
+/* WGSL extra matcher: shift u32 normalization, bool CMPLT/XOR (tinygrad wgsl_matcher). */
+PolyPatternMatcher *poly_pm_wgsl_extra(void);
+
 /* Linearize a kernel for WebGPU execution.
  * Full codegen pipeline with GPU dims (SPECIAL, BARRIER, shared memory).
  * WebGPU constraints: supports_float4=false, local_max=256, no tensor cores. */
