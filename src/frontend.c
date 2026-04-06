@@ -1998,6 +1998,254 @@ int poly_abi_version(void) {
   return POLYGRAD_ABI_VERSION;
 }
 
+/* ── WebGPU step plan ────────────────────────────────────────────────── */
+
+struct PolyWebGpuStepPlan {
+  int n_kernels;
+  char **kernel_wgsl;         /* WGSL source per kernel (malloc'd strings) */
+  int *kernel_wgsl_lens;
+  int *kernel_n_params;
+  int **kernel_param_buf_idxs;
+  int *kernel_grid;           /* [k*3+dim]: dispatch workgroup counts */
+  int *kernel_local;          /* [k*3+dim]: workgroup sizes */
+  int n_total_buffers;
+  int n_bindable_buffers;
+  int *exec_order;
+  int64_t *buffer_sizes;      /* element count per buffer */
+  int *buffer_itemsizes;      /* bytes per element per buffer */
+};
+
+/* Extract grid/local dimensions from linearized UOps.
+ * SPECIAL("gidxN") → grid[N] = bound, SPECIAL("lidxN") → local[N] = bound.
+ * Grid dispatch = global_bound for gidx (it's workgroup count, not thread count). */
+static void webgpu_extract_dims(PolyUOp **lin, int n_lin,
+                                 int grid[3], int local[3]) {
+  grid[0] = 1; grid[1] = 1; grid[2] = 1;
+  local[0] = 1; local[1] = 1; local[2] = 1;
+
+  for (int j = 0; j < n_lin; j++) {
+    if (lin[j]->op != POLY_OP_SPECIAL) continue;
+    if (!lin[j]->arg.str || lin[j]->n_src < 1) continue;
+    if (lin[j]->src[0]->op != POLY_OP_CONST) continue;
+
+    const char *sn = lin[j]->arg.str;
+    int slen = (int)strlen(sn);
+    int dim_idx = (slen > 0) ? sn[slen - 1] - '0' : 0;
+    if (dim_idx < 0 || dim_idx > 2) dim_idx = 0;
+    int bound = (int)lin[j]->src[0]->arg.i;
+
+    if (sn[0] == 'l')
+      local[dim_idx] = bound;
+    else
+      grid[dim_idx] = bound;
+  }
+}
+
+PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_sink) {
+  if (!ctx || !tensor_sink || tensor_sink->op != POLY_OP_SINK) {
+    fprintf(stderr, "polygrad: webgpu_stepplan: expected SINK\n");
+    return NULL;
+  }
+
+  PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
+  if (sr.n_kernels <= 0 || !sr.kernels) {
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
+
+  PolyWebGpuStepPlan *p = calloc(1, sizeof(*p));
+  if (!p) { poly_schedule_result_free(&sr); return NULL; }
+
+  p->n_kernels = sr.n_kernels;
+  p->kernel_wgsl = calloc((size_t)p->n_kernels, sizeof(char *));
+  p->kernel_wgsl_lens = calloc((size_t)p->n_kernels, sizeof(int));
+  p->kernel_n_params = calloc((size_t)p->n_kernels, sizeof(int));
+  p->kernel_param_buf_idxs = calloc((size_t)p->n_kernels, sizeof(int *));
+  p->kernel_grid = calloc((size_t)p->n_kernels * 3, sizeof(int));
+  p->kernel_local = calloc((size_t)p->n_kernels * 3, sizeof(int));
+  p->exec_order = calloc((size_t)p->n_kernels, sizeof(int));
+  if (!p->kernel_wgsl || !p->kernel_wgsl_lens || !p->kernel_n_params ||
+      !p->kernel_param_buf_idxs || !p->kernel_grid || !p->kernel_local ||
+      !p->exec_order) {
+    poly_webgpu_stepplan_destroy(p);
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
+
+  /* Collect external (user-visible) buffers */
+  PolyUOp *ext_bufs[POLY_MAX_REALIZE_BUFS];
+  int n_ext = poly_collect_ordered_buffers(ctx, tensor_sink, ext_bufs, POLY_MAX_REALIZE_BUFS);
+  p->n_bindable_buffers = n_ext;
+  p->n_total_buffers = n_ext + sr.n_intermediates;
+
+  /* Populate global buffer list so poly_kernel_buf() works */
+  g_kernel_n_bufs = n_ext;
+  if (n_ext > 0) memcpy(g_kernel_bufs, ext_bufs, (size_t)n_ext * sizeof(PolyUOp *));
+
+  /* Per-buffer element counts and itemsizes */
+  p->buffer_sizes = calloc((size_t)p->n_total_buffers, sizeof(int64_t));
+  p->buffer_itemsizes = calloc((size_t)p->n_total_buffers, sizeof(int));
+  if (p->buffer_sizes) {
+    for (int i = 0; i < n_ext; i++)
+      p->buffer_sizes[i] = ext_bufs[i]->arg.i;
+    for (int i = 0; i < sr.n_intermediates; i++)
+      p->buffer_sizes[n_ext + i] = sr.intermediate_sizes ? sr.intermediate_sizes[i] : 0;
+  }
+  if (p->buffer_itemsizes) {
+    for (int i = 0; i < n_ext; i++)
+      p->buffer_itemsizes[i] = poly_dtype_itemsize(poly_dtype_scalar(ext_bufs[i]->dtype));
+    for (int i = 0; i < sr.n_intermediates; i++)
+      p->buffer_itemsizes[n_ext + i] = sr.intermediate_itemsizes ? sr.intermediate_itemsizes[i] : 4;
+  }
+
+  /* Per-kernel: linearize → render WGSL → extract grid/local */
+  for (int k = 0; k < p->n_kernels; k++) {
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_webgpu(ctx, sr.kernels[k], &n_lin);
+    if (!lin) {
+      poly_webgpu_stepplan_destroy(p);
+      poly_schedule_result_free(&sr);
+      return NULL;
+    }
+
+    /* Extract grid and local dims from SPECIAL ops */
+    webgpu_extract_dims(lin, n_lin, &p->kernel_grid[k*3], &p->kernel_local[k*3]);
+
+    /* Render WGSL source */
+    char fn_name[64];
+    snprintf(fn_name, sizeof(fn_name), "k%d", k);
+    char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
+    free(lin);
+    if (!wgsl) {
+      poly_webgpu_stepplan_destroy(p);
+      poly_schedule_result_free(&sr);
+      return NULL;
+    }
+
+    if (getenv("POLY_DUMP_KERNELS"))
+      fprintf(stderr, "=== WGSL KERNEL %s ===\n%s\n=== END ===\n", fn_name, wgsl);
+
+    p->kernel_wgsl[k] = wgsl;
+    p->kernel_wgsl_lens[k] = (int)strlen(wgsl);
+
+    /* Param-to-buffer index mapping (same logic as WASM step plan) */
+    int n_params = (sr.kernel_n_params ? sr.kernel_n_params[k] : 0);
+    p->kernel_n_params[k] = n_params;
+    if (n_params > 0) {
+      p->kernel_param_buf_idxs[k] = malloc((size_t)n_params * sizeof(int));
+      if (!p->kernel_param_buf_idxs[k]) {
+        poly_webgpu_stepplan_destroy(p);
+        poly_schedule_result_free(&sr);
+        return NULL;
+      }
+      for (int i = 0; i < n_params; i++) p->kernel_param_buf_idxs[k][i] = -1;
+      for (int i = 0; i < n_params; i++) {
+        PolyUOp *pb = (sr.param_to_buf && sr.param_to_buf[k]) ? sr.param_to_buf[k][i] : NULL;
+        int idx = -1;
+        if (pb) idx = poly_find_buf_position(pb, ext_bufs, n_ext);
+        if (idx < 0 && pb && sr.intermediate_buf_uops && sr.n_intermediates > 0) {
+          int ib = poly_find_buf_position(pb, sr.intermediate_buf_uops, sr.n_intermediates);
+          if (ib >= 0) idx = n_ext + ib;
+        }
+        if (idx < 0 && (!sr.param_to_buf || !sr.param_to_buf[k]) && i < n_ext) idx = i;
+        p->kernel_param_buf_idxs[k][i] = idx;
+      }
+    }
+  }
+
+  if (sr.exec_order) memcpy(p->exec_order, sr.exec_order, (size_t)p->n_kernels * sizeof(int));
+  else for (int i = 0; i < p->n_kernels; i++) p->exec_order[i] = i;
+
+  poly_schedule_result_free(&sr);
+  return p;
+}
+
+/* ── WebGPU step plan accessors ──────────────────────────────────────── */
+
+int poly_webgpu_stepplan_n_kernels(const PolyWebGpuStepPlan *p) {
+  return p ? p->n_kernels : 0;
+}
+
+const char *poly_webgpu_stepplan_kernel_wgsl(const PolyWebGpuStepPlan *p, int k, int *len) {
+  if (!p || k < 0 || k >= p->n_kernels) return NULL;
+  if (len) *len = p->kernel_wgsl_lens[k];
+  return p->kernel_wgsl[k];
+}
+
+int poly_webgpu_stepplan_kernel_n_params(const PolyWebGpuStepPlan *p, int k) {
+  if (!p || k < 0 || k >= p->n_kernels) return 0;
+  return p->kernel_n_params[k];
+}
+
+int poly_webgpu_stepplan_kernel_grid(const PolyWebGpuStepPlan *p, int k, int dim) {
+  if (!p || k < 0 || k >= p->n_kernels || dim < 0 || dim > 2) return 1;
+  return p->kernel_grid[k * 3 + dim];
+}
+
+int poly_webgpu_stepplan_kernel_local(const PolyWebGpuStepPlan *p, int k, int dim) {
+  if (!p || k < 0 || k >= p->n_kernels || dim < 0 || dim > 2) return 1;
+  return p->kernel_local[k * 3 + dim];
+}
+
+int poly_webgpu_stepplan_n_buffers(const PolyWebGpuStepPlan *p) {
+  return p ? p->n_total_buffers : 0;
+}
+
+int poly_webgpu_stepplan_n_bindable_buffers(const PolyWebGpuStepPlan *p) {
+  return p ? p->n_bindable_buffers : 0;
+}
+
+int poly_webgpu_stepplan_bindable_buf_index(const PolyWebGpuStepPlan *p, int bi) {
+  if (!p || bi < 0 || bi >= p->n_bindable_buffers) return -1;
+  return bi;
+}
+
+int poly_webgpu_stepplan_kernel_param_buf_index(const PolyWebGpuStepPlan *p, int k, int param_idx) {
+  if (!p || k < 0 || k >= p->n_kernels) return -1;
+  if (param_idx < 0 || param_idx >= p->kernel_n_params[k]) return -1;
+  return p->kernel_param_buf_idxs && p->kernel_param_buf_idxs[k]
+    ? p->kernel_param_buf_idxs[k][param_idx] : -1;
+}
+
+const int *poly_webgpu_stepplan_exec_order(const PolyWebGpuStepPlan *p, int *n) {
+  if (!p) return NULL;
+  if (n) *n = p->n_kernels;
+  return p->exec_order;
+}
+
+int64_t poly_webgpu_stepplan_buf_size(const PolyWebGpuStepPlan *p, int buf_idx) {
+  if (!p || buf_idx < 0 || buf_idx >= p->n_total_buffers) return 0;
+  return p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
+}
+
+int64_t poly_webgpu_stepplan_buf_nbytes(const PolyWebGpuStepPlan *p, int buf_idx) {
+  if (!p || buf_idx < 0 || buf_idx >= p->n_total_buffers) return 0;
+  int64_t elems = p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
+  int itemsize = (p->buffer_itemsizes && buf_idx < p->n_total_buffers)
+                   ? p->buffer_itemsizes[buf_idx] : 4;
+  return elems * itemsize;
+}
+
+void poly_webgpu_stepplan_destroy(PolyWebGpuStepPlan *p) {
+  if (!p) return;
+  if (p->kernel_wgsl) {
+    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_wgsl[i]);
+    free(p->kernel_wgsl);
+  }
+  if (p->kernel_param_buf_idxs) {
+    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_param_buf_idxs[i]);
+    free(p->kernel_param_buf_idxs);
+  }
+  free(p->kernel_wgsl_lens);
+  free(p->kernel_n_params);
+  free(p->kernel_grid);
+  free(p->kernel_local);
+  free(p->exec_order);
+  free(p->buffer_sizes);
+  free(p->buffer_itemsizes);
+  free(p);
+}
+
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
   if (!p) return;
   if (p->kernel_bytes) {

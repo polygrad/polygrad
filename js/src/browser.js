@@ -2,7 +2,7 @@
 
 const { createRuntime, normalizeOptions } = require('./runtime')
 
-const BROWSER_DEVICES = new Set(['auto', 'cpu', 'interp'])
+const BROWSER_DEVICES = new Set(['auto', 'cpu', 'interp', 'webgpu'])
 
 async function resolveBrowserTarget(name, opts) {
   if (!BROWSER_DEVICES.has(opts.device)) {
@@ -14,7 +14,11 @@ async function resolveBrowserTarget(name, opts) {
   if (name !== 'auto' && name !== 'wasm') {
     throw new Error(`polygrad: browser bundle only supports target='wasm' (got ${name})`)
   }
-  const { createWasmBackend } = require('./wasm')
+  if (opts.device === 'webgpu') {
+    const { createWebGpuBackend } = require('./exec_webgpu')
+    return createWebGpuBackend()
+  }
+  const { createWasmBackend } = require('./exec_wasm')
   return createWasmBackend(opts.device)
 }
 

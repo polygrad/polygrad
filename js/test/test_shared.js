@@ -387,9 +387,12 @@ async function runTests(pg) {
   await test('matmul shape mismatch throws', async () => {
     const a = new Tensor([[1, 2], [3, 4]])
     const b = new Tensor([[1, 2, 3]])
-    // poly_dot builds a lazy graph; mismatch detected by empty output shape
-    const c = a.dot(b)
-    assert(c.shape.length === 0, 'expected empty shape for mismatched dot')
+    let ok = false
+    try {
+      const c = a.dot(b)
+      ok = c.shape.length === 0  // native: returns empty-shape result
+    } catch (e) { ok = true }    // wasm: throws immediately
+    assert(ok, 'expected dot to fail on shape mismatch')
   })
 
   await test('matmul broadcast batch', async () => {
@@ -416,9 +419,12 @@ async function runTests(pg) {
       [0, 0, 0, 0, 0, 0],
       [0, 0, 0, 0, 0, 0]
     ]))
-    // poly_dot builds a lazy graph; mismatch detected by empty output shape
-    const c = a.dot(b)
-    assert(c.shape.length === 0, 'expected empty shape for broadcast-mismatched dot')
+    let ok = false
+    try {
+      const c = a.dot(b)
+      ok = c.shape.length === 0
+    } catch (e) { ok = true }
+    assert(ok, 'expected dot to fail on broadcast-mismatched shapes')
   })
 
   await test('crossEntropy with sparse targets', async () => {
@@ -482,9 +488,12 @@ async function runTests(pg) {
   await test('crossEntropy shape mismatch throws', async () => {
     const logits = new Tensor([[0, 0, 0], [0, 0, 0]])
     const target = new Tensor([[1, 0], [0, 1]])
-    // poly_cross_entropy builds a lazy graph; mismatch detected by empty output shape
-    const loss = await logits.crossEntropy(target)
-    assert(loss.shape.length === 0, 'expected scalar shape for mismatched crossEntropy')
+    let ok = false
+    try {
+      const loss = await logits.crossEntropy(target)
+      ok = loss.shape.length === 0
+    } catch (e) { ok = true }
+    assert(ok, 'expected crossEntropy to fail on shape mismatch')
   })
 
   // -- Autograd --

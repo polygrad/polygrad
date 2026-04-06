@@ -138,6 +138,29 @@ int64_t poly_wasm_stepplan_buf_nbytes(const PolyWasmStepPlan *p, int buf_idx);
 int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi);
 
 
+/* ── WebGPU step plan ────────────────────────────────────────────────── */
+
+/* WebGPU step plan: schedule + linearize + render WGSL per kernel.
+ * Each kernel has WGSL source, grid/local dispatch dimensions, and
+ * param-to-buffer mappings. JS hosts compile WGSL → GPUShaderModule,
+ * create compute pipelines, and dispatch workgroups.
+ * WGSL source pointers are owned by the plan and valid until destroy(). */
+typedef struct PolyWebGpuStepPlan PolyWebGpuStepPlan;
+PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_sink);
+int poly_webgpu_stepplan_n_kernels(const PolyWebGpuStepPlan *p);
+const char *poly_webgpu_stepplan_kernel_wgsl(const PolyWebGpuStepPlan *p, int k, int *len);
+int poly_webgpu_stepplan_kernel_n_params(const PolyWebGpuStepPlan *p, int k);
+int poly_webgpu_stepplan_kernel_grid(const PolyWebGpuStepPlan *p, int k, int dim);
+int poly_webgpu_stepplan_kernel_local(const PolyWebGpuStepPlan *p, int k, int dim);
+int poly_webgpu_stepplan_n_buffers(const PolyWebGpuStepPlan *p);
+int poly_webgpu_stepplan_n_bindable_buffers(const PolyWebGpuStepPlan *p);
+int poly_webgpu_stepplan_bindable_buf_index(const PolyWebGpuStepPlan *p, int bi);
+int poly_webgpu_stepplan_kernel_param_buf_index(const PolyWebGpuStepPlan *p, int k, int param_idx);
+const int *poly_webgpu_stepplan_exec_order(const PolyWebGpuStepPlan *p, int *n);
+int64_t poly_webgpu_stepplan_buf_size(const PolyWebGpuStepPlan *p, int buf_idx);
+int64_t poly_webgpu_stepplan_buf_nbytes(const PolyWebGpuStepPlan *p, int buf_idx);
+void poly_webgpu_stepplan_destroy(PolyWebGpuStepPlan *p);
+
 /* ABI version (callers check at load time for compatibility). */
 int poly_abi_version(void);
 

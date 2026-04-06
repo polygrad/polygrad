@@ -5,12 +5,25 @@
  * compute shader string. Buffers become storage bindings, loops use
  * WGSL syntax, WHERE maps to select().
  *
- * Reference: tinygrad renderer/wgsl.py
+ * GPU ops: SPECIAL (gidx/lidx → workgroup_id/local_invocation_id),
+ * BARRIER (workgroupBarrier), DEFINE_LOCAL (var<workgroup> shared arrays),
+ * DEFINE_REG (register-local arrays), AFTER (passthrough).
+ *
+ * Parity target: tinygrad renderer/wgsl.py (WGSLRenderer)
+ *
+ * Key differences from C/CUDA renderer:
+ *   - Binding 0 is reserved for INFINITY uniform
+ *   - Buffer bindings start at @binding(1)
+ *   - WHERE → select(false_val, true_val, cond)  (reversed args)
+ *   - Workgroup shared memory: var<workgroup> (externalized before @compute)
+ *   - Workgroup builtins: gindex (workgroup_id), lindex (local_invocation_id)
+ *   - No float4/vector support (supports_float4=false)
  */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "exec_plan.h"  /* POLY_DEVICE_WEBGPU */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,8 +113,12 @@ static void wsm_destroy(WgslStrMap *m) {
 /* ── WGSL type name ──────────────────────────────────────────────────── */
 
 static const char *wgsl_type_name(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  /* f16 for half (tinygrad: dtypes.half -> "f16") */
+  if (s.priority == POLY_FLOAT16.priority && s.bitsize == POLY_FLOAT16.bitsize) return "f16";
   if (poly_dtype_is_float(dt)) return "f32";
   if (poly_dtype_is_bool(dt)) return "bool";
+  /* Sub-4-byte types: char/short map to i32/u32 (tinygrad type_map) */
   if (poly_dtype_is_unsigned(dt)) return "u32";
   return "i32";
 }
@@ -109,16 +126,6 @@ static const char *wgsl_type_name(PolyDType dt) {
 /* ── WGSL float constant ────────────────────────────────────────────── */
 
 static char *render_float_const_wgsl(double v, char *buf, int cap) {
-  if (isinf(v)) {
-    snprintf(buf, cap, v > 0
-      ? "bitcast<f32>(0x7F800000u)"
-      : "bitcast<f32>(0xFF800000u)");
-    return buf;
-  }
-  if (isnan(v)) {
-    snprintf(buf, cap, "bitcast<f32>(0xFFFFFFFFu)");
-    return buf;
-  }
   /* Use enough digits to round-trip float32 constants through text. */
   snprintf(buf, cap, "%.9g", (double)(float)v);
   /* ensure decimal point (WGSL requires it for f32 literals) */
@@ -137,7 +144,14 @@ static void render_alu_wgsl(char *buf, int cap, PolyOps op, PolyDType dtype,
   switch (op) {
   /* unary */
   case POLY_OP_NEG:
-    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0); break;
+    if (poly_dtype_is_bool(dtype))
+      snprintf(buf, cap, "(!%s)", s0);
+    else if (poly_dtype_is_unsigned(dtype))
+      /* WGSL doesn't support unary minus on unsigned (tinygrad wgsl.py:69) */
+      snprintf(buf, cap, "(0-%s)", s0);
+    else
+      snprintf(buf, cap, "(-%s)", s0);
+    break;
   case POLY_OP_SQRT:       snprintf(buf, cap, "sqrt(%s)", s0); break;
   case POLY_OP_TRUNC:      snprintf(buf, cap, "trunc(%s)", s0); break;
   case POLY_OP_EXP2:       snprintf(buf, cap, "exp2(%s)", s0); break;
@@ -184,17 +198,48 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   int n_bindings = 0;
 
   /* prefix counters */
-  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
+  int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0, c_smem = 0;
   int depth = 1;
+
+  /* Workgroup shared memory declarations (externalized before @compute).
+   * Tinygrad: var<workgroup> lines are hoisted out of the kernel body
+   * (wgsl.py render_kernel lines 105-106). */
+  char extern_locals[16][256];
+  int n_extern_locals = 0;
+
+  /* ── Pre-scan: extract local dims from SPECIAL ops, detect f16 usage ── */
+  int local_dims[3] = {1, 1, 1};
+  bool has_local_dims = false;
+  bool uses_f16 = false;
+
+  for (int i = 0; i < n; i++) {
+    /* Local dims: SPECIAL("lidxN") → local_dims[N] = bound */
+    if (uops[i]->op == POLY_OP_SPECIAL && uops[i]->arg.str &&
+        uops[i]->arg.str[0] == 'l') {
+      int slen = (int)strlen(uops[i]->arg.str);
+      int dim_idx = (slen > 0) ? uops[i]->arg.str[slen - 1] - '0' : 0;
+      if (dim_idx >= 0 && dim_idx < 3 && uops[i]->n_src > 0 &&
+          uops[i]->src[0]->op == POLY_OP_CONST) {
+        local_dims[dim_idx] = (int)uops[i]->src[0]->arg.i;
+        has_local_dims = true;
+      }
+    }
+    /* f16: check all UOps for half dtype */
+    PolyDType s = poly_dtype_scalar(uops[i]->dtype);
+    if (s.priority == POLY_FLOAT16.priority && s.bitsize == POLY_FLOAT16.bitsize)
+      uses_f16 = true;
+  }
+
+  /* ── Main render loop ─────────────────────────────────────────────────── */
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
 
-    /* --- SINK: skip ------------------------------------------------- */
+    /* --- SINK/NOOP/GROUP: skip ---------------------------------------- */
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
       continue;
 
-    /* --- PARAM: storage buffer binding ------------------------------ */
+    /* --- PARAM: storage buffer binding -------------------------------- */
     if (u->op == POLY_OP_PARAM) {
       char name[32];
       snprintf(name, sizeof(name), "data%lld", (long long)u->arg.i);
@@ -207,7 +252,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- DEFINE_VAR: integer parameter (as var) --------------------- */
+    /* --- DEFINE_VAR: integer parameter (as var) ----------------------- */
     if (u->op == POLY_OP_DEFINE_VAR) {
       const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
                         : (u->arg.str ? u->arg.str : "var");
@@ -215,34 +260,97 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- CONST: inline literal -------------------------------------- */
+    /* --- SPECIAL: GPU thread/workgroup index (tinygrad gpudims.py) ---- */
+    if (u->op == POLY_OP_SPECIAL) {
+      const char *sname = u->arg.str ? u->arg.str : "gidx0";
+      wsm_set(&names, u, strdup(sname));
+
+      /* Dimension: last char of name (gidx0→x, gidx1→y, gidx2→z) */
+      int slen = (int)strlen(sname);
+      int dim_idx = (slen > 0) ? sname[slen - 1] - '0' : 0;
+      if (dim_idx < 0 || dim_idx > 2) dim_idx = 0;
+      char dim_char = "xyz"[dim_idx];
+
+      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+      if (sname[0] == 'l') {
+        /* Local index: lindex (local_invocation_id)
+         * tinygrad: i32(lindex.x) */
+        wsb_printf(&body, "var %s: i32 = i32(lindex.%c);\n", sname, dim_char);
+      } else {
+        /* Global index: gindex (workgroup_id)
+         * tinygrad: i32(gindex.x) — note: workgroup_id, NOT global_invocation_id */
+        wsb_printf(&body, "var %s: i32 = i32(gindex.%c);\n", sname, dim_char);
+      }
+
+      /* Bounds check for global indices only.
+       * Local threads must all run (barrier requires it). */
+      if (sname[0] != 'l') {
+        char *bound = wsm_get(&names, u->src[0]);
+        if (bound) {
+          for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+          wsb_printf(&body, "if (%s >= %s) { return; }\n", sname, bound);
+        }
+      }
+      continue;
+    }
+
+    /* --- BARRIER: workgroup synchronization (tinygrad: "workgroupBarrier();") */
+    if (u->op == POLY_OP_BARRIER) {
+      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+      wsb_puts(&body, "workgroupBarrier();\n");
+      continue;
+    }
+
+    /* --- CONST: inline literal ---------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char val[128];
       if (poly_dtype_is_float(u->dtype)) {
-        render_float_const_wgsl(u->arg.f, val, sizeof(val));
+        PolyDType s = poly_dtype_scalar(u->dtype);
+        if (isinf(u->arg.f)) {
+          /* Use INFINITY uniform (tinygrad wgsl.py:109) */
+          snprintf(val, sizeof(val), u->arg.f > 0 ? "INFINITY" : "(-INFINITY)");
+        } else if (isnan(u->arg.f)) {
+          /* Use nan() function (tinygrad wgsl.py:108) */
+          snprintf(val, sizeof(val), "nan()");
+        } else if (s.priority == POLY_FLOAT16.priority && s.bitsize == POLY_FLOAT16.bitsize) {
+          /* f16 const: cast from f32 literal */
+          char f32buf[64];
+          render_float_const_wgsl(u->arg.f, f32buf, sizeof(f32buf));
+          snprintf(val, sizeof(val), "f16(%s)", f32buf);
+        } else {
+          render_float_const_wgsl(u->arg.f, val, sizeof(val));
+        }
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%s", u->arg.b ? "true" : "false");
-      } else {
-        if (poly_dtype_is_unsigned(u->dtype))
-          snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)u->arg.i);
+      } else if (poly_dtype_is_unsigned(u->dtype)) {
+        /* Unsigned consts: negative → bitcast, positive → Nu suffix
+         * (tinygrad wgsl.py:72) */
+        int64_t v = u->arg.i;
+        if (v < 0)
+          snprintf(val, sizeof(val), "bitcast<u32>(%lld)", (long long)v);
         else
-          snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
+          snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)(v & 0xFFFFFFFF));
+      } else {
+        snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
       }
       wsm_set(&names, u, strdup(val));
       continue;
     }
 
-    /* --- INDEX: array indexing (buf[idx]) --------------------------- */
+    /* --- INDEX: array indexing (buf[idx]) ----------------------------- */
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = wsm_get(&names, u->src[0]);
       char *idx_s = wsm_get(&names, u->src[1]);
+      /* 3-source INDEX: gated (buf, idx, gate). Store the gate name
+       * for use by LOAD/STORE handlers. The index expression itself
+       * is still buf[idx]. */
       char expr[256];
       snprintf(expr, sizeof(expr), "%s[%s]", buf_s, idx_s);
       wsm_set(&names, u, strdup(expr));
       continue;
     }
 
-    /* --- RANGE: for loop -------------------------------------------- */
+    /* --- RANGE: for loop --------------------------------------------- */
     if (u->op == POLY_OP_RANGE) {
       char name[32];
       snprintf(name, sizeof(name), "ridx%lld", (long long)poly_range_axis_id(u->arg));
@@ -256,7 +364,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- END / ENDIF: close brace ----------------------------------- */
+    /* --- END / ENDIF: close brace ------------------------------------ */
     if (u->op == POLY_OP_END || u->op == POLY_OP_ENDIF) {
       depth--;
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
@@ -264,25 +372,65 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- DEFINE_LOCAL: accumulator variable -------------------------- */
+    /* --- DEFINE_LOCAL: shared memory array or scalar accumulator ------ */
     if (u->op == POLY_OP_DEFINE_LOCAL) {
-      char name[32];
-      snprintf(name, sizeof(name), "acc%d", c_acc++);
-      wsm_set(&names, u, strdup(name));
+      if (u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_LOCAL) {
+        /* Workgroup shared memory array.
+         * tinygrad: var<workgroup> smemN: array<type, SIZE>;
+         * Externalized before @compute (wgsl.py render_kernel lines 105-106). */
+        char name[32];
+        snprintf(name, sizeof(name), "smem%d", c_smem++);
+        wsm_set(&names, u, strdup(name));
 
-      char initval[64];
-      if (u->arg.kind == POLY_ARG_FLOAT)
-        render_float_const_wgsl(u->arg.f, initval, sizeof(initval));
-      else
-        snprintf(initval, sizeof(initval), "0.0");
+        int smem_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
+        const char *base_tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
+        if (n_extern_locals < 16) {
+          snprintf(extern_locals[n_extern_locals], 256,
+                   "var<workgroup> %s: array<%s,%d>;", name, base_tn, smem_size);
+          n_extern_locals++;
+        }
+      } else {
+        /* Scalar accumulator (non-pointer dtype).
+         * Used by pm_reduce for reduction accumulators. */
+        char name[32];
+        snprintf(name, sizeof(name), "acc%d", c_acc++);
+        wsm_set(&names, u, strdup(name));
 
-      const char *tn = wgsl_type_name(u->dtype);
-      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      wsb_printf(&body, "var %s: %s = %s;\n", name, tn, initval);
+        char initval[64];
+        if (u->arg.kind == POLY_ARG_FLOAT)
+          render_float_const_wgsl(u->arg.f, initval, sizeof(initval));
+        else
+          snprintf(initval, sizeof(initval), "0.0");
+
+        const char *tn = wgsl_type_name(u->dtype);
+        for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+        wsb_printf(&body, "var %s: %s = %s;\n", name, tn, initval);
+      }
       continue;
     }
 
-    /* --- LOAD: read from array -------------------------------------- */
+    /* --- DEFINE_REG: register-local array ----------------------------- */
+    if (u->op == POLY_OP_DEFINE_REG) {
+      char name[32];
+      snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
+      wsm_set(&names, u, strdup(name));
+
+      /* tinygrad: var rN: array<type, SIZE>; (wgsl.py:75) */
+      int reg_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
+      const char *base_tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
+      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+      wsb_printf(&body, "var %s: array<%s,%d>;\n", name, base_tn, reg_size);
+      continue;
+    }
+
+    /* --- AFTER: passthrough (alias src[0] name) ---------------------- */
+    if (u->op == POLY_OP_AFTER) {
+      char *src_name = wsm_get(&names, u->src[0]);
+      if (src_name) wsm_set(&names, u, strdup(src_name));
+      continue;
+    }
+
+    /* --- LOAD: read from array --------------------------------------- */
     if (u->op == POLY_OP_LOAD) {
       char name[32];
       snprintf(name, sizeof(name), "val%d", c_val++);
@@ -307,19 +455,82 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- STORE: write to array or accumulator ----------------------- */
-    if (u->op == POLY_OP_STORE) {
-      char *target = wsm_get(&names, u->src[0]);
-      char *val    = wsm_get(&names, u->src[1]);
-      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      if (u->src[0]->op == POLY_OP_DEFINE_LOCAL)
-        wsb_printf(&body, "%s = %s;\n", target, val);
-      else
-        wsb_printf(&body, "%s = %s;\n", target, val);
+    /* --- GEP: extract element from vector/array (devectorized access) -- */
+    if (u->op == POLY_OP_GEP) {
+      if (u->n_src < 1) { wsm_set(&names, u, strdup("0")); continue; }
+      char *src_s = wsm_get(&names, u->src[0]);
+      if (!src_s) src_s = "0";
+      if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1) {
+        /* Single-lane GEP: src[i] */
+        char expr[256];
+        snprintf(expr, sizeof(expr), "%s[%lld]", src_s,
+                 (long long)u->arg.int_tuple.vals[0]);
+        wsm_set(&names, u, strdup(expr));
+      } else if (u->arg.kind == POLY_ARG_INT) {
+        char expr[256];
+        snprintf(expr, sizeof(expr), "%s[%lld]", src_s, (long long)u->arg.i);
+        wsm_set(&names, u, strdup(expr));
+      } else {
+        /* Identity GEP or unsupported: alias source */
+        wsm_set(&names, u, strdup(src_s));
+      }
       continue;
     }
 
-    /* --- CAST: type conversion -------------------------------------- */
+    /* --- VECTORIZE: vector constructor (scalar after devectorize) ----- */
+    if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+      if (u->n_src == 1) {
+        /* Single source: alias */
+        char *s = wsm_get(&names, u->src[0]);
+        wsm_set(&names, u, strdup(s ? s : "0"));
+      } else if (u->n_src > 1) {
+        /* Multi-source: vec constructor. Shouldn't appear for scalar WGSL
+         * (supports_float4=false), but handle for robustness. */
+        const char *tn = wgsl_type_name(poly_dtype_scalar(u->dtype));
+        WgslStrBuf vexpr;
+        wsb_init(&vexpr);
+        wsb_printf(&vexpr, "vec%d<%s>(", u->n_src, tn);
+        for (int j = 0; j < u->n_src; j++) {
+          char *s = wsm_get(&names, u->src[j]);
+          wsb_printf(&vexpr, "%s%s", j > 0 ? "," : "", s ? s : "0");
+        }
+        wsb_puts(&vexpr, ")");
+        wsm_set(&names, u, vexpr.buf);
+      } else {
+        wsm_set(&names, u, strdup("0"));
+      }
+      continue;
+    }
+
+    /* --- STORE: write to array or accumulator ------------------------ */
+    if (u->op == POLY_OP_STORE) {
+      char *target = wsm_get(&names, u->src[0]);
+      char *val    = wsm_get(&names, u->src[1]);
+
+      /* Gated store: INDEX with 3rd bool source → if (gate) { store; }
+       * Matches CUDA renderer pattern (render_cuda.c gated STORE). */
+      PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
+      bool gated_store = (store_idx && store_idx->n_src >= 3 &&
+                          u->src[0]->op != POLY_OP_DEFINE_LOCAL);
+      if (gated_store) {
+        char *gate_s = wsm_get(&names, store_idx->src[2]);
+        for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+        wsb_printf(&body, "if (%s) {\n", gate_s);
+        depth++;
+      }
+
+      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+      wsb_printf(&body, "%s = %s;\n", target, val);
+
+      if (gated_store) {
+        depth--;
+        for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+        wsb_puts(&body, "}\n");
+      }
+      continue;
+    }
+
+    /* --- CAST / BITCAST: type conversion ----------------------------- */
     if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) {
       char name[32];
       snprintf(name, sizeof(name), "cast%d", c_cast++);
@@ -327,15 +538,51 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
       char *src_s = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
+      PolyDType dst_s = poly_dtype_scalar(u->dtype);
+      PolyDType src_dt = poly_dtype_scalar(u->src[0]->dtype);
+
+      char expr[256];
+      if (u->op == POLY_OP_BITCAST) {
+        /* BITCAST specializations matching tinygrad wgsl.py:76-84 */
+        if (dst_s.priority == POLY_FLOAT16.priority && dst_s.bitsize == POLY_FLOAT16.bitsize) {
+          snprintf(expr, sizeof(expr), "bitcast<vec2<f16>>(%s)[0]", src_s);
+        } else if (dst_s.priority == POLY_UINT8.priority && dst_s.bitsize == 8) {
+          snprintf(expr, sizeof(expr), "bitcast<u32>(%s&0xFF)", src_s);
+        } else if (dst_s.priority == POLY_INT8.priority && dst_s.bitsize == 8) {
+          snprintf(expr, sizeof(expr), "((i32(%s&0xFF)<<24)>>24)", src_s);
+        } else if (dst_s.priority == POLY_UINT16.priority && dst_s.bitsize == 16) {
+          if (src_dt.priority == POLY_FLOAT16.priority && src_dt.bitsize == POLY_FLOAT16.bitsize)
+            snprintf(expr, sizeof(expr), "bitcast<u32>(vec2<f16>(%s,0))", src_s);
+          else
+            snprintf(expr, sizeof(expr), "bitcast<u32>(%s&0xFFFF)", src_s);
+        } else if (dst_s.priority == POLY_INT16.priority && dst_s.bitsize == 16) {
+          if (src_dt.priority == POLY_FLOAT16.priority && src_dt.bitsize == POLY_FLOAT16.bitsize)
+            snprintf(expr, sizeof(expr), "bitcast<i32>(vec2<f16>(%s,0))", src_s);
+          else
+            snprintf(expr, sizeof(expr), "((i32(%s&0xFFFF)<<16)>>16)", src_s);
+        } else {
+          snprintf(expr, sizeof(expr), "bitcast<%s>(%s)", tn, src_s);
+        }
+      } else {
+        /* CAST: type conversion */
+        snprintf(expr, sizeof(expr), "%s(%s)", tn, src_s);
+      }
+
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      if (u->op == POLY_OP_BITCAST)
-        wsb_printf(&body, "var %s: %s = bitcast<%s>(%s);\n", name, tn, tn, src_s);
-      else
-        wsb_printf(&body, "var %s: %s = %s(%s);\n", name, tn, tn, src_s);
+      wsb_printf(&body, "var %s: %s = %s;\n", name, tn, expr);
       continue;
     }
 
-    /* --- ALU ops: arithmetic expressions ---------------------------- */
+    /* --- IF: conditional --------------------------------------------- */
+    if (u->op == POLY_OP_IF) {
+      char *cond_s = wsm_get(&names, u->src[0]);
+      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
+      wsb_printf(&body, "if (%s) {\n", cond_s);
+      depth++;
+      continue;
+    }
+
+    /* --- ALU ops: arithmetic expressions ----------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       char expr[512];
       const char *s0 = (u->n_src > 0) ? wsm_get(&names, u->src[0]) : "";
@@ -350,15 +597,6 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       const char *tn = wgsl_type_name(u->dtype);
       for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
       wsb_printf(&body, "var %s: %s = %s;\n", name, tn, expr);
-      continue;
-    }
-
-    /* --- IF: conditional -------------------------------------------- */
-    if (u->op == POLY_OP_IF) {
-      char *cond_s = wsm_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) wsb_puts(&body, "  ");
-      wsb_printf(&body, "if (%s) {\n", cond_s);
-      depth++;
       continue;
     }
   }
@@ -384,17 +622,38 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   WgslStrBuf out;
   wsb_init(&out);
 
-  /* buffer bindings */
+  /* Preamble: f16 extension, nan() function, INFINITY uniform.
+   * Matches tinygrad WGSLRenderer.render_kernel lines 107-109. */
+  if (uses_f16)
+    wsb_puts(&out, "enable f16;\n");
+  wsb_puts(&out, "fn nan() -> f32 { let bits = 0xffffffffu; return bitcast<f32>(bits); }\n");
+  wsb_puts(&out, "@group(0) @binding(0)\nvar<uniform> INFINITY : f32;\n");
+
+  /* Externalized workgroup shared memory declarations.
+   * These must appear before the @compute function (tinygrad wgsl.py:105-106). */
+  for (int i = 0; i < n_extern_locals; i++) {
+    wsb_printf(&out, "%s\n", extern_locals[i]);
+  }
+
+  /* Buffer bindings: offset by +1 (binding 0 = INFINITY uniform).
+   * Tinygrad: bufs start at binding(1) after INFINITY at binding(0). */
   for (int i = 0; i < n_bindings; i++) {
     const char *tn = wgsl_type_name(binding_dtypes[i]);
     wsb_printf(&out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n",
-               binding_indices[i], binding_names[i], tn);
+               binding_indices[i] + 1, binding_names[i], tn);
   }
 
-  /* compute shader entry point */
-  wsb_printf(&out, "@compute @workgroup_size(1)\nfn %s("
-             "@builtin(global_invocation_id) gid: vec3<u32>) {\n",
-             fn_name);
+  /* Compute shader entry point.
+   * tinygrad: @builtin(workgroup_id) gindex, @builtin(local_invocation_id) lindex
+   * workgroup_size from collected local dims. */
+  if (has_local_dims)
+    wsb_printf(&out, "@compute @workgroup_size(%d,%d,%d)\nfn %s(",
+               local_dims[0], local_dims[1], local_dims[2], fn_name);
+  else
+    wsb_printf(&out, "@compute @workgroup_size(1)\nfn %s(", fn_name);
+
+  wsb_puts(&out, "@builtin(workgroup_id) gindex: vec3<u32>,");
+  wsb_puts(&out, "@builtin(local_invocation_id) lindex: vec3<u32>) {\n");
   wsb_puts(&out, body.buf);
   wsb_puts(&out, "}\n");
 
@@ -405,4 +664,36 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   wsm_destroy(&names);
 
   return out.buf;
+}
+
+/* ── WebGPU linearizer ───────────────────────────────────────────────── */
+
+/* Linearize a kernel for WebGPU: full codegen pipeline with GPU dims.
+ *
+ * Pipeline: full_rewrite_to_sink_ex (with device=WEBGPU, triggering
+ * add_gpudims + group_for_reduce) → apply_control_flow → linearize.
+ *
+ * WebGPU constraints (matching tinygrad WGSLRenderer):
+ *   - supports_float4=false → devectorize=1
+ *   - local_max=(256,256,64) → gpu_block_size=256
+ *   - No MULACC/THREEFRY hardware support
+ *   - No tensor cores */
+PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  PolyRewriteOpts opts = {
+    .optimize     = true,
+    .devectorize  = 1,     /* supports_float4=false: full devectorize */
+    .beam_width   = 0,
+    .caps         = {
+      .has_mulacc   = false,
+      .has_threefry = false,
+      .max_vec_width = 1,  /* supports_float4=false: scalar loads, no vec folding */
+    },
+    .device         = POLY_DEVICE_WEBGPU,
+    .opt_policy     = POLY_OPT_HEURISTIC,
+    .extra_matcher  = NULL,   /* Phase 8: poly_pm_wgsl_extra() */
+    .gpu_block_size = 256,    /* WebGPU local_max[0] */
+  };
+  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  /* apply_control_flow already called inside full_rewrite_to_sink_ex (codegen.c:5674) */
+  return poly_linearize_rewritten(ctx, sink, n_out);
 }

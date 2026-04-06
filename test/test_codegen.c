@@ -4,6 +4,8 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
+#include "../src/frontend.h"  /* PolyWebGpuStepPlan, poly_render_step_webgpu_plan */
+#include "../src/tensor.h"    /* poly_sum_reduce */
 
 /* ── Helper: build c[i] = a[i] OP b[i] kernel IR ────────────────────── */
 
@@ -53,6 +55,24 @@ static int count_lin_ops(PolyUOp **lin, int n, PolyOps op) {
   int c = 0;
   for (int i = 0; i < n; i++) if (lin[i]->op == op) c++;
   return c;
+}
+
+static int count_special_named(PolyUOp **lin, int n, const char *name) {
+  int c = 0;
+  for (int i = 0; i < n; i++) {
+    if (lin[i]->op == POLY_OP_SPECIAL && lin[i]->arg.str &&
+        strcmp(lin[i]->arg.str, name) == 0) c++;
+  }
+  return c;
+}
+
+static int find_webgpu_kernel(PolyWebGpuStepPlan *plan, const char *a, const char *b) {
+  for (int k = 0; k < poly_webgpu_stepplan_n_kernels(plan); k++) {
+    int len = 0;
+    const char *wgsl = poly_webgpu_stepplan_kernel_wgsl(plan, k, &len);
+    if (wgsl && (!a || strstr(wgsl, a)) && (!b || strstr(wgsl, b))) return k;
+  }
+  return -1;
 }
 
 /* ── Linearizer tests ────────────────────────────────────────────────── */
@@ -282,18 +302,24 @@ TEST(codegen, render_wgsl_vecadd) {
   PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n);
   char *src = poly_render_wgsl(lin, n, "vecadd");
 
-  /* buffer bindings */
+  /* preamble: INFINITY uniform at binding(0) */
+  ASSERT_NOT_NULL(strstr(src, "fn nan()"));
+  ASSERT_NOT_NULL(strstr(src, "var<uniform> INFINITY"));
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(0)"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data0: array<f32>"));
+
+  /* buffer bindings: offset by +1 (binding 0 = INFINITY) */
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)"));
-  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data1: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data0: array<f32>"));
   ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data1: array<f32>"));
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)"));
   ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2: array<f32>"));
 
-  /* compute shader entry point */
+  /* compute shader entry point: workgroup_id + local_invocation_id */
   ASSERT_NOT_NULL(strstr(src, "@compute @workgroup_size(1)"));
   ASSERT_NOT_NULL(strstr(src, "fn vecadd("));
-  ASSERT_NOT_NULL(strstr(src, "@builtin(global_invocation_id)"));
+  ASSERT_NOT_NULL(strstr(src, "@builtin(workgroup_id) gindex"));
+  ASSERT_NOT_NULL(strstr(src, "@builtin(local_invocation_id) lindex"));
 
   /* loop */
   ASSERT_NOT_NULL(strstr(src, "for (var ridx0: i32 = 0; ridx0 < 10; ridx0++)"));
@@ -516,6 +542,149 @@ TEST(codegen, render_wgsl_reduce) {
 
   free(src);
   free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── WebGPU step plan tests ──────────────────────────────────────────── */
+
+TEST(codegen, webgpu_stepplan_vecadd) {
+  /* c[i] = a[i] + b[i] for i in 0..1024 — verify WebGPU GPU dims and plan */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer_f32(ctx, 1024);
+  PolyUOp *b = poly_buffer_f32(ctx, 1024);
+  PolyUOp *c = poly_buffer_f32(ctx, 1024);
+
+  PolyUOp *sum = poly_add(ctx, a, b);
+  PolyUOp *store = poly_store_val(ctx, c, sum);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
+  ASSERT_NOT_NULL(plan);
+
+  ASSERT_TRUE(poly_webgpu_stepplan_n_kernels(plan) >= 1);
+
+  /* WGSL source contains GPU preamble and builtins */
+  int wgsl_len = 0;
+  const char *wgsl = poly_webgpu_stepplan_kernel_wgsl(plan, 0, &wgsl_len);
+  ASSERT_NOT_NULL(wgsl);
+  ASSERT_TRUE(wgsl_len > 0);
+  ASSERT_NOT_NULL(strstr(wgsl, "fn nan()"));
+  ASSERT_NOT_NULL(strstr(wgsl, "INFINITY"));
+  ASSERT_NOT_NULL(strstr(wgsl, "gindex"));
+  ASSERT_NOT_NULL(strstr(wgsl, "lindex"));
+
+  /* GPU dims: 1024 elements / 256 block_size = 4 workgroups */
+  ASSERT_TRUE(poly_webgpu_stepplan_kernel_grid(plan, 0, 0) >= 1);
+  ASSERT_TRUE(poly_webgpu_stepplan_kernel_local(plan, 0, 0) >= 1);
+
+  /* 3 bindable buffers (a, b, c), 1024*4 bytes each */
+  ASSERT_TRUE(poly_webgpu_stepplan_n_bindable_buffers(plan) == 3);
+  ASSERT_TRUE(poly_webgpu_stepplan_buf_nbytes(plan, 0) == 4096);
+  ASSERT_TRUE(poly_webgpu_stepplan_buf_nbytes(plan, 1) == 4096);
+  ASSERT_TRUE(poly_webgpu_stepplan_buf_nbytes(plan, 2) == 4096);
+
+  int n_order = 0;
+  const int *order = poly_webgpu_stepplan_exec_order(plan, &n_order);
+  ASSERT_NOT_NULL(order);
+  ASSERT_TRUE(n_order >= 1);
+
+  poly_webgpu_stepplan_destroy(plan);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, webgpu_stepplan_chain) {
+  /* c = neg(a + b): fused elementwise chain, validates multi-op WGSL */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer_f32(ctx, 16);
+  PolyUOp *b = poly_buffer_f32(ctx, 16);
+  PolyUOp *c = poly_buffer_f32(ctx, 16);
+
+  PolyUOp *sum = poly_add(ctx, a, b);
+  PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, sum);
+  PolyUOp *store = poly_store_val(ctx, c, neg);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
+  ASSERT_NOT_NULL(plan);
+
+  ASSERT_TRUE(poly_webgpu_stepplan_n_kernels(plan) >= 1);
+
+  /* Verify WGSL contains both add and neg */
+  int wgsl_len = 0;
+  const char *wgsl = poly_webgpu_stepplan_kernel_wgsl(plan, 0, &wgsl_len);
+  ASSERT_NOT_NULL(wgsl);
+  ASSERT_TRUE(wgsl_len > 50);
+  ASSERT_NOT_NULL(strstr(wgsl, "+"));
+  ASSERT_NOT_NULL(strstr(wgsl, "(-"));
+
+  /* 3 bindable buffers */
+  ASSERT_TRUE(poly_webgpu_stepplan_n_bindable_buffers(plan) == 3);
+
+  /* Grid/local dims are valid */
+  ASSERT_TRUE(poly_webgpu_stepplan_kernel_grid(plan, 0, 0) >= 1);
+  ASSERT_TRUE(poly_webgpu_stepplan_kernel_local(plan, 0, 0) >= 1);
+
+  poly_webgpu_stepplan_destroy(plan);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* ── WebGPU GPU linearizer output tests ──────────────────────────────── */
+
+TEST(codegen, linearize_webgpu_vecadd_emits_gpudims) {
+  /* Verify GPU linearizer produces SPECIAL ops and correct WGSL builtins */
+  VecKernel k = make_vec_binop(POLY_OP_ADD, 1024);
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_webgpu(k.ctx, k.sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  ASSERT_TRUE(n_lin > 0);
+
+  /* GPU linearizer should produce at least gidx0 SPECIAL op */
+  ASSERT_TRUE(count_special_named(lin, n_lin, "gidx0") >= 1);
+
+  /* Render to WGSL and verify GPU-specific patterns */
+  char *wgsl = poly_render_wgsl(lin, n_lin, "vecadd_gpu");
+  ASSERT_NOT_NULL(wgsl);
+  ASSERT_NOT_NULL(strstr(wgsl, "i32(gindex."));
+  ASSERT_NOT_NULL(strstr(wgsl, "@compute @workgroup_size("));
+  /* Builtins: workgroup_id + local_invocation_id */
+  ASSERT_NOT_NULL(strstr(wgsl, "workgroup_id"));
+  ASSERT_NOT_NULL(strstr(wgsl, "local_invocation_id"));
+
+  free(wgsl);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(codegen, linearize_webgpu_reduce_emits_shared_barrier) {
+  /* Verify GPU reduction produces shared memory + barrier.
+   * 4096 elements > 256*2 threshold triggers group_for_reduce. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4096);
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *sum = poly_sum_reduce(ctx, a, 0, 0);
+  PolyUOp *store = poly_store_val(ctx, out, sum);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  /* Generate step plan and verify WGSL contains GPU reduction patterns */
+  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
+  ASSERT_NOT_NULL(plan);
+  ASSERT_TRUE(poly_webgpu_stepplan_n_kernels(plan) >= 1);
+
+  /* At least one kernel should have shared memory + barrier */
+  int k = find_webgpu_kernel(plan, "var<workgroup>", "workgroupBarrier();");
+  ASSERT_TRUE(k >= 0);
+
+  /* That kernel should have local dims > 1 (parallel reduction threads) */
+  ASSERT_TRUE(poly_webgpu_stepplan_kernel_local(plan, k, 0) > 1);
+
+  poly_webgpu_stepplan_destroy(plan);
   poly_ctx_destroy(ctx);
   PASS();
 }

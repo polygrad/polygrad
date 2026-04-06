@@ -4436,12 +4436,15 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   if (!buf) return NULL;
 
   /* Determine fold lengths based on hardware vector width.
-   * g_max_fold_width is set by the pipeline before running this pass. */
-  int fold_lengths[4];
+   * g_max_fold_width is set by the pipeline before running this pass.
+   * Tinygrad devectorizer.py:161-175:
+   *   supports_float4=true  → lengths = [4, 2, 1] (or [8,4,2] for half+AMX)
+   *   supports_float4=false → lengths = [1] */
+  int fold_lengths[5];
   int n_folds = 0;
   if (g_max_fold_width >= 8) fold_lengths[n_folds++] = 8;
-  fold_lengths[n_folds++] = 4;
-  fold_lengths[n_folds++] = 2;
+  if (g_max_fold_width >= 4) fold_lengths[n_folds++] = 4;
+  if (g_max_fold_width >= 2) fold_lengths[n_folds++] = 2;
   fold_lengths[n_folds++] = 1;
 
   /* Split into chunks */
@@ -5634,7 +5637,10 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
 
   /* ── 6. Add loads + devectorize (gated by devectorize >= 0) ─────────── */
-  g_max_fold_width = (opts.caps.max_vec_width >= 8) ? 8 : 4;
+  /* max_vec_width controls fold width in load_store_folding.
+   * CPU/x64: 4 or 8 (supports_float4=true). WGSL: 1 (supports_float4=false). */
+  g_max_fold_width = (opts.caps.max_vec_width >= 8) ? 8
+                   : (opts.caps.max_vec_width >= 2) ? 4 : 1;
   if (opts.devectorize >= 0) {
     sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());
     sink = poly_graph_rewrite(ctx, sink,

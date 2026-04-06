@@ -152,6 +152,11 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name);
  * Returns malloc'd string. Caller must free(). */
 char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name);
 
+/* Linearize a kernel for WebGPU execution.
+ * Full codegen pipeline with GPU dims (SPECIAL, BARRIER, shared memory).
+ * WebGPU constraints: supports_float4=false, local_max=256, no tensor cores. */
+PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+
 /* Render linearized UOps to a WASM binary module.
  * Returns malloc'd byte array containing a valid WASM module.
  * Caller must free(). *size_out receives the byte count.

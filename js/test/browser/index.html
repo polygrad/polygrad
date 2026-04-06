@@ -15,7 +15,7 @@ const params = new URLSearchParams(location.search)
 const device = params.get('device') || 'auto'
 
 async function runTests() {
-  let passed = 0, failed = 0
+  let passed = 0, failed = 0, skipped = 0
 
   async function test(name, fn) {
     try {
@@ -28,6 +28,11 @@ async function runTests() {
     }
   }
 
+  function skip(name) {
+    print('[SKIP] ' + name)
+    skipped++
+  }
+
   function assert(cond, msg) { if (!cond) throw new Error(msg || 'assertion failed') }
   function assertClose(arr, expected, tol) {
     if (tol === undefined) tol = 1e-4
@@ -37,10 +42,19 @@ async function runTests() {
     }
   }
 
+  const isWebGpu = device === 'webgpu'
+
   print('=== device: ' + device + ' ===')
   const pg = await polygrad.create({ target: 'wasm', device: device })
   const Tensor = pg.Tensor
   const Instance = pg.Instance
+
+  // -- WebGPU smoke test --
+  if (isWebGpu) {
+    await test('webgpu smoke: device is webgpu', async () => {
+      assert(pg.device === 'webgpu', 'expected webgpu, got ' + pg.device)
+    })
+  }
 
   // -- Tensor basics --
   await test('create vector', async () => {
@@ -71,6 +85,19 @@ async function runTests() {
     assertClose(await new Tensor([1, 2, 3, 4, 5, 6]).reshape([2, 3]).toArray(), [1, 2, 3, 4, 5, 6])
   })
 
+  await test('neg', async () => {
+    assertClose(await new Tensor([1, -2, 3]).neg().toArray(), [-1, 2, -3])
+  })
+
+  await test('exp', async () => {
+    const out = await new Tensor([0, 1]).exp().toArray()
+    assertClose(out, [1.0, 2.7183], 1e-3)
+  })
+
+  await test('sub', async () => {
+    assertClose(await new Tensor([5, 3]).sub(new Tensor([1, 2])).toArray(), [4, 1])
+  })
+
   // -- Comparisons --
   await test('eq', async () => {
     assertClose(await new Tensor([1, 5, 3]).eq(new Tensor([2, 5, 3])).toArray(), [0, 1, 1])
@@ -96,40 +123,45 @@ async function runTests() {
     assertClose(await a.grad.toArray(), [0, 1, 0, 1])
   })
 
-  // -- Instance --
-  await test('instance forward', async () => {
-    const inst = Instance.mlp({
-      layers: [2, 4, 1], activation: 'relu', bias: true,
-      loss: 'mse', batch_size: 1, seed: 42
+  // -- Instance (skip on WebGPU: no C vtable backend) --
+  if (isWebGpu) {
+    skip('instance forward (no WebGPU C backend)')
+    skip('instance train (no WebGPU C backend)')
+  } else {
+    await test('instance forward', async () => {
+      const inst = Instance.mlp({
+        layers: [2, 4, 1], activation: 'relu', bias: true,
+        loss: 'mse', batch_size: 1, seed: 42
+      })
+      try {
+        const out = inst.forward({ x: new Float32Array([1, 2]) })
+        assert(out.output instanceof Float32Array, 'output should be Float32Array')
+        assert(Number.isFinite(out.output[0]), 'output should be finite')
+      } finally { inst.dispose() }
     })
-    try {
-      const out = inst.forward({ x: new Float32Array([1, 2]) })
-      assert(out.output instanceof Float32Array, 'output should be Float32Array')
-      assert(Number.isFinite(out.output[0]), 'output should be finite')
-    } finally { inst.dispose() }
-  })
 
-  await test('instance train', async () => {
-    const inst = Instance.mlp({
-      layers: [2, 1], activation: 'none', bias: true,
-      loss: 'mse', batch_size: 1, seed: 42
+    await test('instance train', async () => {
+      const inst = Instance.mlp({
+        layers: [2, 1], activation: 'none', bias: true,
+        loss: 'mse', batch_size: 1, seed: 42
+      })
+      try {
+        inst.setOptimizer(pg.OPTIM_SGD, 0.05)
+        const x = new Float32Array([1, 2])
+        const y = new Float32Array([5])
+        let first = null, last = null
+        for (let i = 0; i < 50; i++) {
+          last = inst.trainStep({ x, y })
+          if (first == null) first = last
+        }
+        assert(Number.isFinite(last), 'loss should be finite')
+        assert(last < first, 'loss should decrease: ' + first + ' -> ' + last)
+      } finally { inst.dispose() }
     })
-    try {
-      inst.setOptimizer(pg.OPTIM_SGD, 0.05)
-      const x = new Float32Array([1, 2])
-      const y = new Float32Array([5])
-      let first = null, last = null
-      for (let i = 0; i < 50; i++) {
-        last = inst.trainStep({ x, y })
-        if (first == null) first = last
-      }
-      assert(Number.isFinite(last), 'loss should be finite')
-      assert(last < first, 'loss should decrease: ' + first + ' -> ' + last)
-    } finally { inst.dispose() }
-  })
+  }
 
-  window.__testResults = { passed, failed, device }
-  print('\nResults: ' + passed + ' passed, ' + failed + ' failed')
+  window.__testResults = { passed, failed, skipped, device }
+  print('\nResults: ' + passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped')
 }
 
 runTests().catch(e => {

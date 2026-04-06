@@ -1236,6 +1236,11 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx,
   }
 
   PolyUOp *log_probs = poly_log_softmax(ctx, logits, axis);
+  /* Cast bool weights to f32 before multiply (tinygrad does this via
+   * Tensor._broadcasted dtype promotion; polygrad's C-level ALU doesn't
+   * auto-promote, so explicit CAST is needed). */
+  if (poly_dtype_is_bool(weights->dtype))
+    weights = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, weights, poly_arg_none());
   PolyUOp *weighted = poly_alu2(ctx, POLY_OP_MUL, log_probs, weights);
 
   int64_t per_sample_shape[POLY_MAX_DIMS];

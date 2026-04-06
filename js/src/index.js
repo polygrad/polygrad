@@ -4,7 +4,7 @@ const { createRuntime, normalizeOptions } = require('./runtime')
 
 async function resolveNodeTarget(name, opts) {
   if (name === 'wasm') {
-    const { createWasmBackend } = require('./wasm')
+    const { createWasmBackend } = require('./exec_wasm')
     return createWasmBackend(opts.device)
   }
 
@@ -24,7 +24,7 @@ async function resolveNodeTarget(name, opts) {
     return createNativeBackend()
   } catch (e) { /* fall through to WASM */ }
 
-  const { createWasmBackend } = require('./wasm')
+  const { createWasmBackend } = require('./exec_wasm')
   return createWasmBackend(opts.device)
 }
 

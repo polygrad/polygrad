@@ -1,9 +1,12 @@
 /**
- * wasm.js -- WASM backend adapter for polygrad.
+ * core_wasm.js -- Emscripten target binding for polygrad.
  *
- * Wraps the Emscripten-compiled polygrad core into a backend object.
- * Handles: Emscripten heap management, int64 marshalling, WASM kernel
- * compilation/caching/execution, memory pool, instance cache.
+ * Loads the C core compiled to WASM, builds the FFI table, creates a
+ * context, and exposes heap/marshalling helpers. Shared by all
+ * wasm-target device executors (exec_wasm.js, exec_webgpu.js).
+ *
+ * This is a target binding, not a device executor. It does not decide
+ * how kernels are compiled or dispatched.
  */
 
 'use strict'
@@ -11,18 +14,12 @@
 // Lazy-loaded Emscripten module factory.
 // Published: ../wasm/polygrad.js (SINGLE_FILE build).
 // Dev (Node only): ../../build/polygrad.js (two-file Emscripten build).
-//
-// The dev fallback uses a computed require() so bundlers (esbuild, webpack, vite)
-// cannot statically resolve it. This is intentional: the dev path only runs in
-// Node.js during development -- published packages always have wasm/polygrad.js.
 let _moduleFactory = null
 function getModuleFactory() {
   if (_moduleFactory) return _moduleFactory
   try {
     _moduleFactory = require('../wasm/polygrad.js')
   } catch (e) {
-    // Dev fallback -- Node.js only. The computed require() prevents bundlers
-    // from following this branch (they can't resolve a runtime string).
     if (typeof process !== 'undefined' && process.versions && process.versions.node) {
       // eslint-disable-next-line no-eval
       const nodeRequire = typeof __non_webpack_require__ !== 'undefined'
@@ -40,42 +37,13 @@ function getModuleFactory() {
   return _moduleFactory
 }
 
-// LRU helpers
-function lruGet(map, key) {
-  const val = map.get(key)
-  if (val === undefined) return undefined
-  map.delete(key)
-  map.set(key, val)
-  return val
-}
-
-function lruSet(map, key, val, maxSize) {
-  if (map.has(key)) map.delete(key)
-  map.set(key, val)
-  if (map.size > maxSize) {
-    const oldest = map.keys().next().value
-    map.delete(oldest)
-  }
-}
-
-function hashBytes(bytes) {
-  let h = 0x811c9dc5
-  for (let i = 0; i < bytes.length; i++) {
-    h ^= bytes[i]
-    h = Math.imul(h, 0x01000193)
-  }
-  return h >>> 0
-}
-
-function moduleCacheKey(hash, len) {
-  return `${hash}:${len}`
-}
-
 /**
- * Create a WASM backend instance.
- * Returns a Promise<backend>.
+ * Create the wasm-target core: Emscripten module + ffi + ctx.
+ *
+ * @param {string} device - Device name ('auto', 'cpu', 'wasm', 'interp', 'webgpu')
+ * @returns {Promise<object>} Internal core object (not a public backend)
  */
-async function createWasmBackend(device) {
+async function createWasmCore(device) {
   const deviceName = device || 'auto'
   const Module = await getModuleFactory()()
 
@@ -123,7 +91,7 @@ async function createWasmBackend(device) {
   // --- Device selection (PolyDeviceId enum from exec_plan.h) ---
   const DEVICE_IDS = { auto: 4, cpu: 4, interp: 2, wasm: 4, webgpu: 5 }
   if (!(deviceName in DEVICE_IDS))
-    throw new Error('polygrad: unsupported WASM device \'' + deviceName + '\'')
+    throw new Error('polygrad: unsupported device \'' + deviceName + '\'')
   const deviceId = DEVICE_IDS[deviceName]
 
   // --- Scratch pointers ---
@@ -222,53 +190,6 @@ async function createWasmBackend(device) {
     return new TextDecoder().decode(bytes.subarray(ptr, end))
   }
 
-  // --- C math imports for WASM kernels ---
-  const mathImports = {
-    exp2f: Module._exp2f,
-    log2f: Module._log2f,
-    sinf: Module._sinf,
-    powf: Module._powf
-  }
-
-  // --- Caching infrastructure ---
-  const MAX_MODULE_CACHE = 512
-  const _moduleCache = new Map()
-
-  const MAX_INSTANCE_CACHE = 512
-  const _instanceCache = new WeakMap()
-
-  function getOrCreateInstance(mod, cacheKey, memory, imports) {
-    let perMemory = _instanceCache.get(memory)
-    if (!perMemory) {
-      perMemory = new Map()
-      _instanceCache.set(memory, perMemory)
-    }
-    let inst = lruGet(perMemory, cacheKey)
-    if (!inst) {
-      inst = new WebAssembly.Instance(mod, imports)
-      lruSet(perMemory, cacheKey, inst, MAX_INSTANCE_CACHE)
-    }
-    return inst
-  }
-
-  // --- Memory pool ---
-  const _ctxMemory = new Map()
-
-  function getOrGrowMemory(ctxPtr, neededPages) {
-    let entry = _ctxMemory.get(ctxPtr)
-    if (!entry) {
-      const memory = new WebAssembly.Memory({ initial: neededPages })
-      entry = { memory, pages: neededPages }
-      _ctxMemory.set(ctxPtr, entry)
-      return entry.memory
-    }
-    if (neededPages > entry.pages) {
-      entry.memory.grow(neededPages - entry.pages)
-      entry.pages = neededPages
-    }
-    return entry.memory
-  }
-
   // --- Realize serialization ---
   const _realizeChains = new Map()
 
@@ -279,7 +200,7 @@ async function createWasmBackend(device) {
     return next
   }
 
-  // --- Realize via C backend vtable (interp, future webgpu) ---
+  // --- Realize via C backend vtable (interp) ---
   async function realizeViaBackend(ctx, sink, numel, leafMap, isF64) {
     return serializeRealize(ctx, async () => {
       const ArrayType = isF64 ? Float64Array : Float32Array
@@ -304,7 +225,6 @@ async function createWasmBackend(device) {
         const rc = Module._poly_realize_flat_device(ctx, sink, bufsPtr, datasPtr, n, deviceId)
         if (rc !== 0) throw new Error('poly_realize_flat_device failed (rc=' + rc + ')')
 
-        // Copy output from last binding (same convention as native.js)
         const lastPtr = heapPtrs[heapPtrs.length - 1]
         const lastArr = entries[entries.length - 1][1]
         const out = new ArrayType(lastArr.length)
@@ -318,118 +238,7 @@ async function createWasmBackend(device) {
     })
   }
 
-  // --- Core WASM kernel execution ---
-  async function renderAndExec(ctx, sink, numel, leafMap, isF64) {
-    return serializeRealize(ctx, async () => {
-      const plan = Module._poly_render_step_wasm_plan(ctx, sink)
-      if (!plan) throw new Error('poly_render_step_wasm_plan failed')
-
-      const ArrayType = isF64 ? Float64Array : Float32Array
-
-      try {
-        const nKernels = Module._poly_wasm_stepplan_n_kernels(plan)
-        const nBufs = Module._poly_wasm_stepplan_n_buffers(plan)
-        const nBindable = Module._poly_wasm_stepplan_n_bindable_buffers(plan)
-
-        const bufNbytes = new Array(nBufs)
-        const bufData = new Array(nBufs)
-
-        for (let bi = 0; bi < nBindable; bi++) {
-          const bufIdx = Module._poly_wasm_stepplan_bindable_buf_index(plan, bi)
-          const bufUop = Module._poly_kernel_buf(ctx, bi)
-          const data = leafMap.get(bufUop)
-          if (data) {
-            bufData[bufIdx] = data
-            bufNbytes[bufIdx] = data.byteLength
-          } else {
-            const constPtr = Module._poly_const_buffer_data(ctx, bufUop)
-            if (!constPtr) throw new Error(`No data binding for bindable buffer ${bi}`)
-            const nbytes = Number(Module._poly_wasm_stepplan_buf_nbytes(plan, bufIdx))
-            bufData[bufIdx] = new Uint8Array(heapU8().buffer, constPtr, nbytes)
-            bufNbytes[bufIdx] = nbytes
-          }
-        }
-
-        for (let i = nBindable; i < nBufs; i++) {
-          bufNbytes[i] = Number(Module._poly_wasm_stepplan_buf_nbytes(plan, i))
-          bufData[i] = null
-        }
-
-        const offsets = new Array(nBufs)
-        let totalBytes = 0
-        for (let i = 0; i < nBufs; i++) {
-          totalBytes = (totalBytes + 7) & ~7
-          offsets[i] = totalBytes
-          totalBytes += bufNbytes[i]
-        }
-
-        const neededPages = Math.max(1, Math.ceil(totalBytes / 65536))
-        const memory = getOrGrowMemory(ctx, neededPages)
-        const memBytes = new Uint8Array(memory.buffer)
-
-        for (let bi = 0; bi < nBindable; bi++) {
-          const bufIdx = Module._poly_wasm_stepplan_bindable_buf_index(plan, bi)
-          const data = bufData[bufIdx]
-          if (data) {
-            if (data instanceof Uint8Array) {
-              memBytes.set(data, offsets[bufIdx])
-            } else {
-              memBytes.set(
-                new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-                offsets[bufIdx]
-              )
-            }
-          }
-        }
-
-        const execOrderPtr = Module._poly_wasm_stepplan_exec_order(plan, _scratchLenPtr)
-        const execOrder = []
-        for (let i = 0; i < nKernels; i++) {
-          execOrder.push(heap32()[(execOrderPtr >> 2) + i])
-        }
-
-        const imports = { env: { memory }, math: mathImports }
-
-        for (const ki of execOrder) {
-          const bytesPtr = Module._poly_wasm_stepplan_kernel_bytes(plan, ki, _scratchLenPtr)
-          const bytesLen = heap32()[_scratchLenPtr >> 2]
-          if (!bytesPtr || bytesLen <= 0) throw new Error(`No WASM bytes for kernel ${ki}`)
-
-          const wasmView = new Uint8Array(heapU8().buffer, bytesPtr, bytesLen)
-          const hash = hashBytes(wasmView)
-          const cacheKey = moduleCacheKey(hash, bytesLen)
-
-          let mod = lruGet(_moduleCache, cacheKey)
-          if (!mod) {
-            mod = await WebAssembly.compile(wasmView.slice())
-            lruSet(_moduleCache, cacheKey, mod, MAX_MODULE_CACHE)
-          }
-
-          const nParams = Module._poly_wasm_stepplan_kernel_n_params(plan, ki)
-          const paramOffsets = []
-          for (let p = 0; p < nParams; p++) {
-            const bufIdx = Module._poly_wasm_stepplan_kernel_param_buf_index(plan, ki, p)
-            if (bufIdx < 0 || bufIdx >= nBufs) {
-              throw new Error(`Invalid buffer index ${bufIdx} for kernel ${ki} param ${p}`)
-            }
-            paramOffsets.push(offsets[bufIdx])
-          }
-
-          const instance = getOrCreateInstance(mod, cacheKey, memory, imports)
-          instance.exports.kernel(...paramOffsets)
-        }
-
-        const outView = new ArrayType(memory.buffer, offsets[0], numel)
-        const result = new ArrayType(numel)
-        result.set(outView)
-        return result
-      } finally {
-        Module._poly_wasm_stepplan_destroy(plan)
-      }
-    })
-  }
-
-  // --- Build normalized FFI table ---
+  // --- Build FFI table ---
   const cwrapName = Module.cwrap('poly_op_name', 'string', ['number'])
   const cwrapReshape = Module.cwrap('poly_reshape', 'number', ['number', 'number', 'number', 'number'])
   const cwrapExpand = Module.cwrap('poly_expand', 'number', ['number', 'number', 'number', 'number'])
@@ -446,7 +255,6 @@ async function createWasmBackend(device) {
     if (name) ops[name] = i
   }
 
-  // Normalized FFI: int64 arrays accept plain JS number[], shape-returning fns return { uop, shape }
   const ffi = {
     // Simple ops (no int64 arrays)
     poly_ctx_new: Module._poly_ctx_new,
@@ -465,14 +273,13 @@ async function createWasmBackend(device) {
     poly_detach: Module._poly_detach,
     poly_cast_by_id: Module._poly_cast_by_id,
 
-    // Shape-on-UOp accessors (lazy, cached on ctx)
+    // Shape-on-UOp accessors
     poly_uop_ndim: (ctx, uop) => Module._poly_uop_ndim(ctx, uop),
     poly_uop_dims: (ctx, uop) => {
       const ndim = Module._poly_uop_ndim(ctx, uop)
       if (ndim <= 0) return []
       const dimsPtr = Module._poly_uop_dims(ctx, uop)
       if (!dimsPtr) return []
-      // Read int64 dims from WASM heap (little-endian, 8 bytes each)
       const result = []
       const h32 = heap32()
       for (let i = 0; i < ndim; i++) {
@@ -483,7 +290,7 @@ async function createWasmBackend(device) {
       return result
     },
 
-    // Shape-taking ops (accept JS number[])
+    // Shape-taking ops
     poly_reshape: (ctx, uop, shape, len) => callWithInt64(cwrapReshape, ctx, uop, shape, len),
     poly_expand: (ctx, uop, shape, len) => callWithInt64(cwrapExpand, ctx, uop, shape, len),
     poly_permute: (ctx, uop, order, len) => callWithInt64(cwrapPermute, ctx, uop, order, len),
@@ -513,65 +320,22 @@ async function createWasmBackend(device) {
       return result
     },
 
-    // Shape-returning ops (return { uop, shape })
-    poly_max_reduce: (ctx, uop, shape, nshape, axis, keepdim) => {
-      const shPtr = writeInt64Array(shape)
-      heap32()[_scratchOutNdimPtr >> 2] = 0
-      const result = Module._poly_max_reduce(ctx, uop, shPtr, nshape, axis, keepdim,
-        _scratchOutShapePtr, _scratchOutNdimPtr)
-      Module._free(shPtr)
-      return { uop: result, shape: readOutShape() }
-    },
-
-    poly_mean_reduce: (ctx, uop, shape, nshape, axis, keepdim) => {
-      const shPtr = writeInt64Array(shape)
-      heap32()[_scratchOutNdimPtr >> 2] = 0
-      const result = Module._poly_mean_reduce(ctx, uop, shPtr, nshape, axis, keepdim,
-        _scratchOutShapePtr, _scratchOutNdimPtr)
-      Module._free(shPtr)
-      return { uop: result, shape: readOutShape() }
-    },
-
-    poly_dot: (ctx, aUop, aShape, aNshape, bUop, bShape, bNshape) => {
-      const aPtr = writeInt64Array(aShape)
-      const bPtr = writeInt64Array(bShape)
-      heap32()[_scratchOutNdimPtr >> 2] = 0
-      const result = Module._poly_dot(ctx, aUop, aPtr, aNshape, bUop, bPtr, bNshape,
-        _scratchOutShapePtr, _scratchOutNdimPtr)
-      Module._free(aPtr)
-      Module._free(bPtr)
-      return { uop: result, shape: readOutShape() }
-    },
-
-    poly_cross_entropy: (ctx, logitsUop, logitsShape, logitsNshape, targetUop, targetShape, targetNshape, axis) => {
-      const logitsPtr = writeInt64Array(logitsShape)
-      const targetPtr = writeInt64Array(targetShape)
-      heap32()[_scratchOutNdimPtr >> 2] = 0
-      const result = Module._poly_cross_entropy(
-        ctx, logitsUop, logitsPtr, logitsNshape,
-        targetUop, targetPtr, targetNshape,
-        axis, _scratchOutShapePtr, _scratchOutNdimPtr
-      )
-      Module._free(logitsPtr)
-      Module._free(targetPtr)
-      return { uop: result, shape: readOutShape() }
-    },
+    // Shape-on-UOp: C computes shapes internally, JS passes bare UOp pointers.
+    poly_max_reduce: Module._poly_max_reduce,
+    poly_mean_reduce: Module._poly_mean_reduce,
+    poly_dot: Module._poly_dot,
+    poly_cross_entropy: Module._poly_cross_entropy,
 
     poly_einsum: (ctx, formula, operands) => {
       const n = operands.length
-
       const tensorPtrs = Module._malloc(n * 4)
       for (let i = 0; i < n; i++) {
         heap32()[(tensorPtrs >> 2) + i] = operands[i]._uop
       }
-
       const formulaPtr = allocString(formula)
-
       const result = Module._poly_einsum(ctx, formulaPtr, tensorPtrs, n)
-
       Module._free(formulaPtr)
       Module._free(tensorPtrs)
-
       return { uop: result, shape: readUopShape(ctx, result) }
     },
 
@@ -579,23 +343,17 @@ async function createWasmBackend(device) {
       const names = Object.keys(kwargs)
       const values = names.map(k => kwargs[k])
       const n = names.length
-
       const formulaPtr = allocString(formula)
-
       let namesPtr = 0
       let valuesPtr = 0
       if (n > 0) {
         namesPtr = allocString(names.join(' '))
         valuesPtr = writeInt64Array(values)
       }
-
-      const result = Module._poly_rearrange(ctx, formulaPtr,
-        uop, namesPtr, valuesPtr, n)
-
+      const result = Module._poly_rearrange(ctx, formulaPtr, uop, namesPtr, valuesPtr, n)
       Module._free(formulaPtr)
       if (namesPtr) Module._free(namesPtr)
       if (valuesPtr) Module._free(valuesPtr)
-
       return { uop: result, shape: readUopShape(ctx, result) }
     },
 
@@ -650,7 +408,7 @@ async function createWasmBackend(device) {
     poly_minimum: Module._poly_minimum,
     poly_clamp: Module._poly_clamp,
 
-    // Creation (shape-taking, seed is uint64)
+    // Creation
     poly_rand: (ctx, shape, ndim, seed) => {
       const shPtr = writeInt64Array(shape)
       const result = Module._poly_rand(ctx, shPtr, ndim, BigInt(seed))
@@ -667,18 +425,9 @@ async function createWasmBackend(device) {
     poly_eye: Module._poly_eye,
     poly_linspace: Module._poly_linspace,
     poly_full: Module._poly_full,
-    poly_tril: (ctx, uop, shape, ndim, diagonal) => {
-      const ptr = writeInt64Array(shape)
-      const result = Module._poly_tril(ctx, uop, ptr, ndim, diagonal)
-      Module._free(ptr)
-      return result
-    },
-    poly_triu: (ctx, uop, shape, ndim, diagonal) => {
-      const ptr = writeInt64Array(shape)
-      const result = Module._poly_triu(ctx, uop, ptr, ndim, diagonal)
-      Module._free(ptr)
-      return result
-    },
+    // Shape-on-UOp: C reads shape from UOp internally.
+    poly_tril: Module._poly_tril,
+    poly_triu: Module._poly_triu,
     poly_cholesky: Module._poly_cholesky,
     poly_triangular_solve: Module._poly_triangular_solve,
 
@@ -704,6 +453,7 @@ async function createWasmBackend(device) {
   // Create context
   const ctx = ffi.poly_ctx_new()
 
+  // --- Instance API ---
   const instance = {
     fromIR(irBytes, weightsBytes) {
       const irPtr = allocBytes(irBytes)
@@ -759,54 +509,32 @@ async function createWasmBackend(device) {
       return inst || null
     },
 
-    free(instPtr) {
-      Module._poly_instance_free(instPtr)
-    },
-
-    paramCount(instPtr) {
-      return Module._poly_instance_param_count(instPtr)
-    },
-
-    paramName(instPtr, i) {
-      return readCString(Module._poly_instance_param_name(instPtr, i))
-    },
-
+    free(instPtr) { Module._poly_instance_free(instPtr) },
+    paramCount(instPtr) { return Module._poly_instance_param_count(instPtr) },
+    paramName(instPtr, i) { return readCString(Module._poly_instance_param_name(instPtr, i)) },
     paramShape(instPtr, i) {
       const ndim = Module._poly_instance_param_shape(instPtr, i, _scratchOutShapePtr, 8)
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
     },
-
     paramData(instPtr, i) {
       const dataPtr = Module._poly_instance_param_data(instPtr, i, _scratchNumelPtr)
       if (!dataPtr) return null
       const numel = readInt64At(_scratchNumelPtr)
       return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
     },
-
-    bufCount(instPtr) {
-      return Module._poly_instance_buf_count(instPtr)
-    },
-
-    bufName(instPtr, i) {
-      return readCString(Module._poly_instance_buf_name(instPtr, i))
-    },
-
-    bufRole(instPtr, i) {
-      return Module._poly_instance_buf_role(instPtr, i)
-    },
-
+    bufCount(instPtr) { return Module._poly_instance_buf_count(instPtr) },
+    bufName(instPtr, i) { return readCString(Module._poly_instance_buf_name(instPtr, i)) },
+    bufRole(instPtr, i) { return Module._poly_instance_buf_role(instPtr, i) },
     bufShape(instPtr, i) {
       const ndim = Module._poly_instance_buf_shape(instPtr, i, _scratchOutShapePtr, 8)
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
     },
-
     bufData(instPtr, i) {
       const dataPtr = Module._poly_instance_buf_data(instPtr, i, _scratchNumelPtr)
       if (!dataPtr) return null
       const numel = readInt64At(_scratchNumelPtr)
       return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
     },
-
     exportWeights(instPtr) {
       const bytesPtr = Module._poly_instance_export_weights(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
@@ -815,14 +543,12 @@ async function createWasmBackend(device) {
       Module._free(bytesPtr)
       return bytes
     },
-
     importWeights(instPtr, bytes) {
       const bytesPtr = allocBytes(bytes)
       const rc = Module._poly_instance_import_weights(instPtr, bytesPtr, bytes.length)
       Module._free(bytesPtr)
       return rc
     },
-
     exportIR(instPtr) {
       const bytesPtr = Module._poly_instance_export_ir(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
@@ -831,7 +557,6 @@ async function createWasmBackend(device) {
       Module._free(bytesPtr)
       return bytes
     },
-
     saveBundle(instPtr) {
       const bytesPtr = Module._poly_instance_save_bundle(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
@@ -840,7 +565,6 @@ async function createWasmBackend(device) {
       Module._free(bytesPtr)
       return bytes
     },
-
     fromBundle(bytes) {
       const ptr = allocBytes(bytes)
       const inst = Module._poly_instance_from_bundle(ptr, bytes.length)
@@ -851,8 +575,6 @@ async function createWasmBackend(device) {
       }
       return inst || null
     },
-
-    /* ── Model loading ────────────────────────────────────────── */
 
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const cfgPtr = allocBytes(configBytes)
@@ -897,8 +619,6 @@ async function createWasmBackend(device) {
       const msgPtr = Module._poly_import_last_error_message()
       return { code, message: msgPtr ? readCString(msgPtr) : 'unknown' }
     },
-
-    /* ── Tokenizer ───────────────────────────────────────────── */
 
     tokenizerFromGGUF(ggufBytes) {
       const ptr = allocBytes(ggufBytes)
@@ -955,7 +675,6 @@ async function createWasmBackend(device) {
       const bindingPtr = Module._malloc(Math.max(1, n) * 8)
       const namePtrs = new Array(n)
       const dataPtrs = new Array(n)
-
       for (let i = 0; i < n; i++) {
         namePtrs[i] = allocString(names[i])
         dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
@@ -963,9 +682,7 @@ async function createWasmBackend(device) {
         heap32()[base] = namePtrs[i]
         heap32()[base + 1] = dataPtrs[i]
       }
-
       const rc = Module._poly_instance_forward(instPtr, bindingPtr, n)
-
       for (const ptr of dataPtrs) Module._free(ptr)
       for (const ptr of namePtrs) Module._free(ptr)
       Module._free(bindingPtr)
@@ -977,7 +694,6 @@ async function createWasmBackend(device) {
       const bindingPtr = Module._malloc(Math.max(1, n) * 8)
       const namePtrs = new Array(n)
       const dataPtrs = new Array(n)
-
       for (let i = 0; i < n; i++) {
         namePtrs[i] = allocString(names[i])
         dataPtrs[i] = allocBytes(new Uint8Array(arrays[i].buffer, arrays[i].byteOffset, arrays[i].byteLength))
@@ -985,11 +701,9 @@ async function createWasmBackend(device) {
         heap32()[base] = namePtrs[i]
         heap32()[base + 1] = dataPtrs[i]
       }
-
       const lossPtr = Module._malloc(4)
       const rc = Module._poly_instance_train_step(instPtr, bindingPtr, n, lossPtr)
       const loss = rc === 0 ? heapF32()[lossPtr >> 2] : null
-
       Module._free(lossPtr)
       for (const ptr of dataPtrs) Module._free(ptr)
       for (const ptr of namePtrs) Module._free(ptr)
@@ -999,17 +713,28 @@ async function createWasmBackend(device) {
   }
 
   return {
+    Module,
+    deviceName,
+    deviceId,
     ffi,
     ctx,
     ops,
     instance,
     int64: BigInt,
     readShape: readOutShape,
-    realize: deviceId === DEVICE_IDS.wasm ? renderAndExec : realizeViaBackend,
-    caps: { simd: true, f64: true, target: 'wasm', device: deviceName },
-    destroy: () => {
+    serializeRealize,
+    realizeViaBackend,
+    // Heap/marshalling helpers for device executors
+    heap32,
+    heapU8,
+    heapF32,
+    heapF64,
+    allocBytes,
+    allocString,
+    readCString,
+    _scratchLenPtr,
+    destroy() {
       ffi.poly_ctx_destroy(ctx)
-      _ctxMemory.delete(ctx)
       _realizeChains.delete(ctx)
       Module._free(_scratchLenPtr)
       Module._free(_scratchNumelPtr)
@@ -1020,4 +745,4 @@ async function createWasmBackend(device) {
   }
 }
 
-module.exports = { createWasmBackend }
+module.exports = { createWasmCore }

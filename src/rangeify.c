@@ -1027,6 +1027,17 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
           }
         }
 
+        /* Scalar output: full reduction eliminated all ranges but the output
+         * buffer still needs INDEX(buf, 0). Tinygrad handles this in
+         * run_rangeify/apply_rangeify (indexing.py:55-84): size-1 buffers
+         * get CONST(0) as their range, producing INDEX(PARAM, 0). */
+        if (n_idx == 0 && j == 0 &&
+            (u->op == POLY_OP_STORE || u->op == POLY_OP_ASSIGN)) {
+          PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+          idx_rngs[0] = zero;
+          n_idx = 1;
+        }
+
         if (n_idx > 0) {
           /* Derive shape from range bounds for flat index computation.
            * The BUFFER is always 1D (flat), but ranges may be multi-dim. */
