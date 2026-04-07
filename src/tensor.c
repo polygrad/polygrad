@@ -739,12 +739,36 @@ PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
 
 /* ── Comparisons (broadcasting) ──────────────────────────────────────── */
 
+/* Logical NOT — polygrad's canonical form is `CMPNE(x, CONST(true))` for
+ * bool inputs, matching tinygrad's `logical_not()` after CAST elision
+ * (mixin/elementwise.py:25-33 + symbolic.py:126).
+ *
+ * Polygrad ALSO supports `NEG(bool_uop)` at the kernel level (alu.c:169
+ * maps NEG-on-bool to `!a`). Both forms are accepted by codegen, but
+ * tensor-level helpers should produce the CMPNE form for tinygrad parity
+ * so Phase D's reduce_collapse rules can match the IR shape verbatim. */
+PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x) {
+  PolyUOp *t = poly_const_typed(ctx, POLY_BOOL, 1);
+  return poly_alu2(ctx, POLY_OP_CMPNE, x, t);
+}
+
+/* All comparison helpers return BOOL, mirroring tinygrad's
+ * mixin/elementwise.py:218-247:
+ *   eq(a,b) = (a != b).logical_not()
+ *   ne(a,b) = CMPNE(a,b)
+ *   gt(a,b) = CMPLT(b,a)         (operand swap)
+ *   lt(a,b) = CMPLT(a,b)
+ *   ge(a,b) = (a < b).logical_not()
+ *   le(a,b) = (a > b).logical_not() = (b < a).logical_not()
+ *
+ * Polygrad previously had ge/le returning float WHERE(0,1); fixed in P5
+ * for tinygrad parity and to let Phase D's reduce_collapse Rule 4 match
+ * polygrad's tril/triu masks. */
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t s[POLY_MAX_DIMS]; int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
-  PolyUOp *t = poly_const_typed(ctx, POLY_BOOL, 1);
-  return poly_alu2(ctx, POLY_OP_CMPNE, ne, t);
+  return poly_logical_not(ctx, ne);
 }
 
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
@@ -763,14 +787,14 @@ PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t s[POLY_MAX_DIMS]; int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *lt = poly_alu2(ctx, POLY_OP_CMPLT, a, b);
-  return poly_alu3(ctx, POLY_OP_WHERE, lt, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
+  return poly_logical_not(ctx, lt);
 }
 
 PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t s[POLY_MAX_DIMS]; int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
-  PolyUOp *gt_val = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
-  return poly_alu3(ctx, POLY_OP_WHERE, gt_val, cf(ctx, a, 0.0), cf(ctx, a, 1.0));
+  PolyUOp *gt = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
+  return poly_logical_not(ctx, gt);
 }
 
 PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {

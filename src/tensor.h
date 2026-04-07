@@ -134,12 +134,17 @@ PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val)
 PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x);
 
-/* Comparisons */
+/* Comparisons. All return BOOL, mirroring tinygrad mixin/elementwise.py:
+ *   eq/ne via CMPNE (and double-CMPNE for eq), gt/lt via CMPLT,
+ *   ge/le via logical_not of the strict form. */
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+/* Polygrad's canonical bool NOT, matching tinygrad's logical_not()
+ * (mixin/elementwise.py:25-33) after CAST elision: CMPNE(x, CONST(true)). */
+PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
 PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);

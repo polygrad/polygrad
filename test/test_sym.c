@@ -597,3 +597,91 @@ TEST(sym, minmax_cache_reuse_yields_same) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+
+/* ── poly_logical_not / bool comparison parity (Phase A P5) ──────────
+ *
+ * Tinygrad's `logical_not()` (mixin/elementwise.py:25-33) lowers to
+ *   CMPNE(CAST(x, bool), CONST(true))
+ * which symbolic.py:126 collapses to
+ *   CMPNE(x, CONST(true))           when x is already bool.
+ *
+ * Polygrad's poly_logical_not is the same form (CMPNE-with-true). All
+ * comparison helpers (poly_le, poly_ge, poly_eq) return bool via this
+ * canonical NOT, mirroring tinygrad's mixin/elementwise.py:240-250.
+ *
+ * Captured against tinygrad in test/parity_scripts/tg_logical_not_gt.py. */
+TEST(sym, logical_not_canonical_form) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = mk_range(ctx, 5, 0);
+  PolyUOp *c3 = mk_const(ctx, 3);
+  PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, c3, poly_arg_none());
+  PolyUOp *not_lt = poly_logical_not(ctx, lt);
+  /* Shape: CMPNE(CMPLT(...), CONST(true)) */
+  ASSERT_INT_EQ(not_lt->op, POLY_OP_CMPNE);
+  ASSERT_TRUE(poly_dtype_eq(not_lt->dtype, POLY_BOOL));
+  ASSERT_INT_EQ(not_lt->n_src, 2);
+  ASSERT_PTR_EQ(not_lt->src[0], lt);
+  ASSERT_INT_EQ(not_lt->src[1]->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(not_lt->src[1]->dtype, POLY_BOOL));
+  ASSERT_TRUE(not_lt->src[1]->arg.b == true);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, poly_le_returns_bool) {
+  /* poly_le must return bool (was previously float WHERE(0,1) before P5). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = mk_range(ctx, 5, 0);
+  PolyUOp *b = mk_const(ctx, 3);
+  PolyUOp *le = poly_le(ctx, a, b);
+  ASSERT_TRUE(poly_dtype_eq(le->dtype, POLY_BOOL));
+  /* Structure: CMPNE(CMPLT(b, a), CONST(true)) per the (b<a).logical_not() form */
+  ASSERT_INT_EQ(le->op, POLY_OP_CMPNE);
+  ASSERT_INT_EQ(le->src[0]->op, POLY_OP_CMPLT);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, poly_ge_returns_bool) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = mk_range(ctx, 5, 0);
+  PolyUOp *b = mk_const(ctx, 3);
+  PolyUOp *ge = poly_ge(ctx, a, b);
+  ASSERT_TRUE(poly_dtype_eq(ge->dtype, POLY_BOOL));
+  ASSERT_INT_EQ(ge->op, POLY_OP_CMPNE);
+  ASSERT_INT_EQ(ge->src[0]->op, POLY_OP_CMPLT);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, poly_eq_returns_bool) {
+  /* poly_eq = (a != b).logical_not() = CMPNE(CMPNE(a,b), true). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = mk_range(ctx, 5, 0);
+  PolyUOp *b = mk_const(ctx, 3);
+  PolyUOp *eq = poly_eq(ctx, a, b);
+  ASSERT_TRUE(poly_dtype_eq(eq->dtype, POLY_BOOL));
+  ASSERT_INT_EQ(eq->op, POLY_OP_CMPNE);
+  ASSERT_INT_EQ(eq->src[0]->op, POLY_OP_CMPNE);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, double_logical_not_idempotent_via_minmax) {
+  /* Tinygrad symbolic.py:91: x.logical_not().logical_not() -> x.
+   * Polygrad doesn't have a dedicated rewrite rule for this CMPNE form
+   * (only for NEG-NEG via rule_double_neg). But the bound semantics must
+   * still match: NOT(NOT(bool x)) has the same vmin/vmax as x. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = mk_range(ctx, 5, 0);
+  PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, mk_const(ctx, 3), poly_arg_none());
+  PolyUOp *not_lt = poly_logical_not(ctx, lt);
+  PolyUOp *not_not_lt = poly_logical_not(ctx, not_lt);
+  int64_t lo_a, hi_a, lo_b, hi_b;
+  poly_uop_minmax(ctx, lt, &lo_a, &hi_a);
+  poly_uop_minmax(ctx, not_not_lt, &lo_b, &hi_b);
+  ASSERT_INT_EQ(lo_a, lo_b);
+  ASSERT_INT_EQ(hi_a, hi_b);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
