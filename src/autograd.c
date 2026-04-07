@@ -820,10 +820,20 @@ static PolyUOp *substitute_rec(PolyCtx *ctx, PolyUOp *u,
     return u;
   }
 
-  /* Recursively substitute sources */
-  PolyUOp *new_srcs[16]; /* enough for any UOp */
+  /* Recursively substitute sources. Stack buffer for the common small-arity
+   * case; arena fallback for high-arity nodes (VECTORIZE, AFTER chains, large
+   * BUFFERIZE/INDEX, etc.) so we never silently truncate. Arena, not malloc,
+   * matches the lifetime model used by uop.c when allocating src[] arrays. */
+  PolyUOp *ns_buf[POLY_MAX_DIMS + 2];
+  PolyUOp **new_srcs = ns_buf;
+  if ((size_t)u->n_src > sizeof(ns_buf) / sizeof(ns_buf[0])) {
+    new_srcs = poly_arena_alloc(poly_ctx_arena(ctx),
+                                (size_t)u->n_src * sizeof(PolyUOp *),
+                                _Alignof(PolyUOp *));
+    if (!new_srcs) return u;
+  }
   bool changed = false;
-  for (int i = 0; i < u->n_src && i < 16; i++) {
+  for (int i = 0; i < u->n_src; i++) {
     new_srcs[i] = substitute_rec(ctx, u->src[i], sub_map, memo);
     if (new_srcs[i] != u->src[i]) changed = true;
   }
