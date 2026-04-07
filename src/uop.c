@@ -367,8 +367,14 @@ static uint32_t ptr_hash(const void *p) {
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
 }
 
-PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
-                           bool (*gate)(PolyUOp *), bool enter_calls) {
+/* Shared iterative DFS worker. Either `gate_simple` or `gate_user` may be
+ * non-NULL (never both). The gate signature difference is bridged here so
+ * callers can use closure-style gating without another whole copy. */
+static PolyUOp **toposort_worker(PolyCtx *ctx, PolyUOp *root, int *n_out,
+                                 bool (*gate_simple)(PolyUOp *),
+                                 bool (*gate_user)(PolyUOp *, void *),
+                                 void *user_data,
+                                 bool enter_calls) {
   int cap = 256;
   int n = 0;
   PolyUOp **result = poly_arena_alloc(ctx->arena, cap * sizeof(PolyUOp*), _Alignof(PolyUOp*));
@@ -398,7 +404,10 @@ PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
 
     if (s == 0) {
       /* Gate check: if gate returns false, skip this subtree entirely */
-      if (gate && !gate(u)) {
+      bool pass = true;
+      if (gate_simple && !gate_simple(u)) pass = false;
+      if (gate_user && !gate_user(u, user_data)) pass = false;
+      if (!pass) {
         stack_top--;
         continue;
       }
@@ -443,8 +452,233 @@ PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
   return result;
 }
 
+PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
+                           bool (*gate)(PolyUOp *), bool enter_calls) {
+  return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls);
+}
+
+PolyUOp **poly_toposort_ex_user(PolyCtx *ctx, PolyUOp *root, int *n_out,
+                                bool (*gate)(PolyUOp *, void *), void *user_data,
+                                bool enter_calls) {
+  return toposort_worker(ctx, root, n_out, NULL, gate, user_data, enter_calls);
+}
+
 PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
-  return poly_toposort_ex(ctx, root, n_out, NULL, true);
+  return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true);
+}
+
+/* Local duplicate of codegen.c's range_start_for_op table so uop.c can
+ * compute ended_ranges without pulling codegen.h (which depends on uop).
+ * The two definitions must stay in sync — both mirror tinygrad's
+ * `range_start` dict (uop/ops.py:29). */
+static int uop_range_start_for_op(PolyOps op) {
+  switch (op) {
+    case POLY_OP_BUFFERIZE: return 1;
+    case POLY_OP_REDUCE: return 1;
+    case POLY_OP_STORE: return 2;
+    case POLY_OP_WMMA: return 3;
+    case POLY_OP_END: return 1;
+    case POLY_OP_CALL: return 1;
+    case POLY_OP_COPY: return 2;
+    case POLY_OP_BUFFER_VIEW: return 1;
+    default: return -1;
+  }
+}
+
+/* ── Range helpers ───────────────────────────────────────────────────────
+ *
+ * Ports tinygrad's `no_range` (codegen/simplify.py:75) and the
+ * `_ranges`/`ranges`/`ended_ranges` triple (uop/ops.py:351-378).
+ *
+ * `poly_no_range(u)` = not any RANGE in u's backward slice (simple, exact).
+ *
+ * `poly_uop_ranges(u)` = the set of *active* RANGE UOps at u's position:
+ *   ranges(u) = union(ranges(src) for src in u.src)
+ *               minus ended_ranges(u)
+ *               plus ({u} if u.op == RANGE else {})
+ *
+ * `ended_ranges(u)` follows tinygrad's semantics:
+ *   - Ops with range_start_for_op(op) in {BUFFERIZE:1, REDUCE:1, STORE:2,
+ *     WMMA:3, END:1, CALL:1, COPY:2, BUFFER_VIEW:1}: trailing srcs past
+ *     range_start are the ended ranges.
+ *   - AFTER: flatten(ended_ranges(src) for src in u.src[1:]) — recursive.
+ *   - CONTRACT: the RANGE elements of ranges(src[0]) whose axis_id appears
+ *     in u.arg.pair_tuple (first element of each pair).
+ *   - otherwise: empty.
+ *
+ * When an ended entry is not itself a RANGE (e.g. a bound expression like
+ * DEFINE_VAR, a symbolic bound, an AFTER value), tinygrad's `_ranges`
+ * removes every range in that entry's `ranges` set from the result — not
+ * just the entry itself. We mirror that exactly.
+ *
+ * Sets are represented as arena-allocated PolyUOp* arrays with linear-time
+ * dedup. Typical range set sizes in realistic kernels are 0-8 elements, so
+ * linear ops beat a hashmap. Computation is memoized per-UOp in a PolyMap
+ * cache so a single pass-wide walk is O(N * avg_set_size). */
+
+typedef struct PolyRangeSet {
+  PolyUOp **items;
+  int n;
+  int cap;
+} PolyRangeSet;
+
+static PolyRangeSet *range_set_new(PolyCtx *ctx, int cap) {
+  PolyArena *arena = poly_ctx_arena(ctx);
+  PolyRangeSet *s = poly_arena_alloc(arena, sizeof(PolyRangeSet), _Alignof(PolyRangeSet));
+  if (cap < 4) cap = 4;
+  s->items = poly_arena_alloc(arena, (size_t)cap * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+  s->n = 0;
+  s->cap = cap;
+  return s;
+}
+
+static void range_set_grow(PolyCtx *ctx, PolyRangeSet *s, int need) {
+  if (need <= s->cap) return;
+  int new_cap = s->cap * 2;
+  while (new_cap < need) new_cap *= 2;
+  PolyUOp **new_items = poly_arena_alloc(poly_ctx_arena(ctx),
+                                          (size_t)new_cap * sizeof(PolyUOp *),
+                                          _Alignof(PolyUOp *));
+  memcpy(new_items, s->items, (size_t)s->n * sizeof(PolyUOp *));
+  s->items = new_items;
+  s->cap = new_cap;
+}
+
+static bool range_set_contains(const PolyRangeSet *s, PolyUOp *r) {
+  for (int i = 0; i < s->n; i++) if (s->items[i] == r) return true;
+  return false;
+}
+
+static void range_set_add(PolyCtx *ctx, PolyRangeSet *s, PolyUOp *r) {
+  if (range_set_contains(s, r)) return;
+  range_set_grow(ctx, s, s->n + 1);
+  s->items[s->n++] = r;
+}
+
+static void range_set_remove(PolyRangeSet *s, PolyUOp *r) {
+  for (int i = 0; i < s->n; i++) {
+    if (s->items[i] == r) {
+      s->items[i] = s->items[s->n - 1];
+      s->n--;
+      return;
+    }
+  }
+}
+
+static void range_set_union(PolyCtx *ctx, PolyRangeSet *dst, const PolyRangeSet *src) {
+  for (int i = 0; i < src->n; i++) range_set_add(ctx, dst, src->items[i]);
+}
+
+static void range_set_subtract(PolyRangeSet *dst, const PolyRangeSet *src) {
+  for (int i = 0; i < src->n; i++) range_set_remove(dst, src->items[i]);
+}
+
+static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo);
+
+/* ended_ranges per tinygrad ops.py:351-358. Writes into `out` (caller-owned).
+ * For entries that are themselves RANGE nodes we just add them; for non-RANGE
+ * entries we union in their full ranges set so the caller's subtract does the
+ * right thing regardless of entry shape. */
+static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u,
+                                 PolyRangeSet *out, PolyMap *memo) {
+  int rs = uop_range_start_for_op(u->op);
+  if (rs >= 0) {
+    if (rs > u->n_src) rs = u->n_src;
+    for (int i = rs; i < u->n_src; i++) {
+      PolyUOp *er = u->src[i];
+      if (er->op == POLY_OP_RANGE) {
+        range_set_add(ctx, out, er);
+      } else {
+        const PolyRangeSet *er_r = compute_ranges(ctx, er, memo);
+        range_set_union(ctx, out, er_r);
+      }
+    }
+    return;
+  }
+  if (u->op == POLY_OP_AFTER) {
+    /* flatten(ended_ranges(x) for x in src[1:]) — recursive flatten */
+    for (int i = 1; i < u->n_src; i++) {
+      compute_ended_ranges(ctx, u->src[i], out, memo);
+    }
+    return;
+  }
+  if (u->op == POLY_OP_CONTRACT && u->n_src >= 1
+      && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
+    const PolyRangeSet *s0 = compute_ranges(ctx, u->src[0], memo);
+    int n_pairs = u->arg.pair_tuple.n;
+    for (int i = 0; i < s0->n; i++) {
+      PolyUOp *r = s0->items[i];
+      if (r->op != POLY_OP_RANGE) continue;
+      int64_t axis_id = poly_range_axis_id(r->arg);
+      for (int j = 0; j < n_pairs; j++) {
+        if (u->arg.pair_tuple.pairs[j][0] == axis_id) {
+          range_set_add(ctx, out, r);
+          break;
+        }
+      }
+    }
+    return;
+  }
+  /* No ended ranges for other ops. */
+}
+
+static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
+  void *cached = poly_map_get(memo, ptr_hash(u), u, ptr_eq);
+  if (cached) return (PolyRangeSet *)cached;
+
+  PolyRangeSet *ret = range_set_new(ctx, 4);
+
+  /* Union of src ranges */
+  for (int i = 0; i < u->n_src; i++) {
+    const PolyRangeSet *s = compute_ranges(ctx, u->src[i], memo);
+    range_set_union(ctx, ret, s);
+  }
+
+  /* Subtract ended ranges */
+  PolyRangeSet ended = { .items = NULL, .n = 0, .cap = 0 };
+  PolyRangeSet *ended_ptr = &ended;
+  /* Give ended a minimal arena buffer */
+  ended_ptr->items = poly_arena_alloc(poly_ctx_arena(ctx),
+                                      4 * sizeof(PolyUOp *),
+                                      _Alignof(PolyUOp *));
+  ended_ptr->cap = 4;
+  compute_ended_ranges(ctx, u, ended_ptr, memo);
+  range_set_subtract(ret, ended_ptr);
+
+  /* If self is a RANGE, include self */
+  if (u->op == POLY_OP_RANGE) range_set_add(ctx, ret, u);
+
+  poly_map_set(memo, ptr_hash(u), u, ret, ptr_eq);
+  return ret;
+}
+
+bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
+  if (!u) return true;
+  if (u->op == POLY_OP_RANGE) return false;
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, u, &n);
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_RANGE) return false;
+  return true;
+}
+
+bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r) {
+  if (!ctx || !u || !r || r->op != POLY_OP_RANGE) return false;
+  PolyMap *memo = poly_map_new(64);
+  const PolyRangeSet *s = compute_ranges(ctx, u, memo);
+  bool found = range_set_contains(s, r);
+  poly_map_destroy(memo);
+  return found;
+}
+
+int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out) {
+  if (!ctx || !u || !out || max_out <= 0) return 0;
+  PolyMap *memo = poly_map_new(64);
+  const PolyRangeSet *s = compute_ranges(ctx, u, memo);
+  int n_out = s->n < max_out ? s->n : max_out;
+  memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
+  poly_map_destroy(memo);
+  return n_out;
 }
 
 /* ── Pretty-print ─────────────────────────────────────────────────────── */

@@ -407,10 +407,30 @@ PolyUOp *poly_uop3(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyU
 
 /* Toposort: returns arena-allocated array of UOp pointers, sets *n_out.
  * _ex variant: gate callback (NULL=visit all, return false to skip subtree),
- * enter_calls (false = skip CALL src[0], process src[1:] only). */
+ * enter_calls (false = skip CALL src[0], process src[1:] only).
+ * _ex_user variant: gate carries user_data (closure-style, mirrors tinygrad's
+ * `u.toposort(gate=lambda x: r in x.ranges)` where r is captured). */
 PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out);
 PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
                            bool (*gate)(PolyUOp *), bool enter_calls);
+PolyUOp **poly_toposort_ex_user(PolyCtx *ctx, PolyUOp *root, int *n_out,
+                                bool (*gate)(PolyUOp *, void *), void *user_data,
+                                bool enter_calls);
+
+/* Range helpers. `poly_no_range` matches tinygrad's no_range exactly
+ * (simplify.py:75). `poly_uop_in_ranges` / `poly_uop_ranges` compute
+ * "RANGE reachable in the backward slice" — the backward-slice approximation
+ * of tinygrad's u.ranges (ops.py:362-378). Tinygrad's full semantics also
+ * subtract ranges that have been ended by REDUCE/STORE/END/BUFFERIZE/AFTER
+ * ancestors. The Phase D reduce_collapse driver (simplify.py:129-142)
+ * uses this gate on a value subtree while explicitly rejecting any nested
+ * STORE/REDUCE inside the collected set (line 132), which guarantees the
+ * backward-slice approximation is exact for the driver's usage. Any caller
+ * that walks through REDUCE/STORE/END/BUFFERIZE/AFTER nodes must port the
+ * full _ranges semantics from tinygrad ops.py:362-373 first. */
+bool poly_no_range(PolyCtx *ctx, PolyUOp *u);
+bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r);
+int  poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out);
 
 /* Pretty-print a UOp graph to a buffer (returns malloc'd string, caller frees) */
 char *poly_uop_str(PolyUOp *u);
