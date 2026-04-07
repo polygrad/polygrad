@@ -1124,8 +1124,10 @@ PolyUOp *poly_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
           reduce_src[n_rsrc++] = re->in_rngs[d];
       }
 
-      /* arg = the reduction op (ADD/MUL/MAX) */
-      PolyArg reduce_arg = poly_arg_int((int64_t)u->arg.reduce_axis.op);
+      /* arg = the reduction op (ADD/MUL/MAX). Use POLY_ARG_OPS so consumers
+       * (rule_reduce_to_acc, codegen split-reduce, future pm_reduce_simplify
+       * patterns) can read red->arg.ops with a correct kind tag. */
+      PolyArg reduce_arg = poly_arg_ops(u->arg.reduce_axis.op);
       result = poly_uop(ctx, POLY_OP_REDUCE, u->dtype,
                          reduce_src, n_rsrc, reduce_arg);
 
