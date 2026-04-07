@@ -417,20 +417,81 @@ PolyUOp **poly_toposort_ex_user(PolyCtx *ctx, PolyUOp *root, int *n_out,
                                 bool (*gate)(PolyUOp *, void *), void *user_data,
                                 bool enter_calls);
 
-/* Range helpers. `poly_no_range` matches tinygrad's no_range exactly
- * (simplify.py:75). `poly_uop_in_ranges` / `poly_uop_ranges` compute
- * "RANGE reachable in the backward slice" — the backward-slice approximation
- * of tinygrad's u.ranges (ops.py:362-378). Tinygrad's full semantics also
- * subtract ranges that have been ended by REDUCE/STORE/END/BUFFERIZE/AFTER
- * ancestors. The Phase D reduce_collapse driver (simplify.py:129-142)
- * uses this gate on a value subtree while explicitly rejecting any nested
- * STORE/REDUCE inside the collected set (line 132), which guarantees the
- * backward-slice approximation is exact for the driver's usage. Any caller
- * that walks through REDUCE/STORE/END/BUFFERIZE/AFTER nodes must port the
- * full _ranges semantics from tinygrad ops.py:362-373 first. */
+/* ── Per-pass cache for UOp queries (ranges, vmin/vmax) ──────────────────
+ *
+ * Tinygrad caches every queryable UOp property as @functools.cached_property
+ * on the immutable UOp instance, which gives per-UOp-lifetime memoization
+ * for free. Polygrad's UOps are also immutable (arena-allocated, hash-consed)
+ * but we keep the cache external so it can be scoped to one rewrite pass
+ * and thrown away cleanly.
+ *
+ * PolyUOpCache unifies two per-UOp caches that Phase D's reduce_collapse
+ * driver queries together:
+ *   - minmax: UOp -> (int64_t vmin, int64_t vmax) per tinygrad _min_max
+ *   - ranges: UOp -> set of active RANGE ancestors per tinygrad u.ranges
+ *
+ * Without caching, the minmax computation is exponential on diamond DAGs
+ * (MUL alone is a 4-corner recurrence; hash-consed graphs like
+ * `arange(n).reshape(n,1) - arange(n).reshape(1,n)` compound that with
+ * shared subexpressions). The same holds for the ranges-set walk on any
+ * graph where many ancestors query the same subtree.
+ *
+ * Usage:
+ *   PolyUOpCache *c = poly_uop_cache_new();
+ *   poly_uop_minmax_ex(ctx, u, c, &lo, &hi);
+ *   bool ok = poly_no_range_ex(ctx, u2, c);
+ *   ... more queries reusing c ...
+ *   poly_uop_cache_destroy(c);
+ *
+ * Lifetime: cache entries are allocated from the PolyCtx arena and live
+ * until the ctx is destroyed. poly_uop_cache_destroy frees the two PolyMap
+ * wrappers only; the arena-backed entries are reclaimed at ctx teardown.
+ * Cache invalidation is NOT automatic — if the graph is mutated via
+ * poly_uop_substitute between queries, destroy and recreate the cache. */
+
+typedef struct PolyUOpCache PolyUOpCache;
+
+PolyUOpCache *poly_uop_cache_new(void);
+void          poly_uop_cache_destroy(PolyUOpCache *c);
+
+/* Range helpers. `poly_no_range` matches tinygrad codegen/simplify.py:75:
+ *   def no_range(u): return not any(x.op is Ops.RANGE for x in u.backward_slice_with_self)
+ *
+ * `poly_uop_ranges` / `poly_uop_in_ranges` mirror tinygrad uop/ops.py:362-378:
+ *   ranges(u) = union(ranges(s) for s in u.src) - ended_ranges(u) + ({u} if RANGE)
+ *
+ * where ended_ranges() matches ops.py:351-358 (trailing srcs past range_start,
+ * AFTER: recursive flatten, CONTRACT: filter by axis_id). See src/uop.c.
+ *
+ * Every helper has a public one-off entry point (allocates a throwaway cache
+ * per call, destroys on return) and an `_ex` variant that takes a caller-
+ * owned PolyUOpCache for batch queries. Use the `_ex` form in any hot loop. */
 bool poly_no_range(PolyCtx *ctx, PolyUOp *u);
+bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache);
 bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r);
+bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *cache);
 int  poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out);
+int  poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out,
+                        PolyUOpCache *cache);
+
+/* vmin/vmax interval arithmetic. Full port of tinygrad uop/ops.py:856-897
+ * (UOp._min_max) with per-pass memoization via PolyUOpCache.
+ *
+ * Integer-only: polygrad tracks bounds as int64 and uses an (INT64_MIN,
+ * INT64_MAX) sentinel for any float-dtype UOp. Phase D's rules only query
+ * bounds on integer operands (range counts, comparison cuts) so this is
+ * sufficient. Callers that need float bounds must check poly_dtype_is_float
+ * first and handle the sentinel explicitly.
+ *
+ * Overflow: corner multiplications and shifts use __builtin_*_overflow
+ * detection and fall through to dtype bounds on overflow. This can produce
+ * loose (but conservative and correct) intervals for pathological inputs;
+ * practical Phase D workloads stay far below int64 saturation.
+ *
+ * Parity: verified against test/parity_scripts/tg_minmax_gt.py. */
+void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax);
+void poly_uop_minmax_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache,
+                        int64_t *vmin, int64_t *vmax);
 
 /* Pretty-print a UOp graph to a buffer (returns malloc'd string, caller frees) */
 char *poly_uop_str(PolyUOp *u);

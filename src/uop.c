@@ -652,7 +652,50 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
   return ret;
 }
 
+/* ── PolyUOpCache: per-pass unified cache for minmax + ranges ─────────
+ *
+ * Owns two PolyMaps keyed by PolyUOp*. The struct is opaque in the public
+ * header; callers get it via poly_uop_cache_new and pass it to any `_ex`
+ * query. Values (PolyRangeSet*, PolyMinMaxBox*) are arena-allocated and
+ * reclaimed at ctx teardown; destroying the cache only tears down the map
+ * wrappers. */
+
+struct PolyUOpCache {
+  PolyMap *ranges;  /* PolyUOp* -> PolyRangeSet* */
+  PolyMap *minmax;  /* PolyUOp* -> PolyMinMaxBox* (populated by src/sym.c) */
+};
+
+PolyUOpCache *poly_uop_cache_new(void) {
+  PolyUOpCache *c = malloc(sizeof(PolyUOpCache));
+  if (!c) return NULL;
+  c->ranges = poly_map_new(64);
+  c->minmax = poly_map_new(64);
+  if (!c->ranges || !c->minmax) {
+    if (c->ranges) poly_map_destroy(c->ranges);
+    if (c->minmax) poly_map_destroy(c->minmax);
+    free(c);
+    return NULL;
+  }
+  return c;
+}
+
+void poly_uop_cache_destroy(PolyUOpCache *c) {
+  if (!c) return;
+  if (c->ranges) poly_map_destroy(c->ranges);
+  if (c->minmax) poly_map_destroy(c->minmax);
+  free(c);
+}
+
+/* Internal accessor for src/sym.c's minmax code (declared in uop_cache_internal.h). */
+PolyMap *poly_uop_cache_minmax_map(PolyUOpCache *c) { return c ? c->minmax : NULL; }
+
 bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
+  return poly_no_range_ex(ctx, u, NULL);
+}
+
+bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache) {
+  (void)cache; /* no_range is a single backward-slice walk; caching wouldn't
+                * help because we short-circuit on the first RANGE hit. */
   if (!u) return true;
   if (u->op == POLY_OP_RANGE) return false;
   int n = 0;
@@ -663,21 +706,31 @@ bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
 }
 
 bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r) {
+  return poly_uop_in_ranges_ex(ctx, u, r, NULL);
+}
+
+bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r,
+                           PolyUOpCache *cache) {
   if (!ctx || !u || !r || r->op != POLY_OP_RANGE) return false;
-  PolyMap *memo = poly_map_new(64);
+  PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
   const PolyRangeSet *s = compute_ranges(ctx, u, memo);
   bool found = range_set_contains(s, r);
-  poly_map_destroy(memo);
+  if (!cache) poly_map_destroy(memo);
   return found;
 }
 
 int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out) {
+  return poly_uop_ranges_ex(ctx, u, out, max_out, NULL);
+}
+
+int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out,
+                       PolyUOpCache *cache) {
   if (!ctx || !u || !out || max_out <= 0) return 0;
-  PolyMap *memo = poly_map_new(64);
+  PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
   const PolyRangeSet *s = compute_ranges(ctx, u, memo);
   int n_out = s->n < max_out ? s->n : max_out;
   memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
-  poly_map_destroy(memo);
+  if (!cache) poly_map_destroy(memo);
   return n_out;
 }
 

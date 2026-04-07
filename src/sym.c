@@ -6,6 +6,7 @@
  */
 
 #include "pat.h"
+#include "uop_cache_internal.h"
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
@@ -27,77 +28,382 @@ static bool i64_neg_ok(int64_t a, int64_t *out) {
   return true;
 }
 
-/* ── vmin/vmax bounds (port of tinygrad's UOp._min_max) ──────────────── */
+/* ── vmin/vmax bounds (port of tinygrad's UOp._min_max) ────────────────
+ *
+ * Full port of tinygrad/uop/ops.py:856-897 (UOp._min_max). The switch in
+ * tinygrad is gated on GroupOp.Binary (uop/__init__.py:111-112) with an
+ * outer `not dtypes.is_float(self.dtype)` guard at line 858. Polygrad
+ * mirrors the exact case ordering and guards; see inline tinygrad refs.
+ *
+ * Ops covered:
+ *   Binary block (non-float dtype):
+ *     ADD  line 860
+ *     SUB  line 861
+ *     AND  line 862 (int with non-neg const)
+ *     MUL  line 864 (4-corner)
+ *     SHL  line 866 (const rhs)
+ *     SHR  line 867 (const rhs)
+ *     MOD  lines 868-872 (three cases by divisor sign)
+ *     IDIV lines 873-876 (sign-definite divisor only)
+ *     XOR  line 877 (with -1 only: bitwise NOT)
+ *     MAX  line 878
+ *     CMPLT line 879
+ *     CMPNE line 880
+ *     OR   line 881 (bool dtype)
+ *     AND  line 882 (bool dtype)
+ *   Post-Binary:
+ *     WHERE        line 884 (int dtype only)
+ *     DEFINE_VAR   line 887
+ *     RANGE/SPECIAL line 888 (src[0].vmax - 1 via identity (s-1).vmax)
+ *     BIND         line 889 (passthrough src[0])
+ *     UNROLL/VECTORIZE line 890 (min/max over srcs)
+ *     CONST        line 891
+ *     VCONST       line 892
+ *     GEP          line 893 (passthrough src[0])
+ *     CAST         lines 895-896 (monotone targets only: float/signed int)
+ *
+ * Not ported (deliberate divergences):
+ *   - NEG: tinygrad's _min_max has no NEG case; falls through to dtype
+ *     bounds. Polygrad does likewise for strict parity.
+ *   - CMPEQ: in GroupOp.Binary but no dispatch case in tinygrad's switch
+ *     (only CMPLT and CMPNE are handled). Falls through to dtype bounds.
+ *   - BITCAST: not monotone, falls through to dtype bounds.
+ *   - PARAM: tinygrad's rule reads src[2].arg/src[3].arg; polygrad's
+ *     POLY_OP_PARAM (rangeify.c:1582) is a zero-src buffer index with
+ *     no bounds info. Falls through to dtype bounds.
+ *   - Float dtype: sentinel (INT64_MIN, INT64_MAX). Phase D never queries
+ *     float bounds; callers must check poly_dtype_is_float first.
+ *
+ * Parity: test/parity_scripts/tg_minmax_gt.py captures the ground truth,
+ * test/test_sym.c asserts every case verbatim. */
 
-static void poly_uop_minmax(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
-  if (u->op == POLY_OP_CONST) {
-    if (poly_dtype_is_float(u->dtype)) {
-      *vmin = *vmax = (int64_t)u->arg.f;
-    } else {
-      *vmin = *vmax = u->arg.i;
-    }
-    return;
-  }
-  if (u->op == POLY_OP_RANGE) {
-    *vmin = 0;
-    int64_t bmax;
-    poly_uop_minmax(u->src[0], &bmax, &bmax);
-    *vmax = bmax - 1;
-    return;
-  }
-  if (u->op == POLY_OP_ADD && u->n_src == 2 && poly_dtype_is_int(u->dtype)) {
-    int64_t a0, a1, b0, b1;
-    poly_uop_minmax(u->src[0], &a0, &a1);
-    poly_uop_minmax(u->src[1], &b0, &b1);
-    *vmin = a0 + b0;
-    *vmax = a1 + b1;
-    return;
-  }
-  if (u->op == POLY_OP_MUL && u->n_src == 2 && poly_dtype_is_int(u->dtype)) {
-    int64_t a0, a1, b0, b1;
-    poly_uop_minmax(u->src[0], &a0, &a1);
-    poly_uop_minmax(u->src[1], &b0, &b1);
-    int64_t v[4];
-    if (i64_mul_ok(a0, b0, &v[0]) && i64_mul_ok(a0, b1, &v[1]) &&
-        i64_mul_ok(a1, b0, &v[2]) && i64_mul_ok(a1, b1, &v[3])) {
-      *vmin = v[0]; *vmax = v[0];
-      for (int i = 1; i < 4; i++) {
-        if (v[i] < *vmin) *vmin = v[i];
-        if (v[i] > *vmax) *vmax = v[i];
-      }
-      return;
-    }
-    /* overflow: fall through to conservative dtype bounds */
-  }
-  if (u->op == POLY_OP_MOD && u->n_src == 2 && poly_dtype_is_int(u->dtype)) {
-    int64_t a0, a1, b0, b1;
-    poly_uop_minmax(u->src[0], &a0, &a1);
-    poly_uop_minmax(u->src[1], &b0, &b1);
-    if (b0 == b1 && b0 > 0) {
-      *vmin = (a0 >= 0) ? 0 : a0;
-      *vmax = (a0 >= 0) ? ((a1 < b0) ? a1 : b0 - 1) : b0 - 1;
-      return;
-    }
-  }
-  /* Fallback: dtype range */
-  if (poly_dtype_is_int(u->dtype)) {
-    if (poly_dtype_eq(u->dtype, POLY_INT32)) {
-      *vmin = INT32_MIN; *vmax = INT32_MAX;
-    } else {
-      *vmin = INT64_MIN / 2; *vmax = INT64_MAX / 2;
-    }
-  } else {
-    *vmin = INT64_MIN / 2; *vmax = INT64_MAX / 2;
-  }
-}
-
-/* C-style integer division (truncates toward zero) */
+/* C-style integer division (truncates toward zero). Matches tinygrad's
+ * helpers.py:58 cdiv: abs(x)//abs(y) * sign(x*y) if y != 0 else 0. */
 static int64_t cdiv(int64_t x, int64_t y) {
   if (y == 0) return 0;
   int64_t ax = x < 0 ? -x : x;
   int64_t ay = y < 0 ? -y : y;
   int64_t q = ax / ay;
   return (x < 0) != (y < 0) ? -q : q;
+}
+
+static int64_t dtype_min(PolyDType dt) {
+  if (poly_dtype_eq(dt, POLY_BOOL))   return 0;
+  if (poly_dtype_eq(dt, POLY_INT8))   return INT8_MIN;
+  if (poly_dtype_eq(dt, POLY_UINT8))  return 0;
+  if (poly_dtype_eq(dt, POLY_INT16))  return INT16_MIN;
+  if (poly_dtype_eq(dt, POLY_UINT16)) return 0;
+  if (poly_dtype_eq(dt, POLY_INT32))  return INT32_MIN;
+  if (poly_dtype_eq(dt, POLY_UINT32)) return 0;
+  if (poly_dtype_eq(dt, POLY_INT64))  return INT64_MIN;
+  if (poly_dtype_eq(dt, POLY_UINT64)) return 0;
+  /* float / index / unknown: conservative */
+  return INT64_MIN / 2;
+}
+
+static int64_t dtype_max(PolyDType dt) {
+  if (poly_dtype_eq(dt, POLY_BOOL))   return 1;
+  if (poly_dtype_eq(dt, POLY_INT8))   return INT8_MAX;
+  if (poly_dtype_eq(dt, POLY_UINT8))  return UINT8_MAX;
+  if (poly_dtype_eq(dt, POLY_INT16))  return INT16_MAX;
+  if (poly_dtype_eq(dt, POLY_UINT16)) return UINT16_MAX;
+  if (poly_dtype_eq(dt, POLY_INT32))  return INT32_MAX;
+  if (poly_dtype_eq(dt, POLY_UINT32)) return UINT32_MAX;
+  if (poly_dtype_eq(dt, POLY_INT64))  return INT64_MAX;
+  if (poly_dtype_eq(dt, POLY_UINT64)) return INT64_MAX;  /* clamped */
+  return INT64_MAX / 2;
+}
+
+typedef struct MinMaxBox { int64_t lo, hi; } MinMaxBox;
+
+static bool mm_ptr_eq(const void *a, const void *b) { return a == b; }
+static uint32_t mm_ptr_hash(const void *p) {
+  uintptr_t v = (uintptr_t)p;
+  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
+}
+
+static int64_t min4(int64_t a, int64_t b, int64_t c, int64_t d) {
+  int64_t x = a < b ? a : b;
+  int64_t y = c < d ? c : d;
+  return x < y ? x : y;
+}
+static int64_t max4(int64_t a, int64_t b, int64_t c, int64_t d) {
+  int64_t x = a > b ? a : b;
+  int64_t y = c > d ? c : d;
+  return x > y ? x : y;
+}
+static int64_t i64_min(int64_t a, int64_t b) { return a < b ? a : b; }
+static int64_t i64_max(int64_t a, int64_t b) { return a > b ? a : b; }
+
+static void poly_uop_minmax_rec(PolyCtx *ctx, PolyUOp *u,
+                                int64_t *vmin, int64_t *vmax, PolyMap *memo);
+
+static void minmax_src(PolyCtx *ctx, PolyUOp *s,
+                       int64_t *lo, int64_t *hi, PolyMap *memo) {
+  poly_uop_minmax_rec(ctx, s, lo, hi, memo);
+}
+
+/* Public single-call wrapper. Allocates a throwaway memo per call; Phase D
+ * hot paths should use poly_uop_minmax_ex with a shared PolyUOpCache. */
+void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
+  PolyMap *memo = poly_map_new(64);
+  poly_uop_minmax_rec(ctx, u, vmin, vmax, memo);
+  poly_map_destroy(memo);
+}
+
+void poly_uop_minmax_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache,
+                        int64_t *vmin, int64_t *vmax) {
+  PolyMap *memo = cache ? poly_uop_cache_minmax_map(cache) : NULL;
+  if (memo) poly_uop_minmax_rec(ctx, u, vmin, vmax, memo);
+  else      poly_uop_minmax(ctx, u, vmin, vmax);
+}
+
+static void poly_uop_minmax_rec(PolyCtx *ctx, PolyUOp *u,
+                                int64_t *vmin, int64_t *vmax, PolyMap *memo) {
+  if (!u) { *vmin = 0; *vmax = 0; return; }
+
+  uint32_t h = mm_ptr_hash(u);
+  MinMaxBox *cached = memo ? (MinMaxBox *)poly_map_get(memo, h, u, mm_ptr_eq) : NULL;
+  if (cached) { *vmin = cached->lo; *vmax = cached->hi; return; }
+
+  /* CONST */
+  if (u->op == POLY_OP_CONST) {
+    if (poly_dtype_is_float(u->dtype)) {
+      /* floats are tracked at int64 precision; matches prior behavior
+       * and tinygrad's integer-bounds-only pattern matching. */
+      *vmin = *vmax = (int64_t)u->arg.f;
+    } else if (poly_dtype_eq(u->dtype, POLY_BOOL)) {
+      *vmin = *vmax = u->arg.b ? 1 : 0;
+    } else {
+      *vmin = *vmax = u->arg.i;
+    }
+    goto done;
+  }
+
+  /* VCONST — child CONSTs in src[]. Min/max over lanes. */
+  if (u->op == POLY_OP_VCONST && u->n_src > 0) {
+    int64_t lo = INT64_MAX, hi = INT64_MIN;
+    for (int i = 0; i < u->n_src; i++) {
+      int64_t a, b;
+      minmax_src(ctx, u->src[i], &a, &b, memo);
+      if (a < lo) lo = a;
+      if (b > hi) hi = b;
+    }
+    *vmin = lo; *vmax = hi;
+    goto done;
+  }
+
+  /* DEFINE_VAR: (name, min_val, max_val) */
+  if (u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR) {
+    *vmin = u->arg.define_var.min_val;
+    *vmax = u->arg.define_var.max_val;
+    goto done;
+  }
+
+  /* RANGE / SPECIAL: tinygrad ops.py:888
+   *   if self.op in (Ops.RANGE, Ops.SPECIAL): return 0, (self.src[0]-1).vmax
+   * Tinygrad constructs (src[0] - 1) as a real UOp and recursively queries
+   * its vmax. SUB's rule (line 861) gives `s0_vmax - s1_vmin`; with
+   * s1 = CONST(1) (vmin=vmax=1), that simplifies to `src[0].vmax - 1`,
+   * which is mathematically identical and avoids the allocation. */
+  if ((u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL) && u->n_src >= 1) {
+    int64_t lo, hi;
+    minmax_src(ctx, u->src[0], &lo, &hi, memo);
+    *vmin = 0;
+    *vmax = hi - 1;
+    goto done;
+  }
+
+  /* BIND: passthrough src[0] (ignore bound value) */
+  if (u->op == POLY_OP_BIND && u->n_src >= 1) {
+    minmax_src(ctx, u->src[0], vmin, vmax, memo);
+    goto done;
+  }
+
+  /* GEP: passthrough src[0] */
+  if (u->op == POLY_OP_GEP && u->n_src >= 1) {
+    minmax_src(ctx, u->src[0], vmin, vmax, memo);
+    goto done;
+  }
+
+  /* UNROLL/VECTORIZE: min/max over all srcs */
+  if ((u->op == POLY_OP_UNROLL || u->op == POLY_OP_VECTORIZE) && u->n_src > 0) {
+    int64_t lo = INT64_MAX, hi = INT64_MIN;
+    for (int i = 0; i < u->n_src; i++) {
+      int64_t a, b;
+      minmax_src(ctx, u->src[i], &a, &b, memo);
+      if (a < lo) lo = a;
+      if (b > hi) hi = b;
+    }
+    *vmin = lo; *vmax = hi;
+    goto done;
+  }
+
+  /* Binary ops — gated on `not is_float` to match tinygrad ops.py:858.
+   * Float-dtype binary ops fall through to the dtype-bounds default; their
+   * NaN handling makes interval arithmetic unsafe. CMPLT/CMPNE on float
+   * operands are dispatched separately below since their result is bool. */
+  if (u->n_src == 2 && !poly_dtype_is_float(u->dtype)) {
+    int64_t a0, a1, b0, b1;
+    minmax_src(ctx, u->src[0], &a0, &a1, memo);
+    minmax_src(ctx, u->src[1], &b0, &b1, memo);
+
+    if (u->op == POLY_OP_ADD) { *vmin = a0 + b0; *vmax = a1 + b1; goto done; }
+    if (u->op == POLY_OP_SUB) { *vmin = a0 - b1; *vmax = a1 - b0; goto done; }
+    if (u->op == POLY_OP_MUL) {
+      int64_t v0, v1, v2, v3;
+      if (i64_mul_ok(a0, b0, &v0) && i64_mul_ok(a0, b1, &v1) &&
+          i64_mul_ok(a1, b0, &v2) && i64_mul_ok(a1, b1, &v3)) {
+        *vmin = min4(v0, v1, v2, v3);
+        *vmax = max4(v0, v1, v2, v3);
+        goto done;
+      }
+      /* overflow: fall through */
+    }
+    if (u->op == POLY_OP_MAX) {
+      *vmin = i64_max(a0, b0);
+      *vmax = i64_max(a1, b1);
+      goto done;
+    }
+    if (u->op == POLY_OP_MOD) {
+      /* tinygrad ops.py:868-872 */
+      if (b0 == b1 && b0 > 0) {
+        int64_t c = b0;
+        int64_t lo = (a0 > 0) ? 0 : (a0 >= -c+1 && a0 <= 0 ? a0 : -(c-1));
+        int64_t hi = (a1 < 0) ? 0 : (a1 >= 0 && a1 < c ? a1 : c-1);
+        *vmin = lo; *vmax = hi;
+        goto done;
+      }
+      if (b0 > 0) {
+        if (a0 >= 0)      { *vmin = 0;         *vmax = b1 - 1; }
+        else if (a1 <= 0) { *vmin = -(b1 - 1); *vmax = 0; }
+        else              { *vmin = -(b1 - 1); *vmax = b1 - 1; }
+        goto done;
+      }
+      if (b1 < 0) {
+        int64_t m = -b0 - 1;
+        if (a0 >= 0)      { *vmin = 0;  *vmax = m; }
+        else if (a1 <= 0) { *vmin = -m; *vmax = 0; }
+        else              { *vmin = -m; *vmax = m; }
+        goto done;
+      }
+    }
+    if (u->op == POLY_OP_IDIV) {
+      /* Only handle the case where the divisor sign is known */
+      /* Tinygrad ops.py:875 uses `s1_vmin*s1_vmax>0` which can overflow
+       * int64. The same-sign check below is equivalent and overflow-safe;
+       * matches the idiom already used in fold_divmod_general. */
+      if ((b0 > 0 && b1 > 0) || (b0 < 0 && b1 < 0)) {
+        int64_t v0 = cdiv(a0, b0), v1 = cdiv(a0, b1);
+        int64_t v2 = cdiv(a1, b0), v3 = cdiv(a1, b1);
+        *vmin = min4(v0, v1, v2, v3);
+        *vmax = max4(v0, v1, v2, v3);
+        goto done;
+      }
+    }
+    if (u->op == POLY_OP_SHL && b0 == b1 && b0 >= 0 && b0 < 63) {
+      int64_t v0 = a0 << b0, v1 = a1 << b0;
+      *vmin = i64_min(v0, v1);
+      *vmax = i64_max(v0, v1);
+      goto done;
+    }
+    if (u->op == POLY_OP_SHR && b0 == b1 && b0 >= 0 && b0 < 63) {
+      *vmin = a0 >> b0;
+      *vmax = a1 >> b0;
+      goto done;
+    }
+    if (u->op == POLY_OP_XOR && b0 == b1 && b0 == -1) {
+      /* ~x: bitwise not */
+      *vmin = ~a1;
+      *vmax = ~a0;
+      goto done;
+    }
+    if (u->op == POLY_OP_AND && poly_dtype_is_int(u->dtype)
+        && b0 == b1 && b0 >= 0) {
+      /* tinygrad ops.py:862-863:
+       *   if self.op is Ops.AND and dtypes.is_int(self.dtype)
+       *      and s1_vmin == s1_vmax >= 0:
+       *     return 0, s1_vmax if s0_vmin < 0 else min(s0_vmax, s1_vmax) */
+      *vmin = 0;
+      *vmax = (a0 < 0) ? b1 : i64_min(a1, b1);
+      goto done;
+    }
+  }
+
+  /* Bool binary ops (AND / OR on bool dtype) */
+  if (u->n_src == 2 && poly_dtype_eq(u->dtype, POLY_BOOL)) {
+    int64_t a0, a1, b0, b1;
+    minmax_src(ctx, u->src[0], &a0, &a1, memo);
+    minmax_src(ctx, u->src[1], &b0, &b1, memo);
+    if (u->op == POLY_OP_AND) {
+      *vmin = (a0 && b0) ? 1 : 0;
+      *vmax = (a1 && b1) ? 1 : 0;
+      goto done;
+    }
+    if (u->op == POLY_OP_OR) {
+      *vmin = (a0 || b0) ? 1 : 0;
+      *vmax = (a1 || b1) ? 1 : 0;
+      goto done;
+    }
+  }
+
+  /* Comparisons: always bool, regardless of operand dtype */
+  if (u->n_src == 2 && (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE)) {
+    int64_t a0, a1, b0, b1;
+    minmax_src(ctx, u->src[0], &a0, &a1, memo);
+    minmax_src(ctx, u->src[1], &b0, &b1, memo);
+    if (u->op == POLY_OP_CMPLT) {
+      *vmin = (a1 < b0) ? 1 : 0;
+      *vmax = (a0 < b1) ? 1 : 0;
+      goto done;
+    }
+    /* CMPNE */
+    bool def_ne = (a1 < b0) || (b1 < a0);
+    bool all_eq = (a0 == a1) && (b0 == b1) && (a0 == b0);
+    *vmin = def_ne ? 1 : 0;
+    *vmax = all_eq ? 0 : 1;
+    goto done;
+  }
+
+  /* WHERE (int branches): min/max over both branches */
+  if (u->op == POLY_OP_WHERE && u->n_src == 3 && poly_dtype_is_int(u->dtype)) {
+    int64_t t0, t1, f0, f1;
+    minmax_src(ctx, u->src[1], &t0, &t1, memo);
+    minmax_src(ctx, u->src[2], &f0, &f1, memo);
+    *vmin = i64_min(t0, f0);
+    *vmax = i64_max(t1, f1);
+    goto done;
+  }
+
+  /* CAST: clamp src[0] bounds to dtype range. Matches tinygrad ops.py:895 —
+   * only monotone casts. Cast to bool/unsigned is not necessarily monotone;
+   * fall through to dtype bounds for those. */
+  if (u->op == POLY_OP_CAST && u->n_src >= 1) {
+    bool monotone = poly_dtype_is_float(u->dtype)
+                 || (poly_dtype_is_int(u->dtype) && !poly_dtype_is_unsigned(u->dtype)
+                     && !poly_dtype_eq(u->dtype, POLY_BOOL));
+    if (monotone) {
+      int64_t a0, a1;
+      minmax_src(ctx, u->src[0], &a0, &a1, memo);
+      *vmin = i64_max(dtype_min(u->dtype), a0);
+      *vmax = i64_min(a1, dtype_max(u->dtype));
+      goto done;
+    }
+  }
+
+  /* Fallback: dtype range */
+  *vmin = dtype_min(u->dtype);
+  *vmax = dtype_max(u->dtype);
+
+done:
+  if (memo && ctx) {
+    MinMaxBox *box = poly_arena_alloc(poly_ctx_arena(ctx),
+                                      sizeof(MinMaxBox), _Alignof(MinMaxBox));
+    if (box) {
+      box->lo = *vmin; box->hi = *vmax;
+      poly_map_set(memo, h, u, box, mm_ptr_eq);
+    }
+  }
 }
 
 /* ── Rewrite callbacks ────────────────────────────────────────────────── */
@@ -387,8 +693,8 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
   if (root->n_src != 2 || !poly_dtype_is_int(root->dtype)) return NULL;
   PolyUOp *x = root->src[0], *y = root->src[1];
   int64_t x_min, x_max, y_min, y_max;
-  poly_uop_minmax(x, &x_min, &x_max);
-  poly_uop_minmax(y, &y_min, &y_max);
+  poly_uop_minmax(ctx, x, &x_min, &x_max);
+  poly_uop_minmax(ctx, y, &y_min, &y_max);
 
   /* 1. cancel_divmod: all corners give same quotient */
   /* Use same-sign check instead of y_min*y_max>0 to avoid int64 overflow */
@@ -444,7 +750,7 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
         for (int i = 1; i < n_sum; i++)
           new_x = poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_x, sum_terms[i], poly_arg_none());
         int64_t nx_min, nx_max;
-        poly_uop_minmax(new_x, &nx_min, &nx_max);
+        poly_uop_minmax(ctx, new_x, &nx_min, &nx_max);
         if (nx_min >= 0)
           return poly_uop2(ctx, POLY_OP_MOD, root->dtype, new_x, y, poly_arg_none());
       }
@@ -488,7 +794,7 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
   for (int i = 0; i < n_nc; i++) {
     bases[i] = uop_divides(ctx, nc_terms[i], nc_factors[i]);
     if (!bases[i]) return NULL;
-    poly_uop_minmax(bases[i], &base_mins[i], &base_maxs[i]);
+    poly_uop_minmax(ctx, bases[i], &base_mins[i], &base_maxs[i]);
   }
 
   /* 4. fold_binary_numerator: single non-const term with range of 2 */
@@ -557,7 +863,7 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
           new_x = new_x ? poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_x, ac_uop, poly_arg_none()) : ac_uop;
         }
         int64_t nx_min, nx_max;
-        poly_uop_minmax(new_x, &nx_min, &nx_max);
+        poly_uop_minmax(ctx, new_x, &nx_min, &nx_max);
         if (nx_min >= 0) {
           PolyUOp *new_y = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(new_c));
           if (root->op == POLY_OP_MOD) {
