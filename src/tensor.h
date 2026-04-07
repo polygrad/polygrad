@@ -27,6 +27,48 @@ void poly_const_registry_cleanup(PolyCtx *ctx);
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
 
+/* ── Movement-op helpers (port of tinygrad mixin/movement.py) ────────── */
+
+/* Tensor.repeat -- movement.py:465. n_repeats >= input ndim. */
+PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x, const int64_t *repeats, int n_repeats);
+
+/* Tensor.shrink_to -- movement.py:168. ends[i] == -1 means no-op (keep dim). */
+PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x, const int64_t *ends, int n_ends);
+
+/* Tensor._pool -- movement.py:487. General N-d pool via repeat/shrink/reshape/permute.
+ * stride/dilation NULL means default of 1. Output adds a kernel axis per pooled dim. */
+PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
+                   const int64_t *k_, int nk,
+                   const int64_t *stride_, const int64_t *dilation_);
+
+/* Tensor.cat -- tensor.py:1364. Concatenate tensors along `dim`.
+ * All tensors must have identical shape except along `dim`. */
+PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim);
+
+/* Tensor._pad_constant -- tensor.py:1067. Constant pad with `value`.
+ * Supports negative pads (which shrink that side). For value==0 this is
+ * equivalent to poly_pad on non-negative pairs. */
+PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
+                        int ndim, double value);
+
+/* Tensor._pad_circular -- tensor.py:1075. Circular (wrap-around) padding.
+ * Negative pads not supported. Each pad must be <= corresponding dim size. */
+PolyUOp *poly_pad_circular(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim);
+
+/* Tensor._pad_reflect_replicate (mode="reflect") -- tensor.py:1081.
+ * Reflect padding without repeating the edge. Each pad must be < dim size. */
+PolyUOp *poly_pad_reflect(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim);
+
+/* Tensor._pad_reflect_replicate (mode="replicate") -- tensor.py:1081.
+ * Replicate (edge-extend) padding. Repeats the boundary element. */
+PolyUOp *poly_pad_replicate(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim);
+
+/* Tensor._cumalu -- tensor.py:2048. Cumulative reduction along `axis`.
+ * Supports POLY_OP_ADD, POLY_OP_MAX, POLY_OP_MUL (uses poly_pad_value with
+ * the operator's identity element). include_initial=true uses negative pad
+ * on the right (tinygrad parity). */
+PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool include_initial);
+
 /* ── Broadcasting (matches tinygrad's _broadcasted) ─────────────────── */
 
 /* Broadcast a UOp to a target shape via reshape + expand.

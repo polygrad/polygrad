@@ -248,6 +248,83 @@ def build_cross_entropy_nonlast_axis() -> tuple[Tensor, ...]:
     return (logits.cross_entropy(target),)
 
 
+# ── New helpers (movement / pad / cumalu / full / arange) ──────────
+
+def build_full_1d() -> tuple[Tensor, ...]:
+    return (Tensor.full((5,), 7.5),)
+
+
+def build_full_2d() -> tuple[Tensor, ...]:
+    return (Tensor.full((3, 4), -2.0),)
+
+
+def build_arange_simple() -> tuple[Tensor, ...]:
+    return (Tensor.arange(0, 5, 1),)
+
+
+def build_arange_start_step() -> tuple[Tensor, ...]:
+    return (Tensor.arange(2, 8, 3),)
+
+
+def build_linspace_5() -> tuple[Tensor, ...]:
+    return (Tensor.linspace(0, 10, 5),)
+
+
+def build_eye_3() -> tuple[Tensor, ...]:
+    return (Tensor.eye(3),)
+
+
+def build_tril_3x4_diag0() -> tuple[Tensor, ...]:
+    m = Tensor(np.arange(1, 13, dtype=np.float32).reshape(3, 4).tolist())
+    return (m.tril(0),)
+
+
+def build_triu_3x4_diag0() -> tuple[Tensor, ...]:
+    m = Tensor(np.arange(1, 13, dtype=np.float32).reshape(3, 4).tolist())
+    return (m.triu(0),)
+
+
+def build_repeat_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0]).repeat([4]),)
+
+
+def build_pool_1d_k3() -> tuple[Tensor, ...]:
+    return (Tensor([0.0, 1.0, 2.0, 3.0, 4.0])._pool((3,)),)
+
+
+def build_cat_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0]).cat(Tensor([3.0, 4.0, 5.0]), dim=0),)
+
+
+def build_pad_value_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0]).pad(((2, 1),), value=9.0),)
+
+
+def build_pad_circular_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0]).pad(((1, 2),), mode="circular"),)
+
+
+def build_pad_reflect_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0, 4.0]).pad(((2, 1),), mode="reflect"),)
+
+
+def build_pad_replicate_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0, 4.0]).pad(((2, 1),), mode="replicate"),)
+
+
+def build_cumsum_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0, 4.0, 5.0]).cumsum(0),)
+
+
+def build_cumprod_1d() -> tuple[Tensor, ...]:
+    return (Tensor([1.0, 2.0, 3.0, 4.0]).cumprod(0),)
+
+
+def build_cummax_1d() -> tuple[Tensor, ...]:
+    # cummax returns (values, indices); take values only for parity
+    return (Tensor([1.0, 3.0, 2.0, 5.0, 4.0]).cummax(0)[0],)
+
+
 CaseBuilder = Callable[[], tuple[Tensor, ...]]
 CASES: dict[str, CaseBuilder] = {
     "vecadd": build_vecadd,
@@ -283,6 +360,25 @@ CASES: dict[str, CaseBuilder] = {
     "matmul_small": build_matmul_small,
     "matmul_broadcast": build_matmul_broadcast,
     "cross_entropy_nonlast_axis": build_cross_entropy_nonlast_axis,
+    # New helpers (movement/pad/cumalu/full/arange)
+    "full_1d":           build_full_1d,
+    "full_2d":           build_full_2d,
+    "arange_simple":     build_arange_simple,
+    "arange_start_step": build_arange_start_step,
+    "linspace_5":        build_linspace_5,
+    "eye_3":             build_eye_3,
+    "tril_3x4_diag0":    build_tril_3x4_diag0,
+    "triu_3x4_diag0":    build_triu_3x4_diag0,
+    "repeat_1d":         build_repeat_1d,
+    "pool_1d_k3":        build_pool_1d_k3,
+    "cat_1d":            build_cat_1d,
+    "pad_value_1d":      build_pad_value_1d,
+    "pad_circular_1d":   build_pad_circular_1d,
+    "pad_reflect_1d":    build_pad_reflect_1d,
+    "pad_replicate_1d":  build_pad_replicate_1d,
+    "cumsum_1d":         build_cumsum_1d,
+    "cumprod_1d":        build_cumprod_1d,
+    "cummax_1d":         build_cummax_1d,
 }
 
 STRUCTURE_KEYS: tuple[str, ...] = (

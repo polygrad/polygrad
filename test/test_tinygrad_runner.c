@@ -982,20 +982,19 @@ static int case_matmul_broadcast(void) {
   float out_d[8] = {0};
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 8);
-  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *a_buf = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *b_buf = poly_buffer(ctx, POLY_FLOAT32, 4);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 8);
-  int64_t out_shape[POLY_MAX_DIMS];
-  int out_ndim = 0;
 
-  PolyUOp *dot = poly_dot(ctx,
-                          a, (int64_t[]){2, 2, 2}, 3,
-                          b, (int64_t[]){1, 2, 2}, 3,
-                          out_shape, &out_ndim);
+  /* v2 API: shape lives on the UOp via reshape */
+  PolyUOp *a = poly_reshape(ctx, a_buf, (int64_t[]){2, 2, 2}, 3);
+  PolyUOp *b = poly_reshape(ctx, b_buf, (int64_t[]){1, 2, 2}, 3);
+
+  PolyUOp *dot = poly_dot(ctx, a, b);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, dot, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  ParityBinding bindings[] = {{out, out_d}, {a, a_d}, {b, b_d}};
+  ParityBinding bindings[] = {{out, out_d}, {a_buf, a_d}, {b_buf, b_d}};
   int ok = run_and_report(ctx, sink, bindings, 3, out_d, 8);
   poly_ctx_destroy(ctx);
   return ok;
@@ -1007,21 +1006,300 @@ static int case_cross_entropy_nonlast_axis(void) {
   float out_d[1] = {0};
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *logits = poly_buffer_f32(ctx, 12);
-  PolyUOp *target = poly_buffer_f32(ctx, 4);
+  PolyUOp *logits_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *target_buf = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 1);
-  int64_t out_shape[POLY_MAX_DIMS];
-  int out_ndim = 0;
 
-  PolyUOp *loss = poly_cross_entropy(ctx,
-                                     logits, (int64_t[]){2, 3, 2}, 3,
-                                     target, (int64_t[]){2, 2}, 2,
-                                     -2, out_shape, &out_ndim);
+  /* v2 API: shape lives on the UOp via reshape */
+  PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
+  PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2, 2}, 2);
+
+  PolyUOp *loss = poly_cross_entropy(ctx, logits, target, -2);
   PolyUOp *store = poly_store_val(ctx, out, loss);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  ParityBinding bindings[] = {{out, out_d}, {logits, logits_d}, {target, target_d}};
+  ParityBinding bindings[] = {{out, out_d}, {logits_buf, logits_d}, {target_buf, target_d}};
   int ok = run_and_report(ctx, sink, bindings, 3, out_d, 1);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+/* ──────────────────────────────────────────────────────────────────── */
+/*  Tinygrad-parity cases for new movement/pad/cumalu/full/arange      */
+/*  helpers. Each case mirrors a build_xxx function in                 */
+/*  test_tinygrad_parity.py with the same name.                        */
+/* ──────────────────────────────────────────────────────────────────── */
+
+static int case_full_1d(void) {
+  /* tinygrad: Tensor.full((5,), 7.5) */
+  float out_d[5] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, 5);
+  PolyUOp *val = poly_full(ctx, (int64_t[]){5}, 1, 7.5);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}};
+  int ok = run_and_report(ctx, sink, b, 1, out_d, 5);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_full_2d(void) {
+  /* tinygrad: Tensor.full((3, 4), -2.0) */
+  float out_d[12] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, 12);
+  PolyUOp *val = poly_full(ctx, (int64_t[]){3, 4}, 2, -2.0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}};
+  int ok = run_and_report(ctx, sink, b, 1, out_d, 12);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_arange_simple(void) {
+  /* tinygrad: Tensor.arange(0, 5, 1) */
+  float out_d[5] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, 5);
+  PolyUOp *val = poly_arange(ctx, 0.0, 5.0, 1.0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}};
+  int ok = run_and_report(ctx, sink, b, 1, out_d, 5);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_arange_start_step(void) {
+  /* tinygrad: Tensor.arange(2, 8, 3) */
+  float out_d[2] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, 2);
+  PolyUOp *val = poly_arange(ctx, 2.0, 8.0, 3.0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}};
+  int ok = run_and_report(ctx, sink, b, 1, out_d, 2);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_eye_3(void) {
+  /* tinygrad: Tensor.eye(3) */
+  float out_d[9] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, 9);
+  PolyUOp *val = poly_eye(ctx, 3);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}};
+  int ok = run_and_report(ctx, sink, b, 1, out_d, 9);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_tril_3x4_diag0(void) {
+  /* tinygrad: Tensor.arange(1,13).reshape(3,4).tril(0) */
+  float in_d[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+  float out_d[12] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *out = poly_buffer_f32(ctx, 12);
+  PolyUOp *in = poly_reshape(ctx, in_buf, (int64_t[]){3, 4}, 2);
+  PolyUOp *val = poly_tril(ctx, in, 0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in_buf, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 12);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_triu_3x4_diag0(void) {
+  /* tinygrad: Tensor.arange(1,13).reshape(3,4).triu(0) */
+  float in_d[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+  float out_d[12] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *out = poly_buffer_f32(ctx, 12);
+  PolyUOp *in = poly_reshape(ctx, in_buf, (int64_t[]){3, 4}, 2);
+  PolyUOp *val = poly_triu(ctx, in, 0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in_buf, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 12);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_linspace_5(void) {
+  /* tinygrad: Tensor.linspace(0, 10, 5) */
+  float out_d[5] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, 5);
+  PolyUOp *val = poly_linspace(ctx, 0.0, 10.0, 5);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}};
+  int ok = run_and_report(ctx, sink, b, 1, out_d, 5);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_repeat_1d(void) {
+  /* tinygrad: Tensor([1,2,3]).repeat([4]) */
+  float in_d[3] = {1, 2, 3}, out_d[12] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 3);
+  PolyUOp *out = poly_buffer_f32(ctx, 12);
+  PolyUOp *val = poly_repeat(ctx, in, (int64_t[]){4}, 1);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 12);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_pool_1d_k3(void) {
+  /* tinygrad: Tensor([0,1,2,3,4])._pool((3,)) */
+  float in_d[5] = {0,1,2,3,4}, out_d[9] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 5);
+  PolyUOp *out = poly_buffer_f32(ctx, 9);
+  PolyUOp *val = poly_pool(ctx, in, (int64_t[]){3}, 1, NULL, NULL);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 9);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_cat_1d(void) {
+  /* tinygrad: Tensor([1,2]).cat(Tensor([3,4,5]), dim=0) */
+  float a_d[2] = {1, 2}, b_d[3] = {3, 4, 5}, out_d[5] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 2);
+  PolyUOp *b = poly_buffer_f32(ctx, 3);
+  PolyUOp *out = poly_buffer_f32(ctx, 5);
+  PolyUOp *parts[2] = {a, b};
+  PolyUOp *val = poly_cat(ctx, parts, 2, 0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding bd[] = {{out, out_d}, {a, a_d}, {b, b_d}};
+  int ok = run_and_report(ctx, sink, bd, 3, out_d, 5);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_pad_value_1d(void) {
+  /* tinygrad: Tensor([1,2,3]).pad(((2,1),), value=9.0) */
+  float in_d[3] = {1, 2, 3}, out_d[6] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 3);
+  PolyUOp *out = poly_buffer_f32(ctx, 6);
+  int64_t pads[1][2] = {{2, 1}};
+  PolyUOp *val = poly_pad_value(ctx, in, pads, 1, 9.0);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 6);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_pad_circular_1d(void) {
+  /* tinygrad: Tensor([1,2,3]).pad(((1,2),), mode='circular') */
+  float in_d[3] = {1, 2, 3}, out_d[6] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 3);
+  PolyUOp *out = poly_buffer_f32(ctx, 6);
+  int64_t pads[1][2] = {{1, 2}};
+  PolyUOp *val = poly_pad_circular(ctx, in, pads, 1);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 6);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_pad_reflect_1d(void) {
+  /* tinygrad: Tensor([1,2,3,4]).pad(((2,1),), mode='reflect') */
+  float in_d[4] = {1, 2, 3, 4}, out_d[7] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 7);
+  int64_t pads[1][2] = {{2, 1}};
+  PolyUOp *val = poly_pad_reflect(ctx, in, pads, 1);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 7);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_pad_replicate_1d(void) {
+  /* tinygrad: Tensor([1,2,3,4]).pad(((2,1),), mode='replicate') */
+  float in_d[4] = {1, 2, 3, 4}, out_d[7] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 7);
+  int64_t pads[1][2] = {{2, 1}};
+  PolyUOp *val = poly_pad_replicate(ctx, in, pads, 1);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 7);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_cumsum_1d(void) {
+  /* tinygrad: Tensor([1,2,3,4,5]).cumsum(0) */
+  float in_d[5] = {1, 2, 3, 4, 5}, out_d[5] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 5);
+  PolyUOp *out = poly_buffer_f32(ctx, 5);
+  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_ADD, false);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 5);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_cumprod_1d(void) {
+  /* tinygrad: Tensor([1,2,3,4]).cumprod(0) */
+  float in_d[4] = {1, 2, 3, 4}, out_d[4] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MUL, false);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 4);
+  poly_ctx_destroy(ctx);
+  return ok;
+}
+
+static int case_cummax_1d(void) {
+  /* tinygrad: Tensor([1,3,2,5,4]).cummax(0)[0] */
+  float in_d[5] = {1, 3, 2, 5, 4}, out_d[5] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *in = poly_buffer_f32(ctx, 5);
+  PolyUOp *out = poly_buffer_f32(ctx, 5);
+  PolyUOp *val = poly_cumalu(ctx, in, 0, POLY_OP_MAX, false);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  ParityBinding b[] = {{out, out_d}, {in, in_d}};
+  int ok = run_and_report(ctx, sink, b, 2, out_d, 5);
   poly_ctx_destroy(ctx);
   return ok;
 }
@@ -1074,6 +1352,25 @@ static CaseEntry CASES[] = {
   {"matmul_small", case_matmul_small},
   {"matmul_broadcast", case_matmul_broadcast},
   {"cross_entropy_nonlast_axis", case_cross_entropy_nonlast_axis},
+  /* New helpers (movement/pad/cumalu/full/arange) */
+  {"full_1d",            case_full_1d},
+  {"full_2d",            case_full_2d},
+  {"arange_simple",      case_arange_simple},
+  {"arange_start_step",  case_arange_start_step},
+  {"linspace_5",         case_linspace_5},
+  {"eye_3",              case_eye_3},
+  {"tril_3x4_diag0",     case_tril_3x4_diag0},
+  {"triu_3x4_diag0",     case_triu_3x4_diag0},
+  {"repeat_1d",          case_repeat_1d},
+  {"pool_1d_k3",         case_pool_1d_k3},
+  {"cat_1d",             case_cat_1d},
+  {"pad_value_1d",       case_pad_value_1d},
+  {"pad_circular_1d",    case_pad_circular_1d},
+  {"pad_reflect_1d",     case_pad_reflect_1d},
+  {"pad_replicate_1d",   case_pad_replicate_1d},
+  {"cumsum_1d",          case_cumsum_1d},
+  {"cumprod_1d",         case_cumprod_1d},
+  {"cummax_1d",          case_cummax_1d},
 };
 
 static int run_case(const char *name) {

@@ -303,26 +303,6 @@ static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x, PolyDType 
   return poly_alu3(ctx, POLY_OP_WHERE, cond, lg_ref, lg_pos);
 }
 
-/* ── tri_mask helper ─────────────────────────────────────────────────── */
-
-static PolyUOp *tri_mask(PolyCtx *ctx, const int64_t *shape, int diagonal, bool upper) {
-  if (!shape || shape[0] <= 0 || shape[1] <= 0) return NULL;
-  int64_t rows = shape[0], cols = shape[1];
-  if ((size_t)rows > SIZE_MAX / (size_t)cols) return NULL;
-  size_t numel = (size_t)rows * (size_t)cols;
-  float *m = malloc(numel * sizeof(float));
-  if (!m) return NULL;
-  for (int64_t i = 0; i < rows; i++) {
-    for (int64_t j = 0; j < cols; j++) {
-      bool keep = upper ? (j >= i + diagonal) : (j <= i + diagonal);
-      m[(size_t)i * (size_t)cols + (size_t)j] = keep ? 1.0f : 0.0f;
-    }
-  }
-  PolyUOp *mask = make_const_f32_tensor(ctx, m, shape, 2);
-  free(m);
-  return mask;
-}
-
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Public functions                                                     */
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -837,20 +817,527 @@ PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x) {
   return poly_uop1(ctx, POLY_OP_DETACH, x->dtype, x, poly_arg_none());
 }
 
-/* ── Creation ────────────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════ */
+/*  Movement-op helpers (port of tinygrad mixin/movement.py)             */
+/*                                                                       */
+/*  Pure tensor-level helpers built from existing primitives. Static     */
+/*  int64_t shapes only -- polygrad does not yet match tinygrad's        */
+/*  symbolic-shape movement args.                                        */
+/* ══════════════════════════════════════════════════════════════════════ */
 
-PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value) {
-  int64_t numel = poly_shape_numel_checked(shape, ndim);
-  if (numel < 0) return NULL;
-  if (numel == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  float *data = malloc((size_t)numel * sizeof(float));
-  if (!data) return NULL;
-  for (int64_t i = 0; i < numel; i++) data[i] = (float)fill_value;
-  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, ndim);
-  free(data);
-  return u;
+/* Tensor.repeat -- movement.py:465 */
+PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x,
+                     const int64_t *repeats, int n_repeats) {
+  int64_t in_shape[POLY_MAX_DIMS];
+  int in_ndim = uop_shape(ctx, x, in_shape);
+  if (in_ndim < 0 || in_ndim > n_repeats || n_repeats > POLY_MAX_DIMS) return NULL;
+
+  /* _align_left: pad input shape with leading 1s to match n_repeats */
+  int64_t base[POLY_MAX_DIMS];
+  int pad = n_repeats - in_ndim;
+  for (int i = 0; i < pad; i++) base[i] = 1;
+  for (int i = 0; i < in_ndim; i++) base[pad + i] = in_shape[i];
+
+  /* unsqueezed = flatten([[s] if r==1 else [1,s] for r,s in zip(repeats, base)])
+   * expanded   = flatten([[s] if r==1 else [r,s] for r,s in zip(repeats, base)])
+   * final      = [r*s for r,s in zip(repeats, base)] */
+  int64_t unsq[POLY_MAX_DIMS * 2], exp[POLY_MAX_DIMS * 2], final_sh[POLY_MAX_DIMS];
+  int n = 0;
+  for (int i = 0; i < n_repeats; i++) {
+    int64_t r = repeats[i], s = base[i];
+    if (r == 1) { unsq[n] = s; exp[n] = s; n++; }
+    else { unsq[n] = 1; exp[n] = r; n++; unsq[n] = s; exp[n] = s; n++; }
+    final_sh[i] = r * s;
+  }
+
+  return poly_reshape(ctx,
+           poly_expand(ctx,
+             poly_reshape(ctx, x, unsq, n),
+             exp, n),
+           final_sh, n_repeats);
 }
 
+/* Tensor.shrink_to -- movement.py:168. ends[i] == -1 means no-op (keep dim). */
+PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x,
+                        const int64_t *ends, int n_ends) {
+  int64_t in_shape[POLY_MAX_DIMS];
+  int in_ndim = uop_shape(ctx, x, in_shape);
+  if (in_ndim != n_ends) return NULL;
+
+  int64_t pairs[POLY_MAX_DIMS][2];
+  bool any = false;
+  for (int i = 0; i < n_ends; i++) {
+    int64_t e = (ends[i] == -1) ? in_shape[i] : ends[i];
+    pairs[i][0] = 0; pairs[i][1] = e;
+    if (e != in_shape[i]) any = true;
+  }
+  return any ? poly_shrink(ctx, x, pairs, n_ends) : x;
+}
+
+/* Tensor._pool -- movement.py:487. General N-d pool via repeat/shrink/reshape/permute. */
+PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
+                   const int64_t *k_, int nk,
+                   const int64_t *stride_, const int64_t *dilation_) {
+  int64_t sh[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, sh);
+  if (ndim < nk) return NULL;
+  int noop = ndim - nk;
+
+  int64_t s_[POLY_MAX_DIMS], d_[POLY_MAX_DIMS], i_[POLY_MAX_DIMS];
+  int64_t o_[POLY_MAX_DIMS], f_[POLY_MAX_DIMS];
+  for (int j = 0; j < nk; j++) {
+    s_[j] = stride_   ? stride_[j]   : 1;
+    d_[j] = dilation_ ? dilation_[j] : 1;
+    i_[j] = sh[noop + j];
+    if (d_[j] * (k_[j] - 1) + 1 > i_[j]) return NULL;
+    o_[j] = (i_[j] - d_[j] * (k_[j] - 1) + s_[j] - 1) / s_[j];     /* ceildiv */
+    int64_t fn = o_[j] * s_[j] - d_[j];
+    int64_t fv = fn <= 0 ? 1 : (fn + i_[j] - 1) / i_[j];
+    f_[j] = fv < 1 ? 1 : fv;
+  }
+  if (noop + 3 * nk > POLY_MAX_DIMS) return NULL;
+
+  /* x = repeat([1]*noop + [ceildiv(k*(i*f+d), i) for ...]) */
+  int64_t rep[POLY_MAX_DIMS];
+  for (int j = 0; j < noop; j++) rep[j] = 1;
+  for (int j = 0; j < nk; j++) {
+    int64_t num = k_[j] * (i_[j] * f_[j] + d_[j]);
+    rep[noop + j] = (num + i_[j] - 1) / i_[j];
+  }
+  PolyUOp *r = poly_repeat(ctx, x, rep, ndim);
+
+  /* shrink_to(noop + [k*(i*f+d) for ...]) */
+  int64_t e1[POLY_MAX_DIMS];
+  for (int j = 0; j < noop; j++) e1[j] = -1;
+  for (int j = 0; j < nk; j++) e1[noop + j] = k_[j] * (i_[j] * f_[j] + d_[j]);
+  r = poly_shrink_to(ctx, r, e1, ndim);
+
+  /* reshape(noop + flatten((k, i*f+d) for ...)) */
+  int64_t s1[POLY_MAX_DIMS];
+  for (int j = 0; j < noop; j++) s1[j] = sh[j];
+  for (int j = 0; j < nk; j++) { s1[noop + 2*j] = k_[j]; s1[noop + 2*j + 1] = i_[j] * f_[j] + d_[j]; }
+  r = poly_reshape(ctx, r, s1, noop + 2 * nk);
+
+  /* shrink_to(noop + flatten((k, o*s) for ...)).reshape(noop + flatten((k, o, s) for ...)) */
+  int64_t e2[POLY_MAX_DIMS], s2[POLY_MAX_DIMS];
+  for (int j = 0; j < noop; j++) { e2[j] = -1; s2[j] = sh[j]; }
+  for (int j = 0; j < nk; j++) {
+    e2[noop + 2*j] = k_[j]; e2[noop + 2*j + 1] = o_[j] * s_[j];
+    s2[noop + 3*j] = k_[j]; s2[noop + 3*j + 1] = o_[j]; s2[noop + 3*j + 2] = s_[j];
+  }
+  r = poly_reshape(ctx, poly_shrink_to(ctx, r, e2, noop + 2*nk), s2, noop + 3*nk);
+
+  /* shrink_to(noop + flatten((k, o, 1) for ...)).reshape(noop + flatten((k, o) for ...)) */
+  int64_t e3[POLY_MAX_DIMS], s3[POLY_MAX_DIMS];
+  for (int j = 0; j < noop; j++) { e3[j] = -1; s3[j] = sh[j]; }
+  for (int j = 0; j < nk; j++) {
+    e3[noop + 3*j] = k_[j]; e3[noop + 3*j + 1] = o_[j]; e3[noop + 3*j + 2] = 1;
+    s3[noop + 2*j] = k_[j]; s3[noop + 2*j + 1] = o_[j];
+  }
+  r = poly_reshape(ctx, poly_shrink_to(ctx, r, e3, noop + 3*nk), s3, noop + 2*nk);
+
+  /* permute(*range(noop), *[noop + i*2 + 1 for i in range(nk)],
+                          *[noop + i*2     for i in range(nk)]) */
+  int64_t perm[POLY_MAX_DIMS];
+  for (int j = 0; j < noop; j++) perm[j] = j;
+  for (int j = 0; j < nk; j++) perm[noop + j]      = noop + 2*j + 1;
+  for (int j = 0; j < nk; j++) perm[noop + nk + j] = noop + 2*j;
+  return poly_permute(ctx, r, perm, noop + 2*nk);
+}
+
+/* ── Pad with arbitrary value / circular / reflect / replicate ───────── */
+
+/* ones_like(x): same shape and dtype as x, filled with 1.
+ * Pure UOp (no const-registry): scalar CONST -> reshape to (1,)*ndim -> expand. */
+static PolyUOp *poly_ones_like(PolyCtx *ctx, PolyUOp *x) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 0) return NULL;
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
+  int64_t ones[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) ones[i] = 1;
+  PolyUOp *r = poly_reshape(ctx, one, ones, ndim);
+  return poly_expand(ctx, r, shape, ndim);
+}
+
+/* Tensor.cat -- tensor.py:1364
+ *   dim_cumsum = accumulate([t.shape[dim] for t in tensors], initial=0)
+ *   for i, t in enumerate(tensors):
+ *     tensors[i] = t.pad([(dim_cumsum[i], dim_cumsum[-1]-dim_cumsum[i+1])
+ *                          if j==dim else None for j in range(t.ndim)])
+ *   return reduce(add, tensors) */
+PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
+  if (!ctx || !tensors || n_tensors <= 0) return NULL;
+  if (n_tensors == 1) return tensors[0];
+
+  int64_t sh0[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, tensors[0], sh0);
+  if (ndim < 0) return NULL;
+  if (dim < 0) dim += ndim;
+  if (dim < 0 || dim >= ndim) return NULL;
+
+  /* All tensors must match shape except along dim */
+  int64_t shi[POLY_MAX_DIMS];
+  int64_t cum[POLY_MAX_DIMS + 1];
+  cum[0] = 0;
+  for (int i = 0; i < n_tensors; i++) {
+    int ni = uop_shape(ctx, tensors[i], shi);
+    if (ni != ndim) {
+      fprintf(stderr, "poly_cat: ndim mismatch at tensor %d: %d vs %d\n", i, ni, ndim);
+      return NULL;
+    }
+    for (int j = 0; j < ndim; j++) {
+      if (j == dim) continue;
+      if (shi[j] != sh0[j]) {
+        fprintf(stderr, "poly_cat: shape mismatch at tensor %d dim %d: %lld vs %lld\n",
+                i, j, (long long)shi[j], (long long)sh0[j]);
+        return NULL;
+      }
+    }
+    cum[i + 1] = cum[i] + shi[dim];
+  }
+  int64_t total = cum[n_tensors];
+
+  PolyUOp *acc = NULL;
+  for (int i = 0; i < n_tensors; i++) {
+    int64_t pads[POLY_MAX_DIMS][2];
+    for (int j = 0; j < ndim; j++) { pads[j][0] = 0; pads[j][1] = 0; }
+    pads[dim][0] = cum[i];
+    pads[dim][1] = total - cum[i + 1];
+    PolyUOp *padded = poly_pad(ctx, tensors[i], pads, ndim);
+    if (!padded) return NULL;
+    acc = (i == 0) ? padded : poly_alu2(ctx, POLY_OP_ADD, acc, padded);
+  }
+  return acc;
+}
+
+/* Tensor._pad_constant -- tensor.py:1067 */
+PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
+                        int ndim, double value) {
+  if (!ctx || !x || !pads || ndim <= 0) return NULL;
+
+  int64_t sh[POLY_MAX_DIMS];
+  int xnd = uop_shape(ctx, x, sh);
+  if (xnd != ndim) {
+    fprintf(stderr, "poly_pad_value: ndim mismatch %d vs %d\n", xnd, ndim);
+    return NULL;
+  }
+
+  /* has_neg = not all(p >= 0) */
+  bool has_neg = false;
+  for (int i = 0; i < ndim; i++)
+    if (pads[i][0] < 0 || pads[i][1] < 0) { has_neg = true; break; }
+
+  PolyUOp *X = x;
+  int64_t nn_pads[POLY_MAX_DIMS][2];
+  if (has_neg) {
+    /* Shrink first for the negative parts:
+     * shrink_pair = (-min(pB,0), min(pA + s, s)) */
+    int64_t shr[POLY_MAX_DIMS][2];
+    for (int i = 0; i < ndim; i++) {
+      int64_t pB = pads[i][0], pA = pads[i][1], s = sh[i];
+      shr[i][0] = -(pB < 0 ? pB : 0);                 /* -min(pB, 0) */
+      int64_t end = pA + s;
+      shr[i][1] = end < s ? end : s;                  /*  min(pA + s, s) */
+    }
+    X = poly_shrink(ctx, X, shr, ndim);
+    /* Then pad with only the non-negative parts */
+    for (int i = 0; i < ndim; i++) {
+      nn_pads[i][0] = pads[i][0] > 0 ? pads[i][0] : 0;
+      nn_pads[i][1] = pads[i][1] > 0 ? pads[i][1] : 0;
+    }
+  } else {
+    for (int i = 0; i < ndim; i++) {
+      nn_pads[i][0] = pads[i][0];
+      nn_pads[i][1] = pads[i][1];
+    }
+  }
+
+  /* Fast path: zero pad */
+  PolyUOp *padded_X = poly_pad(ctx, X, nn_pads, ndim);
+  if (value == 0.0) return padded_X;
+
+  /* Pad ones_like(X) with the same pads, where==0 -> value, else 0; then add */
+  PolyUOp *ones    = poly_ones_like(ctx, X);
+  PolyUOp *padded_ones = poly_pad(ctx, ones, nn_pads, ndim);
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  PolyUOp *zero_c  = poly_const_typed(ctx, dt, 0.0);
+  PolyUOp *value_c = poly_const_typed(ctx, dt, value);
+  /* where(padded_ones, 0, value): tinygrad's .where(0, value) means
+   * "where padded_ones is true (=1, the data region) -> 0, else -> value" */
+  PolyUOp *fill = poly_alu3(ctx, POLY_OP_WHERE, padded_ones, zero_c, value_c);
+  return poly_alu2(ctx, POLY_OP_ADD, padded_X, fill);
+}
+
+/* Tensor._pad_circular -- tensor.py:1075
+ *   X = self.repeat(tuple(1 + bool(pB) + bool(pA) for pB,pA in pX))
+ *   return X.shrink(tuple((0 if pB == 0 else osh-pB,
+ *                          xsh if pA == 0 else xsh-osh+pA)
+ *                          for (pB,pA),osh,xsh in zip(pX, orig_shape, X.shape))) */
+PolyUOp *poly_pad_circular(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim) {
+  if (!ctx || !x || !pads || ndim <= 0) return NULL;
+
+  int64_t sh[POLY_MAX_DIMS];
+  int xnd = uop_shape(ctx, x, sh);
+  if (xnd != ndim) {
+    fprintf(stderr, "poly_pad_circular: ndim mismatch %d vs %d\n", xnd, ndim);
+    return NULL;
+  }
+
+  for (int i = 0; i < ndim; i++) {
+    if (pads[i][0] < 0 || pads[i][1] < 0) {
+      fprintf(stderr, "poly_pad_circular: negative pads not supported\n");
+      return NULL;
+    }
+    if (pads[i][0] > sh[i] || pads[i][1] > sh[i]) {
+      fprintf(stderr, "poly_pad_circular: pad %lld/%lld exceeds dim %lld (would wrap >1x)\n",
+              (long long)pads[i][0], (long long)pads[i][1], (long long)sh[i]);
+      return NULL;
+    }
+  }
+
+  /* repeats = [1 + (pB!=0) + (pA!=0) for ...] */
+  int64_t reps[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    reps[i] = 1 + (pads[i][0] != 0 ? 1 : 0) + (pads[i][1] != 0 ? 1 : 0);
+  PolyUOp *X = poly_repeat(ctx, x, reps, ndim);
+  if (!X) return NULL;
+
+  /* Compute the new (post-repeat) shape so we can shrink correctly */
+  int64_t xsh[POLY_MAX_DIMS];
+  if (uop_shape(ctx, X, xsh) < 0) return NULL;
+
+  int64_t shr[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) {
+    int64_t pB = pads[i][0], pA = pads[i][1];
+    int64_t osh = sh[i], xs = xsh[i];
+    shr[i][0] = (pB == 0) ? 0 : (osh - pB);
+    shr[i][1] = (pA == 0) ? xs : (xs - osh + pA);
+  }
+  return poly_shrink(ctx, X, shr, ndim);
+}
+
+/* Common impl for reflect/replicate. mode_reflect=true means "reflect"
+ * (skip the boundary element), false means "replicate" (repeat the boundary).
+ * tensor.py:1081. */
+static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
+                                           int64_t (*pads)[2], int ndim,
+                                           bool mode_reflect) {
+  if (!ctx || !x || !pads || ndim <= 0) return NULL;
+  int64_t sh[POLY_MAX_DIMS];
+  int xnd = uop_shape(ctx, x, sh);
+  if (xnd != ndim) {
+    fprintf(stderr, "poly_pad_%s: ndim mismatch %d vs %d\n",
+            mode_reflect ? "reflect" : "replicate", xnd, ndim);
+    return NULL;
+  }
+
+  /* tinygrad: pads = ((max(pB,0), max(pA,0)) for (pB,pA) in pX) -- positive only first */
+  int64_t pos_pads[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) {
+    pos_pads[i][0] = pads[i][0] > 0 ? pads[i][0] : 0;
+    pos_pads[i][1] = pads[i][1] > 0 ? pads[i][1] : 0;
+  }
+
+  PolyUOp *X = x;
+  for (int d = 0; d < ndim; d++) {
+    int64_t pB = pos_pads[d][0], pA = pos_pads[d][1];
+    if (pB == 0 && pA == 0) continue;
+
+    int64_t cur_sh[POLY_MAX_DIMS];
+    int cur_nd = uop_shape(ctx, X, cur_sh);
+    if (cur_nd < 0) return NULL;
+    int64_t s = cur_sh[d];
+
+    if (mode_reflect && (pB >= s || pA >= s)) {
+      fprintf(stderr, "poly_pad_reflect: pad (%lld,%lld) >= dim size %lld at dim %d\n",
+              (long long)pB, (long long)pA, (long long)s, d);
+      return NULL;
+    }
+
+    PolyUOp *xB = NULL, *xA = NULL;
+    if (mode_reflect) {
+      /* slcB = slice(pB, 0, -1) -> indices [pB, pB-1, ..., 1]
+       * That's elements at index 1..pB+1, then flipped. */
+      if (pB > 0) {
+        int64_t shr[POLY_MAX_DIMS][2];
+        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
+        shr[d][0] = 1;
+        shr[d][1] = pB + 1;
+        PolyUOp *sl = poly_shrink(ctx, X, shr, ndim);
+        int64_t flip_axes[1] = {d};
+        xB = poly_flip(ctx, sl, flip_axes, 1);
+      }
+      /* slcA = slice(s-2, s-2-pA, -1) -> indices [s-2, s-3, ..., s-1-pA]
+       * That's elements at index s-1-pA..s-1 (exclusive s-1), then flipped. */
+      if (pA > 0) {
+        int64_t shr[POLY_MAX_DIMS][2];
+        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
+        shr[d][0] = s - 1 - pA;
+        shr[d][1] = s - 1;
+        PolyUOp *sl = poly_shrink(ctx, X, shr, ndim);
+        int64_t flip_axes[1] = {d};
+        xA = poly_flip(ctx, sl, flip_axes, 1);
+      }
+    } else {
+      /* replicate: shrink to (0,1) and expand to (pB,) on dim d */
+      if (pB > 0) {
+        int64_t shr[POLY_MAX_DIMS][2];
+        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
+        shr[d][0] = 0; shr[d][1] = 1;
+        int64_t exp_sh[POLY_MAX_DIMS];
+        for (int j = 0; j < ndim; j++) exp_sh[j] = cur_sh[j];
+        exp_sh[d] = pB;
+        xB = poly_expand(ctx, poly_shrink(ctx, X, shr, ndim), exp_sh, ndim);
+      }
+      if (pA > 0) {
+        int64_t shr[POLY_MAX_DIMS][2];
+        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
+        shr[d][0] = s - 1; shr[d][1] = s;
+        int64_t exp_sh[POLY_MAX_DIMS];
+        for (int j = 0; j < ndim; j++) exp_sh[j] = cur_sh[j];
+        exp_sh[d] = pA;
+        xA = poly_expand(ctx, poly_shrink(ctx, X, shr, ndim), exp_sh, ndim);
+      }
+    }
+
+    /* cat([xB, X, xA] for those that exist) */
+    PolyUOp *parts[3];
+    int n_parts = 0;
+    if (xB) parts[n_parts++] = xB;
+    parts[n_parts++] = X;
+    if (xA) parts[n_parts++] = xA;
+    X = poly_cat(ctx, parts, n_parts, d);
+    if (!X) return NULL;
+  }
+
+  /* shrink after for negative pads (reflect/replicate must see full data first):
+   * shrink = ((-min(pB,0), min(pA+s, s)) for ((pB,pA), s) in zip(pX, X.shape)) */
+  bool has_neg = false;
+  for (int i = 0; i < ndim; i++)
+    if (pads[i][0] < 0 || pads[i][1] < 0) { has_neg = true; break; }
+  if (has_neg) {
+    int64_t cur_sh[POLY_MAX_DIMS];
+    if (uop_shape(ctx, X, cur_sh) < 0) return NULL;
+    int64_t shr[POLY_MAX_DIMS][2];
+    for (int i = 0; i < ndim; i++) {
+      int64_t pB = pads[i][0], pA = pads[i][1], s = cur_sh[i];
+      shr[i][0] = -(pB < 0 ? pB : 0);
+      int64_t end = pA + s;
+      shr[i][1] = end < s ? end : s;
+    }
+    X = poly_shrink(ctx, X, shr, ndim);
+  }
+  return X;
+}
+
+PolyUOp *poly_pad_reflect(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim) {
+  return poly_pad_reflect_replicate(ctx, x, pads, ndim, true);
+}
+
+PolyUOp *poly_pad_replicate(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim) {
+  return poly_pad_reflect_replicate(ctx, x, pads, ndim, false);
+}
+
+/* Tensor._cumalu -- tensor.py:2048
+ *   pl_sz = shape[axis] - int(not _include_initial)
+ *   pooled = transpose(axis,-1).pad((pl_sz, -int(_include_initial)),
+ *                                    value=identity_element(op,dtype))._pool((shape[axis],))
+ *   return pooled.sum(-1).transpose(axis,-1)
+ *
+ * Supports ADD/MAX/MUL via poly_pad_value with the operator's identity element. */
+PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool include_initial) {
+  if (op != POLY_OP_ADD && op != POLY_OP_MAX && op != POLY_OP_MUL) {
+    fprintf(stderr, "poly_cumalu: op must be ADD, MAX, or MUL\n");
+    return NULL;
+  }
+
+  int64_t sh[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, sh);
+  if (ndim < 0) return NULL;
+  if (axis < 0) axis += ndim;
+  if (axis < 0 || axis >= ndim || sh[axis] == 0) return NULL;
+
+  int64_t len = sh[axis];
+  int64_t pl_sz = len - (include_initial ? 0 : 1);
+
+  /* identity element per op */
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  double identity;
+  if (op == POLY_OP_ADD)      identity = 0.0;
+  else if (op == POLY_OP_MUL) identity = 1.0;
+  else /* MAX */ {
+    if (poly_dtype_is_float(dt)) identity = -INFINITY;
+    else                         identity = (double)INT64_MIN;
+  }
+
+  /* transpose(axis, -1): swap axis with last */
+  int64_t perm[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) perm[i] = i;
+  perm[axis] = ndim - 1;
+  perm[ndim - 1] = axis;
+  bool need_transpose = (axis != ndim - 1);
+  PolyUOp *r = need_transpose ? poly_permute(ctx, x, perm, ndim) : x;
+
+  /* pad((pl_sz, -int(include_initial))) on the LAST axis only, value=identity. */
+  int64_t pads[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) { pads[i][0] = 0; pads[i][1] = 0; }
+  pads[ndim - 1][0] = pl_sz;
+  pads[ndim - 1][1] = include_initial ? -1 : 0;
+  r = poly_pad_value(ctx, r, pads, ndim, identity);
+
+  /* _pool((len,)) on last axis. After _pool, last two dims are (windows, kernel). */
+  int64_t k_arr[1] = {len};
+  r = poly_pool(ctx, r, k_arr, 1, NULL, NULL);
+
+  /* Reduce on last (kernel) axis with the requested op */
+  int64_t axes[1] = {-1};
+  /* poly_reduce_axis takes the actual op; output keeps dims, we reshape away the last */
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = 0;
+  int64_t r_sh[POLY_MAX_DIMS];
+  int r_nd = uop_shape(ctx, r, r_sh);
+  if (r_nd < 0) return NULL;
+  axes[0] = r_nd - 1;  /* concrete axis */
+  r = poly_reduce_axis(ctx, op, r, axes, 1);
+  /* Drop the reduced axis */
+  for (int i = 0; i < r_nd - 1; i++) out_shape[out_ndim++] = r_sh[i];
+  if (out_ndim == 0) { out_shape[0] = 1; out_ndim = 1; }
+  r = poly_reshape(ctx, r, out_shape, out_ndim);
+
+  /* transpose(axis, -1): swap back */
+  if (need_transpose) r = poly_permute(ctx, r, perm, ndim);
+  return r;
+}
+
+/* ── Creation ────────────────────────────────────────────────────────── */
+
+/* tinygrad Tensor.full -- tensor.py:660:
+ *   Tensor(fill_value, _force_unique=True).reshape((1,)*ndim).expand(shape)
+ *
+ * Pure UOp graph -- no const-registry, no host malloc. _force_unique is
+ * not needed because polygrad CONST is immutable and CSE'd by hash key. */
+PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value) {
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  /* Zero-size shape: return an empty buffer (poly_shape_numel_checked
+   * rejects shape[i]<=0, so we handle the empty case explicitly first). */
+  for (int i = 0; i < ndim; i++)
+    if (shape[i] == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+  if (poly_shape_numel_checked(shape, ndim) < 0) return NULL;
+
+  PolyUOp *scalar = poly_const_typed(ctx, POLY_FLOAT32, fill_value);
+  int64_t ones[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++) ones[i] = 1;
+  PolyUOp *r = poly_reshape(ctx, scalar, ones, ndim);
+  return poly_expand(ctx, r, (int64_t *)shape, ndim);
+}
+
+/* tinygrad Tensor.arange -- tensor.py:722:
+ *   Tensor.full((output_len,), step)._cumalu(0, Ops.ADD) + (start - step)
+ *
+ * Pure UOp graph. The cumulative sum is currently O(N^2) until the
+ * range-collapse simplify pass lands in Phase D. */
 PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step) {
   if (step == 0.0) {
     fprintf(stderr, "polygrad: arange: step must be non-zero\n");
@@ -863,43 +1350,62 @@ PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step) {
     if (n < 0) n = 0;
   }
   if (n == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  float *data = malloc((size_t)n * sizeof(float));
-  if (!data) return NULL;
-  for (int64_t i = 0; i < n; i++) data[i] = (float)(start + (double)i * step);
+
   int64_t shape[1] = { n };
-  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, 1);
-  free(data);
-  return u;
+  PolyUOp *base   = poly_full(ctx, shape, 1, step);
+  PolyUOp *cumsum = poly_cumalu(ctx, base, 0, POLY_OP_ADD, false);
+  PolyUOp *bias   = poly_const_typed(ctx, POLY_FLOAT32, start - step);
+  return poly_alu2(ctx, POLY_OP_ADD, cumsum, bias);
 }
 
+/* tinygrad Tensor.linspace -- tensor.py:754
+ *   (start + Tensor.arange(steps) * ((stop - start) / (steps - 1))).cast(dtype) */
 PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps) {
-  if (steps <= 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  float *data = malloc((size_t)steps * sizeof(float));
-  if (!data) return NULL;
-  if (steps == 1) data[0] = (float)start;
-  else {
-    for (int64_t i = 0; i < steps; i++)
-      data[i] = (float)(start + (stop - start) * (double)i / (double)(steps - 1));
+  if (steps < 0) return NULL;
+  if (steps == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+  if (steps == 1) {
+    /* Single value `start` broadcast to shape (1,) */
+    int64_t shape[1] = {1};
+    return poly_full(ctx, shape, 1, start);
   }
-  int64_t shape[1] = { steps };
-  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, 1);
-  free(data);
-  return u;
+  double scale = (stop - start) / (double)(steps - 1);
+  PolyUOp *ar    = poly_arange(ctx, 0.0, (double)steps, 1.0);
+  PolyUOp *s_c   = poly_const_typed(ctx, POLY_FLOAT32, scale);
+  PolyUOp *start_c = poly_const_typed(ctx, POLY_FLOAT32, start);
+  return poly_alu2(ctx, POLY_OP_ADD,
+           poly_alu2(ctx, POLY_OP_MUL, ar, s_c),
+           start_c);
 }
 
+/* tinygrad Tensor.eye -- tensor.py:774
+ *   (arange(n).unsqueeze(-1) == arange(m)).cast(dtype) */
 PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
   if (n <= 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  if ((size_t)n > SIZE_MAX / (size_t)n) return NULL;
-  size_t numel = (size_t)n * (size_t)n;
-  float *data = calloc(numel, sizeof(float));
-  if (!data) return NULL;
-  for (int64_t i = 0; i < n; i++) data[(size_t)i * (size_t)n + (size_t)i] = 1.0f;
-  int64_t shape[2] = { n, n };
-  PolyUOp *u = make_const_f32_tensor(ctx, data, shape, 2);
-  free(data);
-  return u;
+  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0),
+                               (int64_t[]){n, 1}, 2);
+  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0),
+                               (int64_t[]){1, n}, 2);
+  /* Broadcasting (n,1) vs (1,n) -> (n,n) */
+  PolyUOp *eq_bool = poly_eq(ctx, rows, cols);
+  return poly_cast(ctx, eq_bool, POLY_FLOAT32);
 }
 
+/* tinygrad Tensor._tri -- tensor.py:2128
+ *   arange(r).unsqueeze(-1) + diagonal <= arange(c)
+ *   Returns a bool mask of shape (r, c). */
+static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) {
+  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)r, 1.0),
+                               (int64_t[]){r, 1}, 2);
+  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)c, 1.0),
+                               (int64_t[]){1, c}, 2);
+  PolyUOp *rows_shifted = (diagonal == 0) ? rows :
+      poly_alu2(ctx, POLY_OP_ADD, rows,
+                poly_const_typed(ctx, POLY_FLOAT32, (double)diagonal));
+  return poly_le(ctx, rows_shifted, cols);
+}
+
+/* tinygrad Tensor.tril -- tensor.py:2154
+ *   _tri(rows, cols, diagonal+1).where(zeros_like(self), self) */
 PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   if (!x) return NULL;
   int64_t shape[POLY_MAX_DIMS];
@@ -908,11 +1414,13 @@ PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal) {
     fprintf(stderr, "polygrad: tril: only 2D tensors are supported\n");
     return NULL;
   }
-  PolyUOp *mask = tri_mask(ctx, shape, diagonal, false);
-  if (!mask) return NULL;
-  return poly_alu2(ctx, POLY_OP_MUL, x, mask);
+  PolyUOp *mask = poly_tri_mask(ctx, shape[0], shape[1], diagonal + 1);
+  PolyUOp *zero = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0);
+  return poly_alu3(ctx, POLY_OP_WHERE, mask, zero, x);
 }
 
+/* tinygrad Tensor.triu -- tensor.py:2131
+ *   _tri(rows, cols, diagonal).where(self, zeros_like(self)) */
 PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   if (!x) return NULL;
   int64_t shape[POLY_MAX_DIMS];
@@ -921,9 +1429,9 @@ PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
     fprintf(stderr, "polygrad: triu: only 2D tensors are supported\n");
     return NULL;
   }
-  PolyUOp *mask = tri_mask(ctx, shape, diagonal, true);
-  if (!mask) return NULL;
-  return poly_alu2(ctx, POLY_OP_MUL, x, mask);
+  PolyUOp *mask = poly_tri_mask(ctx, shape[0], shape[1], diagonal);
+  PolyUOp *zero = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0);
+  return poly_alu3(ctx, POLY_OP_WHERE, mask, x, zero);
 }
 
 PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {

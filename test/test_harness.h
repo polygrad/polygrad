@@ -44,6 +44,14 @@ extern int g_n_tests;
   (*_failed)++; return; \
 } while(0)
 
+/* SKIP: marks a test as intentionally not run yet (e.g. waiting on a
+ * dependent feature). Counts as a pass but logs the reason so the
+ * skipped test is visible in the runner output. */
+#define SKIP(reason) do { \
+  fprintf(stderr, "    SKIP %s:%d: " reason "\n", __FILE__, __LINE__); \
+  (*_passed)++; return; \
+} while(0)
+
 #define ASSERT_TRUE(expr) do { \
   if (!(expr)) FAIL("expected true: %s", #expr); \
 } while(0)
