@@ -53,11 +53,6 @@ typedef struct {
   PolyUOp **grad_uops;             /* [n_params] raw gradient UOp expressions */
   PolyUOp *loss_value;             /* loss value UOp (pre-store) */
   float loss_data;                  /* scalar loss value */
-
-  /* Cached slot indices (set after first prepare_step) */
-  int loss_slot;                    /* buf_slot index for loss output */
-  int *grad_slots;                  /* [n_params] buf_slot indices for grads */
-  bool slots_resolved;              /* true after first resolution */
 } VagState;
 
 /* ── Training state (optimizer graph, built lazily) ──────────────────── */
@@ -90,27 +85,6 @@ typedef struct {
   PolyBufferHandle bc2_handle;
 } TrainState;
 
-/* ── Cached slot table (avoids O(n_slots×n_bufs) scan each call) ────── */
-
-typedef struct {
-  PolyCompiledPlan *plan;      /* cache-owned, do NOT free */
-  void **slot_data;            /* [n_slots], pre-filled */
-  int n_slots;
-
-  /* Mapping: slot index -> instance buf index, or -1 */
-  int *slot_to_buf;
-
-  /* IO fast-patch: which slots to update from IO bindings */
-  int *io_slot_indices;        /* [n_io] */
-  int *io_buf_indices;         /* [n_io] instance buf index */
-  int n_io;
-
-  /* Device-migrated const-registry buffers (owned, freed on cache teardown) */
-  void **migrated_consts;      /* device pointers to free */
-  int n_migrated;
-  PolyDeviceId device;         /* which device owns migrated_consts */
-} SlotCache;
-
 struct PolyInstance {
   PolyCtx *ctx;
   bool owns_ctx;     /* true: poly_instance_free destroys ctx */
@@ -137,122 +111,7 @@ struct PolyInstance {
 
   /* ── Optimizer state ── */
   OptimState optim;
-
-  /* ── Cached slot tables (one per entrypoint path) ── */
-  SlotCache *call_cache;            /* for poly_instance_call */
-  SlotCache *train_cache;           /* for poly_instance_train_step */
 };
-
-/* ── Slot table cache ────────────────────────────────────────────────── */
-
-static void slot_cache_free(SlotCache *c) {
-  if (!c) return;
-  /* Free device-migrated const buffers */
-  if (c->migrated_consts && c->n_migrated > 0) {
-    const PolyBackendDesc *be = poly_backend_get(c->device);
-    const PolyAllocator *alloc = be ? be->get_allocator() : NULL;
-    for (int i = 0; i < c->n_migrated; i++)
-      if (alloc && c->migrated_consts[i])
-        alloc->free(c->migrated_consts[i], alloc->dev_ctx);
-    free(c->migrated_consts);
-  }
-  free(c->slot_data);
-  free(c->slot_to_buf);
-  free(c->io_slot_indices);
-  free(c->io_buf_indices);
-  free(c);
-}
-
-/* Build a cached slot table for a given sink + device.
- * Maps each schedule slot to the instance buf index whose buffer UOp matches.
- * extra_bufs/extra_ptrs provide non-instance buffers (loss output, moments, etc.).
- * Returns NULL on error. The plan is cache-owned; the SlotCache does NOT free it. */
-static SlotCache *slot_cache_build(
-    PolyInstance *inst, PolyUOp *sink, PolyDeviceId device,
-    PolyUOp **extra_bufs, void **extra_ptrs, int n_extra) {
-  PolyCompiledPlan *plan = poly_get_plan(inst->ctx, sink, device);
-  if (!plan) return NULL;
-  PolySchedule *sched = plan->schedule;
-
-  SlotCache *c = calloc(1, sizeof(SlotCache));
-  c->plan = plan;
-  c->device = device;
-  c->n_slots = sched->n_buf_slots;
-  c->slot_data = calloc((size_t)(c->n_slots > 0 ? c->n_slots : 1), sizeof(void *));
-  c->slot_to_buf = malloc((size_t)(c->n_slots > 0 ? c->n_slots : 1) * sizeof(int));
-
-  /* Build slot -> instance buf mapping and fill initial slot_data */
-  for (int s = 0; s < c->n_slots; s++) {
-    c->slot_to_buf[s] = -1;
-    if (sched->buf_slots[s].is_intermediate) continue;
-    PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
-
-    /* Check instance buffers */
-    for (int j = 0; j < inst->n_bufs; j++) {
-      if (inst->bufs[j].buffer == slot_uop) {
-        c->slot_to_buf[s] = j;
-        c->slot_data[s] = inst->buf_handles[j].ptr;
-        break;
-      }
-    }
-
-    /* Check extra buffers */
-    if (c->slot_to_buf[s] < 0 && extra_bufs) {
-      for (int j = 0; j < n_extra; j++) {
-        if (extra_bufs[j] == slot_uop) {
-          c->slot_data[s] = extra_ptrs[j];
-          break;
-        }
-      }
-    }
-
-    /* Check const_registry for anonymous constant buffers (e.g. arange in gather).
-     * These live in host memory. For non-host-addressable devices (CUDA, HIP),
-     * we must allocate device memory and upload the data -- otherwise the kernel
-     * receives a host pointer as a device arg → CUDA_ERROR_ILLEGAL_ADDRESS. */
-    if (!c->slot_data[s]) {
-      void *const_data = poly_const_registry_lookup(inst->ctx, slot_uop);
-      if (const_data) {
-        if (!poly_device_is_host_addressable(device)) {
-          size_t nbytes = (size_t)sched->buf_slots[s].nbytes;
-          const PolyBackendDesc *be = poly_backend_get(device);
-          const PolyAllocator *alloc = be ? be->get_allocator() : NULL;
-          if (alloc && alloc->alloc) {
-            void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-            if (dptr) {
-              alloc->copy_in(dptr, const_data, nbytes, alloc->dev_ctx);
-              c->slot_data[s] = dptr;
-              /* Track for cleanup on cache teardown */
-              int idx = c->n_migrated++;
-              c->migrated_consts = realloc(c->migrated_consts,
-                  (size_t)c->n_migrated * sizeof(void *));
-              c->migrated_consts[idx] = dptr;
-            }
-          }
-        } else {
-          c->slot_data[s] = const_data;
-        }
-      }
-    }
-  }
-
-  /* Build IO fast-patch table: which slots correspond to INPUT/TARGET */
-  int max_io = inst->n_bufs;
-  c->io_slot_indices = malloc((size_t)max_io * sizeof(int));
-  c->io_buf_indices = malloc((size_t)max_io * sizeof(int));
-  c->n_io = 0;
-  for (int s = 0; s < c->n_slots; s++) {
-    int bi = c->slot_to_buf[s];
-    if (bi >= 0 && (inst->bufs[bi].role == POLY_ROLE_INPUT ||
-                    inst->bufs[bi].role == POLY_ROLE_TARGET)) {
-      c->io_slot_indices[c->n_io] = s;
-      c->io_buf_indices[c->n_io] = bi;
-      c->n_io++;
-    }
-  }
-
-  return c;
-}
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -466,12 +325,26 @@ static void vag_free(VagState *vag, int n_params) {
   }
   free(vag->grad_out_bufs);
   free(vag->grad_uops);
-  free(vag->grad_slots);
   free(vag);
+}
+
+static void free_owned_handle(PolyBufferHandle *h) {
+  if (h->owned && h->ptr) {
+    const PolyBackendDesc *be = poly_backend_get(h->domain);
+    if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
+  }
 }
 
 static void train_free(TrainState *ts, int n_params) {
   if (!ts) return;
+  /* Free device-owned moment handles before freeing host data */
+  for (int i = 0; i < ts->n_moment_bufs; i++) {
+    if (ts->m_handles) free_owned_handle(&ts->m_handles[i]);
+    if (ts->v_handles) free_owned_handle(&ts->v_handles[i]);
+  }
+  free_owned_handle(&ts->loss_handle);
+  free_owned_handle(&ts->bc1_handle);
+  free_owned_handle(&ts->bc2_handle);
   if (ts->m_datas) {
     for (int i = 0; i < n_params; i++) free(ts->m_datas[i]);
     free(ts->m_datas);
@@ -525,10 +398,6 @@ void poly_instance_free(PolyInstance *inst) {
   /* Free training state */
   train_free(inst->train, inst->n_params);
 
-  /* Free slot caches (plans are cache-owned, not freed here) */
-  slot_cache_free(inst->call_cache);
-  slot_cache_free(inst->train_cache);
-
   /* Free context (arena-frees all UOps) -- only if we own it */
   if (inst->owns_ctx && inst->ctx) poly_ctx_destroy(inst->ctx);
 
@@ -556,6 +425,9 @@ int poly_instance_param_shape(const PolyInstance *inst, int i,
 }
 
 static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len);
+static PolyBufferHandle make_handle(void *host_data, size_t nbytes,
+                                     PolyDeviceId dev,
+                                     const PolyAllocator *alloc);
 
 /* Sync device buffer to host shadow if on a non-host domain.
  * Returns 0 on success or if already on host; -1 on readback failure. */
@@ -748,10 +620,6 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
 int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   if (!inst) return -1;
 
-  /* Invalidate slot caches (buffer handles change domain) */
-  slot_cache_free(inst->call_cache);  inst->call_cache = NULL;
-  slot_cache_free(inst->train_cache); inst->train_cache = NULL;
-
   /* Resolve AUTO: check POLY_DEVICE env var, same logic as infer_device()
    * in frontend.c so that Instance and Tensor paths use the same selector. */
   PolyDeviceId resolved = device;
@@ -857,31 +725,46 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     for (int i = 0; i < ts->n_moment_bufs; i++) {
       /* m handles */
       if (ts->m_handles[i].domain != resolved) {
-        void *mp = alloc->alloc(ts->m_handles[i].nbytes, alloc->dev_ctx);
-        if (mp) {
-          if (ts->m_datas[i])
-            alloc->copy_in(mp, ts->m_datas[i], ts->m_handles[i].nbytes, alloc->dev_ctx);
+        free_owned_handle(&ts->m_handles[i]);
+        if (poly_device_is_host_addressable(resolved)) {
           ts->m_handles[i] = (PolyBufferHandle){
-            .ptr = mp, .nbytes = ts->m_handles[i].nbytes,
-            .domain = resolved, .owned = true,
+            .ptr = ts->m_datas[i], .nbytes = ts->m_handles[i].nbytes,
+            .domain = resolved, .owned = false,
           };
+        } else {
+          size_t nb = ts->m_handles[i].nbytes;
+          void *mp = alloc->alloc(nb, alloc->dev_ctx);
+          if (mp) {
+            if (ts->m_datas[i]) alloc->copy_in(mp, ts->m_datas[i], nb, alloc->dev_ctx);
+            ts->m_handles[i] = (PolyBufferHandle){
+              .ptr = mp, .nbytes = nb, .domain = resolved, .owned = true,
+            };
+          }
         }
       }
       /* v handles */
       if (ts->v_handles[i].domain != resolved) {
-        void *vp = alloc->alloc(ts->v_handles[i].nbytes, alloc->dev_ctx);
-        if (vp) {
-          if (ts->v_datas[i])
-            alloc->copy_in(vp, ts->v_datas[i], ts->v_handles[i].nbytes, alloc->dev_ctx);
+        free_owned_handle(&ts->v_handles[i]);
+        if (poly_device_is_host_addressable(resolved)) {
           ts->v_handles[i] = (PolyBufferHandle){
-            .ptr = vp, .nbytes = ts->v_handles[i].nbytes,
-            .domain = resolved, .owned = true,
+            .ptr = ts->v_datas[i], .nbytes = ts->v_handles[i].nbytes,
+            .domain = resolved, .owned = false,
           };
+        } else {
+          size_t nb = ts->v_handles[i].nbytes;
+          void *vp = alloc->alloc(nb, alloc->dev_ctx);
+          if (vp) {
+            if (ts->v_datas[i]) alloc->copy_in(vp, ts->v_datas[i], nb, alloc->dev_ctx);
+            ts->v_handles[i] = (PolyBufferHandle){
+              .ptr = vp, .nbytes = nb, .domain = resolved, .owned = true,
+            };
+          }
         }
       }
     }
     /* Migrate loss output handle */
     if (ts->loss_handle.domain != resolved) {
+      free_owned_handle(&ts->loss_handle);
       if (poly_device_is_host_addressable(resolved)) {
         ts->loss_handle = (PolyBufferHandle){
           .ptr = &ts->loss_data, .nbytes = sizeof(float),
@@ -899,19 +782,32 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     }
     /* Migrate bc scalar handles */
     if (ts->bc1_handle.domain != resolved) {
-      void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
-      if (bp1) {
-        alloc->copy_in(bp1, &ts->bc1_data, sizeof(float), alloc->dev_ctx);
+      free_owned_handle(&ts->bc1_handle);
+      free_owned_handle(&ts->bc2_handle);
+      if (poly_device_is_host_addressable(resolved)) {
         ts->bc1_handle = (PolyBufferHandle){
-          .ptr = bp1, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+          .ptr = &ts->bc1_data, .nbytes = sizeof(float),
+          .domain = resolved, .owned = false,
         };
-      }
-      void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
-      if (bp2) {
-        alloc->copy_in(bp2, &ts->bc2_data, sizeof(float), alloc->dev_ctx);
         ts->bc2_handle = (PolyBufferHandle){
-          .ptr = bp2, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+          .ptr = &ts->bc2_data, .nbytes = sizeof(float),
+          .domain = resolved, .owned = false,
         };
+      } else {
+        void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
+        if (bp1) {
+          alloc->copy_in(bp1, &ts->bc1_data, sizeof(float), alloc->dev_ctx);
+          ts->bc1_handle = (PolyBufferHandle){
+            .ptr = bp1, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+          };
+        }
+        void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
+        if (bp2) {
+          alloc->copy_in(bp2, &ts->bc2_data, sizeof(float), alloc->dev_ctx);
+          ts->bc2_handle = (PolyBufferHandle){
+            .ptr = bp2, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+          };
+        }
       }
     }
   }
@@ -993,38 +889,14 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
   }
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
-  PolyDeviceId device = inst->buf_handles[0].domain;
+  int n_bindings = 0;
+  PolyBufferBinding *bindings = build_bindings_for_realize(
+      inst, ep_idx, io, n_io, &n_bindings);
+  if (!bindings) return -1;
 
-  /* Build cached slot table on first call (or after invalidation) */
-  SlotCache *c = inst->call_cache;
-  if (!c) {
-    inst->call_cache = slot_cache_build(inst, sink, device, NULL, NULL, 0);
-    c = inst->call_cache;
-    if (!c) return -1;
-  }
-
-  /* Patch IO slots by name */
-  for (int i = 0; i < n_io; i++) {
-    if (!io[i].data || !io[i].name) continue;
-    int bi = find_buf_by_name(inst, io[i].name);
-    if (bi < 0) continue;
-    if (!poly_device_is_host_addressable(inst->buf_handles[bi].domain)) {
-      const PolyBackendDesc *bd = poly_backend_get(inst->buf_handles[bi].domain);
-      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
-      if (a && a->copy_in)
-        a->copy_in(inst->buf_handles[bi].ptr, io[i].data,
-                   inst->buf_handles[bi].nbytes, a->dev_ctx);
-    } else {
-      for (int j = 0; j < c->n_io; j++) {
-        if (c->io_buf_indices[j] == bi) {
-          c->slot_data[c->io_slot_indices[j]] = io[i].data;
-          break;
-        }
-      }
-    }
-  }
-
-  return poly_compiled_plan_run(c->plan, c->slot_data, c->n_slots, NULL, 0);
+  int ret = poly_realize(inst->ctx, sink, bindings, n_bindings);
+  free(bindings);
+  return ret;
 }
 
 /* ── Convenience wrapper ─────────────────────────────────────────────── */
@@ -1054,8 +926,6 @@ int poly_instance_set_optimizer(PolyInstance *inst, int kind,
     train_free(inst->train, inst->n_params);
     inst->train = NULL;
   }
-  slot_cache_free(inst->train_cache);
-  inst->train_cache = NULL;
 
   return 0;
 }
@@ -1129,7 +999,6 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   VagState *vag = calloc(1, sizeof(VagState));
   vag->grad_out_bufs = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
   vag->grad_datas = calloc((size_t)inst->n_params, sizeof(float *));
-  vag->grad_slots = calloc((size_t)inst->n_params, sizeof(int));
   vag->grad_uops = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
   vag->loss_value = loss_value;
 
@@ -1182,51 +1051,12 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   }
 
   vag->combined_sink = poly_sink_n(inst->ctx, stores, n_stores);
-  vag->slots_resolved = false;
 
   free(stores);
   free(grads);
   free(param_bufs);
 
   inst->vag = vag;
-  return 0;
-}
-
-/* Resolve loss/grad buf_slot indices from a prepared step.
- * Called once after the first prepare_step for this vag graph. */
-static int resolve_vag_slots(PolyInstance *inst, const PolySchedule *prep) {
-  VagState *vag = inst->vag;
-  if (vag->slots_resolved) return 0;
-
-  /* Find loss slot */
-  vag->loss_slot = -1;
-  for (int s = 0; s < prep->n_buf_slots; s++) {
-    if (prep->buf_slots[s].buf_uop == vag->loss_out_buf) {
-      vag->loss_slot = s;
-      break;
-    }
-  }
-  if (vag->loss_slot < 0) {
-    fprintf(stderr, "poly_instance: value_and_grad: loss buffer slot not found\n");
-    return -1;
-  }
-
-  /* Find grad slots */
-  for (int i = 0; i < inst->n_params; i++) {
-    vag->grad_slots[i] = -1;
-    for (int s = 0; s < prep->n_buf_slots; s++) {
-      if (prep->buf_slots[s].buf_uop == vag->grad_out_bufs[i]) {
-        vag->grad_slots[i] = s;
-        break;
-      }
-    }
-    if (vag->grad_slots[i] < 0) {
-      fprintf(stderr, "poly_instance: value_and_grad: grad[%d] buffer slot not found\n", i);
-      return -1;
-    }
-  }
-
-  vag->slots_resolved = true;
   return 0;
 }
 
@@ -1245,7 +1075,14 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   if (ensure_vag_graph(inst, ep_idx) != 0) return -1;
   VagState *vag = inst->vag;
 
-  /* Build extra bindings for vag output buffers (loss + grads) */
+  /* Build extra bindings for vag output buffers (loss + grads).
+   * Use the instance's device domain so handles match the device
+   * that instance buffers live on (avoids mixing host pointers into
+   * device kernel args when on CUDA/HIP). */
+  PolyDeviceId device = inst->buf_handles[0].domain;
+  const PolyBackendDesc *vag_be = poly_backend_get(device);
+  const PolyAllocator *vag_alloc = vag_be ? vag_be->get_allocator() : NULL;
+
   int n_extra = 1 + inst->n_params;
   PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
   PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
@@ -1254,37 +1091,44 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
     return -1;
   }
 
-  /* Loss output buffer -- always host-resident for readback */
+  /* Loss output buffer */
   extra_bufs[0] = vag->loss_out_buf;
-  extra_handles[0] = (PolyBufferHandle){
-    .ptr = &vag->loss_data, .nbytes = sizeof(float),
-    .domain = POLY_DEVICE_HOST, .owned = false,
-  };
+  extra_handles[0] = make_handle(&vag->loss_data, sizeof(float), device, vag_alloc);
 
-  /* Gradient output buffers -- host-resident for readback */
+  /* Gradient output buffers */
   for (int i = 0; i < inst->n_params; i++) {
     NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+    size_t nbytes = (size_t)pb->numel * sizeof(float);
     extra_bufs[1 + i] = vag->grad_out_bufs[i];
-    extra_handles[1 + i] = (PolyBufferHandle){
-      .ptr = vag->grad_datas[i],
-      .nbytes = (size_t)pb->numel * sizeof(float),
-      .domain = POLY_DEVICE_HOST, .owned = false,
-    };
+    extra_handles[1 + i] = make_handle(vag->grad_datas[i], nbytes, device, vag_alloc);
   }
 
   /* Build combined bindings: instance buffers + IO + vag outputs */
   int n_bindings = 0;
   PolyBufferBinding *bindings = build_bindings_extended(
     inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
-  free(extra_bufs);
-  free(extra_handles);
-  if (!bindings) return -1;
 
   /* Route through core poly_realize -- caching is automatic */
-  int ret = poly_realize(inst->ctx, vag->combined_sink, bindings, n_bindings);
+  int ret = bindings ? poly_realize(inst->ctx, vag->combined_sink, bindings, n_bindings) : -1;
   free(bindings);
-  if (ret != 0) return ret;
 
+  /* Readback loss + grads from device to host if needed */
+  if (ret == 0 && !poly_device_is_host_addressable(device)) {
+    readback_handle(&extra_handles[0], &vag->loss_data, sizeof(float));
+    for (int i = 0; i < inst->n_params; i++) {
+      NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+      readback_handle(&extra_handles[1 + i], vag->grad_datas[i],
+                      (size_t)pb->numel * sizeof(float));
+    }
+  }
+
+  /* Free device-owned extra handles */
+  for (int i = 0; i < n_extra; i++)
+    free_owned_handle(&extra_handles[i]);
+  free(extra_bufs);
+  free(extra_handles);
+
+  if (ret != 0) return ret;
   if (loss_out) *loss_out = vag->loss_data;
   return 0;
 }
@@ -1542,67 +1386,42 @@ int poly_instance_train_step(PolyInstance *inst,
     }
   }
 
-  /* Build cached slot table on first call */
-  SlotCache *c = inst->train_cache;
-  if (!c) {
-    int n_extra = 1;  /* loss output */
-    if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW)
-      n_extra += 2 * np + 2;  /* m + v + bc1 + bc2 */
+  /* Build extra bindings: loss output + moment buffers + bc scalars */
+  bool has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
+  int n_extra = 1 + (has_moments ? 2 * np + 2 : 0);
 
-    PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
-    void **extra_ptrs = malloc((size_t)n_extra * sizeof(void *));
-    if (!extra_bufs || !extra_ptrs) {
-      free(extra_bufs); free(extra_ptrs);
-      o->step--;
-      return -1;
-    }
-
-    extra_bufs[0] = ts->loss_out_buf;
-    extra_ptrs[0] = ts->loss_handle.ptr;
-    if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
-      for (int i = 0; i < np; i++) {
-        extra_bufs[1 + i] = ts->m_bufs[i];
-        extra_ptrs[1 + i] = ts->m_handles[i].ptr;
-        extra_bufs[1 + np + i] = ts->v_bufs[i];
-        extra_ptrs[1 + np + i] = ts->v_handles[i].ptr;
-      }
-      extra_bufs[1 + 2*np] = ts->bc1_buf;
-      extra_ptrs[1 + 2*np] = ts->bc1_handle.ptr;
-      extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
-      extra_ptrs[1 + 2*np + 1] = ts->bc2_handle.ptr;
-    }
-
-    PolyDeviceId device = inst->buf_handles[0].domain;
-    inst->train_cache = slot_cache_build(inst, ts->combined_sink, device,
-                                          extra_bufs, extra_ptrs, n_extra);
-    free(extra_bufs);
-    free(extra_ptrs);
-    c = inst->train_cache;
-    if (!c) { o->step--; return -1; }
+  PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
+  PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
+  if (!extra_bufs || !extra_handles) {
+    free(extra_bufs); free(extra_handles);
+    o->step--;
+    return -1;
   }
 
-  /* Patch IO slots */
-  for (int i = 0; i < n_io; i++) {
-    if (!io[i].data || !io[i].name) continue;
-    int bi = find_buf_by_name(inst, io[i].name);
-    if (bi < 0) continue;
-    if (!poly_device_is_host_addressable(inst->buf_handles[bi].domain)) {
-      const PolyBackendDesc *bd = poly_backend_get(inst->buf_handles[bi].domain);
-      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
-      if (a && a->copy_in)
-        a->copy_in(inst->buf_handles[bi].ptr, io[i].data,
-                   inst->buf_handles[bi].nbytes, a->dev_ctx);
-    } else {
-      for (int j = 0; j < c->n_io; j++) {
-        if (c->io_buf_indices[j] == bi) {
-          c->slot_data[c->io_slot_indices[j]] = io[i].data;
-          break;
-        }
-      }
+  extra_bufs[0] = ts->loss_out_buf;
+  extra_handles[0] = ts->loss_handle;
+  if (has_moments) {
+    for (int i = 0; i < np; i++) {
+      extra_bufs[1 + i] = ts->m_bufs[i];
+      extra_handles[1 + i] = ts->m_handles[i];
+      extra_bufs[1 + np + i] = ts->v_bufs[i];
+      extra_handles[1 + np + i] = ts->v_handles[i];
     }
+    extra_bufs[1 + 2*np] = ts->bc1_buf;
+    extra_handles[1 + 2*np] = ts->bc1_handle;
+    extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
+    extra_handles[1 + 2*np + 1] = ts->bc2_handle;
   }
 
-  int ret = poly_compiled_plan_run(c->plan, c->slot_data, c->n_slots, NULL, 0);
+  int n_bindings = 0;
+  PolyBufferBinding *bindings = build_bindings_extended(
+      inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
+  free(extra_bufs);
+  free(extra_handles);
+  if (!bindings) { o->step--; return -1; }
+
+  int ret = poly_realize(inst->ctx, ts->combined_sink, bindings, n_bindings);
+  free(bindings);
   if (ret != 0) { o->step--; return ret; }
 
   /* Read back loss from device to host if not host-addressable */
