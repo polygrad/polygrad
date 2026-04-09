@@ -140,23 +140,21 @@ async function createWebGpuBackend() {
           })
         }
 
-        // Copy leaf data and const registry data to GPU
+        // Copy leaf data to GPU.
+        // Phase E removed the const-registry fallback (Module._poly_const
+        // _buffer_data): poly_arange / poly_eye / poly_full / poly_tril /
+        // poly_rand are all pure-UOp now and don't produce const buffers,
+        // so every bindable buffer must be in leafMap. Bindable buffers
+        // missing from leafMap indicate a real binding bug.
         for (let bi = 0; bi < nBindable; bi++) {
           const bufIdx = Module._poly_webgpu_stepplan_bindable_buf_index(plan, bi)
           const bufUop = Module._poly_kernel_buf(ctx, bi)
           const data = leafMap.get(bufUop)
-          if (data) {
-            device.queue.writeBuffer(gpuBufs[bufIdx], 0,
-              new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
-          } else {
-            // Const registry fallback (arange, causal mask, etc.)
-            const constPtr = Module._poly_const_buffer_data(ctx, bufUop)
-            if (constPtr) {
-              const nb = bufNbytes[bufIdx]
-              device.queue.writeBuffer(gpuBufs[bufIdx], 0,
-                new Uint8Array(heapU8().buffer, constPtr, nb).slice())
-            }
+          if (!data) {
+            throw new Error(`No data binding for bindable buffer ${bi}`)
           }
+          device.queue.writeBuffer(gpuBufs[bufIdx], 0,
+            new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
         }
 
         // Read exec order

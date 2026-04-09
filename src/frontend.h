@@ -177,7 +177,9 @@ typedef enum {
   POLY_STEP_BUF_INPUT = 0,
   POLY_STEP_BUF_OUTPUT = 1,
   POLY_STEP_BUF_TEMP = 2,
-  POLY_STEP_BUF_CONSTANT = 3,
+  /* Phase E: POLY_STEP_BUF_CONSTANT = 3 was removed along with the
+   * const-registry. Pure-UOp creation helpers (arange/eye/full/...) never
+   * produce constant-role buffers any more. */
 } PolyStepBufRole;
 
 #define POLY_STEP_BUFFER_INFO_VERSION 1

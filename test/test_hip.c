@@ -497,10 +497,16 @@ TEST(hip, instance_hip_roundtrip) {
   PASS();
 }
 
-/* ── Regression: realize_ex with const-registry buffers on GPU ─────────── */
-/* poly_full creates a const-registry buffer. The shared migration helper
- * must migrate it to device; without that, the kernel accesses host memory. */
-TEST(hip, realize_ex_const_registry) {
+/* ── Regression: realize_ex with poly_full + DEFINE_VAR shape on GPU ───── */
+/* Originally landed (pre-Phase-B) as a guard for the const-registry buffer
+ * migration path: poly_full used to malloc a host buffer and stash it via
+ * g_const_bindings, which only worked on GPU after the realize-time
+ * migrated_consts[64] copy. Phase B (commit 6044282) rewrote poly_full as
+ * a pure UOp (CONST -> reshape -> expand), and Phase E deleted the
+ * const-registry entirely, so this test now exercises a different code
+ * path entirely: the only HIP smoke that runs poly_realize_ex with a
+ * DEFINE_VAR'd dynamic shape. Renamed accordingly. */
+TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
   SKIP_IF_NO_HIP();
   PolyCtx *ctx = poly_ctx_new();
 

@@ -826,7 +826,17 @@ TEST(step, compile_value_and_grad_quadratic) {
   PASS();
 }
 
-TEST(step, constant_buffers_autobind_rand) {
+TEST(step, zero_input_pure_uop_rand) {
+  /* Phase E: rewrite of the original `constant_buffers_autobind_rand` test.
+   *
+   * The original asserted `const_count > 0` to verify that poly_rand's
+   * uint32 counter buffer was autobound by the step API via the
+   * POLY_STEP_BUF_CONSTANT role. After Phase E, poly_rand builds its
+   * counter as pure UOp (poly_arange + cast to uint32), so there is no
+   * constant buffer at all -- only the output. The remaining edge case
+   * worth smoke-testing is: the step API can run a kernel that has zero
+   * external inputs and only an output binding. Codex high recommended
+   * preserving this smoke instead of deleting outright. */
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[1] = {16};
   PolyUOp *rnd = poly_rand(ctx, shape, 1, 1337u);
@@ -839,15 +849,16 @@ TEST(step, constant_buffers_autobind_rand) {
 
   int nbuf = poly_step_n_buffers(step);
   int out_idx = -1;
-  int const_count = 0;
+  int input_count = 0;
   PolyStepBufferInfo bi;
   for (int i = 0; i < nbuf; i++) {
     ASSERT_INT_EQ(poly_step_buffer_info(step, i, &bi), 0);
     if (bi.role == POLY_STEP_BUF_OUTPUT && bi.numel == 16) out_idx = i;
-    if (bi.role == POLY_STEP_BUF_CONSTANT) const_count++;
+    if (bi.role == POLY_STEP_BUF_INPUT) input_count++;
   }
   ASSERT_TRUE(out_idx >= 0);
-  ASSERT_TRUE(const_count > 0);
+  /* Phase E invariant: pure-UOp poly_rand has no INPUT buffers. */
+  ASSERT_INT_EQ(input_count, 0);
 
   float out1[16] = {0}, out2[16] = {0};
   void *bufs[64] = {0};

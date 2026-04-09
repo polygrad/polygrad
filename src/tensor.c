@@ -83,107 +83,6 @@ static bool shape_equal_except_axis(const int64_t *full, int full_ndim,
   return true;
 }
 
-static PolyUOp *make_const_buffer_tensor(PolyCtx *ctx, PolyDType dt,
-                                         const void *src, size_t elem_size,
-                                         const int64_t *shape, int ndim) {
-  int64_t numel = poly_shape_numel_checked(shape, ndim);
-  if (numel <= 0 || !src || elem_size == 0) return NULL;
-  if (numel > (1LL << 20)) {
-    fprintf(stderr, "polygrad: large constant-backed tensor (%lld elems); "
-            "prefer explicit bindings/device-generated paths for hot loops\n",
-            (long long)numel);
-  }
-  if ((size_t)numel > SIZE_MAX / elem_size) return NULL;
-  size_t nbytes = (size_t)numel * elem_size;
-  void *copy = malloc(nbytes);
-  if (!copy) return NULL;
-  memcpy(copy, src, nbytes);
-
-  PolyUOp *buf = poly_buffer(ctx, dt, numel);
-  poly_const_registry_add(ctx, buf, copy);
-  if (ndim == 1) return buf;
-  return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
-}
-
-static PolyUOp *make_const_f32_tensor(PolyCtx *ctx, const float *src,
-                                      const int64_t *shape, int ndim) {
-  return make_const_buffer_tensor(ctx, POLY_FLOAT32, src, sizeof(float), shape, ndim);
-}
-
-static PolyUOp *make_const_u32_tensor(PolyCtx *ctx, const uint32_t *src,
-                                      const int64_t *shape, int ndim) {
-  return make_const_buffer_tensor(ctx, POLY_UINT32, src, sizeof(uint32_t), shape, ndim);
-}
-
-/* ── Constant buffer registry (ctx-scoped) ─────────────────────────────
- *
- * Some additive frontend creation helpers (arange/full/rand/...) return
- * BUFFER-backed tensors. We retain host data here and auto-bind it when a
- * caller omits bindings for those buffers.
- */
-
-typedef struct {
-  PolyCtx *ctx;
-  PolyUOp *buf;
-  void *data;
-} PolyConstBindingEntry;
-
-static PolyConstBindingEntry *g_const_bindings = NULL;
-static int g_const_bindings_n = 0;
-static int g_const_bindings_cap = 0;
-
-void poly_const_registry_add(PolyCtx *ctx, PolyUOp *buf, void *data) {
-  if (!ctx || !buf || !data) return;
-  for (int i = 0; i < g_const_bindings_n; i++) {
-    if (g_const_bindings[i].ctx == ctx && g_const_bindings[i].buf == buf) {
-      free(g_const_bindings[i].data);
-      g_const_bindings[i].data = data;
-      return;
-    }
-  }
-  if (g_const_bindings_n == g_const_bindings_cap) {
-    int new_cap = (g_const_bindings_cap == 0) ? 64 : (g_const_bindings_cap * 2);
-    PolyConstBindingEntry *nb = realloc(g_const_bindings, (size_t)new_cap * sizeof(*nb));
-    if (!nb) {
-      free(data);
-      return;
-    }
-    g_const_bindings = nb;
-    g_const_bindings_cap = new_cap;
-  }
-  g_const_bindings[g_const_bindings_n++] = (PolyConstBindingEntry){
-    .ctx = ctx, .buf = buf, .data = data
-  };
-}
-
-void *poly_const_registry_lookup(PolyCtx *ctx, PolyUOp *buf) {
-  if (!ctx || !buf) return NULL;
-  for (int i = 0; i < g_const_bindings_n; i++) {
-    if (g_const_bindings[i].ctx == ctx && g_const_bindings[i].buf == buf)
-      return g_const_bindings[i].data;
-  }
-  return NULL;
-}
-
-bool poly_const_registry_has(PolyCtx *ctx, PolyUOp *buf) {
-  return poly_const_registry_lookup(ctx, buf) != NULL;
-}
-
-void poly_const_registry_cleanup(PolyCtx *ctx) {
-  if (g_const_bindings_n > 0) {
-    int wr = 0;
-    for (int i = 0; i < g_const_bindings_n; i++) {
-      if (g_const_bindings[i].ctx == ctx) {
-        free(g_const_bindings[i].data);
-        continue;
-      }
-      if (wr != i) g_const_bindings[wr] = g_const_bindings[i];
-      wr++;
-    }
-    g_const_bindings_n = wr;
-  }
-}
-
 /* ── Internal: compute output shape for a single-axis reduction ──────── */
 
 static void reduce_output_shape(const int64_t *shape, int ndim, int axis,
@@ -1461,22 +1360,36 @@ PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
 PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
   int64_t numel = poly_shape_numel_checked(shape, ndim);
   if (numel <= 0) return NULL;
-  if ((size_t)numel > SIZE_MAX / sizeof(uint32_t)) return NULL;
-  uint32_t *counter = malloc((size_t)numel * sizeof(uint32_t));
-  if (!counter) {
-    return NULL;
-  }
 
   uint32_t key_lo = (uint32_t)(seed & 0xffffffffu);
   uint32_t key_hi = (uint32_t)(seed >> 32);
   uint32_t mixed_key = key_lo ^ ((key_hi << 16) | (key_hi >> 16));
-  for (int64_t i = 0; i < numel; i++) {
-    counter[i] = (uint32_t)i;
-  }
 
-  PolyUOp *counter_t = make_const_u32_tensor(ctx, counter, shape, ndim);
-  free(counter);
-  if (!counter_t) return NULL;
+  /* Phase E: build the THREEFRY counter via pure-UOp arange instead of
+   * malloc'ing a uint32_t[numel] array and stashing it in g_const_bindings.
+   *
+   * Mirrors tinygrad's Tensor.rand at tensor.py:641 which uses
+   *   counts0 = Tensor.arange(ceildiv(chunk_num, 2), dtype=dtypes.uint32)
+   *
+   * Polygrad's poly_arange currently returns FLOAT32 (cumsum-of-step
+   * lowering), so we cast to UINT32 at the end. For numel < 2^24 this is
+   * bit-exact: cumulative addition of 1.0 N times is exact when N fits in
+   * the float32 mantissa, and CAST(float32, uint32) on a non-negative
+   * integer-valued float is the truncation (i.e. identity for these
+   * values). The bit-exact c2c_rand_threefry_pipeline test at
+   * test_nn.c:1488 covers this for N=8.
+   *
+   * After Phase D's pm_reduce_simplify the inner cumsum REDUCE collapses
+   * to a closed-form expression and the kernel emits
+   *     out[i] = THREEFRY((uint32)i, key)
+   * with no host buffer and no migrated_consts[64] dependency. */
+  PolyUOp *flat = poly_arange(ctx, 0.0, (double)numel, 1.0);
+  if (!flat) return NULL;
+  PolyUOp *counter_u32_flat = poly_cast(ctx, flat, POLY_UINT32);
+  PolyUOp *counter_t = (ndim == 1)
+      ? counter_u32_flat
+      : poly_reshape(ctx, counter_u32_flat, (int64_t *)shape, ndim);
+
   PolyUOp *key_t = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int((int64_t)mixed_key));
 
   PolyUOp *bits = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
@@ -2462,6 +2375,8 @@ PolyUOp *poly_mae_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target) {
   return poly_alu2(ctx, POLY_OP_FDIV, r, poly_const_float(ctx, (double)numel));
 }
 
-const void *poly_const_buffer_data(PolyCtx *ctx, PolyUOp *buf) {
-  return poly_const_registry_lookup(ctx, buf);
-}
+/* Phase E: poly_const_buffer_data + g_const_bindings + poly_const_registry_*
+ * + make_const_buffer_tensor were deleted. The const-registry path was the
+ * last hidden-state mechanism in tensor.c, used only by an old poly_rand
+ * implementation that has been rewritten to use a pure-UOp arange counter
+ * (see poly_rand below). */

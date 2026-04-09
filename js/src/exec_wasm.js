@@ -118,16 +118,15 @@ async function createWasmBackend(device) {
           const bufIdx = Module._poly_wasm_stepplan_bindable_buf_index(plan, bi)
           const bufUop = Module._poly_kernel_buf(ctx, bi)
           const data = leafMap.get(bufUop)
-          if (data) {
-            bufData[bufIdx] = data
-            bufNbytes[bufIdx] = data.byteLength
-          } else {
-            const constPtr = Module._poly_const_buffer_data(ctx, bufUop)
-            if (!constPtr) throw new Error(`No data binding for bindable buffer ${bi}`)
-            const nbytes = Number(Module._poly_wasm_stepplan_buf_nbytes(plan, bufIdx))
-            bufData[bufIdx] = new Uint8Array(heapU8().buffer, constPtr, nbytes)
-            bufNbytes[bufIdx] = nbytes
+          if (!data) {
+            // Phase E: const-registry has been removed from the C core, so
+            // every bindable buffer must come from the caller's leafMap.
+            // The previous fallback (Module._poly_const_buffer_data) read
+            // from g_const_bindings, which no longer exists.
+            throw new Error(`No data binding for bindable buffer ${bi}`)
           }
+          bufData[bufIdx] = data
+          bufNbytes[bufIdx] = data.byteLength
         }
 
         for (let i = nBindable; i < nBufs; i++) {

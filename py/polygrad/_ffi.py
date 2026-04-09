@@ -59,7 +59,10 @@ class PolyDType(ctypes.Structure):
 POLY_STEP_BUF_INPUT = 0
 POLY_STEP_BUF_OUTPUT = 1
 POLY_STEP_BUF_TEMP = 2
-POLY_STEP_BUF_CONSTANT = 3
+# Phase E: POLY_STEP_BUF_CONSTANT = 3 was removed along with the
+# const-registry buffer migration path. poly_arange / poly_eye / poly_full /
+# poly_tril / poly_triu / poly_rand are pure-UOp now and never produce
+# constant-role buffers.
 
 class PolyStepBufferInfo(ctypes.Structure):
     _fields_ = [

@@ -15,12 +15,9 @@
 extern "C" {
 #endif
 
-/* ── Const buffer registry (shared between tensor.c and frontend.c) ──── */
-
-void poly_const_registry_add(PolyCtx *ctx, PolyUOp *buf, void *data);
-void *poly_const_registry_lookup(PolyCtx *ctx, PolyUOp *buf);
-bool poly_const_registry_has(PolyCtx *ctx, PolyUOp *buf);
-void poly_const_registry_cleanup(PolyCtx *ctx);
+/* Phase E: poly_const_registry_* declarations were removed along with the
+ * const-registry implementation. The hidden-state buffer migration path is
+ * gone; all creation helpers (arange/eye/full/tril/triu/rand) are pure UOp. */
 
 /* ── Shape helpers (shared) ──────────────────────────────────────────── */
 
@@ -205,8 +202,7 @@ PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
 PolyUOp *poly_mae_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
 
-/* Query constant buffer data. Returns NULL if buf is not a registered constant. */
-const void *poly_const_buffer_data(PolyCtx *ctx, PolyUOp *buf);
+/* Phase E: poly_const_buffer_data was removed along with the const-registry. */
 
 #ifdef __cplusplus
 }

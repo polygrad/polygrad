@@ -174,8 +174,8 @@ uint32_t poly_ptr_hash(const void *p) {
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
 }
 
-/* Constant buffer registry moved to tensor.c.
- * frontend.c uses poly_const_registry_* from tensor.h. */
+/* Phase E: const-registry was deleted from tensor.c, so the corresponding
+ * cleanup hook here no longer needs to drain g_const_bindings. */
 
 #ifndef __EMSCRIPTEN__
 static void realize_cache_purge(PolyCtx *ctx); /* defined below */
@@ -183,7 +183,6 @@ static void realize_cache_purge(PolyCtx *ctx); /* defined below */
 void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
   if (!ctx) return;
   realize_cache_purge(ctx);
-  poly_const_registry_cleanup(ctx);
 }
 #endif
 
@@ -672,8 +671,8 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
           }
         }
         if (is_output) m->role = POLY_STEP_BUF_OUTPUT;
-        else if (poly_const_registry_has(ctx, buf)) m->role = POLY_STEP_BUF_CONSTANT;
         else m->role = POLY_STEP_BUF_INPUT;
+        /* Phase E: POLY_STEP_BUF_CONSTANT removed; const-registry deleted. */
       }
       m->dtype = slot->dtype;
       m->numel = slot->numel;
@@ -819,11 +818,9 @@ int poly_step_run_ex(PolyStep *step,
       slot_data[pos] = bindings[j].handle.ptr;
   }
 
-  /* Fill const-registry entries for unbound external slots */
-  for (int i = 0; i < n_slots; i++) {
-    if (!slot_data[i] && !sched->buf_slots[i].is_intermediate && step->ctx)
-      slot_data[i] = poly_const_registry_lookup(step->ctx, sched->buf_slots[i].buf_uop);
-  }
+  /* Phase E: const-registry autobind path removed. Unbound external slots
+   * are now an explicit caller error rather than being silently filled
+   * from g_const_bindings. */
 
   int ret = poly_compiled_plan_run(step->plan, slot_data, n_slots,
                                    var_bindings, n_var_bindings);
@@ -1084,6 +1081,7 @@ static void **build_slot_data_from_bindings(PolyCtx *ctx, const PolySchedule *sc
   void **slot_data = calloc((size_t)sched->n_buf_slots, sizeof(void *));
   if (!slot_data) return NULL;
 
+  (void)ctx;
   for (int s = 0; s < sched->n_buf_slots; s++) {
     if (sched->buf_slots[s].is_intermediate) continue;
     PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
@@ -1093,8 +1091,9 @@ static void **build_slot_data_from_bindings(PolyCtx *ctx, const PolySchedule *sc
         break;
       }
     }
-    if (!slot_data[s] && ctx)
-      slot_data[s] = poly_const_registry_lookup(ctx, slot_uop);
+    /* Phase E: const-registry autobind path removed. Unbound external
+     * slots now stay NULL and the caller-side error reporting picks them
+     * up — they used to be silently filled from g_const_bindings. */
   }
   return slot_data;
 }
@@ -1168,70 +1167,16 @@ static int migrate_to_device(PolyCtx *ctx, PolyUOp *tensor_sink,
     dev[i].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
   }
 
-  /* Discover and migrate const-registry buffers */
-  int total = n_bindings;
-  uint32_t hash = poly_structural_hash(tensor_sink)
-                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
-  if (!sched) {
-    sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
-    if (sched) r_sched_put(ctx, tensor_sink, hash, POLY_MODE_CALL, sched);
-  }
-
-  if (sched) {
-    int n_consts = 0;
-    for (int s = 0; s < sched->n_buf_slots; s++) {
-      if (sched->buf_slots[s].is_intermediate) continue;
-      PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
-      bool is_bound = false;
-      for (int j = 0; j < n_bindings; j++)
-        if (dev[j].buffer == slot_uop) { is_bound = true; break; }
-      if (is_bound) continue;
-      if (poly_const_registry_lookup(ctx, slot_uop)) n_consts++;
-    }
-
-    if (n_consts > 0) {
-      total = n_bindings + n_consts;
-      PolyBufferBinding *grown = realloc(dev, (size_t)total * sizeof(PolyBufferBinding));
-      if (!grown) {
-        for (int j = 0; j < n_bindings; j++) alloc->free(dev[j].handle.ptr, alloc->dev_ctx);
-        free(dev);
-        return -1;
-      }
-      dev = grown;
-
-      int ci = 0;
-      for (int s = 0; s < sched->n_buf_slots; s++) {
-        if (sched->buf_slots[s].is_intermediate) continue;
-        PolyUOp *slot_uop = sched->buf_slots[s].buf_uop;
-        bool is_bound = false;
-        for (int j = 0; j < n_bindings; j++)
-          if (dev[j].buffer == slot_uop) { is_bound = true; break; }
-        if (is_bound) continue;
-        void *host = poly_const_registry_lookup(ctx, slot_uop);
-        if (!host) continue;
-        size_t nbytes = (size_t)sched->buf_slots[s].nbytes;
-        if (nbytes == 0) nbytes = (size_t)sched->buf_slots[s].numel *
-            poly_dtype_itemsize(poly_dtype_scalar(sched->buf_slots[s].dtype));
-        void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-        if (!dptr) {
-          for (int k = 0; k < ci; k++)
-            alloc->free(dev[n_bindings + k].handle.ptr, alloc->dev_ctx);
-          for (int k = 0; k < n_bindings; k++)
-            alloc->free(dev[k].handle.ptr, alloc->dev_ctx);
-          free(dev);
-          return -1;
-        }
-        alloc->copy_in(dptr, host, nbytes, alloc->dev_ctx);
-        dev[n_bindings + ci].buffer = slot_uop;
-        dev[n_bindings + ci].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
-        ci++;
-      }
-    }
-  }
+  /* Phase E: the const-registry buffer migration block (formerly the
+   * migrated_consts[64] workaround) was removed entirely. poly_arange /
+   * poly_eye / poly_full / poly_tril / poly_triu / poly_rand are pure
+   * UOps now and never produce host-backed const buffers, so there is
+   * nothing to migrate to device. tensor_sink is unused after this
+   * deletion (kept in the signature for ABI stability). */
+  (void)tensor_sink;
 
   *out_dev = dev;
-  *out_total = total;
+  *out_total = n_bindings;
   return 0;
 }
 
