@@ -667,6 +667,90 @@ TEST(sym, poly_eq_returns_bool) {
   PASS();
 }
 
+/* ── CAST(CONST) constant fold parity (Phase D regression coverage) ────
+ *
+ * Mirrors test/parity_scripts/tg_cast_const_fold_gt.py cases A-E.
+ *
+ * History: Phase D's pm_reduce_unparented produces
+ *   MUL(CONST_float, CAST(CONST_int -> float))
+ * which symbolic_simple folds via rule_cast_const + rule_const_fold_binary.
+ * The original poly_const_like (src/pat.c) blindly copied the source
+ * CONST's PolyArg into a CONST tagged with the new dtype, producing a
+ * CONST(dtype=float, arg.kind=INT) — a tagged-union mismatch that the
+ * codegen misread as a denormal/zero. The fix: poly_const_like now
+ * normalizes the value through poly_arg_float / _int / _bool dispatch,
+ * matching tinygrad's DType.const(b) at dtype.py:92-100. These tests
+ * lock the fix in place. */
+
+TEST(sym, cast_const_int_to_float) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *cast = poly_cast(ctx, c, POLY_FLOAT32);
+  PolyUOp *folded = simplify(ctx, cast);
+  ASSERT_TRUE(folded->op == POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_FLOAT32));
+  ASSERT_TRUE(folded->arg.kind == POLY_ARG_FLOAT);
+  ASSERT_TRUE(folded->arg.f == 5.0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, cast_const_float_to_int) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.7));
+  PolyUOp *cast = poly_cast(ctx, c, POLY_INT32);
+  PolyUOp *folded = simplify(ctx, cast);
+  ASSERT_TRUE(folded->op == POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_INT32));
+  ASSERT_TRUE(folded->arg.kind == POLY_ARG_INT);
+  ASSERT_INT_EQ((int)folded->arg.i, 3);     /* truncates to 3 */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, cast_const_bool_to_float) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+  PolyUOp *cast = poly_cast(ctx, c, POLY_FLOAT32);
+  PolyUOp *folded = simplify(ctx, cast);
+  ASSERT_TRUE(folded->op == POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_FLOAT32));
+  ASSERT_TRUE(folded->arg.kind == POLY_ARG_FLOAT);
+  ASSERT_TRUE(folded->arg.f == 1.0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, cast_const_zero_int_to_bool) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *cast = poly_cast(ctx, c, POLY_BOOL);
+  PolyUOp *folded = simplify(ctx, cast);
+  ASSERT_TRUE(folded->op == POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_BOOL));
+  ASSERT_TRUE(folded->arg.kind == POLY_ARG_BOOL);
+  ASSERT_TRUE(folded->arg.b == false);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* The exact MUL(CONST_float, CAST(CONST_int)) shape that pm_reduce_unparented
+ * produces and that triggered the original expand_reduce_e2e regression. */
+TEST(sym, mul_float_cast_int_const_fold) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one_f = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *five_i = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *cast = poly_cast(ctx, five_i, POLY_FLOAT32);
+  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, one_f, cast);
+  PolyUOp *folded = simplify(ctx, mul);
+  ASSERT_TRUE(folded->op == POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_FLOAT32));
+  ASSERT_TRUE(folded->arg.kind == POLY_ARG_FLOAT);
+  ASSERT_TRUE(folded->arg.f == 5.0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sym, double_logical_not_idempotent_via_minmax) {
   /* Tinygrad symbolic.py:91: x.logical_not().logical_not() -> x.
    * Polygrad doesn't have a dedicated rewrite rule for this CMPNE form

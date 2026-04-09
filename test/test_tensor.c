@@ -1654,13 +1654,19 @@ TEST(pe, triu_pure_uop_diag_neg1) {
 /*  test should schedule first then inspect the kernel UOps.              */
 /* ═══════════════════════════════════════════════════════════════════════ */
 TEST(pe, arange_range_collapse_structural) {
-  /* Gates Phase D: needs (a) reduce-collapse simplify pass landed in
-   * rangeify (codex audit recommended insertion at rangeify.c:2796) AND
-   * (b) this test rewritten to schedule first then inspect kernel UOps
-   * (currently bypasses rangeify entirely by calling poly_full_rewrite_to_sink_ex
-   * directly on a tensor sink). Both land together in the reduce-collapse commit. */
-  SKIP("gates Phase D: reduce-collapse simplify pass + schedule-first inspection");
-
+  /* Phase D structural assertion: after pm_reduce_simplify lands in
+   * rangeify, poly_arange's REDUCE-based cumsum collapses to a closed-form
+   * `i*step + start` expression. Schedule the arange (which runs the full
+   * rangeify+reduce_simplify pipeline) and inspect the kernel UOps:
+   *
+   *   exactly 1 RANGE   (the output index)
+   *   0 LOAD            (no buffer reads -- pure compute)
+   *   0 REDUCE          (the cumsum REDUCE was eliminated)
+   *   1 STORE           (single store per element)
+   *
+   * Mirrors tinygrad's E_5 kernel for Tensor.arange(5):
+   *   *(data0+gidx0) = gidx0;
+   */
   PolyCtx *ctx = poly_ctx_new();
 
   const struct { double start, stop, step; } cases[] = {
@@ -1677,19 +1683,17 @@ TEST(pe, arange_range_collapse_structural) {
     PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, ar));
     ASSERT_NOT_NULL(sink);
 
-    PolyRewriteOpts opts = {0};
-    opts.optimize = true;
-    PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
-    ASSERT_NOT_NULL(rewritten);
-
-    int n_topo = 0;
-    /* poly_toposort returns arena-owned memory; do not free. */
-    PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
-    ASSERT_NOT_NULL(topo);
+    /* Schedule (runs rangeify + reduce_simplify), then linearize. */
+    PolyUOp *kernel = poly_schedule(ctx, sink);
+    ASSERT_NOT_NULL(kernel);
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
+    ASSERT_NOT_NULL(lin);
+    ASSERT_TRUE(n_lin > 0);
 
     int n_range = 0, n_load = 0, n_reduce = 0, n_store = 0;
-    for (int i = 0; i < n_topo; i++) {
-      switch (topo[i]->op) {
+    for (int i = 0; i < n_lin; i++) {
+      switch (lin[i]->op) {
         case POLY_OP_RANGE:        n_range++;  break;
         case POLY_OP_LOAD:         n_load++;   break;
         case POLY_OP_REDUCE:       n_reduce++; break;

@@ -10,6 +10,7 @@
 
 #include "rangeify.h"
 #include "indexing.h"
+#include "reduce_simplify.h"
 #include <assert.h>
 #include <math.h>
 #include <stdlib.h>
@@ -2846,6 +2847,20 @@ static PolyScheduleResult schedule_v2_new(PolyCtx *ctx, PolyUOp *tensor_sink) {
   /* Stage 3: Remove BUFFERIZEs that don't need materialization (pm_remove_bufferize).
    * Uses multi-range INDEX arity-equality match enabled by Stage 1.5. */
   PolyUOp *removed = poly_remove_bufferize(ctx, cleaned);
+
+  /* Stage 3.1: Phase D — pm_reduce_simplify (port of tinygrad
+   * codegen/simplify.py:147-149). Folds REDUCEs whose value doesn't
+   * span all of the surrounding ranges into closed-form expressions
+   * before the linearizer sees them.
+   *
+   * Tinygrad runs this fused with pm_remove_bufferize+symbolic in one
+   * fixpoint (rangeify.py:579). Polygrad runs it AFTER remove_bufferize
+   * because poly_uop_in_ranges_ex (which the unparented rule uses to
+   * partition reduce ranges) treats BUFFERIZE as a range terminator —
+   * running on the still-bufferized graph would mis-classify all reduce
+   * ranges as unparented.
+   */
+  removed = poly_apply_reduce_simplify(ctx, removed);
 
   /* Stage 3.25: Limit buffer count per kernel (pm_limit_bufs).
    * Only active when max_kernel_bufs > 0 (set via POLY_MAX_KERNEL_BUFFERS

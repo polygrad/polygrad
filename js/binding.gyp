@@ -23,6 +23,7 @@
         "csrc/ops.c",
         "csrc/pat.c",
         "csrc/rangeify.c",
+        "csrc/reduce_simplify.c",
         "csrc/recipe.c",
         "csrc/render_c.c",
         "csrc/runtime_cpu.c",

@@ -43,6 +43,7 @@ SOURCES = [
     'src/interp.c',
     'src/bundle.c',
     'src/rangeify.c',
+    'src/reduce_simplify.c',
     'src/indexing.c',
     'src/nn.c',
     # CODEC_SRC
@@ -89,6 +90,7 @@ HEADERS = [
     'src/nn.h',
     'src/pat.h',
     'src/rangeify.h',
+    'src/reduce_simplify.h',
     'src/recipe.h',
     'src/safetensors.h',
     'src/scheduler.h',

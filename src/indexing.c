@@ -230,13 +230,29 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
             poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()),
             poly_arg_none());
       }
-      /* valid_i = (shifted >= 0) AND (shifted < in_dim) */
+      /* valid_i = (shifted >= 0) AND (shifted < in_dim).
+       *
+       * `(shifted >= 0)` must be in polygrad's canonical bool form
+       * (CMPNE(CMPLT(shifted, 0), CONST(true))) — matching tinygrad's
+       * `__ge__` (mixin/elementwise.py:240-241) which expands to
+       * `(self < x).logical_not()` and then `logical_not()` (line 33)
+       * which is `self.cast(bool).ne(True)`. Symbolic eliminates the
+       * redundant CAST, leaving `CMPNE(CMPLT(shifted, 0), True)`.
+       *
+       * Polygrad previously used `NEG(CMPLT(shifted, 0), POLY_BOOL)` which
+       * is semantically equivalent (alu.c:169 lowers NEG-on-bool to `!a`)
+       * but produces a divergent IR shape that prevents Phase D's
+       * reduce_collapse Rule 4 (fold_range_two_sided) from matching the
+       * pad-derived two-sided range mask. */
       PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
       PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
                                poly_arg_int(in_shape.dims[i]));
-      PolyUOp *ge_zero = poly_uop1(ctx, POLY_OP_NEG, POLY_BOOL,
-          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, zero,
-                    poly_arg_none()), poly_arg_none());
+      PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL,
+                                      poly_arg_bool(true));
+      PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
+                                   shifted, zero, poly_arg_none());
+      PolyUOp *ge_zero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL,
+                                   lt_zero, true_const, poly_arg_none());
       PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
                                   shifted, dim, poly_arg_none());
       PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,

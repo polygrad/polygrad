@@ -387,13 +387,23 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
             poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()),
             poly_arg_none());
       }
-      /* valid_i = NOT(in_idx < 0) AND (in_idx < in_dim) */
+      /* valid_i = NOT(in_idx < 0) AND (in_idx < in_dim).
+       *
+       * The "NOT" must be in polygrad's canonical bool form
+       * (CMPNE(x, CONST(true)), matching poly_logical_not in tensor.c:750
+       * and tinygrad's logical_not at uop/symbolic.py:126), NOT NEG(bool).
+       * The NEG-bool form was a polygrad-specific divergence that prevented
+       * Phase D's reduce_collapse Rule 4 (fold_range_two_sided) from
+       * matching the pad-derived two-sided range mask. */
       PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
       PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
                                poly_arg_int(in_shape.dims[i]));
-      PolyUOp *ge_zero = poly_uop1(ctx, POLY_OP_NEG, POLY_BOOL,
-          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, in_ranges[i], zero,
-                    poly_arg_none()), poly_arg_none());
+      PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL,
+                                      poly_arg_bool(true));
+      PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
+                                   in_ranges[i], zero, poly_arg_none());
+      PolyUOp *ge_zero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL,
+                                   lt_zero, true_const, poly_arg_none());
       PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
                                   in_ranges[i], dim, poly_arg_none());
       PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,

@@ -497,6 +497,12 @@ void poly_uop_minmax_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache,
 char *poly_uop_str(PolyUOp *u);
 char *poly_graph_str(PolyUOp *root);
 
+/* Recursive indented IR tree dump to a FILE*. Used by passes (rangeify,
+ * codegen, reduce_simplify) to print pre/post-rewrite IR for diagnostics.
+ * Caps recursion at max_depth (suggested: 12-16 for full graphs). */
+#include <stdio.h>
+void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth);
+
 /* ── Shape ────────────────────────────────────────────────────────────── */
 /* ndim == -1 means "no tensor shape" (kernel-level ops like RANGE, LOAD) */
 

@@ -641,6 +641,30 @@ PolyUOp *poly_graph_rewrite_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *
 /* ── UOp helpers for rewrite callbacks ────────────────────────────────── */
 
 PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
+  /* Normalise the arg kind to match ref->dtype.
+   *
+   * Tinygrad parity: every const construction goes through DType.const(b)
+   * which converts to ConstFloat(float(b)) / bool(b) / int(b) based on the
+   * target dtype (uop/ops.py:498-499 -> dtype.py:92-100). polygrad must do
+   * the same here, otherwise rule_cast_const (sym.c:534) would propagate
+   * a CONST_INT(5) into a float-tagged CONST and the codegen would mis-
+   * interpret arg.i as arg.f, lowering it to a denormal/zero. Verified
+   * against test/parity_scripts/tg_cast_const_fold_gt.py cases A-E. */
+  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_FLOAT ||
+      val.kind == POLY_ARG_BOOL) {
+    double dval;
+    if      (val.kind == POLY_ARG_INT)   dval = (double)val.i;
+    else if (val.kind == POLY_ARG_FLOAT) dval = val.f;
+    else                                 dval = val.b ? 1.0 : 0.0;
+    if (poly_dtype_is_float(ref->dtype))
+      return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_float(dval));
+    if (poly_dtype_is_bool(ref->dtype))
+      return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(dval != 0.0));
+    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_int((int64_t)dval));
+  }
+  /* Non-numeric arg kinds (NONE, OPS, RANGE, etc.) are passed through as-is
+   * for callers like rule_const_fold_unary that synthesise the right kind
+   * via poly_exec_alu. */
   return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, val);
 }
 

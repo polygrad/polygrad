@@ -828,6 +828,37 @@ char *poly_graph_str(PolyUOp *root) {
   return poly_uop_str(root);
 }
 
+/* Recursive indented tree dump to a FILE*. Used by debug paths in
+ * reduce_simplify.c, codegen.c, and any future pass that needs to inspect
+ * IR shape. Caps recursion at max_depth to keep output bounded on cyclic
+ * or very deep graphs (though hash-consed UOps cannot actually cycle). */
+void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
+  if (!u || !fp) return;
+  for (int i = 0; i < depth; i++) fputc(' ', fp);
+  fprintf(fp, "%s dt=%s n_src=%d",
+          poly_op_name(u->op),
+          u->dtype.name ? u->dtype.name : "?",
+          (int)u->n_src);
+  switch (u->arg.kind) {
+    case POLY_ARG_INT:   fprintf(fp, " i=%lld", (long long)u->arg.i); break;
+    case POLY_ARG_FLOAT: fprintf(fp, " f=%g", u->arg.f); break;
+    case POLY_ARG_BOOL:  fprintf(fp, " b=%d", (int)u->arg.b); break;
+    case POLY_ARG_OPS:   fprintf(fp, " op=%s", poly_op_name(u->arg.ops)); break;
+    case POLY_ARG_RANGE: fprintf(fp, " axis=%lld", (long long)u->arg.range.axis_id); break;
+    case POLY_ARG_DEFINE_VAR:
+      fprintf(fp, " var=%s[%lld,%lld]",
+              u->arg.define_var.name ? u->arg.define_var.name : "?",
+              (long long)u->arg.define_var.min_val,
+              (long long)u->arg.define_var.max_val);
+      break;
+    default: break;
+  }
+  fputc('\n', fp);
+  if (depth >= max_depth) return;
+  for (uint16_t i = 0; i < u->n_src; i++)
+    poly_uop_dump_tree(fp, u->src[i], depth + 2, max_depth);
+}
+
 /* ── Named buffer registry ──────────────────────────────────────────── */
 
 #include <stdarg.h>
