@@ -547,6 +547,57 @@ TEST(codegen, render_wgsl_reduce) {
   PASS();
 }
 
+TEST(codegen, render_wgsl_define_var) {
+  /* out[i] = data[i] + cast(N) for i in 0..N, with N as DEFINE_VAR.
+   * Verified against tinygrad: PARAM gets var<storage,read_write>,
+   * DEFINE_VAR gets var<uniform>, sequential binding indices. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *N  = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32,
+                           poly_arg_define_var("N", 1, 16));
+
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, N, poly_arg_int(0));
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *cast_n = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, N, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, cast_n, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, add, poly_arg_none());
+
+  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
+  char *src = poly_render_wgsl(lin, n_lin, "var_kernel");
+
+  /* binding(0) = INFINITY uniform (always) */
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(0)\nvar<uniform> INFINITY"));
+
+  /* binding(1) = data0 storage buffer */
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)\nvar<storage,read_write> data0: array<f32>"));
+
+  /* binding(2) = data1 storage buffer */
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)\nvar<storage,read_write> data1: array<f32>"));
+
+  /* binding(3) = N scalar uniform (DEFINE_VAR) */
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)\nvar<uniform> N: i32"));
+
+  /* the variable name N appears in the kernel body */
+  ASSERT_NOT_NULL(strstr(src, "f32(N)"));
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ── WebGPU step plan tests ──────────────────────────────────────────── */
 
 TEST(codegen, webgpu_stepplan_vecadd) {

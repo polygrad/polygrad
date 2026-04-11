@@ -197,10 +197,13 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   WgslStrMap names;
   wsm_init(&names, n);
 
-  /* Collect buffer binding info: (name, binding_index, dtype) */
+  /* Kernel parameter bindings: PARAM (storage) and DEFINE_VAR (uniform).
+   * Tinygrad cstyle.py:182-186 collects both into one `bufs` dict in
+   * traversal order; wgsl.py:110-112 assigns sequential binding indices. */
   char *binding_names[64];
   int binding_indices[64];
   PolyDType binding_dtypes[64];
+  bool binding_is_buffer[64];
   int n_bindings = 0;
 
   /* prefix counters */
@@ -254,15 +257,22 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       binding_names[n_bindings] = strdup(name);
       binding_indices[n_bindings] = (int)u->arg.i;
       binding_dtypes[n_bindings] = poly_dtype_scalar(u->dtype);
+      binding_is_buffer[n_bindings] = true;
       n_bindings++;
       continue;
     }
 
-    /* --- DEFINE_VAR: integer parameter (as var) ----------------------- */
+    /* --- DEFINE_VAR: scalar uniform binding --------------------------- */
     if (u->op == POLY_OP_DEFINE_VAR) {
       const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
                         : (u->arg.str ? u->arg.str : "var");
       wsm_set(&names, u, strdup(vname));
+
+      binding_names[n_bindings] = strdup(vname);
+      binding_indices[n_bindings] = n_bindings;
+      binding_dtypes[n_bindings] = poly_dtype_scalar(u->dtype);
+      binding_is_buffer[n_bindings] = false;
+      n_bindings++;
       continue;
     }
 
@@ -615,16 +625,19 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     int ki = binding_indices[i];
     char *kn = binding_names[i];
     PolyDType kd = binding_dtypes[i];
+    bool kb = binding_is_buffer[i];
     int j = i - 1;
     while (j >= 0 && binding_indices[j] > ki) {
       binding_indices[j+1] = binding_indices[j];
       binding_names[j+1] = binding_names[j];
       binding_dtypes[j+1] = binding_dtypes[j];
+      binding_is_buffer[j+1] = binding_is_buffer[j];
       j--;
     }
     binding_indices[j+1] = ki;
     binding_names[j+1] = kn;
     binding_dtypes[j+1] = kd;
+    binding_is_buffer[j+1] = kb;
   }
 
   /* ── Build complete source ─────────────────────────────────────────── */
@@ -644,12 +657,17 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     wsb_printf(&out, "%s\n", extern_locals[i]);
   }
 
-  /* Buffer bindings: offset by +1 (binding 0 = INFINITY uniform).
-   * Tinygrad: bufs start at binding(1) after INFINITY at binding(0). */
+  /* Parameter bindings: sequential indices starting at 1 (binding 0 = INFINITY).
+   * Storage buffers use var<storage,read_write>, scalar vars use var<uniform>. */
   for (int i = 0; i < n_bindings; i++) {
     const char *tn = wgsl_type_name(binding_dtypes[i]);
-    wsb_printf(&out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n",
-               binding_indices[i] + 1, binding_names[i], tn);
+    if (binding_is_buffer[i]) {
+      wsb_printf(&out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n",
+                 binding_indices[i] + 1, binding_names[i], tn);
+    } else {
+      wsb_printf(&out, "@group(0) @binding(%d)\nvar<uniform> %s: %s;\n",
+                 binding_indices[i] + 1, binding_names[i], tn);
+    }
   }
 
   /* Compute shader entry point.
