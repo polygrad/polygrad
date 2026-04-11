@@ -7,12 +7,12 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ── Round-trip: single tensor ─────────────────────────────────────── */
+/* Round-trip: single tensor */
 
 TEST(safetensors, round_trip_single) {
-  float data[] = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
-  int64_t shape[] = { 2, 3 };
-  PolySafetensorEntry entry = { "weight", data, shape, 2 };
+  float data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  int64_t shape[] = {2, 3};
+  PolySafetensorEntry entry = {"weight", data, shape, 2};
 
   int out_len = 0;
   uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &out_len);
@@ -41,17 +41,17 @@ TEST(safetensors, round_trip_single) {
   PASS();
 }
 
-/* ── Round-trip: multiple tensors ──────────────────────────────────── */
+/* Round-trip: multiple tensors */
 
 TEST(safetensors, round_trip_multiple) {
-  float w_data[] = { 1.0f, 2.0f, 3.0f, 4.0f };
-  float b_data[] = { 0.5f, -0.5f };
-  int64_t w_shape[] = { 2, 2 };
-  int64_t b_shape[] = { 2 };
+  float w_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_data[] = {0.5f, -0.5f};
+  int64_t w_shape[] = {2, 2};
+  int64_t b_shape[] = {2};
 
   PolySafetensorEntry entries[] = {
-    { "layers.0.weight", w_data, w_shape, 2 },
-    { "layers.0.bias", b_data, b_shape, 1 },
+      {"layers.0.weight", w_data, w_shape, 2},
+      {"layers.0.bias", b_data, b_shape, 1},
   };
 
   int out_len = 0;
@@ -76,17 +76,18 @@ TEST(safetensors, round_trip_multiple) {
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(views[1].data[i], w_data[i], 0.0);
 
-  for (int i = 0; i < n; i++) free(views[i].name);
+  for (int i = 0; i < n; i++)
+    free(views[i].name);
   free(views);
   free(bytes);
   PASS();
 }
 
-/* ── Round-trip: scalar (0-dim tensor) ─────────────────────────────── */
+/* Round-trip: scalar (0-dim tensor) */
 
 TEST(safetensors, round_trip_scalar) {
   float data = 42.0f;
-  PolySafetensorEntry entry = { "loss", &data, NULL, 0 };
+  PolySafetensorEntry entry = {"loss", &data, NULL, 0};
 
   int out_len = 0;
   uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &out_len);
@@ -106,12 +107,12 @@ TEST(safetensors, round_trip_scalar) {
   PASS();
 }
 
-/* ── Metadata round-trip ──────────────────────────────────────────── */
+/* Metadata round-trip */
 
 TEST(safetensors, metadata_round_trip) {
-  float data[] = { 1.0f };
-  int64_t shape[] = { 1 };
-  PolySafetensorEntry entry = { "x", data, shape, 1 };
+  float data[] = {1.0f};
+  int64_t shape[] = {1};
+  PolySafetensorEntry entry = {"x", data, shape, 1};
 
   const char *meta_json = "{\"kind\":\"adamw\",\"lr\":0.001}";
   int out_len = 0;
@@ -136,7 +137,7 @@ TEST(safetensors, metadata_round_trip) {
   PASS();
 }
 
-/* ── Empty (zero tensors) ─────────────────────────────────────────── */
+/* Empty (zero tensors) */
 
 TEST(safetensors, encode_empty) {
   int out_len = 0;
@@ -153,10 +154,10 @@ TEST(safetensors, encode_empty) {
   PASS();
 }
 
-/* ── Decode: truncated data ───────────────────────────────────────── */
+/* Decode: truncated data */
 
 TEST(safetensors, decode_truncated) {
-  uint8_t short_buf[] = { 0, 0, 0, 0 };
+  uint8_t short_buf[] = {0, 0, 0, 0};
   int n = 0;
   PolySafetensorView *views = poly_safetensors_decode(short_buf, 4, &n, NULL);
   ASSERT_TRUE(views == NULL);
@@ -164,15 +165,16 @@ TEST(safetensors, decode_truncated) {
   PASS();
 }
 
-/* ── Large tensor round-trip ──────────────────────────────────────── */
+/* Large tensor round-trip */
 
 TEST(safetensors, round_trip_large) {
   int64_t numel = 1024;
   float *data = malloc(numel * sizeof(float));
-  for (int64_t i = 0; i < numel; i++) data[i] = (float)i * 0.001f;
+  for (int64_t i = 0; i < numel; i++)
+    data[i] = (float)i * 0.001f;
 
-  int64_t shape[] = { 32, 32 };
-  PolySafetensorEntry entry = { "big_weight", data, shape, 2 };
+  int64_t shape[] = {32, 32};
+  PolySafetensorEntry entry = {"big_weight", data, shape, 2};
 
   int out_len = 0;
   uint8_t *bytes = poly_safetensors_encode(&entry, 1, NULL, &out_len);
@@ -194,19 +196,19 @@ TEST(safetensors, round_trip_large) {
   PASS();
 }
 
-/* ── Deterministic ordering ───────────────────────────────────────── */
+/* Deterministic ordering */
 
 TEST(safetensors, deterministic_ordering) {
-  float a_data[] = { 1.0f };
-  float b_data[] = { 2.0f };
-  float c_data[] = { 3.0f };
-  int64_t shape[] = { 1 };
+  float a_data[] = {1.0f};
+  float b_data[] = {2.0f};
+  float c_data[] = {3.0f};
+  int64_t shape[] = {1};
 
   /* Create entries in reverse order */
   PolySafetensorEntry entries[] = {
-    { "z_param", a_data, shape, 1 },
-    { "a_param", b_data, shape, 1 },
-    { "m_param", c_data, shape, 1 },
+      {"z_param", a_data, shape, 1},
+      {"a_param", b_data, shape, 1},
+      {"m_param", c_data, shape, 1},
   };
 
   int len1 = 0, len2 = 0;
@@ -226,7 +228,8 @@ TEST(safetensors, deterministic_ordering) {
   ASSERT_STR_EQ(views[1].name, "m_param");
   ASSERT_STR_EQ(views[2].name, "z_param");
 
-  for (int i = 0; i < n; i++) free(views[i].name);
+  for (int i = 0; i < n; i++)
+    free(views[i].name);
   free(views);
   free(bytes1);
   free(bytes2);

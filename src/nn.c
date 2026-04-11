@@ -10,27 +10,24 @@
 
 #include "nn.h"
 #include "frontend.h"
-#include "tensor.h"     /* poly_mean_reduce */
-#include "scheduler.h"  /* poly_reshape, poly_permute, poly_expand */
+#include "tensor.h" /* poly_mean_reduce */
+#include "scheduler.h" /* poly_reshape, poly_permute, poly_expand */
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 
-/* ── RNG ────────────────────────────────────────────────────────────── */
+/* RNG */
 
 static uint32_t nn_rng_state = 12345;
 
-void poly_nn_seed(uint32_t seed) { nn_rng_state = seed; }
+void poly_nn_seed(uint32_t seed) {
+  nn_rng_state = seed;
+}
 
-/* ── Linear ─────────────────────────────────────────────────────────── */
+/* Linear */
 
-PolyUOp *poly_linear_apply(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    PolyUOp *w,
-    PolyUOp *b
-) {
+PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b) {
   if (!ctx || !x || !w) return NULL;
   int64_t perm[] = {1, 0};
   PolyUOp *out = poly_dot(ctx, x, poly_permute(ctx, w, perm, 2));
@@ -62,7 +59,7 @@ PolyUOp *poly_linear(
   return poly_linear_apply(ctx, x, w, b);
 }
 
-/* ── LayerNorm ──────────────────────────────────────────────────────── */
+/* LayerNorm */
 
 PolyUOp *poly_layernorm_apply(
     PolyCtx *ctx,
@@ -78,14 +75,8 @@ PolyUOp *poly_layernorm_apply(
   PolyUOp *centered = poly_sub(ctx, x, mean);
   PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, centered, centered);
   PolyUOp *var = poly_mean_reduce(ctx, sq, axis, 1);
-  PolyUOp *denom = poly_alu1(
-      ctx, POLY_OP_SQRT,
-      poly_add(ctx, var, poly_const_float(ctx, eps))
-  );
-  PolyUOp *normed = poly_mul(
-      ctx, centered,
-      poly_alu1(ctx, POLY_OP_RECIPROCAL, denom)
-  );
+  PolyUOp *denom = poly_alu1(ctx, POLY_OP_SQRT, poly_add(ctx, var, poly_const_float(ctx, eps)));
+  PolyUOp *normed = poly_mul(ctx, centered, poly_alu1(ctx, POLY_OP_RECIPROCAL, denom));
 
   if (w) normed = poly_mul(ctx, normed, w);
   if (b) normed = poly_add(ctx, normed, b);
@@ -93,34 +84,20 @@ PolyUOp *poly_layernorm_apply(
   return normed;
 }
 
-PolyUOp *poly_layernorm(
-    PolyCtx *ctx,
-    const char *prefix,
-    PolyUOp *x,
-    int dim,
-    double eps
-) {
+PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
   int64_t ds[] = {dim};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
   PolyUOp *b = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.bias", prefix);
   if (!w || !b) return NULL;
 
   return poly_layernorm_apply(
-      ctx, x,
-      poly_reshape(ctx, w, ds, 1),
-      poly_reshape(ctx, b, ds, 1),
-      -1, eps
+      ctx, x, poly_reshape(ctx, w, ds, 1), poly_reshape(ctx, b, ds, 1), -1, eps
   );
 }
 
-/* ── RMSNorm ────────────────────────────────────────────────────────── */
+/* RMSNorm */
 
-PolyUOp *poly_rmsnorm_apply(
-    PolyCtx *ctx,
-    PolyUOp *x,
-    PolyUOp *w,
-    double eps
-) {
+PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
   if (!ctx || !x) return NULL;
   int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 1) return NULL;
@@ -143,7 +120,8 @@ PolyUOp *poly_rmsnorm_apply(
     if (w_ndim == 1) {
       const int64_t *w_dims = poly_uop_dims(ctx, w);
       int64_t bc[POLY_MAX_DIMS];
-      for (int i = 0; i < ndim - 1; i++) bc[i] = 1;
+      for (int i = 0; i < ndim - 1; i++)
+        bc[i] = 1;
       bc[ndim - 1] = w_dims ? w_dims[0] : 0;
       PolyUOp *w_r = poly_reshape(ctx, w, bc, ndim);
       PolyUOp *w_e = poly_expand(ctx, w_r, shape, ndim);
@@ -153,26 +131,16 @@ PolyUOp *poly_rmsnorm_apply(
   return normed;
 }
 
-PolyUOp *poly_rmsnorm(
-    PolyCtx *ctx,
-    const char *prefix,
-    PolyUOp *x,
-    int dim,
-    double eps
-) {
+PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps) {
   int64_t ds[] = {dim};
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ds, 1, "%s.weight", prefix);
   if (!w) return NULL;
   return poly_rmsnorm_apply(ctx, x, poly_reshape(ctx, w, ds, 1), eps);
 }
 
-/* ── Embedding ──────────────────────────────────────────────────────── */
+/* Embedding */
 
-PolyUOp *poly_embedding_apply(
-    PolyCtx *ctx,
-    PolyUOp *tokens,
-    PolyUOp *table
-) {
+PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
   return poly_gather(ctx, table, tokens);
 }
 
@@ -189,28 +157,24 @@ PolyUOp *poly_embedding(
   return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, w, ws, 2));
 }
 
-/* ── Causal attention mask ──────────────────────────────────────────── */
+/* Causal attention mask */
 
 PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T) {
   if (!ctx || T <= 0) return NULL;
 
   PolyUOp *arange_buf = poly_arange(ctx, 0.0, (double)T, 1.0);
-  int64_t row_shape[] = { T, 1 };
-  PolyUOp *row = poly_expand(ctx, poly_reshape(ctx, arange_buf, row_shape, 2),
-                              (int64_t[]){ T, T }, 2);
-  int64_t col_shape[] = { 1, T };
-  PolyUOp *col = poly_expand(ctx, poly_reshape(ctx, arange_buf, col_shape, 2),
-                              (int64_t[]){ T, T }, 2);
+  int64_t row_shape[] = {T, 1};
+  PolyUOp *row =
+      poly_expand(ctx, poly_reshape(ctx, arange_buf, row_shape, 2), (int64_t[]){T, T}, 2);
+  int64_t col_shape[] = {1, T};
+  PolyUOp *col =
+      poly_expand(ctx, poly_reshape(ctx, arange_buf, col_shape, 2), (int64_t[]){T, T}, 2);
 
   PolyUOp *mask = poly_alu2(ctx, POLY_OP_CMPLT, row, col);
-  return poly_where_op(
-      ctx, mask,
-      poly_const_float(ctx, -1e9),
-      poly_const_float(ctx, 0.0)
-  );
+  return poly_where_op(ctx, mask, poly_const_float(ctx, -1e9), poly_const_float(ctx, 0.0));
 }
 
-/* ── Scaled Dot-Product Attention ───────────────────────────────────── */
+/* Scaled Dot-Product Attention */
 
 /*
  * Repeat K/V heads for Grouped Query Attention (GQA).
@@ -226,18 +190,17 @@ static PolyUOp *repeat_kv(PolyCtx *ctx, PolyUOp *kv, int n_rep) {
   int ndim = poly_uop_ndim(ctx, kv);
   if (ndim != 4 || !dims) return NULL;
   /* (B, n_kv_heads, T, hd) -> (B, n_kv_heads, 1, T, hd) */
-  int64_t rs[] = { dims[0], dims[1], 1, dims[2], dims[3] };
+  int64_t rs[] = {dims[0], dims[1], 1, dims[2], dims[3]};
   PolyUOp *r = poly_reshape(ctx, kv, rs, 5);
   /* expand the new dim to n_rep */
-  int64_t ex[] = { dims[0], dims[1], n_rep, dims[2], dims[3] };
+  int64_t ex[] = {dims[0], dims[1], n_rep, dims[2], dims[3]};
   r = poly_expand(ctx, r, ex, 5);
   /* flatten back: (B, n_kv_heads * n_rep, T, hd) */
-  int64_t fl[] = { dims[0], dims[1] * n_rep, dims[2], dims[3] };
+  int64_t fl[] = {dims[0], dims[1] * n_rep, dims[2], dims[3]};
   return poly_reshape(ctx, r, fl, 4);
 }
 
-PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
-                   PolyUOp *mask, int is_causal) {
+PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *mask, int is_causal) {
   int q_ndim = poly_uop_ndim(ctx, q);
   int k_ndim = poly_uop_ndim(ctx, k);
   int v_ndim = poly_uop_ndim(ctx, v);
@@ -258,7 +221,8 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
   double scale = 1.0 / sqrt((double)d_k);
 
   int64_t k_perm[POLY_MAX_DIMS];
-  for (int i = 0; i < k_ndim; i++) k_perm[i] = i;
+  for (int i = 0; i < k_ndim; i++)
+    k_perm[i] = i;
   k_perm[k_ndim - 2] = k_ndim - 1;
   k_perm[k_ndim - 1] = k_ndim - 2;
   PolyUOp *k_t = poly_permute(ctx, k, k_perm, k_ndim);
@@ -271,11 +235,10 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
     int64_t seq_k = poly_uop_dims(ctx, k)[k_ndim - 2];
     PolyUOp *ones = poly_full(ctx, (int64_t[]){seq_q, seq_k}, 2, 1.0);
     PolyUOp *tril_m = poly_tril(ctx, ones, 0);
-    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, tril_m,
-                               poly_const_float(ctx, 0.5));
-    PolyUOp *cmask = poly_alu3(ctx, POLY_OP_WHERE, cond,
-                                poly_const_float(ctx, -1e9),
-                                poly_const_float(ctx, 0.0));
+    PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, tril_m, poly_const_float(ctx, 0.5));
+    PolyUOp *cmask = poly_alu3(
+        ctx, POLY_OP_WHERE, cond, poly_const_float(ctx, -1e9), poly_const_float(ctx, 0.0)
+    );
     scores = poly_add(ctx, scores, cmask);
   }
 
@@ -283,4 +246,3 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v,
 
   return poly_dot(ctx, poly_softmax(ctx, scores, -1), v);
 }
-

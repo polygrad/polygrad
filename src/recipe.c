@@ -17,20 +17,26 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* ── Training Plan ─────────────────────────────────────────────────── */
+/* Training Plan */
 
 PolyTrainPlan *poly_train_plan_create(
     PolyCtx *ctx,
     PolyUOp *loss_uop,
-    PolyUOp *x_buf, int x_size,
-    PolyUOp *y_buf, int y_size,
-    PolyUOp **param_bufs, float **param_datas, int *param_sizes,
+    PolyUOp *x_buf,
+    int x_size,
+    PolyUOp *y_buf,
+    int y_size,
+    PolyUOp **param_bufs,
+    float **param_datas,
+    int *param_sizes,
     int n_params,
-    float lr)
-{
+    float lr
+) {
   if (n_params > POLY_PLAN_MAX_PARAMS) {
-    fprintf(stderr, "poly_train_plan_create: too many params (%d > %d)\n",
-            n_params, POLY_PLAN_MAX_PARAMS);
+    fprintf(
+        stderr, "poly_train_plan_create: too many params (%d > %d)\n", n_params,
+        POLY_PLAN_MAX_PARAMS
+    );
     return NULL;
   }
 
@@ -72,10 +78,8 @@ PolyTrainPlan *poly_train_plan_create(
   /* 3. SGD update SINKs: param = param - lr * grad */
   for (int i = 0; i < n_params; i++) {
     PolyUOp *lr_const = poly_const_float(ctx, (double)lr);
-    PolyUOp *scaled_grad = poly_alu2(ctx, POLY_OP_MUL,
-                                       plan->grad_bufs[i], lr_const);
-    PolyUOp *updated = poly_alu2(ctx, POLY_OP_SUB,
-                                   param_bufs[i], scaled_grad);
+    PolyUOp *scaled_grad = poly_alu2(ctx, POLY_OP_MUL, plan->grad_bufs[i], lr_const);
+    PolyUOp *updated = poly_alu2(ctx, POLY_OP_SUB, param_bufs[i], scaled_grad);
 
     plan->update_bufs[i] = poly_buffer_f32(ctx, param_sizes[i]);
     plan->update_datas[i] = calloc(param_sizes[i], sizeof(float));
@@ -89,8 +93,8 @@ PolyTrainPlan *poly_train_plan_create(
 int poly_train_plan_compile(PolyTrainPlan *plan) {
   if (!plan) return -1;
 
-  /* Helper: collect all buffer bindings for a sink */
-  #define MAX_PLAN_BINDINGS 128
+/* Helper: collect all buffer bindings for a sink */
+#define MAX_PLAN_BINDINGS 128
   PolyBufferBinding bindings[MAX_PLAN_BINDINGS];
   int nb;
 
@@ -112,7 +116,8 @@ int poly_train_plan_compile(PolyTrainPlan *plan) {
   int ret = poly_realize(plan->ctx, plan->fwd_sink, bindings, nb);
   if (ret != 0) {
     fprintf(stderr, "poly_train_plan_compile: forward realize failed\n");
-    free(dummy_x); free(dummy_y);
+    free(dummy_x);
+    free(dummy_y);
     return -1;
   }
 
@@ -130,7 +135,8 @@ int poly_train_plan_compile(PolyTrainPlan *plan) {
     ret = poly_realize(plan->ctx, plan->grad_sinks[i], bindings, nb);
     if (ret != 0) {
       fprintf(stderr, "poly_train_plan_compile: gradient %d realize failed\n", i);
-      free(dummy_x); free(dummy_y);
+      free(dummy_x);
+      free(dummy_y);
       return -1;
     }
   }
@@ -145,7 +151,8 @@ int poly_train_plan_compile(PolyTrainPlan *plan) {
     ret = poly_realize(plan->ctx, plan->update_sinks[i], bindings, nb);
     if (ret != 0) {
       fprintf(stderr, "poly_train_plan_compile: update %d realize failed\n", i);
-      free(dummy_x); free(dummy_y);
+      free(dummy_x);
+      free(dummy_y);
       return -1;
     }
   }
@@ -195,8 +202,7 @@ float poly_train_step(PolyTrainPlan *plan, float *x_data, float *y_data) {
     poly_realize(plan->ctx, plan->update_sinks[i], bindings, nb);
 
     /* Copy updated params back */
-    memcpy(plan->param_datas[i], plan->update_datas[i],
-           plan->param_sizes[i] * sizeof(float));
+    memcpy(plan->param_datas[i], plan->update_datas[i], plan->param_sizes[i] * sizeof(float));
   }
 
   return plan->loss_data[0];
@@ -211,17 +217,19 @@ void poly_train_plan_free(PolyTrainPlan *plan) {
   free(plan);
 }
 
-/* ── Data Loader ───────────────────────────────────────────────────── */
+/* Data Loader */
 
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 
-PolyDataLoader *poly_dataloader_open(const char *path,
-                                      int batch_size,
-                                      int input_size,
-                                      int label_size) {
+PolyDataLoader *poly_dataloader_open(
+    const char *path,
+    int batch_size,
+    int input_size,
+    int label_size
+) {
   int fd = open(path, O_RDONLY);
   if (fd < 0) {
     fprintf(stderr, "poly_dataloader_open: cannot open %s\n", path);
@@ -255,7 +263,8 @@ PolyDataLoader *poly_dataloader_open(const char *path,
 
   /* Sequential index array */
   loader->indices = malloc(n_samples * sizeof(int));
-  for (int i = 0; i < n_samples; i++) loader->indices[i] = i;
+  for (int i = 0; i < n_samples; i++)
+    loader->indices[i] = i;
 
   /* Contiguous batch buffers for gather */
   loader->x_batch = malloc(batch_size * input_size * sizeof(float));
@@ -264,11 +273,13 @@ PolyDataLoader *poly_dataloader_open(const char *path,
   return loader;
 }
 
-PolyDataLoader *poly_dataloader_from_memory(float *data,
-                                             int n_samples,
-                                             int batch_size,
-                                             int input_size,
-                                             int label_size) {
+PolyDataLoader *poly_dataloader_from_memory(
+    float *data,
+    int n_samples,
+    int batch_size,
+    int input_size,
+    int label_size
+) {
   PolyDataLoader *loader = calloc(1, sizeof(PolyDataLoader));
   loader->data = data;
   loader->n_samples = n_samples;
@@ -281,7 +292,8 @@ PolyDataLoader *poly_dataloader_from_memory(float *data,
   loader->file_size = 0;
 
   loader->indices = malloc(n_samples * sizeof(int));
-  for (int i = 0; i < n_samples; i++) loader->indices[i] = i;
+  for (int i = 0; i < n_samples; i++)
+    loader->indices[i] = i;
 
   loader->x_batch = malloc(batch_size * input_size * sizeof(float));
   loader->y_batch = malloc(batch_size * label_size * sizeof(float));
@@ -290,7 +302,7 @@ PolyDataLoader *poly_dataloader_from_memory(float *data,
 }
 
 PolyBatch poly_dataloader_next(PolyDataLoader *loader) {
-  PolyBatch batch = { NULL, NULL, 0 };
+  PolyBatch batch = {NULL, NULL, 0};
   if (!loader || loader->current >= loader->n_samples) return batch;
 
   int remaining = loader->n_samples - loader->current;
@@ -300,10 +312,11 @@ PolyBatch poly_dataloader_next(PolyDataLoader *loader) {
   for (int i = 0; i < bs; i++) {
     int idx = loader->indices[loader->current + i];
     float *sample = loader->data + idx * loader->sample_size;
-    memcpy(loader->x_batch + i * loader->input_size,
-           sample, loader->input_size * sizeof(float));
-    memcpy(loader->y_batch + i * loader->label_size,
-           sample + loader->input_size, loader->label_size * sizeof(float));
+    memcpy(loader->x_batch + i * loader->input_size, sample, loader->input_size * sizeof(float));
+    memcpy(
+        loader->y_batch + i * loader->label_size, sample + loader->input_size,
+        loader->label_size * sizeof(float)
+    );
   }
 
   batch.x = loader->x_batch;
@@ -342,7 +355,7 @@ void poly_dataloader_close(PolyDataLoader *loader) {
   free(loader);
 }
 
-/* ── MLP Model Builder ─────────────────────────────────────────────── */
+/* MLP Model Builder */
 
 PolyMLP *poly_mlp_create(PolyCtx *ctx, int *layer_sizes, int n_layers) {
   if (n_layers < 2) {
@@ -422,20 +435,20 @@ PolyUOp *poly_mlp_forward(PolyMLP *model, PolyUOp *x, int batch_size) {
     PolyUOp *b = model->param_bufs[l * 2 + 1];
 
     /* Reshape weight from flat (out_dim*in_dim,) to 2D (out_dim, in_dim) */
-    int64_t w_2d_shape[] = { out_dim, in_dim };
+    int64_t w_2d_shape[] = {out_dim, in_dim};
     PolyUOp *w_2d = poly_reshape(ctx, w, w_2d_shape, 2);
 
     /* Transpose from (out_dim, in_dim) to (in_dim, out_dim) */
-    int64_t w_perm[] = { 1, 0 };
+    int64_t w_perm[] = {1, 0};
     PolyUOp *wt = poly_permute(ctx, w_2d, w_perm, 2);
 
     /* x @ wt: (batch, in_dim) × (in_dim, out_dim) → (batch, out_dim) */
     x = poly_dot(ctx, x, wt);
 
     /* Add bias: reshape (out_dim) → (1, out_dim), expand → (batch, out_dim) */
-    int64_t b_reshape[] = { 1, out_dim };
+    int64_t b_reshape[] = {1, out_dim};
     PolyUOp *br = poly_reshape(ctx, b, b_reshape, 2);
-    int64_t b_expand[] = { batch_size, out_dim };
+    int64_t b_expand[] = {batch_size, out_dim};
     PolyUOp *be = poly_expand(ctx, br, b_expand, 2);
     x = poly_alu2(ctx, POLY_OP_ADD, x, be);
 

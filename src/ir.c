@@ -15,7 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ── Byte helpers ───────────────────────────────────────────────────── */
+/* Byte helpers */
 
 typedef struct {
   uint8_t *data;
@@ -49,15 +49,19 @@ static void bb_u16(ByteBuf *b, uint16_t v) {
 
 static void bb_u32(ByteBuf *b, uint32_t v) {
   bb_ensure(b, 4);
-  for (int i = 0; i < 4; i++) b->data[b->len++] = (v >> (i * 8)) & 0xFF;
+  for (int i = 0; i < 4; i++)
+    b->data[b->len++] = (v >> (i * 8)) & 0xFF;
 }
 
-static void bb_i32(ByteBuf *b, int32_t v) { bb_u32(b, (uint32_t)v); }
+static void bb_i32(ByteBuf *b, int32_t v) {
+  bb_u32(b, (uint32_t)v);
+}
 
 static void bb_i64(ByteBuf *b, int64_t v) {
   bb_ensure(b, 8);
   uint64_t u = (uint64_t)v;
-  for (int i = 0; i < 8; i++) b->data[b->len++] = (u >> (i * 8)) & 0xFF;
+  for (int i = 0; i < 8; i++)
+    b->data[b->len++] = (u >> (i * 8)) & 0xFF;
 }
 
 static void bb_f64(ByteBuf *b, double v) {
@@ -72,7 +76,7 @@ static void bb_bytes(ByteBuf *b, const uint8_t *src, int n) {
   b->len += n;
 }
 
-/* ── Read helpers ───────────────────────────────────────────────────── */
+/* Read helpers */
 
 typedef struct {
   const uint8_t *data;
@@ -80,7 +84,9 @@ typedef struct {
   int pos;
 } ByteReader;
 
-static int br_remaining(ByteReader *r) { return r->len - r->pos; }
+static int br_remaining(ByteReader *r) {
+  return r->len - r->pos;
+}
 
 static uint8_t br_u8(ByteReader *r) {
   if (r->pos >= r->len) return 0;
@@ -97,16 +103,20 @@ static uint16_t br_u16(ByteReader *r) {
 static uint32_t br_u32(ByteReader *r) {
   if (r->pos + 4 > r->len) return 0;
   uint32_t v = 0;
-  for (int i = 0; i < 4; i++) v |= (uint32_t)r->data[r->pos++] << (i * 8);
+  for (int i = 0; i < 4; i++)
+    v |= (uint32_t)r->data[r->pos++] << (i * 8);
   return v;
 }
 
-static int32_t br_i32(ByteReader *r) { return (int32_t)br_u32(r); }
+static int32_t br_i32(ByteReader *r) {
+  return (int32_t)br_u32(r);
+}
 
 static int64_t br_i64(ByteReader *r) {
   if (r->pos + 8 > r->len) return 0;
   uint64_t v = 0;
-  for (int i = 0; i < 8; i++) v |= (uint64_t)r->data[r->pos++] << (i * 8);
+  for (int i = 0; i < 8; i++)
+    v |= (uint64_t)r->data[r->pos++] << (i * 8);
   return (int64_t)v;
 }
 
@@ -117,20 +127,19 @@ static double br_f64(ByteReader *r) {
   return d;
 }
 
-/* ── Magic ──────────────────────────────────────────────────────────── */
+/* Magic */
 
-#define IR_MAGIC 0x52494750  /* "PGIR" LE */
+#define IR_MAGIC 0x52494750 /* "PGIR" LE */
 #define IR_VERSION 1
 
-/* ── Dtype index table ──────────────────────────────────────────────── */
+/* Dtype index table */
 
 #define N_DTYPES 15
 
 static const PolyDType *dtype_table[N_DTYPES] = {
-  &POLY_VOID, &POLY_BOOL, &POLY_INT8, &POLY_UINT8,
-  &POLY_INT16, &POLY_UINT16, &POLY_INT32, &POLY_UINT32,
-  &POLY_INT64, &POLY_UINT64, &POLY_FLOAT16, &POLY_BFLOAT16,
-  &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
+    &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
+    &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64, &POLY_INDEX,
 };
 
 static int dtype_to_index(PolyDType dt) {
@@ -139,7 +148,7 @@ static int dtype_to_index(PolyDType dt) {
   return -1;
 }
 
-/* ── String table builder ───────────────────────────────────────────── */
+/* String table builder */
 
 typedef struct {
   char **strs;
@@ -166,11 +175,12 @@ static uint32_t st_add(StringTable *st, const char *s) {
 }
 
 static void st_free(StringTable *st) {
-  for (int i = 0; i < st->n; i++) free(st->strs[i]);
+  for (int i = 0; i < st->n; i++)
+    free(st->strs[i]);
   free(st->strs);
 }
 
-/* ── Export ──────────────────────────────────────────────────────────── */
+/* Export */
 
 uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   *out_len = 0;
@@ -187,7 +197,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
    * toposort each sink and merge (dedup by pointer). */
   int n_nodes = 0;
   PolyUOp **topo = NULL;
-  int topo_is_heap = 0;  /* whether topo is malloc'd (needs free) */
+  int topo_is_heap = 0; /* whether topo is malloc'd (needs free) */
 
   if (n_sinks == 1) {
     topo = poly_toposort(spec->ctx, spec->entrypoints[0].sink, &n_nodes);
@@ -209,7 +219,10 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
         PolyUOp *u = per_sink[i][j];
         int dup = 0;
         for (int k = 0; k < merged_n; k++)
-          if (merged[k] == u) { dup = 1; break; }
+          if (merged[k] == u) {
+            dup = 1;
+            break;
+          }
         if (!dup) merged[merged_n++] = u;
       }
     }
@@ -229,19 +242,26 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
 
   /* Build node index map (UOp pointer -> index) */
   /* Use a simple linear scan (good enough for small-medium graphs) */
-  typedef struct { PolyUOp *uop; uint32_t idx; } NodeMapEntry;
+  typedef struct {
+    PolyUOp *uop;
+    uint32_t idx;
+  } NodeMapEntry;
   NodeMapEntry *node_map = malloc(n_nodes * sizeof(NodeMapEntry));
   for (int i = 0; i < n_nodes; i++) {
     node_map[i].uop = topo[i];
     node_map[i].idx = (uint32_t)i;
   }
 
-  /* Helper: find index of a UOp */
-  #define FIND_IDX(u) ({ \
-    uint32_t _idx = UINT32_MAX; \
-    for (int _i = 0; _i < n_nodes; _i++) \
-      if (node_map[_i].uop == (u)) { _idx = node_map[_i].idx; break; } \
-    _idx; \
+/* Helper: find index of a UOp */
+#define FIND_IDX(u)                                                                                \
+  ({                                                                                               \
+    uint32_t _idx = UINT32_MAX;                                                                    \
+    for (int _i = 0; _i < n_nodes; _i++)                                                           \
+      if (node_map[_i].uop == (u)) {                                                               \
+        _idx = node_map[_i].idx;                                                                   \
+        break;                                                                                     \
+      }                                                                                            \
+    _idx;                                                                                          \
   })
 
   /* Validate: no pointer/vector dtypes */
@@ -254,8 +274,9 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       return NULL;
     }
     if (dtype_to_index(dt) < 0) {
-      fprintf(stderr, "poly_ir_export: node %d has unknown dtype '%s'\n",
-              i, dt.name ? dt.name : "?");
+      fprintf(
+          stderr, "poly_ir_export: node %d has unknown dtype '%s'\n", i, dt.name ? dt.name : "?"
+      );
       free(node_map);
       if (topo_is_heap) free(topo);
       return NULL;
@@ -269,10 +290,8 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   /* Collect strings from args */
   for (int i = 0; i < n_nodes; i++) {
     PolyArg a = topo[i]->arg;
-    if (a.kind == POLY_ARG_STRING && a.str)
-      st_add(&strings, a.str);
-    if (a.kind == POLY_ARG_DEFINE_VAR && a.define_var.name)
-      st_add(&strings, a.define_var.name);
+    if (a.kind == POLY_ARG_STRING && a.str) st_add(&strings, a.str);
+    if (a.kind == POLY_ARG_DEFINE_VAR && a.define_var.name) st_add(&strings, a.define_var.name);
   }
   /* Collect strings from interface + entrypoints */
   for (int i = 0; i < spec->n_bufs; i++)
@@ -283,13 +302,11 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   /* Compute flags */
   uint32_t flags = 0;
   for (int i = 0; i < spec->n_entrypoints; i++) {
-    if (strcmp(spec->entrypoints[i].name, "loss") == 0)
-      flags |= 1;  /* has_loss */
-    if (strcmp(spec->entrypoints[i].name, "train_step") == 0)
-      flags |= 2;  /* has_train_step */
+    if (strcmp(spec->entrypoints[i].name, "loss") == 0) flags |= 1; /* has_loss */
+    if (strcmp(spec->entrypoints[i].name, "train_step") == 0) flags |= 2; /* has_train_step */
   }
 
-  /* ── Write binary ────────────────────────────────────────────── */
+  /* Write binary */
 
   ByteBuf buf;
   bb_init(&buf);
@@ -302,7 +319,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   bb_u32(&buf, (uint32_t)strings.n);
   bb_u32(&buf, (uint32_t)spec->n_bufs);
   bb_u32(&buf, (uint32_t)spec->n_entrypoints);
-  bb_u32(&buf, 0);  /* reserved */
+  bb_u32(&buf, 0); /* reserved */
 
   /* String table */
   for (int i = 0; i < strings.n; i++) {
@@ -319,7 +336,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     bb_i32(&buf, u->tag);
     bb_u16(&buf, u->n_src);
     bb_u8(&buf, (uint8_t)u->arg.kind);
-    bb_u8(&buf, 0);  /* padding */
+    bb_u8(&buf, 0); /* padding */
 
     /* Sources */
     for (int s = 0; s < u->n_src; s++) {
@@ -337,10 +354,17 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
 
     /* Arg data */
     switch (u->arg.kind) {
-    case POLY_ARG_NONE: break;
-    case POLY_ARG_INT: bb_i64(&buf, u->arg.i); break;
-    case POLY_ARG_FLOAT: bb_f64(&buf, u->arg.f); break;
-    case POLY_ARG_BOOL: bb_u8(&buf, u->arg.b ? 1 : 0); break;
+    case POLY_ARG_NONE:
+      break;
+    case POLY_ARG_INT:
+      bb_i64(&buf, u->arg.i);
+      break;
+    case POLY_ARG_FLOAT:
+      bb_f64(&buf, u->arg.f);
+      break;
+    case POLY_ARG_BOOL:
+      bb_u8(&buf, u->arg.b ? 1 : 0);
+      break;
     case POLY_ARG_INT_TUPLE:
       bb_u16(&buf, (uint16_t)u->arg.int_tuple.n);
       for (int t = 0; t < u->arg.int_tuple.n; t++)
@@ -377,7 +401,8 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       bb_i64(&buf, u->arg.define_var.min_val);
       bb_i64(&buf, u->arg.define_var.max_val);
       break;
-    case POLY_ARG_INVALID: break;
+    case POLY_ARG_INVALID:
+      break;
     }
   }
 
@@ -385,11 +410,13 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   for (int i = 0; i < spec->n_bufs; i++) {
     bb_u32(&buf, st_add(&strings, spec->bufs[i].name));
     bb_u8(&buf, spec->bufs[i].role);
-    bb_u8(&buf, 0); bb_u8(&buf, 0); bb_u8(&buf, 0);  /* padding */
+    bb_u8(&buf, 0);
+    bb_u8(&buf, 0);
+    bb_u8(&buf, 0); /* padding */
     uint32_t nidx = FIND_IDX(spec->bufs[i].buffer);
     bb_u32(&buf, nidx);
     bb_u16(&buf, (uint16_t)spec->bufs[i].ndim);
-    bb_u16(&buf, 0);  /* padding */
+    bb_u16(&buf, 0); /* padding */
     for (int d = 0; d < spec->bufs[i].ndim; d++)
       bb_i64(&buf, spec->bufs[i].shape[d]);
   }
@@ -401,7 +428,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     bb_u32(&buf, nidx);
   }
 
-  #undef FIND_IDX
+#undef FIND_IDX
 
   free(node_map);
   if (topo_is_heap) free(topo);
@@ -411,12 +438,12 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   return buf.data;
 }
 
-/* ── Import ──────────────────────────────────────────────────────────── */
+/* Import */
 
 int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
   memset(out, 0, sizeof(PolyIrSpec));
 
-  ByteReader r = { data, len, 0 };
+  ByteReader r = {data, len, 0};
 
   /* Header */
   if (br_remaining(&r) < 32) {
@@ -434,12 +461,12 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     fprintf(stderr, "poly_ir_import: unsupported version %u\n", version);
     return -1;
   }
-  /*uint32_t flags =*/ br_u32(&r);  /* flags (informational) */
+  /*uint32_t flags =*/br_u32(&r); /* flags (informational) */
   uint32_t n_nodes = br_u32(&r);
   uint32_t n_strings = br_u32(&r);
   uint32_t n_entries = br_u32(&r);
   uint32_t n_entrypts = br_u32(&r);
-  /*uint32_t reserved =*/ br_u32(&r);
+  /*uint32_t reserved =*/br_u32(&r);
 
   /* String table */
   char **strings = calloc(n_strings, sizeof(char *));
@@ -466,15 +493,14 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     int32_t tag = br_i32(&r);
     uint16_t n_src = br_u16(&r);
     uint8_t arg_kind = br_u8(&r);
-    /*uint8_t pad =*/ br_u8(&r);
+    /*uint8_t pad =*/br_u8(&r);
 
     if (op_val >= POLY_OP_COUNT) {
       fprintf(stderr, "poly_ir_import: invalid op %u at node %u\n", op_val, i);
       goto fail_nodes;
     }
     if (dtype_idx >= N_DTYPES) {
-      fprintf(stderr, "poly_ir_import: invalid dtype index %u at node %u\n",
-              dtype_idx, i);
+      fprintf(stderr, "poly_ir_import: invalid dtype index %u at node %u\n", dtype_idx, i);
       goto fail_nodes;
     }
 
@@ -500,7 +526,8 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     arg.kind = (PolyArgKind)arg_kind;
 
     switch (arg.kind) {
-    case POLY_ARG_NONE: break;
+    case POLY_ARG_NONE:
+      break;
     case POLY_ARG_INT:
       arg.i = br_i64(&r);
       break;
@@ -513,14 +540,15 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     case POLY_ARG_INT_TUPLE: {
       uint16_t count = br_u16(&r);
       int64_t *vals = malloc(count * sizeof(int64_t));
-      for (int t = 0; t < count; t++) vals[t] = br_i64(&r);
+      for (int t = 0; t < count; t++)
+        vals[t] = br_i64(&r);
       arg.int_tuple.vals = vals;
       arg.int_tuple.n = count;
       break;
     }
     case POLY_ARG_PAIR_TUPLE: {
       uint16_t count = br_u16(&r);
-      int64_t (*pairs)[2] = malloc(count * sizeof(int64_t[2]));
+      int64_t(*pairs)[2] = malloc(count * sizeof(int64_t[2]));
       for (int t = 0; t < count; t++) {
         pairs[t][0] = br_i64(&r);
         pairs[t][1] = br_i64(&r);
@@ -544,7 +572,8 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       arg.reduce_axis.op = (PolyOps)br_u16(&r);
       uint16_t n_axes = br_u16(&r);
       int64_t *axes = malloc(n_axes * sizeof(int64_t));
-      for (int t = 0; t < n_axes; t++) axes[t] = br_i64(&r);
+      for (int t = 0; t < n_axes; t++)
+        axes[t] = br_i64(&r);
       arg.reduce_axis.axes = axes;
       arg.reduce_axis.n = n_axes;
       break;
@@ -555,7 +584,8 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       uint16_t n_extra = br_u16(&r);
       if (n_extra > 0) {
         int64_t *extra = malloc(n_extra * sizeof(int64_t));
-        for (int t = 0; t < n_extra; t++) extra[t] = br_i64(&r);
+        for (int t = 0; t < n_extra; t++)
+          extra[t] = br_i64(&r);
         arg.range.extra = extra;
       } else {
         arg.range.extra = NULL;
@@ -570,20 +600,19 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       arg.define_var.max_val = br_i64(&r);
       break;
     }
-    case POLY_ARG_INVALID: break;
+    case POLY_ARG_INVALID:
+      break;
     default:
-      fprintf(stderr, "poly_ir_import: unknown arg kind %u at node %u\n",
-              arg_kind, i);
+      fprintf(stderr, "poly_ir_import: unknown arg kind %u at node %u\n", arg_kind, i);
       if (srcs) free(srcs);
       goto fail_nodes;
     }
 
     /* Create UOp -- restore tag to preserve BUFFER CSE-distinctness */
-    PolyUOp *u = (tag != 0)
-      ? poly_uop_tagged(ctx, (PolyOps)op_val, *dtype_table[dtype_idx],
-                         srcs, n_src, arg, tag)
-      : poly_uop(ctx, (PolyOps)op_val, *dtype_table[dtype_idx],
-                  srcs, n_src, arg);
+    PolyUOp *u =
+        (tag != 0)
+            ? poly_uop_tagged(ctx, (PolyOps)op_val, *dtype_table[dtype_idx], srcs, n_src, arg, tag)
+            : poly_uop(ctx, (PolyOps)op_val, *dtype_table[dtype_idx], srcs, n_src, arg);
 
     /* Free temporary malloc'd arg buffers (arena has its own copy now) */
     if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.vals)
@@ -595,8 +624,7 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     else if (arg.kind == POLY_ARG_RANGE && arg.range.extra)
       free(arg.range.extra);
 
-    if (tag != 0)
-      ((PolyUOp *)u)->tag = tag;
+    if (tag != 0) ((PolyUOp *)u)->tag = tag;
 
     nodes[i] = (PolyUOp *)u;
     if (srcs) free(srcs);
@@ -609,10 +637,12 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     if (br_remaining(&r) < 12) goto fail_bufs;
     uint32_t name_idx = br_u32(&r);
     uint8_t role = br_u8(&r);
-    br_u8(&r); br_u8(&r); br_u8(&r);  /* padding */
+    br_u8(&r);
+    br_u8(&r);
+    br_u8(&r); /* padding */
     uint32_t node_idx = br_u32(&r);
     uint16_t ndim = br_u16(&r);
-    br_u16(&r);  /* padding */
+    br_u16(&r); /* padding */
 
     out->bufs[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
     out->bufs[i].role = role;
@@ -636,7 +666,8 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
   out->ctx = ctx;
 
   /* Cleanup temp arrays */
-  for (uint32_t i = 0; i < n_strings; i++) free(strings[i]);
+  for (uint32_t i = 0; i < n_strings; i++)
+    free(strings[i]);
   free(strings);
   free(nodes);
   return 0;
@@ -653,7 +684,8 @@ fail_nodes:
   poly_ctx_destroy(ctx);
   free(nodes);
 fail_strings:
-  for (uint32_t i = 0; i < n_strings; i++) free(strings[i]);
+  for (uint32_t i = 0; i < n_strings; i++)
+    free(strings[i]);
   free(strings);
   return -1;
 }

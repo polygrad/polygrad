@@ -20,7 +20,7 @@ extern "C" {
 
 typedef struct PolyTokenizer PolyTokenizer;
 
-/* ── Creation ───────────────────────────────────────────────────── */
+/* Creation */
 
 /*
  * Create tokenizer from GGUF KV metadata.
@@ -36,8 +36,7 @@ PolyTokenizer *poly_tokenizer_from_gguf(const PolyGgufDecoded *gguf);
  * tokens[i] is a UTF-8 string (using GPT-2 byte encoding).
  * types[i]: 1 = normal, 3 = control/special, others = normal.
  */
-PolyTokenizer *poly_tokenizer_create(
-    const char **tokens, const int *types, int n_tokens);
+PolyTokenizer *poly_tokenizer_create(const char **tokens, const int *types, int n_tokens);
 
 /*
  * Create tokenizer from HF tokenizer.json content.
@@ -48,23 +47,27 @@ PolyTokenizer *poly_tokenizer_from_json(const char *json_data, int json_len);
 
 void poly_tokenizer_free(PolyTokenizer *tok);
 
-/* ── Encode / Decode ────────────────────────────────────────────── */
+/* Encode / Decode */
 
 /*
  * Encode text to token IDs. Returns number of tokens written.
  * If ids_out is NULL, returns the count without writing.
  */
-int poly_tokenize(const PolyTokenizer *tok, const char *text,
-                  int *ids_out, int max_ids);
+int poly_tokenize(const PolyTokenizer *tok, const char *text, int *ids_out, int max_ids);
 
 /*
  * Decode token IDs to text. Returns number of bytes written
  * (excluding null terminator). If text_out is NULL, returns count.
  */
-int poly_detokenize(const PolyTokenizer *tok, const int *ids, int n_ids,
-                    char *text_out, int max_len);
+int poly_detokenize(
+    const PolyTokenizer *tok,
+    const int *ids,
+    int n_ids,
+    char *text_out,
+    int max_len
+);
 
-/* ── Accessors ──────────────────────────────────────────────────── */
+/* Accessors */
 
 int poly_tokenizer_vocab_size(const PolyTokenizer *tok);
 int poly_tokenizer_bos_id(const PolyTokenizer *tok);

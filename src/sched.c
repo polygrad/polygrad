@@ -12,14 +12,16 @@
 
 #include "scheduler.h"
 #include "rangeify.h"
-#include "codegen.h"  /* for linearize/render/compile if needed */
+#include "codegen.h" /* for linearize/render/compile if needed */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Local helpers ────────────────────────────────────────────────────── */
+/* Local helpers */
 
-static bool ptr_eq(const void *a, const void *b) { return a == b; }
+static bool ptr_eq(const void *a, const void *b) {
+  return a == b;
+}
 
 static uint32_t ptr_hash(const void *p) {
   uintptr_t v = (uintptr_t)p;
@@ -29,16 +31,19 @@ static uint32_t ptr_hash(const void *p) {
 /* Return the identity element for a reduction op */
 static double reduce_identity(PolyOps op) {
   switch (op) {
-    case POLY_OP_ADD: return 0.0;
-    case POLY_OP_MUL: return 1.0;
-    case POLY_OP_MAX: return -__builtin_inf();
-    default:
-      fprintf(stderr, "polygrad: sched: unsupported reduce op %s\n", poly_op_name(op));
-      return 0.0;
+  case POLY_OP_ADD:
+    return 0.0;
+  case POLY_OP_MUL:
+    return 1.0;
+  case POLY_OP_MAX:
+    return -__builtin_inf();
+  default:
+    fprintf(stderr, "polygrad: sched: unsupported reduce op %s\n", poly_op_name(op));
+    return 0.0;
   }
 }
 
-/* ── Scheduling context ──────────────────────────────────────────────── */
+/* Scheduling context */
 
 typedef struct {
   PolyUOp *acc;
@@ -47,13 +52,13 @@ typedef struct {
 
 typedef struct {
   PolyCtx *ctx;
-  PolyMap *buf_to_param;   /* BUFFER UOp* → PARAM UOp* */
-  PolyMap *shape_cache;    /* UOp* → PolyShape* (heap-allocated) */
-  PolyMap *lower_cache;    /* UOp* keyed by (uop, ranges_hash) → lowered UOp* */
+  PolyMap *buf_to_param; /* BUFFER UOp* → PARAM UOp* */
+  PolyMap *shape_cache; /* UOp* → PolyShape* (heap-allocated) */
+  PolyMap *lower_cache; /* UOp* keyed by (uop, ranges_hash) → lowered UOp* */
   PolyMap *scalar_reduce_cache; /* REDUCE_AXIS UOp* -> RealizedScalarReduce* */
-  PolyUOp *replace_from;   /* optional substitution during lowering */
+  PolyUOp *replace_from; /* optional substitution during lowering */
   PolyUOp *replace_to;
-  int next_range_id;      /* unique RANGE arg ids across scheduled kernels */
+  int next_range_id; /* unique RANGE arg ids across scheduled kernels */
   int n_params;
 } SchedCtx;
 
@@ -71,11 +76,10 @@ static PolyShape sched_shape(SchedCtx *sctx, PolyUOp *u) {
   return s;
 }
 
-/* ── Flat index computation ──────────────────────────────────────────── */
+/* Flat index computation */
 
 /* Build UOp expression: ranges[0]*stride[0] + ranges[1]*stride[1] + ... */
-static PolyUOp *compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim,
-                                   PolyShape shape) {
+static PolyUOp *compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape) {
   if (ndim == 0) {
     return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   }
@@ -107,13 +111,19 @@ static PolyUOp *compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim,
   return flat;
 }
 
-/* ── Reshape index transform ─────────────────────────────────────────── */
+/* Reshape index transform */
 
 /* Given output ranges for out_shape, compute input ranges for in_shape.
  * Method: flatten to linear index, then decompose via div/mod. */
-static void reshape_indices(PolyCtx *ctx,
-                            PolyUOp **out_ranges, int out_ndim, PolyShape out_shape,
-                            PolyUOp **in_ranges,  int in_ndim,  PolyShape in_shape) {
+static void reshape_indices(
+    PolyCtx *ctx,
+    PolyUOp **out_ranges,
+    int out_ndim,
+    PolyShape out_shape,
+    PolyUOp **in_ranges,
+    int in_ndim,
+    PolyShape in_shape
+) {
   /* Compute combined flat index from output ranges */
   PolyUOp *combined = compute_flat_index(ctx, out_ranges, out_ndim, out_shape);
 
@@ -142,8 +152,13 @@ static int alloc_range_id(SchedCtx *sctx) {
 /* STORE with optional dependency sources.
  * Extra sources are ignored by renderers but force topological dependence
  * so the store remains inside the intended loop nest. */
-static PolyUOp *store_with_deps(PolyCtx *ctx, PolyUOp *dst, PolyUOp *val,
-                                PolyUOp **deps, int n_deps) {
+static PolyUOp *store_with_deps(
+    PolyCtx *ctx,
+    PolyUOp *dst,
+    PolyUOp *val,
+    PolyUOp **deps,
+    int n_deps
+) {
   if (n_deps <= 0) return poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, val, poly_arg_none());
   PolyUOp *src[2 + POLY_MAX_DIMS];
   int n_src = 0;
@@ -157,9 +172,15 @@ static PolyUOp *store_with_deps(PolyCtx *ctx, PolyUOp *dst, PolyUOp *val,
 
 /* Binary op with optional dependency sources.
  * Extra sources are dependency-only; renderers consume the first two. */
-static PolyUOp *binary_with_deps(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                                 PolyUOp *lhs, PolyUOp *rhs,
-                                 PolyUOp **deps, int n_deps) {
+static PolyUOp *binary_with_deps(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp *lhs,
+    PolyUOp *rhs,
+    PolyUOp **deps,
+    int n_deps
+) {
   if (n_deps <= 0) return poly_uop2(ctx, op, dtype, lhs, rhs, poly_arg_none());
   PolyUOp *src[2 + POLY_MAX_DIMS];
   int n_src = 0;
@@ -183,24 +204,26 @@ static bool find_single_reduce(PolyUOp *u, PolyUOp **found) {
   return true;
 }
 
-static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
-                          PolyUOp **ranges, int n_ranges);
+static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u, PolyUOp **ranges, int n_ranges);
 
 /* Materialize a scalar REDUCE_AXIS once and cache the result for reuse
  * across multiple scheduled STOREs. */
-static bool realize_scalar_reduce(SchedCtx *sctx, PolyUOp *reduce_uop,
-                                  PolyUOp **acc_out, PolyUOp **dep_out) {
+static bool realize_scalar_reduce(
+    SchedCtx *sctx,
+    PolyUOp *reduce_uop,
+    PolyUOp **acc_out,
+    PolyUOp **dep_out
+) {
   PolyCtx *ctx = sctx->ctx;
-  RealizedScalarReduce *cached = poly_map_get(
-    sctx->scalar_reduce_cache, ptr_hash(reduce_uop), reduce_uop, ptr_eq);
+  RealizedScalarReduce *cached =
+      poly_map_get(sctx->scalar_reduce_cache, ptr_hash(reduce_uop), reduce_uop, ptr_eq);
   if (cached) {
     *acc_out = cached->acc;
     *dep_out = cached->dep;
     return true;
   }
 
-  if (reduce_uop->op != POLY_OP_REDUCE_AXIS ||
-      reduce_uop->arg.kind != POLY_ARG_REDUCE_AXIS) {
+  if (reduce_uop->op != POLY_OP_REDUCE_AXIS || reduce_uop->arg.kind != POLY_ARG_REDUCE_AXIS) {
     return false;
   }
 
@@ -212,26 +235,25 @@ static bool realize_scalar_reduce(SchedCtx *sctx, PolyUOp *reduce_uop,
   if (in_shape.ndim < 0) return false;
 
   double ident = reduce_identity(reduce_op);
-  PolyUOp *acc = poly_uop0(ctx, POLY_OP_DEFINE_LOCAL, reduce_uop->dtype,
-                           poly_arg_float(ident));
+  PolyUOp *acc = poly_uop0(ctx, POLY_OP_DEFINE_LOCAL, reduce_uop->dtype, poly_arg_float(ident));
 
   PolyUOp *rranges[POLY_MAX_DIMS];
   for (int i = 0; i < in_shape.ndim; i++) {
-    PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                             poly_arg_int(in_shape.dims[i]));
-    rranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bnd,
-                            poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+    PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+    rranges[i] = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_INT32, bnd, poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+    );
   }
 
   PolyUOp *rval = lower_uop(sctx, reduce_uop->src[0], rranges, in_shape.ndim);
   if (!rval) return false;
 
-  PolyUOp *racc = binary_with_deps(ctx, reduce_op, reduce_uop->dtype,
-                                    acc, rval, rranges, in_shape.ndim);
+  PolyUOp *racc =
+      binary_with_deps(ctx, reduce_op, reduce_uop->dtype, acc, rval, rranges, in_shape.ndim);
   PolyUOp *rstore = store_with_deps(ctx, acc, racc, rranges, in_shape.ndim);
   PolyUOp *rchain = rstore;
   for (int i = in_shape.ndim - 1; i >= 0; i--) {
-    PolyUOp *end_src[2] = { rchain, rranges[i] };
+    PolyUOp *end_src[2] = {rchain, rranges[i]};
     rchain = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   }
 
@@ -245,12 +267,11 @@ static bool realize_scalar_reduce(SchedCtx *sctx, PolyUOp *reduce_uop,
   return true;
 }
 
-/* ── Recursive lowering ──────────────────────────────────────────────── */
+/* Recursive lowering */
 
 /* Lower a tensor-level UOp into kernel-level IR, given the current
  * set of range variables representing "which position we're computing". */
-static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
-                          PolyUOp **ranges, int n_ranges) {
+static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u, PolyUOp **ranges, int n_ranges) {
   PolyCtx *ctx = sctx->ctx;
 
   /* Optional substitution hook for schedule-time realizes. */
@@ -309,8 +330,7 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
 
     /* Zero-init: reshape_indices may leave gaps when ndims differ */
     PolyUOp *in_ranges[POLY_MAX_DIMS] = {0};
-    reshape_indices(ctx, ranges, n_ranges, out_shape,
-                    in_ranges, in_shape.ndim, in_shape);
+    reshape_indices(ctx, ranges, n_ranges, out_shape, in_ranges, in_shape.ndim, in_shape);
     return lower_uop(sctx, u->src[0], in_ranges, in_shape.ndim);
   }
 
@@ -335,8 +355,7 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
         in_ranges[i] = ranges[i];
       } else {
         PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(start));
-        in_ranges[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                                  ranges[i], off, poly_arg_none());
+        in_ranges[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, ranges[i], off, poly_arg_none());
       }
     }
     return lower_uop(sctx, u->src[0], in_ranges, n);
@@ -355,11 +374,12 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
     PolyUOp *in_ranges[POLY_MAX_DIMS] = {0};
     for (int i = 0; i < in_shape.ndim && i < n_ranges; i++) {
       if (flipped[i]) {
-        PolyUOp *max_idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                                     poly_arg_int(in_shape.dims[i] - 1));
-        in_ranges[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, max_idx,
-            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, ranges[i], poly_arg_none()),
-            poly_arg_none());
+        PolyUOp *max_idx =
+            poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i] - 1));
+        in_ranges[i] = poly_uop2(
+            ctx, POLY_OP_ADD, POLY_INT32, max_idx,
+            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, ranges[i], poly_arg_none()), poly_arg_none()
+        );
       } else {
         in_ranges[i] = ranges[i];
       }
@@ -383,9 +403,10 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
         in_ranges[i] = ranges[i];
       } else {
         PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(begin));
-        in_ranges[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, ranges[i],
-            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()),
-            poly_arg_none());
+        in_ranges[i] = poly_uop2(
+            ctx, POLY_OP_ADD, POLY_INT32, ranges[i],
+            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()), poly_arg_none()
+        );
       }
       /* valid_i = NOT(in_idx < 0) AND (in_idx < in_dim).
        *
@@ -396,36 +417,30 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
        * Phase D's reduce_collapse Rule 4 (fold_range_two_sided) from
        * matching the pad-derived two-sided range mask. */
       PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-      PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                               poly_arg_int(in_shape.dims[i]));
-      PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL,
-                                      poly_arg_bool(true));
-      PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                   in_ranges[i], zero, poly_arg_none());
-      PolyUOp *ge_zero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL,
-                                   lt_zero, true_const, poly_arg_none());
-      PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                  in_ranges[i], dim, poly_arg_none());
-      PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
-                              ge_zero, lt_dim, poly_arg_none());
-      valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
-                                valid, dv, poly_arg_none()) : dv;
+      PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+      PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+      PolyUOp *lt_zero =
+          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, in_ranges[i], zero, poly_arg_none());
+      PolyUOp *ge_zero =
+          poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, lt_zero, true_const, poly_arg_none());
+      PolyUOp *lt_dim =
+          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, in_ranges[i], dim, poly_arg_none());
+      PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_zero, lt_dim, poly_arg_none());
+      valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dv, poly_arg_none()) : dv;
     }
 
     /* Clamp indices to [0, dim-1] for safe memory access */
     PolyUOp *clamped[POLY_MAX_DIMS];
     for (int i = 0; i < n; i++) {
       PolyUOp *z = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-      PolyUOp *m = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                             poly_arg_int(in_shape.dims[i] - 1));
-      PolyUOp *lt_z = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                in_ranges[i], z, poly_arg_none());
-      PolyUOp *cl = poly_uop(ctx, POLY_OP_WHERE, POLY_INT32,
-          (PolyUOp*[]){lt_z, z, in_ranges[i]}, 3, poly_arg_none());
-      PolyUOp *gt_m = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                m, cl, poly_arg_none());
-      clamped[i] = poly_uop(ctx, POLY_OP_WHERE, POLY_INT32,
-          (PolyUOp*[]){gt_m, m, cl}, 3, poly_arg_none());
+      PolyUOp *m = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i] - 1));
+      PolyUOp *lt_z = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, in_ranges[i], z, poly_arg_none());
+      PolyUOp *cl = poly_uop(
+          ctx, POLY_OP_WHERE, POLY_INT32, (PolyUOp *[]){lt_z, z, in_ranges[i]}, 3, poly_arg_none()
+      );
+      PolyUOp *gt_m = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, m, cl, poly_arg_none());
+      clamped[i] =
+          poly_uop(ctx, POLY_OP_WHERE, POLY_INT32, (PolyUOp *[]){gt_m, m, cl}, 3, poly_arg_none());
     }
 
     PolyUOp *loaded = lower_uop(sctx, u->src[0], clamped, n);
@@ -456,7 +471,7 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u,
   return NULL;
 }
 
-/* ── Schedule a single STORE ─────────────────────────────────────────── */
+/* Schedule a single STORE */
 
 /* Schedule one STORE(buffer, value) into kernel-level IR.
  * Returns the END node (wrapping STORE and all RANGEs). */
@@ -468,8 +483,8 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     return NULL;
   }
 
-  PolyUOp *out_buf = store_uop->src[0];  /* output BUFFER */
-  PolyUOp *value   = store_uop->src[1];  /* value expression */
+  PolyUOp *out_buf = store_uop->src[0]; /* output BUFFER */
+  PolyUOp *value = store_uop->src[1]; /* value expression */
 
   /* Get output shape from the value */
   PolyShape out_shape = sched_shape(sctx, value);
@@ -494,12 +509,11 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     return NULL;
   }
 
-  /* ── Chained scalar-reduce → elementwise path ─────────────────────── */
+  /* Chained scalar-reduce → elementwise path */
   /* Handles patterns like add(reshape(sum(a), ()), b) by computing
    * the scalar reduction once, then using it in a second loop nest. */
   PolyUOp *nested_reduce = NULL;
-  if (find_single_reduce(value, &nested_reduce) &&
-      nested_reduce && nested_reduce != value &&
+  if (find_single_reduce(value, &nested_reduce) && nested_reduce && nested_reduce != value &&
       nested_reduce->arg.kind == POLY_ARG_REDUCE_AXIS) {
     PolyShape rshape = sched_shape(sctx, nested_reduce);
     if (rshape.ndim >= 0 && poly_shape_numel(rshape) == 1) {
@@ -514,8 +528,10 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
       PolyUOp *eranges[POLY_MAX_DIMS];
       for (int i = 0; i < ndim; i++) {
         PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(out_shape.dims[i]));
-        eranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound,
-                                poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+        eranges[i] = poly_uop1(
+            ctx, POLY_OP_RANGE, POLY_INT32, bound,
+            poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+        );
       }
 
       PolyUOp *old_from = sctx->replace_from, *old_to = sctx->replace_to;
@@ -526,19 +542,18 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
       sctx->replace_to = old_to;
       if (!eval) return NULL;
 
-      PolyUOp *out_flat = (ndim == 0)
-        ? poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0))
-        : compute_flat_index(ctx, eranges, ndim, out_shape);
-      PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype,
-                                   out_param, out_flat, poly_arg_none());
+      PolyUOp *out_flat = (ndim == 0) ? poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0))
+                                      : compute_flat_index(ctx, eranges, ndim, out_shape);
+      PolyUOp *out_idx =
+          poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype, out_param, out_flat, poly_arg_none());
 
       /* 3rd source carries dependency on reduction chain. */
-      PolyUOp *s_src[3] = { out_idx, eval, rchain };
+      PolyUOp *s_src[3] = {out_idx, eval, rchain};
       PolyUOp *estore = poly_uop(ctx, POLY_OP_STORE, POLY_VOID, s_src, 3, poly_arg_none());
 
       PolyUOp *echain = estore;
       for (int i = ndim - 1; i >= 0; i--) {
-        PolyUOp *end_src[2] = { echain, eranges[i] };
+        PolyUOp *end_src[2] = {echain, eranges[i]};
         echain = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
       }
       return echain;
@@ -590,8 +605,7 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
           int oi = 0;
           for (int i = 0; i < rshape.ndim && map_ok; i++) {
             if (!is_reduced[i]) {
-              if (oi >= out_shape.ndim || rshape.dims[i] != out_shape.dims[oi])
-                map_ok = false;
+              if (oi >= out_shape.ndim || rshape.dims[i] != out_shape.dims[oi]) map_ok = false;
               oi++;
             }
           }
@@ -603,9 +617,12 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
         int ndim = out_shape.ndim;
         PolyUOp *out_ranges[POLY_MAX_DIMS];
         for (int i = 0; i < ndim; i++) {
-          PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(out_shape.dims[i]));
-          out_ranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound,
-                                     poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+          PolyUOp *bound =
+              poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(out_shape.dims[i]));
+          out_ranges[i] = poly_uop1(
+              ctx, POLY_OP_RANGE, POLY_INT32, bound,
+              poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+          );
         }
 
         /* For non-reduced axes, coordinate comes from output loop.
@@ -619,41 +636,43 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
           for (int i = 0; i < in_shape.ndim; i++) {
             /* Guard oi < ndim: n_non_reduced == ndim is validated above,
              * but the analyzer can't prove it across the loop. */
-            if (!is_reduced[i] && oi < ndim)
-              all_ranges[i] = out_ranges[oi++];
+            if (!is_reduced[i] && oi < ndim) all_ranges[i] = out_ranges[oi++];
           }
         } else {
           for (int i = 0; i < in_shape.ndim; i++) {
-            if (!is_reduced[i])
-              all_ranges[i] = (rshape.dims[i] == 1) ? zero : out_ranges[i];
+            if (!is_reduced[i]) all_ranges[i] = (rshape.dims[i] == 1) ? zero : out_ranges[i];
           }
         }
 
         /* Accumulator lives inside output loops. */
         double ident = reduce_identity(reduce_op);
-        PolyUOp *acc = poly_uop(ctx, POLY_OP_DEFINE_LOCAL, nested_reduce->dtype,
-                                out_ranges, ndim, poly_arg_float(ident));
+        PolyUOp *acc = poly_uop(
+            ctx, POLY_OP_DEFINE_LOCAL, nested_reduce->dtype, out_ranges, ndim, poly_arg_float(ident)
+        );
 
         /* Inner reduction loops */
         for (int i = 0; i < in_shape.ndim; i++) {
           if (is_reduced[i]) {
-            PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                                     poly_arg_int(in_shape.dims[i]));
-            all_ranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bnd,
-                                       poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+            PolyUOp *bnd =
+                poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+            all_ranges[i] = poly_uop1(
+                ctx, POLY_OP_RANGE, POLY_INT32, bnd,
+                poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+            );
           }
         }
 
         PolyUOp *loaded = lower_uop(sctx, nested_reduce->src[0], all_ranges, in_shape.ndim);
         if (!loaded) return NULL;
-        PolyUOp *alu = binary_with_deps(ctx, reduce_op, nested_reduce->dtype,
-                                         acc, loaded, all_ranges, in_shape.ndim);
+        PolyUOp *alu = binary_with_deps(
+            ctx, reduce_op, nested_reduce->dtype, acc, loaded, all_ranges, in_shape.ndim
+        );
         PolyUOp *acc_store = store_with_deps(ctx, acc, alu, all_ranges, in_shape.ndim);
 
         PolyUOp *rchain = acc_store;
         for (int i = in_shape.ndim - 1; i >= 0; i--) {
           if (is_reduced[i]) {
-            PolyUOp *end_src[2] = { rchain, all_ranges[i] };
+            PolyUOp *end_src[2] = {rchain, all_ranges[i]};
             rchain = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
           }
         }
@@ -668,17 +687,16 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
         if (!eval) return NULL;
 
         PolyUOp *out_flat = compute_flat_index(ctx, out_ranges, ndim, out_shape);
-        PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype,
-                                     out_param, out_flat, poly_arg_none());
+        PolyUOp *out_idx =
+            poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype, out_param, out_flat, poly_arg_none());
 
         /* Dependency source keeps out_store after reduction loop. */
-        PolyUOp *s_src[3] = { out_idx, eval, rchain };
-        PolyUOp *out_store = poly_uop(ctx, POLY_OP_STORE, POLY_VOID,
-                                      s_src, 3, poly_arg_none());
+        PolyUOp *s_src[3] = {out_idx, eval, rchain};
+        PolyUOp *out_store = poly_uop(ctx, POLY_OP_STORE, POLY_VOID, s_src, 3, poly_arg_none());
 
         PolyUOp *echain = out_store;
         for (int i = ndim - 1; i >= 0; i--) {
-          PolyUOp *end_src[2] = { echain, out_ranges[i] };
+          PolyUOp *end_src[2] = {echain, out_ranges[i]};
           echain = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
         }
         return echain;
@@ -686,9 +704,8 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     }
   }
 
-  /* ── REDUCE_AXIS path ──────────────────────────────────────────────── */
-  if (value->op == POLY_OP_REDUCE_AXIS &&
-      value->arg.kind == POLY_ARG_REDUCE_AXIS) {
+  /* REDUCE_AXIS path */
+  if (value->op == POLY_OP_REDUCE_AXIS && value->arg.kind == POLY_ARG_REDUCE_AXIS) {
     PolyOps reduce_op = value->arg.reduce_axis.op;
     int n_rax = value->arg.reduce_axis.n;
     int64_t *rax = value->arg.reduce_axis.axes;
@@ -714,10 +731,11 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     int n_outer = 0;
     for (int i = 0; i < in_shape.ndim; i++) {
       if (!is_reduced[i]) {
-        PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                                 poly_arg_int(in_shape.dims[i]));
-        all_ranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32,
-                                   bnd, poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+        PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+        all_ranges[i] = poly_uop1(
+            ctx, POLY_OP_RANGE, POLY_INT32, bnd,
+            poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+        );
         outer_ranges[n_outer] = all_ranges[i];
         outer_dims[n_outer] = in_shape.dims[i];
         n_outer++;
@@ -728,17 +746,18 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
      * Give outer ranges as sources so the linearizer places it
      * inside the outer loop (not hoisted before it). */
     double ident = reduce_identity(reduce_op);
-    PolyUOp *acc = poly_uop(ctx, POLY_OP_DEFINE_LOCAL, value->dtype,
-                            outer_ranges, n_outer,
-                            poly_arg_float(ident));
+    PolyUOp *acc = poly_uop(
+        ctx, POLY_OP_DEFINE_LOCAL, value->dtype, outer_ranges, n_outer, poly_arg_float(ident)
+    );
 
     /* Create INNER RANGE loops (reduced dims) */
     for (int i = 0; i < in_shape.ndim; i++) {
       if (is_reduced[i]) {
-        PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                                 poly_arg_int(in_shape.dims[i]));
-        all_ranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32,
-                                   bnd, poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+        PolyUOp *bnd = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+        all_ranges[i] = poly_uop1(
+            ctx, POLY_OP_RANGE, POLY_INT32, bnd,
+            poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+        );
       }
     }
 
@@ -747,8 +766,8 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     if (!loaded) return NULL;
 
     /* Accumulate: alu = reduce_op(acc, loaded) */
-    PolyUOp *alu = binary_with_deps(ctx, reduce_op, value->dtype,
-                                     acc, loaded, all_ranges, in_shape.ndim);
+    PolyUOp *alu =
+        binary_with_deps(ctx, reduce_op, value->dtype, acc, loaded, all_ranges, in_shape.ndim);
 
     /* Store to accumulator */
     PolyUOp *acc_store = store_with_deps(ctx, acc, alu, all_ranges, in_shape.ndim);
@@ -757,7 +776,7 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     PolyUOp *current = acc_store;
     for (int i = in_shape.ndim - 1; i >= 0; i--) {
       if (is_reduced[i]) {
-        PolyUOp *end_src[2] = { current, all_ranges[i] };
+        PolyUOp *end_src[2] = {current, all_ranges[i]};
         current = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
       }
     }
@@ -768,23 +787,22 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
       /* Full reduction: scalar output at index 0 */
       out_flat = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
     } else {
-      PolyShape nr_shape = { outer_dims, n_outer };
+      PolyShape nr_shape = {outer_dims, n_outer};
       out_flat = compute_flat_index(ctx, outer_ranges, n_outer, nr_shape);
     }
 
-    PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype,
-                                 out_param, out_flat, poly_arg_none());
+    PolyUOp *out_idx =
+        poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype, out_param, out_flat, poly_arg_none());
 
     /* Store acc to output.  3rd source = inner END chain for dependency. */
-    PolyUOp *dep_src[3] = { out_idx, acc, current };
-    PolyUOp *out_store = poly_uop(ctx, POLY_OP_STORE, POLY_VOID,
-                                  dep_src, 3, poly_arg_none());
+    PolyUOp *dep_src[3] = {out_idx, acc, current};
+    PolyUOp *out_store = poly_uop(ctx, POLY_OP_STORE, POLY_VOID, dep_src, 3, poly_arg_none());
 
     /* Close outer ENDs */
     current = out_store;
     for (int i = in_shape.ndim - 1; i >= 0; i--) {
       if (!is_reduced[i]) {
-        PolyUOp *end_src[2] = { current, all_ranges[i] };
+        PolyUOp *end_src[2] = {current, all_ranges[i]};
         current = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
       }
     }
@@ -792,15 +810,16 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
     return current;
   }
 
-  /* ── Elementwise path ──────────────────────────────────────────────── */
+  /* Elementwise path */
   int ndim = out_shape.ndim;
 
   /* Create RANGE UOps (one per dimension) */
   PolyUOp *ranges[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++) {
     PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(out_shape.dims[i]));
-    ranges[i] = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound,
-                           poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP));
+    ranges[i] = poly_uop1(
+        ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(alloc_range_id(sctx), POLY_AXIS_LOOP)
+    );
   }
 
   /* Lower the value expression */
@@ -808,20 +827,22 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
   if (!lowered_value) return NULL;
 
   PolyUOp *out_flat = compute_flat_index(ctx, ranges, ndim, out_shape);
-  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype, out_param, out_flat, poly_arg_none());
-  PolyUOp *kernel_store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, lowered_value, poly_arg_none());
+  PolyUOp *out_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, out_param->dtype, out_param, out_flat, poly_arg_none());
+  PolyUOp *kernel_store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, lowered_value, poly_arg_none());
 
   /* Chain ENDs for all ranges (innermost first) */
   PolyUOp *current = kernel_store;
   for (int i = ndim - 1; i >= 0; i--) {
-    PolyUOp *end_src[2] = { current, ranges[i] };
+    PolyUOp *end_src[2] = {current, ranges[i]};
     current = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   }
 
   return current;
 }
 
-/* ── Collect all BUFFERs in a tensor graph ────────────────────────────── */
+/* Collect all BUFFERs in a tensor graph */
 
 static void collect_buffers(SchedCtx *sctx, PolyUOp *root) {
   int n_topo;
@@ -830,25 +851,26 @@ static void collect_buffers(SchedCtx *sctx, PolyUOp *root) {
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_BUFFER) {
       /* Check if already assigned */
-      if (poly_map_get(sctx->buf_to_param, ptr_hash(topo[i]), topo[i], ptr_eq))
-        continue;
+      if (poly_map_get(sctx->buf_to_param, ptr_hash(topo[i]), topo[i], ptr_eq)) continue;
 
       /* Create PARAM for this buffer */
       PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
       PolyDType ptr_dt = poly_dtype_ptr(scalar, -1, POLY_ADDR_GLOBAL);
-      PolyUOp *param = poly_uop0(sctx->ctx, POLY_OP_PARAM, ptr_dt,
-                                poly_arg_int(sctx->n_params));
+      PolyUOp *param = poly_uop0(sctx->ctx, POLY_OP_PARAM, ptr_dt, poly_arg_int(sctx->n_params));
       poly_map_set(sctx->buf_to_param, ptr_hash(topo[i]), topo[i], param, ptr_eq);
       sctx->n_params++;
     }
   }
 }
 
-/* ── Public API ───────────────────────────────────────────────────────── */
+/* Public API */
 
 PolyUOp *poly_schedule(PolyCtx *ctx, PolyUOp *tensor_sink) {
   PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
-  if (sr.n_kernels < 1) { poly_schedule_result_free(&sr); return NULL; }
+  if (sr.n_kernels < 1) {
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
   /* For single-kernel API, return the last kernel (consumer).
    * Multi-kernel callers should use poly_schedule_v2() directly. */
   PolyUOp *kernel = sr.kernels[sr.n_kernels - 1];
@@ -856,7 +878,7 @@ PolyUOp *poly_schedule(PolyCtx *ctx, PolyUOp *tensor_sink) {
   return kernel;
 }
 
-/* ── Convenience constructors ─────────────────────────────────────────── */
+/* Convenience constructors */
 
 static int poly_buffer_id = 0;
 
@@ -883,8 +905,13 @@ PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   return poly_uop1(ctx, POLY_OP_EXPAND, src->dtype, src, arg);
 }
 
-PolyUOp *poly_reduce_axis(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *src,
-                         int64_t *axes, int n_axes) {
+PolyUOp *poly_reduce_axis(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *src,
+    int64_t *axes,
+    int n_axes
+) {
   PolyArg arg;
   arg.kind = POLY_ARG_REDUCE_AXIS;
   arg.reduce_axis.op = reduce_op;

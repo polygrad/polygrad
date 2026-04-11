@@ -38,14 +38,14 @@ extern "C" {
 #endif
 
 /* Section type constants */
-#define POLY_BUNDLE_IR       0x01
-#define POLY_BUNDLE_WEIGHTS  0x02
+#define POLY_BUNDLE_IR 0x01
+#define POLY_BUNDLE_WEIGHTS 0x02
 #define POLY_BUNDLE_METADATA 0x03
 
-#define POLY_BUNDLE_VERSION  1
-#define POLY_BUNDLE_MAGIC    "POLYBNDL"
+#define POLY_BUNDLE_VERSION 1
+#define POLY_BUNDLE_MAGIC "POLYBNDL"
 
-/* ── Encode ──────────────────────────────────────────────────────────── */
+/* Encode */
 
 /* Encode a bundle from IR bytes + optional weights bytes + optional metadata JSON.
  * ir_data/ir_len: required (poly.ir.uops@1 bytes from poly_ir_export)
@@ -53,20 +53,24 @@ extern "C" {
  * metadata_json: optional (UTF-8 JSON string, pass NULL to omit)
  * Returns malloc'd bytes. Caller frees. Sets *out_len.
  * Returns NULL on error. */
-uint8_t *poly_bundle_encode(const uint8_t *ir_data, int ir_len,
-                            const uint8_t *weights_data, int weights_len,
-                            const char *metadata_json,
-                            int *out_len);
+uint8_t *poly_bundle_encode(
+    const uint8_t *ir_data,
+    int ir_len,
+    const uint8_t *weights_data,
+    int weights_len,
+    const char *metadata_json,
+    int *out_len
+);
 
-/* ── Decode ──────────────────────────────────────────────────────────── */
+/* Decode */
 
 /* Decoded bundle sections (zero-copy pointers into input data). */
 typedef struct {
-  const uint8_t *ir_data;       /* pointer into input, or NULL */
+  const uint8_t *ir_data; /* pointer into input, or NULL */
   int ir_len;
-  const uint8_t *weights_data;  /* pointer into input, or NULL */
+  const uint8_t *weights_data; /* pointer into input, or NULL */
   int weights_len;
-  const char *metadata_json;    /* pointer into input, or NULL (not NUL-terminated) */
+  const char *metadata_json; /* pointer into input, or NULL (not NUL-terminated) */
   int metadata_len;
   uint32_t version;
   uint32_t flags;
@@ -77,7 +81,7 @@ typedef struct {
  * Returns 0 on success, -1 on error (bad magic, truncated, etc). */
 int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out);
 
-/* ── Convenience: Instance round-trip ────────────────────────────────── */
+/* Convenience: Instance round-trip */
 
 /* Forward declaration */
 typedef struct PolyInstance PolyInstance;

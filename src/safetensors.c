@@ -23,7 +23,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 
-/* ── Helpers ────────────────────────────────────────────────────────── */
+/* Helpers */
 
 static void write_le64(uint8_t *dst, uint64_t v) {
   for (int i = 0; i < 8; i++)
@@ -39,7 +39,8 @@ static uint64_t read_le64(const uint8_t *src) {
 
 static int64_t compute_numel(const int64_t *shape, int ndim) {
   int64_t n = 1;
-  for (int i = 0; i < ndim; i++) n *= shape[i];
+  for (int i = 0; i < ndim; i++)
+    n *= shape[i];
   return n;
 }
 
@@ -51,18 +52,22 @@ static int entry_cmp(const void *a, const void *b) {
   return 0; /* placeholder -- replaced by actual sort below */
 }
 
-/* ── Encode ─────────────────────────────────────────────────────────── */
+/* Encode */
 
-uint8_t *poly_safetensors_encode(const PolySafetensorEntry *entries, int n,
-                                 const char *metadata_json,
-                                 int *out_len) {
+uint8_t *poly_safetensors_encode(
+    const PolySafetensorEntry *entries,
+    int n,
+    const char *metadata_json,
+    int *out_len
+) {
   *out_len = 0;
   if (n < 0) return NULL;
 
   /* Sort indices by name for deterministic output */
   int *order = malloc(n * sizeof(int));
   if (!order) return NULL;
-  for (int i = 0; i < n; i++) order[i] = i;
+  for (int i = 0; i < n; i++)
+    order[i] = i;
 
   /* Simple insertion sort (small N expected) */
   for (int i = 1; i < n; i++) {
@@ -87,7 +92,11 @@ uint8_t *poly_safetensors_encode(const PolySafetensorEntry *entries, int n,
 
   /* Build JSON header */
   cJSON *root = cJSON_CreateObject();
-  if (!root) { free(order); free(offsets); return NULL; }
+  if (!root) {
+    free(order);
+    free(offsets);
+    return NULL;
+  }
 
   /* Add __metadata__ if provided */
   if (metadata_json && metadata_json[0] != '\0') {
@@ -120,7 +129,11 @@ uint8_t *poly_safetensors_encode(const PolySafetensorEntry *entries, int n,
 
   char *json_str = cJSON_PrintUnformatted(root);
   cJSON_Delete(root);
-  if (!json_str) { free(order); free(offsets); return NULL; }
+  if (!json_str) {
+    free(order);
+    free(offsets);
+    return NULL;
+  }
 
   uint64_t header_size = (uint64_t)strlen(json_str);
   /* Pad JSON header to 4-byte alignment so float data starts at a 4-byte
@@ -129,16 +142,27 @@ uint8_t *poly_safetensors_encode(const PolySafetensorEntry *entries, int n,
   uint64_t pad = (4 - header_size % 4) % 4;
   if (pad > 0) {
     char *padded = realloc(json_str, header_size + pad + 1);
-    if (!padded) { free(json_str); free(order); free(offsets); return NULL; }
+    if (!padded) {
+      free(json_str);
+      free(order);
+      free(offsets);
+      return NULL;
+    }
     json_str = padded;
-    for (uint64_t p = 0; p < pad; p++) json_str[header_size + p] = ' ';
+    for (uint64_t p = 0; p < pad; p++)
+      json_str[header_size + p] = ' ';
     json_str[header_size + pad] = '\0';
     header_size += pad;
   }
   uint64_t total_size = 8 + header_size + data_offset;
 
   uint8_t *buf = malloc((size_t)total_size);
-  if (!buf) { free(json_str); free(order); free(offsets); return NULL; }
+  if (!buf) {
+    free(json_str);
+    free(order);
+    free(offsets);
+    return NULL;
+  }
 
   /* Write header size (8 bytes LE) */
   write_le64(buf, header_size);
@@ -161,11 +185,14 @@ uint8_t *poly_safetensors_encode(const PolySafetensorEntry *entries, int n,
   return buf;
 }
 
-/* ── Decode ─────────────────────────────────────────────────────────── */
+/* Decode */
 
-PolySafetensorView *poly_safetensors_decode(const uint8_t *data, int len,
-                                            int *n_out,
-                                            char **metadata_out) {
+PolySafetensorView *poly_safetensors_decode(
+    const uint8_t *data,
+    int len,
+    int *n_out,
+    char **metadata_out
+) {
   *n_out = 0;
   if (metadata_out) *metadata_out = NULL;
 
@@ -176,8 +203,10 @@ PolySafetensorView *poly_safetensors_decode(const uint8_t *data, int len,
 
   uint64_t header_size = read_le64(data);
   if (8 + header_size > (uint64_t)len) {
-    fprintf(stderr, "poly_safetensors_decode: header_size %" PRIu64
-            " exceeds data length %d\n", header_size, len);
+    fprintf(
+        stderr, "poly_safetensors_decode: header_size %" PRIu64 " exceeds data length %d\n",
+        header_size, len
+    );
     return NULL;
   }
 
@@ -202,7 +231,10 @@ PolySafetensorView *poly_safetensors_decode(const uint8_t *data, int len,
   }
 
   PolySafetensorView *views = calloc(count, sizeof(PolySafetensorView));
-  if (!views && count > 0) { cJSON_Delete(root); return NULL; }
+  if (!views && count > 0) {
+    cJSON_Delete(root);
+    return NULL;
+  }
 
   const uint8_t *data_region = data + 8 + (size_t)header_size;
   uint64_t data_region_len = (uint64_t)len - 8 - header_size;
@@ -220,27 +252,26 @@ PolySafetensorView *poly_safetensors_decode(const uint8_t *data, int len,
     /* Validate dtype */
     cJSON *dtype_val = cJSON_GetObjectItemCaseSensitive(item, "dtype");
     if (!dtype_val || !cJSON_IsString(dtype_val)) {
-      fprintf(stderr, "poly_safetensors_decode: missing dtype for '%s'\n",
-              item->string);
+      fprintf(stderr, "poly_safetensors_decode: missing dtype for '%s'\n", item->string);
       goto fail;
     }
     if (strcmp(dtype_val->valuestring, "F32") != 0) {
-      fprintf(stderr, "poly_safetensors_decode: unsupported dtype '%s' for '%s'\n",
-              dtype_val->valuestring, item->string);
+      fprintf(
+          stderr, "poly_safetensors_decode: unsupported dtype '%s' for '%s'\n",
+          dtype_val->valuestring, item->string
+      );
       goto fail;
     }
 
     /* Parse shape */
     cJSON *shape_arr = cJSON_GetObjectItemCaseSensitive(item, "shape");
     if (!shape_arr || !cJSON_IsArray(shape_arr)) {
-      fprintf(stderr, "poly_safetensors_decode: missing shape for '%s'\n",
-              item->string);
+      fprintf(stderr, "poly_safetensors_decode: missing shape for '%s'\n", item->string);
       goto fail;
     }
     int ndim = cJSON_GetArraySize(shape_arr);
     if (ndim > 8) {
-      fprintf(stderr, "poly_safetensors_decode: ndim %d > 8 for '%s'\n",
-              ndim, item->string);
+      fprintf(stderr, "poly_safetensors_decode: ndim %d > 8 for '%s'\n", ndim, item->string);
       goto fail;
     }
 
@@ -256,19 +287,18 @@ PolySafetensorView *poly_safetensors_decode(const uint8_t *data, int len,
 
     /* Parse data_offsets */
     cJSON *offs_arr = cJSON_GetObjectItemCaseSensitive(item, "data_offsets");
-    if (!offs_arr || !cJSON_IsArray(offs_arr) || cJSON_GetArraySize(offs_arr) != 2)
-      goto fail;
+    if (!offs_arr || !cJSON_IsArray(offs_arr) || cJSON_GetArraySize(offs_arr) != 2) goto fail;
     uint64_t start = (uint64_t)cJSON_GetArrayItem(offs_arr, 0)->valuedouble;
     uint64_t end = (uint64_t)cJSON_GetArrayItem(offs_arr, 1)->valuedouble;
 
     if (end < start || end > data_region_len) {
-      fprintf(stderr, "poly_safetensors_decode: data_offsets out of bounds for '%s'\n",
-              item->string);
+      fprintf(
+          stderr, "poly_safetensors_decode: data_offsets out of bounds for '%s'\n", item->string
+      );
       goto fail;
     }
     if ((end - start) != (uint64_t)numel * sizeof(float)) {
-      fprintf(stderr, "poly_safetensors_decode: data size mismatch for '%s'\n",
-              item->string);
+      fprintf(stderr, "poly_safetensors_decode: data size mismatch for '%s'\n", item->string);
       goto fail;
     }
 
@@ -282,42 +312,85 @@ PolySafetensorView *poly_safetensors_decode(const uint8_t *data, int len,
   return views;
 
 fail:
-  for (int i = 0; i < vi; i++) free(views[i].name);
+  for (int i = 0; i < vi; i++)
+    free(views[i].name);
   free(views);
   cJSON_Delete(root);
   return NULL;
 }
 
-/* ── Multi-dtype support ───────────────────────────────────────────── */
+/* Multi-dtype support */
 
 int poly_safetensor_dtype_size(PolySafetensorDType dtype) {
   switch (dtype) {
-  case POLY_ST_F64:  case POLY_ST_I64:  return 8;
-  case POLY_ST_F32:  case POLY_ST_I32:  return 4;
-  case POLY_ST_F16:  case POLY_ST_BF16: case POLY_ST_I16: return 2;
-  case POLY_ST_I8:   case POLY_ST_U8:   case POLY_ST_BOOL: return 1;
+  case POLY_ST_F64:
+  case POLY_ST_I64:
+    return 8;
+  case POLY_ST_F32:
+  case POLY_ST_I32:
+    return 4;
+  case POLY_ST_F16:
+  case POLY_ST_BF16:
+  case POLY_ST_I16:
+    return 2;
+  case POLY_ST_I8:
+  case POLY_ST_U8:
+  case POLY_ST_BOOL:
+    return 1;
   }
   return 0;
 }
 
 static int parse_safetensor_dtype(const char *s, PolySafetensorDType *out) {
-  if (strcmp(s, "F32") == 0)    { *out = POLY_ST_F32;  return 0; }
-  if (strcmp(s, "F16") == 0)    { *out = POLY_ST_F16;  return 0; }
-  if (strcmp(s, "BF16") == 0)   { *out = POLY_ST_BF16; return 0; }
-  if (strcmp(s, "F64") == 0)    { *out = POLY_ST_F64;  return 0; }
-  if (strcmp(s, "I64") == 0)    { *out = POLY_ST_I64;  return 0; }
-  if (strcmp(s, "I32") == 0)    { *out = POLY_ST_I32;  return 0; }
-  if (strcmp(s, "I16") == 0)    { *out = POLY_ST_I16;  return 0; }
-  if (strcmp(s, "I8") == 0)     { *out = POLY_ST_I8;   return 0; }
-  if (strcmp(s, "U8") == 0)     { *out = POLY_ST_U8;   return 0; }
-  if (strcmp(s, "BOOL") == 0)   { *out = POLY_ST_BOOL; return 0; }
+  if (strcmp(s, "F32") == 0) {
+    *out = POLY_ST_F32;
+    return 0;
+  }
+  if (strcmp(s, "F16") == 0) {
+    *out = POLY_ST_F16;
+    return 0;
+  }
+  if (strcmp(s, "BF16") == 0) {
+    *out = POLY_ST_BF16;
+    return 0;
+  }
+  if (strcmp(s, "F64") == 0) {
+    *out = POLY_ST_F64;
+    return 0;
+  }
+  if (strcmp(s, "I64") == 0) {
+    *out = POLY_ST_I64;
+    return 0;
+  }
+  if (strcmp(s, "I32") == 0) {
+    *out = POLY_ST_I32;
+    return 0;
+  }
+  if (strcmp(s, "I16") == 0) {
+    *out = POLY_ST_I16;
+    return 0;
+  }
+  if (strcmp(s, "I8") == 0) {
+    *out = POLY_ST_I8;
+    return 0;
+  }
+  if (strcmp(s, "U8") == 0) {
+    *out = POLY_ST_U8;
+    return 0;
+  }
+  if (strcmp(s, "BOOL") == 0) {
+    *out = POLY_ST_BOOL;
+    return 0;
+  }
   return -1;
 }
 
 PolySafetensorViewEx *poly_safetensors_decode_ex(
-    const uint8_t *data, int64_t len,
-    int *n_out, char **metadata_out)
-{
+    const uint8_t *data,
+    int64_t len,
+    int *n_out,
+    char **metadata_out
+) {
   *n_out = 0;
   if (metadata_out) *metadata_out = NULL;
 
@@ -328,8 +401,11 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
 
   uint64_t header_size = read_le64(data);
   if (8 + header_size > (uint64_t)len) {
-    fprintf(stderr, "poly_safetensors_decode_ex: header_size %" PRIu64
-            " exceeds data length %" PRId64 "\n", header_size, len);
+    fprintf(
+        stderr,
+        "poly_safetensors_decode_ex: header_size %" PRIu64 " exceeds data length %" PRId64 "\n",
+        header_size, len
+    );
     return NULL;
   }
 
@@ -341,8 +417,7 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
 
   /* Trim trailing whitespace from JSON (safetensors spec allows padding) */
   size_t json_len = header_size;
-  while (json_len > 0 && (json_str[json_len - 1] == ' ' ||
-                           json_str[json_len - 1] == '\0'))
+  while (json_len > 0 && (json_str[json_len - 1] == ' ' || json_str[json_len - 1] == '\0'))
     json_str[--json_len] = '\0';
 
   cJSON *root = cJSON_Parse(json_str);
@@ -360,7 +435,10 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   }
 
   PolySafetensorViewEx *views = calloc(count, sizeof(PolySafetensorViewEx));
-  if (!views && count > 0) { cJSON_Delete(root); return NULL; }
+  if (!views && count > 0) {
+    cJSON_Delete(root);
+    return NULL;
+  }
 
   const uint8_t *data_region = data + 8 + (size_t)header_size;
   uint64_t data_region_len = (uint64_t)len - 8 - header_size;
@@ -378,29 +456,28 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
     /* Parse dtype */
     cJSON *dtype_val = cJSON_GetObjectItemCaseSensitive(item, "dtype");
     if (!dtype_val || !cJSON_IsString(dtype_val)) {
-      fprintf(stderr, "poly_safetensors_decode_ex: missing dtype for '%s'\n",
-              item->string);
+      fprintf(stderr, "poly_safetensors_decode_ex: missing dtype for '%s'\n", item->string);
       goto fail_ex;
     }
 
     PolySafetensorDType dtype;
     if (parse_safetensor_dtype(dtype_val->valuestring, &dtype) != 0) {
-      fprintf(stderr, "poly_safetensors_decode_ex: unsupported dtype '%s' for '%s'\n",
-              dtype_val->valuestring, item->string);
+      fprintf(
+          stderr, "poly_safetensors_decode_ex: unsupported dtype '%s' for '%s'\n",
+          dtype_val->valuestring, item->string
+      );
       goto fail_ex;
     }
 
     /* Parse shape */
     cJSON *shape_arr = cJSON_GetObjectItemCaseSensitive(item, "shape");
     if (!shape_arr || !cJSON_IsArray(shape_arr)) {
-      fprintf(stderr, "poly_safetensors_decode_ex: missing shape for '%s'\n",
-              item->string);
+      fprintf(stderr, "poly_safetensors_decode_ex: missing shape for '%s'\n", item->string);
       goto fail_ex;
     }
     int ndim = cJSON_GetArraySize(shape_arr);
     if (ndim > 8) {
-      fprintf(stderr, "poly_safetensors_decode_ex: ndim %d > 8 for '%s'\n",
-              ndim, item->string);
+      fprintf(stderr, "poly_safetensors_decode_ex: ndim %d > 8 for '%s'\n", ndim, item->string);
       goto fail_ex;
     }
 
@@ -417,20 +494,19 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
 
     /* Parse data_offsets */
     cJSON *offs_arr = cJSON_GetObjectItemCaseSensitive(item, "data_offsets");
-    if (!offs_arr || !cJSON_IsArray(offs_arr) || cJSON_GetArraySize(offs_arr) != 2)
-      goto fail_ex;
+    if (!offs_arr || !cJSON_IsArray(offs_arr) || cJSON_GetArraySize(offs_arr) != 2) goto fail_ex;
     uint64_t start = (uint64_t)cJSON_GetArrayItem(offs_arr, 0)->valuedouble;
     uint64_t end = (uint64_t)cJSON_GetArrayItem(offs_arr, 1)->valuedouble;
 
     if (end < start || end > data_region_len) {
-      fprintf(stderr, "poly_safetensors_decode_ex: data_offsets out of bounds for '%s'\n",
-              item->string);
+      fprintf(
+          stderr, "poly_safetensors_decode_ex: data_offsets out of bounds for '%s'\n", item->string
+      );
       goto fail_ex;
     }
     int elem_size = poly_safetensor_dtype_size(dtype);
     if (elem_size == 0 || (int64_t)(end - start) != numel * elem_size) {
-      fprintf(stderr, "poly_safetensors_decode_ex: data size mismatch for '%s'\n",
-              item->string);
+      fprintf(stderr, "poly_safetensors_decode_ex: data size mismatch for '%s'\n", item->string);
       goto fail_ex;
     }
 
@@ -444,13 +520,14 @@ PolySafetensorViewEx *poly_safetensors_decode_ex(
   return views;
 
 fail_ex:
-  for (int i = 0; i < vi; i++) free(views[i].name);
+  for (int i = 0; i < vi; i++)
+    free(views[i].name);
   free(views);
   cJSON_Delete(root);
   return NULL;
 }
 
-/* ── F16/BF16 to F32 conversion ────────────────────────────────────── */
+/* F16/BF16 to F32 conversion */
 
 static float f16_to_f32(uint16_t h) {
   uint32_t sign = ((uint32_t)h & 0x8000) << 16;
@@ -472,8 +549,7 @@ static float f16_to_f32(uint16_t h) {
       exponent--;
     }
     mantissa &= 0x03FF;
-    uint32_t bits = sign | ((uint32_t)(exponent + 127 - 15) << 23)
-                    | ((uint32_t)mantissa << 13);
+    uint32_t bits = sign | ((uint32_t)(exponent + 127 - 15) << 23) | ((uint32_t)mantissa << 13);
     float f;
     memcpy(&f, &bits, sizeof(f));
     return f;
@@ -486,8 +562,7 @@ static float f16_to_f32(uint16_t h) {
   }
 
   /* Normalized */
-  uint32_t bits = sign | ((uint32_t)(exponent + 127 - 15) << 23)
-                  | ((uint32_t)mantissa << 13);
+  uint32_t bits = sign | ((uint32_t)(exponent + 127 - 15) << 23) | ((uint32_t)mantissa << 13);
   float f;
   memcpy(&f, &bits, sizeof(f));
   return f;

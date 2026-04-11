@@ -27,7 +27,7 @@
 #include <stdarg.h>
 #include <math.h>
 
-/* ── String builder ───────────────────────────────────────────────── */
+/* String builder */
 
 typedef struct {
   char *buf;
@@ -60,7 +60,7 @@ static void hsb_puts(HipStrBuf *sb, const char *s) {
   hsb_printf(sb, "%s", s);
 }
 
-/* ── Pointer -> string hash map ───────────────────────────────────── */
+/* Pointer -> string hash map */
 
 typedef struct {
   PolyUOp **keys;
@@ -83,7 +83,8 @@ static void hsmap_init(HipStrMap *m, int n) {
 
 static void hsmap_set(HipStrMap *m, PolyUOp *key, char *val) {
   uint32_t h = hip_ptr_hash(key) % m->cap;
-  while (m->keys[h] && m->keys[h] != key) h = (h + 1) % m->cap;
+  while (m->keys[h] && m->keys[h] != key)
+    h = (h + 1) % m->cap;
   if (m->keys[h] == key) free(m->vals[h]);
   m->keys[h] = key;
   m->vals[h] = val;
@@ -105,7 +106,7 @@ static void hsmap_destroy(HipStrMap *m) {
   free(m->vals);
 }
 
-/* ── Type rendering ──────────────────────────────────────────────── */
+/* Type rendering */
 
 /* Map scalar PolyDType to a short identifier-safe name for vector typedefs.
  * E.g. POLY_FLOAT16 -> "half", POLY_FLOAT32 -> "float", POLY_INT32 -> "int".
@@ -113,20 +114,34 @@ static void hsmap_destroy(HipStrMap *m) {
 /* Match by priority (not full poly_dtype_eq) so pointer-derived dtypes work. */
 static const char *hip_scalar_alias(PolyDType s) {
   switch (s.priority) {
-  case  0: return "bool";
-  case  1: return "char";
-  case  2: return "uchar";
-  case  3: return "short";
-  case  4: return "ushort";
-  case  5: return "int";
-  case  6: return "uint";
-  case  7: return "long";
-  case  8: return "ulong";
-  case 11: return "half";
-  case 12: return "bfloat16";
-  case 13: return "float";
-  case 14: return "double";
-  default: return s.name;
+  case 0:
+    return "bool";
+  case 1:
+    return "char";
+  case 2:
+    return "uchar";
+  case 3:
+    return "short";
+  case 4:
+    return "ushort";
+  case 5:
+    return "int";
+  case 6:
+    return "uint";
+  case 7:
+    return "long";
+  case 8:
+    return "ulong";
+  case 11:
+    return "half";
+  case 12:
+    return "bfloat16";
+  case 13:
+    return "float";
+  case 14:
+    return "double";
+  default:
+    return s.name;
   }
 }
 
@@ -134,7 +149,7 @@ static const char *hip_scalar_alias(PolyDType s) {
  * Matches by priority+bitsize (not full poly_dtype_eq) so pointer-derived
  * dtypes also resolve correctly. */
 static const char *hip_scalar_ctype(PolyDType s) {
-  if (s.priority == POLY_FLOAT16.priority  && s.bitsize == 16) return "_Float16";
+  if (s.priority == POLY_FLOAT16.priority && s.bitsize == 16) return "_Float16";
   if (s.priority == POLY_BFLOAT16.priority && s.bitsize == 16) return "unsigned short";
   return s.name;
 }
@@ -152,7 +167,7 @@ static void hip_render_ctype(PolyDType dt, char *buf, int cap) {
   snprintf(buf, cap, "%s%d", hip_scalar_alias(s), (int)dt.count);
 }
 
-/* ── Render helpers ───────────────────────────────────────────────── */
+/* Render helpers */
 
 static char *hip_render_float_const(double v, PolyDType dt, char *buf, int cap) {
   bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
@@ -172,66 +187,139 @@ static char *hip_render_float_const(double v, PolyDType dt, char *buf, int cap) 
     snprintf(buf, cap, "%.17g", v);
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
       int len = (int)strlen(buf);
-      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+      if (len + 2 < cap) {
+        buf[len] = '.';
+        buf[len + 1] = '0';
+        buf[len + 2] = '\0';
+      }
     }
   } else {
     /* f32: round-trip float32 through text with 'f' suffix. */
     snprintf(buf, cap, "%.9g", (double)(float)v);
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
       int len = (int)strlen(buf);
-      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+      if (len + 2 < cap) {
+        buf[len] = '.';
+        buf[len + 1] = '0';
+        buf[len + 2] = '\0';
+      }
     }
     int len = (int)strlen(buf);
-    if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
+    if (len + 1 < cap) {
+      buf[len] = 'f';
+      buf[len + 1] = '\0';
+    }
   }
   return buf;
 }
 
-static void hip_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
-                            const char *s0, const char *s1, const char *s2) {
+static void hip_render_alu(
+    char *buf,
+    int cap,
+    PolyOps op,
+    PolyDType dtype,
+    const char *s0,
+    const char *s1,
+    const char *s2
+) {
   switch (op) {
   case POLY_OP_NEG:
-    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0); break;
-  case POLY_OP_SQRT:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "__ocml_sqrt_f64(%s)" : "__ocml_sqrt_f32(%s)", s0); break;
-  case POLY_OP_TRUNC:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "__ocml_trunc_f64(%s)" : "__ocml_trunc_f32(%s)", s0); break;
-  case POLY_OP_EXP2:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "__ocml_exp2_f64(%s)" : "__ocml_exp2_f32(%s)", s0); break;
-  case POLY_OP_LOG2:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "__ocml_log2_f64(%s)" : "__ocml_log2_f32(%s)", s0); break;
-  case POLY_OP_SIN:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "__ocml_sin_f64(%s)" : "__ocml_sin_f32(%s)", s0); break;
-  case POLY_OP_RECIPROCAL: snprintf(buf, cap, "(1/%s)", s0); break;
-  case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
-  case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
-  case POLY_OP_MUL:   snprintf(buf, cap, "(%s*%s)", s0, s1); break;
-  case POLY_OP_FDIV:  snprintf(buf, cap, "(%s/%s)", s0, s1); break;
-  case POLY_OP_IDIV:  snprintf(buf, cap, "(%s/%s)", s0, s1); break;
-  case POLY_OP_MOD:   snprintf(buf, cap, "(%s%%%s)", s0, s1); break;
-  case POLY_OP_SHL:   snprintf(buf, cap, "(%s<<%s)", s0, s1); break;
-  case POLY_OP_SHR:   snprintf(buf, cap, "(%s>>%s)", s0, s1); break;
-  case POLY_OP_AND:   snprintf(buf, cap, "(%s&%s)", s0, s1); break;
-  case POLY_OP_OR:    snprintf(buf, cap, "(%s|%s)", s0, s1); break;
-  case POLY_OP_XOR:   snprintf(buf, cap, "(%s^%s)", s0, s1); break;
-  case POLY_OP_CMPLT: snprintf(buf, cap, "(%s<%s)", s0, s1); break;
-  case POLY_OP_CMPNE: snprintf(buf, cap, "(%s!=%s)", s0, s1); break;
-  case POLY_OP_CMPEQ: snprintf(buf, cap, "(%s==%s)", s0, s1); break;
-  case POLY_OP_MAX:   snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1); break;
-  case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1); break;
-  case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
-  case POLY_OP_MULACC:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "__builtin_fma(%s,%s,%s)" : "__builtin_fmaf(%s,%s,%s)", s0, s1, s2);
+    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0);
     break;
-  default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
+  case POLY_OP_SQRT:
+    snprintf(
+        buf, cap,
+        poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_sqrt_f64(%s)" : "__ocml_sqrt_f32(%s)", s0
+    );
+    break;
+  case POLY_OP_TRUNC:
+    snprintf(
+        buf, cap,
+        poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_trunc_f64(%s)" : "__ocml_trunc_f32(%s)", s0
+    );
+    break;
+  case POLY_OP_EXP2:
+    snprintf(
+        buf, cap,
+        poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_exp2_f64(%s)" : "__ocml_exp2_f32(%s)", s0
+    );
+    break;
+  case POLY_OP_LOG2:
+    snprintf(
+        buf, cap,
+        poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_log2_f64(%s)" : "__ocml_log2_f32(%s)", s0
+    );
+    break;
+  case POLY_OP_SIN:
+    snprintf(
+        buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64) ? "__ocml_sin_f64(%s)" : "__ocml_sin_f32(%s)",
+        s0
+    );
+    break;
+  case POLY_OP_RECIPROCAL:
+    snprintf(buf, cap, "(1/%s)", s0);
+    break;
+  case POLY_OP_ADD:
+    snprintf(buf, cap, "(%s+%s)", s0, s1);
+    break;
+  case POLY_OP_SUB:
+    snprintf(buf, cap, "(%s-%s)", s0, s1);
+    break;
+  case POLY_OP_MUL:
+    snprintf(buf, cap, "(%s*%s)", s0, s1);
+    break;
+  case POLY_OP_FDIV:
+    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    break;
+  case POLY_OP_IDIV:
+    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    break;
+  case POLY_OP_MOD:
+    snprintf(buf, cap, "(%s%%%s)", s0, s1);
+    break;
+  case POLY_OP_SHL:
+    snprintf(buf, cap, "(%s<<%s)", s0, s1);
+    break;
+  case POLY_OP_SHR:
+    snprintf(buf, cap, "(%s>>%s)", s0, s1);
+    break;
+  case POLY_OP_AND:
+    snprintf(buf, cap, "(%s&%s)", s0, s1);
+    break;
+  case POLY_OP_OR:
+    snprintf(buf, cap, "(%s|%s)", s0, s1);
+    break;
+  case POLY_OP_XOR:
+    snprintf(buf, cap, "(%s^%s)", s0, s1);
+    break;
+  case POLY_OP_CMPLT:
+    snprintf(buf, cap, "(%s<%s)", s0, s1);
+    break;
+  case POLY_OP_CMPNE:
+    snprintf(buf, cap, "(%s!=%s)", s0, s1);
+    break;
+  case POLY_OP_CMPEQ:
+    snprintf(buf, cap, "(%s==%s)", s0, s1);
+    break;
+  case POLY_OP_MAX:
+    snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
+    break;
+  case POLY_OP_POW:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
+    break;
+  case POLY_OP_WHERE:
+    snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
+    break;
+  case POLY_OP_MULACC:
+    snprintf(
+        buf, cap,
+        poly_dtype_eq(dtype, POLY_FLOAT64) ? "__builtin_fma(%s,%s,%s)" : "__builtin_fmaf(%s,%s,%s)",
+        s0, s1, s2
+    );
+    break;
+  default:
+    snprintf(buf, cap, "/* unknown op %d */0", op);
+    break;
   }
 }
 
@@ -246,7 +334,7 @@ static int hip_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool crea
   return *n_ranges - 1;
 }
 
-/* ── AMD CDNA Tensor Core specs (port of tc.py:112-116) ────────────── */
+/* AMD CDNA Tensor Core specs (port of tc.py:112-116) */
 
 static PolyTensorCore hip_cdna_tc_specs_storage[2];
 static int hip_cdna_tc_specs_init = 0;
@@ -258,28 +346,56 @@ static void init_hip_cdna_tc_specs(void) {
   /* half -> float (mfma_f32_16x16x16f16) */
   PolyTensorCore *tc0 = &hip_cdna_tc_specs_storage[0];
   memset(tc0, 0, sizeof(*tc0));
-  tc0->dims[0] = 16; tc0->dims[1] = 16; tc0->dims[2] = 16;
+  tc0->dims[0] = 16;
+  tc0->dims[1] = 16;
+  tc0->dims[2] = 16;
   tc0->threads = 64;
-  tc0->elements_per_thread[0] = 4; tc0->elements_per_thread[1] = 4; tc0->elements_per_thread[2] = 4;
+  tc0->elements_per_thread[0] = 4;
+  tc0->elements_per_thread[1] = 4;
+  tc0->elements_per_thread[2] = 4;
   tc0->dtype_in = POLY_FLOAT16;
   tc0->dtype_out = POLY_FLOAT32;
-  struct { char type; int dim; } opts0[] = {
-    {'l',0},{'l',0},{'l',0},{'l',0},{'u',1},{'u',1},{'l',1},{'l',1}
-  };
-  for (int i = 0; i < 8; i++) { tc0->opts[i].type = opts0[i].type; tc0->opts[i].dim = opts0[i].dim; }
+  struct {
+    char type;
+    int dim;
+  } opts0[] = {{'l', 0}, {'l', 0}, {'l', 0}, {'l', 0}, {'u', 1}, {'u', 1}, {'l', 1}, {'l', 1}};
+  for (int i = 0; i < 8; i++) {
+    tc0->opts[i].type = opts0[i].type;
+    tc0->opts[i].dim = opts0[i].dim;
+  }
   tc0->n_opts = 8;
   /* swizzle[0] */
-  tc0->swizzle[0][0][0]="u0"; tc0->swizzle[0][0][1]="u1"; tc0->swizzle[0][0][2]="l4";
-  tc0->swizzle[0][0][3]="l5"; tc0->swizzle[0][0][4]="r2"; tc0->swizzle[0][0][5]="r3";
-  tc0->swizzle[0][1][0]="r0"; tc0->swizzle[0][1][1]="r1";
-  tc0->swizzle[0][2][0]="l0"; tc0->swizzle[0][2][1]="l1"; tc0->swizzle[0][2][2]="l2"; tc0->swizzle[0][2][3]="l3";
+  tc0->swizzle[0][0][0] = "u0";
+  tc0->swizzle[0][0][1] = "u1";
+  tc0->swizzle[0][0][2] = "l4";
+  tc0->swizzle[0][0][3] = "l5";
+  tc0->swizzle[0][0][4] = "r2";
+  tc0->swizzle[0][0][5] = "r3";
+  tc0->swizzle[0][1][0] = "r0";
+  tc0->swizzle[0][1][1] = "r1";
+  tc0->swizzle[0][2][0] = "l0";
+  tc0->swizzle[0][2][1] = "l1";
+  tc0->swizzle[0][2][2] = "l2";
+  tc0->swizzle[0][2][3] = "l3";
   /* swizzle[1] */
-  tc0->swizzle[1][0][0]="l0"; tc0->swizzle[1][0][1]="l1"; tc0->swizzle[1][0][2]="l2";
-  tc0->swizzle[1][0][3]="l3"; tc0->swizzle[1][0][4]="r2"; tc0->swizzle[1][0][5]="r3";
-  tc0->swizzle[1][1][0]="r0"; tc0->swizzle[1][1][1]="r1";
-  tc0->swizzle[1][2][0]="l4"; tc0->swizzle[1][2][1]="l5"; tc0->swizzle[1][2][2]="u0"; tc0->swizzle[1][2][3]="u1";
-  tc0->swizzle_len[0][0]=6; tc0->swizzle_len[0][1]=2; tc0->swizzle_len[0][2]=4;
-  tc0->swizzle_len[1][0]=6; tc0->swizzle_len[1][1]=2; tc0->swizzle_len[1][2]=4;
+  tc0->swizzle[1][0][0] = "l0";
+  tc0->swizzle[1][0][1] = "l1";
+  tc0->swizzle[1][0][2] = "l2";
+  tc0->swizzle[1][0][3] = "l3";
+  tc0->swizzle[1][0][4] = "r2";
+  tc0->swizzle[1][0][5] = "r3";
+  tc0->swizzle[1][1][0] = "r0";
+  tc0->swizzle[1][1][1] = "r1";
+  tc0->swizzle[1][2][0] = "l4";
+  tc0->swizzle[1][2][1] = "l5";
+  tc0->swizzle[1][2][2] = "u0";
+  tc0->swizzle[1][2][3] = "u1";
+  tc0->swizzle_len[0][0] = 6;
+  tc0->swizzle_len[0][1] = 2;
+  tc0->swizzle_len[0][2] = 4;
+  tc0->swizzle_len[1][0] = 6;
+  tc0->swizzle_len[1][1] = 2;
+  tc0->swizzle_len[1][2] = 4;
   tc0->intrinsic_name = "mfma_f32_16x16x16f16";
 
   /* bfloat16 -> float (mfma_f32_16x16x16bf16_1k) -- same structure */
@@ -292,33 +408,33 @@ static void init_hip_cdna_tc_specs(void) {
 static PolyRendererCaps poly_hip_renderer_caps(void) {
   init_hip_cdna_tc_specs();
   return (PolyRendererCaps){
-    .has_mulacc = true,
-    .has_threefry = false,
-    .tensor_cores = hip_cdna_tc_specs_storage,
-    .n_tensor_cores = 2,
+      .has_mulacc = true,
+      .has_threefry = false,
+      .tensor_cores = hip_cdna_tc_specs_storage,
+      .n_tensor_cores = 2,
   };
 }
 
-/* ── HIP Linearizer ──────────────────────────────────────────────── */
+/* HIP Linearizer */
 
 PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   PolyRewriteOpts opts = {
-    .optimize    = true,           /* shared optimized pipeline (tinygrad parity) */
-    .devectorize = -1,             /* HIP: no add_loads/devectorize */
-    .caps        = poly_hip_renderer_caps(),
-    .device      = POLY_DEVICE_HIP,
-    .opt_policy  = POLY_OPT_TC_ONLY,
-    .extra_matcher = poly_pm_bf16_non_native(),
-    .gpu_block_size = 256,
+      .optimize = true, /* shared optimized pipeline (tinygrad parity) */
+      .devectorize = -1, /* HIP: no add_loads/devectorize */
+      .caps = poly_hip_renderer_caps(),
+      .device = POLY_DEVICE_HIP,
+      .opt_policy = POLY_OPT_TC_ONLY,
+      .extra_matcher = poly_pm_bf16_non_native(),
+      .gpu_block_size = 256,
   };
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 
-/* ── Track which OCML/OCKL functions are used ─────────────────────── */
+/* Track which OCML/OCKL functions are used */
 
 typedef struct {
-  bool uses_special;    /* needs ockl workitem functions */
+  bool uses_special; /* needs ockl workitem functions */
   bool uses_exp2_f32;
   bool uses_log2_f32;
   bool uses_sin_f32;
@@ -345,32 +461,61 @@ static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
     if (u->op == POLY_OP_SPECIAL) used->uses_special = true;
     bool is_f64 = poly_dtype_eq(u->dtype, POLY_FLOAT64);
     switch (u->op) {
-    case POLY_OP_EXP2:  if (is_f64) used->uses_exp2_f64  = true; else used->uses_exp2_f32  = true; break;
-    case POLY_OP_LOG2:  if (is_f64) used->uses_log2_f64  = true; else used->uses_log2_f32  = true; break;
-    case POLY_OP_SIN:   if (is_f64) used->uses_sin_f64   = true; else used->uses_sin_f32   = true; break;
-    case POLY_OP_SQRT:  if (is_f64) used->uses_sqrt_f64  = true; else used->uses_sqrt_f32  = true; break;
-    case POLY_OP_TRUNC: if (is_f64) used->uses_trunc_f64 = true; else used->uses_trunc_f32 = true; break;
+    case POLY_OP_EXP2:
+      if (is_f64)
+        used->uses_exp2_f64 = true;
+      else
+        used->uses_exp2_f32 = true;
+      break;
+    case POLY_OP_LOG2:
+      if (is_f64)
+        used->uses_log2_f64 = true;
+      else
+        used->uses_log2_f32 = true;
+      break;
+    case POLY_OP_SIN:
+      if (is_f64)
+        used->uses_sin_f64 = true;
+      else
+        used->uses_sin_f32 = true;
+      break;
+    case POLY_OP_SQRT:
+      if (is_f64)
+        used->uses_sqrt_f64 = true;
+      else
+        used->uses_sqrt_f32 = true;
+      break;
+    case POLY_OP_TRUNC:
+      if (is_f64)
+        used->uses_trunc_f64 = true;
+      else
+        used->uses_trunc_f32 = true;
+      break;
     case POLY_OP_WMMA: {
       used->uses_wmma = true;
       const char *wn = (u->arg.kind == POLY_ARG_STRING && u->arg.str) ? u->arg.str : NULL;
       if (wn && used->n_wmma_names < 16) {
         bool dup = false;
         for (int j = 0; j < used->n_wmma_names; j++)
-          if (strcmp(used->wmma_names[j], wn) == 0) { dup = true; break; }
+          if (strcmp(used->wmma_names[j], wn) == 0) {
+            dup = true;
+            break;
+          }
         if (!dup) used->wmma_names[used->n_wmma_names++] = wn;
       }
       break;
     }
-    default: break;
+    default:
+      break;
     }
     /* Collect vector dtypes for typedef emission */
     if (u->dtype.count > 1 && !u->dtype.is_ptr && used->n_vec_dtypes < 32) {
       bool dup = false;
       for (int j = 0; j < used->n_vec_dtypes; j++) {
-        if (poly_dtype_eq(poly_dtype_scalar(used->vec_dtypes[j]),
-                          poly_dtype_scalar(u->dtype)) &&
+        if (poly_dtype_eq(poly_dtype_scalar(used->vec_dtypes[j]), poly_dtype_scalar(u->dtype)) &&
             used->vec_dtypes[j].count == u->dtype.count) {
-          dup = true; break;
+          dup = true;
+          break;
         }
       }
       if (!dup) used->vec_dtypes[used->n_vec_dtypes++] = u->dtype;
@@ -378,7 +523,7 @@ static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
   }
 }
 
-/* ── HIP Renderer ─────────────────────────────────────────────────── */
+/* HIP Renderer */
 
 char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bounds) {
   HipStrBuf decls, body;
@@ -410,8 +555,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
   /* Pre-scan: count range references for liveness */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_RANGE)
-      (void)hip_range_slot(live_ranges, &n_live_ranges, u, true);
+    if (u->op == POLY_OP_RANGE) (void)hip_range_slot(live_ranges, &n_live_ranges, u, true);
     if (u->op == POLY_OP_END) continue;
     for (int j = 0; j < u->n_src; j++) {
       if (u->src[j] && u->src[j]->op == POLY_OP_RANGE) {
@@ -424,8 +568,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
 
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
-      continue;
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
 
     if (u->op != POLY_OP_END) {
       for (int j = 0; j < u->n_src; j++) {
@@ -455,7 +598,7 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     /* --- DEFINE_VAR --------------------------------------------------- */
     if (u->op == POLY_OP_DEFINE_VAR) {
       const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
-                        : (u->arg.str ? u->arg.str : "var");
+                                                             : (u->arg.str ? u->arg.str : "var");
       hsmap_set(&names, u, strdup(vname));
       param_types[n_params] = strdup("const int");
       param_names[n_params] = strdup(vname);
@@ -505,21 +648,27 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       if (slen > 0) dim_idx = sname[slen - 1] - '0';
 
       /* HIP uses OCKL workitem intrinsics */
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
       if (sname[0] == 'l') {
         /* Local index: __ockl_get_local_id */
         hsb_printf(&body, "int %s = __ockl_get_local_id(%d);\n", sname, dim_idx);
       } else {
         /* Global index: __ockl_get_group_id * __ockl_get_local_size + __ockl_get_local_id */
-        hsb_printf(&body, "int %s = (__ockl_get_group_id(%d)*__ockl_get_local_size(%d)+__ockl_get_local_id(%d));\n",
-                   sname, dim_idx, dim_idx, dim_idx);
+        hsb_printf(
+            &body,
+            "int %s = "
+            "(__ockl_get_group_id(%d)*__ockl_get_local_size(%d)+__ockl_get_local_id(%d));\n",
+            sname, dim_idx, dim_idx, dim_idx
+        );
       }
 
       /* Bounds check for global indices only */
       if (sname[0] != 'l') {
         char *bound = hsmap_get(&names, u->src[0]);
         if (bound) {
-          for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+          for (int d = 0; d < depth; d++)
+            hsb_puts(&body, "  ");
           hsb_printf(&body, "if (%s >= %s) return;\n", sname, bound);
         }
       }
@@ -528,7 +677,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
     /* --- BARRIER ------------------------------------------------------ */
     if (u->op == POLY_OP_BARRIER) {
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
       hsb_puts(&body, "__syncthreads();\n");
       continue;
     }
@@ -540,9 +690,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *bound = hsmap_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
-      hsb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n",
-                 name, name, bound, name);
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
+      hsb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n", name, name, bound, name);
       depth++;
       if (n_open_ranges < 128) open_ranges[n_open_ranges++] = u;
       continue;
@@ -557,7 +707,10 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
         int pos = -1;
         for (int p = n_open_ranges - 1; p >= 0; p--) {
-          if (open_ranges[p] == want) { pos = p; break; }
+          if (open_ranges[p] == want) {
+            pos = p;
+            break;
+          }
         }
         if (pos < 0) continue;
 
@@ -573,7 +726,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
         while (n_open_ranges > pos) {
           depth--;
-          for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+          for (int d = 0; d < depth; d++)
+            hsb_puts(&body, "  ");
           hsb_puts(&body, "}\n");
           n_open_ranges--;
         }
@@ -581,7 +735,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       }
 
       depth--;
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
       hsb_puts(&body, "}\n");
       if (u->op == POLY_OP_END && n_open_ranges > 0) n_open_ranges--;
       continue;
@@ -596,8 +751,10 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       /* HIP shared memory: __attribute__((shared, aligned(16))) */
       int smem_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
       PolyDType base = poly_dtype_scalar(u->dtype);
-      hsb_printf(&decls, "  __attribute__((shared, aligned(16))) %s %s[%d];\n",
-                 hip_scalar_ctype(base), name, smem_size);
+      hsb_printf(
+          &decls, "  __attribute__((shared, aligned(16))) %s %s[%d];\n", hip_scalar_ctype(base),
+          name, smem_size
+      );
       continue;
     }
 
@@ -626,9 +783,13 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *bidx = hsmap_get(&names, u->src[0]);
-      { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
-      hsb_printf(&decls, "  %s %s;\n", ctype, name); }
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      {
+        char ctype[128];
+        hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+        hsb_printf(&decls, "  %s %s;\n", ctype, name);
+      }
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
 
       /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
@@ -638,7 +799,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
         hsb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
       } else if (idx_uop && idx_uop->n_src >= 3) {
         char *gate_s = hsmap_get(&names, idx_uop->src[2]);
-        char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+        char ctype[128];
+        hip_render_ctype(u->dtype, ctype, sizeof(ctype));
         hsb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
       } else {
         hsb_printf(&body, "%s = (*%s);\n", name, bidx);
@@ -649,8 +811,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     /* --- STORE -------------------------------------------------------- */
     if (u->op == POLY_OP_STORE) {
       char *target = hsmap_get(&names, u->src[0]);
-      char *val    = hsmap_get(&names, u->src[1]);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      char *val = hsmap_get(&names, u->src[1]);
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
       if (u->src[0]->op == POLY_OP_DEFINE_LOCAL)
         hsb_printf(&body, "%s = %s;\n", target, val);
       else
@@ -665,11 +828,18 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hsmap_set(&names, u, strdup(name));
 
       char *src_s = hsmap_get(&names, u->src[0]);
-      { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
-      hsb_printf(&decls, "  %s %s;\n", ctype, name); }
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
-      { char ctype2[128]; hip_render_ctype(u->dtype, ctype2, sizeof(ctype2));
-      hsb_printf(&body, "%s = (%s)(%s);\n", name, ctype2, src_s); }
+      {
+        char ctype[128];
+        hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+        hsb_printf(&decls, "  %s %s;\n", ctype, name);
+      }
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
+      {
+        char ctype2[128];
+        hip_render_ctype(u->dtype, ctype2, sizeof(ctype2));
+        hsb_printf(&body, "%s = (%s)(%s);\n", name, ctype2, src_s);
+      }
       continue;
     }
 
@@ -684,9 +854,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       hip_render_ctype(u->dtype, dst_type, sizeof(dst_type));
       hip_render_ctype(u->src[0]->dtype, src_type, sizeof(src_type));
       hsb_printf(&decls, "  %s %s;\n", dst_type, name);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
-      hsb_printf(&body, "%s = tg_bitcast<%s>((%s)(%s));\n",
-                 name, dst_type, src_type, src_s);
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
+      hsb_printf(&body, "%s = tg_bitcast<%s>((%s)(%s));\n", name, dst_type, src_type, src_s);
       continue;
     }
 
@@ -702,9 +872,13 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       snprintf(name, sizeof(name), "alu%d", c_alu++);
       hsmap_set(&names, u, strdup(name));
 
-      { char ctype[128]; hip_render_ctype(u->dtype, ctype, sizeof(ctype));
-      hsb_printf(&decls, "  %s %s;\n", ctype, name); }
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      {
+        char ctype[128];
+        hip_render_ctype(u->dtype, ctype, sizeof(ctype));
+        hsb_printf(&decls, "  %s %s;\n", ctype, name);
+      }
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
       hsb_printf(&body, "%s = %s;\n", name, expr);
       continue;
     }
@@ -712,7 +886,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     /* --- IF ----------------------------------------------------------- */
     if (u->op == POLY_OP_IF) {
       char *cond_s = hsmap_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
       hsb_printf(&body, "if (%s) {\n", cond_s);
       depth++;
       continue;
@@ -727,7 +902,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       char ctype[128];
       hip_render_ctype(u->dtype, ctype, sizeof(ctype));
       hsb_printf(&decls, "  %s %s;\n", ctype, name);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
 
       if (u->n_src == 1) {
         char *s = hsmap_get(&names, u->src[0]);
@@ -753,7 +929,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       char ctype[128];
       hip_render_ctype(u->dtype, ctype, sizeof(ctype));
       hsb_printf(&decls, "  %s %s;\n", ctype, name);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
 
       char *src_s = hsmap_get(&names, u->src[0]);
       if (u->arg.kind == POLY_ARG_INT) {
@@ -786,7 +963,8 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       char ctype[128];
       hip_render_ctype(u->dtype, ctype, sizeof(ctype));
       hsb_printf(&decls, "  %s %s;\n", ctype, name);
-      for (int d = 0; d < depth; d++) hsb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        hsb_puts(&body, "  ");
 
       /* WMMA has 3 sources: A, B, C(accumulator). Arg is the intrinsic name. */
       char *a_s = (u->n_src > 0) ? hsmap_get(&names, u->src[0]) : "0";
@@ -795,10 +973,12 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
       /* Emit: wmma0 = __builtin_amdgcn_<name>(A, B, C, 0, 0, 0);
        * MFMA builtins take 6 args: A, B, C, cbsz, abid, blgp. */
-      const char *wmma_name = (u->arg.kind == POLY_ARG_STRING && u->arg.str)
-                              ? u->arg.str : "WMMA_UNKNOWN";
-      hsb_printf(&body, "%s = __builtin_amdgcn_%s(%s, %s, %s, 0, 0, 0);\n",
-                 name, wmma_name, a_s ? a_s : "0", b_s ? b_s : "0", c_s ? c_s : "0");
+      const char *wmma_name =
+          (u->arg.kind == POLY_ARG_STRING && u->arg.str) ? u->arg.str : "WMMA_UNKNOWN";
+      hsb_printf(
+          &body, "%s = __builtin_amdgcn_%s(%s, %s, %s, 0, 0, 0);\n", name, wmma_name,
+          a_s ? a_s : "0", b_s ? b_s : "0", c_s ? c_s : "0"
+      );
       continue;
     }
   }
@@ -809,14 +989,14 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     char *kt = param_types[i], *kn = param_names[i];
     int j = i - 1;
     while (j >= 0 && param_order[j] > ko) {
-      param_order[j+1] = param_order[j];
-      param_types[j+1] = param_types[j];
-      param_names[j+1] = param_names[j];
+      param_order[j + 1] = param_order[j];
+      param_types[j + 1] = param_types[j];
+      param_names[j + 1] = param_names[j];
       j--;
     }
-    param_order[j+1] = ko;
-    param_types[j+1] = kt;
-    param_names[j+1] = kn;
+    param_order[j + 1] = ko;
+    param_types[j + 1] = kt;
+    param_names[j + 1] = kn;
   }
 
   /* Scan which OCML/OCKL functions are used */
@@ -836,32 +1016,50 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
   /* Bitcast template helper. With -nogpuinc, __device__/__forceinline__
    * are unavailable; use __attribute__ equivalents. */
-  hsb_puts(&out, "template <class T, class F> __attribute__((device, always_inline)) T tg_bitcast(F v) {\n");
+  hsb_puts(
+      &out,
+      "template <class T, class F> __attribute__((device, always_inline)) T tg_bitcast(F v) {\n"
+  );
   hsb_puts(&out, "  union U { F f; T t; }; U u; u.f = v; return u.t;\n");
   hsb_puts(&out, "}\n");
 
   /* OCKL workitem function declarations (only when SPECIAL ops are used) */
   if (used.uses_special) {
-    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) size_t __ockl_get_local_id(unsigned int);\n");
-    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) size_t __ockl_get_group_id(unsigned int);\n");
-    hsb_puts(&out, "extern \"C\" __attribute__((device, const)) size_t __ockl_get_local_size(unsigned int);\n");
+    hsb_puts(
+        &out,
+        "extern \"C\" __attribute__((device, const)) size_t __ockl_get_local_id(unsigned int);\n"
+    );
+    hsb_puts(
+        &out,
+        "extern \"C\" __attribute__((device, const)) size_t __ockl_get_group_id(unsigned int);\n"
+    );
+    hsb_puts(
+        &out,
+        "extern \"C\" __attribute__((device, const)) size_t __ockl_get_local_size(unsigned int);\n"
+    );
   }
 
   /* OCML math function declarations (only what's used) */
-#define EMIT_OCML(flag, name, attr) \
-  if (used.flag) hsb_printf(&out, "extern \"C\" __attribute__((device%s)) float __ocml_%s_f32(float);\n", attr, name)
-#define EMIT_OCML_F64(flag, name, attr) \
-  if (used.flag) hsb_printf(&out, "extern \"C\" __attribute__((device%s)) double __ocml_%s_f64(double);\n", attr, name)
+#define EMIT_OCML(flag, name, attr)                                                                \
+  if (used.flag)                                                                                   \
+  hsb_printf(                                                                                      \
+      &out, "extern \"C\" __attribute__((device%s)) float __ocml_%s_f32(float);\n", attr, name     \
+  )
+#define EMIT_OCML_F64(flag, name, attr)                                                            \
+  if (used.flag)                                                                                   \
+  hsb_printf(                                                                                      \
+      &out, "extern \"C\" __attribute__((device%s)) double __ocml_%s_f64(double);\n", attr, name   \
+  )
 
-  EMIT_OCML(uses_exp2_f32,  "exp2",  ", pure");
-  EMIT_OCML(uses_log2_f32,  "log2",  ", pure");
-  EMIT_OCML(uses_sqrt_f32,  "sqrt",  ", const");
-  EMIT_OCML(uses_sin_f32,   "sin",   "");
+  EMIT_OCML(uses_exp2_f32, "exp2", ", pure");
+  EMIT_OCML(uses_log2_f32, "log2", ", pure");
+  EMIT_OCML(uses_sqrt_f32, "sqrt", ", const");
+  EMIT_OCML(uses_sin_f32, "sin", "");
   EMIT_OCML(uses_trunc_f32, "trunc", "");
-  EMIT_OCML_F64(uses_exp2_f64,  "exp2",  ", pure");
-  EMIT_OCML_F64(uses_log2_f64,  "log2",  ", pure");
-  EMIT_OCML_F64(uses_sqrt_f64,  "sqrt",  ", const");
-  EMIT_OCML_F64(uses_sin_f64,   "sin",   "");
+  EMIT_OCML_F64(uses_exp2_f64, "exp2", ", pure");
+  EMIT_OCML_F64(uses_log2_f64, "log2", ", pure");
+  EMIT_OCML_F64(uses_sqrt_f64, "sqrt", ", const");
+  EMIT_OCML_F64(uses_sin_f64, "sin", "");
   EMIT_OCML_F64(uses_trunc_f64, "trunc", "");
 
   /* WMMA: builtins emitted directly in body, no #define needed. */
@@ -875,16 +1073,20 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     char tname[64];
     hip_render_ctype(vdt, tname, sizeof(tname));
     const char *sctype = hip_scalar_ctype(poly_dtype_scalar(vdt));
-    hsb_printf(&out, "typedef %s %s __attribute__((ext_vector_type(%d)));\n",
-               sctype, tname, (int)vdt.count);
+    hsb_printf(
+        &out, "typedef %s %s __attribute__((ext_vector_type(%d)));\n", sctype, tname, (int)vdt.count
+    );
   }
 
   hsb_puts(&out, "\n");
 
   /* Kernel signature: AMD-specific attributes */
-  hsb_printf(&out,
-    "extern \"C\" __attribute__((global)) void __attribute__((amdgpu_flat_work_group_size(1, %d))) %s(",
-    launch_bounds, fn_name);
+  hsb_printf(
+      &out,
+      "extern \"C\" __attribute__((global)) void __attribute__((amdgpu_flat_work_group_size(1, "
+      "%d))) %s(",
+      launch_bounds, fn_name
+  );
   for (int i = 0; i < n_params; i++) {
     if (i > 0) hsb_puts(&out, ", ");
     hsb_printf(&out, "%s %s", param_types[i], param_names[i]);

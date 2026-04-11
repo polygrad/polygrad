@@ -5,7 +5,7 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 
-/* ── Basic creation ───────────────────────────────────────────────────── */
+/* Basic creation */
 
 TEST(uop, create_const) {
   PolyCtx *ctx = poly_ctx_new();
@@ -62,7 +62,7 @@ TEST(uop, create_string_arg) {
 TEST(uop, create_int_tuple_arg) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t perm[] = {1, 0, 2};
-  PolyArg arg = { .kind = POLY_ARG_INT_TUPLE, .int_tuple = { perm, 3 } };
+  PolyArg arg = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {perm, 3}};
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *u = poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, a, arg);
   ASSERT_EQ(u->arg.kind, POLY_ARG_INT_TUPLE);
@@ -76,7 +76,7 @@ TEST(uop, create_int_tuple_arg) {
   PASS();
 }
 
-/* ── CSE (Common Subexpression Elimination) ───────────────────────────── */
+/* CSE (Common Subexpression Elimination) */
 
 TEST(uop, cse_same_const) {
   PolyCtx *ctx = poly_ctx_new();
@@ -133,8 +133,8 @@ TEST(uop, cse_int_tuple) {
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   int64_t perm1[] = {1, 0};
   int64_t perm2[] = {1, 0};
-  PolyArg arg1 = { .kind = POLY_ARG_INT_TUPLE, .int_tuple = { perm1, 2 } };
-  PolyArg arg2 = { .kind = POLY_ARG_INT_TUPLE, .int_tuple = { perm2, 2 } };
+  PolyArg arg1 = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {perm1, 2}};
+  PolyArg arg2 = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {perm2, 2}};
   PolyUOp *u1 = poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, a, arg1);
   PolyUOp *u2 = poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, a, arg2);
   ASSERT_PTR_EQ(u1, u2);
@@ -142,7 +142,7 @@ TEST(uop, cse_int_tuple) {
   PASS();
 }
 
-/* ── Toposort ─────────────────────────────────────────────────────────── */
+/* Toposort */
 
 TEST(uop, toposort_single) {
   PolyCtx *ctx = poly_ctx_new();
@@ -187,9 +187,9 @@ TEST(uop, toposort_diamond) {
 
   int n;
   PolyUOp **sorted = poly_toposort(ctx, d, &n);
-  ASSERT_INT_EQ(n, 4);  /* a, b, c, d — each appears once */
-  ASSERT_PTR_EQ(sorted[0], a);  /* a first (leaf) */
-  ASSERT_PTR_EQ(sorted[3], d);  /* d last (root) */
+  ASSERT_INT_EQ(n, 4); /* a, b, c, d — each appears once */
+  ASSERT_PTR_EQ(sorted[0], a); /* a first (leaf) */
+  ASSERT_PTR_EQ(sorted[3], d); /* d last (root) */
   /* b and c can be in either order but both must come before d */
   ASSERT_TRUE((sorted[1] == b && sorted[2] == c) || (sorted[1] == c && sorted[2] == b));
   poly_ctx_destroy(ctx);
@@ -207,13 +207,13 @@ TEST(uop, toposort_shared_subgraph) {
 
   int n;
   PolyUOp **sorted = poly_toposort(ctx, root, &n);
-  ASSERT_INT_EQ(n, 4);  /* a, b, shared, root */
+  ASSERT_INT_EQ(n, 4); /* a, b, shared, root */
   ASSERT_PTR_EQ(sorted[3], root);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── Ops helpers ──────────────────────────────────────────────────────── */
+/* Ops helpers */
 
 TEST(ops, op_name) {
   ASSERT_STR_EQ(poly_op_name(POLY_OP_ADD), "ADD");
@@ -247,7 +247,7 @@ TEST(ops, opset) {
   PASS();
 }
 
-/* ── Pretty-print ─────────────────────────────────────────────────────── */
+/* Pretty-print */
 
 TEST(uop, print_const) {
   PolyCtx *ctx = poly_ctx_new();
@@ -263,7 +263,7 @@ TEST(uop, print_const) {
   PASS();
 }
 
-/* ── Arena basics ─────────────────────────────────────────────────────── */
+/* Arena basics */
 
 TEST(arena, alloc_and_destroy) {
   PolyArena *a = poly_arena_new(1024);
@@ -281,7 +281,7 @@ TEST(arena, alloc_and_destroy) {
 }
 
 TEST(arena, large_alloc) {
-  PolyArena *a = poly_arena_new(64);  /* tiny initial block */
+  PolyArena *a = poly_arena_new(64); /* tiny initial block */
   /* allocate more than initial capacity */
   void *p = poly_arena_alloc(a, 256, 8);
   ASSERT_NOT_NULL(p);
@@ -302,10 +302,10 @@ TEST(arena, reset) {
   PASS();
 }
 
-/* ── Hashmap ──────────────────────────────────────────────────────────── */
+/* Hashmap */
 
 static bool int_key_eq(const void *a, const void *b) {
-  return *(const int*)a == *(const int*)b;
+  return *(const int *)a == *(const int *)b;
 }
 
 TEST(hashmap, basic_set_get) {
@@ -314,8 +314,8 @@ TEST(hashmap, basic_set_get) {
 
   int key1 = 42;
   int key2 = 99;
-  poly_map_set(m, 42, &key1, (void*)(uintptr_t)100, int_key_eq);
-  poly_map_set(m, 99, &key2, (void*)(uintptr_t)200, int_key_eq);
+  poly_map_set(m, 42, &key1, (void *)(uintptr_t)100, int_key_eq);
+  poly_map_set(m, 99, &key2, (void *)(uintptr_t)200, int_key_eq);
 
   ASSERT_INT_EQ(poly_map_len(m), 2);
   ASSERT_EQ((uintptr_t)poly_map_get(m, 42, &key1, int_key_eq), 100);
@@ -331,7 +331,7 @@ TEST(hashmap, basic_set_get) {
 TEST(hashmap, remove) {
   PolyMap *m = poly_map_new(16);
   int key1 = 42;
-  poly_map_set(m, 42, &key1, (void*)(uintptr_t)100, int_key_eq);
+  poly_map_set(m, 42, &key1, (void *)(uintptr_t)100, int_key_eq);
   ASSERT_INT_EQ(poly_map_len(m), 1);
 
   poly_map_remove(m, 42, &key1, int_key_eq);
@@ -347,7 +347,7 @@ TEST(hashmap, grow) {
   int keys[100];
   for (int i = 0; i < 100; i++) {
     keys[i] = i;
-    poly_map_set(m, (uint32_t)i, &keys[i], (void*)(uintptr_t)(i + 1000), int_key_eq);
+    poly_map_set(m, (uint32_t)i, &keys[i], (void *)(uintptr_t)(i + 1000), int_key_eq);
   }
   ASSERT_INT_EQ(poly_map_len(m), 100);
 
@@ -361,7 +361,7 @@ TEST(hashmap, grow) {
   PASS();
 }
 
-/* ── Toposort gate and enter_calls ───────────────────────────────────── */
+/* Toposort gate and enter_calls */
 
 static bool gate_skip_neg(PolyUOp *u) {
   return u->op != POLY_OP_NEG;
@@ -412,8 +412,7 @@ TEST(uop, toposort_enter_calls_false) {
   ASSERT_INT_EQ(n_no, 2);
   bool found_callee = false;
   for (int i = 0; i < n_no; i++) {
-    if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2)
-      found_callee = true;
+    if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2) found_callee = true;
   }
   ASSERT_TRUE(!found_callee);
   ASSERT_TRUE(topo_no[0] == arg1);
@@ -423,8 +422,7 @@ TEST(uop, toposort_enter_calls_false) {
   PASS();
 }
 
-/* ── Range helpers (poly_no_range / poly_uop_in_ranges / poly_uop_ranges) ──
- *
+/* Range helpers (poly_no_range / poly_uop_in_ranges / poly_uop_ranges) *
  * Each test mirrors a tinygrad ground-truth case verified against
  * references/tinygrad_latest (conda env tiny). Ground-truth generator:
  *   PYTHONPATH=.../references/tinygrad_latest python /tmp/tg_ranges_gt.py
@@ -438,8 +436,7 @@ TEST(uop, toposort_enter_calls_false) {
 
 static PolyUOp *make_range(PolyCtx *ctx, int64_t n, int64_t axis_id) {
   PolyUOp *size = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
-  return poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, size,
-                   poly_arg_range(axis_id, POLY_AXIS_LOOP));
+  return poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, size, poly_arg_range(axis_id, POLY_AXIS_LOOP));
 }
 
 TEST(uop, no_range_const) {
@@ -447,7 +444,7 @@ TEST(uop, no_range_const) {
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
   /* [tg] CONST   no_range=True */
   ASSERT_TRUE(poly_no_range(ctx, c));
-  ASSERT_INT_EQ(poly_uop_ranges(ctx, c, (PolyUOp*[8]){0}, 8), 0);
+  ASSERT_INT_EQ(poly_uop_ranges(ctx, c, (PolyUOp *[8]){0}, 8), 0);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -487,9 +484,8 @@ TEST(uop, no_range_reduce_ends_range) {
   PolyUOp *r = make_range(ctx, 5, 0);
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
   PolyUOp *e = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r, c, poly_arg_none());
-  PolyUOp *red_src[2] = { e, r };
-  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, red_src, 2,
-                          poly_arg_ops(POLY_OP_ADD));
+  PolyUOp *red_src[2] = {e, r};
+  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, red_src, 2, poly_arg_ops(POLY_OP_ADD));
   /* [c3] REDUCE(r+3, r)  no_range=False (r still in backward slice)
    *                      |ranges|=0  (r is ended by the reduce) */
   ASSERT_TRUE(!poly_no_range(ctx, red));
@@ -503,9 +499,9 @@ TEST(uop, no_range_reduce_ends_range) {
 
 TEST(uop, ranges_two_ranges_union) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *r  = make_range(ctx, 5, 0);
+  PolyUOp *r = make_range(ctx, 5, 0);
   PolyUOp *r2 = make_range(ctx, 7, 1);
-  PolyUOp *e  = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r, r2, poly_arg_none());
+  PolyUOp *e = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r, r2, poly_arg_none());
   /* [c4] r+r2  |ranges|=2 */
   PolyUOp *rs[8] = {0};
   int n = poly_uop_ranges(ctx, e, rs, 8);
@@ -518,12 +514,11 @@ TEST(uop, ranges_two_ranges_union) {
 
 TEST(uop, ranges_partial_reduce_leaves_other_active) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *r  = make_range(ctx, 5, 0);
+  PolyUOp *r = make_range(ctx, 5, 0);
   PolyUOp *r2 = make_range(ctx, 7, 1);
-  PolyUOp *e  = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r, r2, poly_arg_none());
-  PolyUOp *red_src[2] = { e, r };
-  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, red_src, 2,
-                          poly_arg_ops(POLY_OP_ADD));
+  PolyUOp *e = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r, r2, poly_arg_none());
+  PolyUOp *red_src[2] = {e, r};
+  PolyUOp *red = poly_uop(ctx, POLY_OP_REDUCE, POLY_INT32, red_src, 2, poly_arg_ops(POLY_OP_ADD));
   /* [c5] REDUCE(r+r2, r)  |ranges|=1  (r ended, r2 still active) */
   PolyUOp *rs[8] = {0};
   int n = poly_uop_ranges(ctx, red, rs, 8);
@@ -555,7 +550,7 @@ TEST(uop, toposort_ex_user_passes_user_data) {
   ASSERT_NOT_NULL(topo);
   /* Gate returns true for all nodes (no collision with the xor sentinel),
    * so we should see every node in the graph. */
-  ASSERT_TRUE(n >= 3);  /* at least RANGE size const, RANGE, ADD */
+  ASSERT_TRUE(n >= 3); /* at least RANGE size const, RANGE, ADD */
   poly_ctx_destroy(ctx);
   PASS();
 }

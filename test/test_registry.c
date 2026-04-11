@@ -10,7 +10,7 @@
 #include "../src/ir.h"
 #include "../src/scheduler.h"
 
-/* ── Registration + lookup ─────────────────────────────────────────── */
+/* Registration + lookup */
 
 TEST(registry, register_all_roles) {
   PolyCtx *ctx = poly_ctx_new();
@@ -82,7 +82,7 @@ TEST(registry, get_entry) {
   PASS();
 }
 
-/* ── Idempotent re-registration ────────────────────────────────────── */
+/* Idempotent re-registration */
 
 TEST(registry, idempotent_rereg) {
   PolyCtx *ctx = poly_ctx_new();
@@ -100,7 +100,7 @@ TEST(registry, idempotent_rereg) {
   PASS();
 }
 
-/* ── Mismatch rejection ────────────────────────────────────────────── */
+/* Mismatch rejection */
 
 TEST(registry, mismatch_dtype) {
   PolyCtx *ctx = poly_ctx_new();
@@ -120,7 +120,7 @@ TEST(registry, mismatch_dtype) {
 TEST(registry, mismatch_shape) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t s1[] = {3, 4};
-  int64_t s2[] = {4, 3};  /* same numel, different shape */
+  int64_t s2[] = {4, 3}; /* same numel, different shape */
 
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, s1, 2, "weight");
   ASSERT_TRUE(w != NULL);
@@ -147,7 +147,7 @@ TEST(registry, mismatch_ndim) {
   PASS();
 }
 
-/* ── Alias ─────────────────────────────────────────────────────────── */
+/* Alias */
 
 TEST(registry, alias_resolves_same_buffer) {
   PolyCtx *ctx = poly_ctx_new();
@@ -206,7 +206,7 @@ TEST(registry, alias_name_conflict) {
   PASS();
 }
 
-/* ── Entrypoints ───────────────────────────────────────────────────── */
+/* Entrypoints */
 
 TEST(registry, entrypoint_register_and_retrieve) {
   PolyCtx *ctx = poly_ctx_new();
@@ -254,7 +254,7 @@ TEST(registry, entrypoint_null_rejected) {
   PASS();
 }
 
-/* ── Enumeration ───────────────────────────────────────────────────── */
+/* Enumeration */
 
 TEST(registry, enumeration_count) {
   PolyCtx *ctx = poly_ctx_new();
@@ -303,7 +303,7 @@ TEST(registry, enumeration_entries) {
   PASS();
 }
 
-/* ── Printf-style naming ──────────────────────────────────────────── */
+/* Printf-style naming */
 
 TEST(registry, printf_naming) {
   PolyCtx *ctx = poly_ctx_new();
@@ -343,9 +343,8 @@ TEST(registry, instance_from_ctx_basic) {
   PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
 
   /* Build graph: output = w * x */
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL,
-                             poly_reshape(ctx, w, s, 1),
-                             poly_reshape(ctx, x, s, 1));
+  PolyUOp *prod =
+      poly_alu2(ctx, POLY_OP_MUL, poly_reshape(ctx, w, s, 1), poly_reshape(ctx, x, s, 1));
   PolyUOp *store = poly_store_val(ctx, out, prod);
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "forward", sink);
@@ -386,9 +385,8 @@ TEST(registry, instance_from_ctx_execute) {
   PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
   PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
 
-  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL,
-                             poly_reshape(ctx, w, s, 1),
-                             poly_reshape(ctx, x, s, 1));
+  PolyUOp *prod =
+      poly_alu2(ctx, POLY_OP_MUL, poly_reshape(ctx, w, s, 1), poly_reshape(ctx, x, s, 1));
   PolyUOp *store = poly_store_val(ctx, out, prod);
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "forward", sink);
@@ -400,20 +398,21 @@ TEST(registry, instance_from_ctx_execute) {
   int64_t numel;
   float *w_data = poly_instance_buf_data_named(inst, "w", &numel);
   ASSERT_INT_EQ(numel, 4);
-  for (int i = 0; i < 4; i++) w_data[i] = (float)(i + 1);
+  for (int i = 0; i < 4; i++)
+    w_data[i] = (float)(i + 1);
 
   /* Execute forward */
   float x_data[] = {2.0f, 3.0f, 4.0f, 5.0f};
-  PolyIOBinding io[] = { { "x", x_data } };
+  PolyIOBinding io[] = {{"x", x_data}};
   int rc = poly_instance_call(inst, "forward", io, 1);
   ASSERT_INT_EQ(rc, 0);
 
   /* Check output */
   float *out_data = poly_instance_buf_data_named(inst, "output", NULL);
-  ASSERT_FLOAT_EQ(out_data[0], 2.0f, 1e-5);   /* 1*2 */
-  ASSERT_FLOAT_EQ(out_data[1], 6.0f, 1e-5);   /* 2*3 */
-  ASSERT_FLOAT_EQ(out_data[2], 12.0f, 1e-5);  /* 3*4 */
-  ASSERT_FLOAT_EQ(out_data[3], 20.0f, 1e-5);  /* 4*5 */
+  ASSERT_FLOAT_EQ(out_data[0], 2.0f, 1e-5); /* 1*2 */
+  ASSERT_FLOAT_EQ(out_data[1], 6.0f, 1e-5); /* 2*3 */
+  ASSERT_FLOAT_EQ(out_data[2], 12.0f, 1e-5); /* 3*4 */
+  ASSERT_FLOAT_EQ(out_data[3], 20.0f, 1e-5); /* 4*5 */
 
   poly_instance_free(inst);
   poly_ctx_destroy(ctx);
@@ -428,8 +427,8 @@ TEST(registry, instance_from_ctx_alias_shares_data) {
   poly_alias(ctx, "lm_head", "embedding");
 
   /* Trivial graph that uses the embedding buffer */
-  PolyUOp *store = poly_store_val(ctx, emb,
-      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)));
+  PolyUOp *store =
+      poly_store_val(ctx, emb, poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)));
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "init", sink);
 
@@ -460,10 +459,9 @@ TEST(registry, instance_from_ctx_unreachable_excluded) {
 
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, s, 1, "w");
   PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
-  poly_aux(ctx, POLY_FLOAT32, s, 1, "unused_aux");  /* not in graph */
+  poly_aux(ctx, POLY_FLOAT32, s, 1, "unused_aux"); /* not in graph */
 
-  PolyUOp *store = poly_store_val(ctx, w,
-      poly_reshape(ctx, x, s, 1));
+  PolyUOp *store = poly_store_val(ctx, w, poly_reshape(ctx, x, s, 1));
   PolyUOp *sink = poly_sink1(ctx, store);
   poly_register_entrypoint(ctx, "copy", sink);
 
@@ -504,9 +502,8 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyUOp *wa = poly_param(ctx_a, POLY_FLOAT32, s, 1, "w");
   PolyUOp *xa = poly_input(ctx_a, POLY_FLOAT32, s, 1, "x");
   PolyUOp *oa = poly_output(ctx_a, POLY_FLOAT32, s, 1, "output");
-  PolyUOp *prod_a = poly_alu2(ctx_a, POLY_OP_MUL,
-                                poly_reshape(ctx_a, wa, s, 1),
-                                poly_reshape(ctx_a, xa, s, 1));
+  PolyUOp *prod_a =
+      poly_alu2(ctx_a, POLY_OP_MUL, poly_reshape(ctx_a, wa, s, 1), poly_reshape(ctx_a, xa, s, 1));
   PolyUOp *st_a = poly_store_val(ctx_a, oa, prod_a);
   PolyUOp *sink_a = poly_sink1(ctx_a, st_a);
   poly_register_entrypoint(ctx_a, "forward", sink_a);
@@ -522,12 +519,12 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyUOp *st_b = poly_store_val(ctx_b, ob, prod_b);
   PolyUOp *sink_b = poly_sink1(ctx_b, st_b);
   PolyIrBufEntry bufs_b[] = {
-    { "w", POLY_IR_ROLE_PARAM, wb, { N }, 1 },
-    { "x", POLY_IR_ROLE_INPUT, xb, { N }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, ob, { N }, 1 },
+      {"w", POLY_IR_ROLE_PARAM, wb, {N}, 1},
+      {"x", POLY_IR_ROLE_INPUT, xb, {N}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, ob, {N}, 1},
   };
-  PolyIrEntrypoint eps_b[] = { { "forward", sink_b } };
-  PolyIrSpec spec_b = { ctx_b, bufs_b, 3, eps_b, 1 };
+  PolyIrEntrypoint eps_b[] = {{"forward", sink_b}};
+  PolyIrSpec spec_b = {ctx_b, bufs_b, 3, eps_b, 1};
   uint8_t *ir = poly_ir_export(&spec_b, &(int){0});
   int ir_len;
   ir = poly_ir_export(&spec_b, &ir_len);
@@ -540,10 +537,13 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   float *wa_d = poly_instance_buf_data_named(inst_a, "w", NULL);
   float *wb_d = poly_instance_buf_data_named(inst_b, "w", NULL);
   float x_in[] = {2, 3, 4, 5};
-  for (int i = 0; i < N; i++) { wa_d[i] = (float)(i + 1); wb_d[i] = (float)(i + 1); }
+  for (int i = 0; i < N; i++) {
+    wa_d[i] = (float)(i + 1);
+    wb_d[i] = (float)(i + 1);
+  }
 
-  PolyIOBinding io_a[] = { { "x", x_in } };
-  PolyIOBinding io_b[] = { { "x", x_in } };
+  PolyIOBinding io_a[] = {{"x", x_in}};
+  PolyIOBinding io_b[] = {{"x", x_in}};
   ASSERT_INT_EQ(poly_instance_call(inst_a, "forward", io_a, 1), 0);
   ASSERT_INT_EQ(poly_instance_call(inst_b, "forward", io_b, 1), 0);
 

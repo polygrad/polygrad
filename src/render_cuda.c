@@ -19,7 +19,7 @@
 #include <stdarg.h>
 #include <math.h>
 
-/* ── String builder (local copy from render_c.c) ─────────────────────── */
+/* String builder (local copy from render_c.c) */
 
 typedef struct {
   char *buf;
@@ -52,7 +52,7 @@ static void csb_puts(CudaStrBuf *sb, const char *s) {
   csb_printf(sb, "%s", s);
 }
 
-/* ── Pointer → string hash map ───────────────────────────────────────── */
+/* Pointer → string hash map */
 
 typedef struct {
   PolyUOp **keys;
@@ -75,7 +75,8 @@ static void csmap_init(CudaStrMap *m, int n) {
 
 static void csmap_set(CudaStrMap *m, PolyUOp *key, char *val) {
   uint32_t h = cuda_ptr_hash(key) % m->cap;
-  while (m->keys[h] && m->keys[h] != key) h = (h + 1) % m->cap;
+  while (m->keys[h] && m->keys[h] != key)
+    h = (h + 1) % m->cap;
   if (m->keys[h] == key) free(m->vals[h]);
   m->keys[h] = key;
   m->vals[h] = val;
@@ -97,7 +98,7 @@ static void csmap_destroy(CudaStrMap *m) {
   free(m->vals);
 }
 
-/* ── Render helpers ──────────────────────────────────────────────────── */
+/* Render helpers */
 
 static char *cuda_render_float_const(double v, PolyDType dt, char *buf, int cap) {
   bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
@@ -113,16 +114,27 @@ static char *cuda_render_float_const(double v, PolyDType dt, char *buf, int cap)
     snprintf(buf, cap, "%.17g", v);
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
       int len = (int)strlen(buf);
-      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+      if (len + 2 < cap) {
+        buf[len] = '.';
+        buf[len + 1] = '0';
+        buf[len + 2] = '\0';
+      }
     }
   } else {
     snprintf(buf, cap, "%.9g", (double)(float)v);
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
       int len = (int)strlen(buf);
-      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+      if (len + 2 < cap) {
+        buf[len] = '.';
+        buf[len + 1] = '0';
+        buf[len + 2] = '\0';
+      }
     }
     int len = (int)strlen(buf);
-    if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
+    if (len + 1 < cap) {
+      buf[len] = 'f';
+      buf[len + 1] = '\0';
+    }
   }
   return buf;
 }
@@ -132,7 +144,7 @@ static char *cuda_render_float_const(double v, PolyDType dt, char *buf, int cap)
  * poly_dtype_scalar doesn't strip ptr fields. Same approach as HIP. */
 static const char *cuda_ctype(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
-  if (s.priority == POLY_FLOAT16.priority)  return "half";
+  if (s.priority == POLY_FLOAT16.priority) return "half";
   if (s.priority == POLY_BFLOAT16.priority) return "nv_bfloat16";
   return s.name;
 }
@@ -142,55 +154,132 @@ static bool cuda_is_half(PolyDType dt) {
   return s.priority == POLY_FLOAT16.priority || s.priority == POLY_BFLOAT16.priority;
 }
 
-static void cuda_render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
-                             const char *s0, const char *s1, const char *s2) {
+static void cuda_render_alu(
+    char *buf,
+    int cap,
+    PolyOps op,
+    PolyDType dtype,
+    const char *s0,
+    const char *s1,
+    const char *s2
+) {
   bool is_half = cuda_is_half(dtype);
   switch (op) {
   case POLY_OP_NEG:
-    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0); break;
-  case POLY_OP_SQRT:
-    snprintf(buf, cap, is_half ? "hsqrt(%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "sqrt(%s)" : "sqrtf(%s)", s0); break;
-  case POLY_OP_TRUNC:
-    snprintf(buf, cap, is_half ? "htrunc(%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "trunc(%s)" : "truncf(%s)", s0); break;
-  case POLY_OP_EXP2:
-    snprintf(buf, cap, is_half ? "hexp2(%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "exp2(%s)" : "exp2f(%s)", s0); break;
-  case POLY_OP_LOG2:
-    snprintf(buf, cap, is_half ? "hlog2(%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "log2(%s)" : "log2f(%s)", s0); break;
-  case POLY_OP_SIN:
-    snprintf(buf, cap, is_half ? "hsin(%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "sin(%s)" : "sinf(%s)", s0); break;
-  case POLY_OP_RECIPROCAL:
-    snprintf(buf, cap, is_half ? "hrcp(%s)" : "(1/%s)", s0); break;
-  case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
-  case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
-  case POLY_OP_MUL:   snprintf(buf, cap, "(%s*%s)", s0, s1); break;
-  case POLY_OP_FDIV:  snprintf(buf, cap, "(%s/%s)", s0, s1); break;
-  case POLY_OP_IDIV:  snprintf(buf, cap, "(%s/%s)", s0, s1); break;
-  case POLY_OP_MOD:   snprintf(buf, cap, "(%s%%%s)", s0, s1); break;
-  case POLY_OP_SHL:   snprintf(buf, cap, "(%s<<%s)", s0, s1); break;
-  case POLY_OP_SHR:   snprintf(buf, cap, "(%s>>%s)", s0, s1); break;
-  case POLY_OP_AND:   snprintf(buf, cap, "(%s&%s)", s0, s1); break;
-  case POLY_OP_OR:    snprintf(buf, cap, "(%s|%s)", s0, s1); break;
-  case POLY_OP_XOR:   snprintf(buf, cap, "(%s^%s)", s0, s1); break;
-  case POLY_OP_CMPLT: snprintf(buf, cap, "(%s<%s)", s0, s1); break;
-  case POLY_OP_CMPNE: snprintf(buf, cap, "(%s!=%s)", s0, s1); break;
-  case POLY_OP_CMPEQ: snprintf(buf, cap, "(%s==%s)", s0, s1); break;
-  case POLY_OP_MAX:   snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1); break;
-  case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64)
-      ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1); break;
-  case POLY_OP_WHERE:  snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2); break;
-  case POLY_OP_MULACC:
-    snprintf(buf, cap, is_half ? "__hfma(%s,%s,%s)" :
-      poly_dtype_eq(dtype, POLY_FLOAT64) ? "fma(%s,%s,%s)" :
-      poly_dtype_is_float(dtype) ? "__fmaf_rn(%s,%s,%s)" : "(%s*%s+%s)",
-      s0, s1, s2);
+    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0);
     break;
-  default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
+  case POLY_OP_SQRT:
+    snprintf(
+        buf, cap,
+        is_half                              ? "hsqrt(%s)"
+        : poly_dtype_eq(dtype, POLY_FLOAT64) ? "sqrt(%s)"
+                                             : "sqrtf(%s)",
+        s0
+    );
+    break;
+  case POLY_OP_TRUNC:
+    snprintf(
+        buf, cap,
+        is_half                              ? "htrunc(%s)"
+        : poly_dtype_eq(dtype, POLY_FLOAT64) ? "trunc(%s)"
+                                             : "truncf(%s)",
+        s0
+    );
+    break;
+  case POLY_OP_EXP2:
+    snprintf(
+        buf, cap,
+        is_half                              ? "hexp2(%s)"
+        : poly_dtype_eq(dtype, POLY_FLOAT64) ? "exp2(%s)"
+                                             : "exp2f(%s)",
+        s0
+    );
+    break;
+  case POLY_OP_LOG2:
+    snprintf(
+        buf, cap,
+        is_half                              ? "hlog2(%s)"
+        : poly_dtype_eq(dtype, POLY_FLOAT64) ? "log2(%s)"
+                                             : "log2f(%s)",
+        s0
+    );
+    break;
+  case POLY_OP_SIN:
+    snprintf(
+        buf, cap,
+        is_half                              ? "hsin(%s)"
+        : poly_dtype_eq(dtype, POLY_FLOAT64) ? "sin(%s)"
+                                             : "sinf(%s)",
+        s0
+    );
+    break;
+  case POLY_OP_RECIPROCAL:
+    snprintf(buf, cap, is_half ? "hrcp(%s)" : "(1/%s)", s0);
+    break;
+  case POLY_OP_ADD:
+    snprintf(buf, cap, "(%s+%s)", s0, s1);
+    break;
+  case POLY_OP_SUB:
+    snprintf(buf, cap, "(%s-%s)", s0, s1);
+    break;
+  case POLY_OP_MUL:
+    snprintf(buf, cap, "(%s*%s)", s0, s1);
+    break;
+  case POLY_OP_FDIV:
+    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    break;
+  case POLY_OP_IDIV:
+    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    break;
+  case POLY_OP_MOD:
+    snprintf(buf, cap, "(%s%%%s)", s0, s1);
+    break;
+  case POLY_OP_SHL:
+    snprintf(buf, cap, "(%s<<%s)", s0, s1);
+    break;
+  case POLY_OP_SHR:
+    snprintf(buf, cap, "(%s>>%s)", s0, s1);
+    break;
+  case POLY_OP_AND:
+    snprintf(buf, cap, "(%s&%s)", s0, s1);
+    break;
+  case POLY_OP_OR:
+    snprintf(buf, cap, "(%s|%s)", s0, s1);
+    break;
+  case POLY_OP_XOR:
+    snprintf(buf, cap, "(%s^%s)", s0, s1);
+    break;
+  case POLY_OP_CMPLT:
+    snprintf(buf, cap, "(%s<%s)", s0, s1);
+    break;
+  case POLY_OP_CMPNE:
+    snprintf(buf, cap, "(%s!=%s)", s0, s1);
+    break;
+  case POLY_OP_CMPEQ:
+    snprintf(buf, cap, "(%s==%s)", s0, s1);
+    break;
+  case POLY_OP_MAX:
+    snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
+    break;
+  case POLY_OP_POW:
+    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
+    break;
+  case POLY_OP_WHERE:
+    snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
+    break;
+  case POLY_OP_MULACC:
+    snprintf(
+        buf, cap,
+        is_half                              ? "__hfma(%s,%s,%s)"
+        : poly_dtype_eq(dtype, POLY_FLOAT64) ? "fma(%s,%s,%s)"
+        : poly_dtype_is_float(dtype)         ? "__fmaf_rn(%s,%s,%s)"
+                                             : "(%s*%s+%s)",
+        s0, s1, s2
+    );
+    break;
+  default:
+    snprintf(buf, cap, "/* unknown op %d */0", op);
+    break;
   }
 }
 
@@ -205,7 +294,7 @@ static int cuda_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool cre
   return *n_ranges - 1;
 }
 
-/* ── CUDA Linearizer ─────────────────────────────────────────────────── */
+/* CUDA Linearizer */
 
 PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* TODO: CUDA tensor core specs not yet ported. tinygrad selects from
@@ -213,22 +302,21 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
    * with empty tensor_cores is a no-op on CUDA. */
   /* bf16: native on sm_80+ (nv_bfloat16 + h* intrinsics), non-native on older */
   PolyPatternMatcher *extra = NULL;
-  if (poly_cuda_arch_major() < 8)
-    extra = poly_pm_bf16_non_native();
+  if (poly_cuda_arch_major() < 8) extra = poly_pm_bf16_non_native();
   PolyRewriteOpts opts = {
-    .optimize    = true,           /* shared optimized pipeline (tinygrad parity) */
-    .devectorize = -1,             /* CUDA: no add_loads/devectorize */
-    .caps        = { .has_mulacc = true },
-    .device      = POLY_DEVICE_CUDA,
-    .opt_policy  = POLY_OPT_TC_ONLY,
-    .extra_matcher = extra,
-    .gpu_block_size = 256,
+      .optimize = true, /* shared optimized pipeline (tinygrad parity) */
+      .devectorize = -1, /* CUDA: no add_loads/devectorize */
+      .caps = {.has_mulacc = true},
+      .device = POLY_DEVICE_CUDA,
+      .opt_policy = POLY_OPT_TC_ONLY,
+      .extra_matcher = extra,
+      .gpu_block_size = 256,
   };
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 
-/* ── CUDA Renderer ───────────────────────────────────────────────────── */
+/* CUDA Renderer */
 
 char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bounds) {
   CudaStrBuf decls, body;
@@ -260,8 +348,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
   /* Pre-scan: count range references for liveness */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_RANGE)
-      (void)cuda_range_slot(live_ranges, &n_live_ranges, u, true);
+    if (u->op == POLY_OP_RANGE) (void)cuda_range_slot(live_ranges, &n_live_ranges, u, true);
     if (u->op == POLY_OP_END) continue;
     for (int j = 0; j < u->n_src; j++) {
       if (u->src[j] && u->src[j]->op == POLY_OP_RANGE) {
@@ -274,8 +361,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
 
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
-      continue;
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
 
     if (u->op != POLY_OP_END) {
       for (int j = 0; j < u->n_src; j++) {
@@ -304,7 +390,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     /* --- DEFINE_VAR --------------------------------------------------- */
     if (u->op == POLY_OP_DEFINE_VAR) {
       const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
-                        : (u->arg.str ? u->arg.str : "var");
+                                                             : (u->arg.str ? u->arg.str : "var");
       csmap_set(&names, u, strdup(vname));
       param_types[n_params] = strdup("const int");
       param_names[n_params] = strdup(vname);
@@ -317,10 +403,12 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     if (u->op == POLY_OP_CONST) {
       char val[64];
       if (poly_dtype_eq(u->dtype, POLY_FLOAT16)) {
-        char tmp[32]; cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
+        char tmp[32];
+        cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
         snprintf(val, sizeof(val), "__float2half(%s)", tmp);
       } else if (poly_dtype_eq(u->dtype, POLY_BFLOAT16)) {
-        char tmp[32]; cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
+        char tmp[32];
+        cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
         snprintf(val, sizeof(val), "__float2bfloat16(%s)", tmp);
       } else if (poly_dtype_is_float(u->dtype)) {
         cuda_render_float_const(u->arg.f, u->dtype, val, sizeof(val));
@@ -359,18 +447,23 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       int slen = (int)strlen(sname);
       if (slen > 0) dim_idx = sname[slen - 1] - '0';
       char dim_char = 'x';
-      if (dim_idx == 1) dim_char = 'y';
-      else if (dim_idx == 2) dim_char = 'z';
+      if (dim_idx == 1)
+        dim_char = 'y';
+      else if (dim_idx == 2)
+        dim_char = 'z';
 
       /* Determine prefix: "gidx" → blockIdx*blockDim+threadIdx */
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       if (sname[0] == 'l') {
         /* Local index: threadIdx */
         csb_printf(&body, "int %s = threadIdx.%c;\n", sname, dim_char);
       } else {
         /* Global index: blockIdx * blockDim + threadIdx */
-        csb_printf(&body, "int %s = (blockIdx.%c*blockDim.%c+threadIdx.%c);\n",
-                   sname, dim_char, dim_char, dim_char);
+        csb_printf(
+            &body, "int %s = (blockIdx.%c*blockDim.%c+threadIdx.%c);\n", sname, dim_char, dim_char,
+            dim_char
+        );
       }
 
       /* Bounds check for global indices only.
@@ -378,7 +471,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       if (sname[0] != 'l') {
         char *bound = csmap_get(&names, u->src[0]);
         if (bound) {
-          for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+          for (int d = 0; d < depth; d++)
+            csb_puts(&body, "  ");
           csb_printf(&body, "if (%s >= %s) return;\n", sname, bound);
         }
       }
@@ -387,7 +481,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
     /* --- BARRIER ------------------------------------------------------ */
     if (u->op == POLY_OP_BARRIER) {
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       csb_puts(&body, "__syncthreads();\n");
       continue;
     }
@@ -399,9 +494,9 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *bound = csmap_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
-      csb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n",
-                 name, name, bound, name);
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
+      csb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n", name, name, bound, name);
       depth++;
       if (n_open_ranges < 128) open_ranges[n_open_ranges++] = u;
       continue;
@@ -416,7 +511,10 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
         int pos = -1;
         for (int p = n_open_ranges - 1; p >= 0; p--) {
-          if (open_ranges[p] == want) { pos = p; break; }
+          if (open_ranges[p] == want) {
+            pos = p;
+            break;
+          }
         }
         if (pos < 0) continue;
 
@@ -432,7 +530,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
         while (n_open_ranges > pos) {
           depth--;
-          for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+          for (int d = 0; d < depth; d++)
+            csb_puts(&body, "  ");
           csb_puts(&body, "}\n");
           n_open_ranges--;
         }
@@ -440,7 +539,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       }
 
       depth--;
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       csb_puts(&body, "}\n");
       if (u->op == POLY_OP_END && n_open_ranges > 0) n_open_ranges--;
       continue;
@@ -484,7 +584,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       char *bidx = csmap_get(&names, u->src[0]);
       const char *ctype = cuda_ctype(u->dtype);
       csb_printf(&decls, "  %s %s;\n", ctype, name);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
 
       /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
@@ -504,7 +605,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     /* --- STORE -------------------------------------------------------- */
     if (u->op == POLY_OP_STORE) {
       char *target = csmap_get(&names, u->src[0]);
-      char *val    = csmap_get(&names, u->src[1]);
+      char *val = csmap_get(&names, u->src[1]);
 
       /* Gated STORE: if the INDEX has a 3rd source (boolean gate), wrap
        * the store in `if (gate) { ... }`.  This is the CUDA-side lowering
@@ -513,16 +614,18 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
        * pm_linearize_cleanups which converts gated INDEX+STORE into
        * IF/STORE/ENDIF post-linearization. */
       PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
-      bool gated_store = (store_idx && store_idx->n_src >= 3 &&
-                          u->src[0]->op != POLY_OP_DEFINE_LOCAL);
+      bool gated_store =
+          (store_idx && store_idx->n_src >= 3 && u->src[0]->op != POLY_OP_DEFINE_LOCAL);
       if (gated_store) {
         char *gate_s = csmap_get(&names, store_idx->src[2]);
-        for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+        for (int d = 0; d < depth; d++)
+          csb_puts(&body, "  ");
         csb_printf(&body, "if (%s) {\n", gate_s);
         depth++;
       }
 
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       if (u->src[0]->op == POLY_OP_DEFINE_LOCAL)
         csb_printf(&body, "%s = %s;\n", target, val);
       else
@@ -530,7 +633,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
       if (gated_store) {
         depth--;
-        for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+        for (int d = 0; d < depth; d++)
+          csb_puts(&body, "  ");
         csb_puts(&body, "}\n");
       }
       continue;
@@ -545,7 +649,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       char *src_s = csmap_get(&names, u->src[0]);
       const char *ctype = cuda_ctype(u->dtype);
       csb_printf(&decls, "  %s %s;\n", ctype, name);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       csb_printf(&body, "%s = (%s)(%s);\n", name, ctype, src_s);
       continue;
     }
@@ -560,9 +665,9 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       const char *dst_type = cuda_ctype(u->dtype);
       const char *src_type = cuda_ctype(u->src[0]->dtype);
       csb_printf(&decls, "  %s %s;\n", dst_type, name);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
-      csb_printf(&body, "%s = tg_bitcast<%s>((%s)(%s));\n",
-                 name, dst_type, src_type, src_s);
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
+      csb_printf(&body, "%s = tg_bitcast<%s>((%s)(%s));\n", name, dst_type, src_type, src_s);
       continue;
     }
 
@@ -579,7 +684,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       csb_printf(&decls, "  %s %s;\n", cuda_ctype(u->dtype), name);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       csb_printf(&body, "%s = %s;\n", name, expr);
       continue;
     }
@@ -587,7 +693,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     /* --- IF ----------------------------------------------------------- */
     if (u->op == POLY_OP_IF) {
       char *cond_s = csmap_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) csb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
       csb_printf(&body, "if (%s) {\n", cond_s);
       depth++;
       continue;
@@ -600,14 +707,14 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     char *kt = param_types[i], *kn = param_names[i];
     int j = i - 1;
     while (j >= 0 && param_order[j] > ko) {
-      param_order[j+1] = param_order[j];
-      param_types[j+1] = param_types[j];
-      param_names[j+1] = param_names[j];
+      param_order[j + 1] = param_order[j];
+      param_types[j + 1] = param_types[j];
+      param_names[j + 1] = param_names[j];
       j--;
     }
-    param_order[j+1] = ko;
-    param_types[j+1] = kt;
-    param_names[j+1] = kn;
+    param_order[j + 1] = ko;
+    param_types[j + 1] = kt;
+    param_names[j + 1] = kn;
   }
 
   /* Build complete CUDA source */
@@ -626,17 +733,18 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     bool uses_f16 = false, uses_bf16 = false;
     for (int i = 0; i < n; i++) {
       PolyDType s = poly_dtype_scalar(uops[i]->dtype);
-      if (s.priority == POLY_FLOAT16.priority)  uses_f16 = true;
+      if (s.priority == POLY_FLOAT16.priority) uses_f16 = true;
       if (s.priority == POLY_BFLOAT16.priority) uses_bf16 = true;
     }
-    if (uses_f16)  csb_puts(&out, "#include <cuda_fp16.h>\n");
+    if (uses_f16) csb_puts(&out, "#include <cuda_fp16.h>\n");
     if (uses_bf16) csb_puts(&out, "#include <cuda_bf16.h>\n");
   }
   csb_puts(&out, "\n");
 
   /* Kernel signature */
-  csb_printf(&out, "extern \"C\" __global__ void __launch_bounds__(%d) %s(",
-             launch_bounds, fn_name);
+  csb_printf(
+      &out, "extern \"C\" __global__ void __launch_bounds__(%d) %s(", launch_bounds, fn_name
+  );
   for (int i = 0; i < n_params; i++) {
     if (i > 0) csb_puts(&out, ", ");
     csb_printf(&out, "%s %s", param_types[i], param_names[i]);

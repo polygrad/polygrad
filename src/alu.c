@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ── Safe math helpers ────────────────────────────────────────────────── */
+/* Safe math helpers */
 
 static double safe_exp2(double x) {
   if (x > 1023.0) return INFINITY;
@@ -54,40 +54,51 @@ static int64_t cmod(int64_t a, int64_t b) {
   return a % b;
 }
 
-/* ── Get numeric value from PolyArg ────────────────────────────────────── */
+/* Get numeric value from PolyArg */
 
 static double arg_to_float(PolyArg a) {
   switch (a.kind) {
-    case POLY_ARG_FLOAT: return a.f;
-    case POLY_ARG_INT:   return (double)a.i;
-    case POLY_ARG_BOOL:  return a.b ? 1.0 : 0.0;
-    default: return 0.0;
+  case POLY_ARG_FLOAT:
+    return a.f;
+  case POLY_ARG_INT:
+    return (double)a.i;
+  case POLY_ARG_BOOL:
+    return a.b ? 1.0 : 0.0;
+  default:
+    return 0.0;
   }
 }
 
 static int64_t arg_to_int(PolyArg a) {
   switch (a.kind) {
-    case POLY_ARG_INT:   return a.i;
-    case POLY_ARG_FLOAT: return (int64_t)a.f;
-    case POLY_ARG_BOOL:  return a.b ? 1 : 0;
-    default: return 0;
+  case POLY_ARG_INT:
+    return a.i;
+  case POLY_ARG_FLOAT:
+    return (int64_t)a.f;
+  case POLY_ARG_BOOL:
+    return a.b ? 1 : 0;
+  default:
+    return 0;
   }
 }
 
 static bool arg_to_bool(PolyArg a) {
   switch (a.kind) {
-    case POLY_ARG_BOOL:  return a.b;
-    case POLY_ARG_INT:   return a.i != 0;
-    case POLY_ARG_FLOAT: return a.f != 0.0;
-    default: return false;
+  case POLY_ARG_BOOL:
+    return a.b;
+  case POLY_ARG_INT:
+    return a.i != 0;
+  case POLY_ARG_FLOAT:
+    return a.f != 0.0;
+  default:
+    return false;
   }
 }
 
-/* ── Truncate result to dtype range ───────────────────────────────────── */
+/* Truncate result to dtype range */
 
 static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
-  if (poly_dtype_is_bool(dtype))
-    return poly_arg_bool(arg_to_bool(val));
+  if (poly_dtype_is_bool(dtype)) return poly_arg_bool(arg_to_bool(val));
 
   if (poly_dtype_is_int(dtype)) {
     int64_t v = arg_to_int(val);
@@ -98,8 +109,7 @@ static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
       if (bits < 64) {
         int64_t mask = ((int64_t)1 << bits) - 1;
         v &= mask;
-        if (v & ((int64_t)1 << (bits - 1)))
-          v |= ~mask; /* sign extend */
+        if (v & ((int64_t)1 << (bits - 1))) v |= ~mask; /* sign extend */
       }
     }
     return poly_arg_int(v);
@@ -107,48 +117,81 @@ static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
 
   if (poly_dtype_is_float(dtype)) {
     double v = arg_to_float(val);
-    if (dtype.bitsize == 32)
-      v = (double)(float)v;
+    if (dtype.bitsize == 32) v = (double)(float)v;
     return poly_arg_float(v);
   }
 
   return val;
 }
 
-/* ── exec_alu: evaluate an ALU op on constant operands ────────────────── */
+/* exec_alu: evaluate an ALU op on constant operands */
 
 PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
   /* Float path */
-  if (poly_dtype_is_float(dtype) || op == POLY_OP_CMPLT ||
-      op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) {
+  if (poly_dtype_is_float(dtype) || op == POLY_OP_CMPLT || op == POLY_OP_CMPNE ||
+      op == POLY_OP_CMPEQ) {
     double a = n_ops > 0 ? arg_to_float(ops[0]) : 0.0;
     double b = n_ops > 1 ? arg_to_float(ops[1]) : 0.0;
     double c = n_ops > 2 ? arg_to_float(ops[2]) : 0.0;
     double r = 0.0;
 
     switch (op) {
-      /* unary */
-      case POLY_OP_NEG:        r = -a; break;
-      case POLY_OP_EXP2:       r = safe_exp2(a); break;
-      case POLY_OP_LOG2:       r = safe_log2(a); break;
-      case POLY_OP_SIN:        r = safe_sin(a); break;
-      case POLY_OP_SQRT:       r = safe_sqrt(a); break;
-      case POLY_OP_RECIPROCAL: r = safe_recip(a); break;
-      case POLY_OP_TRUNC:      r = trunc(a); break;
-      /* binary */
-      case POLY_OP_ADD:  r = a + b; break;
-      case POLY_OP_SUB:  r = a - b; break;
-      case POLY_OP_MUL:  r = a * b; break;
-      case POLY_OP_FDIV: r = b != 0.0 ? a / b : copysign(INFINITY, a * b); break;
-      case POLY_OP_POW:  r = safe_pow(a, b); break;
-      case POLY_OP_MAX:  r = fmax(a, b); break;
-      case POLY_OP_CMPLT: return poly_arg_bool(a < b);
-      case POLY_OP_CMPNE: return poly_arg_bool(a != b);
-      case POLY_OP_CMPEQ: return poly_arg_bool(a == b);
-      /* ternary */
-      case POLY_OP_WHERE:  r = arg_to_bool(ops[0]) ? b : c; break;
-      case POLY_OP_MULACC: r = a * b + c; break;
-      default: return poly_arg_float(0.0);
+    /* unary */
+    case POLY_OP_NEG:
+      r = -a;
+      break;
+    case POLY_OP_EXP2:
+      r = safe_exp2(a);
+      break;
+    case POLY_OP_LOG2:
+      r = safe_log2(a);
+      break;
+    case POLY_OP_SIN:
+      r = safe_sin(a);
+      break;
+    case POLY_OP_SQRT:
+      r = safe_sqrt(a);
+      break;
+    case POLY_OP_RECIPROCAL:
+      r = safe_recip(a);
+      break;
+    case POLY_OP_TRUNC:
+      r = trunc(a);
+      break;
+    /* binary */
+    case POLY_OP_ADD:
+      r = a + b;
+      break;
+    case POLY_OP_SUB:
+      r = a - b;
+      break;
+    case POLY_OP_MUL:
+      r = a * b;
+      break;
+    case POLY_OP_FDIV:
+      r = b != 0.0 ? a / b : copysign(INFINITY, a * b);
+      break;
+    case POLY_OP_POW:
+      r = safe_pow(a, b);
+      break;
+    case POLY_OP_MAX:
+      r = fmax(a, b);
+      break;
+    case POLY_OP_CMPLT:
+      return poly_arg_bool(a < b);
+    case POLY_OP_CMPNE:
+      return poly_arg_bool(a != b);
+    case POLY_OP_CMPEQ:
+      return poly_arg_bool(a == b);
+    /* ternary */
+    case POLY_OP_WHERE:
+      r = arg_to_bool(ops[0]) ? b : c;
+      break;
+    case POLY_OP_MULACC:
+      r = a * b + c;
+      break;
+    default:
+      return poly_arg_float(0.0);
     }
 
     if (op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ)
@@ -163,28 +206,62 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
   int64_t r = 0;
 
   switch (op) {
-    /* Bool NEG = logical NOT (matches C renderer's !x), not arithmetic -x.
-     * Without this, NEG(false) folds to -0=0=false instead of true,
-     * breaking PAD validity masks when a dimension has (0,0) padding. */
-    case POLY_OP_NEG:   r = poly_dtype_is_bool(dtype) ? !a : -a; break;
-    case POLY_OP_TRUNC: r = a; break;
-    case POLY_OP_ADD:   r = a + b; break;
-    case POLY_OP_SUB:   r = a - b; break;
-    case POLY_OP_MUL:   r = a * b; break;
-    case POLY_OP_IDIV:  r = cdiv(a, b); break;
-    case POLY_OP_MOD:   r = cmod(a, b); break;
-    case POLY_OP_MAX:   r = a > b ? a : b; break;
-    case POLY_OP_SHL:   r = a << b; break;
-    case POLY_OP_SHR:   r = (poly_dtype_is_unsigned(dtype)) ? (int64_t)((uint64_t)a >> b) : a >> b; break;
-    case POLY_OP_XOR:   r = a ^ b; break;
-    case POLY_OP_OR:    r = a | b; break;
-    case POLY_OP_AND:   r = a & b; break;
-    case POLY_OP_CMPLT: return poly_arg_bool(a < b);
-    case POLY_OP_CMPNE: return poly_arg_bool(a != b);
-    case POLY_OP_CMPEQ: return poly_arg_bool(a == b);
-    case POLY_OP_WHERE:  r = arg_to_bool(ops[0]) ? b : c; break;
-    case POLY_OP_MULACC: r = a * b + c; break;
-    default: return poly_arg_int(0);
+  /* Bool NEG = logical NOT (matches C renderer's !x), not arithmetic -x.
+   * Without this, NEG(false) folds to -0=0=false instead of true,
+   * breaking PAD validity masks when a dimension has (0,0) padding. */
+  case POLY_OP_NEG:
+    r = poly_dtype_is_bool(dtype) ? !a : -a;
+    break;
+  case POLY_OP_TRUNC:
+    r = a;
+    break;
+  case POLY_OP_ADD:
+    r = a + b;
+    break;
+  case POLY_OP_SUB:
+    r = a - b;
+    break;
+  case POLY_OP_MUL:
+    r = a * b;
+    break;
+  case POLY_OP_IDIV:
+    r = cdiv(a, b);
+    break;
+  case POLY_OP_MOD:
+    r = cmod(a, b);
+    break;
+  case POLY_OP_MAX:
+    r = a > b ? a : b;
+    break;
+  case POLY_OP_SHL:
+    r = a << b;
+    break;
+  case POLY_OP_SHR:
+    r = (poly_dtype_is_unsigned(dtype)) ? (int64_t)((uint64_t)a >> b) : a >> b;
+    break;
+  case POLY_OP_XOR:
+    r = a ^ b;
+    break;
+  case POLY_OP_OR:
+    r = a | b;
+    break;
+  case POLY_OP_AND:
+    r = a & b;
+    break;
+  case POLY_OP_CMPLT:
+    return poly_arg_bool(a < b);
+  case POLY_OP_CMPNE:
+    return poly_arg_bool(a != b);
+  case POLY_OP_CMPEQ:
+    return poly_arg_bool(a == b);
+  case POLY_OP_WHERE:
+    r = arg_to_bool(ops[0]) ? b : c;
+    break;
+  case POLY_OP_MULACC:
+    r = a * b + c;
+    break;
+  default:
+    return poly_arg_int(0);
   }
 
   return truncate_result(poly_arg_int(r), dtype);

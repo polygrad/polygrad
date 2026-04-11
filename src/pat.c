@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── OpSet helpers ────────────────────────────────────────────────────── */
+/* OpSet helpers */
 
 static int opset_popcount(PolyOpSet s) {
   return __builtin_popcountll(s.bits[0]) + __builtin_popcountll(s.bits[1]);
@@ -23,7 +23,7 @@ static PolyOps opset_first(PolyOpSet s) {
   return (PolyOps)0;
 }
 
-/* ── Pattern constructors ─────────────────────────────────────────────── */
+/* Pattern constructors */
 
 static PolyPat *pat_alloc(void) {
   PolyPat *p = calloc(1, sizeof(PolyPat));
@@ -31,7 +31,7 @@ static PolyPat *pat_alloc(void) {
 }
 
 static PolyOpSet compute_early_reject(PolyPat **src, int n_src) {
-  PolyOpSet rej = {{ 0, 0 }};
+  PolyOpSet rej = {{0, 0}};
   if (!src) return rej;
   for (int i = 0; i < n_src; i++) {
     if (src[i]->has_ops && opset_popcount(src[i]->ops) == 1)
@@ -57,7 +57,7 @@ PolyPat *poly_pat_cvar(const char *name) {
   PolyPat *p = pat_alloc();
   p->has_ops = true;
   /* CONST | VCONST */
-  p->ops = poly_opset_add(poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_CONST), POLY_OP_VCONST);
+  p->ops = poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST), POLY_OP_VCONST);
   p->name = name;
   return p;
 }
@@ -65,7 +65,7 @@ PolyPat *poly_pat_cvar(const char *name) {
 PolyPat *poly_pat_const_val(PolyArg val) {
   PolyPat *p = pat_alloc();
   p->has_ops = true;
-  p->ops = poly_opset_add((PolyOpSet){{0,0}}, POLY_OP_CONST);
+  p->ops = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CONST);
   p->match_arg = true;
   p->arg = val;
   return p;
@@ -74,7 +74,7 @@ PolyPat *poly_pat_const_val(PolyArg val) {
 PolyPat *poly_pat_op(PolyOps op, PolyPat **src, int n_src, const char *name) {
   PolyPat *p = pat_alloc();
   p->has_ops = true;
-  p->ops = poly_opset_add((PolyOpSet){{0,0}}, op);
+  p->ops = poly_opset_add((PolyOpSet){{0, 0}}, op);
   p->src = dup_src(src, n_src);
   p->n_src = n_src;
   p->strict_length = (src != NULL);
@@ -96,39 +96,39 @@ PolyPat *poly_pat_ops(PolyOpSet ops, PolyPat **src, int n_src, const char *name)
 }
 
 PolyPat *poly_pat_op1(PolyOps op, PolyPat *s0, const char *name) {
-  PolyPat *arr[] = { s0 };
+  PolyPat *arr[] = {s0};
   return poly_pat_op(op, arr, 1, name);
 }
 
 PolyPat *poly_pat_op2(PolyOps op, PolyPat *s0, PolyPat *s1, const char *name) {
-  PolyPat *arr[] = { s0, s1 };
+  PolyPat *arr[] = {s0, s1};
   return poly_pat_op(op, arr, 2, name);
 }
 
 PolyPat *poly_pat_op2c(PolyOps op, PolyPat *s0, PolyPat *s1, const char *name) {
-  PolyPat *arr[] = { s0, s1 };
+  PolyPat *arr[] = {s0, s1};
   PolyPat *p = poly_pat_op(op, arr, 2, name);
   p->commutative = true;
   return p;
 }
 
 PolyPat *poly_pat_op3(PolyOps op, PolyPat *s0, PolyPat *s1, PolyPat *s2, const char *name) {
-  PolyPat *arr[] = { s0, s1, s2 };
+  PolyPat *arr[] = {s0, s1, s2};
   return poly_pat_op(op, arr, 3, name);
 }
 
 PolyPat *poly_pat_ops1(PolyOpSet ops, PolyPat *s0, const char *name) {
-  PolyPat *arr[] = { s0 };
+  PolyPat *arr[] = {s0};
   return poly_pat_ops(ops, arr, 1, name);
 }
 
 PolyPat *poly_pat_ops2(PolyOpSet ops, PolyPat *s0, PolyPat *s1, const char *name) {
-  PolyPat *arr[] = { s0, s1 };
+  PolyPat *arr[] = {s0, s1};
   return poly_pat_ops(ops, arr, 2, name);
 }
 
 PolyPat *poly_pat_ops3(PolyOpSet ops, PolyPat *s0, PolyPat *s1, PolyPat *s2, const char *name) {
-  PolyPat *arr[] = { s0, s1, s2 };
+  PolyPat *arr[] = {s0, s1, s2};
   return poly_pat_ops(ops, arr, 3, name);
 }
 
@@ -170,12 +170,11 @@ void poly_pat_free(PolyPat *p) {
   free(p);
 }
 
-/* ── Pattern matching ─────────────────────────────────────────────────── */
+/* Pattern matching */
 
 static bool match_sources(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
   for (int i = 0; i < pat->n_src; i++) {
-    if (!poly_pat_match(pat->src[i], uop->src[i], binds))
-      return false;
+    if (!poly_pat_match(pat->src[i], uop->src[i], binds)) return false;
   }
   return true;
 }
@@ -184,14 +183,12 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
   /* CAST-tolerant match: pattern or CAST(pattern). */
   if (pat->or_casted && uop->op == POLY_OP_CAST && uop->n_src == 1) {
     int saved = binds->n;
-    if (poly_pat_match(pat, uop->src[0], binds))
-      return true;
+    if (poly_pat_match(pat, uop->src[0], binds)) return true;
     binds->n = saved;
   }
 
   /* Op check */
-  if (pat->has_ops && !poly_opset_has(pat->ops, uop->op))
-    return false;
+  if (pat->has_ops && !poly_opset_has(pat->ops, uop->op)) return false;
 
   /* Name binding: if already bound, must be same pointer */
   if (pat->name) {
@@ -211,8 +208,7 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
     bool found = false;
     PolyDType scalar = poly_dtype_scalar(uop->dtype);
     for (int i = 0; i < pat->n_dtypes; i++) {
-      if (poly_dtype_eq(pat->dtypes[i], uop->dtype) ||
-          poly_dtype_eq(pat->dtypes[i], scalar)) {
+      if (poly_dtype_eq(pat->dtypes[i], uop->dtype) || poly_dtype_eq(pat->dtypes[i], scalar)) {
         found = true;
         break;
       }
@@ -221,8 +217,7 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
   }
 
   /* Arg check */
-  if (pat->match_arg && !poly_arg_eq(pat->arg, uop->arg))
-    return false;
+  if (pat->match_arg && !poly_arg_eq(pat->arg, uop->arg)) return false;
 
   /* Source count */
   if (uop->n_src < pat->n_src) return false;
@@ -234,8 +229,7 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
   /* Commutative: try both orderings */
   if (pat->commutative && pat->n_src == 2) {
     int saved = binds->n;
-    if (match_sources(pat, uop, binds))
-      return true;
+    if (match_sources(pat, uop, binds)) return true;
     binds->n = saved;
     /* Swap: match pat->src[0] against uop->src[1] and vice versa */
     if (poly_pat_match(pat->src[0], uop->src[1], binds) &&
@@ -249,20 +243,23 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
   return match_sources(pat, uop, binds);
 }
 
-/* ── PatternMatcher ───────────────────────────────────────────────────── */
+/* PatternMatcher */
 
 struct PolyPatternMatcher {
   PolyRule *rules;
   int n_rules;
-  struct { int *indices; int n; int cap; } by_op[POLY_OP_COUNT];
+  struct {
+    int *indices;
+    int n;
+    int cap;
+  } by_op[POLY_OP_COUNT];
 };
 
 static void pm_add_op(PolyPatternMatcher *pm, int op, int rule_idx) {
   if (op < 0 || op >= POLY_OP_COUNT) return;
   if (pm->by_op[op].n >= pm->by_op[op].cap) {
     pm->by_op[op].cap = pm->by_op[op].cap ? pm->by_op[op].cap * 2 : 8;
-    pm->by_op[op].indices = realloc(pm->by_op[op].indices,
-                                     pm->by_op[op].cap * sizeof(int));
+    pm->by_op[op].indices = realloc(pm->by_op[op].indices, pm->by_op[op].cap * sizeof(int));
   }
   pm->by_op[op].indices[pm->by_op[op].n++] = rule_idx;
 }
@@ -281,8 +278,7 @@ PolyPatternMatcher *poly_pm_new(const PolyRule *rules, int n_rules) {
         pm_add_op(pm, j, i);
     } else {
       for (int j = 0; j < POLY_OP_COUNT; j++) {
-        if (poly_opset_has(p->ops, (PolyOps)j))
-          pm_add_op(pm, j, i);
+        if (poly_opset_has(p->ops, (PolyOps)j)) pm_add_op(pm, j, i);
       }
     }
   }
@@ -299,11 +295,10 @@ void poly_pm_destroy(PolyPatternMatcher *pm) {
 
 PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
   int op = (int)uop->op;
-  if (op < 0 || op >= POLY_OP_COUNT || pm->by_op[op].n == 0)
-    return NULL;
+  if (op < 0 || op >= POLY_OP_COUNT || pm->by_op[op].n == 0) return NULL;
 
   /* Compute src ops bitmask for early reject */
-  PolyOpSet src_ops = {{ 0, 0 }};
+  PolyOpSet src_ops = {{0, 0}};
   for (int i = 0; i < uop->n_src; i++)
     src_ops = poly_opset_add(src_ops, uop->src[i]->op);
 
@@ -312,10 +307,9 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
     PolyRule *rule = &pm->rules[idx];
 
     /* Early reject: required ops must appear in sources */
-    if (!poly_opset_subset(rule->pat->early_reject, src_ops))
-      continue;
+    if (!poly_opset_subset(rule->pat->early_reject, src_ops)) continue;
 
-    PolyBindings binds = { .n = 0 };
+    PolyBindings binds = {.n = 0};
     if (poly_pat_match(rule->pat, uop, &binds)) {
       PolyUOp *result = rule->fn(ctx, uop, &binds);
       if (result != NULL && result != uop) return result;
@@ -334,10 +328,12 @@ PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b)
   return result;
 }
 
-/* ── graph_rewrite (top-down unified_rewrite) ─────────────────────────── */
+/* graph_rewrite (top-down unified_rewrite) */
 
 /* Pointer hash/eq for maps */
-static bool ptr_eq(const void *a, const void *b) { return a == b; }
+static bool ptr_eq(const void *a, const void *b) {
+  return a == b;
+}
 static uint32_t ptr_hash(const void *p) {
   uintptr_t v = (uintptr_t)p;
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
@@ -345,9 +341,9 @@ static uint32_t ptr_hash(const void *p) {
 
 /* Worklist entry */
 typedef struct {
-  PolyUOp *n;       /* original node */
-  int stage;       /* 0, 1, or 2 */
-  PolyUOp *new_n;   /* potentially rewritten node */
+  PolyUOp *n; /* original node */
+  int stage; /* 0, 1, or 2 */
+  PolyUOp *new_n; /* potentially rewritten node */
 } WorkItem;
 
 /* Dynamic stack */
@@ -361,7 +357,7 @@ static void ws_push(WorkStack *ws, PolyUOp *n, int stage, PolyUOp *new_n) {
     ws->cap = ws->cap ? ws->cap * 2 : 256;
     ws->items = realloc(ws->items, ws->cap * sizeof(WorkItem));
   }
-  ws->items[ws->top++] = (WorkItem){ n, stage, new_n };
+  ws->items[ws->top++] = (WorkItem){n, stage, new_n};
 }
 
 /* Waitlist: linked list of work items per UOp key */
@@ -407,18 +403,24 @@ void *poly_graph_rewrite_userctx(void) {
   return g_graph_rewrite_userctx;
 }
 
-PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
-                                    void *user_ctx, bool bottom_up, bool enter_calls) {
+PolyUOp *poly_graph_rewrite_ctx_ex2(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyPatternMatcher *pm,
+    void *user_ctx,
+    bool bottom_up,
+    bool enter_calls
+) {
   void *prev_userctx = g_graph_rewrite_userctx;
   g_graph_rewrite_userctx = user_ctx;
 
   PolyMap *replace = poly_map_new(256);
   PolyMap *on_stack = poly_map_new(256);
   PolyMap *waitlist = poly_map_new(64);
-  WorkStack ws = { NULL, 0, 0 };
+  WorkStack ws = {NULL, 0, 0};
 
   /* Mark root as on_stack and push */
-  poly_map_set(on_stack, ptr_hash(sink), sink, (void*)(uintptr_t)1, ptr_eq);
+  poly_map_set(on_stack, ptr_hash(sink), sink, (void *)(uintptr_t)1, ptr_eq);
   ws_push(&ws, sink, 0, sink);
 
   while (ws.top > 0) {
@@ -464,7 +466,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
       for (int i = new_n->n_src - 1; i >= src_start; i--) {
         PolyUOp *x = new_n->src[i];
         if (poly_map_get(on_stack, ptr_hash(x), x, ptr_eq)) continue;
-        poly_map_set(on_stack, ptr_hash(x), x, (void*)(uintptr_t)1, ptr_eq);
+        poly_map_set(on_stack, ptr_hash(x), x, (void *)(uintptr_t)1, ptr_eq);
         ws_push(&ws, x, 0, x);
       }
     } else if (stage == 1) {
@@ -473,20 +475,22 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
       bool any_changed = false;
       bool heap_src = (new_n->n_src > 16);
       PolyUOp *new_src_buf[16];
-      PolyUOp **new_src = heap_src ?
-        malloc(new_n->n_src * sizeof(PolyUOp *)) : new_src_buf;
+      PolyUOp **new_src = heap_src ? malloc(new_n->n_src * sizeof(PolyUOp *)) : new_src_buf;
 
       for (int i = 0; i < new_n->n_src; i++) {
         PolyUOp *rx = replace_get(replace, new_n->src[i]);
         if (!rx) {
-          waitlist_add(waitlist, new_n->src[i], (WorkItem){ n, 1, new_n });
+          waitlist_add(waitlist, new_n->src[i], (WorkItem){n, 1, new_n});
           all_ready = false;
           break;
         }
         new_src[i] = rx;
         if (rx != new_n->src[i]) any_changed = true;
       }
-      if (!all_ready) { if (heap_src) free(new_src); continue; }
+      if (!all_ready) {
+        if (heap_src) free(new_src);
+        continue;
+      }
 
       PolyUOp *new_src_n;
       if (!any_changed) {
@@ -498,9 +502,12 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
           continue;
         }
       } else {
-        new_src_n = (new_n->tag != 0)
-          ? poly_uop_tagged(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg, new_n->tag)
-          : poly_uop(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg);
+        new_src_n =
+            (new_n->tag != 0)
+                ? poly_uop_tagged(
+                      ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg, new_n->tag
+                  )
+                : poly_uop(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg);
       }
       if (heap_src) free(new_src);
 
@@ -511,7 +518,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
       /* Stage 2: link n -> result of new_n */
       PolyUOp *replaced = replace_get(replace, new_n);
       if (!replaced) {
-        waitlist_add(waitlist, new_n, (WorkItem){ n, 2, new_n });
+        waitlist_add(waitlist, new_n, (WorkItem){n, 2, new_n});
       } else {
         replace_set(replace, n, replaced);
         waitlist_flush(waitlist, n, &ws);
@@ -531,16 +538,21 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatc
   return result ? result : sink;
 }
 
-/* ── walk_rewrite: MLIR-style single-pass, no re-traversal ──────────── */
+/* walk_rewrite: MLIR-style single-pass, no re-traversal */
 
-PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
-                                 PolyPatternMatcher *pm, PolyPatternMatcher *bpm,
-                                 void *user_ctx, bool enter_calls) {
+PolyUOp *poly_graph_walk_rewrite(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyPatternMatcher *pm,
+    PolyPatternMatcher *bpm,
+    void *user_ctx,
+    bool enter_calls
+) {
   void *prev_userctx = g_graph_rewrite_userctx;
   g_graph_rewrite_userctx = user_ctx;
 
   PolyMap *replace = poly_map_new(256);
-  WorkStack ws = { NULL, 0, 0 };
+  WorkStack ws = {NULL, 0, 0};
 
   ws_push(&ws, sink, 0, sink);
 
@@ -574,15 +586,13 @@ PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
 
       int start = (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 1) ? 1 : 0;
       for (int i = n->n_src - 1; i >= start; i--) {
-        if (!replace_get(replace, n->src[i]))
-          ws_push(&ws, n->src[i], 0, n->src[i]);
+        if (!replace_get(replace, n->src[i])) ws_push(&ws, n->src[i], 0, n->src[i]);
       }
     } else {
       /* Rebuild with rewritten sources */
       bool heap_src = (n->n_src > 16);
       PolyUOp *new_src_buf[16];
-      PolyUOp **new_src = heap_src ?
-        malloc(n->n_src * sizeof(PolyUOp *)) : new_src_buf;
+      PolyUOp **new_src = heap_src ? malloc(n->n_src * sizeof(PolyUOp *)) : new_src_buf;
       bool changed = false;
 
       for (int i = 0; i < n->n_src; i++) {
@@ -594,8 +604,8 @@ PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
       PolyUOp *new_n;
       if (changed) {
         new_n = (n->tag != 0)
-          ? poly_uop_tagged(ctx, n->op, n->dtype, new_src, n->n_src, n->arg, n->tag)
-          : poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg);
+                    ? poly_uop_tagged(ctx, n->op, n->dtype, new_src, n->n_src, n->arg, n->tag)
+                    : poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg);
       } else {
         new_n = n;
       }
@@ -619,13 +629,22 @@ PolyUOp *poly_graph_walk_rewrite(PolyCtx *ctx, PolyUOp *sink,
   return result ? result : sink;
 }
 
-PolyUOp *poly_graph_rewrite_ctx_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
-                                   void *user_ctx, bool bottom_up) {
+PolyUOp *poly_graph_rewrite_ctx_ex(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyPatternMatcher *pm,
+    void *user_ctx,
+    bool bottom_up
+) {
   return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, user_ctx, bottom_up, true);
 }
 
-PolyUOp *poly_graph_rewrite_ctx(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
-                                void *user_ctx) {
+PolyUOp *poly_graph_rewrite_ctx(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyPatternMatcher *pm,
+    void *user_ctx
+) {
   return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, user_ctx, false, true);
 }
 
@@ -633,12 +652,16 @@ PolyUOp *poly_graph_rewrite(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm)
   return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, NULL, false, true);
 }
 
-PolyUOp *poly_graph_rewrite_ex(PolyCtx *ctx, PolyUOp *sink, PolyPatternMatcher *pm,
-                               bool bottom_up) {
+PolyUOp *poly_graph_rewrite_ex(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyPatternMatcher *pm,
+    bool bottom_up
+) {
   return poly_graph_rewrite_ctx_ex2(ctx, sink, pm, NULL, bottom_up, true);
 }
 
-/* ── UOp helpers for rewrite callbacks ────────────────────────────────── */
+/* UOp helpers for rewrite callbacks */
 
 PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
   /* Normalise the arg kind to match ref->dtype.
@@ -650,12 +673,14 @@ PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
    * a CONST_INT(5) into a float-tagged CONST and the codegen would mis-
    * interpret arg.i as arg.f, lowering it to a denormal/zero. Verified
    * against test/parity_scripts/tg_cast_const_fold_gt.py cases A-E. */
-  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_FLOAT ||
-      val.kind == POLY_ARG_BOOL) {
+  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_FLOAT || val.kind == POLY_ARG_BOOL) {
     double dval;
-    if      (val.kind == POLY_ARG_INT)   dval = (double)val.i;
-    else if (val.kind == POLY_ARG_FLOAT) dval = val.f;
-    else                                 dval = val.b ? 1.0 : 0.0;
+    if (val.kind == POLY_ARG_INT)
+      dval = (double)val.i;
+    else if (val.kind == POLY_ARG_FLOAT)
+      dval = val.f;
+    else
+      dval = val.b ? 1.0 : 0.0;
     if (poly_dtype_is_float(ref->dtype))
       return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_float(dval));
     if (poly_dtype_is_bool(ref->dtype))

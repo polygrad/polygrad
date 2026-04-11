@@ -22,25 +22,23 @@
 #define M_LN2 0.693147180559945309417
 #endif
 
-/* ── Dtype table for FFI (used by poly_cast_by_id) ───────────────────── */
+/* Dtype table for FFI (used by poly_cast_by_id) */
 
 static const PolyDType *_dtype_table_ffi[] = {
-  &POLY_VOID, &POLY_BOOL, &POLY_INT8, &POLY_UINT8,
-  &POLY_INT16, &POLY_UINT16, &POLY_INT32, &POLY_UINT32,
-  &POLY_INT64, &POLY_UINT64, &POLY_FLOAT16, &POLY_BFLOAT16,
-  &POLY_FLOAT32, &POLY_FLOAT64,
+    &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
+    &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
-/* ── Internal helpers ────────────────────────────────────────────────── */
+/* Internal helpers */
 
 /* Helper: float constant matching the dtype of a given UOp.
  * For float inputs: creates a constant with the same float dtype.
  * For non-float inputs (comparisons producing bool): defaults to float32. */
 static inline PolyUOp *cf(PolyCtx *ctx, PolyUOp *ref, double v) {
   PolyDType dt = poly_dtype_scalar(ref->dtype);
-  if (poly_dtype_is_float(dt))
-    return poly_const_typed(ctx, dt, v);
+  if (poly_dtype_is_float(dt)) return poly_const_typed(ctx, dt, v);
   return poly_const_float(ctx, v);
 }
 
@@ -70,9 +68,13 @@ bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim
   return true;
 }
 
-static bool shape_equal_except_axis(const int64_t *full, int full_ndim,
-                                    const int64_t *reduced, int reduced_ndim,
-                                    int axis) {
+static bool shape_equal_except_axis(
+    const int64_t *full,
+    int full_ndim,
+    const int64_t *reduced,
+    int reduced_ndim,
+    int axis
+) {
   if (!full || !reduced || full_ndim != reduced_ndim + 1) return false;
   if (axis < 0) axis += full_ndim;
   if (axis < 0 || axis >= full_ndim) return false;
@@ -83,10 +85,16 @@ static bool shape_equal_except_axis(const int64_t *full, int full_ndim,
   return true;
 }
 
-/* ── Internal: compute output shape for a single-axis reduction ──────── */
+/* Internal: compute output shape for a single-axis reduction */
 
-static void reduce_output_shape(const int64_t *shape, int ndim, int axis,
-                                int keepdim, int64_t *out_shape, int *out_ndim) {
+static void reduce_output_shape(
+    const int64_t *shape,
+    int ndim,
+    int axis,
+    int keepdim,
+    int64_t *out_shape,
+    int *out_ndim
+) {
   if (axis < 0) axis += ndim;
   int on = 0;
   for (int i = 0; i < ndim; i++) {
@@ -96,16 +104,27 @@ static void reduce_output_shape(const int64_t *shape, int ndim, int axis,
       out_shape[on++] = shape[i];
     }
   }
-  if (on == 0) { out_shape[0] = 1; on = 1; }
+  if (on == 0) {
+    out_shape[0] = 1;
+    on = 1;
+  }
   *out_ndim = on;
 }
 
 /* Internal: do a single-axis reduce and optionally reshape away the axis */
-static PolyUOp *do_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *x,
-                           const int64_t *shape, int ndim, int axis, int keepdim,
-                           int64_t *out_shape, int *out_ndim) {
+static PolyUOp *do_reduce(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *x,
+    const int64_t *shape,
+    int ndim,
+    int axis,
+    int keepdim,
+    int64_t *out_shape,
+    int *out_ndim
+) {
   if (axis < 0) axis += ndim;
-  int64_t axes[] = { axis };
+  int64_t axes[] = {axis};
   PolyUOp *r = poly_reduce_axis(ctx, reduce_op, x, axes, 1);
   reduce_output_shape(shape, ndim, axis, keepdim, out_shape, out_ndim);
   if (!keepdim) {
@@ -114,8 +133,7 @@ static PolyUOp *do_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *x,
   return r;
 }
 
-static PolyUOp *reshape_logical_input(PolyCtx *ctx, PolyUOp *x,
-                                      const int64_t *shape, int ndim) {
+static PolyUOp *reshape_logical_input(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim) {
   if (!ctx || !x || (ndim > 0 && !shape)) return NULL;
   if (ndim == 0) return poly_reshape(ctx, x, NULL, 0);
   return poly_reshape(ctx, x, (int64_t *)shape, ndim);
@@ -131,16 +149,20 @@ static int uop_shape(PolyCtx *ctx, PolyUOp *u, int64_t *out_shape) {
   return ndim;
 }
 
-/* ── erf tau helper ──────────────────────────────────────────────────── */
+/* erf tau helper */
 
 /* A&S 7.1.26: tau(|x|) = t * P(t) * exp(-x^2) where t = 1/(1+p*|x|).
  * erf(x) = sign(x) * (1 - tau(|x|)).
  * erfc(x) = tau(x) for x >= 0, 2 - tau(|x|) for x < 0.
  * Computing tau directly avoids the 1-erf(x) cancellation in erfc. */
 static PolyUOp *erf_tau(PolyCtx *ctx, PolyUOp *ax, PolyDType dt) {
-  PolyUOp *t = poly_alu1(ctx, POLY_OP_RECIPROCAL,
-             poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 1.0),
-             poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.3275911), ax)));
+  PolyUOp *t = poly_alu1(
+      ctx, POLY_OP_RECIPROCAL,
+      poly_alu2(
+          ctx, POLY_OP_ADD, cdt(ctx, dt, 1.0),
+          poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.3275911), ax)
+      )
+  );
   PolyUOp *p = cdt(ctx, dt, 1.061405429);
   p = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, -1.453152027), poly_alu2(ctx, POLY_OP_MUL, t, p));
   p = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 1.421413741), poly_alu2(ctx, POLY_OP_MUL, t, p));
@@ -151,53 +173,60 @@ static PolyUOp *erf_tau(PolyCtx *ctx, PolyUOp *ax, PolyDType dt) {
   return poly_alu2(ctx, POLY_OP_MUL, t, poly_alu2(ctx, POLY_OP_MUL, p, e));
 }
 
-/* ── lgamma Lanczos helper ───────────────────────────────────────────── */
+/* lgamma Lanczos helper */
 
 static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x, PolyDType dt) {
   /* Lanczos approximation with reflection. */
   const double g = 7.0;
   const double c0 = 0.99999999999980993;
-  const double c[8] = {
-    676.5203681218851, -1259.1392167224028, 771.32342877765313,
-    -176.61502916214059, 12.507343278686905, -0.13857109526572012,
-    9.9843695780195716e-6, 1.5056327351493116e-7
-  };
+  const double c[8] = {676.5203681218851,     -1259.1392167224028,  771.32342877765313,
+                       -176.61502916214059,   12.507343278686905,   -0.13857109526572012,
+                       9.9843695780195716e-6, 1.5056327351493116e-7};
 
   PolyUOp *xm1 = poly_alu2(ctx, POLY_OP_SUB, x, cdt(ctx, dt, 1.0));
   PolyUOp *a = cdt(ctx, dt, c0);
   for (int i = 0; i < 8; i++) {
     PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, (double)(i + 1)));
-    a = poly_alu2(ctx, POLY_OP_ADD, a,
-         poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, c[i]), den));
+    a = poly_alu2(ctx, POLY_OP_ADD, a, poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, c[i]), den));
   }
   PolyUOp *t = poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, g + 0.5));
-  PolyUOp *lg_pos = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 0.91893853320467274178),
-                 poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_MUL,
-                     poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, 0.5)),
-                     poly_log(ctx, t)),
-                   poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, a), t)));
+  PolyUOp *lg_pos = poly_alu2(
+      ctx, POLY_OP_ADD, cdt(ctx, dt, 0.91893853320467274178),
+      poly_alu2(
+          ctx, POLY_OP_ADD,
+          poly_alu2(
+              ctx, POLY_OP_MUL, poly_alu2(ctx, POLY_OP_ADD, xm1, cdt(ctx, dt, 0.5)),
+              poly_log(ctx, t)
+          ),
+          poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, a), t)
+      )
+  );
 
   PolyUOp *one_minus_x = poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, 1.0), x);
   PolyUOp *xm1r = poly_alu2(ctx, POLY_OP_SUB, one_minus_x, cdt(ctx, dt, 1.0));
   PolyUOp *ar = cdt(ctx, dt, c0);
   for (int i = 0; i < 8; i++) {
     PolyUOp *den = poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, (double)(i + 1)));
-    ar = poly_alu2(ctx, POLY_OP_ADD, ar,
-         poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, c[i]), den));
+    ar = poly_alu2(ctx, POLY_OP_ADD, ar, poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, c[i]), den));
   }
   PolyUOp *tr = poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, g + 0.5));
-  PolyUOp *lg_ref_base = poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 0.91893853320467274178),
-                      poly_alu2(ctx, POLY_OP_ADD,
-                        poly_alu2(ctx, POLY_OP_MUL,
-                          poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, 0.5)),
-                          poly_log(ctx, tr)),
-                        poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, ar), tr)));
+  PolyUOp *lg_ref_base = poly_alu2(
+      ctx, POLY_OP_ADD, cdt(ctx, dt, 0.91893853320467274178),
+      poly_alu2(
+          ctx, POLY_OP_ADD,
+          poly_alu2(
+              ctx, POLY_OP_MUL, poly_alu2(ctx, POLY_OP_ADD, xm1r, cdt(ctx, dt, 0.5)),
+              poly_log(ctx, tr)
+          ),
+          poly_alu2(ctx, POLY_OP_SUB, poly_log(ctx, ar), tr)
+      )
+  );
   PolyUOp *sinpix = poly_sin(ctx, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, M_PI), x));
-  PolyUOp *lg_ref = poly_alu2(ctx, POLY_OP_SUB,
-                  poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, log(M_PI)),
-                    poly_log(ctx, poly_abs(ctx, sinpix))),
-                  lg_ref_base);
+  PolyUOp *lg_ref = poly_alu2(
+      ctx, POLY_OP_SUB,
+      poly_alu2(ctx, POLY_OP_SUB, cdt(ctx, dt, log(M_PI)), poly_log(ctx, poly_abs(ctx, sinpix))),
+      lg_ref_base
+  );
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cdt(ctx, dt, 0.5));
   return poly_alu3(ctx, POLY_OP_WHERE, cond, lg_ref, lg_pos);
 }
@@ -206,35 +235,41 @@ static PolyUOp *poly_lgamma_forward_lanczos(PolyCtx *ctx, PolyUOp *x, PolyDType 
 /*  Public functions                                                     */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-/* ── Broadcasting (tinygrad _broadcasted / _broadcast_to) ────────────── */
+/* Broadcasting (tinygrad _broadcasted / _broadcast_to) */
 
-PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x,
-                           const int64_t *shape, int ndim) {
+PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int ndim) {
   if (!ctx || !x || !shape || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
   int64_t x_shape[POLY_MAX_DIMS];
   int x_ndim = uop_shape(ctx, x, x_shape);
-  if (x_ndim < 0) return x;  /* shapeless (CONST scalar) -- pass through */
-  if (ndim < x_ndim) return NULL;  /* can't broadcast to fewer dims */
+  if (x_ndim < 0) return x; /* shapeless (CONST scalar) -- pass through */
+  if (ndim < x_ndim) return NULL; /* can't broadcast to fewer dims */
 
   /* Already matching */
   if (x_ndim == ndim) {
     bool same = true;
     for (int i = 0; i < ndim; i++)
-      if (x_shape[i] != shape[i]) { same = false; break; }
+      if (x_shape[i] != shape[i]) {
+        same = false;
+        break;
+      }
     if (same) return x;
   }
 
   /* Left-pad with 1s to match ndim (tinygrad _align_left) */
   int64_t aligned[POLY_MAX_DIMS];
   int pad = ndim - x_ndim;
-  for (int i = 0; i < pad; i++) aligned[i] = 1;
-  for (int i = 0; i < x_ndim; i++) aligned[pad + i] = x_shape[i];
+  for (int i = 0; i < pad; i++)
+    aligned[i] = 1;
+  for (int i = 0; i < x_ndim; i++)
+    aligned[pad + i] = x_shape[i];
 
   /* Validate: each aligned dim must be 1 or equal to target */
   for (int i = 0; i < ndim; i++) {
     if (aligned[i] != shape[i] && aligned[i] != 1) {
-      fprintf(stderr, "poly_broadcast_to: incompatible dim %d: %lld vs %lld\n",
-              i, (long long)aligned[i], (long long)shape[i]);
+      fprintf(
+          stderr, "poly_broadcast_to: incompatible dim %d: %lld vs %lld\n", i,
+          (long long)aligned[i], (long long)shape[i]
+      );
       return NULL;
     }
   }
@@ -244,33 +279,52 @@ PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x,
   /* Expand where aligned[i]==1 and shape[i]>1 */
   bool need_expand = false;
   for (int i = 0; i < ndim; i++)
-    if (aligned[i] != shape[i]) { need_expand = true; break; }
-  if (need_expand)
-    r = poly_expand(ctx, r, (int64_t *)shape, ndim);
+    if (aligned[i] != shape[i]) {
+      need_expand = true;
+      break;
+    }
+  if (need_expand) r = poly_expand(ctx, r, (int64_t *)shape, ndim);
   return r;
 }
 
-bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b,
-                         int64_t *out_shape, int *out_ndim) {
+bool poly_broadcast_pair(
+    PolyCtx *ctx,
+    PolyUOp **a,
+    PolyUOp **b,
+    int64_t *out_shape,
+    int *out_ndim
+) {
   int64_t sa[POLY_MAX_DIMS], sb[POLY_MAX_DIMS];
   int na = uop_shape(ctx, *a, sa);
   int nb = uop_shape(ctx, *b, sb);
 
   /* Scalars or shapeless -- no broadcast needed */
-  if (na <= 0 && nb <= 0) { *out_ndim = 0; return true; }
-  if (na <= 0) { na = 0; }
-  if (nb <= 0) { nb = 0; }
+  if (na <= 0 && nb <= 0) {
+    *out_ndim = 0;
+    return true;
+  }
+  if (na <= 0) {
+    na = 0;
+  }
+  if (nb <= 0) {
+    nb = 0;
+  }
 
   /* Compute broadcast shape (tinygrad _broadcast_shape) */
   int nd = na > nb ? na : nb;
-  if (nd > POLY_MAX_DIMS) { *out_ndim = 0; return false; }
+  if (nd > POLY_MAX_DIMS) {
+    *out_ndim = 0;
+    return false;
+  }
   int pa = nd - na, pb = nd - nb;
   for (int i = 0; i < nd; i++) {
     int64_t da = (i >= pa) ? sa[i - pa] : 1;
     int64_t db = (i >= pb) ? sb[i - pb] : 1;
     if (da != db && da != 1 && db != 1) {
-      fprintf(stderr, "poly_broadcast_pair: incompatible shapes at dim %d: %lld vs %lld\n",
-              i, (long long)da, (long long)db);
+      fprintf(
+          stderr, "poly_broadcast_pair: incompatible shapes at dim %d: %lld vs %lld\n", i,
+          (long long)da, (long long)db
+      );
       *out_ndim = 0;
       return false;
     }
@@ -283,52 +337,54 @@ bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b,
   return true;
 }
 
-/* ── Broadcasting binary ops ──────────────────────────────────────────── */
+/* Broadcasting binary ops */
 
 PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
   return poly_alu2(ctx, POLY_OP_ADD, a, b);
 }
 
 PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
   return poly_alu2(ctx, POLY_OP_SUB, a, b);
 }
 
 PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
   return poly_alu2(ctx, POLY_OP_MUL, a, b);
 }
 
 PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   poly_broadcast_pair(ctx, &a, &b, shape, &ndim);
   return poly_alu2(ctx, POLY_OP_FDIV, a, b);
 }
 
-/* ── Contiguous (realize barrier) ──────────────────────────────────── */
+/* Contiguous (realize barrier) */
 
 PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
   return poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
 }
 
-/* ── Math ────────────────────────────────────────────────────────────── */
+/* Math */
 
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x) {
   /* exp(x) = exp2(x * (1/ln2)) */
   PolyDType dt = poly_dtype_scalar(x->dtype);
-  return poly_alu1(ctx, POLY_OP_EXP2,
-    poly_alu2(ctx, POLY_OP_MUL, x, cdt(ctx, dt, 1.0 / M_LN2)));
+  return poly_alu1(ctx, POLY_OP_EXP2, poly_alu2(ctx, POLY_OP_MUL, x, cdt(ctx, dt, 1.0 / M_LN2)));
 }
 
 PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x) {
   /* log(x) = log2(x) * ln2 */
   PolyDType dt = poly_dtype_scalar(x->dtype);
-  return poly_alu2(ctx, POLY_OP_MUL,
-    poly_alu1(ctx, POLY_OP_LOG2, x), cdt(ctx, dt, M_LN2));
+  return poly_alu2(ctx, POLY_OP_MUL, poly_alu1(ctx, POLY_OP_LOG2, x), cdt(ctx, dt, M_LN2));
 }
 
 PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x) {
@@ -338,10 +394,13 @@ PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cdt(ctx, dt, 1e-4));
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
   PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x2, x);
-  PolyUOp *poly = poly_alu2(ctx, POLY_OP_ADD, x,
-                 poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -0.5), x2),
-                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0/3.0), x3)));
+  PolyUOp *poly = poly_alu2(
+      ctx, POLY_OP_ADD, x,
+      poly_alu2(
+          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -0.5), x2),
+          poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0 / 3.0), x3)
+      )
+  );
   PolyUOp *direct = poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, cdt(ctx, dt, 1.0), x));
   return poly_alu3(ctx, POLY_OP_WHERE, small, poly, direct);
 }
@@ -353,10 +412,13 @@ PolyUOp *poly_expm1(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *small = poly_alu2(ctx, POLY_OP_CMPLT, ax, cdt(ctx, dt, 1e-4));
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
   PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x2, x);
-  PolyUOp *poly = poly_alu2(ctx, POLY_OP_ADD, x,
-                 poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.5), x2),
-                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0/6.0), x3)));
+  PolyUOp *poly = poly_alu2(
+      ctx, POLY_OP_ADD, x,
+      poly_alu2(
+          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.5), x2),
+          poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0 / 6.0), x3)
+      )
+  );
   PolyUOp *direct = poly_alu2(ctx, POLY_OP_SUB, poly_exp(ctx, x), cdt(ctx, dt, 1.0));
   return poly_alu3(ctx, POLY_OP_WHERE, small, poly, direct);
 }
@@ -367,8 +429,7 @@ PolyUOp *poly_sin(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_cos(PolyCtx *ctx, PolyUOp *x) {
   /* cos(x) = sin(pi/2 - x) */
-  return poly_alu1(ctx, POLY_OP_SIN,
-    poly_alu2(ctx, POLY_OP_SUB, cf(ctx, x, M_PI / 2.0), x));
+  return poly_alu1(ctx, POLY_OP_SIN, poly_alu2(ctx, POLY_OP_SUB, cf(ctx, x, M_PI / 2.0), x));
 }
 
 PolyUOp *poly_tan(PolyCtx *ctx, PolyUOp *x) {
@@ -402,22 +463,24 @@ PolyUOp *poly_erfinv(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *one = cdt(ctx, dt, 1.0);
   PolyUOp *x2 = poly_alu2(ctx, POLY_OP_MUL, x, x);
   PolyUOp *ln = poly_log(ctx, poly_alu2(ctx, POLY_OP_SUB, one, x2));
-  PolyUOp *term1 = poly_alu2(ctx, POLY_OP_ADD,
-                   poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, 2.0/(M_PI*0.147)), one),
-                   poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.5), ln));
+  PolyUOp *term1 = poly_alu2(
+      ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_FDIV, cdt(ctx, dt, 2.0 / (M_PI * 0.147)), one),
+      poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 0.5), ln)
+  );
   PolyUOp *term2 = poly_alu2(ctx, POLY_OP_FDIV, ln, a);
-  PolyUOp *inside = poly_alu2(ctx, POLY_OP_SUB,
-                    poly_alu2(ctx, POLY_OP_MUL, term1, term1), term2);
-  PolyUOp *root = poly_alu1(ctx, POLY_OP_SQRT,
-                  poly_alu2(ctx, POLY_OP_SUB, poly_alu1(ctx, POLY_OP_SQRT, inside), term1));
+  PolyUOp *inside = poly_alu2(ctx, POLY_OP_SUB, poly_alu2(ctx, POLY_OP_MUL, term1, term1), term2);
+  PolyUOp *root = poly_alu1(
+      ctx, POLY_OP_SQRT, poly_alu2(ctx, POLY_OP_SUB, poly_alu1(ctx, POLY_OP_SQRT, inside), term1)
+  );
   return poly_alu2(ctx, POLY_OP_MUL, poly_sign(ctx, x), root);
 }
 
 PolyUOp *poly_ndtri(PolyCtx *ctx, PolyUOp *x) {
   /* ndtri(p) = sqrt(2) * erfinv(2p-1) */
   PolyDType dt = poly_dtype_scalar(x->dtype);
-  PolyUOp *arg = poly_alu2(ctx, POLY_OP_SUB,
-                poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 2.0), x), cdt(ctx, dt, 1.0));
+  PolyUOp *arg = poly_alu2(
+      ctx, POLY_OP_SUB, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 2.0), x), cdt(ctx, dt, 1.0)
+  );
   return poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, sqrt(2.0)), poly_erfinv(ctx, arg));
 }
 
@@ -430,20 +493,26 @@ PolyUOp *poly_digamma(PolyCtx *ctx, PolyUOp *x) {
     PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, xx, cdt(ctx, dt, 6.0));
     PolyUOp *inv = poly_alu1(ctx, POLY_OP_RECIPROCAL, xx);
     acc = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_SUB, acc, inv), acc);
-    xx = poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_ADD, xx, cdt(ctx, dt, 1.0)), xx);
+    xx =
+        poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_ADD, xx, cdt(ctx, dt, 1.0)), xx);
   }
   PolyUOp *inv = poly_alu1(ctx, POLY_OP_RECIPROCAL, xx);
   PolyUOp *inv2 = poly_alu2(ctx, POLY_OP_MUL, inv, inv);
   PolyUOp *inv4 = poly_alu2(ctx, POLY_OP_MUL, inv2, inv2);
   PolyUOp *inv6 = poly_alu2(ctx, POLY_OP_MUL, inv4, inv2);
-  PolyUOp *asym = poly_alu2(ctx, POLY_OP_ADD, poly_log(ctx, xx),
-                poly_alu2(ctx, POLY_OP_ADD,
-                  poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -0.5), inv),
-                  poly_alu2(ctx, POLY_OP_ADD,
-                    poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -1.0/12.0), inv2),
-                    poly_alu2(ctx, POLY_OP_ADD,
-                      poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0/120.0), inv4),
-                      poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -1.0/252.0), inv6)))));
+  PolyUOp *asym = poly_alu2(
+      ctx, POLY_OP_ADD, poly_log(ctx, xx),
+      poly_alu2(
+          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -0.5), inv),
+          poly_alu2(
+              ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -1.0 / 12.0), inv2),
+              poly_alu2(
+                  ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, 1.0 / 120.0), inv4),
+                  poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, dt, -1.0 / 252.0), inv6)
+              )
+          )
+      )
+  );
   return poly_alu2(ctx, POLY_OP_ADD, acc, asym);
 }
 
@@ -463,16 +532,16 @@ PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x) {
   /* sigmoid(x) = (1 + exp2(x * (-1/ln2)))^-1 */
   PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, x, cf(ctx, x, -1.0 / M_LN2));
   PolyUOp *e = poly_alu1(ctx, POLY_OP_EXP2, scaled);
-  return poly_alu1(ctx, POLY_OP_RECIPROCAL,
-    poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), e));
+  return poly_alu1(ctx, POLY_OP_RECIPROCAL, poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), e));
 }
 
 PolyUOp *poly_tanh_act(PolyCtx *ctx, PolyUOp *x) {
   /* tanh(x) = 2*sigmoid(2x) - 1 */
   PolyUOp *two_x = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), x);
-  return poly_alu2(ctx, POLY_OP_SUB,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), poly_sigmoid(ctx, two_x)),
-    cf(ctx, x, 1.0));
+  return poly_alu2(
+      ctx, POLY_OP_SUB, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), poly_sigmoid(ctx, two_x)),
+      cf(ctx, x, 1.0)
+  );
 }
 
 PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x) {
@@ -489,8 +558,7 @@ PolyUOp *poly_sign(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *neg_or_pos = poly_alu3(ctx, POLY_OP_WHERE, is_neg, cf(ctx, x, -1.0), cf(ctx, x, 1.0));
   PolyUOp *result = poly_alu3(ctx, POLY_OP_WHERE, is_nonzero, neg_or_pos, zero);
   /* +x*0 to propagate NaN */
-  return poly_alu2(ctx, POLY_OP_ADD, result,
-    poly_alu2(ctx, POLY_OP_MUL, x, zero));
+  return poly_alu2(ctx, POLY_OP_ADD, result, poly_alu2(ctx, POLY_OP_MUL, x, zero));
 }
 
 PolyUOp *poly_square(PolyCtx *ctx, PolyUOp *x) {
@@ -505,16 +573,14 @@ PolyUOp *poly_ceil(PolyCtx *ctx, PolyUOp *x) {
   /* ceil(x) = (x > (b=trunc(x))).where(b+1, b) */
   PolyUOp *b = poly_alu1(ctx, POLY_OP_TRUNC, x);
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, b, x); /* b < x = x > b */
-  return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_alu2(ctx, POLY_OP_ADD, b, cf(ctx, x, 1.0)), b);
+  return poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_ADD, b, cf(ctx, x, 1.0)), b);
 }
 
 PolyUOp *poly_floor(PolyCtx *ctx, PolyUOp *x) {
   /* floor(x) = (x < (b=trunc(x))).where(b-1, b) */
   PolyUOp *b = poly_alu1(ctx, POLY_OP_TRUNC, x);
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, b); /* x < b */
-  return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_alu2(ctx, POLY_OP_SUB, b, cf(ctx, x, 1.0)), b);
+  return poly_alu3(ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_SUB, b, cf(ctx, x, 1.0)), b);
 }
 
 PolyUOp *poly_round_f(PolyCtx *ctx, PolyUOp *x) {
@@ -530,9 +596,10 @@ PolyUOp *poly_round_f(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *trunc_x_half = poly_alu1(ctx, POLY_OP_TRUNC, x_half);
   PolyUOp *halves_eq = poly_eq(ctx, trunc_b_half, trunc_x_half);
   PolyUOp *cond = poly_eq(ctx, x_gt_0, halves_eq);
-  return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_ceil(ctx, poly_alu2(ctx, POLY_OP_SUB, x, half)),
-    poly_floor(ctx, poly_alu2(ctx, POLY_OP_ADD, x, half)));
+  return poly_alu3(
+      ctx, POLY_OP_WHERE, cond, poly_ceil(ctx, poly_alu2(ctx, POLY_OP_SUB, x, half)),
+      poly_floor(ctx, poly_alu2(ctx, POLY_OP_ADD, x, half))
+  );
 }
 
 PolyUOp *poly_isinf(PolyCtx *ctx, PolyUOp *x) {
@@ -551,7 +618,7 @@ PolyUOp *poly_isnan(PolyCtx *ctx, PolyUOp *x) {
   return poly_alu2(ctx, POLY_OP_CMPNE, x, x);
 }
 
-/* ── Activations ─────────────────────────────────────────────────────── */
+/* Activations */
 
 PolyUOp *poly_relu(PolyCtx *ctx, PolyUOp *x) {
   /* relu(x) = where(0 < x, x, 0) */
@@ -562,31 +629,37 @@ PolyUOp *poly_relu(PolyCtx *ctx, PolyUOp *x) {
 
 PolyUOp *poly_relu6(PolyCtx *ctx, PolyUOp *x) {
   /* relu6(x) = relu(x) - relu(x - 6) */
-  return poly_alu2(ctx, POLY_OP_SUB,
-    poly_relu(ctx, x),
-    poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, x, cf(ctx, x, 6.0))));
+  return poly_alu2(
+      ctx, POLY_OP_SUB, poly_relu(ctx, x),
+      poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, x, cf(ctx, x, 6.0)))
+  );
 }
 
 PolyUOp *poly_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope) {
   PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, x, cf(ctx, x, 0.0));
-  return poly_alu3(ctx, POLY_OP_WHERE, cond,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, neg_slope), x), x);
+  return poly_alu3(
+      ctx, POLY_OP_WHERE, cond, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, neg_slope), x), x
+  );
 }
 
 PolyUOp *poly_gelu(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x, poly_alu2(ctx, POLY_OP_MUL, x, x));
-  PolyUOp *inner = poly_alu2(ctx, POLY_OP_ADD, x,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 0.044715), x3));
-  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL,
-    cf(ctx, x, sqrt(2.0 / M_PI)), inner);
-  return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 0.5),
-    poly_alu2(ctx, POLY_OP_MUL, x,
-      poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), poly_tanh_act(ctx, scaled))));
+  PolyUOp *inner =
+      poly_alu2(ctx, POLY_OP_ADD, x, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 0.044715), x3));
+  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, sqrt(2.0 / M_PI)), inner);
+  return poly_alu2(
+      ctx, POLY_OP_MUL, cf(ctx, x, 0.5),
+      poly_alu2(
+          ctx, POLY_OP_MUL, x,
+          poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), poly_tanh_act(ctx, scaled))
+      )
+  );
 }
 
 PolyUOp *poly_quick_gelu(PolyCtx *ctx, PolyUOp *x) {
-  return poly_alu2(ctx, POLY_OP_MUL, x,
-    poly_sigmoid(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.702), x)));
+  return poly_alu2(
+      ctx, POLY_OP_MUL, x, poly_sigmoid(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.702), x))
+  );
 }
 
 PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x) {
@@ -594,11 +667,13 @@ PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha) {
-  return poly_alu2(ctx, POLY_OP_SUB,
-    poly_relu(ctx, x),
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, alpha),
-      poly_relu(ctx,
-        poly_alu2(ctx, POLY_OP_SUB, cf(ctx, x, 1.0), poly_exp(ctx, x)))));
+  return poly_alu2(
+      ctx, POLY_OP_SUB, poly_relu(ctx, x),
+      poly_alu2(
+          ctx, POLY_OP_MUL, cf(ctx, x, alpha),
+          poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, cf(ctx, x, 1.0), poly_exp(ctx, x)))
+      )
+  );
 }
 
 PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta) {
@@ -607,14 +682,12 @@ PolyUOp *poly_softplus(PolyCtx *ctx, PolyUOp *x, double beta) {
   PolyUOp *m = poly_alu2(ctx, POLY_OP_MAX, bx, zero);
   PolyUOp *ea = poly_exp(ctx, poly_alu2(ctx, POLY_OP_SUB, bx, m));
   PolyUOp *eb = poly_exp(ctx, poly_alu2(ctx, POLY_OP_SUB, zero, m));
-  PolyUOp *lae = poly_alu2(ctx, POLY_OP_ADD, m,
-    poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, ea, eb)));
+  PolyUOp *lae = poly_alu2(ctx, POLY_OP_ADD, m, poly_log(ctx, poly_alu2(ctx, POLY_OP_ADD, ea, eb)));
   return poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.0 / beta), lae);
 }
 
 PolyUOp *poly_mish(PolyCtx *ctx, PolyUOp *x) {
-  return poly_alu2(ctx, POLY_OP_MUL, x,
-    poly_tanh_act(ctx, poly_softplus(ctx, x, 1.0)));
+  return poly_alu2(ctx, POLY_OP_MUL, x, poly_tanh_act(ctx, poly_softplus(ctx, x, 1.0)));
 }
 
 PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val) {
@@ -622,21 +695,26 @@ PolyUOp *poly_hardtanh(PolyCtx *ctx, PolyUOp *x, double min_val, double max_val)
 }
 
 PolyUOp *poly_hardswish(PolyCtx *ctx, PolyUOp *x) {
-  return poly_alu2(ctx, POLY_OP_MUL,
-    poly_alu2(ctx, POLY_OP_MUL, x,
-      poly_relu6(ctx, poly_alu2(ctx, POLY_OP_ADD, x, cf(ctx, x, 3.0)))),
-    cf(ctx, x, 1.0 / 6.0));
+  return poly_alu2(
+      ctx, POLY_OP_MUL,
+      poly_alu2(
+          ctx, POLY_OP_MUL, x, poly_relu6(ctx, poly_alu2(ctx, POLY_OP_ADD, x, cf(ctx, x, 3.0)))
+      ),
+      cf(ctx, x, 1.0 / 6.0)
+  );
 }
 
 PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
-  PolyUOp *t = poly_alu2(ctx, POLY_OP_ADD,
-    poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.0/6.0), x), cf(ctx, x, 0.5));
-  return poly_alu2(ctx, POLY_OP_SUB,
-    poly_relu(ctx, t),
-    poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, t, cf(ctx, x, 1.0))));
+  PolyUOp *t = poly_alu2(
+      ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.0 / 6.0), x), cf(ctx, x, 0.5)
+  );
+  return poly_alu2(
+      ctx, POLY_OP_SUB, poly_relu(ctx, t),
+      poly_relu(ctx, poly_alu2(ctx, POLY_OP_SUB, t, cf(ctx, x, 1.0)))
+  );
 }
 
-/* ── Comparisons (broadcasting) ──────────────────────────────────────── */
+/* Comparisons (broadcasting) */
 
 /* Logical NOT — polygrad's canonical form is `CMPNE(x, CONST(true))` for
  * bool inputs, matching tinygrad's `logical_not()` after CAST elision
@@ -664,33 +742,38 @@ PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x) {
  * for tinygrad parity and to let Phase D's reduce_collapse Rule 4 match
  * polygrad's tril/triu masks. */
 PolyUOp *poly_eq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *ne = poly_alu2(ctx, POLY_OP_CMPNE, a, b);
   return poly_logical_not(ctx, ne);
 }
 
 PolyUOp *poly_ne(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu2(ctx, POLY_OP_CMPNE, a, b);
 }
 
 PolyUOp *poly_gt(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu2(ctx, POLY_OP_CMPLT, b, a);
 }
 
 PolyUOp *poly_ge(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *lt = poly_alu2(ctx, POLY_OP_CMPLT, a, b);
   return poly_logical_not(ctx, lt);
 }
 
 PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   PolyUOp *gt = poly_alu2(ctx, POLY_OP_CMPLT, b, a);
   return poly_logical_not(ctx, gt);
@@ -706,25 +789,28 @@ PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id) {
 }
 
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &x, &y, s, &nd);
   poly_broadcast_pair(ctx, &cond, &x, s, &nd);
   return poly_alu3(ctx, POLY_OP_WHERE, cond, x, y);
 }
 
 PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
   return poly_alu2(ctx, POLY_OP_MAX, a, b);
 }
 
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  int64_t s[POLY_MAX_DIMS]; int nd;
+  int64_t s[POLY_MAX_DIMS];
+  int nd;
   poly_broadcast_pair(ctx, &a, &b, s, &nd);
-  return poly_alu1(ctx, POLY_OP_NEG,
-    poly_alu2(ctx, POLY_OP_MAX,
-      poly_alu1(ctx, POLY_OP_NEG, a),
-      poly_alu1(ctx, POLY_OP_NEG, b)));
+  return poly_alu1(
+      ctx, POLY_OP_NEG,
+      poly_alu2(ctx, POLY_OP_MAX, poly_alu1(ctx, POLY_OP_NEG, a), poly_alu1(ctx, POLY_OP_NEG, b))
+  );
 }
 
 PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi) {
@@ -749,8 +835,7 @@ PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x) {
 /* ══════════════════════════════════════════════════════════════════════ */
 
 /* Tensor.repeat -- movement.py:465 */
-PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x,
-                     const int64_t *repeats, int n_repeats) {
+PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x, const int64_t *repeats, int n_repeats) {
   int64_t in_shape[POLY_MAX_DIMS];
   int in_ndim = uop_shape(ctx, x, in_shape);
   if (in_ndim < 0 || in_ndim > n_repeats || n_repeats > POLY_MAX_DIMS) return NULL;
@@ -758,8 +843,10 @@ PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x,
   /* _align_left: pad input shape with leading 1s to match n_repeats */
   int64_t base[POLY_MAX_DIMS];
   int pad = n_repeats - in_ndim;
-  for (int i = 0; i < pad; i++) base[i] = 1;
-  for (int i = 0; i < in_ndim; i++) base[pad + i] = in_shape[i];
+  for (int i = 0; i < pad; i++)
+    base[i] = 1;
+  for (int i = 0; i < in_ndim; i++)
+    base[pad + i] = in_shape[i];
 
   /* unsqueezed = flatten([[s] if r==1 else [1,s] for r,s in zip(repeats, base)])
    * expanded   = flatten([[s] if r==1 else [r,s] for r,s in zip(repeats, base)])
@@ -768,21 +855,28 @@ PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x,
   int n = 0;
   for (int i = 0; i < n_repeats; i++) {
     int64_t r = repeats[i], s = base[i];
-    if (r == 1) { unsq[n] = s; exp[n] = s; n++; }
-    else { unsq[n] = 1; exp[n] = r; n++; unsq[n] = s; exp[n] = s; n++; }
+    if (r == 1) {
+      unsq[n] = s;
+      exp[n] = s;
+      n++;
+    } else {
+      unsq[n] = 1;
+      exp[n] = r;
+      n++;
+      unsq[n] = s;
+      exp[n] = s;
+      n++;
+    }
     final_sh[i] = r * s;
   }
 
-  return poly_reshape(ctx,
-           poly_expand(ctx,
-             poly_reshape(ctx, x, unsq, n),
-             exp, n),
-           final_sh, n_repeats);
+  return poly_reshape(
+      ctx, poly_expand(ctx, poly_reshape(ctx, x, unsq, n), exp, n), final_sh, n_repeats
+  );
 }
 
 /* Tensor.shrink_to -- movement.py:168. ends[i] == -1 means no-op (keep dim). */
-PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x,
-                        const int64_t *ends, int n_ends) {
+PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x, const int64_t *ends, int n_ends) {
   int64_t in_shape[POLY_MAX_DIMS];
   int in_ndim = uop_shape(ctx, x, in_shape);
   if (in_ndim != n_ends) return NULL;
@@ -791,16 +885,22 @@ PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x,
   bool any = false;
   for (int i = 0; i < n_ends; i++) {
     int64_t e = (ends[i] == -1) ? in_shape[i] : ends[i];
-    pairs[i][0] = 0; pairs[i][1] = e;
+    pairs[i][0] = 0;
+    pairs[i][1] = e;
     if (e != in_shape[i]) any = true;
   }
   return any ? poly_shrink(ctx, x, pairs, n_ends) : x;
 }
 
 /* Tensor._pool -- movement.py:487. General N-d pool via repeat/shrink/reshape/permute. */
-PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
-                   const int64_t *k_, int nk,
-                   const int64_t *stride_, const int64_t *dilation_) {
+PolyUOp *poly_pool(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *k_,
+    int nk,
+    const int64_t *stride_,
+    const int64_t *dilation_
+) {
   int64_t sh[POLY_MAX_DIMS];
   int ndim = uop_shape(ctx, x, sh);
   if (ndim < nk) return NULL;
@@ -809,11 +909,11 @@ PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
   int64_t s_[POLY_MAX_DIMS], d_[POLY_MAX_DIMS], i_[POLY_MAX_DIMS];
   int64_t o_[POLY_MAX_DIMS], f_[POLY_MAX_DIMS];
   for (int j = 0; j < nk; j++) {
-    s_[j] = stride_   ? stride_[j]   : 1;
+    s_[j] = stride_ ? stride_[j] : 1;
     d_[j] = dilation_ ? dilation_[j] : 1;
     i_[j] = sh[noop + j];
     if (d_[j] * (k_[j] - 1) + 1 > i_[j]) return NULL;
-    o_[j] = (i_[j] - d_[j] * (k_[j] - 1) + s_[j] - 1) / s_[j];     /* ceildiv */
+    o_[j] = (i_[j] - d_[j] * (k_[j] - 1) + s_[j] - 1) / s_[j]; /* ceildiv */
     int64_t fn = o_[j] * s_[j] - d_[j];
     int64_t fv = fn <= 0 ? 1 : (fn + i_[j] - 1) / i_[j];
     f_[j] = fv < 1 ? 1 : fv;
@@ -822,7 +922,8 @@ PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
 
   /* x = repeat([1]*noop + [ceildiv(k*(i*f+d), i) for ...]) */
   int64_t rep[POLY_MAX_DIMS];
-  for (int j = 0; j < noop; j++) rep[j] = 1;
+  for (int j = 0; j < noop; j++)
+    rep[j] = 1;
   for (int j = 0; j < nk; j++) {
     int64_t num = k_[j] * (i_[j] * f_[j] + d_[j]);
     rep[noop + j] = (num + i_[j] - 1) / i_[j];
@@ -831,44 +932,65 @@ PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
 
   /* shrink_to(noop + [k*(i*f+d) for ...]) */
   int64_t e1[POLY_MAX_DIMS];
-  for (int j = 0; j < noop; j++) e1[j] = -1;
-  for (int j = 0; j < nk; j++) e1[noop + j] = k_[j] * (i_[j] * f_[j] + d_[j]);
+  for (int j = 0; j < noop; j++)
+    e1[j] = -1;
+  for (int j = 0; j < nk; j++)
+    e1[noop + j] = k_[j] * (i_[j] * f_[j] + d_[j]);
   r = poly_shrink_to(ctx, r, e1, ndim);
 
   /* reshape(noop + flatten((k, i*f+d) for ...)) */
   int64_t s1[POLY_MAX_DIMS];
-  for (int j = 0; j < noop; j++) s1[j] = sh[j];
-  for (int j = 0; j < nk; j++) { s1[noop + 2*j] = k_[j]; s1[noop + 2*j + 1] = i_[j] * f_[j] + d_[j]; }
+  for (int j = 0; j < noop; j++)
+    s1[j] = sh[j];
+  for (int j = 0; j < nk; j++) {
+    s1[noop + 2 * j] = k_[j];
+    s1[noop + 2 * j + 1] = i_[j] * f_[j] + d_[j];
+  }
   r = poly_reshape(ctx, r, s1, noop + 2 * nk);
 
   /* shrink_to(noop + flatten((k, o*s) for ...)).reshape(noop + flatten((k, o, s) for ...)) */
   int64_t e2[POLY_MAX_DIMS], s2[POLY_MAX_DIMS];
-  for (int j = 0; j < noop; j++) { e2[j] = -1; s2[j] = sh[j]; }
-  for (int j = 0; j < nk; j++) {
-    e2[noop + 2*j] = k_[j]; e2[noop + 2*j + 1] = o_[j] * s_[j];
-    s2[noop + 3*j] = k_[j]; s2[noop + 3*j + 1] = o_[j]; s2[noop + 3*j + 2] = s_[j];
+  for (int j = 0; j < noop; j++) {
+    e2[j] = -1;
+    s2[j] = sh[j];
   }
-  r = poly_reshape(ctx, poly_shrink_to(ctx, r, e2, noop + 2*nk), s2, noop + 3*nk);
+  for (int j = 0; j < nk; j++) {
+    e2[noop + 2 * j] = k_[j];
+    e2[noop + 2 * j + 1] = o_[j] * s_[j];
+    s2[noop + 3 * j] = k_[j];
+    s2[noop + 3 * j + 1] = o_[j];
+    s2[noop + 3 * j + 2] = s_[j];
+  }
+  r = poly_reshape(ctx, poly_shrink_to(ctx, r, e2, noop + 2 * nk), s2, noop + 3 * nk);
 
   /* shrink_to(noop + flatten((k, o, 1) for ...)).reshape(noop + flatten((k, o) for ...)) */
   int64_t e3[POLY_MAX_DIMS], s3[POLY_MAX_DIMS];
-  for (int j = 0; j < noop; j++) { e3[j] = -1; s3[j] = sh[j]; }
-  for (int j = 0; j < nk; j++) {
-    e3[noop + 3*j] = k_[j]; e3[noop + 3*j + 1] = o_[j]; e3[noop + 3*j + 2] = 1;
-    s3[noop + 2*j] = k_[j]; s3[noop + 2*j + 1] = o_[j];
+  for (int j = 0; j < noop; j++) {
+    e3[j] = -1;
+    s3[j] = sh[j];
   }
-  r = poly_reshape(ctx, poly_shrink_to(ctx, r, e3, noop + 3*nk), s3, noop + 2*nk);
+  for (int j = 0; j < nk; j++) {
+    e3[noop + 3 * j] = k_[j];
+    e3[noop + 3 * j + 1] = o_[j];
+    e3[noop + 3 * j + 2] = 1;
+    s3[noop + 2 * j] = k_[j];
+    s3[noop + 2 * j + 1] = o_[j];
+  }
+  r = poly_reshape(ctx, poly_shrink_to(ctx, r, e3, noop + 3 * nk), s3, noop + 2 * nk);
 
   /* permute(*range(noop), *[noop + i*2 + 1 for i in range(nk)],
-                          *[noop + i*2     for i in range(nk)]) */
+   *[noop + i*2     for i in range(nk)]) */
   int64_t perm[POLY_MAX_DIMS];
-  for (int j = 0; j < noop; j++) perm[j] = j;
-  for (int j = 0; j < nk; j++) perm[noop + j]      = noop + 2*j + 1;
-  for (int j = 0; j < nk; j++) perm[noop + nk + j] = noop + 2*j;
-  return poly_permute(ctx, r, perm, noop + 2*nk);
+  for (int j = 0; j < noop; j++)
+    perm[j] = j;
+  for (int j = 0; j < nk; j++)
+    perm[noop + j] = noop + 2 * j + 1;
+  for (int j = 0; j < nk; j++)
+    perm[noop + nk + j] = noop + 2 * j;
+  return poly_permute(ctx, r, perm, noop + 2 * nk);
 }
 
-/* ── Pad with arbitrary value / circular / reflect / replicate ───────── */
+/* Pad with arbitrary value / circular / reflect / replicate */
 
 /* ones_like(x): same shape and dtype as x, filled with 1.
  * Pure UOp (no const-registry): scalar CONST -> reshape to (1,)*ndim -> expand. */
@@ -879,7 +1001,8 @@ static PolyUOp *poly_ones_like(PolyCtx *ctx, PolyUOp *x) {
   PolyDType dt = poly_dtype_scalar(x->dtype);
   PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
   int64_t ones[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++) ones[i] = 1;
+  for (int i = 0; i < ndim; i++)
+    ones[i] = 1;
   PolyUOp *r = poly_reshape(ctx, one, ones, ndim);
   return poly_expand(ctx, r, shape, ndim);
 }
@@ -913,8 +1036,10 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
     for (int j = 0; j < ndim; j++) {
       if (j == dim) continue;
       if (shi[j] != sh0[j]) {
-        fprintf(stderr, "poly_cat: shape mismatch at tensor %d dim %d: %lld vs %lld\n",
-                i, j, (long long)shi[j], (long long)sh0[j]);
+        fprintf(
+            stderr, "poly_cat: shape mismatch at tensor %d dim %d: %lld vs %lld\n", i, j,
+            (long long)shi[j], (long long)sh0[j]
+        );
         return NULL;
       }
     }
@@ -925,7 +1050,10 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
   PolyUOp *acc = NULL;
   for (int i = 0; i < n_tensors; i++) {
     int64_t pads[POLY_MAX_DIMS][2];
-    for (int j = 0; j < ndim; j++) { pads[j][0] = 0; pads[j][1] = 0; }
+    for (int j = 0; j < ndim; j++) {
+      pads[j][0] = 0;
+      pads[j][1] = 0;
+    }
     pads[dim][0] = cum[i];
     pads[dim][1] = total - cum[i + 1];
     PolyUOp *padded = poly_pad(ctx, tensors[i], pads, ndim);
@@ -936,8 +1064,7 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
 }
 
 /* Tensor._pad_constant -- tensor.py:1067 */
-PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
-                        int ndim, double value) {
+PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, double value) {
   if (!ctx || !x || !pads || ndim <= 0) return NULL;
 
   int64_t sh[POLY_MAX_DIMS];
@@ -950,7 +1077,10 @@ PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
   /* has_neg = not all(p >= 0) */
   bool has_neg = false;
   for (int i = 0; i < ndim; i++)
-    if (pads[i][0] < 0 || pads[i][1] < 0) { has_neg = true; break; }
+    if (pads[i][0] < 0 || pads[i][1] < 0) {
+      has_neg = true;
+      break;
+    }
 
   PolyUOp *X = x;
   int64_t nn_pads[POLY_MAX_DIMS][2];
@@ -960,9 +1090,9 @@ PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
     int64_t shr[POLY_MAX_DIMS][2];
     for (int i = 0; i < ndim; i++) {
       int64_t pB = pads[i][0], pA = pads[i][1], s = sh[i];
-      shr[i][0] = -(pB < 0 ? pB : 0);                 /* -min(pB, 0) */
+      shr[i][0] = -(pB < 0 ? pB : 0); /* -min(pB, 0) */
       int64_t end = pA + s;
-      shr[i][1] = end < s ? end : s;                  /*  min(pA + s, s) */
+      shr[i][1] = end < s ? end : s; /*  min(pA + s, s) */
     }
     X = poly_shrink(ctx, X, shr, ndim);
     /* Then pad with only the non-negative parts */
@@ -982,10 +1112,10 @@ PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
   if (value == 0.0) return padded_X;
 
   /* Pad ones_like(X) with the same pads, where==0 -> value, else 0; then add */
-  PolyUOp *ones    = poly_ones_like(ctx, X);
+  PolyUOp *ones = poly_ones_like(ctx, X);
   PolyUOp *padded_ones = poly_pad(ctx, ones, nn_pads, ndim);
   PolyDType dt = poly_dtype_scalar(x->dtype);
-  PolyUOp *zero_c  = poly_const_typed(ctx, dt, 0.0);
+  PolyUOp *zero_c = poly_const_typed(ctx, dt, 0.0);
   PolyUOp *value_c = poly_const_typed(ctx, dt, value);
   /* where(padded_ones, 0, value): tinygrad's .where(0, value) means
    * "where padded_ones is true (=1, the data region) -> 0, else -> value" */
@@ -1014,8 +1144,10 @@ PolyUOp *poly_pad_circular(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndi
       return NULL;
     }
     if (pads[i][0] > sh[i] || pads[i][1] > sh[i]) {
-      fprintf(stderr, "poly_pad_circular: pad %lld/%lld exceeds dim %lld (would wrap >1x)\n",
-              (long long)pads[i][0], (long long)pads[i][1], (long long)sh[i]);
+      fprintf(
+          stderr, "poly_pad_circular: pad %lld/%lld exceeds dim %lld (would wrap >1x)\n",
+          (long long)pads[i][0], (long long)pads[i][1], (long long)sh[i]
+      );
       return NULL;
     }
   }
@@ -1044,15 +1176,21 @@ PolyUOp *poly_pad_circular(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndi
 /* Common impl for reflect/replicate. mode_reflect=true means "reflect"
  * (skip the boundary element), false means "replicate" (repeat the boundary).
  * tensor.py:1081. */
-static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
-                                           int64_t (*pads)[2], int ndim,
-                                           bool mode_reflect) {
+static PolyUOp *poly_pad_reflect_replicate(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t (*pads)[2],
+    int ndim,
+    bool mode_reflect
+) {
   if (!ctx || !x || !pads || ndim <= 0) return NULL;
   int64_t sh[POLY_MAX_DIMS];
   int xnd = uop_shape(ctx, x, sh);
   if (xnd != ndim) {
-    fprintf(stderr, "poly_pad_%s: ndim mismatch %d vs %d\n",
-            mode_reflect ? "reflect" : "replicate", xnd, ndim);
+    fprintf(
+        stderr, "poly_pad_%s: ndim mismatch %d vs %d\n", mode_reflect ? "reflect" : "replicate",
+        xnd, ndim
+    );
     return NULL;
   }
 
@@ -1074,8 +1212,10 @@ static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
     int64_t s = cur_sh[d];
 
     if (mode_reflect && (pB >= s || pA >= s)) {
-      fprintf(stderr, "poly_pad_reflect: pad (%lld,%lld) >= dim size %lld at dim %d\n",
-              (long long)pB, (long long)pA, (long long)s, d);
+      fprintf(
+          stderr, "poly_pad_reflect: pad (%lld,%lld) >= dim size %lld at dim %d\n", (long long)pB,
+          (long long)pA, (long long)s, d
+      );
       return NULL;
     }
 
@@ -1085,7 +1225,10 @@ static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
        * That's elements at index 1..pB+1, then flipped. */
       if (pB > 0) {
         int64_t shr[POLY_MAX_DIMS][2];
-        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
+        for (int j = 0; j < ndim; j++) {
+          shr[j][0] = 0;
+          shr[j][1] = cur_sh[j];
+        }
         shr[d][0] = 1;
         shr[d][1] = pB + 1;
         PolyUOp *sl = poly_shrink(ctx, X, shr, ndim);
@@ -1096,7 +1239,10 @@ static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
        * That's elements at index s-1-pA..s-1 (exclusive s-1), then flipped. */
       if (pA > 0) {
         int64_t shr[POLY_MAX_DIMS][2];
-        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
+        for (int j = 0; j < ndim; j++) {
+          shr[j][0] = 0;
+          shr[j][1] = cur_sh[j];
+        }
         shr[d][0] = s - 1 - pA;
         shr[d][1] = s - 1;
         PolyUOp *sl = poly_shrink(ctx, X, shr, ndim);
@@ -1107,19 +1253,29 @@ static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
       /* replicate: shrink to (0,1) and expand to (pB,) on dim d */
       if (pB > 0) {
         int64_t shr[POLY_MAX_DIMS][2];
-        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
-        shr[d][0] = 0; shr[d][1] = 1;
+        for (int j = 0; j < ndim; j++) {
+          shr[j][0] = 0;
+          shr[j][1] = cur_sh[j];
+        }
+        shr[d][0] = 0;
+        shr[d][1] = 1;
         int64_t exp_sh[POLY_MAX_DIMS];
-        for (int j = 0; j < ndim; j++) exp_sh[j] = cur_sh[j];
+        for (int j = 0; j < ndim; j++)
+          exp_sh[j] = cur_sh[j];
         exp_sh[d] = pB;
         xB = poly_expand(ctx, poly_shrink(ctx, X, shr, ndim), exp_sh, ndim);
       }
       if (pA > 0) {
         int64_t shr[POLY_MAX_DIMS][2];
-        for (int j = 0; j < ndim; j++) { shr[j][0] = 0; shr[j][1] = cur_sh[j]; }
-        shr[d][0] = s - 1; shr[d][1] = s;
+        for (int j = 0; j < ndim; j++) {
+          shr[j][0] = 0;
+          shr[j][1] = cur_sh[j];
+        }
+        shr[d][0] = s - 1;
+        shr[d][1] = s;
         int64_t exp_sh[POLY_MAX_DIMS];
-        for (int j = 0; j < ndim; j++) exp_sh[j] = cur_sh[j];
+        for (int j = 0; j < ndim; j++)
+          exp_sh[j] = cur_sh[j];
         exp_sh[d] = pA;
         xA = poly_expand(ctx, poly_shrink(ctx, X, shr, ndim), exp_sh, ndim);
       }
@@ -1139,7 +1295,10 @@ static PolyUOp *poly_pad_reflect_replicate(PolyCtx *ctx, PolyUOp *x,
    * shrink = ((-min(pB,0), min(pA+s, s)) for ((pB,pA), s) in zip(pX, X.shape)) */
   bool has_neg = false;
   for (int i = 0; i < ndim; i++)
-    if (pads[i][0] < 0 || pads[i][1] < 0) { has_neg = true; break; }
+    if (pads[i][0] < 0 || pads[i][1] < 0) {
+      has_neg = true;
+      break;
+    }
   if (has_neg) {
     int64_t cur_sh[POLY_MAX_DIMS];
     if (uop_shape(ctx, X, cur_sh) < 0) return NULL;
@@ -1188,16 +1347,21 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
   /* identity element per op */
   PolyDType dt = poly_dtype_scalar(x->dtype);
   double identity;
-  if (op == POLY_OP_ADD)      identity = 0.0;
-  else if (op == POLY_OP_MUL) identity = 1.0;
+  if (op == POLY_OP_ADD)
+    identity = 0.0;
+  else if (op == POLY_OP_MUL)
+    identity = 1.0;
   else /* MAX */ {
-    if (poly_dtype_is_float(dt)) identity = -INFINITY;
-    else                         identity = (double)INT64_MIN;
+    if (poly_dtype_is_float(dt))
+      identity = -INFINITY;
+    else
+      identity = (double)INT64_MIN;
   }
 
   /* transpose(axis, -1): swap axis with last */
   int64_t perm[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++) perm[i] = i;
+  for (int i = 0; i < ndim; i++)
+    perm[i] = i;
   perm[axis] = ndim - 1;
   perm[ndim - 1] = axis;
   bool need_transpose = (axis != ndim - 1);
@@ -1205,7 +1369,10 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
 
   /* pad((pl_sz, -int(include_initial))) on the LAST axis only, value=identity. */
   int64_t pads[POLY_MAX_DIMS][2];
-  for (int i = 0; i < ndim; i++) { pads[i][0] = 0; pads[i][1] = 0; }
+  for (int i = 0; i < ndim; i++) {
+    pads[i][0] = 0;
+    pads[i][1] = 0;
+  }
   pads[ndim - 1][0] = pl_sz;
   pads[ndim - 1][1] = include_initial ? -1 : 0;
   r = poly_pad_value(ctx, r, pads, ndim, identity);
@@ -1222,11 +1389,15 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
   int64_t r_sh[POLY_MAX_DIMS];
   int r_nd = uop_shape(ctx, r, r_sh);
   if (r_nd < 0) return NULL;
-  axes[0] = r_nd - 1;  /* concrete axis */
+  axes[0] = r_nd - 1; /* concrete axis */
   r = poly_reduce_axis(ctx, op, r, axes, 1);
   /* Drop the reduced axis */
-  for (int i = 0; i < r_nd - 1; i++) out_shape[out_ndim++] = r_sh[i];
-  if (out_ndim == 0) { out_shape[0] = 1; out_ndim = 1; }
+  for (int i = 0; i < r_nd - 1; i++)
+    out_shape[out_ndim++] = r_sh[i];
+  if (out_ndim == 0) {
+    out_shape[0] = 1;
+    out_ndim = 1;
+  }
   r = poly_reshape(ctx, r, out_shape, out_ndim);
 
   /* transpose(axis, -1): swap back */
@@ -1234,7 +1405,7 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
   return r;
 }
 
-/* ── Creation ────────────────────────────────────────────────────────── */
+/* Creation */
 
 /* tinygrad Tensor.full -- tensor.py:660:
  *   Tensor(fill_value, _force_unique=True).reshape((1,)*ndim).expand(shape)
@@ -1251,7 +1422,8 @@ PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_val
 
   PolyUOp *scalar = poly_const_typed(ctx, POLY_FLOAT32, fill_value);
   int64_t ones[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++) ones[i] = 1;
+  for (int i = 0; i < ndim; i++)
+    ones[i] = 1;
   PolyUOp *r = poly_reshape(ctx, scalar, ones, ndim);
   return poly_expand(ctx, r, (int64_t *)shape, ndim);
 }
@@ -1274,10 +1446,10 @@ PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step) {
   }
   if (n == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
 
-  int64_t shape[1] = { n };
-  PolyUOp *base   = poly_full(ctx, shape, 1, step);
+  int64_t shape[1] = {n};
+  PolyUOp *base = poly_full(ctx, shape, 1, step);
   PolyUOp *cumsum = poly_cumalu(ctx, base, 0, POLY_OP_ADD, false);
-  PolyUOp *bias   = poly_const_typed(ctx, POLY_FLOAT32, start - step);
+  PolyUOp *bias = poly_const_typed(ctx, POLY_FLOAT32, start - step);
   return poly_alu2(ctx, POLY_OP_ADD, cumsum, bias);
 }
 
@@ -1292,22 +1464,18 @@ PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps) {
     return poly_full(ctx, shape, 1, start);
   }
   double scale = (stop - start) / (double)(steps - 1);
-  PolyUOp *ar    = poly_arange(ctx, 0.0, (double)steps, 1.0);
-  PolyUOp *s_c   = poly_const_typed(ctx, POLY_FLOAT32, scale);
+  PolyUOp *ar = poly_arange(ctx, 0.0, (double)steps, 1.0);
+  PolyUOp *s_c = poly_const_typed(ctx, POLY_FLOAT32, scale);
   PolyUOp *start_c = poly_const_typed(ctx, POLY_FLOAT32, start);
-  return poly_alu2(ctx, POLY_OP_ADD,
-           poly_alu2(ctx, POLY_OP_MUL, ar, s_c),
-           start_c);
+  return poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, ar, s_c), start_c);
 }
 
 /* tinygrad Tensor.eye -- tensor.py:774
  *   (arange(n).unsqueeze(-1) == arange(m)).cast(dtype) */
 PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
   if (n <= 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0),
-                               (int64_t[]){n, 1}, 2);
-  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0),
-                               (int64_t[]){1, n}, 2);
+  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0), (int64_t[]){n, 1}, 2);
+  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0), (int64_t[]){1, n}, 2);
   /* Broadcasting (n,1) vs (1,n) -> (n,n) */
   PolyUOp *eq_bool = poly_eq(ctx, rows, cols);
   return poly_cast(ctx, eq_bool, POLY_FLOAT32);
@@ -1317,13 +1485,14 @@ PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
  *   arange(r).unsqueeze(-1) + diagonal <= arange(c)
  *   Returns a bool mask of shape (r, c). */
 static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) {
-  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)r, 1.0),
-                               (int64_t[]){r, 1}, 2);
-  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)c, 1.0),
-                               (int64_t[]){1, c}, 2);
-  PolyUOp *rows_shifted = (diagonal == 0) ? rows :
-      poly_alu2(ctx, POLY_OP_ADD, rows,
-                poly_const_typed(ctx, POLY_FLOAT32, (double)diagonal));
+  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)r, 1.0), (int64_t[]){r, 1}, 2);
+  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)c, 1.0), (int64_t[]){1, c}, 2);
+  PolyUOp *rows_shifted =
+      (diagonal == 0)
+          ? rows
+          : poly_alu2(
+                ctx, POLY_OP_ADD, rows, poly_const_typed(ctx, POLY_FLOAT32, (double)diagonal)
+            );
   return poly_le(ctx, rows_shifted, cols);
 }
 
@@ -1386,9 +1555,8 @@ PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) 
   PolyUOp *flat = poly_arange(ctx, 0.0, (double)numel, 1.0);
   if (!flat) return NULL;
   PolyUOp *counter_u32_flat = poly_cast(ctx, flat, POLY_UINT32);
-  PolyUOp *counter_t = (ndim == 1)
-      ? counter_u32_flat
-      : poly_reshape(ctx, counter_u32_flat, (int64_t *)shape, ndim);
+  PolyUOp *counter_t =
+      (ndim == 1) ? counter_u32_flat : poly_reshape(ctx, counter_u32_flat, (int64_t *)shape, ndim);
 
   PolyUOp *key_t = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int((int64_t)mixed_key));
 
@@ -1404,56 +1572,76 @@ PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed)
   PolyUOp *u2 = poly_rand(ctx, shape, ndim, seed ^ 0x9E3779B97F4A7C15ull);
   if (!u1 || !u2) return NULL;
   PolyUOp *u1_safe = poly_maximum(ctx, u1, cf(ctx, u1, 1e-7));
-  PolyUOp *r = poly_alu1(ctx, POLY_OP_SQRT,
-              poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u1, -2.0), poly_log(ctx, u1_safe)));
+  PolyUOp *r = poly_alu1(
+      ctx, POLY_OP_SQRT, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u1, -2.0), poly_log(ctx, u1_safe))
+  );
   PolyUOp *theta = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u2, 2.0 * M_PI), u2);
   return poly_alu2(ctx, POLY_OP_MUL, r, poly_cos(ctx, theta));
 }
 
 PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, int upper) {
-  (void)ctx; (void)x; (void)upper;
-  fprintf(stderr, "polygrad: cholesky: Track C fallback not yet implemented in frontend graph builder\n");
+  (void)ctx;
+  (void)x;
+  (void)upper;
+  fprintf(
+      stderr, "polygrad: cholesky: Track C fallback not yet implemented in frontend graph builder\n"
+  );
   return NULL;
 }
 
-PolyUOp *poly_triangular_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b,
-                               int upper, int transpose_a, int unit_diagonal) {
-  (void)ctx; (void)a; (void)b;
-  (void)upper; (void)transpose_a; (void)unit_diagonal;
-  fprintf(stderr, "polygrad: triangular_solve: Track C fallback not yet implemented in frontend graph builder\n");
+PolyUOp *poly_triangular_solve(
+    PolyCtx *ctx,
+    PolyUOp *a,
+    PolyUOp *b,
+    int upper,
+    int transpose_a,
+    int unit_diagonal
+) {
+  (void)ctx;
+  (void)a;
+  (void)b;
+  (void)upper;
+  (void)transpose_a;
+  (void)unit_diagonal;
+  fprintf(
+      stderr,
+      "polygrad: triangular_solve: Track C fallback not yet implemented in frontend graph builder\n"
+  );
   return NULL;
 }
 
-/* ── Reductions ──────────────────────────────────────────────────────── */
+/* Reductions */
 
 PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
-  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS]; int ndim, out_ndim;
+  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int ndim, out_ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   return do_reduce(ctx, POLY_OP_ADD, x, shape, ndim, axis, keepdim, out_shape, &out_ndim);
 }
 
 PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
-  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS]; int ndim, out_ndim;
+  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int ndim, out_ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   return do_reduce(ctx, POLY_OP_MAX, x, shape, ndim, axis, keepdim, out_shape, &out_ndim);
 }
 
 PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
-  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS]; int ndim, out_ndim;
+  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int ndim, out_ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
   int64_t count = shape[axis];
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, x, shape, ndim, axis, keepdim,
-                          out_shape, &out_ndim);
+  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, x, shape, ndim, axis, keepdim, out_shape, &out_ndim);
   return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, x, (double)count));
 }
 
-PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
-                         int axis, int keepdim, int correction) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int correction) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
@@ -1469,16 +1657,17 @@ PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x,
   PolyUOp *diff = poly_alu2(ctx, POLY_OP_SUB, x_view, m_expanded);
   PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
   /* sum of squares / (count - correction) */
-  int64_t out_shape[POLY_MAX_DIMS]; int out_ndim;
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, sq, shape, ndim, axis, keepdim,
-                          out_shape, &out_ndim);
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim;
+  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, sq, shape, ndim, axis, keepdim, out_shape, &out_ndim);
   double divisor = (double)(count - correction);
   if (divisor <= 0.0) divisor = 1.0;
   return poly_alu2(ctx, POLY_OP_FDIV, s, cf(ctx, x, divisor));
 }
 
 PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
@@ -1503,7 +1692,7 @@ PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
   return poly_reshape(ctx, lse_keep, final_shape, fn);
 }
 
-/* ── Matmul ──────────────────────────────────────────────────────────── */
+/* Matmul */
 
 PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   if (!ctx || !x || !w) return NULL;
@@ -1511,40 +1700,50 @@ PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   int x_ndim = uop_shape(ctx, x, x_shape);
   int w_ndim = uop_shape(ctx, w, w_shape);
   if (x_ndim < 0 || w_ndim < 0) return NULL;
-  int64_t out_shape[POLY_MAX_DIMS]; int out_ndim = 0;
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = 0;
   if (x_ndim < 1 || w_ndim < 1 || x_ndim > POLY_MAX_DIMS || w_ndim > POLY_MAX_DIMS) return NULL;
 
   int64_t K = x_shape[x_ndim - 1];
   int axis_w = w_ndim - (w_ndim >= 2 ? 2 : 1);
   if (K != w_shape[axis_w]) return NULL;
 
-  int64_t xs[POLY_MAX_DIMS]; int xn = 0;
-  for (int i = 0; i < x_ndim - 1; i++) xs[xn++] = x_shape[i];
+  int64_t xs[POLY_MAX_DIMS];
+  int xn = 0;
+  for (int i = 0; i < x_ndim - 1; i++)
+    xs[xn++] = x_shape[i];
   int n_ones_x;
   {
     int a = x_ndim - 1, b = w_ndim - 1;
     n_ones_x = a < b ? a : b;
     if (n_ones_x > 1) n_ones_x = 1;
   }
-  for (int i = 0; i < n_ones_x; i++) xs[xn++] = 1;
+  for (int i = 0; i < n_ones_x; i++)
+    xs[xn++] = 1;
   xs[xn++] = K;
   PolyUOp *xr = poly_reshape(ctx, x, xs, xn);
 
-  int64_t ws[POLY_MAX_DIMS]; int wn = 0;
-  for (int i = 0; i < w_ndim - 2; i++) ws[wn++] = w_shape[i];
-  for (int i = 0; i < n_ones_x; i++) ws[wn++] = 1;
-  for (int i = axis_w; i < w_ndim; i++) ws[wn++] = w_shape[i];
+  int64_t ws[POLY_MAX_DIMS];
+  int wn = 0;
+  for (int i = 0; i < w_ndim - 2; i++)
+    ws[wn++] = w_shape[i];
+  for (int i = 0; i < n_ones_x; i++)
+    ws[wn++] = 1;
+  for (int i = axis_w; i < w_ndim; i++)
+    ws[wn++] = w_shape[i];
   PolyUOp *wr = poly_reshape(ctx, w, ws, wn);
 
   int new_axis_w = wn - 2;
   if (new_axis_w < 0) new_axis_w = 0;
   int64_t perm[POLY_MAX_DIMS];
-  for (int i = 0; i < wn; i++) perm[i] = i;
+  for (int i = 0; i < wn; i++)
+    perm[i] = i;
   perm[wn - 1] = new_axis_w;
   perm[new_axis_w] = wn - 1;
   PolyUOp *wt = poly_permute(ctx, wr, perm, wn);
   int64_t wt_shape[POLY_MAX_DIMS];
-  for (int i = 0; i < wn; i++) wt_shape[i] = ws[perm[i]];
+  for (int i = 0; i < wn; i++)
+    wt_shape[i] = ws[perm[i]];
 
   int max_ndim = xn > wn ? xn : wn;
   int64_t bc_shape[POLY_MAX_DIMS];
@@ -1561,8 +1760,10 @@ PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   if (xn < max_ndim) {
     int64_t padded[POLY_MAX_DIMS];
     int pad = max_ndim - xn;
-    for (int i = 0; i < pad; i++) padded[i] = 1;
-    for (int i = 0; i < xn; i++) padded[pad + i] = xs[i];
+    for (int i = 0; i < pad; i++)
+      padded[i] = 1;
+    for (int i = 0; i < xn; i++)
+      padded[pad + i] = xs[i];
     x_exp = poly_reshape(ctx, xr, padded, max_ndim);
   } else {
     x_exp = xr;
@@ -1570,8 +1771,10 @@ PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   if (wn < max_ndim) {
     int64_t padded[POLY_MAX_DIMS];
     int pad = max_ndim - wn;
-    for (int i = 0; i < pad; i++) padded[i] = 1;
-    for (int i = 0; i < wn; i++) padded[pad + i] = wt_shape[i];
+    for (int i = 0; i < pad; i++)
+      padded[i] = 1;
+    for (int i = 0; i < wn; i++)
+      padded[pad + i] = wt_shape[i];
     w_exp = poly_reshape(ctx, wt, padded, max_ndim);
   } else {
     w_exp = wt;
@@ -1580,99 +1783,108 @@ PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   w_exp = poly_expand(ctx, w_exp, bc_shape, max_ndim);
 
   PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, x_exp, w_exp);
-  int64_t sum_axis[] = { max_ndim - 1 };
+  int64_t sum_axis[] = {max_ndim - 1};
   PolyUOp *summed = poly_reduce_axis(ctx, POLY_OP_ADD, mul, sum_axis, 1);
 
   int on = 0;
   for (int i = 0; i < max_ndim - 1; i++) {
     out_shape[on++] = bc_shape[i];
   }
-  if (on == 0) { out_shape[0] = 1; on = 1; }
+  if (on == 0) {
+    out_shape[0] = 1;
+    on = 1;
+  }
   out_ndim = on;
 
   return poly_reshape(ctx, summed, out_shape, on);
 }
 
-/* ── Softmax ─────────────────────────────────────────────────────────── */
+/* Softmax */
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
   PolyUOp *x_view = reshape_logical_input(ctx, x, shape, ndim);
   if (!x_view) return NULL;
 
-  int64_t max_shape[8]; int max_ndim;
-  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1,
-                          max_shape, &max_ndim);
+  int64_t max_shape[8];
+  int max_ndim;
+  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1, max_shape, &max_ndim);
   PolyUOp *m_exp = poly_expand(ctx, m, (int64_t *)shape, ndim);
   PolyUOp *shifted = poly_alu2(ctx, POLY_OP_SUB, x_view, m_exp);
   PolyUOp *e = poly_exp(ctx, shifted);
 
-  int64_t sum_shape[8]; int sum_ndim;
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1,
-                          sum_shape, &sum_ndim);
+  int64_t sum_shape[8];
+  int sum_ndim;
+  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1, sum_shape, &sum_ndim);
   PolyUOp *s_exp = poly_expand(ctx, s, (int64_t *)shape, ndim);
 
   return poly_alu2(ctx, POLY_OP_FDIV, e, s_exp);
 }
 
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
   PolyUOp *x_view = reshape_logical_input(ctx, x, shape, ndim);
   if (!x_view) return NULL;
 
-  int64_t max_shape[8]; int max_ndim;
-  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1,
-                          max_shape, &max_ndim);
+  int64_t max_shape[8];
+  int max_ndim;
+  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1, max_shape, &max_ndim);
   PolyUOp *m_exp = poly_expand(ctx, m, (int64_t *)shape, ndim);
   PolyUOp *shifted = poly_alu2(ctx, POLY_OP_SUB, x_view, m_exp);
   PolyUOp *e = poly_exp(ctx, shifted);
 
-  int64_t sum_shape[8]; int sum_ndim;
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1,
-                          sum_shape, &sum_ndim);
+  int64_t sum_shape[8];
+  int sum_ndim;
+  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1, sum_shape, &sum_ndim);
   PolyUOp *log_s = poly_log(ctx, s);
   PolyUOp *log_s_exp = poly_expand(ctx, log_s, (int64_t *)shape, ndim);
 
   return poly_alu2(ctx, POLY_OP_SUB, shifted, log_s_exp);
 }
 
-PolyUOp *poly_cross_entropy(PolyCtx *ctx,
-                            PolyUOp *logits, PolyUOp *target, int axis) {
+PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis) {
   if (!ctx || !logits || !target) return NULL;
   int64_t logits_shape[POLY_MAX_DIMS], target_shape[POLY_MAX_DIMS];
   int logits_ndim = uop_shape(ctx, logits, logits_shape);
   int target_ndim = uop_shape(ctx, target, target_shape);
-  if (logits_ndim < 1 || logits_ndim > POLY_MAX_DIMS || target_ndim < 0 || target_ndim > POLY_MAX_DIMS) return NULL;
+  if (logits_ndim < 1 || logits_ndim > POLY_MAX_DIMS || target_ndim < 0 ||
+      target_ndim > POLY_MAX_DIMS)
+    return NULL;
 
   if (axis < 0) axis += logits_ndim;
   if (axis < 0 || axis >= logits_ndim) return NULL;
 
   const bool dense_targets = poly_shape_equal(logits_shape, logits_ndim, target_shape, target_ndim);
-  const bool sparse_targets = shape_equal_except_axis(logits_shape, logits_ndim, target_shape, target_ndim, axis);
+  const bool sparse_targets =
+      shape_equal_except_axis(logits_shape, logits_ndim, target_shape, target_ndim, axis);
   if (!dense_targets && !sparse_targets) return NULL;
 
-  PolyUOp *weights = dense_targets
-    ? poly_reshape(ctx, target, (int64_t *)target_shape, target_ndim)
-    : target;
+  PolyUOp *weights =
+      dense_targets ? poly_reshape(ctx, target, (int64_t *)target_shape, target_ndim) : target;
   if (sparse_targets) {
     const int64_t classes = logits_shape[axis];
     int64_t target_us_shape[POLY_MAX_DIMS];
-    for (int i = 0; i < axis; i++) target_us_shape[i] = target_shape[i];
+    for (int i = 0; i < axis; i++)
+      target_us_shape[i] = target_shape[i];
     target_us_shape[axis] = 1;
-    for (int i = axis; i < target_ndim; i++) target_us_shape[i + 1] = target_shape[i];
+    for (int i = axis; i < target_ndim; i++)
+      target_us_shape[i + 1] = target_shape[i];
 
     PolyUOp *target_us = poly_reshape(ctx, target, target_us_shape, target_ndim + 1);
     PolyUOp *target_exp = poly_expand(ctx, target_us, (int64_t *)logits_shape, logits_ndim);
 
     PolyUOp *classes_uop = poly_arange(ctx, 0.0, (double)classes, 1.0);
     int64_t classes_shape[POLY_MAX_DIMS];
-    for (int i = 0; i < logits_ndim; i++) classes_shape[i] = 1;
+    for (int i = 0; i < logits_ndim; i++)
+      classes_shape[i] = 1;
     classes_shape[axis] = classes;
     PolyUOp *classes_r = poly_reshape(ctx, classes_uop, classes_shape, logits_ndim);
     PolyUOp *classes_exp = poly_expand(ctx, classes_r, (int64_t *)logits_shape, logits_ndim);
@@ -1690,13 +1902,16 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx,
 
   int64_t per_sample_shape[POLY_MAX_DIMS];
   int per_sample_ndim = 0;
-  PolyUOp *per_sample = do_reduce(ctx, POLY_OP_ADD, weighted, logits_shape, logits_ndim, axis, 0,
-                                  per_sample_shape, &per_sample_ndim);
+  PolyUOp *per_sample = do_reduce(
+      ctx, POLY_OP_ADD, weighted, logits_shape, logits_ndim, axis, 0, per_sample_shape,
+      &per_sample_ndim
+  );
 
   PolyUOp *total = per_sample;
   if (per_sample_ndim > 0) {
     int64_t axes[POLY_MAX_DIMS];
-    for (int i = 0; i < per_sample_ndim; i++) axes[i] = i;
+    for (int i = 0; i < per_sample_ndim; i++)
+      axes[i] = i;
     total = poly_reduce_axis(ctx, POLY_OP_ADD, per_sample, axes, per_sample_ndim);
   }
 
@@ -1708,12 +1923,11 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx,
   return poly_reshape(ctx, loss, NULL, 0);
 }
 
-/* ── Einsum ──────────────────────────────────────────────────────────── */
+/* Einsum */
 
 #define MAX_EINSUM_TENSORS 8
 
-PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
-                     PolyUOp **tensors, int n_tensors) {
+PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n_tensors) {
   if (!formula || n_tensors <= 0 || n_tensors > MAX_EINSUM_TENSORS) return NULL;
 
   /* Read shapes from UOps */
@@ -1755,7 +1969,8 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
   char *pp = lhs_buf;
   while (*pp && n_inputs < MAX_EINSUM_TENSORS) {
     input_specs[n_inputs++] = pp;
-    while (*pp && *pp != ',') pp++;
+    while (*pp && *pp != ',')
+      pp++;
     if (*pp == ',') *pp++ = '\0';
   }
   if (n_inputs != n_tensors) return NULL;
@@ -1804,7 +2019,10 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
       char c = s[ci2];
       int ki = -1;
       for (int k = ci2 + 1; k < slen; k++)
-        if (s[k] == c) { ki = k; break; }
+        if (s[k] == c) {
+          ki = k;
+          break;
+        }
       if (ki < 0) continue;
 
       int64_t n = x_shape[ci2];
@@ -1900,7 +2118,10 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
     const char *spec = input_specs[t];
     int spec_len = (int)strlen(spec);
     PolyUOp *x = trace_tensors[t];
-    if (spec_len == 0) { aligned[t] = x; continue; }
+    if (spec_len == 0) {
+      aligned[t] = x;
+      continue;
+    }
 
     char sorted_spec[27];
     memcpy(sorted_spec, spec, spec_len);
@@ -1917,17 +2138,22 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
     bool needs_perm = false;
     for (int i = 0; i < spec_len; i++) {
       for (int j = 0; j < spec_len; j++)
-        if (spec[j] == sorted_spec[i]) { perm[i] = j; break; }
+        if (spec[j] == sorted_spec[i]) {
+          perm[i] = j;
+          break;
+        }
       if (perm[i] != i) needs_perm = true;
     }
-    if (needs_perm)
-      x = poly_permute(ctx, x, perm, spec_len);
+    if (needs_perm) x = poly_permute(ctx, x, perm, spec_len);
 
     int64_t rshape[POLY_MAX_DIMS];
     for (int i = 0; i < n_alpha; i++) {
       bool found = false;
       for (int j = 0; j < spec_len; j++)
-        if (sorted_spec[j] == alpha[i]) { found = true; break; }
+        if (sorted_spec[j] == alpha[i]) {
+          found = true;
+          break;
+        }
       rshape[i] = found ? sz[(int)(alpha[i] - 'a')] : 1;
     }
     x = poly_reshape(ctx, x, rshape, n_alpha);
@@ -1949,21 +2175,24 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
   for (int i = 0; i < n_alpha; i++) {
     bool in_rhs = false;
     for (const char *r = rhs_buf; *r; r++)
-      if (*r == alpha[i]) { in_rhs = true; break; }
-    if (!in_rhs)
-      sum_axes[n_sum++] = i;
+      if (*r == alpha[i]) {
+        in_rhs = true;
+        break;
+      }
+    if (!in_rhs) sum_axes[n_sum++] = i;
   }
-  if (n_sum > 0)
-    result = poly_reduce_axis(ctx, POLY_OP_ADD, result, sum_axes, n_sum);
+  if (n_sum > 0) result = poly_reduce_axis(ctx, POLY_OP_ADD, result, sum_axes, n_sum);
 
   char remaining[26];
   int n_remaining = 0;
   for (int i = 0; i < n_alpha; i++) {
     bool summed = false;
     for (int j = 0; j < n_sum; j++)
-      if (sum_axes[j] == i) { summed = true; break; }
-    if (!summed)
-      remaining[n_remaining++] = alpha[i];
+      if (sum_axes[j] == i) {
+        summed = true;
+        break;
+      }
+    if (!summed) remaining[n_remaining++] = alpha[i];
   }
 
   int rhs_len = (int)strlen(rhs_buf);
@@ -1979,26 +2208,30 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
         break;
       }
   }
-  if (needs_final_perm)
-    result = poly_permute(ctx, result, out_perm, rhs_len);
+  if (needs_final_perm) result = poly_permute(ctx, result, out_perm, rhs_len);
 
   return result;
 }
 
-/* ── Rearrange (einops) ──────────────────────────────────────────────── */
+/* Rearrange (einops) */
 
 #define MAX_REARRANGE_TOKENS 32
 
-static int parse_rearrange_side(const char *s,
-                                 char tokens[][32], int *n_tokens,
-                                 int groups[][2], int *n_groups) {
+static int parse_rearrange_side(
+    const char *s,
+    char tokens[][32],
+    int *n_tokens,
+    int groups[][2],
+    int *n_groups
+) {
   *n_tokens = 0;
   *n_groups = 0;
   int paren_start = -1;
 
   const char *p = s;
   while (*p) {
-    while (*p == ' ' || *p == '\t') p++;
+    while (*p == ' ' || *p == '\t')
+      p++;
     if (!*p) break;
 
     if (*p == '(') {
@@ -2027,30 +2260,40 @@ static int parse_rearrange_side(const char *s,
   return *n_tokens;
 }
 
-static int64_t find_axis_size(const char *name,
-                               const char *axis_names, const int64_t *axis_values,
-                               int n_axis_sizes) {
+static int64_t find_axis_size(
+    const char *name,
+    const char *axis_names,
+    const int64_t *axis_values,
+    int n_axis_sizes
+) {
   if (!axis_names || n_axis_sizes <= 0) return -1;
   const char *p = axis_names;
   int idx = 0;
   while (*p && idx < n_axis_sizes) {
-    while (*p == ' ') p++;
+    while (*p == ' ')
+      p++;
     if (!*p) break;
     const char *start = p;
-    while (*p && *p != ' ') p++;
+    while (*p && *p != ' ')
+      p++;
     int len = (int)(p - start);
-    if ((int)strlen(name) == len && memcmp(start, name, len) == 0)
-      return axis_values[idx];
+    if ((int)strlen(name) == len && memcmp(start, name, len) == 0) return axis_values[idx];
     idx++;
   }
   return -1;
 }
 
-PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
-                        PolyUOp *x, const char *axis_names,
-                        const int64_t *axis_values, int n_axis_sizes) {
+PolyUOp *poly_rearrange(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyUOp *x,
+    const char *axis_names,
+    const int64_t *axis_values,
+    int n_axis_sizes
+) {
   if (!formula || !x) return NULL;
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
 
@@ -2080,7 +2323,8 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
     bool in_group[MAX_REARRANGE_TOKENS];
     int g_id[MAX_REARRANGE_TOKENS];
     memset(in_group, 0, sizeof(in_group));
-    for (int i = 0; i < MAX_REARRANGE_TOKENS; i++) g_id[i] = -1;
+    for (int i = 0; i < MAX_REARRANGE_TOKENS; i++)
+      g_id[i] = -1;
     for (int g = 0; g < n_lg; g++)
       for (int i = lhs_grp[g][0]; i < lhs_grp[g][1]; i++) {
         in_group[i] = true;
@@ -2100,11 +2344,17 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
         int unk = -1;
         for (int i = 0; i < gc; i++) {
           const char *nm = lhs_tok[gs + i];
-          if (strcmp(nm, "1") == 0) { sub[i] = 1; }
-          else {
+          if (strcmp(nm, "1") == 0) {
+            sub[i] = 1;
+          } else {
             int64_t v = find_axis_size(nm, axis_names, axis_values, n_axis_sizes);
-            if (v > 0) sub[i] = v;
-            else { if (unk >= 0) return NULL; unk = i; sub[i] = -1; }
+            if (v > 0)
+              sub[i] = v;
+            else {
+              if (unk >= 0) return NULL;
+              unk = i;
+              sub[i] = -1;
+            }
           }
           if (sub[i] > 0) known *= sub[i];
         }
@@ -2112,11 +2362,13 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
           if (input_dim >= cur_ndim) return NULL;
           sub[unk] = cur_shape[input_dim] / known;
         }
-        for (int i = 0; i < gc; i++) new_shape[new_ndim++] = sub[i];
+        for (int i = 0; i < gc; i++)
+          new_shape[new_ndim++] = sub[i];
         input_dim++;
         ti = ge;
       } else {
-        if (strcmp(lhs_tok[ti], "1") == 0) new_shape[new_ndim++] = 1;
+        if (strcmp(lhs_tok[ti], "1") == 0)
+          new_shape[new_ndim++] = 1;
         else {
           if (input_dim >= cur_ndim) return NULL;
           new_shape[new_ndim++] = cur_shape[input_dim];
@@ -2139,14 +2391,18 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
   for (int i = 0; i < n_rt; i++) {
     perm[i] = -1;
     for (int j = 0; j < n_lt; j++)
-      if (strcmp(rhs_tok[i], lhs_tok[j]) == 0) { perm[i] = j; break; }
+      if (strcmp(rhs_tok[i], lhs_tok[j]) == 0) {
+        perm[i] = j;
+        break;
+      }
     if (perm[i] < 0) return NULL;
     if (perm[i] != i) need_perm = true;
   }
   if (need_perm) {
     result = poly_permute(ctx, result, perm, n_rt);
     int64_t ps[POLY_MAX_DIMS];
-    for (int i = 0; i < n_rt; i++) ps[i] = cur_shape[perm[i]];
+    for (int i = 0; i < n_rt; i++)
+      ps[i] = cur_shape[perm[i]];
     memcpy(cur_shape, ps, n_rt * sizeof(int64_t));
     cur_ndim = n_rt;
   }
@@ -2156,12 +2412,15 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
     int gs = rhs_grp[g][0], ge = rhs_grp[g][1];
     if (ge - gs <= 1) continue;
     int64_t flat = 1;
-    for (int i = gs; i < ge && i < cur_ndim; i++) flat *= cur_shape[i];
+    for (int i = gs; i < ge && i < cur_ndim; i++)
+      flat *= cur_shape[i];
     int64_t ns[POLY_MAX_DIMS];
     int nn = 0;
-    for (int i = 0; i < gs; i++) ns[nn++] = cur_shape[i];
+    for (int i = 0; i < gs; i++)
+      ns[nn++] = cur_shape[i];
     ns[nn++] = flat;
-    for (int i = ge; i < cur_ndim; i++) ns[nn++] = cur_shape[i];
+    for (int i = ge; i < cur_ndim; i++)
+      ns[nn++] = cur_shape[i];
     result = poly_reshape(ctx, result, ns, nn);
     memcpy(cur_shape, ns, nn * sizeof(int64_t));
     cur_ndim = nn;
@@ -2170,7 +2429,7 @@ PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
   return result;
 }
 
-/* ── Gather (embedding lookup) ───────────────────────────────────────── */
+/* Gather (embedding lookup) */
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   if (!ctx || !table || !indices) return NULL;
@@ -2186,18 +2445,21 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
 
   int64_t idx_us_shape[POLY_MAX_DIMS];
   int idx_us_ndim = idx_ndim + 1;
-  for (int i = 0; i < idx_ndim; i++) idx_us_shape[i] = idx_shape[i];
+  for (int i = 0; i < idx_ndim; i++)
+    idx_us_shape[i] = idx_shape[i];
   idx_us_shape[idx_ndim] = 1;
   PolyUOp *idx_us = poly_reshape(ctx, indices, idx_us_shape, idx_us_ndim);
 
   int64_t idx_bcast[POLY_MAX_DIMS];
-  for (int i = 0; i < idx_ndim; i++) idx_bcast[i] = idx_shape[i];
+  for (int i = 0; i < idx_ndim; i++)
+    idx_bcast[i] = idx_shape[i];
   idx_bcast[idx_ndim] = V;
   PolyUOp *idx_exp = poly_expand(ctx, idx_us, idx_bcast, idx_us_ndim);
 
   int64_t arange_shape[POLY_MAX_DIMS];
   int arange_ndim = idx_us_ndim;
-  for (int i = 0; i < idx_ndim; i++) arange_shape[i] = 1;
+  for (int i = 0; i < idx_ndim; i++)
+    arange_shape[i] = 1;
   arange_shape[idx_ndim] = V;
   PolyUOp *arange_r = poly_reshape(ctx, arange_buf, arange_shape, arange_ndim);
   PolyUOp *arange_exp = poly_expand(ctx, arange_r, idx_bcast, arange_ndim);
@@ -2206,18 +2468,21 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
 
   int64_t mask_us_shape[POLY_MAX_DIMS];
   int mask_us_ndim = idx_us_ndim + 1;
-  for (int i = 0; i < idx_us_ndim; i++) mask_us_shape[i] = idx_bcast[i];
+  for (int i = 0; i < idx_us_ndim; i++)
+    mask_us_shape[i] = idx_bcast[i];
   mask_us_shape[idx_us_ndim] = 1;
   PolyUOp *mask_us = poly_reshape(ctx, mask, mask_us_shape, mask_us_ndim);
 
   int64_t mask_bcast[POLY_MAX_DIMS];
-  for (int i = 0; i < idx_us_ndim; i++) mask_bcast[i] = idx_bcast[i];
+  for (int i = 0; i < idx_us_ndim; i++)
+    mask_bcast[i] = idx_bcast[i];
   mask_bcast[idx_us_ndim] = D;
   PolyUOp *mask_exp = poly_expand(ctx, mask_us, mask_bcast, mask_us_ndim);
 
   int64_t tbl_shape[POLY_MAX_DIMS];
   int tbl_ndim = mask_us_ndim;
-  for (int i = 0; i < idx_ndim; i++) tbl_shape[i] = 1;
+  for (int i = 0; i < idx_ndim; i++)
+    tbl_shape[i] = 1;
   tbl_shape[idx_ndim] = V;
   tbl_shape[idx_ndim + 1] = D;
   PolyUOp *tbl_r = poly_reshape(ctx, table, tbl_shape, tbl_ndim);
@@ -2226,23 +2491,23 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   PolyUOp *zero = cf(ctx, tbl_exp, 0.0);
   PolyUOp *selected = poly_where_op(ctx, mask_exp, tbl_exp, zero);
 
-  int64_t reduce_axes[] = { idx_ndim };
-  PolyUOp *gathered = poly_reduce_axis(ctx, POLY_OP_ADD, selected,
-                                        reduce_axes, 1);
+  int64_t reduce_axes[] = {idx_ndim};
+  PolyUOp *gathered = poly_reduce_axis(ctx, POLY_OP_ADD, selected, reduce_axes, 1);
 
   int64_t out_shape[POLY_MAX_DIMS];
   int out_ndim = idx_ndim + 1;
-  for (int i = 0; i < idx_ndim; i++) out_shape[i] = idx_shape[i];
+  for (int i = 0; i < idx_ndim; i++)
+    out_shape[i] = idx_shape[i];
   out_shape[idx_ndim] = D;
 
   return poly_reshape(ctx, gathered, out_shape, out_ndim);
 }
 
-/* ── Additional composed ops ─────────────────────────────────────────── */
+/* Additional composed ops */
 
-PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x,
-                       PolyUOp *freqs_cos, PolyUOp *freqs_sin) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 1) return NULL;
   int64_t half_dim = shape[ndim - 1] / 2;
@@ -2250,37 +2515,44 @@ PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x,
 
   int64_t pairs1[POLY_MAX_DIMS][2], pairs2[POLY_MAX_DIMS][2];
   for (int i = 0; i < ndim - 1; i++) {
-    pairs1[i][0] = 0; pairs1[i][1] = shape[i];
-    pairs2[i][0] = 0; pairs2[i][1] = shape[i];
+    pairs1[i][0] = 0;
+    pairs1[i][1] = shape[i];
+    pairs2[i][0] = 0;
+    pairs2[i][1] = shape[i];
   }
-  pairs1[ndim - 1][0] = 0;         pairs1[ndim - 1][1] = half_dim;
-  pairs2[ndim - 1][0] = half_dim;  pairs2[ndim - 1][1] = shape[ndim - 1];
+  pairs1[ndim - 1][0] = 0;
+  pairs1[ndim - 1][1] = half_dim;
+  pairs2[ndim - 1][0] = half_dim;
+  pairs2[ndim - 1][1] = shape[ndim - 1];
 
   PolyUOp *x1 = poly_shrink(ctx, x, pairs1, ndim);
   PolyUOp *x2 = poly_shrink(ctx, x, pairs2, ndim);
 
-  PolyUOp *r1 = poly_alu2(ctx, POLY_OP_SUB,
-    poly_alu2(ctx, POLY_OP_MUL, x1, freqs_cos),
-    poly_alu2(ctx, POLY_OP_MUL, x2, freqs_sin));
-  PolyUOp *r2 = poly_alu2(ctx, POLY_OP_ADD,
-    poly_alu2(ctx, POLY_OP_MUL, x2, freqs_cos),
-    poly_alu2(ctx, POLY_OP_MUL, x1, freqs_sin));
+  PolyUOp *r1 = poly_alu2(
+      ctx, POLY_OP_SUB, poly_alu2(ctx, POLY_OP_MUL, x1, freqs_cos),
+      poly_alu2(ctx, POLY_OP_MUL, x2, freqs_sin)
+  );
+  PolyUOp *r2 = poly_alu2(
+      ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, x2, freqs_cos),
+      poly_alu2(ctx, POLY_OP_MUL, x1, freqs_sin)
+  );
 
   int64_t pad1[POLY_MAX_DIMS][2], pad2[POLY_MAX_DIMS][2];
   for (int i = 0; i < ndim; i++) {
-    pad1[i][0] = 0; pad1[i][1] = 0;
-    pad2[i][0] = 0; pad2[i][1] = 0;
+    pad1[i][0] = 0;
+    pad1[i][1] = 0;
+    pad2[i][0] = 0;
+    pad2[i][1] = 0;
   }
   pad1[ndim - 1][1] = half_dim;
   pad2[ndim - 1][0] = half_dim;
 
-  return poly_alu2(ctx, POLY_OP_ADD,
-    poly_pad(ctx, r1, pad1, ndim),
-    poly_pad(ctx, r2, pad2, ndim));
+  return poly_alu2(ctx, POLY_OP_ADD, poly_pad(ctx, r1, pad1, ndim), poly_pad(ctx, r2, pad2, ndim));
 }
 
 PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 1 || repeats <= 0) return NULL;
   if (dim < 0) dim += ndim;
@@ -2288,9 +2560,11 @@ PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) 
 
   int64_t ins[POLY_MAX_DIMS];
   int ins_ndim = ndim + 1;
-  for (int i = 0; i <= dim; i++) ins[i] = shape[i];
+  for (int i = 0; i <= dim; i++)
+    ins[i] = shape[i];
   ins[dim + 1] = 1;
-  for (int i = dim + 1; i < ndim; i++) ins[i + 1] = shape[i];
+  for (int i = dim + 1; i < ndim; i++)
+    ins[i + 1] = shape[i];
   PolyUOp *r = poly_reshape(ctx, x, ins, ins_ndim);
 
   int64_t exp[POLY_MAX_DIMS];
@@ -2299,14 +2573,17 @@ PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) 
   r = poly_expand(ctx, r, exp, ins_ndim);
 
   int64_t flat[POLY_MAX_DIMS];
-  for (int i = 0; i < dim; i++) flat[i] = shape[i];
+  for (int i = 0; i < dim; i++)
+    flat[i] = shape[i];
   flat[dim] = shape[dim] * repeats;
-  for (int i = dim + 1; i < ndim; i++) flat[i] = shape[i];
+  for (int i = dim + 1; i < ndim; i++)
+    flat[i] = shape[i];
   return poly_reshape(ctx, r, flat, ndim);
 }
 
 PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 1) return NULL;
   if (axis < 0) axis += ndim;
@@ -2314,7 +2591,8 @@ PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis) {
 
   int64_t N = shape[axis];
 
-  int64_t max_shape[POLY_MAX_DIMS]; int max_ndim;
+  int64_t max_shape[POLY_MAX_DIMS];
+  int max_ndim;
   PolyUOp *x_max = do_reduce(ctx, POLY_OP_MAX, x, shape, ndim, axis, 1, max_shape, &max_ndim);
   PolyUOp *x_max_bc = poly_expand(ctx, x_max, shape, ndim);
   PolyUOp *m = poly_eq(ctx, x, x_max_bc);
@@ -2325,53 +2603,63 @@ PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis) {
   PolyUOp *desc = poly_alu2(ctx, POLY_OP_SUB, poly_const_float(ctx, (double)N), rng);
 
   int64_t bc[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++) bc[i] = 1;
+  for (int i = 0; i < ndim; i++)
+    bc[i] = 1;
   bc[axis] = N;
   desc = poly_reshape(ctx, desc, bc, ndim);
   desc = poly_expand(ctx, desc, shape, ndim);
 
   PolyUOp *idx = poly_alu2(ctx, POLY_OP_MUL, m_f, desc);
 
-  int64_t idx_max_shape[POLY_MAX_DIMS]; int idx_max_ndim;
-  PolyUOp *idx_max = do_reduce(ctx, POLY_OP_MAX, idx, shape, ndim, axis, 0,
-                                idx_max_shape, &idx_max_ndim);
+  int64_t idx_max_shape[POLY_MAX_DIMS];
+  int idx_max_ndim;
+  PolyUOp *idx_max =
+      do_reduce(ctx, POLY_OP_MAX, idx, shape, ndim, axis, 0, idx_max_shape, &idx_max_ndim);
   PolyUOp *result = poly_alu2(ctx, POLY_OP_SUB, poly_const_float(ctx, (double)N), idx_max);
   return poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, result, poly_arg_none());
 }
 
 PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, pred, shape);
   if (ndim < 0) return NULL;
   PolyUOp *diff = poly_alu2(ctx, POLY_OP_SUB, pred, target);
   PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
-  int64_t out_shape[POLY_MAX_DIMS]; int out_ndim;
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim;
   PolyUOp *r = sq;
   for (int i = ndim - 1; i >= 0; i--) {
-    int64_t s[POLY_MAX_DIMS]; int sn;
+    int64_t s[POLY_MAX_DIMS];
+    int sn;
     sn = uop_shape(ctx, r, s);
     r = do_reduce(ctx, POLY_OP_ADD, r, s, sn, i, 0, out_shape, &out_ndim);
   }
   int64_t numel = 1;
-  for (int i = 0; i < ndim; i++) numel *= shape[i];
+  for (int i = 0; i < ndim; i++)
+    numel *= shape[i];
   return poly_alu2(ctx, POLY_OP_FDIV, r, poly_const_float(ctx, (double)numel));
 }
 
 PolyUOp *poly_mae_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target) {
-  int64_t shape[POLY_MAX_DIMS]; int ndim;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim;
   ndim = uop_shape(ctx, pred, shape);
   if (ndim < 0) return NULL;
   PolyUOp *diff = poly_alu2(ctx, POLY_OP_SUB, pred, target);
   PolyUOp *absdiff = poly_abs(ctx, diff);
-  int64_t out_shape[POLY_MAX_DIMS]; int out_ndim;
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim;
   PolyUOp *r = absdiff;
   for (int i = ndim - 1; i >= 0; i--) {
-    int64_t s[POLY_MAX_DIMS]; int sn;
+    int64_t s[POLY_MAX_DIMS];
+    int sn;
     sn = uop_shape(ctx, r, s);
     r = do_reduce(ctx, POLY_OP_ADD, r, s, sn, i, 0, out_shape, &out_ndim);
   }
   int64_t numel = 1;
-  for (int i = 0; i < ndim; i++) numel *= shape[i];
+  for (int i = 0; i < ndim; i++)
+    numel *= shape[i];
   return poly_alu2(ctx, POLY_OP_FDIV, r, poly_const_float(ctx, (double)numel));
 }
 

@@ -9,25 +9,23 @@
 #include <stdlib.h>
 #include <math.h>
 
-/* ── Specs ──────────────────────────────────────────────────────────── */
+/* Specs */
 
 static const char *simple_nam_spec =
-  "{\"n_features\":2,\"hidden_sizes\":[4],\"activation\":\"relu\","
-  "\"n_outputs\":1,\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
+    "{\"n_features\":2,\"hidden_sizes\":[4],\"activation\":\"relu\","
+    "\"n_outputs\":1,\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-static const char *exu_nam_spec =
-  "{\"n_features\":2,\"hidden_sizes\":[4],\"activation\":\"exu\","
-  "\"n_outputs\":1,\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
+static const char *exu_nam_spec = "{\"n_features\":2,\"hidden_sizes\":[4],\"activation\":\"exu\","
+                                  "\"n_outputs\":1,\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
 static const char *ce_nam_spec =
-  "{\"n_features\":2,\"hidden_sizes\":[4],\"activation\":\"relu\","
-  "\"n_outputs\":3,\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
+    "{\"n_features\":2,\"hidden_sizes\":[4],\"activation\":\"relu\","
+    "\"n_outputs\":3,\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
 
-/* ── Tests ──────────────────────────────────────────────────────────── */
+/* Tests */
 
 TEST(nam, create_simple) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec,
-                                         (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst);
 
   /* intercept (1) + 2 features * (weight + bias per layer) = 1 + 2*(2*2) = 9 */
@@ -69,8 +67,7 @@ TEST(nam, create_simple) {
 }
 
 TEST(nam, create_exu) {
-  PolyInstance *inst = poly_nam_instance(exu_nam_spec,
-                                         (int)strlen(exu_nam_spec));
+  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
   ASSERT_NOT_NULL(inst);
 
   /* With ExU, hidden layers get extra exu.weight + exu.bias params.
@@ -90,8 +87,7 @@ TEST(nam, create_exu) {
 }
 
 TEST(nam, init_values) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec,
-                                         (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst);
 
   /* Intercept should be zero */
@@ -109,7 +105,7 @@ TEST(nam, init_values) {
 
   /* Weight should have Kaiming init (bounded) */
   float *w = poly_instance_param_data(inst, 1, &numel);
-  float bound = sqrtf(6.0f / 1.0f);  /* fan_in = 1 */
+  float bound = sqrtf(6.0f / 1.0f); /* fan_in = 1 */
   for (int64_t i = 0; i < numel; i++)
     ASSERT_TRUE(w[i] >= -bound && w[i] <= bound);
 
@@ -118,8 +114,7 @@ TEST(nam, init_values) {
 }
 
 TEST(nam, exu_init_values) {
-  PolyInstance *inst = poly_nam_instance(exu_nam_spec,
-                                         (int)strlen(exu_nam_spec));
+  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
   ASSERT_NOT_NULL(inst);
 
   /* ExU weight should be zero (exp(0) = 1) */
@@ -140,10 +135,8 @@ TEST(nam, exu_init_values) {
 }
 
 TEST(nam, deterministic_init) {
-  PolyInstance *inst1 = poly_nam_instance(simple_nam_spec,
-                                           (int)strlen(simple_nam_spec));
-  PolyInstance *inst2 = poly_nam_instance(simple_nam_spec,
-                                           (int)strlen(simple_nam_spec));
+  PolyInstance *inst1 = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  PolyInstance *inst2 = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -161,12 +154,11 @@ TEST(nam, deterministic_init) {
 }
 
 TEST(nam, forward_produces_output) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec,
-                                         (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst);
 
-  float x[] = { 1.0f, 2.0f };
-  PolyIOBinding inputs[] = { { "x", x } };
+  float x[] = {1.0f, 2.0f};
+  PolyIOBinding inputs[] = {{"x", x}};
 
   int ret = poly_instance_forward(inst, inputs, 1);
   ASSERT_INT_EQ(ret, 0);
@@ -179,7 +171,7 @@ TEST(nam, forward_produces_output) {
       int64_t numel;
       float *out = poly_instance_buf_data(inst, i, &numel);
       ASSERT_NOT_NULL(out);
-      ASSERT_INT_EQ((int)numel, 1);  /* batch=1, n_outputs=1 */
+      ASSERT_INT_EQ((int)numel, 1); /* batch=1, n_outputs=1 */
       ASSERT_TRUE(isfinite(out[0]));
       found_output = 1;
       break;
@@ -192,12 +184,11 @@ TEST(nam, forward_produces_output) {
 }
 
 TEST(nam, forward_deterministic) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec,
-                                         (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst);
 
-  float x[] = { 1.0f, 2.0f };
-  PolyIOBinding inputs[] = { { "x", x } };
+  float x[] = {1.0f, 2.0f};
+  PolyIOBinding inputs[] = {{"x", x}};
 
   poly_instance_forward(inst, inputs, 1);
   float out1 = 0.0f;
@@ -229,18 +220,16 @@ TEST(nam, forward_deterministic) {
 }
 
 TEST(nam, train_mse_loss_decreases) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec,
-                                         (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 1.0f, 2.0f };
-  float y[] = { 5.0f };
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -261,18 +250,16 @@ TEST(nam, train_mse_loss_decreases) {
 }
 
 TEST(nam, train_exu_loss_decreases) {
-  PolyInstance *inst = poly_nam_instance(exu_nam_spec,
-                                         (int)strlen(exu_nam_spec));
+  PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 1.0f, 2.0f };
-  float y[] = { 5.0f };
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -293,18 +280,16 @@ TEST(nam, train_exu_loss_decreases) {
 }
 
 TEST(nam, train_cross_entropy_loss_decreases) {
-  PolyInstance *inst = poly_nam_instance(ce_nam_spec,
-                                         (int)strlen(ce_nam_spec));
+  PolyInstance *inst = poly_nam_instance(ce_nam_spec, (int)strlen(ce_nam_spec));
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 1.0f, 0.0f };
-  float y[] = { 0.0f, 1.0f, 0.0f };
+  float x[] = {1.0f, 0.0f};
+  float y[] = {0.0f, 1.0f, 0.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -325,23 +310,21 @@ TEST(nam, train_cross_entropy_loss_decreases) {
 }
 
 TEST(nam, save_load_roundtrip) {
-  PolyInstance *inst = poly_nam_instance(simple_nam_spec,
-                                         (int)strlen(simple_nam_spec));
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
   ASSERT_NOT_NULL(inst);
 
   /* Train a few steps */
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
-  float x[] = { 1.0f, 2.0f };
-  float y[] = { 5.0f };
-  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
   for (int i = 0; i < 10; i++) {
     float loss;
     poly_instance_train_step(inst, io, 2, &loss);
   }
 
   /* Forward to get prediction before save */
-  PolyIOBinding fwd[] = { { "x", x } };
+  PolyIOBinding fwd[] = {{"x", x}};
   poly_instance_forward(inst, fwd, 1);
   float pred_before = 0.0f;
   int n_bufs = poly_instance_buf_count(inst);

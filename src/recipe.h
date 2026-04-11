@@ -26,32 +26,32 @@ extern "C" {
 #endif
 
 /* Maximum buffers/kernels in a training plan */
-#define POLY_PLAN_MAX_PARAMS  64
+#define POLY_PLAN_MAX_PARAMS 64
 #define POLY_PLAN_MAX_KERNELS 128
 
-/* ── Training Plan ─────────────────────────────────────────────────── */
+/* Training Plan */
 
 typedef struct {
   PolyCtx *ctx;
 
   /* Model parameters */
   int n_params;
-  PolyUOp *param_bufs[POLY_PLAN_MAX_PARAMS];    /* BUFFER UOps for parameters */
-  float *param_datas[POLY_PLAN_MAX_PARAMS];      /* Host memory for parameters */
-  int param_sizes[POLY_PLAN_MAX_PARAMS];         /* Sizes in floats */
+  PolyUOp *param_bufs[POLY_PLAN_MAX_PARAMS]; /* BUFFER UOps for parameters */
+  float *param_datas[POLY_PLAN_MAX_PARAMS]; /* Host memory for parameters */
+  int param_sizes[POLY_PLAN_MAX_PARAMS]; /* Sizes in floats */
 
   /* Input/output buffers */
-  PolyUOp *x_buf;        /* Input data BUFFER UOp */
-  PolyUOp *y_buf;        /* Target data BUFFER UOp */
-  int x_size;            /* Input size in floats */
-  int y_size;            /* Target size in floats */
+  PolyUOp *x_buf; /* Input data BUFFER UOp */
+  PolyUOp *y_buf; /* Target data BUFFER UOp */
+  int x_size; /* Input size in floats */
+  int y_size; /* Target size in floats */
 
   /* Loss output */
-  PolyUOp *loss_buf;     /* Loss scalar BUFFER UOp */
-  float loss_data[1];    /* Loss scalar value */
+  PolyUOp *loss_buf; /* Loss scalar BUFFER UOp */
+  float loss_data[1]; /* Loss scalar value */
 
   /* Forward + loss realize */
-  PolyUOp *fwd_sink;     /* SINK for forward + loss */
+  PolyUOp *fwd_sink; /* SINK for forward + loss */
 
   /* Gradient realizes (one per parameter) */
   PolyUOp *grad_sinks[POLY_PLAN_MAX_PARAMS];
@@ -83,11 +83,16 @@ typedef struct {
 PolyTrainPlan *poly_train_plan_create(
     PolyCtx *ctx,
     PolyUOp *loss_uop,
-    PolyUOp *x_buf, int x_size,
-    PolyUOp *y_buf, int y_size,
-    PolyUOp **param_bufs, float **param_datas, int *param_sizes,
+    PolyUOp *x_buf,
+    int x_size,
+    PolyUOp *y_buf,
+    int y_size,
+    PolyUOp **param_bufs,
+    float **param_datas,
+    int *param_sizes,
     int n_params,
-    float lr);
+    float lr
+);
 
 /* Pre-compile all kernels in the training plan.
  * After this call, poly_train_step() skips scheduling and compilation. */
@@ -101,43 +106,47 @@ float poly_train_step(PolyTrainPlan *plan, float *x_data, float *y_data);
 /* Free a training plan and all associated resources. */
 void poly_train_plan_free(PolyTrainPlan *plan);
 
-/* ── Data Loader ───────────────────────────────────────────────────── */
+/* Data Loader */
 
 typedef struct {
-  float *data;           /* mmap'd or malloc'd data */
-  int n_samples;         /* Total number of samples */
-  int sample_size;       /* Elements per sample (input + label) */
-  int input_size;        /* Elements per input */
-  int label_size;        /* Elements per label */
-  int batch_size;        /* Batch size */
-  int current;           /* Current sample index */
-  int *indices;          /* Shuffle index array */
-  float *x_batch;        /* Contiguous batch buffer for inputs */
-  float *y_batch;        /* Contiguous batch buffer for labels */
-  int fd;               /* File descriptor for mmap (-1 if malloc'd) */
-  size_t file_size;     /* File size for munmap */
+  float *data; /* mmap'd or malloc'd data */
+  int n_samples; /* Total number of samples */
+  int sample_size; /* Elements per sample (input + label) */
+  int input_size; /* Elements per input */
+  int label_size; /* Elements per label */
+  int batch_size; /* Batch size */
+  int current; /* Current sample index */
+  int *indices; /* Shuffle index array */
+  float *x_batch; /* Contiguous batch buffer for inputs */
+  float *y_batch; /* Contiguous batch buffer for labels */
+  int fd; /* File descriptor for mmap (-1 if malloc'd) */
+  size_t file_size; /* File size for munmap */
 } PolyDataLoader;
 
 typedef struct {
-  float *x;             /* Pointer to input batch data */
-  float *y;             /* Pointer to label batch data */
-  int batch_size;       /* Actual batch size (may be smaller at end) */
+  float *x; /* Pointer to input batch data */
+  float *y; /* Pointer to label batch data */
+  int batch_size; /* Actual batch size (may be smaller at end) */
 } PolyBatch;
 
 /* Open a binary float32 data file.
  * Format: [sample0_x..., sample0_y..., sample1_x..., sample1_y..., ...]
  * Each sample has input_size + label_size floats. */
-PolyDataLoader *poly_dataloader_open(const char *path,
-                                      int batch_size,
-                                      int input_size,
-                                      int label_size);
+PolyDataLoader *poly_dataloader_open(
+    const char *path,
+    int batch_size,
+    int input_size,
+    int label_size
+);
 
 /* Create a dataloader from in-memory data (no file). */
-PolyDataLoader *poly_dataloader_from_memory(float *data,
-                                             int n_samples,
-                                             int batch_size,
-                                             int input_size,
-                                             int label_size);
+PolyDataLoader *poly_dataloader_from_memory(
+    float *data,
+    int n_samples,
+    int batch_size,
+    int input_size,
+    int label_size
+);
 
 /* Get the next batch. Returns {NULL, NULL, 0} at end of epoch. */
 PolyBatch poly_dataloader_next(PolyDataLoader *loader);
@@ -151,16 +160,16 @@ void poly_dataloader_shuffle(PolyDataLoader *loader);
 /* Close and free. */
 void poly_dataloader_close(PolyDataLoader *loader);
 
-/* ── Model Builders ────────────────────────────────────────────────── */
+/* Model Builders */
 
 typedef struct {
   PolyCtx *ctx;
   int n_layers;
-  int *layer_sizes;      /* [input, hidden1, ..., output] */
+  int *layer_sizes; /* [input, hidden1, ..., output] */
   int n_params;
-  PolyUOp **param_bufs;  /* BUFFER UOps for all weights + biases */
-  float **param_datas;    /* Host data for all parameters */
-  int *param_sizes;       /* Size of each parameter */
+  PolyUOp **param_bufs; /* BUFFER UOps for all weights + biases */
+  float **param_datas; /* Host data for all parameters */
+  int *param_sizes; /* Size of each parameter */
 } PolyMLP;
 
 /* Create an MLP with the given layer sizes.

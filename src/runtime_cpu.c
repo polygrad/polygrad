@@ -25,15 +25,15 @@
 #include <errno.h>
 
 struct PolyProgram {
-  void *handle;                       /* dlopen handle */
-  void (*call_fn)(void **args);       /* fn_name_call wrapper */
-  char so_path[512];                  /* kept alive until destroy */
-  int cached;                         /* 1 if loaded from disk cache (don't remove on destroy) */
+  void *handle; /* dlopen handle */
+  void (*call_fn)(void **args); /* fn_name_call wrapper */
+  char so_path[512]; /* kept alive until destroy */
+  int cached; /* 1 if loaded from disk cache (don't remove on destroy) */
 };
 
 static int poly_compile_id = 0;
 
-/* ── Content hash (FNV-1a 64-bit) ─────────────────────────────────────── */
+/* Content hash (FNV-1a 64-bit) */
 
 static uint64_t source_hash(const char *s) {
   uint64_t h = 0xcbf29ce484222325ULL;
@@ -44,7 +44,7 @@ static uint64_t source_hash(const char *s) {
   return h;
 }
 
-/* ── Disk cache directory ─────────────────────────────────────────────── */
+/* Disk cache directory */
 
 static int ensure_cache_dir(char *dir, int cap) {
   const char *xdg = getenv("XDG_CACHE_HOME");
@@ -64,12 +64,11 @@ static int ensure_cache_dir(char *dir, int cap) {
     *last_slash = '\0';
     mkdir(parent, 0755); /* ignore error if exists */
   }
-  if (mkdir(dir, 0755) == -1 && errno != EEXIST)
-    return -1;
+  if (mkdir(dir, 0755) == -1 && errno != EEXIST) return -1;
   return 0;
 }
 
-/* ── Optimization level ───────────────────────────────────────────────── */
+/* Optimization level */
 
 static const char *opt_flag(void) {
   const char *v = getenv("POLY_OPT");
@@ -79,13 +78,12 @@ static const char *opt_flag(void) {
   return "-O2";
 }
 
-/* ── Load a .so and resolve the _call wrapper ─────────────────────────── */
+/* Load a .so and resolve the _call wrapper */
 
 static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached) {
   void *handle = dlopen(so_path, RTLD_LAZY);
   if (!handle) {
-    if (!cached)
-      fprintf(stderr, "polygrad: dlopen: %s\n", dlerror());
+    if (!cached) fprintf(stderr, "polygrad: dlopen: %s\n", dlerror());
     return NULL;
   }
 
@@ -95,8 +93,7 @@ static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached
   void (*call_fn)(void **);
   memcpy(&call_fn, &sym, sizeof(sym));
   if (!call_fn) {
-    if (!cached)
-      fprintf(stderr, "polygrad: dlsym(%s): %s\n", call_name, dlerror());
+    if (!cached) fprintf(stderr, "polygrad: dlsym(%s): %s\n", call_name, dlerror());
     dlclose(handle);
     return NULL;
   }
@@ -110,11 +107,14 @@ static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached
   return prog;
 }
 
-/* ── Compile C source to .so ──────────────────────────────────────────── */
+/* Compile C source to .so */
 
 static int compile_to_so(const char *source, const char *c_path, const char *so_path) {
   FILE *f = fopen(c_path, "w");
-  if (!f) { fprintf(stderr, "polygrad: cannot write %s\n", c_path); return -1; }
+  if (!f) {
+    fprintf(stderr, "polygrad: cannot write %s\n", c_path);
+    return -1;
+  }
   fputs(source, f);
   fclose(f);
 
@@ -127,17 +127,22 @@ static int compile_to_so(const char *source, const char *c_path, const char *so_
   if (pid == 0) {
     const char *cc = getenv("CC");
     if (!cc) cc = "clang";
-    execlp(cc, cc, opt_flag(), "-shared", "-fPIC",
-           "-fno-math-errno", "-o", so_path, c_path, "-lm", (char *)NULL);
+    execlp(
+        cc, cc, opt_flag(), "-shared", "-fPIC", "-fno-math-errno", "-o", so_path, c_path, "-lm",
+        (char *)NULL
+    );
     /* clang not found — try gcc as fallback */
     if (!getenv("CC")) {
-      execlp("gcc", "gcc", opt_flag(), "-shared", "-fPIC",
-             "-fno-math-errno", "-o", so_path, c_path, "-lm", (char *)NULL);
+      execlp(
+          "gcc", "gcc", opt_flag(), "-shared", "-fPIC", "-fno-math-errno", "-o", so_path, c_path,
+          "-lm", (char *)NULL
+      );
     }
     _exit(127);
   }
   int status;
-  while (waitpid(pid, &status, 0) == -1) { /* retry on EINTR */ }
+  while (waitpid(pid, &status, 0) == -1) { /* retry on EINTR */
+  }
   int ret = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   remove(c_path);
   return ret;
@@ -171,8 +176,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
     }
 
     if (ensure_cache_dir(cache_dir, sizeof(cache_dir)) == 0) {
-      snprintf(cache_path, sizeof(cache_path), "%s/%016llx.so",
-               cache_dir, (unsigned long long)h);
+      snprintf(cache_path, sizeof(cache_path), "%s/%016llx.so", cache_dir, (unsigned long long)h);
 
       /* Try loading cached .so */
       if (access(cache_path, F_OK) == 0) {
@@ -238,7 +242,6 @@ void poly_program_call(PolyProgram *prog, void **args, int n_args) {
 void poly_program_destroy(PolyProgram *prog) {
   if (!prog) return;
   dlclose(prog->handle);
-  if (!prog->cached)
-    remove(prog->so_path);
+  if (!prog->cached) remove(prog->so_path);
   free(prog);
 }

@@ -20,15 +20,15 @@
 extern "C" {
 #endif
 
-#define POLY_WLRN_MAGIC     0x4E524C57  /* "WLRN" LE */
+#define POLY_WLRN_MAGIC 0x4E524C57 /* "WLRN" LE */
 #define POLY_WLRN_HEADER_SIZE 16
 
 typedef struct {
-  const uint8_t *manifest;    /* ptr into input data */
+  const uint8_t *manifest; /* ptr into input data */
   uint32_t manifest_len;
-  const uint8_t *toc;         /* ptr into input data */
+  const uint8_t *toc; /* ptr into input data */
   uint32_t toc_len;
-  const uint8_t *blobs;       /* ptr into input data */
+  const uint8_t *blobs; /* ptr into input data */
   uint32_t blobs_len;
 } PolyWlrnView;
 

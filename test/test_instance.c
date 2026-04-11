@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <math.h>
 
-/* ── Helper: build IR bytes for a simple add graph ───────────────────── */
+/* Helper: build IR bytes for a simple add graph */
 /* out = a + b, forward entrypoint */
 static uint8_t *make_add_ir(int *out_len) {
   PolyCtx *ctx = poly_ctx_new();
@@ -25,19 +25,19 @@ static uint8_t *make_add_ir(int *out_len) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
-    { "a", POLY_IR_ROLE_INPUT, a, { 4 }, 1 },
-    { "b", POLY_IR_ROLE_INPUT, b, { 4 }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, out_buf, { 4 }, 1 },
+      {"a", POLY_IR_ROLE_INPUT, a, {4}, 1},
+      {"b", POLY_IR_ROLE_INPUT, b, {4}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out_buf, {4}, 1},
   };
-  PolyIrEntrypoint eps[] = { { "forward", sink } };
-  PolyIrSpec spec = { ctx, bufs, 3, eps, 1 };
+  PolyIrEntrypoint eps[] = {{"forward", sink}};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
 
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   poly_ctx_destroy(ctx);
   return bytes;
 }
 
-/* ── Helper: build IR bytes for a trainable model ────────────────────── */
+/* Helper: build IR bytes for a trainable model */
 /* out = w * x, loss = sum((out - y)^2) / N */
 static uint8_t *make_train_ir(int n, int *out_len) {
   PolyCtx *ctx = poly_ctx_new();
@@ -54,10 +54,9 @@ static uint8_t *make_train_ir(int n, int *out_len) {
   PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
 
   /* Loss: sum((prod - y)^2) */
-  PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, prod,
-                              poly_alu1(ctx, POLY_OP_NEG, y));
+  PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, prod, poly_alu1(ctx, POLY_OP_NEG, y));
   PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
-  int64_t axes[] = { 0 };
+  int64_t axes[] = {0};
   PolyUOp *loss_val = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1);
 
   /* Scale by 1/N */
@@ -68,24 +67,24 @@ static uint8_t *make_train_ir(int n, int *out_len) {
   PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
 
   PolyIrBufEntry bufs[] = {
-    { "w", POLY_IR_ROLE_PARAM, w, { n }, 1 },
-    { "x", POLY_IR_ROLE_INPUT, x, { n }, 1 },
-    { "y", POLY_IR_ROLE_TARGET, y, { n }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, out_buf, { n }, 1 },
-    { "loss", POLY_IR_ROLE_OUTPUT, loss_buf, { 1 }, 1 },
+      {"w", POLY_IR_ROLE_PARAM, w, {n}, 1},
+      {"x", POLY_IR_ROLE_INPUT, x, {n}, 1},
+      {"y", POLY_IR_ROLE_TARGET, y, {n}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out_buf, {n}, 1},
+      {"loss", POLY_IR_ROLE_OUTPUT, loss_buf, {1}, 1},
   };
   PolyIrEntrypoint eps[] = {
-    { "forward", fwd_sink },
-    { "loss", loss_sink },
+      {"forward", fwd_sink},
+      {"loss", loss_sink},
   };
-  PolyIrSpec spec = { ctx, bufs, 5, eps, 2 };
+  PolyIrSpec spec = {ctx, bufs, 5, eps, 2};
 
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   poly_ctx_destroy(ctx);
   return bytes;
 }
 
-/* ── Tests ───────────────────────────────────────────────────────────── */
+/* Tests */
 
 TEST(instance, create_from_ir) {
   int ir_len = 0;
@@ -120,11 +119,11 @@ TEST(instance, forward_add) {
   PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst);
 
-  float a_data[] = { 1.0f, 2.0f, 3.0f, 4.0f };
-  float b_data[] = { 10.0f, 20.0f, 30.0f, 40.0f };
+  float a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_data[] = {10.0f, 20.0f, 30.0f, 40.0f};
   PolyIOBinding inputs[] = {
-    { "a", a_data },
-    { "b", b_data },
+      {"a", a_data},
+      {"b", b_data},
   };
 
   int ret = poly_instance_forward(inst, inputs, 2);
@@ -182,7 +181,10 @@ TEST(instance, weights_round_trip) {
   /* Set param values */
   int64_t numel;
   float *w = poly_instance_param_data(inst, 0, &numel);
-  w[0] = 1.0f; w[1] = 2.0f; w[2] = 3.0f; w[3] = 4.0f;
+  w[0] = 1.0f;
+  w[1] = 2.0f;
+  w[2] = 3.0f;
+  w[3] = 4.0f;
 
   /* Export */
   int st_len = 0;
@@ -241,18 +243,18 @@ TEST(instance, train_step_sgd) {
   /* Init weights to 1.0 */
   int64_t numel;
   float *w = poly_instance_param_data(inst, 0, &numel);
-  for (int i = 0; i < 4; i++) w[i] = 1.0f;
+  for (int i = 0; i < 4; i++)
+    w[i] = 1.0f;
 
   /* Configure SGD */
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   /* Training data: x=1,1,1,1; y=3,3,3,3 (target: w=3) */
-  float x[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-  float y[] = { 3.0f, 3.0f, 3.0f, 3.0f };
+  float x[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float y[] = {3.0f, 3.0f, 3.0f, 3.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   /* Run several train steps and check loss decreases */
@@ -261,8 +263,7 @@ TEST(instance, train_step_sgd) {
     float loss;
     int ret = poly_instance_train_step(inst, io, 2, &loss);
     ASSERT_INT_EQ(ret, 0);
-    if (step > 0)
-      ASSERT_TRUE(loss <= prev_loss + 1e-6f);
+    if (step > 0) ASSERT_TRUE(loss <= prev_loss + 1e-6f);
     prev_loss = loss;
   }
 
@@ -283,15 +284,15 @@ TEST(instance, train_step_adam) {
   /* Init weights */
   int64_t numel;
   float *w = poly_instance_param_data(inst, 0, &numel);
-  for (int i = 0; i < 4; i++) w[i] = 0.5f;
+  for (int i = 0; i < 4; i++)
+    w[i] = 0.5f;
 
   /* Configure Adam */
-  poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM,
-                               0.05f, 0.9f, 0.999f, 1e-8f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.05f, 0.9f, 0.999f, 1e-8f, 0.0f);
 
-  float x[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-  float y[] = { 3.0f, 3.0f, 3.0f, 3.0f };
-  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+  float x[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float y[] = {3.0f, 3.0f, 3.0f, 3.0f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
 
   float first_loss = -1.0f;
   float prev_loss = 1e10f;
@@ -317,11 +318,11 @@ TEST(instance, null_safety) {
   ASSERT_TRUE(poly_instance_buf_name(NULL, 0) == NULL);
   ASSERT_TRUE(poly_instance_param_name(NULL, 0) == NULL);
   ASSERT_TRUE(poly_instance_param_data(NULL, 0, NULL) == NULL);
-  poly_instance_free(NULL);  /* should not crash */
+  poly_instance_free(NULL); /* should not crash */
   PASS();
 }
 
-/* ── Phase 5: Backend-aware PolyInstance tests ────────────────────────── */
+/* Phase 5: Backend-aware PolyInstance tests */
 
 TEST(instance, call_basic) {
   int ir_len = 0;
@@ -329,9 +330,9 @@ TEST(instance, call_basic) {
   PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst);
 
-  float a_data[] = { 1.0f, 2.0f, 3.0f, 4.0f };
-  float b_data[] = { 10.0f, 20.0f, 30.0f, 40.0f };
-  PolyIOBinding io[] = { { "a", a_data }, { "b", b_data } };
+  float a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_data[] = {10.0f, 20.0f, 30.0f, 40.0f};
+  PolyIOBinding io[] = {{"a", a_data}, {"b", b_data}};
 
   /* Use poly_instance_call instead of poly_instance_forward */
   int ret = poly_instance_call(inst, "forward", io, 2);
@@ -360,9 +361,9 @@ TEST(instance, set_device_interp) {
   int ret = poly_instance_set_device(inst, POLY_DEVICE_INTERP);
   ASSERT_INT_EQ(ret, 0);
 
-  float a_data[] = { 5.0f, 6.0f, 7.0f, 8.0f };
-  float b_data[] = { 100.0f, 200.0f, 300.0f, 400.0f };
-  PolyIOBinding io[] = { { "a", a_data }, { "b", b_data } };
+  float a_data[] = {5.0f, 6.0f, 7.0f, 8.0f};
+  float b_data[] = {100.0f, 200.0f, 300.0f, 400.0f};
+  PolyIOBinding io[] = {{"a", a_data}, {"b", b_data}};
 
   ret = poly_instance_forward(inst, io, 2);
   ASSERT_INT_EQ(ret, 0);
@@ -388,9 +389,9 @@ TEST(instance, cpu_vs_interp_forward) {
   PolyInstance *inst_cpu = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst_cpu);
 
-  float a_data[] = { 1.5f, 2.5f, 3.5f, 4.5f };
-  float b_data[] = { 0.1f, 0.2f, 0.3f, 0.4f };
-  PolyIOBinding io[] = { { "a", a_data }, { "b", b_data } };
+  float a_data[] = {1.5f, 2.5f, 3.5f, 4.5f};
+  float b_data[] = {0.1f, 0.2f, 0.3f, 0.4f};
+  PolyIOBinding io[] = {{"a", a_data}, {"b", b_data}};
 
   ASSERT_INT_EQ(poly_instance_forward(inst_cpu, io, 2), 0);
   int64_t numel;
@@ -417,17 +418,20 @@ TEST(instance, cpu_vs_interp_train) {
   int ir_len = 0;
   uint8_t *ir = make_train_ir(4, &ir_len);
 
-  float x[] = { 1.0f, 1.0f, 1.0f, 1.0f };
-  float y[] = { 3.0f, 3.0f, 3.0f, 3.0f };
-  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+  float x[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float y[] = {3.0f, 3.0f, 3.0f, 3.0f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
 
   /* CPU training */
   PolyInstance *inst_cpu = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst_cpu);
-  { int64_t n; float *w = poly_instance_param_data(inst_cpu, 0, &n);
-    for (int i = 0; i < 4; i++) w[i] = 1.0f; }
-  poly_instance_set_optimizer(inst_cpu, POLY_OPTIM_SGD,
-                               0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
+  {
+    int64_t n;
+    float *w = poly_instance_param_data(inst_cpu, 0, &n);
+    for (int i = 0; i < 4; i++)
+      w[i] = 1.0f;
+  }
+  poly_instance_set_optimizer(inst_cpu, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   float cpu_losses[5];
   for (int s = 0; s < 5; s++) {
@@ -438,10 +442,13 @@ TEST(instance, cpu_vs_interp_train) {
   PolyInstance *inst_interp = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst_interp);
   ASSERT_INT_EQ(poly_instance_set_device(inst_interp, POLY_DEVICE_INTERP), 0);
-  { int64_t n; float *w = poly_instance_param_data(inst_interp, 0, &n);
-    for (int i = 0; i < 4; i++) w[i] = 1.0f; }
-  poly_instance_set_optimizer(inst_interp, POLY_OPTIM_SGD,
-                               0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
+  {
+    int64_t n;
+    float *w = poly_instance_param_data(inst_interp, 0, &n);
+    for (int i = 0; i < 4; i++)
+      w[i] = 1.0f;
+  }
+  poly_instance_set_optimizer(inst_interp, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   float interp_losses[5];
   for (int s = 0; s < 5; s++) {
@@ -467,10 +474,10 @@ TEST(instance, set_device_roundtrip) {
   PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
   ASSERT_NOT_NULL(inst);
 
-  float a[] = { 1.0f, 2.0f, 3.0f, 4.0f };
-  float b[] = { 10.0f, 20.0f, 30.0f, 40.0f };
-  PolyIOBinding io[] = { { "a", a }, { "b", b } };
-  float expected[] = { 11.0f, 22.0f, 33.0f, 44.0f };
+  float a[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b[] = {10.0f, 20.0f, 30.0f, 40.0f};
+  PolyIOBinding io[] = {{"a", a}, {"b", b}};
+  float expected[] = {11.0f, 22.0f, 33.0f, 44.0f};
   int64_t numel;
 
   /* Run on CPU */
@@ -506,8 +513,7 @@ TEST(instance, set_device_unsupported) {
 
   /* CUDA: fails if not available, succeeds if available -- both are valid */
 #ifdef POLY_HAS_CUDA
-  if (!poly_cuda_available())
-    ASSERT_TRUE(poly_instance_set_device(inst, POLY_DEVICE_CUDA) < 0);
+  if (!poly_cuda_available()) ASSERT_TRUE(poly_instance_set_device(inst, POLY_DEVICE_CUDA) < 0);
 #else
   ASSERT_TRUE(poly_instance_set_device(inst, POLY_DEVICE_CUDA) < 0);
 #endif

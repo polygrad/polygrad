@@ -18,48 +18,48 @@
 extern "C" {
 #endif
 
-/* ── Buffer roles ───────────────────────────────────────────────────── */
+/* Buffer roles */
 
-#define POLY_IR_ROLE_PARAM   0
-#define POLY_IR_ROLE_INPUT   1
-#define POLY_IR_ROLE_TARGET  2
-#define POLY_IR_ROLE_OUTPUT  3
-#define POLY_IR_ROLE_AUX     4
+#define POLY_IR_ROLE_PARAM 0
+#define POLY_IR_ROLE_INPUT 1
+#define POLY_IR_ROLE_TARGET 2
+#define POLY_IR_ROLE_OUTPUT 3
+#define POLY_IR_ROLE_AUX 4
 
-/* ── IR spec: graph + metadata ──────────────────────────────────────── */
+/* IR spec: graph + metadata */
 
 /* Named buffer entry (interface table row) */
 typedef struct {
-  const char *name;          /* e.g. "layers.0.weight", "x", "output" */
-  uint8_t role;              /* POLY_IR_ROLE_* */
-  PolyUOp *buffer;           /* BUFFER UOp */
+  const char *name; /* e.g. "layers.0.weight", "x", "output" */
+  uint8_t role; /* POLY_IR_ROLE_* */
+  PolyUOp *buffer; /* BUFFER UOp */
   int64_t shape[8];
   int ndim;
 } PolyIrBufEntry;
 
 /* Named entrypoint (SINK) */
 typedef struct {
-  const char *name;          /* e.g. "forward", "loss" */
-  PolyUOp *sink;             /* SINK UOp */
+  const char *name; /* e.g. "forward", "loss" */
+  PolyUOp *sink; /* SINK UOp */
 } PolyIrEntrypoint;
 
 /* Full IR spec: graph context + named buffers + named entrypoints */
 typedef struct {
-  PolyCtx *ctx;              /* UOp context (not owned, caller manages) */
-  PolyIrBufEntry *bufs;      /* named buffer entries */
+  PolyCtx *ctx; /* UOp context (not owned, caller manages) */
+  PolyIrBufEntry *bufs; /* named buffer entries */
   int n_bufs;
   PolyIrEntrypoint *entrypoints;
   int n_entrypoints;
 } PolyIrSpec;
 
-/* ── Export ──────────────────────────────────────────────────────────── */
+/* Export */
 
 /* Export a tensor-level IR spec to binary format.
  * Caller frees returned bytes.
  * Returns NULL on error (unsupported dtypes, etc). */
 uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len);
 
-/* ── Import ──────────────────────────────────────────────────────────── */
+/* Import */
 
 /* Import binary IR into a fresh PolyIrSpec.
  * Creates a new PolyCtx and reconstructs the UOp graph.

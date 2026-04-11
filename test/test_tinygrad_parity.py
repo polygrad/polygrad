@@ -248,8 +248,7 @@ def build_cross_entropy_nonlast_axis() -> tuple[Tensor, ...]:
     return (logits.cross_entropy(target),)
 
 
-# ── New helpers (movement / pad / cumalu / full / arange) ──────────
-
+# New helpers (movement / pad / cumalu / full / arange)
 def build_full_1d() -> tuple[Tensor, ...]:
     return (Tensor.full((5,), 7.5),)
 

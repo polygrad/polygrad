@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── PolyArg equality and hashing ──────────────────────────────────────── */
+/* PolyArg equality and hashing */
 
 bool poly_arg_eq(PolyArg a, PolyArg b) {
   if (a.kind != b.kind) {
@@ -22,47 +22,57 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
       if (poly_range_n_extra(a) != poly_range_n_extra(b)) return false;
       int n_extra = poly_range_n_extra(a);
       if (n_extra == 0) return true;
-      return memcmp(poly_range_extra(a), poly_range_extra(b),
-                    (size_t)n_extra * sizeof(int64_t)) == 0;
+      return memcmp(poly_range_extra(a), poly_range_extra(b), (size_t)n_extra * sizeof(int64_t)) ==
+             0;
     }
     return false;
   }
   switch (a.kind) {
-    case POLY_ARG_NONE:    return true;
-    case POLY_ARG_INVALID: return true;
-    case POLY_ARG_INT:     return a.i == b.i;
-    case POLY_ARG_FLOAT:   /* bitwise compare to distinguish -0.0 from 0.0 */
-      { uint64_t ba, bb;
-        memcpy(&ba, &a.f, 8); memcpy(&bb, &b.f, 8);
-        return ba == bb; }
-    case POLY_ARG_BOOL:    return a.b == b.b;
-    case POLY_ARG_STRING:  return a.str == b.str || (a.str && b.str && strcmp(a.str, b.str) == 0);
-    case POLY_ARG_OPS:     return a.ops == b.ops;
-    case POLY_ARG_INT_TUPLE:
-      if (a.int_tuple.n != b.int_tuple.n) return false;
-      if (a.int_tuple.n == 0) return true;
-      return memcmp(a.int_tuple.vals, b.int_tuple.vals, a.int_tuple.n * sizeof(int64_t)) == 0;
-    case POLY_ARG_PAIR_TUPLE:
-      if (a.pair_tuple.n != b.pair_tuple.n) return false;
-      if (a.pair_tuple.n == 0) return true;
-      return memcmp(a.pair_tuple.pairs, b.pair_tuple.pairs, a.pair_tuple.n * 2 * sizeof(int64_t)) == 0;
-    case POLY_ARG_REDUCE_AXIS:
-      if (a.reduce_axis.op != b.reduce_axis.op) return false;
-      if (a.reduce_axis.n != b.reduce_axis.n) return false;
-      if (a.reduce_axis.n == 0) return true;
-      return memcmp(a.reduce_axis.axes, b.reduce_axis.axes, a.reduce_axis.n * sizeof(int64_t)) == 0;
-    case POLY_ARG_RANGE:
-      if (a.range.axis_id != b.range.axis_id) return false;
-      if (a.range.axis_type != b.range.axis_type) return false;
-      if (a.range.n_extra != b.range.n_extra) return false;
-      if (a.range.n_extra == 0) return true;
-      return memcmp(a.range.extra, b.range.extra, (size_t)a.range.n_extra * sizeof(int64_t)) == 0;
-    case POLY_ARG_DEFINE_VAR:
-      if (a.define_var.min_val != b.define_var.min_val) return false;
-      if (a.define_var.max_val != b.define_var.max_val) return false;
-      if (a.define_var.name == b.define_var.name) return true;
-      if (!a.define_var.name || !b.define_var.name) return false;
-      return strcmp(a.define_var.name, b.define_var.name) == 0;
+  case POLY_ARG_NONE:
+    return true;
+  case POLY_ARG_INVALID:
+    return true;
+  case POLY_ARG_INT:
+    return a.i == b.i;
+  case POLY_ARG_FLOAT: /* bitwise compare to distinguish -0.0 from 0.0 */
+  {
+    uint64_t ba, bb;
+    memcpy(&ba, &a.f, 8);
+    memcpy(&bb, &b.f, 8);
+    return ba == bb;
+  }
+  case POLY_ARG_BOOL:
+    return a.b == b.b;
+  case POLY_ARG_STRING:
+    return a.str == b.str || (a.str && b.str && strcmp(a.str, b.str) == 0);
+  case POLY_ARG_OPS:
+    return a.ops == b.ops;
+  case POLY_ARG_INT_TUPLE:
+    if (a.int_tuple.n != b.int_tuple.n) return false;
+    if (a.int_tuple.n == 0) return true;
+    return memcmp(a.int_tuple.vals, b.int_tuple.vals, a.int_tuple.n * sizeof(int64_t)) == 0;
+  case POLY_ARG_PAIR_TUPLE:
+    if (a.pair_tuple.n != b.pair_tuple.n) return false;
+    if (a.pair_tuple.n == 0) return true;
+    return memcmp(a.pair_tuple.pairs, b.pair_tuple.pairs, a.pair_tuple.n * 2 * sizeof(int64_t)) ==
+           0;
+  case POLY_ARG_REDUCE_AXIS:
+    if (a.reduce_axis.op != b.reduce_axis.op) return false;
+    if (a.reduce_axis.n != b.reduce_axis.n) return false;
+    if (a.reduce_axis.n == 0) return true;
+    return memcmp(a.reduce_axis.axes, b.reduce_axis.axes, a.reduce_axis.n * sizeof(int64_t)) == 0;
+  case POLY_ARG_RANGE:
+    if (a.range.axis_id != b.range.axis_id) return false;
+    if (a.range.axis_type != b.range.axis_type) return false;
+    if (a.range.n_extra != b.range.n_extra) return false;
+    if (a.range.n_extra == 0) return true;
+    return memcmp(a.range.extra, b.range.extra, (size_t)a.range.n_extra * sizeof(int64_t)) == 0;
+  case POLY_ARG_DEFINE_VAR:
+    if (a.define_var.min_val != b.define_var.min_val) return false;
+    if (a.define_var.max_val != b.define_var.max_val) return false;
+    if (a.define_var.name == b.define_var.name) return true;
+    if (!a.define_var.name || !b.define_var.name) return false;
+    return strcmp(a.define_var.name, b.define_var.name) == 0;
   }
   return false;
 }
@@ -77,62 +87,63 @@ static uint32_t hash_mix(uint32_t h, uint32_t v) {
 uint32_t poly_arg_hash(PolyArg a) {
   uint32_t h = (uint32_t)a.kind;
   switch (a.kind) {
-    case POLY_ARG_NONE:
-    case POLY_ARG_INVALID:
-      break;
-    case POLY_ARG_INT:
-      h = hash_mix(h, (uint32_t)(a.i ^ (a.i >> 32)));
-      break;
-    case POLY_ARG_FLOAT:
-      { uint64_t bits; memcpy(&bits, &a.f, 8);
-        h = hash_mix(h, (uint32_t)(bits ^ (bits >> 32))); }
-      break;
-    case POLY_ARG_BOOL:
-      h = hash_mix(h, a.b ? 1 : 0);
-      break;
-    case POLY_ARG_STRING:
-      if (a.str) {
-        for (const char *p = a.str; *p; p++)
-          h = hash_mix(h, (uint32_t)*p);
-      }
-      break;
-    case POLY_ARG_OPS:
-      h = hash_mix(h, (uint32_t)a.ops);
-      break;
-    case POLY_ARG_INT_TUPLE:
-      for (int i = 0; i < a.int_tuple.n; i++)
-        h = hash_mix(h, (uint32_t)(a.int_tuple.vals[i] ^ (a.int_tuple.vals[i] >> 32)));
-      break;
-    case POLY_ARG_PAIR_TUPLE:
-      for (int i = 0; i < a.pair_tuple.n; i++) {
-        h = hash_mix(h, (uint32_t)(a.pair_tuple.pairs[i][0] ^ (a.pair_tuple.pairs[i][0] >> 32)));
-        h = hash_mix(h, (uint32_t)(a.pair_tuple.pairs[i][1] ^ (a.pair_tuple.pairs[i][1] >> 32)));
-      }
-      break;
-    case POLY_ARG_REDUCE_AXIS:
-      h = hash_mix(h, (uint32_t)a.reduce_axis.op);
-      for (int i = 0; i < a.reduce_axis.n; i++)
-        h = hash_mix(h, (uint32_t)(a.reduce_axis.axes[i] ^ (a.reduce_axis.axes[i] >> 32)));
-      break;
-    case POLY_ARG_RANGE:
-      h = hash_mix(h, (uint32_t)(a.range.axis_id ^ (a.range.axis_id >> 32)));
-      h = hash_mix(h, (uint32_t)a.range.axis_type);
-      for (int i = 0; i < a.range.n_extra; i++)
-        h = hash_mix(h, (uint32_t)(a.range.extra[i] ^ (a.range.extra[i] >> 32)));
-      break;
-    case POLY_ARG_DEFINE_VAR:
-      if (a.define_var.name) {
-        for (const char *p = a.define_var.name; *p; p++)
-          h = hash_mix(h, (uint32_t)*p);
-      }
-      h = hash_mix(h, (uint32_t)(a.define_var.min_val ^ (a.define_var.min_val >> 32)));
-      h = hash_mix(h, (uint32_t)(a.define_var.max_val ^ (a.define_var.max_val >> 32)));
-      break;
+  case POLY_ARG_NONE:
+  case POLY_ARG_INVALID:
+    break;
+  case POLY_ARG_INT:
+    h = hash_mix(h, (uint32_t)(a.i ^ (a.i >> 32)));
+    break;
+  case POLY_ARG_FLOAT: {
+    uint64_t bits;
+    memcpy(&bits, &a.f, 8);
+    h = hash_mix(h, (uint32_t)(bits ^ (bits >> 32)));
+  } break;
+  case POLY_ARG_BOOL:
+    h = hash_mix(h, a.b ? 1 : 0);
+    break;
+  case POLY_ARG_STRING:
+    if (a.str) {
+      for (const char *p = a.str; *p; p++)
+        h = hash_mix(h, (uint32_t)*p);
+    }
+    break;
+  case POLY_ARG_OPS:
+    h = hash_mix(h, (uint32_t)a.ops);
+    break;
+  case POLY_ARG_INT_TUPLE:
+    for (int i = 0; i < a.int_tuple.n; i++)
+      h = hash_mix(h, (uint32_t)(a.int_tuple.vals[i] ^ (a.int_tuple.vals[i] >> 32)));
+    break;
+  case POLY_ARG_PAIR_TUPLE:
+    for (int i = 0; i < a.pair_tuple.n; i++) {
+      h = hash_mix(h, (uint32_t)(a.pair_tuple.pairs[i][0] ^ (a.pair_tuple.pairs[i][0] >> 32)));
+      h = hash_mix(h, (uint32_t)(a.pair_tuple.pairs[i][1] ^ (a.pair_tuple.pairs[i][1] >> 32)));
+    }
+    break;
+  case POLY_ARG_REDUCE_AXIS:
+    h = hash_mix(h, (uint32_t)a.reduce_axis.op);
+    for (int i = 0; i < a.reduce_axis.n; i++)
+      h = hash_mix(h, (uint32_t)(a.reduce_axis.axes[i] ^ (a.reduce_axis.axes[i] >> 32)));
+    break;
+  case POLY_ARG_RANGE:
+    h = hash_mix(h, (uint32_t)(a.range.axis_id ^ (a.range.axis_id >> 32)));
+    h = hash_mix(h, (uint32_t)a.range.axis_type);
+    for (int i = 0; i < a.range.n_extra; i++)
+      h = hash_mix(h, (uint32_t)(a.range.extra[i] ^ (a.range.extra[i] >> 32)));
+    break;
+  case POLY_ARG_DEFINE_VAR:
+    if (a.define_var.name) {
+      for (const char *p = a.define_var.name; *p; p++)
+        h = hash_mix(h, (uint32_t)*p);
+    }
+    h = hash_mix(h, (uint32_t)(a.define_var.min_val ^ (a.define_var.min_val >> 32)));
+    h = hash_mix(h, (uint32_t)(a.define_var.max_val ^ (a.define_var.max_val >> 32)));
+    break;
   }
   return h;
 }
 
-/* ── CSE key: (op, dtype, src[], arg, tag) ────────────────────────────── */
+/* CSE key: (op, dtype, src[], arg, tag) */
 
 typedef struct {
   PolyOps op;
@@ -170,27 +181,30 @@ static bool cse_eq(const void *a, const void *b) {
   return true;
 }
 
-/* ── Context ──────────────────────────────────────────────────────────── */
+/* Context */
 
 struct PolyCtx {
   PolyArena *arena;
   PolyMap *cse;
-  PolyMap *kernel_cache;  /* computation UOp* → PolyCachedKernel* (rendered bytes) */
-  PolyMap *shape_cache;   /* UOp* → ShapeCacheEntry* (lazy shape cache) */
+  PolyMap *kernel_cache; /* computation UOp* → PolyCachedKernel* (rendered bytes) */
+  PolyMap *shape_cache; /* UOp* → ShapeCacheEntry* (lazy shape cache) */
   /* Named buffer registry */
-  PolyRegEntry **entries;  /* malloc'd array of ptrs to arena-allocated entries */
+  PolyRegEntry **entries; /* malloc'd array of ptrs to arena-allocated entries */
   int n_entries;
   int entries_cap;
-  PolyMap *name_map;       /* str hash → PolyRegEntry* */
+  PolyMap *name_map; /* str hash → PolyRegEntry* */
   /* Named entrypoints */
-  struct { const char *name; PolyUOp *sink; } *ep;
+  struct {
+    const char *name;
+    PolyUOp *sink;
+  } *ep;
   int n_ep;
   int ep_cap;
-  int32_t next_buf_tag;  /* auto-incrementing tag for unique registry BUFFERs */
+  int32_t next_buf_tag; /* auto-incrementing tag for unique registry BUFFERs */
 };
 
 PolyCtx *poly_ctx_new(void) {
-  poly_init_group_ops();  /* ensure opset globals are initialized (Emscripten safety) */
+  poly_init_group_ops(); /* ensure opset globals are initialized (Emscripten safety) */
   PolyCtx *ctx = malloc(sizeof(PolyCtx));
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
@@ -213,12 +227,13 @@ PolyCtx *poly_ctx_new(void) {
   ctx->ep = NULL;
   ctx->n_ep = 0;
   ctx->ep_cap = 0;
-  ctx->next_buf_tag = 1;  /* start at 1; tag=0 is the default (untagged) */
+  ctx->next_buf_tag = 1; /* start at 1; tag=0 is the default (untagged) */
   return ctx;
 }
 
 static void free_cached_kernel(const void *key, void *value, void *userdata) {
-  (void)key; (void)userdata;
+  (void)key;
+  (void)userdata;
   PolyCachedKernel *ck = value;
   free(ck->bytes);
   free(ck);
@@ -231,11 +246,11 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
-  poly_map_destroy(ctx->shape_cache);  /* entries are arena-owned, no per-entry free */
-  poly_map_destroy(ctx->name_map);     /* entries are arena-owned */
+  poly_map_destroy(ctx->shape_cache); /* entries are arena-owned, no per-entry free */
+  poly_map_destroy(ctx->name_map); /* entries are arena-owned */
   poly_map_destroy(ctx->cse);
-  free(ctx->entries);                  /* array of ptrs, entries themselves arena-owned */
-  free(ctx->ep);                       /* ep names are arena-owned */
+  free(ctx->entries); /* array of ptrs, entries themselves arena-owned */
+  free(ctx->ep); /* ep names are arena-owned */
   poly_arena_destroy(ctx->arena);
   free(ctx);
 }
@@ -251,17 +266,29 @@ bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p) {
   return false;
 }
 
-PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) { return ctx->kernel_cache; }
-PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
-PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
+PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) {
+  return ctx->kernel_cache;
+}
+PolyArena *poly_ctx_arena(PolyCtx *ctx) {
+  return ctx->arena;
+}
+PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) {
+  return ctx->shape_cache;
+}
 
-/* ── UOp creation with CSE ────────────────────────────────────────────── */
+/* UOp creation with CSE */
 
-static PolyUOp *poly_uop_internal(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                                   PolyUOp **src, int n_src, PolyArg arg, int32_t tag)
-{
+static PolyUOp *poly_uop_internal(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    int32_t tag
+) {
   /* Build a CSE key on the stack */
-  CseKey key = { op, dtype, src, (uint16_t)n_src, arg, tag };
+  CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag};
   uint32_t h = cse_hash(&key);
 
   /* DEFINE_LOCAL represents mutable accumulators — each REDUCE needs its
@@ -285,27 +312,32 @@ static PolyUOp *poly_uop_internal(PolyCtx *ctx, PolyOps op, PolyDType dtype,
 
   /* Copy src pointers into arena */
   if (n_src > 0) {
-    u->src = poly_arena_alloc(ctx->arena, n_src * sizeof(PolyUOp*), _Alignof(PolyUOp*));
-    memcpy(u->src, src, n_src * sizeof(PolyUOp*));
+    u->src = poly_arena_alloc(ctx->arena, n_src * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+    memcpy(u->src, src, n_src * sizeof(PolyUOp *));
   } else {
     u->src = NULL;
   }
 
   /* Copy arg data that needs arena allocation */
   if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.n > 0) {
-    int64_t *vals = poly_arena_alloc(ctx->arena, arg.int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
+    int64_t *vals =
+        poly_arena_alloc(ctx->arena, arg.int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
     memcpy(vals, arg.int_tuple.vals, arg.int_tuple.n * sizeof(int64_t));
     u->arg.int_tuple.vals = vals;
   } else if (arg.kind == POLY_ARG_PAIR_TUPLE && arg.pair_tuple.n > 0) {
-    int64_t (*pairs)[2] = poly_arena_alloc(ctx->arena, arg.pair_tuple.n * 2 * sizeof(int64_t), _Alignof(int64_t));
+    int64_t(*pairs)[2] =
+        poly_arena_alloc(ctx->arena, arg.pair_tuple.n * 2 * sizeof(int64_t), _Alignof(int64_t));
     memcpy(pairs, arg.pair_tuple.pairs, arg.pair_tuple.n * 2 * sizeof(int64_t));
     u->arg.pair_tuple.pairs = pairs;
   } else if (arg.kind == POLY_ARG_REDUCE_AXIS && arg.reduce_axis.n > 0) {
-    int64_t *axes = poly_arena_alloc(ctx->arena, arg.reduce_axis.n * sizeof(int64_t), _Alignof(int64_t));
+    int64_t *axes =
+        poly_arena_alloc(ctx->arena, arg.reduce_axis.n * sizeof(int64_t), _Alignof(int64_t));
     memcpy(axes, arg.reduce_axis.axes, arg.reduce_axis.n * sizeof(int64_t));
     u->arg.reduce_axis.axes = axes;
   } else if (arg.kind == POLY_ARG_RANGE && arg.range.n_extra > 0) {
-    int64_t *extra = poly_arena_alloc(ctx->arena, (size_t)arg.range.n_extra * sizeof(int64_t), _Alignof(int64_t));
+    int64_t *extra = poly_arena_alloc(
+        ctx->arena, (size_t)arg.range.n_extra * sizeof(int64_t), _Alignof(int64_t)
+    );
     memcpy(extra, arg.range.extra, (size_t)arg.range.n_extra * sizeof(int64_t));
     u->arg.range.extra = extra;
   } else if (arg.kind == POLY_ARG_STRING && arg.str) {
@@ -322,19 +354,32 @@ static PolyUOp *poly_uop_internal(PolyCtx *ctx, PolyOps op, PolyDType dtype,
 
   /* Also store the CSE key in the arena so it persists for hash map lookups */
   CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));
-  *stored_key = (CseKey){ op, dtype, u->src, (uint16_t)n_src, u->arg, tag };
+  *stored_key = (CseKey){op, dtype, u->src, (uint16_t)n_src, u->arg, tag};
 
   poly_map_set(ctx->cse, h, stored_key, u, cse_eq);
   return u;
 }
 
-PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                 PolyUOp **src, int n_src, PolyArg arg) {
+PolyUOp *poly_uop(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg
+) {
   return poly_uop_internal(ctx, op, dtype, src, n_src, arg, 0);
 }
 
-PolyUOp *poly_uop_tagged(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                          PolyUOp **src, int n_src, PolyArg arg, int32_t tag) {
+PolyUOp *poly_uop_tagged(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    int32_t tag
+) {
   return poly_uop_internal(ctx, op, dtype, src, n_src, arg, tag);
 }
 
@@ -343,24 +388,40 @@ PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg) {
 }
 
 PolyUOp *poly_uop1(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyArg arg) {
-  PolyUOp *src[] = { s0 };
+  PolyUOp *src[] = {s0};
   return poly_uop(ctx, op, dtype, src, 1, arg);
 }
 
-PolyUOp *poly_uop2(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyUOp *s1, PolyArg arg) {
-  PolyUOp *src[] = { s0, s1 };
+PolyUOp *poly_uop2(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp *s0,
+    PolyUOp *s1,
+    PolyArg arg
+) {
+  PolyUOp *src[] = {s0, s1};
   return poly_uop(ctx, op, dtype, src, 2, arg);
 }
 
-PolyUOp *poly_uop3(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                   PolyUOp *s0, PolyUOp *s1, PolyUOp *s2, PolyArg arg) {
-  PolyUOp *src[] = { s0, s1, s2 };
+PolyUOp *poly_uop3(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp *s0,
+    PolyUOp *s1,
+    PolyUOp *s2,
+    PolyArg arg
+) {
+  PolyUOp *src[] = {s0, s1, s2};
   return poly_uop(ctx, op, dtype, src, 3, arg);
 }
 
-/* ── Toposort (iterative DFS, mirrors tinygrad's toposort) ────────────── */
+/* Toposort (iterative DFS, mirrors tinygrad's toposort) */
 
-static bool ptr_eq(const void *a, const void *b) { return a == b; }
+static bool ptr_eq(const void *a, const void *b) {
+  return a == b;
+}
 
 static uint32_t ptr_hash(const void *p) {
   uintptr_t v = (uintptr_t)p;
@@ -370,14 +431,18 @@ static uint32_t ptr_hash(const void *p) {
 /* Shared iterative DFS worker. Either `gate_simple` or `gate_user` may be
  * non-NULL (never both). The gate signature difference is bridged here so
  * callers can use closure-style gating without another whole copy. */
-static PolyUOp **toposort_worker(PolyCtx *ctx, PolyUOp *root, int *n_out,
-                                 bool (*gate_simple)(PolyUOp *),
-                                 bool (*gate_user)(PolyUOp *, void *),
-                                 void *user_data,
-                                 bool enter_calls) {
+static PolyUOp **toposort_worker(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate_simple)(PolyUOp *),
+    bool (*gate_user)(PolyUOp *, void *),
+    void *user_data,
+    bool enter_calls
+) {
   int cap = 256;
   int n = 0;
-  PolyUOp **result = poly_arena_alloc(ctx->arena, cap * sizeof(PolyUOp*), _Alignof(PolyUOp*));
+  PolyUOp **result = poly_arena_alloc(ctx->arena, cap * sizeof(PolyUOp *), _Alignof(PolyUOp *));
 
   /* Visited set — pointer identity map */
   PolyMap *visited = poly_map_new(256);
@@ -385,7 +450,7 @@ static PolyUOp **toposort_worker(PolyCtx *ctx, PolyUOp *root, int *n_out,
   /* DFS stack: pairs of (UOp*, state) where state 0=first visit, 1=children pushed */
   int stack_cap = 256;
   int stack_top = 0;
-  PolyUOp **stack = malloc(stack_cap * sizeof(PolyUOp*));
+  PolyUOp **stack = malloc(stack_cap * sizeof(PolyUOp *));
   int *state = malloc(stack_cap * sizeof(int));
 
   stack[stack_top] = root;
@@ -420,7 +485,7 @@ static PolyUOp **toposort_worker(PolyCtx *ctx, PolyUOp *root, int *n_out,
         if (poly_map_get(visited, ch, u->src[i], ptr_eq) != NULL) continue;
         if (stack_top >= stack_cap) {
           stack_cap *= 2;
-          stack = realloc(stack, stack_cap * sizeof(PolyUOp*));
+          stack = realloc(stack, stack_cap * sizeof(PolyUOp *));
           state = realloc(state, stack_cap * sizeof(int));
         }
         stack[stack_top] = u->src[i];
@@ -432,12 +497,13 @@ static PolyUOp **toposort_worker(PolyCtx *ctx, PolyUOp *root, int *n_out,
       stack_top--;
       if (poly_map_get(visited, vh, u, ptr_eq) != NULL) continue;
       /* Use a non-NULL sentinel as value */
-      poly_map_set(visited, vh, u, (void*)(uintptr_t)1, ptr_eq);
+      poly_map_set(visited, vh, u, (void *)(uintptr_t)1, ptr_eq);
 
       if (n >= cap) {
         int new_cap = cap * 2;
-        PolyUOp **new_result = poly_arena_alloc(ctx->arena, new_cap * sizeof(PolyUOp*), _Alignof(PolyUOp*));
-        memcpy(new_result, result, n * sizeof(PolyUOp*));
+        PolyUOp **new_result =
+            poly_arena_alloc(ctx->arena, new_cap * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+        memcpy(new_result, result, n * sizeof(PolyUOp *));
         result = new_result;
         cap = new_cap;
       }
@@ -452,14 +518,24 @@ static PolyUOp **toposort_worker(PolyCtx *ctx, PolyUOp *root, int *n_out,
   return result;
 }
 
-PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
-                           bool (*gate)(PolyUOp *), bool enter_calls) {
+PolyUOp **poly_toposort_ex(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *),
+    bool enter_calls
+) {
   return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls);
 }
 
-PolyUOp **poly_toposort_ex_user(PolyCtx *ctx, PolyUOp *root, int *n_out,
-                                bool (*gate)(PolyUOp *, void *), void *user_data,
-                                bool enter_calls) {
+PolyUOp **poly_toposort_ex_user(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *, void *),
+    void *user_data,
+    bool enter_calls
+) {
   return toposort_worker(ctx, root, n_out, NULL, gate, user_data, enter_calls);
 }
 
@@ -473,20 +549,28 @@ PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
  * `range_start` dict (uop/ops.py:29). */
 static int uop_range_start_for_op(PolyOps op) {
   switch (op) {
-    case POLY_OP_BUFFERIZE: return 1;
-    case POLY_OP_REDUCE: return 1;
-    case POLY_OP_STORE: return 2;
-    case POLY_OP_WMMA: return 3;
-    case POLY_OP_END: return 1;
-    case POLY_OP_CALL: return 1;
-    case POLY_OP_COPY: return 2;
-    case POLY_OP_BUFFER_VIEW: return 1;
-    default: return -1;
+  case POLY_OP_BUFFERIZE:
+    return 1;
+  case POLY_OP_REDUCE:
+    return 1;
+  case POLY_OP_STORE:
+    return 2;
+  case POLY_OP_WMMA:
+    return 3;
+  case POLY_OP_END:
+    return 1;
+  case POLY_OP_CALL:
+    return 1;
+  case POLY_OP_COPY:
+    return 2;
+  case POLY_OP_BUFFER_VIEW:
+    return 1;
+  default:
+    return -1;
   }
 }
 
-/* ── Range helpers ───────────────────────────────────────────────────────
- *
+/* Range helpers *
  * Ports tinygrad's `no_range` (codegen/simplify.py:75) and the
  * `_ranges`/`ranges`/`ended_ranges` triple (uop/ops.py:351-378).
  *
@@ -535,17 +619,19 @@ static PolyRangeSet *range_set_new(PolyCtx *ctx, int cap) {
 static void range_set_grow(PolyCtx *ctx, PolyRangeSet *s, int need) {
   if (need <= s->cap) return;
   int new_cap = s->cap * 2;
-  while (new_cap < need) new_cap *= 2;
-  PolyUOp **new_items = poly_arena_alloc(poly_ctx_arena(ctx),
-                                          (size_t)new_cap * sizeof(PolyUOp *),
-                                          _Alignof(PolyUOp *));
+  while (new_cap < need)
+    new_cap *= 2;
+  PolyUOp **new_items = poly_arena_alloc(
+      poly_ctx_arena(ctx), (size_t)new_cap * sizeof(PolyUOp *), _Alignof(PolyUOp *)
+  );
   memcpy(new_items, s->items, (size_t)s->n * sizeof(PolyUOp *));
   s->items = new_items;
   s->cap = new_cap;
 }
 
 static bool range_set_contains(const PolyRangeSet *s, PolyUOp *r) {
-  for (int i = 0; i < s->n; i++) if (s->items[i] == r) return true;
+  for (int i = 0; i < s->n; i++)
+    if (s->items[i] == r) return true;
   return false;
 }
 
@@ -566,11 +652,13 @@ static void range_set_remove(PolyRangeSet *s, PolyUOp *r) {
 }
 
 static void range_set_union(PolyCtx *ctx, PolyRangeSet *dst, const PolyRangeSet *src) {
-  for (int i = 0; i < src->n; i++) range_set_add(ctx, dst, src->items[i]);
+  for (int i = 0; i < src->n; i++)
+    range_set_add(ctx, dst, src->items[i]);
 }
 
 static void range_set_subtract(PolyRangeSet *dst, const PolyRangeSet *src) {
-  for (int i = 0; i < src->n; i++) range_set_remove(dst, src->items[i]);
+  for (int i = 0; i < src->n; i++)
+    range_set_remove(dst, src->items[i]);
 }
 
 static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo);
@@ -579,8 +667,7 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo);
  * For entries that are themselves RANGE nodes we just add them; for non-RANGE
  * entries we union in their full ranges set so the caller's subtract does the
  * right thing regardless of entry shape. */
-static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u,
-                                 PolyRangeSet *out, PolyMap *memo) {
+static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u, PolyRangeSet *out, PolyMap *memo) {
   int rs = uop_range_start_for_op(u->op);
   if (rs >= 0) {
     if (rs > u->n_src) rs = u->n_src;
@@ -602,8 +689,7 @@ static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u,
     }
     return;
   }
-  if (u->op == POLY_OP_CONTRACT && u->n_src >= 1
-      && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
+  if (u->op == POLY_OP_CONTRACT && u->n_src >= 1 && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
     const PolyRangeSet *s0 = compute_ranges(ctx, u->src[0], memo);
     int n_pairs = u->arg.pair_tuple.n;
     for (int i = 0; i < s0->n; i++) {
@@ -635,12 +721,11 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
   }
 
   /* Subtract ended ranges */
-  PolyRangeSet ended = { .items = NULL, .n = 0, .cap = 0 };
+  PolyRangeSet ended = {.items = NULL, .n = 0, .cap = 0};
   PolyRangeSet *ended_ptr = &ended;
   /* Give ended a minimal arena buffer */
-  ended_ptr->items = poly_arena_alloc(poly_ctx_arena(ctx),
-                                      4 * sizeof(PolyUOp *),
-                                      _Alignof(PolyUOp *));
+  ended_ptr->items =
+      poly_arena_alloc(poly_ctx_arena(ctx), 4 * sizeof(PolyUOp *), _Alignof(PolyUOp *));
   ended_ptr->cap = 4;
   compute_ended_ranges(ctx, u, ended_ptr, memo);
   range_set_subtract(ret, ended_ptr);
@@ -652,8 +737,7 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
   return ret;
 }
 
-/* ── PolyUOpCache: per-pass unified cache for minmax + ranges ─────────
- *
+/* PolyUOpCache: per-pass unified cache for minmax + ranges *
  * Owns two PolyMaps keyed by PolyUOp*. The struct is opaque in the public
  * header; callers get it via poly_uop_cache_new and pass it to any `_ex`
  * query. Values (PolyRangeSet*, PolyMinMaxBox*) are arena-allocated and
@@ -661,8 +745,8 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
  * wrappers. */
 
 struct PolyUOpCache {
-  PolyMap *ranges;  /* PolyUOp* -> PolyRangeSet* */
-  PolyMap *minmax;  /* PolyUOp* -> PolyMinMaxBox* (populated by src/sym.c) */
+  PolyMap *ranges; /* PolyUOp* -> PolyRangeSet* */
+  PolyMap *minmax; /* PolyUOp* -> PolyMinMaxBox* (populated by src/sym.c) */
 };
 
 PolyUOpCache *poly_uop_cache_new(void) {
@@ -687,7 +771,9 @@ void poly_uop_cache_destroy(PolyUOpCache *c) {
 }
 
 /* Internal accessor for src/sym.c's minmax code (declared in uop_cache_internal.h). */
-PolyMap *poly_uop_cache_minmax_map(PolyUOpCache *c) { return c ? c->minmax : NULL; }
+PolyMap *poly_uop_cache_minmax_map(PolyUOpCache *c) {
+  return c ? c->minmax : NULL;
+}
 
 bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
   return poly_no_range_ex(ctx, u, NULL);
@@ -709,8 +795,7 @@ bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r) {
   return poly_uop_in_ranges_ex(ctx, u, r, NULL);
 }
 
-bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r,
-                           PolyUOpCache *cache) {
+bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *cache) {
   if (!ctx || !u || !r || r->op != POLY_OP_RANGE) return false;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
   const PolyRangeSet *s = compute_ranges(ctx, u, memo);
@@ -723,8 +808,7 @@ int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out) {
   return poly_uop_ranges_ex(ctx, u, out, max_out, NULL);
 }
 
-int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out,
-                       PolyUOpCache *cache) {
+int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache) {
   if (!ctx || !u || !out || max_out <= 0) return 0;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
   const PolyRangeSet *s = compute_ranges(ctx, u, memo);
@@ -734,7 +818,7 @@ int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out,
   return n_out;
 }
 
-/* ── Pretty-print ─────────────────────────────────────────────────────── */
+/* Pretty-print */
 
 static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
   int written = snprintf(buf + *pos, cap - *pos, "UOp(%s", poly_op_name(u->op));
@@ -748,59 +832,65 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
 
   /* arg */
   switch (u->arg.kind) {
-    case POLY_ARG_NONE: break;
-    case POLY_ARG_INT:
-      written = snprintf(buf + *pos, cap - *pos, ", %ld", (long)u->arg.i);
+  case POLY_ARG_NONE:
+    break;
+  case POLY_ARG_INT:
+    written = snprintf(buf + *pos, cap - *pos, ", %ld", (long)u->arg.i);
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_FLOAT:
+    written = snprintf(buf + *pos, cap - *pos, ", %g", u->arg.f);
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_BOOL:
+    written = snprintf(buf + *pos, cap - *pos, ", %s", u->arg.b ? "True" : "False");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_STRING:
+    written = snprintf(buf + *pos, cap - *pos, ", \"%s\"", u->arg.str ? u->arg.str : "");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_OPS:
+    written = snprintf(buf + *pos, cap - *pos, ", %s", poly_op_name(u->arg.ops));
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_INVALID:
+    written = snprintf(buf + *pos, cap - *pos, ", Invalid");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_INT_TUPLE:
+    written = snprintf(buf + *pos, cap - *pos, ", (");
+    if (written > 0) *pos += written;
+    for (int i = 0; i < u->arg.int_tuple.n; i++) {
+      written =
+          snprintf(buf + *pos, cap - *pos, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
       if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_FLOAT:
-      written = snprintf(buf + *pos, cap - *pos, ", %g", u->arg.f);
+    }
+    written = snprintf(buf + *pos, cap - *pos, ")");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_RANGE:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", (%ld,%d", (long)u->arg.range.axis_id, (int)u->arg.range.axis_type
+    );
+    if (written > 0) *pos += written;
+    for (int i = 0; i < u->arg.range.n_extra; i++) {
+      written = snprintf(buf + *pos, cap - *pos, ",%ld", (long)u->arg.range.extra[i]);
       if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_BOOL:
-      written = snprintf(buf + *pos, cap - *pos, ", %s", u->arg.b ? "True" : "False");
-      if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_STRING:
-      written = snprintf(buf + *pos, cap - *pos, ", \"%s\"", u->arg.str ? u->arg.str : "");
-      if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_OPS:
-      written = snprintf(buf + *pos, cap - *pos, ", %s", poly_op_name(u->arg.ops));
-      if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_INVALID:
-      written = snprintf(buf + *pos, cap - *pos, ", Invalid");
-      if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_INT_TUPLE:
-      written = snprintf(buf + *pos, cap - *pos, ", (");
-      if (written > 0) *pos += written;
-      for (int i = 0; i < u->arg.int_tuple.n; i++) {
-        written = snprintf(buf + *pos, cap - *pos, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
-        if (written > 0) *pos += written;
-      }
-      written = snprintf(buf + *pos, cap - *pos, ")");
-      if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_RANGE:
-      written = snprintf(buf + *pos, cap - *pos, ", (%ld,%d",
-                         (long)u->arg.range.axis_id, (int)u->arg.range.axis_type);
-      if (written > 0) *pos += written;
-      for (int i = 0; i < u->arg.range.n_extra; i++) {
-        written = snprintf(buf + *pos, cap - *pos, ",%ld", (long)u->arg.range.extra[i]);
-        if (written > 0) *pos += written;
-      }
-      written = snprintf(buf + *pos, cap - *pos, ")");
-      if (written > 0) *pos += written;
-      break;
-    case POLY_ARG_DEFINE_VAR:
-      written = snprintf(buf + *pos, cap - *pos, ", (\"%s\",%ld,%ld)",
-                         u->arg.define_var.name ? u->arg.define_var.name : "?",
-                         (long)u->arg.define_var.min_val, (long)u->arg.define_var.max_val);
-      if (written > 0) *pos += written;
-      break;
-    default: break;
+    }
+    written = snprintf(buf + *pos, cap - *pos, ")");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_DEFINE_VAR:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", (\"%s\",%ld,%ld)",
+        u->arg.define_var.name ? u->arg.define_var.name : "?", (long)u->arg.define_var.min_val,
+        (long)u->arg.define_var.max_val
+    );
+    if (written > 0) *pos += written;
+    break;
+  default:
+    break;
   }
 
   /* n_src */
@@ -834,24 +924,36 @@ char *poly_graph_str(PolyUOp *root) {
  * or very deep graphs (though hash-consed UOps cannot actually cycle). */
 void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
   if (!u || !fp) return;
-  for (int i = 0; i < depth; i++) fputc(' ', fp);
-  fprintf(fp, "%s dt=%s n_src=%d",
-          poly_op_name(u->op),
-          u->dtype.name ? u->dtype.name : "?",
-          (int)u->n_src);
+  for (int i = 0; i < depth; i++)
+    fputc(' ', fp);
+  fprintf(
+      fp, "%s dt=%s n_src=%d", poly_op_name(u->op), u->dtype.name ? u->dtype.name : "?",
+      (int)u->n_src
+  );
   switch (u->arg.kind) {
-    case POLY_ARG_INT:   fprintf(fp, " i=%lld", (long long)u->arg.i); break;
-    case POLY_ARG_FLOAT: fprintf(fp, " f=%g", u->arg.f); break;
-    case POLY_ARG_BOOL:  fprintf(fp, " b=%d", (int)u->arg.b); break;
-    case POLY_ARG_OPS:   fprintf(fp, " op=%s", poly_op_name(u->arg.ops)); break;
-    case POLY_ARG_RANGE: fprintf(fp, " axis=%lld", (long long)u->arg.range.axis_id); break;
-    case POLY_ARG_DEFINE_VAR:
-      fprintf(fp, " var=%s[%lld,%lld]",
-              u->arg.define_var.name ? u->arg.define_var.name : "?",
-              (long long)u->arg.define_var.min_val,
-              (long long)u->arg.define_var.max_val);
-      break;
-    default: break;
+  case POLY_ARG_INT:
+    fprintf(fp, " i=%lld", (long long)u->arg.i);
+    break;
+  case POLY_ARG_FLOAT:
+    fprintf(fp, " f=%g", u->arg.f);
+    break;
+  case POLY_ARG_BOOL:
+    fprintf(fp, " b=%d", (int)u->arg.b);
+    break;
+  case POLY_ARG_OPS:
+    fprintf(fp, " op=%s", poly_op_name(u->arg.ops));
+    break;
+  case POLY_ARG_RANGE:
+    fprintf(fp, " axis=%lld", (long long)u->arg.range.axis_id);
+    break;
+  case POLY_ARG_DEFINE_VAR:
+    fprintf(
+        fp, " var=%s[%lld,%lld]", u->arg.define_var.name ? u->arg.define_var.name : "?",
+        (long long)u->arg.define_var.min_val, (long long)u->arg.define_var.max_val
+    );
+    break;
+  default:
+    break;
   }
   fputc('\n', fp);
   if (depth >= max_depth) return;
@@ -859,13 +961,14 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
     poly_uop_dump_tree(fp, u->src[i], depth + 2, max_depth);
 }
 
-/* ── Named buffer registry ──────────────────────────────────────────── */
+/* Named buffer registry */
 
 #include <stdarg.h>
 
 static uint32_t reg_str_hash(const char *s) {
   uint32_t h = 2166136261u;
-  for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+  for (; *s; s++)
+    h = (h ^ (uint8_t)*s) * 16777619u;
   return h;
 }
 
@@ -902,8 +1005,14 @@ static int reg_grow_entries(PolyCtx *ctx) {
 }
 
 /* Internal: register a named buffer with given role */
-static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
-                                const int64_t *shape, int ndim, const char *name) {
+static PolyUOp *register_named(
+    PolyCtx *ctx,
+    PolyBufRole role,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *name
+) {
   if (!ctx || !name || ndim < 0 || ndim > 8) return NULL;
 
   /* Check for re-registration */
@@ -918,8 +1027,10 @@ static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
     }
     /* Validate shape */
     if (existing->ndim != ndim) {
-      fprintf(stderr, "poly_register: '%s' already registered with different ndim (%d vs %d)\n",
-              name, existing->ndim, ndim);
+      fprintf(
+          stderr, "poly_register: '%s' already registered with different ndim (%d vs %d)\n", name,
+          existing->ndim, ndim
+      );
       return NULL;
     }
     for (int i = 0; i < ndim; i++) {
@@ -933,13 +1044,14 @@ static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
 
   /* Compute numel */
   int64_t numel = 1;
-  for (int i = 0; i < ndim; i++) numel *= shape[i];
+  for (int i = 0; i < ndim; i++)
+    numel *= shape[i];
 
   /* Create BUFFER UOp with unique tag to avoid CSE dedup.
    * Use scalar dtype (not PtrDType) — matches poly_buffer() in sched.c.
    * The scheduling pipeline creates proper PARAM ptrs during lowering. */
-  PolyUOp *buf = poly_uop_tagged(ctx, POLY_OP_BUFFER, dt, NULL, 0,
-                                  poly_arg_int(numel), ctx->next_buf_tag++);
+  PolyUOp *buf =
+      poly_uop_tagged(ctx, POLY_OP_BUFFER, dt, NULL, 0, poly_arg_int(numel), ctx->next_buf_tag++);
 
   /* Arena-alloc entry */
   PolyRegEntry *entry = poly_arena_alloc(ctx->arena, sizeof(PolyRegEntry), _Alignof(PolyRegEntry));
@@ -949,7 +1061,8 @@ static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
   entry->buffer = buf;
   entry->ndim = ndim;
   entry->is_alias = false;
-  for (int i = 0; i < ndim; i++) entry->shape[i] = shape[i];
+  for (int i = 0; i < ndim; i++)
+    entry->shape[i] = shape[i];
 
   /* Append to entries array */
   if (ctx->n_entries >= ctx->entries_cap && reg_grow_entries(ctx) < 0) return NULL;
@@ -963,8 +1076,14 @@ static PolyUOp *register_named(PolyCtx *ctx, PolyBufRole role, PolyDType dt,
 
 /* Public registration wrappers */
 
-PolyUOp *poly_param(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                    const char *fmt, ...) {
+PolyUOp *poly_param(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) {
   va_list ap;
   va_start(ap, fmt);
   char *name = arena_vsprintf(ctx->arena, fmt, ap);
@@ -973,8 +1092,14 @@ PolyUOp *poly_param(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
   return register_named(ctx, POLY_ROLE_PARAM, dt, shape, ndim, name);
 }
 
-PolyUOp *poly_input(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                    const char *fmt, ...) {
+PolyUOp *poly_input(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) {
   va_list ap;
   va_start(ap, fmt);
   char *name = arena_vsprintf(ctx->arena, fmt, ap);
@@ -983,8 +1108,14 @@ PolyUOp *poly_input(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
   return register_named(ctx, POLY_ROLE_INPUT, dt, shape, ndim, name);
 }
 
-PolyUOp *poly_output(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                     const char *fmt, ...) {
+PolyUOp *poly_output(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) {
   va_list ap;
   va_start(ap, fmt);
   char *name = arena_vsprintf(ctx->arena, fmt, ap);
@@ -993,8 +1124,14 @@ PolyUOp *poly_output(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
   return register_named(ctx, POLY_ROLE_OUTPUT, dt, shape, ndim, name);
 }
 
-PolyUOp *poly_target(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                     const char *fmt, ...) {
+PolyUOp *poly_target(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) {
   va_list ap;
   va_start(ap, fmt);
   char *name = arena_vsprintf(ctx->arena, fmt, ap);
@@ -1003,8 +1140,14 @@ PolyUOp *poly_target(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
   return register_named(ctx, POLY_ROLE_TARGET, dt, shape, ndim, name);
 }
 
-PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                  const char *fmt, ...) {
+PolyUOp *poly_aux(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) {
   va_list ap;
   va_start(ap, fmt);
   char *name = arena_vsprintf(ctx->arena, fmt, ap);
@@ -1035,7 +1178,8 @@ int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name) 
   entry->buffer = existing->buffer;
   entry->ndim = existing->ndim;
   entry->is_alias = true;
-  for (int i = 0; i < existing->ndim; i++) entry->shape[i] = existing->shape[i];
+  for (int i = 0; i < existing->ndim; i++)
+    entry->shape[i] = existing->shape[i];
 
   if (ctx->n_entries >= ctx->entries_cap && reg_grow_entries(ctx) < 0) return -1;
   ctx->entries[ctx->n_entries++] = entry;
@@ -1103,9 +1247,11 @@ PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i) {
   return ctx->ep[i].sink;
 }
 
-/* ── UOp construction helpers (moved from frontend.c) ───────────────── */
+/* UOp construction helpers (moved from frontend.c) */
 
-int poly_op_count(void) { return (int)POLY_OP_COUNT; }
+int poly_op_count(void) {
+  return (int)POLY_OP_COUNT;
+}
 
 PolyUOp *poly_const_float(PolyCtx *ctx, double value) {
   return poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(value));
@@ -1120,8 +1266,7 @@ PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
 }
 
 PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
-  if (poly_dtype_is_float(dt))
-    return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
+  if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
   return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)value));
 }
 

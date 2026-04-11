@@ -8,29 +8,42 @@
 #include <stdlib.h>
 
 /* Helper: build a minimal WLRN bundle in memory */
-static uint8_t *make_wlrn(const char *manifest, const char *toc,
-                           const uint8_t *blob, uint32_t blob_len,
-                           uint32_t *out_len) {
+static uint8_t *make_wlrn(
+    const char *manifest,
+    const char *toc,
+    const uint8_t *blob,
+    uint32_t blob_len,
+    uint32_t *out_len
+) {
   uint32_t mlen = (uint32_t)strlen(manifest);
   uint32_t tlen = (uint32_t)strlen(toc);
   uint32_t total = 16 + mlen + tlen + blob_len;
   uint8_t *buf = calloc(total, 1);
 
   /* Magic "WLRN" LE */
-  buf[0] = 'W'; buf[1] = 'L'; buf[2] = 'R'; buf[3] = 'N';
+  buf[0] = 'W';
+  buf[1] = 'L';
+  buf[2] = 'R';
+  buf[3] = 'N';
   /* Version 1 LE */
-  buf[4] = 1; buf[5] = 0; buf[6] = 0; buf[7] = 0;
+  buf[4] = 1;
+  buf[5] = 0;
+  buf[6] = 0;
+  buf[7] = 0;
   /* Manifest length LE */
-  buf[8] = mlen & 0xFF; buf[9] = (mlen >> 8) & 0xFF;
-  buf[10] = (mlen >> 16) & 0xFF; buf[11] = (mlen >> 24) & 0xFF;
+  buf[8] = mlen & 0xFF;
+  buf[9] = (mlen >> 8) & 0xFF;
+  buf[10] = (mlen >> 16) & 0xFF;
+  buf[11] = (mlen >> 24) & 0xFF;
   /* TOC length LE */
-  buf[12] = tlen & 0xFF; buf[13] = (tlen >> 8) & 0xFF;
-  buf[14] = (tlen >> 16) & 0xFF; buf[15] = (tlen >> 24) & 0xFF;
+  buf[12] = tlen & 0xFF;
+  buf[13] = (tlen >> 8) & 0xFF;
+  buf[14] = (tlen >> 16) & 0xFF;
+  buf[15] = (tlen >> 24) & 0xFF;
 
   memcpy(buf + 16, manifest, mlen);
   memcpy(buf + 16 + mlen, toc, tlen);
-  if (blob && blob_len > 0)
-    memcpy(buf + 16 + mlen + tlen, blob, blob_len);
+  if (blob && blob_len > 0) memcpy(buf + 16 + mlen + tlen, blob, blob_len);
 
   *out_len = total;
   return buf;
@@ -39,7 +52,7 @@ static uint8_t *make_wlrn(const char *manifest, const char *toc,
 TEST(wlrn, valid_bundle) {
   const char *manifest = "{\"typeId\":\"wlearn.nn.mlp@1\"}";
   const char *toc = "[{\"id\":\"weights\",\"offset\":0,\"length\":4}]";
-  uint8_t blob[] = { 0xDE, 0xAD, 0xBE, 0xEF };
+  uint8_t blob[] = {0xDE, 0xAD, 0xBE, 0xEF};
   uint32_t len;
   uint8_t *data = make_wlrn(manifest, toc, blob, 4, &len);
 
@@ -61,7 +74,7 @@ TEST(wlrn, valid_bundle) {
 }
 
 TEST(wlrn, bad_magic) {
-  uint8_t data[] = { 'X', 'Y', 'Z', 'W', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint8_t data[] = {'X', 'Y', 'Z', 'W', 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   PolyWlrnView v;
   int ret = poly_wlrn_view(data, 16, &v);
   ASSERT_INT_EQ(ret, -1);
@@ -69,7 +82,7 @@ TEST(wlrn, bad_magic) {
 }
 
 TEST(wlrn, too_short) {
-  uint8_t data[] = { 'W', 'L', 'R', 'N' };
+  uint8_t data[] = {'W', 'L', 'R', 'N'};
   PolyWlrnView v;
   int ret = poly_wlrn_view(data, 4, &v);
   ASSERT_INT_EQ(ret, -1);
@@ -93,10 +106,8 @@ TEST(wlrn, empty_blob) {
 
 TEST(wlrn, truncated_header) {
   /* Manifest length claims 1000 bytes but total data is only 20 */
-  uint8_t data[20] = { 'W', 'L', 'R', 'N', 1, 0, 0, 0,
-                        0xE8, 0x03, 0, 0,   /* manifest_len = 1000 */
-                        0, 0, 0, 0,
-                        0, 0, 0, 0 };
+  uint8_t data[20] = {'W', 'L', 'R', 'N', 1, 0, 0, 0, 0xE8, 0x03, 0, 0, /* manifest_len = 1000 */
+                      0,   0,   0,   0,   0, 0, 0, 0};
   PolyWlrnView v;
   int ret = poly_wlrn_view(data, 20, &v);
   ASSERT_INT_EQ(ret, -1);

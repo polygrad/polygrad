@@ -39,8 +39,7 @@ PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
 
 /* Convenience: reduce a tensor along specified axes */
-PolyUOp *poly_reduce_axis(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *src,
-                         int64_t *axes, int n_axes);
+PolyUOp *poly_reduce_axis(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *src, int64_t *axes, int n_axes);
 
 /* Convenience: permute (transpose) tensor dimensions */
 PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim);

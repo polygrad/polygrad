@@ -30,19 +30,19 @@
 /* ══════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
-  bool has_sse2;   /* always true on x86-64 */
-  bool has_sse41;  /* cpuid leaf 1, ecx bit 19 (roundps, pextrd, pmulld) */
-  bool has_avx;    /* cpuid leaf 1, ecx bit 28 + os_avx_ok (VEX.128 legal) */
-  bool has_avx2;   /* cpuid leaf 7, ebx bit 5 */
-  bool has_fma;    /* cpuid leaf 1, ecx bit 12 */
-  bool os_avx_ok;  /* OSXSAVE + XGETBV confirms YMM state is saved */
+  bool has_sse2; /* always true on x86-64 */
+  bool has_sse41; /* cpuid leaf 1, ecx bit 19 (roundps, pextrd, pmulld) */
+  bool has_avx; /* cpuid leaf 1, ecx bit 28 + os_avx_ok (VEX.128 legal) */
+  bool has_avx2; /* cpuid leaf 7, ebx bit 5 */
+  bool has_fma; /* cpuid leaf 1, ecx bit 12 */
+  bool os_avx_ok; /* OSXSAVE + XGETBV confirms YMM state is saved */
 } X64CpuCaps;
 
 static X64CpuCaps g_cpu_caps;
 static bool g_cpu_caps_detected = false;
 
 static X64CpuCaps detect_cpu_caps(void) {
-  X64CpuCaps caps = { .has_sse2 = true };
+  X64CpuCaps caps = {.has_sse2 = true};
   unsigned int eax, ebx, ecx, edx;
 
   /* Leaf 1: check SSE4.1, FMA, AVX, OSXSAVE */
@@ -96,7 +96,8 @@ typedef struct {
 static void xb_grow(X64Buf *b, int need) {
   if (b->len + need <= b->cap) return;
   int nc = b->cap < 256 ? 256 : b->cap;
-  while (nc < b->len + need) nc *= 2;
+  while (nc < b->len + need)
+    nc *= 2;
   b->data = realloc(b->data, nc);
   b->cap = nc;
 }
@@ -171,14 +172,29 @@ static void lm_destroy(LocalMap *m) {
 /* ══════════════════════════════════════════════════════════════════════ */
 
 enum {
-  RAX = 0, RCX = 1, RDX = 2, RBX = 3,
-  RSP = 4, RBP = 5, RSI = 6, RDI = 7,
-  R8 = 8, R9 = 9, R10 = 10, R11 = 11,
-  R12 = 12, R13 = 13, R14 = 14, R15 = 15,
+  RAX = 0,
+  RCX = 1,
+  RDX = 2,
+  RBX = 3,
+  RSP = 4,
+  RBP = 5,
+  RSI = 6,
+  RDI = 7,
+  R8 = 8,
+  R9 = 9,
+  R10 = 10,
+  R11 = 11,
+  R12 = 12,
+  R13 = 13,
+  R14 = 14,
+  R15 = 15,
 };
 
 enum {
-  XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3,
+  XMM0 = 0,
+  XMM1 = 1,
+  XMM2 = 2,
+  XMM3 = 3,
 };
 
 /* Stack slot base offset from RBP.
@@ -196,20 +212,29 @@ static int slot_offset(int slot_idx) {
 
 /* Convert SIB scale factor (1/2/4/8) to the 2-bit SS encoding */
 static inline int scale_to_ss(int scale) {
-  switch (scale) { case 2: return 1; case 4: return 2; case 8: return 3; default: return 0; }
+  switch (scale) {
+  case 2:
+    return 1;
+  case 4:
+    return 2;
+  case 8:
+    return 3;
+  default:
+    return 0;
+  }
 }
 
-/* ── Vector configuration: parameterizes emission for SSE vs AVX2 ──── */
+/* Vector configuration: parameterizes emission for SSE vs AVX2 */
 typedef struct {
-  int width;       /* elements per vector: 4 (SSE) or 8 (AVX2) */
-  int reg_bits;    /* 128 (XMM) or 256 (YMM) */
-  bool use_vex;    /* true for VEX-encoded instructions (AVX2) */
+  int width; /* elements per vector: 4 (SSE) or 8 (AVX2) */
+  int reg_bits; /* 128 (XMM) or 256 (YMM) */
+  bool use_vex; /* true for VEX-encoded instructions (AVX2) */
 } VecConfig;
 
 /* SSE configuration (current default) */
-static const VecConfig VCFG_SSE = { .width = 4, .reg_bits = 128, .use_vex = false };
+static const VecConfig VCFG_SSE = {.width = 4, .reg_bits = 128, .use_vex = false};
 /* AVX2 configuration */
-static const VecConfig VCFG_AVX2 = { .width = 8, .reg_bits = 256, .use_vex = true };
+static const VecConfig VCFG_AVX2 = {.width = 8, .reg_bits = 256, .use_vex = true};
 
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  x86-64 instruction encoding helpers                                  */
@@ -341,11 +366,21 @@ static void emit_movsxd(X64Buf *b, int dst, int src) {
 static void emit_lea_sib(X64Buf *b, int dst, int base, int index, int scale) {
   int ss;
   switch (scale) {
-    case 1: ss = 0; break;
-    case 2: ss = 1; break;
-    case 4: ss = 2; break;
-    case 8: ss = 3; break;
-    default: ss = 0; break; /* shouldn't reach here */
+  case 1:
+    ss = 0;
+    break;
+  case 2:
+    ss = 1;
+    break;
+  case 4:
+    ss = 2;
+    break;
+  case 8:
+    ss = 3;
+    break;
+  default:
+    ss = 0;
+    break; /* shouldn't reach here */
   }
   emit_rex_always(b, 1, dst >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x8D);
@@ -412,9 +447,11 @@ static void emit_add_r64_imm32(X64Buf *b, int reg, int32_t imm) {
 }
 
 /* ret */
-static void emit_ret(X64Buf *b) { xb_byte(b, 0xC3); }
+static void emit_ret(X64Buf *b) {
+  xb_byte(b, 0xC3);
+}
 
-/* ── SSE scalar instructions ───────────────────────────────────────── */
+/* SSE scalar instructions */
 
 /* movss xmm, [rbp + disp32] — F3 0F 10 /r */
 static void emit_movss_xmm_rbp(X64Buf *b, int xmm, int disp) {
@@ -452,17 +489,29 @@ static void emit_movss_xmm_mem(X64Buf *b, int xmm, int base) {
 /* movups xmm, [r64] — 0F 10 /r with base register (packed 128-bit load) */
 static void emit_movups_xmm_mem(X64Buf *b, int xmm, int base) {
   if (xmm >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, 0, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x10);
-  if ((base & 7) == RBP) { emit_modrm(b, 1, xmm, base); xb_byte(b, 0); }
-  else { emit_modrm(b, 0, xmm, base); if ((base & 7) == RSP) xb_byte(b, 0x24); }
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x10);
+  if ((base & 7) == RBP) {
+    emit_modrm(b, 1, xmm, base);
+    xb_byte(b, 0);
+  } else {
+    emit_modrm(b, 0, xmm, base);
+    if ((base & 7) == RSP) xb_byte(b, 0x24);
+  }
 }
 
 /* movups [r64], xmm — 0F 11 /r (packed 128-bit store) */
 static void emit_movups_mem_xmm(X64Buf *b, int xmm, int base) {
   if (xmm >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, 0, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x11);
-  if ((base & 7) == RBP) { emit_modrm(b, 1, xmm, base); xb_byte(b, 0); }
-  else { emit_modrm(b, 0, xmm, base); if ((base & 7) == RSP) xb_byte(b, 0x24); }
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x11);
+  if ((base & 7) == RBP) {
+    emit_modrm(b, 1, xmm, base);
+    xb_byte(b, 0);
+  } else {
+    emit_modrm(b, 0, xmm, base);
+    if ((base & 7) == RSP) xb_byte(b, 0x24);
+  }
 }
 
 /* movss [r64], xmm — F3 0F 11 /r */
@@ -585,7 +634,7 @@ static void emit_cvttss2si(X64Buf *b, int r32, int xmm) {
   emit_modrm(b, 3, r32, xmm);
 }
 
-/* ── Jump instructions ─────────────────────────────────────────────── */
+/* Jump instructions */
 
 /* jmp rel32 — E9 cd (returns offset of rel32 for patching) */
 static int emit_jmp_rel32(X64Buf *b, int32_t rel) {
@@ -640,10 +689,15 @@ static void emit_neg_r64(X64Buf *b, int reg) {
 }
 
 /* cdq — sign-extend EAX into EDX:EAX */
-static void emit_cdq(X64Buf *b) { xb_byte(b, 0x99); }
+static void emit_cdq(X64Buf *b) {
+  xb_byte(b, 0x99);
+}
 
 /* cqo — sign-extend RAX into RDX:RAX */
-static void emit_cqo(X64Buf *b) { emit_rex_always(b, 1, 0, 0, 0); xb_byte(b, 0x99); }
+static void emit_cqo(X64Buf *b) {
+  emit_rex_always(b, 1, 0, 0, 0);
+  xb_byte(b, 0x99);
+}
 
 /* idiv r/m32 — F7 /7 */
 static void emit_idiv_r32(X64Buf *b, int reg) {
@@ -732,7 +786,7 @@ static void patch_rel32(X64Buf *b, int patch_off, int target_off) {
 /* ══════════════════════════════════════════════════════════════════════ */
 
 /* GPRs dedicated to loop counters (callee-saved, survive iterations) */
-static const int LOOP_GPRS[] = { R12, R13, R14, RBX };
+static const int LOOP_GPRS[] = {R12, R13, R14, RBX};
 #define N_LOOP_GPRS 4
 
 /* Track which UOps live in dedicated GPRs */
@@ -744,11 +798,11 @@ typedef struct {
 #define MAX_REG_ASSIGNS 8
 
 typedef struct {
-  PolyUOp *range;       /* which RANGE UOp */
-  int jge_disp_offset;  /* offset of rel32 in the jge instruction */
-  int loop_body_start;  /* byte offset of loop condition check */
-  int counter_slot;     /* stack slot index for loop counter */
-  int gpr;              /* dedicated GPR for counter (-1 = memory fallback) */
+  PolyUOp *range; /* which RANGE UOp */
+  int jge_disp_offset; /* offset of rel32 in the jge instruction */
+  int loop_body_start; /* byte offset of loop condition check */
+  int counter_slot; /* stack slot index for loop counter */
+  int gpr; /* dedicated GPR for counter (-1 = memory fallback) */
 } LoopPatch;
 
 #define MAX_LOOP_DEPTH 32
@@ -767,14 +821,13 @@ static void emit_inc_r64(X64Buf *b, int reg) {
   emit_modrm(b, 3, 0, reg);
 }
 
-/* ── SIB-addressed SSE loads/stores (for fused INDEX+LOAD/STORE) ───── */
+/* SIB-addressed SSE loads/stores (for fused INDEX+LOAD/STORE) */
 
 /* movss xmm, [base + index*scale] — F3 (REX) 0F 10 ModRM SIB */
 static void emit_movss_xmm_sib(X64Buf *b, int xmm, int base, int index, int scale) {
   int ss = scale_to_ss(scale);
   xb_byte(b, 0xF3);
-  if (xmm >= 8 || index >= 8 || base >= 8)
-    emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
+  if (xmm >= 8 || index >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x0F);
   xb_byte(b, 0x10);
   if ((base & 7) == RBP) {
@@ -791,8 +844,7 @@ static void emit_movss_xmm_sib(X64Buf *b, int xmm, int base, int index, int scal
 static void emit_movss_sib_xmm(X64Buf *b, int xmm, int base, int index, int scale) {
   int ss = scale_to_ss(scale);
   xb_byte(b, 0xF3);
-  if (xmm >= 8 || index >= 8 || base >= 8)
-    emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
+  if (xmm >= 8 || index >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x0F);
   xb_byte(b, 0x11);
   if ((base & 7) == RBP) {
@@ -806,12 +858,17 @@ static void emit_movss_sib_xmm(X64Buf *b, int xmm, int base, int index, int scal
 }
 
 /* SSE scalar op with SIB addressing: F3 (REX) 0F <opcode> xmm, [base+index*scale] */
-static void emit_sse_scalar_sib(X64Buf *b, uint8_t opcode, int xmm,
-                                 int base, int index, int scale) {
+static void emit_sse_scalar_sib(
+    X64Buf *b,
+    uint8_t opcode,
+    int xmm,
+    int base,
+    int index,
+    int scale
+) {
   int ss = scale_to_ss(scale);
   xb_byte(b, 0xF3);
-  if (xmm >= 8 || index >= 8 || base >= 8)
-    emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
+  if (xmm >= 8 || index >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
   xb_byte(b, 0x0F);
   xb_byte(b, opcode);
   if ((base & 7) == RBP) {
@@ -824,13 +881,21 @@ static void emit_sse_scalar_sib(X64Buf *b, uint8_t opcode, int xmm,
   }
 }
 
-static bool valid_sib_scale(int s) { return s == 1 || s == 2 || s == 4 || s == 8; }
+static bool valid_sib_scale(int s) {
+  return s == 1 || s == 2 || s == 4 || s == 8;
+}
 
 /* Load an integer source value into a GPR.
  * Checks register assignment first (loop counters, PARAMs), falls back to stack. */
-static void emit_load_int_src(X64Buf *buf, int dst_gpr, int w,
-                               PolyUOp *src_uop, int src_slot,
-                               RegAssign *regs, int n_regs) {
+static void emit_load_int_src(
+    X64Buf *buf,
+    int dst_gpr,
+    int w,
+    PolyUOp *src_uop,
+    int src_slot,
+    RegAssign *regs,
+    int n_regs
+) {
   int reg = find_reg(regs, n_regs, src_uop);
   if (reg >= 0) {
     emit_alu_rr(buf, w, 0x8B, dst_gpr, reg); /* mov dst, src_reg */
@@ -842,8 +907,7 @@ static void emit_load_int_src(X64Buf *buf, int dst_gpr, int w,
 /* Check if the index operand can be resolved to a GPR, without emitting code.
  * Returns the GPR number if already in a register (RANGE counter), or RCX if
  * the value is in a stack slot (will need a load), or -1 if unresolvable. */
-static int query_index_gpr(PolyUOp *idx_src, RegAssign *regs, int n_regs,
-                           LocalMap *locals) {
+static int query_index_gpr(PolyUOp *idx_src, RegAssign *regs, int n_regs, LocalMap *locals) {
   int r = find_reg(regs, n_regs, idx_src);
   if (r >= 0) return r;
   if (locals && lm_get(locals, idx_src) >= 0) return RCX;
@@ -852,9 +916,13 @@ static int query_index_gpr(PolyUOp *idx_src, RegAssign *regs, int n_regs,
 
 /* Materialize the index operand into a GPR, emitting a load if needed.
  * Call only after query_index_gpr returned >= 0. */
-static int materialize_index_gpr(X64Buf *buf, PolyUOp *idx_src,
-                                 RegAssign *regs, int n_regs,
-                                 LocalMap *locals) {
+static int materialize_index_gpr(
+    X64Buf *buf,
+    PolyUOp *idx_src,
+    RegAssign *regs,
+    int n_regs,
+    LocalMap *locals
+) {
   int r = find_reg(regs, n_regs, idx_src);
   if (r >= 0) return r;
   if (locals) {
@@ -869,28 +937,30 @@ static int materialize_index_gpr(X64Buf *buf, PolyUOp *idx_src,
 
 /* Use shared poly_find_index_through_cast from codegen.h */
 
-/* ── Packed SSE (no F3 prefix — operates on all 4 float lanes) ──────── */
+/* Packed SSE (no F3 prefix — operates on all 4 float lanes) */
 
 /* movups xmm, [rbp+disp] — 0F 10 /r (no prefix) */
 static void emit_movups_xmm_rbp(X64Buf *b, int xmm, int disp) {
   if (xmm >= 8) emit_rex(b, 0, xmm >> 3, 0, 0);
-  xb_byte(b, 0x0F); xb_byte(b, 0x10);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x10);
   emit_modrm_rbp_disp32(b, xmm, disp);
 }
 
 /* movups [rbp+disp], xmm — 0F 11 /r */
 static void emit_movups_rbp_xmm(X64Buf *b, int xmm, int disp) {
   if (xmm >= 8) emit_rex(b, 0, xmm >> 3, 0, 0);
-  xb_byte(b, 0x0F); xb_byte(b, 0x11);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x11);
   emit_modrm_rbp_disp32(b, xmm, disp);
 }
 
 /* movups xmm, [base+index*scale] — (REX) 0F 10 ModRM SIB */
 static void emit_movups_xmm_sib(X64Buf *b, int xmm, int base, int index, int scale) {
   int ss = scale_to_ss(scale);
-  if (xmm >= 8 || index >= 8 || base >= 8)
-    emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x10);
+  if (xmm >= 8 || index >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x10);
   if ((base & 7) == RBP) {
     emit_modrm(b, 1, xmm, 4);
     xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
@@ -904,9 +974,9 @@ static void emit_movups_xmm_sib(X64Buf *b, int xmm, int base, int index, int sca
 /* movups [base+index*scale], xmm — (REX) 0F 11 ModRM SIB */
 static void emit_movups_sib_xmm(X64Buf *b, int xmm, int base, int index, int scale) {
   int ss = scale_to_ss(scale);
-  if (xmm >= 8 || index >= 8 || base >= 8)
-    emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x11);
+  if (xmm >= 8 || index >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x11);
   if ((base & 7) == RBP) {
     emit_modrm(b, 1, xmm, 4);
     xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
@@ -920,17 +990,24 @@ static void emit_movups_sib_xmm(X64Buf *b, int xmm, int base, int index, int sca
 /* Packed SSE op: (REX) 0F <opcode> xmm, xmm — no F3 prefix */
 static void emit_sse_packed_rr(X64Buf *b, uint8_t opcode, int dst, int src) {
   if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, opcode);
+  xb_byte(b, 0x0F);
+  xb_byte(b, opcode);
   emit_modrm(b, 3, dst, src);
 }
 
 /* Packed SSE op with SIB: (REX) 0F <opcode> xmm, [base+index*scale] */
-static void emit_sse_packed_sib(X64Buf *b, uint8_t opcode, int xmm,
-                                 int base, int index, int scale) {
+static void emit_sse_packed_sib(
+    X64Buf *b,
+    uint8_t opcode,
+    int xmm,
+    int base,
+    int index,
+    int scale
+) {
   int ss = scale_to_ss(scale);
-  if (xmm >= 8 || index >= 8 || base >= 8)
-    emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, opcode);
+  if (xmm >= 8 || index >= 8 || base >= 8) emit_rex(b, 0, xmm >> 3, index >> 3, base >> 3);
+  xb_byte(b, 0x0F);
+  xb_byte(b, opcode);
   if ((base & 7) == RBP) {
     emit_modrm(b, 1, xmm, 4);
     xb_byte(b, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
@@ -944,7 +1021,8 @@ static void emit_sse_packed_sib(X64Buf *b, uint8_t opcode, int xmm,
 /* movups xmm, xmm — 0F 10 /r (mod=11) */
 static void emit_movups_xmm_xmm(X64Buf *b, int dst, int src) {
   if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x10);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x10);
   emit_modrm(b, 3, dst, src);
 }
 
@@ -972,8 +1050,7 @@ static void emit_vex2(X64Buf *b, int R, int vvvv, int L, int pp) {
 }
 
 /* 3-byte VEX: C4 [RXB mmmmm] [W vvvv L pp] — for 0F38/0F3A maps or R8+ regs */
-static void emit_vex3(X64Buf *b, int R, int X, int B, int mmmmm,
-                      int W, int vvvv, int L, int pp) {
+static void emit_vex3(X64Buf *b, int R, int X, int B, int mmmmm, int W, int vvvv, int L, int pp) {
   xb_byte(b, 0xC4);
   xb_byte(b, (uint8_t)(((R & 1) << 7) | ((X & 1) << 6) | ((B & 1) << 5) | (mmmmm & 0x1F)));
   xb_byte(b, (uint8_t)(((W & 1) << 7) | ((~vvvv & 0xF) << 3) | ((L & 1) << 2) | (pp & 3)));
@@ -981,8 +1058,16 @@ static void emit_vex3(X64Buf *b, int R, int X, int B, int mmmmm,
 
 /* Helper: emit VEX prefix choosing 2-byte or 3-byte form.
  * 2-byte form is only valid when: map=0F, W=0, X=1, B=1 (no ext needed). */
-static void emit_vex_auto(X64Buf *b, int dst, int src1, int src2_or_rm,
-                           int L, int pp, int mmmmm, int W) {
+static void emit_vex_auto(
+    X64Buf *b,
+    int dst,
+    int src1,
+    int src2_or_rm,
+    int L,
+    int pp,
+    int mmmmm,
+    int W
+) {
   int R = (dst < 8) ? 1 : 0;
   int X = 1; /* no index extension in reg-reg */
   int B = (src2_or_rm < 8) ? 1 : 0;
@@ -1092,8 +1177,16 @@ static void emit_vex_packed_rrr(X64Buf *b, uint8_t opc, int dst, int src1, int s
 }
 
 /* VEX packed ALU with SIB memory operand: dst = src1 op [base+idx*scale] */
-static void emit_vex_packed_rr_sib(X64Buf *b, uint8_t opc, int dst, int src1,
-                                    int base, int idx, int scale, int L) {
+static void emit_vex_packed_rr_sib(
+    X64Buf *b,
+    uint8_t opc,
+    int dst,
+    int src1,
+    int base,
+    int idx,
+    int scale,
+    int L
+) {
   int ss = scale_to_ss(scale);
   int R = (dst < 8) ? 1 : 0;
   int X = (idx < 8) ? 1 : 0;
@@ -1146,7 +1239,9 @@ static void emit_vroundss(X64Buf *b, int dst, int src1, int src2, int imm) {
 static void emit_roundps(X64Buf *b, int dst, int src, int imm) {
   xb_byte(b, 0x66);
   if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x08);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x3A);
+  xb_byte(b, 0x08);
   emit_modrm(b, 3, dst, src);
   xb_byte(b, (uint8_t)imm);
 }
@@ -1155,19 +1250,23 @@ static void emit_roundps(X64Buf *b, int dst, int src, int imm) {
 static void emit_roundss(X64Buf *b, int dst, int src, int imm) {
   xb_byte(b, 0x66);
   if (dst >= 8 || src >= 8) emit_rex(b, 0, dst >> 3, 0, src >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x0A);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x3A);
+  xb_byte(b, 0x0A);
   emit_modrm(b, 3, dst, src);
   xb_byte(b, (uint8_t)imm);
 }
 
-/* ── Per-lane variable shift helpers (SSE4.1, for !AVX2 fallback) ─────── */
+/* Per-lane variable shift helpers (SSE4.1, for !AVX2 fallback) */
 
 /* pextrd r32, xmm, imm8 — 66 (REX) 0F 3A 16 /r ib
  * ModRM.reg = xmm (source), ModRM.r/m = r32 (destination) */
 static void emit_pextrd(X64Buf *b, int gpr, int xmm, int imm) {
   xb_byte(b, 0x66);
   if (xmm >= 8 || gpr >= 8) emit_rex(b, 0, xmm >> 3, 0, gpr >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x16);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x3A);
+  xb_byte(b, 0x16);
   emit_modrm(b, 3, xmm, gpr);
   xb_byte(b, (uint8_t)imm);
 }
@@ -1177,7 +1276,9 @@ static void emit_pextrd(X64Buf *b, int gpr, int xmm, int imm) {
 static void emit_pinsrd(X64Buf *b, int xmm, int gpr, int imm) {
   xb_byte(b, 0x66);
   if (xmm >= 8 || gpr >= 8) emit_rex(b, 0, xmm >> 3, 0, gpr >> 3);
-  xb_byte(b, 0x0F); xb_byte(b, 0x3A); xb_byte(b, 0x22);
+  xb_byte(b, 0x0F);
+  xb_byte(b, 0x3A);
+  xb_byte(b, 0x22);
   emit_modrm(b, 3, xmm, gpr);
   xb_byte(b, (uint8_t)imm);
 }
@@ -1331,16 +1432,22 @@ static void emit_vpsrld_imm(X64Buf *b, int dst, int src, uint8_t imm, int L) {
 /* Width-aware vector load from stack slot.
  * vec_width determines instruction: >=8→vmovups YMM, 2-4→movups XMM, 0-1→movss */
 static void emit_width_load_rbp(X64Buf *b, int reg, int disp, int vec_width) {
-  if (vec_width >= 8)      emit_vmovups_ymm_rbp(b, reg, disp);
-  else if (vec_width >= 2) emit_movups_xmm_rbp(b, reg, disp);
-  else                     emit_movss_xmm_rbp(b, reg, disp);
+  if (vec_width >= 8)
+    emit_vmovups_ymm_rbp(b, reg, disp);
+  else if (vec_width >= 2)
+    emit_movups_xmm_rbp(b, reg, disp);
+  else
+    emit_movss_xmm_rbp(b, reg, disp);
 }
 
 /* Width-aware vector store to stack slot */
 static void emit_width_store_rbp(X64Buf *b, int reg, int disp, int vec_width) {
-  if (vec_width >= 8)      emit_vmovups_rbp_ymm(b, reg, disp);
-  else if (vec_width >= 2) emit_movups_rbp_xmm(b, reg, disp);
-  else                     emit_movss_rbp_xmm(b, reg, disp);
+  if (vec_width >= 8)
+    emit_vmovups_rbp_ymm(b, reg, disp);
+  else if (vec_width >= 2)
+    emit_movups_rbp_xmm(b, reg, disp);
+  else
+    emit_movss_rbp_xmm(b, reg, disp);
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -1348,23 +1455,24 @@ static void emit_width_store_rbp(X64Buf *b, int reg, int disp, int vec_width) {
 /*  stack round-trips. XMM0 reserved as scratch for non-file ops.        */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-#define XF_SIZE 15     /* XMM1 through XMM15 */
-#define XF_BASE 1      /* first allocatable XMM register number */
+#define XF_SIZE 15 /* XMM1 through XMM15 */
+#define XF_BASE 1 /* first allocatable XMM register number */
 
 typedef struct {
-  int slot;      /* stack slot this register mirrors (-1 = free) */
-  bool dirty;    /* value only in register, not yet in stack */
+  int slot; /* stack slot this register mirrors (-1 = free) */
+  bool dirty; /* value only in register, not yet in stack */
   int vec_width; /* 0 or 1 = scalar (movss, 4 bytes), 4 = SSE packed (movups, 16 bytes) */
-  bool pinned;   /* true if pinned (accumulator); never evicted */
+  bool pinned; /* true if pinned (accumulator); never evicted */
 } XfEntry;
 
 typedef struct {
   XfEntry e[XF_SIZE];
-  int next_evict;  /* round-robin pointer */
+  int next_evict; /* round-robin pointer */
 } XmmFile;
 
 static void xf_init(XmmFile *f) {
-  for (int i = 0; i < XF_SIZE; i++) f->e[i] = (XfEntry){ .slot = -1 };
+  for (int i = 0; i < XF_SIZE; i++)
+    f->e[i] = (XfEntry){.slot = -1};
   f->next_evict = 0;
 }
 
@@ -1380,17 +1488,24 @@ static int xf_find(XmmFile *f, int slot) {
  * avoid1/avoid2/avoid3 = regs not to evict (-1 = unused).
  * slot_last_use + cur_pos enable Belady's eviction (evict furthest next_use).
  * Pass slot_last_use=NULL for legacy round-robin fallback. */
-static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
-                           int avoid1, int avoid2, int avoid3,
-                           const int *slot_last_use, int cur_pos,
-                           bool *jit_ok) {
+static int xf_alloc_belady(
+    XmmFile *f,
+    X64Buf *buf,
+    int slot,
+    int avoid1,
+    int avoid2,
+    int avoid3,
+    const int *slot_last_use,
+    int cur_pos,
+    bool *jit_ok
+) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
 
   /* Find free */
   for (int i = 0; i < XF_SIZE; i++) {
     if (f->e[i].slot < 0) {
-      f->e[i] = (XfEntry){ .slot = slot };
+      f->e[i] = (XfEntry){.slot = slot};
       return XF_BASE + i;
     }
   }
@@ -1403,7 +1518,10 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
     if (f->e[i].pinned) continue; /* never evict pinned (accumulator) */
     if (slot_last_use) {
       int dist = (f->e[i].slot >= 0) ? slot_last_use[f->e[i].slot] - cur_pos : 0;
-      if (dist > best_dist) { best_dist = dist; best_ei = i; }
+      if (dist > best_dist) {
+        best_dist = dist;
+        best_ei = i;
+      }
     } else {
       /* Round-robin fallback */
       best_ei = f->next_evict;
@@ -1422,23 +1540,20 @@ static int xf_alloc_belady(XmmFile *f, X64Buf *buf, int slot,
   }
   int reg = XF_BASE + best_ei;
   if (f->e[best_ei].dirty) {
-    emit_width_store_rbp(buf, reg,
-                         -slot_offset(f->e[best_ei].slot), f->e[best_ei].vec_width);
+    emit_width_store_rbp(buf, reg, -slot_offset(f->e[best_ei].slot), f->e[best_ei].vec_width);
   }
-  f->e[best_ei] = (XfEntry){ .slot = slot };
+  f->e[best_ei] = (XfEntry){.slot = slot};
   return reg;
 }
 
 /* Round-robin eviction wrapper. All wrappers thread jit_ok through
  * to xf_alloc_belady so the all-pinned failure is caught everywhere. */
-static int xf_alloc(XmmFile *f, X64Buf *buf, int slot,
-                    int avoid1, int avoid2, bool *jit_ok) {
+static int xf_alloc(XmmFile *f, X64Buf *buf, int slot, int avoid1, int avoid2, bool *jit_ok) {
   return xf_alloc_belady(f, buf, slot, avoid1, avoid2, -1, NULL, 0, jit_ok);
 }
 
 /* Get slot's register, loading from stack if not cached. */
-static int xf_get_avoid(XmmFile *f, X64Buf *buf, int slot,
-                        int avoid1, bool *jit_ok) {
+static int xf_get_avoid(XmmFile *f, X64Buf *buf, int slot, int avoid1, bool *jit_ok) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
   r = xf_alloc(f, buf, slot, avoid1, -1, jit_ok);
@@ -1450,8 +1565,7 @@ static int xf_get(XmmFile *f, X64Buf *buf, int slot, bool *jit_ok) {
 }
 
 /* Get slot's register for packed value, loading with the given width */
-static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot,
-                           int width, bool *jit_ok) {
+static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot, int width, bool *jit_ok) {
   int r = xf_find(f, slot);
   if (r >= 0) return r;
   r = xf_alloc(f, buf, slot, -1, -1, jit_ok);
@@ -1462,15 +1576,15 @@ static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot,
 
 /* Clear all entries without spilling (iteration-local values discarded) */
 static void xf_clear(XmmFile *f) {
-  for (int i = 0; i < XF_SIZE; i++) f->e[i] = (XfEntry){ .slot = -1 };
+  for (int i = 0; i < XF_SIZE; i++)
+    f->e[i] = (XfEntry){.slot = -1};
 }
 
 /* Flush: spill all dirty entries using per-entry vec_width, then clear */
 static void xf_flush(XmmFile *f, X64Buf *buf) {
   for (int i = 0; i < XF_SIZE; i++) {
     if (f->e[i].slot >= 0 && f->e[i].dirty) {
-      emit_width_store_rbp(buf, XF_BASE + i,
-                           -slot_offset(f->e[i].slot), f->e[i].vec_width);
+      emit_width_store_rbp(buf, XF_BASE + i, -slot_offset(f->e[i].slot), f->e[i].vec_width);
     }
   }
   xf_clear(f);
@@ -1503,10 +1617,10 @@ static bool dtype_is_int(PolyDType dt) {
 static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
   if (!u) return NULL;
   if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
-  if (u->op == POLY_OP_AFTER && u->n_src > 0)   return resolve_acc_base_fn(u->src[0]);
-  if (u->op == POLY_OP_CAST && u->n_src > 0)    return resolve_acc_base_fn(u->src[0]);
-  if (u->op == POLY_OP_BITCAST && u->n_src > 0)  return resolve_acc_base_fn(u->src[0]);
-  if (u->op == POLY_OP_INDEX && u->n_src > 0)    return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_AFTER && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_CAST && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_BITCAST && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_INDEX && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
   return NULL;
 }
 
@@ -1516,7 +1630,12 @@ static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
 /*  extraction of per-UOp handler functions.                              */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-typedef struct { PolyUOp *uop; int base_reg; PolyUOp *idx_src; int itemsize; } DeferredSIB;
+typedef struct {
+  PolyUOp *uop;
+  int base_reg;
+  PolyUOp *idx_src;
+  int itemsize;
+} DeferredSIB;
 
 typedef struct {
   /* Code buffer */
@@ -1529,8 +1648,8 @@ typedef struct {
   int next_slot;
   int n_slots;
   /* Liveness */
-  int *last_consumer;   /* [n] last UOp index that references uops[i] */
-  int *slot_last_use;   /* [n_slots+16] last consumer for Belady's eviction */
+  int *last_consumer; /* [n] last UOp index that references uops[i] */
+  int *slot_last_use; /* [n_slots+16] last consumer for Belady's eviction */
   /* CPU/config */
   X64CpuCaps cpu;
   bool use_avx;
@@ -1561,12 +1680,11 @@ typedef struct {
   bool jit_ok;
 } X64RenderCtx;
 
-/* ── Context helpers (replace former macros) ─────────────────────────── */
+/* Context helpers (replace former macros) */
 
 static void ctx_bind_slot(X64RenderCtx *c, PolyUOp *u, int slot, int uop_idx) {
   lm_set(&c->locals, u, slot);
-  if (slot >= 0 && slot < c->n_slots + 16)
-    c->slot_last_use[slot] = c->last_consumer[uop_idx];
+  if (slot >= 0 && slot < c->n_slots + 16) c->slot_last_use[slot] = c->last_consumer[uop_idx];
 }
 
 static void ctx_reload_sign_mask(X64RenderCtx *c) {
@@ -1575,19 +1693,19 @@ static void ctx_reload_sign_mask(X64RenderCtx *c) {
   if (c->use_avx2) {
     emit_vbroadcastss_ymm_xmm(&c->buf, XMM0, XMM0);
   } else {
-    xb_byte(&c->buf, 0x0F); xb_byte(&c->buf, 0xC6);
-    emit_modrm(&c->buf, 3, XMM0, XMM0); xb_byte(&c->buf, 0x00);
+    xb_byte(&c->buf, 0x0F);
+    xb_byte(&c->buf, 0xC6);
+    emit_modrm(&c->buf, 3, XMM0, XMM0);
+    xb_byte(&c->buf, 0x00);
   }
   c->rax_slot = -1;
 }
 
-static void ctx_load_int_src(X64RenderCtx *c, int dst_gpr, int w,
-                             PolyUOp *src_uop, int src_slot) {
-  emit_load_int_src(&c->buf, dst_gpr, w, src_uop, src_slot,
-                    c->reg_assigns, c->n_reg_assigns);
+static void ctx_load_int_src(X64RenderCtx *c, int dst_gpr, int w, PolyUOp *src_uop, int src_slot) {
+  emit_load_int_src(&c->buf, dst_gpr, w, src_uop, src_slot, c->reg_assigns, c->n_reg_assigns);
 }
 
-/* ── Cleanup helpers ─────────────────────────────────────────────────── */
+/* Cleanup helpers */
 
 static void ctx_free(X64RenderCtx *c) {
   lm_destroy(&c->locals);
@@ -1604,11 +1722,10 @@ static bool x64_emit_param(X64RenderCtx *c, PolyUOp *u, int i) {
   int off = -slot_offset(slot);
   int param_idx = (int)u->arg.i;
   int gpr = -1;
-  if (c->n_param_gprs_assigned < c->n_param_gprs &&
-      c->n_reg_assigns < MAX_REG_ASSIGNS) {
+  if (c->n_param_gprs_assigned < c->n_param_gprs && c->n_reg_assigns < MAX_REG_ASSIGNS) {
     gpr = LOOP_GPRS[c->param_gpr_start + c->n_param_gprs_assigned];
     c->n_param_gprs_assigned++;
-    c->reg_assigns[c->n_reg_assigns++] = (RegAssign){ u, gpr };
+    c->reg_assigns[c->n_reg_assigns++] = (RegAssign){u, gpr};
     emit_mov_r64_mem(&c->buf, gpr, R15, 8 * param_idx);
   } else {
     emit_mov_r64_mem(&c->buf, RAX, R15, 8 * param_idx);
@@ -1670,19 +1787,19 @@ static bool x64_emit_endif(X64RenderCtx *c) {
 }
 
 uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
-  X64RenderCtx c = { .jit_ok = true, .rax_slot = -1 };
+  X64RenderCtx c = {.jit_ok = true, .rax_slot = -1};
   c.uops = uops;
   c.n = n;
-  /* buf is a macro alias to c.buf so all emit helpers write to the ctx buffer */
-  #define buf c.buf
+/* buf is a macro alias to c.buf so all emit helpers write to the ctx buffer */
+#define buf c.buf
   lm_init(&c.locals, n * 4); /* 25% load factor for safe open addressing */
 
-  /* ── Pre-scan: count slots, RANGEs, PARAMs, detect max vec width ─── */
+  /* Pre-scan: count slots, RANGEs, PARAMs, detect max vec width */
   int n_slots = 0, n_params = 0, n_define_vars = 0, n_ranges = 0, max_vec_width = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP ||
-        u->op == POLY_OP_GROUP || u->op == POLY_OP_ENDIF)
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP ||
+        u->op == POLY_OP_ENDIF)
       continue;
     if (u->op == POLY_OP_AFTER) continue;
     if (u->op == POLY_OP_STORE) continue;
@@ -1700,28 +1817,34 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   /* Select VecConfig based on IR vector width and CPU caps */
   X64CpuCaps cpu = get_cpu_caps();
   c.cpu = cpu;
-  bool use_avx = cpu.has_avx;  /* VEX.128 legal (for packed vec4 ops) */
+  bool use_avx = cpu.has_avx; /* VEX.128 legal (for packed vec4 ops) */
   bool use_avx2 = (max_vec_width >= 8) && cpu.has_avx2 && cpu.os_avx_ok;
   c.use_avx = use_avx;
   c.use_avx2 = use_avx2;
-  (void)VCFG_AVX2; (void)VCFG_SSE; /* used by helper functions */
+  (void)VCFG_AVX2;
+  (void)VCFG_SSE; /* used by helper functions */
 
-  /* ── Phase 3a: precompute last consumer index per UOp ────────────── */
+  /* Phase 3a: precompute last consumer index per UOp */
   /* last_consumer[i] = the latest UOp index j that references uops[i]
    * as a source. Used for dead-value freeing and Belady's eviction.
    * Build a ptr→index map for O(1) source lookups. */
   c.last_consumer = calloc((size_t)n, sizeof(int));
   int *last_consumer = c.last_consumer; /* local alias for readability */
   int *n_consumers = calloc((size_t)n, sizeof(int)); /* total consumer count per UOp */
-  for (int i = 0; i < n; i++) last_consumer[i] = i; /* default: self */
+  for (int i = 0; i < n; i++)
+    last_consumer[i] = i; /* default: self */
   /* Simple open-addressing hash map: UOp* → linearized index */
-  typedef struct { PolyUOp *key; int idx; } UOpMapEntry;
+  typedef struct {
+    PolyUOp *key;
+    int idx;
+  } UOpMapEntry;
   int uop_map_cap = n < 32 ? 64 : (n * 4);
   UOpMapEntry *uop_map = calloc((size_t)uop_map_cap, sizeof(UOpMapEntry));
   for (int i = 0; i < n; i++) {
     uint64_t h = ((uint64_t)(uintptr_t)uops[i] >> 3) * 0x9E3779B97F4A7C15ULL;
     int pos = (int)(h % (uint64_t)uop_map_cap);
-    while (uop_map[pos].key) pos = (pos + 1) % uop_map_cap;
+    while (uop_map[pos].key)
+      pos = (pos + 1) % uop_map_cap;
     uop_map[pos].key = uops[i];
     uop_map[pos].idx = i;
   }
@@ -1732,7 +1855,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int sp = (int)(sh % (uint64_t)uop_map_cap);
       int j = -1;
       while (uop_map[sp].key) {
-        if (uop_map[sp].key == u->src[k]) { j = uop_map[sp].idx; break; }
+        if (uop_map[sp].key == u->src[k]) {
+          j = uop_map[sp].idx;
+          break;
+        }
         sp = (sp + 1) % uop_map_cap;
       }
       if (j >= 0) {
@@ -1744,7 +1870,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   /* Per-slot last-use tracking (filled during rendering) */
   c.slot_last_use = calloc((size_t)(n_slots + 16), sizeof(int));
   int *slot_last_use = c.slot_last_use; /* local alias */
-  for (int i = 0; i < n_slots + 16; i++) slot_last_use[i] = INT32_MAX;
+  for (int i = 0; i < n_slots + 16; i++)
+    slot_last_use[i] = INT32_MAX;
 
   /* GPR allocation plan: LOOP_GPRS = {R12, R13, R14, RBX}
    * Reserve first n_ranges GPRs for loop counters.
@@ -1767,7 +1894,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   if (frame_size < 8) frame_size = 8;
   c.frame_size = frame_size;
 
-  /* ── Prologue ────────────────────────────────────────────────────── */
+  /* Prologue */
   emit_push(&buf, RBP);
   /* mov rbp, rsp */
   emit_rex_always(&buf, 1, 0, 0, 0);
@@ -1794,36 +1921,38 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
   } else {
     /* shufps xmm0, xmm0, 0 — broadcast to all 4 lanes */
-    xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-    emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+    xb_byte(&buf, 0x0F);
+    xb_byte(&buf, 0xC6);
+    emit_modrm(&buf, 3, XMM0, XMM0);
+    xb_byte(&buf, 0x00);
   }
 
-  /* RELOAD_SIGN_MASK / LM_SET now dispatch to ctx helpers.
-   * The macros are thin wrappers that capture the local `c` and `i`. */
-  #define RELOAD_SIGN_MASK() ctx_reload_sign_mask(&c)
-  #define LM_SET(u_ptr, slot_val) ctx_bind_slot(&c, (u_ptr), (slot_val), i)
+/* RELOAD_SIGN_MASK / LM_SET now dispatch to ctx helpers.
+ * The macros are thin wrappers that capture the local `c` and `i`. */
+#define RELOAD_SIGN_MASK() ctx_reload_sign_mask(&c)
+#define LM_SET(u_ptr, slot_val) ctx_bind_slot(&c, (u_ptr), (slot_val), i)
 
-  /* ── Walk UOps ───────────────────────────────────────────────────── */
+  /* Walk UOps */
   xf_init(&c.xf);
 
-  /* Local aliases for heavily-used context fields.
-   * These reference the ctx struct so extracted handlers can use `c.` directly. */
-  #define locals    c.locals
-  #define xf        c.xf
-  #define rax_slot  c.rax_slot
-  #define jit_ok    c.jit_ok
-  #define reg_assigns    c.reg_assigns
-  #define n_reg_assigns  c.n_reg_assigns
-  #define n_loop_regs    c.n_loop_regs
-  #define loop_stack     c.loop_stack
-  #define loop_depth     c.loop_depth
-  #define if_patch_stack c.if_patch_stack
-  #define if_depth       c.if_depth
-  #define deferred       c.deferred
-  #define n_deferred     c.n_deferred
-  #define next_slot      c.next_slot
-  #define n_define_vars  c.n_define_vars
-  #define n_param_gprs_assigned c.n_param_gprs_assigned
+/* Local aliases for heavily-used context fields.
+ * These reference the ctx struct so extracted handlers can use `c.` directly. */
+#define locals c.locals
+#define xf c.xf
+#define rax_slot c.rax_slot
+#define jit_ok c.jit_ok
+#define reg_assigns c.reg_assigns
+#define n_reg_assigns c.n_reg_assigns
+#define n_loop_regs c.n_loop_regs
+#define loop_stack c.loop_stack
+#define loop_depth c.loop_depth
+#define if_patch_stack c.if_patch_stack
+#define if_depth c.if_depth
+#define deferred c.deferred
+#define n_deferred c.n_deferred
+#define next_slot c.next_slot
+#define n_define_vars c.n_define_vars
+#define n_param_gprs_assigned c.n_param_gprs_assigned
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
@@ -1834,31 +1963,30 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     }
 
     /* Skip non-code UOps */
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
-      continue;
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
 
-    /* ── Phase 3a: free dead XMM entries ──────────────────────────── */
+    /* Phase 3a: free dead XMM entries */
     for (int ri = 0; ri < XF_SIZE; ri++) {
       int s = xf.e[ri].slot;
       if (s >= 0 && !xf.e[ri].pinned && slot_last_use[s] < i) {
         /* Last consumer already processed; free without spill */
-        xf.e[ri] = (XfEntry){ .slot = -1 };
+        xf.e[ri] = (XfEntry){.slot = -1};
       }
     }
 
-    /* ── PARAM: load buffer pointer from args array ──────────────── */
+    /* PARAM: load buffer pointer from args array */
     if (u->op == POLY_OP_PARAM) {
       if (!x64_emit_param(&c, u, i)) goto x64_fail;
       continue;
     }
 
-    /* ── DEFINE_VAR: load int variable from args array ───────────── */
+    /* DEFINE_VAR: load int variable from args array */
     if (u->op == POLY_OP_DEFINE_VAR) {
       if (!x64_emit_define_var(&c, u, i)) goto x64_fail;
       continue;
     }
 
-    /* ── CONST: store immediate value to slot ────────────────────── */
+    /* CONST: store immediate value to slot */
     if (u->op == POLY_OP_CONST) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
@@ -1877,8 +2005,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_vmovups_rbp_ymm(&buf, XMM0, off);
           } else {
             /* shufps xmm0, xmm0, 0 — broadcast lane 0 */
-            xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-            emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+            xb_byte(&buf, 0x0F);
+            xb_byte(&buf, 0xC6);
+            emit_modrm(&buf, 3, XMM0, XMM0);
+            xb_byte(&buf, 0x00);
             emit_movups_rbp_xmm(&buf, XMM0, off);
           }
           RELOAD_SIGN_MASK();
@@ -1895,8 +2025,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           emit_vmovups_rbp_ymm(&buf, XMM0, off);
         } else {
           /* shufps xmm0, xmm0, 0 — broadcast to 4 lanes */
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-          emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0xC6);
+          emit_modrm(&buf, 3, XMM0, XMM0);
+          xb_byte(&buf, 0x00);
           emit_movups_rbp_xmm(&buf, XMM0, off);
         }
         RELOAD_SIGN_MASK();
@@ -1915,19 +2047,19 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── DEFINE_LOCAL / DEFINE_REG: initialize accumulator ───────── */
+    /* DEFINE_LOCAL / DEFINE_REG: initialize accumulator */
     if (u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG) {
       if (!x64_emit_define_acc(&c, u, i)) goto x64_fail;
       continue;
     }
 
-    /* ── AFTER: alias to src[0] ──────────────────────────────────── */
+    /* AFTER: alias to src[0] */
     if (u->op == POLY_OP_AFTER) {
       if (!x64_emit_after(&c, u, i)) goto x64_fail;
       continue;
     }
 
-    /* ── INDEX: pointer arithmetic (base + idx * itemsize) ───────── */
+    /* INDEX: pointer arithmetic (base + idx * itemsize) */
     if (u->op == POLY_OP_INDEX) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
@@ -1944,8 +2076,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       /* Check if all consumers of this INDEX can fuse via SIB.
        * If so, skip emission — LOAD/STORE will use [base+idx*scale] directly. */
       int base_reg = find_reg(reg_assigns, n_reg_assigns, u->src[0]);
-      int idx_reg_check = query_index_gpr(u->src[1],
-                                          reg_assigns, n_reg_assigns, &locals);
+      int idx_reg_check = query_index_gpr(u->src[1], reg_assigns, n_reg_assigns, &locals);
       /* Pure query: no code emitted, safe to check before deciding to skip INDEX */
       if (base_reg >= 0 && idx_reg_check >= 0 && valid_sib_scale(itemsize)) {
         /* Check all consumers: every consumer must be LOAD/STORE/CAST.
@@ -1971,8 +2102,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_r64_rbp(&buf, RAX, -slot_offset(base_slot));
       }
 
-      int idx_reg = materialize_index_gpr(&buf, u->src[1],
-                                          reg_assigns, n_reg_assigns, &locals);
+      int idx_reg = materialize_index_gpr(&buf, u->src[1], reg_assigns, n_reg_assigns, &locals);
       if (idx_reg >= 0) {
         if (idx_reg != RCX) emit_alu_rr(&buf, 1, 0x8B, RCX, idx_reg);
       } else {
@@ -1992,7 +2122,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── LOAD: dereference pointer ───────────────────────────────── */
+    /* LOAD: dereference pointer */
     if (u->op == POLY_OP_LOAD) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
@@ -2045,7 +2175,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             emit_mov_r32_rbp(&buf, RAX, -slot_offset(gate_slot_v));
             rax_slot = -1;
             /* test eax, eax */
-            xb_byte(&buf, 0x85); emit_modrm(&buf, 3, RAX, RAX);
+            xb_byte(&buf, 0x85);
+            emit_modrm(&buf, 3, RAX, RAX);
             /* jnz valid_load (skip zero path) */
             xb_byte(&buf, 0x75);
             int jnz_fixup = buf.len;
@@ -2074,8 +2205,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
-          int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
-                                              reg_assigns, n_reg_assigns, &locals);
+          int idx_reg =
+              materialize_index_gpr(&buf, idx_uop->src[1], reg_assigns, n_reg_assigns, &locals);
           int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
             is = idx_uop->src[0]->dtype.bitsize / 8;
@@ -2087,8 +2218,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               PolyUOp *fj = uops[last_consumer[i]];
               for (int k = 0; k < fj->n_src; k++) {
                 if (fj->src[k] == u && k == 1 && !packed &&
-                    poly_opset_has(POLY_GROUP_ALU, fj->op) &&
-                    dtype_is_float(fj->dtype) && fj->n_src >= 2)
+                    poly_opset_has(POLY_GROUP_ALU, fj->op) && dtype_is_float(fj->dtype) &&
+                    fj->n_src >= 2)
                   can_defer = true;
               }
               if (can_defer && n_deferred < 32) {
@@ -2096,7 +2227,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
                  * materialize_index_gpr is called at consumption time
                  * so the GPR value is fresh (RCX may be clobbered by
                  * SHL/SHR or other int ops between deferral and use). */
-                deferred[n_deferred++] = (DeferredSIB){ u, base_reg, idx_uop->src[1], is };
+                deferred[n_deferred++] = (DeferredSIB){u, base_reg, idx_uop->src[1], is};
                 LM_SET(u, slot);
                 goto x64_load_done;
               }
@@ -2120,8 +2251,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* Non-fused float LOAD via pointer */
         {
           int dst2 = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
-          if (ptr_slot != rax_slot)
-            emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
+          if (ptr_slot != rax_slot) emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
           if (packed && u->dtype.count >= 8)
             emit_vmovups_ymm_mem(&buf, dst2, RAX);
           else if (packed)
@@ -2142,7 +2272,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (gate_slot_v >= 0) {
           emit_mov_r32_rbp(&buf, RAX, -slot_offset(gate_slot_v));
           rax_slot = -1;
-          xb_byte(&buf, 0x85); emit_modrm(&buf, 3, RAX, RAX); /* test eax,eax */
+          xb_byte(&buf, 0x85);
+          emit_modrm(&buf, 3, RAX, RAX); /* test eax,eax */
           xb_byte(&buf, 0x75); /* jnz valid_load */
           int jnz_fixup = buf.len;
           xb_byte(&buf, 0);
@@ -2151,9 +2282,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           xb_byte(&buf, 0xEB); /* jmp done */
           gate_jmp_done_fixup = buf.len;
           xb_byte(&buf, 0);
-          { int disp = buf.len - jnz_fixup - 1;
-            if (disp > 127) { fprintf(stderr, "x64 jit: int gated load jnz disp %d > 127\n", disp); goto x64_fail; }
-            buf.data[jnz_fixup] = (uint8_t)disp; }
+          {
+            int disp = buf.len - jnz_fixup - 1;
+            if (disp > 127) {
+              fprintf(stderr, "x64 jit: int gated load jnz disp %d > 127\n", disp);
+              goto x64_fail;
+            }
+            buf.data[jnz_fixup] = (uint8_t)disp;
+          }
         }
       }
       /* Check for fused SIB addressing (INDEX was skipped). */
@@ -2161,8 +2297,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
-          int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
-                                              reg_assigns, n_reg_assigns, &locals);
+          int idx_reg =
+              materialize_index_gpr(&buf, idx_uop->src[1], reg_assigns, n_reg_assigns, &locals);
           int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
             is = idx_uop->src[0]->dtype.bitsize / 8;
@@ -2181,8 +2317,10 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               emit_modrm(&buf, 0, RAX, 4);
               xb_byte(&buf, (uint8_t)((ss << 6) | ((idx_reg & 7) << 3) | (base_reg & 7)));
             }
-            if (w64) emit_mov_rbp_r64(&buf, RAX, off);
-            else emit_mov_rbp_r32(&buf, RAX, off);
+            if (w64)
+              emit_mov_rbp_r64(&buf, RAX, off);
+            else
+              emit_mov_rbp_r32(&buf, RAX, off);
             rax_slot = slot;
             LM_SET(u, slot);
             goto x64_load_done;
@@ -2190,8 +2328,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
       }
       /* Non-fused integer LOAD: dereference pointer from slot */
-      if (ptr_slot != rax_slot)
-        emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
+      if (ptr_slot != rax_slot) emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
       if (u->dtype.bitsize <= 32) {
         emit_mov_r32_mem_base(&buf, RAX, RAX);
         emit_mov_rbp_r32(&buf, RAX, off);
@@ -2215,7 +2352,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── STORE: write value to memory or accumulator ─────────────── */
+    /* STORE: write value to memory or accumulator */
     if (u->op == POLY_OP_STORE) {
       int ptr_slot = lm_get(&locals, u->src[0]);
       int val_slot = lm_get(&locals, u->src[1]);
@@ -2231,7 +2368,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             if (dtype_is_float(u->src[1]->dtype)) {
               int vr = xf_find(&xf, val_slot);
               bool used_xmm0 = false;
-              if (vr < 0) { vr = XMM0; emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot)); used_xmm0 = true; }
+              if (vr < 0) {
+                vr = XMM0;
+                emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
+                used_xmm0 = true;
+              }
               emit_movss_rbp_xmm(&buf, vr, -slot_offset(acc_slot));
               /* Update register file: acc_slot now has this value */
               int ar = xf_find(&xf, acc_slot);
@@ -2239,8 +2380,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               if (used_xmm0) RELOAD_SIGN_MASK();
             } else {
               int vw = u->src[1]->dtype.bitsize <= 32 ? 0 : 1;
-              emit_load_int_src(&buf, RAX, vw, u->src[1], val_slot,
-                                reg_assigns, n_reg_assigns);
+              emit_load_int_src(&buf, RAX, vw, u->src[1], val_slot, reg_assigns, n_reg_assigns);
               emit_mov_rbp_r64(&buf, RAX, -slot_offset(acc_slot));
               rax_slot = acc_slot;
             }
@@ -2256,9 +2396,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         int vr = xf_find(&xf, val_slot);
         if (vr < 0) {
           vr = XMM0;
-          if (packed && sw >= 8) emit_vmovups_ymm_rbp(&buf, XMM0, -slot_offset(val_slot));
-          else if (packed) emit_movups_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
-          else emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
+          if (packed && sw >= 8)
+            emit_vmovups_ymm_rbp(&buf, XMM0, -slot_offset(val_slot));
+          else if (packed)
+            emit_movups_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
+          else
+            emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
         }
 
         /* Check for fused INDEX store (walk through pointer CAST/BITCAST) */
@@ -2266,32 +2409,35 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (st_idx) {
           PolyUOp *idx_uop = st_idx;
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
-          int idx_reg = materialize_index_gpr(&buf, idx_uop->src[1],
-                                              reg_assigns, n_reg_assigns, &locals);
+          int idx_reg =
+              materialize_index_gpr(&buf, idx_uop->src[1], reg_assigns, n_reg_assigns, &locals);
           int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
           if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
             is = idx_uop->src[0]->dtype.bitsize / 8;
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
-            if (packed && sw >= 8) emit_vmovups_sib_ymm(&buf, vr, base_reg, idx_reg, is);
-            else if (packed) emit_movups_sib_xmm(&buf, vr, base_reg, idx_reg, is);
-            else emit_movss_sib_xmm(&buf, vr, base_reg, idx_reg, is);
+            if (packed && sw >= 8)
+              emit_vmovups_sib_ymm(&buf, vr, base_reg, idx_reg, is);
+            else if (packed)
+              emit_movups_sib_xmm(&buf, vr, base_reg, idx_reg, is);
+            else
+              emit_movss_sib_xmm(&buf, vr, base_reg, idx_reg, is);
             continue;
           }
         }
 
         /* Non-fused: store via pointer in RAX */
-        if (ptr_slot != rax_slot)
-          emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
-        if (packed && sw >= 8) emit_vmovups_mem_ymm(&buf, vr, RAX);
-        else if (packed) emit_movups_mem_xmm(&buf, vr, RAX);
-        else emit_movss_mem_xmm(&buf, vr, RAX);
+        if (ptr_slot != rax_slot) emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
+        if (packed && sw >= 8)
+          emit_vmovups_mem_ymm(&buf, vr, RAX);
+        else if (packed)
+          emit_movups_mem_xmm(&buf, vr, RAX);
+        else
+          emit_movss_mem_xmm(&buf, vr, RAX);
       } else {
         /* Integer store: reload pointer + use GPR-aware value load */
-        if (ptr_slot != rax_slot)
-          emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
+        if (ptr_slot != rax_slot) emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
         int vw = u->src[1]->dtype.bitsize <= 32 ? 0 : 1;
-        emit_load_int_src(&buf, RCX, vw, u->src[1], val_slot,
-                          reg_assigns, n_reg_assigns);
+        emit_load_int_src(&buf, RCX, vw, u->src[1], val_slot, reg_assigns, n_reg_assigns);
         if (vw) {
           emit_rex_always(&buf, 1, RCX >> 3, 0, RAX >> 3);
         } else {
@@ -2304,7 +2450,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── RANGE: loop start ───────────────────────────────────────── */
+    /* RANGE: loop start */
     if (u->op == POLY_OP_RANGE) {
       int slot = next_slot++;
       LM_SET(u, slot);
@@ -2314,8 +2460,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       /* Check if bound is a compile-time constant */
       PolyUOp *bound_uop = u->src[0];
-      bool bound_is_const = (bound_uop->op == POLY_OP_CONST &&
-                             bound_uop->arg.kind == POLY_ARG_INT);
+      bool bound_is_const = (bound_uop->op == POLY_OP_CONST && bound_uop->arg.kind == POLY_ARG_INT);
       int64_t bound_val = bound_is_const ? bound_uop->arg.i : 0;
 
       /* Try to assign a dedicated GPR for the loop counter.
@@ -2324,7 +2469,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int gpr = -1;
       if (n_loop_regs < N_LOOP_GPRS && n_reg_assigns < MAX_REG_ASSIGNS) {
         gpr = LOOP_GPRS[n_loop_regs++];
-        reg_assigns[n_reg_assigns++] = (RegAssign){ u, gpr };
+        reg_assigns[n_reg_assigns++] = (RegAssign){u, gpr};
         emit_alu_rr(&buf, 1, 0x33, gpr, gpr);
       } else {
         emit_mov_rbp_imm64_sx(&buf, -slot_offset(slot), 0);
@@ -2334,7 +2479,6 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
        * must survive inner-loop register pressure (xf_clear would discard them). */
       xf_flush(&xf, &buf);
       rax_slot = -1;
-
 
       /* Loop condition check (backward jump target) */
       int loop_start = buf.len;
@@ -2359,24 +2503,27 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
       {
         loop_stack[loop_depth++] = (LoopPatch){
-          .range = u,
-          .jge_disp_offset = jge_off,
-          .loop_body_start = loop_start,
-          .counter_slot = slot,
-          .gpr = gpr,
+            .range = u,
+            .jge_disp_offset = jge_off,
+            .loop_body_start = loop_start,
+            .counter_slot = slot,
+            .gpr = gpr,
         };
       }
 
       continue;
     }
 
-    /* ── END: loop close ─────────────────────────────────────────── */
+    /* END: loop close */
     if (u->op == POLY_OP_END) {
       /* Find matching RANGE — END.src[1] is the RANGE being closed */
       PolyUOp *range = (u->n_src >= 2) ? u->src[1] : NULL;
       int match = -1;
       for (int d = loop_depth - 1; d >= 0; d--) {
-        if (loop_stack[d].range == range) { match = d; break; }
+        if (loop_stack[d].range == range) {
+          match = d;
+          break;
+        }
       }
       if (match < 0) continue;
 
@@ -2410,22 +2557,25 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── IF: conditional forward jump ────────────────────────────── */
+    /* IF: conditional forward jump */
     if (u->op == POLY_OP_IF) {
       if (!x64_emit_if(&c, u)) goto x64_fail;
       continue;
     }
 
-    /* ── ENDIF: patch IF forward jump ────────────────────────────── */
+    /* ENDIF: patch IF forward jump */
     if (u->op == POLY_OP_ENDIF) {
       if (!x64_emit_endif(&c)) goto x64_fail;
       continue;
     }
 
-    /* ── Vector CAST: packed float↔int conversion in XMM/YMM ────── */
+    /* Vector CAST: packed float↔int conversion in XMM/YMM */
     if (u->op == POLY_OP_CAST && u->dtype.count > 1) {
       int s0 = lm_get(&locals, u->src[0]);
-      if (s0 < 0) { next_slot++; goto skip_slot; }
+      if (s0 < 0) {
+        next_slot++;
+        goto skip_slot;
+      }
       bool src_float = dtype_is_float(u->src[0]->dtype);
       bool dst_float = dtype_is_float(u->dtype);
       int vw = u->dtype.count > u->src[0]->dtype.count ? u->dtype.count : u->src[0]->dtype.count;
@@ -2464,10 +2614,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
     }
 
-    /* ── Scalar CAST: type conversion ──────────────────────────── */
+    /* Scalar CAST: type conversion */
     if (u->op == POLY_OP_CAST) {
       int s0 = lm_get(&locals, u->src[0]);
-      if (s0 < 0) { next_slot++; goto skip_slot; }
+      if (s0 < 0) {
+        next_slot++;
+        goto skip_slot;
+      }
 
       bool src_float = dtype_is_float(u->src[0]->dtype);
       bool dst_float = dtype_is_float(u->dtype);
@@ -2493,7 +2646,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           /* cvttss2si rax, xmm0 (64-bit): F3 REX.W 0F 2C /r */
           xb_byte(&buf, 0xF3);
           emit_rex_always(&buf, 1, 0, 0, 0);
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2C);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0x2C);
           emit_modrm(&buf, 3, RAX, XMM0);
         } else {
           emit_cvttss2si(&buf, RAX, XMM0);
@@ -2507,7 +2661,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           /* cvtsi2ss xmm0, rax (64-bit source) */
           xb_byte(&buf, 0xF3);
           emit_rex_always(&buf, 1, 0, 0, 0);
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2A);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0x2A);
           emit_modrm(&buf, 3, XMM0, RAX);
         } else {
           emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
@@ -2545,21 +2700,25 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           emit_mov_rbp_r32(&buf, RAX, off);
         else
           emit_mov_rbp_r64(&buf, RAX, off);
-        rax_slot = slot;      }
+        rax_slot = slot;
+      }
       LM_SET(u, slot);
       continue;
     }
 
-    /* ── Vector BITCAST: no-op retag in XMM register file ────────── */
+    /* Vector BITCAST: no-op retag in XMM register file */
     if (u->op == POLY_OP_BITCAST && u->dtype.count > 1) {
       int s0 = lm_get(&locals, u->src[0]);
-      if (s0 < 0) { next_slot++; goto skip_slot; }
+      if (s0 < 0) {
+        next_slot++;
+        goto skip_slot;
+      }
       /* Just alias to the same slot -- bits stay in the same XMM register */
       LM_SET(u, s0);
       continue;
     }
 
-    /* ── Scalar BITCAST: reinterpret bits across float/int domains ── */
+    /* Scalar BITCAST: reinterpret bits across float/int domains */
     if (u->op == POLY_OP_BITCAST) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
@@ -2568,8 +2727,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
       bool src_float = dtype_is_float(u->src[0]->dtype);
       int src_bits = u->src[0]->dtype.count > 1
-        ? (u->src[0]->dtype.bitsize / u->src[0]->dtype.count)
-        : u->src[0]->dtype.bitsize;
+                         ? (u->src[0]->dtype.bitsize / u->src[0]->dtype.count)
+                         : u->src[0]->dtype.bitsize;
       bool wide = (src_bits > 32);
 
       /* If source is in XMM register file (float), spill to stack first */
@@ -2591,24 +2750,28 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0));
         emit_mov_rbp_r32(&buf, RAX, off);
       }
-      rax_slot = slot;      LM_SET(u, slot);
+      rax_slot = slot;
+      LM_SET(u, slot);
       continue;
     }
 
-    /* ── GEP: extract scalar lane from vector register ──────────── */
-    if (u->op == POLY_OP_GEP && u->n_src >= 1 && dtype_is_float(u->dtype) &&
-        u->dtype.count == 1 && u->src[0]->dtype.count > 1) {
+    /* GEP: extract scalar lane from vector register */
+    if (u->op == POLY_OP_GEP && u->n_src >= 1 && dtype_is_float(u->dtype) && u->dtype.count == 1 &&
+        u->src[0]->dtype.count > 1) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
       (void)off;
       int lane = 0;
-      if (u->arg.kind == POLY_ARG_INT) lane = (int)u->arg.i;
+      if (u->arg.kind == POLY_ARG_INT)
+        lane = (int)u->arg.i;
       else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1)
         lane = (int)u->arg.int_tuple.vals[0];
 
       /* Get source vec from register file */
       int sr = xf_find(&xf, lm_get(&locals, u->src[0]));
-      if (sr < 0) sr = xf_get_packed_w(&xf, &buf, lm_get(&locals, u->src[0]), u->src[0]->dtype.count, &jit_ok);
+      if (sr < 0)
+        sr =
+            xf_get_packed_w(&xf, &buf, lm_get(&locals, u->src[0]), u->src[0]->dtype.count, &jit_ok);
 
       /* Allocate scalar destination (avoid evicting source) */
       int dr = xf_alloc(&xf, &buf, slot, sr, -1, &jit_ok);
@@ -2620,11 +2783,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (hilo_lane == 0) {
           emit_movss_xmm_xmm(&buf, dr, XMM0);
         } else {
-          uint8_t imm = (uint8_t)(hilo_lane | (hilo_lane << 2) | (hilo_lane << 4) | (hilo_lane << 6));
+          uint8_t imm =
+              (uint8_t)(hilo_lane | (hilo_lane << 2) | (hilo_lane << 4) | (hilo_lane << 6));
           /* pshufd: 66 0F 70 /r ib */
           xb_byte(&buf, 0x66);
           if (dr >= 8) emit_rex(&buf, 0, dr >> 3, 0, 0);
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x70);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0x70);
           emit_modrm(&buf, 3, dr, XMM0);
           xb_byte(&buf, imm);
         }
@@ -2642,7 +2807,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           /* pshufd: 66 0F 70 /r ib */
           xb_byte(&buf, 0x66);
           if (dr >= 8 || sr >= 8) emit_rex(&buf, 0, dr >> 3, 0, sr >> 3);
-          xb_byte(&buf, 0x0F); xb_byte(&buf, 0x70);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0x70);
           emit_modrm(&buf, 3, dr, sr);
           xb_byte(&buf, imm);
         }
@@ -2653,7 +2819,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── VECTORIZE: construct vector from scalar values ──────────── */
+    /* VECTORIZE: construct vector from scalar values */
     /* Integer VECTORIZE: construct int vec from scalar ints.
      * Store each scalar int32 to consecutive stack positions, load as packed XMM. */
     if (u->op == POLY_OP_VECTORIZE && u->n_src >= 2 && dtype_is_int(u->dtype) &&
@@ -2733,19 +2899,22 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         if (dr != sr[0]) emit_movss_xmm_xmm(&buf, dr, sr[0]);
         /* unpcklps dr, sr[1]: dr = {dr[0], sr1[0], dr[1], sr1[1]} = {s0, s1, ?, ?} */
         if (sr[1] >= 8 || dr >= 8) emit_rex(&buf, 0, dr >> 3, 0, sr[1] >> 3);
-        xb_byte(&buf, 0x0F); xb_byte(&buf, 0x14);
+        xb_byte(&buf, 0x0F);
+        xb_byte(&buf, 0x14);
         emit_modrm(&buf, 3, dr, sr[1]);
 
         /* Build second pair in XMM0 */
         emit_movss_xmm_xmm(&buf, XMM0, sr[2]);
         /* unpcklps xmm0, sr[3] */
         if (sr[3] >= 8) emit_rex(&buf, 0, 0, 0, sr[3] >> 3);
-        xb_byte(&buf, 0x0F); xb_byte(&buf, 0x14);
+        xb_byte(&buf, 0x0F);
+        xb_byte(&buf, 0x14);
         emit_modrm(&buf, 3, XMM0, sr[3]);
 
         /* movlhps dr, xmm0: dr = {dr[0], dr[1], xmm0[0], xmm0[1]} = {s0, s1, s2, s3} */
         if (dr >= 8) emit_rex(&buf, 0, dr >> 3, 0, 0);
-        xb_byte(&buf, 0x0F); xb_byte(&buf, 0x16);
+        xb_byte(&buf, 0x0F);
+        xb_byte(&buf, 0x16);
         emit_modrm(&buf, 3, dr, XMM0);
       } else {
         /* Fallback for non-4-wide: store to stack slots, load as packed */
@@ -2762,7 +2931,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── ALU operations ──────────────────────────────────────────── */
+    /* ALU operations */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
@@ -2774,12 +2943,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         is_float_op = u->n_src > 0 && dtype_is_float(u->src[0]->dtype);
 
       if (is_float_op) {
-        /* ── Float ALU ──────────────────────────────────────────── */
+        /* Float ALU */
         int s0 = (u->n_src > 0) ? lm_get(&locals, u->src[0]) : -1;
         int s1 = (u->n_src > 1) ? lm_get(&locals, u->src[1]) : -1;
         int s2 = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
 
-        /* ── Register-file float ops (scalar or packed SSE) ────── */
+        /* Register-file float ops (scalar or packed SSE) */
         bool pk = dtype_is_vec_float(u->dtype);
         /* For comparisons, check input dtype */
         if (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE)
@@ -2788,7 +2957,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         /* Get src0 from register file */
         int sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
         if (sr0 < 0 && s0 >= 0) {
-          sr0 = pk ? xf_get_packed_w(&xf, &buf, s0, u->dtype.count, &jit_ok) : xf_get(&xf, &buf, s0, &jit_ok);
+          sr0 = pk ? xf_get_packed_w(&xf, &buf, s0, u->dtype.count, &jit_ok)
+                   : xf_get(&xf, &buf, s0, &jit_ok);
         }
 
         /* For binary ops: check if src1 was deferred (can fuse as SIB operand) */
@@ -2796,14 +2966,17 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         int ds1_idx_reg = -1;
         if (u->n_src > 1) {
           for (int d = 0; d < n_deferred; d++)
-            if (deferred[d].uop == u->src[1]) { ds1 = &deferred[d]; break; }
+            if (deferred[d].uop == u->src[1]) {
+              ds1 = &deferred[d];
+              break;
+            }
         }
         /* Materialize the index GPR now (not at deferral time) so it's
          * fresh — RCX may have been clobbered since the LOAD was deferred.
          * Note: nothing between here and emit_*_sib() may clobber RCX. */
         if (ds1) {
-          ds1_idx_reg = materialize_index_gpr(&buf, ds1->idx_src,
-                                               reg_assigns, n_reg_assigns, &locals);
+          ds1_idx_reg =
+              materialize_index_gpr(&buf, ds1->idx_src, reg_assigns, n_reg_assigns, &locals);
           /* Should always succeed: deferral only happens when
            * query_index_gpr returned >= 0 at the producer site. */
           assert(ds1_idx_reg >= 0);
@@ -2813,19 +2986,19 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
          * For VEX packed binary ops, try to find in regfile first; if not cached,
          * leave sr1=-1 and fold as [rbp+slot] memory operand in the ALU handler. */
         int sr1 = -1;
-        if (!ds1 && s1 >= 0 && u->n_src > 1 &&
-            u->op != POLY_OP_NEG && u->op != POLY_OP_SQRT &&
-            u->op != POLY_OP_RECIPROCAL && u->op != POLY_OP_TRUNC &&
-            u->op != POLY_OP_EXP2 && u->op != POLY_OP_LOG2 &&
-            u->op != POLY_OP_SIN) {
-          bool can_fold_mem = pk && use_avx2 &&
-            (u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL ||
-             u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX);
+        if (!ds1 && s1 >= 0 && u->n_src > 1 && u->op != POLY_OP_NEG && u->op != POLY_OP_SQRT &&
+            u->op != POLY_OP_RECIPROCAL && u->op != POLY_OP_TRUNC && u->op != POLY_OP_EXP2 &&
+            u->op != POLY_OP_LOG2 && u->op != POLY_OP_SIN) {
+          bool can_fold_mem =
+              pk && use_avx2 &&
+              (u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL ||
+               u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX);
           if (can_fold_mem) {
             /* Try to find in regfile; if not cached, will fold as memory operand */
             sr1 = xf_find(&xf, s1);
           } else {
-            sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count, &jit_ok) : xf_get_avoid(&xf, &buf, s1, sr0, &jit_ok);
+            sr1 = pk ? xf_get_packed_w(&xf, &buf, s1, u->dtype.count, &jit_ok)
+                     : xf_get_avoid(&xf, &buf, s1, sr0, &jit_ok);
           }
         }
 
@@ -2838,8 +3011,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         int dr;
         if (sr0 >= XF_BASE && sr0 < XF_BASE + XF_SIZE &&
             (u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL ||
-             u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX ||
-             u->op == POLY_OP_NEG || u->op == POLY_OP_SQRT) &&
+             u->op == POLY_OP_FDIV || u->op == POLY_OP_MAX || u->op == POLY_OP_NEG ||
+             u->op == POLY_OP_SQRT) &&
             u->op != POLY_OP_RECIPROCAL) {
           /* Reuse sr0's register as destination — saves a movss copy.
            * Only spill if src0 is used again later (check remaining UOps). */
@@ -2861,8 +3034,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
               }
             }
             if (src0_used_later) {
-              emit_width_store_rbp(&buf, sr0,
-                                   -slot_offset(xf.e[si].slot), xf.e[si].vec_width);
+              emit_width_store_rbp(&buf, sr0, -slot_offset(xf.e[si].slot), xf.e[si].vec_width);
             }
             xf.e[si].dirty = false;
           }
@@ -2873,313 +3045,347 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
 
         switch (u->op) {
-          /* Binary: copy s0→dst, op with s1 */
+        /* Binary: copy s0→dst, op with s1 */
+        case POLY_OP_ADD:
+        case POLY_OP_SUB:
+        case POLY_OP_MUL:
+        case POLY_OP_FDIV:
+        case POLY_OP_MAX: {
+          bool pk = dtype_is_vec_float(u->dtype);
+          uint8_t opc = 0;
+          switch (u->op) {
           case POLY_OP_ADD:
+            opc = 0x58;
+            break;
           case POLY_OP_SUB:
+            opc = 0x5C;
+            break;
           case POLY_OP_MUL:
+            opc = 0x59;
+            break;
           case POLY_OP_FDIV:
-          case POLY_OP_MAX: {
-            bool pk = dtype_is_vec_float(u->dtype);
-            uint8_t opc = 0;
-            switch (u->op) {
-              case POLY_OP_ADD:  opc = 0x58; break;
-              case POLY_OP_SUB:  opc = 0x5C; break;
-              case POLY_OP_MUL:  opc = 0x59; break;
-              case POLY_OP_FDIV: opc = 0x5E; break;
-              case POLY_OP_MAX:  opc = 0x5F; break;
-              default: break;
-            }
-            if (pk && use_avx2) {
-              /* AVX 3-operand: dst = sr0 op sr1 (non-destructive) */
-              int vL = (u->dtype.count >= 8) ? 1 : 0;
-              if (ds1)
-                emit_vex_packed_rr_sib(&buf, opc, dr, sr0, ds1->base_reg, ds1_idx_reg, ds1->itemsize, vL);
-              else if (s1 >= 0 && xf_find(&xf, s1) < 0) {
-                /* src1 not in register: fold as memory operand from stack slot */
-                emit_vex_packed_rr_rbp(&buf, opc, dr, sr0, -slot_offset(s1), vL);
-              } else
-                emit_vex_packed_rrr(&buf, opc, dr, sr0, sr1, vL);
-            } else if (pk) {
-              if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
-              if (ds1)
-                emit_sse_packed_sib(&buf, opc, dr, ds1->base_reg, ds1_idx_reg, ds1->itemsize);
-              else
-                emit_sse_packed_rr(&buf, opc, dr, sr1);
-            } else {
-              if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
-              if (ds1)
-                emit_sse_scalar_sib(&buf, opc, dr, ds1->base_reg, ds1_idx_reg, ds1->itemsize);
-              else
-                emit_sse_scalar_rr(&buf, opc, dr, sr1);
-            }
+            opc = 0x5E;
             break;
-          }
-
-          /* Unary */
-          case POLY_OP_NEG:
-            /* XOR with sign mask (preloaded in XMM0 in prologue) */
-            if (use_avx2 && dtype_is_vec_float(u->dtype)) {
-              int vL = (u->dtype.count >= 8) ? 1 : 0;
-              emit_vxorps(&buf, dr, sr0, XMM0, vL);
-            } else {
-              if (dr != sr0) {
-                if (dtype_is_vec_float(u->dtype))
-                  emit_movups_xmm_xmm(&buf, dr, sr0);
-                else
-                  emit_movss_xmm_xmm(&buf, dr, sr0);
-              }
-              emit_xorps(&buf, dr, XMM0);
-            }
+          case POLY_OP_MAX:
+            opc = 0x5F;
             break;
-          case POLY_OP_SQRT:
-            if (use_avx2 && dtype_is_vec_float(u->dtype))
-              emit_vex_packed_sqrt(&buf, dr, sr0, (u->dtype.count >= 8) ? 1 : 0);
-            else if (dtype_is_vec_float(u->dtype))
-              emit_sse_packed_rr(&buf, 0x51, dr, sr0);
-            else
-              emit_sse_scalar_rr(&buf, 0x51, dr, sr0);
-            break;
-          case POLY_OP_RECIPROCAL: {
-            /* 1.0 / x: load 1.0f into XMM0 (scratch), divide by sr0, store in dr */
-            emit_mov_r32_imm32(&buf, RAX, 0x3F800000);
-            emit_movd_xmm_r32(&buf, XMM0, RAX);
-            if (use_avx2 && dtype_is_vec_float(u->dtype)) {
-              int vL = (u->dtype.count >= 8) ? 1 : 0;
-              if (vL) emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
-              else { xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-                     emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00); }
-              emit_vex_packed_rrr(&buf, 0x5E, dr, XMM0, sr0, vL);
-            } else if (dtype_is_vec_float(u->dtype)) {
-              /* Broadcast 1.0f to all lanes: shufps xmm0, xmm0, 0 */
-              xb_byte(&buf, 0x0F); xb_byte(&buf, 0xC6);
-              emit_modrm(&buf, 3, XMM0, XMM0); xb_byte(&buf, 0x00);
-              emit_sse_packed_rr(&buf, 0x5E, XMM0, sr0); /* xmm0 = 1.0/sr0 */
-              if (dr != XMM0) emit_movups_xmm_xmm(&buf, dr, XMM0);
-            } else {
-              emit_sse_scalar_rr(&buf, 0x5E, XMM0, sr0);
-              if (dr != XMM0) emit_movss_xmm_xmm(&buf, dr, XMM0);
-            }
-            RELOAD_SIGN_MASK();
-            break;
-          }
-          case POLY_OP_TRUNC:
-            /* roundps/vroundps imm=0x0B: truncate toward zero (imm[1:0]=11, bit2=1 force imm) */
-            if (pk) {
-              if (use_avx2)
-                emit_vroundps(&buf, dr, sr0, 0x0B, (u->dtype.count >= 8) ? 1 : 0);
-              else if (use_avx)
-                emit_vroundps(&buf, dr, sr0, 0x0B, 0); /* VEX.128 roundps */
-              else if (cpu.has_sse41)
-                { if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0); emit_roundps(&buf, dr, dr, 0x0B); }
-              else {
-                /* Pre-SSE4.1 fallback: cvttss2si + cvtsi2ss per lane (only reachable with devec=1) */
-                fprintf(stderr, "x64 jit: packed TRUNC without SSE4.1 not supported\n");
-                goto x64_fail;
-              }
-            } else {
-              if (use_avx)
-                emit_vroundss(&buf, dr, sr0, sr0, 0x0B); /* VEX.128 roundss */
-              else if (cpu.has_sse41) {
-                if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
-                emit_roundss(&buf, dr, dr, 0x0B);
-              } else {
-                /* Pre-SSE4.1: cvttss2si + cvtsi2ss */
-                /* cvttss2si eax, xmm — F3 0F 2C /r */
-                xb_byte(&buf, 0xF3); xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2C);
-                emit_modrm(&buf, 3, RAX, sr0);
-                /* cvtsi2ss xmm, eax — F3 0F 2A /r */
-                xb_byte(&buf, 0xF3); xb_byte(&buf, 0x0F); xb_byte(&buf, 0x2A);
-                emit_modrm(&buf, 3, dr, RAX);
-                rax_slot = -1;
-              }
-            }
-            break;
-
-          /* Comparisons */
-          case POLY_OP_CMPLT:
-          case POLY_OP_CMPEQ:
-          case POLY_OP_CMPNE: {
-            uint8_t pred = u->op == POLY_OP_CMPLT ? 1 : u->op == POLY_OP_CMPEQ ? 0 : 4;
-            if (pk) {
-              /* Packed CMP: vcmpps dst, sr0, sr1, imm8 — result is mask in XMM/YMM */
-              int vL = (u->src[0]->dtype.count >= 8) ? 1 : 0;
-              /* VEX.NDS.pp=00.0F C2 /r ib */
-              emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x00, 1, 0);
-              xb_byte(&buf, 0xC2);
-              emit_modrm(&buf, 3, dr, sr1);
-              xb_byte(&buf, pred);
-              /* Result is vector mask, keep in register file */
-              xf.e[dr - XF_BASE].dirty = true;
-              xf.e[dr - XF_BASE].vec_width = u->src[0]->dtype.count;
-            } else {
-              /* Scalar CMP: use XMM0 as scratch, result is int → goes to stack */
-              emit_movss_xmm_xmm(&buf, XMM0, sr0);
-              emit_cmpss_rr(&buf, XMM0, sr1, pred);
-              emit_movd_r32_xmm(&buf, RAX, XMM0);
-              emit_and_r32_imm32(&buf, RAX, 1);
-              emit_mov_rbp_r64(&buf, RAX, off);
-              /* Free the destination XMM since result is int (in stack) */
-              xf.e[dr - XF_BASE].slot = -1;
-              xf.e[dr - XF_BASE].dirty = false;
-              RELOAD_SIGN_MASK();
-            }
-            break;
-          }
-
-          /* Ternary */
-          case POLY_OP_WHERE: {
-            if (pk && u->src[0]->dtype.count > 1) {
-              /* Packed WHERE: mask is vector (from packed CMP), in register file.
-               * WHERE(mask, true_val, false_val) = (mask & true) | (~mask & false) */
-              int vw = u->dtype.count;
-              int vL = (vw >= 8) ? 1 : 0;
-              int sr_mask = xf_find(&xf, s0);
-              if (sr_mask < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
-              int sr_true = xf_find(&xf, s1);
-              if (sr_true < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
-              int sr_false = xf_find(&xf, s2);
-              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
-              /* Revalidate after loads */
-              if (xf_find(&xf, s1) < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
-              if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
-              if (xf_find(&xf, slot) < 0)
-                dr = xf_alloc_belady(&xf, &buf, slot, sr_mask, sr_true, sr_false,
-                                      slot_last_use, i, &jit_ok);
-              /* dr = (mask & true) | (~mask & false) */
-              emit_vandps(&buf, dr, sr_mask, sr_true, vL);
-              emit_vandnps(&buf, XMM0, sr_mask, sr_false, vL);
-              emit_vorps(&buf, dr, dr, XMM0, vL);
-              RELOAD_SIGN_MASK();
-            } else {
-              /* Scalar WHERE: cond is int (in stack), true/false are float (in reg file) */
-              int sr_true = xf_find(&xf, s1);
-              if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1, &jit_ok);
-              int sr_false = xf_find(&xf, s2);
-              if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
-              int sr_true_check = xf_find(&xf, s1);
-              if (sr_true_check < 0) sr_true = xf_get_avoid(&xf, &buf, s1, sr_false, &jit_ok);
-              else sr_true = sr_true_check;
-              if (xf_find(&xf, slot) < 0)
-                dr = xf_alloc_belady(&xf, &buf, slot, sr_true, sr_false, -1,
-                                      slot_last_use, i, &jit_ok);
-              emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
-              emit_neg_r32(&buf, RAX);
-              emit_movd_xmm_r32(&buf, XMM0, RAX);
-              if (dr != sr_true) emit_movss_xmm_xmm(&buf, dr, sr_true);
-              emit_andps(&buf, dr, XMM0);
-              emit_andnps(&buf, XMM0, sr_false);
-              emit_orps(&buf, dr, XMM0);
-              rax_slot = -1;
-              RELOAD_SIGN_MASK();
-            }
-            break;
-          }
-
-          case POLY_OP_MULACC: {
-            /* MULACC: dst = src0 * src1 + src2
-             * All three sources must be live simultaneously. Load each
-             * with the others protected from eviction. */
-
-            /* Step 1: ensure sr_s2 is loaded */
-            int sr_s2 = xf_find(&xf, s2);
-            if (sr_s2 < 0) {
-              if (pk) {
-                /* Allocate with sr0/sr1 protected */
-                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
-                emit_width_load_rbp(&buf, sr_s2, -slot_offset(s2), u->dtype.count);
-                xf.e[sr_s2 - XF_BASE].vec_width = u->dtype.count;
-              } else {
-                sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
-                emit_movss_xmm_rbp(&buf, sr_s2, -slot_offset(s2));
-              }
-            }
-
-            /* Step 2: re-find sr0 and sr1 (they may have been evicted) */
-            sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
-            if (sr0 < 0 && s0 >= 0) {
-              sr0 = xf_alloc(&xf, &buf, s0, sr_s2, -1, &jit_ok);
-              emit_width_load_rbp(&buf, sr0, -slot_offset(s0), pk ? u->dtype.count : 0);
-              if (pk) xf.e[sr0 - XF_BASE].vec_width = u->dtype.count;
-            }
-            sr1 = (s1 >= 0) ? xf_find(&xf, s1) : -1;
-            if (sr1 < 0 && s1 >= 0) {
-              sr1 = xf_alloc(&xf, &buf, s1, sr_s2, sr0, &jit_ok);
-              emit_width_load_rbp(&buf, sr1, -slot_offset(s1), pk ? u->dtype.count : 0);
-              if (pk) xf.e[sr1 - XF_BASE].vec_width = u->dtype.count;
-            }
-
-            /* Step 3: allocate dr protecting all 3 */
-            if (xf_find(&xf, slot) < 0) {
-              dr = xf_alloc_belady(&xf, &buf, slot, sr0, sr1, sr_s2,
-                                    slot_last_use, i, &jit_ok);
-            }
-            if (cpu.has_fma) {
-              int vL = pk ? ((u->dtype.count >= 8) ? 1 : 0) : 0;
-              /* vfmadd231ps/ss: dst += sr0 * sr1 (dst must hold src2) */
-              if (dr != sr_s2) {
-                if (pk && vL) emit_vmovups_ymm_ymm(&buf, dr, sr_s2);
-                else if (pk) emit_movups_xmm_xmm(&buf, dr, sr_s2);
-                else emit_movss_xmm_xmm(&buf, dr, sr_s2);
-              }
-              emit_vfmadd231(&buf, dr, sr0, sr1, vL, !pk);
-            } else if (pk) {
-              if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
-              emit_sse_packed_rr(&buf, 0x59, dr, sr1); /* mulps */
-              emit_sse_packed_rr(&buf, 0x58, dr, sr_s2); /* addps */
-            } else {
-              if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
-              emit_sse_scalar_rr(&buf, 0x59, dr, sr1); /* mulss */
-              emit_sse_scalar_rr(&buf, 0x58, dr, sr_s2); /* addss */
-            }
-            break;
-          }
-
-          /* Transcendentals via libm — flush register file before call */
-          case POLY_OP_EXP2:
-          case POLY_OP_LOG2:
-          case POLY_OP_SIN: {
-            void *fn_addr = NULL;
-            if (u->op == POLY_OP_EXP2) fn_addr = (void*)(uintptr_t)exp2f;
-            else if (u->op == POLY_OP_LOG2) fn_addr = (void*)(uintptr_t)log2f;
-            else fn_addr = (void*)(uintptr_t)sinf;
-            xf_flush(&xf, &buf); /* caller-saved XMMs clobbered by call */
-            emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(s0));
-            emit_mov_r64_imm64(&buf, RAX, (int64_t)(uintptr_t)fn_addr);
-            emit_call_r64(&buf, RAX);
-            /* Result in XMM0, put in register file */
-            dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
-            emit_movss_xmm_xmm(&buf, dr, XMM0);
-            /* libm call clobbers XMM0 and RAX -- restore invariants */
-            RELOAD_SIGN_MASK();
-            rax_slot = -1;
-            break;
-          }
-          case POLY_OP_POW: {
-            xf_flush(&xf, &buf);
-            emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(s0));
-            emit_movss_xmm_rbp(&buf, XMM1, -slot_offset(s1));
-            emit_mov_r64_imm64(&buf, RAX, (int64_t)(uintptr_t)powf);
-            emit_call_r64(&buf, RAX);
-            dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
-            emit_movss_xmm_xmm(&buf, dr, XMM0);
-            RELOAD_SIGN_MASK();
-            rax_slot = -1;
-            break;
-          }
-
           default:
-            fprintf(stderr, "x64 jit: unhandled float ALU op %s at index %d\n",
-                    poly_op_name(u->op), i);
-            goto x64_fail;
+            break;
+          }
+          if (pk && use_avx2) {
+            /* AVX 3-operand: dst = sr0 op sr1 (non-destructive) */
+            int vL = (u->dtype.count >= 8) ? 1 : 0;
+            if (ds1)
+              emit_vex_packed_rr_sib(
+                  &buf, opc, dr, sr0, ds1->base_reg, ds1_idx_reg, ds1->itemsize, vL
+              );
+            else if (s1 >= 0 && xf_find(&xf, s1) < 0) {
+              /* src1 not in register: fold as memory operand from stack slot */
+              emit_vex_packed_rr_rbp(&buf, opc, dr, sr0, -slot_offset(s1), vL);
+            } else
+              emit_vex_packed_rrr(&buf, opc, dr, sr0, sr1, vL);
+          } else if (pk) {
+            if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
+            if (ds1)
+              emit_sse_packed_sib(&buf, opc, dr, ds1->base_reg, ds1_idx_reg, ds1->itemsize);
+            else
+              emit_sse_packed_rr(&buf, opc, dr, sr1);
+          } else {
+            if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
+            if (ds1)
+              emit_sse_scalar_sib(&buf, opc, dr, ds1->base_reg, ds1_idx_reg, ds1->itemsize);
+            else
+              emit_sse_scalar_rr(&buf, opc, dr, sr1);
+          }
+          break;
+        }
+
+        /* Unary */
+        case POLY_OP_NEG:
+          /* XOR with sign mask (preloaded in XMM0 in prologue) */
+          if (use_avx2 && dtype_is_vec_float(u->dtype)) {
+            int vL = (u->dtype.count >= 8) ? 1 : 0;
+            emit_vxorps(&buf, dr, sr0, XMM0, vL);
+          } else {
+            if (dr != sr0) {
+              if (dtype_is_vec_float(u->dtype))
+                emit_movups_xmm_xmm(&buf, dr, sr0);
+              else
+                emit_movss_xmm_xmm(&buf, dr, sr0);
+            }
+            emit_xorps(&buf, dr, XMM0);
+          }
+          break;
+        case POLY_OP_SQRT:
+          if (use_avx2 && dtype_is_vec_float(u->dtype))
+            emit_vex_packed_sqrt(&buf, dr, sr0, (u->dtype.count >= 8) ? 1 : 0);
+          else if (dtype_is_vec_float(u->dtype))
+            emit_sse_packed_rr(&buf, 0x51, dr, sr0);
+          else
+            emit_sse_scalar_rr(&buf, 0x51, dr, sr0);
+          break;
+        case POLY_OP_RECIPROCAL: {
+          /* 1.0 / x: load 1.0f into XMM0 (scratch), divide by sr0, store in dr */
+          emit_mov_r32_imm32(&buf, RAX, 0x3F800000);
+          emit_movd_xmm_r32(&buf, XMM0, RAX);
+          if (use_avx2 && dtype_is_vec_float(u->dtype)) {
+            int vL = (u->dtype.count >= 8) ? 1 : 0;
+            if (vL)
+              emit_vbroadcastss_ymm_xmm(&buf, XMM0, XMM0);
+            else {
+              xb_byte(&buf, 0x0F);
+              xb_byte(&buf, 0xC6);
+              emit_modrm(&buf, 3, XMM0, XMM0);
+              xb_byte(&buf, 0x00);
+            }
+            emit_vex_packed_rrr(&buf, 0x5E, dr, XMM0, sr0, vL);
+          } else if (dtype_is_vec_float(u->dtype)) {
+            /* Broadcast 1.0f to all lanes: shufps xmm0, xmm0, 0 */
+            xb_byte(&buf, 0x0F);
+            xb_byte(&buf, 0xC6);
+            emit_modrm(&buf, 3, XMM0, XMM0);
+            xb_byte(&buf, 0x00);
+            emit_sse_packed_rr(&buf, 0x5E, XMM0, sr0); /* xmm0 = 1.0/sr0 */
+            if (dr != XMM0) emit_movups_xmm_xmm(&buf, dr, XMM0);
+          } else {
+            emit_sse_scalar_rr(&buf, 0x5E, XMM0, sr0);
+            if (dr != XMM0) emit_movss_xmm_xmm(&buf, dr, XMM0);
+          }
+          RELOAD_SIGN_MASK();
+          break;
+        }
+        case POLY_OP_TRUNC:
+          /* roundps/vroundps imm=0x0B: truncate toward zero (imm[1:0]=11, bit2=1 force imm) */
+          if (pk) {
+            if (use_avx2)
+              emit_vroundps(&buf, dr, sr0, 0x0B, (u->dtype.count >= 8) ? 1 : 0);
+            else if (use_avx)
+              emit_vroundps(&buf, dr, sr0, 0x0B, 0); /* VEX.128 roundps */
+            else if (cpu.has_sse41) {
+              if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
+              emit_roundps(&buf, dr, dr, 0x0B);
+            } else {
+              /* Pre-SSE4.1 fallback: cvttss2si + cvtsi2ss per lane (only reachable with devec=1) */
+              fprintf(stderr, "x64 jit: packed TRUNC without SSE4.1 not supported\n");
+              goto x64_fail;
+            }
+          } else {
+            if (use_avx)
+              emit_vroundss(&buf, dr, sr0, sr0, 0x0B); /* VEX.128 roundss */
+            else if (cpu.has_sse41) {
+              if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
+              emit_roundss(&buf, dr, dr, 0x0B);
+            } else {
+              /* Pre-SSE4.1: cvttss2si + cvtsi2ss */
+              /* cvttss2si eax, xmm — F3 0F 2C /r */
+              xb_byte(&buf, 0xF3);
+              xb_byte(&buf, 0x0F);
+              xb_byte(&buf, 0x2C);
+              emit_modrm(&buf, 3, RAX, sr0);
+              /* cvtsi2ss xmm, eax — F3 0F 2A /r */
+              xb_byte(&buf, 0xF3);
+              xb_byte(&buf, 0x0F);
+              xb_byte(&buf, 0x2A);
+              emit_modrm(&buf, 3, dr, RAX);
+              rax_slot = -1;
+            }
+          }
+          break;
+
+        /* Comparisons */
+        case POLY_OP_CMPLT:
+        case POLY_OP_CMPEQ:
+        case POLY_OP_CMPNE: {
+          uint8_t pred = u->op == POLY_OP_CMPLT ? 1 : u->op == POLY_OP_CMPEQ ? 0 : 4;
+          if (pk) {
+            /* Packed CMP: vcmpps dst, sr0, sr1, imm8 — result is mask in XMM/YMM */
+            int vL = (u->src[0]->dtype.count >= 8) ? 1 : 0;
+            /* VEX.NDS.pp=00.0F C2 /r ib */
+            emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x00, 1, 0);
+            xb_byte(&buf, 0xC2);
+            emit_modrm(&buf, 3, dr, sr1);
+            xb_byte(&buf, pred);
+            /* Result is vector mask, keep in register file */
+            xf.e[dr - XF_BASE].dirty = true;
+            xf.e[dr - XF_BASE].vec_width = u->src[0]->dtype.count;
+          } else {
+            /* Scalar CMP: use XMM0 as scratch, result is int → goes to stack */
+            emit_movss_xmm_xmm(&buf, XMM0, sr0);
+            emit_cmpss_rr(&buf, XMM0, sr1, pred);
+            emit_movd_r32_xmm(&buf, RAX, XMM0);
+            emit_and_r32_imm32(&buf, RAX, 1);
+            emit_mov_rbp_r64(&buf, RAX, off);
+            /* Free the destination XMM since result is int (in stack) */
+            xf.e[dr - XF_BASE].slot = -1;
+            xf.e[dr - XF_BASE].dirty = false;
+            RELOAD_SIGN_MASK();
+          }
+          break;
+        }
+
+        /* Ternary */
+        case POLY_OP_WHERE: {
+          if (pk && u->src[0]->dtype.count > 1) {
+            /* Packed WHERE: mask is vector (from packed CMP), in register file.
+             * WHERE(mask, true_val, false_val) = (mask & true) | (~mask & false) */
+            int vw = u->dtype.count;
+            int vL = (vw >= 8) ? 1 : 0;
+            int sr_mask = xf_find(&xf, s0);
+            if (sr_mask < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
+            int sr_true = xf_find(&xf, s1);
+            if (sr_true < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
+            int sr_false = xf_find(&xf, s2);
+            if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
+            /* Revalidate after loads */
+            if (xf_find(&xf, s1) < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
+            if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
+            if (xf_find(&xf, slot) < 0)
+              dr = xf_alloc_belady(
+                  &xf, &buf, slot, sr_mask, sr_true, sr_false, slot_last_use, i, &jit_ok
+              );
+            /* dr = (mask & true) | (~mask & false) */
+            emit_vandps(&buf, dr, sr_mask, sr_true, vL);
+            emit_vandnps(&buf, XMM0, sr_mask, sr_false, vL);
+            emit_vorps(&buf, dr, dr, XMM0, vL);
+            RELOAD_SIGN_MASK();
+          } else {
+            /* Scalar WHERE: cond is int (in stack), true/false are float (in reg file) */
+            int sr_true = xf_find(&xf, s1);
+            if (sr_true < 0) sr_true = xf_get(&xf, &buf, s1, &jit_ok);
+            int sr_false = xf_find(&xf, s2);
+            if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
+            int sr_true_check = xf_find(&xf, s1);
+            if (sr_true_check < 0)
+              sr_true = xf_get_avoid(&xf, &buf, s1, sr_false, &jit_ok);
+            else
+              sr_true = sr_true_check;
+            if (xf_find(&xf, slot) < 0)
+              dr = xf_alloc_belady(
+                  &xf, &buf, slot, sr_true, sr_false, -1, slot_last_use, i, &jit_ok
+              );
+            emit_mov_r32_rbp(&buf, RAX, -slot_offset(s0)); /* cond from stack */
+            emit_neg_r32(&buf, RAX);
+            emit_movd_xmm_r32(&buf, XMM0, RAX);
+            if (dr != sr_true) emit_movss_xmm_xmm(&buf, dr, sr_true);
+            emit_andps(&buf, dr, XMM0);
+            emit_andnps(&buf, XMM0, sr_false);
+            emit_orps(&buf, dr, XMM0);
+            rax_slot = -1;
+            RELOAD_SIGN_MASK();
+          }
+          break;
+        }
+
+        case POLY_OP_MULACC: {
+          /* MULACC: dst = src0 * src1 + src2
+           * All three sources must be live simultaneously. Load each
+           * with the others protected from eviction. */
+
+          /* Step 1: ensure sr_s2 is loaded */
+          int sr_s2 = xf_find(&xf, s2);
+          if (sr_s2 < 0) {
+            if (pk) {
+              /* Allocate with sr0/sr1 protected */
+              sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
+              emit_width_load_rbp(&buf, sr_s2, -slot_offset(s2), u->dtype.count);
+              xf.e[sr_s2 - XF_BASE].vec_width = u->dtype.count;
+            } else {
+              sr_s2 = xf_alloc(&xf, &buf, s2, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
+              emit_movss_xmm_rbp(&buf, sr_s2, -slot_offset(s2));
+            }
+          }
+
+          /* Step 2: re-find sr0 and sr1 (they may have been evicted) */
+          sr0 = (s0 >= 0) ? xf_find(&xf, s0) : -1;
+          if (sr0 < 0 && s0 >= 0) {
+            sr0 = xf_alloc(&xf, &buf, s0, sr_s2, -1, &jit_ok);
+            emit_width_load_rbp(&buf, sr0, -slot_offset(s0), pk ? u->dtype.count : 0);
+            if (pk) xf.e[sr0 - XF_BASE].vec_width = u->dtype.count;
+          }
+          sr1 = (s1 >= 0) ? xf_find(&xf, s1) : -1;
+          if (sr1 < 0 && s1 >= 0) {
+            sr1 = xf_alloc(&xf, &buf, s1, sr_s2, sr0, &jit_ok);
+            emit_width_load_rbp(&buf, sr1, -slot_offset(s1), pk ? u->dtype.count : 0);
+            if (pk) xf.e[sr1 - XF_BASE].vec_width = u->dtype.count;
+          }
+
+          /* Step 3: allocate dr protecting all 3 */
+          if (xf_find(&xf, slot) < 0) {
+            dr = xf_alloc_belady(&xf, &buf, slot, sr0, sr1, sr_s2, slot_last_use, i, &jit_ok);
+          }
+          if (cpu.has_fma) {
+            int vL = pk ? ((u->dtype.count >= 8) ? 1 : 0) : 0;
+            /* vfmadd231ps/ss: dst += sr0 * sr1 (dst must hold src2) */
+            if (dr != sr_s2) {
+              if (pk && vL)
+                emit_vmovups_ymm_ymm(&buf, dr, sr_s2);
+              else if (pk)
+                emit_movups_xmm_xmm(&buf, dr, sr_s2);
+              else
+                emit_movss_xmm_xmm(&buf, dr, sr_s2);
+            }
+            emit_vfmadd231(&buf, dr, sr0, sr1, vL, !pk);
+          } else if (pk) {
+            if (dr != sr0) emit_movups_xmm_xmm(&buf, dr, sr0);
+            emit_sse_packed_rr(&buf, 0x59, dr, sr1); /* mulps */
+            emit_sse_packed_rr(&buf, 0x58, dr, sr_s2); /* addps */
+          } else {
+            if (dr != sr0) emit_movss_xmm_xmm(&buf, dr, sr0);
+            emit_sse_scalar_rr(&buf, 0x59, dr, sr1); /* mulss */
+            emit_sse_scalar_rr(&buf, 0x58, dr, sr_s2); /* addss */
+          }
+          break;
+        }
+
+        /* Transcendentals via libm — flush register file before call */
+        case POLY_OP_EXP2:
+        case POLY_OP_LOG2:
+        case POLY_OP_SIN: {
+          void *fn_addr = NULL;
+          if (u->op == POLY_OP_EXP2)
+            fn_addr = (void *)(uintptr_t)exp2f;
+          else if (u->op == POLY_OP_LOG2)
+            fn_addr = (void *)(uintptr_t)log2f;
+          else
+            fn_addr = (void *)(uintptr_t)sinf;
+          xf_flush(&xf, &buf); /* caller-saved XMMs clobbered by call */
+          emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(s0));
+          emit_mov_r64_imm64(&buf, RAX, (int64_t)(uintptr_t)fn_addr);
+          emit_call_r64(&buf, RAX);
+          /* Result in XMM0, put in register file */
+          dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
+          emit_movss_xmm_xmm(&buf, dr, XMM0);
+          /* libm call clobbers XMM0 and RAX -- restore invariants */
+          RELOAD_SIGN_MASK();
+          rax_slot = -1;
+          break;
+        }
+        case POLY_OP_POW: {
+          xf_flush(&xf, &buf);
+          emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(s0));
+          emit_movss_xmm_rbp(&buf, XMM1, -slot_offset(s1));
+          emit_mov_r64_imm64(&buf, RAX, (int64_t)(uintptr_t)powf);
+          emit_call_r64(&buf, RAX);
+          dr = xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
+          emit_movss_xmm_xmm(&buf, dr, XMM0);
+          RELOAD_SIGN_MASK();
+          rax_slot = -1;
+          break;
+        }
+
+        default:
+          fprintf(
+              stderr, "x64 jit: unhandled float ALU op %s at index %d\n", poly_op_name(u->op), i
+          );
+          goto x64_fail;
         }
         /* Mark destination register as dirty (value not in stack) */
-        if (u->op != POLY_OP_CMPLT && u->op != POLY_OP_CMPEQ &&
-            u->op != POLY_OP_CMPNE) {
+        if (u->op != POLY_OP_CMPLT && u->op != POLY_OP_CMPEQ && u->op != POLY_OP_CMPNE) {
           xf.e[dr - XF_BASE].dirty = true;
           xf.e[dr - XF_BASE].vec_width = pk ? u->dtype.count : 0;
         }
       } else {
-        /* ── Vector Integer ALU (SIMD in XMM/YMM) ──────────────── */
+        /* Vector Integer ALU (SIMD in XMM/YMM) */
         if (u->dtype.count > 1 && dtype_is_int(u->dtype)) {
           int s0 = (u->n_src > 0) ? lm_get(&locals, u->src[0]) : -1;
           int s1 = (u->n_src > 1) ? lm_get(&locals, u->src[1]) : -1;
@@ -3198,176 +3404,183 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           int dr = xf_alloc(&xf, &buf, slot, sr0, sr1 >= 0 ? sr1 : -1, &jit_ok);
 
           switch (u->op) {
-            case POLY_OP_ADD:
-              emit_vpaddd(&buf, dr, sr0, sr1, vL);
-              break;
-            case POLY_OP_SUB:
-              emit_vpsubd(&buf, dr, sr0, sr1, vL);
-              break;
-            case POLY_OP_AND:
-              emit_vpand(&buf, dr, sr0, sr1, vL);
-              break;
-            case POLY_OP_OR:
-              emit_vpor(&buf, dr, sr0, sr1, vL);
-              break;
-            case POLY_OP_SHL:
-              if (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
-                  u->src[1]->arg.kind == POLY_ARG_INT) {
-                /* Immediate shift: vpslld dst, src, imm8 */
-                int shift = (int)u->src[1]->arg.i;
-                if (dr != sr0) {
-                  if (vL) emit_vmovups_ymm_ymm(&buf, dr, sr0);
-                  else emit_movups_xmm_xmm(&buf, dr, sr0);
-                }
-                emit_vpslld_imm(&buf, dr, dr, (uint8_t)shift, vL);
-              } else if (sr1 >= 0 && use_avx2) {
-                /* AVX2 per-lane variable shift: vpsllvd VEX.66.0F38 47 /r */
-                int R = (dr < 8) ? 1 : 0;
-                int B = (sr1 < 8) ? 1 : 0;
-                emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
-                xb_byte(&buf, 0x47);
-                emit_modrm(&buf, 3, dr, sr1);
-              } else if (sr1 >= 0 && vw <= 4) {
-                /* Per-lane scalar SHL fallback (SSE4.1 pextrd/pinsrd).
-                 * SHL shift counts come from e_lo = e_i & 31, always 0..31,
-                 * so 32-bit shl r32,cl is correct (masks mod 32 = identity). */
-                for (int lane = 0; lane < vw; lane++) {
-                  emit_pextrd(&buf, RCX, sr1, lane); /* shift[lane] → ECX (CL) */
-                  emit_pextrd(&buf, RAX, sr0, lane); /* value[lane] → EAX */
-                  emit_shl_r32_cl(&buf, RAX);         /* EAX <<= CL */
-                  emit_pinsrd(&buf, dr, RAX, lane);   /* dr[lane] = EAX */
-                }
-                rax_slot = -1;
-              } else {
-                fprintf(stderr, "x64 jit: SSE vector SHL with variable shift not supported\n");
-                goto x64_fail;
+          case POLY_OP_ADD:
+            emit_vpaddd(&buf, dr, sr0, sr1, vL);
+            break;
+          case POLY_OP_SUB:
+            emit_vpsubd(&buf, dr, sr0, sr1, vL);
+            break;
+          case POLY_OP_AND:
+            emit_vpand(&buf, dr, sr0, sr1, vL);
+            break;
+          case POLY_OP_OR:
+            emit_vpor(&buf, dr, sr0, sr1, vL);
+            break;
+          case POLY_OP_SHL:
+            if (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
+                u->src[1]->arg.kind == POLY_ARG_INT) {
+              /* Immediate shift: vpslld dst, src, imm8 */
+              int shift = (int)u->src[1]->arg.i;
+              if (dr != sr0) {
+                if (vL)
+                  emit_vmovups_ymm_ymm(&buf, dr, sr0);
+                else
+                  emit_movups_xmm_xmm(&buf, dr, sr0);
               }
-              break;
-            case POLY_OP_SHR:
-              if (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
-                  u->src[1]->arg.kind == POLY_ARG_INT) {
-                /* Immediate shift: vpsrld dst, src, imm8 */
-                int shift = (int)u->src[1]->arg.i;
-                if (dr != sr0) {
-                  if (vL) emit_vmovups_ymm_ymm(&buf, dr, sr0);
-                  else emit_movups_xmm_xmm(&buf, dr, sr0);
-                }
-                emit_vpsrld_imm(&buf, dr, dr, (uint8_t)shift, vL);
-              } else if (sr1 >= 0 && use_avx2) {
-                /* AVX2 per-lane variable shift: vpsrlvd VEX.66.0F38 45 /r */
-                int R = (dr < 8) ? 1 : 0;
-                int B = (sr1 < 8) ? 1 : 0;
-                emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
-                xb_byte(&buf, 0x45);
-                emit_modrm(&buf, 3, dr, sr1);
-              } else if (sr1 >= 0 && vw <= 4) {
-                /* Per-lane scalar SHR fallback (SSE4.1 pextrd/pinsrd).
-                 * SHR shift counts come from offset = 32 - e_lo, range 1..32.
-                 * vpsrlvd zeros a lane when count >= 32; scalar shr r32,cl masks
-                 * count mod 32 (count 32 acts like 0). Fix: use 64-bit shr rax,cl
-                 * after zero-extending EAX to RAX — shr r64,cl masks mod 64, so
-                 * count 32 correctly shifts a zero-extended 32-bit value to 0. */
-                for (int lane = 0; lane < vw; lane++) {
-                  emit_pextrd(&buf, RCX, sr1, lane); /* shift[lane] → ECX (CL) */
-                  emit_pextrd(&buf, RAX, sr0, lane); /* value[lane] → EAX */
-                  /* Zero-extend EAX to RAX: writing a 32-bit register clears upper 32.
-                   * pextrd already writes only to EAX, so RAX[63:32] = 0. */
-                  emit_shr_r64_cl(&buf, RAX);         /* RAX >>= CL (64-bit logical) */
-                  emit_pinsrd(&buf, dr, RAX, lane);   /* dr[lane] = EAX (low 32 bits) */
-                }
-                rax_slot = -1;
-              } else {
-                fprintf(stderr, "x64 jit: SSE vector SHR with variable shift not supported\n");
-                goto x64_fail;
-              }
-              break;
-            case POLY_OP_MUL: {
-              /* vpmulld: VEX.66.0F38 40 /r (packed int32 multiply low dword) */
+              emit_vpslld_imm(&buf, dr, dr, (uint8_t)shift, vL);
+            } else if (sr1 >= 0 && use_avx2) {
+              /* AVX2 per-lane variable shift: vpsllvd VEX.66.0F38 47 /r */
               int R = (dr < 8) ? 1 : 0;
               int B = (sr1 < 8) ? 1 : 0;
-              emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01); /* map=0F38, pp=01(66) */
+              emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
+              xb_byte(&buf, 0x47);
+              emit_modrm(&buf, 3, dr, sr1);
+            } else if (sr1 >= 0 && vw <= 4) {
+              /* Per-lane scalar SHL fallback (SSE4.1 pextrd/pinsrd).
+               * SHL shift counts come from e_lo = e_i & 31, always 0..31,
+               * so 32-bit shl r32,cl is correct (masks mod 32 = identity). */
+              for (int lane = 0; lane < vw; lane++) {
+                emit_pextrd(&buf, RCX, sr1, lane); /* shift[lane] → ECX (CL) */
+                emit_pextrd(&buf, RAX, sr0, lane); /* value[lane] → EAX */
+                emit_shl_r32_cl(&buf, RAX); /* EAX <<= CL */
+                emit_pinsrd(&buf, dr, RAX, lane); /* dr[lane] = EAX */
+              }
+              rax_slot = -1;
+            } else {
+              fprintf(stderr, "x64 jit: SSE vector SHL with variable shift not supported\n");
+              goto x64_fail;
+            }
+            break;
+          case POLY_OP_SHR:
+            if (u->n_src > 1 && u->src[1]->op == POLY_OP_CONST &&
+                u->src[1]->arg.kind == POLY_ARG_INT) {
+              /* Immediate shift: vpsrld dst, src, imm8 */
+              int shift = (int)u->src[1]->arg.i;
+              if (dr != sr0) {
+                if (vL)
+                  emit_vmovups_ymm_ymm(&buf, dr, sr0);
+                else
+                  emit_movups_xmm_xmm(&buf, dr, sr0);
+              }
+              emit_vpsrld_imm(&buf, dr, dr, (uint8_t)shift, vL);
+            } else if (sr1 >= 0 && use_avx2) {
+              /* AVX2 per-lane variable shift: vpsrlvd VEX.66.0F38 45 /r */
+              int R = (dr < 8) ? 1 : 0;
+              int B = (sr1 < 8) ? 1 : 0;
+              emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01);
+              xb_byte(&buf, 0x45);
+              emit_modrm(&buf, 3, dr, sr1);
+            } else if (sr1 >= 0 && vw <= 4) {
+              /* Per-lane scalar SHR fallback (SSE4.1 pextrd/pinsrd).
+               * SHR shift counts come from offset = 32 - e_lo, range 1..32.
+               * vpsrlvd zeros a lane when count >= 32; scalar shr r32,cl masks
+               * count mod 32 (count 32 acts like 0). Fix: use 64-bit shr rax,cl
+               * after zero-extending EAX to RAX — shr r64,cl masks mod 64, so
+               * count 32 correctly shifts a zero-extended 32-bit value to 0. */
+              for (int lane = 0; lane < vw; lane++) {
+                emit_pextrd(&buf, RCX, sr1, lane); /* shift[lane] → ECX (CL) */
+                emit_pextrd(&buf, RAX, sr0, lane); /* value[lane] → EAX */
+                /* Zero-extend EAX to RAX: writing a 32-bit register clears upper 32.
+                 * pextrd already writes only to EAX, so RAX[63:32] = 0. */
+                emit_shr_r64_cl(&buf, RAX); /* RAX >>= CL (64-bit logical) */
+                emit_pinsrd(&buf, dr, RAX, lane); /* dr[lane] = EAX (low 32 bits) */
+              }
+              rax_slot = -1;
+            } else {
+              fprintf(stderr, "x64 jit: SSE vector SHR with variable shift not supported\n");
+              goto x64_fail;
+            }
+            break;
+          case POLY_OP_MUL: {
+            /* vpmulld: VEX.66.0F38 40 /r (packed int32 multiply low dword) */
+            int R = (dr < 8) ? 1 : 0;
+            int B = (sr1 < 8) ? 1 : 0;
+            emit_vex3(&buf, R, 1, B, 2, 0, sr0, vL, 0x01); /* map=0F38, pp=01(66) */
+            xb_byte(&buf, 0x40);
+            emit_modrm(&buf, 3, dr, sr1);
+            break;
+          }
+          case POLY_OP_MULACC: {
+            /* MULACC(a,b,c) = a*b+c. When b is power-of-2 constant (from
+             * SHL+ADD fusion), use vpslld+vpaddd instead of slow vpmulld. */
+            int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
+            int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
+            if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw, &jit_ok);
+            bool is_pow2 =
+                (u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT &&
+                 u->src[1]->arg.i > 0 && (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
+            if (is_pow2) {
+              /* vpslld(a, log2(b)) + vpaddd(result, c) */
+              int shift = 0;
+              for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1)
+                shift++;
+              if (dr != sr0) {
+                if (vL)
+                  emit_vmovups_ymm_ymm(&buf, dr, sr0);
+                else
+                  emit_movups_xmm_xmm(&buf, dr, sr0);
+              }
+              emit_vpslld_imm(&buf, dr, dr, (uint8_t)shift, vL);
+            } else {
+              /* vpmulld: VEX.66.0F38 40 /r */
+              int R = (dr < 8) ? 1 : 0;
+              int B2 = (sr1 < 8) ? 1 : 0;
+              emit_vex3(&buf, R, 1, B2, 2, 0, sr0, vL, 0x01);
               xb_byte(&buf, 0x40);
               emit_modrm(&buf, 3, dr, sr1);
-              break;
             }
-            case POLY_OP_MULACC: {
-              /* MULACC(a,b,c) = a*b+c. When b is power-of-2 constant (from
-               * SHL+ADD fusion), use vpslld+vpaddd instead of slow vpmulld. */
-              int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
-              int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
-              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw, &jit_ok);
-              bool is_pow2 = (u->src[1]->op == POLY_OP_CONST &&
-                              u->src[1]->arg.kind == POLY_ARG_INT &&
-                              u->src[1]->arg.i > 0 &&
-                              (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
-              if (is_pow2) {
-                /* vpslld(a, log2(b)) + vpaddd(result, c) */
-                int shift = 0;
-                for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1) shift++;
-                if (dr != sr0) {
-                  if (vL) emit_vmovups_ymm_ymm(&buf, dr, sr0);
-                  else emit_movups_xmm_xmm(&buf, dr, sr0);
-                }
-                emit_vpslld_imm(&buf, dr, dr, (uint8_t)shift, vL);
-              } else {
-                /* vpmulld: VEX.66.0F38 40 /r */
-                int R = (dr < 8) ? 1 : 0;
-                int B2 = (sr1 < 8) ? 1 : 0;
-                emit_vex3(&buf, R, 1, B2, 2, 0, sr0, vL, 0x01);
-                xb_byte(&buf, 0x40);
-                emit_modrm(&buf, 3, dr, sr1);
-              }
-              emit_vpaddd(&buf, dr, dr, sr_s2, vL);
-              break;
-            }
-            case POLY_OP_WHERE: {
-              /* Packed int WHERE: mask is vector, use vpand/vpandn/vpor */
-              int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
-              int sr_mask = (s0 >= 0) ? xf_find(&xf, s0) : -1;
-              if (sr_mask < 0 && s0 >= 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
-              int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
-              if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw, &jit_ok);
-              /* dr = (mask & sr1) | (~mask & sr_s2) */
-              emit_vpand(&buf, dr, sr_mask, sr1, vL);
-              emit_vandnps(&buf, XMM0, sr_mask, sr_s2, vL);
-              emit_vpor(&buf, dr, dr, XMM0, vL);
-              RELOAD_SIGN_MASK();
-              break;
-            }
-            case POLY_OP_CMPLT: {
-              /* vpcmpgtd: VEX.66.0F 66 /r (a > b, so swap for a < b) */
-              /* CMPLT(a,b) = b > a, so: vpcmpgtd(dr, sr1, sr0) */
-              emit_vex_auto(&buf, dr, sr1, sr0, vL, 0x01, 1, 0);
-              xb_byte(&buf, 0x66);
-              emit_modrm(&buf, 3, dr, sr0);
-              break;
-            }
-            case POLY_OP_CMPEQ: {
-              /* vpcmpeqd: VEX.66.0F 76 /r */
-              emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x01, 1, 0);
-              xb_byte(&buf, 0x76);
-              emit_modrm(&buf, 3, dr, sr1);
-              break;
-            }
-            case POLY_OP_CMPNE: {
-              /* vpcmpeqd + vpxor with all-1s (NOT) -- or simpler: vpcmpeqd then negate */
-              /* For now: compare equal, then XOR with all-1s */
-              emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x01, 1, 0);
-              xb_byte(&buf, 0x76); /* vpcmpeqd */
-              emit_modrm(&buf, 3, dr, sr1);
-              /* Generate all-1s in XMM0 via vpcmpeqd xmm0, xmm0, xmm0 */
-              emit_vex_auto(&buf, XMM0, XMM0, XMM0, vL, 0x01, 1, 0);
-              xb_byte(&buf, 0x76);
-              emit_modrm(&buf, 3, XMM0, XMM0);
-              /* XOR with all-1s to negate */
-              emit_vxorps(&buf, dr, dr, XMM0, vL);
-              RELOAD_SIGN_MASK();
-              break;
-            }
-            default:
-              fprintf(stderr, "x64 jit: unhandled vec int ALU op %s at index %d\n",
-                      poly_op_name(u->op), i);
-              goto x64_fail;
+            emit_vpaddd(&buf, dr, dr, sr_s2, vL);
+            break;
+          }
+          case POLY_OP_WHERE: {
+            /* Packed int WHERE: mask is vector, use vpand/vpandn/vpor */
+            int s2v = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
+            int sr_mask = (s0 >= 0) ? xf_find(&xf, s0) : -1;
+            if (sr_mask < 0 && s0 >= 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
+            int sr_s2 = (s2v >= 0) ? xf_find(&xf, s2v) : -1;
+            if (sr_s2 < 0 && s2v >= 0) sr_s2 = xf_get_packed_w(&xf, &buf, s2v, vw, &jit_ok);
+            /* dr = (mask & sr1) | (~mask & sr_s2) */
+            emit_vpand(&buf, dr, sr_mask, sr1, vL);
+            emit_vandnps(&buf, XMM0, sr_mask, sr_s2, vL);
+            emit_vpor(&buf, dr, dr, XMM0, vL);
+            RELOAD_SIGN_MASK();
+            break;
+          }
+          case POLY_OP_CMPLT: {
+            /* vpcmpgtd: VEX.66.0F 66 /r (a > b, so swap for a < b) */
+            /* CMPLT(a,b) = b > a, so: vpcmpgtd(dr, sr1, sr0) */
+            emit_vex_auto(&buf, dr, sr1, sr0, vL, 0x01, 1, 0);
+            xb_byte(&buf, 0x66);
+            emit_modrm(&buf, 3, dr, sr0);
+            break;
+          }
+          case POLY_OP_CMPEQ: {
+            /* vpcmpeqd: VEX.66.0F 76 /r */
+            emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x01, 1, 0);
+            xb_byte(&buf, 0x76);
+            emit_modrm(&buf, 3, dr, sr1);
+            break;
+          }
+          case POLY_OP_CMPNE: {
+            /* vpcmpeqd + vpxor with all-1s (NOT) -- or simpler: vpcmpeqd then negate */
+            /* For now: compare equal, then XOR with all-1s */
+            emit_vex_auto(&buf, dr, sr0, sr1, vL, 0x01, 1, 0);
+            xb_byte(&buf, 0x76); /* vpcmpeqd */
+            emit_modrm(&buf, 3, dr, sr1);
+            /* Generate all-1s in XMM0 via vpcmpeqd xmm0, xmm0, xmm0 */
+            emit_vex_auto(&buf, XMM0, XMM0, XMM0, vL, 0x01, 1, 0);
+            xb_byte(&buf, 0x76);
+            emit_modrm(&buf, 3, XMM0, XMM0);
+            /* XOR with all-1s to negate */
+            emit_vxorps(&buf, dr, dr, XMM0, vL);
+            RELOAD_SIGN_MASK();
+            break;
+          }
+          default:
+            fprintf(
+                stderr, "x64 jit: unhandled vec int ALU op %s at index %d\n", poly_op_name(u->op), i
+            );
+            goto x64_fail;
           }
           xf.e[dr - XF_BASE].dirty = true;
           xf.e[dr - XF_BASE].vec_width = vw;
@@ -3375,7 +3588,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           continue;
         }
 
-        /* ── Scalar Integer ALU (GPR) ──────────────────────────── */
+        /* Scalar Integer ALU (GPR) */
         int s0 = (u->n_src > 0) ? lm_get(&locals, u->src[0]) : -1;
         int s1 = (u->n_src > 1) ? lm_get(&locals, u->src[1]) : -1;
         int s2 = (u->n_src > 2) ? lm_get(&locals, u->src[2]) : -1;
@@ -3387,187 +3600,203 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
         int w = wide ? 1 : 0;
 
-        /* Use emit_load_int_src to honor GPR-assigned sources (RANGE counters).
-         * Stack slots for GPR-assigned values are stale after the first iteration. */
-        #define ILOAD(dst, src_idx) emit_load_int_src(&buf, dst, w, u->src[src_idx], \
-                                      lm_get(&locals, u->src[src_idx]), reg_assigns, n_reg_assigns)
+/* Use emit_load_int_src to honor GPR-assigned sources (RANGE counters).
+ * Stack slots for GPR-assigned values are stale after the first iteration. */
+#define ILOAD(dst, src_idx)                                                                        \
+  emit_load_int_src(                                                                               \
+      &buf, dst, w, u->src[src_idx], lm_get(&locals, u->src[src_idx]), reg_assigns, n_reg_assigns  \
+  )
 
         switch (u->op) {
-          case POLY_OP_ADD:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x03, RAX, RCX); /* add */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_SUB:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x2B, RAX, RCX); /* sub */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_MUL:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            if (wide) emit_imul_r64_r64(&buf, RAX, RCX);
-            else emit_imul_r32_r32(&buf, RAX, RCX);
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_IDIV:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            if (wide) { emit_cqo(&buf); emit_idiv_r64(&buf, RCX); }
-            else { emit_cdq(&buf); emit_idiv_r32(&buf, RCX); }
-            emit_mov_rbp_r64(&buf, RAX, off); /* quotient in RAX */
-            break;
-          case POLY_OP_MOD:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            if (wide) { emit_cqo(&buf); emit_idiv_r64(&buf, RCX); }
-            else { emit_cdq(&buf); emit_idiv_r32(&buf, RCX); }
-            emit_mov_rbp_r64(&buf, RDX, off); /* remainder in RDX */
-            break;
-          case POLY_OP_SHL: {
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_rex_always(&buf, w, 0, 0, 0);
-            xb_byte(&buf, 0xD3);
-            emit_modrm(&buf, 3, 4, RAX); /* shl rax, cl */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
+        case POLY_OP_ADD:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x03, RAX, RCX); /* add */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_SUB:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x2B, RAX, RCX); /* sub */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_MUL:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          if (wide)
+            emit_imul_r64_r64(&buf, RAX, RCX);
+          else
+            emit_imul_r32_r32(&buf, RAX, RCX);
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_IDIV:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          if (wide) {
+            emit_cqo(&buf);
+            emit_idiv_r64(&buf, RCX);
+          } else {
+            emit_cdq(&buf);
+            emit_idiv_r32(&buf, RCX);
           }
-          case POLY_OP_SHR: {
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            /* Use logical shr for unsigned types, arithmetic sar for signed */
-            bool is_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
-            emit_rex_always(&buf, w, 0, 0, 0);
-            xb_byte(&buf, 0xD3);
-            emit_modrm(&buf, 3, is_unsigned ? 5 : 7, RAX); /* /5=shr, /7=sar */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
+          emit_mov_rbp_r64(&buf, RAX, off); /* quotient in RAX */
+          break;
+        case POLY_OP_MOD:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          if (wide) {
+            emit_cqo(&buf);
+            emit_idiv_r64(&buf, RCX);
+          } else {
+            emit_cdq(&buf);
+            emit_idiv_r32(&buf, RCX);
           }
-          case POLY_OP_AND:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x23, RAX, RCX); /* and */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_OR:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x0B, RAX, RCX); /* or */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_XOR:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x33, RAX, RCX); /* xor */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_NEG:
-            ILOAD(RAX, 0);
-            if (poly_dtype_is_bool(u->src[0]->dtype)) {
-              /* Bool NEG = logical NOT: xor eax, 1 (flip 0↔1).
-               * Plain neg turns 1→-1 which corrupts subsequent AND/OR. */
-              if (RAX >= 8) emit_rex(&buf, 0, 0, 0, RAX >> 3);
-              xb_byte(&buf, 0x83); emit_modrm(&buf, 3, 6, RAX); xb_byte(&buf, 1);
-            } else if (wide) {
-              emit_neg_r64(&buf, RAX);
-            } else {
-              emit_neg_r32(&buf, RAX);
-            }
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_MAX:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
-            /* cmovl: 0F 4C /r */
-            emit_rex_always(&buf, w, RAX >> 3, 0, RCX >> 3);
-            xb_byte(&buf, 0x0F);
-            xb_byte(&buf, 0x4C);
-            emit_modrm(&buf, 3, RAX, RCX);
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-
-          /* Integer comparisons */
-          case POLY_OP_CMPLT:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
-            emit_setcc(&buf, 0x0C, RAX); /* setl al */
-            emit_movzx_r32_r8(&buf, RAX, RAX);
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_CMPEQ:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
-            emit_setcc(&buf, 0x04, RAX); /* sete al */
-            emit_movzx_r32_r8(&buf, RAX, RAX);
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-          case POLY_OP_CMPNE:
-            ILOAD(RAX, 0);
-            ILOAD(RCX, 1);
-            emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
-            emit_setcc(&buf, 0x05, RAX); /* setne al */
-            emit_movzx_r32_r8(&buf, RAX, RAX);
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-
-          case POLY_OP_WHERE:
-            /* Integer WHERE: test cond, cmov */
-            ILOAD(RAX, 0); /* cond */
-            ILOAD(RCX, 1); /* true */
-            ILOAD(RDX, 2); /* false */
-            emit_test_r32(&buf, RAX, RAX);
-            /* cmovz rcx, rdx (if cond==0, take false) */
-            emit_rex_always(&buf, w, RCX >> 3, 0, RDX >> 3);
-            xb_byte(&buf, 0x0F);
-            xb_byte(&buf, 0x44); /* cmove */
-            emit_modrm(&buf, 3, RCX, RDX);
-            emit_mov_rbp_r64(&buf, RCX, off);
-            break;
-
-          case POLY_OP_MULACC:
-            {
-            bool is_pow2 = (u->src[1]->op == POLY_OP_CONST &&
-                            u->src[1]->arg.kind == POLY_ARG_INT &&
-                            u->src[1]->arg.i > 0 &&
-                            (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
-            ILOAD(RAX, 0);
-            if (is_pow2) {
-              int shift = 0;
-              for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1) shift++;
-              emit_rex_always(&buf, w, 0, 0, 0);
-              xb_byte(&buf, 0xC1);
-              emit_modrm(&buf, 3, 4, RAX);
-              xb_byte(&buf, (uint8_t)shift);
-            } else {
-              ILOAD(RCX, 1);
-              if (wide) emit_imul_r64_r64(&buf, RAX, RCX);
-              else emit_imul_r32_r32(&buf, RAX, RCX);
-            }
-            ILOAD(RCX, 2);
-            emit_alu_rr(&buf, w, 0x03, RAX, RCX); /* add */
-            emit_mov_rbp_r64(&buf, RAX, off);
-            break;
-            }
-
-          case POLY_OP_THREEFRY:
-            /* THREEFRY should be decomposed by pm_decomp before reaching the
-             * renderer, and x64_can_handle rejects it. If it somehow survives,
-             * fail rather than silently producing wrong results. */
-            fprintf(stderr, "x64 jit: unexpected THREEFRY op at index %d\n", i);
-            goto x64_fail;
-
-          default:
-            fprintf(stderr, "x64 jit: unhandled int ALU op %s at index %d\n",
-                    poly_op_name(u->op), i);
-            goto x64_fail;
+          emit_mov_rbp_r64(&buf, RDX, off); /* remainder in RDX */
+          break;
+        case POLY_OP_SHL: {
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_rex_always(&buf, w, 0, 0, 0);
+          xb_byte(&buf, 0xD3);
+          emit_modrm(&buf, 3, 4, RAX); /* shl rax, cl */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
         }
-        #undef ILOAD
+        case POLY_OP_SHR: {
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          /* Use logical shr for unsigned types, arithmetic sar for signed */
+          bool is_unsigned = poly_dtype_is_unsigned(u->src[0]->dtype);
+          emit_rex_always(&buf, w, 0, 0, 0);
+          xb_byte(&buf, 0xD3);
+          emit_modrm(&buf, 3, is_unsigned ? 5 : 7, RAX); /* /5=shr, /7=sar */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        }
+        case POLY_OP_AND:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x23, RAX, RCX); /* and */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_OR:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x0B, RAX, RCX); /* or */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_XOR:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x33, RAX, RCX); /* xor */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_NEG:
+          ILOAD(RAX, 0);
+          if (poly_dtype_is_bool(u->src[0]->dtype)) {
+            /* Bool NEG = logical NOT: xor eax, 1 (flip 0↔1).
+             * Plain neg turns 1→-1 which corrupts subsequent AND/OR. */
+            if (RAX >= 8) emit_rex(&buf, 0, 0, 0, RAX >> 3);
+            xb_byte(&buf, 0x83);
+            emit_modrm(&buf, 3, 6, RAX);
+            xb_byte(&buf, 1);
+          } else if (wide) {
+            emit_neg_r64(&buf, RAX);
+          } else {
+            emit_neg_r32(&buf, RAX);
+          }
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_MAX:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
+          /* cmovl: 0F 4C /r */
+          emit_rex_always(&buf, w, RAX >> 3, 0, RCX >> 3);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0x4C);
+          emit_modrm(&buf, 3, RAX, RCX);
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+
+        /* Integer comparisons */
+        case POLY_OP_CMPLT:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
+          emit_setcc(&buf, 0x0C, RAX); /* setl al */
+          emit_movzx_r32_r8(&buf, RAX, RAX);
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_CMPEQ:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
+          emit_setcc(&buf, 0x04, RAX); /* sete al */
+          emit_movzx_r32_r8(&buf, RAX, RAX);
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        case POLY_OP_CMPNE:
+          ILOAD(RAX, 0);
+          ILOAD(RCX, 1);
+          emit_alu_rr(&buf, w, 0x3B, RAX, RCX); /* cmp */
+          emit_setcc(&buf, 0x05, RAX); /* setne al */
+          emit_movzx_r32_r8(&buf, RAX, RAX);
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+
+        case POLY_OP_WHERE:
+          /* Integer WHERE: test cond, cmov */
+          ILOAD(RAX, 0); /* cond */
+          ILOAD(RCX, 1); /* true */
+          ILOAD(RDX, 2); /* false */
+          emit_test_r32(&buf, RAX, RAX);
+          /* cmovz rcx, rdx (if cond==0, take false) */
+          emit_rex_always(&buf, w, RCX >> 3, 0, RDX >> 3);
+          xb_byte(&buf, 0x0F);
+          xb_byte(&buf, 0x44); /* cmove */
+          emit_modrm(&buf, 3, RCX, RDX);
+          emit_mov_rbp_r64(&buf, RCX, off);
+          break;
+
+        case POLY_OP_MULACC: {
+          bool is_pow2 =
+              (u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT &&
+               u->src[1]->arg.i > 0 && (u->src[1]->arg.i & (u->src[1]->arg.i - 1)) == 0);
+          ILOAD(RAX, 0);
+          if (is_pow2) {
+            int shift = 0;
+            for (int64_t v = u->src[1]->arg.i; v > 1; v >>= 1)
+              shift++;
+            emit_rex_always(&buf, w, 0, 0, 0);
+            xb_byte(&buf, 0xC1);
+            emit_modrm(&buf, 3, 4, RAX);
+            xb_byte(&buf, (uint8_t)shift);
+          } else {
+            ILOAD(RCX, 1);
+            if (wide)
+              emit_imul_r64_r64(&buf, RAX, RCX);
+            else
+              emit_imul_r32_r32(&buf, RAX, RCX);
+          }
+          ILOAD(RCX, 2);
+          emit_alu_rr(&buf, w, 0x03, RAX, RCX); /* add */
+          emit_mov_rbp_r64(&buf, RAX, off);
+          break;
+        }
+
+        case POLY_OP_THREEFRY:
+          /* THREEFRY should be decomposed by pm_decomp before reaching the
+           * renderer, and x64_can_handle rejects it. If it somehow survives,
+           * fail rather than silently producing wrong results. */
+          fprintf(stderr, "x64 jit: unexpected THREEFRY op at index %d\n", i);
+          goto x64_fail;
+
+        default:
+          fprintf(stderr, "x64 jit: unhandled int ALU op %s at index %d\n", poly_op_name(u->op), i);
+          goto x64_fail;
+        }
+#undef ILOAD
         /* Integer ALU clobbers RAX */
         rax_slot = -1;
       }
@@ -3575,21 +3804,23 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* ── Unhandled: hard-fail ────────────────────────────────────── */
-    fprintf(stderr, "x64 jit: unhandled UOp %s (op=%d) at index %d\n",
-            poly_op_name(u->op), u->op, i);
+    /* Unhandled: hard-fail */
+    fprintf(
+        stderr, "x64 jit: unhandled UOp %s (op=%d) at index %d\n", poly_op_name(u->op), u->op, i
+    );
     goto x64_fail;
 
-skip_slot:
+  skip_slot:
     /* A source slot was unresolved -- the kernel graph is broken.
      * Silently continuing would emit incomplete code that produces
      * wrong results. Fail so the exec_plan layer falls back to CPU. */
-    fprintf(stderr, "x64 jit: unresolved source slot at UOp index %d (op=%s)\n",
-            i, poly_op_name(u->op));
+    fprintf(
+        stderr, "x64 jit: unresolved source slot at UOp index %d (op=%s)\n", i, poly_op_name(u->op)
+    );
     goto x64_fail;
   }
 
-  /* ── Epilogue ────────────────────────────────────────────────────── */
+  /* Epilogue */
   if (use_avx2) emit_vzeroupper(&buf);
   emit_add_rsp_imm32(&buf, frame_size);
   emit_pop(&buf, RBX);
@@ -3599,26 +3830,26 @@ skip_slot:
   emit_pop(&buf, R15);
   emit_pop(&buf, RBP);
   emit_ret(&buf);
-  /* Undefine local aliases */
-  #undef locals
-  #undef xf
-  #undef rax_slot
-  #undef jit_ok
-  #undef reg_assigns
-  #undef n_reg_assigns
-  #undef n_loop_regs
-  #undef loop_stack
-  #undef loop_depth
-  #undef if_patch_stack
-  #undef if_depth
-  #undef deferred
-  #undef n_deferred
-  #undef next_slot
-  #undef n_define_vars
-  #undef n_param_gprs_assigned
-  #undef buf
-  #undef RELOAD_SIGN_MASK
-  #undef LM_SET
+/* Undefine local aliases */
+#undef locals
+#undef xf
+#undef rax_slot
+#undef jit_ok
+#undef reg_assigns
+#undef n_reg_assigns
+#undef n_loop_regs
+#undef loop_stack
+#undef loop_depth
+#undef if_patch_stack
+#undef if_depth
+#undef deferred
+#undef n_deferred
+#undef next_slot
+#undef n_define_vars
+#undef n_param_gprs_assigned
+#undef buf
+#undef RELOAD_SIGN_MASK
+#undef LM_SET
 
   ctx_free(&c);
   free(uop_map);
@@ -3665,8 +3896,7 @@ PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
   /* Non-AVX CPUs must use devec>=1: packed vec4 paths emit VEX.128 encoding
    * (vcmpps, vandps, vpaddd, etc.) which requires AVX hardware support. */
-  if (!cpu.has_avx && opts.devectorize < 1)
-    opts.devectorize = 1;
+  if (!cpu.has_avx && opts.devectorize < 1) opts.devectorize = 1;
 
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
@@ -3687,8 +3917,7 @@ PolyX64Program *poly_compile_x64(uint8_t *code, int code_size) {
   long page_size = sysconf(_SC_PAGESIZE);
   size_t alloc_size = ((size_t)code_size + page_size - 1) & ~(page_size - 1);
 
-  void *mem = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void *mem = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (mem == MAP_FAILED) return NULL;
 
   memcpy(mem, code, code_size);
@@ -3699,7 +3928,10 @@ PolyX64Program *poly_compile_x64(uint8_t *code, int code_size) {
   }
 
   PolyX64Program *prog = malloc(sizeof(PolyX64Program));
-  if (!prog) { munmap(mem, alloc_size); return NULL; }
+  if (!prog) {
+    munmap(mem, alloc_size);
+    return NULL;
+  }
   prog->code = mem;
   prog->code_size = alloc_size;
   /* Safe cast via memcpy to avoid strict aliasing violation */

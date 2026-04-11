@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-/* ── Model configuration (cJSON wrapper for HF config.json) ────────── */
+/* Model configuration (cJSON wrapper for HF config.json) */
 
 typedef struct PolyModelConfig PolyModelConfig;
 
@@ -23,7 +23,7 @@ void poly_model_config_set_int(PolyModelConfig *config, const char *key, int val
 void poly_model_config_set_float(PolyModelConfig *config, const char *key, float value);
 void poly_model_config_free(PolyModelConfig *config);
 
-/* ── HuggingFace loader (auto-dispatch by model_type) ──────────── */
+/* HuggingFace loader (auto-dispatch by model_type) */
 
 PolyInstance *poly_hf_load(
     const char *config_json, int config_len,

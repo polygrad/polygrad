@@ -23,17 +23,17 @@ extern "C" {
 /* Forward declaration -- defined in frontend.h, pointer-only usage here */
 struct PolyVarBinding;
 
-/* ── Device identity ─────────────────────────────────────────────────── */
+/* Device identity */
 
 typedef enum {
   POLY_DEVICE_AUTO = 0, /* resolved at set_device time, never stored */
-  POLY_DEVICE_CPU,      /* host C compiler (fork + clang/gcc + dlopen) */
-  POLY_DEVICE_INTERP,   /* interpreter: walks scheduled graph, no codegen */
-  POLY_DEVICE_CUDA,     /* NVIDIA GPU (PTX via cuModuleLoad) */
+  POLY_DEVICE_CPU, /* host C compiler (fork + clang/gcc + dlopen) */
+  POLY_DEVICE_INTERP, /* interpreter: walks scheduled graph, no codegen */
+  POLY_DEVICE_CUDA, /* NVIDIA GPU (PTX via cuModuleLoad) */
   POLY_DEVICE_WASM_JIT, /* WASM: C renders bytes, host compiles+executes */
-  POLY_DEVICE_WEBGPU,   /* WebGPU: C renders WGSL, host compiles+executes */
-  POLY_DEVICE_X64_JIT,  /* x86-64 JIT: C emits machine code, mmap+execute */
-  POLY_DEVICE_HIP,      /* AMD GPU (HSACO via hipModule) */
+  POLY_DEVICE_WEBGPU, /* WebGPU: C renders WGSL, host compiles+executes */
+  POLY_DEVICE_X64_JIT, /* x86-64 JIT: C emits machine code, mmap+execute */
+  POLY_DEVICE_HIP, /* AMD GPU (HSACO via hipModule) */
 } PolyDeviceId;
 
 /*
@@ -62,14 +62,14 @@ typedef enum {
 #define POLY_DEVICE_HOST POLY_DEVICE_CPU
 #endif
 
-/* ── Compilation mode ────────────────────────────────────────────────── */
+/* Compilation mode */
 
 typedef enum {
-  POLY_MODE_CALL = 0,       /* forward-only execution */
+  POLY_MODE_CALL = 0, /* forward-only execution */
   POLY_MODE_VALUE_AND_GRAD, /* forward + backward (value + gradient) */
 } PolyCompileMode;
 
-/* ── Exec item classification ────────────────────────────────────────── */
+/* Exec item classification */
 /*
  * Only POLY_EXEC_COMPUTE is emitted by the scheduler today.
  * COPY, VIEW, ENCDEC are defined for forward compatibility -- they become
@@ -78,22 +78,22 @@ typedef enum {
 
 typedef enum {
   POLY_EXEC_COMPUTE, /* scheduled kernel: lower -> render -> compile -> run */
-  POLY_EXEC_COPY,    /* buffer transfer across memory domains */
-  POLY_EXEC_VIEW,    /* buffer alias with offset (noop or alias setup) */
-  POLY_EXEC_ENCDEC,  /* encode/decode (HEVC, etc.) */
+  POLY_EXEC_COPY, /* buffer transfer across memory domains */
+  POLY_EXEC_VIEW, /* buffer alias with offset (noop or alias setup) */
+  POLY_EXEC_ENCDEC, /* encode/decode (HEVC, etc.) */
 } PolyExecItemKind;
 
-/* ── Runner classification ───────────────────────────────────────────── */
+/* Runner classification */
 
 typedef enum {
   POLY_RUNNER_COMPILED, /* lowered + rendered + compiled compute kernel */
-  POLY_RUNNER_COPY,     /* buffer copy between memory domains */
-  POLY_RUNNER_VIEW,     /* buffer view (noop or alias setup) */
-  POLY_RUNNER_ENCDEC,   /* encode/decode */
-  POLY_RUNNER_INTERP,   /* interpreter: walks scheduled graph directly */
+  POLY_RUNNER_COPY, /* buffer copy between memory domains */
+  POLY_RUNNER_VIEW, /* buffer view (noop or alias setup) */
+  POLY_RUNNER_ENCDEC, /* encode/decode */
+  POLY_RUNNER_INTERP, /* interpreter: walks scheduled graph directly */
 } PolyRunnerKind;
 
-/* ── Buffer handle ───────────────────────────────────────────────────── */
+/* Buffer handle */
 /*
  * Device-specific buffer reference. The ptr field is opaque:
  *   CPU/INTERP: host malloc'd pointer
@@ -104,13 +104,13 @@ typedef enum {
  */
 
 typedef struct {
-  void *ptr;            /* device-specific handle */
-  size_t nbytes;        /* physical byte size (handles quantized packing) */
-  PolyDeviceId domain;  /* which memory domain this lives in */
-  bool owned;           /* whether the instance should free this on cleanup */
+  void *ptr; /* device-specific handle */
+  size_t nbytes; /* physical byte size (handles quantized packing) */
+  PolyDeviceId domain; /* which memory domain this lives in */
+  bool owned; /* whether the instance should free this on cleanup */
 } PolyBufferHandle;
 
-/* ── Allocator interface ─────────────────────────────────────────────── */
+/* Allocator interface */
 /*
  * Per-device memory operations. Every executable step has exactly one
  * allocator corresponding to its device's memory domain.
@@ -119,17 +119,14 @@ typedef struct {
 typedef struct {
   void *(*alloc)(size_t nbytes, void *dev_ctx);
   void (*free)(void *handle, void *dev_ctx);
-  int (*copy_in)(void *dst_handle, const void *host_src, size_t nbytes,
-                 void *dev_ctx);
-  int (*copy_out)(void *host_dst, const void *src_handle, size_t nbytes,
-                  void *dev_ctx);
-  int (*copy_between)(void *dst_handle, const void *src_handle, size_t nbytes,
-                      void *dev_ctx);
+  int (*copy_in)(void *dst_handle, const void *host_src, size_t nbytes, void *dev_ctx);
+  int (*copy_out)(void *host_dst, const void *src_handle, size_t nbytes, void *dev_ctx);
+  int (*copy_between)(void *dst_handle, const void *src_handle, size_t nbytes, void *dev_ctx);
   void *dev_ctx; /* NULL for CPU, CUcontext* for CUDA, etc. */
   bool host_addressable; /* true if alloc'd pointers are host-dereferenceable */
 } PolyAllocator;
 
-/* ── Prepared buffer slot ────────────────────────────────────────────── */
+/* Prepared buffer slot */
 /*
  * One logical buffer in a prepared step. Merges external (named/bound)
  * and intermediate buffers into a flat indexed array.
@@ -139,12 +136,12 @@ typedef struct {
   PolyDType dtype;
   int64_t numel;
   int64_t nbytes;
-  PolyUOp *buf_uop;       /* pointer into PolyCtx arena */
+  PolyUOp *buf_uop; /* pointer into PolyCtx arena */
   bool is_intermediate;
-  int external_buf_idx;    /* index into PolyInstance.bufs[], or -1 */
+  int external_buf_idx; /* index into PolyInstance.bufs[], or -1 */
 } PolyScheduleBufSlot;
 
-/* ── Exec item spec ──────────────────────────────────────────────────── */
+/* Exec item spec */
 /*
  * One item in a prepared step. Mirrors tinygrad's ExecItem before lowering.
  *
@@ -173,7 +170,7 @@ typedef struct {
   int n_var_uops;
 } PolyExecItem;
 
-/* ── Prepared step ───────────────────────────────────────────────────── */
+/* Prepared step */
 /*
  * Backend-neutral execution plan. Internal only, not serialized.
  * Produced by scheduling a tensor-level SINK. Survives device changes.
@@ -200,11 +197,11 @@ typedef struct {
   int n_default_vars;
 
   /* Mode-specific metadata (VALUE_AND_GRAD only) */
-  int loss_buf_slot;  /* which slot is the loss output, or -1 */
+  int loss_buf_slot; /* which slot is the loss output, or -1 */
   int *grad_buf_slots; /* [n_params] grad output slots, or NULL */
 } PolySchedule;
 
-/* ── Runner ──────────────────────────────────────────────────────────── */
+/* Runner */
 /*
  * Backend-specific compiled execution unit. One per exec item after lowering.
  *
@@ -240,7 +237,7 @@ typedef struct {
   int n_vars;
 } PolyRunner;
 
-/* ── Compiled plan ────────────────────────────────────────────────────── */
+/* Compiled plan */
 /*
  * Backend-specific lowered execution plan with persistent workspace.
  * Produced by compiling a schedule for a specific device. Contains compiled
@@ -261,12 +258,12 @@ typedef struct {
   /* Persistent workspace: allocated once at compile time, reused every run.
    * Intermediates are zeroed at each run (reduce accumulators need it).
    * Args arrays are filled at each run (slot pointers change). */
-  PolyBufferHandle *intermediates;   /* [n_intermediates] */
+  PolyBufferHandle *intermediates; /* [n_intermediates] */
   int n_intermediates;
 
-  void ***kernel_args;               /* [n_runners], each is void*[n_params + n_vars] */
+  void ***kernel_args; /* [n_runners], each is void*[n_params + n_vars] */
 
-  void **slot_to_data;               /* [schedule->n_buf_slots], reused per run */
+  void **slot_to_data; /* [schedule->n_buf_slots], reused per run */
   int n_slot_to_data;
 
   /* Merged variable bindings array (reused per run) */
@@ -278,7 +275,7 @@ typedef struct {
   int var_int_cap;
 } PolyCompiledPlan;
 
-/* ── Backend descriptor ──────────────────────────────────────────────── */
+/* Backend descriptor */
 /*
  * Each backend provides a runner construction hook. The seam is at
  * lowering: for each COMPUTE item, lower_item does backend-specific
@@ -300,8 +297,12 @@ typedef struct {
   /* Lower a scheduled root into a runner. ctx needed for linearization.
    * fn_name is for debug output and cache keying.
    * Returns 0 on success, <0 on error. */
-  int (*lower_item)(PolyCtx *ctx, PolyUOp *scheduled_root,
-                    const char *fn_name, PolyRunner *runner_out);
+  int (*lower_item)(
+      PolyCtx *ctx,
+      PolyUOp *scheduled_root,
+      const char *fn_name,
+      PolyRunner *runner_out
+  );
 
   /* Execute a lowered runner. NULL for host-executed backends. */
   int (*execute)(PolyRunner *runner, void **args, int n_args);
@@ -313,19 +314,19 @@ typedef struct {
   const PolyAllocator *(*get_allocator)(void);
 } PolyBackendDesc;
 
-/* ── Execution status ────────────────────────────────────────────────── */
+/* Execution status */
 /*
  * Structured error reporting for host-executed backends.
  * Replaces sentinel return codes.
  */
 
 typedef struct {
-  int code;              /* 0 = success, <0 = error */
-  char message[256];     /* human-readable error description */
+  int code; /* 0 = success, <0 = error */
+  char message[256]; /* human-readable error description */
   int failed_item_index; /* which exec item failed, -1 if N/A */
 } PolyExecStatus;
 
-/* ── Prepared step construction ───────────────────────────────────────── */
+/* Prepared step construction */
 /*
  * Build a backend-neutral execution plan from a tensor-level SINK.
  * Calls poly_schedule_v2() internally, populates exec items from the
@@ -336,12 +337,11 @@ typedef struct {
  *
  * Returns NULL on error.
  */
-PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink,
-                                    PolyCompileMode mode);
+PolySchedule *poly_schedule_for(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode mode);
 
 void poly_schedule_free(PolySchedule *step);
 
-/* ── Executable step construction ────────────────────────────────────── */
+/* Executable step construction */
 /*
  * Lower a prepared step into a backend-specific executable for a device.
  * For each COMPUTE item, calls the backend's linearize -> render -> compile
@@ -352,8 +352,7 @@ void poly_schedule_free(PolySchedule *step);
  *
  * Returns NULL on error.
  */
-PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared,
-                                    PolyDeviceId device);
+PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared, PolyDeviceId device);
 
 /*
  * Execute a lowered step with bound buffer data. Zero-alloc in steady state.
@@ -367,13 +366,17 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared,
  * NOT reentrant: the plan's persistent workspace is shared across calls.
  * Returns 0 on success, <0 on error.
  */
-int poly_compiled_plan_run(PolyCompiledPlan *step,
-                             void **slot_data, int n_slots,
-                             struct PolyVarBinding *var_bindings, int n_var_bindings);
+int poly_compiled_plan_run(
+    PolyCompiledPlan *step,
+    void **slot_data,
+    int n_slots,
+    struct PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
 
 void poly_compiled_plan_free(PolyCompiledPlan *step);
 
-/* ── Allocators ──────────────────────────────────────────────────────── */
+/* Allocators */
 
 extern const PolyAllocator POLY_CPU_ALLOCATOR;
 
@@ -385,7 +388,7 @@ extern const PolyAllocator POLY_CUDA_ALLOCATOR;
 extern const PolyAllocator POLY_HIP_ALLOCATOR;
 #endif
 
-/* ── Backend registry ────────────────────────────────────────────────── */
+/* Backend registry */
 
 /* Returns the backend descriptor for a device, or NULL if unsupported
  * in this build. */
@@ -394,17 +397,17 @@ const PolyBackendDesc *poly_backend_get(PolyDeviceId device);
 /* True if the device's allocator produces host-dereferenceable pointers. */
 bool poly_device_is_host_addressable(PolyDeviceId device);
 
-/* ── Backward compatibility ──────────────────────────────────────────── */
+/* Backward compatibility */
 
 typedef PolyScheduleBufSlot PolyPreparedBufSlot;
 typedef PolyExecItem PolyExecItemSpec;
 typedef PolySchedule PolyPreparedStep;
 typedef PolyCompiledPlan PolyExecutableStep;
 
-#define poly_prepare_step      poly_schedule_for
+#define poly_prepare_step poly_schedule_for
 #define poly_prepared_step_free poly_schedule_free
-#define poly_lower_step        poly_compile_schedule
-#define poly_executable_step_run  poly_compiled_plan_run
+#define poly_lower_step poly_compile_schedule
+#define poly_executable_step_run poly_compiled_plan_run
 #define poly_executable_step_free poly_compiled_plan_free
 
 #ifdef __cplusplus

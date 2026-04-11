@@ -16,7 +16,7 @@
 #include "../src/codegen.h"
 #include "../src/scheduler.h"
 
-/* ── Convenience builder tests ──────────────────────────────────────── */
+/* Convenience builder tests */
 
 TEST(nn, nn_linear_registers_params) {
   PolyCtx *ctx = poly_ctx_new();
@@ -94,7 +94,7 @@ TEST(nn, nn_linear_e2e) {
 
   /* Set weights: W = [[1,0],[0,1],[1,1]], b = [0,0,0] */
   float *wd = poly_instance_buf_data_named(inst, "fc.weight", NULL);
-  float w_init[] = {1,0, 0,1, 1,1};
+  float w_init[] = {1, 0, 0, 1, 1, 1};
   memcpy(wd, w_init, sizeof(w_init));
 
   float *bd = poly_instance_buf_data_named(inst, "fc.bias", NULL);
@@ -102,7 +102,7 @@ TEST(nn, nn_linear_e2e) {
 
   /* Execute: x = [2, 3], expect [2, 3, 5] */
   float x_data[] = {2.0f, 3.0f};
-  PolyIOBinding io[] = { { "x", x_data } };
+  PolyIOBinding io[] = {{"x", x_data}};
   ASSERT_INT_EQ(poly_instance_call(inst, "forward", io, 1), 0);
 
   float *od = poly_instance_buf_data_named(inst, "output", NULL);
@@ -159,18 +159,17 @@ TEST(nn, nn_embedding_registers_params) {
   PASS();
 }
 
-
 TEST(nn, embedding_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* table: (4, 3) weight matrix */
   PolyUOp *table_buf = poly_buffer_f32(ctx, 12);
-  int64_t table_shape[] = { 4, 3 };
+  int64_t table_shape[] = {4, 3};
   PolyUOp *table = poly_reshape(ctx, table_buf, table_shape, 2);
 
   /* indices: (2,) tokens */
   PolyUOp *idx_buf = poly_buffer_f32(ctx, 2);
-  int64_t idx_shape[] = { 2 };
+  int64_t idx_shape[] = {2};
   PolyUOp *indices = poly_reshape(ctx, idx_buf, idx_shape, 1);
 
   PolyUOp *result = poly_embedding_apply(ctx, indices, table);
@@ -180,28 +179,24 @@ TEST(nn, embedding_e2e) {
   PolyUOp *store = poly_store_val(ctx, out_buf, result);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  float table_data[] = {
-    1.0f, 2.0f, 3.0f,
-    4.0f, 5.0f, 6.0f,
-    7.0f, 8.0f, 9.0f,
-    10.0f, 11.0f, 12.0f
-  };
-  float idx_data[] = { 0.0f, 2.0f };
+  float table_data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
+  float idx_data[] = {0.0f, 2.0f};
   float out_data[6] = {0};
 
   /* poly_gather internally creates an arange const buffer --
    * const_registry fallback in build_slot_data_from_bindings should bind it */
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(out_buf, out_data),
-    POLY_BIND_HOST(idx_buf, idx_data),
-    POLY_BIND_HOST(table_buf, table_data),
+      POLY_BIND_HOST(out_buf, out_data),
+      POLY_BIND_HOST(idx_buf, idx_data),
+      POLY_BIND_HOST(table_buf, table_data),
   };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
 
-  fprintf(stderr, "  embedding out: [%.1f %.1f %.1f | %.1f %.1f %.1f]\n",
-          out_data[0], out_data[1], out_data[2],
-          out_data[3], out_data[4], out_data[5]);
+  fprintf(
+      stderr, "  embedding out: [%.1f %.1f %.1f | %.1f %.1f %.1f]\n", out_data[0], out_data[1],
+      out_data[2], out_data[3], out_data[4], out_data[5]
+  );
   ASSERT_FLOAT_EQ(out_data[0], 1.0f, 1e-4);
   ASSERT_FLOAT_EQ(out_data[1], 2.0f, 1e-4);
   ASSERT_FLOAT_EQ(out_data[2], 3.0f, 1e-4);
@@ -213,7 +208,7 @@ TEST(nn, embedding_e2e) {
   PASS();
 }
 
-/* ── Existing composed op tests (kept, no PolyTensor dependency) ────── */
+/* Existing composed op tests (kept, no PolyTensor dependency) */
 
 TEST(nn, matmul_invalid_shape_returns_null) {
   PolyCtx *ctx = poly_ctx_new();
@@ -252,14 +247,15 @@ TEST(nn, matmul_broadcast_batch_numeric) {
   float out_data[8] = {0};
   float expected[] = {201, 2010, 403, 4030, 605, 6050, 807, 8070};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a_buf, a_data ),
-    POLY_BIND_HOST(b_buf, b_data ),
-    POLY_BIND_HOST(out_buf, out_data ),
+      POLY_BIND_HOST(a_buf, a_data),
+      POLY_BIND_HOST(b_buf, b_data),
+      POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5f);
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -296,9 +292,9 @@ TEST(nn, cross_entropy_sparse_targets) {
   float target_data[] = {0, 2};
   float out_data[] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(logits_buf, logits_data ),
-    POLY_BIND_HOST(target_buf, target_data ),
-    POLY_BIND_HOST(out_buf, out_data ),
+      POLY_BIND_HOST(logits_buf, logits_data),
+      POLY_BIND_HOST(target_buf, target_data),
+      POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 3);
@@ -327,9 +323,9 @@ TEST(nn, cross_entropy_dense_targets) {
   float target_data[] = {1, 0, 0, 0, 0, 1};
   float out_data[] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(logits_buf, logits_data ),
-    POLY_BIND_HOST(target_buf, target_data ),
-    POLY_BIND_HOST(out_buf, out_data ),
+      POLY_BIND_HOST(logits_buf, logits_data),
+      POLY_BIND_HOST(target_buf, target_data),
+      POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 3);
@@ -354,16 +350,13 @@ TEST(nn, cross_entropy_sparse_targets_non_last_axis) {
   PolyUOp *store = poly_store_val(ctx, out_buf, loss);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  float logits_data[] = {
-    0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0
-  };
+  float logits_data[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   float target_data[] = {0, 2, 1, 0};
   float out_data[] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(logits_buf, logits_data ),
-    POLY_BIND_HOST(target_buf, target_data ),
-    POLY_BIND_HOST(out_buf, out_data ),
+      POLY_BIND_HOST(logits_buf, logits_data),
+      POLY_BIND_HOST(target_buf, target_data),
+      POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 3);
@@ -399,19 +392,17 @@ TEST(nn, log_softmax_non_last_axis_flat_buffer) {
   PolyUOp *store = poly_store_val(ctx, out_buf, y);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  float x_data[] = {
-    0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0
-  };
+  float x_data[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
   float out_data[12] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(x_buf, x_data ),
-    POLY_BIND_HOST(out_buf, out_data ),
+      POLY_BIND_HOST(x_buf, x_data),
+      POLY_BIND_HOST(out_buf, out_data),
   };
 
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], -logf(3.0f), 1e-5f);
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out_data[i], -logf(3.0f), 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -443,25 +434,26 @@ TEST(nn, layernorm_non_last_axis) {
   /* All-zero input → layernorm output is 0/0 → NaN, but 0-0=0 so var=0.
    * Actually: (0-0)/sqrt(0+eps) = 0. Output should be 0. */
   float x_data[12] = {0};
-  PolyIOBinding io[] = { { "x", x_data } };
+  PolyIOBinding io[] = {{"x", x_data}};
   int ret = poly_instance_call(inst, "forward", io, 1);
   ASSERT_INT_EQ(ret, 0);
 
   float *out_data = poly_instance_buf_data_named(inst, "output", NULL);
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], 0.0f, 1e-5f);
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out_data[i], 0.0f, 1e-5f);
 
   poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── Compiled Step tests ─────────────────────────────────────────────── */
+/* Compiled Step tests */
 
 TEST(step, compile_step_basic) {
   /* a[8] + 1.0 -> out[8]. Compile once, run twice with different data. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a   = poly_buffer_f32(ctx, 8);
-  PolyUOp *buf_out  = poly_buffer_f32(ctx, 8);
+  PolyUOp *buf_a = poly_buffer_f32(ctx, 8);
+  PolyUOp *buf_out = poly_buffer_f32(ctx, 8);
   PolyUOp *one = poly_const_float(ctx, 1.0);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, buf_a, one);
   PolyUOp *store = poly_store_val(ctx, buf_out, add);
@@ -473,11 +465,11 @@ TEST(step, compile_step_basic) {
   ASSERT_INT_EQ(poly_step_n_intermediates(step), 0);
 
   /* Run 1 */
-  float a_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+  float a_data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_data[8] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_a, a_data ),
-    POLY_BIND_HOST(buf_out, out_data ),
+      POLY_BIND_HOST(buf_a, a_data),
+      POLY_BIND_HOST(buf_out, out_data),
   };
   int ret = poly_step_run(step, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
@@ -485,7 +477,8 @@ TEST(step, compile_step_basic) {
     ASSERT_FLOAT_EQ(out_data[i], (float)(i + 1) + 1.0f, 1e-5);
 
   /* Run 2: different data, same compiled step */
-  for (int i = 0; i < 8; i++) a_data[i] = (float)(i + 10);
+  for (int i = 0; i < 8; i++)
+    a_data[i] = (float)(i + 10);
   memset(out_data, 0, sizeof(out_data));
   ret = poly_step_run(step, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
@@ -504,26 +497,25 @@ TEST(step, compile_step_multikernel) {
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *c0  = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *e0  = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *oc  = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *oe  = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *c0 = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *e0 = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *oc = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *oe = poly_buffer(ctx, POLY_FLOAT32, N);
 
-  int64_t axes[]   = {0};
+  int64_t axes[] = {0};
   int64_t one_sh[] = {1};
   int64_t exp_sh[] = {N};
 
-  PolyUOp *sum     = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
-  PolyUOp *sum_1   = poly_reshape(ctx, sum, one_sh, 1);
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolyUOp *sum_1 = poly_reshape(ctx, sum, one_sh, 1);
   PolyUOp *sum_exp = poly_expand(ctx, sum_1, exp_sh, 1);
 
   PolyUOp *add_op = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum_exp, c0, poly_arg_none());
   PolyUOp *mul_op = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, sum_exp, e0, poly_arg_none());
-  PolyUOp *sc  = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oc, add_op, poly_arg_none());
-  PolyUOp *se  = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oe, mul_op, poly_arg_none());
-  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID,
-                            (PolyUOp *[]){sc, se}, 2, poly_arg_none());
+  PolyUOp *sc = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oc, add_op, poly_arg_none());
+  PolyUOp *se = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oe, mul_op, poly_arg_none());
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){sc, se}, 2, poly_arg_none());
 
   PolyStep *step = poly_compile_step(ctx, sink);
   ASSERT_NOT_NULL(step);
@@ -532,7 +524,7 @@ TEST(step, compile_step_multikernel) {
 
   float a_d[8], c0_d[8], e0_d[8], oc_d[8], oe_d[8];
   for (int i = 0; i < N; i++) {
-    a_d[i]  = (float)(i + 1);
+    a_d[i] = (float)(i + 1);
     c0_d[i] = 10.0f;
     e0_d[i] = 2.0f;
     oc_d[i] = 0.0f;
@@ -540,8 +532,8 @@ TEST(step, compile_step_multikernel) {
   }
 
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(oc, oc_d), POLY_BIND_HOST(oe, oe_d),
-    POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(c0, c0_d), POLY_BIND_HOST(e0, e0_d),
+      POLY_BIND_HOST(oc, oc_d), POLY_BIND_HOST(oe, oe_d), POLY_BIND_HOST(a, a_d),
+      POLY_BIND_HOST(c0, c0_d), POLY_BIND_HOST(e0, e0_d),
   };
   int ret = poly_step_run(step, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
@@ -568,9 +560,9 @@ TEST(step, compile_step_assign) {
   PolyStep *step = poly_compile_step(ctx, sink);
   ASSERT_NOT_NULL(step);
 
-  float a_data[4] = { 10.0f, 20.0f, 30.0f, 40.0f };
+  float a_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_a, a_data ),
+      POLY_BIND_HOST(buf_a, a_data),
   };
 
   /* Run 1: a becomes a + 1 */
@@ -606,10 +598,10 @@ TEST(step, compile_step_dynamic_default_override) {
   /* Build buffers with BIND as source (so strip_bind_values sees it) */
   PolyUOp *unique_a = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(3000000));
   PolyUOp *unique_o = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(3000001));
-  PolyUOp *src_a[2] = { unique_a, bind_N };
-  PolyUOp *src_o[2] = { unique_o, bind_N };
-  PolyUOp *buf_a   = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_a, 2, poly_arg_int(16));
-  PolyUOp *buf_out  = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_o, 2, poly_arg_int(16));
+  PolyUOp *src_a[2] = {unique_a, bind_N};
+  PolyUOp *src_o[2] = {unique_o, bind_N};
+  PolyUOp *buf_a = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_a, 2, poly_arg_int(16));
+  PolyUOp *buf_out = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_o, 2, poly_arg_int(16));
 
   PolyUOp *one = poly_const_float(ctx, 1.0);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf_a, one, poly_arg_none());
@@ -626,8 +618,8 @@ TEST(step, compile_step_dynamic_default_override) {
   }
 
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_a, a_data ),
-    POLY_BIND_HOST(buf_out, out_data ),
+      POLY_BIND_HOST(buf_a, a_data),
+      POLY_BIND_HOST(buf_out, out_data),
   };
 
   /* Run 1: no var_bindings, uses BIND default N=4 */
@@ -641,8 +633,9 @@ TEST(step, compile_step_dynamic_default_override) {
   ASSERT_FLOAT_EQ(out_data[4], -999.0f, 1e-5);
 
   /* Run 2: override N=8 */
-  for (int i = 0; i < 16; i++) out_data[i] = -999.0f;
-  PolyVarBinding var_bind = { .var = N, .value = 8 };
+  for (int i = 0; i < 16; i++)
+    out_data[i] = -999.0f;
+  PolyVarBinding var_bind = {.var = N, .value = 8};
   ret = poly_step_run_ex(step, bindings, 2, &var_bind, 1);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 8; i++)
@@ -658,8 +651,8 @@ TEST(step, compile_step_dynamic_default_override) {
 TEST(step, compile_step_missing_binding) {
   /* Compile a step, call with incomplete buffer bindings -> returns -1. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a   = poly_buffer_f32(ctx, 4);
-  PolyUOp *buf_out  = poly_buffer_f32(ctx, 4);
+  PolyUOp *buf_a = poly_buffer_f32(ctx, 4);
+  PolyUOp *buf_out = poly_buffer_f32(ctx, 4);
   PolyUOp *one = poly_const_float(ctx, 1.0);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, buf_a, one);
   PolyUOp *store = poly_store_val(ctx, buf_out, add);
@@ -671,7 +664,7 @@ TEST(step, compile_step_missing_binding) {
   /* Only provide buf_out, missing buf_a */
   float out_data[4] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_out, out_data ),
+      POLY_BIND_HOST(buf_out, out_data),
   };
   int ret = poly_step_run(step, bindings, 1);
   ASSERT_INT_EQ(ret, -1);
@@ -687,8 +680,8 @@ TEST(step, compile_step_missing_var) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
-  PolyUOp *buf_a   = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
-  PolyUOp *buf_out  = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *buf_a = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *buf_out = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
 
   PolyUOp *one = poly_const_float(ctx, 1.0);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf_a, one, poly_arg_none());
@@ -704,8 +697,8 @@ TEST(step, compile_step_missing_var) {
     out_data[i] = -999.0f;
   }
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_a, a_data ),
-    POLY_BIND_HOST(buf_out, out_data ),
+      POLY_BIND_HOST(buf_a, a_data),
+      POLY_BIND_HOST(buf_out, out_data),
   };
 
   /* Run without var_bindings -> should fail (no BIND default, var needed) */
@@ -713,8 +706,9 @@ TEST(step, compile_step_missing_var) {
   ASSERT_INT_EQ(ret, -1);
 
   /* Run with explicit var_bindings -> should succeed */
-  for (int i = 0; i < 16; i++) out_data[i] = -999.0f;
-  PolyVarBinding var_bind = { .var = N, .value = 4 };
+  for (int i = 0; i < 16; i++)
+    out_data[i] = -999.0f;
+  PolyVarBinding var_bind = {.var = N, .value = 4};
   ret = poly_step_run_ex(step, bindings, 2, &var_bind, 1);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_data[0], 2.0f, 1e-5);
@@ -731,8 +725,8 @@ TEST(step, compile_step_missing_var) {
 TEST(step, compile_step_metadata) {
   /* Basic metadata queries. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a   = poly_buffer_f32(ctx, 4);
-  PolyUOp *buf_out  = poly_buffer_f32(ctx, 4);
+  PolyUOp *buf_a = poly_buffer_f32(ctx, 4);
+  PolyUOp *buf_out = poly_buffer_f32(ctx, 4);
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, buf_a, poly_const_float(ctx, 1.0));
   PolyUOp *store = poly_store_val(ctx, buf_out, add);
   PolyUOp *sink = poly_sink1(ctx, store);
@@ -758,9 +752,9 @@ TEST(step, compile_value_and_grad_quadratic) {
   int64_t axes[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1);
 
-  PolyUOp *params[] = { p };
+  PolyUOp *params[] = {p};
   int loss_idx = -1;
-  int grad_idxs[1] = { -1 };
+  int grad_idxs[1] = {-1};
   PolyStep *step = poly_compile_value_and_grad(ctx, loss, params, 1, &loss_idx, grad_idxs);
   ASSERT_NOT_NULL(step);
 
@@ -793,7 +787,7 @@ TEST(step, compile_value_and_grad_quadratic) {
   ASSERT_INT_EQ(poly_step_buffer_info(step, n_bufs, &info), -1);
   ASSERT_INT_EQ(poly_step_buffer_info(NULL, 0, &info), -1);
 
-  float p_data[4] = { 1.0f, 2.0f, -3.0f, 4.0f };
+  float p_data[4] = {1.0f, 2.0f, -3.0f, 4.0f};
   float loss_out[1] = {0};
   float grad_out[4] = {0};
   void *buf_ptrs[16] = {0};
@@ -882,12 +876,10 @@ TEST(nn, threefry_reference_vector_cpu) {
   /* Reference from JAX threefry2x32 primitive:
    * key0=1337, key1=0, x0=counters 0..19, x1=0.
    * This matches tinygrad's uint32 elementwise lowering semantics. */
-  const uint32_t ref[20] = {
-    2732499619u, 3322027265u, 2482432314u, 3871860445u, 3571867126u,
-    3019569655u, 2459680734u, 2731866067u, 986922480u, 1616040745u,
-    4238711754u, 3594775990u, 3046419939u, 3519108299u, 586160567u,
-    3928687287u, 4074505382u, 4210472430u, 4094881238u, 3306411770u
-  };
+  const uint32_t ref[20] = {2732499619u, 3322027265u, 2482432314u, 3871860445u, 3571867126u,
+                            3019569655u, 2459680734u, 2731866067u, 986922480u,  1616040745u,
+                            4238711754u, 3594775990u, 3046419939u, 3519108299u, 586160567u,
+                            3928687287u, 4074505382u, 4210472430u, 4094881238u, 3306411770u};
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *counter = poly_buffer(ctx, POLY_UINT32, 20);
@@ -903,7 +895,8 @@ TEST(nn, threefry_reference_vector_cpu) {
     out_data[i] = 0u;
   }
   PolyBufferBinding binds[3] = {
-    POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data), POLY_BIND_HOST(out, out_data)
+      POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data),
+      POLY_BIND_HOST(out, out_data)
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
   for (int i = 0; i < 20; i++)
@@ -918,13 +911,13 @@ TEST(nn, threefry_reference_vector_uint64_cpu) {
    * x = (x1<<32)|x0 with x0=0..19, x1=0
    * key = (key1<<32)|key0 with key0=1337, key1=0 */
   const uint64_t ref[20] = {
-    2091981003842036387ull, 7289724007706926337ull, 5665610599518103866ull,
-    1710967476831381213ull, 10223482319493553654ull, 17028600460329286135ull,
-    17124603982541209566ull, 3105577853879908307ull, 2086892522412654064ull,
-    3335679299718140713ull, 16051258882154404810ull, 6689751810128997814ull,
-    14143017499898457571ull, 15433975895207007435ull, 585627789352245687ull,
-    6751685475094430391ull, 13535415641566872742ull, 11824248585908041198ull,
-    12094218887010381270ull, 17901838715724224250ull
+      2091981003842036387ull,  7289724007706926337ull,  5665610599518103866ull,
+      1710967476831381213ull,  10223482319493553654ull, 17028600460329286135ull,
+      17124603982541209566ull, 3105577853879908307ull,  2086892522412654064ull,
+      3335679299718140713ull,  16051258882154404810ull, 6689751810128997814ull,
+      14143017499898457571ull, 15433975895207007435ull, 585627789352245687ull,
+      6751685475094430391ull,  13535415641566872742ull, 11824248585908041198ull,
+      12094218887010381270ull, 17901838715724224250ull
   };
 
   PolyCtx *ctx = poly_ctx_new();
@@ -941,13 +934,16 @@ TEST(nn, threefry_reference_vector_uint64_cpu) {
     out_data[i] = 0ull;
   }
   PolyBufferBinding binds[3] = {
-    POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data), POLY_BIND_HOST(out, out_data)
+      POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data),
+      POLY_BIND_HOST(out, out_data)
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
   for (int i = 0; i < 20; i++) {
     if (out_data[i] != ref[i]) {
-      FAIL("out_data[%d]=%llu expected %llu", i,
-           (unsigned long long)out_data[i], (unsigned long long)ref[i]);
+      FAIL(
+          "out_data[%d]=%llu expected %llu", i, (unsigned long long)out_data[i],
+          (unsigned long long)ref[i]
+      );
     }
   }
 
@@ -1030,11 +1026,12 @@ TEST(nn, frontend_creation_helpers) {
   PolyUOp *buf2 = poly_buffer_f32(ctx, 1);
   PolyUOp *buf3 = poly_buffer_f32(ctx, 1);
   float tri_out[2] = {0, 0};
-  PolyUOp *sink = poly_sink_n(ctx, (PolyUOp *[]){
-    poly_store_val(ctx, buf2, tl_s),
-    poly_store_val(ctx, buf3, tu_s)
-  }, 2);
-  PolyBufferBinding binds[2] = { POLY_BIND_HOST(buf2, &tri_out[0]), POLY_BIND_HOST(buf3, &tri_out[1]) };
+  PolyUOp *sink = poly_sink_n(
+      ctx, (PolyUOp *[]){poly_store_val(ctx, buf2, tl_s), poly_store_val(ctx, buf3, tu_s)}, 2
+  );
+  PolyBufferBinding binds[2] = {
+      POLY_BIND_HOST(buf2, &tri_out[0]), POLY_BIND_HOST(buf3, &tri_out[1])
+  };
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 2), 0);
   ASSERT_FLOAT_EQ(tri_out[0], 6.0f, 1e-5);
   ASSERT_FLOAT_EQ(tri_out[1], 6.0f, 1e-5);
@@ -1052,12 +1049,18 @@ TEST(nn, frontend_math_wrappers_and_lgamma_grad) {
   PolyUOp *y2 = poly_expm1(ctx, x);
   PolyUOp *o1 = poly_buffer_f32(ctx, 1);
   PolyUOp *o2 = poly_buffer_f32(ctx, 1);
-  PolyUOp *sink = poly_sink_n(ctx, (PolyUOp *[]){
-    poly_store_val(ctx, o1, y1),
-    poly_store_val(ctx, o2, y2),
-  }, 2);
+  PolyUOp *sink = poly_sink_n(
+      ctx,
+      (PolyUOp *[]){
+          poly_store_val(ctx, o1, y1),
+          poly_store_val(ctx, o2, y2),
+      },
+      2
+  );
   float xv[1] = {0.2f}, out1[1] = {0}, out2[1] = {0};
-  PolyBufferBinding binds[3] = { POLY_BIND_HOST(x, xv), POLY_BIND_HOST(o1, out1), POLY_BIND_HOST(o2, out2) };
+  PolyBufferBinding binds[3] = {
+      POLY_BIND_HOST(x, xv), POLY_BIND_HOST(o1, out1), POLY_BIND_HOST(o2, out2)
+  };
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
   ASSERT_FLOAT_EQ(out1[0], log1pf(0.2f), 5e-3f);
   ASSERT_FLOAT_EQ(out2[0], expm1f(0.2f), 5e-3f);
@@ -1066,7 +1069,7 @@ TEST(nn, frontend_math_wrappers_and_lgamma_grad) {
   PolyUOp *lg = poly_lgamma(ctx, x);
   int64_t axes[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, lg, axes, 1);
-  PolyUOp *params[] = { x };
+  PolyUOp *params[] = {x};
   int loss_idx = -1, grad_idx[1] = {-1};
   PolyStep *step = poly_compile_value_and_grad(ctx, loss, params, 1, &loss_idx, grad_idx);
   ASSERT_NOT_NULL(step);
@@ -1097,7 +1100,7 @@ TEST(nn, frontend_math_wrappers_and_lgamma_grad) {
   PASS();
 }
 
-/* ── Special math correctness tests (baked reference constants) ────────── */
+/* Special math correctness tests (baked reference constants) */
 
 /* Helper: compile a scalar f32 function, evaluate at given input, return output */
 static float eval_scalar_f32(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), float xval) {
@@ -1107,7 +1110,7 @@ static float eval_scalar_f32(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), float xval) {
   PolyUOp *out = poly_buffer_f32(ctx, 1);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
   float inv = xval, result = 0;
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(x, &inv), POLY_BIND_HOST(out, &result) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(x, &inv), POLY_BIND_HOST(out, &result)};
   int rc = poly_realize(ctx, sink, binds, 2);
   poly_ctx_destroy(ctx);
   return (rc == 0) ? result : NAN;
@@ -1121,7 +1124,7 @@ static double eval_scalar_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double xval)
   PolyUOp *out = poly_buffer_f64(ctx, 1);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
   double inv = xval, result = 0.0;
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(x, &inv), POLY_BIND_HOST(out, &result) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(x, &inv), POLY_BIND_HOST(out, &result)};
   int rc = poly_realize(ctx, sink, binds, 2);
   poly_ctx_destroy(ctx);
   return (rc == 0) ? result : (double)NAN;
@@ -1129,13 +1132,12 @@ static double eval_scalar_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double xval)
 
 TEST(nn, special_math_erf) {
   /* Reference: A&S Table 7.1, DLMF 7.2.1 */
-  struct { float x; float ref; } cases[] = {
-    { 0.0f,   0.0f },
-    { 0.5f,   0.5204998778f },
-    { 1.0f,   0.8427007929f },
-    { 2.0f,   0.9953222650f },
-    { 3.0f,   0.9999779095f },
-    {-1.0f,  -0.8427007929f },
+  struct {
+    float x;
+    float ref;
+  } cases[] = {
+      {0.0f, 0.0f},          {0.5f, 0.5204998778f}, {1.0f, 0.8427007929f},
+      {2.0f, 0.9953222650f}, {3.0f, 0.9999779095f}, {-1.0f, -0.8427007929f},
   };
   for (int i = 0; i < 6; i++) {
     float got = eval_scalar_f32(poly_erf, cases[i].x);
@@ -1147,14 +1149,18 @@ TEST(nn, special_math_erf) {
 TEST(nn, special_math_erfc) {
   /* Reference: erfc(x) = 1 - erf(x). Tail values from DLMF 7.2.2.
    * Uses A&S tau directly (no 1-erf cancellation). */
-  struct { float x; float ref; float tol; } cases[] = {
-    { 0.0f,   1.0f,             1e-4f },
-    { 1.0f,   0.15729920706f,   1e-4f },
-    { 2.0f,   0.00467773498f,   1e-5f },
-    { 3.0f,   2.20904970e-5f,   5e-6f },
-    { 5.0f,   1.53745979e-12f,  1e-12f },
-    /* Negative: erfc(-x) = 2 - erfc(x) */
-    {-1.0f,   1.84270079294f,   1e-4f },
+  struct {
+    float x;
+    float ref;
+    float tol;
+  } cases[] = {
+      {0.0f, 1.0f, 1e-4f},
+      {1.0f, 0.15729920706f, 1e-4f},
+      {2.0f, 0.00467773498f, 1e-5f},
+      {3.0f, 2.20904970e-5f, 5e-6f},
+      {5.0f, 1.53745979e-12f, 1e-12f},
+      /* Negative: erfc(-x) = 2 - erfc(x) */
+      {-1.0f, 1.84270079294f, 1e-4f},
   };
   for (int i = 0; i < 6; i++) {
     float got = eval_scalar_f32(poly_erfc, cases[i].x);
@@ -1162,7 +1168,7 @@ TEST(nn, special_math_erfc) {
     /* For very small tail values, check relative error instead */
     if (cases[i].ref < 1e-4f && cases[i].ref > 0.0f) {
       float rel_err = fabsf(got - cases[i].ref) / cases[i].ref;
-      ASSERT_TRUE(rel_err < 0.5f);  /* within 50% relative error for f32 tails */
+      ASSERT_TRUE(rel_err < 0.5f); /* within 50% relative error for f32 tails */
     } else {
       ASSERT_FLOAT_EQ(got, cases[i].ref, cases[i].tol);
     }
@@ -1172,13 +1178,12 @@ TEST(nn, special_math_erfc) {
 
 TEST(nn, special_math_erfinv) {
   /* Reference: erfinv values from Wolfram Alpha */
-  struct { float x; float ref; } cases[] = {
-    {  0.0f,     0.0f },
-    {  0.5f,     0.4769362762f },
-    { -0.5f,    -0.4769362762f },
-    {  0.9f,     1.1630871536f },
-    {  0.99f,    1.8213863677f },
-    {  0.9999f,  2.7510639058f },
+  struct {
+    float x;
+    float ref;
+  } cases[] = {
+      {0.0f, 0.0f},          {0.5f, 0.4769362762f},  {-0.5f, -0.4769362762f},
+      {0.9f, 1.1630871536f}, {0.99f, 1.8213863677f}, {0.9999f, 2.7510639058f},
   };
   for (int i = 0; i < 6; i++) {
     float got = eval_scalar_f32(poly_erfinv, cases[i].x);
@@ -1188,7 +1193,7 @@ TEST(nn, special_math_erfinv) {
   }
 
   /* Roundtrip: erfinv(erf(x)) ~= x */
-  float roundtrip_x[] = { -2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f };
+  float roundtrip_x[] = {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f};
   for (int i = 0; i < 7; i++) {
     float v = roundtrip_x[i];
     float erf_v = eval_scalar_f32(poly_erf, v);
@@ -1200,14 +1205,18 @@ TEST(nn, special_math_erfinv) {
 
 TEST(nn, special_math_ndtri) {
   /* Reference: inverse normal CDF from standard tables / Wolfram Alpha */
-  struct { float p; float ref; float tol; } cases[] = {
-    { 0.5f,    0.0f,          1e-4f },
-    { 0.75f,   0.6744897502f, 0.01f },
-    { 0.9f,    1.2815515655f, 0.02f },
-    { 0.99f,   2.3263478740f, 0.05f },
-    /* Tail tests -- PPL-critical */
-    { 1e-3f,  -3.0902323062f, 0.1f  },
-    { 1e-6f,  -4.7534243060f, 0.2f  },
+  struct {
+    float p;
+    float ref;
+    float tol;
+  } cases[] = {
+      {0.5f, 0.0f, 1e-4f},
+      {0.75f, 0.6744897502f, 0.01f},
+      {0.9f, 1.2815515655f, 0.02f},
+      {0.99f, 2.3263478740f, 0.05f},
+      /* Tail tests -- PPL-critical */
+      {1e-3f, -3.0902323062f, 0.1f},
+      {1e-6f, -4.7534243060f, 0.2f},
   };
   for (int i = 0; i < 6; i++) {
     float got = eval_scalar_f32(poly_ndtri, cases[i].p);
@@ -1223,12 +1232,12 @@ TEST(nn, special_math_ndtri) {
 
 TEST(nn, special_math_digamma) {
   /* Reference: DLMF 5.4.14, A&S Table 6.3 */
-  struct { float x; float ref; } cases[] = {
-    { 1.0f,  -0.5772156649f },   /* Euler-Mascheroni */
-    { 2.0f,   0.4227843351f },
-    { 0.5f,  -1.9635100260f },
-    { 5.0f,   1.5061176685f },
-    { 10.0f,  2.2517525890f },
+  struct {
+    float x;
+    float ref;
+  } cases[] = {
+      {1.0f, -0.5772156649f}, /* Euler-Mascheroni */
+      {2.0f, 0.4227843351f},  {0.5f, -1.9635100260f}, {5.0f, 1.5061176685f}, {10.0f, 2.2517525890f},
   };
   for (int i = 0; i < 5; i++) {
     float got = eval_scalar_f32(poly_digamma, cases[i].x);
@@ -1240,13 +1249,17 @@ TEST(nn, special_math_digamma) {
 TEST(nn, special_math_lgamma) {
   /* Reference: lgamma values from standard tables.
    * All computation is f32 (cf() emits POLY_FLOAT32), so expect ~1e-3 accuracy. */
-  struct { float x; float ref; float tol; } cases[] = {
-    { 1.0f,   0.0f,          5e-4f },
-    { 2.0f,   0.0f,          5e-4f },
-    { 0.5f,   0.5723649429f, 1e-3f },   /* ln(sqrt(pi)) */
-    { 3.5f,   1.2009736024f, 1e-3f },
-    { 5.0f,   3.1780538303f, 5e-3f },
-    { 10.0f, 12.8018274801f, 0.02f },
+  struct {
+    float x;
+    float ref;
+    float tol;
+  } cases[] = {
+      {1.0f, 0.0f, 5e-4f},
+      {2.0f, 0.0f, 5e-4f},
+      {0.5f, 0.5723649429f, 1e-3f}, /* ln(sqrt(pi)) */
+      {3.5f, 1.2009736024f, 1e-3f},
+      {5.0f, 3.1780538303f, 5e-3f},
+      {10.0f, 12.8018274801f, 0.02f},
   };
   for (int i = 0; i < 6; i++) {
     float got = eval_scalar_f32(poly_lgamma, cases[i].x);
@@ -1263,20 +1276,30 @@ TEST(nn, special_math_log1p_expm1) {
   PolyUOp *y2 = poly_expm1(ctx, x);
   PolyUOp *o1 = poly_buffer_f32(ctx, 1);
   PolyUOp *o2 = poly_buffer_f32(ctx, 1);
-  PolyUOp *sink = poly_sink_n(ctx, (PolyUOp *[]){
-    poly_store_val(ctx, o1, y1),
-    poly_store_val(ctx, o2, y2),
-  }, 2);
+  PolyUOp *sink = poly_sink_n(
+      ctx,
+      (PolyUOp *[]){
+          poly_store_val(ctx, o1, y1),
+          poly_store_val(ctx, o2, y2),
+      },
+      2
+  );
 
-  struct { float x; float ref_log1p; float ref_expm1; } cases[] = {
-    { 0.0f,     0.0f,           0.0f },
-    { 1.0f,     0.6931471806f,  1.7182818285f },
-    { 0.2f,     0.1823215568f,  0.2214027582f },
-    { 1e-6f,    1e-6f,          1e-6f },   /* near-zero: should NOT be 0 */
+  struct {
+    float x;
+    float ref_log1p;
+    float ref_expm1;
+  } cases[] = {
+      {0.0f, 0.0f, 0.0f},
+      {1.0f, 0.6931471806f, 1.7182818285f},
+      {0.2f, 0.1823215568f, 0.2214027582f},
+      {1e-6f, 1e-6f, 1e-6f}, /* near-zero: should NOT be 0 */
   };
   for (int i = 0; i < 4; i++) {
     float xv = cases[i].x, out1 = 0, out2 = 0;
-    PolyBufferBinding binds[] = { POLY_BIND_HOST(x, &xv), POLY_BIND_HOST(o1, &out1), POLY_BIND_HOST(o2, &out2) };
+    PolyBufferBinding binds[] = {
+        POLY_BIND_HOST(x, &xv), POLY_BIND_HOST(o1, &out1), POLY_BIND_HOST(o2, &out2)
+    };
     ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
     ASSERT_FLOAT_EQ(out1, cases[i].ref_log1p, 5e-4f);
     ASSERT_FLOAT_EQ(out2, cases[i].ref_expm1, 5e-4f);
@@ -1301,9 +1324,9 @@ TEST(nn, special_math_logsumexp) {
     PolyUOp *out = poly_buffer_f32(ctx, 1);
     PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
     float xv[] = {0.0f, 0.0f}, result = 0;
-    PolyBufferBinding binds[] = { POLY_BIND_HOST(x, xv), POLY_BIND_HOST(out, &result) };
+    PolyBufferBinding binds[] = {POLY_BIND_HOST(x, xv), POLY_BIND_HOST(out, &result)};
     ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 2), 0);
-    ASSERT_FLOAT_EQ(result, 0.6931471806f, 1e-4f);  /* ln(2) */
+    ASSERT_FLOAT_EQ(result, 0.6931471806f, 1e-4f); /* ln(2) */
   }
 
   /* Case 2: overflow stability -- logsumexp([1000, 1001]) */
@@ -1313,7 +1336,7 @@ TEST(nn, special_math_logsumexp) {
     PolyUOp *out2 = poly_buffer_f32(ctx, 1);
     PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, y2));
     float xv2[] = {1000.0f, 1001.0f}, result2 = 0;
-    PolyBufferBinding binds2[] = { POLY_BIND_HOST(x2, xv2), POLY_BIND_HOST(out2, &result2) };
+    PolyBufferBinding binds2[] = {POLY_BIND_HOST(x2, xv2), POLY_BIND_HOST(out2, &result2)};
     ASSERT_INT_EQ(poly_realize(ctx, sink2, binds2, 2), 0);
     /* Expected: 1001 + ln(1 + e^-1) = 1001.3133 */
     ASSERT_TRUE(isfinite(result2));
@@ -1327,7 +1350,7 @@ TEST(nn, special_math_logsumexp) {
     PolyUOp *out3 = poly_buffer_f32(ctx, 1);
     PolyUOp *sink3 = poly_sink1(ctx, poly_store_val(ctx, out3, y3));
     float xv3[] = {-1000.0f, -999.0f}, result3 = 0;
-    PolyBufferBinding binds3[] = { POLY_BIND_HOST(x3, xv3), POLY_BIND_HOST(out3, &result3) };
+    PolyBufferBinding binds3[] = {POLY_BIND_HOST(x3, xv3), POLY_BIND_HOST(out3, &result3)};
     ASSERT_INT_EQ(poly_realize(ctx, sink3, binds3, 2), 0);
     /* Expected: -999 + ln(1 + e^-1) = -998.6867 */
     ASSERT_TRUE(isfinite(result3));
@@ -1338,16 +1361,18 @@ TEST(nn, special_math_logsumexp) {
   PASS();
 }
 
-/* ── f64 accuracy tests — verify dtype-correct constants ─────────────── */
+/* f64 accuracy tests — verify dtype-correct constants */
 
 TEST(nn, special_math_f64_lgamma) {
   /* lgamma() is ISO C99 <math.h>; use it as reference for f64 accuracy. */
-  struct { double x; double tol; } cases[] = {
-    { 1.0,  1e-12 },   /* lgamma(1) = 0 exactly */
-    { 2.0,  1e-12 },   /* lgamma(2) = 0 exactly */
-    { 0.5,  1e-12 },   /* ln(sqrt(pi)) */
-    { 1.5,  1e-12 },
-    { 10.0, 1e-10 },
+  struct {
+    double x;
+    double tol;
+  } cases[] = {
+      {1.0, 1e-12}, /* lgamma(1) = 0 exactly */
+      {2.0, 1e-12}, /* lgamma(2) = 0 exactly */
+      {0.5, 1e-12}, /* ln(sqrt(pi)) */
+      {1.5, 1e-12}, {10.0, 1e-10},
   };
   for (int i = 0; i < 5; i++) {
     double got = eval_scalar_f64(poly_lgamma, cases[i].x);
@@ -1366,10 +1391,14 @@ TEST(nn, special_math_f64_digamma) {
    * asymptotic at x=6, giving ~2-3e-9 truncation error.  Tolerances are set
    * to 1e-7 to stay well above this while still requiring f64 precision
    * (f32 gives ~1e-5 error due to transcendental polynomial approximation). */
-  struct { double x; double ref; double tol; } cases[] = {
-    { 1.0, -0.5772156649015328606, 1e-7 },  /* Euler-Mascheroni */
-    { 2.0,  0.4227843350984671394, 1e-7 },  /* 1 - γ */
-    { 5.0,  1.5061176684318004727, 1e-7 },  /* precomputed */
+  struct {
+    double x;
+    double ref;
+    double tol;
+  } cases[] = {
+      {1.0, -0.5772156649015328606, 1e-7}, /* Euler-Mascheroni */
+      {2.0, 0.4227843350984671394, 1e-7}, /* 1 - γ */
+      {5.0, 1.5061176684318004727, 1e-7}, /* precomputed */
   };
   for (int i = 0; i < 3; i++) {
     double got = eval_scalar_f64(poly_digamma, cases[i].x);
@@ -1379,16 +1408,19 @@ TEST(nn, special_math_f64_digamma) {
   /* Recurrence check: ψ(x+1) = ψ(x) + 1/x */
   double psi15 = eval_scalar_f64(poly_digamma, 1.5);
   double psi25 = eval_scalar_f64(poly_digamma, 2.5);
-  ASSERT_TRUE(fabs(psi25 - (psi15 + 1.0/1.5)) < 1e-10);
+  ASSERT_TRUE(fabs(psi25 - (psi15 + 1.0 / 1.5)) < 1e-10);
   PASS();
 }
 
 TEST(nn, special_math_f64_log1p) {
   /* log1p() is ISO C99 <math.h> */
-  struct { double x; double tol; } cases[] = {
-    { 1e-10, 1e-18 },   /* tiny x: f32 loses most digits */
-    { 1.0,   1e-14 },   /* ln(2) */
-    { 0.2,   1e-13 },
+  struct {
+    double x;
+    double tol;
+  } cases[] = {
+      {1e-10, 1e-18}, /* tiny x: f32 loses most digits */
+      {1.0, 1e-14}, /* ln(2) */
+      {0.2, 1e-13},
   };
   for (int i = 0; i < 3; i++) {
     double got = eval_scalar_f64(poly_log1p, cases[i].x);
@@ -1401,10 +1433,13 @@ TEST(nn, special_math_f64_log1p) {
 
 TEST(nn, special_math_f64_expm1) {
   /* expm1() is ISO C99 <math.h> */
-  struct { double x; double tol; } cases[] = {
-    { 1e-10, 1e-18 },   /* tiny x: f32 loses most digits */
-    { 1.0,   1e-14 },   /* e - 1 */
-    { 0.2,   1e-13 },
+  struct {
+    double x;
+    double tol;
+  } cases[] = {
+      {1e-10, 1e-18}, /* tiny x: f32 loses most digits */
+      {1.0, 1e-14}, /* e - 1 */
+      {0.2, 1e-13},
   };
   for (int i = 0; i < 3; i++) {
     double got = eval_scalar_f64(poly_expm1, cases[i].x);
@@ -1415,7 +1450,7 @@ TEST(nn, special_math_f64_expm1) {
   PASS();
 }
 
-/* ── C5 primitive tests ───────────────────────────────────────────────── */
+/* C5 primitive tests */
 
 TEST(nn, c5_detach_stops_grad) {
   /* detach(x) passes forward value but blocks gradient */
@@ -1466,7 +1501,7 @@ TEST(nn, c5_linspace) {
   PolyUOp *out = poly_buffer_f32(ctx, 5);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, ls));
   float result[5] = {0};
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(out, result) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(out, result)};
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 1), 0);
   float expected[] = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
   for (int i = 0; i < 5; i++) {
@@ -1484,7 +1519,7 @@ TEST(nn, c5_full) {
   PolyUOp *out = poly_buffer_f32(ctx, 4);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, f));
   float result[4] = {0};
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(out, result) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(out, result)};
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 1), 0);
   for (int i = 0; i < 4; i++) {
     ASSERT_FLOAT_EQ(result[i], 3.14f, 1e-5f);
@@ -1493,16 +1528,14 @@ TEST(nn, c5_full) {
   PASS();
 }
 
-/* ── C2c: RNG determinism + cross-backend parity ─────────────────────── */
+/* C2c: RNG determinism + cross-backend parity */
 
 TEST(nn, c2c_rand_bitpattern_8) {
   /* Tier 1 bit-exact: full poly_rand pipeline (THREEFRY -> SHR 8 -> CAST f32 -> MUL 2^-24).
    * seed=1337 -> key_lo=1337, key_hi=0, mixed_key=1337.
    * counter=[0..7], THREEFRY outputs match threefry_reference_vector_cpu. */
-  const uint32_t thr_ref[8] = {
-    2732499619u, 3322027265u, 2482432314u, 3871860445u,
-    3571867126u, 3019569655u, 2459680734u, 2731866067u
-  };
+  const uint32_t thr_ref[8] = {2732499619u, 3322027265u, 2482432314u, 3871860445u,
+                               3571867126u, 3019569655u, 2459680734u, 2731866067u};
   float expected[8];
   for (int i = 0; i < 8; i++)
     expected[i] = (float)(thr_ref[i] >> 8) * (1.0f / 16777216.0f);
@@ -1519,8 +1552,14 @@ TEST(nn, c2c_rand_bitpattern_8) {
    * Optimization changes THREEFRY kernel structure (UPCAST reorders ops). */
   char save_opt[32] = "", save_dev[32] = "";
   const char *e;
-  if ((e = getenv("POLY_OPTIMIZE"))) { strncpy(save_opt, e, 31); unsetenv("POLY_OPTIMIZE"); }
-  if ((e = getenv("POLY_DEVECTORIZE"))) { strncpy(save_dev, e, 31); unsetenv("POLY_DEVECTORIZE"); }
+  if ((e = getenv("POLY_OPTIMIZE"))) {
+    strncpy(save_opt, e, 31);
+    unsetenv("POLY_OPTIMIZE");
+  }
+  if ((e = getenv("POLY_DEVECTORIZE"))) {
+    strncpy(save_dev, e, 31);
+    unsetenv("POLY_DEVECTORIZE");
+  }
   ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
   if (save_opt[0]) setenv("POLY_OPTIMIZE", save_opt, 1);
   if (save_dev[0]) setenv("POLY_DEVECTORIZE", save_dev, 1);
@@ -1557,8 +1596,10 @@ TEST(nn, c2c_rand_seed_mixing) {
   for (int i = 0; i < 4; i++) {
     for (int j = i + 1; j < 4; j++) {
       if (memcmp(all[i], all[j], 4 * sizeof(float)) == 0) {
-        FAIL("seed %llu and %llu produced identical output",
-             (unsigned long long)seeds[i], (unsigned long long)seeds[j]);
+        FAIL(
+            "seed %llu and %llu produced identical output", (unsigned long long)seeds[i],
+            (unsigned long long)seeds[j]
+        );
       }
     }
   }
@@ -1666,8 +1707,7 @@ TEST(nn, c2c_rand_determinism) {
   ASSERT_INT_EQ(poly_realize(ctx1, s1, &bind1, 1), 0);
   bind1.handle.ptr = b;
   ASSERT_INT_EQ(poly_realize(ctx1, s1, &bind1, 1), 0);
-  if (memcmp(a, b, sizeof(a)) != 0)
-    FAIL("same graph replay not deterministic");
+  if (memcmp(a, b, sizeof(a)) != 0) FAIL("same graph replay not deterministic");
 
   /* Case 2: two separately built graphs, different contexts */
   PolyCtx *ctx2 = poly_ctx_new();
@@ -1677,8 +1717,7 @@ TEST(nn, c2c_rand_determinism) {
   float c[32] = {0};
   PolyBufferBinding bind2 = POLY_BIND_HOST(o2, c);
   ASSERT_INT_EQ(poly_realize(ctx2, s2, &bind2, 1), 0);
-  if (memcmp(a, c, sizeof(a)) != 0)
-    FAIL("separate graphs with same seed not deterministic");
+  if (memcmp(a, c, sizeof(a)) != 0) FAIL("separate graphs with same seed not deterministic");
 
   poly_ctx_destroy(ctx1);
   poly_ctx_destroy(ctx2);
@@ -1726,7 +1765,8 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
     out_data[i] = 0u;
   }
   PolyBufferBinding binds[3] = {
-    POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data), POLY_BIND_HOST(out, out_data)
+      POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data),
+      POLY_BIND_HOST(out, out_data)
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
   /* Verify we got non-zero output (THREEFRY actually ran) */
@@ -1742,7 +1782,7 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
   PASS();
 }
 
-/* ── C5: Primitive edge-case tests ───────────────────────────────────── */
+/* C5: Primitive edge-case tests */
 
 TEST(nn, c5_arange_negative_step) {
   PolyCtx *ctx = poly_ctx_new();
@@ -1816,8 +1856,7 @@ TEST(nn, c5_tril_triu_diagonal_offset) {
    * [[1,1,0],[1,1,1],[1,1,1]] -> sum=8 */
   PolyUOp *tl1 = poly_tril(ctx, ones, 1);
   ASSERT_NOT_NULL(tl1);
-  PolyUOp *sum_tl = poly_sum_reduce(ctx,
-    poly_sum_reduce(ctx, tl1, 1, 1), 0, 0);
+  PolyUOp *sum_tl = poly_sum_reduce(ctx, poly_sum_reduce(ctx, tl1, 1, 1), 0, 0);
   PolyUOp *buf = poly_buffer_f32(ctx, 1);
   float out[1] = {0};
   PolyBufferBinding bind = POLY_BIND_HOST(buf, out);
@@ -1828,12 +1867,13 @@ TEST(nn, c5_tril_triu_diagonal_offset) {
    * [[1,1,1],[1,1,1],[0,1,1]] -> sum=8 */
   PolyUOp *tu1 = poly_triu(ctx, ones, -1);
   ASSERT_NOT_NULL(tu1);
-  PolyUOp *sum_tu = poly_sum_reduce(ctx,
-    poly_sum_reduce(ctx, tu1, 1, 1), 0, 0);
+  PolyUOp *sum_tu = poly_sum_reduce(ctx, poly_sum_reduce(ctx, tu1, 1, 1), 0, 0);
   PolyUOp *buf2 = poly_buffer_f32(ctx, 1);
   float out2[1] = {0};
   PolyBufferBinding bind2 = POLY_BIND_HOST(buf2, out2);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, buf2, sum_tu)), &bind2, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, buf2, sum_tu)), &bind2, 1), 0
+  );
   ASSERT_FLOAT_EQ(out2[0], 8.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
@@ -1853,7 +1893,7 @@ TEST(nn, c5_tril_zeros_check) {
   PolyBufferBinding bind = POLY_BIND_HOST(out, result);
   ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
   /* Row-major: [[1,0,0],[1,1,0],[1,1,1]] */
-  float expected[9] = {1,0,0, 1,1,0, 1,1,1};
+  float expected[9] = {1, 0, 0, 1, 1, 0, 1, 1, 1};
   for (int i = 0; i < 9; i++)
     ASSERT_FLOAT_EQ(result[i], expected[i], 1e-7f);
   poly_ctx_destroy(ctx);
@@ -1890,7 +1930,7 @@ TEST(nn, c5_linspace_edge_cases) {
   PASS();
 }
 
-/* ── ABI stability ───────────────────────────────────────────────────── */
+/* ABI stability */
 
 TEST(nn, c5_abi_step_buffer_info_layout) {
   /* Verify sizeof, field offsets, and alignment of PolyStepBufferInfo
@@ -1961,7 +2001,7 @@ TEST(wasm, step_plan_rand_threefry_decomposed) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, r));
 
   PolyWasmStepPlan *p = poly_render_step_wasm_plan(ctx, sink);
-  ASSERT_NOT_NULL(p);  /* render success = no residual THREEFRY */
+  ASSERT_NOT_NULL(p); /* render success = no residual THREEFRY */
   int nk = poly_wasm_stepplan_n_kernels(p);
   ASSERT_TRUE(nk >= 1);
   /* Verify each kernel has valid WASM (magic header \0asm) */
@@ -1970,10 +2010,10 @@ TEST(wasm, step_plan_rand_threefry_decomposed) {
     const uint8_t *bytes = poly_wasm_stepplan_kernel_bytes(p, k, &len);
     ASSERT_NOT_NULL(bytes);
     ASSERT_TRUE(len > 8);
-    ASSERT_INT_EQ(bytes[0], 0x00);  /* \0 */
-    ASSERT_INT_EQ(bytes[1], 0x61);  /* a */
-    ASSERT_INT_EQ(bytes[2], 0x73);  /* s */
-    ASSERT_INT_EQ(bytes[3], 0x6d);  /* m */
+    ASSERT_INT_EQ(bytes[0], 0x00); /* \0 */
+    ASSERT_INT_EQ(bytes[1], 0x61); /* a */
+    ASSERT_INT_EQ(bytes[2], 0x73); /* s */
+    ASSERT_INT_EQ(bytes[3], 0x6d); /* m */
   }
   poly_wasm_stepplan_destroy(p);
   poly_ctx_destroy(ctx);
@@ -1996,7 +2036,7 @@ TEST(wasm, step_plan_buf_nbytes) {
   for (int i = 0; i < n_bindable; i++) {
     int64_t nbytes = poly_wasm_stepplan_buf_nbytes(p, i);
     int64_t nelems = poly_wasm_stepplan_buf_size(p, i);
-    ASSERT_INT_EQ(nbytes, nelems * 4);  /* f32 = 4 bytes */
+    ASSERT_INT_EQ(nbytes, nelems * 4); /* f32 = 4 bytes */
   }
 
   /* bindable_buf_index is identity today */
@@ -2028,7 +2068,7 @@ TEST(wasm, step_plan_buf_nbytes_f64) {
   for (int i = 0; i < n_bindable; i++) {
     int64_t nbytes = poly_wasm_stepplan_buf_nbytes(p, i);
     int64_t nelems = poly_wasm_stepplan_buf_size(p, i);
-    ASSERT_INT_EQ(nbytes, nelems * 8);  /* f64 = 8 bytes */
+    ASSERT_INT_EQ(nbytes, nelems * 8); /* f64 = 8 bytes */
   }
 
   poly_wasm_stepplan_destroy(p);
@@ -2042,7 +2082,7 @@ TEST(wasm, abi_version) {
   PASS();
 }
 
-/* ── C3: Float64 pipeline tests ──────────────────────────────────────── */
+/* C3: Float64 pipeline tests */
 
 TEST(f64, const_typed) {
   PolyCtx *ctx = poly_ctx_new();
@@ -2073,7 +2113,9 @@ TEST(f64, vecadd_e2e) {
   }
 
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(out, o_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d),
+      POLY_BIND_HOST(out, o_d),
+      POLY_BIND_HOST(a, a_d),
+      POLY_BIND_HOST(b, b_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
@@ -2100,11 +2142,12 @@ TEST(f64, exp_log_roundtrip) {
   PolyUOp *store = poly_store_val(ctx, out, elx);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  double x_d[4] = { 0.5, 1.0, 2.71828, 100.0 };
+  double x_d[4] = {0.5, 1.0, 2.71828, 100.0};
   double o_d[4] = {0};
 
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(out, o_d), POLY_BIND_HOST(x, x_d),
+      POLY_BIND_HOST(out, o_d),
+      POLY_BIND_HOST(x, x_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
@@ -2125,11 +2168,10 @@ TEST(f64, value_and_grad) {
   int64_t axes[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1);
 
-  PolyUOp *params[] = { p };
+  PolyUOp *params[] = {p};
   int loss_idx = -1;
-  int grad_idxs[1] = { -1 };
-  PolyStep *step = poly_compile_value_and_grad(ctx, loss, params, 1,
-                                                &loss_idx, grad_idxs);
+  int grad_idxs[1] = {-1};
+  PolyStep *step = poly_compile_value_and_grad(ctx, loss, params, 1, &loss_idx, grad_idxs);
   ASSERT_NOT_NULL(step);
 
   int n_bufs = poly_step_n_buffers(step);
@@ -2141,8 +2183,7 @@ TEST(f64, value_and_grad) {
   for (int i = 0; i < n_bufs; i++) {
     PolyStepBufferInfo info;
     poly_step_buffer_info(step, i, &info);
-    if (info.role == POLY_STEP_BUF_INPUT &&
-        poly_dtype_eq(info.dtype, POLY_FLOAT64) &&
+    if (info.role == POLY_STEP_BUF_INPUT && poly_dtype_eq(info.dtype, POLY_FLOAT64) &&
         info.numel == 4) {
       param_idx = i;
       break;
@@ -2150,7 +2191,7 @@ TEST(f64, value_and_grad) {
   }
   ASSERT_TRUE(param_idx >= 0);
 
-  double p_data[4] = { 1.0, 2.0, -3.0, 4.0 };
+  double p_data[4] = {1.0, 2.0, -3.0, 4.0};
   double loss_out[1] = {0};
   double grad_out[4] = {0};
   void *buf_ptrs[64] = {0};

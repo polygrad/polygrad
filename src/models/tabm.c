@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <math.h>
 
-/* ── Activation dispatch (same as model_mlp.c) ──────────────────────── */
+/* Activation dispatch (same as model_mlp.c) */
 
 typedef enum { TABM_ACT_NONE, TABM_ACT_RELU, TABM_ACT_GELU, TABM_ACT_SILU } TabmActivation;
 
@@ -44,7 +44,7 @@ static PolyUOp *tabm_apply_activation(PolyCtx *ctx, PolyUOp *x, TabmActivation a
   return x;
 }
 
-/* ── TabM Builder ────────────────────────────────────────────────────── */
+/* TabM Builder */
 
 PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len) {
   if (!spec_json || spec_len <= 0) return NULL;
@@ -125,7 +125,7 @@ PolyInstance *poly_tabm_instance(const char *spec_json, int spec_len) {
     param_bufs[pi++] = poly_param(ctx, POLY_FLOAT32, bs, 2, "layers.%d.b", l);
   }
 
-  /* ── Build forward graph ─────────────────────────────────────────── */
+  /* Build forward graph */
 
   /* Expand input from (batch_size, in_dim) to (k, in_dim)
    * For batch_size=1: reshape (1, in_dim) -> (1, in_dim), expand to (k, in_dim)

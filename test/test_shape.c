@@ -24,7 +24,7 @@ static PolyArg reduce_ax(PolyOps op, int64_t *axes, int n) {
   return a;
 }
 
-/* ── Shape tests ──────────────────────────────────────────────────────── */
+/* Shape tests */
 
 TEST(shape, buffer) {
   PolyCtx *ctx = poly_ctx_new();
@@ -62,7 +62,7 @@ TEST(shape, elementwise) {
 TEST(shape, reshape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(100));
-  int64_t dims[] = { 10, 10 };
+  int64_t dims[] = {10, 10};
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf, int_tuple(dims, 2));
   PolyShape s = poly_uop_shape(ctx, r);
   ASSERT_INT_EQ(s.ndim, 2);
@@ -76,9 +76,9 @@ TEST(shape, reshape) {
 TEST(shape, expand) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(10));
-  int64_t rdims[] = { 1, 10 };
+  int64_t rdims[] = {1, 10};
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf, int_tuple(rdims, 2));
-  int64_t edims[] = { 5, 10 };
+  int64_t edims[] = {5, 10};
   PolyUOp *e = poly_uop1(ctx, POLY_OP_EXPAND, POLY_FLOAT32, r, int_tuple(edims, 2));
   PolyShape s = poly_uop_shape(ctx, e);
   ASSERT_INT_EQ(s.ndim, 2);
@@ -92,10 +92,11 @@ TEST(shape, expand) {
 TEST(shape, reduce_axis) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(100));
-  int64_t rdims[] = { 10, 10 };
+  int64_t rdims[] = {10, 10};
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf, int_tuple(rdims, 2));
-  int64_t axes[] = { 1 };
-  PolyUOp *red = poly_uop1(ctx, POLY_OP_REDUCE_AXIS, POLY_FLOAT32, r, reduce_ax(POLY_OP_ADD, axes, 1));
+  int64_t axes[] = {1};
+  PolyUOp *red =
+      poly_uop1(ctx, POLY_OP_REDUCE_AXIS, POLY_FLOAT32, r, reduce_ax(POLY_OP_ADD, axes, 1));
   PolyShape s = poly_uop_shape(ctx, red);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 10);
@@ -110,11 +111,11 @@ TEST(shape, chain) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf1 = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(20));
   PolyUOp *buf2 = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(4));
-  int64_t d1[] = { 5, 4 };
+  int64_t d1[] = {5, 4};
   PolyUOp *r1 = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf1, int_tuple(d1, 2));
-  int64_t d2[] = { 1, 4 };
+  int64_t d2[] = {1, 4};
   PolyUOp *r2 = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf2, int_tuple(d2, 2));
-  int64_t d3[] = { 5, 4 };
+  int64_t d3[] = {5, 4};
   PolyUOp *e2 = poly_uop1(ctx, POLY_OP_EXPAND, POLY_FLOAT32, r2, int_tuple(d3, 2));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, r1, e2, poly_arg_none());
   PolyShape s = poly_uop_shape(ctx, add);

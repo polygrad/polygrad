@@ -16,7 +16,7 @@
 #include "safetensors.h"
 #include "frontend.h"
 #include "exec_plan.h"
-#include "codegen.h"   /* poly_cuda_available (POLY_HAS_CUDA) */
+#include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
 #include "scheduler.h"
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +24,7 @@
 #include <math.h>
 #include <math.h>
 
-/* ── Internal types ──────────────────────────────────────────────────── */
+/* Internal types */
 
 typedef struct {
   char *name;
@@ -32,9 +32,9 @@ typedef struct {
   PolyUOp *buffer;
   int64_t shape[8];
   int ndim;
-  float *data;       /* owned, allocated for all roles */
+  float *data; /* owned, allocated for all roles */
   int64_t numel;
-  bool owns_data;    /* false for aliases sharing another entry's allocation */
+  bool owns_data; /* false for aliases sharing another entry's allocation */
 } NamedBuf;
 
 typedef struct {
@@ -43,51 +43,51 @@ typedef struct {
   int step;
 } OptimState;
 
-/* ── Value-and-grad metadata (built lazily on first train call) ──────── */
+/* Value-and-grad metadata (built lazily on first train call) */
 
 typedef struct {
-  PolyUOp *combined_sink;           /* combined fwd+bwd SINK */
-  PolyUOp *loss_out_buf;            /* BUFFER UOp for loss output */
-  PolyUOp **grad_out_bufs;          /* [n_params] gradient BUFFER UOps */
-  float **grad_datas;               /* [n_params] gradient host data */
-  PolyUOp **grad_uops;             /* [n_params] raw gradient UOp expressions */
-  PolyUOp *loss_value;             /* loss value UOp (pre-store) */
-  float loss_data;                  /* scalar loss value */
+  PolyUOp *combined_sink; /* combined fwd+bwd SINK */
+  PolyUOp *loss_out_buf; /* BUFFER UOp for loss output */
+  PolyUOp **grad_out_bufs; /* [n_params] gradient BUFFER UOps */
+  float **grad_datas; /* [n_params] gradient host data */
+  PolyUOp **grad_uops; /* [n_params] raw gradient UOp expressions */
+  PolyUOp *loss_value; /* loss value UOp (pre-store) */
+  float loss_data; /* scalar loss value */
 } VagState;
 
-/* ── Training state (optimizer graph, built lazily) ──────────────────── */
+/* Training state (optimizer graph, built lazily) */
 
 typedef struct {
-  PolyUOp *combined_sink;           /* fwd+bwd+optimizer SINK */
-  PolyUOp *loss_out_buf;            /* BUFFER UOp for loss scalar output */
-  float loss_data;                  /* scalar loss value after step */
-  PolyBufferHandle loss_handle;     /* device-aware handle for loss output */
+  PolyUOp *combined_sink; /* fwd+bwd+optimizer SINK */
+  PolyUOp *loss_out_buf; /* BUFFER UOp for loss scalar output */
+  float loss_data; /* scalar loss value after step */
+  PolyBufferHandle loss_handle; /* device-aware handle for loss output */
 
   /* Moment buffers (Adam/AdamW only) */
-  PolyUOp **m_bufs;                /* [n_params] first moment BUFFER UOps */
-  PolyUOp **v_bufs;                /* [n_params] second moment BUFFER UOps */
+  PolyUOp **m_bufs; /* [n_params] first moment BUFFER UOps */
+  PolyUOp **v_bufs; /* [n_params] second moment BUFFER UOps */
   int n_moment_bufs;
 
   /* Moment host data (for initialization + set_device upload) */
-  float **m_datas;                 /* [n_params] first moment host data */
-  float **v_datas;                 /* [n_params] second moment host data */
+  float **m_datas; /* [n_params] first moment host data */
+  float **v_datas; /* [n_params] second moment host data */
 
   /* Moment buffer handles (for bindings) */
-  PolyBufferHandle *m_handles;     /* [n_params] */
-  PolyBufferHandle *v_handles;     /* [n_params] */
+  PolyBufferHandle *m_handles; /* [n_params] */
+  PolyBufferHandle *v_handles; /* [n_params] */
 
   /* Bias correction scalar buffers (Adam/AdamW only) */
-  PolyUOp *bc1_buf;               /* 1-element buffer for bc1 */
-  PolyUOp *bc2_buf;               /* 1-element buffer for bc2 */
-  float bc1_data;                  /* host value for bc1 */
-  float bc2_data;                  /* host value for bc2 */
+  PolyUOp *bc1_buf; /* 1-element buffer for bc1 */
+  PolyUOp *bc2_buf; /* 1-element buffer for bc2 */
+  float bc1_data; /* host value for bc1 */
+  float bc2_data; /* host value for bc2 */
   PolyBufferHandle bc1_handle;
   PolyBufferHandle bc2_handle;
 } TrainState;
 
 struct PolyInstance {
   PolyCtx *ctx;
-  bool owns_ctx;     /* true: poly_instance_free destroys ctx */
+  bool owns_ctx; /* true: poly_instance_free destroys ctx */
 
   NamedBuf *bufs;
   int n_bufs;
@@ -97,27 +97,31 @@ struct PolyInstance {
   int n_params;
 
   /* Entrypoints */
-  struct { char *name; PolyUOp *sink; } *entrypoints;
+  struct {
+    char *name;
+    PolyUOp *sink;
+  } *entrypoints;
   int n_entrypoints;
 
-  /* ── Buffer handles (one per named buffer, carries domain) ── */
-  PolyBufferHandle *buf_handles;    /* [n_bufs], ptr + domain + nbytes */
+  /* Buffer handles (one per named buffer, carries domain) */
+  PolyBufferHandle *buf_handles; /* [n_bufs], ptr + domain + nbytes */
 
-  /* ── Value-and-grad state (lazy, per-entrypoint -- currently only "loss") ── */
-  VagState *vag;                    /* NULL until first value_and_grad call */
+  /* Value-and-grad state (lazy, per-entrypoint -- currently only "loss") */
+  VagState *vag; /* NULL until first value_and_grad call */
 
-  /* ── Training state (optimizer graph, built lazily) ── */
-  TrainState *train;                /* NULL until first train_step call */
+  /* Training state (optimizer graph, built lazily) */
+  TrainState *train; /* NULL until first train_step call */
 
-  /* ── Optimizer state ── */
+  /* Optimizer state */
   OptimState optim;
 };
 
-/* ── Helpers ─────────────────────────────────────────────────────────── */
+/* Helpers */
 
 static int64_t compute_numel(const int64_t *shape, int ndim) {
   int64_t n = 1;
-  for (int i = 0; i < ndim; i++) n *= shape[i];
+  for (int i = 0; i < ndim; i++)
+    n *= shape[i];
   return n;
 }
 
@@ -133,7 +137,7 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
   return -1;
 }
 
-/* ── Lifecycle ───────────────────────────────────────────────────────── */
+/* Lifecycle */
 
 /* Build a PolyInstance from a PolyIrSpec.
  * owns_ctx: if true, the instance takes ownership of spec->ctx.
@@ -153,8 +157,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
     inst->bufs[i].role = spec->bufs[i].role;
     inst->bufs[i].buffer = spec->bufs[i].buffer;
     inst->bufs[i].ndim = spec->bufs[i].ndim;
-    memcpy(inst->bufs[i].shape, spec->bufs[i].shape,
-           spec->bufs[i].ndim * sizeof(int64_t));
+    memcpy(inst->bufs[i].shape, spec->bufs[i].shape, spec->bufs[i].ndim * sizeof(int64_t));
     inst->bufs[i].numel = compute_numel(spec->bufs[i].shape, spec->bufs[i].ndim);
 
     /* Check if an earlier entry shares the same buffer UOp (alias) */
@@ -171,10 +174,11 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
     } else {
       inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
       if (!inst->bufs[i].data && inst->bufs[i].numel > 0)
-        fprintf(stderr, "poly_instance: calloc FAILED for '%s' (%lld floats = %lld MB)\n",
-                spec->bufs[i].name ? spec->bufs[i].name : "?",
-                (long long)inst->bufs[i].numel,
-                (long long)(inst->bufs[i].numel * 4 / 1024 / 1024));
+        fprintf(
+            stderr, "poly_instance: calloc FAILED for '%s' (%lld floats = %lld MB)\n",
+            spec->bufs[i].name ? spec->bufs[i].name : "?", (long long)inst->bufs[i].numel,
+            (long long)(inst->bufs[i].numel * 4 / 1024 / 1024)
+        );
       inst->bufs[i].owns_data = true;
     }
     if (spec->bufs[i].role == POLY_ROLE_PARAM) n_params++;
@@ -193,10 +197,10 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   inst->buf_handles = calloc(spec->n_bufs, sizeof(PolyBufferHandle));
   for (int i = 0; i < spec->n_bufs; i++) {
     inst->buf_handles[i] = (PolyBufferHandle){
-      .ptr = inst->bufs[i].data,
-      .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
-      .domain = POLY_DEVICE_HOST,
-      .owned = false,
+        .ptr = inst->bufs[i].data,
+        .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
+        .domain = POLY_DEVICE_HOST,
+        .owned = false,
     };
   }
 
@@ -205,8 +209,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   inst->param_indices = malloc(n_params * sizeof(int));
   int pi = 0;
   for (int i = 0; i < spec->n_bufs; i++)
-    if (spec->bufs[i].role == POLY_ROLE_PARAM)
-      inst->param_indices[pi++] = i;
+    if (spec->bufs[i].role == POLY_ROLE_PARAM) inst->param_indices[pi++] = i;
 
   /* Copy entrypoints */
   inst->n_entrypoints = spec->n_entrypoints;
@@ -225,9 +228,11 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
 }
 
 PolyInstance *poly_instance_from_ir(
-    const uint8_t *ir_data, int ir_len,
-    const uint8_t *weights_data, int weights_len)
-{
+    const uint8_t *ir_data,
+    int ir_len,
+    const uint8_t *weights_data,
+    int weights_len
+) {
   /* Import IR */
   PolyIrSpec spec;
   if (poly_ir_import(ir_data, ir_len, &spec) != 0) {
@@ -249,9 +254,9 @@ PolyInstance *poly_instance_from_ir(
   return inst;
 }
 
-/* ── Instance from PolyCtx registry ────────────────────────────────── */
+/* Instance from PolyCtx registry */
 
-#include "frontend_internal.h"  /* poly_ptr_hash, poly_ptr_eq */
+#include "frontend_internal.h" /* poly_ptr_hash, poly_ptr_eq */
 
 PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
   if (!ctx) return NULL;
@@ -285,10 +290,10 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
     uint32_t h = poly_ptr_hash(e->buffer);
     if (!poly_map_get(reachable, h, e->buffer, poly_ptr_eq)) continue;
     bufs[n_bufs] = (PolyIrBufEntry){
-      .name = e->name,
-      .role = (uint8_t)e->role,
-      .buffer = e->buffer,
-      .ndim = e->ndim,
+        .name = e->name,
+        .role = (uint8_t)e->role,
+        .buffer = e->buffer,
+        .ndim = e->ndim,
     };
     memcpy(bufs[n_bufs].shape, e->shape, e->ndim * sizeof(int64_t));
     n_bufs++;
@@ -304,11 +309,11 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
 
   /* Build spec and create instance (does NOT own ctx) */
   PolyIrSpec spec = {
-    .ctx = ctx,
-    .bufs = bufs,
-    .n_bufs = n_bufs,
-    .entrypoints = eps,
-    .n_entrypoints = n_ep,
+      .ctx = ctx,
+      .bufs = bufs,
+      .n_bufs = n_bufs,
+      .entrypoints = eps,
+      .n_entrypoints = n_ep,
   };
   PolyInstance *inst = instance_from_spec(&spec, false, false);
 
@@ -320,7 +325,8 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
 static void vag_free(VagState *vag, int n_params) {
   if (!vag) return;
   if (vag->grad_datas) {
-    for (int i = 0; i < n_params; i++) free(vag->grad_datas[i]);
+    for (int i = 0; i < n_params; i++)
+      free(vag->grad_datas[i]);
     free(vag->grad_datas);
   }
   free(vag->grad_out_bufs);
@@ -346,11 +352,13 @@ static void train_free(TrainState *ts, int n_params) {
   free_owned_handle(&ts->bc1_handle);
   free_owned_handle(&ts->bc2_handle);
   if (ts->m_datas) {
-    for (int i = 0; i < n_params; i++) free(ts->m_datas[i]);
+    for (int i = 0; i < n_params; i++)
+      free(ts->m_datas[i]);
     free(ts->m_datas);
   }
   if (ts->v_datas) {
-    for (int i = 0; i < n_params; i++) free(ts->v_datas[i]);
+    for (int i = 0; i < n_params; i++)
+      free(ts->v_datas[i]);
     free(ts->v_datas);
   }
   free(ts->m_bufs);
@@ -404,7 +412,7 @@ void poly_instance_free(PolyInstance *inst) {
   free(inst);
 }
 
-/* ── Param Enumeration ───────────────────────────────────────────────── */
+/* Param Enumeration */
 
 int poly_instance_param_count(const PolyInstance *inst) {
   return inst ? inst->n_params : 0;
@@ -415,8 +423,7 @@ const char *poly_instance_param_name(const PolyInstance *inst, int i) {
   return inst->bufs[inst->param_indices[i]].name;
 }
 
-int poly_instance_param_shape(const PolyInstance *inst, int i,
-                               int64_t *shape_out, int max_dims) {
+int poly_instance_param_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims) {
   if (!inst || i < 0 || i >= inst->n_params) return 0;
   NamedBuf *b = &inst->bufs[inst->param_indices[i]];
   int n = b->ndim < max_dims ? b->ndim : max_dims;
@@ -425,9 +432,12 @@ int poly_instance_param_shape(const PolyInstance *inst, int i,
 }
 
 static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len);
-static PolyBufferHandle make_handle(void *host_data, size_t nbytes,
-                                     PolyDeviceId dev,
-                                     const PolyAllocator *alloc);
+static PolyBufferHandle make_handle(
+    void *host_data,
+    size_t nbytes,
+    PolyDeviceId dev,
+    const PolyAllocator *alloc
+);
 
 /* Sync device buffer to host shadow if on a non-host domain.
  * Returns 0 on success or if already on host; -1 on readback failure. */
@@ -438,8 +448,7 @@ static int sync_buf_to_host(PolyInstance *inst, int bi) {
   return readback_handle(&inst->buf_handles[bi], inst->bufs[bi].data, nbytes);
 }
 
-float *poly_instance_param_data(PolyInstance *inst, int i,
-                                 int64_t *numel_out) {
+float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_params) return NULL;
   int bi = inst->param_indices[i];
   if (numel_out) *numel_out = inst->bufs[bi].numel;
@@ -447,7 +456,7 @@ float *poly_instance_param_data(PolyInstance *inst, int i,
   return inst->bufs[bi].data;
 }
 
-/* ── Buffer Enumeration ──────────────────────────────────────────────── */
+/* Buffer Enumeration */
 
 int poly_instance_buf_count(const PolyInstance *inst) {
   return inst ? inst->n_bufs : 0;
@@ -463,23 +472,21 @@ int poly_instance_buf_role(const PolyInstance *inst, int i) {
   return inst->bufs[i].role;
 }
 
-int poly_instance_buf_shape(const PolyInstance *inst, int i,
-                             int64_t *shape_out, int max_dims) {
+int poly_instance_buf_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims) {
   if (!inst || i < 0 || i >= inst->n_bufs) return 0;
   int n = inst->bufs[i].ndim < max_dims ? inst->bufs[i].ndim : max_dims;
   memcpy(shape_out, inst->bufs[i].shape, n * sizeof(int64_t));
   return inst->bufs[i].ndim;
 }
 
-float *poly_instance_buf_data(PolyInstance *inst, int i,
-                               int64_t *numel_out) {
+float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_bufs) return NULL;
   if (numel_out) *numel_out = inst->bufs[i].numel;
   if (sync_buf_to_host(inst, i) != 0) return NULL;
   return inst->bufs[i].data;
 }
 
-/* ── Readback / Upload ──────────────────────────────────────────────── */
+/* Readback / Upload */
 
 static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
   if (!h || !h->ptr || !dst || len == 0) return -1;
@@ -489,8 +496,7 @@ static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
   }
   const PolyBackendDesc *be = poly_backend_get(h->domain);
   if (!be) return -1;
-  return be->get_allocator()->copy_out(dst, h->ptr, len,
-                                        be->get_allocator()->dev_ctx);
+  return be->get_allocator()->copy_out(dst, h->ptr, len, be->get_allocator()->dev_ctx);
 }
 
 static int upload_handle(PolyBufferHandle *h, const void *src, size_t len) {
@@ -501,38 +507,36 @@ static int upload_handle(PolyBufferHandle *h, const void *src, size_t len) {
   }
   const PolyBackendDesc *be = poly_backend_get(h->domain);
   if (!be) return -1;
-  return be->get_allocator()->copy_in(h->ptr, src, len,
-                                       be->get_allocator()->dev_ctx);
+  return be->get_allocator()->copy_in(h->ptr, src, len, be->get_allocator()->dev_ctx);
 }
 
-int poly_instance_readback_buf(PolyInstance *inst, int i,
-                               void *host_dst, size_t dst_len) {
+int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
   if (!inst || i < 0 || i >= inst->n_bufs || !inst->buf_handles) return -1;
   return readback_handle(&inst->buf_handles[i], host_dst, dst_len);
 }
 
-int poly_instance_upload_buf(PolyInstance *inst, int i,
-                             const void *host_src, size_t src_len) {
+int poly_instance_upload_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_bufs || !inst->buf_handles) return -1;
   return upload_handle(&inst->buf_handles[i], host_src, src_len);
 }
 
-int poly_instance_readback_param(PolyInstance *inst, int i,
-                                 void *host_dst, size_t dst_len) {
+int poly_instance_readback_param(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
   if (!inst || i < 0 || i >= inst->n_params) return -1;
   return poly_instance_readback_buf(inst, inst->param_indices[i], host_dst, dst_len);
 }
 
-int poly_instance_upload_param(PolyInstance *inst, int i,
-                               const void *host_src, size_t src_len) {
+int poly_instance_upload_param(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_params) return -1;
   return poly_instance_upload_buf(inst, inst->param_indices[i], host_src, src_len);
 }
 
-/* ── Weight I/O ──────────────────────────────────────────────────────── */
+/* Weight I/O */
 
 uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
-  if (!inst || inst->n_params == 0) { *out_len = 0; return NULL; }
+  if (!inst || inst->n_params == 0) {
+    *out_len = 0;
+    return NULL;
+  }
 
   /* Readback all params from device to host before serializing */
   for (int i = 0; i < inst->n_params; i++)
@@ -552,8 +556,7 @@ uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
   return bytes;
 }
 
-int poly_instance_import_weights(PolyInstance *inst,
-                                  const uint8_t *data, int len) {
+int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int len) {
   if (!inst) return -1;
 
   int n_views = 0;
@@ -565,20 +568,20 @@ int poly_instance_import_weights(PolyInstance *inst,
   for (int i = 0; i < n_views; i++) {
     int bi = find_buf_by_name(inst, views[i].name);
     if (bi < 0) {
-      fprintf(stderr, "poly_instance_import_weights: unknown tensor '%s'\n",
-              views[i].name);
+      fprintf(stderr, "poly_instance_import_weights: unknown tensor '%s'\n", views[i].name);
       /* Continue - non-fatal */
     } else if (inst->bufs[bi].data && views[i].numel == inst->bufs[bi].numel) {
       memcpy(inst->bufs[bi].data, views[i].data, views[i].numel * sizeof(float));
       /* Sync to device if buffer handle is on non-host memory */
-      if (inst->buf_handles &&
-          !poly_device_is_host_addressable(inst->buf_handles[bi].domain))
-        upload_handle(&inst->buf_handles[bi], inst->bufs[bi].data,
-                      views[i].numel * sizeof(float));
+      if (inst->buf_handles && !poly_device_is_host_addressable(inst->buf_handles[bi].domain))
+        upload_handle(&inst->buf_handles[bi], inst->bufs[bi].data, views[i].numel * sizeof(float));
     } else if (inst->bufs[bi].data) {
-      fprintf(stderr, "poly_instance_import_weights: shape mismatch for '%s' "
-              "(expected %lld, got %lld)\n", views[i].name,
-              (long long)inst->bufs[bi].numel, (long long)views[i].numel);
+      fprintf(
+          stderr,
+          "poly_instance_import_weights: shape mismatch for '%s' "
+          "(expected %lld, got %lld)\n",
+          views[i].name, (long long)inst->bufs[bi].numel, (long long)views[i].numel
+      );
     }
     free(views[i].name);
   }
@@ -587,10 +590,13 @@ int poly_instance_import_weights(PolyInstance *inst,
   return 0;
 }
 
-/* ── IR Export ───────────────────────────────────────────────────────── */
+/* IR Export */
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
-  if (!inst) { *out_len = 0; return NULL; }
+  if (!inst) {
+    *out_len = 0;
+    return NULL;
+  }
 
   /* Build PolyIrSpec from instance state */
   PolyIrBufEntry *bufs = malloc(inst->n_bufs * sizeof(PolyIrBufEntry));
@@ -608,14 +614,14 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
     eps[i].sink = inst->entrypoints[i].sink;
   }
 
-  PolyIrSpec spec = { inst->ctx, bufs, inst->n_bufs, eps, inst->n_entrypoints };
+  PolyIrSpec spec = {inst->ctx, bufs, inst->n_bufs, eps, inst->n_entrypoints};
   uint8_t *bytes = poly_ir_export(&spec, out_len);
   free(bufs);
   free(eps);
   return bytes;
 }
 
-/* ── Device configuration ────────────────────────────────────────────── */
+/* Device configuration */
 
 int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   if (!inst) return -1;
@@ -629,18 +635,24 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
 #else
     const char *dev_env = getenv("POLY_DEVICE");
     if (dev_env && dev_env[0]) {
-      if (strcmp(dev_env, "cpu") == 0) resolved = POLY_DEVICE_CPU;
-      else if (strcmp(dev_env, "interp") == 0) resolved = POLY_DEVICE_INTERP;
+      if (strcmp(dev_env, "cpu") == 0)
+        resolved = POLY_DEVICE_CPU;
+      else if (strcmp(dev_env, "interp") == 0)
+        resolved = POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
-      else if (strcmp(dev_env, "cuda") == 0) resolved = POLY_DEVICE_CUDA;
+      else if (strcmp(dev_env, "cuda") == 0)
+        resolved = POLY_DEVICE_CUDA;
 #endif
 #ifdef POLY_HAS_HIP
-      else if (strcmp(dev_env, "hip") == 0) resolved = POLY_DEVICE_HIP;
+      else if (strcmp(dev_env, "hip") == 0)
+        resolved = POLY_DEVICE_HIP;
 #endif
 #ifdef POLY_HAS_X64
-      else if (strcmp(dev_env, "x64") == 0) resolved = POLY_DEVICE_X64_JIT;
+      else if (strcmp(dev_env, "x64") == 0)
+        resolved = POLY_DEVICE_X64_JIT;
 #endif
-      else resolved = POLY_DEVICE_CPU;
+      else
+        resolved = POLY_DEVICE_CPU;
     } else {
       resolved = POLY_DEVICE_CPU;
     }
@@ -672,7 +684,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   /* Bulk rematerialization: move all buffer handles to the new domain */
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyBufferHandle *h = &inst->buf_handles[i];
-    if (h->domain == resolved) continue;  /* already there */
+    if (h->domain == resolved) continue; /* already there */
 
     size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
     if (nbytes == 0) continue;
@@ -691,8 +703,10 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
         }
       }
       *h = (PolyBufferHandle){
-        .ptr = inst->bufs[i].data, .nbytes = nbytes,
-        .domain = resolved, .owned = false,
+          .ptr = inst->bufs[i].data,
+          .nbytes = nbytes,
+          .domain = resolved,
+          .owned = false,
       };
       continue;
     }
@@ -703,19 +717,19 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       fprintf(stderr, "poly_instance_set_device: alloc failed for buffer %d\n", i);
       return -1;
     }
-    if (inst->bufs[i].data)
-      alloc->copy_in(dptr, inst->bufs[i].data, nbytes, alloc->dev_ctx);
+    if (inst->bufs[i].data) alloc->copy_in(dptr, inst->bufs[i].data, nbytes, alloc->dev_ctx);
 
     /* Free old device handle if owned and from a non-host domain */
     if (h->owned && h->ptr && !poly_device_is_host_addressable(h->domain)) {
       const PolyBackendDesc *old_be = poly_backend_get(h->domain);
-      if (old_be) old_be->get_allocator()->free(h->ptr,
-                    old_be->get_allocator()->dev_ctx);
+      if (old_be) old_be->get_allocator()->free(h->ptr, old_be->get_allocator()->dev_ctx);
     }
 
     *h = (PolyBufferHandle){
-      .ptr = dptr, .nbytes = nbytes,
-      .domain = resolved, .owned = true,
+        .ptr = dptr,
+        .nbytes = nbytes,
+        .domain = resolved,
+        .owned = true,
     };
   }
 
@@ -728,8 +742,10 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
         free_owned_handle(&ts->m_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
           ts->m_handles[i] = (PolyBufferHandle){
-            .ptr = ts->m_datas[i], .nbytes = ts->m_handles[i].nbytes,
-            .domain = resolved, .owned = false,
+              .ptr = ts->m_datas[i],
+              .nbytes = ts->m_handles[i].nbytes,
+              .domain = resolved,
+              .owned = false,
           };
         } else {
           size_t nb = ts->m_handles[i].nbytes;
@@ -737,7 +753,10 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           if (mp) {
             if (ts->m_datas[i]) alloc->copy_in(mp, ts->m_datas[i], nb, alloc->dev_ctx);
             ts->m_handles[i] = (PolyBufferHandle){
-              .ptr = mp, .nbytes = nb, .domain = resolved, .owned = true,
+                .ptr = mp,
+                .nbytes = nb,
+                .domain = resolved,
+                .owned = true,
             };
           }
         }
@@ -747,8 +766,10 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
         free_owned_handle(&ts->v_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
           ts->v_handles[i] = (PolyBufferHandle){
-            .ptr = ts->v_datas[i], .nbytes = ts->v_handles[i].nbytes,
-            .domain = resolved, .owned = false,
+              .ptr = ts->v_datas[i],
+              .nbytes = ts->v_handles[i].nbytes,
+              .domain = resolved,
+              .owned = false,
           };
         } else {
           size_t nb = ts->v_handles[i].nbytes;
@@ -756,7 +777,10 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           if (vp) {
             if (ts->v_datas[i]) alloc->copy_in(vp, ts->v_datas[i], nb, alloc->dev_ctx);
             ts->v_handles[i] = (PolyBufferHandle){
-              .ptr = vp, .nbytes = nb, .domain = resolved, .owned = true,
+                .ptr = vp,
+                .nbytes = nb,
+                .domain = resolved,
+                .owned = true,
             };
           }
         }
@@ -767,15 +791,19 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       free_owned_handle(&ts->loss_handle);
       if (poly_device_is_host_addressable(resolved)) {
         ts->loss_handle = (PolyBufferHandle){
-          .ptr = &ts->loss_data, .nbytes = sizeof(float),
-          .domain = resolved, .owned = false,
+            .ptr = &ts->loss_data,
+            .nbytes = sizeof(float),
+            .domain = resolved,
+            .owned = false,
         };
       } else {
         void *lp = alloc->alloc(sizeof(float), alloc->dev_ctx);
         if (lp) {
           ts->loss_handle = (PolyBufferHandle){
-            .ptr = lp, .nbytes = sizeof(float),
-            .domain = resolved, .owned = true,
+              .ptr = lp,
+              .nbytes = sizeof(float),
+              .domain = resolved,
+              .owned = true,
           };
         }
       }
@@ -786,26 +814,36 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       free_owned_handle(&ts->bc2_handle);
       if (poly_device_is_host_addressable(resolved)) {
         ts->bc1_handle = (PolyBufferHandle){
-          .ptr = &ts->bc1_data, .nbytes = sizeof(float),
-          .domain = resolved, .owned = false,
+            .ptr = &ts->bc1_data,
+            .nbytes = sizeof(float),
+            .domain = resolved,
+            .owned = false,
         };
         ts->bc2_handle = (PolyBufferHandle){
-          .ptr = &ts->bc2_data, .nbytes = sizeof(float),
-          .domain = resolved, .owned = false,
+            .ptr = &ts->bc2_data,
+            .nbytes = sizeof(float),
+            .domain = resolved,
+            .owned = false,
         };
       } else {
         void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
         if (bp1) {
           alloc->copy_in(bp1, &ts->bc1_data, sizeof(float), alloc->dev_ctx);
           ts->bc1_handle = (PolyBufferHandle){
-            .ptr = bp1, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+              .ptr = bp1,
+              .nbytes = sizeof(float),
+              .domain = resolved,
+              .owned = true,
           };
         }
         void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
         if (bp2) {
           alloc->copy_in(bp2, &ts->bc2_data, sizeof(float), alloc->dev_ctx);
           ts->bc2_handle = (PolyBufferHandle){
-            .ptr = bp2, .nbytes = sizeof(float), .domain = resolved, .owned = true,
+              .ptr = bp2,
+              .nbytes = sizeof(float),
+              .domain = resolved,
+              .owned = true,
           };
         }
       }
@@ -815,15 +853,23 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   return 0;
 }
 
-/* ── Generic entrypoint execution ────────────────────────────────────── */
+/* Generic entrypoint execution */
 
 /* Build PolyBufferBinding[] from instance named buffers + IO overrides. */
 static PolyBufferBinding *build_bindings_for_realize(
-    PolyInstance *inst, int ep_idx, PolyIOBinding *io, int n_io, int *n_out) {
+    PolyInstance *inst,
+    int ep_idx,
+    PolyIOBinding *io,
+    int n_io,
+    int *n_out
+) {
   /* Start with all instance buffers */
   int n = inst->n_bufs;
   PolyBufferBinding *bindings = calloc((size_t)n, sizeof(PolyBufferBinding));
-  if (!bindings) { *n_out = 0; return NULL; }
+  if (!bindings) {
+    *n_out = 0;
+    return NULL;
+  }
 
   for (int i = 0; i < n; i++) {
     bindings[i].buffer = inst->bufs[i].buffer;
@@ -858,16 +904,29 @@ static PolyBufferBinding *build_bindings_for_realize(
 /* Extended version: instance buffers + IO overrides + extra buffer/handle pairs.
  * Used by value_and_grad to include vag output buffers in the bindings. */
 static PolyBufferBinding *build_bindings_extended(
-    PolyInstance *inst, int ep_idx, PolyIOBinding *io, int n_io,
-    PolyUOp **extra_bufs, PolyBufferHandle *extra_handles, int n_extra,
-    int *n_out) {
+    PolyInstance *inst,
+    int ep_idx,
+    PolyIOBinding *io,
+    int n_io,
+    PolyUOp **extra_bufs,
+    PolyBufferHandle *extra_handles,
+    int n_extra,
+    int *n_out
+) {
   int n_base = 0;
   PolyBufferBinding *base = build_bindings_for_realize(inst, ep_idx, io, n_io, &n_base);
-  if (!base) { *n_out = 0; return NULL; }
+  if (!base) {
+    *n_out = 0;
+    return NULL;
+  }
 
   int n_total = n_base + n_extra;
   PolyBufferBinding *all = realloc(base, (size_t)n_total * sizeof(PolyBufferBinding));
-  if (!all) { free(base); *n_out = 0; return NULL; }
+  if (!all) {
+    free(base);
+    *n_out = 0;
+    return NULL;
+  }
 
   for (int i = 0; i < n_extra; i++) {
     all[n_base + i].buffer = extra_bufs[i];
@@ -878,8 +937,7 @@ static PolyBufferBinding *build_bindings_extended(
   return all;
 }
 
-int poly_instance_call(PolyInstance *inst, const char *entrypoint,
-                       PolyIOBinding *io, int n_io) {
+int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding *io, int n_io) {
   if (!inst || !entrypoint) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
@@ -890,8 +948,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
   int n_bindings = 0;
-  PolyBufferBinding *bindings = build_bindings_for_realize(
-      inst, ep_idx, io, n_io, &n_bindings);
+  PolyBufferBinding *bindings = build_bindings_for_realize(inst, ep_idx, io, n_io, &n_bindings);
   if (!bindings) return -1;
 
   int ret = poly_realize(inst->ctx, sink, bindings, n_bindings);
@@ -899,18 +956,23 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint,
   return ret;
 }
 
-/* ── Convenience wrapper ─────────────────────────────────────────────── */
+/* Convenience wrapper */
 
-int poly_instance_forward(PolyInstance *inst,
-                          PolyIOBinding *inputs, int n_inputs) {
+int poly_instance_forward(PolyInstance *inst, PolyIOBinding *inputs, int n_inputs) {
   return poly_instance_call(inst, "forward", inputs, n_inputs);
 }
 
-/* ── Optimizer ───────────────────────────────────────────────────────── */
+/* Optimizer */
 
-int poly_instance_set_optimizer(PolyInstance *inst, int kind,
-                                float lr, float beta1, float beta2,
-                                float eps, float weight_decay) {
+int poly_instance_set_optimizer(
+    PolyInstance *inst,
+    int kind,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay
+) {
   if (!inst) return -1;
 
   inst->optim.kind = kind;
@@ -930,7 +992,7 @@ int poly_instance_set_optimizer(PolyInstance *inst, int kind,
   return 0;
 }
 
-/* ── Value and Grad ──────────────────────────────────────────────────── */
+/* Value and Grad */
 
 /* Compute numel from shape inference. Returns -1 on failure. */
 static int64_t uop_numel(PolyCtx *ctx, PolyUOp *u) {
@@ -946,7 +1008,7 @@ static int64_t uop_numel(PolyCtx *ctx, PolyUOp *u) {
 
 /* Build the combined fwd+bwd SINK for value_and_grad (lazy, once). */
 static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
-  if (inst->vag) return 0;  /* already built */
+  if (inst->vag) return 0; /* already built */
 
   PolyUOp *loss_sink = inst->entrypoints[loss_ep_idx].sink;
   PolyUOp *loss_store = loss_sink->src[0]; /* SINK src[0] = STORE */
@@ -971,27 +1033,37 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
     /* Find the RESHAPE in the loss graph whose src[0] is this raw buffer
      * and whose shape matches the declared param shape. */
     for (int j = 0; j < n_topo; j++) {
-      if (topo[j]->op != POLY_OP_RESHAPE || topo[j]->n_src < 1 ||
-          topo[j]->src[0] != raw_buf) continue;
+      if (topo[j]->op != POLY_OP_RESHAPE || topo[j]->n_src < 1 || topo[j]->src[0] != raw_buf)
+        continue;
       PolyShape rs = poly_uop_shape(inst->ctx, topo[j]);
       bool match = (rs.ndim == pb->ndim);
       if (match) {
         for (int d = 0; d < rs.ndim; d++) {
-          if (rs.dims[d] != pb->shape[d]) { match = false; break; }
+          if (rs.dims[d] != pb->shape[d]) {
+            match = false;
+            break;
+          }
         }
       }
       if (rs.ndim > 0 && rs.dims) free(rs.dims);
-      if (match) { shaped = topo[j]; break; }
+      if (match) {
+        shaped = topo[j];
+        break;
+      }
     }
     param_bufs[i] = shaped ? shaped : raw_buf;
   }
 
   /* Compute gradients */
   PolyUOp **grads = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
-  if (!grads) { free(param_bufs); return -1; }
+  if (!grads) {
+    free(param_bufs);
+    return -1;
+  }
   if (poly_grad_many(inst->ctx, loss_value, NULL, param_bufs, inst->n_params, grads) != 0) {
     fprintf(stderr, "poly_instance: value_and_grad: autograd failed\n");
-    free(grads); free(param_bufs);
+    free(grads);
+    free(param_bufs);
     return -1;
   }
 
@@ -1027,7 +1099,10 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
     int64_t numel = uop_numel(inst->ctx, grads[i]);
     if (numel <= 0) {
       fprintf(stderr, "poly_instance: value_and_grad: grad[%d] has unknown shape\n", i);
-      free(stores); free(grads); free(param_bufs); vag_free(vag, inst->n_params);
+      free(stores);
+      free(grads);
+      free(param_bufs);
+      vag_free(vag, inst->n_params);
       return -1;
     }
     PolyDType gdt = poly_dtype_scalar(grads[i]->dtype);
@@ -1039,7 +1114,7 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
     PolyUOp *gflat = grads[i];
     PolyShape gs = poly_uop_shape(inst->ctx, grads[i]);
     if (gs.ndim != 1 || (gs.ndim == 1 && gs.dims[0] != numel)) {
-      int64_t flat_shape[1] = { numel };
+      int64_t flat_shape[1] = {numel};
       gflat = poly_reshape(inst->ctx, grads[i], flat_shape, 1);
     }
     if (gs.dims) free(gs.dims);
@@ -1060,9 +1135,13 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   return 0;
 }
 
-int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
-                                 PolyIOBinding *io, int n_io,
-                                 float *loss_out) {
+int poly_instance_value_and_grad(
+    PolyInstance *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    float *loss_out
+) {
   if (!inst || !entrypoint) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
@@ -1087,7 +1166,8 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
   PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
   if (!extra_bufs || !extra_handles) {
-    free(extra_bufs); free(extra_handles);
+    free(extra_bufs);
+    free(extra_handles);
     return -1;
   }
 
@@ -1106,7 +1186,8 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   /* Build combined bindings: instance buffers + IO + vag outputs */
   int n_bindings = 0;
   PolyBufferBinding *bindings = build_bindings_extended(
-    inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
+      inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings
+  );
 
   /* Route through core poly_realize -- caching is automatic */
   int ret = bindings ? poly_realize(inst->ctx, vag->combined_sink, bindings, n_bindings) : -1;
@@ -1117,8 +1198,7 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
     readback_handle(&extra_handles[0], &vag->loss_data, sizeof(float));
     for (int i = 0; i < inst->n_params; i++) {
       NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-      readback_handle(&extra_handles[1 + i], vag->grad_datas[i],
-                      (size_t)pb->numel * sizeof(float));
+      readback_handle(&extra_handles[1 + i], vag->grad_datas[i], (size_t)pb->numel * sizeof(float));
     }
   }
 
@@ -1133,27 +1213,35 @@ int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
   return 0;
 }
 
-/* ── Optimizer Graph Builder ─────────────────────────────────────────── */
+/* Optimizer Graph Builder */
 
 /* Create a buffer handle on the given device. For host-addressable devices,
  * points directly at host_data. For device memory, allocates and uploads. */
-static PolyBufferHandle make_handle(void *host_data, size_t nbytes,
-                                     PolyDeviceId dev,
-                                     const PolyAllocator *alloc) {
+static PolyBufferHandle make_handle(
+    void *host_data,
+    size_t nbytes,
+    PolyDeviceId dev,
+    const PolyAllocator *alloc
+) {
   if (poly_device_is_host_addressable(dev)) {
     return (PolyBufferHandle){
-      .ptr = host_data, .nbytes = nbytes, .domain = dev, .owned = false,
+        .ptr = host_data,
+        .nbytes = nbytes,
+        .domain = dev,
+        .owned = false,
     };
   }
   void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!dptr) {
     fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
-    return (PolyBufferHandle){ .ptr = NULL, .nbytes = 0, .domain = dev, .owned = false };
+    return (PolyBufferHandle){.ptr = NULL, .nbytes = 0, .domain = dev, .owned = false};
   }
-  if (host_data)
-    alloc->copy_in(dptr, host_data, nbytes, alloc->dev_ctx);
+  if (host_data) alloc->copy_in(dptr, host_data, nbytes, alloc->dev_ctx);
   return (PolyBufferHandle){
-    .ptr = dptr, .nbytes = nbytes, .domain = dev, .owned = true,
+      .ptr = dptr,
+      .nbytes = nbytes,
+      .domain = dev,
+      .owned = true,
   };
 }
 
@@ -1161,7 +1249,7 @@ static PolyBufferHandle make_handle(void *host_data, size_t nbytes,
  * Gradients are consumed directly by ASSIGN ops -- not materialized to
  * separate output buffers (D1: no grad stores in optimizer SINK). */
 static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
-  if (inst->train) return 0;  /* already built */
+  if (inst->train) return 0; /* already built */
 
   /* Build fwd+bwd first (gives us loss_value and grad UOps) */
   if (ensure_vag_graph(inst, loss_ep_idx) != 0) return -1;
@@ -1181,19 +1269,21 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 
   /* Initialize all train handles on the current device so kernels write
    * to the correct memory domain (host or device). */
-  PolyDeviceId cur_dev = inst->buf_handles ? inst->buf_handles[0].domain
-                                            : POLY_DEVICE_CPU;
+  PolyDeviceId cur_dev = inst->buf_handles ? inst->buf_handles[0].domain : POLY_DEVICE_CPU;
   const PolyBackendDesc *cur_be = poly_backend_get(cur_dev);
   const PolyAllocator *alloc = cur_be ? cur_be->get_allocator() : NULL;
   ts->loss_handle = make_handle(&ts->loss_data, sizeof(float), cur_dev, alloc);
 
   /* Count SINK sources: loss_store + param assigns + moment assigns */
   int has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
-  int n_sink_srcs = 1 + np;  /* loss_store + param assigns */
-  if (has_moments) n_sink_srcs += 2 * np;  /* + m assigns + v assigns */
+  int n_sink_srcs = 1 + np; /* loss_store + param assigns */
+  if (has_moments) n_sink_srcs += 2 * np; /* + m assigns + v assigns */
 
   PolyUOp **sink_srcs = calloc((size_t)n_sink_srcs, sizeof(PolyUOp *));
-  if (!sink_srcs) { train_free(ts, np); return -1; }
+  if (!sink_srcs) {
+    train_free(ts, np);
+    return -1;
+  }
 
   /* Loss store */
   PolyUOp *loss_flat = vag->loss_value;
@@ -1216,7 +1306,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     /* Bias correction scalar buffers */
     ts->bc1_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
     ts->bc2_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
-    ts->bc1_data = 1.0f;  /* will be updated before each step */
+    ts->bc1_data = 1.0f; /* will be updated before each step */
     ts->bc2_data = 1.0f;
     ts->bc1_handle = make_handle(&ts->bc1_data, sizeof(float), cur_dev, alloc);
     ts->bc2_handle = make_handle(&ts->bc2_data, sizeof(float), cur_dev, alloc);
@@ -1239,7 +1329,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 
   /* Build optimizer update graph for each parameter */
   PolyUOp *lr_const = poly_const_float(ctx, (double)o->lr);
-  int si = 1;  /* sink_srcs index (0 = loss_store) */
+  int si = 1; /* sink_srcs index (0 = loss_store) */
 
   for (int i = 0; i < np; i++) {
     PolyUOp *param_buf = inst->bufs[inst->param_indices[i]].buffer;
@@ -1252,7 +1342,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     {
       PolyShape gs = poly_uop_shape(ctx, grad);
       if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != pb_opt->numel)) {
-        int64_t flat[1] = { pb_opt->numel };
+        int64_t flat[1] = {pb_opt->numel};
         grad = poly_reshape(ctx, grad, flat, 1);
       }
       if (gs.dims) free(gs.dims);
@@ -1274,7 +1364,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       int64_t numel = pb->numel;
 
       /* Expand scalar bc buffers to match param shape */
-      int64_t param_shape[1] = { numel };
+      int64_t param_shape[1] = {numel};
       PolyUOp *bc1_expanded = poly_expand(ctx, ts->bc1_buf, param_shape, 1);
       PolyUOp *bc2_expanded = poly_expand(ctx, ts->bc2_buf, param_shape, 1);
 
@@ -1287,21 +1377,22 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       /* AdamW: decoupled weight decay on param first */
       PolyUOp *p_cur = param_buf;
       if (o->kind == POLY_OPTIM_ADAMW && o->weight_decay > 0.0f) {
-        PolyUOp *wd_factor = poly_const_float(ctx,
-          1.0 - (double)o->lr * (double)o->weight_decay);
+        PolyUOp *wd_factor = poly_const_float(ctx, 1.0 - (double)o->lr * (double)o->weight_decay);
         p_cur = poly_alu2(ctx, POLY_OP_MUL, param_buf, wd_factor);
       }
 
       /* m_new = beta1 * m + (1 - beta1) * grad */
-      PolyUOp *m_new = poly_alu2(ctx, POLY_OP_ADD,
-        poly_alu2(ctx, POLY_OP_MUL, beta1, m_buf),
-        poly_alu2(ctx, POLY_OP_MUL, one_minus_b1, grad));
+      PolyUOp *m_new = poly_alu2(
+          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, beta1, m_buf),
+          poly_alu2(ctx, POLY_OP_MUL, one_minus_b1, grad)
+      );
 
       /* v_new = beta2 * v + (1 - beta2) * grad * grad */
       PolyUOp *g_sq = poly_alu2(ctx, POLY_OP_MUL, grad, grad);
-      PolyUOp *v_new = poly_alu2(ctx, POLY_OP_ADD,
-        poly_alu2(ctx, POLY_OP_MUL, beta2, v_buf),
-        poly_alu2(ctx, POLY_OP_MUL, one_minus_b2, g_sq));
+      PolyUOp *v_new = poly_alu2(
+          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, beta2, v_buf),
+          poly_alu2(ctx, POLY_OP_MUL, one_minus_b2, g_sq)
+      );
 
       /* Bias-corrected: m_hat = m_new * bc1, v_hat = v_new * bc2 */
       PolyUOp *m_hat = poly_alu2(ctx, POLY_OP_MUL, m_new, bc1_expanded);
@@ -1310,20 +1401,22 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       /* p_new = p_cur - lr * m_hat / (sqrt(v_hat) + eps) */
       PolyUOp *v_sqrt = poly_alu1(ctx, POLY_OP_SQRT, v_hat);
       PolyUOp *denom = poly_alu2(ctx, POLY_OP_ADD, v_sqrt, eps);
-      PolyUOp *step_val = poly_alu2(ctx, POLY_OP_MUL, lr_const,
-        poly_alu2(ctx, POLY_OP_MUL, m_hat,
-          poly_alu1(ctx, POLY_OP_RECIPROCAL, denom)));
+      PolyUOp *step_val = poly_alu2(
+          ctx, POLY_OP_MUL, lr_const,
+          poly_alu2(ctx, POLY_OP_MUL, m_hat, poly_alu1(ctx, POLY_OP_RECIPROCAL, denom))
+      );
       PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, p_cur, step_val);
 
       /* ASSIGN all three: param, m, v */
       sink_srcs[si++] = poly_assign(ctx, param_buf, p_new);
-      sink_srcs[1 + np + 2*i] = poly_assign(ctx, m_buf, m_new);
-      sink_srcs[1 + np + 2*i + 1] = poly_assign(ctx, v_buf, v_new);
+      sink_srcs[1 + np + 2 * i] = poly_assign(ctx, m_buf, m_new);
+      sink_srcs[1 + np + 2 * i + 1] = poly_assign(ctx, v_buf, v_new);
       break;
     }
     default:
       fprintf(stderr, "ensure_train_graph: unsupported optimizer %d\n", o->kind);
-      free(sink_srcs); train_free(ts, np);
+      free(sink_srcs);
+      train_free(ts, np);
       return -1;
     }
   }
@@ -1342,11 +1435,9 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   return 0;
 }
 
-/* ── Train Step ──────────────────────────────────────────────────────── */
+/* Train Step */
 
-int poly_instance_train_step(PolyInstance *inst,
-                             PolyIOBinding *io, int n_io,
-                             float *loss_out) {
+int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, float *loss_out) {
   if (!inst) return -1;
   if (inst->optim.kind == POLY_OPTIM_NONE) {
     fprintf(stderr, "poly_instance_train_step: no optimizer configured\n");
@@ -1393,7 +1484,8 @@ int poly_instance_train_step(PolyInstance *inst,
   PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
   PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
   if (!extra_bufs || !extra_handles) {
-    free(extra_bufs); free(extra_handles);
+    free(extra_bufs);
+    free(extra_handles);
     o->step--;
     return -1;
   }
@@ -1407,22 +1499,29 @@ int poly_instance_train_step(PolyInstance *inst,
       extra_bufs[1 + np + i] = ts->v_bufs[i];
       extra_handles[1 + np + i] = ts->v_handles[i];
     }
-    extra_bufs[1 + 2*np] = ts->bc1_buf;
-    extra_handles[1 + 2*np] = ts->bc1_handle;
-    extra_bufs[1 + 2*np + 1] = ts->bc2_buf;
-    extra_handles[1 + 2*np + 1] = ts->bc2_handle;
+    extra_bufs[1 + 2 * np] = ts->bc1_buf;
+    extra_handles[1 + 2 * np] = ts->bc1_handle;
+    extra_bufs[1 + 2 * np + 1] = ts->bc2_buf;
+    extra_handles[1 + 2 * np + 1] = ts->bc2_handle;
   }
 
   int n_bindings = 0;
   PolyBufferBinding *bindings = build_bindings_extended(
-      inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings);
+      inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings
+  );
   free(extra_bufs);
   free(extra_handles);
-  if (!bindings) { o->step--; return -1; }
+  if (!bindings) {
+    o->step--;
+    return -1;
+  }
 
   int ret = poly_realize(inst->ctx, ts->combined_sink, bindings, n_bindings);
   free(bindings);
-  if (ret != 0) { o->step--; return ret; }
+  if (ret != 0) {
+    o->step--;
+    return ret;
+  }
 
   /* Read back loss from device to host if not host-addressable */
   if (!poly_device_is_host_addressable(ts->loss_handle.domain))
@@ -1437,7 +1536,7 @@ int poly_instance_train_step(PolyInstance *inst,
   return 0;
 }
 
-/* ── Named accessor helpers ─────────────────────────────────────────── */
+/* Named accessor helpers */
 
 PolyCtx *poly_instance_ctx(const PolyInstance *inst) {
   return inst ? inst->ctx : NULL;
@@ -1459,8 +1558,7 @@ PolyUOp *poly_instance_get_sink(const PolyInstance *inst, const char *name) {
   return (idx >= 0) ? inst->entrypoints[idx].sink : NULL;
 }
 
-float *poly_instance_buf_data_named(PolyInstance *inst, const char *name,
-                                    int64_t *numel_out) {
+float *poly_instance_buf_data_named(PolyInstance *inst, const char *name, int64_t *numel_out) {
   if (!inst || !name) return NULL;
   int idx = find_buf_by_name(inst, name);
   if (idx < 0) return NULL;

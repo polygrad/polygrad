@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <math.h>
 
-/* ── Stateless PRNG (SplitMix64) ────────────────────────────────────── */
+/* Stateless PRNG (SplitMix64) */
 
 static uint64_t splitmix64(uint64_t x) {
   x += 0x9E3779B97F4A7C15ULL;
@@ -50,7 +50,7 @@ void poly_init_param_kaiming(uint64_t seed, const char *name,
     data[i] = (prng_float(seed, stream, (uint64_t)i) * 2.0f - 1.0f) * bound;
 }
 
-/* ── Activation dispatch ─────────────────────────────────────────────── */
+/* Activation dispatch */
 
 typedef enum {
   ACT_NONE, ACT_RELU, ACT_GELU, ACT_SILU, ACT_TANH, ACT_SIGMOID
@@ -78,7 +78,7 @@ static PolyUOp *apply_activation(PolyCtx *ctx, PolyUOp *x, ActivationKind act) {
   return x;
 }
 
-/* ── MLP Config ──────────────────────────────────────────────────────── */
+/* MLP Config */
 
 MLPConfig poly_mlp_config_default(void) {
   return (MLPConfig){
@@ -91,7 +91,7 @@ MLPConfig poly_mlp_config_default(void) {
   };
 }
 
-/* ── MLP Builder (config struct) ─────────────────────────────────────── */
+/* MLP Builder (config struct) */
 
 PolyInstance *poly_mlp(const MLPConfig *cfg) {
   if (!cfg || cfg->n_layers < 2 || cfg->n_layers > POLY_MLP_MAX_LAYERS)
@@ -161,7 +161,7 @@ PolyInstance *poly_mlp(const MLPConfig *cfg) {
   return inst;
 }
 
-/* ── FFI wrapper (JSON -> config -> build) ───────────────────────────── */
+/* FFI wrapper (JSON -> config -> build) */
 
 PolyInstance *poly_mlp_from_json(const char *json, int len) {
   if (!json || len <= 0) return NULL;

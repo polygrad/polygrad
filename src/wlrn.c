@@ -7,24 +7,21 @@
 #include <string.h>
 
 static uint32_t read_le32(const uint8_t *p) {
-  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 int poly_wlrn_view(const uint8_t *data, uint32_t len, PolyWlrnView *out) {
   if (!data || !out) return -1;
 
   if (len < POLY_WLRN_HEADER_SIZE) {
-    fprintf(stderr, "poly_wlrn_view: data too short (%u < %d)\n",
-            len, POLY_WLRN_HEADER_SIZE);
+    fprintf(stderr, "poly_wlrn_view: data too short (%u < %d)\n", len, POLY_WLRN_HEADER_SIZE);
     return -1;
   }
 
   /* Check magic */
   uint32_t magic = read_le32(data);
   if (magic != POLY_WLRN_MAGIC) {
-    fprintf(stderr, "poly_wlrn_view: bad magic 0x%08x (expected 0x%08x)\n",
-            magic, POLY_WLRN_MAGIC);
+    fprintf(stderr, "poly_wlrn_view: bad magic 0x%08x (expected 0x%08x)\n", magic, POLY_WLRN_MAGIC);
     return -1;
   }
 

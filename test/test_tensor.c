@@ -18,11 +18,17 @@
 #include "../src/tensor.h"
 #include "../src/codegen.h"
 
-/* ── Helper: realize a UOp into a float array ─────────────────────────── */
+/* Helper: realize a UOp into a float array */
 
-static int realize_uop(PolyCtx *ctx, PolyUOp *val, PolyUOp *out_buf,
-                       float *out_data, PolyUOp **leaf_bufs, float **leaf_datas,
-                       int n_leaves) {
+static int realize_uop(
+    PolyCtx *ctx,
+    PolyUOp *val,
+    PolyUOp *out_buf,
+    float *out_data,
+    PolyUOp **leaf_bufs,
+    float **leaf_datas,
+    int n_leaves
+) {
   PolyUOp *store = poly_store_val(ctx, out_buf, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   int n = n_leaves + 1;
@@ -37,11 +43,12 @@ static int realize_uop(PolyCtx *ctx, PolyUOp *val, PolyUOp *out_buf,
   return poly_realize_flat(ctx, sink, bufs, datas, n);
 }
 
-/* ── Helper: make a shaped buffer (RESHAPE(BUFFER, shape)) ────────────── */
+/* Helper: make a shaped buffer (RESHAPE(BUFFER, shape)) */
 
 static PolyUOp *make_buf(PolyCtx *ctx, const int64_t *shape, int ndim) {
   int64_t numel = 1;
-  for (int i = 0; i < ndim; i++) numel *= shape[i];
+  for (int i = 0; i < ndim; i++)
+    numel *= shape[i];
   PolyUOp *buf = poly_buffer_f32(ctx, numel);
   if (ndim > 1) return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
   return buf;
@@ -49,7 +56,8 @@ static PolyUOp *make_buf(PolyCtx *ctx, const int64_t *shape, int ndim) {
 
 /* Get underlying BUFFER from possibly-reshaped UOp */
 static PolyUOp *base_buf(PolyUOp *u) {
-  while (u->op == POLY_OP_RESHAPE && u->n_src > 0) u = u->src[0];
+  while (u->op == POLY_OP_RESHAPE && u->n_src > 0)
+    u = u->src[0];
   return u;
 }
 
@@ -67,14 +75,15 @@ TEST(pe, rmsnorm_e2e) {
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
 
-  float dx[] = {1,2,3, 4,5,6}, dw[] = {1,1,1}, dout[6] = {0};
+  float dx[] = {1, 2, 3, 4, 5, 6}, dw[] = {1, 1, 1}, dout[6] = {0};
   PolyUOp *leaves[] = {base_buf(x), w};
   float *ld[] = {dx, dw};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 0.46290955f, 1e-4);
   ASSERT_FLOAT_EQ(dout[3], 0.78954184f, 1e-4);
   ASSERT_FLOAT_EQ(dout[5], 1.18431280f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, sdpa_e2e) {
@@ -88,13 +97,14 @@ TEST(pe, sdpa_e2e) {
   ASSERT_NOT_NULL(r);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
 
-  float dq[] = {1,0, 0,1}, dk[] = {1,0, 0,1}, dv[] = {1,2, 3,4}, dout[4] = {0};
+  float dq[] = {1, 0, 0, 1}, dk[] = {1, 0, 0, 1}, dv[] = {1, 2, 3, 4}, dout[4] = {0};
   PolyUOp *leaves[] = {base_buf(q), base_buf(k), base_buf(v)};
   float *ld[] = {dq, dk, dv};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.6604769f, 1e-3);
   ASSERT_FLOAT_EQ(dout[3], 3.3395231f, 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, sdpa_causal_e2e) {
@@ -106,7 +116,7 @@ TEST(pe, sdpa_causal_e2e) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
   PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 1);
 
-  float dq[] = {1,0, 0,1, 1,1}, dk[] = {1,0, 0,1, 1,1}, dv[] = {1,0, 0,1, 1,1};
+  float dq[] = {1, 0, 0, 1, 1, 1}, dk[] = {1, 0, 0, 1, 1, 1}, dv[] = {1, 0, 0, 1, 1, 1};
   float dout[6] = {0};
   PolyUOp *leaves[] = {base_buf(q), base_buf(k), base_buf(v)};
   float *ld[] = {dq, dk, dv};
@@ -114,7 +124,8 @@ TEST(pe, sdpa_causal_e2e) {
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-3);
   ASSERT_FLOAT_EQ(dout[2], 0.33023846f, 1e-3);
   ASSERT_FLOAT_EQ(dout[4], 0.7517449f, 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, repeat_interleave_e2e) {
@@ -126,13 +137,15 @@ TEST(pe, repeat_interleave_e2e) {
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 6);
 
-  float dx[] = {1,2,3, 4,5,6}, dout[12] = {0};
+  float dx[] = {1, 2, 3, 4, 5, 6}, dout[12] = {0};
   PolyUOp *leaves[] = {base_buf(x)};
   float *ld[] = {dx};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
-  float expected[] = {1,1,2,2,3,3, 4,4,5,5,6,6};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(dout[i], expected[i], 1e-6);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[] = {1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(dout[i], expected[i], 1e-6);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, argmax_e2e) {
@@ -144,12 +157,13 @@ TEST(pe, argmax_e2e) {
   /* Cast int32 result to float for output */
   r = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r, poly_arg_none());
 
-  float dx[] = {1,5,3,2,4}, dout[1] = {0};
+  float dx[] = {1, 5, 3, 2, 4}, dout[1] = {0};
   PolyUOp *leaves[] = {x};
   float *ld[] = {dx};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, argmax_2d_e2e) {
@@ -160,13 +174,14 @@ TEST(pe, argmax_2d_e2e) {
   PolyUOp *r = poly_argmax(ctx, x, 1);
   r = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r, poly_arg_none());
 
-  float dx[] = {1,5,3, 4,2,6}, dout[2] = {0};
+  float dx[] = {1, 5, 3, 4, 2, 6}, dout[2] = {0};
   PolyUOp *leaves[] = {base_buf(x)};
   float *ld[] = {dx};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
   ASSERT_FLOAT_EQ(dout[1], 2.0f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, mse_loss_e2e) {
@@ -177,12 +192,13 @@ TEST(pe, mse_loss_e2e) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
   PolyUOp *r = poly_mse_loss(ctx, pred, tgt);
 
-  float dp[] = {1,2,3}, dt[] = {4,5,6}, dout[1] = {0};
+  float dp[] = {1, 2, 3}, dt[] = {4, 5, 6}, dout[1] = {0};
   PolyUOp *leaves[] = {pred, tgt};
   float *ld[] = {dp, dt};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 9.0f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, softmax_v2_e2e) {
@@ -192,7 +208,7 @@ TEST(pe, softmax_v2_e2e) {
   PolyUOp *sm = poly_softmax(ctx, x, 0);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, sm), 1);
 
-  float dx[] = {1,2,3}, dout[3] = {0};
+  float dx[] = {1, 2, 3}, dout[3] = {0};
   poly_realize_begin(ctx);
   poly_realize_bind(ctx, x, dx);
   poly_realize_bind(ctx, out_buf, dout);
@@ -200,7 +216,8 @@ TEST(pe, softmax_v2_e2e) {
   ASSERT_INT_EQ(poly_realize_exec(ctx, poly_sink1(ctx, store)), 0);
   ASSERT_FLOAT_EQ(dout[0], 0.0900f, 1e-3);
   ASSERT_FLOAT_EQ(dout[2], 0.6652f, 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, dot_v2_e2e) {
@@ -213,13 +230,14 @@ TEST(pe, dot_v2_e2e) {
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 2);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
-  float da[] = {1,2,3, 4,5,6}, db[] = {1,2, 3,4, 5,6}, dout[4] = {0};
+  float da[] = {1, 2, 3, 4, 5, 6}, db[] = {1, 2, 3, 4, 5, 6}, dout[4] = {0};
   PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
   float *ld[] = {da, db};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 22.0f, 1e-4);
   ASSERT_FLOAT_EQ(dout[3], 64.0f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, layernorm_v2_shape) {
@@ -230,7 +248,8 @@ TEST(pe, layernorm_v2_shape) {
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, rope_e2e) {
@@ -242,30 +261,31 @@ TEST(pe, rope_e2e) {
   double theta = 10000.0;
   for (int64_t i = 0; i < seq; i++)
     for (int64_t j = 0; j < half; j++) {
-      double freq = 1.0 / pow(theta, (double)(2*j) / (double)dim);
+      double freq = 1.0 / pow(theta, (double)(2 * j) / (double)dim);
       double angle = (double)i * freq;
-      cos_data[i*half+j] = (float)cos(angle);
-      sin_data[i*half+j] = (float)sin(angle);
+      cos_data[i * half + j] = (float)cos(angle);
+      sin_data[i * half + j] = (float)sin(angle);
     }
 
-  PolyUOp *x = make_buf(ctx, (int64_t[]){1,1,3,4}, 4);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){1, 1, 3, 4}, 4);
   PolyUOp *fc_buf = poly_buffer_f32(ctx, 6);
   PolyUOp *fs_buf = poly_buffer_f32(ctx, 6);
-  PolyUOp *fc = poly_reshape(ctx, fc_buf, (int64_t[]){1,1,3,2}, 4);
-  PolyUOp *fs = poly_reshape(ctx, fs_buf, (int64_t[]){1,1,3,2}, 4);
+  PolyUOp *fc = poly_reshape(ctx, fc_buf, (int64_t[]){1, 1, 3, 2}, 4);
+  PolyUOp *fs = poly_reshape(ctx, fs_buf, (int64_t[]){1, 1, 3, 2}, 4);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
   PolyUOp *r = poly_rope(ctx, x, fc, fs);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 4);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[3], 4);
 
-  float dx[] = {1,0,0,1, 1,0,0,1, 1,0,0,1}, dout[12] = {0};
+  float dx[] = {1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1}, dout[12] = {0};
   PolyUOp *leaves[] = {base_buf(x), fc_buf, fs_buf};
   float *ld[] = {dx, cos_data, sin_data};
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-3);
   ASSERT_FLOAT_EQ(dout[4], 0.5403f, 1e-3);
   ASSERT_FLOAT_EQ(dout[6], 0.8415f, 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -277,7 +297,8 @@ TEST(shape_uop, buffer_static) {
   PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 100);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, b), 1);
   ASSERT_INT_EQ(poly_uop_dims(ctx, b)[0], 100);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, buffer_dynamic) {
@@ -287,96 +308,106 @@ TEST(shape_uop, buffer_dynamic) {
   ASSERT_INT_EQ(poly_uop_ndim(ctx, buf), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, buf)[0], 32);
   ASSERT_INT_EQ(poly_uop_dims(ctx, buf)[1], 10);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, reshape) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *r = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2,3,4}, 3);
+  PolyUOp *r = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2, 3, 4}, 3);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[2], 4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, permute) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3,4}, 3);
-  PolyUOp *p = poly_permute(ctx, b, (int64_t[]){2,0,1}, 3);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *p = poly_permute(ctx, b, (int64_t[]){2, 0, 1}, 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, p)[0], 4);
   ASSERT_INT_EQ(poly_uop_dims(ctx, p)[1], 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, p)[2], 3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, pad) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3}, 2);
-  PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1,1},{2,0}}, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1, 1}, {2, 0}}, 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, p)[0], 4);
   ASSERT_INT_EQ(poly_uop_dims(ctx, p)[1], 5);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, shrink) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = make_buf(ctx, (int64_t[]){4,5}, 2);
-  PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1,3},{0,4}}, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){4, 5}, 2);
+  PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1, 3}, {0, 4}}, 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, s)[0], 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, s)[1], 4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, reduce_axis) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3,4}, 3);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3, 4}, 3);
   PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){1}, 1);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 1);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[2], 4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, alu_broadcast_scalar) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *a = make_buf(ctx, (int64_t[]){3, 4}, 2);
   PolyUOp *c = poly_const_float(ctx, 1.0);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, c);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, alu_broadcast_ndim) {
   /* (3,5,1) + (5,4) → (3,5,4) -- the embedding WHERE bug case */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = make_buf(ctx, (int64_t[]){3,5,1}, 3);
-  PolyUOp *b = make_buf(ctx, (int64_t[]){5,4}, 2);
+  PolyUOp *a = make_buf(ctx, (int64_t[]){3, 5, 1}, 3);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){5, 4}, 2);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_ADD, a, b);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[1], 5);
   ASSERT_INT_EQ(poly_uop_dims(ctx, r)[2], 4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, cmplt_broadcast) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = make_buf(ctx, (int64_t[]){2,3}, 2);
+  PolyUOp *a = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *c = poly_const_float(ctx, 0.5);
   PolyUOp *r = poly_alu2(ctx, POLY_OP_CMPLT, c, a);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 2);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, const_scalar) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_const_float(ctx, 42.0)), 0);
   ASSERT_TRUE(poly_uop_dims(ctx, poly_const_float(ctx, 42.0)) == NULL);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, store_inherits_value_shape) {
@@ -386,30 +417,33 @@ TEST(shape_uop, store_inherits_value_shape) {
   /* STORE inherits shape from its value source (src[1]).
    * A scalar const has shape (), so ndim=0. */
   ASSERT_INT_EQ(poly_uop_ndim(ctx, st), 0);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, contiguous_passthrough) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *b = make_buf(ctx, (int64_t[]){2,3}, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *c = poly_uop1(ctx, POLY_OP_CONTIGUOUS, b->dtype, b, poly_arg_none());
   ASSERT_INT_EQ(poly_uop_ndim(ctx, c), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, c)[0], 2);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, assign_flat) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
-  PolyUOp *r = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *r = make_buf(ctx, (int64_t[]){3, 4}, 2);
   PolyUOp *a = poly_assign(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
   /* ASSIGN normalizes to flat BUFFER (shape fix deferred) */
   ASSERT_INT_EQ(poly_uop_ndim(ctx, a), 1);
   ASSERT_INT_EQ(poly_uop_dims(ctx, a)[0], 12);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
-/* ── Shape parity oracle ──────────────────────────────────────────────── */
+/* Shape parity oracle */
 
 static int check_shape_parity(PolyCtx *ctx, PolyUOp *root) {
   int n_topo;
@@ -419,16 +453,21 @@ static int check_shape_parity(PolyCtx *ctx, PolyUOp *root) {
     PolyShape computed = poly_uop_shape(ctx, topo[i]);
     int cached_ndim = poly_uop_ndim(ctx, topo[i]);
     if (cached_ndim != computed.ndim) {
-      fprintf(stderr, "  parity: op=%s cached=%d computed=%d\n",
-              poly_op_name(topo[i]->op), cached_ndim, computed.ndim);
+      fprintf(
+          stderr, "  parity: op=%s cached=%d computed=%d\n", poly_op_name(topo[i]->op), cached_ndim,
+          computed.ndim
+      );
       mismatches++;
     } else if (cached_ndim > 0 && computed.dims) {
       for (int j = 0; j < cached_ndim; j++)
         if (poly_uop_dims(ctx, topo[i])[j] != computed.dims[j]) {
-          fprintf(stderr, "  parity: op=%s dim[%d] cached=%ld computed=%ld\n",
-                  poly_op_name(topo[i]->op), j,
-                  (long)poly_uop_dims(ctx, topo[i])[j], (long)computed.dims[j]);
-          mismatches++; break;
+          fprintf(
+              stderr, "  parity: op=%s dim[%d] cached=%ld computed=%ld\n",
+              poly_op_name(topo[i]->op), j, (long)poly_uop_dims(ctx, topo[i])[j],
+              (long)computed.dims[j]
+          );
+          mismatches++;
+          break;
         }
     }
     if (computed.ndim > 0 && computed.dims) free(computed.dims);
@@ -438,35 +477,38 @@ static int check_shape_parity(PolyCtx *ctx, PolyUOp *root) {
 
 TEST(shape_uop, parity_softmax) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){3, 4}, 2);
   PolyUOp *sm = poly_softmax(ctx, x, -1);
   ASSERT_INT_EQ(check_shape_parity(ctx, sm), 0);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, parity_cross_entropy) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *logits = make_buf(ctx, (int64_t[]){3,5}, 2);
+  PolyUOp *logits = make_buf(ctx, (int64_t[]){3, 5}, 2);
   PolyUOp *target = poly_reshape(ctx, poly_buffer_f32(ctx, 3), (int64_t[]){3}, 1);
   PolyUOp *ce = poly_cross_entropy(ctx, logits, target, -1);
   ASSERT_INT_EQ(check_shape_parity(ctx, ce), 0);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(shape_uop, parity_gather) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *table = make_buf(ctx, (int64_t[]){5,4}, 2);
+  PolyUOp *table = make_buf(ctx, (int64_t[]){5, 4}, 2);
   PolyUOp *idx = poly_reshape(ctx, poly_buffer_f32(ctx, 3), (int64_t[]){3}, 1);
   PolyUOp *g = poly_gather(ctx, table, idx);
   ASSERT_INT_EQ(check_shape_parity(ctx, g), 0);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
-/* ── v2 reduce shape ──────────────────────────────────────────────────── */
+/* v2 reduce shape */
 
 TEST(pe, v2_reduce_shape) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x = make_buf(ctx, (int64_t[]){3,4}, 2);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){3, 4}, 2);
   PolyUOp *s = poly_sum_reduce(ctx, x, 1, 0);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, s), 1);
   ASSERT_INT_EQ(poly_uop_dims(ctx, s)[0], 3);
@@ -474,10 +516,11 @@ TEST(pe, v2_reduce_shape) {
   ASSERT_INT_EQ(poly_uop_ndim(ctx, sk), 2);
   ASSERT_INT_EQ(poly_uop_dims(ctx, sk)[0], 3);
   ASSERT_INT_EQ(poly_uop_dims(ctx, sk)[1], 1);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
-/* ── Contiguous ──────────────────────────────────────────────────────── */
+/* Contiguous */
 
 TEST(tensor, contiguous_passthrough) {
   PolyCtx *ctx = poly_ctx_new();
@@ -492,12 +535,14 @@ TEST(tensor, contiguous_passthrough) {
   float in[] = {1, 2, 3, 4};
   float out[4] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(out_buf, out),
-    POLY_BIND_HOST(a_buf, in),
+      POLY_BIND_HOST(out_buf, out),
+      POLY_BIND_HOST(a_buf, in),
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(out[i], in[i], 1e-6);
-  poly_ctx_destroy(ctx); PASS();
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], in[i], 1e-6);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(tensor, contiguous_expand_materializes) {
@@ -516,14 +561,15 @@ TEST(tensor, contiguous_expand_materializes) {
   float in[] = {10, 20, 30, 40};
   float out[16] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(out_buf, out),
-    POLY_BIND_HOST(a_buf, in),
+      POLY_BIND_HOST(out_buf, out),
+      POLY_BIND_HOST(a_buf, in),
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
   for (int r = 0; r < 4; r++)
     for (int c2 = 0; c2 < 4; c2++)
       ASSERT_FLOAT_EQ(out[r * 4 + c2], in[r] + 1.0f, 1e-6);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(tensor, contiguous_chain) {
@@ -532,10 +578,9 @@ TEST(tensor, contiguous_chain) {
   PolyUOp *a_buf = poly_buffer_f32(ctx, 3);
   PolyUOp *a = poly_reshape(ctx, a_buf, (int64_t[]){3}, 1);
 
-  PolyUOp *doubled = poly_contiguous(ctx,
-      poly_alu2(ctx, POLY_OP_MUL, a, poly_const_float(ctx, 2.0)));
-  PolyUOp *result = poly_contiguous(ctx,
-      poly_add(ctx, doubled, poly_const_float(ctx, 1.0)));
+  PolyUOp *doubled =
+      poly_contiguous(ctx, poly_alu2(ctx, POLY_OP_MUL, a, poly_const_float(ctx, 2.0)));
+  PolyUOp *result = poly_contiguous(ctx, poly_add(ctx, doubled, poly_const_float(ctx, 1.0)));
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   PolyUOp *store = poly_store_val(ctx, out_buf, result);
@@ -544,14 +589,15 @@ TEST(tensor, contiguous_chain) {
   float in[] = {5, 10, 15};
   float out[3] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(out_buf, out),
-    POLY_BIND_HOST(a_buf, in),
+      POLY_BIND_HOST(out_buf, out),
+      POLY_BIND_HOST(a_buf, in),
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
   ASSERT_FLOAT_EQ(out[0], 11.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[1], 21.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[2], 31.0f, 1e-6);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -574,16 +620,18 @@ TEST(pe, repeat_1d_simple) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_data[3]   = {1.0f, 2.0f, 3.0f};
+  float in_data[3] = {1.0f, 2.0f, 3.0f};
   float out_data[12] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[12] = {1,2,3, 1,2,3, 1,2,3, 1,2,3};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[12] = {1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, repeat_1d_to_2d) {
@@ -596,16 +644,18 @@ TEST(pe, repeat_1d_to_2d) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 18);
-  float in_data[3]   = {1.0f, 2.0f, 3.0f};
+  float in_data[3] = {1.0f, 2.0f, 3.0f};
   float out_data[18] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[18] = {1,2,3,1,2,3,1,2,3,  1,2,3,1,2,3,1,2,3};
-  for (int i = 0; i < 18; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[18] = {1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3};
+  for (int i = 0; i < 18; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, repeat_2d_2x2) {
@@ -619,23 +669,22 @@ TEST(pe, repeat_2d_2x2) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 24);
-  float in_data[4]   = {1, 2, 3, 4};
+  float in_data[4] = {1, 2, 3, 4};
   float out_data[24] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
   /* tinygrad output:
    * [[1,2,1,2,1,2],[3,4,3,4,3,4],[1,2,1,2,1,2],[3,4,3,4,3,4]] */
   float expected[24] = {
-    1,2,1,2,1,2,
-    3,4,3,4,3,4,
-    1,2,1,2,1,2,
-    3,4,3,4,3,4,
+      1, 2, 1, 2, 1, 2, 3, 4, 3, 4, 3, 4, 1, 2, 1, 2, 1, 2, 3, 4, 3, 4, 3, 4,
   };
-  for (int i = 0; i < 24; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  for (int i = 0; i < 24; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, shrink_to_2d) {
@@ -649,16 +698,18 @@ TEST(pe, shrink_to_2d) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
-  float in_data[12] = {0,1,2,3, 4,5,6,7, 8,9,10,11};
+  float in_data[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
   float out_data[6] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[6] = {0,1,2, 4,5,6};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[6] = {0, 1, 2, 4, 5, 6};
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pool_1d_k3_stride1) {
@@ -671,17 +722,19 @@ TEST(pe, pool_1d_k3_stride1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 9);
-  float in_data[5]  = {0,1,2,3,4};
+  float in_data[5] = {0, 1, 2, 3, 4};
   float out_data[9] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
   /* row-major (3,3): [[0,1,2],[1,2,3],[2,3,4]] */
-  float expected[9] = {0,1,2, 1,2,3, 2,3,4};
-  for (int i = 0; i < 9; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[9] = {0, 1, 2, 1, 2, 3, 2, 3, 4};
+  for (int i = 0; i < 9; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pool_1d_k3_stride2) {
@@ -694,16 +747,18 @@ TEST(pe, pool_1d_k3_stride2) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
-  float in_data[5]  = {0,1,2,3,4};
+  float in_data[5] = {0, 1, 2, 3, 4};
   float out_data[6] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[6] = {0,1,2, 2,3,4};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[6] = {0, 1, 2, 2, 3, 4};
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pool_1d_k2_dilation2) {
@@ -717,16 +772,18 @@ TEST(pe, pool_1d_k2_dilation2) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_data[8]   = {0,1,2,3,4,5,6,7};
+  float in_data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
   float out_data[12] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[12] = {0,2, 1,3, 2,4, 3,5, 4,6, 5,7};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[12] = {0, 2, 1, 3, 2, 4, 3, 5, 4, 6, 5, 7};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pool_2d_k22_4x4) {
@@ -740,10 +797,10 @@ TEST(pe, pool_2d_k22_4x4) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 36);
-  float in_data[16]  = {0,1,2,3, 4,5,6,7, 8,9,10,11, 12,13,14,15};
+  float in_data[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
   float out_data[36] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
   /* tinygrad output (3,3,2,2) flattened row-major:
@@ -751,13 +808,14 @@ TEST(pe, pool_2d_k22_4x4) {
    *   [ [[4,5],[8,9]],   [[5,6],[9,10]],  [[6,7],[10,11]] ],
    *   [ [[8,9],[12,13]], [[9,10],[13,14]],[[10,11],[14,15]] ]] */
   float expected[36] = {
-     0,1,  4,5,    1,2,  5,6,    2,3,  6,7,
-     4,5,  8,9,    5,6,  9,10,   6,7, 10,11,
-     8,9, 12,13,   9,10, 13,14, 10,11, 14,15,
+      0, 1,  4, 5, 1,  2,  5, 6, 2,  3,  6, 7,  4,  5,  8,  9,  5,  6,
+      9, 10, 6, 7, 10, 11, 8, 9, 12, 13, 9, 10, 13, 14, 10, 11, 14, 15,
   };
-  for (int i = 0; i < 36; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  for (int i = 0; i < 36; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -773,16 +831,18 @@ TEST(pe, cumalu_add_1d) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
-  float in_data[5]  = {1, 2, 3, 4, 5};
+  float in_data[5] = {1, 2, 3, 4, 5};
   float out_data[5] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
   float expected[5] = {1, 3, 6, 10, 15};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_add_1d_const) {
@@ -795,16 +855,18 @@ TEST(pe, cumalu_add_1d_const) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
-  float in_data[5]  = {3, 3, 3, 3, 3};
+  float in_data[5] = {3, 3, 3, 3, 3};
   float out_data[5] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
   float expected[5] = {3, 6, 9, 12, 15};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_add_1d_include_initial) {
@@ -817,16 +879,18 @@ TEST(pe, cumalu_add_1d_include_initial) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
-  float in_data[5]  = {1, 2, 3, 4, 5};
+  float in_data[5] = {1, 2, 3, 4, 5};
   float out_data[5] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
   float expected[5] = {0, 1, 3, 6, 10};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_add_2d_axis1) {
@@ -840,16 +904,18 @@ TEST(pe, cumalu_add_2d_axis1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_data[12]  = {0,1,2,3, 4,5,6,7, 8,9,10,11};
+  float in_data[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
   float out_data[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[12] = {0,1,3,6, 4,9,15,22, 8,17,27,38};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[12] = {0, 1, 3, 6, 4, 9, 15, 22, 8, 17, 27, 38};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_add_2d_axis0) {
@@ -863,16 +929,18 @@ TEST(pe, cumalu_add_2d_axis0) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_data[12]  = {0,1,2,3, 4,5,6,7, 8,9,10,11};
+  float in_data[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
   float out_data[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_data};
+  float *ld[] = {in_data};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 1), 0);
 
-  float expected[12] = {0,1,2,3, 4,6,8,10, 12,15,18,21};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+  float expected[12] = {0, 1, 2, 3, 4, 6, 8, 10, 12, 15, 18, 21};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -892,13 +960,15 @@ TEST(pe, cat_1d) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
   float a_d[2] = {1, 2}, b_d[3] = {3, 4, 5}, out[5] = {0};
   PolyUOp *leaves[] = {a, b};
-  float *ld[]       = {a_d, b_d};
+  float *ld[] = {a_d, b_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 2), 0);
 
   float expected[5] = {1, 2, 3, 4, 5};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cat_2d_axis0) {
@@ -913,15 +983,17 @@ TEST(pe, cat_2d_axis0) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
-  float a_d[4] = {1,2,3,4}, b_d[2] = {5,6}, out[6] = {0};
+  float a_d[4] = {1, 2, 3, 4}, b_d[2] = {5, 6}, out[6] = {0};
   PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
-  float *ld[]       = {a_d, b_d};
+  float *ld[] = {a_d, b_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 2), 0);
 
-  float expected[6] = {1,2, 3,4, 5,6};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  float expected[6] = {1, 2, 3, 4, 5, 6};
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cat_2d_axis1) {
@@ -936,15 +1008,17 @@ TEST(pe, cat_2d_axis1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
-  float a_d[4] = {1,2,3,4}, b_d[2] = {7,8}, out[6] = {0};
+  float a_d[4] = {1, 2, 3, 4}, b_d[2] = {7, 8}, out[6] = {0};
   PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
-  float *ld[]       = {a_d, b_d};
+  float *ld[] = {a_d, b_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 2), 0);
 
-  float expected[6] = {1,2,7, 3,4,8};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  float expected[6] = {1, 2, 7, 3, 4, 8};
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -963,13 +1037,15 @@ TEST(pe, pad_value_1d_basic) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
   float in_d[3] = {1, 2, 3}, out[6] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[6] = {9, 9, 1, 2, 3, 9};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pad_value_1d_negative_left) {
@@ -984,13 +1060,15 @@ TEST(pe, pad_value_1d_negative_left) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   float in_d[3] = {1, 2, 3}, out[3] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[3] = {2, 3, 7};
-  for (int i = 0; i < 3; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pad_value_1d_negative_right_zero_value) {
@@ -1005,13 +1083,15 @@ TEST(pe, pad_value_1d_negative_right_zero_value) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   float in_d[3] = {1, 2, 3}, out[3] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[3] = {0, 1, 2};
-  for (int i = 0; i < 3; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pad_value_2d) {
@@ -1026,20 +1106,19 @@ TEST(pe, pad_value_2d) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 16);
-  float in_d[4] = {1,2,3,4}, out[16] = {0};
+  float in_d[4] = {1, 2, 3, 4}, out[16] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[16] = {
-    -1,-1,-1,-1,
-     1, 2,-1,-1,
-     3, 4,-1,-1,
-    -1,-1,-1,-1,
+      -1, -1, -1, -1, 1, 2, -1, -1, 3, 4, -1, -1, -1, -1, -1, -1,
   };
-  for (int i = 0; i < 16; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 16; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1058,13 +1137,15 @@ TEST(pe, pad_circular_1d) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 6);
   float in_d[3] = {1, 2, 3}, out[6] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[6] = {3, 1, 2, 3, 1, 2};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pad_circular_2d) {
@@ -1079,15 +1160,17 @@ TEST(pe, pad_circular_2d) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 9);
-  float in_d[4] = {1,2,3,4}, out[9] = {0};
+  float in_d[4] = {1, 2, 3, 4}, out[9] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[9] = {3,4,3, 1,2,1, 3,4,3};
-  for (int i = 0; i < 9; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  float expected[9] = {3, 4, 3, 1, 2, 1, 3, 4, 3};
+  for (int i = 0; i < 9; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1106,13 +1189,15 @@ TEST(pe, pad_reflect_1d_left_heavy) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 7);
   float in_d[4] = {1, 2, 3, 4}, out[7] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[7] = {3, 2, 1, 2, 3, 4, 3};
-  for (int i = 0; i < 7; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 7; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pad_reflect_1d_right_heavy) {
@@ -1127,13 +1212,15 @@ TEST(pe, pad_reflect_1d_right_heavy) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 7);
   float in_d[4] = {1, 2, 3, 4}, out[7] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[7] = {2, 1, 2, 3, 4, 3, 2};
-  for (int i = 0; i < 7; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 7; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1152,13 +1239,15 @@ TEST(pe, pad_replicate_1d_left_heavy) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 7);
   float in_d[4] = {1, 2, 3, 4}, out[7] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[7] = {1, 1, 1, 2, 3, 4, 4};
-  for (int i = 0; i < 7; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 7; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, pad_replicate_1d_right_heavy) {
@@ -1173,13 +1262,15 @@ TEST(pe, pad_replicate_1d_right_heavy) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 7);
   float in_d[4] = {1, 2, 3, 4}, out[7] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[7] = {1, 1, 2, 3, 4, 4, 4};
-  for (int i = 0; i < 7; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 7; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1197,13 +1288,15 @@ TEST(pe, cumalu_max_1d) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
   float in_d[5] = {1, 3, 2, 5, 4}, out[5] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[5] = {1, 3, 3, 5, 5};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_max_1d_decreasing) {
@@ -1217,13 +1310,15 @@ TEST(pe, cumalu_max_1d_decreasing) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
   float in_d[5] = {5, 3, 4, 1, 2}, out[5] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[5] = {5, 5, 5, 5, 5};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_max_negative) {
@@ -1239,13 +1334,15 @@ TEST(pe, cumalu_max_negative) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   float in_d[3] = {-3, -1, -2}, out[3] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[3] = {-3, -1, -1};
-  for (int i = 0; i < 3; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_max_include_initial) {
@@ -1259,14 +1356,15 @@ TEST(pe, cumalu_max_include_initial) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   float in_d[3] = {1, 3, 2}, out[3] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  ASSERT_FLOAT_INF(out[0], -1);  /* -inf */
+  ASSERT_FLOAT_INF(out[0], -1); /* -inf */
   ASSERT_FLOAT_EQ(out[1], 1.0f, 1e-5);
   ASSERT_FLOAT_EQ(out[2], 3.0f, 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_mul_1d) {
@@ -1280,13 +1378,15 @@ TEST(pe, cumalu_mul_1d) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
   float in_d[4] = {1, 2, 3, 4}, out[4] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[4] = {1, 2, 6, 24};
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_mul_1d_const) {
@@ -1302,13 +1402,15 @@ TEST(pe, cumalu_mul_1d_const) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   float in_d[3] = {2, 2, 2}, out[3] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[3] = {2, 4, 8};
-  for (int i = 0; i < 3; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, cumalu_mul_include_initial) {
@@ -1322,13 +1424,15 @@ TEST(pe, cumalu_mul_include_initial) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 3);
   float in_d[3] = {2, 3, 4}, out[3] = {0};
   PolyUOp *leaves[] = {in};
-  float *ld[]       = {in_d};
+  float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
   float expected[3] = {1, 2, 6};
-  for (int i = 0; i < 3; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1351,9 +1455,11 @@ TEST(pe, full_pure_uop_1d) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 5);
   float out[5] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], 7.5f, 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], 7.5f, 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, full_pure_uop_2d) {
@@ -1365,17 +1471,20 @@ TEST(pe, full_pure_uop_2d) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
   float out[12] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], -2.0f, 1e-5);
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], -2.0f, 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, full_pure_uop_zero_size) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[1] = {0};
   PolyUOp *out_val = poly_full(ctx, shape, 1, 1.0);
-  ASSERT_NOT_NULL(out_val);  /* should return an empty buffer, not NULL */
-  poly_ctx_destroy(ctx); PASS();
+  ASSERT_NOT_NULL(out_val); /* should return an empty buffer, not NULL */
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, arange_pure_uop_simple) {
@@ -1388,9 +1497,11 @@ TEST(pe, arange_pure_uop_simple) {
   float out[5] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[5] = {0, 1, 2, 3, 4};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, arange_pure_uop_start_step) {
@@ -1403,9 +1514,11 @@ TEST(pe, arange_pure_uop_start_step) {
   float out[2] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[2] = {2, 5};
-  for (int i = 0; i < 2; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 2; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, arange_pure_uop_float_step) {
@@ -1418,9 +1531,11 @@ TEST(pe, arange_pure_uop_float_step) {
   float out[5] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[5] = {1.5f, 2.0f, 2.5f, 3.0f, 3.5f};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, linspace_pure_uop_basic) {
@@ -1433,8 +1548,10 @@ TEST(pe, linspace_pure_uop_basic) {
   float out[5] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[5] = {0.0f, 2.5f, 5.0f, 7.5f, 10.0f};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, linspace_pure_uop_negative_range) {
@@ -1447,8 +1564,10 @@ TEST(pe, linspace_pure_uop_negative_range) {
   float out[5] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[5] = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, linspace_pure_uop_single_step) {
@@ -1461,7 +1580,8 @@ TEST(pe, linspace_pure_uop_single_step) {
   float out[1] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   ASSERT_FLOAT_EQ(out[0], 0.0f, 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, arange_pure_uop_negative_step) {
@@ -1474,9 +1594,11 @@ TEST(pe, arange_pure_uop_negative_step) {
   float out[5] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[5] = {5, 4, 3, 2, 1};
-  for (int i = 0; i < 5; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1492,9 +1614,11 @@ TEST(pe, eye_pure_uop_3) {
   PolyUOp *out_buf = poly_buffer_f32(ctx, 9);
   float out[9] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
-  float expected[9] = {1,0,0, 0,1,0, 0,0,1};
-  for (int i = 0; i < 9; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  for (int i = 0; i < 9; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, eye_pure_uop_4) {
@@ -1506,10 +1630,12 @@ TEST(pe, eye_pure_uop_4) {
   float out[16] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, NULL, NULL, 0), 0);
   float expected[16] = {
-    1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1,
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
   };
-  for (int i = 0; i < 16; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  for (int i = 0; i < 16; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, tril_pure_uop_diag0) {
@@ -1522,15 +1648,17 @@ TEST(pe, tril_pure_uop_diag0) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_d[12] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
   float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[12] = {1,0,0,0, 5,6,0,0, 9,10,11,0};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[12] = {1, 0, 0, 0, 5, 6, 0, 0, 9, 10, 11, 0};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, tril_pure_uop_diag_pos1) {
@@ -1542,15 +1670,17 @@ TEST(pe, tril_pure_uop_diag_pos1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_d[12] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
   float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[12] = {1,2,0,0, 5,6,7,0, 9,10,11,12};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[12] = {1, 2, 0, 0, 5, 6, 7, 0, 9, 10, 11, 12};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, tril_pure_uop_diag_neg1) {
@@ -1562,15 +1692,17 @@ TEST(pe, tril_pure_uop_diag_neg1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_d[12] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
   float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[12] = {0,0,0,0, 5,0,0,0, 9,10,0,0};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[12] = {0, 0, 0, 0, 5, 0, 0, 0, 9, 10, 0, 0};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, triu_pure_uop_diag0) {
@@ -1582,15 +1714,17 @@ TEST(pe, triu_pure_uop_diag0) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_d[12] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
   float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[12] = {1,2,3,4, 0,6,7,8, 0,0,11,12};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[12] = {1, 2, 3, 4, 0, 6, 7, 8, 0, 0, 11, 12};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, triu_pure_uop_diag_pos1) {
@@ -1602,15 +1736,17 @@ TEST(pe, triu_pure_uop_diag_pos1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_d[12] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
   float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[12] = {0,2,3,4, 0,0,7,8, 0,0,0,12};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[12] = {0, 2, 3, 4, 0, 0, 7, 8, 0, 0, 0, 12};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(pe, triu_pure_uop_diag_neg1) {
@@ -1622,15 +1758,17 @@ TEST(pe, triu_pure_uop_diag_neg1) {
   ASSERT_NOT_NULL(out_val);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 12);
-  float in_d[12] = {1,2,3,4, 5,6,7,8, 9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out[12] = {0};
   PolyUOp *leaves[] = {base_buf(in)};
   float *ld[] = {in_d};
   ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out, leaves, ld, 1), 0);
 
-  float expected[12] = {1,2,3,4, 5,6,7,8, 0,10,11,12};
-  for (int i = 0; i < 12; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  float expected[12] = {1, 2, 3, 4, 5, 6, 7, 8, 0, 10, 11, 12};
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -1669,17 +1807,19 @@ TEST(pe, arange_range_collapse_structural) {
    */
   PolyCtx *ctx = poly_ctx_new();
 
-  const struct { double start, stop, step; } cases[] = {
-    {0.0, 5.0, 1.0},  /* trivial out[i] = i */
-    {2.0, 8.0, 3.0},  /* non-trivial start+step */
+  const struct {
+    double start, stop, step;
+  } cases[] = {
+      {0.0, 5.0, 1.0}, /* trivial out[i] = i */
+      {2.0, 8.0, 3.0}, /* non-trivial start+step */
   };
 
-  for (size_t k = 0; k < sizeof(cases)/sizeof(cases[0]); k++) {
+  for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
     PolyUOp *ar = poly_arange(ctx, cases[k].start, cases[k].stop, cases[k].step);
     ASSERT_NOT_NULL(ar);
     int64_t n = (int64_t)((cases[k].stop - cases[k].start) / cases[k].step);
     if (n <= 0) n = 1;
-    PolyUOp *out  = poly_buffer_f32(ctx, n);
+    PolyUOp *out = poly_buffer_f32(ctx, n);
     PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, ar));
     ASSERT_NOT_NULL(sink);
 
@@ -1694,20 +1834,32 @@ TEST(pe, arange_range_collapse_structural) {
     int n_range = 0, n_load = 0, n_reduce = 0, n_store = 0;
     for (int i = 0; i < n_lin; i++) {
       switch (lin[i]->op) {
-        case POLY_OP_RANGE:        n_range++;  break;
-        case POLY_OP_LOAD:         n_load++;   break;
-        case POLY_OP_REDUCE:       n_reduce++; break;
-        case POLY_OP_REDUCE_AXIS:  n_reduce++; break;
-        case POLY_OP_STORE:        n_store++;  break;
-        default: break;
+      case POLY_OP_RANGE:
+        n_range++;
+        break;
+      case POLY_OP_LOAD:
+        n_load++;
+        break;
+      case POLY_OP_REDUCE:
+        n_reduce++;
+        break;
+      case POLY_OP_REDUCE_AXIS:
+        n_reduce++;
+        break;
+      case POLY_OP_STORE:
+        n_store++;
+        break;
+      default:
+        break;
       }
     }
 
-    ASSERT_INT_EQ(n_range,  1);
-    ASSERT_INT_EQ(n_load,   0);
+    ASSERT_INT_EQ(n_range, 1);
+    ASSERT_INT_EQ(n_load, 0);
     ASSERT_INT_EQ(n_reduce, 0);
-    ASSERT_INT_EQ(n_store,  1);
+    ASSERT_INT_EQ(n_store, 1);
   }
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }

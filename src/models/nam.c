@@ -26,7 +26,7 @@
 #include <stdio.h>
 #include <math.h>
 
-/* ── Activation types ──────────────────────────────────────────────── */
+/* Activation types */
 
 typedef enum { NAM_ACT_RELU, NAM_ACT_GELU, NAM_ACT_SILU, NAM_ACT_EXU } NamActivation;
 
@@ -38,7 +38,7 @@ static NamActivation nam_parse_activation(const char *s) {
   return NAM_ACT_EXU;
 }
 
-/* ── NAM Builder ───────────────────────────────────────────────────── */
+/* NAM Builder */
 
 PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
   if (!spec_json || spec_len <= 0) return NULL;
@@ -100,7 +100,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
   subnet_sizes[n_layers - 1] = n_outputs;
   int n_linear = n_layers - 1;  /* number of linear transformations */
 
-  /* ── Build graph using named buffer registry ──────────────────────── */
+  /* Build graph using named buffer registry */
 
   PolyCtx *ctx = poly_ctx_new();
 
@@ -209,7 +209,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
   PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
   poly_register_entrypoint(ctx, "forward", fwd_sink);
 
-  /* ── Loss graph ───────────────────────────────────────────────────── */
+  /* Loss graph */
 
   int has_loss = (loss_type && (strcmp(loss_type, "mse") == 0 ||
                                 strcmp(loss_type, "cross_entropy") == 0));
@@ -249,7 +249,7 @@ PolyInstance *poly_nam_instance(const char *spec_json, int spec_len) {
     poly_register_entrypoint(ctx, "loss", loss_sink);
   }
 
-  /* ── Create instance from ctx registry ────────────────────────────── */
+  /* Create instance from ctx registry */
 
   PolyInstance *inst = poly_instance_from_ctx(ctx);
 

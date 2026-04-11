@@ -32,29 +32,44 @@ extern "C" {
  *
  * Returns true on success, false on error.
  */
-bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
-                            PolyShape in_shape, PolyArg arg,
-                            PolyUOp **out_rngs, int n_out,
-                            PolyUOp **in_rngs, int *n_in_out,
-                            PolyUOp **valid_out);
+bool poly_apply_movement_op(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyShape in_shape,
+    PolyArg arg,
+    PolyUOp **out_rngs,
+    int n_out,
+    PolyUOp **in_rngs,
+    int *n_in_out,
+    PolyUOp **valid_out
+);
 
 /* Compute flat index from multi-dimensional ranges and shape strides.
  * Returns a UOp expression: ranges[0]*stride[0] + ranges[1]*stride[1] + ... */
-PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim,
-                                PolyShape shape);
+PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape);
 
 /* Compute reshape index transform: given output ranges for out_shape,
  * compute input ranges for in_shape via flatten + decompose. */
-void poly_reshape_indices(PolyCtx *ctx,
-                          PolyUOp **out_ranges, int out_ndim, PolyShape out_shape,
-                          PolyUOp **in_ranges, int in_ndim, PolyShape in_shape);
+void poly_reshape_indices(
+    PolyCtx *ctx,
+    PolyUOp **out_ranges,
+    int out_ndim,
+    PolyShape out_shape,
+    PolyUOp **in_ranges,
+    int in_ndim,
+    PolyShape in_shape
+);
 
 /* Compute flat index from multi-dimensional ranges and UOp bounds.
  * Like poly_compute_flat_index, but bounds are UOp* (can be CONST or DEFINE_VAR).
  * When all bounds are CONST, produces the same result as poly_compute_flat_index.
  * When bounds include DEFINE_VAR, strides are UOp MUL chains. */
-PolyUOp *poly_compute_flat_index_symbolic(PolyCtx *ctx, PolyUOp **ranges,
-                                           PolyUOp **bounds, int ndim);
+PolyUOp *poly_compute_flat_index_symbolic(
+    PolyCtx *ctx,
+    PolyUOp **ranges,
+    PolyUOp **bounds,
+    int ndim
+);
 
 #ifdef __cplusplus
 }

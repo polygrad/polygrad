@@ -12,26 +12,33 @@
 
 #define LN2_F 0.69314718055994530942f
 
-#define RUN_GRAD_EXPR(ctx, out_buf, expr, fn_name, args, n_args) do { \
-  PolyUOp *__store = poly_uop2((ctx), POLY_OP_STORE, POLY_VOID, (out_buf), (expr), poly_arg_none()); \
-  PolyUOp *__sink = poly_uop((ctx), POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){__store}, 1, poly_arg_none()); \
-  PolyUOp *__kernel = poly_schedule((ctx), __sink); \
-  ASSERT_NOT_NULL(__kernel); \
-  int __n_lin = 0; \
-  PolyUOp **__lin = poly_linearize((ctx), __kernel, &__n_lin); \
-  ASSERT_TRUE(__n_lin > 0); \
-  char *__src = poly_render_c(__lin, __n_lin, (fn_name)); \
-  ASSERT_NOT_NULL(__src); \
-  PolyProgram *__prog = poly_compile_c(__src, (fn_name)); \
-  ASSERT_NOT_NULL(__prog); \
-  poly_program_call(__prog, (args), (n_args)); \
-  poly_program_destroy(__prog); \
-  free(__src); \
-  free(__lin); \
-} while (0)
+#define RUN_GRAD_EXPR(ctx, out_buf, expr, fn_name, args, n_args)                                   \
+  do {                                                                                             \
+    PolyUOp *__store =                                                                             \
+        poly_uop2((ctx), POLY_OP_STORE, POLY_VOID, (out_buf), (expr), poly_arg_none());            \
+    PolyUOp *__sink =                                                                              \
+        poly_uop((ctx), POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){__store}, 1, poly_arg_none());      \
+    PolyUOp *__kernel = poly_schedule((ctx), __sink);                                              \
+    ASSERT_NOT_NULL(__kernel);                                                                     \
+    int __n_lin = 0;                                                                               \
+    PolyUOp **__lin = poly_linearize((ctx), __kernel, &__n_lin);                                   \
+    ASSERT_TRUE(__n_lin > 0);                                                                      \
+    char *__src = poly_render_c(__lin, __n_lin, (fn_name));                                        \
+    ASSERT_NOT_NULL(__src);                                                                        \
+    PolyProgram *__prog = poly_compile_c(__src, (fn_name));                                        \
+    ASSERT_NOT_NULL(__prog);                                                                       \
+    poly_program_call(__prog, (args), (n_args));                                                   \
+    poly_program_destroy(__prog);                                                                  \
+    free(__src);                                                                                   \
+    free(__lin);                                                                                   \
+  } while (0)
 
-static int compile_expr_program(PolyCtx *ctx, PolyUOp *expr, const char *fn_name,
-                                PolyProgram **prog_out) {
+static int compile_expr_program(
+    PolyCtx *ctx,
+    PolyUOp *expr,
+    const char *fn_name,
+    PolyProgram **prog_out
+) {
   PolyUOp *out = poly_buffer(ctx, poly_dtype_scalar(expr->dtype), 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, expr, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -58,13 +65,21 @@ static int compile_expr_program(PolyCtx *ctx, PolyUOp *expr, const char *fn_name
 
 /* Central finite-difference check for one target input buffer.
  * Uses a single compiled loss program and replays it with +/- h perturbations. */
-static int finite_diff_check(PolyCtx *ctx, PolyUOp *loss,
-                              float **inputs, int n_inputs,
-                              int target_input, int n,
-                              const float *ad_grad,
-                              float h, float tol,
-                              const char *fn_name,
-                              int *bad_i, float *bad_num, float *bad_ad) {
+static int finite_diff_check(
+    PolyCtx *ctx,
+    PolyUOp *loss,
+    float **inputs,
+    int n_inputs,
+    int target_input,
+    int n,
+    const float *ad_grad,
+    float h,
+    float tol,
+    const char *fn_name,
+    int *bad_i,
+    float *bad_num,
+    float *bad_ad
+) {
   *bad_i = -1;
   *bad_num = 0.0f;
   *bad_ad = 0.0f;
@@ -79,7 +94,8 @@ static int finite_diff_check(PolyCtx *ctx, PolyUOp *loss,
     return 0;
   }
   args[0] = &out;
-  for (int i = 0; i < n_inputs; i++) args[i + 1] = inputs[i];
+  for (int i = 0; i < n_inputs; i++)
+    args[i + 1] = inputs[i];
 
   float *target = inputs[target_input];
   for (int i = 0; i < n; i++) {
@@ -127,16 +143,18 @@ TEST(autograd, mul_reduce_sum_1d_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_mul_sum", args, 2);
 
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(gx_d[i], 2.0f * x_d[i], 1e-5);
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_mul_sum", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_mul_sum", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -161,10 +179,11 @@ TEST(autograd, fdiv_const_reduce_sum_1d_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_fdiv_const", args, 2);
 
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gx_d[i], 0.5f, 1e-5);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], 0.5f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -185,7 +204,7 @@ TEST(autograd, expand_reduce_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_expand", args, 2);
 
   ASSERT_FLOAT_EQ(gx_d[0], 5.0f, 1e-5);
@@ -213,10 +232,11 @@ TEST(autograd, permute_reduce_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 6);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_permute", args, 2);
 
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -239,11 +259,12 @@ TEST(autograd, shrink_reduce_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 6);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_shrink", args, 2);
 
   float expected[6] = {0, 1, 1, 1, 1, 0};
-  for (int i = 0; i < 6; i++) ASSERT_FLOAT_EQ(gx_d[i], expected[i], 1e-5);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], expected[i], 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -263,10 +284,11 @@ TEST(autograd, pad_reduce_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_pad", args, 2);
 
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -290,10 +312,11 @@ TEST(autograd, no_path_zero_e2e) {
   ASSERT_NOT_NULL(gb);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[3] = { gb_d, a_d, b_d };
+  void *args[3] = {gb_d, a_d, b_d};
   RUN_GRAD_EXPR(ctx, out, gb, "ad_zero", args, 3);
 
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gb_d[i], 0.0f, 1e-5);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(gb_d[i], 0.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -316,15 +339,18 @@ TEST(autograd, neg_reduce_sum_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_neg", args, 2);
 
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gx_d[i], -1.0f, 1e-5);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], -1.0f, 1e-5);
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_neg", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_neg", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -354,8 +380,8 @@ TEST(autograd, add_reduce_sum_e2e) {
 
   PolyUOp *outx = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *outy = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args_x[3] = { gx_d, x_d, y_d };
-  void *args_y[3] = { gy_d, x_d, y_d };
+  void *args_x[3] = {gx_d, x_d, y_d};
+  void *args_y[3] = {gy_d, x_d, y_d};
   RUN_GRAD_EXPR(ctx, outx, gx, "ad_add_x", args_x, 3);
   RUN_GRAD_EXPR(ctx, outy, gy, "ad_add_y", args_y, 3);
 
@@ -364,13 +390,16 @@ TEST(autograd, add_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gy_d[i], 1.0f, 1e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d, y_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_add_x", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d, y_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 2, 0, N, gx_d, 1e-3f, 2e-3f, "fd_add_x", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 1, N, gy_d,
-              1e-3f, 2e-3f, "fd_add_y", &bad_i, &bad_num, &bad_ad));
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 2, 1, N, gy_d, 1e-3f, 2e-3f, "fd_add_y", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -400,8 +429,8 @@ TEST(autograd, sub_reduce_sum_e2e) {
 
   PolyUOp *outx = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *outy = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args_x[3] = { gx_d, x_d, y_d };
-  void *args_y[3] = { gy_d, x_d, y_d };
+  void *args_x[3] = {gx_d, x_d, y_d};
+  void *args_y[3] = {gy_d, x_d, y_d};
   RUN_GRAD_EXPR(ctx, outx, gx, "ad_sub_x", args_x, 3);
   RUN_GRAD_EXPR(ctx, outy, gy, "ad_sub_y", args_y, 3);
 
@@ -410,13 +439,16 @@ TEST(autograd, sub_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gy_d[i], -1.0f, 1e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d, y_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_sub_x", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d, y_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 2, 0, N, gx_d, 1e-3f, 2e-3f, "fd_sub_x", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 1, N, gy_d,
-              1e-3f, 2e-3f, "fd_sub_y", &bad_i, &bad_num, &bad_ad));
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 2, 1, N, gy_d, 1e-3f, 2e-3f, "fd_sub_y", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -437,7 +469,7 @@ TEST(autograd, exp2_reduce_sum_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_exp2", args, 2);
 
   for (int i = 0; i < N; i++) {
@@ -445,10 +477,12 @@ TEST(autograd, exp2_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 2e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_exp2", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_exp2", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -469,7 +503,7 @@ TEST(autograd, log2_reduce_sum_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_log2", args, 2);
 
   for (int i = 0; i < N; i++) {
@@ -477,10 +511,12 @@ TEST(autograd, log2_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 5e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_log2", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_log2", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -501,7 +537,7 @@ TEST(autograd, sqrt_reduce_sum_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_sqrt", args, 2);
 
   for (int i = 0; i < N; i++) {
@@ -509,10 +545,12 @@ TEST(autograd, sqrt_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 5e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_sqrt", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_sqrt", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -533,7 +571,7 @@ TEST(autograd, recip_reduce_sum_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_recip", args, 2);
 
   for (int i = 0; i < N; i++) {
@@ -541,10 +579,12 @@ TEST(autograd, recip_reduce_sum_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 2e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_recip", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_recip", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -567,7 +607,7 @@ TEST(autograd, where_reduce_sum_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_where", args, 2);
 
   for (int i = 0; i < N; i++) {
@@ -597,10 +637,11 @@ TEST(autograd, reshape_reduce_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_reshape", args, 2);
 
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -624,10 +665,11 @@ TEST(autograd, flip_reduce_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_flip", args, 2);
 
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], 1.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -648,7 +690,7 @@ TEST(autograd, chain_mul_exp2_e2e) {
   ASSERT_NOT_NULL(gx);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args[2] = { gx_d, x_d };
+  void *args[2] = {gx_d, x_d};
   RUN_GRAD_EXPR(ctx, out, gx, "ad_chain_mul_exp2", args, 2);
 
   for (int i = 0; i < N; i++) {
@@ -656,10 +698,12 @@ TEST(autograd, chain_mul_exp2_e2e) {
     ASSERT_FLOAT_EQ(gx_d[i], expected, 2e-4);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 1, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_chain_mul_exp2", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 1, 0, N, gx_d, 1e-3f, 2e-3f, "fd_chain_mul_exp2", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -691,12 +735,13 @@ TEST(autograd, max_reduce_backward_e2e) {
   PolyUOp *store = poly_store_val(ctx, out, gx);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d) };
+  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   float expected[6] = {0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(gx_d[i], expected[i], 1e-5);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(gx_d[i], expected[i], 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -721,8 +766,8 @@ TEST(autograd, fdiv_both_e2e) {
 
   PolyUOp *outx = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *outy = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args_x[2] = { gx_d, y_d };
-  void *args_y[3] = { gy_d, x_d, y_d };
+  void *args_x[2] = {gx_d, y_d};
+  void *args_y[3] = {gy_d, x_d, y_d};
   RUN_GRAD_EXPR(ctx, outx, gx, "ad_fdiv_both_x", args_x, 2);
   RUN_GRAD_EXPR(ctx, outy, gy, "ad_fdiv_both_y", args_y, 3);
 
@@ -733,13 +778,16 @@ TEST(autograd, fdiv_both_e2e) {
     ASSERT_FLOAT_EQ(gy_d[i], ey, 1e-5);
   }
 
-  int bad_i; float bad_num, bad_ad;
-  float *inputs[] = { x_d, y_d };
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 0, N, gx_d,
-              1e-3f, 2e-3f, "fd_fdiv_x", &bad_i, &bad_num, &bad_ad));
+  int bad_i;
+  float bad_num, bad_ad;
+  float *inputs[] = {x_d, y_d};
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 2, 0, N, gx_d, 1e-3f, 2e-3f, "fd_fdiv_x", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
-  ASSERT_TRUE(finite_diff_check(ctx, loss, inputs, 2, 1, N, gy_d,
-              1e-3f, 2e-3f, "fd_fdiv_y", &bad_i, &bad_num, &bad_ad));
+  ASSERT_TRUE(finite_diff_check(
+      ctx, loss, inputs, 2, 1, N, gy_d, 1e-3f, 2e-3f, "fd_fdiv_y", &bad_i, &bad_num, &bad_ad
+  ));
   ASSERT_INT_EQ(bad_i, -1);
 
   poly_ctx_destroy(ctx);
@@ -773,8 +821,8 @@ TEST(autograd, multi_wrt_same_loss_e2e) {
 
   PolyUOp *outx = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *outy = poly_buffer(ctx, POLY_FLOAT32, N);
-  void *args_x[3] = { gx_d, x_d, y_d };
-  void *args_y[3] = { gy_d, x_d, y_d };
+  void *args_x[3] = {gx_d, x_d, y_d};
+  void *args_y[3] = {gy_d, x_d, y_d};
   RUN_GRAD_EXPR(ctx, outx, gx, "ad_multi_x", args_x, 3);
   RUN_GRAD_EXPR(ctx, outy, gy, "ad_multi_y", args_y, 3);
 

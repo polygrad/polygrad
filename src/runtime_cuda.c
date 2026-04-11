@@ -15,7 +15,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 
-/* ── CUDA driver API types ───────────────────────────────────────────── */
+/* CUDA driver API types */
 
 typedef int CUresult;
 typedef int CUdevice;
@@ -31,21 +31,21 @@ typedef unsigned long long CUdeviceptr;
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR 75
 #define CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR 76
 
-/* ── NVRTC types ─────────────────────────────────────────────────────── */
+/* NVRTC types */
 
 typedef int nvrtcResult;
 typedef void *nvrtcProgram;
 
 #define NVRTC_SUCCESS 0
 
-/* ── PolyCudaProgram struct (forward-declared in codegen.h) ───────────── */
+/* PolyCudaProgram struct (forward-declared in codegen.h) */
 
 struct PolyCudaProgram {
-  void *module;    /* CUmodule */
-  void *function;  /* CUfunction */
+  void *module; /* CUmodule */
+  void *function; /* CUfunction */
 };
 
-/* ── Function pointer typedefs ───────────────────────────────────────── */
+/* Function pointer typedefs */
 
 /* CUDA driver */
 typedef CUresult (*cuInit_fn)(unsigned int);
@@ -58,16 +58,13 @@ typedef CUresult (*cuMemcpyHtoD_v2_fn)(CUdeviceptr, const void *, size_t);
 typedef CUresult (*cuMemcpyDtoH_v2_fn)(void *, CUdeviceptr, size_t);
 typedef CUresult (*cuModuleLoadData_fn)(CUmodule *, const void *);
 typedef CUresult (*cuModuleGetFunction_fn)(CUfunction *, CUmodule, const char *);
-typedef CUresult (*cuLaunchKernel_fn)(CUfunction, unsigned int, unsigned int, unsigned int,
-                                       unsigned int, unsigned int, unsigned int,
-                                       unsigned int, void *, void **, void **);
+typedef CUresult (*cuLaunchKernel_fn)(CUfunction, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, void *, void **, void **);
 typedef CUresult (*cuCtxSynchronize_fn)(void);
 typedef CUresult (*cuMemsetD8_v2_fn)(CUdeviceptr, unsigned char, size_t);
 typedef CUresult (*cuModuleUnload_fn)(CUmodule);
 
 /* NVRTC */
-typedef nvrtcResult (*nvrtcCreateProgram_fn)(nvrtcProgram *, const char *, const char *,
-                                              int, const char *const *, const char *const *);
+typedef nvrtcResult (*nvrtcCreateProgram_fn)(nvrtcProgram *, const char *, const char *, int, const char *const *, const char *const *);
 typedef nvrtcResult (*nvrtcCompileProgram_fn)(nvrtcProgram, int, const char *const *);
 typedef nvrtcResult (*nvrtcGetProgramLogSize_fn)(nvrtcProgram, size_t *);
 typedef nvrtcResult (*nvrtcGetProgramLog_fn)(nvrtcProgram, char *);
@@ -75,7 +72,7 @@ typedef nvrtcResult (*nvrtcGetPTXSize_fn)(nvrtcProgram, size_t *);
 typedef nvrtcResult (*nvrtcGetPTX_fn)(nvrtcProgram, char *);
 typedef nvrtcResult (*nvrtcDestroyProgram_fn)(nvrtcProgram *);
 
-/* ── Loaded symbols ──────────────────────────────────────────────────── */
+/* Loaded symbols */
 
 static struct {
   void *libcuda;
@@ -107,14 +104,14 @@ static struct {
   nvrtcDestroyProgram_fn nvrtcDestroyProgram;
 } cuda_api = {0};
 
-/* ── Lazy singleton state ────────────────────────────────────────────── */
+/* Lazy singleton state */
 
 static enum { CUDA_NOT_TRIED, CUDA_INIT_OK, CUDA_INIT_FAIL } cuda_state = CUDA_NOT_TRIED;
 static CUcontext cuda_ctx = NULL;
 static int cuda_arch_major = 0;
 static int cuda_arch_minor = 0;
 
-/* ── dlsym helper ────────────────────────────────────────────────────── */
+/* dlsym helper */
 
 static void *load_sym(void *lib, const char *name) {
   void *sym = dlsym(lib, name);
@@ -124,21 +121,19 @@ static void *load_sym(void *lib, const char *name) {
   return sym;
 }
 
-/* ── Load libraries + resolve all symbols ────────────────────────────── */
+/* Load libraries + resolve all symbols */
 
 static bool load_cuda_libs(void) {
   /* Try common library names */
   cuda_api.libcuda = dlopen("libcuda.so.1", RTLD_LAZY);
-  if (!cuda_api.libcuda)
-    cuda_api.libcuda = dlopen("libcuda.so", RTLD_LAZY);
+  if (!cuda_api.libcuda) cuda_api.libcuda = dlopen("libcuda.so", RTLD_LAZY);
   if (!cuda_api.libcuda) {
     fprintf(stderr, "polygrad: cuda: cannot load libcuda.so: %s\n", dlerror());
     return false;
   }
 
   cuda_api.libnvrtc = dlopen("libnvrtc.so.12", RTLD_LAZY);
-  if (!cuda_api.libnvrtc)
-    cuda_api.libnvrtc = dlopen("libnvrtc.so", RTLD_LAZY);
+  if (!cuda_api.libnvrtc) cuda_api.libnvrtc = dlopen("libnvrtc.so", RTLD_LAZY);
   if (!cuda_api.libnvrtc) {
     fprintf(stderr, "polygrad: cuda: cannot load libnvrtc.so: %s\n", dlerror());
     dlclose(cuda_api.libcuda);
@@ -147,9 +142,10 @@ static bool load_cuda_libs(void) {
   }
 
   /* Resolve CUDA driver symbols */
-#define LOAD_CUDA(name) do { \
-    *(void **)&cuda_api.name = load_sym(cuda_api.libcuda, #name); \
-    if (!cuda_api.name) return false; \
+#define LOAD_CUDA(name)                                                                            \
+  do {                                                                                             \
+    *(void **)&cuda_api.name = load_sym(cuda_api.libcuda, #name);                                  \
+    if (!cuda_api.name) return false;                                                              \
   } while (0)
 
   LOAD_CUDA(cuInit);
@@ -170,9 +166,10 @@ static bool load_cuda_libs(void) {
 #undef LOAD_CUDA
 
   /* Resolve NVRTC symbols */
-#define LOAD_NVRTC(name) do { \
-    *(void **)&cuda_api.name = load_sym(cuda_api.libnvrtc, #name); \
-    if (!cuda_api.name) return false; \
+#define LOAD_NVRTC(name)                                                                           \
+  do {                                                                                             \
+    *(void **)&cuda_api.name = load_sym(cuda_api.libnvrtc, #name);                                 \
+    if (!cuda_api.name) return false;                                                              \
   } while (0)
 
   LOAD_NVRTC(nvrtcCreateProgram);
@@ -188,7 +185,7 @@ static bool load_cuda_libs(void) {
   return true;
 }
 
-/* ── Public API ──────────────────────────────────────────────────────── */
+/* Public API */
 
 int poly_cuda_init(void) {
   if (cuda_state == CUDA_INIT_OK) return 0;
@@ -215,14 +212,16 @@ int poly_cuda_init(void) {
   }
 
   /* Query compute capability via cuDeviceGetAttribute */
-  err = cuda_api.cuDeviceGetAttribute(&cuda_arch_major,
-                                       CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev);
+  err = cuda_api.cuDeviceGetAttribute(
+      &cuda_arch_major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, dev
+  );
   if (err != CUDA_SUCCESS) {
     fprintf(stderr, "polygrad: cuda: cuDeviceGetAttribute(MAJOR) failed (CUresult=%d)\n", err);
     return -1;
   }
-  err = cuda_api.cuDeviceGetAttribute(&cuda_arch_minor,
-                                       CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev);
+  err = cuda_api.cuDeviceGetAttribute(
+      &cuda_arch_minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev
+  );
   if (err != CUDA_SUCCESS) {
     fprintf(stderr, "polygrad: cuda: cuDeviceGetAttribute(MINOR) failed (CUresult=%d)\n", err);
     return -1;
@@ -247,7 +246,6 @@ int poly_cuda_arch_major(void) {
   if (cuda_state == CUDA_NOT_TRIED) poly_cuda_init();
   return cuda_arch_major;
 }
-
 
 unsigned long long poly_cuda_alloc(size_t bytes) {
   if (cuda_state != CUDA_INIT_OK) {
@@ -301,7 +299,7 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   nvrtcResult nv_err;
   CUresult cu_err;
 
-  /* ── NVRTC: source → PTX ──────────────────────────────────────────── */
+  /* NVRTC: source → PTX */
 
   nvrtcProgram prog = NULL;
   nv_err = cuda_api.nvrtcCreateProgram(&prog, source, fn_name, 0, NULL, NULL);
@@ -312,8 +310,10 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
 
   /* Build --gpu-architecture option from detected compute capability */
   char arch_opt[64];
-  snprintf(arch_opt, sizeof(arch_opt), "--gpu-architecture=compute_%d%d",
-           cuda_arch_major, cuda_arch_minor);
+  snprintf(
+      arch_opt, sizeof(arch_opt), "--gpu-architecture=compute_%d%d", cuda_arch_major,
+      cuda_arch_minor
+  );
 
   /* Include path for cuda_fp16.h / cuda_bf16.h.
    * NVRTC doesn't search system include dirs by default. */
@@ -326,7 +326,7 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   else
     snprintf(inc_opt, sizeof(inc_opt), "-I/usr/include");
 
-  const char *opts[] = { arch_opt, inc_opt };
+  const char *opts[] = {arch_opt, inc_opt};
   nv_err = cuda_api.nvrtcCompileProgram(prog, 2, opts);
   if (nv_err != NVRTC_SUCCESS) {
     /* Print compilation log */
@@ -370,7 +370,7 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
     return NULL;
   }
 
-  /* ── CUDA driver: PTX → module → function ─────────────────────────── */
+  /* CUDA driver: PTX → module → function */
 
   CUmodule module = NULL;
   cu_err = cuda_api.cuModuleLoadData(&module, ptx);
@@ -383,13 +383,14 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   CUfunction function = NULL;
   cu_err = cuda_api.cuModuleGetFunction(&function, module, fn_name);
   if (cu_err != CUDA_SUCCESS) {
-    fprintf(stderr, "polygrad: cuda: cuModuleGetFunction(%s) failed (CUresult=%d)\n",
-            fn_name, cu_err);
+    fprintf(
+        stderr, "polygrad: cuda: cuModuleGetFunction(%s) failed (CUresult=%d)\n", fn_name, cu_err
+    );
     cuda_api.cuModuleUnload(module);
     return NULL;
   }
 
-  /* ── Package result ────────────────────────────────────────────────── */
+  /* Package result */
 
   PolyCudaProgram *result = malloc(sizeof(PolyCudaProgram));
   if (!result) {
@@ -401,20 +402,28 @@ PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name) {
   return result;
 }
 
-int poly_cuda_launch(PolyCudaProgram *prog, void **args, int n_args,
-                     int gx, int gy, int gz, int bx, int by, int bz) {
+int poly_cuda_launch(
+    PolyCudaProgram *prog,
+    void **args,
+    int n_args,
+    int gx,
+    int gy,
+    int gz,
+    int bx,
+    int by,
+    int bz
+) {
   (void)n_args; /* kernel knows its own param count */
 
   if (!prog || cuda_state != CUDA_INIT_OK) return -1;
 
   CUresult err = cuda_api.cuLaunchKernel(
-    (CUfunction)prog->function,
-    (unsigned int)gx, (unsigned int)gy, (unsigned int)gz,   /* grid */
-    (unsigned int)bx, (unsigned int)by, (unsigned int)bz,   /* block */
-    0,      /* shared memory bytes */
-    NULL,   /* stream (0 = default) */
-    args,   /* kernel arguments */
-    NULL    /* extra (unused) */
+      (CUfunction)prog->function, (unsigned int)gx, (unsigned int)gy, (unsigned int)gz, /* grid */
+      (unsigned int)bx, (unsigned int)by, (unsigned int)bz, /* block */
+      0, /* shared memory bytes */
+      NULL, /* stream (0 = default) */
+      args, /* kernel arguments */
+      NULL /* extra (unused) */
   );
   if (err != CUDA_SUCCESS) {
     fprintf(stderr, "polygrad: cuda: cuLaunchKernel failed (CUresult=%d)\n", err);

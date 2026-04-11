@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* ── PolyModelConfig (cJSON wrapper) ──────────────────────────────── */
+/* PolyModelConfig (cJSON wrapper) */
 
 struct PolyModelConfig {
   cJSON *root;  /* owned */

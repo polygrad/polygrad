@@ -15,13 +15,18 @@
 #include <stdlib.h>
 #include <math.h>
 
-/* ── Safetensors multi-dtype ─────────────────────────────────────── */
+/* Safetensors multi-dtype */
 
 /* Helper: create a minimal safetensors file with given dtype string */
-static uint8_t *make_st_file(const char *name, const char *dtype_str,
-                              const void *data, int64_t nbytes,
-                              const int64_t *shape, int ndim,
-                              int64_t *out_len) {
+static uint8_t *make_st_file(
+    const char *name,
+    const char *dtype_str,
+    const void *data,
+    int64_t nbytes,
+    const int64_t *shape,
+    int ndim,
+    int64_t *out_len
+) {
   /* Build JSON header manually */
   char header[512];
   char shape_str[128] = "[";
@@ -32,16 +37,18 @@ static uint8_t *make_st_file(const char *name, const char *dtype_str,
   }
   strcat(shape_str, "]");
 
-  snprintf(header, sizeof(header),
-           "{\"%s\":{\"dtype\":\"%s\",\"shape\":%s,\"data_offsets\":[0,%lld]}}",
-           name, dtype_str, shape_str, (long long)nbytes);
+  snprintf(
+      header, sizeof(header), "{\"%s\":{\"dtype\":\"%s\",\"shape\":%s,\"data_offsets\":[0,%lld]}}",
+      name, dtype_str, shape_str, (long long)nbytes
+  );
 
   uint64_t header_size = strlen(header);
   uint64_t total = 8 + header_size + (uint64_t)nbytes;
 
   uint8_t *buf = malloc((size_t)total);
   /* Write header size LE */
-  for (int i = 0; i < 8; i++) buf[i] = (uint8_t)(header_size >> (i * 8));
+  for (int i = 0; i < 8; i++)
+    buf[i] = (uint8_t)(header_size >> (i * 8));
   memcpy(buf + 8, header, header_size);
   memcpy(buf + 8 + header_size, data, nbytes);
 
@@ -50,8 +57,8 @@ static uint8_t *make_st_file(const char *name, const char *dtype_str,
 }
 
 TEST(hf, safetensors_decode_ex_f32) {
-  float data[] = { 1.0f, 2.0f, 3.0f };
-  int64_t shape[] = { 3 };
+  float data[] = {1.0f, 2.0f, 3.0f};
+  int64_t shape[] = {3};
   int64_t file_len;
   uint8_t *file = make_st_file("w", "F32", data, sizeof(data), shape, 1, &file_len);
 
@@ -77,8 +84,8 @@ TEST(hf, safetensors_decode_ex_f32) {
 
 TEST(hf, safetensors_decode_ex_f16) {
   /* F16 encoding: 1.0 = 0x3C00, 0.5 = 0x3800, -1.0 = 0xBC00 */
-  uint16_t data[] = { 0x3C00, 0x3800, 0xBC00 };
-  int64_t shape[] = { 3 };
+  uint16_t data[] = {0x3C00, 0x3800, 0xBC00};
+  int64_t shape[] = {3};
   int64_t file_len;
   uint8_t *file = make_st_file("w", "F16", data, sizeof(data), shape, 1, &file_len);
 
@@ -104,8 +111,8 @@ TEST(hf, safetensors_decode_ex_bf16) {
   /* BF16 encoding: upper 16 bits of float32 */
   /* 1.0f = 0x3F800000 -> BF16 = 0x3F80 */
   /* -2.0f = 0xC0000000 -> BF16 = 0xC000 */
-  uint16_t data[] = { 0x3F80, 0xC000 };
-  int64_t shape[] = { 2 };
+  uint16_t data[] = {0x3F80, 0xC000};
+  int64_t shape[] = {2};
   int64_t file_len;
   uint8_t *file = make_st_file("w", "BF16", data, sizeof(data), shape, 1, &file_len);
 
@@ -127,8 +134,8 @@ TEST(hf, safetensors_decode_ex_bf16) {
 }
 
 TEST(hf, safetensors_decode_ex_i32) {
-  int32_t data[] = { 42, -7, 0, 100 };
-  int64_t shape[] = { 4 };
+  int32_t data[] = {42, -7, 0, 100};
+  int64_t shape[] = {4};
   int64_t file_len;
   uint8_t *file = make_st_file("idx", "I32", data, sizeof(data), shape, 1, &file_len);
 
@@ -153,13 +160,14 @@ TEST(hf, safetensors_decode_ex_i32) {
 
 TEST(hf, safetensors_header_padding) {
   /* Test that trailing spaces in JSON header are tolerated */
-  float data[] = { 1.0f };
+  float data[] = {1.0f};
   /* Manually build with trailing spaces */
   const char *header = "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}   ";
   uint64_t header_size = strlen(header);
   uint64_t total = 8 + header_size + 4;
   uint8_t *buf = malloc((size_t)total);
-  for (int i = 0; i < 8; i++) buf[i] = (uint8_t)(header_size >> (i * 8));
+  for (int i = 0; i < 8; i++)
+    buf[i] = (uint8_t)(header_size >> (i * 8));
   memcpy(buf + 8, header, header_size);
   memcpy(buf + 8 + header_size, data, 4);
 
@@ -178,7 +186,7 @@ TEST(hf, safetensors_header_padding) {
   PASS();
 }
 
-/* ── PolyModelConfig ─────────────────────────────────────────────── */
+/* PolyModelConfig */
 
 TEST(hf, config_parse) {
   const char *json = "{\"model_type\":\"gpt2\",\"vocab_size\":50257,"
@@ -203,17 +211,17 @@ TEST(hf, config_parse) {
   PASS();
 }
 
-/* ── GPT-2 builder ───────────────────────────────────────────────── */
+/* GPT-2 builder */
 
 TEST(hf, gpt2_build_tiny) {
   GPT2Config cfg = {
-    .vocab_size = 32,
-    .n_embd = 16,
-    .n_head = 2,
-    .n_layer = 1,
-    .max_seq_len = 8,
-    .batch_size = 1,
-    .norm_eps = 1e-5f
+      .vocab_size = 32,
+      .n_embd = 16,
+      .n_head = 2,
+      .n_layer = 1,
+      .max_seq_len = 8,
+      .batch_size = 1,
+      .norm_eps = 1e-5f
   };
 
   PolyInstance *inst = poly_gpt2(&cfg);
@@ -230,14 +238,14 @@ TEST(hf, gpt2_build_tiny) {
     if (strcmp(name, "wte.weight") == 0) {
       int ndim = poly_instance_param_shape(inst, i, shape, 8);
       ASSERT_INT_EQ(ndim, 2);
-      ASSERT_INT_EQ(shape[0], 32);  /* vocab_size */
-      ASSERT_INT_EQ(shape[1], 16);  /* n_embd */
+      ASSERT_INT_EQ(shape[0], 32); /* vocab_size */
+      ASSERT_INT_EQ(shape[1], 16); /* n_embd */
     }
   }
 
   /* Check we have the expected buffer names */
   int n_bufs = poly_instance_buf_count(inst);
-  ASSERT_TRUE(n_bufs >= 16 + 4);  /* params + x + output + positions + arange */
+  ASSERT_TRUE(n_bufs >= 16 + 4); /* params + x + output + positions + arange */
 
   int found_x = 0, found_output = 0;
   for (int i = 0; i < n_bufs; i++) {
@@ -254,13 +262,13 @@ TEST(hf, gpt2_build_tiny) {
 
 TEST(hf, gpt2_build_multi_layer) {
   GPT2Config cfg = {
-    .vocab_size = 64,
-    .n_embd = 32,
-    .n_head = 4,
-    .n_layer = 3,
-    .max_seq_len = 16,
-    .batch_size = 2,
-    .norm_eps = 1e-5f
+      .vocab_size = 64,
+      .n_embd = 32,
+      .n_head = 4,
+      .n_layer = 3,
+      .max_seq_len = 16,
+      .batch_size = 2,
+      .norm_eps = 1e-5f
   };
 
   PolyInstance *inst = poly_gpt2(&cfg);
@@ -273,8 +281,7 @@ TEST(hf, gpt2_build_multi_layer) {
   int found = 0;
   int n_params = poly_instance_param_count(inst);
   for (int i = 0; i < n_params; i++) {
-    if (strcmp(poly_instance_param_name(inst, i), "h.2.mlp.c_proj.weight") == 0)
-      found = 1;
+    if (strcmp(poly_instance_param_name(inst, i), "h.2.mlp.c_proj.weight") == 0) found = 1;
   }
   ASSERT_TRUE(found);
 
@@ -282,7 +289,7 @@ TEST(hf, gpt2_build_multi_layer) {
   PASS();
 }
 
-/* ── HF loader ───────────────────────────────────────────────────── */
+/* HF loader */
 
 TEST(hf, hf_load_tiny_gpt2) {
   const char *config = "{\"model_type\":\"gpt2\",\"vocab_size\":32,"
@@ -291,19 +298,19 @@ TEST(hf, hf_load_tiny_gpt2) {
 
   /* Create a safetensors file with a few test weights */
   float wte_data[32 * 16];
-  for (int i = 0; i < 32 * 16; i++) wte_data[i] = (float)i * 0.001f;
+  for (int i = 0; i < 32 * 16; i++)
+    wte_data[i] = (float)i * 0.001f;
 
-  int64_t wte_shape[] = { 32, 16 };
+  int64_t wte_shape[] = {32, 16};
   int64_t file_len;
-  uint8_t *file = make_st_file("transformer.wte.weight", "F32",
-                                wte_data, sizeof(wte_data), wte_shape, 2,
-                                &file_len);
+  uint8_t *file = make_st_file(
+      "transformer.wte.weight", "F32", wte_data, sizeof(wte_data), wte_shape, 2, &file_len
+  );
 
-  const uint8_t *files[] = { file };
-  int64_t lens[] = { file_len };
+  const uint8_t *files[] = {file};
+  int64_t lens[] = {file_len};
 
-  PolyInstance *inst = poly_hf_load(config, (int)strlen(config),
-                                     files, lens, 1, 1, 8);
+  PolyInstance *inst = poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8);
   ASSERT_NOT_NULL(inst);
 
   /* Verify wte.weight was loaded */
@@ -332,18 +339,17 @@ TEST(hf, hf_load_ignores_attn_bias) {
   /* Create a safetensors file with attn.bias (should be ignored) */
   float bias_data[8 * 8];
   memset(bias_data, 0, sizeof(bias_data));
-  int64_t bias_shape[] = { 1, 1, 8, 8 };
+  int64_t bias_shape[] = {1, 1, 8, 8};
   int64_t file_len;
-  uint8_t *file = make_st_file("transformer.h.0.attn.bias", "F32",
-                                bias_data, sizeof(bias_data), bias_shape, 4,
-                                &file_len);
+  uint8_t *file = make_st_file(
+      "transformer.h.0.attn.bias", "F32", bias_data, sizeof(bias_data), bias_shape, 4, &file_len
+  );
 
-  const uint8_t *files[] = { file };
-  int64_t lens[] = { file_len };
+  const uint8_t *files[] = {file};
+  int64_t lens[] = {file_len};
 
   /* Should not crash */
-  PolyInstance *inst = poly_hf_load(config, (int)strlen(config),
-                                     files, lens, 1, 1, 8);
+  PolyInstance *inst = poly_hf_load(config, (int)strlen(config), files, lens, 1, 1, 8);
   ASSERT_NOT_NULL(inst);
 
   poly_instance_free(inst);
@@ -351,25 +357,25 @@ TEST(hf, hf_load_ignores_attn_bias) {
   PASS();
 }
 
-/* ── Frontend ops ────────────────────────────────────────────────── */
+/* Frontend ops */
 
 TEST(hf, poly_gather_basic) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* table: (4, 3) weight matrix -- reshape buffer to give it a shape */
-  int64_t table_shape[] = { 4, 3 };
+  int64_t table_shape[] = {4, 3};
   PolyUOp *table = poly_reshape(ctx, poly_buffer_f32(ctx, 12), table_shape, 2);
 
   /* indices: (2,) -- reshape buffer to give it a shape */
-  int64_t idx_shape[] = { 2 };
+  int64_t idx_shape[] = {2};
   PolyUOp *indices = poly_reshape(ctx, poly_buffer_f32(ctx, 2), idx_shape, 1);
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
   PolyShape s = poly_uop_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 2);
-  ASSERT_INT_EQ(s.dims[0], 2);  /* num indices */
-  ASSERT_INT_EQ(s.dims[1], 3);  /* embedding dim */
+  ASSERT_INT_EQ(s.dims[0], 2); /* num indices */
+  ASSERT_INT_EQ(s.dims[1], 3); /* embedding dim */
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -379,20 +385,20 @@ TEST(hf, poly_gather_2d_indices) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* table: (10, 4) -- reshape buffer to give it a shape */
-  int64_t table_shape[] = { 10, 4 };
+  int64_t table_shape[] = {10, 4};
   PolyUOp *table = poly_reshape(ctx, poly_buffer_f32(ctx, 40), table_shape, 2);
 
   /* indices: (2, 3) -- batch of indices, reshape buffer to give it a shape */
-  int64_t idx_shape[] = { 2, 3 };
+  int64_t idx_shape[] = {2, 3};
   PolyUOp *indices = poly_reshape(ctx, poly_buffer_f32(ctx, 6), idx_shape, 2);
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
   PolyShape s = poly_uop_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 3);
-  ASSERT_INT_EQ(s.dims[0], 2);   /* batch */
-  ASSERT_INT_EQ(s.dims[1], 3);   /* seq_len */
-  ASSERT_INT_EQ(s.dims[2], 4);   /* embed_dim */
+  ASSERT_INT_EQ(s.dims[0], 2); /* batch */
+  ASSERT_INT_EQ(s.dims[1], 3); /* seq_len */
+  ASSERT_INT_EQ(s.dims[2], 4); /* embed_dim */
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -468,17 +474,17 @@ TEST(hf, poly_causal_mask_shape) {
   PASS();
 }
 
-/* ── GPT-2 forward pass e2e ───────────────────────────────────── */
+/* GPT-2 forward pass e2e */
 
 TEST(hf, gpt2_forward_e2e) {
   GPT2Config cfg = {
-    .vocab_size = 32,
-    .n_embd = 16,
-    .n_head = 2,
-    .n_layer = 1,
-    .max_seq_len = 8,
-    .batch_size = 1,
-    .norm_eps = 1e-5f
+      .vocab_size = 32,
+      .n_embd = 16,
+      .n_head = 2,
+      .n_layer = 1,
+      .max_seq_len = 8,
+      .batch_size = 1,
+      .norm_eps = 1e-5f
   };
 
   PolyInstance *inst = poly_gpt2(&cfg);
@@ -492,9 +498,11 @@ TEST(hf, gpt2_forward_e2e) {
     const char *name = poly_instance_param_name(inst, i);
     /* LayerNorm weights init to 1, biases to 0 */
     if (strstr(name, "ln_") && strstr(name, "weight")) {
-      for (int64_t j = 0; j < numel; j++) data[j] = 1.0f;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = 1.0f;
     } else if (strstr(name, "bias")) {
-      for (int64_t j = 0; j < numel; j++) data[j] = 0.0f;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = 0.0f;
     } else {
       for (int64_t j = 0; j < numel; j++)
         data[j] = 0.02f * ((float)(j % 100) / 100.0f - 0.5f);
@@ -509,11 +517,14 @@ TEST(hf, gpt2_forward_e2e) {
     float *data = poly_instance_buf_data(inst, i, &numel);
     if (strcmp(name, "x") == 0) {
       /* 1 batch, T=8 but only first 4 tokens matter */
-      for (int64_t j = 0; j < numel; j++) data[j] = (float)(j % 4);
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = (float)(j % 4);
     } else if (strcmp(name, "positions") == 0) {
-      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = (float)j;
     } else if (strcmp(name, "arange") == 0) {
-      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = (float)j;
     }
   }
 
@@ -547,17 +558,17 @@ TEST(hf, gpt2_forward_e2e) {
   PASS();
 }
 
-/* ── GPT-2 training: loss decreases ─────────────────────────────── */
+/* GPT-2 training: loss decreases */
 
 TEST(hf, gpt2_training_loss_decreases) {
   GPT2Config cfg = {
-    .vocab_size = 32,
-    .n_embd = 16,
-    .n_head = 2,
-    .n_layer = 1,
-    .max_seq_len = 8,
-    .batch_size = 1,
-    .norm_eps = 1e-5f
+      .vocab_size = 32,
+      .n_embd = 16,
+      .n_head = 2,
+      .n_layer = 1,
+      .max_seq_len = 8,
+      .batch_size = 1,
+      .norm_eps = 1e-5f
   };
 
   PolyInstance *inst = poly_gpt2(&cfg);
@@ -570,9 +581,11 @@ TEST(hf, gpt2_training_loss_decreases) {
     float *data = poly_instance_param_data(inst, i, &numel);
     const char *name = poly_instance_param_name(inst, i);
     if (strstr(name, "ln_") && strstr(name, "weight")) {
-      for (int64_t j = 0; j < numel; j++) data[j] = 1.0f;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = 1.0f;
     } else if (strstr(name, "bias")) {
-      for (int64_t j = 0; j < numel; j++) data[j] = 0.0f;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = 0.0f;
     } else {
       for (int64_t j = 0; j < numel; j++)
         data[j] = 0.02f * ((float)((j * 7 + 13) % 100) / 100.0f - 0.5f);
@@ -586,17 +599,19 @@ TEST(hf, gpt2_training_loss_decreases) {
     int64_t numel;
     float *data = poly_instance_buf_data(inst, i, &numel);
     if (strcmp(name, "x") == 0) {
-      for (int64_t j = 0; j < numel; j++) data[j] = (float)(j % 4);
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = (float)(j % 4);
     } else if (strcmp(name, "positions") == 0) {
-      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = (float)j;
     } else if (strcmp(name, "arange") == 0) {
-      for (int64_t j = 0; j < numel; j++) data[j] = (float)j;
+      for (int64_t j = 0; j < numel; j++)
+        data[j] = (float)j;
     }
   }
 
   /* Configure Adam optimizer */
-  int ret = poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM,
-                                         0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);
+  int ret = poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.001f, 0.9f, 0.999f, 1e-8f, 0.0f);
   ASSERT_INT_EQ(ret, 0);
 
   /* Train for 5 steps */
@@ -620,12 +635,11 @@ TEST(hf, gpt2_training_loss_decreases) {
   PASS();
 }
 
-/* ── Unsupported model type ──────────────────────────────────────── */
+/* Unsupported model type */
 
 TEST(hf, hf_load_unsupported_type) {
   const char *config = "{\"model_type\":\"llama\",\"vocab_size\":100}";
-  PolyInstance *inst = poly_hf_load(config, (int)strlen(config),
-                                     NULL, NULL, 0, 1, 64);
+  PolyInstance *inst = poly_hf_load(config, (int)strlen(config), NULL, NULL, 0, 1, 64);
   ASSERT_TRUE(inst == NULL);
   PASS();
 }

@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <math.h>
 
-/* ── Config ─────────────────────────────────────────────────────── */
+/* Config */
 
 Qwen3Config poly_qwen3_config_default(void) {
     return (Qwen3Config){
@@ -47,7 +47,7 @@ Qwen3Config poly_qwen3_config_default(void) {
     };
 }
 
-/* ── Builder ────────────────────────────────────────────────────── */
+/* Builder */
 
 PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
     if (!cfg || cfg->n_layers < 1 || cfg->dim < 1 || cfg->vocab_size < 1)
@@ -73,14 +73,14 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
 
     PolyCtx *ctx = poly_ctx_new();
 
-    /* ── I/O buffers ──────────────────────────────────────────── */
+    /* I/O buffers */
 
     PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32,
         (int64_t[]){ B, T }, 2, "x");
     PolyUOp *out_buf = poly_output(ctx, POLY_FLOAT32,
         (int64_t[]){ B, T, V }, 3, "output");
 
-    /* ── Precompute RoPE frequencies ──────────────────────────── */
+    /* Precompute RoPE frequencies */
     /* freqs_cos: (T, hd/2), freqs_sin: (T, hd/2)
      * freq[i] = 1.0 / (theta ^ (2i / hd)) for i in [0, hd/2)
      * Then outer product with positions: pos_j * freq_i
@@ -93,7 +93,7 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
     PolyUOp *rope_sin_buf = poly_input(ctx, POLY_FLOAT32,
         (int64_t[]){ T, half_hd }, 2, "rope_sin");
 
-    /* ── Token embedding ──────────────────────────────────────── */
+    /* Token embedding */
 
     PolyUOp *x = poly_reshape(ctx, x_buf, (int64_t[]){ B, T }, 2);
     PolyUOp *h = poly_embedding(ctx, "token_embd", x, V, D);
@@ -103,12 +103,12 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
     PolyUOp *rope_cos = poly_reshape(ctx, rope_cos_buf, (int64_t[]){ 1, 1, T, half_hd }, 4);
     PolyUOp *rope_sin = poly_reshape(ctx, rope_sin_buf, (int64_t[]){ 1, 1, T, half_hd }, 4);
 
-    /* ── Causal mask: (1, 1, T, T) ────────────────────────────── */
+    /* Causal mask: (1, 1, T, T) */
 
     PolyUOp *mask = poly_contiguous(ctx, poly_reshape(ctx,
         poly_causal_mask(ctx, T), (int64_t[]){ 1, 1, T, T }, 4));
 
-    /* ── Transformer blocks ───────────────────────────────────── */
+    /* Transformer blocks */
 
     for (int i = 0; i < L; i++) {
         char pf[64];
@@ -171,7 +171,7 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
             poly_linear(ctx, pf, attn, H * hd, D, false));
         h = poly_contiguous(ctx, poly_add(ctx, h, attn));
 
-        /* ── SwiGLU FFN ──────────────────────────────────────── */
+        /* SwiGLU FFN */
 
         snprintf(pf, sizeof(pf), "blk.%d.ffn_norm", i);
         PolyUOp *h_norm = poly_contiguous(ctx,
@@ -195,11 +195,11 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
         h = poly_contiguous(ctx, poly_add(ctx, h, ffn_out));
     }
 
-    /* ── Final RMSNorm ────────────────────────────────────────── */
+    /* Final RMSNorm */
 
     h = poly_contiguous(ctx, poly_rmsnorm(ctx, "output_norm", h, D, eps));
 
-    /* ── LM head: h @ token_embd.T (weight tying, no bias) ──── */
+    /* LM head: h @ token_embd.T (weight tying, no bias) */
 
     PolyUOp *wte = poly_ctx_get(ctx, "token_embd.weight");
     PolyUOp *logits = poly_linear_apply(ctx, h,
@@ -214,7 +214,7 @@ PolyInstance *poly_qwen3(const Qwen3Config *cfg) {
     return inst;
 }
 
-/* ── GGUF import ────────────────────────────────────────────────── */
+/* GGUF import */
 
 #include "../loaders/gguf_decode.h"
 #include "../loaders/bind.h"

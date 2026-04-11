@@ -15,11 +15,14 @@
 #include <string.h>
 
 /* Skip helper: PASS immediately if no GPU */
-#define SKIP_IF_NO_HIP() do { \
-  if (!poly_hip_available()) { PASS(); } \
-} while (0)
+#define SKIP_IF_NO_HIP()                                                                           \
+  do {                                                                                             \
+    if (!poly_hip_available()) {                                                                   \
+      PASS();                                                                                      \
+    }                                                                                              \
+  } while (0)
 
-/* ── Helper: build vecadd kernel IR (tensor-level) ───────────────────── */
+/* Helper: build vecadd kernel IR (tensor-level) */
 
 typedef struct {
   PolyCtx *ctx;
@@ -36,10 +39,10 @@ static HipTensorVecadd hip_make_tensor_vecadd(int n) {
   PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
   PolyUOp *store = poly_store_val(ctx, c, add);
   PolyUOp *sink = poly_sink1(ctx, store);
-  return (HipTensorVecadd){ ctx, sink, a, b, c, n };
+  return (HipTensorVecadd){ctx, sink, a, b, c, n};
 }
 
-/* ── Render tests (no GPU needed) ────────────────────────────────────── */
+/* Render tests (no GPU needed) */
 
 TEST(hip, render_vecadd) {
   /* Test HIP source generation -- no GPU needed */
@@ -109,7 +112,7 @@ TEST(hip, render_mulacc_fma) {
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ld0, ld1, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, ld2, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
@@ -181,13 +184,11 @@ TEST(hip, render_shared_mem) {
   PASS();
 }
 
-/* ── HIP binding helpers ─────────────────────────────────────────────── */
+/* HIP binding helpers */
 
-static int build_hip_bindings(PolyBufferBinding *out, PolyUOp **bufs,
-                               float **host_ptrs, int n) {
+static int build_hip_bindings(PolyBufferBinding *out, PolyUOp **bufs, float **host_ptrs, int n) {
   for (int i = 0; i < n; i++) {
-    size_t nbytes = (size_t)bufs[i]->arg.i * poly_dtype_itemsize(
-                      poly_dtype_scalar(bufs[i]->dtype));
+    size_t nbytes = (size_t)bufs[i]->arg.i * poly_dtype_itemsize(poly_dtype_scalar(bufs[i]->dtype));
     void *dptr = poly_hip_alloc(nbytes);
     if (!dptr) return -1;
     if (host_ptrs[i])
@@ -195,22 +196,21 @@ static int build_hip_bindings(PolyBufferBinding *out, PolyUOp **bufs,
     else
       poly_hip_memset(dptr, 0, nbytes);
     out[i].buffer = bufs[i];
-    out[i].handle = (PolyBufferHandle){ dptr, nbytes, POLY_DEVICE_HIP, true };
+    out[i].handle = (PolyBufferHandle){dptr, nbytes, POLY_DEVICE_HIP, true};
   }
   return 0;
 }
 
 static void free_hip_bindings(PolyBufferBinding *bindings, int n) {
   for (int i = 0; i < n; i++)
-    if (bindings[i].handle.owned)
-      poly_hip_free(bindings[i].handle.ptr);
+    if (bindings[i].handle.owned) poly_hip_free(bindings[i].handle.ptr);
 }
 
 static void readback_hip_binding(PolyBufferBinding *b, void *host_dst, size_t nbytes) {
   poly_hip_copy_dtoh(host_dst, b->handle.ptr, nbytes);
 }
 
-/* ── E2E tests (require GPU) ─────────────────────────────────────────── */
+/* E2E tests (require GPU) */
 
 TEST(hip, e2e_vecadd) {
   SKIP_IF_NO_HIP();
@@ -230,14 +230,14 @@ TEST(hip, e2e_vecadd) {
 
   /* CPU reference */
   PolyBufferBinding cpu_binds[] = {
-    POLY_BIND_HOST(tv.buf_c, c_cpu), POLY_BIND_HOST(tv.buf_a, a), POLY_BIND_HOST(tv.buf_b, b)
+      POLY_BIND_HOST(tv.buf_c, c_cpu), POLY_BIND_HOST(tv.buf_a, a), POLY_BIND_HOST(tv.buf_b, b)
   };
   int ret = poly_realize(tv.ctx, tv.sink, cpu_binds, 3);
   ASSERT_TRUE(ret == 0);
 
   /* GPU via unified poly_realize with HIP-domain bindings */
-  PolyUOp *bufs[] = { tv.buf_c, tv.buf_a, tv.buf_b };
-  float *ptrs[] = { NULL, a, b };
+  PolyUOp *bufs[] = {tv.buf_c, tv.buf_a, tv.buf_b};
+  float *ptrs[] = {NULL, a, b};
   PolyBufferBinding hip_binds[3];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 3), 0);
   ASSERT_INT_EQ(poly_realize(tv.ctx, tv.sink, hip_binds, 3), 0);
@@ -249,7 +249,10 @@ TEST(hip, e2e_vecadd) {
     ASSERT_FLOAT_EQ(c_gpu[i], c_cpu[i], 1e-5);
   }
 
-  free(a); free(b); free(c_cpu); free(c_gpu);
+  free(a);
+  free(b);
+  free(c_cpu);
+  free(c_gpu);
   poly_ctx_destroy(tv.ctx);
   PASS();
 }
@@ -268,22 +271,26 @@ TEST(hip, e2e_neg) {
   float *a = malloc(n * sizeof(float));
   float *c_cpu = calloc(n, sizeof(float));
   float *c_gpu = calloc(n, sizeof(float));
-  for (int i = 0; i < n; i++) a[i] = (float)i - 256.0f;
+  for (int i = 0; i < n; i++)
+    a[i] = (float)i - 256.0f;
 
-  PolyBufferBinding cpu_binds[] = { POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a) };
+  PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a)};
   ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
 
-  PolyUOp *bufs[] = { buf_c, buf_a };
-  float *ptrs[] = { NULL, a };
+  PolyUOp *bufs[] = {buf_c, buf_a};
+  float *ptrs[] = {NULL, a};
   PolyBufferBinding hip_binds[2];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 2), 0);
   ASSERT_INT_EQ(poly_realize(ctx, sink, hip_binds, 2), 0);
   readback_hip_binding(&hip_binds[0], c_gpu, n * sizeof(float));
   free_hip_bindings(hip_binds, 2);
 
-  for (int i = 0; i < n; i++) ASSERT_FLOAT_EQ(c_gpu[i], c_cpu[i], 1e-5);
+  for (int i = 0; i < n; i++)
+    ASSERT_FLOAT_EQ(c_gpu[i], c_cpu[i], 1e-5);
 
-  free(a); free(c_cpu); free(c_gpu);
+  free(a);
+  free(c_cpu);
+  free(c_gpu);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -302,22 +309,26 @@ TEST(hip, e2e_exp2) {
   float *a = malloc(n * sizeof(float));
   float *c_cpu = calloc(n, sizeof(float));
   float *c_gpu = calloc(n, sizeof(float));
-  for (int i = 0; i < n; i++) a[i] = (float)i * 0.05f - 6.0f;
+  for (int i = 0; i < n; i++)
+    a[i] = (float)i * 0.05f - 6.0f;
 
-  PolyBufferBinding cpu_binds[] = { POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a) };
+  PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a)};
   ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
 
-  PolyUOp *bufs[] = { buf_c, buf_a };
-  float *ptrs[] = { NULL, a };
+  PolyUOp *bufs[] = {buf_c, buf_a};
+  float *ptrs[] = {NULL, a};
   PolyBufferBinding hip_binds[2];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 2), 0);
   ASSERT_INT_EQ(poly_realize(ctx, sink, hip_binds, 2), 0);
   readback_hip_binding(&hip_binds[0], c_gpu, n * sizeof(float));
   free_hip_bindings(hip_binds, 2);
 
-  for (int i = 0; i < n; i++) ASSERT_FLOAT_EQ(c_gpu[i], c_cpu[i], 1e-4);
+  for (int i = 0; i < n; i++)
+    ASSERT_FLOAT_EQ(c_gpu[i], c_cpu[i], 1e-4);
 
-  free(a); free(c_cpu); free(c_gpu);
+  free(a);
+  free(c_cpu);
+  free(c_gpu);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -329,20 +340,21 @@ TEST(hip, e2e_reduce_sum) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, 1);
-  int64_t axes[] = { 0 };
+  int64_t axes[] = {0};
   PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, buf_a, axes, 1);
   PolyUOp *store = poly_store_val(ctx, buf_c, red);
   PolyUOp *sink = poly_sink1(ctx, store);
 
   float *a = malloc(n * sizeof(float));
   float c_cpu = 0, c_gpu = 0;
-  for (int i = 0; i < n; i++) a[i] = 1.0f;
+  for (int i = 0; i < n; i++)
+    a[i] = 1.0f;
 
-  PolyBufferBinding cpu_binds[] = { POLY_BIND_HOST(buf_c, &c_cpu), POLY_BIND_HOST(buf_a, a) };
+  PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, &c_cpu), POLY_BIND_HOST(buf_a, a)};
   ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
 
-  PolyUOp *bufs[] = { buf_c, buf_a };
-  float *ptrs[] = { NULL, a };
+  PolyUOp *bufs[] = {buf_c, buf_a};
+  float *ptrs[] = {NULL, a};
   PolyBufferBinding hip_binds[2];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 2), 0);
   ASSERT_INT_EQ(poly_realize(ctx, sink, hip_binds, 2), 0);
@@ -356,16 +368,19 @@ TEST(hip, e2e_reduce_sum) {
   PASS();
 }
 
-/* ── Instance-level HIP tests ────────────────────────────────────────── */
+/* Instance-level HIP tests */
 
 #include "../src/instance.h"
 #include "../src/models/mlp.h"
 
 static PolyInstance *hip_make_test_mlp(int n_in, int n_out) {
   char spec[256];
-  snprintf(spec, sizeof(spec),
-    "{\"layers\":[%d,4,%d],\"activation\":\"relu\",\"bias\":true,"
-    "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}", n_in, n_out);
+  snprintf(
+      spec, sizeof(spec),
+      "{\"layers\":[%d,4,%d],\"activation\":\"relu\",\"bias\":true,"
+      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}",
+      n_in, n_out
+  );
   return poly_mlp_from_json(spec, (int)strlen(spec));
 }
 
@@ -414,15 +429,18 @@ TEST(hip, instance_hip_forward_parity) {
   }
 
   /* Forward on CPU */
-  float input[] = { 1.0f, 2.0f };
+  float input[] = {1.0f, 2.0f};
   float out_cpu[3] = {0};
-  PolyIOBinding io[] = { {"x", input} };
+  PolyIOBinding io[] = {{"x", input}};
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
 
   /* Read CPU output */
   int out_idx = -1;
   for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) { out_idx = i; break; }
+    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+      out_idx = i;
+      break;
+    }
   ASSERT_TRUE(out_idx >= 0);
   {
     int64_t numel;
@@ -463,16 +481,22 @@ TEST(hip, instance_hip_roundtrip) {
       data[j] = (float)(j % 5 - 2) * 0.2f;
   }
 
-  float input[] = { 1.0f, -1.0f };
-  PolyIOBinding io[] = { {"x", input} };
+  float input[] = {1.0f, -1.0f};
+  PolyIOBinding io[] = {{"x", input}};
   float results[4];
 
   /* CPU -> forward */
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
   int out_idx = -1;
   for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) { out_idx = i; break; }
-  { int64_t n; results[0] = *poly_instance_buf_data(inst, out_idx, &n); }
+    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+      out_idx = i;
+      break;
+    }
+  {
+    int64_t n;
+    results[0] = *poly_instance_buf_data(inst, out_idx, &n);
+  }
 
   /* HIP -> forward */
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
@@ -482,7 +506,10 @@ TEST(hip, instance_hip_roundtrip) {
   /* CPU -> forward */
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CPU), 0);
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
-  { int64_t n; results[2] = *poly_instance_buf_data(inst, out_idx, &n); }
+  {
+    int64_t n;
+    results[2] = *poly_instance_buf_data(inst, out_idx, &n);
+  }
 
   /* HIP -> forward */
   ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_HIP), 0);
@@ -497,7 +524,7 @@ TEST(hip, instance_hip_roundtrip) {
   PASS();
 }
 
-/* ── Regression: realize_ex with poly_full + DEFINE_VAR shape on GPU ───── */
+/* Regression: realize_ex with poly_full + DEFINE_VAR shape on GPU */
 /* Originally landed (pre-Phase-B) as a guard for the const-registry buffer
  * migration path: poly_full used to malloc a host buffer and stash it via
  * g_const_bindings, which only worked on GPU after the realize-time
@@ -523,10 +550,10 @@ TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
   float a_data[16] = {1, 2, 3, 4};
   float out_data[16] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_a, a_data),
-    POLY_BIND_HOST(buf_out, out_data),
+      POLY_BIND_HOST(buf_a, a_data),
+      POLY_BIND_HOST(buf_out, out_data),
   };
-  PolyVarBinding vars[] = {{ .var = N, .value = 4 }};
+  PolyVarBinding vars[] = {{.var = N, .value = 4}};
 
   int ret = poly_realize_ex(ctx, sink, bindings, 2, vars, 1);
   poly_ctx_destroy(ctx);
@@ -539,7 +566,7 @@ TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
   PASS();
 }
 
-/* ── WMMA rendering smoke test (no GPU needed) ───────────────────────── */
+/* WMMA rendering smoke test (no GPU needed) */
 TEST(hip, render_wmma_mfma) {
   /* Build minimal linearized IR with a WMMA op and verify the HIP
    * renderer emits the MFMA macro and vector type declarations. */
@@ -548,9 +575,9 @@ TEST(hip, render_wmma_mfma) {
   /* Params: A (half*), B (half*), C (float*) */
   PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));  /* A */
-  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));  /* B */
-  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));  /* C out */
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0)); /* A */
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1)); /* B */
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2)); /* C out */
 
   /* Thread index (gidx0) as placeholder */
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(64));
@@ -562,23 +589,22 @@ TEST(hip, render_wmma_mfma) {
 
   /* Fake A/B loads as CONST vectors (just for render testing) */
   PolyUOp *zero_f16 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT16, poly_arg_float(0.0));
-  PolyUOp *a_vec_srcs[4] = { zero_f16, zero_f16, zero_f16, zero_f16 };
+  PolyUOp *a_vec_srcs[4] = {zero_f16, zero_f16, zero_f16, zero_f16};
   PolyUOp *a_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_vec_srcs, 4, poly_arg_none());
   PolyUOp *b_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f16v4, a_vec_srcs, 4, poly_arg_none());
 
   /* Zero accumulator */
   PolyUOp *zero_f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
-  PolyUOp *c_vec_srcs[4] = { zero_f32, zero_f32, zero_f32, zero_f32 };
+  PolyUOp *c_vec_srcs[4] = {zero_f32, zero_f32, zero_f32, zero_f32};
   PolyUOp *c_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f32v4, c_vec_srcs, 4, poly_arg_none());
 
   /* WMMA: result = mfma(A, B, C) */
-  PolyUOp *wmma_srcs[3] = { a_vec, b_vec, c_vec };
-  PolyUOp *wmma = poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3,
-                             poly_arg_str("mfma_f32_16x16x16f16"));
+  PolyUOp *wmma_srcs[3] = {a_vec, b_vec, c_vec};
+  PolyUOp *wmma =
+      poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3, poly_arg_str("mfma_f32_16x16x16f16"));
 
   /* Extract lane 0 and store (just to complete the kernel) */
-  PolyUOp *lane0 = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma,
-                               poly_arg_int(0));
+  PolyUOp *lane0 = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma, poly_arg_int(0));
   PolyUOp *idx_c = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, special, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_c, lane0, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -607,10 +633,12 @@ TEST(hip, render_wmma_mfma) {
   PASS();
 }
 
-/* ── E2E MFMA smoke test: all-ones matmul on GPU ─────────────────────── */
+/* E2E MFMA smoke test: all-ones matmul on GPU */
 TEST(hip, wmma_mfma_e2e) {
   SKIP_IF_NO_HIP();
-  if (poly_hip_wave_size() != 64) { PASS(); } /* CDNA wave64 only */
+  if (poly_hip_wave_size() != 64) {
+    PASS();
+  } /* CDNA wave64 only */
 
   /* Build hand-crafted kernel IR:
    *   Each of 64 threads loads half4 from A and B, runs mfma_f32_16x16x16f16,
@@ -629,8 +657,7 @@ TEST(hip, wmma_mfma_e2e) {
 
   /* Thread index: lidx0 in [0, 64) */
   PolyUOp *bound64 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(64));
-  PolyUOp *tid = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound64,
-                             poly_arg_str("lidx0"));
+  PolyUOp *tid = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound64, poly_arg_str("lidx0"));
 
   /* Per-thread offset: tid * 4 */
   PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
@@ -653,13 +680,13 @@ TEST(hip, wmma_mfma_e2e) {
 
   /* Zero accumulator (float4) */
   PolyUOp *zero_f32 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
-  PolyUOp *c_elems[4] = { zero_f32, zero_f32, zero_f32, zero_f32 };
+  PolyUOp *c_elems[4] = {zero_f32, zero_f32, zero_f32, zero_f32};
   PolyUOp *c_vec = poly_uop(ctx, POLY_OP_VECTORIZE, f32v4, c_elems, 4, poly_arg_none());
 
   /* WMMA: D = A * B + C */
-  PolyUOp *wmma_srcs[3] = { a_vec, b_vec, c_vec };
-  PolyUOp *d_vec = poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3,
-                              poly_arg_str("mfma_f32_16x16x16f16"));
+  PolyUOp *wmma_srcs[3] = {a_vec, b_vec, c_vec};
+  PolyUOp *d_vec =
+      poly_uop(ctx, POLY_OP_WMMA, f32v4, wmma_srcs, 3, poly_arg_str("mfma_f32_16x16x16f16"));
 
   /* Store all 4 output lanes */
   PolyUOp *stores[4];
@@ -700,7 +727,10 @@ TEST(hip, wmma_mfma_e2e) {
   size_t c_bytes = 256 * sizeof(float);
 
   uint16_t h_a[256], h_b[256];
-  for (int i = 0; i < 256; i++) { h_a[i] = 0x3C00; h_b[i] = 0x3C00; } /* 1.0h */
+  for (int i = 0; i < 256; i++) {
+    h_a[i] = 0x3C00;
+    h_b[i] = 0x3C00;
+  } /* 1.0h */
 
   void *d_a = poly_hip_alloc(a_bytes);
   void *d_b = poly_hip_alloc(a_bytes);
@@ -714,7 +744,7 @@ TEST(hip, wmma_mfma_e2e) {
   poly_hip_memset(d_c, 0, c_bytes);
 
   /* Launch: 1 block of 64 threads (one wave) */
-  void *args[3] = { &d_a, &d_b, &d_c };
+  void *args[3] = {&d_a, &d_b, &d_c};
   int rc = poly_hip_launch(prog, args, 3, /*grid*/ 1, 1, 1, /*block*/ 64, 1, 1);
   ASSERT_INT_EQ(rc, 0);
   rc = poly_hip_sync();
@@ -728,8 +758,7 @@ TEST(hip, wmma_mfma_e2e) {
   for (int i = 0; i < 256; i++) {
     float diff = h_c[i] - 16.0f;
     if (diff < -0.5f || diff > 0.5f) {
-      if (n_wrong < 5)
-        fprintf(stderr, "  mfma_e2e: h_c[%d] = %.4f (expected 16.0)\n", i, h_c[i]);
+      if (n_wrong < 5) fprintf(stderr, "  mfma_e2e: h_c[%d] = %.4f (expected 16.0)\n", i, h_c[i]);
       n_wrong++;
     }
   }
@@ -748,23 +777,25 @@ TEST(hip, wmma_mfma_e2e) {
   PASS();
 }
 
-/* ── f16 helper: convert f32 to IEEE 754 half ──────────────────────── */
+/* f16 helper: convert f32 to IEEE 754 half */
 static uint16_t f32_to_f16(float f) {
   uint32_t x;
   memcpy(&x, &f, 4);
   uint32_t sign = (x >> 16) & 0x8000;
   int exp = ((x >> 23) & 0xFF) - 127 + 15;
   uint32_t mant = (x >> 13) & 0x3FF;
-  if (exp <= 0) return (uint16_t)sign;        /* underflow -> zero */
+  if (exp <= 0) return (uint16_t)sign; /* underflow -> zero */
   if (exp >= 31) return (uint16_t)(sign | 0x7C00); /* overflow -> inf */
   return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
 }
 
-/* ── Automatic TC E2E: 16x16x16 f16 matmul through poly_realize ──── */
+/* Automatic TC E2E: 16x16x16 f16 matmul through poly_realize */
 
 TEST(hip, tc_auto_matmul_e2e) {
   SKIP_IF_NO_HIP();
-  if (poly_hip_wave_size() != 64) { PASS(); } /* CDNA wave64 only */
+  if (poly_hip_wave_size() != 64) {
+    PASS();
+  } /* CDNA wave64 only */
 
   /* Build 16x16x16 matmul: C[i,j] = sum_k(A[i,k] * B[k,j])
    * A, B are f16, accumulation and output C are f32.
@@ -772,9 +803,9 @@ TEST(hip, tc_auto_matmul_e2e) {
   const int M = 16, N = 16, K = 16;
 
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT16, M * K);   /* f16[256] */
-  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT16, K * N);   /* f16[256] */
-  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, M * N);   /* f32[256] */
+  PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT16, M * K); /* f16[256] */
+  PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT16, K * N); /* f16[256] */
+  PolyUOp *buf_c = poly_buffer(ctx, POLY_FLOAT32, M * N); /* f32[256] */
 
   /* A: [M*K] -> [M, 1, K] -> expand [M, N, K] */
   int64_t a_3d[] = {M, 1, K};
@@ -803,20 +834,24 @@ TEST(hip, tc_auto_matmul_e2e) {
 
   /* Host data: all ones (result = 16.0f for every element) */
   uint16_t h_a[M * K], h_b[K * N];
-  for (int i = 0; i < M * K; i++) h_a[i] = 0x3C00; /* 1.0h */
-  for (int i = 0; i < K * N; i++) h_b[i] = 0x3C00;
+  for (int i = 0; i < M * K; i++)
+    h_a[i] = 0x3C00; /* 1.0h */
+  for (int i = 0; i < K * N; i++)
+    h_b[i] = 0x3C00;
   float h_c[M * N];
   memset(h_c, 0, sizeof(h_c));
 
   /* Allocate HIP buffers and copy input data */
-  size_t a_bytes = (size_t)(M * K) * 2;  /* f16 = 2 bytes */
+  size_t a_bytes = (size_t)(M * K) * 2; /* f16 = 2 bytes */
   size_t b_bytes = (size_t)(K * N) * 2;
-  size_t c_bytes = (size_t)(M * N) * 4;  /* f32 = 4 bytes */
+  size_t c_bytes = (size_t)(M * N) * 4; /* f32 = 4 bytes */
 
   void *d_a = poly_hip_alloc(a_bytes);
   void *d_b = poly_hip_alloc(b_bytes);
   void *d_c = poly_hip_alloc(c_bytes);
-  ASSERT_NOT_NULL(d_a); ASSERT_NOT_NULL(d_b); ASSERT_NOT_NULL(d_c);
+  ASSERT_NOT_NULL(d_a);
+  ASSERT_NOT_NULL(d_b);
+  ASSERT_NOT_NULL(d_c);
 
   poly_hip_copy_htod(d_a, h_a, a_bytes);
   poly_hip_copy_htod(d_b, h_b, b_bytes);
@@ -824,9 +859,9 @@ TEST(hip, tc_auto_matmul_e2e) {
 
   /* Build HIP bindings manually (f16 buffers need raw void* handling) */
   PolyBufferBinding hip_binds[3] = {
-    { .buffer = buf_c, .handle = { d_c, c_bytes, POLY_DEVICE_HIP, true } },
-    { .buffer = buf_a, .handle = { d_a, a_bytes, POLY_DEVICE_HIP, true } },
-    { .buffer = buf_b, .handle = { d_b, b_bytes, POLY_DEVICE_HIP, true } },
+      {.buffer = buf_c, .handle = {d_c, c_bytes, POLY_DEVICE_HIP, true}},
+      {.buffer = buf_a, .handle = {d_a, a_bytes, POLY_DEVICE_HIP, true}},
+      {.buffer = buf_b, .handle = {d_b, b_bytes, POLY_DEVICE_HIP, true}},
   };
 
   /* Execute through full poly_realize path */
@@ -855,10 +890,11 @@ TEST(hip, tc_auto_matmul_e2e) {
       n_wrong++;
     }
   }
-  if (n_wrong > 0)
-    fprintf(stderr, "  tc_auto_matmul: %d/%d outputs wrong\n", n_wrong, M * N);
+  if (n_wrong > 0) fprintf(stderr, "  tc_auto_matmul: %d/%d outputs wrong\n", n_wrong, M * N);
 
-  poly_hip_free(d_a); poly_hip_free(d_b); poly_hip_free(d_c);
+  poly_hip_free(d_a);
+  poly_hip_free(d_b);
+  poly_hip_free(d_c);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(n_wrong, 0);
   PASS();
@@ -866,7 +902,9 @@ TEST(hip, tc_auto_matmul_e2e) {
 
 TEST(hip, tc_auto_matmul_unique_values) {
   SKIP_IF_NO_HIP();
-  if (poly_hip_wave_size() != 64) { PASS(); }
+  if (poly_hip_wave_size() != 64) {
+    PASS();
+  }
 
   /* 16x16x16 matmul with unique values to catch swizzle/lane-mapping bugs.
    * A[i][k] = (i*16+k+1) as f16, B[k][j] = (k*16+j+1) as f16.
@@ -933,16 +971,18 @@ TEST(hip, tc_auto_matmul_unique_values) {
   void *d_a = poly_hip_alloc(a_bytes);
   void *d_b = poly_hip_alloc(b_bytes);
   void *d_c = poly_hip_alloc(c_bytes);
-  ASSERT_NOT_NULL(d_a); ASSERT_NOT_NULL(d_b); ASSERT_NOT_NULL(d_c);
+  ASSERT_NOT_NULL(d_a);
+  ASSERT_NOT_NULL(d_b);
+  ASSERT_NOT_NULL(d_c);
 
   poly_hip_copy_htod(d_a, h_a, a_bytes);
   poly_hip_copy_htod(d_b, h_b, b_bytes);
   poly_hip_memset(d_c, 0, c_bytes);
 
   PolyBufferBinding hip_binds[3] = {
-    { .buffer = buf_c, .handle = { d_c, c_bytes, POLY_DEVICE_HIP, true } },
-    { .buffer = buf_a, .handle = { d_a, a_bytes, POLY_DEVICE_HIP, true } },
-    { .buffer = buf_b, .handle = { d_b, b_bytes, POLY_DEVICE_HIP, true } },
+      {.buffer = buf_c, .handle = {d_c, c_bytes, POLY_DEVICE_HIP, true}},
+      {.buffer = buf_a, .handle = {d_a, a_bytes, POLY_DEVICE_HIP, true}},
+      {.buffer = buf_b, .handle = {d_b, b_bytes, POLY_DEVICE_HIP, true}},
   };
 
   setenv("POLY_TC_OPT", "1", 1);
@@ -965,15 +1005,18 @@ TEST(hip, tc_auto_matmul_unique_values) {
     if (atol < 0.01f) atol = 0.01f;
     if (diff > atol) {
       if (n_wrong < 5)
-        fprintf(stderr, "  unique_matmul: h_c[%d] = %.2f, expected %.2f (diff=%.2f)\n",
-                i, h_c[i], c_ref[i], diff);
+        fprintf(
+            stderr, "  unique_matmul: h_c[%d] = %.2f, expected %.2f (diff=%.2f)\n", i, h_c[i],
+            c_ref[i], diff
+        );
       n_wrong++;
     }
   }
-  if (n_wrong > 0)
-    fprintf(stderr, "  unique_matmul: %d/%d outputs wrong\n", n_wrong, M * N);
+  if (n_wrong > 0) fprintf(stderr, "  unique_matmul: %d/%d outputs wrong\n", n_wrong, M * N);
 
-  poly_hip_free(d_a); poly_hip_free(d_b); poly_hip_free(d_c);
+  poly_hip_free(d_a);
+  poly_hip_free(d_b);
+  poly_hip_free(d_c);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(n_wrong, 0);
   PASS();

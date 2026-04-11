@@ -21,7 +21,7 @@
 #include <string.h>
 #include <math.h>
 
-/* ── In-place assignment (stays here: depends on scheduler.h) ────────── */
+/* In-place assignment (stays here: depends on scheduler.h) */
 
 PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
   /* Normalize: walk target through movement ops to the base BUFFER.
@@ -37,27 +37,26 @@ PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
     /* Base is a BUFFER with a flat shape. Reshape value to match. */
     int64_t numel = (base->arg.kind == POLY_ARG_INT) ? base->arg.i : 0;
     if (numel > 0) {
-      int64_t flat_shape[1] = { numel };
+      int64_t flat_shape[1] = {numel};
       value = poly_reshape(ctx, value, flat_shape, 1);
     }
     target = base;
   }
 
-  PolyUOp *srcs[2] = { target, value };
+  PolyUOp *srcs[2] = {target, value};
   return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
 }
 
-/* ── Dtype table for FFI (shared by poly_buffer_by_id and poly_cast_by_id) ─ */
+/* Dtype table for FFI (shared by poly_buffer_by_id and poly_cast_by_id) */
 
 static const PolyDType *_dtype_table_ffi[] = {
-  &POLY_VOID, &POLY_BOOL, &POLY_INT8, &POLY_UINT8,
-  &POLY_INT16, &POLY_UINT16, &POLY_INT32, &POLY_UINT32,
-  &POLY_INT64, &POLY_UINT64, &POLY_FLOAT16, &POLY_BFLOAT16,
-  &POLY_FLOAT32, &POLY_FLOAT64,
+    &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
+    &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
-/* ── Buffer shortcuts ─────────────────────────────────────────────────── */
+/* Buffer shortcuts */
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT32, size);
@@ -72,12 +71,13 @@ PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int64_t size, int dtype_id) {
   return poly_buffer(ctx, *_dtype_table_ffi[dtype_id], size);
 }
 
-/* ── Dynamic shapes (DEFINE_VAR / BIND) ──────────────────────────────── */
+/* Dynamic shapes (DEFINE_VAR / BIND) */
 
 PolyUOp *poly_define_var(PolyCtx *ctx, const char *name, int64_t min_val, int64_t max_val) {
   /* Name string is copied into arena by poly_uop_create (POLY_ARG_DEFINE_VAR case) */
-  return poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32,
-                   poly_arg_define_var(name, min_val, max_val));
+  return poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var(name, min_val, max_val)
+  );
 }
 
 PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value) {
@@ -88,8 +88,13 @@ PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value) {
 
 static int poly_dyn_buffer_id = 1000000; /* separate range from sched.c's poly_buffer_id */
 
-PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
-                          const int64_t *inner_dims, int n_inner) {
+PolyUOp *poly_buffer_var(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner
+) {
   assert(batch_var->op == POLY_OP_DEFINE_VAR);
   assert(n_inner >= 0 && n_inner < POLY_MAX_DIMS);
   int64_t max_val = batch_var->arg.define_var.max_val;
@@ -114,7 +119,7 @@ PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
 
 /* All composed elementwise/reduction/creation ops moved to tensor.c */
 
-/* ── Shared helpers ──────────────────────────────────────────────────── */
+/* Shared helpers */
 
 /* (Remaining code: collect_ordered_buffers, ptr_hash/eq, structural hash/eq,
  * realize pipeline, compiled step, WASM rendering, debug helpers,
@@ -124,27 +129,33 @@ PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
  *     poly_rearrange, poly_gather, and all v2 wrappers) have been moved
  *     to tensor.c. See tensor.h for declarations. --- */
 
-/* ── Shared helpers ──────────────────────────────────────────────────── */
+/* Shared helpers */
 
 /* POLY_MAX_REALIZE_BUFS defined in frontend_internal.h */
 
 /* Reconstruct the buffer-to-PARAM ordering that poly_schedule() uses:
  * 1. Output buffers (STORE targets in SINK source order)
  * 2. Remaining input buffers (toposort encounter order) */
-int poly_collect_ordered_buffers(PolyCtx *ctx, PolyUOp *tensor_sink,
-                                    PolyUOp **ordered, int max_bufs) {
+int poly_collect_ordered_buffers(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp **ordered,
+    int max_bufs
+) {
   int n = 0;
 
   /* Output buffers first */
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
-    if (store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        store->src[0]->op == POLY_OP_BUFFER) {
+    if (store->op == POLY_OP_STORE && store->n_src >= 1 && store->src[0]->op == POLY_OP_BUFFER) {
       PolyUOp *buf = store->src[0];
       /* Dedup */
       bool dup = false;
       for (int j = 0; j < n; j++) {
-        if (ordered[j] == buf) { dup = true; break; }
+        if (ordered[j] == buf) {
+          dup = true;
+          break;
+        }
       }
       if (!dup && n < max_bufs) ordered[n++] = buf;
     }
@@ -157,7 +168,10 @@ int poly_collect_ordered_buffers(PolyCtx *ctx, PolyUOp *tensor_sink,
     if (topo[i]->op == POLY_OP_BUFFER) {
       bool dup = false;
       for (int j = 0; j < n; j++) {
-        if (ordered[j] == topo[i]) { dup = true; break; }
+        if (ordered[j] == topo[i]) {
+          dup = true;
+          break;
+        }
       }
       if (!dup && n < max_bufs) ordered[n++] = topo[i];
     }
@@ -166,9 +180,11 @@ int poly_collect_ordered_buffers(PolyCtx *ctx, PolyUOp *tensor_sink,
   return n;
 }
 
-/* ── Pointer hash/eq helpers (used by kernel cache and CPU realize) ──── */
+/* Pointer hash/eq helpers (used by kernel cache and CPU realize) */
 
-bool poly_ptr_eq(const void *a, const void *b) { return a == b; }
+bool poly_ptr_eq(const void *a, const void *b) {
+  return a == b;
+}
 uint32_t poly_ptr_hash(const void *p) {
   uintptr_t v = (uintptr_t)p;
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
@@ -186,8 +202,7 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
 }
 #endif
 
-/* ── Structural hash/eq for kernel cache ─────────────────────────────
- *
+/* Structural hash/eq for kernel cache *
  * The kernel cache needs to match computations that are structurally
  * identical but use different BUFFER UOp instances (e.g., each training
  * step creates new buffers).  We hash/compare the computation DAG
@@ -226,7 +241,10 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
     /* BUFFER nodes: use positional ID instead of pointer identity */
     int buf_id = -1;
     for (int i = 0; i < ctx->n_bufs; i++) {
-      if (ctx->bufs[i].uop == u) { buf_id = ctx->bufs[i].id; break; }
+      if (ctx->bufs[i].uop == u) {
+        buf_id = ctx->bufs[i].id;
+        break;
+      }
     }
     if (buf_id < 0 && ctx->n_bufs < POLY_MAX_REALIZE_BUFS) {
       buf_id = ctx->n_bufs;
@@ -234,19 +252,29 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
       ctx->bufs[ctx->n_bufs].id = buf_id;
       ctx->n_bufs++;
     }
-    h ^= (uint32_t)u->op;        h *= 0x01000193;
-    h ^= (uint32_t)u->dtype.priority; h *= 0x01000193;
-    h ^= (uint32_t)u->dtype.bitsize;  h *= 0x01000193;
-    h ^= (uint32_t)buf_id;       h *= 0x01000193;
-    h ^= poly_arg_hash(u->arg);   h *= 0x01000193;
+    h ^= (uint32_t)u->op;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.priority;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.bitsize;
+    h *= 0x01000193;
+    h ^= (uint32_t)buf_id;
+    h *= 0x01000193;
+    h ^= poly_arg_hash(u->arg);
+    h *= 0x01000193;
   } else {
-    h ^= (uint32_t)u->op;        h *= 0x01000193;
-    h ^= (uint32_t)u->dtype.priority; h *= 0x01000193;
-    h ^= (uint32_t)u->dtype.bitsize;  h *= 0x01000193;
+    h ^= (uint32_t)u->op;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.priority;
+    h *= 0x01000193;
+    h ^= (uint32_t)u->dtype.bitsize;
+    h *= 0x01000193;
     for (int i = 0; i < u->n_src; i++) {
-      h ^= struct_hash_impl(u->src[i], ctx); h *= 0x01000193;
+      h ^= struct_hash_impl(u->src[i], ctx);
+      h *= 0x01000193;
     }
-    h ^= poly_arg_hash(u->arg);   h *= 0x01000193;
+    h ^= poly_arg_hash(u->arg);
+    h *= 0x01000193;
   }
 
   /* Memoize */
@@ -265,7 +293,7 @@ uint32_t poly_structural_hash(PolyUOp *u) {
   return h;
 }
 
-/* ── Structural equality ─────────────────────────────────────────────── */
+/* Structural equality */
 
 typedef struct {
   PolyUOp *a[POLY_MAX_REALIZE_BUFS];
@@ -328,8 +356,8 @@ static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) 
 }
 
 bool poly_structural_eq(const void *a, const void *b) {
-  BufPairs bp = { .n = 0 };
-  EqVisited ev = { .n = 0 };
+  BufPairs bp = {.n = 0};
+  EqVisited ev = {.n = 0};
   return struct_eq_impl((PolyUOp *)a, (PolyUOp *)b, &bp, &ev);
 }
 
@@ -338,17 +366,21 @@ bool poly_structural_eq(const void *a, const void *b) {
  * n_bufs counts total BUFFERs found (may exceed buf_order capacity).
  * buf_order is only written up to POLY_MAX_REALIZE_BUFS entries.
  * Callers must check *n_bufs <= POLY_MAX_REALIZE_BUFS after the call. */
-void poly_collect_buf_order(PolyUOp *u, PolyUOp **buf_order, int *n_bufs,
-                               PolyUOp **visited, int *n_visited) {
+void poly_collect_buf_order(
+    PolyUOp *u,
+    PolyUOp **buf_order,
+    int *n_bufs,
+    PolyUOp **visited,
+    int *n_visited
+) {
   if (!u) return;
   for (int i = 0; i < *n_visited; i++)
     if (visited[i] == u) return;
   if (*n_visited < POLY_MAX_STRUCT_NODES) visited[(*n_visited)++] = u;
 
   if (u->op == POLY_OP_BUFFER) {
-    if (*n_bufs < POLY_MAX_REALIZE_BUFS)
-      buf_order[*n_bufs] = u;
-    (*n_bufs)++;  /* always count, even past capacity */
+    if (*n_bufs < POLY_MAX_REALIZE_BUFS) buf_order[*n_bufs] = u;
+    (*n_bufs)++; /* always count, even past capacity */
     return;
   }
   for (int i = 0; i < u->n_src; i++)
@@ -361,7 +393,7 @@ int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {
   return -1;
 }
 
-/* ── Helpers shared by all builds (exec_plan + realize) ───────────────── */
+/* Helpers shared by all builds (exec_plan + realize) */
 
 /* Defensive graph validator to avoid crashing in toposort/linearize when
  * a malformed kernel contains NULL sources. */
@@ -381,21 +413,34 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
     PolyUOp *u = stack[sp];
     PolyUOp *parent = parent_stack[sp];
     int src_idx = parent_src_idx[sp];
-    if (!u) { poly_map_destroy(visited); return false; }
+    if (!u) {
+      poly_map_destroy(visited);
+      return false;
+    }
     if (!poly_ctx_owns_ptr(ctx, u)) {
       if (parent) {
-        fprintf(stderr, "polygrad: realize: foreign/stale UOp pointer %p referenced by %s(%p) src[%d]\n",
-                (void *)u, poly_op_name(parent->op), (void *)parent, src_idx);
-        fprintf(stderr, "polygrad: realize: parent %s n_src=%d\n", poly_op_name(parent->op), parent->n_src);
+        fprintf(
+            stderr,
+            "polygrad: realize: foreign/stale UOp pointer %p referenced by %s(%p) src[%d]\n",
+            (void *)u, poly_op_name(parent->op), (void *)parent, src_idx
+        );
+        fprintf(
+            stderr, "polygrad: realize: parent %s n_src=%d\n", poly_op_name(parent->op),
+            parent->n_src
+        );
         for (int si = 0; si < parent->n_src; si++) {
           PolyUOp *ps = parent->src[si];
           bool owned = poly_ctx_owns_ptr(ctx, ps);
-          fprintf(stderr, "  parent.src[%d]=%p %s%s\n", si, (void *)ps,
-                  owned ? "" : "[FOREIGN] ",
-                  (owned && ps) ? poly_op_name(ps->op) : "");
+          fprintf(
+              stderr, "  parent.src[%d]=%p %s%s\n", si, (void *)ps, owned ? "" : "[FOREIGN] ",
+              (owned && ps) ? poly_op_name(ps->op) : ""
+          );
         }
       } else {
-        fprintf(stderr, "polygrad: realize: foreign/stale root UOp pointer %p in kernel graph\n", (void *)u);
+        fprintf(
+            stderr, "polygrad: realize: foreign/stale root UOp pointer %p in kernel graph\n",
+            (void *)u
+        );
       }
       poly_map_destroy(visited);
       return false;
@@ -404,15 +449,19 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
     poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
 
     if (u->n_src < 0 || u->n_src > 64) {
-      fprintf(stderr, "polygrad: realize: invalid n_src=%d on %s(%p)\n",
-              u->n_src, poly_op_name(u->op), (void *)u);
+      fprintf(
+          stderr, "polygrad: realize: invalid n_src=%d on %s(%p)\n", u->n_src, poly_op_name(u->op),
+          (void *)u
+      );
       poly_map_destroy(visited);
       return false;
     }
     for (int i = 0; i < u->n_src; i++) {
       if (!u->src[i]) {
-        fprintf(stderr, "polygrad: realize: NULL src[%d] on %s(%p), n_src=%d\n",
-                i, poly_op_name(u->op), (void *)u, u->n_src);
+        fprintf(
+            stderr, "polygrad: realize: NULL src[%d] on %s(%p), n_src=%d\n", i, poly_op_name(u->op),
+            (void *)u, u->n_src
+        );
         poly_map_destroy(visited);
         return false;
       }
@@ -429,8 +478,7 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
 
 /* POLY_SCHED_CACHE_VERSION defined in frontend_internal.h */
 
-/* ── CPU realize (not available in Emscripten) ───────────────────────── */
-
+/* CPU realize (not available in Emscripten) */
 
 /* Strip BIND values from graph, extracting {DEFINE_VAR → value} pairs.
  * Port of tinygrad's strip_bind in pm_pre_sched_cache.
@@ -438,27 +486,41 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
  * Populates out_vals[0..n_out-1] with extracted bindings.
  * Also remaps buf_bindings[].buffer pointers to their rewritten equivalents
  * (so binding lookup works after graph rewrite). */
-PolyUOp *poly_strip_bind_values(PolyCtx *ctx, PolyUOp *sink,
-                                   PolyVarBinding *out_vals, int *n_out, int max_out,
-                                   PolyBufferBinding *buf_bindings, int n_buf_bindings) {
+PolyUOp *poly_strip_bind_values(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyVarBinding *out_vals,
+    int *n_out,
+    int max_out,
+    PolyBufferBinding *buf_bindings,
+    int n_buf_bindings
+) {
   int n_uops;
   PolyUOp **topo = poly_toposort(ctx, sink, &n_uops);
-  if (!topo) { *n_out = 0; return sink; }
+  if (!topo) {
+    *n_out = 0;
+    return sink;
+  }
 
   /* Check if any BIND nodes exist */
   bool has_bind = false;
   for (int i = 0; i < n_uops; i++) {
-    if (topo[i]->op == POLY_OP_BIND) { has_bind = true; break; }
+    if (topo[i]->op == POLY_OP_BIND) {
+      has_bind = true;
+      break;
+    }
   }
-  if (!has_bind) { *n_out = 0; return sink; }
+  if (!has_bind) {
+    *n_out = 0;
+    return sink;
+  }
 
   /* Bottom-up rewrite: BIND(DEFINE_VAR, CONST) → DEFINE_VAR */
   PolyMap *rmap = poly_map_new(n_uops * 2);
   int nv = 0;
   for (int i = 0; i < n_uops; i++) {
     PolyUOp *u = topo[i];
-    if (u->op == POLY_OP_BIND && u->n_src >= 2 &&
-        u->src[0]->op == POLY_OP_DEFINE_VAR &&
+    if (u->op == POLY_OP_BIND && u->n_src >= 2 && u->src[0]->op == POLY_OP_DEFINE_VAR &&
         u->src[1]->op == POLY_OP_CONST) {
       /* Extract var → value binding */
       if (nv < max_out) {
@@ -490,8 +552,9 @@ PolyUOp *poly_strip_bind_values(PolyCtx *ctx, PolyUOp *sink,
 
   /* Remap buffer binding pointers to rewritten BUFFERs */
   for (int j = 0; j < n_buf_bindings; j++) {
-    PolyUOp *remapped = poly_map_get(rmap, poly_ptr_hash(buf_bindings[j].buffer),
-                                      buf_bindings[j].buffer, poly_ptr_eq);
+    PolyUOp *remapped = poly_map_get(
+        rmap, poly_ptr_hash(buf_bindings[j].buffer), buf_bindings[j].buffer, poly_ptr_eq
+    );
     if (remapped) buf_bindings[j].buffer = remapped;
   }
 
@@ -511,7 +574,10 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
     if (!buf || buf->op != POLY_OP_BUFFER) continue;
     bool dup = false;
     for (int j = 0; j < n_seen; j++) {
-      if (out[j] == buf) { dup = true; break; }
+      if (out[j] == buf) {
+        dup = true;
+        break;
+      }
     }
     if (!dup && n_seen < cap) out[n_seen++] = buf;
   }
@@ -522,8 +588,7 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
 
 static int realize_counter = 0;
 
-/* ── Compiled program cache ───────────────────────────────────────────
- *
+/* Compiled program cache *
  * Caches compiled PolyProgram* (CPU) and PolyCudaProgram* (CUDA) keyed by
  * the structural hash of the tensor-level SINK.  Avoids re-running
  * cc/NVRTC on every realize() call for the same computation.
@@ -569,8 +634,7 @@ static void cpu_cache_put(uint32_t h, PolyProgram *prog) {
 
 /* poly_realize and helpers moved below #endif to be available in all builds */
 
-/* ── Compiled Step ─────────────────────────────────────────────────────
- *
+/* Compiled Step *
  * PolyStep is a thin wrapper over the exec_plan infrastructure.
  * poly_compile_step() schedules and compiles via poly_schedule_for() +
  * poly_compile_schedule(). poly_step_run() delegates to
@@ -587,20 +651,19 @@ typedef struct {
 
 struct PolyStep {
   PolyCtx *ctx;
-  PolySchedule *schedule;        /* owned, from poly_schedule_for */
-  PolyCompiledPlan *plan;        /* owned, from poly_compile_schedule */
+  PolySchedule *schedule; /* owned, from poly_schedule_for */
+  PolyCompiledPlan *plan; /* owned, from poly_compile_schedule */
 
   /* Pre-strip buffer ordering for callers that bind by original UOp pointer */
   int n_bufs;
-  PolyUOp **buf_order;           /* malloc'd [n_bufs] */
+  PolyUOp **buf_order; /* malloc'd [n_bufs] */
 
   /* Query API metadata */
-  PolyStepBufMeta *buf_meta;     /* malloc'd [n_buf_slots] */
+  PolyStepBufMeta *buf_meta; /* malloc'd [n_buf_slots] */
   int n_total_buf_meta;
 
   uint32_t graph_hash;
 };
-
 
 PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
@@ -663,15 +726,16 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink) {
         if (tensor_sink->op == POLY_OP_SINK) {
           for (int s = 0; s < tensor_sink->n_src; s++) {
             PolyUOp *st = tensor_sink->src[s];
-            if (st && st->op == POLY_OP_STORE && st->n_src > 0 &&
-                st->src[0] == buf) {
+            if (st && st->op == POLY_OP_STORE && st->n_src > 0 && st->src[0] == buf) {
               is_output = true;
               break;
             }
           }
         }
-        if (is_output) m->role = POLY_STEP_BUF_OUTPUT;
-        else m->role = POLY_STEP_BUF_INPUT;
+        if (is_output)
+          m->role = POLY_STEP_BUF_OUTPUT;
+        else
+          m->role = POLY_STEP_BUF_INPUT;
         /* Phase E: POLY_STEP_BUF_CONSTANT removed; const-registry deleted. */
       }
       m->dtype = slot->dtype;
@@ -692,18 +756,28 @@ static int64_t static_numel_of_uop(PolyCtx *ctx, PolyUOp *u) {
   if (s.ndim == 0) return 1;
   int64_t n = 1;
   for (int i = 0; i < s.ndim; i++) {
-    if (s.dims[i] <= 0) { free(s.dims); return -1; }
-    if (n > INT64_MAX / s.dims[i]) { free(s.dims); return -1; }
+    if (s.dims[i] <= 0) {
+      free(s.dims);
+      return -1;
+    }
+    if (n > INT64_MAX / s.dims[i]) {
+      free(s.dims);
+      return -1;
+    }
     n *= s.dims[i];
   }
   free(s.dims);
   return n;
 }
 
-PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
-                                      PolyUOp **params, int n_params,
-                                      int *out_loss_buf_idx,
-                                      int *out_grad_buf_idxs) {
+PolyStep *poly_compile_value_and_grad(
+    PolyCtx *ctx,
+    PolyUOp *loss,
+    PolyUOp **params,
+    int n_params,
+    int *out_loss_buf_idx,
+    int *out_grad_buf_idxs
+) {
   if (!ctx || !loss || !params || n_params <= 0 || !out_loss_buf_idx || !out_grad_buf_idxs) {
     fprintf(stderr, "polygrad: compile_value_and_grad: invalid arguments\n");
     return NULL;
@@ -759,7 +833,7 @@ PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
     PolyUOp *gflat = grads[i];
     PolyShape gs = poly_uop_shape(ctx, grads[i]);
     if (gs.ndim != 1 || (gs.ndim == 1 && gs.dims[0] != numel)) {
-      int64_t flat_shape[1] = { numel };
+      int64_t flat_shape[1] = {numel};
       gflat = poly_reshape(ctx, grads[i], flat_shape, 1);
     }
     if (gs.dims) free(gs.dims);
@@ -799,9 +873,13 @@ PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
   return step;
 }
 
-int poly_step_run_ex(PolyStep *step,
-                     PolyBufferBinding *bindings, int n_bindings,
-                     PolyVarBinding *var_bindings, int n_var_bindings) {
+int poly_step_run_ex(
+    PolyStep *step,
+    PolyBufferBinding *bindings,
+    int n_bindings,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+) {
   if (!step || !step->schedule || !step->plan) return -1;
 
   /* Map caller's bindings (keyed by pre-strip buf_uop pointers) to
@@ -814,27 +892,29 @@ int poly_step_run_ex(PolyStep *step,
   /* Fill external slots from bindings */
   for (int j = 0; j < n_bindings; j++) {
     int pos = poly_find_buf_position(bindings[j].buffer, step->buf_order, step->n_bufs);
-    if (pos >= 0 && pos < n_slots)
-      slot_data[pos] = bindings[j].handle.ptr;
+    if (pos >= 0 && pos < n_slots) slot_data[pos] = bindings[j].handle.ptr;
   }
 
   /* Phase E: const-registry autobind path removed. Unbound external slots
    * are now an explicit caller error rather than being silently filled
    * from g_const_bindings. */
 
-  int ret = poly_compiled_plan_run(step->plan, slot_data, n_slots,
-                                   var_bindings, n_var_bindings);
+  int ret = poly_compiled_plan_run(step->plan, slot_data, n_slots, var_bindings, n_var_bindings);
   free(slot_data);
   return ret;
 }
 
-int poly_step_run(PolyStep *step,
-                  PolyBufferBinding *bindings, int n_bindings) {
+int poly_step_run(PolyStep *step, PolyBufferBinding *bindings, int n_bindings) {
   return poly_step_run_ex(step, bindings, n_bindings, NULL, 0);
 }
 
-int poly_step_run_indexed_ex(PolyStep *step, void **buffer_data, int n_buffers,
-                             PolyVarBinding *var_bindings, int n_var_bindings) {
+int poly_step_run_indexed_ex(
+    PolyStep *step,
+    void **buffer_data,
+    int n_buffers,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+) {
   if (!step || !buffer_data || n_buffers <= 0) return -1;
   int n = (n_buffers < step->n_bufs) ? n_buffers : step->n_bufs;
   PolyBufferBinding *bindings = calloc((size_t)n, sizeof(PolyBufferBinding));
@@ -843,7 +923,7 @@ int poly_step_run_indexed_ex(PolyStep *step, void **buffer_data, int n_buffers,
   for (int i = 0; i < n; i++) {
     if (!buffer_data[i]) continue;
     bindings[nb].buffer = step->buf_order[i];
-    bindings[nb].handle = (PolyBufferHandle){ buffer_data[i], 0, POLY_DEVICE_CPU, false };
+    bindings[nb].handle = (PolyBufferHandle){buffer_data[i], 0, POLY_DEVICE_CPU, false};
     nb++;
   }
   int ret = poly_step_run_ex(step, bindings, nb, var_bindings, n_var_bindings);
@@ -874,8 +954,12 @@ int poly_step_n_intermediates(const PolyStep *step) {
     if (step->schedule->buf_slots[i].is_intermediate) n++;
   return n;
 }
-int poly_step_n_buffers(const PolyStep *step) { return step ? step->n_total_buf_meta : 0; }
-int poly_step_n_bindable_buffers(const PolyStep *step) { return step ? step->n_bufs : 0; }
+int poly_step_n_buffers(const PolyStep *step) {
+  return step ? step->n_total_buf_meta : 0;
+}
+int poly_step_n_bindable_buffers(const PolyStep *step) {
+  return step ? step->n_bufs : 0;
+}
 
 int poly_step_buffer_info(const PolyStep *step, int idx, PolyStepBufferInfo *out) {
   if (!step || !out || idx < 0 || idx >= step->n_total_buf_meta) return -1;
@@ -906,11 +990,11 @@ PolyUOp *poly_step_buf_uop(const PolyStep *step, int idx) {
 /* ══════════════════════════════════════════════════════════════════════ */
 
 #define REALIZE_SCHED_CACHE_CAP 128
-#define REALIZE_PLAN_CACHE_CAP  256
+#define REALIZE_PLAN_CACHE_CAP 256
 
 typedef struct {
   PolyCtx *ctx;
-  PolyUOp *sink;           /* identity key (CSE-deduped pointer) */
+  PolyUOp *sink; /* identity key (CSE-deduped pointer) */
   uint32_t hash;
   PolyCompileMode mode;
   PolySchedule *sched;
@@ -918,14 +1002,14 @@ typedef struct {
 
 typedef struct {
   PolyCtx *ctx;
-  PolyUOp *sink;           /* identity key */
+  PolyUOp *sink; /* identity key */
   uint32_t hash;
   PolyCompileMode mode;
   PolyDeviceId device;
-  int8_t optimize;         /* codegen optimization level */
-  int8_t devectorize;      /* devectorize level (-1, 0, 1) */
-  int8_t tc_opt;           /* POLY_TC_OPT env (TC strictness level) */
-  int8_t use_tc;           /* POLY_USE_TC env (0=off, 1=full, 2=shape-only) */
+  int8_t optimize; /* codegen optimization level */
+  int8_t devectorize; /* devectorize level (-1, 0, 1) */
+  int8_t tc_opt; /* POLY_TC_OPT env (TC strictness level) */
+  int8_t use_tc; /* POLY_USE_TC env (0=off, 1=full, 2=shape-only) */
   PolyCompiledPlan *plan;
 } RealizePlanCacheEntry;
 
@@ -943,32 +1027,52 @@ static PolySchedule *r_sched_get(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCo
   return NULL;
 }
 
-static void r_sched_put(PolyCtx *ctx, PolyUOp *sink, uint32_t h, PolyCompileMode m, PolySchedule *s) {
+static void r_sched_put(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    uint32_t h,
+    PolyCompileMode m,
+    PolySchedule *s
+) {
   if (r_sched_n < REALIZE_SCHED_CACHE_CAP)
-    r_sched_cache[r_sched_n++] = (RealizeSchedCacheEntry){ ctx, sink, h, m, s };
+    r_sched_cache[r_sched_n++] = (RealizeSchedCacheEntry){ctx, sink, h, m, s};
 }
 
-static PolyCompiledPlan *r_plan_get(PolyCtx *ctx, PolyUOp *sink, uint32_t h,
-                                    PolyCompileMode m, PolyDeviceId d,
-                                    int8_t opt, int8_t devec,
-                                    int8_t tc_opt, int8_t use_tc) {
+static PolyCompiledPlan *r_plan_get(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    uint32_t h,
+    PolyCompileMode m,
+    PolyDeviceId d,
+    int8_t opt,
+    int8_t devec,
+    int8_t tc_opt,
+    int8_t use_tc
+) {
   for (int i = 0; i < r_plan_n; i++)
-    if (r_plan_cache[i].ctx == ctx && r_plan_cache[i].sink == sink &&
-        r_plan_cache[i].hash == h && r_plan_cache[i].mode == m &&
-        r_plan_cache[i].device == d &&
+    if (r_plan_cache[i].ctx == ctx && r_plan_cache[i].sink == sink && r_plan_cache[i].hash == h &&
+        r_plan_cache[i].mode == m && r_plan_cache[i].device == d &&
         r_plan_cache[i].optimize == opt && r_plan_cache[i].devectorize == devec &&
         r_plan_cache[i].tc_opt == tc_opt && r_plan_cache[i].use_tc == use_tc)
       return r_plan_cache[i].plan;
   return NULL;
 }
 
-static void r_plan_put(PolyCtx *ctx, PolyUOp *sink, uint32_t h,
-                        PolyCompileMode m, PolyDeviceId d,
-                        int8_t opt, int8_t devec,
-                        int8_t tc_opt, int8_t use_tc,
-                        PolyCompiledPlan *p) {
+static void r_plan_put(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    uint32_t h,
+    PolyCompileMode m,
+    PolyDeviceId d,
+    int8_t opt,
+    int8_t devec,
+    int8_t tc_opt,
+    int8_t use_tc,
+    PolyCompiledPlan *p
+) {
   if (r_plan_n < REALIZE_PLAN_CACHE_CAP)
-    r_plan_cache[r_plan_n++] = (RealizePlanCacheEntry){ ctx, sink, h, m, d, opt, devec, tc_opt, use_tc, p };
+    r_plan_cache[r_plan_n++] =
+        (RealizePlanCacheEntry){ctx, sink, h, m, d, opt, devec, tc_opt, use_tc, p};
 }
 
 /* Read current codegen optimization settings from env vars.
@@ -1023,8 +1127,8 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
 static PolyDeviceId infer_device(PolyBufferBinding *bindings, int n) {
   /* Check if any binding is on a non-CPU device */
   for (int i = 0; i < n; i++)
-    if (bindings[i].handle.domain != POLY_DEVICE_CPU
-        && bindings[i].handle.domain != POLY_DEVICE_AUTO)
+    if (bindings[i].handle.domain != POLY_DEVICE_CPU &&
+        bindings[i].handle.domain != POLY_DEVICE_AUTO)
       return bindings[i].handle.domain;
   /* POLY_DEVICE=cpu|cuda|hip|x64|interp — unified backend selector.
    * Strict: if set but unavailable, warn (don't silently fall back to CPU). */
@@ -1061,23 +1165,25 @@ static PolyDeviceId infer_device(PolyBufferBinding *bindings, int n) {
 #ifdef POLY_HAS_HIP
   {
     const char *hip_env = getenv("POLY_HIP");
-    if (hip_env && hip_env[0] == '1' && poly_hip_available())
-      return POLY_DEVICE_HIP;
+    if (hip_env && hip_env[0] == '1' && poly_hip_available()) return POLY_DEVICE_HIP;
   }
 #endif
 #ifdef POLY_HAS_X64
   {
     const char *x64_env = getenv("POLY_X64");
-    if (x64_env && x64_env[0] == '1')
-      return POLY_DEVICE_X64_JIT;
+    if (x64_env && x64_env[0] == '1') return POLY_DEVICE_X64_JIT;
   }
 #endif
   return POLY_DEVICE_CPU;
 #endif
 }
 
-static void **build_slot_data_from_bindings(PolyCtx *ctx, const PolySchedule *sched,
-                                             PolyBufferBinding *bindings, int n_bindings) {
+static void **build_slot_data_from_bindings(
+    PolyCtx *ctx,
+    const PolySchedule *sched,
+    PolyBufferBinding *bindings,
+    int n_bindings
+) {
   void **slot_data = calloc((size_t)sched->n_buf_slots, sizeof(void *));
   if (!slot_data) return NULL;
 
@@ -1098,12 +1204,10 @@ static void **build_slot_data_from_bindings(PolyCtx *ctx, const PolySchedule *sc
   return slot_data;
 }
 
-PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink,
-                                PolyDeviceId device) {
+PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDeviceId device) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) return NULL;
 
-  uint32_t hash = poly_structural_hash(tensor_sink)
-                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  uint32_t hash = poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
 
   PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
   if (!sched) {
@@ -1114,7 +1218,8 @@ PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink,
 
   int8_t opt = r_env_optimize(), devec = r_env_devectorize();
   int8_t tc_opt = r_env_tc_opt(), use_tc = r_env_use_tc();
-  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
+  PolyCompiledPlan *plan =
+      r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
   if (!plan) {
     plan = poly_compile_schedule(ctx, sched, device);
     if (!plan) return NULL;
@@ -1133,15 +1238,20 @@ static bool needs_device_migration(PolyDeviceId device, PolyBufferBinding *bindi
   return true;
 }
 
-/* ── Shared device migration helpers ─────────────────────────────────── */
+/* Shared device migration helpers */
 
 /* Allocate device memory for user bindings + const-registry buffers.
  * Returns 0 on success, -1 on error. On success, *out_dev and *out_total
  * are set; caller must call unmigrate_from_device to clean up. */
-static int migrate_to_device(PolyCtx *ctx, PolyUOp *tensor_sink,
-                             PolyBufferBinding *bindings, int n_bindings,
-                             PolyDeviceId device,
-                             PolyBufferBinding **out_dev, int *out_total) {
+static int migrate_to_device(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyBufferBinding *bindings,
+    int n_bindings,
+    PolyDeviceId device,
+    PolyBufferBinding **out_dev,
+    int *out_total
+) {
   const PolyBackendDesc *be = poly_backend_get(device);
   if (!be) return -1;
   const PolyAllocator *alloc = be->get_allocator();
@@ -1152,19 +1262,19 @@ static int migrate_to_device(PolyCtx *ctx, PolyUOp *tensor_sink,
   /* Alloc + upload user bindings */
   for (int i = 0; i < n_bindings; i++) {
     PolyUOp *buf = bindings[i].buffer;
-    size_t nbytes = (size_t)buf->arg.i *
-        poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+    size_t nbytes = (size_t)buf->arg.i * poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
     if (nbytes == 0) nbytes = sizeof(float);
     void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
     if (!dptr) {
-      for (int j = 0; j < i; j++) alloc->free(dev[j].handle.ptr, alloc->dev_ctx);
+      for (int j = 0; j < i; j++)
+        alloc->free(dev[j].handle.ptr, alloc->dev_ctx);
       free(dev);
       return -1;
     }
     if (bindings[i].handle.ptr)
       alloc->copy_in(dptr, bindings[i].handle.ptr, nbytes, alloc->dev_ctx);
     dev[i].buffer = buf;
-    dev[i].handle = (PolyBufferHandle){ dptr, nbytes, device, true };
+    dev[i].handle = (PolyBufferHandle){dptr, nbytes, device, true};
   }
 
   /* Phase E: the const-registry buffer migration block (formerly the
@@ -1181,18 +1291,27 @@ static int migrate_to_device(PolyCtx *ctx, PolyUOp *tensor_sink,
 }
 
 /* Readback user buffers to host, free all device memory, free dev array. */
-static void unmigrate_from_device(PolyBufferBinding *host_bindings, int n_user,
-                                  PolyBufferBinding *dev, int n_total,
-                                  PolyDeviceId device, bool readback) {
+static void unmigrate_from_device(
+    PolyBufferBinding *host_bindings,
+    int n_user,
+    PolyBufferBinding *dev,
+    int n_total,
+    PolyDeviceId device,
+    bool readback
+) {
   const PolyBackendDesc *be = poly_backend_get(device);
-  if (!be) { free(dev); return; }
+  if (!be) {
+    free(dev);
+    return;
+  }
   const PolyAllocator *alloc = be->get_allocator();
 
   if (readback) {
     for (int i = 0; i < n_user; i++) {
       if (!host_bindings[i].handle.ptr) continue;
-      alloc->copy_out(host_bindings[i].handle.ptr, dev[i].handle.ptr,
-                      dev[i].handle.nbytes, alloc->dev_ctx);
+      alloc->copy_out(
+          host_bindings[i].handle.ptr, dev[i].handle.ptr, dev[i].handle.nbytes, alloc->dev_ctx
+      );
     }
   }
   for (int i = 0; i < n_total; i++)
@@ -1200,8 +1319,7 @@ static void unmigrate_from_device(PolyBufferBinding *host_bindings, int n_user,
   free(dev);
 }
 
-int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
-                PolyBufferBinding *bindings, int n_bindings) {
+int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink, PolyBufferBinding *bindings, int n_bindings) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: realize: expected SINK\n");
     return -1;
@@ -1223,8 +1341,7 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
     return ret;
   }
 
-  uint32_t hash = poly_structural_hash(tensor_sink)
-                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  uint32_t hash = poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
 
   /* Schedule cache: per-context, keyed by sink pointer (CSE identity) */
   PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
@@ -1237,7 +1354,8 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
   /* Compiled plan cache: per-context + per-device + per-optimization + per-TC-mode */
   int8_t opt = r_env_optimize(), devec = r_env_devectorize();
   int8_t tc_opt = r_env_tc_opt(), use_tc = r_env_use_tc();
-  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
+  PolyCompiledPlan *plan =
+      r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
   if (!plan) {
     plan = poly_compile_schedule(ctx, sched, device);
     if (!plan) return -1;
@@ -1253,9 +1371,14 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
   return ret;
 }
 
-int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
-                    PolyBufferBinding *bindings, int n_bindings,
-                    PolyVarBinding *var_bindings, int n_var_bindings) {
+int poly_realize_ex(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyBufferBinding *bindings,
+    int n_bindings,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: realize_ex: expected SINK\n");
     return -1;
@@ -1269,14 +1392,12 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
     int total = 0;
     if (migrate_to_device(ctx, tensor_sink, bindings, n_bindings, device, &dev, &total) != 0)
       return -1;
-    int ret = poly_realize_ex(ctx, tensor_sink, dev, total,
-                              var_bindings, n_var_bindings);
+    int ret = poly_realize_ex(ctx, tensor_sink, dev, total, var_bindings, n_var_bindings);
     unmigrate_from_device(bindings, n_bindings, dev, total, device, ret == 0);
     return ret;
   }
 
-  uint32_t hash = poly_structural_hash(tensor_sink)
-                  ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  uint32_t hash = poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
 
   PolySchedule *sched = r_sched_get(ctx, tensor_sink, hash, POLY_MODE_CALL);
   if (!sched) {
@@ -1287,7 +1408,8 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
 
   int8_t opt = r_env_optimize(), devec = r_env_devectorize();
   int8_t tc_opt = r_env_tc_opt(), use_tc = r_env_use_tc();
-  PolyCompiledPlan *plan = r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
+  PolyCompiledPlan *plan =
+      r_plan_get(ctx, tensor_sink, hash, POLY_MODE_CALL, device, opt, devec, tc_opt, use_tc);
   if (!plan) {
     plan = poly_compile_schedule(ctx, sched, device);
     if (!plan) return -1;
@@ -1297,36 +1419,42 @@ int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
   void **slot_data = build_slot_data_from_bindings(ctx, sched, bindings, n_bindings);
   if (!slot_data) return -1;
 
-  int ret = poly_compiled_plan_run(plan, slot_data, sched->n_buf_slots,
-                                   var_bindings, n_var_bindings);
+  int ret =
+      poly_compiled_plan_run(plan, slot_data, sched->n_buf_slots, var_bindings, n_var_bindings);
   free(slot_data);
   return ret;
 }
 
-int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
-                     PolyUOp **buffers, void **datas, int n) {
-  return poly_realize_flat_device(ctx, tensor_sink, buffers, datas, n,
-                                  POLY_DEVICE_AUTO);
+int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink, PolyUOp **buffers, void **datas, int n) {
+  return poly_realize_flat_device(ctx, tensor_sink, buffers, datas, n, POLY_DEVICE_AUTO);
 }
 
-int poly_realize_flat_device(PolyCtx *ctx, PolyUOp *tensor_sink,
-                             PolyUOp **buffers, void **datas, int n,
-                             PolyDeviceId device) {
+int poly_realize_flat_device(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp **buffers,
+    void **datas,
+    int n,
+    PolyDeviceId device
+) {
   /* datas[] are host pointers -- only host-addressable devices are valid.
    * For device-memory backends (CUDA/HIP), use poly_realize with proper
    * PolyBufferHandle bindings that carry device pointers. */
   PolyDeviceId dom = (device == POLY_DEVICE_AUTO) ? POLY_DEVICE_CPU : device;
   if (dom != POLY_DEVICE_AUTO && !poly_device_is_host_addressable(dom)) {
-    fprintf(stderr, "poly_realize_flat_device: device %d is not host-addressable, "
-            "use poly_realize with device-memory bindings\n", dom);
+    fprintf(
+        stderr,
+        "poly_realize_flat_device: device %d is not host-addressable, "
+        "use poly_realize with device-memory bindings\n",
+        dom
+    );
     return -1;
   }
-  PolyBufferBinding *bindings = calloc((size_t)(n > 0 ? n : 1),
-                                       sizeof(PolyBufferBinding));
+  PolyBufferBinding *bindings = calloc((size_t)(n > 0 ? n : 1), sizeof(PolyBufferBinding));
   if (!bindings) return -1;
   for (int i = 0; i < n; i++) {
     bindings[i].buffer = buffers[i];
-    bindings[i].handle = (PolyBufferHandle){ datas[i], 0, dom, false };
+    bindings[i].handle = (PolyBufferHandle){datas[i], 0, dom, false};
   }
   int ret = poly_realize(ctx, tensor_sink, bindings, n);
   free(bindings);
@@ -1335,7 +1463,7 @@ int poly_realize_flat_device(PolyCtx *ctx, PolyUOp *tensor_sink,
 
 #ifndef __EMSCRIPTEN__
 
-/* ── Stateful realize builder ────────────────────────────────────────── */
+/* Stateful realize builder */
 
 static PolyBufferBinding g_realize_bindings[POLY_MAX_REALIZE_BUFS];
 static int g_realize_n = 0;
@@ -1348,12 +1476,11 @@ void poly_realize_begin(PolyCtx *ctx) {
 void poly_realize_bind(PolyCtx *ctx, PolyUOp *buffer, void *data) {
   (void)ctx;
   if (g_realize_n >= POLY_MAX_REALIZE_BUFS) {
-    fprintf(stderr, "polygrad: realize_bind: too many bindings (max %d)\n",
-            POLY_MAX_REALIZE_BUFS);
+    fprintf(stderr, "polygrad: realize_bind: too many bindings (max %d)\n", POLY_MAX_REALIZE_BUFS);
     return;
   }
   g_realize_bindings[g_realize_n].buffer = buffer;
-  g_realize_bindings[g_realize_n].handle = (PolyBufferHandle){ data, 0, POLY_DEVICE_CPU, false };
+  g_realize_bindings[g_realize_n].handle = (PolyBufferHandle){data, 0, POLY_DEVICE_CPU, false};
   g_realize_n++;
 }
 
@@ -1363,8 +1490,7 @@ int poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink) {
   return ret;
 }
 
-/* ── CUDA realize (DEPRECATED stubs) ─────────────────────────────────
- * These are kept for Python/JS frontend backward compatibility.
+/* CUDA realize (DEPRECATED stubs) * These are kept for Python/JS frontend backward compatibility.
  * New code should use poly_realize() with CUDA-domain PolyBufferHandle bindings.
  */
 
@@ -1376,7 +1502,7 @@ static int cuda_realize_counter = 0;
 typedef struct {
   uint32_t hash;
   PolyCudaProgram *prog;
-  int grid_x;      /* grid blocks in x */
+  int grid_x; /* grid blocks in x */
   int block_size;
 } CudaCacheEntry;
 
@@ -1434,8 +1560,12 @@ void poly_cuda_prog_cache_flush(void) {
   cuda_prog_cache_n = 0;
 }
 
-int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
-                     PolyBufferBinding *bindings, int n_bindings) {
+int poly_realize_cuda(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyBufferBinding *bindings,
+    int n_bindings
+) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: realize_cuda: expected SINK\n");
     return -1;
@@ -1447,11 +1577,15 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
   }
 
   /* Structural hash for CUDA program cache */
-  uint32_t cache_hash = poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  uint32_t cache_hash =
+      poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
 
   /* 1. Schedule */
   PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
-  if (sr.n_kernels < 1) { poly_schedule_result_free(&sr); return -1; }
+  if (sr.n_kernels < 1) {
+    poly_schedule_result_free(&sr);
+    return -1;
+  }
 
   int n_int = sr.n_intermediates;
 
@@ -1461,7 +1595,8 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
     d_intermediates = calloc(n_int, sizeof(unsigned long long));
     for (int b = 0; b < n_int; b++) {
       int itemsize = (sr.intermediate_itemsizes && sr.intermediate_itemsizes[b] > 0)
-                       ? sr.intermediate_itemsizes[b] : (int)sizeof(float);
+                         ? sr.intermediate_itemsizes[b]
+                         : (int)sizeof(float);
       d_intermediates[b] = poly_cuda_alloc(sr.intermediate_sizes[b] * itemsize);
     }
   }
@@ -1491,7 +1626,8 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
       if (!dptr) {
         fprintf(stderr, "polygrad: realize_cuda: GPU alloc failed for buffer %d\n", i);
         if (d_intermediates) {
-          for (int b = 0; b < n_int; b++) poly_cuda_free(d_intermediates[b]);
+          for (int b = 0; b < n_int; b++)
+            poly_cuda_free(d_intermediates[b]);
           free(d_intermediates);
         }
         poly_schedule_result_free(&sr);
@@ -1514,8 +1650,7 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
     inter_set = poly_map_new(n_int < 4 ? 4 : (size_t)n_int);
     for (int b = 0; b < n_int; b++) {
       PolyUOp *ib = sr.intermediate_buf_uops[b];
-      poly_map_set(inter_set, poly_ptr_hash(ib), ib,
-                   (PolyUOp *)(intptr_t)(b + 1), poly_ptr_eq);
+      poly_map_set(inter_set, poly_ptr_hash(ib), ib, (PolyUOp *)(intptr_t)(b + 1), poly_ptr_eq);
     }
   }
 
@@ -1524,7 +1659,8 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
     int k = sr.exec_order ? sr.exec_order[step] : step;
     if (!sr.kernel_n_params || !sr.param_to_buf || !sr.param_to_buf[k]) {
       fprintf(stderr, "polygrad: realize_cuda: missing PARAM mapping for kernel %d\n", k);
-      ret = -1; break;
+      ret = -1;
+      break;
     }
     int n_params = sr.kernel_n_params[k];
 
@@ -1552,14 +1688,16 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
           }
         }
       } else {
-        assert(buf->op != POLY_OP_BUFFERIZE &&
-               "unexpected BUFFERIZE in param_to_buf (old split path removed)");
+        assert(
+            buf->op != POLY_OP_BUFFERIZE &&
+            "unexpected BUFFERIZE in param_to_buf (old split path removed)"
+        );
       }
 
       if (!found) {
-        fprintf(stderr, "polygrad: realize_cuda: no GPU buffer for param %d in kernel %d\n",
-                i, k);
-        ret = -1; break;
+        fprintf(stderr, "polygrad: realize_cuda: no GPU buffer for param %d in kernel %d\n", i, k);
+        ret = -1;
+        break;
       }
       args[i] = &dptrs[i];
     }
@@ -1570,14 +1708,20 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
 
       if (cached) {
         /* Cache hit — just launch with stored grid/block dims */
-        ret = poly_cuda_launch(cached->prog, args, n_params,
-                               cached->grid_x, 1, 1, cached->block_size, 1, 1);
+        ret = poly_cuda_launch(
+            cached->prog, args, n_params, cached->grid_x, 1, 1, cached->block_size, 1, 1
+        );
         if (ret == 0) ret = poly_cuda_sync();
       } else {
         /* Cache miss — full pipeline */
         int n_lin;
         PolyUOp **lin = poly_linearize_cuda(ctx, sr.kernels[k], &n_lin);
-        if (!lin) { ret = -1; free(dptrs); free(args); break; }
+        if (!lin) {
+          ret = -1;
+          free(dptrs);
+          free(args);
+          break;
+        }
 
         /* Extract grid/block size from SPECIAL ops.
          * gidx* → global parallelism (grid dimension)
@@ -1603,7 +1747,12 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
         char *src = poly_render_cuda(lin, n_lin, fn_name, block_size);
         free(lin);
 
-        if (!src) { ret = -1; free(dptrs); free(args); break; }
+        if (!src) {
+          ret = -1;
+          free(dptrs);
+          free(args);
+          break;
+        }
 
         if (getenv("POLY_DUMP_CUDA"))
           fprintf(stderr, "=== CUDA SOURCE (%s) ===\n%s\n=== END ===\n", fn_name, src);
@@ -1611,7 +1760,11 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
         PolyCudaProgram *prog = poly_compile_cuda(src, fn_name);
         if (!prog) {
           fprintf(stderr, "=== FAILED CUDA SOURCE (%s) ===\n%s\n=== END ===\n", fn_name, src);
-          free(src); ret = -1; free(dptrs); free(args); break;
+          free(src);
+          ret = -1;
+          free(dptrs);
+          free(args);
+          break;
         }
         free(src);
 
@@ -1647,7 +1800,8 @@ int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
    * Only free intermediates (not cached). */
   if (inter_set) poly_map_destroy(inter_set);
   if (d_intermediates) {
-    for (int b = 0; b < n_int; b++) poly_cuda_free(d_intermediates[b]);
+    for (int b = 0; b < n_int; b++)
+      poly_cuda_free(d_intermediates[b]);
     free(d_intermediates);
   }
   poly_schedule_result_free(&sr);
@@ -1663,8 +1817,8 @@ void poly_cuda_flush_buffers(void) {
 int poly_cuda_copyback(PolyBufferBinding *bindings, int n_bindings) {
   for (int i = 0; i < n_bindings; i++) {
     int64_t n_elems = bindings[i].buffer->arg.i;
-    size_t bytes = (size_t)n_elems * poly_dtype_itemsize(
-        poly_dtype_scalar(bindings[i].buffer->dtype));
+    size_t bytes =
+        (size_t)n_elems * poly_dtype_itemsize(poly_dtype_scalar(bindings[i].buffer->dtype));
     GpuBufCacheEntry *cached = gpu_buf_lookup(bindings[i].handle.ptr, bytes);
     if (cached) {
       poly_cuda_copy_dtoh(bindings[i].handle.ptr, cached->gpu_ptr, bytes);
@@ -1677,7 +1831,7 @@ int poly_cuda_copyback(PolyBufferBinding *bindings, int n_bindings) {
 
 #endif /* !__EMSCRIPTEN__ */
 
-/* ── WASM kernel rendering ───────────────────────────────────────────── */
+/* WASM kernel rendering */
 
 static PolyUOp *g_kernel_bufs[POLY_MAX_REALIZE_BUFS];
 static int g_kernel_n_bufs = 0;
@@ -1691,14 +1845,18 @@ struct PolyWasmStepPlan {
   int n_total_buffers;
   int n_bindable_buffers;
   int *exec_order;
-  int64_t *buffer_sizes;  /* element count per buffer (bindable + intermediate) */
-  int *buffer_itemsizes;  /* bytes per element per buffer (e.g. 4 for f32, 8 for f64) */
+  int64_t *buffer_sizes; /* element count per buffer (bindable + intermediate) */
+  int *buffer_itemsizes; /* bytes per element per buffer (e.g. 4 for f32, 8 for f64) */
 };
 
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p);
 
-uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
-                                 int *wasm_len, int *n_bufs_out) {
+uint8_t *poly_render_kernel_wasm(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    int *wasm_len,
+    int *n_bufs_out
+) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: render_kernel_wasm: expected SINK\n");
     *wasm_len = 0;
@@ -1716,13 +1874,14 @@ uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
   /* Check kernel cache (structural: matches even with different BUFFER UOps) */
   if (comp) {
     uint32_t h = poly_structural_hash(comp);
-    PolyCachedKernel *cached = poly_map_get(poly_ctx_kernel_cache(ctx), h, comp, poly_structural_eq);
+    PolyCachedKernel *cached =
+        poly_map_get(poly_ctx_kernel_cache(ctx), h, comp, poly_structural_eq);
     if (cached) {
       /* Cache hit — return copy of cached bytes, collect NEW buffer ordering */
       uint8_t *copy = malloc(cached->len);
       if (copy) memcpy(copy, cached->bytes, cached->len);
-      g_kernel_n_bufs = poly_collect_ordered_buffers(ctx, tensor_sink,
-                                                 g_kernel_bufs, POLY_MAX_REALIZE_BUFS);
+      g_kernel_n_bufs =
+          poly_collect_ordered_buffers(ctx, tensor_sink, g_kernel_bufs, POLY_MAX_REALIZE_BUFS);
       *wasm_len = cached->len;
       *n_bufs_out = g_kernel_n_bufs;
       return copy;
@@ -1732,17 +1891,25 @@ uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
   /* Cache miss — full pipeline */
 
   /* 1. Reconstruct buffer ordering */
-  g_kernel_n_bufs = poly_collect_ordered_buffers(ctx, tensor_sink,
-                                             g_kernel_bufs, POLY_MAX_REALIZE_BUFS);
+  g_kernel_n_bufs =
+      poly_collect_ordered_buffers(ctx, tensor_sink, g_kernel_bufs, POLY_MAX_REALIZE_BUFS);
 
   /* 2. Schedule */
   PolyUOp *kernel = poly_schedule(ctx, tensor_sink);
-  if (!kernel) { *wasm_len = 0; *n_bufs_out = 0; return NULL; }
+  if (!kernel) {
+    *wasm_len = 0;
+    *n_bufs_out = 0;
+    return NULL;
+  }
 
   /* 3. Linearize */
   int n_lin;
   PolyUOp **lin = poly_linearize_env(ctx, kernel, &n_lin);
-  if (!lin) { *wasm_len = 0; *n_bufs_out = 0; return NULL; }
+  if (!lin) {
+    *wasm_len = 0;
+    *n_bufs_out = 0;
+    return NULL;
+  }
 
   /* 4. Render to WASM binary */
   int size;
@@ -1759,7 +1926,9 @@ uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
         ck->len = size;
         ck->n_bufs = g_kernel_n_bufs;
         memcpy(ck->bufs, g_kernel_bufs, g_kernel_n_bufs * sizeof(PolyUOp *));
-        poly_map_set(poly_ctx_kernel_cache(ctx), poly_structural_hash(comp), comp, ck, poly_structural_eq);
+        poly_map_set(
+            poly_ctx_kernel_cache(ctx), poly_structural_hash(comp), comp, ck, poly_structural_eq
+        );
       } else {
         free(ck);
       }
@@ -1800,8 +1969,8 @@ PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink)
   p->kernel_n_params = calloc((size_t)p->n_kernels, sizeof(int));
   p->kernel_param_buf_idxs = calloc((size_t)p->n_kernels, sizeof(int *));
   p->exec_order = calloc((size_t)p->n_kernels, sizeof(int));
-  if (!p->kernel_bytes || !p->kernel_lens || !p->kernel_n_params ||
-      !p->kernel_param_buf_idxs || !p->exec_order) {
+  if (!p->kernel_bytes || !p->kernel_lens || !p->kernel_n_params || !p->kernel_param_buf_idxs ||
+      !p->exec_order) {
     poly_wasm_stepplan_destroy(p);
     poly_schedule_result_free(&sr);
     return NULL;
@@ -1862,7 +2031,8 @@ PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink)
         poly_schedule_result_free(&sr);
         return NULL;
       }
-      for (int i = 0; i < n_params; i++) p->kernel_param_buf_idxs[k][i] = -1;
+      for (int i = 0; i < n_params; i++)
+        p->kernel_param_buf_idxs[k][i] = -1;
       for (int i = 0; i < n_params; i++) {
         PolyUOp *pb = (sr.param_to_buf && sr.param_to_buf[k]) ? sr.param_to_buf[k][i] : NULL;
         int idx = -1;
@@ -1877,8 +2047,11 @@ PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink)
     }
   }
 
-  if (sr.exec_order) memcpy(p->exec_order, sr.exec_order, (size_t)p->n_kernels * sizeof(int));
-  else for (int i = 0; i < p->n_kernels; i++) p->exec_order[i] = i;
+  if (sr.exec_order)
+    memcpy(p->exec_order, sr.exec_order, (size_t)p->n_kernels * sizeof(int));
+  else
+    for (int i = 0; i < p->n_kernels; i++)
+      p->exec_order[i] = i;
 
   poly_schedule_result_free(&sr);
   return p;
@@ -1911,7 +2084,8 @@ int poly_wasm_stepplan_kernel_param_buf_index(const PolyWasmStepPlan *p, int k, 
   if (!p || k < 0 || k >= p->n_kernels) return -1;
   if (param_idx < 0 || param_idx >= p->kernel_n_params[k]) return -1;
   return p->kernel_param_buf_idxs && p->kernel_param_buf_idxs[k]
-    ? p->kernel_param_buf_idxs[k][param_idx] : -1;
+             ? p->kernel_param_buf_idxs[k][param_idx]
+             : -1;
 }
 
 const int *poly_wasm_stepplan_exec_order(const PolyWasmStepPlan *p, int *n) {
@@ -1928,45 +2102,47 @@ int64_t poly_wasm_stepplan_buf_size(const PolyWasmStepPlan *p, int buf_idx) {
 int64_t poly_wasm_stepplan_buf_nbytes(const PolyWasmStepPlan *p, int buf_idx) {
   if (!p || buf_idx < 0 || buf_idx >= p->n_total_buffers) return 0;
   int64_t elems = p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
-  int itemsize = (p->buffer_itemsizes && buf_idx < p->n_total_buffers)
-                   ? p->buffer_itemsizes[buf_idx] : 4;
+  int itemsize =
+      (p->buffer_itemsizes && buf_idx < p->n_total_buffers) ? p->buffer_itemsizes[buf_idx] : 4;
   return elems * itemsize;
 }
 
 int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi) {
   if (!p || bi < 0 || bi >= p->n_bindable_buffers) return -1;
-  return bi;  /* identity today; explicit contract for future indirection */
+  return bi; /* identity today; explicit contract for future indirection */
 }
-
 
 int poly_abi_version(void) {
   return POLYGRAD_ABI_VERSION;
 }
 
-/* ── WebGPU step plan ────────────────────────────────────────────────── */
+/* WebGPU step plan */
 
 struct PolyWebGpuStepPlan {
   int n_kernels;
-  char **kernel_wgsl;         /* WGSL source per kernel (malloc'd strings) */
+  char **kernel_wgsl; /* WGSL source per kernel (malloc'd strings) */
   int *kernel_wgsl_lens;
   int *kernel_n_params;
   int **kernel_param_buf_idxs;
-  int *kernel_grid;           /* [k*3+dim]: dispatch workgroup counts */
-  int *kernel_local;          /* [k*3+dim]: workgroup sizes */
+  int *kernel_grid; /* [k*3+dim]: dispatch workgroup counts */
+  int *kernel_local; /* [k*3+dim]: workgroup sizes */
   int n_total_buffers;
   int n_bindable_buffers;
   int *exec_order;
-  int64_t *buffer_sizes;      /* element count per buffer */
-  int *buffer_itemsizes;      /* bytes per element per buffer */
+  int64_t *buffer_sizes; /* element count per buffer */
+  int *buffer_itemsizes; /* bytes per element per buffer */
 };
 
 /* Extract grid/local dimensions from linearized UOps.
  * SPECIAL("gidxN") → grid[N] = bound, SPECIAL("lidxN") → local[N] = bound.
  * Grid dispatch = global_bound for gidx (it's workgroup count, not thread count). */
-static void webgpu_extract_dims(PolyUOp **lin, int n_lin,
-                                 int grid[3], int local[3]) {
-  grid[0] = 1; grid[1] = 1; grid[2] = 1;
-  local[0] = 1; local[1] = 1; local[2] = 1;
+static void webgpu_extract_dims(PolyUOp **lin, int n_lin, int grid[3], int local[3]) {
+  grid[0] = 1;
+  grid[1] = 1;
+  grid[2] = 1;
+  local[0] = 1;
+  local[1] = 1;
+  local[2] = 1;
 
   for (int j = 0; j < n_lin; j++) {
     if (lin[j]->op != POLY_OP_SPECIAL) continue;
@@ -1999,7 +2175,10 @@ PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_s
   }
 
   PolyWebGpuStepPlan *p = calloc(1, sizeof(*p));
-  if (!p) { poly_schedule_result_free(&sr); return NULL; }
+  if (!p) {
+    poly_schedule_result_free(&sr);
+    return NULL;
+  }
 
   p->n_kernels = sr.n_kernels;
   p->kernel_wgsl = calloc((size_t)p->n_kernels, sizeof(char *));
@@ -2009,9 +2188,8 @@ PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_s
   p->kernel_grid = calloc((size_t)p->n_kernels * 3, sizeof(int));
   p->kernel_local = calloc((size_t)p->n_kernels * 3, sizeof(int));
   p->exec_order = calloc((size_t)p->n_kernels, sizeof(int));
-  if (!p->kernel_wgsl || !p->kernel_wgsl_lens || !p->kernel_n_params ||
-      !p->kernel_param_buf_idxs || !p->kernel_grid || !p->kernel_local ||
-      !p->exec_order) {
+  if (!p->kernel_wgsl || !p->kernel_wgsl_lens || !p->kernel_n_params || !p->kernel_param_buf_idxs ||
+      !p->kernel_grid || !p->kernel_local || !p->exec_order) {
     poly_webgpu_stepplan_destroy(p);
     poly_schedule_result_free(&sr);
     return NULL;
@@ -2054,7 +2232,7 @@ PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_s
     }
 
     /* Extract grid and local dims from SPECIAL ops */
-    webgpu_extract_dims(lin, n_lin, &p->kernel_grid[k*3], &p->kernel_local[k*3]);
+    webgpu_extract_dims(lin, n_lin, &p->kernel_grid[k * 3], &p->kernel_local[k * 3]);
 
     /* Render WGSL source */
     char fn_name[64];
@@ -2083,7 +2261,8 @@ PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_s
         poly_schedule_result_free(&sr);
         return NULL;
       }
-      for (int i = 0; i < n_params; i++) p->kernel_param_buf_idxs[k][i] = -1;
+      for (int i = 0; i < n_params; i++)
+        p->kernel_param_buf_idxs[k][i] = -1;
       for (int i = 0; i < n_params; i++) {
         PolyUOp *pb = (sr.param_to_buf && sr.param_to_buf[k]) ? sr.param_to_buf[k][i] : NULL;
         int idx = -1;
@@ -2098,14 +2277,17 @@ PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_s
     }
   }
 
-  if (sr.exec_order) memcpy(p->exec_order, sr.exec_order, (size_t)p->n_kernels * sizeof(int));
-  else for (int i = 0; i < p->n_kernels; i++) p->exec_order[i] = i;
+  if (sr.exec_order)
+    memcpy(p->exec_order, sr.exec_order, (size_t)p->n_kernels * sizeof(int));
+  else
+    for (int i = 0; i < p->n_kernels; i++)
+      p->exec_order[i] = i;
 
   poly_schedule_result_free(&sr);
   return p;
 }
 
-/* ── WebGPU step plan accessors ──────────────────────────────────────── */
+/* WebGPU step plan accessors */
 
 int poly_webgpu_stepplan_n_kernels(const PolyWebGpuStepPlan *p) {
   return p ? p->n_kernels : 0;
@@ -2149,7 +2331,8 @@ int poly_webgpu_stepplan_kernel_param_buf_index(const PolyWebGpuStepPlan *p, int
   if (!p || k < 0 || k >= p->n_kernels) return -1;
   if (param_idx < 0 || param_idx >= p->kernel_n_params[k]) return -1;
   return p->kernel_param_buf_idxs && p->kernel_param_buf_idxs[k]
-    ? p->kernel_param_buf_idxs[k][param_idx] : -1;
+             ? p->kernel_param_buf_idxs[k][param_idx]
+             : -1;
 }
 
 const int *poly_webgpu_stepplan_exec_order(const PolyWebGpuStepPlan *p, int *n) {
@@ -2166,19 +2349,21 @@ int64_t poly_webgpu_stepplan_buf_size(const PolyWebGpuStepPlan *p, int buf_idx) 
 int64_t poly_webgpu_stepplan_buf_nbytes(const PolyWebGpuStepPlan *p, int buf_idx) {
   if (!p || buf_idx < 0 || buf_idx >= p->n_total_buffers) return 0;
   int64_t elems = p->buffer_sizes ? p->buffer_sizes[buf_idx] : 0;
-  int itemsize = (p->buffer_itemsizes && buf_idx < p->n_total_buffers)
-                   ? p->buffer_itemsizes[buf_idx] : 4;
+  int itemsize =
+      (p->buffer_itemsizes && buf_idx < p->n_total_buffers) ? p->buffer_itemsizes[buf_idx] : 4;
   return elems * itemsize;
 }
 
 void poly_webgpu_stepplan_destroy(PolyWebGpuStepPlan *p) {
   if (!p) return;
   if (p->kernel_wgsl) {
-    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_wgsl[i]);
+    for (int i = 0; i < p->n_kernels; i++)
+      free(p->kernel_wgsl[i]);
     free(p->kernel_wgsl);
   }
   if (p->kernel_param_buf_idxs) {
-    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_param_buf_idxs[i]);
+    for (int i = 0; i < p->n_kernels; i++)
+      free(p->kernel_param_buf_idxs[i]);
     free(p->kernel_param_buf_idxs);
   }
   free(p->kernel_wgsl_lens);
@@ -2194,11 +2379,13 @@ void poly_webgpu_stepplan_destroy(PolyWebGpuStepPlan *p) {
 void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
   if (!p) return;
   if (p->kernel_bytes) {
-    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_bytes[i]);
+    for (int i = 0; i < p->n_kernels; i++)
+      free(p->kernel_bytes[i]);
     free(p->kernel_bytes);
   }
   if (p->kernel_param_buf_idxs) {
-    for (int i = 0; i < p->n_kernels; i++) free(p->kernel_param_buf_idxs[i]);
+    for (int i = 0; i < p->n_kernels; i++)
+      free(p->kernel_param_buf_idxs[i]);
     free(p->kernel_param_buf_idxs);
   }
   free(p->kernel_lens);
@@ -2212,38 +2399,47 @@ void poly_wasm_stepplan_destroy(PolyWasmStepPlan *p) {
 /* Debug helper — check opset state */
 void poly_debug_opsets(void) {
   fprintf(stderr, "=== OpSet debug ===\n");
-  fprintf(stderr, "POLY_GROUP_ALU.bits = [%llu, %llu]\n",
-    (unsigned long long)POLY_GROUP_ALU.bits[0],
-    (unsigned long long)POLY_GROUP_ALU.bits[1]);
-  fprintf(stderr, "POLY_GROUP_UNARY.bits = [%llu, %llu]\n",
-    (unsigned long long)POLY_GROUP_UNARY.bits[0],
-    (unsigned long long)POLY_GROUP_UNARY.bits[1]);
-  fprintf(stderr, "POLY_GROUP_BINARY.bits = [%llu, %llu]\n",
-    (unsigned long long)POLY_GROUP_BINARY.bits[0],
-    (unsigned long long)POLY_GROUP_BINARY.bits[1]);
-  fprintf(stderr, "poly_opset_has(ALU, ADD=%d) = %d\n",
-    POLY_OP_ADD, poly_opset_has(POLY_GROUP_ALU, POLY_OP_ADD));
-  fprintf(stderr, "poly_opset_has(BINARY, ADD=%d) = %d\n",
-    POLY_OP_ADD, poly_opset_has(POLY_GROUP_BINARY, POLY_OP_ADD));
+  fprintf(
+      stderr, "POLY_GROUP_ALU.bits = [%llu, %llu]\n", (unsigned long long)POLY_GROUP_ALU.bits[0],
+      (unsigned long long)POLY_GROUP_ALU.bits[1]
+  );
+  fprintf(
+      stderr, "POLY_GROUP_UNARY.bits = [%llu, %llu]\n",
+      (unsigned long long)POLY_GROUP_UNARY.bits[0], (unsigned long long)POLY_GROUP_UNARY.bits[1]
+  );
+  fprintf(
+      stderr, "POLY_GROUP_BINARY.bits = [%llu, %llu]\n",
+      (unsigned long long)POLY_GROUP_BINARY.bits[0], (unsigned long long)POLY_GROUP_BINARY.bits[1]
+  );
+  fprintf(
+      stderr, "poly_opset_has(ALU, ADD=%d) = %d\n", POLY_OP_ADD,
+      poly_opset_has(POLY_GROUP_ALU, POLY_OP_ADD)
+  );
+  fprintf(
+      stderr, "poly_opset_has(BINARY, ADD=%d) = %d\n", POLY_OP_ADD,
+      poly_opset_has(POLY_GROUP_BINARY, POLY_OP_ADD)
+  );
   fprintf(stderr, "===================\n");
 }
 
-
-
-
 /* Debug helper — print UOp info */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u) {
-  if (!u) { fprintf(stderr, "poly_debug_uop: NULL\n"); return; }
-  fprintf(stderr, "UOp@%p: op=%s(%d) n_src=%d arg.kind=%d",
-          (void*)u, poly_op_name(u->op), u->op, u->n_src, u->arg.kind);
-  if (u->arg.kind == POLY_ARG_INT)
-    fprintf(stderr, " arg.i=%lld", (long long)u->arg.i);
-  if (u->arg.kind == POLY_ARG_FLOAT)
-    fprintf(stderr, " arg.f=%f", u->arg.f);
+  if (!u) {
+    fprintf(stderr, "poly_debug_uop: NULL\n");
+    return;
+  }
+  fprintf(
+      stderr, "UOp@%p: op=%s(%d) n_src=%d arg.kind=%d", (void *)u, poly_op_name(u->op), u->op,
+      u->n_src, u->arg.kind
+  );
+  if (u->arg.kind == POLY_ARG_INT) fprintf(stderr, " arg.i=%lld", (long long)u->arg.i);
+  if (u->arg.kind == POLY_ARG_FLOAT) fprintf(stderr, " arg.f=%f", u->arg.f);
   fprintf(stderr, "\n");
   for (int i = 0; i < u->n_src; i++) {
-    fprintf(stderr, "  src[%d]: @%p op=%s(%d)\n", i, (void*)u->src[i],
-            poly_op_name(u->src[i]->op), u->src[i]->op);
+    fprintf(
+        stderr, "  src[%d]: @%p op=%s(%d)\n", i, (void *)u->src[i], poly_op_name(u->src[i]->op),
+        u->src[i]->op
+    );
   }
   /* Try shape */
   PolyShape s = poly_uop_shape(ctx, u);
@@ -2259,4 +2455,3 @@ void poly_debug_uop(PolyCtx *ctx, PolyUOp *u) {
     fprintf(stderr, "  shape: NONE\n");
   }
 }
-

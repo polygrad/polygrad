@@ -9,21 +9,20 @@
 #include <stdlib.h>
 #include <math.h>
 
-/* ── Specs ──────────────────────────────────────────────────────────── */
+/* Specs */
 
 static const char *simple_tabm_spec =
-  "{\"layers\":[2,4,1],\"activation\":\"relu\","
-  "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
+    "{\"layers\":[2,4,1],\"activation\":\"relu\","
+    "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
 
 static const char *ce_tabm_spec =
-  "{\"layers\":[2,4,3],\"activation\":\"relu\","
-  "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
+    "{\"layers\":[2,4,3],\"activation\":\"relu\","
+    "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
 
-/* ── Tests ──────────────────────────────────────────────────────────── */
+/* Tests */
 
 TEST(tabm, create_simple) {
-  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec,
-                                           (int)strlen(simple_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
   /* 2 layers * 4 params = 8 params (weight + r + s + b per layer) */
@@ -52,28 +51,27 @@ TEST(tabm, create_simple) {
   /* layers.0.r: (4, 2) -- k=4, in_dim=2 */
   ndim = poly_instance_param_shape(inst, 1, shape, 8);
   ASSERT_INT_EQ(ndim, 2);
-  ASSERT_INT_EQ((int)shape[0], 4);  /* k */
-  ASSERT_INT_EQ((int)shape[1], 2);  /* in_dim */
+  ASSERT_INT_EQ((int)shape[0], 4); /* k */
+  ASSERT_INT_EQ((int)shape[1], 2); /* in_dim */
 
   /* layers.0.s: (4, 4) -- k=4, out_dim=4 */
   ndim = poly_instance_param_shape(inst, 2, shape, 8);
   ASSERT_INT_EQ(ndim, 2);
-  ASSERT_INT_EQ((int)shape[0], 4);  /* k */
-  ASSERT_INT_EQ((int)shape[1], 4);  /* out_dim */
+  ASSERT_INT_EQ((int)shape[0], 4); /* k */
+  ASSERT_INT_EQ((int)shape[1], 4); /* out_dim */
 
   /* layers.0.b: (4, 4) -- k=4, out_dim=4 */
   ndim = poly_instance_param_shape(inst, 3, shape, 8);
   ASSERT_INT_EQ(ndim, 2);
-  ASSERT_INT_EQ((int)shape[0], 4);  /* k */
-  ASSERT_INT_EQ((int)shape[1], 4);  /* out_dim */
+  ASSERT_INT_EQ((int)shape[0], 4); /* k */
+  ASSERT_INT_EQ((int)shape[1], 4); /* out_dim */
 
   poly_instance_free(inst);
   PASS();
 }
 
 TEST(tabm, init_values) {
-  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec,
-                                           (int)strlen(simple_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
   /* r should be initialized to ones */
@@ -97,7 +95,7 @@ TEST(tabm, init_values) {
 
   /* weight should have Kaiming init (bounded) */
   float *w = poly_instance_param_data(inst, 0, &numel);
-  float bound = sqrtf(6.0f / 2.0f);  /* fan_in = 2 */
+  float bound = sqrtf(6.0f / 2.0f); /* fan_in = 2 */
   for (int64_t i = 0; i < numel; i++)
     ASSERT_TRUE(w[i] >= -bound && w[i] <= bound);
 
@@ -106,10 +104,8 @@ TEST(tabm, init_values) {
 }
 
 TEST(tabm, deterministic_init) {
-  PolyInstance *inst1 = poly_tabm_instance(simple_tabm_spec,
-                                            (int)strlen(simple_tabm_spec));
-  PolyInstance *inst2 = poly_tabm_instance(simple_tabm_spec,
-                                            (int)strlen(simple_tabm_spec));
+  PolyInstance *inst1 = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
+  PolyInstance *inst2 = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -127,12 +123,11 @@ TEST(tabm, deterministic_init) {
 }
 
 TEST(tabm, forward_produces_output) {
-  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec,
-                                           (int)strlen(simple_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
-  float x[] = { 1.0f, 2.0f };
-  PolyIOBinding inputs[] = { { "x", x } };
+  float x[] = {1.0f, 2.0f};
+  PolyIOBinding inputs[] = {{"x", x}};
 
   int ret = poly_instance_forward(inst, inputs, 1);
   ASSERT_INT_EQ(ret, 0);
@@ -145,7 +140,7 @@ TEST(tabm, forward_produces_output) {
       int64_t numel;
       float *out = poly_instance_buf_data(inst, i, &numel);
       ASSERT_NOT_NULL(out);
-      ASSERT_INT_EQ((int)numel, 1);  /* batch=1, out_dim=1 */
+      ASSERT_INT_EQ((int)numel, 1); /* batch=1, out_dim=1 */
       ASSERT_TRUE(isfinite(out[0]));
       found_output = 1;
       break;
@@ -158,12 +153,11 @@ TEST(tabm, forward_produces_output) {
 }
 
 TEST(tabm, forward_deterministic) {
-  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec,
-                                           (int)strlen(simple_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
-  float x[] = { 1.0f, 2.0f };
-  PolyIOBinding inputs[] = { { "x", x } };
+  float x[] = {1.0f, 2.0f};
+  PolyIOBinding inputs[] = {{"x", x}};
 
   poly_instance_forward(inst, inputs, 1);
   float out1 = 0.0f;
@@ -195,18 +189,16 @@ TEST(tabm, forward_deterministic) {
 }
 
 TEST(tabm, train_mse_loss_decreases) {
-  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec,
-                                           (int)strlen(simple_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 1.0f, 2.0f };
-  float y[] = { 5.0f };
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -227,18 +219,16 @@ TEST(tabm, train_mse_loss_decreases) {
 }
 
 TEST(tabm, train_cross_entropy_loss_decreases) {
-  PolyInstance *inst = poly_tabm_instance(ce_tabm_spec,
-                                           (int)strlen(ce_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(ce_tabm_spec, (int)strlen(ce_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 1.0f, 0.0f };
-  float y[] = { 0.0f, 1.0f, 0.0f };
+  float x[] = {1.0f, 0.0f};
+  float y[] = {0.0f, 1.0f, 0.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -259,23 +249,21 @@ TEST(tabm, train_cross_entropy_loss_decreases) {
 }
 
 TEST(tabm, save_load_roundtrip) {
-  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec,
-                                           (int)strlen(simple_tabm_spec));
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);
 
   /* Run a few training steps */
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
-  float x[] = { 1.0f, 2.0f };
-  float y[] = { 5.0f };
-  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
   for (int i = 0; i < 10; i++) {
     float loss;
     poly_instance_train_step(inst, io, 2, &loss);
   }
 
   /* Forward to get prediction before save */
-  PolyIOBinding fwd[] = { { "x", x } };
+  PolyIOBinding fwd[] = {{"x", x}};
   poly_instance_forward(inst, fwd, 1);
   float pred_before = 0.0f;
   int n_bufs = poly_instance_buf_count(inst);

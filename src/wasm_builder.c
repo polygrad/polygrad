@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Byte buffer ─────────────────────────────────────────────────────── */
+/* Byte buffer */
 
 void wb_init(WasmBuf *b) {
   b->cap = 256;
@@ -47,7 +47,7 @@ void wb_append(WasmBuf *dst, const WasmBuf *src) {
   wb_bytes(dst, src->data, src->len);
 }
 
-/* ── LEB128 encoding ─────────────────────────────────────────────────── */
+/* LEB128 encoding */
 
 void wb_uleb128(WasmBuf *b, uint64_t v) {
   do {
@@ -73,7 +73,7 @@ void wb_sleb128(WasmBuf *b, int64_t v) {
   }
 }
 
-/* ── Numeric encoding ────────────────────────────────────────────────── */
+/* Numeric encoding */
 
 void wb_f32(WasmBuf *b, float v) {
   uint8_t bytes[4];
@@ -87,7 +87,7 @@ void wb_f64(WasmBuf *b, double v) {
   wb_bytes(b, bytes, 8);
 }
 
-/* ── String encoding ─────────────────────────────────────────────────── */
+/* String encoding */
 
 void wb_name(WasmBuf *b, const char *s) {
   int len = (int)strlen(s);
@@ -95,7 +95,7 @@ void wb_name(WasmBuf *b, const char *s) {
   wb_bytes(b, (const uint8_t *)s, len);
 }
 
-/* ── Module-level helpers ────────────────────────────────────────────── */
+/* Module-level helpers */
 
 void wb_module_header(WasmBuf *b) {
   /* Magic number: \0asm */

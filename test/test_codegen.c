@@ -4,15 +4,15 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
-#include "../src/frontend.h"  /* PolyWebGpuStepPlan, poly_render_step_webgpu_plan */
-#include "../src/tensor.h"    /* poly_sum_reduce */
+#include "../src/frontend.h" /* PolyWebGpuStepPlan, poly_render_step_webgpu_plan */
+#include "../src/tensor.h" /* poly_sum_reduce */
 
-/* ── Helper: build c[i] = a[i] OP b[i] kernel IR ────────────────────── */
+/* Helper: build c[i] = a[i] OP b[i] kernel IR */
 
 typedef struct {
   PolyCtx *ctx;
   PolyUOp *sink;
-  int n;         /* loop bound */
+  int n; /* loop bound */
 } VecKernel;
 
 static VecKernel make_vec_binop(PolyOps alu_op, int n) {
@@ -44,24 +44,24 @@ static VecKernel make_vec_binop(PolyOps alu_op, int n) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, alu, poly_arg_none());
 
   /* end loop + sink */
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
-  return (VecKernel){ ctx, sink, n };
+  return (VecKernel){ctx, sink, n};
 }
 
 static int count_lin_ops(PolyUOp **lin, int n, PolyOps op) {
   int c = 0;
-  for (int i = 0; i < n; i++) if (lin[i]->op == op) c++;
+  for (int i = 0; i < n; i++)
+    if (lin[i]->op == op) c++;
   return c;
 }
 
 static int count_special_named(PolyUOp **lin, int n, const char *name) {
   int c = 0;
   for (int i = 0; i < n; i++) {
-    if (lin[i]->op == POLY_OP_SPECIAL && lin[i]->arg.str &&
-        strcmp(lin[i]->arg.str, name) == 0) c++;
+    if (lin[i]->op == POLY_OP_SPECIAL && lin[i]->arg.str && strcmp(lin[i]->arg.str, name) == 0) c++;
   }
   return c;
 }
@@ -75,7 +75,7 @@ static int find_webgpu_kernel(PolyWebGpuStepPlan *plan, const char *a, const cha
   return -1;
 }
 
-/* ── Linearizer tests ────────────────────────────────────────────────── */
+/* Linearizer tests */
 
 TEST(codegen, linearize_order) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
@@ -89,10 +89,10 @@ TEST(codegen, linearize_order) {
   ASSERT_TRUE(lin[2]->op == POLY_OP_PARAM);
 
   /* SINK should be last */
-  ASSERT_TRUE(lin[n-1]->op == POLY_OP_SINK);
+  ASSERT_TRUE(lin[n - 1]->op == POLY_OP_SINK);
 
   /* END should come just before SINK */
-  ASSERT_TRUE(lin[n-2]->op == POLY_OP_END);
+  ASSERT_TRUE(lin[n - 2]->op == POLY_OP_END);
 
   free(lin);
   poly_ctx_destroy(k.ctx);
@@ -110,7 +110,10 @@ TEST(codegen, linearize_deps) {
       PolyUOp *src = lin[i]->src[j];
       bool found = false;
       for (int k = 0; k < i; k++) {
-        if (lin[k] == src) { found = true; break; }
+        if (lin[k] == src) {
+          found = true;
+          break;
+        }
       }
       ASSERT_TRUE(found);
     }
@@ -136,17 +139,19 @@ TEST(codegen, reduce_merge_shared_end) {
   PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pin, r0, poly_arg_none());
   PolyUOp *in_ld = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_idx, poly_arg_none());
 
-  PolyUOp *red0_srcs[2] = { in_ld, r0 };
-  PolyUOp *red1_srcs[2] = { in_ld, r0 };
-  PolyUOp *sum = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red0_srcs, 2, poly_arg_ops(POLY_OP_ADD));
-  PolyUOp *mx = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red1_srcs, 2, poly_arg_ops(POLY_OP_MAX));
+  PolyUOp *red0_srcs[2] = {in_ld, r0};
+  PolyUOp *red1_srcs[2] = {in_ld, r0};
+  PolyUOp *sum =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red0_srcs, 2, poly_arg_ops(POLY_OP_ADD));
+  PolyUOp *mx =
+      poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red1_srcs, 2, poly_arg_ops(POLY_OP_MAX));
 
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *out0_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pout0, zero, poly_arg_none());
   PolyUOp *out1_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pout1, zero, poly_arg_none());
   PolyUOp *st0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out0_idx, sum, poly_arg_none());
   PolyUOp *st1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out1_idx, mx, poly_arg_none());
-  PolyUOp *stores[2] = { st0, st1 };
+  PolyUOp *stores[2] = {st0, st1};
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 2, poly_arg_none());
 
   int n = 0;
@@ -160,7 +165,7 @@ TEST(codegen, reduce_merge_shared_end) {
   PASS();
 }
 
-/* ── Renderer tests ──────────────────────────────────────────────────── */
+/* Renderer tests */
 
 TEST(codegen, render_vecadd) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
@@ -202,7 +207,7 @@ TEST(codegen, render_vecmul) {
   PASS();
 }
 
-/* ── End-to-end tests ────────────────────────────────────────────────── */
+/* End-to-end tests */
 
 TEST(codegen, e2e_vecadd) {
   /* c[i] = a[i] + b[i] for i in 0..9 */
@@ -216,12 +221,12 @@ TEST(codegen, e2e_vecadd) {
 
   float a[10], b[10], c[10];
   for (int i = 0; i < 10; i++) {
-    a[i] = (float)(i + 1);         /* 1, 2, ..., 10 */
-    b[i] = (float)((i + 1) * 10);  /* 10, 20, ..., 100 */
+    a[i] = (float)(i + 1); /* 1, 2, ..., 10 */
+    b[i] = (float)((i + 1) * 10); /* 10, 20, ..., 100 */
     c[i] = 0.0f;
   }
 
-  void *args[3] = { a, b, c };
+  void *args[3] = {a, b, c};
   poly_program_call(prog, args, 3);
 
   for (int i = 0; i < 10; i++) {
@@ -252,7 +257,7 @@ TEST(codegen, e2e_vecmul) {
     c[i] = 0.0f;
   }
 
-  void *args[3] = { a, b, c };
+  void *args[3] = {a, b, c};
   poly_program_call(prog, args, 3);
 
   for (int i = 0; i < 8; i++) {
@@ -276,11 +281,11 @@ TEST(codegen, e2e_vecsub) {
   PolyProgram *prog = poly_compile_c(src, "vecsub");
   ASSERT_NOT_NULL(prog);
 
-  float a[4] = { 10, 20, 30, 40 };
-  float b[4] = { 1, 2, 3, 4 };
-  float c[4] = { 0 };
+  float a[4] = {10, 20, 30, 40};
+  float b[4] = {1, 2, 3, 4};
+  float c[4] = {0};
 
-  void *args[3] = { a, b, c };
+  void *args[3] = {a, b, c};
   poly_program_call(prog, args, 3);
 
   for (int i = 0; i < 4; i++) {
@@ -294,7 +299,7 @@ TEST(codegen, e2e_vecsub) {
   PASS();
 }
 
-/* ── WGSL renderer tests ─────────────────────────────────────────────── */
+/* WGSL renderer tests */
 
 TEST(codegen, render_wgsl_vecadd) {
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);
@@ -351,7 +356,7 @@ TEST(codegen, render_wgsl_vecmul) {
 
   ASSERT_NOT_NULL(strstr(src, "fn vecmul("));
   ASSERT_NOT_NULL(strstr(src, "ridx0 < 8"));
-  ASSERT_NOT_NULL(strstr(src, "*"));  /* multiply operator */
+  ASSERT_NOT_NULL(strstr(src, "*")); /* multiply operator */
 
   free(src);
   free(lin);
@@ -374,11 +379,11 @@ TEST(codegen, render_wgsl_unary) {
   PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
 
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
-  PolyUOp *neg  = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, load, poly_arg_none());
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, load, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, neg, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n;
@@ -420,13 +425,13 @@ TEST(codegen, render_wgsl_where) {
   PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(5.0));
   PolyUOp *cond = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, load0, five, poly_arg_none());
 
-  PolyUOp *where_src[3] = { cond, load0, load1 };
+  PolyUOp *where_src[3] = {cond, load0, load1};
   PolyUOp *where = poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT32, where_src, 3, poly_arg_none());
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, where, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n;
@@ -464,17 +469,18 @@ TEST(codegen, render_wgsl_uint32_ops) {
   PolyUOp *thirty_one = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(31));
 
   PolyUOp *cond = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, la, lb, poly_arg_none());
-  PolyUOp *rhs = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32,
-                           poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, la, one, poly_arg_none()),
-                           poly_uop2(ctx, POLY_OP_MOD, POLY_UINT32, la, thirty_one, poly_arg_none()),
-                           poly_arg_none());
+  PolyUOp *rhs = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_UINT32,
+      poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, la, one, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_MOD, POLY_UINT32, la, thirty_one, poly_arg_none()), poly_arg_none()
+  );
   PolyUOp *lhs = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT32, la, lb, poly_arg_none());
-  PolyUOp *sel_src[3] = { cond, rhs, lhs };
+  PolyUOp *sel_src[3] = {cond, rhs, lhs};
   PolyUOp *sel = poly_uop(ctx, POLY_OP_WHERE, POLY_UINT32, sel_src, 3, poly_arg_none());
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, sel, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n;
@@ -516,13 +522,13 @@ TEST(codegen, render_wgsl_reduce) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, acc, load, poly_arg_none());
   PolyUOp *store_acc = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, acc, add, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store_acc, range };
+  PolyUOp *end_src[2] = {store_acc, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
 
   /* store result */
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, zero, poly_arg_none());
-  PolyUOp *store_out_src[3] = { idx1, acc, end };
+  PolyUOp *store_out_src[3] = {idx1, acc, end};
   PolyUOp *store_out = poly_uop(ctx, POLY_OP_STORE, POLY_VOID, store_out_src, 3, poly_arg_none());
 
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store_out, poly_arg_none());
@@ -556,8 +562,7 @@ TEST(codegen, render_wgsl_define_var) {
 
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
   PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
-  PolyUOp *N  = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32,
-                           poly_arg_define_var("N", 1, 16));
+  PolyUOp *N = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("N", 1, 16));
 
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, N, poly_arg_int(0));
 
@@ -569,8 +574,8 @@ TEST(codegen, render_wgsl_define_var) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, cast_n, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, add, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n_lin;
@@ -598,7 +603,7 @@ TEST(codegen, render_wgsl_define_var) {
   PASS();
 }
 
-/* ── WebGPU step plan tests ──────────────────────────────────────────── */
+/* WebGPU step plan tests */
 
 TEST(codegen, webgpu_stepplan_vecadd) {
   /* c[i] = a[i] + b[i] for i in 0..1024 — verify WebGPU GPU dims and plan */
@@ -685,7 +690,7 @@ TEST(codegen, webgpu_stepplan_chain) {
   PASS();
 }
 
-/* ── WebGPU GPU linearizer output tests ──────────────────────────────── */
+/* WebGPU GPU linearizer output tests */
 
 TEST(codegen, linearize_webgpu_vecadd_emits_gpudims) {
   /* Verify GPU linearizer produces SPECIAL ops and correct WGSL builtins */
@@ -741,7 +746,7 @@ TEST(codegen, linearize_webgpu_reduce_emits_shared_barrier) {
   PASS();
 }
 
-/* ── Unary op end-to-end ─────────────────────────────────────────────── */
+/* Unary op end-to-end */
 
 TEST(codegen, e2e_neg) {
   /* b[i] = -a[i] for i in 0..5 */
@@ -758,11 +763,11 @@ TEST(codegen, e2e_neg) {
   PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
 
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
-  PolyUOp *neg  = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, load, poly_arg_none());
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, load, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, neg, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n;
@@ -772,10 +777,10 @@ TEST(codegen, e2e_neg) {
   PolyProgram *prog = poly_compile_c(src, "vecneg");
   ASSERT_NOT_NULL(prog);
 
-  float a[6] = { 1.0f, -2.5f, 3.14f, 0.0f, -100.0f, 42.0f };
-  float b[6] = { 0 };
+  float a[6] = {1.0f, -2.5f, 3.14f, 0.0f, -100.0f, 42.0f};
+  float b[6] = {0};
 
-  void *args[2] = { a, b };
+  void *args[2] = {a, b};
   poly_program_call(prog, args, 2);
 
   for (int i = 0; i < 6; i++) {

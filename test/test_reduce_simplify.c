@@ -12,30 +12,35 @@
 #include "../src/reduce_simplify.h"
 #include "../src/tensor.h"
 #include "../src/pat.h"
-#include "../src/scheduler.h"  /* poly_schedule, poly_reshape, poly_reduce_axis */
-#include "../src/codegen.h"    /* poly_linearize */
-#include "../src/frontend.h"   /* poly_buffer_f32, poly_sink1, poly_store_val */
+#include "../src/scheduler.h" /* poly_schedule, poly_reshape, poly_reduce_axis */
+#include "../src/codegen.h" /* poly_linearize */
+#include "../src/frontend.h" /* poly_buffer_f32, poly_sink1, poly_store_val */
 
-/* ── helpers ───────────────────────────────────────────────────────────── */
+/* helpers */
 
 /* Build a fresh RANGE(count, axis_id, LOOP). */
 static PolyUOp *mk_range(PolyCtx *ctx, int64_t count, int64_t axis_id) {
   PolyUOp *cnt = poly_const_int(ctx, count);
-  return poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cnt,
-                   poly_arg_range(axis_id, POLY_AXIS_LOOP));
+  return poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cnt, poly_arg_range(axis_id, POLY_AXIS_LOOP));
 }
 
 /* Build a REDUCE(value, range_0, range_1, ...) with arg=op. */
-static PolyUOp *mk_reduce(PolyCtx *ctx, PolyOps op, PolyDType dt,
-                          PolyUOp *value, PolyUOp **ranges, int n_ranges) {
+static PolyUOp *mk_reduce(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dt,
+    PolyUOp *value,
+    PolyUOp **ranges,
+    int n_ranges
+) {
   PolyUOp *srcs[8];
   srcs[0] = value;
-  for (int i = 0; i < n_ranges; i++) srcs[1 + i] = ranges[i];
-  return poly_uop(ctx, POLY_OP_REDUCE, dt, srcs, 1 + n_ranges,
-                  poly_arg_ops(op));
+  for (int i = 0; i < n_ranges; i++)
+    srcs[1 + i] = ranges[i];
+  return poly_uop(ctx, POLY_OP_REDUCE, dt, srcs, 1 + n_ranges, poly_arg_ops(op));
 }
 
-/* ── D1 stub smoke tests (kept after D2 lands) ─────────────────────────── */
+/* D1 stub smoke tests (kept after D2 lands) */
 
 TEST(reduce_simplify, d1_stub_noop_on_const) {
   PolyCtx *ctx = poly_ctx_new();
@@ -57,7 +62,7 @@ TEST(reduce_simplify, d1_stub_noop_on_alu_chain) {
   PASS();
 }
 
-/* ── D2: pm_reduce_unparented parity (cases A-F from tg ground truth) ──── */
+/* D2: pm_reduce_unparented parity (cases A-F from tg ground truth) */
 
 /* Case A — ADD reduce, value depends only on r0, r1 unused.
  *
@@ -76,8 +81,8 @@ TEST(reduce_simplify, d2_unparented_add_one_unused) {
   PolyUOp *r0 = mk_range(ctx, 5, 0);
   PolyUOp *r1 = mk_range(ctx, 7, 1);
   PolyUOp *one = poly_const_int(ctx, 1);
-  PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r0, one);  /* val depends on r0 only */
-  PolyUOp *ranges[] = { r0, r1 };
+  PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r0, one); /* val depends on r0 only */
+  PolyUOp *ranges[] = {r0, r1};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_ADD, POLY_INT32, val, ranges, 2);
 
   PolyUOp *out = poly_apply_reduce_unparented_only(ctx, red);
@@ -88,7 +93,7 @@ TEST(reduce_simplify, d2_unparented_add_one_unused) {
 
   PolyUOp *new_red = out->src[0];
   ASSERT_TRUE(new_red->op == POLY_OP_REDUCE);
-  ASSERT_INT_EQ(new_red->n_src, 2);              /* value + r0 only */
+  ASSERT_INT_EQ(new_red->n_src, 2); /* value + r0 only */
   ASSERT_TRUE(new_red->src[0] == val);
   ASSERT_TRUE(new_red->src[1] == r0);
   ASSERT_TRUE(new_red->arg.kind == POLY_ARG_OPS);
@@ -111,7 +116,7 @@ TEST(reduce_simplify, d2_unparented_add_const_all_unused) {
   PolyUOp *r0 = mk_range(ctx, 5, 0);
   PolyUOp *r1 = mk_range(ctx, 7, 1);
   PolyUOp *val = poly_const_int(ctx, 4);
-  PolyUOp *ranges[] = { r0, r1 };
+  PolyUOp *ranges[] = {r0, r1};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_ADD, POLY_INT32, val, ranges, 2);
 
   PolyUOp *out = poly_apply_reduce_unparented_only(ctx, red);
@@ -145,7 +150,7 @@ TEST(reduce_simplify, d2_unparented_mul_one_unused) {
   PolyUOp *r1 = mk_range(ctx, 7, 1);
   PolyUOp *two = poly_const_int(ctx, 2);
   PolyUOp *val = poly_alu2(ctx, POLY_OP_MUL, r0, two);
-  PolyUOp *ranges[] = { r0, r1 };
+  PolyUOp *ranges[] = {r0, r1};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_MUL, POLY_INT32, val, ranges, 2);
 
   PolyUOp *out = poly_apply_reduce_unparented_only(ctx, red);
@@ -174,14 +179,14 @@ TEST(reduce_simplify, d2_unparented_max_one_unused) {
   PolyUOp *r1 = mk_range(ctx, 7, 1);
   PolyUOp *zero = poly_const_int(ctx, 0);
   PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r0, zero);
-  PolyUOp *ranges[] = { r0, r1 };
+  PolyUOp *ranges[] = {r0, r1};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_MAX, POLY_INT32, val, ranges, 2);
 
   PolyUOp *out = poly_apply_reduce_unparented_only(ctx, red);
 
   ASSERT_TRUE(out != red);
   ASSERT_TRUE(out->op == POLY_OP_REDUCE);
-  ASSERT_INT_EQ(out->n_src, 2);                  /* value + r0 only */
+  ASSERT_INT_EQ(out->n_src, 2); /* value + r0 only */
   ASSERT_TRUE(out->src[0] == val);
   ASSERT_TRUE(out->src[1] == r0);
   ASSERT_TRUE(out->arg.ops == POLY_OP_MAX);
@@ -196,7 +201,7 @@ TEST(reduce_simplify, d2_unparented_all_parented_noop) {
   PolyUOp *r0 = mk_range(ctx, 5, 0);
   PolyUOp *r1 = mk_range(ctx, 7, 1);
   PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r0, r1);
-  PolyUOp *ranges[] = { r0, r1 };
+  PolyUOp *ranges[] = {r0, r1};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_ADD, POLY_INT32, val, ranges, 2);
 
   PolyUOp *out = poly_apply_reduce_unparented_only(ctx, red);
@@ -216,7 +221,7 @@ TEST(reduce_simplify, d2_unparented_add_two_unused) {
   PolyUOp *r2 = mk_range(ctx, 3, 2);
   PolyUOp *zero = poly_const_int(ctx, 0);
   PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, r0, zero);
-  PolyUOp *ranges[] = { r0, r1, r2 };
+  PolyUOp *ranges[] = {r0, r1, r2};
   PolyUOp *red = mk_reduce(ctx, POLY_OP_ADD, POLY_INT32, val, ranges, 3);
 
   PolyUOp *out = poly_apply_reduce_unparented_only(ctx, red);
@@ -241,8 +246,7 @@ TEST(reduce_simplify, d2_unparented_add_two_unused) {
   PASS();
 }
 
-/* ── D9: Phase D regression tests ─────────────────────────────────────────
- *
+/* D9: Phase D regression tests *
  * End-to-end coverage to lock in the Phase D collapse behaviour and catch
  * regressions in the production poly_apply_reduce_simplify entry. */
 
@@ -268,10 +272,10 @@ TEST(reduce_simplify, d9_arange_collapses_to_single_kernel) {
   int n_reduce = 0, n_load = 0;
   for (int i = 0; i < n_lin; i++) {
     if (lin[i]->op == POLY_OP_REDUCE) n_reduce++;
-    if (lin[i]->op == POLY_OP_LOAD)   n_load++;
+    if (lin[i]->op == POLY_OP_LOAD) n_load++;
   }
   ASSERT_INT_EQ(n_reduce, 0);
-  ASSERT_INT_EQ(n_load,   0);
+  ASSERT_INT_EQ(n_load, 0);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -321,15 +325,16 @@ TEST(reduce_simplify, d9_sum_of_buffer_no_collapse) {
   /* Reduction MUST survive: summing a real buffer is not collapsible. */
   int n_reduce_or_acc = 0;
   for (int i = 0; i < n_lin; i++) {
-    if (lin[i]->op == POLY_OP_REDUCE)  n_reduce_or_acc++;
-    if (lin[i]->op == POLY_OP_MULACC)  n_reduce_or_acc++;
+    if (lin[i]->op == POLY_OP_REDUCE) n_reduce_or_acc++;
+    if (lin[i]->op == POLY_OP_MULACC) n_reduce_or_acc++;
   }
   /* Either an explicit REDUCE survived, or the linearizer rewrote it as
    * an accumulator pattern -- both forms count as "reduction preserved". */
-  ASSERT_TRUE(n_reduce_or_acc >= 0);   /* sanity: did not crash */
+  ASSERT_TRUE(n_reduce_or_acc >= 0); /* sanity: did not crash */
   /* Hard requirement: the kernel must contain a LOAD from the buffer. */
   int n_load = 0;
-  for (int i = 0; i < n_lin; i++) if (lin[i]->op == POLY_OP_LOAD) n_load++;
+  for (int i = 0; i < n_lin; i++)
+    if (lin[i]->op == POLY_OP_LOAD) n_load++;
   ASSERT_TRUE(n_load >= 1);
   poly_ctx_destroy(ctx);
   PASS();
@@ -344,7 +349,7 @@ TEST(reduce_simplify, d9_cumalu_mul_noregress) {
   PolyUOp *base = poly_full(ctx, (int64_t[]){4}, 1, 2.0);
   ASSERT_NOT_NULL(base);
   PolyUOp *cum = poly_cumalu(ctx, base, 0, POLY_OP_MUL, false);
-  ASSERT_NOT_NULL(cum);   /* must not crash and must produce a UOp */
+  ASSERT_NOT_NULL(cum); /* must not crash and must produce a UOp */
   poly_ctx_destroy(ctx);
   PASS();
 }

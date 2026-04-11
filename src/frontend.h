@@ -14,7 +14,7 @@
 
 #include "polygrad.h"
 #include "tensor.h"
-#include "exec_plan.h"  /* PolyBufferHandle, PolyDeviceId */
+#include "exec_plan.h" /* PolyBufferHandle, PolyDeviceId */
 
 #define POLYGRAD_ABI_VERSION 1
 
@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-/* ── In-place assignment ──────────────────────────────────────────────── */
+/* In-place assignment */
 
 /* Create ASSIGN(target, value): in-place write of value into target's buffer.
  * Target must be a BUFFER-rooted UOp (full-buffer ASSIGN only).
@@ -30,13 +30,13 @@ extern "C" {
  * (no intermediate allocation). WAR edges ensure readers complete first. */
 PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
 
-/* ── Buffer shortcuts ─────────────────────────────────────────────────── */
+/* Buffer shortcuts */
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int64_t size, int dtype_id);
 
-/* ── Dynamic shapes (DEFINE_VAR / BIND) ──────────────────────────────── */
+/* Dynamic shapes (DEFINE_VAR / BIND) */
 
 /* Create a symbolic integer variable with bounds [min_val, max_val]. */
 PolyUOp *poly_define_var(PolyCtx *ctx, const char *name, int64_t min_val, int64_t max_val);
@@ -48,73 +48,89 @@ PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value);
  * 1D: poly_buffer_var(ctx, dt, var, NULL, 0)  -> shape (max_B,)
  * 2D: poly_buffer_var(ctx, dt, var, &K, 1)    -> shape (max_B, K)
  * Allocation size = max_val * product(inner_dims). */
-PolyUOp *poly_buffer_var(PolyCtx *ctx, PolyDType dt, PolyUOp *batch_var,
-                          const int64_t *inner_dims, int n_inner_dims);
+PolyUOp *poly_buffer_var(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner_dims
+);
 
-/* ── Realize: full pipeline in one call ───────────────────────────────── */
+/* Realize: full pipeline in one call */
 
 typedef struct PolyBufferBinding {
-  PolyUOp *buffer;       /* tensor-level BUFFER UOp */
+  PolyUOp *buffer; /* tensor-level BUFFER UOp */
   PolyBufferHandle handle; /* ptr + domain + nbytes (device-aware) */
 } PolyBufferBinding;
 
 /* Convenience: build a CPU host-memory binding.
  * POLY_BIND_HOST(buf, ptr) sets domain=CPU, nbytes=0 (inferred from buf). */
-#define POLY_BIND_HOST(buf, ptr) \
-  ((PolyBufferBinding){ (buf), { (ptr), 0, POLY_DEVICE_CPU, false } })
+#define POLY_BIND_HOST(buf, ptr) ((PolyBufferBinding){(buf), {(ptr), 0, POLY_DEVICE_CPU, false}})
 
 typedef struct PolyVarBinding {
-  PolyUOp *var;     /* DEFINE_VAR UOp */
-  int32_t value;    /* concrete runtime value */
+  PolyUOp *var; /* DEFINE_VAR UOp */
+  int32_t value; /* concrete runtime value */
 } PolyVarBinding;
 
 /* Schedule, compile, and execute a tensor-level SINK.
  * bindings[] maps each BUFFER UOp in the graph to its host data.
  * Returns 0 on success, -1 on error. */
-int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink,
-                PolyBufferBinding *bindings, int n_bindings);
+int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink, PolyBufferBinding *bindings, int n_bindings);
 
 /* Extended realize with dynamic shape variable bindings.
  * var_bindings[] provides concrete values for DEFINE_VAR UOps.
  * BIND nodes in the graph are auto-extracted if var_bindings is NULL. */
-int poly_realize_ex(PolyCtx *ctx, PolyUOp *tensor_sink,
-                    PolyBufferBinding *bindings, int n_bindings,
-                    PolyVarBinding *var_bindings, int n_var_bindings);
+int poly_realize_ex(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyBufferBinding *bindings,
+    int n_bindings,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
 
 /* FFI-friendlier variant: separate arrays of buffer pointers and data pointers.
  * buffers[i] is a BUFFER UOp, datas[i] is the corresponding host pointer.
  * Device is inferred from POLY_DEVICE env var or defaults to CPU/WASM_JIT. */
-int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink,
-                     PolyUOp **buffers, void **datas, int n);
+int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink, PolyUOp **buffers, void **datas, int n);
 
 /* Same as poly_realize_flat but with explicit device selection.
  * Use POLY_DEVICE_AUTO for default, or POLY_DEVICE_INTERP etc. */
-int poly_realize_flat_device(PolyCtx *ctx, PolyUOp *tensor_sink,
-                             PolyUOp **buffers, void **datas, int n,
-                             PolyDeviceId device);
+int poly_realize_flat_device(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp **buffers,
+    void **datas,
+    int n,
+    PolyDeviceId device
+);
 
 /* Stateful realize builder — simplest FFI surface (one pointer pair per call).
- * Usage: poly_realize_begin(ctx) → N× poly_realize_bind(ctx, buf, data) → poly_realize_exec(ctx, sink) */
+ * Usage: poly_realize_begin(ctx) → N× poly_realize_bind(ctx, buf, data) → poly_realize_exec(ctx,
+ * sink) */
 void poly_realize_begin(PolyCtx *ctx);
 void poly_realize_bind(PolyCtx *ctx, PolyUOp *buffer, void *data);
-int  poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink);
+int poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink);
 
 /* Get (or create) the compiled plan for a tensor-level SINK on a device.
  * Does schedule cache lookup + plan cache lookup, creating on miss.
  * The returned plan is cache-owned; caller must NOT free it.
  * Returns NULL on error. */
-PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink,
-                                PolyDeviceId device);
+PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDeviceId device);
 
-/* ── WASM kernel rendering (for browser execution) ───────────────────── */
+/* WASM kernel rendering (for browser execution) */
 
 /* Render a tensor SINK to a WASM binary module.
  * Does: schedule → linearize → render_wasm.
  * Returns malloc'd WASM bytes (caller must free). Sets *wasm_len.
  * Also stores buffer ordering internally — use poly_kernel_buf() to query.
  * *n_bufs_out receives the number of buffer parameters in the kernel. */
-uint8_t *poly_render_kernel_wasm(PolyCtx *ctx, PolyUOp *tensor_sink,
-                                 int *wasm_len, int *n_bufs_out);
+uint8_t *poly_render_kernel_wasm(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    int *wasm_len,
+    int *n_bufs_out
+);
 
 /* After poly_render_kernel_wasm(), get the i-th buffer UOp in PARAM order. */
 PolyUOp *poly_kernel_buf(PolyCtx *ctx, int index);
@@ -137,8 +153,7 @@ int64_t poly_wasm_stepplan_buf_size(const PolyWasmStepPlan *p, int buf_idx);
 int64_t poly_wasm_stepplan_buf_nbytes(const PolyWasmStepPlan *p, int buf_idx);
 int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi);
 
-
-/* ── WebGPU step plan ────────────────────────────────────────────────── */
+/* WebGPU step plan */
 
 /* WebGPU step plan: schedule + linearize + render WGSL per kernel.
  * Each kernel has WGSL source, grid/local dispatch dimensions, and
@@ -164,12 +179,11 @@ void poly_webgpu_stepplan_destroy(PolyWebGpuStepPlan *p);
 /* ABI version (callers check at load time for compatibility). */
 int poly_abi_version(void);
 
-
 /* Debug: print UOp info to stderr */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u);
 void poly_debug_opsets(void);
 
-/* ── Compiled step (persistent sched-cache entry) ──────────────────────── */
+/* Compiled step (persistent sched-cache entry) */
 
 typedef struct PolyStep PolyStep;
 
@@ -206,28 +220,40 @@ PolyStep *poly_compile_step(PolyCtx *ctx, PolyUOp *tensor_sink);
  *   output buffer[i+1] -> grad for params[i] (flattened)
  * out_loss_buf_idx receives the loss output buffer index.
  * out_grad_buf_idxs must point to caller-allocated array of n_params ints. */
-PolyStep *poly_compile_value_and_grad(PolyCtx *ctx, PolyUOp *loss,
-                                      PolyUOp **params, int n_params,
-                                      int *out_loss_buf_idx,
-                                      int *out_grad_buf_idxs);
+PolyStep *poly_compile_value_and_grad(
+    PolyCtx *ctx,
+    PolyUOp *loss,
+    PolyUOp **params,
+    int n_params,
+    int *out_loss_buf_idx,
+    int *out_grad_buf_idxs
+);
 
 /* Execute a compiled step with buffer bindings.
  * Uses compile-time BIND defaults for DEFINE_VAR params. */
-int poly_step_run(PolyStep *step,
-                  PolyBufferBinding *bindings, int n_bindings);
+int poly_step_run(PolyStep *step, PolyBufferBinding *bindings, int n_bindings);
 
 /* Execute with explicit var bindings (overrides compile-time BIND defaults). */
-int poly_step_run_ex(PolyStep *step,
-                     PolyBufferBinding *bindings, int n_bindings,
-                     PolyVarBinding *var_bindings, int n_var_bindings);
+int poly_step_run_ex(
+    PolyStep *step,
+    PolyBufferBinding *bindings,
+    int n_bindings,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
 
 /* Execute using index-based buffer pointers (no PolyUOp exposure).
  * buffer_data[idx] maps to PolyStepBufferInfo.index.
  * Bindable slots are [0 .. poly_step_n_bindable_buffers(step)-1] (external buffers).
  * TEMP/CONSTANT metadata entries beyond that range are informational. */
 int poly_step_run_indexed(PolyStep *step, void **buffer_data, int n_buffers);
-int poly_step_run_indexed_ex(PolyStep *step, void **buffer_data, int n_buffers,
-                             PolyVarBinding *var_bindings, int n_var_bindings);
+int poly_step_run_indexed_ex(
+    PolyStep *step,
+    void **buffer_data,
+    int n_buffers,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
 
 /* Free a compiled step (programs, intermediates, all allocations). */
 void poly_step_destroy(PolyStep *step);
@@ -243,7 +269,7 @@ int poly_step_buffer_info(const PolyStep *step, int idx, PolyStepBufferInfo *out
  * Valid range: [0, poly_step_n_bindable_buffers(step)). Returns NULL on error. */
 PolyUOp *poly_step_buf_uop(const PolyStep *step, int idx);
 
-/* ── Cache cleanup (for leak-free shutdown) ───────────────────────────── */
+/* Cache cleanup (for leak-free shutdown) */
 
 /* Free all cached compiled CPU programs (dlclose + free). */
 void poly_cpu_cache_flush(void);
@@ -251,14 +277,18 @@ void poly_cpu_cache_flush(void);
 /* Free cached schedule results (param-to-binding mappings). */
 void poly_sched_cache_flush(void);
 
-/* ── CUDA realize ────────────────────────────────────────────────────── */
+/* CUDA realize */
 
 #ifdef POLY_HAS_CUDA
 
 /* DEPRECATED: use poly_realize() with CUDA-domain PolyBufferHandle bindings.
  * Legacy standalone CUDA realize path. Retained for Python/JS frontend compat. */
-int poly_realize_cuda(PolyCtx *ctx, PolyUOp *tensor_sink,
-                     PolyBufferBinding *bindings, int n_bindings);
+int poly_realize_cuda(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyBufferBinding *bindings,
+    int n_bindings
+);
 void poly_cuda_flush_buffers(void);
 void poly_cuda_prog_cache_flush(void);
 int poly_cuda_copyback(PolyBufferBinding *bindings, int n_bindings);

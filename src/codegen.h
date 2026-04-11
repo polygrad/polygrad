@@ -20,47 +20,50 @@
 #define POLY_TC_MAX_SWIZZLE 8
 
 typedef struct {
-  int dims[3];                          /* N, M, K */
-  int threads;                          /* warp size (64 for CDNA, 32 for CUDA/RDNA) */
-  int elements_per_thread[3];           /* per-thread elements for A, B, C */
-  PolyDType dtype_in;                   /* A and B input dtype */
-  PolyDType dtype_out;                  /* C and D output dtype */
-  struct { char type; int dim; } opts[POLY_TC_MAX_OPTS];  /* 'l'=LOCAL, 'u'=UPCAST */
+  int dims[3]; /* N, M, K */
+  int threads; /* warp size (64 for CDNA, 32 for CUDA/RDNA) */
+  int elements_per_thread[3]; /* per-thread elements for A, B, C */
+  PolyDType dtype_in; /* A and B input dtype */
+  PolyDType dtype_out; /* C and D output dtype */
+  struct {
+    char type;
+    int dim;
+  } opts[POLY_TC_MAX_OPTS]; /* 'l'=LOCAL, 'u'=UPCAST */
   int n_opts;
   const char *swizzle[2][3][POLY_TC_MAX_SWIZZLE]; /* [input][local/upcast/reduce][axis] */
   int swizzle_len[2][3];
-  const char *intrinsic_name;           /* e.g. "mfma_f32_16x16x16f16" */
+  const char *intrinsic_name; /* e.g. "mfma_f32_16x16x16f16" */
 } PolyTensorCore;
 
 /* Renderer capability flags -- determines which ops survive into rendered code.
  * Mirrors tinygrad's code_for_op / supported_ops gating in get_late_rewrite_patterns.
  * max_vec_width is a polygrad extension (tinygrad uses boolean supports_float4). */
 typedef struct {
-  bool has_mulacc;    /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
-  bool has_threefry;  /* Backend supports native THREEFRY op without decomposition */
-  bool has_simd_int;  /* Backend supports packed integer ops in vector regs (vpaddd etc) */
-  int  max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
-  const PolyTensorCore *tensor_cores;  /* array of available TC specs (NULL if none) */
-  int n_tensor_cores;                  /* number of TC specs */
+  bool has_mulacc; /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
+  bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
+  bool has_simd_int; /* Backend supports packed integer ops in vector regs (vpaddd etc) */
+  int max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
+  const PolyTensorCore *tensor_cores; /* array of available TC specs (NULL if none) */
+  int n_tensor_cores; /* number of TC specs */
 } PolyRendererCaps;
 
 /* Optimization policy: explicit discriminator for what the heuristic does.
  * Wrappers set this directly instead of inferring from caps. */
 typedef enum {
   POLY_OPT_HEURISTIC = 0, /* CPU: full heuristic (masked upcast, stride upcast, reduce unroll) */
-  POLY_OPT_TC_ONLY,       /* GPU: TC detection only, no CPU-oriented scheduling */
+  POLY_OPT_TC_ONLY, /* GPU: TC detection only, no CPU-oriented scheduling */
 } PolyOptPolicy;
 
 typedef struct {
-  bool optimize;     /* tinygrad optimize path (UPCAST/UNROLL + late pipeline) */
-  int devectorize;   /* tinygrad DEVECTORIZE level (0/1/2) */
-  int beam_width;    /* BEAM search width (0 = heuristic, >0 = BEAM search) */
-  PolyRendererCaps caps;  /* renderer capabilities (zero-init = CPU defaults) */
+  bool optimize; /* tinygrad optimize path (UPCAST/UNROLL + late pipeline) */
+  int devectorize; /* tinygrad DEVECTORIZE level (0/1/2) */
+  int beam_width; /* BEAM search width (0 = heuristic, >0 = BEAM search) */
+  PolyRendererCaps caps; /* renderer capabilities (zero-init = CPU defaults) */
   /* Renderer config for unified pipeline (Phase 4) */
-  int device;                            /* PolyDeviceId from exec_plan.h (0 = CPU) */
-  PolyOptPolicy opt_policy;              /* explicit optimization strategy */
-  PolyPatternMatcher *extra_matcher;     /* renderer-specific final rewrite (NULL = none) */
-  int gpu_block_size;                    /* group_for_reduce block size (0 = skip) */
+  int device; /* PolyDeviceId from exec_plan.h (0 = CPU) */
+  PolyOptPolicy opt_policy; /* explicit optimization strategy */
+  PolyPatternMatcher *extra_matcher; /* renderer-specific final rewrite (NULL = none) */
+  int gpu_block_size; /* group_for_reduce block size (0 = skip) */
 } PolyRewriteOpts;
 
 /* Linearize: full codegen pipeline + priority-based toposort.
@@ -98,16 +101,21 @@ int tc_count_local(const PolyTensorCore *tc);
 int tc_count_upcast(const PolyTensorCore *tc);
 int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n);
 int tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n);
-void tc_permute_for_shape_str(const PolyTensorCore *tc, int swz_idx,
-                               const char *shape_str[], int n_shape,
-                               int perm[], int max_n);
+void tc_permute_for_shape_str(
+    const PolyTensorCore *tc,
+    int swz_idx,
+    const char *shape_str[],
+    int n_shape,
+    int perm[],
+    int max_n
+);
 
 /* Walk through transparent pointer casts to find the underlying INDEX.
  * Returns the INDEX UOp if found, NULL otherwise. Used by renderers to
  * detect gated loads: LOAD(CAST(INDEX(buf, idx, gate)), alt). */
 static inline PolyUOp *poly_find_index_through_cast(PolyUOp *u) {
-  while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST)
-         && u->n_src > 0 && u->dtype.is_ptr)
+  while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0 && u->dtype.is_ptr
+  )
     u = u->src[0];
   return (u && u->op == POLY_OP_INDEX) ? u : NULL;
 }
@@ -181,7 +189,7 @@ void poly_program_call(PolyProgram *prog, void **args, int n_args);
 /* Free a compiled program (dlclose + cleanup). */
 void poly_program_destroy(PolyProgram *prog);
 
-/* ── CUDA support (conditional on POLY_HAS_CUDA) ───────────────────── */
+/* CUDA support (conditional on POLY_HAS_CUDA) */
 
 #ifdef POLY_HAS_CUDA
 
@@ -203,15 +211,24 @@ void poly_cuda_free(unsigned long long ptr);
 int poly_cuda_copy_htod(unsigned long long dst, const void *src, size_t bytes);
 int poly_cuda_copy_dtoh(void *dst, unsigned long long src, size_t bytes);
 PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name);
-int poly_cuda_launch(PolyCudaProgram *prog, void **args, int n_args,
-                     int gx, int gy, int gz, int bx, int by, int bz);
+int poly_cuda_launch(
+    PolyCudaProgram *prog,
+    void **args,
+    int n_args,
+    int gx,
+    int gy,
+    int gz,
+    int bx,
+    int by,
+    int bz
+);
 int poly_cuda_sync(void);
 void poly_cuda_program_destroy(PolyCudaProgram *prog);
 int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
 
 #endif /* POLY_HAS_CUDA */
 
-/* ── HIP/ROCm support (conditional on POLY_HAS_HIP) ────────────────── */
+/* HIP/ROCm support (conditional on POLY_HAS_HIP) */
 
 #ifdef POLY_HAS_HIP
 
@@ -234,15 +251,24 @@ void poly_hip_free(void *ptr);
 int poly_hip_copy_htod(void *dst, const void *src, size_t bytes);
 int poly_hip_copy_dtoh(void *dst, const void *src, size_t bytes);
 PolyHipProgram *poly_compile_hip(const char *source, const char *fn_name);
-int poly_hip_launch(PolyHipProgram *prog, void **args, int n_args,
-                    int gx, int gy, int gz, int bx, int by, int bz);
+int poly_hip_launch(
+    PolyHipProgram *prog,
+    void **args,
+    int n_args,
+    int gx,
+    int gy,
+    int gz,
+    int bx,
+    int by,
+    int bz
+);
 int poly_hip_sync(void);
 void poly_hip_program_destroy(PolyHipProgram *prog);
 int poly_hip_memset(void *ptr, unsigned char val, size_t bytes);
 
 #endif /* POLY_HAS_HIP */
 
-/* ── x86-64 JIT support (conditional on POLY_HAS_X64) ──────────────── */
+/* x86-64 JIT support (conditional on POLY_HAS_X64) */
 
 #ifdef POLY_HAS_X64
 

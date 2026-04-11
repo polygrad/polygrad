@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-/* ── Ops enum (mirrors tinygrad Ops, 78 members) ──────────────────────── */
+/* Ops enum (mirrors tinygrad Ops, 78 members) */
 /* The order controls toposort priority (lower = earlier).                  */
 
 typedef enum {
@@ -125,13 +125,15 @@ typedef enum {
   POLY_OP_VCAT,
   POLY_OP_PTRCAT,
 
-  POLY_OP_COUNT  /* sentinel — total number of ops */
+  POLY_OP_COUNT /* sentinel — total number of ops */
 } PolyOps;
 
-/* ── GroupOp bitmask sets ─────────────────────────────────────────────── */
+/* GroupOp bitmask sets */
 /* Each set is a uint64_t[2] bitmask (128 bits, enough for 78 ops).        */
 
-typedef struct { uint64_t bits[2]; } PolyOpSet;
+typedef struct {
+  uint64_t bits[2];
+} PolyOpSet;
 
 extern PolyOpSet POLY_GROUP_UNARY;
 extern PolyOpSet POLY_GROUP_BINARY;
@@ -161,7 +163,7 @@ static inline PolyOpSet poly_opset_add(PolyOpSet set, PolyOps op) {
 }
 
 static inline PolyOpSet poly_opset_union(PolyOpSet a, PolyOpSet b) {
-  return (PolyOpSet){{ a.bits[0] | b.bits[0], a.bits[1] | b.bits[1] }};
+  return (PolyOpSet){{a.bits[0] | b.bits[0], a.bits[1] | b.bits[1]}};
 }
 
 static inline bool poly_opset_empty(PolyOpSet set) {
@@ -169,7 +171,7 @@ static inline bool poly_opset_empty(PolyOpSet set) {
 }
 
 static inline PolyOpSet poly_opset_intersect(PolyOpSet a, PolyOpSet b) {
-  return (PolyOpSet){{ a.bits[0] & b.bits[0], a.bits[1] & b.bits[1] }};
+  return (PolyOpSet){{a.bits[0] & b.bits[0], a.bits[1] & b.bits[1]}};
 }
 
 static inline bool poly_opset_subset(PolyOpSet sub, PolyOpSet super) {
@@ -178,7 +180,7 @@ static inline bool poly_opset_subset(PolyOpSet sub, PolyOpSet super) {
 
 const char *poly_op_name(PolyOps op);
 
-/* ── DType ────────────────────────────────────────────────────────────── */
+/* DType */
 
 typedef enum {
   POLY_ADDR_GLOBAL = 0,
@@ -189,14 +191,14 @@ typedef enum {
 typedef struct {
   int8_t priority;
   uint16_t bitsize;
-  const char *name;   /* C type name, e.g. "float", "int" */
-  char fmt;           /* struct pack format char, 0 if none */
-  uint16_t count;     /* vector width, 1 for scalars */
+  const char *name; /* C type name, e.g. "float", "int" */
+  char fmt; /* struct pack format char, 0 if none */
+  uint16_t count; /* vector width, 1 for scalars */
   /* pointer fields (0/defaults for non-pointer dtypes) */
   bool is_ptr;
   PolyAddrSpace addrspace;
-  uint16_t vcount;    /* pointer vector count */
-  int64_t ptr_size;   /* -1 = unlimited */
+  uint16_t vcount; /* pointer vector count */
+  int64_t ptr_size; /* -1 = unlimited */
 } PolyDType;
 
 /* Predefined scalar dtypes */
@@ -227,7 +229,7 @@ PolyDType poly_dtype_ptr(PolyDType dt, int64_t size, PolyAddrSpace addrspace);
 int poly_dtype_itemsize(PolyDType dt);
 const char *poly_dtype_name(PolyDType dt);
 
-/* ── Axis metadata for RANGE args (tinygrad AxisType parity) ─────────── */
+/* Axis metadata for RANGE args (tinygrad AxisType parity) */
 
 typedef enum {
   POLY_AXIS_GLOBAL = 0,
@@ -242,7 +244,7 @@ typedef enum {
   POLY_AXIS_PLACEHOLDER,
 } PolyAxisType;
 
-/* ── PolyArg — tagged union for UOp arg field ──────────────────────────── */
+/* PolyArg — tagged union for UOp arg field */
 
 typedef enum {
   POLY_ARG_NONE = 0,
@@ -250,12 +252,12 @@ typedef enum {
   POLY_ARG_FLOAT,
   POLY_ARG_BOOL,
   POLY_ARG_INT_TUPLE,
-  POLY_ARG_PAIR_TUPLE,   /* array of (int64_t, int64_t) pairs */
+  POLY_ARG_PAIR_TUPLE, /* array of (int64_t, int64_t) pairs */
   POLY_ARG_STRING,
   POLY_ARG_OPS,
-  POLY_ARG_REDUCE_AXIS,  /* (PolyOps, int64_t[], n) */
-  POLY_ARG_RANGE,        /* (axis_id, axis_type, extra...) */
-  POLY_ARG_DEFINE_VAR,   /* (name, min_val, max_val) */
+  POLY_ARG_REDUCE_AXIS, /* (PolyOps, int64_t[], n) */
+  POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
+  POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
   POLY_ARG_INVALID,
 } PolyArgKind;
 
@@ -265,42 +267,76 @@ typedef struct {
     int64_t i;
     double f;
     bool b;
-    struct { int64_t *vals; int n; } int_tuple;
-    struct { int64_t (*pairs)[2]; int n; } pair_tuple;
+    struct {
+      int64_t *vals;
+      int n;
+    } int_tuple;
+    struct {
+      int64_t (*pairs)[2];
+      int n;
+    } pair_tuple;
     const char *str;
     PolyOps ops;
-    struct { PolyOps op; int64_t *axes; int n; } reduce_axis;
-    struct { int64_t axis_id; PolyAxisType axis_type; int64_t *extra; int n_extra; } range;
-    struct { const char *name; int64_t min_val; int64_t max_val; } define_var;
+    struct {
+      PolyOps op;
+      int64_t *axes;
+      int n;
+    } reduce_axis;
+    struct {
+      int64_t axis_id;
+      PolyAxisType axis_type;
+      int64_t *extra;
+      int n_extra;
+    } range;
+    struct {
+      const char *name;
+      int64_t min_val;
+      int64_t max_val;
+    } define_var;
   };
 } PolyArg;
 
-static inline PolyArg poly_arg_none(void) { return (PolyArg){ .kind = POLY_ARG_NONE }; }
-static inline PolyArg poly_arg_int(int64_t v) { return (PolyArg){ .kind = POLY_ARG_INT, .i = v }; }
-static inline PolyArg poly_arg_float(double v) { return (PolyArg){ .kind = POLY_ARG_FLOAT, .f = v }; }
-static inline PolyArg poly_arg_bool(bool v) { return (PolyArg){ .kind = POLY_ARG_BOOL, .b = v }; }
-static inline PolyArg poly_arg_ops(PolyOps op) { return (PolyArg){ .kind = POLY_ARG_OPS, .ops = op }; }
-static inline PolyArg poly_arg_invalid(void) { return (PolyArg){ .kind = POLY_ARG_INVALID }; }
-static inline PolyArg poly_arg_str(const char *s) { return (PolyArg){ .kind = POLY_ARG_STRING, .str = s }; }
-static inline PolyArg poly_arg_range(int64_t axis_id, PolyAxisType axis_type) {
-  return (PolyArg){
-    .kind = POLY_ARG_RANGE,
-    .range = { .axis_id = axis_id, .axis_type = axis_type, .extra = NULL, .n_extra = 0 }
-  };
+static inline PolyArg poly_arg_none(void) {
+  return (PolyArg){.kind = POLY_ARG_NONE};
 }
-static inline PolyArg poly_arg_range_ex(int64_t axis_id, PolyAxisType axis_type,
-                                        int64_t *extra, int n_extra) {
-  return (PolyArg){
-    .kind = POLY_ARG_RANGE,
-    .range = { .axis_id = axis_id, .axis_type = axis_type, .extra = extra, .n_extra = n_extra }
-  };
+static inline PolyArg poly_arg_int(int64_t v) {
+  return (PolyArg){.kind = POLY_ARG_INT, .i = v};
+}
+static inline PolyArg poly_arg_float(double v) {
+  return (PolyArg){.kind = POLY_ARG_FLOAT, .f = v};
+}
+static inline PolyArg poly_arg_bool(bool v) {
+  return (PolyArg){.kind = POLY_ARG_BOOL, .b = v};
+}
+static inline PolyArg poly_arg_ops(PolyOps op) {
+  return (PolyArg){.kind = POLY_ARG_OPS, .ops = op};
+}
+static inline PolyArg poly_arg_invalid(void) {
+  return (PolyArg){.kind = POLY_ARG_INVALID};
+}
+static inline PolyArg poly_arg_str(const char *s) {
+  return (PolyArg){.kind = POLY_ARG_STRING, .str = s};
+}
+static inline PolyArg poly_arg_range(int64_t axis_id, PolyAxisType axis_type) {
+  return (PolyArg
+  ){.kind = POLY_ARG_RANGE,
+    .range = {.axis_id = axis_id, .axis_type = axis_type, .extra = NULL, .n_extra = 0}};
+}
+static inline PolyArg poly_arg_range_ex(
+    int64_t axis_id,
+    PolyAxisType axis_type,
+    int64_t *extra,
+    int n_extra
+) {
+  return (PolyArg
+  ){.kind = POLY_ARG_RANGE,
+    .range = {.axis_id = axis_id, .axis_type = axis_type, .extra = extra, .n_extra = n_extra}};
 }
 
 static inline PolyArg poly_arg_define_var(const char *name, int64_t min_val, int64_t max_val) {
-  return (PolyArg){
-    .kind = POLY_ARG_DEFINE_VAR,
-    .define_var = { .name = name, .min_val = min_val, .max_val = max_val }
-  };
+  return (PolyArg
+  ){.kind = POLY_ARG_DEFINE_VAR,
+    .define_var = {.name = name, .min_val = min_val, .max_val = max_val}};
 }
 
 /* Compatibility helpers: legacy RANGE arg kind may still be POLY_ARG_INT
@@ -327,7 +363,7 @@ static inline bool poly_arg_is_range(PolyArg a) {
 bool poly_arg_eq(PolyArg a, PolyArg b);
 uint32_t poly_arg_hash(PolyArg a);
 
-/* ── Arena allocator ──────────────────────────────────────────────────── */
+/* Arena allocator */
 
 typedef struct PolyArena PolyArena;
 
@@ -337,18 +373,31 @@ void poly_arena_reset(PolyArena *a);
 void poly_arena_destroy(PolyArena *a);
 size_t poly_arena_used(PolyArena *a);
 
-/* ── Hash map (for CSE) ───────────────────────────────────────────────── */
+/* Hash map (for CSE) */
 
 typedef struct PolyMap PolyMap;
 
 PolyMap *poly_map_new(size_t initial_cap);
 void poly_map_destroy(PolyMap *m);
-void *poly_map_get(PolyMap *m, uint32_t hash, const void *key,
-                   bool (*eq)(const void *a, const void *b));
-void poly_map_set(PolyMap *m, uint32_t hash, const void *key, void *value,
-                  bool (*eq)(const void *a, const void *b));
-void poly_map_remove(PolyMap *m, uint32_t hash, const void *key,
-                     bool (*eq)(const void *a, const void *b));
+void *poly_map_get(
+    PolyMap *m,
+    uint32_t hash,
+    const void *key,
+    bool (*eq)(const void *a, const void *b)
+);
+void poly_map_set(
+    PolyMap *m,
+    uint32_t hash,
+    const void *key,
+    void *value,
+    bool (*eq)(const void *a, const void *b)
+);
+void poly_map_remove(
+    PolyMap *m,
+    uint32_t hash,
+    const void *key,
+    bool (*eq)(const void *a, const void *b)
+);
 size_t poly_map_len(PolyMap *m);
 void poly_map_clear(PolyMap *m);
 
@@ -357,7 +406,7 @@ void poly_map_clear(PolyMap *m);
 typedef void (*PolyMapIterFn)(const void *key, void *value, void *userdata);
 void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata);
 
-/* ── UOp ──────────────────────────────────────────────────────────────── */
+/* UOp */
 
 typedef struct PolyUOp PolyUOp;
 
@@ -374,10 +423,10 @@ struct PolyUOp {
 /* Cached rendered kernel (used by kernel_cache in PolyCtx) */
 #define POLY_MAX_KERNEL_BUFS 64
 typedef struct {
-  uint8_t *bytes;                         /* malloc'd rendered bytes (WASM/C/etc) */
-  int len;                                /* byte length */
-  int n_bufs;                             /* number of buffer params */
-  PolyUOp *bufs[POLY_MAX_KERNEL_BUFS];     /* ordered buffer UOps */
+  uint8_t *bytes; /* malloc'd rendered bytes (WASM/C/etc) */
+  int len; /* byte length */
+  int n_bufs; /* number of buffer params */
+  PolyUOp *bufs[POLY_MAX_KERNEL_BUFS]; /* ordered buffer UOps */
 } PolyCachedKernel;
 
 /* Context owns the arena, CSE cache, kernel cache, and all UOps */
@@ -390,20 +439,41 @@ PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* Create a UOp (with CSE deduplication) */
-PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                 PolyUOp **src, int n_src, PolyArg arg);
+PolyUOp *poly_uop(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp **src, int n_src, PolyArg arg);
 
 /* Create a UOp with a non-zero tag. Tag is part of the CSE key,
  * so a tagged node is distinct from an untagged node with the same
  * (op, dtype, src, arg). Matches tinygrad's UOp.replace(tag=...). */
-PolyUOp *poly_uop_tagged(PolyCtx *ctx, PolyOps op, PolyDType dtype,
-                          PolyUOp **src, int n_src, PolyArg arg, int32_t tag);
+PolyUOp *poly_uop_tagged(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    int32_t tag
+);
 
 /* Convenience: create a UOp with 0, 1, 2, or 3 sources */
 PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg);
 PolyUOp *poly_uop1(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyArg arg);
-PolyUOp *poly_uop2(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyUOp *s1, PolyArg arg);
-PolyUOp *poly_uop3(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyUOp *s1, PolyUOp *s2, PolyArg arg);
+PolyUOp *poly_uop2(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp *s0,
+    PolyUOp *s1,
+    PolyArg arg
+);
+PolyUOp *poly_uop3(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp *s0,
+    PolyUOp *s1,
+    PolyUOp *s2,
+    PolyArg arg
+);
 
 /* Toposort: returns arena-allocated array of UOp pointers, sets *n_out.
  * _ex variant: gate callback (NULL=visit all, return false to skip subtree),
@@ -411,14 +481,23 @@ PolyUOp *poly_uop3(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyUOp *s0, PolyU
  * _ex_user variant: gate carries user_data (closure-style, mirrors tinygrad's
  * `u.toposort(gate=lambda x: r in x.ranges)` where r is captured). */
 PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out);
-PolyUOp **poly_toposort_ex(PolyCtx *ctx, PolyUOp *root, int *n_out,
-                           bool (*gate)(PolyUOp *), bool enter_calls);
-PolyUOp **poly_toposort_ex_user(PolyCtx *ctx, PolyUOp *root, int *n_out,
-                                bool (*gate)(PolyUOp *, void *), void *user_data,
-                                bool enter_calls);
+PolyUOp **poly_toposort_ex(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *),
+    bool enter_calls
+);
+PolyUOp **poly_toposort_ex_user(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *, void *),
+    void *user_data,
+    bool enter_calls
+);
 
-/* ── Per-pass cache for UOp queries (ranges, vmin/vmax) ──────────────────
- *
+/* Per-pass cache for UOp queries (ranges, vmin/vmax) *
  * Tinygrad caches every queryable UOp property as @functools.cached_property
  * on the immutable UOp instance, which gives per-UOp-lifetime memoization
  * for free. Polygrad's UOps are also immutable (arena-allocated, hash-consed)
@@ -452,7 +531,7 @@ PolyUOp **poly_toposort_ex_user(PolyCtx *ctx, PolyUOp *root, int *n_out,
 typedef struct PolyUOpCache PolyUOpCache;
 
 PolyUOpCache *poly_uop_cache_new(void);
-void          poly_uop_cache_destroy(PolyUOpCache *c);
+void poly_uop_cache_destroy(PolyUOpCache *c);
 
 /* Range helpers. `poly_no_range` matches tinygrad codegen/simplify.py:75:
  *   def no_range(u): return not any(x.op is Ops.RANGE for x in u.backward_slice_with_self)
@@ -470,9 +549,8 @@ bool poly_no_range(PolyCtx *ctx, PolyUOp *u);
 bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache);
 bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r);
 bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *cache);
-int  poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out);
-int  poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out,
-                        PolyUOpCache *cache);
+int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out);
+int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache);
 
 /* vmin/vmax interval arithmetic. Full port of tinygrad uop/ops.py:856-897
  * (UOp._min_max) with per-pass memoization via PolyUOpCache.
@@ -490,8 +568,13 @@ int  poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out,
  *
  * Parity: verified against test/parity_scripts/tg_minmax_gt.py. */
 void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax);
-void poly_uop_minmax_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache,
-                        int64_t *vmin, int64_t *vmax);
+void poly_uop_minmax_ex(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOpCache *cache,
+    int64_t *vmin,
+    int64_t *vmax
+);
 
 /* Pretty-print a UOp graph to a buffer (returns malloc'd string, caller frees) */
 char *poly_uop_str(PolyUOp *u);
@@ -503,20 +586,20 @@ char *poly_graph_str(PolyUOp *root);
 #include <stdio.h>
 void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth);
 
-/* ── Shape ────────────────────────────────────────────────────────────── */
+/* Shape */
 /* ndim == -1 means "no tensor shape" (kernel-level ops like RANGE, LOAD) */
 
 typedef struct {
-  int64_t *dims;   /* arena-allocated array of dimension sizes */
-  int ndim;        /* -1 = no shape, 0 = scalar, >0 = tensor */
+  int64_t *dims; /* arena-allocated array of dimension sizes */
+  int ndim; /* -1 = no shape, 0 = scalar, >0 = tensor */
 } PolyShape;
 
-#define POLY_SHAPE_NONE ((PolyShape){ NULL, -1 })
+#define POLY_SHAPE_NONE ((PolyShape){NULL, -1})
 #define POLY_MAX_DIMS 16
 
 PolyShape poly_uop_shape(PolyCtx *ctx, PolyUOp *u);
-int64_t  poly_shape_numel(PolyShape s);
-bool     poly_shape_eq(PolyShape a, PolyShape b);
+int64_t poly_shape_numel(PolyShape s);
+bool poly_shape_eq(PolyShape a, PolyShape b);
 
 /* Lazy cached shape accessors -- computes on first access, O(1) thereafter.
  * Returns arena-owned dims, do NOT free. */
@@ -525,20 +608,20 @@ const int64_t *poly_uop_dims(PolyCtx *ctx, const PolyUOp *u);
 PolyShape poly_uop_shape_cached(PolyCtx *ctx, const PolyUOp *u);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
-/* ── Named buffer registry ────────────────────────────────────────────── */
+/* Named buffer registry */
 
 typedef enum {
-  POLY_ROLE_PARAM  = 0,
-  POLY_ROLE_INPUT  = 1,
+  POLY_ROLE_PARAM = 0,
+  POLY_ROLE_INPUT = 1,
   POLY_ROLE_TARGET = 2,
   POLY_ROLE_OUTPUT = 3,
-  POLY_ROLE_AUX    = 4,
+  POLY_ROLE_AUX = 4,
 } PolyBufRole;
 
 typedef struct {
-  const char *name;      /* arena-allocated */
+  const char *name; /* arena-allocated */
   PolyBufRole role;
-  PolyUOp *buffer;       /* BUFFER UOp */
+  PolyUOp *buffer; /* BUFFER UOp */
   int64_t shape[8];
   int ndim;
   bool is_alias;
@@ -547,16 +630,40 @@ typedef struct {
 /* Register a named BUFFER on ctx. Returns the BUFFER UOp.
  * Re-registration with same (name, dtype, shape) returns existing buffer.
  * Mismatch (same name, different dtype or shape) returns NULL. */
-PolyUOp *poly_param(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                    const char *fmt, ...) __attribute__((format(printf, 5, 6)));
-PolyUOp *poly_input(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                    const char *fmt, ...) __attribute__((format(printf, 5, 6)));
-PolyUOp *poly_output(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                     const char *fmt, ...) __attribute__((format(printf, 5, 6)));
-PolyUOp *poly_target(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                     const char *fmt, ...) __attribute__((format(printf, 5, 6)));
-PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
-                  const char *fmt, ...) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_param(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_input(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_output(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_target(
+    PolyCtx *ctx,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    const char *fmt,
+    ...
+) __attribute__((format(printf, 5, 6)));
+PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim, const char *fmt, ...)
+    __attribute__((format(printf, 5, 6)));
 
 /* Create an alias: alias_name resolves to the same buffer as existing_name.
  * Returns 0 on success, -1 on error (existing_name not found, or alias_name
@@ -564,8 +671,7 @@ PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim,
 int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name);
 
 /* Lookup a named buffer by name. Returns the BUFFER UOp, or NULL. */
-PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 
 /* Lookup a registry entry by name. Returns NULL if not found. */
 const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name);
@@ -582,7 +688,7 @@ int poly_ctx_entrypoint_count(PolyCtx *ctx);
 const char *poly_ctx_entrypoint_name(PolyCtx *ctx, int i);
 PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i);
 
-/* ── Autograd ─────────────────────────────────────────────────────────── */
+/* Autograd */
 /* Reverse-mode gradient of loss w.r.t. wrt.
  * Returns a UOp expression for d(loss)/d(wrt), or NULL on unsupported path. */
 PolyUOp *poly_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt);
@@ -592,17 +698,22 @@ PolyUOp *poly_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt);
  * wrts[0..n-1]: target UOps to differentiate w.r.t.
  * out_grads[0..n-1]: receives gradient UOps (zero if no path).
  * Returns 0 on success, -1 on failure. */
-int poly_grad_many(PolyCtx *ctx, PolyUOp *loss, PolyUOp *initial_grad,
-                    PolyUOp **wrts, int n, PolyUOp **out_grads);
+int poly_grad_many(
+    PolyCtx *ctx,
+    PolyUOp *loss,
+    PolyUOp *initial_grad,
+    PolyUOp **wrts,
+    int n,
+    PolyUOp **out_grads
+);
 
 /* Substitute UOps in a graph: replace from[i] with to[i] for i in [0,n).
  * Returns a new root UOp with substitutions applied. Used to reconnect
  * realized intermediate buffers back to their original computation graphs
  * before calling poly_grad. */
-PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root,
-                               PolyUOp **from, PolyUOp **to, int n);
+PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root, PolyUOp **from, PolyUOp **to, int n);
 
-/* ── UOp construction helpers ────────────────────────────────────────── */
+/* UOp construction helpers */
 
 int poly_op_count(void);
 

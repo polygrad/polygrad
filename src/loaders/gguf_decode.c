@@ -22,7 +22,7 @@
 #include <stdio.h>
 #include <math.h>
 
-/* ── GGML type codes ─────────────────────────────────────────────── */
+/* GGML type codes */
 
 #define GGML_TYPE_F32    0
 #define GGML_TYPE_F16    1
@@ -52,7 +52,7 @@
 #define GGUF_TYPE_INT64  11
 #define GGUF_TYPE_FLOAT64 12
 
-/* ── Reader helpers ──────────────────────────────────────────────── */
+/* Reader helpers */
 
 typedef struct {
     const uint8_t *data;
@@ -140,7 +140,7 @@ static int64_t align_up(int64_t pos, int64_t alignment) {
     return (pos + alignment - 1) / alignment * alignment;
 }
 
-/* ── KV value reader ─────────────────────────────────────────────── */
+/* KV value reader */
 
 static int read_kv_value(GgufReader *r, PolyGgufKV *kv) {
     switch (kv->type) {
@@ -195,7 +195,7 @@ static int read_kv_value(GgufReader *r, PolyGgufKV *kv) {
     return 0;
 }
 
-/* ── Bytes per element for GGML types ────────────────────────────── */
+/* Bytes per element for GGML types */
 
 /* Returns bytes per block and elements per block for quantized types.
  * For native types, block_size=1. */
@@ -236,7 +236,7 @@ static int ggml_to_decoded_dtype(int ggml_type) {
     }
 }
 
-/* ── Main decode ─────────────────────────────────────────────────── */
+/* Main decode */
 
 int poly_gguf_decode(const uint8_t *data, int64_t len, PolyGgufDecoded **out) {
     *out = NULL;
@@ -379,7 +379,7 @@ void poly_gguf_decoded_free(PolyGgufDecoded *gguf) {
     free(gguf);
 }
 
-/* ── KV lookup helpers ───────────────────────────────────────────── */
+/* KV lookup helpers */
 
 int poly_gguf_kv_int(const PolyGgufDecoded *g, const char *key, int def) {
     if (!g) return def;

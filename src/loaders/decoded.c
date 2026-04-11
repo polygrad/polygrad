@@ -29,7 +29,7 @@
 #define GGML_I32   18
 #define GGML_BF16  30
 
-/* ── F16/BF16 conversion (shared with safetensors) ───────────────── */
+/* F16/BF16 conversion (shared with safetensors) */
 
 static float f16_to_f32(uint16_t h) {
     uint32_t sign = ((uint32_t)h & 0x8000) << 16;
@@ -61,7 +61,7 @@ static float bf16_to_f32(uint16_t h) {
     return f;
 }
 
-/* ── GGML Q4_0 dequantization ────────────────────────────────────── */
+/* GGML Q4_0 dequantization */
 /* Block: 2 bytes f16 scale + 16 bytes (32 x 4-bit unsigned) = 18 bytes */
 
 static void dequant_q4_0(const uint8_t *block, float *out, int64_t n_blocks) {
@@ -76,7 +76,7 @@ static void dequant_q4_0(const uint8_t *block, float *out, int64_t n_blocks) {
     }
 }
 
-/* ── GGML Q4_1 dequantization ────────────────────────────────────── */
+/* GGML Q4_1 dequantization */
 /* Block: 2 bytes f16 scale + 2 bytes f16 min + 16 bytes = 20 bytes */
 
 static void dequant_q4_1(const uint8_t *block, float *out, int64_t n_blocks) {
@@ -91,7 +91,7 @@ static void dequant_q4_1(const uint8_t *block, float *out, int64_t n_blocks) {
     }
 }
 
-/* ── GGML Q8_0 dequantization ────────────────────────────────────── */
+/* GGML Q8_0 dequantization */
 /* Block: 2 bytes f16 scale + 32 bytes int8 = 34 bytes */
 
 static void dequant_q8_0(const uint8_t *block, float *out, int64_t n_blocks) {
@@ -103,7 +103,7 @@ static void dequant_q8_0(const uint8_t *block, float *out, int64_t n_blocks) {
     }
 }
 
-/* ── GGML Q6_K dequantization ────────────────────────────────────── */
+/* GGML Q6_K dequantization */
 /* Block: 128 bytes ql + 64 bytes qh + 16 bytes scales + 2 bytes d = 210 bytes
  * 256 elements per block.
  * ql: low 4 bits of each element (packed as nibbles, 2 per byte)
@@ -138,7 +138,7 @@ static void dequant_q6_k(const uint8_t *block, float *out, int64_t n_blocks) {
     }
 }
 
-/* ── GGML native type conversion ─────────────────────────────────── */
+/* GGML native type conversion */
 
 static float *ggml_to_f32(const void *data, int64_t numel, int ggml_type) {
     float *out = malloc((size_t)numel * sizeof(float));
@@ -197,7 +197,7 @@ static float *ggml_to_f32(const void *data, int64_t numel, int ggml_type) {
     return out;
 }
 
-/* ── Public API ──────────────────────────────────────────────────── */
+/* Public API */
 
 /*
  * The dtype field interpretation depends on the source format.

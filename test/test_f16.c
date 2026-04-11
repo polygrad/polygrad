@@ -13,7 +13,7 @@
 #include "../src/frontend.h"
 #include "../src/scheduler.h"
 
-/* ── Helper: f32 <-> f16 bit conversion (IEEE 754 half-precision) ─────── */
+/* Helper: f32 <-> f16 bit conversion (IEEE 754 half-precision) */
 
 static uint16_t f32_to_f16_bits(float f) {
   uint32_t u;
@@ -43,7 +43,7 @@ static float f16_bits_to_f32(uint16_t h) {
   return result;
 }
 
-/* ── Helper: f32 <-> bf16 bit conversion ──────────────────────────────── */
+/* Helper: f32 <-> bf16 bit conversion */
 
 static uint16_t f32_to_bf16_bits(float f) {
   uint32_t u;
@@ -58,7 +58,7 @@ static float bf16_bits_to_f32(uint16_t b) {
   return result;
 }
 
-/* ── dtype classification ─────────────────────────────────────────────── */
+/* dtype classification */
 
 TEST(f16, dtype_float16_basics) {
   ASSERT_INT_EQ(POLY_FLOAT16.bitsize, 16);
@@ -76,7 +76,7 @@ TEST(f16, dtype_bfloat16_basics) {
   PASS();
 }
 
-/* ── f32 -> f16 cast + realize ────────────────────────────────────────── */
+/* f32 -> f16 cast + realize */
 
 TEST(f16, cast_f32_to_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -89,7 +89,7 @@ TEST(f16, cast_f32_to_f16_e2e) {
   float in_data[] = {1.0f, 2.0f, -0.5f, 0.0f};
   uint16_t out_data[4] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -102,7 +102,7 @@ TEST(f16, cast_f32_to_f16_e2e) {
   PASS();
 }
 
-/* ── f16 -> f32 cast + realize ────────────────────────────────────────── */
+/* f16 -> f32 cast + realize */
 
 TEST(f16, cast_f16_to_f32_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -112,14 +112,10 @@ TEST(f16, cast_f16_to_f32_e2e) {
   PolyUOp *out = poly_buffer_f32(ctx, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
 
-  uint16_t in_data[] = {
-    f32_to_f16_bits(1.0f),
-    f32_to_f16_bits(3.5f),
-    f32_to_f16_bits(-2.0f)
-  };
+  uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(3.5f), f32_to_f16_bits(-2.0f)};
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -131,7 +127,7 @@ TEST(f16, cast_f16_to_f32_e2e) {
   PASS();
 }
 
-/* ── f16 add e2e ──────────────────────────────────────────────────────── */
+/* f16 add e2e */
 
 TEST(f16, add_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -143,29 +139,29 @@ TEST(f16, add_f16_e2e) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
 
   uint16_t a_data[] = {
-    f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f),
-    f32_to_f16_bits(3.0f), f32_to_f16_bits(-1.0f)
+      f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-1.0f)
   };
   uint16_t b_data[] = {
-    f32_to_f16_bits(10.0f), f32_to_f16_bits(20.0f),
-    f32_to_f16_bits(30.0f), f32_to_f16_bits(1.0f)
+      f32_to_f16_bits(10.0f), f32_to_f16_bits(20.0f), f32_to_f16_bits(30.0f), f32_to_f16_bits(1.0f)
   };
   uint16_t out_data[4] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {
+      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 11.0f, 0.1f);
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[1]), 22.0f, 0.1f);
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[2]), 33.0f, 0.1f);
-  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[3]),  0.0f, 0.1f);
+  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[3]), 0.0f, 0.1f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── f16 mul e2e ──────────────────────────────────────────────────────── */
+/* f16 mul e2e */
 
 TEST(f16, mul_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -176,27 +172,25 @@ TEST(f16, mul_f16_e2e) {
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT16, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
 
-  uint16_t a_data[] = {
-    f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-4.0f)
-  };
-  uint16_t b_data[] = {
-    f32_to_f16_bits(5.0f), f32_to_f16_bits(0.5f), f32_to_f16_bits(2.0f)
-  };
+  uint16_t a_data[] = {f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f), f32_to_f16_bits(-4.0f)};
+  uint16_t b_data[] = {f32_to_f16_bits(5.0f), f32_to_f16_bits(0.5f), f32_to_f16_bits(2.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {
+      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 10.0f, 0.1f);
-  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[1]),  1.5f, 0.1f);
+  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[1]), 1.5f, 0.1f);
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[2]), -8.0f, 0.1f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── f16 neg e2e ──────────────────────────────────────────────────────── */
+/* f16 neg e2e */
 
 TEST(f16, neg_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -206,24 +200,22 @@ TEST(f16, neg_f16_e2e) {
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT16, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, neg));
 
-  uint16_t a_data[] = {
-    f32_to_f16_bits(1.0f), f32_to_f16_bits(-2.0f), f32_to_f16_bits(0.0f)
-  };
+  uint16_t a_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(-2.0f), f32_to_f16_bits(0.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), -1.0f, 0.01f);
-  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[1]),  2.0f, 0.01f);
-  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[2]),  0.0f, 0.01f);
+  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[1]), 2.0f, 0.01f);
+  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[2]), 0.0f, 0.01f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── f16 constant rendering ───────────────────────────────────────────── */
+/* f16 constant rendering */
 
 TEST(f16, const_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -234,12 +226,10 @@ TEST(f16, const_f16_e2e) {
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT16, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
 
-  uint16_t a_data[] = {
-    f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)
-  };
+  uint16_t a_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -251,7 +241,7 @@ TEST(f16, const_f16_e2e) {
   PASS();
 }
 
-/* ── mixed precision: f16 -> f32 compute -> f32 output ────────────────── */
+/* mixed precision: f16 -> f32 compute -> f32 output */
 
 TEST(f16, mixed_f16_to_f32_chain_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -263,12 +253,10 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
   PolyUOp *out = poly_buffer_f32(ctx, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
 
-  uint16_t in_data[] = {
-    f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)
-  };
+  uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
@@ -280,7 +268,7 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
   PASS();
 }
 
-/* ── f64 -> f16 cast (should go via f32 intermediate) ─────────────────── */
+/* f64 -> f16 cast (should go via f32 intermediate) */
 
 TEST(f16, cast_f64_to_f16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -293,18 +281,18 @@ TEST(f16, cast_f64_to_f16_e2e) {
   double in_data[] = {1.5, -2.5};
   uint16_t out_data[2] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
-  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]),  1.5f, 0.01f);
+  ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 1.5f, 0.01f);
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[1]), -2.5f, 0.01f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── bf16 cast f32 -> bf16 e2e ────────────────────────────────────────── */
+/* bf16 cast f32 -> bf16 e2e */
 
 TEST(f16, cast_f32_to_bf16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -317,19 +305,19 @@ TEST(f16, cast_f32_to_bf16_e2e) {
   float in_data[] = {1.0f, -2.0f, 0.5f};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
-  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]),  1.0f, 0.01f);
+  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), 1.0f, 0.01f);
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[1]), -2.0f, 0.01f);
-  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[2]),  0.5f, 0.01f);
+  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[2]), 0.5f, 0.01f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── bf16 cast bf16 -> f32 e2e ────────────────────────────────────────── */
+/* bf16 cast bf16 -> f32 e2e */
 
 TEST(f16, cast_bf16_to_f32_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -339,26 +327,22 @@ TEST(f16, cast_bf16_to_f32_e2e) {
   PolyUOp *out = poly_buffer_f32(ctx, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
 
-  uint16_t in_data[] = {
-    f32_to_bf16_bits(1.0f),
-    f32_to_bf16_bits(-3.0f),
-    f32_to_bf16_bits(0.25f)
-  };
+  uint16_t in_data[] = {f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-3.0f), f32_to_bf16_bits(0.25f)};
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
   int rc = poly_realize(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
-  ASSERT_FLOAT_EQ(out_data[0],  1.0f, 0.01f);
+  ASSERT_FLOAT_EQ(out_data[0], 1.0f, 0.01f);
   ASSERT_FLOAT_EQ(out_data[1], -3.0f, 0.01f);
-  ASSERT_FLOAT_EQ(out_data[2],  0.25f, 0.01f);
+  ASSERT_FLOAT_EQ(out_data[2], 0.25f, 0.01f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── bf16 add (via f32 emulation) e2e ─────────────────────────────────── */
+/* bf16 add (via f32 emulation) e2e */
 
 TEST(f16, add_bf16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -369,27 +353,25 @@ TEST(f16, add_bf16_e2e) {
   PolyUOp *out = poly_buffer(ctx, POLY_BFLOAT16, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
 
-  uint16_t a_data[] = {
-    f32_to_bf16_bits(1.0f), f32_to_bf16_bits(2.0f), f32_to_bf16_bits(-1.0f)
-  };
-  uint16_t b_data[] = {
-    f32_to_bf16_bits(10.0f), f32_to_bf16_bits(20.0f), f32_to_bf16_bits(1.0f)
-  };
+  uint16_t a_data[] = {f32_to_bf16_bits(1.0f), f32_to_bf16_bits(2.0f), f32_to_bf16_bits(-1.0f)};
+  uint16_t b_data[] = {f32_to_bf16_bits(10.0f), f32_to_bf16_bits(20.0f), f32_to_bf16_bits(1.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {
+      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), 11.0f, 0.2f);
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[1]), 22.0f, 0.2f);
-  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[2]),  0.0f, 0.2f);
+  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[2]), 0.0f, 0.2f);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── bf16 mul (via f32 emulation) e2e ─────────────────────────────────── */
+/* bf16 mul (via f32 emulation) e2e */
 
 TEST(f16, mul_bf16_e2e) {
   PolyCtx *ctx = poly_ctx_new();
@@ -400,20 +382,18 @@ TEST(f16, mul_bf16_e2e) {
   PolyUOp *out = poly_buffer(ctx, POLY_BFLOAT16, 3);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, prod));
 
-  uint16_t a_data[] = {
-    f32_to_bf16_bits(2.0f), f32_to_bf16_bits(3.0f), f32_to_bf16_bits(-4.0f)
-  };
-  uint16_t b_data[] = {
-    f32_to_bf16_bits(5.0f), f32_to_bf16_bits(0.5f), f32_to_bf16_bits(2.0f)
-  };
+  uint16_t a_data[] = {f32_to_bf16_bits(2.0f), f32_to_bf16_bits(3.0f), f32_to_bf16_bits(-4.0f)};
+  uint16_t b_data[] = {f32_to_bf16_bits(5.0f), f32_to_bf16_bits(0.5f), f32_to_bf16_bits(2.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = { POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data) };
+  PolyBufferBinding binds[] = {
+      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  };
   int rc = poly_realize(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), 10.0f, 0.2f);
-  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[1]),  1.5f, 0.2f);
+  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[1]), 1.5f, 0.2f);
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[2]), -8.0f, 0.2f);
 
   poly_ctx_destroy(ctx);

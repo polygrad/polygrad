@@ -26,7 +26,7 @@
 #include "polygrad.h"
 #include "tensor.h"
 
-/* ── helpers ──────────────────────────────────────────────────────────── */
+/* helpers */
 
 /* Test whether a UOp is one of the "external dependency" leaves that
  * reduce_collapse must NOT wrap in a DEFINE_VAR. Mirrors tinygrad's
@@ -35,31 +35,36 @@
  */
 static bool is_external_leaf(PolyUOp *u) {
   switch (u->op) {
-    case POLY_OP_CONST:
-    case POLY_OP_VCONST:
-    case POLY_OP_PARAM:
-    case POLY_OP_DEFINE_LOCAL:
-    case POLY_OP_DEFINE_VAR:
-      return true;
-    default:
-      return false;
+  case POLY_OP_CONST:
+  case POLY_OP_VCONST:
+  case POLY_OP_PARAM:
+  case POLY_OP_DEFINE_LOCAL:
+  case POLY_OP_DEFINE_VAR:
+    return true;
+  default:
+    return false;
   }
 }
 
 /* Pointer-key map helpers (mirror src/uop.c:363-368). */
-static bool ptr_eq_local(const void *a, const void *b) { return a == b; }
+static bool ptr_eq_local(const void *a, const void *b) {
+  return a == b;
+}
 static uint32_t ptr_hash_local(const void *p) {
   uintptr_t v = (uintptr_t)p;
   return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
 }
 
-
 /* Construct a DEFINE_VAR with arbitrary dtype (frontend.c:poly_define_var
  * is INT32-only). Name is arena-copied by poly_uop_create. */
-static PolyUOp *make_define_var(PolyCtx *ctx, const char *name, PolyDType dt,
-                                 int64_t vmin, int64_t vmax) {
-  return poly_uop0(ctx, POLY_OP_DEFINE_VAR, dt,
-                   poly_arg_define_var(name, vmin, vmax));
+static PolyUOp *make_define_var(
+    PolyCtx *ctx,
+    const char *name,
+    PolyDType dt,
+    int64_t vmin,
+    int64_t vmax
+) {
+  return poly_uop0(ctx, POLY_OP_DEFINE_VAR, dt, poly_arg_define_var(name, vmin, vmax));
 }
 
 /* CONST in a target dtype, value taken as a double and re-encoded into the
@@ -67,10 +72,8 @@ static PolyUOp *make_define_var(PolyCtx *ctx, const char *name, PolyDType dt,
  * construct a CONST with mismatched dtype/arg.kind (the bug fixed in
  * pat.c:poly_const_like). */
 static PolyUOp *typed_const(PolyCtx *ctx, PolyDType dt, double v) {
-  if (poly_dtype_is_float(dt))
-    return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(v));
-  if (poly_dtype_is_bool(dt))
-    return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(v != 0.0));
+  if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(v));
+  if (poly_dtype_is_bool(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(v != 0.0));
   return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)v));
 }
 
@@ -79,16 +82,16 @@ static PolyUOp *typed_const(PolyCtx *ctx, PolyDType dt, double v) {
 static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *x, PolyDType dt) {
   if (poly_dtype_eq(x->dtype, dt)) return x;
   if (x->op == POLY_OP_CONST) {
-    double v = (x->arg.kind == POLY_ARG_INT)   ? (double)x->arg.i :
-               (x->arg.kind == POLY_ARG_FLOAT) ? x->arg.f :
-               (x->arg.kind == POLY_ARG_BOOL)  ? (x->arg.b ? 1.0 : 0.0) : 0.0;
+    double v = (x->arg.kind == POLY_ARG_INT)     ? (double)x->arg.i
+               : (x->arg.kind == POLY_ARG_FLOAT) ? x->arg.f
+               : (x->arg.kind == POLY_ARG_BOOL)  ? (x->arg.b ? 1.0 : 0.0)
+                                                 : 0.0;
     return typed_const(ctx, dt, v);
   }
   return poly_cast(ctx, x, dt);
 }
 
-/* ── D2: reduce_unparented ────────────────────────────────────────────────
- *
+/* D2: reduce_unparented *
  * Tinygrad source (codegen/simplify.py:77-92):
  *
  *   def reduce_unparented(red):
@@ -103,8 +106,7 @@ static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *x, PolyDType dt) {
  *
  * Verified against tg_reduce_unparented_gt.py cases A-F.
  */
-static PolyUOp *rule_reduce_unparented(PolyCtx *ctx, PolyUOp *red,
-                                       const PolyBindings *b) {
+static PolyUOp *rule_reduce_unparented(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->arg.kind != POLY_ARG_OPS) return NULL;
   PolyOps rop = red->arg.ops;
@@ -133,9 +135,9 @@ static PolyUOp *rule_reduce_unparented(PolyCtx *ctx, PolyUOp *red,
   if (n_parented > 0 || !poly_dtype_eq(red->dtype, value->dtype)) {
     PolyUOp *new_srcs[POLY_MAX_DIMS + 2];
     new_srcs[0] = value;
-    for (int i = 0; i < n_parented; i++) new_srcs[i + 1] = parented[i];
-    ret = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, new_srcs, 1 + n_parented,
-                   red->arg);
+    for (int i = 0; i < n_parented; i++)
+      new_srcs[i + 1] = parented[i];
+    ret = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, new_srcs, 1 + n_parented, red->arg);
   } else {
     ret = value;
   }
@@ -151,12 +153,15 @@ static PolyUOp *rule_reduce_unparented(PolyCtx *ctx, PolyUOp *red,
   return ret;
 }
 
-/* ── D3: pm_reduce_collapse rules ──────────────────────────────────────── */
+/* D3: pm_reduce_collapse rules */
 
 /* Rule 1: ((x+y).or_casted() < c) -> x < (c.cast(y.dtype)-y)  if no_range(y,c)
  * tinygrad simplify.py:96 */
-static PolyUOp *rule_collapse_lift_add_from_cmplt(PolyCtx *ctx, PolyUOp *cmplt,
-                                                   const PolyBindings *b) {
+static PolyUOp *rule_collapse_lift_add_from_cmplt(
+    PolyCtx *ctx,
+    PolyUOp *cmplt,
+    const PolyBindings *b
+) {
   (void)b;
   if (cmplt->op != POLY_OP_CMPLT || cmplt->n_src != 2) return NULL;
   PolyUOp *lhs = cmplt->src[0];
@@ -175,8 +180,11 @@ static PolyUOp *rule_collapse_lift_add_from_cmplt(PolyCtx *ctx, PolyUOp *cmplt,
 
 /* Rule 2: ((x*y) < c) -> x < ((c+y-1)//y)  if no_range(y,c) and is_int(y) and y.vmin>0
  * tinygrad simplify.py:98-99 */
-static PolyUOp *rule_collapse_lift_mul_from_cmplt(PolyCtx *ctx, PolyUOp *cmplt,
-                                                   const PolyBindings *b) {
+static PolyUOp *rule_collapse_lift_mul_from_cmplt(
+    PolyCtx *ctx,
+    PolyUOp *cmplt,
+    const PolyBindings *b
+) {
   (void)b;
   if (cmplt->op != POLY_OP_CMPLT || cmplt->n_src != 2) return NULL;
   PolyUOp *lhs = cmplt->src[0];
@@ -199,19 +207,23 @@ static PolyUOp *rule_collapse_lift_mul_from_cmplt(PolyCtx *ctx, PolyUOp *cmplt,
 
 /* Match patterns of the form REDUCE_ADD( WHERE( CMPLT(r, cut), tval, fval ), r ).
  * Used by rules 3 and 5 below. Returns true and fills out params on match. */
-static bool match_where_cmplt_reduce(PolyUOp *red, PolyUOp **out_r,
-                                     PolyUOp **out_cut, PolyUOp **out_tval,
-                                     PolyUOp **out_fval) {
+static bool match_where_cmplt_reduce(
+    PolyUOp *red,
+    PolyUOp **out_r,
+    PolyUOp **out_cut,
+    PolyUOp **out_tval,
+    PolyUOp **out_fval
+) {
   if (red->op != POLY_OP_REDUCE) return false;
   if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return false;
-  if (red->n_src != 2) return false;                     /* exactly one range */
+  if (red->n_src != 2) return false; /* exactly one range */
   PolyUOp *r = red->src[1];
   if (r->op != POLY_OP_RANGE) return false;
   PolyUOp *value = red->src[0];
   if (value->op != POLY_OP_WHERE || value->n_src != 3) return false;
   PolyUOp *cmplt = value->src[0];
   if (cmplt->op != POLY_OP_CMPLT || cmplt->n_src != 2) return false;
-  if (cmplt->src[0] != r) return false;                 /* CMPLT(r, cut) */
+  if (cmplt->src[0] != r) return false; /* CMPLT(r, cut) */
   *out_r = r;
   *out_cut = cmplt->src[1];
   *out_tval = value->src[1];
@@ -221,8 +233,7 @@ static bool match_where_cmplt_reduce(PolyUOp *red, PolyUOp **out_r,
 
 /* Helper: build N.max(0).min(r.src[0]).cast(val.dtype) * val
  * where N is the integer expression "remaining count" the rule produces. */
-static PolyUOp *build_count_mul_val(PolyCtx *ctx, PolyUOp *N, PolyUOp *r,
-                                    PolyUOp *val) {
+static PolyUOp *build_count_mul_val(PolyCtx *ctx, PolyUOp *N, PolyUOp *r, PolyUOp *val) {
   /* N.maximum(0) -> MAX(N, 0) in N's dtype */
   PolyUOp *zero_n = typed_const(ctx, N->dtype, 0);
   PolyUOp *clamped_lo = poly_alu2(ctx, POLY_OP_MAX, N, zero_n);
@@ -245,17 +256,15 @@ static PolyUOp *build_count_mul_val(PolyCtx *ctx, PolyUOp *N, PolyUOp *r,
  *     -> (r.src[0]-cut).maximum(0).minimum(r.src[0]).cast(val.dtype) * val
  *  iff no_range(val).
  * tinygrad simplify.py:103 */
-static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red,
-                                                const PolyBindings *b) {
+static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   PolyUOp *r, *cut, *tval, *fval;
   if (!match_where_cmplt_reduce(red, &r, &cut, &tval, &fval)) return NULL;
   /* tval must be CONST(0); val = fval */
   if (tval->op != POLY_OP_CONST) return NULL;
-  bool tval_is_zero =
-      (tval->arg.kind == POLY_ARG_INT && tval->arg.i == 0) ||
-      (tval->arg.kind == POLY_ARG_FLOAT && tval->arg.f == 0.0) ||
-      (tval->arg.kind == POLY_ARG_BOOL && tval->arg.b == false);
+  bool tval_is_zero = (tval->arg.kind == POLY_ARG_INT && tval->arg.i == 0) ||
+                      (tval->arg.kind == POLY_ARG_FLOAT && tval->arg.f == 0.0) ||
+                      (tval->arg.kind == POLY_ARG_BOOL && tval->arg.b == false);
   if (!tval_is_zero) return NULL;
   PolyUOp *val = fval;
   if (!poly_no_range(ctx, val)) return NULL;
@@ -271,17 +280,15 @@ static PolyUOp *rule_collapse_fold_range_below(PolyCtx *ctx, PolyUOp *red,
  *     -> cut.maximum(0).minimum(r.src[0]).cast(val.dtype) * val
  *  iff no_range(val).
  * tinygrad simplify.py:109 */
-static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red,
-                                                const PolyBindings *b) {
+static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   PolyUOp *r, *cut, *tval, *fval;
   if (!match_where_cmplt_reduce(red, &r, &cut, &tval, &fval)) return NULL;
   /* fval must be CONST(0); val = tval */
   if (fval->op != POLY_OP_CONST) return NULL;
-  bool fval_is_zero =
-      (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
-      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0) ||
-      (fval->arg.kind == POLY_ARG_BOOL && fval->arg.b == false);
+  bool fval_is_zero = (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
+                      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0) ||
+                      (fval->arg.kind == POLY_ARG_BOOL && fval->arg.b == false);
   if (!fval_is_zero) return NULL;
   PolyUOp *val = tval;
   if (!poly_no_range(ctx, val)) return NULL;
@@ -297,8 +304,11 @@ static PolyUOp *rule_collapse_fold_range_above(PolyCtx *ctx, PolyUOp *red,
  *  where n = r.src[0]. Polygrad's logical_not is CMPNE(x, true) (P5). The
  *  AND of two bool comparisons is POLY_OP_AND.
  * tinygrad simplify.py:105-107 */
-static PolyUOp *rule_collapse_fold_range_two_sided(PolyCtx *ctx, PolyUOp *red,
-                                                    const PolyBindings *b) {
+static PolyUOp *rule_collapse_fold_range_two_sided(
+    PolyCtx *ctx,
+    PolyUOp *red,
+    const PolyBindings *b
+) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
   if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
@@ -310,9 +320,8 @@ static PolyUOp *rule_collapse_fold_range_two_sided(PolyCtx *ctx, PolyUOp *red,
   PolyUOp *fval = value->src[2];
   PolyUOp *val = value->src[1];
   if (fval->op != POLY_OP_CONST) return NULL;
-  bool fval_is_zero =
-      (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
-      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0);
+  bool fval_is_zero = (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
+                      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0);
   if (!fval_is_zero) return NULL;
   PolyUOp *cond = value->src[0];
   if (cond->op != POLY_OP_AND || cond->n_src != 2) return NULL;
@@ -325,10 +334,8 @@ static PolyUOp *rule_collapse_fold_range_two_sided(PolyCtx *ctx, PolyUOp *red,
     PolyUOp *a = swap ? hi_form : lo_form;
     PolyUOp *b2 = swap ? lo_form : hi_form;
     /* a should be CMPNE(CMPLT(r, lower), CONST(true)) */
-    if (a->op == POLY_OP_CMPNE && a->n_src == 2 &&
-        a->src[0]->op == POLY_OP_CMPLT && a->src[0]->n_src == 2 &&
-        a->src[0]->src[0] == r &&
-        a->src[1]->op == POLY_OP_CONST &&
+    if (a->op == POLY_OP_CMPNE && a->n_src == 2 && a->src[0]->op == POLY_OP_CMPLT &&
+        a->src[0]->n_src == 2 && a->src[0]->src[0] == r && a->src[1]->op == POLY_OP_CONST &&
         ((a->src[1]->arg.kind == POLY_ARG_BOOL && a->src[1]->arg.b == true) ||
          (a->src[1]->arg.kind == POLY_ARG_INT && a->src[1]->arg.i != 0))) {
       PolyUOp *cand_lower = a->src[0]->src[1];
@@ -350,8 +357,7 @@ static PolyUOp *rule_collapse_fold_range_two_sided(PolyCtx *ctx, PolyUOp *red,
   PolyUOp *lower_in_n = cast_to(ctx, lower, n->dtype);
   PolyUOp *neg_u = poly_alu1(ctx, POLY_OP_NEG, upper_in_n);
   PolyUOp *neg_n = poly_alu1(ctx, POLY_OP_NEG, n);
-  PolyUOp *upper_min_n = poly_alu1(ctx, POLY_OP_NEG,
-                                    poly_alu2(ctx, POLY_OP_MAX, neg_u, neg_n));
+  PolyUOp *upper_min_n = poly_alu1(ctx, POLY_OP_NEG, poly_alu2(ctx, POLY_OP_MAX, neg_u, neg_n));
   /* lower.maximum(0) = MAX(lower, 0) */
   PolyUOp *zero = typed_const(ctx, n->dtype, 0);
   PolyUOp *lower_max_0 = poly_alu2(ctx, POLY_OP_MAX, lower_in_n, zero);
@@ -363,8 +369,11 @@ static PolyUOp *rule_collapse_fold_range_two_sided(PolyCtx *ctx, PolyUOp *red,
 /* Rule 6: reduce_add_distribute
  *   (x+y).reduce_add(*ranges) -> x.reduce_add(*ranges) + y.reduce_add(*ranges)
  * tinygrad simplify.py:113 */
-static PolyUOp *rule_collapse_reduce_add_distribute(PolyCtx *ctx, PolyUOp *red,
-                                                     const PolyBindings *b) {
+static PolyUOp *rule_collapse_reduce_add_distribute(
+    PolyCtx *ctx,
+    PolyUOp *red,
+    const PolyBindings *b
+) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
   if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
@@ -383,10 +392,8 @@ static PolyUOp *rule_collapse_reduce_add_distribute(PolyCtx *ctx, PolyUOp *red,
     xs[1 + i] = red->src[1 + i];
     ys[1 + i] = red->src[1 + i];
   }
-  PolyUOp *xred = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, xs, 1 + n_extra,
-                            red->arg);
-  PolyUOp *yred = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, ys, 1 + n_extra,
-                            red->arg);
+  PolyUOp *xred = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, xs, 1 + n_extra, red->arg);
+  PolyUOp *yred = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, ys, 1 + n_extra, red->arg);
   return poly_alu2(ctx, POLY_OP_ADD, xred, yred);
 }
 
@@ -394,8 +401,7 @@ static PolyUOp *rule_collapse_reduce_add_distribute(PolyCtx *ctx, PolyUOp *red,
  *   ((DEFINE_VAR & y).where(c, 0)).reduce_add(*ranges)
  *     -> y.where(c, 0).reduce_add(*ranges) * x.cast(c.dtype)
  * tinygrad simplify.py:115-116 */
-static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red,
-                                            const PolyBindings *b) {
+static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
   if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
@@ -404,32 +410,32 @@ static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red,
   if (where->op != POLY_OP_WHERE || where->n_src != 3) return NULL;
   PolyUOp *fval = where->src[2];
   if (fval->op != POLY_OP_CONST) return NULL;
-  bool fval_is_zero =
-      (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
-      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0);
+  bool fval_is_zero = (fval->arg.kind == POLY_ARG_INT && fval->arg.i == 0) ||
+                      (fval->arg.kind == POLY_ARG_FLOAT && fval->arg.f == 0.0);
   if (!fval_is_zero) return NULL;
   PolyUOp *and_op = where->src[0];
   if (and_op->op != POLY_OP_AND || and_op->n_src != 2) return NULL;
   /* One side must be DEFINE_VAR, the other is "y" */
   PolyUOp *x = NULL, *y = NULL;
   if (and_op->src[0]->op == POLY_OP_DEFINE_VAR) {
-    x = and_op->src[0]; y = and_op->src[1];
+    x = and_op->src[0];
+    y = and_op->src[1];
   } else if (and_op->src[1]->op == POLY_OP_DEFINE_VAR) {
-    x = and_op->src[1]; y = and_op->src[0];
+    x = and_op->src[1];
+    y = and_op->src[0];
   } else {
     return NULL;
   }
   PolyUOp *c = where->src[1];
   /* New WHERE: y.where(c, fval) */
-  PolyUOp *new_where = poly_uop3(ctx, POLY_OP_WHERE, where->dtype, y, c, fval,
-                                  poly_arg_none());
+  PolyUOp *new_where = poly_uop3(ctx, POLY_OP_WHERE, where->dtype, y, c, fval, poly_arg_none());
   /* New REDUCE with same ranges */
   int n_extra = red->n_src - 1;
   PolyUOp *new_srcs[POLY_MAX_DIMS + 2];
   new_srcs[0] = new_where;
-  for (int i = 0; i < n_extra; i++) new_srcs[1 + i] = red->src[1 + i];
-  PolyUOp *new_red = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, new_srcs,
-                               1 + n_extra, red->arg);
+  for (int i = 0; i < n_extra; i++)
+    new_srcs[1 + i] = red->src[1 + i];
+  PolyUOp *new_red = poly_uop(ctx, POLY_OP_REDUCE, red->dtype, new_srcs, 1 + n_extra, red->arg);
   /* * x.cast(c.dtype) */
   PolyUOp *x_cast = cast_to(ctx, x, c->dtype);
   return poly_alu2(ctx, POLY_OP_MUL, new_red, x_cast);
@@ -439,8 +445,7 @@ static PolyUOp *rule_collapse_and_on_where(PolyCtx *ctx, PolyUOp *red,
  *   x * gate.cast()  ->  gate.where(x, 0)
  *  where gate.dtype is bool.
  * tinygrad simplify.py:118 */
-static PolyUOp *rule_collapse_mul_casted_bool(PolyCtx *ctx, PolyUOp *mul,
-                                               const PolyBindings *b) {
+static PolyUOp *rule_collapse_mul_casted_bool(PolyCtx *ctx, PolyUOp *mul, const PolyBindings *b) {
   (void)b;
   if (mul->op != POLY_OP_MUL || mul->n_src != 2) return NULL;
   /* Try both src orderings: src[0]=x, src[1]=CAST(gate); and the swap. */
@@ -452,14 +457,12 @@ static PolyUOp *rule_collapse_mul_casted_bool(PolyCtx *ctx, PolyUOp *mul,
     if (!poly_dtype_is_bool(gate->dtype)) continue;
     /* gate.where(x, 0) — result dtype = x.dtype */
     PolyUOp *zero = typed_const(ctx, x->dtype, 0);
-    return poly_uop3(ctx, POLY_OP_WHERE, x->dtype, gate, x, zero,
-                      poly_arg_none());
+    return poly_uop3(ctx, POLY_OP_WHERE, x->dtype, gate, x, zero, poly_arg_none());
   }
   return NULL;
 }
 
-/* ── D4: reduce_collapse driver ──────────────────────────────────────────
- *
+/* D4: reduce_collapse driver *
  * Tinygrad source (codegen/simplify.py:129-142):
  *
  *   def reduce_collapse(red, u, pm=pm_reduce_collapse):
@@ -509,14 +512,12 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
     if (r->op != POLY_OP_RANGE) goto fail;
 
     /* Toposort u, gated by "r in node.ranges" — yields "included" set. */
-    GateCtx g = { .ctx = ctx, .r = r, .cache = cache };
+    GateCtx g = {.ctx = ctx, .r = r, .cache = cache};
     int n_inc = 0;
-    PolyUOp **included = poly_toposort_ex_user(ctx, u, &n_inc,
-                                                collapse_gate, &g, true);
+    PolyUOp **included = poly_toposort_ex_user(ctx, u, &n_inc, collapse_gate, &g, true);
     /* `included` is arena-allocated by toposort; do NOT free. */
     if (dbg) {
-      fprintf(stderr, "  [reduce_collapse] r=%p included.n=%d value tree:\n",
-              (void *)r, n_inc);
+      fprintf(stderr, "  [reduce_collapse] r=%p included.n=%d value tree:\n", (void *)r, n_inc);
       poly_uop_dump_tree(stderr, u, 4, 12);
     }
     if (!included || n_inc == 0) goto fail;
@@ -524,15 +525,19 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
     if (included_map) poly_map_destroy(included_map);
     included_map = poly_map_new(16);
     for (int i = 0; i < n_inc; i++) {
-      poly_map_set(included_map, ptr_hash_local(included[i]),
-                   included[i], (void *)(uintptr_t)1, ptr_eq_local);
+      poly_map_set(
+          included_map, ptr_hash_local(included[i]), included[i], (void *)(uintptr_t)1, ptr_eq_local
+      );
     }
 
     /* Bail if any included node is STORE or REDUCE (a nested reduce). */
     bool nested = false;
     for (int i = 0; i < n_inc; i++) {
       PolyOps op = included[i]->op;
-      if (op == POLY_OP_STORE || op == POLY_OP_REDUCE) { nested = true; break; }
+      if (op == POLY_OP_STORE || op == POLY_OP_REDUCE) {
+        nested = true;
+        break;
+      }
     }
     if (nested) goto fail;
 
@@ -549,10 +554,8 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
       PolyUOp *node = included[i];
       for (uint16_t k = 0; k < node->n_src; k++) {
         PolyUOp *s = node->src[k];
-        if (poly_map_get(included_map, ptr_hash_local(s), s, ptr_eq_local))
-          continue;
-        if (poly_map_get(replaces_map, ptr_hash_local(s), s, ptr_eq_local))
-          continue;
+        if (poly_map_get(included_map, ptr_hash_local(s), s, ptr_eq_local)) continue;
+        if (poly_map_get(replaces_map, ptr_hash_local(s), s, ptr_eq_local)) continue;
         if (is_external_leaf(s)) continue;
         int64_t vmin, vmax;
         poly_uop_minmax_ex(ctx, s, cache, &vmin, &vmax);
@@ -569,16 +572,15 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
     /* Substitute, build collapse form, run pm_reduce_collapse, check
      * no_range, substitute back. */
     PolyUOp *substituted = poly_uop_substitute(ctx, u, from_arr, to_arr, n_repl);
-    PolyUOp *one_range_srcs[2] = { substituted, r };
-    PolyUOp *collapse_form = poly_uop(ctx, POLY_OP_REDUCE, red->dtype,
-                                       one_range_srcs, 2,
-                                       poly_arg_ops(POLY_OP_ADD));
-    PolyUOp *sink = poly_graph_rewrite(ctx, collapse_form,
-                                        pm_reduce_collapse_get());
+    PolyUOp *one_range_srcs[2] = {substituted, r};
+    PolyUOp *collapse_form =
+        poly_uop(ctx, POLY_OP_REDUCE, red->dtype, one_range_srcs, 2, poly_arg_ops(POLY_OP_ADD));
+    PolyUOp *sink = poly_graph_rewrite(ctx, collapse_form, pm_reduce_collapse_get());
     if (dbg)
-      fprintf(stderr, "  [reduce_collapse] n_repl=%d sink_op=%s no_range=%d\n",
-              n_repl, poly_op_name(sink->op),
-              (int)poly_no_range_ex(ctx, sink, cache));
+      fprintf(
+          stderr, "  [reduce_collapse] n_repl=%d sink_op=%s no_range=%d\n", n_repl,
+          poly_op_name(sink->op), (int)poly_no_range_ex(ctx, sink, cache)
+      );
     if (!poly_no_range_ex(ctx, sink, cache)) goto fail;
     /* Substitute back: from = to_arr (DEFINE_VARs), to = from_arr (originals) */
     u = poly_uop_substitute(ctx, sink, to_arr, from_arr, n_repl);
@@ -600,8 +602,7 @@ fail:
  *   (UPat(REDUCE, src=(UPat.var("u"),), allow_any_len=True, arg=Ops.ADD,
  *       name="red"), reduce_collapse)
  */
-static PolyUOp *rule_reduce_simplify_entry(PolyCtx *ctx, PolyUOp *red,
-                                           const PolyBindings *b) {
+static PolyUOp *rule_reduce_simplify_entry(PolyCtx *ctx, PolyUOp *red, const PolyBindings *b) {
   (void)b;
   if (red->op != POLY_OP_REDUCE) return NULL;
   if (red->arg.kind != POLY_ARG_OPS || red->arg.ops != POLY_OP_ADD) return NULL;
@@ -609,8 +610,7 @@ static PolyUOp *rule_reduce_simplify_entry(PolyCtx *ctx, PolyUOp *red,
   return reduce_collapse_drive(ctx, red, red->src[0]);
 }
 
-/* ── D5: pm_reduce_simplify combinator ───────────────────────────────────
- *
+/* D5: pm_reduce_simplify combinator *
  * Tinygrad source (codegen/simplify.py:147-149):
  *   pm_reduce_simplify = pm_reduce_unparented + PatternMatcher([
  *     (UPat(Ops.REDUCE, src=(UPat.var("u"),), allow_any_len=True,
@@ -630,36 +630,26 @@ static PolyPatternMatcher *g_pm_reduce_simplify = NULL;
 static PolyPatternMatcher *pm_reduce_unparented_get(void) {
   if (g_pm_reduce_unparented) return g_pm_reduce_unparented;
   PolyRule rules[] = {
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_unparented },
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_unparented},
   };
-  g_pm_reduce_unparented = poly_pm_new(rules,
-                                       (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_reduce_unparented = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_reduce_unparented;
 }
 
 static PolyPatternMatcher *pm_reduce_collapse_get(void) {
   if (g_pm_reduce_collapse) return g_pm_reduce_collapse;
   PolyRule rules[] = {
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_unparented },
-    { poly_pat_op(POLY_OP_CMPLT, NULL, 0, "x"),
-      rule_collapse_lift_add_from_cmplt },
-    { poly_pat_op(POLY_OP_CMPLT, NULL, 0, "x"),
-      rule_collapse_lift_mul_from_cmplt },
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"),
-      rule_collapse_fold_range_below },
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"),
-      rule_collapse_fold_range_two_sided },
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"),
-      rule_collapse_fold_range_above },
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"),
-      rule_collapse_reduce_add_distribute },
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"),
-      rule_collapse_and_on_where },
-    { poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"),
-      rule_collapse_mul_casted_bool },
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_unparented},
+      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "x"), rule_collapse_lift_add_from_cmplt},
+      {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "x"), rule_collapse_lift_mul_from_cmplt},
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_below},
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_two_sided},
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_fold_range_above},
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_reduce_add_distribute},
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_and_on_where},
+      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_collapse_mul_casted_bool},
   };
-  PolyPatternMatcher *base = poly_pm_new(rules,
-                                          (int)(sizeof(rules) / sizeof(rules[0])));
+  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   g_pm_reduce_collapse = poly_pm_concat(base, poly_symbolic_simple());
   return g_pm_reduce_collapse;
 }
@@ -667,16 +657,15 @@ static PolyPatternMatcher *pm_reduce_collapse_get(void) {
 static PolyPatternMatcher *pm_reduce_simplify_get(void) {
   if (g_pm_reduce_simplify) return g_pm_reduce_simplify;
   PolyRule rules[] = {
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_unparented },
-    { poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_simplify_entry },
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_unparented},
+      {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_reduce_simplify_entry},
   };
-  PolyPatternMatcher *base = poly_pm_new(rules,
-                                          (int)(sizeof(rules) / sizeof(rules[0])));
+  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   g_pm_reduce_simplify = poly_pm_concat(base, poly_symbolic_simple());
   return g_pm_reduce_simplify;
 }
 
-/* ── Public entries ──────────────────────────────────────────────────── */
+/* Public entries */
 
 PolyUOp *poly_apply_reduce_unparented_only(PolyCtx *ctx, PolyUOp *sink) {
   /* Test-only entry: standalone pm_reduce_unparented (no symbolic concat).

@@ -19,12 +19,12 @@ extern "C" {
  * const-registry implementation. The hidden-state buffer migration path is
  * gone; all creation helpers (arange/eye/full/tril/triu/rand) are pure UOp. */
 
-/* ── Shape helpers (shared) ──────────────────────────────────────────── */
+/* Shape helpers (shared) */
 
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
 
-/* ── Movement-op helpers (port of tinygrad mixin/movement.py) ────────── */
+/* Movement-op helpers (port of tinygrad mixin/movement.py) */
 
 /* Tensor.repeat -- movement.py:465. n_repeats >= input ndim. */
 PolyUOp *poly_repeat(PolyCtx *ctx, PolyUOp *x, const int64_t *repeats, int n_repeats);
@@ -34,9 +34,14 @@ PolyUOp *poly_shrink_to(PolyCtx *ctx, PolyUOp *x, const int64_t *ends, int n_end
 
 /* Tensor._pool -- movement.py:487. General N-d pool via repeat/shrink/reshape/permute.
  * stride/dilation NULL means default of 1. Output adds a kernel axis per pooled dim. */
-PolyUOp *poly_pool(PolyCtx *ctx, PolyUOp *x,
-                   const int64_t *k_, int nk,
-                   const int64_t *stride_, const int64_t *dilation_);
+PolyUOp *poly_pool(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *k_,
+    int nk,
+    const int64_t *stride_,
+    const int64_t *dilation_
+);
 
 /* Tensor.cat -- tensor.py:1364. Concatenate tensors along `dim`.
  * All tensors must have identical shape except along `dim`. */
@@ -45,8 +50,7 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim);
 /* Tensor._pad_constant -- tensor.py:1067. Constant pad with `value`.
  * Supports negative pads (which shrink that side). For value==0 this is
  * equivalent to poly_pad on non-negative pairs. */
-PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2],
-                        int ndim, double value);
+PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, double value);
 
 /* Tensor._pad_circular -- tensor.py:1075. Circular (wrap-around) padding.
  * Negative pads not supported. Each pad must be <= corresponding dim size. */
@@ -66,7 +70,7 @@ PolyUOp *poly_pad_replicate(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int nd
  * on the right (tinygrad parity). */
 PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool include_initial);
 
-/* ── Broadcasting (matches tinygrad's _broadcasted) ─────────────────── */
+/* Broadcasting (matches tinygrad's _broadcasted) */
 
 /* Broadcast a UOp to a target shape via reshape + expand.
  * Equivalent to tinygrad's _broadcast_to: left-pad dims with 1, then expand. */
@@ -75,21 +79,20 @@ PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int n
 /* Broadcast two UOps to a common shape (tinygrad's _broadcasted).
  * Returns the broadcast shape via out_shape/out_ndim. Returns false on
  * incompatible shapes. */
-bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b,
-                         int64_t *out_shape, int *out_ndim);
+bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b, int64_t *out_shape, int *out_ndim);
 
-/* ── Broadcasting binary ops (like tinygrad Tensor.add/mul/sub) ─────── */
+/* Broadcasting binary ops (like tinygrad Tensor.add/mul/sub) */
 
 PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
-/* ── Contiguous (realize barrier) ───────────────────────────────────── */
+/* Contiguous (realize barrier) */
 
 PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x);
 
-/* ── Composed elementwise ops (shape-free, UOp-level) ────────────────── */
+/* Composed elementwise ops (shape-free, UOp-level) */
 
 /* Math */
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x);
@@ -162,10 +165,16 @@ PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_val
 PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, int upper);
-PolyUOp *poly_triangular_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b,
-                               int upper, int transpose_a, int unit_diagonal);
+PolyUOp *poly_triangular_solve(
+    PolyCtx *ctx,
+    PolyUOp *a,
+    PolyUOp *b,
+    int upper,
+    int transpose_a,
+    int unit_diagonal
+);
 
-/* ── Shape-aware composed ops (shape read from UOp) ──────────────────── */
+/* Shape-aware composed ops (shape read from UOp) */
 
 PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
@@ -179,22 +188,26 @@ PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis);
 
-/* ── Einsum ────────────────────────────────────────────────────────── */
+/* Einsum */
 
-PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula,
-                     PolyUOp **tensors, int n_tensors);
+PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n_tensors);
 
-/* ── Rearrange (einops) ───────────────────────────────────────────── */
+/* Rearrange (einops) */
 
-PolyUOp *poly_rearrange(PolyCtx *ctx, const char *formula,
-                        PolyUOp *x, const char *axis_names,
-                        const int64_t *axis_values, int n_axis_sizes);
+PolyUOp *poly_rearrange(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyUOp *x,
+    const char *axis_names,
+    const int64_t *axis_values,
+    int n_axis_sizes
+);
 
-/* ── Gather (embedding lookup) ───────────────────────────────────── */
+/* Gather (embedding lookup) */
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
 
-/* ── Additional composed ops ─────────────────────────────────────── */
+/* Additional composed ops */
 
 PolyUOp *poly_rope(PolyCtx *ctx, PolyUOp *x, PolyUOp *freqs_cos, PolyUOp *freqs_sin);
 PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);

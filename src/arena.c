@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ARENA_DEFAULT_CAP (64 * 1024)  /* 64 KB blocks */
+#define ARENA_DEFAULT_CAP (64 * 1024) /* 64 KB blocks */
 
 static PolyArenaBlock *block_new(size_t cap) {
   PolyArenaBlock *b = malloc(sizeof(PolyArenaBlock) + cap);
@@ -26,7 +26,10 @@ PolyArena *poly_arena_new(size_t initial_cap) {
   PolyArena *a = malloc(sizeof(PolyArena));
   if (!a) return NULL;
   a->head = block_new(initial_cap);
-  if (!a->head) { free(a); return NULL; }
+  if (!a->head) {
+    free(a);
+    return NULL;
+  }
   a->total_used = 0;
   return a;
 }

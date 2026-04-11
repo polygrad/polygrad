@@ -29,26 +29,29 @@ extern "C" {
 typedef struct PolyInstance PolyInstance;
 
 /* Buffer roles (matches poly_ir.h) */
-#define POLY_ROLE_PARAM   0
-#define POLY_ROLE_INPUT   1
-#define POLY_ROLE_TARGET  2
-#define POLY_ROLE_OUTPUT  3
-#define POLY_ROLE_AUX     4
+#define POLY_ROLE_PARAM 0
+#define POLY_ROLE_INPUT 1
+#define POLY_ROLE_TARGET 2
+#define POLY_ROLE_OUTPUT 3
+#define POLY_ROLE_AUX 4
 
 /* Optimizer kinds */
-#define POLY_OPTIM_NONE   0
-#define POLY_OPTIM_SGD    1
-#define POLY_OPTIM_ADAM   2
-#define POLY_OPTIM_ADAMW  3
+#define POLY_OPTIM_NONE 0
+#define POLY_OPTIM_SGD 1
+#define POLY_OPTIM_ADAM 2
+#define POLY_OPTIM_ADAMW 3
 
-/* ── Lifecycle ───────────────────────────────────────────────────────── */
+/* Lifecycle */
 
 /* Create from IR bytes + optional safetensors weights.
  * Pass NULL/0 for weights to skip (params zero-initialized).
  * Returns NULL on error. */
 PolyInstance *poly_instance_from_ir(
-    const uint8_t *ir_data, int ir_len,
-    const uint8_t *weights_data, int weights_len);
+    const uint8_t *ir_data,
+    int ir_len,
+    const uint8_t *weights_data,
+    int weights_len
+);
 
 /* Create from a PolyCtx with named buffer registry + entrypoints.
  * Requires at least one entrypoint registered. The ctx is NOT owned
@@ -58,45 +61,40 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx);
 
 void poly_instance_free(PolyInstance *inst);
 
-/* ── Param Enumeration ───────────────────────────────────────────────── */
+/* Param Enumeration */
 
-int         poly_instance_param_count(const PolyInstance *inst);
+int poly_instance_param_count(const PolyInstance *inst);
 const char *poly_instance_param_name(const PolyInstance *inst, int i);
-int         poly_instance_param_shape(const PolyInstance *inst, int i,
-                                      int64_t *shape_out, int max_dims);
+int poly_instance_param_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims);
 /* Returns host pointer to param data. For GPU domains, automatically
  * copies device data to the host shadow buffer first (like tinygrad's
  * Tensor.numpy()). Returns NULL only on error. */
-float      *poly_instance_param_data(PolyInstance *inst, int i,
-                                     int64_t *numel_out);
+float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out);
 
-/* ── Buffer Enumeration ──────────────────────────────────────────────── */
+/* Buffer Enumeration */
 
-int         poly_instance_buf_count(const PolyInstance *inst);
+int poly_instance_buf_count(const PolyInstance *inst);
 const char *poly_instance_buf_name(const PolyInstance *inst, int i);
-int         poly_instance_buf_role(const PolyInstance *inst, int i);
-int         poly_instance_buf_shape(const PolyInstance *inst, int i,
-                                    int64_t *shape_out, int max_dims);
+int poly_instance_buf_role(const PolyInstance *inst, int i);
+int poly_instance_buf_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims);
 /* Returns host pointer to buffer data. For GPU domains, automatically
  * copies device data to the host shadow buffer first. Returns NULL
  * only on error. */
-float      *poly_instance_buf_data(PolyInstance *inst, int i,
-                                   int64_t *numel_out);
+float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out);
 
-/* ── Weight I/O (safetensors) ────────────────────────────────────────── */
+/* Weight I/O (safetensors) */
 
 /* Export all param buffers as safetensors. Caller frees returned bytes. */
 uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len);
 
 /* Import weights from safetensors. Matches by name. Returns 0 on success. */
-int poly_instance_import_weights(PolyInstance *inst,
-                                 const uint8_t *data, int len);
+int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int len);
 
-/* ── IR Export ───────────────────────────────────────────────────────── */
+/* IR Export */
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
 
-/* ── Device configuration ────────────────────────────────────────────── */
+/* Device configuration */
 
 /* Bulk rematerialization: moves all buffer handles to the target domain.
  * After set_device(CUDA), all buf_handles[].domain are CUDA.
@@ -105,57 +103,59 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
  * Returns 0 on success, <0 if device is unsupported or unavailable. */
 int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device);
 
-/* ── Explicit readback/upload for device-resident buffers ────────────── */
+/* Explicit readback/upload for device-resident buffers */
 
-int poly_instance_readback_buf(PolyInstance *inst, int i,
-                               void *host_dst, size_t dst_len);
-int poly_instance_upload_buf(PolyInstance *inst, int i,
-                             const void *host_src, size_t src_len);
-int poly_instance_readback_param(PolyInstance *inst, int i,
-                                 void *host_dst, size_t dst_len);
-int poly_instance_upload_param(PolyInstance *inst, int i,
-                               const void *host_src, size_t src_len);
+int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len);
+int poly_instance_upload_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len);
+int poly_instance_readback_param(PolyInstance *inst, int i, void *host_dst, size_t dst_len);
+int poly_instance_upload_param(PolyInstance *inst, int i, const void *host_src, size_t src_len);
 
-/* ── Execution ───────────────────────────────────────────────────────── */
+/* Execution */
 
 /* I/O binding for forward/train calls. */
 typedef struct {
-    const char *name;
-    float *data;
+  const char *name;
+  float *data;
 } PolyIOBinding;
 
 /* Generic entrypoint execution. Compiles lazily on first call.
  * I/O bindings match instance buffer names. Output written to
  * instance-owned buffers (retrieve via poly_instance_buf_data).
  * Returns 0 on success. */
-int poly_instance_call(PolyInstance *inst, const char *entrypoint,
-                       PolyIOBinding *io, int n_io);
+int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding *io, int n_io);
 
 /* Forward + backward for a differentiable entrypoint.
  * Builds autograd graph lazily on first call. Computes loss value
  * and per-parameter gradients. Does NOT apply optimizer updates.
  * Returns 0 on success, loss value via *loss_out. */
-int poly_instance_value_and_grad(PolyInstance *inst, const char *entrypoint,
-                                 PolyIOBinding *io, int n_io,
-                                 float *loss_out);
+int poly_instance_value_and_grad(
+    PolyInstance *inst,
+    const char *entrypoint,
+    PolyIOBinding *io,
+    int n_io,
+    float *loss_out
+);
 
-/* ── Convenience wrappers ────────────────────────────────────────────── */
+/* Convenience wrappers */
 
 /* forward() = call("forward", ...) */
-int poly_instance_forward(PolyInstance *inst,
-                          PolyIOBinding *inputs, int n_inputs);
+int poly_instance_forward(PolyInstance *inst, PolyIOBinding *inputs, int n_inputs);
 
 /* train_step() = value_and_grad("loss", ...) + host optimizer update */
-int poly_instance_train_step(PolyInstance *inst,
-                             PolyIOBinding *io, int n_io,
-                             float *loss_out);
+int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, float *loss_out);
 
 /* Configure optimizer. Call before first train_step. */
-int poly_instance_set_optimizer(PolyInstance *inst, int kind,
-                                float lr, float beta1, float beta2,
-                                float eps, float weight_decay);
+int poly_instance_set_optimizer(
+    PolyInstance *inst,
+    int kind,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay
+);
 
-/* ── Named accessor helpers ─────────────────────────────────────────── */
+/* Named accessor helpers */
 
 /* Return the ctx backing this instance. */
 PolyCtx *poly_instance_ctx(const PolyInstance *inst);
@@ -172,8 +172,7 @@ PolyUOp *poly_instance_get_buffer(const PolyInstance *inst, const char *name);
 PolyUOp *poly_instance_get_sink(const PolyInstance *inst, const char *name);
 
 /* Get host data pointer for a named buffer. Sets *numel_out if non-NULL. */
-float *poly_instance_buf_data_named(PolyInstance *inst, const char *name,
-                                    int64_t *numel_out);
+float *poly_instance_buf_data_named(PolyInstance *inst, const char *name, int64_t *numel_out);
 
 /* Get numel for a named buffer. Returns 0 if not found. */
 int64_t poly_instance_buf_numel_named(const PolyInstance *inst, const char *name);

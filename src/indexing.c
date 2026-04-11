@@ -13,22 +13,21 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ── Flat index computation ──────────────────────────────────────────── */
+/* Flat index computation */
 
-PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim,
-                                PolyShape shape) {
-  if (ndim == 0)
-    return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  if (ndim == 1)
-    return ranges[0];
+PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape) {
+  if (ndim == 0) return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  if (ndim == 1) return ranges[0];
 
   int64_t strides[POLY_MAX_DIMS];
   strides[ndim - 1] = 1;
   for (int i = ndim - 2; i >= 0; i--) {
     strides[i] = strides[i + 1] * shape.dims[i + 1];
     if (__builtin_mul_overflow(strides[i + 1], shape.dims[i + 1], &strides[i])) {
-      fprintf(stderr, "poly_compute_flat_index: stride overflow at dim %d: %lld * %lld\n",
-              i, (long long)strides[i+1], (long long)shape.dims[i+1]);
+      fprintf(
+          stderr, "poly_compute_flat_index: stride overflow at dim %d: %lld * %lld\n", i,
+          (long long)strides[i + 1], (long long)shape.dims[i + 1]
+      );
       for (int j = 0; j < ndim; j++)
         fprintf(stderr, "  shape[%d] = %lld\n", j, (long long)shape.dims[j]);
     }
@@ -48,22 +47,24 @@ PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim,
   return flat;
 }
 
-/* ── Symbolic flat index computation ────────────────────────────────── */
+/* Symbolic flat index computation */
 
-PolyUOp *poly_compute_flat_index_symbolic(PolyCtx *ctx, PolyUOp **ranges,
-                                           PolyUOp **bounds, int ndim) {
-  if (ndim == 0)
-    return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  if (ndim == 1)
-    return ranges[0];
+PolyUOp *poly_compute_flat_index_symbolic(
+    PolyCtx *ctx,
+    PolyUOp **ranges,
+    PolyUOp **bounds,
+    int ndim
+) {
+  if (ndim == 0) return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  if (ndim == 1) return ranges[0];
 
   /* Build strides bottom-up as UOp expressions.
    * stride[ndim-1] = 1, stride[i] = stride[i+1] * bounds[i+1] */
   PolyUOp *strides[POLY_MAX_DIMS];
   strides[ndim - 1] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   for (int i = ndim - 2; i >= 0; i--)
-    strides[i] = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, strides[i + 1], bounds[i + 1],
-                             poly_arg_none());
+    strides[i] =
+        poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, strides[i + 1], bounds[i + 1], poly_arg_none());
 
   /* Sum terms: ranges[i] * strides[i] */
   PolyUOp *flat = NULL;
@@ -73,18 +74,23 @@ PolyUOp *poly_compute_flat_index_symbolic(PolyCtx *ctx, PolyUOp **ranges,
     if (strides[i]->op == POLY_OP_CONST && strides[i]->arg.i == 1)
       term = ranges[i];
     else
-      term = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ranges[i], strides[i],
-                         poly_arg_none());
+      term = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ranges[i], strides[i], poly_arg_none());
     flat = flat ? poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, flat, term, poly_arg_none()) : term;
   }
   return flat;
 }
 
-/* ── Reshape index transform ─────────────────────────────────────────── */
+/* Reshape index transform */
 
-void poly_reshape_indices(PolyCtx *ctx,
-                          PolyUOp **out_ranges, int out_ndim, PolyShape out_shape,
-                          PolyUOp **in_ranges, int in_ndim, PolyShape in_shape) {
+void poly_reshape_indices(
+    PolyCtx *ctx,
+    PolyUOp **out_ranges,
+    int out_ndim,
+    PolyShape out_shape,
+    PolyUOp **in_ranges,
+    int in_ndim,
+    PolyShape in_shape
+) {
   PolyUOp *combined = poly_compute_flat_index(ctx, out_ranges, out_ndim, out_shape);
 
   int64_t in_stride = 1;
@@ -102,13 +108,19 @@ void poly_reshape_indices(PolyCtx *ctx,
   }
 }
 
-/* ── apply_movement_op ───────────────────────────────────────────────── */
+/* apply_movement_op */
 
-bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
-                            PolyShape in_shape, PolyArg arg,
-                            PolyUOp **out_rngs, int n_out,
-                            PolyUOp **in_rngs, int *n_in_out,
-                            PolyUOp **valid_out) {
+bool poly_apply_movement_op(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyShape in_shape,
+    PolyArg arg,
+    PolyUOp **out_rngs,
+    int n_out,
+    PolyUOp **in_rngs,
+    int *n_in_out,
+    PolyUOp **valid_out
+) {
   if (valid_out) *valid_out = NULL;
 
   switch (op) {
@@ -119,7 +131,10 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
     int n = in_shape.ndim;
     PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
     for (int i = 0; i < n; i++) {
-      if (i >= n_out) { in_rngs[i] = zero; continue; }
+      if (i >= n_out) {
+        in_rngs[i] = zero;
+        continue;
+      }
       if (in_shape.dims[i] == 1 && arg.int_tuple.vals[i] != 1) {
         in_rngs[i] = zero;
       } else {
@@ -135,7 +150,8 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
     if (arg.kind != POLY_ARG_INT_TUPLE) return false;
     int n = arg.int_tuple.n;
     PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-    for (int i = 0; i < n; i++) in_rngs[i] = zero;
+    for (int i = 0; i < n; i++)
+      in_rngs[i] = zero;
     for (int i = 0; i < n && i < n_out; i++) {
       int p = (int)arg.int_tuple.vals[i];
       if (p >= 0 && p < n) in_rngs[p] = out_rngs[i];
@@ -150,14 +166,16 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
     int n = arg.pair_tuple.n;
     PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
     for (int i = 0; i < n; i++) {
-      if (i >= n_out) { in_rngs[i] = zero; continue; }
+      if (i >= n_out) {
+        in_rngs[i] = zero;
+        continue;
+      }
       int64_t start = arg.pair_tuple.pairs[i][0];
       if (start == 0) {
         in_rngs[i] = out_rngs[i];
       } else {
         PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(start));
-        in_rngs[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                                out_rngs[i], off, poly_arg_none());
+        in_rngs[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i], off, poly_arg_none());
       }
     }
     *n_in_out = in_shape.ndim;
@@ -175,13 +193,17 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
     int n = in_shape.ndim;
     PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
     for (int i = 0; i < n; i++) {
-      if (i >= n_out) { in_rngs[i] = zero; continue; }
+      if (i >= n_out) {
+        in_rngs[i] = zero;
+        continue;
+      }
       if (flipped[i]) {
-        PolyUOp *max_idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                                     poly_arg_int(in_shape.dims[i] - 1));
-        in_rngs[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, max_idx,
-            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, out_rngs[i], poly_arg_none()),
-            poly_arg_none());
+        PolyUOp *max_idx =
+            poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i] - 1));
+        in_rngs[i] = poly_uop2(
+            ctx, POLY_OP_ADD, POLY_INT32, max_idx,
+            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, out_rngs[i], poly_arg_none()), poly_arg_none()
+        );
       } else {
         in_rngs[i] = out_rngs[i];
       }
@@ -200,8 +222,9 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
     /* Use the RESHAPE arg's ndim as the authoritative output ndim,
      * not n_out (which may differ if range propagation assigned
      * a different number of ranges to this node). */
-    poly_reshape_indices(ctx, out_rngs, out_shape.ndim, out_shape,
-                         in_rngs, in_shape.ndim, in_shape);
+    poly_reshape_indices(
+        ctx, out_rngs, out_shape.ndim, out_shape, in_rngs, in_shape.ndim, in_shape
+    );
     *n_in_out = in_shape.ndim;
     return true;
   }
@@ -217,7 +240,8 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
     for (int i = 0; i < n; i++) {
       if (i >= n_out) {
         in_rngs[i] = zero;
-        valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, falsev, poly_arg_none()) : falsev;
+        valid =
+            valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, falsev, poly_arg_none()) : falsev;
         continue;
       }
       int64_t begin = arg.pair_tuple.pairs[i][0];
@@ -226,9 +250,10 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
         shifted = out_rngs[i];
       } else {
         PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(begin));
-        shifted = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i],
-            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()),
-            poly_arg_none());
+        shifted = poly_uop2(
+            ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i],
+            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()), poly_arg_none()
+        );
       }
       /* valid_i = (shifted >= 0) AND (shifted < in_dim).
        *
@@ -245,25 +270,18 @@ bool poly_apply_movement_op(PolyCtx *ctx, PolyOps op,
        * reduce_collapse Rule 4 (fold_range_two_sided) from matching the
        * pad-derived two-sided range mask. */
       PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-      PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32,
-                               poly_arg_int(in_shape.dims[i]));
-      PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL,
-                                      poly_arg_bool(true));
-      PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                   shifted, zero, poly_arg_none());
-      PolyUOp *ge_zero = poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL,
-                                   lt_zero, true_const, poly_arg_none());
-      PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL,
-                                  shifted, dim, poly_arg_none());
-      PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
-                              ge_zero, lt_dim, poly_arg_none());
+      PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+      PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+      PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, zero, poly_arg_none());
+      PolyUOp *ge_zero =
+          poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, lt_zero, true_const, poly_arg_none());
+      PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, dim, poly_arg_none());
+      PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_zero, lt_dim, poly_arg_none());
       /* Clamp index to valid range: WHERE(valid, shifted, 0).
        * Matches tinygrad indexing.py:137: valid.where(r-s, UOp.invalid()).
        * Prevents negative INDEX offsets that crash non-short-circuiting backends. */
-      in_rngs[i] = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32,
-                              dv, shifted, zero, poly_arg_none());
-      valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL,
-                                valid, dv, poly_arg_none()) : dv;
+      in_rngs[i] = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, dv, shifted, zero, poly_arg_none());
+      valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dv, poly_arg_none()) : dv;
     }
     if (valid_out) *valid_out = valid;
     *n_in_out = in_shape.ndim;

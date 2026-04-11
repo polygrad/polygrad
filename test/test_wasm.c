@@ -6,7 +6,7 @@
 #include "../src/codegen.h"
 #include "../src/wasm_builder.h"
 
-/* ── WASM builder tests ──────────────────────────────────────────────── */
+/* WASM builder tests */
 
 TEST(wasm, leb128_unsigned) {
   WasmBuf b;
@@ -164,7 +164,7 @@ TEST(wasm, f32_encoding) {
   PASS();
 }
 
-/* ── Helper: build c[i] = a[i] OP b[i] kernel IR (same as test_codegen.c) ── */
+/* Helper: build c[i] = a[i] OP b[i] kernel IR (same as test_codegen.c) */
 
 typedef struct {
   PolyCtx *ctx;
@@ -194,11 +194,11 @@ static WasmVecKernel wasm_make_vec_binop(PolyOps alu_op, int n) {
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, alu, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
-  return (WasmVecKernel){ ctx, sink, n };
+  return (WasmVecKernel){ctx, sink, n};
 }
 
 /* Helper: build b[i] = OP(a[i]) unary kernel */
@@ -220,14 +220,14 @@ static WasmVecKernel wasm_make_vec_unary(PolyOps alu_op, int n) {
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
-  return (WasmVecKernel){ ctx, sink, n };
+  return (WasmVecKernel){ctx, sink, n};
 }
 
-/* ── WASM renderer tests ─────────────────────────────────────────────── */
+/* WASM renderer tests */
 
 TEST(wasm, render_vecadd) {
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
@@ -291,7 +291,10 @@ TEST(wasm, render_unary) {
   /* Look for NEG opcode (0x8C) somewhere in the binary */
   bool found_neg = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_F32_NEG) { found_neg = true; break; }
+    if (wasm[i] == WASM_OP_F32_NEG) {
+      found_neg = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_neg);
 
@@ -328,8 +331,8 @@ TEST(wasm, render_chain) {
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, add, lc, poly_arg_none());
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, mul, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n_lin;
@@ -384,8 +387,8 @@ TEST(wasm, render_unsigned_alu_opcodes) {
   PolyUOp *out = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT32, sum, shr, poly_arg_none());
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, out, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n_lin;
@@ -426,7 +429,10 @@ TEST(wasm, render_simd_flag) {
   /* Should contain SIMD prefix (0xFD) for f32x4 ops */
   bool found_simd = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_SIMD_PREFIX) { found_simd = true; break; }
+    if (wasm[i] == WASM_SIMD_PREFIX) {
+      found_simd = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_simd);
 
@@ -454,7 +460,9 @@ TEST(wasm, write_and_validate) {
   }
 
   /* Try running wasm-validate if available */
-  int rc = system("which wasm-validate > /dev/null 2>&1 && wasm-validate /tmp/polygrad_test_vecadd.wasm");
+  int rc =
+      system("which wasm-validate > /dev/null 2>&1 && wasm-validate /tmp/polygrad_test_vecadd.wasm"
+      );
   if (rc == 0) {
     /* wasm-validate passed — great! */
   }
@@ -486,7 +494,10 @@ TEST(wasm, render_pow) {
   /* Must contain a CALL instruction (0x10) for the imported powf */
   bool found_call = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_CALL) { found_call = true; break; }
+    if (wasm[i] == WASM_OP_CALL) {
+      found_call = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_call);
 
@@ -510,14 +521,20 @@ TEST(wasm, render_pow_simd_fallback) {
   /* Should NOT contain SIMD prefix (POW forces scalar fallback) */
   bool found_simd = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_SIMD_PREFIX) { found_simd = true; break; }
+    if (wasm[i] == WASM_SIMD_PREFIX) {
+      found_simd = true;
+      break;
+    }
   }
   ASSERT_TRUE(!found_simd);
 
   /* Should still contain a CALL for powf */
   bool found_call = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_CALL) { found_call = true; break; }
+    if (wasm[i] == WASM_OP_CALL) {
+      found_call = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_call);
 
@@ -594,7 +611,7 @@ TEST(wasm, e2e_node_vecadd) {
   PASS();
 }
 
-/* ── F64 WASM helpers ──────────────────────────────────────────────────── */
+/* F64 WASM helpers */
 
 static WasmVecKernel wasm_make_vec_binop_f64(PolyOps alu_op, int n) {
   PolyCtx *ctx = poly_ctx_new();
@@ -618,11 +635,11 @@ static WasmVecKernel wasm_make_vec_binop_f64(PolyOps alu_op, int n) {
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, alu, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
-  return (WasmVecKernel){ ctx, sink, n };
+  return (WasmVecKernel){ctx, sink, n};
 }
 
 static WasmVecKernel wasm_make_vec_unary_f64(PolyOps alu_op, int n) {
@@ -643,14 +660,14 @@ static WasmVecKernel wasm_make_vec_unary_f64(PolyOps alu_op, int n) {
 
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
 
-  PolyUOp *end_src[2] = { store, range };
-  PolyUOp *end  = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
-  return (WasmVecKernel){ ctx, sink, n };
+  return (WasmVecKernel){ctx, sink, n};
 }
 
-/* ── F64 WASM renderer tests ──────────────────────────────────────────── */
+/* F64 WASM renderer tests */
 
 TEST(wasm_f64, render_vecadd_f64_scalar) {
   /* Render f64 vecadd kernel in scalar mode -- verify f64 opcodes */
@@ -667,21 +684,30 @@ TEST(wasm_f64, render_vecadd_f64_scalar) {
   /* Must contain f64.add opcode (0xA0) */
   bool found_f64_add = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_F64_ADD) { found_f64_add = true; break; }
+    if (wasm[i] == WASM_OP_F64_ADD) {
+      found_f64_add = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_f64_add);
 
   /* Must contain f64.load opcode (0x2B) */
   bool found_f64_load = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_F64_LOAD) { found_f64_load = true; break; }
+    if (wasm[i] == WASM_OP_F64_LOAD) {
+      found_f64_load = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_f64_load);
 
   /* Must contain f64.store opcode (0x39) */
   bool found_f64_store = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_F64_STORE) { found_f64_store = true; break; }
+    if (wasm[i] == WASM_OP_F64_STORE) {
+      found_f64_store = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_f64_store);
 
@@ -705,7 +731,10 @@ TEST(wasm_f64, render_neg_f64_scalar) {
   /* Must contain f64.neg opcode (0x9A) */
   bool found_f64_neg = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_OP_F64_NEG) { found_f64_neg = true; break; }
+    if (wasm[i] == WASM_OP_F64_NEG) {
+      found_f64_neg = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_f64_neg);
 
@@ -730,14 +759,17 @@ TEST(wasm_f64, render_simd_f64x2) {
   /* Must contain SIMD prefix (0xFD) -- proves SIMD path was taken */
   bool found_simd = false;
   for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_SIMD_PREFIX) { found_simd = true; break; }
+    if (wasm[i] == WASM_SIMD_PREFIX) {
+      found_simd = true;
+      break;
+    }
   }
   ASSERT_TRUE(found_simd);
 
   /* Verify f64x2.add sub-opcode (0xF0) follows a SIMD prefix */
   bool found_f64x2_add = false;
   for (int i = 0; i < wasm_size - 1; i++) {
-    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i+1] == WASM_SIMD_F64X2_ADD) {
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_F64X2_ADD) {
       found_f64x2_add = true;
       break;
     }
@@ -761,11 +793,15 @@ TEST(wasm_f64, validate_f64_scalar) {
   ASSERT_NOT_NULL(wasm);
 
   FILE *f = fopen("/tmp/polygrad_test_f64_scalar.wasm", "wb");
-  if (f) { fwrite(wasm, 1, wasm_size, f); fclose(f); }
+  if (f) {
+    fwrite(wasm, 1, wasm_size, f);
+    fclose(f);
+  }
 
   int rc = system("which wasm-validate > /dev/null 2>&1 && "
-                   "wasm-validate /tmp/polygrad_test_f64_scalar.wasm");
-  if (rc == 0) { /* wasm-validate passed */ }
+                  "wasm-validate /tmp/polygrad_test_f64_scalar.wasm");
+  if (rc == 0) { /* wasm-validate passed */
+  }
 
   free(wasm);
   free(lin);
@@ -784,11 +820,15 @@ TEST(wasm_f64, validate_f64_simd) {
   ASSERT_NOT_NULL(wasm);
 
   FILE *f = fopen("/tmp/polygrad_test_f64_simd.wasm", "wb");
-  if (f) { fwrite(wasm, 1, wasm_size, f); fclose(f); }
+  if (f) {
+    fwrite(wasm, 1, wasm_size, f);
+    fclose(f);
+  }
 
   int rc = system("which wasm-validate > /dev/null 2>&1 && "
-                   "wasm-validate --enable-simd /tmp/polygrad_test_f64_simd.wasm");
-  if (rc == 0) { /* wasm-validate passed */ }
+                  "wasm-validate --enable-simd /tmp/polygrad_test_f64_simd.wasm");
+  if (rc == 0) { /* wasm-validate passed */
+  }
 
   free(wasm);
   free(lin);

@@ -21,7 +21,7 @@
 #include "../src/frontend.h"
 #include "../src/scheduler.h"
 
-/* ── Helpers ─────────────────────────────────────────────────────────── */
+/* Helpers */
 
 static int count_ops_in(PolyCtx *ctx, PolyUOp *sink, PolyOps op) {
   int n_topo = 0;
@@ -45,7 +45,7 @@ static PolyUOp *make_unary_kernel(PolyCtx *ctx, PolyOps op, int n) {
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *alu = poly_uop1(ctx, op, POLY_FLOAT32, load, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
@@ -65,7 +65,7 @@ static PolyUOp *make_binary_kernel(PolyCtx *ctx, PolyOps op, int n) {
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
   PolyUOp *alu = poly_uop2(ctx, op, POLY_FLOAT32, ld0, ld1, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, alu, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
@@ -89,7 +89,7 @@ TEST(transcendental, decomp_log2_ir) {
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
   int n_log2 = count_ops_in(ctx, rewritten, POLY_OP_LOG2);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_log2, 0);  /* LOG2 must be fully decomposed */
+  ASSERT_INT_EQ(n_log2, 0); /* LOG2 must be fully decomposed */
   PASS();
 }
 
@@ -104,7 +104,7 @@ TEST(transcendental, decomp_sin_ir) {
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
   int n_sin = count_ops_in(ctx, rewritten, POLY_OP_SIN);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_sin, 0);  /* SIN must be fully decomposed */
+  ASSERT_INT_EQ(n_sin, 0); /* SIN must be fully decomposed */
   PASS();
 }
 
@@ -129,15 +129,15 @@ TEST(decomp, mod_to_and) {
   PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, load, four, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, mod, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
   int n_mod = count_ops_in(ctx, rewritten, POLY_OP_MOD);
   int n_and = count_ops_in(ctx, rewritten, POLY_OP_AND);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_mod, 0);  /* MOD must be eliminated */
-  ASSERT_TRUE(n_and > 0);   /* AND must appear */
+  ASSERT_INT_EQ(n_mod, 0); /* MOD must be eliminated */
+  ASSERT_TRUE(n_and > 0); /* AND must appear */
   PASS();
 }
 
@@ -161,16 +161,16 @@ TEST(decomp, mulacc_to_mul_add) {
   PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
   PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
-  PolyUOp *mulacc_srcs[3] = { ld0, ld1, ld2 };
+  PolyUOp *mulacc_srcs[3] = {ld0, ld1, ld2};
   PolyUOp *mulacc = poly_uop(ctx, POLY_OP_MULACC, POLY_FLOAT32, mulacc_srcs, 3, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, mulacc, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
   int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_mulacc, 0);  /* MULACC must be eliminated */
+  ASSERT_INT_EQ(n_mulacc, 0); /* MULACC must be eliminated */
   PASS();
 }
 
@@ -194,18 +194,17 @@ TEST(decomp, mulacc_caps_preserves) {
   PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
   PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
-  PolyUOp *mulacc_srcs[3] = { ld0, ld1, ld2 };
+  PolyUOp *mulacc_srcs[3] = {ld0, ld1, ld2};
   PolyUOp *mulacc = poly_uop(ctx, POLY_OP_MULACC, POLY_FLOAT32, mulacc_srcs, 3, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, mulacc, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
-  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
-                            .caps = { .has_mulacc = true } };
+  PolyRewriteOpts opts = {.optimize = false, .devectorize = 0, .caps = {.has_mulacc = true}};
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
   poly_ctx_destroy(ctx);
-  ASSERT_TRUE(n_mulacc > 0);  /* MULACC preserved with FMA caps */
+  ASSERT_TRUE(n_mulacc > 0); /* MULACC preserved with FMA caps */
   PASS();
 }
 
@@ -233,15 +232,14 @@ TEST(decomp, mul_add_fuses_to_mulacc) {
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ld0, ld1, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, ld2, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
-  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
-                            .caps = { .has_mulacc = true } };
+  PolyRewriteOpts opts = {.optimize = false, .devectorize = 0, .caps = {.has_mulacc = true}};
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
   poly_ctx_destroy(ctx);
-  ASSERT_TRUE(n_mulacc > 0);  /* MUL+ADD fused to MULACC */
+  ASSERT_TRUE(n_mulacc > 0); /* MUL+ADD fused to MULACC */
   PASS();
 }
 
@@ -268,15 +266,14 @@ TEST(decomp, mul_add_int_no_fuse) {
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ld0, ld1, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, mul, ld2, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
-  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
-                            .caps = { .has_mulacc = true } };
+  PolyRewriteOpts opts = {.optimize = false, .devectorize = 0, .caps = {.has_mulacc = true}};
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   int n_mulacc = count_ops_in(ctx, rewritten, POLY_OP_MULACC);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_mulacc, 0);  /* No fusion for int types */
+  ASSERT_INT_EQ(n_mulacc, 0); /* No fusion for int types */
   PASS();
 }
 
@@ -298,7 +295,7 @@ TEST(decomp, threefry_lowered_when_no_native_support) {
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx1, poly_arg_none());
   PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, ld0, ld1, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, thr, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
@@ -308,7 +305,7 @@ TEST(decomp, threefry_lowered_when_no_native_support) {
   int n_xor = count_ops_in(ctx, rewritten, POLY_OP_XOR);
   poly_ctx_destroy(ctx);
 
-  ASSERT_INT_EQ(n_threefry, 0);  /* must be fully lowered */
+  ASSERT_INT_EQ(n_threefry, 0); /* must be fully lowered */
   ASSERT_TRUE(n_add > 0);
   ASSERT_TRUE(n_xor > 0);
   PASS();
@@ -332,17 +329,18 @@ TEST(decomp, threefry_preserved_with_native_caps) {
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT32, idx1, poly_arg_none());
   PolyUOp *thr = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, ld0, ld1, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, thr, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
-  PolyRewriteOpts opts = { .optimize = false, .devectorize = 0,
-                           .caps = { .has_mulacc = false, .has_threefry = true } };
+  PolyRewriteOpts opts = {
+      .optimize = false, .devectorize = 0, .caps = {.has_mulacc = false, .has_threefry = true}
+  };
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   int n_threefry = count_ops_in(ctx, rewritten, POLY_OP_THREEFRY);
   poly_ctx_destroy(ctx);
 
-  ASSERT_TRUE(n_threefry > 0);  /* native-cap path must preserve THREEFRY */
+  ASSERT_TRUE(n_threefry > 0); /* native-cap path must preserve THREEFRY */
   PASS();
 }
 
@@ -360,7 +358,7 @@ TEST(decomp, mul_neg1_to_neg) {
   PolyUOp *neg1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(-1));
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ld0, neg1, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, mul, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
@@ -390,7 +388,7 @@ TEST(decomp, add_neg_to_sub) {
   PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, ld1, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, ld0, neg, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, add, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
@@ -434,7 +432,7 @@ TEST(decomp, mul_one_over_b_to_fdiv) {
   PolyUOp *one_over = poly_uop2(ctx, POLY_OP_FDIV, POLY_FLOAT32, one, ld1, poly_arg_none());
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ld0, one_over, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, mul, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
@@ -539,7 +537,7 @@ TEST(sym_future, xor_zero) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_str("x"));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *xor = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, x, zero, poly_arg_none());
+  PolyUOp * xor = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, x, zero, poly_arg_none());
   PolyUOp *r = simplify(ctx, xor);
   int matched = (r == x);
   poly_ctx_destroy(ctx);
@@ -604,12 +602,12 @@ TEST(sym_future, vectorize_const_fold) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
-  PolyUOp *vec_srcs[2] = { c1, c2 };
+  PolyUOp *vec_srcs[2] = {c1, c2};
   PolyUOp *vec = poly_uop(ctx, POLY_OP_VECTORIZE, POLY_FLOAT32, vec_srcs, 2, poly_arg_none());
   PolyUOp *r = simplify(ctx, vec);
   int folded = (r->op == POLY_OP_CONST || r->op == POLY_OP_VCONST);
   poly_ctx_destroy(ctx);
-  ASSERT_TRUE(folded);  /* must fold */
+  ASSERT_TRUE(folded); /* must fold */
   PASS();
 }
 
@@ -626,7 +624,7 @@ TEST(expander, unroll_empty_arg_removed) {
   PolyUOp *r = poly_full_rewrite_to_sink(ctx, unroll);
   int not_unroll = (r->op != POLY_OP_UNROLL);
   poly_ctx_destroy(ctx);
-  ASSERT_TRUE(not_unroll);  /* UNROLL must be eliminated */
+  ASSERT_TRUE(not_unroll); /* UNROLL must be eliminated */
   PASS();
 }
 
@@ -653,9 +651,9 @@ TEST(regression, exp2_e2e) {
   char *src = poly_render_c(lin, n, "exp2_kernel");
   PolyProgram *prog = poly_compile_c(src, "exp2_kernel");
   ASSERT_NOT_NULL(prog);
-  float in[4] = { 0.0f, 1.0f, 2.0f, -1.0f };
-  float out[4] = { 0 };
-  void *args[2] = { in, out };
+  float in[4] = {0.0f, 1.0f, 2.0f, -1.0f};
+  float out[4] = {0};
+  void *args[2] = {in, out};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(out[0], 1.0f, 1e-4);
   ASSERT_FLOAT_EQ(out[1], 2.0f, 1e-4);
@@ -682,7 +680,7 @@ TEST(regression, mul_to_shl) {
   PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, load, four, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, mul, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
@@ -706,7 +704,7 @@ TEST(regression, idiv_to_shr) {
   PolyUOp *eight = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
   PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, load, eight, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, div, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
   PolyUOp *rewritten = poly_full_rewrite_to_sink(ctx, sink);
@@ -750,9 +748,9 @@ TEST(regression, log2_e2e) {
   char *src = poly_render_c(lin, n, "log2_kernel");
   PolyProgram *prog = poly_compile_c(src, "log2_kernel");
   ASSERT_NOT_NULL(prog);
-  float in[4] = { 1.0f, 2.0f, 4.0f, 8.0f };
-  float out[4] = { 0 };
-  void *args[2] = { in, out };
+  float in[4] = {1.0f, 2.0f, 4.0f, 8.0f};
+  float out[4] = {0};
+  void *args[2] = {in, out};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(out[0], 0.0f, 1e-4);
   ASSERT_FLOAT_EQ(out[1], 1.0f, 1e-4);
@@ -774,9 +772,9 @@ TEST(regression, sin_e2e) {
   char *src = poly_render_c(lin, n, "sin_kernel");
   PolyProgram *prog = poly_compile_c(src, "sin_kernel");
   ASSERT_NOT_NULL(prog);
-  float in[4] = { 0.0f, 1.5707963f, 3.1415927f, 6.2831853f };
-  float out[4] = { 0 };
-  void *args[2] = { in, out };
+  float in[4] = {0.0f, 1.5707963f, 3.1415927f, 6.2831853f};
+  float out[4] = {0};
+  void *args[2] = {in, out};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(out[0], 0.0f, 1e-4);
   ASSERT_FLOAT_EQ(out[1], 1.0f, 1e-4);
@@ -802,9 +800,9 @@ TEST(regression, sin_decomp_large_e2e) {
   PolyProgram *prog = poly_compile_c(src, "sin_decomp_large_kernel");
   ASSERT_NOT_NULL(prog);
 
-  float in[4] = { 31.0f, 100000.0f, -100000.0f, 1234567.0f };
-  float out[4] = { 0 };
-  void *args[2] = { in, out };
+  float in[4] = {31.0f, 100000.0f, -100000.0f, 1234567.0f};
+  float out[4] = {0};
+  void *args[2] = {in, out};
   poly_program_call(prog, args, 2);
 
   for (int i = 0; i < 4; i++) {
@@ -827,9 +825,9 @@ TEST(regression, sqrt_e2e) {
   char *src = poly_render_c(lin, n, "sqrt_kernel");
   PolyProgram *prog = poly_compile_c(src, "sqrt_kernel");
   ASSERT_NOT_NULL(prog);
-  float in[4] = { 1.0f, 4.0f, 9.0f, 16.0f };
-  float out[4] = { 0 };
-  void *args[2] = { in, out };
+  float in[4] = {1.0f, 4.0f, 9.0f, 16.0f};
+  float out[4] = {0};
+  void *args[2] = {in, out};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(out[0], 1.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[1], 2.0f, 1e-6);
@@ -851,9 +849,9 @@ TEST(regression, reciprocal_e2e) {
   char *src = poly_render_c(lin, n, "recip_kernel");
   PolyProgram *prog = poly_compile_c(src, "recip_kernel");
   ASSERT_NOT_NULL(prog);
-  float in[4] = { 1.0f, 2.0f, 4.0f, 0.5f };
-  float out[4] = { 0 };
-  void *args[2] = { in, out };
+  float in[4] = {1.0f, 2.0f, 4.0f, 0.5f};
+  float out[4] = {0};
+  void *args[2] = {in, out};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(out[0], 1.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[1], 0.5f, 1e-6);
@@ -875,14 +873,14 @@ TEST(regression, fdiv_e2e) {
   char *src = poly_render_c(lin, n, "fdiv_kernel");
   PolyProgram *prog = poly_compile_c(src, "fdiv_kernel");
   ASSERT_NOT_NULL(prog);
-  float a[4] = { 10.0f, 7.0f, 1.0f, 0.0f };
-  float b[4] = { 2.0f, 3.0f, 3.0f, 1.0f };
-  float out[4] = { 0 };
-  void *args[3] = { a, b, out };
+  float a[4] = {10.0f, 7.0f, 1.0f, 0.0f};
+  float b[4] = {2.0f, 3.0f, 3.0f, 1.0f};
+  float out[4] = {0};
+  void *args[3] = {a, b, out};
   poly_program_call(prog, args, 3);
   ASSERT_FLOAT_EQ(out[0], 5.0f, 1e-6);
-  ASSERT_FLOAT_EQ(out[1], 7.0f/3.0f, 1e-5);
-  ASSERT_FLOAT_EQ(out[2], 1.0f/3.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out[1], 7.0f / 3.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out[2], 1.0f / 3.0f, 1e-5);
   ASSERT_FLOAT_EQ(out[3], 0.0f, 1e-6);
   poly_program_destroy(prog);
   free(src);
@@ -1002,8 +1000,8 @@ static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
   memset(out, 0, (size_t)n * sizeof(float));
 
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(buf_out, out),
-    POLY_BIND_HOST(buf_in, in_copy),
+      POLY_BIND_HOST(buf_out, out),
+      POLY_BIND_HOST(buf_in, in_copy),
   };
   int ret = poly_realize(ctx, sink, bindings, 2);
 
@@ -1025,13 +1023,11 @@ static uint32_t xorshift32(uint32_t *state) {
 /* Stratified bit-pattern sweep: 5 specials + 4 samples per exponent band (0-254).
  * Returns actual count written. Exponent band 0 = subnormals, 1-254 = normals.
  * If include_negative: randomly flip sign bit on half the samples. */
-static int gen_stratified_sweep(float *out, int max_n, uint32_t seed,
-                                int include_negative) {
+static int gen_stratified_sweep(float *out, int max_n, uint32_t seed, int include_negative) {
   uint32_t state = seed;
   int n = 0;
   /* Explicit specials: +0, -0, +inf, -inf, NaN */
-  uint32_t sp[] = {0x00000000u, 0x80000000u, 0x7F800000u, 0xFF800000u,
-                   0x7FC00000u};
+  uint32_t sp[] = {0x00000000u, 0x80000000u, 0x7F800000u, 0xFF800000u, 0x7FC00000u};
   for (int i = 0; i < 5 && n < max_n; i++)
     memcpy(&out[n++], &sp[i], sizeof(float));
   /* Stratified: 4 samples per exponent band */
@@ -1040,8 +1036,7 @@ static int gen_stratified_sweep(float *out, int max_n, uint32_t seed,
     for (int j = 0; j < 4 && n < max_n; j++) {
       uint32_t mantissa = xorshift32(&state) & 0x7FFFFFu;
       uint32_t bits = base | mantissa;
-      if (include_negative && (xorshift32(&state) & 1))
-        bits |= 0x80000000u;
+      if (include_negative && (xorshift32(&state) & 1)) bits |= 0x80000000u;
       memcpy(&out[n++], &bits, sizeof(float));
     }
   }
@@ -1050,26 +1045,25 @@ static int gen_stratified_sweep(float *out, int max_n, uint32_t seed,
 
 /* LOG2: special values (zero, negative zero, inf, -inf, NaN, denormal, FLT_MAX) */
 TEST(conformance, log2_special_values) {
-  float in[8] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
-                   (float)NAN, 1e-40f, 1.0f, FLT_MAX };
+  float in[8] = {0.0f, -0.0f, (float)INFINITY, (float)-INFINITY, (float)NAN, 1e-40f, 1.0f, FLT_MAX};
   float out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_LOG2, in, out, 8), 0);
 
-  ASSERT_FLOAT_INF(out[0], -1);                   /* log2(0)    = -inf */
-  ASSERT_FLOAT_INF(out[1], -1);                   /* log2(-0)   = -inf */
-  ASSERT_FLOAT_INF(out[2], +1);                   /* log2(+inf) = +inf */
-  ASSERT_FLOAT_NAN(out[3]);                        /* log2(-inf) = NaN  */
-  ASSERT_FLOAT_NAN(out[4]);                        /* log2(NaN)  = NaN  */
-  ASSERT_FLOAT_ULP(out[5], log2f(1e-40f), 128);   /* denormal          */
-  ASSERT_FLOAT_ULP(out[6], 0.0f, 0);              /* log2(1) = 0 exact */
-  ASSERT_FLOAT_ULP(out[7], log2f(FLT_MAX), 8);    /* large             */
+  ASSERT_FLOAT_INF(out[0], -1); /* log2(0)    = -inf */
+  ASSERT_FLOAT_INF(out[1], -1); /* log2(-0)   = -inf */
+  ASSERT_FLOAT_INF(out[2], +1); /* log2(+inf) = +inf */
+  ASSERT_FLOAT_NAN(out[3]); /* log2(-inf) = NaN  */
+  ASSERT_FLOAT_NAN(out[4]); /* log2(NaN)  = NaN  */
+  ASSERT_FLOAT_ULP(out[5], log2f(1e-40f), 128); /* denormal          */
+  ASSERT_FLOAT_ULP(out[6], 0.0f, 0); /* log2(1) = 0 exact */
+  ASSERT_FLOAT_ULP(out[7], log2f(FLT_MAX), 8); /* large             */
 
   PASS();
 }
 
 /* LOG2: all negative inputs must return NaN */
 TEST(conformance, log2_negative_domain) {
-  float in[4] = { -1.0f, -100.0f, -FLT_MIN, -FLT_MAX };
+  float in[4] = {-1.0f, -100.0f, -FLT_MIN, -FLT_MAX};
   float out[4] = {0};
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_LOG2, in, out, 4), 0);
 
@@ -1094,16 +1088,15 @@ TEST(conformance, log2_dense_sweep) {
 
 /* SIN: special values */
 TEST(conformance, sin_special_values) {
-  float in[6] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
-                   (float)NAN, 3.14159265f };
+  float in[6] = {0.0f, -0.0f, (float)INFINITY, (float)-INFINITY, (float)NAN, 3.14159265f};
   float out[6] = {0};
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, 6), 0);
 
-  ASSERT_FLOAT_ABS(out[0], 0.0f, 1e-7f);          /* sin(0)    = 0    */
-  ASSERT_FLOAT_ABS(out[1], 0.0f, 1e-7f);          /* sin(-0)   = 0    */
-  ASSERT_FLOAT_NAN(out[2]);                         /* sin(+inf) = NaN  */
-  ASSERT_FLOAT_NAN(out[3]);                         /* sin(-inf) = NaN  */
-  ASSERT_FLOAT_NAN(out[4]);                         /* sin(NaN)  = NaN  */
+  ASSERT_FLOAT_ABS(out[0], 0.0f, 1e-7f); /* sin(0)    = 0    */
+  ASSERT_FLOAT_ABS(out[1], 0.0f, 1e-7f); /* sin(-0)   = 0    */
+  ASSERT_FLOAT_NAN(out[2]); /* sin(+inf) = NaN  */
+  ASSERT_FLOAT_NAN(out[3]); /* sin(-inf) = NaN  */
+  ASSERT_FLOAT_NAN(out[4]); /* sin(NaN)  = NaN  */
   ASSERT_FLOAT_ABS(out[5], sinf(3.14159265f), 1e-3f); /* sin(pi) ~ 0  */
 
   PASS();
@@ -1114,7 +1107,7 @@ TEST(conformance, sin_special_values) {
  * is meaningless (tiny absolute error becomes huge ULP count). */
 TEST(conformance, sin_quadrant_boundaries) {
   float pi = 3.14159265358979f;
-  float in[8] = { pi/6, pi/4, pi/3, pi/2, 2*pi/3, 3*pi/4, 5*pi/6, pi };
+  float in[8] = {pi / 6, pi / 4, pi / 3, pi / 2, 2 * pi / 3, 3 * pi / 4, 5 * pi / 6, pi};
   float out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, 8), 0);
 
@@ -1126,7 +1119,7 @@ TEST(conformance, sin_quadrant_boundaries) {
 
 /* SIN: Cody-Waite / Payne-Hanek switchover at 30.0 */
 TEST(conformance, sin_switchover_boundary) {
-  float in[8] = { 29.0f, 29.5f, 29.9f, 30.0f, 30.1f, 30.5f, 31.0f, 32.0f };
+  float in[8] = {29.0f, 29.5f, 29.9f, 30.0f, 30.1f, 30.5f, 31.0f, 32.0f};
   float out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_SIN, in, out, 8), 0);
 
@@ -1138,17 +1131,16 @@ TEST(conformance, sin_switchover_boundary) {
 
 /* EXP2: special values (zero, -0, inf, -inf, NaN, overflow, underflow) */
 TEST(conformance, exp2_special_values) {
-  float in[7] = { 0.0f, -0.0f, (float)INFINITY, (float)-INFINITY,
-                   (float)NAN, 128.0f, -150.0f };
+  float in[7] = {0.0f, -0.0f, (float)INFINITY, (float)-INFINITY, (float)NAN, 128.0f, -150.0f};
   float out[7] = {0};
   ASSERT_INT_EQ(run_unary_e2e(POLY_OP_EXP2, in, out, 7), 0);
 
-  ASSERT_FLOAT_ULP(out[0], 1.0f, 0);              /* exp2(0)    = 1    */
-  ASSERT_FLOAT_ULP(out[1], 1.0f, 0);              /* exp2(-0)   = 1    */
-  ASSERT_FLOAT_INF(out[2], +1);                    /* exp2(+inf) = +inf */
+  ASSERT_FLOAT_ULP(out[0], 1.0f, 0); /* exp2(0)    = 1    */
+  ASSERT_FLOAT_ULP(out[1], 1.0f, 0); /* exp2(-0)   = 1    */
+  ASSERT_FLOAT_INF(out[2], +1); /* exp2(+inf) = +inf */
   ASSERT_FLOAT_ABS(out[3], 0.0f, 1e-44f); /* exp2(-inf) = 0    */
-  ASSERT_FLOAT_NAN(out[4]);                         /* exp2(NaN)  = NaN  */
-  ASSERT_FLOAT_INF(out[5], +1);                    /* exp2(128)  = +inf */
+  ASSERT_FLOAT_NAN(out[4]); /* exp2(NaN)  = NaN  */
+  ASSERT_FLOAT_INF(out[5], +1); /* exp2(128)  = +inf */
   ASSERT_FLOAT_ABS(out[6], 0.0f, 1e-44f); /* exp2(-150) = 0    */
 
   PASS();
@@ -1213,7 +1205,7 @@ static PolyUOp *make_unary_kernel_f64(PolyCtx *ctx, PolyOps op, int n) {
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT64, idx0, poly_arg_none());
   PolyUOp *alu = poly_uop1(ctx, op, POLY_FLOAT64, load, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, alu, poly_arg_none());
-  PolyUOp *end_src[2] = { store, range };
+  PolyUOp *end_src[2] = {store, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
@@ -1228,37 +1220,44 @@ static int run_unary_e2e_f64(PolyOps op, const double *in, double *out, int n) {
   snprintf(name, sizeof(name), "conformance_f64_%d", op);
   char *src = poly_render_c(lin, nlin, name);
   PolyProgram *prog = poly_compile_c(src, name);
-  if (!prog) { free(src); free(lin); poly_ctx_destroy(ctx); return -1; }
+  if (!prog) {
+    free(src);
+    free(lin);
+    poly_ctx_destroy(ctx);
+    return -1;
+  }
   double *in_copy = (double *)malloc((size_t)n * sizeof(double));
   memcpy(in_copy, in, (size_t)n * sizeof(double));
-  void *args[2] = { in_copy, out };
+  void *args[2] = {in_copy, out};
   poly_program_call(prog, args, 2);
   poly_program_destroy(prog);
-  free(src); free(lin); free(in_copy);
+  free(src);
+  free(lin);
+  free(in_copy);
   poly_ctx_destroy(ctx);
   return 0;
 }
 
 /* EXP2 f64: special values */
 TEST(conformance_f64, exp2_special_values) {
-  double in[7] = { 0.0, -0.0, INFINITY, -INFINITY, NAN, 1024.0, -2000.0 };
+  double in[7] = {0.0, -0.0, INFINITY, -INFINITY, NAN, 1024.0, -2000.0};
   double out[7] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_EXP2, in, out, 7), 0);
 
-  ASSERT_DOUBLE_ULP(out[0], 1.0, 0);               /* exp2(0)     = 1    */
-  ASSERT_DOUBLE_ULP(out[1], 1.0, 0);               /* exp2(-0)    = 1    */
-  ASSERT_DOUBLE_INF(out[2], +1);                    /* exp2(+inf)  = +inf */
-  ASSERT_DOUBLE_ABS(out[3], 0.0, 1e-300);          /* exp2(-inf)  = 0    */
-  ASSERT_DOUBLE_NAN(out[4]);                         /* exp2(NaN)   = NaN  */
-  ASSERT_DOUBLE_INF(out[5], +1);                    /* exp2(1024)  = +inf */
-  ASSERT_DOUBLE_ABS(out[6], 0.0, 1e-300);          /* exp2(-2000) = 0    */
+  ASSERT_DOUBLE_ULP(out[0], 1.0, 0); /* exp2(0)     = 1    */
+  ASSERT_DOUBLE_ULP(out[1], 1.0, 0); /* exp2(-0)    = 1    */
+  ASSERT_DOUBLE_INF(out[2], +1); /* exp2(+inf)  = +inf */
+  ASSERT_DOUBLE_ABS(out[3], 0.0, 1e-300); /* exp2(-inf)  = 0    */
+  ASSERT_DOUBLE_NAN(out[4]); /* exp2(NaN)   = NaN  */
+  ASSERT_DOUBLE_INF(out[5], +1); /* exp2(1024)  = +inf */
+  ASSERT_DOUBLE_ABS(out[6], 0.0, 1e-300); /* exp2(-2000) = 0    */
 
   PASS();
 }
 
 /* EXP2 f64: normal range values */
 TEST(conformance_f64, exp2_normal_range) {
-  double in[8] = { 1.0, -1.0, 10.0, -10.0, 0.5, -0.5, 100.0, -100.0 };
+  double in[8] = {1.0, -1.0, 10.0, -10.0, 0.5, -0.5, 100.0, -100.0};
   double out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_EXP2, in, out, 8), 0);
 
@@ -1270,25 +1269,25 @@ TEST(conformance_f64, exp2_normal_range) {
 
 /* LOG2 f64: special values */
 TEST(conformance_f64, log2_special_values) {
-  double in[8] = { 0.0, -0.0, INFINITY, -INFINITY, NAN, 5e-324, 1.0, DBL_MAX };
+  double in[8] = {0.0, -0.0, INFINITY, -INFINITY, NAN, 5e-324, 1.0, DBL_MAX};
   double out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_LOG2, in, out, 8), 0);
 
-  ASSERT_DOUBLE_INF(out[0], -1);                    /* log2(0)    = -inf */
-  ASSERT_DOUBLE_INF(out[1], -1);                    /* log2(-0)   = -inf */
-  ASSERT_DOUBLE_INF(out[2], +1);                    /* log2(+inf) = +inf */
-  ASSERT_DOUBLE_NAN(out[3]);                         /* log2(-inf) = NaN  */
-  ASSERT_DOUBLE_NAN(out[4]);                         /* log2(NaN)  = NaN  */
-  ASSERT_DOUBLE_ULP(out[5], log2(5e-324), 256);     /* denormal (subnormal min) */
-  ASSERT_DOUBLE_ULP(out[6], 0.0, 0);               /* log2(1) = 0 exact */
-  ASSERT_DOUBLE_ULP(out[7], log2(DBL_MAX), 16);     /* large */
+  ASSERT_DOUBLE_INF(out[0], -1); /* log2(0)    = -inf */
+  ASSERT_DOUBLE_INF(out[1], -1); /* log2(-0)   = -inf */
+  ASSERT_DOUBLE_INF(out[2], +1); /* log2(+inf) = +inf */
+  ASSERT_DOUBLE_NAN(out[3]); /* log2(-inf) = NaN  */
+  ASSERT_DOUBLE_NAN(out[4]); /* log2(NaN)  = NaN  */
+  ASSERT_DOUBLE_ULP(out[5], log2(5e-324), 256); /* denormal (subnormal min) */
+  ASSERT_DOUBLE_ULP(out[6], 0.0, 0); /* log2(1) = 0 exact */
+  ASSERT_DOUBLE_ULP(out[7], log2(DBL_MAX), 16); /* large */
 
   PASS();
 }
 
 /* LOG2 f64: negative domain returns NaN */
 TEST(conformance_f64, log2_negative_domain) {
-  double in[4] = { -1.0, -100.0, -DBL_MIN, -DBL_MAX };
+  double in[4] = {-1.0, -100.0, -DBL_MIN, -DBL_MAX};
   double out[4] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_LOG2, in, out, 4), 0);
 
@@ -1314,16 +1313,16 @@ TEST(conformance_f64, log2_dense_sweep) {
 /* SIN f64: special values */
 TEST(conformance_f64, sin_special_values) {
   double pi = 3.14159265358979323846;
-  double in[6] = { 0.0, -0.0, INFINITY, -INFINITY, NAN, pi };
+  double in[6] = {0.0, -0.0, INFINITY, -INFINITY, NAN, pi};
   double out[6] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_SIN, in, out, 6), 0);
 
-  ASSERT_DOUBLE_ABS(out[0], 0.0, 1e-15);           /* sin(0)    = 0    */
-  ASSERT_DOUBLE_ABS(out[1], 0.0, 1e-15);           /* sin(-0)   = 0    */
-  ASSERT_DOUBLE_NAN(out[2]);                         /* sin(+inf) = NaN  */
-  ASSERT_DOUBLE_NAN(out[3]);                         /* sin(-inf) = NaN  */
-  ASSERT_DOUBLE_NAN(out[4]);                         /* sin(NaN)  = NaN  */
-  ASSERT_DOUBLE_ABS(out[5], sin(pi), 1e-7);         /* sin(pi) ~ 0     */
+  ASSERT_DOUBLE_ABS(out[0], 0.0, 1e-15); /* sin(0)    = 0    */
+  ASSERT_DOUBLE_ABS(out[1], 0.0, 1e-15); /* sin(-0)   = 0    */
+  ASSERT_DOUBLE_NAN(out[2]); /* sin(+inf) = NaN  */
+  ASSERT_DOUBLE_NAN(out[3]); /* sin(-inf) = NaN  */
+  ASSERT_DOUBLE_NAN(out[4]); /* sin(NaN)  = NaN  */
+  ASSERT_DOUBLE_ABS(out[5], sin(pi), 1e-7); /* sin(pi) ~ 0     */
 
   PASS();
 }
@@ -1331,7 +1330,7 @@ TEST(conformance_f64, sin_special_values) {
 /* SIN f64: quadrant boundaries (Cody-Waite path) */
 TEST(conformance_f64, sin_quadrant_boundaries) {
   double pi = 3.14159265358979323846;
-  double in[8] = { pi/6, pi/4, pi/3, pi/2, 2*pi/3, 3*pi/4, 5*pi/6, pi };
+  double in[8] = {pi / 6, pi / 4, pi / 3, pi / 2, 2 * pi / 3, 3 * pi / 4, 5 * pi / 6, pi};
   double out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_SIN, in, out, 8), 0);
 
@@ -1343,7 +1342,7 @@ TEST(conformance_f64, sin_quadrant_boundaries) {
 
 /* SIN f64: switchover boundary */
 TEST(conformance_f64, sin_switchover_boundary) {
-  double in[8] = { 29.0, 29.5, 29.9, 30.0, 30.1, 30.5, 31.0, 32.0 };
+  double in[8] = {29.0, 29.5, 29.9, 30.0, 30.1, 30.5, 31.0, 32.0};
   double out[8] = {0};
   ASSERT_INT_EQ(run_unary_e2e_f64(POLY_OP_SIN, in, out, 8), 0);
 
@@ -1366,13 +1365,13 @@ TEST(conformance, fma_rounding_divergence) {
   float mul_add_result = prod + c;
   /* Fused multiply-add */
   float fma_result = fmaf((float)a, (float)b, (float)c);
-  ASSERT_TRUE(mul_add_result == 0.0f);        /* double-rounded: exact zero */
-  ASSERT_TRUE(fma_result != mul_add_result);   /* FMA: nonzero */
-  ASSERT_TRUE(fma_result > 0.0f);             /* sanity: positive residual */
+  ASSERT_TRUE(mul_add_result == 0.0f); /* double-rounded: exact zero */
+  ASSERT_TRUE(fma_result != mul_add_result); /* FMA: nonzero */
+  ASSERT_TRUE(fma_result > 0.0f); /* sanity: positive residual */
   PASS();
 }
 
-/* ── C1 divmod rules (tinygrad divandmod.py alignment) ─────────────── */
+/* C1 divmod rules (tinygrad divandmod.py alignment) */
 
 /* nested_div_mod: (x%6)//3 → (x//3)%2.  Ref: divandmod.py:25-27 */
 TEST(sym_future, nested_div_mod_idiv) {
@@ -1428,8 +1427,7 @@ TEST(sym_future, remove_nested_mod) {
   PolyUOp *inner_sum = r->src[0];
   ASSERT_TRUE(inner_sum->op == POLY_OP_ADD);
   bool has_mod = false;
-  if (inner_sum->src[0]->op == POLY_OP_MOD || inner_sum->src[1]->op == POLY_OP_MOD)
-    has_mod = true;
+  if (inner_sum->src[0]->op == POLY_OP_MOD || inner_sum->src[1]->op == POLY_OP_MOD) has_mod = true;
   ASSERT_TRUE(!has_mod);
   poly_ctx_destroy(ctx);
   PASS();
@@ -1501,7 +1499,7 @@ TEST(decomp, shl_add_fuses_to_mulacc) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, shl, c, poly_arg_none());
 
   /* With MULACC caps, ADD(SHL(x,3), c) -> MULACC(x, 8, c) */
-  PolyRendererCaps caps = { .has_mulacc = true };
+  PolyRendererCaps caps = {.has_mulacc = true};
   PolyPatternMatcher *pm = poly_pm_decomp_pass_caps(caps);
   PolyUOp *r = poly_graph_rewrite(ctx, add, pm);
   ASSERT_NOT_NULL(r);
@@ -1534,7 +1532,7 @@ TEST(devectorize, alu_scatter) {
   PolyUOp *vadd = poly_uop2(ctx, POLY_OP_ADD, f32x4, va, vb, poly_arg_none());
 
   /* Apply devectorize */
-  PolyRewriteOpts opts = { .optimize = false, .devectorize = 1 };
+  PolyRewriteOpts opts = {.optimize = false, .devectorize = 1};
   (void)opts;
   PolyUOp *r = poly_graph_rewrite(ctx, vadd, poly_pm_devectorize_pass());
 
@@ -1595,7 +1593,7 @@ TEST(devectorize, drop_true_gate) {
   PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
   PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *gate = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_int(1));
-  PolyUOp *srcs[3] = { buf, idx, gate };
+  PolyUOp *srcs[3] = {buf, idx, gate};
   PolyUOp *index = poly_uop(ctx, POLY_OP_INDEX, ptr_f32, srcs, 3, poly_arg_none());
 
   PolyUOp *r = poly_graph_rewrite(ctx, index, poly_pm_devectorize_pass());
@@ -1621,7 +1619,7 @@ TEST(devectorize, e2e_vecadd) {
   float db[] = {10, 20, 30, 40, 50, 60, 70, 80};
   float dout[8] = {0};
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
   };
 
   /* Use POLY_OPTIMIZE + POLY_DEVECTORIZE via env to test full pipeline */
@@ -1655,10 +1653,13 @@ TEST(beam, vecadd_correct) {
   PolyUOp *sink = poly_sink1(ctx, st);
 
   float da[64], db[64], dout[64];
-  for (int i = 0; i < N; i++) { da[i] = (float)i; db[i] = (float)(100 + i); }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)i;
+    db[i] = (float)(100 + i);
+  }
   memset(dout, 0, sizeof(dout));
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
@@ -1690,10 +1691,11 @@ TEST(beam, reduce_correct) {
 
   float da[32], dout[1] = {0};
   float expected = 0;
-  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); expected += da[i]; }
-  PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(out, dout)
-  };
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i + 1);
+    expected += da[i];
+  }
+  PolyBufferBinding bindings[] = {POLY_BIND_HOST(a, da), POLY_BIND_HOST(out, dout)};
 
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
@@ -1722,10 +1724,13 @@ TEST(beam, zero_is_heuristic) {
   PolyUOp *sink = poly_sink1(ctx, st);
 
   float da[16], db[16], dout[16];
-  for (int i = 0; i < N; i++) { da[i] = (float)i; db[i] = 1.0f; }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)i;
+    db[i] = 1.0f;
+  }
   memset(dout, 0, sizeof(dout));
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
@@ -1756,10 +1761,13 @@ TEST(beam, cache_roundtrip) {
   PolyUOp *sink = poly_sink1(ctx, st);
 
   float da[64], db[64], dout1[64], dout2[64];
-  for (int i = 0; i < N; i++) { da[i] = (float)(i * 3); db[i] = (float)(i + 7); }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i * 3);
+    db[i] = (float)(i + 7);
+  }
 
   PolyBufferBinding bindings1[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout1)
+      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout1)
   };
 
   /* First run: populates cache */
@@ -1779,7 +1787,7 @@ TEST(beam, cache_roundtrip) {
   PolyUOp *sink2 = poly_sink1(ctx2, st2);
 
   PolyBufferBinding bindings2[] = {
-    POLY_BIND_HOST(a2, da), POLY_BIND_HOST(b2, db), POLY_BIND_HOST(out2, dout2)
+      POLY_BIND_HOST(a2, da), POLY_BIND_HOST(b2, db), POLY_BIND_HOST(out2, dout2)
   };
   int ret2 = poly_realize(ctx2, sink2, bindings2, 3);
   unsetenv("POLY_OPTIMIZE");
@@ -1818,8 +1826,7 @@ TEST(beam, chain_correct) {
   }
   memset(dout, 0, sizeof(dout));
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db),
-    POLY_BIND_HOST(c, dc), POLY_BIND_HOST(out, dout)
+      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(c, dc), POLY_BIND_HOST(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
@@ -1838,7 +1845,7 @@ TEST(beam, chain_correct) {
   PASS();
 }
 
-/* ── Section 8: Tensor core helper tests (tc.py port) ───────────────── */
+/* Section 8: Tensor core helper tests (tc.py port) */
 
 /* AMD CDNA 16x16x16 half->float spec for testing.
  * Initialized at first use because POLY_FLOAT16/POLY_FLOAT32 are extern const. */
@@ -1849,30 +1856,56 @@ static const PolyTensorCore *get_test_cdna_tc(void) {
   if (!test_cdna_tc_init) {
     test_cdna_tc_init = 1;
     memset(&test_cdna_tc, 0, sizeof(test_cdna_tc));
-    test_cdna_tc.dims[0] = 16; test_cdna_tc.dims[1] = 16; test_cdna_tc.dims[2] = 16;
+    test_cdna_tc.dims[0] = 16;
+    test_cdna_tc.dims[1] = 16;
+    test_cdna_tc.dims[2] = 16;
     test_cdna_tc.threads = 64;
     test_cdna_tc.elements_per_thread[0] = 4;
     test_cdna_tc.elements_per_thread[1] = 4;
     test_cdna_tc.elements_per_thread[2] = 4;
     test_cdna_tc.dtype_in = POLY_FLOAT16;
     test_cdna_tc.dtype_out = POLY_FLOAT32;
-    struct { char type; int dim; } opts[] = {
-      {'l',0},{'l',0},{'l',0},{'l',0},{'u',1},{'u',1},{'l',1},{'l',1}
-    };
-    for (int i = 0; i < 8; i++) { test_cdna_tc.opts[i].type = opts[i].type; test_cdna_tc.opts[i].dim = opts[i].dim; }
+    struct {
+      char type;
+      int dim;
+    } opts[] = {{'l', 0}, {'l', 0}, {'l', 0}, {'l', 0}, {'u', 1}, {'u', 1}, {'l', 1}, {'l', 1}};
+    for (int i = 0; i < 8; i++) {
+      test_cdna_tc.opts[i].type = opts[i].type;
+      test_cdna_tc.opts[i].dim = opts[i].dim;
+    }
     test_cdna_tc.n_opts = 8;
     /* swizzle[0] */
-    test_cdna_tc.swizzle[0][0][0]="u0"; test_cdna_tc.swizzle[0][0][1]="u1"; test_cdna_tc.swizzle[0][0][2]="l4";
-    test_cdna_tc.swizzle[0][0][3]="l5"; test_cdna_tc.swizzle[0][0][4]="r2"; test_cdna_tc.swizzle[0][0][5]="r3";
-    test_cdna_tc.swizzle[0][1][0]="r0"; test_cdna_tc.swizzle[0][1][1]="r1";
-    test_cdna_tc.swizzle[0][2][0]="l0"; test_cdna_tc.swizzle[0][2][1]="l1"; test_cdna_tc.swizzle[0][2][2]="l2"; test_cdna_tc.swizzle[0][2][3]="l3";
+    test_cdna_tc.swizzle[0][0][0] = "u0";
+    test_cdna_tc.swizzle[0][0][1] = "u1";
+    test_cdna_tc.swizzle[0][0][2] = "l4";
+    test_cdna_tc.swizzle[0][0][3] = "l5";
+    test_cdna_tc.swizzle[0][0][4] = "r2";
+    test_cdna_tc.swizzle[0][0][5] = "r3";
+    test_cdna_tc.swizzle[0][1][0] = "r0";
+    test_cdna_tc.swizzle[0][1][1] = "r1";
+    test_cdna_tc.swizzle[0][2][0] = "l0";
+    test_cdna_tc.swizzle[0][2][1] = "l1";
+    test_cdna_tc.swizzle[0][2][2] = "l2";
+    test_cdna_tc.swizzle[0][2][3] = "l3";
     /* swizzle[1] */
-    test_cdna_tc.swizzle[1][0][0]="l0"; test_cdna_tc.swizzle[1][0][1]="l1"; test_cdna_tc.swizzle[1][0][2]="l2";
-    test_cdna_tc.swizzle[1][0][3]="l3"; test_cdna_tc.swizzle[1][0][4]="r2"; test_cdna_tc.swizzle[1][0][5]="r3";
-    test_cdna_tc.swizzle[1][1][0]="r0"; test_cdna_tc.swizzle[1][1][1]="r1";
-    test_cdna_tc.swizzle[1][2][0]="l4"; test_cdna_tc.swizzle[1][2][1]="l5"; test_cdna_tc.swizzle[1][2][2]="u0"; test_cdna_tc.swizzle[1][2][3]="u1";
-    test_cdna_tc.swizzle_len[0][0]=6; test_cdna_tc.swizzle_len[0][1]=2; test_cdna_tc.swizzle_len[0][2]=4;
-    test_cdna_tc.swizzle_len[1][0]=6; test_cdna_tc.swizzle_len[1][1]=2; test_cdna_tc.swizzle_len[1][2]=4;
+    test_cdna_tc.swizzle[1][0][0] = "l0";
+    test_cdna_tc.swizzle[1][0][1] = "l1";
+    test_cdna_tc.swizzle[1][0][2] = "l2";
+    test_cdna_tc.swizzle[1][0][3] = "l3";
+    test_cdna_tc.swizzle[1][0][4] = "r2";
+    test_cdna_tc.swizzle[1][0][5] = "r3";
+    test_cdna_tc.swizzle[1][1][0] = "r0";
+    test_cdna_tc.swizzle[1][1][1] = "r1";
+    test_cdna_tc.swizzle[1][2][0] = "l4";
+    test_cdna_tc.swizzle[1][2][1] = "l5";
+    test_cdna_tc.swizzle[1][2][2] = "u0";
+    test_cdna_tc.swizzle[1][2][3] = "u1";
+    test_cdna_tc.swizzle_len[0][0] = 6;
+    test_cdna_tc.swizzle_len[0][1] = 2;
+    test_cdna_tc.swizzle_len[0][2] = 4;
+    test_cdna_tc.swizzle_len[1][0] = 6;
+    test_cdna_tc.swizzle_len[1][1] = 2;
+    test_cdna_tc.swizzle_len[1][2] = 4;
     test_cdna_tc.intrinsic_name = "mfma_f32_16x16x16f16";
   }
   return &test_cdna_tc;
@@ -1891,8 +1924,8 @@ TEST(tc, get_reduce_axes) {
 }
 
 TEST(tc, count_local_upcast) {
-  ASSERT_INT_EQ(tc_count_local(get_test_cdna_tc()), 6);  /* l0,l0,l0,l0,l1,l1 */
-  ASSERT_INT_EQ(tc_count_upcast(get_test_cdna_tc()), 2);  /* u1,u1 */
+  ASSERT_INT_EQ(tc_count_local(get_test_cdna_tc()), 6); /* l0,l0,l0,l0,l1,l1 */
+  ASSERT_INT_EQ(tc_count_upcast(get_test_cdna_tc()), 2); /* u1,u1 */
   PASS();
 }
 
@@ -1902,7 +1935,7 @@ TEST(tc, base_shape_str) {
   /* 8 opts + 4 reduce = 12 entries */
   ASSERT_INT_EQ(n, 12);
   /* Expected: l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3 */
-  const char *expected[] = {"l0","l1","l2","l3","u0","u1","l4","l5","r0","r1","r2","r3"};
+  const char *expected[] = {"l0", "l1", "l2", "l3", "u0", "u1", "l4", "l5", "r0", "r1", "r2", "r3"};
   for (int i = 0; i < 12; i++) {
     if (strcmp(out[i], expected[i]) != 0) {
       FAIL("base_shape_str[%d]: got '%s', expected '%s'", i, out[i], expected[i]);
@@ -1916,7 +1949,7 @@ TEST(tc, base_upcast_axes) {
   int n = tc_base_upcast_axes(get_test_cdna_tc(), out, 32);
   /* reversed [r0,r1,r2,r3,u0,u1] -> [u1,u0,r3,r2,r1,r0] */
   ASSERT_INT_EQ(n, 6);
-  const char *expected[] = {"u1","u0","r3","r2","r1","r0"};
+  const char *expected[] = {"u1", "u0", "r3", "r2", "r1", "r0"};
   for (int i = 0; i < 6; i++) {
     if (strcmp(out[i], expected[i]) != 0) {
       FAIL("base_upcast_axes[%d]: got '%s', expected '%s'", i, out[i], expected[i]);
@@ -1937,7 +1970,8 @@ TEST(tc, permute_for_shape_str) {
 
   /* swizzle[0] flattened: u0,u1,l4,l5,r2,r3, r0,r1, l0,l1,l2,l3
    * fwd (base_shape_str): l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3
-   * remap[0]: l0->u0, l1->u1, l2->l4, l3->l5, u0->r2, u1->r3, l4->r0, l5->r1, r0->l0, r1->l1, r2->l2, r3->l3
+   * remap[0]: l0->u0, l1->u1, l2->l4, l3->l5, u0->r2, u1->r3, l4->r0, l5->r1, r0->l0, r1->l1,
+   * r2->l2, r3->l3
    *
    * For shape_str = base_shape_str:
    *   perm0[0] = shape_str.index(remap["l0"]) = index("u0") = 4
@@ -1961,10 +1995,8 @@ TEST(tc, permute_for_shape_str) {
   }
 
   /* swizzle[1] flattened: l0,l1,l2,l3,r2,r3, r0,r1, l4,l5,u0,u1
-   * remap[1]: l0->l0, l1->l1, l2->l2, l3->l3, u0->r2, u1->r3, l4->r0, l5->r1, r0->l4, r1->l5, r2->u0, r3->u1
-   *   perm1[0] = index("l0") = 0
-   *   perm1[1] = index("l1") = 1
-   *   perm1[2] = index("l2") = 2
+   * remap[1]: l0->l0, l1->l1, l2->l2, l3->l3, u0->r2, u1->r3, l4->r0, l5->r1, r0->l4, r1->l5,
+   * r2->u0, r3->u1 perm1[0] = index("l0") = 0 perm1[1] = index("l1") = 1 perm1[2] = index("l2") = 2
    *   perm1[3] = index("l3") = 3
    *   perm1[4] = index("r2") = 10
    *   perm1[5] = index("r3") = 11
@@ -1985,7 +2017,7 @@ TEST(tc, permute_for_shape_str) {
   PASS();
 }
 
-/* ── Section 9: TC structural detection tests ───────────────────────── */
+/* Section 9: TC structural detection tests */
 
 /* Build a minimal 16x16x16 matmul kernel AST:
  * C[i,j] = sum_k( CAST_f32(A[i,k] * B[k,j]) )  where i,j,k in [0,16)
@@ -1999,40 +2031,43 @@ static PolyUOp *build_matmul_16x16x16_ast(PolyCtx *ctx) {
   PolyUOp *pC = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
 
   PolyUOp *c16 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
-  PolyUOp *rng_i = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16,
-                               poly_arg_range(0, POLY_AXIS_GLOBAL));
-  PolyUOp *rng_j = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16,
-                               poly_arg_range(1, POLY_AXIS_GLOBAL));
-  PolyUOp *rng_k = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16,
-                               poly_arg_range(2, POLY_AXIS_REDUCE));
+  PolyUOp *rng_i =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_j =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16, poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_k =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, c16, poly_arg_range(2, POLY_AXIS_REDUCE));
 
   PolyUOp *c16b = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
-  PolyUOp *a_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, c16b, poly_arg_none()),
-                    rng_k, poly_arg_none());
+  PolyUOp *a_idx = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, c16b, poly_arg_none()), rng_k, poly_arg_none()
+  );
   PolyUOp *a_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, a_idx, poly_arg_none());
   PolyUOp *a_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, a_ptr, poly_arg_none());
 
-  PolyUOp *b_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_k, c16b, poly_arg_none()),
-                    rng_j, poly_arg_none());
+  PolyUOp *b_idx = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_k, c16b, poly_arg_none()), rng_j, poly_arg_none()
+  );
   PolyUOp *b_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, b_idx, poly_arg_none());
   PolyUOp *b_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, b_ptr, poly_arg_none());
 
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, a_val, b_val, poly_arg_none());
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
 
-  PolyUOp *red_srcs[2] = { cast, rng_k };
-  PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+  PolyUOp *red_srcs[2] = {cast, rng_k};
+  PolyArg red_arg = {.kind = POLY_ARG_OPS, .ops = POLY_OP_ADD};
   PolyUOp *reduce = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, red_arg);
 
-  PolyUOp *c_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, c16b, poly_arg_none()),
-                    rng_j, poly_arg_none());
+  PolyUOp *c_idx = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, c16b, poly_arg_none()), rng_j, poly_arg_none()
+  );
   PolyUOp *c_ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, c_idx, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c_ptr, reduce, poly_arg_none());
 
-  PolyUOp *end_srcs[3] = { store, rng_i, rng_j };
+  PolyUOp *end_srcs[3] = {store, rng_i, rng_j};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
@@ -2059,9 +2094,8 @@ TEST(tc, structural_matmul_ast_shape) {
   PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
   bool found = false;
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_REDUCE &&
-        topo[i]->arg.kind == POLY_ARG_OPS && topo[i]->arg.ops == POLY_OP_ADD &&
-        topo[i]->src[0]->op == POLY_OP_CAST &&
+    if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == POLY_ARG_OPS &&
+        topo[i]->arg.ops == POLY_OP_ADD && topo[i]->src[0]->op == POLY_OP_CAST &&
         topo[i]->src[0]->src[0]->op == POLY_OP_MUL) {
       found = true;
       ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(topo[i]->src[0]->src[0]->dtype), POLY_FLOAT16));
@@ -2086,9 +2120,9 @@ TEST(tc, detect_wmma_in_heuristic) {
 
   /* Run heuristic with CDNA TC spec (tc_opt=1 to allow CAST'd MUL) */
   PolyRendererCaps caps = {
-    .has_mulacc = true,
-    .tensor_cores = get_test_cdna_tc(),
-    .n_tensor_cores = 1,
+      .has_mulacc = true,
+      .tensor_cores = get_test_cdna_tc(),
+      .n_tensor_cores = 1,
   };
 
   /* Set env for tc_opt=1 (allow CAST) */
@@ -2097,7 +2131,7 @@ TEST(tc, detect_wmma_in_heuristic) {
 
   /* poly_apply_opts_heuristic is static, so we go through poly_full_rewrite_to_sink_ex
    * which calls it when optimize=true. */
-  PolyRewriteOpts opts = { .optimize = true, .caps = caps };
+  PolyRewriteOpts opts = {.optimize = true, .caps = caps};
   PolyUOp *optimized = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 
   unsetenv("POLY_TC_OPT");
@@ -2109,23 +2143,28 @@ TEST(tc, detect_wmma_in_heuristic) {
   int n_unroll = count_ops(ctx, optimized, POLY_OP_UNROLL);
 
   if (n_wmma == 0) {
-    fprintf(stderr, "  detect_wmma: no WMMA found after heuristic (n_contract=%d n_unroll=%d)\n",
-            n_contract, n_unroll);
+    fprintf(
+        stderr, "  detect_wmma: no WMMA found after heuristic (n_contract=%d n_unroll=%d)\n",
+        n_contract, n_unroll
+    );
     /* Dump op counts for debugging */
     int n_topo = 0;
     PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
     for (int i = 0; i < n_topo; i++) {
       if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_WMMA ||
           topo[i]->op == POLY_OP_CONTRACT || topo[i]->op == POLY_OP_UNROLL)
-        fprintf(stderr, "    op[%d] = %d (REDUCE=%d WMMA=%d)\n", i, topo[i]->op,
-                POLY_OP_REDUCE, POLY_OP_WMMA);
+        fprintf(
+            stderr, "    op[%d] = %d (REDUCE=%d WMMA=%d)\n", i, topo[i]->op, POLY_OP_REDUCE,
+            POLY_OP_WMMA
+        );
     }
   }
 
   ASSERT_TRUE(n_wmma > 0);
   /* CONTRACT and UNROLL may be lowered by the expander pass -- that's correct.
    * The key assertion is WMMA present and REDUCE(ADD) gone. */
-  (void)n_contract; (void)n_unroll;
+  (void)n_contract;
+  (void)n_unroll;
 
   /* The original REDUCE(ADD) should be gone (replaced by WMMA) */
   int n_reduce = 0;
@@ -2133,8 +2172,8 @@ TEST(tc, detect_wmma_in_heuristic) {
     int n_topo = 0;
     PolyUOp **topo = poly_toposort(ctx, optimized, &n_topo);
     for (int i = 0; i < n_topo; i++) {
-      if (topo[i]->op == POLY_OP_REDUCE &&
-          topo[i]->arg.kind == POLY_ARG_OPS && topo[i]->arg.ops == POLY_OP_ADD)
+      if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == POLY_ARG_OPS &&
+          topo[i]->arg.ops == POLY_OP_ADD)
         n_reduce++;
     }
   }
@@ -2160,11 +2199,11 @@ static PolyUOp *run_tc_heuristic(PolyCtx *ctx, PolyUOp *sink, const char *tc_opt
   setenv("POLY_TC_OPT", tc_opt_val, 1);
   setenv("POLY_USE_TC", "1", 1);
   PolyRendererCaps caps = {
-    .has_mulacc = true,
-    .tensor_cores = get_test_cdna_tc(),
-    .n_tensor_cores = 1,
+      .has_mulacc = true,
+      .tensor_cores = get_test_cdna_tc(),
+      .n_tensor_cores = 1,
   };
-  PolyRewriteOpts opts = { .optimize = true, .caps = caps };
+  PolyRewriteOpts opts = {.optimize = true, .caps = caps};
   PolyUOp *result = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   unsetenv("POLY_TC_OPT");
   unsetenv("POLY_USE_TC");
@@ -2189,32 +2228,43 @@ static PolyUOp *build_matmul_NxNxN_ast(PolyCtx *ctx, int N) {
   PolyUOp *pB = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
   PolyUOp *pC = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
   PolyUOp *cN = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
-  PolyUOp *rng_i = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(0, POLY_AXIS_GLOBAL));
-  PolyUOp *rng_j = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(1, POLY_AXIS_GLOBAL));
-  PolyUOp *rng_k = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(2, POLY_AXIS_REDUCE));
+  PolyUOp *rng_i =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_j =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_k =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cN, poly_arg_range(2, POLY_AXIS_REDUCE));
   PolyUOp *cNb = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
-  PolyUOp *a_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, cNb, poly_arg_none()),
-                    rng_k, poly_arg_none());
-  PolyUOp *a_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16,
-                    poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, a_idx, poly_arg_none()), poly_arg_none());
-  PolyUOp *b_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_k, cNb, poly_arg_none()),
-                    rng_j, poly_arg_none());
-  PolyUOp *b_val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16,
-                    poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, b_idx, poly_arg_none()), poly_arg_none());
+  PolyUOp *a_idx = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, cNb, poly_arg_none()), rng_k, poly_arg_none()
+  );
+  PolyUOp *a_val = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_FLOAT16,
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pA, a_idx, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *b_idx = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_k, cNb, poly_arg_none()), rng_j, poly_arg_none()
+  );
+  PolyUOp *b_val = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_FLOAT16,
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pB, b_idx, poly_arg_none()), poly_arg_none()
+  );
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT16, a_val, b_val, poly_arg_none());
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, mul, poly_arg_none());
-  PolyUOp *red_srcs[2] = { cast, rng_k };
-  PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+  PolyUOp *red_srcs[2] = {cast, rng_k};
+  PolyArg red_arg = {.kind = POLY_ARG_OPS, .ops = POLY_OP_ADD};
   PolyUOp *reduce = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, red_arg);
-  PolyUOp *c_idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, cNb, poly_arg_none()),
-                    rng_j, poly_arg_none());
-  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID,
-                    poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, c_idx, poly_arg_none()),
-                    reduce, poly_arg_none());
-  PolyUOp *end_srcs[3] = { store, rng_i, rng_j };
+  PolyUOp *c_idx = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, cNb, poly_arg_none()), rng_j, poly_arg_none()
+  );
+  PolyUOp *store = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID,
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pC, c_idx, poly_arg_none()), reduce, poly_arg_none()
+  );
+  PolyUOp *end_srcs[3] = {store, rng_i, rng_j};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
@@ -2244,9 +2294,9 @@ TEST(tc, pre_expander_wmma_structure) {
   setenv("POLY_TC_OPT", "1", 1);
   setenv("POLY_USE_TC", "1", 1);
   PolyRendererCaps caps = {
-    .has_mulacc = true,
-    .tensor_cores = get_test_cdna_tc(),
-    .n_tensor_cores = 1,
+      .has_mulacc = true,
+      .tensor_cores = get_test_cdna_tc(),
+      .n_tensor_cores = 1,
   };
 
   /* Run the preprocessing that normally happens before heuristic */
@@ -2330,7 +2380,7 @@ TEST(tc, pre_expander_wmma_structure) {
 
   /* Verify expected op counts */
   ASSERT_INT_EQ(n_contract, 2); /* one per operand */
-  ASSERT_TRUE(n_unroll >= 1);   /* at least the WMMA wrapper */
+  ASSERT_TRUE(n_unroll >= 1); /* at least the WMMA wrapper */
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -2355,9 +2405,9 @@ TEST(tc, all_ne_elements_tagged) {
   setenv("POLY_TC_OPT", "1", 1);
   setenv("POLY_USE_TC", "1", 1);
   PolyRendererCaps caps = {
-    .has_mulacc = true,
-    .tensor_cores = get_test_cdna_tc(),
-    .n_tensor_cores = 1,
+      .has_mulacc = true,
+      .tensor_cores = get_test_cdna_tc(),
+      .n_tensor_cores = 1,
   };
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
@@ -2398,13 +2448,13 @@ TEST(tc, use_tc_2_no_wmma_but_expanded) {
   PolyUOp *sink = build_matmul_16x16x16_ast(ctx);
 
   setenv("POLY_TC_OPT", "1", 1);
-  setenv("POLY_USE_TC", "2", 1);  /* shape-only: no WMMA */
+  setenv("POLY_USE_TC", "2", 1); /* shape-only: no WMMA */
   PolyRendererCaps caps = {
-    .has_mulacc = true,
-    .tensor_cores = get_test_cdna_tc(),
-    .n_tensor_cores = 1,
+      .has_mulacc = true,
+      .tensor_cores = get_test_cdna_tc(),
+      .n_tensor_cores = 1,
   };
-  PolyRewriteOpts opts = { .optimize = true, .caps = caps };
+  PolyRewriteOpts opts = {.optimize = true, .caps = caps};
   PolyUOp *optimized = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
   unsetenv("POLY_TC_OPT");
   unsetenv("POLY_USE_TC");
@@ -2468,7 +2518,8 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
 
   /* Run each scheduled kernel through GPU-like opts but render to C */
   float x_d[75], o_d[1] = {0.0f};
-  for (int i = 0; i < 75; i++) x_d[i] = (float)(i + 1);
+  for (int i = 0; i < 75; i++)
+    x_d[i] = (float)(i + 1);
 
   for (int k = 0; k < sched->n_items; k++) {
     PolyExecItem *item = &sched->items[k];
@@ -2476,12 +2527,12 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
 
     /* Exact HIP opts with optimize=true (the tinygrad-parity path) */
     PolyRewriteOpts opts = {
-      .optimize    = true,
-      .devectorize = -1,
-      .caps        = { .has_mulacc = true },
-      .device      = POLY_DEVICE_HIP,
-      .opt_policy  = POLY_OPT_TC_ONLY,
-      .gpu_block_size = 256,
+        .optimize = true,
+        .devectorize = -1,
+        .caps = {.has_mulacc = true},
+        .device = POLY_DEVICE_HIP,
+        .opt_policy = POLY_OPT_TC_ONLY,
+        .gpu_block_size = 256,
     };
     PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, item->root, opts);
 
@@ -2512,7 +2563,7 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
     }
 
     /* Build args from slot indices */
-    void *bufs[2] = { o_d, x_d };
+    void *bufs[2] = {o_d, x_d};
     void *args[16];
     for (int p = 0; p < item->n_buf_slots && p < 16; p++)
       args[p] = bufs[item->buf_slot_indices[p]];
@@ -2522,8 +2573,10 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
   }
 
   if (o_d[0] != 740.0f) {
-    fprintf(stderr, "  pad_shrink_reduce: got %.1f, expected 740.0 (delta=%.1f)\n",
-            (double)o_d[0], (double)(o_d[0] - 740.0f));
+    fprintf(
+        stderr, "  pad_shrink_reduce: got %.1f, expected 740.0 (delta=%.1f)\n", (double)o_d[0],
+        (double)(o_d[0] - 740.0f)
+    );
   }
   ASSERT_FLOAT_EQ(o_d[0], 740.0f, 1e-5);
 
@@ -2541,17 +2594,17 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
 /* Helper: build a large reduction kernel: out = sum(in[0..N)) */
 static PolyUOp *build_large_reduction_ast(PolyCtx *ctx, int N) {
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *p_in  = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p_in = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
   PolyUOp *p_out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
 
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
-  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound,
-                               poly_arg_range(0, POLY_AXIS_REDUCE));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_in, range, poly_arg_none());
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx, poly_arg_none());
 
-  PolyUOp *red_srcs[2] = { load, range };
-  PolyArg red_arg = { .kind = POLY_ARG_OPS, .ops = POLY_OP_ADD };
+  PolyUOp *red_srcs[2] = {load, range};
+  PolyArg red_arg = {.kind = POLY_ARG_OPS, .ops = POLY_OP_ADD};
   PolyUOp *reduce = poly_uop(ctx, POLY_OP_REDUCE, POLY_FLOAT32, red_srcs, 2, red_arg);
 
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
@@ -2564,29 +2617,31 @@ static PolyUOp *build_large_reduction_ast(PolyCtx *ctx, int N) {
 /* Helper: build a 2-range elementwise kernel: out[i*N+j] = in[i*N+j] + 1 */
 static PolyUOp *build_2range_kernel(PolyCtx *ctx, int M, int N) {
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *p_in  = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p_in = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
   PolyUOp *p_out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
 
   PolyUOp *cm = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(M));
   PolyUOp *cn = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
-  PolyUOp *rng_i = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cm,
-                               poly_arg_range(0, POLY_AXIS_GLOBAL));
-  PolyUOp *rng_j = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cn,
-                               poly_arg_range(1, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_i =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cm, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rng_j =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, cn, poly_arg_range(1, POLY_AXIS_GLOBAL));
 
   PolyUOp *stride = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
-  PolyUOp *flat = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32,
-                    poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, stride, poly_arg_none()),
-                    rng_j, poly_arg_none());
+  PolyUOp *flat = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, rng_i, stride, poly_arg_none()), rng_j,
+      poly_arg_none()
+  );
 
-  PolyUOp *in_idx  = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_in, flat, poly_arg_none());
+  PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_in, flat, poly_arg_none());
   PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_out, flat, poly_arg_none());
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_idx, poly_arg_none());
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, one, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, add, poly_arg_none());
 
-  PolyUOp *end_srcs[3] = { store, rng_i, rng_j };
+  PolyUOp *end_srcs[3] = {store, rng_i, rng_j};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
@@ -2602,8 +2657,8 @@ TEST(unify_pre, large_reduction_structural) {
   sink = poly_group_for_reduce(ctx, sink, 256);
 
   int n_define_local = count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL);
-  int n_barrier      = count_ops(ctx, sink, POLY_OP_BARRIER);
-  int n_reduce       = count_ops(ctx, sink, POLY_OP_REDUCE);
+  int n_barrier = count_ops(ctx, sink, POLY_OP_BARRIER);
+  int n_reduce = count_ops(ctx, sink, POLY_OP_REDUCE);
 
   ASSERT_TRUE(n_define_local >= 1);
   ASSERT_TRUE(n_barrier >= 1);
@@ -2723,7 +2778,7 @@ TEST(unify_pre, full_gpu_pipeline_structural) {
    * the final IR has SPECIAL + DEFINE_LOCAL + BARRIER + no raw RANGE. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
-  PolyRendererCaps caps = { .has_mulacc = true };
+  PolyRendererCaps caps = {.has_mulacc = true};
 
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   sink = poly_group_for_reduce(ctx, sink, 256);
@@ -2757,7 +2812,7 @@ TEST(unify_pre, full_rewrite_composition) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_EXP2, 256);
 
-  PolyRewriteOpts opts = { .optimize = false, .devectorize = -1 };
+  PolyRewriteOpts opts = {.optimize = false, .devectorize = -1};
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 
   /* EXP2 should be decomposed */
@@ -2782,7 +2837,7 @@ TEST(unify_pre, gpu_pipeline_2range_elementwise) {
    * and successful linearization. Captures baseline for CUDA path. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_2range_kernel(ctx, 64, 128);
-  PolyRendererCaps caps = { .has_mulacc = true };
+  PolyRendererCaps caps = {.has_mulacc = true};
 
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
   /* No group_for_reduce needed (no reduction) */

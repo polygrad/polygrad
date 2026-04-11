@@ -37,7 +37,7 @@
 
 
 
-/* ── GPT-2 Config ───────────────────────────────────────────────── */
+/* GPT-2 Config */
 
 GPT2Config poly_gpt2_config_default(void) {
   return (GPT2Config){
@@ -51,7 +51,7 @@ GPT2Config poly_gpt2_config_default(void) {
   };
 }
 
-/* ── GPT-2 Builder ───────────────────────────────────────────────── */
+/* GPT-2 Builder */
 
 PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1)
@@ -73,7 +73,7 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
 
   PolyCtx *ctx = poly_ctx_new();
 
-  /* ── Register I/O buffers ────────────────────────────────────── */
+  /* Register I/O buffers */
 
   int64_t x_shape[] = { B, T };
   PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, x_shape, 2, "x");
@@ -84,7 +84,7 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   int64_t pos_shape[] = { 1, T };
   PolyUOp *pos_buf = poly_input(ctx, POLY_FLOAT32, pos_shape, 2, "positions");
 
-  /* ── Build forward graph ─────────────────────────────────────── */
+  /* Build forward graph */
 
   /* Token + position embeddings */
   PolyUOp *x_shaped = poly_reshape(ctx, x_buf, x_shape, 2);
@@ -104,7 +104,7 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   PolyUOp *mask = poly_contiguous(ctx,poly_reshape(ctx, poly_causal_mask(ctx, T),
                                         (int64_t[]){ 1, 1, T, T }, 4));
 
-  /* ── Transformer blocks ──────────────────────────────────────── */
+  /* Transformer blocks */
 
   for (int i = 0; i < L; i++) {
     char prefix[64];
@@ -210,7 +210,7 @@ PolyInstance *poly_gpt2_from_json(const char *json, int len) {
   return inst;
 }
 
-/* ── HF import (model-specific) ─────────────────────────────────── */
+/* HF import (model-specific) */
 
 #include "../loaders/hf_decode.h"
 #include "../loaders/bind.h"
@@ -343,7 +343,7 @@ PolyInstance *poly_gpt2_from_hf_decoded_generic(
       opts ? opts->max_seq_len : 0);
 }
 
-/* ── GGUF import (model-specific) ───────────────────────────────── */
+/* GGUF import (model-specific) */
 
 #include "../loaders/gguf_decode.h"
 

@@ -10,12 +10,12 @@
 #include "../src/models/mlp.h"
 #include <string.h>
 
-/* ── Basic encode/decode ─────────────────────────────────────────────── */
+/* Basic encode/decode */
 
 TEST(bundle, encode_decode_roundtrip) {
   /* Create dummy IR and weights */
-  uint8_t ir[] = { 0x01, 0x02, 0x03, 0x04 };
-  uint8_t weights[] = { 0xAA, 0xBB, 0xCC };
+  uint8_t ir[] = {0x01, 0x02, 0x03, 0x04};
+  uint8_t weights[] = {0xAA, 0xBB, 0xCC};
   const char *meta = "{\"model\":\"test\"}";
 
   int bundle_len = 0;
@@ -43,7 +43,7 @@ TEST(bundle, encode_decode_roundtrip) {
 }
 
 TEST(bundle, encode_ir_only) {
-  uint8_t ir[] = { 0x42 };
+  uint8_t ir[] = {0x42};
   int bundle_len = 0;
   uint8_t *bundle = poly_bundle_encode(ir, 1, NULL, 0, NULL, &bundle_len);
   ASSERT_NOT_NULL(bundle);
@@ -78,7 +78,7 @@ TEST(bundle, decode_null_input) {
   PASS();
 }
 
-/* ── Instance round-trip via bundle ───────────────────────────────────── */
+/* Instance round-trip via bundle */
 
 TEST(bundle, instance_save_load_roundtrip) {
   /* Create MLP instance */
@@ -96,14 +96,17 @@ TEST(bundle, instance_save_load_roundtrip) {
   }
 
   /* Forward on original */
-  float input[] = { 1.0f, 2.0f };
-  PolyIOBinding io[] = { {"x", input} };
+  float input[] = {1.0f, 2.0f};
+  PolyIOBinding io[] = {{"x", input}};
   ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
 
   /* Read original output */
   int out_idx = -1;
   for (int i = 0; i < poly_instance_buf_count(inst); i++)
-    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) { out_idx = i; break; }
+    if (poly_instance_buf_role(inst, i) == POLY_ROLE_OUTPUT) {
+      out_idx = i;
+      break;
+    }
   ASSERT_TRUE(out_idx >= 0);
   int64_t numel;
   float *orig_out = poly_instance_buf_data(inst, out_idx, &numel);

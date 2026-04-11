@@ -16,7 +16,7 @@
 #include <math.h>
 #include <assert.h>
 
-/* ── String builder ──────────────────────────────────────────────────── */
+/* String builder */
 
 typedef struct {
   char *buf;
@@ -51,7 +51,7 @@ static void sb_puts(StrBuf *sb, const char *s) {
   sb_printf(sb, "%s", s);
 }
 
-/* ── Pointer → int hash map (for linearizer) ─────────────────────────── */
+/* Pointer → int hash map (for linearizer) */
 
 typedef struct {
   PolyUOp **keys;
@@ -74,14 +74,16 @@ static void imap_init(IntMap *m, int n) {
 
 static void imap_set(IntMap *m, PolyUOp *key, int val) {
   uint32_t h = ptr_hash_mix(key) % m->cap;
-  while (m->keys[h] && m->keys[h] != key) h = (h + 1) % m->cap;
+  while (m->keys[h] && m->keys[h] != key)
+    h = (h + 1) % m->cap;
   m->keys[h] = key;
   m->vals[h] = val;
 }
 
 static int imap_get(IntMap *m, PolyUOp *key) {
   uint32_t h = ptr_hash_mix(key) % m->cap;
-  while (m->keys[h] != key) h = (h + 1) % m->cap;
+  while (m->keys[h] != key)
+    h = (h + 1) % m->cap;
   return m->vals[h];
 }
 
@@ -99,7 +101,7 @@ static void imap_destroy(IntMap *m) {
   free(m->vals);
 }
 
-/* ── Pointer → string hash map (for renderer) ────────────────────────── */
+/* Pointer → string hash map (for renderer) */
 
 typedef struct {
   PolyUOp **keys;
@@ -115,7 +117,8 @@ static void smap_init(StrMap *m, int n) {
 
 static void smap_set(StrMap *m, PolyUOp *key, char *val) {
   uint32_t h = ptr_hash_mix(key) % m->cap;
-  while (m->keys[h] && m->keys[h] != key) h = (h + 1) % m->cap;
+  while (m->keys[h] && m->keys[h] != key)
+    h = (h + 1) % m->cap;
   if (m->keys[h] == key) free(m->vals[h]); /* replace existing */
   m->keys[h] = key;
   m->vals[h] = val;
@@ -137,7 +140,7 @@ static void smap_destroy(StrMap *m) {
   free(m->vals);
 }
 
-/* ── Min-heap (for linearizer reverse toposort) ──────────────────────── */
+/* Min-heap (for linearizer reverse toposort) */
 
 typedef struct {
   int *keys;
@@ -160,8 +163,12 @@ static void heap_push(Heap *h, int key, PolyUOp *val) {
   while (i > 0) {
     int p = (i - 1) / 2;
     if (h->keys[p] <= h->keys[i]) break;
-    int tk = h->keys[i]; h->keys[i] = h->keys[p]; h->keys[p] = tk;
-    PolyUOp *tv = h->vals[i]; h->vals[i] = h->vals[p]; h->vals[p] = tv;
+    int tk = h->keys[i];
+    h->keys[i] = h->keys[p];
+    h->keys[p] = tk;
+    PolyUOp *tv = h->vals[i];
+    h->vals[i] = h->vals[p];
+    h->vals[p] = tv;
     i = p;
   }
 }
@@ -174,12 +181,16 @@ static PolyUOp *heap_pop(Heap *h) {
     h->vals[0] = h->vals[h->len];
     int i = 0;
     for (;;) {
-      int l = 2*i + 1, r = 2*i + 2, s = i;
+      int l = 2 * i + 1, r = 2 * i + 2, s = i;
       if (l < h->len && h->keys[l] < h->keys[s]) s = l;
       if (r < h->len && h->keys[r] < h->keys[s]) s = r;
       if (s == i) break;
-      int tk = h->keys[i]; h->keys[i] = h->keys[s]; h->keys[s] = tk;
-      PolyUOp *tv = h->vals[i]; h->vals[i] = h->vals[s]; h->vals[s] = tv;
+      int tk = h->keys[i];
+      h->keys[i] = h->keys[s];
+      h->keys[s] = tk;
+      PolyUOp *tv = h->vals[i];
+      h->vals[i] = h->vals[s];
+      h->vals[s] = tv;
       i = s;
     }
   }
@@ -191,22 +202,31 @@ static void heap_destroy(Heap *h) {
   free(h->vals);
 }
 
-/* ── Linearizer ──────────────────────────────────────────────────────── */
+/* Linearizer */
 
 static int op_priority(PolyOps op) {
   switch (op) {
-    case POLY_OP_PARAM:       return -20;
-    case POLY_OP_DEFINE_VAR:  return -19;
-    case POLY_OP_DEFINE_LOCAL:return -18;
-    case POLY_OP_DEFINE_REG:  return -17;
-    /* NOTE: in the reference tinygrad commit, CONST has no special
-     * priority — it falls through to default priority 0.  This is
-     * critical for matching the tuplize-based ordering. */
-    case POLY_OP_LOAD:        return -1;
-    case POLY_OP_STORE:       return 1;
-    case POLY_OP_RANGE:       return 5;
-    case POLY_OP_END:         return -5;
-    default:                 return 0;
+  case POLY_OP_PARAM:
+    return -20;
+  case POLY_OP_DEFINE_VAR:
+    return -19;
+  case POLY_OP_DEFINE_LOCAL:
+    return -18;
+  case POLY_OP_DEFINE_REG:
+    return -17;
+  /* NOTE: in the reference tinygrad commit, CONST has no special
+   * priority — it falls through to default priority 0.  This is
+   * critical for matching the tuplize-based ordering. */
+  case POLY_OP_LOAD:
+    return -1;
+  case POLY_OP_STORE:
+    return 1;
+  case POLY_OP_RANGE:
+    return 5;
+  case POLY_OP_END:
+    return -5;
+  default:
+    return 0;
   }
 }
 
@@ -226,18 +246,31 @@ static inline void bitset_clear(uint64_t *bs, int bit) {
  * Mirrors tinygrad's ended_ranges property + _ranges subtraction logic.
  * range_start = {BUFFERIZE:1, REDUCE:1, STORE:2, END:1}
  * AFTER: flatten([x.ended_ranges for x in src[1:]]) */
-static void apply_uop_ended_ranges(uint64_t *r, PolyUOp *u, PolyUOp **topo,
-                                    IntMap *idx, uint64_t *all_ranges, int words) {
+static void apply_uop_ended_ranges(
+    uint64_t *r,
+    PolyUOp *u,
+    PolyUOp **topo,
+    IntMap *idx,
+    uint64_t *all_ranges,
+    int words
+) {
   int rs = -1;
   switch (u->op) {
-    case POLY_OP_STORE:  rs = 2; break;
-    case POLY_OP_END:    rs = 1; break;
-    case POLY_OP_REDUCE: rs = 1; break;
-    case POLY_OP_AFTER:
-      for (int j = 1; j < u->n_src; j++)
-        apply_uop_ended_ranges(r, u->src[j], topo, idx, all_ranges, words);
-      return;
-    default: return;
+  case POLY_OP_STORE:
+    rs = 2;
+    break;
+  case POLY_OP_END:
+    rs = 1;
+    break;
+  case POLY_OP_REDUCE:
+    rs = 1;
+    break;
+  case POLY_OP_AFTER:
+    for (int j = 1; j < u->n_src; j++)
+      apply_uop_ended_ranges(r, u->src[j], topo, idx, all_ranges, words);
+    return;
+  default:
+    return;
   }
   for (int j = rs; j < u->n_src; j++) {
     int si = imap_try_get(idx, u->src[j]);
@@ -246,13 +279,19 @@ static void apply_uop_ended_ranges(uint64_t *r, PolyUOp *u, PolyUOp **topo,
       bitset_clear(r, si);
     } else {
       const uint64_t *er = all_ranges + (size_t)si * (size_t)words;
-      for (int w = 0; w < words; w++) r[w] &= ~er[w];
+      for (int w = 0; w < words; w++)
+        r[w] &= ~er[w];
     }
   }
 }
 
-static int dep_count_in_siblings(const uint64_t *deps, int words, int idx,
-                                 const int *siblings, int n_siblings) {
+static int dep_count_in_siblings(
+    const uint64_t *deps,
+    int words,
+    int idx,
+    const int *siblings,
+    int n_siblings
+) {
   const uint64_t *d = deps + (size_t)idx * (size_t)words;
   int cnt = 0;
   for (int i = 0; i < n_siblings; i++)
@@ -266,7 +305,8 @@ static int dep_count_in_siblings(const uint64_t *deps, int words, int idx,
 static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
   int *extra_dep = malloc((size_t)n * sizeof(int));
   if (!extra_dep) return NULL;
-  for (int i = 0; i < n; i++) extra_dep[i] = -1;
+  for (int i = 0; i < n; i++)
+    extra_dep[i] = -1;
   if (n == 0) return extra_dep;
 
   int words = (n + 63) / 64;
@@ -281,7 +321,8 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
     free(scores);
     return extra_dep;
   }
-  for (int i = 0; i < n; i++) nest_parent[i] = -1;
+  for (int i = 0; i < n; i++)
+    nest_parent[i] = -1;
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = topo[i];
@@ -292,14 +333,14 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
       int si = imap_try_get(idx, u->src[j]);
       if (si < 0) continue;
       const uint64_t *ds = deps + (size_t)si * (size_t)words;
-      for (int w = 0; w < words; w++) du[w] |= ds[w];
+      for (int w = 0; w < words; w++)
+        du[w] |= ds[w];
     }
 
     /* Build nesting map from END -> (END or SINK) parent. */
     if (u->op == POLY_OP_END || u->op == POLY_OP_SINK) {
       int parent_rng_idx = -1;
-      if (u->op == POLY_OP_END && u->n_src > 1)
-        parent_rng_idx = imap_try_get(idx, u->src[1]);
+      if (u->op == POLY_OP_END && u->n_src > 1) parent_rng_idx = imap_try_get(idx, u->src[1]);
 
       for (int x = 0; x < n; x++) {
         if (nest_parent[x] != -1 || topo[x]->op != POLY_OP_END) continue;
@@ -376,7 +417,7 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
   return extra_dep;
 }
 
-/* ── Port of tinygrad's pm_add_control_flow ─────────────────────────── */
+/* Port of tinygrad's pm_add_control_flow */
 /* Adds predecessor edges as real RANGE sources so loop nesting is
  * structural in the DAG.  Applied after full_rewrite_to_sink, before
  * linearize.  Uses memoized DFS to handle transitive chains correctly
@@ -385,20 +426,24 @@ static int *build_control_edges(PolyUOp **topo, int n, IntMap *idx) {
 /* 3-state visit marker for cycle detection in cf_rewrite. */
 enum { CF_UNVISITED = 0, CF_VISITING = 1, CF_DONE = 2 };
 
-static PolyUOp *cf_rewrite(PolyCtx *ctx, PolyUOp *u,
-                            PolyUOp **topo, IntMap *idx,
-                            int *extra_dep, PolyUOp **memo,
-                            uint8_t *visit) {
+static PolyUOp *cf_rewrite(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **topo,
+    IntMap *idx,
+    int *extra_dep,
+    PolyUOp **memo,
+    uint8_t *visit
+) {
   int ui = imap_try_get(idx, u);
-  if (ui < 0) return u;              /* shared constant not in topo */
+  if (ui < 0) return u; /* shared constant not in topo */
   if (visit[ui] == CF_DONE) return memo[ui];
 
   /* Cycle detection: if we're already visiting this node, we have a cycle
    * in the control-flow edges. This shouldn't happen, but guard against it
    * rather than infinite-recursing. */
   if (visit[ui] == CF_VISITING) {
-    fprintf(stderr, "cf_rewrite: cycle detected at topo[%d] op=%s\n",
-            ui, poly_op_name(u->op));
+    fprintf(stderr, "cf_rewrite: cycle detected at topo[%d] op=%s\n", ui, poly_op_name(u->op));
     memo[ui] = u;
     visit[ui] = CF_DONE;
     return u;
@@ -416,12 +461,14 @@ static PolyUOp *cf_rewrite(PolyCtx *ctx, PolyUOp *u,
 
   /* Append control-flow dep for RANGE nodes */
   if (u->op == POLY_OP_RANGE && extra_dep[ui] >= 0) {
-    PolyUOp *dep = cf_rewrite(ctx, topo[extra_dep[ui]],
-                               topo, idx, extra_dep, memo, visit);
+    PolyUOp *dep = cf_rewrite(ctx, topo[extra_dep[ui]], topo, idx, extra_dep, memo, visit);
     /* Dedup: skip if dep already a source (after rewrite) */
     bool dup = false;
     for (int j = 0; j < ns; j++) {
-      if (src[j] == dep) { dup = true; break; }
+      if (src[j] == dep) {
+        dup = true;
+        break;
+      }
     }
     if (!dup) {
       src[ns++] = dep;
@@ -444,14 +491,18 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
 
   IntMap idx;
   imap_init(&idx, n);
-  for (int i = 0; i < n; i++) imap_set(&idx, topo[i], i);
+  for (int i = 0; i < n; i++)
+    imap_set(&idx, topo[i], i);
 
   int *extra_dep = build_control_edges(topo, n, &idx);
 
   /* Early exit if no edges */
   bool has_edges = false;
   for (int i = 0; i < n; i++) {
-    if (extra_dep[i] >= 0) { has_edges = true; break; }
+    if (extra_dep[i] >= 0) {
+      has_edges = true;
+      break;
+    }
   }
   if (!has_edges) {
     free(extra_dep);
@@ -471,8 +522,10 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
     if (memo[i] && memo[i]->op == POLY_OP_RANGE && memo[i]->n_src > 0) {
       PolyUOp *bound = memo[i]->src[0];
       if (bound->op != POLY_OP_CONST && bound->op != POLY_OP_DEFINE_VAR) {
-        fprintf(stderr, "cf_rewrite: RANGE[%d] src[0] is %s, expected CONST or DEFINE_VAR\n",
-                i, poly_op_name(bound->op));
+        fprintf(
+            stderr, "cf_rewrite: RANGE[%d] src[0] is %s, expected CONST or DEFINE_VAR\n", i,
+            poly_op_name(bound->op)
+        );
       }
     }
   }
@@ -485,42 +538,39 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   return result;
 }
 
-/* ── Tuplize comparison (matches tinygrad's UOp.tuplize for TUPLE_ORDER) ── */
+/* Tuplize comparison (matches tinygrad's UOp.tuplize for TUPLE_ORDER) */
 
 static int arg_cmp(PolyArg a, PolyArg b) {
   /* Match Python's comparison semantics for tinygrad arg types.
    * Python compares None < numbers, int/float cross-type works. */
   if (a.kind != b.kind) return a.kind < b.kind ? -1 : 1;
   switch (a.kind) {
-    case POLY_ARG_NONE: return 0;
-    case POLY_ARG_INT:
-      return a.i < b.i ? -1 : (a.i > b.i ? 1 : 0);
-    case POLY_ARG_FLOAT:
-      return (a.f < b.f) ? -1 : (a.f > b.f ? 1 : 0);
-    case POLY_ARG_RANGE:
-      if (a.range.axis_id != b.range.axis_id)
-        return a.range.axis_id < b.range.axis_id ? -1 : 1;
-      if (a.range.axis_type != b.range.axis_type)
-        return a.range.axis_type < b.range.axis_type ? -1 : 1;
-      if (a.range.n_extra != b.range.n_extra)
-        return a.range.n_extra < b.range.n_extra ? -1 : 1;
-      for (int i = 0; i < a.range.n_extra; i++) {
-        if (a.range.extra[i] != b.range.extra[i])
-          return a.range.extra[i] < b.range.extra[i] ? -1 : 1;
-      }
-      return 0;
-    case POLY_ARG_REDUCE_AXIS: {
-      if (a.reduce_axis.op != b.reduce_axis.op)
-        return a.reduce_axis.op < b.reduce_axis.op ? -1 : 1;
-      if (a.reduce_axis.n != b.reduce_axis.n)
-        return a.reduce_axis.n < b.reduce_axis.n ? -1 : 1;
-      for (int i = 0; i < a.reduce_axis.n; i++) {
-        if (a.reduce_axis.axes[i] != b.reduce_axis.axes[i])
-          return a.reduce_axis.axes[i] < b.reduce_axis.axes[i] ? -1 : 1;
-      }
-      return 0;
+  case POLY_ARG_NONE:
+    return 0;
+  case POLY_ARG_INT:
+    return a.i < b.i ? -1 : (a.i > b.i ? 1 : 0);
+  case POLY_ARG_FLOAT:
+    return (a.f < b.f) ? -1 : (a.f > b.f ? 1 : 0);
+  case POLY_ARG_RANGE:
+    if (a.range.axis_id != b.range.axis_id) return a.range.axis_id < b.range.axis_id ? -1 : 1;
+    if (a.range.axis_type != b.range.axis_type)
+      return a.range.axis_type < b.range.axis_type ? -1 : 1;
+    if (a.range.n_extra != b.range.n_extra) return a.range.n_extra < b.range.n_extra ? -1 : 1;
+    for (int i = 0; i < a.range.n_extra; i++) {
+      if (a.range.extra[i] != b.range.extra[i]) return a.range.extra[i] < b.range.extra[i] ? -1 : 1;
     }
-    default: return 0;
+    return 0;
+  case POLY_ARG_REDUCE_AXIS: {
+    if (a.reduce_axis.op != b.reduce_axis.op) return a.reduce_axis.op < b.reduce_axis.op ? -1 : 1;
+    if (a.reduce_axis.n != b.reduce_axis.n) return a.reduce_axis.n < b.reduce_axis.n ? -1 : 1;
+    for (int i = 0; i < a.reduce_axis.n; i++) {
+      if (a.reduce_axis.axes[i] != b.reduce_axis.axes[i])
+        return a.reduce_axis.axes[i] < b.reduce_axis.axes[i] ? -1 : 1;
+    }
+    return 0;
+  }
+  default:
+    return 0;
   }
 }
 
@@ -556,7 +606,7 @@ static int dtype_lt_cmp(PolyDType a, PolyDType b) {
  *
  * Returns malloc'd array of n ranks (caller frees). */
 typedef struct {
-  int orig_idx;    /* index in topo array */
+  int orig_idx; /* index in topo array */
   int op;
   PolyArg arg;
   PolyDType dtype;
@@ -579,8 +629,7 @@ static int tuplize_key_cmp(const void *ap, const void *bp) {
   int min_src = a->n_src < b->n_src ? a->n_src : b->n_src;
   if (min_src > 8) min_src = 8;
   for (int i = 0; i < min_src; i++) {
-    if (a->src_ranks[i] != b->src_ranks[i])
-      return a->src_ranks[i] < b->src_ranks[i] ? -1 : 1;
+    if (a->src_ranks[i] != b->src_ranks[i]) return a->src_ranks[i] < b->src_ranks[i] ? -1 : 1;
   }
   return a->n_src < b->n_src ? -1 : (a->n_src > b->n_src ? 1 : 0);
 }
@@ -610,7 +659,8 @@ static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
   /* Sort keys to determine rank ordering.
    * Use a separate sorted index array to avoid losing the orig_idx mapping. */
   int *sorted_idx = (int *)malloc((size_t)n * sizeof(int));
-  for (int i = 0; i < n; i++) sorted_idx[i] = i;
+  for (int i = 0; i < n; i++)
+    sorted_idx[i] = i;
 
   /* Insertion sort on sorted_idx by keys[sorted_idx[i]] (stable, O(n^2) but
    * each comparison is O(max_src) = O(1), and n is typically < 5000). */
@@ -628,8 +678,7 @@ static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
   int cur_rank = 0;
   ranks[sorted_idx[0]] = 0;
   for (int i = 1; i < n; i++) {
-    if (tuplize_key_cmp(&keys[sorted_idx[i]], &keys[sorted_idx[i - 1]]) != 0)
-      cur_rank++;
+    if (tuplize_key_cmp(&keys[sorted_idx[i]], &keys[sorted_idx[i - 1]]) != 0) cur_rank++;
     ranks[sorted_idx[i]] = cur_rank;
   }
 
@@ -646,7 +695,8 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* 2. Build UOp* → topo-index lookup */
   IntMap idx;
   imap_init(&idx, n);
-  for (int i = 0; i < n; i++) imap_set(&idx, topo[i], i);
+  for (int i = 0; i < n; i++)
+    imap_set(&idx, topo[i], i);
 
   /* 3. Compute ranges bitset per UOp (forward pass).
    * Mirrors tinygrad's UOp.ranges property: the set of RANGE ops
@@ -661,7 +711,8 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       int si = imap_try_get(&idx, u->src[j]);
       if (si < 0) continue;
       const uint64_t *sr = ranges + (size_t)si * (size_t)words;
-      for (int w = 0; w < words; w++) r[w] |= sr[w];
+      for (int w = 0; w < words; w++)
+        r[w] |= sr[w];
     }
     /* Remove ended ranges */
     apply_uop_ended_ranges(r, u, topo, &idx, ranges, words);
@@ -669,8 +720,10 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
      * from poly_apply_control_flow are control-flow ordering only. */
     if (u->op == POLY_OP_RANGE) {
       assert(u->n_src >= 1 && "RANGE must have at least one source (bound)");
-      assert((u->src[0]->op == POLY_OP_CONST || u->src[0]->op == POLY_OP_DEFINE_VAR) &&
-             "RANGE.src[0] must be CONST or DEFINE_VAR (bound)");
+      assert(
+          (u->src[0]->op == POLY_OP_CONST || u->src[0]->op == POLY_OP_DEFINE_VAR) &&
+          "RANGE.src[0] must be CONST or DEFINE_VAR (bound)"
+      );
       bitset_set(r, i);
     }
   }
@@ -695,8 +748,8 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       while (bits) {
         int bit = __builtin_ctzll(bits);
         int b = w * 64 + bit;
-        if (b < n && topo[b]->op == POLY_OP_RANGE &&
-            topo[b]->n_src > 0 && topo[b]->src[0]->op == POLY_OP_CONST)
+        if (b < n && topo[b]->op == POLY_OP_RANGE && topo[b]->n_src > 0 &&
+            topo[b]->src[0]->op == POLY_OP_CONST)
           run_count[i] *= topo[b]->src[0]->arg.i;
         bits &= bits - 1;
       }
@@ -714,7 +767,8 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   /* 6. Build ideal order: sort by (run_count, priority, extra, tuplize_hash, topo_idx).
    * Matches tinygrad's sorted(lst, key=lambda x: priorities[x]+x.tuplize). */
   int *ideal = malloc(n * sizeof(int));
-  for (int i = 0; i < n; i++) ideal[i] = i;
+  for (int i = 0; i < n; i++)
+    ideal[i] = i;
 
   /* Insertion sort (stable, sufficient for kernel sizes).
    * Sort key: (run_count, priority, extra, tuplize).
@@ -727,34 +781,56 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     int j = i - 1;
     while (j >= 0) {
       int ji = ideal[j];
-      if (run_count[ji] > kr) { ideal[j + 1] = ideal[j]; j--; continue; }
+      if (run_count[ji] > kr) {
+        ideal[j + 1] = ideal[j];
+        j--;
+        continue;
+      }
       if (run_count[ji] < kr) break;
-      if (prio[ji] > kp) { ideal[j + 1] = ideal[j]; j--; continue; }
+      if (prio[ji] > kp) {
+        ideal[j + 1] = ideal[j];
+        j--;
+        continue;
+      }
       if (prio[ji] < kp) break;
-      if (extra[ji] > ke) { ideal[j + 1] = ideal[j]; j--; continue; }
+      if (extra[ji] > ke) {
+        ideal[j + 1] = ideal[j];
+        j--;
+        continue;
+      }
       if (extra[ji] < ke) break;
       /* Tiebreak: tuplize rank comparison (matches TUPLE_ORDER=1 in tinygrad).
        * Precomputed ranks reproduce @cached_property tuplize ordering in O(1). */
-      if (tup_ranks[ji] > tup_ranks[ki]) { ideal[j + 1] = ideal[j]; j--; continue; }
+      if (tup_ranks[ji] > tup_ranks[ki]) {
+        ideal[j + 1] = ideal[j];
+        j--;
+        continue;
+      }
       if (tup_ranks[ji] < tup_ranks[ki]) break;
       /* Final tiebreak: topo index */
-      if (ji > ki) { ideal[j + 1] = ideal[j]; j--; }
-      else break;
+      if (ji > ki) {
+        ideal[j + 1] = ideal[j];
+        j--;
+      } else
+        break;
     }
     ideal[j + 1] = ki;
   }
 
   /* nkey[i] = position of topo[i] in ideal order */
   int *nkey = malloc(n * sizeof(int));
-  for (int i = 0; i < n; i++) nkey[ideal[i]] = i;
+  for (int i = 0; i < n; i++)
+    nkey[ideal[i]] = i;
 
   if (getenv("POLY_DUMP_KERNELS")) {
     for (int i = 0; i < n; i++) {
       PolyUOp *u = topo[i];
-      if (u->op == POLY_OP_RANGE || u->op == POLY_OP_STORE ||
-          u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_AFTER) {
-        fprintf(stderr, "[lin] topo[%d] %s run_count=%lld prio=%d nkey=%d out_deg=%d\n",
-                i, poly_op_name(u->op), (long long)run_count[i], prio[i], nkey[i], out_deg[i]);
+      if (u->op == POLY_OP_RANGE || u->op == POLY_OP_STORE || u->op == POLY_OP_DEFINE_REG ||
+          u->op == POLY_OP_AFTER) {
+        fprintf(
+            stderr, "[lin] topo[%d] %s run_count=%lld prio=%d nkey=%d out_deg=%d\n", i,
+            poly_op_name(u->op), (long long)run_count[i], prio[i], nkey[i], out_deg[i]
+        );
       }
     }
   }
@@ -775,8 +851,7 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     result[rlen++] = u;
     for (int j = 0; j < u->n_src; j++) {
       int si = imap_get(&idx, u->src[j]);
-      if (--out_deg[si] == 0)
-        heap_push(&heap, -nkey[si], u->src[j]);
+      if (--out_deg[si] == 0) heap_push(&heap, -nkey[si], u->src[j]);
     }
   }
 
@@ -811,8 +886,8 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
 static bool env_true(const char *name) {
   const char *v = getenv(name);
-  return v && v[0] != '\0' && strcmp(v, "0") != 0 &&
-         strcmp(v, "false") != 0 && strcmp(v, "False") != 0;
+  return v && v[0] != '\0' && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
+         strcmp(v, "False") != 0;
 }
 
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
@@ -835,11 +910,11 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   int beam = 0;
   const char *bv = getenv("POLY_BEAM");
   if (bv && bv[0] != '\0') beam = atoi(bv);
-  PolyRewriteOpts opts = { .optimize = opt, .devectorize = devec, .beam_width = beam };
+  PolyRewriteOpts opts = {.optimize = opt, .devectorize = devec, .beam_width = beam};
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 
-/* ── Render helpers ──────────────────────────────────────────────────── */
+/* Render helpers */
 
 /* Render a float constant, dtype-aware: f64 gets full precision with no suffix,
  * f32 (and all other float types) get %.9g with the 'f' suffix. */
@@ -861,7 +936,11 @@ static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
     snprintf(buf, cap, "%.17g", v);
     if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
       int len = (int)strlen(buf);
-      if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+      if (len + 2 < cap) {
+        buf[len] = '.';
+        buf[len + 1] = '0';
+        buf[len + 2] = '\0';
+      }
     }
     return buf;
   }
@@ -869,10 +948,17 @@ static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
   snprintf(buf, cap, "%.9g", (double)(float)v);
   if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
     int len = (int)strlen(buf);
-    if (len + 2 < cap) { buf[len] = '.'; buf[len+1] = '0'; buf[len+2] = '\0'; }
+    if (len + 2 < cap) {
+      buf[len] = '.';
+      buf[len + 1] = '0';
+      buf[len + 2] = '\0';
+    }
   }
   int len = (int)strlen(buf);
-  if (len + 1 < cap) { buf[len] = 'f'; buf[len+1] = '\0'; }
+  if (len + 1 < cap) {
+    buf[len] = 'f';
+    buf[len + 1] = '\0';
+  }
   return buf;
 }
 
@@ -907,9 +993,9 @@ static void render_ctype(PolyDType dt, char *buf, int cap) {
    * Scalar pointer → "float*" */
   if (dt.vcount > 1) {
     /* bitsize for the base scalar element (ptr bitsize = element bitsize) */
-    uint16_t elem_bits = base.bitsize;  /* e.g. 32 for float ptr */
+    uint16_t elem_bits = base.bitsize; /* e.g. 32 for float ptr */
     base.count = dt.vcount;
-    base.bitsize = elem_bits * (uint16_t)dt.vcount;  /* 32*4=128 for vec4 */
+    base.bitsize = elem_bits * (uint16_t)dt.vcount; /* 32*4=128 for vec4 */
   } else {
     base.count = 1;
   }
@@ -922,8 +1008,15 @@ static void render_ctype(PolyDType dt, char *buf, int cap) {
 /* Render an ALU expression.
  * For vec4 types, GCC vector extensions handle +, -, *, /, <<, >>, &, |, ^,
  * <, !=, == natively.  WHERE/MAX/NEG-bool need special handling. */
-static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
-                       const char *s0, const char *s1, const char *s2) {
+static void render_alu(
+    char *buf,
+    int cap,
+    PolyOps op,
+    PolyDType dtype,
+    const char *s0,
+    const char *s1,
+    const char *s2
+) {
   bool is_vec = (dtype.count > 1);
   PolyDType sdt = poly_dtype_scalar(dtype);
   switch (op) {
@@ -931,62 +1024,100 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
   case POLY_OP_NEG:
     if (poly_dtype_is_bool(sdt)) {
       if (is_vec)
-        snprintf(buf, cap, "(~%s)", s0);  /* vec bool NEG: bitwise NOT */
+        snprintf(buf, cap, "(~%s)", s0); /* vec bool NEG: bitwise NOT */
       else
         snprintf(buf, cap, "(!%s)", s0);
     } else {
-      snprintf(buf, cap, "(-%s)", s0);  /* works on vectors */
+      snprintf(buf, cap, "(-%s)", s0); /* works on vectors */
     }
     break;
   case POLY_OP_SQRT:
     if (is_vec) {
       /* Vec SQRT: per-element via initializer (no vec builtin) */
-      char vt[128]; render_ctype(dtype, vt, sizeof(vt));
+      char vt[128];
+      render_ctype(dtype, vt, sizeof(vt));
       const char *fn = poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_sqrt" : "__builtin_sqrtf";
-      snprintf(buf, cap, "((%s){%s(%s[0]),%s(%s[1]),%s(%s[2]),%s(%s[3])})",
-               vt, fn, s0, fn, s0, fn, s0, fn, s0);
+      snprintf(
+          buf, cap, "((%s){%s(%s[0]),%s(%s[1]),%s(%s[2]),%s(%s[3])})", vt, fn, s0, fn, s0, fn, s0,
+          fn, s0
+      );
     } else {
-      snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-        ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)", s0);
+      snprintf(
+          buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_sqrt(%s)" : "__builtin_sqrtf(%s)",
+          s0
+      );
     }
     break;
   case POLY_OP_TRUNC:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-      ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)", s0); break;
+    snprintf(
+        buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "__builtin_trunc(%s)" : "__builtin_truncf(%s)",
+        s0
+    );
+    break;
   case POLY_OP_EXP2:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-      ? "exp2(%s)" : "exp2f(%s)", s0); break;
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "exp2(%s)" : "exp2f(%s)", s0);
+    break;
   case POLY_OP_LOG2:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-      ? "log2(%s)" : "log2f(%s)", s0); break;
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "log2(%s)" : "log2f(%s)", s0);
+    break;
   case POLY_OP_SIN:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-      ? "sin(%s)" : "sinf(%s)", s0); break;
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "sin(%s)" : "sinf(%s)", s0);
+    break;
   case POLY_OP_RECIPROCAL:
     if (is_vec) {
       /* Vec RECIPROCAL: (type){1.0f,...} / x */
-      char vt[128]; render_ctype(dtype, vt, sizeof(vt));
-      char one[128]; render_ctype(dtype, one, sizeof(one));
+      char vt[128];
+      render_ctype(dtype, vt, sizeof(vt));
+      char one[128];
+      render_ctype(dtype, one, sizeof(one));
       snprintf(buf, cap, "((%s){1.0f,1.0f,1.0f,1.0f}/%s)", vt, s0);
     } else {
       snprintf(buf, cap, "(1/%s)", s0);
     }
     break;
   /* binary — +, -, *, /, <<, >>, &, |, ^, <, !=, == all work on GCC vectors */
-  case POLY_OP_ADD:   snprintf(buf, cap, "(%s+%s)", s0, s1); break;
-  case POLY_OP_SUB:   snprintf(buf, cap, "(%s-%s)", s0, s1); break;
-  case POLY_OP_MUL:   snprintf(buf, cap, "(%s*%s)", s0, s1); break;
-  case POLY_OP_FDIV:  snprintf(buf, cap, "(%s/%s)", s0, s1); break;
-  case POLY_OP_IDIV:  snprintf(buf, cap, "(%s/%s)", s0, s1); break;
-  case POLY_OP_MOD:   snprintf(buf, cap, "(%s%%%s)", s0, s1); break;
-  case POLY_OP_SHL:   snprintf(buf, cap, "(%s<<%s)", s0, s1); break;
-  case POLY_OP_SHR:   snprintf(buf, cap, "(%s>>%s)", s0, s1); break;
-  case POLY_OP_AND:   snprintf(buf, cap, "(%s&%s)", s0, s1); break;
-  case POLY_OP_OR:    snprintf(buf, cap, "(%s|%s)", s0, s1); break;
-  case POLY_OP_XOR:   snprintf(buf, cap, "(%s^%s)", s0, s1); break;
-  case POLY_OP_CMPLT: snprintf(buf, cap, "(%s<%s)", s0, s1); break;
-  case POLY_OP_CMPNE: snprintf(buf, cap, "(%s!=%s)", s0, s1); break;
-  case POLY_OP_CMPEQ: snprintf(buf, cap, "(%s==%s)", s0, s1); break;
+  case POLY_OP_ADD:
+    snprintf(buf, cap, "(%s+%s)", s0, s1);
+    break;
+  case POLY_OP_SUB:
+    snprintf(buf, cap, "(%s-%s)", s0, s1);
+    break;
+  case POLY_OP_MUL:
+    snprintf(buf, cap, "(%s*%s)", s0, s1);
+    break;
+  case POLY_OP_FDIV:
+    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    break;
+  case POLY_OP_IDIV:
+    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    break;
+  case POLY_OP_MOD:
+    snprintf(buf, cap, "(%s%%%s)", s0, s1);
+    break;
+  case POLY_OP_SHL:
+    snprintf(buf, cap, "(%s<<%s)", s0, s1);
+    break;
+  case POLY_OP_SHR:
+    snprintf(buf, cap, "(%s>>%s)", s0, s1);
+    break;
+  case POLY_OP_AND:
+    snprintf(buf, cap, "(%s&%s)", s0, s1);
+    break;
+  case POLY_OP_OR:
+    snprintf(buf, cap, "(%s|%s)", s0, s1);
+    break;
+  case POLY_OP_XOR:
+    snprintf(buf, cap, "(%s^%s)", s0, s1);
+    break;
+  case POLY_OP_CMPLT:
+    snprintf(buf, cap, "(%s<%s)", s0, s1);
+    break;
+  case POLY_OP_CMPNE:
+    snprintf(buf, cap, "(%s!=%s)", s0, s1);
+    break;
+  case POLY_OP_CMPEQ:
+    snprintf(buf, cap, "(%s==%s)", s0, s1);
+    break;
   case POLY_OP_MAX:
     if (is_vec) {
       /* vec MAX: bitwise select using comparison mask.
@@ -996,16 +1127,17 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
       render_ctype(poly_dtype_vec(idt, dtype.count), int_type, sizeof(int_type));
       char dst_type[128];
       render_ctype(dtype, dst_type, sizeof(dst_type));
-      snprintf(buf, cap, "((%s)(((%s)(%s>%s) & (%s)%s) | (~(%s)(%s>%s) & (%s)%s)))",
-               dst_type, int_type, s0, s1, int_type, s0,
-               int_type, s0, s1, int_type, s1);
+      snprintf(
+          buf, cap, "((%s)(((%s)(%s>%s) & (%s)%s) | (~(%s)(%s>%s) & (%s)%s)))", dst_type, int_type,
+          s0, s1, int_type, s0, int_type, s0, s1, int_type, s1
+      );
     } else {
       snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
     }
     break;
   case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64)
-      ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1); break;
+    snprintf(buf, cap, poly_dtype_eq(sdt, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
+    break;
   /* ternary */
   case POLY_OP_WHERE:
     if (is_vec) {
@@ -1016,14 +1148,20 @@ static void render_alu(char *buf, int cap, PolyOps op, PolyDType dtype,
       render_ctype(poly_dtype_vec(idt, dtype.count), int_type, sizeof(int_type));
       char dst_type[128];
       render_ctype(dtype, dst_type, sizeof(dst_type));
-      snprintf(buf, cap, "((%s)((%s & (%s)%s) | (~%s & (%s)%s)))",
-               dst_type, s0, int_type, s1, s0, int_type, s2);
+      snprintf(
+          buf, cap, "((%s)((%s & (%s)%s) | (~%s & (%s)%s)))", dst_type, s0, int_type, s1, s0,
+          int_type, s2
+      );
     } else {
       snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
     }
     break;
-  case POLY_OP_MULACC: snprintf(buf, cap, "((%s*%s)+%s)", s0, s1, s2); break;
-  default: snprintf(buf, cap, "/* unknown op %d */0", op); break;
+  case POLY_OP_MULACC:
+    snprintf(buf, cap, "((%s*%s)+%s)", s0, s1, s2);
+    break;
+  default:
+    snprintf(buf, cap, "/* unknown op %d */0", op);
+    break;
   }
 }
 
@@ -1038,11 +1176,11 @@ static int range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) 
   return *n_ranges - 1;
 }
 
-/* ── C Renderer ──────────────────────────────────────────────────────── */
+/* C Renderer */
 
 char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
-  StrBuf decls;  /* variable declarations at function scope */
-  StrBuf body;   /* function body with assignments */
+  StrBuf decls; /* variable declarations at function scope */
+  StrBuf body; /* function body with assignments */
   sb_init(&decls);
   sb_init(&body);
 
@@ -1073,8 +1211,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_RANGE)
-      (void)range_slot(live_ranges, &n_live_ranges, u, true);
+    if (u->op == POLY_OP_RANGE) (void)range_slot(live_ranges, &n_live_ranges, u, true);
     if (u->op == POLY_OP_END) continue;
     for (int j = 0; j < u->n_src; j++) {
       if (u->src[j] && u->src[j]->op == POLY_OP_RANGE) {
@@ -1088,8 +1225,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     PolyUOp *u = uops[i];
 
     /* --- SINK: skip ------------------------------------------------- */
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP)
-      continue;
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
 
     if (u->op != POLY_OP_END) {
       for (int j = 0; j < u->n_src; j++) {
@@ -1121,7 +1257,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- DEFINE_VAR: integer parameter ------------------------------ */
     if (u->op == POLY_OP_DEFINE_VAR) {
       const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
-                        : (u->arg.str ? u->arg.str : "var");
+                                                             : (u->arg.str ? u->arg.str : "var");
       smap_set(&names, u, strdup(vname));
       param_types[n_params] = strdup("const int");
       param_names[n_params] = strdup(vname);
@@ -1198,19 +1334,24 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         }
       }
       sb_puts(&vexpr, "})");
-      smap_set(&names, u, vexpr.buf);  /* takes ownership */
+      smap_set(&names, u, vexpr.buf); /* takes ownership */
       continue;
     }
 
     /* --- GEP: vector lane extract ---------------------------------- */
     if (u->op == POLY_OP_GEP) {
-      if (u->n_src < 1) { smap_set(&names, u, strdup("0")); continue; }
+      if (u->n_src < 1) {
+        smap_set(&names, u, strdup("0"));
+        continue;
+      }
       char *src_s = smap_get(&names, u->src[0]);
       if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0) {
         if (u->arg.int_tuple.n == 1) {
           char expr[256];
-          snprintf(expr, sizeof(expr), "(%s[%lld])", src_s ? src_s : "0",
-                   (long long)u->arg.int_tuple.vals[0]);
+          snprintf(
+              expr, sizeof(expr), "(%s[%lld])", src_s ? src_s : "0",
+              (long long)u->arg.int_tuple.vals[0]
+          );
           smap_set(&names, u, strdup(expr));
         } else {
           char dtype_s[128];
@@ -1220,8 +1361,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
           sb_printf(&vexpr, "((%s){", dtype_s);
           for (int j = 0; j < u->arg.int_tuple.n; j++) {
             if (j) sb_puts(&vexpr, ",");
-            sb_printf(&vexpr, "(%s[%lld])", src_s ? src_s : "0",
-                      (long long)u->arg.int_tuple.vals[j]);
+            sb_printf(
+                &vexpr, "(%s[%lld])", src_s ? src_s : "0", (long long)u->arg.int_tuple.vals[j]
+            );
           }
           sb_puts(&vexpr, "})");
           smap_set(&names, u, vexpr.buf);
@@ -1253,16 +1395,18 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       int n_extra = poly_range_n_extra(u->arg);
       if (n_extra > 0) {
         const int64_t *extra = poly_range_extra(u->arg);
-        snprintf(name, sizeof(name), "ridx%lld_%lld", (long long)aid, (long long)extra[n_extra - 1]);
+        snprintf(
+            name, sizeof(name), "ridx%lld_%lld", (long long)aid, (long long)extra[n_extra - 1]
+        );
       } else {
         snprintf(name, sizeof(name), "ridx%lld", (long long)aid);
       }
       smap_set(&names, u, strdup(name));
 
       char *bound = smap_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
-      sb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n",
-                name, name, bound, name);
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
+      sb_printf(&body, "for (int %s = 0; %s < %s; %s++) {\n", name, name, bound, name);
       depth++;
       if (n_open_ranges < 128) open_ranges[n_open_ranges++] = u;
       continue;
@@ -1273,13 +1417,16 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       if (u->op == POLY_OP_END && u->n_src > 1 && u->src[1]->op == POLY_OP_RANGE) {
         PolyUOp *want = u->src[1];
         int wi = range_slot(live_ranges, &n_live_ranges, want, false);
-        if (wi >= 0 && live_remaining[wi] > 0) continue;  /* too early */
+        if (wi >= 0 && live_remaining[wi] > 0) continue; /* too early */
 
         int pos = -1;
         for (int p = n_open_ranges - 1; p >= 0; p--) {
-          if (open_ranges[p] == want) { pos = p; break; }
+          if (open_ranges[p] == want) {
+            pos = p;
+            break;
+          }
         }
-        if (pos < 0) continue;  /* duplicate/stale END */
+        if (pos < 0) continue; /* duplicate/stale END */
 
         bool can_close = true;
         for (int p = n_open_ranges - 1; p >= pos; p--) {
@@ -1293,7 +1440,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
         while (n_open_ranges > pos) {
           depth--;
-          for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+          for (int d = 0; d < depth; d++)
+            sb_puts(&body, "  ");
           sb_puts(&body, "}\n");
           n_open_ranges--;
         }
@@ -1305,16 +1453,20 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
        * Debug: abort loudly.  Release: skip silently as safety belt. */
       if (u->op == POLY_OP_END && u->n_src > 1 && u->src[1]->op != POLY_OP_RANGE) {
 #ifndef NDEBUG
-        fprintf(stderr, "polygrad: render_c: END node references non-RANGE source "
-                "(op=%s) -- structural invariant violation\n",
-                poly_op_name(u->src[1]->op));
+        fprintf(
+            stderr,
+            "polygrad: render_c: END node references non-RANGE source "
+            "(op=%s) -- structural invariant violation\n",
+            poly_op_name(u->src[1]->op)
+        );
         assert(0 && "END source must be RANGE");
 #endif
         continue;
       }
 
       depth--;
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
       sb_puts(&body, "}\n");
       if (u->op == POLY_OP_END && n_open_ranges > 0) n_open_ranges--;
       continue;
@@ -1330,13 +1482,16 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       if (u->arg.kind == POLY_ARG_FLOAT)
         render_float_const(u->arg.f, u->dtype, initval, sizeof(initval));
       else
-        snprintf(initval, sizeof(initval),
-                 poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_FLOAT64) ? "0.0" : "0.0f");
+        snprintf(
+            initval, sizeof(initval),
+            poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_FLOAT64) ? "0.0" : "0.0f"
+        );
 
       char dtype_s[128];
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
       sb_printf(&body, "%s = %s;\n", name, initval);
       continue;
     }
@@ -1358,7 +1513,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         /* Vec accumulator: float __attribute__((vector_size(N))) r0[1]; */
         PolyDType elem = poly_dtype_scalar(u->dtype);
         int vbytes = (int)(elem.bitsize / 8) * base.count;
-        sb_printf(&decls, "  %s __attribute__((vector_size(%d))) %s[1];\n", elem.name, vbytes, name);
+        sb_printf(
+            &decls, "  %s __attribute__((vector_size(%d))) %s[1];\n", elem.name, vbytes, name
+        );
       } else {
         sb_printf(&decls, "  %s %s[1];\n", base.name, name);
       }
@@ -1368,8 +1525,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- AFTER: pass-through (use src[0]'s name) -------------------- */
     if (u->op == POLY_OP_AFTER) {
       char *src_name = smap_get(&names, u->src[0]);
-      if (src_name)
-        smap_set(&names, u, strdup(src_name));
+      if (src_name) smap_set(&names, u, strdup(src_name));
       continue;
     }
 
@@ -1383,7 +1539,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       char dtype_s[128];
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
 
       /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt)
        * Walks through pointer casts to find the underlying gated INDEX. */
@@ -1404,8 +1561,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- STORE: write to indexed pointer or accumulator ------------- */
     if (u->op == POLY_OP_STORE) {
       char *target = smap_get(&names, u->src[0]);
-      char *val    = smap_get(&names, u->src[1]);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      char *val = smap_get(&names, u->src[1]);
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
       /* Guard: STORE src[0] is always set by construction, but null-check
        * satisfies the analyzer's path-sensitive null-deref tracking. */
       if (u->src[0] && u->src[0]->op == POLY_OP_DEFINE_LOCAL)
@@ -1425,7 +1583,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       char dtype_s[128];
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
 
       /* Vector → vector CAST: __builtin_convertvector (tinygrad cstyle.py:24) */
       if (u->dtype.count > 1 && u->src[0]->dtype.count > 1 && !u->dtype.is_ptr) {
@@ -1444,8 +1603,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       /* Vector → scalar: extract element 0, then cast */
       else if (u->dtype.count <= 1 && u->src[0]->dtype.count > 1) {
         sb_printf(&body, "%s = (%s)((%s)[0]);\n", name, dtype_s, src_s);
-      }
-      else {
+      } else {
         sb_printf(&body, "%s = (%s)(%s);\n", name, dtype_s, src_s);
       }
       continue;
@@ -1462,16 +1620,20 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       render_ctype(u->src[0]->dtype, src_type, sizeof(src_type));
       render_ctype(u->dtype, dst_type, sizeof(dst_type));
       sb_printf(&decls, "  %s %s;\n", dst_type, name);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
       /* Vector → scalar bitcast: extract element 0, then reinterpret */
       if (u->dtype.count <= 1 && u->src[0]->dtype.count > 1) {
         char elem_type[128];
         render_ctype(poly_dtype_scalar(u->src[0]->dtype), elem_type, sizeof(elem_type));
-        sb_printf(&body, "{ %s _bc = (%s)[0]; memcpy(&%s, &_bc, sizeof(%s)); }\n",
-                  elem_type, src_s, name, name);
+        sb_printf(
+            &body, "{ %s _bc = (%s)[0]; memcpy(&%s, &_bc, sizeof(%s)); }\n", elem_type, src_s, name,
+            name
+        );
       } else {
-        sb_printf(&body, "{ %s _bc = %s; memcpy(&%s, &_bc, sizeof(%s)); }\n",
-                  src_type, src_s, name, name);
+        sb_printf(
+            &body, "{ %s _bc = %s; memcpy(&%s, &_bc, sizeof(%s)); }\n", src_type, src_s, name, name
+        );
       }
       continue;
     }
@@ -1491,7 +1653,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       char dtype_s[128];
       render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
       sb_printf(&decls, "  %s %s;\n", dtype_s, name);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
       sb_printf(&body, "%s = %s;\n", name, expr);
       continue;
     }
@@ -1499,7 +1662,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- IF: conditional -------------------------------------------- */
     if (u->op == POLY_OP_IF) {
       char *cond_s = smap_get(&names, u->src[0]);
-      for (int d = 0; d < depth; d++) sb_puts(&body, "  ");
+      for (int d = 0; d < depth; d++)
+        sb_puts(&body, "  ");
       sb_printf(&body, "if (%s) {\n", cond_s);
       depth++;
       continue;
@@ -1515,7 +1679,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     for (int i = 0; i < n; i++) {
       if (uops[i]->op == POLY_OP_RANGE && n_ranges < 64) {
         range_ptrs[n_ranges] = uops[i];
-        range_sizes[n_ranges] = (uops[i]->n_src > 0 && uops[i]->src[0]->op == POLY_OP_CONST) ? uops[i]->src[0]->arg.i : -1;
+        range_sizes[n_ranges] = (uops[i]->n_src > 0 && uops[i]->src[0]->op == POLY_OP_CONST)
+                                    ? uops[i]->src[0]->arg.i
+                                    : -1;
         range_end_count[n_ranges] = 0;
         n_ranges++;
       }
@@ -1530,34 +1696,38 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         }
       }
     }
-    fprintf(stderr, "polygrad render_c: DEPTH MISMATCH: depth=%d (expected 1) "
-            "%d RANGEs, %d ENDs (%d without RANGE ref)\n",
-            depth, n_ranges, n_ends, n_ends_norange);
+    fprintf(
+        stderr,
+        "polygrad render_c: DEPTH MISMATCH: depth=%d (expected 1) "
+        "%d RANGEs, %d ENDs (%d without RANGE ref)\n",
+        depth, n_ranges, n_ends, n_ends_norange
+    );
     for (int r = 0; r < n_ranges; r++) {
-      fprintf(stderr, "  RANGE[%d] %p size=%lld %s\n", r, (void*)range_ptrs[r],
-              (long long)range_sizes[r],
-              (range_end_count[r] > 0) ? "HAS_END" : "ORPHAN");
+      fprintf(
+          stderr, "  RANGE[%d] %p size=%lld %s\n", r, (void *)range_ptrs[r],
+          (long long)range_sizes[r], (range_end_count[r] > 0) ? "HAS_END" : "ORPHAN"
+      );
       fprintf(stderr, "    END count: %d\n", range_end_count[r]);
     }
   }
 
-  /* ── Sort params by arg index (PARAM 0, 1, 2, ...) ─────────────── */
+  /* Sort params by arg index (PARAM 0, 1, 2, ...) */
   for (int i = 1; i < n_params; i++) {
     int ko = param_order[i];
     char *kt = param_types[i], *kn = param_names[i];
     int j = i - 1;
     while (j >= 0 && param_order[j] > ko) {
-      param_order[j+1] = param_order[j];
-      param_types[j+1] = param_types[j];
-      param_names[j+1] = param_names[j];
+      param_order[j + 1] = param_order[j];
+      param_types[j + 1] = param_types[j];
+      param_names[j + 1] = param_names[j];
       j--;
     }
-    param_order[j+1] = ko;
-    param_types[j+1] = kt;
-    param_names[j+1] = kn;
+    param_order[j + 1] = ko;
+    param_types[j + 1] = kt;
+    param_names[j + 1] = kn;
   }
 
-  /* ── Build complete source ────────────────────────────────────────── */
+  /* Build complete source */
   StrBuf out;
   sb_init(&out);
   sb_puts(&out, "#include <math.h>\n");

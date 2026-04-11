@@ -8,7 +8,7 @@
 #include "../src/rangeify.h"
 #include "../src/frontend.h"
 
-/* ── Helper: build tensor-level graph, schedule, verify structure ────── */
+/* Helper: build tensor-level graph, schedule, verify structure */
 
 /* Count ops of a given type in a linearized graph */
 static int count_ops(PolyUOp **lin, int n, PolyOps op) {
@@ -18,7 +18,7 @@ static int count_ops(PolyUOp **lin, int n, PolyOps op) {
   return count;
 }
 
-/* ── IR structure tests ──────────────────────────────────────────────── */
+/* IR structure tests */
 
 TEST(sched, vecadd_ir) {
   /* c = a + b (1D, 10 elements): verify kernel IR structure */
@@ -53,7 +53,7 @@ TEST(sched, vecadd_ir) {
   PASS();
 }
 
-/* ── End-to-end tests ─────────────────────────────────────────────────── */
+/* End-to-end tests */
 
 TEST(sched, vecadd_e2e) {
   /* c = a + b: build tensor graph, schedule, compile, run, verify */
@@ -87,7 +87,7 @@ TEST(sched, vecadd_e2e) {
   }
 
   /* The scheduler assigns: param 0 = output (c), param 1 = a, param 2 = b */
-  void *args[3] = { c_data, a_data, b_data };
+  void *args[3] = {c_data, a_data, b_data};
   poly_program_call(prog, args, 3);
 
   for (int i = 0; i < N; i++)
@@ -132,7 +132,7 @@ TEST(sched, chain_e2e) {
   }
 
   /* param 0 = output (d), then a, b, c in toposort order */
-  void *args[4] = { d_d, a_d, b_d, c_d };
+  void *args[4] = {d_d, a_d, b_d, c_d};
   poly_program_call(prog, args, 4);
 
   for (int i = 0; i < N; i++)
@@ -167,9 +167,12 @@ TEST(sched, broadcast_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[8], c_d[8];
-  for (int i = 0; i < N; i++) { a_d[i] = (float)(i + 1); c_d[i] = 0.0f; }
+  for (int i = 0; i < N; i++) {
+    a_d[i] = (float)(i + 1);
+    c_d[i] = 0.0f;
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   for (int i = 0; i < N; i++)
@@ -203,9 +206,12 @@ TEST(sched, unary_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[8], b_d[8];
-  for (int i = 0; i < N; i++) { a_d[i] = (float)(i + 1); b_d[i] = 0.0f; }
+  for (int i = 0; i < N; i++) {
+    a_d[i] = (float)(i + 1);
+    b_d[i] = 0.0f;
+  }
 
-  void *args[2] = { b_d, a_d };
+  void *args[2] = {b_d, a_d};
   poly_program_call(prog, args, 2);
 
   for (int i = 0; i < N; i++)
@@ -228,14 +234,14 @@ TEST(sched, 2d_e2e) {
   PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, N);
 
   /* Reshape to 2D */
-  int64_t dims[] = { 4, 8 };
+  int64_t dims[] = {4, 8};
   PolyUOp *a2d = poly_reshape(ctx, a, dims, 2);
   PolyUOp *b2d = poly_reshape(ctx, b, dims, 2);
 
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a2d, b2d, poly_arg_none());
 
   /* Flatten back for storage */
-  int64_t flat[] = { 32 };
+  int64_t flat[] = {32};
   PolyUOp *flat_result = poly_reshape(ctx, add, flat, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, flat_result, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -256,7 +262,7 @@ TEST(sched, 2d_e2e) {
     c_d[i] = 0.0f;
   }
 
-  void *args[3] = { c_d, a_d, b_d };
+  void *args[3] = {c_d, a_d, b_d};
   poly_program_call(prog, args, 3);
 
   for (int i = 0; i < N; i++)
@@ -275,24 +281,24 @@ TEST(sched, expand_e2e) {
   int N = 20;
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *a_buf = poly_buffer(ctx, POLY_FLOAT32, N);     /* 20 elements */
-  PolyUOp *b_buf = poly_buffer(ctx, POLY_FLOAT32, 4);      /* 4 elements */
-  PolyUOp *c_buf = poly_buffer(ctx, POLY_FLOAT32, N);      /* 20 elements */
+  PolyUOp *a_buf = poly_buffer(ctx, POLY_FLOAT32, N); /* 20 elements */
+  PolyUOp *b_buf = poly_buffer(ctx, POLY_FLOAT32, 4); /* 4 elements */
+  PolyUOp *c_buf = poly_buffer(ctx, POLY_FLOAT32, N); /* 20 elements */
 
   /* Reshape a to (5,4) */
-  int64_t a_dims[] = { 5, 4 };
+  int64_t a_dims[] = {5, 4};
   PolyUOp *a = poly_reshape(ctx, a_buf, a_dims, 2);
 
   /* Reshape b to (1,4), then expand to (5,4) */
-  int64_t b_dims[] = { 1, 4 };
+  int64_t b_dims[] = {1, 4};
   PolyUOp *b_r = poly_reshape(ctx, b_buf, b_dims, 2);
-  int64_t e_dims[] = { 5, 4 };
+  int64_t e_dims[] = {5, 4};
   PolyUOp *b = poly_expand(ctx, b_r, e_dims, 2);
 
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
 
   /* Flatten result for storage */
-  int64_t flat[] = { 20 };
+  int64_t flat[] = {20};
   PolyUOp *flat_result = poly_reshape(ctx, add, flat, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c_buf, flat_result, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -307,10 +313,14 @@ TEST(sched, expand_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[20], b_d[4], c_d[20];
-  for (int i = 0; i < N; i++) { a_d[i] = (float)(i + 1); c_d[i] = 0.0f; }
-  for (int i = 0; i < 4; i++) b_d[i] = (float)(i + 1) * 10.0f;
+  for (int i = 0; i < N; i++) {
+    a_d[i] = (float)(i + 1);
+    c_d[i] = 0.0f;
+  }
+  for (int i = 0; i < 4; i++)
+    b_d[i] = (float)(i + 1) * 10.0f;
 
-  void *args[3] = { c_d, a_d, b_d };
+  void *args[3] = {c_d, a_d, b_d};
   poly_program_call(prog, args, 3);
 
   /* Verify: c[i*4+j] = a[i*4+j] + b[j] */
@@ -334,11 +344,11 @@ TEST(sched, reshape_e2e) {
   PolyUOp *b_buf = poly_buffer(ctx, POLY_FLOAT32, N);
 
   /* Reshape a to (2,4), add 1.0, reshape back to (8) */
-  int64_t dims[] = { 2, 4 };
+  int64_t dims[] = {2, 4};
   PolyUOp *a2d = poly_reshape(ctx, a_buf, dims, 2);
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a2d, one, poly_arg_none());
-  int64_t flat[] = { 8 };
+  int64_t flat[] = {8};
   PolyUOp *flat_result = poly_reshape(ctx, add, flat, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, b_buf, flat_result, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
@@ -353,9 +363,12 @@ TEST(sched, reshape_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[8], b_d[8];
-  for (int i = 0; i < N; i++) { a_d[i] = (float)(i + 1); b_d[i] = 0.0f; }
+  for (int i = 0; i < N; i++) {
+    a_d[i] = (float)(i + 1);
+    b_d[i] = 0.0f;
+  }
 
-  void *args[2] = { b_d, a_d };
+  void *args[2] = {b_d, a_d};
   poly_program_call(prog, args, 2);
 
   for (int i = 0; i < N; i++)
@@ -368,7 +381,7 @@ TEST(sched, reshape_e2e) {
   PASS();
 }
 
-/* ── Reduce tests ────────────────────────────────────────────────────── */
+/* Reduce tests */
 
 TEST(sched, reduce_sum_1d_ir) {
   /* sum(a) where a is 10 elements: verify kernel IR structure */
@@ -425,9 +438,12 @@ TEST(sched, reduce_sum_1d_e2e) {
 
   float a_d[10], c_d[1] = {0.0f};
   float expected = 0.0f;
-  for (int i = 0; i < N; i++) { a_d[i] = (float)(i + 1); expected += a_d[i]; }
+  for (int i = 0; i < N; i++) {
+    a_d[i] = (float)(i + 1);
+    expected += a_d[i];
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(c_d[0], expected, 1e-4);
 
@@ -461,14 +477,16 @@ TEST(sched, reduce_sum_axis0_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[12], c_d[3] = {0};
-  for (int i = 0; i < 12; i++) a_d[i] = (float)(i + 1);
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)(i + 1);
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   for (int j = 0; j < 3; j++) {
     float exp = 0;
-    for (int i = 0; i < 4; i++) exp += a_d[i * 3 + j];
+    for (int i = 0; i < 4; i++)
+      exp += a_d[i * 3 + j];
     ASSERT_FLOAT_EQ(c_d[j], exp, 1e-4);
   }
 
@@ -502,14 +520,16 @@ TEST(sched, reduce_sum_axis1_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[12], c_d[4] = {0};
-  for (int i = 0; i < 12; i++) a_d[i] = (float)(i + 1);
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)(i + 1);
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   for (int i = 0; i < 4; i++) {
     float exp = 0;
-    for (int j = 0; j < 3; j++) exp += a_d[i * 3 + j];
+    for (int j = 0; j < 3; j++)
+      exp += a_d[i * 3 + j];
     ASSERT_FLOAT_EQ(c_d[i], exp, 1e-4);
   }
 
@@ -544,9 +564,12 @@ TEST(sched, reduce_sum_all_e2e) {
 
   float a_d[12], c_d[1] = {0};
   float expected = 0;
-  for (int i = 0; i < 12; i++) { a_d[i] = (float)(i + 1); expected += a_d[i]; }
+  for (int i = 0; i < 12; i++) {
+    a_d[i] = (float)(i + 1);
+    expected += a_d[i];
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(c_d[0], expected, 1e-4);
 
@@ -581,7 +604,7 @@ TEST(sched, reduce_max_e2e) {
   float a_d[8] = {3, 1, 4, 1, 5, 9, 2, 6};
   float c_d[1] = {0};
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
   ASSERT_FLOAT_EQ(c_d[0], 9.0f, 1e-6);
 
@@ -631,7 +654,7 @@ TEST(sched, reduce_scalar_chain_e2e) {
     sumv += a_d[i];
   }
 
-  void *args[3] = { c_d, a_d, b_d };
+  void *args[3] = {c_d, a_d, b_d};
   poly_program_call(prog, args, 3);
 
   for (int i = 0; i < N; i++)
@@ -658,9 +681,9 @@ TEST(sched, reduce_vector_chain_e2e) {
   PolyUOp *b2d = poly_reshape(ctx, b, dims2d, 2);
 
   int64_t axes[] = {1};
-  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1);  /* shape (4,1) */
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a2d, axes, 1); /* shape (4,1) */
   int64_t expd[] = {4, 3};
-  PolyUOp *sum_exp = poly_expand(ctx, sum, expd, 2);                 /* shape (4,3) */
+  PolyUOp *sum_exp = poly_expand(ctx, sum, expd, 2); /* shape (4,3) */
 
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum_exp, b2d, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, add, poly_arg_none());
@@ -679,18 +702,19 @@ TEST(sched, reduce_vector_chain_e2e) {
 
   float a_d[12], b_d[12], c_d[12];
   for (int i = 0; i < N; i++) {
-    a_d[i] = (float)(i + 1);       /* rows: [1 2 3], [4 5 6], ... */
+    a_d[i] = (float)(i + 1); /* rows: [1 2 3], [4 5 6], ... */
     b_d[i] = (float)(100 + i);
     c_d[i] = 0.0f;
   }
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(c, c_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d)
+      POLY_BIND_HOST(c, c_d), POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d)
   };
   ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 3), 0);
 
   for (int i = 0; i < 4; i++) {
     float row_sum = 0.0f;
-    for (int j = 0; j < 3; j++) row_sum += a_d[i * 3 + j];
+    for (int j = 0; j < 3; j++)
+      row_sum += a_d[i * 3 + j];
     for (int j = 0; j < 3; j++) {
       int idx = i * 3 + j;
       ASSERT_FLOAT_EQ(c_d[idx], row_sum + b_d[idx], 1e-5);
@@ -722,12 +746,12 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
 
   PolyUOp *store_c = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, add, poly_arg_none());
   PolyUOp *store_e = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, e, mul, poly_arg_none());
-  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID,
-      (PolyUOp *[]){store_c, store_e}, 2, poly_arg_none());
+  PolyUOp *sink =
+      poly_uop(ctx, POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){store_c, store_e}, 2, poly_arg_none());
 
   /* IR check: 2 consumer kernels, each with reduce + output loop = 2 RANGEs */
   PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
-  ASSERT_INT_EQ(sr.n_kernels, 2);  /* 2 consumer kernels, no BUFFERIZE */
+  ASSERT_INT_EQ(sr.n_kernels, 2); /* 2 consumer kernels, no BUFFERIZE */
   for (int k = 0; k < sr.n_kernels; k++) {
     int n_lin;
     PolyUOp **lin = poly_linearize(ctx, sr.kernels[k], &n_lin);
@@ -751,9 +775,9 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
   }
 
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(c, c_d),
-    POLY_BIND_HOST(e, e_d),
-    POLY_BIND_HOST(a, a_d),
+      POLY_BIND_HOST(c, c_d),
+      POLY_BIND_HOST(e, e_d),
+      POLY_BIND_HOST(a, a_d),
   };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
@@ -767,7 +791,7 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
   PASS();
 }
 
-/* ── Movement op tests ──────────────────────────────────────────────── */
+/* Movement op tests */
 
 TEST(sched, permute_2d_e2e) {
   /* Transpose (3,4) → (4,3) */
@@ -792,17 +816,23 @@ TEST(sched, permute_2d_e2e) {
 
   /* a = [[0,1,2,3],[4,5,6,7],[8,9,10,11]] (3x4, row-major) */
   float a_d[12], c_d[12];
-  for (int i = 0; i < 12; i++) { a_d[i] = (float)i; c_d[i] = -1.0f; }
+  for (int i = 0; i < 12; i++) {
+    a_d[i] = (float)i;
+    c_d[i] = -1.0f;
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* c = transpose -> (4x3): c[j][i] = a[i][j] */
-  float expected[] = {0,4,8, 1,5,9, 2,6,10, 3,7,11};
+  float expected[] = {0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11};
   for (int i = 0; i < 12; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -828,18 +858,24 @@ TEST(sched, permute_3d_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[24], c_d[24];
-  for (int i = 0; i < 24; i++) { a_d[i] = (float)i; c_d[i] = -1.0f; }
+  for (int i = 0; i < 24; i++) {
+    a_d[i] = (float)i;
+    c_d[i] = -1.0f;
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* out[k][i][j] = a[i][j][k], out shape (4,2,3) */
   for (int k = 0; k < 4; k++)
     for (int i = 0; i < 2; i++)
       for (int j = 0; j < 3; j++)
-        ASSERT_FLOAT_EQ(c_d[k*6 + i*3 + j], a_d[i*12 + j*4 + k], 1e-6);
+        ASSERT_FLOAT_EQ(c_d[k * 6 + i * 3 + j], a_d[i * 12 + j * 4 + k], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -863,10 +899,12 @@ TEST(sched, shrink_1d_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[8], c_d[3];
-  for (int i = 0; i < 8; i++) a_d[i] = (float)(i * 10);
-  for (int i = 0; i < 3; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 8; i++)
+    a_d[i] = (float)(i * 10);
+  for (int i = 0; i < 3; i++)
+    c_d[i] = -1.0f;
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* c = a[2:5] = {20, 30, 40} */
@@ -874,7 +912,10 @@ TEST(sched, shrink_1d_e2e) {
   ASSERT_FLOAT_EQ(c_d[1], 30.0f, 1e-6);
   ASSERT_FLOAT_EQ(c_d[2], 40.0f, 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -901,18 +942,23 @@ TEST(sched, shrink_2d_e2e) {
 
   /* a = [[0,1,2],[3,4,5],[6,7,8],[9,10,11]] (4x3) */
   float a_d[12], c_d[6];
-  for (int i = 0; i < 12; i++) a_d[i] = (float)i;
-  for (int i = 0; i < 6; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)i;
+  for (int i = 0; i < 6; i++)
+    c_d[i] = -1.0f;
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* c = a[1:3, 0:3] = [[3,4,5],[6,7,8]] */
-  float expected[] = {3,4,5, 6,7,8};
+  float expected[] = {3, 4, 5, 6, 7, 8};
   for (int i = 0; i < 6; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -938,7 +984,7 @@ TEST(sched, flip_1d_e2e) {
   float a_d[] = {10, 20, 30, 40, 50};
   float c_d[5] = {0};
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   ASSERT_FLOAT_EQ(c_d[0], 50.0f, 1e-6);
@@ -947,7 +993,10 @@ TEST(sched, flip_1d_e2e) {
   ASSERT_FLOAT_EQ(c_d[3], 20.0f, 1e-6);
   ASSERT_FLOAT_EQ(c_d[4], 10.0f, 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -973,17 +1022,23 @@ TEST(sched, flip_2d_axis0_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[12], c_d[12];
-  for (int i = 0; i < 12; i++) { a_d[i] = (float)i; c_d[i] = -1.0f; }
+  for (int i = 0; i < 12; i++) {
+    a_d[i] = (float)i;
+    c_d[i] = -1.0f;
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* Flip axis 0: [[8,9,10,11],[4,5,6,7],[0,1,2,3]] */
-  float expected[] = {8,9,10,11, 4,5,6,7, 0,1,2,3};
+  float expected[] = {8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3};
   for (int i = 0; i < 12; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -1009,17 +1064,23 @@ TEST(sched, flip_2d_both_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[12], c_d[12];
-  for (int i = 0; i < 12; i++) { a_d[i] = (float)i; c_d[i] = -1.0f; }
+  for (int i = 0; i < 12; i++) {
+    a_d[i] = (float)i;
+    c_d[i] = -1.0f;
+  }
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* Flip both: [[11,10,9,8],[7,6,5,4],[3,2,1,0]] */
-  float expected[] = {11,10,9,8, 7,6,5,4, 3,2,1,0};
+  float expected[] = {11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
   for (int i = 0; i < 12; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -1044,9 +1105,10 @@ TEST(sched, pad_1d_e2e) {
 
   float a_d[] = {10, 20, 30};
   float c_d[7];
-  for (int i = 0; i < 7; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 7; i++)
+    c_d[i] = -1.0f;
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* c = [0, 0, 10, 20, 30, 0, 0] */
@@ -1054,7 +1116,10 @@ TEST(sched, pad_1d_e2e) {
   for (int i = 0; i < 7; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -1082,22 +1147,21 @@ TEST(sched, pad_2d_e2e) {
   /* a = [[1,2,3],[4,5,6]] (2x3) */
   float a_d[] = {1, 2, 3, 4, 5, 6};
   float c_d[20];
-  for (int i = 0; i < 20; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 20; i++)
+    c_d[i] = -1.0f;
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* c (4x5): [[0,0,0,0,0], [0,1,2,3,0], [0,4,5,6,0], [0,0,0,0,0]] */
-  float expected[] = {
-    0,0,0,0,0,
-    0,1,2,3,0,
-    0,4,5,6,0,
-    0,0,0,0,0
-  };
+  float expected[] = {0, 0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 4, 5, 6, 0, 0, 0, 0, 0, 0};
   for (int i = 0; i < 20; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -1110,9 +1174,9 @@ TEST(sched, chain_permute_shrink_e2e) {
   int64_t rdims[] = {3, 4};
   PolyUOp *a2d = poly_reshape(ctx, a, rdims, 2);
   int64_t perm[] = {1, 0};
-  PolyUOp *t = poly_permute(ctx, a2d, perm, 2);  /* (4,3) */
+  PolyUOp *t = poly_permute(ctx, a2d, perm, 2); /* (4,3) */
   int64_t pairs[][2] = {{0, 2}, {0, 3}};
-  PolyUOp *s = poly_shrink(ctx, t, pairs, 2);  /* (2,3) */
+  PolyUOp *s = poly_shrink(ctx, t, pairs, 2); /* (2,3) */
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, s, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
@@ -1125,19 +1189,24 @@ TEST(sched, chain_permute_shrink_e2e) {
   ASSERT_NOT_NULL(prog);
 
   float a_d[12], c_d[6];
-  for (int i = 0; i < 12; i++) a_d[i] = (float)i;
-  for (int i = 0; i < 6; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)i;
+  for (int i = 0; i < 6; i++)
+    c_d[i] = -1.0f;
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* transpose -> [[0,4,8],[1,5,9],[2,6,10],[3,7,11]] (4x3)
    * shrink rows 0:2 -> [[0,4,8],[1,5,9]] (2x3) */
-  float expected[] = {0,4,8, 1,5,9};
+  float expected[] = {0, 4, 8, 1, 5, 9};
   for (int i = 0; i < 6; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -1148,7 +1217,7 @@ TEST(sched, chain_pad_flip_e2e) {
   PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, 5);
 
   int64_t pad_pairs[][2] = {{1, 1}};
-  PolyUOp *p = poly_pad(ctx, a, pad_pairs, 1);  /* 5 elements */
+  PolyUOp *p = poly_pad(ctx, a, pad_pairs, 1); /* 5 elements */
   int64_t axes[] = {0};
   PolyUOp *f = poly_flip(ctx, p, axes, 1);
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, f, poly_arg_none());
@@ -1165,7 +1234,7 @@ TEST(sched, chain_pad_flip_e2e) {
   float a_d[] = {1, 2, 3};
   float c_d[5] = {-1, -1, -1, -1, -1};
 
-  void *args[2] = { c_d, a_d };
+  void *args[2] = {c_d, a_d};
   poly_program_call(prog, args, 2);
 
   /* pad -> [0,1,2,3,0], flip -> [0,3,2,1,0] */
@@ -1173,7 +1242,10 @@ TEST(sched, chain_pad_flip_e2e) {
   for (int i = 0; i < 5; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -1202,18 +1274,21 @@ TEST(sched, movement_alu_chain_e2e) {
   float b_d[] = {10, 20, 30, 40};
   float c_d[4] = {0};
 
-  void *args[3] = { c_d, a_d, b_d };
+  void *args[3] = {c_d, a_d, b_d};
   poly_program_call(prog, args, 3);
 
   float expected[] = {14, 23, 32, 41};
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(c_d[i], expected[i], 1e-6);
 
-  poly_program_destroy(prog); free(src); free(lin); poly_ctx_destroy(ctx);
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── poly_realize tests ────────────────────────────────────────────────── */
+/* poly_realize tests */
 
 #include "../src/frontend.h"
 
@@ -1234,7 +1309,9 @@ TEST(sched, realize_vecadd) {
     c_d[i] = 0;
   }
 
-  PolyBufferBinding bindings[] = { POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d), POLY_BIND_HOST(c, c_d) };
+  PolyBufferBinding bindings[] = {
+      POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d), POLY_BIND_HOST(c, c_d)
+  };
   int ret = poly_realize(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
@@ -1256,7 +1333,7 @@ TEST(sched, realize_reduce_sum) {
   float x_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_d[] = {0};
 
-  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, out_d) };
+  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, out_d)};
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_d[0], 36.0f, 1e-5);
@@ -1282,7 +1359,7 @@ TEST(sched, realize_grad_chain) {
   float x_d[] = {1, 2, 3, 4};
   float gx_d[] = {0, 0, 0, 0};
 
-  PolyBufferBinding bindings[] = { POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d) };
+  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
   int ret = poly_realize(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)

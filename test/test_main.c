@@ -21,7 +21,7 @@ static void cleanup_caches(void) {
 #endif
 }
 
-static const char *slow_suites[] = { "nn", NULL };
+static const char *slow_suites[] = {"nn", NULL};
 
 static int is_slow(const char *suite) {
   for (int i = 0; slow_suites[i]; i++)
@@ -35,24 +35,30 @@ int main(int argc, char **argv) {
   const char *filter = NULL;
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--fast") == 0) fast = 1;
-    else filter = argv[i];
+    if (strcmp(argv[i], "--fast") == 0)
+      fast = 1;
+    else
+      filter = argv[i];
   }
 
   printf("\n  polygrad test suite%s\n", fast ? " (fast)" : "");
   printf("  ================\n");
 
-  if (!fast && !filter)
-    return poly_test_run_all();
+  if (!fast && !filter) return poly_test_run_all();
 
   /* Filtered run */
   int total_passed = 0, total_failed = 0, skipped = 0;
   const char *current_suite = "";
 
   for (int i = 0; i < g_n_tests; i++) {
-    if (fast && is_slow(g_tests[i].suite)) { skipped++; continue; }
-    if (filter && !strstr(g_tests[i].suite, filter) &&
-        !strstr(g_tests[i].name, filter)) { skipped++; continue; }
+    if (fast && is_slow(g_tests[i].suite)) {
+      skipped++;
+      continue;
+    }
+    if (filter && !strstr(g_tests[i].suite, filter) && !strstr(g_tests[i].name, filter)) {
+      skipped++;
+      continue;
+    }
 
     if (strcmp(current_suite, g_tests[i].suite) != 0) {
       current_suite = g_tests[i].suite;
@@ -71,8 +77,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  printf("\n  Results: %d passed, %d failed, %d skipped, %d total\n\n",
-         total_passed, total_failed, skipped, total_passed + total_failed + skipped);
+  printf(
+      "\n  Results: %d passed, %d failed, %d skipped, %d total\n\n", total_passed, total_failed,
+      skipped, total_passed + total_failed + skipped
+  );
   if (filter && total_passed == 0 && total_failed == 0) {
     printf("  ERROR: no tests matched filter '%s'\n\n", filter);
     return 1;

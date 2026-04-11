@@ -7,7 +7,7 @@
 #include "../src/rangeify.h"
 #include "../src/frontend.h"
 
-/* ── JSON helpers ─────────────────────────────────────────────────────── */
+/* JSON helpers */
 
 static void json_float_array(const float *data, int n) {
   printf("[");
@@ -27,7 +27,7 @@ static void json_ops_array(PolyUOp **lin, int n_lin) {
   printf("]");
 }
 
-/* ── run_and_report: schedule → linearize → render → execute → JSON ── */
+/* run_and_report: schedule → linearize → render → execute → JSON */
 
 typedef struct {
   PolyUOp *buffer;
@@ -57,9 +57,14 @@ static int graph_has_compute_ops(PolyCtx *ctx, PolyUOp *tensor_sink) {
 /* Schedules, linearizes, renders, executes, and emits JSON with both
  * kernel ops and output data. For kernel-only cases, pass NULL/0 for
  * out_data/out_n and NULL/0 for bindings/n_bindings. */
-static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
-                          ParityBinding *bindings, int n_bindings,
-                          float *out_data, int out_n) {
+static int run_and_report(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    ParityBinding *bindings,
+    int n_bindings,
+    float *out_data,
+    int out_n
+) {
   int use_cuda = env_enabled("POLY_PARITY_CUDA");
   int use_hip = env_enabled("POLY_PARITY_HIP");
 
@@ -73,7 +78,7 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     PolyBufferBinding *bb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
     for (int j = 0; j < n_bindings; j++) {
       bb[j].buffer = bindings[j].buffer;
-      bb[j].handle = (PolyBufferHandle){ bindings[j].data, 0, POLY_DEVICE_CPU, false };
+      bb[j].handle = (PolyBufferHandle){bindings[j].data, 0, POLY_DEVICE_CPU, false};
     }
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
@@ -82,18 +87,18 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
       int alloc_ok = 1;
       for (int j = 0; j < n_bindings; j++) {
         PolyUOp *buf = bindings[j].buffer;
-        size_t nbytes = (size_t)buf->arg.i *
-            poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+        size_t nbytes = (size_t)buf->arg.i * poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
         unsigned long long dptr = poly_cuda_alloc(nbytes);
-        if (!dptr) { alloc_ok = 0; break; }
+        if (!dptr) {
+          alloc_ok = 0;
+          break;
+        }
         if (bindings[j].data)
           poly_cuda_copy_htod(dptr, bindings[j].data, nbytes);
         else
           poly_cuda_memset(dptr, 0, nbytes);
         cb[j].buffer = buf;
-        cb[j].handle = (PolyBufferHandle){
-          (void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true
-        };
+        cb[j].handle = (PolyBufferHandle){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
       }
       if (alloc_ok)
         ok = (poly_realize(ctx, tensor_sink, cb, n_bindings) == 0);
@@ -104,36 +109,37 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
         for (int j = 0; j < n_bindings; j++) {
           if (!bindings[j].data) continue;
           PolyUOp *buf = bindings[j].buffer;
-          size_t nbytes = (size_t)buf->arg.i *
-              poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
-          poly_cuda_copy_dtoh(bindings[j].data,
-              (unsigned long long)(uintptr_t)cb[j].handle.ptr, nbytes);
+          size_t nbytes = (size_t)buf->arg.i * poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+          poly_cuda_copy_dtoh(
+              bindings[j].data, (unsigned long long)(uintptr_t)cb[j].handle.ptr, nbytes
+          );
         }
       }
       /* Free device memory */
       for (int j = 0; j < n_bindings; j++) {
-        if (cb[j].handle.owned)
-          poly_cuda_free((unsigned long long)(uintptr_t)cb[j].handle.ptr);
+        if (cb[j].handle.owned) poly_cuda_free((unsigned long long)(uintptr_t)cb[j].handle.ptr);
       }
       free(cb);
     } else
 #endif
 #ifdef POLY_HAS_HIP
-    if (use_hip) {
+        if (use_hip) {
       PolyBufferBinding *hb = calloc((size_t)n_bindings, sizeof(PolyBufferBinding));
       int alloc_ok = 1;
       for (int j = 0; j < n_bindings; j++) {
         PolyUOp *buf = bindings[j].buffer;
-        size_t nbytes = (size_t)buf->arg.i *
-            poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+        size_t nbytes = (size_t)buf->arg.i * poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
         void *dptr = poly_hip_alloc(nbytes);
-        if (!dptr) { alloc_ok = 0; break; }
+        if (!dptr) {
+          alloc_ok = 0;
+          break;
+        }
         if (bindings[j].data)
           poly_hip_copy_htod(dptr, bindings[j].data, nbytes);
         else
           poly_hip_memset(dptr, 0, nbytes);
         hb[j].buffer = buf;
-        hb[j].handle = (PolyBufferHandle){ dptr, nbytes, POLY_DEVICE_HIP, true };
+        hb[j].handle = (PolyBufferHandle){dptr, nbytes, POLY_DEVICE_HIP, true};
       }
       if (alloc_ok)
         ok = (poly_realize(ctx, tensor_sink, hb, n_bindings) == 0);
@@ -143,14 +149,12 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
         for (int j = 0; j < n_bindings; j++) {
           if (!bindings[j].data) continue;
           PolyUOp *buf = bindings[j].buffer;
-          size_t nbytes = (size_t)buf->arg.i *
-              poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+          size_t nbytes = (size_t)buf->arg.i * poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
           poly_hip_copy_dtoh(bindings[j].data, hb[j].handle.ptr, nbytes);
         }
       }
       for (int j = 0; j < n_bindings; j++) {
-        if (hb[j].handle.owned)
-          poly_hip_free(hb[j].handle.ptr);
+        if (hb[j].handle.owned) poly_hip_free(hb[j].handle.ptr);
       }
       free(hb);
     } else
@@ -180,7 +184,7 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     } else
 #endif
 #ifdef POLY_HAS_HIP
-    if (use_hip) {
+        if (use_hip) {
       all_lin[k] = poly_linearize_hip(ctx, sr.kernels[k], &all_n_lin[k]);
     } else
 #endif
@@ -191,7 +195,8 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
     }
     if (!all_lin[k]) {
       fprintf(stderr, "parity: linearize failed for kernel %d\n", k);
-      for (int j = 0; j < k; j++) free(all_lin[j]);
+      for (int j = 0; j < k; j++)
+        free(all_lin[j]);
       free(all_lin);
       free(all_n_lin);
       poly_schedule_result_free(&sr);
@@ -201,8 +206,8 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
 
   /* 3. Emit JSON */
   if (ok) {
-    int movement_as_copy = env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") &&
-                           !graph_has_compute_ops(ctx, tensor_sink);
+    int movement_as_copy =
+        env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") && !graph_has_compute_ops(ctx, tensor_sink);
     if (movement_as_copy) {
       printf("{\"n_kernels\":0,\"kernels\":[]");
     } else {
@@ -223,14 +228,15 @@ static int run_and_report(PolyCtx *ctx, PolyUOp *tensor_sink,
   }
 
   /* Cleanup */
-  for (int k = 0; k < sr.n_kernels; k++) free(all_lin[k]);
+  for (int k = 0; k < sr.n_kernels; k++)
+    free(all_lin[k]);
   free(all_lin);
   free(all_n_lin);
   poly_schedule_result_free(&sr);
   return ok;
 }
 
-/* ── Original 16 test cases ───────────────────────────────────────── */
+/* Original 16 test cases */
 
 static int case_vecadd(void) {
   int N = 16;
@@ -305,7 +311,8 @@ static int case_broadcast_scalar(void) {
 
 static int case_reduce_sum_axis1(void) {
   float a_d[12], c_d[4] = {0};
-  for (int i = 0; i < 12; i++) a_d[i] = (float)(i + 1);
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)(i + 1);
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 12);
@@ -413,8 +420,8 @@ static int case_shared_scalar_reduce_branches(void) {
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, sum_exp, e0, poly_arg_none());
   PolyUOp *store_c = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oc, add, poly_arg_none());
   PolyUOp *store_e = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oe, mul, poly_arg_none());
-  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID,
-      (PolyUOp *[]){store_c, store_e}, 2, poly_arg_none());
+  PolyUOp *sink =
+      poly_uop(ctx, POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){store_c, store_e}, 2, poly_arg_none());
 
   ParityBinding bindings[] = {{oc, out_c}, {oe, out_e}, {a, a_d}, {c0, c0_d}, {e0, e0_d}};
   int ok = run_and_report(ctx, sink, bindings, 5, out_d, 16);
@@ -447,8 +454,10 @@ static int case_permute_2d(void) {
 
 static int case_shrink_2d(void) {
   float a_d[12], c_d[6];
-  for (int i = 0; i < 12; i++) a_d[i] = (float)i;
-  for (int i = 0; i < 6; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)i;
+  for (int i = 0; i < 6; i++)
+    c_d[i] = -1.0f;
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 12);
@@ -469,7 +478,8 @@ static int case_shrink_2d(void) {
 static int case_pad_2d(void) {
   float a_d[] = {1, 2, 3, 4, 5, 6};
   float c_d[20];
-  for (int i = 0; i < 20; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 20; i++)
+    c_d[i] = -1.0f;
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 6);
@@ -507,7 +517,7 @@ static int case_chain_pad_flip(void) {
   return ok;
 }
 
-/* ── Autograd cases (original) ────────────────────────────────────── */
+/* Autograd cases (original) */
 
 static int case_grad_mul_sum(void) {
   int N = 8;
@@ -627,7 +637,7 @@ static int case_grad_chain_movement(void) {
   return ok;
 }
 
-/* ── Tier 1: Simple elementwise ──────────────────────────────────── */
+/* Tier 1: Simple elementwise */
 
 static int case_neg_1d(void) {
   int N = 8;
@@ -732,12 +742,13 @@ static int case_where_1d(void) {
   return ok;
 }
 
-/* ── Tier 2: Reductions ──────────────────────────────────────────── */
+/* Tier 2: Reductions */
 
 static int case_reduce_sum_all(void) {
   int N = 12;
   float a_d[12], c_d[1] = {0};
-  for (int i = 0; i < N; i++) a_d[i] = (float)(i + 1);
+  for (int i = 0; i < N; i++)
+    a_d[i] = (float)(i + 1);
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
@@ -756,7 +767,8 @@ static int case_reduce_sum_all(void) {
 static int case_reduce_max_1d(void) {
   int N = 8;
   float a_d[8], c_d[1] = {0};
-  for (int i = 0; i < N; i++) a_d[i] = (float)(i * 2 - 7);
+  for (int i = 0; i < N; i++)
+    a_d[i] = (float)(i * 2 - 7);
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
@@ -772,11 +784,12 @@ static int case_reduce_max_1d(void) {
   return ok;
 }
 
-/* ── Tier 3: Composed ────────────────────────────────────────────── */
+/* Tier 3: Composed */
 
 static int case_reshape_reduce(void) {
   float a_d[12], c_d[4] = {0};
-  for (int i = 0; i < 12; i++) a_d[i] = (float)(i + 1);
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)(i + 1);
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 12);
@@ -797,7 +810,8 @@ static int case_reshape_reduce(void) {
 static int case_expand_alu_reduce(void) {
   float a_d[4] = {1, 2, 3, 4};
   float b_d[12], c_d[4] = {0};
-  for (int i = 0; i < 12; i++) b_d[i] = (float)(i + 1) * 0.1f;
+  for (int i = 0; i < 12; i++)
+    b_d[i] = (float)(i + 1) * 0.1f;
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
@@ -822,8 +836,10 @@ static int case_expand_alu_reduce(void) {
 
 static int case_multi_movement(void) {
   float a_d[12], c_d[6];
-  for (int i = 0; i < 12; i++) a_d[i] = (float)(i + 1);
-  for (int i = 0; i < 6; i++) c_d[i] = -1.0f;
+  for (int i = 0; i < 12; i++)
+    a_d[i] = (float)(i + 1);
+  for (int i = 0; i < 6; i++)
+    c_d[i] = -1.0f;
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 12);
@@ -845,7 +861,7 @@ static int case_multi_movement(void) {
   return ok;
 }
 
-/* ── Tier 4: Autograd (new) ──────────────────────────────────────── */
+/* Tier 4: Autograd (new) */
 
 static int case_grad_log2_sum(void) {
   int N = 6;
@@ -892,7 +908,8 @@ static int case_grad_sqrt_sum(void) {
 static int case_grad_where_sum(void) {
   int N = 8;
   float x_d[8], gx_d[8] = {0};
-  for (int i = 0; i < N; i++) x_d[i] = (float)(i - 3);
+  for (int i = 0; i < N; i++)
+    x_d[i] = (float)(i - 3);
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, N);
@@ -936,7 +953,7 @@ static int case_grad_multi_use(void) {
   return ok;
 }
 
-/* ── Tier 5: NN patterns ─────────────────────────────────────────── */
+/* Tier 5: NN patterns */
 
 static int case_matmul_small(void) {
   /* 2x3 @ 3x2 → 2x2 via reshape+expand+mul+reduce */
@@ -1024,11 +1041,9 @@ static int case_cross_entropy_nonlast_axis(void) {
   return ok;
 }
 
-/* ──────────────────────────────────────────────────────────────────── */
 /*  Tinygrad-parity cases for new movement/pad/cumalu/full/arange      */
 /*  helpers. Each case mirrors a build_xxx function in                 */
 /*  test_tinygrad_parity.py with the same name.                        */
-/* ──────────────────────────────────────────────────────────────────── */
 
 static int case_full_1d(void) {
   /* tinygrad: Tensor.full((5,), 7.5) */
@@ -1102,7 +1117,7 @@ static int case_eye_3(void) {
 
 static int case_tril_3x4_diag0(void) {
   /* tinygrad: Tensor.arange(1,13).reshape(3,4).tril(0) */
-  float in_d[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out_d[12] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in_buf = poly_buffer_f32(ctx, 12);
@@ -1119,7 +1134,7 @@ static int case_tril_3x4_diag0(void) {
 
 static int case_triu_3x4_diag0(void) {
   /* tinygrad: Tensor.arange(1,13).reshape(3,4).triu(0) */
-  float in_d[12] = {1,2,3,4,5,6,7,8,9,10,11,12};
+  float in_d[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   float out_d[12] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in_buf = poly_buffer_f32(ctx, 12);
@@ -1165,7 +1180,7 @@ static int case_repeat_1d(void) {
 
 static int case_pool_1d_k3(void) {
   /* tinygrad: Tensor([0,1,2,3,4])._pool((3,)) */
-  float in_d[5] = {0,1,2,3,4}, out_d[9] = {0};
+  float in_d[5] = {0, 1, 2, 3, 4}, out_d[9] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *in = poly_buffer_f32(ctx, 5);
   PolyUOp *out = poly_buffer_f32(ctx, 9);
@@ -1304,7 +1319,7 @@ static int case_cummax_1d(void) {
   return ok;
 }
 
-/* ── Case dispatch ────────────────────────────────────────────────── */
+/* Case dispatch */
 
 typedef int (*CaseFn)(void);
 typedef struct {
@@ -1313,64 +1328,64 @@ typedef struct {
 } CaseEntry;
 
 static CaseEntry CASES[] = {
-  /* Original 16 */
-  {"vecadd", case_vecadd},
-  {"chain", case_chain},
-  {"broadcast_scalar", case_broadcast_scalar},
-  {"reduce_sum_axis1", case_reduce_sum_axis1},
-  {"reduce_scalar_chain", case_reduce_scalar_chain},
-  {"reduce_vector_chain", case_reduce_vector_chain},
-  {"shared_scalar_reduce_branches", case_shared_scalar_reduce_branches},
-  {"permute_2d", case_permute_2d},
-  {"shrink_2d", case_shrink_2d},
-  {"pad_2d", case_pad_2d},
-  {"chain_pad_flip", case_chain_pad_flip},
-  {"grad_mul_sum", case_grad_mul_sum},
-  {"grad_exp2_sum", case_grad_exp2_sum},
-  {"grad_fdiv_sum_x", case_grad_fdiv_sum_x},
-  {"grad_fdiv_sum_y", case_grad_fdiv_sum_y},
-  {"grad_chain_movement", case_grad_chain_movement},
-  /* Tier 1: elementwise */
-  {"neg_1d", case_neg_1d},
-  {"exp2_1d", case_exp2_1d},
-  {"sqrt_1d", case_sqrt_1d},
-  {"mul_1d", case_mul_1d},
-  {"where_1d", case_where_1d},
-  /* Tier 2: reductions */
-  {"reduce_sum_all", case_reduce_sum_all},
-  {"reduce_max_1d", case_reduce_max_1d},
-  /* Tier 3: composed */
-  {"reshape_reduce", case_reshape_reduce},
-  {"expand_alu_reduce", case_expand_alu_reduce},
-  {"multi_movement", case_multi_movement},
-  /* Tier 4: autograd */
-  {"grad_log2_sum", case_grad_log2_sum},
-  {"grad_sqrt_sum", case_grad_sqrt_sum},
-  {"grad_where_sum", case_grad_where_sum},
-  {"grad_multi_use", case_grad_multi_use},
-  /* Tier 5: NN */
-  {"matmul_small", case_matmul_small},
-  {"matmul_broadcast", case_matmul_broadcast},
-  {"cross_entropy_nonlast_axis", case_cross_entropy_nonlast_axis},
-  /* New helpers (movement/pad/cumalu/full/arange) */
-  {"full_1d",            case_full_1d},
-  {"full_2d",            case_full_2d},
-  {"arange_simple",      case_arange_simple},
-  {"arange_start_step",  case_arange_start_step},
-  {"linspace_5",         case_linspace_5},
-  {"eye_3",              case_eye_3},
-  {"tril_3x4_diag0",     case_tril_3x4_diag0},
-  {"triu_3x4_diag0",     case_triu_3x4_diag0},
-  {"repeat_1d",          case_repeat_1d},
-  {"pool_1d_k3",         case_pool_1d_k3},
-  {"cat_1d",             case_cat_1d},
-  {"pad_value_1d",       case_pad_value_1d},
-  {"pad_circular_1d",    case_pad_circular_1d},
-  {"pad_reflect_1d",     case_pad_reflect_1d},
-  {"pad_replicate_1d",   case_pad_replicate_1d},
-  {"cumsum_1d",          case_cumsum_1d},
-  {"cumprod_1d",         case_cumprod_1d},
-  {"cummax_1d",          case_cummax_1d},
+    /* Original 16 */
+    {"vecadd", case_vecadd},
+    {"chain", case_chain},
+    {"broadcast_scalar", case_broadcast_scalar},
+    {"reduce_sum_axis1", case_reduce_sum_axis1},
+    {"reduce_scalar_chain", case_reduce_scalar_chain},
+    {"reduce_vector_chain", case_reduce_vector_chain},
+    {"shared_scalar_reduce_branches", case_shared_scalar_reduce_branches},
+    {"permute_2d", case_permute_2d},
+    {"shrink_2d", case_shrink_2d},
+    {"pad_2d", case_pad_2d},
+    {"chain_pad_flip", case_chain_pad_flip},
+    {"grad_mul_sum", case_grad_mul_sum},
+    {"grad_exp2_sum", case_grad_exp2_sum},
+    {"grad_fdiv_sum_x", case_grad_fdiv_sum_x},
+    {"grad_fdiv_sum_y", case_grad_fdiv_sum_y},
+    {"grad_chain_movement", case_grad_chain_movement},
+    /* Tier 1: elementwise */
+    {"neg_1d", case_neg_1d},
+    {"exp2_1d", case_exp2_1d},
+    {"sqrt_1d", case_sqrt_1d},
+    {"mul_1d", case_mul_1d},
+    {"where_1d", case_where_1d},
+    /* Tier 2: reductions */
+    {"reduce_sum_all", case_reduce_sum_all},
+    {"reduce_max_1d", case_reduce_max_1d},
+    /* Tier 3: composed */
+    {"reshape_reduce", case_reshape_reduce},
+    {"expand_alu_reduce", case_expand_alu_reduce},
+    {"multi_movement", case_multi_movement},
+    /* Tier 4: autograd */
+    {"grad_log2_sum", case_grad_log2_sum},
+    {"grad_sqrt_sum", case_grad_sqrt_sum},
+    {"grad_where_sum", case_grad_where_sum},
+    {"grad_multi_use", case_grad_multi_use},
+    /* Tier 5: NN */
+    {"matmul_small", case_matmul_small},
+    {"matmul_broadcast", case_matmul_broadcast},
+    {"cross_entropy_nonlast_axis", case_cross_entropy_nonlast_axis},
+    /* New helpers (movement/pad/cumalu/full/arange) */
+    {"full_1d", case_full_1d},
+    {"full_2d", case_full_2d},
+    {"arange_simple", case_arange_simple},
+    {"arange_start_step", case_arange_start_step},
+    {"linspace_5", case_linspace_5},
+    {"eye_3", case_eye_3},
+    {"tril_3x4_diag0", case_tril_3x4_diag0},
+    {"triu_3x4_diag0", case_triu_3x4_diag0},
+    {"repeat_1d", case_repeat_1d},
+    {"pool_1d_k3", case_pool_1d_k3},
+    {"cat_1d", case_cat_1d},
+    {"pad_value_1d", case_pad_value_1d},
+    {"pad_circular_1d", case_pad_circular_1d},
+    {"pad_reflect_1d", case_pad_reflect_1d},
+    {"pad_replicate_1d", case_pad_replicate_1d},
+    {"cumsum_1d", case_cumsum_1d},
+    {"cumprod_1d", case_cumprod_1d},
+    {"cummax_1d", case_cummax_1d},
 };
 
 static int run_case(const char *name) {
@@ -1384,7 +1399,8 @@ static int run_case(const char *name) {
 
 static void print_cases(void) {
   int n_cases = (int)(sizeof(CASES) / sizeof(CASES[0]));
-  for (int i = 0; i < n_cases; i++) printf("%s\n", CASES[i].name);
+  for (int i = 0; i < n_cases; i++)
+    printf("%s\n", CASES[i].name);
 }
 
 int main(int argc, char **argv) {

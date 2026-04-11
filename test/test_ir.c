@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* ── Round-trip: simple add graph ──────────────────────────────────── */
+/* Round-trip: simple add graph */
 
 TEST(ir, round_trip_add) {
   PolyCtx *ctx = poly_ctx_new();
@@ -22,19 +22,19 @@ TEST(ir, round_trip_add) {
   PolyUOp *store = poly_store_val(ctx, out_buf, sum);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  int64_t shape4[] = { 4 };
+  int64_t shape4[] = {4};
   PolyIrBufEntry bufs[] = {
-    { "a", POLY_IR_ROLE_INPUT, a, { 4 }, 1 },
-    { "b", POLY_IR_ROLE_INPUT, b, { 4 }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, out_buf, { 4 }, 1 },
+      {"a", POLY_IR_ROLE_INPUT, a, {4}, 1},
+      {"b", POLY_IR_ROLE_INPUT, b, {4}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out_buf, {4}, 1},
   };
   (void)shape4;
 
   PolyIrEntrypoint eps[] = {
-    { "forward", sink },
+      {"forward", sink},
   };
 
-  PolyIrSpec spec = { ctx, bufs, 3, eps, 1 };
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -68,7 +68,7 @@ TEST(ir, round_trip_add) {
   PASS();
 }
 
-/* ── Round-trip: graph with CONST args ─────────────────────────────── */
+/* Round-trip: graph with CONST args */
 
 TEST(ir, round_trip_const) {
   PolyCtx *ctx = poly_ctx_new();
@@ -81,11 +81,11 @@ TEST(ir, round_trip_const) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
-    { "input", POLY_IR_ROLE_INPUT, a, { 4 }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, out, { 4 }, 1 },
+      {"input", POLY_IR_ROLE_INPUT, a, {4}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out, {4}, 1},
   };
-  PolyIrEntrypoint eps[] = { { "forward", sink } };
-  PolyIrSpec spec = { ctx, bufs, 2, eps, 1 };
+  PolyIrEntrypoint eps[] = {{"forward", sink}};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -105,7 +105,7 @@ TEST(ir, round_trip_const) {
   PASS();
 }
 
-/* ── Round-trip: multiple entrypoints ──────────────────────────────── */
+/* Round-trip: multiple entrypoints */
 
 TEST(ir, round_trip_multi_entry) {
   PolyCtx *ctx = poly_ctx_new();
@@ -121,15 +121,15 @@ TEST(ir, round_trip_multi_entry) {
   PolyUOp *loss_sink = poly_sink1(ctx, loss_store);
 
   PolyIrBufEntry bufs[] = {
-    { "x", POLY_IR_ROLE_INPUT, x, { 4 }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, fwd_out, { 4 }, 1 },
-    { "loss", POLY_IR_ROLE_OUTPUT, loss_out, { 1 }, 1 },
+      {"x", POLY_IR_ROLE_INPUT, x, {4}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, fwd_out, {4}, 1},
+      {"loss", POLY_IR_ROLE_OUTPUT, loss_out, {1}, 1},
   };
   PolyIrEntrypoint eps[] = {
-    { "forward", fwd_sink },
-    { "loss", loss_sink },
+      {"forward", fwd_sink},
+      {"loss", loss_sink},
   };
-  PolyIrSpec spec = { ctx, bufs, 3, eps, 2 };
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 2};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -149,7 +149,7 @@ TEST(ir, round_trip_multi_entry) {
   PASS();
 }
 
-/* ── Round-trip: param roles ──────────────────────────────────────── */
+/* Round-trip: param roles */
 
 TEST(ir, round_trip_roles) {
   PolyCtx *ctx = poly_ctx_new();
@@ -162,12 +162,12 @@ TEST(ir, round_trip_roles) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
-    { "layers.0.weight", POLY_IR_ROLE_PARAM, w, { 2, 3 }, 2 },
-    { "x", POLY_IR_ROLE_INPUT, x, { 3 }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, out, { 2 }, 1 },
+      {"layers.0.weight", POLY_IR_ROLE_PARAM, w, {2, 3}, 2},
+      {"x", POLY_IR_ROLE_INPUT, x, {3}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out, {2}, 1},
   };
-  PolyIrEntrypoint eps[] = { { "forward", sink } };
-  PolyIrSpec spec = { ctx, bufs, 3, eps, 1 };
+  PolyIrEntrypoint eps[] = {{"forward", sink}};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);
@@ -194,10 +194,10 @@ TEST(ir, round_trip_roles) {
   PASS();
 }
 
-/* ── Invalid data ─────────────────────────────────────────────────── */
+/* Invalid data */
 
 TEST(ir, import_bad_magic) {
-  uint8_t data[32] = { 0 };
+  uint8_t data[32] = {0};
   PolyIrSpec spec;
   int ret = poly_ir_import(data, 32, &spec);
   ASSERT_INT_EQ(ret, -1);
@@ -205,31 +205,31 @@ TEST(ir, import_bad_magic) {
 }
 
 TEST(ir, import_truncated) {
-  uint8_t data[16] = { 'P', 'G', 'I', 'R' };
+  uint8_t data[16] = {'P', 'G', 'I', 'R'};
   PolyIrSpec spec;
   int ret = poly_ir_import(data, 16, &spec);
   ASSERT_INT_EQ(ret, -1);
   PASS();
 }
 
-/* ── Round-trip: graph with int tuple args ─────────────────────────── */
+/* Round-trip: graph with int tuple args */
 
 TEST(ir, round_trip_reshape) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer_f32(ctx, 6);
-  int64_t new_shape[] = { 2, 3 };
+  int64_t new_shape[] = {2, 3};
   PolyUOp *reshaped = poly_reshape(ctx, a, new_shape, 2);
   PolyUOp *out = poly_buffer_f32(ctx, 6);
   PolyUOp *store = poly_store_val(ctx, out, reshaped);
   PolyUOp *sink = poly_sink1(ctx, store);
 
   PolyIrBufEntry bufs[] = {
-    { "input", POLY_IR_ROLE_INPUT, a, { 6 }, 1 },
-    { "output", POLY_IR_ROLE_OUTPUT, out, { 2, 3 }, 2 },
+      {"input", POLY_IR_ROLE_INPUT, a, {6}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out, {2, 3}, 2},
   };
-  PolyIrEntrypoint eps[] = { { "forward", sink } };
-  PolyIrSpec spec = { ctx, bufs, 2, eps, 1 };
+  PolyIrEntrypoint eps[] = {{"forward", sink}};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
 
   int out_len = 0;
   uint8_t *bytes = poly_ir_export(&spec, &out_len);

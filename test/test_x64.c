@@ -18,16 +18,23 @@
 /*  Helpers                                                              */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-typedef struct { PolyCtx *ctx; PolyUOp *sink; } K;
+typedef struct {
+  PolyCtx *ctx;
+  PolyUOp *sink;
+} K;
 
 /* Run kernel via x64 JIT (scalar path, no optimize) */
 static int x64_run(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
-  int nl; PolyUOp **lin = poly_linearize(ctx, sink, &nl);
+  int nl;
+  PolyUOp **lin = poly_linearize(ctx, sink, &nl);
   if (!lin) return -1;
-  int sz; uint8_t *code = poly_render_x64(lin, nl, &sz);
-  free(lin); if (!code) return -1;
+  int sz;
+  uint8_t *code = poly_render_x64(lin, nl, &sz);
+  free(lin);
+  if (!code) return -1;
   PolyX64Program *p = poly_compile_x64(code, sz);
-  free(code); if (!p) return -1;
+  free(code);
+  if (!p) return -1;
   poly_x64_program_call(p, args, n);
   poly_x64_program_destroy(p);
   return 0;
@@ -35,13 +42,17 @@ static int x64_run(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
 
 /* Run kernel via x64 JIT (vec4 optimized path) */
 static int x64_run_vec(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
-  PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
-  int nl; PolyUOp **lin = poly_linearize_ex(ctx, sink, opts, &nl);
+  PolyRewriteOpts opts = {.optimize = true, .devectorize = 0};
+  int nl;
+  PolyUOp **lin = poly_linearize_ex(ctx, sink, opts, &nl);
   if (!lin) return -1;
-  int sz; uint8_t *code = poly_render_x64(lin, nl, &sz);
-  free(lin); if (!code) return -1;
+  int sz;
+  uint8_t *code = poly_render_x64(lin, nl, &sz);
+  free(lin);
+  if (!code) return -1;
   PolyX64Program *p = poly_compile_x64(code, sz);
-  free(code); if (!p) return -1;
+  free(code);
+  if (!p) return -1;
   poly_x64_program_call(p, args, n);
   poly_x64_program_destroy(p);
   return 0;
@@ -49,12 +60,15 @@ static int x64_run_vec(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
 
 /* Run kernel via CPU (C compiler) for parity reference */
 static int cpu_run(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
-  int nl; PolyUOp **lin = poly_linearize(ctx, sink, &nl);
+  int nl;
+  PolyUOp **lin = poly_linearize(ctx, sink, &nl);
   if (!lin) return -1;
   char *src = poly_render_c(lin, nl, "test_fn");
-  free(lin); if (!src) return -1;
+  free(lin);
+  if (!src) return -1;
   PolyProgram *p = poly_compile_c(src, "test_fn");
-  free(src); if (!p) return -1;
+  free(src);
+  if (!p) return -1;
   poly_program_call(p, args, n);
   poly_program_destroy(p);
   return 0;
@@ -79,9 +93,9 @@ static K make_binop(PolyOps op, int N) {
   PolyUOp *l1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, i1, poly_arg_none());
   PolyUOp *alu = poly_uop2(ctx, op, POLY_FLOAT32, l0, l1, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i2, alu, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
-  return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
+  return (K){ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none())};
 }
 
 /* Build: b[i] = OP(a[i]) */
@@ -97,13 +111,21 @@ static K make_unary(PolyOps op, int N) {
   PolyUOp *l0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, i0, poly_arg_none());
   PolyUOp *alu = poly_uop1(ctx, op, POLY_FLOAT32, l0, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i1, alu, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
-  return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
+  return (K){ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none())};
 }
 
 /* Parity helper: run both CPU and x64, compare results */
-static int check_parity(K k, void **args, int n_args, float *c_cpu, float *c_x64, int N, float tol) {
+static int check_parity(
+    K k,
+    void **args,
+    int n_args,
+    float *c_cpu,
+    float *c_x64,
+    int N,
+    float tol
+) {
   memset(c_cpu, 0, N * sizeof(float));
   memset(c_x64, 0, N * sizeof(float));
   args[n_args - 1] = c_cpu;
@@ -116,7 +138,15 @@ static int check_parity(K k, void **args, int n_args, float *c_cpu, float *c_x64
 }
 
 /* Parity helper for vec4 path */
-static int check_parity_vec(K k, void **args, int n_args, float *c_cpu, float *c_x64, int N, float tol) {
+static int check_parity_vec(
+    K k,
+    void **args,
+    int n_args,
+    float *c_cpu,
+    float *c_x64,
+    int N,
+    float tol
+) {
   memset(c_cpu, 0, N * sizeof(float));
   memset(c_x64, 0, N * sizeof(float));
   args[n_args - 1] = c_cpu;
@@ -144,9 +174,9 @@ static K make_int_binop(PolyOps op, int N) {
   PolyUOp *l1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, i1, poly_arg_none());
   PolyUOp *alu = poly_uop2(ctx, op, POLY_INT32, l0, l1, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i2, alu, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
-  return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
+  return (K){ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none())};
 }
 
 /* Parity helper for int32 ops */
@@ -178,12 +208,12 @@ static K make_where_kernel(int N) {
   PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, i1, poly_arg_none());
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0f));
   PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, zero, la, poly_arg_none());
-  PolyUOp *w = poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT32,
-                         (PolyUOp*[]){cmp, la, lb}, 3, poly_arg_none());
+  PolyUOp *w =
+      poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT32, (PolyUOp *[]){cmp, la, lb}, 3, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i2, w, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
-  return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
+  return (K){ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none())};
 }
 
 /* Build: c[i] = CAST(float, a_int[i]) */
@@ -200,9 +230,9 @@ static K make_cast_int_to_float(int N) {
   PolyUOp *li = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, i0, poly_arg_none());
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, li, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i1, cast, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
-  return (K){ ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none()) };
+  return (K){ctx, poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none())};
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -213,12 +243,17 @@ TEST(x64, empty_kernel) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *noop = poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, noop, poly_arg_none());
-  int nl; PolyUOp **lin = poly_linearize(ctx, sink, &nl);
+  int nl;
+  PolyUOp **lin = poly_linearize(ctx, sink, &nl);
   ASSERT_NOT_NULL(lin);
-  int sz; uint8_t *code = poly_render_x64(lin, nl, &sz);
-  free(lin); ASSERT_NOT_NULL(code); ASSERT_TRUE(sz > 10);
+  int sz;
+  uint8_t *code = poly_render_x64(lin, nl, &sz);
+  free(lin);
+  ASSERT_NOT_NULL(code);
+  ASSERT_TRUE(sz > 10);
   PolyX64Program *p = poly_compile_x64(code, sz);
-  free(code); ASSERT_NOT_NULL(p);
+  free(code);
+  ASSERT_NOT_NULL(p);
   poly_x64_program_call(p, NULL, 0);
   poly_x64_program_destroy(p);
   poly_ctx_destroy(ctx);
@@ -228,86 +263,111 @@ TEST(x64, empty_kernel) {
 TEST(x64, e2e_vecadd) {
   K k = make_binop(POLY_OP_ADD, 16);
   float a[16], b[16], c[16];
-  for (int i = 0; i < 16; i++) { a[i] = (float)i; b[i] = (float)(i * 10); }
-  void *args[3] = { a, b, c };
+  for (int i = 0; i < 16; i++) {
+    a[i] = (float)i;
+    b[i] = (float)(i * 10);
+  }
+  void *args[3] = {a, b, c};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 3), 0);
-  for (int i = 0; i < 16; i++) ASSERT_FLOAT_EQ(c[i], a[i] + b[i], 1e-6);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 16; i++)
+    ASSERT_FLOAT_EQ(c[i], a[i] + b[i], 1e-6);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_vecsub) {
   K k = make_binop(POLY_OP_SUB, 16);
   float a[16], b[16], c[16];
-  for (int i = 0; i < 16; i++) { a[i] = (float)(i * 10); b[i] = (float)i; }
-  void *args[3] = { a, b, c };
+  for (int i = 0; i < 16; i++) {
+    a[i] = (float)(i * 10);
+    b[i] = (float)i;
+  }
+  void *args[3] = {a, b, c};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 3), 0);
-  for (int i = 0; i < 16; i++) ASSERT_FLOAT_EQ(c[i], a[i] - b[i], 1e-6);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 16; i++)
+    ASSERT_FLOAT_EQ(c[i], a[i] - b[i], 1e-6);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_vecmul) {
   K k = make_binop(POLY_OP_MUL, 16);
   float a[16], b[16], c[16];
-  for (int i = 0; i < 16; i++) { a[i] = (float)(i + 1); b[i] = 0.5f; }
-  void *args[3] = { a, b, c };
+  for (int i = 0; i < 16; i++) {
+    a[i] = (float)(i + 1);
+    b[i] = 0.5f;
+  }
+  void *args[3] = {a, b, c};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 3), 0);
-  for (int i = 0; i < 16; i++) ASSERT_FLOAT_EQ(c[i], a[i] * b[i], 1e-6);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 16; i++)
+    ASSERT_FLOAT_EQ(c[i], a[i] * b[i], 1e-6);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_fdiv) {
   K k = make_binop(POLY_OP_FDIV, 8);
-  float a[8] = {10,20,30,40,50,60,70,80};
-  float b[8] = {2,4,5,8,10,12,14,16};
+  float a[8] = {10, 20, 30, 40, 50, 60, 70, 80};
+  float b[8] = {2, 4, 5, 8, 10, 12, 14, 16};
   float c[8];
-  void *args[3] = { a, b, c };
+  void *args[3] = {a, b, c};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 3), 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(c[i], a[i] / b[i], 1e-5);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(c[i], a[i] / b[i], 1e-5);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_max) {
   K k = make_binop(POLY_OP_MAX, 8);
-  float a[8] = {1,-2,3,-4,5,-6,7,-8};
-  float b[8] = {-1,2,-3,4,-5,6,-7,8};
+  float a[8] = {1, -2, 3, -4, 5, -6, 7, -8};
+  float b[8] = {-1, 2, -3, 4, -5, 6, -7, 8};
   float c[8];
-  void *args[3] = { a, b, c };
+  void *args[3] = {a, b, c};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 3), 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(c[i], a[i] > b[i] ? a[i] : b[i], 1e-6);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(c[i], a[i] > b[i] ? a[i] : b[i], 1e-6);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_neg) {
   K k = make_unary(POLY_OP_NEG, 8);
-  float a[8] = {1,-2,0,3.14f,-0.0f,1e10f,-1e-10f,42};
+  float a[8] = {1, -2, 0, 3.14f, -0.0f, 1e10f, -1e-10f, 42};
   float b[8];
-  void *args[2] = { a, b };
+  void *args[2] = {a, b};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 2), 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(b[i], -a[i], 0.0f);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(b[i], -a[i], 0.0f);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_sqrt) {
   K k = make_unary(POLY_OP_SQRT, 8);
-  float a[8] = {0,1,4,9,16,25,100,0.25f};
+  float a[8] = {0, 1, 4, 9, 16, 25, 100, 0.25f};
   float b[8];
-  void *args[2] = { a, b };
+  void *args[2] = {a, b};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 2), 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(b[i], sqrtf(a[i]), 1e-6);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(b[i], sqrtf(a[i]), 1e-6);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, e2e_reciprocal) {
   K k = make_unary(POLY_OP_RECIPROCAL, 8);
-  float a[8] = {1,2,4,0.5f,0.25f,10,100,0.1f};
+  float a[8] = {1, 2, 4, 0.5f, 0.25f, 10, 100, 0.1f};
   float b[8];
-  void *args[2] = { a, b };
+  void *args[2] = {a, b};
   ASSERT_INT_EQ(x64_run(k.ctx, k.sink, args, 2), 0);
-  for (int i = 0; i < 8; i++) ASSERT_FLOAT_EQ(b[i], 1.0f / a[i], 1e-5);
-  poly_ctx_destroy(k.ctx); PASS();
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(b[i], 1.0f / a[i], 1e-5);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
-/* ── Chain: c[i] = sqrt(a[i]*b[i] + a[i]) ──────────────────────────── */
+/* Chain: c[i] = sqrt(a[i]*b[i] + a[i]) */
 
 TEST(x64, e2e_chain_mul_add_sqrt) {
   PolyCtx *ctx = poly_ctx_new();
@@ -327,41 +387,52 @@ TEST(x64, e2e_chain_mul_add_sqrt) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, l0, poly_arg_none());
   PolyUOp *sq = poly_uop1(ctx, POLY_OP_SQRT, POLY_FLOAT32, add, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i2, sq, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   float a[16], b[16], c_cpu[16], c_x64[16];
-  for (int i = 0; i < N; i++) { a[i] = 1.0f + 0.5f * i; b[i] = 2.0f + 0.5f * i; }
-  K k = { ctx, sink };
-  void *args[3] = { a, b, NULL };
+  for (int i = 0; i < N; i++) {
+    a[i] = 1.0f + 0.5f * i;
+    b[i] = 2.0f + 0.5f * i;
+  }
+  K k = {ctx, sink};
+  void *args[3] = {a, b, NULL};
   ASSERT_INT_EQ(check_parity(k, args, 3, c_cpu, c_x64, N, 1e-5), 0);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Parity tests: x64 scalar vs CPU for every float ALU op               */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-#define PARITY_TEST_BINOP(name, op) \
-TEST(x64, parity_##name) { \
-  int N = 16; K k = make_binop(op, N); \
-  float a[16], b[16], c_cpu[16], c_x64[16]; \
-  for (int i = 0; i < N; i++) { a[i] = 1.0f + i * 0.3f; b[i] = 2.0f + i * 0.7f; } \
-  void *args[3] = { a, b, NULL }; \
-  ASSERT_INT_EQ(check_parity(k, args, 3, c_cpu, c_x64, N, 1e-5), 0); \
-  poly_ctx_destroy(k.ctx); PASS(); \
-}
+#define PARITY_TEST_BINOP(name, op)                                                                \
+  TEST(x64, parity_##name) {                                                                       \
+    int N = 16;                                                                                    \
+    K k = make_binop(op, N);                                                                       \
+    float a[16], b[16], c_cpu[16], c_x64[16];                                                      \
+    for (int i = 0; i < N; i++) {                                                                  \
+      a[i] = 1.0f + i * 0.3f;                                                                      \
+      b[i] = 2.0f + i * 0.7f;                                                                      \
+    }                                                                                              \
+    void *args[3] = {a, b, NULL};                                                                  \
+    ASSERT_INT_EQ(check_parity(k, args, 3, c_cpu, c_x64, N, 1e-5), 0);                             \
+    poly_ctx_destroy(k.ctx);                                                                       \
+    PASS();                                                                                        \
+  }
 
-#define PARITY_TEST_UNARY(name, op) \
-TEST(x64, parity_##name) { \
-  int N = 8; K k = make_unary(op, N); \
-  float a[8] = {1,4,9,16,25,0.25f,0.01f,100}; \
-  float b_cpu[8], b_x64[8]; \
-  void *args[2] = { a, NULL }; \
-  ASSERT_INT_EQ(check_parity(k, args, 2, b_cpu, b_x64, N, 1e-5), 0); \
-  poly_ctx_destroy(k.ctx); PASS(); \
-}
+#define PARITY_TEST_UNARY(name, op)                                                                \
+  TEST(x64, parity_##name) {                                                                       \
+    int N = 8;                                                                                     \
+    K k = make_unary(op, N);                                                                       \
+    float a[8] = {1, 4, 9, 16, 25, 0.25f, 0.01f, 100};                                             \
+    float b_cpu[8], b_x64[8];                                                                      \
+    void *args[2] = {a, NULL};                                                                     \
+    ASSERT_INT_EQ(check_parity(k, args, 2, b_cpu, b_x64, N, 1e-5), 0);                             \
+    poly_ctx_destroy(k.ctx);                                                                       \
+    PASS();                                                                                        \
+  }
 
 PARITY_TEST_BINOP(add, POLY_OP_ADD)
 PARITY_TEST_BINOP(sub, POLY_OP_SUB)
@@ -376,25 +447,33 @@ PARITY_TEST_UNARY(reciprocal, POLY_OP_RECIPROCAL)
 /*  Vec4 optimized path tests                                            */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-#define VEC4_PARITY_BINOP(name, op) \
-TEST(x64, vec4_##name) { \
-  int N = 32; K k = make_binop(op, N); \
-  float a[32], b[32], c_cpu[32], c_x64[32]; \
-  for (int i = 0; i < N; i++) { a[i] = 1.0f + i * 0.3f; b[i] = 2.0f + i * 0.7f; } \
-  void *args[3] = { a, b, NULL }; \
-  ASSERT_INT_EQ(check_parity_vec(k, args, 3, c_cpu, c_x64, N, 1e-5), 0); \
-  poly_ctx_destroy(k.ctx); PASS(); \
-}
+#define VEC4_PARITY_BINOP(name, op)                                                                \
+  TEST(x64, vec4_##name) {                                                                         \
+    int N = 32;                                                                                    \
+    K k = make_binop(op, N);                                                                       \
+    float a[32], b[32], c_cpu[32], c_x64[32];                                                      \
+    for (int i = 0; i < N; i++) {                                                                  \
+      a[i] = 1.0f + i * 0.3f;                                                                      \
+      b[i] = 2.0f + i * 0.7f;                                                                      \
+    }                                                                                              \
+    void *args[3] = {a, b, NULL};                                                                  \
+    ASSERT_INT_EQ(check_parity_vec(k, args, 3, c_cpu, c_x64, N, 1e-5), 0);                         \
+    poly_ctx_destroy(k.ctx);                                                                       \
+    PASS();                                                                                        \
+  }
 
-#define VEC4_PARITY_UNARY(name, op) \
-TEST(x64, vec4_##name) { \
-  int N = 32; K k = make_unary(op, N); \
-  float a[32], b_cpu[32], b_x64[32]; \
-  for (int i = 0; i < N; i++) a[i] = 1.0f + i * 0.5f; \
-  void *args[2] = { a, NULL }; \
-  ASSERT_INT_EQ(check_parity_vec(k, args, 2, b_cpu, b_x64, N, 1e-5), 0); \
-  poly_ctx_destroy(k.ctx); PASS(); \
-}
+#define VEC4_PARITY_UNARY(name, op)                                                                \
+  TEST(x64, vec4_##name) {                                                                         \
+    int N = 32;                                                                                    \
+    K k = make_unary(op, N);                                                                       \
+    float a[32], b_cpu[32], b_x64[32];                                                             \
+    for (int i = 0; i < N; i++)                                                                    \
+      a[i] = 1.0f + i * 0.5f;                                                                      \
+    void *args[2] = {a, NULL};                                                                     \
+    ASSERT_INT_EQ(check_parity_vec(k, args, 2, b_cpu, b_x64, N, 1e-5), 0);                         \
+    poly_ctx_destroy(k.ctx);                                                                       \
+    PASS();                                                                                        \
+  }
 
 VEC4_PARITY_BINOP(add, POLY_OP_ADD)
 VEC4_PARITY_BINOP(sub, POLY_OP_SUB)
@@ -424,27 +503,31 @@ TEST(x64, vec4_chain_mul_add_sqrt) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, l0, poly_arg_none());
   PolyUOp *sq = poly_uop1(ctx, POLY_OP_SQRT, POLY_FLOAT32, add, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, i2, sq, poly_arg_none());
-  PolyUOp *es[2] = { st, range };
+  PolyUOp *es[2] = {st, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, es, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   float a[32], b[32], c_cpu[32], c_x64[32];
-  for (int i = 0; i < N; i++) { a[i] = 1.0f + 0.5f * i; b[i] = 2.0f + 0.5f * i; }
+  for (int i = 0; i < N; i++) {
+    a[i] = 1.0f + 0.5f * i;
+    b[i] = 2.0f + 0.5f * i;
+  }
 
   /* CPU reference */
   memset(c_cpu, 0, sizeof(c_cpu));
-  void *args_cpu[3] = { a, b, c_cpu };
+  void *args_cpu[3] = {a, b, c_cpu};
   ASSERT_INT_EQ(cpu_run(ctx, sink, args_cpu, 3), 0);
 
   /* x64 vec */
   memset(c_x64, 0, sizeof(c_x64));
-  void *args_x64[3] = { a, b, c_x64 };
+  void *args_x64[3] = {a, b, c_x64};
   ASSERT_INT_EQ(x64_run_vec(ctx, sink, args_x64, 3), 0);
 
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(c_x64[i], c_cpu[i], 1e-5);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -468,10 +551,14 @@ TEST(x64, vec4_non_aligned_size) {
   int N = 13;
   K k = make_binop(POLY_OP_ADD, N);
   float a[13], b[13], c_cpu[13], c_x64[13];
-  for (int i = 0; i < N; i++) { a[i] = (float)i; b[i] = (float)(i * 2); }
-  void *args[3] = { a, b, NULL };
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)i;
+    b[i] = (float)(i * 2);
+  }
+  void *args[3] = {a, b, NULL};
   ASSERT_INT_EQ(check_parity_vec(k, args, 3, c_cpu, c_x64, N, 1e-5), 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -485,69 +572,104 @@ TEST(x64, vec4_large_parity) {
   float *b = malloc(N * sizeof(float));
   float *c_cpu = malloc(N * sizeof(float));
   float *c_x64 = malloc(N * sizeof(float));
-  for (int i = 0; i < N; i++) { a[i] = (float)i * 0.01f; b[i] = (float)(N - i) * 0.01f; }
-  void *args[3] = { a, b, NULL };
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)i * 0.01f;
+    b[i] = (float)(N - i) * 0.01f;
+  }
+  void *args[3] = {a, b, NULL};
   ASSERT_INT_EQ(check_parity_vec(k, args, 3, c_cpu, c_x64, N, 1e-4), 0);
-  free(a); free(b); free(c_cpu); free(c_x64);
-  poly_ctx_destroy(k.ctx); PASS();
+  free(a);
+  free(b);
+  free(c_cpu);
+  free(c_x64);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Three-way differential: CPU vs INTERP vs x64 JIT                     */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-static int three_way_parity(PolyCtx *ctx, PolyUOp *sink,
-                            PolyUOp **bufs, void **datas, int n_bufs,
-                            PolyUOp *out_buf, float *out_cpu, float *out_interp,
-                            float *out_x64, int out_numel, float tol) {
+static int three_way_parity(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyUOp **bufs,
+    void **datas,
+    int n_bufs,
+    PolyUOp *out_buf,
+    float *out_cpu,
+    float *out_interp,
+    float *out_x64,
+    int out_numel,
+    float tol
+) {
   PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
   if (!ps) return -1;
 
-  /* Helper: fill slots from buf/data arrays */
-  #define FILL_SLOTS(slot_arr, out_ptr) do { \
-    memset(slot_arr, 0, sizeof(void*) * 16); \
-    for (int _i = 0; _i < ps->n_buf_slots; _i++) \
-      for (int _j = 0; _j < n_bufs; _j++) \
-        if (ps->buf_slots[_i].buf_uop == bufs[_j]) \
-          slot_arr[_i] = (bufs[_j] == out_buf) ? (out_ptr) : datas[_j]; \
-  } while(0)
+/* Helper: fill slots from buf/data arrays */
+#define FILL_SLOTS(slot_arr, out_ptr)                                                              \
+  do {                                                                                             \
+    memset(slot_arr, 0, sizeof(void *) * 16);                                                      \
+    for (int _i = 0; _i < ps->n_buf_slots; _i++)                                                   \
+      for (int _j = 0; _j < n_bufs; _j++)                                                          \
+        if (ps->buf_slots[_i].buf_uop == bufs[_j])                                                 \
+          slot_arr[_i] = (bufs[_j] == out_buf) ? (out_ptr) : datas[_j];                            \
+  } while (0)
 
   /* CPU path */
   PolyExecutableStep *cpu = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
-  if (!cpu) { poly_prepared_step_free(ps); return -2; }
+  if (!cpu) {
+    poly_prepared_step_free(ps);
+    return -2;
+  }
   memset(out_cpu, 0, (size_t)out_numel * sizeof(float));
-  void *slot_cpu[16]; FILL_SLOTS(slot_cpu, out_cpu);
+  void *slot_cpu[16];
+  FILL_SLOTS(slot_cpu, out_cpu);
   int rc = poly_executable_step_run(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
   poly_executable_step_free(cpu);
-  if (rc < 0) { poly_prepared_step_free(ps); return -3; }
+  if (rc < 0) {
+    poly_prepared_step_free(ps);
+    return -3;
+  }
 
   /* INTERP path */
   PolyExecutableStep *interp = poly_lower_step(ctx, ps, POLY_DEVICE_INTERP);
-  if (!interp) { poly_prepared_step_free(ps); return -4; }
+  if (!interp) {
+    poly_prepared_step_free(ps);
+    return -4;
+  }
   memset(out_interp, 0, (size_t)out_numel * sizeof(float));
-  void *slot_interp[16]; FILL_SLOTS(slot_interp, out_interp);
+  void *slot_interp[16];
+  FILL_SLOTS(slot_interp, out_interp);
   rc = poly_executable_step_run(interp, slot_interp, ps->n_buf_slots, NULL, 0);
   poly_executable_step_free(interp);
-  if (rc < 0) { poly_prepared_step_free(ps); return -5; }
+  if (rc < 0) {
+    poly_prepared_step_free(ps);
+    return -5;
+  }
 
   /* x64 JIT path */
   PolyExecutableStep *x64 = poly_lower_step(ctx, ps, POLY_DEVICE_X64_JIT);
-  if (!x64) { poly_prepared_step_free(ps); return -6; }
+  if (!x64) {
+    poly_prepared_step_free(ps);
+    return -6;
+  }
   memset(out_x64, 0, (size_t)out_numel * sizeof(float));
-  void *slot_x64[16]; FILL_SLOTS(slot_x64, out_x64);
+  void *slot_x64[16];
+  FILL_SLOTS(slot_x64, out_x64);
   rc = poly_executable_step_run(x64, slot_x64, ps->n_buf_slots, NULL, 0);
   poly_executable_step_free(x64);
   poly_prepared_step_free(ps);
   if (rc < 0) return -7;
 
-  #undef FILL_SLOTS
+#undef FILL_SLOTS
 
   /* Compare all three */
   for (int i = 0; i < out_numel; i++) {
     float d1 = fabsf(out_cpu[i] - out_interp[i]);
     float d2 = fabsf(out_cpu[i] - out_x64[i]);
-    if (d1 > tol) return 100 + i;  /* CPU vs INTERP mismatch */
-    if (d2 > tol) return 200 + i;  /* CPU vs x64 mismatch */
+    if (d1 > tol) return 100 + i; /* CPU vs INTERP mismatch */
+    if (d2 > tol) return 200 + i; /* CPU vs x64 mismatch */
   }
   return 0;
 }
@@ -570,11 +692,11 @@ TEST(x64, e2e_reduce_sum) {
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 1, 1e-5f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 1, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_x64[0], 36.0f, 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, e2e_reduce_max) {
@@ -591,11 +713,11 @@ TEST(x64, e2e_reduce_max) {
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 1, 1e-5f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 1, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_x64[0], 8.0f, 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, parity_reduce_chain) {
@@ -616,11 +738,11 @@ TEST(x64, parity_reduce_chain) {
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, 1, 1e-4f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, 1, 1e-4f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_x64[0], 136.0f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -659,13 +781,13 @@ TEST(x64, trunc_exec_plan) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, N, 0.0f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, N, 0.0f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f);
   ASSERT_FLOAT_EQ(out_x64[1], -2.0f, 0.0f);
   ASSERT_FLOAT_EQ(out_x64[3], 42.0f, 0.0f);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* TRUNC: truncate toward zero */
@@ -679,7 +801,8 @@ TEST(x64, float_trunc) {
   ASSERT_FLOAT_EQ(c_x64[0], 1.0f, 0.0f);
   ASSERT_FLOAT_EQ(c_x64[1], -2.0f, 0.0f);
   ASSERT_FLOAT_EQ(c_x64[3], 3.0f, 0.0f);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 /* Float CMPEQ: where(a == b, 1.0, 0.0) via three_way_parity */
@@ -698,22 +821,24 @@ TEST(x64, float_cmpeq) {
   PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, one, zero);
   PolyUOp *st = poly_store_val(ctx, out, w);
   PolyUOp *sink = poly_sink1(ctx, st);
-  float da[12] = {1.0f, 2.0f, 3.0f, nan_val, inf_val, -inf_val, 0.0f, -0.0f, nan_val, inf_val, 1.0f, 0.0f};
-  float db[12] = {1.0f, 3.0f, 3.0f, nan_val, inf_val, -inf_val, -0.0f, 0.0f, 1.0f,   -inf_val, 0.0f, 0.0f};
+  float da[12] = {1.0f, 2.0f,  3.0f,    nan_val, inf_val, -inf_val,
+                  0.0f, -0.0f, nan_val, inf_val, 1.0f,    0.0f};
+  float db[12] = {1.0f,  3.0f, 3.0f, nan_val,  inf_val, -inf_val,
+                  -0.0f, 0.0f, 1.0f, -inf_val, 0.0f,    0.0f};
   /* Expected: T, F, T, F(NaN!=NaN), T, T, T(+0==-0), T(-0==+0), F, F, F, T */
   float out_cpu[12], out_interp[12], out_x64[12];
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, N, 0.0f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, N, 0.0f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f);  /* 1.0 == 1.0 */
-  ASSERT_FLOAT_EQ(out_x64[1], 0.0f, 0.0f);  /* 2.0 != 3.0 */
-  ASSERT_FLOAT_EQ(out_x64[3], 0.0f, 0.0f);  /* NaN != NaN (IEEE 754) */
-  ASSERT_FLOAT_EQ(out_x64[4], 1.0f, 0.0f);  /* +Inf == +Inf */
-  ASSERT_FLOAT_EQ(out_x64[6], 1.0f, 0.0f);  /* +0 == -0 */
-  ASSERT_FLOAT_EQ(out_x64[7], 1.0f, 0.0f);  /* -0 == +0 */
-  poly_ctx_destroy(ctx); PASS();
+  ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 0.0f); /* 1.0 == 1.0 */
+  ASSERT_FLOAT_EQ(out_x64[1], 0.0f, 0.0f); /* 2.0 != 3.0 */
+  ASSERT_FLOAT_EQ(out_x64[3], 0.0f, 0.0f); /* NaN != NaN (IEEE 754) */
+  ASSERT_FLOAT_EQ(out_x64[4], 1.0f, 0.0f); /* +Inf == +Inf */
+  ASSERT_FLOAT_EQ(out_x64[6], 1.0f, 0.0f); /* +0 == -0 */
+  ASSERT_FLOAT_EQ(out_x64[7], 1.0f, 0.0f); /* -0 == +0 */
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* Float CMPNE with IEEE edge cases */
@@ -731,22 +856,24 @@ TEST(x64, float_cmpne) {
   PolyUOp *w = poly_alu3(ctx, POLY_OP_WHERE, cmp, one, zero);
   PolyUOp *st = poly_store_val(ctx, out, w);
   PolyUOp *sink = poly_sink1(ctx, st);
-  float da[12] = {1.0f, 2.0f, 3.0f, nan_val, inf_val, -inf_val, 0.0f, -0.0f, nan_val, inf_val, 1.0f, 0.0f};
-  float db[12] = {1.0f, 3.0f, 3.0f, nan_val, inf_val, -inf_val, -0.0f, 0.0f, 1.0f,   -inf_val, 0.0f, 0.0f};
+  float da[12] = {1.0f, 2.0f,  3.0f,    nan_val, inf_val, -inf_val,
+                  0.0f, -0.0f, nan_val, inf_val, 1.0f,    0.0f};
+  float db[12] = {1.0f,  3.0f, 3.0f, nan_val,  inf_val, -inf_val,
+                  -0.0f, 0.0f, 1.0f, -inf_val, 0.0f,    0.0f};
   /* Expected: F, T, F, T(NaN!=NaN), F, F, F(+0==-0), F(-0==+0), T, T, T, F */
   float out_cpu[12], out_interp[12], out_x64[12];
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, N, 0.0f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, N, 0.0f);
   ASSERT_INT_EQ(rc, 0);
-  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 0.0f);  /* 1.0 == 1.0 → NE false */
-  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 0.0f);  /* 2.0 != 3.0 → NE true */
-  ASSERT_FLOAT_EQ(out_x64[3], 1.0f, 0.0f);  /* NaN != NaN → NE true (IEEE 754) */
-  ASSERT_FLOAT_EQ(out_x64[4], 0.0f, 0.0f);  /* +Inf == +Inf → NE false */
-  ASSERT_FLOAT_EQ(out_x64[6], 0.0f, 0.0f);  /* +0 == -0 → NE false */
-  ASSERT_FLOAT_EQ(out_x64[7], 0.0f, 0.0f);  /* -0 == +0 → NE false */
-  poly_ctx_destroy(ctx); PASS();
+  ASSERT_FLOAT_EQ(out_x64[0], 0.0f, 0.0f); /* 1.0 == 1.0 → NE false */
+  ASSERT_FLOAT_EQ(out_x64[1], 1.0f, 0.0f); /* 2.0 != 3.0 → NE true */
+  ASSERT_FLOAT_EQ(out_x64[3], 1.0f, 0.0f); /* NaN != NaN → NE true (IEEE 754) */
+  ASSERT_FLOAT_EQ(out_x64[4], 0.0f, 0.0f); /* +Inf == +Inf → NE false */
+  ASSERT_FLOAT_EQ(out_x64[6], 0.0f, 0.0f); /* +0 == -0 → NE false */
+  ASSERT_FLOAT_EQ(out_x64[7], 0.0f, 0.0f); /* -0 == +0 → NE false */
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -771,13 +898,13 @@ TEST(x64, float_where) {
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, 8, 1e-5f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, 8, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
   /* a[0]=1>0.5 -> a[0]=1; a[1]=-2<0.5 -> b[1]=20 */
   ASSERT_FLOAT_EQ(out_x64[0], 1.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_x64[1], 20.0f, 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, float_cast) {
@@ -797,12 +924,12 @@ TEST(x64, float_cast) {
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 4, 1e-5f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 4, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_x64[0], 3.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_x64[3], 9.0f, 1e-5);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -830,13 +957,13 @@ TEST(x64, e2e_exp2) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 8, 5e-2f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 8, 5e-2f);
   ASSERT_INT_EQ(rc, 0);
   /* Also check against libm reference */
   for (int j = 0; j < 8; j++)
     ASSERT_FLOAT_EQ(out_x64[j], exp2f(da[j]), 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, e2e_log2) {
@@ -851,12 +978,12 @@ TEST(x64, e2e_log2) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 8, 5e-2f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 8, 5e-2f);
   ASSERT_INT_EQ(rc, 0);
   for (int j = 0; j < 8; j++)
     ASSERT_FLOAT_EQ(out_x64[j], log2f(da[j]), 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, e2e_sin) {
@@ -871,12 +998,12 @@ TEST(x64, e2e_sin) {
   float out_cpu[4], out_interp[4], out_x64[4];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 4, 5e-2f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 4, 5e-2f);
   ASSERT_INT_EQ(rc, 0);
   for (int j = 0; j < 4; j++)
     ASSERT_FLOAT_EQ(out_x64[j], sinf(da[j]), 1e-3);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, e2e_exp2_log2_chain) {
@@ -893,12 +1020,12 @@ TEST(x64, e2e_exp2_log2_chain) {
   float out_cpu[8], out_interp[8], out_x64[8];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 8, 5e-2f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 8, 5e-2f);
   ASSERT_INT_EQ(rc, 0);
   for (int j = 0; j < 8; j++)
     ASSERT_FLOAT_EQ(out_x64[j], da[j], 5e-2);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -923,13 +1050,13 @@ TEST(x64, multikernel) {
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, 8, 1e-4f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, 8, 1e-4f);
   ASSERT_INT_EQ(rc, 0);
   /* sum(1..8) = 36, so out[i] = 36 + b[i] */
   ASSERT_FLOAT_EQ(out_x64[0], 46.0f, 1e-4);
   ASSERT_FLOAT_EQ(out_x64[7], 116.0f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, large_n) {
@@ -948,18 +1075,25 @@ TEST(x64, large_n) {
   float *out_cpu = malloc(N * sizeof(float));
   float *out_interp = malloc(N * sizeof(float));
   float *out_x64 = malloc(N * sizeof(float));
-  for (int i = 0; i < N; i++) { da[i] = (float)i; db[i] = (float)(N - i); }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)i;
+    db[i] = (float)(N - i);
+  }
 
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, N, 1e-3f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, N, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_x64[0], (float)N, 1e-3);
 
-  free(da); free(db); free(out_cpu); free(out_interp); free(out_x64);
-  poly_ctx_destroy(ctx); PASS();
+  free(da);
+  free(db);
+  free(out_cpu);
+  free(out_interp);
+  free(out_x64);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -990,23 +1124,34 @@ static bool test_has_fma(void) {
 
 /* Run kernel via x64 JIT with AVX2 caps (max_vec_width=8) */
 static int x64_run_avx2(PolyCtx *ctx, PolyUOp *sink, void **args, int n) {
-  PolyRewriteOpts opts = { .optimize = true, .devectorize = 0 };
+  PolyRewriteOpts opts = {.optimize = true, .devectorize = 0};
   opts.caps.max_vec_width = 8;
   opts.caps.has_mulacc = test_has_fma();
-  int nl; PolyUOp **lin = poly_linearize_ex(ctx, sink, opts, &nl);
+  int nl;
+  PolyUOp **lin = poly_linearize_ex(ctx, sink, opts, &nl);
   if (!lin) return -1;
-  int sz; uint8_t *code = poly_render_x64(lin, nl, &sz);
-  free(lin); if (!code) return -1;
+  int sz;
+  uint8_t *code = poly_render_x64(lin, nl, &sz);
+  free(lin);
+  if (!code) return -1;
   PolyX64Program *p = poly_compile_x64(code, sz);
-  free(code); if (!p) return -1;
+  free(code);
+  if (!p) return -1;
   poly_x64_program_call(p, args, n);
   poly_x64_program_destroy(p);
   return 0;
 }
 
 /* Parity helper: CPU vs AVX2 x64 */
-static int check_parity_avx2(K k, void **args, int n_args,
-                              float *c_cpu, float *c_x64, int N, float tol) {
+static int check_parity_avx2(
+    K k,
+    void **args,
+    int n_args,
+    float *c_cpu,
+    float *c_x64,
+    int N,
+    float tol
+) {
   memset(c_cpu, 0, N * sizeof(float));
   memset(c_x64, 0, N * sizeof(float));
   args[n_args - 1] = c_cpu;
@@ -1019,8 +1164,15 @@ static int check_parity_avx2(K k, void **args, int n_args,
 }
 
 /* Parity: SSE vec4 vs AVX2 vec8 */
-static int check_parity_sse_vs_avx2(K k, void **args, int n_args,
-                                     float *c_sse, float *c_avx, int N, float tol) {
+static int check_parity_sse_vs_avx2(
+    K k,
+    void **args,
+    int n_args,
+    float *c_sse,
+    float *c_avx,
+    int N,
+    float tol
+) {
   memset(c_sse, 0, N * sizeof(float));
   memset(c_avx, 0, N * sizeof(float));
   args[n_args - 1] = c_sse;
@@ -1036,72 +1188,90 @@ TEST(x64, avx2_vecadd) {
   if (!test_has_avx2()) PASS(); /* skip gracefully */
   int N = 64;
   float a[64], b[64], c_cpu[64], c_x64[64];
-  for (int i = 0; i < N; i++) { a[i] = (float)i * 0.5f; b[i] = (float)(N - i) * 0.3f; }
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)i * 0.5f;
+    b[i] = (float)(N - i) * 0.3f;
+  }
   K k = make_binop(POLY_OP_ADD, N);
   void *args[3] = {a, b, NULL};
   int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_vecmul) {
   if (!test_has_avx2()) PASS();
   int N = 64;
   float a[64], b[64], c_cpu[64], c_x64[64];
-  for (int i = 0; i < N; i++) { a[i] = (float)(i + 1) * 0.1f; b[i] = (float)(N - i) * 0.2f; }
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)(i + 1) * 0.1f;
+    b[i] = (float)(N - i) * 0.2f;
+  }
   K k = make_binop(POLY_OP_MUL, N);
   void *args[3] = {a, b, NULL};
   int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-4f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_vecsub) {
   if (!test_has_avx2()) PASS();
   int N = 64;
   float a[64], b[64], c_cpu[64], c_x64[64];
-  for (int i = 0; i < N; i++) { a[i] = (float)i * 1.5f; b[i] = (float)i * 0.5f; }
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)i * 1.5f;
+    b[i] = (float)i * 0.5f;
+  }
   K k = make_binop(POLY_OP_SUB, N);
   void *args[3] = {a, b, NULL};
   int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_neg) {
   if (!test_has_avx2()) PASS();
   int N = 64;
   float a[64], c_cpu[64], c_x64[64];
-  for (int i = 0; i < N; i++) a[i] = (float)i * 0.7f - 20.0f;
+  for (int i = 0; i < N; i++)
+    a[i] = (float)i * 0.7f - 20.0f;
   K k = make_unary(POLY_OP_NEG, N);
   void *args[3] = {a, NULL};
   int rc = check_parity_avx2(k, args, 2, c_cpu, c_x64, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_sqrt) {
   if (!test_has_avx2()) PASS();
   int N = 64;
   float a[64], c_cpu[64], c_x64[64];
-  for (int i = 0; i < N; i++) a[i] = (float)(i + 1) * 0.5f;
+  for (int i = 0; i < N; i++)
+    a[i] = (float)(i + 1) * 0.5f;
   K k = make_unary(POLY_OP_SQRT, N);
   void *args[3] = {a, NULL};
   int rc = check_parity_avx2(k, args, 2, c_cpu, c_x64, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_reciprocal) {
   if (!test_has_avx2()) PASS();
   int N = 64;
   float a[64], c_cpu[64], c_x64[64];
-  for (int i = 0; i < N; i++) a[i] = (float)(i + 1) * 0.3f;
+  for (int i = 0; i < N; i++)
+    a[i] = (float)(i + 1) * 0.3f;
   K k = make_unary(POLY_OP_RECIPROCAL, N);
   void *args[3] = {a, NULL};
   int rc = check_parity_avx2(k, args, 2, c_cpu, c_x64, N, 1e-4f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_reduce_sum) {
@@ -1115,17 +1285,18 @@ TEST(x64, avx2_reduce_sum) {
   PolyUOp *sink = poly_sink1(ctx, st);
 
   float da[64];
-  for (int i = 0; i < 64; i++) da[i] = (float)(i + 1);
+  for (int i = 0; i < 64; i++)
+    da[i] = (float)(i + 1);
   float out_cpu[1], out_interp[1], out_x64[1];
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 2,
-                            out, out_cpu, out_interp, out_x64, 1, 1e-3f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, out_x64, 1, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
   /* sum(1..64) = 2080 */
   ASSERT_FLOAT_EQ(out_x64[0], 2080.0f, 1e-2);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(x64, avx2_non_pow2) {
@@ -1133,14 +1304,18 @@ TEST(x64, avx2_non_pow2) {
   /* N=13: not divisible by 8, exercises masked epilogue */
   int N = 13;
   float a[13], b[13], c_cpu[13], c_x64[13];
-  for (int i = 0; i < N; i++) { a[i] = (float)i; b[i] = (float)(N - i); }
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)i;
+    b[i] = (float)(N - i);
+  }
   K k = make_binop(POLY_OP_ADD, N);
   void *args[3] = {a, b, NULL};
   int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(c_x64[i], (float)N, 1e-5);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_parity_sse) {
@@ -1148,12 +1323,16 @@ TEST(x64, avx2_parity_sse) {
   /* Same kernel forced SSE vs AVX2, identical results */
   int N = 64;
   float a[64], b[64], c_sse[64], c_avx[64];
-  for (int i = 0; i < N; i++) { a[i] = (float)i * 0.5f; b[i] = (float)(N - i) * 0.3f; }
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)i * 0.5f;
+    b[i] = (float)(N - i) * 0.3f;
+  }
   K k = make_binop(POLY_OP_ADD, N);
   void *args[3] = {a, b, NULL};
   int rc = check_parity_sse_vs_avx2(k, args, 3, c_sse, c_avx, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
-  poly_ctx_destroy(k.ctx); PASS();
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_large_n) {
@@ -1163,13 +1342,20 @@ TEST(x64, avx2_large_n) {
   float *b = malloc(N * sizeof(float));
   float *c_cpu = malloc(N * sizeof(float));
   float *c_x64 = malloc(N * sizeof(float));
-  for (int i = 0; i < N; i++) { a[i] = (float)(i % 1000) * 0.001f; b[i] = 1.0f; }
+  for (int i = 0; i < N; i++) {
+    a[i] = (float)(i % 1000) * 0.001f;
+    b[i] = 1.0f;
+  }
   K k = make_binop(POLY_OP_ADD, N);
   void *args[3] = {a, b, NULL};
   int rc = check_parity_avx2(k, args, 3, c_cpu, c_x64, N, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
-  free(a); free(b); free(c_cpu); free(c_x64);
-  poly_ctx_destroy(k.ctx); PASS();
+  free(a);
+  free(b);
+  free(c_cpu);
+  free(c_x64);
+  poly_ctx_destroy(k.ctx);
+  PASS();
 }
 
 TEST(x64, avx2_fma_chain) {
@@ -1187,17 +1373,20 @@ TEST(x64, avx2_fma_chain) {
 
   float da[64], db[64];
   float out_cpu[64], out_interp[64], out_x64[64];
-  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1) * 0.1f; db[i] = 2.0f; }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i + 1) * 0.1f;
+    db[i] = 2.0f;
+  }
 
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = three_way_parity(ctx, sink, bufs, datas, 3,
-                            out, out_cpu, out_interp, out_x64, N, 1e-3f);
+  int rc = three_way_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, out_x64, N, 1e-3f);
   ASSERT_INT_EQ(rc, 0);
   /* a[0]*b[0]+a[0] = 0.1*2.0+0.1 = 0.3 */
   ASSERT_FLOAT_EQ(out_x64[0], 0.3f, 1e-4);
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -1228,20 +1417,25 @@ TEST(x64, sin_then_neg_parity) {
   PolyUOp *ng = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, lb, poly_arg_none());
   PolyUOp *st1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, io1, s, poly_arg_none());
   PolyUOp *st2 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, io2, ng, poly_arg_none());
-  PolyUOp *end_srcs[3] = { st1, st2, range };
+  PolyUOp *end_srcs[3] = {st1, st2, range};
   PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 3, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   float a[16], b[16], o1_cpu[16], o2_cpu[16], o1_x64[16], o2_x64[16];
-  for (int i = 0; i < N; i++) { a[i] = 0.5f * (float)(i + 1); b[i] = (float)(i + 1); }
+  for (int i = 0; i < N; i++) {
+    a[i] = 0.5f * (float)(i + 1);
+    b[i] = (float)(i + 1);
+  }
 
   /* CPU reference */
-  memset(o1_cpu, 0, sizeof(o1_cpu)); memset(o2_cpu, 0, sizeof(o2_cpu));
+  memset(o1_cpu, 0, sizeof(o1_cpu));
+  memset(o2_cpu, 0, sizeof(o2_cpu));
   void *args_cpu[4] = {a, b, o1_cpu, o2_cpu};
   ASSERT_INT_EQ(cpu_run(ctx, sink, args_cpu, 4), 0);
 
   /* x64 */
-  memset(o1_x64, 0, sizeof(o1_x64)); memset(o2_x64, 0, sizeof(o2_x64));
+  memset(o1_x64, 0, sizeof(o1_x64));
+  memset(o2_x64, 0, sizeof(o2_x64));
   void *args_x64[4] = {a, b, o1_x64, o2_x64};
   ASSERT_INT_EQ(x64_run(ctx, sink, args_x64, 4), 0);
 
@@ -1253,7 +1447,8 @@ TEST(x64, sin_then_neg_parity) {
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(o2_x64[i], o2_cpu[i], 1e-6);
 
-  poly_ctx_destroy(ctx); PASS();
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 #endif /* POLY_HAS_X64 */

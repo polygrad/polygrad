@@ -11,18 +11,29 @@
 #include "../src/exec_plan.h"
 #include "../src/scheduler.h"
 
-/* ── Helper: run same graph on CPU and INTERP, compare outputs ────────── */
+/* Helper: run same graph on CPU and INTERP, compare outputs */
 
-static int cpu_interp_parity(PolyCtx *ctx, PolyUOp *sink,
-                             PolyUOp **bufs, void **datas, int n_bufs,
-                             PolyUOp *out_buf, float *out_cpu, float *out_interp,
-                             int out_numel, float tol) {
+static int cpu_interp_parity(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyUOp **bufs,
+    void **datas,
+    int n_bufs,
+    PolyUOp *out_buf,
+    float *out_cpu,
+    float *out_interp,
+    int out_numel,
+    float tol
+) {
   PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
   if (!ps) return -1;
 
   /* CPU path */
   PolyExecutableStep *cpu = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
-  if (!cpu) { poly_prepared_step_free(ps); return -2; }
+  if (!cpu) {
+    poly_prepared_step_free(ps);
+    return -2;
+  }
   memset(out_cpu, 0, (size_t)out_numel * sizeof(float));
   void *slot_cpu[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
@@ -33,11 +44,17 @@ static int cpu_interp_parity(PolyCtx *ctx, PolyUOp *sink,
   }
   int rc = poly_executable_step_run(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
   poly_executable_step_free(cpu);
-  if (rc < 0) { poly_prepared_step_free(ps); return -3; }
+  if (rc < 0) {
+    poly_prepared_step_free(ps);
+    return -3;
+  }
 
   /* INTERP path */
   PolyExecutableStep *interp = poly_lower_step(ctx, ps, POLY_DEVICE_INTERP);
-  if (!interp) { poly_prepared_step_free(ps); return -4; }
+  if (!interp) {
+    poly_prepared_step_free(ps);
+    return -4;
+  }
   memset(out_interp, 0, (size_t)out_numel * sizeof(float));
   void *slot_interp[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
@@ -60,7 +77,7 @@ static int cpu_interp_parity(PolyCtx *ctx, PolyUOp *sink,
   return 0;
 }
 
-/* ── Single-kernel: vecadd ─────────────────────────────────────────────── */
+/* Single-kernel: vecadd */
 
 TEST(exec_plan, prepare_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
@@ -105,14 +122,14 @@ TEST(exec_plan, prepare_vecadd) {
   PASS();
 }
 
-/* ── Multi-kernel: reduce -> scalar chain ──────────────────────────────── */
+/* Multi-kernel: reduce -> scalar chain */
 
 TEST(exec_plan, prepare_multikernel) {
   /* c = expand(reshape(sum(a), (1))) + b  -- sum produces intermediate */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t axes[] = {0};
@@ -156,7 +173,7 @@ TEST(exec_plan, prepare_multikernel) {
   PASS();
 }
 
-/* ── Buffer slot metadata ──────────────────────────────────────────────── */
+/* Buffer slot metadata */
 
 TEST(exec_plan, prepare_buf_slot_metadata) {
   PolyCtx *ctx = poly_ctx_new();
@@ -183,7 +200,7 @@ TEST(exec_plan, prepare_buf_slot_metadata) {
   PASS();
 }
 
-/* ── Null/invalid input handling ───────────────────────────────────────── */
+/* Null/invalid input handling */
 
 TEST(exec_plan, prepare_null_safety) {
   PolyCtx *ctx = poly_ctx_new();
@@ -202,7 +219,7 @@ TEST(exec_plan, prepare_null_safety) {
   PASS();
 }
 
-/* ── Graph hash is populated ───────────────────────────────────────────── */
+/* Graph hash is populated */
 
 TEST(exec_plan, prepare_graph_hash) {
   PolyCtx *ctx = poly_ctx_new();
@@ -222,7 +239,7 @@ TEST(exec_plan, prepare_graph_hash) {
   PASS();
 }
 
-/* ── Phase 3: Lower + Run ─────────────────────────────────────────────── */
+/* Phase 3: Lower + Run */
 
 TEST(exec_plan, lower_and_run_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
@@ -249,10 +266,14 @@ TEST(exec_plan, lower_and_run_vecadd) {
   /* Build slot_data array indexed by buf_slot */
   void *slot_data[3];
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
-    else slot_data[i] = NULL;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
+    else
+      slot_data[i] = NULL;
   }
 
   int ret = poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0);
@@ -274,8 +295,8 @@ TEST(exec_plan, lower_and_run_multikernel) {
    * Multi-kernel: reduce produces intermediate. */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t axes[] = {0};
@@ -301,14 +322,20 @@ TEST(exec_plan, lower_and_run_multikernel) {
 
   /* a = [1..8], sum = 36, b = [10..17], out = 36 + b */
   float da[8], db[8], dout[8];
-  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); db[i] = (float)(i + 10); }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i + 1);
+    db[i] = (float)(i + 10);
+  }
   memset(dout, 0, sizeof(dout));
 
   void *slot_data[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
   }
 
   int ret = poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0);
@@ -343,7 +370,7 @@ TEST(exec_plan, lower_matches_old_compile_step) {
   PolyStep *old_step = poly_compile_step(ctx, sink);
   ASSERT_TRUE(old_step != NULL);
   PolyBufferBinding bindings[] = {
-    POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout_old)
+      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout_old)
   };
   ASSERT_INT_EQ(poly_step_run(old_step, bindings, 3), 0);
 
@@ -356,9 +383,12 @@ TEST(exec_plan, lower_matches_old_compile_step) {
 
   void *slot_data[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout_new;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout_new;
   }
   ASSERT_INT_EQ(poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
 
@@ -373,7 +403,7 @@ TEST(exec_plan, lower_matches_old_compile_step) {
   PASS();
 }
 
-/* ── Phase 4: Interpreter backend ─────────────────────────────────────── */
+/* Phase 4: Interpreter backend */
 
 TEST(exec_plan, interp_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
@@ -397,10 +427,14 @@ TEST(exec_plan, interp_vecadd) {
 
   void *slot_data[3];
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
-    else slot_data[i] = NULL;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
+    else
+      slot_data[i] = NULL;
   }
 
   int ret = poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0);
@@ -421,8 +455,8 @@ TEST(exec_plan, interp_reduce) {
   /* sum(a) -> reshape -> expand -> add(b) -> out */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t axes[] = {0};
@@ -442,14 +476,20 @@ TEST(exec_plan, interp_reduce) {
   ASSERT_TRUE(es != NULL);
 
   float da[8], db[8], dout[8];
-  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); db[i] = (float)(i + 10); }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i + 1);
+    db[i] = (float)(i + 10);
+  }
   memset(dout, 0, sizeof(dout));
 
   void *slot_data[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
   }
 
   int ret = poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0);
@@ -487,9 +527,12 @@ TEST(exec_plan, interp_matches_cpu) {
 
   void *slot_cpu[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_cpu[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_cpu[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_cpu[i] = dout_cpu;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_cpu[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_cpu[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_cpu[i] = dout_cpu;
   }
   ASSERT_INT_EQ(poly_executable_step_run(cpu, slot_cpu, ps->n_buf_slots, NULL, 0), 0);
 
@@ -500,9 +543,12 @@ TEST(exec_plan, interp_matches_cpu) {
 
   void *slot_interp[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_interp[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b) slot_interp[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out) slot_interp[i] = dout_interp;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_interp[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_interp[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_interp[i] = dout_interp;
   }
   ASSERT_INT_EQ(poly_executable_step_run(interp, slot_interp, ps->n_buf_slots, NULL, 0), 0);
 
@@ -537,8 +583,10 @@ TEST(exec_plan, interp_transcendental) {
 
   void *slot_data[16] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
   }
 
   ASSERT_INT_EQ(poly_executable_step_run(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
@@ -553,7 +601,7 @@ TEST(exec_plan, interp_transcendental) {
   PASS();
 }
 
-/* ── CPU vs INTERP parity suite ──────────────────────────────────────── */
+/* CPU vs INTERP parity suite */
 
 TEST(exec_plan, parity_chain) {
   /* (a + b) * (a - b) -- 3-op elementwise chain */
@@ -573,8 +621,7 @@ TEST(exec_plan, parity_chain) {
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
-                             out, out_cpu, out_interp, 8, 0.0f);
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, 8, 0.0f);
   ASSERT_INT_EQ(rc, 0);
 
   poly_ctx_destroy(ctx);
@@ -599,8 +646,7 @@ TEST(exec_plan, parity_neg_sqrt) {
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
-                             out, out_cpu, out_interp, 4, 1e-6f);
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, 4, 1e-6f);
   ASSERT_INT_EQ(rc, 0);
 
   poly_ctx_destroy(ctx);
@@ -624,8 +670,7 @@ TEST(exec_plan, parity_reduce_sum) {
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
 
-  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2,
-                             out, out_cpu, out_interp, 1, 1e-5f);
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, 1, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_cpu[0], 36.0f, 1e-5);
 
@@ -651,13 +696,12 @@ TEST(exec_plan, parity_where) {
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
-                             out, out_cpu, out_interp, 4, 0.0f);
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, 4, 0.0f);
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_cpu[0], 10.0f, 1e-6);
-  ASSERT_FLOAT_EQ(out_cpu[1],  2.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out_cpu[1], 2.0f, 1e-6);
   ASSERT_FLOAT_EQ(out_cpu[2], 30.0f, 1e-6);
-  ASSERT_FLOAT_EQ(out_cpu[3],  4.0f, 1e-6);
+  ASSERT_FLOAT_EQ(out_cpu[3], 4.0f, 1e-6);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -678,8 +722,7 @@ TEST(exec_plan, parity_exp2_log2) {
   PolyUOp *bufs[] = {a, out};
   void *datas[] = {da, NULL};
 
-  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2,
-                             out, out_cpu, out_interp, 4, 1e-5f);
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, 4, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
 
   poly_ctx_destroy(ctx);
@@ -690,8 +733,8 @@ TEST(exec_plan, parity_multikernel_reduce_chain) {
   /* sum(a) -> expand -> add(b): multi-kernel with intermediate */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t axes[] = {0};
@@ -705,28 +748,30 @@ TEST(exec_plan, parity_multikernel_reduce_chain) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 
   float da[8], db[8];
-  for (int i = 0; i < N; i++) { da[i] = (float)(i + 1); db[i] = (float)(i * 10); }
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)(i + 1);
+    db[i] = (float)(i * 10);
+  }
   float out_cpu[8], out_interp[8];
   PolyUOp *bufs[] = {a, b, out};
   void *datas[] = {da, db, NULL};
 
-  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3,
-                             out, out_cpu, out_interp, N, 1e-5f);
+  int rc = cpu_interp_parity(ctx, sink, bufs, datas, 3, out, out_cpu, out_interp, N, 1e-5f);
   ASSERT_INT_EQ(rc, 0);
 
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-/* ── Phase 5: Persistent workspace ───────────────────────────────────── */
+/* Phase 5: Persistent workspace */
 
 TEST(exec_plan, workspace_reuse) {
   /* Run same plan 100 times with different data. Persistent intermediates
    * are zeroed each call (reduce accumulators). No per-call allocations. */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a   = poly_buffer(ctx, POLY_FLOAT32, N);
-  PolyUOp *b   = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
 
   int64_t axes[] = {0};
@@ -764,9 +809,12 @@ TEST(exec_plan, workspace_reuse) {
 
     void *slot_data[16] = {0};
     for (int i = 0; i < ps->n_buf_slots; i++) {
-      if (ps->buf_slots[i].buf_uop == a) slot_data[i] = da;
-      else if (ps->buf_slots[i].buf_uop == b) slot_data[i] = db;
-      else if (ps->buf_slots[i].buf_uop == out) slot_data[i] = dout;
+      if (ps->buf_slots[i].buf_uop == a)
+        slot_data[i] = da;
+      else if (ps->buf_slots[i].buf_uop == b)
+        slot_data[i] = db;
+      else if (ps->buf_slots[i].buf_uop == out)
+        slot_data[i] = dout;
     }
 
     int ret = poly_compiled_plan_run(plan, slot_data, ps->n_buf_slots, NULL, 0);
@@ -809,8 +857,10 @@ TEST(exec_plan, workspace_reduce_zeroed) {
   float dout1 = 0;
   void *slot1[8] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot1[i] = da1;
-    else if (ps->buf_slots[i].buf_uop == out) slot1[i] = &dout1;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot1[i] = da1;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot1[i] = &dout1;
   }
   ASSERT_INT_EQ(poly_compiled_plan_run(plan, slot1, ps->n_buf_slots, NULL, 0), 0);
   ASSERT_FLOAT_EQ(dout1, 10.0f, 1e-6);
@@ -820,8 +870,10 @@ TEST(exec_plan, workspace_reduce_zeroed) {
   float dout2 = 0;
   void *slot2[8] = {0};
   for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) slot2[i] = da2;
-    else if (ps->buf_slots[i].buf_uop == out) slot2[i] = &dout2;
+    if (ps->buf_slots[i].buf_uop == a)
+      slot2[i] = da2;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot2[i] = &dout2;
   }
   ASSERT_INT_EQ(poly_compiled_plan_run(plan, slot2, ps->n_buf_slots, NULL, 0), 0);
   ASSERT_FLOAT_EQ(dout2, 100.0f, 1e-5);
@@ -841,10 +893,10 @@ TEST(exec_plan, interp_gated_load_pad_shrink) {
   PolyUOp *x_flat = poly_buffer(ctx, POLY_FLOAT32, 75);
   int64_t x_shape[] = {1, 3, 5, 5};
   PolyUOp *x = poly_reshape(ctx, x_flat, x_shape, 4);
-  int64_t pad_pairs[][2] = {{0,0},{0,0},{1,1},{1,1}};
+  int64_t pad_pairs[][2] = {{0, 0}, {0, 0}, {1, 1}, {1, 1}};
   PolyUOp *xp = poly_pad(ctx, x, pad_pairs, 4);
-  int64_t s1_pairs[][2] = {{0,1},{0,1},{0,5},{0,5}};
-  int64_t s2_pairs[][2] = {{0,1},{0,1},{0,5},{1,6}};
+  int64_t s1_pairs[][2] = {{0, 1}, {0, 1}, {0, 5}, {0, 5}};
+  int64_t s2_pairs[][2] = {{0, 1}, {0, 1}, {0, 5}, {1, 6}};
   PolyUOp *s1 = poly_shrink(ctx, xp, s1_pairs, 4);
   PolyUOp *s2 = poly_shrink(ctx, xp, s2_pairs, 4);
   int64_t out_shape[] = {1, 2, 5, 5};
@@ -858,15 +910,18 @@ TEST(exec_plan, interp_gated_load_pad_shrink) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
   float x_d[75];
-  for (int i = 0; i < 75; i++) x_d[i] = (float)(i + 1);
+  for (int i = 0; i < 75; i++)
+    x_d[i] = (float)(i + 1);
   float out_cpu[1], out_interp[1];
-  PolyUOp *bufs[] = { x_flat, out };
-  void *datas[] = { x_d, NULL };
+  PolyUOp *bufs[] = {x_flat, out};
+  void *datas[] = {x_d, NULL};
 
   int rc = cpu_interp_parity(ctx, sink, bufs, datas, 2, out, out_cpu, out_interp, 1, 1e-5f);
   if (rc != 0)
-    fprintf(stderr, "  gated_load: cpu=%.1f interp=%.1f rc=%d\n",
-            (double)out_cpu[0], (double)out_interp[0], rc);
+    fprintf(
+        stderr, "  gated_load: cpu=%.1f interp=%.1f rc=%d\n", (double)out_cpu[0],
+        (double)out_interp[0], rc
+    );
   ASSERT_INT_EQ(rc, 0);
   ASSERT_FLOAT_EQ(out_cpu[0], 740.0f, 1e-5);
 

@@ -10,7 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ── Little-endian helpers ────────────────────────────────────────────── */
+/* Little-endian helpers */
 
 static void write_le32(uint8_t *dst, uint32_t v) {
   dst[0] = (uint8_t)(v);
@@ -20,16 +20,20 @@ static void write_le32(uint8_t *dst, uint32_t v) {
 }
 
 static uint32_t read_le32(const uint8_t *src) {
-  return (uint32_t)src[0] | ((uint32_t)src[1] << 8) |
-         ((uint32_t)src[2] << 16) | ((uint32_t)src[3] << 24);
+  return (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16) |
+         ((uint32_t)src[3] << 24);
 }
 
-/* ── Encode ──────────────────────────────────────────────────────────── */
+/* Encode */
 
-uint8_t *poly_bundle_encode(const uint8_t *ir_data, int ir_len,
-                            const uint8_t *weights_data, int weights_len,
-                            const char *metadata_json,
-                            int *out_len) {
+uint8_t *poly_bundle_encode(
+    const uint8_t *ir_data,
+    int ir_len,
+    const uint8_t *weights_data,
+    int weights_len,
+    const char *metadata_json,
+    int *out_len
+) {
   if (!ir_data || ir_len <= 0) {
     fprintf(stderr, "poly_bundle_encode: IR section is required\n");
     if (out_len) *out_len = 0;
@@ -47,47 +51,61 @@ uint8_t *poly_bundle_encode(const uint8_t *ir_data, int ir_len,
    *   header: 8 (magic) + 4 (version) + 4 (flags) + 4 (n_sections) = 20
    *   per section: 4 (type) + 4 (length) + data */
   int total = 20;
-  total += 8 + ir_len;  /* IR section header + data */
-  if (weights_data && weights_len > 0)
-    total += 8 + weights_len;
-  if (meta_len > 0)
-    total += 8 + meta_len;
+  total += 8 + ir_len; /* IR section header + data */
+  if (weights_data && weights_len > 0) total += 8 + weights_len;
+  if (meta_len > 0) total += 8 + meta_len;
 
   uint8_t *buf = malloc((size_t)total);
-  if (!buf) { if (out_len) *out_len = 0; return NULL; }
+  if (!buf) {
+    if (out_len) *out_len = 0;
+    return NULL;
+  }
 
   int pos = 0;
 
   /* Header */
-  memcpy(buf + pos, POLY_BUNDLE_MAGIC, 8); pos += 8;
-  write_le32(buf + pos, POLY_BUNDLE_VERSION); pos += 4;
-  write_le32(buf + pos, 0); pos += 4; /* flags */
-  write_le32(buf + pos, (uint32_t)n_sections); pos += 4;
+  memcpy(buf + pos, POLY_BUNDLE_MAGIC, 8);
+  pos += 8;
+  write_le32(buf + pos, POLY_BUNDLE_VERSION);
+  pos += 4;
+  write_le32(buf + pos, 0);
+  pos += 4; /* flags */
+  write_le32(buf + pos, (uint32_t)n_sections);
+  pos += 4;
 
   /* IR section */
-  write_le32(buf + pos, POLY_BUNDLE_IR); pos += 4;
-  write_le32(buf + pos, (uint32_t)ir_len); pos += 4;
-  memcpy(buf + pos, ir_data, (size_t)ir_len); pos += ir_len;
+  write_le32(buf + pos, POLY_BUNDLE_IR);
+  pos += 4;
+  write_le32(buf + pos, (uint32_t)ir_len);
+  pos += 4;
+  memcpy(buf + pos, ir_data, (size_t)ir_len);
+  pos += ir_len;
 
   /* Weights section (optional) */
   if (weights_data && weights_len > 0) {
-    write_le32(buf + pos, POLY_BUNDLE_WEIGHTS); pos += 4;
-    write_le32(buf + pos, (uint32_t)weights_len); pos += 4;
-    memcpy(buf + pos, weights_data, (size_t)weights_len); pos += weights_len;
+    write_le32(buf + pos, POLY_BUNDLE_WEIGHTS);
+    pos += 4;
+    write_le32(buf + pos, (uint32_t)weights_len);
+    pos += 4;
+    memcpy(buf + pos, weights_data, (size_t)weights_len);
+    pos += weights_len;
   }
 
   /* Metadata section (optional) */
   if (meta_len > 0) {
-    write_le32(buf + pos, POLY_BUNDLE_METADATA); pos += 4;
-    write_le32(buf + pos, (uint32_t)meta_len); pos += 4;
-    memcpy(buf + pos, metadata_json, (size_t)meta_len); pos += meta_len;
+    write_le32(buf + pos, POLY_BUNDLE_METADATA);
+    pos += 4;
+    write_le32(buf + pos, (uint32_t)meta_len);
+    pos += 4;
+    memcpy(buf + pos, metadata_json, (size_t)meta_len);
+    pos += meta_len;
   }
 
   if (out_len) *out_len = pos;
   return buf;
 }
 
-/* ── Decode ──────────────────────────────────────────────────────────── */
+/* Decode */
 
 int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out) {
   if (!data || !out) return -1;
@@ -121,31 +139,35 @@ int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out) {
       fprintf(stderr, "poly_bundle_decode: truncated section header at offset %d\n", pos);
       return -1;
     }
-    uint32_t stype = read_le32(data + pos); pos += 4;
-    uint32_t slen = read_le32(data + pos); pos += 4;
+    uint32_t stype = read_le32(data + pos);
+    pos += 4;
+    uint32_t slen = read_le32(data + pos);
+    pos += 4;
 
     if (pos + (int)slen > len) {
-      fprintf(stderr, "poly_bundle_decode: section %u truncated (need %u, have %d)\n",
-              stype, slen, len - pos);
+      fprintf(
+          stderr, "poly_bundle_decode: section %u truncated (need %u, have %d)\n", stype, slen,
+          len - pos
+      );
       return -1;
     }
 
     switch (stype) {
-      case POLY_BUNDLE_IR:
-        out->ir_data = data + pos;
-        out->ir_len = (int)slen;
-        break;
-      case POLY_BUNDLE_WEIGHTS:
-        out->weights_data = data + pos;
-        out->weights_len = (int)slen;
-        break;
-      case POLY_BUNDLE_METADATA:
-        out->metadata_json = (const char *)(data + pos);
-        out->metadata_len = (int)slen;
-        break;
-      default:
-        /* Unknown section: skip (forward compatibility) */
-        break;
+    case POLY_BUNDLE_IR:
+      out->ir_data = data + pos;
+      out->ir_len = (int)slen;
+      break;
+    case POLY_BUNDLE_WEIGHTS:
+      out->weights_data = data + pos;
+      out->weights_len = (int)slen;
+      break;
+    case POLY_BUNDLE_METADATA:
+      out->metadata_json = (const char *)(data + pos);
+      out->metadata_len = (int)slen;
+      break;
+    default:
+      /* Unknown section: skip (forward compatibility) */
+      break;
     }
     pos += (int)slen;
   }
@@ -158,15 +180,21 @@ int poly_bundle_decode(const uint8_t *data, int len, PolyBundleSections *out) {
   return 0;
 }
 
-/* ── Instance convenience ─────────────────────────────────────────────── */
+/* Instance convenience */
 
 uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len) {
-  if (!inst) { if (out_len) *out_len = 0; return NULL; }
+  if (!inst) {
+    if (out_len) *out_len = 0;
+    return NULL;
+  }
 
   /* Export IR */
   int ir_len = 0;
   uint8_t *ir_data = poly_instance_export_ir(inst, &ir_len);
-  if (!ir_data) { if (out_len) *out_len = 0; return NULL; }
+  if (!ir_data) {
+    if (out_len) *out_len = 0;
+    return NULL;
+  }
 
   /* Export weights (safetensors) */
   int weights_len = 0;
@@ -174,10 +202,10 @@ uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len) {
   /* weights_data may be NULL if no params -- that's ok */
 
   /* Encode bundle */
-  uint8_t *bundle = poly_bundle_encode(ir_data, ir_len,
-                                        weights_data, weights_len,
-                                        NULL, /* no metadata yet */
-                                        out_len);
+  uint8_t *bundle = poly_bundle_encode(
+      ir_data, ir_len, weights_data, weights_len, NULL, /* no metadata yet */
+      out_len
+  );
   free(ir_data);
   free(weights_data);
   return bundle;
@@ -185,9 +213,9 @@ uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len) {
 
 PolyInstance *poly_instance_from_bundle(const uint8_t *data, int len) {
   PolyBundleSections sections;
-  if (poly_bundle_decode(data, len, &sections) != 0)
-    return NULL;
+  if (poly_bundle_decode(data, len, &sections) != 0) return NULL;
 
-  return poly_instance_from_ir(sections.ir_data, sections.ir_len,
-                               sections.weights_data, sections.weights_len);
+  return poly_instance_from_ir(
+      sections.ir_data, sections.ir_len, sections.weights_data, sections.weights_len
+  );
 }

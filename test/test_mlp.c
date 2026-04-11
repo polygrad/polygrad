@@ -9,21 +9,18 @@
 #include <stdlib.h>
 #include <math.h>
 
-/* ── Helper: build MLP spec JSON ─────────────────────────────────────── */
+/* Helper: build MLP spec JSON */
 
-static const char *simple_mlp_spec =
-  "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
-  "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
+static const char *simple_mlp_spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
+                                     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
-static const char *no_bias_spec =
-  "{\"layers\":[3,2],\"activation\":\"none\",\"bias\":false,"
-  "\"loss\":\"none\",\"batch_size\":1,\"seed\":42}";
+static const char *no_bias_spec = "{\"layers\":[3,2],\"activation\":\"none\",\"bias\":false,"
+                                  "\"loss\":\"none\",\"batch_size\":1,\"seed\":42}";
 
-/* ── Tests ───────────────────────────────────────────────────────────── */
+/* Tests */
 
 TEST(mlp, create_simple) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
-                                          (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
   /* 2 weights + 2 biases = 4 params */
@@ -41,29 +38,28 @@ TEST(mlp, create_simple) {
 
   ndim = poly_instance_param_shape(inst, 0, shape, 8);
   ASSERT_INT_EQ(ndim, 2);
-  ASSERT_INT_EQ((int)shape[0], 4);  /* out_dim */
-  ASSERT_INT_EQ((int)shape[1], 2);  /* in_dim */
+  ASSERT_INT_EQ((int)shape[0], 4); /* out_dim */
+  ASSERT_INT_EQ((int)shape[1], 2); /* in_dim */
 
   ndim = poly_instance_param_shape(inst, 1, shape, 8);
   ASSERT_INT_EQ(ndim, 1);
-  ASSERT_INT_EQ((int)shape[0], 4);  /* out_dim */
+  ASSERT_INT_EQ((int)shape[0], 4); /* out_dim */
 
   ndim = poly_instance_param_shape(inst, 2, shape, 8);
   ASSERT_INT_EQ(ndim, 2);
-  ASSERT_INT_EQ((int)shape[0], 1);  /* out_dim */
-  ASSERT_INT_EQ((int)shape[1], 4);  /* in_dim */
+  ASSERT_INT_EQ((int)shape[0], 1); /* out_dim */
+  ASSERT_INT_EQ((int)shape[1], 4); /* in_dim */
 
   ndim = poly_instance_param_shape(inst, 3, shape, 8);
   ASSERT_INT_EQ(ndim, 1);
-  ASSERT_INT_EQ((int)shape[0], 1);  /* out_dim */
+  ASSERT_INT_EQ((int)shape[0], 1); /* out_dim */
 
   poly_instance_free(inst);
   PASS();
 }
 
 TEST(mlp, create_no_bias) {
-  PolyInstance *inst = poly_mlp_from_json(no_bias_spec,
-                                          (int)strlen(no_bias_spec));
+  PolyInstance *inst = poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec));
   ASSERT_NOT_NULL(inst);
 
   /* 1 weight, no bias */
@@ -73,8 +69,8 @@ TEST(mlp, create_no_bias) {
   int64_t shape[8];
   int ndim = poly_instance_param_shape(inst, 0, shape, 8);
   ASSERT_INT_EQ(ndim, 2);
-  ASSERT_INT_EQ((int)shape[0], 2);  /* out_dim */
-  ASSERT_INT_EQ((int)shape[1], 3);  /* in_dim */
+  ASSERT_INT_EQ((int)shape[0], 2); /* out_dim */
+  ASSERT_INT_EQ((int)shape[1], 3); /* in_dim */
 
   poly_instance_free(inst);
   PASS();
@@ -82,10 +78,8 @@ TEST(mlp, create_no_bias) {
 
 TEST(mlp, deterministic_init) {
   /* Same seed should produce identical weights */
-  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec,
-                                           (int)strlen(simple_mlp_spec));
-  PolyInstance *inst2 = poly_mlp_from_json(simple_mlp_spec,
-                                           (int)strlen(simple_mlp_spec));
+  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst2 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -103,14 +97,11 @@ TEST(mlp, deterministic_init) {
 }
 
 TEST(mlp, cross_seed_divergence) {
-  const char *spec_seed99 =
-    "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
-    "\"loss\":\"mse\",\"batch_size\":1,\"seed\":99}";
+  const char *spec_seed99 = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"
+                            "\"loss\":\"mse\",\"batch_size\":1,\"seed\":99}";
 
-  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec,
-                                           (int)strlen(simple_mlp_spec));
-  PolyInstance *inst2 = poly_mlp_from_json(spec_seed99,
-                                           (int)strlen(spec_seed99));
+  PolyInstance *inst1 = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  PolyInstance *inst2 = poly_mlp_from_json(spec_seed99, (int)strlen(spec_seed99));
   ASSERT_NOT_NULL(inst1);
   ASSERT_NOT_NULL(inst2);
 
@@ -121,7 +112,10 @@ TEST(mlp, cross_seed_divergence) {
   /* At least one weight should differ */
   int any_diff = 0;
   for (int64_t i = 0; i < numel1; i++) {
-    if (w1[i] != w2[i]) { any_diff = 1; break; }
+    if (w1[i] != w2[i]) {
+      any_diff = 1;
+      break;
+    }
   }
   ASSERT_TRUE(any_diff);
 
@@ -132,8 +126,7 @@ TEST(mlp, cross_seed_divergence) {
 
 TEST(mlp, kaiming_bounds) {
   /* Kaiming init: values should be within [-sqrt(6/fan_in), +sqrt(6/fan_in)] */
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
-                                          (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
   /* Layer 0 weight: fan_in = 2, bound = sqrt(6/2) = sqrt(3) ~ 1.732 */
@@ -155,12 +148,11 @@ TEST(mlp, kaiming_bounds) {
 }
 
 TEST(mlp, forward_produces_output) {
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
-                                          (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
-  float x[] = { 1.0f, 2.0f };
-  PolyIOBinding inputs[] = { { "x", x } };
+  float x[] = {1.0f, 2.0f};
+  PolyIOBinding inputs[] = {{"x", x}};
 
   int ret = poly_instance_forward(inst, inputs, 1);
   ASSERT_INT_EQ(ret, 0);
@@ -173,7 +165,7 @@ TEST(mlp, forward_produces_output) {
       int64_t numel;
       float *out = poly_instance_buf_data(inst, i, &numel);
       ASSERT_NOT_NULL(out);
-      ASSERT_INT_EQ((int)numel, 1);  /* batch=1, out_dim=1 */
+      ASSERT_INT_EQ((int)numel, 1); /* batch=1, out_dim=1 */
       /* Output should be finite */
       ASSERT_TRUE(isfinite(out[0]));
       found_output = 1;
@@ -188,12 +180,11 @@ TEST(mlp, forward_produces_output) {
 
 TEST(mlp, forward_deterministic) {
   /* Same instance, same input -> same output */
-  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec,
-                                          (int)strlen(simple_mlp_spec));
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
   ASSERT_NOT_NULL(inst);
 
-  float x[] = { 1.0f, 2.0f };
-  PolyIOBinding inputs[] = { { "x", x } };
+  float x[] = {1.0f, 2.0f};
+  PolyIOBinding inputs[] = {{"x", x}};
 
   poly_instance_forward(inst, inputs, 1);
 
@@ -247,23 +238,21 @@ TEST(mlp, null_and_invalid) {
 
 TEST(mlp, train_single_layer) {
   /* Single-layer MLP: 2 -> 1 with MSE */
-  const char *spec =
-    "{\"layers\":[2,1],\"activation\":\"none\",\"bias\":true,"
-    "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
+  const char *spec = "{\"layers\":[2,1],\"activation\":\"none\",\"bias\":true,"
+                     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
   PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   /* Training data: x=[1, 2], y=[5] (target: w=[1,2], b=0 gives 5) */
-  float x[] = { 1.0f, 2.0f };
-  float y[] = { 5.0f };
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -289,22 +278,20 @@ TEST(mlp, train_multi_layer) {
    * Regression test for chained-reduction codegen bug where CONST(0)
    * pseudo-ranges from singleton dims entered REDUCE sources, producing
    * END(CONST) that corrupted scope depth in the C renderer. */
-  const char *spec =
-    "{\"layers\":[1,4,1],\"activation\":\"relu\",\"bias\":true,"
-    "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
+  const char *spec = "{\"layers\":[1,4,1],\"activation\":\"relu\",\"bias\":true,"
+                     "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42}";
 
   PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
 
   /* Configure SGD */
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 1.0f };
-  float y[] = { 2.0f };
+  float x[] = {1.0f};
+  float y[] = {2.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -327,22 +314,20 @@ TEST(mlp, train_multi_layer) {
 
 TEST(mlp, train_cross_entropy) {
   /* 3-class classification: 2 -> 4 -> 3 with cross-entropy loss */
-  const char *spec =
-    "{\"layers\":[2,4,3],\"activation\":\"relu\",\"bias\":true,"
-    "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
+  const char *spec = "{\"layers\":[2,4,3],\"activation\":\"relu\",\"bias\":true,"
+                     "\"loss\":\"cross_entropy\",\"batch_size\":1,\"seed\":42}";
 
   PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
 
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   /* x=[1, 0], target=class 1 (one-hot: [0, 1, 0]) */
-  float x[] = { 1.0f, 0.0f };
-  float y[] = { 0.0f, 1.0f, 0.0f };
+  float x[] = {1.0f, 0.0f};
+  float y[] = {0.0f, 1.0f, 0.0f};
   PolyIOBinding io[] = {
-    { "x", x },
-    { "y", y },
+      {"x", x},
+      {"y", y},
   };
 
   float first_loss = -1.0f;
@@ -364,18 +349,16 @@ TEST(mlp, train_cross_entropy) {
 
 TEST(mlp, train_batch2_mse) {
   /* batch_size=2: 2 -> 3 -> 2, relu, MSE (P0 regression) */
-  const char *spec =
-    "{\"layers\":[2,3,2],\"activation\":\"relu\",\"bias\":false,"
-    "\"loss\":\"mse\",\"batch_size\":2,\"seed\":42}";
+  const char *spec = "{\"layers\":[2,3,2],\"activation\":\"relu\",\"bias\":false,"
+                     "\"loss\":\"mse\",\"batch_size\":2,\"seed\":42}";
 
   PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
-  float x[] = { 0.5f, 0.5f,  0.5f, 0.5f };
-  float y[] = { 0.3f, 0.3f,  0.3f, 0.3f };
-  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+  float x[] = {0.5f, 0.5f, 0.5f, 0.5f};
+  float y[] = {0.3f, 0.3f, 0.3f, 0.3f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
 
   float first_loss = -1.0f, prev_loss = 1e10f;
   for (int step = 0; step < 50; step++) {
@@ -392,20 +375,20 @@ TEST(mlp, train_batch2_mse) {
 
 TEST(mlp, train_batch4_cross_entropy) {
   /* batch_size=4: 4 -> 8 -> 3, relu, cross-entropy (P0 regression) */
-  const char *spec =
-    "{\"layers\":[4,8,3],\"activation\":\"relu\",\"bias\":true,"
-    "\"loss\":\"cross_entropy\",\"batch_size\":4,\"seed\":42}";
+  const char *spec = "{\"layers\":[4,8,3],\"activation\":\"relu\",\"bias\":true,"
+                     "\"loss\":\"cross_entropy\",\"batch_size\":4,\"seed\":42}";
 
   PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
   ASSERT_NOT_NULL(inst);
-  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD,
-                               0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
+  poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f);
 
   float x[4 * 4], y[4 * 3];
-  for (int i = 0; i < 16; i++) x[i] = (float)(i % 7) * 0.1f;
+  for (int i = 0; i < 16; i++)
+    x[i] = (float)(i % 7) * 0.1f;
   memset(y, 0, sizeof(y));
-  for (int i = 0; i < 4; i++) y[i * 3 + (i % 3)] = 1.0f;
-  PolyIOBinding io[] = { { "x", x }, { "y", y } };
+  for (int i = 0; i < 4; i++)
+    y[i * 3 + (i % 3)] = 1.0f;
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
 
   float first_loss = -1.0f, prev_loss = 1e10f;
   for (int step = 0; step < 30; step++) {

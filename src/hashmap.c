@@ -31,12 +31,16 @@ PolyMap *poly_map_new(size_t initial_cap) {
   if (initial_cap < 16) initial_cap = 16;
   /* round up to power of 2 */
   size_t cap = 1;
-  while (cap < initial_cap) cap <<= 1;
+  while (cap < initial_cap)
+    cap <<= 1;
 
   PolyMap *m = malloc(sizeof(PolyMap));
   if (!m) return NULL;
   m->entries = calloc(cap, sizeof(PolyMapEntry));
-  if (!m->entries) { free(m); return NULL; }
+  if (!m->entries) {
+    free(m);
+    return NULL;
+  }
   m->cap = cap;
   m->len = 0;
   return m;
@@ -53,9 +57,12 @@ size_t poly_map_len(PolyMap *m) {
 
 static void map_grow(PolyMap *m);
 
-void *poly_map_get(PolyMap *m, uint32_t hash, const void *key,
-                   bool (*eq)(const void *a, const void *b))
-{
+void *poly_map_get(
+    PolyMap *m,
+    uint32_t hash,
+    const void *key,
+    bool (*eq)(const void *a, const void *b)
+) {
   size_t slot = hash & (m->cap - 1);
   size_t dist = 0;
   for (;;) {
@@ -68,13 +75,17 @@ void *poly_map_get(PolyMap *m, uint32_t hash, const void *key,
   }
 }
 
-void poly_map_set(PolyMap *m, uint32_t hash, const void *key, void *value,
-                  bool (*eq)(const void *a, const void *b))
-{
+void poly_map_set(
+    PolyMap *m,
+    uint32_t hash,
+    const void *key,
+    void *value,
+    bool (*eq)(const void *a, const void *b)
+) {
   if (m->len * 4 >= m->cap * 3) map_grow(m);
 
   size_t slot = hash & (m->cap - 1);
-  PolyMapEntry incoming = { hash, key, value, true };
+  PolyMapEntry incoming = {hash, key, value, true};
   size_t dist = 0;
 
   for (;;) {
@@ -102,9 +113,12 @@ void poly_map_set(PolyMap *m, uint32_t hash, const void *key, void *value,
   }
 }
 
-void poly_map_remove(PolyMap *m, uint32_t hash, const void *key,
-                     bool (*eq)(const void *a, const void *b))
-{
+void poly_map_remove(
+    PolyMap *m,
+    uint32_t hash,
+    const void *key,
+    bool (*eq)(const void *a, const void *b)
+) {
   size_t slot = hash & (m->cap - 1);
   size_t dist = 0;
   for (;;) {
@@ -137,8 +151,7 @@ void poly_map_clear(PolyMap *m) {
 
 void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata) {
   for (size_t i = 0; i < m->cap; i++) {
-    if (m->entries[i].occupied)
-      fn(m->entries[i].key, m->entries[i].value, userdata);
+    if (m->entries[i].occupied) fn(m->entries[i].key, m->entries[i].value, userdata);
   }
 }
 
