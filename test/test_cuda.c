@@ -441,7 +441,7 @@ static int build_cuda_bindings(PolyBufferBinding *out, PolyUOp **bufs, float **h
     else
       poly_cuda_memset(dptr, 0, nbytes);
     out[i].buffer = bufs[i];
-    out[i].handle = (PolyBufferHandle){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
+    out[i].handle = (PolyBuffer){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
   }
   return 0;
 }

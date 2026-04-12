@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include "utils.h"
 
 /* String builder */
 
@@ -68,12 +69,6 @@ typedef struct {
   int cap;
 } HipStrMap;
 
-static uint32_t hip_ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  v = ((v >> 16) ^ v) * 0x45d9f3bU;
-  v = ((v >> 16) ^ v) * 0x45d9f3bU;
-  return (uint32_t)((v >> 16) ^ v);
-}
 
 static void hsmap_init(HipStrMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
@@ -82,7 +77,7 @@ static void hsmap_init(HipStrMap *m, int n) {
 }
 
 static void hsmap_set(HipStrMap *m, PolyUOp *key, char *val) {
-  uint32_t h = hip_ptr_hash(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h] && m->keys[h] != key)
     h = (h + 1) % m->cap;
   if (m->keys[h] == key) free(m->vals[h]);
@@ -91,7 +86,7 @@ static void hsmap_set(HipStrMap *m, PolyUOp *key, char *val) {
 }
 
 static char *hsmap_get(HipStrMap *m, PolyUOp *key) {
-  uint32_t h = hip_ptr_hash(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
     if (m->keys[h] == key) return m->vals[h];
     h = (h + 1) % m->cap;

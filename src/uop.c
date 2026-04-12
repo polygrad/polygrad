@@ -6,6 +6,7 @@
  */
 
 #include "polygrad.h"
+#include "utils.h"
 #include "arena.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -188,6 +189,7 @@ struct PolyCtx {
   PolyMap *cse;
   PolyMap *kernel_cache; /* computation UOp* → PolyCachedKernel* (rendered bytes) */
   PolyMap *shape_cache; /* UOp* → ShapeCacheEntry* (lazy shape cache) */
+  PolyMap *buffers; /* BUFFER UOp* → PolyBuffer*, side table for realize */
   /* Named buffer registry */
   PolyRegEntry **entries; /* malloc'd array of ptrs to arena-allocated entries */
   int n_entries;
@@ -211,12 +213,15 @@ PolyCtx *poly_ctx_new(void) {
   ctx->cse = poly_map_new(256);
   ctx->kernel_cache = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
+  ctx->buffers = poly_map_new(64);
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache || !ctx->name_map) {
+  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache || !ctx->buffers ||
+      !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->kernel_cache) poly_map_destroy(ctx->kernel_cache);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
+    if (ctx->buffers) poly_map_destroy(ctx->buffers);
     if (ctx->name_map) poly_map_destroy(ctx->name_map);
     free(ctx);
     return NULL;
@@ -247,6 +252,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
   poly_map_destroy(ctx->shape_cache); /* entries are arena-owned, no per-entry free */
+  poly_map_destroy(ctx->buffers); /* handle values are arena-owned */
   poly_map_destroy(ctx->name_map); /* entries are arena-owned */
   poly_map_destroy(ctx->cse);
   free(ctx->entries); /* array of ptrs, entries themselves arena-owned */
@@ -419,14 +425,7 @@ PolyUOp *poly_uop3(
 
 /* Toposort (iterative DFS, mirrors tinygrad's toposort) */
 
-static bool ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
 
-static uint32_t ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 /* Shared iterative DFS worker. Either `gate_simple` or `gate_user` may be
  * non-NULL (never both). The gate signature difference is bridged here so
@@ -461,8 +460,8 @@ static PolyUOp **toposort_worker(
     PolyUOp *u = stack[stack_top - 1];
     int s = state[stack_top - 1];
 
-    uint32_t vh = ptr_hash(u);
-    if (s == 0 && poly_map_get(visited, vh, u, ptr_eq) != NULL) {
+    uint32_t vh = poly_ptr_hash(u);
+    if (s == 0 && poly_map_get(visited, vh, u, poly_ptr_eq) != NULL) {
       stack_top--;
       continue;
     }
@@ -481,8 +480,8 @@ static PolyUOp **toposort_worker(
       /* For CALL nodes with enter_calls=false, skip src[0] (the callee body) */
       int start = (!enter_calls && u->op == POLY_OP_CALL && u->n_src > 1) ? 1 : 0;
       for (int i = u->n_src - 1; i >= start; i--) {
-        uint32_t ch = ptr_hash(u->src[i]);
-        if (poly_map_get(visited, ch, u->src[i], ptr_eq) != NULL) continue;
+        uint32_t ch = poly_ptr_hash(u->src[i]);
+        if (poly_map_get(visited, ch, u->src[i], poly_ptr_eq) != NULL) continue;
         if (stack_top >= stack_cap) {
           stack_cap *= 2;
           stack = realloc(stack, stack_cap * sizeof(PolyUOp *));
@@ -495,9 +494,9 @@ static PolyUOp **toposort_worker(
     } else {
       /* Post-order: all children done, emit this node */
       stack_top--;
-      if (poly_map_get(visited, vh, u, ptr_eq) != NULL) continue;
+      if (poly_map_get(visited, vh, u, poly_ptr_eq) != NULL) continue;
       /* Use a non-NULL sentinel as value */
-      poly_map_set(visited, vh, u, (void *)(uintptr_t)1, ptr_eq);
+      poly_map_set(visited, vh, u, (void *)(uintptr_t)1, poly_ptr_eq);
 
       if (n >= cap) {
         int new_cap = cap * 2;
@@ -709,7 +708,7 @@ static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u, PolyRangeSet *out, Po
 }
 
 static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
-  void *cached = poly_map_get(memo, ptr_hash(u), u, ptr_eq);
+  void *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
   if (cached) return (PolyRangeSet *)cached;
 
   PolyRangeSet *ret = range_set_new(ctx, 4);
@@ -733,7 +732,7 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
   /* If self is a RANGE, include self */
   if (u->op == POLY_OP_RANGE) range_set_add(ctx, ret, u);
 
-  poly_map_set(memo, ptr_hash(u), u, ret, ptr_eq);
+  poly_map_set(memo, poly_ptr_hash(u), u, ret, poly_ptr_eq);
   return ret;
 }
 

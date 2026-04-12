@@ -16,17 +16,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "utils.h"
 
 /* Local helpers */
 
-static bool ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
 
-static uint32_t ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 /* Return the identity element for a reduction op */
 static double reduce_identity(PolyOps op) {
@@ -65,14 +59,14 @@ typedef struct {
 /* Get cached shape, or compute and cache it */
 static PolyShape sched_shape(SchedCtx *sctx, PolyUOp *u) {
   /* Check cache */
-  PolyShape *cached = poly_map_get(sctx->shape_cache, ptr_hash(u), u, ptr_eq);
+  PolyShape *cached = poly_map_get(sctx->shape_cache, poly_ptr_hash(u), u, poly_ptr_eq);
   if (cached) return *cached;
 
   /* Compute */
   PolyShape s = poly_uop_shape(sctx->ctx, u);
   PolyShape *stored = malloc(sizeof(PolyShape));
   *stored = s;
-  poly_map_set(sctx->shape_cache, ptr_hash(u), u, stored, ptr_eq);
+  poly_map_set(sctx->shape_cache, poly_ptr_hash(u), u, stored, poly_ptr_eq);
   return s;
 }
 
@@ -216,7 +210,7 @@ static bool realize_scalar_reduce(
 ) {
   PolyCtx *ctx = sctx->ctx;
   RealizedScalarReduce *cached =
-      poly_map_get(sctx->scalar_reduce_cache, ptr_hash(reduce_uop), reduce_uop, ptr_eq);
+      poly_map_get(sctx->scalar_reduce_cache, poly_ptr_hash(reduce_uop), reduce_uop, poly_ptr_eq);
   if (cached) {
     *acc_out = cached->acc;
     *dep_out = cached->dep;
@@ -260,7 +254,7 @@ static bool realize_scalar_reduce(
   RealizedScalarReduce *entry = malloc(sizeof(RealizedScalarReduce));
   entry->acc = acc;
   entry->dep = rchain;
-  poly_map_set(sctx->scalar_reduce_cache, ptr_hash(reduce_uop), reduce_uop, entry, ptr_eq);
+  poly_map_set(sctx->scalar_reduce_cache, poly_ptr_hash(reduce_uop), reduce_uop, entry, poly_ptr_eq);
 
   *acc_out = acc;
   *dep_out = rchain;
@@ -279,7 +273,7 @@ static PolyUOp *lower_uop(SchedCtx *sctx, PolyUOp *u, PolyUOp **ranges, int n_ra
 
   /* BUFFER → PARAM + flat_index + INDEX + LOAD */
   if (u->op == POLY_OP_BUFFER) {
-    PolyUOp *param = poly_map_get(sctx->buf_to_param, ptr_hash(u), u, ptr_eq);
+    PolyUOp *param = poly_map_get(sctx->buf_to_param, poly_ptr_hash(u), u, poly_ptr_eq);
     if (!param) {
       fprintf(stderr, "polygrad: sched: unknown buffer\n");
       return NULL;
@@ -503,7 +497,7 @@ static PolyUOp *schedule_store(SchedCtx *sctx, PolyUOp *store_uop) {
   }
 
   /* Look up output buffer PARAM */
-  PolyUOp *out_param = poly_map_get(sctx->buf_to_param, ptr_hash(out_buf), out_buf, ptr_eq);
+  PolyUOp *out_param = poly_map_get(sctx->buf_to_param, poly_ptr_hash(out_buf), out_buf, poly_ptr_eq);
   if (!out_param) {
     fprintf(stderr, "polygrad: sched: unknown output buffer\n");
     return NULL;
@@ -851,13 +845,13 @@ static void collect_buffers(SchedCtx *sctx, PolyUOp *root) {
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_BUFFER) {
       /* Check if already assigned */
-      if (poly_map_get(sctx->buf_to_param, ptr_hash(topo[i]), topo[i], ptr_eq)) continue;
+      if (poly_map_get(sctx->buf_to_param, poly_ptr_hash(topo[i]), topo[i], poly_ptr_eq)) continue;
 
       /* Create PARAM for this buffer */
       PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
       PolyDType ptr_dt = poly_dtype_ptr(scalar, -1, POLY_ADDR_GLOBAL);
       PolyUOp *param = poly_uop0(sctx->ctx, POLY_OP_PARAM, ptr_dt, poly_arg_int(sctx->n_params));
-      poly_map_set(sctx->buf_to_param, ptr_hash(topo[i]), topo[i], param, ptr_eq);
+      poly_map_set(sctx->buf_to_param, poly_ptr_hash(topo[i]), topo[i], param, poly_ptr_eq);
       sctx->n_params++;
     }
   }

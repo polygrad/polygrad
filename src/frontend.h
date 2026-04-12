@@ -14,7 +14,7 @@
 
 #include "polygrad.h"
 #include "tensor.h"
-#include "exec_plan.h" /* PolyBufferHandle, PolyDeviceId */
+#include "exec_plan.h" /* PolyBuffer, PolyDeviceId */
 
 #define POLYGRAD_ABI_VERSION 1
 
@@ -60,7 +60,7 @@ PolyUOp *poly_buffer_var(
 
 typedef struct PolyBufferBinding {
   PolyUOp *buffer; /* tensor-level BUFFER UOp */
-  PolyBufferHandle handle; /* ptr + domain + nbytes (device-aware) */
+  PolyBuffer handle; /* ptr + domain + nbytes (device-aware) */
 } PolyBufferBinding;
 
 /* Convenience: build a CPU host-memory binding.
@@ -281,7 +281,7 @@ void poly_sched_cache_flush(void);
 
 #ifdef POLY_HAS_CUDA
 
-/* DEPRECATED: use poly_realize() with CUDA-domain PolyBufferHandle bindings.
+/* DEPRECATED: use poly_realize() with CUDA-domain PolyBuffer bindings.
  * Legacy standalone CUDA realize path. Retained for Python/JS frontend compat. */
 int poly_realize_cuda(
     PolyCtx *ctx,

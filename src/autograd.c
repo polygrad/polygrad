@@ -19,17 +19,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "utils.h"
 
 /* Local helpers */
 
-static bool ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
 
-static uint32_t ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 static PolyUOp *const_scalar(PolyCtx *ctx, PolyDType dt, double v) {
   if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(v));
@@ -43,19 +37,19 @@ static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *u, PolyDType dt) {
 }
 
 static PolyUOp *grad_get(PolyMap *grads, PolyUOp *u) {
-  return poly_map_get(grads, ptr_hash(u), u, ptr_eq);
+  return poly_map_get(grads, poly_ptr_hash(u), u, poly_ptr_eq);
 }
 
 static void grad_add(PolyCtx *ctx, PolyMap *grads, PolyUOp *u, PolyUOp *g) {
   if (!u || !g) return;
   PolyUOp *old = grad_get(grads, u);
   if (!old) {
-    poly_map_set(grads, ptr_hash(u), u, g, ptr_eq);
+    poly_map_set(grads, poly_ptr_hash(u), u, g, poly_ptr_eq);
     return;
   }
   PolyUOp *rhs = cast_to(ctx, g, old->dtype);
   PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, old->dtype, old, rhs, poly_arg_none());
-  poly_map_set(grads, ptr_hash(u), u, sum, ptr_eq);
+  poly_map_set(grads, poly_ptr_hash(u), u, sum, poly_ptr_eq);
 }
 
 static PolyUOp *reduce_sum_axes(PolyCtx *ctx, PolyUOp *u, int64_t *axes, int n_axes) {
@@ -183,25 +177,25 @@ static PolyUOp **target_walk(
 ) {
   PolyMap *target_set = poly_map_new((size_t)n_targets * 2 + 16);
   for (int i = 0; i < n_targets; i++)
-    poly_map_set(target_set, ptr_hash(targets[i]), targets[i], targets[i], ptr_eq);
+    poly_map_set(target_set, poly_ptr_hash(targets[i]), targets[i], targets[i], poly_ptr_eq);
 
   /* Forward pass: mark nodes whose sources lead to any target */
   PolyMap *in_path = poly_map_new((size_t)n_topo * 2 + 16);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
     if (u->op == POLY_OP_DETACH || u->op == POLY_OP_ASSIGN) continue;
-    bool on_path = poly_map_get(target_set, ptr_hash(u), u, ptr_eq) != NULL;
+    bool on_path = poly_map_get(target_set, poly_ptr_hash(u), u, poly_ptr_eq) != NULL;
     if (!on_path) {
       for (int j = 0; j < u->n_src; j++) {
         PolyUOp *s = u->src[j];
-        if (poly_map_get(target_set, ptr_hash(s), s, ptr_eq) ||
-            poly_map_get(in_path, ptr_hash(s), s, ptr_eq)) {
+        if (poly_map_get(target_set, poly_ptr_hash(s), s, poly_ptr_eq) ||
+            poly_map_get(in_path, poly_ptr_hash(s), s, poly_ptr_eq)) {
           on_path = true;
           break;
         }
       }
     }
-    if (on_path) poly_map_set(in_path, ptr_hash(u), u, u, ptr_eq);
+    if (on_path) poly_map_set(in_path, poly_ptr_hash(u), u, u, poly_ptr_eq);
   }
 
   PolyUOp **result = malloc((size_t)n_topo * sizeof(PolyUOp *));
@@ -214,7 +208,7 @@ static PolyUOp **target_walk(
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    if (poly_map_get(in_path, ptr_hash(u), u, ptr_eq)) result[count++] = u;
+    if (poly_map_get(in_path, poly_ptr_hash(u), u, poly_ptr_eq)) result[count++] = u;
   }
 
   poly_map_destroy(target_set);
@@ -801,16 +795,16 @@ static PolyUOp *substitute_rec(PolyCtx *ctx, PolyUOp *u, PolyMap *sub_map, PolyM
   /* Check substitution map first — and recurse into the replacement
    * to handle nested intermediates (e.g. var's internal mean realize
    * inside layernorm's var realize). */
-  void *sub = poly_map_get(sub_map, ptr_hash(u), u, ptr_eq);
+  void *sub = poly_map_get(sub_map, poly_ptr_hash(u), u, poly_ptr_eq);
   if (sub) return substitute_rec(ctx, (PolyUOp *)sub, sub_map, memo);
 
   /* Check memo */
-  void *cached = poly_map_get(memo, ptr_hash(u), u, ptr_eq);
+  void *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
   if (cached) return (PolyUOp *)cached;
 
   /* Leaf node: no sources to recurse into */
   if (u->n_src == 0) {
-    poly_map_set(memo, ptr_hash(u), u, u, ptr_eq);
+    poly_map_set(memo, poly_ptr_hash(u), u, u, poly_ptr_eq);
     return u;
   }
 
@@ -840,7 +834,7 @@ static PolyUOp *substitute_rec(PolyCtx *ctx, PolyUOp *u, PolyMap *sub_map, PolyM
                  ? poly_uop_tagged(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag)
                  : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
   }
-  poly_map_set(memo, ptr_hash(u), u, result, ptr_eq);
+  poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
   return result;
 }
 
@@ -850,7 +844,7 @@ PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root, PolyUOp **from, PolyUO
   PolyMap *sub_map = poly_map_new((size_t)n * 2 + 16);
   for (int i = 0; i < n; i++) {
     if (from[i] == to[i]) continue; /* skip identity maps (would infinite-recurse) */
-    poly_map_set(sub_map, ptr_hash(from[i]), from[i], to[i], ptr_eq);
+    poly_map_set(sub_map, poly_ptr_hash(from[i]), from[i], to[i], poly_ptr_eq);
   }
 
   PolyMap *memo = poly_map_new(256);

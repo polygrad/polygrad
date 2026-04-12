@@ -12,6 +12,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "instance.h"
+#include "utils.h"
 #include "ir.h"
 #include "safetensors.h"
 #include "frontend.h"
@@ -61,7 +62,7 @@ typedef struct {
   PolyUOp *combined_sink; /* fwd+bwd+optimizer SINK */
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss scalar output */
   float loss_data; /* scalar loss value after step */
-  PolyBufferHandle loss_handle; /* device-aware handle for loss output */
+  PolyBuffer loss_handle; /* device-aware handle for loss output */
 
   /* Moment buffers (Adam/AdamW only) */
   PolyUOp **m_bufs; /* [n_params] first moment BUFFER UOps */
@@ -73,16 +74,16 @@ typedef struct {
   float **v_datas; /* [n_params] second moment host data */
 
   /* Moment buffer handles (for bindings) */
-  PolyBufferHandle *m_handles; /* [n_params] */
-  PolyBufferHandle *v_handles; /* [n_params] */
+  PolyBuffer *m_handles; /* [n_params] */
+  PolyBuffer *v_handles; /* [n_params] */
 
   /* Bias correction scalar buffers (Adam/AdamW only) */
   PolyUOp *bc1_buf; /* 1-element buffer for bc1 */
   PolyUOp *bc2_buf; /* 1-element buffer for bc2 */
   float bc1_data; /* host value for bc1 */
   float bc2_data; /* host value for bc2 */
-  PolyBufferHandle bc1_handle;
-  PolyBufferHandle bc2_handle;
+  PolyBuffer bc1_handle;
+  PolyBuffer bc2_handle;
 } TrainState;
 
 struct PolyInstance {
@@ -104,7 +105,7 @@ struct PolyInstance {
   int n_entrypoints;
 
   /* Buffer handles (one per named buffer, carries domain) */
-  PolyBufferHandle *buf_handles; /* [n_bufs], ptr + domain + nbytes */
+  PolyBuffer *buf_handles; /* [n_bufs], ptr + domain + nbytes */
 
   /* Value-and-grad state (lazy, per-entrypoint -- currently only "loss") */
   VagState *vag; /* NULL until first value_and_grad call */
@@ -194,9 +195,9 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
    * is valid host memory. Fixed in commit after 9a061b9 (which added
    * the host_addressable flag but didn't handle the WASM case).
    */
-  inst->buf_handles = calloc(spec->n_bufs, sizeof(PolyBufferHandle));
+  inst->buf_handles = calloc(spec->n_bufs, sizeof(PolyBuffer));
   for (int i = 0; i < spec->n_bufs; i++) {
-    inst->buf_handles[i] = (PolyBufferHandle){
+    inst->buf_handles[i] = (PolyBuffer){
         .ptr = inst->bufs[i].data,
         .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
         .domain = POLY_DEVICE_HOST,
@@ -334,7 +335,7 @@ static void vag_free(VagState *vag, int n_params) {
   free(vag);
 }
 
-static void free_owned_handle(PolyBufferHandle *h) {
+static void free_owned_handle(PolyBuffer *h) {
   if (h->owned && h->ptr) {
     const PolyBackendDesc *be = poly_backend_get(h->domain);
     if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
@@ -374,7 +375,7 @@ void poly_instance_free(PolyInstance *inst) {
   /* Free device-owned buffer handles */
   if (inst->buf_handles) {
     for (int i = 0; i < inst->n_bufs; i++) {
-      PolyBufferHandle *h = &inst->buf_handles[i];
+      PolyBuffer *h = &inst->buf_handles[i];
       if (h->owned && h->ptr) {
         const PolyBackendDesc *be = poly_backend_get(h->domain);
         if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
@@ -431,8 +432,8 @@ int poly_instance_param_shape(const PolyInstance *inst, int i, int64_t *shape_ou
   return b->ndim;
 }
 
-static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len);
-static PolyBufferHandle make_handle(
+static int readback_handle(const PolyBuffer *h, void *dst, size_t len);
+static PolyBuffer make_handle(
     void *host_data,
     size_t nbytes,
     PolyDeviceId dev,
@@ -488,7 +489,7 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
 
 /* Readback / Upload */
 
-static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
+static int readback_handle(const PolyBuffer *h, void *dst, size_t len) {
   if (!h || !h->ptr || !dst || len == 0) return -1;
   if (poly_device_is_host_addressable(h->domain)) {
     memcpy(dst, h->ptr, len);
@@ -499,7 +500,7 @@ static int readback_handle(const PolyBufferHandle *h, void *dst, size_t len) {
   return be->get_allocator()->copy_out(dst, h->ptr, len, be->get_allocator()->dev_ctx);
 }
 
-static int upload_handle(PolyBufferHandle *h, const void *src, size_t len) {
+static int upload_handle(PolyBuffer *h, const void *src, size_t len) {
   if (!h || !h->ptr || !src || len == 0) return -1;
   if (poly_device_is_host_addressable(h->domain)) {
     memcpy(h->ptr, src, len);
@@ -683,7 +684,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
 
   /* Bulk rematerialization: move all buffer handles to the new domain */
   for (int i = 0; i < inst->n_bufs; i++) {
-    PolyBufferHandle *h = &inst->buf_handles[i];
+    PolyBuffer *h = &inst->buf_handles[i];
     if (h->domain == resolved) continue; /* already there */
 
     size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
@@ -702,7 +703,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           old_alloc->free(h->ptr, old_alloc->dev_ctx);
         }
       }
-      *h = (PolyBufferHandle){
+      *h = (PolyBuffer){
           .ptr = inst->bufs[i].data,
           .nbytes = nbytes,
           .domain = resolved,
@@ -725,7 +726,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       if (old_be) old_be->get_allocator()->free(h->ptr, old_be->get_allocator()->dev_ctx);
     }
 
-    *h = (PolyBufferHandle){
+    *h = (PolyBuffer){
         .ptr = dptr,
         .nbytes = nbytes,
         .domain = resolved,
@@ -741,7 +742,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       if (ts->m_handles[i].domain != resolved) {
         free_owned_handle(&ts->m_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
-          ts->m_handles[i] = (PolyBufferHandle){
+          ts->m_handles[i] = (PolyBuffer){
               .ptr = ts->m_datas[i],
               .nbytes = ts->m_handles[i].nbytes,
               .domain = resolved,
@@ -752,7 +753,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           void *mp = alloc->alloc(nb, alloc->dev_ctx);
           if (mp) {
             if (ts->m_datas[i]) alloc->copy_in(mp, ts->m_datas[i], nb, alloc->dev_ctx);
-            ts->m_handles[i] = (PolyBufferHandle){
+            ts->m_handles[i] = (PolyBuffer){
                 .ptr = mp,
                 .nbytes = nb,
                 .domain = resolved,
@@ -765,7 +766,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       if (ts->v_handles[i].domain != resolved) {
         free_owned_handle(&ts->v_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
-          ts->v_handles[i] = (PolyBufferHandle){
+          ts->v_handles[i] = (PolyBuffer){
               .ptr = ts->v_datas[i],
               .nbytes = ts->v_handles[i].nbytes,
               .domain = resolved,
@@ -776,7 +777,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           void *vp = alloc->alloc(nb, alloc->dev_ctx);
           if (vp) {
             if (ts->v_datas[i]) alloc->copy_in(vp, ts->v_datas[i], nb, alloc->dev_ctx);
-            ts->v_handles[i] = (PolyBufferHandle){
+            ts->v_handles[i] = (PolyBuffer){
                 .ptr = vp,
                 .nbytes = nb,
                 .domain = resolved,
@@ -790,7 +791,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     if (ts->loss_handle.domain != resolved) {
       free_owned_handle(&ts->loss_handle);
       if (poly_device_is_host_addressable(resolved)) {
-        ts->loss_handle = (PolyBufferHandle){
+        ts->loss_handle = (PolyBuffer){
             .ptr = &ts->loss_data,
             .nbytes = sizeof(float),
             .domain = resolved,
@@ -799,7 +800,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       } else {
         void *lp = alloc->alloc(sizeof(float), alloc->dev_ctx);
         if (lp) {
-          ts->loss_handle = (PolyBufferHandle){
+          ts->loss_handle = (PolyBuffer){
               .ptr = lp,
               .nbytes = sizeof(float),
               .domain = resolved,
@@ -813,13 +814,13 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       free_owned_handle(&ts->bc1_handle);
       free_owned_handle(&ts->bc2_handle);
       if (poly_device_is_host_addressable(resolved)) {
-        ts->bc1_handle = (PolyBufferHandle){
+        ts->bc1_handle = (PolyBuffer){
             .ptr = &ts->bc1_data,
             .nbytes = sizeof(float),
             .domain = resolved,
             .owned = false,
         };
-        ts->bc2_handle = (PolyBufferHandle){
+        ts->bc2_handle = (PolyBuffer){
             .ptr = &ts->bc2_data,
             .nbytes = sizeof(float),
             .domain = resolved,
@@ -829,7 +830,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
         void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
         if (bp1) {
           alloc->copy_in(bp1, &ts->bc1_data, sizeof(float), alloc->dev_ctx);
-          ts->bc1_handle = (PolyBufferHandle){
+          ts->bc1_handle = (PolyBuffer){
               .ptr = bp1,
               .nbytes = sizeof(float),
               .domain = resolved,
@@ -839,7 +840,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
         void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
         if (bp2) {
           alloc->copy_in(bp2, &ts->bc2_data, sizeof(float), alloc->dev_ctx);
-          ts->bc2_handle = (PolyBufferHandle){
+          ts->bc2_handle = (PolyBuffer){
               .ptr = bp2,
               .nbytes = sizeof(float),
               .domain = resolved,
@@ -909,7 +910,7 @@ static PolyBufferBinding *build_bindings_extended(
     PolyIOBinding *io,
     int n_io,
     PolyUOp **extra_bufs,
-    PolyBufferHandle *extra_handles,
+    PolyBuffer *extra_handles,
     int n_extra,
     int *n_out
 ) {
@@ -1164,7 +1165,7 @@ int poly_instance_value_and_grad(
 
   int n_extra = 1 + inst->n_params;
   PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
-  PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
+  PolyBuffer *extra_handles = malloc((size_t)n_extra * sizeof(PolyBuffer));
   if (!extra_bufs || !extra_handles) {
     free(extra_bufs);
     free(extra_handles);
@@ -1217,14 +1218,14 @@ int poly_instance_value_and_grad(
 
 /* Create a buffer handle on the given device. For host-addressable devices,
  * points directly at host_data. For device memory, allocates and uploads. */
-static PolyBufferHandle make_handle(
+static PolyBuffer make_handle(
     void *host_data,
     size_t nbytes,
     PolyDeviceId dev,
     const PolyAllocator *alloc
 ) {
   if (poly_device_is_host_addressable(dev)) {
-    return (PolyBufferHandle){
+    return (PolyBuffer){
         .ptr = host_data,
         .nbytes = nbytes,
         .domain = dev,
@@ -1234,10 +1235,10 @@ static PolyBufferHandle make_handle(
   void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!dptr) {
     fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
-    return (PolyBufferHandle){.ptr = NULL, .nbytes = 0, .domain = dev, .owned = false};
+    return (PolyBuffer){.ptr = NULL, .nbytes = 0, .domain = dev, .owned = false};
   }
   if (host_data) alloc->copy_in(dptr, host_data, nbytes, alloc->dev_ctx);
-  return (PolyBufferHandle){
+  return (PolyBuffer){
       .ptr = dptr,
       .nbytes = nbytes,
       .domain = dev,
@@ -1299,8 +1300,8 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     ts->v_bufs = calloc((size_t)np, sizeof(PolyUOp *));
     ts->m_datas = calloc((size_t)np, sizeof(float *));
     ts->v_datas = calloc((size_t)np, sizeof(float *));
-    ts->m_handles = calloc((size_t)np, sizeof(PolyBufferHandle));
-    ts->v_handles = calloc((size_t)np, sizeof(PolyBufferHandle));
+    ts->m_handles = calloc((size_t)np, sizeof(PolyBuffer));
+    ts->v_handles = calloc((size_t)np, sizeof(PolyBuffer));
     ts->n_moment_bufs = np;
 
     /* Bias correction scalar buffers */
@@ -1482,7 +1483,7 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   int n_extra = 1 + (has_moments ? 2 * np + 2 : 0);
 
   PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
-  PolyBufferHandle *extra_handles = malloc((size_t)n_extra * sizeof(PolyBufferHandle));
+  PolyBuffer *extra_handles = malloc((size_t)n_extra * sizeof(PolyBuffer));
   if (!extra_bufs || !extra_handles) {
     free(extra_bufs);
     free(extra_handles);

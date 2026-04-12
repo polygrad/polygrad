@@ -26,8 +26,6 @@ extern "C" {
 
 /* Pointer hashing (for PolyMap keying by UOp pointer) */
 
-bool poly_ptr_eq(const void *a, const void *b);
-uint32_t poly_ptr_hash(const void *p);
 
 /* Structural hashing/equality (for cache keying by graph shape) */
 

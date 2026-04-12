@@ -15,6 +15,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "exec_plan.h"
+#include "utils.h"
 #include "frontend_internal.h"
 #include "codegen.h"
 #include "interp.h"
@@ -1109,7 +1110,7 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule, Po
     if (schedule->buf_slots[i].is_intermediate) plan->n_intermediates++;
 
   if (plan->n_intermediates > 0) {
-    plan->intermediates = calloc((size_t)plan->n_intermediates, sizeof(PolyBufferHandle));
+    plan->intermediates = calloc((size_t)plan->n_intermediates, sizeof(PolyBuffer));
     if (!plan->intermediates) goto cleanup;
     int idx = 0;
     for (int i = 0; i < schedule->n_buf_slots; i++) {
@@ -1118,7 +1119,7 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule, Po
       if (nbytes == 0) nbytes = sizeof(float);
       void *ptr = plan->allocator->alloc(nbytes, plan->allocator->dev_ctx);
       if (!ptr) goto cleanup;
-      plan->intermediates[idx] = (PolyBufferHandle){
+      plan->intermediates[idx] = (PolyBuffer){
           .ptr = ptr,
           .nbytes = nbytes,
           .domain = plan->device,
@@ -1196,7 +1197,7 @@ int poly_compiled_plan_run(
 
   /* Zero persistent intermediates (reduce accumulators need this) */
   for (int i = 0; i < plan->n_intermediates; i++) {
-    PolyBufferHandle *h = &plan->intermediates[i];
+    PolyBuffer *h = &plan->intermediates[i];
     if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP
 #ifdef POLY_HAS_X64
         || h->domain == POLY_DEVICE_X64_JIT

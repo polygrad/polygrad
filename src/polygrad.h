@@ -3,8 +3,6 @@
  *
  * A C11 port of tinygrad's compiler core: UOp IR, pattern matcher,
  * scheduler, codegen, and CPU runtime.
- *
- * Reference: tinygrad commit c2be31e75b366638965337b96f2c66c2ba8c4068
  */
 
 #ifndef POLYGRAD_H
@@ -405,6 +403,39 @@ void poly_map_clear(PolyMap *m);
  * Callback receives (key, value, userdata) for each occupied slot. */
 typedef void (*PolyMapIterFn)(const void *key, void *value, void *userdata);
 void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata);
+
+/* Device identity */
+
+typedef enum {
+  POLY_DEVICE_AUTO = 0,
+  POLY_DEVICE_CPU,
+  POLY_DEVICE_INTERP,
+  POLY_DEVICE_CUDA,
+  POLY_DEVICE_WASM_JIT,
+  POLY_DEVICE_WEBGPU,
+  POLY_DEVICE_X64_JIT,
+  POLY_DEVICE_HIP,
+} PolyDeviceId;
+
+#ifdef __EMSCRIPTEN__
+#define POLY_DEVICE_HOST POLY_DEVICE_WASM_JIT
+#else
+#define POLY_DEVICE_HOST POLY_DEVICE_CPU
+#endif
+
+/* Buffer: device-specific memory reference.
+ *   CPU/INTERP: host malloc'd pointer
+ *   CUDA:       CUdeviceptr (cast to void*)
+ *   HIP:        hipDeviceptr_t (void*)
+ *   WASM_JIT:   offset into Emscripten heap
+ *   WEBGPU:     GPUBuffer (host-managed, wrapped) */
+
+typedef struct {
+  void *ptr;
+  size_t nbytes;
+  PolyDeviceId domain;
+  bool owned;
+} PolyBuffer;
 
 /* UOp */
 

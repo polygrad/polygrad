@@ -78,7 +78,7 @@ static int run_and_report(
     PolyBufferBinding *bb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
     for (int j = 0; j < n_bindings; j++) {
       bb[j].buffer = bindings[j].buffer;
-      bb[j].handle = (PolyBufferHandle){bindings[j].data, 0, POLY_DEVICE_CPU, false};
+      bb[j].handle = (PolyBuffer){bindings[j].data, 0, POLY_DEVICE_CPU, false};
     }
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
@@ -98,7 +98,7 @@ static int run_and_report(
         else
           poly_cuda_memset(dptr, 0, nbytes);
         cb[j].buffer = buf;
-        cb[j].handle = (PolyBufferHandle){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
+        cb[j].handle = (PolyBuffer){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
       }
       if (alloc_ok)
         ok = (poly_realize(ctx, tensor_sink, cb, n_bindings) == 0);
@@ -139,7 +139,7 @@ static int run_and_report(
         else
           poly_hip_memset(dptr, 0, nbytes);
         hb[j].buffer = buf;
-        hb[j].handle = (PolyBufferHandle){dptr, nbytes, POLY_DEVICE_HIP, true};
+        hb[j].handle = (PolyBuffer){dptr, nbytes, POLY_DEVICE_HIP, true};
       }
       if (alloc_ok)
         ok = (poly_realize(ctx, tensor_sink, hb, n_bindings) == 0);

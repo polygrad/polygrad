@@ -20,17 +20,8 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include "utils.h"
 
-static bool ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
-static uint32_t ptr_hash(const void *p) {
-  uintptr_t x = (uintptr_t)p;
-  x ^= x >> 33;
-  x *= 0xff51afd7ed558ccdULL;
-  x ^= x >> 33;
-  return (uint32_t)x;
-}
 static PolyArg poly_arg_int_tuple_local(int64_t *vals, int n);
 static PolyUOp *scalarize_lane_expr(PolyCtx *ctx, PolyUOp *u, int lane);
 
@@ -470,7 +461,7 @@ static uint64_t *build_reachability_bitmask(
   int *indices = (int *)malloc((size_t)n_topo * sizeof(int));
   for (int i = 0; i < n_topo; i++) {
     indices[i] = i + 1; /* 1-based so NULL means "not in map" */
-    poly_map_set(idx_map, ptr_hash(topo[i]), topo[i], &indices[i], ptr_eq);
+    poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
   }
 
   /* Build range_index: for each range UOp, which bit index */
@@ -488,7 +479,7 @@ static uint64_t *build_reachability_bitmask(
   /* Forward pass: propagate bits from sources */
   for (int i = 0; i < n_topo; i++) {
     for (int j = 0; j < topo[i]->n_src; j++) {
-      int *pidx = (int *)poly_map_get(idx_map, ptr_hash(topo[i]->src[j]), topo[i]->src[j], ptr_eq);
+      int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(topo[i]->src[j]), topo[i]->src[j], poly_ptr_eq);
       if (pidx) reach[i] |= reach[*pidx - 1];
     }
   }
@@ -570,10 +561,10 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
     int *indices = (int *)malloc((size_t)n_topo * sizeof(int));
     for (int i = 0; i < n_topo; i++) {
       indices[i] = i;
-      poly_map_set(idx_map, ptr_hash(topo[i]), topo[i], &indices[i], ptr_eq);
+      poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
     }
     for (int bi = 0; bi < s->n_bufs; bi++) {
-      int *pidx = (int *)poly_map_get(idx_map, ptr_hash(s->bufs[bi]), s->bufs[bi], ptr_eq);
+      int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(s->bufs[bi]), s->bufs[bi], poly_ptr_eq);
       if (pidx) s->buf_reach[bi] = reach[*pidx];
     }
     s->has_reach = true;
@@ -645,10 +636,10 @@ static void sched_refresh(OptScheduler *s) {
     int *indices = (int *)malloc((size_t)n_topo2 * sizeof(int));
     for (int i = 0; i < n_topo2; i++) {
       indices[i] = i;
-      poly_map_set(idx_map, ptr_hash(topo2[i]), topo2[i], &indices[i], ptr_eq);
+      poly_map_set(idx_map, poly_ptr_hash(topo2[i]), topo2[i], &indices[i], poly_ptr_eq);
     }
     for (int bi = 0; bi < s->n_bufs; bi++) {
-      int *pidx = (int *)poly_map_get(idx_map, ptr_hash(s->bufs[bi]), s->bufs[bi], ptr_eq);
+      int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(s->bufs[bi]), s->bufs[bi], poly_ptr_eq);
       if (pidx) s->buf_reach[bi] = reach[*pidx];
     }
     s->has_reach = true;
@@ -1000,8 +991,8 @@ static uint64_t collect_ranges_from(const OptScheduler *s, PolyUOp *u) {
   PolyMap *visited = poly_map_new(256);
   while (sp > 0) {
     PolyUOp *cur = stack[--sp];
-    if (poly_map_get(visited, ptr_hash(cur), cur, ptr_eq)) continue;
-    poly_map_set(visited, ptr_hash(cur), cur, cur, ptr_eq);
+    if (poly_map_get(visited, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
+    poly_map_set(visited, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
     if (cur->op == POLY_OP_RANGE) {
       for (int j = 0; j < s->n_rngs; j++) {
         if (s->rngs[j] == cur) {
@@ -1494,7 +1485,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     int *tidx = (int *)malloc((size_t)n_topo * sizeof(int));
     for (int i = 0; i < n_topo; i++) {
       tidx[i] = i;
-      poly_map_set(topo_idx, ptr_hash(topo[i]), topo[i], &tidx[i], ptr_eq);
+      poly_map_set(topo_idx, poly_ptr_hash(topo[i]), topo[i], &tidx[i], poly_ptr_eq);
     }
 
     for (int ui = 0; ui < n_up; ui++) {
@@ -1506,7 +1497,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
         if (topo[ti]->op != POLY_OP_WHERE) continue;
         /* Check if rng is reachable from WHERE's src[0] (the condition) */
         int *pidx =
-            (int *)poly_map_get(topo_idx, ptr_hash(topo[ti]->src[0]), topo[ti]->src[0], ptr_eq);
+            (int *)poly_map_get(topo_idx, poly_ptr_hash(topo[ti]->src[0]), topo[ti]->src[0], poly_ptr_eq);
         if (pidx && (full_reach[*pidx] & rng_bit)) is_masked = true;
       }
       if (!is_masked) continue;
@@ -2261,7 +2252,7 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
       for (int s = 1; s < u->n_src; s++) {
         PolyUOp *r = u->src[s];
         if (!r || r->op != POLY_OP_RANGE) continue;
-        poly_map_set(ended_ranges, ptr_hash(r), r, r, ptr_eq);
+        poly_map_set(ended_ranges, poly_ptr_hash(r), r, r, poly_ptr_eq);
       }
     }
   }
@@ -2282,7 +2273,7 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
     if (!is_reduce) {
       bool is_ended = false;
       if (ended_ranges) {
-        is_ended = poly_map_get(ended_ranges, ptr_hash(topo[i]), topo[i], ptr_eq) != NULL;
+        is_ended = poly_map_get(ended_ranges, poly_ptr_hash(topo[i]), topo[i], poly_ptr_eq) != NULL;
       } else {
         for (int k = 0; k < n_topo; k++) {
           if (topo[k]->op != POLY_OP_END) continue;

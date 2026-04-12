@@ -25,6 +25,7 @@
 #include "pat.h"
 #include "polygrad.h"
 #include "tensor.h"
+#include "utils.h"
 
 /* helpers */
 
@@ -47,13 +48,6 @@ static bool is_external_leaf(PolyUOp *u) {
 }
 
 /* Pointer-key map helpers (mirror src/uop.c:363-368). */
-static bool ptr_eq_local(const void *a, const void *b) {
-  return a == b;
-}
-static uint32_t ptr_hash_local(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 /* Construct a DEFINE_VAR with arbitrary dtype (frontend.c:poly_define_var
  * is INT32-only). Name is arena-copied by poly_uop_create. */
@@ -526,7 +520,7 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
     included_map = poly_map_new(16);
     for (int i = 0; i < n_inc; i++) {
       poly_map_set(
-          included_map, ptr_hash_local(included[i]), included[i], (void *)(uintptr_t)1, ptr_eq_local
+          included_map, poly_ptr_hash(included[i]), included[i], (void *)(uintptr_t)1, poly_ptr_eq
       );
     }
 
@@ -554,8 +548,8 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
       PolyUOp *node = included[i];
       for (uint16_t k = 0; k < node->n_src; k++) {
         PolyUOp *s = node->src[k];
-        if (poly_map_get(included_map, ptr_hash_local(s), s, ptr_eq_local)) continue;
-        if (poly_map_get(replaces_map, ptr_hash_local(s), s, ptr_eq_local)) continue;
+        if (poly_map_get(included_map, poly_ptr_hash(s), s, poly_ptr_eq)) continue;
+        if (poly_map_get(replaces_map, poly_ptr_hash(s), s, poly_ptr_eq)) continue;
         if (is_external_leaf(s)) continue;
         int64_t vmin, vmax;
         poly_uop_minmax_ex(ctx, s, cache, &vmin, &vmax);
@@ -564,7 +558,7 @@ static PolyUOp *reduce_collapse_drive(PolyCtx *ctx, PolyUOp *red, PolyUOp *u) {
         if (n_repl >= 256) goto fail;
         from_arr[n_repl] = s;
         to_arr[n_repl] = dv;
-        poly_map_set(replaces_map, ptr_hash_local(s), s, dv, ptr_eq_local);
+        poly_map_set(replaces_map, poly_ptr_hash(s), s, dv, poly_ptr_eq);
         n_repl++;
       }
     }

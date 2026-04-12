@@ -23,45 +23,6 @@ extern "C" {
 /* Forward declaration -- defined in frontend.h, pointer-only usage here */
 struct PolyVarBinding;
 
-/* Device identity */
-
-typedef enum {
-  POLY_DEVICE_AUTO = 0, /* resolved at set_device time, never stored */
-  POLY_DEVICE_CPU, /* host C compiler (fork + clang/gcc + dlopen) */
-  POLY_DEVICE_INTERP, /* interpreter: walks scheduled graph, no codegen */
-  POLY_DEVICE_CUDA, /* NVIDIA GPU (PTX via cuModuleLoad) */
-  POLY_DEVICE_WASM_JIT, /* WASM: C renders bytes, host compiles+executes */
-  POLY_DEVICE_WEBGPU, /* WebGPU: C renders WGSL, host compiles+executes */
-  POLY_DEVICE_X64_JIT, /* x86-64 JIT: C emits machine code, mmap+execute */
-  POLY_DEVICE_HIP, /* AMD GPU (HSACO via hipModule) */
-} PolyDeviceId;
-
-/*
- * Host-addressable device for this build target.
- *
- * Instance buffers are tagged with a device domain so that
- * poly_instance_buf_data() knows whether a buffer is directly
- * readable (host-addressable) or needs a device-to-host copy.
- *
- * In native builds, host memory is POLY_DEVICE_CPU (the CPU backend
- * is registered and recognized as host-addressable).
- *
- * In Emscripten/WASM builds, the CPU backend is NOT registered
- * (there is no fork+clang+dlopen in WASM). Only POLY_DEVICE_WASM_JIT
- * is registered and recognized as host-addressable. If buffers are
- * tagged POLY_DEVICE_CPU in WASM, poly_device_is_host_addressable()
- * returns false, sync_buf_to_host() fails, and buf_data() returns NULL
- * even though the data pointer is valid host memory.
- *
- * POLY_DEVICE_HOST resolves to the correct host device per build target,
- * ensuring buffers created during model import are always accessible.
- */
-#ifdef __EMSCRIPTEN__
-#define POLY_DEVICE_HOST POLY_DEVICE_WASM_JIT
-#else
-#define POLY_DEVICE_HOST POLY_DEVICE_CPU
-#endif
-
 /* Compilation mode */
 
 typedef enum {
@@ -92,23 +53,6 @@ typedef enum {
   POLY_RUNNER_ENCDEC, /* encode/decode */
   POLY_RUNNER_INTERP, /* interpreter: walks scheduled graph directly */
 } PolyRunnerKind;
-
-/* Buffer handle */
-/*
- * Device-specific buffer reference. The ptr field is opaque:
- *   CPU/INTERP: host malloc'd pointer
- *   CUDA:       CUdeviceptr (cast to void*)
- *   HIP:        hipDeviceptr_t (void*)
- *   WASM_JIT:   offset into Emscripten heap
- *   WEBGPU:     GPUBuffer (host-managed, wrapped)
- */
-
-typedef struct {
-  void *ptr; /* device-specific handle */
-  size_t nbytes; /* physical byte size (handles quantized packing) */
-  PolyDeviceId domain; /* which memory domain this lives in */
-  bool owned; /* whether the instance should free this on cleanup */
-} PolyBufferHandle;
 
 /* Allocator interface */
 /*
@@ -258,7 +202,7 @@ typedef struct {
   /* Persistent workspace: allocated once at compile time, reused every run.
    * Intermediates are zeroed at each run (reduce accumulators need it).
    * Args arrays are filled at each run (slot pointers change). */
-  PolyBufferHandle *intermediates; /* [n_intermediates] */
+  PolyBuffer *intermediates; /* [n_intermediates] */
   int n_intermediates;
 
   void ***kernel_args; /* [n_runners], each is void*[n_params + n_vars] */

@@ -196,7 +196,7 @@ static int build_hip_bindings(PolyBufferBinding *out, PolyUOp **bufs, float **ho
     else
       poly_hip_memset(dptr, 0, nbytes);
     out[i].buffer = bufs[i];
-    out[i].handle = (PolyBufferHandle){dptr, nbytes, POLY_DEVICE_HIP, true};
+    out[i].handle = (PolyBuffer){dptr, nbytes, POLY_DEVICE_HIP, true};
   }
   return 0;
 }

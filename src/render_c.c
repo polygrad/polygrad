@@ -8,6 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "utils.h"
 #include "pat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,12 +60,6 @@ typedef struct {
   int cap;
 } IntMap;
 
-static uint32_t ptr_hash_mix(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  v = ((v >> 16) ^ v) * 0x45d9f3bU;
-  v = ((v >> 16) ^ v) * 0x45d9f3bU;
-  return (uint32_t)((v >> 16) ^ v);
-}
 
 static void imap_init(IntMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
@@ -73,7 +68,7 @@ static void imap_init(IntMap *m, int n) {
 }
 
 static void imap_set(IntMap *m, PolyUOp *key, int val) {
-  uint32_t h = ptr_hash_mix(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h] && m->keys[h] != key)
     h = (h + 1) % m->cap;
   m->keys[h] = key;
@@ -81,14 +76,14 @@ static void imap_set(IntMap *m, PolyUOp *key, int val) {
 }
 
 static int imap_get(IntMap *m, PolyUOp *key) {
-  uint32_t h = ptr_hash_mix(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h] != key)
     h = (h + 1) % m->cap;
   return m->vals[h];
 }
 
 static int imap_try_get(IntMap *m, PolyUOp *key) {
-  uint32_t h = ptr_hash_mix(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
     if (m->keys[h] == key) return m->vals[h];
     h = (h + 1) % m->cap;
@@ -116,7 +111,7 @@ static void smap_init(StrMap *m, int n) {
 }
 
 static void smap_set(StrMap *m, PolyUOp *key, char *val) {
-  uint32_t h = ptr_hash_mix(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h] && m->keys[h] != key)
     h = (h + 1) % m->cap;
   if (m->keys[h] == key) free(m->vals[h]); /* replace existing */
@@ -125,7 +120,7 @@ static void smap_set(StrMap *m, PolyUOp *key, char *val) {
 }
 
 static char *smap_get(StrMap *m, PolyUOp *key) {
-  uint32_t h = ptr_hash_mix(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
     if (m->keys[h] == key) return m->vals[h];
     h = (h + 1) % m->cap;

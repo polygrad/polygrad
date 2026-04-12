@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
+#include "utils.h"
 
 /* Overflow-safe int64 helpers */
 
@@ -117,13 +118,6 @@ typedef struct MinMaxBox {
   int64_t lo, hi;
 } MinMaxBox;
 
-static bool mm_ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
-static uint32_t mm_ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 static int64_t min4(int64_t a, int64_t b, int64_t c, int64_t d) {
   int64_t x = a < b ? a : b;
@@ -189,8 +183,8 @@ static void poly_uop_minmax_rec(
     return;
   }
 
-  uint32_t h = mm_ptr_hash(u);
-  MinMaxBox *cached = memo ? (MinMaxBox *)poly_map_get(memo, h, u, mm_ptr_eq) : NULL;
+  uint32_t h = poly_ptr_hash(u);
+  MinMaxBox *cached = memo ? (MinMaxBox *)poly_map_get(memo, h, u, poly_ptr_eq) : NULL;
   if (cached) {
     *vmin = cached->lo;
     *vmax = cached->hi;
@@ -456,7 +450,7 @@ done:
     if (box) {
       box->lo = *vmin;
       box->hi = *vmax;
-      poly_map_set(memo, h, u, box, mm_ptr_eq);
+      poly_map_set(memo, h, u, box, poly_ptr_eq);
     }
   }
 }

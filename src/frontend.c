@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "utils.h"
 
 /* In-place assignment (stays here: depends on scheduler.h) */
 
@@ -182,13 +183,6 @@ int poly_collect_ordered_buffers(
 
 /* Pointer hash/eq helpers (used by kernel cache and CPU realize) */
 
-bool poly_ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
-uint32_t poly_ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 /* Phase E: const-registry was deleted from tensor.c, so the corresponding
  * cleanup hook here no longer needs to drain g_const_bindings. */
@@ -923,7 +917,7 @@ int poly_step_run_indexed_ex(
   for (int i = 0; i < n; i++) {
     if (!buffer_data[i]) continue;
     bindings[nb].buffer = step->buf_order[i];
-    bindings[nb].handle = (PolyBufferHandle){buffer_data[i], 0, POLY_DEVICE_CPU, false};
+    bindings[nb].handle = (PolyBuffer){buffer_data[i], 0, POLY_DEVICE_CPU, false};
     nb++;
   }
   int ret = poly_step_run_ex(step, bindings, nb, var_bindings, n_var_bindings);
@@ -1274,7 +1268,7 @@ static int migrate_to_device(
     if (bindings[i].handle.ptr)
       alloc->copy_in(dptr, bindings[i].handle.ptr, nbytes, alloc->dev_ctx);
     dev[i].buffer = buf;
-    dev[i].handle = (PolyBufferHandle){dptr, nbytes, device, true};
+    dev[i].handle = (PolyBuffer){dptr, nbytes, device, true};
   }
 
   /* Phase E: the const-registry buffer migration block (formerly the
@@ -1439,7 +1433,7 @@ int poly_realize_flat_device(
 ) {
   /* datas[] are host pointers -- only host-addressable devices are valid.
    * For device-memory backends (CUDA/HIP), use poly_realize with proper
-   * PolyBufferHandle bindings that carry device pointers. */
+   * PolyBuffer bindings that carry device pointers. */
   PolyDeviceId dom = (device == POLY_DEVICE_AUTO) ? POLY_DEVICE_CPU : device;
   if (dom != POLY_DEVICE_AUTO && !poly_device_is_host_addressable(dom)) {
     fprintf(
@@ -1454,7 +1448,7 @@ int poly_realize_flat_device(
   if (!bindings) return -1;
   for (int i = 0; i < n; i++) {
     bindings[i].buffer = buffers[i];
-    bindings[i].handle = (PolyBufferHandle){datas[i], 0, dom, false};
+    bindings[i].handle = (PolyBuffer){datas[i], 0, dom, false};
   }
   int ret = poly_realize(ctx, tensor_sink, bindings, n);
   free(bindings);
@@ -1480,7 +1474,7 @@ void poly_realize_bind(PolyCtx *ctx, PolyUOp *buffer, void *data) {
     return;
   }
   g_realize_bindings[g_realize_n].buffer = buffer;
-  g_realize_bindings[g_realize_n].handle = (PolyBufferHandle){data, 0, POLY_DEVICE_CPU, false};
+  g_realize_bindings[g_realize_n].handle = (PolyBuffer){data, 0, POLY_DEVICE_CPU, false};
   g_realize_n++;
 }
 
@@ -1491,7 +1485,7 @@ int poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink) {
 }
 
 /* CUDA realize (DEPRECATED stubs) * These are kept for Python/JS frontend backward compatibility.
- * New code should use poly_realize() with CUDA-domain PolyBufferHandle bindings.
+ * New code should use poly_realize() with CUDA-domain PolyBuffer bindings.
  */
 
 #ifdef POLY_HAS_CUDA

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "utils.h"
 
 /* OpSet helpers */
 
@@ -331,13 +332,6 @@ PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b)
 /* graph_rewrite (top-down unified_rewrite) */
 
 /* Pointer hash/eq for maps */
-static bool ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
-static uint32_t ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 /* Worklist entry */
 typedef struct {
@@ -367,33 +361,33 @@ typedef struct WaitNode {
 } WaitNode;
 
 static void waitlist_add(PolyMap *wl, PolyUOp *key, WorkItem item) {
-  uint32_t h = ptr_hash(key);
+  uint32_t h = poly_ptr_hash(key);
   WaitNode *node = malloc(sizeof(WaitNode));
   node->item = item;
-  node->next = poly_map_get(wl, h, key, ptr_eq);
-  poly_map_set(wl, h, key, node, ptr_eq);
+  node->next = poly_map_get(wl, h, key, poly_ptr_eq);
+  poly_map_set(wl, h, key, node, poly_ptr_eq);
 }
 
 static void waitlist_flush(PolyMap *wl, PolyUOp *key, WorkStack *ws) {
-  uint32_t h = ptr_hash(key);
-  WaitNode *chain = poly_map_get(wl, h, key, ptr_eq);
+  uint32_t h = poly_ptr_hash(key);
+  WaitNode *chain = poly_map_get(wl, h, key, poly_ptr_eq);
   while (chain) {
     ws_push(ws, chain->item.n, chain->item.stage, chain->item.new_n);
     WaitNode *next = chain->next;
     free(chain);
     chain = next;
   }
-  poly_map_remove(wl, h, key, ptr_eq);
+  poly_map_remove(wl, h, key, poly_ptr_eq);
 }
 
 #define REWRITE_STACK_LIMIT 100000
 
 static PolyUOp *replace_get(PolyMap *m, PolyUOp *key) {
-  return poly_map_get(m, ptr_hash(key), key, ptr_eq);
+  return poly_map_get(m, poly_ptr_hash(key), key, poly_ptr_eq);
 }
 
 static void replace_set(PolyMap *m, PolyUOp *key, PolyUOp *val) {
-  poly_map_set(m, ptr_hash(key), key, val, ptr_eq);
+  poly_map_set(m, poly_ptr_hash(key), key, val, poly_ptr_eq);
 }
 
 /* Active graph_rewrite user context for callbacks that need pass-local state. */
@@ -420,7 +414,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
   WorkStack ws = {NULL, 0, 0};
 
   /* Mark root as on_stack and push */
-  poly_map_set(on_stack, ptr_hash(sink), sink, (void *)(uintptr_t)1, ptr_eq);
+  poly_map_set(on_stack, poly_ptr_hash(sink), sink, (void *)(uintptr_t)1, poly_ptr_eq);
   ws_push(&ws, sink, 0, sink);
 
   while (ws.top > 0) {
@@ -465,8 +459,8 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
       int src_start = (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 1) ? 1 : 0;
       for (int i = new_n->n_src - 1; i >= src_start; i--) {
         PolyUOp *x = new_n->src[i];
-        if (poly_map_get(on_stack, ptr_hash(x), x, ptr_eq)) continue;
-        poly_map_set(on_stack, ptr_hash(x), x, (void *)(uintptr_t)1, ptr_eq);
+        if (poly_map_get(on_stack, poly_ptr_hash(x), x, poly_ptr_eq)) continue;
+        poly_map_set(on_stack, poly_ptr_hash(x), x, (void *)(uintptr_t)1, poly_ptr_eq);
         ws_push(&ws, x, 0, x);
       }
     } else if (stage == 1) {

@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "utils.h"
 #include "exec_plan.h"
 #include "pat.h"
 #include <stdio.h>
@@ -60,12 +61,6 @@ typedef struct {
   int cap;
 } CudaStrMap;
 
-static uint32_t cuda_ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  v = ((v >> 16) ^ v) * 0x45d9f3bU;
-  v = ((v >> 16) ^ v) * 0x45d9f3bU;
-  return (uint32_t)((v >> 16) ^ v);
-}
 
 static void csmap_init(CudaStrMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
@@ -74,7 +69,7 @@ static void csmap_init(CudaStrMap *m, int n) {
 }
 
 static void csmap_set(CudaStrMap *m, PolyUOp *key, char *val) {
-  uint32_t h = cuda_ptr_hash(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h] && m->keys[h] != key)
     h = (h + 1) % m->cap;
   if (m->keys[h] == key) free(m->vals[h]);
@@ -83,7 +78,7 @@ static void csmap_set(CudaStrMap *m, PolyUOp *key, char *val) {
 }
 
 static char *csmap_get(CudaStrMap *m, PolyUOp *key) {
-  uint32_t h = cuda_ptr_hash(key) % m->cap;
+  uint32_t h = poly_ptr_hash(key) % m->cap;
   while (m->keys[h]) {
     if (m->keys[h] == key) return m->vals[h];
     h = (h + 1) % m->cap;

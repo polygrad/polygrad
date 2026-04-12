@@ -11,17 +11,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "utils.h"
 
 /* Local helpers */
 
-static bool ptr_eq(const void *a, const void *b) {
-  return a == b;
-}
 
-static uint32_t ptr_hash(const void *p) {
-  uintptr_t v = (uintptr_t)p;
-  return (uint32_t)(v ^ (v >> 16) ^ (sizeof(v) > 4 ? (uint32_t)(v >> 32) : 0));
-}
 
 /* Heap-allocate a shape with copied dims */
 static PolyShape heap_shape(int64_t *dims, int ndim) {
@@ -136,11 +130,11 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u);
 
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
   PolyMap *cache = poly_ctx_shape_cache(ctx);
-  uint32_t h = ptr_hash(u);
-  ShapeCacheEntry *cached = poly_map_get(cache, h, u, ptr_eq);
+  uint32_t h = poly_ptr_hash(u);
+  ShapeCacheEntry *cached = poly_map_get(cache, h, u, poly_ptr_eq);
   if (cached) return cached;
   ShapeCacheEntry *entry = compute_and_cache(ctx, u);
-  poly_map_set(cache, h, u, entry, ptr_eq);
+  poly_map_set(cache, h, u, entry, poly_ptr_eq);
   return entry;
 }
 
