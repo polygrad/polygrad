@@ -7,7 +7,7 @@
 
 #include "polygrad.h"
 #include "utils.h"
-#include "arena.h"
+#include "ctx.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -182,105 +182,7 @@ static bool cse_eq(const void *a, const void *b) {
   return true;
 }
 
-/* Context */
-
-struct PolyCtx {
-  PolyArena *arena;
-  PolyMap *cse;
-  PolyMap *kernel_cache; /* computation UOp* → PolyCachedKernel* (rendered bytes) */
-  PolyMap *shape_cache; /* UOp* → ShapeCacheEntry* (lazy shape cache) */
-  PolyMap *buffers; /* BUFFER UOp* → PolyBuffer*, side table for realize */
-  /* Named buffer registry */
-  PolyRegEntry **entries; /* malloc'd array of ptrs to arena-allocated entries */
-  int n_entries;
-  int entries_cap;
-  PolyMap *name_map; /* str hash → PolyRegEntry* */
-  /* Named entrypoints */
-  struct {
-    const char *name;
-    PolyUOp *sink;
-  } *ep;
-  int n_ep;
-  int ep_cap;
-  int32_t next_buf_tag; /* auto-incrementing tag for unique registry BUFFERs */
-};
-
-PolyCtx *poly_ctx_new(void) {
-  poly_init_group_ops(); /* ensure opset globals are initialized (Emscripten safety) */
-  PolyCtx *ctx = malloc(sizeof(PolyCtx));
-  if (!ctx) return NULL;
-  ctx->arena = poly_arena_new(0);
-  ctx->cse = poly_map_new(256);
-  ctx->kernel_cache = poly_map_new(16);
-  ctx->shape_cache = poly_map_new(64);
-  ctx->buffers = poly_map_new(64);
-  ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache || !ctx->buffers ||
-      !ctx->name_map) {
-    if (ctx->arena) poly_arena_destroy(ctx->arena);
-    if (ctx->cse) poly_map_destroy(ctx->cse);
-    if (ctx->kernel_cache) poly_map_destroy(ctx->kernel_cache);
-    if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
-    if (ctx->buffers) poly_map_destroy(ctx->buffers);
-    if (ctx->name_map) poly_map_destroy(ctx->name_map);
-    free(ctx);
-    return NULL;
-  }
-  ctx->entries = NULL;
-  ctx->n_entries = 0;
-  ctx->entries_cap = 0;
-  ctx->ep = NULL;
-  ctx->n_ep = 0;
-  ctx->ep_cap = 0;
-  ctx->next_buf_tag = 1; /* start at 1; tag=0 is the default (untagged) */
-  return ctx;
-}
-
-static void free_cached_kernel(const void *key, void *value, void *userdata) {
-  (void)key;
-  (void)userdata;
-  PolyCachedKernel *ck = value;
-  free(ck->bytes);
-  free(ck);
-}
-
-/* Optional frontend cleanup hook (defined in frontend.c). */
-void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
-
-void poly_ctx_destroy(PolyCtx *ctx) {
-  if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
-  poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
-  poly_map_destroy(ctx->kernel_cache);
-  poly_map_destroy(ctx->shape_cache); /* entries are arena-owned, no per-entry free */
-  poly_map_destroy(ctx->buffers); /* handle values are arena-owned */
-  poly_map_destroy(ctx->name_map); /* entries are arena-owned */
-  poly_map_destroy(ctx->cse);
-  free(ctx->entries); /* array of ptrs, entries themselves arena-owned */
-  free(ctx->ep); /* ep names are arena-owned */
-  poly_arena_destroy(ctx->arena);
-  free(ctx);
-}
-
-bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p) {
-  if (!ctx || !p) return false;
-  uintptr_t addr = (uintptr_t)p;
-  for (PolyArenaBlock *b = ctx->arena->head; b; b = b->next) {
-    uintptr_t start = (uintptr_t)b->data;
-    uintptr_t end = start + b->used;
-    if (addr >= start && addr < end) return true;
-  }
-  return false;
-}
-
-PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) {
-  return ctx->kernel_cache;
-}
-PolyArena *poly_ctx_arena(PolyCtx *ctx) {
-  return ctx->arena;
-}
-PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) {
-  return ctx->shape_cache;
-}
+/* struct PolyCtx and lifecycle are in ctx.h / ctx.c */
 
 /* UOp creation with CSE */
 
