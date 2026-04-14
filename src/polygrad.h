@@ -415,7 +415,7 @@ typedef enum {
   POLY_DEVICE_WEBGPU,
   POLY_DEVICE_X64_JIT,
   POLY_DEVICE_HIP,
-} PolyDeviceId;
+} PolyDevice;
 
 #ifdef __EMSCRIPTEN__
 #define POLY_DEVICE_HOST POLY_DEVICE_WASM_JIT
@@ -423,19 +423,7 @@ typedef enum {
 #define POLY_DEVICE_HOST POLY_DEVICE_CPU
 #endif
 
-/* Buffer: device-specific memory reference.
- *   CPU/INTERP: host malloc'd pointer
- *   CUDA:       CUdeviceptr (cast to void*)
- *   HIP:        hipDeviceptr_t (void*)
- *   WASM_JIT:   offset into Emscripten heap
- *   WEBGPU:     GPUBuffer (host-managed, wrapped) */
-
-typedef struct {
-  void *ptr;
-  size_t nbytes;
-  PolyDeviceId domain;
-  bool owned;
-} PolyBuffer;
+/* PolyBuffer is defined in device.h (needs PolyAllocator pointer) */
 
 /* UOp */
 

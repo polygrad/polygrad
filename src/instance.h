@@ -18,7 +18,7 @@
 #define POLY_INSTANCE_H
 
 #include "polygrad.h"
-#include "exec_plan.h" /* PolyDeviceId */
+#include "exec_plan.h" /* PolyDevice */
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -97,11 +97,11 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
 /* Device configuration */
 
 /* Bulk rematerialization: moves all buffer handles to the target domain.
- * After set_device(CUDA), all buf_handles[].domain are CUDA.
+ * After set_device(CUDA), all buf_handles[].device are CUDA.
  * The next poly_instance_call() builds CUDA-domain bindings,
  * poly_realize() infers CUDA, compiles for CUDA, runs on CUDA.
  * Returns 0 on success, <0 if device is unsupported or unavailable. */
-int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device);
+int poly_instance_set_device(PolyInstance *inst, PolyDevice device);
 
 /* Explicit readback/upload for device-resident buffers */
 

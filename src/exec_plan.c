@@ -1020,13 +1020,13 @@ static const PolyBackendDesc BACKENDS[] = {
 
 #define N_BACKENDS (sizeof(BACKENDS) / sizeof(BACKENDS[0]))
 
-const PolyBackendDesc *poly_backend_get(PolyDeviceId device) {
+const PolyBackendDesc *poly_backend_get(PolyDevice device) {
   if (device < 0 || (size_t)device >= N_BACKENDS) return NULL;
   if (!BACKENDS[device].name) return NULL;
   return &BACKENDS[device];
 }
 
-bool poly_device_is_host_addressable(PolyDeviceId device) {
+bool poly_device_is_host_addressable(PolyDevice device) {
   const PolyBackendDesc *be = poly_backend_get(device);
   return be && be->get_allocator()->host_addressable;
 }
@@ -1042,7 +1042,7 @@ void poly_sched_cache_flush(void) {
 /*  Executable step: lower, run, free                                    */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule, PolyDeviceId device) {
+PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device) {
   if (!ctx || !schedule) return NULL;
 
   const PolyBackendDesc *backend = poly_backend_get(device);
@@ -1122,7 +1122,7 @@ PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *schedule, Po
       plan->intermediates[idx] = (PolyBuffer){
           .ptr = ptr,
           .nbytes = nbytes,
-          .domain = plan->device,
+          .device = plan->device,
           .owned = true,
       };
       idx++;
@@ -1198,23 +1198,23 @@ int poly_compiled_plan_run(
   /* Zero persistent intermediates (reduce accumulators need this) */
   for (int i = 0; i < plan->n_intermediates; i++) {
     PolyBuffer *h = &plan->intermediates[i];
-    if (h->domain == POLY_DEVICE_CPU || h->domain == POLY_DEVICE_INTERP
+    if (h->device == POLY_DEVICE_CPU || h->device == POLY_DEVICE_INTERP
 #ifdef POLY_HAS_X64
-        || h->domain == POLY_DEVICE_X64_JIT
+        || h->device == POLY_DEVICE_X64_JIT
 #endif
 #ifdef __EMSCRIPTEN__
-        || h->domain == POLY_DEVICE_WASM_JIT
+        || h->device == POLY_DEVICE_WASM_JIT
 #endif
     ) {
       memset(h->ptr, 0, h->nbytes);
     }
 #ifdef POLY_HAS_CUDA
-    else if (h->domain == POLY_DEVICE_CUDA) {
+    else if (h->device == POLY_DEVICE_CUDA) {
       poly_cuda_memset((unsigned long long)(uintptr_t)h->ptr, 0, h->nbytes);
     }
 #endif
 #ifdef POLY_HAS_HIP
-    else if (h->domain == POLY_DEVICE_HIP) {
+    else if (h->device == POLY_DEVICE_HIP) {
       poly_hip_memset(h->ptr, 0, h->nbytes);
     }
 #endif

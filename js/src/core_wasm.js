@@ -88,7 +88,7 @@ async function createWasmCore(device) {
     return Module.__heapF32
   }
 
-  // --- Device selection (PolyDeviceId enum from exec_plan.h) ---
+  // --- Device selection (PolyDevice enum from exec_plan.h) ---
   const DEVICE_IDS = { auto: 4, cpu: 4, interp: 2, wasm: 4, webgpu: 5 }
   if (!(deviceName in DEVICE_IDS))
     throw new Error('polygrad: unsupported device \'' + deviceName + '\'')

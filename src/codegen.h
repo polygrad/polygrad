@@ -60,7 +60,7 @@ typedef struct {
   int beam_width; /* BEAM search width (0 = heuristic, >0 = BEAM search) */
   PolyRendererCaps caps; /* renderer capabilities (zero-init = CPU defaults) */
   /* Renderer config for unified pipeline (Phase 4) */
-  int device; /* PolyDeviceId from exec_plan.h (0 = CPU) */
+  int device; /* PolyDevice from exec_plan.h (0 = CPU) */
   PolyOptPolicy opt_policy; /* explicit optimization strategy */
   PolyPatternMatcher *extra_matcher; /* renderer-specific final rewrite (NULL = none) */
   int gpu_block_size; /* group_for_reduce block size (0 = skip) */

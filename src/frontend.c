@@ -999,7 +999,7 @@ typedef struct {
   PolyUOp *sink; /* identity key */
   uint32_t hash;
   PolyCompileMode mode;
-  PolyDeviceId device;
+  PolyDevice device;
   int8_t optimize; /* codegen optimization level */
   int8_t devectorize; /* devectorize level (-1, 0, 1) */
   int8_t tc_opt; /* POLY_TC_OPT env (TC strictness level) */
@@ -1037,7 +1037,7 @@ static PolyCompiledPlan *r_plan_get(
     PolyUOp *sink,
     uint32_t h,
     PolyCompileMode m,
-    PolyDeviceId d,
+    PolyDevice d,
     int8_t opt,
     int8_t devec,
     int8_t tc_opt,
@@ -1057,7 +1057,7 @@ static void r_plan_put(
     PolyUOp *sink,
     uint32_t h,
     PolyCompileMode m,
-    PolyDeviceId d,
+    PolyDevice d,
     int8_t opt,
     int8_t devec,
     int8_t tc_opt,
@@ -1118,12 +1118,12 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
 /*  poly_realize: available in ALL builds (native + WASM)                */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-static PolyDeviceId infer_device(PolyBufferBinding *bindings, int n) {
+static PolyDevice infer_device(PolyBufferBinding *bindings, int n) {
   /* Check if any binding is on a non-CPU device */
   for (int i = 0; i < n; i++)
-    if (bindings[i].handle.domain != POLY_DEVICE_CPU &&
-        bindings[i].handle.domain != POLY_DEVICE_AUTO)
-      return bindings[i].handle.domain;
+    if (bindings[i].handle.device != POLY_DEVICE_CPU &&
+        bindings[i].handle.device != POLY_DEVICE_AUTO)
+      return bindings[i].handle.device;
   /* POLY_DEVICE=cpu|cuda|hip|x64|interp — unified backend selector.
    * Strict: if set but unavailable, warn (don't silently fall back to CPU). */
   const char *dev_env = getenv("POLY_DEVICE");
@@ -1198,7 +1198,7 @@ static void **build_slot_data_from_bindings(
   return slot_data;
 }
 
-PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDeviceId device) {
+PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDevice device) {
   if (!tensor_sink || tensor_sink->op != POLY_OP_SINK) return NULL;
 
   uint32_t hash = poly_structural_hash(tensor_sink) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
@@ -1225,10 +1225,10 @@ PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDeviceId
 
 /* Check if device needs device-memory but all bindings are host-domain.
  * Returns true for GPU backends (CUDA, HIP) when bindings are CPU/AUTO. */
-static bool needs_device_migration(PolyDeviceId device, PolyBufferBinding *bindings, int n) {
+static bool needs_device_migration(PolyDevice device, PolyBufferBinding *bindings, int n) {
   if (device != POLY_DEVICE_CUDA && device != POLY_DEVICE_HIP) return false;
   for (int i = 0; i < n; i++)
-    if (bindings[i].handle.domain == device) return false; /* already on device */
+    if (bindings[i].handle.device == device) return false; /* already on device */
   return true;
 }
 
@@ -1242,7 +1242,7 @@ static int migrate_to_device(
     PolyUOp *tensor_sink,
     PolyBufferBinding *bindings,
     int n_bindings,
-    PolyDeviceId device,
+    PolyDevice device,
     PolyBufferBinding **out_dev,
     int *out_total
 ) {
@@ -1290,7 +1290,7 @@ static void unmigrate_from_device(
     int n_user,
     PolyBufferBinding *dev,
     int n_total,
-    PolyDeviceId device,
+    PolyDevice device,
     bool readback
 ) {
   const PolyBackendDesc *be = poly_backend_get(device);
@@ -1319,7 +1319,7 @@ int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink, PolyBufferBinding *bindings
     return -1;
   }
 
-  PolyDeviceId device = infer_device(bindings, n_bindings);
+  PolyDevice device = infer_device(bindings, n_bindings);
 
   /* Transparent host-to-device migration: when a GPU backend is selected
    * (via env var like POLY_HIP=1) but bindings are host pointers, we
@@ -1378,7 +1378,7 @@ int poly_realize_ex(
     return -1;
   }
 
-  PolyDeviceId device = infer_device(bindings, n_bindings);
+  PolyDevice device = infer_device(bindings, n_bindings);
 
   /* Transparent device migration (shared with poly_realize) */
   if (needs_device_migration(device, bindings, n_bindings)) {
@@ -1429,12 +1429,12 @@ int poly_realize_flat_device(
     PolyUOp **buffers,
     void **datas,
     int n,
-    PolyDeviceId device
+    PolyDevice device
 ) {
   /* datas[] are host pointers -- only host-addressable devices are valid.
    * For device-memory backends (CUDA/HIP), use poly_realize with proper
    * PolyBuffer bindings that carry device pointers. */
-  PolyDeviceId dom = (device == POLY_DEVICE_AUTO) ? POLY_DEVICE_CPU : device;
+  PolyDevice dom = (device == POLY_DEVICE_AUTO) ? POLY_DEVICE_CPU : device;
   if (dom != POLY_DEVICE_AUTO && !poly_device_is_host_addressable(dom)) {
     fprintf(
         stderr,

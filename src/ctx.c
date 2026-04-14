@@ -1,6 +1,7 @@
 /* ctx.c -- PolyCtx lifecycle: create, destroy, accessors */
 
 #include "ctx.h"
+#include "device.h"
 #include "utils.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -17,6 +18,13 @@ static void free_cached_kernel(const void *key, void *value, void *userdata) {
   PolyCachedKernel *ck = value;
   free(ck->bytes);
   free(ck);
+}
+
+static void free_buffer_entry(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  /* Free current + src chain. PolyBuffer struct itself is arena-allocated. */
+  poly_buffer_free_chain((PolyBuffer *)value);
 }
 
 PolyCtx *poly_ctx_new(void) {
@@ -56,6 +64,8 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
   poly_map_destroy(ctx->shape_cache);
+  /* Free owned buffer ptrs before destroying the map. */
+  poly_map_foreach(ctx->buffers, free_buffer_entry, NULL);
   poly_map_destroy(ctx->buffers);
   poly_map_destroy(ctx->name_map);
   poly_map_destroy(ctx->cse);

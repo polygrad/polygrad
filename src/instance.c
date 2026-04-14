@@ -200,7 +200,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
     inst->buf_handles[i] = (PolyBuffer){
         .ptr = inst->bufs[i].data,
         .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
-        .domain = POLY_DEVICE_HOST,
+        .device = POLY_DEVICE_HOST,
         .owned = false,
     };
   }
@@ -337,7 +337,7 @@ static void vag_free(VagState *vag, int n_params) {
 
 static void free_owned_handle(PolyBuffer *h) {
   if (h->owned && h->ptr) {
-    const PolyBackendDesc *be = poly_backend_get(h->domain);
+    const PolyBackendDesc *be = poly_backend_get(h->device);
     if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
   }
 }
@@ -377,7 +377,7 @@ void poly_instance_free(PolyInstance *inst) {
     for (int i = 0; i < inst->n_bufs; i++) {
       PolyBuffer *h = &inst->buf_handles[i];
       if (h->owned && h->ptr) {
-        const PolyBackendDesc *be = poly_backend_get(h->domain);
+        const PolyBackendDesc *be = poly_backend_get(h->device);
         if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
       }
     }
@@ -436,7 +436,7 @@ static int readback_handle(const PolyBuffer *h, void *dst, size_t len);
 static PolyBuffer make_handle(
     void *host_data,
     size_t nbytes,
-    PolyDeviceId dev,
+    PolyDevice dev,
     const PolyAllocator *alloc
 );
 
@@ -444,7 +444,7 @@ static PolyBuffer make_handle(
  * Returns 0 on success or if already on host; -1 on readback failure. */
 static int sync_buf_to_host(PolyInstance *inst, int bi) {
   if (!inst->buf_handles) return 0;
-  if (poly_device_is_host_addressable(inst->buf_handles[bi].domain)) return 0;
+  if (poly_device_is_host_addressable(inst->buf_handles[bi].device)) return 0;
   size_t nbytes = (size_t)inst->bufs[bi].numel * sizeof(float);
   return readback_handle(&inst->buf_handles[bi], inst->bufs[bi].data, nbytes);
 }
@@ -491,22 +491,22 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
 
 static int readback_handle(const PolyBuffer *h, void *dst, size_t len) {
   if (!h || !h->ptr || !dst || len == 0) return -1;
-  if (poly_device_is_host_addressable(h->domain)) {
+  if (poly_device_is_host_addressable(h->device)) {
     memcpy(dst, h->ptr, len);
     return 0;
   }
-  const PolyBackendDesc *be = poly_backend_get(h->domain);
+  const PolyBackendDesc *be = poly_backend_get(h->device);
   if (!be) return -1;
   return be->get_allocator()->copy_out(dst, h->ptr, len, be->get_allocator()->dev_ctx);
 }
 
 static int upload_handle(PolyBuffer *h, const void *src, size_t len) {
   if (!h || !h->ptr || !src || len == 0) return -1;
-  if (poly_device_is_host_addressable(h->domain)) {
+  if (poly_device_is_host_addressable(h->device)) {
     memcpy(h->ptr, src, len);
     return 0;
   }
-  const PolyBackendDesc *be = poly_backend_get(h->domain);
+  const PolyBackendDesc *be = poly_backend_get(h->device);
   if (!be) return -1;
   return be->get_allocator()->copy_in(h->ptr, src, len, be->get_allocator()->dev_ctx);
 }
@@ -574,7 +574,7 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
     } else if (inst->bufs[bi].data && views[i].numel == inst->bufs[bi].numel) {
       memcpy(inst->bufs[bi].data, views[i].data, views[i].numel * sizeof(float));
       /* Sync to device if buffer handle is on non-host memory */
-      if (inst->buf_handles && !poly_device_is_host_addressable(inst->buf_handles[bi].domain))
+      if (inst->buf_handles && !poly_device_is_host_addressable(inst->buf_handles[bi].device))
         upload_handle(&inst->buf_handles[bi], inst->bufs[bi].data, views[i].numel * sizeof(float));
     } else if (inst->bufs[bi].data) {
       fprintf(
@@ -624,12 +624,12 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
 
 /* Device configuration */
 
-int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
+int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
   if (!inst) return -1;
 
   /* Resolve AUTO: check POLY_DEVICE env var, same logic as infer_device()
    * in frontend.c so that Instance and Tensor paths use the same selector. */
-  PolyDeviceId resolved = device;
+  PolyDevice resolved = device;
   if (resolved == POLY_DEVICE_AUTO) {
 #ifdef __EMSCRIPTEN__
     resolved = POLY_DEVICE_WASM_JIT;
@@ -685,7 +685,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
   /* Bulk rematerialization: move all buffer handles to the new domain */
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyBuffer *h = &inst->buf_handles[i];
-    if (h->domain == resolved) continue; /* already there */
+    if (h->device == resolved) continue; /* already there */
 
     size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
     if (nbytes == 0) continue;
@@ -693,8 +693,8 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     /* For host-addressable devices, point at existing data */
     if (poly_device_is_host_addressable(resolved)) {
       /* Free old device handle if it was device-owned */
-      if (h->owned && !poly_device_is_host_addressable(h->domain)) {
-        const PolyBackendDesc *old_be = poly_backend_get(h->domain);
+      if (h->owned && !poly_device_is_host_addressable(h->device)) {
+        const PolyBackendDesc *old_be = poly_backend_get(h->device);
         if (old_be) {
           const PolyAllocator *old_alloc = old_be->get_allocator();
           /* Readback to host before freeing device memory */
@@ -706,7 +706,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       *h = (PolyBuffer){
           .ptr = inst->bufs[i].data,
           .nbytes = nbytes,
-          .domain = resolved,
+          .device = resolved,
           .owned = false,
       };
       continue;
@@ -721,15 +721,15 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     if (inst->bufs[i].data) alloc->copy_in(dptr, inst->bufs[i].data, nbytes, alloc->dev_ctx);
 
     /* Free old device handle if owned and from a non-host domain */
-    if (h->owned && h->ptr && !poly_device_is_host_addressable(h->domain)) {
-      const PolyBackendDesc *old_be = poly_backend_get(h->domain);
+    if (h->owned && h->ptr && !poly_device_is_host_addressable(h->device)) {
+      const PolyBackendDesc *old_be = poly_backend_get(h->device);
       if (old_be) old_be->get_allocator()->free(h->ptr, old_be->get_allocator()->dev_ctx);
     }
 
     *h = (PolyBuffer){
         .ptr = dptr,
         .nbytes = nbytes,
-        .domain = resolved,
+        .device = resolved,
         .owned = true,
     };
   }
@@ -739,13 +739,13 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
     TrainState *ts = inst->train;
     for (int i = 0; i < ts->n_moment_bufs; i++) {
       /* m handles */
-      if (ts->m_handles[i].domain != resolved) {
+      if (ts->m_handles[i].device != resolved) {
         free_owned_handle(&ts->m_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
           ts->m_handles[i] = (PolyBuffer){
               .ptr = ts->m_datas[i],
               .nbytes = ts->m_handles[i].nbytes,
-              .domain = resolved,
+              .device = resolved,
               .owned = false,
           };
         } else {
@@ -756,20 +756,20 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
             ts->m_handles[i] = (PolyBuffer){
                 .ptr = mp,
                 .nbytes = nb,
-                .domain = resolved,
+                .device = resolved,
                 .owned = true,
             };
           }
         }
       }
       /* v handles */
-      if (ts->v_handles[i].domain != resolved) {
+      if (ts->v_handles[i].device != resolved) {
         free_owned_handle(&ts->v_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
           ts->v_handles[i] = (PolyBuffer){
               .ptr = ts->v_datas[i],
               .nbytes = ts->v_handles[i].nbytes,
-              .domain = resolved,
+              .device = resolved,
               .owned = false,
           };
         } else {
@@ -780,7 +780,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
             ts->v_handles[i] = (PolyBuffer){
                 .ptr = vp,
                 .nbytes = nb,
-                .domain = resolved,
+                .device = resolved,
                 .owned = true,
             };
           }
@@ -788,13 +788,13 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
       }
     }
     /* Migrate loss output handle */
-    if (ts->loss_handle.domain != resolved) {
+    if (ts->loss_handle.device != resolved) {
       free_owned_handle(&ts->loss_handle);
       if (poly_device_is_host_addressable(resolved)) {
         ts->loss_handle = (PolyBuffer){
             .ptr = &ts->loss_data,
             .nbytes = sizeof(float),
-            .domain = resolved,
+            .device = resolved,
             .owned = false,
         };
       } else {
@@ -803,27 +803,27 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           ts->loss_handle = (PolyBuffer){
               .ptr = lp,
               .nbytes = sizeof(float),
-              .domain = resolved,
+              .device = resolved,
               .owned = true,
           };
         }
       }
     }
     /* Migrate bc scalar handles */
-    if (ts->bc1_handle.domain != resolved) {
+    if (ts->bc1_handle.device != resolved) {
       free_owned_handle(&ts->bc1_handle);
       free_owned_handle(&ts->bc2_handle);
       if (poly_device_is_host_addressable(resolved)) {
         ts->bc1_handle = (PolyBuffer){
             .ptr = &ts->bc1_data,
             .nbytes = sizeof(float),
-            .domain = resolved,
+            .device = resolved,
             .owned = false,
         };
         ts->bc2_handle = (PolyBuffer){
             .ptr = &ts->bc2_data,
             .nbytes = sizeof(float),
-            .domain = resolved,
+            .device = resolved,
             .owned = false,
         };
       } else {
@@ -833,7 +833,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           ts->bc1_handle = (PolyBuffer){
               .ptr = bp1,
               .nbytes = sizeof(float),
-              .domain = resolved,
+              .device = resolved,
               .owned = true,
           };
         }
@@ -843,7 +843,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDeviceId device) {
           ts->bc2_handle = (PolyBuffer){
               .ptr = bp2,
               .nbytes = sizeof(float),
-              .domain = resolved,
+              .device = resolved,
               .owned = true,
           };
         }
@@ -884,9 +884,9 @@ static PolyBufferBinding *build_bindings_for_realize(
     if (!io[i].data) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) continue;
-    if (!poly_device_is_host_addressable(bindings[bi].handle.domain)) {
+    if (!poly_device_is_host_addressable(bindings[bi].handle.device)) {
       /* Upload host IO data into device buffer */
-      const PolyBackendDesc *bd = poly_backend_get(bindings[bi].handle.domain);
+      const PolyBackendDesc *bd = poly_backend_get(bindings[bi].handle.device);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in) {
         size_t nbytes = bindings[bi].handle.nbytes;
@@ -1159,7 +1159,7 @@ int poly_instance_value_and_grad(
    * Use the instance's device domain so handles match the device
    * that instance buffers live on (avoids mixing host pointers into
    * device kernel args when on CUDA/HIP). */
-  PolyDeviceId device = inst->buf_handles[0].domain;
+  PolyDevice device = inst->buf_handles[0].device;
   const PolyBackendDesc *vag_be = poly_backend_get(device);
   const PolyAllocator *vag_alloc = vag_be ? vag_be->get_allocator() : NULL;
 
@@ -1221,27 +1221,27 @@ int poly_instance_value_and_grad(
 static PolyBuffer make_handle(
     void *host_data,
     size_t nbytes,
-    PolyDeviceId dev,
+    PolyDevice dev,
     const PolyAllocator *alloc
 ) {
   if (poly_device_is_host_addressable(dev)) {
     return (PolyBuffer){
         .ptr = host_data,
         .nbytes = nbytes,
-        .domain = dev,
+        .device = dev,
         .owned = false,
     };
   }
   void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!dptr) {
     fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
-    return (PolyBuffer){.ptr = NULL, .nbytes = 0, .domain = dev, .owned = false};
+    return (PolyBuffer){.ptr = NULL, .nbytes = 0, .device = dev, .owned = false};
   }
   if (host_data) alloc->copy_in(dptr, host_data, nbytes, alloc->dev_ctx);
   return (PolyBuffer){
       .ptr = dptr,
       .nbytes = nbytes,
-      .domain = dev,
+      .device = dev,
       .owned = true,
   };
 }
@@ -1270,7 +1270,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 
   /* Initialize all train handles on the current device so kernels write
    * to the correct memory domain (host or device). */
-  PolyDeviceId cur_dev = inst->buf_handles ? inst->buf_handles[0].domain : POLY_DEVICE_CPU;
+  PolyDevice cur_dev = inst->buf_handles ? inst->buf_handles[0].device : POLY_DEVICE_CPU;
   const PolyBackendDesc *cur_be = poly_backend_get(cur_dev);
   const PolyAllocator *alloc = cur_be ? cur_be->get_allocator() : NULL;
   ts->loss_handle = make_handle(&ts->loss_data, sizeof(float), cur_dev, alloc);
@@ -1465,8 +1465,8 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
     float bc2 = 1.0f / (1.0f - powf(o->beta2, (float)o->step));
 
     /* Device-aware update (D2) */
-    if (!poly_device_is_host_addressable(ts->bc1_handle.domain)) {
-      const PolyBackendDesc *bd = poly_backend_get(ts->bc1_handle.domain);
+    if (!poly_device_is_host_addressable(ts->bc1_handle.device)) {
+      const PolyBackendDesc *bd = poly_backend_get(ts->bc1_handle.device);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in) {
         a->copy_in(ts->bc1_handle.ptr, &bc1, sizeof(float), a->dev_ctx);
@@ -1525,7 +1525,7 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   }
 
   /* Read back loss from device to host if not host-addressable */
-  if (!poly_device_is_host_addressable(ts->loss_handle.domain))
+  if (!poly_device_is_host_addressable(ts->loss_handle.device))
     readback_handle(&ts->loss_handle, &ts->loss_data, sizeof(float));
   if (loss_out) *loss_out = ts->loss_data;
 

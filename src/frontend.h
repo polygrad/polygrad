@@ -14,7 +14,7 @@
 
 #include "polygrad.h"
 #include "tensor.h"
-#include "exec_plan.h" /* PolyBuffer, PolyDeviceId */
+#include "exec_plan.h" /* PolyBuffer, PolyDevice */
 
 #define POLYGRAD_ABI_VERSION 1
 
@@ -102,7 +102,7 @@ int poly_realize_flat_device(
     PolyUOp **buffers,
     void **datas,
     int n,
-    PolyDeviceId device
+    PolyDevice device
 );
 
 /* Stateful realize builder — simplest FFI surface (one pointer pair per call).
@@ -116,7 +116,7 @@ int poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink);
  * Does schedule cache lookup + plan cache lookup, creating on miss.
  * The returned plan is cache-owned; caller must NOT free it.
  * Returns NULL on error. */
-PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDeviceId device);
+PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDevice device);
 
 /* WASM kernel rendering (for browser execution) */
 

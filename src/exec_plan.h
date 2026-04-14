@@ -14,7 +14,8 @@
 #ifndef POLY_EXEC_PLAN_H
 #define POLY_EXEC_PLAN_H
 
-#include "polygrad.h" /* PolyDType (by value), PolyCtx/PolyUOp (forward-declared) */
+#include "polygrad.h"
+#include "device.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,21 +55,7 @@ typedef enum {
   POLY_RUNNER_INTERP, /* interpreter: walks scheduled graph directly */
 } PolyRunnerKind;
 
-/* Allocator interface */
-/*
- * Per-device memory operations. Every executable step has exactly one
- * allocator corresponding to its device's memory domain.
- */
-
-typedef struct {
-  void *(*alloc)(size_t nbytes, void *dev_ctx);
-  void (*free)(void *handle, void *dev_ctx);
-  int (*copy_in)(void *dst_handle, const void *host_src, size_t nbytes, void *dev_ctx);
-  int (*copy_out)(void *host_dst, const void *src_handle, size_t nbytes, void *dev_ctx);
-  int (*copy_between)(void *dst_handle, const void *src_handle, size_t nbytes, void *dev_ctx);
-  void *dev_ctx; /* NULL for CPU, CUcontext* for CUDA, etc. */
-  bool host_addressable; /* true if alloc'd pointers are host-dereferenceable */
-} PolyAllocator;
+/* PolyAllocator is defined in device.h (included above) */
 
 /* Prepared buffer slot */
 /*
@@ -193,7 +180,7 @@ typedef struct {
 
 typedef struct {
   PolySchedule *schedule; /* retained reference, not owned */
-  PolyDeviceId device;
+  PolyDevice device;
   const PolyAllocator *allocator;
 
   PolyRunner *runners; /* [schedule->n_items], one per exec item */
@@ -235,7 +222,7 @@ typedef struct {
 
 typedef struct {
   const char *name;
-  PolyDeviceId id;
+  PolyDevice id;
   bool host_executed; /* true for WASM_JIT and WEBGPU */
 
   /* Lower a scheduled root into a runner. ctx needed for linearization.
@@ -296,7 +283,7 @@ void poly_schedule_free(PolySchedule *step);
  *
  * Returns NULL on error.
  */
-PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared, PolyDeviceId device);
+PolyCompiledPlan *poly_compile_schedule(PolyCtx *ctx, PolySchedule *prepared, PolyDevice device);
 
 /*
  * Execute a lowered step with bound buffer data. Zero-alloc in steady state.
@@ -336,10 +323,10 @@ extern const PolyAllocator POLY_HIP_ALLOCATOR;
 
 /* Returns the backend descriptor for a device, or NULL if unsupported
  * in this build. */
-const PolyBackendDesc *poly_backend_get(PolyDeviceId device);
+const PolyBackendDesc *poly_backend_get(PolyDevice device);
 
 /* True if the device's allocator produces host-dereferenceable pointers. */
-bool poly_device_is_host_addressable(PolyDeviceId device);
+bool poly_device_is_host_addressable(PolyDevice device);
 
 /* Backward compatibility */
 

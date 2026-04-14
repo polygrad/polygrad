@@ -32,7 +32,7 @@ class PolyBuffer(ctypes.Structure):
     _fields_ = [
         ('ptr', _ptr),
         ('nbytes', ctypes.c_size_t),
-        ('domain', ctypes.c_int),    # PolyDeviceId
+        ('domain', ctypes.c_int),    # PolyDevice
         ('owned', ctypes.c_bool),
     ]
 

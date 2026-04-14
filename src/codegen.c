@@ -6156,7 +6156,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
    * New Phase 4 fields used here:
    *   opt_policy      — POLY_OPT_HEURISTIC (CPU) or POLY_OPT_TC_ONLY (GPU)
    *   gpu_block_size  — group_for_reduce block size (0 = skip)
-   *   device          — PolyDeviceId, gates gpudims/control_flow
+   *   device          — PolyDevice, gates gpudims/control_flow
    *   extra_matcher   — renderer-specific final rewrite patterns (NULL = none)
    */
 
