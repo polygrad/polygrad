@@ -27,6 +27,23 @@ const PolyDType POLY_BFLOAT16 = {12, 16, "__bf16", 0, 1, false, 0, 0, 0};
 const PolyDType POLY_FLOAT32 = {13, 32, "float", 'f', 1, false, 0, 0, 0};
 const PolyDType POLY_FLOAT64 = {14, 64, "double", 'd', 1, false, 0, 0, 0};
 
+/* FFI-friendly dtype lookup: id -> PolyDType. The id ordering matches the
+ * _DTYPE_IDS dict in py/polygrad/_ffi.py and js/src/ffi.js. */
+static const PolyDType *_dtype_table[] = {
+    &POLY_VOID,    &POLY_BOOL,     &POLY_INT8,    &POLY_UINT8,   &POLY_INT16,
+    &POLY_UINT16,  &POLY_INT32,    &POLY_UINT32,  &POLY_INT64,   &POLY_UINT64,
+    &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
+};
+#define N_DTYPE_TABLE ((int)(sizeof(_dtype_table) / sizeof(_dtype_table[0])))
+
+int poly_dtype_count(void) { return N_DTYPE_TABLE; }
+
+bool poly_dtype_by_id(int id, PolyDType *out) {
+  if (!out || id < 0 || id >= N_DTYPE_TABLE) return false;
+  *out = *_dtype_table[id];
+  return true;
+}
+
 bool poly_dtype_eq(PolyDType a, PolyDType b) {
   return a.priority == b.priority && a.bitsize == b.bitsize && a.count == b.count &&
          a.is_ptr == b.is_ptr && a.addrspace == b.addrspace && a.vcount == b.vcount &&

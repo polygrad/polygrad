@@ -70,9 +70,9 @@ def _pre_init_optimizer_state(opt, model):
 def _snapshot_tensor(t):
     """Capture full tensor state for later restoration."""
     snap = {
-        'uop': t._uop,
+        'uop': t.uop,
         'data': t._data,
-        'buffer': t._buffer,
+        'buffer': t._buf_uop,
         'inputs': t._inputs[:],
         'grad': t._grad,
         'shape': t.shape,
@@ -89,9 +89,9 @@ def _snapshot_tensor(t):
 
 def _restore_tensor(t, snap):
     """Restore tensor state from snapshot."""
-    t._uop = snap['uop']
+    t.uop = snap['uop']
     t._data = snap['data']
-    t._buffer = snap['buffer']
+    t._buf_uop = snap['buffer']
     t._inputs = snap['inputs']
     t._grad = snap['grad']
     # shape is on the UOp -- restoring _uop is sufficient
@@ -218,7 +218,7 @@ def compile_step(step_fn, model, opt, *sample_inputs):
     numel = int(np.prod(loss.shape)) if loss.shape else 1
     loss_buf = _ffi._lib.poly_buffer_f32(ctx, numel)
     loss_data = np.zeros(numel, dtype=np.float32)
-    loss_store = _ffi._lib.poly_store_val(ctx, loss_buf, loss._uop)
+    loss_store = _ffi._lib.poly_store_val(ctx, loss_buf, loss.uop)
     sink_srcs.append(loss_store)
 
     # Build SINK

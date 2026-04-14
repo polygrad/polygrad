@@ -348,6 +348,41 @@ def _declare_signatures(lib):
     lib.poly_grad_many.restype = ctypes.c_int
     lib.poly_grad_many.argtypes = [_ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
 
+    # --- UOp identity helpers ---
+    lib.poly_uop_has_buffer_identity.restype = ctypes.c_bool
+    lib.poly_uop_has_buffer_identity.argtypes = [_ptr]
+
+    lib.poly_uop_get_buffer_identity.restype = _ptr
+    lib.poly_uop_get_buffer_identity.argtypes = [_ptr]
+
+    # --- Side-table buffer API (device.h) ---
+    lib.poly_buffer_set.restype = None
+    lib.poly_buffer_set.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+
+    lib.poly_buffer_get_ptr.restype = ctypes.c_void_p
+    lib.poly_buffer_get_ptr.argtypes = [_ptr, _ptr]
+
+    lib.poly_buffer_from_host.restype = _ptr
+    lib.poly_buffer_from_host.argtypes = [
+        _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, _i64p, ctypes.c_int,
+    ]
+
+    lib.poly_buffer_get.restype = _ptr
+    lib.poly_buffer_get.argtypes = [_ptr, _ptr]
+
+    lib.poly_buffer_is_allocated.restype = ctypes.c_bool
+    lib.poly_buffer_is_allocated.argtypes = [_ptr, _ptr]
+
+    # --- Graph-driven realize (realize.h) ---
+    lib.poly_realize_sink.restype = ctypes.c_int
+    lib.poly_realize_sink.argtypes = [_ptr, _ptr]
+
+    lib.poly_realize_uop.restype = _ptr
+    lib.poly_realize_uop.argtypes = [_ptr, _ptr]
+
+    lib.poly_realize_uops.restype = ctypes.c_int
+    lib.poly_realize_uops.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
+
     # --- Realize ---
     lib.poly_realize.restype = ctypes.c_int
     lib.poly_realize.argtypes = [_ptr, _ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int]

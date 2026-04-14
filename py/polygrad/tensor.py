@@ -5,10 +5,19 @@ Supports float32 (default) and float64 dtypes.
 
 import ctypes
 import math
+import weakref
 
 import numpy as np
 
 from . import _ffi
+from polygrad.uop.ops import UOp
+from polygrad.device import Buffer
+
+
+# Global registry of live Tensors. Keys are weakrefs so GC'd tensors vanish
+# automatically. Used for post-realize retargeting and backward graph
+# discovery (replaces polygrad's legacy per-Tensor `_inputs` list).
+all_tensors: dict[weakref.ref, None] = {}
 
 
 def _int64_array(vals):
@@ -66,7 +75,7 @@ class Variable:
         self.name = name
         self.min_val = min_val
         self.max_val = max_val
-        self._uop = _ffi._lib.poly_define_var(self._ctx, name.encode(), min_val, max_val)
+        self.uop = UOp.variable(self._ctx, name, min_val, max_val)
 
     def bind(self, value):
         """Bind a concrete value, returning a BoundVariable."""
@@ -84,7 +93,7 @@ class BoundVariable:
         self.variable = variable
         self.value = value
         self._ctx = variable._ctx
-        self._uop = _ffi._lib.poly_bind_var(self._ctx, variable._uop, value)
+        self.uop = variable.uop.bind(value)
 
     def __int__(self):
         return self.value
@@ -121,7 +130,7 @@ class Tensor:
     _compile_assigns_ordered = []  # class-level: ASSIGN UOps in program order
 
     def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
-                 _buffer=None, _data=None, _shape=None, _inputs=None, _dtype=None, _device=None):
+                 _buf_uop=None, _data=None, _shape=None, _inputs=None, _dtype=None, _device=None):
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
         from .device import Device
@@ -129,9 +138,9 @@ class Tensor:
         self._device = Device.canonicalize(_device if _device is not None else device)
 
         if _uop is not None:
-            # Internal construction (from ops) -- shape is on the UOp
-            self._uop = _uop
-            self._buffer = _buffer
+            # Internal construction (from ops) -- shape is on the UOp.
+            # Accept either a UOp instance or a raw ctypes pointer from FFI.
+            self.uop = _uop if isinstance(_uop, UOp) else UOp(self._ctx, _uop)
             self._data = _data
             self._inputs = _inputs or []
             self._dtype_str = _dtype or 'float32'
@@ -147,23 +156,26 @@ class Tensor:
             arr = np.ascontiguousarray(data, dtype=np_dt)
             self._data = arr.ravel()
             self._dtype_str = dt
-            if dt == 'float64':
-                self._buffer = _ffi._lib.poly_buffer_f64(self._ctx, len(self._data))
-            else:
-                self._buffer = _ffi._lib.poly_buffer_f32(self._ctx, len(self._data))
-            # For multi-dimensional tensors, insert a RESHAPE UOp so the
-            # scheduler knows the shape (BUFFER alone is flat/1D).
+            # Polygrad equivalent of tinygrad's _fromnp: UOp.from_host creates
+            # the BUFFER UOp, registers a PolyBuffer wrapping the NumPy host
+            # bytes in ctx->buffers, and wraps in RESHAPE when ndim>1.
+            # self._data owns the memory; C borrows the pointer.
+            dtype_id = self._DTYPE_IDS.get(dt, 13 if dt == 'float64' else 12)
             if len(arr.shape) > 1:
                 dims, ndim = _int64_array(arr.shape)
-                self._uop = _ffi._lib.poly_reshape(self._ctx, self._buffer, dims, ndim)
             else:
-                self._uop = self._buffer
+                dims, ndim = None, 0
+            self.uop = UOp.from_host(
+                self._ctx, self._data.ctypes.data, self._data.nbytes,
+                dtype_id, dims, ndim,
+            )
             self._inputs = []
 
         self._requires_grad = requires_grad
         self._grad = None
         self._is_param = False     # True for model parameters (set by nn modules)
         # Saved for gradient graph stitching after realize
+        all_tensors[weakref.ref(self)] = None
         self._saved_uop = None     # pre-realize UOp (computation graph)
         self._saved_inputs = None  # pre-realize inputs list
 
@@ -172,20 +184,20 @@ class Tensor:
     @property
     def shape(self):
         """Read shape from cached UOp fields (O(1), no allocation)."""
-        if self._uop is None:
+        if self.uop is None:
             return ()
         lib = _ffi._lib
-        ndim = lib.poly_uop_ndim(self._ctx, self._uop)
+        ndim = lib.poly_uop_ndim(self._ctx, self.uop)
         if ndim <= 0:
             return ()
-        dims = lib.poly_uop_dims(self._ctx, self._uop)
+        dims = lib.poly_uop_dims(self._ctx, self.uop)
         return tuple(dims[i] for i in range(ndim))
 
     @property
     def ndim(self):
-        if self._uop is None:
+        if self.uop is None:
             return 0
-        return max(0, _ffi._lib.poly_uop_ndim(self._ctx, self._uop))
+        return max(0, _ffi._lib.poly_uop_ndim(self._ctx, self.uop))
 
     @property
     def dtype(self):
@@ -228,10 +240,31 @@ class Tensor:
             dim += len(self.shape)
         return self.shape[dim]
 
+    def _apply_uop(self, fxn, *x, extra_args=(), **kwargs):
+        srcs = (self,) + x
+        new_uop = fxn(*[t.uop for t in srcs], *extra_args, **kwargs)
+        needs_input_grad = [t._requires_grad for t in srcs]
+        # directly create the Tensor
+        ret = Tensor.__new__(Tensor)
+        ret.uop, ret._grad = new_uop, None
+        ret._requires_grad = True if any(needs_input_grad) else None if None in needs_input_grad else False
+        # polygrad-specific fields needed by other methods on the returned tensor
+        ret._ctx = self._ctx
+        ret._dtype_str = self._dtype_str
+        ret._device = self._device
+        ret._data = None
+        ret._inputs = []
+        ret._is_param = False
+        ret._saved_uop = None
+        ret._saved_inputs = None
+        # add to all_tensors after construction succeeds
+        all_tensors[weakref.ref(ret)] = None
+        return ret
+
     # --- Realization ---
 
     def _is_leaf(self):
-        return self._data is not None and self._buffer is not None
+        return self._data is not None and self._buf_uop is not None
 
     def _collect_leaves(self, seen=None):
         """Walk the Python tensor graph to find all leaf tensors with data."""
@@ -285,130 +318,6 @@ class Tensor:
             leaves.extend(inp._collect_deep_leaves(seen))
         return leaves
 
-    def _realize(self):
-        """Execute the lazy graph to produce concrete data."""
-        if self._is_leaf():
-            return
-        # Already realized (value cached by backward's _cache_value)
-        if self._data is not None:
-            return
-
-        if self._device == 'CUDA':
-            return self._realize_cuda()
-
-        # Collect all leaf tensor bindings
-        leaves = self._collect_leaves()
-
-        # Build output buffer with correct dtype
-        numel = int(np.prod(self.shape)) if self.shape else 1
-        _DTYPE_NP = {
-            'float32': np.float32, 'float64': np.float64,
-            'int32': np.int32, 'int64': np.int64,
-            'int16': np.int16, 'int8': np.int8,
-            'uint8': np.uint8, 'uint16': np.uint16,
-            'uint32': np.uint32, 'uint64': np.uint64,
-            'bool': np.bool_,
-        }
-        np_dt = _DTYPE_NP.get(self._dtype_str, np.float32)
-        dtype_id = self._DTYPE_IDS.get(self._dtype_str)
-        if dtype_id is not None:
-            out_buf = _ffi._lib.poly_buffer_by_id(self._ctx, numel, dtype_id)
-        elif self._dtype_str == 'float64':
-            out_buf = _ffi._lib.poly_buffer_f64(self._ctx, numel)
-        else:
-            out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
-        out_data = np.zeros(numel, dtype=np_dt)
-
-        # Build STORE + SINK
-        store = _ffi._lib.poly_store_val(self._ctx, out_buf, self._uop)
-        sink = _ffi._lib.poly_sink1(self._ctx, store)
-
-        # Build bindings array
-        all_bindings = []
-        for leaf in leaves:
-            all_bindings.append((leaf._buffer, leaf._data.ctypes.data))
-        all_bindings.append((out_buf, out_data.ctypes.data))
-
-        n = len(all_bindings)
-        c_bindings = (_ffi.PolyBufferBinding * n)()
-        for i, (buf, data) in enumerate(all_bindings):
-            c_bindings[i].buffer = buf
-            c_bindings[i].handle.ptr = data
-
-        ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, n)
-        if ret != 0:
-            raise RuntimeError(f'poly_realize failed {ret}')
-
-        self._data = out_data
-        self._buffer = out_buf
-        # Save original UOp and inputs for backward graph stitching
-        self._saved_uop = self._uop
-        self._saved_inputs = self._inputs[:]
-        # Preserve shape in UOp graph so subsequent ops see correct dimensions
-        if len(self.shape) > 1:
-            dims, ndim = _int64_array(self.shape)
-            self._uop = _ffi._lib.poly_reshape(self._ctx, out_buf, dims, ndim)
-        else:
-            self._uop = out_buf
-        self._inputs = []
-
-    def _realize_cuda(self):
-        """Execute the lazy graph on GPU via CUDA backend."""
-        if not _ffi._has_cuda_ffi:
-            raise RuntimeError('polygrad was built without CUDA support')
-        if not _ffi._lib.poly_cuda_available():
-            raise RuntimeError('CUDA not available')
-
-        # Collect all leaf tensor bindings
-        leaves = self._collect_leaves()
-
-        # Build output buffer
-        numel = int(np.prod(self.shape)) if self.shape else 1
-        is_f64 = self._dtype_str == 'float64'
-        np_dt = np.float64 if is_f64 else np.float32
-        if is_f64:
-            out_buf = _ffi._lib.poly_buffer_f64(self._ctx, numel)
-        else:
-            out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
-        out_data = np.zeros(numel, dtype=np_dt)
-
-        # Build STORE + SINK
-        store = _ffi._lib.poly_store_val(self._ctx, out_buf, self._uop)
-        sink = _ffi._lib.poly_sink1(self._ctx, store)
-
-        # Build bindings array
-        all_bindings = []
-        for leaf in leaves:
-            all_bindings.append((leaf._buffer, leaf._data.ctypes.data))
-        all_bindings.append((out_buf, out_data.ctypes.data))
-
-        n = len(all_bindings)
-        c_bindings = (_ffi.PolyBufferBinding * n)()
-        for i, (buf, data) in enumerate(all_bindings):
-            c_bindings[i].buffer = buf
-            c_bindings[i].handle.ptr = data
-
-        # Run on GPU
-        ret = _ffi._lib.poly_realize_cuda(self._ctx, sink, c_bindings, n)
-        if ret != 0:
-            raise RuntimeError(f'poly_realize_cuda failed ({ret})')
-
-        # Copy results back from GPU to host
-        _ffi._lib.poly_cuda_copyback(c_bindings, n)
-
-        self._data = out_data
-        self._buffer = out_buf
-        # Save original UOp and inputs for backward graph stitching
-        self._saved_uop = self._uop
-        self._saved_inputs = self._inputs[:]
-        # Preserve shape in UOp graph so subsequent ops see correct dimensions
-        if len(self.shape) > 1:
-            dims, ndim = _int64_array(self.shape)
-            self._uop = _ffi._lib.poly_reshape(self._ctx, out_buf, dims, ndim)
-        else:
-            self._uop = out_buf
-        self._inputs = []
-
     def assign(self, x):
         """In-place assignment: self's buffer will be overwritten with x's values.
         Must be realized before use. Returns self for chaining."""
@@ -416,14 +325,14 @@ class Tensor:
             x = Tensor(x)
         if self.shape != x.shape:
             x = x._broadcast_to(self.shape)
-        assert self._buffer is not None, "assign target must be a realized tensor"
+        assert self._buf_uop is not None, "assign target must be a realized tensor"
         # Save logical shape before assign (ASSIGN normalizes to flat BUFFER)
         self._assign_shape = self.shape
-        target_uop = self._uop
-        assign_uop = _ffi._lib.poly_assign(self._ctx, target_uop, x._uop)
+        target_uop = self.uop
+        assign_uop = _ffi._lib.poly_assign(self._ctx, target_uop, x.uop)
         self._assign_data = self._data
-        self._assign_buffer = self._buffer
-        self._uop = assign_uop
+        self._assign_buffer = self._buf_uop
+        self.uop = assign_uop
         self._data = None
         self._inputs = [self._make_leaf_ref(), x]
         return self
@@ -432,9 +341,9 @@ class Tensor:
         """Create a lightweight leaf reference for ASSIGN's self-binding."""
         ref = object.__new__(Tensor)
         ref._ctx = self._ctx
-        ref._buffer = self._assign_buffer
+        ref._buf_uop = self._assign_buffer
         ref._data = self._assign_data
-        ref._uop = self._assign_buffer
+        ref.uop = self._assign_buffer
         ref._inputs = []
         ref._requires_grad = False
         ref._grad = None
@@ -447,7 +356,7 @@ class Tensor:
 
     def _realize_assign(self):
         """Realize an ASSIGN: in-place update to existing buffer."""
-        assign_uop = self._uop
+        assign_uop = self.uop
         target_data = self._assign_data
         target_buffer = self._assign_buffer
 
@@ -461,11 +370,11 @@ class Tensor:
         all_bindings = []
         seen_bufs = set()
         for leaf in leaves:
-            buf_id = leaf._buffer
+            buf_id = leaf._buf_uop
             if buf_id in seen_bufs:
                 continue
             seen_bufs.add(buf_id)
-            all_bindings.append((leaf._buffer, leaf._data.ctypes.data))
+            all_bindings.append((leaf._buf_uop, leaf._data.ctypes.data))
 
         n = len(all_bindings)
         c_bindings = (_ffi.PolyBufferBinding * n)()
@@ -479,53 +388,56 @@ class Tensor:
 
         # Restore: data was updated in-place, point UOp back to buffer
         self._data = target_data
-        self._buffer = target_buffer
+        self._buf_uop = target_buffer
         orig_shape = getattr(self, '_assign_shape', ())
         if len(orig_shape) > 1:
             dims, ndim = _int64_array(orig_shape)
-            self._uop = _ffi._lib.poly_reshape(self._ctx, self._buffer, dims, ndim)
+            self.uop = _ffi._lib.poly_reshape(self._ctx, self._buf_uop, dims, ndim)
         else:
-            self._uop = self._buffer
+            self.uop = self._buf_uop
         self._inputs = []
         # Clean up assign temporaries
         del self._assign_data
         del self._assign_buffer
 
-    def realize(self):
-        """Realize the computation (in-place). Returns self for chaining."""
-        if Tensor._compile_mode:
-            if hasattr(self, '_assign_data'):
-                # Pseudo-realize: save ASSIGN UOp for compile_step SINK,
-                # then restore tensor to buffer state (as if assign ran).
-                # This is needed because Adam's step() does:
-                #   m.assign(new_m).realize()
-                #   m_hat = m * bc1   <-- must use m_buffer, not ASSIGN UOp
-                Tensor._compile_assigns_ordered.append(self._uop)
-                orig_shape = getattr(self, '_assign_shape', self.shape)
-                self._data = self._assign_data
-                self._buffer = self._assign_buffer
-                if len(orig_shape) > 1:
-                    dims, ndim = _int64_array(orig_shape)
-                    self._uop = _ffi._lib.poly_reshape(self._ctx, self._buffer, dims, ndim)
-                else:
-                    self._uop = self._buffer
-                self._inputs = []
-                del self._assign_data
-                del self._assign_buffer
-            return self  # noop for non-assign: keep lazy graph intact
-        if hasattr(self, '_assign_data'):
-            self._realize_assign()
-        else:
-            self._realize()
+    def realize(self, *lst, do_update_stats=True):
+        """Triggers the computation needed to create these Tensor(s).
+        Filters out tensors already with buffer identity, batches the rest
+        into a single SINK via poly_realize_uops, and retargets each
+        tensor's .uop to its realized buffer-identity UOp."""
+        targets = [x for x in (self,) + lst if not x.uop.has_buffer_identity()]
+        if not targets:
+            return self
+        n = len(targets)
+        in_arr = (ctypes.c_void_p * n)(*[t.uop.raw for t in targets])
+        out_arr = (ctypes.c_void_p * n)()
+        rc = _ffi._lib.poly_realize_uops(self._ctx, in_arr, n, out_arr)
+        if rc != 0:
+            raise RuntimeError('poly_realize_uops failed')
+        for t, raw in zip(targets, out_arr):
+            t._saved_uop = t.uop
+            t.uop = UOp(t._ctx, raw)
         return self
 
+    def _buffer(self) -> Buffer:
+        """Return the runtime Buffer backing this tensor.
+        Materializes self via cast -> contiguous -> (to CPU if sharded) ->
+        realize, then wraps the realized UOp's terminal buffer."""
+        x = self.cast(self._dtype_str).contiguous()
+        if isinstance(self._device, tuple):
+            x = x.to("CPU")
+        x.realize()
+        return Buffer(self._ctx, x.uop.buffer, x._dtype_str, x.numel())
+
     def numpy(self):
-        """Realize the computation and return as numpy array.
-        Returns a view into the internal buffer (zero-copy).
-        Caller should .copy() if they need to mutate the result."""
-        if self._data is None:
-            self.realize()
-        return self._data.reshape(self.shape)
+        """Return the value of this tensor as a numpy.ndarray.
+        Matches tinygrad's Tensor.numpy signature."""
+        from .dtype import _to_np_dtype
+        shape = self.shape
+        np_dt = _to_np_dtype(self._dtype_str)
+        if 0 in shape:
+            return np.empty(shape, dtype=np_dt)
+        return self._buffer().numpy().reshape(shape)
 
     def item(self):
         """Return scalar value."""
@@ -557,8 +469,8 @@ class Tensor:
 
         out = Tensor(
             _ctx=self._ctx,
-            _uop=self._uop,
-            _buffer=self._buffer,
+            _uop=self.uop,
+            _buf_uop=self._buf_uop,
             _data=self._data,
             _shape=self.shape,
             _inputs=self._inputs[:],
@@ -578,9 +490,9 @@ class Tensor:
     def cuda(self):
         return self.to('cuda')
 
-    def contiguous(self):
-        uop = _ffi._lib.poly_contiguous(self._ctx, self._uop)
-        return Tensor._from_uop(uop, self.shape, self._ctx, [self])
+    def contiguous(self, *args, **kwargs):
+        """Returns a contiguous tensor."""
+        return self._apply_uop(UOp.contiguous, extra_args=args, **kwargs)
 
     # --- Dtype casting ---
 
@@ -606,7 +518,7 @@ class Tensor:
         dtype_id = self._DTYPE_IDS.get(target_name)
         if dtype_id is None:
             raise ValueError(f'unsupported cast target dtype: {target_name}')
-        uop = _ffi._lib.poly_cast_by_id(self._ctx, self._uop, dtype_id)
+        uop = _ffi._lib.poly_cast_by_id(self._ctx, self.uop, dtype_id)
         if not uop:
             raise RuntimeError(f'poly_cast_by_id failed for dtype {target_name}')
         return Tensor(_ctx=self._ctx, _uop=uop, _shape=self.shape,
@@ -717,11 +629,11 @@ class Tensor:
         sees EXPAND UOps instead of implicit ALU broadcasting.
         """
         if self.shape == target_shape:
-            return self._uop
-        uop = self._uop
+            return self.uop
+        uop = self.uop
         cur_shape = self.shape
         # CONST scalars (from _ensure_tensor) auto-broadcast — no EXPAND needed
-        if not cur_shape and self._buffer is None:
+        if not cur_shape and self._buf_uop is None:
             return uop
         # Scalar tensor or lower-rank: pad left with 1s
         target_nd = len(target_shape)
@@ -773,7 +685,7 @@ class Tensor:
         return other.__truediv__(self)
 
     def __neg__(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['NEG'], self._uop)
+        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['NEG'], self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def __pow__(self, other):
@@ -855,146 +767,146 @@ class Tensor:
             raise RuntimeError("at least one of 'min_' or 'max_' must not be None")
         lo = min_ if min_ is not None else -1e38
         hi = max_ if max_ is not None else 1e38
-        uop = _ffi._lib.poly_clamp(self._ctx, self._uop, float(lo), float(hi))
+        uop = _ffi._lib.poly_clamp(self._ctx, self.uop, float(lo), float(hi))
         return self._make_result(uop, self.shape, [self])
 
     # --- Unary math (C core composed ops) ---
 
     def exp2(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['EXP2'], self._uop)
+        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['EXP2'], self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def log2(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['LOG2'], self._uop)
+        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['LOG2'], self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def sqrt(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['SQRT'], self._uop)
+        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['SQRT'], self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def reciprocal(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['RECIPROCAL'], self._uop)
+        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['RECIPROCAL'], self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def trunc(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['TRUNC'], self._uop)
+        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['TRUNC'], self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def exp(self):
-        uop = _ffi._lib.poly_exp(self._ctx, self._uop)
+        uop = _ffi._lib.poly_exp(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def log(self):
-        uop = _ffi._lib.poly_log(self._ctx, self._uop)
+        uop = _ffi._lib.poly_log(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def sin(self):
-        uop = _ffi._lib.poly_sin(self._ctx, self._uop)
+        uop = _ffi._lib.poly_sin(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def cos(self):
-        uop = _ffi._lib.poly_cos(self._ctx, self._uop)
+        uop = _ffi._lib.poly_cos(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def tan(self):
-        uop = _ffi._lib.poly_tan(self._ctx, self._uop)
+        uop = _ffi._lib.poly_tan(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def sigmoid(self):
-        uop = _ffi._lib.poly_sigmoid(self._ctx, self._uop)
+        uop = _ffi._lib.poly_sigmoid(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def tanh(self):
-        uop = _ffi._lib.poly_tanh_act(self._ctx, self._uop)
+        uop = _ffi._lib.poly_tanh_act(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def abs(self):
-        uop = _ffi._lib.poly_abs(self._ctx, self._uop)
+        uop = _ffi._lib.poly_abs(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def sign(self):
-        uop = _ffi._lib.poly_sign(self._ctx, self._uop)
+        uop = _ffi._lib.poly_sign(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def square(self):
-        uop = _ffi._lib.poly_square(self._ctx, self._uop)
+        uop = _ffi._lib.poly_square(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def rsqrt(self):
-        uop = _ffi._lib.poly_rsqrt(self._ctx, self._uop)
+        uop = _ffi._lib.poly_rsqrt(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def ceil(self):
-        uop = _ffi._lib.poly_ceil(self._ctx, self._uop)
+        uop = _ffi._lib.poly_ceil(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def floor(self):
-        uop = _ffi._lib.poly_floor(self._ctx, self._uop)
+        uop = _ffi._lib.poly_floor(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def round(self):
-        uop = _ffi._lib.poly_round_f(self._ctx, self._uop)
+        uop = _ffi._lib.poly_round_f(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def isinf(self):
-        uop = _ffi._lib.poly_isinf(self._ctx, self._uop)
+        uop = _ffi._lib.poly_isinf(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def isnan(self):
-        uop = _ffi._lib.poly_isnan(self._ctx, self._uop)
+        uop = _ffi._lib.poly_isnan(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     # --- Activations (C core composed ops) ---
 
     def relu(self):
-        uop = _ffi._lib.poly_relu(self._ctx, self._uop)
+        uop = _ffi._lib.poly_relu(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def relu6(self):
-        uop = _ffi._lib.poly_relu6(self._ctx, self._uop)
+        uop = _ffi._lib.poly_relu6(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def leaky_relu(self, neg_slope=0.01):
-        uop = _ffi._lib.poly_leaky_relu(self._ctx, self._uop, neg_slope)
+        uop = _ffi._lib.poly_leaky_relu(self._ctx, self.uop, neg_slope)
         return self._make_result(uop, self.shape, [self])
 
     def gelu(self):
-        uop = _ffi._lib.poly_gelu(self._ctx, self._uop)
+        uop = _ffi._lib.poly_gelu(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def quick_gelu(self):
-        uop = _ffi._lib.poly_quick_gelu(self._ctx, self._uop)
+        uop = _ffi._lib.poly_quick_gelu(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def silu(self):
-        uop = _ffi._lib.poly_silu(self._ctx, self._uop)
+        uop = _ffi._lib.poly_silu(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def swish(self):
         return self.silu()
 
     def elu(self, alpha=1.0):
-        uop = _ffi._lib.poly_elu(self._ctx, self._uop, alpha)
+        uop = _ffi._lib.poly_elu(self._ctx, self.uop, alpha)
         return self._make_result(uop, self.shape, [self])
 
     def softplus(self, beta=1.0):
-        uop = _ffi._lib.poly_softplus(self._ctx, self._uop, beta)
+        uop = _ffi._lib.poly_softplus(self._ctx, self.uop, beta)
         return self._make_result(uop, self.shape, [self])
 
     def mish(self):
-        uop = _ffi._lib.poly_mish(self._ctx, self._uop)
+        uop = _ffi._lib.poly_mish(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def hardtanh(self, min_val=-1, max_val=1):
-        uop = _ffi._lib.poly_hardtanh(self._ctx, self._uop, min_val, max_val)
+        uop = _ffi._lib.poly_hardtanh(self._ctx, self.uop, min_val, max_val)
         return self._make_result(uop, self.shape, [self])
 
     def hardswish(self):
-        uop = _ffi._lib.poly_hardswish(self._ctx, self._uop)
+        uop = _ffi._lib.poly_hardswish(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     def hardsigmoid(self):
-        uop = _ffi._lib.poly_hardsigmoid(self._ctx, self._uop)
+        uop = _ffi._lib.poly_hardsigmoid(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
     # --- Softmax (Tensor-level composition with realize boundaries) ---
@@ -1029,14 +941,14 @@ class Tensor:
                     known *= s
             shape = tuple(total // known if i == neg_idx else s for i, s in enumerate(shape))
         arr, n = _int64_array(shape)
-        uop = _ffi._lib.poly_reshape(self._ctx, self._uop, arr, n)
+        uop = _ffi._lib.poly_reshape(self._ctx, self.uop, arr, n)
         return self._make_result(uop, shape, [self])
 
     def permute(self, *order):
         if len(order) == 1 and isinstance(order[0], (tuple, list)):
             order = tuple(order[0])
         arr, n = _int64_array(order)
-        uop = _ffi._lib.poly_permute(self._ctx, self._uop, arr, n)
+        uop = _ffi._lib.poly_permute(self._ctx, self.uop, arr, n)
         new_shape = tuple(self.shape[i] for i in order)
         return self._make_result(uop, new_shape, [self])
 
@@ -1044,20 +956,20 @@ class Tensor:
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
         arr, n = _int64_array(shape)
-        uop = _ffi._lib.poly_expand(self._ctx, self._uop, arr, n)
+        uop = _ffi._lib.poly_expand(self._ctx, self.uop, arr, n)
         return self._make_result(uop, shape, [self])
 
     def shrink(self, arg):
         """arg is tuple of (start, end) pairs per dimension."""
         flat, n = _pair_array(arg)
-        uop = _ffi._lib.poly_shrink(self._ctx, self._uop, flat, n)
+        uop = _ffi._lib.poly_shrink(self._ctx, self.uop, flat, n)
         new_shape = tuple(e - s for s, e in arg)
         return self._make_result(uop, new_shape, [self])
 
     def pad(self, arg):
         """arg is tuple of (before, after) pairs per dimension."""
         flat, n = _pair_array(arg)
-        uop = _ffi._lib.poly_pad(self._ctx, self._uop, flat, n)
+        uop = _ffi._lib.poly_pad(self._ctx, self.uop, flat, n)
         new_shape = tuple(s + b + a for s, (b, a) in zip(self.shape, arg))
         return self._make_result(uop, new_shape, [self])
 
@@ -1065,7 +977,7 @@ class Tensor:
         if isinstance(axis, int):
             axis = (axis,)
         arr, n = _int64_array(axis)
-        uop = _ffi._lib.poly_flip(self._ctx, self._uop, arr, n)
+        uop = _ffi._lib.poly_flip(self._ctx, self.uop, arr, n)
         return self._make_result(uop, self.shape, [self])
 
     def transpose(self, dim0=-2, dim1=-1):
@@ -1167,7 +1079,7 @@ class Tensor:
         axis = tuple(a + nd if a < 0 else a for a in axis)
 
         arr, n = _int64_array(axis)
-        uop = _ffi._lib.poly_reduce_axis(self._ctx, _ffi.OPS['ADD'], self._uop, arr, n)
+        uop = _ffi._lib.poly_reduce_axis(self._ctx, _ffi.OPS['ADD'], self.uop, arr, n)
 
         # REDUCE_AXIS keeps all dims (reduced→1). If keepdim=False, reshape to squeeze.
         if not keepdim and axis:
@@ -1187,7 +1099,7 @@ class Tensor:
             # Reduce all
             result = self
             for i in range(len(self.shape) - 1, -1, -1):
-                uop = _ffi._lib.poly_max_reduce(self._ctx, result._uop,
+                uop = _ffi._lib.poly_max_reduce(self._ctx, result.uop,
                                                   i, int(keepdim))
                 new_shape = _shape_from_uop(self._ctx, uop)
                 result = self._make_result(uop, new_shape, [result])
@@ -1196,7 +1108,7 @@ class Tensor:
         nd = len(self.shape)
         if axis < 0:
             axis = axis + nd
-        uop = _ffi._lib.poly_max_reduce(self._ctx, self._uop,
+        uop = _ffi._lib.poly_max_reduce(self._ctx, self.uop,
                                           axis, int(keepdim))
         new_shape = _shape_from_uop(self._ctx, uop)
         result = self._make_result(uop, new_shape, [self])
@@ -1208,7 +1120,7 @@ class Tensor:
     def mean(self, axis=None, keepdim=False):
         if axis is None:
             return self.sum(keepdim=keepdim) / self.numel()
-        uop = _ffi._lib.poly_mean_reduce(self._ctx, self._uop,
+        uop = _ffi._lib.poly_mean_reduce(self._ctx, self.uop,
                                            axis, int(keepdim))
         new_shape = _shape_from_uop(self._ctx, uop)
         return self._make_result(uop, new_shape, [self])
@@ -1237,7 +1149,7 @@ class Tensor:
     def dot(self, w):
         if not isinstance(w, Tensor):
             raise TypeError(f'Expected Tensor, got {type(w)}')
-        uop = _ffi._lib.poly_dot(self._ctx, self._uop, w._uop)
+        uop = _ffi._lib.poly_dot(self._ctx, self.uop, w.uop)
         if not uop:
             raise ValueError(f'cannot dot {self.shape} and {w.shape}')
         new_shape = _shape_from_uop(self._ctx, uop)
@@ -1270,7 +1182,7 @@ class Tensor:
         if axis is None:
             axis = 0 if self.ndim == 1 else 1
         uop = _ffi._lib.poly_cross_entropy(
-            self._ctx, self._uop, target._uop, axis
+            self._ctx, self.uop, target.uop, axis
         )
         if not uop:
             raise ValueError(f'shape mismatch: self.shape={self.shape}, target.shape={target.shape}')
@@ -1375,7 +1287,7 @@ class Tensor:
         ctx = operands[0]._ctx
         n = len(operands)
 
-        tensor_arr = (_ffi._ptr * n)(*[t._uop for t in operands])
+        tensor_arr = (_ffi._ptr * n)(*[t.uop for t in operands])
 
         uop = _ffi._lib.poly_einsum(
             ctx, formula.encode('utf-8'),
@@ -1399,7 +1311,7 @@ class Tensor:
 
         uop = _ffi._lib.poly_rearrange(
             self._ctx, formula.encode('utf-8'),
-            self._uop,
+            self.uop,
             axis_names, axis_values, n)
         if not uop:
             raise ValueError(f'poly_rearrange failed for formula: {formula}')
@@ -1569,12 +1481,12 @@ class Tensor:
         out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
         out_data = np.zeros(numel, dtype=np.float32)
 
-        store = _ffi._lib.poly_store_val(self._ctx, out_buf, self._uop)
+        store = _ffi._lib.poly_store_val(self._ctx, out_buf, self.uop)
         sink = _ffi._lib.poly_sink1(self._ctx, store)
 
         all_bindings = []
         for leaf in leaves:
-            all_bindings.append((leaf._buffer, leaf._data.ctypes.data))
+            all_bindings.append((leaf._buf_uop, leaf._data.ctypes.data))
         all_bindings.append((out_buf, out_data.ctypes.data))
 
         n = len(all_bindings)
@@ -1660,7 +1572,7 @@ class Tensor:
         seen_bufs = set()
         unique_leaves = []
         for l in leaves:
-            buf_id = id(l._buffer) if l._buffer else id(l)
+            buf_id = id(l._buf_uop) if l._buf_uop else id(l)
             if buf_id not in seen_bufs:
                 seen_bufs.add(buf_id)
                 unique_leaves.append(l)
@@ -1669,14 +1581,14 @@ class Tensor:
         self._cache_value()
 
         for leaf in leaves:
-            grad_uop = _ffi._lib.poly_grad(self._ctx, self._uop, leaf._uop)
+            grad_uop = _ffi._lib.poly_grad(self._ctx, self.uop, leaf.uop)
             if not grad_uop:
                 raise RuntimeError('poly_grad returned NULL for a leaf tensor')
 
             snap_leaves = []
             for l in all_leaves:
                 snap_leaves.append(Tensor(
-                    _ctx=self._ctx, _uop=l._uop, _buffer=l._buffer, _data=l._data,
+                    _ctx=self._ctx, _uop=l.uop, _buf_uop=l._buf_uop, _data=l._data,
                     _shape=l.shape, _dtype=l._dtype_str, _device=l._device,
                 ))
             grad_tensor = Tensor(
@@ -1742,7 +1654,7 @@ class Tensor:
 
         if loss_targets:
             self._realize_segment_grads(
-                self._uop, None, loss_targets, loss_leaves,
+                self.uop, None, loss_targets, loss_leaves,
                 upstream_grads, inter_set=inter_set)
 
         # ── Phase 2: Kahn's algorithm (topological sort) ─────────
@@ -1841,7 +1753,7 @@ class Tensor:
         # poly_grad_many: single reverse pass, all targets
         wrts = (_ffi._ptr * n)()
         for i, t in enumerate(targets):
-            wrts[i] = t._uop
+            wrts[i] = t.uop
         out_grads = (_ffi._ptr * n)()
 
         ret = _ffi._lib.poly_grad_many(
@@ -1854,9 +1766,9 @@ class Tensor:
         base_bindings = []
         seen_bufs = set()
         for l in all_leaves:
-            bid = id(l._buffer)
+            bid = id(l._buf_uop)
             if bid not in seen_bufs:
-                base_bindings.append((l._buffer, l._data.ctypes.data))
+                base_bindings.append((l._buf_uop, l._data.ctypes.data))
                 seen_bufs.add(bid)
         for buf, data in (extra_bufs or []):
             bid = id(buf)
@@ -1907,13 +1819,13 @@ class Tensor:
                 inputs = []
                 for l in all_leaves:
                     inputs.append(Tensor(
-                        _ctx=self._ctx, _uop=l._uop, _buffer=l._buffer, _data=l._data,
+                        _ctx=self._ctx, _uop=l.uop, _buf_uop=l._buf_uop, _data=l._data,
                         _shape=l.shape, _dtype=l._dtype_str, _device=l._device,
                     ))
                 if extra_bufs is not None:
                     for buf, data in extra_bufs:
                         inputs.append(Tensor(
-                            _ctx=self._ctx, _uop=buf, _buffer=buf, _data=data,
+                            _ctx=self._ctx, _uop=buf, _buf_uop=buf, _data=data,
                             _shape=(len(data),), _device=t._device,
                         ))
                 grad_tensor = Tensor(

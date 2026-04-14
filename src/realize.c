@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int poly_realize_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
+int poly_realize_sink(PolyCtx *ctx, PolyUOp *tensor_sink) {
   if (!ctx || !tensor_sink || tensor_sink->op != POLY_OP_SINK) {
-    fprintf(stderr, "poly_realize_graph: expected SINK\n");
+    fprintf(stderr, "poly_realize_sink: expected SINK\n");
     return -1;
   }
 
@@ -25,7 +25,7 @@ int poly_realize_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
    * poly_compiled_plan_run). */
   PolySchedule *sched = poly_schedule_for(ctx, tensor_sink, POLY_MODE_CALL);
   if (!sched) {
-    fprintf(stderr, "poly_realize_graph: scheduling failed\n");
+    fprintf(stderr, "poly_realize_sink: scheduling failed\n");
     return -1;
   }
 
@@ -44,7 +44,7 @@ int poly_realize_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
   /* Compile */
   PolyCompiledPlan *plan = poly_compile_schedule(ctx, sched, device);
   if (!plan) {
-    fprintf(stderr, "poly_realize_graph: compile failed\n");
+    fprintf(stderr, "poly_realize_sink: compile failed\n");
     poly_schedule_free(sched);
     return -1;
   }
@@ -59,13 +59,13 @@ int poly_realize_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     PolyUOp *buf_uop = sched->buf_slots[s].buf_uop;
     PolyBuffer *b = poly_buffer_get(ctx, buf_uop);
     if (!b || !b->ptr) {
-      fprintf(stderr, "poly_realize_graph: buffer slot %d has no data attached\n", s);
+      fprintf(stderr, "poly_realize_sink: buffer slot %d has no data attached\n", s);
       goto cleanup;
     }
     if (b->device != device) {
       fprintf(
           stderr,
-          "poly_realize_graph: buffer slot %d on device %d but kernel target is %d "
+          "poly_realize_sink: buffer slot %d on device %d but kernel target is %d "
           "(cross-device transfer not yet supported)\n",
           s, b->device, device
       );
@@ -83,4 +83,61 @@ cleanup:
   poly_compiled_plan_free(plan);
   poly_schedule_free(sched);
   return ret;
+}
+
+int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
+  if (!ctx || !uops || !out_uops || n < 0) return -1;
+  if (n == 0) return 0;
+
+  PolyUOp **stores = calloc((size_t)n, sizeof(PolyUOp *));
+  if (!stores) return -1;
+  int n_stores = 0;
+
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = uops[i];
+    if (!u) {
+      out_uops[i] = NULL;
+      continue;
+    }
+    if (poly_uop_has_buffer_identity(u)) {
+      out_uops[i] = u;
+      continue;
+    }
+
+    /* ASSIGN writes back to its target buffer (src[0]) in place. Don't
+     * wrap it in STORE(new_buf, ASSIGN); emit it directly into the SINK
+     * and report the target buffer as the realized UOp. */
+    if (u->op == POLY_OP_ASSIGN && u->n_src >= 1) {
+      stores[n_stores++] = u;
+      out_uops[i] = u->src[0];
+      continue;
+    }
+
+    PolyShape shape = poly_uop_shape_cached(ctx, u);
+    int64_t numel = (shape.ndim >= 0) ? poly_shape_numel(shape) : 1;
+    if (numel < 1) numel = 1;
+
+    PolyUOp *buf = poly_buffer(ctx, poly_dtype_scalar(u->dtype), numel);
+    if (!buf || poly_buffer_allocate(ctx, buf, POLY_DEVICE_HOST) != 0) {
+      fprintf(stderr, "poly_realize_uops: buffer allocate failed\n");
+      free(stores);
+      return -1;
+    }
+    stores[n_stores++] = poly_store_val(ctx, buf, u);
+    out_uops[i] = (shape.ndim > 1) ? poly_reshape(ctx, buf, shape.dims, shape.ndim) : buf;
+  }
+
+  int ret = 0;
+  if (n_stores > 0) {
+    PolyUOp *sink = poly_sink_n(ctx, stores, n_stores);
+    ret = poly_realize_sink(ctx, sink);
+  }
+  free(stores);
+  return ret;
+}
+
+PolyUOp *poly_realize_uop(PolyCtx *ctx, PolyUOp *uop) {
+  PolyUOp *out = NULL;
+  if (poly_realize_uops(ctx, &uop, 1, &out) != 0) return NULL;
+  return out;
 }

@@ -1,7 +1,7 @@
 /*
- * test_realize.c — Tests for poly_realize_graph (graph-driven realize).
+ * test_realize.c — Tests for poly_realize_sink (graph-driven realize).
  *
- * Verifies that poly_realize_graph reads buffers from the side table
+ * Verifies that poly_realize_sink reads buffers from the side table
  * (attached via poly_buffer_set), schedules, compiles, and executes —
  * with no external bindings array.
  */
@@ -31,7 +31,7 @@ TEST(realize, graph_vecadd) {
   poly_buffer_set(ctx, b, db, sizeof(db), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, out, dout, sizeof(dout), POLY_DEVICE_CPU);
 
-  ASSERT_INT_EQ(poly_realize_graph(ctx, sink), 0);
+  ASSERT_INT_EQ(poly_realize_sink(ctx, sink), 0);
 
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-5f);
@@ -60,7 +60,7 @@ TEST(realize, graph_missing_buffer_errors) {
   poly_buffer_set(ctx, out, dout, sizeof(dout), POLY_DEVICE_CPU);
 
   /* Should error since b has no data */
-  ASSERT_INT_EQ(poly_realize_graph(ctx, sink), -1);
+  ASSERT_INT_EQ(poly_realize_sink(ctx, sink), -1);
 
   poly_ctx_destroy(ctx);
   PASS();

@@ -53,6 +53,11 @@ struct PolyBuffer {
  * FFI-friendly: takes flat scalars, constructs PolyBuffer internally. */
 void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int domain);
 
+PolyUOp *poly_buffer_from_host(
+    PolyCtx *ctx, void *ptr, size_t nbytes, int dtype_id,
+    int64_t *dims, int ndim
+);
+
 /* Look up data pointer for a BUFFER UOp. Returns NULL if not attached. */
 void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf);
 

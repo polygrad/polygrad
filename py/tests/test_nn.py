@@ -631,8 +631,8 @@ class TestSegmentBackward:
             losses.append(loss.item())
             # Manual SGD step
             updated = (w - w.grad * 0.01).realize()
-            w._uop = updated._uop
-            w._buffer = updated._buffer
+            w.uop = updated.uop
+            w._buf_uop = updated._buf_uop
             w._data = updated._data
             w._inputs = []
             w._grad = None

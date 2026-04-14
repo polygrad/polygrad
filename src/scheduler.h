@@ -29,30 +29,6 @@ extern "C" {
  */
 PolyUOp *poly_schedule(PolyCtx *ctx, PolyUOp *tensor_sink);
 
-/* Convenience: create a BUFFER UOp (1D, given element count) */
-PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size);
-
-/* Convenience: reshape a tensor UOp */
-PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
-
-/* Convenience: expand (broadcast) a tensor UOp */
-PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
-
-/* Convenience: reduce a tensor along specified axes */
-PolyUOp *poly_reduce_axis(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *src, int64_t *axes, int n_axes);
-
-/* Convenience: permute (transpose) tensor dimensions */
-PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim);
-
-/* Convenience: shrink (slice) a tensor — pairs are (start, end) per dim */
-PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim);
-
-/* Convenience: flip (reverse) tensor along specified axes */
-PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes);
-
-/* Convenience: pad a tensor — pairs are (before, after) per dim */
-PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim);
-
 #ifdef __cplusplus
 }
 #endif

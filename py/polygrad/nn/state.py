@@ -73,8 +73,8 @@ def load_state_dict(obj, state_dict, strict=True):
                 import numpy as np
                 data = np.asarray(val, dtype=np.float32)
             new_t = Tensor(data, requires_grad=target.requires_grad)
-            target._uop = new_t._uop
-            target._buffer = new_t._buffer
+            target.uop = new_t.uop
+            target._buf_uop = new_t._buf_uop
             target._data = new_t._data
             target._inputs = []
         elif strict:

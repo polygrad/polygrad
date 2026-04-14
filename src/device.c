@@ -8,6 +8,42 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Polygrad equivalent of tinygrad's _frompy / _fromnp: create a new BUFFER
+ * UOp, attach frontend-owned host bytes as its PolyBuffer in ctx->buffers,
+ * and wrap in RESHAPE(BUFFER) when ndim > 1. Frontends must keep `ptr` alive
+ * for as long as the buffer is reachable. */
+PolyUOp *poly_buffer_from_host(
+    PolyCtx *ctx,
+    void *ptr,
+    size_t nbytes,
+    int dtype_id,
+    int64_t *dims,
+    int ndim
+) {
+  if (!ctx) return NULL;
+  PolyDType scalar;
+  if (!poly_dtype_by_id(dtype_id, &scalar)) return NULL;
+  /* Infer numel from shape when provided; fall back to nbytes / itemsize. */
+  int64_t numel = 1;
+  if (dims && ndim > 0) {
+    for (int i = 0; i < ndim; i++) numel *= dims[i];
+  } else {
+    int isize = poly_dtype_itemsize(scalar);
+    numel = (isize > 0) ? (int64_t)(nbytes / (size_t)isize) : 0;
+    if (numel < 1) numel = 1;
+  }
+  PolyUOp *buf = poly_buffer(ctx, scalar, numel);
+  if (!buf) return NULL;
+  /* Register the host pointer in ctx->buffers so graph-driven realize
+   * (poly_realize_sink / poly_realize_uops) can find the data without
+   * external binding arrays. */
+  poly_buffer_set(ctx, buf, ptr, nbytes, (int)POLY_DEVICE_CPU);
+  /* BUFFER is 1D; a multi-dim tensor needs RESHAPE on top so the scheduler
+   * sees the intended shape. */
+  if (ndim > 1) return poly_reshape(ctx, buf, dims, ndim);
+  return buf;
+}
+
 void poly_buffer_free(PolyBuffer *b) {
   if (!b) return;
   if (b->owned && b->ptr && b->allocator && b->allocator->free)

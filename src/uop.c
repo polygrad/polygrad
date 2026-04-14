@@ -676,6 +676,33 @@ PolyMap *poly_uop_cache_minmax_map(PolyUOpCache *c) {
   return c ? c->minmax : NULL;
 }
 
+/* Walks RESHAPE/MULTI wrappers and returns the terminal buffer-identity UOp
+ * (BUFFER / BUFFER_VIEW / PARAM), or NULL if `u` has no buffer identity. */
+const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
+  while (u) {
+    if (u->op == POLY_OP_RESHAPE || u->op == POLY_OP_MULTI) {
+      if (u->n_src < 1) return NULL;
+      u = u->src[0];
+      continue;
+    }
+    if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW ||
+        u->op == POLY_OP_PARAM) {
+      return u;
+    }
+    return NULL;
+  }
+  return NULL;
+}
+
+/* Port of tinygrad's UOp.has_buffer_identity.
+ * Unwraps RESHAPE/MULTI via src[0], then returns true iff the terminus is
+ * BUFFER / BUFFER_VIEW / PARAM. tinygrad also handles GETTUPLE(TUPLE(...));
+ * polygrad does not yet have those ops, so that part is intentionally
+ * omitted. */
+bool poly_uop_has_buffer_identity(const PolyUOp *u) {
+  return poly_uop_get_buffer_identity(u) != NULL;
+}
+
 bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
   return poly_no_range_ex(ctx, u, NULL);
 }
