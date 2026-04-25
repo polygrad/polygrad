@@ -10,7 +10,7 @@
 #include "../src/models/models.h"
 #include "../src/nn.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>

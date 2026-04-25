@@ -14,7 +14,7 @@
  * - Target-pruned reverse pass (port of tinygrad's _deepwalk)
  */
 
-#include "scheduler.h"
+#include "engine/schedule.h"
 #include "pat.h"
 #include <stdio.h>
 #include <stdlib.h>

@@ -4,10 +4,10 @@
 
 #include "test_harness.h"
 #include "../src/instance.h"
-#include "../src/exec_plan.h"
+#include "../src/engine/schedule.h"
 #include "../src/ir.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>

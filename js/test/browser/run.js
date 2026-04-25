@@ -61,11 +61,15 @@ async function launchForDevice(chromium, device) {
 }
 
 async function runForDevice(browser, port, device) {
-  const url = `http://127.0.0.1:${port}/?device=${device}`
+  const debugLevel = process.env.POLY_DEBUG || process.env.DEBUG || ''
+  const url = `http://127.0.0.1:${port}/?device=${device}` +
+    (debugLevel ? `&debug=${encodeURIComponent(debugLevel)}` : '')
   const page = await browser.newPage()
 
   page.on('console', msg => {
-    if (msg.type() === 'log' || msg.type() === 'debug') console.log(msg.text())
+    if (msg.type() === 'error') console.error(msg.text())
+    else if (msg.type() === 'log' || msg.type() === 'debug' || msg.type() === 'warning')
+      console.log(msg.text())
   })
   page.on('pageerror', err => console.error('PAGE ERROR:', err.message))
 

@@ -8,7 +8,7 @@
 #include "../src/frontend.h"
 #include "../src/instance.h"
 #include "../src/ir.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 
 /* Registration + lookup */
 

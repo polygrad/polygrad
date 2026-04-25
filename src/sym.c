@@ -28,6 +28,12 @@ static bool i64_neg_ok(int64_t a, int64_t *out) {
   *out = -a;
   return true;
 }
+static bool i64_shl_ok(int64_t a, int64_t shift, int64_t *out) {
+  if (shift < 0 || shift >= 63 || a < 0) return false;
+  if (a > (INT64_MAX >> shift)) return false;
+  *out = a << shift;
+  return true;
+}
 
 /* vmin/vmax bounds (port of tinygrad's UOp._min_max) *
  * Full port of tinygrad/uop/ops.py:856-897 (UOp._min_max). The switch in
@@ -276,14 +282,22 @@ static void poly_uop_minmax_rec(
     minmax_src(ctx, u->src[1], &b0, &b1, memo);
 
     if (u->op == POLY_OP_ADD) {
-      *vmin = a0 + b0;
-      *vmax = a1 + b1;
-      goto done;
+      int64_t lo, hi;
+      if (i64_add_ok(a0, b0, &lo) && i64_add_ok(a1, b1, &hi)) {
+        *vmin = lo;
+        *vmax = hi;
+        goto done;
+      }
+      /* overflow: fall through */
     }
     if (u->op == POLY_OP_SUB) {
-      *vmin = a0 - b1;
-      *vmax = a1 - b0;
-      goto done;
+      int64_t lo, hi;
+      if (i64_sub_ok(a0, b1, &lo) && i64_sub_ok(a1, b0, &hi)) {
+        *vmin = lo;
+        *vmax = hi;
+        goto done;
+      }
+      /* overflow: fall through */
     }
     if (u->op == POLY_OP_MUL) {
       int64_t v0, v1, v2, v3;
@@ -352,10 +366,13 @@ static void poly_uop_minmax_rec(
       }
     }
     if (u->op == POLY_OP_SHL && b0 == b1 && b0 >= 0 && b0 < 63) {
-      int64_t v0 = a0 << b0, v1 = a1 << b0;
-      *vmin = i64_min(v0, v1);
-      *vmax = i64_max(v0, v1);
-      goto done;
+      int64_t v0, v1;
+      if (i64_shl_ok(a0, b0, &v0) && i64_shl_ok(a1, b0, &v1)) {
+        *vmin = i64_min(v0, v1);
+        *vmax = i64_max(v0, v1);
+        goto done;
+      }
+      /* overflow or negative lhs: fall through */
     }
     if (u->op == POLY_OP_SHR && b0 == b1 && b0 >= 0 && b0 < 63) {
       *vmin = a0 >> b0;
@@ -543,9 +560,80 @@ static PolyUOp *rule_or_one(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) 
   return poly_const_like_bool(ctx, poly_bind(b, "x"), true);
 }
 
+/* ALU/variable min==max -> CONST.
+ * tinygrad symbolic.py:
+ *   (UPat({Ops.CMPLT, Ops.CMPNE, Ops.IDIV, Ops.MOD, Ops.DEFINE_VAR, Ops.BIND, Ops.SPECIAL}, name="x"),
+ *    lambda x: x.const_like(x.vmin) if x.vmin == x.vmax else None)
+ *   (UPat(Ops.RANGE, src=(UPat(Ops.CONST,)), name="x"), lambda x: x.const_like(x.vmin) if x.vmin == x.vmax else None)
+ */
+static PolyUOp *rule_const_when_minmax_point(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  int64_t vmin = 0, vmax = 0;
+  poly_uop_minmax(ctx, root, &vmin, &vmax);
+  if (vmin != vmax) return NULL;
+  if (poly_dtype_eq(root->dtype, POLY_BOOL)) return poly_const_like_bool(ctx, root, vmin != 0);
+  if (poly_dtype_is_float(root->dtype)) return poly_const_like_float(ctx, root, (double)vmin);
+  return poly_const_like_int(ctx, root, vmin);
+}
+
+/* max folding
+ *   maximum(x, y) -> x if x.vmin >= y.vmax else y if x.vmax <= y.vmin
+ * tinygrad uop/symbolic.py:243 */
+static PolyUOp *rule_max_fold(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_MAX || root->n_src != 2) return NULL;
+  int64_t x_min = 0, x_max = 0, y_min = 0, y_max = 0;
+  poly_uop_minmax(ctx, root->src[0], &x_min, &x_max);
+  poly_uop_minmax(ctx, root->src[1], &y_min, &y_max);
+  if (x_min >= y_max) return root->src[0];
+  if (x_max <= y_min) return root->src[1];
+  return NULL;
+}
+
+static bool const_lane_arg(PolyUOp *u, int lane, PolyArg *out) {
+  if (!u || !out || lane < 0) return false;
+  if (u->op == POLY_OP_CONST) {
+    *out = u->arg;
+    return true;
+  }
+  if (u->op != POLY_OP_VCONST) return false;
+  if (lane < u->n_src && u->src[lane] && u->src[lane]->op == POLY_OP_CONST) {
+    *out = u->src[lane]->arg;
+    return true;
+  }
+  if (u->arg.kind == POLY_ARG_INT_TUPLE && lane < u->arg.int_tuple.n) {
+    *out = poly_arg_int(u->arg.int_tuple.vals[lane]);
+    return true;
+  }
+  return false;
+}
+
+static PolyUOp *build_vector_const_fold(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    PolyOps op,
+    int n_ops
+) {
+  if (!root || root->dtype.count <= 1 || root->dtype.count > 128 || n_ops < 1 || n_ops > 3) return NULL;
+  PolyUOp *elts[128];
+  PolyDType lane_dt = poly_dtype_scalar(root->dtype);
+  for (int lane = 0; lane < root->dtype.count; lane++) {
+    PolyArg lane_ops[3];
+    for (int i = 0; i < n_ops; i++) {
+      if (!const_lane_arg(root->src[i], lane, &lane_ops[i])) return NULL;
+    }
+    PolyArg lane_result = poly_exec_alu(op, lane_dt, lane_ops, n_ops);
+    elts[lane] = poly_uop0(ctx, POLY_OP_CONST, lane_dt, lane_result);
+  }
+  /* Match tinygrad's lane-wise vector exec_alu. Keeping child CONST lanes here
+   * preserves Invalid lanes instead of turning them into scalar zero. */
+  return poly_uop(ctx, POLY_OP_VCONST, root->dtype, elts, root->dtype.count, poly_arg_none());
+}
+
 /* Constant folding: Unary(CONST) -> CONST */
 static PolyUOp *rule_const_fold_unary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
+  if (a->dtype.count > 1) return build_vector_const_fold(ctx, a, a->op, 1);
   /* Guard int64 NEG against INT64_MIN overflow */
   if (a->op == POLY_OP_NEG && poly_dtype_is_int(a->dtype) && a->dtype.bitsize == 64 &&
       a->src[0]->arg.kind == POLY_ARG_INT) {
@@ -560,6 +648,7 @@ static PolyUOp *rule_const_fold_unary(PolyCtx *ctx, PolyUOp *root, const PolyBin
 /* Constant folding: Binary(CONST, CONST) -> CONST */
 static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
+  if (a->dtype.count > 1) return build_vector_const_fold(ctx, a, a->op, 2);
   /* Guard int64 ADD/SUB/MUL against overflow (UB in C for signed int64) */
   if (poly_dtype_is_int(a->dtype) && a->dtype.bitsize == 64 &&
       a->src[0]->arg.kind == POLY_ARG_INT && a->src[1]->arg.kind == POLY_ARG_INT) {
@@ -576,6 +665,7 @@ static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBi
 /* Constant folding: Ternary(CONST, CONST, CONST) -> CONST */
 static PolyUOp *rule_const_fold_ternary(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *a = poly_bind(b, "a");
+  if (a->dtype.count > 1) return build_vector_const_fold(ctx, a, a->op, 3);
   PolyArg operands[3] = {a->src[0]->arg, a->src[1]->arg, a->src[2]->arg};
   PolyArg result = poly_exec_alu(a->op, a->dtype, operands, 3);
   return poly_const_like(ctx, a, result);
@@ -585,6 +675,7 @@ static PolyUOp *rule_const_fold_ternary(PolyCtx *ctx, PolyUOp *root, const PolyB
 static PolyUOp *rule_cast_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   PolyUOp *c = root->src[0];
+  if (root->dtype.count > 1) return build_vector_const_fold(ctx, root, POLY_OP_CAST, 1);
   return poly_const_like(ctx, root, c->arg);
 }
 
@@ -636,6 +727,51 @@ static PolyUOp *rule_where_const_gate(PolyCtx *ctx, PolyUOp *root, const PolyBin
   return NULL;
 }
 
+static bool is_invalid_const_uop(PolyUOp *u) {
+  return u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID;
+}
+
+static bool is_true_const_uop(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_CONST) return false;
+  if (!poly_dtype_eq(u->dtype, POLY_BOOL)) return false;
+  return (u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
+         (u->arg.kind == POLY_ARG_INT && u->arg.i != 0);
+}
+
+/* WHERE(CMPNE(cond, true), t, f) -> WHERE(cond, f, t)
+ * Tinygrad symbolic.py:230-231:
+ *   cond.logical_not().where(t, f) -> cond.where(f, t)
+ * Keep the Invalid guard from tinygrad so we don't move Invalid into the
+ * taken branch and perturb validity semantics. */
+static PolyUOp *rule_where_logical_not(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  PolyUOp *cond = poly_bind(b, "cond");
+  PolyUOp *t = poly_bind(b, "t");
+  PolyUOp *f = poly_bind(b, "f");
+  if (!root || root->n_src != 3 || !is_true_const_uop(root->src[0]->src[1])) return NULL;
+  if (is_invalid_const_uop(f)) return NULL;
+  return poly_uop3(ctx, POLY_OP_WHERE, root->dtype, cond, f, t, poly_arg_none());
+}
+
+static PolyUOp *strip_casted_index_ptr(PolyUOp *u) {
+  while (u && u->op == POLY_OP_CAST && u->n_src >= 1) u = u->src[0];
+  return (u && u->op == POLY_OP_INDEX && u->n_src >= 2) ? u : NULL;
+}
+
+/* Tinygrad symbolic.py load/store folding:
+ *   LOAD(INDEX(buf, Invalid)) -> const_like(0)
+ *   STORE(INDEX(buf, Invalid), ...) -> NOOP
+ * This is what removes dead masked lanes after devectorization. */
+static PolyUOp *rule_fold_invalid_load_store(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || (root->op != POLY_OP_LOAD && root->op != POLY_OP_STORE) || root->n_src < 1) return NULL;
+  PolyUOp *idx = strip_casted_index_ptr(root->src[0]);
+  if (!idx || !is_invalid_const_uop(idx->src[1])) return NULL;
+  if (root->op == POLY_OP_STORE) return poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
+  if (poly_dtype_eq(root->dtype, POLY_BOOL)) return poly_const_like_bool(ctx, root, false);
+  if (poly_dtype_is_float(root->dtype)) return poly_const_like_float(ctx, root, 0.0);
+  return poly_const_like_int(ctx, root, 0);
+}
+
 /* x + x -> x * 2 */
 static PolyUOp *rule_add_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *x = poly_bind(b, "x");
@@ -654,6 +790,80 @@ static PolyUOp *rule_add_assoc_self(PolyCtx *ctx, PolyUOp *root, const PolyBindi
   PolyUOp *two = poly_const_like_int(ctx, x, 2);
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, x->dtype, x, two, poly_arg_none());
   return poly_uop2(ctx, POLY_OP_ADD, root->dtype, a, mul, poly_arg_none());
+}
+
+static bool is_scalar_const_uop(PolyUOp *u) {
+  return u && u->op == POLY_OP_CONST;
+}
+
+static bool match_binary_one_const(PolyUOp *u, PolyUOp **out_x, PolyUOp **out_c) {
+  if (!u || u->n_src != 2) return false;
+  if (is_scalar_const_uop(u->src[0]) && !is_scalar_const_uop(u->src[1])) {
+    *out_c = u->src[0];
+    *out_x = u->src[1];
+    return true;
+  }
+  if (is_scalar_const_uop(u->src[1]) && !is_scalar_const_uop(u->src[0])) {
+    *out_c = u->src[1];
+    *out_x = u->src[0];
+    return true;
+  }
+  return false;
+}
+
+/* tinygrad symbolic.py:260-262
+ *   x.alu(op, c1).alu(op, c2) -> x.alu(op, c1.alu(op, c2))
+ * Implemented structurally for binary associative ops with one const in the
+ * inner node and one const at the root, regardless of src ordering. */
+static PolyUOp *rule_assoc_fold_consts(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->n_src != 2) return NULL;
+  if (!poly_opset_has(POLY_GROUP_ASSOCIATIVE, root->op)) return NULL;
+
+  PolyUOp *inner = NULL, *c2 = NULL;
+  if (!match_binary_one_const(root, &inner, &c2)) return NULL;
+  if (!inner || inner->op != root->op || inner->n_src != 2) return NULL;
+
+  PolyUOp *x = NULL, *c1 = NULL;
+  if (!match_binary_one_const(inner, &x, &c1)) return NULL;
+
+  PolyArg operands[2] = {c1->arg, c2->arg};
+  PolyArg folded = poly_exec_alu(root->op, root->dtype, operands, 2);
+  if (folded.kind == POLY_ARG_INVALID) return NULL;
+  PolyUOp *fc = poly_const_like(ctx, c1, folded);
+  return poly_uop2(ctx, root->op, root->dtype, x, fc, poly_arg_none());
+}
+
+/* tinygrad symbolic.py:227-229
+ *   y * (x + c) -> (y * x) + (y * c)
+ * Support both src orderings so we do not depend on a prior commutative flip
+ * just to expose the add+const shape. */
+static PolyUOp *rule_distribute_const_mul_over_add(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_MUL || root->n_src != 2) return NULL;
+
+  for (int swap = 0; swap < 2; swap++) {
+    PolyUOp *c = root->src[swap];
+    PolyUOp *add = root->src[swap ^ 1];
+    if (!is_scalar_const_uop(c) || !add || add->op != POLY_OP_ADD || add->n_src != 2) continue;
+
+    PolyUOp *x = NULL, *add_c = NULL;
+    if (!match_binary_one_const(add, &x, &add_c)) continue;
+
+    PolyArg operands[2] = {c->arg, add_c->arg};
+    PolyArg folded = poly_exec_alu(POLY_OP_MUL, root->dtype, operands, 2);
+    if (folded.kind == POLY_ARG_INVALID) continue;
+
+    PolyUOp *scaled_x = poly_uop2(ctx, POLY_OP_MUL, root->dtype, x, c, poly_arg_none());
+    PolyUOp *scaled_c = poly_const_like(ctx, add_c, folded);
+    return poly_uop2(ctx, POLY_OP_ADD, root->dtype, scaled_x, scaled_c, poly_arg_none());
+  }
+
+  return NULL;
 }
 
 /* fold_divmod helpers (port of tinygrad divandmod.py) */
@@ -1173,7 +1383,15 @@ static PolyUOp *rule_gep_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *
   if (root->op != POLY_OP_GEP || root->n_src < 1) return NULL;
   PolyUOp *c = root->src[0];
   if (!c) return NULL;
-  if (c->op == POLY_OP_CONST) return c;
+  if (c->op == POLY_OP_CONST) {
+    if (c->dtype.count <= 1) return c;
+    if (root->arg.kind == POLY_ARG_INT)
+      return poly_uop0(ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), c->arg);
+    if (root->arg.kind != POLY_ARG_INT_TUPLE || root->arg.int_tuple.n <= 0) return NULL;
+    if (root->arg.int_tuple.n == 1)
+      return poly_uop0(ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), c->arg);
+    return poly_uop0(ctx, POLY_OP_CONST, root->dtype, c->arg);
+  }
   if (c->op != POLY_OP_VCONST) return NULL;
 
   if (root->arg.kind == POLY_ARG_INT) {
@@ -1275,6 +1493,25 @@ static PolyUOp *rule_gep_through_alu(PolyCtx *ctx, PolyUOp *gep, const PolyBindi
   return poly_uop(ctx, alu->op, new_dt, srcs, alu->n_src, alu->arg);
 }
 
+/* Tinygrad symbolic.py: VCAT cannot be rendered directly, so expand it into
+ * VECTORIZE of per-lane GEPs early enough for later scalarization passes. */
+static PolyUOp *rule_vcat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
+  (void)b;
+  if (!x || x->op != POLY_OP_VCAT || x->n_src <= 0 || x->dtype.is_ptr) return NULL;
+  PolyUOp *elts[128];
+  int p = 0;
+  for (int i = 0; i < x->n_src; i++) {
+    PolyUOp *src = x->src[i];
+    int cnt = src->dtype.count > 0 ? src->dtype.count : 1;
+    for (int j = 0; j < cnt && p < 128; j++) {
+      elts[p++] = poly_uop1(
+          ctx, POLY_OP_GEP, poly_dtype_scalar(src->dtype), src, poly_arg_int(j)
+      );
+    }
+  }
+  return poly_uop(ctx, POLY_OP_VECTORIZE, x->dtype, elts, p, poly_arg_none());
+}
+
 /* VECTORIZE(GEP(x, a0), GEP(x, a1), ...) where all GEPs share same source x
  * → x.gep((a0, a1, ...))  (collapse to single GEP with tuple arg)
  * Port of tinygrad symbolic.py:199:
@@ -1318,6 +1555,16 @@ static PolyUOp *rule_vectorize_same_gep(PolyCtx *ctx, PolyUOp *root, const PolyB
   return poly_uop1(ctx, POLY_OP_GEP, root->dtype, base, tup);
 }
 
+/* tinygrad symbolic.py: clean up singleton GROUP wrappers that appear after
+ * store splitting/devectorization. Keeping GROUP(x) structurally distinct adds
+ * a spurious late node compared to tinygrad's linearize path. */
+static PolyUOp *rule_group_singleton(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)ctx;
+  (void)b;
+  if (!root || root->op != POLY_OP_GROUP || root->n_src != 1) return NULL;
+  return root->src[0];
+}
+
 /* GEP pushing PM (for combined devec pass) */
 
 static PolyPatternMatcher *g_pm_gep_pushing = NULL;
@@ -1340,6 +1587,7 @@ PolyPatternMatcher *poly_pm_gep_pushing(void) {
 /* Build the symbolic_simple PatternMatcher */
 
 static PolyPatternMatcher *g_symbolic_simple = NULL;
+static PolyPatternMatcher *g_symbolic = NULL;
 
 PolyPatternMatcher *poly_symbolic_simple(void) {
   if (g_symbolic_simple) return g_symbolic_simple;
@@ -1437,6 +1685,10 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
       {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_vectorize},
       {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_const},
       {poly_pat_op(POLY_OP_GEP, NULL, 0, NULL), rule_gep_identity},
+      /* VCAT -> VECTORIZE(GEP...) */
+      {poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_vcat_to_vectorize},
+      /* GROUP(x) -> x */
+      {poly_pat_op(POLY_OP_GROUP, NULL, 0, NULL), rule_group_singleton},
       /* VECTORIZE(GEP(x,a0), ...) → x.gep((a0,...)) is in gep_pushing (tinygrad symbolic.py:199).
        * Then rule_gep_identity handles the (0,1,...,N-1) → identity case. */
 
@@ -1464,6 +1716,16 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
        rule_mul_fdiv_cancel},
 
       /* -- Where folding -- */
+      /* WHERE(CMPNE(cond, true), t, f) -> WHERE(cond, f, t) */
+      {poly_pat_op3(
+           POLY_OP_WHERE,
+           poly_pat_op2c(
+               POLY_OP_CMPNE, poly_pat_dtype("cond", (PolyDType[]){POLY_BOOL}, 1),
+               poly_pat_any("trueish"), NULL
+           ),
+           poly_pat_any("t"), poly_pat_any("f"), NULL
+       ),
+       rule_where_logical_not},
       /* WHERE(a, WHERE(b, c, d), d) -> WHERE(AND(a, b), c, d) */
       {poly_pat_op3(
            POLY_OP_WHERE, poly_pat_any("a"),
@@ -1478,11 +1740,42 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
            POLY_OP_WHERE, poly_pat_any(NULL), poly_pat_any("val"), poly_pat_any("val"), NULL
        ),
        rule_where_same},
+      /* LOAD/STORE with Invalid index folds away */
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "x")), rule_fold_invalid_load_store},
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "x")), rule_fold_invalid_load_store},
       /* WHERE(const_gate, c0, c1) -> c0 or c1 */
       {poly_pat_op3(
            POLY_OP_WHERE, poly_pat_cvar("gate"), poly_pat_any("c0"), poly_pat_any("c1"), NULL
        ),
        rule_where_const_gate},
+
+      /* -- vmin/vmax const folding -- */
+      {poly_pat_ops(
+           poly_opset_add(
+               poly_opset_add(
+                   poly_opset_add(
+                       poly_opset_add(
+                           poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CMPLT), POLY_OP_CMPNE
+                       ),
+                       POLY_OP_IDIV
+                   ),
+                   POLY_OP_MOD
+               ),
+               POLY_OP_DEFINE_VAR
+           ),
+           NULL, 0, "x"
+       ),
+       rule_const_when_minmax_point},
+      {poly_pat_ops(
+           poly_opset_add(
+               poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BIND), POLY_OP_SPECIAL
+           ),
+           NULL, 0, "x"
+       ),
+       rule_const_when_minmax_point},
+      {poly_pat_op1(POLY_OP_RANGE, poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), "x"),
+       rule_const_when_minmax_point},
+      {poly_pat_op2(POLY_OP_MAX, poly_pat_any("x"), poly_pat_any("y"), NULL), rule_max_fold},
 
       /* -- Combine terms -- */
       /* x + x -> x * 2 */
@@ -1509,4 +1802,17 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
   int n = sizeof(rules) / sizeof(rules[0]);
   g_symbolic_simple = poly_pm_new(rules, n);
   return g_symbolic_simple;
+}
+
+PolyPatternMatcher *poly_symbolic(void) {
+  if (g_symbolic) return g_symbolic;
+  PolyRule rules[] = {
+      {poly_pat_ops2(POLY_GROUP_ASSOCIATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "alu"),
+       rule_assoc_fold_consts},
+      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_const_mul_over_add},
+  };
+  PolyPatternMatcher *extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_symbolic = poly_pm_concat(poly_symbolic_simple(), extra);
+  g_symbolic = poly_pm_concat(g_symbolic, poly_pm_gep_pushing());
+  return g_symbolic;
 }

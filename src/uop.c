@@ -976,7 +976,8 @@ static PolyUOp *register_named(
     numel *= shape[i];
 
   /* Create BUFFER UOp with unique tag to avoid CSE dedup.
-   * Use scalar dtype (not PtrDType) — matches poly_buffer() in sched.c.
+   * Use scalar dtype (not PtrDType) — matches poly_buffer() in the retired
+   * single-kernel scheduler path.
    * The scheduling pipeline creates proper PARAM ptrs during lowering. */
   PolyUOp *buf =
       poly_uop_tagged(ctx, POLY_OP_BUFFER, dt, NULL, 0, poly_arg_int(numel), ctx->next_buf_tag++);

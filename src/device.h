@@ -10,12 +10,14 @@
 
 /* Allocator interface: per-device memory operations */
 
+typedef struct PolyBuffer PolyBuffer;
+
 typedef struct PolyAllocator {
   void *(*alloc)(size_t nbytes, void *dev_ctx);
-  void (*free)(void *handle, void *dev_ctx);
-  int (*copy_in)(void *dst_handle, const void *host_src, size_t nbytes, void *dev_ctx);
-  int (*copy_out)(void *host_dst, const void *src_handle, size_t nbytes, void *dev_ctx);
-  int (*copy_between)(void *dst_handle, const void *src_handle, size_t nbytes, void *dev_ctx);
+  void (*free)(const PolyBuffer *buffer, void *dev_ctx);
+  int (*copy_in)(const PolyBuffer *dst, const PolyBuffer *src, size_t nbytes, void *dev_ctx);
+  int (*copy_out)(const PolyBuffer *dst, const PolyBuffer *src, size_t nbytes, void *dev_ctx);
+  int (*copy_between)(const PolyBuffer *dst, const PolyBuffer *src, size_t nbytes, void *dev_ctx);
   void *dev_ctx;
   bool host_addressable;
 } PolyAllocator;
@@ -24,7 +26,7 @@ typedef struct PolyAllocator {
  *   CPU/INTERP: host malloc'd pointer
  *   CUDA:       CUdeviceptr (cast to void*)
  *   HIP:        hipDeviceptr_t (void*)
- *   WASM_JIT:   offset into Emscripten heap
+ *   WASM:       offset into Emscripten heap
  *   WEBGPU:     GPUBuffer (host-managed, wrapped)
  *
  * Each buffer stores its allocator (resolved at allocation time).
@@ -38,12 +40,11 @@ typedef struct PolyAllocator {
  *   4. After kernel writes: {ptr=cuda, valid=true, src->valid=false}
  */
 
-typedef struct PolyBuffer PolyBuffer;
 struct PolyBuffer {
   void *ptr;
   size_t nbytes;
   PolyDevice device; 
-  bool owned; /* do we own the ptr and need to free it? */
+  bool owned; /* should allocator->free be called when this residency is retired? */
   const PolyAllocator *allocator; /* allocator for this buffer (set at allocation time) */
   PolyBuffer *src;  /* root source buffer (usually host), or NULL */
   bool valid; /* does ptr contain current logical contents? */
@@ -57,6 +58,13 @@ PolyUOp *poly_buffer_from_host(
     PolyCtx *ctx, void *ptr, size_t nbytes, int dtype_id,
     int64_t *dims, int ndim
 );
+
+/* Notify the frontend that the given PolyBuffer* key is no longer needed. */
+void poly_frontend_buffer_release_key(uintptr_t buffer_key);
+
+/* Wrap a raw host-addressable pointer as an ephemeral runtime buffer view.
+ * On native builds this is a CPU view; on Emscripten it is a WASM view. */
+PolyBuffer poly_buffer_make_host_view(void *ptr, size_t nbytes);
 
 /* Look up data pointer for a BUFFER UOp. Returns NULL if not attached. */
 void *poly_buffer_get_ptr(PolyCtx *ctx, PolyUOp *buf);
@@ -77,6 +85,9 @@ void poly_buffer_free_chain(PolyBuffer *b);
 /* Remove a buffer from the side table (frees current + src chain). */
 void poly_buffer_remove(PolyCtx *ctx, PolyUOp *buf);
 
+/* Copy logical contents from src residency into dst residency. */
+int poly_buffer_copy(PolyBuffer *dst, const PolyBuffer *src);
+
 /* Allocate device memory for a BUFFER UOp. No-op if already allocated. */
 int poly_buffer_allocate(PolyCtx *ctx, PolyUOp *buf, PolyDevice device);
 
@@ -88,6 +99,10 @@ int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbyte
 
 /* Device -> host data transfer. Buffer must be allocated. */
 int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
+
+/* Read bytes from a realized buffer into dst. Alias for copyout, but used by
+ * frontends that need a backend-aware readback path rather than raw ptr access. */
+int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 
 /* Check if a buffer has data in the side table. */
 bool poly_buffer_is_allocated(PolyCtx *ctx, PolyUOp *buf);

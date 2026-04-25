@@ -232,7 +232,7 @@ static WasmVecKernel wasm_make_vec_unary(PolyOps alu_op, int n) {
 TEST(wasm, render_vecadd) {
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -259,7 +259,7 @@ TEST(wasm, render_vecadd) {
 TEST(wasm, render_vecmul) {
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_MUL, 8);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -280,7 +280,7 @@ TEST(wasm, render_vecmul) {
 TEST(wasm, render_unary) {
   WasmVecKernel k = wasm_make_vec_unary(POLY_OP_NEG, 10);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -336,7 +336,7 @@ TEST(wasm, render_chain) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -392,7 +392,7 @@ TEST(wasm, render_unsigned_alu_opcodes) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
   ASSERT_NOT_NULL(wasm);
@@ -418,7 +418,7 @@ TEST(wasm, render_simd_flag) {
   /* Render with SIMD enabled — verify SIMD prefix byte appears */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 16);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
@@ -446,7 +446,7 @@ TEST(wasm, write_and_validate) {
   /* Render a vecadd kernel and write to /tmp for manual validation */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -478,7 +478,7 @@ TEST(wasm, render_pow) {
   /* POW kernel: c[i] = a[i] ^ b[i] — must import powf */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_POW, 4);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -511,7 +511,7 @@ TEST(wasm, render_pow_simd_fallback) {
   /* POW kernel with use_simd=true must fall back to scalar (no SIMD for POW) */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_POW, 16);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
@@ -548,7 +548,7 @@ TEST(wasm, e2e_node_pow) {
   /* End-to-end: POW kernel via Node.js — c[i] = a[i]^b[i] */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_POW, 4);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -580,7 +580,7 @@ TEST(wasm, e2e_node_vecadd) {
   /* End-to-end: render WASM, write to file, run with Node.js */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 8);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -673,7 +673,7 @@ TEST(wasm_f64, render_vecadd_f64_scalar) {
   /* Render f64 vecadd kernel in scalar mode -- verify f64 opcodes */
   WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 10);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -721,7 +721,7 @@ TEST(wasm_f64, render_neg_f64_scalar) {
   /* Render f64 unary neg kernel -- verify f64.neg opcode */
   WasmVecKernel k = wasm_make_vec_unary_f64(POLY_OP_NEG, 8);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -748,7 +748,7 @@ TEST(wasm_f64, render_simd_f64x2) {
   /* Render f64 vecadd with SIMD enabled -- verify f64x2 SIMD opcodes */
   WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 16);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
@@ -786,7 +786,7 @@ TEST(wasm_f64, validate_f64_scalar) {
   /* Write f64 scalar kernel and validate with wasm-validate */
   WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 10);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
@@ -813,7 +813,7 @@ TEST(wasm_f64, validate_f64_simd) {
   /* Write f64x2 SIMD kernel and validate with wasm-validate */
   WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 16);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
@@ -840,7 +840,7 @@ TEST(wasm_f64, e2e_node_vecadd_f64) {
   /* End-to-end: render f64 WASM, write to file, run with Node.js */
   WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 8);
   int n_lin;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n_lin);
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);

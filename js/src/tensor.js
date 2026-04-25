@@ -11,12 +11,42 @@
 
 'use strict'
 
+const { UOp } = require('./uop/ops')
+
+/**
+ * Strong frontend owner registry. Maps C-side PolyBuffer* address value ->
+ * TypedArray that backs that imported HOST residency. This is intentionally
+ * keyed by the retired residency object, not by BUFFER UOp identity.
+ * The C core calls frontend_buffer_release(buffer) when the HOST PolyBuffer
+ * is retired, and only then do we drop the JS owner entry.
+ */
+const hostBuffers = new Map()
+
+// JS-side materialization/storage type by dtype name. The numeric dtype ids
+// come from the C core; this map is only the frontend's ArrayBuffer view choice.
+const TA_BY_DTYPE = {
+  bool: Uint8Array,
+  int8: Int8Array,
+  uint8: Uint8Array,
+  int16: Int16Array,
+  uint16: Uint16Array,
+  int32: Int32Array,
+  uint32: Uint32Array,
+  int64: BigInt64Array,
+  uint64: BigUint64Array,
+  float16: Uint16Array,
+  bfloat16: Uint16Array,
+  float32: Float32Array,
+  float64: Float64Array
+}
+
 // --- Utility helpers ---
 
 function flattenArray(arr, dtype) {
-  const ArrayType = dtype === 'float64' ? Float64Array : Float32Array
+  const ArrayType = TA_BY_DTYPE[dtype] || Float32Array
   if (typeof arr === 'number') {
-    return { data: new ArrayType([arr]), shape: [1] }
+    const v = dtype === 'bool' ? (arr ? 1 : 0) : arr
+    return { data: new ArrayType([v]), shape: [1] }
   }
   if (arr instanceof Float32Array || arr instanceof Float64Array) {
     return { data: new ArrayType(arr), shape: [arr.length] }
@@ -37,7 +67,7 @@ function flattenArray(arr, dtype) {
     if (Array.isArray(a)) {
       for (const el of a) recurse(el)
     } else {
-      flat.push(a)
+      flat.push(dtype === 'bool' ? (a ? 1 : 0) : a)
     }
   }
   recurse(arr)
@@ -51,6 +81,36 @@ function arraysEqual(a, b) {
     if (a[i] !== b[i]) return false
   }
   return true
+}
+
+function normalizeBufferKey(key) {
+  return typeof key === 'bigint' ? key.toString() : String(key)
+}
+
+function decodeFloat16Bits(h) {
+  const s = (h & 0x8000) ? -1 : 1
+  const e = (h >> 10) & 0x1F
+  const f = h & 0x03FF
+  if (e === 0) return f ? s * Math.pow(2, -14) * (f / 1024) : s * 0
+  if (e === 0x1F) return f ? NaN : s * Infinity
+  return s * Math.pow(2, e - 15) * (1 + f / 1024)
+}
+
+function decodeFloat16Array(bits) {
+  const out = new Float32Array(bits.length)
+  for (let i = 0; i < bits.length; i++) out[i] = decodeFloat16Bits(bits[i])
+  return out
+}
+
+function decodeBfloat16Array(bits) {
+  const out = new Float32Array(bits.length)
+  const tmp = new Uint32Array(1)
+  const f32 = new Float32Array(tmp.buffer)
+  for (let i = 0; i < bits.length; i++) {
+    tmp[0] = bits[i] << 16
+    out[i] = f32[0]
+  }
+  return out
 }
 
 function _buildNested(data, shape, dim, offset) {
@@ -89,7 +149,20 @@ function _broadcastShapes(a, b) {
 
 function createBoundTensorClass(runtime) {
   const _runtime = runtime
+  const DTYPE_ID = _runtime._backend.dtypeIds
+  if (!DTYPE_ID) throw new Error('polygrad: backend missing dtypeIds')
   let _seed = 0
+  const ffi = _runtime._backend.ffi
+  if (ffi.poly_set_frontend_buffer_release && !_runtime._backend.__frontendBufferReleaseRegistered) {
+    ffi.poly_set_frontend_buffer_release((bufferKey) => {
+      const key = normalizeBufferKey(bufferKey)
+      hostBuffers.delete(key)
+      if (_runtime._backend.unregisterHostBuffer) {
+        _runtime._backend.unregisterHostBuffer(key)
+      }
+    })
+    _runtime._backend.__frontendBufferReleaseRegistered = true
+  }
 
   class Tensor {
     /**
@@ -105,38 +178,57 @@ function createBoundTensorClass(runtime) {
       this._grad = null
 
       if (opts._uop) {
-        // Internal construction from ops -- shape is on the UOp
-        this._uop = opts._uop
+        // Internal construction from ops -- shape is on the UOp.
+        // Accept either a UOp wrapper instance or a raw handle.
+        if (opts._uop instanceof UOp) {
+          this.uop = opts._uop
+          this._uop = opts._uop.raw
+        } else {
+          this._uop = opts._uop
+          this.uop = new UOp(this._ctx, backend.ffi, opts._uop)
+        }
         this._buffer = opts._buffer || null
         this._data = opts._data || null
         this._inputs = opts._inputs || []
         this._dtype = opts._dtype || 'float32'
-      } else if (data instanceof Float64Array) {
-        this._data = new Float64Array(data)
-        this._buffer = backend.ffi.poly_buffer_f64(this._ctx, data.length)
-        this._uop = this._buffer
-        this._inputs = []
-        this._dtype = 'float64'
-      } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
-        this._data = new Float32Array(data)
-        this._buffer = backend.ffi.poly_buffer_f32(this._ctx, data.length)
-        this._uop = this._buffer
-        this._inputs = []
-        this._dtype = 'float32'
       } else {
-        const dt = (opts && opts.dtype) || 'float32'
-        this._dtype = dt
-        const { data: flat, shape } = flattenArray(data, dt)
-        this._data = flat
-        if (dt === 'float64') {
-          this._buffer = backend.ffi.poly_buffer_f64(this._ctx, flat.length)
+        // User construction from data. Resolve dtype and flatten to a single
+        // TypedArray. Then call UOp.fromHost (one FFI call) which creates
+        // the BUFFER UOp, registers a PolyBuffer wrapping the TypedArray's
+        // bytes in ctx->buffers, and wraps in RESHAPE when ndim > 1.
+        // JS also keeps a strong owner entry keyed by the C-side PolyBuffer*
+        // address value, not by the BUFFER UOp.
+        let dt, flat, shape
+        if (data instanceof Float64Array) {
+          dt = 'float64'; flat = new Float64Array(data); shape = [data.length]
+        } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
+          dt = 'float32'; flat = new Float32Array(data); shape = [data.length]
+        } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
+          dt = (opts && opts.dtype) || 'float32'
+          const ArrayType = TA_BY_DTYPE[dt] || Float32Array
+          flat = new ArrayType(data)
+          shape = [data.length]
         } else {
-          this._buffer = backend.ffi.poly_buffer_f32(this._ctx, flat.length)
+          dt = (opts && opts.dtype) || 'float32'
+          const r = flattenArray(data, dt)
+          flat = r.data; shape = r.shape
         }
-        if (shape.length > 1) {
-          this._uop = backend.ffi.poly_reshape(this._ctx, this._buffer, shape, shape.length)
-        } else {
-          this._uop = this._buffer
+        this._dtype = dt
+        this._data = flat
+        const dtypeId = DTYPE_ID[dt] || 12
+        const dims = shape.length > 1 ? shape : null
+        // `uop` is the wrapper instance (has .buffer / .hasBufferIdentity);
+        // `_uop` is the raw handle that existing FFI call sites pass into C.
+        this.uop = UOp.fromHost(this._ctx, backend.ffi, flat, dtypeId, dims)
+        this._uop = this.uop.raw
+        this._buffer = this.uop.buffer ? this.uop.buffer.raw : null
+        if (this._buffer && backend.ffi.poly_buffer_get_key) {
+          const bufferKey = backend.ffi.poly_buffer_get_key(this._ctx, this._buffer)
+          if (bufferKey) {
+            const key = normalizeBufferKey(bufferKey)
+            hostBuffers.set(key, flat)
+            if (backend.registerHostBuffer) backend.registerHostBuffer(key, flat)
+          }
         }
         this._inputs = []
       }
@@ -148,7 +240,7 @@ function createBoundTensorClass(runtime) {
       return ffi.poly_uop_dims(this._ctx, this._uop)
     }
     get dtype() { return this._dtype }
-    get device() { return 'CPU' }
+    get device() { return String(this._rt.device || 'cpu').toUpperCase() }
     get ndim() { return this._rt._backend.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }
     get requiresGrad() { return this._requiresGrad }
     set requiresGrad(v) { this._requiresGrad = v }
@@ -199,57 +291,87 @@ function createBoundTensorClass(runtime) {
       return map
     }
 
-    async _realize() {
-      if (this._isLeaf()) return
+    // _realize() is a back-compat shim. realize() (below) is the new entry
+    // point matching Python's Tensor.realize(*lst) signature.
+    // Back-compat shim. realize() (below) is the new entry point matching
+    // Python's Tensor.realize(*lst) signature.
+    async _realize() { await this.realize() }
 
-      const backend = this._rt._backend
-      const { ffi, ctx } = backend
-      const numel = this.shape.reduce((a, b) => a * b, 1) || 1
-      const isF64 = this._dtype === 'float64'
-      const outBuf = isF64
-        ? ffi.poly_buffer_f64(ctx, numel)
-        : ffi.poly_buffer_f32(ctx, numel)
-      const store = ffi.poly_store_val(ctx, outBuf, this._uop)
-      const sink = ffi.poly_sink1(ctx, store)
-
-      const leafMap = this._collectLeafMap()
-      const AT = isF64 ? Float64Array : Float32Array
-      leafMap.set(outBuf, new AT(numel))
-
-      const result = await backend.realize(ctx, sink, numel, leafMap, isF64)
-
-      this._data = result
-      this._buffer = outBuf
-      if (this.shape.length > 1) {
-        this._uop = ffi.poly_reshape(ctx, outBuf, this.shape, this.shape.length)
-      } else {
-        this._uop = outBuf
+    async realize(...lst) {
+      // Triggers the computation needed to create these Tensor(s). Filters
+      // out tensors already with buffer identity, batches the rest into a
+      // single graph-side realize call, and retargets each tensor's uop
+      // to its realized buffer-identity UOp. Port of Python's
+      // Tensor.realize(*lst).
+      const { ffi, ctx } = this._rt._backend
+      const tensors = [this, ...lst]
+      const targets = tensors.filter(t => !t.uop.hasBufferIdentity())
+      if (!targets.length) return this
+      const out = await ffi.poly_realize(ctx, targets.map(t => t._uop))
+      if (!out || out.length !== targets.length) {
+        throw new Error('poly_realize failed')
       }
-      this._inputs = []
-    }
-
-    async realize() {
-      await this._realize()
+      for (let i = 0; i < targets.length; i++) {
+        const t = targets[i]
+        t._saved_uop = t._uop
+        t._uop = out[i]
+        t.uop = new UOp(t._ctx, ffi, out[i])
+        t._buffer = t.uop.buffer ? t.uop.buffer.raw : null
+        t._inputs = []
+      }
       return this
     }
 
+    async _readBufferBytes() {
+      const { ffi, ctx } = this._rt._backend
+      const numel = this.numel()
+      const AT = TA_BY_DTYPE[this._dtype] || Float32Array
+      const itemsize = AT.BYTES_PER_ELEMENT
+      const bufRaw = this.uop && this.uop.buffer ? this.uop.buffer.raw : null
+      if (!bufRaw) throw new Error('toArray: tensor has no buffer identity')
+      let raw
+      const bufferKey = ffi.poly_buffer_get_key ? ffi.poly_buffer_get_key(ctx, bufRaw) : 0
+      const normKey = bufferKey ? normalizeBufferKey(bufferKey) : null
+      if (normKey && hostBuffers.has(normKey)) {
+        raw = hostBuffers.get(normKey)
+      } else {
+        const nbytes = numel * itemsize
+        raw = await ffi.poly_buffer_read(ctx, bufRaw, nbytes)
+      }
+      if (this._dtype === 'float16') {
+        const bits = raw instanceof Uint16Array ? raw :
+          new Uint16Array(raw.buffer, raw.byteOffset, numel)
+        return decodeFloat16Array(bits)
+      }
+      if (this._dtype === 'bfloat16') {
+        const bits = raw instanceof Uint16Array ? raw :
+          new Uint16Array(raw.buffer, raw.byteOffset, numel)
+        return decodeBfloat16Array(bits)
+      }
+      if (raw instanceof AT) return raw
+      return new AT(raw.buffer, raw.byteOffset, numel)
+    }
+
     async toArray() {
-      await this._realize()
-      const AT = this._dtype === 'float64' ? Float64Array : Float32Array
-      return new AT(this._data)
+      if (this._dtype === 'float16' || this._dtype === 'bfloat16') {
+        const t = this.cast('float32')
+        await t.realize()
+        return await t._readBufferBytes()
+      }
+      await this.realize()
+      return await this._readBufferBytes()
     }
 
     async item() {
-      await this._realize()
-      if (this._data.length !== 1) {
+      const arr = await this.toArray()
+      if (arr.length !== 1) {
         throw new Error(`item() requires scalar tensor, got shape [${this.shape}]`)
       }
-      return this._data[0]
+      return arr[0]
     }
 
     async tolist() {
-      await this._realize()
-      return _buildNested(this._data, this.shape, 0, 0).value
+      return _buildNested(await this.toArray(), this.shape, 0, 0).value
     }
 
     async detach() {
@@ -270,10 +392,12 @@ function createBoundTensorClass(runtime) {
 
     // --- Internal helpers ---
 
-    _makeResult(uop, inputs) {
-      let dt = 'float32'
-      for (let i = 0; i < inputs.length; i++) {
-        if (inputs[i]._dtype === 'float64') { dt = 'float64'; break }
+    _makeResult(uop, inputs, forcedDtype) {
+      let dt = forcedDtype || 'float32'
+      if (!forcedDtype) {
+        for (let i = 0; i < inputs.length; i++) {
+          if (inputs[i]._dtype === 'float64') { dt = 'float64'; break }
+        }
       }
       const t = new Tensor(null, {
         _ctx: this._ctx,
@@ -352,7 +476,15 @@ function createBoundTensorClass(runtime) {
     mul(other) { return this._binop(other, 'MUL') }
     div(other) { return this._binop(other, 'FDIV') }
     pow(other) { return this._binop(other, 'POW') }
-    lt(other) { return this._binop(other, 'CMPLT') }
+    lt(other) {
+      const { ffi } = this._rt._backend
+      other = this._ensureTensor(other)
+      const outShape = this._broadcastShape(other.shape)
+      const cmp = ffi.poly_alu2(
+        this._ctx, this._rt._backend.ops.CMPLT, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
+      return this._makeResult(uop, [this, other], 'float32')
+    }
 
     neg() {
       const { ffi, ops } = this._rt._backend
@@ -366,40 +498,45 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_eq(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      const cmp = ffi.poly_eq(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
+      return this._makeResult(uop, [this, other], 'float32')
     }
 
     ne(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_ne(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      const cmp = ffi.poly_ne(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
+      return this._makeResult(uop, [this, other], 'float32')
     }
 
     gt(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_gt(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      const cmp = ffi.poly_gt(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
+      return this._makeResult(uop, [this, other], 'float32')
     }
 
     ge(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_ge(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      const cmp = ffi.poly_ge(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
+      return this._makeResult(uop, [this, other], 'float32')
     }
 
     le(other) {
       const { ffi } = this._rt._backend
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_le(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      const cmp = ffi.poly_le(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
+      return this._makeResult(uop, [this, other], 'float32')
     }
 
     where(x, y) {
@@ -445,13 +582,8 @@ function createBoundTensorClass(runtime) {
     // --- Cast ---
 
     cast(dtype) {
-      const DTYPE_IDS = {
-        bool: 1, int8: 2, uint8: 3, int16: 4, uint16: 5,
-        int32: 6, uint32: 7, int64: 8, uint64: 9,
-        float16: 10, bfloat16: 11, float32: 12, float64: 13
-      }
       if (dtype === this._dtype) return this
-      const id = DTYPE_IDS[dtype]
+      const id = DTYPE_ID[dtype]
       if (id === undefined) throw new Error(`unsupported cast target dtype: ${dtype}`)
       const { ffi } = this._rt._backend
       const uop = ffi.poly_cast_by_id(this._ctx, this._uop, id)

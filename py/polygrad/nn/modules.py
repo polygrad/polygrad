@@ -5,8 +5,19 @@ from ..tensor import Tensor
 
 
 def _mark_param(t):
-    """Mark a tensor as a model parameter (for backward graph stitching)."""
+    """Mark a tensor as a model parameter.
+
+    Parameters should behave like tinygrad leaves after their initialization
+    graph has been realized: keep the realized buffer identity, but drop the
+    init-time Python graph history so backward starts from the current model
+    state rather than the random initializer trace.
+    """
     t._is_param = True
+    if t._buf_uop is None:
+        t._buf_uop = t.uop.buffer or t.uop
+    t._inputs = []
+    t._saved_uop = None
+    t._saved_inputs = None
     return t
 
 

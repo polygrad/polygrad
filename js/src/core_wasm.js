@@ -46,6 +46,7 @@ function getModuleFactory() {
 async function createWasmCore(device) {
   const deviceName = device || 'auto'
   const Module = await getModuleFactory()()
+  Module.__polygradHostBuffers = Module.__polygradHostBuffers || new Map()
 
   // --- Heap accessors ---
   function heap32() {
@@ -87,12 +88,6 @@ async function createWasmCore(device) {
     }
     return Module.__heapF32
   }
-
-  // --- Device selection (PolyDevice enum from exec_plan.h) ---
-  const DEVICE_IDS = { auto: 4, cpu: 4, interp: 2, wasm: 4, webgpu: 5 }
-  if (!(deviceName in DEVICE_IDS))
-    throw new Error('polygrad: unsupported device \'' + deviceName + '\'')
-  const deviceId = DEVICE_IDS[deviceName]
 
   // --- Scratch pointers ---
   const _scratchLenPtr = Module._malloc(4)
@@ -176,6 +171,107 @@ async function createWasmCore(device) {
     return ptr
   }
 
+  // Lookup device ID by name via C API. 
+  // This allows the C core to control the device enum and supported devices, and avoids hardcoding IDs in JS.
+  function coreDeviceId(name) {
+    const ptr = allocString(name)
+    const id = Module._poly_device_by_name(ptr)
+    Module._free(ptr)
+    return id
+  }
+
+  function coreDTypeId(name) {
+    const ptr = allocString(name)
+    const id = Module._poly_dtype_id_by_name(ptr)
+    Module._free(ptr)
+    return id
+  }
+
+  // Public cpu resolves to the wasm execution backend on wasm targets.
+  const DEVICE_IDS = {
+    auto: coreDeviceId('wasm'),
+    cpu: coreDeviceId('wasm'),
+    interp: coreDeviceId('interp'),
+    wasm: coreDeviceId('wasm'),
+    webgpu: coreDeviceId('webgpu')
+  }
+  const DTYPE_IDS = {
+    bool: coreDTypeId('bool'),
+    int8: coreDTypeId('int8'),
+    uint8: coreDTypeId('uint8'),
+    int16: coreDTypeId('int16'),
+    uint16: coreDTypeId('uint16'),
+    int32: coreDTypeId('int32'),
+    uint32: coreDTypeId('uint32'),
+    int64: coreDTypeId('int64'),
+    uint64: coreDTypeId('uint64'),
+    float16: coreDTypeId('float16'),
+    bfloat16: coreDTypeId('bfloat16'),
+    float32: coreDTypeId('float32'),
+    float64: coreDTypeId('float64')
+  }
+  if (!(deviceName in DEVICE_IDS))
+    throw new Error('polygrad: unsupported device \'' + deviceName + '\'')
+  const deviceId = DEVICE_IDS[deviceName]
+
+  async function ensureWebGPU() {
+    if (deviceName !== 'webgpu') {
+      throw new Error('polygrad: WebGPU state requested for non-webgpu runtime')
+    }
+    if (Module.__polygradWebGpuState && Module.__polygradWebGpuState.device) {
+      return Module.__polygradWebGpuState
+    }
+    if (Module.__polygradWebGpuInit) return Module.__polygradWebGpuInit
+
+    Module.__polygradWebGpuInit = (async () => {
+      if (typeof navigator === 'undefined' || !navigator.gpu) {
+        throw new Error('polygrad: WebGPU not available')
+      }
+
+      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
+      if (!adapter) throw new Error('polygrad: no WebGPU adapter found')
+
+      const features = []
+      if (adapter.features.has('shader-f16')) features.push('shader-f16')
+
+      const device = await adapter.requestDevice({
+        requiredFeatures: features,
+        requiredLimits: {
+          maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+          maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
+          maxBufferSize: adapter.limits.maxBufferSize
+        }
+      })
+
+      const infinityBuf = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      })
+      device.queue.writeBuffer(infinityBuf, 0, new Float32Array([Infinity]))
+
+      Module.__polygradWebGpuState = {
+        adapter,
+        device,
+        infinityBuf,
+        buffers: new Map(),
+        bufferSizes: new Map(),
+        nextBufferId: 1,
+        pipelines: new Map(),
+        pipelineKeyToId: new Map(),
+        nextPipelineId: 1
+      }
+      return Module.__polygradWebGpuState
+    })()
+
+    try {
+      return await Module.__polygradWebGpuInit
+    } finally {
+      Module.__polygradWebGpuInit = null
+    }
+  }
+
+  Module.__polygradEnsureWebGPU = ensureWebGPU
+
   function allocBytes(bytes) {
     const ptr = Module._malloc(bytes.length || 1)
     if (bytes.length > 0) heapU8().set(bytes, ptr)
@@ -222,8 +318,9 @@ async function createWasmCore(device) {
           Module.HEAP32[(datasPtr >> 2) + i] = hPtr
         }
 
-        const rc = Module._poly_realize_flat_device(ctx, sink, bufsPtr, datasPtr, n, deviceId)
-        if (rc !== 0) throw new Error('poly_realize_flat_device failed (rc=' + rc + ')')
+        const rc = Module._poly_realize_with_bindings_flat_device(
+          ctx, sink, bufsPtr, datasPtr, n, deviceId)
+        if (rc !== 0) throw new Error('poly_realize_with_bindings_flat_device failed (rc=' + rc + ')')
 
         const lastPtr = heapPtrs[heapPtrs.length - 1]
         const lastArr = entries[entries.length - 1][1]
@@ -269,6 +366,91 @@ async function createWasmCore(device) {
     poly_sink1: Module._poly_sink1,
     poly_buffer_f32: (ctx, size) => Module._poly_buffer_f32(ctx, BigInt(size)),
     poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
+
+    // Matches poly_buffer_from_host (device.h). For the unified WebGPU path,
+    // browser HOST stays JS-owned and the C core stores only a HOST residency
+    // key; no eager copy into wasm memory happens at import. Non-WebGPU wasm
+    // runtimes still stage bytes into wasm memory at construction.
+    poly_buffer_from_host: (ctx, typedArray, nbytes, dtypeId, dims, ndim) => {
+      let ptr = 0
+      if (deviceName !== 'webgpu') {
+        ptr = Module._malloc(nbytes)
+        heapU8().set(new Uint8Array(typedArray.buffer, typedArray.byteOffset, nbytes), ptr)
+      }
+      const dimsPtr = (dims && ndim > 0) ? writeInt64Array(Array.from(dims)) : 0
+      const uop = Module._poly_buffer_from_host(ctx, ptr, nbytes, dtypeId, dimsPtr, ndim)
+      if (dimsPtr) Module._free(dimsPtr)
+      return uop
+    },
+
+    poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
+    poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
+    poly_buffer_get_ptr: (ctx, buf) => Module._poly_buffer_get_ptr(ctx, buf),
+    poly_buffer_get_key: (ctx, buf) => Module._poly_buffer_get_key(ctx, buf),
+    poly_set_frontend_buffer_release: (fn) => {
+      Module.__polygradFrontendBufferRelease = fn
+      if (!Module.__polygradFrontendBufferReleasePtr) {
+        Module.__polygradFrontendBufferReleasePtr = Module.addFunction((bufferKey) => {
+          if (Module.__polygradFrontendBufferRelease) {
+            Module.__polygradFrontendBufferRelease(bufferKey)
+          }
+        }, 'vi')
+      }
+      Module._poly_set_frontend_buffer_release(Module.__polygradFrontendBufferReleasePtr)
+    },
+
+    // Batched graph-side realize. JS signature: poly_realize(ctx, [uop, ...]) -> [raw, ...].
+    // Builds an input pointer array in WASM memory, calls C, reads back the
+    // output pointer array.
+    poly_realize: async (ctx, uops) => {
+      const n = uops.length
+      if (n === 0) return []
+      const inPtr = Module._malloc(n * 4)
+      const outPtr = Module._malloc(n * 4)
+      const h32 = heap32()
+      for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = uops[i]
+      for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+      const rc = (deviceName === 'webgpu' && Module.ccall)
+        ? await Module.ccall(
+          'poly_realize',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [ctx, inPtr, n, outPtr],
+          { async: true }
+        )
+        : Module._poly_realize(ctx, inPtr, n, outPtr)
+      const out = new Array(n)
+      if (rc === 0) {
+        const h32b = heap32()
+        for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+      }
+      Module._free(inPtr)
+      Module._free(outPtr)
+      return rc === 0 ? out : null
+    },
+
+    // Backend-aware readback helper. This routes through the C core so
+    // WEBGPU buffers can read back via Asyncify instead of assuming raw host
+    // pointer access.
+    poly_buffer_read: async (ctx, buf, nbytes) => {
+      if (nbytes <= 0) return new Uint8Array(0)
+      const dst = Module._malloc(nbytes)
+      try {
+        const rc = (deviceName === 'webgpu' && Module.ccall)
+          ? await Module.ccall(
+            'poly_buffer_read',
+            'number',
+            ['number', 'number', 'number', 'number'],
+            [ctx, buf, dst, nbytes],
+            { async: true }
+          )
+          : Module._poly_buffer_read(ctx, buf, dst, nbytes)
+        if (rc !== 0) throw new Error('poly_buffer_read failed (rc=' + rc + ')')
+        return heapU8().slice(dst, dst + nbytes)
+      } finally {
+        Module._free(dst)
+      }
+    },
     poly_grad: Module._poly_grad,
     poly_detach: Module._poly_detach,
     poly_cast_by_id: Module._poly_cast_by_id,
@@ -441,7 +623,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 1
+  const EXPECTED_ABI = 4
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -452,6 +634,9 @@ async function createWasmCore(device) {
 
   // Create context
   const ctx = ffi.poly_ctx_new()
+  if (Module._poly_ctx_set_preferred_device) {
+    Module._poly_ctx_set_preferred_device(ctx, deviceId)
+  }
 
   // --- Instance API ---
   const instance = {
@@ -716,6 +901,8 @@ async function createWasmCore(device) {
     Module,
     deviceName,
     deviceId,
+    deviceIds: DEVICE_IDS,
+    dtypeIds: DTYPE_IDS,
     ffi,
     ctx,
     ops,
@@ -733,6 +920,12 @@ async function createWasmCore(device) {
     allocString,
     readCString,
     _scratchLenPtr,
+    registerHostBuffer(bufferKey, value) {
+      Module.__polygradHostBuffers.set(String(bufferKey), value)
+    },
+    unregisterHostBuffer(bufferKey) {
+      Module.__polygradHostBuffers.delete(String(bufferKey))
+    },
     destroy() {
       ffi.poly_ctx_destroy(ctx)
       _realizeChains.delete(ctx)

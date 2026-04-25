@@ -13,7 +13,8 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
+#include "../src/schedule/rangeify.h"
 #include "../src/nn.h"
 #include "../src/tensor.h"
 #include "../src/codegen.h"
@@ -40,7 +41,7 @@ static int realize_uop(
   }
   bufs[n_leaves] = out_buf;
   datas[n_leaves] = out_data;
-  return poly_realize_flat(ctx, sink, bufs, datas, n);
+  return poly_realize_with_bindings_flat(ctx, sink, bufs, datas, n);
 }
 
 /* Helper: make a shaped buffer (RESHAPE(BUFFER, shape)) */
@@ -59,6 +60,20 @@ static PolyUOp *base_buf(PolyUOp *u) {
   while (u->op == POLY_OP_RESHAPE && u->n_src > 0)
     u = u->src[0];
   return u;
+}
+
+/* Structural constructor tests that count LOAD/RANGE/STORE ops need the
+ * executable scheduled root rather than the earlier public kernel graph. */
+static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
+  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!schedule) return NULL;
+  if (schedule->n_items != 1 || !schedule->items[0].root) {
+    poly_schedule_free(schedule);
+    return NULL;
+  }
+  PolyUOp *root = schedule->items[0].root;
+  poly_schedule_free(schedule);
+  return root;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════ */
@@ -124,6 +139,300 @@ TEST(pe, sdpa_causal_e2e) {
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-3);
   ASSERT_FLOAT_EQ(dout[2], 0.33023846f, 1e-3);
   ASSERT_FLOAT_EQ(dout[4], 0.7517449f, 1e-3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, sdpa_single_token_multihead_returns_v) {
+  /* For T=1, softmax(q @ k^T) is exactly 1, so SDPA must return v. */
+  PolyCtx *ctx = poly_ctx_new();
+  const int B = 1, H = 12, T = 1, D = 64;
+  const int64_t shape[] = {B, H, T, D};
+  const int64_t numel = (int64_t)B * H * T * D;
+
+  PolyUOp *q = make_buf(ctx, (int64_t *)shape, 4);
+  PolyUOp *k = make_buf(ctx, (int64_t *)shape, 4);
+  PolyUOp *v = make_buf(ctx, (int64_t *)shape, 4);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, numel);
+  PolyUOp *r = poly_sdpa(ctx, q, k, v, NULL, 0);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 4);
+
+  float *dq = calloc((size_t)numel, sizeof(float));
+  float *dk = calloc((size_t)numel, sizeof(float));
+  float *dv = calloc((size_t)numel, sizeof(float));
+  float *dout = calloc((size_t)numel, sizeof(float));
+  ASSERT_NOT_NULL(dq);
+  ASSERT_NOT_NULL(dk);
+  ASSERT_NOT_NULL(dv);
+  ASSERT_NOT_NULL(dout);
+
+  for (int64_t i = 0; i < numel; i++) {
+    dq[i] = (float)((i % 17) - 8) * 0.25f;
+    dk[i] = (float)((i % 13) - 6) * 0.5f;
+    dv[i] = (float)(i % 101) * 0.1f - 5.0f;
+  }
+
+  PolyUOp *leaves[] = {base_buf(q), base_buf(k), base_buf(v)};
+  float *ld[] = {dq, dk, dv};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
+
+  for (int64_t i = 0; i < numel; i++)
+    ASSERT_FLOAT_EQ(dout[i], dv[i], 1e-4f);
+
+  free(dq);
+  free(dk);
+  free(dv);
+  free(dout);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, gpt2_qkv_v_path_single_token_layout) {
+  /* GPT-2 qkv split path for T=1:
+   * qkv: (B,T,3*D) -> v shrink -> reshape(B,T,H,hd) -> permute(B,H,T,hd)
+   * must preserve the exact lane order of the final third of qkv.
+   */
+  PolyCtx *ctx = poly_ctx_new();
+  const int B = 1, T = 1, H = 12, hd = 64, D = H * hd;
+  const int64_t qkv_shape[] = {B, T, 3 * D};
+  const int64_t numel = (int64_t)B * T * 3 * D;
+  const int64_t out_numel = (int64_t)B * H * T * hd;
+
+  PolyUOp *qkv = make_buf(ctx, (int64_t *)qkv_shape, 3);
+  int64_t shrink_v[][2] = {{0, B}, {0, T}, {2 * D, 3 * D}};
+  PolyUOp *v = poly_shrink(ctx, qkv, shrink_v, 3);
+  ASSERT_NOT_NULL(v);
+
+  int64_t mh[] = {B, T, H, hd};
+  int64_t perm[] = {0, 2, 1, 3};
+  PolyUOp *vp = poly_permute(ctx, poly_reshape(ctx, v, mh, 4), perm, 4);
+  ASSERT_NOT_NULL(vp);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, out_numel);
+  float *in = calloc((size_t)numel, sizeof(float));
+  float *out = calloc((size_t)out_numel, sizeof(float));
+  ASSERT_NOT_NULL(in);
+  ASSERT_NOT_NULL(out);
+
+  for (int64_t i = 0; i < numel; i++)
+    in[i] = (float)i;
+
+  PolyUOp *leaves[] = {base_buf(qkv)};
+  float *ld[] = {in};
+  ASSERT_INT_EQ(realize_uop(ctx, vp, out_buf, out, leaves, ld, 1), 0);
+
+  for (int h = 0; h < H; h++) {
+    for (int d = 0; d < hd; d++) {
+      int64_t got_idx = ((int64_t)h * T + 0) * hd + d;
+      int64_t src_idx = (int64_t)2 * D + (int64_t)h * hd + d;
+      ASSERT_FLOAT_EQ(out[got_idx], in[src_idx], 1e-6f);
+    }
+  }
+
+  free(in);
+  free(out);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, gpt2_qkv_v_path_single_token_contiguous) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int B = 1, T = 1, H = 12, hd = 64, D = H * hd;
+  const int64_t qkv_shape[] = {B, T, 3 * D};
+  const int64_t numel = (int64_t)B * T * 3 * D;
+  const int64_t out_numel = (int64_t)B * H * T * hd;
+
+  PolyUOp *qkv = make_buf(ctx, (int64_t *)qkv_shape, 3);
+  int64_t shrink_v[][2] = {{0, B}, {0, T}, {2 * D, 3 * D}};
+  PolyUOp *v = poly_shrink(ctx, qkv, shrink_v, 3);
+  ASSERT_NOT_NULL(v);
+
+  int64_t mh[] = {B, T, H, hd};
+  int64_t perm[] = {0, 2, 1, 3};
+  PolyUOp *vp = poly_permute(ctx, poly_reshape(ctx, v, mh, 4), perm, 4);
+  ASSERT_NOT_NULL(vp);
+  vp = poly_contiguous(ctx, vp);
+  ASSERT_NOT_NULL(vp);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, out_numel);
+  float *in = calloc((size_t)numel, sizeof(float));
+  float *out = calloc((size_t)out_numel, sizeof(float));
+  ASSERT_NOT_NULL(in);
+  ASSERT_NOT_NULL(out);
+
+  for (int64_t i = 0; i < numel; i++)
+    in[i] = (float)i;
+
+  PolyUOp *leaves[] = {base_buf(qkv)};
+  float *ld[] = {in};
+  ASSERT_INT_EQ(realize_uop(ctx, vp, out_buf, out, leaves, ld, 1), 0);
+
+  for (int h = 0; h < H; h++) {
+    for (int d = 0; d < hd; d++) {
+      int64_t got_idx = ((int64_t)h * T + 0) * hd + d;
+      int64_t src_idx = (int64_t)2 * D + (int64_t)h * hd + d;
+      ASSERT_FLOAT_EQ(out[got_idx], in[src_idx], 1e-6f);
+    }
+  }
+
+  free(in);
+  free(out);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, gpt2_c_attn_linear_single_token_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int B = 1, T = 1, IN = 768, OUT = 2304;
+  const int64_t x_shape[] = {B, T, IN};
+  const int64_t w_shape[] = {OUT, IN};
+  const int64_t b_shape[] = {OUT};
+  const int64_t out_numel = (int64_t)B * T * OUT;
+
+  PolyUOp *x = make_buf(ctx, (int64_t *)x_shape, 3);
+  PolyUOp *w = make_buf(ctx, (int64_t *)w_shape, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t *)b_shape, 1);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, out_numel);
+  PolyUOp *r = poly_linear_apply(ctx, x, w, b);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
+
+  float *dx = calloc((size_t)IN, sizeof(float));
+  float *dw = calloc((size_t)OUT * (size_t)IN, sizeof(float));
+  float *db = calloc((size_t)OUT, sizeof(float));
+  float *dout = calloc((size_t)out_numel, sizeof(float));
+  ASSERT_NOT_NULL(dx);
+  ASSERT_NOT_NULL(dw);
+  ASSERT_NOT_NULL(db);
+  ASSERT_NOT_NULL(dout);
+
+  for (int i = 0; i < IN; i++)
+    dx[i] = (float)((i % 23) - 11) * 0.03125f;
+  for (int o = 0; o < OUT; o++) {
+    db[o] = (float)((o % 19) - 9) * 0.05f;
+    for (int i = 0; i < IN; i++)
+      dw[(size_t)o * (size_t)IN + (size_t)i] = (float)(((o * 7 + i * 3) % 29) - 14) * 0.0078125f;
+  }
+
+  PolyUOp *leaves[] = {base_buf(x), base_buf(w), base_buf(b)};
+  float *ld[] = {dx, dw, db};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
+
+  for (int o = 0; o < OUT; o++) {
+    double acc = db[o];
+    for (int i = 0; i < IN; i++)
+      acc += (double)dx[i] * (double)dw[(size_t)o * (size_t)IN + (size_t)i];
+    ASSERT_FLOAT_EQ(dout[o], (float)acc, 1e-3f);
+  }
+
+  free(dx);
+  free(dw);
+  free(db);
+  free(dout);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, gpt2_c_attn_linear_single_token_contiguous_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int B = 1, T = 1, IN = 768, OUT = 2304;
+  const int64_t x_shape[] = {B, T, IN};
+  const int64_t w_shape[] = {OUT, IN};
+  const int64_t b_shape[] = {OUT};
+  const int64_t out_numel = (int64_t)B * T * OUT;
+
+  PolyUOp *x = make_buf(ctx, (int64_t *)x_shape, 3);
+  PolyUOp *w = make_buf(ctx, (int64_t *)w_shape, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t *)b_shape, 1);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, out_numel);
+  PolyUOp *r = poly_contiguous(ctx, poly_linear_apply(ctx, x, w, b));
+  ASSERT_NOT_NULL(r);
+
+  float *dx = calloc((size_t)IN, sizeof(float));
+  float *dw = calloc((size_t)OUT * (size_t)IN, sizeof(float));
+  float *db = calloc((size_t)OUT, sizeof(float));
+  float *dout = calloc((size_t)out_numel, sizeof(float));
+  ASSERT_NOT_NULL(dx);
+  ASSERT_NOT_NULL(dw);
+  ASSERT_NOT_NULL(db);
+  ASSERT_NOT_NULL(dout);
+
+  for (int i = 0; i < IN; i++)
+    dx[i] = (float)((i % 23) - 11) * 0.03125f;
+  for (int o = 0; o < OUT; o++) {
+    db[o] = (float)((o % 19) - 9) * 0.05f;
+    for (int i = 0; i < IN; i++)
+      dw[(size_t)o * (size_t)IN + (size_t)i] = (float)(((o * 7 + i * 3) % 29) - 14) * 0.0078125f;
+  }
+
+  PolyUOp *leaves[] = {base_buf(x), base_buf(w), base_buf(b)};
+  float *ld[] = {dx, dw, db};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
+
+  for (int o = 0; o < OUT; o++) {
+    double acc = db[o];
+    for (int i = 0; i < IN; i++)
+      acc += (double)dx[i] * (double)dw[(size_t)o * (size_t)IN + (size_t)i];
+    ASSERT_FLOAT_EQ(dout[o], (float)acc, 1e-3f);
+  }
+
+  free(dx);
+  free(dw);
+  free(db);
+  free(dout);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, gpt2_c_proj_linear_single_token_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int B = 1, T = 1, IN = 768, OUT = 768;
+  const int64_t x_shape[] = {B, T, IN};
+  const int64_t w_shape[] = {OUT, IN};
+  const int64_t b_shape[] = {OUT};
+  const int64_t out_numel = (int64_t)B * T * OUT;
+
+  PolyUOp *x = make_buf(ctx, (int64_t *)x_shape, 3);
+  PolyUOp *w = make_buf(ctx, (int64_t *)w_shape, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t *)b_shape, 1);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, out_numel);
+  PolyUOp *r = poly_linear_apply(ctx, x, w, b);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
+
+  float *dx = calloc((size_t)IN, sizeof(float));
+  float *dw = calloc((size_t)OUT * (size_t)IN, sizeof(float));
+  float *db = calloc((size_t)OUT, sizeof(float));
+  float *dout = calloc((size_t)out_numel, sizeof(float));
+  ASSERT_NOT_NULL(dx);
+  ASSERT_NOT_NULL(dw);
+  ASSERT_NOT_NULL(db);
+  ASSERT_NOT_NULL(dout);
+
+  for (int i = 0; i < IN; i++)
+    dx[i] = (float)((i % 31) - 15) * 0.015625f;
+  for (int o = 0; o < OUT; o++) {
+    db[o] = (float)((o % 17) - 8) * 0.03125f;
+    for (int i = 0; i < IN; i++)
+      dw[(size_t)o * (size_t)IN + (size_t)i] = (float)(((o * 5 + i * 11) % 37) - 18) * 0.00390625f;
+  }
+
+  PolyUOp *leaves[] = {base_buf(x), base_buf(w), base_buf(b)};
+  float *ld[] = {dx, dw, db};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
+
+  for (int o = 0; o < OUT; o++) {
+    double acc = db[o];
+    for (int i = 0; i < IN; i++)
+      acc += (double)dx[i] * (double)dw[(size_t)o * (size_t)IN + (size_t)i];
+    ASSERT_FLOAT_EQ(dout[o], (float)acc, 1e-3f);
+  }
+
+  free(dx);
+  free(dw);
+  free(db);
+  free(dout);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -366,6 +675,31 @@ TEST(shape_uop, reduce_axis) {
   PASS();
 }
 
+TEST(shape_uop, reduce_axis_drops_singleton_axes_like_tinygrad_rop) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* tinygrad UOp._rop filters size-1 axes before constructing REDUCE_AXIS.
+   * Keep that parity at the constructor boundary so later schedule/rangeify
+   * stages never see no-op singleton reductions. */
+  PolyUOp *b = make_buf(ctx, (int64_t[]){1, 4, 3}, 3);
+
+  PolyUOp *only_singleton = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){0}, 1);
+  ASSERT_PTR_EQ(only_singleton, b);
+
+  PolyUOp *mixed = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){2, 0}, 2);
+  ASSERT_NOT_NULL(mixed);
+  ASSERT_EQ(mixed->op, POLY_OP_REDUCE_AXIS);
+  ASSERT_EQ(mixed->arg.kind, POLY_ARG_REDUCE_AXIS);
+  ASSERT_INT_EQ(mixed->arg.reduce_axis.n, 1);
+  ASSERT_INT_EQ(mixed->arg.reduce_axis.axes[0], 2);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, mixed)[0], 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, mixed)[1], 4);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, mixed)[2], 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(shape_uop, alu_broadcast_scalar) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = make_buf(ctx, (int64_t[]){3, 4}, 2);
@@ -538,7 +872,7 @@ TEST(tensor, contiguous_passthrough) {
       POLY_BIND_HOST(out_buf, out),
       POLY_BIND_HOST(a_buf, in),
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(out[i], in[i], 1e-6);
   poly_ctx_destroy(ctx);
@@ -564,7 +898,7 @@ TEST(tensor, contiguous_expand_materializes) {
       POLY_BIND_HOST(out_buf, out),
       POLY_BIND_HOST(a_buf, in),
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
   for (int r = 0; r < 4; r++)
     for (int c2 = 0; c2 < 4; c2++)
       ASSERT_FLOAT_EQ(out[r * 4 + c2], in[r] + 1.0f, 1e-6);
@@ -592,7 +926,7 @@ TEST(tensor, contiguous_chain) {
       POLY_BIND_HOST(out_buf, out),
       POLY_BIND_HOST(a_buf, in),
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, bindings, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
   ASSERT_FLOAT_EQ(out[0], 11.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[1], 21.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[2], 31.0f, 1e-6);
@@ -1638,6 +1972,44 @@ TEST(pe, eye_pure_uop_4) {
   PASS();
 }
 
+TEST(pe, triu_frontend_uses_int_mask_and_broadcast_zero) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[2] = {3, 4};
+  PolyUOp *in = make_buf(ctx, shape, 2);
+  PolyUOp *out_val = poly_triu(ctx, in, 0);
+  ASSERT_NOT_NULL(out_val);
+
+  ASSERT_INT_EQ(out_val->op, POLY_OP_WHERE);
+  ASSERT_TRUE(poly_dtype_eq(out_val->dtype, POLY_FLOAT32));
+
+  PolyUOp *mask = out_val->src[0];
+  ASSERT_NOT_NULL(mask);
+  ASSERT_INT_EQ(mask->op, POLY_OP_CMPNE);
+  ASSERT_TRUE(poly_dtype_eq(mask->dtype, POLY_BOOL));
+
+  PolyUOp *lt = mask->src[0];
+  ASSERT_NOT_NULL(lt);
+  ASSERT_INT_EQ(lt->op, POLY_OP_CMPLT);
+  ASSERT_TRUE(poly_dtype_eq(lt->dtype, POLY_BOOL));
+  ASSERT_TRUE(poly_dtype_eq(lt->src[0]->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(lt->src[1]->dtype, POLY_INT32));
+
+  ASSERT_NOT_NULL(out_val->src[1]);
+  ASSERT_INT_EQ(out_val->src[1]->op, POLY_OP_RESHAPE);
+
+  PolyUOp *zero = out_val->src[2];
+  ASSERT_NOT_NULL(zero);
+  ASSERT_INT_EQ(zero->op, POLY_OP_EXPAND);
+  ASSERT_TRUE(poly_dtype_eq(zero->dtype, POLY_FLOAT32));
+  ASSERT_NOT_NULL(zero->src[0]);
+  ASSERT_INT_EQ(zero->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_NOT_NULL(zero->src[0]->src[0]);
+  ASSERT_INT_EQ(zero->src[0]->src[0]->op, POLY_OP_CONST);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, tril_pure_uop_diag0) {
   PolyCtx *ctx = poly_ctx_new();
   /* tinygrad: arange(1,13).reshape(3,4).tril(0)
@@ -1824,7 +2196,7 @@ TEST(pe, arange_range_collapse_structural) {
     ASSERT_NOT_NULL(sink);
 
     /* Schedule (runs rangeify + reduce_simplify), then linearize. */
-    PolyUOp *kernel = poly_schedule(ctx, sink);
+    PolyUOp *kernel = single_scheduled_root(ctx, sink);
     ASSERT_NOT_NULL(kernel);
     int n_lin = 0;
     PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);

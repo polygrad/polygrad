@@ -14,10 +14,6 @@ async function resolveBrowserTarget(name, opts) {
   if (name !== 'auto' && name !== 'wasm') {
     throw new Error(`polygrad: browser bundle only supports target='wasm' (got ${name})`)
   }
-  if (opts.device === 'webgpu') {
-    const { createWebGpuBackend } = require('./exec_webgpu')
-    return createWebGpuBackend()
-  }
   const { createWasmBackend } = require('./exec_wasm')
   return createWasmBackend(opts.device)
 }

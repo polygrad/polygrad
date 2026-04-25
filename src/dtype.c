@@ -44,6 +44,25 @@ bool poly_dtype_by_id(int id, PolyDType *out) {
   return true;
 }
 
+int poly_dtype_id_by_name(const char *name) {
+  if (!name || !name[0]) return -1;
+  if (strcmp(name, "void") == 0) return 0;
+  if (strcmp(name, "bool") == 0) return 1;
+  if (strcmp(name, "int8") == 0 || strcmp(name, "signed char") == 0) return 2;
+  if (strcmp(name, "uint8") == 0 || strcmp(name, "unsigned char") == 0) return 3;
+  if (strcmp(name, "int16") == 0 || strcmp(name, "short") == 0) return 4;
+  if (strcmp(name, "uint16") == 0 || strcmp(name, "unsigned short") == 0) return 5;
+  if (strcmp(name, "int32") == 0 || strcmp(name, "int") == 0) return 6;
+  if (strcmp(name, "uint32") == 0 || strcmp(name, "unsigned int") == 0) return 7;
+  if (strcmp(name, "int64") == 0 || strcmp(name, "long") == 0) return 8;
+  if (strcmp(name, "uint64") == 0 || strcmp(name, "unsigned long") == 0) return 9;
+  if (strcmp(name, "float16") == 0 || strcmp(name, "__fp16") == 0) return 10;
+  if (strcmp(name, "bfloat16") == 0 || strcmp(name, "__bf16") == 0) return 11;
+  if (strcmp(name, "float32") == 0 || strcmp(name, "float") == 0) return 12;
+  if (strcmp(name, "float64") == 0 || strcmp(name, "double") == 0) return 13;
+  return -1;
+}
+
 bool poly_dtype_eq(PolyDType a, PolyDType b) {
   return a.priority == b.priority && a.bitsize == b.bitsize && a.count == b.count &&
          a.is_ptr == b.is_ptr && a.addrspace == b.addrspace && a.vcount == b.vcount &&

@@ -40,6 +40,41 @@ class TestCreation:
         t = Tensor.arange(5)
         np.testing.assert_allclose(t.numpy(), np.arange(5, dtype=np.float32))
 
+    def test_rand_manual_seed_deterministic(self):
+        Tensor.manual_seed(42)
+        a = Tensor.rand(5).numpy()
+        b = Tensor.rand(5).numpy()
+        Tensor.manual_seed(42)
+        c = Tensor.rand(5).numpy()
+        d = Tensor.rand(5).numpy()
+        np.testing.assert_allclose(a, c)
+        np.testing.assert_allclose(b, d)
+        assert not np.allclose(a, b)
+
+    def test_randn_manual_seed_deterministic(self):
+        Tensor.manual_seed(42)
+        a = Tensor.randn(5).numpy()
+        b = Tensor.randn(5).numpy()
+        Tensor.manual_seed(42)
+        c = Tensor.randn(5).numpy()
+        d = Tensor.randn(5).numpy()
+        np.testing.assert_allclose(a, c)
+        np.testing.assert_allclose(b, d)
+        assert not np.allclose(a, b)
+
+    def test_randint_range_and_manual_seed(self):
+        Tensor.manual_seed(42)
+        a = Tensor.randint(5, 10, shape=(64,), dtype='int32').numpy()
+        Tensor.manual_seed(42)
+        b = Tensor.randint(5, 10, shape=(64,), dtype='int32').numpy()
+        np.testing.assert_array_equal(a, b)
+        assert np.all(a >= 5)
+        assert np.all(a < 10)
+
+    def test_rand_rejects_int_dtype(self):
+        with pytest.raises(ValueError, match='rand only supports float dtypes'):
+            Tensor.rand(4, dtype='int32')
+
     def test_item(self):
         t = Tensor([42.0])
         assert t.item() == pytest.approx(42.0)

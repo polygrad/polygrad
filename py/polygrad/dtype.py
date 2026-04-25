@@ -5,7 +5,7 @@ in the full tinygrad.helpers module.
 """
 
 from __future__ import annotations
-from typing import Final, ClassVar, Callable, Literal
+from typing import Final, ClassVar, Callable, Literal, Union
 import math
 import os
 import struct
@@ -103,8 +103,8 @@ class InvalidType:
 
 Invalid = InvalidType()
 
-PyConst = float | int | bool
-ConstType = PyConst | InvalidType
+PyConst = Union[float, int, bool]
+ConstType = Union[PyConst, InvalidType]
 
 FmtStr = Literal['?', 'b', 'B', 'h', 'H', 'i', 'I', 'q', 'Q', 'e', 'f', 'd']
 
@@ -395,7 +395,7 @@ if (env_default_float := getenv("DEFAULT_FLOAT", "")):
     assert dtypes.is_float(dtypes.default_float), \
         f"{env_default_float} is not a float dtype"
 
-DTypeLike = str | DType
+DTypeLike = Union[str, DType]
 
 
 def to_dtype(dtype):

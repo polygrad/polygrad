@@ -228,6 +228,7 @@ int poly_dtype_itemsize(PolyDType dt);
 const char *poly_dtype_name(PolyDType dt);
 int poly_dtype_count(void);
 bool poly_dtype_by_id(int id, PolyDType *out);
+int poly_dtype_id_by_name(const char *name);
 
 /* Axis metadata for RANGE args (tinygrad AxisType parity) */
 
@@ -410,20 +411,37 @@ void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata);
 
 typedef enum {
   POLY_DEVICE_AUTO = 0,
-  POLY_DEVICE_CPU,
-  POLY_DEVICE_INTERP,
+  POLY_DEVICE_HOST,    /* imported frontend data, never a kernel target */
+  POLY_DEVICE_CPU,     /* native compiled CPU backend */
+  POLY_DEVICE_INTERP,  /* interpreter (shares CPU/WASM storage) */
+  POLY_DEVICE_WASM,    /* WASM JIT backend */
+  POLY_DEVICE_WEBGPU,  /* WebGPU GPU backend */
   POLY_DEVICE_CUDA,
-  POLY_DEVICE_WASM_JIT,
-  POLY_DEVICE_WEBGPU,
-  POLY_DEVICE_X64_JIT,
   POLY_DEVICE_HIP,
+  POLY_DEVICE_X64_JIT,
 } PolyDevice;
 
-#ifdef __EMSCRIPTEN__
-#define POLY_DEVICE_HOST POLY_DEVICE_WASM_JIT
-#else
-#define POLY_DEVICE_HOST POLY_DEVICE_CPU
-#endif
+/* Default compute backend for the current build */
+PolyDevice poly_device_default(void);
+
+/* Can this device execute kernels? false for HOST and AUTO */
+bool poly_device_can_execute(PolyDevice dev);
+
+/* Is ptr directly dereferenceable by the compiled core? */
+bool poly_device_is_host_addressable(PolyDevice dev);
+
+/* Do two devices use the same underlying storage domain? */
+bool poly_devices_share_storage(PolyDevice a, PolyDevice b);
+
+/* Look up device id by name. Returns POLY_DEVICE_AUTO if unknown. */
+PolyDevice poly_device_by_name(const char *name);
+
+/* Frontend host-buffer lifetime hook.
+ * Frontends keep strong maps keyed by the C-side PolyBuffer* address value.
+ * When the core retires an imported HOST residency, it calls the registered
+ * release function with that key so the frontend can drop its owner entry. */
+typedef void (*PolyFrontendBufferReleaseFn)(uintptr_t buffer_key);
+void poly_set_frontend_buffer_release(PolyFrontendBufferReleaseFn fn);
 
 /* PolyBuffer is defined in device.h (needs PolyAllocator pointer) */
 
@@ -455,8 +473,15 @@ typedef struct PolyCtx PolyCtx;
 
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
+void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
+PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
 PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx);
+
+/* Return the current ctx->buffers entry address for a BUFFER UOp as an opaque
+ * frontend key. Returns 0 when no PolyBuffer is attached. */
+uint64_t poly_buffer_get_key(PolyCtx *ctx, PolyUOp *buf);
+int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* Create a UOp (with CSE deduplication) */

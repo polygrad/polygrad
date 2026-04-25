@@ -19,6 +19,7 @@ temp/
 !CHANGELOG.md
 *.egg-info
 .pytest_cache/
+.obsidian/
 out*.txt
 bench/results/2*.json
 py/csrc/

@@ -15,6 +15,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,7 +150,7 @@ static int compile_to_so(const char *source, const char *c_path, const char *so_
 }
 
 PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
-  if (getenv("POLY_DUMP_KERNELS")) {
+  if (poly_dump_kernels_enabled()) {
     fprintf(stderr, "=== KERNEL %s ===\n%s\n=== END ===\n", fn_name, source);
   }
 

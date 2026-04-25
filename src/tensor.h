@@ -156,12 +156,34 @@ PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x);
 /* Deterministic RNG helpers (stateless seed -> tensor). */
 PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
 PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
+PolyUOp *poly_rand_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id);
+PolyUOp *poly_randn_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id);
 
 /* Creation helpers (constant-backed tensors). */
 PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step);
 PolyUOp *poly_eye(PolyCtx *ctx, int64_t n);
 PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps);
 PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value);
+PolyUOp *poly_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id);
+PolyUOp *poly_const_float_by_id(PolyCtx *ctx, double value, int dtype_id);
+PolyUOp *poly_full_int_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    int64_t fill_value,
+    int dtype_id
+);
+PolyUOp *poly_full_float_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    double fill_value,
+    int dtype_id
+);
+PolyUOp *poly_arange_int_by_id(PolyCtx *ctx, int64_t start, int64_t stop, int64_t step, int dtype_id);
+PolyUOp *poly_arange_float_by_id(PolyCtx *ctx, double start, double stop, double step, int dtype_id);
+PolyUOp *poly_linspace_by_id(PolyCtx *ctx, double start, double stop, int64_t steps, int dtype_id);
+PolyUOp *poly_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id);
 PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, int upper);

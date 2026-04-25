@@ -817,7 +817,7 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   for (int i = 0; i < n; i++)
     nkey[ideal[i]] = i;
 
-  if (getenv("POLY_DUMP_KERNELS")) {
+  if (poly_dump_linear_enabled()) {
     for (int i = 0; i < n; i++) {
       PolyUOp *u = topo[i];
       if (u->op == POLY_OP_RANGE || u->op == POLY_OP_STORE || u->op == POLY_OP_DEFINE_REG ||
@@ -885,10 +885,25 @@ static bool env_true(const char *name) {
          strcmp(v, "False") != 0;
 }
 
+PolyRendererCaps poly_c_renderer_caps(void) {
+  return (PolyRendererCaps){
+      .has_mulacc = false,
+      .has_threefry = false,
+      .has_local = false,
+      .has_simd_int = true,
+      .max_vec_width = 4,
+  };
+}
+
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  /* Control flow is now applied inside poly_full_rewrite_to_sink (tinygrad parity). */
-  sink = poly_full_rewrite_to_sink(ctx, sink);
-  return poly_linearize_rewritten(ctx, sink, n_out);
+  PolyRewriteOpts opts = {
+      .optimize = true,
+      .devectorize = 1,
+      .caps = poly_c_renderer_caps(),
+      .device = POLY_DEVICE_CPU,
+      .opt_policy = POLY_OPT_HEURISTIC,
+  };
+  return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 
 PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out) {
@@ -905,7 +920,14 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   int beam = 0;
   const char *bv = getenv("POLY_BEAM");
   if (bv && bv[0] != '\0') beam = atoi(bv);
-  PolyRewriteOpts opts = {.optimize = opt, .devectorize = devec, .beam_width = beam};
+  PolyRewriteOpts opts = {
+      .optimize = opt,
+      .devectorize = devec,
+      .beam_width = beam,
+      .caps = poly_c_renderer_caps(),
+      .device = POLY_DEVICE_CPU,
+      .opt_policy = POLY_OPT_HEURISTIC,
+  };
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
 
@@ -983,18 +1005,12 @@ static void render_ctype(PolyDType dt, char *buf, int cap) {
   base.is_ptr = false;
   base.addrspace = POLY_ADDR_GLOBAL;
   base.ptr_size = 0;
-  /* Vec pointer: vcount > 1 means pointer to vector type.
-   * float vec4_ptr → "float __attribute__((vector_size(16)))*"
-   * Scalar pointer → "float*" */
-  if (dt.vcount > 1) {
-    /* bitsize for the base scalar element (ptr bitsize = element bitsize) */
-    uint16_t elem_bits = base.bitsize; /* e.g. 32 for float ptr */
-    base.count = dt.vcount;
-    base.bitsize = elem_bits * (uint16_t)dt.vcount; /* 32*4=128 for vec4 */
-  } else {
-    base.count = 1;
-  }
-  base.vcount = 1;
+  /* tinygrad uses ptr.count for normal ptr-to-vector width. Polygrad still has
+   * a few older late-pass sites that carried that width in ptr.vcount, so
+   * accept either while the remaining producers are normalized. */
+  int lanes = dt.count > 1 ? dt.count : dt.vcount;
+  base = poly_dtype_scalar(base);
+  if (lanes > 1) base = poly_dtype_vec(base, lanes);
   char bt[128];
   render_ctype_nonptr(base, bt, sizeof(bt));
   snprintf(buf, cap, "%s*", bt);
@@ -1173,6 +1189,13 @@ static int range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) 
 
 /* C Renderer */
 
+#define POLY_RENDER_MAX_PARAMS 64
+typedef struct {
+  char type[128];
+  char name[256];
+  int order; /* maps param position -> args[] index */
+} RenderParam;
+
 char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   StrBuf decls; /* variable declarations at function scope */
   StrBuf body; /* function body with assignments */
@@ -1183,9 +1206,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   smap_init(&names, n);
 
   /* function parameter entries: (type_str, name_str, sort_key) */
-  char *param_types[64];
-  char *param_names[64];
-  int param_order[64]; /* maps param position → args[] index */
+  RenderParam params[POLY_RENDER_MAX_PARAMS];
   int n_params = 0;
   int n_buffer_params = 0; /* count of PARAM (buffer) params, used for DEFINE_VAR offset */
 
@@ -1233,17 +1254,16 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- PARAM: buffer pointer parameter ---------------------------- */
     if (u->op == POLY_OP_PARAM) {
+      if (n_params >= POLY_RENDER_MAX_PARAMS) goto fail;
       char name[32];
       snprintf(name, sizeof(name), "data%lld", (long long)u->arg.i);
       smap_set(&names, u, strdup(name));
 
       /* type for signature: "float* restrict" */
       PolyDType base = poly_dtype_scalar(u->dtype);
-      char type[64];
-      snprintf(type, sizeof(type), "%s* restrict", base.name);
-      param_types[n_params] = strdup(type);
-      param_names[n_params] = strdup(name);
-      param_order[n_params] = (int)u->arg.i;
+      snprintf(params[n_params].type, sizeof(params[n_params].type), "%s* restrict", base.name);
+      snprintf(params[n_params].name, sizeof(params[n_params].name), "%s", name);
+      params[n_params].order = (int)u->arg.i;
       n_params++;
       n_buffer_params++;
       continue;
@@ -1251,16 +1271,17 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- DEFINE_VAR: integer parameter ------------------------------ */
     if (u->op == POLY_OP_DEFINE_VAR) {
+      if (n_params >= POLY_RENDER_MAX_PARAMS) goto fail;
       const char *vname = u->arg.kind == POLY_ARG_DEFINE_VAR ? u->arg.define_var.name
                                                              : (u->arg.str ? u->arg.str : "var");
       smap_set(&names, u, strdup(vname));
-      param_types[n_params] = strdup("const int");
-      param_names[n_params] = strdup(vname);
+      snprintf(params[n_params].type, sizeof(params[n_params].type), "const int");
+      snprintf(params[n_params].name, sizeof(params[n_params].name), "%s", vname);
       /* DEFINE_VAR args come after all buffer args in the args[] array.
        * n_buffer_params counts PARAMs seen so far (all PARAMs precede DEFINE_VARs
        * in linearized output due to priority -20 vs -19). var_idx counts
        * DEFINE_VARs within the var section. */
-      param_order[n_params] = n_buffer_params + (n_params - n_buffer_params);
+      params[n_params].order = n_buffer_params + (n_params - n_buffer_params);
       n_params++;
       continue;
     }
@@ -1342,12 +1363,12 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       char *src_s = smap_get(&names, u->src[0]);
       if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0) {
         if (u->arg.int_tuple.n == 1) {
-          char expr[256];
-          snprintf(
-              expr, sizeof(expr), "(%s[%lld])", src_s ? src_s : "0",
-              (long long)u->arg.int_tuple.vals[0]
+          StrBuf expr;
+          sb_init(&expr);
+          sb_printf(
+              &expr, "(%s[%lld])", src_s ? src_s : "0", (long long)u->arg.int_tuple.vals[0]
           );
-          smap_set(&names, u, strdup(expr));
+          smap_set(&names, u, expr.buf);
         } else {
           char dtype_s[128];
           render_ctype(u->dtype, dtype_s, sizeof(dtype_s));
@@ -1364,9 +1385,10 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
           smap_set(&names, u, vexpr.buf);
         }
       } else if (u->arg.kind == POLY_ARG_INT) {
-        char expr[256];
-        snprintf(expr, sizeof(expr), "(%s[%lld])", src_s ? src_s : "0", (long long)u->arg.i);
-        smap_set(&names, u, strdup(expr));
+        StrBuf expr;
+        sb_init(&expr);
+        sb_printf(&expr, "(%s[%lld])", src_s ? src_s : "0", (long long)u->arg.i);
+        smap_set(&names, u, expr.buf);
       } else {
         smap_set(&names, u, strdup(src_s ? src_s : "0"));
       }
@@ -1377,9 +1399,10 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = smap_get(&names, u->src[0]);
       char *idx_s = smap_get(&names, u->src[1]);
-      char expr[256];
-      snprintf(expr, sizeof(expr), "(%s+%s)", buf_s, idx_s);
-      smap_set(&names, u, strdup(expr));
+      StrBuf expr;
+      sb_init(&expr);
+      sb_printf(&expr, "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      smap_set(&names, u, expr.buf);
       continue;
     }
 
@@ -1504,15 +1527,18 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       PolyDType base = u->dtype;
       base.is_ptr = false;
       base.addrspace = 0;
+      base.ptr_size = 0;
+      int64_t reg_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
       if (base.count > 1) {
         /* Vec accumulator: float __attribute__((vector_size(N))) r0[1]; */
         PolyDType elem = poly_dtype_scalar(u->dtype);
         int vbytes = (int)(elem.bitsize / 8) * base.count;
         sb_printf(
-            &decls, "  %s __attribute__((vector_size(%d))) %s[1];\n", elem.name, vbytes, name
+            &decls, "  %s __attribute__((vector_size(%d))) %s[%lld];\n", elem.name, vbytes, name,
+            (long long)reg_size
         );
       } else {
-        sb_printf(&decls, "  %s %s[1];\n", base.name, name);
+        sb_printf(&decls, "  %s %s[%lld];\n", base.name, name, (long long)reg_size);
       }
       continue;
     }
@@ -1635,11 +1661,13 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- ALU ops: arithmetic expressions ---------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      char expr[512];
       const char *s0 = (u->n_src > 0) ? smap_get(&names, u->src[0]) : "";
       const char *s1 = (u->n_src > 1) ? smap_get(&names, u->src[1]) : "";
       const char *s2 = (u->n_src > 2) ? smap_get(&names, u->src[2]) : "";
-      render_alu(expr, sizeof(expr), u->op, u->dtype, s0, s1, s2);
+      size_t expr_cap = strlen(s0 ? s0 : "") + strlen(s1 ? s1 : "") + strlen(s2 ? s2 : "") + 1024;
+      char *expr = malloc(expr_cap);
+      if (!expr) expr = strdup("0");
+      else render_alu(expr, (int)expr_cap, u->op, u->dtype, s0 ? s0 : "", s1 ? s1 : "", s2 ? s2 : "");
 
       char name[32];
       snprintf(name, sizeof(name), "alu%d", c_alu++);
@@ -1651,6 +1679,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       for (int d = 0; d < depth; d++)
         sb_puts(&body, "  ");
       sb_printf(&body, "%s = %s;\n", name, expr);
+      free(expr);
       continue;
     }
 
@@ -1708,18 +1737,13 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
   /* Sort params by arg index (PARAM 0, 1, 2, ...) */
   for (int i = 1; i < n_params; i++) {
-    int ko = param_order[i];
-    char *kt = param_types[i], *kn = param_names[i];
+    RenderParam kp = params[i];
     int j = i - 1;
-    while (j >= 0 && param_order[j] > ko) {
-      param_order[j + 1] = param_order[j];
-      param_types[j + 1] = param_types[j];
-      param_names[j + 1] = param_names[j];
+    while (j >= 0 && params[j].order > kp.order) {
+      params[j + 1] = params[j];
       j--;
     }
-    param_order[j + 1] = ko;
-    param_types[j + 1] = kt;
-    param_names[j + 1] = kn;
+    params[j + 1] = kp;
   }
 
   /* Build complete source */
@@ -1733,7 +1757,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   sb_printf(&out, "void %s(", fn_name);
   for (int i = 0; i < n_params; i++) {
     if (i > 0) sb_puts(&out, ", ");
-    sb_printf(&out, "%s %s", param_types[i], param_names[i]);
+    sb_printf(&out, "%s %s", params[i].type, params[i].name);
   }
   sb_puts(&out, ") {\n");
   if (decls.len > 0) sb_puts(&out, decls.buf);
@@ -1745,14 +1769,15 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   sb_printf(&out, "  %s(", fn_name);
   for (int i = 0; i < n_params; i++) {
     if (i > 0) sb_puts(&out, ", ");
-    int arg_idx = param_order[i];
+    int arg_idx = params[i].order;
     /* pointer params: (type*)args[i]; int params: *(int*)args[i] */
-    if (strchr(param_types[i], '*')) {
+    if (strchr(params[i].type, '*')) {
       /* extract base type (before '* restrict') */
-      char base[64];
-      const char *star = strchr(param_types[i], '*');
-      int blen = (int)(star - param_types[i]);
-      memcpy(base, param_types[i], blen);
+      char base[128];
+      const char *star = strchr(params[i].type, '*');
+      int blen = (int)(star - params[i].type);
+      if (blen >= (int)sizeof(base)) blen = (int)sizeof(base) - 1;
+      memcpy(base, params[i].type, blen);
       base[blen] = '\0';
       sb_printf(&out, "(%s*)args[%d]", base, arg_idx);
     } else {
@@ -1762,13 +1787,15 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   sb_puts(&out, ");\n}\n");
 
   /* cleanup */
-  for (int i = 0; i < n_params; i++) {
-    free(param_types[i]);
-    free(param_names[i]);
-  }
   free(decls.buf);
   free(body.buf);
   smap_destroy(&names);
 
   return out.buf;
+
+fail:
+  free(decls.buf);
+  free(body.buf);
+  smap_destroy(&names);
+  return NULL;
 }

@@ -41,6 +41,7 @@ typedef struct {
 typedef struct {
   bool has_mulacc; /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
   bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
+  bool has_local; /* Backend supports local/workgroup scheduling */
   bool has_simd_int; /* Backend supports packed integer ops in vector regs (vpaddd etc) */
   int max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
   const PolyTensorCore *tensor_cores; /* array of available TC specs (NULL if none) */
@@ -60,7 +61,7 @@ typedef struct {
   int beam_width; /* BEAM search width (0 = heuristic, >0 = BEAM search) */
   PolyRendererCaps caps; /* renderer capabilities (zero-init = CPU defaults) */
   /* Renderer config for unified pipeline (Phase 4) */
-  int device; /* PolyDevice from exec_plan.h (0 = CPU) */
+  int device; /* PolyDevice from engine/schedule.h (0 = CPU) */
   PolyOptPolicy opt_policy; /* explicit optimization strategy */
   PolyPatternMatcher *extra_matcher; /* renderer-specific final rewrite (NULL = none) */
   int gpu_block_size; /* group_for_reduce block size (0 = skip) */
@@ -73,6 +74,15 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out);
 /* Like poly_linearize but reads POLY_OPTIMIZE/POLY_DEVECTORIZE from env. */
 PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+/* WASM linearizer: keep scalar memory/ALU IR and let render_wasm form SIMD
+ * loops itself. Avoids feeding CPU float4/GEP/VECTORIZE IR into the WASM
+ * renderer, which only supports scalar LOAD/STORE/ALU plus its own SIMD path. */
+PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+
+/* Default CPU/C renderer capabilities, matching tinygrad's ClangRenderer:
+ * float4-capable, no local memory scheduling, no native MULACC/THREEFRY. */
+PolyRendererCaps poly_c_renderer_caps(void);
 
 /* Linearize an already-rewritten sink (skip full_rewrite_to_sink).
  * Used by GPU backends that insert passes between rewrite and linearization. */
@@ -129,15 +139,29 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 int range_start_for_op(PolyOps op);
 
 /* Individual codegen pass getters (for GPU linearizer to insert passes between them).
- * poly_symbolic_simple() is declared in pat.h. */
+ * poly_symbolic_simple()/poly_symbolic() are declared in pat.h. */
 PolyPatternMatcher *poly_pm_reduce_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass(void);
 PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps);
 PolyPatternMatcher *poly_pm_transcendental_pass(void);
+PolyPatternMatcher *poly_pm_move_where_on_load_pass(void);
+/* Late codegen stage parity hook: tinygrad pm_add_loads from
+ * codegen/late/devectorizer.py. Exposed so focused tests/probes can isolate the
+ * post-gpudims add-loads boundary before render/devectorize. */
+PolyPatternMatcher *poly_pm_add_loads_pass(void);
 PolyPatternMatcher *poly_pm_bf16_non_native(void);
 PolyPatternMatcher *poly_pm_pre_expander_pass(void);
 PolyPatternMatcher *poly_pm_expander_pass(void);
 PolyPatternMatcher *poly_pm_devectorize_pass(void);
+PolyPatternMatcher *poly_pm_render_subset_pass(void);
+PolyPatternMatcher *poly_pm_split_ends_pass(void);
+/* Tinygrad-aligned late codegen stage helpers used by probes/tests.
+ * These apply the same stage slices as full_rewrite_to_sink_ex instead of
+ * exposing a single internal matcher under a misleading boundary name. */
+PolyUOp *poly_apply_devectorize_stage(
+    PolyCtx *ctx, PolyUOp *sink, int devectorize, PolyRendererCaps caps
+);
+PolyUOp *poly_apply_post_index_symbolic_stage(PolyCtx *ctx, PolyUOp *sink, int devectorize);
 /* Apply pm_reduce with pass-local state (preferred over manual graph_rewrite). */
 PolyUOp *poly_apply_pm_reduce(PolyCtx *ctx, PolyUOp *sink);
 
@@ -210,6 +234,7 @@ unsigned long long poly_cuda_alloc(size_t bytes);
 void poly_cuda_free(unsigned long long ptr);
 int poly_cuda_copy_htod(unsigned long long dst, const void *src, size_t bytes);
 int poly_cuda_copy_dtoh(void *dst, unsigned long long src, size_t bytes);
+int poly_cuda_copy_dtod(unsigned long long dst, unsigned long long src, size_t bytes);
 PolyCudaProgram *poly_compile_cuda(const char *source, const char *fn_name);
 int poly_cuda_launch(
     PolyCudaProgram *prog,

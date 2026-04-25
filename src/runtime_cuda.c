@@ -56,6 +56,7 @@ typedef CUresult (*cuMemAlloc_v2_fn)(CUdeviceptr *, size_t);
 typedef CUresult (*cuMemFree_v2_fn)(CUdeviceptr);
 typedef CUresult (*cuMemcpyHtoD_v2_fn)(CUdeviceptr, const void *, size_t);
 typedef CUresult (*cuMemcpyDtoH_v2_fn)(void *, CUdeviceptr, size_t);
+typedef CUresult (*cuMemcpyDtoD_v2_fn)(CUdeviceptr, CUdeviceptr, size_t);
 typedef CUresult (*cuModuleLoadData_fn)(CUmodule *, const void *);
 typedef CUresult (*cuModuleGetFunction_fn)(CUfunction *, CUmodule, const char *);
 typedef CUresult (*cuLaunchKernel_fn)(CUfunction, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, void *, void **, void **);
@@ -87,6 +88,7 @@ static struct {
   cuMemFree_v2_fn cuMemFree_v2;
   cuMemcpyHtoD_v2_fn cuMemcpyHtoD_v2;
   cuMemcpyDtoH_v2_fn cuMemcpyDtoH_v2;
+  cuMemcpyDtoD_v2_fn cuMemcpyDtoD_v2;
   cuModuleLoadData_fn cuModuleLoadData;
   cuModuleGetFunction_fn cuModuleGetFunction;
   cuLaunchKernel_fn cuLaunchKernel;
@@ -156,6 +158,7 @@ static bool load_cuda_libs(void) {
   LOAD_CUDA(cuMemFree_v2);
   LOAD_CUDA(cuMemcpyHtoD_v2);
   LOAD_CUDA(cuMemcpyDtoH_v2);
+  LOAD_CUDA(cuMemcpyDtoD_v2);
   LOAD_CUDA(cuModuleLoadData);
   LOAD_CUDA(cuModuleGetFunction);
   LOAD_CUDA(cuLaunchKernel);
@@ -285,6 +288,16 @@ int poly_cuda_copy_dtoh(void *dst, unsigned long long src, size_t bytes) {
   CUresult err = cuda_api.cuMemcpyDtoH_v2(dst, (CUdeviceptr)src, bytes);
   if (err != CUDA_SUCCESS) {
     fprintf(stderr, "polygrad: cuda: cuMemcpyDtoH_v2 failed (CUresult=%d)\n", err);
+    return -1;
+  }
+  return 0;
+}
+
+int poly_cuda_copy_dtod(unsigned long long dst, unsigned long long src, size_t bytes) {
+  if (cuda_state != CUDA_INIT_OK) return -1;
+  CUresult err = cuda_api.cuMemcpyDtoD_v2((CUdeviceptr)dst, (CUdeviceptr)src, bytes);
+  if (err != CUDA_SUCCESS) {
+    fprintf(stderr, "polygrad: cuda: cuMemcpyDtoD_v2 failed (CUresult=%d)\n", err);
     return -1;
   }
   return 0;

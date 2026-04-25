@@ -255,6 +255,7 @@ async function createWebGpuBackend() {
 
   return {
     ffi: core.ffi,
+    dtypeIds: core.dtypeIds,
     ctx: core.ctx,
     ops: core.ops,
     instance: core.instance,

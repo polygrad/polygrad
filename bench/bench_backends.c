@@ -9,8 +9,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "../src/frontend.h"
-#include "../src/exec_plan.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
+#include "../src/engine/schedule.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -78,39 +78,39 @@ static BenchResult bench_graph(const char *name, PolyCtx *ctx, PolyUOp *sink,
   BenchResult r = { .name = name };
 
   /* Prepare (shared, one-time) */
-  PolyPreparedStep *prep = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!prep) { fprintf(stderr, "prepare failed for %s\n", name); return r; }
 
   /* CPU: lower + warmup + bench */
   double t0 = now_us();
-  PolyExecutableStep *cpu_exec = poly_lower_step(ctx, prep, POLY_DEVICE_CPU);
+  PolyCompiledSchedule *cpu_exec = poly_lower_schedule(ctx, prep, POLY_DEVICE_CPU);
   r.cpu_lower_us = now_us() - t0;
   if (!cpu_exec) { fprintf(stderr, "CPU lower failed for %s\n", name); return r; }
 
   /* Warmup */
-  poly_executable_step_run(cpu_exec, slot_data, n_slots, NULL, 0);
+  poly_run_compiled_schedule(cpu_exec, slot_data, n_slots, NULL, 0);
 
   t0 = now_us();
   for (int i = 0; i < iters; i++)
-    poly_executable_step_run(cpu_exec, slot_data, n_slots, NULL, 0);
+    poly_run_compiled_schedule(cpu_exec, slot_data, n_slots, NULL, 0);
   r.cpu_us = (now_us() - t0) / iters;
 
   /* INTERP: lower + warmup + bench */
   t0 = now_us();
-  PolyExecutableStep *interp_exec = poly_lower_step(ctx, prep, POLY_DEVICE_INTERP);
+  PolyCompiledSchedule *interp_exec = poly_lower_schedule(ctx, prep, POLY_DEVICE_INTERP);
   r.interp_lower_us = now_us() - t0;
   if (!interp_exec) { fprintf(stderr, "INTERP lower failed for %s\n", name); return r; }
 
-  poly_executable_step_run(interp_exec, slot_data, n_slots, NULL, 0);
+  poly_run_compiled_schedule(interp_exec, slot_data, n_slots, NULL, 0);
 
   t0 = now_us();
   for (int i = 0; i < iters; i++)
-    poly_executable_step_run(interp_exec, slot_data, n_slots, NULL, 0);
+    poly_run_compiled_schedule(interp_exec, slot_data, n_slots, NULL, 0);
   r.interp_us = (now_us() - t0) / iters;
 
-  poly_executable_step_free(cpu_exec);
-  poly_executable_step_free(interp_exec);
-  poly_prepared_step_free(prep);
+  poly_compiled_schedule_free(cpu_exec);
+  poly_compiled_schedule_free(interp_exec);
+  poly_schedule_free(prep);
 
   return r;
 }
@@ -155,13 +155,13 @@ int main(int argc, char **argv) {
       PolyUOp *sink = make_vecadd(ctx, n, &ua, &ub, &uo);
       void *slot_data[8] = {0};
       /* Find slots by matching buf_uop pointers */
-      PolyPreparedStep *prep = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+      PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
       for (int s = 0; s < prep->n_buf_slots; s++) {
         if (prep->buf_slots[s].buf_uop == ua) slot_data[s] = a;
         else if (prep->buf_slots[s].buf_uop == ub) slot_data[s] = b;
         else if (prep->buf_slots[s].buf_uop == uo) slot_data[s] = out;
       }
-      poly_prepared_step_free(prep);
+      poly_schedule_free(prep);
 
       BenchResult r = bench_graph("vecadd", ctx, sink,
                                    slot_data, 8, iters);
@@ -178,13 +178,13 @@ int main(int argc, char **argv) {
       PolyUOp *ua, *ub, *uo;
       PolyUOp *sink = make_chain5(ctx, n, &ua, &ub, &uo);
       void *slot_data[8] = {0};
-      PolyPreparedStep *prep = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+      PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
       for (int s = 0; s < prep->n_buf_slots; s++) {
         if (prep->buf_slots[s].buf_uop == ua) slot_data[s] = a;
         else if (prep->buf_slots[s].buf_uop == ub) slot_data[s] = b;
         else if (prep->buf_slots[s].buf_uop == uo) slot_data[s] = out;
       }
-      poly_prepared_step_free(prep);
+      poly_schedule_free(prep);
 
       BenchResult r = bench_graph("chain5 (fused)", ctx, sink,
                                    slot_data, 8, iters);
@@ -202,12 +202,12 @@ int main(int argc, char **argv) {
       PolyUOp *sink = make_reduce(ctx, n, &ua, &uo);
       float reduce_out = 0;
       void *slot_data[8] = {0};
-      PolyPreparedStep *prep = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+      PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
       for (int s = 0; s < prep->n_buf_slots; s++) {
         if (prep->buf_slots[s].buf_uop == ua) slot_data[s] = a;
         else if (prep->buf_slots[s].buf_uop == uo) slot_data[s] = &reduce_out;
       }
-      poly_prepared_step_free(prep);
+      poly_schedule_free(prep);
 
       BenchResult r = bench_graph("reduce_sum", ctx, sink,
                                    slot_data, 8, n > 100000 ? 50 : iters);

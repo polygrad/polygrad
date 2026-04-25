@@ -35,10 +35,12 @@
 
 #include "interp.h"
 #include "codegen.h"
+#include "utils.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 /* Lane value (scalar) */
 
@@ -521,6 +523,77 @@ static int find_matching_end(PolyUOp **lin, int n, int range_pos) {
   return n;
 }
 
+/* DEFINE_REG / DEFINE_LOCAL can remain scalar-typed in the linearized IR while
+ * being used as backing storage for packed LOAD/STORE paths. Size the backing
+ * allocation from actual uses in the kernel instead of only from the define
+ * node's nominal dtype. */
+static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
+  while (u) {
+    if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
+    if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
+         u->op == POLY_OP_INDEX) &&
+        u->n_src > 0) {
+      u = u->src[0];
+      continue;
+    }
+    return NULL;
+  }
+  return NULL;
+}
+
+static int interp_uop_lane_count(PolyUOp *u) {
+  if (!u) return 1;
+  if (u->op == POLY_OP_VECTORIZE && u->n_src > 1) return u->n_src;
+  return u->dtype.count > 1 ? u->dtype.count : 1;
+}
+
+static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
+  int64_t base_hi = 0;
+  bool saw_index = false;
+  for (PolyUOp *u = ptr_uop; u; ) {
+    if (u->op == POLY_OP_INDEX && u->n_src > 1) {
+      int64_t lo = 0, hi = 0;
+      poly_uop_minmax(NULL, u->src[1], &lo, &hi);
+      if (hi >= 0 && hi <= (1 << 20)) {
+        base_hi += hi;
+        saw_index = true;
+      }
+      u = u->src[0];
+      continue;
+    }
+    if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) &&
+        u->n_src > 0) {
+      u = u->src[0];
+      continue;
+    }
+    break;
+  }
+  if (!saw_index) return access_lanes > 0 ? access_lanes : 1;
+  int64_t need = base_hi + (access_lanes > 0 ? access_lanes : 1);
+  if (need < 1) need = 1;
+  if (need > INT_MAX) need = INT_MAX;
+  return (int)need;
+}
+
+static int interp_storage_lanes_for_def(PolyUOp **lin, int n_lin, PolyUOp *def) {
+  int lanes = def->dtype.count > 1 ? def->dtype.count : 1;
+  for (int i = 0; i < n_lin; i++) {
+    PolyUOp *u = lin[i];
+    if (u->op == POLY_OP_STORE && u->n_src >= 2) {
+      if (interp_follow_storage_base(u->src[0]) == def) {
+        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(u->src[1]));
+        if (need > lanes) lanes = need;
+      }
+    } else if (u->op == POLY_OP_LOAD && u->n_src >= 1) {
+      if (interp_follow_storage_base(u->src[0]) == def) {
+        int need = interp_storage_extent_for_use(u->src[0], interp_uop_lane_count(u));
+        if (need > lanes) lanes = need;
+      }
+    }
+  }
+  return lanes;
+}
+
 /* Region interpreter */
 
 static int interp_region(
@@ -595,8 +668,7 @@ static int interp_region(
       PolyDType base = poly_dtype_scalar(u->dtype);
       int sz = poly_dtype_itemsize(base);
       if (sz < 1) sz = 1;
-      /* Include vector width in allocation size */
-      int cnt = base.count > 1 ? base.count : 1;
+      int cnt = interp_storage_lanes_for_def(lin, n_lin, u);
       vals[i] = iv_scalar(il_ptr(calloc(1, (size_t)(sz * cnt))));
       iv_fixup(&vals[i]);
       break;
@@ -726,7 +798,7 @@ static int interp_region(
       PolyDType base = poly_dtype_scalar(u->dtype);
       int sz = poly_dtype_itemsize(base);
       if (sz < 1) sz = 1;
-      int cnt = base.count > 1 ? base.count : 1;
+      int cnt = interp_storage_lanes_for_def(lin, n_lin, u);
       vals[i] = iv_scalar(il_ptr(calloc(1, (size_t)(sz * cnt))));
       iv_fixup(&vals[i]);
       break;
@@ -784,11 +856,21 @@ static int interp_region(
         break;
       }
 
-      int n_idxs = (u->arg.kind == POLY_ARG_INT_TUPLE) ? u->arg.int_tuple.n : 0;
+      int n_idxs = 0;
+      int scalar_lane_idx = 0;
+      if (u->arg.kind == POLY_ARG_INT_TUPLE) {
+        n_idxs = u->arg.int_tuple.n;
+      } else if (u->arg.kind == POLY_ARG_INT) {
+        n_idxs = 1;
+        scalar_lane_idx = (int)u->arg.i;
+      }
 
       if (n_idxs == 1) {
-        /* Single lane extraction: out = src.lanes[idx] */
-        int lane_idx = (int)u->arg.int_tuple.vals[0];
+        /* Single lane extraction: out = src.lanes[idx].
+         * Linearized GEPs can carry either a scalar int arg (lane extract) or
+         * an int_tuple. tinygrad treats both as scalar lane selection. */
+        int lane_idx = (u->arg.kind == POLY_ARG_INT_TUPLE) ? (int)u->arg.int_tuple.vals[0]
+                                                           : scalar_lane_idx;
         InterpLane lane = iv_get(&vals[src0], lane_idx);
         vals[i] = iv_scalar(lane);
         iv_fixup(&vals[i]);
@@ -875,7 +957,7 @@ int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
   if (!lin || n_lin <= 0) return -1;
   (void)n_args;
 
-  if (getenv("POLY_DUMP_KERNELS")) {
+  if (poly_dump_kernels_enabled()) {
     fprintf(stderr, "=== INTERP KERNEL (%d ops) ===\n", n_lin);
     for (int i = 0; i < n_lin; i++) {
       PolyUOp *u = lin[i];

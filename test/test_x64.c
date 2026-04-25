@@ -9,9 +9,9 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
-#include "../src/exec_plan.h"
+#include "../src/engine/schedule.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #include <math.h>
 
 /* ══════════════════════════════════════════════════════════════════════ */
@@ -603,7 +603,7 @@ static int three_way_parity(
     int out_numel,
     float tol
 ) {
-  PolyPreparedStep *ps = poly_prepare_step(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!ps) return -1;
 
 /* Helper: fill slots from buf/data arrays */
@@ -617,49 +617,49 @@ static int three_way_parity(
   } while (0)
 
   /* CPU path */
-  PolyExecutableStep *cpu = poly_lower_step(ctx, ps, POLY_DEVICE_CPU);
+  PolyCompiledSchedule *cpu = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
   if (!cpu) {
-    poly_prepared_step_free(ps);
+    poly_schedule_free(ps);
     return -2;
   }
   memset(out_cpu, 0, (size_t)out_numel * sizeof(float));
   void *slot_cpu[16];
   FILL_SLOTS(slot_cpu, out_cpu);
-  int rc = poly_executable_step_run(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
-  poly_executable_step_free(cpu);
+  int rc = poly_run_compiled_schedule(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
+  poly_compiled_schedule_free(cpu);
   if (rc < 0) {
-    poly_prepared_step_free(ps);
+    poly_schedule_free(ps);
     return -3;
   }
 
   /* INTERP path */
-  PolyExecutableStep *interp = poly_lower_step(ctx, ps, POLY_DEVICE_INTERP);
+  PolyCompiledSchedule *interp = poly_lower_schedule(ctx, ps, POLY_DEVICE_INTERP);
   if (!interp) {
-    poly_prepared_step_free(ps);
+    poly_schedule_free(ps);
     return -4;
   }
   memset(out_interp, 0, (size_t)out_numel * sizeof(float));
   void *slot_interp[16];
   FILL_SLOTS(slot_interp, out_interp);
-  rc = poly_executable_step_run(interp, slot_interp, ps->n_buf_slots, NULL, 0);
-  poly_executable_step_free(interp);
+  rc = poly_run_compiled_schedule(interp, slot_interp, ps->n_buf_slots, NULL, 0);
+  poly_compiled_schedule_free(interp);
   if (rc < 0) {
-    poly_prepared_step_free(ps);
+    poly_schedule_free(ps);
     return -5;
   }
 
   /* x64 JIT path */
-  PolyExecutableStep *x64 = poly_lower_step(ctx, ps, POLY_DEVICE_X64_JIT);
+  PolyCompiledSchedule *x64 = poly_lower_schedule(ctx, ps, POLY_DEVICE_X64_JIT);
   if (!x64) {
-    poly_prepared_step_free(ps);
+    poly_schedule_free(ps);
     return -6;
   }
   memset(out_x64, 0, (size_t)out_numel * sizeof(float));
   void *slot_x64[16];
   FILL_SLOTS(slot_x64, out_x64);
-  rc = poly_executable_step_run(x64, slot_x64, ps->n_buf_slots, NULL, 0);
-  poly_executable_step_free(x64);
-  poly_prepared_step_free(ps);
+  rc = poly_run_compiled_schedule(x64, slot_x64, ps->n_buf_slots, NULL, 0);
+  poly_compiled_schedule_free(x64);
+  poly_schedule_free(ps);
   if (rc < 0) return -7;
 
 #undef FILL_SLOTS

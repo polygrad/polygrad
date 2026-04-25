@@ -11,7 +11,7 @@
 #include "nn.h"
 #include "frontend.h"
 #include "tensor.h" /* poly_mean_reduce */
-#include "scheduler.h" /* poly_reshape, poly_permute, poly_expand */
+#include "engine/schedule.h" /* poly_reshape, poly_permute, poly_expand */
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>

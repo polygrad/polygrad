@@ -8,7 +8,7 @@
 
 #include "../src/codegen.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,12 +28,12 @@ static double bench_realize(PolyCtx *ctx, PolyUOp *sink,
                             int warmup, int reps) {
   /* Warmup (includes compilation on first call) */
   for (int i = 0; i < warmup; i++)
-    poly_realize(ctx, sink, bindings, n_bind);
+    poly_realize_with_bindings(ctx, sink, bindings, n_bind);
 
   double *times = malloc((size_t)reps * sizeof(double));
   for (int i = 0; i < reps; i++) {
     double t0 = now_us();
-    poly_realize(ctx, sink, bindings, n_bind);
+    poly_realize_with_bindings(ctx, sink, bindings, n_bind);
     double t1 = now_us();
     times[i] = t1 - t0;
   }

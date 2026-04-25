@@ -9,7 +9,7 @@
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
 #include "../src/codegen.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #ifdef POLY_EXEC_PLAN_H
 /* already pulled in by frontend.h on the branch */
 #endif
@@ -55,12 +55,12 @@ static void bench_vecadd(int n, int iters) {
   };
 
   /* Warmup (includes first compile) */
-  poly_realize(ctx, sink, binds, 3);
+  poly_realize_with_bindings(ctx, sink, binds, 3);
 
   /* Timed: should hit cache */
   double t0 = now_us();
   for (int it = 0; it < iters; it++)
-    poly_realize(ctx, sink, binds, 3);
+    poly_realize_with_bindings(ctx, sink, binds, 3);
   double us = (now_us() - t0) / iters;
 
   printf("  vecadd        N=%-8d  %8.1f us/call  (%d iters)\n", n, us, iters);
@@ -96,11 +96,11 @@ static void bench_reduce_chain(int n, int iters) {
     MAKE_BIND(out, hout), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
   };
 
-  poly_realize(ctx, sink, binds, 3);
+  poly_realize_with_bindings(ctx, sink, binds, 3);
 
   double t0 = now_us();
   for (int it = 0; it < iters; it++)
-    poly_realize(ctx, sink, binds, 3);
+    poly_realize_with_bindings(ctx, sink, binds, 3);
   double us = (now_us() - t0) / iters;
 
   printf("  reduce_chain  N=%-8d  %8.1f us/call  (%d iters)\n", n, us, iters);
@@ -128,7 +128,7 @@ static void bench_cold_compile(int n) {
   PolyBufferBinding binds[] = {
     MAKE_BIND(c, hc), MAKE_BIND(a, ha), MAKE_BIND(b, hb)
   };
-  poly_realize(ctx, sink, binds, 3);
+  poly_realize_with_bindings(ctx, sink, binds, 3);
   double us = now_us() - t0;
 
   printf("  cold_compile  N=%-8d  %8.1f us (graph build + schedule + compile + run)\n", n, us);

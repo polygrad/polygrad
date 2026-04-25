@@ -290,14 +290,18 @@ async function runTests(pg) {
     const t = new Tensor([1, 2, 3])
     const r = t.cast('float64')
     assert(r.dtype === 'float64', `expected float64, got ${r.dtype}`)
-    assertClose(await r.toArray(), [1, 2, 3])
+    const arr = await r.toArray()
+    console.log('DEBUG cast f32->f64', Array.from(arr))
+    assertClose(arr, [1, 2, 3])
   })
 
   await test('cast float64 to float32', async () => {
     const t = new Tensor([1.5, 2.5, 3.5], { dtype: 'float64' })
     const r = t.cast('float32')
     assert(r.dtype === 'float32', `expected float32, got ${r.dtype}`)
-    assertClose(await r.toArray(), [1.5, 2.5, 3.5])
+    const arr = await r.toArray()
+    console.log('DEBUG cast f64->f32', Array.from(arr))
+    assertClose(arr, [1.5, 2.5, 3.5])
   })
 
   await test('cast no-op same dtype', async () => {
@@ -328,19 +332,25 @@ async function runTests(pg) {
   await test('triu 2d', async () => {
     const t = new Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
     const r = t.triu()
-    assertClose(await r.toArray(), [1, 2, 3, 0, 5, 6, 0, 0, 9])
+    const arr = await r.toArray()
+    console.log('DEBUG triu', Array.from(arr))
+    assertClose(arr, [1, 2, 3, 0, 5, 6, 0, 0, 9])
   })
 
   await test('tril 2d', async () => {
     const t = new Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
     const r = t.tril()
-    assertClose(await r.toArray(), [1, 0, 0, 4, 5, 0, 7, 8, 9])
+    const arr = await r.toArray()
+    console.log('DEBUG tril', Array.from(arr))
+    assertClose(arr, [1, 0, 0, 4, 5, 0, 7, 8, 9])
   })
 
   await test('triu with diagonal', async () => {
     const t = new Tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
     const r = t.triu(1)
-    assertClose(await r.toArray(), [0, 2, 3, 0, 0, 6, 0, 0, 0])
+    const arr = await r.toArray()
+    console.log('DEBUG triu diag', Array.from(arr))
+    assertClose(arr, [0, 2, 3, 0, 0, 6, 0, 0, 0])
   })
 
   // -- Reduction --
@@ -628,18 +638,23 @@ async function runTests(pg) {
   await test('f64: add', async () => {
     const a = new Tensor([1, 2, 3], { dtype: 'float64' })
     const b = new Tensor([4, 5, 6], { dtype: 'float64' })
-    assertClose(await a.add(b).toArray(), [5, 7, 9])
+    const arr = await a.add(b).toArray()
+    console.log('DEBUG f64 add', Array.from(arr))
+    assertClose(arr, [5, 7, 9])
   })
 
   await test('f64: mul', async () => {
     const a = new Tensor([2, 3], { dtype: 'float64' })
     const b = new Tensor([4, 5], { dtype: 'float64' })
-    assertClose(await a.mul(b).toArray(), [8, 15])
+    const arr = await a.mul(b).toArray()
+    console.log('DEBUG f64 mul', Array.from(arr))
+    assertClose(arr, [8, 15])
   })
 
   await test('f64: sum', async () => {
     const t = new Tensor([1, 2, 3], { dtype: 'float64' })
     const v = await t.sum().item()
+    console.log('DEBUG f64 sum', v)
     assert(Math.abs(v - 6) < 1e-10, `Expected 6, got ${v}`)
   })
 
@@ -779,7 +794,9 @@ async function runTests(pg) {
     const b = new Tensor([[5, 6]])
     const r = Tensor.cat(a, b, { dim: 0 })
     assertShape(r.shape, [3, 2])
-    assertClose(await r.toArray(), [1, 2, 3, 4, 5, 6])
+    const arr = await r.toArray()
+    console.log('DEBUG cat axis0', Array.from(arr))
+    assertClose(arr, [1, 2, 3, 4, 5, 6])
   })
 
   await test('stack', async () => {
@@ -787,7 +804,9 @@ async function runTests(pg) {
     const b = new Tensor([4, 5, 6])
     const r = Tensor.stack(a, b)
     assertShape(r.shape, [2, 3])
-    assertClose(await r.toArray(), [1, 2, 3, 4, 5, 6])
+    const arr = await r.toArray()
+    console.log('DEBUG stack', Array.from(arr))
+    assertClose(arr, [1, 2, 3, 4, 5, 6])
   })
 
   await test('repeat', async () => {

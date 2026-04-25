@@ -49,6 +49,9 @@ function moduleCacheKey(hash, len) {
 async function createWasmBackend(device) {
   const core = await createWasmCore(device || 'auto')
   const { Module, ctx, heap32, heapU8, serializeRealize } = core
+  if (core.deviceName === 'webgpu' && Module.__polygradEnsureWebGPU) {
+    await Module.__polygradEnsureWebGPU()
+  }
 
   // --- C math imports for WASM kernels ---
   const mathImports = {
@@ -209,18 +212,20 @@ async function createWasmBackend(device) {
   }
 
   // --- Device routing ---
-  const WASM_DEVICE_ID = 4
-  const realize = (core.deviceId === WASM_DEVICE_ID) ? renderAndExec : core.realizeViaBackend
+  const realize = (core.deviceId === core.deviceIds.wasm) ? renderAndExec : core.realizeViaBackend
 
   return {
     ffi: core.ffi,
+    dtypeIds: core.dtypeIds,
     ctx: core.ctx,
     ops: core.ops,
     instance: core.instance,
     int64: core.int64,
     readShape: core.readShape,
     realize,
-    caps: { simd: true, f64: true, target: 'wasm', device: core.deviceName },
+    registerHostBuffer: core.registerHostBuffer,
+    unregisterHostBuffer: core.unregisterHostBuffer,
+    caps: { simd: true, f64: core.deviceName !== 'webgpu', target: 'wasm', device: core.deviceName },
     destroy: () => {
       _ctxMemory.delete(ctx)
       core.destroy()

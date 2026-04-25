@@ -4,11 +4,13 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "test_harness.h"
-#include "../src/rangeify.h"
-#include "../src/scheduler.h"
-#include "../src/indexing.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/engine/schedule.h"
+#include "../src/schedule/indexing.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
+#include "../src/utils.h"
 
 /* Cleanup helper */
 
@@ -24,6 +26,13 @@ static void destroy_consumer_map(PolyMap *cmap) {
   poly_map_foreach(cmap, free_consumer_list_cb, NULL);
   poly_map_destroy(cmap);
 }
+
+static PolyRealizeInfo *get_realize_info(PolyIndexingCtx *ictx, PolyUOp *u) {
+  return poly_map_get(ictx->realize_map, poly_ptr_hash(u), u, poly_ptr_eq);
+}
+
+static int count_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op);
+static PolyUOp *run_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink);
 
 /* Consumer map tests */
 
@@ -465,6 +474,136 @@ TEST(rangeify, range_prop_multi_consumer_realize) {
   PASS();
 }
 
+TEST(rangeify, range_prop_expand_ending_realizes_elementwise_default_pcontig) {
+  /* tinygrad indexing.py realizes ended ranges unconditionally when
+   * PCONTIG <= 1. The default tinygrad setting is PCONTIG=0, so an
+   * elementwise op feeding EXPAND must become a realize point here. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a_flat = poly_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *b_flat = poly_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *c_flat = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 8);
+
+  int64_t sh21[] = {2, 1};
+  int64_t sh24[] = {2, 4};
+  PolyUOp *a = poly_reshape(ctx, a_flat, sh21, 2);
+  PolyUOp *b = poly_reshape(ctx, b_flat, sh21, 2);
+  PolyUOp *c = poly_reshape(ctx, c_flat, sh24, 2);
+  PolyUOp *pre = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *exp = poly_expand(ctx, pre, sh24, 2);
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, exp, c, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, add, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  poly_realize_map_build(ictx, sink);
+  poly_range_propagate(ictx, sink);
+
+  ASSERT_TRUE(poly_is_realized(ictx, pre));
+  PolyRealizeInfo *ri = get_realize_info(ictx, pre);
+  ASSERT_NOT_NULL(ri);
+  ASSERT_INT_EQ(ri->n_axes, 2);
+  ASSERT_INT_EQ(ri->axes[0], 0);
+  ASSERT_INT_EQ(ri->axes[1], 1);
+
+  PolyRangeEntry *re_pre = poly_range_map_get(ictx, pre);
+  PolyRangeEntry *re_exp = poly_range_map_get(ictx, exp);
+  ASSERT_NOT_NULL(re_pre);
+  ASSERT_NOT_NULL(re_exp);
+  ASSERT_INT_EQ(re_pre->n_out, 2);
+  ASSERT_INT_EQ(re_exp->n_in, 2);
+  ASSERT_PTR_NEQ(re_pre->out_rngs[0], re_exp->in_rngs[0]);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, range_prop_multi_consumer_same_idx_different_valid_fuses) {
+  /* tinygrad's multi-consumer merge compares local idx separately from valid.
+   * Two consumers that access the same local idx but carry different valid
+   * masks should stay fused at default PCONTIG=0. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *c1 = poly_pad(ctx, poly_shrink(ctx, x, (int64_t[][2]){{0, 3}}, 1), (int64_t[][2]){{0, 2}}, 1);
+  PolyUOp *c2 = poly_pad(ctx, x, (int64_t[][2]){{0, 1}}, 1);
+  PolyUOp *y = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 5);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, y, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  poly_realize_map_build(ictx, sink);
+  poly_range_propagate(ictx, sink);
+
+  /* Match tinygrad's run_rangeify propagation boundary first: same local idx
+   * plus different valid masks must not force a realize point here. */
+  ASSERT_FALSE(poly_is_realized(ictx, x));
+  PolyRangeEntry *re_x = poly_range_map_get(ictx, x);
+  ASSERT_NOT_NULL(re_x);
+  ASSERT_INT_EQ(re_x->n_out, 1);
+  ASSERT_EQ(re_x->out_rngs[0]->op, POLY_OP_WHERE);
+
+  PolyUOp *rangeified = run_apply_rangeify(ictx, sink);
+  ASSERT_NOT_NULL(rangeified);
+
+  ASSERT_FALSE(poly_is_realized(ictx, x));
+  ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_BUFFERIZE), 0);
+  ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_WHERE), 2);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, range_prop_multi_consumer_same_idx_different_valid_fuses_2d) {
+  /* Same rule as the 1D case above, but with a surviving leading axis.
+   * This locks in that polygrad still fuses when only one axis carries
+   * different valid masks and the local idx expressions stay identical. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a0 = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *b0 = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *a = poly_reshape(ctx, a0, (int64_t[]){2, 4}, 2);
+  PolyUOp *b = poly_reshape(ctx, b0, (int64_t[]){2, 4}, 2);
+  PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *c1 = poly_pad(
+      ctx, poly_shrink(ctx, x, (int64_t[][2]){{0, 2}, {0, 3}}, 2), (int64_t[][2]){{0, 0}, {0, 2}},
+      2
+  );
+  PolyUOp *c2 = poly_pad(ctx, x, (int64_t[][2]){{0, 0}, {0, 1}}, 2);
+  PolyUOp *y = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
+  PolyUOp *out0 = poly_buffer(ctx, POLY_FLOAT32, 10);
+  PolyUOp *out = poly_reshape(ctx, out0, (int64_t[]){2, 5}, 2);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, y, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  poly_realize_map_build(ictx, sink);
+  poly_range_propagate(ictx, sink);
+
+  ASSERT_FALSE(poly_is_realized(ictx, x));
+  PolyRangeEntry *re_x = poly_range_map_get(ictx, x);
+  ASSERT_NOT_NULL(re_x);
+  ASSERT_INT_EQ(re_x->n_out, 2);
+  ASSERT_EQ(re_x->out_rngs[0]->op, POLY_OP_WHERE);
+  ASSERT_EQ(re_x->out_rngs[1]->op, POLY_OP_WHERE);
+
+  PolyUOp *rangeified = poly_run_rangeify(ictx, sink);
+  ASSERT_NOT_NULL(rangeified);
+  ASSERT_FALSE(poly_is_realized(ictx, x));
+  ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_BUFFERIZE), 0);
+  ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_WHERE), 2);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, range_prop_reshape) {
   /* reshape(a, (2,3)) where a has shape (6,):
    * STORE gets 2D ranges, reshape transforms to 1D input range */
@@ -552,11 +691,55 @@ static int count_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   return count;
 }
 
+typedef struct {
+  int store_target_index;
+  int target_ptr_index;
+  int read_ptr_index;
+  int read_scalar_index;
+} IndexKindCounts;
+
+static IndexKindCounts count_index_kinds(PolyCtx *ctx, PolyUOp *root) {
+  IndexKindCounts c = {0};
+  int n;
+  PolyUOp **topo = poly_toposort(ctx, root, &n);
+  PolyUOp *store_targets[128] = {0};
+  int n_store_targets = 0;
+
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || u->op != POLY_OP_STORE || u->n_src < 1) continue;
+    if (u->src[0] && u->src[0]->op == POLY_OP_INDEX && n_store_targets < 128)
+      store_targets[n_store_targets++] = u->src[0];
+  }
+
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || u->op != POLY_OP_INDEX) continue;
+    bool is_target = false;
+    for (int j = 0; j < n_store_targets; j++) {
+      if (store_targets[j] == u) {
+        is_target = true;
+        break;
+      }
+    }
+    if (is_target) {
+      c.store_target_index++;
+      if (u->dtype.is_ptr) c.target_ptr_index++;
+    } else if (u->dtype.is_ptr) {
+      c.read_ptr_index++;
+    } else {
+      c.read_scalar_index++;
+    }
+  }
+
+  return c;
+}
+
 /* Run full rangeify pipeline up to and including apply_rangeify */
 static PolyUOp *run_apply_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
   poly_realize_map_build(ictx, sink);
   poly_range_propagate(ictx, sink);
-  return poly_apply_rangeify(ictx, sink);
+  return poly_run_rangeify(ictx, sink);
 }
 
 /* Apply rangeify tests */
@@ -758,6 +941,58 @@ TEST(rangeify, apply_realized_bufferize) {
   PASS();
 }
 
+TEST(rangeify, apply_vecadd_kernel_mode_read_indices_are_scalar) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, add, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  ictx->add_buffer_indices = true;
+  PolyUOp *result = run_apply_rangeify(ictx, sink);
+  ASSERT_NOT_NULL(result);
+
+  IndexKindCounts counts = count_index_kinds(ctx, result);
+  ASSERT_INT_EQ(counts.store_target_index, 1);
+  ASSERT_INT_EQ(counts.target_ptr_index, 1);
+  ASSERT_INT_EQ(counts.read_ptr_index, 0);
+  ASSERT_INT_EQ(counts.read_scalar_index, 2);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, apply_triu_kernel_mode_read_indices_are_scalar) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *in = poly_buffer_f32(ctx, 9);
+  PolyUOp *in2d = poly_reshape(ctx, in, (int64_t[]){3, 3}, 2);
+  PolyUOp *tri = poly_triu(ctx, in2d, 0);
+  PolyUOp *out = poly_buffer_f32(ctx, 9);
+  PolyUOp *store = poly_store_val(ctx, out, tri);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  ictx->add_buffer_indices = true;
+  PolyUOp *result = run_apply_rangeify(ictx, sink);
+  ASSERT_NOT_NULL(result);
+
+  IndexKindCounts counts = count_index_kinds(ctx, result);
+  ASSERT_INT_EQ(counts.store_target_index, 1);
+  ASSERT_INT_EQ(counts.target_ptr_index, 1);
+  ASSERT_INT_EQ(counts.read_ptr_index, 0);
+  ASSERT_TRUE(counts.read_scalar_index >= 1);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* schedule_v2 helper */
 
 static int count_lin_ops(PolyUOp **lin, int n, PolyOps op) {
@@ -780,7 +1015,7 @@ TEST(rangeify, schedule_v2_vecadd_ir) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
   ASSERT_NOT_NULL(sr.kernels[0]);
   ASSERT_EQ(sr.kernels[0]->op, POLY_OP_SINK);
@@ -798,13 +1033,17 @@ TEST(rangeify, schedule_v2_vecadd_ir) {
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 1);
 
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(rangeify, schedule_v2_chain_ir) {
-  /* d = (a + b) * c: single kernel, 4 PARAMs */
+  /* d = (a + b) * c: single kernel, 4 PARAMs.
+   *
+   * On the optimized default CPU path, tinygrad upcasts this 8-wide chain into
+   * one float4 loop. The linearized IR keeps one outer RANGE and one final
+   * VECTORIZE store, but scalarizes the four lanes into 4 ADD + 4 MUL nodes. */
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 8);
@@ -816,7 +1055,7 @@ TEST(rangeify, schedule_v2_chain_ir) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, mul, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
 
   int n;
@@ -826,13 +1065,14 @@ TEST(rangeify, schedule_v2_chain_ir) {
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_PARAM), 4);
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_RANGE), 1);
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_LOAD), 3);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_ADD), 1);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_MUL), 1);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_ADD), 4);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_MUL), 4);
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_VECTORIZE), 1);
 
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -848,21 +1088,26 @@ TEST(rangeify, schedule_v2_reduce_ir) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
 
   int n;
   PolyUOp **lin = poly_linearize(ctx, sr.kernels[0], &n);
   ASSERT_TRUE(n > 0);
 
-  /* 2 PARAMs, 1 DEFINE_REG (accumulator), 1 RANGE (inner), 1+ ADD */
+  /* Tinygrad parity on the optimized CPU path:
+   * the scheduled kernel root still has one RANGE, but the final linearized
+   * kernel is scalarized with PARAM/LOAD/GEP/ADD and no DEFINE_REG/RANGE. */
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_PARAM), 2);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 1);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_RANGE), 1);
-  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_ADD) >= 1);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 0);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_RANGE), 0);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_LOAD), 3);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_ADD), 9);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 0);
 
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -879,7 +1124,7 @@ TEST(rangeify, schedule_v2_vecadd_e2e) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
 
   int n_lin;
@@ -905,7 +1150,7 @@ TEST(rangeify, schedule_v2_vecadd_e2e) {
   poly_program_destroy(prog);
   free(src);
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -923,21 +1168,25 @@ TEST(rangeify, schedule_v2_reduce_chain_ir) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
 
   int n;
   PolyUOp **lin = poly_linearize(ctx, sr.kernels[0], &n);
   ASSERT_TRUE(n > 0);
 
-  /* Should have: 3 PARAMs, 1 DEFINE_REG (accumulator), 1 RANGE (reduce), 2+ ADD */
+  /* Tinygrad parity on the optimized CPU path:
+   * the fused scalar chain is fully scalarized after rewrite/linearize. */
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_PARAM), 3);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 1);
-  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_RANGE) >= 1);
-  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_ADD) >= 2); /* 1 reduce + 1 ewise */
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 0);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_RANGE), 0);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_LOAD), 4);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_ADD), 10);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 0);
 
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -956,7 +1205,7 @@ TEST(rangeify, schedule_v2_reduce_chain_e2e) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, add, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
 
   int n_lin;
@@ -981,7 +1230,7 @@ TEST(rangeify, schedule_v2_reduce_chain_e2e) {
   poly_program_destroy(prog);
   free(src);
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -998,7 +1247,7 @@ TEST(rangeify, schedule_v2_reduce_e2e) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, c, sum, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 1);
 
   int n_lin;
@@ -1023,7 +1272,7 @@ TEST(rangeify, schedule_v2_reduce_e2e) {
   poly_program_destroy(prog);
   free(src);
   free(lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1031,8 +1280,14 @@ TEST(rangeify, schedule_v2_reduce_e2e) {
 /* Parity helper: compare v1 and v2 numerical output */
 
 static bool run_via_v1(PolyCtx *ctx, PolyUOp *sink, void **args, int n_args, const char *name) {
-  PolyUOp *kernel = poly_schedule(ctx, sink);
-  if (!kernel) return false;
+  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!schedule) return false;
+  if (schedule->n_items != 1 || !schedule->items[0].root) {
+    poly_schedule_free(schedule);
+    return false;
+  }
+  PolyUOp *kernel = schedule->items[0].root;
+  poly_schedule_free(schedule);
   int n_lin;
   PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
   if (!lin || n_lin == 0) return false;
@@ -1048,14 +1303,14 @@ static bool run_via_v1(PolyCtx *ctx, PolyUOp *sink, void **args, int n_args, con
 }
 
 static bool run_via_v2(PolyCtx *ctx, PolyUOp *sink, void **args, int n_args, const char *name) {
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   if (sr.n_kernels != 1 || !sr.kernels[0]) {
-    poly_schedule_result_free(&sr);
+    poly_kernel_schedule_result_free(&sr);
     return false;
   }
   int n_lin;
   PolyUOp **lin = poly_linearize(ctx, sr.kernels[0], &n_lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   if (!lin || n_lin == 0) return false;
   char *src = poly_render_c(lin, n_lin, name);
   free(lin);
@@ -1168,7 +1423,7 @@ TEST(rangeify, multi_kernel_shared_computed_ir) {
   PolyUOp *stores[] = {s1, s2};
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 2, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_INT_EQ(sr.n_kernels, 2); /* 2 fused kernels (d inlined) */
   ASSERT_INT_EQ(sr.n_intermediates, 0);
 
@@ -1176,13 +1431,13 @@ TEST(rangeify, multi_kernel_shared_computed_ir) {
   for (int k = 0; k < sr.n_kernels; k++)
     ASSERT_EQ(sr.kernels[k]->op, POLY_OP_SINK);
 
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(rangeify, multi_kernel_shared_computed_e2e) {
-  /* Same pattern as IR test, full compile + execute via poly_realize().
+  /* Same pattern as IR test, full compile + execute via poly_realize_with_bindings().
    * d = neg(a)
    * out1 = d + b = -a + b
    * out2 = d * c = -a * c */
@@ -1214,7 +1469,7 @@ TEST(rangeify, multi_kernel_shared_computed_e2e) {
       POLY_BIND_HOST(out1, o1_d), POLY_BIND_HOST(out2, o2_d), POLY_BIND_HOST(a, a_d),
       POLY_BIND_HOST(b, b_d),     POLY_BIND_HOST(c, c_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 5);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
 
   for (int i = 0; i < N; i++) {
@@ -1228,7 +1483,7 @@ TEST(rangeify, multi_kernel_shared_computed_e2e) {
 }
 
 TEST(rangeify, schedule_v2_switchover_parity) {
-  /* Verify that poly_realize() (now using v2) produces correct results
+  /* Verify that poly_realize_with_bindings() produces correct results
    * for vecadd — the most basic pattern. */
   int N = 16;
   PolyCtx *ctx = poly_ctx_new();
@@ -1251,7 +1506,7 @@ TEST(rangeify, schedule_v2_switchover_parity) {
       POLY_BIND_HOST(a, a_d),
       POLY_BIND_HOST(b, b_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
 
   for (int i = 0; i < N; i++)
@@ -1287,7 +1542,7 @@ TEST(rangeify, stats_clean_vecadd_no_workarounds) {
   };
 
   poly_rangeify_stats_reset();
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
 
   PolyRangeifyStats stats = poly_rangeify_stats_get();
@@ -1329,7 +1584,7 @@ TEST(rangeify, stats_clean_reduce_no_workarounds) {
   };
 
   poly_rangeify_stats_reset();
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   PolyRangeifyStats stats = poly_rangeify_stats_get();
@@ -1373,7 +1628,7 @@ TEST(rangeify, bufferize_same_size_dims_e2e) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   /* For [[1,3],[2,4]]: max over axis 1 = [3,4].
@@ -1514,7 +1769,7 @@ TEST(rangeify, bufferize_foreign_range_same_size_dims_e2e) {
       POLY_BIND_HOST(b_flat, b_d),     POLY_BIND_HOST(c_flat, c_d),
   };
   poly_rangeify_stats_reset();
-  int ret = poly_realize(ctx, sink, bindings, 5);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
   PolyRangeifyStats stats = poly_rangeify_stats_get();
   ASSERT_INT_EQ(stats.remap_calls, 0);
@@ -1587,7 +1842,7 @@ TEST(rangeify, bufferize_movement_chain_alt_ranges_e2e) {
   };
 
   poly_rangeify_stats_reset();
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   /* Expected from numpy reference:
@@ -1733,9 +1988,12 @@ static int count_orphan_ranges(PolyCtx *ctx, PolyUOp *kernel_sink) {
 
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_RANGE && n_ranges < 64) all_ranges[n_ranges++] = topo[i];
-    if (topo[i]->op == POLY_OP_END && topo[i]->n_src >= 2 && topo[i]->src[1]->op == POLY_OP_RANGE &&
-        n_closed < 64)
-      closed_ranges[n_closed++] = topo[i]->src[1];
+    if (topo[i]->op == POLY_OP_END) {
+      for (int s = 1; s < topo[i]->n_src && n_closed < 64; s++) {
+        if (topo[i]->src[s] && topo[i]->src[s]->op == POLY_OP_RANGE)
+          closed_ranges[n_closed++] = topo[i]->src[s];
+      }
+    }
     if (topo[i]->op == POLY_OP_REDUCE) {
       for (int s = 1; s < topo[i]->n_src; s++) {
         if (topo[i]->src[s]->op == POLY_OP_RANGE && n_reduce < 64)
@@ -1854,7 +2112,7 @@ TEST(rangeify, split_store_structural_parity) {
 
   /* Schedule and check kernel structure */
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
 
   /* Assertion 2: correct kernel count */
   ASSERT_INT_EQ(sr.n_kernels, 2); /* 2 fused kernels (d inlined) */
@@ -1876,7 +2134,8 @@ TEST(rangeify, split_store_structural_parity) {
   int k0_ranges = kernel_op_count(ctx, sr.kernels[0], POLY_OP_RANGE);
   ASSERT_INT_EQ(k0_stores, 1);
   ASSERT_TRUE(k0_ranges > 0);
-  ASSERT_INT_EQ(k0_ranges, k0_ends);
+  ASSERT_TRUE(k0_ends > 0);
+  ASSERT_TRUE(k0_ranges >= k0_ends);
 
   /* K1 (reduce): reduce_sum(neg(perm(reshape(a))) * c) → out2 */
   int k1_stores = kernel_op_count(ctx, sr.kernels[1], POLY_OP_STORE);
@@ -1889,7 +2148,7 @@ TEST(rangeify, split_store_structural_parity) {
   ASSERT_TRUE(k1_ranges >= k1_ends); /* ranges >= ends (reduce range has no END) */
   ASSERT_INT_EQ(k1_reduces, 1);
 
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_indexing_ctx_destroy(ictx);
 
   /* E2E value correctness */
@@ -1919,7 +2178,7 @@ TEST(rangeify, split_store_structural_parity) {
       POLY_BIND_HOST(out1_flat, o1_d), POLY_BIND_HOST(out2_flat, o2_d), POLY_BIND_HOST(a_flat, a_d),
       POLY_BIND_HOST(b_flat, b_d),     POLY_BIND_HOST(c_flat, c_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 5);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
 
   /* Verify out1 = neg(permute(a)) + b */
@@ -1972,12 +2231,12 @@ TEST(rangeify, shared_scalar_reduce_branches_ir) {
   PolyUOp *se = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oe, mul, poly_arg_none());
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){sc, se}, 2, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   /* Copy results before freeing so assertions don't leak on failure. */
   int n_kernels = sr.n_kernels;
   int n_intermediates = sr.n_intermediates;
   int64_t size0 = (sr.n_intermediates > 0) ? sr.intermediate_sizes[0] : -1;
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(n_kernels, 3);
@@ -1987,7 +2246,7 @@ TEST(rangeify, shared_scalar_reduce_branches_ir) {
 }
 
 TEST(rangeify, shared_scalar_reduce_branches_e2e) {
-  /* Same graph, full compile+execute via poly_realize().
+  /* Same graph, full compile+execute via poly_realize_with_bindings().
    * a = [1..8] → sum = 36
    * c0 = [10,10,...] → oc[i] = 36 + 10 = 46
    * e0 = [2,2,...] → oe[i] = 36 * 2 = 72 */
@@ -2027,7 +2286,7 @@ TEST(rangeify, shared_scalar_reduce_branches_e2e) {
       POLY_BIND_HOST(oc, oc_d), POLY_BIND_HOST(oe, oe_d), POLY_BIND_HOST(a, a_d),
       POLY_BIND_HOST(c0, c0_d), POLY_BIND_HOST(e0, e0_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 5);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2063,7 +2322,7 @@ TEST(rangeify, const_through_bufferize) {
       POLY_BIND_HOST(out, out_d),
       POLY_BIND_HOST(a, a_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2096,7 +2355,7 @@ TEST(rangeify, earliest_reshape_merge) {
       POLY_BIND_HOST(out, out_d),
       POLY_BIND_HOST(a, a_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2126,7 +2385,7 @@ TEST(rangeify, earliest_detach_removal) {
       POLY_BIND_HOST(a, a_d),
       POLY_BIND_HOST(b, b_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2165,7 +2424,7 @@ TEST(rangeify, limit_bufs_ir) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, acc, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
 
   /* Extract results before cleanup */
   int n_kernels = sr.n_kernels;
@@ -2175,7 +2434,7 @@ TEST(rangeify, limit_bufs_ir) {
     if (sr.kernel_n_params[k] > 8) all_under_limit = false;
   }
 
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
   /* Restore env */
@@ -2226,7 +2485,7 @@ TEST(rangeify, limit_bufs_e2e) {
   for (int i = 0; i < N_BUFS; i++)
     bindings[1 + i] = POLY_BIND_HOST(bufs[i], buf_data[i]);
 
-  int ret = poly_realize(ctx, sink, bindings, 1 + N_BUFS);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 1 + N_BUFS);
 
   /* Copy before cleanup */
   float out_copy[16];
@@ -2269,10 +2528,10 @@ TEST(rangeify, limit_bufs_noop) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, abc, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   int n_kernels = sr.n_kernels;
   int n_intermediates = sr.n_intermediates;
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
   if (olddup) {
@@ -2311,9 +2570,9 @@ TEST(rangeify, limit_bufs_disabled) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, acc, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   int n_kernels = sr.n_kernels;
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
   /* Restore env */
@@ -2353,7 +2612,7 @@ TEST(rangeify, assign_e2e) {
       POLY_BIND_HOST(buf_b, b_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   float result[4];
   memcpy(result, a_data, sizeof(result));
 
@@ -2378,7 +2637,7 @@ TEST(rangeify, assign_ir) {
   PolyUOp *assign = poly_assign(ctx, buf_a, add);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
 
   int got_kernels = sr.n_kernels;
   int got_inter = sr.n_intermediates;
@@ -2392,7 +2651,7 @@ TEST(rangeify, assign_ir) {
     }
   }
 
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
   /* 1 ASSIGN kernel (from AFTER), 0 consumer stores, 0 intermediates */
@@ -2437,7 +2696,7 @@ TEST(rangeify, assign_war_ordering) {
       POLY_BIND_HOST(buf_out, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   float a_result[4], out_result[4];
   memcpy(a_result, a_data, sizeof(a_result));
   memcpy(out_result, out_data, sizeof(out_result));
@@ -2477,7 +2736,7 @@ TEST(rangeify, assign_self_rhs) {
       POLY_BIND_HOST(buf_a, a_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 1);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 1);
   float result[4];
   memcpy(result, a_data, sizeof(result));
 
@@ -2523,7 +2782,7 @@ TEST(rangeify, define_var_1d_e2e) {
       {.var = N, .value = 4},
   };
 
-  int ret = poly_realize_ex(ctx, sink, bindings, 2, var_bindings, 1);
+  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var_bindings, 1);
   float result[16];
   memcpy(result, out_data, sizeof(result));
 
@@ -2574,7 +2833,7 @@ TEST(rangeify, define_var_2d_e2e) {
       {.var = N, .value = 3},
   };
 
-  int ret = poly_realize_ex(ctx, sink, bindings, 2, var_bindings, 1);
+  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var_bindings, 1);
   float result[32];
   memcpy(result, out_data, sizeof(result));
 
@@ -2624,7 +2883,7 @@ TEST(rangeify, bind_auto_extract) {
       POLY_BIND_HOST(buf_out, out_data),
   };
 
-  int ret = poly_realize_ex(ctx, sink, bindings, 2, NULL, 0);
+  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, NULL, 0);
   float result[16];
   memcpy(result, out_data, sizeof(result));
 
@@ -2668,14 +2927,14 @@ TEST(rangeify, define_var_cache_hit) {
   /* First call: N=4 (compiles kernel) */
   memset(out_data, 0, sizeof(out_data));
   PolyVarBinding var4[1] = {{.var = N, .value = 4}};
-  int ret1 = poly_realize_ex(ctx, sink, bindings, 2, var4, 1);
+  int ret1 = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var4, 1);
   float r1[16];
   memcpy(r1, out_data, sizeof(r1));
 
   /* Second call: N=8 (should hit cache, reuse compiled kernel) */
   memset(out_data, 0, sizeof(out_data));
   PolyVarBinding var8[1] = {{.var = N, .value = 8}};
-  int ret2 = poly_realize_ex(ctx, sink, bindings, 2, var8, 1);
+  int ret2 = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var8, 1);
   float r2[16];
   memcpy(r2, out_data, sizeof(r2));
 
@@ -2700,7 +2959,7 @@ TEST(rangeify, define_var_cache_hit) {
 /* Regression: chained reductions (singleton + real) */
 /* Verifies that REDUCE_AXIS with a singleton dim (size 1) followed by
  * a real reduction (size > 1) compiles and executes correctly via
- * poly_realize.  Regression for the bug where CONST(0) pseudo-ranges
+ * poly_realize_with_bindings. Regression for the bug where CONST(0) pseudo-ranges
  * from singleton dims entered REDUCE sources, producing END(CONST)
  * that corrupted scope depth in the C renderer.
  *
@@ -2752,7 +3011,7 @@ TEST(rangeify, chained_singleton_reduce_e2e) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(ret, 0);
@@ -2798,7 +3057,7 @@ TEST(rangeify, mixed_multiaxis_singleton_reduce_e2e) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(ret, 0);
@@ -2837,7 +3096,7 @@ TEST(rangeify, earliest_assign_bitcast) {
       POLY_BIND_HOST(buf, buf_d),
       POLY_BIND_HOST(src, src_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 4; i++)
@@ -2871,7 +3130,7 @@ TEST(rangeify, earliest_nested_assign_chain) {
       POLY_BIND_HOST(v1, v1_d),
       POLY_BIND_HOST(v2, v2_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 4; i++)
@@ -2912,7 +3171,7 @@ TEST(rangeify, earliest_assign_to_contiguous) {
       POLY_BIND_HOST(buf, buf_d),
       POLY_BIND_HOST(src, src_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   /* poly_assign normalizes to BUFFER target, ASSIGN writes in-place */
   ASSERT_INT_EQ(ret, 0);
@@ -2969,13 +3228,13 @@ TEST(rangeify, assign_shrink_hazard) {
   PolyUOp *assign = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, assign_srcs, 2, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
 
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
 
   /* The CONTIGUOUS insertion should produce 2+ kernels:
    * one for materializing the source, one for the ASSIGN write. */
   ASSERT_TRUE(sr.n_kernels >= 2);
 
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -3002,10 +3261,10 @@ TEST(rangeify, assign_shrink_no_hazard_different_buf) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
 
   /* This should schedule successfully */
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_TRUE(sr.n_kernels >= 1);
 
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }

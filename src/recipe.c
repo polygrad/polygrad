@@ -113,7 +113,7 @@ int poly_train_plan_compile(PolyTrainPlan *plan) {
   bindings[0].handle.ptr = dummy_x;
   bindings[1].handle.ptr = dummy_y;
 
-  int ret = poly_realize(plan->ctx, plan->fwd_sink, bindings, nb);
+  int ret = poly_realize_with_bindings(plan->ctx, plan->fwd_sink, bindings, nb);
   if (ret != 0) {
     fprintf(stderr, "poly_train_plan_compile: forward realize failed\n");
     free(dummy_x);
@@ -132,7 +132,7 @@ int poly_train_plan_compile(PolyTrainPlan *plan) {
     /* Add loss buf in case gradient references it */
     bindings[nb++] = POLY_BIND_HOST(plan->loss_buf, plan->loss_data);
 
-    ret = poly_realize(plan->ctx, plan->grad_sinks[i], bindings, nb);
+    ret = poly_realize_with_bindings(plan->ctx, plan->grad_sinks[i], bindings, nb);
     if (ret != 0) {
       fprintf(stderr, "poly_train_plan_compile: gradient %d realize failed\n", i);
       free(dummy_x);
@@ -148,7 +148,7 @@ int poly_train_plan_compile(PolyTrainPlan *plan) {
     bindings[nb++] = POLY_BIND_HOST(plan->grad_bufs[i], plan->grad_datas[i]);
     bindings[nb++] = POLY_BIND_HOST(plan->update_bufs[i], plan->update_datas[i]);
 
-    ret = poly_realize(plan->ctx, plan->update_sinks[i], bindings, nb);
+    ret = poly_realize_with_bindings(plan->ctx, plan->update_sinks[i], bindings, nb);
     if (ret != 0) {
       fprintf(stderr, "poly_train_plan_compile: update %d realize failed\n", i);
       free(dummy_x);
@@ -177,7 +177,7 @@ float poly_train_step(PolyTrainPlan *plan, float *x_data, float *y_data) {
     bindings[nb++] = POLY_BIND_HOST(plan->param_bufs[i], plan->param_datas[i]);
   bindings[nb++] = POLY_BIND_HOST(plan->loss_buf, plan->loss_data);
 
-  poly_realize(plan->ctx, plan->fwd_sink, bindings, nb);
+  poly_realize_with_bindings(plan->ctx, plan->fwd_sink, bindings, nb);
 
   /* 2. Backward: compute gradients */
   for (int i = 0; i < plan->n_params; i++) {
@@ -189,7 +189,7 @@ float poly_train_step(PolyTrainPlan *plan, float *x_data, float *y_data) {
     bindings[nb++] = POLY_BIND_HOST(plan->grad_bufs[i], plan->grad_datas[i]);
     bindings[nb++] = POLY_BIND_HOST(plan->loss_buf, plan->loss_data);
 
-    poly_realize(plan->ctx, plan->grad_sinks[i], bindings, nb);
+    poly_realize_with_bindings(plan->ctx, plan->grad_sinks[i], bindings, nb);
   }
 
   /* 3. SGD update: param = param - lr * grad */
@@ -199,7 +199,7 @@ float poly_train_step(PolyTrainPlan *plan, float *x_data, float *y_data) {
     bindings[nb++] = POLY_BIND_HOST(plan->grad_bufs[i], plan->grad_datas[i]);
     bindings[nb++] = POLY_BIND_HOST(plan->update_bufs[i], plan->update_datas[i]);
 
-    poly_realize(plan->ctx, plan->update_sinks[i], bindings, nb);
+    poly_realize_with_bindings(plan->ctx, plan->update_sinks[i], bindings, nb);
 
     /* Copy updated params back */
     memcpy(plan->param_datas[i], plan->update_datas[i], plan->param_sizes[i] * sizeof(float));
@@ -397,7 +397,7 @@ PolyMLP *poly_mlp_create(PolyCtx *ctx, int *layer_sizes, int n_layers) {
     PolyUOp *w_store = poly_store_val(ctx, w_buf, w_buf);
     PolyUOp *w_sink = poly_sink1(ctx, w_store);
     PolyBufferBinding wb = POLY_BIND_HOST(w_buf, w_data);
-    poly_realize(ctx, w_sink, &wb, 1);
+    poly_realize_with_bindings(ctx, w_sink, &wb, 1);
 
     model->param_bufs[l * 2] = w_buf;
     model->param_datas[l * 2] = w_data;
@@ -413,7 +413,7 @@ PolyMLP *poly_mlp_create(PolyCtx *ctx, int *layer_sizes, int n_layers) {
     PolyUOp *b_store = poly_store_val(ctx, b_buf, b_buf);
     PolyUOp *b_sink = poly_sink1(ctx, b_store);
     PolyBufferBinding bb = POLY_BIND_HOST(b_buf, b_data);
-    poly_realize(ctx, b_sink, &bb, 1);
+    poly_realize_with_bindings(ctx, b_sink, &bb, 1);
 
     model->param_bufs[l * 2 + 1] = b_buf;
     model->param_datas[l * 2 + 1] = b_data;

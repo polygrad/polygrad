@@ -23,7 +23,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
-#include "exec_plan.h" /* POLY_DEVICE_WEBGPU */
+#include "engine/schedule.h" /* POLY_DEVICE_WEBGPU */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,6 +117,59 @@ static const char *wgsl_type_name(PolyDType dt) {
   /* Sub-4-byte types: char/short map to i32/u32 (tinygrad type_map) */
   if (poly_dtype_is_unsigned(dt)) return "u32";
   return "i32";
+}
+
+static bool wgsl_uop_tree_contains_target(PolyUOp *u, PolyUOp *target) {
+  if (!u || !target) return false;
+  if (u == target) return true;
+  for (int i = 0; i < u->n_src; i++)
+    if (wgsl_uop_tree_contains_target(u->src[i], target)) return true;
+  return false;
+}
+
+static PolyUOp *wgsl_pick_lane_uop(PolyUOp *u, int lane) {
+  if (!u || u->dtype.count <= 1) return u;
+  if (lane < 0) lane = 0;
+  if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+    if (u->n_src <= 0) return NULL;
+    if (lane >= u->n_src) lane = u->n_src - 1;
+    return u->src[lane];
+  }
+  return NULL;
+}
+
+static int wgsl_infer_gated_load_lane(PolyUOp *idx_expr, PolyUOp *vec_gate) {
+  if (!idx_expr || !vec_gate || vec_gate->dtype.count <= 1) return -1;
+  int found = -1;
+  for (int lane = 0; lane < vec_gate->dtype.count; lane++) {
+    PolyUOp *gate_lane = wgsl_pick_lane_uop(vec_gate, lane);
+    if (!gate_lane) continue;
+    if (!wgsl_uop_tree_contains_target(idx_expr, gate_lane)) continue;
+    if (found != -1 && found != lane) return -1;
+    found = lane;
+  }
+  return found;
+}
+
+static int wgsl_next_vector_lane(
+    PolyUOp *key,
+    int lanes,
+    PolyUOp **lane_keys,
+    int *lane_next,
+    int *n_lane_keys
+) {
+  if (!key || lanes <= 0 || !lane_keys || !lane_next || !n_lane_keys) return -1;
+  for (int i = 0; i < *n_lane_keys; i++) {
+    if (lane_keys[i] != key) continue;
+    int lane = lane_next[i];
+    lane_next[i] = (lane_next[i] + 1) % lanes;
+    return lane;
+  }
+  if (*n_lane_keys >= 128) return -1;
+  lane_keys[*n_lane_keys] = key;
+  lane_next[*n_lane_keys] = 1 % lanes;
+  (*n_lane_keys)++;
+  return 0;
 }
 
 /* WGSL float constant */
@@ -255,8 +308,10 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   wsm_init(&names, n);
 
   /* Kernel parameter bindings: PARAM (storage) and DEFINE_VAR (uniform).
-   * Tinygrad cstyle.py:182-186 collects both into one `bufs` dict in
-   * traversal order; wgsl.py:110-112 assigns sequential binding indices. */
+   * Match tinygrad exactly here:
+   *   - cstyle.py collects PARAM/DEFINE_VAR into one ordered `bufs` list
+   *   - wgsl.py assigns bindings sequentially from that list
+   * So WGSL binding numbers follow encounter order, not PARAM.arg. */
   char *binding_names[64];
   int binding_indices[64];
   PolyDType binding_dtypes[64];
@@ -277,6 +332,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   int local_dims[3] = {1, 1, 1};
   bool has_local_dims = false;
   bool uses_f16 = false;
+  PolyUOp *gated_lane_keys[128];
+  int gated_lane_next[128];
+  int n_gated_lane_keys = 0;
 
   for (int i = 0; i < n; i++) {
     /* Local dims: SPECIAL("lidxN") → local_dims[N] = bound */
@@ -309,7 +367,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       wsm_set(&names, u, strdup(name));
 
       binding_names[n_bindings] = strdup(name);
-      binding_indices[n_bindings] = (int)u->arg.i;
+      binding_indices[n_bindings] = n_bindings;
       binding_dtypes[n_bindings] = poly_dtype_scalar(u->dtype);
       binding_is_buffer[n_bindings] = true;
       n_bindings++;
@@ -522,11 +580,50 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
-        char *gate_s = wsm_get(&names, idx_uop->src[2]);
-        char *alt_s = wsm_get(&names, u->src[1]);
+        PolyUOp *gate_uop = idx_uop->src[2];
+        PolyUOp *alt_uop = u->src[1];
+        if (u->dtype.count == 1 && ((gate_uop && gate_uop->dtype.count > 1) ||
+                                    (alt_uop && alt_uop->dtype.count > 1))) {
+          int lane = wgsl_infer_gated_load_lane(idx_uop->src[1], gate_uop);
+          int lanes = 0;
+          if (gate_uop && gate_uop->dtype.count > lanes) lanes = gate_uop->dtype.count;
+          if (alt_uop && alt_uop->dtype.count > lanes) lanes = alt_uop->dtype.count;
+          if (lane < 0 && lanes > 1) {
+            PolyUOp *lane_key =
+                (gate_uop && gate_uop->dtype.count > 1) ? gate_uop
+                                                        : ((alt_uop && alt_uop->dtype.count > 1)
+                                                               ? alt_uop
+                                                               : NULL);
+            lane = wgsl_next_vector_lane(
+                lane_key, lanes, gated_lane_keys, gated_lane_next, &n_gated_lane_keys
+            );
+          }
+          if (lane >= 0) {
+            PolyUOp *lane_gate = wgsl_pick_lane_uop(gate_uop, lane);
+            PolyUOp *lane_alt = wgsl_pick_lane_uop(alt_uop, lane);
+            if (lane_gate) gate_uop = lane_gate;
+            if (lane_alt) alt_uop = lane_alt;
+          }
+        }
+        char *gate_s = wsm_get(&names, gate_uop);
+        char *alt_s = wsm_get(&names, alt_uop);
         wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, bidx, gate_s);
       } else if (idx_uop && idx_uop->n_src >= 3) {
-        char *gate_s = wsm_get(&names, idx_uop->src[2]);
+        PolyUOp *gate_uop = idx_uop->src[2];
+        if (u->dtype.count == 1 && gate_uop && gate_uop->dtype.count > 1) {
+          int lane = wgsl_infer_gated_load_lane(idx_uop->src[1], gate_uop);
+          if (lane < 0) {
+            lane = wgsl_next_vector_lane(
+                gate_uop, gate_uop->dtype.count, gated_lane_keys, gated_lane_next,
+                &n_gated_lane_keys
+            );
+          }
+          if (lane >= 0) {
+            PolyUOp *lane_gate = wgsl_pick_lane_uop(gate_uop, lane);
+            if (lane_gate) gate_uop = lane_gate;
+          }
+        }
+        char *gate_s = wsm_get(&names, gate_uop);
         wsb_printf(&body, "%s = select(%s(0), %s, %s);\n", name, tn, bidx, gate_s);
       } else {
         wsb_printf(&body, "%s = %s;\n", name, bidx);
@@ -844,6 +941,7 @@ PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
           {
               .has_mulacc = false,
               .has_threefry = false,
+              .has_local = true,
               .max_vec_width = 1, /* supports_float4=false: scalar loads, no vec folding */
           },
       .device = POLY_DEVICE_WEBGPU,

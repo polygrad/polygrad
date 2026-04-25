@@ -198,9 +198,19 @@ enum {
 };
 
 /* Stack slot base offset from RBP.
- * After prologue: push rbp, r15, r14, r13, r12, rbx = 6 callee saves.
- * Slots start at [rbp - SLOT_BASE - 8*slot_index]. */
-#define SLOT_BASE 48
+ * After prologue:
+ *   [rbp+0]   saved caller RBP
+ *   [rbp-8]   saved R15
+ *   [rbp-16]  saved R14
+ *   [rbp-24]  saved R13
+ *   [rbp-32]  saved R12
+ *   [rbp-40]  saved RBX
+ *
+ * Slots are addressed from their lowest byte, and AVX2 spills use the full
+ * 32-byte slot width. So slot 0 cannot start at -48: a 32-byte store there
+ * would clobber the saved callee-saved registers. Keep one full slot below the
+ * save area, so slot 0 spans [rbp-72 .. rbp-41]. */
+#define SLOT_BASE 72
 /* Each slot is 32 bytes (AVX2-aligned). Scalar values use 4-8 bytes,
  * SSE packed uses 16 bytes, AVX2 packed uses all 32 bytes.
  * 32-byte slots ensure YMM spills never overlap adjacent values. */
@@ -1567,7 +1577,12 @@ static int xf_get(XmmFile *f, X64Buf *buf, int slot, bool *jit_ok) {
 /* Get slot's register for packed value, loading with the given width */
 static int xf_get_packed_w(XmmFile *f, X64Buf *buf, int slot, int width, bool *jit_ok) {
   int r = xf_find(f, slot);
-  if (r >= 0) return r;
+  if (r >= 0) {
+    XfEntry *e = &f->e[r - XF_BASE];
+    if (e->vec_width >= width) return r;
+    if (e->dirty) emit_width_store_rbp(buf, r, -slot_offset(slot), e->vec_width);
+    *e = (XfEntry){.slot = -1};
+  }
   r = xf_alloc(f, buf, slot, -1, -1, jit_ok);
   emit_width_load_rbp(buf, r, -slot_offset(slot), width);
   f->e[r - XF_BASE].vec_width = width;
@@ -2366,17 +2381,39 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
           int acc_slot = lm_get(&locals, acc);
           if (acc_slot >= 0) {
             if (dtype_is_float(u->src[1]->dtype)) {
+              bool packed = dtype_is_vec_float(u->src[1]->dtype);
+              int vec_width = u->src[1]->dtype.count;
               int vr = xf_find(&xf, val_slot);
               bool used_xmm0 = false;
               if (vr < 0) {
                 vr = XMM0;
-                emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
+                if (packed && vec_width >= 8)
+                  emit_vmovups_ymm_rbp(&buf, XMM0, -slot_offset(val_slot));
+                else if (packed)
+                  emit_movups_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
+                else
+                  emit_movss_xmm_rbp(&buf, XMM0, -slot_offset(val_slot));
                 used_xmm0 = true;
               }
-              emit_movss_rbp_xmm(&buf, vr, -slot_offset(acc_slot));
+              if (packed)
+                emit_width_store_rbp(&buf, vr, -slot_offset(acc_slot), vec_width);
+              else
+                emit_movss_rbp_xmm(&buf, vr, -slot_offset(acc_slot));
               /* Update register file: acc_slot now has this value */
               int ar = xf_find(&xf, acc_slot);
-              if (ar >= 0) emit_movss_xmm_xmm(&buf, ar, vr);
+              if (ar >= 0) {
+                if (packed && vec_width >= 8) {
+                  if (ar != vr) emit_vmovups_ymm_ymm(&buf, ar, vr);
+                  xf.e[ar - XF_BASE].vec_width = vec_width;
+                } else if (packed) {
+                  if (ar != vr) emit_movups_xmm_xmm(&buf, ar, vr);
+                  xf.e[ar - XF_BASE].vec_width = vec_width;
+                } else {
+                  emit_movss_xmm_xmm(&buf, ar, vr);
+                  xf.e[ar - XF_BASE].vec_width = 0;
+                }
+                xf.e[ar - XF_BASE].dirty = false;
+              }
               if (used_xmm0) RELOAD_SIGN_MASK();
             } else {
               int vw = u->src[1]->dtype.bitsize <= 32 ? 0 : 1;
@@ -2917,7 +2954,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         xb_byte(&buf, 0x16);
         emit_modrm(&buf, 3, dr, XMM0);
       } else {
-        /* Fallback for non-4-wide: store to stack slots, load as packed */
+        /* Fallback for 2-3 wide vectors: zero the full 16-byte slot first.
+         * The later movups reload reads all 4 lanes, and downstream GEP can
+         * legally extract any lane after late vectorization. Unwritten lanes
+         * must therefore be defined as zero, not stack garbage. */
+        emit_mov_rbp_imm64_sx(&buf, voff, 0);
+        emit_mov_rbp_imm64_sx(&buf, voff + 8, 0);
         for (int j = 0; j < n_lanes; j++) {
           if (sr[j] >= 0) emit_movss_rbp_xmm(&buf, sr[j], voff + j * 4);
         }
@@ -3235,10 +3277,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             int sr_true = xf_find(&xf, s1);
             if (sr_true < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
             int sr_false = xf_find(&xf, s2);
-            if (sr_false < 0) sr_false = xf_get_avoid(&xf, &buf, s2, sr_true, &jit_ok);
+            if (sr_false < 0) sr_false = xf_get_packed_w(&xf, &buf, s2, vw, &jit_ok);
             /* Revalidate after loads */
             if (xf_find(&xf, s1) < 0) sr_true = xf_get_packed_w(&xf, &buf, s1, vw, &jit_ok);
             if (xf_find(&xf, s0) < 0) sr_mask = xf_get_packed_w(&xf, &buf, s0, vw, &jit_ok);
+            if (xf_find(&xf, s2) < 0) sr_false = xf_get_packed_w(&xf, &buf, s2, vw, &jit_ok);
             if (xf_find(&xf, slot) < 0)
               dr = xf_alloc_belady(
                   &xf, &buf, slot, sr_mask, sr_true, sr_false, slot_last_use, i, &jit_ok
@@ -3873,26 +3916,22 @@ x64_fail:
 PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   X64CpuCaps cpu = get_cpu_caps();
   PolyRewriteOpts opts = {0};
-
-  /* Read env overrides (matching poly_linearize_env behavior exactly).
-   * env_true: returns true if set and not "0"/"false".
-   * Default: OPTIMIZE=1 implies DEVECTORIZE=1 (scalar ALU, vec load/store). */
-  const char *ov = getenv("POLY_OPTIMIZE");
-  bool opt = ov && ov[0] != '\0' && strcmp(ov, "0") != 0 && strcmp(ov, "false") != 0;
-  const char *dv = getenv("POLY_DEVECTORIZE");
-  int devec = (dv && dv[0] != '\0') ? atoi(dv) : (opt ? 1 : 0);
-  int beam = 0;
-  const char *bv = getenv("POLY_BEAM");
-  if (bv && bv[0] != '\0') beam = atoi(bv);
-  opts.optimize = opt;
-  opts.devectorize = devec;
-  opts.beam_width = beam;
+  opts.optimize = true;
+  opts.devectorize = 1;
+  opts.beam_width = 0;
 
   /* x64-specific caps from CPUID */
-  opts.caps.has_mulacc = cpu.has_fma; /* FMA3 works with VEX.128 (SSE) too */
+  /* Keep x64 on the decomposed MUL+ADD CPU path for now.
+   * The dedicated x64 MULACC/FMA execution path is not yet correct on all
+   * scalar loop kernels, so the renderer must not advertise native MULACC
+   * support until that path is audited end-to-end. */
+  opts.caps.has_mulacc = false;
   opts.caps.has_threefry = false;
   opts.caps.has_simd_int = true; /* x64 always has paddd/pslld; AVX2 adds vpaddd/vpslld */
-  opts.caps.max_vec_width = (cpu.has_avx2 && cpu.os_avx_ok) ? 8 : 4;
+  /* Match tinygrad's CPU renderer contract: supports_float4, not generic float8.
+   * AVX2 is still used by the x64 renderer for execution, but the late rewrite
+   * pipeline should not generate 8-lane CPU float folding patterns here. */
+  opts.caps.max_vec_width = 4;
 
   /* Non-AVX CPUs must use devec>=1: packed vec4 paths emit VEX.128 encoding
    * (vcmpps, vandps, vpaddd, etc.) which requires AVX hardware support. */

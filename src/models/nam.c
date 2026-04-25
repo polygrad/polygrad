@@ -19,7 +19,6 @@
 #include "mlp.h"  /* poly_init_param_kaiming */
 #include "../instance.h"
 #include "../frontend.h"
-#include "../scheduler.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>

@@ -242,6 +242,22 @@ static bool dt_is_64(PolyDType dt) {
   return dt.bitsize == 64;
 }
 
+static bool wasm_env_true(const char *name) {
+  const char *v = getenv(name);
+  return v && v[0] != '\0' && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
+         strcmp(v, "False") != 0;
+}
+
+static PolyRendererCaps poly_wasm_renderer_caps(void) {
+  return (PolyRendererCaps){
+      .has_mulacc = false,
+      .has_threefry = false,
+      .has_local = false,
+      .has_simd_int = false,
+      .max_vec_width = 1,
+  };
+}
+
 /* Which local bucket: 0=i32, 1=i64, 2=f32, 3=f64 */
 static int dt_bucket(PolyDType dt) {
   if (poly_dtype_is_float(dt)) return dt.bitsize == 64 ? 3 : 2;
@@ -519,7 +535,8 @@ static bool kernel_is_f64(PolyUOp **uops, int n) {
 static bool kernel_is_simdable(PolyUOp **uops, int n) {
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (poly_opset_has(POLY_GROUP_ALU, u->op) && !has_simd_op(u->op)) return false;
+    if (poly_opset_has(POLY_GROUP_ALU, u->op) && poly_dtype_is_float(u->dtype) && !has_simd_op(u->op))
+      return false;
     /* Transcendentals don't have SIMD versions */
     if (u->op == POLY_OP_EXP2 || u->op == POLY_OP_LOG2 || u->op == POLY_OP_SIN ||
         u->op == POLY_OP_POW)
@@ -1187,15 +1204,20 @@ static void build_code_simd(
    * v128 for each LOAD and ALU (SIMD path),
    * f32/f64 for each LOAD and ALU (scalar path). */
 
-  int n_locals_i32 = 0, n_locals_f32 = 0, n_locals_f64 = 0, n_locals_v128 = 0;
+  int n_locals_i32 = 0, n_locals_i64 = 0, n_locals_f32 = 0, n_locals_f64 = 0, n_locals_v128 = 0;
 
   /* Count ops that need locals */
-  int n_indices = 0, n_loads = 0, n_alus = 0;
+  int n_indices = 0, n_loads = 0, n_simd_alus = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_INDEX) n_indices++;
     if (u->op == POLY_OP_LOAD) n_loads++;
-    if (poly_opset_has(POLY_GROUP_ALU, u->op)) n_alus++;
+    if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
+      if (poly_dtype_is_float(u->dtype) && has_simd_op(u->op))
+        n_simd_alus++;
+      else
+        count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
+    }
     if (u->op == POLY_OP_CONST && !poly_dtype_is_float(u->dtype)) n_locals_i32++;
     if (u->op == POLY_OP_CONST && poly_dtype_is_float(u->dtype)) {
       if (dt_is_f64(u->dtype))
@@ -1208,10 +1230,10 @@ static void build_code_simd(
   /* SIMD loop needs: counter, bound const, simd_bound */
   n_locals_i32 += 3 + n_indices * 2; /* indices for both simd and scalar paths */
   if (is_f64_kernel)
-    n_locals_f64 += n_loads + n_alus; /* scalar epilogue */
+    n_locals_f64 += n_loads + n_simd_alus; /* scalar epilogue */
   else
-    n_locals_f32 += n_loads + n_alus;
-  n_locals_v128 += n_loads + n_alus; /* SIMD main loop */
+    n_locals_f32 += n_loads + n_simd_alus;
+  n_locals_v128 += n_loads + n_simd_alus; /* SIMD main loop */
 
   /* Function body */
   WasmBuf body;
@@ -1220,6 +1242,7 @@ static void build_code_simd(
   /* Declare locals */
   int n_local_types = 0;
   if (n_locals_i32 > 0) n_local_types++;
+  if (n_locals_i64 > 0) n_local_types++;
   if (n_locals_f32 > 0) n_local_types++;
   if (n_locals_f64 > 0) n_local_types++;
   if (n_locals_v128 > 0) n_local_types++;
@@ -1228,6 +1251,10 @@ static void build_code_simd(
   if (n_locals_i32 > 0) {
     wb_uleb128(&body, n_locals_i32);
     wb_byte(&body, WASM_TYPE_I32);
+  }
+  if (n_locals_i64 > 0) {
+    wb_uleb128(&body, n_locals_i64);
+    wb_byte(&body, WASM_TYPE_I64);
   }
   if (n_locals_f32 > 0) {
     wb_uleb128(&body, n_locals_f32);
@@ -1248,9 +1275,10 @@ static void build_code_simd(
 
   /* Params: 0..n_params-1 */
   int next_i32 = n_params;
-  int next_f32 = n_params + n_locals_i32;
-  int next_f64 = n_params + n_locals_i32 + n_locals_f32;
-  int next_v128 = n_params + n_locals_i32 + n_locals_f32 + n_locals_f64;
+  int next_i64 = n_params + n_locals_i32;
+  int next_f32 = n_params + n_locals_i32 + n_locals_i64;
+  int next_f64 = n_params + n_locals_i32 + n_locals_i64 + n_locals_f32;
+  int next_v128 = n_params + n_locals_i32 + n_locals_i64 + n_locals_f32 + n_locals_f64;
 
   /* Assign PARAM locals */
   for (int i = 0; i < n; i++) {
@@ -1359,7 +1387,9 @@ static void build_code_simd(
     }
 
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      int local_idx = next_v128++;
+      bool simd_alu = poly_dtype_is_float(u->dtype) && has_simd_op(u->op);
+      int local_idx = simd_alu ? next_v128++
+                               : alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
 
       /* Push sources */
       for (int j = 0; j < u->n_src; j++) {
@@ -1368,10 +1398,16 @@ static void build_code_simd(
         wb_uleb128(&body, src);
       }
 
-      if (is_f64_kernel)
+      if (simd_alu && is_f64_kernel)
         emit_alu_simd_f64x2(&body, u->op);
-      else
+      else if (simd_alu)
         emit_alu_simd_f32x4(&body, u->op);
+      else {
+        PolyDType alu_dtype = u->dtype;
+        if (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE)
+          alu_dtype = u->src[0]->dtype;
+        emit_alu_scalar(&body, u->op, alu_dtype, math, n_imported_funcs);
+      }
 
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, local_idx);
@@ -1573,4 +1609,33 @@ uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd) {
 
   *size_out = mod.len;
   return mod.data; /* caller must free() */
+}
+
+PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  PolyRewriteOpts opts = {
+      .optimize = true,
+      .devectorize = 1,
+      .caps = poly_wasm_renderer_caps(),
+      .device = POLY_DEVICE_WASM,
+      .opt_policy = POLY_OPT_HEURISTIC,
+  };
+  return poly_linearize_ex(ctx, sink, opts, n_out);
+}
+
+PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  bool opt = wasm_env_true("POLY_OPTIMIZE");
+  const char *dev = getenv("POLY_DEVECTORIZE");
+  int devec = dev && dev[0] != '\0' ? atoi(dev) : (opt ? 1 : 0);
+  int beam = 0;
+  const char *bv = getenv("POLY_BEAM");
+  if (bv && bv[0] != '\0') beam = atoi(bv);
+  PolyRewriteOpts opts = {
+      .optimize = opt,
+      .devectorize = devec,
+      .beam_width = beam,
+      .caps = poly_wasm_renderer_caps(),
+      .device = POLY_DEVICE_WASM,
+      .opt_policy = POLY_OPT_HEURISTIC,
+  };
+  return poly_linearize_ex(ctx, sink, opts, n_out);
 }

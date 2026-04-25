@@ -15,7 +15,9 @@ console.log = function(...args) {
 
 const params = new URLSearchParams(location.search)
 const device = params.get('device') || 'auto'
+const debugLevel = Number(params.get('debug') || 0) || 0
 const isWebGpu = device === 'webgpu'
+globalThis.__polygradDebugLevel = debugLevel
 
 async function main() {
   console.log('=== device: ' + device + ' ===\n')

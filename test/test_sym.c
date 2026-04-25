@@ -5,6 +5,7 @@
 #include "test_harness.h"
 #include "../src/pat.h"
 #include "../src/tensor.h"
+#include <limits.h>
 
 /* Helper: apply symbolic_simple via graph_rewrite */
 
@@ -240,6 +241,31 @@ TEST(sym, where_same_branches) {
   PASS();
 }
 
+TEST(sym, where_logical_not_swaps_branches) {
+  /* Tinygrad symbolic.py:230-231:
+   *   cond.logical_not().where(t, f) -> cond.where(f, t) */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *cond = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_BOOL, poly_arg_define_var("c", 0, 1));
+  PolyUOp *not_cond = poly_logical_not(ctx, cond);
+  PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
+  PolyUOp *f = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *wh = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, not_cond, t, f, poly_arg_none());
+
+  PolyUOp *r = simplify(ctx, wh);
+  ASSERT_TRUE(r->op == POLY_OP_WHERE);
+  ASSERT_TRUE(r->src[0]->op == POLY_OP_DEFINE_VAR);
+  ASSERT_TRUE(r->src[0]->dtype.priority == POLY_BOOL.priority);
+  ASSERT_TRUE(r->src[0]->dtype.bitsize == POLY_BOOL.bitsize);
+  ASSERT_TRUE(r->src[0]->arg.kind == POLY_ARG_DEFINE_VAR);
+  ASSERT_STR_EQ(r->src[0]->arg.define_var.name, "c");
+  ASSERT_EQ(r->src[0]->arg.define_var.min_val, 0);
+  ASSERT_EQ(r->src[0]->arg.define_var.max_val, 1);
+  ASSERT_PTR_EQ(r->src[1], f);
+  ASSERT_PTR_EQ(r->src[2], t);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* poly_uop_minmax tinygrad parity tests *
  * Every assertion below corresponds to one row of
  * test/parity_scripts/tg_minmax_gt.py output, captured against
@@ -360,6 +386,26 @@ TEST(sym, minmax_sub_dv_dvn) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+TEST(sym, minmax_add_int64_overflow_falls_back_to_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MAX - 1, INT64_MAX));
+  PolyUOp *y = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("y", 1, INT32_MAX));
+  PolyUOp *u = poly_uop2(ctx, POLY_OP_ADD, POLY_INT64, x, y, poly_arg_none());
+  check_mm(ctx, u, INT64_MIN, INT64_MAX, "i64 add overflow fallback");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+TEST(sym, minmax_sub_int64_overflow_falls_back_to_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MIN, INT64_MIN + 1));
+  PolyUOp *y = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("y", 1, INT32_MAX));
+  PolyUOp *u = poly_uop2(ctx, POLY_OP_SUB, POLY_INT64, x, y, poly_arg_none());
+  check_mm(ctx, u, INT64_MIN, INT64_MAX, "i64 sub overflow fallback");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 /* MUL (4-corner) */
 TEST(sym, minmax_mul_r_3) {
@@ -438,6 +484,19 @@ TEST(sym, minmax_shl_r_2) {
       ctx, POLY_OP_SHL, POLY_INT32, mk_range(ctx, 10, 0), mk_const(ctx, 2), poly_arg_none()
   );
   check_mm(ctx, u, 0, 36, "r<<2");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+TEST(sym, minmax_shl_int64_overflow_falls_back_to_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MAX / 2, INT64_MAX)
+  );
+  PolyUOp *u = poly_uop2(
+      ctx, POLY_OP_SHL, POLY_INT64, x, poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(2)),
+      poly_arg_none()
+  );
+  check_mm(ctx, u, INT64_MIN, INT64_MAX, "i64 shl overflow fallback");
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -792,9 +851,8 @@ TEST(sym, mul_float_cast_int_const_fold) {
 
 TEST(sym, double_logical_not_idempotent_via_minmax) {
   /* Tinygrad symbolic.py:91: x.logical_not().logical_not() -> x.
-   * Polygrad doesn't have a dedicated rewrite rule for this CMPNE form
-   * (only for NEG-NEG via rule_double_neg). But the bound semantics must
-   * still match: NOT(NOT(bool x)) has the same vmin/vmax as x. */
+   * Polygrad still doesn't carry a dedicated double-not rewrite, but the
+   * bound semantics must match even without structural folding. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = mk_range(ctx, 5, 0);
   PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, r, mk_const(ctx, 3), poly_arg_none());

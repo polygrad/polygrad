@@ -1,9 +1,9 @@
 /*
- * frontend_internal.h -- Private helpers shared between frontend.c and exec_plan.c
+ * frontend_internal.h -- Private helpers shared between frontend.c and engine/schedule.c
  *
  * NOT part of the public API. Not installed. Not included by language frontends.
- * Contains declarations for utility functions that both the old realize/compile
- * path (frontend.c) and the new exec_plan path (exec_plan.c) need.
+ * Contains declarations for utility functions that both the frontend helpers
+ * and the engine scheduling layer need.
  */
 
 #ifndef POLY_FRONTEND_INTERNAL_H

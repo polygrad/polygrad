@@ -51,8 +51,8 @@ class Adam(Optimizer):
         self.b1, self.b2 = betas
         self.eps = eps
         self.weight_decay = weight_decay
-        self.m = [Tensor.zeros(*p.shape) for p in self.params]
-        self.v = [Tensor.zeros(*p.shape) for p in self.params]
+        self.m = [Tensor.zeros(*p.shape).realize() for p in self.params]
+        self.v = [Tensor.zeros(*p.shape).realize() for p in self.params]
         self.t = 0
         # Scalar buffer tensors for bias corrections — keeps the UOp graph
         # structure step-invariant so compiled kernels cache across steps.

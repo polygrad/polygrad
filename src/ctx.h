@@ -29,6 +29,7 @@ struct PolyCtx {
   int n_ep;
   int ep_cap;
   int32_t next_buf_tag;
+  PolyDevice preferred_device;
 };
 
 #endif /* POLY_CTX_H */

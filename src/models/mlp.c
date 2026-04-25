@@ -14,7 +14,6 @@
 #include "../tensor.h"
 #include "../instance.h"
 #include "../frontend.h"
-#include "../scheduler.h"
 #include "../../vendor/cjson/cJSON.h"
 #include <stdlib.h>
 #include <string.h>

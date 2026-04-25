@@ -11,10 +11,11 @@
 #include "test_harness.h"
 #include "../src/nn.h"
 #include "../src/instance.h"
-#include "../src/rangeify.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/schedule/rangeify.h"
 #include "../src/frontend.h"
 #include "../src/codegen.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 
 /* Convenience builder tests */
 
@@ -190,7 +191,7 @@ TEST(nn, embedding_e2e) {
       POLY_BIND_HOST(idx_buf, idx_data),
       POLY_BIND_HOST(table_buf, table_data),
   };
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
 
   fprintf(
@@ -252,7 +253,7 @@ TEST(nn, matmul_broadcast_batch_numeric) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 8; i++)
     ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5f);
@@ -297,7 +298,7 @@ TEST(nn, cross_entropy_sparse_targets) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
 
@@ -328,7 +329,7 @@ TEST(nn, cross_entropy_dense_targets) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
 
@@ -359,7 +360,41 @@ TEST(nn, cross_entropy_sparse_targets_non_last_axis) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(nn, cross_entropy_dense_targets_non_last_axis) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logits_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *target_buf = poly_buffer_f32(ctx, 12);
+  PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3, 2}, 3);
+  PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2, 3, 2}, 3);
+
+  PolyUOp *loss = poly_cross_entropy(ctx, logits, target, 1);
+  ASSERT_NOT_NULL(loss);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *store = poly_store_val(ctx, out_buf, loss);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  float logits_data[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  float target_data[] = {
+      1, 0, 0, 0, 0, 1,
+      0, 1, 1, 0, 0, 0,
+  };
+  float out_data[] = {0};
+  PolyBufferBinding bindings[] = {
+      POLY_BIND_HOST(logits_buf, logits_data),
+      POLY_BIND_HOST(target_buf, target_data),
+      POLY_BIND_HOST(out_buf, out_data),
+  };
+
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_data[0], logf(3.0f), 1e-5f);
 
@@ -399,7 +434,7 @@ TEST(nn, log_softmax_non_last_axis_flat_buffer) {
       POLY_BIND_HOST(out_buf, out_data),
   };
 
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 12; i++)
     ASSERT_FLOAT_EQ(out_data[i], -logf(3.0f), 1e-5f);
@@ -898,7 +933,7 @@ TEST(nn, threefry_reference_vector_cpu) {
       POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data),
       POLY_BIND_HOST(out, out_data)
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 3), 0);
   for (int i = 0; i < 20; i++)
     ASSERT_INT_EQ((int)out_data[i], (int)ref[i]);
 
@@ -937,7 +972,7 @@ TEST(nn, threefry_reference_vector_uint64_cpu) {
       POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data),
       POLY_BIND_HOST(out, out_data)
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 3), 0);
   for (int i = 0; i < 20; i++) {
     if (out_data[i] != ref[i]) {
       FAIL(
@@ -964,9 +999,9 @@ TEST(nn, frontend_randn_stats_and_determinism) {
   ASSERT_NOT_NULL(a);
   ASSERT_NOT_NULL(b);
   PolyBufferBinding bind = POLY_BIND_HOST(out, a);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
   bind.handle.ptr = b;
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
 
   double mean = 0.0, var = 0.0;
   for (int i = 0; i < 2048; i++) {
@@ -999,7 +1034,10 @@ TEST(nn, frontend_creation_helpers) {
 
   float ar_out[1] = {0};
   PolyBufferBinding b0 = POLY_BIND_HOST(buf0, ar_out);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, buf0, ar_sum)), &b0, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize_with_bindings(ctx, poly_sink1(ctx, poly_store_val(ctx, buf0, ar_sum)), &b0, 1),
+      0
+  );
   ASSERT_FLOAT_EQ(ar_out[0], 10.0f, 1e-5);
 
   /* eye(3) has trace/sum 3 */
@@ -1010,7 +1048,9 @@ TEST(nn, frontend_creation_helpers) {
   PolyUOp *buf1 = poly_buffer_f32(ctx, 1);
   float eye_out[1] = {0};
   PolyBufferBinding b1 = POLY_BIND_HOST(buf1, eye_out);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, buf1, r2)), &b1, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize_with_bindings(ctx, poly_sink1(ctx, poly_store_val(ctx, buf1, r2)), &b1, 1), 0
+  );
   ASSERT_FLOAT_EQ(eye_out[0], 3.0f, 1e-5);
 
   /* tril/triu on ones(3,3): both sums are 6 */
@@ -1032,7 +1072,7 @@ TEST(nn, frontend_creation_helpers) {
   PolyBufferBinding binds[2] = {
       POLY_BIND_HOST(buf2, &tri_out[0]), POLY_BIND_HOST(buf3, &tri_out[1])
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 2), 0);
   ASSERT_FLOAT_EQ(tri_out[0], 6.0f, 1e-5);
   ASSERT_FLOAT_EQ(tri_out[1], 6.0f, 1e-5);
 
@@ -1061,7 +1101,7 @@ TEST(nn, frontend_math_wrappers_and_lgamma_grad) {
   PolyBufferBinding binds[3] = {
       POLY_BIND_HOST(x, xv), POLY_BIND_HOST(o1, out1), POLY_BIND_HOST(o2, out2)
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 3), 0);
   ASSERT_FLOAT_EQ(out1[0], log1pf(0.2f), 5e-3f);
   ASSERT_FLOAT_EQ(out2[0], expm1f(0.2f), 5e-3f);
 
@@ -1111,7 +1151,7 @@ static float eval_scalar_f32(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), float xval) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
   float inv = xval, result = 0;
   PolyBufferBinding binds[] = {POLY_BIND_HOST(x, &inv), POLY_BIND_HOST(out, &result)};
-  int rc = poly_realize(ctx, sink, binds, 2);
+  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
   poly_ctx_destroy(ctx);
   return (rc == 0) ? result : NAN;
 }
@@ -1125,7 +1165,7 @@ static double eval_scalar_f64(PolyUOp *(*fn)(PolyCtx *, PolyUOp *), double xval)
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
   double inv = xval, result = 0.0;
   PolyBufferBinding binds[] = {POLY_BIND_HOST(x, &inv), POLY_BIND_HOST(out, &result)};
-  int rc = poly_realize(ctx, sink, binds, 2);
+  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
   poly_ctx_destroy(ctx);
   return (rc == 0) ? result : (double)NAN;
 }
@@ -1300,7 +1340,7 @@ TEST(nn, special_math_log1p_expm1) {
     PolyBufferBinding binds[] = {
         POLY_BIND_HOST(x, &xv), POLY_BIND_HOST(o1, &out1), POLY_BIND_HOST(o2, &out2)
     };
-    ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
+    ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 3), 0);
     ASSERT_FLOAT_EQ(out1, cases[i].ref_log1p, 5e-4f);
     ASSERT_FLOAT_EQ(out2, cases[i].ref_expm1, 5e-4f);
     /* Critical: near-zero must not be zero */
@@ -1325,7 +1365,7 @@ TEST(nn, special_math_logsumexp) {
     PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
     float xv[] = {0.0f, 0.0f}, result = 0;
     PolyBufferBinding binds[] = {POLY_BIND_HOST(x, xv), POLY_BIND_HOST(out, &result)};
-    ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 2), 0);
+    ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 2), 0);
     ASSERT_FLOAT_EQ(result, 0.6931471806f, 1e-4f); /* ln(2) */
   }
 
@@ -1337,7 +1377,7 @@ TEST(nn, special_math_logsumexp) {
     PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, y2));
     float xv2[] = {1000.0f, 1001.0f}, result2 = 0;
     PolyBufferBinding binds2[] = {POLY_BIND_HOST(x2, xv2), POLY_BIND_HOST(out2, &result2)};
-    ASSERT_INT_EQ(poly_realize(ctx, sink2, binds2, 2), 0);
+    ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink2, binds2, 2), 0);
     /* Expected: 1001 + ln(1 + e^-1) = 1001.3133 */
     ASSERT_TRUE(isfinite(result2));
     ASSERT_FLOAT_EQ(result2, 1001.3133f, 0.01f);
@@ -1351,7 +1391,7 @@ TEST(nn, special_math_logsumexp) {
     PolyUOp *sink3 = poly_sink1(ctx, poly_store_val(ctx, out3, y3));
     float xv3[] = {-1000.0f, -999.0f}, result3 = 0;
     PolyBufferBinding binds3[] = {POLY_BIND_HOST(x3, xv3), POLY_BIND_HOST(out3, &result3)};
-    ASSERT_INT_EQ(poly_realize(ctx, sink3, binds3, 2), 0);
+    ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink3, binds3, 2), 0);
     /* Expected: -999 + ln(1 + e^-1) = -998.6867 */
     ASSERT_TRUE(isfinite(result3));
     ASSERT_FLOAT_EQ(result3, -998.6867f, 0.01f);
@@ -1502,7 +1542,7 @@ TEST(nn, c5_linspace) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, ls));
   float result[5] = {0};
   PolyBufferBinding binds[] = {POLY_BIND_HOST(out, result)};
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 1), 0);
   float expected[] = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
   for (int i = 0; i < 5; i++) {
     ASSERT_FLOAT_EQ(result[i], expected[i], 1e-6f);
@@ -1520,7 +1560,7 @@ TEST(nn, c5_full) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, f));
   float result[4] = {0};
   PolyBufferBinding binds[] = {POLY_BIND_HOST(out, result)};
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 1), 0);
   for (int i = 0; i < 4; i++) {
     ASSERT_FLOAT_EQ(result[i], 3.14f, 1e-5f);
   }
@@ -1560,7 +1600,7 @@ TEST(nn, c2c_rand_bitpattern_8) {
     strncpy(save_dev, e, 31);
     unsetenv("POLY_DEVECTORIZE");
   }
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
   if (save_opt[0]) setenv("POLY_OPTIMIZE", save_opt, 1);
   if (save_dev[0]) setenv("POLY_DEVECTORIZE", save_dev, 1);
   /* Bit-exact comparison via memcmp -- true Tier 1 contract */
@@ -1590,7 +1630,7 @@ TEST(nn, c2c_rand_seed_mixing) {
     PolyUOp *o = poly_buffer_f32(ctx, 4);
     PolyUOp *sk = poly_sink1(ctx, poly_store_val(ctx, o, t));
     PolyBufferBinding b = POLY_BIND_HOST(o, all[s]);
-    ASSERT_INT_EQ(poly_realize(ctx, sk, &b, 1), 0);
+    ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sk, &b, 1), 0);
   }
   /* All 4 seeds must produce pairwise-different outputs */
   for (int i = 0; i < 4; i++) {
@@ -1617,7 +1657,7 @@ TEST(nn, c2c_rand_range_and_stats) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, r));
   float *buf = calloc(4096, sizeof(float));
   PolyBufferBinding bind = POLY_BIND_HOST(out, buf);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
 
   double sum = 0;
   float vmin = buf[0], vmax = buf[0];
@@ -1658,7 +1698,7 @@ TEST(nn, c2c_randn_tails) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, rn));
   float *buf = calloc(8192, sizeof(float));
   PolyBufferBinding bind = POLY_BIND_HOST(out, buf);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
 
   double mean = 0;
   double max_abs = 0;
@@ -1704,9 +1744,9 @@ TEST(nn, c2c_rand_determinism) {
   PolyUOp *s1 = poly_sink1(ctx1, poly_store_val(ctx1, o1, r1));
   float a[32] = {0}, b[32] = {0};
   PolyBufferBinding bind1 = POLY_BIND_HOST(o1, a);
-  ASSERT_INT_EQ(poly_realize(ctx1, s1, &bind1, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx1, s1, &bind1, 1), 0);
   bind1.handle.ptr = b;
-  ASSERT_INT_EQ(poly_realize(ctx1, s1, &bind1, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx1, s1, &bind1, 1), 0);
   if (memcmp(a, b, sizeof(a)) != 0) FAIL("same graph replay not deterministic");
 
   /* Case 2: two separately built graphs, different contexts */
@@ -1716,7 +1756,7 @@ TEST(nn, c2c_rand_determinism) {
   PolyUOp *s2 = poly_sink1(ctx2, poly_store_val(ctx2, o2, r2));
   float c[32] = {0};
   PolyBufferBinding bind2 = POLY_BIND_HOST(o2, c);
-  ASSERT_INT_EQ(poly_realize(ctx2, s2, &bind2, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx2, s2, &bind2, 1), 0);
   if (memcmp(a, c, sizeof(a)) != 0) FAIL("separate graphs with same seed not deterministic");
 
   poly_ctx_destroy(ctx1);
@@ -1737,7 +1777,7 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   /* Schedule + rewrite with has_threefry=false */
-  PolyScheduleResult sr = poly_schedule_v2(ctx, sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
   ASSERT_TRUE(sr.n_kernels >= 1);
   PolyRewriteOpts opts = {0};
   opts.caps.has_threefry = false;
@@ -1768,7 +1808,7 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
       POLY_BIND_HOST(counter, counter_data), POLY_BIND_HOST(key, key_data),
       POLY_BIND_HOST(out, out_data)
   };
-  ASSERT_INT_EQ(poly_realize(ctx, sink, binds, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, binds, 3), 0);
   /* Verify we got non-zero output (THREEFRY actually ran) */
   int any_nonzero = 0;
   for (int i = 0; i < 8; i++) {
@@ -1777,7 +1817,7 @@ TEST(nn, c2c_threefry_lowered_in_compiled_kernel) {
   ASSERT_TRUE(any_nonzero);
 
   free(uops);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1792,7 +1832,7 @@ TEST(nn, c5_arange_negative_step) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, ar));
   float result[5] = {0};
   PolyBufferBinding bind = POLY_BIND_HOST(out, result);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
   float expected[] = {5.0f, 4.0f, 3.0f, 2.0f, 1.0f};
   for (int i = 0; i < 5; i++)
     ASSERT_FLOAT_EQ(result[i], expected[i], 1e-6f);
@@ -1821,7 +1861,7 @@ TEST(nn, c5_arange_fractional_step) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, ar));
   float result[4] = {0};
   PolyBufferBinding bind = POLY_BIND_HOST(out, result);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
   float expected[] = {0.0f, 0.3f, 0.6f, 0.9f};
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(result[i], expected[i], 1e-6f);
@@ -1837,7 +1877,9 @@ TEST(nn, c5_eye_edge_cases) {
   PolyUOp *o1 = poly_buffer_f32(ctx, 1);
   float r1[1] = {0};
   PolyBufferBinding b1 = POLY_BIND_HOST(o1, r1);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, o1, e1)), &b1, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize_with_bindings(ctx, poly_sink1(ctx, poly_store_val(ctx, o1, e1)), &b1, 1), 0
+  );
   ASSERT_FLOAT_EQ(r1[0], 1.0f, 1e-7f);
   /* eye(0) -> non-NULL zero-length buffer */
   PolyUOp *e0 = poly_eye(ctx, 0);
@@ -1860,7 +1902,12 @@ TEST(nn, c5_tril_triu_diagonal_offset) {
   PolyUOp *buf = poly_buffer_f32(ctx, 1);
   float out[1] = {0};
   PolyBufferBinding bind = POLY_BIND_HOST(buf, out);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, buf, sum_tl)), &bind, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize_with_bindings(
+          ctx, poly_sink1(ctx, poly_store_val(ctx, buf, sum_tl)), &bind, 1
+      ),
+      0
+  );
   ASSERT_FLOAT_EQ(out[0], 8.0f, 1e-5f);
 
   /* triu(diagonal=-1): keeps main diagonal + 1 subdiagonal
@@ -1872,7 +1919,10 @@ TEST(nn, c5_tril_triu_diagonal_offset) {
   float out2[1] = {0};
   PolyBufferBinding bind2 = POLY_BIND_HOST(buf2, out2);
   ASSERT_INT_EQ(
-      poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, buf2, sum_tu)), &bind2, 1), 0
+      poly_realize_with_bindings(
+          ctx, poly_sink1(ctx, poly_store_val(ctx, buf2, sum_tu)), &bind2, 1
+      ),
+      0
   );
   ASSERT_FLOAT_EQ(out2[0], 8.0f, 1e-5f);
 
@@ -1891,7 +1941,7 @@ TEST(nn, c5_tril_zeros_check) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, tl));
   float result[9] = {0};
   PolyBufferBinding bind = POLY_BIND_HOST(out, result);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, &bind, 1), 0);
   /* Row-major: [[1,0,0],[1,1,0],[1,1,1]] */
   float expected[9] = {1, 0, 0, 1, 1, 0, 1, 1, 1};
   for (int i = 0; i < 9; i++)
@@ -1909,7 +1959,9 @@ TEST(nn, c5_linspace_edge_cases) {
   PolyUOp *o1 = poly_buffer_f32(ctx, 1);
   float r1[1] = {0};
   PolyBufferBinding b1 = POLY_BIND_HOST(o1, r1);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, o1, ls1)), &b1, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize_with_bindings(ctx, poly_sink1(ctx, poly_store_val(ctx, o1, ls1)), &b1, 1), 0
+  );
   ASSERT_FLOAT_EQ(r1[0], 3.0f, 1e-7f);
 
   /* start == stop: linspace(5,5,3) -> {5,5,5} */
@@ -1918,7 +1970,9 @@ TEST(nn, c5_linspace_edge_cases) {
   PolyUOp *o2 = poly_buffer_f32(ctx, 3);
   float r2[3] = {0};
   PolyBufferBinding b2 = POLY_BIND_HOST(o2, r2);
-  ASSERT_INT_EQ(poly_realize(ctx, poly_sink1(ctx, poly_store_val(ctx, o2, ls2)), &b2, 1), 0);
+  ASSERT_INT_EQ(
+      poly_realize_with_bindings(ctx, poly_sink1(ctx, poly_store_val(ctx, o2, ls2)), &b2, 1), 0
+  );
   for (int i = 0; i < 3; i++)
     ASSERT_FLOAT_EQ(r2[i], 5.0f, 1e-7f);
 
@@ -2117,7 +2171,7 @@ TEST(f64, vecadd_e2e) {
       POLY_BIND_HOST(a, a_d),
       POLY_BIND_HOST(b, b_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(o_d[i], a_d[i] + b_d[i], 1e-14);
@@ -2149,7 +2203,7 @@ TEST(f64, exp_log_roundtrip) {
       POLY_BIND_HOST(out, o_d),
       POLY_BIND_HOST(x, x_d),
   };
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++) {
     double rel_err = fabs(o_d[i] - x_d[i]) / fabs(x_d[i]);

@@ -12,7 +12,7 @@
 
 #include "codegen.h"
 #include "utils.h"
-#include "exec_plan.h"
+#include "engine/schedule.h"
 #include "pat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,6 +142,79 @@ static const char *cuda_ctype(PolyDType dt) {
   if (s.priority == POLY_FLOAT16.priority) return "half";
   if (s.priority == POLY_BFLOAT16.priority) return "nv_bfloat16";
   return s.name;
+}
+
+static void cuda_render_ctype_nonptr(PolyDType dt, char *buf, int cap) {
+  PolyDType s = poly_dtype_scalar(dt);
+  if (dt.count <= 1) {
+    snprintf(buf, cap, "%s", cuda_ctype(s));
+    return;
+  }
+  if (poly_dtype_is_bool(s)) {
+    snprintf(buf, cap, "int%d", dt.count);
+  } else {
+    snprintf(buf, cap, "%s%d", cuda_ctype(s), dt.count);
+  }
+}
+
+static void cuda_render_ctype(PolyDType dt, char *buf, int cap) {
+  if (!dt.is_ptr) {
+    cuda_render_ctype_nonptr(dt, buf, cap);
+    return;
+  }
+  PolyDType base = dt;
+  base.is_ptr = false;
+  base.addrspace = POLY_ADDR_GLOBAL;
+  base.ptr_size = 0;
+  int lanes = dt.count > 1 ? dt.count : dt.vcount;
+  base = poly_dtype_scalar(base);
+  if (lanes > 1) base = poly_dtype_vec(base, lanes);
+  char bt[128];
+  cuda_render_ctype_nonptr(base, bt, sizeof(bt));
+  snprintf(buf, cap, "%s*", bt);
+}
+
+static bool cuda_vector_needs_prefix(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  if (dt.count <= 1) return false;
+  return (dt.count == 4 || dt.count == 8) &&
+         (s.priority == POLY_FLOAT16.priority || s.priority == POLY_BFLOAT16.priority);
+}
+
+static const char *cuda_lane_name(int idx) {
+  static const char *lanes[] = {
+      "x",  "y",  "z",  "w",  "a",  "b",  "c",  "d",  "e",  "f",  "g",
+      "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q",  "r",
+      "s",  "t",  "u",  "v",  "w0", "x0", "y0", "z0", "a0", "b0",
+  };
+  if (idx < 0 || idx >= (int)(sizeof(lanes) / sizeof(lanes[0]))) return "x";
+  return lanes[idx];
+}
+
+static void cuda_render_vector_prefix(CudaStrBuf *out, PolyDType dt) {
+  PolyDType scalar = poly_dtype_scalar(dt);
+  char vec_t[64], scalar_t[64];
+  cuda_render_ctype_nonptr(dt, vec_t, sizeof(vec_t));
+  cuda_render_ctype_nonptr(scalar, scalar_t, sizeof(scalar_t));
+  int align = poly_dtype_itemsize(scalar) * dt.count;
+
+  csb_printf(out, "struct __align__(%d) %s { ", align, vec_t);
+  for (int i = 0; i < dt.count; i++) {
+    if (i) csb_puts(out, " ");
+    csb_printf(out, "%s %s;", scalar_t, cuda_lane_name(i));
+  }
+  csb_puts(out, " }; ");
+  csb_printf(out, "__device__ %s make_%s(", vec_t, vec_t);
+  for (int i = 0; i < dt.count; i++) {
+    if (i) csb_puts(out, ", ");
+    csb_printf(out, "%s %s", scalar_t, cuda_lane_name(i));
+  }
+  csb_printf(out, ") { %s r = {", vec_t);
+  for (int i = 0; i < dt.count; i++) {
+    if (i) csb_puts(out, ", ");
+    csb_puts(out, cuda_lane_name(i));
+  }
+  csb_puts(out, "}; return r; }\n");
 }
 
 static bool cuda_is_half(PolyDType dt) {
@@ -292,18 +365,23 @@ static int cuda_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool cre
 /* CUDA Linearizer */
 
 PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  /* TODO: CUDA tensor core specs not yet ported. tinygrad selects from
-   * cuda_sm75/sm80/sm89 based on arch (tc.py). Until ported, POLY_OPT_TC_ONLY
-   * with empty tensor_cores is a no-op on CUDA. */
+  /* tinygrad CUDA still uses the normal postrange apply_opts path for
+   * non-TC kernels. Tensor core matching is only the first branch inside
+   * that heuristic. Keep CUDA on the shared heuristic policy so LOCAL/UNROLL
+   * scheduling still happens on ordinary kernels such as broadcast matmul. */
   /* bf16: native on sm_80+ (nv_bfloat16 + h* intrinsics), non-native on older */
   PolyPatternMatcher *extra = NULL;
   if (poly_cuda_arch_major() < 8) extra = poly_pm_bf16_non_native();
   PolyRewriteOpts opts = {
       .optimize = true, /* shared optimized pipeline (tinygrad parity) */
-      .devectorize = -1, /* CUDA: no add_loads/devectorize */
-      .caps = {.has_mulacc = true},
+      /* tinygrad default DEVECTORIZE=1 also applies to CUDA. Keeping this at
+       * -1 leaves VECTORIZE/GEP nodes alive past add_gpudims for ordinary CUDA
+       * kernels such as broadcast matmul, which does not match the reference
+       * pipeline. */
+      .devectorize = 1,
+      .caps = {.has_mulacc = true, .has_local = true},
       .device = POLY_DEVICE_CUDA,
-      .opt_policy = POLY_OPT_TC_ONLY,
+      .opt_policy = POLY_OPT_HEURISTIC,
       .extra_matcher = extra,
       .gpu_block_size = 256,
   };
@@ -374,7 +452,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char type[64];
-      snprintf(type, sizeof(type), "%s*", cuda_ctype(u->dtype));
+      cuda_render_ctype(u->dtype, type, sizeof(type));
       param_types[n_params] = strdup(type);
       param_names[n_params] = strdup(name);
       param_order[n_params] = (int)u->arg.i;
@@ -432,7 +510,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       continue;
     }
 
-    /* --- SPECIAL: GPU thread index ------------------------------------ */
+    /* --- SPECIAL: GPU workitem index ---------------------------------- */
     if (u->op == POLY_OP_SPECIAL) {
       const char *sname = u->arg.str ? u->arg.str : "gidx0";
       csmap_set(&names, u, strdup(sname));
@@ -447,22 +525,27 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       else if (dim_idx == 2)
         dim_char = 'z';
 
-      /* Determine prefix: "gidx" → blockIdx*blockDim+threadIdx */
+      /* tinygrad CUDA maps:
+       *   gidxN -> blockIdx.{x,y,z}
+       *   lidxN -> threadIdx.{x,y,z}
+       *   idxN  -> blockIdx*blockDim+threadIdx
+       * Keep that contract here so launch dimensions and rendered indexing
+       * stay aligned with the reference runtime. */
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
       if (sname[0] == 'l') {
-        /* Local index: threadIdx */
         csb_printf(&body, "int %s = threadIdx.%c;\n", sname, dim_char);
-      } else {
-        /* Global index: blockIdx * blockDim + threadIdx */
+      } else if (sname[0] == 'i') {
         csb_printf(
             &body, "int %s = (blockIdx.%c*blockDim.%c+threadIdx.%c);\n", sname, dim_char, dim_char,
             dim_char
         );
+      } else {
+        csb_printf(&body, "int %s = blockIdx.%c;\n", sname, dim_char);
       }
 
-      /* Bounds check for global indices only.
-       * Skip for lidx: all block_size threads must execute (barrier requires it). */
+      /* Bounds check for non-local indices only.
+       * Skip for lidx: all threads in the block must execute barriers. */
       if (sname[0] != 'l') {
         char *bound = csmap_get(&names, u->src[0]);
         if (bound) {
@@ -549,7 +632,11 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
       /* Render as __shared__ array. Size from pointer dtype's ptr_size. */
       int smem_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
-      csb_printf(&decls, "  __shared__ %s %s[%d];\n", cuda_ctype(u->dtype), name, smem_size);
+      {
+        char ctype[128];
+        cuda_render_ctype_nonptr(poly_dtype_scalar(u->dtype), ctype, sizeof(ctype));
+        csb_printf(&decls, "  __shared__ %s %s[%d];\n", ctype, name, smem_size);
+      }
       continue;
     }
 
@@ -559,7 +646,20 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       csmap_set(&names, u, strdup(name));
 
-      csb_printf(&decls, "  %s %s[1];\n", cuda_ctype(u->dtype), name);
+      PolyDType base = u->dtype;
+      base.is_ptr = false;
+      base.addrspace = 0;
+      base.ptr_size = 0;
+      int64_t reg_size = u->dtype.ptr_size > 0 ? u->dtype.ptr_size : 1;
+      if (base.count > 1) {
+        char ctype[128];
+        cuda_render_ctype_nonptr(base, ctype, sizeof(ctype));
+        csb_printf(&decls, "  %s %s[%lld];\n", ctype, name, (long long)reg_size);
+      } else {
+        char ctype[128];
+        cuda_render_ctype_nonptr(poly_dtype_scalar(u->dtype), ctype, sizeof(ctype));
+        csb_printf(&decls, "  %s %s[%lld];\n", ctype, name, (long long)reg_size);
+      }
       continue;
     }
 
@@ -577,7 +677,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *bidx = csmap_get(&names, u->src[0]);
-      const char *ctype = cuda_ctype(u->dtype);
+      char ctype[128];
+      cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
       csb_printf(&decls, "  %s %s;\n", ctype, name);
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
@@ -642,7 +743,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *src_s = csmap_get(&names, u->src[0]);
-      const char *ctype = cuda_ctype(u->dtype);
+      char ctype[128];
+      cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
       csb_printf(&decls, "  %s %s;\n", ctype, name);
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
@@ -657,8 +759,9 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char *src_s = csmap_get(&names, u->src[0]);
-      const char *dst_type = cuda_ctype(u->dtype);
-      const char *src_type = cuda_ctype(u->src[0]->dtype);
+      char dst_type[128], src_type[128];
+      cuda_render_ctype(u->dtype, dst_type, sizeof(dst_type));
+      cuda_render_ctype(u->src[0]->dtype, src_type, sizeof(src_type));
       csb_printf(&decls, "  %s %s;\n", dst_type, name);
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
@@ -678,10 +781,84 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       snprintf(name, sizeof(name), "alu%d", c_alu++);
       csmap_set(&names, u, strdup(name));
 
-      csb_printf(&decls, "  %s %s;\n", cuda_ctype(u->dtype), name);
+      {
+        char ctype[128];
+        cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
+        csb_printf(&decls, "  %s %s;\n", ctype, name);
+      }
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
       csb_printf(&body, "%s = %s;\n", name, expr);
+      continue;
+    }
+
+    /* --- VECTORIZE / VCONST ------------------------------------------ */
+    if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+      char name[32];
+      snprintf(name, sizeof(name), "vec%d", c_alu++);
+      csmap_set(&names, u, strdup(name));
+
+      char ctype[128];
+      cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
+      csb_printf(&decls, "  %s %s;\n", ctype, name);
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
+
+      if (u->n_src == 1) {
+        char *s = csmap_get(&names, u->src[0]);
+        csb_printf(&body, "%s = (%s)(%s);\n", name, ctype, s ? s : "0");
+      } else if (u->n_src > 1) {
+        csb_printf(&body, "%s = make_%s(", name, ctype);
+        for (int j = 0; j < u->n_src; j++) {
+          if (j) csb_puts(&body, ", ");
+          char *s = csmap_get(&names, u->src[j]);
+          csb_puts(&body, s ? s : "0");
+        }
+        csb_puts(&body, ");\n");
+      } else if (u->arg.kind == POLY_ARG_INT_TUPLE) {
+        csb_printf(&body, "%s = make_%s(", name, ctype);
+        for (int j = 0; j < u->arg.int_tuple.n; j++) {
+          if (j) csb_puts(&body, ", ");
+          csb_printf(&body, "%lld", (long long)u->arg.int_tuple.vals[j]);
+        }
+        csb_puts(&body, ");\n");
+      } else {
+        csb_printf(&body, "%s = (%s)0;\n", name, ctype);
+      }
+      continue;
+    }
+
+    /* --- GEP ---------------------------------------------------------- */
+    if (u->op == POLY_OP_GEP) {
+      char name[32];
+      snprintf(name, sizeof(name), "gep%d", c_alu++);
+      csmap_set(&names, u, strdup(name));
+
+      char ctype[128];
+      cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
+      csb_printf(&decls, "  %s %s;\n", ctype, name);
+      for (int d = 0; d < depth; d++)
+        csb_puts(&body, "  ");
+
+      char *src_s = csmap_get(&names, u->src[0]);
+      if (u->arg.kind == POLY_ARG_INT) {
+        int idx = (int)u->arg.i;
+        csb_printf(&body, "%s = %s.%s;\n", name, src_s ? src_s : "0", cuda_lane_name(idx));
+      } else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1) {
+        int idx = (int)u->arg.int_tuple.vals[0];
+        csb_printf(&body, "%s = %s.%s;\n", name, src_s ? src_s : "0", cuda_lane_name(idx));
+      } else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 1) {
+        csb_printf(&body, "%s = make_%s(", name, ctype);
+        for (int j = 0; j < u->arg.int_tuple.n; j++) {
+          if (j) csb_puts(&body, ", ");
+          csb_printf(
+              &body, "%s.%s", src_s ? src_s : "0", cuda_lane_name((int)u->arg.int_tuple.vals[j])
+          );
+        }
+        csb_puts(&body, ");\n");
+      } else {
+        csb_printf(&body, "%s = %s;\n", name, src_s ? src_s : "0");
+      }
       continue;
     }
 
@@ -726,13 +903,27 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
   /* Conditional includes for half-precision types */
   {
     bool uses_f16 = false, uses_bf16 = false;
+    PolyDType vec_prefixes[32];
+    int n_vec_prefixes = 0;
     for (int i = 0; i < n; i++) {
       PolyDType s = poly_dtype_scalar(uops[i]->dtype);
       if (s.priority == POLY_FLOAT16.priority) uses_f16 = true;
       if (s.priority == POLY_BFLOAT16.priority) uses_bf16 = true;
+      if (cuda_vector_needs_prefix(uops[i]->dtype)) {
+        bool seen = false;
+        for (int j = 0; j < n_vec_prefixes; j++) {
+          if (poly_dtype_eq(vec_prefixes[j], uops[i]->dtype)) {
+            seen = true;
+            break;
+          }
+        }
+        if (!seen && n_vec_prefixes < 32) vec_prefixes[n_vec_prefixes++] = uops[i]->dtype;
+      }
     }
     if (uses_f16) csb_puts(&out, "#include <cuda_fp16.h>\n");
     if (uses_bf16) csb_puts(&out, "#include <cuda_bf16.h>\n");
+    for (int i = 0; i < n_vec_prefixes; i++)
+      cuda_render_vector_prefix(&out, vec_prefixes[i]);
   }
   csb_puts(&out, "\n");
 

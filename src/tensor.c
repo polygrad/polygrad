@@ -7,8 +7,9 @@
 
 #define _GNU_SOURCE
 #include "tensor.h"
+#include "ctx.h"
 #include "frontend.h"
-#include "scheduler.h"
+#include "engine/schedule.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,6 +46,94 @@ static inline PolyUOp *cf(PolyCtx *ctx, PolyUOp *ref, double v) {
 /* Helper: const with explicit dtype -- use in special-math ops for dtype correctness */
 static inline PolyUOp *cdt(PolyCtx *ctx, PolyDType dt, double v) {
   return poly_const_typed(ctx, dt, v);
+}
+
+static const PolyDType *ffi_dtype_from_id(int dtype_id) {
+  if (dtype_id < 0 || dtype_id >= N_DTYPE_FFI) return NULL;
+  return _dtype_table_ffi[dtype_id];
+}
+
+static bool ffi_dtype_is_integer_like(int dtype_id, PolyDType *out_dt) {
+  const PolyDType *dt = ffi_dtype_from_id(dtype_id);
+  if (!dt) return false;
+  PolyDType sdt = poly_dtype_scalar(*dt);
+  if (!poly_dtype_is_int(sdt) && !poly_dtype_is_bool(sdt)) return false;
+  if (out_dt) *out_dt = sdt;
+  return true;
+}
+
+static bool ffi_dtype_is_float_like(int dtype_id, PolyDType *out_dt) {
+  const PolyDType *dt = ffi_dtype_from_id(dtype_id);
+  if (!dt) return false;
+  PolyDType sdt = poly_dtype_scalar(*dt);
+  if (!poly_dtype_is_float(sdt)) return false;
+  if (out_dt) *out_dt = sdt;
+  return true;
+}
+
+static PolyUOp *poly_const_exact_int(PolyCtx *ctx, PolyDType dt, int64_t value) {
+  dt = poly_dtype_scalar(dt);
+  if (poly_dtype_is_bool(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(value != 0));
+  if (!poly_dtype_is_int(dt)) return NULL;
+  return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(value));
+}
+
+static PolyUOp *poly_const_exact_float(PolyCtx *ctx, PolyDType dt, double value) {
+  dt = poly_dtype_scalar(dt);
+  if (!poly_dtype_is_float(dt)) return NULL;
+  return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
+}
+
+static PolyUOp *poly_const_unique_exact_int(PolyCtx *ctx, PolyDType dt, int64_t value) {
+  dt = poly_dtype_scalar(dt);
+  if (poly_dtype_is_bool(dt))
+    return poly_uop_tagged(ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_bool(value != 0), ctx->next_buf_tag++);
+  if (!poly_dtype_is_int(dt)) return NULL;
+  return poly_uop_tagged(ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_int(value), ctx->next_buf_tag++);
+}
+
+static PolyUOp *poly_const_unique_exact_float(PolyCtx *ctx, PolyDType dt, double value) {
+  dt = poly_dtype_scalar(dt);
+  if (!poly_dtype_is_float(dt)) return NULL;
+  return poly_uop_tagged(ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_float(value), ctx->next_buf_tag++);
+}
+
+static PolyUOp *poly_empty_shaped(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim) {
+  PolyUOp *buf = poly_buffer(ctx, dt, 0);
+  if (!buf || ndim <= 1) return buf;
+  return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
+}
+
+static PolyUOp *poly_full_from_scalar(PolyCtx *ctx, const int64_t *shape, int ndim, PolyUOp *scalar) {
+  if (!scalar || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  if (ndim == 0) return scalar;
+  if (!shape) return NULL;
+
+  bool has_zero = false;
+  for (int i = 0; i < ndim; i++) {
+    if (shape[i] < 0) return NULL;
+    if (shape[i] == 0) has_zero = true;
+  }
+  if (has_zero) return poly_empty_shaped(ctx, poly_dtype_scalar(scalar->dtype), shape, ndim);
+  if (poly_shape_numel_checked(shape, ndim) < 0) return NULL;
+
+  int64_t ones[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    ones[i] = 1;
+  PolyUOp *r = poly_reshape(ctx, scalar, ones, ndim);
+  return poly_expand(ctx, r, (int64_t *)shape, ndim);
+}
+
+static int64_t poly_arange_len(long double start, long double stop, long double step) {
+  if (step == 0.0L) return -1;
+  if ((step > 0.0L && start < stop) || (step < 0.0L && start > stop)) {
+    long double span = (stop - start) / step;
+    long double n = ceill(span - 1e-12L);
+    if (n < 0.0L) return 0;
+    if (n > (long double)INT64_MAX) return -1;
+    return (int64_t)n;
+  }
+  return 0;
 }
 
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim) {
@@ -370,6 +459,9 @@ PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 /* Contiguous (realize barrier) */
 
 PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
+  if (!ctx || !x) return NULL;
+  if (x->op == POLY_OP_CONTIGUOUS) return x;
+  if (poly_uop_has_buffer_identity(x)) return x;
   return poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
 }
 
@@ -1410,22 +1502,50 @@ PolyUOp *poly_cumalu(PolyCtx *ctx, PolyUOp *x, int axis, PolyOps op, bool includ
 /* tinygrad Tensor.full -- tensor.py:660:
  *   Tensor(fill_value, _force_unique=True).reshape((1,)*ndim).expand(shape)
  *
- * Pure UOp graph -- no const-registry, no host malloc. _force_unique is
- * not needed because polygrad CONST is immutable and CSE'd by hash key. */
-PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value) {
-  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
-  /* Zero-size shape: return an empty buffer (poly_shape_numel_checked
-   * rejects shape[i]<=0, so we handle the empty case explicitly first). */
-  for (int i = 0; i < ndim; i++)
-    if (shape[i] == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  if (poly_shape_numel_checked(shape, ndim) < 0) return NULL;
+ * Pure UOp graph -- no const-registry, no host malloc. The scalar seed must
+ * stay unique per call, matching tinygrad's `_force_unique=True`, otherwise
+ * separate creation ops like `_tri(arange, arange)` collapse together under
+ * CSE and create extra realized helper kernels. */
+PolyUOp *poly_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id) {
+  PolyDType dt;
+  if (!ffi_dtype_is_integer_like(dtype_id, &dt)) return NULL;
+  return poly_const_exact_int(ctx, dt, value);
+}
 
-  PolyUOp *scalar = poly_const_typed(ctx, POLY_FLOAT32, fill_value);
-  int64_t ones[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++)
-    ones[i] = 1;
-  PolyUOp *r = poly_reshape(ctx, scalar, ones, ndim);
-  return poly_expand(ctx, r, (int64_t *)shape, ndim);
+PolyUOp *poly_const_float_by_id(PolyCtx *ctx, double value, int dtype_id) {
+  PolyDType dt;
+  if (!ffi_dtype_is_float_like(dtype_id, &dt)) return NULL;
+  return poly_const_exact_float(ctx, dt, value);
+}
+
+PolyUOp *poly_full_int_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    int64_t fill_value,
+    int dtype_id
+) {
+  PolyDType dt;
+  if (!ffi_dtype_is_integer_like(dtype_id, &dt)) return NULL;
+  PolyUOp *scalar = poly_const_unique_exact_int(ctx, dt, fill_value);
+  return poly_full_from_scalar(ctx, shape, ndim, scalar);
+}
+
+PolyUOp *poly_full_float_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    double fill_value,
+    int dtype_id
+) {
+  PolyDType dt;
+  if (!ffi_dtype_is_float_like(dtype_id, &dt)) return NULL;
+  PolyUOp *scalar = poly_const_unique_exact_float(ctx, dt, fill_value);
+  return poly_full_from_scalar(ctx, shape, ndim, scalar);
+}
+
+PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_value) {
+  return poly_full_float_by_id(ctx, shape, ndim, fill_value, 12);
 }
 
 /* tinygrad Tensor.arange -- tensor.py:722:
@@ -1433,66 +1553,128 @@ PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_val
  *
  * Pure UOp graph. The cumulative sum is currently O(N^2) until the
  * range-collapse simplify pass lands in Phase D. */
-PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step) {
+PolyUOp *poly_arange_int_by_id(PolyCtx *ctx, int64_t start, int64_t stop, int64_t step, int dtype_id) {
+  PolyDType dt;
+  if (!ffi_dtype_is_integer_like(dtype_id, &dt) || poly_dtype_is_bool(dt)) return NULL;
+  if (step == 0) {
+    fprintf(stderr, "polygrad: arange: step must be non-zero\n");
+    return NULL;
+  }
+
+  int64_t n = poly_arange_len((long double)start, (long double)stop, (long double)step);
+  if (n < 0) return NULL;
+  if (n == 0) return poly_buffer(ctx, dt, 0);
+
+  int64_t shape[1] = {n};
+  PolyUOp *base = poly_full_int_by_id(ctx, shape, 1, step, dtype_id);
+  PolyUOp *cumsum = poly_cumalu(ctx, base, 0, POLY_OP_ADD, false);
+  PolyUOp *bias = poly_const_exact_int(ctx, dt, start - step);
+  return poly_alu2(ctx, POLY_OP_ADD, cumsum, bias);
+}
+
+PolyUOp *poly_arange_float_by_id(PolyCtx *ctx, double start, double stop, double step, int dtype_id) {
+  PolyDType dt;
+  if (!ffi_dtype_is_float_like(dtype_id, &dt)) return NULL;
   if (step == 0.0) {
     fprintf(stderr, "polygrad: arange: step must be non-zero\n");
     return NULL;
   }
-  int64_t n = 0;
-  if ((step > 0.0 && start < stop) || (step < 0.0 && start > stop)) {
-    double span = (stop - start) / step;
-    n = (int64_t)ceil(span - 1e-12);
-    if (n < 0) n = 0;
-  }
-  if (n == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
+
+  int64_t n = poly_arange_len((long double)start, (long double)stop, (long double)step);
+  if (n < 0) return NULL;
+  if (n == 0) return poly_buffer(ctx, dt, 0);
 
   int64_t shape[1] = {n};
-  PolyUOp *base = poly_full(ctx, shape, 1, step);
+  PolyUOp *base = poly_full_float_by_id(ctx, shape, 1, step, dtype_id);
   PolyUOp *cumsum = poly_cumalu(ctx, base, 0, POLY_OP_ADD, false);
-  PolyUOp *bias = poly_const_typed(ctx, POLY_FLOAT32, start - step);
+  PolyUOp *bias = poly_const_exact_float(ctx, dt, start - step);
   return poly_alu2(ctx, POLY_OP_ADD, cumsum, bias);
+}
+
+PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step) {
+  return poly_arange_float_by_id(ctx, start, stop, step, 12);
 }
 
 /* tinygrad Tensor.linspace -- tensor.py:754
  *   (start + Tensor.arange(steps) * ((stop - start) / (steps - 1))).cast(dtype) */
-PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps) {
-  if (steps < 0) return NULL;
-  if (steps == 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  if (steps == 1) {
-    /* Single value `start` broadcast to shape (1,) */
-    int64_t shape[1] = {1};
-    return poly_full(ctx, shape, 1, start);
+PolyUOp *poly_linspace_by_id(PolyCtx *ctx, double start, double stop, int64_t steps, int dtype_id) {
+  const PolyDType *out_ptr = ffi_dtype_from_id(dtype_id);
+  if (!out_ptr) return NULL;
+  PolyDType out_dt = poly_dtype_scalar(*out_ptr);
+  if (poly_dtype_is_bool(out_dt) || poly_dtype_eq(out_dt, POLY_VOID)) {
+    fprintf(stderr, "polygrad: linspace: bool/void dtypes are not supported\n");
+    return NULL;
   }
+  if (steps < 0) {
+    fprintf(stderr, "polygrad: linspace: number of steps must be non-negative\n");
+    return NULL;
+  }
+  if (steps == 0) return poly_buffer(ctx, out_dt, 0);
+
+  PolyDType compute_dt = poly_dtype_eq(out_dt, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
+  int compute_id = poly_dtype_eq(compute_dt, POLY_FLOAT64) ? 13 : 12;
+
+  if (steps == 1) {
+    int64_t shape[1] = {1};
+    PolyUOp *one = poly_full_float_by_id(ctx, shape, 1, start, compute_id);
+    return poly_dtype_eq(out_dt, compute_dt) ? one : poly_cast(ctx, one, out_dt);
+  }
+
   double scale = (stop - start) / (double)(steps - 1);
-  PolyUOp *ar = poly_arange(ctx, 0.0, (double)steps, 1.0);
-  PolyUOp *s_c = poly_const_typed(ctx, POLY_FLOAT32, scale);
-  PolyUOp *start_c = poly_const_typed(ctx, POLY_FLOAT32, start);
-  return poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, ar, s_c), start_c);
+  PolyUOp *ar = poly_arange_float_by_id(ctx, 0.0, (double)steps, 1.0, compute_id);
+  PolyUOp *s_c = poly_const_exact_float(ctx, compute_dt, scale);
+  PolyUOp *start_c = poly_const_exact_float(ctx, compute_dt, start);
+  PolyUOp *result =
+      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, ar, s_c), start_c);
+  return poly_dtype_eq(out_dt, compute_dt) ? result : poly_cast(ctx, result, out_dt);
+}
+
+PolyUOp *poly_linspace(PolyCtx *ctx, double start, double stop, int64_t steps) {
+  return poly_linspace_by_id(ctx, start, stop, steps, 12);
 }
 
 /* tinygrad Tensor.eye -- tensor.py:774
  *   (arange(n).unsqueeze(-1) == arange(m)).cast(dtype) */
-PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
-  if (n <= 0) return poly_buffer(ctx, POLY_FLOAT32, 0);
-  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0), (int64_t[]){n, 1}, 2);
-  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)n, 1.0), (int64_t[]){1, n}, 2);
-  /* Broadcasting (n,1) vs (1,n) -> (n,n) */
+static PolyUOp *poly_iota_i32(PolyCtx *ctx, int64_t n) {
+  if (n <= 0) return poly_buffer(ctx, POLY_INT32, 0);
+  int64_t shape[1] = {n};
+  PolyUOp *scalar = poly_const_unique_exact_int(ctx, POLY_INT32, 1);
+  PolyUOp *base = poly_expand(ctx, poly_reshape(ctx, scalar, (int64_t[]){1}, 1), shape, 1);
+  PolyUOp *cumsum = poly_cumalu(ctx, base, 0, POLY_OP_ADD, false);
+  PolyUOp *bias = poly_const_exact_int(ctx, POLY_INT32, -1);
+  return poly_alu2(ctx, POLY_OP_ADD, cumsum, bias);
+}
+
+PolyUOp *poly_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id) {
+  const PolyDType *out_ptr = ffi_dtype_from_id(dtype_id);
+  if (!out_ptr) return NULL;
+  PolyDType out_dt = poly_dtype_scalar(*out_ptr);
+  if (poly_dtype_eq(out_dt, POLY_VOID) || n < 0 || m < 0) return NULL;
+  if (n == 0 || m == 0) {
+    int64_t shape[2] = {n, m};
+    return poly_empty_shaped(ctx, out_dt, shape, 2);
+  }
+
+  PolyUOp *rows = poly_reshape(ctx, poly_iota_i32(ctx, n), (int64_t[]){n, 1}, 2);
+  PolyUOp *cols = poly_reshape(ctx, poly_iota_i32(ctx, m), (int64_t[]){1, m}, 2);
   PolyUOp *eq_bool = poly_eq(ctx, rows, cols);
-  return poly_cast(ctx, eq_bool, POLY_FLOAT32);
+  return poly_dtype_is_bool(out_dt) ? eq_bool : poly_cast(ctx, eq_bool, out_dt);
+}
+
+PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
+  return poly_eye_by_id(ctx, n, n, 12);
 }
 
 /* tinygrad Tensor._tri -- tensor.py:2128
  *   arange(r).unsqueeze(-1) + diagonal <= arange(c)
  *   Returns a bool mask of shape (r, c). */
 static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) {
-  PolyUOp *rows = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)r, 1.0), (int64_t[]){r, 1}, 2);
-  PolyUOp *cols = poly_reshape(ctx, poly_arange(ctx, 0.0, (double)c, 1.0), (int64_t[]){1, c}, 2);
+  PolyUOp *rows = poly_reshape(ctx, poly_iota_i32(ctx, r), (int64_t[]){r, 1}, 2);
+  PolyUOp *cols = poly_reshape(ctx, poly_iota_i32(ctx, c), (int64_t[]){1, c}, 2);
   PolyUOp *rows_shifted =
       (diagonal == 0)
           ? rows
-          : poly_alu2(
-                ctx, POLY_OP_ADD, rows, poly_const_typed(ctx, POLY_FLOAT32, (double)diagonal)
-            );
+          : poly_alu2(ctx, POLY_OP_ADD, rows, poly_const_exact_int(ctx, POLY_INT32, diagonal));
   return poly_le(ctx, rows_shifted, cols);
 }
 
@@ -1508,7 +1690,7 @@ PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   }
   PolyUOp *mask = poly_tri_mask(ctx, shape[0], shape[1], diagonal + 1);
   PolyUOp *zero = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0);
-  return poly_alu3(ctx, POLY_OP_WHERE, mask, zero, x);
+  return poly_where_op(ctx, mask, zero, x);
 }
 
 /* tinygrad Tensor.triu -- tensor.py:2131
@@ -1523,60 +1705,85 @@ PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   }
   PolyUOp *mask = poly_tri_mask(ctx, shape[0], shape[1], diagonal);
   PolyUOp *zero = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0);
-  return poly_alu3(ctx, POLY_OP_WHERE, mask, x, zero);
+  return poly_where_op(ctx, mask, x, zero);
 }
 
-PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
-  int64_t numel = poly_shape_numel_checked(shape, ndim);
-  if (numel <= 0) return NULL;
+static PolyUOp *poly_rand_compute(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, PolyDType out_dt) {
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  if (ndim > 0 && !shape) return NULL;
+  for (int i = 0; i < ndim; i++) {
+    if (shape[i] < 0) return NULL;
+    if (shape[i] == 0) return poly_empty_shaped(ctx, out_dt, shape, ndim);
+  }
 
+  int64_t numel = poly_shape_numel_checked(shape, ndim);
+  if (numel < 0) return NULL;
   uint32_t key_lo = (uint32_t)(seed & 0xffffffffu);
   uint32_t key_hi = (uint32_t)(seed >> 32);
   uint32_t mixed_key = key_lo ^ ((key_hi << 16) | (key_hi >> 16));
 
-  /* Phase E: build the THREEFRY counter via pure-UOp arange instead of
-   * malloc'ing a uint32_t[numel] array and stashing it in g_const_bindings.
-   *
-   * Mirrors tinygrad's Tensor.rand at tensor.py:641 which uses
-   *   counts0 = Tensor.arange(ceildiv(chunk_num, 2), dtype=dtypes.uint32)
-   *
-   * Polygrad's poly_arange currently returns FLOAT32 (cumsum-of-step
-   * lowering), so we cast to UINT32 at the end. For numel < 2^24 this is
-   * bit-exact: cumulative addition of 1.0 N times is exact when N fits in
-   * the float32 mantissa, and CAST(float32, uint32) on a non-negative
-   * integer-valued float is the truncation (i.e. identity for these
-   * values). The bit-exact c2c_rand_threefry_pipeline test at
-   * test_nn.c:1488 covers this for N=8.
-   *
-   * After Phase D's pm_reduce_simplify the inner cumsum REDUCE collapses
-   * to a closed-form expression and the kernel emits
-   *     out[i] = THREEFRY((uint32)i, key)
-   * with no host buffer and no migrated_consts[64] dependency. */
-  PolyUOp *flat = poly_arange(ctx, 0.0, (double)numel, 1.0);
-  if (!flat) return NULL;
-  PolyUOp *counter_u32_flat = poly_cast(ctx, flat, POLY_UINT32);
-  PolyUOp *counter_t =
-      (ndim == 1) ? counter_u32_flat : poly_reshape(ctx, counter_u32_flat, (int64_t *)shape, ndim);
+  PolyUOp *counter_flat = poly_arange_int_by_id(ctx, 0, numel, 1, 7);
+  if (!counter_flat) return NULL;
+  PolyUOp *counter_t = reshape_logical_input(ctx, counter_flat, shape, ndim);
+  PolyUOp *key_t = poly_const_exact_int(ctx, POLY_UINT32, (int64_t)mixed_key);
 
-  PolyUOp *key_t = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int((int64_t)mixed_key));
+  if (poly_dtype_eq(out_dt, POLY_FLOAT64)) {
+    PolyUOp *bits_hi = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
+    PolyUOp *key2_t = poly_const_exact_int(ctx, POLY_UINT32, (int64_t)(mixed_key ^ 0x9E3779B9u));
+    PolyUOp *bits_lo = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key2_t, poly_arg_none());
+    PolyUOp *hi27 =
+        poly_alu2(ctx, POLY_OP_SHR, bits_hi, poly_const_exact_int(ctx, POLY_UINT32, 5));
+    PolyUOp *lo26 =
+        poly_alu2(ctx, POLY_OP_SHR, bits_lo, poly_const_exact_int(ctx, POLY_UINT32, 6));
+    PolyUOp *hi_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, hi27, poly_arg_none());
+    PolyUOp *lo_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, lo26, poly_arg_none());
+    PolyUOp *mant = poly_alu2(
+        ctx, POLY_OP_ADD,
+        poly_alu2(ctx, POLY_OP_MUL, hi_f, cdt(ctx, POLY_FLOAT64, 67108864.0)),
+        lo_f
+    );
+    return poly_alu2(ctx, POLY_OP_MUL, mant, cdt(ctx, POLY_FLOAT64, 1.0 / 9007199254740992.0));
+  }
 
   PolyUOp *bits = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
-  PolyUOp *sh = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT32, poly_arg_int(8));
-  PolyUOp *hi24 = poly_uop2(ctx, POLY_OP_SHR, POLY_UINT32, bits, sh, poly_arg_none());
-  PolyUOp *as_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, hi24, poly_arg_none());
-  return poly_alu2(ctx, POLY_OP_MUL, as_f, cf(ctx, as_f, 1.0 / 16777216.0));
+  PolyUOp *hi24 = poly_alu2(ctx, POLY_OP_SHR, bits, poly_const_exact_int(ctx, POLY_UINT32, 8));
+  PolyUOp *as_f = poly_uop1(ctx, POLY_OP_CAST, out_dt, hi24, poly_arg_none());
+  return poly_alu2(ctx, POLY_OP_MUL, as_f, cdt(ctx, out_dt, 1.0 / 16777216.0));
+}
+
+PolyUOp *poly_rand_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id) {
+  PolyDType out_dt;
+  if (!ffi_dtype_is_float_like(dtype_id, &out_dt)) return NULL;
+  PolyDType compute_dt = poly_dtype_eq(out_dt, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
+  PolyUOp *base = poly_rand_compute(ctx, shape, ndim, seed, compute_dt);
+  if (!base) return NULL;
+  return poly_dtype_eq(compute_dt, out_dt) ? base : poly_cast(ctx, base, out_dt);
+}
+
+PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
+  return poly_rand_by_id(ctx, shape, ndim, seed, 12);
+}
+
+PolyUOp *poly_randn_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id) {
+  PolyDType out_dt;
+  if (!ffi_dtype_is_float_like(dtype_id, &out_dt)) return NULL;
+  PolyDType compute_dt = poly_dtype_eq(out_dt, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
+
+  PolyUOp *u1 = poly_rand_compute(ctx, shape, ndim, seed, compute_dt);
+  PolyUOp *u2 = poly_rand_compute(ctx, shape, ndim, seed ^ 0x9E3779B97F4A7C15ull, compute_dt);
+  if (!u1 || !u2) return NULL;
+  PolyUOp *u1_safe = poly_maximum(ctx, u1, cdt(ctx, compute_dt, 1e-7));
+  PolyUOp *r = poly_alu1(
+      ctx, POLY_OP_SQRT,
+      poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, compute_dt, -2.0), poly_log(ctx, u1_safe))
+  );
+  PolyUOp *theta = poly_alu2(ctx, POLY_OP_MUL, cdt(ctx, compute_dt, 2.0 * M_PI), u2);
+  PolyUOp *result = poly_alu2(ctx, POLY_OP_MUL, r, poly_cos(ctx, theta));
+  return poly_dtype_eq(compute_dt, out_dt) ? result : poly_cast(ctx, result, out_dt);
 }
 
 PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) {
-  PolyUOp *u1 = poly_rand(ctx, shape, ndim, seed);
-  PolyUOp *u2 = poly_rand(ctx, shape, ndim, seed ^ 0x9E3779B97F4A7C15ull);
-  if (!u1 || !u2) return NULL;
-  PolyUOp *u1_safe = poly_maximum(ctx, u1, cf(ctx, u1, 1e-7));
-  PolyUOp *r = poly_alu1(
-      ctx, POLY_OP_SQRT, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u1, -2.0), poly_log(ctx, u1_safe))
-  );
-  PolyUOp *theta = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, u2, 2.0 * M_PI), u2);
-  return poly_alu2(ctx, POLY_OP_MUL, r, poly_cos(ctx, theta));
+  return poly_randn_by_id(ctx, shape, ndim, seed, 12);
 }
 
 PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, int upper) {
@@ -1871,6 +2078,16 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
       dense_targets ? poly_reshape(ctx, target, (int64_t *)target_shape, target_ndim) : target;
   if (sparse_targets) {
     const int64_t classes = logits_shape[axis];
+    int arange_dtype_id =
+        (classes > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
+                                       : poly_dtype_id_by_name("int32");
+    const PolyDType *class_dt_ptr = ffi_dtype_from_id(arange_dtype_id);
+    if (!class_dt_ptr) return NULL;
+    PolyDType class_dt = poly_dtype_scalar(*class_dt_ptr);
+    PolyUOp *target_idx = poly_dtype_eq(poly_dtype_scalar(target->dtype), class_dt)
+                              ? target
+                              : poly_cast(ctx, target, class_dt);
+
     int64_t target_us_shape[POLY_MAX_DIMS];
     for (int i = 0; i < axis; i++)
       target_us_shape[i] = target_shape[i];
@@ -1878,10 +2095,10 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
     for (int i = axis; i < target_ndim; i++)
       target_us_shape[i + 1] = target_shape[i];
 
-    PolyUOp *target_us = poly_reshape(ctx, target, target_us_shape, target_ndim + 1);
+    PolyUOp *target_us = poly_reshape(ctx, target_idx, target_us_shape, target_ndim + 1);
     PolyUOp *target_exp = poly_expand(ctx, target_us, (int64_t *)logits_shape, logits_ndim);
 
-    PolyUOp *classes_uop = poly_arange(ctx, 0.0, (double)classes, 1.0);
+    PolyUOp *classes_uop = poly_arange_int_by_id(ctx, 0, classes, 1, arange_dtype_id);
     int64_t classes_shape[POLY_MAX_DIMS];
     for (int i = 0; i < logits_ndim; i++)
       classes_shape[i] = 1;
@@ -2441,7 +2658,13 @@ PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   int64_t V = table_shape[0];
   int64_t D = table_shape[1];
 
-  PolyUOp *arange_buf = poly_arange(ctx, 0.0, (double)V, 1.0);
+  /* tinygrad tensor.py:_one_hot_along_dim chooses int32 unless num_classes
+   * overflows int32, then int64. Keep gather on the same integer class range
+   * so later collapse stages can see the same one-hot compare shape. */
+  int arange_dtype_id =
+      (V > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64") : poly_dtype_id_by_name("int32");
+  PolyUOp *arange_buf = poly_arange_int_by_id(ctx, 0, V, 1, arange_dtype_id);
+  if (!arange_buf) return NULL;
 
   int64_t idx_us_shape[POLY_MAX_DIMS];
   int idx_us_ndim = idx_ndim + 1;

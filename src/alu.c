@@ -95,6 +95,10 @@ static bool arg_to_bool(PolyArg a) {
   }
 }
 
+static bool arg_is_invalid(PolyArg a) {
+  return a.kind == POLY_ARG_INVALID;
+}
+
 /* Truncate result to dtype range */
 
 static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
@@ -127,6 +131,29 @@ static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
 /* exec_alu: evaluate an ALU op on constant operands */
 
 PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
+  if (op == POLY_OP_CAST && n_ops == 1) {
+    if (poly_dtype_is_bool(dtype)) return poly_arg_bool(arg_to_bool(ops[0]));
+    if (poly_dtype_is_int(dtype)) return truncate_result(poly_arg_int(arg_to_int(ops[0])), dtype);
+    if (poly_dtype_is_float(dtype))
+      return truncate_result(poly_arg_float(arg_to_float(ops[0])), dtype);
+    return ops[0];
+  }
+
+  /* Tinygrad exec_alu keeps WHERE branch values as-is, which matters for
+   * Invalid-carrying index masks. Do this before any numeric coercion. */
+  if (op == POLY_OP_WHERE && n_ops == 3) {
+    return arg_to_bool(ops[0]) ? ops[1] : ops[2];
+  }
+
+  /* Tinygrad preserves Invalid through integer/index binary ALU instead of
+   * coercing it to zero. Polygrad uses regular int dtypes in this domain, so
+   * we gate on integer output dtype rather than weakint specifically. */
+  if (poly_dtype_is_int(dtype) && poly_opset_has(POLY_GROUP_BINARY, op)) {
+    for (int i = 0; i < n_ops; i++) {
+      if (arg_is_invalid(ops[i])) return poly_arg_invalid();
+    }
+  }
+
   /* Float path */
   if (poly_dtype_is_float(dtype) || op == POLY_OP_CMPLT || op == POLY_OP_CMPNE ||
       op == POLY_OP_CMPEQ) {
@@ -184,9 +211,6 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
     case POLY_OP_CMPEQ:
       return poly_arg_bool(a == b);
     /* ternary */
-    case POLY_OP_WHERE:
-      r = arg_to_bool(ops[0]) ? b : c;
-      break;
     case POLY_OP_MULACC:
       r = a * b + c;
       break;
@@ -254,9 +278,6 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
     return poly_arg_bool(a != b);
   case POLY_OP_CMPEQ:
     return poly_arg_bool(a == b);
-  case POLY_OP_WHERE:
-    r = arg_to_bool(ops[0]) ? b : c;
-    break;
   case POLY_OP_MULACC:
     r = a * b + c;
     break;

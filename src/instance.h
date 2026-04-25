@@ -6,9 +6,10 @@
  *   - Entrypoints (forward, loss, etc.)
  *   - Optimizer state
  *
- * Execution goes through poly_realize() in the core. The instance
+ * Execution goes through poly_realize_with_bindings() in the core. The
+ * instance
  * builds PolyBufferBinding[] from its named buffers and calls
- * poly_realize(). Device is implicit in buffer handles.
+ * poly_realize_with_bindings(). Device is implicit in buffer handles.
  *
  * set_device() is a bulk rematerialization API that moves all buffer
  * handles to a new memory domain.
@@ -18,7 +19,7 @@
 #define POLY_INSTANCE_H
 
 #include "polygrad.h"
-#include "exec_plan.h" /* PolyDevice */
+#include "engine/schedule.h" /* PolyDevice */
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -99,7 +100,7 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
 /* Bulk rematerialization: moves all buffer handles to the target domain.
  * After set_device(CUDA), all buf_handles[].device are CUDA.
  * The next poly_instance_call() builds CUDA-domain bindings,
- * poly_realize() infers CUDA, compiles for CUDA, runs on CUDA.
+ * poly_realize_with_bindings() infers CUDA, compiles for CUDA, runs on CUDA.
  * Returns 0 on success, <0 if device is unsupported or unavailable. */
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device);
 

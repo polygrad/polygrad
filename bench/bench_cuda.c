@@ -2,7 +2,7 @@
 /*
  * bench_cuda.c -- CPU vs GPU benchmark
  *
- * Compares poly_realize() on CPU-domain vs CUDA-domain bindings.
+ * Compares poly_realize_with_bindings() on CPU-domain vs CUDA-domain bindings.
  *
  * Usage: ./build/bench_cuda [max_size]
  */
@@ -11,7 +11,7 @@
 
 #include "../src/codegen.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,21 +67,21 @@ static void bench_vecadd(int n, int iters) {
 
   /* CPU bindings */
   PolyBufferBinding cpu[] = { POLY_BIND_HOST(c, hc), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb) };
-  poly_realize(ctx, sink, cpu, 3); /* warmup */
+  poly_realize_with_bindings(ctx, sink, cpu, 3); /* warmup */
 
   /* CUDA bindings (device-resident, reused across iterations) */
   PolyUOp *bufs[] = { c, a, b };
   float *ptrs[] = { NULL, ha, hb };
   PolyBufferBinding gpu[3];
   build_cuda_binds(gpu, bufs, ptrs, 3);
-  poly_realize(ctx, sink, gpu, 3); /* warmup */
+  poly_realize_with_bindings(ctx, sink, gpu, 3); /* warmup */
 
   double t0 = now_us();
-  for (int it = 0; it < iters; it++) poly_realize(ctx, sink, cpu, 3);
+  for (int it = 0; it < iters; it++) poly_realize_with_bindings(ctx, sink, cpu, 3);
   double cpu_us = (now_us() - t0) / iters;
 
   t0 = now_us();
-  for (int it = 0; it < iters; it++) poly_realize(ctx, sink, gpu, 3);
+  for (int it = 0; it < iters; it++) poly_realize_with_bindings(ctx, sink, gpu, 3);
   double gpu_us = (now_us() - t0) / iters;
 
   printf("  vecadd  N=%-8d  CPU: %8.0f us  GPU: %8.0f us  speedup: %.2fx\n",
@@ -109,20 +109,20 @@ static void bench_mul(int n, int iters) {
   for (int i = 0; i < n; i++) { ha[i] = (float)i * 0.001f; hb[i] = 2.0f; }
 
   PolyBufferBinding cpu[] = { POLY_BIND_HOST(c, hc), POLY_BIND_HOST(a, ha), POLY_BIND_HOST(b, hb) };
-  poly_realize(ctx, sink, cpu, 3);
+  poly_realize_with_bindings(ctx, sink, cpu, 3);
 
   PolyUOp *bufs[] = { c, a, b };
   float *ptrs[] = { NULL, ha, hb };
   PolyBufferBinding gpu[3];
   build_cuda_binds(gpu, bufs, ptrs, 3);
-  poly_realize(ctx, sink, gpu, 3);
+  poly_realize_with_bindings(ctx, sink, gpu, 3);
 
   double t0 = now_us();
-  for (int it = 0; it < iters; it++) poly_realize(ctx, sink, cpu, 3);
+  for (int it = 0; it < iters; it++) poly_realize_with_bindings(ctx, sink, cpu, 3);
   double cpu_us = (now_us() - t0) / iters;
 
   t0 = now_us();
-  for (int it = 0; it < iters; it++) poly_realize(ctx, sink, gpu, 3);
+  for (int it = 0; it < iters; it++) poly_realize_with_bindings(ctx, sink, gpu, 3);
   double gpu_us = (now_us() - t0) / iters;
 
   printf("  mul     N=%-8d  CPU: %8.0f us  GPU: %8.0f us  speedup: %.2fx\n",
@@ -149,20 +149,20 @@ static void bench_reduce_sum(int n, int iters) {
   for (int i = 0; i < n; i++) ha[i] = 1.0f;
 
   PolyBufferBinding cpu[] = { POLY_BIND_HOST(c, &hc), POLY_BIND_HOST(a, ha) };
-  poly_realize(ctx, sink, cpu, 2);
+  poly_realize_with_bindings(ctx, sink, cpu, 2);
 
   PolyUOp *bufs[] = { c, a };
   float *ptrs[] = { NULL, ha };
   PolyBufferBinding gpu[2];
   build_cuda_binds(gpu, bufs, ptrs, 2);
-  poly_realize(ctx, sink, gpu, 2);
+  poly_realize_with_bindings(ctx, sink, gpu, 2);
 
   double t0 = now_us();
-  for (int it = 0; it < iters; it++) poly_realize(ctx, sink, cpu, 2);
+  for (int it = 0; it < iters; it++) poly_realize_with_bindings(ctx, sink, cpu, 2);
   double cpu_us = (now_us() - t0) / iters;
 
   t0 = now_us();
-  for (int it = 0; it < iters; it++) poly_realize(ctx, sink, gpu, 2);
+  for (int it = 0; it < iters; it++) poly_realize_with_bindings(ctx, sink, gpu, 2);
   double gpu_us = (now_us() - t0) / iters;
 
   printf("  reduce  N=%-8d  CPU: %8.0f us  GPU: %8.0f us  speedup: %.2fx\n",

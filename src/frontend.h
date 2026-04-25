@@ -5,7 +5,7 @@
  * and PolyDType (struct) across FFI boundaries. All functions take only
  * opaque pointers, integers, and doubles.
  *
- * Also provides poly_realize() which wraps the full
+ * Also provides poly_realize_with_bindings() which wraps the full
  * schedule → linearize → render → compile → execute pipeline.
  */
 
@@ -14,9 +14,11 @@
 
 #include "polygrad.h"
 #include "tensor.h"
-#include "exec_plan.h" /* PolyBuffer, PolyDevice */
+#include "engine/schedule.h" /* PolyBuffer, PolyDevice */
 
-#define POLYGRAD_ABI_VERSION 1
+/* The graph-side realize ABI now uses the batched Tensor-style poly_realize
+ * entrypoint, so bump the public ABI version alongside that refactor. */
+#define POLYGRAD_ABI_VERSION 4
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +37,7 @@ PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int64_t size, int dtype_id);
+int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
 
 /* Dynamic shapes (DEFINE_VAR / BIND) */
 
@@ -72,15 +75,17 @@ typedef struct PolyVarBinding {
   int32_t value; /* concrete runtime value */
 } PolyVarBinding;
 
-/* Schedule, compile, and execute a tensor-level SINK.
- * bindings[] maps each BUFFER UOp in the graph to its host data.
- * Returns 0 on success, -1 on error. */
-int poly_realize(PolyCtx *ctx, PolyUOp *tensor_sink, PolyBufferBinding *bindings, int n_bindings);
+/* Schedule, compile, and execute a tensor-level SINK using explicit runtime
+ * buffer bindings. bindings[] maps each BUFFER UOp in the graph to its
+ * concrete runtime handle. Returns 0 on success, -1 on error. */
+int poly_realize_with_bindings(
+    PolyCtx *ctx, PolyUOp *tensor_sink, PolyBufferBinding *bindings, int n_bindings
+);
 
 /* Extended realize with dynamic shape variable bindings.
  * var_bindings[] provides concrete values for DEFINE_VAR UOps.
  * BIND nodes in the graph are auto-extracted if var_bindings is NULL. */
-int poly_realize_ex(
+int poly_realize_with_bindings_ex(
     PolyCtx *ctx,
     PolyUOp *tensor_sink,
     PolyBufferBinding *bindings,
@@ -91,12 +96,14 @@ int poly_realize_ex(
 
 /* FFI-friendlier variant: separate arrays of buffer pointers and data pointers.
  * buffers[i] is a BUFFER UOp, datas[i] is the corresponding host pointer.
- * Device is inferred from POLY_DEVICE env var or defaults to CPU/WASM_JIT. */
-int poly_realize_flat(PolyCtx *ctx, PolyUOp *tensor_sink, PolyUOp **buffers, void **datas, int n);
+ * Device is inferred from POLY_DEVICE env var or defaults to CPU/WASM. */
+int poly_realize_with_bindings_flat(
+    PolyCtx *ctx, PolyUOp *tensor_sink, PolyUOp **buffers, void **datas, int n
+);
 
-/* Same as poly_realize_flat but with explicit device selection.
+/* Same as poly_realize_with_bindings_flat but with explicit device selection.
  * Use POLY_DEVICE_AUTO for default, or POLY_DEVICE_INTERP etc. */
-int poly_realize_flat_device(
+int poly_realize_with_bindings_flat_device(
     PolyCtx *ctx,
     PolyUOp *tensor_sink,
     PolyUOp **buffers,
@@ -116,7 +123,7 @@ int poly_realize_exec(PolyCtx *ctx, PolyUOp *tensor_sink);
  * Does schedule cache lookup + plan cache lookup, creating on miss.
  * The returned plan is cache-owned; caller must NOT free it.
  * Returns NULL on error. */
-PolyCompiledPlan *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDevice device);
+PolyCompiledSchedule *poly_get_plan(PolyCtx *ctx, PolyUOp *tensor_sink, PolyDevice device);
 
 /* WASM kernel rendering (for browser execution) */
 
@@ -137,7 +144,12 @@ PolyUOp *poly_kernel_buf(PolyCtx *ctx, int index);
 
 /* Step-level WASM render plan for multi-kernel compiled steps.
  * Browser hosts can compile/instantiate each kernel once, then reuse.
- * kernel bytes pointers are owned by the plan and valid until destroy(). */
+ * kernel bytes pointers are owned by the plan and valid until destroy().
+ *
+ * Migration note: this is a legacy export artifact from the JS-owned WASM
+ * execution path. Once WASM execution is driven entirely through the unified
+ * C schedule/run path with JS only providing backend bindings, this API
+ * should be removed. */
 typedef struct PolyWasmStepPlan PolyWasmStepPlan;
 PolyWasmStepPlan *poly_render_step_wasm_plan(PolyCtx *ctx, PolyUOp *tensor_sink);
 int poly_wasm_stepplan_n_kernels(const PolyWasmStepPlan *p);
@@ -159,7 +171,13 @@ int poly_wasm_stepplan_bindable_buf_index(const PolyWasmStepPlan *p, int bi);
  * Each kernel has WGSL source, grid/local dispatch dimensions, and
  * param-to-buffer mappings. JS hosts compile WGSL → GPUShaderModule,
  * create compute pipelines, and dispatch workgroups.
- * WGSL source pointers are owned by the plan and valid until destroy(). */
+ * WGSL source pointers are owned by the plan and valid until destroy().
+ *
+ * Migration note: this is a legacy export artifact from the older
+ * JS-controlled WebGPU execution path. The target architecture is the unified
+ * C backend path (`poly_realize` / `poly_run_schedule`) with JS only exposing
+ * backend bindings; when that migration is complete, this API should be
+ * removed. */
 typedef struct PolyWebGpuStepPlan PolyWebGpuStepPlan;
 PolyWebGpuStepPlan *poly_render_step_webgpu_plan(PolyCtx *ctx, PolyUOp *tensor_sink);
 int poly_webgpu_stepplan_n_kernels(const PolyWebGpuStepPlan *p);
@@ -281,7 +299,7 @@ void poly_sched_cache_flush(void);
 
 #ifdef POLY_HAS_CUDA
 
-/* DEPRECATED: use poly_realize() with CUDA-domain PolyBuffer bindings.
+/* DEPRECATED: use poly_realize_with_bindings() with CUDA-domain PolyBuffer bindings.
  * Legacy standalone CUDA realize path. Retained for Python/JS frontend compat. */
 int poly_realize_cuda(
     PolyCtx *ctx,

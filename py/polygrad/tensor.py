@@ -4,12 +4,14 @@ Supports float32 (default) and float64 dtypes.
 """
 
 import ctypes
+import hashlib
 import math
 import weakref
 
 import numpy as np
 
 from . import _ffi
+from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, ceildiv, dtypes, to_dtype
 from polygrad.uop.ops import UOp
 from polygrad.device import Buffer
 
@@ -18,6 +20,56 @@ from polygrad.device import Buffer
 # automatically. Used for post-realize retargeting and backward graph
 # discovery (replaces polygrad's legacy per-Tensor `_inputs` list).
 all_tensors: dict[weakref.ref, None] = {}
+
+# Strong frontend owner registry keyed by the C-side PolyBuffer* address value.
+# This is intentionally keyed by the retired/imported residency object, not by
+# BUFFER UOp identity. The core explicitly calls frontend_buffer_release(buffer)
+# when a HOST PolyBuffer is retired, and only then do we drop the owner entry.
+_host_buffers: dict[int, np.ndarray] = {}
+_frontend_buffer_release_cb = None
+
+
+def frontend_buffer_release(buffer_key):
+    """Drop the strong owner for a retired HOST PolyBuffer."""
+    _host_buffers.pop(int(buffer_key), None)
+
+
+def _ensure_frontend_buffer_release_registered():
+    global _frontend_buffer_release_cb
+    if _frontend_buffer_release_cb is not None:
+        return
+    _frontend_buffer_release_cb = _ffi.PolyFrontendBufferReleaseFn(frontend_buffer_release)
+    _ffi._lib.poly_set_frontend_buffer_release(_frontend_buffer_release_cb)
+
+
+def _buffer_key(ctx, uop):
+    raw = uop.raw if isinstance(uop, UOp) else uop
+    return int(_ffi._lib.poly_buffer_get_key(ctx, raw))
+
+
+def _uop_raw(uop):
+    return uop.raw if isinstance(uop, UOp) else uop
+
+
+def _ptr_value(ptr):
+    raw = _uop_raw(ptr)
+    if isinstance(raw, ctypes.c_void_p):
+        return 0 if raw.value is None else int(raw.value)
+    return int(raw)
+
+
+def _realized_buffer_uop(ctx, uop):
+    if not uop:
+        return None
+    wrapped = uop if isinstance(uop, UOp) else UOp(ctx, uop)
+    return wrapped.buffer or wrapped
+
+
+def _alloc_buffer_and_array(ctx, numel, dtype_name):
+    np_dt = _to_np_dtype(dtype_name)
+    buf = _ffi._lib.poly_buffer_by_id(ctx, numel, _dtype_id(dtype_name))
+    data = np.zeros(numel, dtype=np_dt)
+    return buf, data
 
 
 def _int64_array(vals):
@@ -59,6 +111,155 @@ def _shape_from_uop(ctx, uop):
         return ()
     dims = _ffi._lib.poly_uop_dims(ctx, uop)
     return tuple(dims[i] for i in range(ndim))
+
+
+I64_MIN = -(1 << 63)
+I64_MAX = (1 << 63) - 1
+_KNOWN_DTYPE_NAMES = (
+    'bool', 'int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32',
+    'int64', 'uint64', 'float16', 'bfloat16', 'float32', 'float64',
+)
+_DTYPE_ID_CACHE = {}
+_DTYPE_NAME_BY_ID = {}
+_U64_MASK = (1 << 64) - 1
+
+
+def _dtype_name(dtype, default='float32'):
+    # Normalize through the shared dtype helpers first so Python and the C
+    # frontend talk about the same scalar names before ids enter the picture.
+    target = default if dtype is None else dtype
+    if isinstance(target, str):
+        dt = to_dtype(target)
+    else:
+        try:
+            dt = to_dtype(target)
+        except AttributeError:
+            dt = _from_np_dtype(np.dtype(target))
+    sdt = dt.scalar()
+    if sdt == dtypes.bool:
+        return 'bool'
+    if sdt == dtypes.int8:
+        return 'int8'
+    if sdt == dtypes.uint8:
+        return 'uint8'
+    if sdt == dtypes.int16:
+        return 'int16'
+    if sdt == dtypes.uint16:
+        return 'uint16'
+    if sdt == dtypes.int32:
+        return 'int32'
+    if sdt == dtypes.uint32:
+        return 'uint32'
+    if sdt == dtypes.int64:
+        return 'int64'
+    if sdt == dtypes.uint64:
+        return 'uint64'
+    if sdt == dtypes.float16:
+        return 'float16'
+    if sdt == dtypes.bfloat16:
+        return 'bfloat16'
+    if sdt == dtypes.float32:
+        return 'float32'
+    if sdt == dtypes.float64:
+        return 'float64'
+    return INVERSE_DTYPES_DICT.get(sdt.name, sdt.name)
+
+
+def _dtype_id(dtype):
+    # JS already asks the core for dtype ids by name; Python needs the same
+    # rule so frontend wrappers do not hard-code a second dtype-id table.
+    name = _dtype_name(dtype, default='float32')
+    cached = _DTYPE_ID_CACHE.get(name)
+    if cached is not None:
+        return cached
+    dtype_id = _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8'))
+    if dtype_id < 0:
+        raise ValueError(f'unsupported dtype: {name}')
+    _DTYPE_ID_CACHE[name] = dtype_id
+    _DTYPE_NAME_BY_ID[dtype_id] = name
+    return dtype_id
+
+
+def _dtype_name_from_id(dtype_id, default='float32'):
+    if dtype_id in _DTYPE_NAME_BY_ID:
+        return _DTYPE_NAME_BY_ID[dtype_id]
+    for name in _KNOWN_DTYPE_NAMES:
+        if _dtype_id(name) == dtype_id:
+            return name
+    return default
+
+
+def _shape_tuple(*shape):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+        shape = tuple(shape[0])
+    return tuple(shape)
+
+
+def _uop_dtype_name(ctx, uop, default='float32'):
+    # Ask the realized UOp for its dtype because Python-side float heuristics
+    # were hiding valid int and bool results from the frontend.
+    raw = uop.raw if isinstance(uop, UOp) else uop
+    dtype_id = _ffi._lib.poly_uop_dtype_id(ctx, raw) if raw else -1
+    return _dtype_name_from_id(dtype_id, default)
+
+
+def _creation_meta(kwargs):
+    # Static constructors do not have input tensors to inherit ctx/device from,
+    # so centralize the frontend defaults instead of re-encoding them per op.
+    from . import _default_ctx
+    from .device import Device
+    ctx = kwargs.get('_ctx') or _default_ctx
+    dev = Device.canonicalize(kwargs.get('_device') if '_device' in kwargs else kwargs.get('device'))
+    requires_grad = kwargs.get('requires_grad', False)
+    return ctx, dev, requires_grad
+
+
+def _shape_arg(shape):
+    # Reuse one normalization path so every constructor feeds the C helpers the
+    # same shape encoding and errors on bad dimensions the same way.
+    shape = tuple(int(s) for s in shape)
+    if not shape:
+        return None, 0, shape
+    dims, ndim = _int64_array(shape)
+    return dims, ndim, shape
+
+
+def _py_scalar(value):
+    # Collapse NumPy scalar wrappers early so constructor validation matches the
+    # behavior of plain Python literals and tinygrad-style call sites.
+    return value.item() if isinstance(value, np.generic) else value
+
+
+def _require_i64(value, what):
+    # Typed constructor helpers accept int64 payloads, so fail before the FFI
+    # boundary instead of silently truncating Python integers.
+    ivalue = int(value)
+    if ivalue < I64_MIN or ivalue > I64_MAX:
+        raise ValueError(f'{what} {ivalue} is out of int64 range')
+    return ivalue
+
+
+def _created_tensor(ctx, uop, dtype_name, device, requires_grad, op_name):
+    # Constructors should trust the core for final shape metadata so Python
+    # does not grow a second copy of shape logic for the same helper.
+    if not uop:
+        raise RuntimeError(f'{op_name} failed')
+    return Tensor(
+        _ctx=ctx, _uop=uop, _shape=_shape_from_uop(ctx, uop), _inputs=[],
+        requires_grad=requires_grad, _dtype=dtype_name, _device=device,
+    )
+
+
+def _rng_device_tag(device):
+    if not isinstance(device, str):
+        raise ValueError(f'random constructors support only a single device, got {device!r}')
+    return int.from_bytes(hashlib.sha256(device.encode('utf-8')).digest()[:8], 'big')
+
+
+def _next_rng_seed(device):
+    counter = Tensor._device_rng_counters.get(device, 0)
+    Tensor._device_rng_counters[device] = counter + 1
+    return (Tensor._seed + _rng_device_tag(device) + counter * 0x9E3779B97F4A7C15) & _U64_MASK
 
 
 class Variable:
@@ -128,6 +329,8 @@ class Tensor:
     training = False  # tinygrad compat
     _compile_mode = False  # suppress realize() for compile_step tracing
     _compile_assigns_ordered = []  # class-level: ASSIGN UOps in program order
+    _seed = 0
+    _device_rng_counters = {}
 
     def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
                  _buf_uop=None, _data=None, _shape=None, _inputs=None, _dtype=None, _device=None):
@@ -141,34 +344,50 @@ class Tensor:
             # Internal construction (from ops) -- shape is on the UOp.
             # Accept either a UOp instance or a raw ctypes pointer from FFI.
             self.uop = _uop if isinstance(_uop, UOp) else UOp(self._ctx, _uop)
+            self._buf_uop = _buf_uop
             self._data = _data
             self._inputs = _inputs or []
             self._dtype_str = _dtype or 'float32'
         else:
             # User construction from data
+            _ensure_frontend_buffer_release_registered()
             if isinstance(data, (int, float)):
                 data = [data]
-            # Resolve dtype string
-            dt = dtype or 'float32'
-            if hasattr(dt, '__class__') and dt.__class__.__name__ == 'dtypes':
-                dt = str(dt)
-            np_dt = np.float64 if dt == 'float64' else np.float32
+            dt = _dtype_name(dtype, default='float32')
+            import_dt = dt
+            post_cast_dt = None
+            np_dt = _to_np_dtype(dt)
+            if dt == 'bfloat16':
+                import_dt = 'float32'
+                post_cast_dt = dt
+                np_dt = np.float32
             arr = np.ascontiguousarray(data, dtype=np_dt)
             self._data = arr.ravel()
             self._dtype_str = dt
             # Polygrad equivalent of tinygrad's _fromnp: UOp.from_host creates
             # the BUFFER UOp, registers a PolyBuffer wrapping the NumPy host
             # bytes in ctx->buffers, and wraps in RESHAPE when ndim>1.
-            # self._data owns the memory; C borrows the pointer.
-            dtype_id = self._DTYPE_IDS.get(dt, 13 if dt == 'float64' else 12)
+            # The frontend keeps a second strong owner entry keyed by the
+            # C-side PolyBuffer* address value, not by the BUFFER UOp.
+            dtype_id = _dtype_id(import_dt)
             if len(arr.shape) > 1:
                 dims, ndim = _int64_array(arr.shape)
             else:
                 dims, ndim = None, 0
-            self.uop = UOp.from_host(
+            imported = UOp.from_host(
                 self._ctx, self._data.ctypes.data, self._data.nbytes,
                 dtype_id, dims, ndim,
             )
+            self.uop = imported
+            if post_cast_dt is not None:
+                cast_uop = _ffi._lib.poly_cast_by_id(self._ctx, imported.raw, _dtype_id(post_cast_dt))
+                if not cast_uop:
+                    raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
+                self.uop = UOp(self._ctx, cast_uop)
+            self._buf_uop = self.uop.buffer or self.uop
+            key = _buffer_key(self._ctx, self._buf_uop)
+            if key:
+                _host_buffers[key] = self._data
             self._inputs = []
 
         self._requires_grad = requires_grad
@@ -252,6 +471,7 @@ class Tensor:
         ret._ctx = self._ctx
         ret._dtype_str = self._dtype_str
         ret._device = self._device
+        ret._buf_uop = None
         ret._data = None
         ret._inputs = []
         ret._is_param = False
@@ -264,10 +484,10 @@ class Tensor:
     # --- Realization ---
 
     def _is_leaf(self):
-        return self._data is not None and self._buf_uop is not None
+        return self._buf_uop is not None
 
     def _collect_leaves(self, seen=None):
-        """Walk the Python tensor graph to find all leaf tensors with data."""
+        """Walk the Python tensor graph to find tensors at buffer boundaries."""
         if seen is None:
             seen = set()
         tid = id(self)
@@ -329,7 +549,9 @@ class Tensor:
         # Save logical shape before assign (ASSIGN normalizes to flat BUFFER)
         self._assign_shape = self.shape
         target_uop = self.uop
-        assign_uop = _ffi._lib.poly_assign(self._ctx, target_uop, x.uop)
+        assign_uop = UOp(self._ctx, _ffi._lib.poly_assign(
+            self._ctx, _uop_raw(target_uop), _uop_raw(x.uop)
+        ))
         self._assign_data = self._data
         self._assign_buffer = self._buf_uop
         self.uop = assign_uop
@@ -370,7 +592,9 @@ class Tensor:
         all_bindings = []
         seen_bufs = set()
         for leaf in leaves:
-            buf_id = leaf._buf_uop
+            if leaf._data is None or leaf._buf_uop is None:
+                continue
+            buf_id = _ptr_value(leaf._buf_uop)
             if buf_id in seen_bufs:
                 continue
             seen_bufs.add(buf_id)
@@ -379,12 +603,12 @@ class Tensor:
         n = len(all_bindings)
         c_bindings = (_ffi.PolyBufferBinding * n)()
         for i, (buf, data) in enumerate(all_bindings):
-            c_bindings[i].buffer = buf
+            c_bindings[i].buffer = _uop_raw(buf)
             c_bindings[i].handle.ptr = data
 
-        ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, n)
+        ret = _ffi._lib.poly_realize_with_bindings(self._ctx, sink, c_bindings, n)
         if ret != 0:
-            raise RuntimeError(f'poly_realize failed (assign) {ret}')
+            raise RuntimeError(f'poly_realize_with_bindings failed (assign) {ret}')
 
         # Restore: data was updated in-place, point UOp back to buffer
         self._data = target_data
@@ -403,20 +627,65 @@ class Tensor:
     def realize(self, *lst, do_update_stats=True):
         """Triggers the computation needed to create these Tensor(s).
         Filters out tensors already with buffer identity, batches the rest
-        into a single SINK via poly_realize_uops, and retargets each
+        into a single graph-side realize call, and retargets each
         tensor's .uop to its realized buffer-identity UOp."""
-        targets = [x for x in (self,) + lst if not x.uop.has_buffer_identity()]
+        if Tensor._compile_mode:
+            for t in (self,) + lst:
+                if not hasattr(t, '_assign_buffer'):
+                    continue
+                Tensor._compile_assigns_ordered.append(_uop_raw(t.uop))
+                target_buffer = t._assign_buffer
+                target_data = t._assign_data
+                orig_shape = getattr(t, '_assign_shape', ())
+                t._data = target_data
+                t._buf_uop = target_buffer
+                if len(orig_shape) > 1:
+                    dims, ndim = _int64_array(orig_shape)
+                    t.uop = UOp(t._ctx, _ffi._lib.poly_reshape(
+                        t._ctx, _uop_raw(target_buffer), dims, ndim
+                    ))
+                else:
+                    t.uop = target_buffer
+                t._inputs = []
+                del t._assign_data
+                del t._assign_buffer
+            return self
+
+        targets = [
+            x for x in (self,) + lst
+            if not (x.uop.has_buffer_identity() and x.uop.is_realized)
+        ]
         if not targets:
             return self
         n = len(targets)
         in_arr = (ctypes.c_void_p * n)(*[t.uop.raw for t in targets])
         out_arr = (ctypes.c_void_p * n)()
-        rc = _ffi._lib.poly_realize_uops(self._ctx, in_arr, n, out_arr)
+        rc = _ffi._lib.poly_realize(self._ctx, in_arr, n, out_arr)
         if rc != 0:
-            raise RuntimeError('poly_realize_uops failed')
+            raise RuntimeError('poly_realize failed')
         for t, raw in zip(targets, out_arr):
+            if hasattr(t, '_assign_buffer'):
+                target_buffer = t._assign_buffer
+                target_data = t._assign_data
+                orig_shape = getattr(t, '_assign_shape', ())
+                t._data = target_data
+                t._buf_uop = target_buffer
+                if len(orig_shape) > 1:
+                    dims, ndim = _int64_array(orig_shape)
+                    t.uop = UOp(t._ctx, _ffi._lib.poly_reshape(
+                        t._ctx, _uop_raw(target_buffer), dims, ndim
+                    ))
+                else:
+                    t.uop = target_buffer
+                t._inputs = []
+                del t._assign_data
+                del t._assign_buffer
+                continue
             t._saved_uop = t.uop
+            t._saved_inputs = t._inputs[:] if t._inputs else None
             t.uop = UOp(t._ctx, raw)
+            t._buf_uop = _realized_buffer_uop(t._ctx, t.uop)
+            t._inputs = []
         return self
 
     def _buffer(self) -> Buffer:
@@ -444,10 +713,66 @@ class Tensor:
         arr = self.numpy()
         if arr.size != 1:
             raise ValueError(f'item() requires scalar tensor, got shape {self.shape}')
-        return float(arr.flat[0])
+        return arr.flat[0].item()
 
     def tolist(self):
         return self.numpy().tolist()
+
+    def kernels(self, device='webgpu', *, materialize=True):
+        """Render backend kernels for this tensor without browser execution.
+
+        This is the structured counterpart to tinygrad's DEBUG>=4 printing:
+        it returns rendered kernel sources directly from the native C plan
+        path. For `device='webgpu'` that means WGSL via
+        `poly_render_step_webgpu_plan`, with no browser runtime involved.
+
+        By default `materialize=True` matches the normal readback/realize path
+        and wraps movement-only graphs in `contiguous()` before rendering.
+        """
+        dev = str(device).lower()
+        if dev != 'webgpu':
+            raise NotImplementedError(f'kernels currently supports only webgpu, got {device!r}')
+
+        x = self.cast(self._dtype_str).contiguous() if materialize else self
+        numel = x.numel()
+        dtype_id = _dtype_id(x._dtype_str)
+
+        out_buf = _ffi._lib.poly_buffer_by_id(x._ctx, numel, dtype_id)
+        if not out_buf:
+            raise RuntimeError('poly_buffer_by_id failed while building debug sink')
+        store = _ffi._lib.poly_store_val(x._ctx, out_buf, x.uop.raw)
+        if not store:
+            raise RuntimeError('poly_store_val failed while building debug sink')
+        sink = _ffi._lib.poly_sink1(x._ctx, store)
+        if not sink:
+            raise RuntimeError('poly_sink1 failed while building debug sink')
+
+        plan = _ffi._lib.poly_render_step_webgpu_plan(x._ctx, sink)
+        if not plan:
+            raise RuntimeError('poly_render_step_webgpu_plan failed')
+
+        try:
+            kernels = []
+            n_kernels = _ffi._lib.poly_webgpu_stepplan_n_kernels(plan)
+            for k in range(n_kernels):
+                out_len = ctypes.c_int(0)
+                src = _ffi._lib.poly_webgpu_stepplan_kernel_wgsl(
+                    plan, k, ctypes.byref(out_len)
+                )
+                kernels.append({
+                    'index': k,
+                    'n_params': _ffi._lib.poly_webgpu_stepplan_kernel_n_params(plan, k),
+                    'grid': tuple(
+                        _ffi._lib.poly_webgpu_stepplan_kernel_grid(plan, k, d) for d in range(3)
+                    ),
+                    'local': tuple(
+                        _ffi._lib.poly_webgpu_stepplan_kernel_local(plan, k, d) for d in range(3)
+                    ),
+                    'wgsl': src.decode('utf-8') if src else '',
+                })
+            return kernels
+        finally:
+            _ffi._lib.poly_webgpu_stepplan_destroy(plan)
 
     def detach(self):
         return Tensor(self.numpy(), dtype=self._dtype_str, device=self._device)
@@ -496,28 +821,12 @@ class Tensor:
 
     # --- Dtype casting ---
 
-    # Dtype name -> cast_by_id index mapping
-    _DTYPE_IDS = {
-        'bool': 1, 'int8': 2, 'uint8': 3,
-        'int16': 4, 'uint16': 5, 'int32': 6, 'uint32': 7,
-        'int64': 8, 'uint64': 9, 'float16': 10, 'bfloat16': 11,
-        'float32': 12, 'float64': 13,
-    }
-
     def cast(self, dtype):
         """Cast tensor to the given dtype. No-op if already that dtype."""
-        from .dtype import dtypes
-        if isinstance(dtype, str):
-            target_name = dtype
-        elif hasattr(dtype, 'name'):
-            target_name = dtype.name
-        else:
-            target_name = str(dtype)
+        target_name = _dtype_name(dtype, default=self._dtype_str)
         if target_name == self._dtype_str:
             return self
-        dtype_id = self._DTYPE_IDS.get(target_name)
-        if dtype_id is None:
-            raise ValueError(f'unsupported cast target dtype: {target_name}')
+        dtype_id = _dtype_id(target_name)
         uop = _ffi._lib.poly_cast_by_id(self._ctx, self.uop, dtype_id)
         if not uop:
             raise RuntimeError(f'poly_cast_by_id failed for dtype {target_name}')
@@ -559,13 +868,10 @@ class Tensor:
     # --- Internal helpers ---
 
     def _make_result(self, uop, shape, inputs):
-        # Infer dtype from inputs: if any input is float64, result is float64
-        dt = 'float32'
         dev = self._infer_device(inputs)
-        for t in inputs:
-            if hasattr(t, '_dtype_str') and t._dtype_str == 'float64':
-                dt = 'float64'
-                break
+        # Result dtype comes from the core graph now; inheriting from Python
+        # inputs was the stale behavior that made bool/int ops look floaty.
+        dt = _uop_dtype_name(self._ctx, uop, self._dtype_str)
         return Tensor(
             _ctx=self._ctx, _uop=uop, _shape=shape, _inputs=inputs,
             requires_grad=any(t._requires_grad for t in inputs),
@@ -590,12 +896,22 @@ class Tensor:
     def _ensure_tensor(self, other):
         if isinstance(other, Tensor):
             return other
-        if isinstance(other, (int, float)):
-            # Scalar constant — create a CONST UOp with matching dtype
-            if self._dtype_str == 'float64':
-                c = _ffi._lib.poly_const_double(self._ctx, float(other))
+        if isinstance(other, np.generic):
+            other = other.item()
+        if isinstance(other, (bool, int, float)):
+            dt = to_dtype(self._dtype_str)
+            # Normalize the Python scalar through the active tensor dtype first
+            # so implicit constants stop bypassing the same dtype rules as core
+            # constructors and comparisons.
+            normalized = dt.const(other)
+            dtype_id = _dtype_id(self._dtype_str)
+            if dtypes.is_bool(dt) or dtypes.is_int(dt):
+                int_value = int(bool(normalized)) if dtypes.is_bool(dt) else int(normalized)
+                if int_value < I64_MIN or int_value > I64_MAX:
+                    raise ValueError(f'scalar {int_value} is out of int64 range')
+                c = _ffi._lib.poly_const_int_by_id(self._ctx, int_value, dtype_id)
             else:
-                c = _ffi._lib.poly_const_float(self._ctx, float(other))
+                c = _ffi._lib.poly_const_float_by_id(self._ctx, float(normalized), dtype_id)
             return Tensor(_ctx=self._ctx, _uop=c, _shape=(), _inputs=[],
                           _dtype=self._dtype_str, _device=self._device)
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
@@ -1327,43 +1643,85 @@ class Tensor:
 
     @staticmethod
     def zeros(*shape, **kwargs):
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.zeros(shape, dtype=np_dt), **kwargs)
+        return Tensor.full(_shape_tuple(*shape), 0.0, **kwargs)
 
     @staticmethod
     def ones(*shape, **kwargs):
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.ones(shape, dtype=np_dt), **kwargs)
+        return Tensor.full(_shape_tuple(*shape), 1.0, **kwargs)
 
     @staticmethod
     def full(shape, fill_value, **kwargs):
-        if isinstance(shape, int):
-            shape = (shape,)
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.full(shape, fill_value, dtype=np_dt), **kwargs)
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        shape = (shape,) if isinstance(shape, int) else _shape_tuple(shape)
+        fill_value = _py_scalar(fill_value)
+        inferred = kwargs.get('dtype', dtypes.from_py(fill_value))
+        dtype_name = _dtype_name(inferred, default='float32')
+        dtype_id = _dtype_id(dtype_name)
+        dims, ndim, _ = _shape_arg(shape)
+
+        dt = to_dtype(dtype_name)
+        if dtypes.is_float(dt):
+            uop = _ffi._lib.poly_full_float_by_id(ctx, dims, ndim, float(fill_value), dtype_id)
+        else:
+            uop = _ffi._lib.poly_full_int_by_id(
+                ctx, dims, ndim, _require_i64(fill_value, 'fill_value'), dtype_id
+            )
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_full_*_by_id')
 
     @staticmethod
-    def arange(stop, start=0, step=1, **kwargs):
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.arange(start, stop, step, dtype=np_dt), **kwargs)
+    def arange(start, stop=None, step=1, **kwargs):
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        start = _py_scalar(start)
+        stop = _py_scalar(stop) if stop is not None else None
+        step = _py_scalar(step)
+        if stop is None:
+            stop, start = start, 0
+
+        inferred = kwargs.get(
+            'dtype',
+            dtypes.default_float if any(isinstance(x, float) for x in (start, stop, step)) else dtypes.default_int,
+        )
+        dtype_name = _dtype_name(inferred, default='float32')
+        dtype_id = _dtype_id(dtype_name)
+        dt = to_dtype(dtype_name)
+
+        if dtypes.is_float(dt):
+            uop = _ffi._lib.poly_arange_float_by_id(
+                ctx, float(start), float(stop), float(step), dtype_id
+            )
+        else:
+            uop = _ffi._lib.poly_arange_int_by_id(
+                ctx,
+                _require_i64(start, 'start'),
+                _require_i64(stop, 'stop'),
+                _require_i64(step, 'step'),
+                dtype_id,
+            )
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_arange_*_by_id')
 
     @staticmethod
     def rand(*shape, **kwargs):
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.random.rand(*shape).astype(np_dt), **kwargs)
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        shape = _shape_tuple(*shape)
+        dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
+        dt = to_dtype(dtype_name)
+        if not dtypes.is_float(dt):
+            raise ValueError(f'rand only supports float dtypes, got {dt}')
+        dims, ndim, _ = _shape_arg(shape)
+        uop = _ffi._lib.poly_rand_by_id(ctx, dims, ndim, _next_rng_seed(dev), _dtype_id(dtype_name))
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_rand_by_id')
 
     @staticmethod
     def randn(*shape, **kwargs):
-        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = tuple(shape[0])
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.random.randn(*shape).astype(np_dt), **kwargs)
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        shape = _shape_tuple(*shape)
+        dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
+        dt = to_dtype(dtype_name)
+        if not dtypes.is_float(dt):
+            raise ValueError(f'randn only supports float dtypes, got {dt}')
+        dims, ndim, _ = _shape_arg(shape)
+        uop = _ffi._lib.poly_randn_by_id(ctx, dims, ndim, _next_rng_seed(dev), _dtype_id(dtype_name))
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_randn_by_id')
 
     @staticmethod
     def randint(low, high=None, shape=(1,), **kwargs):
@@ -1372,18 +1730,38 @@ class Tensor:
             low = 0
         if isinstance(shape, int):
             shape = (shape,)
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.random.randint(low, high, size=shape).astype(np_dt), **kwargs)
+        if not isinstance(low, int) or not isinstance(high, int):
+            raise TypeError(f'low={low!r} and high={high!r} must be integers')
+        rand_kwargs = dict(kwargs)
+        dtype_name = _dtype_name(rand_kwargs.pop('dtype', dtypes.int32), default='int32')
+        dt = to_dtype(dtype_name)
+        if not dtypes.is_int(dt):
+            raise TypeError(f'dtype={dt!r} must be int')
+        if high <= low:
+            raise ValueError(f'high must be greater than low, got {low=} {high=}')
+        return (Tensor.rand(*shape, dtype='float32', **rand_kwargs) * (high - low) + low).cast(dtype_name)
 
     @staticmethod
     def linspace(start, stop, steps, **kwargs):
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.linspace(start, stop, steps, dtype=np_dt), **kwargs)
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
+        uop = _ffi._lib.poly_linspace_by_id(
+            ctx,
+            float(_py_scalar(start)),
+            float(_py_scalar(stop)),
+            _require_i64(_py_scalar(steps), 'steps'),
+            _dtype_id(dtype_name),
+        )
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_linspace_by_id')
 
     @staticmethod
-    def eye(n, **kwargs):
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.eye(n, dtype=np_dt), **kwargs)
+    def eye(n, m=None, **kwargs):
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
+        rows = _require_i64(_py_scalar(n), 'n')
+        cols = rows if m is None else _require_i64(_py_scalar(m), 'm')
+        uop = _ffi._lib.poly_eye_by_id(ctx, rows, cols, _dtype_id(dtype_name))
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_eye_by_id')
 
     @staticmethod
     def empty(*shape, **kwargs):
@@ -1394,7 +1772,8 @@ class Tensor:
 
     @staticmethod
     def manual_seed(seed):
-        np.random.seed(seed)
+        Tensor._seed = int(seed) & _U64_MASK
+        Tensor._device_rng_counters = {}
 
     @staticmethod
     def cat(*tensors, dim=0):
@@ -1473,31 +1852,16 @@ class Tensor:
             return  # noop: keep lazy graph intact for compile_step tracing
         if self._data is not None:
             return
-        if self._is_leaf():
+        if self._buf_uop is not None and self._saved_inputs is None and self.uop.is_realized:
             return
-
-        leaves = self._collect_leaves()
-        numel = int(np.prod(self.shape)) if self.shape else 1
-        out_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
-        out_data = np.zeros(numel, dtype=np.float32)
-
-        store = _ffi._lib.poly_store_val(self._ctx, out_buf, self.uop)
-        sink = _ffi._lib.poly_sink1(self._ctx, store)
-
-        all_bindings = []
-        for leaf in leaves:
-            all_bindings.append((leaf._buf_uop, leaf._data.ctypes.data))
-        all_bindings.append((out_buf, out_data.ctypes.data))
-
-        n = len(all_bindings)
-        c_bindings = (_ffi.PolyBufferBinding * n)()
-        for i, (buf, data) in enumerate(all_bindings):
-            c_bindings[i].buffer = buf
-            c_bindings[i].handle.ptr = data
-
-        ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, n)
-        if ret == 0:
-            self._data = out_data
+        cached = Tensor(
+            _ctx=self._ctx,
+            _uop=self.uop,
+            _shape=self.shape,
+            _dtype=self._dtype_str,
+            _device=self._device,
+        )
+        self._data = np.ascontiguousarray(cached.numpy()).reshape(-1)
 
     def _collect_realized_intermediates(self, seen=None):
         """Walk the tensor graph (via _saved_inputs) to find all realized
@@ -1572,7 +1936,7 @@ class Tensor:
         seen_bufs = set()
         unique_leaves = []
         for l in leaves:
-            buf_id = id(l._buf_uop) if l._buf_uop else id(l)
+            buf_id = _ptr_value(l._buf_uop) if l._buf_uop else id(l)
             if buf_id not in seen_bufs:
                 seen_bufs.add(buf_id)
                 unique_leaves.append(l)
@@ -1585,14 +1949,8 @@ class Tensor:
             if not grad_uop:
                 raise RuntimeError('poly_grad returned NULL for a leaf tensor')
 
-            snap_leaves = []
-            for l in all_leaves:
-                snap_leaves.append(Tensor(
-                    _ctx=self._ctx, _uop=l.uop, _buf_uop=l._buf_uop, _data=l._data,
-                    _shape=l.shape, _dtype=l._dtype_str, _device=l._device,
-                ))
             grad_tensor = Tensor(
-                _ctx=self._ctx, _uop=grad_uop, _shape=leaf.shape, _inputs=snap_leaves,
+                _ctx=self._ctx, _uop=grad_uop, _shape=leaf.shape,
                 _dtype=leaf._dtype_str, _device=leaf._device,
             )
             if leaf._grad is not None:
@@ -1616,7 +1974,7 @@ class Tensor:
         inter_set = set(id(t) for t in intermediates)
         inter_map = {id(t): t for t in intermediates}
 
-        # Map: tensor id → (grad_numpy_data, grad_buffer_uop)
+        # Map: tensor id -> realized upstream grad tensor for this intermediate.
         upstream_grads = {}
 
         # ── Pre-compute segment info and contribution counts ─────
@@ -1661,6 +2019,10 @@ class Tensor:
         # Process each intermediate only after ALL segments that contribute
         # to its upstream gradient have been processed.
         received = {id(t): 0 for t in intermediates}
+        for t in loss_targets:
+            tid = id(t)
+            if tid in inter_set and tid in upstream_grads:
+                received[tid] += 1
         processed = set()
         ready = deque()
 
@@ -1669,7 +2031,9 @@ class Tensor:
         # upstream and all contributions are already in.
         for seg_tensor in intermediates:
             tid = id(seg_tensor)
-            if tid in upstream_grads and contribution_count[tid] == received[tid]:
+            if tid in upstream_grads and (
+                contribution_count[tid] == 0 or contribution_count[tid] == received[tid]
+            ):
                 ready.append(seg_tensor)
 
         while ready:
@@ -1682,7 +2046,7 @@ class Tensor:
             if tid not in upstream_grads:
                 continue
 
-            up_data, up_buf = upstream_grads[tid]
+            up_grad = upstream_grads[tid]
             seg_leaves, seg_targets = seg_info[tid]
 
             if not seg_targets:
@@ -1690,10 +2054,10 @@ class Tensor:
 
             # ── Generic VJP approach ──────────────────────────────
             # Build VJP loss = sum(upstream_grad * segment_output)
-            up_uop = up_buf
+            up_uop = up_grad.uop
             if len(seg_tensor.shape) > 1:
                 dims, ndim = _int64_array(seg_tensor.shape)
-                up_uop = _ffi._lib.poly_reshape(self._ctx, up_buf, dims, ndim)
+                up_uop = _ffi._lib.poly_reshape(self._ctx, up_uop, dims, ndim)
 
             vjp_prod = _ffi._lib.poly_alu2(
                 self._ctx, _ffi.OPS['MUL'], up_uop, seg_tensor._saved_uop)
@@ -1709,9 +2073,7 @@ class Tensor:
 
             self._realize_segment_grads(
                 vjp_loss, None, seg_targets, seg_leaves,
-                upstream_grads,
-                extra_bufs=[(up_buf, up_data)],
-                inter_set=inter_set)
+                upstream_grads, inter_set=inter_set)
 
             # Check if any intermediate targets are now ready
             for t in seg_targets:
@@ -1740,8 +2102,9 @@ class Tensor:
         loss_uop:   local loss UOp for this segment
         targets:    tensors to diff w.r.t. (params + intermediates)
         all_leaves: all leaf tensors in this segment (for bindings)
-        upstream_grads: dict to store intermediate gradient data
-        extra_bufs: additional (buffer, data) pairs for bindings
+        upstream_grads: dict to store realized intermediate grad tensors
+        extra_bufs: legacy arg, unused now that gradients are materialized
+                    through the core realize path
         inter_set:  set of id(t) for intermediate tensors (must be realized)
         """
         if inter_set is None:
@@ -1753,7 +2116,7 @@ class Tensor:
         # poly_grad_many: single reverse pass, all targets
         wrts = (_ffi._ptr * n)()
         for i, t in enumerate(targets):
-            wrts[i] = t.uop
+            wrts[i] = _uop_raw(t.uop)
         out_grads = (_ffi._ptr * n)()
 
         ret = _ffi._lib.poly_grad_many(
@@ -1761,75 +2124,28 @@ class Tensor:
         if ret != 0:
             raise RuntimeError('poly_grad_many failed')
 
-        # Realize each gradient individually (poly_sink_n has multi-store
-        # scheduling issues, so we realize one at a time for correctness)
-        base_bindings = []
-        seen_bufs = set()
-        for l in all_leaves:
-            bid = id(l._buf_uop)
-            if bid not in seen_bufs:
-                base_bindings.append((l._buf_uop, l._data.ctypes.data))
-                seen_bufs.add(bid)
-        for buf, data in (extra_bufs or []):
-            bid = id(buf)
-            if bid not in seen_bufs:
-                base_bindings.append((buf, data.ctypes.data))
-                seen_bufs.add(bid)
-
         for i, t in enumerate(targets):
             grad_val = out_grads[i]
             is_intermediate = id(t) in inter_set
 
             if is_intermediate:
-                # Intermediates MUST be realized — their numpy data is needed
-                # for upstream segment chaining via Kahn's algorithm.
-                numel = int(np.prod(t.shape)) if t.shape else 1
-                g_buf = _ffi._lib.poly_buffer_f32(self._ctx, numel)
-                g_data = np.zeros(numel, dtype=np.float32)
-
-                store = _ffi._lib.poly_store_val(self._ctx, g_buf, grad_val)
-                sink = _ffi._lib.poly_sink1(self._ctx, store)
-
-                bindings = base_bindings + [(g_buf, g_data.ctypes.data)]
-                nb = len(bindings)
-                c_bindings = (_ffi.PolyBufferBinding * nb)()
-                for j, (buf, data) in enumerate(bindings):
-                    c_bindings[j].buffer = buf
-                    c_bindings[j].handle.ptr = data
-
-                ret = _ffi._lib.poly_realize(self._ctx, sink, c_bindings, nb)
-                if ret != 0:
-                    raise RuntimeError('Failed to realize segment gradient')
-
-                # Accumulate upstream for intermediates (may receive from multiple segments)
+                grad_tensor = Tensor(
+                    _ctx=self._ctx, _uop=grad_val, _shape=t.shape,
+                    _dtype=t._dtype_str, _device=t._device,
+                ).realize()
                 if id(t) in upstream_grads:
-                    old_data, _ = upstream_grads[id(t)]
-                    g_data = old_data + g_data
-                # Create a fresh buffer for the accumulated data
-                acc_buf = _ffi._lib.poly_buffer_f32(self._ctx, len(g_data))
-                upstream_grads[id(t)] = (g_data, acc_buf)
+                    grad_tensor = (upstream_grads[id(t)] + grad_tensor).realize()
+                upstream_grads[id(t)] = grad_tensor
 
-                # Also set _grad if this intermediate wants gradients
                 if t._requires_grad:
-                    t._grad = Tensor(g_data.reshape(t.shape), _ctx=self._ctx, device=t._device)
+                    if t._grad is not None:
+                        t._grad = t._grad + grad_tensor
+                    else:
+                        t._grad = grad_tensor
 
             elif t._requires_grad:
-                # Non-intermediate params/tensors: lazy gradient (UOp graph
-                # wraps the gradient computation, realized when consumed).
-                inputs = []
-                for l in all_leaves:
-                    inputs.append(Tensor(
-                        _ctx=self._ctx, _uop=l.uop, _buf_uop=l._buf_uop, _data=l._data,
-                        _shape=l.shape, _dtype=l._dtype_str, _device=l._device,
-                    ))
-                if extra_bufs is not None:
-                    for buf, data in extra_bufs:
-                        inputs.append(Tensor(
-                            _ctx=self._ctx, _uop=buf, _buf_uop=buf, _data=data,
-                            _shape=(len(data),), _device=t._device,
-                        ))
                 grad_tensor = Tensor(
-                    _ctx=self._ctx, _uop=grad_val, _shape=t.shape, _inputs=inputs,
+                    _ctx=self._ctx, _uop=grad_val, _shape=t.shape,
                     _dtype=t._dtype_str, _device=t._device,
                 )
                 if t._grad is not None:
@@ -1881,10 +2197,21 @@ class CompiledStep:
         n = len(self._buf_bindings)
         c_bindings = (_ffi.PolyBufferBinding * n)()
         for i, (buf_uop, holder) in enumerate(self._buf_bindings):
-            c_bindings[i].buffer = buf_uop
+            c_bindings[i].buffer = _uop_raw(buf_uop)
             if isinstance(holder, Tensor):
-                c_bindings[i].handle.ptr = ctypes.cast(
-                    holder._data.ctypes.data, ctypes.c_void_p)
+                if holder._data is not None:
+                    c_bindings[i].handle.ptr = ctypes.cast(
+                        holder._data.ctypes.data, ctypes.c_void_p)
+                elif holder._buf_uop is not None:
+                    realized = holder._buf_uop.realized if isinstance(holder._buf_uop, UOp) \
+                        else UOp(holder._ctx, holder._buf_uop).realized
+                    if not realized:
+                        raise RuntimeError('CompiledStep.run: tensor binding has no host data or realized buffer')
+                    c_bindings[i].handle = ctypes.cast(
+                        realized, ctypes.POINTER(_ffi.PolyBuffer)
+                    ).contents
+                else:
+                    raise RuntimeError('CompiledStep.run: tensor binding has no buffer identity')
             else:
                 c_bindings[i].handle.ptr = ctypes.cast(
                     holder.ctypes.data, ctypes.c_void_p)

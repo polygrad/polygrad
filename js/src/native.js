@@ -18,6 +18,22 @@ function createNativeBackend() {
     throw new Error('polygrad: target=\'native\' unavailable (N-API addon not built)')
   }
 
+  const dtypeIds = {
+    bool: binding.poly_dtype_id_by_name('bool'),
+    int8: binding.poly_dtype_id_by_name('int8'),
+    uint8: binding.poly_dtype_id_by_name('uint8'),
+    int16: binding.poly_dtype_id_by_name('int16'),
+    uint16: binding.poly_dtype_id_by_name('uint16'),
+    int32: binding.poly_dtype_id_by_name('int32'),
+    uint32: binding.poly_dtype_id_by_name('uint32'),
+    int64: binding.poly_dtype_id_by_name('int64'),
+    uint64: binding.poly_dtype_id_by_name('uint64'),
+    float16: binding.poly_dtype_id_by_name('float16'),
+    bfloat16: binding.poly_dtype_id_by_name('bfloat16'),
+    float32: binding.poly_dtype_id_by_name('float32'),
+    float64: binding.poly_dtype_id_by_name('float64')
+  }
+
   const ctx = binding.poly_ctx_new()
 
   const ops = {}
@@ -27,7 +43,7 @@ function createNativeBackend() {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 1
+  const EXPECTED_ABI = 4
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -164,6 +180,7 @@ function createNativeBackend() {
 
   return {
     ffi: binding,
+    dtypeIds,
     instance,
     ctx,
     ops,

@@ -15,6 +15,114 @@
 
 /* Local helpers */
 
+/* tinygrad-style graph constructors for shape-bearing UOps live here now.
+ * They were previously stranded in the retired single-kernel scheduler alongside the old
+ * scheduler wrapper, but they are core IR-building APIs rather than a
+ * scheduling implementation detail. */
+
+static int poly_buffer_id = 0;
+
+PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size) {
+  int id = poly_buffer_id++;
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(id));
+  return poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(size));
+}
+
+PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
+  PolyArg arg;
+  arg.kind = POLY_ARG_INT_TUPLE;
+  arg.int_tuple.vals = dims;
+  arg.int_tuple.n = ndim;
+  return poly_uop1(ctx, POLY_OP_RESHAPE, src->dtype, src, arg);
+}
+
+PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
+  PolyArg arg;
+  arg.kind = POLY_ARG_INT_TUPLE;
+  arg.int_tuple.vals = dims;
+  arg.int_tuple.n = ndim;
+  return poly_uop1(ctx, POLY_OP_EXPAND, src->dtype, src, arg);
+}
+
+PolyUOp *poly_reduce_axis(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *src,
+    int64_t *axes,
+    int n_axes
+) {
+  /* tinygrad UOp._rop sorts axes and drops singleton reductions up front.
+   * Matching that here keeps no-op singleton reductions out of the graph
+   * instead of relying on later schedule/rangeify cleanup to discover them. */
+  if (!ctx || !src || n_axes <= 0) return src;
+
+  PolyShape shape = poly_uop_shape(ctx, src);
+  int64_t filtered_buf[POLY_MAX_DIMS];
+  int filtered_n = 0;
+  for (int i = 0; i < n_axes; i++) {
+    int64_t ax = axes[i];
+    if (shape.ndim > 0 && ax >= 0 && ax < shape.ndim && shape.dims[ax] == 1) continue;
+    if (filtered_n < POLY_MAX_DIMS) filtered_buf[filtered_n++] = ax;
+  }
+  if (filtered_n == 0) return src;
+
+  for (int i = 1; i < filtered_n; i++) {
+    int64_t ax = filtered_buf[i];
+    int j = i - 1;
+    while (j >= 0 && filtered_buf[j] > ax) {
+      filtered_buf[j + 1] = filtered_buf[j];
+      j--;
+    }
+    filtered_buf[j + 1] = ax;
+  }
+
+  int64_t *stored_axes = filtered_buf;
+  if (filtered_n > 0) {
+    stored_axes =
+        poly_arena_alloc(poly_ctx_arena(ctx), filtered_n * sizeof(int64_t), _Alignof(int64_t));
+    memcpy(stored_axes, filtered_buf, filtered_n * sizeof(int64_t));
+  }
+
+  PolyArg arg;
+  arg.kind = POLY_ARG_REDUCE_AXIS;
+  arg.reduce_axis.op = reduce_op;
+  arg.reduce_axis.axes = stored_axes;
+  arg.reduce_axis.n = filtered_n;
+  return poly_uop1(ctx, POLY_OP_REDUCE_AXIS, src->dtype, src, arg);
+}
+
+PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
+  PolyArg arg;
+  arg.kind = POLY_ARG_INT_TUPLE;
+  arg.int_tuple.vals = perm;
+  arg.int_tuple.n = ndim;
+  return poly_uop1(ctx, POLY_OP_PERMUTE, src->dtype, src, arg);
+}
+
+PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
+  PolyArg arg;
+  arg.kind = POLY_ARG_PAIR_TUPLE;
+  arg.pair_tuple.pairs = pairs;
+  arg.pair_tuple.n = ndim;
+  return poly_uop1(ctx, POLY_OP_SHRINK, src->dtype, src, arg);
+}
+
+PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
+  PolyArg arg;
+  arg.kind = POLY_ARG_INT_TUPLE;
+  arg.int_tuple.vals = axes;
+  arg.int_tuple.n = n_axes;
+  return poly_uop1(ctx, POLY_OP_FLIP, src->dtype, src, arg);
+}
+
+PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
+  PolyArg arg;
+  arg.kind = POLY_ARG_PAIR_TUPLE;
+  arg.pair_tuple.pairs = pairs;
+  arg.pair_tuple.n = ndim;
+  return poly_uop1(ctx, POLY_OP_PAD, src->dtype, src, arg);
+}
+
 
 
 /* Heap-allocate a shape with copied dims */

@@ -19,7 +19,7 @@
 #include "test_harness.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 
 /* Helpers */
 
@@ -987,7 +987,7 @@ TEST(pass_order, full_pipeline_no_residual) {
 static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* Build tensor-level graph: out[i] = op(in[i]) via poly_realize.
+  /* Build tensor-level graph: out[i] = op(in[i]) via poly_realize_with_bindings.
    * Respects POLY_DEVICE so conformance tests run on the selected backend. */
   PolyUOp *buf_in = poly_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *result = poly_alu1(ctx, op, buf_in);
@@ -1003,7 +1003,7 @@ static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
       POLY_BIND_HOST(buf_out, out),
       POLY_BIND_HOST(buf_in, in_copy),
   };
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
 
   free(in_copy);
   poly_ctx_destroy(ctx);
@@ -1604,6 +1604,50 @@ TEST(devectorize, drop_true_gate) {
   PASS();
 }
 
+/* Verify: no_vectorized_index handles large register vectors like GPT-2 MLP/QKV
+ * paths, not just <=16 lanes. This matches tinygrad's no_vectorized_index which
+ * has no small-count cutoff. */
+TEST(devectorize, no_vectorized_index_large_lane_count) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int lanes = 48;
+  PolyDType reg_scalar_ptr = poly_dtype_ptr(POLY_FLOAT32, lanes, POLY_ADDR_REG);
+  PolyDType reg_vec_ptr = poly_dtype_ptr(poly_dtype_vec(POLY_FLOAT32, lanes), 1, POLY_ADDR_REG);
+  PolyDType idx_vec = poly_dtype_vec(POLY_INT32, lanes);
+
+  PolyUOp *reg = poly_uop0(ctx, POLY_OP_DEFINE_REG, reg_scalar_ptr, poly_arg_int(7));
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, reg_vec_ptr, reg, poly_arg_none());
+  PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, reg_vec_ptr, cast, idx, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, index, poly_pm_devectorize_pass());
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(r->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(r->n_src, 2);
+  ASSERT_NOT_NULL(r->src[0]);
+  ASSERT_NOT_NULL(r->src[1]);
+  ASSERT_INT_EQ(r->src[0]->op, POLY_OP_VECTORIZE);
+  ASSERT_INT_EQ(r->src[0]->n_src, lanes);
+  ASSERT_INT_EQ(r->src[1]->dtype.count, lanes);
+  for (int i = 0; i < lanes; i++) {
+    ASSERT_TRUE(r->src[0]->src[i] == reg);
+  }
+  if (r->src[1]->op == POLY_OP_VECTORIZE || r->src[1]->op == POLY_OP_VCONST) {
+    ASSERT_INT_EQ(r->src[1]->n_src, lanes);
+  } else {
+    ASSERT_INT_EQ(r->src[1]->op, POLY_OP_ADD);
+    ASSERT_INT_EQ(r->src[1]->src[0]->op, POLY_OP_MUL);
+    ASSERT_INT_EQ(r->src[1]->src[0]->dtype.count, lanes);
+    ASSERT_INT_EQ(r->src[1]->src[1]->op, POLY_OP_VECTORIZE);
+    ASSERT_INT_EQ(r->src[1]->src[1]->n_src, lanes);
+    for (int i = 0; i < lanes; i++) {
+      ASSERT_INT_EQ(r->src[1]->src[1]->src[i]->op, POLY_OP_CONST);
+      ASSERT_INT_EQ((int)r->src[1]->src[1]->src[i]->arg.i, i);
+    }
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* E2E: vecadd through full devectorize pipeline produces correct results */
 TEST(devectorize, e2e_vecadd) {
   /* Build tensor-level: out = a + b, N=8 (divisible by 4 for UPCAST) */
@@ -1625,7 +1669,7 @@ TEST(devectorize, e2e_vecadd) {
   /* Use POLY_OPTIMIZE + POLY_DEVECTORIZE via env to test full pipeline */
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
 
@@ -1665,7 +1709,7 @@ TEST(beam, vecadd_correct) {
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1700,7 +1744,7 @@ TEST(beam, reduce_correct) {
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1736,7 +1780,7 @@ TEST(beam, zero_is_heuristic) {
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "0", 1);
-  int ret = poly_realize(ctx, sink, bindings, 3);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1774,7 +1818,7 @@ TEST(beam, cache_roundtrip) {
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret1 = poly_realize(ctx, sink, bindings1, 3);
+  int ret1 = poly_realize_with_bindings(ctx, sink, bindings1, 3);
   ASSERT_INT_EQ(ret1, 0);
 
   /* Second run: should hit cache */
@@ -1789,7 +1833,7 @@ TEST(beam, cache_roundtrip) {
   PolyBufferBinding bindings2[] = {
       POLY_BIND_HOST(a2, da), POLY_BIND_HOST(b2, db), POLY_BIND_HOST(out2, dout2)
   };
-  int ret2 = poly_realize(ctx2, sink2, bindings2, 3);
+  int ret2 = poly_realize_with_bindings(ctx2, sink2, bindings2, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1832,7 +1876,7 @@ TEST(beam, chain_correct) {
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret = poly_realize(ctx, sink, bindings, 4);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 4);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -2477,8 +2521,8 @@ TEST(tc, use_tc_2_no_wmma_but_expanded) {
  * SECTION 7B: Regression — HIP opts on pad+shrink+reduce kernel
  * ════════════════════════════════════════════════════════════════════════ */
 
-#include "../src/scheduler.h"
-#include "../src/exec_plan.h"
+#include "../src/engine/schedule.h"
+#include "../src/engine/schedule.h"
 
 TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
   /* Reproduces bufferize_movement_chain_alt_ranges_e2e failure on HIP.
@@ -2512,7 +2556,7 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
   /* Schedule */
-  PolySchedule *sched = poly_schedule_for(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
   ASSERT_TRUE(sched->n_items > 0);
 

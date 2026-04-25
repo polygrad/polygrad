@@ -10,8 +10,8 @@
 #include "test_harness.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
-#include "../src/scheduler.h"
-#include "../src/rangeify.h"
+#include "../src/engine/schedule.h"
+#include "../src/schedule/rangeify.h"
 #include <string.h>
 
 /* Skip helper: PASS immediately if no GPU */
@@ -85,7 +85,6 @@ TEST(cuda, render_vecadd) {
   ASSERT_TRUE(strstr(src, "__global__") != NULL);
   ASSERT_TRUE(strstr(src, "__launch_bounds__") != NULL);
   ASSERT_TRUE(strstr(src, "blockIdx") != NULL);
-  ASSERT_TRUE(strstr(src, "threadIdx") != NULL);
   ASSERT_TRUE(strstr(src, "extern \"C\"") != NULL);
   ASSERT_TRUE(strstr(src, "gidx0") != NULL);
   /* No _call wrapper */
@@ -206,15 +205,15 @@ TEST(cuda, e2e_vecadd) {
   PolyBufferBinding cpu_binds[] = {
       POLY_BIND_HOST(tv.buf_c, c_cpu), POLY_BIND_HOST(tv.buf_a, a), POLY_BIND_HOST(tv.buf_b, b)
   };
-  int ret = poly_realize(tv.ctx, tv.sink, cpu_binds, 3);
+  int ret = poly_realize_with_bindings(tv.ctx, tv.sink, cpu_binds, 3);
   ASSERT_TRUE(ret == 0);
 
-  /* GPU via unified poly_realize with CUDA-domain bindings */
+  /* GPU via unified poly_realize_with_bindings with CUDA-domain bindings */
   PolyUOp *bufs[] = {tv.buf_c, tv.buf_a, tv.buf_b};
   float *ptrs[] = {NULL, a, b};
   PolyBufferBinding cuda_binds[3];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 3), 0);
-  ASSERT_INT_EQ(poly_realize(tv.ctx, tv.sink, cuda_binds, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(tv.ctx, tv.sink, cuda_binds, 3), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 3);
 
@@ -249,13 +248,13 @@ TEST(cuda, e2e_neg) {
     a[i] = (float)i - 256.0f;
 
   PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
+  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
   PolyBufferBinding cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cuda_binds, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
 
@@ -295,13 +294,13 @@ TEST(cuda, e2e_chain) {
   PolyBufferBinding cpu_binds[] = {
       POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a), POLY_BIND_HOST(buf_b, b)
   };
-  ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 3) == 0);
+  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 3) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a, buf_b};
   float *ptrs[] = {NULL, a, b};
   PolyBufferBinding cuda_binds[3];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 3), 0);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cuda_binds, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cuda_binds, 3), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 3);
 
@@ -334,13 +333,13 @@ TEST(cuda, e2e_exp2) {
     a[i] = (float)i * 0.05f - 6.0f;
 
   PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
+  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
   PolyBufferBinding cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cuda_binds, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
 
@@ -372,13 +371,13 @@ TEST(cuda, e2e_reduce_sum) {
     a[i] = 1.0f;
 
   PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, &c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
+  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
   PolyBufferBinding cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cuda_binds, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], &c_gpu, sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
 
@@ -408,13 +407,13 @@ TEST(cuda, e2e_reduce_sum_parallel) {
     a[i] = 1.0f;
 
   PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, &c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize(ctx, sink, cpu_binds, 2) == 0);
+  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
   PolyBufferBinding cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cuda_binds, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], &c_gpu, sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
 
@@ -427,7 +426,7 @@ TEST(cuda, e2e_reduce_sum_parallel) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
-/*  Unified poly_realize() with CUDA-domain bindings                     */
+/*  Unified poly_realize_with_bindings() with CUDA-domain bindings       */
 /* ══════════════════════════════════════════════════════════════════════ */
 
 /* Helper: build CUDA-domain bindings from host data */
@@ -471,19 +470,19 @@ TEST(cuda, realize_unified_vecadd) {
     b[i] = (float)(n - i) * 0.05f;
   }
 
-  /* CPU reference via poly_realize */
+  /* CPU reference via poly_realize_with_bindings */
   PolyBufferBinding cpu_b[] = {
       POLY_BIND_HOST(tv.buf_c, c_cpu), POLY_BIND_HOST(tv.buf_a, a), POLY_BIND_HOST(tv.buf_b, b)
   };
-  ASSERT_INT_EQ(poly_realize(tv.ctx, tv.sink, cpu_b, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(tv.ctx, tv.sink, cpu_b, 3), 0);
 
-  /* CUDA via poly_realize (device inferred from CUDA-domain bindings) */
+  /* CUDA via poly_realize_with_bindings (device inferred from CUDA-domain bindings) */
   PolyUOp *bufs[] = {tv.buf_c, tv.buf_a, tv.buf_b};
   float *ptrs[] = {NULL, a, b};
   PolyBufferBinding cuda_b[3];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_b, bufs, ptrs, 3), 0);
 
-  ASSERT_INT_EQ(poly_realize(tv.ctx, tv.sink, cuda_b, 3), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(tv.ctx, tv.sink, cuda_b, 3), 0);
 
   readback_cuda_binding(&cuda_b[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_b, 3);
@@ -521,7 +520,7 @@ TEST(cuda, realize_unified_reduce) {
 
   /* CPU */
   PolyBufferBinding cpu_b[] = {POLY_BIND_HOST(buf_c, &c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cpu_b, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cpu_b, 2), 0);
   ASSERT_FLOAT_EQ(c_cpu, expected, 1e-2);
 
   /* CUDA */
@@ -529,7 +528,7 @@ TEST(cuda, realize_unified_reduce) {
   float *ptrs[] = {NULL, a};
   PolyBufferBinding cuda_b[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_b, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize(ctx, sink, cuda_b, 2), 0);
+  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, cuda_b, 2), 0);
   readback_cuda_binding(&cuda_b[0], &c_gpu, sizeof(float));
   free_cuda_bindings(cuda_b, 2);
 

@@ -21,6 +21,7 @@ _has_cuda_ffi = False
 _ptr = ctypes.c_void_p
 _i64p = ctypes.POINTER(ctypes.c_int64)
 _ip = ctypes.POINTER(ctypes.c_int)
+_uintptr = ctypes.c_size_t
 
 
 # --- Structures (always available, no _lib dependency) ---
@@ -32,8 +33,11 @@ class PolyBuffer(ctypes.Structure):
     _fields_ = [
         ('ptr', _ptr),
         ('nbytes', ctypes.c_size_t),
-        ('domain', ctypes.c_int),    # PolyDevice
+        ('device', ctypes.c_int),    # PolyDevice
         ('owned', ctypes.c_bool),
+        ('allocator', _ptr),
+        ('src', _ptr),
+        ('valid', ctypes.c_bool),
     ]
 
 class PolyBufferBinding(ctypes.Structure):
@@ -73,6 +77,9 @@ class PolyStepBufferInfo(ctypes.Structure):
         ('numel', ctypes.c_int64),
         ('nbytes', ctypes.c_int64),
     ]
+
+
+PolyFrontendBufferReleaseFn = ctypes.CFUNCTYPE(None, _uintptr)
 
 
 # --- Library discovery ---
@@ -157,12 +164,21 @@ def _declare_signatures(lib):
     lib.poly_ctx_destroy.restype = None
     lib.poly_ctx_destroy.argtypes = [_ptr]
 
+    lib.poly_ctx_set_preferred_device.restype = None
+    lib.poly_ctx_set_preferred_device.argtypes = [_ptr, ctypes.c_int]
+
     # --- Op helpers ---
     lib.poly_op_count.restype = ctypes.c_int
     lib.poly_op_count.argtypes = []
 
     lib.poly_op_name.restype = ctypes.c_char_p
     lib.poly_op_name.argtypes = [ctypes.c_int]
+
+    lib.poly_dtype_count.restype = ctypes.c_int
+    lib.poly_dtype_count.argtypes = []
+
+    lib.poly_dtype_id_by_name.restype = ctypes.c_int
+    lib.poly_dtype_id_by_name.argtypes = [ctypes.c_char_p]
 
     # --- Frontend helpers (frontend.h) ---
     lib.poly_const_float.restype = _ptr
@@ -204,6 +220,9 @@ def _declare_signatures(lib):
     lib.poly_buffer_by_id.restype = _ptr
     lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int]
 
+    lib.poly_uop_dtype_id.restype = ctypes.c_int
+    lib.poly_uop_dtype_id.argtypes = [_ptr, _ptr]
+
     lib.poly_cast_by_id.restype = _ptr
     lib.poly_cast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
 
@@ -244,17 +263,47 @@ def _declare_signatures(lib):
     lib.poly_randn.restype = _ptr
     lib.poly_randn.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64]
 
+    lib.poly_rand_by_id.restype = _ptr
+    lib.poly_rand_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
+
+    lib.poly_randn_by_id.restype = _ptr
+    lib.poly_randn_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_uint64, ctypes.c_int]
+
     lib.poly_arange.restype = _ptr
     lib.poly_arange.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+
+    lib.poly_arange_int_by_id.restype = _ptr
+    lib.poly_arange_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
+
+    lib.poly_arange_float_by_id.restype = _ptr
+    lib.poly_arange_float_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int]
 
     lib.poly_eye.restype = _ptr
     lib.poly_eye.argtypes = [_ptr, ctypes.c_int64]
 
+    lib.poly_eye_by_id.restype = _ptr
+    lib.poly_eye_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
+
     lib.poly_linspace.restype = _ptr
     lib.poly_linspace.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64]
 
+    lib.poly_linspace_by_id.restype = _ptr
+    lib.poly_linspace_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64, ctypes.c_int]
+
     lib.poly_full.restype = _ptr
     lib.poly_full.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double]
+
+    lib.poly_const_int_by_id.restype = _ptr
+    lib.poly_const_int_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int]
+
+    lib.poly_const_float_by_id.restype = _ptr
+    lib.poly_const_float_by_id.argtypes = [_ptr, ctypes.c_double, ctypes.c_int]
+
+    lib.poly_full_int_by_id.restype = _ptr
+    lib.poly_full_int_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_int64, ctypes.c_int]
+
+    lib.poly_full_float_by_id.restype = _ptr
+    lib.poly_full_float_by_id.argtypes = [_ptr, _i64p, ctypes.c_int, ctypes.c_double, ctypes.c_int]
 
     lib.poly_tril.restype = _ptr
     lib.poly_tril.argtypes = [_ptr, _ptr, ctypes.c_int]
@@ -362,10 +411,19 @@ def _declare_signatures(lib):
     lib.poly_buffer_get_ptr.restype = ctypes.c_void_p
     lib.poly_buffer_get_ptr.argtypes = [_ptr, _ptr]
 
+    lib.poly_buffer_get_key.restype = ctypes.c_uint64
+    lib.poly_buffer_get_key.argtypes = [_ptr, _ptr]
+
+    lib.poly_buffer_read.restype = ctypes.c_int
+    lib.poly_buffer_read.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t]
+
     lib.poly_buffer_from_host.restype = _ptr
     lib.poly_buffer_from_host.argtypes = [
         _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, _i64p, ctypes.c_int,
     ]
+
+    lib.poly_set_frontend_buffer_release.restype = None
+    lib.poly_set_frontend_buffer_release.argtypes = [PolyFrontendBufferReleaseFn]
 
     lib.poly_buffer_get.restype = _ptr
     lib.poly_buffer_get.argtypes = [_ptr, _ptr]
@@ -374,21 +432,17 @@ def _declare_signatures(lib):
     lib.poly_buffer_is_allocated.argtypes = [_ptr, _ptr]
 
     # --- Graph-driven realize (realize.h) ---
-    lib.poly_realize_sink.restype = ctypes.c_int
-    lib.poly_realize_sink.argtypes = [_ptr, _ptr]
-
-    lib.poly_realize_uop.restype = _ptr
-    lib.poly_realize_uop.argtypes = [_ptr, _ptr]
-
-    lib.poly_realize_uops.restype = ctypes.c_int
-    lib.poly_realize_uops.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
+    lib.poly_realize.restype = ctypes.c_int
+    lib.poly_realize.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
 
     # --- Realize ---
-    lib.poly_realize.restype = ctypes.c_int
-    lib.poly_realize.argtypes = [_ptr, _ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int]
+    lib.poly_realize_with_bindings.restype = ctypes.c_int
+    lib.poly_realize_with_bindings.argtypes = [
+        _ptr, _ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int
+    ]
 
-    lib.poly_realize_ex.restype = ctypes.c_int
-    lib.poly_realize_ex.argtypes = [_ptr, _ptr,
+    lib.poly_realize_with_bindings_ex.restype = ctypes.c_int
+    lib.poly_realize_with_bindings_ex.argtypes = [_ptr, _ptr,
         ctypes.POINTER(PolyBufferBinding), ctypes.c_int,
         ctypes.POINTER(PolyVarBinding), ctypes.c_int]
 
@@ -477,6 +531,49 @@ def _declare_signatures(lib):
 
     lib.poly_wasm_stepplan_destroy.restype = None
     lib.poly_wasm_stepplan_destroy.argtypes = [_ptr]
+
+    # --- WebGPU step plan ---
+    lib.poly_render_step_webgpu_plan.restype = _ptr
+    lib.poly_render_step_webgpu_plan.argtypes = [_ptr, _ptr]
+
+    lib.poly_webgpu_stepplan_n_kernels.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_n_kernels.argtypes = [_ptr]
+
+    lib.poly_webgpu_stepplan_kernel_wgsl.restype = ctypes.c_char_p
+    lib.poly_webgpu_stepplan_kernel_wgsl.argtypes = [_ptr, ctypes.c_int, _ip]
+
+    lib.poly_webgpu_stepplan_kernel_n_params.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_kernel_n_params.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_kernel_grid.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_kernel_grid.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_kernel_local.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_kernel_local.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_n_buffers.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_n_buffers.argtypes = [_ptr]
+
+    lib.poly_webgpu_stepplan_n_bindable_buffers.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_n_bindable_buffers.argtypes = [_ptr]
+
+    lib.poly_webgpu_stepplan_bindable_buf_index.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_bindable_buf_index.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_kernel_param_buf_index.restype = ctypes.c_int
+    lib.poly_webgpu_stepplan_kernel_param_buf_index.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_exec_order.restype = _ip
+    lib.poly_webgpu_stepplan_exec_order.argtypes = [_ptr, _ip]
+
+    lib.poly_webgpu_stepplan_buf_size.restype = ctypes.c_int64
+    lib.poly_webgpu_stepplan_buf_size.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_buf_nbytes.restype = ctypes.c_int64
+    lib.poly_webgpu_stepplan_buf_nbytes.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_webgpu_stepplan_destroy.restype = None
+    lib.poly_webgpu_stepplan_destroy.argtypes = [_ptr]
 
     # --- PolyInstance (instance.h) ---
     lib.poly_instance_from_ir.restype = _ptr

@@ -64,7 +64,7 @@ def _pre_init_optimizer_state(opt, model):
     if isinstance(opt, SGD) and opt.momentum and opt.velocities:
         for i, p in enumerate(opt.params):
             if opt.velocities[i] is None:
-                opt.velocities[i] = Tensor.zeros(*p.shape)
+                opt.velocities[i] = Tensor.zeros(*p.shape).realize()
 
 
 def _snapshot_tensor(t):
@@ -241,13 +241,14 @@ def compile_step(step_fn, model, opt, *sample_inputs):
     seen_bufs = set()
 
     def _add_binding(buf, holder):
-        if buf and id(buf) not in seen_bufs:
-            seen_bufs.add(id(buf))
+        key = int(buf.raw) if hasattr(buf, 'raw') and buf.raw else int(buf) if buf else 0
+        if buf and key not in seen_bufs:
+            seen_bufs.add(key)
             buf_bindings.append((buf, holder))
 
     for t in all_tensors:
         snap = snapshots[id(t)]
-        if snap['data'] is not None:
+        if snap['buffer'] is not None:
             _add_binding(snap['buffer'], t)
 
     # Loss output buffer

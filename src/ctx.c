@@ -55,6 +55,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->n_ep = 0;
   ctx->ep_cap = 0;
   ctx->next_buf_tag = 1;
+  ctx->preferred_device = POLY_DEVICE_AUTO;
   return ctx;
 }
 
@@ -84,6 +85,15 @@ bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p) {
     if (addr >= start && addr < end) return true;
   }
   return false;
+}
+
+void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device) {
+  if (!ctx) return;
+  ctx->preferred_device = device;
+}
+
+PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx) {
+  return ctx ? ctx->preferred_device : POLY_DEVICE_AUTO;
 }
 
 PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) { return ctx->kernel_cache; }

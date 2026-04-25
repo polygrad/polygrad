@@ -12,7 +12,6 @@
 
 /* Include polygrad headers */
 #include "../../../src/frontend.h"
-#include "../../../src/scheduler.h"
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
@@ -259,7 +258,7 @@ SEXP C_poly_realize_read(SEXP ctx_ptr, SEXP sink,
 
   int ret = poly_realize_exec(ctx, unwrap_ptr(sink));
   if (ret != 0) {
-    error("poly_realize failed");
+    error("poly_realize_with_bindings failed");
   }
 
   /* Convert float32 -> R double */

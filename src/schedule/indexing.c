@@ -2,14 +2,14 @@
  * indexing.c — Movement op index transforms for rangeify
  *
  * Ports tinygrad's indexing.py apply_movement_op() to C11.
- * Refactored from the movement op cases in sched.c lower_uop().
+ * Refactored from the movement-op cases in the retired single-kernel lowerer.
  *
- * Key difference from sched.c: these functions transform ranges
+ * Key difference from that retired path: these functions transform ranges
  * without doing any lowering — they return index UOp expressions
  * that the rangeify pipeline uses for scheduling decisions.
  */
 
-#include "indexing.h"
+#include "schedule/indexing.h"
 #include <stdio.h>
 #include <string.h>
 

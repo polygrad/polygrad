@@ -22,7 +22,6 @@
 #include "../tensor.h"
 #include "../instance.h"
 #include "../frontend.h"
-#include "../scheduler.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

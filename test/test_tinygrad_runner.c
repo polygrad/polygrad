@@ -2,9 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
 #include "../src/codegen.h"
-#include "../src/rangeify.h"
+#include "../src/schedule/rangeify.h"
+#include "../src/schedule/rangeify.h"
 #include "../src/frontend.h"
 
 /* JSON helpers */
@@ -101,7 +102,7 @@ static int run_and_report(
         cb[j].handle = (PolyBuffer){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
       }
       if (alloc_ok)
-        ok = (poly_realize(ctx, tensor_sink, cb, n_bindings) == 0);
+        ok = (poly_realize_with_bindings(ctx, tensor_sink, cb, n_bindings) == 0);
       else
         ok = 0;
       /* Readback all bindings to host */
@@ -142,7 +143,7 @@ static int run_and_report(
         hb[j].handle = (PolyBuffer){dptr, nbytes, POLY_DEVICE_HIP, true};
       }
       if (alloc_ok)
-        ok = (poly_realize(ctx, tensor_sink, hb, n_bindings) == 0);
+        ok = (poly_realize_with_bindings(ctx, tensor_sink, hb, n_bindings) == 0);
       else
         ok = 0;
       if (ok) {
@@ -161,16 +162,16 @@ static int run_and_report(
 #endif
     {
       (void)use_hip;
-      ok = (poly_realize(ctx, tensor_sink, bb, n_bindings) == 0);
+      ok = (poly_realize_with_bindings(ctx, tensor_sink, bb, n_bindings) == 0);
     }
     free(bb);
   }
 
   /* 2. Schedule and linearize for kernel metadata. */
-  PolyScheduleResult sr = poly_schedule_v2(ctx, tensor_sink);
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, tensor_sink);
   if (sr.n_kernels < 1) {
     fprintf(stderr, "parity: schedule produced 0 kernels\n");
-    poly_schedule_result_free(&sr);
+    poly_kernel_schedule_result_free(&sr);
     return 0;
   }
 
@@ -199,7 +200,7 @@ static int run_and_report(
         free(all_lin[j]);
       free(all_lin);
       free(all_n_lin);
-      poly_schedule_result_free(&sr);
+      poly_kernel_schedule_result_free(&sr);
       return 0;
     }
   }
@@ -232,7 +233,7 @@ static int run_and_report(
     free(all_lin[k]);
   free(all_lin);
   free(all_n_lin);
-  poly_schedule_result_free(&sr);
+  poly_kernel_schedule_result_free(&sr);
   return ok;
 }
 

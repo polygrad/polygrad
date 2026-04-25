@@ -19,7 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
-#include "exec_plan.h"
+#include "engine/schedule.h"
 #include "pat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -405,6 +405,7 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
   return (PolyRendererCaps){
       .has_mulacc = true,
       .has_threefry = false,
+      .has_local = true,
       .tensor_cores = hip_cdna_tc_specs_storage,
       .n_tensor_cores = 2,
   };

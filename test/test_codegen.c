@@ -75,6 +75,52 @@ static int find_webgpu_kernel(PolyWebGpuStepPlan *plan, const char *a, const cha
   return -1;
 }
 
+static VecKernel make_vec_copy_with_casted_int64_index(int n) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  /* Addressing expression intentionally widened beyond the concrete index
+   * width tinygrad would keep after pm_lower_index_dtype. */
+  PolyUOp *idx64 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, range, poly_arg_none());
+  PolyUOp *zero64 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(0));
+  PolyUOp *add64 = poly_uop2(ctx, POLY_OP_ADD, POLY_INT64, idx64, zero64, poly_arg_none());
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, add64, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+  PolyUOp *load0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, load0, poly_arg_none());
+
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+  return (VecKernel){ctx, sink, n};
+}
+
+static bool subtree_has_i64_dtype(PolyUOp *u) {
+  if (!u) return false;
+  PolyDType scalar = poly_dtype_scalar(u->dtype);
+  if (poly_dtype_is_int(scalar) && scalar.bitsize == 64) return true;
+  for (int i = 0; i < u->n_src; i++)
+    if (subtree_has_i64_dtype(u->src[i])) return true;
+  return false;
+}
+
+static int count_indexes_with_i64_addr(PolyUOp **nodes, int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    if (nodes[i]->op != POLY_OP_INDEX || nodes[i]->n_src < 2) continue;
+    if (subtree_has_i64_dtype(nodes[i]->src[1])) bad++;
+    if (nodes[i]->n_src >= 3 && subtree_has_i64_dtype(nodes[i]->src[2])) bad++;
+  }
+  return bad;
+}
+
 /* Linearizer tests */
 
 TEST(codegen, linearize_order) {
@@ -197,9 +243,13 @@ TEST(codegen, render_vecmul) {
   PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n);
   char *src = poly_render_c(lin, n, "vecmul");
 
-  /* multiply uses * operator */
+  /* Default C path follows tinygrad's ClangRenderer float4 upcast:
+   * 8 elements become a 2-iteration loop with vec4 loads/stores. */
   ASSERT_NOT_NULL(strstr(src, "void vecmul("));
-  ASSERT_NOT_NULL(strstr(src, "ridx0 < 8"));
+  ASSERT_NOT_NULL(strstr(src, "ridx0 < 2"));
+  ASSERT_NOT_NULL(strstr(src, "__attribute__((vector_size(16)))"));
+  ASSERT_NOT_NULL(strstr(src, "val0[0]"));
+  ASSERT_NOT_NULL(strstr(src, "*"));
 
   free(src);
   free(lin);
@@ -351,12 +401,16 @@ TEST(codegen, render_wgsl_vecadd) {
 TEST(codegen, render_wgsl_vecmul) {
   VecKernel k = make_vec_binop(POLY_OP_MUL, 8);
   int n;
-  PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n);
+  PolyUOp **lin = poly_linearize_webgpu(k.ctx, k.sink, &n);
   char *src = poly_render_wgsl(lin, n, "vecmul");
 
   ASSERT_NOT_NULL(strstr(src, "fn vecmul("));
-  ASSERT_NOT_NULL(strstr(src, "ridx0 < 8"));
+  ASSERT_NOT_NULL(strstr(src, "@compute @workgroup_size(2,1,1)"));
+  ASSERT_NOT_NULL(strstr(src, "var lidx0: i32 = i32(lindex.x);"));
+  ASSERT_NOT_NULL(strstr(src, "data2[alu0] = alu4;"));
   ASSERT_NOT_NULL(strstr(src, "*")); /* multiply operator */
+  ASSERT_TRUE(strstr(src, "for (var ridx0") == NULL);
+  ASSERT_TRUE(strstr(src, "vec4<f32>") == NULL);
 
   free(src);
   free(lin);
@@ -603,6 +657,52 @@ TEST(codegen, render_wgsl_define_var) {
   PASS();
 }
 
+TEST(codegen, render_wgsl_param_bindings_follow_encounter_order) {
+  /* Match tinygrad WGSL binding assignment:
+   * bindings are sequential in PARAM/DEFINE_VAR encounter order, not PARAM.arg.
+   * Sparse PARAM ids used to leak into @binding(N), which mismatched runtime binding order. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p7 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(7));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *p9 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(9));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  PolyUOp *idx7 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p7, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, range, poly_arg_none());
+  PolyUOp *idx9 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p9, range, poly_arg_none());
+
+  PolyUOp *lhs = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
+  PolyUOp *rhs = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx9, poly_arg_none());
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, lhs, rhs, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx7, sum, poly_arg_none());
+
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
+  char *src = poly_render_wgsl(lin, n_lin, "param_order");
+
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(1)\nvar<storage,read_write>"));
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(2)\nvar<storage,read_write>"));
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(3)\nvar<storage,read_write>"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data7: array<f32>;"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2: array<f32>;"));
+  ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data9: array<f32>;"));
+  ASSERT_TRUE(strstr(src, "@group(0) @binding(8)\nvar<storage,read_write> data7: array<f32>") == NULL);
+  ASSERT_TRUE(strstr(src, "@group(0) @binding(10)\nvar<storage,read_write> data9: array<f32>") == NULL);
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* WebGPU step plan tests */
 
 TEST(codegen, webgpu_stepplan_vecadd) {
@@ -743,6 +843,40 @@ TEST(codegen, linearize_webgpu_reduce_emits_shared_barrier) {
 
   poly_webgpu_stepplan_destroy(plan);
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, full_rewrite_post_index_lowering_narrows_i64_addressing) {
+  VecKernel k = make_vec_copy_with_casted_int64_index(32);
+  PolyRewriteOpts opts = {
+      .optimize = false,
+      .devectorize = 1,
+      .caps = {.max_vec_width = 1},
+      .device = POLY_DEVICE_WEBGPU,
+  };
+
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(k.ctx, k.sink, opts);
+  ASSERT_NOT_NULL(rewritten);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(k.ctx, rewritten, &n_topo);
+  ASSERT_TRUE(n_topo > 0);
+  ASSERT_INT_EQ(count_indexes_with_i64_addr(topo, n_topo), 0);
+
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(codegen, linearize_webgpu_narrows_i64_addressing) {
+  VecKernel k = make_vec_copy_with_casted_int64_index(32);
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_webgpu(k.ctx, k.sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  ASSERT_TRUE(n_lin > 0);
+  ASSERT_INT_EQ(count_indexes_with_i64_addr(lin, n_lin), 0);
+
+  free(lin);
+  poly_ctx_destroy(k.ctx);
   PASS();
 }
 

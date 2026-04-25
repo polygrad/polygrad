@@ -6,9 +6,24 @@
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
-#include "../src/scheduler.h"
+#include "../src/engine/schedule.h"
+#include "../src/schedule/rangeify.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
+
+/* Autograd e2e tests compile concrete scheduled kernels, not the earlier
+ * pre-codegen kernel graph returned by poly_get_kernel_graph(). */
+static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
+  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!schedule) return NULL;
+  if (schedule->n_items != 1 || !schedule->items[0].root) {
+    poly_schedule_free(schedule);
+    return NULL;
+  }
+  PolyUOp *root = schedule->items[0].root;
+  poly_schedule_free(schedule);
+  return root;
+}
 
 #define LN2_F 0.69314718055994530942f
 
@@ -18,7 +33,7 @@
         poly_uop2((ctx), POLY_OP_STORE, POLY_VOID, (out_buf), (expr), poly_arg_none());            \
     PolyUOp *__sink =                                                                              \
         poly_uop((ctx), POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){__store}, 1, poly_arg_none());      \
-    PolyUOp *__kernel = poly_schedule((ctx), __sink);                                              \
+    PolyUOp *__kernel = single_scheduled_root((ctx), __sink);                                      \
     ASSERT_NOT_NULL(__kernel);                                                                     \
     int __n_lin = 0;                                                                               \
     PolyUOp **__lin = poly_linearize((ctx), __kernel, &__n_lin);                                   \
@@ -44,7 +59,7 @@ static int compile_expr_program(
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
   int n_lin = 0;
-  PolyUOp *kernel = poly_schedule(ctx, sink);
+  PolyUOp *kernel = single_scheduled_root(ctx, sink);
   if (!kernel) return 0;
   PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
   if (!lin) return 0;
@@ -712,7 +727,7 @@ TEST(autograd, chain_mul_exp2_e2e) {
 
 TEST(autograd, max_reduce_backward_e2e) {
   /* reduce-MAX gradient requires multi-kernel scheduling (CONTIGUOUS barriers
-   * create BUFFERIZE intermediates). Must use poly_realize, not single-kernel
+   * create BUFFERIZE intermediates). Must use poly_realize_with_bindings, not single-kernel
    * RUN_GRAD_EXPR. */
   int N = 6;
   float x_d[6] = {1.0f, 3.0f, 2.0f, 4.0f, 5.0f, 6.0f};
@@ -736,7 +751,7 @@ TEST(autograd, max_reduce_backward_e2e) {
   PolyUOp *sink = poly_sink1(ctx, store);
 
   PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
-  int ret = poly_realize(ctx, sink, bindings, 2);
+  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   float expected[6] = {0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};

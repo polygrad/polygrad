@@ -16,9 +16,9 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "frontend.h"
-#include "exec_plan.h"
+#include "engine/schedule.h"
 #include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
-#include "scheduler.h"
+#include "engine/schedule.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -189,7 +189,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
    *
    * Uses POLY_DEVICE_HOST (not hardcoded POLY_DEVICE_CPU) because in
    * Emscripten/WASM builds the CPU backend is not registered -- only
-   * POLY_DEVICE_WASM_JIT is. Tagging buffers as CPU in WASM causes
+   * POLY_DEVICE_WASM is. Tagging buffers as CPU in WASM causes
    * poly_device_is_host_addressable() to return false, making
    * poly_instance_buf_data() return NULL even though the data pointer
    * is valid host memory. Fixed in commit after 9a061b9 (which added
@@ -202,6 +202,8 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
         .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
         .device = POLY_DEVICE_HOST,
         .owned = false,
+        .allocator = poly_backend_get(POLY_DEVICE_HOST)->get_allocator(),
+        .valid = true,
     };
   }
 
@@ -338,8 +340,22 @@ static void vag_free(VagState *vag, int n_params) {
 static void free_owned_handle(PolyBuffer *h) {
   if (h->owned && h->ptr) {
     const PolyBackendDesc *be = poly_backend_get(h->device);
-    if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
+    if (be) be->get_allocator()->free(h, be->get_allocator()->dev_ctx);
   }
+}
+
+static bool retarget_handle_if_shared(
+    PolyBuffer *h,
+    PolyDevice resolved,
+    const PolyAllocator *alloc
+) {
+  if (!h) return false;
+  if (h->device == resolved) return true;
+  if (!poly_devices_share_storage(h->device, resolved)) return false;
+  h->device = resolved;
+  h->allocator = alloc;
+  h->valid = (h->ptr != NULL);
+  return true;
 }
 
 static void train_free(TrainState *ts, int n_params) {
@@ -378,7 +394,7 @@ void poly_instance_free(PolyInstance *inst) {
       PolyBuffer *h = &inst->buf_handles[i];
       if (h->owned && h->ptr) {
         const PolyBackendDesc *be = poly_backend_get(h->device);
-        if (be) be->get_allocator()->free(h->ptr, be->get_allocator()->dev_ctx);
+        if (be) be->get_allocator()->free(h, be->get_allocator()->dev_ctx);
       }
     }
     free(inst->buf_handles);
@@ -497,7 +513,8 @@ static int readback_handle(const PolyBuffer *h, void *dst, size_t len) {
   }
   const PolyBackendDesc *be = poly_backend_get(h->device);
   if (!be) return -1;
-  return be->get_allocator()->copy_out(dst, h->ptr, len, be->get_allocator()->dev_ctx);
+  PolyBuffer dst_view = poly_buffer_make_host_view(dst, len);
+  return be->get_allocator()->copy_out(&dst_view, h, len, be->get_allocator()->dev_ctx);
 }
 
 static int upload_handle(PolyBuffer *h, const void *src, size_t len) {
@@ -508,7 +525,8 @@ static int upload_handle(PolyBuffer *h, const void *src, size_t len) {
   }
   const PolyBackendDesc *be = poly_backend_get(h->device);
   if (!be) return -1;
-  return be->get_allocator()->copy_in(h->ptr, src, len, be->get_allocator()->dev_ctx);
+  PolyBuffer src_view = poly_buffer_make_host_view((void *)src, len);
+  return be->get_allocator()->copy_in(h, &src_view, len, be->get_allocator()->dev_ctx);
 }
 
 int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
@@ -631,38 +649,18 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
    * in frontend.c so that Instance and Tensor paths use the same selector. */
   PolyDevice resolved = device;
   if (resolved == POLY_DEVICE_AUTO) {
-#ifdef __EMSCRIPTEN__
-    resolved = POLY_DEVICE_WASM_JIT;
-#else
     const char *dev_env = getenv("POLY_DEVICE");
     if (dev_env && dev_env[0]) {
-      if (strcmp(dev_env, "cpu") == 0)
-        resolved = POLY_DEVICE_CPU;
-      else if (strcmp(dev_env, "interp") == 0)
-        resolved = POLY_DEVICE_INTERP;
-#ifdef POLY_HAS_CUDA
-      else if (strcmp(dev_env, "cuda") == 0)
-        resolved = POLY_DEVICE_CUDA;
-#endif
-#ifdef POLY_HAS_HIP
-      else if (strcmp(dev_env, "hip") == 0)
-        resolved = POLY_DEVICE_HIP;
-#endif
-#ifdef POLY_HAS_X64
-      else if (strcmp(dev_env, "x64") == 0)
-        resolved = POLY_DEVICE_X64_JIT;
-#endif
-      else
-        resolved = POLY_DEVICE_CPU;
+      resolved = poly_device_by_name(dev_env);
+      if (resolved == POLY_DEVICE_AUTO) resolved = poly_device_default();
     } else {
-      resolved = POLY_DEVICE_CPU;
+      resolved = poly_device_default();
     }
-#endif
   }
 
   /* Validate: backend must exist for this build */
   const PolyBackendDesc *backend = poly_backend_get(resolved);
-  if (!backend) {
+  if (!backend || !poly_device_can_execute(resolved)) {
     fprintf(stderr, "poly_instance_set_device: unsupported device %d\n", resolved);
     return -1;
   }
@@ -685,7 +683,7 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
   /* Bulk rematerialization: move all buffer handles to the new domain */
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyBuffer *h = &inst->buf_handles[i];
-    if (h->device == resolved) continue; /* already there */
+    if (retarget_handle_if_shared(h, resolved, alloc)) continue;
 
     size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
     if (nbytes == 0) continue;
@@ -698,9 +696,11 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
         if (old_be) {
           const PolyAllocator *old_alloc = old_be->get_allocator();
           /* Readback to host before freeing device memory */
-          if (inst->bufs[i].data)
-            old_alloc->copy_out(inst->bufs[i].data, h->ptr, nbytes, old_alloc->dev_ctx);
-          old_alloc->free(h->ptr, old_alloc->dev_ctx);
+          if (inst->bufs[i].data) {
+            PolyBuffer dst_view = poly_buffer_make_host_view(inst->bufs[i].data, nbytes);
+            old_alloc->copy_out(&dst_view, h, nbytes, old_alloc->dev_ctx);
+          }
+          old_alloc->free(h, old_alloc->dev_ctx);
         }
       }
       *h = (PolyBuffer){
@@ -708,6 +708,8 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
           .nbytes = nbytes,
           .device = resolved,
           .owned = false,
+          .allocator = alloc,
+          .valid = true,
       };
       continue;
     }
@@ -718,12 +720,16 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
       fprintf(stderr, "poly_instance_set_device: alloc failed for buffer %d\n", i);
       return -1;
     }
-    if (inst->bufs[i].data) alloc->copy_in(dptr, inst->bufs[i].data, nbytes, alloc->dev_ctx);
+    if (inst->bufs[i].data) {
+      PolyBuffer dst = {.ptr = dptr, .nbytes = nbytes, .device = resolved, .owned = true, .allocator = alloc};
+      PolyBuffer src_view = poly_buffer_make_host_view(inst->bufs[i].data, nbytes);
+      alloc->copy_in(&dst, &src_view, nbytes, alloc->dev_ctx);
+    }
 
     /* Free old device handle if owned and from a non-host domain */
     if (h->owned && h->ptr && !poly_device_is_host_addressable(h->device)) {
       const PolyBackendDesc *old_be = poly_backend_get(h->device);
-      if (old_be) old_be->get_allocator()->free(h->ptr, old_be->get_allocator()->dev_ctx);
+      if (old_be) old_be->get_allocator()->free(h, old_be->get_allocator()->dev_ctx);
     }
 
     *h = (PolyBuffer){
@@ -731,6 +737,8 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
         .nbytes = nbytes,
         .device = resolved,
         .owned = true,
+        .allocator = alloc,
+        .valid = true,
     };
   }
 
@@ -740,6 +748,9 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
     for (int i = 0; i < ts->n_moment_bufs; i++) {
       /* m handles */
       if (ts->m_handles[i].device != resolved) {
+        if (retarget_handle_if_shared(&ts->m_handles[i], resolved, alloc)) {
+          /* shared storage, executor-only retarget */
+        } else {
         free_owned_handle(&ts->m_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
           ts->m_handles[i] = (PolyBuffer){
@@ -747,23 +758,35 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
               .nbytes = ts->m_handles[i].nbytes,
               .device = resolved,
               .owned = false,
+              .allocator = alloc,
+              .valid = true,
           };
         } else {
           size_t nb = ts->m_handles[i].nbytes;
           void *mp = alloc->alloc(nb, alloc->dev_ctx);
           if (mp) {
-            if (ts->m_datas[i]) alloc->copy_in(mp, ts->m_datas[i], nb, alloc->dev_ctx);
+            if (ts->m_datas[i]) {
+              PolyBuffer dst = {.ptr = mp, .nbytes = nb, .device = resolved, .owned = true, .allocator = alloc};
+              PolyBuffer src_view = poly_buffer_make_host_view(ts->m_datas[i], nb);
+              alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
+            }
             ts->m_handles[i] = (PolyBuffer){
                 .ptr = mp,
                 .nbytes = nb,
                 .device = resolved,
                 .owned = true,
+                .allocator = alloc,
+                .valid = true,
             };
           }
+        }
         }
       }
       /* v handles */
       if (ts->v_handles[i].device != resolved) {
+        if (retarget_handle_if_shared(&ts->v_handles[i], resolved, alloc)) {
+          /* shared storage, executor-only retarget */
+        } else {
         free_owned_handle(&ts->v_handles[i]);
         if (poly_device_is_host_addressable(resolved)) {
           ts->v_handles[i] = (PolyBuffer){
@@ -771,81 +794,111 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
               .nbytes = ts->v_handles[i].nbytes,
               .device = resolved,
               .owned = false,
+              .allocator = alloc,
+              .valid = true,
           };
         } else {
           size_t nb = ts->v_handles[i].nbytes;
           void *vp = alloc->alloc(nb, alloc->dev_ctx);
           if (vp) {
-            if (ts->v_datas[i]) alloc->copy_in(vp, ts->v_datas[i], nb, alloc->dev_ctx);
+            if (ts->v_datas[i]) {
+              PolyBuffer dst = {.ptr = vp, .nbytes = nb, .device = resolved, .owned = true, .allocator = alloc};
+              PolyBuffer src_view = poly_buffer_make_host_view(ts->v_datas[i], nb);
+              alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
+            }
             ts->v_handles[i] = (PolyBuffer){
                 .ptr = vp,
                 .nbytes = nb,
                 .device = resolved,
                 .owned = true,
+                .allocator = alloc,
+                .valid = true,
             };
           }
+        }
         }
       }
     }
     /* Migrate loss output handle */
     if (ts->loss_handle.device != resolved) {
-      free_owned_handle(&ts->loss_handle);
-      if (poly_device_is_host_addressable(resolved)) {
-        ts->loss_handle = (PolyBuffer){
-            .ptr = &ts->loss_data,
-            .nbytes = sizeof(float),
-            .device = resolved,
-            .owned = false,
-        };
-      } else {
-        void *lp = alloc->alloc(sizeof(float), alloc->dev_ctx);
-        if (lp) {
+      if (!retarget_handle_if_shared(&ts->loss_handle, resolved, alloc)) {
+        free_owned_handle(&ts->loss_handle);
+        if (poly_device_is_host_addressable(resolved)) {
           ts->loss_handle = (PolyBuffer){
-              .ptr = lp,
+              .ptr = &ts->loss_data,
               .nbytes = sizeof(float),
               .device = resolved,
-              .owned = true,
+              .owned = false,
+              .allocator = alloc,
+              .valid = true,
           };
+        } else {
+          void *lp = alloc->alloc(sizeof(float), alloc->dev_ctx);
+          if (lp) {
+            ts->loss_handle = (PolyBuffer){
+                .ptr = lp,
+                .nbytes = sizeof(float),
+                .device = resolved,
+                .owned = true,
+                .allocator = alloc,
+                .valid = true,
+            };
+          }
         }
       }
     }
     /* Migrate bc scalar handles */
     if (ts->bc1_handle.device != resolved) {
-      free_owned_handle(&ts->bc1_handle);
-      free_owned_handle(&ts->bc2_handle);
-      if (poly_device_is_host_addressable(resolved)) {
-        ts->bc1_handle = (PolyBuffer){
-            .ptr = &ts->bc1_data,
-            .nbytes = sizeof(float),
-            .device = resolved,
-            .owned = false,
-        };
-        ts->bc2_handle = (PolyBuffer){
-            .ptr = &ts->bc2_data,
-            .nbytes = sizeof(float),
-            .device = resolved,
-            .owned = false,
-        };
-      } else {
-        void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
-        if (bp1) {
-          alloc->copy_in(bp1, &ts->bc1_data, sizeof(float), alloc->dev_ctx);
+      if (!retarget_handle_if_shared(&ts->bc1_handle, resolved, alloc) ||
+          !retarget_handle_if_shared(&ts->bc2_handle, resolved, alloc)) {
+        free_owned_handle(&ts->bc1_handle);
+        free_owned_handle(&ts->bc2_handle);
+        if (poly_device_is_host_addressable(resolved)) {
           ts->bc1_handle = (PolyBuffer){
-              .ptr = bp1,
+              .ptr = &ts->bc1_data,
               .nbytes = sizeof(float),
               .device = resolved,
-              .owned = true,
+              .owned = false,
+              .allocator = alloc,
+              .valid = true,
           };
-        }
-        void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
-        if (bp2) {
-          alloc->copy_in(bp2, &ts->bc2_data, sizeof(float), alloc->dev_ctx);
           ts->bc2_handle = (PolyBuffer){
-              .ptr = bp2,
+              .ptr = &ts->bc2_data,
               .nbytes = sizeof(float),
               .device = resolved,
-              .owned = true,
+              .owned = false,
+              .allocator = alloc,
+              .valid = true,
           };
+        } else {
+          void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
+          if (bp1) {
+            PolyBuffer dst = {.ptr = bp1, .nbytes = sizeof(float), .device = resolved, .owned = true, .allocator = alloc};
+            PolyBuffer src_view = poly_buffer_make_host_view(&ts->bc1_data, sizeof(float));
+            alloc->copy_in(&dst, &src_view, sizeof(float), alloc->dev_ctx);
+            ts->bc1_handle = (PolyBuffer){
+                .ptr = bp1,
+                .nbytes = sizeof(float),
+                .device = resolved,
+                .owned = true,
+                .allocator = alloc,
+                .valid = true,
+            };
+          }
+          void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
+          if (bp2) {
+            PolyBuffer dst = {.ptr = bp2, .nbytes = sizeof(float), .device = resolved, .owned = true, .allocator = alloc};
+            PolyBuffer src_view = poly_buffer_make_host_view(&ts->bc2_data, sizeof(float));
+            alloc->copy_in(&dst, &src_view, sizeof(float), alloc->dev_ctx);
+            ts->bc2_handle = (PolyBuffer){
+                .ptr = bp2,
+                .nbytes = sizeof(float),
+                .device = resolved,
+                .owned = true,
+                .allocator = alloc,
+                .valid = true,
+            };
+          }
         }
       }
     }
@@ -890,7 +943,8 @@ static PolyBufferBinding *build_bindings_for_realize(
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in) {
         size_t nbytes = bindings[bi].handle.nbytes;
-        a->copy_in(bindings[bi].handle.ptr, io[i].data, nbytes, a->dev_ctx);
+        PolyBuffer src_view = poly_buffer_make_host_view(io[i].data, nbytes);
+        a->copy_in(&bindings[bi].handle, &src_view, nbytes, a->dev_ctx);
       }
       /* handle.ptr stays as device pointer */
     } else {
@@ -952,7 +1006,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
   PolyBufferBinding *bindings = build_bindings_for_realize(inst, ep_idx, io, n_io, &n_bindings);
   if (!bindings) return -1;
 
-  int ret = poly_realize(inst->ctx, sink, bindings, n_bindings);
+  int ret = poly_realize_with_bindings(inst->ctx, sink, bindings, n_bindings);
   free(bindings);
   return ret;
 }
@@ -1190,8 +1244,10 @@ int poly_instance_value_and_grad(
       inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings
   );
 
-  /* Route through core poly_realize -- caching is automatic */
-  int ret = bindings ? poly_realize(inst->ctx, vag->combined_sink, bindings, n_bindings) : -1;
+  /* Route through explicit-bindings realize -- caching is automatic */
+  int ret = bindings
+                ? poly_realize_with_bindings(inst->ctx, vag->combined_sink, bindings, n_bindings)
+                : -1;
   free(bindings);
 
   /* Readback loss + grads from device to host if needed */
@@ -1230,19 +1286,28 @@ static PolyBuffer make_handle(
         .nbytes = nbytes,
         .device = dev,
         .owned = false,
+        .allocator = alloc,
+        .valid = true,
     };
   }
   void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!dptr) {
     fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
-    return (PolyBuffer){.ptr = NULL, .nbytes = 0, .device = dev, .owned = false};
+    return (PolyBuffer){
+        .ptr = NULL, .nbytes = 0, .device = dev, .owned = false, .allocator = alloc, .valid = false};
   }
-  if (host_data) alloc->copy_in(dptr, host_data, nbytes, alloc->dev_ctx);
+  if (host_data) {
+    PolyBuffer dst = {.ptr = dptr, .nbytes = nbytes, .device = dev, .owned = true, .allocator = alloc};
+    PolyBuffer src_view = poly_buffer_make_host_view(host_data, nbytes);
+    alloc->copy_in(&dst, &src_view, nbytes, alloc->dev_ctx);
+  }
   return (PolyBuffer){
       .ptr = dptr,
       .nbytes = nbytes,
       .device = dev,
       .owned = true,
+      .allocator = alloc,
+      .valid = true,
   };
 }
 
@@ -1469,8 +1534,10 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
       const PolyBackendDesc *bd = poly_backend_get(ts->bc1_handle.device);
       const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
       if (a && a->copy_in) {
-        a->copy_in(ts->bc1_handle.ptr, &bc1, sizeof(float), a->dev_ctx);
-        a->copy_in(ts->bc2_handle.ptr, &bc2, sizeof(float), a->dev_ctx);
+        PolyBuffer bc1_view = poly_buffer_make_host_view(&bc1, sizeof(float));
+        PolyBuffer bc2_view = poly_buffer_make_host_view(&bc2, sizeof(float));
+        a->copy_in(&ts->bc1_handle, &bc1_view, sizeof(float), a->dev_ctx);
+        a->copy_in(&ts->bc2_handle, &bc2_view, sizeof(float), a->dev_ctx);
       }
     } else {
       ts->bc1_data = bc1;
@@ -1517,7 +1584,7 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
     return -1;
   }
 
-  int ret = poly_realize(inst->ctx, ts->combined_sink, bindings, n_bindings);
+  int ret = poly_realize_with_bindings(inst->ctx, ts->combined_sink, bindings, n_bindings);
   free(bindings);
   if (ret != 0) {
     o->step--;

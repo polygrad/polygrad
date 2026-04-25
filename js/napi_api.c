@@ -21,7 +21,7 @@
 #include "models/mlp.h"
 #include "models/tabm.h"
 #include "models/nam.h"
-#include "scheduler.h"
+#include "engine/schedule.h"
 
 /* ── Error-checking macro ──────────────────────────────────────────────── */
 
@@ -49,6 +49,28 @@ static napi_value make_external(napi_env env, void *ptr) {
   napi_value result;
   NAPI_CALL(env, napi_create_external(env, ptr, NULL, NULL, &result));
   return result;
+}
+
+static napi_env g_frontend_buffer_release_env = NULL;
+static napi_ref g_frontend_buffer_release_ref = NULL;
+
+static void napi_frontend_buffer_release(uintptr_t buffer_key) {
+  if (!g_frontend_buffer_release_env || !g_frontend_buffer_release_ref) return;
+
+  napi_handle_scope scope;
+  if (napi_open_handle_scope(g_frontend_buffer_release_env, &scope) != napi_ok) return;
+
+  napi_value fn, global, arg, result;
+  if (napi_get_reference_value(g_frontend_buffer_release_env, g_frontend_buffer_release_ref, &fn) != napi_ok)
+    goto done;
+  if (napi_get_global(g_frontend_buffer_release_env, &global) != napi_ok)
+    goto done;
+  if (napi_create_bigint_uint64(g_frontend_buffer_release_env, (uint64_t)buffer_key, &arg) != napi_ok)
+    goto done;
+  napi_call_function(g_frontend_buffer_release_env, global, fn, 1, &arg, &result);
+
+done:
+  napi_close_handle_scope(g_frontend_buffer_release_env, scope);
 }
 
 static int read_int64_array(napi_env env, napi_value arr, int64_t *out, int max_len) {
@@ -375,6 +397,190 @@ static napi_value napi_poly_buffer_f64(napi_env env, napi_callback_info info) {
   return make_external(env, poly_buffer_f64(ctx, size));
 }
 
+/* ── Host-backed buffers + side table + graph-driven realize ──────────── */
+
+static napi_value napi_poly_buffer_from_host(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  napi_typedarray_type ta_type;
+  size_t ta_len;
+  void *ta_data;
+  napi_value ab;
+  size_t ab_off;
+  NAPI_CALL(env, napi_get_typedarray_info(env, argv[1], &ta_type, &ta_len, &ta_data, &ab, &ab_off));
+  size_t esz = 4;
+  switch (ta_type) {
+    case napi_int8_array: case napi_uint8_array: case napi_uint8_clamped_array: esz = 1; break;
+    case napi_int16_array: case napi_uint16_array: esz = 2; break;
+    case napi_int32_array: case napi_uint32_array: case napi_float32_array: esz = 4; break;
+    case napi_float64_array: case napi_biguint64_array: case napi_bigint64_array: esz = 8; break;
+    default: esz = 4;
+  }
+  size_t nbytes = ta_len * esz;
+  int dtype_id;
+  napi_get_value_int32(env, argv[3], &dtype_id);
+  int64_t dims[16];
+  int ndim = 0;
+  napi_valuetype vt;
+  napi_typeof(env, argv[4], &vt);
+  if (vt == napi_object) {
+    bool is_arr;
+    napi_is_array(env, argv[4], &is_arr);
+    if (is_arr) {
+      uint32_t len;
+      napi_get_array_length(env, argv[4], &len);
+      if (len > 16) len = 16;
+      for (uint32_t i = 0; i < len; i++) {
+        napi_value el;
+        napi_get_element(env, argv[4], i, &el);
+        int64_t v;
+        napi_get_value_int64(env, el, &v);
+        dims[i] = v;
+      }
+      ndim = (int)len;
+    }
+  }
+  return make_external(env, poly_buffer_from_host(ctx, ta_data, nbytes, dtype_id, dims, ndim));
+}
+
+static napi_value napi_poly_uop_has_buffer_identity(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyUOp *u = get_external(env, argv[0]);
+  napi_value out;
+  napi_get_boolean(env, poly_uop_has_buffer_identity(u), &out);
+  return out;
+}
+
+static napi_value napi_poly_uop_get_buffer_identity(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyUOp *u = get_external(env, argv[0]);
+  const PolyUOp *r = poly_uop_get_buffer_identity(u);
+  return make_external(env, (void *)r);
+}
+
+/* poly_realize(ctx, uops[], n, out_uops[]) -- batched graph-side realize.
+ * JS signature: realize(ctx, [uop0, uop1, ...]) -> [realizedUop0, ...]. */
+static napi_value napi_poly_realize(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  bool is_arr;
+  napi_is_array(env, argv[1], &is_arr);
+  if (!is_arr) {
+    napi_value empty;
+    napi_create_array_with_length(env, 0, &empty);
+    return empty;
+  }
+  uint32_t n;
+  napi_get_array_length(env, argv[1], &n);
+  PolyUOp **in_arr = (PolyUOp **)malloc(n * sizeof(PolyUOp *));
+  PolyUOp **out_arr = (PolyUOp **)malloc(n * sizeof(PolyUOp *));
+  for (uint32_t i = 0; i < n; i++) {
+    napi_value el;
+    napi_get_element(env, argv[1], i, &el);
+    in_arr[i] = get_external(env, el);
+    out_arr[i] = NULL;
+  }
+  int rc = poly_realize(ctx, in_arr, (int)n, out_arr);
+  napi_value out_js;
+  napi_create_array_with_length(env, n, &out_js);
+  if (rc == 0) {
+    for (uint32_t i = 0; i < n; i++) {
+      napi_value el = make_external(env, out_arr[i]);
+      napi_set_element(env, out_js, i, el);
+    }
+  }
+  free(in_arr);
+  free(out_arr);
+  return out_js;
+}
+
+static napi_value napi_poly_buffer_get_ptr(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *buf = get_external(env, argv[1]);
+  void *p = poly_buffer_get_ptr(ctx, buf);
+  napi_value out;
+  napi_create_bigint_uint64(env, (uint64_t)(uintptr_t)p, &out);
+  return out;
+}
+
+static napi_value napi_poly_buffer_get_key(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *buf = get_external(env, argv[1]);
+  napi_value out;
+  NAPI_CALL(env, napi_create_bigint_uint64(env, poly_buffer_get_key(ctx, buf), &out));
+  return out;
+}
+
+static napi_value napi_poly_set_frontend_buffer_release(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+
+  if (g_frontend_buffer_release_ref) {
+    napi_delete_reference(env, g_frontend_buffer_release_ref);
+    g_frontend_buffer_release_ref = NULL;
+  }
+  g_frontend_buffer_release_env = env;
+  NAPI_CALL(env, napi_create_reference(env, argv[0], 1, &g_frontend_buffer_release_ref));
+  poly_set_frontend_buffer_release(napi_frontend_buffer_release);
+
+  napi_value undef;
+  NAPI_CALL(env, napi_get_undefined(env, &undef));
+  return undef;
+}
+
+/* Copy `nbytes` from the buffer's host pointer into a fresh Node Buffer.
+ * Used by JS Tensor.toArray() / item() / tolist() when no JS-side host
+ * owner is registered (e.g. realize() allocated the buffer in C). */
+static napi_value napi_poly_buffer_read(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *buf = get_external(env, argv[1]);
+  int64_t nbytes;
+  napi_get_value_int64(env, argv[2], &nbytes);
+  napi_value out;
+  if (nbytes <= 0) {
+    napi_create_buffer(env, 0, NULL, &out);
+    return out;
+  }
+  void *dst;
+  napi_create_buffer(env, (size_t)nbytes, &dst, &out);
+  if (poly_buffer_read(ctx, buf, dst, (size_t)nbytes) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_buffer_read failed");
+    return NULL;
+  }
+  return out;
+}
+
+static napi_value napi_poly_ctx_set_preferred_device(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t device = 0;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &device));
+  poly_ctx_set_preferred_device(ctx, (PolyDevice)device);
+  napi_value undef;
+  NAPI_CALL(env, napi_get_undefined(env, &undef));
+  return undef;
+}
+
 /* ── Autograd ──────────────────────────────────────────────────────────── */
 
 static napi_value napi_poly_grad(napi_env env, napi_callback_info info) {
@@ -407,6 +613,18 @@ static napi_value napi_poly_cast_by_id(napi_env env, napi_callback_info info) {
     return NULL;
   }
   return make_external(env, r);
+}
+
+static napi_value napi_poly_dtype_id_by_name(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  char name[64];
+  size_t len = 0;
+  NAPI_CALL(env, napi_get_value_string_utf8(env, argv[0], name, sizeof(name), &len));
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_dtype_id_by_name(name), &out));
+  return out;
 }
 
 /* ── Shape-taking movement ops ─────────────────────────────────────────── */
@@ -1687,11 +1905,21 @@ NAPI_MODULE_INIT() {
     /* Buffers */
     DECLARE_NAPI_METHOD("poly_buffer_f32", napi_poly_buffer_f32),
     DECLARE_NAPI_METHOD("poly_buffer_f64", napi_poly_buffer_f64),
+    DECLARE_NAPI_METHOD("poly_buffer_from_host", napi_poly_buffer_from_host),
+    DECLARE_NAPI_METHOD("poly_buffer_get_ptr", napi_poly_buffer_get_ptr),
+    DECLARE_NAPI_METHOD("poly_buffer_get_key", napi_poly_buffer_get_key),
+    DECLARE_NAPI_METHOD("poly_set_frontend_buffer_release", napi_poly_set_frontend_buffer_release),
+    DECLARE_NAPI_METHOD("poly_uop_has_buffer_identity", napi_poly_uop_has_buffer_identity),
+    DECLARE_NAPI_METHOD("poly_uop_get_buffer_identity", napi_poly_uop_get_buffer_identity),
+    DECLARE_NAPI_METHOD("poly_realize", napi_poly_realize),
+    DECLARE_NAPI_METHOD("poly_buffer_read", napi_poly_buffer_read),
+    DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
 
     /* Autograd */
     DECLARE_NAPI_METHOD("poly_grad", napi_poly_grad),
     DECLARE_NAPI_METHOD("poly_detach", napi_poly_detach),
     DECLARE_NAPI_METHOD("poly_cast_by_id", napi_poly_cast_by_id),
+    DECLARE_NAPI_METHOD("poly_dtype_id_by_name", napi_poly_dtype_id_by_name),
 
     /* Movement ops (shape-taking) */
     DECLARE_NAPI_METHOD("poly_reshape", napi_poly_reshape),
