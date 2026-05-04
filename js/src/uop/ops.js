@@ -7,7 +7,7 @@
  * Node addon, a number for the WASM runtime. Since hash-consing is done in C,
  * two UOp instances with the same raw handle represent the same UOp.
  *
- * `ffi` is the backend's ffi object (native binding or wasm wrappers).
+ * `ffi` is the core's ffi object (native binding or wasm wrappers).
  */
 
 class UOp {
@@ -18,6 +18,12 @@ class UOp {
   }
 
   toString() { return `UOp(${this.raw})` }
+
+  get key() {
+    if (!this.raw) return '0'
+    if (this.ffi.poly_uop_key) return String(this.ffi.poly_uop_key(this.raw))
+    return String(this.raw)
+  }
 
   hasBufferIdentity() {
     if (!this.raw) return false

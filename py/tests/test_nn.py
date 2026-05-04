@@ -33,11 +33,11 @@ class TestLinear:
         y = m(x)
         assert y.shape == (1, 2)
 
-    def test_weight_is_leaf(self):
+    def test_weight_has_buffer_identity(self):
         m = Linear(2, 3)
-        assert m.weight._is_leaf()
+        assert m.weight.uop.has_buffer_identity()
         assert m.weight.requires_grad
-        assert m.bias._is_leaf()
+        assert m.bias.uop.has_buffer_identity()
         assert m.bias.requires_grad
 
     def test_backward(self):
@@ -381,15 +381,11 @@ class TestStateDict:
 
 # ── Segment-wise backward ──
 
-class TestSegmentBackward:
-    """Tests for gradient computation through realize() boundaries.
-
-    The segment-wise backward processes realize boundaries as segment
-    boundaries, computing local VJPs and chaining upstream gradients.
-    """
+class TestLiveTensorBackward:
+    """Tests for tinygrad-style live-UOp gradient target discovery."""
 
     def test_two_segment_chain(self):
-        """Gradient flows through one realize boundary: x→w1→realize→w2→loss."""
+        """Gradient flows through a lazy matmul chain."""
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4).realize()
         w1 = (Tensor.rand(4, 4) * 0.1).realize()
@@ -399,7 +395,7 @@ class TestSegmentBackward:
         w2.requires_grad = True
         w2._requires_grad = True
 
-        h = x.matmul(w1.T).realize()
+        h = x.matmul(w1.T)
         out = h.matmul(w2.T)
         loss = out.mean()
         loss.backward()
@@ -412,7 +408,7 @@ class TestSegmentBackward:
         assert np.linalg.norm(w2.grad.numpy()) > 0
 
     def test_three_segment_chain(self):
-        """Gradient flows through two realize boundaries."""
+        """Gradient flows through a deeper lazy matmul chain."""
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4).realize()
         w1 = (Tensor.rand(4, 4) * 0.1).realize()
@@ -425,8 +421,8 @@ class TestSegmentBackward:
         w3.requires_grad = True
         w3._requires_grad = True
 
-        h1 = x.matmul(w1.T).realize()
-        h2 = h1.matmul(w2.T).realize()
+        h1 = x.matmul(w1.T)
+        h2 = h1.matmul(w2.T)
         out = h2.matmul(w3.T)
         loss = out.mean()
         loss.backward()
@@ -437,7 +433,7 @@ class TestSegmentBackward:
             assert np.linalg.norm(w.grad.numpy()) > 0
 
     def test_segment_matches_direct(self):
-        """Segment-wise backward matches direct backward for matmul chain."""
+        """Live-tensor backward matches direct backward for a matmul chain."""
         # Direct (no realize boundaries)
         Tensor.manual_seed(42)
         rng = np.random.RandomState(42)
@@ -451,17 +447,18 @@ class TestSegmentBackward:
         loss1.backward()
         direct_grad = w1.grad.numpy().copy()
 
-        # Segment-wise (with realize)
+        # Same graph from realized source buffers, without materializing the
+        # trainable path before backward.
         w2 = Tensor(w_np.copy()).realize()
         w2.requires_grad = True
         w2._requires_grad = True
         x2 = Tensor(x_np.copy()).realize()
-        h2 = x2.matmul(w2.T).realize()
+        h2 = x2.matmul(w2.T)
         loss2 = h2.mean()
         loss2.backward()
-        segment_grad = w2.grad.numpy()
+        live_grad = w2.grad.numpy()
 
-        np.testing.assert_allclose(segment_grad, direct_grad, rtol=1e-4)
+        np.testing.assert_allclose(live_grad, direct_grad, rtol=1e-4)
 
     def test_matmul_transpose_backward(self):
         """Backward through q @ k.T pattern (attention-style)."""
@@ -473,7 +470,7 @@ class TestSegmentBackward:
         k.requires_grad = True
         k._requires_grad = True
 
-        scores = q.matmul(k.transpose(-2, -1)).realize()
+        scores = q.matmul(k.transpose(-2, -1))
         loss = (scores * 0.25).sum()
         loss.backward()
 
@@ -489,22 +486,22 @@ class TestSegmentBackward:
 
         # Use a non-trivial loss (weighted sum, not plain sum which has trivial zero grad)
         w = Tensor([[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]])
-        y = x.softmax(axis=-1).realize()
+        y = x.softmax(axis=-1)
         loss = (y * w).sum()
         loss.backward()
 
         assert x.grad is not None
         assert np.all(np.isfinite(x.grad.numpy()))
 
-    def test_layernorm_backward_through_realize(self):
-        """Backward through LayerNorm (mean→var→normalize, with realizes)."""
+    def test_layernorm_backward(self):
+        """Backward through LayerNorm (mean→var→normalize)."""
         Tensor.manual_seed(42)
         ln = LayerNorm(4)
         x = Tensor.rand(2, 4).realize()
         x.requires_grad = True
         x._requires_grad = True
 
-        y = ln(x).realize()
+        y = ln(x)
         loss = y.sum()
         loss.backward()
 
@@ -514,13 +511,13 @@ class TestSegmentBackward:
         assert ln.bias.grad is not None
 
     def test_mlp_backward(self):
-        """MLP with two Linear layers and ReLU, realize between layers."""
+        """MLP with two Linear layers and ReLU."""
         Tensor.manual_seed(42)
         l1 = Linear(4, 8)
         l2 = Linear(8, 2)
 
         x = Tensor.rand(2, 4)
-        h = l1(x).relu().realize()
+        h = l1(x).relu()
         out = l2(h)
         loss = out.sum()
         loss.backward()
@@ -532,15 +529,15 @@ class TestSegmentBackward:
         assert np.linalg.norm(l2.weight.grad.numpy()) > 0
 
     def test_grad_accumulation_multiple_paths(self):
-        """A parameter used in multiple segments gets accumulated gradient."""
+        """A parameter used through multiple lazy paths gets accumulated gradient."""
         Tensor.manual_seed(42)
         w = (Tensor.rand(4, 4) * 0.1).realize()
         w.requires_grad = True
         w._requires_grad = True
 
         x = Tensor.rand(1, 4).realize()
-        h1 = x.matmul(w.T).realize()
-        h2 = h1.matmul(w.T).realize()  # w used again
+        h1 = x.matmul(w.T)
+        h2 = h1.matmul(w.T)  # w used again
         loss = h2.sum()
         loss.backward()
 
@@ -550,20 +547,20 @@ class TestSegmentBackward:
         assert np.linalg.norm(w.grad.numpy()) > 0
 
     def test_mlp_training_with_sgd(self):
-        """End-to-end: MLP training with realize boundaries reduces loss."""
+        """End-to-end: MLP training reduces loss."""
         Tensor.manual_seed(42)
         l1 = Linear(4, 8)
         l2 = Linear(8, 1)
         params = get_parameters(l1) + get_parameters(l2)
         opt = SGD(params, lr=0.01)
+        x = Tensor.rand(2, 4)
+        target = Tensor([[1.0], [0.0]])
 
         losses = []
         for _ in range(5):
             opt.zero_grad()
-            x = Tensor.rand(2, 4)
-            h = l1(x).relu().realize()
+            h = l1(x).relu()
             out = l2(h)
-            target = Tensor([[1.0], [0.0]])
             loss = (out - target).square().sum()
             loss.backward()
             opt.step()
@@ -572,12 +569,7 @@ class TestSegmentBackward:
         assert losses[-1] < losses[0]
 
     def test_qkv_diamond_shared_intermediate(self):
-        """Verify gradients flow through q/k/v shared qkv intermediate.
-
-        Regression test: segment-wise backward must process shared intermediates
-        only after ALL contributing segments have accumulated upstream gradients
-        (Kahn's algorithm). Without this, qkv only gets ~1/3 of its gradient.
-        """
+        """Verify gradients flow through q/k/v shared qkv intermediate."""
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4, 8)
         # w shape (8, 24) so x @ w gives (1, 4, 24) which splits into 3 × 8
@@ -586,13 +578,12 @@ class TestSegmentBackward:
         w._requires_grad = True
 
         # Attention-like pattern: shared projection split 3 ways
-        qkv = x.dot(w).realize()
-        q = qkv.shrink(((0, 1), (0, 4), (0, 8))).realize()
-        k = qkv.shrink(((0, 1), (0, 4), (8, 16))).realize()
-        v = qkv.shrink(((0, 1), (0, 4), (16, 24))).realize()
+        qkv = x.dot(w)
+        q = qkv.shrink(((0, 1), (0, 4), (0, 8)))
+        k = qkv.shrink(((0, 1), (0, 4), (8, 16)))
+        v = qkv.shrink(((0, 1), (0, 4), (16, 24)))
 
         loss = (q * q + k * k + v * v).sum()
-        loss.realize()
         loss.backward()
 
         g = w.grad.numpy()
@@ -608,11 +599,7 @@ class TestSegmentBackward:
         assert ratio < 10, f"Gradient section norms differ too much: {norms} (ratio={ratio:.1f})"
 
     def test_qkv_diamond_training(self):
-        """QKV diamond pattern: gradient produces loss decrease over steps.
-
-        Functional test: the segment-wise backward through the shared qkv
-        intermediate produces usable gradients that reduce the loss.
-        """
+        """QKV diamond pattern: lazy gradient produces loss decrease over steps."""
         Tensor.manual_seed(42)
         x = Tensor.rand(1, 4, 8)
         w = (Tensor.rand(8, 24) * 0.1).realize()
@@ -621,20 +608,20 @@ class TestSegmentBackward:
 
         losses = []
         for _ in range(5):
-            qkv = x.dot(w).realize()
-            q = qkv.shrink(((0, 1), (0, 4), (0, 8))).realize()
-            k = qkv.shrink(((0, 1), (0, 4), (8, 16))).realize()
-            v = qkv.shrink(((0, 1), (0, 4), (16, 24))).realize()
+            # Match tinygrad: realization is a materialization boundary, so
+            # trainable sources must remain in the current UOp graph until
+            # backward has selected live gradient targets.
+            qkv = x.dot(w)
+            q = qkv.shrink(((0, 1), (0, 4), (0, 8)))
+            k = qkv.shrink(((0, 1), (0, 4), (8, 16)))
+            v = qkv.shrink(((0, 1), (0, 4), (16, 24)))
             loss = (q * q + k * k + v * v).sum()
-            loss.realize()
             loss.backward()
             losses.append(loss.item())
             # Manual SGD step
             updated = (w - w.grad * 0.01).realize()
-            w.uop = updated.uop
-            w._buf_uop = updated._buf_uop
+            w._tensor = updated._tensor
             w._data = updated._data
-            w._inputs = []
             w._grad = None
 
         assert all(np.isfinite(l) for l in losses), f"NaN/Inf in losses: {losses}"
@@ -684,9 +671,10 @@ class TestGPT2:
         losses = []
         for _ in range(5):
             logits = model(tokens)
-            logits.realize()
             loss = (logits * logits).sum()
-            loss.realize()
+            # tinygrad realizes optimizer outputs together with the loss after
+            # gradient graph construction. Realizing logits/loss before backward
+            # materializes the current UOp root and drops live grad targets.
             loss.backward()
             losses.append(loss.item())
             opt.step()
@@ -708,9 +696,9 @@ class TestGPT2:
         losses = []
         for _ in range(10):
             logits = model(tokens)
-            logits.realize()
             loss = (logits * logits).sum()
-            loss.realize()
+            # Keep the trainable path lazy until backward has selected params
+            # from all_tensors, matching tinygrad's current-UOp semantics.
             loss.backward()
             losses.append(loss.item())
             opt.step()
@@ -752,101 +740,3 @@ class TestVariable:
         assert "N" in repr(v)
         bound = v.bind(32)
         assert "32" in repr(bound)
-
-
-# ── CompiledStep ──
-
-class TestCompiledStep:
-    def test_compiled_step_basic(self):
-        """Compile a simple elementwise op, run twice with different data."""
-        from polygrad.tensor import CompiledStep
-        from polygrad import _ffi
-
-        ctx = _ffi._lib.poly_ctx_new()
-        buf_a = _ffi._lib.poly_buffer_f32(ctx, 4)
-        buf_out = _ffi._lib.poly_buffer_f32(ctx, 4)
-        one = _ffi._lib.poly_const_float(ctx, 1.0)
-        add = _ffi._lib.poly_alu2(ctx, _ffi.OPS['ADD'], buf_a, one)
-        store = _ffi._lib.poly_store_val(ctx, buf_out, add)
-        sink = _ffi._lib.poly_sink1(ctx, store)
-
-        step_ptr = _ffi._lib.poly_compile_step(ctx, sink)
-        assert step_ptr is not None
-
-        a = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        out = np.zeros(4, dtype=np.float32)
-        bindings = [
-            (buf_a, a),
-            (buf_out, out),
-        ]
-        step = CompiledStep(step_ptr, bindings)
-        assert step.n_kernels >= 1
-
-        # Run 1
-        step.run()
-        assert approx(out, [2.0, 3.0, 4.0, 5.0])
-
-        # Run 2 with different data
-        a[:] = [10.0, 20.0, 30.0, 40.0]
-        out[:] = 0.0
-        step.run()
-        assert approx(out, [11.0, 21.0, 31.0, 41.0])
-
-        _ffi._lib.poly_ctx_destroy(ctx)
-
-    def test_compiled_step_training_sgd(self):
-        """Compile a training step with SGD, verify loss decreases."""
-        from polygrad.nn import compile_step
-
-        model = Linear(4, 1)
-        opt = SGD(get_parameters(model), lr=0.01)
-
-        x = Tensor(np.random.randn(8, 4).astype(np.float32))
-        y = Tensor(np.random.randn(8, 1).astype(np.float32))
-
-        def train_step(model, opt, x, y):
-            pred = model(x)
-            loss = ((pred - y) * (pred - y)).sum()
-            loss.backward()
-            opt.step()
-            opt.zero_grad()
-            return loss
-
-        step = compile_step(train_step, model, opt, x, y)
-        assert step.n_kernels > 0
-
-        losses = []
-        for _ in range(10):
-            step.run()
-            losses.append(step.loss_value())
-
-        # Loss should decrease
-        assert losses[-1] < losses[0], f'Loss did not decrease: {losses[0]} -> {losses[-1]}'
-
-    def test_compiled_step_training_adam(self):
-        """Compile a training step with Adam, verify loss decreases."""
-        from polygrad.nn import compile_step
-
-        model = Linear(4, 1)
-        opt = Adam(get_parameters(model), lr=0.01)
-
-        x = Tensor(np.random.randn(8, 4).astype(np.float32))
-        y = Tensor(np.random.randn(8, 1).astype(np.float32))
-
-        def train_step(model, opt, x, y):
-            pred = model(x)
-            loss = ((pred - y) * (pred - y)).sum()
-            loss.backward()
-            opt.step()
-            opt.zero_grad()
-            return loss
-
-        step = compile_step(train_step, model, opt, x, y)
-        assert step.n_kernels > 0
-
-        losses = []
-        for _ in range(10):
-            step.run()
-            losses.append(step.loss_value())
-
-        assert losses[-1] < losses[0], f'Loss did not decrease: {losses[0]} -> {losses[-1]}'

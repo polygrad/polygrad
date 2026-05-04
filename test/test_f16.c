@@ -5,7 +5,7 @@
  * correctly through the C renderer. The strategy matches tinygrad:
  *   - float16 renders as __fp16 (via type_map)
  *   - bfloat16 ALU ops are emulated via f32 promotion
- *   - bfloat16 casts use manual bitwise manipulation
+ *   - bfloat16 casts use manual bitwise manipulation with raw u16 storage on CPU C
  */
 
 #include "test_harness.h"
@@ -89,8 +89,8 @@ TEST(f16, cast_f32_to_f16_e2e) {
   float in_data[] = {1.0f, 2.0f, -0.5f, 0.0f};
   uint16_t out_data[4] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_INT_EQ(out_data[0], f32_to_f16_bits(1.0f));
@@ -115,8 +115,8 @@ TEST(f16, cast_f16_to_f32_e2e) {
   uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(3.5f), f32_to_f16_bits(-2.0f)};
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(out_data[0], 1.0f, 1e-3f);
@@ -146,10 +146,10 @@ TEST(f16, add_f16_e2e) {
   };
   uint16_t out_data[4] = {0};
 
-  PolyBufferBinding binds[] = {
-      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
   };
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 3);
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 11.0f, 0.1f);
@@ -176,10 +176,10 @@ TEST(f16, mul_f16_e2e) {
   uint16_t b_data[] = {f32_to_f16_bits(5.0f), f32_to_f16_bits(0.5f), f32_to_f16_bits(2.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {
-      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
   };
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 3);
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 10.0f, 0.1f);
@@ -203,8 +203,8 @@ TEST(f16, neg_f16_e2e) {
   uint16_t a_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(-2.0f), f32_to_f16_bits(0.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), -1.0f, 0.01f);
@@ -229,8 +229,8 @@ TEST(f16, const_f16_e2e) {
   uint16_t a_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 11.0f, 0.1f);
@@ -256,8 +256,8 @@ TEST(f16, mixed_f16_to_f32_chain_e2e) {
   uint16_t in_data[] = {f32_to_f16_bits(1.0f), f32_to_f16_bits(2.0f), f32_to_f16_bits(3.0f)};
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(out_data[0], 101.0f, 0.1f);
@@ -281,8 +281,8 @@ TEST(f16, cast_f64_to_f16_e2e) {
   double in_data[] = {1.5, -2.5};
   uint16_t out_data[2] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(f16_bits_to_f32(out_data[0]), 1.5f, 0.01f);
@@ -305,8 +305,8 @@ TEST(f16, cast_f32_to_bf16_e2e) {
   float in_data[] = {1.0f, -2.0f, 0.5f};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), 1.0f, 0.01f);
@@ -330,8 +330,8 @@ TEST(f16, cast_bf16_to_f32_e2e) {
   uint16_t in_data[] = {f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-3.0f), f32_to_bf16_bits(0.25f)};
   float out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {POLY_BIND_HOST(in, in_data), POLY_BIND_HOST(out, out_data)};
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 2);
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 2);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(out_data[0], 1.0f, 0.01f);
@@ -357,10 +357,10 @@ TEST(f16, add_bf16_e2e) {
   uint16_t b_data[] = {f32_to_bf16_bits(10.0f), f32_to_bf16_bits(20.0f), f32_to_bf16_bits(1.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {
-      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
   };
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 3);
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), 11.0f, 0.2f);
@@ -386,10 +386,10 @@ TEST(f16, mul_bf16_e2e) {
   uint16_t b_data[] = {f32_to_bf16_bits(5.0f), f32_to_bf16_bits(0.5f), f32_to_bf16_bits(2.0f)};
   uint16_t out_data[3] = {0};
 
-  PolyBufferBinding binds[] = {
-      POLY_BIND_HOST(a, a_data), POLY_BIND_HOST(b, b_data), POLY_BIND_HOST(out, out_data)
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
   };
-  int rc = poly_realize_with_bindings(ctx, sink, binds, 3);
+  int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), 10.0f, 0.2f);

@@ -24,7 +24,7 @@ async function main() {
 
   let pg
   try {
-    pg = await polygrad.create({ target: 'wasm', device: device })
+    pg = await polygrad.create({ core: 'wasm', device: device })
   } catch (e) {
     console.log('FATAL: create failed: ' + e.message)
     window.__testResults = { passed: 0, failed: 1, error: e.message }
@@ -34,22 +34,28 @@ async function main() {
   // Run the full shared tensor test suite
   const tensorResult = await window.__runTests(pg)
 
-  // Run instance tests (skip on WebGPU: no C vtable backend)
+  // Tensor WebGPU coverage uses the unified C backend. Instance WebGPU tests are
+  // still skipped here until the async browser instance path has a busy guard.
   let instanceResult = { passed: 0, failed: 0 }
   if (isWebGpu) {
     console.log('\n== Instance ==')
-    console.log('  [SKIP] Instance tests (no WebGPU C backend)')
+    console.log('  [SKIP] Instance tests (browser WebGPU async path not validated yet)')
   } else {
     instanceResult = await window.__runInstanceTests(pg)
   }
 
   const totalPassed = tensorResult.passed + instanceResult.passed
   const totalFailed = tensorResult.failed + instanceResult.failed
-  console.log('\nTotal: ' + totalPassed + ' passed, ' + totalFailed + ' failed')
+  const totalSkipped = (tensorResult.skipped || 0) + (instanceResult.skipped || 0)
+  console.log(
+    '\nTotal: ' + totalPassed + ' passed, ' + totalFailed + ' failed' +
+    (totalSkipped ? ', ' + totalSkipped + ' skipped' : '')
+  )
 
   window.__testResults = {
     passed: totalPassed,
     failed: totalFailed,
+    skipped: totalSkipped,
     device: device
   }
 }

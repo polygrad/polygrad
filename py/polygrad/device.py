@@ -25,15 +25,14 @@ class Buffer:
 
     def numpy(self):
         """Read the buffer bytes as a flat numpy array (copy)."""
-        ptr = _ffi._lib.poly_buffer_get_ptr(self.ctx, self.uop.raw)
-        if not ptr:
-            raise RuntimeError('Buffer.numpy: buffer not allocated in ctx->buffers')
         np_dt = _to_np_dtype(self.dtype_name)
         itemsize = np.dtype(np_dt).itemsize
         nbytes = self.numel * itemsize
-        # Copy C-owned bytes into a fresh NumPy array. ctypes.string_at copies
-        # once; np.frombuffer then wraps without extra copy.
-        raw = ctypes.string_at(ptr, nbytes)
+        raw_buf = ctypes.create_string_buffer(nbytes)
+        rc = _ffi._lib.poly_buffer_read(self.ctx, self.uop.raw, raw_buf, nbytes)
+        if rc != 0:
+            raise RuntimeError('Buffer.numpy: buffer readback failed')
+        raw = raw_buf.raw
         return np.frombuffer(raw, dtype=np_dt)
 
 

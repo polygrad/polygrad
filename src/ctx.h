@@ -14,8 +14,15 @@ struct PolyCtx {
   PolyArena *arena;
   PolyMap *cse;
   PolyMap *kernel_cache;
+  PolyMap *schedule_cache;
+  PolyMap *program_cache;
   PolyMap *shape_cache;
   PolyMap *buffers;
+  PolyMap *tensors_by_uop;
+  PolyTensor **tensors;
+  int n_tensors;
+  int tensors_cap;
+  uint64_t next_tensor_order;
   /* Named buffer registry */
   PolyRegEntry **entries;
   int n_entries;

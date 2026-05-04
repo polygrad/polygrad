@@ -40,9 +40,6 @@ class PolyBuffer(ctypes.Structure):
         ('valid', ctypes.c_bool),
     ]
 
-class PolyBufferBinding(ctypes.Structure):
-    _fields_ = [('buffer', _ptr), ('handle', PolyBuffer)]
-
 class PolyIOBinding(ctypes.Structure):
     _fields_ = [('name', ctypes.c_char_p),
                 ('data', ctypes.POINTER(ctypes.c_float))]
@@ -59,25 +56,6 @@ class PolyDType(ctypes.Structure):
         ('vcount', ctypes.c_uint16),
         ('ptr_size', ctypes.c_int64),
     ]
-
-POLY_STEP_BUF_INPUT = 0
-POLY_STEP_BUF_OUTPUT = 1
-POLY_STEP_BUF_TEMP = 2
-# Phase E: POLY_STEP_BUF_CONSTANT = 3 was removed along with the
-# const-registry buffer migration path. poly_arange / poly_eye / poly_full /
-# poly_tril / poly_triu / poly_rand are pure-UOp now and never produce
-# constant-role buffers.
-
-class PolyStepBufferInfo(ctypes.Structure):
-    _fields_ = [
-        ('version', ctypes.c_int),
-        ('index', ctypes.c_int),
-        ('role', ctypes.c_int),
-        ('dtype', PolyDType),
-        ('numel', ctypes.c_int64),
-        ('nbytes', ctypes.c_int64),
-    ]
-
 
 PolyFrontendBufferReleaseFn = ctypes.CFUNCTYPE(None, _uintptr)
 
@@ -166,6 +144,12 @@ def _declare_signatures(lib):
 
     lib.poly_ctx_set_preferred_device.restype = None
     lib.poly_ctx_set_preferred_device.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_device_by_name.restype = ctypes.c_int
+    lib.poly_device_by_name.argtypes = [ctypes.c_char_p]
+
+    lib.poly_device_name.restype = ctypes.c_char_p
+    lib.poly_device_name.argtypes = [ctypes.c_int]
 
     # --- Op helpers ---
     lib.poly_op_count.restype = ctypes.c_int
@@ -404,6 +388,9 @@ def _declare_signatures(lib):
     lib.poly_uop_get_buffer_identity.restype = _ptr
     lib.poly_uop_get_buffer_identity.argtypes = [_ptr]
 
+    lib.poly_uop_reachable.restype = ctypes.c_bool
+    lib.poly_uop_reachable.argtypes = [_ptr, _ptr, _ptr]
+
     # --- Side-table buffer API (device.h) ---
     lib.poly_buffer_set.restype = None
     lib.poly_buffer_set.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -431,20 +418,41 @@ def _declare_signatures(lib):
     lib.poly_buffer_is_allocated.restype = ctypes.c_bool
     lib.poly_buffer_is_allocated.argtypes = [_ptr, _ptr]
 
-    # --- Graph-driven realize (realize.h) ---
-    lib.poly_realize.restype = ctypes.c_int
-    lib.poly_realize.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
+    # --- Graph-driven realization and core frontend tensors ---
+    lib.poly_realize_uops.restype = ctypes.c_int
+    lib.poly_realize_uops.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
 
-    # --- Realize ---
-    lib.poly_realize_with_bindings.restype = ctypes.c_int
-    lib.poly_realize_with_bindings.argtypes = [
-        _ptr, _ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int
+    lib.poly_tensor_create.restype = _ptr
+    lib.poly_tensor_create.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_tensor_create_with_roots.restype = _ptr
+    lib.poly_tensor_create_with_roots.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_tensor_update.restype = ctypes.c_int
+    lib.poly_tensor_update.argtypes = [_ptr, _ptr, _ptr, _ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_tensor_to_device.restype = _ptr
+    lib.poly_tensor_to_device.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_tensor_assign.restype = _ptr
+    lib.poly_tensor_assign.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_tensor_uop.restype = _ptr
+    lib.poly_tensor_uop.argtypes = [_ptr]
+
+    lib.poly_tensor_uop_logical.restype = _ptr
+    lib.poly_tensor_uop_logical.argtypes = [_ptr]
+
+    lib.poly_tensor_uop_physical.restype = _ptr
+    lib.poly_tensor_uop_physical.argtypes = [_ptr]
+
+    lib.poly_tensor_device.restype = ctypes.c_int
+    lib.poly_tensor_device.argtypes = [_ptr]
+
+    lib.poly_realize_tensors.restype = ctypes.c_int
+    lib.poly_realize_tensors.argtypes = [
+        _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)
     ]
-
-    lib.poly_realize_with_bindings_ex.restype = ctypes.c_int
-    lib.poly_realize_with_bindings_ex.argtypes = [_ptr, _ptr,
-        ctypes.POINTER(PolyBufferBinding), ctypes.c_int,
-        ctypes.POINTER(PolyVarBinding), ctypes.c_int]
 
     # --- Einsum ---
     lib.poly_einsum.restype = _ptr
@@ -461,119 +469,6 @@ def _declare_signatures(lib):
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
     ]
-
-    # --- Compiled Step ---
-    lib.poly_compile_step.restype = _ptr
-    lib.poly_compile_step.argtypes = [_ptr, _ptr]
-
-    lib.poly_compile_value_and_grad.restype = _ptr
-    lib.poly_compile_value_and_grad.argtypes = [
-        _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, _ip, _ip,
-    ]
-
-    lib.poly_step_run.restype = ctypes.c_int
-    lib.poly_step_run.argtypes = [_ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int]
-
-    lib.poly_step_run_ex.restype = ctypes.c_int
-    lib.poly_step_run_ex.argtypes = [_ptr,
-        ctypes.POINTER(PolyBufferBinding), ctypes.c_int,
-        ctypes.POINTER(PolyVarBinding), ctypes.c_int]
-
-    lib.poly_step_run_indexed.restype = ctypes.c_int
-    lib.poly_step_run_indexed.argtypes = [_ptr, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int]
-
-    lib.poly_step_run_indexed_ex.restype = ctypes.c_int
-    lib.poly_step_run_indexed_ex.argtypes = [_ptr, ctypes.POINTER(ctypes.c_void_p), ctypes.c_int,
-        ctypes.POINTER(PolyVarBinding), ctypes.c_int]
-
-    lib.poly_step_destroy.restype = None
-    lib.poly_step_destroy.argtypes = [_ptr]
-
-    lib.poly_step_n_kernels.restype = ctypes.c_int
-    lib.poly_step_n_kernels.argtypes = [_ptr]
-
-    lib.poly_step_n_intermediates.restype = ctypes.c_int
-    lib.poly_step_n_intermediates.argtypes = [_ptr]
-
-    lib.poly_step_n_buffers.restype = ctypes.c_int
-    lib.poly_step_n_buffers.argtypes = [_ptr]
-
-    lib.poly_step_n_bindable_buffers.restype = ctypes.c_int
-    lib.poly_step_n_bindable_buffers.argtypes = [_ptr]
-
-    lib.poly_step_buffer_info.restype = ctypes.c_int
-    lib.poly_step_buffer_info.argtypes = [_ptr, ctypes.c_int, ctypes.POINTER(PolyStepBufferInfo)]
-
-    # --- WASM step plan ---
-    lib.poly_render_step_wasm_plan.restype = _ptr
-    lib.poly_render_step_wasm_plan.argtypes = [_ptr, _ptr]
-
-    lib.poly_wasm_stepplan_n_kernels.restype = ctypes.c_int
-    lib.poly_wasm_stepplan_n_kernels.argtypes = [_ptr]
-
-    lib.poly_wasm_stepplan_kernel_bytes.restype = ctypes.POINTER(ctypes.c_uint8)
-    lib.poly_wasm_stepplan_kernel_bytes.argtypes = [_ptr, ctypes.c_int, _ip]
-
-    lib.poly_wasm_stepplan_kernel_n_params.restype = ctypes.c_int
-    lib.poly_wasm_stepplan_kernel_n_params.argtypes = [_ptr, ctypes.c_int]
-
-    lib.poly_wasm_stepplan_n_buffers.restype = ctypes.c_int
-    lib.poly_wasm_stepplan_n_buffers.argtypes = [_ptr]
-
-    lib.poly_wasm_stepplan_n_bindable_buffers.restype = ctypes.c_int
-    lib.poly_wasm_stepplan_n_bindable_buffers.argtypes = [_ptr]
-
-    lib.poly_wasm_stepplan_kernel_param_buf_index.restype = ctypes.c_int
-    lib.poly_wasm_stepplan_kernel_param_buf_index.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_wasm_stepplan_exec_order.restype = _ip
-    lib.poly_wasm_stepplan_exec_order.argtypes = [_ptr, _ip]
-
-    lib.poly_wasm_stepplan_destroy.restype = None
-    lib.poly_wasm_stepplan_destroy.argtypes = [_ptr]
-
-    # --- WebGPU step plan ---
-    lib.poly_render_step_webgpu_plan.restype = _ptr
-    lib.poly_render_step_webgpu_plan.argtypes = [_ptr, _ptr]
-
-    lib.poly_webgpu_stepplan_n_kernels.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_n_kernels.argtypes = [_ptr]
-
-    lib.poly_webgpu_stepplan_kernel_wgsl.restype = ctypes.c_char_p
-    lib.poly_webgpu_stepplan_kernel_wgsl.argtypes = [_ptr, ctypes.c_int, _ip]
-
-    lib.poly_webgpu_stepplan_kernel_n_params.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_kernel_n_params.argtypes = [_ptr, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_kernel_grid.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_kernel_grid.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_kernel_local.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_kernel_local.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_n_buffers.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_n_buffers.argtypes = [_ptr]
-
-    lib.poly_webgpu_stepplan_n_bindable_buffers.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_n_bindable_buffers.argtypes = [_ptr]
-
-    lib.poly_webgpu_stepplan_bindable_buf_index.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_bindable_buf_index.argtypes = [_ptr, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_kernel_param_buf_index.restype = ctypes.c_int
-    lib.poly_webgpu_stepplan_kernel_param_buf_index.argtypes = [_ptr, ctypes.c_int, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_exec_order.restype = _ip
-    lib.poly_webgpu_stepplan_exec_order.argtypes = [_ptr, _ip]
-
-    lib.poly_webgpu_stepplan_buf_size.restype = ctypes.c_int64
-    lib.poly_webgpu_stepplan_buf_size.argtypes = [_ptr, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_buf_nbytes.restype = ctypes.c_int64
-    lib.poly_webgpu_stepplan_buf_nbytes.argtypes = [_ptr, ctypes.c_int]
-
-    lib.poly_webgpu_stepplan_destroy.restype = None
-    lib.poly_webgpu_stepplan_destroy.argtypes = [_ptr]
 
     # --- PolyInstance (instance.h) ---
     lib.poly_instance_from_ir.restype = _ptr
@@ -686,15 +581,9 @@ def _declare_signatures(lib):
     lib.poly_mae_loss.restype = _ptr
     lib.poly_mae_loss.argtypes = [_ptr, _ptr, _ptr]
 
-    # --- CUDA realize (conditional) ---
-    has_cuda = hasattr(lib, 'poly_realize_cuda')
+    # --- CUDA helpers (conditional) ---
+    has_cuda = hasattr(lib, 'poly_cuda_available')
     if has_cuda:
-        lib.poly_realize_cuda.restype = ctypes.c_int
-        lib.poly_realize_cuda.argtypes = [_ptr, _ptr, ctypes.POINTER(PolyBufferBinding), ctypes.c_int]
-
-        lib.poly_cuda_copyback.restype = ctypes.c_int
-        lib.poly_cuda_copyback.argtypes = [ctypes.POINTER(PolyBufferBinding), ctypes.c_int]
-
         lib.poly_cuda_flush_buffers.restype = None
         lib.poly_cuda_flush_buffers.argtypes = []
 

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -7,6 +8,7 @@
 #include "../src/schedule/rangeify.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/frontend.h"
+#include "test_harness.h"
 
 /* JSON helpers */
 
@@ -76,7 +78,7 @@ static int run_and_report(
    * kernel metadata for parity reporting. */
   int ok = 1;
   if (bindings && n_bindings > 0) {
-    PolyBufferBinding *bb = malloc((size_t)n_bindings * sizeof(PolyBufferBinding));
+    PolyTestBufferView *bb = malloc((size_t)n_bindings * sizeof(PolyTestBufferView));
     for (int j = 0; j < n_bindings; j++) {
       bb[j].buffer = bindings[j].buffer;
       bb[j].handle = (PolyBuffer){bindings[j].data, 0, POLY_DEVICE_CPU, false};
@@ -84,7 +86,7 @@ static int run_and_report(
 #ifdef POLY_HAS_CUDA
     if (use_cuda) {
       /* Build CUDA-domain bindings, realize via unified path, readback */
-      PolyBufferBinding *cb = calloc((size_t)n_bindings, sizeof(PolyBufferBinding));
+      PolyTestBufferView *cb = calloc((size_t)n_bindings, sizeof(PolyTestBufferView));
       int alloc_ok = 1;
       for (int j = 0; j < n_bindings; j++) {
         PolyUOp *buf = bindings[j].buffer;
@@ -102,7 +104,7 @@ static int run_and_report(
         cb[j].handle = (PolyBuffer){(void *)(uintptr_t)dptr, nbytes, POLY_DEVICE_CUDA, true};
       }
       if (alloc_ok)
-        ok = (poly_realize_with_bindings(ctx, tensor_sink, cb, n_bindings) == 0);
+        ok = (poly_test_realize_buffer_views(ctx, tensor_sink, cb, n_bindings) == 0);
       else
         ok = 0;
       /* Readback all bindings to host */
@@ -125,7 +127,7 @@ static int run_and_report(
 #endif
 #ifdef POLY_HAS_HIP
         if (use_hip) {
-      PolyBufferBinding *hb = calloc((size_t)n_bindings, sizeof(PolyBufferBinding));
+      PolyTestBufferView *hb = calloc((size_t)n_bindings, sizeof(PolyTestBufferView));
       int alloc_ok = 1;
       for (int j = 0; j < n_bindings; j++) {
         PolyUOp *buf = bindings[j].buffer;
@@ -143,7 +145,7 @@ static int run_and_report(
         hb[j].handle = (PolyBuffer){dptr, nbytes, POLY_DEVICE_HIP, true};
       }
       if (alloc_ok)
-        ok = (poly_realize_with_bindings(ctx, tensor_sink, hb, n_bindings) == 0);
+        ok = (poly_test_realize_buffer_views(ctx, tensor_sink, hb, n_bindings) == 0);
       else
         ok = 0;
       if (ok) {
@@ -162,7 +164,7 @@ static int run_and_report(
 #endif
     {
       (void)use_hip;
-      ok = (poly_realize_with_bindings(ctx, tensor_sink, bb, n_bindings) == 0);
+      ok = (poly_test_realize_buffer_views(ctx, tensor_sink, bb, n_bindings) == 0);
     }
     free(bb);
   }
@@ -192,7 +194,11 @@ static int run_and_report(
     {
       (void)use_cuda;
       (void)use_hip;
-      all_lin[k] = poly_linearize(ctx, sr.kernels[k], &all_n_lin[k]);
+      /* Strict parity diagnostics compare against tinygrad with the optimizer
+       * explicitly on or off. Use the env-aware CPU linearizer here so the
+       * runner follows POLY_OPTIMIZE/POLY_DEVECTORIZE in the same way the
+       * Python harness configures tinygrad extraction. */
+      all_lin[k] = poly_linearize_env(ctx, sr.kernels[k], &all_n_lin[k]);
     }
     if (!all_lin[k]) {
       fprintf(stderr, "parity: linearize failed for kernel %d\n", k);
@@ -1020,12 +1026,14 @@ static int case_matmul_broadcast(void) {
 
 static int case_cross_entropy_nonlast_axis(void) {
   float logits_d[12] = {0};
-  float target_d[4] = {0, 2, 1, 0};
+  int32_t target_d[4] = {0, 2, 1, 0};
   float out_d[1] = {0};
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *logits_buf = poly_buffer_f32(ctx, 12);
-  PolyUOp *target_buf = poly_buffer_f32(ctx, 4);
+  /* Mirrors test_tinygrad_parity.py exactly: target is np.int32, not f32
+   * with an implicit cast inside cross_entropy. */
+  PolyUOp *target_buf = poly_buffer(ctx, POLY_INT32, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 1);
 
   /* v2 API: shape lives on the UOp via reshape */
@@ -1075,7 +1083,7 @@ static int case_full_2d(void) {
 }
 
 static int case_arange_simple(void) {
-  /* tinygrad: Tensor.arange(0, 5, 1) */
+  /* tinygrad: Tensor.arange(0, 5, 1, dtype=dtypes.float32) */
   float out_d[5] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = poly_buffer_f32(ctx, 5);
@@ -1089,7 +1097,7 @@ static int case_arange_simple(void) {
 }
 
 static int case_arange_start_step(void) {
-  /* tinygrad: Tensor.arange(2, 8, 3) */
+  /* tinygrad: Tensor.arange(2, 8, 3, dtype=dtypes.float32) */
   float out_d[2] = {0};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *out = poly_buffer_f32(ctx, 2);

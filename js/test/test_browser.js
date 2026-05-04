@@ -5,7 +5,7 @@ const { runTests } = require('./test_shared')
 const { runInstanceTests } = require('./test_instance_shared')
 
 // Browser smoke: exercises the WASM-only path that browsers use
-polygrad.create({ target: 'wasm' }).then(pg =>
+polygrad.create({ core: 'wasm' }).then(pg =>
   runTests(pg).then(async tensorResult => {
     const instanceResult = await runInstanceTests(pg)
     const failed = tensorResult.failed + instanceResult.failed

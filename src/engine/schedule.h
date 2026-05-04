@@ -67,6 +67,7 @@ typedef struct {
   int64_t numel;
   int64_t nbytes;
   PolyUOp *buf_uop;
+  PolyDevice device;
   bool is_intermediate;
   int external_buf_idx;
 } PolyScheduleBufSlot;
@@ -175,6 +176,14 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph);
 
 /* Tinygrad engine/schedule.py analogue: lower a sink into LINEAR form. */
 PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode mode);
+
+size_t poly_schedule_cache_len(PolyCtx *ctx);
+void poly_schedule_cache_clear(PolyCtx *ctx);
+/* Tinygrad to_program/runtime-cache analogue: count/clear backend program
+ * handles cached below scheduling. Clearing is intended for tests and must not
+ * race an in-flight PolySchedule that is borrowing cached runners. */
+size_t poly_program_cache_len(PolyCtx *ctx);
+void poly_program_cache_clear(PolyCtx *ctx);
 
 void poly_schedule_free(PolySchedule *schedule);
 

@@ -10,6 +10,8 @@
  *   POLY_OPT=0      use -O0 (fast compile, ~5x faster than -O2)
  *   POLY_OPT=1      use -O1
  *   POLY_OPT=2      use -O2 (default, matches tinygrad)
+ *   POLY_CPU_ARCH=0 disable host CPU targeting
+ *   POLY_CPU_ARCH=x compile with -march=x (default: native)
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -24,6 +26,7 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdbool.h>
 
 struct PolyProgram {
   void *handle; /* dlopen handle */
@@ -33,6 +36,30 @@ struct PolyProgram {
 };
 
 static int poly_compile_id = 0;
+
+typedef struct CachedSoHandle {
+  char path[512];
+  void *handle;
+  struct CachedSoHandle *next;
+} CachedSoHandle;
+
+static CachedSoHandle *g_cached_so_handles;
+
+static void *cached_so_handle_get(const char *so_path) {
+  for (CachedSoHandle *e = g_cached_so_handles; e; e = e->next)
+    if (strcmp(e->path, so_path) == 0) return e->handle;
+  return NULL;
+}
+
+static void cached_so_handle_put(const char *so_path, void *handle) {
+  CachedSoHandle *e = malloc(sizeof(*e));
+  if (!e) return;
+  strncpy(e->path, so_path, sizeof(e->path) - 1);
+  e->path[sizeof(e->path) - 1] = '\0';
+  e->handle = handle;
+  e->next = g_cached_so_handles;
+  g_cached_so_handles = e;
+}
 
 /* Content hash (FNV-1a 64-bit) */
 
@@ -79,13 +106,53 @@ static const char *opt_flag(void) {
   return "-O2";
 }
 
+/* CPU target flag.
+ * tinygrad's CPU compiler always passes the selected host arch to clang.
+ * Polygrad's native JIT also needs that: without F16C/AVX feature selection,
+ * clang may lower __fp16 casts into unresolved compiler-rt libcalls. */
+static const char *cpu_arch_flag(char *buf, size_t cap) {
+  const char *v = getenv("POLY_CPU_ARCH");
+  if (!v || !v[0]) v = "native";
+  if (strcmp(v, "0") == 0 || strcmp(v, "none") == 0 || strcmp(v, "baseline") == 0)
+    return NULL;
+  if (v[0] == '-') return v;
+  snprintf(buf, cap, "-march=%s", v);
+  return buf;
+}
+
+static bool jit_asan_enabled(void) {
+#if defined(__SANITIZE_ADDRESS__)
+  return true;
+#else
+  return false;
+#endif
+}
+
 /* Load a .so and resolve the _call wrapper */
 
 static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached) {
-  void *handle = dlopen(so_path, RTLD_LAZY);
+  void *handle = cached ? cached_so_handle_get(so_path) : NULL;
   if (!handle) {
-    if (!cached) fprintf(stderr, "polygrad: dlopen: %s\n", dlerror());
-    return NULL;
+    /* Resolve JIT module relocations during dlopen. Lazy binding can defer a
+     * bad cached shared-object dependency until the first kernel call, which
+     * turns a corrupt/stale cache entry into a crash instead of a load failure
+     * that the cache path can delete and rebuild.
+     *
+     * tinygrad's ClangJIT path uses a freestanding object plus jit_loader, so a
+     * cached CPU program is executable bytes kept resident by the runtime. The
+     * Polygrad C backend still uses dlopen for ABI simplicity; keeping disk
+     * cache hits resident gives it the same lifetime shape and avoids repeated
+     * dlopen/dlclose cycles for one cached kernel. */
+    int flags = RTLD_NOW | RTLD_LOCAL;
+#ifdef RTLD_NODELETE
+    if (cached) flags |= RTLD_NODELETE;
+#endif
+    handle = dlopen(so_path, flags);
+    if (!handle) {
+      if (!cached) fprintf(stderr, "polygrad: dlopen: %s\n", dlerror());
+      return NULL;
+    }
+    if (cached) cached_so_handle_put(so_path, handle);
   }
 
   char call_name[256];
@@ -110,7 +177,9 @@ static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached
 
 /* Compile C source to .so */
 
-static int compile_to_so(const char *source, const char *c_path, const char *so_path) {
+static int compile_to_so_with_flag(
+    const char *source, const char *c_path, const char *so_path, const char *cpu_flag
+) {
   FILE *f = fopen(c_path, "w");
   if (!f) {
     fprintf(stderr, "polygrad: cannot write %s\n", c_path);
@@ -128,16 +197,35 @@ static int compile_to_so(const char *source, const char *c_path, const char *so_
   if (pid == 0) {
     const char *cc = getenv("CC");
     if (!cc) cc = "clang";
-    execlp(
-        cc, cc, opt_flag(), "-shared", "-fPIC", "-fno-math-errno", "-o", so_path, c_path, "-lm",
-        (char *)NULL
-    );
+    char *args[16];
+    int n = 0;
+    args[n++] = (char *)cc;
+    args[n++] = (char *)opt_flag();
+    if (cpu_flag) args[n++] = (char *)cpu_flag;
+    args[n++] = "-shared";
+    args[n++] = "-fPIC";
+    args[n++] = "-fno-math-errno";
+    args[n++] = "-o";
+    args[n++] = (char *)so_path;
+    args[n++] = (char *)c_path;
+    args[n++] = "-lm";
+    args[n] = NULL;
+    execvp(cc, args);
     /* clang not found — try gcc as fallback */
     if (!getenv("CC")) {
-      execlp(
-          "gcc", "gcc", opt_flag(), "-shared", "-fPIC", "-fno-math-errno", "-o", so_path, c_path,
-          "-lm", (char *)NULL
-      );
+      n = 0;
+      args[n++] = "gcc";
+      args[n++] = (char *)opt_flag();
+      if (cpu_flag) args[n++] = (char *)cpu_flag;
+      args[n++] = "-shared";
+      args[n++] = "-fPIC";
+      args[n++] = "-fno-math-errno";
+      args[n++] = "-o";
+      args[n++] = (char *)so_path;
+      args[n++] = (char *)c_path;
+      args[n++] = "-lm";
+      args[n] = NULL;
+      execvp("gcc", args);
     }
     _exit(127);
   }
@@ -155,10 +243,18 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
   }
 
   /* Disk cache: check if we already compiled this exact source */
-  int use_cache = !getenv("POLY_CACHE") || getenv("POLY_CACHE")[0] != '0';
+  /* ASAN-instrumented test binaries are unstable when repeatedly loading
+   * uninstrumented cached JIT DSOs. tinygrad's CPU JIT maps freestanding object
+   * bytes, not dlopen'ed shared libraries, so this is a Polygrad C-backend
+   * loader constraint. Keep release disk caching enabled, but make sanitizer
+   * runs compile temporary kernels instead of reusing cached .so files. */
+  int use_cache =
+      (!getenv("POLY_CACHE") || getenv("POLY_CACHE")[0] != '0') && !jit_asan_enabled();
   char cache_dir[512] = {0};
   char cache_path[512] = {0};
   uint64_t h = 0;
+  char cpu_flag_buf[128] = {0};
+  const char *cpu_flag = cpu_arch_flag(cpu_flag_buf, sizeof(cpu_flag_buf));
 
   if (use_cache) {
     h = source_hash(source);
@@ -171,6 +267,12 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
     const char *cc_env = getenv("CC");
     if (cc_env) {
       for (const char *p = cc_env; *p; p++) {
+        h ^= (uint64_t)(unsigned char)*p;
+        h *= 0x100000001b3ULL;
+      }
+    }
+    if (cpu_flag) {
+      for (const char *p = cpu_flag; *p; p++) {
         h ^= (uint64_t)(unsigned char)*p;
         h *= 0x100000001b3ULL;
       }
@@ -197,7 +299,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
   snprintf(so_path, sizeof(so_path), "/tmp/polygrad_%d_%d.so", (int)getpid(), poly_compile_id);
   poly_compile_id++;
 
-  int ret = compile_to_so(source, c_path, so_path);
+  int ret = compile_to_so_with_flag(source, c_path, so_path, cpu_flag);
   if (ret != 0) {
     /* DEBUG: dump failed kernel source */
     fprintf(stderr, "polygrad: C compiler failed (exit %d)\n", ret);
@@ -242,7 +344,7 @@ void poly_program_call(PolyProgram *prog, void **args, int n_args) {
 
 void poly_program_destroy(PolyProgram *prog) {
   if (!prog) return;
-  dlclose(prog->handle);
+  if (!prog->cached) dlclose(prog->handle);
   if (!prog->cached) remove(prog->so_path);
   free(prog);
 }

@@ -186,7 +186,7 @@ TEST(hip, render_shared_mem) {
 
 /* HIP binding helpers */
 
-static int build_hip_bindings(PolyBufferBinding *out, PolyUOp **bufs, float **host_ptrs, int n) {
+static int build_hip_bindings(PolyTestBufferView *out, PolyUOp **bufs, float **host_ptrs, int n) {
   for (int i = 0; i < n; i++) {
     size_t nbytes = (size_t)bufs[i]->arg.i * poly_dtype_itemsize(poly_dtype_scalar(bufs[i]->dtype));
     void *dptr = poly_hip_alloc(nbytes);
@@ -201,12 +201,12 @@ static int build_hip_bindings(PolyBufferBinding *out, PolyUOp **bufs, float **ho
   return 0;
 }
 
-static void free_hip_bindings(PolyBufferBinding *bindings, int n) {
+static void free_hip_bindings(PolyTestBufferView *bindings, int n) {
   for (int i = 0; i < n; i++)
     if (bindings[i].handle.owned) poly_hip_free(bindings[i].handle.ptr);
 }
 
-static void readback_hip_binding(PolyBufferBinding *b, void *host_dst, size_t nbytes) {
+static void readback_hip_binding(PolyTestBufferView *b, void *host_dst, size_t nbytes) {
   poly_hip_copy_dtoh(host_dst, b->handle.ptr, nbytes);
 }
 
@@ -229,18 +229,18 @@ TEST(hip, e2e_vecadd) {
   }
 
   /* CPU reference */
-  PolyBufferBinding cpu_binds[] = {
-      POLY_BIND_HOST(tv.buf_c, c_cpu), POLY_BIND_HOST(tv.buf_a, a), POLY_BIND_HOST(tv.buf_b, b)
+  PolyTestBufferView cpu_binds[] = {
+      POLY_TEST_HOST_VIEW(tv.buf_c, c_cpu), POLY_TEST_HOST_VIEW(tv.buf_a, a), POLY_TEST_HOST_VIEW(tv.buf_b, b)
   };
-  int ret = poly_realize_with_bindings(tv.ctx, tv.sink, cpu_binds, 3);
+  int ret = poly_test_realize_buffer_views(tv.ctx, tv.sink, cpu_binds, 3);
   ASSERT_TRUE(ret == 0);
 
-  /* GPU via unified poly_realize_with_bindings with HIP-domain bindings */
+  /* GPU via unified poly_test_realize_buffer_views with HIP-domain bindings */
   PolyUOp *bufs[] = {tv.buf_c, tv.buf_a, tv.buf_b};
   float *ptrs[] = {NULL, a, b};
-  PolyBufferBinding hip_binds[3];
+  PolyTestBufferView hip_binds[3];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 3), 0);
-  ASSERT_INT_EQ(poly_realize_with_bindings(tv.ctx, tv.sink, hip_binds, 3), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(tv.ctx, tv.sink, hip_binds, 3), 0);
   readback_hip_binding(&hip_binds[0], c_gpu, n * sizeof(float));
   free_hip_bindings(hip_binds, 3);
 
@@ -274,14 +274,14 @@ TEST(hip, e2e_neg) {
   for (int i = 0; i < n; i++)
     a[i] = (float)i - 256.0f;
 
-  PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
+  PolyTestBufferView cpu_binds[] = {POLY_TEST_HOST_VIEW(buf_c, c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
+  ASSERT_TRUE(poly_test_realize_buffer_views(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
-  PolyBufferBinding hip_binds[2];
+  PolyTestBufferView hip_binds[2];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, hip_binds, 2), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, hip_binds, 2), 0);
   readback_hip_binding(&hip_binds[0], c_gpu, n * sizeof(float));
   free_hip_bindings(hip_binds, 2);
 
@@ -312,14 +312,14 @@ TEST(hip, e2e_exp2) {
   for (int i = 0; i < n; i++)
     a[i] = (float)i * 0.05f - 6.0f;
 
-  PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
+  PolyTestBufferView cpu_binds[] = {POLY_TEST_HOST_VIEW(buf_c, c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
+  ASSERT_TRUE(poly_test_realize_buffer_views(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
-  PolyBufferBinding hip_binds[2];
+  PolyTestBufferView hip_binds[2];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, hip_binds, 2), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, hip_binds, 2), 0);
   readback_hip_binding(&hip_binds[0], c_gpu, n * sizeof(float));
   free_hip_bindings(hip_binds, 2);
 
@@ -350,14 +350,14 @@ TEST(hip, e2e_reduce_sum) {
   for (int i = 0; i < n; i++)
     a[i] = 1.0f;
 
-  PolyBufferBinding cpu_binds[] = {POLY_BIND_HOST(buf_c, &c_cpu), POLY_BIND_HOST(buf_a, a)};
-  ASSERT_TRUE(poly_realize_with_bindings(ctx, sink, cpu_binds, 2) == 0);
+  PolyTestBufferView cpu_binds[] = {POLY_TEST_HOST_VIEW(buf_c, &c_cpu), POLY_TEST_HOST_VIEW(buf_a, a)};
+  ASSERT_TRUE(poly_test_realize_buffer_views(ctx, sink, cpu_binds, 2) == 0);
 
   PolyUOp *bufs[] = {buf_c, buf_a};
   float *ptrs[] = {NULL, a};
-  PolyBufferBinding hip_binds[2];
+  PolyTestBufferView hip_binds[2];
   ASSERT_INT_EQ(build_hip_bindings(hip_binds, bufs, ptrs, 2), 0);
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, hip_binds, 2), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, hip_binds, 2), 0);
   readback_hip_binding(&hip_binds[0], &c_gpu, sizeof(float));
   free_hip_bindings(hip_binds, 2);
 
@@ -531,7 +531,7 @@ TEST(hip, instance_hip_roundtrip) {
  * migrated_consts[64] copy. Phase B (commit 6044282) rewrote poly_full as
  * a pure UOp (CONST -> reshape -> expand), and Phase E deleted the
  * const-registry entirely, so this test now exercises a different code
- * path entirely: the only HIP smoke that runs poly_realize_with_bindings_ex with a
+ * path entirely: the only HIP smoke that runs poly_test_realize_buffer_views_vars with a
  * DEFINE_VAR'd dynamic shape. Renamed accordingly. */
 TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
   SKIP_IF_NO_HIP();
@@ -549,13 +549,13 @@ TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
 
   float a_data[16] = {1, 2, 3, 4};
   float out_data[16] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_out, out_data),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_out, out_data),
   };
   PolyVarBinding vars[] = {{.var = N, .value = 4}};
 
-  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, vars, 1);
+  int ret = poly_test_realize_buffer_views_vars(ctx, sink, bindings, 2, vars, 1);
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(ret, 0);
@@ -789,7 +789,7 @@ static uint16_t f32_to_f16(float f) {
   return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
 }
 
-/* Automatic TC E2E: 16x16x16 f16 matmul through poly_realize_with_bindings */
+/* Automatic TC E2E: 16x16x16 f16 matmul through poly_test_realize_buffer_views */
 
 TEST(hip, tc_auto_matmul_e2e) {
   SKIP_IF_NO_HIP();
@@ -858,21 +858,21 @@ TEST(hip, tc_auto_matmul_e2e) {
   poly_hip_memset(d_c, 0, c_bytes);
 
   /* Build HIP bindings manually (f16 buffers need raw void* handling) */
-  PolyBufferBinding hip_binds[3] = {
+  PolyTestBufferView hip_binds[3] = {
       {.buffer = buf_c, .handle = {d_c, c_bytes, POLY_DEVICE_HIP, true}},
       {.buffer = buf_a, .handle = {d_a, a_bytes, POLY_DEVICE_HIP, true}},
       {.buffer = buf_b, .handle = {d_b, b_bytes, POLY_DEVICE_HIP, true}},
   };
 
-  /* Execute through full poly_realize_with_bindings path */
+  /* Execute through full poly_test_realize_buffer_views path */
   setenv("POLY_TC_OPT", "1", 1);
   setenv("POLY_USE_TC", "1", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, hip_binds, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, hip_binds, 3);
   unsetenv("POLY_TC_OPT");
   unsetenv("POLY_USE_TC");
 
   if (ret != 0) {
-    fprintf(stderr, "  tc_auto_matmul: poly_realize_with_bindings failed (ret=%d)\n", ret);
+    fprintf(stderr, "  tc_auto_matmul: poly_test_realize_buffer_views failed (ret=%d)\n", ret);
     /* Preflight diagnostic: dump the scheduled kernel shape */
     fprintf(stderr, "  (check POLY_DUMP_KERNELS=1 for kernel IR before HIP lowering)\n");
   }
@@ -979,7 +979,7 @@ TEST(hip, tc_auto_matmul_unique_values) {
   poly_hip_copy_htod(d_b, h_b, b_bytes);
   poly_hip_memset(d_c, 0, c_bytes);
 
-  PolyBufferBinding hip_binds[3] = {
+  PolyTestBufferView hip_binds[3] = {
       {.buffer = buf_c, .handle = {d_c, c_bytes, POLY_DEVICE_HIP, true}},
       {.buffer = buf_a, .handle = {d_a, a_bytes, POLY_DEVICE_HIP, true}},
       {.buffer = buf_b, .handle = {d_b, b_bytes, POLY_DEVICE_HIP, true}},
@@ -987,7 +987,7 @@ TEST(hip, tc_auto_matmul_unique_values) {
 
   setenv("POLY_TC_OPT", "1", 1);
   setenv("POLY_USE_TC", "1", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, hip_binds, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, hip_binds, 3);
   unsetenv("POLY_TC_OPT");
   unsetenv("POLY_USE_TC");
   ASSERT_INT_EQ(ret, 0);

@@ -22,7 +22,7 @@ async function runInstanceTests(pg) {
 
   if (!pg.supportsInstance) {
     console.log('\n== Instance ==')
-    console.log('  [SKIP] target does not expose PolyInstance runtime yet')
+    console.log('  [SKIP] core does not expose PolyInstance runtime yet')
     return { passed: 0, failed: 0 }
   }
 

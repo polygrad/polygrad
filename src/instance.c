@@ -16,9 +16,9 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "frontend.h"
+#include "engine/realize.h"
 #include "engine/schedule.h"
 #include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
-#include "engine/schedule.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -909,87 +909,62 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
 
 /* Generic entrypoint execution */
 
-/* Build PolyBufferBinding[] from instance named buffers + IO overrides. */
-static PolyBufferBinding *build_bindings_for_realize(
-    PolyInstance *inst,
-    int ep_idx,
-    PolyIOBinding *io,
-    int n_io,
-    int *n_out
-) {
-  /* Start with all instance buffers */
-  int n = inst->n_bufs;
-  PolyBufferBinding *bindings = calloc((size_t)n, sizeof(PolyBufferBinding));
-  if (!bindings) {
-    *n_out = 0;
-    return NULL;
-  }
+static int attach_instance_buffers(PolyInstance *inst, PolyIOBinding *io, int n_io) {
+  if (!inst || !inst->ctx || !inst->buf_handles) return -1;
 
-  for (int i = 0; i < n; i++) {
-    bindings[i].buffer = inst->bufs[i].buffer;
-    bindings[i].handle = inst->buf_handles[i];
-  }
+  for (int i = 0; i < inst->n_bufs; i++)
+    poly_buffer_attach(inst->ctx, inst->bufs[i].buffer, &inst->buf_handles[i]);
 
-  /* Override with IO bindings by name.
-   * For device-memory domains, upload host data into existing device buffer.
-   * For CPU/INTERP/WASM, point directly at host memory (zero-copy). */
   for (int i = 0; i < n_io; i++) {
     if (!io[i].data) continue;
     int bi = find_buf_by_name(inst, io[i].name);
     if (bi < 0) continue;
-    if (!poly_device_is_host_addressable(bindings[bi].handle.device)) {
-      /* Upload host IO data into device buffer */
-      const PolyBackendDesc *bd = poly_backend_get(bindings[bi].handle.device);
-      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
-      if (a && a->copy_in) {
-        size_t nbytes = bindings[bi].handle.nbytes;
-        PolyBuffer src_view = poly_buffer_make_host_view(io[i].data, nbytes);
-        a->copy_in(&bindings[bi].handle, &src_view, nbytes, a->dev_ctx);
-      }
-      /* handle.ptr stays as device pointer */
+
+    PolyBuffer *h = &inst->buf_handles[bi];
+    if (!poly_device_is_host_addressable(h->device)) {
+      if (upload_handle(h, io[i].data, h->nbytes) != 0) return -1;
+      poly_buffer_attach(inst->ctx, inst->bufs[bi].buffer, h);
     } else {
-      bindings[bi].handle.ptr = io[i].data;
+      PolyBuffer view = *h;
+      view.ptr = io[i].data;
+      view.owned = false;
+      view.src = NULL;
+      view.valid = true;
+      poly_buffer_attach(inst->ctx, inst->bufs[bi].buffer, &view);
     }
   }
 
-  *n_out = n;
-  return bindings;
+  return 0;
 }
 
-/* Extended version: instance buffers + IO overrides + extra buffer/handle pairs.
- * Used by value_and_grad to include vag output buffers in the bindings. */
-static PolyBufferBinding *build_bindings_extended(
+static void attach_extra_buffers(
     PolyInstance *inst,
-    int ep_idx,
+    PolyUOp **extra_bufs,
+    PolyBuffer *extra_handles,
+    int n_extra
+) {
+  if (!inst || !extra_bufs || !extra_handles) return;
+  for (int i = 0; i < n_extra; i++)
+    poly_buffer_attach(inst->ctx, extra_bufs[i], &extra_handles[i]);
+}
+
+static int run_instance_sink(
+    PolyInstance *inst,
+    PolyUOp *sink,
     PolyIOBinding *io,
     int n_io,
     PolyUOp **extra_bufs,
     PolyBuffer *extra_handles,
-    int n_extra,
-    int *n_out
+    int n_extra
 ) {
-  int n_base = 0;
-  PolyBufferBinding *base = build_bindings_for_realize(inst, ep_idx, io, n_io, &n_base);
-  if (!base) {
-    *n_out = 0;
-    return NULL;
-  }
-
-  int n_total = n_base + n_extra;
-  PolyBufferBinding *all = realloc(base, (size_t)n_total * sizeof(PolyBufferBinding));
-  if (!all) {
-    free(base);
-    *n_out = 0;
-    return NULL;
-  }
-
-  for (int i = 0; i < n_extra; i++) {
-    all[n_base + i].buffer = extra_bufs[i];
-    all[n_base + i].handle = extra_handles[i];
-  }
-
-  *n_out = n_total;
-  return all;
+  if (attach_instance_buffers(inst, io, n_io) != 0) return -1;
+  attach_extra_buffers(inst, extra_bufs, extra_handles, n_extra);
+  /* Instance entrypoints and train/value-grad combined graphs are already
+   * effect sinks. They must skip tensor callify and enter the schedule runner
+   * directly, matching tinygrad's separation between tensor realization and
+   * schedule execution. */
+  int ret = poly_realize_sink(inst->ctx, sink);
+  return ret;
 }
 
 int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding *io, int n_io) {
@@ -1002,13 +977,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
   }
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
-  int n_bindings = 0;
-  PolyBufferBinding *bindings = build_bindings_for_realize(inst, ep_idx, io, n_io, &n_bindings);
-  if (!bindings) return -1;
-
-  int ret = poly_realize_with_bindings(inst->ctx, sink, bindings, n_bindings);
-  free(bindings);
-  return ret;
+  return run_instance_sink(inst, sink, io, n_io, NULL, NULL, 0);
 }
 
 /* Convenience wrapper */
@@ -1238,17 +1207,9 @@ int poly_instance_value_and_grad(
     extra_handles[1 + i] = make_handle(vag->grad_datas[i], nbytes, device, vag_alloc);
   }
 
-  /* Build combined bindings: instance buffers + IO + vag outputs */
-  int n_bindings = 0;
-  PolyBufferBinding *bindings = build_bindings_extended(
-      inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings
+  int ret = run_instance_sink(
+      inst, vag->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra
   );
-
-  /* Route through explicit-bindings realize -- caching is automatic */
-  int ret = bindings
-                ? poly_realize_with_bindings(inst->ctx, vag->combined_sink, bindings, n_bindings)
-                : -1;
-  free(bindings);
 
   /* Readback loss + grads from device to host if needed */
   if (ret == 0 && !poly_device_is_host_addressable(device)) {
@@ -1573,19 +1534,11 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
     extra_handles[1 + 2 * np + 1] = ts->bc2_handle;
   }
 
-  int n_bindings = 0;
-  PolyBufferBinding *bindings = build_bindings_extended(
-      inst, ep_idx, io, n_io, extra_bufs, extra_handles, n_extra, &n_bindings
+  int ret = run_instance_sink(
+      inst, ts->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra
   );
   free(extra_bufs);
   free(extra_handles);
-  if (!bindings) {
-    o->step--;
-    return -1;
-  }
-
-  int ret = poly_realize_with_bindings(inst->ctx, ts->combined_sink, bindings, n_bindings);
-  free(bindings);
   if (ret != 0) {
     o->step--;
     return ret;

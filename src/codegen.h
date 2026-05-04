@@ -150,6 +150,7 @@ PolyPatternMatcher *poly_pm_move_where_on_load_pass(void);
  * post-gpudims add-loads boundary before render/devectorize. */
 PolyPatternMatcher *poly_pm_add_loads_pass(void);
 PolyPatternMatcher *poly_pm_bf16_non_native(void);
+PolyPatternMatcher *poly_pm_c_renderer_extra(void);
 PolyPatternMatcher *poly_pm_pre_expander_pass(void);
 PolyPatternMatcher *poly_pm_expander_pass(void);
 PolyPatternMatcher *poly_pm_devectorize_pass(void);

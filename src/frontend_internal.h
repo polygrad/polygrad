@@ -67,20 +67,9 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
  * no NULL sources. Returns true if valid, false with diagnostic on stderr. */
 bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root);
 
-/* BIND stripping */
-
-/* Rewrites BIND(DEFINE_VAR, CONST) -> DEFINE_VAR throughout the graph.
- * Extracts var->value bindings into out_vals[0..n_out-1].
- * Remaps buf_bindings[].buffer pointers to their rewritten equivalents. */
-PolyUOp *poly_strip_bind_values(
-    PolyCtx *ctx,
-    PolyUOp *sink,
-    PolyVarBinding *out_vals,
-    int *n_out,
-    int max_out,
-    PolyBufferBinding *buf_bindings,
-    int n_buf_bindings
-);
+/* Memoized backing helper for poly_uop_device(), matching tinygrad's cached
+ * UOp._device property without storing pass-local cache state on every UOp. */
+PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache);
 
 #ifdef __cplusplus
 }

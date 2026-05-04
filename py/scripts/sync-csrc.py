@@ -25,6 +25,9 @@ SOURCES = [
     'src/utils.c',
     'src/ctx.c',
     'src/device.c',
+    # poly_realize_tensors calls the tensor physicalizer; sdists need this
+    # source or .to()/placement builds miss COPY/DEVICE lowering.
+    'src/placer.c',
     'src/engine/realize.c',
     'src/uop.c',
     'src/pat.c',
@@ -37,6 +40,7 @@ SOURCES = [
     'src/render_cuda.c',
     'src/render_wgsl.c',
     'src/runtime_cpu.c',
+    'src/runtime_wasm.c',
     'src/runtime_webgpu.c',
     'src/runtime_cuda.c',
     'src/wasm_builder.c',
@@ -81,6 +85,7 @@ HEADERS = [
     'src/ctx.h',
     'src/device.h',
     'src/engine/realize.h',
+    'src/runtime_wasm.h',
     'src/runtime_webgpu.h',
     'src/uop_cache_internal.h',
     'src/codegen.h',
@@ -100,7 +105,6 @@ HEADERS = [
     'src/nn.h',
     'src/pat.h',
     'src/simplify.h',
-    'src/recipe.h',
     'src/safetensors.h',
     'src/wasm_builder.h',
     'src/wlrn.h',

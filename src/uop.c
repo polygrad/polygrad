@@ -74,6 +74,10 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     if (a.define_var.name == b.define_var.name) return true;
     if (!a.define_var.name || !b.define_var.name) return false;
     return strcmp(a.define_var.name, b.define_var.name) == 0;
+  case POLY_ARG_BUFFERIZE_OPTS:
+    return a.bufferize_opts.device == b.bufferize_opts.device &&
+           a.bufferize_opts.addrspace == b.bufferize_opts.addrspace &&
+           a.bufferize_opts.removable == b.bufferize_opts.removable;
   }
   return false;
 }
@@ -139,6 +143,11 @@ uint32_t poly_arg_hash(PolyArg a) {
     }
     h = hash_mix(h, (uint32_t)(a.define_var.min_val ^ (a.define_var.min_val >> 32)));
     h = hash_mix(h, (uint32_t)(a.define_var.max_val ^ (a.define_var.max_val >> 32)));
+    break;
+  case POLY_ARG_BUFFERIZE_OPTS:
+    h = hash_mix(h, (uint32_t)a.bufferize_opts.device);
+    h = hash_mix(h, (uint32_t)a.bufferize_opts.addrspace);
+    h = hash_mix(h, a.bufferize_opts.removable ? 1u : 0u);
     break;
   }
   return h;
@@ -703,6 +712,18 @@ bool poly_uop_has_buffer_identity(const PolyUOp *u) {
   return poly_uop_get_buffer_identity(u) != NULL;
 }
 
+bool poly_uop_reachable(PolyCtx *ctx, PolyUOp *root, PolyUOp *target) {
+  if (!ctx || !root || !target) return false;
+  if (root == target) return true;
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, root, &n);
+  if (!topo) return false;
+  /* Mirrors tinygrad's `t.uop in loss.uop.toposort()` frontend test. */
+  for (int i = 0; i < n; i++)
+    if (topo[i] == target) return true;
+  return false;
+}
+
 bool poly_no_range(PolyCtx *ctx, PolyUOp *u) {
   return poly_no_range_ex(ctx, u, NULL);
 }
@@ -817,6 +838,14 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     );
     if (written > 0) *pos += written;
     break;
+  case POLY_ARG_BUFFERIZE_OPTS:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", BufferizeOpts(device=%d,addrspace=%d,removable=%d)",
+        (int)u->arg.bufferize_opts.device, (int)u->arg.bufferize_opts.addrspace,
+        (int)u->arg.bufferize_opts.removable
+    );
+    if (written > 0) *pos += written;
+    break;
   default:
     break;
   }
@@ -878,6 +907,13 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
     fprintf(
         fp, " var=%s[%lld,%lld]", u->arg.define_var.name ? u->arg.define_var.name : "?",
         (long long)u->arg.define_var.min_val, (long long)u->arg.define_var.max_val
+    );
+    break;
+  case POLY_ARG_BUFFERIZE_OPTS:
+    fprintf(
+        fp, " bufferize_opts=(device=%d,addrspace=%d,removable=%d)",
+        (int)u->arg.bufferize_opts.device, (int)u->arg.bufferize_opts.addrspace,
+        (int)u->arg.bufferize_opts.removable
     );
     break;
   default:

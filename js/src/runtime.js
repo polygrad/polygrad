@@ -7,11 +7,8 @@ const { createBoundTokenizerClass } = require('./tokenizer')
 function normalizeOptions(opts) {
   const options = opts ? { ...opts } : {}
 
-  if (options.target == null && options.backend != null) {
-    options.target = options.backend
-  }
-  if (options.target == null) {
-    options.target = 'auto'
+  if (options.core == null) {
+    options.core = 'auto'
   }
   if (options.device == null) {
     options.device = 'auto'
@@ -22,7 +19,7 @@ function normalizeOptions(opts) {
 
 class PolyRuntime {
   constructor(binding) {
-    this._backend = binding
+    this._core = binding
     this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
     this.Instance = createBoundInstanceClass(this)
@@ -38,25 +35,28 @@ class PolyRuntime {
     this.OPTIM_ADAMW = this.Instance.OPTIM_ADAMW
   }
 
-  get target() { return this._backend.caps.target }
+  get core() { return this._core.caps.core }
 
-  get device() { return this._backend.caps.device }
+  get device() { return this._core.caps.device }
 
-  // Compatibility alias for the old public shape.
-  get backend() { return this.target }
+  get caps() {
+    // Public capability surface for tests and callers to avoid dispatching
+    // unsupported dtype/backend combinations, mirroring tinygrad's checks.
+    return { ...this._core.caps }
+  }
 
   async dispose() {
-    if (this._backend && this._backend.destroy) this._backend.destroy()
-    this._backend = null
+    if (this._core && this._core.destroy) this._core.destroy()
+    this._core = null
   }
 }
 
-async function createRuntime(opts, resolveTarget) {
-  if (typeof resolveTarget !== 'function') {
-    throw new TypeError('polygrad: createRuntime requires a target resolver')
+async function createRuntime(opts, resolveCore) {
+  if (typeof resolveCore !== 'function') {
+    throw new TypeError('polygrad: createRuntime requires a core resolver')
   }
   const options = normalizeOptions(opts)
-  const binding = await resolveTarget(options.target, options)
+  const binding = await resolveCore(options.core, options)
   return new PolyRuntime(binding)
 }
 

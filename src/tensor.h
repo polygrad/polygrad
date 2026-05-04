@@ -81,6 +81,45 @@ PolyUOp *poly_broadcast_to(PolyCtx *ctx, PolyUOp *x, const int64_t *shape, int n
  * incompatible shapes. */
 bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b, int64_t *out_shape, int *out_ndim);
 
+/* Current-placement index lookup. `role == (PolyTensorRole)-1` means any role.
+ * The index is keyed by poly_tensor_uop(t), not by the preserved logical root. */
+PolyTensor *poly_tensor_find_current(
+    PolyCtx *ctx, PolyUOp *current, PolyDevice device, PolyTensorRole role
+);
+
+typedef struct {
+  PolyTensor *selected;
+  PolyUOp *selected_current;
+  PolyUOp *selected_logical;
+  PolyUOp *selected_physical;
+  PolyTensorRole selected_role;
+  PolyDevice selected_device;
+  PolyTensor *selected_source;
+
+  PolyUOp *query_current;
+  PolyDevice query_device;
+  PolyTensor *place_fact;
+  PolyTensor *value_fact;
+  PolyTensor *matched_fact;
+  PolyTensorRole matched_role;
+
+  PolyUOp *physical_root;
+} PolyPlacementAudit;
+
+/* Test/probe-facing placement inspection. This is intentionally not part of
+ * the frontend ABI: it mirrors the physicalizer's current fact lookup order so
+ * placement tests can assert which VALUE/PLACE record is active before judging
+ * the generated physical COPY/DEVICE graph. `query_current == NULL` audits the
+ * selected tensor's current root; `query_device == AUTO` uses the selected
+ * tensor's resolved device. */
+int poly_tensor_placement_audit(
+    PolyCtx *ctx,
+    PolyTensor *selected,
+    PolyUOp *query_current,
+    PolyDevice query_device,
+    PolyPlacementAudit *out
+);
+
 /* Broadcasting binary ops (like tinygrad Tensor.add/mul/sub) */
 
 PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);

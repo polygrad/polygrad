@@ -11,8 +11,8 @@
  *
  * Usage:
  *   node test/test_qwen3_e2e.js                    # auto (native or WASM)
- *   node test/test_qwen3_e2e.js --target=wasm      # force WASM
- *   node test/test_qwen3_e2e.js --target=native    # force native
+ *   node test/test_qwen3_e2e.js --core=wasm      # force WASM
+ *   node test/test_qwen3_e2e.js --core=native    # force native
  *   node --max-old-space-size=4096 test/test_qwen3_e2e.js  # if OOM
  */
 
@@ -27,7 +27,7 @@ const CACHE_DIR = path.join(require('os').homedir(), '.cache', 'polygrad')
 
 // Parse args
 const args = process.argv.slice(2)
-const target = (args.find(a => a.startsWith('--target=')) || '').split('=')[1] || 'auto'
+const core = (args.find(a => a.startsWith('--core=')) || '').split('=')[1] || 'auto'
 const maxTokens = parseInt((args.find(a => a.startsWith('--tokens=')) || '').split('=')[1] || '20')
 
 async function downloadGGUF() {
@@ -69,8 +69,8 @@ async function main() {
   console.log(`GGUF: ${(ggufBytes.length / 1024 / 1024).toFixed(0)} MB`)
 
   const polygrad = require('../js/src/index')
-  const pg = await polygrad.create({ target })
-  console.log(`Runtime: ${pg.target}`)
+  const pg = await polygrad.create({ core })
+  console.log(`Runtime: ${pg.core}`)
 
   // Load model
   console.log('Loading model...')

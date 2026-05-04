@@ -61,8 +61,8 @@ function createBoundInstanceClass(runtime) {
     }
 
     static fromIR(irBytes, weightsBytes) {
-      const api = _runtime._backend.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this target')
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const inst = api.fromIR(
         normalizeBytes(irBytes, 'irBytes'),
         normalizeBytes(weightsBytes, 'weightsBytes')
@@ -72,24 +72,24 @@ function createBoundInstanceClass(runtime) {
     }
 
     static mlp(spec) {
-      const api = _runtime._backend.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this target')
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const inst = api.mlp(normalizeSpec(spec))
       if (!inst) throw new Error('polygrad: failed to create MLP instance')
       return new Instance(inst)
     }
 
     static tabm(spec) {
-      const api = _runtime._backend.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this target')
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const inst = api.tabm(normalizeSpec(spec))
       if (!inst) throw new Error('polygrad: failed to create TabM instance')
       return new Instance(inst)
     }
 
     static nam(spec) {
-      const api = _runtime._backend.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this target')
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const inst = api.nam(normalizeSpec(spec))
       if (!inst) throw new Error('polygrad: failed to create NAM instance')
       return new Instance(inst)
@@ -97,7 +97,7 @@ function createBoundInstanceClass(runtime) {
 
     dispose() {
       if (this._handle) {
-        this._rt._backend.instance.free(this._handle)
+        this._rt._core.instance.free(this._handle)
         this._handle = null
       }
     }
@@ -107,19 +107,19 @@ function createBoundInstanceClass(runtime) {
     }
 
     get paramCount() {
-      return this._rt._backend.instance.paramCount(this._handle)
+      return this._rt._core.instance.paramCount(this._handle)
     }
 
     paramName(i) {
-      return this._rt._backend.instance.paramName(this._handle, i)
+      return this._rt._core.instance.paramName(this._handle, i)
     }
 
     paramShape(i) {
-      return this._rt._backend.instance.paramShape(this._handle, i)
+      return this._rt._core.instance.paramShape(this._handle, i)
     }
 
     paramData(i) {
-      return this._rt._backend.instance.paramData(this._handle, i)
+      return this._rt._core.instance.paramData(this._handle, i)
     }
 
     params() {
@@ -131,23 +131,23 @@ function createBoundInstanceClass(runtime) {
     }
 
     get bufCount() {
-      return this._rt._backend.instance.bufCount(this._handle)
+      return this._rt._core.instance.bufCount(this._handle)
     }
 
     bufName(i) {
-      return this._rt._backend.instance.bufName(this._handle, i)
+      return this._rt._core.instance.bufName(this._handle, i)
     }
 
     bufRole(i) {
-      return this._rt._backend.instance.bufRole(this._handle, i)
+      return this._rt._core.instance.bufRole(this._handle, i)
     }
 
     bufShape(i) {
-      return this._rt._backend.instance.bufShape(this._handle, i)
+      return this._rt._core.instance.bufShape(this._handle, i)
     }
 
     bufData(i) {
-      return this._rt._backend.instance.bufData(this._handle, i)
+      return this._rt._core.instance.bufData(this._handle, i)
     }
 
     findBuf(name) {
@@ -158,11 +158,11 @@ function createBoundInstanceClass(runtime) {
     }
 
     exportWeights() {
-      return this._rt._backend.instance.exportWeights(this._handle)
+      return this._rt._core.instance.exportWeights(this._handle)
     }
 
     importWeights(bytes) {
-      const rc = this._rt._backend.instance.importWeights(
+      const rc = this._rt._core.instance.importWeights(
         this._handle,
         normalizeBytes(bytes, 'weights')
       )
@@ -170,23 +170,23 @@ function createBoundInstanceClass(runtime) {
     }
 
     exportIR() {
-      return this._rt._backend.instance.exportIR(this._handle)
+      return this._rt._core.instance.exportIR(this._handle)
     }
 
     saveBundle() {
-      return this._rt._backend.instance.saveBundle(this._handle)
+      return this._rt._core.instance.saveBundle(this._handle)
     }
 
     static fromBundle(bytes) {
-      const api = _runtime._backend.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this target')
+      const api = _runtime._core.instance
+      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
       const handle = api.fromBundle(bytes)
       if (!handle) throw new Error('polygrad: fromBundle failed')
       return new Instance(handle)
     }
 
     static loadHF(configBytes, weightFiles, opts = {}) {
-      const api = _runtime._backend.instance
+      const api = _runtime._core.instance
       const cfg = normalizeBytes(configBytes, 'config')
       const wf = weightFiles.map((f, i) => normalizeBytes(f, `weight file ${i}`))
       const handle = api.loadHF(cfg, wf, opts.maxBatch, opts.maxSeqLen)
@@ -198,7 +198,7 @@ function createBoundInstanceClass(runtime) {
     }
 
     static loadGGUF(ggufBytes, opts = {}) {
-      const api = _runtime._backend.instance
+      const api = _runtime._core.instance
       const bytes = normalizeBytes(ggufBytes, 'gguf')
       const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
       if (!handle) {
@@ -209,7 +209,7 @@ function createBoundInstanceClass(runtime) {
     }
 
     setOptimizer(kind, lr = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weightDecay = 0.0) {
-      const rc = this._rt._backend.instance.setOptimizer(
+      const rc = this._rt._core.instance.setOptimizer(
         this._handle, kind, lr, beta1, beta2, eps, weightDecay
       )
       if (rc !== 0) throw new Error(`polygrad: setOptimizer failed (rc=${rc})`)
@@ -218,14 +218,14 @@ function createBoundInstanceClass(runtime) {
 
     forward(io) {
       const { names, arrays } = normalizeBindings(io)
-      const rc = this._rt._backend.instance.forward(this._handle, names, arrays)
+      const rc = this._rt._core.instance.forward(this._handle, names, arrays)
       if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
       return this._collectOutputs()
     }
 
     trainStep(io) {
       const { names, arrays } = normalizeBindings(io)
-      const loss = this._rt._backend.instance.trainStep(this._handle, names, arrays)
+      const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
       if (loss == null || Number.isNaN(loss)) {
         throw new Error('polygrad: trainStep failed')
       }

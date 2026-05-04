@@ -1,24 +1,24 @@
 /**
- * core_wasm.js -- Emscripten target binding for polygrad.
+ * core/wasm.js -- Emscripten core binding for polygrad.
  *
  * Loads the C core compiled to WASM, builds the FFI table, creates a
- * context, and exposes heap/marshalling helpers. Shared by all
- * wasm-target device executors (exec_wasm.js, exec_webgpu.js).
+ * context, and exposes heap/marshalling helpers. Execution stays in
+ * the C core; JS only adapts memory and frontend calls.
  *
- * This is a target binding, not a device executor. It does not decide
- * how kernels are compiled or dispatched.
+ * This is a core binding, not a device executor. It does not decide how
+ * kernels are compiled or dispatched.
  */
 
 'use strict'
 
 // Lazy-loaded Emscripten module factory.
-// Published: ../wasm/polygrad.js (SINGLE_FILE build).
-// Dev (Node only): ../../build/polygrad.js (two-file Emscripten build).
+// Published: ../../wasm/polygrad.js (SINGLE_FILE build).
+// Dev (Node only): ../../../build/polygrad.js (two-file Emscripten build).
 let _moduleFactory = null
 function getModuleFactory() {
   if (_moduleFactory) return _moduleFactory
   try {
-    _moduleFactory = require('../wasm/polygrad.js')
+    _moduleFactory = require('../../wasm/polygrad.js')
   } catch (e) {
     if (typeof process !== 'undefined' && process.versions && process.versions.node) {
       // eslint-disable-next-line no-eval
@@ -26,7 +26,7 @@ function getModuleFactory() {
         ? __non_webpack_require__ : eval('require')
       const path = nodeRequire('path')
       _moduleFactory = nodeRequire(
-        path.resolve(__dirname, '..', '..', 'build', 'polygrad.js')
+        path.resolve(__dirname, '..', '..', '..', 'build', 'polygrad.js')
       )
     } else {
       throw new Error(
@@ -38,10 +38,10 @@ function getModuleFactory() {
 }
 
 /**
- * Create the wasm-target core: Emscripten module + ffi + ctx.
+ * Create the wasm core: Emscripten module + ffi + ctx.
  *
  * @param {string} device - Device name ('auto', 'cpu', 'wasm', 'interp', 'webgpu')
- * @returns {Promise<object>} Internal core object (not a public backend)
+ * @returns {Promise<object>} Internal core object.
  */
 async function createWasmCore(device) {
   const deviceName = device || 'auto'
@@ -180,6 +180,11 @@ async function createWasmCore(device) {
     return id
   }
 
+  function coreDeviceName(device) {
+    const ptr = Module._poly_device_name(device)
+    return ptr ? Module.UTF8ToString(ptr) : 'auto'
+  }
+
   function coreDTypeId(name) {
     const ptr = allocString(name)
     const id = Module._poly_dtype_id_by_name(ptr)
@@ -212,7 +217,9 @@ async function createWasmCore(device) {
   }
   if (!(deviceName in DEVICE_IDS))
     throw new Error('polygrad: unsupported device \'' + deviceName + '\'')
+  const resolvedDeviceName = deviceName === 'auto' ? 'wasm' : deviceName
   const deviceId = DEVICE_IDS[deviceName]
+  let webgpuSupportsF16 = false
 
   async function ensureWebGPU() {
     if (deviceName !== 'webgpu') {
@@ -232,7 +239,8 @@ async function createWasmCore(device) {
       if (!adapter) throw new Error('polygrad: no WebGPU adapter found')
 
       const features = []
-      if (adapter.features.has('shader-f16')) features.push('shader-f16')
+      const hasShaderF16 = adapter.features.has('shader-f16')
+      if (hasShaderF16) features.push('shader-f16')
 
       const device = await adapter.requestDevice({
         requiredFeatures: features,
@@ -252,6 +260,8 @@ async function createWasmCore(device) {
       Module.__polygradWebGpuState = {
         adapter,
         device,
+        adapterFeatures: [...adapter.features],
+        hasShaderF16,
         infinityBuf,
         buffers: new Map(),
         bufferSizes: new Map(),
@@ -260,6 +270,7 @@ async function createWasmCore(device) {
         pipelineKeyToId: new Map(),
         nextPipelineId: 1
       }
+      webgpuSupportsF16 = hasShaderF16
       return Module.__polygradWebGpuState
     })()
 
@@ -271,6 +282,11 @@ async function createWasmCore(device) {
   }
 
   Module.__polygradEnsureWebGPU = ensureWebGPU
+  if (deviceName === 'webgpu') {
+    // WebGPU allocation is called synchronously from C through EM_JS, so the
+    // adapter/device must already exist before any realize path can allocate.
+    await ensureWebGPU()
+  }
 
   function allocBytes(bytes) {
     const ptr = Module._malloc(bytes.length || 1)
@@ -284,55 +300,6 @@ async function createWasmCore(device) {
     let end = ptr
     while (bytes[end] !== 0) end++
     return new TextDecoder().decode(bytes.subarray(ptr, end))
-  }
-
-  // --- Realize serialization ---
-  const _realizeChains = new Map()
-
-  function serializeRealize(ctxPtr, fn) {
-    const prev = _realizeChains.get(ctxPtr) || Promise.resolve()
-    const next = prev.then(fn, fn)
-    _realizeChains.set(ctxPtr, next)
-    return next
-  }
-
-  // --- Realize via C backend vtable (interp) ---
-  async function realizeViaBackend(ctx, sink, numel, leafMap, isF64) {
-    return serializeRealize(ctx, async () => {
-      const ArrayType = isF64 ? Float64Array : Float32Array
-      const entries = [...leafMap.entries()]
-      const n = entries.length
-
-      const bufsPtr = Module._malloc(n * 4)
-      const datasPtr = Module._malloc(n * 4)
-      const heapPtrs = []
-
-      try {
-        for (let i = 0; i < n; i++) {
-          const [bufUop, jsArr] = entries[i]
-          const nbytes = jsArr.byteLength
-          const hPtr = Module._malloc(nbytes)
-          heapPtrs.push(hPtr)
-          heapU8().set(new Uint8Array(jsArr.buffer, jsArr.byteOffset, nbytes), hPtr)
-          Module.HEAP32[(bufsPtr >> 2) + i] = bufUop
-          Module.HEAP32[(datasPtr >> 2) + i] = hPtr
-        }
-
-        const rc = Module._poly_realize_with_bindings_flat_device(
-          ctx, sink, bufsPtr, datasPtr, n, deviceId)
-        if (rc !== 0) throw new Error('poly_realize_with_bindings_flat_device failed (rc=' + rc + ')')
-
-        const lastPtr = heapPtrs[heapPtrs.length - 1]
-        const lastArr = entries[entries.length - 1][1]
-        const out = new ArrayType(lastArr.length)
-        out.set(new ArrayType(Module.HEAPF32.buffer, lastPtr, lastArr.length))
-        return out
-      } finally {
-        for (const p of heapPtrs) Module._free(p)
-        Module._free(bufsPtr)
-        Module._free(datasPtr)
-      }
-    })
   }
 
   // --- Build FFI table ---
@@ -359,6 +326,9 @@ async function createWasmCore(device) {
     poly_const_float: Module._poly_const_float,
     poly_const_double: Module._poly_const_double,
     poly_const_int: (ctx, val) => Module._poly_const_int(ctx, BigInt(val)),
+    // Tensor.contiguous() is used as the explicit materialization/readback
+    // boundary for views, matching the native N-API adapter surface.
+    poly_contiguous: Module._poly_contiguous,
     poly_alu1: Module._poly_alu1,
     poly_alu2: Module._poly_alu2,
     poly_alu3: Module._poly_alu3,
@@ -385,8 +355,46 @@ async function createWasmCore(device) {
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
+    poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
+    poly_uop_key: (uop) => BigInt(uop || 0),
+    poly_uop_reachable: (ctx, root, target) =>
+      !!Module._poly_uop_reachable(ctx, root || 0, target || 0),
+    poly_uop_substitute: (ctx, root, from, to) => {
+      const n = Math.min(from.length, to.length)
+      if (n <= 0) return root
+      const fromPtr = Module._malloc(n * 4)
+      const toPtr = Module._malloc(n * 4)
+      const h32 = heap32()
+      for (let i = 0; i < n; i++) {
+        h32[(fromPtr >> 2) + i] = from[i] || 0
+        h32[(toPtr >> 2) + i] = to[i] || 0
+      }
+      const out = Module._poly_uop_substitute(ctx, root, fromPtr, toPtr, n)
+      Module._free(fromPtr)
+      Module._free(toPtr)
+      return out
+    },
     poly_buffer_get_ptr: (ctx, buf) => Module._poly_buffer_get_ptr(ctx, buf),
     poly_buffer_get_key: (ctx, buf) => Module._poly_buffer_get_key(ctx, buf),
+    poly_device_by_name: (name) => {
+      const key = String(name).toLowerCase()
+      return DEVICE_IDS[key] !== undefined ? DEVICE_IDS[key] : coreDeviceId(key)
+    },
+    poly_device_name: (device) => coreDeviceName(device),
+    poly_tensor_create: (ctx, uop, role, device) =>
+      Module._poly_tensor_create(ctx, uop, role, device),
+    poly_tensor_create_with_roots: (ctx, logical, physical, role, device) =>
+      Module._poly_tensor_create_with_roots(ctx, logical, physical, role, device),
+    poly_tensor_update: (ctx, tensor, logical, physical, role, device) =>
+      Module._poly_tensor_update(ctx, tensor, logical || 0, physical || 0, role, device),
+    poly_tensor_to_device: (ctx, tensor, device) =>
+      Module._poly_tensor_to_device(ctx, tensor, device),
+    poly_tensor_assign: (ctx, target, value) =>
+      Module._poly_tensor_assign(ctx, target, value),
+    poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
+    poly_tensor_uop_logical: (tensor) => Module._poly_tensor_uop_logical(tensor),
+    poly_tensor_uop_physical: (tensor) => Module._poly_tensor_uop_physical(tensor),
+    poly_tensor_device: (tensor) => Module._poly_tensor_device(tensor),
     poly_set_frontend_buffer_release: (fn) => {
       Module.__polygradFrontendBufferRelease = fn
       if (!Module.__polygradFrontendBufferReleasePtr) {
@@ -399,10 +407,10 @@ async function createWasmCore(device) {
       Module._poly_set_frontend_buffer_release(Module.__polygradFrontendBufferReleasePtr)
     },
 
-    // Batched graph-side realize. JS signature: poly_realize(ctx, [uop, ...]) -> [raw, ...].
+    // Batched raw-UOp realize. JS signature: poly_realize_uops(ctx, [uop, ...]) -> [raw, ...].
     // Builds an input pointer array in WASM memory, calls C, reads back the
     // output pointer array.
-    poly_realize: async (ctx, uops) => {
+    poly_realize_uops: async (ctx, uops) => {
       const n = uops.length
       if (n === 0) return []
       const inPtr = Module._malloc(n * 4)
@@ -412,13 +420,40 @@ async function createWasmCore(device) {
       for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
       const rc = (deviceName === 'webgpu' && Module.ccall)
         ? await Module.ccall(
-          'poly_realize',
+          'poly_realize_uops',
           'number',
           ['number', 'number', 'number', 'number'],
           [ctx, inPtr, n, outPtr],
           { async: true }
         )
-        : Module._poly_realize(ctx, inPtr, n, outPtr)
+        : Module._poly_realize_uops(ctx, inPtr, n, outPtr)
+      const out = new Array(n)
+      if (rc === 0) {
+        const h32b = heap32()
+        for (let i = 0; i < n; i++) out[i] = h32b[(outPtr >> 2) + i]
+      }
+      Module._free(inPtr)
+      Module._free(outPtr)
+      return rc === 0 ? out : null
+    },
+
+    poly_realize_tensors: async (ctx, tensors) => {
+      const n = tensors.length
+      if (n === 0) return []
+      const inPtr = Module._malloc(n * 4)
+      const outPtr = Module._malloc(n * 4)
+      const h32 = heap32()
+      for (let i = 0; i < n; i++) h32[(inPtr >> 2) + i] = tensors[i]
+      for (let i = 0; i < n; i++) h32[(outPtr >> 2) + i] = 0
+      const rc = (deviceName === 'webgpu' && Module.ccall)
+        ? await Module.ccall(
+          'poly_realize_tensors',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [ctx, inPtr, n, outPtr],
+          { async: true }
+        )
+        : Module._poly_realize_tensors(ctx, inPtr, n, outPtr)
       const out = new Array(n)
       if (rc === 0) {
         const h32b = heap32()
@@ -452,6 +487,29 @@ async function createWasmCore(device) {
       }
     },
     poly_grad: Module._poly_grad,
+    poly_grad_many: (ctx, loss, initialGrad, targets) => {
+      const n = targets.length
+      const wrtsPtr = Module._malloc(n * 4)
+      const outPtr = Module._malloc(n * 4)
+      const h32 = heap32()
+      for (let i = 0; i < n; i++) {
+        h32[(wrtsPtr >> 2) + i] = targets[i] || 0
+        h32[(outPtr >> 2) + i] = 0
+      }
+      /* Match tinygrad's single gradient pass over all live targets. The
+       * pointer arrays are wasm32 handles, so each slot is 4 bytes. */
+      const rc = Module._poly_grad_many(ctx, loss || 0, initialGrad || 0, wrtsPtr, n, outPtr)
+      if (rc !== 0) {
+        Module._free(wrtsPtr)
+        Module._free(outPtr)
+        return null
+      }
+      const out = new Array(n)
+      for (let i = 0; i < n; i++) out[i] = h32[(outPtr >> 2) + i]
+      Module._free(wrtsPtr)
+      Module._free(outPtr)
+      return out
+    },
     poly_detach: Module._poly_detach,
     poly_cast_by_id: Module._poly_cast_by_id,
 
@@ -505,6 +563,9 @@ async function createWasmCore(device) {
     // Shape-on-UOp: C computes shapes internally, JS passes bare UOp pointers.
     poly_max_reduce: Module._poly_max_reduce,
     poly_mean_reduce: Module._poly_mean_reduce,
+    poly_var_reduce: Module._poly_var_reduce,
+    poly_softmax: Module._poly_softmax,
+    poly_log_softmax: Module._poly_log_softmax,
     poly_dot: Module._poly_dot,
     poly_cross_entropy: Module._poly_cross_entropy,
 
@@ -909,9 +970,14 @@ async function createWasmCore(device) {
     instance,
     int64: BigInt,
     readShape: readOutShape,
-    serializeRealize,
-    realizeViaBackend,
-    // Heap/marshalling helpers for device executors
+    caps: {
+      simd: true,
+      f16: deviceName !== 'webgpu' || webgpuSupportsF16,
+      f64: deviceName !== 'webgpu',
+      core: 'wasm',
+      device: resolvedDeviceName
+    },
+    // Heap/marshalling helpers for frontend adapters and host buffer views.
     heap32,
     heapU8,
     heapF32,
@@ -928,7 +994,6 @@ async function createWasmCore(device) {
     },
     destroy() {
       ffi.poly_ctx_destroy(ctx)
-      _realizeChains.delete(ctx)
       Module._free(_scratchLenPtr)
       Module._free(_scratchNumelPtr)
       Module._free(_scratchAxisPtr)

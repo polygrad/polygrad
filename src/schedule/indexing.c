@@ -10,19 +10,35 @@
  */
 
 #include "schedule/indexing.h"
+#include "pat.h"
 #include <stdio.h>
 #include <string.h>
+
+static PolyUOp *index_const(PolyCtx *ctx, int64_t value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(value));
+}
+
+static PolyUOp *to_index_dtype(PolyCtx *ctx, PolyUOp *u) {
+  if (!u || poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_INDEX)) return u;
+  return poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, u, poly_arg_none());
+}
+
+static PolyUOp *index_neg_like_tinygrad(PolyCtx *ctx, PolyUOp *u) {
+  /* tinygrad ElementwiseMixin.neg() constructs x * -1, not a NEG UOp.
+   * Movement indexes run through symbolic div/mod simplification before late
+   * decompositions can introduce NEG, so keep this source shape identical. */
+  return poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, to_index_dtype(ctx, u), index_const(ctx, -1), poly_arg_none());
+}
 
 /* Flat index computation */
 
 PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape) {
-  if (ndim == 0) return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  if (ndim == 1) return ranges[0];
+  if (ndim == 0) return index_const(ctx, 0);
+  if (ndim == 1) return to_index_dtype(ctx, ranges[0]);
 
   int64_t strides[POLY_MAX_DIMS];
   strides[ndim - 1] = 1;
   for (int i = ndim - 2; i >= 0; i--) {
-    strides[i] = strides[i + 1] * shape.dims[i + 1];
     if (__builtin_mul_overflow(strides[i + 1], shape.dims[i + 1], &strides[i])) {
       fprintf(
           stderr, "poly_compute_flat_index: stride overflow at dim %d: %lld * %lld\n", i,
@@ -33,18 +49,18 @@ PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyS
     }
   }
 
-  PolyUOp *flat = NULL;
-  for (int i = 0; i < ndim; i++) {
+  PolyUOp *flat = index_const(ctx, 0);
+  for (int i = ndim - 1; i >= 0; i--) {
     PolyUOp *term;
     if (strides[i] == 1) {
-      term = ranges[i];
+      term = to_index_dtype(ctx, ranges[i]);
     } else {
-      PolyUOp *s = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(strides[i]));
-      term = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ranges[i], s, poly_arg_none());
+      PolyUOp *s = index_const(ctx, strides[i]);
+      term = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, s, to_index_dtype(ctx, ranges[i]), poly_arg_none());
     }
-    flat = flat ? poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, flat, term, poly_arg_none()) : term;
+    flat = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, flat, term, poly_arg_none());
   }
-  return flat;
+  return poly_graph_rewrite(ctx, flat, poly_symbolic());
 }
 
 /* Symbolic flat index computation */
@@ -55,29 +71,30 @@ PolyUOp *poly_compute_flat_index_symbolic(
     PolyUOp **bounds,
     int ndim
 ) {
-  if (ndim == 0) return poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  if (ndim == 1) return ranges[0];
+  if (ndim == 0) return index_const(ctx, 0);
+  if (ndim == 1) return to_index_dtype(ctx, ranges[0]);
 
   /* Build strides bottom-up as UOp expressions.
    * stride[ndim-1] = 1, stride[i] = stride[i+1] * bounds[i+1] */
   PolyUOp *strides[POLY_MAX_DIMS];
-  strides[ndim - 1] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  strides[ndim - 1] = index_const(ctx, 1);
   for (int i = ndim - 2; i >= 0; i--)
     strides[i] =
-        poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, strides[i + 1], bounds[i + 1], poly_arg_none());
+        poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, strides[i + 1], to_index_dtype(ctx, bounds[i + 1]), poly_arg_none());
 
-  /* Sum terms: ranges[i] * strides[i] */
-  PolyUOp *flat = NULL;
-  for (int i = 0; i < ndim; i++) {
+  /* Match poly_compute_flat_index / tinygrad _apply_reshape ordering for
+   * symbolic bounds too: innermost dim first, then symbolic canonicalization. */
+  PolyUOp *flat = index_const(ctx, 0);
+  for (int i = ndim - 1; i >= 0; i--) {
     PolyUOp *term;
     /* Optimize: stride == 1 → skip the MUL */
     if (strides[i]->op == POLY_OP_CONST && strides[i]->arg.i == 1)
-      term = ranges[i];
+      term = to_index_dtype(ctx, ranges[i]);
     else
-      term = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, ranges[i], strides[i], poly_arg_none());
-    flat = flat ? poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, flat, term, poly_arg_none()) : term;
+      term = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, strides[i], to_index_dtype(ctx, ranges[i]), poly_arg_none());
+    flat = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, flat, term, poly_arg_none());
   }
-  return flat;
+  return poly_graph_rewrite(ctx, flat, poly_symbolic());
 }
 
 /* Reshape index transform */
@@ -95,15 +112,15 @@ void poly_reshape_indices(
 
   int64_t in_stride = 1;
   for (int j = in_ndim - 1; j >= 0; j--) {
-    PolyUOp *dim_val = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[j]));
+    PolyUOp *dim_val = index_const(ctx, in_shape.dims[j]);
     PolyUOp *shifted;
     if (in_stride == 1) {
       shifted = combined;
     } else {
-      PolyUOp *s = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_stride));
-      shifted = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, combined, s, poly_arg_none());
+      PolyUOp *s = index_const(ctx, in_stride);
+      shifted = poly_uop2(ctx, POLY_OP_IDIV, POLY_INDEX, combined, s, poly_arg_none());
     }
-    in_ranges[j] = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, shifted, dim_val, poly_arg_none());
+    in_ranges[j] = poly_uop2(ctx, POLY_OP_MOD, POLY_INDEX, shifted, dim_val, poly_arg_none());
     in_stride *= in_shape.dims[j];
   }
 }
@@ -129,7 +146,7 @@ bool poly_apply_movement_op(
   case POLY_OP_EXPAND: {
     if (arg.kind != POLY_ARG_INT_TUPLE) return false;
     int n = in_shape.ndim;
-    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+    PolyUOp *zero = index_const(ctx, 0);
     for (int i = 0; i < n; i++) {
       if (i >= n_out) {
         in_rngs[i] = zero;
@@ -149,7 +166,7 @@ bool poly_apply_movement_op(
   case POLY_OP_PERMUTE: {
     if (arg.kind != POLY_ARG_INT_TUPLE) return false;
     int n = arg.int_tuple.n;
-    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+    PolyUOp *zero = index_const(ctx, 0);
     for (int i = 0; i < n; i++)
       in_rngs[i] = zero;
     for (int i = 0; i < n && i < n_out; i++) {
@@ -164,7 +181,7 @@ bool poly_apply_movement_op(
   case POLY_OP_SHRINK: {
     if (arg.kind != POLY_ARG_PAIR_TUPLE) return false;
     int n = arg.pair_tuple.n;
-    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+    PolyUOp *zero = index_const(ctx, 0);
     for (int i = 0; i < n; i++) {
       if (i >= n_out) {
         in_rngs[i] = zero;
@@ -174,8 +191,9 @@ bool poly_apply_movement_op(
       if (start == 0) {
         in_rngs[i] = out_rngs[i];
       } else {
-        PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(start));
-        in_rngs[i] = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i], off, poly_arg_none());
+        PolyUOp *off = index_const(ctx, start);
+        in_rngs[i] =
+            poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, to_index_dtype(ctx, out_rngs[i]), off, poly_arg_none());
       }
     }
     *n_in_out = in_shape.ndim;
@@ -191,18 +209,17 @@ bool poly_apply_movement_op(
       if (ax >= 0 && ax < in_shape.ndim) flipped[ax] = true;
     }
     int n = in_shape.ndim;
-    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+    PolyUOp *zero = index_const(ctx, 0);
     for (int i = 0; i < n; i++) {
       if (i >= n_out) {
         in_rngs[i] = zero;
         continue;
       }
       if (flipped[i]) {
-        PolyUOp *max_idx =
-            poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i] - 1));
+        PolyUOp *max_idx = index_const(ctx, in_shape.dims[i] - 1);
         in_rngs[i] = poly_uop2(
-            ctx, POLY_OP_ADD, POLY_INT32, max_idx,
-            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, out_rngs[i], poly_arg_none()), poly_arg_none()
+            ctx, POLY_OP_ADD, POLY_INDEX, max_idx, index_neg_like_tinygrad(ctx, out_rngs[i]),
+            poly_arg_none()
         );
       } else {
         in_rngs[i] = out_rngs[i];
@@ -234,7 +251,7 @@ bool poly_apply_movement_op(
     if (arg.kind != POLY_ARG_PAIR_TUPLE) return false;
     int n = arg.pair_tuple.n;
     PolyUOp *valid = NULL;
-    PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+    PolyUOp *zero = index_const(ctx, 0);
     PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
 
     for (int i = 0; i < n; i++) {
@@ -249,38 +266,40 @@ bool poly_apply_movement_op(
       if (begin == 0) {
         shifted = out_rngs[i];
       } else {
-        PolyUOp *off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(begin));
+        PolyUOp *off = index_const(ctx, begin);
         shifted = poly_uop2(
-            ctx, POLY_OP_ADD, POLY_INT32, out_rngs[i],
-            poly_uop1(ctx, POLY_OP_NEG, POLY_INT32, off, poly_arg_none()), poly_arg_none()
+            ctx, POLY_OP_ADD, POLY_INDEX, to_index_dtype(ctx, out_rngs[i]),
+            index_neg_like_tinygrad(ctx, off), poly_arg_none()
         );
       }
-      /* valid_i = (shifted >= 0) AND (shifted < in_dim).
+      /* tinygrad schedule/indexing.py::apply_movement_op(PAD) forms the
+       * valid mask on the output-space range:
        *
-       * `(shifted >= 0)` must be in polygrad's canonical bool form
-       * (CMPNE(CMPLT(shifted, 0), CONST(true))) — matching tinygrad's
-       * `__ge__` (mixin/elementwise.py:240-241) which expands to
-       * `(self < x).logical_not()` and then `logical_not()` (line 33)
-       * which is `self.cast(bool).ne(True)`. Symbolic eliminates the
-       * redundant CAST, leaving `CMPNE(CMPLT(shifted, 0), True)`.
+       *   valid = (r >= begin) & (r < in_dim + begin)
+       *   index = valid.where(r - begin, Invalid)
        *
-       * Polygrad previously used `NEG(CMPLT(shifted, 0), POLY_BOOL)` which
-       * is semantically equivalent (alu.c:169 lowers NEG-on-bool to `!a`)
-       * but produces a divergent IR shape that prevents Phase D's
-       * reduce_collapse Rule 4 (fold_range_two_sided) from matching the
-       * pad-derived two-sided range mask. */
-      PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-      PolyUOp *dim = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(in_shape.dims[i]));
+       * Building validity from `shifted = r - begin` is equivalent for values,
+       * but loses the explicit begin/end constants that tinygrad's symbolic
+       * and late-decomp passes preserve in linear IR. Keep the same unshifted
+       * bounds here, then use the already-computed shifted index for the
+       * data address. */
+      int64_t end_val;
+      if (__builtin_add_overflow(in_shape.dims[i], begin, &end_val)) return false;
+      PolyUOp *begin_c = index_const(ctx, begin);
+      PolyUOp *end_c = index_const(ctx, end_val);
+      PolyUOp *zero = index_const(ctx, 0);
       PolyUOp *true_const = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
-      PolyUOp *lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, zero, poly_arg_none());
-      PolyUOp *ge_zero =
-          poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, lt_zero, true_const, poly_arg_none());
-      PolyUOp *lt_dim = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, shifted, dim, poly_arg_none());
-      PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_zero, lt_dim, poly_arg_none());
+      PolyUOp *lt_begin =
+          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, to_index_dtype(ctx, out_rngs[i]), begin_c, poly_arg_none());
+      PolyUOp *ge_begin =
+          poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, lt_begin, true_const, poly_arg_none());
+      PolyUOp *lt_dim =
+          poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, to_index_dtype(ctx, out_rngs[i]), end_c, poly_arg_none());
+      PolyUOp *dv = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_begin, lt_dim, poly_arg_none());
       /* Clamp index to valid range: WHERE(valid, shifted, 0).
        * Matches tinygrad indexing.py:137: valid.where(r-s, UOp.invalid()).
        * Prevents negative INDEX offsets that crash non-short-circuiting backends. */
-      in_rngs[i] = poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, dv, shifted, zero, poly_arg_none());
+      in_rngs[i] = poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, dv, shifted, zero, poly_arg_none());
       valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dv, poly_arg_none()) : dv;
     }
     if (valid_out) *valid_out = valid;

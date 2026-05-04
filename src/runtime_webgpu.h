@@ -10,9 +10,6 @@ extern "C" {
 #endif
 
 #ifdef __EMSCRIPTEN__
-int poly_browser_host_copy_out(uintptr_t src_buffer_key, void *dst_ptr, size_t nbytes);
-int poly_browser_host_copy_in(uintptr_t dst_buffer_key, const void *src_ptr, size_t nbytes);
-
 int poly_webgpu_memset_zero(uintptr_t handle, size_t nbytes);
 
 int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn_name, PolyRunner *out);

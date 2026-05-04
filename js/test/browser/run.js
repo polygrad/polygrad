@@ -127,7 +127,10 @@ async function main() {
       console.error(`\n[${device}] ERROR: ${r.error}`)
       totalFailed++
     } else {
-      console.log(`\n[${device}] ${r.passed} passed, ${r.failed} failed`)
+      console.log(
+        `\n[${device}] ${r.passed} passed, ${r.failed} failed` +
+        (r.skipped ? `, ${r.skipped} skipped` : '')
+      )
       totalFailed += r.failed
     }
   }

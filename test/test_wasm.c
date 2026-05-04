@@ -4,6 +4,9 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
+#include "../src/engine/realize.h"
+#include "../src/frontend.h"
+#include "../src/tensor.h"
 #include "../src/wasm_builder.h"
 
 /* WASM builder tests */
@@ -471,6 +474,86 @@ TEST(wasm, write_and_validate) {
   free(wasm);
   free(lin);
   poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, sparse_cross_entropy_i64_gather_index_validates) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* Sparse cross-entropy follows tinygrad's late index dtype lowering: loaded
+   * class labels can remain int64 in gather address expressions. The WASM
+   * backend still targets wasm32 memory, so the renderer must wrap those
+   * address indexes to i32 at the memory access boundary. */
+  PolyUOp *logits_buf = poly_buffer_f32(ctx, 6);
+  PolyUOp *target_buf = poly_buffer(ctx, POLY_INT32, 2);
+  PolyUOp *logits = poly_reshape(ctx, logits_buf, (int64_t[]){2, 3}, 2);
+  PolyUOp *target = poly_reshape(ctx, target_buf, (int64_t[]){2}, 1);
+  PolyUOp *loss = poly_cross_entropy(ctx, logits, target, 1);
+
+  PolyUOp *targets[] = {loss};
+  PolyUOp *realized[] = {NULL};
+  PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->n_items, 3);
+
+  bool saw_i64_index = false;
+  bool saw_i32_wrap = false;
+
+  for (int item = 0; item < sched->n_items; item++) {
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_wasm_env(ctx, sched->items[item].root, &n_lin);
+    ASSERT_NOT_NULL(lin);
+
+    bool item_has_i64_index = false;
+    for (int i = 0; i < n_lin; i++) {
+      PolyUOp *u = lin[i];
+      if (u->op == POLY_OP_INDEX && u->n_src >= 2 && u->src[1] &&
+          !poly_dtype_is_float(u->src[1]->dtype) && u->src[1]->dtype.bitsize == 64) {
+        item_has_i64_index = true;
+        saw_i64_index = true;
+      }
+    }
+
+    int wasm_size = 0;
+    uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+    ASSERT_NOT_NULL(wasm);
+
+    if (item_has_i64_index) {
+      for (int i = 0; i < wasm_size; i++) {
+        if (wasm[i] == WASM_OP_I32_WRAP_I64) {
+          saw_i32_wrap = true;
+          break;
+        }
+      }
+    }
+
+    char path[128];
+    snprintf(path, sizeof(path), "/tmp/polygrad_test_ce_sparse_item%d.wasm", item);
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(wasm, 1, (size_t)wasm_size, f);
+    fclose(f);
+
+    int has_node = system("which node > /dev/null 2>&1");
+    if (has_node == 0) {
+      char cmd[512];
+      snprintf(
+          cmd, sizeof(cmd),
+          "node -e \"const fs=require('fs'); new WebAssembly.Module(fs.readFileSync('%s'))\"",
+          path
+      );
+      ASSERT_INT_EQ(system(cmd), 0);
+    }
+
+    free(wasm);
+    free(lin);
+  }
+
+  ASSERT_TRUE(saw_i64_index);
+  ASSERT_TRUE(saw_i32_wrap);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

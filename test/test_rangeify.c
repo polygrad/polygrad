@@ -1437,7 +1437,7 @@ TEST(rangeify, multi_kernel_shared_computed_ir) {
 }
 
 TEST(rangeify, multi_kernel_shared_computed_e2e) {
-  /* Same pattern as IR test, full compile + execute via poly_realize_with_bindings().
+  /* Same pattern as IR test, full compile + execute via poly_test_realize_buffer_views().
    * d = neg(a)
    * out1 = d + b = -a + b
    * out2 = d * c = -a * c */
@@ -1465,11 +1465,11 @@ TEST(rangeify, multi_kernel_shared_computed_e2e) {
     c_d[i] = (float)(i + 1) * 0.5f; /* 0.5,1.0,...,4.0 */
   }
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out1, o1_d), POLY_BIND_HOST(out2, o2_d), POLY_BIND_HOST(a, a_d),
-      POLY_BIND_HOST(b, b_d),     POLY_BIND_HOST(c, c_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out1, o1_d), POLY_TEST_HOST_VIEW(out2, o2_d), POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(b, b_d),     POLY_TEST_HOST_VIEW(c, c_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
 
   for (int i = 0; i < N; i++) {
@@ -1483,7 +1483,7 @@ TEST(rangeify, multi_kernel_shared_computed_e2e) {
 }
 
 TEST(rangeify, schedule_v2_switchover_parity) {
-  /* Verify that poly_realize_with_bindings() produces correct results
+  /* Verify that poly_test_realize_buffer_views() produces correct results
    * for vecadd — the most basic pattern. */
   int N = 16;
   PolyCtx *ctx = poly_ctx_new();
@@ -1501,12 +1501,12 @@ TEST(rangeify, schedule_v2_switchover_parity) {
     b_d[i] = (float)(N - i);
   }
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, o_d),
-      POLY_BIND_HOST(a, a_d),
-      POLY_BIND_HOST(b, b_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, o_d),
+      POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(b, b_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
 
   for (int i = 0; i < N; i++)
@@ -1535,14 +1535,14 @@ TEST(rangeify, stats_clean_vecadd_no_workarounds) {
     b_d[i] = (float)(N - i);
   }
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, o_d),
-      POLY_BIND_HOST(a, a_d),
-      POLY_BIND_HOST(b, b_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, o_d),
+      POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(b, b_d),
   };
 
   poly_rangeify_stats_reset();
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
 
   PolyRangeifyStats stats = poly_rangeify_stats_get();
@@ -1578,13 +1578,13 @@ TEST(rangeify, stats_clean_reduce_no_workarounds) {
   for (int i = 0; i < R * C; i++)
     a_d[i] = (float)(i + 1);
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, o_d),
-      POLY_BIND_HOST(a_flat, a_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, o_d),
+      POLY_TEST_HOST_VIEW(a_flat, a_d),
   };
 
   poly_rangeify_stats_reset();
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   PolyRangeifyStats stats = poly_rangeify_stats_get();
@@ -1627,8 +1627,8 @@ TEST(rangeify, bufferize_same_size_dims_e2e) {
   PolyUOp *store = poly_store_val(ctx, out, gx);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  PolyTestBufferView bindings[] = {POLY_TEST_HOST_VIEW(x, x_d), POLY_TEST_HOST_VIEW(out, gx_d)};
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   /* For [[1,3],[2,4]]: max over axis 1 = [3,4].
@@ -1764,12 +1764,12 @@ TEST(rangeify, bufferize_foreign_range_same_size_dims_e2e) {
     }
   }
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out1_flat, o1_d), POLY_BIND_HOST(out2_flat, o2_d), POLY_BIND_HOST(a_flat, a_d),
-      POLY_BIND_HOST(b_flat, b_d),     POLY_BIND_HOST(c_flat, c_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out1_flat, o1_d), POLY_TEST_HOST_VIEW(out2_flat, o2_d), POLY_TEST_HOST_VIEW(a_flat, a_d),
+      POLY_TEST_HOST_VIEW(b_flat, b_d),     POLY_TEST_HOST_VIEW(c_flat, c_d),
   };
   poly_rangeify_stats_reset();
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
   PolyRangeifyStats stats = poly_rangeify_stats_get();
   ASSERT_INT_EQ(stats.remap_calls, 0);
@@ -1836,13 +1836,13 @@ TEST(rangeify, bufferize_movement_chain_alt_ranges_e2e) {
   for (int i = 0; i < 75; i++)
     x_d[i] = (float)(i + 1);
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, o_d),
-      POLY_BIND_HOST(x_flat, x_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, o_d),
+      POLY_TEST_HOST_VIEW(x_flat, x_d),
   };
 
   poly_rangeify_stats_reset();
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   /* Expected from numpy reference:
@@ -1962,6 +1962,46 @@ TEST(rangeify, add_buffers_multi_kernel) {
   ASSERT_TRUE(found_buf);
 
   poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, add_buffers_uses_bufferize_device_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_FLOAT32, a, device, poly_arg_none());
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+
+  PolyUOp *src[] = {copy, range};
+  PolyUOp *bufferize = poly_uop(
+      ctx, POLY_OP_BUFFERIZE, POLY_FLOAT32, src, 2,
+      poly_arg_bufferize_opts(POLY_DEVICE_CUDA, POLY_ADDR_GLOBAL, false)
+  );
+  ASSERT_INT_EQ(bufferize->arg.kind, POLY_ARG_BUFFERIZE_OPTS);
+  ASSERT_FALSE(poly_bufferize_arg_removable(bufferize->arg));
+  ASSERT_INT_EQ(poly_bufferize_arg_device(bufferize->arg), POLY_DEVICE_CUDA);
+
+  PolyUOp *result = poly_apply_add_buffers(ctx, bufferize, NULL);
+  ASSERT_NOT_NULL(result);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, result, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  bool found = false;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op != POLY_OP_BUFFER || u->n_src < 2 || u->src[0]->op != POLY_OP_LUNIQUE) continue;
+    ASSERT_TRUE(u->src[1]->op == POLY_OP_DEVICE);
+    ASSERT_TRUE(u->src[1]->arg.kind == POLY_ARG_INT);
+    ASSERT_INT_EQ(u->src[1]->arg.i, POLY_DEVICE_CUDA);
+    found = true;
+  }
+  ASSERT_TRUE(found);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2174,11 +2214,11 @@ TEST(rangeify, split_store_structural_parity) {
   memset(o1_d, 0, sizeof(o1_d));
   memset(o2_d, 0, sizeof(o2_d));
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out1_flat, o1_d), POLY_BIND_HOST(out2_flat, o2_d), POLY_BIND_HOST(a_flat, a_d),
-      POLY_BIND_HOST(b_flat, b_d),     POLY_BIND_HOST(c_flat, c_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out1_flat, o1_d), POLY_TEST_HOST_VIEW(out2_flat, o2_d), POLY_TEST_HOST_VIEW(a_flat, a_d),
+      POLY_TEST_HOST_VIEW(b_flat, b_d),     POLY_TEST_HOST_VIEW(c_flat, c_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 5);
   ASSERT_INT_EQ(ret, 0);
 
   /* Verify out1 = neg(permute(a)) + b */
@@ -2246,7 +2286,7 @@ TEST(rangeify, shared_scalar_reduce_branches_ir) {
 }
 
 TEST(rangeify, shared_scalar_reduce_branches_e2e) {
-  /* Same graph, full compile+execute via poly_realize_with_bindings().
+  /* Same graph, full compile+execute via poly_test_realize_buffer_views().
    * a = [1..8] → sum = 36
    * c0 = [10,10,...] → oc[i] = 36 + 10 = 46
    * e0 = [2,2,...] → oe[i] = 36 * 2 = 72 */
@@ -2282,11 +2322,11 @@ TEST(rangeify, shared_scalar_reduce_branches_e2e) {
     oe_d[i] = 0.0f;
   }
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(oc, oc_d), POLY_BIND_HOST(oe, oe_d), POLY_BIND_HOST(a, a_d),
-      POLY_BIND_HOST(c0, c0_d), POLY_BIND_HOST(e0, e0_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(oc, oc_d), POLY_TEST_HOST_VIEW(oe, oe_d), POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(c0, c0_d), POLY_TEST_HOST_VIEW(e0, e0_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 5);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 5);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2318,11 +2358,11 @@ TEST(rangeify, const_through_bufferize) {
 
   float a_d[] = {1, 2, 3, 4};
   float out_d[4] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, out_d),
-      POLY_BIND_HOST(a, a_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, out_d),
+      POLY_TEST_HOST_VIEW(a, a_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2351,11 +2391,11 @@ TEST(rangeify, earliest_reshape_merge) {
 
   float a_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_d[8] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, out_d),
-      POLY_BIND_HOST(a, a_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, out_d),
+      POLY_TEST_HOST_VIEW(a, a_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2380,12 +2420,12 @@ TEST(rangeify, earliest_detach_removal) {
   float a_d[] = {1, 2, 3, 4};
   float b_d[] = {10, 20, 30, 40};
   float out_d[4] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out, out_d),
-      POLY_BIND_HOST(a, a_d),
-      POLY_BIND_HOST(b, b_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out, out_d),
+      POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(b, b_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
 
@@ -2480,12 +2520,12 @@ TEST(rangeify, limit_bufs_e2e) {
       buf_data[i][j] = (float)(i + 1);
   float out_d[16] = {0};
 
-  PolyBufferBinding bindings[12]; /* out + 10 inputs */
-  bindings[0] = POLY_BIND_HOST(out, out_d);
+  PolyTestBufferView bindings[12]; /* out + 10 inputs */
+  bindings[0] = POLY_TEST_HOST_VIEW(out, out_d);
   for (int i = 0; i < N_BUFS; i++)
-    bindings[1 + i] = POLY_BIND_HOST(bufs[i], buf_data[i]);
+    bindings[1 + i] = POLY_TEST_HOST_VIEW(bufs[i], buf_data[i]);
 
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 1 + N_BUFS);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 1 + N_BUFS);
 
   /* Copy before cleanup */
   float out_copy[16];
@@ -2607,12 +2647,12 @@ TEST(rangeify, assign_e2e) {
   float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float b_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
 
-  PolyBufferBinding bindings[2] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_b, b_data),
+  PolyTestBufferView bindings[2] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_b, b_data),
   };
 
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   float result[4];
   memcpy(result, a_data, sizeof(result));
 
@@ -2691,12 +2731,12 @@ TEST(rangeify, assign_war_ordering) {
   float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float out_data[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-  PolyBufferBinding bindings[2] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_out, out_data),
+  PolyTestBufferView bindings[2] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_out, out_data),
   };
 
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   float a_result[4], out_result[4];
   memcpy(a_result, a_data, sizeof(a_result));
   memcpy(out_result, out_data, sizeof(out_result));
@@ -2732,11 +2772,11 @@ TEST(rangeify, assign_self_rhs) {
 
   float a_data[4] = {3.0f, 5.0f, 7.0f, 11.0f};
 
-  PolyBufferBinding bindings[1] = {
-      POLY_BIND_HOST(buf_a, a_data),
+  PolyTestBufferView bindings[1] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
   };
 
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 1);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 1);
   float result[4];
   memcpy(result, a_data, sizeof(result));
 
@@ -2774,15 +2814,15 @@ TEST(rangeify, define_var_1d_e2e) {
   float out_data[16];
   memset(out_data, 0, sizeof(out_data));
 
-  PolyBufferBinding bindings[2] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_out, out_data),
+  PolyTestBufferView bindings[2] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_out, out_data),
   };
   PolyVarBinding var_bindings[1] = {
       {.var = N, .value = 4},
   };
 
-  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var_bindings, 1);
+  int ret = poly_test_realize_buffer_views_vars(ctx, sink, bindings, 2, var_bindings, 1);
   float result[16];
   memcpy(result, out_data, sizeof(result));
 
@@ -2823,9 +2863,9 @@ TEST(rangeify, define_var_2d_e2e) {
     a_data[i] = (float)(i + 1);
   memset(out_data, 0, sizeof(out_data));
 
-  PolyBufferBinding bindings[2] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_out, out_data),
+  PolyTestBufferView bindings[2] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_out, out_data),
   };
 
   /* Execute with N=3 (12 elements) */
@@ -2833,7 +2873,7 @@ TEST(rangeify, define_var_2d_e2e) {
       {.var = N, .value = 3},
   };
 
-  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var_bindings, 1);
+  int ret = poly_test_realize_buffer_views_vars(ctx, sink, bindings, 2, var_bindings, 1);
   float result[32];
   memcpy(result, out_data, sizeof(result));
 
@@ -2878,12 +2918,12 @@ TEST(rangeify, bind_auto_extract) {
   float out_data[16];
   memset(out_data, 0, sizeof(out_data));
 
-  PolyBufferBinding bindings[2] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_out, out_data),
+  PolyTestBufferView bindings[2] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_out, out_data),
   };
 
-  int ret = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, NULL, 0);
+  int ret = poly_test_realize_buffer_views_vars(ctx, sink, bindings, 2, NULL, 0);
   float result[16];
   memcpy(result, out_data, sizeof(result));
 
@@ -2919,22 +2959,22 @@ TEST(rangeify, define_var_cache_hit) {
   for (int i = 0; i < 16; i++)
     a_data[i] = (float)(i * 10);
 
-  PolyBufferBinding bindings[2] = {
-      POLY_BIND_HOST(buf_a, a_data),
-      POLY_BIND_HOST(buf_out, out_data),
+  PolyTestBufferView bindings[2] = {
+      POLY_TEST_HOST_VIEW(buf_a, a_data),
+      POLY_TEST_HOST_VIEW(buf_out, out_data),
   };
 
   /* First call: N=4 (compiles kernel) */
   memset(out_data, 0, sizeof(out_data));
   PolyVarBinding var4[1] = {{.var = N, .value = 4}};
-  int ret1 = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var4, 1);
+  int ret1 = poly_test_realize_buffer_views_vars(ctx, sink, bindings, 2, var4, 1);
   float r1[16];
   memcpy(r1, out_data, sizeof(r1));
 
   /* Second call: N=8 (should hit cache, reuse compiled kernel) */
   memset(out_data, 0, sizeof(out_data));
   PolyVarBinding var8[1] = {{.var = N, .value = 8}};
-  int ret2 = poly_realize_with_bindings_ex(ctx, sink, bindings, 2, var8, 1);
+  int ret2 = poly_test_realize_buffer_views_vars(ctx, sink, bindings, 2, var8, 1);
   float r2[16];
   memcpy(r2, out_data, sizeof(r2));
 
@@ -2959,7 +2999,7 @@ TEST(rangeify, define_var_cache_hit) {
 /* Regression: chained reductions (singleton + real) */
 /* Verifies that REDUCE_AXIS with a singleton dim (size 1) followed by
  * a real reduction (size > 1) compiles and executes correctly via
- * poly_realize_with_bindings. Regression for the bug where CONST(0) pseudo-ranges
+ * poly_test_realize_buffer_views. Regression for the bug where CONST(0) pseudo-ranges
  * from singleton dims entered REDUCE sources, producing END(CONST)
  * that corrupted scope depth in the C renderer.
  *
@@ -3005,13 +3045,13 @@ TEST(rangeify, chained_singleton_reduce_e2e) {
   float w_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
   float out_data[] = {0.0f};
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a_buf, a_data),
-      POLY_BIND_HOST(w_buf, w_data),
-      POLY_BIND_HOST(out_buf, out_data),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a_buf, a_data),
+      POLY_TEST_HOST_VIEW(w_buf, w_data),
+      POLY_TEST_HOST_VIEW(out_buf, out_data),
   };
 
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(ret, 0);
@@ -3052,12 +3092,12 @@ TEST(rangeify, mixed_multiaxis_singleton_reduce_e2e) {
   float in_data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   float out_data[] = {0.0f, 0.0f};
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(in_buf, in_data),
-      POLY_BIND_HOST(out_buf, out_data),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(in_buf, in_data),
+      POLY_TEST_HOST_VIEW(out_buf, out_data),
   };
 
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(ret, 0);
@@ -3092,11 +3132,11 @@ TEST(rangeify, earliest_assign_bitcast) {
    * Execute: buf should become src * 2 */
   float buf_d[] = {1, 2, 3, 4};
   float src_d[] = {10, 20, 30, 40};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(buf, buf_d),
-      POLY_BIND_HOST(src, src_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(buf, buf_d),
+      POLY_TEST_HOST_VIEW(src, src_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 4; i++)
@@ -3125,12 +3165,12 @@ TEST(rangeify, earliest_nested_assign_chain) {
   float buf_d[] = {0, 0, 0, 0};
   float v1_d[] = {1, 2, 3, 4};
   float v2_d[] = {10, 20, 30, 40};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(buf, buf_d),
-      POLY_BIND_HOST(v1, v1_d),
-      POLY_BIND_HOST(v2, v2_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(buf, buf_d),
+      POLY_TEST_HOST_VIEW(v1, v1_d),
+      POLY_TEST_HOST_VIEW(v2, v2_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 4; i++)
@@ -3167,11 +3207,11 @@ TEST(rangeify, earliest_assign_to_contiguous) {
 
   float buf_d[] = {99, 99, 99, 99, 99, 99, 99, 99};
   float src_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(buf, buf_d),
-      POLY_BIND_HOST(src, src_d),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(buf, buf_d),
+      POLY_TEST_HOST_VIEW(src, src_d),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
   /* poly_assign normalizes to BUFFER target, ASSIGN writes in-place */
   ASSERT_INT_EQ(ret, 0);

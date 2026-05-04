@@ -105,6 +105,58 @@ TEST(ir, round_trip_const) {
   PASS();
 }
 
+TEST(ir, round_trip_bufferize_opts_arg) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer_f32(ctx, 8);
+  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *copy = poly_uop2(ctx, POLY_OP_COPY, POLY_FLOAT32, a, device, poly_arg_none());
+  PolyUOp *bound = poly_const_int(ctx, 8);
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *bsrc[] = {copy, range};
+  PolyUOp *bufferize = poly_uop(
+      ctx, POLY_OP_BUFFERIZE, POLY_FLOAT32, bsrc, 2,
+      poly_arg_bufferize_opts(POLY_DEVICE_CUDA, POLY_ADDR_GLOBAL, false)
+  );
+  PolyUOp *out = poly_buffer_f32(ctx, 8);
+  PolyUOp *store = poly_store_val(ctx, out, bufferize);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  PolyIrBufEntry bufs[] = {
+      {"input", POLY_IR_ROLE_INPUT, a, {8}, 1},
+      {"output", POLY_IR_ROLE_OUTPUT, out, {8}, 1},
+  };
+  PolyIrEntrypoint eps[] = {{"forward", sink}};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  bool found = false;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op != POLY_OP_BUFFERIZE) continue;
+    ASSERT_INT_EQ(topo[i]->arg.kind, POLY_ARG_BUFFERIZE_OPTS);
+    ASSERT_INT_EQ(poly_bufferize_arg_device(topo[i]->arg), POLY_DEVICE_CUDA);
+    ASSERT_INT_EQ(poly_bufferize_arg_addrspace(topo[i]->arg), POLY_ADDR_GLOBAL);
+    ASSERT_FALSE(poly_bufferize_arg_removable(topo[i]->arg));
+    found = true;
+  }
+  ASSERT_TRUE(found);
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
 /* Round-trip: multiple entrypoints */
 
 TEST(ir, round_trip_multi_entry) {

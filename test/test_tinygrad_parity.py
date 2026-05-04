@@ -17,10 +17,11 @@ os.environ.setdefault("DEVECTORIZE", "-1")
 os.environ["DEV"] = "CPU"
 sys.path.insert(0, str(ROOT / "references" / "tinygrad_latest"))
 
-from tinygrad import Context, Tensor  # noqa: E402
-from tinygrad.codegen import get_program, full_rewrite_to_sink  # noqa: E402
+from tinygrad import Context, Tensor, dtypes  # noqa: E402
+from tinygrad.codegen import to_program, full_rewrite_to_sink  # noqa: E402
 from tinygrad.codegen.late.linearizer import linearize  # noqa: E402
-from tinygrad.renderer.cstyle import ClangRenderer, CUDARenderer, AMDHIPRenderer  # noqa: E402
+from tinygrad.helpers import Target  # noqa: E402
+from tinygrad.renderer.cstyle import ClangRenderer, CUDARenderer, HIPRenderer  # noqa: E402
 from tinygrad.uop.ops import Ops  # noqa: E402
 
 
@@ -44,6 +45,15 @@ def _concat_outputs(outputs: tuple[Tensor, ...]) -> np.ndarray:
     if len(parts) == 1:
         return parts[0]
     return np.concatenate(parts, axis=0)
+
+
+def _program_linear_ops(program) -> list[str]:
+    """tinygrad latest returns a PROGRAM UOp; its linearized kernel is carried
+    as an Ops.LINEAR source rather than the older program.uops attribute."""
+    for src in program.src:
+        if src.op is Ops.LINEAR:
+            return [u.op.name for u in src.src]
+    raise RuntimeError("tinygrad PROGRAM has no LINEAR source")
 
 
 # ---- case builders ----
@@ -258,11 +268,11 @@ def build_full_2d() -> tuple[Tensor, ...]:
 
 
 def build_arange_simple() -> tuple[Tensor, ...]:
-    return (Tensor.arange(0, 5, 1),)
+    return (Tensor.arange(0, 5, 1, dtype=dtypes.float32),)
 
 
 def build_arange_start_step() -> tuple[Tensor, ...]:
-    return (Tensor.arange(2, 8, 3),)
+    return (Tensor.arange(2, 8, 3, dtype=dtypes.float32),)
 
 
 def build_linspace_5() -> tuple[Tensor, ...]:
@@ -416,6 +426,16 @@ def kernel_structure(ops: list[str]) -> dict[str, int]:
 def run_polygrad_case(runner: pathlib.Path, case: str, mode: str,
                       cuda: bool = False, hip: bool = False) -> dict:
     env = os.environ.copy()
+    # ASan-instrumented parity_runner is spawned from Python. On this platform,
+    # detect_leaks=0 alone can produce recursive DEADLYSIGNAL reports in the
+    # child process; halt_on_error=0 preserves the intended non-leak behavior
+    # and lets subprocess capture the JSON report.
+    asan_opts = env.get("ASAN_OPTIONS", "")
+    if "detect_leaks=" not in asan_opts:
+        asan_opts = (asan_opts + ":detect_leaks=0") if asan_opts else "detect_leaks=0"
+    if "halt_on_error=" not in asan_opts:
+        asan_opts = asan_opts + ":halt_on_error=0"
+    env["ASAN_OPTIONS"] = asan_opts
     if mode == "full":
         env["POLY_SPLIT_SINK_STORES"] = "1"
         env["POLY_PARITY_MOVEMENT_AS_COPY"] = "1"
@@ -457,9 +477,11 @@ def run_polygrad_case(runner: pathlib.Path, case: str, mode: str,
 
 
 def evaluate_tinygrad_case(case_builder: CaseBuilder) -> np.ndarray:
-    # DEVECTORIZE=-1 can produce non-runnable kernels on some tinygrad backends.
-    # Keep IR extraction under requested flags, but compute values with DEVECTORIZE=0.
-    with Context(DEVECTORIZE=0):
+    # Current tinygrad_latest CPU can render invalid C for vector bool masks
+    # under DEVECTORIZE=0 (for example non-last-axis cross_entropy emits
+    # `_Bool __attribute__((ext_vector_type(4)))`). DEVECTORIZE=1 keeps value
+    # evaluation runnable while preserving the same high-level Tensor case.
+    with Context(DEVECTORIZE=1):
         outputs = _to_output_tuple(case_builder())
         return _concat_outputs(outputs)
 
@@ -469,19 +491,25 @@ def extract_tinygrad_kernels(case_builder: CaseBuilder, optimize: bool = True, r
     # Use DEVECTORIZE=0 for stable linearized kernel extraction.
     with Context(DEVECTORIZE=0):
         outputs = _to_output_tuple(case_builder())
-        schedule = outputs[0].schedule(*outputs[1:])
+        linear_schedule = outputs[0].schedule_linear(*outputs[1:])
 
         if renderer is None:
-            renderer = ClangRenderer()
+            renderer = ClangRenderer(Target.parse("CPU"))
         kernels = []
-        for si in schedule:
-            if si.ast.op is not Ops.SINK:
+        for call in linear_schedule.src:
+            if call.op is not Ops.CALL or len(call.src) == 0:
+                continue
+            ast = call.src[0]
+            # Current tinygrad schedule_linear includes COPY calls for host
+            # transfers. The historical parity report compares only lowered
+            # compute SINK kernels, matching the Polygrad runner metadata.
+            if ast.op is not Ops.SINK:
                 continue
             if optimize:
-                program = get_program(si.ast, renderer)
-                ops = [u.op.name for u in (program.uops or [])]
+                program = to_program(ast, renderer)
+                ops = _program_linear_ops(program)
             else:
-                rw = full_rewrite_to_sink(si.ast, renderer, optimize=False)
+                rw = full_rewrite_to_sink(ast, renderer, optimize=False)
                 ops = [u.op.name for u in linearize(rw)]
             kernels.append({"ops": ops, "structure": kernel_structure(ops)})
 
@@ -598,12 +626,12 @@ def main() -> int:
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
             text=True,
         ).strip().split("\n")[0]
-        renderer = CUDARenderer("sm_" + arch.replace(".", ""))
+        renderer = CUDARenderer(Target.parse("CUDA:NV:sm_" + arch.replace(".", "")))
     elif args.hip:
         hip_arch = os.environ.get("HIP_ARCH", "gfx90a")
-        renderer = AMDHIPRenderer(hip_arch)
+        renderer = HIPRenderer(Target.parse("HIP:AMD:" + hip_arch))
     else:
-        renderer = ClangRenderer()
+        renderer = ClangRenderer(Target.parse("CPU"))
 
     failures: list[tuple[str, str]] = []
     ir_diverged: list[tuple[str, str]] = []

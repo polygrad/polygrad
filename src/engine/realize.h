@@ -2,9 +2,9 @@
  *
  * This is the C-core analogue of tinygrad's Tensor.realize ->
  * Tensor.schedule_with_vars -> run_schedule path. Callers pass the unrealized
- * top-level value UOps they want materialized; poly_realize batches them into
- * one internal SINK, schedules, compiles, executes, and returns the realized
- * buffer-identity replacements in out_uops.
+ * top-level value UOps they want materialized; poly_realize_uops callifies
+ * them into an internal effect SINK, then shares the same sink runner used by
+ * already-schedule-ready instance/imported graphs.
  */
 
 #ifndef POLYGRAD_REALIZE_H
@@ -32,13 +32,19 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
  * on error. */
 PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops);
 
+/* Run an already-effectful SINK using ctx->buffers runtime state. This is the
+ * lower layer for imported/instance graphs whose top-level sources are already
+ * STORE/ASSIGN/AFTER effects. It intentionally does not call transform_to_call:
+ * tinygrad only callifies tensor value roots, not an existing schedule sink. */
+int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink);
+
 /* Materialize the requested top-level value UOps using ctx->buffers runtime
  * state. Already-realized inputs pass through unchanged in out_uops. Non-leaf
  * values are assigned fresh output buffers internally, scheduled as one batch,
  * and the realized replacements are returned in out_uops.
  *
  * Returns 0 on success, -1 on error. */
-int poly_realize(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops);
+int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops);
 
 #ifdef __cplusplus
 }

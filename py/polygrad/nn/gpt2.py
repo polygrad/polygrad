@@ -32,36 +32,30 @@ class Attention:
     def __call__(self, x, mask=None):
         B, T, C = x.shape
 
-        # Q, K, V projection: (B, T, 3*dim) → 3 × (B, T, dim)
-        # Realize after matmul to prevent fusion with downstream ops
-        qkv = self.c_attn(x).realize()
+        # Keep parameter-dependent graph construction lazy. tinygrad treats
+        # realize() as a materialization boundary for backward target discovery,
+        # so training code must not realize hidden activations before backward().
+        qkv = self.c_attn(x)
         q = qkv.shrink(((0, B), (0, T), (0, C)))
         k = qkv.shrink(((0, B), (0, T), (C, 2 * C)))
         v = qkv.shrink(((0, B), (0, T), (2 * C, 3 * C)))
-
-        # Realize Q, K, V after shrink to materialize before reshape+permute
-        q = q.realize()
-        k = k.realize()
-        v = v.realize()
 
         # Reshape to multi-head: (B, T, n_heads, head_dim) → (B, n_heads, T, head_dim)
         q = q.reshape(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         k = k.reshape(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
         v = v.reshape(B, T, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
 
-        # Scaled dot-product attention — realize after matmul before mask
         scale = 1.0 / math.sqrt(self.head_dim)
-        scores = q.matmul(k.transpose(-2, -1)).realize()
+        scores = q.matmul(k.transpose(-2, -1))
         scores = scores * scale
 
         if mask is not None:
-            scores = (scores + mask).realize()
+            scores = scores + mask
 
-        # Softmax: reduce→expand→alu pattern, must realize
-        attn = scores.softmax(axis=-1).realize()  # (B, H, T, T)
+        attn = scores.softmax(axis=-1)  # (B, H, T, T)
 
         # Attention-weighted values + merge heads
-        out = attn.matmul(v).realize()  # (B, H, T, D)
+        out = attn.matmul(v)  # (B, H, T, D)
         out = out.permute(0, 2, 1, 3).reshape(B, T, C)
         return self.c_proj(out)
 
@@ -73,10 +67,9 @@ class FeedForward:
         self.c_proj = Linear(hidden_dim, dim, bias=True)
 
     def __call__(self, x):
-        # Realize after matmul and gelu to prevent fusion
-        h = self.c_fc(x).realize()
-        h = h.gelu().realize()
-        return self.c_proj(h).realize()
+        h = self.c_fc(x)
+        h = h.gelu()
+        return self.c_proj(h)
 
 
 class TransformerBlock:
@@ -88,14 +81,12 @@ class TransformerBlock:
         self.ln_2 = LayerNorm(dim, eps=norm_eps)
 
     def __call__(self, x, mask=None):
-        # Realize after each major stage to prevent reduce fusion
-        # LayerNorm has reduce→expand→alu — must realize before attention
-        ln1 = self.ln_1(x).realize()
-        attn_out = self.attn(ln1, mask).realize()
-        h = (x + attn_out).realize()
-        ln2 = self.ln_2(h).realize()
+        ln1 = self.ln_1(x)
+        attn_out = self.attn(ln1, mask)
+        h = x + attn_out
+        ln2 = self.ln_2(h)
         mlp_out = self.mlp(ln2)
-        return (h + mlp_out).realize()
+        return h + mlp_out
 
 
 class GPT2:
@@ -128,26 +119,23 @@ class GPT2:
         """
         B, T = tokens.shape
 
-        # Token embeddings (realize to prevent reduce fusion)
-        tok_emb = self.wte(tokens).realize()  # (B, T, dim)
+        # The trainable path stays lazy until loss.backward(); callers can
+        # realize logits for inference, but training must preserve UOp reachability.
+        tok_emb = self.wte(tokens)  # (B, T, dim)
 
-        # Position embeddings (realize to prevent reduce fusion)
         positions = Tensor.arange(T).reshape(1, T)
-        pos_emb = self.wpe(positions).realize()  # (1, T, dim)
+        pos_emb = self.wpe(positions)  # (1, T, dim)
 
-        h = (tok_emb + pos_emb).realize()
+        h = tok_emb + pos_emb
 
-        # Causal mask: upper triangle filled with -inf
+        # The mask is a constant graph, so realizing it does not cut gradients.
         mask = (Tensor.ones(T, T).triu(diagonal=1) * (-1e9)).realize()
         mask = mask.reshape(1, 1, T, T)
 
-        # Transformer blocks (realize between blocks to prevent cross-block fusion)
         for block in self.h:
             h = block(h, mask)
-            h = h.realize()
 
-        # Final norm + logit projection (realize layernorm before linear)
-        h = self.ln_f(h).realize()
+        h = self.ln_f(h)
         logits = self.lm_head(h)  # (B, T, vocab_size)
         return logits
 

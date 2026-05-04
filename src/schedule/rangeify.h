@@ -93,9 +93,18 @@ PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_m
 /* Tinygrad schedule/rangeify.py analogue: build the kernel graph for a sink. */
 PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *sink);
 
+typedef enum {
+  POLY_KERNEL_ITEM_COMPUTE = 0,
+  POLY_KERNEL_ITEM_COPY = 1,
+} PolyKernelItemKind;
+
 typedef struct {
   PolyUOp **kernels;
   int n_kernels;
+
+  int *kernel_kinds; /* PolyKernelItemKind */
+  int *copy_dst_params;
+  int *copy_src_params;
 
   PolyUOp ***param_to_buf;
   int *kernel_n_params;

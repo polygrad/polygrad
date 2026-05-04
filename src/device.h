@@ -54,6 +54,12 @@ struct PolyBuffer {
  * FFI-friendly: takes flat scalars, constructs PolyBuffer internally. */
 void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int domain);
 
+/* Attach an existing runtime buffer view to a BUFFER UOp without taking
+ * ownership of the underlying allocation. This is used when instance/call
+ * storage should be visible through ctx->buffers, which keeps execution on
+ * the same schedule/realize path as normal tensors. */
+void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
+
 PolyUOp *poly_buffer_from_host(
     PolyCtx *ctx, void *ptr, size_t nbytes, int dtype_id,
     int64_t *dims, int ndim

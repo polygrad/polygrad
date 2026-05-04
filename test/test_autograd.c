@@ -27,25 +27,80 @@ static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
 
 #define LN2_F 0.69314718055994530942f
 
+static int run_grad_expr(
+    PolyCtx *ctx,
+    PolyUOp *out_buf,
+    PolyUOp *expr,
+    const char *fn_name,
+    void **args,
+    int n_args
+) {
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_buf, expr, poly_arg_none());
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){store}, 1, poly_arg_none());
+
+  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!schedule) return -1;
+  if (schedule->n_items != 1 || !schedule->items[0].root) {
+    poly_schedule_free(schedule);
+    return -1;
+  }
+
+  if (schedule->items[0].kind == POLY_EXEC_COPY) {
+    PolyTestBufferView *bindings =
+        calloc((size_t)(n_args > 0 ? n_args : 1), sizeof(PolyTestBufferView));
+    if (!bindings) {
+      poly_schedule_free(schedule);
+      return -1;
+    }
+    int n_bindings = 0;
+    for (int i = 0; i < schedule->n_buf_slots; i++) {
+      if (schedule->buf_slots[i].is_intermediate) continue;
+      if (n_bindings >= n_args) {
+        free(bindings);
+        poly_schedule_free(schedule);
+        return -1;
+      }
+      bindings[n_bindings] = POLY_TEST_HOST_VIEW(schedule->buf_slots[i].buf_uop, args[n_bindings]);
+      n_bindings++;
+    }
+    poly_schedule_free(schedule);
+    int ret = poly_test_realize_buffer_views(ctx, sink, bindings, n_bindings);
+    free(bindings);
+    return ret;
+  }
+
+  PolyUOp *kernel = schedule->items[0].root;
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
+  if (!lin || n_lin <= 0) {
+    poly_schedule_free(schedule);
+    free(lin);
+    return -1;
+  }
+
+  char *src = poly_render_c(lin, n_lin, fn_name);
+  free(lin);
+  if (!src) {
+    poly_schedule_free(schedule);
+    return -1;
+  }
+
+  PolyProgram *prog = poly_compile_c(src, fn_name);
+  free(src);
+  if (!prog) {
+    poly_schedule_free(schedule);
+    return -1;
+  }
+
+  poly_program_call(prog, args, n_args);
+  poly_program_destroy(prog);
+  poly_schedule_free(schedule);
+  return 0;
+}
+
 #define RUN_GRAD_EXPR(ctx, out_buf, expr, fn_name, args, n_args)                                   \
   do {                                                                                             \
-    PolyUOp *__store =                                                                             \
-        poly_uop2((ctx), POLY_OP_STORE, POLY_VOID, (out_buf), (expr), poly_arg_none());            \
-    PolyUOp *__sink =                                                                              \
-        poly_uop((ctx), POLY_OP_SINK, POLY_VOID, (PolyUOp *[]){__store}, 1, poly_arg_none());      \
-    PolyUOp *__kernel = single_scheduled_root((ctx), __sink);                                      \
-    ASSERT_NOT_NULL(__kernel);                                                                     \
-    int __n_lin = 0;                                                                               \
-    PolyUOp **__lin = poly_linearize((ctx), __kernel, &__n_lin);                                   \
-    ASSERT_TRUE(__n_lin > 0);                                                                      \
-    char *__src = poly_render_c(__lin, __n_lin, (fn_name));                                        \
-    ASSERT_NOT_NULL(__src);                                                                        \
-    PolyProgram *__prog = poly_compile_c(__src, (fn_name));                                        \
-    ASSERT_NOT_NULL(__prog);                                                                       \
-    poly_program_call(__prog, (args), (n_args));                                                   \
-    poly_program_destroy(__prog);                                                                  \
-    free(__src);                                                                                   \
-    free(__lin);                                                                                   \
+    ASSERT_INT_EQ(run_grad_expr((ctx), (out_buf), (expr), (fn_name), (args), (n_args)), 0);        \
   } while (0)
 
 static int compile_expr_program(
@@ -727,7 +782,7 @@ TEST(autograd, chain_mul_exp2_e2e) {
 
 TEST(autograd, max_reduce_backward_e2e) {
   /* reduce-MAX gradient requires multi-kernel scheduling (CONTIGUOUS barriers
-   * create BUFFERIZE intermediates). Must use poly_realize_with_bindings, not single-kernel
+   * create BUFFERIZE intermediates). Must use poly_test_realize_buffer_views, not single-kernel
    * RUN_GRAD_EXPR. */
   int N = 6;
   float x_d[6] = {1.0f, 3.0f, 2.0f, 4.0f, 5.0f, 6.0f};
@@ -750,8 +805,8 @@ TEST(autograd, max_reduce_backward_e2e) {
   PolyUOp *store = poly_store_val(ctx, out, gx);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  PolyTestBufferView bindings[] = {POLY_TEST_HOST_VIEW(x, x_d), POLY_TEST_HOST_VIEW(out, gx_d)};
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
   float expected[6] = {0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};

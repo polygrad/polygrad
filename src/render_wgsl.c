@@ -119,6 +119,99 @@ static const char *wgsl_type_name(PolyDType dt) {
   return "i32";
 }
 
+static bool wgsl_dtype_is_packed_storage(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  int itemsize = poly_dtype_itemsize(s);
+  /* tinygrad packs sub-32-bit non-half storage through atomic<u32>. Keep this
+   * to integer byte/short storage for now; bool/bf16 need separate renderer
+   * rules before they can be packed safely. */
+  return itemsize > 0 && itemsize < 4 && poly_dtype_is_int(s) && !poly_dtype_is_bool(s);
+}
+
+static const char *wgsl_buffer_type_name(PolyDType dt) {
+  return wgsl_dtype_is_packed_storage(dt) ? "atomic<u32>" : wgsl_type_name(dt);
+}
+
+static bool wgsl_packed_params(PolyDType dt, int *itemsize, int *elems, unsigned *mask) {
+  if (!wgsl_dtype_is_packed_storage(dt)) return false;
+  int is = poly_dtype_itemsize(poly_dtype_scalar(dt));
+  if (is != 1 && is != 2) return false;
+  if (itemsize) *itemsize = is;
+  if (elems) *elems = 4 / is;
+  if (mask) *mask = (is == 1) ? 0xFFu : 0xFFFFu;
+  return true;
+}
+
+static bool wgsl_index_uses_packed_buffer(PolyUOp *idx_uop, PolyDType *buf_dt_out) {
+  if (!idx_uop || idx_uop->op != POLY_OP_INDEX || idx_uop->n_src < 2) return false;
+  PolyDType buf_dt = poly_dtype_scalar(idx_uop->src[0]->dtype);
+  if (!wgsl_dtype_is_packed_storage(buf_dt)) return false;
+  if (buf_dt_out) *buf_dt_out = buf_dt;
+  return true;
+}
+
+static bool wgsl_make_packed_load_expr(
+    WgslStrMap *names, PolyUOp *idx_uop, PolyDType load_dt, char *out, size_t out_sz
+) {
+  PolyDType buf_dt;
+  if (!wgsl_index_uses_packed_buffer(idx_uop, &buf_dt)) return false;
+
+  int itemsize = 0, elems = 0;
+  unsigned mask = 0;
+  if (!wgsl_packed_params(buf_dt, &itemsize, &elems, &mask)) return false;
+
+  char *buf_s = wsm_get(names, idx_uop->src[0]);
+  char *idx_s = wsm_get(names, idx_uop->src[1]);
+  if (!buf_s || !idx_s) return false;
+
+  char raw[512];
+  snprintf(
+      raw, sizeof(raw),
+      "((atomicLoad(&%s[(%s/%d)]) >> ((u32(%s)%%%du)*%du)) & 0x%Xu)", buf_s, idx_s, elems,
+      idx_s, elems, 8u * (unsigned)itemsize, mask
+  );
+
+  PolyDType scalar = poly_dtype_scalar(load_dt);
+  if (!poly_dtype_is_unsigned(scalar) && poly_dtype_is_int(scalar)) {
+    int sext = (itemsize == 1) ? 24 : 16;
+    snprintf(out, out_sz, "((i32(%s)<<%d)>>%d)", raw, sext, sext);
+  } else {
+    snprintf(out, out_sz, "%s", raw);
+  }
+  return true;
+}
+
+static bool wgsl_emit_packed_store(
+    WgslStrBuf *body, WgslStrMap *names, PolyUOp *idx_uop, const char *val, int depth
+) {
+  PolyDType buf_dt;
+  if (!wgsl_index_uses_packed_buffer(idx_uop, &buf_dt)) return false;
+
+  int itemsize = 0, elems = 0;
+  unsigned mask = 0;
+  if (!wgsl_packed_params(buf_dt, &itemsize, &elems, &mask)) return false;
+
+  char *buf_s = wsm_get(names, idx_uop->src[0]);
+  char *idx_s = wsm_get(names, idx_uop->src[1]);
+  if (!buf_s || !idx_s || !val) return false;
+
+  unsigned shift_bits = 8u * (unsigned)itemsize;
+  for (int d = 0; d < depth; d++)
+    wsb_puts(body, "  ");
+  wsb_printf(
+      body, "atomicAnd(&%s[(%s/%d)], ((0x%Xu << ((u32(%s)%%%du)*%uu)) ^ 0xFFFFFFFFu));\n",
+      buf_s, idx_s, elems, mask, idx_s, elems, shift_bits
+  );
+
+  for (int d = 0; d < depth; d++)
+    wsb_puts(body, "  ");
+  wsb_printf(
+      body, "atomicAdd(&%s[(%s/%d)], ((u32(%s) & 0x%Xu) << ((u32(%s)%%%du)*%uu)));\n",
+      buf_s, idx_s, elems, val, mask, idx_s, elems, shift_bits
+  );
+  return true;
+}
+
 static bool wgsl_uop_tree_contains_target(PolyUOp *u, PolyUOp *target) {
   if (!u || !target) return false;
   if (u == target) return true;
@@ -573,12 +666,16 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
       char *bidx = wsm_get(&names, u->src[0]);
       const char *tn = wgsl_type_name(u->dtype);
+      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      char packed_load[512];
+      const char *load_expr = bidx;
+      if (idx_uop && wgsl_make_packed_load_expr(&names, idx_uop, u->dtype, packed_load, sizeof(packed_load)))
+        load_expr = packed_load;
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
 
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
-      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
         PolyUOp *gate_uop = idx_uop->src[2];
         PolyUOp *alt_uop = u->src[1];
@@ -607,7 +704,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         }
         char *gate_s = wsm_get(&names, gate_uop);
         char *alt_s = wsm_get(&names, alt_uop);
-        wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, bidx, gate_s);
+        wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, load_expr, gate_s);
       } else if (idx_uop && idx_uop->n_src >= 3) {
         PolyUOp *gate_uop = idx_uop->src[2];
         if (u->dtype.count == 1 && gate_uop && gate_uop->dtype.count > 1) {
@@ -624,9 +721,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
           }
         }
         char *gate_s = wsm_get(&names, gate_uop);
-        wsb_printf(&body, "%s = select(%s(0), %s, %s);\n", name, tn, bidx, gate_s);
+        wsb_printf(&body, "%s = select(%s(0), %s, %s);\n", name, tn, load_expr, gate_s);
       } else {
-        wsb_printf(&body, "%s = %s;\n", name, bidx);
+        wsb_printf(&body, "%s = %s;\n", name, load_expr);
       }
       continue;
     }
@@ -698,9 +795,11 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         depth++;
       }
 
-      for (int d = 0; d < depth; d++)
-        wsb_puts(&body, "  ");
-      wsb_printf(&body, "%s = %s;\n", target, val);
+      if (!wgsl_emit_packed_store(&body, &names, store_idx, val, depth)) {
+        for (int d = 0; d < depth; d++)
+          wsb_puts(&body, "  ");
+        wsb_printf(&body, "%s = %s;\n", target, val);
+      }
 
       if (gated_store) {
         depth--;
@@ -826,7 +925,8 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   /* Parameter bindings: sequential indices starting at 1 (binding 0 = INFINITY).
    * Storage buffers use var<storage,read_write>, scalar vars use var<uniform>. */
   for (int i = 0; i < n_bindings; i++) {
-    const char *tn = wgsl_type_name(binding_dtypes[i]);
+    const char *tn = binding_is_buffer[i] ? wgsl_buffer_type_name(binding_dtypes[i])
+                                          : wgsl_type_name(binding_dtypes[i]);
     if (binding_is_buffer[i]) {
       wsb_printf(
           &out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n",

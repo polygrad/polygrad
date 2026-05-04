@@ -912,7 +912,7 @@ static int interp_region(
 
     default: {
       /* ALU operations: dispatch to eval_alu with lane loop */
-      if (u->op >= POLY_OP_EXP2 && u->op <= POLY_OP_MULACC) {
+      if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
         PolyDType alu_dt = poly_dtype_scalar(u->dtype);
         int out_cnt = u->dtype.count > 0 ? u->dtype.count : 1;
 

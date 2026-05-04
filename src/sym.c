@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
+#include <string.h>
 #include "utils.h"
 
 /* Overflow-safe int64 helpers */
@@ -811,6 +812,37 @@ static bool match_binary_one_const(PolyUOp *u, PolyUOp **out_x, PolyUOp **out_c)
   return false;
 }
 
+/* tinygrad symbolic.py:
+ *   (x:weakint + c).cast(signed_int) -> x.cast(signed_int) + c.cast(signed_int)
+ *
+ * This turns Tensor.arange's `(range + 1).cast(int) + -1` class index into
+ * `range.cast(int)`, exposing the sparse one-hot load-collapse rule. Keep it
+ * scoped to POLY_INDEX sources and signed integer destinations, matching
+ * dtypes.weakint -> dtypes.sints. */
+static PolyUOp *rule_cast_index_add_const_to_add_casts(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->op != POLY_OP_CAST || root->n_src != 1) return NULL;
+  if (!poly_dtype_is_int(root->dtype) || poly_dtype_is_unsigned(root->dtype) ||
+      poly_dtype_is_bool(root->dtype))
+    return NULL;
+
+  PolyUOp *add = root->src[0];
+  if (!add || add->op != POLY_OP_ADD || add->n_src != 2) return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(add->dtype), POLY_INDEX)) return NULL;
+
+  PolyUOp *x = NULL;
+  PolyUOp *c = NULL;
+  if (!match_binary_one_const(add, &x, &c)) return NULL;
+
+  PolyUOp *x_cast = poly_uop1(ctx, POLY_OP_CAST, root->dtype, x, poly_arg_none());
+  PolyUOp *c_cast = poly_uop1(ctx, POLY_OP_CAST, root->dtype, c, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_ADD, root->dtype, x_cast, c_cast, poly_arg_none());
+}
+
 /* tinygrad symbolic.py:260-262
  *   x.alu(op, c1).alu(op, c2) -> x.alu(op, c1.alu(op, c2))
  * Implemented structurally for binary associative ops with one const in the
@@ -834,8 +866,13 @@ static PolyUOp *rule_assoc_fold_consts(PolyCtx *ctx, PolyUOp *root, const PolyBi
   return poly_uop2(ctx, root->op, root->dtype, x, fc, poly_arg_none());
 }
 
-/* tinygrad symbolic.py:227-229
+/* tinygrad symbolic.py:
  *   y * (x + c) -> (y * x) + (y * c)
+ *
+ * tinygrad gates this rule to weak integer/index expressions. Applying it to
+ * float arithmetic changes rounding behavior and also breaks useful vector ALU
+ * structure, so keep the Polygrad port integer-only instead of distributing
+ * general f32/f64 math such as linspace scaling.
  * Support both src orderings so we do not depend on a prior commutative flip
  * just to expose the add+const shape. */
 static PolyUOp *rule_distribute_const_mul_over_add(
@@ -845,6 +882,7 @@ static PolyUOp *rule_distribute_const_mul_over_add(
 ) {
   (void)b;
   if (!root || root->op != POLY_OP_MUL || root->n_src != 2) return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(root->dtype), POLY_INDEX)) return NULL;
 
   for (int swap = 0; swap < 2; swap++) {
     PolyUOp *c = root->src[swap];
@@ -864,6 +902,217 @@ static PolyUOp *rule_distribute_const_mul_over_add(
   }
 
   return NULL;
+}
+
+/* tinygrad symbolic.py:269-271
+ *   (x + c) + y -> (x + y) + c
+ *   (x * c) * y -> (x * y) * c
+ * Keeps constants at the end of associative chains. This is visible in
+ * optimized index expressions such as cross-entropy over a non-last axis. */
+static PolyUOp *rule_move_const_to_end(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->n_src != 2) return NULL;
+  if (root->op != POLY_OP_ADD && root->op != POLY_OP_MUL) return NULL;
+
+  PolyUOp *inner = root->src[0];
+  PolyUOp *y = root->src[1];
+  if (!inner || inner->op != root->op || inner->n_src != 2 || is_scalar_const_uop(y))
+    return NULL;
+
+  PolyUOp *x = NULL;
+  PolyUOp *c = NULL;
+  if (!match_binary_one_const(inner, &x, &c)) return NULL;
+  PolyUOp *xy = poly_uop2(ctx, root->op, root->dtype, x, y, poly_arg_none());
+  return poly_uop2(ctx, root->op, root->dtype, xy, c, poly_arg_none());
+}
+
+static int cmp_i64(int64_t a, int64_t b) {
+  return (a > b) - (a < b);
+}
+
+static int cmp_u16(uint16_t a, uint16_t b) {
+  return (a > b) - (a < b);
+}
+
+static int cmp_bool(bool a, bool b) {
+  return (a > b) - (a < b);
+}
+
+static int cmp_cstr(const char *a, const char *b) {
+  if (a == b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  return strcmp(a, b);
+}
+
+static int dtype_tuplize_cmp(PolyDType a, PolyDType b) {
+  if (poly_dtype_eq(a, b)) return 0;
+  int ret;
+  if ((ret = cmp_i64(a.priority, b.priority))) return ret;
+  if ((ret = cmp_u16(a.bitsize, b.bitsize))) return ret;
+  if ((ret = cmp_u16(a.count, b.count))) return ret;
+  if ((ret = cmp_bool(a.is_ptr, b.is_ptr))) return ret;
+  if ((ret = cmp_i64(a.addrspace, b.addrspace))) return ret;
+  if ((ret = cmp_u16(a.vcount, b.vcount))) return ret;
+  if ((ret = cmp_i64(a.ptr_size, b.ptr_size))) return ret;
+  return cmp_cstr(a.name, b.name);
+}
+
+static int arg_int_tuple_cmp(const int64_t *a, int an, const int64_t *b, int bn) {
+  int n = an < bn ? an : bn;
+  for (int i = 0; i < n; i++) {
+    int ret = cmp_i64(a[i], b[i]);
+    if (ret) return ret;
+  }
+  return (an > bn) - (an < bn);
+}
+
+static int arg_pair_tuple_cmp(int64_t (*a)[2], int an, int64_t (*b)[2], int bn) {
+  int n = an < bn ? an : bn;
+  for (int i = 0; i < n; i++) {
+    int ret = cmp_i64(a[i][0], b[i][0]);
+    if (ret) return ret;
+    ret = cmp_i64(a[i][1], b[i][1]);
+    if (ret) return ret;
+  }
+  return (an > bn) - (an < bn);
+}
+
+static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
+  if (poly_arg_eq(a, b)) return 0;
+  if (a.kind != b.kind) return (a.kind > b.kind) - (a.kind < b.kind);
+  switch (a.kind) {
+  case POLY_ARG_NONE:
+  case POLY_ARG_INVALID:
+    return 0;
+  case POLY_ARG_INT:
+    return cmp_i64(a.i, b.i);
+  case POLY_ARG_FLOAT: {
+    uint64_t av, bv;
+    memcpy(&av, &a.f, sizeof(av));
+    memcpy(&bv, &b.f, sizeof(bv));
+    return (av > bv) - (av < bv);
+  }
+  case POLY_ARG_BOOL:
+    return cmp_bool(a.b, b.b);
+  case POLY_ARG_INT_TUPLE:
+    return arg_int_tuple_cmp(a.int_tuple.vals, a.int_tuple.n, b.int_tuple.vals, b.int_tuple.n);
+  case POLY_ARG_PAIR_TUPLE:
+    return arg_pair_tuple_cmp(a.pair_tuple.pairs, a.pair_tuple.n, b.pair_tuple.pairs, b.pair_tuple.n);
+  case POLY_ARG_STRING:
+    return cmp_cstr(a.str, b.str);
+  case POLY_ARG_OPS:
+    return cmp_i64((int64_t)a.ops, (int64_t)b.ops);
+  case POLY_ARG_REDUCE_AXIS: {
+    int ret = cmp_i64((int64_t)a.reduce_axis.op, (int64_t)b.reduce_axis.op);
+    if (ret) return ret;
+    return arg_int_tuple_cmp(
+        a.reduce_axis.axes, a.reduce_axis.n, b.reduce_axis.axes, b.reduce_axis.n
+    );
+  }
+  case POLY_ARG_RANGE: {
+    int ret = cmp_i64(a.range.axis_id, b.range.axis_id);
+    if (ret) return ret;
+    ret = cmp_i64((int64_t)a.range.axis_type, (int64_t)b.range.axis_type);
+    if (ret) return ret;
+    return arg_int_tuple_cmp(a.range.extra, a.range.n_extra, b.range.extra, b.range.n_extra);
+  }
+  case POLY_ARG_DEFINE_VAR: {
+    int ret = cmp_cstr(a.define_var.name, b.define_var.name);
+    if (ret) return ret;
+    ret = cmp_i64(a.define_var.min_val, b.define_var.min_val);
+    if (ret) return ret;
+    return cmp_i64(a.define_var.max_val, b.define_var.max_val);
+  }
+  case POLY_ARG_BUFFERIZE_OPTS: {
+    int ret = cmp_i64(a.bufferize_opts.device, b.bufferize_opts.device);
+    if (ret) return ret;
+    ret = cmp_i64((int64_t)a.bufferize_opts.addrspace, (int64_t)b.bufferize_opts.addrspace);
+    if (ret) return ret;
+    return cmp_bool(a.bufferize_opts.removable, b.bufferize_opts.removable);
+  }
+  }
+  return 0;
+}
+
+static int uop_tuplize_cmp(PolyUOp *a, PolyUOp *b) {
+  if (a == b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+
+  /* Port of tinygrad UOp.tuplize tuple comparison:
+   *   (op.value, arg, dtype) + tuple(src.tuplize for src in src)
+   * This is used only by the weak-index commutative rule below, so it stays
+   * local to symbolic rewriting instead of becoming a general identity rule. */
+  int ret = cmp_i64((int64_t)a->op, (int64_t)b->op);
+  if (ret) return ret;
+  ret = arg_tuplize_cmp(a->arg, b->arg);
+  if (ret) return ret;
+  ret = dtype_tuplize_cmp(a->dtype, b->dtype);
+  if (ret) return ret;
+
+  int n = a->n_src < b->n_src ? a->n_src : b->n_src;
+  for (int i = 0; i < n; i++) {
+    ret = uop_tuplize_cmp(a->src[i], b->src[i]);
+    if (ret) return ret;
+  }
+  return (a->n_src > b->n_src) - (a->n_src < b->n_src);
+}
+
+/* tinygrad symbolic.py:
+ *   UPat(GroupOp.Commutative, dtype=dtypes.weakint)
+ *     -> reverse srcs if src[1].tuplize < src[0].tuplize
+ *
+ * Polygrad's weak index dtype is POLY_INDEX. Keep the rule scoped there; doing
+ * this for ordinary numeric ALU can disturb vector math merging, matching the
+ * warning in tinygrad's own comment. */
+static PolyUOp *rule_commutative_index_tuplize_order(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!root || root->n_src != 2) return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(root->dtype), POLY_INDEX)) return NULL;
+  if (!poly_opset_has(POLY_GROUP_COMMUTATIVE, root->op)) return NULL;
+  if (uop_tuplize_cmp(root->src[1], root->src[0]) >= 0) return NULL;
+  return poly_uop2(ctx, root->op, root->dtype, root->src[1], root->src[0], root->arg);
+}
+
+static int64_t uop_const_factor(PolyUOp *u);
+
+static bool is_flat_index_term_uop(PolyUOp *u) {
+  if (!u) return false;
+  if (u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL || u->op == POLY_OP_DEFINE_VAR)
+    return true;
+  if ((u->op == POLY_OP_MUL || u->op == POLY_OP_SHL) && u->n_src == 2)
+    return is_flat_index_term_uop(u->src[0]) || is_flat_index_term_uop(u->src[1]);
+  return false;
+}
+
+/* tinygrad's reshape/indexing path simplifies weakint flat indexes at movement
+ * construction time. Polygrad represents these as POLY_INDEX, so keep the
+ * canonical innermost-first grouping scoped to integer index-like ADD chains. */
+static PolyUOp *rule_flat_index_outer_term_to_end(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_ADD || root->n_src != 2) return NULL;
+  if (!poly_dtype_is_int(root->dtype) || poly_dtype_is_bool(root->dtype)) return NULL;
+
+  PolyUOp *inner = root->src[0];
+  PolyUOp *last = root->src[1];
+  if (!inner || inner->op != POLY_OP_ADD || inner->n_src != 2) return NULL;
+  if (!is_flat_index_term_uop(inner->src[0]) || !is_flat_index_term_uop(inner->src[1]) ||
+      !is_flat_index_term_uop(last))
+    return NULL;
+
+  int64_t outer_factor = uop_const_factor(inner->src[0]);
+  int64_t middle_factor = uop_const_factor(inner->src[1]);
+  int64_t last_factor = uop_const_factor(last);
+  if (!(outer_factor > middle_factor && middle_factor >= last_factor)) return NULL;
+
+  PolyUOp *new_inner =
+      poly_uop2(ctx, POLY_OP_ADD, root->dtype, inner->src[1], last, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_inner, inner->src[0], poly_arg_none());
 }
 
 /* fold_divmod helpers (port of tinygrad divandmod.py) */
@@ -1807,9 +2056,16 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
 PolyPatternMatcher *poly_symbolic(void) {
   if (g_symbolic) return g_symbolic;
   PolyRule rules[] = {
+      {poly_pat_ops2(POLY_GROUP_COMMUTATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "x"),
+       rule_commutative_index_tuplize_order},
+      {poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), "cast"),
+       rule_cast_index_add_const_to_add_casts},
       {poly_pat_ops2(POLY_GROUP_ASSOCIATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "alu"),
        rule_assoc_fold_consts},
       {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_const_mul_over_add},
+      {poly_pat_op(POLY_OP_ADD, NULL, 0, "add"), rule_move_const_to_end},
+      {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_move_const_to_end},
+      {poly_pat_op(POLY_OP_ADD, NULL, 0, "add"), rule_flat_index_outer_term_to_end},
   };
   PolyPatternMatcher *extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   g_symbolic = poly_pm_concat(poly_symbolic_simple(), extra);

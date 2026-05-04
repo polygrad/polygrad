@@ -22,10 +22,18 @@
 
 static int poly_buffer_id = 0;
 
-PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size) {
+PolyUOp *poly_buffer_on_device(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size, PolyDevice device) {
   int id = poly_buffer_id++;
   PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(id));
-  return poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(size));
+  if (device == POLY_DEVICE_AUTO) return poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(size));
+
+  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *src[2] = {unique, dev};
+  return poly_uop(ctx, POLY_OP_BUFFER, scalar_dtype, src, 2, poly_arg_int(size));
+}
+
+PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size) {
+  return poly_buffer_on_device(ctx, scalar_dtype, size, POLY_DEVICE_AUTO);
 }
 
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {

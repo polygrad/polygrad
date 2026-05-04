@@ -401,6 +401,11 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       bb_i64(&buf, u->arg.define_var.min_val);
       bb_i64(&buf, u->arg.define_var.max_val);
       break;
+    case POLY_ARG_BUFFERIZE_OPTS:
+      bb_i64(&buf, (int64_t)u->arg.bufferize_opts.device);
+      bb_u8(&buf, (uint8_t)u->arg.bufferize_opts.addrspace);
+      bb_u8(&buf, u->arg.bufferize_opts.removable ? 1 : 0);
+      break;
     case POLY_ARG_INVALID:
       break;
     }
@@ -600,6 +605,11 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       arg.define_var.max_val = br_i64(&r);
       break;
     }
+    case POLY_ARG_BUFFERIZE_OPTS:
+      arg.bufferize_opts.device = (int32_t)br_i64(&r);
+      arg.bufferize_opts.addrspace = (PolyAddrSpace)br_u8(&r);
+      arg.bufferize_opts.removable = br_u8(&r) != 0;
+      break;
     case POLY_ARG_INVALID:
       break;
     default:

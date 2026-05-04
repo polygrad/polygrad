@@ -342,7 +342,11 @@ class TestDevice:
 
         c = b.to('cpu')
         assert c.device == 'CPU'
-        np.testing.assert_allclose(c.numpy(), [2.0, 3.0, 4.0])
+        if Device.cuda_available():
+            np.testing.assert_allclose(c.numpy(), [2.0, 3.0, 4.0])
+        else:
+            with pytest.raises(RuntimeError, match='poly_realize_tensors'):
+                c.numpy()
 
     def test_to_cuda_runtime_behavior(self):
         a = Tensor([1.0, 2.0, 3.0])
@@ -352,6 +356,25 @@ class TestDevice:
         else:
             with pytest.raises(RuntimeError, match='CUDA'):
                 b.numpy()
+
+    def test_assign_rejects_device_mismatch_like_tinygrad(self):
+        a = Tensor([1.0], device='cpu')
+        v = Tensor([5.0], device='cpu').to('cuda')
+        with pytest.raises(RuntimeError, match='assign device mismatch CPU != CUDA'):
+            a.assign(v)
+
+    def test_assign_rejects_dtype_mismatch_like_tinygrad(self):
+        a = Tensor([1.0], dtype='float32')
+        v = Tensor([5.0], dtype='float64')
+        with pytest.raises(RuntimeError, match='assign dtype mismatch float32 != float64'):
+            a.assign(v)
+
+    def test_assign_to_same_device_place_keeps_place_target(self):
+        a = Tensor([1.0], device='cpu').to('cuda')
+        v = Tensor([5.0], device='cpu').to('cuda')
+        assert a.assign(v) is a
+        assert a.device == 'CUDA'
+        assert not a.uop.has_buffer_identity()
 
 
 class TestRepr:
@@ -487,3 +510,92 @@ class TestFloat64:
         a = Tensor([1.0, 2.0])
         assert a.dtype == 'float32'
         assert a.numpy().dtype == np.float32
+
+
+class TestMaterializationParity:
+    def test_realize_retargets_live_tensors_sharing_lazy_uop(self):
+        a = Tensor([1.0]).realize()
+        x1 = a + 1
+        x2 = a + 1
+        assert x1.uop == x2.uop
+
+        x1.realize()
+
+        assert x1.uop == x2.uop
+        assert x1.uop.buffer == x2.uop.buffer
+        np.testing.assert_allclose(x2.numpy(), [2.0])
+
+    def test_realize_rewrites_downstream_live_graph_to_snapshot(self):
+        a = Tensor([1.0]).realize()
+        x = a + 1
+        y = x + 2
+
+        x.realize()
+        a.assign(Tensor([10.0])).realize()
+
+        np.testing.assert_allclose(x.numpy(), [2.0])
+        np.testing.assert_allclose(y.numpy(), [4.0])
+
+    def test_separate_realizes_do_not_alias_assign(self):
+        a = Tensor([1.0]).realize()
+        y1 = (a + 1).realize()
+        y2 = (a + 1).realize()
+
+        assert y1.uop.buffer != y2.uop.buffer
+
+        y2.assign(Tensor([5.0])).realize()
+        np.testing.assert_allclose(y1.numpy(), [2.0])
+        np.testing.assert_allclose(y2.numpy(), [5.0])
+
+    def test_assign_realized_targets_reuse_current_buffer(self):
+        a = Tensor([1.0]).realize()
+        a_buf = a.uop.buffer
+
+        # assign() follows tinygrad by creating an effect graph first; realizing
+        # that effect writes the existing target storage and returns to the same
+        # current buffer root.
+        a.assign(Tensor([5.0]))
+        assert not a.uop.has_buffer_identity()
+        a.realize()
+        assert a.uop.buffer == a_buf
+        np.testing.assert_allclose(a.numpy(), [5.0])
+
+        x = (Tensor([1.0]) + 1).realize()
+        x_buf = x.uop.buffer
+        x.assign(Tensor([9.0])).realize()
+        assert x.uop.buffer == x_buf
+        np.testing.assert_allclose(x.numpy(), [9.0])
+
+    def test_to_keeps_separate_realized_same_logical_occurrences(self):
+        a = Tensor([1.0]).realize()
+        x1 = (a + 1).realize()
+        x2 = (a + 1).realize()
+        assert x1.uop.buffer != x2.uop.buffer
+
+        # x1/x2 preserve the same exportable logical expression, but .to()
+        # must carry the occurrence-specific realized source into placement.
+        x1_cuda = x1.to('cuda')
+        x2_cuda = x2.to('cuda')
+        assert x1_cuda.uop.buffer == x1.uop.buffer
+        assert x2_cuda.uop.buffer == x2.uop.buffer
+        assert x1_cuda.uop.buffer != x2_cuda.uop.buffer
+
+        y1 = x1_cuda + 1
+        y2 = x2_cuda + 1
+        assert y1.uop != y2.uop
+
+    def test_nested_to_keeps_realized_current_and_export_logical_separate(self):
+        x = (Tensor([1.0]) + 1).realize()
+        x_cuda = x.to('cuda')
+        x_cpu = x_cuda.to('cpu')
+
+        # Polygrad keeps .to() out of the portable logical graph, but the
+        # current/physical root must stay tied to the realized buffer selected
+        # by this tensor occurrence so later ops can physicalize the copy chain.
+        assert x_cpu.uop == x.uop
+        assert x_cpu.uop_physical == x.uop
+        assert x_cpu.uop_logical == x.uop_logical
+
+        y = x_cpu + 1
+        assert y.device == 'CPU'
+        assert y.uop != x_cpu.uop

@@ -4,7 +4,7 @@ const polygrad = require('..')
 const { runTests } = require('./test_shared')
 const { runInstanceTests } = require('./test_instance_shared')
 
-polygrad.create({ target: 'native' }).then(pg =>
+polygrad.create({ core: 'native' }).then(pg =>
   runTests(pg).then(async tensorResult => {
     const instanceResult = await runInstanceTests(pg)
     const failed = tensorResult.failed + instanceResult.failed

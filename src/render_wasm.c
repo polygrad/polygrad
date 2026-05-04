@@ -266,12 +266,68 @@ static int dt_bucket(PolyDType dt) {
 
 /* Element size in bytes for buffer data */
 static int dt_elem_size(PolyDType dt) {
-  return dt.bitsize <= 32 ? 4 : 8;
+  PolyDType base = poly_dtype_scalar(dt);
+  int sz = poly_dtype_itemsize(base);
+  return sz > 0 ? sz : 4;
 }
 
 /* Log2 alignment for WASM load/store */
 static int dt_align_log2(PolyDType dt) {
-  return dt.bitsize <= 32 ? 2 : 3;
+  int sz = dt_elem_size(dt);
+  return sz >= 8 ? 3 : sz >= 4 ? 2 : sz >= 2 ? 1 : 0;
+}
+
+static void emit_local_get_as_i32(WasmBuf *body, int local, PolyDType dt) {
+  wb_byte(body, WASM_OP_LOCAL_GET);
+  wb_uleb128(body, local);
+  /* Polygrad follows tinygrad's late index lowering, where sparse gather
+   * labels can remain int64 in address expressions. This renderer targets
+   * wasm32 linear memory, so memory addresses must be i32 stack values. */
+  if (!poly_dtype_is_float(dt) && dt.bitsize == 64) wb_byte(body, WASM_OP_I32_WRAP_I64);
+}
+
+static void emit_scalar_load_opcode(WasmBuf *body, PolyDType dt) {
+  if (dt_is_f64(dt)) {
+    wb_byte(body, WASM_OP_F64_LOAD);
+  } else if (poly_dtype_is_float(dt)) {
+    wb_byte(body, WASM_OP_F32_LOAD);
+  } else if (dt_is_i64(dt)) {
+    wb_byte(body, WASM_OP_I64_LOAD);
+  } else {
+    /* WASM locals are i32 for <=32-bit integers, but memory width must match
+     * the buffer dtype. This is required for uint8/int16 tensors and mirrors C
+     * load semantics instead of widening every buffer element to four bytes. */
+    int sz = dt_elem_size(dt);
+    bool is_u = poly_dtype_is_unsigned(dt) || poly_dtype_is_bool(dt);
+    if (sz <= 1)
+      wb_byte(body, is_u ? WASM_OP_I32_LOAD8_U : WASM_OP_I32_LOAD8_S);
+    else if (sz == 2)
+      wb_byte(body, is_u ? WASM_OP_I32_LOAD16_U : WASM_OP_I32_LOAD16_S);
+    else
+      wb_byte(body, WASM_OP_I32_LOAD);
+  }
+  wb_uleb128(body, dt_align_log2(dt));
+  wb_uleb128(body, 0);
+}
+
+static void emit_scalar_store_opcode(WasmBuf *body, PolyDType dt) {
+  if (dt_is_f64(dt)) {
+    wb_byte(body, WASM_OP_F64_STORE);
+  } else if (poly_dtype_is_float(dt)) {
+    wb_byte(body, WASM_OP_F32_STORE);
+  } else if (dt_is_i64(dt)) {
+    wb_byte(body, WASM_OP_I64_STORE);
+  } else {
+    int sz = dt_elem_size(dt);
+    if (sz <= 1)
+      wb_byte(body, WASM_OP_I32_STORE8);
+    else if (sz == 2)
+      wb_byte(body, WASM_OP_I32_STORE16);
+    else
+      wb_byte(body, WASM_OP_I32_STORE);
+  }
+  wb_uleb128(body, dt_align_log2(dt));
+  wb_uleb128(body, 0);
 }
 
 /* Emit scalar ALU opcode */
@@ -768,8 +824,7 @@ static void build_code_scalar(
 
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, base);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, idx);
+        emit_local_get_as_i32(&body, idx, u->src[1]->dtype);
         wb_byte(&body, WASM_OP_I32_CONST);
         wb_sleb128(&body, elem_size);
         wb_byte(&body, WASM_OP_I32_MUL);
@@ -865,15 +920,7 @@ static void build_code_scalar(
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, addr);
 
-        /* Pick load opcode by dtype */
-        if (dt_is_f64(u->dtype))
-          wb_byte(&body, WASM_OP_F64_LOAD);
-        else if (poly_dtype_is_float(u->dtype))
-          wb_byte(&body, WASM_OP_F32_LOAD);
-        else
-          wb_byte(&body, WASM_OP_I32_LOAD);
-        wb_uleb128(&body, dt_align_log2(u->dtype));
-        wb_uleb128(&body, 0);
+        emit_scalar_load_opcode(&body, u->dtype);
 
         if (gated) {
           wb_byte(&body, WASM_OP_ELSE);
@@ -944,18 +991,8 @@ static void build_code_scalar(
           wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
         }
 
-        /* Pick store opcode */
-        if (buf_is_f64) {
-          wb_byte(&body, WASM_OP_F64_STORE);
-          wb_uleb128(&body, 3); /* align: 2^3 = 8 bytes */
-        } else if (buf_is_float || val_is_float) {
-          wb_byte(&body, WASM_OP_F32_STORE);
-          wb_uleb128(&body, 2); /* align: 2^2 = 4 bytes */
-        } else {
-          wb_byte(&body, WASM_OP_I32_STORE);
-          wb_uleb128(&body, 2);
-        }
-        wb_uleb128(&body, 0); /* offset */
+        PolyDType buf_dt = u->src[0]->dtype.is_ptr ? u->src[0]->dtype : val_dt;
+        emit_scalar_store_opcode(&body, buf_dt);
       }
       continue;
     }
@@ -1360,8 +1397,7 @@ static void build_code_simd(
 
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, base);
-      wb_byte(&body, WASM_OP_LOCAL_GET);
-      wb_uleb128(&body, idx);
+      emit_local_get_as_i32(&body, idx, u->src[1]->dtype);
       wb_byte(&body, WASM_OP_I32_CONST);
       wb_sleb128(&body, 16); /* v128 = 16 bytes (f32x4: 4×4, f64x2: 2×8) */
       wb_byte(&body, WASM_OP_I32_MUL);
@@ -1488,9 +1524,7 @@ static void build_code_simd(
 
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, addr);
-      wb_byte(&body, is_f64_kernel ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD);
-      wb_uleb128(&body, is_f64_kernel ? 3 : 2); /* align */
-      wb_uleb128(&body, 0);
+      emit_scalar_load_opcode(&body, u->dtype);
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, local_idx);
       lm_set(&locals, u, local_idx);
@@ -1533,15 +1567,8 @@ static void build_code_simd(
         else
           wb_byte(&body, WASM_OP_F32_CONVERT_I32_S);
       }
-      if (buf_f64) {
-        wb_byte(&body, WASM_OP_F64_STORE);
-        wb_uleb128(&body, 3); /* align: 2^3 = 8 */
-      } else {
-        bool store_float = poly_dtype_is_float(u->src[1]->dtype) || buf_float;
-        wb_byte(&body, store_float ? WASM_OP_F32_STORE : WASM_OP_I32_STORE);
-        wb_uleb128(&body, 2);
-      }
-      wb_uleb128(&body, 0);
+      PolyDType buf_dt = u->src[0]->dtype.is_ptr ? u->src[0]->dtype : u->src[1]->dtype;
+      emit_scalar_store_opcode(&body, buf_dt);
     }
   }
 
@@ -1623,7 +1650,14 @@ PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 }
 
 PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  bool opt = wasm_env_true("POLY_OPTIMIZE");
+  /* Browser/Node WASM often runs without a normal POSIX environment, so the
+   * runtime path must default to the same optimized pipeline as
+   * poly_linearize_wasm(). That pipeline lowers Invalid-carrying pad/triu
+   * indexes into gated loads; leaving it off turns invalid indexes into
+   * address 0 in the renderer. */
+  bool opt = true;
+  const char *ov = getenv("POLY_OPTIMIZE");
+  if (ov && ov[0] != '\0') opt = wasm_env_true("POLY_OPTIMIZE");
   const char *dev = getenv("POLY_DEVECTORIZE");
   int devec = dev && dev[0] != '\0' ? atoi(dev) : (opt ? 1 : 0);
   int beam = 0;

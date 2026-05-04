@@ -12,7 +12,7 @@
 /* priority, bitsize, name, fmt, count, is_ptr, addrspace, vcount, ptr_size */
 
 const PolyDType POLY_VOID = {-1, 0, "void", 0, 1, false, 0, 0, 0};
-const PolyDType POLY_INDEX = {-1, 800, "index", 0, 1, false, 0, 0, 0};
+const PolyDType POLY_INDEX = {0, 800, "weakint", 0, 1, false, 0, 0, 0};
 const PolyDType POLY_BOOL = {0, 1, "bool", '?', 1, false, 0, 0, 0};
 const PolyDType POLY_INT8 = {1, 8, "signed char", 'b', 1, false, 0, 0, 0};
 const PolyDType POLY_UINT8 = {2, 8, "unsigned char", 'B', 1, false, 0, 0, 0};

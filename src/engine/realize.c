@@ -1,9 +1,5 @@
 /* realize.c -- graph-driven realize: reads buffers from ctx->buffers
- * side table (managed via device.h), no external bindings needed.
- *
- * This is the tensor-style realize path. The explicit bindings API lives in
- * frontend.c as poly_realize_with_bindings(...).
- */
+ * side table (managed via device.h), no external bindings needed. */
 
 #include "engine/realize.h"
 #include "device.h"
@@ -66,15 +62,23 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
   return view;
 }
 
-static PolyUOp *poly_transform_to_call_alloc_buffer(PolyCtx *ctx, PolyDType dtype, PolyShape shape) {
+static PolyUOp *poly_transform_to_call_alloc_buffer_on_device(
+    PolyCtx *ctx, PolyDType dtype, PolyShape shape, PolyDevice device
+) {
   int64_t numel = (shape.ndim >= 0) ? poly_shape_numel(shape) : 1;
   if (numel < 1) numel = 1;
 
-  PolyUOp *buf = poly_buffer(ctx, poly_dtype_scalar(dtype), numel);
-  PolyDevice out_dev = poly_ctx_get_preferred_device(ctx);
+  PolyDevice out_dev = device;
   if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_device_default();
+  PolyUOp *buf = poly_buffer_on_device(ctx, poly_dtype_scalar(dtype), numel, out_dev);
   if (!buf || poly_buffer_allocate(ctx, buf, out_dev) != 0) return NULL;
   return buf;
+}
+
+static PolyUOp *poly_transform_to_call_alloc_buffer(PolyCtx *ctx, PolyDType dtype, PolyShape shape) {
+  PolyDevice out_dev = poly_ctx_get_preferred_device(ctx);
+  if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_device_default();
+  return poly_transform_to_call_alloc_buffer_on_device(ctx, dtype, shape, out_dev);
 }
 
 static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, PolyUOp *store) {
@@ -82,6 +86,22 @@ static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, Po
   if (tctx->n_stores >= tctx->stores_cap) return false;
   tctx->stores[tctx->n_stores++] = store;
   return true;
+}
+
+static bool poly_transform_to_call_after_store_assign(
+    PolyUOp *u, PolyUOp **out_target, PolyUOp **out_store
+) {
+  if (!u || u->op != POLY_OP_AFTER || u->n_src < 2 || !u->src[0]) return false;
+  PolyUOp *target = u->src[0];
+  for (int i = 1; i < u->n_src; i++) {
+    PolyUOp *store = u->src[i];
+    if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
+    if (store->src[0] != target) continue;
+    if (out_target) *out_target = target;
+    if (out_store) *out_store = store;
+    return true;
+  }
+  return false;
 }
 
 static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
@@ -233,6 +253,24 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
       continue;
     }
 
+    /* Tensor.assign follows tinygrad and builds AFTER(target, STORE(target,
+     * value)). Real storage targets run the STORE in-place. Non-storage
+     * targets are temporary values, so assignment materializes the stored value
+     * instead of inventing a write into an expression such as COPY(...). */
+    PolyUOp *assign_target = NULL;
+    PolyUOp *assign_store = NULL;
+    if (poly_transform_to_call_after_store_assign(u, &assign_target, &assign_store)) {
+      if (poly_uop_has_buffer_identity(assign_target)) {
+        if (!poly_transform_to_call_append_store(&tctx, assign_store)) {
+          free(stores);
+          return NULL;
+        }
+        out_uops[i] = assign_target;
+        continue;
+      }
+      u = assign_store->src[1];
+    }
+
     /* ASSIGN already writes to its target buffer, so keep it as the batched
      * store boundary and report the target buffer as the realized result. */
     if (u->op == POLY_OP_ASSIGN && u->n_src >= 1) {
@@ -268,7 +306,9 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
        * scheduling an extra copy kernel for CONTIGUOUS itself. */
       materialized = materialized->src[0];
     }
-    PolyUOp *buf = poly_transform_to_call_alloc_buffer(ctx, u->dtype, root_shape);
+    PolyDevice out_dev = poly_uop_device(materialized);
+    if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_uop_device(u);
+    PolyUOp *buf = poly_transform_to_call_alloc_buffer_on_device(ctx, u->dtype, root_shape, out_dev);
     if (!buf) {
       fprintf(stderr, "poly_realize: buffer allocate failed\n");
       free(stores);
@@ -292,12 +332,28 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
   return poly_transform_to_call_wrap_call(ctx, sink_body);
 }
 
-/* C-side analogue of tinygrad's Tensor.schedule_with_vars: normalize the
- * requested top-level values into one realizable SINK and return the schedule.
- * The actual execution still happens in poly_realize below. */
+static PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink) {
+  if (!ctx || !sink || sink->op != POLY_OP_SINK) {
+    fprintf(stderr, "poly_realize: expected effect SINK\n");
+    return NULL;
+  }
+
+  /* This is the schedule-ready layer. Callers reaching this point already
+   * own an effect sink; tensor values must be normalized by transform_to_call
+   * before using this helper. */
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!sched) fprintf(stderr, "poly_realize: scheduling failed\n");
+  return sched;
+}
+
+/* C-side analogue of tinygrad's Tensor.schedule_with_vars: normalize requested
+ * top-level value UOps into one effect SINK and return its schedule. */
 PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
   if (n == 0) return NULL;
+
+  /* Only tensor value roots belong on this path. Already-effectful SINKs used
+   * by instance/imported graphs run through poly_realize_sink directly. */
   PolyUOp *big_call = poly_transform_to_call(ctx, uops, n, out_uops);
   if (!big_call) return NULL;
 
@@ -310,15 +366,19 @@ PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyU
     sched_sink = big_call->src[0];
   }
 
-  /* complete_create_schedule_with_vars strips BIND internally and stores the
-   * default vars on the schedule so poly_run_schedule only needs runtime
-   * overrides. */
-  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sched_sink, POLY_MODE_CALL);
-  if (!sched) fprintf(stderr, "poly_realize: scheduling failed\n");
+  PolySchedule *sched = poly_schedule_effect_sink(ctx, sched_sink);
   return sched;
 }
 
-int poly_realize(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
+int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink) {
+  PolySchedule *sched = poly_schedule_effect_sink(ctx, sink);
+  if (!sched) return -1;
+  int ret = poly_run_schedule(ctx, sched, NULL, 0);
+  poly_schedule_free(sched);
+  return ret;
+}
+
+int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (!ctx || !uops || !out_uops || n < 0) return -1;
   if (n == 0) return 0;
 
@@ -336,4 +396,46 @@ int poly_realize(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   int ret = poly_run_schedule(ctx, sched, NULL, 0);
   poly_schedule_free(sched);
   return ret;
+}
+
+int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs) {
+  if (!ctx || !inputs || !outputs || n < 0) return -1;
+  if (n == 0) return 0;
+  PolyUOp **physical = calloc((size_t)n, sizeof(PolyUOp *));
+  PolyUOp **out_uops = calloc((size_t)n, sizeof(PolyUOp *));
+  if (!physical) return -1;
+  if (!out_uops) {
+    free(physical);
+    return -1;
+  }
+
+  for (int i = 0; i < n; i++) {
+    outputs[i] = NULL;
+    physical[i] = poly_tensor_physicalize(ctx, inputs[i]);
+    if (!physical[i]) {
+      free(physical);
+      free(out_uops);
+      return -1;
+    }
+  }
+
+  int rc = poly_realize_uops(ctx, physical, n, out_uops);
+  if (rc == 0) {
+    for (int i = 0; i < n; i++) {
+      if (!inputs[i] || !out_uops[i]) continue;
+      PolyDevice device = poly_uop_device(out_uops[i]);
+      if (device == POLY_DEVICE_AUTO) device = inputs[i]->device;
+      if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
+      if (device == POLY_DEVICE_AUTO) device = poly_device_default();
+      if (poly_tensor_update(ctx, inputs[i], NULL, out_uops[i], POLY_TENSOR_VALUE, device) != 0) {
+        rc = -1;
+        continue;
+      }
+      outputs[i] = inputs[i];
+    }
+  }
+
+  free(out_uops);
+  free(physical);
+  return rc;
 }

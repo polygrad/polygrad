@@ -7,17 +7,10 @@ from ..tensor import Tensor
 def _mark_param(t):
     """Mark a tensor as a model parameter.
 
-    Parameters should behave like tinygrad leaves after their initialization
-    graph has been realized: keep the realized buffer identity, but drop the
-    init-time Python graph history so backward starts from the current model
-    state rather than the random initializer trace.
+    Parameters should behave like tinygrad leaves after their initializer has
+    been realized: backward sees the current UOp/buffer from all_tensors.
     """
     t._is_param = True
-    if t._buf_uop is None:
-        t._buf_uop = t.uop.buffer or t.uop
-    t._inputs = []
-    t._saved_uop = None
-    t._saved_inputs = None
     return t
 
 
@@ -95,7 +88,9 @@ class GroupNorm:
         x = x.reshape(N, G, C // G, *shape[2:])
         # Normalize over all dims after G using flattened tail.
         flat = x.reshape(N, G, -1)
-        m = flat.mean(axis=-1, keepdim=True).realize()
+        # Normalization statistics are graph nodes. Realizing them here makes
+        # GroupNorm a hidden materialization boundary unlike tinygrad.
+        m = flat.mean(axis=-1, keepdim=True)
         v = flat.var(axis=-1, keepdim=True, correction=0)
         flat = (flat - m) / (v + self.eps).sqrt()
         result = flat.reshape(*shape)
@@ -115,7 +110,9 @@ class RMSNorm:
         _mark_param(self.weight)
 
     def __call__(self, x):
-        rms = (x * x).mean(axis=-1, keepdim=True).realize()
+        # RMSNorm should stay lazy until the user/backend materializes the
+        # enclosing graph; the previous realize cut gradients through x.
+        rms = (x * x).mean(axis=-1, keepdim=True)
         x_norm = x / (rms + self.eps).sqrt()
         return x_norm * self.weight
 

@@ -29,6 +29,11 @@ static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
 
 #define poly_get_kernel_graph(ctx, sink) single_scheduled_root((ctx), (sink))
 
+static PolyBuffer *test_realized_buffer(PolyCtx *ctx, PolyUOp *realized) {
+  const PolyUOp *buf_uop = poly_uop_get_buffer_identity(realized);
+  return buf_uop ? poly_buffer_get(ctx, (PolyUOp *)buf_uop) : NULL;
+}
+
 /* Count ops of a given type in a linearized graph */
 static int count_ops(PolyUOp **lin, int n, PolyOps op) {
   int count = 0;
@@ -53,7 +58,8 @@ static int count_param_index_ptrs(PolyCtx *ctx, PolyUOp *root, bool is_ptr) {
   int count = 0;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
-    if (!u || u->op != POLY_OP_INDEX || u->n_src < 1 || !u->src[0] || u->src[0]->op != POLY_OP_PARAM)
+    if (!u || u->op != POLY_OP_INDEX || u->n_src < 1 || !u->src[0] ||
+        u->src[0]->op != POLY_OP_PARAM)
       continue;
     if ((bool)u->dtype.is_ptr == is_ptr) count++;
   }
@@ -159,11 +165,132 @@ TEST(sched, direct_sink_copy_uses_copy_exec_item) {
   ASSERT_NOT_NULL(sched);
   ASSERT_INT_EQ(sched->n_items, 1);
   ASSERT_EQ(sched->items[0].kind, POLY_EXEC_COPY);
+  ASSERT_TRUE(sched->items[0].root->op != POLY_OP_SINK);
+  ASSERT_TRUE(sched->items[0].root->op != POLY_OP_STORE);
 
-  PolyBufferBinding bindings[] = {POLY_BIND_HOST(dst, dst_d), POLY_BIND_HOST(src, src_d)};
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
+  poly_buffer_set(ctx, dst, dst_d, sizeof(dst_d), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, src, src_d, sizeof(src_d), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(dst_d[i], src_d[i], 1e-6);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sched, realize_uops_reads_ctx_buffers) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+
+  float a_d[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_d[] = {10.0f, 20.0f, 30.0f, 40.0f};
+  poly_buffer_set(ctx, a, a_d, sizeof(a_d), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, b, b_d, sizeof(b_d), POLY_DEVICE_CPU);
+
+  PolyUOp *out_uop = NULL;
+  ASSERT_INT_EQ(poly_realize_uops(ctx, &add, 1, &out_uop), 0);
+  ASSERT_NOT_NULL(out_uop);
+  PolyBuffer *out_buf = test_realized_buffer(ctx, out_uop);
+  ASSERT_NOT_NULL(out_buf);
+  float *out = (float *)out_buf->ptr;
+  ASSERT_NOT_NULL(out);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], a_d[i] + b_d[i], 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sched, ctx_buffer_rebinding_overrides_previous_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+
+  float a_ctx[] = {100.0f, 100.0f, 100.0f, 100.0f};
+  float a_call[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_d[] = {10.0f, 20.0f, 30.0f, 40.0f};
+  poly_buffer_set(ctx, a, a_ctx, sizeof(a_ctx), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, b, b_d, sizeof(b_d), POLY_DEVICE_CPU);
+
+  poly_buffer_set(ctx, a, a_call, sizeof(a_call), POLY_DEVICE_CPU);
+
+  PolyUOp *out_uop = NULL;
+  ASSERT_INT_EQ(poly_realize_uops(ctx, &add, 1, &out_uop), 0);
+  ASSERT_NOT_NULL(out_uop);
+  PolyBuffer *out_buf = test_realized_buffer(ctx, out_uop);
+  ASSERT_NOT_NULL(out_buf);
+  float *out = (float *)out_buf->ptr;
+  ASSERT_NOT_NULL(out);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], a_call[i] + b_d[i], 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sched, placement_copy_item_uses_copy_root_and_two_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 3);
+  float *data = malloc(3 * sizeof(float));
+  ASSERT_NOT_NULL(data);
+  data[0] = 1.0f;
+  data[1] = 2.0f;
+  data[2] = 3.0f;
+  poly_buffer_set(ctx, a, data, 3 * sizeof(float), POLY_DEVICE_HOST);
+
+  PolyUOp *x = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
+  PolyTensor *tensor = poly_tensor_create(ctx, x, POLY_TENSOR_PLACE, POLY_DEVICE_CPU);
+  PolyUOp *physical = poly_tensor_physicalize(ctx, tensor);
+  ASSERT_NOT_NULL(physical);
+
+  PolyUOp *out = poly_buffer_on_device(ctx, POLY_FLOAT32, 3, POLY_DEVICE_CPU);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, physical));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->n_items, 2);
+  ASSERT_EQ(sched->items[0].kind, POLY_EXEC_COPY);
+  ASSERT_NOT_NULL(sched->items[0].root);
+  ASSERT_INT_EQ(sched->items[0].root->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(sched->items[0].n_buf_slots, 2);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sched, placement_scalar_copy_operand_splits_before_compute) {
+  PolyCtx *ctx = poly_ctx_new();
+  float x_data[1] = {5.0f};
+  float y_data[1] = {3.0f};
+
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *y = poly_buffer(ctx, POLY_FLOAT32, 1);
+  poly_buffer_set(ctx, x, x_data, sizeof(x_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, y, y_data, sizeof(y_data), POLY_DEVICE_HOST);
+
+  PolyTensor *yt = poly_tensor_create(ctx, y, POLY_TENSOR_PLACE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(yt);
+  PolyUOp *y_cpu = poly_tensor_physicalize(ctx, yt);
+  ASSERT_NOT_NULL(y_cpu);
+
+  PolyUOp *sub = poly_alu2(ctx, POLY_OP_SUB, x, y_cpu);
+  PolyUOp *out = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sub));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+
+  ASSERT_INT_EQ(sched->n_items, 2);
+  ASSERT_EQ(sched->items[0].kind, POLY_EXEC_COPY);
+  ASSERT_INT_EQ(sched->items[0].root->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(sched->items[0].n_buf_slots, 2);
+  ASSERT_EQ(sched->items[1].kind, POLY_EXEC_COMPUTE);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -871,7 +998,7 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, sum_scalar, c, poly_arg_none());
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, sum_scalar, e, poly_arg_none());
 
-  /* E2E check via poly_realize_with_bindings */
+  /* E2E check via poly_test_realize_buffer_views */
   float a_d[8], c_d[8], e_d[8];
   float c0[8], e0[8];
   float sumv = 0.0f;
@@ -1440,7 +1567,7 @@ TEST(sched, movement_alu_chain_e2e) {
   PASS();
 }
 
-/* poly_realize_with_bindings tests */
+/* poly_test_realize_buffer_views tests */
 
 #include "../src/frontend.h"
 
@@ -1461,10 +1588,10 @@ TEST(sched, realize_vecadd) {
     c_d[i] = 0;
   }
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a, a_d), POLY_BIND_HOST(b, b_d), POLY_BIND_HOST(c, c_d)
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, a_d), POLY_TEST_HOST_VIEW(b, b_d), POLY_TEST_HOST_VIEW(c, c_d)
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(c_d[i], a_d[i] + b_d[i], 1e-6);
@@ -1485,8 +1612,8 @@ TEST(sched, realize_reduce_sum) {
   float x_d[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float out_d[] = {0};
 
-  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, out_d)};
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  PolyTestBufferView bindings[] = {POLY_TEST_HOST_VIEW(x, x_d), POLY_TEST_HOST_VIEW(out, out_d)};
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_FLOAT_EQ(out_d[0], 36.0f, 1e-5);
 
@@ -1511,8 +1638,8 @@ TEST(sched, realize_grad_chain) {
   float x_d[] = {1, 2, 3, 4};
   float gx_d[] = {0, 0, 0, 0};
 
-  PolyBufferBinding bindings[] = {POLY_BIND_HOST(x, x_d), POLY_BIND_HOST(out, gx_d)};
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  PolyTestBufferView bindings[] = {POLY_TEST_HOST_VIEW(x, x_d), POLY_TEST_HOST_VIEW(out, gx_d)};
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(gx_d[i], 2.0f * x_d[i], 1e-5);

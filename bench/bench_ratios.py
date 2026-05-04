@@ -1,9 +1,13 @@
 #!/usr/bin/env python
-"""Relative benchmark: polygrad vs numpy/tinygrad/torch.
+"""Broad frontend ratio benchmark: polygrad vs numpy/tinygrad/torch.
 
 Reports speedup ratios (polygrad_time / baseline_time) that are stable across
 hardware. Outputs JSON to bench/results/<timestamp>.json and a human-readable
 table to stderr.
+
+This script is intentionally broad and includes NumPy/Torch/frontend overhead.
+Use bench/bench_tinygrad_parity.py for the tighter tinygrad_latest regression
+guard with matched input-reuse policy and fail-closed Polygrad library loading.
 
 Usage: python bench/bench_ratios.py [--no-tinygrad] [--no-torch]
 """

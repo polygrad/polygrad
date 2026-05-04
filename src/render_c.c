@@ -533,7 +533,7 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   return result;
 }
 
-/* Tuplize comparison (matches tinygrad's UOp.tuplize for TUPLE_ORDER) */
+/* Tuplize ranking (matches tinygrad's cached UOp.tuplize for TUPLE_ORDER). */
 
 static int arg_cmp(PolyArg a, PolyArg b) {
   /* Match Python's comparison semantics for tinygrad arg types.
@@ -585,101 +585,207 @@ static int dtype_lt_cmp(PolyDType a, PolyDType b) {
   return 0;
 }
 
-/* Precompute tuplize ranks for all UOps in toposort order (bottom-up).
- *
- * Reproduces tinygrad's @cached_property tuplize + Python sorted() semantics:
- *   tuplize = (op.value, arg, dtype) + tuple(src.tuplize for src in src)
- *
- * Each UOp gets a rank (int) such that rank ordering matches the lexicographic
- * order of tinygrad's tuplize tuples. Nodes with identical tuplize get the same
- * rank. The linearizer sort then uses ranks for O(1) comparison.
- *
- * Algorithm: for each node i (bottom-up), build a key = (op, arg, dtype,
- * src_rank_0, src_rank_1, ...). Sort nodes by key to assign ranks. Two nodes
- * with identical keys get the same rank. Since sources are processed first,
- * their ranks are available when processing consumers.
- *
- * Returns malloc'd array of n ranks (caller frees). */
 typedef struct {
-  int orig_idx; /* index in topo array */
-  int op;
-  PolyArg arg;
-  PolyDType dtype;
-  int src_ranks[8]; /* ranks of sources (max 8 for comparison; extras use 0) */
-  int n_src;
-} TuplizeKey;
+  uint64_t *keys;
+  int8_t *vals;
+  int cap;
+  int len;
+} TuplizePairMemo;
 
-static int tuplize_key_cmp(const void *ap, const void *bp) {
-  const TuplizeKey *a = (const TuplizeKey *)ap;
-  const TuplizeKey *b = (const TuplizeKey *)bp;
-  /* Lexicographic: op, arg, dtype, src_ranks... (matches tinygrad tuple order) */
-  if (a->op != b->op) return a->op < b->op ? -1 : 1;
-  int ac = arg_cmp(a->arg, b->arg);
-  if (ac != 0) return ac;
-  if (!poly_dtype_eq(a->dtype, b->dtype)) {
-    int dc = dtype_lt_cmp(a->dtype, b->dtype);
-    if (dc != 0) return dc;
-    return 0;
+static uint64_t tuplize_pair_key(int a, int b) {
+  return (((uint64_t)(uint32_t)a) << 32) | (uint32_t)b;
+}
+
+static uint64_t tuplize_pair_hash(uint64_t x) {
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+  return x;
+}
+
+static bool tuplize_pair_memo_init(TuplizePairMemo *m, int n) {
+  int cap = 1024;
+  while (cap < n * 4) cap <<= 1;
+  m->keys = calloc((size_t)cap, sizeof(uint64_t));
+  m->vals = calloc((size_t)cap, sizeof(int8_t));
+  if (!m->keys || !m->vals) {
+    free(m->keys);
+    free(m->vals);
+    memset(m, 0, sizeof(*m));
+    return false;
   }
-  int min_src = a->n_src < b->n_src ? a->n_src : b->n_src;
-  if (min_src > 8) min_src = 8;
-  for (int i = 0; i < min_src; i++) {
-    if (a->src_ranks[i] != b->src_ranks[i]) return a->src_ranks[i] < b->src_ranks[i] ? -1 : 1;
+  m->cap = cap;
+  m->len = 0;
+  return true;
+}
+
+static void tuplize_pair_memo_destroy(TuplizePairMemo *m) {
+  free(m->keys);
+  free(m->vals);
+  memset(m, 0, sizeof(*m));
+}
+
+static bool tuplize_pair_memo_get(TuplizePairMemo *m, uint64_t key, int *out) {
+  if (!m->cap) return false;
+  uint64_t stored = key + 1;
+  uint64_t mask = (uint64_t)m->cap - 1;
+  uint64_t pos = tuplize_pair_hash(stored) & mask;
+  while (m->keys[pos]) {
+    if (m->keys[pos] == stored) {
+      *out = (int)m->vals[pos];
+      return true;
+    }
+    pos = (pos + 1) & mask;
   }
-  return a->n_src < b->n_src ? -1 : (a->n_src > b->n_src ? 1 : 0);
+  return false;
+}
+
+static bool tuplize_pair_memo_grow(TuplizePairMemo *m) {
+  TuplizePairMemo nm = {0};
+  nm.cap = m->cap ? m->cap << 1 : 1024;
+  nm.keys = calloc((size_t)nm.cap, sizeof(uint64_t));
+  nm.vals = calloc((size_t)nm.cap, sizeof(int8_t));
+  if (!nm.keys || !nm.vals) {
+    free(nm.keys);
+    free(nm.vals);
+    return false;
+  }
+
+  for (int i = 0; i < m->cap; i++) {
+    if (!m->keys[i]) continue;
+    uint64_t mask = (uint64_t)nm.cap - 1;
+    uint64_t pos = tuplize_pair_hash(m->keys[i]) & mask;
+    while (nm.keys[pos]) pos = (pos + 1) & mask;
+    nm.keys[pos] = m->keys[i];
+    nm.vals[pos] = m->vals[i];
+    nm.len++;
+  }
+
+  free(m->keys);
+  free(m->vals);
+  *m = nm;
+  return true;
+}
+
+static bool tuplize_pair_memo_set(TuplizePairMemo *m, uint64_t key, int val) {
+  if ((m->len + 1) * 2 >= m->cap && !tuplize_pair_memo_grow(m)) return false;
+  uint64_t stored = key + 1;
+  uint64_t mask = (uint64_t)m->cap - 1;
+  uint64_t pos = tuplize_pair_hash(stored) & mask;
+  while (m->keys[pos] && m->keys[pos] != stored) pos = (pos + 1) & mask;
+  if (!m->keys[pos]) {
+    m->keys[pos] = stored;
+    m->len++;
+  }
+  m->vals[pos] = (int8_t)((val > 0) - (val < 0));
+  return true;
+}
+
+typedef struct {
+  PolyUOp **topo;
+  IntMap *idx;
+  TuplizePairMemo *memo;
+} TuplizeCmpCtx;
+
+static int tuplize_cmp_idx(TuplizeCmpCtx *tc, int ai, int bi) {
+  if (ai == bi) return 0;
+
+  uint64_t key = tuplize_pair_key(ai, bi);
+  int cached = 0;
+  if (tuplize_pair_memo_get(tc->memo, key, &cached)) return cached;
+
+  PolyUOp *a = tc->topo[ai];
+  PolyUOp *b = tc->topo[bi];
+  int ret = 0;
+
+  /* Port of tinygrad UOp.tuplize:
+   *   (op.value, arg, dtype) + tuple(src.tuplize for src in src)
+   *
+   * tinygrad caches the recursive tuple on each UOp. Here the pair memo gives
+   * the same effect for sorting: each structural pair comparison is computed at
+   * most once, while sources are compared recursively in tuple order. */
+  int ao = (int)a->op, bo = (int)b->op;
+  if (ao != bo) {
+    ret = ao < bo ? -1 : 1;
+  } else {
+    int ac = arg_cmp(a->arg, b->arg);
+    if (ac != 0) {
+      ret = ac;
+    } else if (!poly_dtype_eq(a->dtype, b->dtype)) {
+      int dc = dtype_lt_cmp(a->dtype, b->dtype);
+      /* Python tuple comparison stops at the dtype element. PtrDType can be
+       * unequal while neither side orders below the other, so do not use source
+       * UOps as an extra tiebreak in that case. */
+      ret = dc;
+    } else {
+      int min_src = a->n_src < b->n_src ? a->n_src : b->n_src;
+      for (int i = 0; i < min_src && ret == 0; i++) {
+        int as = imap_get(tc->idx, a->src[i]);
+        int bs = imap_get(tc->idx, b->src[i]);
+        ret = tuplize_cmp_idx(tc, as, bs);
+      }
+      if (ret == 0) ret = a->n_src < b->n_src ? -1 : (a->n_src > b->n_src ? 1 : 0);
+    }
+  }
+
+  ret = (ret > 0) - (ret < 0);
+  tuplize_pair_memo_set(tc->memo, key, ret);
+  tuplize_pair_memo_set(tc->memo, tuplize_pair_key(bi, ai), -ret);
+  return ret;
+}
+
+static void tuplize_merge_sort_rec(TuplizeCmpCtx *tc, int *arr, int *tmp, int lo, int hi) {
+  if (hi - lo <= 1) return;
+  int mid = lo + (hi - lo) / 2;
+  tuplize_merge_sort_rec(tc, arr, tmp, lo, mid);
+  tuplize_merge_sort_rec(tc, arr, tmp, mid, hi);
+
+  int i = lo, j = mid, k = lo;
+  while (i < mid && j < hi) {
+    /* Python's sorted is stable, so equal tuplize keys keep topo order. */
+    if (tuplize_cmp_idx(tc, arr[i], arr[j]) <= 0)
+      tmp[k++] = arr[i++];
+    else
+      tmp[k++] = arr[j++];
+  }
+  while (i < mid)
+    tmp[k++] = arr[i++];
+  while (j < hi)
+    tmp[k++] = arr[j++];
+  memcpy(arr + lo, tmp + lo, (size_t)(hi - lo) * sizeof(int));
 }
 
 static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
-  int *ranks = (int *)malloc((size_t)n * sizeof(int));
-  TuplizeKey *keys = (TuplizeKey *)malloc((size_t)n * sizeof(TuplizeKey));
-
-  /* Build keys bottom-up (toposort order ensures sources are ranked first) */
-  for (int i = 0; i < n; i++) {
-    PolyUOp *u = topo[i];
-    keys[i].orig_idx = i;
-    keys[i].op = (int)u->op;
-    keys[i].arg = u->arg;
-    keys[i].dtype = u->dtype;
-    keys[i].n_src = u->n_src;
-    for (int j = 0; j < u->n_src && j < 8; j++) {
-      int si = imap_get(idx, u->src[j]);
-      keys[i].src_ranks[j] = ranks[si];
-    }
-    for (int j = u->n_src; j < 8; j++)
-      keys[i].src_ranks[j] = 0;
-    /* Assign a temporary rank = i (will be reassigned after sort) */
-    ranks[i] = i;
+  int *rank = malloc((size_t)n * sizeof(int));
+  int *order = malloc((size_t)n * sizeof(int));
+  int *tmp = malloc((size_t)n * sizeof(int));
+  TuplizePairMemo memo = {0};
+  if (!rank || !order || !tmp || !tuplize_pair_memo_init(&memo, n)) {
+    free(rank);
+    free(order);
+    free(tmp);
+    return NULL;
   }
 
-  /* Sort keys to determine rank ordering.
-   * Use a separate sorted index array to avoid losing the orig_idx mapping. */
-  int *sorted_idx = (int *)malloc((size_t)n * sizeof(int));
   for (int i = 0; i < n; i++)
-    sorted_idx[i] = i;
+    order[i] = i;
 
-  /* Insertion sort on sorted_idx by keys[sorted_idx[i]] (stable, O(n^2) but
-   * each comparison is O(max_src) = O(1), and n is typically < 5000). */
-  for (int i = 1; i < n; i++) {
-    int ki = sorted_idx[i];
-    int j = i - 1;
-    while (j >= 0 && tuplize_key_cmp(&keys[ki], &keys[sorted_idx[j]]) < 0) {
-      sorted_idx[j + 1] = sorted_idx[j];
-      j--;
-    }
-    sorted_idx[j + 1] = ki;
-  }
+  TuplizeCmpCtx tc = {.topo = topo, .idx = idx, .memo = &memo};
+  tuplize_merge_sort_rec(&tc, order, tmp, 0, n);
 
-  /* Assign ranks: equal keys get the same rank */
   int cur_rank = 0;
-  ranks[sorted_idx[0]] = 0;
+  rank[order[0]] = 0;
   for (int i = 1; i < n; i++) {
-    if (tuplize_key_cmp(&keys[sorted_idx[i]], &keys[sorted_idx[i - 1]]) != 0) cur_rank++;
-    ranks[sorted_idx[i]] = cur_rank;
+    if (tuplize_cmp_idx(&tc, order[i - 1], order[i]) != 0) cur_rank++;
+    rank[order[i]] = cur_rank;
   }
 
-  free(keys);
-  free(sorted_idx);
-  return ranks;
+  tuplize_pair_memo_destroy(&memo);
+  free(order);
+  free(tmp);
+  return rank;
 }
 
 PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
@@ -755,11 +861,19 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
     if (u->op == POLY_OP_PARAM) extra[i] = u->arg.i;
   }
 
-  /* 5. Precompute tuplize ranks for O(1) structural comparison.
-   * Matches tinygrad's @cached_property tuplize + sorted(key=...+x.tuplize). */
-  int *tup_ranks = compute_tuplize_ranks(topo, n, &idx);
+  int *tuplize_rank = compute_tuplize_ranks(topo, n, &idx);
+  if (!tuplize_rank) {
+    imap_destroy(&idx);
+    free(ranges);
+    free(out_deg);
+    free(run_count);
+    free(prio);
+    free(extra);
+    *n_out = n;
+    return topo;
+  }
 
-  /* 6. Build ideal order: sort by (run_count, priority, extra, tuplize_hash, topo_idx).
+  /* 6. Build ideal order: sort by (run_count, priority, extra, tuplize, topo_idx).
    * Matches tinygrad's sorted(lst, key=lambda x: priorities[x]+x.tuplize). */
   int *ideal = malloc(n * sizeof(int));
   for (int i = 0; i < n; i++)
@@ -794,14 +908,12 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
         continue;
       }
       if (extra[ji] < ke) break;
-      /* Tiebreak: tuplize rank comparison (matches TUPLE_ORDER=1 in tinygrad).
-       * Precomputed ranks reproduce @cached_property tuplize ordering in O(1). */
-      if (tup_ranks[ji] > tup_ranks[ki]) {
+      if (tuplize_rank[ji] > tuplize_rank[ki]) {
         ideal[j + 1] = ideal[j];
         j--;
         continue;
       }
-      if (tup_ranks[ji] < tup_ranks[ki]) break;
+      if (tuplize_rank[ji] < tuplize_rank[ki]) break;
       /* Final tiebreak: topo index */
       if (ji > ki) {
         ideal[j + 1] = ideal[j];
@@ -871,9 +983,9 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   free(run_count);
   free(prio);
   free(extra);
+  free(tuplize_rank);
   free(ideal);
   free(nkey);
-  free(tup_ranks);
 
   *n_out = rlen;
   return result;
@@ -890,7 +1002,11 @@ PolyRendererCaps poly_c_renderer_caps(void) {
       .has_mulacc = false,
       .has_threefry = false,
       .has_local = false,
-      .has_simd_int = true,
+      /* Clang/C rendering follows tinygrad's CStyle pm_render path, which
+       * inserts masked-load alt values and scalarizes vector comparisons.
+       * The packed-int render subset is reserved for the handwritten x64
+       * backend, which sets this capability in render_x64.c. */
+      .has_simd_int = false,
       .max_vec_width = 4,
   };
 }
@@ -902,6 +1018,7 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .caps = poly_c_renderer_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .extra_matcher = poly_pm_c_renderer_extra(),
   };
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
@@ -927,6 +1044,7 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .caps = poly_c_renderer_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .extra_matcher = poly_pm_c_renderer_extra(),
   };
   return poly_linearize_ex(ctx, sink, opts, n_out);
 }
@@ -980,7 +1098,24 @@ static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
 }
 
 /* Render a C type for a PolyDType, including vector and pointer forms. */
+static bool render_is_bf16(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  return s.priority == POLY_BFLOAT16.priority && s.bitsize == 16;
+}
+
 static void render_ctype_nonptr(PolyDType dt, char *buf, int cap) {
+  if (render_is_bf16(dt)) {
+    /* CPU C follows tinygrad's non-native bf16 lowering: arithmetic is
+     * promoted to f32 and bf16 storage is addressed as raw 16-bit lanes. */
+    if (dt.count > 1)
+      snprintf(
+          buf, cap, "unsigned short __attribute__((vector_size(%d)))",
+          poly_dtype_itemsize(poly_dtype_scalar(dt)) * dt.count
+      );
+    else
+      snprintf(buf, cap, "unsigned short");
+    return;
+  }
   if (dt.count <= 1) {
     snprintf(buf, cap, "%s", dt.name);
     return;
@@ -1014,6 +1149,33 @@ static void render_ctype(PolyDType dt, char *buf, int cap) {
   char bt[128];
   render_ctype_nonptr(base, bt, sizeof(bt));
   snprintf(buf, cap, "%s*", bt);
+}
+
+static bool render_index_lane_ptr(StrMap *names, PolyUOp *ptr_uop, int lane, char *buf, int cap) {
+  PolyUOp *idx = poly_find_index_through_cast(ptr_uop);
+  if (!idx || idx->n_src < 2) return false;
+  char *base = smap_get(names, idx->src[0]);
+  char *idx_s = smap_get(names, idx->src[1]);
+  if (lane == 0)
+    snprintf(buf, cap, "(%s+%s)", base ? base : "0", idx_s ? idx_s : "0");
+  else
+    snprintf(buf, cap, "(%s+(%s)+%d)", base ? base : "0", idx_s ? idx_s : "0", lane);
+  return true;
+}
+
+static void render_vector_load_expr(
+    StrBuf *body, StrMap *names, PolyUOp *ptr_uop, PolyDType dtype, const char *dtype_s
+) {
+  sb_printf(body, "((%s){", dtype_s);
+  for (int lane = 0; lane < dtype.count; lane++) {
+    char lane_ptr[512];
+    if (lane) sb_puts(body, ",");
+    if (render_index_lane_ptr(names, ptr_uop, lane, lane_ptr, sizeof(lane_ptr)))
+      sb_printf(body, "(*%s)", lane_ptr);
+    else
+      sb_puts(body, "0");
+  }
+  sb_puts(body, "})");
 }
 
 /* Render an ALU expression.
@@ -1191,7 +1353,7 @@ static int range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) 
 
 #define POLY_RENDER_MAX_PARAMS 64
 typedef struct {
-  char type[128];
+  char type[256];
   char name[256];
   int order; /* maps param position -> args[] index */
 } RenderParam;
@@ -1259,9 +1421,13 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       snprintf(name, sizeof(name), "data%lld", (long long)u->arg.i);
       smap_set(&names, u, strdup(name));
 
-      /* type for signature: "float* restrict" */
+      /* Keep parameter storage type in sync with renderer dtype mapping. This
+       * matters for non-native bf16, where the kernel ABI is raw u16 storage
+       * even though the logical dtype remains POLY_BFLOAT16. */
       PolyDType base = poly_dtype_scalar(u->dtype);
-      snprintf(params[n_params].type, sizeof(params[n_params].type), "%s* restrict", base.name);
+      char base_type[128];
+      render_ctype_nonptr(base, base_type, sizeof(base_type));
+      snprintf(params[n_params].type, sizeof(params[n_params].type), "%s* restrict", base_type);
       snprintf(params[n_params].name, sizeof(params[n_params].name), "%s", name);
       params[n_params].order = (int)u->arg.i;
       n_params++;
@@ -1569,12 +1735,33 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
         char *gate_s = smap_get(&names, idx_uop->src[2]);
         char *alt_s = smap_get(&names, u->src[1]);
-        sb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
+        if (u->dtype.count > 1) {
+          /* tinygrad's CPU Clang renderer keeps upcasted memory traffic as
+           * scalar lane loads. This avoids assuming alignment for external
+           * buffers while still using vector locals for arithmetic. */
+          sb_printf(&body, "if (%s) %s = ", gate_s, name);
+          render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
+          sb_printf(&body, "; else %s = %s;\n", name, alt_s);
+        } else {
+          sb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
+        }
       } else if (idx_uop && idx_uop->n_src >= 3) {
         char *gate_s = smap_get(&names, idx_uop->src[2]);
-        sb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, dtype_s);
+        if (u->dtype.count > 1) {
+          sb_printf(&body, "if (%s) %s = ", gate_s, name);
+          render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
+          sb_printf(&body, "; else memset(&%s, 0, sizeof(%s));\n", name, name);
+        } else {
+          sb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, dtype_s);
+        }
       } else {
-        sb_printf(&body, "%s = (*%s);\n", name, bidx);
+        if (u->dtype.count > 1 && idx_uop) {
+          sb_printf(&body, "%s = ", name);
+          render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
+          sb_puts(&body, ";\n");
+        } else {
+          sb_printf(&body, "%s = (*%s);\n", name, bidx);
+        }
       }
       continue;
     }
@@ -1589,7 +1776,20 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
        * satisfies the analyzer's path-sensitive null-deref tracking. */
       if (u->src[0] && u->src[0]->op == POLY_OP_DEFINE_LOCAL)
         sb_printf(&body, "%s = %s;\n", target, val);
-      else
+      else if (u->src[1] && u->src[1]->dtype.count > 1 &&
+               poly_find_index_through_cast(u->src[0])) {
+        /* Match tinygrad CPU C rendering: upcasted STORE writes scalar lanes
+         * instead of dereferencing a wide vector pointer to user/runtime memory. */
+        for (int lane = 0; lane < u->src[1]->dtype.count; lane++) {
+          char lane_ptr[512];
+          if (!render_index_lane_ptr(&names, u->src[0], lane, lane_ptr, sizeof(lane_ptr))) break;
+          if (lane) {
+            for (int d = 0; d < depth; d++)
+              sb_puts(&body, "  ");
+          }
+          sb_printf(&body, "*%s = (%s)[%d];\n", lane_ptr, val, lane);
+        }
+      } else
         sb_printf(&body, "*%s = %s;\n", target, val);
       continue;
     }

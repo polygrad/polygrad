@@ -11,6 +11,8 @@ void poly_init_group_ops(void);
 
 /* Optional cleanup hooks (defined in other files, linked weakly). */
 void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
+void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
+void poly_schedule_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
 static void free_cached_kernel(const void *key, void *value, void *userdata) {
   (void)key;
@@ -34,16 +36,27 @@ PolyCtx *poly_ctx_new(void) {
   ctx->arena = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
   ctx->kernel_cache = poly_map_new(16);
+  ctx->schedule_cache = poly_map_new(16);
+  ctx->program_cache = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
+  ctx->tensors_by_uop = poly_map_new(64);
+  ctx->tensors = NULL;
+  ctx->n_tensors = 0;
+  ctx->tensors_cap = 0;
+  ctx->next_tensor_order = 1;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->shape_cache || !ctx->buffers ||
+  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->schedule_cache ||
+      !ctx->program_cache || !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop ||
       !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->kernel_cache) poly_map_destroy(ctx->kernel_cache);
+    if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
+    if (ctx->program_cache) poly_map_destroy(ctx->program_cache);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
+    if (ctx->tensors_by_uop) poly_map_destroy(ctx->tensors_by_uop);
     if (ctx->name_map) poly_map_destroy(ctx->name_map);
     free(ctx);
     return NULL;
@@ -62,12 +75,18 @@ PolyCtx *poly_ctx_new(void) {
 void poly_ctx_destroy(PolyCtx *ctx) {
   if (!ctx) return;
   if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
+  if (poly_tensor_ctx_cleanup) poly_tensor_ctx_cleanup(ctx);
+  if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
   poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
   poly_map_destroy(ctx->kernel_cache);
+  poly_map_destroy(ctx->schedule_cache);
+  poly_map_destroy(ctx->program_cache);
   poly_map_destroy(ctx->shape_cache);
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, NULL);
   poly_map_destroy(ctx->buffers);
+  poly_map_destroy(ctx->tensors_by_uop);
+  free(ctx->tensors);
   poly_map_destroy(ctx->name_map);
   poly_map_destroy(ctx->cse);
   free(ctx->entries);

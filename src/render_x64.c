@@ -15,6 +15,10 @@
 
 #ifdef POLY_HAS_X64
 
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include "codegen.h"
 #include <assert.h>
 #include <stdio.h>
@@ -24,6 +28,12 @@
 #include <unistd.h>
 #include <math.h>
 #include <cpuid.h>
+
+#ifndef MAP_ANONYMOUS
+#ifdef MAP_ANON
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#endif
 
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  CPU feature detection (Phase 4)                                      */

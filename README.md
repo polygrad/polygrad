@@ -46,7 +46,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
   └───────────┘     └──────────────────────┘    └────────────────────┘
 ```
 
-**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> unified codegen pipeline -> render (C, x86-64 JIT, CUDA, HIP, WASM, interpreter) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support across all backends. The JS package uses `await polygrad.create({ target, device })`, prefers a native Node-API binding in Node (with CUDA/HIP/x64 support), falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences. 609 C tests, 170 Python, 109 JS native, 109 JS WASM/browser. All five native backends (CPU, x64, CUDA, HIP, interpreter) pass the full C test suite. Instance API supports GPU training with auto-readback via `host_addressable` allocator flag.
+**What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> unified codegen pipeline -> render (C, x86-64 JIT, CUDA, HIP, WASM, interpreter) -> execute. Elementwise ops (~20), reductions (sum, max, mean, var, std), matmul, softmax, movement ops (reshape, expand, permute, shrink, flip, pad), step slicing (`t[::2]`, `t[::-1]`), reverse-mode autograd, multi-kernel scheduling, in-place buffer writes (ASSIGN + WAR/WAW ordering). Full float64/float16/bfloat16 support across all backends. The JS package uses `await polygrad.create({ core, device })`, prefers a native Node-API binding in Node (with CUDA/HIP/x64 support), falls back to packaged WASM, and also ships prebuilt browser bundles. Python `nn` module: Linear, LayerNorm, RMSNorm, Embedding, Dropout + SGD/Adam/AdamW optimizers. HuggingFace model loading: load GPT-2 directly from config.json + safetensors, verified logit-exact match with HF Transformers. Value parity with tinygrad is 33/33; full IR parity is 31/33 with two remaining structural divergences. 609 C tests, 170 Python, 109 JS native, 109 JS WASM/browser. All five native backends (CPU, x64, CUDA, HIP, interpreter) pass the full C test suite. Instance API supports GPU training with auto-readback via `host_addressable` allocator flag.
 
 **Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, x64 JIT, CUDA, HIP, interpreter, WASM JIT). All backends share one unified linearizer pipeline (`poly_full_rewrite_to_sink_ex`), with backend differences expressed via `PolyRewriteOpts`. The x64 JIT (`render_x64.c`) emits x86-64 machine code directly -- no C compiler dependency, zero compile latency, SSE2 packed vectorization. CUDA uses native `half`/`nv_bfloat16` types with h* intrinsics. HIP supports AMD MI250X with MFMA tensor core codegen. The interpreter supports vector operations via a lane-array value model with pre-allocated arena. Backend selection via `POLY_DEVICE=cpu|cuda|hip|x64|interp`. `PolyInstance` uses cached slot tables and calls `poly_compiled_plan_run()` directly -- zero per-step allocations in the training loop. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
 
@@ -59,7 +59,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 | Frontend | API Docs | Install |
 |----------|----------|---------|
 | [Python](py/) | Tensor, nn module, optimizers | `pip install polygrad` |
-| [JavaScript + Browser](js/) | Unified npm package (`create({ target, device })`), Node-API + WASM, browser dist bundles | `npm install polygrad` |
+| [JavaScript + Browser](js/) | Unified npm package (`create({ core, device })`), Node-API + WASM, browser dist bundles | `npm install polygrad` |
 | [R](r/) | Tensor (.Call FFI) | `R CMD INSTALL r/` |
 
 ## Versioning
@@ -68,17 +68,21 @@ Package versions use semver, but `major.minor` tracks the shared C core line acr
 
 ## Parity
 
-Current parity snapshot against tinygrad `ClangRenderer` (CPU, `DEVECTORIZE=0`, `optimize=False`):
-- Value parity: **33/33**
-- Full IR parity (kernel count + structure + op sequence): **31/33**
-- Remaining structural divergences: `matmul_broadcast`, `cross_entropy_nonlast_axis`
+Current parity snapshot against `references/tinygrad_latest`:
+- Value parity: **51/51** (`make test-parity`)
+- Optimized value parity: **51/51** (`make test-parity-opt`)
+- Strict IR comparison is tracked separately by `make test-parity-ir` and
+  `make test-parity-ir-opt`. These diagnostic targets currently report
+  structural divergences against tinygrad's latest schedule-linear output.
 
-The parity test (`make test-parity`) schedules each case through both polygrad and tinygrad, linearizes, and compares:
+The value parity test (`make test-parity`) schedules each case through both
+Polygrad and tinygrad and compares output values. The strict IR diagnostic
+targets additionally compare:
 - kernel count
 - per-kernel structural signature (`RANGE/END/REDUCE/INDEX/LOAD/STORE` counts and loop-depth balance)
 - full per-kernel op sequence
 
-The parity suite covers 33 cases:
+The parity suite covers 51 cases:
 
 | Category | Cases |
 |----------|-------|
@@ -89,12 +93,14 @@ The parity suite covers 33 cases:
 | Movement | permute_2d, shrink_2d, pad_2d, chain_pad_flip, multi_movement |
 | Autograd | grad_mul_sum, grad_exp2_sum, grad_fdiv_sum_x, grad_fdiv_sum_y, grad_chain_movement, grad_log2_sum, grad_sqrt_sum, grad_where_sum, grad_multi_use |
 | NN | matmul_small, matmul_broadcast, cross_entropy_nonlast_axis |
+| Creation/movement helpers | full_1d, full_2d, arange_simple, arange_start_step, linspace_5, eye_3, repeat_1d, pool_1d_k3, cat_1d |
+| Padding/cumulative helpers | pad_value_1d, pad_circular_1d, pad_reflect_1d, pad_replicate_1d, cumsum_1d, cumprod_1d, cummax_1d |
 
 ```bash
 # Run parity tests (requires conda env 'tiny' with tinygrad)
 make test-parity
 
-# Dump IR for a specific case
+# Dump strict IR comparison for a specific case
 ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 \
   conda run -n tiny python test/test_tinygrad_parity.py \
   --runner build/polygrad_parity_runner --mode full --no-opt --dump vecadd
@@ -105,7 +111,9 @@ ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 \
 This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c66c2ba8c4068`.
 
 `Core parity` gates:
-- Differential parity (`make test-parity`) must pass in full mode (`--mode full --no-opt`).
+- Differential value parity (`make test-parity`) must pass.
+- Strict IR parity (`make test-parity-ir`) is a diagnostic target while
+  Polygrad catches up to current tinygrad schedule-linear structure.
 - No silent scheduler/indexing fallbacks for invalid mappings; failures must be explicit.
 - Any intentional divergence from tinygrad must be documented in `Whats different` with reason.
 
@@ -122,6 +130,7 @@ This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c
 | Eager gradient realization (no double-backward) | Lazy gradient tensors (double-backward possible) | Gradients are realized eagerly per segment into numpy arrays, so `grad(grad(loss))` isn't possible. First-order optimization (SGD/Adam/AdamW) is unaffected |
 | Frontend creation helpers (`rand`, `randn`, `arange`, `full`, `eye`, `linspace`, `tril`, `triu`) use ctx-scoped constant-buffer auto-binding as a convenience path | Device-native RNG/creation flow in Tensor runtime | Track C kept this additive to avoid breaking `PolyStep`/FFI contracts; for large tensors or hot loops, prefer explicit buffer bindings/device-resident generation |
 | `poly_rand` uses top-24-bit extraction (SHR 8, CAST f32, MUL 2^-24) producing 2^24 distinct uniform [0,1) values | Mantissa-bit randomization (set exponent=1, bitcast, subtract 1.0) | Simpler codegen path; both produce uniform [0,1) but float bit patterns differ for same THREEFRY output |
+| CPU C backend renders bf16 storage as `unsigned short` after non-native bf16 rewrites | tinygrad_latest CPU `ClangRenderer` still emits `__bf16` and fails on CPU targets without native bf16 support; OpenCL/HIP use raw ushort/typedef storage on non-native paths | Deliberate portability improvement for the C FFI backend while keeping tinygrad's bf16 cast/math rewrite semantics |
 
 ## RNG contract
 

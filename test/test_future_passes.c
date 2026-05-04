@@ -987,7 +987,7 @@ TEST(pass_order, full_pipeline_no_residual) {
 static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* Build tensor-level graph: out[i] = op(in[i]) via poly_realize_with_bindings.
+  /* Build tensor-level graph: out[i] = op(in[i]) via poly_test_realize_buffer_views.
    * Respects POLY_DEVICE so conformance tests run on the selected backend. */
   PolyUOp *buf_in = poly_buffer(ctx, POLY_FLOAT32, n);
   PolyUOp *result = poly_alu1(ctx, op, buf_in);
@@ -999,11 +999,11 @@ static int run_unary_e2e(PolyOps op, const float *in, float *out, int n) {
   memcpy(in_copy, in, (size_t)n * sizeof(float));
   memset(out, 0, (size_t)n * sizeof(float));
 
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(buf_out, out),
-      POLY_BIND_HOST(buf_in, in_copy),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(buf_out, out),
+      POLY_TEST_HOST_VIEW(buf_in, in_copy),
   };
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
 
   free(in_copy);
   poly_ctx_destroy(ctx);
@@ -1662,14 +1662,14 @@ TEST(devectorize, e2e_vecadd) {
   float da[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float db[] = {10, 20, 30, 40, 50, 60, 70, 80};
   float dout[8] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(out, dout)
   };
 
   /* Use POLY_OPTIMIZE + POLY_DEVECTORIZE via env to test full pipeline */
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
 
@@ -1702,14 +1702,14 @@ TEST(beam, vecadd_correct) {
     db[i] = (float)(100 + i);
   }
   memset(dout, 0, sizeof(dout));
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1739,12 +1739,12 @@ TEST(beam, reduce_correct) {
     da[i] = (float)(i + 1);
     expected += da[i];
   }
-  PolyBufferBinding bindings[] = {POLY_BIND_HOST(a, da), POLY_BIND_HOST(out, dout)};
+  PolyTestBufferView bindings[] = {POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(out, dout)};
 
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 2);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1773,14 +1773,14 @@ TEST(beam, zero_is_heuristic) {
     db[i] = 1.0f;
   }
   memset(dout, 0, sizeof(dout));
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout)
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "0", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 3);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1810,15 +1810,15 @@ TEST(beam, cache_roundtrip) {
     db[i] = (float)(i + 7);
   }
 
-  PolyBufferBinding bindings1[] = {
-      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout1)
+  PolyTestBufferView bindings1[] = {
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(out, dout1)
   };
 
   /* First run: populates cache */
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret1 = poly_realize_with_bindings(ctx, sink, bindings1, 3);
+  int ret1 = poly_test_realize_buffer_views(ctx, sink, bindings1, 3);
   ASSERT_INT_EQ(ret1, 0);
 
   /* Second run: should hit cache */
@@ -1830,10 +1830,10 @@ TEST(beam, cache_roundtrip) {
   PolyUOp *st2 = poly_store_val(ctx2, out2, c2);
   PolyUOp *sink2 = poly_sink1(ctx2, st2);
 
-  PolyBufferBinding bindings2[] = {
-      POLY_BIND_HOST(a2, da), POLY_BIND_HOST(b2, db), POLY_BIND_HOST(out2, dout2)
+  PolyTestBufferView bindings2[] = {
+      POLY_TEST_HOST_VIEW(a2, da), POLY_TEST_HOST_VIEW(b2, db), POLY_TEST_HOST_VIEW(out2, dout2)
   };
-  int ret2 = poly_realize_with_bindings(ctx2, sink2, bindings2, 3);
+  int ret2 = poly_test_realize_buffer_views(ctx2, sink2, bindings2, 3);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");
@@ -1869,14 +1869,14 @@ TEST(beam, chain_correct) {
     dc[i] = (float)(i * 10);
   }
   memset(dout, 0, sizeof(dout));
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(c, dc), POLY_BIND_HOST(out, dout)
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(c, dc), POLY_TEST_HOST_VIEW(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
   setenv("POLY_DEVECTORIZE", "1", 1);
   setenv("POLY_BEAM", "2", 1);
-  int ret = poly_realize_with_bindings(ctx, sink, bindings, 4);
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 4);
   unsetenv("POLY_OPTIMIZE");
   unsetenv("POLY_DEVECTORIZE");
   unsetenv("POLY_BEAM");

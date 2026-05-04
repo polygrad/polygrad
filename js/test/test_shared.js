@@ -31,7 +31,10 @@ function assertShape(actual, expected) {
 
 async function runTests(pg) {
   const Tensor = pg.Tensor
-  let passed = 0, failed = 0
+  const caps = pg.caps || {}
+  const supportsF16 = caps.f16 !== false
+  const supportsF64 = caps.f64 !== false
+  let passed = 0, failed = 0, skipped = 0
 
   async function test(name, fn) {
     try {
@@ -44,7 +47,16 @@ async function runTests(pg) {
     }
   }
 
-  console.log(`Target: ${pg.target}, device: ${pg.device}\n`)
+  async function testIf(cond, name, fn) {
+    if (!cond) {
+      console.log(`  [SKIP] ${name}`)
+      skipped++
+      return
+    }
+    await test(name, fn)
+  }
+
+  console.log(`Core: ${pg.core}, device: ${pg.device}\n`)
 
   // -- Creation --
   console.log('-- Creation --')
@@ -225,6 +237,22 @@ async function runTests(pg) {
     assertClose(await p.toArray(), [0, 1, 2, 3, 0])
   })
 
+  await test('pad readback preserves non-float dtype', async () => {
+    const p = new Tensor([1, 2, 3], { dtype: 'int32' }).pad([[1, 1]])
+    assert(p.dtype === 'int32', `expected int32, got ${p.dtype}`)
+    const arr = await p.toArray()
+    assert(arr.constructor.name === 'Int32Array', `expected Int32Array, got ${arr.constructor.name}`)
+    assertClose(arr, [0, 1, 2, 3, 0])
+  })
+
+  await test('pad readback preserves byte dtype', async () => {
+    const p = new Tensor([1, 0, 1], { dtype: 'uint8' }).pad([[1, 1]])
+    assert(p.dtype === 'uint8', `expected uint8, got ${p.dtype}`)
+    const arr = await p.toArray()
+    assert(arr instanceof Uint8Array, `expected Uint8Array-compatible view, got ${arr.constructor.name}`)
+    assertClose(arr, [0, 1, 0, 1, 0])
+  })
+
   // -- Step slicing --
   console.log('\n-- Step slicing --')
 
@@ -286,7 +314,7 @@ async function runTests(pg) {
   // -- Cast --
   console.log('\n-- Cast --')
 
-  await test('cast float32 to float64', async () => {
+  await testIf(supportsF64, 'cast float32 to float64', async () => {
     const t = new Tensor([1, 2, 3])
     const r = t.cast('float64')
     assert(r.dtype === 'float64', `expected float64, got ${r.dtype}`)
@@ -295,7 +323,7 @@ async function runTests(pg) {
     assertClose(arr, [1, 2, 3])
   })
 
-  await test('cast float64 to float32', async () => {
+  await testIf(supportsF64, 'cast float64 to float32', async () => {
     const t = new Tensor([1.5, 2.5, 3.5], { dtype: 'float64' })
     const r = t.cast('float32')
     assert(r.dtype === 'float32', `expected float32, got ${r.dtype}`)
@@ -310,17 +338,19 @@ async function runTests(pg) {
     assertClose(await r.toArray(), [1, 2, 3])
   })
 
-  await test('half and double convenience', async () => {
+  await testIf(supportsF16, 'half and double convenience', async () => {
     const t = new Tensor([1, 2, 3])
-    const d = t.double()
-    assert(d.dtype === 'float64', `expected float64, got ${d.dtype}`)
-    assertClose(await d.toArray(), [1, 2, 3])
     const h = t.half()
     assert(h.dtype === 'float16', `expected float16, got ${h.dtype}`)
     assertClose(await h.toArray(), [1, 2, 3])
+    if (supportsF64) {
+      const d = t.double()
+      assert(d.dtype === 'float64', `expected float64, got ${d.dtype}`)
+      assertClose(await d.toArray(), [1, 2, 3])
+    }
   })
 
-  await test('cast then compute', async () => {
+  await testIf(supportsF64, 'cast then compute', async () => {
     const t = new Tensor([1, 2, 3]).cast('float64')
     const r = t.add(new Tensor([10, 20, 30], { dtype: 'float64' }))
     assertClose(await r.toArray(), [11, 22, 33])
@@ -553,6 +583,72 @@ async function runTests(pg) {
     assertClose(await a.grad.toArray(), [2, 4, 6])
   })
 
+  // -- Assign --
+  console.log('\n-- Assign --')
+
+  await test('assign basic', async () => {
+    const a = new Tensor([1, 2, 3])
+    a.assign(a.add(10))
+    await a.realize()
+    assertClose(await a.toArray(), [11, 12, 13])
+  })
+
+  await test('assign rejects device mismatch', async () => {
+    const a = new Tensor([1], { device: 'cpu' })
+    const v = new Tensor([5], { device: 'cpu' }).to('cuda')
+    let ok = false
+    try {
+      a.assign(v)
+    } catch (e) {
+      ok = /assign device mismatch CPU != CUDA/.test(String(e && e.message ? e.message : e))
+    }
+    assert(ok, 'expected assign device mismatch CPU != CUDA')
+  })
+
+  await test('assign rejects dtype mismatch', async () => {
+    const a = new Tensor([1], { dtype: 'float32' })
+    const mismatchDtype = supportsF64 ? 'float64' : 'int32'
+    const v = new Tensor([5], { dtype: mismatchDtype })
+    let ok = false
+    try {
+      a.assign(v)
+    } catch (e) {
+      ok = new RegExp(`assign dtype mismatch float32 != ${mismatchDtype}`).test(
+        String(e && e.message ? e.message : e)
+      )
+    }
+    assert(ok, `expected assign dtype mismatch float32 != ${mismatchDtype}`)
+  })
+
+  await test('assign to same-device place keeps place target', async () => {
+    const a = new Tensor([1], { device: 'cpu' }).to('cuda')
+    const v = new Tensor([5], { device: 'cpu' }).to('cuda')
+    assert(a.assign(v) === a, 'assign should return self')
+    assert(a.device === 'CUDA', 'assign should keep CUDA placement')
+    assert(!a.uop.hasBufferIdentity(), 'assign before realize should be an effect graph')
+  })
+
+  await test('assign realized targets reuse current buffer', async () => {
+    const a = new Tensor([1])
+    await a.realize()
+    const aBuffer = a.uop.buffer.key
+
+    // assign() creates an effect graph first. Realizing that effect writes the
+    // existing target storage and returns to the same current buffer root.
+    a.assign(new Tensor([5]))
+    assert(!a.uop.hasBufferIdentity(), 'assign before realize should be an effect graph')
+    await a.realize()
+    assert(a.uop.buffer.key === aBuffer, 'realized assign should reuse target buffer')
+    assertClose(await a.toArray(), [5])
+
+    const x = await new Tensor([1]).add(1).realize()
+    const xBuffer = x.uop.buffer.key
+    x.assign(new Tensor([9]))
+    await x.realize()
+    assert(x.uop.buffer.key === xBuffer, 'realized expression assign should reuse target buffer')
+    assertClose(await x.toArray(), [9])
+  })
+
   // -- Static constructors --
   console.log('\n-- Static constructors --')
 
@@ -620,22 +716,24 @@ async function runTests(pg) {
   // -- Float64 --
   console.log('\n-- Float64 --')
 
-  await test('f64: creation', async () => {
+  // tinygrad gates backend dtype tests through is_dtype_supported. Polygrad's
+  // WebGPU caps likewise advertise no f64 because WGSL has no f64 shader type.
+  await testIf(supportsF64, 'f64: creation', async () => {
     const t = new Tensor([1.5, 2.5, 3.5], { dtype: 'float64' })
     assertClose(await t.toArray(), [1.5, 2.5, 3.5])
   })
 
-  await test('f64: zeros', async () => {
+  await testIf(supportsF64, 'f64: zeros', async () => {
     const t = Tensor.zeros(3, { dtype: 'float64' })
     assertClose(await t.toArray(), [0, 0, 0])
   })
 
-  await test('f64: ones', async () => {
+  await testIf(supportsF64, 'f64: ones', async () => {
     const t = Tensor.ones(2, { dtype: 'float64' })
     assertClose(await t.toArray(), [1, 1])
   })
 
-  await test('f64: add', async () => {
+  await testIf(supportsF64, 'f64: add', async () => {
     const a = new Tensor([1, 2, 3], { dtype: 'float64' })
     const b = new Tensor([4, 5, 6], { dtype: 'float64' })
     const arr = await a.add(b).toArray()
@@ -643,7 +741,7 @@ async function runTests(pg) {
     assertClose(arr, [5, 7, 9])
   })
 
-  await test('f64: mul', async () => {
+  await testIf(supportsF64, 'f64: mul', async () => {
     const a = new Tensor([2, 3], { dtype: 'float64' })
     const b = new Tensor([4, 5], { dtype: 'float64' })
     const arr = await a.mul(b).toArray()
@@ -651,14 +749,14 @@ async function runTests(pg) {
     assertClose(arr, [8, 15])
   })
 
-  await test('f64: sum', async () => {
+  await testIf(supportsF64, 'f64: sum', async () => {
     const t = new Tensor([1, 2, 3], { dtype: 'float64' })
     const v = await t.sum().item()
     console.log('DEBUG f64 sum', v)
     assert(Math.abs(v - 6) < 1e-10, `Expected 6, got ${v}`)
   })
 
-  await test('f64: backward', async () => {
+  await testIf(supportsF64, 'f64: backward', async () => {
     const a = new Tensor([1, 2, 3], { dtype: 'float64', requiresGrad: true })
     const b = new Tensor([4, 5, 6], { dtype: 'float64' })
     const loss = a.mul(b).sum()
@@ -686,6 +784,81 @@ async function runTests(pg) {
     assertClose(r1, [11, 22, 33, 44])
     assertClose(r2, [11, 22, 33, 44])
     assertClose(r3, [11, 22, 33, 44])
+  })
+
+  await test('realize retargets live tensors sharing lazy root', async () => {
+    const a = new Tensor([1])
+    await a.realize()
+    const x1 = a.add(1)
+    const x2 = a.add(1)
+    assert(x1.uop.key === x2.uop.key, 'lazy roots should be hash-consed together')
+
+    await x1.realize()
+
+    assert(x1.uop.key === x2.uop.key, 'shared lazy root should retarget to one realized root')
+    assert(x1.uop.buffer.key === x2.uop.buffer.key, 'shared lazy root should share realized buffer')
+    assertClose(await x2.toArray(), [2])
+  })
+
+  await test('realize rewrites downstream live graph', async () => {
+    const a = new Tensor([1])
+    await a.realize()
+    const x = a.add(1)
+    const y = x.add(2)
+    const oldYKey = y.uop.key
+
+    await x.realize()
+
+    assert(y.uop.key !== oldYKey, 'downstream graph should be rewritten through realized x')
+    assertClose(await y.toArray(), [4])
+  })
+
+  await test('separate realizes do not alias buffers', async () => {
+    const a = new Tensor([1])
+    await a.realize()
+    const y1 = await a.add(1).realize()
+    const y2 = await a.add(1).realize()
+
+    assert(y1.uop.buffer.key !== y2.uop.buffer.key, 'separate materializations should get separate buffers')
+    assertClose(await y1.toArray(), [2])
+    assertClose(await y2.toArray(), [2])
+  })
+
+  await test('to keeps separate realized same-logical occurrences', async () => {
+    const a = new Tensor([1])
+    await a.realize()
+    const x1 = await a.add(1).realize()
+    const x2 = await a.add(1).realize()
+    assert(x1.uop.buffer.key !== x2.uop.buffer.key, 'separate materializations should stay distinct')
+
+    // The preserved logical expression can be shared, but placement must see
+    // the occurrence-specific realized source when .to(device) creates a fact.
+    const x1Cuda = x1.to('cuda')
+    const x2Cuda = x2.to('cuda')
+    assert(x1Cuda.uop.buffer.key === x1.uop.buffer.key, 'x1.to(cuda) should point at x1 buffer')
+    assert(x2Cuda.uop.buffer.key === x2.uop.buffer.key, 'x2.to(cuda) should point at x2 buffer')
+    assert(x1Cuda.uop.buffer.key !== x2Cuda.uop.buffer.key, 'to(cuda) occurrences should not alias')
+
+    const y1 = x1Cuda.add(1)
+    const y2 = x2Cuda.add(1)
+    assert(y1.uop.key !== y2.uop.key, 'downstream graphs should use distinct occurrence sources')
+  })
+
+  await test('nested to keeps realized current and export logical separate', async () => {
+    const x = await new Tensor([1]).add(1).realize()
+    const xCuda = x.to('cuda')
+    const xCpu = xCuda.to('cpu')
+
+    // Polygrad's portable logical UOp stays device-free, while current and
+    // physical roots keep the realized buffer selected by this tensor
+    // occurrence for later placement physicalization.
+    assert(xCpu.uop.key === x.uop.key, 'nested to should preserve current realized buffer root')
+    assert(xCpu.uopPhysical.key === x.uop.key, 'nested to should preserve physical buffer root')
+    assert(xCpu.uopLogical.key === x.uopLogical.key, 'nested to should preserve export logical root')
+
+    const y = xCpu.add(1)
+    assert(y.device === 'CPU', 'downstream value should keep selected CPU placement')
+    assert(y.uop.key !== xCpu.uop.key, 'downstream value should build a new current graph')
   })
 
   await test('repeated fused chain produces identical results', async () => {
@@ -816,6 +989,15 @@ async function runTests(pg) {
     assertClose(await r.toArray(), [1, 2, 3, 1, 2, 3, 1, 2, 3])
   })
 
+  await test('repeat readback preserves int32 dtype', async () => {
+    const t = new Tensor([1, 2, 3], { dtype: 'int32' })
+    const r = t.repeat(3)
+    assert(r.dtype === 'int32', `expected int32, got ${r.dtype}`)
+    const arr = await r.toArray()
+    assert(arr.constructor.name === 'Int32Array', `expected Int32Array, got ${arr.constructor.name}`)
+    assertClose(arr, [1, 2, 3, 1, 2, 3, 1, 2, 3])
+  })
+
   await test('repeat 2d', async () => {
     const t = new Tensor([[1, 2], [3, 4]])
     const r = t.repeat(2, 3)
@@ -828,8 +1010,8 @@ async function runTests(pg) {
     ])
   })
 
-  console.log(`\nResults: ${passed} passed, ${failed} failed, ${passed + failed} total`)
-  return { passed, failed }
+  console.log(`\nResults: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`)
+  return { passed, failed, skipped }
 }
 
 module.exports = { runTests }

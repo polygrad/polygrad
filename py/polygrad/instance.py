@@ -106,7 +106,7 @@ class Instance:
     def param_shape(self, i):
         shape_buf = (ctypes.c_int64 * 8)()
         ndim = _get_lib().poly_instance_param_shape(self._ptr, i, shape_buf, 8)
-        return tuple(shape_buf[d] for d in range(ndim))
+        return [shape_buf[d] for d in range(ndim)]
 
     def param_data(self, i):
         """Return a numpy view of param data (mutable, zero-copy)."""

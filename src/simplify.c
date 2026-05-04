@@ -413,13 +413,19 @@ static PolyUOp *rule_collapse_lift_add_from_cmplt(
   /* or_casted: also accept CAST(ADD(x,y)) on lhs */
   if (lhs->op == POLY_OP_CAST && lhs->n_src == 1) lhs = lhs->src[0];
   if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  PolyUOp *x = lhs->src[0];
-  PolyUOp *y = lhs->src[1];
-  if (!poly_no_range(ctx, y) || !poly_no_range(ctx, c)) return NULL;
-  /* tinygrad sub() lowers to add(-y), not a dedicated SUB op. */
-  PolyUOp *c_cast = cast_to(ctx, c, y->dtype);
-  PolyUOp *rhs_new = poly_alu2(ctx, POLY_OP_ADD, c_cast, mul_neg_one(ctx, y));
-  return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, rhs_new, poly_arg_none());
+  if (!poly_no_range(ctx, c)) return NULL;
+  for (int swap = 0; swap < 2; swap++) {
+    PolyUOp *x = lhs->src[swap];
+    PolyUOp *y = lhs->src[swap ^ 1];
+    /* UPat builds ADD as commutative and tries both source permutations.
+     * Mirror that here so the range-bearing term can be either side. */
+    if (!poly_no_range(ctx, y)) continue;
+    /* tinygrad sub() lowers to add(-y), not a dedicated SUB op. */
+    PolyUOp *c_cast = cast_to(ctx, c, y->dtype);
+    PolyUOp *rhs_new = poly_alu2(ctx, POLY_OP_ADD, c_cast, mul_neg_one(ctx, y));
+    return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, rhs_new, poly_arg_none());
+  }
+  return NULL;
 }
 
 /* Rule 2: ((x*y) < c) -> x < ((c+y-1)//y)  if no_range(y,c) and is_int(y) and y.vmin>0
@@ -434,19 +440,24 @@ static PolyUOp *rule_collapse_lift_mul_from_cmplt(
   PolyUOp *lhs = cmplt->src[0];
   PolyUOp *c = cmplt->src[1];
   if (lhs->op != POLY_OP_MUL || lhs->n_src != 2) return NULL;
-  PolyUOp *x = lhs->src[0];
-  PolyUOp *y = lhs->src[1];
-  if (!poly_no_range(ctx, y) || !poly_no_range(ctx, c)) return NULL;
-  if (!poly_dtype_is_int(y->dtype)) return NULL;
-  int64_t y_vmin, y_vmax;
-  poly_uop_minmax(ctx, y, &y_vmin, &y_vmax);
-  if (y_vmin <= 0) return NULL;
-  /* x < ((c + y - 1) // y) */
-  PolyUOp *one = typed_const(ctx, c->dtype, 1);
-  PolyUOp *cy1 = poly_alu2(ctx, POLY_OP_ADD, c, y);
-  PolyUOp *cy1m1 = poly_alu2(ctx, POLY_OP_SUB, cy1, one);
-  PolyUOp *div = poly_alu2(ctx, POLY_OP_IDIV, cy1m1, y);
-  return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, div, poly_arg_none());
+  if (!poly_no_range(ctx, c)) return NULL;
+  for (int swap = 0; swap < 2; swap++) {
+    PolyUOp *x = lhs->src[swap];
+    PolyUOp *y = lhs->src[swap ^ 1];
+    /* Tinygrad's commutative UPat tries both x/y bindings for MUL. */
+    if (!poly_no_range(ctx, y)) continue;
+    if (!poly_dtype_is_int(y->dtype)) continue;
+    int64_t y_vmin, y_vmax;
+    poly_uop_minmax(ctx, y, &y_vmin, &y_vmax);
+    if (y_vmin <= 0) continue;
+    /* x < ((c + y - 1) // y) */
+    PolyUOp *one = typed_const(ctx, c->dtype, 1);
+    PolyUOp *cy1 = poly_alu2(ctx, POLY_OP_ADD, c, y);
+    PolyUOp *cy1m1 = poly_alu2(ctx, POLY_OP_SUB, cy1, one);
+    PolyUOp *div = poly_alu2(ctx, POLY_OP_IDIV, cy1m1, y);
+    return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, div, poly_arg_none());
+  }
+  return NULL;
 }
 
 /* Match patterns of the form REDUCE_ADD( WHERE( CMPLT(r, cut), tval, fval ), r ).
@@ -933,11 +944,17 @@ static PolyUOp *rule_lift_add_from_cmpne(PolyCtx *ctx, PolyUOp *cmpne, const Pol
   PolyUOp *c = cmpne->src[1];
   if (lhs->op == POLY_OP_CAST && lhs->n_src == 1) lhs = lhs->src[0];
   if (lhs->op != POLY_OP_ADD || lhs->n_src != 2) return NULL;
-  PolyUOp *x = lhs->src[0];
-  PolyUOp *y = lhs->src[1];
-  if (!poly_no_range(ctx, y) || !poly_no_range(ctx, c)) return NULL;
-  PolyUOp *rhs = poly_alu2(ctx, POLY_OP_ADD, cast_to(ctx, c, y->dtype), mul_neg_one(ctx, y));
-  return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, rhs, poly_arg_none());
+  if (!poly_no_range(ctx, c)) return NULL;
+  for (int swap = 0; swap < 2; swap++) {
+    PolyUOp *x = lhs->src[swap];
+    PolyUOp *y = lhs->src[swap ^ 1];
+    /* Same commutative UPat permutation behavior as tinygrad's load-collapse
+     * `(x+y) != c` rule. */
+    if (!poly_no_range(ctx, y)) continue;
+    PolyUOp *rhs = poly_alu2(ctx, POLY_OP_ADD, cast_to(ctx, c, y->dtype), mul_neg_one(ctx, y));
+    return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, x, rhs, poly_arg_none());
+  }
+  return NULL;
 }
 
 static PolyUOp *rule_reduce_gated_load_collapse(

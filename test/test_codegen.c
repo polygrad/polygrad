@@ -4,7 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
-#include "../src/frontend.h" /* PolyWebGpuStepPlan, poly_render_step_webgpu_plan */
+#include "../src/frontend.h"
 #include "../src/tensor.h" /* poly_sum_reduce */
 
 /* Helper: build c[i] = a[i] OP b[i] kernel IR */
@@ -66,32 +66,25 @@ static int count_special_named(PolyUOp **lin, int n, const char *name) {
   return c;
 }
 
-static int find_webgpu_kernel(PolyWebGpuStepPlan *plan, const char *a, const char *b) {
-  for (int k = 0; k < poly_webgpu_stepplan_n_kernels(plan); k++) {
-    int len = 0;
-    const char *wgsl = poly_webgpu_stepplan_kernel_wgsl(plan, k, &len);
-    if (wgsl && (!a || strstr(wgsl, a)) && (!b || strstr(wgsl, b))) return k;
-  }
-  return -1;
-}
-
-static VecKernel make_vec_copy_with_casted_int64_index(int n) {
+static VecKernel make_vec_copy_with_weak_index_expr(int n) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
 
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
   PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
 
-  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
-  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(n));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_LOOP));
 
-  /* Addressing expression intentionally widened beyond the concrete index
-   * width tinygrad would keep after pm_lower_index_dtype. */
-  PolyUOp *idx64 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, range, poly_arg_none());
-  PolyUOp *zero64 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(0));
-  PolyUOp *add64 = poly_uop2(ctx, POLY_OP_ADD, POLY_INT64, idx64, zero64, poly_arg_none());
+  /* tinygrad carries address expressions as weakint through most of codegen,
+   * then pm_lower_index_dtype narrows them to a concrete integer dtype. This
+   * test mirrors that path; explicit user casts to int64 are intentionally not
+   * stripped by tinygrad and are not part of this invariant. */
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *addr = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, range, zero, poly_arg_none());
 
-  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, add64, poly_arg_none());
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, addr, poly_arg_none());
   PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
   PolyUOp *load0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, load0, poly_arg_none());
@@ -407,7 +400,13 @@ TEST(codegen, render_wgsl_vecmul) {
   ASSERT_NOT_NULL(strstr(src, "fn vecmul("));
   ASSERT_NOT_NULL(strstr(src, "@compute @workgroup_size(2,1,1)"));
   ASSERT_NOT_NULL(strstr(src, "var lidx0: i32 = i32(lindex.x);"));
-  ASSERT_NOT_NULL(strstr(src, "data2[alu0] = alu4;"));
+  /* The tinygrad-style recursive tuplize tiebreak may order vector lanes as
+   * offsets first and base lane last. The semantic contract is four scalar
+   * stores to the four lanes, not a specific temporary-number pairing. */
+  ASSERT_NOT_NULL(strstr(src, "data2[alu0] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2[alu1] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2[alu2] ="));
+  ASSERT_NOT_NULL(strstr(src, "data2[alu3] ="));
   ASSERT_NOT_NULL(strstr(src, "*")); /* multiply operator */
   ASSERT_TRUE(strstr(src, "for (var ridx0") == NULL);
   ASSERT_TRUE(strstr(src, "vec4<f32>") == NULL);
@@ -547,6 +546,41 @@ TEST(codegen, render_wgsl_uint32_ops) {
   ASSERT_NOT_NULL(strstr(src, ">>"));
   ASSERT_NOT_NULL(strstr(src, "%"));
   ASSERT_NOT_NULL(strstr(src, "select("));
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, render_wgsl_uint8_storage_is_packed_like_tinygrad) {
+  /* out[i] = in[i] for uint8. WGSL has no byte-addressable storage buffer,
+   * so tinygrad packs byte/short storage into atomic<u32> lanes. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_u8 = poly_dtype_ptr(POLY_UINT8, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u8, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_u8, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u8, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_u8, p1, range, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT8, idx0, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, load, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n);
+  char *src = poly_render_wgsl(lin, n, "copy_u8");
+
+  ASSERT_NOT_NULL(strstr(src, "data0: array<atomic<u32>>"));
+  ASSERT_NOT_NULL(strstr(src, "data1: array<atomic<u32>>"));
+  ASSERT_NOT_NULL(strstr(src, "atomicLoad(&data0[(ridx0/4)]"));
+  ASSERT_NOT_NULL(strstr(src, "atomicAnd(&data1[(ridx0/4)]"));
+  ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data1[(ridx0/4)]"));
+  ASSERT_TRUE(strstr(src, "data1[ridx0] =") == NULL);
 
   free(src);
   free(lin);
@@ -703,93 +737,6 @@ TEST(codegen, render_wgsl_param_bindings_follow_encounter_order) {
   PASS();
 }
 
-/* WebGPU step plan tests */
-
-TEST(codegen, webgpu_stepplan_vecadd) {
-  /* c[i] = a[i] + b[i] for i in 0..1024 — verify WebGPU GPU dims and plan */
-  PolyCtx *ctx = poly_ctx_new();
-
-  PolyUOp *a = poly_buffer_f32(ctx, 1024);
-  PolyUOp *b = poly_buffer_f32(ctx, 1024);
-  PolyUOp *c = poly_buffer_f32(ctx, 1024);
-
-  PolyUOp *sum = poly_add(ctx, a, b);
-  PolyUOp *store = poly_store_val(ctx, c, sum);
-  PolyUOp *sink = poly_sink1(ctx, store);
-
-  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
-  ASSERT_NOT_NULL(plan);
-
-  ASSERT_TRUE(poly_webgpu_stepplan_n_kernels(plan) >= 1);
-
-  /* WGSL source contains GPU preamble and builtins */
-  int wgsl_len = 0;
-  const char *wgsl = poly_webgpu_stepplan_kernel_wgsl(plan, 0, &wgsl_len);
-  ASSERT_NOT_NULL(wgsl);
-  ASSERT_TRUE(wgsl_len > 0);
-  ASSERT_NOT_NULL(strstr(wgsl, "fn nan()"));
-  ASSERT_NOT_NULL(strstr(wgsl, "INFINITY"));
-  ASSERT_NOT_NULL(strstr(wgsl, "gindex"));
-  ASSERT_NOT_NULL(strstr(wgsl, "lindex"));
-
-  /* GPU dims: 1024 elements / 256 block_size = 4 workgroups */
-  ASSERT_TRUE(poly_webgpu_stepplan_kernel_grid(plan, 0, 0) >= 1);
-  ASSERT_TRUE(poly_webgpu_stepplan_kernel_local(plan, 0, 0) >= 1);
-
-  /* 3 bindable buffers (a, b, c), 1024*4 bytes each */
-  ASSERT_TRUE(poly_webgpu_stepplan_n_bindable_buffers(plan) == 3);
-  ASSERT_TRUE(poly_webgpu_stepplan_buf_nbytes(plan, 0) == 4096);
-  ASSERT_TRUE(poly_webgpu_stepplan_buf_nbytes(plan, 1) == 4096);
-  ASSERT_TRUE(poly_webgpu_stepplan_buf_nbytes(plan, 2) == 4096);
-
-  int n_order = 0;
-  const int *order = poly_webgpu_stepplan_exec_order(plan, &n_order);
-  ASSERT_NOT_NULL(order);
-  ASSERT_TRUE(n_order >= 1);
-
-  poly_webgpu_stepplan_destroy(plan);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
-TEST(codegen, webgpu_stepplan_chain) {
-  /* c = neg(a + b): fused elementwise chain, validates multi-op WGSL */
-  PolyCtx *ctx = poly_ctx_new();
-
-  PolyUOp *a = poly_buffer_f32(ctx, 16);
-  PolyUOp *b = poly_buffer_f32(ctx, 16);
-  PolyUOp *c = poly_buffer_f32(ctx, 16);
-
-  PolyUOp *sum = poly_add(ctx, a, b);
-  PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, sum);
-  PolyUOp *store = poly_store_val(ctx, c, neg);
-  PolyUOp *sink = poly_sink1(ctx, store);
-
-  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
-  ASSERT_NOT_NULL(plan);
-
-  ASSERT_TRUE(poly_webgpu_stepplan_n_kernels(plan) >= 1);
-
-  /* Verify WGSL contains both add and neg */
-  int wgsl_len = 0;
-  const char *wgsl = poly_webgpu_stepplan_kernel_wgsl(plan, 0, &wgsl_len);
-  ASSERT_NOT_NULL(wgsl);
-  ASSERT_TRUE(wgsl_len > 50);
-  ASSERT_NOT_NULL(strstr(wgsl, "+"));
-  ASSERT_NOT_NULL(strstr(wgsl, "(-"));
-
-  /* 3 bindable buffers */
-  ASSERT_TRUE(poly_webgpu_stepplan_n_bindable_buffers(plan) == 3);
-
-  /* Grid/local dims are valid */
-  ASSERT_TRUE(poly_webgpu_stepplan_kernel_grid(plan, 0, 0) >= 1);
-  ASSERT_TRUE(poly_webgpu_stepplan_kernel_local(plan, 0, 0) >= 1);
-
-  poly_webgpu_stepplan_destroy(plan);
-  poly_ctx_destroy(ctx);
-  PASS();
-}
-
 /* WebGPU GPU linearizer output tests */
 
 TEST(codegen, linearize_webgpu_vecadd_emits_gpudims) {
@@ -829,25 +776,30 @@ TEST(codegen, linearize_webgpu_reduce_emits_shared_barrier) {
   PolyUOp *store = poly_store_val(ctx, out, sum);
   PolyUOp *sink = poly_sink1(ctx, store);
 
-  /* Generate step plan and verify WGSL contains GPU reduction patterns */
-  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
-  ASSERT_NOT_NULL(plan);
-  ASSERT_TRUE(poly_webgpu_stepplan_n_kernels(plan) >= 1);
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
 
-  /* At least one kernel should have shared memory + barrier */
-  int k = find_webgpu_kernel(plan, "var<workgroup>", "workgroupBarrier();");
-  ASSERT_TRUE(k >= 0);
+  bool found = false;
+  for (int i = 0; i < sched->n_items; i++) {
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[i].root, &n_lin);
+    ASSERT_NOT_NULL(lin);
+    char *wgsl = poly_render_wgsl(lin, n_lin, "reduce_webgpu");
+    ASSERT_NOT_NULL(wgsl);
+    if (strstr(wgsl, "var<workgroup>") && strstr(wgsl, "workgroupBarrier();"))
+      found = true;
+    free(wgsl);
+    free(lin);
+  }
+  ASSERT_TRUE(found);
 
-  /* That kernel should have local dims > 1 (parallel reduction threads) */
-  ASSERT_TRUE(poly_webgpu_stepplan_kernel_local(plan, k, 0) > 1);
-
-  poly_webgpu_stepplan_destroy(plan);
+  poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(codegen, full_rewrite_post_index_lowering_narrows_i64_addressing) {
-  VecKernel k = make_vec_copy_with_casted_int64_index(32);
+  VecKernel k = make_vec_copy_with_weak_index_expr(32);
   PolyRewriteOpts opts = {
       .optimize = false,
       .devectorize = 1,
@@ -868,7 +820,7 @@ TEST(codegen, full_rewrite_post_index_lowering_narrows_i64_addressing) {
 }
 
 TEST(codegen, linearize_webgpu_narrows_i64_addressing) {
-  VecKernel k = make_vec_copy_with_casted_int64_index(32);
+  VecKernel k = make_vec_copy_with_weak_index_expr(32);
   int n_lin = 0;
   PolyUOp **lin = poly_linearize_webgpu(k.ctx, k.sink, &n_lin);
   ASSERT_NOT_NULL(lin);

@@ -204,7 +204,7 @@ static IndexKindCounts count_index_kinds(PolyCtx *ctx, PolyUOp *root) {
 
 /* Single-kernel: vecadd */
 
-TEST(exec_plan, prepare_vecadd) {
+TEST(schedule_runtime, prepare_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -247,7 +247,7 @@ TEST(exec_plan, prepare_vecadd) {
   PASS();
 }
 
-TEST(exec_plan, create_schedule_matches_complete_schedule_vecadd) {
+TEST(schedule_runtime, create_schedule_matches_complete_schedule_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *b = poly_buffer_f32(ctx, 8);
@@ -289,7 +289,7 @@ TEST(exec_plan, create_schedule_matches_complete_schedule_vecadd) {
   PASS();
 }
 
-TEST(exec_plan, lower_sink_to_linear_matches_create_schedule_vecadd) {
+TEST(schedule_runtime, lower_sink_to_linear_matches_create_schedule_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *b = poly_buffer_f32(ctx, 8);
@@ -310,7 +310,12 @@ TEST(exec_plan, lower_sink_to_linear_matches_create_schedule_vecadd) {
 
   for (int step = 0; step < schedule->n_items; step++) {
     int idx = schedule->exec_order ? schedule->exec_order[step] : step;
-    ASSERT_TRUE(poly_structural_eq(linear->src[step], schedule->items[idx].root));
+    PolyUOp *linear_item = linear->src[step];
+    /* Cached LINEAR mirrors tinygrad's callified form: each entry is a CALL
+     * carrying the reusable kernel root plus its parameter order. */
+    if (linear_item && linear_item->op == POLY_OP_CALL && linear_item->n_src >= 1)
+      linear_item = linear_item->src[0];
+    ASSERT_TRUE(poly_structural_eq(linear_item, schedule->items[idx].root));
   }
 
   poly_schedule_free(schedule);
@@ -318,7 +323,539 @@ TEST(exec_plan, lower_sink_to_linear_matches_create_schedule_vecadd) {
   PASS();
 }
 
-TEST(exec_plan, full_rewrite_vecadd_upcast_preserves_end_ranges_like_tinygrad) {
+TEST(schedule_runtime, lower_sink_to_linear_caches_structural_linear) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+
+  PolyUOp *a1 = poly_buffer_f32(ctx, 8);
+  PolyUOp *b1 = poly_buffer_f32(ctx, 8);
+  PolyUOp *out1 = poly_buffer_f32(ctx, 8);
+  PolyUOp *sink1 = poly_sink1(ctx, poly_store_val(ctx, out1, poly_alu2(ctx, POLY_OP_ADD, a1, b1)));
+
+  PolyUOp *linear1 = poly_lower_sink_to_linear(ctx, sink1, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear1);
+  ASSERT_EQ(linear1->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *a2 = poly_buffer_f32(ctx, 8);
+  PolyUOp *b2 = poly_buffer_f32(ctx, 8);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 8);
+  PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_ADD, a2, b2)));
+
+  PolyUOp *linear2 = poly_lower_sink_to_linear(ctx, sink2, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear2);
+  ASSERT_PTR_EQ(linear1, linear2);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyUOp *make_bufferview_cache_sink(PolyCtx *ctx, int64_t tag) {
+  PolyUOp *base = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag));
+  int64_t view_shape[1] = {8};
+  PolyArg view_arg = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {view_shape, 1}};
+  PolyUOp *view_src[2] = {base, unique};
+  PolyUOp *view = poly_uop(ctx, POLY_OP_BUFFER_VIEW, POLY_FLOAT32, view_src, 2, view_arg);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, view, one);
+  return poly_sink1(ctx, poly_store_val(ctx, out, add));
+}
+
+TEST(schedule_runtime, lower_sink_to_linear_cache_normalizes_buffer_view_identity) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *linear1 = poly_lower_sink_to_linear(ctx, make_bufferview_cache_sink(ctx, 1000), POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear1);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  /* tinygrad callify.pm_replace_buf normalizes BUFFER_VIEW as a call param for
+   * schedule-cache identity, the same as BUFFER and BIND. */
+  PolyUOp *linear2 = poly_lower_sink_to_linear(ctx, make_bufferview_cache_sink(ctx, 2000), POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear2);
+  ASSERT_PTR_EQ(linear1, linear2);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyUOp *make_bound_vecadd_sink(
+    PolyCtx *ctx,
+    PolyUOp *N,
+    int64_t value,
+    int tag_base,
+    PolyUOp **a_out,
+    PolyUOp **b_out,
+    PolyUOp **out_out
+) {
+  PolyUOp *bind_N = poly_bind_var(ctx, N, value);
+  PolyUOp *unique_a = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag_base));
+  PolyUOp *unique_b = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag_base + 1));
+  PolyUOp *unique_o = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag_base + 2));
+  PolyUOp *src_a[2] = {unique_a, bind_N};
+  PolyUOp *src_b[2] = {unique_b, bind_N};
+  PolyUOp *src_o[2] = {unique_o, bind_N};
+  PolyUOp *a = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_a, 2, poly_arg_int(16));
+  PolyUOp *b = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_b, 2, poly_arg_int(16));
+  PolyUOp *out = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_o, 2, poly_arg_int(16));
+  if (a_out) *a_out = a;
+  if (b_out) *b_out = b;
+  if (out_out) *out_out = out;
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  return poly_sink1(ctx, poly_store_val(ctx, out, add));
+}
+
+TEST(schedule_runtime, lower_sink_to_linear_cache_ignores_bind_values) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+
+  PolyUOp *sink4 = make_bound_vecadd_sink(ctx, N, 4, 3000000, NULL, NULL, NULL);
+  PolyUOp *linear4 = poly_lower_sink_to_linear(ctx, sink4, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear4);
+  ASSERT_EQ(linear4->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *sink8 = make_bound_vecadd_sink(ctx, N, 8, 3000000, NULL, NULL, NULL);
+  PolyUOp *linear8 = poly_lower_sink_to_linear(ctx, sink8, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear8);
+  ASSERT_PTR_EQ(linear4, linear8);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static bool schedule_has_buf_slot(PolySchedule *sched, PolyUOp *buf) {
+  for (int i = 0; sched && i < sched->n_buf_slots; i++)
+    if (sched->buf_slots[i].buf_uop == buf) return true;
+  return false;
+}
+
+TEST(schedule_runtime, complete_schedule_reuses_linear_cache_with_current_buf_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a1 = poly_buffer_f32(ctx, 8);
+  PolyUOp *b1 = poly_buffer_f32(ctx, 8);
+  PolyUOp *out1 = poly_buffer_f32(ctx, 8);
+  PolyUOp *sink1 = poly_sink1(ctx, poly_store_val(ctx, out1, poly_alu2(ctx, POLY_OP_ADD, a1, b1)));
+  PolySchedule *sched1 = poly_complete_create_schedule_with_vars(ctx, sink1, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched1);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *a2 = poly_buffer_f32(ctx, 8);
+  PolyUOp *b2 = poly_buffer_f32(ctx, 8);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 8);
+  PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_ADD, a2, b2)));
+  PolySchedule *sched2 = poly_complete_create_schedule_with_vars(ctx, sink2, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched2);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  ASSERT_INT_EQ(sched1->n_items, 1);
+  ASSERT_INT_EQ(sched2->n_items, 1);
+  ASSERT_PTR_EQ(sched1->items[0].root, sched2->items[0].root);
+  ASSERT_TRUE(schedule_has_buf_slot(sched2, a2));
+  ASSERT_TRUE(schedule_has_buf_slot(sched2, b2));
+  ASSERT_TRUE(schedule_has_buf_slot(sched2, out2));
+  ASSERT_FALSE(schedule_has_buf_slot(sched2, a1));
+  ASSERT_FALSE(schedule_has_buf_slot(sched2, b1));
+  ASSERT_FALSE(schedule_has_buf_slot(sched2, out1));
+
+  poly_schedule_free(sched1);
+  poly_schedule_free(sched2);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, complete_schedule_cached_linear_uses_current_bind_defaults) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+
+  PolyUOp *a4 = NULL, *b4 = NULL, *out4 = NULL;
+  PolyUOp *sink4 = make_bound_vecadd_sink(ctx, N, 4, 4000000, &a4, &b4, &out4);
+  float a4_data[16], b4_data[16], out4_data[16];
+  for (int i = 0; i < 16; i++) {
+    a4_data[i] = (float)i;
+    b4_data[i] = (float)(100 + i);
+    out4_data[i] = -1.0f;
+  }
+  PolyTestBufferView views4[] = {
+      POLY_TEST_HOST_VIEW(a4, a4_data),
+      POLY_TEST_HOST_VIEW(b4, b4_data),
+      POLY_TEST_HOST_VIEW(out4, out4_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink4, views4, 3, NULL, 0), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out4_data[3], 106.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out4_data[4], -1.0f, 1e-5);
+
+  PolyUOp *a8 = NULL, *b8 = NULL, *out8 = NULL;
+  PolyUOp *sink8 = make_bound_vecadd_sink(ctx, N, 8, 4000000, &a8, &b8, &out8);
+  float a8_data[16], b8_data[16], out8_data[16];
+  for (int i = 0; i < 16; i++) {
+    a8_data[i] = (float)(10 + i);
+    b8_data[i] = (float)(200 + i);
+    out8_data[i] = -1.0f;
+  }
+  PolyTestBufferView views8[] = {
+      POLY_TEST_HOST_VIEW(a8, a8_data),
+      POLY_TEST_HOST_VIEW(b8, b8_data),
+      POLY_TEST_HOST_VIEW(out8, out8_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink8, views8, 3, NULL, 0), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out8_data[7], 224.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out8_data[8], -1.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, cached_linear_sub_e2e_uses_current_param_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *b1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *out1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink1 =
+      poly_sink1(ctx, poly_store_val(ctx, out1, poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, a1, b1, poly_arg_none())));
+  float a1_data[4] = {10, 20, 30, 40};
+  float b1_data[4] = {1, 2, 3, 4};
+  float out1_data[4] = {0};
+  PolyTestBufferView views1[] = {
+      POLY_TEST_HOST_VIEW(a1, a1_data),
+      POLY_TEST_HOST_VIEW(b1, b1_data),
+      POLY_TEST_HOST_VIEW(out1, out1_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out1_data[0], 9.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out1_data[3], 36.0f, 1e-5);
+
+  PolyUOp *a2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *b2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink2 =
+      poly_sink1(ctx, poly_store_val(ctx, out2, poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, a2, b2, poly_arg_none())));
+  float a2_data[4] = {100, 200, 300, 400};
+  float b2_data[4] = {7, 8, 9, 10};
+  float out2_data[4] = {0};
+  PolyTestBufferView views2[] = {
+      POLY_TEST_HOST_VIEW(a2, a2_data),
+      POLY_TEST_HOST_VIEW(b2, b2_data),
+      POLY_TEST_HOST_VIEW(out2, out2_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 3), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out2_data[0], 93.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out2_data[3], 390.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, cached_linear_assign_chain_uses_raw_sink_param_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *v1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *v2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *inner_src[2] = {buf, v1};
+  PolyUOp *inner = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, inner_src, 2, poly_arg_none());
+  PolyUOp *outer_src[2] = {inner, v2};
+  PolyUOp *outer = poly_uop(ctx, POLY_OP_ASSIGN, POLY_FLOAT32, outer_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, outer);
+
+  float buf_data[4] = {0, 0, 0, 0};
+  float v1_data[4] = {1, 2, 3, 4};
+  float v2_data[4] = {10, 20, 30, 40};
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(buf, buf_data),
+      POLY_TEST_HOST_VIEW(v1, v1_data),
+      POLY_TEST_HOST_VIEW(v2, v2_data),
+  };
+
+  /* earliest_rewrites collapses ASSIGN(ASSIGN(buf, v1), v2) to
+   * ASSIGN(buf, v2), so the optimized kernel graph no longer uses v1. The
+   * cached LINEAR replay must still number CALL params against the original
+   * sink slots, otherwise PARAM(1) incorrectly binds v1 instead of v2. */
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, views, 3), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(buf_data[0], 10.0f, 1e-5);
+  ASSERT_FLOAT_EQ(buf_data[3], 40.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+
+  /* This mirrors tinygrad's to_program/runtime cache layer: the schedule is
+   * rebuilt for a fresh realization, but the backend program for the same
+   * normalized kernel root is reused while current buffer slots are rebound. */
+  PolyUOp *a1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *b1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *out1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink1 = poly_sink1(ctx, poly_store_val(ctx, out1, poly_alu2(ctx, POLY_OP_ADD, a1, b1)));
+  float a1_data[4] = {1, 2, 3, 4};
+  float b1_data[4] = {10, 20, 30, 40};
+  float out1_data[4] = {0};
+  PolyTestBufferView views1[] = {
+      POLY_TEST_HOST_VIEW(a1, a1_data),
+      POLY_TEST_HOST_VIEW(b1, b1_data),
+      POLY_TEST_HOST_VIEW(out1, out1_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out1_data[0], 11.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out1_data[3], 44.0f, 1e-5);
+
+  PolyUOp *a2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *b2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_ADD, a2, b2)));
+  float a2_data[4] = {5, 6, 7, 8};
+  float b2_data[4] = {50, 60, 70, 80};
+  float out2_data[4] = {0};
+  PolyTestBufferView views2[] = {
+      POLY_TEST_HOST_VIEW(a2, a2_data),
+      POLY_TEST_HOST_VIEW(b2, b2_data),
+      POLY_TEST_HOST_VIEW(out2, out2_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 3), 0);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out2_data[0], 55.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out2_data[3], 88.0f, 1e-5);
+
+  PolyUOp *out3 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink3 = poly_sink1(ctx, poly_store_val(ctx, out3, poly_alu2(ctx, POLY_OP_MUL, a2, b2)));
+  float out3_data[4] = {0};
+  PolyTestBufferView views3[] = {
+      POLY_TEST_HOST_VIEW(a2, a2_data),
+      POLY_TEST_HOST_VIEW(b2, b2_data),
+      POLY_TEST_HOST_VIEW(out3, out3_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink3, views3, 3), 0);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 2);
+  ASSERT_FLOAT_EQ(out3_data[0], 250.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out3_data[3], 640.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, schedule_cache_misses_on_changed_op_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink_add =
+      poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+  PolyUOp *lin_add = poly_lower_sink_to_linear(ctx, sink_add, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(lin_add);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *c = poly_buffer_f32(ctx, 4);
+  PolyUOp *d = poly_buffer_f32(ctx, 4);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink_mul =
+      poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_MUL, c, d)));
+  PolyUOp *lin_mul = poly_lower_sink_to_linear(ctx, sink_mul, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(lin_mul);
+  ASSERT_TRUE(lin_mul != lin_add);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 2);
+
+  int64_t axes[] = {0};
+  PolyUOp *e = poly_buffer_f32(ctx, 4);
+  PolyUOp *out3 = poly_buffer_f32(ctx, 1);
+  PolyUOp *sink_reduce =
+      poly_sink1(ctx, poly_store_val(ctx, out3, poly_reduce_axis(ctx, POLY_OP_ADD, e, axes, 1)));
+  PolyUOp *lin_reduce = poly_lower_sink_to_linear(ctx, sink_reduce, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(lin_reduce);
+  ASSERT_TRUE(lin_reduce != lin_add);
+  ASSERT_TRUE(lin_reduce != lin_mul);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 3);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, cached_linear_runtime_override_wins_over_default) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+
+  PolyUOp *a4 = NULL, *b4 = NULL, *out4 = NULL;
+  PolyUOp *sink4 = make_bound_vecadd_sink(ctx, N, 4, 5000000, &a4, &b4, &out4);
+  float a4_data[16], b4_data[16], out4_data[16];
+  for (int i = 0; i < 16; i++) {
+    a4_data[i] = (float)i;
+    b4_data[i] = (float)(100 + i);
+    out4_data[i] = -1.0f;
+  }
+  PolyTestBufferView views4[] = {
+      POLY_TEST_HOST_VIEW(a4, a4_data),
+      POLY_TEST_HOST_VIEW(b4, b4_data),
+      POLY_TEST_HOST_VIEW(out4, out4_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink4, views4, 3, NULL, 0), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *a_again = NULL, *b_again = NULL, *out_again = NULL;
+  PolyUOp *sink_again = make_bound_vecadd_sink(ctx, N, 4, 5000100, &a_again, &b_again, &out_again);
+  float a_data[16], b_data[16], out_data[16];
+  for (int i = 0; i < 16; i++) {
+    a_data[i] = (float)(10 + i);
+    b_data[i] = (float)(200 + i);
+    out_data[i] = -1.0f;
+  }
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(a_again, a_data),
+      POLY_TEST_HOST_VIEW(b_again, b_data),
+      POLY_TEST_HOST_VIEW(out_again, out_data),
+  };
+  PolyVarBinding override = {.var = N, .value = 6};
+  ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink_again, views, 3, &override, 1), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out_data[5], 220.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[6], -1.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+static PolyUOp *make_copy_sink(PolyCtx *ctx, PolyUOp **src_out, PolyUOp **dst_out) {
+  PolyUOp *src = poly_buffer_f32(ctx, 4);
+  PolyUOp *dst = poly_buffer_f32(ctx, 4);
+  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *copy_src[2] = {src, dev};
+  PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  if (src_out) *src_out = src;
+  if (dst_out) *dst_out = dst;
+  return poly_sink1(ctx, poly_store_val(ctx, dst, copy));
+}
+
+TEST(schedule_runtime, cached_linear_copy_e2e_uses_current_copy_slots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *src1 = NULL, *dst1 = NULL;
+  PolyUOp *sink1 = make_copy_sink(ctx, &src1, &dst1);
+  float src1_data[4] = {1, 2, 3, 4};
+  float dst1_data[4] = {0};
+  PolyTestBufferView views1[] = {
+      POLY_TEST_HOST_VIEW(src1, src1_data),
+      POLY_TEST_HOST_VIEW(dst1, dst1_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 2), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(dst1_data[0], 1.0f, 1e-5);
+  ASSERT_FLOAT_EQ(dst1_data[3], 4.0f, 1e-5);
+
+  PolyUOp *src2 = NULL, *dst2 = NULL;
+  PolyUOp *sink2 = make_copy_sink(ctx, &src2, &dst2);
+  PolySchedule *sched2 = poly_complete_create_schedule_with_vars(ctx, sink2, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched2);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  PolyExecItem *copy_item = NULL;
+  for (int i = 0; i < sched2->n_items; i++)
+    if (sched2->items[i].kind == POLY_EXEC_COPY) copy_item = &sched2->items[i];
+  ASSERT_TRUE(copy_item != NULL);
+  ASSERT_INT_EQ(copy_item->n_buf_slots, 2);
+  ASSERT_TRUE(copy_item->buf_slot_indices[0] >= 0);
+  ASSERT_TRUE(copy_item->buf_slot_indices[1] >= 0);
+  ASSERT_PTR_EQ(sched2->buf_slots[copy_item->buf_slot_indices[0]].buf_uop, dst2);
+  ASSERT_PTR_EQ(sched2->buf_slots[copy_item->buf_slot_indices[1]].buf_uop, src2);
+  ASSERT_TRUE(schedule_has_buf_slot(sched2, src2));
+  ASSERT_TRUE(schedule_has_buf_slot(sched2, dst2));
+  ASSERT_FALSE(schedule_has_buf_slot(sched2, src1));
+  ASSERT_FALSE(schedule_has_buf_slot(sched2, dst1));
+  poly_schedule_free(sched2);
+
+  float src2_data[4] = {10, 20, 30, 40};
+  float dst2_data[4] = {0};
+  PolyTestBufferView views2[] = {
+      POLY_TEST_HOST_VIEW(src2, src2_data),
+      POLY_TEST_HOST_VIEW(dst2, dst2_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 2), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(dst2_data[0], 10.0f, 1e-5);
+  ASSERT_FLOAT_EQ(dst2_data[3], 40.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, cached_linear_multikernel_e2e_uses_current_buffers) {
+  int N = 4;
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a1 = poly_buffer_f32(ctx, N);
+  PolyUOp *b1 = poly_buffer_f32(ctx, N);
+  PolyUOp *out1 = poly_buffer_f32(ctx, N);
+  int64_t axes[] = {0};
+  int64_t one_sh[] = {1};
+  int64_t exp_sh[] = {N};
+  PolyUOp *s1 = poly_reduce_axis(ctx, POLY_OP_ADD, a1, axes, 1);
+  PolyUOp *se1 = poly_expand(ctx, poly_reshape(ctx, s1, one_sh, 1), exp_sh, 1);
+  PolyUOp *sink1 = poly_sink1(ctx, poly_store_val(ctx, out1, poly_alu2(ctx, POLY_OP_ADD, se1, b1)));
+  float a1_data[4] = {1, 2, 3, 4};
+  float b1_data[4] = {10, 20, 30, 40};
+  float out1_data[4] = {0};
+  PolyTestBufferView views1[] = {
+      POLY_TEST_HOST_VIEW(a1, a1_data),
+      POLY_TEST_HOST_VIEW(b1, b1_data),
+      POLY_TEST_HOST_VIEW(out1, out1_data),
+  };
+  PolySchedule *sched1 = poly_complete_create_schedule_with_vars(ctx, sink1, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched1);
+  ASSERT_TRUE(sched1->n_items > 1);
+  poly_schedule_free(sched1);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out1_data[0], 20.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out1_data[3], 50.0f, 1e-5);
+
+  PolyUOp *a2 = poly_buffer_f32(ctx, N);
+  PolyUOp *b2 = poly_buffer_f32(ctx, N);
+  PolyUOp *out2 = poly_buffer_f32(ctx, N);
+  PolyUOp *s2 = poly_reduce_axis(ctx, POLY_OP_ADD, a2, axes, 1);
+  PolyUOp *se2 = poly_expand(ctx, poly_reshape(ctx, s2, one_sh, 1), exp_sh, 1);
+  PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_ADD, se2, b2)));
+  float a2_data[4] = {5, 6, 7, 8};
+  float b2_data[4] = {100, 200, 300, 400};
+  float out2_data[4] = {0};
+  PolyTestBufferView views2[] = {
+      POLY_TEST_HOST_VIEW(a2, a2_data),
+      POLY_TEST_HOST_VIEW(b2, b2_data),
+      POLY_TEST_HOST_VIEW(out2, out2_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 3), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out2_data[0], 126.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out2_data[3], 426.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, full_rewrite_vecadd_upcast_preserves_end_ranges_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -363,7 +900,7 @@ TEST(exec_plan, full_rewrite_vecadd_upcast_preserves_end_ranges_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, linearize_vecadd_upcast_has_no_singleton_group_like_tinygrad) {
+TEST(schedule_runtime, linearize_vecadd_upcast_has_no_singleton_group_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -396,7 +933,7 @@ TEST(exec_plan, linearize_vecadd_upcast_has_no_singleton_group_like_tinygrad) {
 
 /* Multi-kernel: reduce -> scalar chain */
 
-TEST(exec_plan, prepare_multikernel) {
+TEST(schedule_runtime, prepare_multikernel) {
   /* c = expand(reshape(sum(a), (1))) + b  -- sum produces intermediate */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -447,7 +984,7 @@ TEST(exec_plan, prepare_multikernel) {
 
 /* Buffer slot metadata */
 
-TEST(exec_plan, prepare_buf_slot_metadata) {
+TEST(schedule_runtime, prepare_buf_slot_metadata) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
   PolyUOp *b = poly_buffer_f64(ctx, 8);
@@ -472,7 +1009,11 @@ TEST(exec_plan, prepare_buf_slot_metadata) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_param_order_matches_runtime_slots) {
+TEST(schedule_runtime, webgpu_triu_param_order_matches_runtime_slots) {
+  if (!poly_backend_get(POLY_DEVICE_WEBGPU)) {
+    SKIP("WebGPU runtime backend not available in this build");
+  }
+
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -489,12 +1030,12 @@ TEST(exec_plan, webgpu_triu_param_order_matches_runtime_slots) {
   ASSERT_TRUE(sched != NULL);
   ASSERT_TRUE(sched->n_items >= 1);
 
-  PolyWebGpuStepPlan *plan = poly_render_step_webgpu_plan(ctx, sink);
-  ASSERT_TRUE(plan != NULL);
-
   bool checked_kernel = false;
   for (int k = 0; k < sched->n_items; k++) {
     PolyExecItem *item = &sched->items[k];
+    ASSERT_INT_EQ(poly_exec_item_lower(ctx, sched, k, POLY_DEVICE_WEBGPU), 0);
+    ASSERT_INT_EQ(item->prg.n_params, item->n_buf_slots);
+
     int n_lin = 0;
     PolyUOp **lin = poly_linearize_webgpu(ctx, item->root, &n_lin);
     ASSERT_TRUE(lin != NULL);
@@ -504,24 +1045,21 @@ TEST(exec_plan, webgpu_triu_param_order_matches_runtime_slots) {
       if (lin[i]->op != POLY_OP_PARAM) continue;
       ASSERT_TRUE(seen_params < item->n_buf_slots);
       ASSERT_INT_EQ((int)lin[i]->arg.i, seen_params);
-      ASSERT_INT_EQ(poly_webgpu_stepplan_kernel_param_buf_index(plan, k, seen_params),
-                    item->buf_slot_indices[(int)lin[i]->arg.i]);
+      ASSERT_INT_EQ(item->prg.param_to_slot[seen_params], item->buf_slot_indices[(int)lin[i]->arg.i]);
       seen_params++;
     }
-    ASSERT_INT_EQ(poly_webgpu_stepplan_kernel_n_params(plan, k), item->n_buf_slots);
     ASSERT_INT_EQ(seen_params, item->n_buf_slots);
     free(lin);
     checked_kernel = true;
   }
 
   ASSERT_TRUE(checked_kernel);
-  poly_webgpu_stepplan_destroy(plan);
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(exec_plan, webgpu_unified_triu_renders_single_kernel_no_helper_params) {
+TEST(schedule_runtime, webgpu_unified_triu_renders_single_kernel_no_helper_params) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -561,7 +1099,7 @@ TEST(exec_plan, webgpu_unified_triu_renders_single_kernel_no_helper_params) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_unified_triu_has_no_vector_gated_loads) {
+TEST(schedule_runtime, webgpu_unified_triu_has_no_vector_gated_loads) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -604,7 +1142,7 @@ TEST(exec_plan, webgpu_unified_triu_has_no_vector_gated_loads) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_move_where_keeps_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_move_where_keeps_residual_where_like_tinygrad) {
   for (int n = 3; n <= 9; n += 6) {
     PolyCtx *ctx = poly_ctx_new();
     ASSERT_TRUE(ctx != NULL);
@@ -656,7 +1194,7 @@ TEST(exec_plan, webgpu_triu_move_where_keeps_residual_where_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -689,7 +1227,7 @@ TEST(exec_plan, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -734,7 +1272,7 @@ TEST(exec_plan, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_small_expander_drops_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_small_expander_drops_residual_where_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -765,7 +1303,7 @@ TEST(exec_plan, webgpu_triu_small_expander_drops_residual_where_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_tril_small_expander_drops_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_tril_small_expander_drops_residual_where_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -796,7 +1334,7 @@ TEST(exec_plan, webgpu_tril_small_expander_drops_residual_where_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_small_devector_matches_tinygrad_load_count) {
+TEST(schedule_runtime, webgpu_triu_small_devector_matches_tinygrad_load_count) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -833,7 +1371,7 @@ TEST(exec_plan, webgpu_triu_small_devector_matches_tinygrad_load_count) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_tril_small_devector_matches_tinygrad_load_count) {
+TEST(schedule_runtime, webgpu_tril_small_devector_matches_tinygrad_load_count) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -870,7 +1408,7 @@ TEST(exec_plan, webgpu_tril_small_devector_matches_tinygrad_load_count) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_add_loads_keeps_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_add_loads_keeps_residual_where_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -914,7 +1452,7 @@ TEST(exec_plan, webgpu_triu_add_loads_keeps_residual_where_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_post_index_symbolic_keeps_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_post_index_symbolic_lowers_where_to_gated_load_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -951,16 +1489,18 @@ TEST(exec_plan, webgpu_triu_post_index_symbolic_keeps_residual_where_like_tinygr
   u = poly_apply_devectorize_stage(ctx, u, 1, caps);
   u = poly_apply_post_index_symbolic_stage(ctx, u, 1);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
+  /* tinygrad_latest WGSL pipeline keeps the residual WHERE through add_loads,
+   * then pm_lower_index_dtype/load_store_indexing lowers it into INDEX.valid. */
+  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_LOAD), 1);
-  ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 0);
+  ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 1);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(exec_plan, webgpu_triu_final_rewrite_keeps_scalar_where_load_like_tinygrad) {
+TEST(schedule_runtime, webgpu_triu_final_rewrite_keeps_gated_load_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -995,16 +1535,18 @@ TEST(exec_plan, webgpu_triu_final_rewrite_keeps_scalar_where_load_like_tinygrad)
 
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sched->items[0].root, opts);
   ASSERT_TRUE(rewritten != NULL);
-  ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_WHERE), 1);
+  /* Matches temp/tg_webgpu_tri_stage_probe.py: after final WGSL rewrite the
+   * mask is still represented as the LOAD's INDEX.valid gate, not a WHERE. */
+  ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_WHERE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_LOAD), 1);
-  ASSERT_INT_EQ(count_root_gated_loads(ctx, rewritten), 0);
+  ASSERT_INT_EQ(count_root_gated_loads(ctx, rewritten), 1);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(exec_plan, webgpu_unified_tril_has_no_vector_gated_loads) {
+TEST(schedule_runtime, webgpu_unified_tril_has_no_vector_gated_loads) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -1038,7 +1580,7 @@ TEST(exec_plan, webgpu_unified_tril_has_no_vector_gated_loads) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_tril_add_loads_keeps_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_tril_add_loads_keeps_residual_where_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -1057,7 +1599,7 @@ TEST(exec_plan, webgpu_tril_add_loads_keeps_residual_where_like_tinygrad) {
   PASS();
 }
 
-TEST(exec_plan, webgpu_tril_post_index_symbolic_keeps_residual_where_like_tinygrad) {
+TEST(schedule_runtime, webgpu_tril_post_index_symbolic_lowers_where_to_gated_load_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -1067,16 +1609,18 @@ TEST(exec_plan, webgpu_tril_post_index_symbolic_keeps_residual_where_like_tinygr
 
   PolyUOp *u = apply_webgpu_tri_stage_root(ctx, sched->items[0].root, true, true);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
+  /* tinygrad_latest WGSL pipeline keeps the residual WHERE through add_loads,
+   * then pm_lower_index_dtype/load_store_indexing lowers it into INDEX.valid. */
+  ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_LOAD), 1);
-  ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 0);
+  ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 1);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(exec_plan, webgpu_tril_final_rewrite_keeps_scalar_where_load_like_tinygrad) {
+TEST(schedule_runtime, webgpu_tril_final_rewrite_keeps_gated_load_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -1103,16 +1647,18 @@ TEST(exec_plan, webgpu_tril_final_rewrite_keeps_scalar_where_load_like_tinygrad)
 
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sched->items[0].root, opts);
   ASSERT_TRUE(rewritten != NULL);
-  ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_WHERE), 1);
+  /* Matches temp/tg_webgpu_tri_stage_probe.py: after final WGSL rewrite the
+   * mask is still represented as the LOAD's INDEX.valid gate, not a WHERE. */
+  ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_WHERE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_LOAD), 1);
-  ASSERT_INT_EQ(count_root_gated_loads(ctx, rewritten), 0);
+  ASSERT_INT_EQ(count_root_gated_loads(ctx, rewritten), 1);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(exec_plan, kernel_graph_triu_keeps_load_in_codegen_stage_only) {
+TEST(schedule_runtime, kernel_graph_triu_keeps_load_in_codegen_stage_only) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -1144,7 +1690,7 @@ TEST(exec_plan, kernel_graph_triu_keeps_load_in_codegen_stage_only) {
   PASS();
 }
 
-TEST(exec_plan, kernel_graph_triu_read_indices_stay_scalar_until_codegen) {
+TEST(schedule_runtime, kernel_graph_triu_read_indices_stay_scalar_until_codegen) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_TRUE(ctx != NULL);
 
@@ -1173,7 +1719,7 @@ TEST(exec_plan, kernel_graph_triu_read_indices_stay_scalar_until_codegen) {
 
 /* Null/invalid input handling */
 
-TEST(exec_plan, prepare_null_safety) {
+TEST(schedule_runtime, prepare_null_safety) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* NULL sink */
@@ -1192,7 +1738,7 @@ TEST(exec_plan, prepare_null_safety) {
 
 /* Graph hash is populated */
 
-TEST(exec_plan, prepare_graph_hash) {
+TEST(schedule_runtime, prepare_graph_hash) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -1212,7 +1758,7 @@ TEST(exec_plan, prepare_graph_hash) {
 
 /* Phase 3: Lower + Run */
 
-TEST(exec_plan, lower_and_run_vecadd) {
+TEST(schedule_runtime, lower_and_run_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -1261,7 +1807,7 @@ TEST(exec_plan, lower_and_run_vecadd) {
   PASS();
 }
 
-TEST(exec_plan, lower_and_run_multikernel) {
+TEST(schedule_runtime, lower_and_run_multikernel) {
   /* sum(a) -> reshape -> expand -> add(b) -> out
    * Multi-kernel: reduce produces intermediate. */
   int N = 8;
@@ -1322,8 +1868,8 @@ TEST(exec_plan, lower_and_run_multikernel) {
   PASS();
 }
 
-TEST(exec_plan, lower_matches_old_compile_step) {
-  /* Same graph through both old (poly_compile_step) and new (prepare+lower+run).
+TEST(schedule_runtime, lower_matches_realize_uops) {
+  /* Same graph through direct realize and explicit prepare+lower+run.
    * Results must be identical. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1336,14 +1882,12 @@ TEST(exec_plan, lower_matches_old_compile_step) {
   float da[] = {2, 3, 4, 5};
   float db[] = {10, 20, 30, 40};
 
-  /* Old path */
-  float dout_old[4] = {0};
-  PolyStep *old_step = poly_compile_step(ctx, sink);
-  ASSERT_TRUE(old_step != NULL);
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(a, da), POLY_BIND_HOST(b, db), POLY_BIND_HOST(out, dout_old)
+  /* Direct realize path */
+  float dout_direct[4] = {0};
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(out, dout_direct)
   };
-  ASSERT_INT_EQ(poly_step_run(old_step, bindings, 3), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 3), 0);
 
   /* New path */
   float dout_new[4] = {0};
@@ -1365,18 +1909,17 @@ TEST(exec_plan, lower_matches_old_compile_step) {
 
   /* Must match exactly */
   for (int i = 0; i < 4; i++)
-    ASSERT_FLOAT_EQ(dout_new[i], dout_old[i], 0.0);
+    ASSERT_FLOAT_EQ(dout_new[i], dout_direct[i], 0.0);
 
   poly_compiled_schedule_free(es);
   poly_schedule_free(ps);
-  poly_step_destroy(old_step);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 /* Phase 4: Interpreter backend */
 
-TEST(exec_plan, interp_vecadd) {
+TEST(schedule_runtime, interp_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -1422,7 +1965,7 @@ TEST(exec_plan, interp_vecadd) {
   PASS();
 }
 
-TEST(exec_plan, interp_reduce) {
+TEST(schedule_runtime, interp_reduce) {
   /* sum(a) -> reshape -> expand -> add(b) -> out */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -1475,7 +2018,7 @@ TEST(exec_plan, interp_reduce) {
   PASS();
 }
 
-TEST(exec_plan, interp_matches_cpu) {
+TEST(schedule_runtime, interp_matches_cpu) {
   /* Same graph, CPU vs INTERP, must produce identical results */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1533,7 +2076,7 @@ TEST(exec_plan, interp_matches_cpu) {
   PASS();
 }
 
-TEST(exec_plan, interp_transcendental) {
+TEST(schedule_runtime, interp_transcendental) {
   /* exp(log(a)) ~= a, tests the decomposed transcendental path */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1574,7 +2117,7 @@ TEST(exec_plan, interp_transcendental) {
 
 /* CPU vs INTERP parity suite */
 
-TEST(exec_plan, parity_chain) {
+TEST(schedule_runtime, parity_chain) {
   /* (a + b) * (a - b) -- 3-op elementwise chain */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 8);
@@ -1599,7 +2142,7 @@ TEST(exec_plan, parity_chain) {
   PASS();
 }
 
-TEST(exec_plan, parity_neg_sqrt) {
+TEST(schedule_runtime, parity_neg_sqrt) {
   /* sqrt(a) + neg(b) */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1624,7 +2167,7 @@ TEST(exec_plan, parity_neg_sqrt) {
   PASS();
 }
 
-TEST(exec_plan, parity_reduce_sum) {
+TEST(schedule_runtime, parity_reduce_sum) {
   /* sum(a) -> scalar output */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -1649,7 +2192,7 @@ TEST(exec_plan, parity_reduce_sum) {
   PASS();
 }
 
-TEST(exec_plan, parity_where) {
+TEST(schedule_runtime, parity_where) {
   /* where(a > 0, a, b) */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1678,7 +2221,7 @@ TEST(exec_plan, parity_where) {
   PASS();
 }
 
-TEST(exec_plan, parity_exp2_log2) {
+TEST(schedule_runtime, parity_exp2_log2) {
   /* exp2(log2(a)) ~= a (through decomposed polynomial path) */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1700,7 +2243,7 @@ TEST(exec_plan, parity_exp2_log2) {
   PASS();
 }
 
-TEST(exec_plan, parity_multikernel_reduce_chain) {
+TEST(schedule_runtime, parity_multikernel_reduce_chain) {
   /* sum(a) -> expand -> add(b): multi-kernel with intermediate */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -1736,7 +2279,7 @@ TEST(exec_plan, parity_multikernel_reduce_chain) {
 
 /* Phase 5: Persistent workspace */
 
-TEST(exec_plan, workspace_reuse) {
+TEST(schedule_runtime, workspace_reuse) {
   /* Run same plan 100 times with different data. Persistent intermediates
    * are zeroed each call (reduce accumulators). No per-call allocations. */
   int N = 8;
@@ -1803,7 +2346,7 @@ TEST(exec_plan, workspace_reuse) {
   PASS();
 }
 
-TEST(exec_plan, workspace_reduce_zeroed) {
+TEST(schedule_runtime, workspace_reduce_zeroed) {
   /* Verify reduce accumulators are zero at start of each run despite
    * persistent intermediates. Two consecutive reduce runs must each
    * produce correct independent results. */
@@ -1855,7 +2398,7 @@ TEST(exec_plan, workspace_reduce_zeroed) {
   PASS();
 }
 
-TEST(exec_plan, interp_gated_load_pad_shrink) {
+TEST(schedule_runtime, interp_gated_load_pad_shrink) {
   /* Pad+shrink+expand+reduce: verifies gated INDEX (from move_where_on_load)
    * is correctly handled by the interpreter LOAD. Without the fix, pad guards
    * are ignored and the result is 800 instead of 740. */

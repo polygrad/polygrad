@@ -18,7 +18,7 @@ from polygrad.device import Buffer
 
 # Global registry of live Tensors. Keys are weakrefs so GC'd tensors vanish
 # automatically. Used for post-realize retargeting and backward graph
-# discovery (replaces polygrad's legacy per-Tensor `_inputs` list).
+# discovery, matching tinygrad's live-tensor registry.
 all_tensors: dict[weakref.ref, None] = {}
 
 # Strong frontend owner registry keyed by the C-side PolyBuffer* address value.
@@ -27,6 +27,9 @@ all_tensors: dict[weakref.ref, None] = {}
 # when a HOST PolyBuffer is retired, and only then do we drop the owner entry.
 _host_buffers: dict[int, np.ndarray] = {}
 _frontend_buffer_release_cb = None
+
+_POLY_TENSOR_VALUE = 0
+_POLY_TENSOR_PLACE = 1
 
 
 def frontend_buffer_release(buffer_key):
@@ -51,6 +54,10 @@ def _uop_raw(uop):
     return uop.raw if isinstance(uop, UOp) else uop
 
 
+def _uop_wrap(ctx, raw):
+    return UOp(ctx, raw) if raw else None
+
+
 def _ptr_value(ptr):
     raw = _uop_raw(ptr)
     if isinstance(raw, ctypes.c_void_p):
@@ -58,11 +65,25 @@ def _ptr_value(ptr):
     return int(raw)
 
 
+def _device_name_from_id(device_id):
+    raw = _ffi._lib.poly_device_name(int(device_id))
+    if not raw:
+        return 'CPU'
+    return raw.decode('utf-8').upper()
+
+
 def _realized_buffer_uop(ctx, uop):
     if not uop:
         return None
     wrapped = uop if isinstance(uop, UOp) else UOp(ctx, uop)
     return wrapped.buffer or wrapped
+
+
+def _device_id(device):
+    from .device import Device
+
+    dev = Device.canonicalize(device).lower().encode('utf-8')
+    return int(_ffi._lib.poly_device_by_name(dev))
 
 
 def _alloc_buffer_and_array(ctx, numel, dtype_name):
@@ -245,9 +266,76 @@ def _created_tensor(ctx, uop, dtype_name, device, requires_grad, op_name):
     if not uop:
         raise RuntimeError(f'{op_name} failed')
     return Tensor(
-        _ctx=ctx, _uop=uop, _shape=_shape_from_uop(ctx, uop), _inputs=[],
+        _ctx=ctx, _uop=uop, _shape=_shape_from_uop(ctx, uop),
         requires_grad=requires_grad, _dtype=dtype_name, _device=device,
     )
+
+
+def _apply_map_to_tensors(ctx, replacements):
+    """Apply realized-root substitutions to live frontend tensors.
+
+    This mirrors tinygrad's _apply_map_to_tensors: after a realize call maps a
+    lazy root to a realized buffer root, every live Tensor whose current UOp
+    graph contains that root must be rewritten. Polygrad filters by core device
+    because placement is stored on PolyTensor rather than inside the UOp.
+    """
+    if not replacements:
+        return
+
+    by_device = {}
+    for old_raw, new_raw, device_id, realized_tensor in replacements:
+        if not old_raw or not new_raw:
+            continue
+        by_device.setdefault(int(device_id), []).append(
+            (old_raw, new_raw, realized_tensor)
+        )
+    if not by_device:
+        return
+
+    ctx_key = _ptr_value(ctx)
+    stale_refs = []
+
+    for tref in list(all_tensors):
+        t = tref()
+        if t is None:
+            stale_refs.append(tref)
+            continue
+        if getattr(t, '_tensor', None) is None or _ptr_value(t._ctx) != ctx_key:
+            continue
+
+        device_id = int(_ffi._lib.poly_tensor_device(t._tensor))
+        entries = by_device.get(device_id)
+        if not entries:
+            continue
+
+        current_raw = Tensor._core_uop_raw(t._tensor)
+        if not current_raw:
+            continue
+
+        n = len(entries)
+        from_arr = (_ffi._ptr * n)(*[old for old, _, _ in entries])
+        to_arr = (_ffi._ptr * n)(*[new for _, new, _ in entries])
+        new_current = _ffi._lib.poly_uop_substitute(
+            t._ctx, current_raw, from_arr, to_arr, n
+        )
+        if not new_current or _ptr_value(new_current) == _ptr_value(current_raw):
+            continue
+
+        rc = _ffi._lib.poly_tensor_update(
+            t._ctx,
+            t._tensor,
+            None,
+            new_current,
+            _POLY_TENSOR_VALUE,
+            device_id,
+        )
+        if rc != 0:
+            raise RuntimeError('poly_tensor_update failed during live UOp retarget')
+        t._data = None
+        t._device = _device_name_from_id(device_id)
+
+    for tref in stale_refs:
+        all_tensors.pop(tref, None)
 
 
 def _rng_device_tag(device):
@@ -327,26 +415,26 @@ class Tensor:
     """
 
     training = False  # tinygrad compat
-    _compile_mode = False  # suppress realize() for compile_step tracing
-    _compile_assigns_ordered = []  # class-level: ASSIGN UOps in program order
     _seed = 0
     _device_rng_counters = {}
 
     def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
-                 _buf_uop=None, _data=None, _shape=None, _inputs=None, _dtype=None, _device=None):
+                 _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
         from .device import Device
         self._ctx = _ctx or _default_ctx
         self._device = Device.canonicalize(_device if _device is not None else device)
+        self._tensor = _tensor
+        current_uop = None
+        if self._tensor is not None and _uop is None:
+            _uop = self._core_uop_raw(self._tensor)
 
         if _uop is not None:
             # Internal construction (from ops) -- shape is on the UOp.
             # Accept either a UOp instance or a raw ctypes pointer from FFI.
-            self.uop = _uop if isinstance(_uop, UOp) else UOp(self._ctx, _uop)
-            self._buf_uop = _buf_uop
+            current_uop = _uop if isinstance(_uop, UOp) else UOp(self._ctx, _uop)
             self._data = _data
-            self._inputs = _inputs or []
             self._dtype_str = _dtype or 'float32'
         else:
             # User construction from data
@@ -378,27 +466,87 @@ class Tensor:
                 self._ctx, self._data.ctypes.data, self._data.nbytes,
                 dtype_id, dims, ndim,
             )
-            self.uop = imported
+            current_uop = imported
             if post_cast_dt is not None:
                 cast_uop = _ffi._lib.poly_cast_by_id(self._ctx, imported.raw, _dtype_id(post_cast_dt))
                 if not cast_uop:
                     raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
-                self.uop = UOp(self._ctx, cast_uop)
-            self._buf_uop = self.uop.buffer or self.uop
-            key = _buffer_key(self._ctx, self._buf_uop)
+                current_uop = UOp(self._ctx, cast_uop)
+            key_uop = current_uop.buffer or current_uop
+            key = _buffer_key(self._ctx, key_uop)
             if key:
                 _host_buffers[key] = self._data
-            self._inputs = []
+
+        if self._tensor is None and current_uop is not None:
+            self._tensor = self._core_create(current_uop, _POLY_TENSOR_VALUE, self._device)
 
         self._requires_grad = requires_grad
         self._grad = None
         self._is_param = False     # True for model parameters (set by nn modules)
-        # Saved for gradient graph stitching after realize
         all_tensors[weakref.ref(self)] = None
-        self._saved_uop = None     # pre-realize UOp (computation graph)
-        self._saved_inputs = None  # pre-realize inputs list
+
+    # --- Core PolyTensor bridge ---
+
+    @staticmethod
+    def _core_create_for(ctx, uop, role, device):
+        raw = _uop_raw(uop)
+        if not raw:
+            return None
+        return _ffi._lib.poly_tensor_create(ctx, raw, int(role), _device_id(device))
+
+    def _core_create(self, uop, role=_POLY_TENSOR_VALUE, device=None):
+        return Tensor._core_create_for(
+            self._ctx, uop, role, self._device if device is None else device
+        )
+
+    @staticmethod
+    def _core_uop_raw(tensor):
+        return _ffi._lib.poly_tensor_uop(tensor) if tensor else None
+
+    @staticmethod
+    def _core_uop_logical_raw(tensor):
+        return _ffi._lib.poly_tensor_uop_logical(tensor) if tensor else None
+
+    @staticmethod
+    def _core_uop_physical_raw(tensor):
+        return _ffi._lib.poly_tensor_uop_physical(tensor) if tensor else None
+
+    def _core_to_device(self, device):
+        if self._tensor is None:
+            raise RuntimeError("Tensor has no core PolyTensor")
+        return _ffi._lib.poly_tensor_to_device(self._ctx, self._tensor, _device_id(device))
+
+    def _core_assign(self, value):
+        if self._tensor is None or value._tensor is None:
+            raise RuntimeError("Tensor.assign requires core PolyTensor handles")
+        return _ffi._lib.poly_tensor_assign(self._ctx, self._tensor, value._tensor)
+
+    @staticmethod
+    def _core_realize_batch(ctx, targets):
+        n = len(targets)
+        in_arr = (_ffi._ptr * n)(*[t._tensor for t in targets])
+        out_arr = (_ffi._ptr * n)()
+        rc = _ffi._lib.poly_realize_tensors(ctx, in_arr, n, out_arr)
+        if rc != 0:
+            return rc, []
+        return 0, [out_arr[i] for i in range(n)]
 
     # --- Properties ---
+
+    @property
+    def uop(self):
+        raw = self._core_uop_raw(self._tensor)
+        return _uop_wrap(self._ctx, raw)
+
+    @property
+    def uop_logical(self):
+        raw = self._core_uop_logical_raw(self._tensor)
+        return _uop_wrap(self._ctx, raw)
+
+    @property
+    def uop_physical(self):
+        raw = self._core_uop_physical_raw(self._tensor)
+        return _uop_wrap(self._ctx, raw)
 
     @property
     def shape(self):
@@ -424,7 +572,14 @@ class Tensor:
 
     @property
     def device(self):
-        return self._device
+        if self._tensor is None:
+            raise RuntimeError("Tensor has no core PolyTensor")
+        raw = _ffi._lib.poly_device_name(
+            int(_ffi._lib.poly_tensor_device(self._tensor))
+        )
+        if not raw:
+            raise RuntimeError("core returned unknown tensor device")
+        return raw.decode("utf-8").upper()
 
     @property
     def requires_grad(self):
@@ -461,231 +616,98 @@ class Tensor:
 
     def _apply_uop(self, fxn, *x, extra_args=(), **kwargs):
         srcs = (self,) + x
+        # Tensor construction stays in the C core: Python reads the current UOp
+        # from each PolyTensor and asks the core for one new UOp result, matching
+        # tinygrad's single-current-root frontend behavior.
         new_uop = fxn(*[t.uop for t in srcs], *extra_args, **kwargs)
         needs_input_grad = [t._requires_grad for t in srcs]
-        # directly create the Tensor
         ret = Tensor.__new__(Tensor)
-        ret.uop, ret._grad = new_uop, None
+        ret._grad = None
         ret._requires_grad = True if any(needs_input_grad) else None if None in needs_input_grad else False
-        # polygrad-specific fields needed by other methods on the returned tensor
         ret._ctx = self._ctx
         ret._dtype_str = self._dtype_str
         ret._device = self._device
-        ret._buf_uop = None
         ret._data = None
-        ret._inputs = []
         ret._is_param = False
-        ret._saved_uop = None
-        ret._saved_inputs = None
-        # add to all_tensors after construction succeeds
+        ret._tensor = ret._core_create(new_uop, _POLY_TENSOR_VALUE, ret._device)
         all_tensors[weakref.ref(ret)] = None
         return ret
 
     # --- Realization ---
 
-    def _is_leaf(self):
-        return self._buf_uop is not None
+    def _live_grad_targets(self):
+        """Find gradient targets the same way tinygrad does.
 
-    def _collect_leaves(self, seen=None):
-        """Walk the Python tensor graph to find tensors at buffer boundaries."""
-        if seen is None:
-            seen = set()
-        tid = id(self)
-        if tid in seen:
-            return []
-        seen.add(tid)
-
-        if self._is_leaf():
-            return [self]
-
-        leaves = []
-        for inp in self._inputs:
-            leaves.extend(inp._collect_leaves(seen))
-        return leaves
-
-    def _collect_deep_leaves(self, seen=None):
-        """Walk through realized intermediates to find original parameter leaves.
-
-        Like _collect_leaves, but follows _saved_inputs through realized
-        non-parameter intermediates. Stops at requires_grad tensors (_requires_grad) and
-        tensors that are original leaves (input data).
+        tinygrad has no per-tensor input graph. backward() scans all live
+        tensors and keeps the ones whose current UOp is in loss.uop.toposort().
         """
-        if seen is None:
-            seen = set()
-        tid = id(self)
-        if tid in seen:
-            return []
-        seen.add(tid)
-
-        # If this is a parameter → stop here
-        if self._is_leaf() and self._requires_grad:
-            return [self]
-
-        # If this is a realized intermediate → follow saved_inputs
-        if self._is_leaf() and self._saved_inputs is not None:
-            leaves = []
-            for inp in self._saved_inputs:
-                leaves.extend(inp._collect_deep_leaves(seen))
-            return leaves
-
-        # If this is a plain leaf (input data, no saved_inputs) → stop here
-        if self._is_leaf():
-            return [self]
-
-        # Not a leaf: walk regular inputs
-        leaves = []
-        for inp in self._inputs:
-            leaves.extend(inp._collect_deep_leaves(seen))
-        return leaves
+        targets = []
+        stale_refs = []
+        root = self.uop
+        ctx_key = _ptr_value(self._ctx)
+        for tref in list(all_tensors):
+            t = tref()
+            if t is None:
+                stale_refs.append(tref)
+                continue
+            if _ptr_value(t._ctx) != ctx_key or not t._requires_grad:
+                continue
+            target = t.uop
+            if target and _ffi._lib.poly_uop_reachable(self._ctx, root, target):
+                targets.append(t)
+        for tref in stale_refs:
+            all_tensors.pop(tref, None)
+        return targets
 
     def assign(self, x):
         """In-place assignment: self's buffer will be overwritten with x's values.
         Must be realized before use. Returns self for chaining."""
         if not isinstance(x, Tensor):
-            x = Tensor(x)
+            x = Tensor(x, dtype=self._dtype_str, device=self._device)
         if self.shape != x.shape:
             x = x._broadcast_to(self.shape)
-        assert self._buf_uop is not None, "assign target must be a realized tensor"
-        # Save logical shape before assign (ASSIGN normalizes to flat BUFFER)
-        self._assign_shape = self.shape
-        target_uop = self.uop
-        assign_uop = UOp(self._ctx, _ffi._lib.poly_assign(
-            self._ctx, _uop_raw(target_uop), _uop_raw(x.uop)
-        ))
-        self._assign_data = self._data
-        self._assign_buffer = self._buf_uop
-        self.uop = assign_uop
+        if self.device != x.device:
+            raise RuntimeError(f'assign device mismatch {self.device} != {x.device}')
+        if self.dtype != x.dtype:
+            raise RuntimeError(f'assign dtype mismatch {self.dtype} != {x.dtype}')
+
+        assigned = self._core_assign(x)
+        if not assigned:
+            raise RuntimeError('poly_tensor_assign failed')
+        self._tensor = assigned
         self._data = None
-        self._inputs = [self._make_leaf_ref(), x]
         return self
-
-    def _make_leaf_ref(self):
-        """Create a lightweight leaf reference for ASSIGN's self-binding."""
-        ref = object.__new__(Tensor)
-        ref._ctx = self._ctx
-        ref._buf_uop = self._assign_buffer
-        ref._data = self._assign_data
-        ref.uop = self._assign_buffer
-        ref._inputs = []
-        ref._requires_grad = False
-        ref._grad = None
-        ref._is_param = False
-        ref._saved_uop = None
-        ref._saved_inputs = None
-        ref._dtype_str = self._dtype_str
-        ref._device = self._device
-        return ref
-
-    def _realize_assign(self):
-        """Realize an ASSIGN: in-place update to existing buffer."""
-        assign_uop = self.uop
-        target_data = self._assign_data
-        target_buffer = self._assign_buffer
-
-        # Collect leaf bindings from the value expression
-        leaves = self._collect_leaves()
-
-        # Build SINK(ASSIGN) -- ASSIGN goes directly in SINK
-        sink = _ffi._lib.poly_sink1(self._ctx, assign_uop)
-
-        # Build bindings: all leaves (which includes our self-ref with target buffer)
-        all_bindings = []
-        seen_bufs = set()
-        for leaf in leaves:
-            if leaf._data is None or leaf._buf_uop is None:
-                continue
-            buf_id = _ptr_value(leaf._buf_uop)
-            if buf_id in seen_bufs:
-                continue
-            seen_bufs.add(buf_id)
-            all_bindings.append((leaf._buf_uop, leaf._data.ctypes.data))
-
-        n = len(all_bindings)
-        c_bindings = (_ffi.PolyBufferBinding * n)()
-        for i, (buf, data) in enumerate(all_bindings):
-            c_bindings[i].buffer = _uop_raw(buf)
-            c_bindings[i].handle.ptr = data
-
-        ret = _ffi._lib.poly_realize_with_bindings(self._ctx, sink, c_bindings, n)
-        if ret != 0:
-            raise RuntimeError(f'poly_realize_with_bindings failed (assign) {ret}')
-
-        # Restore: data was updated in-place, point UOp back to buffer
-        self._data = target_data
-        self._buf_uop = target_buffer
-        orig_shape = getattr(self, '_assign_shape', ())
-        if len(orig_shape) > 1:
-            dims, ndim = _int64_array(orig_shape)
-            self.uop = _ffi._lib.poly_reshape(self._ctx, self._buf_uop, dims, ndim)
-        else:
-            self.uop = self._buf_uop
-        self._inputs = []
-        # Clean up assign temporaries
-        del self._assign_data
-        del self._assign_buffer
 
     def realize(self, *lst, do_update_stats=True):
         """Triggers the computation needed to create these Tensor(s).
         Filters out tensors already with buffer identity, batches the rest
-        into a single graph-side realize call, and retargets each
-        tensor's .uop to its realized buffer-identity UOp."""
-        if Tensor._compile_mode:
-            for t in (self,) + lst:
-                if not hasattr(t, '_assign_buffer'):
-                    continue
-                Tensor._compile_assigns_ordered.append(_uop_raw(t.uop))
-                target_buffer = t._assign_buffer
-                target_data = t._assign_data
-                orig_shape = getattr(t, '_assign_shape', ())
-                t._data = target_data
-                t._buf_uop = target_buffer
-                if len(orig_shape) > 1:
-                    dims, ndim = _int64_array(orig_shape)
-                    t.uop = UOp(t._ctx, _ffi._lib.poly_reshape(
-                        t._ctx, _uop_raw(target_buffer), dims, ndim
-                    ))
-                else:
-                    t.uop = target_buffer
-                t._inputs = []
-                del t._assign_data
-                del t._assign_buffer
-            return self
-
-        targets = [
-            x for x in (self,) + lst
-            if not (x.uop.has_buffer_identity() and x.uop.is_realized)
-        ]
+        into a single graph-side realize call, and retargets every live
+        tensor whose current UOp graph contains a realized root."""
+        targets = []
+        seen = set()
+        for x in (self,) + lst:
+            if x.uop.has_buffer_identity() and x.uop.is_realized:
+                continue
+            current_raw = Tensor._core_uop_raw(x._tensor)
+            device_id = int(_ffi._lib.poly_tensor_device(x._tensor))
+            key = (_ptr_value(current_raw), device_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(x)
         if not targets:
             return self
-        n = len(targets)
-        in_arr = (ctypes.c_void_p * n)(*[t.uop.raw for t in targets])
-        out_arr = (ctypes.c_void_p * n)()
-        rc = _ffi._lib.poly_realize(self._ctx, in_arr, n, out_arr)
+        old_roots = [Tensor._core_uop_raw(t._tensor) for t in targets]
+        device_ids = [int(_ffi._lib.poly_tensor_device(t._tensor)) for t in targets]
+        rc, realized_tensors = Tensor._core_realize_batch(self._ctx, targets)
         if rc != 0:
-            raise RuntimeError('poly_realize failed')
-        for t, raw in zip(targets, out_arr):
-            if hasattr(t, '_assign_buffer'):
-                target_buffer = t._assign_buffer
-                target_data = t._assign_data
-                orig_shape = getattr(t, '_assign_shape', ())
-                t._data = target_data
-                t._buf_uop = target_buffer
-                if len(orig_shape) > 1:
-                    dims, ndim = _int64_array(orig_shape)
-                    t.uop = UOp(t._ctx, _ffi._lib.poly_reshape(
-                        t._ctx, _uop_raw(target_buffer), dims, ndim
-                    ))
-                else:
-                    t.uop = target_buffer
-                t._inputs = []
-                del t._assign_data
-                del t._assign_buffer
-                continue
-            t._saved_uop = t.uop
-            t._saved_inputs = t._inputs[:] if t._inputs else None
-            t.uop = UOp(t._ctx, raw)
-            t._buf_uop = _realized_buffer_uop(t._ctx, t.uop)
-            t._inputs = []
+            devices = ', '.join(sorted({str(t._device) for t in targets}))
+            raise RuntimeError(f'poly_realize_tensors failed for device(s): {devices}')
+        replacements = []
+        for old_raw, realized, device_id in zip(old_roots, realized_tensors, device_ids):
+            new_raw = Tensor._core_uop_raw(realized)
+            replacements.append((old_raw, new_raw, device_id, realized))
+        _apply_map_to_tensors(self._ctx, replacements)
         return self
 
     def _buffer(self) -> Buffer:
@@ -718,62 +740,6 @@ class Tensor:
     def tolist(self):
         return self.numpy().tolist()
 
-    def kernels(self, device='webgpu', *, materialize=True):
-        """Render backend kernels for this tensor without browser execution.
-
-        This is the structured counterpart to tinygrad's DEBUG>=4 printing:
-        it returns rendered kernel sources directly from the native C plan
-        path. For `device='webgpu'` that means WGSL via
-        `poly_render_step_webgpu_plan`, with no browser runtime involved.
-
-        By default `materialize=True` matches the normal readback/realize path
-        and wraps movement-only graphs in `contiguous()` before rendering.
-        """
-        dev = str(device).lower()
-        if dev != 'webgpu':
-            raise NotImplementedError(f'kernels currently supports only webgpu, got {device!r}')
-
-        x = self.cast(self._dtype_str).contiguous() if materialize else self
-        numel = x.numel()
-        dtype_id = _dtype_id(x._dtype_str)
-
-        out_buf = _ffi._lib.poly_buffer_by_id(x._ctx, numel, dtype_id)
-        if not out_buf:
-            raise RuntimeError('poly_buffer_by_id failed while building debug sink')
-        store = _ffi._lib.poly_store_val(x._ctx, out_buf, x.uop.raw)
-        if not store:
-            raise RuntimeError('poly_store_val failed while building debug sink')
-        sink = _ffi._lib.poly_sink1(x._ctx, store)
-        if not sink:
-            raise RuntimeError('poly_sink1 failed while building debug sink')
-
-        plan = _ffi._lib.poly_render_step_webgpu_plan(x._ctx, sink)
-        if not plan:
-            raise RuntimeError('poly_render_step_webgpu_plan failed')
-
-        try:
-            kernels = []
-            n_kernels = _ffi._lib.poly_webgpu_stepplan_n_kernels(plan)
-            for k in range(n_kernels):
-                out_len = ctypes.c_int(0)
-                src = _ffi._lib.poly_webgpu_stepplan_kernel_wgsl(
-                    plan, k, ctypes.byref(out_len)
-                )
-                kernels.append({
-                    'index': k,
-                    'n_params': _ffi._lib.poly_webgpu_stepplan_kernel_n_params(plan, k),
-                    'grid': tuple(
-                        _ffi._lib.poly_webgpu_stepplan_kernel_grid(plan, k, d) for d in range(3)
-                    ),
-                    'local': tuple(
-                        _ffi._lib.poly_webgpu_stepplan_kernel_local(plan, k, d) for d in range(3)
-                    ),
-                    'wgsl': src.decode('utf-8') if src else '',
-                })
-            return kernels
-        finally:
-            _ffi._lib.poly_webgpu_stepplan_destroy(plan)
-
     def detach(self):
         return Tensor(self.numpy(), dtype=self._dtype_str, device=self._device)
 
@@ -792,21 +758,20 @@ class Tensor:
         if dev == self._device:
             return self
 
+        core_tensor = self._core_to_device(dev)
+
         out = Tensor(
             _ctx=self._ctx,
             _uop=self.uop,
-            _buf_uop=self._buf_uop,
+            _tensor=core_tensor,
             _data=self._data,
             _shape=self.shape,
-            _inputs=self._inputs[:],
             _dtype=self._dtype_str,
             _device=dev,
             requires_grad=self._requires_grad,
         )
         out._grad = self._grad.to(dev) if self._grad is not None else None
         out._is_param = self._is_param
-        out._saved_uop = self._saved_uop
-        out._saved_inputs = self._saved_inputs[:] if self._saved_inputs is not None else None
         return out
 
     def cpu(self):
@@ -831,7 +796,8 @@ class Tensor:
         if not uop:
             raise RuntimeError(f'poly_cast_by_id failed for dtype {target_name}')
         return Tensor(_ctx=self._ctx, _uop=uop, _shape=self.shape,
-                      _inputs=[self], _dtype=target_name, _device=self._device)
+                      _dtype=target_name, _device=self._device,
+                      requires_grad=self._requires_grad)
 
     def half(self):
         """Cast to float16."""
@@ -873,7 +839,7 @@ class Tensor:
         # inputs was the stale behavior that made bool/int ops look floaty.
         dt = _uop_dtype_name(self._ctx, uop, self._dtype_str)
         return Tensor(
-            _ctx=self._ctx, _uop=uop, _shape=shape, _inputs=inputs,
+            _ctx=self._ctx, _uop=uop, _shape=shape,
             requires_grad=any(t._requires_grad for t in inputs),
             _dtype=dt,
             _device=dev,
@@ -912,7 +878,7 @@ class Tensor:
                 c = _ffi._lib.poly_const_int_by_id(self._ctx, int_value, dtype_id)
             else:
                 c = _ffi._lib.poly_const_float_by_id(self._ctx, float(normalized), dtype_id)
-            return Tensor(_ctx=self._ctx, _uop=c, _shape=(), _inputs=[],
+            return Tensor(_ctx=self._ctx, _uop=c, _shape=(),
                           _dtype=self._dtype_str, _device=self._device)
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
 
@@ -949,7 +915,7 @@ class Tensor:
         uop = self.uop
         cur_shape = self.shape
         # CONST scalars (from _ensure_tensor) auto-broadcast — no EXPAND needed
-        if not cur_shape and self._buf_uop is None:
+        if not cur_shape and self.uop.buffer is None:
             return uop
         # Scalar tensor or lower-rank: pad left with 1s
         target_nd = len(target_shape)
@@ -1225,22 +1191,21 @@ class Tensor:
         uop = _ffi._lib.poly_hardsigmoid(self._ctx, self.uop)
         return self._make_result(uop, self.shape, [self])
 
-    # --- Softmax (Tensor-level composition with realize boundaries) ---
-    # Composed at Tensor level (not C core) because the reduce→expand→alu
-    # pattern requires separate kernels. Each .realize() forces a kernel boundary.
+    # --- Softmax ---
 
     def softmax(self, axis=-1):
-        m = self.max(axis=axis, keepdim=True).realize()
-        e = (self - m).exp().realize()
-        s = e.sum(axis=axis, keepdim=True).realize()
-        return e / s
+        # Keep softmax lazy so backward sees the same current UOp graph as
+        # tinygrad; scheduling decides where kernel boundaries belong.
+        uop = _ffi._lib.poly_softmax(self._ctx, self.uop, int(axis))
+        if not uop:
+            raise RuntimeError('poly_softmax failed')
+        return self._make_result(uop, self.shape, [self])
 
     def log_softmax(self, axis=-1):
-        m = self.max(axis=axis, keepdim=True).realize()
-        shifted = (self - m).realize()
-        e = shifted.exp().realize()
-        s = e.sum(axis=axis, keepdim=True).realize()
-        return shifted - s.log()
+        uop = _ffi._lib.poly_log_softmax(self._ctx, self.uop, int(axis))
+        if not uop:
+            raise RuntimeError('poly_log_softmax failed')
+        return self._make_result(uop, self.shape, [self])
 
     # --- Movement ops ---
 
@@ -1450,12 +1415,15 @@ class Tensor:
         if isinstance(axis, int):
             if axis < 0:
                 axis += len(self.shape)
-        # Tensor-level: mean→realize→subtract→square→sum (avoid reduce→expand→alu)
-        m = self.mean(axis=axis, keepdim=True).realize()
-        diff = self - m
-        sq = diff * diff
-        dim_size = self.shape[axis]
-        return sq.sum(axis=axis, keepdim=keepdim) / (dim_size - correction)
+        # Keep variance construction lazy like tinygrad. The old frontend
+        # realized the mean as a scheduler workaround, which made var/layernorm
+        # invisible to backward across that forced materialization boundary.
+        uop = _ffi._lib.poly_var_reduce(
+            self._ctx, self.uop, int(axis), int(keepdim), int(correction)
+        )
+        if not uop:
+            raise RuntimeError('poly_var_reduce failed')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
 
     def std(self, axis=None, keepdim=False, correction=1):
         return self.var(axis=axis, keepdim=keepdim, correction=correction).sqrt()
@@ -1509,8 +1477,11 @@ class Tensor:
         return -(target * self.log() + (1.0 - target) * (1.0 - self).log()).mean()
 
     def layernorm(self, axis=-1, eps=1e-5):
-        m = self.mean(axis=axis, keepdim=True).realize()
-        v = self.var(axis=axis, keepdim=True, correction=0).realize()
+        # Layernorm is graph construction, not a materialization boundary.
+        # Explicit realize calls here severed gradients in cases where tinygrad
+        # keeps the full UOp DAG lazy until the user calls realize/backward.
+        m = self.mean(axis=axis, keepdim=True)
+        v = self.var(axis=axis, keepdim=True, correction=0)
         return (self - m) / (v + eps).sqrt()
 
     # --- Indexing ---
@@ -1612,7 +1583,10 @@ class Tensor:
             raise ValueError(f'poly_einsum failed for formula: {formula}')
         shape = _shape_from_uop(ctx, uop)
         dev = operands[0]._infer_device(list(operands))
-        return Tensor(_ctx=ctx, _uop=uop, _shape=shape, _inputs=list(operands), _device=dev)
+        return Tensor(
+            _ctx=ctx, _uop=uop, _shape=shape, _device=dev,
+            requires_grad=any(t._requires_grad for t in operands),
+        )
 
     # --- Rearrange (C core, einops-style) ---
 
@@ -1842,321 +1816,40 @@ class Tensor:
 
     # --- Autograd ---
 
-    def _cache_value(self):
-        """Compute and cache tensor value without modifying the UOp graph.
-
-        This is called by backward() to cache the loss value before optimizer
-        step potentially mutates parameter buffers.
-        """
-        if Tensor._compile_mode:
-            return  # noop: keep lazy graph intact for compile_step tracing
-        if self._data is not None:
-            return
-        if self._buf_uop is not None and self._saved_inputs is None and self.uop.is_realized:
-            return
-        cached = Tensor(
-            _ctx=self._ctx,
-            _uop=self.uop,
-            _shape=self.shape,
-            _dtype=self._dtype_str,
-            _device=self._device,
-        )
-        self._data = np.ascontiguousarray(cached.numpy()).reshape(-1)
-
-    def _collect_realized_intermediates(self, seen=None):
-        """Walk the tensor graph (via _saved_inputs) to find all realized
-        intermediate tensors that need UOp substitution for backward.
-
-        A realized tensor is an intermediate if it has computation history
-        (_saved_inputs). Leaf tensors (params, user-created) have _saved_uop
-        but no _saved_inputs — they are terminal leaves, not intermediates.
-        """
-        if seen is None:
-            seen = set()
-        tid = id(self)
-        if tid in seen:
-            return []
-        seen.add(tid)
-
-        result = []
-        if self._saved_uop is not None and self._saved_inputs:
-            # Realized tensor with computation history → intermediate
-            result.append(self)
-            for inp in self._saved_inputs:
-                result.extend(inp._collect_realized_intermediates(seen))
-        elif self._saved_uop is not None:
-            # Realized leaf (param, user-created) → stop here
-            pass
-        else:
-            # Walk regular inputs
-            for inp in self._inputs:
-                result.extend(inp._collect_realized_intermediates(seen))
-        return result
-
     def backward(self):
-        """Compute gradients via reverse-mode autodiff.
-
-        Uses segment-wise backward: each realize() boundary defines a segment.
-        Segments are processed in reverse topological order. For each segment,
-        a local VJP (vector-Jacobian product) is computed using poly_grad_many,
-        and all gradient outputs are realized in a single sink.
-
-        For simple graphs (no intermediate realizes), falls back to the direct
-        poly_grad approach.
-        """
-        if not self._inputs and self._is_leaf() and self._saved_uop is None:
-            raise RuntimeError('backward() called on a realized tensor — '
-                               'call backward() before item()/numpy()')
-
-        # In compile mode, always use simple backward: the full graph is lazy
-        # (no intermediate realizes during tracing), so segment-wise backward
-        # would incorrectly reference _saved_uop from pre-compile realizes
-        # (model param initialization), bringing in stale BUFFER UOps.
-        if Tensor._compile_mode:
-            return self._backward_simple()
-
-        # Collect realized intermediates (segment boundaries)
-        intermediates = self._collect_realized_intermediates()
-
-        if not intermediates:
-            # Simple case: no intermediate realizes, use direct poly_grad
-            return self._backward_simple()
-
-        # Segment-wise backward
-        return self._backward_segmented(intermediates)
-
-    def _backward_simple(self):
-        """Direct backward for simple graphs (no intermediate realizes)."""
-        all_leaves = self._collect_leaves()
-        leaves = [t for t in all_leaves if t._requires_grad]
-        if not leaves:
+        """Compute gradients for live tensors reachable from this loss UOp."""
+        targets = self._live_grad_targets()
+        if not targets:
             raise RuntimeError('No leaf tensors require grad')
 
-        # Deduplicate
-        seen_bufs = set()
-        unique_leaves = []
-        for l in leaves:
-            buf_id = _ptr_value(l._buf_uop) if l._buf_uop else id(l)
-            if buf_id not in seen_bufs:
-                seen_bufs.add(buf_id)
-                unique_leaves.append(l)
-        leaves = unique_leaves
-
-        self._cache_value()
-
-        for leaf in leaves:
-            grad_uop = _ffi._lib.poly_grad(self._ctx, self.uop, leaf.uop)
-            if not grad_uop:
-                raise RuntimeError('poly_grad returned NULL for a leaf tensor')
-
-            grad_tensor = Tensor(
-                _ctx=self._ctx, _uop=grad_uop, _shape=leaf.shape,
-                _dtype=leaf._dtype_str, _device=leaf._device,
-            )
-            if leaf._grad is not None:
-                leaf._grad = leaf._grad + grad_tensor
-            else:
-                leaf._grad = grad_tensor
-
-    def _backward_segmented(self, intermediates):
-        """Segment-wise backward through realized intermediate boundaries.
-
-        Each realize() defines a segment boundary. We process segments using
-        Kahn's algorithm (topological sort) so that shared intermediates
-        (e.g. qkv split into q, k, v) receive ALL upstream contributions
-        before being processed. This keeps each poly_grad_many call operating
-        on a small local graph with correct accumulated gradients.
-        """
-        from collections import deque
-
-        self._cache_value()
-
-        inter_set = set(id(t) for t in intermediates)
-        inter_map = {id(t): t for t in intermediates}
-
-        # Map: tensor id -> realized upstream grad tensor for this intermediate.
-        upstream_grads = {}
-
-        # ── Pre-compute segment info and contribution counts ─────
-        # For each segment, find its leaves and targets (params + intermediates).
-        # Count how many segments will contribute upstream to each intermediate.
-        seg_info = {}  # id(seg) → (seg_leaves, seg_targets)
-        contribution_count = {id(t): 0 for t in intermediates}
-
-        for seg_tensor in intermediates:
-            seg_leaves = []
-            seen = set()
-            for inp in (seg_tensor._saved_inputs or []):
-                seg_leaves.extend(inp._collect_leaves(seen))
-            seg_targets = [l for l in seg_leaves
-                           if l._requires_grad or id(l) in inter_set]
-            # Dedupe targets by tensor id to avoid over-counting contributions
-            seen_target_ids = set()
-            unique_targets = []
-            for t in seg_targets:
-                if id(t) not in seen_target_ids:
-                    seen_target_ids.add(id(t))
-                    unique_targets.append(t)
-            seg_targets = unique_targets
-            seg_info[id(seg_tensor)] = (seg_leaves, seg_targets)
-            for t in seg_targets:
-                if id(t) in inter_set:
-                    contribution_count[id(t)] += 1
-
-        # ── Phase 1: Loss segment ────────────────────────────────
-        # From the loss tensor back to its immediate leaves (shallow walk).
-        # These include both params and realized intermediates.
-        loss_leaves = self._collect_leaves()
-        loss_targets = [l for l in loss_leaves
-                        if l._requires_grad or id(l) in inter_set]
-
-        if loss_targets:
-            self._realize_segment_grads(
-                self.uop, None, loss_targets, loss_leaves,
-                upstream_grads, inter_set=inter_set)
-
-        # ── Phase 2: Kahn's algorithm (topological sort) ─────────
-        # Process each intermediate only after ALL segments that contribute
-        # to its upstream gradient have been processed.
-        received = {id(t): 0 for t in intermediates}
-        for t in loss_targets:
-            tid = id(t)
-            if tid in inter_set and tid in upstream_grads:
-                received[tid] += 1
-        processed = set()
-        ready = deque()
-
-        # Seed: intermediates that received upstream from Phase 1 and have
-        # no pending contributions (contribution_count == 0), OR received
-        # upstream and all contributions are already in.
-        for seg_tensor in intermediates:
-            tid = id(seg_tensor)
-            if tid in upstream_grads and (
-                contribution_count[tid] == 0 or contribution_count[tid] == received[tid]
-            ):
-                ready.append(seg_tensor)
-
-        while ready:
-            seg_tensor = ready.popleft()
-            tid = id(seg_tensor)
-            if tid in processed:
-                continue
-            processed.add(tid)
-
-            if tid not in upstream_grads:
-                continue
-
-            up_grad = upstream_grads[tid]
-            seg_leaves, seg_targets = seg_info[tid]
-
-            if not seg_targets:
-                continue
-
-            # ── Generic VJP approach ──────────────────────────────
-            # Build VJP loss = sum(upstream_grad * segment_output)
-            up_uop = up_grad.uop
-            if len(seg_tensor.shape) > 1:
-                dims, ndim = _int64_array(seg_tensor.shape)
-                up_uop = _ffi._lib.poly_reshape(self._ctx, up_uop, dims, ndim)
-
-            vjp_prod = _ffi._lib.poly_alu2(
-                self._ctx, _ffi.OPS['MUL'], up_uop, seg_tensor._saved_uop)
-
-            # Reduce all axes to scalar
-            n_dims = len(seg_tensor.shape)
-            if n_dims > 0:
-                axes_arr, n_axes = _int64_array(list(range(n_dims)))
-                vjp_loss = _ffi._lib.poly_reduce_axis(
-                    self._ctx, _ffi.OPS['ADD'], vjp_prod, axes_arr, n_axes)
-            else:
-                vjp_loss = vjp_prod
-
-            self._realize_segment_grads(
-                vjp_loss, None, seg_targets, seg_leaves,
-                upstream_grads, inter_set=inter_set)
-
-            # Check if any intermediate targets are now ready
-            for t in seg_targets:
-                t_id = id(t)
-                if t_id in inter_set and t_id not in processed:
-                    received[t_id] += 1
-                    if received[t_id] == contribution_count[t_id]:
-                        ready.append(inter_map[t_id])
-
-        # ── Consistency check ─────────────────────────────────────
-        for t in intermediates:
-            if id(t) in upstream_grads and id(t) not in processed:
-                raise RuntimeError(
-                    f'segment backward: intermediate received upstream '
-                    f'gradient but was never processed '
-                    f'(shape={t.shape}, contribution_count='
-                    f'{contribution_count[id(t)]}, '
-                    f'received={received[id(t)]})'
-                )
-
-    def _realize_segment_grads(self, loss_uop, initial_grad_uop,
-                                targets, all_leaves, upstream_grads,
-                                extra_bufs=None, inter_set=None):
-        """Compute and realize gradients for one segment.
-
-        loss_uop:   local loss UOp for this segment
-        targets:    tensors to diff w.r.t. (params + intermediates)
-        all_leaves: all leaf tensors in this segment (for bindings)
-        upstream_grads: dict to store realized intermediate grad tensors
-        extra_bufs: legacy arg, unused now that gradients are materialized
-                    through the core realize path
-        inter_set:  set of id(t) for intermediate tensors (must be realized)
-        """
-        if inter_set is None:
-            inter_set = set()
-        n = len(targets)
-        if n == 0:
-            return
-
-        # poly_grad_many: single reverse pass, all targets
-        wrts = (_ffi._ptr * n)()
-        for i, t in enumerate(targets):
-            wrts[i] = _uop_raw(t.uop)
-        out_grads = (_ffi._ptr * n)()
-
-        ret = _ffi._lib.poly_grad_many(
-            self._ctx, loss_uop, initial_grad_uop, wrts, n, out_grads)
-        if ret != 0:
+        wrts = (_ffi._ptr * len(targets))(*[_uop_raw(t.uop) for t in targets])
+        out_grads = (_ffi._ptr * len(targets))()
+        # tinygrad calls gradient(*targets), so every live target is handled by
+        # one reverse pass. Calling poly_grad repeatedly can observe frontend
+        # retargeting side effects between targets.
+        rc = _ffi._lib.poly_grad_many(
+            self._ctx, _uop_raw(self.uop), None, wrts, len(targets), out_grads
+        )
+        if rc != 0:
             raise RuntimeError('poly_grad_many failed')
 
-        for i, t in enumerate(targets):
-            grad_val = out_grads[i]
-            is_intermediate = id(t) in inter_set
-
-            if is_intermediate:
-                grad_tensor = Tensor(
-                    _ctx=self._ctx, _uop=grad_val, _shape=t.shape,
-                    _dtype=t._dtype_str, _device=t._device,
-                ).realize()
-                if id(t) in upstream_grads:
-                    grad_tensor = (upstream_grads[id(t)] + grad_tensor).realize()
-                upstream_grads[id(t)] = grad_tensor
-
-                if t._requires_grad:
-                    if t._grad is not None:
-                        t._grad = t._grad + grad_tensor
-                    else:
-                        t._grad = grad_tensor
-
-            elif t._requires_grad:
-                grad_tensor = Tensor(
-                    _ctx=self._ctx, _uop=grad_val, _shape=t.shape,
-                    _dtype=t._dtype_str, _device=t._device,
-                )
-                if t._grad is not None:
-                    t._grad = t._grad + grad_tensor
-                else:
-                    t._grad = grad_tensor
+        for target, grad_uop in zip(targets, out_grads):
+            if not grad_uop:
+                raise RuntimeError('poly_grad_many returned NULL for a live target')
+            grad_tensor = Tensor(
+                _ctx=self._ctx, _uop=grad_uop, _shape=target.shape,
+                _dtype=target._dtype_str, _device=target._device,
+            )
+            if target._grad is not None:
+                target._grad = target._grad + grad_tensor
+            else:
+                target._grad = grad_tensor
+        return self
 
     # --- Representation ---
 
     def __repr__(self):
-        if self._is_leaf() and self._data is not None and self.numel() <= 16:
+        if self.uop.has_buffer_identity() and self._data is not None and self.numel() <= 16:
             data_str = str(self._data.reshape(self.shape).tolist())
             return f'Tensor({data_str}, shape={self.shape}, dtype={self.dtype})'
         return f'Tensor(shape={self.shape}, dtype={self.dtype})'
@@ -2171,55 +1864,3 @@ class Tensor:
 
     def __bool__(self):
         return bool(self.item())
-
-
-class CompiledStep:
-    """Pre-compiled multi-kernel execution step.
-
-    Wraps a C PolyStep*. The step owns compiled kernel programs and
-    pre-allocated intermediate buffers. Call run() to execute with
-    current buffer data. Not thread-safe (shared intermediates).
-    """
-    def __init__(self, step_ptr, buf_bindings):
-        self._step = step_ptr
-        self._buf_bindings = buf_bindings  # list of (buf_uop_ptr, tensor_or_data)
-
-    @property
-    def n_kernels(self):
-        return _ffi._lib.poly_step_n_kernels(self._step)
-
-    @property
-    def n_intermediates(self):
-        return _ffi._lib.poly_step_n_intermediates(self._step)
-
-    def run(self):
-        """Execute the step with current buffer data."""
-        n = len(self._buf_bindings)
-        c_bindings = (_ffi.PolyBufferBinding * n)()
-        for i, (buf_uop, holder) in enumerate(self._buf_bindings):
-            c_bindings[i].buffer = _uop_raw(buf_uop)
-            if isinstance(holder, Tensor):
-                if holder._data is not None:
-                    c_bindings[i].handle.ptr = ctypes.cast(
-                        holder._data.ctypes.data, ctypes.c_void_p)
-                elif holder._buf_uop is not None:
-                    realized = holder._buf_uop.realized if isinstance(holder._buf_uop, UOp) \
-                        else UOp(holder._ctx, holder._buf_uop).realized
-                    if not realized:
-                        raise RuntimeError('CompiledStep.run: tensor binding has no host data or realized buffer')
-                    c_bindings[i].handle = ctypes.cast(
-                        realized, ctypes.POINTER(_ffi.PolyBuffer)
-                    ).contents
-                else:
-                    raise RuntimeError('CompiledStep.run: tensor binding has no buffer identity')
-            else:
-                c_bindings[i].handle.ptr = ctypes.cast(
-                    holder.ctypes.data, ctypes.c_void_p)
-        ret = _ffi._lib.poly_step_run(self._step, c_bindings, n)
-        if ret != 0:
-            raise RuntimeError(f'poly_step_run failed ({ret})')
-
-    def __del__(self):
-        if hasattr(self, '_step') and self._step:
-            _ffi._lib.poly_step_destroy(self._step)
-            self._step = None

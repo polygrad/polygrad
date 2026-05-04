@@ -665,14 +665,25 @@ static bool uop_ptr_in_list(PolyUOp *u, PolyUOp **list, int n) {
   return false;
 }
 
-/* Tinygrad's UOp.uprod(*clauses) is bool-AND here. Keep it local so
- * pm_move_where_on_load can rebuild the moved/kept clause products without
- * changing unrelated symbolic helpers. */
+static bool is_true_clause_const(PolyUOp *u) {
+  return u && u->op == POLY_OP_CONST &&
+         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) || (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
+}
+
+/* Tinygrad's UOp.uprod(*clauses) is bool-AND here. Skip literal `true`
+ * identity clauses locally so INDEX.valid does not keep `true AND mask`
+ * after pm_move_where_on_load. */
 static PolyUOp *and_all_clauses(PolyCtx *ctx, PolyUOp **clauses, int n, PolyUOp *init) {
-  PolyUOp *acc = init ? init : poly_const_typed(ctx, POLY_BOOL, 1.0);
-  for (int i = 0; i < n; i++)
+  PolyUOp *acc = (init && !is_true_clause_const(init)) ? init : NULL;
+  for (int i = 0; i < n; i++) {
+    if (is_true_clause_const(clauses[i])) continue;
+    if (!acc) {
+      acc = clauses[i];
+      continue;
+    }
     acc = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, acc, clauses[i], poly_arg_none());
-  return acc;
+  }
+  return acc ? acc : poly_const_typed(ctx, POLY_BOOL, 1.0);
 }
 
 /* TensorCore helpers (port of tc.py) */
@@ -2390,6 +2401,10 @@ static PolyUOp *rule_mul_to_shl(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyUOp *c_node = poly_bind(b, "c");
   PolyUOp *x_node = poly_bind(b, "x");
   if (!c_node || !x_node) return NULL;
+  /* tinygrad's final render loop leaves vector MUL-by-constant as vector ALU
+   * plus STACK constants; this scalar strength reduction must not fire on
+   * vector lanes. */
+  if (root->dtype.count > 1) return NULL;
   if (!poly_dtype_is_int(root->dtype)) return NULL;
   if (c_node->arg.kind != POLY_ARG_INT) return NULL;
   int64_t c = c_node->arg.i;
@@ -2413,6 +2428,9 @@ static PolyUOp *rule_idiv_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   PolyUOp *c_node = poly_bind(b, "c");
   PolyUOp *x_node = poly_bind(b, "x");
   if (!c_node || !x_node) return NULL;
+  /* Match tinygrad's vector path: vector IDIV by a constant is rendered as
+   * IDIV(..., STACK(...)), not decomposed into per-lane shift/correction here. */
+  if (root->dtype.count > 1) return NULL;
   if (!poly_dtype_is_int(root->dtype)) return NULL;
   if (c_node->arg.kind != POLY_ARG_INT) return NULL;
   int64_t c = c_node->arg.i;
@@ -2448,6 +2466,9 @@ static PolyUOp *rule_mod_to_and(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyUOp *c_node = poly_bind(b, "c");
   PolyUOp *x_node = poly_bind(b, "x");
   if (!c_node || !x_node) return NULL;
+  /* tinygrad does not apply the scalar MOD-to-AND shortcut to vector MOD by a
+   * vector-typed constant; keep vector modulo in the late vector form. */
+  if (root->dtype.count > 1) return NULL;
   if (!poly_dtype_is_int(root->dtype)) return NULL;
   if (c_node->arg.kind != POLY_ARG_INT) return NULL;
   int64_t c = c_node->arg.i;
@@ -2532,6 +2553,9 @@ static PolyUOp *rule_mul_neg1_to_neg(PolyCtx *ctx, PolyUOp *root, const PolyBind
   PolyUOp *x = poly_bind(b, "x");
   PolyUOp *c = poly_bind(b, "c");
   if (!x || !c) return NULL;
+  /* Vector x * -1 stays as vector MUL with rendered STACK constants in
+   * tinygrad, so only scalar MUL is folded to NEG here. */
+  if (root->dtype.count > 1) return NULL;
   if (c->op != POLY_OP_CONST) return NULL;
   if (c->arg.kind == POLY_ARG_INT && c->arg.i == -1)
     return poly_uop1(ctx, POLY_OP_NEG, root->dtype, x, poly_arg_none());
@@ -2545,6 +2569,13 @@ static PolyUOp *rule_mul_neg1_to_neg(PolyCtx *ctx, PolyUOp *root, const PolyBind
  * x + NEG(y) → SUB(x, y)
  */
 static PolyUOp *rule_add_neg_to_sub(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *y = poly_bind(b, "y");
+  if (!x || !y) return NULL;
+  return poly_uop2(ctx, POLY_OP_SUB, root->dtype, x, y, poly_arg_none());
+}
+
+static PolyUOp *rule_neg_add_to_sub(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   PolyUOp *x = poly_bind(b, "x");
   PolyUOp *y = poly_bind(b, "y");
   if (!x || !y) return NULL;
@@ -2578,6 +2609,75 @@ static PolyUOp *rule_mul_fdiv1_to_fdiv(PolyCtx *ctx, PolyUOp *root, const PolyBi
   if (one->arg.kind == POLY_ARG_INT && one->arg.i == 1)
     return poly_uop2(ctx, POLY_OP_FDIV, root->dtype, a, bnode, poly_arg_none());
   return NULL;
+}
+
+static bool is_true_const_late(PolyUOp *u) {
+  return u && u->op == POLY_OP_CONST &&
+         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) || (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
+}
+
+static bool int_const_value_codegen(PolyUOp *u, int64_t *out);
+
+/* tinygrad decompositions.py:get_late_rewrite_patterns:
+ *   (x < c).logical_not() -> c-1 < x
+ *   (c < x).logical_not() -> x < c+1
+ *
+ * This is deliberately a late decomposition, not a symbolic construction rule.
+ * Earlier rewrites rely on the not-CMPLT shape for simplex/valid reasoning. */
+static PolyUOp *rule_not_cmplt_to_bound(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_CMPNE || root->n_src != 2) return NULL;
+
+  PolyUOp *lt = NULL;
+  if (root->src[0]->op == POLY_OP_CMPLT && is_true_const_late(root->src[1]))
+    lt = root->src[0];
+  else if (root->src[1]->op == POLY_OP_CMPLT && is_true_const_late(root->src[0]))
+    lt = root->src[1];
+  else
+    return NULL;
+  if (!lt || lt->n_src != 2) return NULL;
+
+  int64_t cval = 0, adjusted = 0;
+  if (int_const_value_codegen(lt->src[1], &cval) && poly_dtype_is_int(lt->src[0]->dtype) &&
+      !poly_dtype_is_unsigned(lt->src[0]->dtype) && !poly_dtype_is_bool(lt->src[0]->dtype)) {
+    if (__builtin_sub_overflow(cval, 1, &adjusted)) return NULL;
+    return poly_uop2(
+        ctx, POLY_OP_CMPLT, POLY_BOOL, poly_const_like_int(ctx, lt->src[0], adjusted), lt->src[0],
+        poly_arg_none()
+    );
+  }
+  if (int_const_value_codegen(lt->src[0], &cval) && poly_dtype_is_int(lt->src[1]->dtype) &&
+      !poly_dtype_is_unsigned(lt->src[1]->dtype) && !poly_dtype_is_bool(lt->src[1]->dtype)) {
+    if (__builtin_add_overflow(cval, 1, &adjusted)) return NULL;
+    return poly_uop2(
+        ctx, POLY_OP_CMPLT, POLY_BOOL, lt->src[1], poly_const_like_int(ctx, lt->src[1], adjusted),
+        poly_arg_none()
+    );
+  }
+  return NULL;
+}
+
+/* tinygrad decompositions.py:
+ *   x.ne(y).logical_not() -> x.alu(Ops.CMPEQ, y)
+ *
+ * Tensor-level eq stays as CMPNE(CMPNE(x,y), true) for frontend parity with
+ * tinygrad's elementwise helper. Renderers that support CMPEQ should see the
+ * direct comparison in late IR, which removes an extra bool compare and matches
+ * current tinygrad linearized kernels such as Tensor.eye. */
+static PolyUOp *rule_cmpne_not_to_cmpeq(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_CMPNE || root->n_src != 2) return NULL;
+
+  PolyUOp *cmpne = NULL;
+  if (root->src[0]->op == POLY_OP_CMPNE && is_true_const_late(root->src[1])) {
+    cmpne = root->src[0];
+  } else if (root->src[1]->op == POLY_OP_CMPNE && is_true_const_late(root->src[0])) {
+    cmpne = root->src[1];
+  } else {
+    return NULL;
+  }
+  if (!cmpne || cmpne->n_src != 2) return NULL;
+  return poly_uop2(ctx, POLY_OP_CMPEQ, root->dtype, cmpne->src[0], cmpne->src[1], poly_arg_none());
 }
 
 static PolyUOp *u32_const(PolyCtx *ctx, uint32_t v) {
@@ -2757,6 +2857,13 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
         POLY_OP_ADD, poly_pat_any("x"), poly_pat_op1(POLY_OP_NEG, poly_pat_any("y"), NULL), NULL
     ),
     rule_add_neg_to_sub};
+  /* NEG(y) + x → SUB(x, y). tinygrad's UPat ADD is commutative; mirror the
+   * reversed shape explicitly in C. */
+  rules[n++] = (PolyRule
+  ){poly_pat_op2(
+        POLY_OP_ADD, poly_pat_op1(POLY_OP_NEG, poly_pat_any("y"), NULL), poly_pat_any("x"), NULL
+    ),
+    rule_neg_add_to_sub};
 
   if (!has_threefry) {
     PolyOpSet threefry_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_THREEFRY);
@@ -2788,6 +2895,10 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
         poly_pat_op2(POLY_OP_FDIV, poly_pat_cvar("one"), poly_pat_any("b"), NULL), NULL
     ),
     rule_mul_fdiv1_to_fdiv};
+  /* Late not-CMPLT bound rewrite must run before generic not-CMPNE → CMPEQ. */
+  rules[n++] = (PolyRule){poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_not_cmplt_to_bound};
+  /* CMPNE(CMPNE(x,y), true) → CMPEQ(x,y), when the renderer supports CMPEQ. */
+  rules[n++] = (PolyRule){poly_pat_op(POLY_OP_CMPNE, NULL, 0, NULL), rule_cmpne_not_to_cmpeq};
 
   /* STORE(ptr<T>, value<U>) → STORE(ptr<T>, CAST<T>(value)) when T != U */
   {
@@ -2881,17 +2992,29 @@ static PolyUOp *xd_pow2if(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *q) 
   int bias = xd_exponent_bias(ft);
   int mbits = xd_mantissa_bits(ft);
   PolyUOp *i_bias = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(bias));
-  PolyUOp *i_mb = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(mbits));
+  PolyUOp *i_factor = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(1LL << mbits));
   PolyUOp *added = poly_uop2(ctx, POLY_OP_ADD, it, q, i_bias, poly_arg_none());
-  PolyUOp *shifted = poly_uop2(ctx, POLY_OP_SHL, it, added, i_mb, poly_arg_none());
+  /* tinygrad's decompositions.shl helper creates x * (2**n). Scalar lanes may
+   * later fold to SHL, while vector lanes keep MUL with rendered STACK consts. */
+  PolyUOp *shifted = poly_uop2(ctx, POLY_OP_MUL, it, added, i_factor, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_BITCAST, ft, shifted, poly_arg_none());
+}
+
+static PolyUOp *xd_sub_like_tinygrad(PolyCtx *ctx, PolyDType dt, PolyUOp *a, PolyUOp *b) {
+  /* tinygrad's elementwise subtraction is built as a + (b * -1). The scalar
+   * late rewrite can still collapse this to SUB, but vector paths keep the
+   * MUL/ADD shape used by the reference linearizer. */
+  PolyArg neg_arg = poly_dtype_is_float(dt) ? poly_arg_float(-1.0) : poly_arg_int(-1);
+  PolyUOp *neg_one = poly_uop0(ctx, POLY_OP_CONST, dt, neg_arg);
+  PolyUOp *neg_b = poly_uop2(ctx, POLY_OP_MUL, dt, b, neg_one, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_ADD, dt, a, neg_b, poly_arg_none());
 }
 
 /* ldexp2k: d * 2^e. Splits e into two halves to avoid overflow in pow2if. */
 static PolyUOp *xd_ldexp2k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d, PolyUOp *e) {
   PolyUOp *i_two = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(2));
   PolyUOp *half_e = poly_uop2(ctx, POLY_OP_IDIV, it, e, i_two, poly_arg_none());
-  PolyUOp *other_e = poly_uop2(ctx, POLY_OP_SUB, it, e, half_e, poly_arg_none());
+  PolyUOp *other_e = xd_sub_like_tinygrad(ctx, it, e, half_e);
   PolyUOp *pow1 = xd_pow2if(ctx, ft, it, half_e);
   PolyUOp *pow2 = xd_pow2if(ctx, ft, it, other_e);
   PolyUOp *r = poly_uop2(ctx, POLY_OP_MUL, ft, d, pow1, poly_arg_none());
@@ -2911,18 +3034,21 @@ static PolyUOp *xd_ldexp3k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d,
 }
 
 /* ilogb2k: integer part of log2(d) for normalized fp values.
- * (d.bitcast(int) >> mantissa_bits) & exponent_mask - exponent_bias */
+ * tinygrad decompositions.py uses `shr(dint, mantissa_bits)`, and that helper
+ * is `dint // 2**mantissa_bits`, not a raw signed right shift. Keeping IDIV
+ * here lets the late decomp pass add the same signed floor-division correction
+ * before it becomes SHR. */
 static PolyUOp *xd_ilogb2k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d) {
   int mbits = xd_mantissa_bits(ft);
   int64_t emask = xd_exponent_mask(ft);
   int bias = xd_exponent_bias(ft);
-  PolyUOp *i_mb = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(mbits));
+  PolyUOp *i_div = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(1LL << mbits));
   PolyUOp *i_mask = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(emask));
-  PolyUOp *i_bias = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(bias));
+  PolyUOp *i_neg_bias = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(-bias));
   PolyUOp *d_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, d, poly_arg_none());
-  PolyUOp *exp_bits = poly_uop2(ctx, POLY_OP_SHR, it, d_bits, i_mb, poly_arg_none());
+  PolyUOp *exp_bits = poly_uop2(ctx, POLY_OP_IDIV, it, d_bits, i_div, poly_arg_none());
   PolyUOp *masked = poly_uop2(ctx, POLY_OP_AND, it, exp_bits, i_mask, poly_arg_none());
-  return poly_uop2(ctx, POLY_OP_SUB, it, masked, i_bias, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_ADD, it, masked, i_neg_bias, poly_arg_none());
 }
 
 /*
@@ -2990,7 +3116,7 @@ static PolyUOp *rule_decomp_exp2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
 
   /* Step 3: fractional part s = x - q.cast(float) */
   PolyUOp *q_float = poly_uop1(ctx, POLY_OP_CAST, ft, q, poly_arg_none());
-  PolyUOp *s = poly_uop2(ctx, POLY_OP_SUB, ft, x, q_float, poly_arg_none());
+  PolyUOp *s = xd_sub_like_tinygrad(ctx, ft, x, q_float);
 
   /* Step 4: polyN — Horner's method */
   PolyUOp *u = xd_polyN(ctx, ft, s, coeffs, ncoeffs);
@@ -3033,12 +3159,13 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   PolyUOp *f_zero = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.0));
   PolyUOp *f_neg_zero = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.0));
   PolyUOp *f_one = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0));
+  PolyUOp *f_neg_one = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.0));
   PolyUOp *f_neg_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
   PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
   PolyUOp *f_nan = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
   PolyUOp *f_1e4 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1e-4));
   PolyUOp *f_4_3 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.0 / 0.75));
-  PolyUOp *f_64 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(64.0));
+  PolyUOp *f_neg_64 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-64.0));
   PolyUOp *f_2p64 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(18446744073709551616.0));
 
   /* Denormal handling: scale up subnormals by 2^64 */
@@ -3056,11 +3183,11 @@ static PolyUOp *rule_decomp_log2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   PolyUOp *m = xd_ldexp3k(ctx, ft, it, a, neg_e);
 
   /* Denormal exponent correction: subtract the 2^64 scaling */
-  PolyUOp *e_minus64 = poly_uop2(ctx, POLY_OP_SUB, ft, e, f_64, poly_arg_none());
+  PolyUOp *e_minus64 = poly_uop2(ctx, POLY_OP_ADD, ft, e, f_neg_64, poly_arg_none());
   PolyUOp *e_adj = poly_uop3(ctx, POLY_OP_WHERE, ft, is_denormal, e_minus64, e, poly_arg_none());
 
   /* x = (m - 1) / (m + 1) */
-  PolyUOp *m_minus1 = poly_uop2(ctx, POLY_OP_SUB, ft, m, f_one, poly_arg_none());
+  PolyUOp *m_minus1 = poly_uop2(ctx, POLY_OP_ADD, ft, m, f_neg_one, poly_arg_none());
   PolyUOp *m_plus1 = poly_uop2(ctx, POLY_OP_ADD, ft, m, f_one, poly_arg_none());
   PolyUOp *x = poly_uop2(ctx, POLY_OP_FDIV, ft, m_minus1, m_plus1, poly_arg_none());
   PolyUOp *x2 = poly_uop2(ctx, POLY_OP_MUL, ft, x, x, poly_arg_none());
@@ -3554,6 +3681,35 @@ static bool is_bf16(PolyDType dt) {
   return s.priority == POLY_BFLOAT16.priority && s.bitsize == 16;
 }
 
+static bool is_f16(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  return s.priority == POLY_FLOAT16.priority && s.bitsize == 16;
+}
+
+static bool is_f64(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  return s.priority == POLY_FLOAT64.priority && s.bitsize == 64;
+}
+
+static PolyDType float32_like(PolyDType dt) {
+  return dt.count > 1 ? poly_dtype_vec(POLY_FLOAT32, dt.count) : POLY_FLOAT32;
+}
+
+/* CPU C renderer parity with tinygrad ClangRenderer.extra_matcher:
+ * avoid backend compiler-rt/runtime helper calls for double->half/bf16 and
+ * bf16->half by lowering through float32 before final render. */
+static PolyUOp *rule_c_renderer_cast_via_f32(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (root->op != POLY_OP_CAST || root->n_src < 1) return NULL;
+  PolyDType src_dt = root->src[0]->dtype;
+  PolyDType dst_dt = root->dtype;
+  if (!((is_f64(src_dt) && (is_f16(dst_dt) || is_bf16(dst_dt))) ||
+        (is_bf16(src_dt) && is_f16(dst_dt))))
+    return NULL;
+  PolyUOp *f32 = poly_uop1(ctx, POLY_OP_CAST, float32_like(src_dt), root->src[0], poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, dst_dt, f32, poly_arg_none());
+}
+
 /* Rule: ALU(bf16, ...) -> CAST(ALU(CAST(src0, f32), ..., f32), bf16)
  * Applies to unary and binary float ALU ops with bf16 output. */
 static PolyUOp *rule_bf16_alu_promote(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -3753,6 +3909,21 @@ PolyPatternMatcher *poly_pm_bf16_non_native(void) {
   return g_pm_bf16_non_native;
 }
 
+static PolyPatternMatcher *g_pm_c_renderer_extra = NULL;
+
+PolyPatternMatcher *poly_pm_c_renderer_extra(void) {
+  if (g_pm_c_renderer_extra) return g_pm_c_renderer_extra;
+
+  PolyOpSet cast_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_CAST);
+  PolyRule c_rules[] = {
+      {poly_pat_ops(cast_set, NULL, 0, NULL), rule_c_renderer_cast_via_f32},
+  };
+  PolyPatternMatcher *c_pm = poly_pm_new(c_rules, (int)(sizeof(c_rules) / sizeof(c_rules[0])));
+  g_pm_c_renderer_extra = poly_pm_concat(c_pm, poly_pm_bf16_non_native());
+  poly_pm_destroy(c_pm);
+  return g_pm_c_renderer_extra;
+}
+
 /* Build the pm_transcendental PatternMatcher */
 
 static PolyPatternMatcher *g_pm_transcendental = NULL;
@@ -3868,11 +4039,65 @@ static void swizzle_recur(SwizzleCtx *s, int dim) {
   }
 }
 
+static PolyDType dtype_for_gep_result(PolyDType src_dt, int n_idxs) {
+  /* tinygrad's PtrDType has two independent lane concepts:
+   *   count  = lanes in the pointed-to value, e.g. ptr(float4)
+   *   vcount = lanes in a vector of pointers, e.g. ptr(float4).vec(4)
+   *
+   * Polygrad stores both fields too, but older late-codegen paths used count
+   * for both. GEP(tuple) is the place where this distinction matters for
+   * upcasted reductions: acc.cast(ptr(float4)).gep((...4 lanes...)) must stay
+   * ptr(float4).vec(4), not collapse to ptr(float16). */
+  if (n_idxs <= 1) {
+    if (src_dt.is_ptr) {
+      PolyDType r = src_dt;
+      r.vcount = 1;
+      return r;
+    }
+    return poly_dtype_scalar(src_dt);
+  }
+  if (src_dt.is_ptr) {
+    PolyDType r = src_dt;
+    r.vcount = (uint16_t)n_idxs;
+    return r;
+  }
+  return poly_dtype_vec(poly_dtype_scalar(src_dt), n_idxs);
+}
+
 static PolyUOp *make_gep(PolyCtx *ctx, PolyUOp *base, int64_t *idxs, int n_idxs) {
   return poly_uop1(
-      ctx, POLY_OP_GEP, poly_dtype_vec(poly_dtype_scalar(base->dtype), n_idxs), base,
+      ctx, POLY_OP_GEP, dtype_for_gep_result(base->dtype, n_idxs), base,
       poly_arg_int_tuple_local(idxs, n_idxs)
   );
+}
+
+static PolyDType dtype_for_vectorize_result(PolyDType elem_dt, int lanes) {
+  /* VECTORIZE/BROADCAST of a pointer is a vector of pointers in tinygrad
+   * (PtrDType.vcount), not a pointer to a wider value (PtrDType.count). The
+   * latter is produced explicitly by CAST to a vector pointer. */
+  if (lanes <= 1) return elem_dt;
+  if (elem_dt.is_ptr) {
+    PolyDType r = elem_dt;
+    int base_vcount = r.vcount > 1 ? r.vcount : 1;
+    r.vcount = (uint16_t)(base_vcount * lanes);
+    return r;
+  }
+  return poly_dtype_vec(elem_dt, lanes);
+}
+
+static PolyDType dtype_for_expand_result(PolyDType root_dt, int64_t expand_sz) {
+  /* Expanding a pointer UOp follows the same pointer-vector rule as
+   * VECTORIZE. This keeps upcasted register accumulators shaped as
+   * ptr(floatN).vec(M), so no_vectorized_index can assign every output lane a
+   * unique scalar register slot. */
+  if (expand_sz <= 1) return root_dt;
+  if (root_dt.is_ptr) {
+    PolyDType r = root_dt;
+    int base_vcount = r.vcount > 1 ? r.vcount : 1;
+    r.vcount = (uint16_t)(base_vcount * expand_sz);
+    return r;
+  }
+  return poly_dtype_vec(poly_dtype_scalar(root_dt), root_dt.count * (int)expand_sz);
 }
 
 static PolyUOp *do_expand(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -3980,14 +4205,13 @@ static PolyUOp *do_expand(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
       for (int j = 0; j < n_vec; j++)
         vec_srcs[j] = src;
       new_srcs[n_new_srcs++] = poly_uop(
-          ctx, POLY_OP_VECTORIZE, poly_dtype_vec(src->dtype, n_vec), vec_srcs, n_vec,
+          ctx, POLY_OP_VECTORIZE, dtype_for_vectorize_result(src->dtype, n_vec), vec_srcs, n_vec,
           poly_arg_none()
       );
     }
   }
 
-  PolyDType out_dt =
-      poly_dtype_vec(poly_dtype_scalar(root->dtype), root->dtype.count * (int)expand_sz);
+  PolyDType out_dt = dtype_for_expand_result(root->dtype, expand_sz);
   PolyUOp *nsrc = poly_uop(ctx, root->op, out_dt, new_srcs, n_new_srcs, root->arg);
   return poly_uop1(
       ctx, POLY_OP_UNROLL, root->dtype, nsrc, poly_arg_pair_tuple(expand_pairs, n_expand_pairs)
@@ -4758,8 +4982,10 @@ static PolyUOp *rule_gep_on_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings
   for (int i = 0; i < gn; i++)
     new_arg[i] = pairs[i].pos;
   PolyUOp *st_data = sto->src[1];
-  PolyUOp *reordered_data =
-      poly_uop1(ctx, POLY_OP_GEP, st_data->dtype, st_data, poly_arg_int_tuple_local(new_arg, gn));
+  PolyUOp *reordered_data = poly_uop1(
+      ctx, POLY_OP_GEP, dtype_for_gep_result(st_data->dtype, gn), st_data,
+      poly_arg_int_tuple_local(new_arg, gn)
+  );
   PolyUOp *st_srcs[64];
   int ns = 0;
   st_srcs[ns++] = gep->src[0];
@@ -4817,8 +5043,7 @@ static PolyUOp *rule_ptrcat_after_store(PolyCtx *ctx, PolyUOp *sto, const PolyBi
     int64_t gep_args[128];
     for (int j = 0; j < ptr_count; j++)
       gep_args[j] = offset + j;
-    PolyDType slice_dt = (ptr_count > 1) ? poly_dtype_vec(poly_dtype_scalar(data->dtype), ptr_count)
-                                         : poly_dtype_scalar(data->dtype);
+    PolyDType slice_dt = dtype_for_gep_result(data->dtype, ptr_count);
     PolyUOp *slice =
         poly_uop1(ctx, POLY_OP_GEP, slice_dt, data, poly_arg_int_tuple_local(gep_args, ptr_count));
     PolyUOp *st_srcs[64];
@@ -4831,6 +5056,15 @@ static PolyUOp *rule_ptrcat_after_store(PolyCtx *ctx, PolyUOp *sto, const PolyBi
     offset += ptr_count;
   }
   return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, ns_out, poly_arg_none());
+}
+
+static bool codegen_foldable_buffer_dtype(PolyUOp *buf) {
+  if (!buf || !buf->dtype.is_ptr) return false;
+  /* tinygrad correct_load_store only vector-splits normal buffer LOAD/STORE for
+   * float-like base dtypes (plus backend/image/register special cases). Keep
+   * integer buffers scalar; sparse target labels in cross-entropy depend on
+   * this for strict IR parity. */
+  return poly_dtype_is_float(poly_dtype_scalar(buf->dtype));
 }
 
 /* split_load_store (tinygrad devectorizer.py:140-184):
@@ -4863,6 +5097,9 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   int n_folds = 0;
   if (buf->dtype.is_ptr && buf->dtype.addrspace == POLY_ADDR_REG) {
     /* tinygrad split_load_store keeps register-backed loads/stores scalar. */
+  } else if (!codegen_foldable_buffer_dtype(buf)) {
+    /* Non-float normal buffers keep the fallback width [1], matching
+     * tinygrad's dtype filter in split_load_store. */
   } else {
     if (g_max_fold_width >= 8) fold_lengths[n_folds++] = 8;
     if (g_max_fold_width >= 4) fold_lengths[n_folds++] = 4;
@@ -4936,7 +5173,7 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
       int64_t gep_args[128];
       for (int j = 0; j < fold_length; j++)
         gep_args[j] = global_offset + j;
-      PolyDType slice_dt = (fold_length > 1) ? poly_dtype_vec(sdt, fold_length) : sdt;
+      PolyDType slice_dt = dtype_for_gep_result(ls->src[1]->dtype, fold_length);
       PolyUOp *slice = poly_uop1(
           ctx, POLY_OP_GEP, slice_dt, ls->src[1], poly_arg_int_tuple_local(gep_args, fold_length)
       );
@@ -5128,6 +5365,12 @@ static PolyUOp *rule_no_vectorized_alu(PolyCtx *ctx, PolyUOp *alu, const PolyBin
   return poly_uop(ctx, POLY_OP_VECTORIZE, alu->dtype, elts, lanes, poly_arg_none());
 }
 
+static PolyUOp *rule_bool_and_to_scalarized_vector(PolyCtx *ctx, PolyUOp *alu, const PolyBindings *b) {
+  if (!alu || alu->op != POLY_OP_AND || !poly_dtype_is_bool(poly_dtype_scalar(alu->dtype)))
+    return NULL;
+  return rule_no_vectorized_alu(ctx, alu, b);
+}
+
 /* pm_move_where_on_load (tinygrad uop/symbolic.py line 375-390) * WHERE(cond, LOAD(INDEX(buf, idx)), CONST(0)) → LOAD(INDEX(buf, idx, cond))
  * Moves validity condition into INDEX gate so renderers can emit conditional loads.
  * Without this, unconditional LOAD on out-of-bounds PAD indices SEGVs in JIT.
@@ -5140,6 +5383,14 @@ static bool uop_tree_contains_load(PolyUOp *u) {
   if (u->op == POLY_OP_LOAD) return true;
   for (int i = 0; i < u->n_src; i++)
     if (uop_tree_contains_load(u->src[i])) return true;
+  return false;
+}
+
+static bool uop_tree_indexes_buffer(PolyUOp *u, PolyUOp *buf) {
+  if (!u || !buf) return false;
+  if (u->op == POLY_OP_INDEX && u->n_src >= 1 && u->src[0] == buf) return true;
+  for (int i = 0; i < u->n_src; i++)
+    if (uop_tree_indexes_buffer(u->src[i], buf)) return true;
   return false;
 }
 
@@ -5221,10 +5472,9 @@ static PolyUOp *move_where_clauses_into_index(
   PolyUOp *new_valid = and_all_clauses(ctx, moved, n_moved, load_valid);
   PolyUOp *base = NULL;
   if (has_load) {
-    /* Keep the gated-load approximation only for already-loaded patterns.
-     * The current unified pipeline hits pm_move_where_on_load before
-     * pm_add_loads, so the triu/tril parity path should take the INDEX branch
-     * below and match tinygrad's Invalid-carrying representation. */
+    /* Already-loaded patterns can become a real gated LOAD immediately. Pre-load
+     * INDEX patterns stay in tinygrad's weakint invalid-gate form and are lowered
+     * later by pm_lower_index_dtype-style cleanup. */
     PolyUOp *new_srcs[3] = {idx->src[0], idx->src[1], new_valid};
     PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, new_srcs, 3, idx->arg);
     PolyUOp *load_srcs[2] = {gated_idx, zero};
@@ -5232,8 +5482,7 @@ static PolyUOp *move_where_clauses_into_index(
   } else {
     /* Tinygrad keeps pm_move_where_on_load in the weakint index domain:
      *   INDEX(buf, WHERE(valid, idx, Invalid))
-     * That preserves the residual WHERE through postopt symbolic and only
-     * lowers to a 3-source INDEX later. */
+     * pm_lower_index_dtype then lowers this to INDEX(buf, idx, valid). */
     PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, idx->src[1]->dtype, poly_arg_invalid());
     PolyUOp *index_expr =
         poly_uop3(ctx, POLY_OP_WHERE, idx->src[1]->dtype, new_valid, idx->src[1], invalid, poly_arg_none());
@@ -5268,8 +5517,12 @@ static PolyUOp *rule_where_on_load(PolyCtx *ctx, PolyUOp *w, const PolyBindings 
   if (false_val->arg.kind == POLY_ARG_FLOAT && false_val->arg.f != 0.0) return NULL;
   if (false_val->arg.kind == POLY_ARG_INT && false_val->arg.i != 0) return NULL;
 
-  /* Guard: reject if cond depends on loaded data */
-  if (uop_tree_contains_load(cond)) return NULL;
+  /* Guard: reject value-dependent selects. In Polygrad this pass runs before
+   * pm_add_loads, so ReLU-like conditions are still CMPLT(..., INDEX(buf, i))
+   * rather than CMPLT(..., LOAD(INDEX(buf, i))). Moving those into the index
+   * turns WHERE(x>0, x, 0) into LOAD(x[WHERE(x>0, i, Invalid)]) and loses the
+   * false branch. PAD/triu masks use range/index math and still move. */
+  if (uop_tree_contains_load(cond) || uop_tree_indexes_buffer(cond, idx->src[0])) return NULL;
   return move_where_clauses_into_index(
       ctx,
       cond,
@@ -5305,7 +5558,7 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
   if (true_val->arg.kind == POLY_ARG_FLOAT && true_val->arg.f != 0.0) return NULL;
   if (true_val->arg.kind == POLY_ARG_INT && true_val->arg.i != 0) return NULL;
 
-  if (uop_tree_contains_load(cond)) return NULL;
+  if (uop_tree_contains_load(cond) || uop_tree_indexes_buffer(cond, idx->src[0])) return NULL;
   PolyUOp *neg_cond =
       poly_uop2(ctx, POLY_OP_CMPNE, cond->dtype, cond, poly_const_like_bool(ctx, cond, true), poly_arg_none());
   return move_where_clauses_into_index(
@@ -5428,11 +5681,12 @@ static PolyUOp *rule_no_vectorized_index(PolyCtx *ctx, PolyUOp *idx_uop, const P
   }
   if (n_pairs <= 0) return NULL;
 
-  PolyDType vec_buf_dt = buf->dtype;
-  if (vec_buf_dt.is_ptr) vec_buf_dt.vcount = (uint16_t)n_pairs;
-  else vec_buf_dt.count = (uint16_t)n_pairs;
-  PolyDType vec_idx_dt = poly_dtype_scalar(orig_idx->dtype);
-  vec_idx_dt.count = (uint16_t)n_pairs;
+  /* Build real vector dtypes, not just count-mutated structs. PolyDType.bitsize
+   * is total vector width, so mutating count alone turns int32.vec(16) into a
+   * bogus 2-bit scalar after poly_dtype_scalar(). That aliases register lanes
+   * in upcasted reductions. */
+  PolyDType vec_buf_dt = dtype_for_vectorize_result(buf->dtype, n_pairs);
+  PolyDType vec_idx_dt = poly_dtype_vec(poly_dtype_scalar(orig_idx->dtype), n_pairs);
 
   PolyUOp **bsrcs = calloc((size_t)n_pairs, sizeof(*bsrcs));
   PolyUOp **isrcs = calloc((size_t)n_pairs, sizeof(*isrcs));
@@ -5518,6 +5772,22 @@ static PolyPatternMatcher *poly_pm_devectorize(void) {
 
 /* pm_render subset (constants + vector WHERE scalarization) */
 
+static PolyUOp *rule_render_vector_const(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (!u || u->op != POLY_OP_CONST || u->dtype.count <= 1) return NULL;
+
+  /* tinygrad pm_render lowers vector CONST to explicit STACK before final
+   * rendering. This lets later GEP-of-constant lanes collapse to scalar
+   * constants instead of surviving as extra lane extract nodes. */
+  int lanes = u->dtype.count;
+  if (lanes > 128) return NULL;
+  PolyDType sdt = poly_dtype_scalar(u->dtype);
+  PolyUOp *elts[128];
+  for (int i = 0; i < lanes; i++)
+    elts[i] = poly_uop0(ctx, POLY_OP_CONST, sdt, u->arg);
+  return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, lanes, poly_arg_none());
+}
+
 static PolyUOp *rule_render_vconst(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (u->op != POLY_OP_VCONST) return NULL;
@@ -5547,8 +5817,29 @@ static PolyUOp *rule_vectorize_single(PolyCtx *ctx, PolyUOp *u, const PolyBindin
 static PolyUOp *make_gep_lane(PolyCtx *ctx, PolyUOp *src, int lane) {
   int64_t idx = lane;
   return poly_uop1(
-      ctx, POLY_OP_GEP, poly_dtype_scalar(src->dtype), src, poly_arg_int_tuple_local(&idx, 1)
+      ctx, POLY_OP_GEP, dtype_for_gep_result(src->dtype, 1), src,
+      poly_arg_int_tuple_local(&idx, 1)
   );
+}
+
+static PolyUOp *rule_render_gep_multi(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (!u || u->op != POLY_OP_GEP || u->n_src < 1 || u->arg.kind != POLY_ARG_INT_TUPLE)
+    return NULL;
+  int n = u->arg.int_tuple.n;
+  if (n <= 1 || n > 128) return NULL;
+
+  /* tinygrad's final pm_render lowers GEP(tuple) into STACK(GEP(...), ...).
+   * This is intentionally later than gep_pushing: final render is an explicit
+   * renderer-facing form, not another symbolic cleanup pass. */
+  PolyUOp *elts[128];
+  for (int i = 0; i < n; i++) {
+    /* tinygrad calls gep.src[0].gep(x) here. UOp.gep(int) shortcuts STACK
+     * sources to their selected lane, so preserve that renderer-facing shape
+     * instead of creating extra GEP nodes over a STACK. */
+    elts[i] = lane_or_gep(ctx, u->src[0], (int)u->arg.int_tuple.vals[i]);
+  }
+  return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, n, poly_arg_none());
 }
 
 static PolyUOp *lane_or_gep(PolyCtx *ctx, PolyUOp *src, int lane) {
@@ -5590,6 +5881,248 @@ static PolyUOp *rule_vector_where_to_scalar(PolyCtx *ctx, PolyUOp *u, const Poly
     elts[i] = poly_uop3(ctx, POLY_OP_WHERE, sdt, c, x, y, poly_arg_none());
   }
   return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, lanes, poly_arg_none());
+}
+
+static PolyUOp *rule_vector_const_where_to_stack(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || u->dtype.count <= 1) return NULL;
+  int lanes = u->dtype.count;
+  if (lanes <= 0 || lanes > 128) return NULL;
+
+  /* tinygrad folds vector WHEREs with compile-time lane masks into the chosen
+   * lane values before rendering. This avoids producing scalar WHERE nodes for
+   * upcasted pad/replicate masks such as [1,1,0,0,...]. */
+  PolyUOp *elts[128];
+  for (int i = 0; i < lanes; i++) {
+    PolyUOp *gate = scalarize_lane_expr(ctx, u->src[0], i);
+    if (!gate || gate->op != POLY_OP_CONST || gate->arg.kind != POLY_ARG_BOOL) return NULL;
+    PolyUOp *branch = gate->arg.b ? u->src[1] : u->src[2];
+    elts[i] = scalarize_lane_expr(ctx, branch, i);
+    if (!elts[i]) return NULL;
+  }
+  return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, lanes, poly_arg_none());
+}
+
+static PolyUOp *rule_vector_sub_same_stack_rhs_to_add_neg(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!u || u->op != POLY_OP_SUB || u->n_src != 2 || u->dtype.count <= 1) return NULL;
+  PolyUOp *rhs = u->src[1];
+  if (!rhs || rhs->op != POLY_OP_VECTORIZE || rhs->n_src <= 1 || rhs->n_src > 128) return NULL;
+
+  PolyUOp *same = rhs->src[0];
+  for (int i = 1; i < rhs->n_src; i++)
+    if (rhs->src[i] != same) return NULL;
+
+  /* tinygrad's high-level Tensor.sub is `a + (b * -1)`. For broadcasted
+   * scalar RHS values this reaches render as STACK(NEG(scalar), ...), not as a
+   * vector SUB. Keep ordinary vector SUB intact; only rewrite repeated scalar
+   * RHS stacks that came from broadcast subtraction. */
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, same->dtype, same, poly_arg_none());
+  PolyUOp *elts[128];
+  for (int i = 0; i < rhs->n_src; i++)
+    elts[i] = neg;
+  PolyUOp *neg_stack = poly_uop(ctx, POLY_OP_VECTORIZE, rhs->dtype, elts, rhs->n_src, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_ADD, u->dtype, u->src[0], neg_stack, poly_arg_none());
+}
+
+typedef struct {
+  bool ok;
+  bool from_vector_load;
+  PolyUOp *buf;
+  PolyUOp *idx;
+  int64_t offset;
+  int64_t base;
+  int width;
+} ScalarLoadRun;
+
+static bool scalar_const_load_info(PolyUOp *u, ScalarLoadRun *out) {
+  if (out) memset(out, 0, sizeof(*out));
+  if (!u || u->op != POLY_OP_LOAD || u->n_src != 1) return false;
+  PolyUOp *idx = u->src[0];
+  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src != 2) return false;
+  PolyUOp *buf = idx->src[0];
+  PolyUOp *off = idx->src[1];
+  if (!buf || !buf->dtype.is_ptr || !off || off->op != POLY_OP_CONST ||
+      off->arg.kind != POLY_ARG_INT)
+    return false;
+  if (!codegen_foldable_buffer_dtype(buf)) return false;
+  if (buf->dtype.ptr_size <= 0) return false;
+
+  int width = g_max_fold_width;
+  if (width < 2) return false;
+  if (width > 4) width = 4; /* CStyle parity: tinygrad folds to float4 here. */
+  int64_t offset = off->arg.i;
+  if (offset < 0 || offset >= buf->dtype.ptr_size) return false;
+  int64_t base = (offset / width) * width;
+  if (base + width > buf->dtype.ptr_size) return false;
+
+  if (out) {
+    out->ok = true;
+    out->from_vector_load = false;
+    out->buf = buf;
+    out->idx = idx;
+    out->offset = offset;
+    out->base = base;
+    out->width = width;
+  }
+  return true;
+}
+
+static bool vector_load_lane_info(PolyUOp *u, ScalarLoadRun *out) {
+  if (out) memset(out, 0, sizeof(*out));
+  if (!u || u->op != POLY_OP_GEP || u->n_src != 1) return false;
+  int64_t lane = 0;
+  if (u->arg.kind == POLY_ARG_INT) {
+    lane = u->arg.i;
+  } else if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1) {
+    lane = u->arg.int_tuple.vals[0];
+  } else {
+    return false;
+  }
+
+  PolyUOp *load = u->src[0];
+  if (!load || load->op != POLY_OP_LOAD || load->n_src != 1 || load->dtype.count <= 1)
+    return false;
+  PolyUOp *cast = load->src[0];
+  if (!cast || cast->op != POLY_OP_CAST || cast->n_src != 1 || !cast->dtype.is_ptr ||
+      cast->dtype.count <= 1)
+    return false;
+  PolyUOp *idx = cast->src[0];
+  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src != 2) return false;
+  PolyUOp *buf = idx->src[0];
+  PolyUOp *off = idx->src[1];
+  if (!buf || !buf->dtype.is_ptr || !off || off->op != POLY_OP_CONST ||
+      off->arg.kind != POLY_ARG_INT)
+    return false;
+  if (!codegen_foldable_buffer_dtype(buf)) return false;
+  if (buf->dtype.ptr_size <= 0) return false;
+  if (lane < 0 || lane >= cast->dtype.count) return false;
+
+  int width = g_max_fold_width;
+  if (width < 2) return false;
+  if (width > 4) width = 4;
+  int64_t offset = off->arg.i + lane;
+  if (offset < 0 || offset >= buf->dtype.ptr_size) return false;
+  int64_t base = (offset / width) * width;
+  if (base + width > buf->dtype.ptr_size) return false;
+
+  if (out) {
+    out->ok = true;
+    out->from_vector_load = true;
+    out->buf = buf;
+    out->idx = idx;
+    out->offset = offset;
+    out->base = base;
+    out->width = width;
+  }
+  return true;
+}
+
+static PolyUOp *vector_load_lane_for_scalar_load(PolyCtx *ctx, ScalarLoadRun info) {
+  PolyUOp *base_const =
+      poly_uop0(ctx, POLY_OP_CONST, info.idx->src[1]->dtype, poly_arg_int(info.base));
+  PolyUOp *idx_srcs[2] = {info.buf, base_const};
+  PolyUOp *base_idx = poly_uop(ctx, POLY_OP_INDEX, info.buf->dtype, idx_srcs, 2, info.idx->arg);
+  PolyDType vec_ptr = poly_dtype_ptr_vec(info.buf->dtype, info.width);
+  PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, vec_ptr, base_idx, poly_arg_none());
+  PolyDType elem_dt = poly_dtype_scalar(info.buf->dtype);
+  elem_dt.is_ptr = false;
+  elem_dt.addrspace = 0;
+  elem_dt.ptr_size = 0;
+  elem_dt.vcount = 0;
+  PolyDType vec_dt = poly_dtype_vec(elem_dt, info.width);
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, vec_dt, cast, poly_arg_none());
+  return make_gep_lane(ctx, load, (int)(info.offset - info.base));
+}
+
+static PolyUOp *rule_stack_scalar_load_runs(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (!u || u->op != POLY_OP_VECTORIZE || u->n_src <= 1) return NULL;
+
+  ScalarLoadRun info[128];
+  if (u->n_src > 128) return NULL;
+  bool any = false;
+  for (int i = 0; i < u->n_src; i++) {
+    if (scalar_const_load_info(u->src[i], &info[i]) || vector_load_lane_info(u->src[i], &info[i]))
+      any = true;
+  }
+  if (!any) return NULL;
+
+  PolyUOp *elts[128];
+  bool changed = false;
+  for (int i = 0; i < u->n_src; i++) {
+    elts[i] = u->src[i];
+    if (!info[i].ok) continue;
+
+    int run_uses = 0;
+    int run_first_offset = 0;
+    int run_last_offset = 0;
+    bool run_seen = false;
+    bool run_is_source_order_contiguous = true;
+    bool run_has_all_lanes = true;
+    for (int j = 0; j < u->n_src; j++) {
+      if (info[j].ok && info[j].buf == info[i].buf && info[j].base == info[i].base &&
+          info[j].width == info[i].width) {
+        run_uses++;
+        if (!run_seen) {
+          run_first_offset = (int)info[j].offset;
+          run_last_offset = (int)info[j].offset;
+          run_seen = true;
+        } else {
+          if (info[j].offset != (int64_t)run_last_offset + 1)
+            run_is_source_order_contiguous = false;
+          run_last_offset = (int)info[j].offset;
+        }
+      }
+    }
+    for (int lane = 0; lane < info[i].width; lane++) {
+      bool found_lane = false;
+      for (int j = 0; j < u->n_src; j++) {
+        if (info[j].ok && info[j].buf == info[i].buf && info[j].base == info[i].base &&
+            info[j].width == info[i].width && info[j].offset == info[i].base + lane) {
+          found_lane = true;
+          break;
+        }
+      }
+      if (!found_lane) {
+        run_has_all_lanes = false;
+        break;
+      }
+    }
+    /* tinygrad's load_store_folding groups indexes before renderer STACKs are
+     * considered, so a lane from a smaller vector LOAD can still canonicalize
+     * to the wider folded LOAD even when this particular STACK only uses one
+     * lane. Fresh scalar LOADs need a source-order contiguous ascending run;
+     * repeated or reversed pad/tril loads stay scalar in tinygrad. */
+    if (!info[i].from_vector_load &&
+        (u->dtype.count <= g_max_fold_width || run_uses < 2 ||
+         (!run_is_source_order_contiguous && !run_has_all_lanes)))
+      continue;
+
+    ScalarLoadRun load_info = info[i];
+    if (info[i].from_vector_load && u->dtype.count <= g_max_fold_width && run_uses > 1 &&
+        run_uses < info[i].width && run_is_source_order_contiguous) {
+      /* tinygrad's fold_expanded_index groups contiguous suffixes by their
+       * first actual offset. For triu tails this means LOAD vec2 at offset 10,
+       * not LOAD vec4 at offset 8 followed by GEP(2,3). */
+      load_info.base = run_first_offset;
+      load_info.width = run_uses;
+    }
+
+    /* tinygrad's load_store_folding represents repeated contiguous scalar
+     * loads as one vector LOAD plus GEP lane extracts. Apply the same shape
+     * inside renderer-facing STACKs so cumalu windows do not carry many
+     * redundant scalar LOAD/INDEX pairs. */
+    elts[i] = vector_load_lane_for_scalar_load(ctx, load_info);
+    changed = true;
+  }
+
+  if (!changed) return NULL;
+  return poly_uop(ctx, POLY_OP_VECTORIZE, u->dtype, elts, u->n_src, poly_arg_none());
 }
 
 static PolyUOp *rule_vector_bool_neg_to_scalarized_vector(
@@ -5806,11 +6339,24 @@ static PolyPatternMatcher *poly_pm_render_subset(void) {
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_where_after_gated_load_rev},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "u")),
        rule_scalar_gated_load_operands},
+      {poly_pat_op(POLY_OP_CONST, NULL, 0, "u"), rule_render_vector_const},
       {poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst},
       {poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_cat_to_vectorize},
+      {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_stack_scalar_load_runs},
+      {poly_pat_op(POLY_OP_SUB, NULL, 0, "u"), rule_vector_sub_same_stack_rhs_to_add_neg},
+      {poly_pat_op(POLY_OP_GEP, NULL, 0, "u"), rule_render_gep_multi},
+      /* tinygrad's final rewrite still runs late scalar decompositions after
+       * vector comparisons have been split into lane expressions. This turns
+       * `(idx < 0) != true` gates into `-1 < idx` before the gates are stacked. */
+      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_not_cmplt_to_bound},
       {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
       {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
       {poly_pat_op(POLY_OP_CMPEQ, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
+      /* DEVECTORIZE=0 keeps most vector ALU, but bool masks used as INDEX
+       * valids must become lane-wise scalar predicates for renderer parity with
+       * tinygrad's cross-entropy gather kernels. */
+      {poly_pat_op(POLY_OP_AND, NULL, 0, "u"), rule_bool_and_to_scalarized_vector},
+      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_const_where_to_stack},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_where_to_scalar},
       {poly_pat_op(POLY_OP_NEG, NULL, 0, "u"), rule_vector_bool_neg_to_scalarized_vector},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
@@ -5828,23 +6374,30 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_where_after_gated_load_rev},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "u")),
        rule_scalar_gated_load_operands},
+      {poly_pat_op(POLY_OP_CONST, NULL, 0, "u"), rule_render_vector_const},
       {poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst},
       {poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_cat_to_vectorize},
+      {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_stack_scalar_load_runs},
+      {poly_pat_op(POLY_OP_SUB, NULL, 0, "u"), rule_vector_sub_same_stack_rhs_to_add_neg},
+      {poly_pat_op(POLY_OP_GEP, NULL, 0, "u"), rule_render_gep_multi},
+      /* See the full render subset: scalarized valid masks need the late
+       * not-CMPLT bound form that tinygrad emits before stacking gates. */
+      {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_not_cmplt_to_bound},
       /* Scatter vec CMP/WHERE to per-lane scalar (same as render_subset).
        * tinygrad does this even with DEVECTORIZE=0 — comparison semantics
        * require per-element evaluation, not packed SSE cmpps. */
       {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
       {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
       {poly_pat_op(POLY_OP_CMPEQ, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
+      /* Keep this scoped to boolean AND masks. Integer vector AND can represent
+       * arithmetic decompositions and should stay packed under DEVECTORIZE=0. */
+      {poly_pat_op(POLY_OP_AND, NULL, 0, "u"), rule_bool_and_to_scalarized_vector},
+      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_const_where_to_stack},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_where_to_scalar},
       {poly_pat_op(POLY_OP_NEG, NULL, 0, "u"), rule_vector_bool_neg_to_scalarized_vector},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
   };
-  /* Include gep_pushing so VECTORIZE(GEP(x,0),...) → x identity fires.
-   * The expander at stage 8 creates GEP+VECTORIZE that need cleanup. */
-  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  g_pm_render_subset_vec = poly_pm_concat(base, poly_pm_gep_pushing());
-  poly_pm_destroy(base); /* concat copied rules; base infra no longer needed */
+  g_pm_render_subset_vec = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_render_subset_vec;
 }
 
@@ -5854,14 +6407,17 @@ static PolyPatternMatcher *g_pm_render_subset_x64 = NULL;
 static PolyPatternMatcher *poly_pm_render_subset_x64(void) {
   if (g_pm_render_subset_x64) return g_pm_render_subset_x64;
   PolyRule rules[] = {
+      {poly_pat_op(POLY_OP_CONST, NULL, 0, "u"), rule_render_vector_const},
       {poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst},
       {poly_pat_op(POLY_OP_VCAT, NULL, 0, "x"), rule_cat_to_vectorize},
+      {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_stack_scalar_load_runs},
+      {poly_pat_op(POLY_OP_SUB, NULL, 0, "u"), rule_vector_sub_same_stack_rhs_to_add_neg},
+      {poly_pat_op(POLY_OP_GEP, NULL, 0, "u"), rule_render_gep_multi},
       /* Keep vector CMP/WHERE packed -- x64 handles them natively */
+      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_const_where_to_stack},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
   };
-  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  g_pm_render_subset_x64 = poly_pm_concat(base, poly_pm_gep_pushing());
-  poly_pm_destroy(base);
+  g_pm_render_subset_x64 = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_render_subset_x64;
 }
 
@@ -5891,9 +6447,8 @@ static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
   /* Matches tinygrad pm_no_devec = sym + load_store_folding + correct_load_store +
    * load_store_indexing.
    *
-   * Parity: do not lower generic WHERE(idx, Invalid) into a 3-source INDEX here.
-   * The checked-in tinygrad reference keeps the Invalid-carrying scalar triu path
-   * through add_loads/lower_index_dtype/final rewrite. */
+   * The full lower-Invalid rewrite belongs to the post-index stage below, after
+   * index dtype narrowing has matched tinygrad's pm_lower_index_dtype boundary. */
   PolyRule indexing_rules[] = {
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_drop_true_gate},
   };
@@ -5907,16 +6462,10 @@ static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
 
 /* Post-devectorize index dtype lowering (tinygrad pm_lower_index_dtype parity)
  *
- * Tinygrad carries symbolic index expressions as weakint, then runs a dedicated
- * "lower all index dtypes" pass after devectorization. Polygrad doesn't have a
- * distinct weakint/index dtype, so the closest equivalent is:
- *   1. visit INDEX subtrees only
- *   2. concretize small integer arithmetic to int32
- *   3. drop redundant casts exposed by that narrowing
- *   4. rerun gep_pushing + load_store_indexing-style cleanup
- *
- * This keeps the transformation scoped to addressing logic instead of
- * retagging unrelated integer math.
+ * Tinygrad carries symbolic index expressions as dtypes.weakint, then runs a
+ * dedicated "lower all index dtypes" pass after devectorization. Polygrad's
+ * matching dtype is POLY_INDEX. This pass narrows only POLY_INDEX subtrees to
+ * concrete integer dtypes while preserving ordinary tensor integer ALU.
  */
 
 static PolyUOp *rebuild_preserve_tag(
@@ -5927,8 +6476,24 @@ static PolyUOp *rebuild_preserve_tag(
 }
 
 static PolyDType select_index_dtype(PolyCtx *ctx, PolyUOp *u) {
+  /* tinygrad uop/ops.py::pm_lower_index_dtype lowers RANGE from its bound:
+   *   RANGE(end.cast(weakint)) -> RANGE(end.dtype, end).cast(weakint)
+   * Parent address math may cast that loop value wider, but the loop identity
+   * itself must stay tied to the bound. If the same logical RANGE becomes
+   * `int` for STORE and `long` for LOAD, the renderer sees an un-ended orphan
+   * loop in gather/embedding kernels. */
+  if (u->op == POLY_OP_RANGE && u->n_src >= 1) {
+    int64_t vmin = 0, vmax = 0;
+    poly_uop_minmax(ctx, u, &vmin, &vmax);
+    PolyDType lowered =
+        (vmin >= INT32_MIN && vmax <= INT32_MAX) ? POLY_INT32 : POLY_INT64;
+    if (u->dtype.count > 1) lowered = poly_dtype_vec(lowered, u->dtype.count);
+    return lowered;
+  }
+
   PolyDType scalar = poly_dtype_scalar(u->dtype);
-  if (!poly_dtype_is_int(scalar) || scalar.bitsize <= 32) return u->dtype;
+  if (!poly_dtype_eq(scalar, POLY_INDEX)) return u->dtype;
+  if (u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID) return u->dtype;
   int64_t vmin = 0, vmax = 0;
   poly_uop_minmax(ctx, u, &vmin, &vmax);
   if (vmin >= INT32_MIN && vmax <= INT32_MAX) {
@@ -5936,7 +6501,9 @@ static PolyDType select_index_dtype(PolyCtx *ctx, PolyUOp *u) {
     if (u->dtype.count > 1) lowered = poly_dtype_vec(lowered, u->dtype.count);
     return lowered;
   }
-  return u->dtype;
+  PolyDType lowered = POLY_INT64;
+  if (u->dtype.count > 1) lowered = poly_dtype_vec(lowered, u->dtype.count);
+  return lowered;
 }
 
 static PolyUOp *lower_index_subtree(
@@ -5950,6 +6517,45 @@ static PolyUOp *lower_index_subtree(
   if (!u) return NULL;
   for (int i = 0; i < *memo_n; i++)
     if (memo_old[i] == u) return memo_new[i];
+
+  if (u->op == POLY_OP_RANGE && u->n_src >= 1) {
+    /* Keep RANGE identity canonical when lowering weak indexes. Tinygrad
+     * lowers `RANGE(end.cast(weakint))` by lowering `end` first, then creating
+     * one concrete RANGE. Parent expressions can cast that loop value wider,
+     * but the bound and RANGE dtype must agree or CSE creates duplicate loops. */
+    PolyDType range_dtype = select_index_dtype(ctx, u);
+    PolyUOp *new_srcs[64];
+    int ns = u->n_src < 64 ? u->n_src : 64;
+    for (int i = 0; i < ns; i++)
+      new_srcs[i] = lower_index_subtree(ctx, u->src[i], memo_old, memo_new, memo_n, memo_cap);
+    if (!poly_dtype_eq(new_srcs[0]->dtype, range_dtype)) {
+      if (new_srcs[0]->op == POLY_OP_CONST) {
+        new_srcs[0] = poly_uop0(ctx, POLY_OP_CONST, range_dtype, new_srcs[0]->arg);
+      } else {
+        new_srcs[0] = poly_uop1(ctx, POLY_OP_CAST, range_dtype, new_srcs[0], poly_arg_none());
+      }
+    }
+    PolyUOp *result = rebuild_preserve_tag(ctx, u, range_dtype, new_srcs, ns);
+    if (*memo_n < memo_cap) {
+      memo_old[*memo_n] = u;
+      memo_new[*memo_n] = result;
+      (*memo_n)++;
+    }
+    return result;
+  }
+
+  if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
+      u->src[0]->op == POLY_OP_LOAD && poly_dtype_eq(u->dtype, POLY_INT64)) {
+    /* tinygrad keeps loaded integer labels widened to long inside index
+     * arithmetic. Do not immediately narrow CAST(long, LOAD(int)) back to the
+     * load dtype just because the loaded scalar's standalone bounds fit int32. */
+    if (*memo_n < memo_cap) {
+      memo_old[*memo_n] = u;
+      memo_new[*memo_n] = u;
+      (*memo_n)++;
+    }
+    return u;
+  }
 
   PolyUOp *new_srcs[64];
   bool changed = false;
@@ -5979,9 +6585,16 @@ static PolyUOp *lower_index_subtree(
 
 static PolyUOp *rule_lower_index_dtype(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
   (void)b;
-  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
   PolyUOp *memo_old[256], *memo_new[256];
   int memo_n = 0;
+  if (!idx) return NULL;
+
+  if (idx->op != POLY_OP_INDEX) {
+    PolyUOp *ret = lower_index_subtree(ctx, idx, memo_old, memo_new, &memo_n, 256);
+    return ret == idx ? NULL : ret;
+  }
+
+  if (idx->n_src < 2) return NULL;
   PolyUOp *new_srcs[8];
   bool changed = false;
   new_srcs[0] = idx->src[0];
@@ -5997,7 +6610,11 @@ static PolyPatternMatcher *g_pm_lower_index_dtype = NULL;
 static PolyPatternMatcher *poly_pm_lower_index_dtype(void) {
   if (g_pm_lower_index_dtype) return g_pm_lower_index_dtype;
   PolyRule rules[] = {
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_lower_index_dtype},
+      /* tinygrad runs pm_lower_index_dtype on the whole kernel sink, not just
+       * INDEX nodes. That matters once RANGE/END sources are real weakint
+       * nodes: the loop owner and every address expression must be narrowed
+       * together to the same concrete integer dtype. */
+      {poly_pat_any("idx"), rule_lower_index_dtype},
   };
   g_pm_lower_index_dtype = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   return g_pm_lower_index_dtype;
@@ -6013,20 +6630,155 @@ static bool match_invalid_gate_expr(
     PolyUOp **cond_out,
     PolyUOp **idx_out
 ) {
-  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) return false;
-  if (is_invalid_const_codegen(u->src[2])) {
-    *cond_out = u->src[0];
-    *idx_out = u->src[1];
-    return true;
+  if (!u) return false;
+  if (u->op == POLY_OP_WHERE && u->n_src == 3) {
+    if (is_invalid_const_codegen(u->src[2])) {
+      *cond_out = u->src[0];
+      *idx_out = u->src[1];
+      return true;
+    }
+    if (is_invalid_const_codegen(u->src[1])) {
+      PolyUOp *true_uop = poly_const_like_bool(ctx, u->src[0], true);
+      *cond_out =
+          poly_uop2(ctx, POLY_OP_CMPNE, u->src[0]->dtype, u->src[0], true_uop, poly_arg_none());
+      *idx_out = u->src[2];
+      return true;
+    }
   }
-  if (is_invalid_const_codegen(u->src[1])) {
-    PolyUOp *true_uop = poly_const_like_bool(ctx, u->src[0], true);
-    *cond_out =
-        poly_uop2(ctx, POLY_OP_CMPNE, u->src[0]->dtype, u->src[0], true_uop, poly_arg_none());
-    *idx_out = u->src[2];
-    return true;
+  if (u->n_src <= 0 || u->n_src > 8) return false;
+
+  PolyUOp *new_srcs[8];
+  PolyUOp *found_cond = NULL;
+  bool found = false;
+  for (int i = 0; i < u->n_src; i++) {
+    PolyUOp *child_cond = NULL;
+    PolyUOp *child_idx = NULL;
+    if (match_invalid_gate_expr(ctx, u->src[i], &child_cond, &child_idx)) {
+      if (found && child_cond != found_cond) return false;
+      found = true;
+      found_cond = child_cond;
+      new_srcs[i] = child_idx;
+    } else {
+      new_srcs[i] = u->src[i];
+    }
   }
+  if (!found) return false;
+
+  /* Tinygrad's pm_lower_index_dtype pulls Invalid-carrying weakint indexes into
+   * INDEX.valid even when the Invalid is nested under index arithmetic such as
+   * SHL(WHERE(valid, idx, Invalid), 1). Rebuild the same arithmetic with the
+   * valid branch, then let rule_index_invalid_gate_to_valid attach found_cond as
+   * the INDEX gate. */
+  *cond_out = found_cond;
+  *idx_out = rebuild_preserve_tag(ctx, u, u->dtype, new_srcs, u->n_src);
+  return true;
+}
+
+static bool int_const_value_codegen(PolyUOp *u, int64_t *out) {
+  if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return false;
+  if (out) *out = u->arg.i;
+  return true;
+}
+
+static bool split_add_const_codegen(PolyUOp *u, PolyUOp **base_out, int64_t *offset_out) {
+  if (!u) return false;
+  if (u->op == POLY_OP_ADD && u->n_src == 2) {
+    int64_t k = 0;
+    if (int_const_value_codegen(u->src[1], &k)) {
+      if (base_out) *base_out = u->src[0];
+      if (offset_out) *offset_out = k;
+      return true;
+    }
+    if (int_const_value_codegen(u->src[0], &k)) {
+      if (base_out) *base_out = u->src[1];
+      if (offset_out) *offset_out = k;
+      return true;
+    }
+  }
+  if (base_out) *base_out = u;
+  if (offset_out) *offset_out = 0;
+  return true;
+}
+
+/* tinygrad uop/symbolic.py parses valid masks as integer bounds before late
+ * rendering. Keep this codegen-scoped helper out of early symbolic passes:
+ * helper construction and rangeify still need the original frontend graph, but
+ * late LOAD.valid and padding-value masks should share the canonical bounds. */
+static PolyUOp *canonicalize_valid_bound_clause(PolyCtx *ctx, PolyUOp *gate) {
+  if (!gate) return gate;
+
+  if (gate->op == POLY_OP_CMPLT && gate->n_src == 2) {
+    PolyUOp *x = gate->src[0];
+    PolyUOp *c = gate->src[1];
+    int64_t cval = 0, offset = 0, adjusted = 0;
+    PolyUOp *base = NULL;
+    if (!poly_dtype_is_int(x->dtype) || poly_dtype_is_bool(x->dtype)) return gate;
+    if (!int_const_value_codegen(c, &cval)) return gate;
+    split_add_const_codegen(x, &base, &offset);
+    if (offset == 0) return gate;
+    if (!base || !poly_dtype_is_int(base->dtype) || poly_dtype_is_bool(base->dtype)) return gate;
+    if (__builtin_sub_overflow(cval, offset, &adjusted)) return gate;
+    PolyUOp *upper = poly_const_like_int(ctx, base, adjusted);
+    return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, base, upper, poly_arg_none());
+  }
+
+  if (gate->op != POLY_OP_CMPNE || gate->n_src != 2) return gate;
+  PolyUOp *lt = NULL;
+  if (gate->src[0]->op == POLY_OP_CMPLT && is_true_clause_const(gate->src[1]))
+    lt = gate->src[0];
+  else if (gate->src[1]->op == POLY_OP_CMPLT && is_true_clause_const(gate->src[0]))
+    lt = gate->src[1];
+  if (!lt || lt->n_src != 2) return gate;
+
+  PolyUOp *x = lt->src[0];
+  PolyUOp *c = lt->src[1];
+  int64_t cval = 0, offset = 0, adjusted = 0;
+  PolyUOp *base = NULL;
+  if (!poly_dtype_is_int(x->dtype) || poly_dtype_is_bool(x->dtype)) return gate;
+  if (!int_const_value_codegen(c, &cval)) return gate;
+  split_add_const_codegen(x, &base, &offset);
+  if (!base || !poly_dtype_is_int(base->dtype) || poly_dtype_is_bool(base->dtype)) return gate;
+  if (__builtin_sub_overflow(cval, offset, &adjusted)) return gate;
+  if (adjusted == INT64_MIN) return poly_const_like_bool(ctx, gate, true);
+  adjusted -= 1;
+  PolyUOp *lower = poly_const_like_int(ctx, base, adjusted);
+  return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, lower, base, poly_arg_none());
+}
+
+static PolyUOp *canonicalize_valid_gate_bounds(PolyCtx *ctx, PolyUOp *gate) {
+  if (!gate) return gate;
+  if (gate->op != POLY_OP_AND) return canonicalize_valid_bound_clause(ctx, gate);
+
+  PolyUOp *clauses[128];
+  int n_clauses = split_uop_and(gate, clauses, 128);
+  bool changed = false;
+  for (int i = 0; i < n_clauses; i++) {
+    PolyUOp *new_clause = canonicalize_valid_bound_clause(ctx, clauses[i]);
+    if (new_clause != clauses[i]) {
+      clauses[i] = new_clause;
+      changed = true;
+    }
+  }
+  return changed ? and_all_clauses(ctx, clauses, n_clauses, NULL) : gate;
+}
+
+static bool uop_tree_contains_op_codegen(PolyUOp *u, PolyOps op) {
+  if (!u) return false;
+  if (u->op == op) return true;
+  for (int i = 0; i < u->n_src; i++)
+    if (uop_tree_contains_op_codegen(u->src[i], op)) return true;
   return false;
+}
+
+static PolyUOp *rule_canonicalize_and_valid_bounds(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_AND) return NULL;
+  /* tinygrad's simplify_valid skips masks that contain INDEX nodes; those are
+   * data-dependent conditions, not pure bounds facts. */
+  if (uop_tree_contains_op_codegen(root, POLY_OP_INDEX)) return NULL;
+
+  PolyUOp *ret = canonicalize_valid_gate_bounds(ctx, root);
+  return ret == root ? NULL : ret;
 }
 
 static PolyUOp *simplify_index_expr_given_gate(
@@ -6038,6 +6790,30 @@ static PolyUOp *simplify_index_expr_given_gate(
     int *memo_n,
     int memo_cap
 );
+
+static bool uop_tree_contains_op_codegen(PolyUOp *u, PolyOps op);
+
+static PolyUOp *promote_loaded_index_expr_to_i64(PolyCtx *ctx, PolyUOp *u) {
+  if (!u || !poly_dtype_is_int(u->dtype) || poly_dtype_is_bool(u->dtype)) return u;
+
+  if (u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INT)
+    return poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, u->arg);
+
+  if (u->op == POLY_OP_LOAD) {
+    /* tinygrad's pm_lower_index_dtype casts integer tensor labels to long
+     * before using them in pointer arithmetic for gated gathers. */
+    return poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, u, poly_arg_none());
+  }
+
+  if (u->n_src <= 0 || u->n_src > 8) return u;
+  PolyUOp *new_srcs[8];
+  bool changed = !poly_dtype_eq(u->dtype, POLY_INT64);
+  for (int i = 0; i < u->n_src; i++) {
+    new_srcs[i] = promote_loaded_index_expr_to_i64(ctx, u->src[i]);
+    if (new_srcs[i] != u->src[i]) changed = true;
+  }
+  return changed ? rebuild_preserve_tag(ctx, u, POLY_INT64, new_srcs, u->n_src) : u;
+}
 
 static PolyUOp *rule_index_invalid_gate_to_valid(
     PolyCtx *ctx,
@@ -6056,14 +6832,13 @@ static PolyUOp *rule_index_invalid_gate_to_valid(
   PolyUOp *simplified_idx = simplify_index_expr_given_gate(
       ctx, index_expr, cond, memo_old, memo_new, &memo_n, 256
   );
-  /* Match tinygrad's uop_given_valid behavior: only rewrite when the valid
-   * constraint actually simplifies the carried index expression. Otherwise the
-   * checked scalar triu/tril paths keep the WHERE(cond, idx, Invalid) shape. */
-  if (simplified_idx == index_expr) return NULL;
+  if (uop_tree_contains_op_codegen(simplified_idx, POLY_OP_LOAD))
+    simplified_idx = promote_loaded_index_expr_to_i64(ctx, simplified_idx);
 
-  PolyUOp *new_gate = cond;
+  PolyUOp *new_gate = canonicalize_valid_gate_bounds(ctx, cond);
   if (idx->n_src >= 3) {
     new_gate = poly_uop2(ctx, POLY_OP_AND, idx->src[2]->dtype, idx->src[2], cond, poly_arg_none());
+    new_gate = canonicalize_valid_gate_bounds(ctx, new_gate);
   }
 
   PolyUOp *new_srcs[3] = {idx->src[0], simplified_idx, new_gate};
@@ -6095,6 +6870,55 @@ static int gate_implies_cond_branch(PolyUOp *gate, PolyUOp *cond) {
   return 0;
 }
 
+static bool gate_implies_range_point(PolyCtx *ctx, PolyUOp *gate, PolyUOp *expr, int64_t *out) {
+  if (!gate || !expr) return false;
+  if (gate->op == POLY_OP_AND && gate->n_src == 2) {
+    return gate_implies_range_point(ctx, gate->src[0], expr, out) ||
+           gate_implies_range_point(ctx, gate->src[1], expr, out);
+  }
+  if (gate->op != POLY_OP_CMPLT || gate->n_src != 2) return false;
+
+  int64_t c = 0, lo = 0, hi = 0;
+  poly_uop_minmax(ctx, expr, &lo, &hi);
+  if (gate->src[1] == expr && int_const_value_codegen(gate->src[0], &c)) {
+    /* c < expr and expr.max == c+1 proves expr == c+1. This is the common
+     * replicate/right-pad endpoint after late valid-bound canonicalization. */
+    int64_t upper_point = 0;
+    if (!__builtin_add_overflow(c, 1, &upper_point) && hi == upper_point) {
+      if (out) *out = hi;
+      return true;
+    }
+  }
+  if (gate->src[0] == expr && int_const_value_codegen(gate->src[1], &c)) {
+    /* expr < c and expr.min == c-1 proves expr == c-1. */
+    int64_t lower_point = 0;
+    if (!__builtin_sub_overflow(c, 1, &lower_point) && lo == lower_point) {
+      if (out) *out = lo;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool expr_point_given_gate(PolyCtx *ctx, PolyUOp *gate, PolyUOp *u, int64_t *out) {
+  if (!u || !poly_dtype_is_int(u->dtype) || poly_dtype_is_bool(u->dtype)) return false;
+  if (u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INT) {
+    if (out) *out = u->arg.i;
+    return true;
+  }
+  int64_t base_val = 0, k = 0;
+  PolyUOp *base = NULL;
+  if (split_add_const_codegen(u, &base, &k) && base != u &&
+      gate_implies_range_point(ctx, gate, base, &base_val)) {
+    int64_t folded = 0;
+    if (!__builtin_add_overflow(base_val, k, &folded)) {
+      if (out) *out = folded;
+      return true;
+    }
+  }
+  return gate_implies_range_point(ctx, gate, u, out);
+}
+
 static PolyUOp *simplify_index_expr_given_gate(
     PolyCtx *ctx,
     PolyUOp *u,
@@ -6109,6 +6933,17 @@ static PolyUOp *simplify_index_expr_given_gate(
     if (memo_old[i] == u) return memo_new[i];
 
   PolyUOp *result = u;
+  int64_t point = 0;
+  if (expr_point_given_gate(ctx, gate, u, &point)) {
+    result = poly_const_like_int(ctx, u, point);
+    if (*memo_n < memo_cap) {
+      memo_old[*memo_n] = u;
+      memo_new[*memo_n] = result;
+      (*memo_n)++;
+    }
+    return result;
+  }
+
   if (u->op == POLY_OP_WHERE && u->n_src == 3) {
     int branch = gate_implies_cond_branch(gate, u->src[0]);
     if (branch != 0) {
@@ -6172,13 +7007,14 @@ static PolyPatternMatcher *poly_pm_post_index_lower(void) {
        rule_index_invalid_gate_to_valid},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
        rule_index_gate_selects_where_branch},
+      {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_canonicalize_and_valid_bounds},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load_rev},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_drop_true_gate},
   };
   /* Match tinygrad's post-index cleanup shape: lower dtype, push GEP, then only
    * the checked load/store indexing cleanup needed for Invalid-carrying indexes. */
-  PolyPatternMatcher *pm_indexing = poly_pm_new(indexing_rules, 5);
+  PolyPatternMatcher *pm_indexing = poly_pm_new(indexing_rules, 6);
   PolyPatternMatcher *base = poly_pm_concat(poly_pm_lower_index_dtype(), poly_pm_gep_pushing());
   g_pm_post_index_lower = poly_pm_concat(base, pm_indexing);
   poly_pm_destroy(base);
@@ -7171,6 +8007,7 @@ PolyUOp *poly_full_rewrite_to_sink(PolyCtx *ctx, PolyUOp *sink) {
       .caps = poly_c_renderer_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .extra_matcher = poly_pm_c_renderer_extra(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }

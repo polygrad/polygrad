@@ -91,11 +91,19 @@ void wb_append(WasmBuf *dst, const WasmBuf *src);
 /* WASM opcodes: memory */
 
 #define WASM_OP_I32_LOAD 0x28
+#define WASM_OP_I64_LOAD 0x29
 #define WASM_OP_F32_LOAD 0x2A
 #define WASM_OP_F64_LOAD 0x2B
+#define WASM_OP_I32_LOAD8_S 0x2C
+#define WASM_OP_I32_LOAD8_U 0x2D
+#define WASM_OP_I32_LOAD16_S 0x2E
+#define WASM_OP_I32_LOAD16_U 0x2F
 #define WASM_OP_I32_STORE 0x36
+#define WASM_OP_I64_STORE 0x37
 #define WASM_OP_F32_STORE 0x38
 #define WASM_OP_F64_STORE 0x39
+#define WASM_OP_I32_STORE8 0x3A
+#define WASM_OP_I32_STORE16 0x3B
 
 /* WASM opcodes: i32 */
 

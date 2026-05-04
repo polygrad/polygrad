@@ -16,8 +16,10 @@
 extern "C" {
 #endif
 
-/* Ops enum (mirrors tinygrad Ops, 78 members) */
-/* The order controls toposort priority (lower = earlier).                  */
+/* Ops enum mirrors tinygrad_latest's Ops ordering for shared ops.
+ * The numeric order is observable through exported IR and is also used by
+ * tinygrad's linearizer tuplize tiebreak, so Polygrad-only compatibility ops
+ * live at the tail instead of shifting current tinygrad values. */
 
 typedef enum {
   /* 1 — defines/special */
@@ -31,6 +33,7 @@ typedef enum {
   POLY_OP_NOOP,
   POLY_OP_REWRITE_ERROR,
   POLY_OP_PARAM,
+  POLY_OP_FUNCTION,
   POLY_OP_CALL,
   POLY_OP_PROGRAM,
   POLY_OP_LINEAR,
@@ -40,7 +43,10 @@ typedef enum {
   POLY_OP_AFTER,
   POLY_OP_GROUP,
   POLY_OP_GEP,
-  POLY_OP_VECTORIZE,
+  POLY_OP_STACK,
+  POLY_OP_VECTORIZE = POLY_OP_STACK, /* source-compatible old name */
+  POLY_OP_TUPLE,
+  POLY_OP_GETTUPLE,
 
   /* 3 — load/store */
   POLY_OP_INDEX,
@@ -49,6 +55,7 @@ typedef enum {
 
   /* 4 — math */
   POLY_OP_WMMA,
+  POLY_OP_SHAPED_WMMA,
   /* unary */
   POLY_OP_CAST,
   POLY_OP_BITCAST,
@@ -96,7 +103,6 @@ typedef enum {
   /* 6 — ops that don't exist in programs */
   POLY_OP_UNIQUE,
   POLY_OP_DEVICE,
-  POLY_OP_ASSIGN,
   POLY_OP_LUNIQUE,
   POLY_OP_CONTIGUOUS,
   POLY_OP_CONTIGUOUS_BACKWARD,
@@ -107,7 +113,7 @@ typedef enum {
   POLY_OP_BUFFER_VIEW,
   POLY_OP_MSELECT,
   POLY_OP_MSTACK,
-  POLY_OP_ENCDEC,
+  POLY_OP_CUSTOM_FUNCTION,
   POLY_OP_RESHAPE,
   POLY_OP_PERMUTE,
   POLY_OP_EXPAND,
@@ -115,7 +121,6 @@ typedef enum {
   POLY_OP_SHRINK,
   POLY_OP_FLIP,
   POLY_OP_MULTI,
-  POLY_OP_REDUCE_AXIS,
   POLY_OP_REDUCE,
   POLY_OP_ALLREDUCE,
   POLY_OP_UNROLL,
@@ -123,11 +128,18 @@ typedef enum {
   POLY_OP_VCAT,
   POLY_OP_PTRCAT,
 
+  /* Polygrad-only compatibility ops. Current tinygrad spells assign as
+   * AFTER(target, STORE(target, value)); REDUCE_AXIS is frontend/scheduler
+   * sugar lowered before program IR; ENCDEC is not present upstream. */
+  POLY_OP_ASSIGN,
+  POLY_OP_ENCDEC,
+  POLY_OP_REDUCE_AXIS,
+
   POLY_OP_COUNT /* sentinel — total number of ops */
 } PolyOps;
 
 /* GroupOp bitmask sets */
-/* Each set is a uint64_t[2] bitmask (128 bits, enough for 78 ops).        */
+/* Each set is a uint64_t[2] bitmask (128 bits, enough for current ops). */
 
 typedef struct {
   uint64_t bits[2];
@@ -259,6 +271,7 @@ typedef enum {
   POLY_ARG_REDUCE_AXIS, /* (PolyOps, int64_t[], n) */
   POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
   POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
+  POLY_ARG_BUFFERIZE_OPTS, /* (device, addrspace, removable) */
   POLY_ARG_INVALID,
 } PolyArgKind;
 
@@ -294,6 +307,11 @@ typedef struct {
       int64_t min_val;
       int64_t max_val;
     } define_var;
+    struct {
+      int32_t device; /* PolyDevice, kept int32_t because PolyDevice is declared later. */
+      PolyAddrSpace addrspace;
+      bool removable;
+    } bufferize_opts;
   };
 } PolyArg;
 
@@ -339,6 +357,18 @@ static inline PolyArg poly_arg_define_var(const char *name, int64_t min_val, int
   ){.kind = POLY_ARG_DEFINE_VAR,
     .define_var = {.name = name, .min_val = min_val, .max_val = max_val}};
 }
+/* tinygrad BufferizeOpts equivalent.
+ *
+ * device is the already-derived physical device for the intermediate buffer
+ * (or POLY_DEVICE_AUTO when unknown), addrspace selects global/local storage,
+ * and removable preserves the rangeify optimization contract for eliminating
+ * redundant temporary buffers.
+ */
+static inline PolyArg poly_arg_bufferize_opts(int32_t device, PolyAddrSpace addrspace, bool removable) {
+  return (PolyArg
+  ){.kind = POLY_ARG_BUFFERIZE_OPTS,
+    .bufferize_opts = {.device = device, .addrspace = addrspace, .removable = removable}};
+}
 
 /* Compatibility helpers: legacy RANGE arg kind may still be POLY_ARG_INT
  * during migration; treat that as LOOP axis with id=arg.i. */
@@ -359,6 +389,23 @@ static inline int64_t *poly_range_extra(PolyArg a) {
 }
 static inline bool poly_arg_is_range(PolyArg a) {
   return a.kind == POLY_ARG_RANGE || a.kind == POLY_ARG_INT;
+}
+
+/* Compatibility helpers: legacy BUFFERIZE arg kind was POLY_ARG_INT with
+ * 1=removable and 0=must materialize. New code should use
+ * POLY_ARG_BUFFERIZE_OPTS to match tinygrad's BufferizeOpts carrier. */
+static inline bool poly_bufferize_arg_removable(PolyArg a) {
+  if (a.kind == POLY_ARG_BUFFERIZE_OPTS) return a.bufferize_opts.removable;
+  if (a.kind == POLY_ARG_INT) return a.i == 1;
+  return false;
+}
+static inline PolyAddrSpace poly_bufferize_arg_addrspace(PolyArg a) {
+  if (a.kind == POLY_ARG_BUFFERIZE_OPTS) return a.bufferize_opts.addrspace;
+  return POLY_ADDR_GLOBAL;
+}
+static inline int32_t poly_bufferize_arg_device(PolyArg a) {
+  if (a.kind == POLY_ARG_BUFFERIZE_OPTS) return a.bufferize_opts.device;
+  return 0; /* POLY_DEVICE_AUTO */
 }
 
 bool poly_arg_eq(PolyArg a, PolyArg b);
@@ -435,6 +482,67 @@ bool poly_devices_share_storage(PolyDevice a, PolyDevice b);
 
 /* Look up device id by name. Returns POLY_DEVICE_AUTO if unknown. */
 PolyDevice poly_device_by_name(const char *name);
+const char *poly_device_name(PolyDevice device);
+
+typedef struct PolyCtx PolyCtx;
+typedef struct PolyUOp PolyUOp;
+
+/* Core frontend tensor handle.
+ *
+ * PolyUOp stays the pure logical value graph. PolyTensor is the C-side value
+ * reference used by frontends: it points at a logical UOp and carries the
+ * current non-portable realization intent. The tensor carries two roots:
+ * logical is the exportable/provenance expression, physical is the realized
+ * execution/readback root. physical is NULL for lazy tensors. poly_tensor_uop()
+ * returns the frontend convenience root: physical when present, otherwise
+ * logical. Portable export/autograd provenance should use uop_logical.
+ */
+typedef struct PolyTensor PolyTensor;
+
+typedef enum {
+  POLY_TENSOR_VALUE = 0,
+  POLY_TENSOR_PLACE = 1,
+  POLY_TENSOR_BARRIER = 2,
+} PolyTensorRole;
+
+struct PolyTensor {
+  PolyUOp *uop_logical;
+  PolyUOp *uop_physical;
+  PolyTensorRole role;
+  PolyDevice device;
+  uint64_t order;
+  PolyTensor *source;
+};
+
+PolyTensor *poly_tensor_create(
+    PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device
+);
+PolyTensor *poly_tensor_create_with_roots(
+    PolyCtx *ctx,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+int poly_tensor_update(
+    PolyCtx *ctx,
+    PolyTensor *tensor,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
+PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
+PolyUOp *poly_tensor_uop(PolyTensor *tensor);
+PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
+PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
+PolyDevice poly_tensor_device(PolyTensor *tensor);
+PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor);
+int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs);
+
+PolyDevice poly_device_from_device_uop(PolyUOp *device);
+PolyDevice poly_uop_device(PolyUOp *u);
 
 /* Frontend host-buffer lifetime hook.
  * Frontends keep strong maps keyed by the C-side PolyBuffer* address value.
@@ -446,8 +554,6 @@ void poly_set_frontend_buffer_release(PolyFrontendBufferReleaseFn fn);
 /* PolyBuffer is defined in device.h (needs PolyAllocator pointer) */
 
 /* UOp */
-
-typedef struct PolyUOp PolyUOp;
 
 struct PolyUOp {
   PolyOps op;
@@ -469,8 +575,6 @@ typedef struct {
 } PolyCachedKernel;
 
 /* Context owns the arena, CSE cache, kernel cache, and all UOps */
-typedef struct PolyCtx PolyCtx;
-
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
@@ -599,6 +703,10 @@ const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u);
  * Frontends use this to decide whether a tensor needs materialization
  * (matches tinygrad's UOp.has_buffer_identity). */
 bool poly_uop_has_buffer_identity(const PolyUOp *u);
+
+/* True when target appears in root's source graph. Frontends use this to match
+ * tinygrad's backward discovery rule: live tensors with t.uop in loss.toposort. */
+bool poly_uop_reachable(PolyCtx *ctx, PolyUOp *root, PolyUOp *target);
 
 bool poly_no_range(PolyCtx *ctx, PolyUOp *u);
 bool poly_no_range_ex(PolyCtx *ctx, PolyUOp *u, PolyUOpCache *cache);
@@ -785,6 +893,7 @@ PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value);
 PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store);
 PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n);
 
+PolyUOp *poly_buffer_on_device(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size, PolyDevice device);
 PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size);
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);

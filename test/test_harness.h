@@ -17,6 +17,8 @@
 #include <stdint.h>
 #include <float.h>
 
+#include "../src/engine/realize.h"
+
 typedef void (*TestFn)(int *passed, int *failed);
 
 typedef struct {
@@ -231,6 +233,71 @@ static inline int64_t poly_double_ulp_index(double f) {
 #define ASSERT_NOT_NULL(a) do { \
   if ((a) == NULL) FAIL("%s is NULL", #a); \
 } while(0)
+
+typedef struct {
+  PolyUOp *buffer;
+  PolyBuffer handle;
+} PolyTestBufferView;
+
+#define POLY_TEST_HOST_VIEW(buffer_uop, data_ptr) \
+  ((PolyTestBufferView){ \
+      .buffer = (buffer_uop), \
+      .handle = { \
+          .ptr = (void *)(data_ptr), \
+          .nbytes = 0, \
+          .device = POLY_DEVICE_CPU, \
+          .owned = false, \
+          .allocator = NULL, \
+          .src = NULL, \
+          .valid = true, \
+      }, \
+  })
+
+static inline size_t poly_test_buffer_nbytes(PolyCtx *ctx, PolyUOp *buf) {
+  if (!buf) return 0;
+  int64_t numel = -1;
+  PolyShape shape = poly_uop_shape(ctx, buf);
+  if (shape.ndim >= 0) numel = poly_shape_numel(shape);
+  if (numel < 0 && buf->arg.kind == POLY_ARG_INT) numel = buf->arg.i;
+  if (numel < 0) numel = 0;
+  return (size_t)numel * (size_t)poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
+}
+
+static inline void poly_test_attach_buffer_views(
+    PolyCtx *ctx, PolyTestBufferView *views, int n_views
+) {
+  for (int i = 0; i < n_views; i++) {
+    PolyBuffer h = views[i].handle;
+    if (h.nbytes == 0) h.nbytes = poly_test_buffer_nbytes(ctx, views[i].buffer);
+    h.valid = true;
+    poly_buffer_attach(ctx, views[i].buffer, &h);
+  }
+}
+
+static inline int poly_test_realize_buffer_views(
+    PolyCtx *ctx, PolyUOp *sink, PolyTestBufferView *views, int n_views
+) {
+  poly_test_attach_buffer_views(ctx, views, n_views);
+  /* Test helpers pass schedule-ready STORE/ASSIGN sinks. Keep them on the
+   * effect-sink layer instead of treating the sink itself as a tensor value. */
+  return poly_realize_sink(ctx, sink);
+}
+
+static inline int poly_test_realize_buffer_views_vars(
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    PolyTestBufferView *views,
+    int n_views,
+    struct PolyVarBinding *vars,
+    int n_vars
+) {
+  poly_test_attach_buffer_views(ctx, views, n_views);
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!sched) return -1;
+  int ret = poly_run_schedule(ctx, sched, vars, n_vars);
+  poly_schedule_free(sched);
+  return ret;
+}
 
 static inline int poly_test_run_all(void) {
   int total_passed = 0, total_failed = 0;

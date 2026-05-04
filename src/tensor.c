@@ -8,8 +8,10 @@
 #define _GNU_SOURCE
 #include "tensor.h"
 #include "ctx.h"
+#include "device.h"
 #include "frontend.h"
 #include "engine/schedule.h"
+#include "utils.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +33,240 @@ static const PolyDType *_dtype_table_ffi[] = {
     &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
+
+/* Core PolyTensor handles */
+
+typedef struct {
+  PolyTensor **items;
+  int n;
+  int cap;
+} PolyTensorList;
+
+static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
+  return tensor ? (tensor->uop_physical ? tensor->uop_physical : tensor->uop_logical) : NULL;
+}
+
+static PolyTensorList *tensor_list_for_uop(PolyCtx *ctx, PolyUOp *uop, bool create) {
+  if (!ctx || !uop) return NULL;
+  PolyTensorList *list =
+      poly_map_get(ctx->tensors_by_uop, poly_ptr_hash(uop), uop, poly_ptr_eq);
+  if (list || !create) return list;
+  list = calloc(1, sizeof(PolyTensorList));
+  if (!list) return NULL;
+  poly_map_set(ctx->tensors_by_uop, poly_ptr_hash(uop), uop, list, poly_ptr_eq);
+  return list;
+}
+
+static bool tensor_list_append(PolyTensorList *list, PolyTensor *tensor) {
+  if (!list || !tensor) return false;
+  for (int i = 0; i < list->n; i++)
+    if (list->items[i] == tensor) return true;
+  if (list->n >= list->cap) {
+    int new_cap = list->cap ? list->cap * 2 : 4;
+    PolyTensor **new_items = realloc(list->items, (size_t)new_cap * sizeof(PolyTensor *));
+    if (!new_items) return false;
+    list->items = new_items;
+    list->cap = new_cap;
+  }
+  list->items[list->n++] = tensor;
+  return true;
+}
+
+static bool tensor_index_add_current(PolyCtx *ctx, PolyTensor *tensor) {
+  PolyUOp *current = tensor_current_uop(tensor);
+  PolyTensorList *list = tensor_list_for_uop(ctx, current, true);
+  return tensor_list_append(list, tensor);
+}
+
+static void tensor_index_remove(PolyCtx *ctx, PolyUOp *current, PolyTensor *tensor) {
+  if (!ctx || !current || !tensor) return;
+  PolyTensorList *list = tensor_list_for_uop(ctx, current, false);
+  if (!list) return;
+  for (int i = 0; i < list->n; i++) {
+    if (list->items[i] != tensor) continue;
+    list->items[i] = list->items[list->n - 1];
+    list->n--;
+    if (list->n == 0) {
+      poly_map_remove(ctx->tensors_by_uop, poly_ptr_hash(current), current, poly_ptr_eq);
+      free(list->items);
+      free(list);
+    }
+    return;
+  }
+}
+
+PolyTensor *poly_tensor_find_current(
+    PolyCtx *ctx, PolyUOp *current, PolyDevice device, PolyTensorRole role
+) {
+  PolyTensorList *list = tensor_list_for_uop(ctx, current, false);
+  if (!list) return NULL;
+  PolyTensor *best = NULL;
+  for (int i = 0; i < list->n; i++) {
+    PolyTensor *t = list->items[i];
+    if (!t || tensor_current_uop(t) != current) continue;
+    if (role != (PolyTensorRole)-1 && t->role != role) continue;
+    if (device != POLY_DEVICE_AUTO && !poly_devices_share_storage(t->device, device)) continue;
+    if (!best || t->order > best->order) best = t;
+  }
+  return best;
+}
+
+static void free_tensor_list_entry(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  PolyTensorList *list = value;
+  if (list) {
+    free(list->items);
+    free(list);
+  }
+}
+
+void poly_tensor_ctx_cleanup(PolyCtx *ctx) {
+  if (!ctx) return;
+  if (ctx->tensors_by_uop) poly_map_foreach(ctx->tensors_by_uop, free_tensor_list_entry, NULL);
+  if (ctx->tensors) {
+    for (int i = 0; i < ctx->n_tensors; i++)
+      free(ctx->tensors[i]);
+  }
+}
+
+PolyTensor *poly_tensor_create_with_roots(
+    PolyCtx *ctx,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+) {
+  if (!ctx || !uop_logical) return NULL;
+
+  if (ctx->n_tensors >= ctx->tensors_cap) {
+    int new_cap = ctx->tensors_cap ? ctx->tensors_cap * 2 : 64;
+    PolyTensor **new_tensors = realloc(ctx->tensors, (size_t)new_cap * sizeof(PolyTensor *));
+    if (!new_tensors) return NULL;
+    ctx->tensors = new_tensors;
+    ctx->tensors_cap = new_cap;
+  }
+
+  PolyTensor *tensor = calloc(1, sizeof(PolyTensor));
+  if (!tensor) return NULL;
+  tensor->uop_logical = uop_logical;
+  tensor->uop_physical = uop_physical;
+  tensor->role = role;
+  tensor->device = device;
+  tensor->order = ctx->next_tensor_order++;
+
+  if (!tensor_index_add_current(ctx, tensor)) {
+    free(tensor);
+    return NULL;
+  }
+  ctx->tensors[ctx->n_tensors++] = tensor;
+  return tensor;
+}
+
+PolyTensor *poly_tensor_create(
+    PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device
+) {
+  return poly_tensor_create_with_roots(ctx, uop, NULL, role, device);
+}
+
+int poly_tensor_update(
+    PolyCtx *ctx,
+    PolyTensor *tensor,
+    PolyUOp *uop_logical,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+) {
+  if (!ctx || !tensor) return -1;
+  PolyUOp *old_current = tensor_current_uop(tensor);
+  PolyUOp *new_logical = uop_logical ? uop_logical : tensor->uop_logical;
+  PolyUOp *new_physical = uop_logical ? NULL : tensor->uop_physical;
+  if (uop_physical) new_physical = uop_physical;
+  PolyUOp *new_current = new_physical ? new_physical : new_logical;
+  if (!new_current) return -1;
+
+  bool reindex = old_current != new_current;
+  if (reindex) {
+    PolyTensor tmp = *tensor;
+    tmp.uop_logical = new_logical;
+    tmp.uop_physical = new_physical;
+    if (!tensor_index_add_current(ctx, &tmp)) return -1;
+    tensor_index_remove(ctx, new_current, &tmp);
+  }
+
+  if (uop_logical) {
+    tensor->uop_logical = uop_logical;
+    tensor->uop_physical = NULL;
+  }
+  if (uop_physical) tensor->uop_physical = uop_physical;
+  tensor->role = role;
+  if (device != POLY_DEVICE_AUTO) tensor->device = device;
+  if (role != POLY_TENSOR_PLACE) tensor->source = NULL;
+
+  if (reindex) {
+    tensor_index_remove(ctx, old_current, tensor);
+    if (!tensor_index_add_current(ctx, tensor)) return -1;
+  }
+  return 0;
+}
+
+PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device) {
+  if (!ctx || !tensor || !tensor->uop_logical) return NULL;
+  if (poly_devices_share_storage(tensor->device, device)) return tensor;
+  /* .to(device) preserves the portable logical root for export, but the
+   * frontend current root must follow realized sources. Two tensors can share
+   * one preserved logical UOp while pointing at different realized buffers, so
+   * PLACE facts must be keyed by the source tensor's current root. */
+  PolyUOp *current = poly_tensor_uop(tensor);
+  PolyUOp *physical = (current && current != tensor->uop_logical) ? current : NULL;
+  PolyTensor *placed =
+      poly_tensor_create_with_roots(ctx, tensor->uop_logical, physical, POLY_TENSOR_PLACE, device);
+  if (placed) placed->source = tensor;
+  return placed;
+}
+
+PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value) {
+  if (!ctx || !target || !value) return NULL;
+  PolyUOp *target_uop = poly_tensor_uop(target);
+  PolyUOp *value_uop = poly_tensor_uop(value);
+  if (!target_uop || !value_uop) return NULL;
+
+  /* Match tinygrad Tensor.assign: non-DISK assigns require same device and
+   * dtype before constructing the AFTER/STORE effect graph. Without this,
+   * a CPU target could silently physicalize a CUDA value back to CPU, which
+   * changes user-visible placement semantics. */
+  if (target->device != POLY_DEVICE_AUTO && value->device != POLY_DEVICE_AUTO &&
+      !poly_devices_share_storage(target->device, value->device))
+    return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(target_uop->dtype), poly_dtype_scalar(value_uop->dtype)))
+    return NULL;
+
+  PolyUOp *store = poly_store_val(ctx, target_uop, value_uop);
+  if (!store) return NULL;
+  PolyUOp *src[2] = {target_uop, store};
+  PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, target_uop->dtype, src, 2, poly_arg_none());
+  if (!after) return NULL;
+
+  if (poly_tensor_update(ctx, target, after, NULL, target->role, target->device) != 0)
+    return NULL;
+  return target;
+}
+
+PolyUOp *poly_tensor_uop(PolyTensor *tensor) {
+  return tensor_current_uop(tensor);
+}
+
+PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor) {
+  return tensor ? tensor->uop_logical : NULL;
+}
+
+PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor) {
+  return tensor ? tensor->uop_physical : NULL;
+}
+
+PolyDevice poly_tensor_device(PolyTensor *tensor) {
+  return tensor ? tensor->device : POLY_DEVICE_AUTO;
+}
 
 /* Internal helpers */
 
@@ -884,6 +1120,10 @@ PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
   int64_t s[POLY_MAX_DIMS];
   int nd;
   poly_broadcast_pair(ctx, &x, &y, s, &nd);
+  /* tinygrad Tensor.where casts non-bool conditions to bool before building
+   * Ops.WHERE. Keeping that in the core constructor preserves the expected
+   * CMPNE(cond, 0) node in helper graphs such as nonzero-value padding. */
+  if (!poly_dtype_is_bool(poly_dtype_scalar(cond->dtype))) cond = poly_cast(ctx, cond, POLY_BOOL);
   poly_broadcast_pair(ctx, &cond, &x, s, &nd);
   return poly_alu3(ctx, POLY_OP_WHERE, cond, x, y);
 }
@@ -1211,7 +1451,7 @@ PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, 
   PolyUOp *value_c = poly_const_typed(ctx, dt, value);
   /* where(padded_ones, 0, value): tinygrad's .where(0, value) means
    * "where padded_ones is true (=1, the data region) -> 0, else -> value" */
-  PolyUOp *fill = poly_alu3(ctx, POLY_OP_WHERE, padded_ones, zero_c, value_c);
+  PolyUOp *fill = poly_where_op(ctx, padded_ones, zero_c, value_c);
   return poly_alu2(ctx, POLY_OP_ADD, padded_X, fill);
 }
 
@@ -2021,7 +2261,13 @@ PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
   int max_ndim;
   PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1, max_shape, &max_ndim);
   PolyUOp *m_exp = poly_expand(ctx, m, (int64_t *)shape, ndim);
-  PolyUOp *shifted = poly_alu2(ctx, POLY_OP_SUB, x_view, m_exp);
+  /* tinygrad Tensor._softmax builds subtraction through Tensor.sub, which is
+   * `a + (b * -1)`. Preserve that high-level graph shape here instead of
+   * emitting a direct SUB: vector/broadcast lowering keeps the repeated
+   * multiply-by-minus-one form through the final renderer pass. */
+  PolyUOp *neg_m =
+      poly_alu2(ctx, POLY_OP_MUL, m_exp, poly_uop0(ctx, POLY_OP_CONST, m_exp->dtype, poly_arg_float(-1.0)));
+  PolyUOp *shifted = poly_alu2(ctx, POLY_OP_ADD, x_view, neg_m);
   PolyUOp *e = poly_exp(ctx, shifted);
 
   int64_t sum_shape[8];
@@ -2135,8 +2381,11 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
   int64_t denom = poly_shape_numel_checked(per_sample_shape, per_sample_ndim);
   if (denom <= 0) return NULL;
 
-  PolyUOp *mean = poly_alu2(ctx, POLY_OP_FDIV, total, cf(ctx, log_probs, (double)denom));
-  PolyUOp *loss = poly_alu1(ctx, POLY_OP_NEG, mean);
+  /* tinygrad Tensor.div is multiply by reciprocal, and cross_entropy applies
+   * the leading negation outside the mean reduction. For a static denominator
+   * this reaches linear IR as MUL(total, -1/denom), not FDIV followed by NEG. */
+  PolyUOp *scale = cf(ctx, log_probs, -1.0 / (double)denom);
+  PolyUOp *loss = poly_alu2(ctx, POLY_OP_MUL, total, scale);
   return poly_reshape(ctx, loss, NULL, 0);
 }
 

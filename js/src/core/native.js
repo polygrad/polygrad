@@ -2,20 +2,20 @@
 
 function loadNativeBinding() {
   try {
-    return require('../build/Release/polygrad_napi.node')
+    return require('../../build/Release/polygrad_napi.node')
   } catch {
     try {
-      return require('../build/Debug/polygrad_napi.node')
+      return require('../../build/Debug/polygrad_napi.node')
     } catch {
       return null
     }
   }
 }
 
-function createNativeBackend() {
+function createNativeCore() {
   const binding = loadNativeBinding()
   if (!binding) {
-    throw new Error('polygrad: target=\'native\' unavailable (N-API addon not built)')
+    throw new Error('polygrad: core=\'native\' unavailable (N-API addon not built)')
   }
 
   const dtypeIds = {
@@ -50,23 +50,6 @@ function createNativeBackend() {
       `polygrad native ABI mismatch: expected version ${EXPECTED_ABI}, got ${abi}. ` +
       'Rebuild the native addon with: npm run build:native'
     )
-  }
-
-  async function realize(ctx, sink, numel, leafMap, isF64) {
-    binding.poly_realize_begin(ctx)
-    for (const [buf, data] of leafMap) {
-      binding.poly_realize_bind(ctx, buf, data)
-    }
-    const rc = binding.poly_realize_exec(ctx, sink)
-    if (rc !== 0) {
-      throw new Error('poly_realize_exec failed')
-    }
-    let outData = null
-    for (const [, data] of leafMap) {
-      outData = data
-    }
-    const AT = isF64 ? Float64Array : Float32Array
-    return new AT(outData)
   }
 
   const instance = {
@@ -184,8 +167,7 @@ function createNativeBackend() {
     instance,
     ctx,
     ops,
-    realize,
-    caps: { simd: false, f64: true, target: 'native', device: 'cpu' },
+    caps: { simd: false, f64: true, core: 'native', device: 'cpu' },
     destroy() {
       binding.poly_ctx_destroy(ctx)
       binding.poly_cpu_cache_flush()
@@ -194,4 +176,4 @@ function createNativeBackend() {
   }
 }
 
-module.exports = { createNativeBackend }
+module.exports = { createNativeCore }

@@ -35,13 +35,16 @@ static int realize_uop(
   int n = n_leaves + 1;
   PolyUOp *bufs[64];
   void *datas[64];
+  PolyTestBufferView views[64];
   for (int i = 0; i < n_leaves; i++) {
     bufs[i] = leaf_bufs[i];
     datas[i] = leaf_datas[i];
   }
   bufs[n_leaves] = out_buf;
   datas[n_leaves] = out_data;
-  return poly_realize_with_bindings_flat(ctx, sink, bufs, datas, n);
+  for (int i = 0; i < n; i++)
+    views[i] = POLY_TEST_HOST_VIEW(bufs[i], datas[i]);
+  return poly_test_realize_buffer_views(ctx, sink, views, n);
 }
 
 /* Helper: make a shaped buffer (RESHAPE(BUFFER, shape)) */
@@ -118,6 +121,27 @@ TEST(pe, sdpa_e2e) {
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.6604769f, 1e-3);
   ASSERT_FLOAT_EQ(dout[3], 3.3395231f, 1e-3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, relu_e2e_preserves_false_branch_zero) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer_f32(ctx, 4);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *r = poly_relu(ctx, x);
+  ASSERT_NOT_NULL(r);
+
+  float dx[] = {-1.0f, 0.0f, 1.0f, 2.0f};
+  float dout[4] = {0};
+  PolyUOp *leaves[] = {x};
+  float *ld[] = {dx};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
+  ASSERT_FLOAT_EQ(dout[0], 0.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(dout[1], 0.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(dout[2], 1.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(dout[3], 2.0f, 1e-6f);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -518,11 +542,13 @@ TEST(pe, softmax_v2_e2e) {
   ASSERT_INT_EQ(poly_uop_ndim(ctx, sm), 1);
 
   float dx[] = {1, 2, 3}, dout[3] = {0};
-  poly_realize_begin(ctx);
-  poly_realize_bind(ctx, x, dx);
-  poly_realize_bind(ctx, out_buf, dout);
   PolyUOp *store = poly_store_val(ctx, out_buf, sm);
-  ASSERT_INT_EQ(poly_realize_exec(ctx, poly_sink1(ctx, store)), 0);
+  PolyUOp *sink = poly_sink1(ctx, store);
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(x, dx),
+      POLY_TEST_HOST_VIEW(out_buf, dout),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 0.0900f, 1e-3);
   ASSERT_FLOAT_EQ(dout[2], 0.6652f, 1e-3);
   poly_ctx_destroy(ctx);
@@ -868,11 +894,11 @@ TEST(tensor, contiguous_passthrough) {
 
   float in[] = {1, 2, 3, 4};
   float out[4] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out_buf, out),
-      POLY_BIND_HOST(a_buf, in),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out_buf, out),
+      POLY_TEST_HOST_VIEW(a_buf, in),
   };
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 2), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(out[i], in[i], 1e-6);
   poly_ctx_destroy(ctx);
@@ -894,11 +920,11 @@ TEST(tensor, contiguous_expand_materializes) {
 
   float in[] = {10, 20, 30, 40};
   float out[16] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out_buf, out),
-      POLY_BIND_HOST(a_buf, in),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out_buf, out),
+      POLY_TEST_HOST_VIEW(a_buf, in),
   };
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 2), 0);
   for (int r = 0; r < 4; r++)
     for (int c2 = 0; c2 < 4; c2++)
       ASSERT_FLOAT_EQ(out[r * 4 + c2], in[r] + 1.0f, 1e-6);
@@ -922,11 +948,11 @@ TEST(tensor, contiguous_chain) {
 
   float in[] = {5, 10, 15};
   float out[3] = {0};
-  PolyBufferBinding bindings[] = {
-      POLY_BIND_HOST(out_buf, out),
-      POLY_BIND_HOST(a_buf, in),
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(out_buf, out),
+      POLY_TEST_HOST_VIEW(a_buf, in),
   };
-  ASSERT_INT_EQ(poly_realize_with_bindings(ctx, sink, bindings, 2), 0);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 2), 0);
   ASSERT_FLOAT_EQ(out[0], 11.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[1], 21.0f, 1e-6);
   ASSERT_FLOAT_EQ(out[2], 31.0f, 1e-6);
@@ -941,7 +967,7 @@ TEST(tensor, contiguous_chain) {
 /*    PYTHONPATH=references/tinygrad_latest python -c "from tinygrad ..." */
 /*                                                                        */
 /*  These cover the helpers that poly_cumalu (and conv) need. Inputs are  */
-/*  bound via POLY_BIND_HOST -- no const-registry path involved.          */
+/*  bound via POLY_TEST_HOST_VIEW -- no const-registry path involved.          */
 /* ═══════════════════════════════════════════════════════════════════════ */
 
 TEST(pe, repeat_1d_simple) {

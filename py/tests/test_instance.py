@@ -15,7 +15,7 @@ class TestMLPCreate:
         })
         assert inst.param_count == 4
         assert inst.param_name(0) == 'layers.0.weight'
-        assert inst.param_shape(0) == (4, 2)
+        assert inst.param_shape(0) == [4, 2]
         inst.free()
 
     def test_create_no_bias(self):
@@ -25,7 +25,7 @@ class TestMLPCreate:
         })
         assert inst.param_count == 1
         assert inst.param_name(0) == 'layers.0.weight'
-        assert inst.param_shape(0) == (2, 3)
+        assert inst.param_shape(0) == [2, 3]
         inst.free()
 
     def test_deterministic_init(self):
@@ -169,7 +169,7 @@ class TestParams:
         params = list(inst.params())
         assert len(params) == 4
         assert params[0][0] == 'layers.0.weight'
-        assert params[0][1] == (4, 2)
+        assert params[0][1] == [4, 2]
         assert params[0][2] is not None
         assert len(params[0][2]) == 8  # 4*2
         inst.free()

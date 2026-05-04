@@ -61,17 +61,30 @@ bool poly_devices_share_storage(PolyDevice a, PolyDevice b) {
   return aa && ab && aa == ab;
 }
 
+typedef struct {
+  const char *name;
+  PolyDevice device;
+} PolyDeviceNameEntry;
+
+static const PolyDeviceNameEntry POLY_DEVICE_NAMES[] = {
+    {"auto", POLY_DEVICE_AUTO},   {"host", POLY_DEVICE_HOST},
+    {"cpu", POLY_DEVICE_CPU},     {"interp", POLY_DEVICE_INTERP},
+    {"wasm", POLY_DEVICE_WASM},   {"webgpu", POLY_DEVICE_WEBGPU},
+    {"cuda", POLY_DEVICE_CUDA},   {"hip", POLY_DEVICE_HIP},
+    {"x64", POLY_DEVICE_X64_JIT}, {"x64_jit", POLY_DEVICE_X64_JIT},
+};
+
 PolyDevice poly_device_by_name(const char *name) {
   if (!name || !name[0]) return POLY_DEVICE_AUTO;
-  if (strcmp(name, "cpu") == 0) return POLY_DEVICE_CPU;
-  if (strcmp(name, "interp") == 0) return POLY_DEVICE_INTERP;
-  if (strcmp(name, "wasm") == 0) return POLY_DEVICE_WASM;
-  if (strcmp(name, "webgpu") == 0) return POLY_DEVICE_WEBGPU;
-  if (strcmp(name, "cuda") == 0) return POLY_DEVICE_CUDA;
-  if (strcmp(name, "hip") == 0) return POLY_DEVICE_HIP;
-  if (strcmp(name, "x64") == 0 || strcmp(name, "x64_jit") == 0) return POLY_DEVICE_X64_JIT;
-  if (strcmp(name, "host") == 0) return POLY_DEVICE_HOST;
+  for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
+    if (strcmp(name, POLY_DEVICE_NAMES[i].name) == 0) return POLY_DEVICE_NAMES[i].device;
   return POLY_DEVICE_AUTO;
+}
+
+const char *poly_device_name(PolyDevice device) {
+  for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
+    if (POLY_DEVICE_NAMES[i].device == device) return POLY_DEVICE_NAMES[i].name;
+  return "auto";
 }
 
 /* Create a BUFFER UOp and attach frontend-owned host bytes in ctx->buffers.
@@ -146,6 +159,23 @@ void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int d
       .src = NULL,
       .valid = true, /* frontend just gave us valid data */
   };
+  poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
+}
+
+void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
+  if (!ctx || !buf || !handle) return;
+  PolyBuffer *old = poly_buffer_get(ctx, buf);
+  if (old) poly_buffer_free_chain(old);
+
+  PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
+  *h = *handle;
+  h->owned = false;
+  h->src = NULL;
+  h->valid = true;
+  if (!h->allocator) {
+    const PolyBackendDesc *be = poly_backend_get(h->device);
+    h->allocator = be ? be->get_allocator() : NULL;
+  }
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
 }
 
