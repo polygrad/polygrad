@@ -16,14 +16,13 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "tensor.h"
+#include "optim.h"
 #include "engine/realize.h"
 #include "engine/schedule.h"
 #include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
-#include <math.h>
 
 /* Internal types */
 
@@ -36,6 +35,7 @@ typedef struct {
   float *data; /* owned, allocated for all roles */
   int64_t numel;
   bool owns_data; /* false for aliases sharing another entry's allocation */
+  bool trainable; /* PARAMs can be frozen while still saved as weights */
 } NamedBuf;
 
 typedef struct {
@@ -77,11 +77,11 @@ typedef struct {
   PolyBuffer *m_handles; /* [n_params] */
   PolyBuffer *v_handles; /* [n_params] */
 
-  /* Bias correction scalar buffers (Adam/AdamW only) */
-  PolyUOp *bc1_buf; /* 1-element buffer for bc1 */
-  PolyUOp *bc2_buf; /* 1-element buffer for bc2 */
-  float bc1_data; /* host value for bc1 */
-  float bc2_data; /* host value for bc2 */
+  /* Adam beta-power scalar buffers (tinygrad b1_t/b2_t). */
+  PolyUOp *bc1_buf;
+  PolyUOp *bc2_buf;
+  float bc1_data;
+  float bc2_data;
   PolyBuffer bc1_handle;
   PolyBuffer bc2_handle;
 } TrainState;
@@ -96,6 +96,8 @@ struct PolyInstance {
   /* Param subset (indices into bufs[]) */
   int *param_indices;
   int n_params;
+  int *trainable_param_indices;
+  int n_trainable_params;
 
   /* Entrypoints */
   struct {
@@ -153,9 +155,13 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   inst->n_bufs = spec->n_bufs;
   inst->bufs = calloc(spec->n_bufs, sizeof(NamedBuf));
   int n_params = 0;
+  int n_trainable = 0;
   for (int i = 0; i < spec->n_bufs; i++) {
     inst->bufs[i].name = strdup(spec->bufs[i].name);
     inst->bufs[i].role = spec->bufs[i].role;
+    inst->bufs[i].trainable =
+        spec->bufs[i].trainable_set ? spec->bufs[i].trainable
+                                    : (spec->bufs[i].role == POLY_ROLE_PARAM);
     inst->bufs[i].buffer = spec->bufs[i].buffer;
     inst->bufs[i].ndim = spec->bufs[i].ndim;
     memcpy(inst->bufs[i].shape, spec->bufs[i].shape, spec->bufs[i].ndim * sizeof(int64_t));
@@ -182,7 +188,10 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
         );
       inst->bufs[i].owns_data = true;
     }
-    if (spec->bufs[i].role == POLY_ROLE_PARAM) n_params++;
+    if (spec->bufs[i].role == POLY_ROLE_PARAM) {
+      n_params++;
+      if (inst->bufs[i].trainable) n_trainable++;
+    }
   }
 
   /* Initialize buffer handles with host device domain.
@@ -210,9 +219,15 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   /* Build param index table */
   inst->n_params = n_params;
   inst->param_indices = malloc(n_params * sizeof(int));
+  inst->n_trainable_params = n_trainable;
+  inst->trainable_param_indices = malloc(n_trainable * sizeof(int));
   int pi = 0;
-  for (int i = 0; i < spec->n_bufs; i++)
-    if (spec->bufs[i].role == POLY_ROLE_PARAM) inst->param_indices[pi++] = i;
+  int tpi = 0;
+  for (int i = 0; i < spec->n_bufs; i++) {
+    if (spec->bufs[i].role != POLY_ROLE_PARAM) continue;
+    inst->param_indices[pi++] = i;
+    if (inst->bufs[i].trainable) inst->trainable_param_indices[tpi++] = i;
+  }
 
   /* Copy entrypoints */
   inst->n_entrypoints = spec->n_entrypoints;
@@ -261,18 +276,27 @@ PolyInstance *poly_instance_from_ir(
 
 #include "frontend_internal.h" /* poly_ptr_hash, poly_ptr_eq */
 
-PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
-  if (!ctx) return NULL;
-  int n_ep = poly_ctx_entrypoint_count(ctx);
-  if (n_ep == 0) {
-    fprintf(stderr, "poly_instance_from_ctx: zero entrypoints\n");
+static PolyInstance *instance_from_named_sinks(
+    PolyCtx *ctx,
+    const char **names,
+    PolyUOp **sinks,
+    int n_sinks
+) {
+  if (!ctx || !names || !sinks || n_sinks <= 0) {
+    fprintf(stderr, "poly_instance_from_sinks: zero entrypoints\n");
     return NULL;
   }
 
   /* Collect reachable BUFFER UOps from all entrypoint SINKs */
   PolyMap *reachable = poly_map_new(32);
-  for (int i = 0; i < n_ep; i++) {
-    PolyUOp *sink = poly_ctx_entrypoint_sink(ctx, i);
+  if (!reachable) return NULL;
+  for (int i = 0; i < n_sinks; i++) {
+    if (!names[i] || !sinks[i]) {
+      fprintf(stderr, "poly_instance_from_sinks: null entrypoint at %d\n", i);
+      poly_map_destroy(reachable);
+      return NULL;
+    }
+    PolyUOp *sink = sinks[i];
     int n_topo;
     PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
     for (int j = 0; j < n_topo; j++) {
@@ -297,6 +321,8 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
         .role = (uint8_t)e->role,
         .buffer = e->buffer,
         .ndim = e->ndim,
+        .trainable = e->trainable,
+        .trainable_set = true,
     };
     memcpy(bufs[n_bufs].shape, e->shape, e->ndim * sizeof(int64_t));
     n_bufs++;
@@ -304,10 +330,10 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
   poly_map_destroy(reachable);
 
   /* Build entrypoints array */
-  PolyIrEntrypoint *eps = calloc(n_ep, sizeof(PolyIrEntrypoint));
-  for (int i = 0; i < n_ep; i++) {
-    eps[i].name = poly_ctx_entrypoint_name(ctx, i);
-    eps[i].sink = poly_ctx_entrypoint_sink(ctx, i);
+  PolyIrEntrypoint *eps = calloc((size_t)n_sinks, sizeof(PolyIrEntrypoint));
+  for (int i = 0; i < n_sinks; i++) {
+    eps[i].name = names[i];
+    eps[i].sink = sinks[i];
   }
 
   /* Build spec and create instance (does NOT own ctx) */
@@ -316,13 +342,63 @@ PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
       .bufs = bufs,
       .n_bufs = n_bufs,
       .entrypoints = eps,
-      .n_entrypoints = n_ep,
+      .n_entrypoints = n_sinks,
   };
   PolyInstance *inst = instance_from_spec(&spec, false, false);
+  if (inst) {
+    for (int i = 0; i < inst->n_bufs; i++) {
+      PolyBuffer *src = poly_buffer_get(ctx, inst->bufs[i].buffer);
+      size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
+      if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
+      /* Instances own host-side ABI storage, but the source tensor may already
+       * live in a backend-specific residency (WASM heap, CUDA, WebGPU, etc.).
+       * `valid` only describes the host shadow freshness; backend copyout can
+       * still read the current residency, so do not reject invalid host shadows.
+       * Fall back to direct copy only for valid legacy host buffers whose
+       * allocator cannot service copyout. */
+      if (poly_buffer_read(ctx, inst->bufs[i].buffer, inst->bufs[i].data, nbytes) != 0 &&
+          src->valid && poly_device_is_host_addressable(src->device))
+        memcpy(inst->bufs[i].data, src->ptr, nbytes);
+    }
+  }
 
   free(bufs);
   free(eps);
   return inst;
+}
+
+PolyInstance *poly_instance_from_ctx(PolyCtx *ctx) {
+  if (!ctx) return NULL;
+  int n_ep = poly_ctx_entrypoint_count(ctx);
+  if (n_ep == 0) {
+    fprintf(stderr, "poly_instance_from_ctx: zero entrypoints\n");
+    return NULL;
+  }
+
+  const char **names = calloc((size_t)n_ep, sizeof(char *));
+  PolyUOp **sinks = calloc((size_t)n_ep, sizeof(PolyUOp *));
+  if (!names || !sinks) {
+    free(names);
+    free(sinks);
+    return NULL;
+  }
+  for (int i = 0; i < n_ep; i++) {
+    names[i] = poly_ctx_entrypoint_name(ctx, i);
+    sinks[i] = poly_ctx_entrypoint_sink(ctx, i);
+  }
+  PolyInstance *inst = instance_from_named_sinks(ctx, names, sinks, n_ep);
+  free(names);
+  free(sinks);
+  return inst;
+}
+
+PolyInstance *poly_instance_from_sinks(
+    PolyCtx *ctx,
+    const char **names,
+    PolyUOp **sinks,
+    int n_sinks
+) {
+  return instance_from_named_sinks(ctx, names, sinks, n_sinks);
 }
 
 static void vag_free(VagState *vag, int n_params) {
@@ -369,12 +445,12 @@ static void train_free(TrainState *ts, int n_params) {
   free_owned_handle(&ts->bc1_handle);
   free_owned_handle(&ts->bc2_handle);
   if (ts->m_datas) {
-    for (int i = 0; i < n_params; i++)
+    for (int i = 0; i < ts->n_moment_bufs; i++)
       free(ts->m_datas[i]);
     free(ts->m_datas);
   }
   if (ts->v_datas) {
-    for (int i = 0; i < n_params; i++)
+    for (int i = 0; i < ts->n_moment_bufs; i++)
       free(ts->v_datas[i]);
     free(ts->v_datas);
   }
@@ -407,6 +483,7 @@ void poly_instance_free(PolyInstance *inst) {
   }
   free(inst->bufs);
   free(inst->param_indices);
+  free(inst->trainable_param_indices);
 
   /* Free entrypoints */
   for (int i = 0; i < inst->n_entrypoints; i++)
@@ -487,6 +564,56 @@ const char *poly_instance_buf_name(const PolyInstance *inst, int i) {
 int poly_instance_buf_role(const PolyInstance *inst, int i) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   return inst->bufs[i].role;
+}
+
+bool poly_instance_buf_trainable(const PolyInstance *inst, int i) {
+  if (!inst || i < 0 || i >= inst->n_bufs) return false;
+  return inst->bufs[i].trainable;
+}
+
+bool poly_instance_param_trainable(const PolyInstance *inst, int i) {
+  if (!inst || i < 0 || i >= inst->n_params) return false;
+  return inst->bufs[inst->param_indices[i]].trainable;
+}
+
+static void rebuild_trainable_param_indices(PolyInstance *inst) {
+  if (!inst) return;
+  int n = 0;
+  for (int i = 0; i < inst->n_params; i++) {
+    int bi = inst->param_indices[i];
+    if (inst->bufs[bi].trainable) n++;
+  }
+  int *indices = n > 0 ? malloc((size_t)n * sizeof(int)) : NULL;
+  int j = 0;
+  for (int i = 0; i < inst->n_params; i++) {
+    int bi = inst->param_indices[i];
+    if (inst->bufs[bi].trainable) indices[j++] = bi;
+  }
+  free(inst->trainable_param_indices);
+  inst->trainable_param_indices = indices;
+  inst->n_trainable_params = n;
+}
+
+int poly_instance_set_buf_trainable(PolyInstance *inst, int i, bool trainable) {
+  if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+  PolyUOp *shared = inst->bufs[i].buffer;
+  for (int j = 0; j < inst->n_bufs; j++)
+    if (inst->bufs[j].buffer == shared) inst->bufs[j].trainable = trainable;
+  if (inst->train) {
+    train_free(inst->train, inst->n_params);
+    inst->train = NULL;
+  }
+  if (inst->vag) {
+    vag_free(inst->vag, inst->n_params);
+    inst->vag = NULL;
+  }
+  rebuild_trainable_param_indices(inst);
+  return 0;
+}
+
+int poly_instance_set_param_trainable(PolyInstance *inst, int i, bool trainable) {
+  if (!inst || i < 0 || i >= inst->n_params) return -1;
+  return poly_instance_set_buf_trainable(inst, inst->param_indices[i], trainable);
 }
 
 int poly_instance_buf_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims) {
@@ -624,6 +751,8 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
     bufs[i].role = inst->bufs[i].role;
     bufs[i].buffer = inst->bufs[i].buffer;
     bufs[i].ndim = inst->bufs[i].ndim;
+    bufs[i].trainable = inst->bufs[i].trainable;
+    bufs[i].trainable_set = true;
     memcpy(bufs[i].shape, inst->bufs[i].shape, inst->bufs[i].ndim * sizeof(int64_t));
   }
 
@@ -1272,6 +1401,13 @@ static PolyBuffer make_handle(
   };
 }
 
+static int param_ordinal_for_buf(const PolyInstance *inst, int buf_idx) {
+  if (!inst) return -1;
+  for (int i = 0; i < inst->n_params; i++)
+    if (inst->param_indices[i] == buf_idx) return i;
+  return -1;
+}
+
 /* Build optimizer UOp graph (fwd+bwd+optimizer as a single combined SINK).
  * Gradients are consumed directly by ASSIGN ops -- not materialized to
  * separate output buffers (D1: no grad stores in optimizer SINK). */
@@ -1284,7 +1420,11 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 
   PolyCtx *ctx = inst->ctx;
   OptimState *o = &inst->optim;
-  int np = inst->n_params;
+  int np = inst->n_trainable_params;
+  if (np <= 0) {
+    fprintf(stderr, "ensure_train_graph: no trainable parameters\n");
+    return -1;
+  }
 
   TrainState *ts = calloc(1, sizeof(TrainState));
   if (!ts) return -1;
@@ -1301,10 +1441,10 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   const PolyAllocator *alloc = cur_be ? cur_be->get_allocator() : NULL;
   ts->loss_handle = make_handle(&ts->loss_data, sizeof(float), cur_dev, alloc);
 
-  /* Count SINK sources: loss_store + param assigns + moment assigns */
+  /* Count SINK sources: loss_store + param assigns + optimizer state assigns */
   int has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
   int n_sink_srcs = 1 + np; /* loss_store + param assigns */
-  if (has_moments) n_sink_srcs += 2 * np; /* + m assigns + v assigns */
+  if (has_moments) n_sink_srcs += 2 * np + 2; /* + m/v assigns + b1_t/b2_t assigns */
 
   PolyUOp **sink_srcs = calloc((size_t)n_sink_srcs, sizeof(PolyUOp *));
   if (!sink_srcs) {
@@ -1333,13 +1473,16 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     /* Bias correction scalar buffers */
     ts->bc1_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
     ts->bc2_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
-    ts->bc1_data = 1.0f; /* will be updated before each step */
+    /* tinygrad stores beta powers as state tensors initialized to 1, then
+     * schedule_step multiplies them by beta each step before computing
+     * 1/(1-beta_t). */
+    ts->bc1_data = 1.0f;
     ts->bc2_data = 1.0f;
     ts->bc1_handle = make_handle(&ts->bc1_data, sizeof(float), cur_dev, alloc);
     ts->bc2_handle = make_handle(&ts->bc2_data, sizeof(float), cur_dev, alloc);
 
     for (int i = 0; i < np; i++) {
-      NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
+      NamedBuf *pb = &inst->bufs[inst->trainable_param_indices[i]];
       int64_t numel = pb->numel;
 
       ts->m_bufs[i] = poly_buffer(ctx, POLY_FLOAT32, numel);
@@ -1354,18 +1497,26 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     }
   }
 
-  /* Build optimizer update graph for each parameter */
-  PolyUOp *lr_const = poly_const_float(ctx, (double)o->lr);
+  /* Build optimizer update graph for each trainable parameter. */
   int si = 1; /* sink_srcs index (0 = loss_store) */
+  PolyUOp *bc1_new = NULL;
+  PolyUOp *bc2_new = NULL;
 
   for (int i = 0; i < np; i++) {
-    PolyUOp *param_buf = inst->bufs[inst->param_indices[i]].buffer;
-    NamedBuf *pb_opt = &inst->bufs[inst->param_indices[i]];
+    int buf_idx = inst->trainable_param_indices[i];
+    int param_ord = param_ordinal_for_buf(inst, buf_idx);
+    if (param_ord < 0) {
+      free(sink_srcs);
+      train_free(ts, np);
+      return -1;
+    }
+    PolyUOp *param_buf = inst->bufs[buf_idx].buffer;
+    NamedBuf *pb_opt = &inst->bufs[buf_idx];
 
     /* Flatten gradient to 1D to match the flat param buffer.
      * The grad UOp may be shaped (e.g. [3,2]) because autograd now
      * differentiates w.r.t. the shaped view, not the raw buffer. */
-    PolyUOp *grad = vag->grad_uops[i];
+    PolyUOp *grad = vag->grad_uops[param_ord];
     {
       PolyShape gs = poly_uop_shape(ctx, grad);
       if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != pb_opt->numel)) {
@@ -1375,77 +1526,37 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       if (gs.dims) free(gs.dims);
     }
 
-    switch (o->kind) {
-    case POLY_OPTIM_SGD: {
-      /* p_new = p - lr * grad */
-      PolyUOp *update = poly_alu2(ctx, POLY_OP_MUL, lr_const, grad);
-      PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, param_buf, update);
-      sink_srcs[si++] = poly_legacy_assign_buffer(ctx, param_buf, p_new);
-      break;
-    }
-    case POLY_OPTIM_ADAM:
-    case POLY_OPTIM_ADAMW: {
-      PolyUOp *m_buf = ts->m_bufs[i];
-      PolyUOp *v_buf = ts->v_bufs[i];
-      NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-      int64_t numel = pb->numel;
-
-      /* Expand scalar bc buffers to match param shape */
-      int64_t param_shape[1] = {numel};
-      PolyUOp *bc1_expanded = poly_expand(ctx, ts->bc1_buf, param_shape, 1);
-      PolyUOp *bc2_expanded = poly_expand(ctx, ts->bc2_buf, param_shape, 1);
-
-      PolyUOp *beta1 = poly_const_float(ctx, (double)o->beta1);
-      PolyUOp *beta2 = poly_const_float(ctx, (double)o->beta2);
-      PolyUOp *one_minus_b1 = poly_const_float(ctx, 1.0 - (double)o->beta1);
-      PolyUOp *one_minus_b2 = poly_const_float(ctx, 1.0 - (double)o->beta2);
-      PolyUOp *eps = poly_const_float(ctx, (double)o->eps);
-
-      /* AdamW: decoupled weight decay on param first */
-      PolyUOp *p_cur = param_buf;
-      if (o->kind == POLY_OPTIM_ADAMW && o->weight_decay > 0.0f) {
-        PolyUOp *wd_factor = poly_const_float(ctx, 1.0 - (double)o->lr * (double)o->weight_decay);
-        p_cur = poly_alu2(ctx, POLY_OP_MUL, param_buf, wd_factor);
-      }
-
-      /* m_new = beta1 * m + (1 - beta1) * grad */
-      PolyUOp *m_new = poly_alu2(
-          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, beta1, m_buf),
-          poly_alu2(ctx, POLY_OP_MUL, one_minus_b1, grad)
-      );
-
-      /* v_new = beta2 * v + (1 - beta2) * grad * grad */
-      PolyUOp *g_sq = poly_alu2(ctx, POLY_OP_MUL, grad, grad);
-      PolyUOp *v_new = poly_alu2(
-          ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, beta2, v_buf),
-          poly_alu2(ctx, POLY_OP_MUL, one_minus_b2, g_sq)
-      );
-
-      /* Bias-corrected: m_hat = m_new * bc1, v_hat = v_new * bc2 */
-      PolyUOp *m_hat = poly_alu2(ctx, POLY_OP_MUL, m_new, bc1_expanded);
-      PolyUOp *v_hat = poly_alu2(ctx, POLY_OP_MUL, v_new, bc2_expanded);
-
-      /* p_new = p_cur - lr * m_hat / (sqrt(v_hat) + eps) */
-      PolyUOp *v_sqrt = poly_alu1(ctx, POLY_OP_SQRT, v_hat);
-      PolyUOp *denom = poly_alu2(ctx, POLY_OP_ADD, v_sqrt, eps);
-      PolyUOp *step_val = poly_alu2(
-          ctx, POLY_OP_MUL, lr_const,
-          poly_alu2(ctx, POLY_OP_MUL, m_hat, poly_alu1(ctx, POLY_OP_RECIPROCAL, denom))
-      );
-      PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, p_cur, step_val);
-
-      /* ASSIGN all three: param, m, v */
-      sink_srcs[si++] = poly_legacy_assign_buffer(ctx, param_buf, p_new);
-      sink_srcs[1 + np + 2 * i] = poly_legacy_assign_buffer(ctx, m_buf, m_new);
-      sink_srcs[1 + np + 2 * i + 1] = poly_legacy_assign_buffer(ctx, v_buf, v_new);
-      break;
-    }
-    default:
+    PolyOptimConfig cfg = {
+        .kind = o->kind,
+        .lr = o->lr,
+        .beta1 = o->beta1,
+        .beta2 = o->beta2,
+        .eps = o->eps,
+        .weight_decay = o->weight_decay,
+    };
+    PolyOptimUpdate upd;
+    PolyUOp *m_buf = has_moments ? ts->m_bufs[i] : NULL;
+    PolyUOp *v_buf = has_moments ? ts->v_bufs[i] : NULL;
+    if (poly_optim_build_update(
+            ctx, &cfg, param_buf, grad, m_buf, v_buf, ts->bc1_buf, ts->bc2_buf, pb_opt->numel, &upd
+        ) != 0) {
       fprintf(stderr, "ensure_train_graph: unsupported optimizer %d\n", o->kind);
       free(sink_srcs);
       train_free(ts, np);
       return -1;
     }
+    sink_srcs[si++] = poly_legacy_assign_buffer(ctx, param_buf, upd.param_new);
+    if (has_moments) {
+      if (!bc1_new) bc1_new = upd.bc1_new;
+      if (!bc2_new) bc2_new = upd.bc2_new;
+      sink_srcs[1 + np + 2 * i] = poly_legacy_assign_buffer(ctx, m_buf, upd.m_new);
+      sink_srcs[1 + np + 2 * i + 1] = poly_legacy_assign_buffer(ctx, v_buf, upd.v_new);
+    }
+  }
+
+  if (has_moments) {
+    sink_srcs[1 + np + 2 * np] = poly_legacy_assign_buffer(ctx, ts->bc1_buf, bc1_new);
+    sink_srcs[1 + np + 2 * np + 1] = poly_legacy_assign_buffer(ctx, ts->bc2_buf, bc2_new);
   }
 
   /* For Adam/AdamW, si covered param assigns (1..np), moment assigns
@@ -1482,29 +1593,11 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   if (ensure_train_graph(inst, ep_idx) != 0) return -1;
   TrainState *ts = inst->train;
   OptimState *o = &inst->optim;
-  int np = inst->n_params;
+  int np = inst->n_trainable_params;
 
-  /* Update bias correction scalars (Adam/AdamW) */
+  /* tinygrad updates Adam beta-power state inside the scheduled optimizer
+   * graph. Keep step only as bookkeeping for public state/checkpoints. */
   o->step++;
-  if (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW) {
-    float bc1 = 1.0f / (1.0f - powf(o->beta1, (float)o->step));
-    float bc2 = 1.0f / (1.0f - powf(o->beta2, (float)o->step));
-
-    /* Device-aware update (D2) */
-    if (!poly_device_is_host_addressable(ts->bc1_handle.device)) {
-      const PolyBackendDesc *bd = poly_backend_get(ts->bc1_handle.device);
-      const PolyAllocator *a = bd ? bd->get_allocator() : NULL;
-      if (a && a->copy_in) {
-        PolyBuffer bc1_view = poly_buffer_make_host_view(&bc1, sizeof(float));
-        PolyBuffer bc2_view = poly_buffer_make_host_view(&bc2, sizeof(float));
-        a->copy_in(&ts->bc1_handle, &bc1_view, sizeof(float), a->dev_ctx);
-        a->copy_in(&ts->bc2_handle, &bc2_view, sizeof(float), a->dev_ctx);
-      }
-    } else {
-      ts->bc1_data = bc1;
-      ts->bc2_data = bc2;
-    }
-  }
 
   /* Build extra bindings: loss output + moment buffers + bc scalars */
   bool has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
@@ -1554,6 +1647,213 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   if (loss_named_idx >= 0 && inst->bufs[loss_named_idx].data)
     inst->bufs[loss_named_idx].data[0] = ts->loss_data;
 
+  return 0;
+}
+
+/* Imported-instance composition */
+
+static char *prefixed_name(const char *prefix, const char *name) {
+  const char *p = prefix ? prefix : "";
+  const char *n = name ? name : "";
+  size_t lp = strlen(p), ln = strlen(n);
+  char *out = malloc(lp + ln + 1);
+  if (!out) return NULL;
+  memcpy(out, p, lp);
+  memcpy(out + lp, n, ln + 1);
+  return out;
+}
+
+static const PolyInstanceInlineBinding *find_inline_binding(
+    const PolyInstanceInlineBinding *bindings,
+    int n_bindings,
+    const char *name
+) {
+  if (!bindings || !name) return NULL;
+  for (int i = 0; i < n_bindings; i++)
+    if (bindings[i].name && strcmp(bindings[i].name, name) == 0) return &bindings[i];
+  return NULL;
+}
+
+static const NamedBuf *instance_buf_for_uop(const PolyInstance *inst, PolyUOp *uop) {
+  if (!inst || !uop) return NULL;
+  for (int i = 0; i < inst->n_bufs; i++)
+    if (inst->bufs[i].buffer == uop) return &inst->bufs[i];
+  return NULL;
+}
+
+typedef struct {
+  PolyUOp *child_buf;
+  char *parent_name;
+} InlineAlias;
+
+static PolyUOp *register_inline_buffer(
+    PolyCtx *dst_ctx,
+    const NamedBuf *b,
+    const char *prefix,
+    bool trainable,
+    InlineAlias *aliases,
+    int *n_aliases,
+    int max_aliases
+) {
+  if (!dst_ctx || !b) return NULL;
+
+  char *full = prefixed_name(prefix, b->name);
+  if (!full) return NULL;
+
+  for (int i = 0; i < *n_aliases; i++) {
+    if (aliases[i].child_buf != b->buffer) continue;
+    int rc = poly_alias(dst_ctx, full, aliases[i].parent_name);
+    PolyUOp *aliased = (rc == 0) ? poly_ctx_get(dst_ctx, "%s", full) : NULL;
+    free(full);
+    return aliased;
+  }
+
+  PolyUOp *ret = NULL;
+  switch (b->role) {
+  case POLY_ROLE_PARAM:
+    ret = poly_param(dst_ctx, b->buffer->dtype, b->shape, b->ndim, "%s", full);
+    if (ret) poly_ctx_set_trainable(dst_ctx, full, trainable);
+    break;
+  case POLY_ROLE_INPUT:
+    ret = poly_input(dst_ctx, b->buffer->dtype, b->shape, b->ndim, "%s", full);
+    break;
+  case POLY_ROLE_TARGET:
+    ret = poly_target(dst_ctx, b->buffer->dtype, b->shape, b->ndim, "%s", full);
+    break;
+  case POLY_ROLE_OUTPUT:
+    ret = poly_output(dst_ctx, b->buffer->dtype, b->shape, b->ndim, "%s", full);
+    break;
+  case POLY_ROLE_AUX:
+  default:
+    ret = poly_aux(dst_ctx, b->buffer->dtype, b->shape, b->ndim, "%s", full);
+    break;
+  }
+
+  if (ret && *n_aliases < max_aliases) {
+    aliases[*n_aliases] = (InlineAlias){b->buffer, full};
+    (*n_aliases)++;
+  } else {
+    free(full);
+  }
+  return ret;
+}
+
+static PolyUOp *clone_uop_into_ctx(PolyCtx *dst_ctx, PolyMap *memo, PolyUOp *u) {
+  if (!dst_ctx || !memo || !u) return NULL;
+
+  PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
+  if (cached) return cached;
+
+  PolyUOp *stack_src[16];
+  PolyUOp **src = u->n_src > (int)(sizeof(stack_src) / sizeof(stack_src[0]))
+                      ? malloc((size_t)u->n_src * sizeof(PolyUOp *))
+                      : stack_src;
+  if (u->n_src > 0 && !src) return NULL;
+
+  for (int i = 0; i < u->n_src; i++) {
+    src[i] = clone_uop_into_ctx(dst_ctx, memo, u->src[i]);
+    if (!src[i]) {
+      if (src != stack_src) free(src);
+      return NULL;
+    }
+  }
+
+  /* Preserve nonzero tags when cloning cross-ctx UOps so BUFFER uniqueness and
+   * imported UNIQUE-like identities remain stable inside the destination ctx. */
+  PolyUOp *cloned = u->tag
+                        ? poly_uop_tagged(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag)
+                        : poly_uop(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg);
+  if (src != stack_src) free(src);
+  if (cloned) poly_map_set(memo, poly_ptr_hash(u), u, cloned, poly_ptr_eq);
+  return cloned;
+}
+
+int poly_instance_inline_entrypoint(
+    PolyCtx *dst_ctx,
+    const PolyInstance *child,
+    const char *entrypoint,
+    const char *prefix,
+    const PolyInstanceInlineBinding *bindings,
+    int n_bindings,
+    bool trainable,
+    PolyInstanceInlineOutput *outputs,
+    int max_outputs,
+    int *out_n_outputs
+) {
+  if (out_n_outputs) *out_n_outputs = 0;
+  if (!dst_ctx || !child || !entrypoint || !outputs || max_outputs < 0) return -1;
+  int ep_idx = find_entrypoint(child, entrypoint);
+  if (ep_idx < 0) return -1;
+
+  PolyMap *memo = poly_map_new(64);
+  if (!memo) return -1;
+
+  InlineAlias *aliases = calloc((size_t)child->n_bufs, sizeof(InlineAlias));
+  int n_aliases = 0;
+  int rc = -1;
+
+  for (int i = 0; i < child->n_bufs; i++) {
+    const NamedBuf *b = &child->bufs[i];
+    const PolyInstanceInlineBinding *binding = find_inline_binding(bindings, n_bindings, b->name);
+    PolyUOp *replacement = binding ? binding->uop : NULL;
+    if (!replacement)
+      replacement =
+          register_inline_buffer(dst_ctx, b, prefix, trainable, aliases, &n_aliases, child->n_bufs);
+    if (!replacement) goto done;
+    poly_map_set(memo, poly_ptr_hash(b->buffer), b->buffer, replacement, poly_ptr_eq);
+  }
+
+  PolyUOp *sink = child->entrypoints[ep_idx].sink;
+  if (!sink || sink->op != POLY_OP_SINK) goto done;
+
+  int n_outputs = 0;
+  for (int i = 0; i < sink->n_src; i++) {
+    PolyUOp *store = sink->src[i];
+    if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
+    const PolyUOp *identity = poly_uop_get_buffer_identity(store->src[0]);
+    const NamedBuf *out_buf = instance_buf_for_uop(child, (PolyUOp *)identity);
+    if (!out_buf || out_buf->role != POLY_ROLE_OUTPUT) continue;
+    if (n_outputs >= max_outputs) goto done;
+    PolyUOp *value = clone_uop_into_ctx(dst_ctx, memo, store->src[1]);
+    if (!value) goto done;
+    outputs[n_outputs++] = (PolyInstanceInlineOutput){out_buf->name, value};
+  }
+
+  if (out_n_outputs) *out_n_outputs = n_outputs;
+  rc = 0;
+
+done:
+  if (aliases) {
+    for (int i = 0; i < n_aliases; i++)
+      free(aliases[i].parent_name);
+    free(aliases);
+  }
+  poly_map_destroy(memo);
+  return rc;
+}
+
+int poly_instance_copy_prefixed_weights(
+    PolyInstance *dst,
+    PolyInstance *src,
+    const char *prefix
+) {
+  if (!dst || !src) return -1;
+  for (int i = 0; i < src->n_params; i++) {
+    int sbi = src->param_indices[i];
+    if (sync_buf_to_host(src, sbi) != 0) return -1;
+    const NamedBuf *sb = &src->bufs[sbi];
+    char *dst_name = prefixed_name(prefix, sb->name);
+    if (!dst_name) return -1;
+    int dbi = find_buf_by_name(dst, dst_name);
+    free(dst_name);
+    if (dbi < 0) return -1;
+    NamedBuf *db = &dst->bufs[dbi];
+    if (db->numel != sb->numel || !db->data || !sb->data) return -1;
+    memcpy(db->data, sb->data, (size_t)sb->numel * sizeof(float));
+    if (dst->buf_handles && !poly_device_is_host_addressable(dst->buf_handles[dbi].device))
+      if (upload_handle(&dst->buf_handles[dbi], db->data, (size_t)db->numel * sizeof(float)) != 0)
+        return -1;
+  }
   return 0;
 }
 

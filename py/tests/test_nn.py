@@ -6,8 +6,9 @@ import pytest
 from polygrad import Tensor
 from polygrad.nn import (
     Linear, LayerNorm, GroupNorm, RMSNorm, Embedding, Dropout, Conv2d, BatchNorm,
-    SGD, Adam, AdamW,
+    SGD, Adam, AdamW, OptimizerGroup,
     get_parameters, get_state_dict, load_state_dict,
+    Input, Target, Model,
 )
 
 
@@ -262,6 +263,16 @@ class TestSGD:
         opt.zero_grad()
         assert m.weight.grad is None
 
+    def test_optimizer_group(self):
+        p1 = Tensor([1.0], requires_grad=True).realize()
+        p2 = Tensor([2.0], requires_grad=True).realize()
+        p1._grad = Tensor([1.0])
+        p2._grad = Tensor([2.0])
+        group = OptimizerGroup(SGD([p1], lr=0.1), SGD([p2], lr=0.2))
+        group.step()
+        assert approx(p1.numpy(), [0.9])
+        assert approx(p2.numpy(), [1.6])
+
 
 # ── Adam ──
 
@@ -280,6 +291,20 @@ class TestAdam:
             opt.step()
             losses.append(loss.item())
         assert losses[-1] < losses[0]
+
+    def test_beta_power_state_updates_in_graph(self):
+        p = Tensor([1.0], requires_grad=True).realize()
+        opt = Adam([p], lr=0.1)
+        p._grad = Tensor([1.0])
+        scheduled = opt.schedule_step()
+        assert opt.b1_t in scheduled
+        assert opt.b2_t in scheduled
+        scheduled[0].realize(*scheduled[1:])
+        assert approx(opt.b1_t.numpy(), [0.9], tol=1e-6)
+        assert approx(opt.b2_t.numpy(), [0.999], tol=1e-6)
+        assert approx(opt.m[0].numpy(), [0.1], tol=1e-6)
+        assert approx(opt.v[0].numpy(), [0.001], tol=1e-6)
+        assert approx(p.numpy(), [0.9], tol=1e-4)
 
 
 # ── AdamW ──
@@ -300,6 +325,13 @@ class TestAdamW:
             losses.append(loss.item())
         assert losses[-1] < losses[0]
 
+    def test_weight_decay_uses_core_update(self):
+        p = Tensor([1.0], requires_grad=True).realize()
+        opt = AdamW([p], lr=0.1, weight_decay=0.01)
+        p._grad = Tensor([0.0])
+        opt.step()
+        assert approx(p.numpy(), [0.999], tol=1e-5)
+
 
 # ── ASSIGN ──
 
@@ -313,6 +345,77 @@ class TestAssign:
         a = Tensor([1.0, 2.0, 3.0, 4.0])
         a.assign(a * 2).realize()
         assert approx(a.numpy(), [2.0, 4.0, 6.0, 8.0])
+
+
+# ── Model export ──
+
+class TestModelExport:
+    def test_functional_model_exports_selected_forward_entrypoint(self):
+        w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
+        x = Input("py_export_x", shape=(1, 2))
+        y = x.dot(w)
+
+        model = Model(
+            inputs={"py_export_x": x},
+            outputs={"py_export_output": y},
+            params={"py_export_w": w},
+        )
+        inst = model.export()
+        assert inst.param_count == 1
+        assert inst.param_name(0) == "py_export_w"
+
+        out = inst.forward(py_export_x=np.array([[10.0, 20.0]], dtype=np.float32))
+        assert "py_export_output" in out
+        assert np.allclose(out["py_export_output"], [80.0], atol=1e-5)
+
+    def test_trace_keeps_tinygrad_style_plain_object(self):
+        class LinearNet:
+            def __init__(self):
+                self.weight = Tensor([[4.0], [5.0]], requires_grad=True).realize()
+
+            def __call__(self, x):
+                return x.dot(self.weight)
+
+        net = LinearNet()
+        x = Input("py_trace_x", shape=(1, 2))
+        traced = Model.trace(net, inputs={"py_trace_x": x})
+        inst = traced.export()
+
+        out = inst.forward(py_trace_x=np.array([[2.0, 3.0]], dtype=np.float32))
+        assert np.allclose(out["output"], [23.0], atol=1e-5)
+
+    def test_tinygrad_training_aliases_exist(self):
+        t = Tensor.kaiming_uniform(2, 3)
+        assert t.shape == (2, 3)
+        before = Tensor.training
+        with Tensor.train():
+            assert Tensor.training
+        assert Tensor.training == before
+
+    def test_model_fit_uses_instance_training_path(self):
+        w = Tensor([[1.0]], requires_grad=True).realize()
+        x = Input("fit_x", shape=(1, 1))
+        y = Target("fit_y", shape=(1, 1))
+        pred = x.dot(w)
+        loss = (pred - y).square().mean()
+        model = Model(
+            inputs={"fit_x": x},
+            targets={"fit_y": y},
+            outputs={"fit_out": pred},
+            losses={"loss": loss},
+            params={"fit_w": w},
+        )
+        losses = model.fit(
+            {
+                "fit_x": np.array([[1.0]], dtype=np.float32),
+                "fit_y": np.array([[3.0]], dtype=np.float32),
+            },
+            epochs=4,
+            optimizer="sgd",
+            lr=0.1,
+        )
+        assert len(losses) == 4
+        assert losses[-1] < losses[0]
 
     def test_assign_with_other(self):
         a = Tensor([1.0, 2.0, 3.0, 4.0])

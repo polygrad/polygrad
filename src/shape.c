@@ -64,7 +64,10 @@ PolyUOp *poly_reduce_axis(
    * instead of relying on later schedule/rangeify cleanup to discover them. */
   if (!ctx || !src || n_axes <= 0) return src;
 
-  PolyShape shape = poly_uop_shape(ctx, src);
+  /* Use the ctx-owned cached shape here. poly_reduce_axis only inspects dims;
+   * requesting a heap copy would make this hot constructor responsible for
+   * extra ownership bookkeeping on every reduce. */
+  PolyShape shape = poly_uop_shape_cached(ctx, src);
   int64_t filtered_buf[POLY_MAX_DIMS];
   int filtered_n = 0;
   for (int i = 0; i < n_axes; i++) {

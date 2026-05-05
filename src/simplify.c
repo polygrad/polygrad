@@ -1011,6 +1011,7 @@ static PolyPatternMatcher *pm_reduce_load_collapse_get(void) {
   PolyPatternMatcher *extra =
       poly_pm_new(extra_rules, (int)(sizeof(extra_rules) / sizeof(extra_rules[0])));
   g_pm_reduce_load_collapse = poly_pm_concat(pm_reduce_collapse_get(), extra);
+  poly_pm_destroy(extra); /* poly_pm_concat copies rules. */
   return g_pm_reduce_load_collapse;
 }
 
@@ -1030,6 +1031,7 @@ static PolyPatternMatcher *pm_reduce_simplify_get(void) {
   };
   PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
   g_pm_reduce_simplify = poly_pm_concat(base, poly_symbolic());
+  poly_pm_destroy(base); /* poly_pm_concat copies rules. */
   return g_pm_reduce_simplify;
 }
 

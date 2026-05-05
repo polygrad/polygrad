@@ -35,6 +35,8 @@ typedef struct {
   PolyUOp *buffer; /* BUFFER UOp */
   int64_t shape[8];
   int ndim;
+  bool trainable; /* PARAM default when absent in old IR payloads */
+  bool trainable_set;
 } PolyIrBufEntry;
 
 /* Named entrypoint (SINK) */

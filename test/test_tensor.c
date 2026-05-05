@@ -2256,6 +2256,7 @@ TEST(pe, arange_range_collapse_structural) {
     ASSERT_INT_EQ(n_load, 0);
     ASSERT_INT_EQ(n_reduce, 0);
     ASSERT_INT_EQ(n_store, 1);
+    free(lin);
   }
 
   poly_ctx_destroy(ctx);

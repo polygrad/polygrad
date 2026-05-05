@@ -57,6 +57,19 @@ class PolyDType(ctypes.Structure):
         ('ptr_size', ctypes.c_int64),
     ]
 
+class PolyOptimConfig(ctypes.Structure):
+    _fields_ = [
+        ('kind', ctypes.c_int),
+        ('lr', ctypes.c_float),
+        ('beta1', ctypes.c_float),
+        ('beta2', ctypes.c_float),
+        ('eps', ctypes.c_float),
+        ('weight_decay', ctypes.c_float),
+        ('momentum', ctypes.c_float),
+        ('nesterov', ctypes.c_bool),
+        ('classic', ctypes.c_bool),
+    ]
+
 PolyFrontendBufferReleaseFn = ctypes.CFUNCTYPE(None, _uintptr)
 
 
@@ -194,6 +207,19 @@ def _declare_signatures(lib):
 
     lib.poly_sink_n.restype = _ptr
     lib.poly_sink_n.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_register_buffer_by_id.restype = _ptr
+    lib.poly_register_buffer_by_id.argtypes = [
+        _ptr, ctypes.c_int, ctypes.c_int, _i64p, ctypes.c_int, ctypes.c_char_p
+    ]
+
+    lib.poly_register_existing_buffer.restype = _ptr
+    lib.poly_register_existing_buffer.argtypes = [
+        _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int, ctypes.c_char_p, ctypes.c_bool
+    ]
+
+    lib.poly_register_entrypoint.restype = ctypes.c_int
+    lib.poly_register_entrypoint.argtypes = [_ptr, ctypes.c_char_p, _ptr]
 
     lib.poly_buffer_f32.restype = _ptr
     lib.poly_buffer_f32.argtypes = [_ptr, ctypes.c_int64]
@@ -444,6 +470,22 @@ def _declare_signatures(lib):
         _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)
     ]
 
+    # --- Optimizer graph builders (optim.h) ---
+    lib.poly_optim_build_step.restype = ctypes.c_int
+    lib.poly_optim_build_step.argtypes = [
+        _ptr,
+        ctypes.POINTER(PolyOptimConfig),
+        ctypes.POINTER(_ptr),
+        ctypes.POINTER(_ptr),
+        ctypes.c_int,
+        ctypes.POINTER(_ptr),
+        ctypes.POINTER(_ptr),
+        _ptr,
+        _ptr,
+        ctypes.POINTER(_ptr),
+        ctypes.c_int,
+    ]
+
     # --- Einsum ---
     lib.poly_einsum.restype = _ptr
     lib.poly_einsum.argtypes = [
@@ -464,6 +506,14 @@ def _declare_signatures(lib):
     lib.poly_instance_from_ir.restype = _ptr
     lib.poly_instance_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
 
+    lib.poly_instance_from_ctx.restype = _ptr
+    lib.poly_instance_from_ctx.argtypes = [_ptr]
+
+    lib.poly_instance_from_sinks.restype = _ptr
+    lib.poly_instance_from_sinks.argtypes = [
+        _ptr, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(_ptr), ctypes.c_int
+    ]
+
     lib.poly_instance_free.restype = None
     lib.poly_instance_free.argtypes = [_ptr]
 
@@ -479,6 +529,12 @@ def _declare_signatures(lib):
     lib.poly_instance_param_data.restype = _fp
     lib.poly_instance_param_data.argtypes = [_ptr, ctypes.c_int, _i64p]
 
+    lib.poly_instance_param_trainable.restype = ctypes.c_bool
+    lib.poly_instance_param_trainable.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_instance_set_param_trainable.restype = ctypes.c_int
+    lib.poly_instance_set_param_trainable.argtypes = [_ptr, ctypes.c_int, ctypes.c_bool]
+
     lib.poly_instance_buf_count.restype = ctypes.c_int
     lib.poly_instance_buf_count.argtypes = [_ptr]
 
@@ -487,6 +543,12 @@ def _declare_signatures(lib):
 
     lib.poly_instance_buf_role.restype = ctypes.c_int
     lib.poly_instance_buf_role.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_instance_buf_trainable.restype = ctypes.c_bool
+    lib.poly_instance_buf_trainable.argtypes = [_ptr, ctypes.c_int]
+
+    lib.poly_instance_set_buf_trainable.restype = ctypes.c_int
+    lib.poly_instance_set_buf_trainable.argtypes = [_ptr, ctypes.c_int, ctypes.c_bool]
 
     lib.poly_instance_buf_shape.restype = ctypes.c_int
     lib.poly_instance_buf_shape.argtypes = [_ptr, ctypes.c_int, _i64p, ctypes.c_int]

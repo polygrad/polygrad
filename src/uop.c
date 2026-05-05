@@ -1026,6 +1026,7 @@ static PolyUOp *register_named(
   entry->buffer = buf;
   entry->ndim = ndim;
   entry->is_alias = false;
+  entry->trainable = (role == POLY_ROLE_PARAM);
   for (int i = 0; i < ndim; i++)
     entry->shape[i] = shape[i];
 
@@ -1037,6 +1038,65 @@ static PolyUOp *register_named(
   poly_map_set(ctx->name_map, h, entry->name, entry, reg_str_eq);
 
   return buf;
+}
+
+static PolyUOp *register_existing_named(
+    PolyCtx *ctx,
+    PolyBufRole role,
+    PolyUOp *buffer,
+    const int64_t *shape,
+    int ndim,
+    const char *name,
+    bool trainable
+) {
+  if (!ctx || !name || !buffer || ndim < 0 || ndim > 8) return NULL;
+  const PolyUOp *identity = poly_uop_get_buffer_identity(buffer);
+  if (!identity || identity != buffer) {
+    fprintf(stderr, "poly_register_existing_buffer: '%s' is not a BUFFER identity\n", name);
+    return NULL;
+  }
+
+  uint32_t h = reg_str_hash(name);
+  PolyRegEntry *existing = poly_map_get(ctx->name_map, h, name, reg_str_eq);
+  if (existing) {
+    if (existing->buffer != buffer) {
+      fprintf(stderr, "poly_register_existing_buffer: '%s' already names another buffer\n", name);
+      return NULL;
+    }
+    if (existing->ndim != ndim) {
+      fprintf(
+          stderr, "poly_register_existing_buffer: '%s' registered with different ndim\n", name
+      );
+      return NULL;
+    }
+    for (int i = 0; i < ndim; i++) {
+      if (existing->shape[i] != shape[i]) {
+        fprintf(
+            stderr, "poly_register_existing_buffer: '%s' registered with different shape\n", name
+        );
+        return NULL;
+      }
+    }
+    existing->role = role;
+    existing->trainable = trainable;
+    return existing->buffer;
+  }
+
+  PolyRegEntry *entry = poly_arena_alloc(ctx->arena, sizeof(PolyRegEntry), _Alignof(PolyRegEntry));
+  if (!entry) return NULL;
+  entry->name = arena_strdup(ctx->arena, name);
+  entry->role = role;
+  entry->buffer = buffer;
+  entry->ndim = ndim;
+  entry->is_alias = false;
+  entry->trainable = trainable;
+  for (int i = 0; i < ndim; i++)
+    entry->shape[i] = shape[i];
+
+  if (ctx->n_entries >= ctx->entries_cap && reg_grow_entries(ctx) < 0) return NULL;
+  ctx->entries[ctx->n_entries++] = entry;
+  poly_map_set(ctx->name_map, h, entry->name, entry, reg_str_eq);
+  return buffer;
 }
 
 /* Public registration wrappers */
@@ -1121,6 +1181,33 @@ PolyUOp *poly_aux(
   return register_named(ctx, POLY_ROLE_AUX, dt, shape, ndim, name);
 }
 
+PolyUOp *poly_register_buffer_by_id(
+    PolyCtx *ctx,
+    int role,
+    int dtype_id,
+    const int64_t *shape,
+    int ndim,
+    const char *name
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  if (role < POLY_ROLE_PARAM || role > POLY_ROLE_AUX) return NULL;
+  return register_named(ctx, (PolyBufRole)role, dt, shape, ndim, name);
+}
+
+PolyUOp *poly_register_existing_buffer(
+    PolyCtx *ctx,
+    int role,
+    PolyUOp *buffer,
+    const int64_t *shape,
+    int ndim,
+    const char *name,
+    bool trainable
+) {
+  if (role < POLY_ROLE_PARAM || role > POLY_ROLE_AUX) return NULL;
+  return register_existing_named(ctx, (PolyBufRole)role, buffer, shape, ndim, name, trainable);
+}
+
 /* Alias */
 
 int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name) {
@@ -1143,6 +1230,7 @@ int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name) 
   entry->buffer = existing->buffer;
   entry->ndim = existing->ndim;
   entry->is_alias = true;
+  entry->trainable = existing->trainable;
   for (int i = 0; i < existing->ndim; i++)
     entry->shape[i] = existing->shape[i];
 
@@ -1168,6 +1256,24 @@ PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...) {
 const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name) {
   if (!ctx || !name) return NULL;
   return poly_map_get(ctx->name_map, reg_str_hash(name), name, reg_str_eq);
+}
+
+int poly_ctx_set_trainable(PolyCtx *ctx, const char *name, bool trainable) {
+  if (!ctx || !name) return -1;
+  PolyRegEntry *entry = poly_map_get(ctx->name_map, reg_str_hash(name), name, reg_str_eq);
+  if (!entry) return -1;
+  entry->trainable = trainable;
+  for (int i = 0; i < ctx->n_entries; i++) {
+    PolyRegEntry *other = ctx->entries[i];
+    if (other && other->buffer == entry->buffer) other->trainable = trainable;
+  }
+  return 0;
+}
+
+bool poly_ctx_is_trainable(PolyCtx *ctx, const char *name) {
+  if (!ctx || !name) return false;
+  PolyRegEntry *entry = poly_map_get(ctx->name_map, reg_str_hash(name), name, reg_str_eq);
+  return entry ? entry->trainable : false;
 }
 
 /* Enumeration */

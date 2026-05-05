@@ -1,0 +1,88 @@
+/*
+ * optim.h -- Open optimizer graph helpers.
+ *
+ * Optimizers are normal tensor graph builders. Instance convenience training
+ * uses these helpers, and custom loops can use the same update expressions
+ * before deciding how to realize/apply them.
+ */
+
+#ifndef POLY_OPTIM_H
+#define POLY_OPTIM_H
+
+#include "polygrad.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef POLY_OPTIM_NONE
+#define POLY_OPTIM_NONE 0
+#define POLY_OPTIM_SGD 1
+#define POLY_OPTIM_ADAM 2
+#define POLY_OPTIM_ADAMW 3
+#endif
+
+typedef struct {
+  int kind;
+  float lr;
+  float beta1;
+  float beta2;
+  float eps;
+  float weight_decay;
+  float momentum;
+  bool nesterov;
+  bool classic;
+} PolyOptimConfig;
+
+typedef struct {
+  PolyUOp *param_new;
+  PolyUOp *m_new;
+  PolyUOp *v_new;
+  PolyUOp *bc1_new;
+  PolyUOp *bc2_new;
+} PolyOptimUpdate;
+
+/* Build one parameter's next-value expressions. Adam/AdamW require m/v and
+ * beta-power scalar buffers; SGD ignores those inputs. The caller owns
+ * optimizer state storage and decides whether to wrap returned values in
+ * tinygrad-style AFTER/STORE effects or a compatibility assignment op. */
+int poly_optim_build_update(
+    PolyCtx *ctx,
+    const PolyOptimConfig *cfg,
+    PolyUOp *param,
+    PolyUOp *grad,
+    PolyUOp *m_buf,
+    PolyUOp *v_buf,
+    PolyUOp *bc1_buf,
+    PolyUOp *bc2_buf,
+    int64_t numel,
+    PolyOptimUpdate *out
+);
+
+/* Tensor-level optimizer step builder shared by frontends and Instance-like
+ * callers. This is the C-side graph-construction part of tinygrad's
+ * Optimizer.schedule_step(), not the engine scheduler. It owns no state:
+ * params, grads, and optional optimizer-state tensors are supplied by the
+ * caller. The function mutates target tensors into assignment-effect roots and
+ * writes those tensors into out_tensors so callers can realize the whole
+ * optimizer step as one batch. If out_tensors is NULL or out_cap is too small,
+ * returns the number of output tensors required without mutating anything. */
+int poly_optim_build_step(
+    PolyCtx *ctx,
+    const PolyOptimConfig *cfg,
+    PolyTensor **params,
+    PolyTensor **grads,
+    int n_params,
+    PolyTensor **m_tensors,
+    PolyTensor **v_tensors,
+    PolyTensor *bc1_tensor,
+    PolyTensor *bc2_tensor,
+    PolyTensor **out_tensors,
+    int out_cap
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* POLY_OPTIM_H */

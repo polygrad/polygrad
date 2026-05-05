@@ -259,6 +259,7 @@ static inline size_t poly_test_buffer_nbytes(PolyCtx *ctx, PolyUOp *buf) {
   int64_t numel = -1;
   PolyShape shape = poly_uop_shape(ctx, buf);
   if (shape.ndim >= 0) numel = poly_shape_numel(shape);
+  if (shape.ndim > 0 && shape.dims) free(shape.dims);
   if (numel < 0 && buf->arg.kind == POLY_ARG_INT) numel = buf->arg.i;
   if (numel < 0) numel = 0;
   return (size_t)numel * (size_t)poly_dtype_itemsize(poly_dtype_scalar(buf->dtype));
@@ -311,6 +312,11 @@ static inline int poly_test_run_all(void) {
     }
 
     int passed = 0, failed = 0;
+    /* Emit the active test before entering it. Sanitizer crashes can happen
+     * inside generated/JIT paths before PASS/FAIL is printed, and Apptainer
+     * ASan sometimes reports only recursive DEADLYSIGNAL lines. */
+    printf("    [RUN ] %s\n", g_tests[i].name);
+    fflush(stdout);
     g_tests[i].fn(&passed, &failed);
 
     if (failed == 0) {

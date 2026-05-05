@@ -88,6 +88,12 @@ function createNativeCore() {
     paramData(inst, i) {
       return binding.poly_instance_param_data(inst, i)
     },
+    paramTrainable(inst, i) {
+      return binding.poly_instance_param_trainable(inst, i)
+    },
+    setParamTrainable(inst, i, trainable) {
+      return binding.poly_instance_set_param_trainable(inst, i, trainable)
+    },
     bufCount(inst) {
       return binding.poly_instance_buf_count(inst)
     },
@@ -96,6 +102,12 @@ function createNativeCore() {
     },
     bufRole(inst, i) {
       return binding.poly_instance_buf_role(inst, i)
+    },
+    bufTrainable(inst, i) {
+      return binding.poly_instance_buf_trainable(inst, i)
+    },
+    setBufTrainable(inst, i, trainable) {
+      return binding.poly_instance_set_buf_trainable(inst, i, trainable)
     },
     bufShape(inst, i) {
       return binding.poly_instance_buf_shape(inst, i)
@@ -117,6 +129,11 @@ function createNativeCore() {
     },
     fromBundle(bytes) {
       const inst = binding.poly_instance_from_bundle(bytes)
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
+    },
+    fromSinks(ctxPtr, names, sinks) {
+      const inst = binding.poly_instance_from_sinks(ctxPtr, names, sinks)
       if (inst) binding.poly_instance_set_device(inst, 0)
       return inst
     },

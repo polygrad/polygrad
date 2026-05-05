@@ -2068,7 +2068,9 @@ PolyPatternMatcher *poly_symbolic(void) {
       {poly_pat_op(POLY_OP_ADD, NULL, 0, "add"), rule_flat_index_outer_term_to_end},
   };
   PolyPatternMatcher *extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  g_symbolic = poly_pm_concat(poly_symbolic_simple(), extra);
-  g_symbolic = poly_pm_concat(g_symbolic, poly_pm_gep_pushing());
+  PolyPatternMatcher *with_extra = poly_pm_concat(poly_symbolic_simple(), extra);
+  poly_pm_destroy(extra); /* concat copies rules; the temporary matcher is no longer needed. */
+  g_symbolic = poly_pm_concat(with_extra, poly_pm_gep_pushing());
+  poly_pm_destroy(with_extra);
   return g_symbolic;
 }

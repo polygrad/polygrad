@@ -1,6 +1,9 @@
 'use strict'
 
 const { createBoundInstanceClass } = require('./instance')
+const { createBoundModules } = require('./nn/modules')
+const { createBoundOptim } = require('./nn/optim')
+const { createBoundModel } = require('./nn/model')
 const { createBoundTensorClass } = require('./tensor')
 const { createBoundTokenizerClass } = require('./tokenizer')
 
@@ -33,6 +36,25 @@ class PolyRuntime {
     this.OPTIM_SGD = this.Instance.OPTIM_SGD
     this.OPTIM_ADAM = this.Instance.OPTIM_ADAM
     this.OPTIM_ADAMW = this.Instance.OPTIM_ADAMW
+    const modules = createBoundModules(this)
+    const optim = createBoundOptim(this)
+    const model = createBoundModel(this)
+    this.nn = {
+      Linear: modules.Linear,
+      Input: model.Input,
+      Target: model.Target,
+      Model: model.Model,
+      trace: model.trace,
+      export: model.export,
+      getParameters: model.getParameters,
+      getStateDict: model.getStateDict,
+      optim,
+      Optimizer: optim.Optimizer,
+      OptimizerGroup: optim.OptimizerGroup,
+      SGD: optim.SGD,
+      Adam: optim.Adam,
+      AdamW: optim.AdamW
+    }
   }
 
   get core() { return this._core.caps.core }

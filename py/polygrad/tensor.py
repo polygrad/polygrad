@@ -389,6 +389,21 @@ class Tensor:
     _seed = 0
     _device_rng_counters = {}
 
+    @classmethod
+    def train(cls, mode=True):
+        """tinygrad-compatible training-mode context manager."""
+        class _TrainCtx:
+            def __enter__(self_nonlocal):
+                self_nonlocal.prev = cls.training
+                cls.training = bool(mode)
+                return cls
+
+            def __exit__(self_nonlocal, exc_type, exc, tb):
+                cls.training = self_nonlocal.prev
+                return False
+
+        return _TrainCtx()
+
     def __init__(self, data=None, requires_grad=False, *, dtype=None, device=None, _ctx=None, _uop=None,
                  _data=None, _shape=None, _dtype=None, _device=None, _tensor=None):
         """Create a tensor from a list, numpy array, or scalar."""
@@ -712,7 +727,14 @@ class Tensor:
         return self.numpy().tolist()
 
     def detach(self):
-        return Tensor(self.numpy(), dtype=self._dtype_str, device=self._device)
+        # Match tinygrad's graph-level detach: preserve the current value UOp,
+        # but cut autograd flow without forcing a host readback/materialization.
+        uop = _ffi._lib.poly_detach(self._ctx, self.uop)
+        if not uop:
+            raise RuntimeError('poly_detach failed')
+        return Tensor(_ctx=self._ctx, _uop=uop, _shape=self.shape,
+                      _dtype=self._dtype_str, _device=self._device,
+                      requires_grad=False)
 
     def clone(self):
         return Tensor(
@@ -1442,6 +1464,10 @@ class Tensor:
         new_shape = _shape_from_uop(self._ctx, uop)
         return self._make_result(uop, new_shape, [self, target])
 
+    def sparse_categorical_crossentropy(self, target, axis=None):
+        """tinygrad name for class-index cross entropy."""
+        return self.cross_entropy(target, axis=axis)
+
     def binary_crossentropy(self, target):
         return -(target * self.log() + (1.0 - target) * (1.0 - self).log()).mean()
 
@@ -1665,6 +1691,16 @@ class Tensor:
         dims, ndim, _ = _shape_arg(shape)
         uop = _ffi._lib.poly_randn_by_id(ctx, dims, ndim, _next_rng_seed(dev), _dtype_id(dtype_name))
         return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_randn_by_id')
+
+    @staticmethod
+    def kaiming_uniform(*shape, **kwargs):
+        """tinygrad-compatible Kaiming uniform initializer."""
+        shape = _shape_tuple(*shape)
+        if not shape:
+            raise ValueError("kaiming_uniform requires a non-scalar shape")
+        fan_in = shape[0] if len(shape) == 1 else math.prod(shape[1:])
+        bound = math.sqrt(6.0 / fan_in)
+        return Tensor.rand(*shape, **kwargs) * (2.0 * bound) - bound
 
     @staticmethod
     def randint(low, high=None, shape=(1,), **kwargs):

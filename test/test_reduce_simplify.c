@@ -292,6 +292,7 @@ TEST(reduce_simplify, d9_arange_collapses_to_single_kernel) {
   }
   ASSERT_INT_EQ(n_reduce, 0);
   ASSERT_INT_EQ(n_load, 0);
+  free(lin);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -314,6 +315,7 @@ TEST(reduce_simplify, d9_eye_collapses) {
   for (int i = 0; i < n_lin; i++)
     if (lin[i]->op == POLY_OP_REDUCE) n_reduce++;
   ASSERT_INT_EQ(n_reduce, 0);
+  free(lin);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -352,6 +354,7 @@ TEST(reduce_simplify, d9_sum_of_buffer_no_collapse) {
   for (int i = 0; i < n_lin; i++)
     if (lin[i]->op == POLY_OP_LOAD) n_load++;
   ASSERT_TRUE(n_load >= 1);
+  free(lin);
   poly_ctx_destroy(ctx);
   PASS();
 }

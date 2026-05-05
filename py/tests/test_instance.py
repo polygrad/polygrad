@@ -174,6 +174,49 @@ class TestParams:
         assert len(params[0][2]) == 8  # 4*2
         inst.free()
 
+    def test_param_trainability_freezes_optimizer_updates(self):
+        inst = Instance.mlp({
+            'layers': [2, 1], 'activation': 'none',
+            'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
+        })
+        try:
+            assert inst.param_trainable(0) is True
+            assert inst.param_trainable(1) is True
+            inst.set_param_trainable(0, False)
+            assert inst.param_trainable(0) is False
+
+            weight_before = inst.param_data(0).copy()
+            bias_before = inst.param_data(1).copy()
+            inst.set_optimizer(OPTIM_SGD, lr=0.05)
+            x = np.array([1.0, 2.0], dtype=np.float32)
+            y = np.array([5.0], dtype=np.float32)
+            for _ in range(10):
+                loss = inst.train_step(x=x, y=y)
+                assert np.isfinite(loss)
+
+            np.testing.assert_array_equal(inst.param_data(0), weight_before)
+            assert not np.array_equal(inst.param_data(1), bias_before)
+        finally:
+            inst.free()
+
+    def test_trainability_survives_ir_roundtrip(self):
+        inst = Instance.mlp({
+            'layers': [2, 1], 'activation': 'none',
+            'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
+        })
+        try:
+            inst.set_param_trainable(0, False)
+            ir = inst.export_ir()
+            weights = inst.export_weights()
+            inst2 = Instance.from_ir(ir, weights)
+            try:
+                assert inst2.param_trainable(0) is False
+                assert inst2.param_trainable(1) is True
+            finally:
+                inst2.free()
+        finally:
+            inst.free()
+
 
 class TestTrainBatch:
     """batch_size>1 training (P0 regression coverage)."""

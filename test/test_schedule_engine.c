@@ -262,6 +262,7 @@ TEST(sched, placement_copy_item_uses_copy_root_and_two_slots) {
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
+  free(data);
   PASS();
 }
 

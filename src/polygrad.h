@@ -788,6 +788,7 @@ typedef struct {
   int64_t shape[8];
   int ndim;
   bool is_alias;
+  bool trainable; /* PARAMs default true; frozen imported params set false */
 } PolyRegEntry;
 
 /* Register a named BUFFER on ctx. Returns the BUFFER UOp.
@@ -828,6 +829,31 @@ PolyUOp *poly_target(
 PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim, const char *fmt, ...)
     __attribute__((format(printf, 5, 6)));
 
+/* Non-variadic named-buffer registration for FFI/frontends. These mirror
+ * poly_param/poly_input/poly_output/poly_target/poly_aux, but accept an exact
+ * string and dtype id so Python/JS/WASM do not need to call variadic C APIs. */
+PolyUOp *poly_register_buffer_by_id(
+    PolyCtx *ctx,
+    int role,
+    int dtype_id,
+    const int64_t *shape,
+    int ndim,
+    const char *name
+);
+
+/* Register an existing BUFFER-like UOp as a named ABI buffer. This is the
+ * export path for tinygrad-style lazy model objects whose parameters already
+ * exist before the model graph is traced. */
+PolyUOp *poly_register_existing_buffer(
+    PolyCtx *ctx,
+    int role,
+    PolyUOp *buffer,
+    const int64_t *shape,
+    int ndim,
+    const char *name,
+    bool trainable
+);
+
 /* Create an alias: alias_name resolves to the same buffer as existing_name.
  * Returns 0 on success, -1 on error (existing_name not found, or alias_name
  * already taken by a different buffer). */
@@ -838,6 +864,11 @@ PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...) __attribute__((format(
 
 /* Lookup a registry entry by name. Returns NULL if not found. */
 const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name);
+
+/* Mark a named PARAM trainable/frozen. Non-PARAM buffers ignore optimizer
+ * trainability but still carry the bit for import/export round-trips. */
+int poly_ctx_set_trainable(PolyCtx *ctx, const char *name, bool trainable);
+bool poly_ctx_is_trainable(PolyCtx *ctx, const char *name);
 
 /* Enumeration of all named entries (including aliases). */
 int poly_ctx_named_count(PolyCtx *ctx);

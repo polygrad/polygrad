@@ -15,6 +15,33 @@
 #include "../src/tensor.h"
 #include "../src/utils.h"
 
+#include <stdbool.h>
+
+typedef struct {
+  const char *key;
+  char *value;
+  bool had_value;
+} ScheduleEnvSave;
+
+static ScheduleEnvSave schedule_save_env(const char *key) {
+  const char *cur = getenv(key);
+  return (ScheduleEnvSave){
+      .key = key,
+      .value = cur ? strdup(cur) : NULL,
+      .had_value = cur != NULL,
+  };
+}
+
+static void schedule_restore_env(ScheduleEnvSave *s) {
+  if (!s) return;
+  if (s->had_value)
+    setenv(s->key, s->value ? s->value : "", 1);
+  else
+    unsetenv(s->key);
+  free(s->value);
+  s->value = NULL;
+}
+
 /* Helper: run same graph on CPU and INTERP, compare outputs */
 
 static int cpu_interp_parity(
@@ -691,6 +718,39 @@ TEST(schedule_runtime, schedule_cache_misses_on_changed_op_shape) {
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 3);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, schedule_cache_disabled_by_env_does_not_store_linear) {
+  ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
+  setenv("POLY_SCACHE", "0", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink =
+      poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+
+  /* mirrors tinygrad Context(SCACHE=0): lowering still returns LINEAR, but
+   * neither the lookup nor the write path can populate the schedule cache. */
+  PolyUOp *lin1 = poly_lower_sink_to_linear(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(lin1);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+
+  PolyUOp *lin2 = poly_lower_sink_to_linear(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(lin2);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(ps);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+  poly_schedule_free(ps);
+
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&scache);
   PASS();
 }
 

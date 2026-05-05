@@ -533,6 +533,37 @@ TEST(sym, minmax_and_r_5) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+TEST(sym, minmax_and_negative_var_nonnegative_mask) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = mk_dvar(ctx, "x", -100, 100);
+
+  /* Port of tinygrad test_uop_vmin_vmax.py:
+   * when the mask has no sign bit, x & mask is known non-negative even if x
+   * spans negative and positive values. A negative mask falls back to dtype
+   * bounds because the sign bit can survive. */
+  PolyUOp *mask511 = poly_uop2(ctx, POLY_OP_AND, POLY_INT32, x, mk_const(ctx, 511), poly_arg_none());
+  check_mm(ctx, mask511, 0, 511, "[-100..100] & 511");
+
+  PolyUOp *mask_all =
+      poly_uop2(ctx, POLY_OP_AND, POLY_INT32, x, mk_const(ctx, -1), poly_arg_none());
+  check_mm(ctx, mask_all, INT32_MIN, INT32_MAX, "[-100..100] & -1");
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_special_with_define_var_source) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *dv =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("i", 1, 10));
+  PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, dv, poly_arg_str("gidx0"));
+
+  /* tinygrad SPECIAL uses the source bound as an extent, so [1..10] becomes
+   * an index-style range [0..9]. */
+  check_mm(ctx, special, 0, 9, "SPECIAL(DEFINE_VAR[1..10])");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 /* MAX */
 TEST(sym, minmax_max_r_5) {
@@ -544,12 +575,46 @@ TEST(sym, minmax_max_r_5) {
   poly_ctx_destroy(ctx);
   PASS();
 }
+TEST(sym, minmax_nested_max_min_clamp) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = mk_dvar(ctx, "x", 0, 10);
+  PolyUOp *lo = poly_uop2(ctx, POLY_OP_MAX, POLY_INT32, x, mk_const(ctx, 5), poly_arg_none());
+  PolyUOp *neg_one = mk_const(ctx, -1);
+  PolyUOp *not_lo = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, lo, neg_one, poly_arg_none());
+  PolyUOp *not_8 = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, mk_const(ctx, 8), neg_one, poly_arg_none());
+  PolyUOp *inner = poly_uop2(ctx, POLY_OP_MAX, POLY_INT32, not_lo, not_8, poly_arg_none());
+  PolyUOp *clamped = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, inner, neg_one, poly_arg_none());
+
+  /* Port of tinygrad test_vmin_vmax_nested_min_max:
+   * x.maximum(5).minimum(8) renders as (max((max(x, 5)^-1), -9)^-1)
+   * at the UOp level, then narrows to [5..8]. */
+  check_mm(ctx, clamped, 5, 8, "min(max(x,5),8)");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 TEST(sym, minmax_max_dv_5) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *u = poly_uop2(
       ctx, POLY_OP_MAX, POLY_INT32, mk_dvar(ctx, "x", 2, 7), mk_const(ctx, 5), poly_arg_none()
   );
   check_mm(ctx, u, 5, 7, "max(dv,5)");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_idiv_negative_constant) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *pos = mk_dvar(ctx, "pos", 10, 20);
+  PolyUOp *pos_div_neg =
+      poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, pos, mk_const(ctx, -2), poly_arg_none());
+  check_mm(ctx, pos_div_neg, -10, -5, "[10..20]//-2");
+
+  PolyUOp *neg = mk_dvar(ctx, "neg", -20, -10);
+  PolyUOp *neg_div_neg =
+      poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, neg, mk_const(ctx, -3), poly_arg_none());
+  check_mm(ctx, neg_div_neg, 3, 6, "[-20..-10]//-3");
+
   poly_ctx_destroy(ctx);
   PASS();
 }

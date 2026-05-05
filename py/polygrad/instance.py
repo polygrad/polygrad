@@ -32,6 +32,18 @@ OPTIM_ADAM = 2
 OPTIM_ADAMW = 3
 
 
+def _optimizer_kind(kind):
+    if isinstance(kind, str):
+        k = kind.lower()
+        if k == 'sgd':
+            return OPTIM_SGD
+        if k == 'adam':
+            return OPTIM_ADAM
+        if k == 'adamw':
+            return OPTIM_ADAMW
+    return int(kind)
+
+
 class Instance:
     """Opaque model instance with forward, train, and weight I/O."""
 
@@ -116,6 +128,18 @@ class Instance:
             return None
         return np.ctypeslib.as_array(ptr, shape=(numel.value,))
 
+    def param_trainable(self, i):
+        """Whether this parameter participates in convenience optimizer steps."""
+        return bool(_get_lib().poly_instance_param_trainable(self._ptr, i))
+
+    def set_param_trainable(self, i, trainable):
+        """Enable or freeze one parameter for Instance.train_step()."""
+        ret = _get_lib().poly_instance_set_param_trainable(
+            self._ptr, i, bool(trainable))
+        if ret != 0:
+            raise RuntimeError(f'set_param_trainable failed (ret={ret})')
+        return self
+
     def params(self):
         """Iterate (name, shape, data) for all params."""
         for i in range(self.param_count):
@@ -133,6 +157,18 @@ class Instance:
 
     def buf_role(self, i):
         return _get_lib().poly_instance_buf_role(self._ptr, i)
+
+    def buf_trainable(self, i):
+        """Whether this named buffer is marked trainable."""
+        return bool(_get_lib().poly_instance_buf_trainable(self._ptr, i))
+
+    def set_buf_trainable(self, i, trainable):
+        """Enable or freeze a named buffer for Instance.train_step()."""
+        ret = _get_lib().poly_instance_set_buf_trainable(
+            self._ptr, i, bool(trainable))
+        if ret != 0:
+            raise RuntimeError(f'set_buf_trainable failed (ret={ret})')
+        return self
 
     def buf_shape(self, i):
         shape_buf = (ctypes.c_int64 * 8)()
@@ -237,6 +273,32 @@ class Instance:
         if ret != 0:
             raise RuntimeError(f'train_step failed (ret={ret})')
         return float(loss.value)
+
+    def fit(self, data=None, *, epochs=1, optimizer=None, lr=0.01,
+            beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0,
+            on_step=None, **io):
+        """Run a small Keras-style training loop over this instance.
+
+        This is only orchestration: optimizer update graphs are still built by
+        the C core and executed through the same train_step path as custom
+        loops.
+        """
+        bindings = {}
+        if data:
+            bindings.update(data)
+        bindings.update(io)
+        if optimizer is not None:
+            self.set_optimizer(
+                _optimizer_kind(optimizer), lr=lr, beta1=beta1, beta2=beta2,
+                eps=eps, weight_decay=weight_decay,
+            )
+        losses = []
+        for step in range(int(epochs)):
+            loss = self.train_step(**bindings)
+            losses.append(loss)
+            if on_step is not None:
+                on_step(step, loss)
+        return losses
 
     # ── Internals ────────────────────────────────────────────────────
 

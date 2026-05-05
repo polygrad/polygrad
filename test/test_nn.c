@@ -238,6 +238,7 @@ TEST(nn, matmul_broadcast_batch_numeric) {
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 2);
   ASSERT_INT_EQ(s.dims[2], 2);
+  if (s.dims) free(s.dims);
 
   PolyUOp *out_buf = poly_buffer_f32(ctx, 8);
   PolyUOp *store = poly_store_val(ctx, out_buf, r);
@@ -508,6 +509,7 @@ TEST(nn, layernorm_non_last_axis) {
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 3);
   ASSERT_INT_EQ(s.dims[2], 2);
+  if (s.dims) free(s.dims);
 
   int64_t os[] = {12};
   PolyUOp *out_buf = poly_output(ctx, POLY_FLOAT32, os, 1, "output");

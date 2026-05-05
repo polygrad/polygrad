@@ -24,6 +24,7 @@
         "csrc/src/interp.c",
         "csrc/src/ir.c",
         "csrc/src/nn.c",
+        "csrc/src/optim.c",
         "csrc/src/ops.c",
         "csrc/src/pat.c",
         "csrc/src/placer.c",

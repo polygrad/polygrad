@@ -6435,9 +6435,9 @@ static PolyPatternMatcher *poly_pm_combined_devec(void) {
    *   pm_devectorize = sym+devectorize+load_store_folding+correct_load_store+load_store_indexing
    * Run the shared symbolic matcher here so newly created invalid LOAD/STORE
    * nodes fold inside the same late devectorize stage, like tinygrad. */
-  static PolyPatternMatcher *sym_devec = NULL;
-  if (!sym_devec) sym_devec = poly_pm_concat(poly_symbolic(), poly_pm_devectorize());
+  PolyPatternMatcher *sym_devec = poly_pm_concat(poly_symbolic(), poly_pm_devectorize());
   g_combined_devec = poly_pm_concat(sym_devec, poly_pm_load_store_folding());
+  poly_pm_destroy(sym_devec); /* g_combined_devec owns copied rules. */
   return g_combined_devec;
 }
 

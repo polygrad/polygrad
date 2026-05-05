@@ -198,6 +198,7 @@ TEST(realize, tensor_place_fact_distinguishes_separate_realized_same_logical_sou
   ASSERT_INT_EQ(poly_device_from_device_uop(physical->src[0]->src[1]), POLY_DEVICE_CUDA);
 
   poly_ctx_destroy(ctx);
+  free(da);
   PASS();
 }
 
@@ -448,6 +449,8 @@ TEST(realize, tensor_place_assign_realize_materializes_value_without_mutating_so
   ASSERT_FLOAT_EQ(da[2], 3.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
+  free(da);
+  free(dv);
   PASS();
 }
 
@@ -479,6 +482,7 @@ TEST(realize, tensor_physicalize_uses_selected_tensor_device) {
   ASSERT_INT_EQ(count_copy_to_device(ctx, physical, POLY_DEVICE_CUDA), 0);
 
   poly_ctx_destroy(ctx);
+  free(da);
   PASS();
 }
 
@@ -541,6 +545,7 @@ TEST(realize, tensor_host_to_cpu_copy_feeds_compute_e2e) {
   ASSERT_FLOAT_EQ(out[2], 4.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
+  free(da);
   PASS();
 }
 
@@ -573,6 +578,7 @@ TEST(realize, tensor_assign_host_buffer_updates_original_storage) {
   ASSERT_FLOAT_EQ(da[2], 13.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
+  free(da);
   PASS();
 }
 
@@ -638,6 +644,8 @@ TEST(realize, tensor_current_index_tracks_realize_and_assign) {
   ASSERT_FLOAT_EQ(((float *)z_storage->ptr)[0], 3.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
+  free(da);
+  free(dv);
   PASS();
 }
 
@@ -685,6 +693,8 @@ TEST(realize, tensor_realized_current_feeds_later_ops_after_source_mutation) {
   ASSERT_FLOAT_EQ(((float *)b_storage->ptr)[0], 3.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
+  free(da);
+  free(dten);
   PASS();
 }
 
@@ -736,6 +746,8 @@ TEST(realize, tensor_shared_lazy_retarget_keeps_distinct_tensor_records) {
   ASSERT_FLOAT_EQ(((float *)storage->ptr)[0], 5.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
+  free(da);
+  free(dv);
   PASS();
 }
 

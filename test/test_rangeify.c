@@ -2372,6 +2372,124 @@ TEST(rangeify, const_through_bufferize) {
   PASS();
 }
 
+TEST(rangeify, moved_const_folding_add_shrunk_zero_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *zero6 = poly_full(ctx, (int64_t[]){6}, 1, 0.0);
+  PolyUOp *zero4 = poly_shrink(ctx, zero6, (int64_t[][2]){{1, 5}}, 1);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, zero4)));
+
+  /* Port of tinygrad test_const_folding.py::test_add_shrunk_zero. The
+   * movement-wrapped zero must behave as an elementwise identity and stay in a
+   * single output kernel, not force an intermediate materialization. */
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->n_items, 1);
+  poly_schedule_free(sched);
+
+  float a_d[] = {1, 2, 3, 4};
+  float out_d[4] = {0};
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(out, out_d),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out_d[i], a_d[i], 1e-5);
+  PASS();
+}
+
+TEST(rangeify, moved_const_folding_add_padded_zero_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *zero2 = poly_full(ctx, (int64_t[]){2}, 1, 0.0);
+  PolyUOp *zero4 = poly_pad(ctx, zero2, (int64_t[][2]){{1, 1}}, 1);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, zero4)));
+
+  /* Port of tinygrad test_const_folding.py::test_add_padded_zero. Padded
+   * zeros are valid/index expressions internally, so this catches regressions
+   * where identity folding stops at movement boundaries. */
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->n_items, 1);
+  poly_schedule_free(sched);
+
+  float a_d[] = {5, 6, 7, 8};
+  float out_d[4] = {0};
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(out, out_d),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out_d[i], a_d[i], 1e-5);
+  PASS();
+}
+
+TEST(rangeify, moved_const_folding_mul_shrunk_one_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *one6 = poly_full(ctx, (int64_t[]){6}, 1, 1.0);
+  PolyUOp *one4 = poly_shrink(ctx, one6, (int64_t[][2]){{1, 5}}, 1);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_MUL, a, one4)));
+
+  /* Port of tinygrad test_const_folding.py::test_mul_shrunk_one. */
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->n_items, 1);
+  poly_schedule_free(sched);
+
+  float a_d[] = {-1, 2, -3, 4};
+  float out_d[4] = {0};
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(a, a_d),
+      POLY_TEST_HOST_VIEW(out, out_d),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out_d[i], a_d[i], 1e-5);
+  PASS();
+}
+
+TEST(rangeify, zero_size_sum_folds_to_identity_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *empty = poly_full(ctx, (int64_t[]){1, 0}, 2, 1.0);
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, empty, (int64_t[]){0, 1}, 2);
+  PolyUOp *scalar = poly_reshape(ctx, sum, NULL, 0);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, scalar));
+
+  /* Port of tinygrad TestReduceOpsConstFolding zero-size sum coverage. Empty
+   * reductions should fold to the ADD identity instead of building an invalid
+   * zero-iteration kernel. */
+  float empty_storage[1] = {0.0f};
+  float out_d[1] = {-1.0f};
+  const PolyUOp *empty_buf = poly_uop_get_buffer_identity(empty);
+  ASSERT_NOT_NULL(empty_buf);
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW((PolyUOp *)empty_buf, empty_storage),
+      POLY_TEST_HOST_VIEW(out, out_d),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_FLOAT_EQ(out_d[0], 0.0f, 1e-5);
+  PASS();
+}
+
 /* Stage C: earliest_rewrites */
 
 TEST(rangeify, earliest_reshape_merge) {

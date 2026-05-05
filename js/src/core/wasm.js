@@ -154,6 +154,39 @@ async function createWasmCore(device) {
     return shape
   }
 
+  function writePtrArray(arr) {
+    if (!arr || arr.length === 0) return 0
+    const ptr = Module._malloc(arr.length * 4)
+    const h32 = heap32()
+    for (let i = 0; i < arr.length; i++) h32[(ptr >> 2) + i] = arr[i] || 0
+    return ptr
+  }
+
+  function readPtrArray(ptr, n) {
+    const out = new Array(n)
+    const h32 = heap32()
+    for (let i = 0; i < n; i++) out[i] = h32[(ptr >> 2) + i]
+    return out
+  }
+
+  function writeOptimConfig(cfg) {
+    const ptr = Module._malloc(32)
+    const u8 = heapU8()
+    const h32 = heap32()
+    const f32 = heapF32()
+    u8.fill(0, ptr, ptr + 32)
+    h32[ptr >> 2] = cfg.kind || 0
+    f32[(ptr >> 2) + 1] = cfg.lr == null ? 0.001 : cfg.lr
+    f32[(ptr >> 2) + 2] = cfg.beta1 == null ? 0.9 : cfg.beta1
+    f32[(ptr >> 2) + 3] = cfg.beta2 == null ? 0.999 : cfg.beta2
+    f32[(ptr >> 2) + 4] = cfg.eps == null ? 1e-8 : cfg.eps
+    f32[(ptr >> 2) + 5] = cfg.weightDecay == null ? 0 : cfg.weightDecay
+    f32[(ptr >> 2) + 6] = cfg.momentum == null ? 0 : cfg.momentum
+    u8[ptr + 28] = cfg.nesterov ? 1 : 0
+    u8[ptr + 29] = cfg.classic ? 1 : 0
+    return ptr
+  }
+
   function callWithInt64(fn, ctx, uop, arr, ...extra) {
     if (arr.length <= 8) {
       return fn(ctx, uop, writeInt64Scratch(arr), ...extra)
@@ -334,6 +367,38 @@ async function createWasmCore(device) {
     poly_alu3: Module._poly_alu3,
     poly_store_val: Module._poly_store_val,
     poly_sink1: Module._poly_sink1,
+    poly_sink_n: (ctx, stores) => {
+      const ptr = writePtrArray(stores || [])
+      try {
+        return Module._poly_sink_n(ctx, ptr, (stores || []).length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_register_buffer_by_id: (ctx, role, dtypeId, shape, name) => {
+      const shapePtr = writeInt64Array(shape || [])
+      const namePtr = allocString(name)
+      try {
+        return Module._poly_register_buffer_by_id(
+          ctx, role, dtypeId, shapePtr, (shape || []).length, namePtr
+        )
+      } finally {
+        Module._free(namePtr)
+        if (shapePtr) Module._free(shapePtr)
+      }
+    },
+    poly_register_existing_buffer: (ctx, role, buffer, shape, name, trainable) => {
+      const shapePtr = writeInt64Array(shape || [])
+      const namePtr = allocString(name)
+      try {
+        return Module._poly_register_existing_buffer(
+          ctx, role, buffer, shapePtr, (shape || []).length, namePtr, Boolean(trainable)
+        )
+      } finally {
+        Module._free(namePtr)
+        if (shapePtr) Module._free(shapePtr)
+      }
+    },
     poly_buffer_f32: (ctx, size) => Module._poly_buffer_f32(ctx, BigInt(size)),
     poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
 
@@ -462,6 +527,39 @@ async function createWasmCore(device) {
       Module._free(inPtr)
       Module._free(outPtr)
       return rc === 0 ? out : null
+    },
+
+    poly_optim_build_step: (ctx, cfg, params, grads, mTensors, vTensors, bc1, bc2) => {
+      const n = params.length
+      const cfgPtr = writeOptimConfig(cfg || {})
+      const paramsPtr = writePtrArray(params)
+      const gradsPtr = writePtrArray(grads)
+      const mPtr = writePtrArray(mTensors)
+      const vPtr = writePtrArray(vTensors)
+      let outPtr = 0
+      try {
+        /* src/optim.c owns the optimizer math. JS only marshals PolyTensor*
+         * arrays and receives the tensors whose AFTER/STORE effects must be
+         * realized together. */
+        const needed = Module._poly_optim_build_step(
+          ctx, cfgPtr, paramsPtr, gradsPtr, n, mPtr, vPtr, bc1 || 0, bc2 || 0, 0, 0
+        )
+        if (needed < 0) return null
+        outPtr = Module._malloc(Math.max(1, needed) * 4)
+        const rc = Module._poly_optim_build_step(
+          ctx, cfgPtr, paramsPtr, gradsPtr, n, mPtr, vPtr,
+          bc1 || 0, bc2 || 0, outPtr, needed
+        )
+        if (rc < 0) return null
+        return readPtrArray(outPtr, rc)
+      } finally {
+        if (outPtr) Module._free(outPtr)
+        if (vPtr) Module._free(vPtr)
+        if (mPtr) Module._free(mPtr)
+        if (gradsPtr) Module._free(gradsPtr)
+        if (paramsPtr) Module._free(paramsPtr)
+        Module._free(cfgPtr)
+      }
     },
 
     // Backend-aware readback helper. This routes through the C core so
@@ -768,9 +866,21 @@ async function createWasmCore(device) {
       const numel = readInt64At(_scratchNumelPtr)
       return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
     },
+    paramTrainable(instPtr, i) {
+      return Boolean(Module._poly_instance_param_trainable(instPtr, i))
+    },
+    setParamTrainable(instPtr, i, trainable) {
+      return Module._poly_instance_set_param_trainable(instPtr, i, Boolean(trainable))
+    },
     bufCount(instPtr) { return Module._poly_instance_buf_count(instPtr) },
     bufName(instPtr, i) { return readCString(Module._poly_instance_buf_name(instPtr, i)) },
     bufRole(instPtr, i) { return Module._poly_instance_buf_role(instPtr, i) },
+    bufTrainable(instPtr, i) {
+      return Boolean(Module._poly_instance_buf_trainable(instPtr, i))
+    },
+    setBufTrainable(instPtr, i, trainable) {
+      return Module._poly_instance_set_buf_trainable(instPtr, i, Boolean(trainable))
+    },
     bufShape(instPtr, i) {
       const ndim = Module._poly_instance_buf_shape(instPtr, i, _scratchOutShapePtr, 8)
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
@@ -820,6 +930,31 @@ async function createWasmCore(device) {
         throw new Error('polygrad: set_device failed for device ' + deviceName)
       }
       return inst || null
+    },
+
+    fromSinks(ctxPtr, names, sinks) {
+      const n = Math.min(names.length, sinks.length)
+      const namesPtr = Module._malloc(Math.max(1, n) * 4)
+      const sinksPtr = Module._malloc(Math.max(1, n) * 4)
+      const namePtrs = []
+      try {
+        for (let i = 0; i < n; i++) {
+          const p = allocString(names[i])
+          namePtrs.push(p)
+          heap32()[(namesPtr >> 2) + i] = p
+          heap32()[(sinksPtr >> 2) + i] = sinks[i] || 0
+        }
+        const inst = Module._poly_instance_from_sinks(ctxPtr, namesPtr, sinksPtr, n)
+        if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+          Module._poly_instance_free(inst)
+          throw new Error('polygrad: set_device failed for device ' + deviceName)
+        }
+        return inst || null
+      } finally {
+        for (const p of namePtrs) Module._free(p)
+        Module._free(namesPtr)
+        Module._free(sinksPtr)
+      }
     },
 
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {

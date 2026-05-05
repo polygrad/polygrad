@@ -499,6 +499,12 @@ static void range_map_set_valid(
     int n_out,
     PolyUOp *valid
 ) {
+  /* poly_range_propagate may update the same UOp while refining consumer
+   * ranges. PolyMap replacement is raw pointer assignment, so release the old
+   * entry before installing the new one. */
+  PolyRangeEntry *old = poly_map_get(ictx->range_map, poly_ptr_hash(u), u, poly_ptr_eq);
+  if (old) free_range_entry(u, old, NULL);
+
   PolyRangeEntry *re = malloc(sizeof(PolyRangeEntry));
   re->in_rngs = malloc(n_in * sizeof(PolyUOp *));
   memcpy(re->in_rngs, in_rngs, n_in * sizeof(PolyUOp *));

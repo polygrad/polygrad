@@ -36,11 +36,14 @@ typedef struct PolyInstance PolyInstance;
 #define POLY_ROLE_OUTPUT 3
 #define POLY_ROLE_AUX 4
 
-/* Optimizer kinds */
+/* Optimizer kinds. Kept here for existing instance callers; optim.h exposes
+ * the same constants for custom optimizer graph construction. */
+#ifndef POLY_OPTIM_NONE
 #define POLY_OPTIM_NONE 0
 #define POLY_OPTIM_SGD 1
 #define POLY_OPTIM_ADAM 2
 #define POLY_OPTIM_ADAMW 3
+#endif
 
 /* Lifecycle */
 
@@ -60,6 +63,17 @@ PolyInstance *poly_instance_from_ir(
  * Returns NULL on error (zero entrypoints, allocation failure). */
 PolyInstance *poly_instance_from_ctx(PolyCtx *ctx);
 
+/* Create from selected named sinks instead of every entrypoint registered on
+ * the ctx. Frontend export uses this to package one traced lazy graph even if
+ * the shared ctx contains old probes or other models. Names are copied by the
+ * instance; ctx remains caller-owned. */
+PolyInstance *poly_instance_from_sinks(
+    PolyCtx *ctx,
+    const char **names,
+    PolyUOp **sinks,
+    int n_sinks
+);
+
 void poly_instance_free(PolyInstance *inst);
 
 /* Param Enumeration */
@@ -77,6 +91,10 @@ float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out);
 int poly_instance_buf_count(const PolyInstance *inst);
 const char *poly_instance_buf_name(const PolyInstance *inst, int i);
 int poly_instance_buf_role(const PolyInstance *inst, int i);
+bool poly_instance_buf_trainable(const PolyInstance *inst, int i);
+bool poly_instance_param_trainable(const PolyInstance *inst, int i);
+int poly_instance_set_buf_trainable(PolyInstance *inst, int i, bool trainable);
+int poly_instance_set_param_trainable(PolyInstance *inst, int i, bool trainable);
 int poly_instance_buf_shape(const PolyInstance *inst, int i, int64_t *shape_out, int max_dims);
 /* Returns host pointer to buffer data. For GPU domains, automatically
  * copies device data to the host shadow buffer first. Returns NULL
@@ -142,7 +160,7 @@ int poly_instance_value_and_grad(
 /* forward() = call("forward", ...) */
 int poly_instance_forward(PolyInstance *inst, PolyIOBinding *inputs, int n_inputs);
 
-/* train_step() = value_and_grad("loss", ...) + host optimizer update */
+/* train_step() = value_and_grad("loss", ...) + scheduled optimizer effects */
 int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, float *loss_out);
 
 /* Configure optimizer. Call before first train_step. */
@@ -177,6 +195,41 @@ float *poly_instance_buf_data_named(PolyInstance *inst, const char *name, int64_
 
 /* Get numel for a named buffer. Returns 0 if not found. */
 int64_t poly_instance_buf_numel_named(const PolyInstance *inst, const char *name);
+
+/* Imported-instance composition. Inlines a value entrypoint from `child` into
+ * `dst_ctx` under `prefix`. Input/target buffers listed in bindings are
+ * substituted with parent-ctx UOps. Child PARAM buffers are recreated in
+ * dst_ctx using prefixed names and marked trainable/frozen by `trainable`.
+ * Output value UOps are returned by original child output name. */
+typedef struct {
+  const char *name;
+  PolyUOp *uop;
+} PolyInstanceInlineBinding;
+
+typedef struct {
+  const char *name;
+  PolyUOp *uop;
+} PolyInstanceInlineOutput;
+
+int poly_instance_inline_entrypoint(
+    PolyCtx *dst_ctx,
+    const PolyInstance *child,
+    const char *entrypoint,
+    const char *prefix,
+    const PolyInstanceInlineBinding *bindings,
+    int n_bindings,
+    bool trainable,
+    PolyInstanceInlineOutput *outputs,
+    int max_outputs,
+    int *out_n_outputs
+);
+
+/* Copy parameter host values from src into dst using prefix+src_param_name. */
+int poly_instance_copy_prefixed_weights(
+    PolyInstance *dst,
+    PolyInstance *src,
+    const char *prefix
+);
 
 #ifdef __cplusplus
 }

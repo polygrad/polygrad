@@ -2624,6 +2624,7 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
   }
   ASSERT_FLOAT_EQ(o_d[0], 740.0f, 1e-5);
 
+  poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }

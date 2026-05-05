@@ -519,15 +519,14 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyUOp *st_b = poly_store_val(ctx_b, ob, prod_b);
   PolyUOp *sink_b = poly_sink1(ctx_b, st_b);
   PolyIrBufEntry bufs_b[] = {
-      {"w", POLY_IR_ROLE_PARAM, wb, {N}, 1},
-      {"x", POLY_IR_ROLE_INPUT, xb, {N}, 1},
-      {"output", POLY_IR_ROLE_OUTPUT, ob, {N}, 1},
+      {.name = "w", .role = POLY_IR_ROLE_PARAM, .buffer = wb, .shape = {N}, .ndim = 1},
+      {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = xb, .shape = {N}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = ob, .shape = {N}, .ndim = 1},
   };
   PolyIrEntrypoint eps_b[] = {{"forward", sink_b}};
   PolyIrSpec spec_b = {ctx_b, bufs_b, 3, eps_b, 1};
-  uint8_t *ir = poly_ir_export(&spec_b, &(int){0});
   int ir_len;
-  ir = poly_ir_export(&spec_b, &ir_len);
+  uint8_t *ir = poly_ir_export(&spec_b, &ir_len);
   PolyInstance *inst_b = poly_instance_from_ir(ir, ir_len, NULL, 0);
   free(ir);
   poly_ctx_destroy(ctx_b);

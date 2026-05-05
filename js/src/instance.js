@@ -11,6 +11,16 @@ const OPTIM_SGD = 1
 const OPTIM_ADAM = 2
 const OPTIM_ADAMW = 3
 
+function optimizerKind(kind) {
+  if (typeof kind === 'string') {
+    const k = kind.toLowerCase()
+    if (k === 'sgd') return OPTIM_SGD
+    if (k === 'adam') return OPTIM_ADAM
+    if (k === 'adamw') return OPTIM_ADAMW
+  }
+  return Number(kind)
+}
+
 function normalizeSpec(spec) {
   if (typeof spec === 'string') return spec
   if (spec && typeof spec === 'object') return JSON.stringify(spec)
@@ -122,6 +132,16 @@ function createBoundInstanceClass(runtime) {
       return this._rt._core.instance.paramData(this._handle, i)
     }
 
+    paramTrainable(i) {
+      return this._rt._core.instance.paramTrainable(this._handle, i)
+    }
+
+    setParamTrainable(i, trainable) {
+      const rc = this._rt._core.instance.setParamTrainable(this._handle, i, Boolean(trainable))
+      if (rc !== 0) throw new Error(`polygrad: setParamTrainable failed (rc=${rc})`)
+      return this
+    }
+
     params() {
       const items = []
       for (let i = 0; i < this.paramCount; i++) {
@@ -140,6 +160,16 @@ function createBoundInstanceClass(runtime) {
 
     bufRole(i) {
       return this._rt._core.instance.bufRole(this._handle, i)
+    }
+
+    bufTrainable(i) {
+      return this._rt._core.instance.bufTrainable(this._handle, i)
+    }
+
+    setBufTrainable(i, trainable) {
+      const rc = this._rt._core.instance.setBufTrainable(this._handle, i, Boolean(trainable))
+      if (rc !== 0) throw new Error(`polygrad: setBufTrainable failed (rc=${rc})`)
+      return this
     }
 
     bufShape(i) {
@@ -230,6 +260,29 @@ function createBoundInstanceClass(runtime) {
         throw new Error('polygrad: trainStep failed')
       }
       return loss
+    }
+
+    fit(io, opts = {}) {
+      /* This mirrors the Python convenience wrapper: keep loop ownership in the
+       * frontend while all optimizer math and scheduling stay in the C core. */
+      const epochs = opts.epochs == null ? 1 : Number(opts.epochs)
+      if (opts.optimizer != null) {
+        this.setOptimizer(
+          optimizerKind(opts.optimizer),
+          opts.lr == null ? 0.01 : opts.lr,
+          opts.beta1 == null ? 0.9 : opts.beta1,
+          opts.beta2 == null ? 0.999 : opts.beta2,
+          opts.eps == null ? 1e-8 : opts.eps,
+          opts.weightDecay == null ? 0.0 : opts.weightDecay
+        )
+      }
+      const losses = []
+      for (let step = 0; step < epochs; step++) {
+        const loss = this.trainStep(io)
+        losses.push(loss)
+        if (opts.onStep) opts.onStep(step, loss)
+      }
+      return losses
     }
 
     _collectOutputs() {

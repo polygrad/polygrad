@@ -57,6 +57,66 @@ async function runInstanceTests(pg) {
     }
   })
 
+  await test('param trainability freezes optimizer updates', async () => {
+    const inst = Instance.mlp({
+      layers: [2, 1],
+      activation: 'none',
+      bias: true,
+      loss: 'mse',
+      batch_size: 1,
+      seed: 42
+    })
+    try {
+      assert(inst.paramTrainable(0) === true, 'weight should default trainable')
+      assert(inst.paramTrainable(1) === true, 'bias should default trainable')
+      inst.setParamTrainable(0, false)
+      assert(inst.paramTrainable(0) === false, 'weight should be frozen')
+
+      const weightBefore = inst.paramData(0)
+      const biasBefore = inst.paramData(1)
+      inst.setOptimizer(pg.OPTIM_SGD, 0.05)
+      const x = new Float32Array([1, 2])
+      const y = new Float32Array([5])
+      for (let step = 0; step < 10; step++) {
+        const loss = inst.trainStep({ x, y })
+        assert(Number.isFinite(loss), `loss should be finite, got ${loss}`)
+      }
+
+      assertClose(inst.paramData(0), weightBefore)
+      let biasChanged = false
+      const biasAfter = inst.paramData(1)
+      for (let i = 0; i < biasAfter.length; i++) {
+        if (biasAfter[i] !== biasBefore[i]) biasChanged = true
+      }
+      assert(biasChanged, 'unfrozen bias should update')
+    } finally {
+      inst.dispose()
+    }
+  })
+
+  await test('param trainability survives IR round trip', async () => {
+    const inst1 = Instance.mlp({
+      layers: [2, 1],
+      activation: 'none',
+      bias: true,
+      loss: 'mse',
+      batch_size: 1,
+      seed: 42
+    })
+    try {
+      inst1.setParamTrainable(0, false)
+      const inst2 = Instance.fromIR(inst1.exportIR(), inst1.exportWeights())
+      try {
+        assert(inst2.paramTrainable(0) === false, 'frozen flag should round trip')
+        assert(inst2.paramTrainable(1) === true, 'unfrozen flag should round trip')
+      } finally {
+        inst2.dispose()
+      }
+    } finally {
+      inst1.dispose()
+    }
+  })
+
   await test('mlp forward produces output', async () => {
     const inst = Instance.mlp({
       layers: [2, 4, 1],

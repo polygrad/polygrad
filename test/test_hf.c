@@ -376,6 +376,7 @@ TEST(hf, poly_gather_basic) {
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 2); /* num indices */
   ASSERT_INT_EQ(s.dims[1], 3); /* embedding dim */
+  if (s.dims) free(s.dims);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -399,6 +400,7 @@ TEST(hf, poly_gather_2d_indices) {
   ASSERT_INT_EQ(s.dims[0], 2); /* batch */
   ASSERT_INT_EQ(s.dims[1], 3); /* seq_len */
   ASSERT_INT_EQ(s.dims[2], 4); /* embed_dim */
+  if (s.dims) free(s.dims);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -416,6 +418,7 @@ TEST(hf, poly_layernorm_shape) {
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 3);
   ASSERT_INT_EQ(s.dims[2], 4);
+  if (s.dims) free(s.dims);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -437,6 +440,7 @@ TEST(hf, poly_linear_shape) {
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 3);
   ASSERT_INT_EQ(s.dims[2], 8);
+  if (s.dims) free(s.dims);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -455,6 +459,7 @@ TEST(hf, poly_linear_no_bias) {
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 4);
   ASSERT_INT_EQ(s.dims[1], 16);
+  if (s.dims) free(s.dims);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -469,6 +474,7 @@ TEST(hf, poly_causal_mask_shape) {
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 5);
   ASSERT_INT_EQ(s.dims[1], 5);
+  if (s.dims) free(s.dims);
 
   poly_ctx_destroy(ctx);
   PASS();

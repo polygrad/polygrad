@@ -415,7 +415,14 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   for (int i = 0; i < spec->n_bufs; i++) {
     bb_u32(&buf, st_add(&strings, spec->bufs[i].name));
     bb_u8(&buf, spec->bufs[i].role);
-    bb_u8(&buf, 0);
+    /* Interface flags live in the first historical padding byte so old
+     * poly.ir.uops@1 payloads still import.
+     *   bit0 = trainable value
+     *   bit1 = trainability metadata present */
+    bool trainable =
+        spec->bufs[i].trainable_set ? spec->bufs[i].trainable
+                                    : (spec->bufs[i].role == POLY_IR_ROLE_PARAM);
+    bb_u8(&buf, 2 | (trainable ? 1 : 0));
     bb_u8(&buf, 0);
     bb_u8(&buf, 0); /* padding */
     uint32_t nidx = FIND_IDX(spec->bufs[i].buffer);
@@ -647,7 +654,7 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     if (br_remaining(&r) < 12) goto fail_bufs;
     uint32_t name_idx = br_u32(&r);
     uint8_t role = br_u8(&r);
-    br_u8(&r);
+    uint8_t iface_flags = br_u8(&r);
     br_u8(&r);
     br_u8(&r); /* padding */
     uint32_t node_idx = br_u32(&r);
@@ -656,6 +663,9 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
 
     out->bufs[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
     out->bufs[i].role = role;
+    out->bufs[i].trainable_set = (iface_flags & 2) != 0;
+    out->bufs[i].trainable =
+        out->bufs[i].trainable_set ? ((iface_flags & 1) != 0) : (role == POLY_IR_ROLE_PARAM);
     out->bufs[i].buffer = (node_idx < n_nodes) ? nodes[node_idx] : NULL;
     out->bufs[i].ndim = ndim;
     for (int d = 0; d < ndim && d < 8; d++)

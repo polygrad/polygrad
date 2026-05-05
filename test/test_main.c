@@ -26,6 +26,8 @@ static int is_slow(const char *suite) {
 }
 
 int main(int argc, char **argv) {
+  /* Keep crash diagnostics useful when stdout is redirected by Make/CI. */
+  setvbuf(stdout, NULL, _IONBF, 0);
   atexit(cleanup_caches);
   int fast = 0;
   const char *filter = NULL;
@@ -62,6 +64,10 @@ int main(int argc, char **argv) {
     }
 
     int passed = 0, failed = 0;
+    /* Match the full runner: print the active filtered test before entering
+     * generated/JIT code so sanitizer crashes name the failing test. */
+    printf("    [RUN ] %s\n", g_tests[i].name);
+    fflush(stdout);
     g_tests[i].fn(&passed, &failed);
 
     if (failed == 0) {
