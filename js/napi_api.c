@@ -1,9 +1,9 @@
 /*
  * napi_api.c -- N-API addon wrapping polygrad C core for Node.js.
  *
- * Exposes frontend.h functions as native bindings. Opaque pointers
- * are passed as napi_external values. Int64 arrays are read from
- * JS number[] element-by-element. Shape-returning ops return objects.
+ * Exposes the public C core as native bindings. Opaque pointers are passed as
+ * napi_external values. Int64 arrays are read from JS number[] element-by-
+ * element. Shape-returning ops return objects.
  */
 
 #include <node_api.h>
@@ -12,6 +12,8 @@
 
 #include "polygrad.h"
 #include "frontend.h"
+#include "tensor.h"
+#include "nn.h"
 #include "instance.h"
 #include "tokenizer.h"
 #include "loaders/hf_decode.h"
@@ -1281,18 +1283,6 @@ static napi_value napi_poly_triu(napi_env env, napi_callback_info info) {
   return make_external(env, poly_triu(ctx, x, diagonal));
 }
 
-/* ── Assign ────────────────────────────────────────────────────────────── */
-
-static napi_value napi_poly_assign(napi_env env, napi_callback_info info) {
-  napi_value argv[3];
-  size_t argc = 3;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *target = get_external(env, argv[1]);
-  PolyUOp *value = get_external(env, argv[2]);
-  return make_external(env, poly_assign(ctx, target, value));
-}
-
 /* ── Metadata ──────────────────────────────────────────────────────────── */
 
 static napi_value napi_poly_op_count(napi_env env, napi_callback_info info) {
@@ -1883,16 +1873,6 @@ static napi_value napi_poly_dot(napi_env env, napi_callback_info info) {
   return make_external(env, poly_dot(ctx, x, w));
 }
 
-static napi_value napi_poly_layernorm_v2(napi_env env, napi_callback_info info) {
-  napi_value argv[4]; size_t argc = 4;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *x = get_external(env, argv[1]);
-  int32_t axis; napi_get_value_int32(env, argv[2], &axis);
-  double eps; napi_get_value_double(env, argv[3], &eps);
-  return make_external(env, poly_layernorm_v2(ctx, x, axis, eps));
-}
-
 static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info) {
   napi_value argv[4]; size_t argc = 4;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -1901,16 +1881,6 @@ static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info)
   PolyUOp *target = get_external(env, argv[2]);
   int32_t axis; napi_get_value_int32(env, argv[3], &axis);
   return make_external(env, poly_cross_entropy(ctx, logits, target, axis));
-}
-
-static napi_value napi_poly_linear_v2(napi_env env, napi_callback_info info) {
-  napi_value argv[4]; size_t argc = 4;
-  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
-  PolyCtx *ctx = get_external(env, argv[0]);
-  PolyUOp *x = get_external(env, argv[1]);
-  PolyUOp *w = get_external(env, argv[2]);
-  PolyUOp *bias = get_external(env, argv[3]); /* NULL if js passes null/undefined */
-  return make_external(env, poly_linear_v2(ctx, x, w, bias));
 }
 
 static napi_value napi_poly_gather(napi_env env, napi_callback_info info) {
@@ -2171,7 +2141,6 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_store_val", napi_poly_store_val),
     DECLARE_NAPI_METHOD("poly_sink1", napi_poly_sink1),
     DECLARE_NAPI_METHOD("poly_sink_n", napi_poly_sink_n),
-    DECLARE_NAPI_METHOD("poly_assign", napi_poly_assign),
 
     /* Buffers */
     DECLARE_NAPI_METHOD("poly_buffer_f32", napi_poly_buffer_f32),
@@ -2325,9 +2294,7 @@ NAPI_MODULE_INIT() {
     DECLARE_NAPI_METHOD("poly_softmax", napi_poly_softmax),
     DECLARE_NAPI_METHOD("poly_log_softmax", napi_poly_log_softmax),
     DECLARE_NAPI_METHOD("poly_dot", napi_poly_dot),
-    DECLARE_NAPI_METHOD("poly_layernorm_v2", napi_poly_layernorm_v2),
     DECLARE_NAPI_METHOD("poly_cross_entropy", napi_poly_cross_entropy),
-    DECLARE_NAPI_METHOD("poly_linear_v2", napi_poly_linear_v2),
     DECLARE_NAPI_METHOD("poly_gather", napi_poly_gather),
     DECLARE_NAPI_METHOD("poly_sum_reduce", napi_poly_sum_reduce),
     DECLARE_NAPI_METHOD("poly_max_reduce", napi_poly_max_reduce),

@@ -2259,7 +2259,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
       }
 
       /* C4e: assign_to_contiguous — safety net.
-       * poly_assign() normalizes targets to base BUFFERs at construction
+       * poly_legacy_assign_buffer() normalizes targets to base BUFFERs at construction
        * time. This rule catches edge cases that bypass the frontend:
        * if target is not PARAM/BUFFER/ASSIGN/CONTIGUOUS, wrap in CONTIGUOUS.
        * Ref: tinygrad earliest_rewrites assign_to_contiguous */

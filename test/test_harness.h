@@ -18,6 +18,7 @@
 #include <float.h>
 
 #include "../src/engine/realize.h"
+#include "../src/tensor.h"
 
 typedef void (*TestFn)(int *passed, int *failed);
 
@@ -288,7 +289,7 @@ static inline int poly_test_realize_buffer_views_vars(
     PolyUOp *sink,
     PolyTestBufferView *views,
     int n_views,
-    struct PolyVarBinding *vars,
+    PolyVarBinding *vars,
     int n_vars
 ) {
   poly_test_attach_buffer_views(ctx, views, n_views);

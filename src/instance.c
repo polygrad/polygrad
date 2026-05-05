@@ -15,7 +15,7 @@
 #include "utils.h"
 #include "ir.h"
 #include "safetensors.h"
-#include "frontend.h"
+#include "tensor.h"
 #include "engine/realize.h"
 #include "engine/schedule.h"
 #include "codegen.h" /* poly_cuda_available (POLY_HAS_CUDA) */
@@ -645,8 +645,8 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
   if (!inst) return -1;
 
-  /* Resolve AUTO: check POLY_DEVICE env var, same logic as infer_device()
-   * in frontend.c so that Instance and Tensor paths use the same selector. */
+  /* Resolve AUTO the same way tensor placement does: an explicit environment
+   * device wins, otherwise use the platform default. */
   PolyDevice resolved = device;
   if (resolved == POLY_DEVICE_AUTO) {
     const char *dev_env = getenv("POLY_DEVICE");
@@ -1380,7 +1380,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       /* p_new = p - lr * grad */
       PolyUOp *update = poly_alu2(ctx, POLY_OP_MUL, lr_const, grad);
       PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, param_buf, update);
-      sink_srcs[si++] = poly_assign(ctx, param_buf, p_new);
+      sink_srcs[si++] = poly_legacy_assign_buffer(ctx, param_buf, p_new);
       break;
     }
     case POLY_OPTIM_ADAM:
@@ -1435,9 +1435,9 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       PolyUOp *p_new = poly_alu2(ctx, POLY_OP_SUB, p_cur, step_val);
 
       /* ASSIGN all three: param, m, v */
-      sink_srcs[si++] = poly_assign(ctx, param_buf, p_new);
-      sink_srcs[1 + np + 2 * i] = poly_assign(ctx, m_buf, m_new);
-      sink_srcs[1 + np + 2 * i + 1] = poly_assign(ctx, v_buf, v_new);
+      sink_srcs[si++] = poly_legacy_assign_buffer(ctx, param_buf, p_new);
+      sink_srcs[1 + np + 2 * i] = poly_legacy_assign_buffer(ctx, m_buf, m_new);
+      sink_srcs[1 + np + 2 * i + 1] = poly_legacy_assign_buffer(ctx, v_buf, v_new);
       break;
     }
     default:

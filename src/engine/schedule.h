@@ -17,8 +17,10 @@
 extern "C" {
 #endif
 
-/* Forward declaration -- defined in frontend.h, pointer-only usage here. */
-struct PolyVarBinding;
+typedef struct PolyVarBinding {
+  PolyUOp *var; /* DEFINE_VAR UOp */
+  int32_t value; /* concrete runtime value */
+} PolyVarBinding;
 
 /* Compilation mode mirrors the entrypoint intent used by tinygrad call sites. */
 typedef enum {
@@ -79,7 +81,7 @@ typedef struct {
   int *buf_slot_indices;
   int n_buf_slots;
 
-  struct PolyVarBinding *fixedvars;
+  PolyVarBinding *fixedvars;
   int n_fixedvars;
 
   PolyUOp **var_uops;
@@ -106,7 +108,7 @@ typedef struct {
 
   int *exec_order;
 
-  struct PolyVarBinding *default_vars;
+  PolyVarBinding *default_vars;
   int n_default_vars;
 
   int loss_buf_slot;
@@ -122,7 +124,7 @@ typedef struct {
   void ***run_kernel_args;
   void **run_slot_to_data;
   int n_run_slot_to_data;
-  struct PolyVarBinding *run_merged_vars;
+  PolyVarBinding *run_merged_vars;
   int run_merged_vars_cap;
   int *run_var_int_storage;
   int run_var_int_cap;
@@ -144,7 +146,7 @@ typedef struct {
   void **slot_to_data;
   int n_slot_to_data;
 
-  struct PolyVarBinding *merged_vars;
+  PolyVarBinding *merged_vars;
   int merged_vars_cap;
 
   int *var_int_storage;
@@ -193,7 +195,7 @@ int poly_exec_item_run(
     PolyCtx *ctx,
     PolySchedule *schedule,
     int item_index,
-    struct PolyVarBinding *var_bindings,
+    PolyVarBinding *var_bindings,
     int n_var_bindings
 );
 
@@ -205,7 +207,7 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
 int poly_run_schedule(
     PolyCtx *ctx,
     PolySchedule *schedule,
-    struct PolyVarBinding *var_bindings,
+    PolyVarBinding *var_bindings,
     int n_var_bindings
 );
 
@@ -214,7 +216,7 @@ int poly_run_compiled_schedule(
     PolyCompiledSchedule *schedule,
     void **slot_data,
     int n_slots,
-    struct PolyVarBinding *var_bindings,
+    PolyVarBinding *var_bindings,
     int n_var_bindings
 );
 

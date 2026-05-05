@@ -1357,7 +1357,7 @@ TEST(realize, schedule_with_vars_assign_in_place) {
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *two = poly_const_float(ctx, 2.0f);
   PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, a, two);
-  PolyUOp *assign = poly_assign(ctx, a, mul);
+  PolyUOp *assign = poly_legacy_assign_buffer(ctx, a, mul);
 
   float da[] = {1.0f, 2.0f, 3.0f, 4.0f};
   poly_buffer_set(ctx, a, da, sizeof(da), POLY_DEVICE_CPU);

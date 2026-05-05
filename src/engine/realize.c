@@ -5,7 +5,6 @@
 #include "device.h"
 #include "ctx.h"
 #include "engine/schedule.h"
-#include "frontend.h"
 #include "frontend_internal.h"
 
 #include <stdio.h>

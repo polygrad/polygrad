@@ -170,8 +170,6 @@ function createNativeCore() {
     caps: { simd: false, f64: true, core: 'native', device: 'cpu' },
     destroy() {
       binding.poly_ctx_destroy(ctx)
-      binding.poly_cpu_cache_flush()
-      binding.poly_sched_cache_flush()
     }
   }
 }

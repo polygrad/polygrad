@@ -2345,7 +2345,8 @@ bool poly_device_is_host_addressable(PolyDevice device) {
 
 void poly_sched_cache_flush(void) {
   /* Per-context schedule caches are flushed when context is destroyed.
-   * This global entry point is a no-op placeholder for the N-API layer. */
+   * This ABI cleanup hook remains as a no-op for existing frontend cleanup
+   * paths that still call it. */
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */

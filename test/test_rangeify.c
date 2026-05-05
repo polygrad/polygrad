@@ -2639,9 +2639,9 @@ TEST(rangeify, assign_e2e) {
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf_a, buf_b, poly_arg_none());
 
   /* ASSIGN(a, a + b) */
-  PolyUOp *assign = poly_assign(ctx, buf_a, add);
+  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, add);
 
-  /* SINK(ASSIGN) — ASSIGN goes directly in SINK */
+  /* SINK(ASSIGN) -- legacy optimizer/core in-place effect */
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
   float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -2674,7 +2674,7 @@ TEST(rangeify, assign_ir) {
   PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf_a, buf_b, poly_arg_none());
-  PolyUOp *assign = poly_assign(ctx, buf_a, add);
+  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, add);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
   PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
@@ -2682,8 +2682,8 @@ TEST(rangeify, assign_ir) {
   int got_kernels = sr.n_kernels;
   int got_inter = sr.n_intermediates;
 
-  /* Check that the ASSIGN kernel writes to buf_a (existing buffer).
-   * The ASSIGN AFTER's buffer should appear in param_to_buf for the kernel. */
+  /* Check that the legacy ASSIGN kernel writes to buf_a (existing buffer).
+   * The assigned buffer should appear in param_to_buf for the kernel. */
   bool writes_buf_a = false;
   for (int k = 0; k < sr.n_kernels; k++) {
     for (int p = 0; p < sr.kernel_n_params[k]; p++) {
@@ -2694,7 +2694,7 @@ TEST(rangeify, assign_ir) {
   poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
-  /* 1 ASSIGN kernel (from AFTER), 0 consumer stores, 0 intermediates */
+  /* 1 legacy ASSIGN kernel, 0 consumer stores, 0 intermediates */
   ASSERT_INT_EQ(got_kernels, 1);
   ASSERT_INT_EQ(got_inter, 0);
   ASSERT_TRUE(writes_buf_a);
@@ -2722,7 +2722,7 @@ TEST(rangeify, assign_war_ordering) {
   /* ASSIGN: a = a * 2 */
   PolyUOp *two = poly_const_float(ctx, 2.0);
   PolyUOp *a_times_2 = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, buf_a, two, poly_arg_none());
-  PolyUOp *assign = poly_assign(ctx, buf_a, a_times_2);
+  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, a_times_2);
 
   /* SINK(STORE(out, a+10), ASSIGN(a, a*2)) */
   PolyUOp *sink_src[2] = {store_out, assign};
@@ -2767,7 +2767,7 @@ TEST(rangeify, assign_self_rhs) {
   PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *two = poly_const_float(ctx, 2.0);
   PolyUOp *a_times_2 = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, buf_a, two, poly_arg_none());
-  PolyUOp *assign = poly_assign(ctx, buf_a, a_times_2);
+  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, a_times_2);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
   float a_data[4] = {3.0f, 5.0f, 7.0f, 11.0f};
@@ -3179,7 +3179,7 @@ TEST(rangeify, earliest_nested_assign_chain) {
 }
 
 TEST(rangeify, earliest_assign_to_contiguous) {
-  /* poly_assign() normalizes RESHAPE(buf) target to base BUFFER and
+  /* poly_legacy_assign_buffer() normalizes RESHAPE(buf) target to base BUFFER and
    * reshapes value to flat shape. The ASSIGN writes to buf in-place.
    * C4e (safety net) never fires because target is already BUFFER. */
   PolyCtx *ctx = poly_ctx_new();
@@ -3199,8 +3199,8 @@ TEST(rangeify, earliest_assign_to_contiguous) {
   /* ASSIGN(RESHAPE(buf, [4,2]), value) — target is not PARAM/BUFFER.
    * C4e wraps in CONTIGUOUS: ASSIGN(CONTIGUOUS(RESHAPE(buf)), value).
    * The CONTIGUOUS materializes to intermediate. */
-  /* Use poly_assign() which normalizes RESHAPE(buf) → BUFFER target */
-  PolyUOp *assign = poly_assign(ctx, reshaped, value);
+  /* Use poly_legacy_assign_buffer() which normalizes RESHAPE(buf) → BUFFER target */
+  PolyUOp *assign = poly_legacy_assign_buffer(ctx, reshaped, value);
   /* Verify normalization: target should be base BUFFER, not RESHAPE */
   ASSERT_TRUE(assign->src[0] == buf); /* target normalized to BUFFER */
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
@@ -3213,7 +3213,7 @@ TEST(rangeify, earliest_assign_to_contiguous) {
   };
   int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
-  /* poly_assign normalizes to BUFFER target, ASSIGN writes in-place */
+  /* poly_legacy_assign_buffer normalizes to BUFFER target; ASSIGN writes in-place */
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 8; i++)
     ASSERT_FLOAT_EQ(buf_d[i], src_d[i] + 1.0f, 1e-5);
@@ -3245,7 +3245,7 @@ TEST(rangeify, range_start_for_op_all) {
 TEST(rangeify, assign_shrink_hazard) {
   /* a[:5].assign(a[3:8]) — overlapping SHRINK regions create write-before-read
    * aliasing. fix_assign_hazard should force materialization of the source
-   * before writing. Build ASSIGN manually (not via poly_assign which
+   * before writing. Build legacy ASSIGN manually (not via poly_legacy_assign_buffer which
    * normalizes target) to preserve SHRINK on target.
    *
    * Verify: CONTIGUOUS insertion causes 2+ kernels (materialization + ASSIGN).

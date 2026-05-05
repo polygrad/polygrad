@@ -8,7 +8,6 @@
 
 #define _GNU_SOURCE
 #include "frontend.h"
-#include "tensor.h"
 #include "frontend_internal.h"
 #include "engine/schedule.h"
 #include "schedule/rangeify.h"
@@ -21,33 +20,6 @@
 #include <math.h>
 #include "utils.h"
 
-/* In-place assignment stays in frontend.c because it normalizes frontend-facing
- * ASSIGN targets before they enter the scheduling pipeline. */
-
-PolyUOp *poly_assign(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
-  /* Normalize: walk target through movement ops to the base BUFFER.
-   * Reshape value to the base buffer's flat shape so the ASSIGN target
-   * is always a raw BUFFER. This ensures in-place writes go directly to
-   * the buffer data without the scheduler needing to handle movement ops
-   * on ASSIGN targets. */
-  PolyUOp *base = target;
-  while (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) && base->n_src > 0)
-    base = base->src[0];
-
-  if (base != target && base->op == POLY_OP_BUFFER) {
-    /* Base is a BUFFER with a flat shape. Reshape value to match. */
-    int64_t numel = (base->arg.kind == POLY_ARG_INT) ? base->arg.i : 0;
-    if (numel > 0) {
-      int64_t flat_shape[1] = {numel};
-      value = poly_reshape(ctx, value, flat_shape, 1);
-    }
-    target = base;
-  }
-
-  PolyUOp *srcs[2] = {target, value};
-  return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
-}
-
 /* Dtype table for FFI (shared by buffer/dtype convenience helpers) */
 
 static const PolyDType *_dtype_table_ffi[] = {
@@ -57,19 +29,12 @@ static const PolyDType *_dtype_table_ffi[] = {
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
-/* Buffer shortcuts */
-
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT32, size);
 }
 
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT64, size);
-}
-
-PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int64_t size, int dtype_id) {
-  if (dtype_id < 0 || dtype_id >= N_DTYPE_FFI) return NULL;
-  return poly_buffer(ctx, *_dtype_table_ffi[dtype_id], size);
 }
 
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u) {
@@ -96,51 +61,6 @@ PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value) {
   PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
   return poly_uop2(ctx, POLY_OP_BIND, var->dtype, var, val, poly_arg_none());
 }
-
-static int poly_dyn_buffer_id = 1000000; /* separate range from the retired scheduler's ids */
-
-PolyUOp *poly_buffer_var(
-    PolyCtx *ctx,
-    PolyDType dt,
-    PolyUOp *batch_var,
-    const int64_t *inner_dims,
-    int n_inner
-) {
-  assert(batch_var->op == POLY_OP_DEFINE_VAR);
-  assert(n_inner >= 0 && n_inner < POLY_MAX_DIMS);
-  int64_t max_val = batch_var->arg.define_var.max_val;
-  int64_t alloc = max_val;
-  /* src[0] = UNIQUE (prevent CSE), src[1] = DEFINE_VAR, src[2..] = CONST inner dims */
-  int n_src = 2 + n_inner;
-  PolyUOp *src[POLY_MAX_DIMS + 2];
-  src[0] = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_dyn_buffer_id++));
-  src[1] = batch_var;
-  for (int i = 0; i < n_inner; i++) {
-    alloc *= inner_dims[i];
-    src[2 + i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(inner_dims[i]));
-  }
-  return poly_uop(ctx, POLY_OP_BUFFER, dt, src, n_src, poly_arg_int(alloc));
-}
-
-/* Forward declarations removed -- now in tensor.h/tensor.c */
-
-/* shape helpers moved to tensor.c */
-
-/* make_const helpers moved to tensor.c */
-
-/* All composed elementwise/reduction/creation ops moved to tensor.c */
-
-/* Shared helpers */
-
-/* (Remaining code: collect_ordered_buffers, ptr_hash/eq, structural hash/eq,
- * realize pipeline, compiled step, WASM rendering, debug helpers,
- * causal_mask -- all stay here) */
-
-/* --- All composed ops (poly_exp through poly_cross_entropy, poly_einsum,
- *     poly_rearrange, poly_gather, and all v2 wrappers) have been moved
- *     to tensor.c. See tensor.h for declarations. --- */
-
-/* Shared helpers */
 
 /* POLY_MAX_REALIZE_BUFS defined in frontend_internal.h */
 
@@ -191,26 +111,18 @@ int poly_collect_ordered_buffers(
   return n;
 }
 
-/* Pointer hash/eq helpers (used by kernel cache and CPU realize) */
-
-
-/* Phase E: const-registry was deleted from tensor.c, so the corresponding
- * cleanup hook here no longer needs to drain g_const_bindings. */
-
-#ifndef __EMSCRIPTEN__
-static void realize_cache_purge(PolyCtx *ctx); /* defined below */
-
+/* Weak context cleanup hook called from ctx.c when this translation unit is
+ * linked. Frontend-global caches were removed; per-context caches are owned by
+ * ctx/schedule/program-cache teardown. */
 void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
-  if (!ctx) return;
-  realize_cache_purge(ctx);
+  (void)ctx;
 }
-#endif
 
-/* Structural hash/eq for kernel cache *
- * The kernel cache needs to match computations that are structurally
- * identical but use different BUFFER UOp instances (e.g., each training
- * step creates new buffers).  We hash/compare the computation DAG
- * structure: ops, dtypes, args, and connectivity — treating BUFFER
+/* Structural hash/eq for graph caches.
+ * Cached schedules/programs need to match computations that are structurally
+ * identical but use different BUFFER UOp instances, such as fresh training
+ * step buffers. We hash/compare the computation DAG structure: ops, dtypes,
+ * args, and connectivity, treating BUFFER
  * nodes as positional placeholders (first encountered = 0, etc.).
  */
 
@@ -452,7 +364,7 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
     if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) continue;
     poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
 
-    if (u->n_src < 0 || u->n_src > 64) {
+    if (u->n_src > 64) {
       fprintf(
           stderr, "polygrad: realize: invalid n_src=%d on %s(%p)\n", u->n_src, poly_op_name(u->op),
           (void *)u
@@ -504,34 +416,14 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
   return n_seen;
 }
 
-#ifndef __EMSCRIPTEN__
-
-static int realize_counter = 0;
-
 void poly_cpu_cache_flush(void) {
-  /* The schedule runner owns lowered runners on PolyExecItem now. */
+  /* Retained for ABI/frontend cleanup paths. CPU program caches are per-context
+   * now and are released through poly_ctx_destroy(). */
 }
-
-#endif /* !__EMSCRIPTEN__ -- end CPU-only realize/compile block */
 
 /* Exec plan functions (poly_complete_create_schedule_with_vars, poly_run_schedule,
  * backend lowering, etc.) live in engine/schedule.c. Frontend execution now
  * reaches them only through graph/tensor realize entrypoints. */
-
-static void realize_cache_purge(PolyCtx *ctx) {
-  (void)ctx;
-}
-
-#ifdef __EMSCRIPTEN__
-void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
-  realize_cache_purge(ctx);
-}
-#endif
-
-#ifdef POLY_HAS_CUDA
-void poly_cuda_flush_buffers(void) {}
-void poly_cuda_prog_cache_flush(void) {}
-#endif
 
 int poly_abi_version(void) {
   return POLYGRAD_ABI_VERSION;

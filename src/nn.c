@@ -9,7 +9,6 @@
  */
 
 #include "nn.h"
-#include "frontend.h"
 #include "tensor.h" /* poly_mean_reduce */
 #include "engine/schedule.h" /* poly_reshape, poly_permute, poly_expand */
 #include <stdint.h>

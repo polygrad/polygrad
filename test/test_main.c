@@ -15,10 +15,6 @@ int g_n_tests = 0;
 
 static void cleanup_caches(void) {
   poly_cpu_cache_flush();
-#ifdef POLY_HAS_CUDA
-  poly_cuda_prog_cache_flush();
-  poly_cuda_flush_buffers();
-#endif
 }
 
 static const char *slow_suites[] = {"nn", NULL};

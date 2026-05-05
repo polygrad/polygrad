@@ -1,6 +1,6 @@
 """
-ctypes bindings to libpolygrad.so -- uses only the frontend.h surface
-to avoid passing PolyArg/PolyDType structs across FFI.
+ctypes bindings to libpolygrad.so. The bound surface is the public C ABI:
+frontend helpers, tensor/UOp helpers, schedulers, and instance/model entrypoints.
 
 Library is loaded lazily on first call to get_lib(). Module-level globals
 (_lib, OPS, _has_cuda_ffi) are populated atomically by get_lib().
@@ -201,9 +201,6 @@ def _declare_signatures(lib):
     lib.poly_buffer_f64.restype = _ptr
     lib.poly_buffer_f64.argtypes = [_ptr, ctypes.c_int64]
 
-    lib.poly_buffer_by_id.restype = _ptr
-    lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int]
-
     lib.poly_uop_dtype_id.restype = ctypes.c_int
     lib.poly_uop_dtype_id.argtypes = [_ptr, _ptr]
 
@@ -335,19 +332,12 @@ def _declare_signatures(lib):
     lib.poly_gather.restype = _ptr
     lib.poly_gather.argtypes = [_ptr, _ptr, _ptr]
 
-    # --- ASSIGN ---
-    lib.poly_assign.restype = _ptr
-    lib.poly_assign.argtypes = [_ptr, _ptr, _ptr]
-
     # --- Dynamic shapes (DEFINE_VAR / BIND) ---
     lib.poly_define_var.restype = _ptr
     lib.poly_define_var.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int64, ctypes.c_int64]
 
     lib.poly_bind_var.restype = _ptr
     lib.poly_bind_var.argtypes = [_ptr, _ptr, ctypes.c_int64]
-
-    lib.poly_buffer_var.restype = _ptr
-    lib.poly_buffer_var.argtypes = [_ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int]
 
     # --- Sched helpers (sched.h) ---
     lib.poly_reshape.restype = _ptr
@@ -584,12 +574,6 @@ def _declare_signatures(lib):
     # --- CUDA helpers (conditional) ---
     has_cuda = hasattr(lib, 'poly_cuda_available')
     if has_cuda:
-        lib.poly_cuda_flush_buffers.restype = None
-        lib.poly_cuda_flush_buffers.argtypes = []
-
-        lib.poly_cuda_prog_cache_flush.restype = None
-        lib.poly_cuda_prog_cache_flush.argtypes = []
-
         lib.poly_cuda_available.restype = ctypes.c_bool
         lib.poly_cuda_available.argtypes = []
 

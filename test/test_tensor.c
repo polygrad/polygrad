@@ -795,8 +795,8 @@ TEST(shape_uop, assign_flat) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *r = make_buf(ctx, (int64_t[]){3, 4}, 2);
-  PolyUOp *a = poly_assign(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
-  /* ASSIGN normalizes to flat BUFFER (shape fix deferred) */
+  PolyUOp *a = poly_legacy_assign_buffer(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
+  /* AFTER/STORE assign helper normalizes to flat BUFFER (shape fix deferred) */
   ASSERT_INT_EQ(poly_uop_ndim(ctx, a), 1);
   ASSERT_INT_EQ(poly_uop_dims(ctx, a)[0], 12);
   poly_ctx_destroy(ctx);

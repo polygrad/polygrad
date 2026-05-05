@@ -1,16 +1,15 @@
 /*
- * frontend_internal.h -- Private helpers shared between frontend.c and engine/schedule.c
+ * frontend_internal.h -- Private helpers shared inside the C core
  *
  * NOT part of the public API. Not installed. Not included by language frontends.
- * Contains declarations for utility functions that both the frontend helpers
- * and the engine scheduling layer need.
+ * Contains declarations for utility functions used across frontend helpers,
+ * placement, scheduling, and execution lowering.
  */
 
 #ifndef POLY_FRONTEND_INTERNAL_H
 #define POLY_FRONTEND_INTERNAL_H
 
 #include "polygrad.h"
-#include "frontend.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -23,9 +22,6 @@ extern "C" {
 #define POLY_MAX_REALIZE_BUFS 2048
 #define POLY_MAX_STRUCT_NODES 8192
 #define POLY_SCHED_CACHE_VERSION 3u
-
-/* Pointer hashing (for PolyMap keying by UOp pointer) */
-
 
 /* Structural hashing/equality (for cache keying by graph shape) */
 

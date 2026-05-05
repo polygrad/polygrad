@@ -1,9 +1,9 @@
 /*
  * tensor.h -- Composed tensor ops (elementwise, reduction, creation, etc.)
  *
- * These are higher-level ops built from the core UOp primitives in frontend.h.
- * Separated from frontend.c to keep the FFI surface (frontend.c) focused on
- * graph construction and the realize pipeline.
+ * These are tensor-level graph helpers built from the core UOp primitives.
+ * Keep them out of frontend.h so the language-binding ABI stays small and
+ * limited to FFI-safe wrappers.
  */
 
 #ifndef POLY_TENSOR_H
@@ -15,14 +15,28 @@
 extern "C" {
 #endif
 
-/* Phase E: poly_const_registry_* declarations were removed along with the
- * const-registry implementation. The hidden-state buffer migration path is
- * gone; all creation helpers (arange/eye/full/tril/triu/rand) are pure UOp. */
-
 /* Shape helpers (shared) */
 
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
+
+/* Dynamic BUFFER helper used by C tests/probes and low-level callers. The
+ * first runtime dimension is a DEFINE_VAR or BIND, while allocation reserves
+ * the variable max bound times the fixed inner dimensions. */
+PolyUOp *poly_buffer_var(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner_dims
+);
+
+/* Legacy full-buffer ASSIGN helper for optimizer/direct core paths.
+ * Current tinygrad has no ASSIGN UOp; Tensor.assign must use
+ * poly_tensor_assign, which builds AFTER(target, STORE(target, value)).
+ * Keep this internal until the optimizer/scheduler path is fully ported to
+ * the tinygrad AFTER/STORE shape. */
+PolyUOp *poly_legacy_assign_buffer(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
 
 /* Movement-op helpers (port of tinygrad mixin/movement.py) */
 
@@ -275,8 +289,6 @@ PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim);
 PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
 PolyUOp *poly_mae_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target);
-
-/* Phase E: poly_const_buffer_data was removed along with the const-registry. */
 
 #ifdef __cplusplus
 }

@@ -21,7 +21,6 @@
 #include "../nn.h"
 #include "../tensor.h"
 #include "../instance.h"
-#include "../frontend.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>

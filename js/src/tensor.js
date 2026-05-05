@@ -417,12 +417,6 @@ function createBoundTensorClass(runtime) {
       return targets
     }
 
-    // _realize() is a back-compat shim. realize() (below) is the new entry
-    // point matching Python's Tensor.realize(*lst) signature.
-    // Back-compat shim. realize() (below) is the new entry point matching
-    // Python's Tensor.realize(*lst) signature.
-    async _realize() { await this.realize() }
-
     async realize(...lst) {
       // Triggers the computation needed to create these Tensor(s). Filters
       // out tensors already with buffer identity, batches the rest into a
@@ -671,15 +665,7 @@ function createBoundTensorClass(runtime) {
     mul(other) { return this._binop(other, 'MUL') }
     div(other) { return this._binop(other, 'FDIV') }
     pow(other) { return this._binop(other, 'POW') }
-    lt(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const cmp = ffi.poly_alu2(
-        this._ctx, this._rt._core.ops.CMPLT, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
-      return this._makeResult(uop, [this, other], 'float32')
-    }
+    lt(other) { return this._binop(other, 'CMPLT') }
 
     neg() {
       const { ffi, ops } = this._rt._core
@@ -693,45 +679,40 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const cmp = ffi.poly_eq(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
-      return this._makeResult(uop, [this, other], 'float32')
+      const uop = ffi.poly_eq(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      return this._makeResult(uop, [this, other])
     }
 
     ne(other) {
       const { ffi } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const cmp = ffi.poly_ne(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
-      return this._makeResult(uop, [this, other], 'float32')
+      const uop = ffi.poly_ne(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      return this._makeResult(uop, [this, other])
     }
 
     gt(other) {
       const { ffi } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const cmp = ffi.poly_gt(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
-      return this._makeResult(uop, [this, other], 'float32')
+      const uop = ffi.poly_gt(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      return this._makeResult(uop, [this, other])
     }
 
     ge(other) {
       const { ffi } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const cmp = ffi.poly_ge(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
-      return this._makeResult(uop, [this, other], 'float32')
+      const uop = ffi.poly_ge(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      return this._makeResult(uop, [this, other])
     }
 
     le(other) {
       const { ffi } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const cmp = ffi.poly_le(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      const uop = ffi.poly_cast_by_id(this._ctx, cmp, DTYPE_ID.float32)
-      return this._makeResult(uop, [this, other], 'float32')
+      const uop = ffi.poly_le(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
+      return this._makeResult(uop, [this, other])
     }
 
     where(x, y) {

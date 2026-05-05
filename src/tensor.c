@@ -2,14 +2,12 @@
  * tensor.c -- Composed tensor ops (elementwise, reduction, creation, etc.)
  *
  * These are higher-level ops built from the core UOp primitives.
- * Mechanical move from frontend.c -- no behavior changes.
  */
 
 #define _GNU_SOURCE
 #include "tensor.h"
 #include "ctx.h"
 #include "device.h"
-#include "frontend.h"
 #include "engine/schedule.h"
 #include "utils.h"
 #include <assert.h>
@@ -33,6 +31,54 @@ static const PolyDType *_dtype_table_ffi[] = {
     &POLY_FLOAT16, &POLY_BFLOAT16, &POLY_FLOAT32, &POLY_FLOAT64,
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
+
+static int poly_dyn_buffer_id = 1000000; /* avoid colliding with regular small buffer tags */
+
+PolyUOp *poly_buffer_var(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner
+) {
+  assert(batch_var->op == POLY_OP_DEFINE_VAR || batch_var->op == POLY_OP_BIND);
+  assert(n_inner >= 0 && n_inner < POLY_MAX_DIMS);
+  PolyUOp *bound = batch_var->op == POLY_OP_BIND && batch_var->n_src >= 1 ? batch_var->src[0] : batch_var;
+  assert(bound->op == POLY_OP_DEFINE_VAR);
+  int64_t alloc = bound->arg.define_var.max_val;
+  /* src[0] = UNIQUE (prevent CSE), src[1] = dynamic bound,
+   * src[2..] = fixed inner dimension CONSTs. */
+  int n_src = 2 + n_inner;
+  PolyUOp *src[POLY_MAX_DIMS + 2];
+  src[0] = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_dyn_buffer_id++));
+  src[1] = batch_var;
+  for (int i = 0; i < n_inner; i++) {
+    alloc *= inner_dims[i];
+    src[2 + i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(inner_dims[i]));
+  }
+  return poly_uop(ctx, POLY_OP_BUFFER, dt, src, n_src, poly_arg_int(alloc));
+}
+
+PolyUOp *poly_legacy_assign_buffer(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
+  /* Legacy full-buffer assignment only. Movement views are normalized to their
+   * base BUFFER. Do not use this from frontends; poly_tensor_assign is the
+   * tinygrad-style AFTER/STORE path. */
+  PolyUOp *base = target;
+  while (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) && base->n_src > 0)
+    base = base->src[0];
+
+  if (base != target && base->op == POLY_OP_BUFFER) {
+    int64_t numel = (base->arg.kind == POLY_ARG_INT) ? base->arg.i : 0;
+    if (numel > 0) {
+      int64_t flat_shape[1] = {numel};
+      value = poly_reshape(ctx, value, flat_shape, 1);
+    }
+    target = base;
+  }
+
+  PolyUOp *srcs[2] = {target, value};
+  return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
+}
 
 /* Core PolyTensor handles */
 
@@ -3134,9 +3180,3 @@ PolyUOp *poly_mae_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target) {
     numel *= shape[i];
   return poly_alu2(ctx, POLY_OP_FDIV, r, poly_const_float(ctx, (double)numel));
 }
-
-/* Phase E: poly_const_buffer_data + g_const_bindings + poly_const_registry_*
- * + make_const_buffer_tensor were deleted. The const-registry path was the
- * last hidden-state mechanism in tensor.c, used only by an old poly_rand
- * implementation that has been rewritten to use a pure-UOp arange counter
- * (see poly_rand below). */

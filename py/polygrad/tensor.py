@@ -11,7 +11,7 @@ import weakref
 import numpy as np
 
 from . import _ffi
-from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, ceildiv, dtypes, to_dtype
+from .dtype import INVERSE_DTYPES_DICT, _from_np_dtype, _to_np_dtype, dtypes, to_dtype
 from polygrad.uop.ops import UOp
 from polygrad.device import Buffer
 
@@ -72,25 +72,11 @@ def _device_name_from_id(device_id):
     return raw.decode('utf-8').upper()
 
 
-def _realized_buffer_uop(ctx, uop):
-    if not uop:
-        return None
-    wrapped = uop if isinstance(uop, UOp) else UOp(ctx, uop)
-    return wrapped.buffer or wrapped
-
-
 def _device_id(device):
     from .device import Device
 
     dev = Device.canonicalize(device).lower().encode('utf-8')
     return int(_ffi._lib.poly_device_by_name(dev))
-
-
-def _alloc_buffer_and_array(ctx, numel, dtype_name):
-    np_dt = _to_np_dtype(dtype_name)
-    buf = _ffi._lib.poly_buffer_by_id(ctx, numel, _dtype_id(dtype_name))
-    data = np.zeros(numel, dtype=np_dt)
-    return buf, data
 
 
 def _int64_array(vals):
@@ -108,21 +94,6 @@ def _pair_array(pairs):
         flat[i * 2] = a
         flat[i * 2 + 1] = b
     return flat, n
-
-
-def _shape_array(shape):
-    """Return (ctypes array, int ndim) from a shape tuple."""
-    return (ctypes.c_int64 * len(shape))(*shape), len(shape)
-
-
-def _out_shape():
-    """Allocate out_shape and out_ndim for C calls."""
-    return (ctypes.c_int64 * 8)(), ctypes.c_int(0)
-
-
-def _read_shape(out_shape, out_ndim):
-    """Read shape tuple from C out params."""
-    return tuple(out_shape[i] for i in range(out_ndim.value))
 
 
 def _shape_from_uop(ctx, uop):
@@ -762,10 +733,8 @@ class Tensor:
 
         out = Tensor(
             _ctx=self._ctx,
-            _uop=self.uop,
             _tensor=core_tensor,
             _data=self._data,
-            _shape=self.shape,
             _dtype=self._dtype_str,
             _device=dev,
             requires_grad=self._requires_grad,
