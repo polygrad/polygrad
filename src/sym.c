@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include <string.h>
+#include <stdlib.h>
 #include "utils.h"
 
 /* Overflow-safe int64 helpers */
@@ -1616,14 +1617,19 @@ static PolyUOp *rule_gep_vectorize(PolyCtx *ctx, PolyUOp *root, const PolyBindin
     if (idx < 0 || idx >= vec->n_src) return NULL;
     return vec->src[idx];
   }
-  if (n > 128) return NULL;
-  PolyUOp *elts[128];
+  PolyUOp **elts = calloc((size_t)n, sizeof(*elts));
+  if (!elts) return NULL;
   for (int i = 0; i < n; i++) {
     int64_t idx = root->arg.int_tuple.vals[i];
-    if (idx < 0 || idx >= vec->n_src) return NULL;
+    if (idx < 0 || idx >= vec->n_src) {
+      free(elts);
+      return NULL;
+    }
     elts[i] = vec->src[idx];
   }
-  return poly_uop(ctx, POLY_OP_VECTORIZE, root->dtype, elts, n, poly_arg_none());
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, root->dtype, elts, n, poly_arg_none());
+  free(elts);
+  return ret;
 }
 
 /* GEP(CONST/VCONST) -> selected CONST(s). */
@@ -1665,21 +1671,28 @@ static PolyUOp *rule_gep_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings *
       );
     return NULL;
   }
-  if (n > 128) return NULL;
-  PolyUOp *elts[128];
+  PolyUOp **elts = calloc((size_t)n, sizeof(*elts));
+  if (!elts) return NULL;
   for (int i = 0; i < n; i++) {
     int64_t idx = root->arg.int_tuple.vals[i];
-    if (idx < 0) return NULL;
+    if (idx < 0) {
+      free(elts);
+      return NULL;
+    }
     if (c->n_src > idx)
       elts[i] = c->src[idx];
     else if (c->arg.kind == POLY_ARG_INT_TUPLE && idx < c->arg.int_tuple.n)
       elts[i] = poly_uop0(
           ctx, POLY_OP_CONST, poly_dtype_scalar(c->dtype), poly_arg_int(c->arg.int_tuple.vals[idx])
       );
-    else
+    else {
+      free(elts);
       return NULL;
+    }
   }
-  return poly_uop(ctx, POLY_OP_VECTORIZE, root->dtype, elts, n, poly_arg_none());
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, root->dtype, elts, n, poly_arg_none());
+  free(elts);
+  return ret;
 }
 
 /* GEP in natural order is identity. */
@@ -1747,18 +1760,28 @@ static PolyUOp *rule_gep_through_alu(PolyCtx *ctx, PolyUOp *gep, const PolyBindi
 static PolyUOp *rule_vcat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindings *b) {
   (void)b;
   if (!x || x->op != POLY_OP_VCAT || x->n_src <= 0 || x->dtype.is_ptr) return NULL;
-  PolyUOp *elts[128];
+  int total = 0;
+  for (int i = 0; i < x->n_src; i++) {
+    int cnt = x->src[i]->dtype.count > 0 ? x->src[i]->dtype.count : 1;
+    if (cnt > INT32_MAX - total) return NULL;
+    total += cnt;
+  }
+  if (total <= 0) return NULL;
+  PolyUOp **elts = calloc((size_t)total, sizeof(*elts));
+  if (!elts) return NULL;
   int p = 0;
   for (int i = 0; i < x->n_src; i++) {
     PolyUOp *src = x->src[i];
     int cnt = src->dtype.count > 0 ? src->dtype.count : 1;
-    for (int j = 0; j < cnt && p < 128; j++) {
+    for (int j = 0; j < cnt; j++) {
       elts[p++] = poly_uop1(
           ctx, POLY_OP_GEP, poly_dtype_scalar(src->dtype), src, poly_arg_int(j)
       );
     }
   }
-  return poly_uop(ctx, POLY_OP_VECTORIZE, x->dtype, elts, p, poly_arg_none());
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, x->dtype, elts, p, poly_arg_none());
+  free(elts);
+  return ret;
 }
 
 /* VECTORIZE(GEP(x, a0), GEP(x, a1), ...) where all GEPs share same source x
@@ -1788,8 +1811,8 @@ static PolyUOp *rule_vectorize_same_gep(PolyCtx *ctx, PolyUOp *root, const PolyB
 
   /* Collect lane indices into tuple (stack — poly_uop copies to arena) */
   int n = root->n_src;
-  if (n > 128) return NULL;
-  int64_t lanes[128];
+  int64_t *lanes = calloc((size_t)n, sizeof(*lanes));
+  if (!lanes) return NULL;
   for (int i = 0; i < n; i++) {
     PolyUOp *s = root->src[i];
     lanes[i] = (s->arg.kind == POLY_ARG_INT) ? s->arg.i : s->arg.int_tuple.vals[0];
@@ -1801,7 +1824,9 @@ static PolyUOp *rule_vectorize_same_gep(PolyCtx *ctx, PolyUOp *root, const PolyB
   tup.kind = POLY_ARG_INT_TUPLE;
   tup.int_tuple.vals = lanes;
   tup.int_tuple.n = n;
-  return poly_uop1(ctx, POLY_OP_GEP, root->dtype, base, tup);
+  PolyUOp *ret = poly_uop1(ctx, POLY_OP_GEP, root->dtype, base, tup);
+  free(lanes);
+  return ret;
 }
 
 /* tinygrad symbolic.py: clean up singleton GROUP wrappers that appear after

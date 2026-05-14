@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <math.h>
 #include <assert.h>
+#include <unistd.h>
 
 /* String builder */
 
@@ -997,25 +998,58 @@ static bool env_true(const char *name) {
          strcmp(v, "False") != 0;
 }
 
+static bool env_not_false(const char *name) {
+  const char *v = getenv(name);
+  return !v || (v[0] != '\0' && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
+                strcmp(v, "False") != 0);
+}
+
+static int cpu_thread_count(void) {
+  const char *v = getenv("CPU_COUNT");
+  if (v && v[0]) {
+    int n = atoi(v);
+    if (n > 0) return n;
+  }
+#ifdef _SC_NPROCESSORS_ONLN
+  long n = sysconf(_SC_NPROCESSORS_ONLN);
+  if (n > 0 && n < INT32_MAX) return (int)n;
+#endif
+  return 1;
+}
+
 PolyRendererCaps poly_c_renderer_caps(void) {
+  bool has_threads = env_not_false("THREADS");
   return (PolyRendererCaps){
       .has_mulacc = false,
       .has_threefry = false,
       .has_local = false,
+      .has_threads = has_threads,
       /* Clang/C rendering follows tinygrad's CStyle pm_render path, which
        * inserts masked-load alt values and scalarizes vector comparisons.
        * The packed-int render subset is reserved for the handwritten x64
        * backend, which sets this capability in render_x64.c. */
       .has_simd_int = false,
       .max_vec_width = 4,
+      .max_threads = has_threads ? cpu_thread_count() : 0,
   };
+}
+
+static PolyRendererCaps poly_c_direct_call_caps(void) {
+  PolyRendererCaps caps = poly_c_renderer_caps();
+  /* poly_linearize() is used by low-level direct-call helpers that invoke
+   * poly_program_call(), not the scheduled CPU runner. CPU THREAD axes require
+   * poly_program_call_threaded() to execute every core_id shard, so keep direct
+   * linearization single-core and enable THREAD axes explicitly in schedule.c. */
+  caps.has_threads = false;
+  caps.max_threads = 0;
+  return caps;
 }
 
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   PolyRewriteOpts opts = {
       .optimize = true,
       .devectorize = 1,
-      .caps = poly_c_renderer_caps(),
+      .caps = poly_c_direct_call_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
       .extra_matcher = poly_pm_c_renderer_extra(),
@@ -1041,7 +1075,7 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .optimize = opt,
       .devectorize = devec,
       .beam_width = beam,
-      .caps = poly_c_renderer_caps(),
+      .caps = poly_c_direct_call_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
       .extra_matcher = poly_pm_c_renderer_extra(),
@@ -1356,6 +1390,7 @@ typedef struct {
   char type[256];
   char name[256];
   int order; /* maps param position -> args[] index */
+  bool runtime_core_id; /* tinygrad CPU THREAD runtime variable */
 } RenderParam;
 
 char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
@@ -1371,6 +1406,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   RenderParam params[POLY_RENDER_MAX_PARAMS];
   int n_params = 0;
   int n_buffer_params = 0; /* count of PARAM (buffer) params, used for DEFINE_VAR offset */
+  int n_var_params = 0; /* DEFINE_VAR params excluding runtime core_id */
 
   /* prefix counters */
   int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0;
@@ -1430,6 +1466,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       snprintf(params[n_params].type, sizeof(params[n_params].type), "%s* restrict", base_type);
       snprintf(params[n_params].name, sizeof(params[n_params].name), "%s", name);
       params[n_params].order = (int)u->arg.i;
+      params[n_params].runtime_core_id = false;
       n_params++;
       n_buffer_params++;
       continue;
@@ -1443,11 +1480,17 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       smap_set(&names, u, strdup(vname));
       snprintf(params[n_params].type, sizeof(params[n_params].type), "const int");
       snprintf(params[n_params].name, sizeof(params[n_params].name), "%s", vname);
-      /* DEFINE_VAR args come after all buffer args in the args[] array.
-       * n_buffer_params counts PARAMs seen so far (all PARAMs precede DEFINE_VARs
-       * in linearized output due to priority -20 vs -19). var_idx counts
-       * DEFINE_VARs within the var section. */
-      params[n_params].order = n_buffer_params + (n_params - n_buffer_params);
+      params[n_params].runtime_core_id = strcmp(vname, "core_id") == 0;
+      if (params[n_params].runtime_core_id) {
+        /* tinygrad CPU threading injects core_id as a runtime variable. It is
+         * not a user DEFINE_VAR binding and is supplied by _call_core(). */
+        params[n_params].order = POLY_RENDER_MAX_PARAMS + n_params;
+      } else {
+        /* DEFINE_VAR args come after all buffer args in the args[] array.
+         * n_buffer_params counts PARAMs seen so far (all PARAMs precede
+         * DEFINE_VARs in linearized output due to priority -20 vs -19). */
+        params[n_params].order = n_buffer_params + n_var_params++;
+      }
       n_params++;
       continue;
     }
@@ -1736,9 +1779,6 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         char *gate_s = smap_get(&names, idx_uop->src[2]);
         char *alt_s = smap_get(&names, u->src[1]);
         if (u->dtype.count > 1) {
-          /* tinygrad's CPU Clang renderer keeps upcasted memory traffic as
-           * scalar lane loads. This avoids assuming alignment for external
-           * buffers while still using vector locals for arithmetic. */
           sb_printf(&body, "if (%s) %s = ", gate_s, name);
           render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
           sb_printf(&body, "; else %s = %s;\n", name, alt_s);
@@ -1778,8 +1818,6 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         sb_printf(&body, "%s = %s;\n", target, val);
       else if (u->src[1] && u->src[1]->dtype.count > 1 &&
                poly_find_index_through_cast(u->src[0])) {
-        /* Match tinygrad CPU C rendering: upcasted STORE writes scalar lanes
-         * instead of dereferencing a wide vector pointer to user/runtime memory. */
         for (int lane = 0; lane < u->src[1]->dtype.count; lane++) {
           char lane_ptr[512];
           if (!render_index_lane_ptr(&names, u->src[0], lane, lane_ptr, sizeof(lane_ptr))) break;
@@ -1970,9 +2008,39 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   for (int i = 0; i < n_params; i++) {
     if (i > 0) sb_puts(&out, ", ");
     int arg_idx = params[i].order;
+    if (params[i].runtime_core_id) {
+      sb_puts(&out, "0");
+      continue;
+    }
     /* pointer params: (type*)args[i]; int params: *(int*)args[i] */
     if (strchr(params[i].type, '*')) {
       /* extract base type (before '* restrict') */
+      char base[128];
+      const char *star = strchr(params[i].type, '*');
+      int blen = (int)(star - params[i].type);
+      if (blen >= (int)sizeof(base)) blen = (int)sizeof(base) - 1;
+      memcpy(base, params[i].type, blen);
+      base[blen] = '\0';
+      sb_printf(&out, "(%s*)args[%d]", base, arg_idx);
+    } else {
+      sb_printf(&out, "*(int*)args[%d]", arg_idx);
+    }
+  }
+  sb_puts(&out, ");\n}\n");
+
+  /* _call_core wrapper: same ABI as tinygrad's CPU runtimevars path. The
+   * runtime calls the same compiled kernel once per worker with a different
+   * core_id, while non-threaded kernels ignore the second argument. */
+  sb_printf(&out, "void %s_call_core(void **args, int core_id) {\n", fn_name);
+  sb_printf(&out, "  %s(", fn_name);
+  for (int i = 0; i < n_params; i++) {
+    if (i > 0) sb_puts(&out, ", ");
+    int arg_idx = params[i].order;
+    if (params[i].runtime_core_id) {
+      sb_puts(&out, "core_id");
+      continue;
+    }
+    if (strchr(params[i].type, '*')) {
       char base[128];
       const char *star = strchr(params[i].type, '*');
       int blen = (int)(star - params[i].type);

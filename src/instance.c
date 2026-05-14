@@ -1086,13 +1086,32 @@ static int run_instance_sink(
     PolyBuffer *extra_handles,
     int n_extra
 ) {
+  bool timing = poly_debug_at_least(2);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr, "[polygrad:instance] enter sink=%p n_io=%d n_extra=%d device=%s\n", (void *)sink,
+        n_io, n_extra, poly_device_name(poly_ctx_get_preferred_device(inst->ctx))
+    );
+    fflush(stderr);
+  }
   if (attach_instance_buffers(inst, io, n_io) != 0) return -1;
+  double t_attach = timing ? poly_now_ms() : 0.0;
   attach_extra_buffers(inst, extra_bufs, extra_handles, n_extra);
+  double t_extra = timing ? poly_now_ms() : 0.0;
   /* Instance entrypoints and train/value-grad combined graphs are already
    * effect sinks. They must skip tensor callify and enter the schedule runner
    * directly, matching tinygrad's separation between tensor realization and
    * schedule execution. */
   int ret = poly_realize_sink(inst->ctx, sink);
+  if (timing) {
+    double t_done = poly_now_ms();
+    fprintf(
+        stderr,
+        "[polygrad:instance] attach=%.3fms extra=%.3fms realize=%.3fms total=%.3fms ret=%d\n",
+        t_attach - t0, t_extra - t_attach, t_done - t_extra, t_done - t0, ret
+    );
+  }
   return ret;
 }
 
@@ -1409,8 +1428,9 @@ static int param_ordinal_for_buf(const PolyInstance *inst, int buf_idx) {
 }
 
 /* Build optimizer UOp graph (fwd+bwd+optimizer as a single combined SINK).
- * Gradients are consumed directly by ASSIGN ops -- not materialized to
- * separate output buffers (D1: no grad stores in optimizer SINK). */
+ * Gradients are consumed directly by AFTER/STORE update effects, not
+ * materialized to separate output buffers (D1: no grad stores in optimizer
+ * SINK). */
 static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   if (inst->train) return 0; /* already built */
 
@@ -1545,21 +1565,21 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       train_free(ts, np);
       return -1;
     }
-    sink_srcs[si++] = poly_legacy_assign_buffer(ctx, param_buf, upd.param_new);
+    sink_srcs[si++] = poly_store_buffer_update(ctx, param_buf, upd.param_new);
     if (has_moments) {
       if (!bc1_new) bc1_new = upd.bc1_new;
       if (!bc2_new) bc2_new = upd.bc2_new;
-      sink_srcs[1 + np + 2 * i] = poly_legacy_assign_buffer(ctx, m_buf, upd.m_new);
-      sink_srcs[1 + np + 2 * i + 1] = poly_legacy_assign_buffer(ctx, v_buf, upd.v_new);
+      sink_srcs[1 + np + 2 * i] = poly_store_buffer_update(ctx, m_buf, upd.m_new);
+      sink_srcs[1 + np + 2 * i + 1] = poly_store_buffer_update(ctx, v_buf, upd.v_new);
     }
   }
 
   if (has_moments) {
-    sink_srcs[1 + np + 2 * np] = poly_legacy_assign_buffer(ctx, ts->bc1_buf, bc1_new);
-    sink_srcs[1 + np + 2 * np + 1] = poly_legacy_assign_buffer(ctx, ts->bc2_buf, bc2_new);
+    sink_srcs[1 + np + 2 * np] = poly_store_buffer_update(ctx, ts->bc1_buf, bc1_new);
+    sink_srcs[1 + np + 2 * np + 1] = poly_store_buffer_update(ctx, ts->bc2_buf, bc2_new);
   }
 
-  /* For Adam/AdamW, si covered param assigns (1..np), moment assigns
+  /* For Adam/AdamW, si covered param updates (1..np), moment updates
    * were written directly to their positions. Verify: */
   if (has_moments) {
     /* param assigns: indices 1..np (written by si++)

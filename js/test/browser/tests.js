@@ -918,6 +918,62 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             inst.dispose();
           }
         });
+        await test("param trainability freezes optimizer updates", async () => {
+          const inst = Instance.mlp({
+            layers: [2, 1],
+            activation: "none",
+            bias: true,
+            loss: "mse",
+            batch_size: 1,
+            seed: 42
+          });
+          try {
+            assert(inst.paramTrainable(0) === true, "weight should default trainable");
+            assert(inst.paramTrainable(1) === true, "bias should default trainable");
+            inst.setParamTrainable(0, false);
+            assert(inst.paramTrainable(0) === false, "weight should be frozen");
+            const weightBefore = await inst.paramData(0);
+            const biasBefore = await inst.paramData(1);
+            inst.setOptimizer(pg.OPTIM_SGD, 0.05);
+            const x = new Float32Array([1, 2]);
+            const y = new Float32Array([5]);
+            for (let step = 0; step < 10; step++) {
+              const loss = await inst.trainStep({ x, y });
+              assert(Number.isFinite(loss), `loss should be finite, got ${loss}`);
+            }
+            assertClose(await inst.paramData(0), weightBefore);
+            let biasChanged = false;
+            const biasAfter = await inst.paramData(1);
+            for (let i = 0; i < biasAfter.length; i++) {
+              if (biasAfter[i] !== biasBefore[i]) biasChanged = true;
+            }
+            assert(biasChanged, "unfrozen bias should update");
+          } finally {
+            inst.dispose();
+          }
+        });
+        await test("param trainability survives IR round trip", async () => {
+          const inst1 = Instance.mlp({
+            layers: [2, 1],
+            activation: "none",
+            bias: true,
+            loss: "mse",
+            batch_size: 1,
+            seed: 42
+          });
+          try {
+            inst1.setParamTrainable(0, false);
+            const inst2 = Instance.fromIR(inst1.exportIR(), await inst1.exportWeights());
+            try {
+              assert(inst2.paramTrainable(0) === false, "frozen flag should round trip");
+              assert(inst2.paramTrainable(1) === true, "unfrozen flag should round trip");
+            } finally {
+              inst2.dispose();
+            }
+          } finally {
+            inst1.dispose();
+          }
+        });
         await test("mlp forward produces output", async () => {
           const inst = Instance.mlp({
             layers: [2, 4, 1],
@@ -928,7 +984,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             seed: 42
           });
           try {
-            const outputs = inst.forward({ x: new Float32Array([1, 2]) });
+            const outputs = await inst.forward({ x: new Float32Array([1, 2]) });
             assert(outputs.output instanceof Float32Array, "output should be Float32Array");
             assert(outputs.output.length === 1, `expected output length 1, got ${outputs.output.length}`);
             assert(Number.isFinite(outputs.output[0]), "output should be finite");
@@ -952,7 +1008,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             let first = null;
             let last = null;
             for (let step = 0; step < 50; step++) {
-              last = inst.trainStep({ x, y });
+              last = await inst.trainStep({ x, y });
               if (first == null) first = last;
             }
             assert(last < first, `expected loss to decrease (${first} -> ${last})`);
@@ -972,8 +1028,8 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           const inst1 = Instance.mlp(spec);
           const inst2 = Instance.mlp({ ...spec, seed: 99 });
           try {
-            const original = inst1.paramData(0);
-            const different = inst2.paramData(0);
+            const original = await inst1.paramData(0);
+            const different = await inst2.paramData(0);
             let anyDiff = false;
             for (let i = 0; i < original.length; i++) {
               if (original[i] !== different[i]) {
@@ -982,10 +1038,10 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
               }
             }
             assert(anyDiff, "different seed should change weights");
-            const weights = inst1.exportWeights();
+            const weights = await inst1.exportWeights();
             assert(weights instanceof Uint8Array && weights.length > 0, "expected non-empty weights export");
             inst2.importWeights(weights);
-            assertClose(inst2.paramData(0), original);
+            assertClose(await inst2.paramData(0), original);
           } finally {
             inst1.dispose();
             inst2.dispose();
@@ -1002,11 +1058,11 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           });
           try {
             const ir = inst1.exportIR();
-            const weights = inst1.exportWeights();
+            const weights = await inst1.exportWeights();
             const inst2 = Instance.fromIR(ir, weights);
             try {
-              const out1 = inst1.forward({ x: new Float32Array([1, 2]) }).output;
-              const out2 = inst2.forward({ x: new Float32Array([1, 2]) }).output;
+              const out1 = (await inst1.forward({ x: new Float32Array([1, 2]) })).output;
+              const out2 = (await inst2.forward({ x: new Float32Array([1, 2]) })).output;
               assertClose(out2, out1);
             } finally {
               inst2.dispose();
@@ -1027,7 +1083,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           try {
             const x = new Float32Array(32 * 4);
             for (let i = 0; i < x.length; i++) x[i] = Math.random();
-            const outputs = inst.forward({ x });
+            const outputs = await inst.forward({ x });
             assert(outputs.output instanceof Float32Array, "output should be Float32Array");
             assert(
               outputs.output.length === 32 * 3,
@@ -1061,7 +1117,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             let first = null;
             let last = null;
             for (let step = 0; step < 30; step++) {
-              last = inst.trainStep({ x, y });
+              last = await inst.trainStep({ x, y });
               if (first == null) first = last;
             }
             assert(Number.isFinite(first), `first loss should be finite, got ${first}`);
@@ -1090,8 +1146,8 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             seed: 42
           });
           try {
-            const tabmOut = tabm.forward({ x: new Float32Array([1, 2]) });
-            const namOut = nam.forward({ x: new Float32Array([1, 2]) });
+            const tabmOut = await tabm.forward({ x: new Float32Array([1, 2]) });
+            const namOut = await nam.forward({ x: new Float32Array([1, 2]) });
             assert(tabmOut.output instanceof Float32Array, "tabm output missing");
             assert(namOut.output instanceof Float32Array, "nam output missing");
           } finally {
@@ -1115,7 +1171,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             let first = null;
             let last = null;
             for (let step = 0; step < 50; step++) {
-              last = inst.trainStep({ x, y });
+              last = await inst.trainStep({ x, y });
               if (first == null) first = last;
             }
             assert(last < first, `expected loss to decrease (${first} -> ${last})`);
@@ -1139,7 +1195,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             let first = null;
             let last = null;
             for (let step = 0; step < 50; step++) {
-              last = inst.trainStep({ x, y });
+              last = await inst.trainStep({ x, y });
               if (first == null) first = last;
             }
             assert(Number.isFinite(first), `first loss should be finite, got ${first}`);
@@ -1165,7 +1221,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             let first = null;
             let last = null;
             for (let step = 0; step < 100; step++) {
-              last = inst.trainStep({ x, y });
+              last = await inst.trainStep({ x, y });
               if (first == null) first = last;
             }
             assert(last < first * 0.1, `expected >90% loss reduction (${first} -> ${last})`);
@@ -1177,7 +1233,49 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
 Instance tests: ${passed} passed, ${failed} failed`);
         return { passed, failed };
       }
-      module.exports = { runInstanceTests };
+      async function runInstanceSmokeTests(pg) {
+        const Instance = pg.Instance;
+        let passed = 0;
+        let failed = 0;
+        if (!pg.supportsInstance) {
+          console.log("\n== Instance ==");
+          console.log("  [SKIP] core does not expose PolyInstance runtime yet");
+          return { passed: 0, failed: 0 };
+        }
+        async function test(name, fn) {
+          try {
+            await fn();
+            console.log(`  [PASS] ${name}`);
+            passed++;
+          } catch (e) {
+            console.log(`  [FAIL] ${name}: ${e.message}`);
+            failed++;
+          }
+        }
+        console.log("\n== Instance ==");
+        await test("webgpu mlp forward smoke", async () => {
+          const inst = Instance.mlp({
+            layers: [2, 4, 1],
+            activation: "relu",
+            bias: true,
+            loss: "mse",
+            batch_size: 1,
+            seed: 42
+          });
+          try {
+            const outputs = await inst.forward({ x: new Float32Array([1, 2]) });
+            assert(outputs.output instanceof Float32Array, "output should be Float32Array");
+            assert(outputs.output.length === 1, `expected output length 1, got ${outputs.output.length}`);
+            assert(Number.isFinite(outputs.output[0]), "output should be finite");
+          } finally {
+            inst.dispose();
+          }
+        });
+        console.log(`
+Instance smoke tests: ${passed} passed, ${failed} failed`);
+        return { passed, failed };
+      }
+      module.exports = { runInstanceTests, runInstanceSmokeTests };
     }
   });
 
@@ -1185,9 +1283,10 @@ Instance tests: ${passed} passed, ${failed} failed`);
   var require_test_browser_entry = __commonJS({
     "test/browser/test_browser_entry.js"() {
       var { runTests } = require_test_shared();
-      var { runInstanceTests } = require_test_instance_shared();
+      var { runInstanceTests, runInstanceSmokeTests } = require_test_instance_shared();
       window.__runTests = runTests;
       window.__runInstanceTests = runInstanceTests;
+      window.__runInstanceSmokeTests = runInstanceSmokeTests;
     }
   });
   require_test_browser_entry();

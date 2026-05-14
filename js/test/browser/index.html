@@ -34,12 +34,12 @@ async function main() {
   // Run the full shared tensor test suite
   const tensorResult = await window.__runTests(pg)
 
-  // Tensor WebGPU coverage uses the unified C backend. Instance WebGPU tests are
-  // still skipped here until the async browser instance path has a busy guard.
   let instanceResult = { passed: 0, failed: 0 }
   if (isWebGpu) {
-    console.log('\n== Instance ==')
-    console.log('  [SKIP] Instance tests (browser WebGPU async path not validated yet)')
+    // WebGPU instances use the same C scheduler/backend path as tensors. Run a
+    // small smoke first while the heavier training suite is still being
+    // validated for async host-visible calls.
+    instanceResult = await window.__runInstanceSmokeTests(pg)
   } else {
     instanceResult = await window.__runInstanceTests(pg)
   }

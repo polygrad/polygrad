@@ -231,6 +231,7 @@ extern const PolyDType POLY_FLOAT64;
 bool poly_dtype_eq(PolyDType a, PolyDType b);
 bool poly_dtype_is_float(PolyDType dt);
 bool poly_dtype_is_int(PolyDType dt);
+bool poly_dtype_is_index(PolyDType dt);
 bool poly_dtype_is_unsigned(PolyDType dt);
 bool poly_dtype_is_bool(PolyDType dt);
 PolyDType poly_dtype_scalar(PolyDType dt);

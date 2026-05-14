@@ -74,7 +74,6 @@ typedef struct {
   int cap;
 } WgslStrMap;
 
-
 static void wsm_init(WgslStrMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
@@ -122,10 +121,10 @@ static const char *wgsl_type_name(PolyDType dt) {
 static bool wgsl_dtype_is_packed_storage(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
   int itemsize = poly_dtype_itemsize(s);
-  /* tinygrad packs sub-32-bit non-half storage through atomic<u32>. Keep this
-   * to integer byte/short storage for now; bool/bf16 need separate renderer
-   * rules before they can be packed safely. */
-  return itemsize > 0 && itemsize < 4 && poly_dtype_is_int(s) && !poly_dtype_is_bool(s);
+  /* tinygrad WGSL packs sub-32-bit non-half storage through atomic<u32>.
+   * WGSL scalar bool is valid, but bool storage buffers are not host-shareable,
+   * so bool buffers must use the same byte-lane packing path as uint8. */
+  return itemsize > 0 && itemsize < 4 && (poly_dtype_is_int(s) || poly_dtype_is_bool(s));
 }
 
 static const char *wgsl_buffer_type_name(PolyDType dt) {
@@ -151,7 +150,11 @@ static bool wgsl_index_uses_packed_buffer(PolyUOp *idx_uop, PolyDType *buf_dt_ou
 }
 
 static bool wgsl_make_packed_load_expr(
-    WgslStrMap *names, PolyUOp *idx_uop, PolyDType load_dt, char *out, size_t out_sz
+    WgslStrMap *names,
+    PolyUOp *idx_uop,
+    PolyDType load_dt,
+    char *out,
+    size_t out_sz
 ) {
   PolyDType buf_dt;
   if (!wgsl_index_uses_packed_buffer(idx_uop, &buf_dt)) return false;
@@ -166,13 +169,14 @@ static bool wgsl_make_packed_load_expr(
 
   char raw[512];
   snprintf(
-      raw, sizeof(raw),
-      "((atomicLoad(&%s[(%s/%d)]) >> ((u32(%s)%%%du)*%du)) & 0x%Xu)", buf_s, idx_s, elems,
-      idx_s, elems, 8u * (unsigned)itemsize, mask
+      raw, sizeof(raw), "((atomicLoad(&%s[(%s/%d)]) >> ((u32(%s)%%%du)*%du)) & 0x%Xu)", buf_s,
+      idx_s, elems, idx_s, elems, 8u * (unsigned)itemsize, mask
   );
 
   PolyDType scalar = poly_dtype_scalar(load_dt);
-  if (!poly_dtype_is_unsigned(scalar) && poly_dtype_is_int(scalar)) {
+  if (poly_dtype_is_bool(scalar)) {
+    snprintf(out, out_sz, "(%s != 0u)", raw);
+  } else if (!poly_dtype_is_unsigned(scalar) && poly_dtype_is_int(scalar)) {
     int sext = (itemsize == 1) ? 24 : 16;
     snprintf(out, out_sz, "((i32(%s)<<%d)>>%d)", raw, sext, sext);
   } else {
@@ -182,7 +186,11 @@ static bool wgsl_make_packed_load_expr(
 }
 
 static bool wgsl_emit_packed_store(
-    WgslStrBuf *body, WgslStrMap *names, PolyUOp *idx_uop, const char *val, int depth
+    WgslStrBuf *body,
+    WgslStrMap *names,
+    PolyUOp *idx_uop,
+    const char *val,
+    int depth
 ) {
   PolyDType buf_dt;
   if (!wgsl_index_uses_packed_buffer(idx_uop, &buf_dt)) return false;
@@ -195,19 +203,25 @@ static bool wgsl_emit_packed_store(
   char *idx_s = wsm_get(names, idx_uop->src[1]);
   if (!buf_s || !idx_s || !val) return false;
 
+  char val_u32[512];
+  if (poly_dtype_is_bool(poly_dtype_scalar(buf_dt)))
+    snprintf(val_u32, sizeof(val_u32), "select(0u, 1u, %s)", val);
+  else
+    snprintf(val_u32, sizeof(val_u32), "u32(%s)", val);
+
   unsigned shift_bits = 8u * (unsigned)itemsize;
   for (int d = 0; d < depth; d++)
     wsb_puts(body, "  ");
   wsb_printf(
-      body, "atomicAnd(&%s[(%s/%d)], ((0x%Xu << ((u32(%s)%%%du)*%uu)) ^ 0xFFFFFFFFu));\n",
-      buf_s, idx_s, elems, mask, idx_s, elems, shift_bits
+      body, "atomicAnd(&%s[(%s/%d)], ((0x%Xu << ((u32(%s)%%%du)*%uu)) ^ 0xFFFFFFFFu));\n", buf_s,
+      idx_s, elems, mask, idx_s, elems, shift_bits
   );
 
   for (int d = 0; d < depth; d++)
     wsb_puts(body, "  ");
   wsb_printf(
-      body, "atomicAdd(&%s[(%s/%d)], ((u32(%s) & 0x%Xu) << ((u32(%s)%%%du)*%uu)));\n",
-      buf_s, idx_s, elems, val, mask, idx_s, elems, shift_bits
+      body, "atomicAdd(&%s[(%s/%d)], ((%s & 0x%Xu) << ((u32(%s)%%%du)*%uu)));\n", buf_s, idx_s,
+      elems, val_u32, mask, idx_s, elems, shift_bits
   );
   return true;
 }
@@ -669,7 +683,8 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       char packed_load[512];
       const char *load_expr = bidx;
-      if (idx_uop && wgsl_make_packed_load_expr(&names, idx_uop, u->dtype, packed_load, sizeof(packed_load)))
+      if (idx_uop &&
+          wgsl_make_packed_load_expr(&names, idx_uop, u->dtype, packed_load, sizeof(packed_load)))
         load_expr = packed_load;
       for (int d = 0; d < depth; d++)
         wsb_puts(&body, "  ");
@@ -679,18 +694,16 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
         PolyUOp *gate_uop = idx_uop->src[2];
         PolyUOp *alt_uop = u->src[1];
-        if (u->dtype.count == 1 && ((gate_uop && gate_uop->dtype.count > 1) ||
-                                    (alt_uop && alt_uop->dtype.count > 1))) {
+        if (u->dtype.count == 1 &&
+            ((gate_uop && gate_uop->dtype.count > 1) || (alt_uop && alt_uop->dtype.count > 1))) {
           int lane = wgsl_infer_gated_load_lane(idx_uop->src[1], gate_uop);
           int lanes = 0;
           if (gate_uop && gate_uop->dtype.count > lanes) lanes = gate_uop->dtype.count;
           if (alt_uop && alt_uop->dtype.count > lanes) lanes = alt_uop->dtype.count;
           if (lane < 0 && lanes > 1) {
-            PolyUOp *lane_key =
-                (gate_uop && gate_uop->dtype.count > 1) ? gate_uop
-                                                        : ((alt_uop && alt_uop->dtype.count > 1)
-                                                               ? alt_uop
-                                                               : NULL);
+            PolyUOp *lane_key = (gate_uop && gate_uop->dtype.count > 1)
+                                    ? gate_uop
+                                    : ((alt_uop && alt_uop->dtype.count > 1) ? alt_uop : NULL);
             lane = wgsl_next_vector_lane(
                 lane_key, lanes, gated_lane_keys, gated_lane_next, &n_gated_lane_keys
             );

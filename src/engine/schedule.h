@@ -71,6 +71,7 @@ typedef struct {
   PolyUOp *buf_uop;
   PolyDevice device;
   bool is_intermediate;
+  bool needs_zero;
   int external_buf_idx;
 } PolyScheduleBufSlot;
 

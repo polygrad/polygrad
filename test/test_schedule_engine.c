@@ -266,6 +266,52 @@ TEST(sched, placement_copy_item_uses_copy_root_and_two_slots) {
   PASS();
 }
 
+TEST(sched, placement_computed_copy_source_materializes_before_copy) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 3);
+  float data[3] = {1.0f, 2.0f, 3.0f};
+  poly_buffer_set(ctx, a, data, sizeof(data), POLY_DEVICE_CPU);
+
+  PolyUOp *mul = poly_alu2(ctx, POLY_OP_MUL, a, poly_const_float(ctx, 2.0f));
+  PolyTensor *mt = poly_tensor_create(ctx, mul, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(mt);
+  PolyTensor *cuda_t = poly_tensor_to_device(ctx, mt, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(cuda_t);
+
+  PolyUOp *physical = poly_tensor_physicalize(ctx, cuda_t);
+  ASSERT_NOT_NULL(physical);
+  ASSERT_INT_EQ(physical->op, POLY_OP_COPY);
+
+  PolyUOp *out = poly_buffer_on_device(ctx, POLY_FLOAT32, 3, POLY_DEVICE_CUDA);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, physical));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+
+  int n_copy = 0;
+  int n_compute = 0;
+  for (int i = 0; i < sched->n_items; i++) {
+    if (sched->items[i].kind == POLY_EXEC_COPY) {
+      n_copy++;
+      ASSERT_INT_EQ(sched->items[i].root->op, POLY_OP_COPY);
+      ASSERT_INT_EQ(sched->items[i].n_buf_slots, 2);
+    } else {
+      n_compute++;
+      ASSERT_INT_EQ(count_root_ops(ctx, sched->items[i].root, POLY_OP_COPY), 0);
+      ASSERT_TRUE(sched->items[i].n_buf_slots >= 1);
+      int dst_slot = sched->items[i].buf_slot_indices[0];
+      ASSERT_TRUE(dst_slot >= 0 && dst_slot < sched->n_buf_slots);
+      ASSERT_INT_EQ(sched->buf_slots[dst_slot].device, POLY_DEVICE_CPU);
+    }
+  }
+  ASSERT_INT_EQ(n_compute, 1);
+  ASSERT_INT_EQ(n_copy, 1);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sched, placement_scalar_copy_operand_splits_before_compute) {
   PolyCtx *ctx = poly_ctx_new();
   float x_data[1] = {5.0f};

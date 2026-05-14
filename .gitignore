@@ -20,6 +20,10 @@ temp/
 *.egg-info
 .pytest_cache/
 .obsidian/
+.codex/
+.idea/
+.vscode/
+*.canvas
 out*.txt
 bench/results/2*.json
 py/csrc/

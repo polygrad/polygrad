@@ -7,8 +7,9 @@
 'use strict'
 
 const { runTests } = require('../test_shared')
-const { runInstanceTests } = require('../test_instance_shared')
+const { runInstanceTests, runInstanceSmokeTests } = require('../test_instance_shared')
 
 // Expose globally for index.html
 window.__runTests = runTests
 window.__runInstanceTests = runInstanceTests
+window.__runInstanceSmokeTests = runInstanceSmokeTests

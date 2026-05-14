@@ -383,6 +383,10 @@ class TestRepr:
         assert 'shape=(3,)' in repr(t)
         assert 'float32' in repr(t)
 
+    def test_bool_raises_like_tinygrad(self):
+        with pytest.raises(TypeError, match="__bool__ on Tensor is not defined"):
+            bool(Tensor([1.0]))
+
     def test_repr_f64(self):
         t = Tensor([1, 2, 3], dtype='float64')
         assert 'float64' in repr(t)

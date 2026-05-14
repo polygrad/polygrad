@@ -60,6 +60,10 @@ function normalizeBindings(io) {
   return { names, arrays }
 }
 
+function isPromiseLike(v) {
+  return v && typeof v.then === 'function'
+}
+
 function createBoundInstanceClass(runtime) {
   const _runtime = runtime
 
@@ -68,6 +72,26 @@ function createBoundInstanceClass(runtime) {
       if (!handle) throw new Error('polygrad: failed to create PolyInstance')
       this._rt = _runtime
       this._handle = handle
+      this._asyncTail = Promise.resolve()
+    }
+
+    _usesAsyncHostBridge() {
+      const caps = this._rt && this._rt._core && this._rt._core.caps
+      return caps && caps.core === 'wasm' && caps.device === 'webgpu'
+    }
+
+    _enqueueAsync(fn) {
+      const run = this._asyncTail.then(fn, fn)
+      this._asyncTail = run.catch(() => {})
+      return run
+    }
+
+    _paramDataRaw(i) {
+      return this._rt._core.instance.paramData(this._handle, i)
+    }
+
+    _bufDataRaw(i) {
+      return this._rt._core.instance.bufData(this._handle, i)
     }
 
     static fromIR(irBytes, weightsBytes) {
@@ -129,7 +153,8 @@ function createBoundInstanceClass(runtime) {
     }
 
     paramData(i) {
-      return this._rt._core.instance.paramData(this._handle, i)
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._paramDataRaw(i))
+      return this._paramDataRaw(i)
     }
 
     paramTrainable(i) {
@@ -143,9 +168,19 @@ function createBoundInstanceClass(runtime) {
     }
 
     params() {
+      if (this._usesAsyncHostBridge()) {
+        return this._enqueueAsync(async () => {
+          const items = []
+          for (let i = 0; i < this.paramCount; i++) {
+            items.push([this.paramName(i), this.paramShape(i), await this._paramDataRaw(i)])
+          }
+          return items
+        })
+      }
+
       const items = []
       for (let i = 0; i < this.paramCount; i++) {
-        items.push([this.paramName(i), this.paramShape(i), this.paramData(i)])
+        items.push([this.paramName(i), this.paramShape(i), this._paramDataRaw(i)])
       }
       return items
     }
@@ -177,7 +212,8 @@ function createBoundInstanceClass(runtime) {
     }
 
     bufData(i) {
-      return this._rt._core.instance.bufData(this._handle, i)
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._bufDataRaw(i))
+      return this._bufDataRaw(i)
     }
 
     findBuf(name) {
@@ -188,7 +224,9 @@ function createBoundInstanceClass(runtime) {
     }
 
     exportWeights() {
-      return this._rt._core.instance.exportWeights(this._handle)
+      const run = () => this._rt._core.instance.exportWeights(this._handle)
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return run()
     }
 
     importWeights(bytes) {
@@ -204,7 +242,9 @@ function createBoundInstanceClass(runtime) {
     }
 
     saveBundle() {
-      return this._rt._core.instance.saveBundle(this._handle)
+      const run = () => this._rt._core.instance.saveBundle(this._handle)
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return run()
     }
 
     static fromBundle(bytes) {
@@ -248,18 +288,65 @@ function createBoundInstanceClass(runtime) {
 
     forward(io) {
       const { names, arrays } = normalizeBindings(io)
-      const rc = this._rt._core.instance.forward(this._handle, names, arrays)
-      if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
-      return this._collectOutputs()
+      const run = () => {
+        const rc = this._rt._core.instance.forward(this._handle, names, arrays)
+        if (isPromiseLike(rc)) {
+          return rc.then(v => {
+            if (v !== 0) throw new Error(`polygrad: forward failed (rc=${v})`)
+            return this._collectOutputsRaw()
+          })
+        }
+        if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
+        return this._collectOutputsRaw()
+      }
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return run()
     }
 
     trainStep(io) {
       const { names, arrays } = normalizeBindings(io)
-      const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
-      if (loss == null || Number.isNaN(loss)) {
-        throw new Error('polygrad: trainStep failed')
+      const run = () => {
+        const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
+        if (isPromiseLike(loss)) {
+          return loss.then(v => {
+            if (v == null || Number.isNaN(v)) throw new Error('polygrad: trainStep failed')
+            return v
+          })
+        }
+        if (loss == null || Number.isNaN(loss)) {
+          throw new Error('polygrad: trainStep failed')
+        }
+        return loss
       }
-      return loss
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
+      return run()
+    }
+
+    _collectOutputsRaw() {
+      if (this._usesAsyncHostBridge()) {
+        return (async () => {
+          const outputs = {}
+          for (let i = 0; i < this.bufCount; i++) {
+            if (this.bufRole(i) === ROLE_OUTPUT) {
+              outputs[this.bufName(i)] = await this._bufDataRaw(i)
+            }
+          }
+          return outputs
+        })()
+      }
+
+      const outputs = {}
+      for (let i = 0; i < this.bufCount; i++) {
+        if (this.bufRole(i) === ROLE_OUTPUT) {
+          outputs[this.bufName(i)] = this._bufDataRaw(i)
+        }
+      }
+      return outputs
+    }
+
+    _collectOutputs() {
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._collectOutputsRaw())
+      return this._collectOutputsRaw()
     }
 
     fit(io, opts = {}) {
@@ -277,23 +364,30 @@ function createBoundInstanceClass(runtime) {
         )
       }
       const losses = []
-      for (let step = 0; step < epochs; step++) {
+      let asyncChain = null
+      const runStep = (step) => {
         const loss = this.trainStep(io)
+        if (isPromiseLike(loss)) {
+          return loss.then(v => {
+            losses.push(v)
+            if (opts.onStep) opts.onStep(step, v)
+          })
+        }
         losses.push(loss)
         if (opts.onStep) opts.onStep(step, loss)
+        return null
       }
+      for (let step = 0; step < epochs; step++) {
+        if (asyncChain) asyncChain = asyncChain.then(() => runStep(step))
+        else {
+          const r = runStep(step)
+          if (isPromiseLike(r)) asyncChain = r
+        }
+      }
+      if (asyncChain) return asyncChain.then(() => losses)
       return losses
     }
 
-    _collectOutputs() {
-      const outputs = {}
-      for (let i = 0; i < this.bufCount; i++) {
-        if (this.bufRole(i) === ROLE_OUTPUT) {
-          outputs[this.bufName(i)] = this.bufData(i)
-        }
-      }
-      return outputs
-    }
   }
 
   Instance.ROLE_PARAM = ROLE_PARAM

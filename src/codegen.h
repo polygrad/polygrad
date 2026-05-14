@@ -42,8 +42,10 @@ typedef struct {
   bool has_mulacc; /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
   bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
   bool has_local; /* Backend supports local/workgroup scheduling */
+  bool has_threads; /* Backend supports CPU-style core_id runtime threading */
   bool has_simd_int; /* Backend supports packed integer ops in vector regs (vpaddd etc) */
   int max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
+  int max_threads; /* Max CPU worker threads for THREAD axes (0=disabled) */
   const PolyTensorCore *tensor_cores; /* array of available TC specs (NULL if none) */
   int n_tensor_cores; /* number of TC specs */
 } PolyRendererCaps;
@@ -210,6 +212,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name);
 
 /* Execute a compiled program. args is an array of buffer pointers. */
 void poly_program_call(PolyProgram *prog, void **args, int n_args);
+void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int threads);
 
 /* Free a compiled program (dlclose + cleanup). */
 void poly_program_destroy(PolyProgram *prog);

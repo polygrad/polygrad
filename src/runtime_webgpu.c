@@ -192,17 +192,35 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
 EM_ASYNC_JS(
     uintptr_t,
     js_webgpu_get_or_create_pipeline,
-    (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params),
+    (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params, int debug_level),
     {
+  const t0 = performance.now();
   const st = await Module.__polygradEnsureWebGPU();
   const wgsl = UTF8ToString(wgsl_ptr);
   const entry = UTF8ToString(entry_ptr);
   const key = wgsl + '::' + entry + '::' + n_args + '::' + n_params;
   const cached = st.pipelineKeyToId.get(key);
-  if (cached) return cached;
+  if (cached) {
+    if (debug_level >= 7) {
+      console.log(`[polygrad:webgpu:pipeline] hit entry=${entry} id=${cached} wgsl=${wgsl.length}`);
+    }
+    return cached;
+  }
+  if (debug_level >= 7) {
+    console.log(
+      `[polygrad:webgpu:pipeline] miss entry=${entry} wgsl=${wgsl.length} ` +
+      `n_args=${n_args} n_params=${n_params}`
+    );
+  }
 
   const shaderModule = st.device.createShaderModule({ code: wgsl });
   const info = await shaderModule.getCompilationInfo();
+  if (debug_level >= 7) {
+    console.log(
+      `[polygrad:webgpu:pipeline] compilation-info entry=${entry} ` +
+      `messages=${info.messages.length} ms=${(performance.now() - t0).toFixed(3)}`
+    );
+  }
   let hasError = false;
   for (const msg of info.messages) {
     if (msg.type === 'error') hasError = true;
@@ -238,6 +256,12 @@ EM_ASYNC_JS(
   const id = st.nextPipelineId++;
   st.pipelines.set(id, { pipeline, bindGroupLayout, entry, wgsl });
   st.pipelineKeyToId.set(key, id);
+  if (debug_level >= 7) {
+    console.log(
+      `[polygrad:webgpu:pipeline] ready entry=${entry} id=${id} ` +
+      `ms=${(performance.now() - t0).toFixed(3)}`
+    );
+  }
   return id;
 })
 
@@ -407,14 +431,22 @@ int poly_webgpu_memset_zero(uintptr_t handle, size_t nbytes) {
 }
 
 int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn_name, PolyRunner *out) {
+  bool timing = poly_debug_at_least(7);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:webgpu:lower] begin fn=%s root=%p\n", fn_name, (void *)scheduled_root);
+    fflush(stderr);
+  }
   if (webgpu_graph_has_unsupported_dtype(ctx, scheduled_root)) {
     fprintf(stderr, "polygrad: webgpu: float64 kernels are not supported\n");
     return -1;
   }
+  double t_check = timing ? poly_now_ms() : 0.0;
 
   int n_lin = 0;
   PolyUOp **lin = poly_linearize_webgpu(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
+  double t_lin = timing ? poly_now_ms() : 0.0;
 
   int grid[3], local[3];
   webgpu_extract_dims(lin, n_lin, grid, local);
@@ -422,6 +454,16 @@ int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn
   char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
   free(lin);
   if (!wgsl) return -1;
+  double t_render = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr,
+        "[polygrad:webgpu:lower] rendered fn=%s lin=%d wgsl=%zu grid=%d,%d,%d local=%d,%d,%d check=%.3fms lin=%.3fms render=%.3fms\n",
+        fn_name, n_lin, strlen(wgsl), grid[0], grid[1], grid[2], local[0], local[1], local[2],
+        t_check - t0, t_lin - t_check, t_render - t_lin
+    );
+    fflush(stderr);
+  }
   if (poly_dump_kernels_enabled())
     fprintf(stderr, "=== WEBGPU KERNEL %s ===\n%s\n=== END ===\n", fn_name, wgsl);
 
@@ -454,12 +496,37 @@ int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn
 int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
   if (!runner || !runner->handle) return -1;
   PolyWebGpuRunnerHandle *wh = (PolyWebGpuRunnerHandle *)runner->handle;
+  bool timing = poly_debug_at_least(7);
+  double t0 = timing ? poly_now_ms() : 0.0;
   if (!wh->pipeline_id || wh->n_bindings != n_args) {
-    wh->pipeline_id = js_webgpu_get_or_create_pipeline(wh->wgsl, wh->entry, n_args, runner->n_params);
+    if (timing) {
+      fprintf(
+          stderr, "[polygrad:webgpu:execute] pipeline begin entry=%s n_args=%d n_params=%d wgsl=%zu\n",
+          wh->entry, n_args, runner->n_params, strlen(wh->wgsl)
+      );
+      fflush(stderr);
+    }
+    wh->pipeline_id =
+        js_webgpu_get_or_create_pipeline(wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level());
     wh->n_bindings = n_args;
     if (!wh->pipeline_id) return -1;
+    if (timing) {
+      double t_pipeline = poly_now_ms();
+      fprintf(
+          stderr, "[polygrad:webgpu:execute] pipeline done entry=%s id=%lu ms=%.3f\n", wh->entry,
+          (unsigned long)wh->pipeline_id, t_pipeline - t0
+      );
+      fflush(stderr);
+    }
   }
-  return js_webgpu_dispatch(
+  if (timing) {
+    fprintf(
+        stderr, "[polygrad:webgpu:execute] dispatch begin entry=%s pipeline=%lu\n", wh->entry,
+        (unsigned long)wh->pipeline_id
+    );
+    fflush(stderr);
+  }
+  int ret = js_webgpu_dispatch(
       wh->pipeline_id,
       (const uintptr_t *)args,
       n_args,
@@ -468,6 +535,15 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
       runner->grid[1],
       runner->grid[2],
       poly_debug_level());
+  if (timing) {
+    double t_done = poly_now_ms();
+    fprintf(
+        stderr, "[polygrad:webgpu:execute] dispatch done entry=%s ret=%d total=%.3fms\n", wh->entry,
+        ret, t_done - t0
+    );
+    fflush(stderr);
+  }
+  return ret;
 }
 
 void poly_webgpu_free_runner(PolyRunner *runner) {

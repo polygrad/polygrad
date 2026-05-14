@@ -9,6 +9,108 @@
 #include "../src/tensor.h"
 #include "../src/wasm_builder.h"
 
+static int wasm_run_c_i32(PolyUOp **lin, int n_lin, const char *fn_name, int32_t *out) {
+  char *src = poly_render_c(lin, n_lin, fn_name);
+  if (!src) return -1;
+  PolyProgram *prog = poly_compile_c(src, fn_name);
+  free(src);
+  if (!prog) return -1;
+  void *args[1] = {out};
+  poly_program_call(prog, args, 1);
+  poly_program_destroy(prog);
+  return 0;
+}
+
+static int wasm_run_c_i64(PolyUOp **lin, int n_lin, const char *fn_name, int64_t *out) {
+  char *src = poly_render_c(lin, n_lin, fn_name);
+  if (!src) return -1;
+  PolyProgram *prog = poly_compile_c(src, fn_name);
+  free(src);
+  if (!prog) return -1;
+  void *args[1] = {out};
+  poly_program_call(prog, args, 1);
+  poly_program_destroy(prog);
+  return 0;
+}
+
+static int wasm_run_c_f32_buffer(PolyUOp **lin, int n_lin, const char *fn_name, float *buf) {
+  char *src = poly_render_c(lin, n_lin, fn_name);
+  if (!src) return -1;
+  PolyProgram *prog = poly_compile_c(src, fn_name);
+  free(src);
+  if (!prog) return -1;
+  void *args[1] = {buf};
+  poly_program_call(prog, args, 1);
+  poly_program_destroy(prog);
+  return 0;
+}
+
+static int wasm_write_module(const char *path, const uint8_t *wasm, int wasm_size) {
+  FILE *f = fopen(path, "wb");
+  if (!f) return -1;
+  size_t written = fwrite(wasm, 1, (size_t)wasm_size, f);
+  int close_rc = fclose(f);
+  return (written == (size_t)wasm_size && close_rc == 0) ? 0 : -1;
+}
+
+static int node_run_wasm_i32(const char *path, int32_t expected) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[2048];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "inst.exports.kernel(0);"
+      "const got=new DataView(mem.buffer).getInt32(0,true);"
+      "if(got!==%d){console.error('got '+got+' expected %d');process.exit(2)}\"",
+      path, expected, expected
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_f32_buffer(const char *path, float expected) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[2048];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "const dv=new DataView(mem.buffer);"
+      "dv.setFloat32(4,2,true);dv.setFloat32(8,3,true);dv.setFloat32(12,5,true);"
+      "inst.exports.kernel(0);"
+      "const got=dv.getFloat32(0,true);const expected=%.9g;"
+      "if(Math.abs(got-expected)>1e-6){console.error('got '+got+' expected "
+      "'+expected);process.exit(2)}\"",
+      path, (double)expected
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_i64(const char *path, int64_t expected) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[2048];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "inst.exports.kernel(0);"
+      "const got=new DataView(mem.buffer).getBigInt64(0,true);"
+      "const expected=BigInt('%lld');"
+      "if(got!==expected){console.error('got '+got+' expected '+expected);process.exit(2)}\"",
+      path, (long long)expected
+  );
+  return system(cmd);
+}
+
 /* WASM builder tests */
 
 TEST(wasm, leb128_unsigned) {
@@ -539,8 +641,7 @@ TEST(wasm, sparse_cross_entropy_i64_gather_index_validates) {
       char cmd[512];
       snprintf(
           cmd, sizeof(cmd),
-          "node -e \"const fs=require('fs'); new WebAssembly.Module(fs.readFileSync('%s'))\"",
-          path
+          "node -e \"const fs=require('fs'); new WebAssembly.Module(fs.readFileSync('%s'))\"", path
       );
       ASSERT_INT_EQ(system(cmd), 0);
     }
@@ -553,6 +654,239 @@ TEST(wasm, sparse_cross_entropy_i64_gather_index_validates) {
   ASSERT_TRUE(saw_i32_wrap);
 
   poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, mixed_width_compare_validates) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* tinygrad's UOp spec wants comparison operands to share a base dtype, but
+   * imported/index-heavy graphs can expose a late widened label compared with
+   * an int bound. WASM has no implicit casts, so the renderer must coerce the
+   * narrower operand before emitting i64.lt_s/i64.eq/etc. */
+  PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_i32, out, zero, poly_arg_none());
+  PolyUOp *lhs = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(7));
+  PolyUOp *rhs = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(9));
+  PolyUOp *lt = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, lhs, rhs, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, lt, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  int32_t c_out = 0;
+  ASSERT_INT_EQ(wasm_run_c_i32(lin, n_lin, "mixed_width_compare_c", &c_out), 0);
+  ASSERT_INT_EQ(
+      wasm_write_module("/tmp/polygrad_test_mixed_width_compare.wasm", wasm, wasm_size), 0
+  );
+  ASSERT_INT_EQ(node_run_wasm_i32("/tmp/polygrad_test_mixed_width_compare.wasm", c_out), 0);
+  ASSERT_INT_EQ(c_out, 1);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, mixed_width_shift_validates) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* The first Qwen renderer failure after comparison coercion was i64.shl with
+   * an i32 left operand. For WASM, both operands consumed by i64.shl must be
+   * i64 stack values even when Polygrad created the shift count as int32. */
+  PolyDType ptr_i64 = poly_dtype_ptr(POLY_INT64, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_i64, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_i64, out, zero, poly_arg_none());
+  PolyUOp *lhs = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
+  PolyUOp *rhs = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *shl = poly_uop2(ctx, POLY_OP_SHL, POLY_INT64, lhs, rhs, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, shl, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  int64_t c_out = 0;
+  ASSERT_INT_EQ(wasm_run_c_i64(lin, n_lin, "mixed_width_shift_c", &c_out), 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_mixed_width_shift.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_i64("/tmp/polygrad_test_mixed_width_shift.wasm", c_out), 0);
+  ASSERT_INT_EQ(c_out, 28);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, unsigned_i64_div_mod_matches_c_renderer) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* Tinygrad renderers distinguish signed/unsigned integer lowering:
+   * LLVM emits sdiv/udiv and srem/urem, and NIR emits idiv/udiv and irem/umod.
+   * WASM has the same split. This case catches the silent high-bit bug where a
+   * uint64 IDIV used i64.div_s and returned -1 instead of 2. */
+  PolyDType ptr_u64 = poly_dtype_ptr(POLY_UINT64, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_u64, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_u64, out, zero, poly_arg_none());
+  PolyUOp *lhs =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)0x8000000000000005ULL));
+  PolyUOp *rhs =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)0x4000000000000000ULL));
+  PolyUOp *idiv = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT64, lhs, rhs, poly_arg_none());
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, POLY_UINT64, lhs, rhs, poly_arg_none());
+  PolyUOp *outv = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT64, idiv, mod, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, outv, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  bool found_div_u = false, found_rem_u = false;
+  for (int i = 0; i < wasm_size; i++) {
+    if (wasm[i] == WASM_OP_I64_DIV_U) found_div_u = true;
+    if (wasm[i] == WASM_OP_I64_REM_U) found_rem_u = true;
+  }
+  ASSERT_TRUE(found_div_u);
+  ASSERT_TRUE(found_rem_u);
+
+  int64_t c_out = 0;
+  ASSERT_INT_EQ(wasm_run_c_i64(lin, n_lin, "unsigned_i64_div_mod_c", &c_out), 0);
+  ASSERT_INT_EQ(
+      wasm_write_module("/tmp/polygrad_test_unsigned_i64_div_mod.wasm", wasm, wasm_size), 0
+  );
+  ASSERT_INT_EQ(node_run_wasm_i64("/tmp/polygrad_test_unsigned_i64_div_mod.wasm", c_out), 0);
+  ASSERT_INT_EQ(c_out, 7);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, mulacc_operand_order_matches_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* tinygrad's Ops.MULACC is (x * y) + z. WASM is stack based, so a renderer
+   * that pushes x,y,z and then emits MUL,ADD silently computes x + (y * z).
+   * Keep this C-vs-WASM test on loaded values to prevent constant folding from
+   * hiding the operand-order bug. */
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *i0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *i1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *i2 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *i3 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, buf, i0, poly_arg_none());
+  PolyUOp *x_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, buf, i1, poly_arg_none());
+  PolyUOp *y_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, buf, i2, poly_arg_none());
+  PolyUOp *z_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, buf, i3, poly_arg_none());
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, x_idx, poly_arg_none());
+  PolyUOp *y = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, y_idx, poly_arg_none());
+  PolyUOp *z = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, z_idx, poly_arg_none());
+  PolyUOp *mulacc_src[3] = {x, y, z};
+  PolyUOp *mulacc = poly_uop(ctx, POLY_OP_MULACC, POLY_FLOAT32, mulacc_src, 3, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, mulacc, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  float c_buf[4] = {0.0f, 2.0f, 3.0f, 5.0f};
+  ASSERT_INT_EQ(wasm_run_c_f32_buffer(lin, n_lin, "mulacc_operand_order_c", c_buf), 0);
+  ASSERT_FLOAT_EQ(c_buf[0], 11.0f, 1e-6);
+  ASSERT_INT_EQ(
+      wasm_write_module("/tmp/polygrad_test_mulacc_operand_order.wasm", wasm, wasm_size), 0
+  );
+  ASSERT_INT_EQ(
+      node_run_wasm_f32_buffer("/tmp/polygrad_test_mulacc_operand_order.wasm", c_buf[0]), 0
+  );
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, define_reg_array_constant_indexes_match_c_renderer) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* Qwen's WASM-linearized kernels contain DEFINE_REG(ptr_size=3/4) with
+   * constant INDEX(reg, i) accesses. Native C/WGSL render these as local arrays;
+   * WASM must not collapse every element to the same scalar local. */
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType reg_ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_REG);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *reg = poly_uop0(ctx, POLY_OP_DEFINE_REG, reg_ptr, poly_arg_int(0));
+  PolyUOp *i0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *i3 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(5.0));
+
+  PolyUOp *reg0 = poly_uop2(ctx, POLY_OP_INDEX, reg_ptr, reg, i0, poly_arg_none());
+  PolyUOp *store0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, reg0, two, poly_arg_none());
+  PolyUOp *after0_src[2] = {reg, store0};
+  PolyUOp *after0 = poly_uop(ctx, POLY_OP_AFTER, reg_ptr, after0_src, 2, poly_arg_none());
+
+  PolyUOp *reg3 = poly_uop2(ctx, POLY_OP_INDEX, reg_ptr, after0, i3, poly_arg_none());
+  PolyUOp *store3 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, reg3, five, poly_arg_none());
+  PolyUOp *after1_src[2] = {after0, store3};
+  PolyUOp *after1 = poly_uop(ctx, POLY_OP_AFTER, reg_ptr, after1_src, 2, poly_arg_none());
+
+  PolyUOp *load0 = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_FLOAT32,
+      poly_uop2(ctx, POLY_OP_INDEX, reg_ptr, after1, i0, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *load3 = poly_uop1(
+      ctx, POLY_OP_LOAD, POLY_FLOAT32,
+      poly_uop2(ctx, POLY_OP_INDEX, reg_ptr, after1, i3, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load0, load3, poly_arg_none());
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, i0, poly_arg_none());
+  PolyUOp *store_out = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, sum, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store_out);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+
+  float c_buf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  ASSERT_INT_EQ(wasm_run_c_f32_buffer(lin, n_lin, "define_reg_array_c", c_buf), 0);
+  ASSERT_FLOAT_EQ(c_buf[0], 7.0f, 1e-6);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_define_reg_array.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_f32_buffer("/tmp/polygrad_test_define_reg_array.wasm", c_buf[0]), 0);
+
+  free(wasm);
+  free(lin);
   poly_ctx_destroy(ctx);
   PASS();
 }

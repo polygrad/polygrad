@@ -10,6 +10,7 @@
 
 #include "schedule/rangeify.h"
 #include "schedule/indexing.h"
+#include "device.h"
 #include "simplify.h"
 #include <assert.h>
 #include <limits.h>
@@ -51,9 +52,40 @@ PolyRangeifyStats poly_rangeify_stats_get(void) {
  * cache and store it in POLY_ARG_BUFFERIZE_OPTS. We do not infer placement
  * here or walk the value graph again during add_buffers.
  */
-static PolyDevice bufferize_device_hint(PolyUOp *value, PolyMap *device_memo) {
+static PolyDevice bufferize_device_hint(PolyCtx *ctx, PolyUOp *value, PolyMap *device_memo) {
   if (!value) return POLY_DEVICE_AUTO;
-  return poly_uop_device_cached(value, device_memo);
+  if (device_memo) {
+    void *cached = poly_map_get(device_memo, poly_ptr_hash(value), value, poly_ptr_eq);
+    if (cached) return (PolyDevice)((intptr_t)cached - 1);
+  }
+
+  PolyDevice result = POLY_DEVICE_AUTO;
+  if (value->op == POLY_OP_COPY && value->n_src >= 2) {
+    result = poly_device_from_device_uop(value->src[1]);
+  } else if (value->op == POLY_OP_BUFFER && value->n_src >= 2) {
+    result = poly_device_from_device_uop(value->src[1]);
+  } else if (ctx && (value->op == POLY_OP_BUFFER || value->op == POLY_OP_PARAM)) {
+    PolyBuffer *buf = poly_buffer_get(ctx, value);
+    if (buf && buf->device != POLY_DEVICE_AUTO) result = buf->device;
+  } else if (value->op != POLY_OP_CONST && value->op != POLY_OP_VCONST &&
+             value->op != POLY_OP_DEVICE) {
+    for (int i = 0; i < value->n_src; i++) {
+      PolyDevice child = bufferize_device_hint(ctx, value->src[i], device_memo);
+      if (child == POLY_DEVICE_AUTO) continue;
+      if (result == POLY_DEVICE_AUTO) {
+        result = child;
+      } else if (!poly_devices_share_storage(result, child)) {
+        result = POLY_DEVICE_AUTO;
+        break;
+      }
+    }
+  }
+
+  if (device_memo)
+    poly_map_set(
+        device_memo, poly_ptr_hash(value), value, (void *)(intptr_t)(result + 1), poly_ptr_eq
+    );
+  return result;
 }
 
 static PolyUOp *rangeify_index_const(PolyCtx *ctx, int64_t value) {
@@ -402,6 +434,14 @@ static PolyUOp *uop_base_after_movement(PolyUOp *u) {
   return u;
 }
 
+static PolyUOp *uop_realize_src_base(PolyUOp *u) {
+  while (u && u->n_src > 0 &&
+         (poly_opset_has(POLY_GROUP_MOVEMENT, u->op) || u->op == POLY_OP_MULTI ||
+          u->op == POLY_OP_DETACH))
+    u = u->src[0];
+  return u;
+}
+
 void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
   if (sink->op != POLY_OP_SINK) return;
 
@@ -434,6 +474,17 @@ void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
       break;
     default:
       break;
+    }
+
+    /* tinygrad schedule/indexing.py:pm_generate_realize_map also realizes
+     * sources of COPY/MSELECT/MSTACK whose base is not ALWAYS_CONTIGUOUS.
+     * Without this, COPY(computed_expr, DEVICE) can survive as the value of a
+     * STORE and leak into backend renderers as an ALU operand. */
+    if (u->op == POLY_OP_COPY || u->op == POLY_OP_MSELECT || u->op == POLY_OP_MSTACK) {
+      for (int j = 0; j < u->n_src; j++) {
+        PolyUOp *base = uop_realize_src_base(u->src[j]);
+        if (base && !is_always_contiguous(base->op)) realize_mark(ictx, u->src[j]);
+      }
     }
   }
 
@@ -1028,6 +1079,17 @@ static PolyUOp *movement_chain_base_buffer(PolyUOp *u) {
   return (cur && cur->op == POLY_OP_BUFFER) ? cur : NULL;
 }
 
+static PolyUOp *make_bufferize_nonremovable(PolyCtx *ctx, PolyUOp *bufferize) {
+  if (!ctx || !bufferize || bufferize->op != POLY_OP_BUFFERIZE ||
+      !poly_bufferize_arg_removable(bufferize->arg))
+    return bufferize;
+  PolyArg arg = poly_arg_bufferize_opts(
+      poly_bufferize_arg_device(bufferize->arg), poly_bufferize_arg_addrspace(bufferize->arg),
+      false
+  );
+  return poly_uop(ctx, POLY_OP_BUFFERIZE, bufferize->dtype, bufferize->src, bufferize->n_src, arg);
+}
+
 PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyCtx *ctx = ictx->ctx;
 
@@ -1054,6 +1116,16 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
       PolyUOp *rs = rmap_get(rmap, u->src[j]);
       new_src[j] = rs ? rs : u->src[j];
       if (new_src[j] != u->src[j]) src_changed = true;
+
+      /* tinygrad indexing.py creates BUFFERIZE at the consumer boundary:
+       * removable = x.op is not Ops.COPY and s.op not in ALWAYS_CONTIGUOUS.
+       * Polygrad creates BUFFERIZE at the realized producer, so preserve the
+       * same COPY boundary here when a realized source flows into COPY. */
+      if (u->op == POLY_OP_COPY && new_src[j] && new_src[j]->op == POLY_OP_BUFFERIZE &&
+          poly_bufferize_arg_removable(new_src[j]->arg)) {
+        new_src[j] = make_bufferize_nonremovable(ctx, new_src[j]);
+        src_changed = true;
+      }
 
       /* Structural per-consumer BUFFER indexing fallback:
        * capture source-specific ranges through movement chains ending at BUFFER
@@ -1361,7 +1433,12 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
           bool removable =
               (u->op != POLY_OP_CONTIGUOUS && u->op != POLY_OP_COPY && u->op != POLY_OP_ASSIGN &&
                u->op != POLY_OP_ENCDEC && u->op != POLY_OP_BUFFER && u->op != POLY_OP_BUFFER_VIEW);
-          PolyDevice bdev = bufferize_device_hint(val, device_memo);
+          /* Tinygrad uses BufferizeOpts(device=s.device), where s is the
+           * realized source before range/index rewriting. Using `val` here is
+           * too late: by then BUFFER/PARAM sources may have been rewritten into
+           * INDEX(PARAM, ...), which has no structural device and collapses the
+           * intermediate to AUTO. */
+          PolyDevice bdev = bufferize_device_hint(ctx, u, device_memo);
           result = poly_uop(
               ctx, POLY_OP_BUFFERIZE, u->dtype, buf_src, n_bsrc,
               poly_arg_bufferize_opts((int32_t)bdev, POLY_ADDR_GLOBAL, removable)
@@ -2265,7 +2342,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
       }
 
       /* C4e: assign_to_contiguous — safety net.
-       * poly_legacy_assign_buffer() normalizes targets to base BUFFERs at construction
+       * poly_store_buffer_update() normalizes targets to base BUFFERs at construction
        * time. This rule catches edge cases that bypass the frontend:
        * if target is not PARAM/BUFFER/ASSIGN/CONTIGUOUS, wrap in CONTIGUOUS.
        * Ref: tinygrad earliest_rewrites assign_to_contiguous */
@@ -2307,6 +2384,7 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
   PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
+  PolyUOpCache *range_cache = poly_uop_cache_new();
 
   for (int t = 0; t < n_topo; t++) {
     PolyUOp *u = topo[t];
@@ -2332,36 +2410,34 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
 
       bool always_run =
           (val->op == POLY_OP_CONTIGUOUS || val->op == POLY_OP_COPY || val->op == POLY_OP_ASSIGN ||
-           val->op == POLY_OP_ENCDEC);
+           val->op == POLY_OP_ENCDEC || val->op == POLY_OP_AFTER);
 
       if (!always_run && n_buf_rngs == n_idx && n_buf_rngs > 0) {
-        /* Collect RANGEs reachable from val's subtree */
-        int n_val_topo;
-        PolyUOp **val_topo = poly_toposort(ctx, val, &n_val_topo);
-        PolyMap *val_ranges = poly_map_new(n_val_topo < 8 ? 8 : (uint32_t)n_val_topo);
-        for (int vi = 0; vi < n_val_topo; vi++) {
-          if (val_topo[vi]->op == POLY_OP_RANGE) rmap_set(val_ranges, val_topo[vi], val_topo[vi]);
-        }
-
         /* Build live mask.
          * CONSTs are dead axes (always index 0, contribute nothing).
-         * RANGEs not in val's subtree are also dead.
-         * Matches tinygrad cleanup_dead_axes: "CONSTs are already dead axes". */
+         * RANGEs not in val.ranges are also dead. This must use the cached
+         * active-range query, matching tinygrad's cached UOp.ranges property;
+         * a fresh backward-slice/toposort per BUFFERIZE axis is pathological
+         * for imported graphs such as Qwen. */
         bool live[POLY_MAX_DIMS];
         bool any_dead = false;
+        bool skip_cleanup = false;
         for (int d = 0; d < n_buf_rngs && d < POLY_MAX_DIMS; d++) {
           PolyUOp *br = bufferize->src[1 + d];
           if (br->op == POLY_OP_CONST) {
             live[d] = false;
             any_dead = true;
+          } else if (br->op == POLY_OP_RANGE && br->src[0] && br->src[0]->op != POLY_OP_CONST) {
+            /* tinygrad skips symbolic ranges here. */
+            skip_cleanup = true;
+            break;
           } else {
-            live[d] = (rmap_get(val_ranges, br) != NULL);
+            live[d] = poly_uop_in_ranges_ex(ctx, val, br, range_cache);
             if (!live[d]) any_dead = true;
           }
         }
-        poly_map_destroy(val_ranges);
 
-        if (any_dead) {
+        if (!skip_cleanup && any_dead) {
           PolyUOp *new_buf_src[POLY_MAX_DIMS + 1];
           PolyUOp *new_idx_src[POLY_MAX_DIMS + 1];
           int n_new = 0;
@@ -2388,6 +2464,7 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
   }
 
   PolyUOp *new_sink = rmap_get(rmap, sink);
+  poly_uop_cache_destroy(range_cache);
   poly_map_destroy(rmap);
   return new_sink ? new_sink : sink;
 }
@@ -2920,7 +2997,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
           PolyUOp *bufferize = poly_uop(
               ctx, POLY_OP_BUFFERIZE, poly_dtype_scalar(u->dtype), buf_src, n_rngs + 1,
               poly_arg_bufferize_opts(
-                  (int32_t)bufferize_device_hint(sub_s, device_memo), POLY_ADDR_GLOBAL, false
+                  (int32_t)bufferize_device_hint(ctx, sub_s, device_memo), POLY_ADDR_GLOBAL, false
               )
           ); /* removable=false */
 
@@ -3165,31 +3242,160 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     return NULL;
   }
 
+  bool timing = poly_debug_at_least(2);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] begin sink=%p n_src=%d\n", (void *)tensor_sink, tensor_sink->n_src);
+    fflush(stderr);
+  }
+
   /* tinygrad schedule/rangeify.py:get_kernel_graph
    * Polygrad still carries a few no-op boundaries here while the missing
    * preprocess parity stages are ported, but the stage order is kept explicit. */
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage earliest_rewrites begin\n");
+    fflush(stderr);
+  }
   tensor_sink = poly_earliest_rewrites(ctx, tensor_sink);
+  double t_earliest = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage earliest_rewrites done %.3fms\n", t_earliest - t0);
+    fflush(stderr);
+  }
 
   PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
   ictx->add_buffer_indices = true;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage realize_map begin\n");
+    fflush(stderr);
+  }
   poly_realize_map_build(ictx, tensor_sink);
+  double t_realize = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage realize_map done %.3fms\n", t_realize - t_earliest);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage range_prop begin\n");
+    fflush(stderr);
+  }
   poly_range_propagate(ictx, tensor_sink);
+  double t_range_prop = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage range_prop done %.3fms\n", t_range_prop - t_realize);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage run_rangeify begin\n");
+    fflush(stderr);
+  }
   PolyUOp *rangeified = poly_run_rangeify(ictx, tensor_sink);
+  double t_rangeify = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage run_rangeify done %.3fms\n", t_rangeify - t_range_prop);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage cleanup_dead_bufferize_axes begin\n");
+    fflush(stderr);
+  }
   PolyUOp *cleaned = poly_cleanup_dead_bufferize_axes(ctx, rangeified);
+  double t_cleanup = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage cleanup_dead_bufferize_axes done %.3fms\n", t_cleanup - t_rangeify);
+    fflush(stderr);
+  }
   /* tinygrad Phase 3 order:
-   *   symbolic + pm_reduce_simplify + pm_const_buffer_folding + pm_remove_bufferize
-   * polygrad's cleanup_dead_bufferize_axes already covers the dead-axis slice,
-   * but remove_bufferize still needs to see the simplified post-symbolic graph.
-   * Running it too early leaves removable helper BUFFERIZEs behind in `_tri`. */
-  cleaned = poly_graph_rewrite(ctx, cleaned, poly_symbolic());
-  cleaned = poly_apply_reduce_simplify(ctx, cleaned);
+   *   graph_rewrite(symbolic + pm_reduce_simplify + pm_const_buffer_folding +
+   *                 pm_remove_bufferize)
+   * Polygrad still keeps const folding / remove_bufferize as explicit
+   * follow-up stages, but symbolic and the reduce-simplify base matcher must
+   * be fused so reduce_collapse participates in the same rewrite fixpoint as
+   * the symbolic rules, matching tinygrad's schedule/rangeify.py boundary. */
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage symbolic_reduce_simplify begin\n");
+    fflush(stderr);
+  }
+  cleaned = poly_apply_symbolic_reduce_simplify(ctx, cleaned);
+  double t_reduce = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage symbolic_reduce_simplify done %.3fms\n", t_reduce - t_cleanup);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage remove_bufferize begin\n");
+    fflush(stderr);
+  }
   PolyUOp *removed = poly_remove_bufferize(ctx, cleaned);
+  double t_remove = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage remove_bufferize done %.3fms\n", t_remove - t_reduce);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage limit_bufs begin\n");
+    fflush(stderr);
+  }
   PolyUOp *limited = poly_limit_bufs(ctx, ictx, removed);
+  double t_limit = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage limit_bufs done %.3fms\n", t_limit - t_remove);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage flatten_bufferize_indices begin\n");
+    fflush(stderr);
+  }
   PolyUOp *flattened = poly_flatten_bufferize_indices(ctx, limited);
+  double t_flatten = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage flatten_bufferize_indices done %.3fms\n", t_flatten - t_limit);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage apply_add_buffers begin\n");
+    fflush(stderr);
+  }
   PolyUOp *kernel_graph = poly_apply_add_buffers(ctx, flattened, NULL);
+  double t_add_buffers = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage apply_add_buffers done %.3fms\n", t_add_buffers - t_flatten);
+    fflush(stderr);
+  }
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage add_range_tags begin\n");
+    fflush(stderr);
+  }
   kernel_graph = poly_add_range_tags(ctx, kernel_graph);
+  double t_tags = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:get_kernel_graph] stage add_range_tags done %.3fms\n", t_tags - t_add_buffers);
+    fflush(stderr);
+  }
   poly_indexing_ctx_destroy(ictx);
+  if (timing) {
+    int n_topo = 0;
+    poly_toposort(ctx, kernel_graph, &n_topo);
+    fprintf(
+        stderr,
+        "[polygrad:get_kernel_graph] done earliest=%.3fms realize_map=%.3fms range_prop=%.3fms rangeify=%.3fms cleanup=%.3fms symbolic_reduce=%.3fms remove=%.3fms limit=%.3fms flatten=%.3fms addbuf=%.3fms tags=%.3fms total=%.3fms topo=%d\n",
+        t_earliest - t0, t_realize - t_earliest, t_range_prop - t_realize,
+        t_rangeify - t_range_prop, t_cleanup - t_rangeify, t_reduce - t_cleanup,
+        t_remove - t_reduce, t_limit - t_remove, t_flatten - t_limit,
+        t_add_buffers - t_flatten, t_tags - t_add_buffers, t_tags - t0, n_topo
+    );
+    fflush(stderr);
+  }
   return kernel_graph;
+}
+
+static bool poly_kernel_body_needs_zero(PolyCtx *ctx, PolyUOp *u) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, u, &n);
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_REDUCE_AXIS) return true;
+  }
+  return false;
 }
 
 PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
@@ -3204,13 +3410,27 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     return result;
   }
 
+  bool timing = poly_debug_at_least(2);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr, "[polygrad:kernel_schedule] begin kernel_graph=%p n_src=%d\n",
+        (void *)kernel_graph, kernel_graph->n_src
+    );
+    fflush(stderr);
+  }
+
   /* 3. Collect AFTER nodes from post-add_buffers graph.
-   * Two kinds: intermediate (BUFFER with LUNIQUE) and ASSIGN (existing BUFFER).
-   * Both produce kernels. Only intermediates get buffer allocation. */
+   * This mirrors tinygrad.schedule.create_schedule: AFTER carries the producer
+   * dependency, while BUFFER/PARAM without AFTER is considered already
+   * realized. LUNIQUE only means "allocate a schedule temporary"; a normal
+   * UNIQUE buffer can still be a producer when callify creates
+   * AFTER(buffer, STORE(buffer, value)) for a fresh materialization. */
   int n_topo;
   PolyUOp **topo = poly_toposort(ctx, kernel_graph, &n_topo);
   PolyUOp **after_nodes = NULL;
   bool *after_is_intermediate = NULL;
+  bool *after_is_assign = NULL;
   int n_after = 0, after_cap = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_AFTER && topo[i]->n_src >= 2 &&
@@ -3223,11 +3443,26 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
         void *tmp2 = realloc(after_is_intermediate, after_cap * sizeof(bool));
         assert(tmp2 && "OOM: after_is_intermediate realloc");
         after_is_intermediate = tmp2;
+        void *tmp3 = realloc(after_is_assign, after_cap * sizeof(bool));
+        assert(tmp3 && "OOM: after_is_assign realloc");
+        after_is_assign = tmp3;
       }
       after_nodes[n_after] = topo[i];
-      /* Intermediate: BUFFER has LUNIQUE child. ASSIGN: existing BUFFER (no LUNIQUE). */
+      PolyUOp *after_buf = topo[i]->src[0];
+      /* Intermediate: BUFFER has LUNIQUE child and needs schedule-owned
+       * storage.
+       *
+       * Normal non-LUNIQUE buffers are in-place ASSIGN targets unless they are
+       * freshly allocated materialization buffers. Transform-to-call allocates
+       * those output buffers before scheduling with valid=false, and the STORE
+       * is the producer that first populates them. Codegen-only/model buffers
+       * may have no ctx->buffers entry yet; they are still existing logical
+       * storage identities and must use ASSIGN/WAR ordering. */
       after_is_intermediate[n_after] =
-          (topo[i]->src[0]->n_src >= 1 && topo[i]->src[0]->src[0]->op == POLY_OP_LUNIQUE);
+          (after_buf->n_src >= 1 && after_buf->src[0]->op == POLY_OP_LUNIQUE);
+      PolyBuffer *after_storage = poly_buffer_get(ctx, after_buf);
+      after_is_assign[n_after] = !after_is_intermediate[n_after] &&
+                                 (!after_storage || after_storage->valid);
       n_after++;
     }
   }
@@ -3248,12 +3483,26 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   }
 
   int total_kernels = n_after + n_consumer_stores;
-
-  if (getenv("POLY_DEBUG_FLATTEN")) {
+  double t_count = timing ? poly_now_ms() : 0.0;
+  if (timing) {
     fprintf(
         stderr,
-        "[poly_build_kernel_schedule] n_after=%d (inter=%d assign=%d) n_consumer=%d total=%d\n",
-        n_after, n_intermediates, n_after - n_intermediates, n_consumer_stores, total_kernels
+        "[polygrad:kernel_schedule] counted topo=%d after=%d intermediates=%d consumer_stores=%d total=%d count=%.3fms\n",
+        n_topo, n_after, n_intermediates, n_consumer_stores, total_kernels, t_count - t0
+    );
+    fflush(stderr);
+  }
+
+  if (getenv("POLY_DEBUG_FLATTEN")) {
+    int n_assign_after = 0;
+    for (int _i = 0; _i < n_after; _i++)
+      if (after_is_assign[_i]) n_assign_after++;
+    int n_producer_after = n_after - n_assign_after;
+    fprintf(
+        stderr,
+        "[poly_build_kernel_schedule] n_after=%d (inter=%d assign=%d producer=%d) n_consumer=%d total=%d\n",
+        n_after, n_intermediates, n_assign_after, n_producer_after, n_consumer_stores,
+        total_kernels
     );
     fflush(stderr);
   }
@@ -3277,8 +3526,10 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   if (n_intermediates > 0) {
     result.intermediate_sizes = malloc(n_intermediates * sizeof(int64_t));
     result.intermediate_itemsizes = malloc(n_intermediates * sizeof(int));
+    result.intermediate_needs_zero = calloc((size_t)n_intermediates, sizeof(bool));
     result.intermediate_buf_uops = malloc(n_intermediates * sizeof(PolyUOp *));
   }
+  double t_alloc = timing ? poly_now_ms() : 0.0;
 
   /* Build intermediate_idx: maps after_nodes index → intermediate array index.
    * -1 for ASSIGN AFTERs (no intermediate allocation). */
@@ -3296,6 +3547,10 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   /* 5. Build AFTER kernels (both intermediate producers and ASSIGN writers)
    * using split_kernel_rewrite. */
   for (int a = 0; a < n_after; a++) {
+    if (poly_debug_at_least(7) && (a == 0 || (a % 100) == 0 || a + 1 == n_after)) {
+      fprintf(stderr, "[polygrad:kernel_schedule] after_split %d/%d\n", a + 1, n_after);
+      fflush(stderr);
+    }
     PolyUOp *after = after_nodes[a];
     PolyUOp *after_buf = after->src[0];
     PolyUOp *end_chain = after->src[1];
@@ -3340,6 +3595,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
       int ii = intermediate_idx[a];
       result.intermediate_sizes[ii] = (after_buf->arg.kind == POLY_ARG_INT) ? after_buf->arg.i : 1;
       result.intermediate_itemsizes[ii] = poly_dtype_itemsize(poly_dtype_scalar(after_buf->dtype));
+      result.intermediate_needs_zero[ii] = poly_kernel_body_needs_zero(ctx, end_chain);
       result.intermediate_buf_uops[ii] = after_buf;
     }
 
@@ -3347,6 +3603,15 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     free(sctx.var_bufs);
     poly_map_destroy(sctx.remap);
     poly_map_destroy(sctx.buf_to_param);
+  }
+  double t_after = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr,
+        "[polygrad:kernel_schedule] after_split done alloc=%.3fms split=%.3fms\n",
+        t_alloc - t_count, t_after - t_alloc
+    );
+    fflush(stderr);
   }
 
   /* 6. Build consumer kernels for STORE SINK sources.
@@ -3359,6 +3624,14 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
       PolyUOp *post_store = kernel_graph->src[i];
       PolyUOp *post_body = kernel_strip_copy_end_chain(post_store);
       if (!post_body || post_body->op != POLY_OP_STORE) continue;
+      if (poly_debug_at_least(7) &&
+          (consumer_idx == 0 || (consumer_idx % 100) == 0 || consumer_idx + 1 == n_consumer_stores)) {
+        fprintf(
+            stderr, "[polygrad:kernel_schedule] consumer_split %d/%d\n", consumer_idx + 1,
+            n_consumer_stores
+        );
+        fflush(stderr);
+      }
 
       PolySplitCtx sctx;
       memset(&sctx, 0, sizeof(sctx));
@@ -3403,23 +3676,32 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     }
     assert(consumer_idx == n_consumer_stores);
   }
+  double t_consumer = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr, "[polygrad:kernel_schedule] consumer_split done split=%.3fms\n",
+        t_consumer - t_after
+    );
+    fflush(stderr);
+  }
 
   result.n_kernels = total_kernels;
 
   /* Stage 5: Build exec_order from RAW + WAR + WAW dependency graph */
+  double t_order0 = timing ? poly_now_ms() : 0.0;
   if (total_kernels <= 1) {
     result.exec_order = NULL; /* trivial: no reordering needed */
   } else {
     int n = total_kernels;
 
     /* 5a. Build buf_to_prod: BUFFER → writer kernel index for INTERMEDIATE
-     * buffers only. ASSIGN AFTERs are NOT included — their ordering is
-     * handled purely by WAR/WAW edges (5c/5d). Including ASSIGN buffers
-     * here would create RAW "producer before consumer" edges that conflict
-     * with WAR "reader before writer" edges, causing cycles. */
+     * buffers only. In-place ASSIGN/overwrite AFTERs are NOT included — their
+     * ordering is handled purely by WAR/WAW edges (5c/5d). Fresh callify
+     * materializations, even when backed by normal UNIQUE buffers, are included
+     * because consumers that read through AFTER depend on the producer. */
     PolyMap *buf_to_prod = poly_map_new((size_t)(n_after < 8 ? 8 : n_after));
     for (int b = 0; b < n_after; b++) {
-      if (!after_is_intermediate[b]) continue; /* skip ASSIGN AFTERs */
+      if (after_is_assign[b]) continue; /* skip in-place overwrite AFTERs */
       PolyUOp *buf = after_nodes[b]->src[0];
       if (!poly_map_get(buf_to_prod, poly_ptr_hash(buf), buf, poly_ptr_eq))
         poly_map_set(
@@ -3448,12 +3730,12 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
      * e.g. weight ASSIGN reads m_buffer, m ASSIGN writes m_buffer →
      * WAR says weight before m, but program order says m before weight. */
     for (int w = 0; w < n_after; w++) {
-      if (after_is_intermediate[w]) continue; /* WAR only for ASSIGN writes */
+      if (!after_is_assign[w]) continue; /* WAR only for in-place overwrites */
       PolyUOp *write_buf = after_nodes[w]->src[0];
       for (int k = 0; k < n; k++) {
         if (k == w) continue;
         /* Skip WAR between ASSIGN kernels — program order handles this */
-        if (k < n_after && !after_is_intermediate[k]) continue;
+        if (k < n_after && after_is_assign[k]) continue;
         for (int p = 0; p < result.kernel_n_params[k]; p++) {
           if (result.param_to_buf[k][p] == write_buf) {
             dep[k * n + w] = true; /* reader k before writer w */
@@ -3471,7 +3753,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     {
       int prev_assign = -1;
       for (int k = 0; k < n_after; k++) {
-        if (after_is_intermediate[k]) continue; /* only ASSIGN kernels */
+        if (!after_is_assign[k]) continue; /* only ASSIGN kernels */
         if (prev_assign >= 0) dep[prev_assign * n + k] = true; /* prev before current */
         prev_assign = k;
       }
@@ -3483,10 +3765,10 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     {
       /* Collect ASSIGN writer indices per buffer */
       for (int w1 = 0; w1 < n_after; w1++) {
-        if (after_is_intermediate[w1]) continue;
+        if (!after_is_assign[w1]) continue;
         PolyUOp *buf1 = after_nodes[w1]->src[0];
         for (int w2 = w1 + 1; w2 < n_after; w2++) {
-          if (after_is_intermediate[w2]) continue;
+          if (!after_is_assign[w2]) continue;
           if (after_nodes[w2]->src[0] == buf1) {
             /* Two ASSIGN writers to same buffer: w1 before w2 (program order) */
             dep[w1 * n + w2] = true;
@@ -3542,6 +3824,14 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     free(ready);
     result.exec_order = order; /* NULL if cycle detected → sequential fallback */
   }
+  double t_order = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr, "[polygrad:kernel_schedule] exec_order done order=%.3fms total=%.3fms kernels=%d\n",
+        t_order - t_order0, t_order - t0, result.n_kernels
+    );
+    fflush(stderr);
+  }
 
 #ifndef NDEBUG
   /* Group A: intermediate_buf_uops populated and valid */
@@ -3583,7 +3873,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
      * enforced by WAR edges, so RAW assertion doesn't apply. */
     PolyMap *_btp = poly_map_new((size_t)(n_after < 4 ? 4 : n_after));
     for (int _b = 0; _b < n_after; _b++) {
-      if (!after_is_intermediate[_b]) continue; /* skip ASSIGN AFTERs */
+      if (after_is_assign[_b]) continue; /* skip in-place overwrite AFTERs */
       PolyUOp *_buf = after_nodes[_b]->src[0];
       if (!poly_map_get(_btp, poly_ptr_hash(_buf), _buf, poly_ptr_eq))
         poly_map_set(_btp, poly_ptr_hash(_buf), _buf, (PolyUOp *)(intptr_t)(_b + 1), poly_ptr_eq);
@@ -3608,6 +3898,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
 
   free(after_nodes);
   free(after_is_intermediate);
+  free(after_is_assign);
   free(intermediate_idx);
   return result;
 }
@@ -3638,6 +3929,7 @@ void poly_kernel_schedule_result_free(PolyKernelScheduleResult *sr) {
   free(sr->kernel_n_params);
   free(sr->intermediate_sizes);
   free(sr->intermediate_itemsizes);
+  free(sr->intermediate_needs_zero);
   free(sr->intermediate_buf_uops);
   free(sr->exec_order);
   if (sr->var_to_buf) {

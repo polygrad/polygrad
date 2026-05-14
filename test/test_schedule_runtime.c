@@ -166,7 +166,12 @@ static PolySchedule *build_tri_schedule(PolyCtx *ctx, int n, bool lower) {
   return poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
 }
 
-static PolyUOp *apply_webgpu_tri_stage_root(PolyCtx *ctx, PolyUOp *root, bool with_add_loads, bool with_post_index_symbolic) {
+static PolyUOp *apply_webgpu_tri_stage_root(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    bool with_add_loads,
+    bool with_post_index_symbolic
+) {
   PolyRendererCaps caps = {
       .has_mulacc = false,
       .has_threefry = false,
@@ -379,6 +384,78 @@ TEST(schedule_runtime, lower_sink_to_linear_caches_structural_linear) {
   PASS();
 }
 
+TEST(schedule_runtime, schedule_cache_key_separates_buffer_device) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+
+  PolyUOp *a_cpu = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CPU);
+  PolyUOp *b_cpu = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CPU);
+  PolyUOp *out_cpu = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CPU);
+  PolyUOp *sink_cpu =
+      poly_sink1(ctx, poly_store_val(ctx, out_cpu, poly_alu2(ctx, POLY_OP_ADD, a_cpu, b_cpu)));
+
+  PolyUOp *linear_cpu = poly_lower_sink_to_linear(ctx, sink_cpu, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear_cpu);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *a_cuda = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CUDA);
+  PolyUOp *b_cuda = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CUDA);
+  PolyUOp *out_cuda = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CUDA);
+  PolyUOp *sink_cuda =
+      poly_sink1(ctx, poly_store_val(ctx, out_cuda, poly_alu2(ctx, POLY_OP_ADD, a_cuda, b_cuda)));
+
+  PolyUOp *linear_cuda = poly_lower_sink_to_linear(ctx, sink_cuda, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear_cuda);
+  (void)linear_cpu;
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, structural_helpers_handle_model_scale_graphs) {
+  PolyCtx *ctx1 = poly_ctx_new();
+  PolyCtx *ctx2 = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx1);
+  ASSERT_NOT_NULL(ctx2);
+
+  const int n = POLY_MAX_STRUCT_NODES + 512;
+  PolyUOp **src1 = malloc((size_t)n * sizeof(PolyUOp *));
+  PolyUOp **src2 = malloc((size_t)n * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(src1);
+  ASSERT_NOT_NULL(src2);
+
+  for (int i = 0; i < n; i++) {
+    src1[i] = poly_buffer_f32(ctx1, i + 1);
+    src2[i] = poly_buffer_f32(ctx2, i + 1);
+  }
+
+  PolyUOp *sink1 = poly_uop(ctx1, POLY_OP_SINK, POLY_VOID, src1, n, poly_arg_none());
+  PolyUOp *sink2 = poly_uop(ctx2, POLY_OP_SINK, POLY_VOID, src2, n, poly_arg_none());
+  ASSERT_NOT_NULL(sink1);
+  ASSERT_NOT_NULL(sink2);
+
+  uint32_t h1 = poly_structural_hash(sink1);
+  uint32_t h2 = poly_structural_hash(sink2);
+  ASSERT_TRUE(h1 != 0);
+  ASSERT_INT_EQ((int)h1, (int)h2);
+  ASSERT_TRUE(poly_structural_eq(sink1, sink2));
+
+  PolyUOp *buf_order[POLY_MAX_REALIZE_BUFS];
+  PolyUOp *visited[POLY_MAX_STRUCT_NODES];
+  int n_bufs = 0, n_visited = 0;
+  poly_collect_buf_order(sink1, buf_order, &n_bufs, visited, &n_visited);
+  ASSERT_INT_EQ(n_bufs, n);
+  ASSERT_TRUE(n_visited > POLY_MAX_STRUCT_NODES);
+
+  free(src1);
+  free(src2);
+  poly_ctx_destroy(ctx1);
+  poly_ctx_destroy(ctx2);
+  PASS();
+}
+
 static PolyUOp *make_bufferview_cache_sink(PolyCtx *ctx, int64_t tag) {
   PolyUOp *base = poly_buffer(ctx, POLY_FLOAT32, 8);
   PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag));
@@ -396,13 +473,15 @@ TEST(schedule_runtime, lower_sink_to_linear_cache_normalizes_buffer_view_identit
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *linear1 = poly_lower_sink_to_linear(ctx, make_bufferview_cache_sink(ctx, 1000), POLY_MODE_CALL);
+  PolyUOp *linear1 =
+      poly_lower_sink_to_linear(ctx, make_bufferview_cache_sink(ctx, 1000), POLY_MODE_CALL);
   ASSERT_NOT_NULL(linear1);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
 
   /* tinygrad callify.pm_replace_buf normalizes BUFFER_VIEW as a call param for
    * schedule-cache identity, the same as BUFFER and BIND. */
-  PolyUOp *linear2 = poly_lower_sink_to_linear(ctx, make_bufferview_cache_sink(ctx, 2000), POLY_MODE_CALL);
+  PolyUOp *linear2 =
+      poly_lower_sink_to_linear(ctx, make_bufferview_cache_sink(ctx, 2000), POLY_MODE_CALL);
   ASSERT_NOT_NULL(linear2);
   ASSERT_PTR_EQ(linear1, linear2);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
@@ -552,8 +631,10 @@ TEST(schedule_runtime, cached_linear_sub_e2e_uses_current_param_slots) {
   PolyUOp *a1 = poly_buffer_f32(ctx, 4);
   PolyUOp *b1 = poly_buffer_f32(ctx, 4);
   PolyUOp *out1 = poly_buffer_f32(ctx, 4);
-  PolyUOp *sink1 =
-      poly_sink1(ctx, poly_store_val(ctx, out1, poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, a1, b1, poly_arg_none())));
+  PolyUOp *sink1 = poly_sink1(
+      ctx,
+      poly_store_val(ctx, out1, poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, a1, b1, poly_arg_none()))
+  );
   float a1_data[4] = {10, 20, 30, 40};
   float b1_data[4] = {1, 2, 3, 4};
   float out1_data[4] = {0};
@@ -570,8 +651,10 @@ TEST(schedule_runtime, cached_linear_sub_e2e_uses_current_param_slots) {
   PolyUOp *a2 = poly_buffer_f32(ctx, 4);
   PolyUOp *b2 = poly_buffer_f32(ctx, 4);
   PolyUOp *out2 = poly_buffer_f32(ctx, 4);
-  PolyUOp *sink2 =
-      poly_sink1(ctx, poly_store_val(ctx, out2, poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, a2, b2, poly_arg_none())));
+  PolyUOp *sink2 = poly_sink1(
+      ctx,
+      poly_store_val(ctx, out2, poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, a2, b2, poly_arg_none()))
+  );
   float a2_data[4] = {100, 200, 300, 400};
   float b2_data[4] = {7, 8, 9, 10};
   float out2_data[4] = {0};
@@ -690,8 +773,7 @@ TEST(schedule_runtime, schedule_cache_misses_on_changed_op_shape) {
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
-  PolyUOp *sink_add =
-      poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+  PolyUOp *sink_add = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
   PolyUOp *lin_add = poly_lower_sink_to_linear(ctx, sink_add, POLY_MODE_CALL);
   ASSERT_NOT_NULL(lin_add);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
@@ -699,8 +781,7 @@ TEST(schedule_runtime, schedule_cache_misses_on_changed_op_shape) {
   PolyUOp *c = poly_buffer_f32(ctx, 4);
   PolyUOp *d = poly_buffer_f32(ctx, 4);
   PolyUOp *out2 = poly_buffer_f32(ctx, 4);
-  PolyUOp *sink_mul =
-      poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_MUL, c, d)));
+  PolyUOp *sink_mul = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_MUL, c, d)));
   PolyUOp *lin_mul = poly_lower_sink_to_linear(ctx, sink_mul, POLY_MODE_CALL);
   ASSERT_NOT_NULL(lin_mul);
   ASSERT_TRUE(lin_mul != lin_add);
@@ -731,8 +812,7 @@ TEST(schedule_runtime, schedule_cache_disabled_by_env_does_not_store_linear) {
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
   PolyUOp *out = poly_buffer_f32(ctx, 4);
-  PolyUOp *sink =
-      poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
 
   /* mirrors tinygrad Context(SCACHE=0): lowering still returns LINEAR, but
    * neither the lookup nor the write path can populate the schedule cache. */
@@ -857,6 +937,42 @@ TEST(schedule_runtime, cached_linear_copy_e2e_uses_current_copy_slots) {
   ASSERT_FLOAT_EQ(dst2_data[0], 10.0f, 1e-5);
   ASSERT_FLOAT_EQ(dst2_data[3], 40.0f, 1e-5);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *copy_a_src[2] = {a, dev};
+  PolyUOp *copy_b_src[2] = {b, dev};
+  PolyUOp *copy_a = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_a_src, 2, poly_arg_none());
+  PolyUOp *copy_b = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_b_src, 2, poly_arg_none());
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, copy_a, copy_b);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(ps);
+
+  int n_copy_items = 0, n_intermediates = 0, n_zero = 0;
+  for (int i = 0; i < ps->n_items; i++)
+    if (ps->items[i].kind == POLY_EXEC_COPY) n_copy_items++;
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (!ps->buf_slots[i].is_intermediate) continue;
+    n_intermediates++;
+    if (ps->buf_slots[i].needs_zero) n_zero++;
+  }
+
+  ASSERT_INT_EQ(n_copy_items, 2);
+  ASSERT_INT_EQ(n_intermediates, 2);
+  ASSERT_INT_EQ(n_zero, 0);
+
+  poly_schedule_free(ps);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1105,7 +1221,9 @@ TEST(schedule_runtime, webgpu_triu_param_order_matches_runtime_slots) {
       if (lin[i]->op != POLY_OP_PARAM) continue;
       ASSERT_TRUE(seen_params < item->n_buf_slots);
       ASSERT_INT_EQ((int)lin[i]->arg.i, seen_params);
-      ASSERT_INT_EQ(item->prg.param_to_slot[seen_params], item->buf_slot_indices[(int)lin[i]->arg.i]);
+      ASSERT_INT_EQ(
+          item->prg.param_to_slot[seen_params], item->buf_slot_indices[(int)lin[i]->arg.i]
+      );
       seen_params++;
     }
     ASSERT_INT_EQ(seen_params, item->n_buf_slots);
@@ -1867,6 +1985,233 @@ TEST(schedule_runtime, lower_and_run_vecadd) {
   PASS();
 }
 
+TEST(schedule_runtime, cpu_threaded_render_uses_core_id_and_arg_slots) {
+  ScheduleEnvSave threads_env = schedule_save_env("THREADS");
+  ScheduleEnvSave cpu_count_env = schedule_save_env("CPU_COUNT");
+  setenv("THREADS", "1", 1);
+  setenv("CPU_COUNT", "4", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  const int N = 1000000;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  ASSERT_INT_EQ(ps->n_items, 1);
+
+  PolyRewriteOpts opts = {
+      .optimize = true,
+      .devectorize = 1,
+      .caps = poly_c_renderer_caps(),
+      .device = POLY_DEVICE_CPU,
+      .opt_policy = POLY_OPT_HEURISTIC,
+      .extra_matcher = poly_pm_c_renderer_extra(),
+  };
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_ex(ctx, ps->items[0].root, opts, &n_lin);
+  ASSERT_TRUE(lin != NULL);
+  char *src = poly_render_c(lin, n_lin, "thread_probe");
+  ASSERT_TRUE(src != NULL);
+
+  ASSERT_TRUE(strstr(src, "const int core_id") != NULL);
+  ASSERT_TRUE(strstr(src, "thread_probe_call_core") != NULL);
+  ASSERT_TRUE(
+      strstr(src, "thread_probe((float*)args[0], (float*)args[1], (float*)args[2], core_id);") !=
+      NULL
+  );
+  ASSERT_TRUE(strstr(src, "__attribute__((vector_size(16)))") != NULL);
+  ASSERT_TRUE(strstr(src, "*((float __attribute__((vector_size(16)))*") == NULL);
+  ASSERT_TRUE(strstr(src, "*(data0+") != NULL || strstr(src, "*(data1+") != NULL);
+
+  free(src);
+  free(lin);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&cpu_count_env);
+  schedule_restore_env(&threads_env);
+  PASS();
+}
+
+TEST(schedule_runtime, cpu_threaded_large_vecadd_e2e) {
+  ScheduleEnvSave threads_env = schedule_save_env("THREADS");
+  ScheduleEnvSave cpu_count_env = schedule_save_env("CPU_COUNT");
+  setenv("THREADS", "1", 1);
+  setenv("CPU_COUNT", "4", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  const int N = 1000000;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+  ASSERT_INT_EQ(es->n_runners, 1);
+  ASSERT_INT_EQ(es->runners[0].grid[0], 4);
+
+  float *da = malloc((size_t)N * sizeof(float));
+  float *db = malloc((size_t)N * sizeof(float));
+  float *dout = calloc((size_t)N, sizeof(float));
+  void **slot_data = calloc((size_t)ps->n_buf_slots, sizeof(void *));
+  ASSERT_TRUE(da != NULL);
+  ASSERT_TRUE(db != NULL);
+  ASSERT_TRUE(dout != NULL);
+  ASSERT_TRUE(slot_data != NULL);
+
+  for (int i = 0; i < N; i++) {
+    da[i] = (float)i;
+    db[i] = (float)(N - i);
+  }
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
+  }
+
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_FLOAT_EQ(dout[0], (float)N, 1e-6);
+  ASSERT_FLOAT_EQ(dout[1], (float)N, 1e-6);
+  ASSERT_FLOAT_EQ(dout[12345], (float)N, 1e-6);
+  ASSERT_FLOAT_EQ(dout[N - 1], (float)N, 1e-6);
+
+  free(slot_data);
+  free(dout);
+  free(db);
+  free(da);
+  poly_compiled_schedule_free(es);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&cpu_count_env);
+  schedule_restore_env(&threads_env);
+  PASS();
+}
+
+TEST(schedule_runtime, cpu_threaded_reuses_workers_with_current_slots) {
+  ScheduleEnvSave threads_env = schedule_save_env("THREADS");
+  ScheduleEnvSave cpu_count_env = schedule_save_env("CPU_COUNT");
+  setenv("THREADS", "1", 1);
+  setenv("CPU_COUNT", "4", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  const int N = 1000000;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+  ASSERT_INT_EQ(es->n_runners, 1);
+  ASSERT_INT_EQ(es->runners[0].grid[0], 4);
+
+  float *a1 = malloc((size_t)N * sizeof(float));
+  float *b1 = malloc((size_t)N * sizeof(float));
+  float *o1 = calloc((size_t)N, sizeof(float));
+  float *a2 = malloc((size_t)N * sizeof(float));
+  float *b2 = malloc((size_t)N * sizeof(float));
+  float *o2 = calloc((size_t)N, sizeof(float));
+  void **slots1 = calloc((size_t)ps->n_buf_slots, sizeof(void *));
+  void **slots2 = calloc((size_t)ps->n_buf_slots, sizeof(void *));
+  ASSERT_TRUE(a1 != NULL);
+  ASSERT_TRUE(b1 != NULL);
+  ASSERT_TRUE(o1 != NULL);
+  ASSERT_TRUE(a2 != NULL);
+  ASSERT_TRUE(b2 != NULL);
+  ASSERT_TRUE(o2 != NULL);
+  ASSERT_TRUE(slots1 != NULL);
+  ASSERT_TRUE(slots2 != NULL);
+
+  for (int i = 0; i < N; i++) {
+    a1[i] = (float)i;
+    b1[i] = 1.0f;
+    a2[i] = (float)(2 * i);
+    b2[i] = 3.0f;
+  }
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (ps->buf_slots[i].buf_uop == a) {
+      slots1[i] = a1;
+      slots2[i] = a2;
+    } else if (ps->buf_slots[i].buf_uop == b) {
+      slots1[i] = b1;
+      slots2[i] = b2;
+    } else if (ps->buf_slots[i].buf_uop == out) {
+      slots1[i] = o1;
+      slots2[i] = o2;
+    }
+  }
+
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slots1, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slots2, ps->n_buf_slots, NULL, 0), 0);
+
+  ASSERT_FLOAT_EQ(o1[0], 1.0f, 1e-6);
+  ASSERT_FLOAT_EQ(o1[12345], 12346.0f, 1e-6);
+  ASSERT_FLOAT_EQ(o2[0], 3.0f, 1e-6);
+  ASSERT_FLOAT_EQ(o2[12345], 24693.0f, 1e-6);
+  ASSERT_FLOAT_EQ(o2[N - 1], (float)(2 * (N - 1) + 3), 1e-6);
+
+  free(slots2);
+  free(slots1);
+  free(o2);
+  free(b2);
+  free(a2);
+  free(o1);
+  free(b1);
+  free(a1);
+  poly_compiled_schedule_free(es);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&cpu_count_env);
+  schedule_restore_env(&threads_env);
+  PASS();
+}
+
+TEST(schedule_runtime, cpu_threads_env_zero_keeps_single_core) {
+  ScheduleEnvSave threads_env = schedule_save_env("THREADS");
+  ScheduleEnvSave cpu_count_env = schedule_save_env("CPU_COUNT");
+  setenv("THREADS", "0", 1);
+  setenv("CPU_COUNT", "4", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  const int N = 1000000;
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, N);
+  PolyUOp *st = poly_store_val(ctx, out, c);
+  PolyUOp *sink = poly_sink1(ctx, st);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+  ASSERT_INT_EQ(es->n_runners, 1);
+  ASSERT_INT_EQ(es->runners[0].grid[0], 1);
+
+  poly_compiled_schedule_free(es);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&cpu_count_env);
+  schedule_restore_env(&threads_env);
+  PASS();
+}
+
 TEST(schedule_runtime, lower_and_run_multikernel) {
   /* sum(a) -> reshape -> expand -> add(b) -> out
    * Multi-kernel: reduce produces intermediate. */
@@ -2366,9 +2711,14 @@ TEST(schedule_runtime, workspace_reuse) {
 
   /* Verify persistent intermediates were allocated */
   int n_inter = 0;
-  for (int i = 0; i < ps->n_buf_slots; i++)
-    if (ps->buf_slots[i].is_intermediate) n_inter++;
+  int n_zero = 0;
+  for (int i = 0; i < ps->n_buf_slots; i++) {
+    if (!ps->buf_slots[i].is_intermediate) continue;
+    n_inter++;
+    if (ps->buf_slots[i].needs_zero) n_zero++;
+  }
   ASSERT_TRUE(n_inter > 0);
+  ASSERT_TRUE(n_zero > 0);
   ASSERT_INT_EQ(plan->n_intermediates, n_inter);
 
   /* Run 100 times with different multipliers */

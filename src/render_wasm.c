@@ -64,6 +64,79 @@ static void lm_destroy(LocalMap *m) {
   free(m->vals);
 }
 
+typedef struct {
+  PolyUOp **keys;
+  int **locals;
+  int *sizes;
+  int len;
+  int cap;
+} RegLocalMap;
+
+static void rlm_init(RegLocalMap *m, int cap) {
+  m->cap = cap < 16 ? 16 : cap;
+  m->len = 0;
+  m->keys = calloc((size_t)m->cap, sizeof(PolyUOp *));
+  m->locals = calloc((size_t)m->cap, sizeof(int *));
+  m->sizes = calloc((size_t)m->cap, sizeof(int));
+}
+
+static void rlm_set(RegLocalMap *m, PolyUOp *key, int *locals, int size) {
+  if (!m || !key || !locals || size <= 0) return;
+  for (int i = 0; i < m->len; i++) {
+    if (m->keys[i] == key) {
+      free(m->locals[i]);
+      m->locals[i] = locals;
+      m->sizes[i] = size;
+      return;
+    }
+  }
+  if (m->len >= m->cap) {
+    free(locals);
+    return;
+  }
+  m->keys[m->len] = key;
+  m->locals[m->len] = locals;
+  m->sizes[m->len] = size;
+  m->len++;
+}
+
+static int rlm_get(RegLocalMap *m, PolyUOp *key, int idx) {
+  if (!m || !key) return -1;
+  for (int i = 0; i < m->len; i++) {
+    if (m->keys[i] != key) continue;
+    if (idx < 0 || idx >= m->sizes[i]) return m->locals[i][0];
+    return m->locals[i][idx];
+  }
+  return -1;
+}
+
+static void rlm_destroy(RegLocalMap *m) {
+  if (!m) return;
+  for (int i = 0; i < m->len; i++)
+    free(m->locals[i]);
+  free(m->keys);
+  free(m->locals);
+  free(m->sizes);
+}
+
+/* Match the accumulator-base walking used by native renderers. pm_reduce can
+ * route register arrays through AFTER/CAST/INDEX nodes, but the storage object
+ * is still the underlying DEFINE_REG/DEFINE_LOCAL. */
+static PolyUOp *wasm_acc_base(PolyUOp *u) {
+  if (!u) return NULL;
+  if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
+  if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
+       u->op == POLY_OP_INDEX) &&
+      u->n_src > 0)
+    return wasm_acc_base(u->src[0]);
+  return NULL;
+}
+
+static int wasm_const_index(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return 0;
+  return (int)u->arg.i;
+}
+
 /* Track which transcendentals are needed */
 
 typedef struct {
@@ -286,6 +359,121 @@ static void emit_local_get_as_i32(WasmBuf *body, int local, PolyDType dt) {
   if (!poly_dtype_is_float(dt) && dt.bitsize == 64) wb_byte(body, WASM_OP_I32_WRAP_I64);
 }
 
+static void emit_cast_stack_value(WasmBuf *body, PolyDType src_dt, PolyDType dst_dt) {
+  bool src_float = poly_dtype_is_float(src_dt);
+  bool dst_float = poly_dtype_is_float(dst_dt);
+  bool src_64 = dt_is_64(src_dt);
+  bool dst_64 = dt_is_64(dst_dt);
+
+  if (src_float == dst_float && src_64 == dst_64) return;
+
+  if (!src_float && !dst_float) {
+    if (!src_64 && dst_64) {
+      wb_byte(
+          body, poly_dtype_is_unsigned(src_dt) ? WASM_OP_I64_EXTEND_I32_U : WASM_OP_I64_EXTEND_I32_S
+      );
+    } else if (src_64 && !dst_64) {
+      wb_byte(body, WASM_OP_I32_WRAP_I64);
+    }
+    return;
+  }
+
+  if (src_float && dst_float) {
+    if (!src_64 && dst_64)
+      wb_byte(body, WASM_OP_F64_PROMOTE_F32);
+    else if (src_64 && !dst_64)
+      wb_byte(body, WASM_OP_F32_DEMOTE_F64);
+    return;
+  }
+
+  if (!src_float && dst_float) {
+    bool src_u = poly_dtype_is_unsigned(src_dt);
+    if (src_64 && dst_64)
+      wb_byte(body, src_u ? WASM_OP_F64_CONVERT_I64_U : WASM_OP_F64_CONVERT_I64_S);
+    else if (src_64 && !dst_64)
+      wb_byte(body, src_u ? WASM_OP_F32_CONVERT_I64_U : WASM_OP_F32_CONVERT_I64_S);
+    else if (!src_64 && dst_64)
+      wb_byte(body, src_u ? WASM_OP_F64_CONVERT_I32_U : WASM_OP_F64_CONVERT_I32_S);
+    else
+      wb_byte(body, src_u ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
+    return;
+  }
+
+  bool dst_u = poly_dtype_is_unsigned(dst_dt);
+  if (src_64 && dst_64)
+    wb_byte(body, dst_u ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
+  else if (src_64 && !dst_64)
+    wb_byte(body, dst_u ? WASM_OP_I32_TRUNC_F64_U : WASM_OP_I32_TRUNC_F64_S);
+  else if (!src_64 && dst_64)
+    wb_byte(body, dst_u ? WASM_OP_I64_TRUNC_F32_U : WASM_OP_I64_TRUNC_F32_S);
+  else
+    wb_byte(body, dst_u ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
+}
+
+static PolyDType wasm_compare_dtype(PolyDType a, PolyDType b) {
+  /* tinygrad's UOp spec requires comparison operands to share a base dtype.
+   * Late Polygrad index lowering can still leave the common practical case
+   * CAST(long, LOAD(int)) < int_bound. WASM has no implicit numeric casts, so
+   * pick the wider operand type at the renderer boundary instead of emitting an
+   * invalid mixed-width compare. */
+  bool a_float = poly_dtype_is_float(a);
+  bool b_float = poly_dtype_is_float(b);
+  if (a_float || b_float) {
+    if (a_float && a.bitsize == 64) return a;
+    if (b_float && b.bitsize == 64) return b;
+    return a_float ? a : b;
+  }
+  if (a.bitsize == 64) return a;
+  if (b.bitsize == 64) return b;
+  return a;
+}
+
+static void emit_local_get_for_alu_src(
+    WasmBuf *body,
+    int local,
+    PolyDType src_dt,
+    PolyDType alu_dt
+) {
+  wb_byte(body, WASM_OP_LOCAL_GET);
+  wb_uleb128(body, local);
+  emit_cast_stack_value(body, src_dt, alu_dt);
+}
+
+static PolyDType wasm_alu_src_dtype(PolyUOp *u, int src_idx) {
+  if (!u) return POLY_INT32;
+  if ((u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) && u->n_src >= 2)
+    return wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
+  (void)src_idx;
+  return u->dtype;
+}
+
+static void emit_alu_sources(WasmBuf *body, LocalMap *locals, PolyUOp *u) {
+  if (!u) return;
+
+  if (u->op == POLY_OP_MULACC && u->n_src >= 3) {
+    /* tinygrad defines MULACC(x, y, z) as (x * y) + z. WASM binary ops
+     * consume the top two stack values, so push the addend first, then the
+     * multiply operands. The following MUL consumes x/y and ADD combines with
+     * z, matching tinygrad's PTX fma/mad operand order. */
+    int order[3] = {2, 0, 1};
+    for (int k = 0; k < 3; k++) {
+      int j = order[k];
+      int src = lm_get(locals, u->src[j]);
+      emit_local_get_for_alu_src(body, src, u->src[j]->dtype, wasm_alu_src_dtype(u, j));
+    }
+    return;
+  }
+
+  int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op)  ? 3
+                   : poly_opset_has(POLY_GROUP_BINARY, u->op) ? 2
+                                                              : 1;
+  if (n_operands > u->n_src) n_operands = u->n_src;
+  for (int j = 0; j < n_operands; j++) {
+    int src = lm_get(locals, u->src[j]);
+    emit_local_get_for_alu_src(body, src, u->src[j]->dtype, wasm_alu_src_dtype(u, j));
+  }
+}
+
 static void emit_scalar_load_opcode(WasmBuf *body, PolyDType dt) {
   if (dt_is_f64(dt)) {
     wb_byte(body, WASM_OP_F64_LOAD);
@@ -431,10 +619,16 @@ static void emit_alu_scalar(
 
   /* Integer-only ops */
   case POLY_OP_IDIV:
-    wb_byte(code, b64 ? WASM_OP_I64_DIV_S : (is_unsigned ? WASM_OP_I32_DIV_U : WASM_OP_I32_DIV_S));
+    wb_byte(
+        code, b64 ? (is_unsigned ? WASM_OP_I64_DIV_U : WASM_OP_I64_DIV_S)
+                  : (is_unsigned ? WASM_OP_I32_DIV_U : WASM_OP_I32_DIV_S)
+    );
     break;
   case POLY_OP_MOD:
-    wb_byte(code, is_unsigned ? WASM_OP_I32_REM_U : WASM_OP_I32_REM_S);
+    wb_byte(
+        code, b64 ? (is_unsigned ? WASM_OP_I64_REM_U : WASM_OP_I64_REM_S)
+                  : (is_unsigned ? WASM_OP_I32_REM_U : WASM_OP_I32_REM_S)
+    );
     break;
   case POLY_OP_SHL:
     wb_byte(code, b64 ? WASM_OP_I64_SHL : WASM_OP_I32_SHL);
@@ -591,7 +785,8 @@ static bool kernel_is_f64(PolyUOp **uops, int n) {
 static bool kernel_is_simdable(PolyUOp **uops, int n) {
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (poly_opset_has(POLY_GROUP_ALU, u->op) && poly_dtype_is_float(u->dtype) && !has_simd_op(u->op))
+    if (poly_opset_has(POLY_GROUP_ALU, u->op) && poly_dtype_is_float(u->dtype) &&
+        !has_simd_op(u->op))
       return false;
     /* Transcendentals don't have SIMD versions */
     if (u->op == POLY_OP_EXP2 || u->op == POLY_OP_LOG2 || u->op == POLY_OP_SIN ||
@@ -672,7 +867,10 @@ static void build_code_scalar(
       count_local(u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
     if (u->op == POLY_OP_DEFINE_REG) {
       PolyDType base = poly_dtype_scalar(u->dtype);
-      count_local(base, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
+      int reg_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
+      if (reg_size < 1) reg_size = 1;
+      for (int r = 0; r < reg_size; r++)
+        count_local(base, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64);
     }
     if (u->op == POLY_OP_INDEX) {
       if (!(u->src[0]->dtype.is_ptr && u->src[0]->dtype.addrspace == POLY_ADDR_REG))
@@ -714,6 +912,8 @@ static void build_code_scalar(
   /* --- Assign local indices --- */
   LocalMap locals;
   lm_init(&locals, n * 2);
+  RegLocalMap reg_locals;
+  rlm_init(&reg_locals, n);
 
   /* Local layout: [params(i32)] [i32] [i64] [f32] [f64] */
   int next_i32 = n_params;
@@ -784,23 +984,33 @@ static void build_code_scalar(
     /* --- DEFINE_REG --- */
     if (u->op == POLY_OP_DEFINE_REG) {
       PolyDType base = poly_dtype_scalar(u->dtype);
-      int local_idx = alloc_local(base, &next_i32, &next_i64, &next_f32, &next_f64);
-      if (dt_is_f64(base)) {
-        wb_byte(&body, WASM_OP_F64_CONST);
-        wb_f64(&body, 0.0);
-      } else if (poly_dtype_is_float(base)) {
-        wb_byte(&body, WASM_OP_F32_CONST);
-        wb_f32(&body, 0.0f);
-      } else if (dt_is_i64(base)) {
-        wb_byte(&body, WASM_OP_I64_CONST);
-        wb_sleb128(&body, 0);
-      } else {
-        wb_byte(&body, WASM_OP_I32_CONST);
-        wb_sleb128(&body, 0);
+      int reg_size = u->dtype.ptr_size > 0 ? (int)u->dtype.ptr_size : 1;
+      if (reg_size < 1) reg_size = 1;
+      int *reg_slots = malloc((size_t)reg_size * sizeof(int));
+      if (!reg_slots) reg_size = 0;
+      for (int r = 0; r < reg_size; r++) {
+        int local_idx = alloc_local(base, &next_i32, &next_i64, &next_f32, &next_f64);
+        reg_slots[r] = local_idx;
+        if (dt_is_f64(base)) {
+          wb_byte(&body, WASM_OP_F64_CONST);
+          wb_f64(&body, 0.0);
+        } else if (poly_dtype_is_float(base)) {
+          wb_byte(&body, WASM_OP_F32_CONST);
+          wb_f32(&body, 0.0f);
+        } else if (dt_is_i64(base)) {
+          wb_byte(&body, WASM_OP_I64_CONST);
+          wb_sleb128(&body, 0);
+        } else {
+          wb_byte(&body, WASM_OP_I32_CONST);
+          wb_sleb128(&body, 0);
+        }
+        wb_byte(&body, WASM_OP_LOCAL_SET);
+        wb_uleb128(&body, local_idx);
       }
-      wb_byte(&body, WASM_OP_LOCAL_SET);
-      wb_uleb128(&body, local_idx);
-      lm_set(&locals, u, local_idx);
+      if (reg_size > 0) {
+        lm_set(&locals, u, reg_slots[0]);
+        rlm_set(&reg_locals, u, reg_slots, reg_size);
+      }
       continue;
     }
 
@@ -813,8 +1023,15 @@ static void build_code_scalar(
 
     /* --- INDEX: base + idx * elem_size (byte offset) --- */
     if (u->op == POLY_OP_INDEX) {
-      if (u->src[0]->dtype.is_ptr && u->src[0]->dtype.addrspace == POLY_ADDR_REG) {
-        int acc_local = lm_get(&locals, u->src[0]);
+      PolyUOp *acc_base = wasm_acc_base(u->src[0]);
+      if (acc_base && acc_base->op == POLY_OP_DEFINE_REG) {
+        /* Register arrays are real indexed storage in tinygrad/C/WGSL. WASM
+         * has no local arrays, but Qwen/reduce lowering indexes them with
+         * constants after devectorization, so model each element as its own
+         * local and map INDEX(reg, const_i) to that local. */
+        int acc_local =
+            rlm_get(&reg_locals, acc_base, u->n_src >= 2 ? wasm_const_index(u->src[1]) : 0);
+        if (acc_local < 0) acc_local = lm_get(&locals, acc_base);
         lm_set(&locals, u, acc_local);
       } else {
         int local_idx = next_i32++;
@@ -891,8 +1108,8 @@ static void build_code_scalar(
     /* --- LOAD --- */
     if (u->op == POLY_OP_LOAD) {
       bool is_reg =
-          (u->src[0]->op == POLY_OP_INDEX && u->src[0]->src[0]->dtype.is_ptr &&
-           u->src[0]->src[0]->dtype.addrspace == POLY_ADDR_REG);
+          (u->src[0]->op == POLY_OP_INDEX && wasm_acc_base(u->src[0]) &&
+           wasm_acc_base(u->src[0])->op == POLY_OP_DEFINE_REG);
       if (is_reg) {
         int acc_local = lm_get(&locals, u->src[0]);
         lm_set(&locals, u, acc_local);
@@ -957,8 +1174,8 @@ static void build_code_scalar(
       bool is_reg = false;
       if (u->src[0]->op == POLY_OP_DEFINE_LOCAL) {
         is_reg = true;
-      } else if (u->src[0]->op == POLY_OP_INDEX && u->src[0]->src[0]->dtype.is_ptr &&
-                 u->src[0]->src[0]->dtype.addrspace == POLY_ADDR_REG) {
+      } else if (u->src[0]->op == POLY_OP_INDEX && wasm_acc_base(u->src[0]) &&
+                 wasm_acc_base(u->src[0])->op == POLY_OP_DEFINE_REG) {
         is_reg = true;
       }
       if (is_reg) {
@@ -1135,21 +1352,13 @@ static void build_code_scalar(
         }
         /* i32/bool: already valid for select */
       } else {
-        int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op)  ? 3
-                         : poly_opset_has(POLY_GROUP_BINARY, u->op) ? 2
-                                                                    : 1;
-        if (n_operands > u->n_src) n_operands = u->n_src;
-        for (int j = 0; j < n_operands; j++) {
-          int src = lm_get(&locals, u->src[j]);
-          wb_byte(&body, WASM_OP_LOCAL_GET);
-          wb_uleb128(&body, src);
-        }
+        emit_alu_sources(&body, &locals, u);
       }
 
       /* Use input dtype for comparison ops */
       PolyDType alu_dtype = u->dtype;
       if (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) {
-        alu_dtype = u->src[0]->dtype;
+        alu_dtype = wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
       }
       emit_alu_scalar(&body, u->op, alu_dtype, math, n_imported_funcs);
 
@@ -1189,6 +1398,7 @@ static void build_code_scalar(
 
   wb_free(&body);
   wb_free(&sec);
+  rlm_destroy(&reg_locals);
   lm_destroy(&locals);
 }
 
@@ -1427,12 +1637,9 @@ static void build_code_simd(
       int local_idx = simd_alu ? next_v128++
                                : alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64);
 
-      /* Push sources */
-      for (int j = 0; j < u->n_src; j++) {
-        int src = lm_get(&locals, u->src[j]);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, src);
-      }
+      /* Push sources in renderer stack order, preserving tinygrad MULACC
+       * semantics for scalar fallbacks inside mixed SIMD kernels. */
+      emit_alu_sources(&body, &locals, u);
 
       if (simd_alu && is_f64_kernel)
         emit_alu_simd_f64x2(&body, u->op);
@@ -1441,7 +1648,7 @@ static void build_code_simd(
       else {
         PolyDType alu_dtype = u->dtype;
         if (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE)
-          alu_dtype = u->src[0]->dtype;
+          alu_dtype = wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
         emit_alu_scalar(&body, u->op, alu_dtype, math, n_imported_funcs);
       }
 
@@ -1533,15 +1740,11 @@ static void build_code_simd(
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       int local_idx = is_f64_kernel ? next_f64++ : next_f32++;
 
-      for (int j = 0; j < u->n_src; j++) {
-        int src = lm_get(&locals, u->src[j]);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, src);
-      }
+      emit_alu_sources(&body, &locals, u);
 
       PolyDType alu_dtype = u->dtype;
       if (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) {
-        alu_dtype = u->src[0]->dtype;
+        alu_dtype = wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
       }
       emit_alu_scalar(&body, u->op, alu_dtype, math, n_imported_funcs);
 

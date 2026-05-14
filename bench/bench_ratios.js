@@ -11,7 +11,6 @@
 
 'use strict'
 
-const path = require('path')
 const fs = require('fs')
 const polygrad = require('../js/src/index')
 
@@ -30,41 +29,40 @@ function medianTime(fn, iters) {
 }
 
 function benchMlpForward(pg, inputSize, iters) {
-  const spec = JSON.stringify({
+  const spec = {
     layers: [inputSize, Math.min(inputSize, 64), 1],
     activation: 'relu',
     loss: 'mse',
     seed: 42
-  })
-  const inst = pg._backend.instance.mlp(spec)
+  }
+  const inst = pg.Instance.mlp(spec)
   if (!inst) return null
 
   const input = new Float32Array(inputSize)
   for (let i = 0; i < inputSize; i++) input[i] = Math.random()
 
   for (let i = 0; i < WARMUP; i++) {
-    pg._backend.instance.forward(inst, ['input'], [input])
+    inst.forward({ input })
   }
   const us = medianTime(() => {
-    pg._backend.instance.forward(inst, ['input'], [input])
+    inst.forward({ input })
   }, iters)
 
-  pg._backend.instance.free(inst)
+  inst.dispose()
   return us
 }
 
 function benchMlpTrain(pg, inputSize, iters) {
-  const spec = JSON.stringify({
+  const spec = {
     layers: [inputSize, Math.min(inputSize, 64), 1],
     activation: 'relu',
     loss: 'mse',
     seed: 42
-  })
-  const inst = pg._backend.instance.mlp(spec)
+  }
+  const inst = pg.Instance.mlp(spec)
   if (!inst) return null
 
-  // SGD optimizer (kind=1)
-  pg._backend.instance.setOptimizer(inst, 1, 0.01, 0.9, 0.999, 1e-8, 0)
+  inst.setOptimizer(pg.OPTIM_SGD, 0.01, 0.9, 0.999, 1e-8, 0)
 
   const input = new Float32Array(inputSize)
   const target = new Float32Array(1)
@@ -72,45 +70,45 @@ function benchMlpTrain(pg, inputSize, iters) {
   target[0] = 1.0
 
   for (let i = 0; i < WARMUP; i++) {
-    pg._backend.instance.trainStep(inst, ['input', 'target'], [input, target])
+    inst.trainStep({ input, target })
   }
   const us = medianTime(() => {
-    pg._backend.instance.trainStep(inst, ['input', 'target'], [input, target])
+    inst.trainStep({ input, target })
   }, iters)
 
-  pg._backend.instance.free(inst)
+  inst.dispose()
   return us
 }
 
 function benchBundleRoundtrip(pg, inputSize, iters) {
-  const spec = JSON.stringify({
+  const spec = {
     layers: [inputSize, Math.min(inputSize, 64), 1],
     activation: 'relu',
     loss: 'mse',
     seed: 42
-  })
-  const inst = pg._backend.instance.mlp(spec)
+  }
+  const inst = pg.Instance.mlp(spec)
   if (!inst) return null
 
   // Save bundle, reload, forward -- tests the full portable artifact path
-  const bundle = pg._backend.instance.saveBundle(inst)
-  pg._backend.instance.free(inst)
+  const bundle = inst.saveBundle()
+  inst.dispose()
   if (!bundle) return null
 
-  const inst2 = pg._backend.instance.fromBundle(bundle)
+  const inst2 = pg.Instance.fromBundle(bundle)
   if (!inst2) return null
 
   const input = new Float32Array(inputSize)
   for (let i = 0; i < inputSize; i++) input[i] = Math.random()
 
   for (let i = 0; i < WARMUP; i++) {
-    pg._backend.instance.forward(inst2, ['input'], [input])
+    inst2.forward({ input })
   }
   const us = medianTime(() => {
-    pg._backend.instance.forward(inst2, ['input'], [input])
+    inst2.forward({ input })
   }, iters)
 
-  pg._backend.instance.free(inst2)
+  inst2.dispose()
   return us
 }
 

@@ -5,6 +5,9 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef __EMSCRIPTEN__
+#include <time.h>
+#endif
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -20,7 +23,11 @@ EM_JS(int, poly_browser_debug_level, (), {
 bool poly_ptr_eq(const void *a, const void *b) { return a == b; }
 
 uint32_t poly_ptr_hash(const void *p) {
-  uintptr_t x = (uintptr_t)p;
+  /* UOp/map caches are keyed by pointer identity. Keep the mixer width
+   * explicitly 64-bit: on wasm32 `uintptr_t` is only 32-bit, and shifting it
+   * by 33 is undefined C. That broke the pointer-hash distribution exactly in
+   * the rewrite passes that rely on pointer-keyed PolyMaps. */
+  uint64_t x = (uint64_t)(uintptr_t)p;
   x ^= x >> 33;
   x *= 0xff51afd7ed558ccdULL;
   x ^= x >> 33;
@@ -61,6 +68,16 @@ int poly_debug_level(void) {
 }
 
 bool poly_debug_at_least(int level) { return poly_debug_level() >= level; }
+
+double poly_now_ms(void) {
+#ifdef __EMSCRIPTEN__
+  return emscripten_get_now();
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
+}
 
 bool poly_dump_kernels_enabled(void) {
   return poly_getenv_flag("POLY_DUMP_KERNELS") || poly_debug_at_least(4);

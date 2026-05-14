@@ -221,12 +221,14 @@ int poly_buffer_copy(PolyBuffer *dst, const PolyBuffer *src) {
   if (nbytes == 0) return 0;
 
   int rc = -1;
+  bool dst_host_addressable = dst_alloc->host_addressable;
+  bool src_host_addressable = src_alloc->host_addressable;
   if (dst_alloc == src_alloc && dst_alloc->copy_between) {
     rc = dst_alloc->copy_between(dst, src, nbytes, dst_alloc->dev_ctx);
-  } else if (dst_alloc->copy_in) {
-    rc = dst_alloc->copy_in(dst, src, nbytes, dst_alloc->dev_ctx);
-  } else if (src_alloc->copy_out) {
+  } else if (dst_host_addressable && src_alloc->copy_out) {
     rc = src_alloc->copy_out(dst, src, nbytes, src_alloc->dev_ctx);
+  } else if (src_host_addressable && dst_alloc->copy_in) {
+    rc = dst_alloc->copy_in(dst, src, nbytes, dst_alloc->dev_ctx);
   } else {
     void *tmp = malloc(nbytes);
     if (!tmp) return -1;

@@ -19,7 +19,11 @@ os.environ["DEBUG"] = "0"
 os.environ["VERBOSE"] = "0"
 
 from tinygrad import Tensor, Device
-Device.DEFAULT = "CUDA"
+try:
+    from tinygrad.helpers import DEV
+    DEV.value = "CUDA"
+except Exception:
+    Device.DEFAULT = "CUDA"
 
 def sync():
     Device["CUDA"].synchronize()
@@ -169,11 +173,7 @@ if __name__ == "__main__":
             iters = ITERS_LARGE if n >= 100_000 else ITERS_SMALL
             tg_us = bench_fn(n, iters)
 
-            # Lookup polygrad results
-            # Map op names: "chain" doesn't exist in polygrad bench
             polygrad_op = op_name
-            if polygrad_op == "chain" or polygrad_op == "exp2":
-                polygrad_op = None  # no direct polygrad equivalent
 
             if polygrad_op and (polygrad_op, n) in polygrad:
                 t = polygrad[(polygrad_op, n)]

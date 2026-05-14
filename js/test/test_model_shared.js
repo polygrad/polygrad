@@ -46,7 +46,7 @@ async function runModelTests(pg) {
     const inst = await model.export()
     assert(inst.paramCount === 1, 'expected one param')
     assert(inst.paramName(0) === 'js_export_w', 'param name mismatch')
-    const out = inst.forward({ js_export_x: new Float32Array([10, 20]) })
+    const out = await inst.forward({ js_export_x: new Float32Array([10, 20]) })
     assertClose(out.js_export_output, [80])
   })
 
@@ -64,7 +64,7 @@ async function runModelTests(pg) {
       inputs: { js_trace_x: x }
     })
     const inst = await model.export()
-    const out = inst.forward({ js_trace_x: new Float32Array([2, 3]) })
+    const out = await inst.forward({ js_trace_x: new Float32Array([2, 3]) })
     assertClose(out.output, [23])
   })
 

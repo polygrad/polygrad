@@ -154,6 +154,13 @@ async function createWasmCore(device) {
     return shape
   }
 
+  function shapeNumel(shape) {
+    if (!shape || shape.length === 0) return 1
+    let numel = 1
+    for (const d of shape) numel *= d
+    return numel
+  }
+
   function writePtrArray(arr) {
     if (!arr || arr.length === 0) return 0
     const ptr = Module._malloc(arr.length * 4)
@@ -861,10 +868,28 @@ async function createWasmCore(device) {
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
     },
     paramData(instPtr, i) {
+      const read = (dataPtr) => {
+        if (!dataPtr) return null
+        const numel = readInt64At(_scratchNumelPtr)
+        return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+      }
+      if (deviceName === 'webgpu' && Module.ccall) {
+        const nbytes = shapeNumel(this.paramShape(instPtr, i)) * 4
+        if (nbytes <= 0) return Promise.resolve(new Float32Array(0))
+        const dst = Module._malloc(nbytes)
+        return Module.ccall(
+          'poly_instance_readback_param',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [instPtr, i, dst, nbytes],
+          { async: true }
+        ).then(rc => {
+          if (rc !== 0) return null
+          return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
+        }).finally(() => Module._free(dst))
+      }
       const dataPtr = Module._poly_instance_param_data(instPtr, i, _scratchNumelPtr)
-      if (!dataPtr) return null
-      const numel = readInt64At(_scratchNumelPtr)
-      return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+      return read(dataPtr)
     },
     paramTrainable(instPtr, i) {
       return Boolean(Module._poly_instance_param_trainable(instPtr, i))
@@ -886,12 +911,45 @@ async function createWasmCore(device) {
       return readShapeFromPtr(_scratchOutShapePtr, ndim)
     },
     bufData(instPtr, i) {
+      const read = (dataPtr) => {
+        if (!dataPtr) return null
+        const numel = readInt64At(_scratchNumelPtr)
+        return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+      }
+      if (deviceName === 'webgpu' && Module.ccall) {
+        const nbytes = shapeNumel(this.bufShape(instPtr, i)) * 4
+        if (nbytes <= 0) return Promise.resolve(new Float32Array(0))
+        const dst = Module._malloc(nbytes)
+        return Module.ccall(
+          'poly_instance_readback_buf',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [instPtr, i, dst, nbytes],
+          { async: true }
+        ).then(rc => {
+          if (rc !== 0) return null
+          return new Float32Array(heapF32().buffer.slice(dst, dst + nbytes))
+        }).finally(() => Module._free(dst))
+      }
       const dataPtr = Module._poly_instance_buf_data(instPtr, i, _scratchNumelPtr)
-      if (!dataPtr) return null
-      const numel = readInt64At(_scratchNumelPtr)
-      return new Float32Array(heapF32().buffer.slice(dataPtr, dataPtr + numel * 4))
+      return read(dataPtr)
     },
     exportWeights(instPtr) {
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return Module.ccall(
+          'poly_instance_export_weights',
+          'number',
+          ['number', 'number'],
+          [instPtr, _scratchLenPtr],
+          { async: true }
+        ).then(bytesPtr => {
+          if (!bytesPtr) return null
+          const len = heap32()[_scratchLenPtr >> 2]
+          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+          Module._free(bytesPtr)
+          return bytes
+        })
+      }
       const bytesPtr = Module._poly_instance_export_weights(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
       const len = heap32()[_scratchLenPtr >> 2]
@@ -914,6 +972,21 @@ async function createWasmCore(device) {
       return bytes
     },
     saveBundle(instPtr) {
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return Module.ccall(
+          'poly_instance_save_bundle',
+          'number',
+          ['number', 'number'],
+          [instPtr, _scratchLenPtr],
+          { async: true }
+        ).then(bytesPtr => {
+          if (!bytesPtr) return null
+          const len = heap32()[_scratchLenPtr >> 2]
+          const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
+          Module._free(bytesPtr)
+          return bytes
+        })
+      }
       const bytesPtr = Module._poly_instance_save_bundle(instPtr, _scratchLenPtr)
       if (!bytesPtr) return null
       const len = heap32()[_scratchLenPtr >> 2]
@@ -1063,10 +1136,22 @@ async function createWasmCore(device) {
         heap32()[base] = namePtrs[i]
         heap32()[base + 1] = dataPtrs[i]
       }
+      const cleanup = () => {
+        for (const ptr of dataPtrs) Module._free(ptr)
+        for (const ptr of namePtrs) Module._free(ptr)
+        Module._free(bindingPtr)
+      }
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return Module.ccall(
+          'poly_instance_forward',
+          'number',
+          ['number', 'number', 'number'],
+          [instPtr, bindingPtr, n],
+          { async: true }
+        ).finally(cleanup)
+      }
       const rc = Module._poly_instance_forward(instPtr, bindingPtr, n)
-      for (const ptr of dataPtrs) Module._free(ptr)
-      for (const ptr of namePtrs) Module._free(ptr)
-      Module._free(bindingPtr)
+      cleanup()
       return rc
     },
 
@@ -1083,12 +1168,25 @@ async function createWasmCore(device) {
         heap32()[base + 1] = dataPtrs[i]
       }
       const lossPtr = Module._malloc(4)
+      const readLoss = (rc) => rc === 0 ? heapF32()[lossPtr >> 2] : null
+      const cleanup = () => {
+        Module._free(lossPtr)
+        for (const ptr of dataPtrs) Module._free(ptr)
+        for (const ptr of namePtrs) Module._free(ptr)
+        Module._free(bindingPtr)
+      }
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return Module.ccall(
+          'poly_instance_train_step',
+          'number',
+          ['number', 'number', 'number', 'number'],
+          [instPtr, bindingPtr, n, lossPtr],
+          { async: true }
+        ).then(readLoss).finally(cleanup)
+      }
       const rc = Module._poly_instance_train_step(instPtr, bindingPtr, n, lossPtr)
-      const loss = rc === 0 ? heapF32()[lossPtr >> 2] : null
-      Module._free(lossPtr)
-      for (const ptr of dataPtrs) Module._free(ptr)
-      for (const ptr of namePtrs) Module._free(ptr)
-      Module._free(bindingPtr)
+      const loss = readLoss(rc)
+      cleanup()
       return loss
     }
   }

@@ -27,6 +27,7 @@ bool poly_getenv_flag(const char *key);
  */
 int poly_debug_level(void);
 bool poly_debug_at_least(int level);
+double poly_now_ms(void);
 
 /* Tinygrad-like debug thresholds:
  *   DEBUG >= 4 : rendered kernels

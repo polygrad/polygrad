@@ -30,6 +30,7 @@ PolyPatternMatcher *poly_pm_load_collapse(void);
 
 /* rangeify Phase D entrypoints. */
 PolyUOp *poly_apply_reduce_simplify(PolyCtx *ctx, PolyUOp *sink);
+PolyUOp *poly_apply_symbolic_reduce_simplify(PolyCtx *ctx, PolyUOp *sink);
 
 /* Apply ONLY pm_reduce_unparented (without the symbolic_simple concat that
  * the production poly_apply_reduce_simplify does). This is for parity tests

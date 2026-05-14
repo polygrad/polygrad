@@ -73,18 +73,27 @@ static Kernel make_unop(PolyOps op, int n) {
 
 static int compile_from_sink(PolyCtx *ctx, PolyUOp *sink, const char *fn_name, PolyProgram **prog_out) {
   int n_lin = 0;
-  PolyUOp *kernel = poly_schedule(ctx, sink);
-  if (!kernel) return 0;
-  PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
-  if (!lin) return 0;
+  PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  if (!schedule) return 0;
+  if (schedule->n_items != 1 || schedule->items[0].kind != POLY_EXEC_COMPUTE) {
+    poly_schedule_free(schedule);
+    return 0;
+  }
+  PolyUOp **lin = poly_linearize(ctx, schedule->items[0].root, &n_lin);
+  if (!lin) {
+    poly_schedule_free(schedule);
+    return 0;
+  }
   char *src = poly_render_c(lin, n_lin, fn_name);
   if (!src) {
     free(lin);
+    poly_schedule_free(schedule);
     return 0;
   }
   PolyProgram *prog = poly_compile_c(src, fn_name);
   free(src);
   free(lin);
+  poly_schedule_free(schedule);
   if (!prog) return 0;
   *prog_out = prog;
   return 1;

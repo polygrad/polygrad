@@ -1868,4 +1868,4 @@ class Tensor:
         return id(self)
 
     def __bool__(self):
-        return bool(self.item())
+        raise TypeError("__bool__ on Tensor is not defined")

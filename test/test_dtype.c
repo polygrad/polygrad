@@ -33,6 +33,8 @@ TEST(dtype, classification) {
 
   ASSERT_TRUE(poly_dtype_is_int(POLY_INT32));
   ASSERT_TRUE(poly_dtype_is_int(POLY_UINT64));
+  ASSERT_TRUE(poly_dtype_is_int(POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_is_index(POLY_INDEX));
   ASSERT_FALSE(poly_dtype_is_int(POLY_FLOAT32));
 
   ASSERT_TRUE(poly_dtype_is_unsigned(POLY_UINT8));
@@ -41,6 +43,18 @@ TEST(dtype, classification) {
 
   ASSERT_TRUE(poly_dtype_is_bool(POLY_BOOL));
   ASSERT_FALSE(poly_dtype_is_bool(POLY_INT32));
+  PASS();
+}
+
+TEST(dtype, weakint_identity_uses_tinygrad_scalar_semantics) {
+  PolyDType weak_like = POLY_INDEX;
+  weak_like.bitsize = 144;
+  weak_like.count = 1;
+
+  ASSERT_FALSE(poly_dtype_eq(weak_like, POLY_INDEX));
+  ASSERT_TRUE(poly_dtype_is_index(weak_like));
+  ASSERT_TRUE(poly_dtype_is_int(weak_like));
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(weak_like), POLY_INDEX));
   PASS();
 }
 

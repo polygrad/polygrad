@@ -889,7 +889,9 @@ static PolyPatternMatcher *g_pm_reduce_unparented = NULL;
 static PolyPatternMatcher *g_pm_reduce_collapse_base = NULL;
 static PolyPatternMatcher *g_pm_reduce_collapse = NULL;
 static PolyPatternMatcher *g_pm_reduce_load_collapse = NULL;
+static PolyPatternMatcher *g_pm_reduce_simplify_base = NULL;
 static PolyPatternMatcher *g_pm_reduce_simplify = NULL;
+static PolyPatternMatcher *g_pm_symbolic_reduce_simplify = NULL;
 
 static PolyPatternMatcher *pm_reduce_unparented_get(void) {
   if (g_pm_reduce_unparented) return g_pm_reduce_unparented;
@@ -1023,16 +1025,27 @@ static PolyUOp *reduce_load_collapse(PolyCtx *ctx, PolyUOp *red, const PolyBindi
   return reduce_collapse(ctx, red, red->src[0], pm_reduce_load_collapse_get());
 }
 
-static PolyPatternMatcher *pm_reduce_simplify_get(void) {
-  if (g_pm_reduce_simplify) return g_pm_reduce_simplify;
+static PolyPatternMatcher *pm_reduce_simplify_base_get(void) {
+  if (g_pm_reduce_simplify_base) return g_pm_reduce_simplify_base;
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_simplify},
   };
-  PolyPatternMatcher *base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  g_pm_reduce_simplify = poly_pm_concat(base, poly_symbolic());
-  poly_pm_destroy(base); /* poly_pm_concat copies rules. */
+  g_pm_reduce_simplify_base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  return g_pm_reduce_simplify_base;
+}
+
+static PolyPatternMatcher *pm_reduce_simplify_get(void) {
+  if (g_pm_reduce_simplify) return g_pm_reduce_simplify;
+  g_pm_reduce_simplify = poly_pm_concat(pm_reduce_simplify_base_get(), poly_symbolic());
   return g_pm_reduce_simplify;
+}
+
+static PolyPatternMatcher *pm_symbolic_reduce_simplify_get(void) {
+  if (g_pm_symbolic_reduce_simplify) return g_pm_symbolic_reduce_simplify;
+  g_pm_symbolic_reduce_simplify =
+      poly_pm_concat(poly_symbolic(), pm_reduce_simplify_base_get());
+  return g_pm_symbolic_reduce_simplify;
 }
 
 /* simplify.py: no_load / pm_load_collapse */
@@ -1083,4 +1096,9 @@ PolyUOp *poly_apply_reduce_unparented_only(PolyCtx *ctx, PolyUOp *sink) {
 PolyUOp *poly_apply_reduce_simplify(PolyCtx *ctx, PolyUOp *sink) {
   if (getenv("POLY_DISABLE_REDUCE_SIMPLIFY")) return sink;
   return poly_graph_rewrite(ctx, sink, pm_reduce_simplify_get());
+}
+
+PolyUOp *poly_apply_symbolic_reduce_simplify(PolyCtx *ctx, PolyUOp *sink) {
+  if (getenv("POLY_DISABLE_REDUCE_SIMPLIFY")) return sink;
+  return poly_graph_rewrite(ctx, sink, pm_symbolic_reduce_simplify_get());
 }

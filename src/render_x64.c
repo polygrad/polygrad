@@ -1824,7 +1824,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP ||
-        u->op == POLY_OP_ENDIF)
+        u->op == POLY_OP_ENDIF ||
+        (u->op == POLY_OP_STACK && poly_dtype_eq(u->dtype, POLY_VOID)))
       continue;
     if (u->op == POLY_OP_AFTER) continue;
     if (u->op == POLY_OP_STORE) continue;
@@ -1988,7 +1989,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     }
 
     /* Skip non-code UOps */
-    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP) continue;
+    if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP || u->op == POLY_OP_GROUP ||
+        (u->op == POLY_OP_STACK && poly_dtype_eq(u->dtype, POLY_VOID)))
+      continue;
 
     /* Phase 3a: free dead XMM entries */
     for (int ri = 0; ri < XF_SIZE; ri++) {

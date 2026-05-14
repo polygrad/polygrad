@@ -793,12 +793,12 @@ TEST(shape_uop, contiguous_passthrough) {
 
 TEST(shape_uop, assign_flat) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *r = make_buf(ctx, (int64_t[]){3, 4}, 2);
-  PolyUOp *a = poly_legacy_assign_buffer(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
-  /* AFTER/STORE assign helper normalizes to flat BUFFER (shape fix deferred) */
-  ASSERT_INT_EQ(poly_uop_ndim(ctx, a), 1);
-  ASSERT_INT_EQ(poly_uop_dims(ctx, a)[0], 12);
+  PolyUOp *a = poly_store_buffer_update(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
+  /* Whole-buffer update helper normalizes to flat BUFFER target. */
+  ASSERT_TRUE(a->op == POLY_OP_STORE);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, a->src[0]), 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, a->src[0])[0], 12);
   poly_ctx_destroy(ctx);
   PASS();
 }

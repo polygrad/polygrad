@@ -2743,7 +2743,7 @@ TEST(rangeify, limit_bufs_disabled) {
   PASS();
 }
 
-/* ASSIGN + WAR ordering tests */
+/* In-place update + WAR ordering tests */
 
 /* assign_e2e: a.assign(a + b) — basic in-place update */
 TEST(rangeify, assign_e2e) {
@@ -2756,10 +2756,10 @@ TEST(rangeify, assign_e2e) {
   /* value = a + b */
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf_a, buf_b, poly_arg_none());
 
-  /* ASSIGN(a, a + b) */
-  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, add);
+  /* STORE(a, a + b) */
+  PolyUOp *assign = poly_store_buffer_update(ctx, buf_a, add);
 
-  /* SINK(ASSIGN) -- legacy optimizer/core in-place effect */
+  /* SINK(STORE) -- optimizer/core in-place effect */
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
   float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -2784,7 +2784,7 @@ TEST(rangeify, assign_e2e) {
   PASS();
 }
 
-/* assign_ir: verify ASSIGN scheduling produces correct kernel structure */
+/* assign_ir: verify in-place update scheduling produces correct kernel structure */
 TEST(rangeify, assign_ir) {
   const int N = 4;
   PolyCtx *ctx = poly_ctx_new();
@@ -2792,7 +2792,7 @@ TEST(rangeify, assign_ir) {
   PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *buf_b = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, buf_a, buf_b, poly_arg_none());
-  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, add);
+  PolyUOp *assign = poly_store_buffer_update(ctx, buf_a, add);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
   PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
@@ -2800,8 +2800,7 @@ TEST(rangeify, assign_ir) {
   int got_kernels = sr.n_kernels;
   int got_inter = sr.n_intermediates;
 
-  /* Check that the legacy ASSIGN kernel writes to buf_a (existing buffer).
-   * The assigned buffer should appear in param_to_buf for the kernel. */
+  /* Check that the update kernel writes to buf_a (existing buffer). */
   bool writes_buf_a = false;
   for (int k = 0; k < sr.n_kernels; k++) {
     for (int p = 0; p < sr.kernel_n_params[k]; p++) {
@@ -2812,18 +2811,18 @@ TEST(rangeify, assign_ir) {
   poly_kernel_schedule_result_free(&sr);
   poly_ctx_destroy(ctx);
 
-  /* 1 legacy ASSIGN kernel, 0 consumer stores, 0 intermediates */
+  /* 1 in-place update kernel, 0 consumer stores, 0 intermediates */
   ASSERT_INT_EQ(got_kernels, 1);
   ASSERT_INT_EQ(got_inter, 0);
   ASSERT_TRUE(writes_buf_a);
   PASS();
 }
 
-/* assign_war_ordering: reader kernel must complete before ASSIGN writer.
+/* assign_war_ordering: reader kernel must complete before in-place writer.
  * Graph: a[4], out[4] = a + 10 (separate STORE kernel reading a),
- *        ASSIGN(a, a * 2) (writes a).
- * WAR: out's kernel reads a, ASSIGN writes a → reader before writer.
- * Verify: out = {11, 12, 13, 14} (pre-ASSIGN values), a = {2, 4, 6, 8}. */
+ *        STORE(a, a * 2) (writes a).
+ * WAR: out's kernel reads a, update writes a -> reader before writer.
+ * Verify: out = {11, 12, 13, 14} (pre-update values), a = {2, 4, 6, 8}. */
 TEST(rangeify, assign_war_ordering) {
   const int N = 4;
   PolyCtx *ctx = poly_ctx_new();
@@ -2837,12 +2836,12 @@ TEST(rangeify, assign_war_ordering) {
   PolyUOp *store_out =
       poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, buf_out, a_plus_10, poly_arg_none());
 
-  /* ASSIGN: a = a * 2 */
+  /* In-place update: a = a * 2 */
   PolyUOp *two = poly_const_float(ctx, 2.0);
   PolyUOp *a_times_2 = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, buf_a, two, poly_arg_none());
-  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, a_times_2);
+  PolyUOp *assign = poly_store_buffer_update(ctx, buf_a, a_times_2);
 
-  /* SINK(STORE(out, a+10), ASSIGN(a, a*2)) */
+  /* SINK(STORE(out, a+10), STORE(a, a*2)) */
   PolyUOp *sink_src[2] = {store_out, assign};
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, sink_src, 2, poly_arg_none());
 
@@ -2862,12 +2861,12 @@ TEST(rangeify, assign_war_ordering) {
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(ret, 0);
-  /* out should see pre-ASSIGN values of a (WAR ordering) */
+  /* out should see pre-update values of a (WAR ordering) */
   ASSERT_FLOAT_EQ(out_result[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_result[1], 12.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_result[2], 13.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_result[3], 14.0f, 1e-5);
-  /* a should be updated by ASSIGN */
+  /* a should be updated by the in-place effect */
   ASSERT_FLOAT_EQ(a_result[0], 2.0f, 1e-5);
   ASSERT_FLOAT_EQ(a_result[1], 4.0f, 1e-5);
   ASSERT_FLOAT_EQ(a_result[2], 6.0f, 1e-5);
@@ -2885,7 +2884,7 @@ TEST(rangeify, assign_self_rhs) {
   PolyUOp *buf_a = poly_buffer(ctx, POLY_FLOAT32, N);
   PolyUOp *two = poly_const_float(ctx, 2.0);
   PolyUOp *a_times_2 = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, buf_a, two, poly_arg_none());
-  PolyUOp *assign = poly_legacy_assign_buffer(ctx, buf_a, a_times_2);
+  PolyUOp *assign = poly_store_buffer_update(ctx, buf_a, a_times_2);
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, &assign, 1, poly_arg_none());
 
   float a_data[4] = {3.0f, 5.0f, 7.0f, 11.0f};
@@ -3297,9 +3296,8 @@ TEST(rangeify, earliest_nested_assign_chain) {
 }
 
 TEST(rangeify, earliest_assign_to_contiguous) {
-  /* poly_legacy_assign_buffer() normalizes RESHAPE(buf) target to base BUFFER and
-   * reshapes value to flat shape. The ASSIGN writes to buf in-place.
-   * C4e (safety net) never fires because target is already BUFFER. */
+  /* poly_store_buffer_update() normalizes RESHAPE(buf) target to base BUFFER and
+   * reshapes value to flat shape. The STORE writes to buf in-place. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 8);
   PolyUOp *src = poly_buffer(ctx, POLY_FLOAT32, 8);
@@ -3314,11 +3312,8 @@ TEST(rangeify, earliest_assign_to_contiguous) {
   PolyUOp *one_exp = poly_expand(ctx, poly_reshape(ctx, one, sh8, 1), sh8, 1);
   PolyUOp *value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, src, one_exp, poly_arg_none());
 
-  /* ASSIGN(RESHAPE(buf, [4,2]), value) — target is not PARAM/BUFFER.
-   * C4e wraps in CONTIGUOUS: ASSIGN(CONTIGUOUS(RESHAPE(buf)), value).
-   * The CONTIGUOUS materializes to intermediate. */
-  /* Use poly_legacy_assign_buffer() which normalizes RESHAPE(buf) → BUFFER target */
-  PolyUOp *assign = poly_legacy_assign_buffer(ctx, reshaped, value);
+  /* Use the whole-buffer helper, which normalizes RESHAPE(buf) -> BUFFER. */
+  PolyUOp *assign = poly_store_buffer_update(ctx, reshaped, value);
   /* Verify normalization: target should be base BUFFER, not RESHAPE */
   ASSERT_TRUE(assign->src[0] == buf); /* target normalized to BUFFER */
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, assign, poly_arg_none());
@@ -3331,7 +3326,7 @@ TEST(rangeify, earliest_assign_to_contiguous) {
   };
   int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   poly_ctx_destroy(ctx);
-  /* poly_legacy_assign_buffer normalizes to BUFFER target; ASSIGN writes in-place */
+  /* poly_store_buffer_update normalizes to BUFFER target; STORE writes in-place */
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < 8; i++)
     ASSERT_FLOAT_EQ(buf_d[i], src_d[i] + 1.0f, 1e-5);
@@ -3363,7 +3358,7 @@ TEST(rangeify, range_start_for_op_all) {
 TEST(rangeify, assign_shrink_hazard) {
   /* a[:5].assign(a[3:8]) — overlapping SHRINK regions create write-before-read
    * aliasing. fix_assign_hazard should force materialization of the source
-   * before writing. Build legacy ASSIGN manually (not via poly_legacy_assign_buffer which
+   * before writing. Build legacy ASSIGN manually (not via poly_store_buffer_update which
    * normalizes target) to preserve SHRINK on target.
    *
    * Verify: CONTIGUOUS insertion causes 2+ kernels (materialization + ASSIGN).

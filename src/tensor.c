@@ -43,7 +43,8 @@ PolyUOp *poly_buffer_var(
 ) {
   assert(batch_var->op == POLY_OP_DEFINE_VAR || batch_var->op == POLY_OP_BIND);
   assert(n_inner >= 0 && n_inner < POLY_MAX_DIMS);
-  PolyUOp *bound = batch_var->op == POLY_OP_BIND && batch_var->n_src >= 1 ? batch_var->src[0] : batch_var;
+  PolyUOp *bound =
+      batch_var->op == POLY_OP_BIND && batch_var->n_src >= 1 ? batch_var->src[0] : batch_var;
   assert(bound->op == POLY_OP_DEFINE_VAR);
   int64_t alloc = bound->arg.define_var.max_val;
   /* src[0] = UNIQUE (prevent CSE), src[1] = dynamic bound,
@@ -59,10 +60,9 @@ PolyUOp *poly_buffer_var(
   return poly_uop(ctx, POLY_OP_BUFFER, dt, src, n_src, poly_arg_int(alloc));
 }
 
-PolyUOp *poly_legacy_assign_buffer(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
-  /* Legacy full-buffer assignment only. Movement views are normalized to their
-   * base BUFFER. Do not use this from frontends; poly_tensor_assign is the
-   * tinygrad-style AFTER/STORE path. */
+PolyUOp *poly_store_buffer_update(PolyCtx *ctx, PolyUOp *target, PolyUOp *value) {
+  /* Full-buffer assignment only. Movement views are normalized to their base
+   * BUFFER for optimizer/direct core paths that update whole storage objects. */
   PolyUOp *base = target;
   while (poly_opset_has(POLY_GROUP_MOVEMENT, base->op) && base->n_src > 0)
     base = base->src[0];
@@ -76,8 +76,7 @@ PolyUOp *poly_legacy_assign_buffer(PolyCtx *ctx, PolyUOp *target, PolyUOp *value
     target = base;
   }
 
-  PolyUOp *srcs[2] = {target, value};
-  return poly_uop(ctx, POLY_OP_ASSIGN, target->dtype, srcs, 2, poly_arg_none());
+  return poly_store_val(ctx, target, value);
 }
 
 /* Core PolyTensor handles */
@@ -94,8 +93,7 @@ static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
 
 static PolyTensorList *tensor_list_for_uop(PolyCtx *ctx, PolyUOp *uop, bool create) {
   if (!ctx || !uop) return NULL;
-  PolyTensorList *list =
-      poly_map_get(ctx->tensors_by_uop, poly_ptr_hash(uop), uop, poly_ptr_eq);
+  PolyTensorList *list = poly_map_get(ctx->tensors_by_uop, poly_ptr_hash(uop), uop, poly_ptr_eq);
   if (list || !create) return list;
   list = calloc(1, sizeof(PolyTensorList));
   if (!list) return NULL;
@@ -141,8 +139,100 @@ static void tensor_index_remove(PolyCtx *ctx, PolyUOp *current, PolyTensor *tens
   }
 }
 
+static bool tensor_assign_anchor_op(PolyOps op) {
+  return poly_opset_has(POLY_GROUP_MOVEMENT, op) || op == POLY_OP_BITCAST;
+}
+
+static PolyUOp *tensor_assign_view_anchor(PolyUOp *u) {
+  if (!u || poly_uop_has_buffer_identity(u)) return NULL;
+
+  /* tinygrad retargets view assigns at the nearest buffer-identity level:
+   * SHRINK(BUFFER) maps BUFFER -> AFTER(BUFFER, assign), while
+   * PERMUTE(RESHAPE(BUFFER)) maps RESHAPE(BUFFER) -> AFTER(...).  Stop at
+   * AFTER too, because a second pending view write chains onto that boundary. */
+  PolyUOp *cur = u;
+  while (cur && !poly_uop_has_buffer_identity(cur)) {
+    if (cur->op == POLY_OP_AFTER) return cur;
+    if (!tensor_assign_anchor_op(cur->op) || cur->n_src < 1) return NULL;
+    cur = cur->src[0];
+  }
+  return (cur && cur != u) ? cur : NULL;
+}
+
+static PolyUOp *tensor_substitute_once(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp *from,
+    PolyUOp *to,
+    PolyMap *memo
+) {
+  if (!ctx || !u) return NULL;
+  if (u == from) return to;
+
+  PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
+  if (cached) return cached;
+
+  PolyUOp *stack_src[16];
+  PolyUOp **new_src = (u->n_src > (int)(sizeof(stack_src) / sizeof(stack_src[0])))
+                          ? malloc((size_t)u->n_src * sizeof(PolyUOp *))
+                          : stack_src;
+  if (!new_src) return NULL;
+
+  bool changed = false;
+  for (int i = 0; i < u->n_src; i++) {
+    new_src[i] = tensor_substitute_once(ctx, u->src[i], from, to, memo);
+    if (!new_src[i]) {
+      if (new_src != stack_src) free(new_src);
+      return NULL;
+    }
+    if (new_src[i] != u->src[i]) changed = true;
+  }
+
+  PolyUOp *result = changed ? poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : u;
+  poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
+  if (new_src != stack_src) free(new_src);
+  return result;
+}
+
+static int tensor_retarget_logical_uops(
+    PolyCtx *ctx,
+    PolyUOp *from,
+    PolyUOp *to,
+    PolyDevice device
+) {
+  if (!ctx || !from || !to || from == to) return 0;
+
+  for (int i = 0; i < ctx->n_tensors; i++) {
+    PolyTensor *t = ctx->tensors[i];
+    if (!t) continue;
+    if (device != POLY_DEVICE_AUTO && t->device != POLY_DEVICE_AUTO &&
+        !poly_devices_share_storage(t->device, device))
+      continue;
+
+    PolyUOp *current = tensor_current_uop(t);
+    if (!current) continue;
+    PolyMap *memo = poly_map_new(64);
+    if (!memo) return -1;
+    /* View-assign replacements are intentionally self-containing
+     * (BUFFER -> AFTER(BUFFER, STORE(...))). Do not recurse into the
+     * replacement itself, matching tinygrad's substitute map behavior. */
+    PolyUOp *new_current = tensor_substitute_once(ctx, current, from, to, memo);
+    poly_map_destroy(memo);
+    if (!new_current || new_current == current) continue;
+
+    /* View assign is a semantic effect rewrite, not a runtime materialization
+     * retarget. Keep it in logical IR as AFTER/STORE, matching tinygrad's
+     * Tensor.assign graph shape. */
+    if (poly_tensor_update(ctx, t, new_current, NULL, t->role, t->device) != 0) return -1;
+  }
+  return 0;
+}
+
 PolyTensor *poly_tensor_find_current(
-    PolyCtx *ctx, PolyUOp *current, PolyDevice device, PolyTensorRole role
+    PolyCtx *ctx,
+    PolyUOp *current,
+    PolyDevice device,
+    PolyTensorRole role
 ) {
   PolyTensorList *list = tensor_list_for_uop(ctx, current, false);
   if (!list) return NULL;
@@ -209,9 +299,7 @@ PolyTensor *poly_tensor_create_with_roots(
   return tensor;
 }
 
-PolyTensor *poly_tensor_create(
-    PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device
-) {
+PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device) {
   return poly_tensor_create_with_roots(ctx, uop, NULL, role, device);
 }
 
@@ -293,8 +381,18 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
   PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, target_uop->dtype, src, 2, poly_arg_none());
   if (!after) return NULL;
 
-  if (poly_tensor_update(ctx, target, after, NULL, target->role, target->device) != 0)
-    return NULL;
+  PolyUOp *view_anchor = tensor_assign_view_anchor(target_uop);
+  if (view_anchor) {
+    PolyUOp *anchor_src[2] = {view_anchor, after};
+    PolyUOp *assigned_anchor =
+        poly_uop(ctx, POLY_OP_AFTER, view_anchor->dtype, anchor_src, 2, poly_arg_none());
+    if (!assigned_anchor) return NULL;
+    if (tensor_retarget_logical_uops(ctx, view_anchor, assigned_anchor, target->device) != 0)
+      return NULL;
+    return target;
+  }
+
+  if (poly_tensor_update(ctx, target, after, NULL, target->role, target->device) != 0) return NULL;
   return target;
 }
 
@@ -369,7 +467,9 @@ static PolyUOp *poly_const_exact_float(PolyCtx *ctx, PolyDType dt, double value)
 static PolyUOp *poly_const_unique_exact_int(PolyCtx *ctx, PolyDType dt, int64_t value) {
   dt = poly_dtype_scalar(dt);
   if (poly_dtype_is_bool(dt))
-    return poly_uop_tagged(ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_bool(value != 0), ctx->next_buf_tag++);
+    return poly_uop_tagged(
+        ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_bool(value != 0), ctx->next_buf_tag++
+    );
   if (!poly_dtype_is_int(dt)) return NULL;
   return poly_uop_tagged(ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_int(value), ctx->next_buf_tag++);
 }
@@ -377,7 +477,9 @@ static PolyUOp *poly_const_unique_exact_int(PolyCtx *ctx, PolyDType dt, int64_t 
 static PolyUOp *poly_const_unique_exact_float(PolyCtx *ctx, PolyDType dt, double value) {
   dt = poly_dtype_scalar(dt);
   if (!poly_dtype_is_float(dt)) return NULL;
-  return poly_uop_tagged(ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_float(value), ctx->next_buf_tag++);
+  return poly_uop_tagged(
+      ctx, POLY_OP_CONST, dt, NULL, 0, poly_arg_float(value), ctx->next_buf_tag++
+  );
 }
 
 static PolyUOp *poly_empty_shaped(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim) {
@@ -386,7 +488,12 @@ static PolyUOp *poly_empty_shaped(PolyCtx *ctx, PolyDType dt, const int64_t *sha
   return poly_reshape(ctx, buf, (int64_t *)shape, ndim);
 }
 
-static PolyUOp *poly_full_from_scalar(PolyCtx *ctx, const int64_t *shape, int ndim, PolyUOp *scalar) {
+static PolyUOp *poly_full_from_scalar(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    PolyUOp *scalar
+) {
   if (!scalar || ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
   if (ndim == 0) return scalar;
   if (!shape) return NULL;
@@ -1839,7 +1946,13 @@ PolyUOp *poly_full(PolyCtx *ctx, const int64_t *shape, int ndim, double fill_val
  *
  * Pure UOp graph. The cumulative sum is currently O(N^2) until the
  * range-collapse simplify pass lands in Phase D. */
-PolyUOp *poly_arange_int_by_id(PolyCtx *ctx, int64_t start, int64_t stop, int64_t step, int dtype_id) {
+PolyUOp *poly_arange_int_by_id(
+    PolyCtx *ctx,
+    int64_t start,
+    int64_t stop,
+    int64_t step,
+    int dtype_id
+) {
   PolyDType dt;
   if (!ffi_dtype_is_integer_like(dtype_id, &dt) || poly_dtype_is_bool(dt)) return NULL;
   if (step == 0) {
@@ -1858,7 +1971,13 @@ PolyUOp *poly_arange_int_by_id(PolyCtx *ctx, int64_t start, int64_t stop, int64_
   return poly_alu2(ctx, POLY_OP_ADD, cumsum, bias);
 }
 
-PolyUOp *poly_arange_float_by_id(PolyCtx *ctx, double start, double stop, double step, int dtype_id) {
+PolyUOp *poly_arange_float_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    double step,
+    int dtype_id
+) {
   PolyDType dt;
   if (!ffi_dtype_is_float_like(dtype_id, &dt)) return NULL;
   if (step == 0.0) {
@@ -1910,8 +2029,7 @@ PolyUOp *poly_linspace_by_id(PolyCtx *ctx, double start, double stop, int64_t st
   PolyUOp *ar = poly_arange_float_by_id(ctx, 0.0, (double)steps, 1.0, compute_id);
   PolyUOp *s_c = poly_const_exact_float(ctx, compute_dt, scale);
   PolyUOp *start_c = poly_const_exact_float(ctx, compute_dt, start);
-  PolyUOp *result =
-      poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, ar, s_c), start_c);
+  PolyUOp *result = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, ar, s_c), start_c);
   return poly_dtype_eq(out_dt, compute_dt) ? result : poly_cast(ctx, result, out_dt);
 }
 
@@ -1994,7 +2112,13 @@ PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   return poly_where_op(ctx, mask, x, zero);
 }
 
-static PolyUOp *poly_rand_compute(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, PolyDType out_dt) {
+static PolyUOp *poly_rand_compute(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    uint64_t seed,
+    PolyDType out_dt
+) {
   if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
   if (ndim > 0 && !shape) return NULL;
   for (int i = 0; i < ndim; i++) {
@@ -2014,18 +2138,17 @@ static PolyUOp *poly_rand_compute(PolyCtx *ctx, const int64_t *shape, int ndim, 
   PolyUOp *key_t = poly_const_exact_int(ctx, POLY_UINT32, (int64_t)mixed_key);
 
   if (poly_dtype_eq(out_dt, POLY_FLOAT64)) {
-    PolyUOp *bits_hi = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
+    PolyUOp *bits_hi =
+        poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
     PolyUOp *key2_t = poly_const_exact_int(ctx, POLY_UINT32, (int64_t)(mixed_key ^ 0x9E3779B9u));
-    PolyUOp *bits_lo = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key2_t, poly_arg_none());
-    PolyUOp *hi27 =
-        poly_alu2(ctx, POLY_OP_SHR, bits_hi, poly_const_exact_int(ctx, POLY_UINT32, 5));
-    PolyUOp *lo26 =
-        poly_alu2(ctx, POLY_OP_SHR, bits_lo, poly_const_exact_int(ctx, POLY_UINT32, 6));
+    PolyUOp *bits_lo =
+        poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key2_t, poly_arg_none());
+    PolyUOp *hi27 = poly_alu2(ctx, POLY_OP_SHR, bits_hi, poly_const_exact_int(ctx, POLY_UINT32, 5));
+    PolyUOp *lo26 = poly_alu2(ctx, POLY_OP_SHR, bits_lo, poly_const_exact_int(ctx, POLY_UINT32, 6));
     PolyUOp *hi_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, hi27, poly_arg_none());
     PolyUOp *lo_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, lo26, poly_arg_none());
     PolyUOp *mant = poly_alu2(
-        ctx, POLY_OP_ADD,
-        poly_alu2(ctx, POLY_OP_MUL, hi_f, cdt(ctx, POLY_FLOAT64, 67108864.0)),
+        ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, hi_f, cdt(ctx, POLY_FLOAT64, 67108864.0)),
         lo_f
     );
     return poly_alu2(ctx, POLY_OP_MUL, mant, cdt(ctx, POLY_FLOAT64, 1.0 / 9007199254740992.0));
@@ -2037,7 +2160,13 @@ static PolyUOp *poly_rand_compute(PolyCtx *ctx, const int64_t *shape, int ndim, 
   return poly_alu2(ctx, POLY_OP_MUL, as_f, cdt(ctx, out_dt, 1.0 / 16777216.0));
 }
 
-PolyUOp *poly_rand_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id) {
+PolyUOp *poly_rand_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    uint64_t seed,
+    int dtype_id
+) {
   PolyDType out_dt;
   if (!ffi_dtype_is_float_like(dtype_id, &out_dt)) return NULL;
   PolyDType compute_dt = poly_dtype_eq(out_dt, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
@@ -2050,7 +2179,13 @@ PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed) 
   return poly_rand_by_id(ctx, shape, ndim, seed, 12);
 }
 
-PolyUOp *poly_randn_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id) {
+PolyUOp *poly_randn_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    uint64_t seed,
+    int dtype_id
+) {
   PolyDType out_dt;
   if (!ffi_dtype_is_float_like(dtype_id, &out_dt)) return NULL;
   PolyDType compute_dt = poly_dtype_eq(out_dt, POLY_FLOAT64) ? POLY_FLOAT64 : POLY_FLOAT32;
@@ -2311,8 +2446,9 @@ PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
    * `a + (b * -1)`. Preserve that high-level graph shape here instead of
    * emitting a direct SUB: vector/broadcast lowering keeps the repeated
    * multiply-by-minus-one form through the final renderer pass. */
-  PolyUOp *neg_m =
-      poly_alu2(ctx, POLY_OP_MUL, m_exp, poly_uop0(ctx, POLY_OP_CONST, m_exp->dtype, poly_arg_float(-1.0)));
+  PolyUOp *neg_m = poly_alu2(
+      ctx, POLY_OP_MUL, m_exp, poly_uop0(ctx, POLY_OP_CONST, m_exp->dtype, poly_arg_float(-1.0))
+  );
   PolyUOp *shifted = poly_alu2(ctx, POLY_OP_ADD, x_view, neg_m);
   PolyUOp *e = poly_exp(ctx, shifted);
 
@@ -2370,9 +2506,8 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
       dense_targets ? poly_reshape(ctx, target, (int64_t *)target_shape, target_ndim) : target;
   if (sparse_targets) {
     const int64_t classes = logits_shape[axis];
-    int arange_dtype_id =
-        (classes > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
-                                       : poly_dtype_id_by_name("int32");
+    int arange_dtype_id = (classes > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
+                                                         : poly_dtype_id_by_name("int32");
     const PolyDType *class_dt_ptr = ffi_dtype_from_id(arange_dtype_id);
     if (!class_dt_ptr) return NULL;
     PolyDType class_dt = poly_dtype_scalar(*class_dt_ptr);

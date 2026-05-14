@@ -27,10 +27,12 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 struct PolyProgram {
   void *handle; /* dlopen handle */
   void (*call_fn)(void **args); /* fn_name_call wrapper */
+  void (*call_core_fn)(void **args, int core_id); /* fn_name_call_core wrapper */
   char so_path[512]; /* kept alive until destroy */
   int cached; /* 1 if loaded from disk cache (don't remove on destroy) */
 };
@@ -113,8 +115,7 @@ static const char *opt_flag(void) {
 static const char *cpu_arch_flag(char *buf, size_t cap) {
   const char *v = getenv("POLY_CPU_ARCH");
   if (!v || !v[0]) v = "native";
-  if (strcmp(v, "0") == 0 || strcmp(v, "none") == 0 || strcmp(v, "baseline") == 0)
-    return NULL;
+  if (strcmp(v, "0") == 0 || strcmp(v, "none") == 0 || strcmp(v, "baseline") == 0) return NULL;
   if (v[0] == '-') return v;
   snprintf(buf, cap, "-march=%s", v);
   return buf;
@@ -166,9 +167,16 @@ static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached
     return NULL;
   }
 
+  char call_core_name[256];
+  snprintf(call_core_name, sizeof(call_core_name), "%s_call_core", fn_name);
+  void *core_sym = dlsym(handle, call_core_name);
+  void (*call_core_fn)(void **, int) = NULL;
+  memcpy(&call_core_fn, &core_sym, sizeof(core_sym));
+
   PolyProgram *prog = malloc(sizeof(PolyProgram));
   prog->handle = handle;
   prog->call_fn = call_fn;
+  prog->call_core_fn = call_core_fn;
   strncpy(prog->so_path, so_path, sizeof(prog->so_path) - 1);
   prog->so_path[sizeof(prog->so_path) - 1] = '\0';
   prog->cached = cached;
@@ -178,7 +186,10 @@ static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached
 /* Compile C source to .so */
 
 static int compile_to_so_with_flag(
-    const char *source, const char *c_path, const char *so_path, const char *cpu_flag
+    const char *source,
+    const char *c_path,
+    const char *so_path,
+    const char *cpu_flag
 ) {
   FILE *f = fopen(c_path, "w");
   if (!f) {
@@ -248,8 +259,7 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
    * bytes, not dlopen'ed shared libraries, so this is a Polygrad C-backend
    * loader constraint. Keep release disk caching enabled, but make sanitizer
    * runs compile temporary kernels instead of reusing cached .so files. */
-  int use_cache =
-      (!getenv("POLY_CACHE") || getenv("POLY_CACHE")[0] != '0') && !jit_asan_enabled();
+  int use_cache = (!getenv("POLY_CACHE") || getenv("POLY_CACHE")[0] != '0') && !jit_asan_enabled();
   char cache_dir[512] = {0};
   char cache_path[512] = {0};
   uint64_t h = 0;
@@ -340,6 +350,146 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
 void poly_program_call(PolyProgram *prog, void **args, int n_args) {
   (void)n_args;
   prog->call_fn(args);
+}
+
+typedef struct {
+  int core_id;
+  bool live;
+  pthread_t thread;
+} PolyThreadCall;
+
+typedef struct {
+  pthread_mutex_t mu;
+  pthread_cond_t start_cv;
+  pthread_cond_t done_cv;
+  PolyThreadCall workers[64];
+  PolyProgram *prog;
+  void **args;
+  int requested_threads;
+  int active_workers;
+  uint64_t generation;
+  bool running;
+  bool stop;
+} PolyCPUThreadPool;
+
+static PolyCPUThreadPool g_cpu_thread_pool = {
+    .mu = PTHREAD_MUTEX_INITIALIZER,
+    .start_cv = PTHREAD_COND_INITIALIZER,
+    .done_cv = PTHREAD_COND_INITIALIZER,
+};
+static pthread_once_t g_cpu_thread_pool_once = PTHREAD_ONCE_INIT;
+
+static void poly_cpu_thread_pool_shutdown(void);
+
+static void poly_cpu_thread_pool_once(void) {
+  atexit(poly_cpu_thread_pool_shutdown);
+}
+
+static void *poly_thread_call_main(void *opaque) {
+  PolyThreadCall *tc = (PolyThreadCall *)opaque;
+  PolyCPUThreadPool *p = &g_cpu_thread_pool;
+  uint64_t seen_generation = 0;
+
+  pthread_mutex_lock(&p->mu);
+  for (;;) {
+    while (!p->stop && (!p->running || p->generation == seen_generation ||
+                        tc->core_id >= p->requested_threads)) {
+      pthread_cond_wait(&p->start_cv, &p->mu);
+    }
+    if (p->stop) break;
+
+    PolyProgram *prog = p->prog;
+    void **args = p->args;
+    int core_id = tc->core_id;
+    seen_generation = p->generation;
+    pthread_mutex_unlock(&p->mu);
+
+    prog->call_core_fn(args, core_id);
+
+    pthread_mutex_lock(&p->mu);
+    p->active_workers--;
+    if (p->active_workers == 0) pthread_cond_signal(&p->done_cv);
+  }
+  pthread_mutex_unlock(&p->mu);
+  return NULL;
+}
+
+static int poly_cpu_thread_cap(int threads) {
+  int max_threads = (int)(sizeof(g_cpu_thread_pool.workers) / sizeof(g_cpu_thread_pool.workers[0]));
+  if (threads < 1) return 1;
+  if (threads > max_threads) return max_threads;
+  return threads;
+}
+
+static void poly_cpu_thread_pool_ensure_locked(PolyCPUThreadPool *p, int threads) {
+  for (int t = 1; t < threads; t++) {
+    PolyThreadCall *tc = &p->workers[t];
+    if (tc->live) continue;
+    tc->core_id = t;
+    if (pthread_create(&tc->thread, NULL, poly_thread_call_main, tc) == 0) tc->live = true;
+  }
+}
+
+static void poly_cpu_thread_pool_shutdown(void) {
+  PolyCPUThreadPool *p = &g_cpu_thread_pool;
+  pthread_mutex_lock(&p->mu);
+  p->stop = true;
+  pthread_cond_broadcast(&p->start_cv);
+  pthread_mutex_unlock(&p->mu);
+
+  int max_threads = (int)(sizeof(p->workers) / sizeof(p->workers[0]));
+  for (int t = 1; t < max_threads; t++) {
+    if (!p->workers[t].live) continue;
+    pthread_join(p->workers[t].thread, NULL);
+    p->workers[t].live = false;
+  }
+}
+
+void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int threads) {
+  (void)n_args;
+  if (!prog) return;
+  if (threads <= 1 || !prog->call_core_fn) {
+    prog->call_fn(args);
+    return;
+  }
+
+  pthread_once(&g_cpu_thread_pool_once, poly_cpu_thread_pool_once);
+  threads = poly_cpu_thread_cap(threads);
+
+  PolyCPUThreadPool *p = &g_cpu_thread_pool;
+  pthread_mutex_lock(&p->mu);
+  while (p->running)
+    pthread_cond_wait(&p->done_cv, &p->mu);
+
+  poly_cpu_thread_pool_ensure_locked(p, threads);
+
+  p->prog = prog;
+  p->args = args;
+  p->requested_threads = threads;
+  p->active_workers = 0;
+  for (int t = 1; t < threads; t++)
+    if (p->workers[t].live) p->active_workers++;
+  p->running = true;
+  p->generation++;
+  pthread_cond_broadcast(&p->start_cv);
+  pthread_mutex_unlock(&p->mu);
+
+  prog->call_core_fn(args, 0);
+
+  pthread_mutex_lock(&p->mu);
+  for (int t = 1; t < threads; t++) {
+    if (p->workers[t].live) continue;
+    pthread_mutex_unlock(&p->mu);
+    prog->call_core_fn(args, t);
+    pthread_mutex_lock(&p->mu);
+  }
+  while (p->active_workers > 0)
+    pthread_cond_wait(&p->done_cv, &p->mu);
+  p->running = false;
+  p->prog = NULL;
+  p->args = NULL;
+  pthread_cond_broadcast(&p->done_cv);
+  pthread_mutex_unlock(&p->mu);
 }
 
 void poly_program_destroy(PolyProgram *prog) {

@@ -217,6 +217,48 @@ static void cuda_render_vector_prefix(CudaStrBuf *out, PolyDType dt) {
   csb_puts(out, "}; return r; }\n");
 }
 
+static int cuda_child_count(PolyUOp **uops, int n, PolyUOp *needle) {
+  int count = 0;
+  if (!needle) return 0;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = uops[i];
+    if (!u) continue;
+    for (int j = 0; j < u->n_src; j++)
+      if (u->src[j] == needle) count++;
+  }
+  return count;
+}
+
+static char *cuda_render_vector_expr(CudaStrMap *names, PolyUOp *u) {
+  char ctype[128];
+  cuda_render_ctype(u->dtype, ctype, sizeof(ctype));
+
+  CudaStrBuf expr;
+  csb_init(&expr);
+  if (u->n_src == 1) {
+    char *s = csmap_get(names, u->src[0]);
+    csb_printf(&expr, "(%s)(%s)", ctype, s ? s : "0");
+  } else if (u->n_src > 1) {
+    csb_printf(&expr, "make_%s(", ctype);
+    for (int j = 0; j < u->n_src; j++) {
+      if (j) csb_puts(&expr, ", ");
+      char *s = csmap_get(names, u->src[j]);
+      csb_puts(&expr, s ? s : "0");
+    }
+    csb_puts(&expr, ")");
+  } else if (u->arg.kind == POLY_ARG_INT_TUPLE) {
+    csb_printf(&expr, "make_%s(", ctype);
+    for (int j = 0; j < u->arg.int_tuple.n; j++) {
+      if (j) csb_puts(&expr, ", ");
+      csb_printf(&expr, "%lld", (long long)u->arg.int_tuple.vals[j]);
+    }
+    csb_puts(&expr, ")");
+  } else {
+    csb_printf(&expr, "(%s)0", ctype);
+  }
+  return expr.buf;
+}
+
 static bool cuda_is_half(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
   return s.priority == POLY_FLOAT16.priority || s.priority == POLY_BFLOAT16.priority;
@@ -794,6 +836,16 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
     /* --- VECTORIZE / VCONST ------------------------------------------ */
     if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) {
+      char *expr = cuda_render_vector_expr(&names, u);
+      /* Match tinygrad CStyleLanguage._render: one-use STACK nodes are kept as
+       * expressions instead of materialized as locals. This prevents dead
+       * renderer-facing STACKs that only feed structural helper ops (for
+       * example UNROLL) from emitting illegal CUDA locals like float512. */
+      if (cuda_child_count(uops, n, u) <= 1) {
+        csmap_set(&names, u, expr);
+        continue;
+      }
+
       char name[32];
       snprintf(name, sizeof(name), "vec%d", c_alu++);
       csmap_set(&names, u, strdup(name));
@@ -803,28 +855,8 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csb_printf(&decls, "  %s %s;\n", ctype, name);
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
-
-      if (u->n_src == 1) {
-        char *s = csmap_get(&names, u->src[0]);
-        csb_printf(&body, "%s = (%s)(%s);\n", name, ctype, s ? s : "0");
-      } else if (u->n_src > 1) {
-        csb_printf(&body, "%s = make_%s(", name, ctype);
-        for (int j = 0; j < u->n_src; j++) {
-          if (j) csb_puts(&body, ", ");
-          char *s = csmap_get(&names, u->src[j]);
-          csb_puts(&body, s ? s : "0");
-        }
-        csb_puts(&body, ");\n");
-      } else if (u->arg.kind == POLY_ARG_INT_TUPLE) {
-        csb_printf(&body, "%s = make_%s(", name, ctype);
-        for (int j = 0; j < u->arg.int_tuple.n; j++) {
-          if (j) csb_puts(&body, ", ");
-          csb_printf(&body, "%lld", (long long)u->arg.int_tuple.vals[j]);
-        }
-        csb_puts(&body, ");\n");
-      } else {
-        csb_printf(&body, "%s = (%s)0;\n", name, ctype);
-      }
+      csb_printf(&body, "%s = %s;\n", name, expr);
+      free(expr);
       continue;
     }
 

@@ -114,6 +114,38 @@ static int count_indexes_with_i64_addr(PolyUOp **nodes, int n) {
   return bad;
 }
 
+static int count_weakint_named_nodes(PolyUOp **nodes, int n) {
+  int bad = 0;
+  for (int i = 0; i < n; i++) {
+    PolyDType s = poly_dtype_scalar(nodes[i]->dtype);
+    if (s.name && strcmp(s.name, "weakint") == 0) bad++;
+  }
+  return bad;
+}
+
+static PolyUOp *make_shaped_f32_buf(PolyCtx *ctx, const int64_t *shape, int ndim) {
+  int64_t numel = 1;
+  for (int i = 0; i < ndim; i++)
+    numel *= shape[i];
+  PolyUOp *buf = poly_buffer_f32(ctx, numel);
+  return ndim > 1 ? poly_reshape(ctx, buf, (int64_t *)shape, ndim) : buf;
+}
+
+static int wgsl_workgroup_product(const char *wgsl, int dims[3]) {
+  dims[0] = dims[1] = dims[2] = 1;
+  const char *p = strstr(wgsl, "@workgroup_size(");
+  if (!p) return 1;
+  p += strlen("@workgroup_size(");
+  for (int i = 0; i < 3 && *p; i++) {
+    dims[i] = atoi(p);
+    const char *comma = strchr(p, ',');
+    const char *close = strchr(p, ')');
+    if (!comma || (close && close < comma)) break;
+    p = comma + 1;
+  }
+  return dims[0] * dims[1] * dims[2];
+}
+
 /* Linearizer tests */
 
 TEST(codegen, linearize_order) {
@@ -588,6 +620,46 @@ TEST(codegen, render_wgsl_uint8_storage_is_packed_like_tinygrad) {
   PASS();
 }
 
+TEST(codegen, render_wgsl_bool_storage_is_packed_like_tinygrad) {
+  /* WGSL permits scalar bool values but forbids bool in storage buffers.
+   * tinygrad's WGSLRenderer packs bool output storage into atomic<u32> byte
+   * lanes, while keeping the comparison itself as a scalar bool expression. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_bool = poly_dtype_ptr(POLY_BOOL, -1, POLY_ADDR_GLOBAL);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_bool, poly_arg_int(0));
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *idx_out = poly_uop2(ctx, POLY_OP_INDEX, ptr_bool, out, range, poly_arg_none());
+  PolyUOp *idx_a = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, a, range, poly_arg_none());
+  PolyUOp *idx_b = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, b, range, poly_arg_none());
+  PolyUOp *load_a = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx_a, poly_arg_none());
+  PolyUOp *load_b = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx_b, poly_arg_none());
+  PolyUOp *eq = poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, load_a, load_b, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_out, eq, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n);
+  char *src = poly_render_wgsl(lin, n, "eq_bool");
+
+  ASSERT_NOT_NULL(strstr(src, "data0: array<atomic<u32>>"));
+  ASSERT_TRUE(strstr(src, "array<bool>") == NULL);
+  ASSERT_NOT_NULL(strstr(src, "var alu0: bool"));
+  ASSERT_NOT_NULL(strstr(src, "atomicAdd(&data0[(ridx0/4)]"));
+  ASSERT_NOT_NULL(strstr(src, "select(0u, 1u, alu0)"));
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, render_wgsl_reduce) {
   /* out[0] = sum(a[0..9]) — reduce with accumulator */
   PolyCtx *ctx = poly_ctx_new();
@@ -728,8 +800,12 @@ TEST(codegen, render_wgsl_param_bindings_follow_encounter_order) {
   ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data7: array<f32>;"));
   ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data2: array<f32>;"));
   ASSERT_NOT_NULL(strstr(src, "var<storage,read_write> data9: array<f32>;"));
-  ASSERT_TRUE(strstr(src, "@group(0) @binding(8)\nvar<storage,read_write> data7: array<f32>") == NULL);
-  ASSERT_TRUE(strstr(src, "@group(0) @binding(10)\nvar<storage,read_write> data9: array<f32>") == NULL);
+  ASSERT_TRUE(
+      strstr(src, "@group(0) @binding(8)\nvar<storage,read_write> data7: array<f32>") == NULL
+  );
+  ASSERT_TRUE(
+      strstr(src, "@group(0) @binding(10)\nvar<storage,read_write> data9: array<f32>") == NULL
+  );
 
   free(src);
   free(lin);
@@ -765,9 +841,136 @@ TEST(codegen, linearize_webgpu_vecadd_emits_gpudims) {
   PASS();
 }
 
-TEST(codegen, linearize_webgpu_reduce_emits_shared_barrier) {
-  /* Verify GPU reduction produces shared memory + barrier.
-   * 4096 elements > 256*2 threshold triggers group_for_reduce. */
+TEST(codegen, add_gpudims_same_axis_ranges_share_special) {
+  /* tinygrad gpudims groups ranges by axis tuple, not UOp identity. Distinct
+   * RANGE nodes for the same axis, including weakint/int variants, must map to
+   * one GPU builtin instead of rendering duplicate gidx/lidx declarations. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b16_w = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
+  PolyUOp *b16_i = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
+  PolyUOp *rw = poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, b16_w, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *ri = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, b16_i, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *srcs[2] = {rw, ri};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, 2, poly_arg_str("same_axis"));
+  PolyUOp *rewritten = poly_add_gpudims(ctx, sink);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_SPECIAL), 1);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_RANGE), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, add_gpudims_rewrites_large_source_nodes) {
+  /* C port guard: tinygrad substitution handles arbitrary source tuple sizes.
+   * Polygrad must not cap rewritten source arrays at the small stack scratch
+   * size, or model-scale SINK/END nodes can read past initialized sources. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *srcs[72];
+  srcs[0] = range;
+  for (int i = 1; i < 72; i++)
+    srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, 72, poly_arg_str("large_srcs"));
+  PolyUOp *rewritten = poly_add_gpudims(ctx, sink);
+
+  ASSERT_INT_EQ(rewritten->n_src, 72);
+  ASSERT_TRUE(rewritten->src[0]->op == POLY_OP_SPECIAL);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_SPECIAL), 1);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_RANGE), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, add_gpudims_group_reduce_after_source_becomes_lidx) {
+  /* tinygrad gpudims.py substitutes GROUP_REDUCE axes as local workitem
+   * indices. It only skips AxisType.REDUCE. Polygrad must not infer "serial
+   * reduce" from accumulator AFTER source lists, because group-reduce ranges can
+   * appear there as input-context ranges and still need to become lidxN. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(256));
+  PolyUOp *group_range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(1000, POLY_AXIS_GROUP_REDUCE)
+  );
+  PolyDType reg_f32 = poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_REG);
+  PolyUOp *acc = poly_uop0(ctx, POLY_OP_DEFINE_REG, reg_f32, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, reg_f32, acc, zero, poly_arg_none());
+  PolyUOp *init = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, idx0,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0)), poly_arg_none()
+  );
+  PolyUOp *after_srcs[3] = {acc, init, group_range};
+  PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, reg_f32, after_srcs, 3, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, reg_f32, after, zero, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, load, poly_arg_str("group_reduce"));
+
+  PolyUOp *rewritten = poly_add_gpudims(ctx, sink);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+
+  ASSERT_INT_EQ(count_special_named(topo, n_topo, "lidx0"), 1);
+  for (int i = 0; i < n_topo; i++) {
+    ASSERT_FALSE(
+        topo[i]->op == POLY_OP_RANGE &&
+        poly_arg_is_range(topo[i]->arg) &&
+        poly_range_axis_type(topo[i]->arg) == POLY_AXIS_GROUP_REDUCE
+    );
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, linearize_webgpu_special_stays_int32_under_wide_index_use) {
+  /* tinygrad pm_lower_index_dtype keeps SPECIAL itself int32 and casts widened
+   * uses. Rebuilding SPECIAL as int64 creates duplicate WGSL declarations for
+   * the same builtin name when another use keeps the int32 form. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *wide = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, range, poly_arg_none());
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, wide, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, load, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_str("special_lower"));
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_webgpu(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int n_special = 0;
+  for (int i = 0; i < n_lin; i++) {
+    if (lin[i]->op != POLY_OP_SPECIAL) continue;
+    n_special++;
+    ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(lin[i]->dtype), POLY_INT32));
+    ASSERT_TRUE(lin[i]->n_src == 1);
+    ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(lin[i]->src[0]->dtype), POLY_INT32));
+  }
+  ASSERT_INT_EQ(n_special, 1);
+
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
+  /* tinygrad emits shared memory for this reduce, but with one local axis:
+   * @workgroup_size(16). The regression is growing an extra local reduce axis
+   * and producing @workgroup_size(16,256,1). */
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer_f32(ctx, 4096);
@@ -786,14 +989,102 @@ TEST(codegen, linearize_webgpu_reduce_emits_shared_barrier) {
     ASSERT_NOT_NULL(lin);
     char *wgsl = poly_render_wgsl(lin, n_lin, "reduce_webgpu");
     ASSERT_NOT_NULL(wgsl);
-    if (strstr(wgsl, "var<workgroup>") && strstr(wgsl, "workgroupBarrier();"))
-      found = true;
+    int dims[3];
+    int prod = wgsl_workgroup_product(wgsl, dims);
+    ASSERT_TRUE(prod <= 256);
+    ASSERT_INT_EQ(dims[0], 16);
+    ASSERT_INT_EQ(dims[1], 1);
+    ASSERT_INT_EQ(dims[2], 1);
+    if (strstr(wgsl, "var<workgroup>") && strstr(wgsl, "workgroupBarrier();")) found = true;
     free(wgsl);
     free(lin);
   }
   ASSERT_TRUE(found);
 
   poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, linearize_webgpu_qwen_downproj_workgroup_matches_tinygrad) {
+  /* Probe parity with tinygrad_latest:
+   *   Tensor.empty((25,3072)).matmul(Tensor.empty((1024,3072)).T)
+   * renders @workgroup_size(16), not @workgroup_size(16,256). */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_shaped_f32_buf(ctx, (int64_t[]){25, 3072}, 2);
+  PolyUOp *w = make_shaped_f32_buf(ctx, (int64_t[]){1024, 3072}, 2);
+  PolyUOp *wt = poly_permute(ctx, w, (int64_t[]){1, 0}, 2);
+  PolyUOp *y = poly_dot(ctx, x, wt);
+  PolyUOp *out = poly_buffer_f32(ctx, 25 * 1024);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, y));
+
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->n_items, 1);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[0].root, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *wgsl = poly_render_wgsl(lin, n_lin, "qwen_downproj");
+  ASSERT_NOT_NULL(wgsl);
+
+  int dims[3];
+  int prod = wgsl_workgroup_product(wgsl, dims);
+  ASSERT_TRUE(prod <= 256);
+  ASSERT_INT_EQ(dims[0], 16);
+  ASSERT_INT_EQ(dims[1], 1);
+  ASSERT_INT_EQ(dims[2], 1);
+  ASSERT_TRUE(strstr(wgsl, "@workgroup_size(16,256") == NULL);
+
+  free(wgsl);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(codegen, webgpu_vector_store_target_survives_add_loads_until_devectorize) {
+  /* tinygrad pm_add_loads only adds LOAD around scalar value indexes and removes
+   * STORE(LOAD(ptr), val). It must not turn STACK(ptr indexes) store targets
+   * into STACK(LOAD(...)) value expressions; load_store_folding needs pointer
+   * targets to split vector stores legally before WGSL rendering. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 256, POLY_ADDR_LOCAL);
+  PolyUOp *smem = poly_uop0(ctx, POLY_OP_DEFINE_LOCAL, ptr_f32, poly_arg_int(0));
+  PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(7));
+  PolyUOp *ptr = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, smem, idx, poly_arg_none());
+
+  PolyDType ptr_vec = ptr_f32;
+  ptr_vec.vcount = 4;
+  PolyUOp *ptrs[4] = {ptr, ptr, ptr, ptr};
+  PolyUOp *target = poly_uop(ctx, POLY_OP_VECTORIZE, ptr_vec, ptrs, 4, poly_arg_none());
+
+  PolyUOp *vals[4] = {
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.0)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(4.0)),
+  };
+  PolyUOp *value = poly_uop(
+      ctx, POLY_OP_VECTORIZE, poly_dtype_vec(POLY_FLOAT32, 4), vals, 4, poly_arg_none()
+  );
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, target, value, poly_arg_none());
+
+  PolyUOp *after_add_loads = poly_graph_rewrite(ctx, store, poly_pm_add_loads_pass());
+  ASSERT_TRUE(after_add_loads->op == POLY_OP_STORE);
+  ASSERT_TRUE(after_add_loads->src[0]->op == POLY_OP_VECTORIZE);
+  ASSERT_TRUE(after_add_loads->src[0]->src[0]->op == POLY_OP_INDEX);
+
+  PolyRendererCaps caps = {.max_vec_width = 1};
+  PolyUOp *after_devec = poly_apply_devectorize_stage(ctx, after_add_loads, 1, caps);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, after_devec, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op != POLY_OP_STORE || topo[i]->n_src < 1) continue;
+    ASSERT_TRUE(topo[i]->src[0]->op != POLY_OP_VECTORIZE);
+    ASSERT_TRUE(topo[i]->src[0]->op != POLY_OP_VCONST);
+  }
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -816,6 +1107,42 @@ TEST(codegen, full_rewrite_post_index_lowering_narrows_i64_addressing) {
   ASSERT_INT_EQ(count_indexes_with_i64_addr(topo, n_topo), 0);
 
   poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(codegen, full_rewrite_lowers_weakint_like_address_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType weak_like = POLY_INDEX;
+  weak_like.bitsize = 144;
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(32));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, weak_like, poly_arg_int(1));
+  PolyUOp *addr = poly_uop2(ctx, POLY_OP_ADD, weak_like, range, one, poly_arg_none());
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, addr, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+  PolyUOp *load0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx1, load0, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  ASSERT_INT_EQ(count_weakint_named_nodes(lin, n_lin), 0);
+
+  char *src = poly_render_c(lin, n_lin, "index_like_addr");
+  ASSERT_NOT_NULL(src);
+  ASSERT_TRUE(strstr(src, " weakint ") == NULL);
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

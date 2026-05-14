@@ -20,6 +20,7 @@
 #include "../src/codegen.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
+#include "../src/simplify.h"
 
 /* Helpers */
 
@@ -2655,7 +2656,8 @@ static PolyUOp *build_large_reduction_ast(PolyCtx *ctx, int N) {
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p_out, zero, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, reduce, poly_arg_none());
-  PolyUOp *end = poly_uop1(ctx, POLY_OP_END, POLY_VOID, store, poly_arg_none());
+  PolyUOp *end_srcs[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
 
@@ -2692,13 +2694,18 @@ static PolyUOp *build_2range_kernel(PolyCtx *ctx, int M, int N) {
 }
 
 TEST(unify_pre, large_reduction_structural) {
-  /* N=1024 reduction through group_for_reduce(block_size=256) should produce
-   * DEFINE_LOCAL, BARRIER, and a second REDUCE (partial + final). */
+  /* N=1024 reduction through the GPU optimizer plus group_for_reduce should
+   * produce DEFINE_LOCAL, BARRIER, and a second REDUCE (partial + final).
+   * tinygrad selects GROUP_REDUCE in apply_opts; pm_group_for_reduce only
+   * lowers ranges that have already been tagged. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
+  PolyRendererCaps caps = {.has_local = true};
 
-  /* Apply sym + group_for_reduce (same as GPU pipeline) */
+  /* Apply sym + apply_opts + group_for_reduce (same boundary as GPU pipeline) */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
   sink = poly_group_for_reduce(ctx, sink, 256);
 
   int n_define_local = count_ops(ctx, sink, POLY_OP_DEFINE_LOCAL);
@@ -2714,13 +2721,15 @@ TEST(unify_pre, large_reduction_structural) {
 }
 
 TEST(unify_pre, large_reduction_gpudims_special) {
-  /* After group_for_reduce + gpudims, the group range should become a
-   * SPECIAL(lidx0) and the original global range should be gone (no range
-   * left to iterate — it's a pure reduction). */
+  /* After apply_opts + group_for_reduce + gpudims, the grouped reduce range
+   * should become SPECIAL(lidx0). */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
+  PolyRendererCaps caps = {.has_local = true};
 
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
   sink = poly_group_for_reduce(ctx, sink, 256);
   sink = poly_apply_pm_reduce(ctx, sink);
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
@@ -2823,9 +2832,11 @@ TEST(unify_pre, full_gpu_pipeline_structural) {
    * the final IR has SPECIAL + DEFINE_LOCAL + BARRIER + no raw RANGE. */
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = build_large_reduction_ast(ctx, 1024);
-  PolyRendererCaps caps = {.has_mulacc = true};
+  PolyRendererCaps caps = {.has_mulacc = true, .has_local = true};
 
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+  sink = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
   sink = poly_group_for_reduce(ctx, sink, 256);
   sink = poly_apply_pm_reduce(ctx, sink);
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());

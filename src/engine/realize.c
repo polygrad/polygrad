@@ -6,6 +6,8 @@
 #include "ctx.h"
 #include "engine/schedule.h"
 #include "frontend_internal.h"
+#include "tensor.h"
+#include "utils.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +44,11 @@ static PolyUOp *poly_transform_to_call_root(PolyUOp *u, PolyUOp **views, int *n_
 }
 
 static PolyUOp *poly_transform_to_call_rebuild_view(
-    PolyCtx *ctx, PolyUOp *buf, PolyShape root_shape, PolyUOp **views, int n_views
+    PolyCtx *ctx,
+    PolyUOp *buf,
+    PolyShape root_shape,
+    PolyUOp **views,
+    int n_views
 ) {
   /* Tinygrad's becomes_map rewrites tensors back to their original outer view
    * stack after materializing the base compute into a fresh flat buffer. */
@@ -61,8 +67,23 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
   return view;
 }
 
+static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp *u) {
+  PolyUOp *views[POLY_TRANSFORM_TO_CALL_MAX_VIEWS];
+  int n_views = 0;
+  PolyUOp *root = poly_transform_to_call_root(u, views, &n_views);
+  if (!root || root->op != POLY_OP_AFTER || root->n_src < 1 ||
+      !poly_uop_has_buffer_identity(root->src[0]))
+    return NULL;
+
+  PolyShape root_shape = poly_uop_shape_cached(ctx, root);
+  return poly_transform_to_call_rebuild_view(ctx, root->src[0], root_shape, views, n_views);
+}
+
 static PolyUOp *poly_transform_to_call_alloc_buffer_on_device(
-    PolyCtx *ctx, PolyDType dtype, PolyShape shape, PolyDevice device
+    PolyCtx *ctx,
+    PolyDType dtype,
+    PolyShape shape,
+    PolyDevice device
 ) {
   int64_t numel = (shape.ndim >= 0) ? poly_shape_numel(shape) : 1;
   if (numel < 1) numel = 1;
@@ -74,7 +95,11 @@ static PolyUOp *poly_transform_to_call_alloc_buffer_on_device(
   return buf;
 }
 
-static PolyUOp *poly_transform_to_call_alloc_buffer(PolyCtx *ctx, PolyDType dtype, PolyShape shape) {
+static PolyUOp *poly_transform_to_call_alloc_buffer(
+    PolyCtx *ctx,
+    PolyDType dtype,
+    PolyShape shape
+) {
   PolyDevice out_dev = poly_ctx_get_preferred_device(ctx);
   if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_device_default();
   return poly_transform_to_call_alloc_buffer_on_device(ctx, dtype, shape, out_dev);
@@ -82,13 +107,21 @@ static PolyUOp *poly_transform_to_call_alloc_buffer(PolyCtx *ctx, PolyDType dtyp
 
 static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, PolyUOp *store) {
   if (!tctx || !store) return false;
-  if (tctx->n_stores >= tctx->stores_cap) return false;
+  if (tctx->n_stores >= tctx->stores_cap) {
+    int new_cap = tctx->stores_cap ? tctx->stores_cap * 2 : 8;
+    PolyUOp **new_stores = realloc(tctx->stores, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!new_stores) return false;
+    tctx->stores = new_stores;
+    tctx->stores_cap = new_cap;
+  }
   tctx->stores[tctx->n_stores++] = store;
   return true;
 }
 
 static bool poly_transform_to_call_after_store_assign(
-    PolyUOp *u, PolyUOp **out_target, PolyUOp **out_store
+    PolyUOp *u,
+    PolyUOp **out_target,
+    PolyUOp **out_store
 ) {
   if (!u || u->op != POLY_OP_AFTER || u->n_src < 2 || !u->src[0]) return false;
   PolyUOp *target = u->src[0];
@@ -101,6 +134,49 @@ static bool poly_transform_to_call_after_store_assign(
     return true;
   }
   return false;
+}
+
+static bool poly_transform_to_call_collect_after_stores(
+    PolyTransformToCallCtx *tctx,
+    PolyUOp *effect
+) {
+  if (!tctx || !effect) return false;
+  if (effect->op == POLY_OP_STORE) return poly_transform_to_call_append_store(tctx, effect);
+  if (effect->op != POLY_OP_AFTER) return true;
+
+  /* View assign follows tinygrad's nested shape:
+   * AFTER(base_identity, AFTER(view, STORE(view, value))).
+   * The outer AFTER returns the storage identity; all nested STORE effects
+   * under src[1:] must be scheduled before that identity is considered ready. */
+  for (int i = 1; i < effect->n_src; i++) {
+    if (!poly_transform_to_call_collect_after_stores(tctx, effect->src[i])) return false;
+  }
+  return true;
+}
+
+static bool poly_transform_to_call_collect_pending_effects(
+    PolyTransformToCallCtx *tctx,
+    PolyUOp *u,
+    PolyMap *visited
+) {
+  if (!tctx || !u || !visited) return false;
+  if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) return true;
+  poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
+
+  /* A requested view can contain the assign boundary below its root, e.g.
+   * SHRINK(AFTER(BUFFER, AFTER(SHRINK(BUFFER), STORE(...)))).
+   * Schedule those side-effect stores before materializing the requested
+   * value, otherwise view.realize() reads the old base buffer. */
+  if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
+    for (int i = 1; i < u->n_src; i++) {
+      if (!poly_transform_to_call_collect_after_stores(tctx, u->src[i])) return false;
+    }
+  }
+
+  for (int i = 0; i < u->n_src; i++) {
+    if (!poly_transform_to_call_collect_pending_effects(tctx, u->src[i], visited)) return false;
+  }
+  return true;
 }
 
 static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
@@ -130,7 +206,9 @@ static PolyUOp *poly_transform_to_call_cached_reduce(PolyTransformToCallCtx *tct
 }
 
 static bool poly_transform_to_call_cache_reduce(
-    PolyTransformToCallCtx *tctx, PolyUOp *orig, PolyUOp *repl
+    PolyTransformToCallCtx *tctx,
+    PolyUOp *orig,
+    PolyUOp *repl
 ) {
   if (!tctx || !orig || !repl) return false;
   if (tctx->n_cached >= POLY_TRANSFORM_TO_CALL_MAX_REDUCE_TMPS) return false;
@@ -157,7 +235,9 @@ static bool poly_transform_to_call_depends_on_input_buffer(PolyCtx *ctx, PolyUOp
 }
 
 static PolyUOp *poly_transform_to_call_materialize_reduce_source(
-    PolyCtx *ctx, PolyUOp *u, PolyTransformToCallCtx *tctx
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyTransformToCallCtx *tctx
 ) {
   if (!ctx || !u || !tctx) return NULL;
   PolyUOp *cached = poly_transform_to_call_cached_reduce(tctx, u);
@@ -186,7 +266,10 @@ static PolyUOp *poly_transform_to_call_materialize_reduce_source(
 }
 
 static PolyUOp *poly_transform_to_call_rewrite_reduce_sources(
-    PolyCtx *ctx, PolyUOp *u, PolyTransformToCallCtx *tctx, bool allow_materialize
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyTransformToCallCtx *tctx,
+    bool allow_materialize
 ) {
   if (!ctx || !u || !tctx) return NULL;
   if (poly_uop_has_buffer_identity(u) || u->n_src == 0) return u;
@@ -228,7 +311,12 @@ static PolyUOp *poly_transform_to_call_rewrite_reduce_sources(
  * - preserve already-realized values and ASSIGN targets in out_uops
  * - apply the proven top-level RESHAPE(compute) remap before scheduling
  * - materialize reduction-through-view inputs before outer elementwise stores */
-PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
+static PolyUOp *poly_transform_to_call_ex(
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n,
+    PolyUOp **out_uops
+) {
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
   if (n == 0) return NULL;
 
@@ -252,6 +340,18 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
       continue;
     }
 
+    if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
+      int before = tctx.n_stores;
+      if (!poly_transform_to_call_collect_after_stores(&tctx, u)) {
+        free(tctx.stores);
+        return NULL;
+      }
+      if (tctx.n_stores > before) {
+        out_uops[i] = u->src[0];
+        continue;
+      }
+    }
+
     /* Tensor.assign follows tinygrad and builds AFTER(target, STORE(target,
      * value)). Real storage targets run the STORE in-place. Non-storage
      * targets are temporary values, so assignment materializes the stored value
@@ -261,7 +361,7 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
     if (poly_transform_to_call_after_store_assign(u, &assign_target, &assign_store)) {
       if (poly_uop_has_buffer_identity(assign_target)) {
         if (!poly_transform_to_call_append_store(&tctx, assign_store)) {
-          free(stores);
+          free(tctx.stores);
           return NULL;
         }
         out_uops[i] = assign_target;
@@ -274,7 +374,7 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
      * store boundary and report the target buffer as the realized result. */
     if (u->op == POLY_OP_ASSIGN && u->n_src >= 1) {
       if (!poly_transform_to_call_append_store(&tctx, u)) {
-        free(stores);
+        free(tctx.stores);
         return NULL;
       }
       out_uops[i] = u->src[0];
@@ -287,9 +387,27 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
     if (!poly_transform_to_call_reduce_root(target_root)) {
       u = poly_transform_to_call_rewrite_reduce_sources(ctx, u, &tctx, false);
       if (!u) {
-        free(stores);
+        free(tctx.stores);
         return NULL;
       }
+    }
+
+    PolyMap *pending_visited = poly_map_new(64);
+    if (!pending_visited) {
+      free(tctx.stores);
+      return NULL;
+    }
+    bool pending_ok = poly_transform_to_call_collect_pending_effects(&tctx, u, pending_visited);
+    poly_map_destroy(pending_visited);
+    if (!pending_ok) {
+      free(tctx.stores);
+      return NULL;
+    }
+
+    PolyUOp *after_result = poly_transform_to_call_after_result_buffer(ctx, u);
+    if (after_result) {
+      out_uops[i] = after_result;
+      continue;
     }
 
     PolyUOp *views[POLY_TRANSFORM_TO_CALL_MAX_VIEWS];
@@ -307,28 +425,35 @@ PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **o
     }
     PolyDevice out_dev = poly_uop_device(materialized);
     if (out_dev == POLY_DEVICE_AUTO) out_dev = poly_uop_device(u);
-    PolyUOp *buf = poly_transform_to_call_alloc_buffer_on_device(ctx, u->dtype, root_shape, out_dev);
+    PolyUOp *buf =
+        poly_transform_to_call_alloc_buffer_on_device(ctx, u->dtype, root_shape, out_dev);
     if (!buf) {
       fprintf(stderr, "poly_realize: buffer allocate failed\n");
-      free(stores);
+      free(tctx.stores);
       return NULL;
     }
 
     if (!poly_transform_to_call_append_store(&tctx, poly_store_val(ctx, buf, materialized))) {
-      free(stores);
+      free(tctx.stores);
       return NULL;
     }
     out_uops[i] = poly_transform_to_call_rebuild_view(ctx, buf, root_shape, views, n_views);
   }
 
   if (tctx.n_stores == 0) {
-    free(stores);
+    free(tctx.stores);
     return NULL;
   }
 
-  PolyUOp *sink_body = poly_sink_n(ctx, stores, tctx.n_stores);
-  free(stores);
-  return poly_transform_to_call_wrap_call(ctx, sink_body);
+  PolyUOp *sink_body = poly_sink_n(ctx, tctx.stores, tctx.n_stores);
+  free(tctx.stores);
+  PolyUOp *call = poly_transform_to_call_wrap_call(ctx, sink_body);
+  if (!call) return NULL;
+  return call;
+}
+
+PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
+  return poly_transform_to_call_ex(ctx, uops, n, out_uops);
 }
 
 static PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink) {
@@ -340,20 +465,41 @@ static PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink) {
   /* This is the schedule-ready layer. Callers reaching this point already
    * own an effect sink; tensor values must be normalized by transform_to_call
    * before using this helper. */
+  bool timing = poly_debug_at_least(2);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:schedule_effect] begin sink=%p n_src=%d\n", (void *)sink, sink->n_src);
+    fflush(stderr);
+  }
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!sched) fprintf(stderr, "poly_realize: scheduling failed\n");
+  if (timing) {
+    double t1 = poly_now_ms();
+    fprintf(
+        stderr,
+        "[polygrad:schedule_effect] done schedule=%.3fms items=%d slots=%d default_vars=%d\n",
+        t1 - t0, sched ? sched->n_items : -1, sched ? sched->n_buf_slots : -1,
+        sched ? sched->n_default_vars : -1
+    );
+    fflush(stderr);
+  }
   return sched;
 }
 
 /* C-side analogue of tinygrad's Tensor.schedule_with_vars: normalize requested
  * top-level value UOps into one effect SINK and return its schedule. */
-PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
+static PolySchedule *poly_schedule_with_vars_ex(
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n,
+    PolyUOp **out_uops
+) {
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
   if (n == 0) return NULL;
 
   /* Only tensor value roots belong on this path. Already-effectful SINKs used
    * by instance/imported graphs run through poly_realize_sink directly. */
-  PolyUOp *big_call = poly_transform_to_call(ctx, uops, n, out_uops);
+  PolyUOp *big_call = poly_transform_to_call_ex(ctx, uops, n, out_uops);
   if (!big_call) return NULL;
 
   PolyUOp *sched_sink = big_call;
@@ -369,11 +515,34 @@ PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyU
   return sched;
 }
 
+PolySchedule *poly_schedule_with_vars(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
+  return poly_schedule_with_vars_ex(ctx, uops, n, out_uops);
+}
+
 int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink) {
+  bool timing = poly_debug_at_least(2);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(stderr, "[polygrad:realize_sink] begin sink=%p\n", (void *)sink);
+    fflush(stderr);
+  }
   PolySchedule *sched = poly_schedule_effect_sink(ctx, sink);
+  double t_sched = timing ? poly_now_ms() : 0.0;
   if (!sched) return -1;
+  if (timing) {
+    fprintf(stderr, "[polygrad:realize_sink] run begin items=%d\n", sched->n_items);
+    fflush(stderr);
+  }
   int ret = poly_run_schedule(ctx, sched, NULL, 0);
+  double t_run = timing ? poly_now_ms() : 0.0;
   poly_schedule_free(sched);
+  if (timing) {
+    fprintf(
+        stderr,
+        "[polygrad:realize_sink] schedule=%.3fms run=%.3fms total=%.3fms ret=%d\n",
+        t_sched - t0, t_run - t_sched, t_run - t0, ret
+    );
+  }
   return ret;
 }
 
@@ -390,8 +559,17 @@ int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
     }
   }
 
-  PolySchedule *sched = poly_schedule_with_vars(ctx, uops, n, out_uops);
-  if (!sched) return needs_run ? -1 : 0;
+  PolySchedule *sched = poly_schedule_with_vars_ex(ctx, uops, n, out_uops);
+  if (!sched) {
+    bool all_outputs_resolved = true;
+    for (int i = 0; i < n; i++) {
+      if (!out_uops[i]) {
+        all_outputs_resolved = false;
+        break;
+      }
+    }
+    return (!needs_run || all_outputs_resolved) ? 0 : -1;
+  }
   int ret = poly_run_schedule(ctx, sched, NULL, 0);
   poly_schedule_free(sched);
   return ret;

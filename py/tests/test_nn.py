@@ -297,8 +297,8 @@ class TestAdam:
         opt = Adam([p], lr=0.1)
         p._grad = Tensor([1.0])
         scheduled = opt.schedule_step()
-        assert opt.b1_t in scheduled
-        assert opt.b2_t in scheduled
+        assert any(t is opt.b1_t for t in scheduled)
+        assert any(t is opt.b2_t for t in scheduled)
         scheduled[0].realize(*scheduled[1:])
         assert approx(opt.b1_t.numpy(), [0.9], tol=1e-6)
         assert approx(opt.b2_t.numpy(), [0.999], tol=1e-6)

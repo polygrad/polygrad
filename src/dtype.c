@@ -70,14 +70,29 @@ bool poly_dtype_eq(PolyDType a, PolyDType b) {
          (a.name == b.name || (a.name && b.name && strcmp(a.name, b.name) == 0));
 }
 
+static bool dtype_is_weakint_like(PolyDType dt) {
+  if (dt.is_ptr || !dt.name || dt.priority != POLY_INDEX.priority) return false;
+  return strcmp(dt.name, POLY_INDEX.name) == 0;
+}
+
 bool poly_dtype_is_float(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
   return s.priority >= 9 && s.priority <= 14; /* fp8 through float64 */
 }
 
+bool poly_dtype_is_index(PolyDType dt) {
+  /* tinygrad dtypes are interned, so `dtype.scalar() is dtypes.weakint`
+   * recognizes all weak-index vector/scalar forms. Polygrad stores dtypes as
+   * value structs, and some late index rewrites can carry a weakint name with
+   * non-canonical bit metadata. Treat the weakint name+priority as the stable
+   * identity and lower it before rendering, matching tinygrad's
+   * pm_lower_index_dtype boundary. */
+  return dtype_is_weakint_like(poly_dtype_scalar(dt));
+}
+
 bool poly_dtype_is_int(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
-  return (s.priority >= 1 && s.priority <= 8) || poly_dtype_eq(s, POLY_INDEX);
+  return (s.priority >= 1 && s.priority <= 8) || poly_dtype_is_index(s);
 }
 
 bool poly_dtype_is_unsigned(PolyDType dt) {
@@ -91,11 +106,13 @@ bool poly_dtype_is_bool(PolyDType dt) {
 }
 
 PolyDType poly_dtype_scalar(PolyDType dt) {
+  if (dtype_is_weakint_like(dt)) return POLY_INDEX;
   if (dt.count == 1) return dt;
   /* return the base scalar type by matching priority+name */
   PolyDType s = dt;
   s.count = 1;
   s.bitsize = dt.bitsize / dt.count;
+  if (dtype_is_weakint_like(s)) return POLY_INDEX;
   return s;
 }
 

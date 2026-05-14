@@ -129,27 +129,19 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
 /* POLY_MAX_STRUCT_NODES defined in frontend_internal.h */
 
 typedef struct {
-  PolyUOp *uop;
-  uint32_t hash;
-} StructVisited;
-
-typedef struct {
-  PolyUOp *uop;
-  int id;
-} StructBuf;
-
-typedef struct {
-  StructVisited visited[POLY_MAX_STRUCT_NODES];
-  int n_visited;
-  StructBuf bufs[POLY_MAX_REALIZE_BUFS];
+  PolyMap *visited; /* UOp* -> 1-based index into hashes. Dynamic for model-scale DAGs. */
+  uint32_t *hashes;
+  int n_hashes;
+  int cap_hashes;
+  PolyUOp **bufs;
   int n_bufs;
+  int cap_bufs;
 } StructHashCtx;
 
 static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
   /* Check if already visited */
-  for (int i = 0; i < ctx->n_visited; i++) {
-    if (ctx->visited[i].uop == u) return ctx->visited[i].hash;
-  }
+  void *memo_val = poly_map_get(ctx->visited, poly_ptr_hash(u), u, poly_ptr_eq);
+  if (memo_val) return ctx->hashes[(int)((intptr_t)memo_val - 1)];
 
   uint32_t h = 0x811c9dc5; /* FNV-1a offset basis */
 
@@ -157,16 +149,21 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
     /* BUFFER nodes: use positional ID instead of pointer identity */
     int buf_id = -1;
     for (int i = 0; i < ctx->n_bufs; i++) {
-      if (ctx->bufs[i].uop == u) {
-        buf_id = ctx->bufs[i].id;
+      if (ctx->bufs[i] == u) {
+        buf_id = i;
         break;
       }
     }
-    if (buf_id < 0 && ctx->n_bufs < POLY_MAX_REALIZE_BUFS) {
+    if (buf_id < 0) {
+      if (ctx->n_bufs >= ctx->cap_bufs) {
+        int new_cap = ctx->cap_bufs ? ctx->cap_bufs * 2 : 64;
+        PolyUOp **new_bufs = realloc(ctx->bufs, (size_t)new_cap * sizeof(PolyUOp *));
+        if (!new_bufs) return h;
+        ctx->bufs = new_bufs;
+        ctx->cap_bufs = new_cap;
+      }
       buf_id = ctx->n_bufs;
-      ctx->bufs[ctx->n_bufs].uop = u;
-      ctx->bufs[ctx->n_bufs].id = buf_id;
-      ctx->n_bufs++;
+      ctx->bufs[ctx->n_bufs++] = u;
     }
     h ^= (uint32_t)u->op;
     h *= 0x01000193;
@@ -193,34 +190,42 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
     h *= 0x01000193;
   }
 
-  /* Store in visited */
-  if (ctx->n_visited < POLY_MAX_STRUCT_NODES) {
-    ctx->visited[ctx->n_visited].uop = u;
-    ctx->visited[ctx->n_visited].hash = h;
-    ctx->n_visited++;
+  if (ctx->n_hashes >= ctx->cap_hashes) {
+    int new_cap = ctx->cap_hashes ? ctx->cap_hashes * 2 : 1024;
+    uint32_t *new_hashes = realloc(ctx->hashes, (size_t)new_cap * sizeof(uint32_t));
+    if (!new_hashes) return h;
+    ctx->hashes = new_hashes;
+    ctx->cap_hashes = new_cap;
   }
+  int idx = ctx->n_hashes++;
+  ctx->hashes[idx] = h;
+  poly_map_set(ctx->visited, poly_ptr_hash(u), u, (void *)(intptr_t)(idx + 1), poly_ptr_eq);
   return h;
 }
 
 uint32_t poly_structural_hash(PolyUOp *u) {
-  StructHashCtx *ctx = calloc(1, sizeof(StructHashCtx));
-  uint32_t h = struct_hash_impl(u, ctx);
-  free(ctx);
+  if (!u) return 0;
+  StructHashCtx ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.visited = poly_map_new(1024);
+  if (!ctx.visited) return 0;
+  uint32_t h = struct_hash_impl(u, &ctx);
+  poly_map_destroy(ctx.visited);
+  free(ctx.hashes);
+  free(ctx.bufs);
   return h;
 }
 
 /* Structural equality */
 
 typedef struct {
-  PolyUOp *a[POLY_MAX_REALIZE_BUFS];
-  PolyUOp *b[POLY_MAX_REALIZE_BUFS];
-  int n;
+  PolyMap *a_to_b;
+  PolyMap *b_to_a;
 } BufPairs;
 
 typedef struct {
-  PolyUOp *a[POLY_MAX_STRUCT_NODES];
-  PolyUOp *b[POLY_MAX_STRUCT_NODES];
-  int n;
+  PolyMap *a_to_b;
+  PolyMap *b_to_a;
 } EqVisited;
 
 static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) {
@@ -228,33 +233,23 @@ static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) 
   if (!a || !b) return false;
 
   /* Check if this pair already visited (DAG sharing) */
-  for (int i = 0; i < ev->n; i++) {
-    if (ev->a[i] == a) return ev->b[i] == b;
-    if (ev->b[i] == b) return false;
-  }
+  void *seen_b = poly_map_get(ev->a_to_b, poly_ptr_hash(a), a, poly_ptr_eq);
+  if (seen_b) return seen_b == b;
+  if (poly_map_get(ev->b_to_a, poly_ptr_hash(b), b, poly_ptr_eq)) return false;
 
-  /* Mark visited */
-  if (ev->n < POLY_MAX_STRUCT_NODES) {
-    ev->a[ev->n] = a;
-    ev->b[ev->n] = b;
-    ev->n++;
-  }
+  poly_map_set(ev->a_to_b, poly_ptr_hash(a), a, b, poly_ptr_eq);
+  poly_map_set(ev->b_to_a, poly_ptr_hash(b), b, a, poly_ptr_eq);
 
   /* Both BUFFER? Track correspondence */
   if (a->op == POLY_OP_BUFFER && b->op == POLY_OP_BUFFER) {
     if (!poly_dtype_eq(a->dtype, b->dtype)) return false;
     if (!poly_arg_eq(a->arg, b->arg)) return false;
     /* Check existing mapping */
-    for (int i = 0; i < bp->n; i++) {
-      if (bp->a[i] == a) return bp->b[i] == b;
-      if (bp->b[i] == b) return false;
-    }
-    /* New pair */
-    if (bp->n < POLY_MAX_REALIZE_BUFS) {
-      bp->a[bp->n] = a;
-      bp->b[bp->n] = b;
-      bp->n++;
-    }
+    void *mapped_b = poly_map_get(bp->a_to_b, poly_ptr_hash(a), a, poly_ptr_eq);
+    if (mapped_b) return mapped_b == b;
+    if (poly_map_get(bp->b_to_a, poly_ptr_hash(b), b, poly_ptr_eq)) return false;
+    poly_map_set(bp->a_to_b, poly_ptr_hash(a), a, b, poly_ptr_eq);
+    poly_map_set(bp->b_to_a, poly_ptr_hash(b), b, a, poly_ptr_eq);
     return true;
   }
 
@@ -272,9 +267,21 @@ static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) 
 }
 
 bool poly_structural_eq(const void *a, const void *b) {
-  BufPairs bp = {.n = 0};
-  EqVisited ev = {.n = 0};
-  return struct_eq_impl((PolyUOp *)a, (PolyUOp *)b, &bp, &ev);
+  BufPairs bp = {.a_to_b = poly_map_new(64), .b_to_a = poly_map_new(64)};
+  EqVisited ev = {.a_to_b = poly_map_new(1024), .b_to_a = poly_map_new(1024)};
+  if (!bp.a_to_b || !bp.b_to_a || !ev.a_to_b || !ev.b_to_a) {
+    if (bp.a_to_b) poly_map_destroy(bp.a_to_b);
+    if (bp.b_to_a) poly_map_destroy(bp.b_to_a);
+    if (ev.a_to_b) poly_map_destroy(ev.a_to_b);
+    if (ev.b_to_a) poly_map_destroy(ev.b_to_a);
+    return false;
+  }
+  bool ok = struct_eq_impl((PolyUOp *)a, (PolyUOp *)b, &bp, &ev);
+  poly_map_destroy(bp.a_to_b);
+  poly_map_destroy(bp.b_to_a);
+  poly_map_destroy(ev.a_to_b);
+  poly_map_destroy(ev.b_to_a);
+  return ok;
 }
 
 /* DFS to assign positional IDs to BUFFER nodes, matching poly_structural_hash order.
@@ -289,18 +296,56 @@ void poly_collect_buf_order(
     PolyUOp **visited,
     int *n_visited
 ) {
-  if (!u) return;
-  for (int i = 0; i < *n_visited; i++)
-    if (visited[i] == u) return;
-  if (*n_visited < POLY_MAX_STRUCT_NODES) visited[(*n_visited)++] = u;
+  if (!u || !n_bufs || !n_visited) return;
 
-  if (u->op == POLY_OP_BUFFER) {
-    if (*n_bufs < POLY_MAX_REALIZE_BUFS) buf_order[*n_bufs] = u;
-    (*n_bufs)++; /* always count, even past capacity */
+  /* Model-scale graphs exceed POLY_MAX_STRUCT_NODES. Keep the public scratch
+   * arrays for ABI compatibility, but use a dynamic visited map so traversal
+   * stays O(nodes) instead of revisiting shared DAG tails after the cap. */
+  PolyMap *seen = poly_map_new(1024);
+  if (!seen) return;
+  int initial_visited = *n_visited;
+  for (int i = 0; visited && i < initial_visited && i < POLY_MAX_STRUCT_NODES; i++) {
+    if (visited[i]) poly_map_set(seen, poly_ptr_hash(visited[i]), visited[i], visited[i], poly_ptr_eq);
+  }
+
+  int cap = 1024;
+  int sp = 0;
+  PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
+  if (!stack) {
+    poly_map_destroy(seen);
     return;
   }
-  for (int i = 0; i < u->n_src; i++)
-    poly_collect_buf_order(u->src[i], buf_order, n_bufs, visited, n_visited);
+  stack[sp++] = u;
+
+  while (sp > 0) {
+    PolyUOp *cur = stack[--sp];
+    if (!cur) continue;
+    if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
+    poly_map_set(seen, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
+    if (visited && *n_visited < POLY_MAX_STRUCT_NODES) visited[*n_visited] = cur;
+    (*n_visited)++;
+
+    if (cur->op == POLY_OP_BUFFER) {
+      if (buf_order && *n_bufs < POLY_MAX_REALIZE_BUFS) buf_order[*n_bufs] = cur;
+      (*n_bufs)++; /* always count, even past capacity */
+      continue;
+    }
+
+    if (sp + cur->n_src > cap) {
+      int new_cap = cap;
+      while (sp + cur->n_src > new_cap)
+        new_cap *= 2;
+      PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
+      if (!new_stack) break;
+      stack = new_stack;
+      cap = new_cap;
+    }
+    for (int i = cur->n_src - 1; i >= 0; i--)
+      stack[sp++] = cur->src[i];
+  }
+
+  free(stack);
+  poly_map_destroy(seen);
 }
 
 int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {

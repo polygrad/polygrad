@@ -12,6 +12,8 @@
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
+#include "../src/nn.h"
+#include "../src/optim.h"
 #include "../src/tensor.h"
 #include <string.h>
 
@@ -48,6 +50,33 @@ static int count_lin_ops(PolyUOp **lin, int n, PolyOps op) {
   for (int i = 0; i < n; i++)
     if (lin[i]->op == op) count++;
   return count;
+}
+
+static int64_t test_uop_numel(PolyCtx *ctx, PolyUOp *u) {
+  PolyShape s = poly_uop_shape(ctx, u);
+  if (s.ndim < 0 || !s.dims) return -1;
+  int64_t n = 1;
+  for (int i = 0; i < s.ndim; i++)
+    n *= s.dims[i];
+  free(s.dims);
+  return n;
+}
+
+static const char *cuda_source_illegal_wide_f32_vector(const char *src) {
+  if (!src) return NULL;
+  const char *bad[] = {
+      "float8",       "float16",       "float32",       "float64",
+      "float128",     "float256",      "float512",      "make_float8",
+      "make_float16", "make_float32",  "make_float64",  "make_float128",
+      "make_float256", "make_float512",
+  };
+  for (int i = 0; i < (int)(sizeof(bad) / sizeof(bad[0])); i++)
+    if (strstr(src, bad[i]) != NULL) return bad[i];
+  return NULL;
+}
+
+static bool cuda_source_has_illegal_wide_f32_vector(const char *src) {
+  return cuda_source_illegal_wide_f32_vector(src) != NULL;
 }
 
 /* Render tests */
@@ -145,8 +174,9 @@ TEST(cuda, linearize_reduce_merge_shared_end) {
   PolyUOp *pout0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
   PolyUOp *pout1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
 
-  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
-  PolyUOp *r0 = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1024));
+  PolyUOp *r0 =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_REDUCE));
 
   PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pin, r0, poly_arg_none());
   PolyUOp *in_ld = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_idx, poly_arg_none());
@@ -163,15 +193,20 @@ TEST(cuda, linearize_reduce_merge_shared_end) {
   PolyUOp *out1_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, pout1, zero, poly_arg_none());
   PolyUOp *st0 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out0_idx, sum, poly_arg_none());
   PolyUOp *st1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out1_idx, mx, poly_arg_none());
-  PolyUOp *stores[2] = {st0, st1};
-  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 2, poly_arg_none());
+  PolyUOp *end0_srcs[2] = {st0, r0};
+  PolyUOp *end1_srcs[2] = {st1, r0};
+  PolyUOp *end0 = poly_uop(ctx, POLY_OP_END, POLY_VOID, end0_srcs, 2, poly_arg_none());
+  PolyUOp *end1 = poly_uop(ctx, POLY_OP_END, POLY_VOID, end1_srcs, 2, poly_arg_none());
+  PolyUOp *ends[2] = {end0, end1};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, ends, 2, poly_arg_none());
 
   int n = 0;
   PolyUOp **lin = poly_linearize_cuda(ctx, sink, &n);
   ASSERT_NOT_NULL(lin);
   ASSERT_TRUE(n > 0);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 2);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 1);
+  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_DEFINE_LOCAL) >= 2);
+  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_BARRIER) >= 2);
+  ASSERT_TRUE(count_lin_ops(lin, n, POLY_OP_END) >= 1);
 
   free(lin);
   poly_ctx_destroy(ctx);
@@ -626,6 +661,173 @@ static PolyInstance *make_test_mlp(int n_in, int n_out) {
   return poly_mlp_from_json(spec, (int)strlen(spec));
 }
 
+TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
+  /* Codegen-only regression for the larger MLP train step. tinygrad lowers
+   * this graph without render-visible f32 vector typedefs like float128 or
+   * float512; CUDA C has no such vector names, so they must be scalarized or
+   * split before rendering. No CUDA device is required for this test. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int64_t x_shape[2] = {32, 128};
+  int64_t y_shape[2] = {32, 64};
+  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, x_shape, 2, "x");
+  PolyUOp *y_buf = poly_target(ctx, POLY_FLOAT32, y_shape, 2, "y");
+  ASSERT_NOT_NULL(x_buf);
+  ASSERT_NOT_NULL(y_buf);
+
+  PolyUOp *x = poly_reshape(ctx, x_buf, x_shape, 2);
+  x = poly_linear(ctx, "layers.0", x, 128, 256, true);
+  ASSERT_NOT_NULL(x);
+  x = poly_relu(ctx, x);
+  ASSERT_NOT_NULL(x);
+  PolyUOp *pred = poly_linear(ctx, "layers.1", x, 256, 64, true);
+  ASSERT_NOT_NULL(pred);
+  PolyUOp *target = poly_reshape(ctx, y_buf, y_shape, 2);
+  PolyUOp *loss = poly_mse_loss(ctx, pred, target);
+  ASSERT_NOT_NULL(loss);
+
+  PolyUOp *param_bufs[4] = {
+      poly_ctx_get(ctx, "layers.0.weight"),
+      poly_ctx_get(ctx, "layers.0.bias"),
+      poly_ctx_get(ctx, "layers.1.weight"),
+      poly_ctx_get(ctx, "layers.1.bias"),
+  };
+  int64_t param_shapes[4][2] = {
+      {256, 128},
+      {256, 0},
+      {64, 256},
+      {64, 0},
+  };
+  int param_ndims[4] = {2, 1, 2, 1};
+  int64_t param_numels[4] = {256 * 128, 256, 64 * 256, 64};
+  PolyUOp *wrts[4];
+  for (int i = 0; i < 4; i++) {
+    ASSERT_NOT_NULL(param_bufs[i]);
+    wrts[i] = poly_reshape(ctx, param_bufs[i], param_shapes[i], param_ndims[i]);
+    ASSERT_NOT_NULL(wrts[i]);
+  }
+
+  PolyUOp *grads[4] = {0};
+  ASSERT_INT_EQ(poly_grad_many(ctx, loss, NULL, wrts, 4, grads), 0);
+
+  PolyUOp *stores[5];
+  PolyUOp *loss_out = poly_buffer(ctx, POLY_FLOAT32, 1);
+  ASSERT_NOT_NULL(loss_out);
+  PolyUOp *loss_flat = loss;
+  if (test_uop_numel(ctx, loss) != 1) {
+    int64_t one_shape[1] = {1};
+    loss_flat = poly_reshape(ctx, loss, one_shape, 1);
+  }
+  stores[0] = poly_store_val(ctx, loss_out, loss_flat);
+  ASSERT_NOT_NULL(stores[0]);
+
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_SGD,
+      .lr = 0.01f,
+      .momentum = 0.0f,
+      .weight_decay = 0.0f,
+      .classic = false,
+  };
+  for (int i = 0; i < 4; i++) {
+    ASSERT_NOT_NULL(grads[i]);
+    PolyUOp *grad = grads[i];
+    PolyShape gs = poly_uop_shape(ctx, grad);
+    if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != param_numels[i])) {
+      int64_t flat[1] = {param_numels[i]};
+      grad = poly_reshape(ctx, grad, flat, 1);
+    }
+    if (gs.dims) free(gs.dims);
+
+    PolyOptimUpdate upd;
+    ASSERT_INT_EQ(
+        poly_optim_build_update(
+            ctx, &cfg, param_bufs[i], grad, NULL, NULL, NULL, NULL, param_numels[i], &upd
+        ),
+        0
+    );
+    stores[i + 1] = poly_store_buffer_update(ctx, param_bufs[i], upd.param_new);
+    ASSERT_NOT_NULL(stores[i + 1]);
+  }
+
+  PolyUOp *sink = poly_sink_n(ctx, stores, 5);
+  ASSERT_NOT_NULL(sink);
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+
+  int n_rendered = 0;
+  for (int i = 0; i < sched->n_items; i++) {
+    if (sched->items[i].kind != POLY_EXEC_COMPUTE) continue;
+    int n_lin = 0;
+    PolyUOp **lin = poly_linearize_cuda(ctx, sched->items[i].root, &n_lin);
+    ASSERT_NOT_NULL(lin);
+    char name[64];
+    snprintf(name, sizeof(name), "large_mlp_train_%d", i);
+    char *src = poly_render_cuda(lin, n_lin, name, 256);
+    ASSERT_NOT_NULL(src);
+    const char *bad_token = cuda_source_illegal_wide_f32_vector(src);
+    if (bad_token) {
+      for (int j = 0; j < n_lin; j++) {
+        if (lin[j] && lin[j]->dtype.count >= 16) {
+          fprintf(
+              stderr, "    lin[%d] op=%s dtype=%s count=%d nsrc=%d\n", j,
+              poly_op_name(lin[j]->op), poly_dtype_name(lin[j]->dtype), lin[j]->dtype.count,
+              lin[j]->n_src
+          );
+          for (int k = 0; k < lin[j]->n_src && k < 4; k++) {
+            fprintf(
+                stderr, "      src[%d] op=%s dtype=%s count=%d\n", k,
+                poly_op_name(lin[j]->src[k]->op), poly_dtype_name(lin[j]->src[k]->dtype),
+                lin[j]->src[k]->dtype.count
+            );
+          }
+          for (int p = 0; p < n_lin; p++) {
+            if (!lin[p]) continue;
+            for (int s = 0; s < lin[p]->n_src; s++) {
+              if (lin[p]->src[s] == lin[j]) {
+                fprintf(
+                    stderr, "      parent lin[%d] op=%s dtype=%s count=%d src_slot=%d\n", p,
+                    poly_op_name(lin[p]->op), poly_dtype_name(lin[p]->dtype), lin[p]->dtype.count,
+                    s
+                );
+              }
+            }
+          }
+        }
+      }
+      const char *where = strstr(src, bad_token);
+      if (where) {
+        const char *start = where;
+        while (start > src && (where - start) < 180) start--;
+        fprintf(
+            stderr,
+            "    CUDA bad token item=%d token=%s context:\n%.*s\n",
+            i,
+            bad_token,
+            360,
+            start
+        );
+      }
+      free(lin);
+      free(src);
+      poly_schedule_free(sched);
+      poly_ctx_destroy(ctx);
+      FAIL(
+          "CUDA renderer emitted illegal wide f32 vector token %s for large MLP train step",
+          bad_token
+      );
+    }
+    free(lin);
+    free(src);
+    n_rendered++;
+  }
+  ASSERT_TRUE(n_rendered > 0);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(cuda, instance_set_device_cuda) {
   SKIP_IF_NO_CUDA();
 
@@ -761,6 +963,37 @@ TEST(cuda, instance_cuda_roundtrip) {
   /* All 4 results should match within tolerance */
   for (int i = 1; i < 4; i++)
     ASSERT_FLOAT_EQ(results[i], results[0], 1e-4);
+
+  poly_instance_free(inst);
+  PASS();
+}
+
+TEST(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
+  SKIP_IF_NO_CUDA();
+
+  const char *spec = "{\"layers\":[128,256,64],\"activation\":\"relu\",\"bias\":true,"
+                     "\"loss\":\"mse\",\"batch_size\":32,\"seed\":42}";
+  PolyInstance *inst = poly_mlp_from_json(spec, (int)strlen(spec));
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_CUDA), 0);
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.01f, 0.0f, 0.0f, 0.0f, 0.0f), 0
+  );
+
+  float x[32 * 128];
+  float y[32 * 64];
+  for (int i = 0; i < (int)(sizeof(x) / sizeof(x[0])); i++)
+    x[i] = (float)((i % 17) - 8) * 0.01f;
+  for (int i = 0; i < (int)(sizeof(y) / sizeof(y[0])); i++)
+    y[i] = (float)((i % 13) - 6) * 0.01f;
+
+  PolyIOBinding io[] = {
+      {"x", x},
+      {"y", y},
+  };
+  float loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+  ASSERT_TRUE(isfinite(loss));
 
   poly_instance_free(inst);
   PASS();

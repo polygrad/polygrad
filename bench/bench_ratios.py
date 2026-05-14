@@ -133,6 +133,7 @@ def pg_mlp_train(iters):
     x_np = np.random.randn(4, 64).astype(np.float32)
     y_np = np.random.randn(4, 1).astype(np.float32)
     def run():
+        opt.zero_grad()
         x = Tensor(x_np, requires_grad=False)
         h = l1(x).relu()
         pred = l2(h)
@@ -291,12 +292,22 @@ def check_correct(name, n):
 # -- Tinygrad subprocess -------------------------------------------------------
 
 def run_tinygrad_worker():
-    """Run tinygrad benchmarks in the `tiny` conda env, return results dict."""
-    worker = os.path.join(os.path.dirname(__file__), 'bench_tinygrad_worker.py')
+    """Run tinygrad_latest benchmarks in the `tiny` env, return results dict."""
+    repo = Path(__file__).resolve().parents[1]
+    worker = Path(__file__).resolve().parent / 'bench_tinygrad_worker.py'
+    tiny_root = repo / 'references' / 'tinygrad_latest'
+    tiny_python = os.environ.get('TINY_PYTHON')
+    if tiny_python is None:
+        default_tiny_python = Path('/home/anton/tools/miniconda3/envs/tiny/bin/python')
+        tiny_python = str(default_tiny_python if default_tiny_python.exists() else sys.executable)
+    env = os.environ.copy()
+    if tiny_root.exists():
+        env['PYTHONPATH'] = str(tiny_root) + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
+    env['DEV'] = os.environ.get('TINYGRAD_DEV', 'CPU')
     try:
         result = subprocess.run(
-            ['conda', 'run', '-n', 'tiny', 'python', worker],
-            capture_output=True, text=True, timeout=300
+            [tiny_python, str(worker)],
+            env=env, capture_output=True, text=True, timeout=300
         )
         if result.returncode != 0:
             print(f'  tinygrad worker failed (exit {result.returncode})',

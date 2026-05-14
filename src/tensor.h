@@ -31,12 +31,12 @@ PolyUOp *poly_buffer_var(
     int n_inner_dims
 );
 
-/* Legacy full-buffer ASSIGN helper for optimizer/direct core paths.
- * Current tinygrad has no ASSIGN UOp; Tensor.assign must use
- * poly_tensor_assign, which builds AFTER(target, STORE(target, value)).
- * Keep this internal until the optimizer/scheduler path is fully ported to
- * the tinygrad AFTER/STORE shape. */
-PolyUOp *poly_legacy_assign_buffer(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
+/* Full-buffer STORE effect for optimizer/direct core SINKs.
+ * Tensor.assign itself still uses tinygrad's current-value shape:
+ * AFTER(target, STORE(target, value)). Direct effect SINKs already sequence
+ * stores explicitly, so they should contain STORE(target, value) entries.
+ * Movement views are normalized to their base buffer for whole-storage updates. */
+PolyUOp *poly_store_buffer_update(PolyCtx *ctx, PolyUOp *target, PolyUOp *value);
 
 /* Movement-op helpers (port of tinygrad mixin/movement.py) */
 
