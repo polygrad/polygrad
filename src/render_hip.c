@@ -69,7 +69,6 @@ typedef struct {
   int cap;
 } HipStrMap;
 
-
 static void hsmap_init(HipStrMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
@@ -406,6 +405,7 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
       .has_mulacc = true,
       .has_threefry = false,
       .has_local = true,
+      .global_max = {2147483647, 65535, 65535},
       .tensor_cores = hip_cdna_tc_specs_storage,
       .n_tensor_cores = 2,
   };

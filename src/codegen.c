@@ -300,14 +300,14 @@ static PolyUOp *convert_loop_output_ranges_to_global(PolyCtx *ctx, PolyUOp *ast)
     for (int k = 0; k < n_extra; k++)
       extra_local[k] = src_extra[k];
 
-    PolyArg g_arg = (n_extra > 0)
-                        ? poly_arg_range_ex(
-                              poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL, extra_local, n_extra
-                          )
-                        : poly_arg_range(poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL);
+    PolyArg g_arg =
+        (n_extra > 0)
+            ? poly_arg_range_ex(poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL, extra_local, n_extra)
+            : poly_arg_range(poly_range_axis_id(r->arg), POLY_AXIS_GLOBAL);
     PolyUOp *g_rng =
-        (r->tag != 0) ? poly_uop_tagged(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, g_arg, r->tag)
-                      : poly_uop(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, g_arg);
+        (r->tag != 0)
+            ? poly_uop_tagged(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, g_arg, r->tag)
+            : poly_uop(ctx, POLY_OP_RANGE, r->dtype, r->src, r->n_src, g_arg);
     from[n_sub] = r;
     to[n_sub] = g_rng;
     n_sub++;
@@ -353,7 +353,9 @@ static uint64_t *build_reachability_bitmask(
   /* Forward pass: propagate bits from sources */
   for (int i = 0; i < n_topo; i++) {
     for (int j = 0; j < topo[i]->n_src; j++) {
-      int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(topo[i]->src[j]), topo[i]->src[j], poly_ptr_eq);
+      int *pidx = (int *)poly_map_get(
+          idx_map, poly_ptr_hash(topo[i]->src[j]), topo[i]->src[j], poly_ptr_eq
+      );
       if (pidx) reach[i] |= reach[*pidx - 1];
     }
   }
@@ -438,7 +440,8 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
       poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
     }
     for (int bi = 0; bi < s->n_bufs; bi++) {
-      int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(s->bufs[bi]), s->bufs[bi], poly_ptr_eq);
+      int *pidx =
+          (int *)poly_map_get(idx_map, poly_ptr_hash(s->bufs[bi]), s->bufs[bi], poly_ptr_eq);
       if (pidx) s->buf_reach[bi] = reach[*pidx];
     }
     s->has_reach = true;
@@ -513,7 +516,8 @@ static void sched_refresh(OptScheduler *s) {
       poly_map_set(idx_map, poly_ptr_hash(topo2[i]), topo2[i], &indices[i], poly_ptr_eq);
     }
     for (int bi = 0; bi < s->n_bufs; bi++) {
-      int *pidx = (int *)poly_map_get(idx_map, poly_ptr_hash(s->bufs[bi]), s->bufs[bi], poly_ptr_eq);
+      int *pidx =
+          (int *)poly_map_get(idx_map, poly_ptr_hash(s->bufs[bi]), s->bufs[bi], poly_ptr_eq);
       if (pidx) s->buf_reach[bi] = reach[*pidx];
     }
     s->has_reach = true;
@@ -729,7 +733,8 @@ static bool uop_ptr_in_list(PolyUOp *u, PolyUOp **list, int n) {
 
 static bool is_true_clause_const(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST &&
-         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) || (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
+         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
+          (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
 }
 
 /* Tinygrad's UOp.uprod(*clauses) is bool-AND here. Skip literal `true`
@@ -1585,7 +1590,8 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     int unroll_dims[SCHED_MAX_RNGS];
     int n_unroll = sched_unrollable_dims(&s, unroll_dims, SCHED_MAX_RNGS);
 
-    if (n_unroll > 0 && (sched_upcast_size(&s) <= 4 || !sched_has_axis_type(&s, POLY_AXIS_UNROLL)) &&
+    if (n_unroll > 0 &&
+        (sched_upcast_size(&s) <= 4 || !sched_has_axis_type(&s, POLY_AXIS_UNROLL)) &&
         sched_upcast_size(&s) < 64) {
       int last = unroll_dims[n_unroll - 1];
       int64_t last_sz = s.shape[last];
@@ -2706,7 +2712,8 @@ static PolyUOp *rule_mul_fdiv1_to_fdiv(PolyCtx *ctx, PolyUOp *root, const PolyBi
 
 static bool is_true_const_late(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST &&
-         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) || (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
+         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
+          (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
 }
 
 static bool int_const_value_codegen(PolyUOp *u, int64_t *out);
@@ -3765,9 +3772,9 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   return out;
 }
 
-/* BF16 non-native type rewrites * Mirrors tinygrad's create_non_native_float_pats() + pm_manual_bf16_cast.
- * BF16 is stored as unsigned short on most targets (HIP, OpenCL, CPU).
- * ALU ops must be promoted to float32, and CAST bf16<->f32 uses bitwise ops.
+/* BF16 non-native type rewrites * Mirrors tinygrad's create_non_native_float_pats() +
+ * pm_manual_bf16_cast. BF16 is stored as unsigned short on most targets (HIP, OpenCL, CPU). ALU ops
+ * must be promoted to float32, and CAST bf16<->f32 uses bitwise ops.
  */
 static bool is_bf16(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
@@ -4132,7 +4139,13 @@ static void swizzle_recur(SwizzleCtx *s, int dim) {
   }
 }
 
-static void decode_choice_index(int64_t idx, int64_t (*pairs)[2], int n, int64_t *ids, int64_t *vals) {
+static void decode_choice_index(
+    int64_t idx,
+    int64_t (*pairs)[2],
+    int n,
+    int64_t *ids,
+    int64_t *vals
+) {
   for (int i = n - 1; i >= 0; i--) {
     int64_t m = pairs[i][1];
     ids[i] = pairs[i][0];
@@ -4391,12 +4404,10 @@ static PolyUOp *do_contract(PolyCtx *ctx, PolyUOp *con, const PolyBindings *b) {
     decode_choice_index(rpk, new_pairs, n_new, ids, vals);
     for (int64_t lrpk = 0; lrpk < con_prod; lrpk++) {
       decode_choice_index(
-          lrpk, con->arg.pair_tuple.pairs, con->arg.pair_tuple.n, ids + n_new,
-          vals + n_new
+          lrpk, con->arg.pair_tuple.pairs, con->arg.pair_tuple.n, ids + n_new, vals + n_new
       );
       idxs[p++] = compute_flat_from_assignment(
-          ex->arg.pair_tuple.pairs, ex->arg.pair_tuple.n, ids, vals,
-          n_new + con->arg.pair_tuple.n
+          ex->arg.pair_tuple.pairs, ex->arg.pair_tuple.n, ids, vals, n_new + con->arg.pair_tuple.n
       );
     }
   }
@@ -4406,9 +4417,7 @@ static PolyUOp *do_contract(PolyCtx *ctx, PolyUOp *con, const PolyBindings *b) {
   free(ids);
   free(vals);
 
-  return poly_uop1(
-      ctx, POLY_OP_UNROLL, con->dtype, gep, poly_arg_pair_tuple(new_pairs, n_new)
-  );
+  return poly_uop1(ctx, POLY_OP_UNROLL, con->dtype, gep, poly_arg_pair_tuple(new_pairs, n_new));
 }
 
 static PolyUOp *end_unrolls(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -4662,7 +4671,9 @@ static PolyPatternMatcher *poly_pm_add_loads(void) {
   return g_pm_add_loads;
 }
 
-PolyPatternMatcher *poly_pm_add_loads_pass(void) { return poly_pm_add_loads(); }
+PolyPatternMatcher *poly_pm_add_loads_pass(void) {
+  return poly_pm_add_loads();
+}
 
 /* load_store_folding (subset port for vectorized INDEX collapse) */
 
@@ -5242,7 +5253,8 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   int n_filtered = 0;
   for (int i = 0; i < n_folds; i++) {
     int width = fold_lengths[i];
-    if (width == 1 || expr_divides_const_codegen(offset, width)) filtered_lengths[n_filtered++] = width;
+    if (width == 1 || expr_divides_const_codegen(offset, width))
+      filtered_lengths[n_filtered++] = width;
   }
   if (n_filtered == 0) {
     filtered_lengths[n_filtered++] = 1;
@@ -5506,15 +5518,20 @@ static PolyUOp *rule_no_vectorized_alu(PolyCtx *ctx, PolyUOp *alu, const PolyBin
   return ret;
 }
 
-static PolyUOp *rule_bool_and_to_scalarized_vector(PolyCtx *ctx, PolyUOp *alu, const PolyBindings *b) {
+static PolyUOp *rule_bool_and_to_scalarized_vector(
+    PolyCtx *ctx,
+    PolyUOp *alu,
+    const PolyBindings *b
+) {
   if (!alu || alu->op != POLY_OP_AND || !poly_dtype_is_bool(poly_dtype_scalar(alu->dtype)))
     return NULL;
   return rule_no_vectorized_alu(ctx, alu, b);
 }
 
-/* pm_move_where_on_load (tinygrad uop/symbolic.py line 375-390) * WHERE(cond, LOAD(INDEX(buf, idx)), CONST(0)) → LOAD(INDEX(buf, idx, cond))
- * Moves validity condition into INDEX gate so renderers can emit conditional loads.
- * Without this, unconditional LOAD on out-of-bounds PAD indices SEGVs in JIT.
+/* pm_move_where_on_load (tinygrad uop/symbolic.py line 375-390) * WHERE(cond, LOAD(INDEX(buf,
+ * idx)), CONST(0)) → LOAD(INDEX(buf, idx, cond)) Moves validity condition into INDEX gate so
+ * renderers can emit conditional loads. Without this, unconditional LOAD on out-of-bounds PAD
+ * indices SEGVs in JIT.
  *
  * Guard: only move conditions that are pure index math (no LOAD in subtree).
  * PAD bounds checks (CMPLT/AND of RANGE/CONST) pass; data-dependent conditions
@@ -5625,8 +5642,9 @@ static PolyUOp *move_where_clauses_into_index(
      *   INDEX(buf, WHERE(valid, idx, Invalid))
      * pm_lower_index_dtype then lowers this to INDEX(buf, idx, valid). */
     PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, idx->src[1]->dtype, poly_arg_invalid());
-    PolyUOp *index_expr =
-        poly_uop3(ctx, POLY_OP_WHERE, idx->src[1]->dtype, new_valid, idx->src[1], invalid, poly_arg_none());
+    PolyUOp *index_expr = poly_uop3(
+        ctx, POLY_OP_WHERE, idx->src[1]->dtype, new_valid, idx->src[1], invalid, poly_arg_none()
+    );
     base = poly_uop2(ctx, POLY_OP_INDEX, idx->dtype, idx->src[0], index_expr, idx->arg);
   }
   if (n_keep == 0) return base;
@@ -5665,12 +5683,7 @@ static PolyUOp *rule_where_on_load(PolyCtx *ctx, PolyUOp *w, const PolyBindings 
    * false branch. PAD/triu masks use range/index math and still move. */
   if (uop_tree_contains_load(cond) || uop_tree_indexes_buffer(cond, idx->src[0])) return NULL;
   return move_where_clauses_into_index(
-      ctx,
-      cond,
-      idx,
-      has_load,
-      false_val,
-      has_load ? true_val->dtype : idx->dtype,
+      ctx, cond, idx, has_load, false_val, has_load ? true_val->dtype : idx->dtype,
       has_load ? true_val->arg : poly_arg_none()
   );
 }
@@ -5700,15 +5713,11 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
   if (true_val->arg.kind == POLY_ARG_INT && true_val->arg.i != 0) return NULL;
 
   if (uop_tree_contains_load(cond) || uop_tree_indexes_buffer(cond, idx->src[0])) return NULL;
-  PolyUOp *neg_cond =
-      poly_uop2(ctx, POLY_OP_CMPNE, cond->dtype, cond, poly_const_like_bool(ctx, cond, true), poly_arg_none());
+  PolyUOp *neg_cond = poly_uop2(
+      ctx, POLY_OP_CMPNE, cond->dtype, cond, poly_const_like_bool(ctx, cond, true), poly_arg_none()
+  );
   return move_where_clauses_into_index(
-      ctx,
-      neg_cond,
-      idx,
-      has_load,
-      true_val,
-      has_load ? false_val->dtype : idx->dtype,
+      ctx, neg_cond, idx, has_load, true_val, has_load ? false_val->dtype : idx->dtype,
       has_load ? false_val->arg : poly_arg_none()
   );
 }
@@ -5792,8 +5801,8 @@ static PolyUOp *rule_no_vectorized_index(PolyCtx *ctx, PolyUOp *idx_uop, const P
   if (bcast && bcast->op == POLY_OP_GEP && bcast->arg.kind == POLY_ARG_INT_TUPLE) {
     n_pairs64 = (int64_t)groups * bcast->arg.int_tuple.n;
   } else if (bcast) {
-    int bcast_v = (bcast->dtype.is_ptr && bcast->dtype.vcount > 1) ? bcast->dtype.vcount
-                                                                    : bcast->dtype.count;
+    int bcast_v =
+        (bcast->dtype.is_ptr && bcast->dtype.vcount > 1) ? bcast->dtype.vcount : bcast->dtype.count;
     n_pairs64 = (int64_t)count * bcast_v;
   } else {
     n_pairs64 = count;
@@ -5820,7 +5829,8 @@ static PolyUOp *rule_no_vectorized_index(PolyCtx *ctx, PolyUOp *idx_uop, const P
       }
     }
   } else if (bcast) {
-    int bcast_v = (bcast->dtype.is_ptr && bcast->dtype.vcount > 1) ? bcast->dtype.vcount : bcast->dtype.count;
+    int bcast_v =
+        (bcast->dtype.is_ptr && bcast->dtype.vcount > 1) ? bcast->dtype.vcount : bcast->dtype.count;
     for (int c = 0; c < count; c++) {
       for (int j = 0; j < bcast_v; j++) {
         idx_lanes[p_pair] = j;
@@ -5889,7 +5899,8 @@ static PolyUOp *rule_no_vectorized_index(PolyCtx *ctx, PolyUOp *idx_uop, const P
   PolyUOp *off_v = poly_uop(ctx, POLY_OP_VECTORIZE, vec_idx_dt, osrcs, n_pairs, poly_arg_none());
   PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, vec_idx_dt, idx_v, cnt_v, poly_arg_none());
   PolyUOp *final_idx = poly_uop2(ctx, POLY_OP_ADD, vec_idx_dt, scaled, off_v, poly_arg_none());
-  PolyUOp *ret = poly_uop2(ctx, POLY_OP_INDEX, idx_uop->dtype, bcast_buf, final_idx, poly_arg_none());
+  PolyUOp *ret =
+      poly_uop2(ctx, POLY_OP_INDEX, idx_uop->dtype, bcast_buf, final_idx, poly_arg_none());
 
   free(bsrcs);
   free(isrcs);
@@ -5985,7 +5996,11 @@ static PolyUOp *rule_vectorize_single(PolyCtx *ctx, PolyUOp *u, const PolyBindin
   return u->src[0];
 }
 
-static PolyUOp *rule_vectorize_duplicate_void_effect(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+static PolyUOp *rule_vectorize_duplicate_void_effect(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    const PolyBindings *b
+) {
   (void)ctx;
   (void)b;
   if (u->op != POLY_OP_VECTORIZE || !poly_dtype_eq(u->dtype, POLY_VOID) || u->n_src <= 1)
@@ -5999,15 +6014,13 @@ static PolyUOp *rule_vectorize_duplicate_void_effect(PolyCtx *ctx, PolyUOp *u, c
 static PolyUOp *make_gep_lane(PolyCtx *ctx, PolyUOp *src, int lane) {
   int64_t idx = lane;
   return poly_uop1(
-      ctx, POLY_OP_GEP, dtype_for_gep_result(src->dtype, 1), src,
-      poly_arg_int_tuple_local(&idx, 1)
+      ctx, POLY_OP_GEP, dtype_for_gep_result(src->dtype, 1), src, poly_arg_int_tuple_local(&idx, 1)
   );
 }
 
 static PolyUOp *rule_render_gep_multi(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
-  if (!u || u->op != POLY_OP_GEP || u->n_src < 1 || u->arg.kind != POLY_ARG_INT_TUPLE)
-    return NULL;
+  if (!u || u->op != POLY_OP_GEP || u->n_src < 1 || u->arg.kind != POLY_ARG_INT_TUPLE) return NULL;
   int n = u->arg.int_tuple.n;
   if (n <= 1) return NULL;
 
@@ -6144,7 +6157,8 @@ static PolyUOp *rule_vector_sub_same_stack_rhs_to_add_neg(
   if (!elts) return NULL;
   for (int i = 0; i < rhs->n_src; i++)
     elts[i] = neg;
-  PolyUOp *neg_stack = poly_uop(ctx, POLY_OP_VECTORIZE, rhs->dtype, elts, rhs->n_src, poly_arg_none());
+  PolyUOp *neg_stack =
+      poly_uop(ctx, POLY_OP_VECTORIZE, rhs->dtype, elts, rhs->n_src, poly_arg_none());
   free(elts);
   return poly_uop2(ctx, POLY_OP_ADD, u->dtype, u->src[0], neg_stack, poly_arg_none());
 }
@@ -6205,8 +6219,7 @@ static bool vector_load_lane_info(PolyUOp *u, ScalarLoadRun *out) {
   }
 
   PolyUOp *load = u->src[0];
-  if (!load || load->op != POLY_OP_LOAD || load->n_src != 1 || load->dtype.count <= 1)
-    return false;
+  if (!load || load->op != POLY_OP_LOAD || load->n_src != 1 || load->dtype.count <= 1) return false;
   PolyUOp *cast = load->src[0];
   if (!cast || cast->op != POLY_OP_CAST || cast->n_src != 1 || !cast->dtype.is_ptr ||
       cast->dtype.count <= 1)
@@ -6326,9 +6339,8 @@ static PolyUOp *rule_stack_scalar_load_runs(PolyCtx *ctx, PolyUOp *u, const Poly
      * to the wider folded LOAD even when this particular STACK only uses one
      * lane. Fresh scalar LOADs need a source-order contiguous ascending run;
      * repeated or reversed pad/tril loads stay scalar in tinygrad. */
-    if (!info[i].from_vector_load &&
-        (u->dtype.count <= g_max_fold_width || run_uses < 2 ||
-         (!run_is_source_order_contiguous && !run_has_all_lanes)))
+    if (!info[i].from_vector_load && (u->dtype.count <= g_max_fold_width || run_uses < 2 ||
+                                      (!run_is_source_order_contiguous && !run_has_all_lanes)))
       continue;
 
     ScalarLoadRun load_info = info[i];
@@ -6512,11 +6524,7 @@ static int infer_scalar_load_lane(PolyCtx *ctx, PolyUOp *idx_expr, PolyUOp *vec_
 /* Scalar LOAD with gated INDEX can still carry vector alt/gate operands after
  * devectorization. WGSL scalar loads need lane-specific scalar operands, just
  * like tinygrad's scalar string rewrite expects. */
-static PolyUOp *rule_scalar_gated_load_operands(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    const PolyBindings *b
-) {
+static PolyUOp *rule_scalar_gated_load_operands(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->op != POLY_OP_LOAD || u->dtype.count != 1 || u->n_src < 1) return NULL;
 
@@ -6720,7 +6728,11 @@ static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
  */
 
 static PolyUOp *rebuild_preserve_tag(
-    PolyCtx *ctx, PolyUOp *u, PolyDType dtype, PolyUOp **srcs, int n_src
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyDType dtype,
+    PolyUOp **srcs,
+    int n_src
 ) {
   return (u->tag != 0) ? poly_uop_tagged(ctx, u->op, dtype, srcs, n_src, u->arg, u->tag)
                        : poly_uop(ctx, u->op, dtype, srcs, n_src, u->arg);
@@ -6736,8 +6748,7 @@ static PolyDType select_index_dtype(PolyCtx *ctx, PolyUOp *u) {
   if (u->op == POLY_OP_RANGE && u->n_src >= 1) {
     int64_t vmin = 0, vmax = 0;
     poly_uop_minmax(ctx, u, &vmin, &vmax);
-    PolyDType lowered =
-        (vmin >= INT32_MIN && vmax <= INT32_MAX) ? POLY_INT32 : POLY_INT64;
+    PolyDType lowered = (vmin >= INT32_MIN && vmax <= INT32_MAX) ? POLY_INT32 : POLY_INT64;
     if (u->dtype.count > 1) lowered = poly_dtype_vec(lowered, u->dtype.count);
     return lowered;
   }
@@ -6823,8 +6834,8 @@ static PolyUOp *lower_index_subtree(
     return result;
   }
 
-  if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] &&
-      u->src[0]->op == POLY_OP_LOAD && poly_dtype_eq(u->dtype, POLY_INT64)) {
+  if (u->op == POLY_OP_CAST && u->n_src == 1 && u->src[0] && u->src[0]->op == POLY_OP_LOAD &&
+      poly_dtype_eq(u->dtype, POLY_INT64)) {
     /* tinygrad keeps loaded integer labels widened to long inside index
      * arithmetic. Do not immediately narrow CAST(long, LOAD(int)) back to the
      * load dtype just because the loaded scalar's standalone bounds fit int32. */
@@ -7049,7 +7060,11 @@ static bool uop_tree_contains_op_codegen(PolyUOp *u, PolyOps op) {
   return false;
 }
 
-static PolyUOp *rule_canonicalize_and_valid_bounds(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+static PolyUOp *rule_canonicalize_and_valid_bounds(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
   (void)b;
   if (!root || root->op != POLY_OP_AND) return NULL;
   /* tinygrad's simplify_valid skips masks that contain INDEX nodes; those are
@@ -7108,9 +7123,8 @@ static PolyUOp *rule_index_invalid_gate_to_valid(
 
   PolyUOp *memo_old[256], *memo_new[256];
   int memo_n = 0;
-  PolyUOp *simplified_idx = simplify_index_expr_given_gate(
-      ctx, index_expr, cond, memo_old, memo_new, &memo_n, 256
-  );
+  PolyUOp *simplified_idx =
+      simplify_index_expr_given_gate(ctx, index_expr, cond, memo_old, memo_new, &memo_n, 256);
   if (uop_tree_contains_op_codegen(simplified_idx, POLY_OP_LOAD))
     simplified_idx = promote_loaded_index_expr_to_i64(ctx, simplified_idx);
 
@@ -7126,7 +7140,8 @@ static PolyUOp *rule_index_invalid_gate_to_valid(
 
 static bool is_true_const_codegen(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST &&
-         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) || (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
+         ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
+          (u->arg.kind == POLY_ARG_INT && u->arg.i == 1));
 }
 
 /* Return:
@@ -7309,7 +7324,10 @@ static int fold_width_from_caps(PolyRendererCaps caps) {
 }
 
 PolyUOp *poly_apply_devectorize_stage(
-    PolyCtx *ctx, PolyUOp *sink, int devectorize, PolyRendererCaps caps
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    int devectorize,
+    PolyRendererCaps caps
 ) {
   if (!ctx || !sink || devectorize < 0) return sink;
   g_max_fold_width = fold_width_from_caps(caps);
@@ -7422,6 +7440,268 @@ static PolyUOp *gpudim_special_bound(PolyCtx *ctx, PolyUOp *bound) {
   return poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, bound, poly_arg_none());
 }
 
+typedef struct {
+  PolyUOp *expr;
+  int64_t max;
+  int orig[POLY_MAX_DIMS];
+  int n_orig;
+} GpuDimExpr;
+
+static int64_t gpudim_expr_max(PolyCtx *ctx, PolyUOp *expr) {
+  if (!expr) return 1;
+  int64_t lo = 0, hi = 1;
+  (void)lo;
+  poly_uop_minmax(ctx, expr, &lo, &hi);
+  return hi > 0 ? hi : 1;
+}
+
+static bool gpudim_caps_present(const int caps[3]) {
+  return caps && caps[0] > 0 && caps[1] > 0 && caps[2] > 0;
+}
+
+static PolyUOp *gpudim_const(PolyCtx *ctx, int64_t v) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(v));
+}
+
+static PolyUOp *gpudim_mul_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
+  if (v == 1) return x;
+  return poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, x, gpudim_const(ctx, v), poly_arg_none());
+}
+
+static PolyUOp *gpudim_idiv_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
+  if (v == 1) return x;
+  return poly_uop2(ctx, POLY_OP_IDIV, POLY_INDEX, x, gpudim_const(ctx, v), poly_arg_none());
+}
+
+static PolyUOp *gpudim_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, a, b, poly_arg_none());
+}
+
+static PolyUOp *gpudim_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, a, b, poly_arg_none());
+}
+
+static PolyUOp *gpudim_mod(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_MOD, POLY_INDEX, a, b, poly_arg_none());
+}
+
+static PolyUOp *gpudim_idiv(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_IDIV, POLY_INDEX, a, b, poly_arg_none());
+}
+
+static bool gpudim_safe_mul_i64(int64_t a, int64_t b, int64_t *out) {
+  if (__builtin_mul_overflow(a, b, out)) return false;
+  return *out > 0;
+}
+
+static int64_t gpudim_smallest_divisor(int64_t x) {
+  if (x <= 1) return 1;
+  for (int64_t d = 2; d <= x / d; d++)
+    if ((x % d) == 0) return d;
+  return 1;
+}
+
+static bool gpudim_group_dims(
+    PolyCtx *ctx,
+    const GpuDimExpr *dims,
+    int n_dims,
+    const int caps[3],
+    GpuDimExpr *out,
+    int *n_out
+) {
+  if (!ctx || !dims || !out || !n_out || !gpudim_caps_present(caps) || n_dims <= 0 ||
+      n_dims > POLY_MAX_DIMS)
+    return false;
+
+  int n = n_dims;
+  for (int i = 0; i < n; i++)
+    out[i] = dims[i];
+
+  while (n > 3 || out[0].max > caps[0] || (n > 1 && out[1].max > caps[1]) ||
+         (n > 2 && out[2].max > caps[2])) {
+    bool grouped = false;
+    for (int i = 0; i < 3 && i < n - 1; i++) {
+      int64_t prod = 0;
+      if (!gpudim_safe_mul_i64(out[i].max, out[i + 1].max, &prod) || prod > caps[i]) continue;
+      out[i].expr = gpudim_mul(ctx, out[i].expr, out[i + 1].expr);
+      out[i].max = prod;
+      if (out[i].n_orig + out[i + 1].n_orig > POLY_MAX_DIMS) return false;
+      memcpy(
+          out[i].orig + out[i].n_orig, out[i + 1].orig,
+          (size_t)out[i + 1].n_orig * sizeof(out[i].orig[0])
+      );
+      out[i].n_orig += out[i + 1].n_orig;
+      for (int j = i + 1; j < n - 1; j++)
+        out[j] = out[j + 1];
+      n--;
+      grouped = true;
+      break;
+    }
+    if (!grouped) return false;
+  }
+
+  *n_out = n;
+  return true;
+}
+
+static bool gpudim_split_dims(
+    PolyCtx *ctx,
+    const GpuDimExpr *dims,
+    int n_dims,
+    const int caps[3],
+    GpuDimExpr *out,
+    int *n_out
+) {
+  if (!ctx || !dims || !out || !n_out || !gpudim_caps_present(caps) || n_dims <= 0 || n_dims > 3)
+    return false;
+
+  bool already_ok = true;
+  for (int i = 0; i < n_dims; i++)
+    if (dims[i].max > caps[i]) already_ok = false;
+  if (already_ok) {
+    for (int i = 0; i < n_dims; i++)
+      out[i] = dims[i];
+    *n_out = n_dims;
+    return true;
+  }
+
+  for (int i = 0; i < 3; i++) {
+    if (i < n_dims) {
+      out[i] = dims[i];
+    } else {
+      out[i].expr = gpudim_const(ctx, 1);
+      out[i].max = 1;
+      out[i].n_orig = 0;
+    }
+  }
+
+  for (int i = 0; i < 3; i++) {
+    while (out[i].max > caps[i]) {
+      int64_t div = gpudim_smallest_divisor(out[i].max);
+      if (div == 1) return false;
+      int next = (i + 1) % 3;
+      int64_t next_max = 0;
+      if (!gpudim_safe_mul_i64(out[next].max, div, &next_max)) return false;
+      out[i].expr = gpudim_idiv_const(ctx, out[i].expr, div);
+      out[i].max /= div;
+      out[next].expr = gpudim_mul_const(ctx, out[next].expr, div);
+      out[next].max = next_max;
+    }
+  }
+
+  *n_out = (out[2].max == 1) ? 2 : ((out[1].max == 1 && out[2].max == 1) ? 1 : 3);
+  return true;
+}
+
+static bool gpudim_limited_dims(
+    PolyCtx *ctx,
+    const GpuDimExpr *dims,
+    int n_dims,
+    const int caps[3],
+    GpuDimExpr *out,
+    int *n_out
+) {
+  if (!gpudim_caps_present(caps)) {
+    for (int i = 0; i < n_dims; i++)
+      out[i] = dims[i];
+    *n_out = n_dims;
+    return true;
+  }
+
+  GpuDimExpr grouped[POLY_MAX_DIMS];
+  int n_grouped = 0;
+  if (gpudim_group_dims(ctx, dims, n_dims, caps, grouped, &n_grouped)) {
+    for (int i = 0; i < n_grouped; i++)
+      out[i] = grouped[i];
+    *n_out = n_grouped;
+    return true;
+  }
+
+  if (n_dims > 3) return false;
+  return gpudim_split_dims(ctx, dims, n_dims, caps, out, n_out);
+}
+
+static bool gpudim_build_indices(
+    PolyCtx *ctx,
+    const char *prefix,
+    const GpuDimExpr *dims,
+    int n_dims,
+    const int caps[3],
+    bool reverse,
+    PolyUOp **out
+) {
+  if (!ctx || !prefix || !dims || !out || n_dims <= 0 || n_dims > POLY_MAX_DIMS) return false;
+
+  GpuDimExpr ordered[POLY_MAX_DIMS];
+  for (int i = 0; i < n_dims; i++)
+    ordered[i] = reverse ? dims[n_dims - 1 - i] : dims[i];
+
+  GpuDimExpr limited[POLY_MAX_DIMS];
+  int n_limited = 0;
+  if (!gpudim_limited_dims(ctx, ordered, n_dims, caps, limited, &n_limited)) return false;
+
+  PolyUOp *raw[3] = {NULL, NULL, NULL};
+  for (int i = 0; i < n_limited; i++) {
+    char name[16];
+    snprintf(name, sizeof(name), "%s%d", prefix, i);
+    raw[i] = poly_uop1(
+        ctx, POLY_OP_SPECIAL, POLY_INDEX, gpudim_special_bound(ctx, limited[i].expr),
+        poly_arg_str(name)
+    );
+  }
+
+  PolyUOp *ordered_out[POLY_MAX_DIMS] = {0};
+  if (n_limited < n_dims) {
+    for (int i = 0; i < n_limited; i++) {
+      PolyUOp *idx = raw[i];
+      for (int j = 0; j < limited[i].n_orig; j++) {
+        int orig = limited[i].orig[j];
+        if (orig < 0 || orig >= n_dims) return false;
+        if (j + 1 < limited[i].n_orig) {
+          ordered_out[orig] = gpudim_mod(ctx, idx, ordered[orig].expr);
+          idx = gpudim_idiv(ctx, idx, ordered[orig].expr);
+        } else {
+          ordered_out[orig] = idx;
+        }
+      }
+    }
+  } else if (n_limited > n_dims) {
+    if (n_limited == 2 && n_dims == 1) {
+      ordered_out[0] = gpudim_add(ctx, gpudim_mul(ctx, raw[0], limited[1].expr), raw[1]);
+    } else if (n_limited == 3 && n_dims == 1) {
+      PolyUOp *inner = gpudim_add(ctx, gpudim_mul(ctx, raw[0], limited[1].expr), raw[1]);
+      ordered_out[0] = gpudim_add(ctx, gpudim_mul(ctx, inner, limited[2].expr), raw[2]);
+    } else {
+      return false;
+    }
+  } else {
+    bool same = true;
+    for (int i = 0; i < n_dims; i++)
+      if (limited[i].max != ordered[i].max) same = false;
+    if (same) {
+      for (int i = 0; i < n_dims; i++)
+        ordered_out[i] = raw[i];
+    } else if (n_dims == 2) {
+      PolyUOp *flat = gpudim_add(ctx, gpudim_mul(ctx, raw[0], limited[1].expr), raw[1]);
+      ordered_out[0] = gpudim_idiv(ctx, flat, ordered[1].expr);
+      ordered_out[1] = gpudim_mod(ctx, flat, ordered[1].expr);
+    } else if (n_dims == 3) {
+      PolyUOp *mul12 = gpudim_mul(ctx, ordered[2].expr, ordered[1].expr);
+      PolyUOp *flat01 = gpudim_add(ctx, gpudim_mul(ctx, raw[0], limited[1].expr), raw[1]);
+      PolyUOp *flat = gpudim_add(ctx, gpudim_mul(ctx, flat01, limited[2].expr), raw[2]);
+      ordered_out[0] = gpudim_idiv(ctx, flat, mul12);
+      ordered_out[1] = gpudim_mod(ctx, gpudim_idiv(ctx, flat, ordered[2].expr), ordered[1].expr);
+      ordered_out[2] = gpudim_mod(ctx, flat, ordered[2].expr);
+    } else {
+      return false;
+    }
+  }
+
+  for (int i = 0; i < n_dims; i++)
+    out[i] = reverse ? ordered_out[n_dims - 1 - i] : ordered_out[i];
+  return true;
+}
+
 static PolyUOp **uop_src_scratch_alloc(int n, PolyUOp **stack, int stack_cap) {
   if (n <= stack_cap) return stack;
   return malloc((size_t)n * sizeof(PolyUOp *));
@@ -7431,7 +7711,7 @@ static void uop_src_scratch_free(PolyUOp **buf, PolyUOp **stack) {
   if (buf && buf != stack) free(buf);
 }
 
-PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
+PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
 
@@ -7447,8 +7727,8 @@ PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
 
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op != POLY_OP_RANGE) continue;
-    PolyAxisType t = poly_arg_is_range(topo[i]->arg) ? poly_range_axis_type(topo[i]->arg)
-                                                     : POLY_AXIS_LOOP;
+    PolyAxisType t =
+        poly_arg_is_range(topo[i]->arg) ? poly_range_axis_type(topo[i]->arg) : POLY_AXIS_LOOP;
     if ((t == POLY_AXIS_GLOBAL || t == POLY_AXIS_THREAD || t == POLY_AXIS_LOOP) &&
         n_global < POLY_MAX_DIMS) {
       int existing = find_range_axis_key(topo[i], global_ranges, n_global);
@@ -7473,6 +7753,30 @@ PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
   qsort(global_ranges, (size_t)n_global, sizeof(PolyUOp *), cmp_range_axis_id_ptr);
   qsort(local_ranges, (size_t)n_local, sizeof(PolyUOp *), cmp_range_axis_id_ptr);
 
+  GpuDimExpr global_dims[POLY_MAX_DIMS];
+  PolyUOp *global_idxs[POLY_MAX_DIMS] = {0};
+  for (int i = 0; i < n_global; i++) {
+    global_dims[i].expr = gpudim_special_bound(ctx, global_ranges[i]->src[0]);
+    global_dims[i].max = gpudim_expr_max(ctx, global_dims[i].expr);
+    global_dims[i].orig[0] = i;
+    global_dims[i].n_orig = 1;
+  }
+  if (n_global > 0 &&
+      !gpudim_build_indices(ctx, "gidx", global_dims, n_global, caps.global_max, true, global_idxs))
+    return sink;
+
+  GpuDimExpr local_dims[POLY_MAX_DIMS];
+  PolyUOp *local_idxs[POLY_MAX_DIMS] = {0};
+  for (int i = 0; i < n_local; i++) {
+    local_dims[i].expr = gpudim_special_bound(ctx, local_ranges[i]->src[0]);
+    local_dims[i].max = gpudim_expr_max(ctx, local_dims[i].expr);
+    local_dims[i].orig[0] = i;
+    local_dims[i].n_orig = 1;
+  }
+  if (n_local > 0 &&
+      !gpudim_build_indices(ctx, "lidx", local_dims, n_local, caps.local_max, false, local_idxs))
+    return sink;
+
   /* Substitute: replace all global/local ranges with SPECIALs and remove the
    * matching END nodes.
    * Rebuild graph bottom-up using a flat pointer-identity map. */
@@ -7486,29 +7790,20 @@ PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
   }
   int n_subs = 0;
 
-  /* Seed global specials in reverse order, matching tinygrad's
-   * get_grouped_dims(..., reverse=True) naming for gidxN. */
+  /* Seed global substitutions from tinygrad get_grouped_dims(..., reverse=True).
+   * If a logical dimension was split, global_idxs[i] reconstructs the original
+   * logical RANGE from multiple hardware SPECIALs. */
   for (int i = 0; i < n_global; i++) {
-    PolyUOp *dim_size = gpudim_special_bound(ctx, global_ranges[i]->src[0]);
-    char gidx_name[16];
-    snprintf(gidx_name, sizeof(gidx_name), "gidx%d", n_global - 1 - i);
-    PolyUOp *special =
-        poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INDEX, dim_size, poly_arg_str(gidx_name));
     for (int j = 0; j < n_topo; j++)
       if (topo[j]->op == POLY_OP_RANGE && range_same_axis_key(topo[j], global_ranges[i]))
-        add_gpudim_sub(&sub_old, &sub_new, &n_subs, &sub_cap, topo[j], special);
+        add_gpudim_sub(&sub_old, &sub_new, &n_subs, &sub_cap, topo[j], global_idxs[i]);
   }
 
-  /* Seed local specials in forward order, matching tinygrad lidxN. */
+  /* Seed local substitutions from tinygrad get_grouped_dims(...). */
   for (int g = 0; g < n_local; g++) {
-    PolyUOp *gdim = gpudim_special_bound(ctx, local_ranges[g]->src[0]);
-    char lidx_name[16];
-    snprintf(lidx_name, sizeof(lidx_name), "lidx%d", g);
-    PolyUOp *lidx_special =
-        poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INDEX, gdim, poly_arg_str(lidx_name));
     for (int j = 0; j < n_topo; j++)
       if (topo[j]->op == POLY_OP_RANGE && range_same_axis_key(topo[j], local_ranges[g]))
-        add_gpudim_sub(&sub_old, &sub_new, &n_subs, &sub_cap, topo[j], lidx_special);
+        add_gpudim_sub(&sub_old, &sub_new, &n_subs, &sub_cap, topo[j], local_idxs[g]);
   }
 
   PolyUOp *new_sink = sink;
@@ -7696,6 +7991,11 @@ PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
   return new_sink;
 }
 
+PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink) {
+  PolyRendererCaps caps = {0};
+  return poly_add_gpudims_ex(ctx, sink, caps);
+}
+
 static PolyUOp *poly_add_cpu_thread_dims(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
@@ -7704,8 +8004,8 @@ static PolyUOp *poly_add_cpu_thread_dims(PolyCtx *ctx, PolyUOp *sink) {
   int n_thread = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op != POLY_OP_RANGE) continue;
-    PolyAxisType t = poly_arg_is_range(topo[i]->arg) ? poly_range_axis_type(topo[i]->arg)
-                                                     : POLY_AXIS_LOOP;
+    PolyAxisType t =
+        poly_arg_is_range(topo[i]->arg) ? poly_range_axis_type(topo[i]->arg) : POLY_AXIS_LOOP;
     if (t == POLY_AXIS_THREAD && n_thread < 1) thread_ranges[n_thread++] = topo[i];
   }
   if (n_thread == 0) return sink;
@@ -7720,9 +8020,10 @@ static PolyUOp *poly_add_cpu_thread_dims(PolyCtx *ctx, PolyUOp *sink) {
   PolyUOp *core_id = poly_uop0(
       ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("core_id", 0, threads - 1)
   );
-  PolyUOp *thread_sub = poly_dtype_eq(thread_range->dtype, POLY_INT32) ?
-                            core_id :
-                            poly_uop1(ctx, POLY_OP_CAST, thread_range->dtype, core_id, poly_arg_none());
+  PolyUOp *thread_sub =
+      poly_dtype_eq(thread_range->dtype, POLY_INT32)
+          ? core_id
+          : poly_uop1(ctx, POLY_OP_CAST, thread_range->dtype, core_id, poly_arg_none());
 
   int sub_cap = n_topo * 2 + 16;
   PolyUOp **sub_old = (PolyUOp **)malloc((size_t)sub_cap * sizeof(PolyUOp *));
@@ -7986,7 +8287,8 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
           store_rngs[n_store_dims] = group_ranges[i];
           store_bounds[n_store_dims++] = group_ranges[i]->src[0];
         }
-        PolyUOp *store_idx = poly_compute_flat_index_symbolic(ctx, store_rngs, store_bounds, n_store_dims);
+        PolyUOp *store_idx =
+            poly_compute_flat_index_symbolic(ctx, store_rngs, store_bounds, n_store_dims);
         if (!store_idx) continue;
 
         PolyUOp *smem_store_idx =
@@ -8017,7 +8319,8 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
           load_rngs[n_load_dims] = final_ranges[i];
           load_bounds[n_load_dims++] = final_bounds[i];
         }
-        PolyUOp *load_idx = poly_compute_flat_index_symbolic(ctx, load_rngs, load_bounds, n_load_dims);
+        PolyUOp *load_idx =
+            poly_compute_flat_index_symbolic(ctx, load_rngs, load_bounds, n_load_dims);
         if (!load_idx) continue;
 
         PolyUOp *smem_after_srcs[2] = {smem, barrier};
@@ -8025,7 +8328,8 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
             poly_uop(ctx, POLY_OP_AFTER, smem_ptr, smem_after_srcs, 2, poly_arg_none());
         PolyUOp *final_load_idx =
             poly_uop2(ctx, POLY_OP_INDEX, smem_ptr, smem_after, load_idx, poly_arg_none());
-        PolyUOp *final_load = poly_uop1(ctx, POLY_OP_LOAD, red->dtype, final_load_idx, poly_arg_none());
+        PolyUOp *final_load =
+            poly_uop1(ctx, POLY_OP_LOAD, red->dtype, final_load_idx, poly_arg_none());
 
         PolyUOp *final_red_srcs[1 + POLY_MAX_DIMS];
         final_red_srcs[0] = final_load;
@@ -8319,7 +8623,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   if (opts.caps.has_threads)
     sink = poly_add_cpu_thread_dims(ctx, sink);
   else if (device_is_gpu(opts.device))
-    sink = poly_add_gpudims(ctx, sink);
+    sink = poly_add_gpudims_ex(ctx, sink, opts.caps);
   poly_debug_stage_graph("add gpudims", sink);
 
   /* 8. Add loads */

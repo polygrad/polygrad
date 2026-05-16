@@ -1510,12 +1510,14 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
 
   /* All tensors must match shape except along dim */
   int64_t shi[POLY_MAX_DIMS];
-  int64_t cum[POLY_MAX_DIMS + 1];
+  int64_t *cum = malloc((size_t)(n_tensors + 1) * sizeof(*cum));
+  if (!cum) return NULL;
   cum[0] = 0;
   for (int i = 0; i < n_tensors; i++) {
     int ni = uop_shape(ctx, tensors[i], shi);
     if (ni != ndim) {
       fprintf(stderr, "poly_cat: ndim mismatch at tensor %d: %d vs %d\n", i, ni, ndim);
+      free(cum);
       return NULL;
     }
     for (int j = 0; j < ndim; j++) {
@@ -1525,6 +1527,7 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
             stderr, "poly_cat: shape mismatch at tensor %d dim %d: %lld vs %lld\n", i, j,
             (long long)shi[j], (long long)sh0[j]
         );
+        free(cum);
         return NULL;
       }
     }
@@ -1542,9 +1545,17 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
     pads[dim][0] = cum[i];
     pads[dim][1] = total - cum[i + 1];
     PolyUOp *padded = poly_pad(ctx, tensors[i], pads, ndim);
-    if (!padded) return NULL;
+    if (!padded) {
+      free(cum);
+      return NULL;
+    }
     acc = (i == 0) ? padded : poly_alu2(ctx, POLY_OP_ADD, acc, padded);
+    if (!acc) {
+      free(cum);
+      return NULL;
+    }
   }
+  free(cum);
   return acc;
 }
 

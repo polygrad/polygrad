@@ -105,6 +105,7 @@ struct PolyInstance {
     PolyUOp *sink;
   } *entrypoints;
   int n_entrypoints;
+  PolySchedule **entry_schedules; /* lazy, one per generic entrypoint */
 
   /* Buffer handles (one per named buffer, carries domain) */
   PolyBuffer *buf_handles; /* [n_bufs], ptr + domain + nbytes */
@@ -159,9 +160,9 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   for (int i = 0; i < spec->n_bufs; i++) {
     inst->bufs[i].name = strdup(spec->bufs[i].name);
     inst->bufs[i].role = spec->bufs[i].role;
-    inst->bufs[i].trainable =
-        spec->bufs[i].trainable_set ? spec->bufs[i].trainable
-                                    : (spec->bufs[i].role == POLY_ROLE_PARAM);
+    inst->bufs[i].trainable = spec->bufs[i].trainable_set
+      ? spec->bufs[i].trainable
+      : (spec->bufs[i].role == POLY_ROLE_PARAM);
     inst->bufs[i].buffer = spec->bufs[i].buffer;
     inst->bufs[i].ndim = spec->bufs[i].ndim;
     memcpy(inst->bufs[i].shape, spec->bufs[i].shape, spec->bufs[i].ndim * sizeof(int64_t));
@@ -232,6 +233,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   /* Copy entrypoints */
   inst->n_entrypoints = spec->n_entrypoints;
   inst->entrypoints = calloc(spec->n_entrypoints, sizeof(*inst->entrypoints));
+  inst->entry_schedules = calloc(spec->n_entrypoints, sizeof(*inst->entry_schedules));
   for (int i = 0; i < spec->n_entrypoints; i++) {
     inst->entrypoints[i].name = strdup(spec->entrypoints[i].name);
     inst->entrypoints[i].sink = spec->entrypoints[i].sink;
@@ -486,6 +488,11 @@ void poly_instance_free(PolyInstance *inst) {
   free(inst->trainable_param_indices);
 
   /* Free entrypoints */
+  if (inst->entry_schedules) {
+    for (int i = 0; i < inst->n_entrypoints; i++)
+      poly_schedule_free(inst->entry_schedules[i]);
+    free(inst->entry_schedules);
+  }
   for (int i = 0; i < inst->n_entrypoints; i++)
     free(inst->entrypoints[i].name);
   free(inst->entrypoints);
@@ -850,7 +857,13 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
       return -1;
     }
     if (inst->bufs[i].data) {
-      PolyBuffer dst = {.ptr = dptr, .nbytes = nbytes, .device = resolved, .owned = true, .allocator = alloc};
+      PolyBuffer dst = {
+          .ptr = dptr,
+          .nbytes = nbytes,
+          .device = resolved,
+          .owned = true,
+          .allocator = alloc,
+      };
       PolyBuffer src_view = poly_buffer_make_host_view(inst->bufs[i].data, nbytes);
       alloc->copy_in(&dst, &src_view, nbytes, alloc->dev_ctx);
     }
@@ -880,35 +893,41 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
         if (retarget_handle_if_shared(&ts->m_handles[i], resolved, alloc)) {
           /* shared storage, executor-only retarget */
         } else {
-        free_owned_handle(&ts->m_handles[i]);
-        if (poly_device_is_host_addressable(resolved)) {
-          ts->m_handles[i] = (PolyBuffer){
-              .ptr = ts->m_datas[i],
-              .nbytes = ts->m_handles[i].nbytes,
-              .device = resolved,
-              .owned = false,
-              .allocator = alloc,
-              .valid = true,
-          };
-        } else {
-          size_t nb = ts->m_handles[i].nbytes;
-          void *mp = alloc->alloc(nb, alloc->dev_ctx);
-          if (mp) {
-            if (ts->m_datas[i]) {
-              PolyBuffer dst = {.ptr = mp, .nbytes = nb, .device = resolved, .owned = true, .allocator = alloc};
-              PolyBuffer src_view = poly_buffer_make_host_view(ts->m_datas[i], nb);
-              alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
-            }
+          free_owned_handle(&ts->m_handles[i]);
+          if (poly_device_is_host_addressable(resolved)) {
             ts->m_handles[i] = (PolyBuffer){
-                .ptr = mp,
-                .nbytes = nb,
+                .ptr = ts->m_datas[i],
+                .nbytes = ts->m_handles[i].nbytes,
                 .device = resolved,
-                .owned = true,
+                .owned = false,
                 .allocator = alloc,
                 .valid = true,
             };
+          } else {
+            size_t nb = ts->m_handles[i].nbytes;
+            void *mp = alloc->alloc(nb, alloc->dev_ctx);
+            if (mp) {
+              if (ts->m_datas[i]) {
+                PolyBuffer dst = {
+                    .ptr = mp,
+                    .nbytes = nb,
+                    .device = resolved,
+                    .owned = true,
+                    .allocator = alloc,
+                };
+                PolyBuffer src_view = poly_buffer_make_host_view(ts->m_datas[i], nb);
+                alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
+              }
+              ts->m_handles[i] = (PolyBuffer){
+                  .ptr = mp,
+                  .nbytes = nb,
+                  .device = resolved,
+                  .owned = true,
+                  .allocator = alloc,
+                  .valid = true,
+              };
+            }
           }
-        }
         }
       }
       /* v handles */
@@ -916,35 +935,41 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
         if (retarget_handle_if_shared(&ts->v_handles[i], resolved, alloc)) {
           /* shared storage, executor-only retarget */
         } else {
-        free_owned_handle(&ts->v_handles[i]);
-        if (poly_device_is_host_addressable(resolved)) {
-          ts->v_handles[i] = (PolyBuffer){
-              .ptr = ts->v_datas[i],
-              .nbytes = ts->v_handles[i].nbytes,
-              .device = resolved,
-              .owned = false,
-              .allocator = alloc,
-              .valid = true,
-          };
-        } else {
-          size_t nb = ts->v_handles[i].nbytes;
-          void *vp = alloc->alloc(nb, alloc->dev_ctx);
-          if (vp) {
-            if (ts->v_datas[i]) {
-              PolyBuffer dst = {.ptr = vp, .nbytes = nb, .device = resolved, .owned = true, .allocator = alloc};
-              PolyBuffer src_view = poly_buffer_make_host_view(ts->v_datas[i], nb);
-              alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
-            }
+          free_owned_handle(&ts->v_handles[i]);
+          if (poly_device_is_host_addressable(resolved)) {
             ts->v_handles[i] = (PolyBuffer){
-                .ptr = vp,
-                .nbytes = nb,
+                .ptr = ts->v_datas[i],
+                .nbytes = ts->v_handles[i].nbytes,
                 .device = resolved,
-                .owned = true,
+                .owned = false,
                 .allocator = alloc,
                 .valid = true,
             };
+          } else {
+            size_t nb = ts->v_handles[i].nbytes;
+            void *vp = alloc->alloc(nb, alloc->dev_ctx);
+            if (vp) {
+              if (ts->v_datas[i]) {
+                PolyBuffer dst = {
+                    .ptr = vp,
+                    .nbytes = nb,
+                    .device = resolved,
+                    .owned = true,
+                    .allocator = alloc,
+                };
+                PolyBuffer src_view = poly_buffer_make_host_view(ts->v_datas[i], nb);
+                alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
+              }
+              ts->v_handles[i] = (PolyBuffer){
+                  .ptr = vp,
+                  .nbytes = nb,
+                  .device = resolved,
+                  .owned = true,
+                  .allocator = alloc,
+                  .valid = true,
+              };
+            }
           }
-        }
         }
       }
     }
@@ -1002,7 +1027,13 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
         } else {
           void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
           if (bp1) {
-            PolyBuffer dst = {.ptr = bp1, .nbytes = sizeof(float), .device = resolved, .owned = true, .allocator = alloc};
+            PolyBuffer dst = {
+                .ptr = bp1,
+                .nbytes = sizeof(float),
+                .device = resolved,
+                .owned = true,
+                .allocator = alloc,
+            };
             PolyBuffer src_view = poly_buffer_make_host_view(&ts->bc1_data, sizeof(float));
             alloc->copy_in(&dst, &src_view, sizeof(float), alloc->dev_ctx);
             ts->bc1_handle = (PolyBuffer){
@@ -1016,7 +1047,13 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
           }
           void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
           if (bp2) {
-            PolyBuffer dst = {.ptr = bp2, .nbytes = sizeof(float), .device = resolved, .owned = true, .allocator = alloc};
+            PolyBuffer dst = {
+                .ptr = bp2,
+                .nbytes = sizeof(float),
+                .device = resolved,
+                .owned = true,
+                .allocator = alloc,
+            };
             PolyBuffer src_view = poly_buffer_make_host_view(&ts->bc2_data, sizeof(float));
             alloc->copy_in(&dst, &src_view, sizeof(float), alloc->dev_ctx);
             ts->bc2_handle = (PolyBuffer){
@@ -1084,7 +1121,8 @@ static int run_instance_sink(
     int n_io,
     PolyUOp **extra_bufs,
     PolyBuffer *extra_handles,
-    int n_extra
+    int n_extra,
+    PolySchedule **cached_schedule
 ) {
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
@@ -1103,13 +1141,27 @@ static int run_instance_sink(
    * effect sinks. They must skip tensor callify and enter the schedule runner
    * directly, matching tinygrad's separation between tensor realization and
    * schedule execution. */
-  int ret = poly_realize_sink(inst->ctx, sink);
+  PolySchedule *sched = cached_schedule ? *cached_schedule : NULL;
+  bool schedule_owned = false;
+  if (!sched) {
+    sched = poly_complete_create_schedule_with_vars(inst->ctx, sink, POLY_MODE_CALL);
+    if (cached_schedule) {
+      *cached_schedule = sched;
+    } else {
+      schedule_owned = true;
+    }
+  }
+  double t_sched = timing ? poly_now_ms() : 0.0;
+  int ret = sched ? poly_run_schedule(inst->ctx, sched, NULL, 0) : -1;
+  if (schedule_owned) poly_schedule_free(sched);
   if (timing) {
     double t_done = poly_now_ms();
     fprintf(
         stderr,
-        "[polygrad:instance] attach=%.3fms extra=%.3fms realize=%.3fms total=%.3fms ret=%d\n",
-        t_attach - t0, t_extra - t_attach, t_done - t_extra, t_done - t0, ret
+        "[polygrad:instance] attach=%.3fms extra=%.3fms schedule=%.3fms run=%.3fms total=%.3fms "
+        "ret=%d cached=%d\n",
+        t_attach - t0, t_extra - t_attach, t_sched - t_extra, t_done - t_sched, t_done - t0, ret,
+        cached_schedule && *cached_schedule
     );
   }
   return ret;
@@ -1125,7 +1177,8 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
   }
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
-  return run_instance_sink(inst, sink, io, n_io, NULL, NULL, 0);
+  PolySchedule **cached = inst->entry_schedules ? &inst->entry_schedules[ep_idx] : NULL;
+  return run_instance_sink(inst, sink, io, n_io, NULL, NULL, 0, cached);
 }
 
 /* Convenience wrapper */
@@ -1356,7 +1409,7 @@ int poly_instance_value_and_grad(
   }
 
   int ret = run_instance_sink(
-      inst, vag->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra
+      inst, vag->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra, NULL
   );
 
   /* Readback loss + grads from device to host if needed */
@@ -1403,10 +1456,22 @@ static PolyBuffer make_handle(
   if (!dptr) {
     fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
     return (PolyBuffer){
-        .ptr = NULL, .nbytes = 0, .device = dev, .owned = false, .allocator = alloc, .valid = false};
+        .ptr = NULL,
+        .nbytes = 0,
+        .device = dev,
+        .owned = false,
+        .allocator = alloc,
+        .valid = false,
+    };
   }
   if (host_data) {
-    PolyBuffer dst = {.ptr = dptr, .nbytes = nbytes, .device = dev, .owned = true, .allocator = alloc};
+    PolyBuffer dst = {
+        .ptr = dptr,
+        .nbytes = nbytes,
+        .device = dev,
+        .owned = true,
+        .allocator = alloc,
+    };
     PolyBuffer src_view = poly_buffer_make_host_view(host_data, nbytes);
     alloc->copy_in(&dst, &src_view, nbytes, alloc->dev_ctx);
   }
@@ -1648,7 +1713,7 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   }
 
   int ret = run_instance_sink(
-      inst, ts->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra
+      inst, ts->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra, NULL
   );
   free(extra_bufs);
   free(extra_handles);
@@ -1852,11 +1917,7 @@ done:
   return rc;
 }
 
-int poly_instance_copy_prefixed_weights(
-    PolyInstance *dst,
-    PolyInstance *src,
-    const char *prefix
-) {
+int poly_instance_copy_prefixed_weights(PolyInstance *dst, PolyInstance *src, const char *prefix) {
   if (!dst || !src) return -1;
   for (int i = 0; i < src->n_params; i++) {
     int sbi = src->param_indices[i];

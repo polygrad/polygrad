@@ -156,6 +156,30 @@ class TestMovement:
         assert b.shape == (5,)
         np.testing.assert_allclose(b.numpy(), [0, 1, 2, 3, 0])
 
+    def test_roll_1d(self):
+        a = Tensor.arange(5)
+        np.testing.assert_allclose(a.roll(2, 0).numpy(), np.roll(np.arange(5, dtype=np.float32), 2))
+        np.testing.assert_allclose(a.roll(-1, 0).numpy(), np.roll(np.arange(5, dtype=np.float32), -1))
+        np.testing.assert_allclose(a.roll(7, 0).numpy(), np.roll(np.arange(5, dtype=np.float32), 7))
+
+    def test_roll_dims_none_flattens(self):
+        arr = np.arange(12, dtype=np.float32).reshape(3, 4)
+        a = Tensor(arr.tolist())
+        b = a.roll(2)
+        assert b.shape == (3, 4)
+        np.testing.assert_allclose(b.numpy(), np.roll(arr.reshape(-1), 2).reshape(3, 4))
+
+    def test_roll_2d_single_and_tuple_dims(self):
+        arr = np.arange(12, dtype=np.float32).reshape(3, 4)
+        a = Tensor(arr.tolist())
+        np.testing.assert_allclose(a.roll(1, 0).numpy(), np.roll(arr, 1, axis=0))
+        np.testing.assert_allclose(a.roll(-2, -1).numpy(), np.roll(arr, -2, axis=-1))
+        np.testing.assert_allclose(a.roll((1, -2), (0, 1)).numpy(), np.roll(arr, (1, -2), axis=(0, 1)))
+
+    def test_roll_rejects_shift_dim_length_mismatch(self):
+        with pytest.raises(RuntimeError, match=r"len\(dims\)=2 != len\(shifts\)=1"):
+            Tensor.arange(12).reshape(3, 4).roll(1, (0, 1))
+
 
 class TestStepSlicing:
     def test_step2_1d(self):

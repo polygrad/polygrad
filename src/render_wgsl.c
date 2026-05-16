@@ -31,6 +31,15 @@
 #include <math.h>
 #include "utils.h"
 
+static int wgsl_launch_dim_upper_bound(PolyUOp *expr) {
+  if (!expr) return 1;
+  int64_t lo = 0, hi = 1;
+  poly_uop_minmax(NULL, expr, &lo, &hi);
+  if (hi <= 0) return 1;
+  if (hi > INT32_MAX) return INT32_MAX;
+  return (int)hi;
+}
+
 /* String builder (same as render_c.c) */
 
 typedef struct {
@@ -448,9 +457,8 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     if (uops[i]->op == POLY_OP_SPECIAL && uops[i]->arg.str && uops[i]->arg.str[0] == 'l') {
       int slen = (int)strlen(uops[i]->arg.str);
       int dim_idx = (slen > 0) ? uops[i]->arg.str[slen - 1] - '0' : 0;
-      if (dim_idx >= 0 && dim_idx < 3 && uops[i]->n_src > 0 &&
-          uops[i]->src[0]->op == POLY_OP_CONST) {
-        local_dims[dim_idx] = (int)uops[i]->src[0]->arg.i;
+      if (dim_idx >= 0 && dim_idx < 3 && uops[i]->n_src > 0) {
+        local_dims[dim_idx] = wgsl_launch_dim_upper_bound(uops[i]->src[0]);
         has_local_dims = true;
       }
     }
@@ -1055,6 +1063,8 @@ PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
               .has_mulacc = false,
               .has_threefry = false,
               .has_local = true,
+              .global_max = {65535, 65535, 65535},
+              .local_max = {256, 256, 64},
               .max_vec_width = 1, /* supports_float4=false: scalar loads, no vec folding */
           },
       .device = POLY_DEVICE_WEBGPU,

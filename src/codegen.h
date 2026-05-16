@@ -46,6 +46,8 @@ typedef struct {
   bool has_simd_int; /* Backend supports packed integer ops in vector regs (vpaddd etc) */
   int max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
   int max_threads; /* Max CPU worker threads for THREAD axes (0=disabled) */
+  int global_max[3]; /* GPU SPECIAL global/workgroup caps, 0 = unbounded */
+  int local_max[3]; /* GPU SPECIAL local/workgroup caps, 0 = unbounded */
   const PolyTensorCore *tensor_cores; /* array of available TC specs (NULL if none) */
   int n_tensor_cores; /* number of TC specs */
 } PolyRendererCaps;
@@ -93,6 +95,7 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 /* GPU dims: replace outermost RANGE with SPECIAL thread indices.
  * Returns rewritten sink (or original if no suitable RANGE found). */
 PolyUOp *poly_add_gpudims(PolyCtx *ctx, PolyUOp *sink);
+PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps);
 
 /* Port of tinygrad's pm_add_control_flow: inject predecessor edges as
  * real RANGE sources so loop nesting is structural in the DAG.
@@ -162,7 +165,10 @@ PolyPatternMatcher *poly_pm_split_ends_pass(void);
  * These apply the same stage slices as full_rewrite_to_sink_ex instead of
  * exposing a single internal matcher under a misleading boundary name. */
 PolyUOp *poly_apply_devectorize_stage(
-    PolyCtx *ctx, PolyUOp *sink, int devectorize, PolyRendererCaps caps
+    PolyCtx *ctx,
+    PolyUOp *sink,
+    int devectorize,
+    PolyRendererCaps caps
 );
 PolyUOp *poly_apply_post_index_symbolic_stage(PolyCtx *ctx, PolyUOp *sink, int devectorize);
 /* Apply pm_reduce with pass-local state (preferred over manual graph_rewrite). */

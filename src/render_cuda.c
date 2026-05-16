@@ -61,7 +61,6 @@ typedef struct {
   int cap;
 } CudaStrMap;
 
-
 static void csmap_init(CudaStrMap *m, int n) {
   m->cap = (n < 4) ? 16 : n * 3;
   m->keys = calloc(m->cap, sizeof(PolyUOp *));
@@ -183,9 +182,8 @@ static bool cuda_vector_needs_prefix(PolyDType dt) {
 
 static const char *cuda_lane_name(int idx) {
   static const char *lanes[] = {
-      "x",  "y",  "z",  "w",  "a",  "b",  "c",  "d",  "e",  "f",  "g",
-      "h",  "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",  "q",  "r",
-      "s",  "t",  "u",  "v",  "w0", "x0", "y0", "z0", "a0", "b0",
+      "x", "y", "z", "w", "a", "b", "c", "d", "e", "f", "g",  "h",  "i",  "j",  "k",  "l",
+      "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w0", "x0", "y0", "z0", "a0", "b0",
   };
   if (idx < 0 || idx >= (int)(sizeof(lanes) / sizeof(lanes[0]))) return "x";
   return lanes[idx];
@@ -421,7 +419,13 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
        * kernels such as broadcast matmul, which does not match the reference
        * pipeline. */
       .devectorize = 1,
-      .caps = {.has_mulacc = true, .has_local = true},
+      .caps =
+          {
+              .has_mulacc = true,
+              .has_local = true,
+              .global_max = {2147483647, 65535, 65535},
+              .local_max = {1024, 1024, 64},
+          },
       .device = POLY_DEVICE_CUDA,
       .opt_policy = POLY_OPT_HEURISTIC,
       .extra_matcher = extra,

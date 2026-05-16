@@ -18,7 +18,16 @@ typedef struct {
   int n_bindings;
 } PolyWebGpuRunnerHandle;
 
-static void webgpu_extract_dims(PolyUOp **lin, int n_lin, int grid[3], int local[3]) {
+static int webgpu_launch_dim_upper_bound(PolyCtx *ctx, PolyUOp *expr) {
+  if (!expr) return 1;
+  int64_t lo = 0, hi = 1;
+  poly_uop_minmax(ctx, expr, &lo, &hi);
+  if (hi <= 0) return 1;
+  if (hi > INT32_MAX) return INT32_MAX;
+  return (int)hi;
+}
+
+static void webgpu_extract_dims(PolyCtx *ctx, PolyUOp **lin, int n_lin, int grid[3], int local[3]) {
   grid[0] = 1;
   grid[1] = 1;
   grid[2] = 1;
@@ -28,12 +37,11 @@ static void webgpu_extract_dims(PolyUOp **lin, int n_lin, int grid[3], int local
 
   for (int i = 0; i < n_lin; i++) {
     if (lin[i]->op != POLY_OP_SPECIAL || !lin[i]->arg.str || lin[i]->n_src < 1) continue;
-    if (lin[i]->src[0]->op != POLY_OP_CONST) continue;
     const char *name = lin[i]->arg.str;
     int slen = (int)strlen(name);
     int dim_idx = (slen > 0) ? name[slen - 1] - '0' : 0;
     if (dim_idx < 0 || dim_idx > 2) dim_idx = 0;
-    int bound = (int)lin[i]->src[0]->arg.i;
+    int bound = webgpu_launch_dim_upper_bound(ctx, lin[i]->src[0]);
     if (name[0] == 'l')
       local[dim_idx] = bound;
     else
@@ -64,7 +72,8 @@ EM_JS(uintptr_t, js_webgpu_create_buffer, (size_t nbytes), {
   const size = Math.max(4, Math.ceil(nbytes / 4) * 4);
   const buf = st.device.createBuffer({
     size,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST |
+           GPUBufferUsage.UNIFORM
   });
   st.buffers.set(id, buf);
   st.bufferSizes.set(id, size);
@@ -189,13 +198,17 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
   return 0;
 })
 
-EM_ASYNC_JS(
+EM_JS(
     uintptr_t,
     js_webgpu_get_or_create_pipeline,
     (const char *wgsl_ptr, const char *entry_ptr, int n_args, int n_params, int debug_level),
     {
   const t0 = performance.now();
-  const st = await Module.__polygradEnsureWebGPU();
+  const st = Module.__polygradWebGpuState;
+  if (!st || !st.device) {
+    if (debug_level >= 1) console.log('[polygrad:webgpu:pipeline] WebGPU device is not initialized');
+    return 0;
+  }
   const wgsl = UTF8ToString(wgsl_ptr);
   const entry = UTF8ToString(entry_ptr);
   const key = wgsl + '::' + entry + '::' + n_args + '::' + n_params;
@@ -209,49 +222,40 @@ EM_ASYNC_JS(
   if (debug_level >= 7) {
     console.log(
       `[polygrad:webgpu:pipeline] miss entry=${entry} wgsl=${wgsl.length} ` +
-      `n_args=${n_args} n_params=${n_params}`
-    );
+      `n_args=${n_args} n_params=${n_params}`);
   }
 
-  const shaderModule = st.device.createShaderModule({ code: wgsl });
-  const info = await shaderModule.getCompilationInfo();
-  if (debug_level >= 7) {
-    console.log(
-      `[polygrad:webgpu:pipeline] compilation-info entry=${entry} ` +
-      `messages=${info.messages.length} ms=${(performance.now() - t0).toFixed(3)}`
-    );
-  }
-  let hasError = false;
-  for (const msg of info.messages) {
-    if (msg.type === 'error') hasError = true;
-    if (msg.type === 'error' || msg.type === 'warning') {
-      console.log(
-          '[polygrad:webgpu:shader] ' + msg.type +
-          ' line=' + msg.lineNum + ' pos=' + msg.linePos +
-          ' len=' + msg.length + ' : ' + msg.message);
-    }
-  }
-  if (hasError) {
-    console.log('[polygrad:webgpu:shader] WGSL source for failed pipeline ' + entry + ':\n' + wgsl);
-  }
-  const entries = [{
-    binding: 0,
-    visibility: GPUShaderStage.COMPUTE,
-    buffer: { type: 'uniform' }
-  }];
-  for (let i = 0; i < n_args; i++) {
-    entries.push({
-      binding: i + 1,
+  let shaderModule;
+  let bindGroupLayout;
+  let pipeline;
+  try {
+    shaderModule = st.device.createShaderModule({ code: wgsl });
+    const entries = [{
+      binding: 0,
       visibility: GPUShaderStage.COMPUTE,
-      buffer: { type: i < n_params ? 'storage' : 'uniform' }
+      buffer: { type: 'uniform' }
+    }];
+    for (let i = 0; i < n_args; i++) {
+      entries.push({
+        binding: i + 1,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: i < n_params ? 'storage' : 'uniform' }
+      });
+    }
+    bindGroupLayout = st.device.createBindGroupLayout({ entries });
+    const pipelineLayout = st.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+    pipeline = st.device.createComputePipeline({
+      layout: pipelineLayout,
+      compute: { module: shaderModule, entryPoint: entry }
     });
+  } catch (err) {
+    console.log(
+        '[polygrad:webgpu:pipeline] failed entry=' + entry + ' : ' +
+        (err && err.message ? err.message : String(err)));
+    if (debug_level >= 4)
+      console.log('[polygrad:webgpu:shader] WGSL source for failed pipeline ' + entry + ':\n' + wgsl);
+    return 0;
   }
-  const bindGroupLayout = st.device.createBindGroupLayout({ entries });
-  const pipelineLayout = st.device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
-  const pipeline = await st.device.createComputePipelineAsync({
-    layout: pipelineLayout,
-    compute: { module: shaderModule, entryPoint: entry }
-  });
 
   const id = st.nextPipelineId++;
   st.pipelines.set(id, { pipeline, bindGroupLayout, entry, wgsl });
@@ -259,8 +263,7 @@ EM_ASYNC_JS(
   if (debug_level >= 7) {
     console.log(
       `[polygrad:webgpu:pipeline] ready entry=${entry} id=${id} ` +
-      `ms=${(performance.now() - t0).toFixed(3)}`
-    );
+      `ms=${(performance.now() - t0).toFixed(3)}`);
   }
   return id;
 })
@@ -268,7 +271,14 @@ EM_ASYNC_JS(
 EM_ASYNC_JS(
     int,
     js_webgpu_dispatch,
-    (uintptr_t pipeline_id, const uintptr_t *args, int n_args, int n_params, int gx, int gy, int gz, int debug_level),
+    (uintptr_t pipeline_id,
+     const uintptr_t *args,
+     int n_args,
+     int n_params,
+     int gx,
+     int gy,
+     int gz,
+     int debug_level),
     {
   const st = await Module.__polygradEnsureWebGPU();
   const rec = st.pipelines.get(pipeline_id);
@@ -318,8 +328,7 @@ EM_ASYNC_JS(
     }).join(' ');
     console.log(
       `[polygrad:webgpu:dispatch] entry=${rec.entry} pipeline=${pipeline_id} ` +
-      `grid=${gx},${gy},${gz} n_params=${n_params} n_args=${n_args} ${desc}`
-    );
+      `grid=${gx},${gy},${gz} n_params=${n_params} n_args=${n_args} ${desc}`);
   }
 
   if (debug_level >= 8) {
@@ -343,8 +352,7 @@ EM_ASYNC_JS(
       const i32 = Array.from(new Int32Array(mapped, 0, wordCount));
       console.log(
         `[polygrad:webgpu:buffer] ${label} handle=${handle} nbytes=${nbytes} ` +
-        `i32=${JSON.stringify(i32)} f32=${JSON.stringify(f32)} u8=${JSON.stringify(u8)}`
-      );
+        `i32=${JSON.stringify(i32)} f32=${JSON.stringify(f32)} u8=${JSON.stringify(u8)}`);
       staging.unmap();
       staging.destroy();
     };
@@ -388,7 +396,12 @@ static void webgpu_free(const PolyBuffer *buffer, void *dev_ctx) {
   js_webgpu_destroy_buffer((uintptr_t)buffer->ptr);
 }
 
-static int webgpu_copy_in(const PolyBuffer *dst, const PolyBuffer *src, size_t nbytes, void *dev_ctx) {
+static int webgpu_copy_in(
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t nbytes,
+    void *dev_ctx
+) {
   (void)dev_ctx;
   if (!dst || !dst->ptr || !src) return -1;
   if (src->device == POLY_DEVICE_HOST) {
@@ -396,10 +409,17 @@ static int webgpu_copy_in(const PolyBuffer *dst, const PolyBuffer *src, size_t n
         (uintptr_t)dst->ptr, (uintptr_t)(src->src ? src->src : src), (int)nbytes
     );
   }
-  return js_webgpu_write_buffer_from_wasm((uintptr_t)dst->ptr, (const uint8_t *)src->ptr, (int)nbytes);
+  return js_webgpu_write_buffer_from_wasm(
+      (uintptr_t)dst->ptr, (const uint8_t *)src->ptr, (int)nbytes
+  );
 }
 
-static int webgpu_copy_out(const PolyBuffer *dst, const PolyBuffer *src, size_t nbytes, void *dev_ctx) {
+static int webgpu_copy_out(
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t nbytes,
+    void *dev_ctx
+) {
   (void)dev_ctx;
   if (!dst || !src || !src->ptr) return -1;
   if (dst->device == POLY_DEVICE_HOST) {
@@ -410,31 +430,43 @@ static int webgpu_copy_out(const PolyBuffer *dst, const PolyBuffer *src, size_t 
   return js_webgpu_read_buffer_to_wasm((uint8_t *)dst->ptr, (uintptr_t)src->ptr, (int)nbytes);
 }
 
-static int webgpu_copy_between(const PolyBuffer *dst, const PolyBuffer *src, size_t nbytes, void *dev_ctx) {
+static int webgpu_copy_between(
+    const PolyBuffer *dst,
+    const PolyBuffer *src,
+    size_t nbytes,
+    void *dev_ctx
+) {
   (void)dev_ctx;
   if (!dst || !src || !dst->ptr || !src->ptr) return -1;
   return js_webgpu_copy_buffer_to_buffer((uintptr_t)dst->ptr, (uintptr_t)src->ptr, (int)nbytes);
 }
 
 static const PolyAllocator POLY_WEBGPU_ALLOCATOR = {
-  .alloc = webgpu_alloc,
-  .free = webgpu_free,
-  .copy_in = webgpu_copy_in,
-  .copy_out = webgpu_copy_out,
-  .copy_between = webgpu_copy_between,
-  .dev_ctx = NULL,
-  .host_addressable = false,
+    .alloc = webgpu_alloc,
+    .free = webgpu_free,
+    .copy_in = webgpu_copy_in,
+    .copy_out = webgpu_copy_out,
+    .copy_between = webgpu_copy_between,
+    .dev_ctx = NULL,
+    .host_addressable = false,
 };
 
 int poly_webgpu_memset_zero(uintptr_t handle, size_t nbytes) {
   return js_webgpu_memset_zero_impl(handle, (int)nbytes);
 }
 
-int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn_name, PolyRunner *out) {
+int poly_webgpu_lower_item(
+    PolyCtx *ctx,
+    PolyUOp *scheduled_root,
+    const char *fn_name,
+    PolyRunner *out
+) {
   bool timing = poly_debug_at_least(7);
   double t0 = timing ? poly_now_ms() : 0.0;
   if (timing) {
-    fprintf(stderr, "[polygrad:webgpu:lower] begin fn=%s root=%p\n", fn_name, (void *)scheduled_root);
+    fprintf(
+        stderr, "[polygrad:webgpu:lower] begin fn=%s root=%p\n", fn_name, (void *)scheduled_root
+    );
     fflush(stderr);
   }
   if (webgpu_graph_has_unsupported_dtype(ctx, scheduled_root)) {
@@ -449,7 +481,7 @@ int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn
   double t_lin = timing ? poly_now_ms() : 0.0;
 
   int grid[3], local[3];
-  webgpu_extract_dims(lin, n_lin, grid, local);
+  webgpu_extract_dims(ctx, lin, n_lin, grid, local);
 
   char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
   free(lin);
@@ -458,7 +490,8 @@ int poly_webgpu_lower_item(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn
   if (timing) {
     fprintf(
         stderr,
-        "[polygrad:webgpu:lower] rendered fn=%s lin=%d wgsl=%zu grid=%d,%d,%d local=%d,%d,%d check=%.3fms lin=%.3fms render=%.3fms\n",
+        "[polygrad:webgpu:lower] rendered fn=%s lin=%d wgsl=%zu grid=%d,%d,%d local=%d,%d,%d "
+        "check=%.3fms lin=%.3fms render=%.3fms\n",
         fn_name, n_lin, strlen(wgsl), grid[0], grid[1], grid[2], local[0], local[1], local[2],
         t_check - t0, t_lin - t_check, t_render - t_lin
     );
@@ -501,13 +534,15 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
   if (!wh->pipeline_id || wh->n_bindings != n_args) {
     if (timing) {
       fprintf(
-          stderr, "[polygrad:webgpu:execute] pipeline begin entry=%s n_args=%d n_params=%d wgsl=%zu\n",
+          stderr,
+          "[polygrad:webgpu:execute] pipeline begin entry=%s n_args=%d n_params=%d wgsl=%zu\n",
           wh->entry, n_args, runner->n_params, strlen(wh->wgsl)
       );
       fflush(stderr);
     }
-    wh->pipeline_id =
-        js_webgpu_get_or_create_pipeline(wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level());
+    wh->pipeline_id = js_webgpu_get_or_create_pipeline(
+        wh->wgsl, wh->entry, n_args, runner->n_params, poly_debug_level()
+    );
     wh->n_bindings = n_args;
     if (!wh->pipeline_id) return -1;
     if (timing) {
@@ -527,14 +562,9 @@ int poly_webgpu_execute(PolyRunner *runner, void **args, int n_args) {
     fflush(stderr);
   }
   int ret = js_webgpu_dispatch(
-      wh->pipeline_id,
-      (const uintptr_t *)args,
-      n_args,
-      runner->n_params,
-      runner->grid[0],
-      runner->grid[1],
-      runner->grid[2],
-      poly_debug_level());
+      wh->pipeline_id, (const uintptr_t *)args, n_args, runner->n_params, runner->grid[0],
+      runner->grid[1], runner->grid[2], poly_debug_level()
+  );
   if (timing) {
     double t_done = poly_now_ms();
     fprintf(

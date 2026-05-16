@@ -481,6 +481,25 @@ TEST(pe, repeat_interleave_e2e) {
   PASS();
 }
 
+TEST(pe, cat_many_more_than_max_dims_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *parts[19];
+  for (int i = 0; i < 19; i++)
+    parts[i] = poly_full(ctx, (int64_t[]){1}, 1, (double)(i + 1));
+  PolyUOp *r = poly_cat(ctx, parts, 19, 0);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 1);
+  ASSERT_INT_EQ(poly_uop_dims(ctx, r)[0], 19);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 19);
+  float dout[19] = {0};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, NULL, NULL, 0), 0);
+  for (int i = 0; i < 19; i++)
+    ASSERT_FLOAT_EQ(dout[i], (float)(i + 1), 1e-6f);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, argmax_e2e) {
   /* Reference: argmax([1,5,3,2,4]) = 1 */
   PolyCtx *ctx = poly_ctx_new();
@@ -794,7 +813,8 @@ TEST(shape_uop, contiguous_passthrough) {
 TEST(shape_uop, assign_flat) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = make_buf(ctx, (int64_t[]){3, 4}, 2);
-  PolyUOp *a = poly_store_buffer_update(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
+  PolyUOp *a =
+      poly_store_buffer_update(ctx, r, poly_alu2(ctx, POLY_OP_ADD, r, poly_const_float(ctx, 1.0)));
   /* Whole-buffer update helper normalizes to flat BUFFER target. */
   ASSERT_TRUE(a->op == POLY_OP_STORE);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, a->src[0]), 1);

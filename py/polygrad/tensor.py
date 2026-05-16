@@ -850,6 +850,14 @@ class Tensor:
             raise RuntimeError(f'Mixed devices are not supported: {sorted(devices)}')
         return Device.canonicalize(next(iter(devices)))
 
+    def _resolve_dim(self, dim, *, extra=False):
+        total = self.ndim + int(extra)
+        lo = -max(1, total)
+        hi = max(1, total) - 1
+        if not lo <= dim <= hi:
+            raise IndexError(f'dim={dim} out of range {[lo, hi]}')
+        return dim + total if dim < 0 else dim
+
     def _ensure_tensor(self, other):
         if isinstance(other, Tensor):
             return other
@@ -1338,6 +1346,24 @@ class Tensor:
         result = self.reshape(tuple(new_shape)).expand(tuple(exp_shape))
         final_shape = tuple(s * r for s, r in zip(shape, repeats))
         return result.reshape(final_shape)
+
+    def roll(self, shifts, dims=None):
+        if dims is None:
+            return self.flatten().roll(shifts, 0).reshape(self.shape)
+
+        dims = (int(dims),) if isinstance(dims, (int, np.integer)) else tuple(dims)
+        shifts = (int(shifts),) if isinstance(shifts, (int, np.integer)) else tuple(shifts)
+        dims = tuple(self._resolve_dim(d) for d in dims)
+        if len(dims) != len(shifts):
+            raise RuntimeError(f"len(dims)={len(dims)} != len(shifts)={len(shifts)}")
+
+        shrink_arg = [(0, s) for s in self.shape]
+        for d, s in zip(dims, shifts):
+            size = self.shape[d]
+            delta = size - int(s) % size
+            shrink_arg[d] = (delta, delta + size)
+        repeats = tuple(2 if i in dims else 1 for i in range(self.ndim))
+        return self.repeat(*repeats).shrink(tuple(shrink_arg))
 
     # --- Reduction ops (C core) ---
 

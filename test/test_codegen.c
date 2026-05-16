@@ -66,6 +66,18 @@ static int count_special_named(PolyUOp **lin, int n, const char *name) {
   return c;
 }
 
+static int64_t special_bound_hi_named(PolyUOp **lin, int n, const char *name) {
+  for (int i = 0; i < n; i++) {
+    if (lin[i]->op != POLY_OP_SPECIAL || !lin[i]->arg.str || strcmp(lin[i]->arg.str, name) != 0 ||
+        lin[i]->n_src <= 0)
+      continue;
+    int64_t lo = 0, hi = 0;
+    poly_uop_minmax(NULL, lin[i]->src[0], &lo, &hi);
+    return hi;
+  }
+  return -1;
+}
+
 static VecKernel make_vec_copy_with_weak_index_expr(int n) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
@@ -841,6 +853,31 @@ TEST(codegen, linearize_webgpu_vecadd_emits_gpudims) {
   PASS();
 }
 
+TEST(codegen, linearize_webgpu_vecadd_splits_large_global_dispatch) {
+  /* End-to-end through the WebGPU linearizer: the backend caps must flow into
+   * add_gpudims, so oversized logical dispatches produce multiple hardware
+   * workgroup_id SPECIALs instead of an illegal x-dimension. */
+  VecKernel k = make_vec_binop(POLY_OP_ADD, 16777216);
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_webgpu(k.ctx, k.sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  ASSERT_INT_EQ(count_special_named(lin, n_lin, "gidx0"), 1);
+  ASSERT_INT_EQ(count_special_named(lin, n_lin, "gidx1"), 1);
+  ASSERT_INT_EQ((int)special_bound_hi_named(lin, n_lin, "gidx0"), 32768);
+  ASSERT_INT_EQ((int)special_bound_hi_named(lin, n_lin, "gidx1"), 4);
+
+  char *wgsl = poly_render_wgsl(lin, n_lin, "vecadd_split_gpu");
+  ASSERT_NOT_NULL(wgsl);
+  ASSERT_NOT_NULL(strstr(wgsl, "i32(gindex.x)"));
+  ASSERT_NOT_NULL(strstr(wgsl, "i32(gindex.y)"));
+
+  free(wgsl);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
 TEST(codegen, add_gpudims_same_axis_ranges_share_special) {
   /* tinygrad gpudims groups ranges by axis tuple, not UOp identity. Distinct
    * RANGE nodes for the same axis, including weakint/int variants, must map to
@@ -848,8 +885,10 @@ TEST(codegen, add_gpudims_same_axis_ranges_share_special) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b16_w = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(16));
   PolyUOp *b16_i = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
-  PolyUOp *rw = poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, b16_w, poly_arg_range(0, POLY_AXIS_GLOBAL));
-  PolyUOp *ri = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, b16_i, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *rw =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, b16_w, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *ri =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, b16_i, poly_arg_range(0, POLY_AXIS_GLOBAL));
   PolyUOp *srcs[2] = {rw, ri};
   PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, 2, poly_arg_str("same_axis"));
   PolyUOp *rewritten = poly_add_gpudims(ctx, sink);
@@ -889,6 +928,32 @@ TEST(codegen, add_gpudims_rewrites_large_source_nodes) {
   PASS();
 }
 
+TEST(codegen, add_gpudims_webgpu_splits_oversized_global_dim) {
+  /* tinygrad gpudims.py legalizes backend launch dimensions before rendering.
+   * WebGPU caps workgroup_id.x at 65535, so a logical 1D launch of 73728
+   * workgroups must split into two hardware SPECIAL dimensions while the
+   * replacement expression reconstructs the original logical index. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(73728));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_GLOBAL));
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, range, poly_arg_str("split_global"));
+
+  PolyRendererCaps caps = {.global_max = {65535, 65535, 65535}, .local_max = {256, 256, 64}};
+  PolyUOp *rewritten = poly_add_gpudims_ex(ctx, sink, caps);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_INT_EQ(count_special_named(topo, n_topo, "gidx0"), 1);
+  ASSERT_INT_EQ(count_special_named(topo, n_topo, "gidx1"), 1);
+  ASSERT_INT_EQ((int)special_bound_hi_named(topo, n_topo, "gidx0"), 36864);
+  ASSERT_INT_EQ((int)special_bound_hi_named(topo, n_topo, "gidx1"), 2);
+  ASSERT_INT_EQ(count_lin_ops(topo, n_topo, POLY_OP_RANGE), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, add_gpudims_group_reduce_after_source_becomes_lidx) {
   /* tinygrad gpudims.py substitutes GROUP_REDUCE axes as local workitem
    * indices. It only skips AxisType.REDUCE. Polygrad must not infer "serial
@@ -920,8 +985,7 @@ TEST(codegen, add_gpudims_group_reduce_after_source_becomes_lidx) {
   ASSERT_INT_EQ(count_special_named(topo, n_topo, "lidx0"), 1);
   for (int i = 0; i < n_topo; i++) {
     ASSERT_FALSE(
-        topo[i]->op == POLY_OP_RANGE &&
-        poly_arg_is_range(topo[i]->arg) &&
+        topo[i]->op == POLY_OP_RANGE && poly_arg_is_range(topo[i]->arg) &&
         poly_range_axis_type(topo[i]->arg) == POLY_AXIS_GROUP_REDUCE
     );
   }
@@ -1065,9 +1129,8 @@ TEST(codegen, webgpu_vector_store_target_survives_add_loads_until_devectorize) {
       poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.0)),
       poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(4.0)),
   };
-  PolyUOp *value = poly_uop(
-      ctx, POLY_OP_VECTORIZE, poly_dtype_vec(POLY_FLOAT32, 4), vals, 4, poly_arg_none()
-  );
+  PolyUOp *value =
+      poly_uop(ctx, POLY_OP_VECTORIZE, poly_dtype_vec(POLY_FLOAT32, 4), vals, 4, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, target, value, poly_arg_none());
 
   PolyUOp *after_add_loads = poly_graph_rewrite(ctx, store, poly_pm_add_loads_pass());
