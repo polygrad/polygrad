@@ -13,6 +13,9 @@ UBSAN_OPTIONS ?= print_stacktrace=1:halt_on_error=1
 SAN_RUN = ASAN_OPTIONS=$(ASAN_OPTIONS) UBSAN_OPTIONS=$(UBSAN_OPTIONS)
 EMCC ?= emcc
 EMSDK_PYTHON ?= /usr/bin/python3
+PYTHON ?= python
+NPM ?= npm
+TWINE ?= twine
 # Polygrad's scheduler/codegen path uses deeper C call chains than
 # Emscripten's default stack reliably supports; keep WASM realization away
 # from stack OOB traps on current SDKs.
@@ -70,7 +73,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline wasm wasm-pkg clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -308,6 +311,33 @@ P2P_SRC = src/p2p.c
 bench-train-py:
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py python bench/train_mlp_python.py
 
+# ── Package builds / publishing ─────────────────────────────────────
+
+build-py: build-py-sdist
+
+build-py-sdist:
+	cd py && rm -rf csrc dist build *.egg-info && \
+		$(PYTHON) scripts/sync-csrc.py && \
+		$(PYTHON) -m build --sdist
+
+build-py-wheel:
+	cd py && rm -rf csrc dist build *.egg-info && \
+		$(PYTHON) scripts/sync-csrc.py && \
+		$(PYTHON) -m build --wheel
+
+build-python: build-py
+
+publish-py: build-py-sdist
+	cd py && $(TWINE) upload dist/*.tar.gz
+
+publish-python: publish-py
+
+build-js: wasm-pkg
+	cd js && $(NODE) scripts/sync-csrc.js && $(NPM) run build:browser
+
+publish-js: build-js
+	cd js && $(NPM) publish
+
 # ── P2P distributed training ───────────────────────────────────────
 
 test-p2p: build/test_p2p
@@ -372,11 +402,6 @@ build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 		-o $@ $^ -lm -ldl -fsanitize=memory
 
 # ── Full verification ──────────────────────────────────────────────────
-
-publish-python:
-	cd py && rm -rf csrc dist build *.egg-info && \
-		python scripts/sync-csrc.py && \
-		python -m build --sdist && twine upload dist/*.tar.gz
 
 verify: test test-parity format-check analyze
 	@echo "All verification checks passed."

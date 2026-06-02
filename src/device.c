@@ -259,6 +259,10 @@ int poly_buffer_allocate(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
     fprintf(stderr, "poly_buffer_allocate: no backend for device %d\n", device);
     return -1;
   }
+  if (poly_backend_ensure_open(device) != 0) {
+    fprintf(stderr, "poly_buffer_allocate: backend '%s' failed to open\n", be->name);
+    return -1;
+  }
   const PolyAllocator *alloc = be->get_allocator();
   if (!alloc) return -1;
 

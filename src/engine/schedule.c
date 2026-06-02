@@ -1781,6 +1781,9 @@ static int copy_execute_fn(void *self, void **args, int n_args) {
 
   const PolyBackendDesc *dst_backend = poly_backend_get(ch->dst_device);
   const PolyBackendDesc *src_backend = poly_backend_get(ch->src_device);
+  if ((dst_backend && poly_backend_ensure_open(ch->dst_device) != 0) ||
+      (src_backend && poly_backend_ensure_open(ch->src_device) != 0))
+    return -1;
   const PolyAllocator *dst_alloc = dst_backend ? dst_backend->get_allocator() : NULL;
   const PolyAllocator *src_alloc = src_backend ? src_backend->get_allocator() : NULL;
   if (!dst_alloc || !src_alloc) return -1;
@@ -1893,6 +1896,7 @@ static int poly_lower_compute_item_cached(
 ) {
   const PolyBackendDesc *backend = poly_backend_get(device);
   if (!backend || !backend->lower_item) return -1;
+  if (poly_backend_ensure_open(device) != 0) return -1;
 
   if (!poly_validate_kernel_graph(ctx, item->root)) return -2;
 
@@ -2494,57 +2498,69 @@ static void x64_free_runner(PolyRunner *runner) {
 
 #endif /* POLY_HAS_X64 */
 
+static int backend_noop_ensure_open(void) {
+  return 0;
+}
+
+#ifdef POLY_HAS_CUDA
+static int cuda_ensure_open(void) {
+  return poly_cuda_init();
+}
+#endif
+
 /* ══════════════════════════════════════════════════════════════════════ */
 /*  Backend registry                                                     */
 /* ══════════════════════════════════════════════════════════════════════ */
 
 static const PolyBackendDesc BACKENDS[] = {
-    [POLY_DEVICE_AUTO] = {NULL, POLY_DEVICE_AUTO, false, NULL, NULL, NULL, NULL},
-    [POLY_DEVICE_HOST] = {"host", POLY_DEVICE_HOST, false, NULL, NULL, NULL, host_get_allocator},
+    [POLY_DEVICE_AUTO] = {NULL, POLY_DEVICE_AUTO, false, NULL, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_HOST] =
+        {"host", POLY_DEVICE_HOST, false, NULL, NULL, NULL, backend_noop_ensure_open,
+         host_get_allocator},
 #ifndef __EMSCRIPTEN__
     [POLY_DEVICE_CPU] =
         {"cpu", POLY_DEVICE_CPU, false, cpu_lower_item, cpu_execute, cpu_free_runner,
-         cpu_get_allocator},
+         backend_noop_ensure_open, cpu_get_allocator},
 #else
-    [POLY_DEVICE_CPU] = {NULL, POLY_DEVICE_CPU, false, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_CPU] = {NULL, POLY_DEVICE_CPU, false, NULL, NULL, NULL, NULL, NULL},
 #endif
     [POLY_DEVICE_INTERP] =
         {"interp", POLY_DEVICE_INTERP, false, interp_lower_item, interp_execute, interp_free_runner,
-         interp_get_allocator},
+         backend_noop_ensure_open, interp_get_allocator},
 #ifdef POLY_HAS_CUDA
     [POLY_DEVICE_CUDA] =
         {"cuda", POLY_DEVICE_CUDA, false, cuda_lower_item, cuda_execute, cuda_free_runner,
-         cuda_get_allocator},
+         cuda_ensure_open, cuda_get_allocator},
 #else
-    [POLY_DEVICE_CUDA] = {NULL, POLY_DEVICE_CUDA, false, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_CUDA] = {NULL, POLY_DEVICE_CUDA, false, NULL, NULL, NULL, NULL, NULL},
 #endif
 #ifdef __EMSCRIPTEN__
     [POLY_DEVICE_WASM] =
         {"wasm", POLY_DEVICE_WASM, true, poly_wasm_lower_item, poly_wasm_execute,
-         poly_wasm_free_runner, poly_wasm_get_allocator},
+         poly_wasm_free_runner, backend_noop_ensure_open, poly_wasm_get_allocator},
 #else
-    [POLY_DEVICE_WASM] = {NULL, POLY_DEVICE_WASM, false, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_WASM] = {NULL, POLY_DEVICE_WASM, false, NULL, NULL, NULL, NULL, NULL},
 #endif
 #ifdef __EMSCRIPTEN__
     [POLY_DEVICE_WEBGPU] =
         {"webgpu", POLY_DEVICE_WEBGPU, true, poly_webgpu_lower_item, poly_webgpu_execute,
-         poly_webgpu_free_runner, poly_webgpu_get_allocator},
+         poly_webgpu_free_runner, backend_noop_ensure_open, poly_webgpu_get_allocator},
 #else
-    [POLY_DEVICE_WEBGPU] = {NULL, POLY_DEVICE_WEBGPU, false, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_WEBGPU] = {NULL, POLY_DEVICE_WEBGPU, false, NULL, NULL, NULL, NULL, NULL},
 #endif
 #ifdef POLY_HAS_X64
     [POLY_DEVICE_X64_JIT] =
         {"x64_jit", POLY_DEVICE_X64_JIT, false, x64_lower_item, x64_execute, x64_free_runner,
-         cpu_get_allocator},
+         backend_noop_ensure_open, cpu_get_allocator},
 #else
-    [POLY_DEVICE_X64_JIT] = {NULL, POLY_DEVICE_X64_JIT, false, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_X64_JIT] = {NULL, POLY_DEVICE_X64_JIT, false, NULL, NULL, NULL, NULL, NULL},
 #endif
 #ifdef POLY_HAS_HIP
     [POLY_DEVICE_HIP] =
         {"hip", POLY_DEVICE_HIP, false, hip_lower_item, hip_execute, hip_free_runner,
-         hip_get_allocator},
+         poly_hip_init, hip_get_allocator},
 #else
-    [POLY_DEVICE_HIP] = {NULL, POLY_DEVICE_HIP, false, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_HIP] = {NULL, POLY_DEVICE_HIP, false, NULL, NULL, NULL, NULL, NULL},
 #endif
 };
 
@@ -2554,6 +2570,12 @@ const PolyBackendDesc *poly_backend_get(PolyDevice device) {
   if (device < 0 || (size_t)device >= N_BACKENDS) return NULL;
   if (!BACKENDS[device].name) return NULL;
   return &BACKENDS[device];
+}
+
+int poly_backend_ensure_open(PolyDevice device) {
+  const PolyBackendDesc *be = poly_backend_get(device);
+  if (!be) return -1;
+  return be->ensure_open ? be->ensure_open() : 0;
 }
 
 bool poly_device_is_host_addressable(PolyDevice device) {
@@ -2579,6 +2601,10 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   const PolyBackendDesc *backend = poly_backend_get(device);
   if (!backend || !poly_device_can_execute(device) || !backend->lower_item) {
     fprintf(stderr, "polygrad: compile_schedule: unsupported device %d\n", device);
+    return NULL;
+  }
+  if (poly_backend_ensure_open(device) != 0) {
+    fprintf(stderr, "polygrad: compile_schedule: backend '%s' failed to open\n", backend->name);
     return NULL;
   }
 
@@ -2856,6 +2882,10 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
     fprintf(stderr, "polygrad: run_schedule: unsupported device %d\n", device);
     return -1;
   }
+  if (poly_backend_ensure_open(device) != 0) {
+    fprintf(stderr, "polygrad: run_schedule: backend '%s' failed to open\n", backend->name);
+    return -1;
+  }
 
   if (sched->run_device != POLY_DEVICE_AUTO && sched->run_device != device)
     poly_schedule_runtime_destroy(sched);
@@ -2993,6 +3023,7 @@ int poly_exec_item_lower(PolyCtx *ctx, PolySchedule *schedule, int item_index, P
 
   const PolyBackendDesc *backend = poly_backend_get(device);
   if (!backend || !backend->lower_item) return -1;
+  if (poly_backend_ensure_open(device) != 0) return -1;
   bool lowered_as_copy = false;
 
   if (item->kind == POLY_EXEC_COPY) {
@@ -3064,6 +3095,7 @@ static int poly_exec_item_run_prepared(
   PolyExecItem *item = &sched->items[item_index];
   PolyRunner *runner = &item->prg;
   const PolyBackendDesc *backend = poly_backend_get(item->lowered_device);
+  if (backend && poly_backend_ensure_open(item->lowered_device) != 0) return -1;
   if (!runner->handle) {
     fprintf(stderr, "polygrad: run_schedule: runner %d has no handle\n", item_index);
     return -1;
@@ -3259,6 +3291,7 @@ int poly_run_compiled_schedule(
 
   const PolyBackendDesc *backend = poly_backend_get(plan->device);
   if (!backend) return -1;
+  if (poly_backend_ensure_open(plan->device) != 0) return -1;
 
   int ret = 0;
 

@@ -221,6 +221,43 @@ static void readback_cuda_binding(PolyTestBufferView *b, void *host_dst, size_t 
 
 /* E2E tests (require GPU) */
 
+TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 3);
+  float input[3] = {1.0f, 2.0f, 3.0f};
+  poly_buffer_set(ctx, a, input, sizeof(input), POLY_DEVICE_CPU);
+
+  PolyTensor *at = poly_tensor_create(ctx, a, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(at);
+  PolyTensor *cuda_a = poly_tensor_to_device(ctx, at, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(cuda_a);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(cuda_a), poly_const_float(ctx, 1.0f));
+  ASSERT_NOT_NULL(add);
+  PolyTensor *bt = poly_tensor_create(ctx, add, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(bt);
+
+  PolyTensor *out = NULL;
+  int rc = poly_realize_tensors(ctx, &bt, 1, &out);
+  if (rc != 0) {
+    bool cuda_available_after_failure = poly_cuda_available();
+    poly_ctx_destroy(ctx);
+    if (!cuda_available_after_failure) PASS();
+    FAIL("CUDA tensor realize failed even though CUDA is available");
+  }
+  ASSERT_PTR_EQ(out, bt);
+
+  float got[3] = {0};
+  const PolyUOp *buf = poly_uop_get_buffer_identity(poly_tensor_uop(bt));
+  ASSERT_NOT_NULL(buf);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)buf, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 2.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 3.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[2], 4.0f, 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(cuda, e2e_vecadd) {
   SKIP_IF_NO_CUDA();
 

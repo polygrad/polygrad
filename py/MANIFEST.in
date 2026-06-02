@@ -1,2 +1,9 @@
+include LICENSE
+include CHANGELOG.md
 recursive-include csrc *.c *.h
 include polygrad/_native.c
+prune tests
+prune build
+prune dist
+prune .pytest_cache
+global-exclude *.py[cod]

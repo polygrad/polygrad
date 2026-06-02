@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+### Changed
+- Aligns the npm package with the current shared C core generation and Python frontend release.
+- Ships the unified realization/runtime path, Instance/model/optimizer APIs, and updated browser/WASM artifacts.
+
 ## 0.2.0
 
 Merged `polygrad` (WASM) and `polygrad-node` (koffi FFI) into a single package.

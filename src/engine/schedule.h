@@ -162,6 +162,7 @@ typedef struct {
   int (*lower_item)(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn_name, PolyRunner *runner_out);
   int (*execute)(PolyRunner *runner, void **args, int n_args);
   void (*free_runner)(PolyRunner *runner);
+  int (*ensure_open)(void);
   const PolyAllocator *(*get_allocator)(void);
 } PolyBackendDesc;
 
@@ -235,6 +236,7 @@ extern const PolyAllocator POLY_HIP_ALLOCATOR;
 #endif
 
 const PolyBackendDesc *poly_backend_get(PolyDevice device);
+int poly_backend_ensure_open(PolyDevice device);
 bool poly_device_is_host_addressable(PolyDevice device);
 
 #ifdef __cplusplus

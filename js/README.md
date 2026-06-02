@@ -16,7 +16,7 @@ On Node.js, the native addon builds automatically during install. If the build f
 const polygrad = require('polygrad')
 
 ;(async () => {
-  const pg = await polygrad.create()  // auto target: native > wasm
+  const pg = await polygrad.create()  // auto core: native > wasm
   const { Tensor } = pg
 
   const x = new Tensor([1, 2, 3])
@@ -33,25 +33,24 @@ const polygrad = require('polygrad')
 })().catch(console.error)
 ```
 
-## Target and device selection
+## Core and device selection
 
 ```js
-// Force a specific target
-const pg = await polygrad.create({ target: 'native' })
-const pg = await polygrad.create({ target: 'wasm' })
+// Force a specific core
+const pg = await polygrad.create({ core: "native" })
+const pg = await polygrad.create({ core: "wasm" })
 
 // Environment variables
-// POLY_TARGET=wasm node app.js
-// POLY_DEVICE=cpu node app.js
+// POLY_CORE=wasm node app.js
+// POLY_DEVICE=wasm node app.js
 ```
 
-`backend` is still accepted as a compatibility alias for `target`, but new code should use `target`.
-
-| Environment | `target: 'auto'` | `target: 'native'` | `target: 'wasm'` | `device` |
+| Environment | `core: "auto"` | `core: "native"` | `core: "wasm"` | default device |
 |---|---|---|---|---|
-| Node.js with addon | Native | Native | WASM | `cpu` today |
-| Node.js without addon | WASM | Error | WASM | `cpu` today |
-| Browser | WASM | Error | WASM | `cpu` today |
+| Node.js with addon | Native | Native | WASM | `cpu` for native, `wasm` for WASM |
+| Node.js without addon | WASM | Error | WASM | `wasm` |
+| Browser | WASM | Error | WASM | `wasm` |
+
 
 ## Browser bundles
 
@@ -84,18 +83,16 @@ Example:
 
 ### `polygrad.create(opts?)` -> `Promise<PolyRuntime>`
 
-Creates a runtime with the selected target. Options:
+Creates a runtime with the selected core. Options:
 
-- `target`: `'auto'` (default), `'native'`, or `'wasm'`
-- `device`: `'auto'` (default) or `'cpu'`
-- `backend`: compatibility alias for `target`
+- `core`: `'auto'` (default), `'native'`, or `'wasm'`
+- `device`: `'auto'` (default), `'cpu'`, `'wasm'`, `'interp'`, `'webgpu'` for the WASM core; native currently reports `'cpu'`
 
 ### `PolyRuntime`
 
 - `pg.Tensor` -- runtime-bound Tensor class
-- `pg.target` -- `'native'` or `'wasm'`
-- `pg.device` -- `'cpu'` today
-- `pg.backend` -- compatibility alias for `pg.target`
+- `pg.core` -- `'native'` or `'wasm'`
+- `pg.device` -- resolved device, e.g. `'cpu'` for native or `'wasm'` for the WASM core
 - `pg.dispose()` -- release resources
 
 ### `Tensor`
