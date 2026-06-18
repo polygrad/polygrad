@@ -132,6 +132,7 @@ This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c
 | `poly_rand` uses top-24-bit extraction (SHR 8, CAST f32, MUL 2^-24) producing 2^24 distinct uniform [0,1) values | Mantissa-bit randomization (set exponent=1, bitcast, subtract 1.0) | Simpler codegen path; both produce uniform [0,1) but float bit patterns differ for same THREEFRY output |
 | CPU C backend renders bf16 storage as `unsigned short` after non-native bf16 rewrites | tinygrad_latest CPU `ClangRenderer` still emits `__bf16` and fails on CPU targets without native bf16 support; OpenCL/HIP use raw ushort/typedef storage on non-native paths | Deliberate portability improvement for the C FFI backend while keeping tinygrad's bf16 cast/math rewrite semantics |
 | Heuristic/BEAM/TC optimizer skips kernels whose scheduler metadata would exceed fixed C scratch caps | Scheduler `rngs`/`bufs` are dynamic Python lists and remain optimizable | Correctness-preserving performance fallback: Polygrad must not optimize from a truncated scheduler view; long-term fix is dynamic optimizer scheduler storage |
+| Tensor UOp rank is capped at `POLY_MAX_DIMS` (16); instance/IR binding metadata remains capped at 8 dimensions | tinygrad shape tuples are Python objects and can exceed these fixed ranks | C ABI and stack-scratch safety boundary. Over-rank graph constructors fail closed instead of truncating or flowing into fixed arrays |
 
 ## RNG contract
 

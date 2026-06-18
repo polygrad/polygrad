@@ -4,6 +4,8 @@
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
+#include "../src/device.h"
+#include "../src/tensor.h"
 
 /* Helper: create int tuple arg */
 static PolyArg int_tuple(int64_t *vals, int n) {
@@ -146,6 +148,85 @@ TEST(shape, noshape) {
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
   PolyShape s = poly_uop_shape(ctx, range);
   ASSERT_INT_EQ(s.ndim, -1);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, rank_cap_rejects_overrank_movement_constructors) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 1);
+  ASSERT_NOT_NULL(buf);
+
+  int64_t dims[POLY_MAX_DIMS + 1];
+  int64_t pairs[POLY_MAX_DIMS + 1][2];
+  for (int i = 0; i < POLY_MAX_DIMS + 1; i++) {
+    dims[i] = 1;
+    pairs[i][0] = 0;
+    pairs[i][1] = 1;
+  }
+
+  ASSERT_TRUE(poly_reshape(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_expand(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_permute(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_shrink(ctx, buf, pairs, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_pad(ctx, buf, pairs, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_flip(ctx, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_TRUE(poly_reduce_axis(ctx, POLY_OP_ADD, buf, dims, POLY_MAX_DIMS + 1) == NULL);
+  ASSERT_PTR_EQ(poly_reduce_axis(ctx, POLY_OP_ADD, buf, NULL, 0), buf);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, rank_cap_rejects_low_level_overrank_uops) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 1);
+  ASSERT_NOT_NULL(buf);
+
+  int64_t dims[POLY_MAX_DIMS + 1];
+  int64_t pairs[POLY_MAX_DIMS + 1][2];
+  for (int i = 0; i < POLY_MAX_DIMS + 1; i++) {
+    dims[i] = 1;
+    pairs[i][0] = 0;
+    pairs[i][1] = 1;
+  }
+  PolyArg tuple = int_tuple(dims, POLY_MAX_DIMS + 1);
+  PolyArg pair_tuple;
+  pair_tuple.kind = POLY_ARG_PAIR_TUPLE;
+  pair_tuple.pair_tuple.pairs = pairs;
+  pair_tuple.pair_tuple.n = POLY_MAX_DIMS + 1;
+  PolyArg reduce = reduce_ax(POLY_OP_ADD, dims, POLY_MAX_DIMS + 1);
+
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf, tuple) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_EXPAND, POLY_FLOAT32, buf, tuple) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_PERMUTE, POLY_FLOAT32, buf, tuple) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_FLIP, POLY_FLOAT32, buf, tuple) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_SHRINK, POLY_FLOAT32, buf, pair_tuple) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_PAD, POLY_FLOAT32, buf, pair_tuple) == NULL);
+  ASSERT_TRUE(poly_uop1(ctx, POLY_OP_REDUCE_AXIS, POLY_FLOAT32, buf, reduce) == NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, rank_cap_rejects_ffi_host_and_dynamic_buffers) {
+  PolyCtx *ctx = poly_ctx_new();
+  float data[1] = {0.0f};
+  int64_t dims[POLY_MAX_DIMS + 1];
+  for (int i = 0; i < POLY_MAX_DIMS + 1; i++)
+    dims[i] = 1;
+
+  ASSERT_TRUE(
+      poly_buffer_from_host(
+          ctx, data, sizeof(data), poly_dtype_id_by_name("float32"), dims, POLY_MAX_DIMS + 1
+      ) == NULL
+  );
+
+  PolyUOp *n = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("N", 1, 4));
+  ASSERT_NOT_NULL(n);
+  ASSERT_TRUE(poly_buffer_var(ctx, POLY_FLOAT32, n, dims, POLY_MAX_DIMS) == NULL);
+  ASSERT_TRUE(poly_buffer_var(ctx, POLY_FLOAT32, n, NULL, 1) == NULL);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

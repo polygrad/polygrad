@@ -22,6 +22,10 @@
 
 static int poly_buffer_id = 0;
 
+static bool rank_tuple_valid(const void *data, int n) {
+  return n >= 0 && n <= POLY_MAX_DIMS && (n == 0 || data != NULL);
+}
+
 PolyUOp *poly_buffer_on_device(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size, PolyDevice device) {
   int id = poly_buffer_id++;
   PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(id));
@@ -37,6 +41,7 @@ PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size) {
 }
 
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
   PolyArg arg;
   arg.kind = POLY_ARG_INT_TUPLE;
   arg.int_tuple.vals = dims;
@@ -45,6 +50,7 @@ PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
 }
 
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
   PolyArg arg;
   arg.kind = POLY_ARG_INT_TUPLE;
   arg.int_tuple.vals = dims;
@@ -62,7 +68,9 @@ PolyUOp *poly_reduce_axis(
   /* tinygrad UOp._rop sorts axes and drops singleton reductions up front.
    * Matching that here keeps no-op singleton reductions out of the graph
    * instead of relying on later schedule/rangeify cleanup to discover them. */
-  if (!ctx || !src || n_axes <= 0) return src;
+  if (!ctx || !src) return NULL;
+  if (n_axes == 0) return src;
+  if (!rank_tuple_valid(axes, n_axes)) return NULL;
 
   /* Use the ctx-owned cached shape here. poly_reduce_axis only inspects dims;
    * requesting a heap copy would make this hot constructor responsible for
@@ -73,7 +81,7 @@ PolyUOp *poly_reduce_axis(
   for (int i = 0; i < n_axes; i++) {
     int64_t ax = axes[i];
     if (shape.ndim > 0 && ax >= 0 && ax < shape.ndim && shape.dims[ax] == 1) continue;
-    if (filtered_n < POLY_MAX_DIMS) filtered_buf[filtered_n++] = ax;
+    filtered_buf[filtered_n++] = ax;
   }
   if (filtered_n == 0) return src;
 
@@ -103,6 +111,7 @@ PolyUOp *poly_reduce_axis(
 }
 
 PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(perm, ndim)) return NULL;
   PolyArg arg;
   arg.kind = POLY_ARG_INT_TUPLE;
   arg.int_tuple.vals = perm;
@@ -111,6 +120,7 @@ PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
 }
 
 PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(pairs, ndim)) return NULL;
   PolyArg arg;
   arg.kind = POLY_ARG_PAIR_TUPLE;
   arg.pair_tuple.pairs = pairs;
@@ -119,6 +129,7 @@ PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) 
 }
 
 PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
+  if (!ctx || !src || !rank_tuple_valid(axes, n_axes)) return NULL;
   PolyArg arg;
   arg.kind = POLY_ARG_INT_TUPLE;
   arg.int_tuple.vals = axes;
@@ -127,6 +138,7 @@ PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes) {
 }
 
 PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(pairs, ndim)) return NULL;
   PolyArg arg;
   arg.kind = POLY_ARG_PAIR_TUPLE;
   arg.pair_tuple.pairs = pairs;
@@ -229,6 +241,7 @@ static ShapeCacheEntry *make_entry_1d(PolyCtx *ctx, int64_t dim0) {
 }
 
 static ShapeCacheEntry *make_entry_dims(PolyCtx *ctx, const int64_t *dims, int ndim) {
+  if (ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims)) return make_entry_none(ctx);
   ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
   e->ndim = (int8_t)ndim;
   if (ndim > 0) {
@@ -323,6 +336,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
       /* Dynamic buffer: BUFFER(src=(UNIQUE, DEFINE_VAR, CONST...)) → (max_val, K, ...) */
       if (u->n_src >= 2 && u->src[1]->op == POLY_OP_DEFINE_VAR) {
         int ndim = u->n_src - 1;
+        if (ndim <= 0 || ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
         int64_t dims[POLY_MAX_DIMS];
         dims[0] = u->src[1]->arg.define_var.max_val;
         for (int i = 1; i < ndim && i < POLY_MAX_DIMS; i++)
@@ -378,7 +392,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   /* BUFFERIZE: shape from range bounds */
   if (op == POLY_OP_BUFFERIZE) {
     int n_ranges = u->n_src - 1;
-    if (n_ranges <= 0) {
+    if (n_ranges <= 0 || n_ranges > POLY_MAX_DIMS) {
       return make_entry_none(ctx);
     }
     int64_t dims[POLY_MAX_DIMS];
@@ -396,6 +410,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
 
   /* RESHAPE, EXPAND: shape from int_tuple arg */
   if ((op == POLY_OP_RESHAPE || op == POLY_OP_EXPAND) && u->arg.kind == POLY_ARG_INT_TUPLE) {
+    if (!rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n)) return make_entry_none(ctx);
     return make_entry_dims(ctx, u->arg.int_tuple.vals, u->arg.int_tuple.n);
   }
 
@@ -406,9 +421,13 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
       return make_entry_none(ctx);
     }
     int n = u->arg.int_tuple.n;
+    if (!rank_tuple_valid(u->arg.int_tuple.vals, n) || n > in_ndim) return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
-    for (int i = 0; i < n && i < in_ndim; i++)
-      dims[i] = SRC_DIMS(0)[u->arg.int_tuple.vals[i]];
+    for (int i = 0; i < n; i++) {
+      int64_t idx = u->arg.int_tuple.vals[i];
+      if (idx < 0 || idx >= in_ndim) return make_entry_none(ctx);
+      dims[i] = SRC_DIMS(0)[idx];
+    }
     return make_entry_dims(ctx, dims, n);
   }
 
@@ -418,8 +437,11 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     if (in_ndim <= 0) {
       return make_entry_none(ctx);
     }
+    if (!rank_tuple_valid(u->arg.pair_tuple.pairs, u->arg.pair_tuple.n) ||
+        u->arg.pair_tuple.n != in_ndim)
+      return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
-    for (int i = 0; i < in_ndim && i < u->arg.pair_tuple.n; i++)
+    for (int i = 0; i < in_ndim; i++)
       dims[i] = SRC_DIMS(0)[i] + u->arg.pair_tuple.pairs[i][0] + u->arg.pair_tuple.pairs[i][1];
     return make_entry_dims(ctx, dims, in_ndim);
   }
@@ -430,14 +452,20 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     if (in_ndim <= 0) {
       return make_entry_none(ctx);
     }
+    if (!rank_tuple_valid(u->arg.pair_tuple.pairs, u->arg.pair_tuple.n) ||
+        u->arg.pair_tuple.n != in_ndim)
+      return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
-    for (int i = 0; i < in_ndim && i < u->arg.pair_tuple.n; i++)
+    for (int i = 0; i < in_ndim; i++)
       dims[i] = u->arg.pair_tuple.pairs[i][1] - u->arg.pair_tuple.pairs[i][0];
     return make_entry_dims(ctx, dims, in_ndim);
   }
 
   /* FLIP: same shape as src[0] */
   if (op == POLY_OP_FLIP) {
+    if (u->arg.kind == POLY_ARG_INT_TUPLE &&
+        !rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n))
+      return make_entry_none(ctx);
     if (u->n_src >= 1 && SRC_NDIM(0) >= 0) return make_entry_dims(ctx, SRC_DIMS(0), SRC_NDIM(0));
     return make_entry_none(ctx);
   }
@@ -448,6 +476,8 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     if (in_ndim <= 0) {
       return make_entry_none(ctx);
     }
+    if (!rank_tuple_valid(u->arg.reduce_axis.axes, u->arg.reduce_axis.n))
+      return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
     memcpy(dims, SRC_DIMS(0), in_ndim * sizeof(int64_t));
     for (int i = 0; i < u->arg.reduce_axis.n; i++) {
@@ -459,8 +489,10 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
 
   /* ASSIGN: use stored logical shape (arg) if present */
   if (op == POLY_OP_ASSIGN) {
-    if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0)
+    if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n > 0) {
+      if (!rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n)) return make_entry_none(ctx);
       return make_entry_dims(ctx, u->arg.int_tuple.vals, u->arg.int_tuple.n);
+    }
     if (u->n_src >= 1 && SRC_NDIM(0) >= 0) return make_entry_dims(ctx, SRC_DIMS(0), SRC_NDIM(0));
     return make_entry_none(ctx);
   }
@@ -512,6 +544,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     for (int i = 0; i < u->n_src; i++) {
       int8_t si_ndim = SRC_NDIM(i);
       if (si_ndim < 0) continue;
+      if (si_ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
       const int64_t *si_dims = SRC_DIMS(i);
       if (out_ndim < 0) {
         out_ndim = si_ndim;
@@ -519,6 +552,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
         continue;
       }
       int ndim = (out_ndim > si_ndim) ? out_ndim : si_ndim;
+      if (ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
       int64_t merged[POLY_MAX_DIMS];
       for (int ax = 0; ax < ndim; ax++) {
         int ai = out_ndim - 1 - ax;

@@ -193,6 +193,31 @@ static bool cse_eq(const void *a, const void *b) {
 
 /* UOp creation with CSE */
 
+static bool rank_tuple_valid(const void *data, int n) {
+  return n >= 0 && n <= POLY_MAX_DIMS && (n == 0 || data != NULL);
+}
+
+static bool uop_rank_arg_valid(PolyOps op, PolyArg arg) {
+  switch (op) {
+  case POLY_OP_RESHAPE:
+  case POLY_OP_EXPAND:
+  case POLY_OP_PERMUTE:
+  case POLY_OP_FLIP:
+    return arg.kind == POLY_ARG_INT_TUPLE && rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n);
+  case POLY_OP_SHRINK:
+  case POLY_OP_PAD:
+    return arg.kind == POLY_ARG_PAIR_TUPLE &&
+           rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
+  case POLY_OP_REDUCE_AXIS:
+    return arg.kind == POLY_ARG_REDUCE_AXIS &&
+           rank_tuple_valid(arg.reduce_axis.axes, arg.reduce_axis.n);
+  case POLY_OP_ASSIGN:
+    return arg.kind != POLY_ARG_INT_TUPLE || rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n);
+  default:
+    return true;
+  }
+}
+
 static PolyUOp *poly_uop_internal(
     PolyCtx *ctx,
     PolyOps op,
@@ -202,12 +227,15 @@ static PolyUOp *poly_uop_internal(
     PolyArg arg,
     int32_t tag
 ) {
+  if (!ctx || n_src < 0 || n_src > UINT16_MAX || (n_src > 0 && !src)) return NULL;
   /* Canonicalize legacy RANGE(axis_id as INT) at the UOp boundary. tinygrad
    * stores RANGE args as (axis_id, AxisType, ...); keeping the legacy form out
    * of CSE lets PolyArg equality stay exact by kind. */
   if (op == POLY_OP_RANGE && arg.kind == POLY_ARG_INT) {
     arg = poly_arg_range(arg.i, POLY_AXIS_LOOP);
   }
+
+  if (!uop_rank_arg_valid(op, arg)) return NULL;
 
   /* Build a CSE key on the stack */
   CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag};

@@ -99,12 +99,17 @@ PolyUOp *poly_buffer_from_host(
     int ndim
 ) {
   if (!ctx) return NULL;
+  if (ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims)) return NULL;
   PolyDType scalar;
   if (!poly_dtype_by_id(dtype_id, &scalar)) return NULL;
   /* Infer numel from shape when provided; fall back to nbytes / itemsize. */
   int64_t numel = 1;
   if (dims && ndim > 0) {
-    for (int i = 0; i < ndim; i++) numel *= dims[i];
+    for (int i = 0; i < ndim; i++) {
+      if (dims[i] < 0) return NULL;
+      if (dims[i] != 0 && numel > INT64_MAX / dims[i]) return NULL;
+      numel *= dims[i];
+    }
   } else {
     int isize = poly_dtype_itemsize(scalar);
     numel = (isize > 0) ? (int64_t)(nbytes / (size_t)isize) : 0;

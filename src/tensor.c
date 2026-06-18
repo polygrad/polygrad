@@ -41,11 +41,12 @@ PolyUOp *poly_buffer_var(
     const int64_t *inner_dims,
     int n_inner
 ) {
-  assert(batch_var->op == POLY_OP_DEFINE_VAR || batch_var->op == POLY_OP_BIND);
-  assert(n_inner >= 0 && n_inner < POLY_MAX_DIMS);
+  if (!ctx || !batch_var || n_inner < 0 || n_inner >= POLY_MAX_DIMS || (n_inner > 0 && !inner_dims))
+    return NULL;
+  if (batch_var->op != POLY_OP_DEFINE_VAR && batch_var->op != POLY_OP_BIND) return NULL;
   PolyUOp *bound =
       batch_var->op == POLY_OP_BIND && batch_var->n_src >= 1 ? batch_var->src[0] : batch_var;
-  assert(bound->op == POLY_OP_DEFINE_VAR);
+  if (!bound || bound->op != POLY_OP_DEFINE_VAR) return NULL;
   int64_t alloc = bound->arg.define_var.max_val;
   /* src[0] = UNIQUE (prevent CSE), src[1] = dynamic bound,
    * src[2..] = fixed inner dimension CONSTs. */
@@ -54,6 +55,8 @@ PolyUOp *poly_buffer_var(
   src[0] = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_dyn_buffer_id++));
   src[1] = batch_var;
   for (int i = 0; i < n_inner; i++) {
+    if (inner_dims[i] < 0) return NULL;
+    if (inner_dims[i] != 0 && alloc > INT64_MAX / inner_dims[i]) return NULL;
     alloc *= inner_dims[i];
     src[2 + i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(inner_dims[i]));
   }
