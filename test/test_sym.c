@@ -101,6 +101,42 @@ TEST(alu, compare_uint64_uses_unsigned_order) {
   PASS();
 }
 
+TEST(sym, vector_compare_uint64_const_fold_uses_operand_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType u64x2 = poly_dtype_vec(POLY_UINT64, 2);
+  PolyDType b2 = poly_dtype_vec(POLY_BOOL, 2);
+
+  PolyUOp *a0 = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)UINT64_C(0x8000000000000005))
+  );
+  PolyUOp *a1 = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)UINT64_C(0x4000000000000000))
+  );
+  PolyUOp *b0 = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)UINT64_C(0x4000000000000000))
+  );
+  PolyUOp *b1 = poly_uop0(
+      ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int((int64_t)UINT64_C(0x8000000000000005))
+  );
+  PolyUOp *avec_src[2] = {a0, a1};
+  PolyUOp *bvec_src[2] = {b0, b1};
+  PolyUOp *avec = poly_uop(ctx, POLY_OP_VCONST, u64x2, avec_src, 2, poly_arg_none());
+  PolyUOp *bvec = poly_uop(ctx, POLY_OP_VCONST, u64x2, bvec_src, 2, poly_arg_none());
+  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, b2, avec, bvec, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, cmp, poly_symbolic());
+  ASSERT_TRUE(r != NULL);
+  ASSERT_TRUE(r->op == POLY_OP_VCONST);
+  ASSERT_INT_EQ(r->n_src, 2);
+  ASSERT_TRUE(r->src[0]->op == POLY_OP_CONST && r->src[0]->arg.kind == POLY_ARG_BOOL);
+  ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST && r->src[1]->arg.kind == POLY_ARG_BOOL);
+  ASSERT_TRUE(r->src[0]->arg.b == false);
+  ASSERT_TRUE(r->src[1]->arg.b == true);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(alu, fdiv_zero_zero_is_nan) {
   PolyArg ops[2] = {poly_arg_float(0.0), poly_arg_float(0.0)};
   PolyArg r = poly_exec_alu(POLY_OP_FDIV, POLY_FLOAT32, ops, 2);

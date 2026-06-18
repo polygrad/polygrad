@@ -762,12 +762,15 @@ static PolyUOp *build_vector_const_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op,
     return NULL;
   PolyUOp *elts[128];
   PolyDType lane_dt = poly_dtype_scalar(root->dtype);
+  PolyDType exec_dt = lane_dt;
+  if ((op == POLY_OP_CMPLT || op == POLY_OP_CMPNE || op == POLY_OP_CMPEQ) && root->n_src >= 1)
+    exec_dt = poly_dtype_scalar(root->src[0]->dtype);
   for (int lane = 0; lane < root->dtype.count; lane++) {
     PolyArg lane_ops[3];
     for (int i = 0; i < n_ops; i++) {
       if (!const_lane_arg(root->src[i], lane, &lane_ops[i])) return NULL;
     }
-    PolyArg lane_result = poly_exec_alu(op, lane_dt, lane_ops, n_ops);
+    PolyArg lane_result = poly_exec_alu(op, exec_dt, lane_ops, n_ops);
     elts[lane] = poly_uop0(ctx, POLY_OP_CONST, lane_dt, lane_result);
   }
   /* Match tinygrad's lane-wise vector exec_alu. Keeping child CONST lanes here

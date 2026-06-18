@@ -205,7 +205,8 @@ FUZZ_ARGS ?= -runs=256 -max_len=512 -timeout=5
 FUZZ_SMOKE_ARGS ?= -runs=256 -max_len=512 -timeout=5
 FUZZ_NIGHTLY_ARGS ?= -runs=8192 -max_len=2048 -timeout=10
 FUZZ_WORK_DIR ?= temp/fuzz-corpus
-FUZZ_RUN_ENV ?= UBSAN_OPTIONS=$(UBSAN_OPTIONS)
+FUZZ_ASAN_OPTIONS ?= symbolize=0
+FUZZ_RUN_ENV ?= ASAN_OPTIONS=$(FUZZ_ASAN_OPTIONS) UBSAN_OPTIONS=$(UBSAN_OPTIONS)
 FUZZ_CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -g -O1 \
 	-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
 	-Wall -Wextra -Wpedantic -Wno-unused-parameter -Isrc
