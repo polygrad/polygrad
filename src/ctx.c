@@ -14,14 +14,6 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_tensor_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 void poly_schedule_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
-static void free_cached_kernel(const void *key, void *value, void *userdata) {
-  (void)key;
-  (void)userdata;
-  PolyCachedKernel *ck = value;
-  free(ck->bytes);
-  free(ck);
-}
-
 static void free_buffer_entry(const void *key, void *value, void *userdata) {
   (void)key;
   (void)userdata;
@@ -35,7 +27,6 @@ PolyCtx *poly_ctx_new(void) {
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
-  ctx->kernel_cache = poly_map_new(16);
   ctx->schedule_cache = poly_map_new(16);
   ctx->program_cache = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
@@ -46,12 +37,10 @@ PolyCtx *poly_ctx_new(void) {
   ctx->tensors_cap = 0;
   ctx->next_tensor_order = 1;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->cse || !ctx->kernel_cache || !ctx->schedule_cache ||
-      !ctx->program_cache || !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop ||
-      !ctx->name_map) {
+  if (!ctx->arena || !ctx->cse || !ctx->schedule_cache || !ctx->program_cache ||
+      !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->cse) poly_map_destroy(ctx->cse);
-    if (ctx->kernel_cache) poly_map_destroy(ctx->kernel_cache);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->program_cache) poly_map_destroy(ctx->program_cache);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
@@ -77,8 +66,6 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (poly_frontend_ctx_cleanup) poly_frontend_ctx_cleanup(ctx);
   if (poly_tensor_ctx_cleanup) poly_tensor_ctx_cleanup(ctx);
   if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
-  poly_map_foreach(ctx->kernel_cache, free_cached_kernel, NULL);
-  poly_map_destroy(ctx->kernel_cache);
   poly_map_destroy(ctx->schedule_cache);
   poly_map_destroy(ctx->program_cache);
   poly_map_destroy(ctx->shape_cache);
@@ -115,6 +102,5 @@ PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx) {
   return ctx ? ctx->preferred_device : POLY_DEVICE_AUTO;
 }
 
-PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx) { return ctx->kernel_cache; }
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
 PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }

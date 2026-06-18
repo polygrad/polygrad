@@ -601,22 +601,12 @@ struct PolyUOp {
   uint32_t hash;
 };
 
-/* Cached rendered kernel (used by kernel_cache in PolyCtx) */
-#define POLY_MAX_KERNEL_BUFS 64
-typedef struct {
-  uint8_t *bytes; /* malloc'd rendered bytes (WASM/C/etc) */
-  int len; /* byte length */
-  int n_bufs; /* number of buffer params */
-  PolyUOp *bufs[POLY_MAX_KERNEL_BUFS]; /* ordered buffer UOps */
-} PolyCachedKernel;
-
-/* Context owns the arena, CSE cache, kernel cache, and all UOps */
+/* Context owns the arena, CSE cache, schedule/program caches, and all UOps */
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
-PolyMap *poly_ctx_kernel_cache(PolyCtx *ctx);
 
 /* Return the current ctx->buffers entry address for a BUFFER UOp as an opaque
  * frontend key. Returns 0 when no PolyBuffer is attached. */

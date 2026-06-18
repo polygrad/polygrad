@@ -13,7 +13,6 @@
 struct PolyCtx {
   PolyArena *arena;
   PolyMap *cse;
-  PolyMap *kernel_cache;
   PolyMap *schedule_cache;
   PolyMap *program_cache;
   PolyMap *shape_cache;
