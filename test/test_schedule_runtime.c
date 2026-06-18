@@ -141,6 +141,23 @@ static int count_root_ranges_of_type(PolyCtx *ctx, PolyUOp *root, PolyAxisType a
   return count;
 }
 
+static PolyUOp *make_validator_comb_graph(PolyCtx *ctx, int depth, PolyUOp **bad_node) {
+  PolyUOp *srcs[64];
+  for (int i = 0; i < 64; i++)
+    srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+
+  PolyUOp *cur = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, 64, poly_arg_none());
+  if (bad_node) *bad_node = cur;
+
+  for (int d = 0; d < depth; d++) {
+    for (int i = 0; i < 63; i++)
+      srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(d * 63 + i + 64));
+    srcs[63] = cur;
+    cur = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, 64, poly_arg_none());
+  }
+  return cur;
+}
+
 static int count_root_gated_loads(PolyCtx *ctx, PolyUOp *root) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
@@ -317,6 +334,22 @@ TEST(schedule_runtime, create_schedule_matches_complete_schedule_vecadd) {
   free(graph_lin);
   poly_schedule_free(from_sink);
   poly_schedule_free(from_kernel_graph);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, validate_kernel_graph_grows_past_old_stack_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bad = NULL;
+  PolyUOp *root = make_validator_comb_graph(ctx, 80, &bad);
+
+  ASSERT_NOT_NULL(root);
+  ASSERT_TRUE(bad != NULL && bad->n_src > 0);
+  ASSERT_TRUE(poly_validate_kernel_graph(ctx, root));
+
+  bad->src[0] = NULL;
+  ASSERT_TRUE(!poly_validate_kernel_graph(ctx, root));
+
   poly_ctx_destroy(ctx);
   PASS();
 }

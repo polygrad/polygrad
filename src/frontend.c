@@ -471,9 +471,17 @@ int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {
 bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
   if (!root) return false;
   PolyMap *visited = poly_map_new(256);
-  PolyUOp *stack[4096];
-  PolyUOp *parent_stack[4096];
-  int parent_src_idx[4096];
+  int stack_cap = 1024;
+  PolyUOp **stack = malloc((size_t)stack_cap * sizeof(PolyUOp *));
+  PolyUOp **parent_stack = malloc((size_t)stack_cap * sizeof(PolyUOp *));
+  int *parent_src_idx = malloc((size_t)stack_cap * sizeof(int));
+  if (!visited || !stack || !parent_stack || !parent_src_idx) {
+    if (visited) poly_map_destroy(visited);
+    free(stack);
+    free(parent_stack);
+    free(parent_src_idx);
+    return false;
+  }
   int sp = 0;
   stack[sp++] = root;
   parent_stack[0] = NULL;
@@ -485,6 +493,9 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
     PolyUOp *parent = parent_stack[sp];
     int src_idx = parent_src_idx[sp];
     if (!u) {
+      free(stack);
+      free(parent_stack);
+      free(parent_src_idx);
       poly_map_destroy(visited);
       return false;
     }
@@ -513,6 +524,9 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
             (void *)u
         );
       }
+      free(stack);
+      free(parent_stack);
+      free(parent_src_idx);
       poly_map_destroy(visited);
       return false;
     }
@@ -524,6 +538,9 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
           stderr, "polygrad: realize: invalid n_src=%d on %s(%p)\n", u->n_src, poly_op_name(u->op),
           (void *)u
       );
+      free(stack);
+      free(parent_stack);
+      free(parent_src_idx);
       poly_map_destroy(visited);
       return false;
     }
@@ -533,16 +550,37 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
             stderr, "polygrad: realize: NULL src[%d] on %s(%p), n_src=%d\n", i, poly_op_name(u->op),
             (void *)u, u->n_src
         );
+        free(stack);
+        free(parent_stack);
+        free(parent_src_idx);
         poly_map_destroy(visited);
         return false;
       }
-      if (sp < (int)(sizeof(stack) / sizeof(stack[0]))) {
-        stack[sp++] = u->src[i];
-        parent_stack[sp - 1] = u;
-        parent_src_idx[sp - 1] = i;
+      if (sp >= stack_cap) {
+        int new_cap = stack_cap * 2;
+        PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
+        PolyUOp **new_parent_stack = realloc(parent_stack, (size_t)new_cap * sizeof(PolyUOp *));
+        int *new_parent_src_idx = realloc(parent_src_idx, (size_t)new_cap * sizeof(int));
+        if (!new_stack || !new_parent_stack || !new_parent_src_idx) {
+          free(new_stack ? new_stack : stack);
+          free(new_parent_stack ? new_parent_stack : parent_stack);
+          free(new_parent_src_idx ? new_parent_src_idx : parent_src_idx);
+          poly_map_destroy(visited);
+          return false;
+        }
+        stack = new_stack;
+        parent_stack = new_parent_stack;
+        parent_src_idx = new_parent_src_idx;
+        stack_cap = new_cap;
       }
+      stack[sp++] = u->src[i];
+      parent_stack[sp - 1] = u;
+      parent_src_idx[sp - 1] = i;
     }
   }
+  free(stack);
+  free(parent_stack);
+  free(parent_src_idx);
   poly_map_destroy(visited);
   return true;
 }
