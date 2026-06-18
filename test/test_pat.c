@@ -41,6 +41,34 @@ TEST(pat, match_wildcard_binding) {
   PASS();
 }
 
+TEST(pat, match_more_than_inline_bindings) {
+  enum { N = 20 };
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *srcs[N];
+  PolyPat *pats[N];
+  char names[N][8];
+
+  for (int i = 0; i < N; i++) {
+    snprintf(names[i], sizeof(names[i]), "x%d", i);
+    srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+    pats[i] = poly_pat_any(names[i]);
+  }
+
+  PolyPat *p = poly_pat_op(POLY_OP_SINK, pats, N, NULL);
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, N, poly_arg_none());
+
+  PolyBindings b = {.n = 0};
+  ASSERT_TRUE(poly_pat_match(p, sink, &b));
+  ASSERT_INT_EQ(b.n, N);
+  ASSERT_PTR_EQ(poly_bind(&b, "x0"), srcs[0]);
+  ASSERT_PTR_EQ(poly_bind(&b, "x19"), srcs[19]);
+
+  poly_bindings_free(&b);
+  poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pat, match_src_children) {
   /* Pattern: ADD(CONST, CONST) */
   PolyPat *p = poly_pat_op2(

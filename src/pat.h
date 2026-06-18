@@ -13,19 +13,23 @@
 
 /* Named bindings from a match */
 
-#define POLY_MAX_BINDINGS 16
+#define POLY_BINDINGS_INLINE 16
 
 typedef struct {
-  const char *names[POLY_MAX_BINDINGS];
-  PolyUOp *uops[POLY_MAX_BINDINGS];
+  const char *name;
+  PolyUOp *uop;
+} PolyBindingEntry;
+
+typedef struct {
+  const char *names[POLY_BINDINGS_INLINE];
+  PolyUOp *uops[POLY_BINDINGS_INLINE];
   int n;
+  PolyBindingEntry *extra;
+  int extra_cap;
 } PolyBindings;
 
-static inline PolyUOp *poly_bind(const PolyBindings *b, const char *name) {
-  for (int i = 0; i < b->n; i++)
-    if (b->names[i] == name || strcmp(b->names[i], name) == 0) return b->uops[i];
-  return NULL;
-}
+PolyUOp *poly_bind(const PolyBindings *b, const char *name);
+void poly_bindings_free(PolyBindings *b);
 
 /* Pattern descriptor (mirrors UPat) */
 

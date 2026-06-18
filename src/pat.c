@@ -173,6 +173,59 @@ void poly_pat_free(PolyPat *p) {
 
 /* Pattern matching */
 
+static const char *bindings_name_at(const PolyBindings *b, int idx) {
+  if (!b || idx < 0 || idx >= b->n) return NULL;
+  if (idx < POLY_BINDINGS_INLINE) return b->names[idx];
+  return b->extra[idx - POLY_BINDINGS_INLINE].name;
+}
+
+static PolyUOp *bindings_uop_at(const PolyBindings *b, int idx) {
+  if (!b || idx < 0 || idx >= b->n) return NULL;
+  if (idx < POLY_BINDINGS_INLINE) return b->uops[idx];
+  return b->extra[idx - POLY_BINDINGS_INLINE].uop;
+}
+
+PolyUOp *poly_bind(const PolyBindings *b, const char *name) {
+  if (!b || !name) return NULL;
+  for (int i = 0; i < b->n; i++) {
+    const char *binding_name = bindings_name_at(b, i);
+    if (binding_name == name || (binding_name && strcmp(binding_name, name) == 0))
+      return bindings_uop_at(b, i);
+  }
+  return NULL;
+}
+
+void poly_bindings_free(PolyBindings *b) {
+  if (!b) return;
+  free(b->extra);
+  b->extra = NULL;
+  b->extra_cap = 0;
+  b->n = 0;
+}
+
+static bool bindings_add(PolyBindings *b, const char *name, PolyUOp *uop) {
+  if (!b || !name || !uop) return false;
+  if (b->n < POLY_BINDINGS_INLINE) {
+    b->names[b->n] = name;
+    b->uops[b->n] = uop;
+    b->n++;
+    return true;
+  }
+
+  int extra_idx = b->n - POLY_BINDINGS_INLINE;
+  if (extra_idx >= b->extra_cap) {
+    int new_cap = b->extra_cap ? b->extra_cap * 2 : 16;
+    PolyBindingEntry *new_extra = realloc(b->extra, (size_t)new_cap * sizeof(PolyBindingEntry));
+    if (!new_extra) return false;
+    b->extra = new_extra;
+    b->extra_cap = new_cap;
+  }
+
+  b->extra[extra_idx] = (PolyBindingEntry){.name = name, .uop = uop};
+  b->n++;
+  return true;
+}
+
 static bool match_sources(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
   for (int i = 0; i < pat->n_src; i++) {
     if (!poly_pat_match(pat->src[i], uop->src[i], binds)) return false;
@@ -197,10 +250,7 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
     if (existing) {
       if (existing != uop) return false;
     } else {
-      if (binds->n >= POLY_MAX_BINDINGS) return false;
-      binds->names[binds->n] = pat->name;
-      binds->uops[binds->n] = uop;
-      binds->n++;
+      if (!bindings_add(binds, pat->name, uop)) return false;
     }
   }
 
@@ -313,7 +363,10 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
     PolyBindings binds = {.n = 0};
     if (poly_pat_match(rule->pat, uop, &binds)) {
       PolyUOp *result = rule->fn(ctx, uop, &binds);
+      poly_bindings_free(&binds);
       if (result != NULL && result != uop) return result;
+    } else {
+      poly_bindings_free(&binds);
     }
   }
   return NULL;
