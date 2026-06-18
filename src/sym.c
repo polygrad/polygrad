@@ -757,6 +757,12 @@ static bool const_lane_arg(PolyUOp *u, int lane, PolyArg *out) {
   return false;
 }
 
+static bool numeric_negative_shift_arg(PolyArg a) {
+  if (a.kind == POLY_ARG_INT) return a.i < 0;
+  if (a.kind == POLY_ARG_FLOAT) return a.f < 0.0;
+  return false;
+}
+
 static PolyUOp *build_vector_const_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op, int n_ops) {
   if (!root || root->dtype.count <= 1 || root->dtype.count > 128 || n_ops < 1 || n_ops > 3)
     return NULL;
@@ -770,6 +776,9 @@ static PolyUOp *build_vector_const_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op,
     for (int i = 0; i < n_ops; i++) {
       if (!const_lane_arg(root->src[i], lane, &lane_ops[i])) return NULL;
     }
+    if ((op == POLY_OP_SHL || op == POLY_OP_SHR) && n_ops >= 2 &&
+        numeric_negative_shift_arg(lane_ops[1]))
+      return NULL;
     PolyArg lane_result = poly_exec_alu(op, exec_dt, lane_ops, n_ops);
     elts[lane] = poly_uop0(ctx, POLY_OP_CONST, lane_dt, lane_result);
   }
@@ -805,6 +814,8 @@ static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBi
     if (a->op == POLY_OP_SUB && !i64_sub_ok(av, bv, &rv)) return NULL;
     if (a->op == POLY_OP_MUL && !i64_mul_ok(av, bv, &rv)) return NULL;
   }
+  if ((a->op == POLY_OP_SHL || a->op == POLY_OP_SHR) && numeric_negative_shift_arg(a->src[1]->arg))
+    return NULL;
   PolyArg operands[2] = {a->src[0]->arg, a->src[1]->arg};
   PolyDType exec_dtype = a->dtype;
   if ((a->op == POLY_OP_CMPLT || a->op == POLY_OP_CMPNE || a->op == POLY_OP_CMPEQ) && a->n_src >= 1)

@@ -137,6 +137,42 @@ TEST(sym, vector_compare_uint64_const_fold_uses_operand_dtype) {
   PASS();
 }
 
+TEST(sym, negative_shift_count_does_not_fold_to_invalid_const) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *neg = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(-1));
+  PolyUOp *shl = poly_uop2(ctx, POLY_OP_SHL, POLY_INT32, one, neg, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, shl, poly_symbolic());
+  ASSERT_TRUE(r != NULL);
+  ASSERT_TRUE(r->op == POLY_OP_SHL);
+  ASSERT_TRUE(!(r->op == POLY_OP_CONST && r->arg.kind == POLY_ARG_INVALID));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, vector_negative_shift_count_does_not_fold_to_invalid_vconst) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType i32x2 = poly_dtype_vec(POLY_INT32, 2);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *neg = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(-1));
+  PolyUOp *lhs_src[2] = {one, two};
+  PolyUOp *rhs_src[2] = {zero, neg};
+  PolyUOp *lhs = poly_uop(ctx, POLY_OP_VCONST, i32x2, lhs_src, 2, poly_arg_none());
+  PolyUOp *rhs = poly_uop(ctx, POLY_OP_VCONST, i32x2, rhs_src, 2, poly_arg_none());
+  PolyUOp *shl = poly_uop2(ctx, POLY_OP_SHL, i32x2, lhs, rhs, poly_arg_none());
+
+  PolyUOp *r = poly_graph_rewrite(ctx, shl, poly_symbolic());
+  ASSERT_TRUE(r != NULL);
+  ASSERT_TRUE(r->op == POLY_OP_SHL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(alu, fdiv_zero_zero_is_nan) {
   PolyArg ops[2] = {poly_arg_float(0.0), poly_arg_float(0.0)};
   PolyArg r = poly_exec_alu(POLY_OP_FDIV, POLY_FLOAT32, ops, 2);

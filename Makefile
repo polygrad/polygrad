@@ -205,6 +205,7 @@ FUZZ_ARGS ?= -runs=256 -max_len=512 -timeout=5
 FUZZ_SMOKE_ARGS ?= -runs=256 -max_len=512 -timeout=5
 FUZZ_NIGHTLY_ARGS ?= -runs=8192 -max_len=2048 -timeout=10
 FUZZ_WORK_DIR ?= temp/fuzz-corpus
+FUZZ_SEED_DIR ?= test/corpus
 FUZZ_ASAN_OPTIONS ?= symbolize=0
 FUZZ_RUN_ENV ?= ASAN_OPTIONS=$(FUZZ_ASAN_OPTIONS) UBSAN_OPTIONS=$(UBSAN_OPTIONS)
 FUZZ_CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -g -O1 \
@@ -221,7 +222,7 @@ fuzz-nightly:
 
 fuzz-symbolic: build/fuzz_sym
 	@mkdir -p $(FUZZ_WORK_DIR)/symbolic
-	$(FUZZ_RUN_ENV) ./build/fuzz_sym $(FUZZ_WORK_DIR)/symbolic $(FUZZ_ARGS)
+	$(FUZZ_RUN_ENV) ./build/fuzz_sym $(FUZZ_WORK_DIR)/symbolic $(FUZZ_SEED_DIR)/symbolic $(FUZZ_ARGS)
 
 build/fuzz_sym: test/fuzz_sym.c $(SRC) $(CODEC_SRC)
 	@mkdir -p build
