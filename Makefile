@@ -73,7 +73,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -212,7 +212,7 @@ FUZZ_CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -g -O1 \
 	-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
 	-Wall -Wextra -Wpedantic -Wno-unused-parameter -Isrc
 
-fuzz: fuzz-symbolic
+fuzz: fuzz-symbolic fuzz-symbolic-div
 
 fuzz-smoke:
 	$(MAKE) fuzz FUZZ_ARGS="$(FUZZ_SMOKE_ARGS)"
@@ -225,6 +225,14 @@ fuzz-symbolic: build/fuzz_sym
 	$(FUZZ_RUN_ENV) ./build/fuzz_sym $(FUZZ_WORK_DIR)/symbolic $(FUZZ_SEED_DIR)/symbolic $(FUZZ_ARGS)
 
 build/fuzz_sym: test/fuzz_sym.c $(SRC) $(CODEC_SRC)
+	@mkdir -p build
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^ $(LDFLAGS_DEBUG)
+
+fuzz-symbolic-div: build/fuzz_sym_div
+	@mkdir -p $(FUZZ_WORK_DIR)/symbolic-div
+	$(FUZZ_RUN_ENV) ./build/fuzz_sym_div $(FUZZ_WORK_DIR)/symbolic-div $(FUZZ_SEED_DIR)/symbolic-div $(FUZZ_ARGS)
+
+build/fuzz_sym_div: test/fuzz_sym_div.c $(SRC) $(CODEC_SRC)
 	@mkdir -p build
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^ $(LDFLAGS_DEBUG)
 
