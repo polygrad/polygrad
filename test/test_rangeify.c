@@ -12,6 +12,7 @@
 #include "../src/frontend.h"
 #include "../src/tensor.h"
 #include "../src/utils.h"
+#include <pthread.h>
 
 /* Cleanup helper */
 
@@ -1579,6 +1580,71 @@ TEST(rangeify, schedule_v2_switchover_parity) {
 
 /* Rangeify stats tests */
 
+static bool run_buffer_alt_stats_case(PolyRangeifyStats *out_stats) {
+  PolyCtx *ctx = poly_ctx_new();
+  if (!ctx) return false;
+
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 32);
+  if (!x) {
+    poly_ctx_destroy(ctx);
+    return false;
+  }
+
+  PolyUOp *terms[9];
+  for (int i = 0; i < 9; i++) {
+    int64_t pairs[][2] = {{i, i + 4}};
+    terms[i] = poly_shrink(ctx, x, pairs, 1);
+    if (!terms[i]) {
+      poly_ctx_destroy(ctx);
+      return false;
+    }
+  }
+
+  PolyUOp *acc = terms[0];
+  for (int i = 1; i < 9; i++) {
+    acc = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, acc, terms[i], poly_arg_none());
+    if (!acc) {
+      poly_ctx_destroy(ctx);
+      return false;
+    }
+  }
+
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, acc, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+  if (!out || !store || !sink) {
+    poly_ctx_destroy(ctx);
+    return false;
+  }
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  if (!ictx) {
+    poly_ctx_destroy(ctx);
+    return false;
+  }
+
+  poly_rangeify_stats_reset();
+  PolyUOp *result = run_apply_rangeify(ictx, sink);
+  if (out_stats) *out_stats = poly_rangeify_stats_get();
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  return result != NULL;
+}
+
+typedef struct {
+  PolyRangeifyStats before;
+  PolyRangeifyStats after;
+  bool ok;
+} RangeifyStatsThreadResult;
+
+static void *rangeify_stats_thread_main(void *opaque) {
+  RangeifyStatsThreadResult *result = opaque;
+  result->before = poly_rangeify_stats_get();
+  result->ok = run_buffer_alt_stats_case(&result->after);
+  return NULL;
+}
+
 TEST(rangeify, stats_clean_vecadd_no_workarounds) {
   int N = 16;
   PolyCtx *ctx = poly_ctx_new();
@@ -1661,6 +1727,27 @@ TEST(rangeify, stats_clean_reduce_no_workarounds) {
   ASSERT_INT_EQ(stats.buffer_alt_used, 0);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, stats_are_thread_local) {
+  PolyRangeifyStats main_stats = {0};
+  ASSERT_TRUE(run_buffer_alt_stats_case(&main_stats));
+  ASSERT_TRUE(main_stats.buffer_alt_max_count > 8);
+
+  RangeifyStatsThreadResult thread_result = {0};
+  pthread_t thread;
+  ASSERT_INT_EQ(pthread_create(&thread, NULL, rangeify_stats_thread_main, &thread_result), 0);
+  ASSERT_INT_EQ(pthread_join(thread, NULL), 0);
+
+  ASSERT_TRUE(thread_result.ok);
+  ASSERT_INT_EQ(thread_result.before.buffer_alt_created, 0);
+  ASSERT_INT_EQ(thread_result.before.buffer_alt_max_count, 0);
+  ASSERT_TRUE(thread_result.after.buffer_alt_max_count > 8);
+
+  PolyRangeifyStats main_after = poly_rangeify_stats_get();
+  ASSERT_INT_EQ(main_after.buffer_alt_created, main_stats.buffer_alt_created);
+  ASSERT_INT_EQ(main_after.buffer_alt_max_count, main_stats.buffer_alt_max_count);
   PASS();
 }
 

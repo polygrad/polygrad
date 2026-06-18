@@ -32,8 +32,8 @@
 
 #define POLY_RANGEIFY_RANGE_TAG 0x5247 /* 'RG': tinygrad rtag(()) marker */
 
-/* Global rangeify stats (debug/parity observability). */
-static PolyRangeifyStats g_rangeify_stats;
+/* Thread-local rangeify stats (debug/parity observability). */
+static _Thread_local PolyRangeifyStats g_rangeify_stats;
 
 void poly_rangeify_stats_reset(void) {
   memset(&g_rangeify_stats, 0, sizeof(g_rangeify_stats));
