@@ -114,6 +114,47 @@ static void wsm_destroy(WgslStrMap *m) {
   free(m->vals);
 }
 
+typedef struct {
+  char *name;
+  int index;
+  PolyDType dtype;
+  bool is_buffer;
+} WgslBinding;
+
+static bool wgsl_binding_append(
+    WgslBinding **bindings,
+    int *n_bindings,
+    int *cap_bindings,
+    const char *name,
+    PolyDType dtype,
+    bool is_buffer
+) {
+  if (!bindings || !n_bindings || !cap_bindings || !name) return false;
+  if (*n_bindings >= *cap_bindings) {
+    int new_cap = (*cap_bindings > 0) ? (*cap_bindings * 2) : 16;
+    WgslBinding *new_bindings = realloc(*bindings, (size_t)new_cap * sizeof(WgslBinding));
+    if (!new_bindings) return false;
+    *bindings = new_bindings;
+    *cap_bindings = new_cap;
+  }
+  char *dup = strdup(name);
+  if (!dup) return false;
+  (*bindings)[*n_bindings] = (WgslBinding){
+      .name = dup,
+      .index = *n_bindings,
+      .dtype = dtype,
+      .is_buffer = is_buffer,
+  };
+  (*n_bindings)++;
+  return true;
+}
+
+static void wgsl_bindings_free(WgslBinding *bindings, int n_bindings) {
+  for (int i = 0; i < n_bindings; i++)
+    free(bindings[i].name);
+  free(bindings);
+}
+
 /* WGSL type name */
 
 static const char *wgsl_type_name(PolyDType dt) {
@@ -428,11 +469,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
    *   - cstyle.py collects PARAM/DEFINE_VAR into one ordered `bufs` list
    *   - wgsl.py assigns bindings sequentially from that list
    * So WGSL binding numbers follow encounter order, not PARAM.arg. */
-  char *binding_names[64];
-  int binding_indices[64];
-  PolyDType binding_dtypes[64];
-  bool binding_is_buffer[64];
+  WgslBinding *bindings = NULL;
   int n_bindings = 0;
+  int cap_bindings = 0;
 
   /* prefix counters */
   int c_val = 0, c_alu = 0, c_cast = 0, c_acc = 0, c_smem = 0;
@@ -481,11 +520,10 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       snprintf(name, sizeof(name), "data%lld", (long long)u->arg.i);
       wsm_set(&names, u, strdup(name));
 
-      binding_names[n_bindings] = strdup(name);
-      binding_indices[n_bindings] = n_bindings;
-      binding_dtypes[n_bindings] = poly_dtype_scalar(u->dtype);
-      binding_is_buffer[n_bindings] = true;
-      n_bindings++;
+      if (!wgsl_binding_append(
+              &bindings, &n_bindings, &cap_bindings, name, poly_dtype_scalar(u->dtype), true
+          ))
+        goto fail;
       continue;
     }
 
@@ -495,11 +533,10 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
                                                              : (u->arg.str ? u->arg.str : "var");
       wsm_set(&names, u, strdup(vname));
 
-      binding_names[n_bindings] = strdup(vname);
-      binding_indices[n_bindings] = n_bindings;
-      binding_dtypes[n_bindings] = poly_dtype_scalar(u->dtype);
-      binding_is_buffer[n_bindings] = false;
-      n_bindings++;
+      if (!wgsl_binding_append(
+              &bindings, &n_bindings, &cap_bindings, vname, poly_dtype_scalar(u->dtype), false
+          ))
+        goto fail;
       continue;
     }
 
@@ -909,22 +946,13 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
   /* Sort bindings by index */
   for (int i = 1; i < n_bindings; i++) {
-    int ki = binding_indices[i];
-    char *kn = binding_names[i];
-    PolyDType kd = binding_dtypes[i];
-    bool kb = binding_is_buffer[i];
+    WgslBinding key = bindings[i];
     int j = i - 1;
-    while (j >= 0 && binding_indices[j] > ki) {
-      binding_indices[j + 1] = binding_indices[j];
-      binding_names[j + 1] = binding_names[j];
-      binding_dtypes[j + 1] = binding_dtypes[j];
-      binding_is_buffer[j + 1] = binding_is_buffer[j];
+    while (j >= 0 && bindings[j].index > key.index) {
+      bindings[j + 1] = bindings[j];
       j--;
     }
-    binding_indices[j + 1] = ki;
-    binding_names[j + 1] = kn;
-    binding_dtypes[j + 1] = kd;
-    binding_is_buffer[j + 1] = kb;
+    bindings[j + 1] = key;
   }
 
   /* Build complete source */
@@ -946,17 +974,17 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   /* Parameter bindings: sequential indices starting at 1 (binding 0 = INFINITY).
    * Storage buffers use var<storage,read_write>, scalar vars use var<uniform>. */
   for (int i = 0; i < n_bindings; i++) {
-    const char *tn = binding_is_buffer[i] ? wgsl_buffer_type_name(binding_dtypes[i])
-                                          : wgsl_type_name(binding_dtypes[i]);
-    if (binding_is_buffer[i]) {
+    const char *tn = bindings[i].is_buffer ? wgsl_buffer_type_name(bindings[i].dtype)
+                                           : wgsl_type_name(bindings[i].dtype);
+    if (bindings[i].is_buffer) {
       wsb_printf(
           &out, "@group(0) @binding(%d)\nvar<storage,read_write> %s: array<%s>;\n",
-          binding_indices[i] + 1, binding_names[i], tn
+          bindings[i].index + 1, bindings[i].name, tn
       );
     } else {
       wsb_printf(
-          &out, "@group(0) @binding(%d)\nvar<uniform> %s: %s;\n", binding_indices[i] + 1,
-          binding_names[i], tn
+          &out, "@group(0) @binding(%d)\nvar<uniform> %s: %s;\n", bindings[i].index + 1,
+          bindings[i].name, tn
       );
     }
   }
@@ -980,13 +1008,19 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
   wsb_puts(&out, "}\n");
 
   /* cleanup */
-  for (int i = 0; i < n_bindings; i++)
-    free(binding_names[i]);
+  wgsl_bindings_free(bindings, n_bindings);
   free(decls.buf);
   free(body.buf);
   wsm_destroy(&names);
 
   return out.buf;
+
+fail:
+  wgsl_bindings_free(bindings, n_bindings);
+  free(decls.buf);
+  free(body.buf);
+  wsm_destroy(&names);
+  return NULL;
 }
 
 /* WGSL extra matcher (tinygrad wgsl_matcher, wgsl.py:40-53) */

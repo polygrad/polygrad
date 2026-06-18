@@ -858,6 +858,28 @@ TEST(codegen, render_wgsl_param_bindings_follow_encounter_order) {
   PASS();
 }
 
+TEST(codegen, render_wgsl_bindings_grow_past_old_fixed_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  enum { N_BINDINGS = 70 };
+  PolyUOp **uops = calloc(N_BINDINGS, sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(uops);
+
+  for (int i = 0; i < N_BINDINGS; i++)
+    uops[i] = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(i));
+
+  char *src = poly_render_wgsl(uops, N_BINDINGS, "many_bindings");
+  ASSERT_NOT_NULL(src);
+
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(65)\nvar<storage,read_write> data64"));
+  ASSERT_NOT_NULL(strstr(src, "@group(0) @binding(70)\nvar<storage,read_write> data69"));
+
+  free(src);
+  free(uops);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* WebGPU GPU linearizer output tests */
 
 TEST(codegen, linearize_webgpu_vecadd_emits_gpudims) {
