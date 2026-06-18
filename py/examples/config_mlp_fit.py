@@ -8,10 +8,10 @@ Run from repo root:
 
 import numpy as np
 
-from polygrad.instance import Instance
+from polygrad.models import MLP
 
 
-inst = Instance.mlp({
+inst = MLP({
     "layers": [2, 4, 1],
     "activation": "relu",
     "bias": True,

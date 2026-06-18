@@ -6,7 +6,7 @@ Run from repo root:
 
 import numpy as np
 
-from polygrad import Tensor, nn
+from polygrad import Instance, Tensor, nn
 
 
 class LinearNet:
@@ -31,8 +31,13 @@ with Tensor.train():
         losses.append(loss.item())
         opt.step()
 
-inp = nn.Input("x", shape=(1, 2))
-inst = nn.Model.trace(model, inputs={"x": inp}).export()
+inp = Tensor.empty((1, 2))
+out_tensor = model(inp)
+inst = Instance.from_tensors(
+    inputs={"x": inp},
+    outputs={"output": out_tensor},
+    params={"weight": model.weight},
+)
 out = inst.forward(x=np.array([[1.0, 2.0]], dtype=np.float32))
 bundle = inst.save_bundle()
 

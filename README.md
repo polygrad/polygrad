@@ -261,22 +261,22 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Interpreter with vector value model (lane-array, pre-allocated arena) -- 607/607
 - [x] `POLY_DEVICE=cpu|cuda|hip|x64|interp` backend selector
 
-### Model Zoo
+### Instances and Model Families
 - [x] PolyInstance runtime (forward, train_step, optimizer, weight import/export)
+- [x] Instance constructors: `from_ir`, `from_bundle`, `from_tensors`, `from_hf`, `from_gguf`
 - [x] MLP builder (`poly_mlp_instance`) with configurable layers, activations, loss
 - [x] HuggingFace model loading (`poly_hf_load`): config.json + safetensors -> PolyInstance
-- [x] GPT-2 builder: full transformer (attention, FFN, layernorm, causal mask, weight tying)
+- [x] GGUF model loading (`poly_gguf_load`): GPT-2/Qwen-family bytes -> PolyInstance
 - [x] Safetensors decoder with multi-dtype support (F32, F16, BF16, F64, integers)
-- [x] GPT-2 training (forward + backward + optimizer via PolyInstance)
 - [x] Autoregressive text generation (Python)
 
 ### Language Frontends
 - [x] Float64 support (transcendentals, WASM renderer, all frontends)
 - [x] Python Tensor API (ctypes FFI, lazy eval, autograd, f64, zero-copy numpy I/O, tinygrad-compatible)
 - [x] Python nn module (Linear, LayerNorm, RMSNorm, Embedding, Dropout, SGD, Adam, AdamW)
-- [x] Python HF loader (`load_hf`, `download_hf`, `generate`)
+- [x] Python model loaders (`Instance.from_hf`, `Instance.from_gguf`, `download_hf`, `generate`)
 - [x] Unified JS package (`js/`): CommonJS Node entry, Node-API native path, WASM fallback, browser dist bundles, f64
-- [ ] JS model/Instance parity with Python (builders, model runtime, HF loading, weight I/O) in the unified package
+- [x] JS model/Instance parity with Python (builders, model runtime, HF/GGUF loading, weight I/O) in the unified package
 
 ### Planned
 - [ ] WASM build fix (sched_copy symbol portability)

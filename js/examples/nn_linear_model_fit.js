@@ -18,21 +18,25 @@ async function main() {
   }
 
   const net = new Net()
-  const x = pg.nn.Input('x', { shape: [1, 2] })
-  const y = pg.nn.Target('y', { shape: [1, 1] })
-  const model = pg.nn.trace(net, {
+  const x = pg.Tensor.empty([1, 2])
+  const y = pg.Tensor.empty([1, 1])
+  const pred = net.call(x)
+  const loss = pred.sub(y).square().mean()
+  const inst = await pg.Instance.fromTensors({
     inputs: { x },
     targets: { y },
-    loss: (pred, target) => pred.sub(target).square().mean()
+    outputs: { output: pred },
+    losses: { loss },
+    params: { 'fc.weight': net.fc.weight, 'fc.bias': net.fc.bias }
   })
 
-  const losses = await model.fit({
+  const losses = await inst.fit({
     x: new Float32Array([1, 2]),
     y: new Float32Array([4])
   }, { epochs: 8, optimizer: 'sgd', lr: 0.03 })
 
   console.log('loss', losses[0], '->', losses[losses.length - 1])
-  console.log('forward', Array.from(model.instance.forward({ x: new Float32Array([1, 2]) }).output))
+  console.log('forward', Array.from(inst.forward({ x: new Float32Array([1, 2]) }).output))
 
   await pg.dispose()
 }

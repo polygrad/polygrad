@@ -70,6 +70,38 @@ class PolyOptimConfig(ctypes.Structure):
         ('classic', ctypes.c_bool),
     ]
 
+class PolyInstanceOptions(ctypes.Structure):
+    _fields_ = [
+        ('own_ctx_on_success', ctypes.c_bool),
+        ('own_ctx_on_failure', ctypes.c_bool),
+    ]
+
+class PolyInstanceError(ctypes.Structure):
+    _fields_ = [
+        ('code', ctypes.c_int),
+        ('func', ctypes.c_char_p),
+        ('message', ctypes.c_char * 256),
+    ]
+
+class PolyBindingSpec(ctypes.Structure):
+    _fields_ = [
+        ('name', ctypes.c_char_p),
+        ('role', ctypes.c_int),
+        ('tensor', _ptr),
+        ('flags', ctypes.c_uint32),
+    ]
+
+class PolyEntrypointSpec(ctypes.Structure):
+    _fields_ = [
+        ('name', ctypes.c_char_p),
+        ('inputs', ctypes.POINTER(ctypes.c_char_p)),
+        ('n_inputs', ctypes.c_int),
+        ('outputs', ctypes.POINTER(ctypes.c_char_p)),
+        ('n_outputs', ctypes.c_int),
+        ('objective', ctypes.c_char_p),
+        ('flags', ctypes.c_uint32),
+    ]
+
 PolyFrontendBufferReleaseFn = ctypes.CFUNCTYPE(None, _uintptr)
 
 
@@ -164,6 +196,9 @@ def _declare_signatures(lib):
     lib.poly_device_name.restype = ctypes.c_char_p
     lib.poly_device_name.argtypes = [ctypes.c_int]
 
+    lib.poly_ctx_named_count.restype = ctypes.c_int
+    lib.poly_ctx_named_count.argtypes = [_ptr]
+
     # --- Op helpers ---
     lib.poly_op_count.restype = ctypes.c_int
     lib.poly_op_count.argtypes = []
@@ -220,6 +255,9 @@ def _declare_signatures(lib):
 
     lib.poly_register_entrypoint.restype = ctypes.c_int
     lib.poly_register_entrypoint.argtypes = [_ptr, ctypes.c_char_p, _ptr]
+
+    lib.poly_buffer_by_id.restype = _ptr
+    lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
 
     lib.poly_buffer_f32.restype = _ptr
     lib.poly_buffer_f32.argtypes = [_ptr, ctypes.c_int64]
@@ -514,6 +552,15 @@ def _declare_signatures(lib):
         _ptr, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(_ptr), ctypes.c_int
     ]
 
+    lib.poly_instance_from_bindings.restype = _ptr
+    lib.poly_instance_from_bindings.argtypes = [
+        _ptr,
+        ctypes.POINTER(PolyBindingSpec), ctypes.c_int,
+        ctypes.POINTER(PolyEntrypointSpec), ctypes.c_int,
+        ctypes.POINTER(PolyInstanceOptions),
+        ctypes.POINTER(PolyInstanceError),
+    ]
+
     lib.poly_instance_free.restype = None
     lib.poly_instance_free.argtypes = [_ptr]
 
@@ -595,7 +642,7 @@ def _declare_signatures(lib):
     lib.poly_nam_instance.restype = _ptr
     lib.poly_nam_instance.argtypes = [ctypes.c_char_p, ctypes.c_int]
 
-    # HF loader (modelzoo/hf_loader.c)
+    # HF/model loaders (src/models/*.c)
     lib.poly_hf_load.restype = _ptr
     lib.poly_hf_load.argtypes = [
         ctypes.c_char_p, ctypes.c_int,
@@ -603,6 +650,9 @@ def _declare_signatures(lib):
         ctypes.POINTER(ctypes.c_int64),
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
+
+    lib.poly_gguf_load.restype = _ptr
+    lib.poly_gguf_load.argtypes = [_u8p, ctypes.c_int64, ctypes.c_int, ctypes.c_int]
 
     # --- Shape-on-UOp accessors ---
     lib.poly_uop_ndim.restype = ctypes.c_int

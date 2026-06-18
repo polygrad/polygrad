@@ -169,6 +169,14 @@ async function createWasmCore(device) {
     return ptr
   }
 
+  function writeI32Array(arr) {
+    if (!arr || arr.length === 0) return 0
+    const ptr = Module._malloc(arr.length * 4)
+    const h32 = heap32()
+    for (let i = 0; i < arr.length; i++) h32[(ptr >> 2) + i] = arr[i] | 0
+    return ptr
+  }
+
   function readPtrArray(ptr, n) {
     const out = new Array(n)
     const h32 = heap32()
@@ -363,6 +371,7 @@ async function createWasmCore(device) {
     // Simple ops (no int64 arrays)
     poly_ctx_new: Module._poly_ctx_new,
     poly_ctx_destroy: Module._poly_ctx_destroy,
+    poly_ctx_named_count: Module._poly_ctx_named_count,
     poly_const_float: Module._poly_const_float,
     poly_const_double: Module._poly_const_double,
     poly_const_int: (ctx, val) => Module._poly_const_int(ctx, BigInt(val)),
@@ -406,6 +415,7 @@ async function createWasmCore(device) {
         if (shapePtr) Module._free(shapePtr)
       }
     },
+    poly_buffer_by_id: (ctx, dtypeId, size) => Module._poly_buffer_by_id(ctx, dtypeId, BigInt(size)),
     poly_buffer_f32: (ctx, size) => Module._poly_buffer_f32(ctx, BigInt(size)),
     poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
 
@@ -1027,6 +1037,72 @@ async function createWasmCore(device) {
         for (const p of namePtrs) Module._free(p)
         Module._free(namesPtr)
         Module._free(sinksPtr)
+      }
+    },
+
+    fromBindings(ctxPtr, bindings, entries) {
+      const bindingNames = bindings.map(b => b.name)
+      const bindingRoles = bindings.map(b => b.role | 0)
+      const bindingTensors = bindings.map(b => b.tensor || 0)
+      const bindingFlags = bindings.map(b => b.flags || 0)
+      const entryNames = entries.map(e => e.name)
+      const entryInputs = entries.flatMap(e => e.inputs || [])
+      const entryInputCounts = entries.map(e => (e.inputs || []).length)
+      const entryOutputs = entries.flatMap(e => e.outputs || [])
+      const entryOutputCounts = entries.map(e => (e.outputs || []).length)
+      const entryObjectives = entries.map(e => e.objective || null)
+      const entryFlags = entries.map(e => e.flags || 0)
+
+      const stringPtrs = []
+      const allocStringArray = (items, nullable = false) => {
+        const ptr = Module._malloc(Math.max(1, items.length) * 4)
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i]
+          const sp = nullable && item == null ? 0 : allocString(item)
+          if (sp) stringPtrs.push(sp)
+          heap32()[(ptr >> 2) + i] = sp
+        }
+        return ptr
+      }
+
+      const bindingNamesPtr = allocStringArray(bindingNames)
+      const bindingRolesPtr = writeI32Array(bindingRoles)
+      const bindingTensorsPtr = writePtrArray(bindingTensors)
+      const bindingFlagsPtr = writeI32Array(bindingFlags)
+      const entryNamesPtr = allocStringArray(entryNames)
+      const entryInputsPtr = allocStringArray(entryInputs)
+      const entryInputCountsPtr = writeI32Array(entryInputCounts)
+      const entryOutputsPtr = allocStringArray(entryOutputs)
+      const entryOutputCountsPtr = writeI32Array(entryOutputCounts)
+      const entryObjectivesPtr = allocStringArray(entryObjectives, true)
+      const entryFlagsPtr = writeI32Array(entryFlags)
+
+      try {
+        const inst = Module._poly_instance_from_binding_arrays(
+          ctxPtr,
+          bindingNamesPtr, bindingRolesPtr, bindingTensorsPtr, bindingFlagsPtr, bindings.length,
+          entryNamesPtr, entryInputsPtr, entryInputCountsPtr,
+          entryOutputsPtr, entryOutputCountsPtr, entryObjectivesPtr, entryFlagsPtr,
+          entries.length, 0, 0
+        )
+        if (inst && Module._poly_instance_set_device(inst, deviceId) !== 0) {
+          Module._poly_instance_free(inst)
+          throw new Error('polygrad: set_device failed for device ' + deviceName)
+        }
+        return inst || null
+      } finally {
+        for (const p of stringPtrs) Module._free(p)
+        Module._free(bindingNamesPtr)
+        if (bindingRolesPtr) Module._free(bindingRolesPtr)
+        if (bindingTensorsPtr) Module._free(bindingTensorsPtr)
+        if (bindingFlagsPtr) Module._free(bindingFlagsPtr)
+        Module._free(entryNamesPtr)
+        if (entryInputsPtr) Module._free(entryInputsPtr)
+        if (entryInputCountsPtr) Module._free(entryInputCountsPtr)
+        if (entryOutputsPtr) Module._free(entryOutputsPtr)
+        if (entryOutputCountsPtr) Module._free(entryOutputCountsPtr)
+        if (entryObjectivesPtr) Module._free(entryObjectivesPtr)
+        if (entryFlagsPtr) Module._free(entryFlagsPtr)
       }
     },
 

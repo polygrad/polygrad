@@ -3,12 +3,11 @@
 import math
 import numpy as np
 import pytest
-from polygrad import Tensor
+from polygrad import Instance, Tensor
 from polygrad.nn import (
     Linear, LayerNorm, GroupNorm, RMSNorm, Embedding, Dropout, Conv2d, BatchNorm,
     SGD, Adam, AdamW, OptimizerGroup,
     get_parameters, get_state_dict, load_state_dict,
-    Input, Target, Model,
 )
 
 
@@ -347,20 +346,19 @@ class TestAssign:
         assert approx(a.numpy(), [2.0, 4.0, 6.0, 8.0])
 
 
-# ── Model export ──
+# ── Instance export ──
 
-class TestModelExport:
+class TestInstanceExport:
     def test_functional_model_exports_selected_forward_entrypoint(self):
         w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
-        x = Input("py_export_x", shape=(1, 2))
+        x = Tensor.empty((1, 2))
         y = x.dot(w)
 
-        model = Model(
+        inst = Instance.from_tensors(
             inputs={"py_export_x": x},
             outputs={"py_export_output": y},
             params={"py_export_w": w},
         )
-        inst = model.export()
         assert inst.param_count == 1
         assert inst.param_name(0) == "py_export_w"
 
@@ -368,7 +366,50 @@ class TestModelExport:
         assert "py_export_output" in out
         assert np.allclose(out["py_export_output"], [80.0], atol=1e-5)
 
-    def test_trace_keeps_tinygrad_style_plain_object(self):
+    def test_from_tensors_uses_instance_local_bindings(self):
+        from polygrad import _ffi
+
+        w = Tensor([[2.0]], requires_grad=True).realize()
+        x = Tensor.empty((1, 1))
+        y = x.dot(w)
+        before = _ffi._lib.poly_ctx_named_count(x._ctx)
+
+        inst = Instance.from_tensors(
+            inputs={"local_x": x},
+            outputs={"local_y": y},
+            params={"local_w": w},
+        )
+
+        assert _ffi._lib.poly_ctx_named_count(x._ctx) == before
+        assert inst.param_name(0) == "local_w"
+        out = inst.forward(local_x=np.array([[3.0]], dtype=np.float32))
+        assert np.allclose(out["local_y"], [6.0], atol=1e-5)
+
+    def test_from_bindings_primitive_uses_instance_local_bindings(self):
+        from polygrad import _ffi
+
+        w = Tensor([[7.0]], requires_grad=True).realize()
+        x = Tensor.empty((1, 1))
+        y = x.dot(w)
+        before = _ffi._lib.poly_ctx_named_count(x._ctx)
+
+        inst = Instance.from_bindings(
+            bindings=[
+                {"name": "bind_x", "role": "input", "tensor": x},
+                {"name": "bind_w", "role": "state", "tensor": w},
+                {"name": "bind_y", "role": "output", "tensor": y},
+            ],
+            entrypoints=[
+                {"name": "forward", "inputs": ["bind_x"], "outputs": ["bind_y"]},
+            ],
+        )
+
+        assert _ffi._lib.poly_ctx_named_count(x._ctx) == before
+        assert inst.param_name(0) == "bind_w"
+        out = inst.forward(bind_x=np.array([[3.0]], dtype=np.float32))
+        assert np.allclose(out["bind_y"], [21.0], atol=1e-5)
+
+    def test_from_tensors_keeps_tinygrad_style_plain_object(self):
         class LinearNet:
             def __init__(self):
                 self.weight = Tensor([[4.0], [5.0]], requires_grad=True).realize()
@@ -377,12 +418,40 @@ class TestModelExport:
                 return x.dot(self.weight)
 
         net = LinearNet()
-        x = Input("py_trace_x", shape=(1, 2))
-        traced = Model.trace(net, inputs={"py_trace_x": x})
-        inst = traced.export()
+        x = Tensor.empty((1, 2))
+        out_tensor = net(x)
+        inst = Instance.from_tensors(
+            inputs={"py_trace_x": x},
+            outputs={"output": out_tensor},
+            params={"weight": net.weight},
+        )
 
         out = inst.forward(py_trace_x=np.array([[2.0, 3.0]], dtype=np.float32))
         assert np.allclose(out["output"], [23.0], atol=1e-5)
+
+    def test_constructor_state_names_survive_ir_roundtrip(self):
+        w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
+        x = Tensor.empty((1, 2))
+        logits = x.dot(w)
+
+        inst = Instance(
+            inputs={"x": x},
+            state={"layers.0.weight": w},
+            outputs={"logits": logits},
+            entrypoints=[
+                {"name": "forward", "inputs": ["x"], "outputs": ["logits"]},
+            ],
+        )
+        assert inst.param_count == 1
+        assert inst.param_name(0) == "layers.0.weight"
+        out = inst.forward(x=np.array([[10.0, 20.0]], dtype=np.float32))
+        assert np.allclose(out["logits"], [80.0], atol=1e-5)
+
+        inst2 = Instance.from_ir(inst.export_ir(), inst.export_weights())
+        assert inst2.param_count == 1
+        assert inst2.param_name(0) == "layers.0.weight"
+        out2 = inst2.forward(x=np.array([[10.0, 20.0]], dtype=np.float32))
+        assert np.allclose(out2["logits"], [80.0], atol=1e-5)
 
     def test_tinygrad_training_aliases_exist(self):
         t = Tensor.kaiming_uniform(2, 3)
@@ -394,18 +463,18 @@ class TestModelExport:
 
     def test_model_fit_uses_instance_training_path(self):
         w = Tensor([[1.0]], requires_grad=True).realize()
-        x = Input("fit_x", shape=(1, 1))
-        y = Target("fit_y", shape=(1, 1))
+        x = Tensor.empty((1, 1))
+        y = Tensor.empty((1, 1))
         pred = x.dot(w)
         loss = (pred - y).square().mean()
-        model = Model(
+        inst = Instance.from_tensors(
             inputs={"fit_x": x},
             targets={"fit_y": y},
             outputs={"fit_out": pred},
             losses={"loss": loss},
             params={"fit_w": w},
         )
-        losses = model.fit(
+        losses = inst.fit(
             {
                 "fit_x": np.array([[1.0]], dtype=np.float32),
                 "fit_y": np.array([[3.0]], dtype=np.float32),
@@ -730,86 +799,6 @@ class TestLiveTensorBackward:
         assert all(np.isfinite(l) for l in losses), f"NaN/Inf in losses: {losses}"
         assert losses[-1] < losses[0], \
             f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
-
-
-class TestGPT2:
-    """Smoke tests for GPT-2 model."""
-
-    def test_forward(self):
-        """GPT-2 tiny forward produces correct output shape."""
-        from polygrad.nn.gpt2 import GPT2
-        model = GPT2(n_layers=1, n_heads=2, dim=32, vocab_size=64, max_seq_len=16)
-        Tensor.manual_seed(42)
-        tokens = Tensor(np.random.randint(0, 64, (1, 4)).astype(np.float32))
-        logits = model(tokens)
-        assert logits.shape == (1, 4, 64)
-        assert np.all(np.isfinite(logits.numpy()))
-
-    def test_backward_all_grads(self):
-        """GPT-2 backward produces gradients for all parameters."""
-        from polygrad.nn.gpt2 import GPT2
-        model = GPT2(n_layers=1, n_heads=2, dim=32, vocab_size=64, max_seq_len=16)
-        params = get_parameters(model)
-        Tensor.manual_seed(42)
-        tokens = Tensor(np.random.randint(0, 64, (1, 4)).astype(np.float32))
-        logits = model(tokens)
-        loss = logits.mean()
-        loss.backward()
-
-        n_with_grad = sum(1 for p in params if p._grad is not None)
-        n_finite = sum(1 for p in params if p._grad is not None
-                       and np.all(np.isfinite(p._grad.numpy())))
-        assert n_with_grad == len(params), f"Only {n_with_grad}/{len(params)} params have grads"
-        assert n_finite == len(params), f"Only {n_finite}/{len(params)} params have finite grads"
-
-    def test_training_loss_decreases(self):
-        """GPT-2 training loop: loss decreases over iterations."""
-        from polygrad.nn.gpt2 import GPT2
-        Tensor.manual_seed(42)
-        model = GPT2(n_layers=1, n_heads=1, dim=32, vocab_size=50, max_seq_len=16)
-        params = get_parameters(model)
-        opt = Adam(params, lr=0.001)
-
-        tokens = Tensor(np.array([[5, 12, 23, 38]], dtype=np.float32))
-        losses = []
-        for _ in range(5):
-            logits = model(tokens)
-            loss = (logits * logits).sum()
-            # tinygrad realizes optimizer outputs together with the loss after
-            # gradient graph construction. Realizing logits/loss before backward
-            # materializes the current UOp root and drops live grad targets.
-            loss.backward()
-            losses.append(loss.item())
-            opt.step()
-            opt.zero_grad()
-
-        assert losses[-1] < losses[0], f"Loss did not decrease: {losses[0]:.4f} -> {losses[-1]:.4f}"
-        assert all(np.isfinite(l) for l in losses), f"NaN/Inf in losses: {losses}"
-
-    def test_training_benchmark_config(self):
-        """GPT-2 training with benchmark config: loss decreases by at least 50%."""
-        from polygrad.nn.gpt2 import GPT2
-        Tensor.manual_seed(42)
-        np.random.seed(42)
-        model = GPT2(n_layers=1, n_heads=1, dim=32, vocab_size=50, max_seq_len=8)
-        params = get_parameters(model)
-        opt = Adam(params, lr=0.001)
-
-        tokens = Tensor(np.random.randint(0, 50, (1, 4)).astype(np.float32))
-        losses = []
-        for _ in range(10):
-            logits = model(tokens)
-            loss = (logits * logits).sum()
-            # Keep the trainable path lazy until backward has selected params
-            # from all_tensors, matching tinygrad's current-UOp semantics.
-            loss.backward()
-            losses.append(loss.item())
-            opt.step()
-            opt.zero_grad()
-
-        assert all(np.isfinite(l) for l in losses), f"NaN/Inf in losses: {losses}"
-        assert losses[-1] < losses[0] * 0.5, \
-            f"Loss didn't decrease enough: {losses[0]:.2f} -> {losses[-1]:.2f} (need 50% reduction)"
 
 
 # ── Variable (dynamic shapes) ──

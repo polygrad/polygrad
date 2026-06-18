@@ -1,9 +1,10 @@
 'use strict'
 
 const { createBoundInstanceClass } = require('./instance')
+const { createBoundModels } = require('./models')
 const { createBoundModules } = require('./nn/modules')
 const { createBoundOptim } = require('./nn/optim')
-const { createBoundModel } = require('./nn/model')
+const { getParameters, getStateDict } = require('./nn/state')
 const { createBoundTensorClass } = require('./tensor')
 const { createBoundTokenizerClass } = require('./tokenizer')
 
@@ -26,6 +27,7 @@ class PolyRuntime {
     this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
     this.Instance = createBoundInstanceClass(this)
+    this.models = createBoundModels(this)
     this.Tokenizer = createBoundTokenizerClass(this)
     this.ROLE_PARAM = this.Instance.ROLE_PARAM
     this.ROLE_INPUT = this.Instance.ROLE_INPUT
@@ -38,16 +40,10 @@ class PolyRuntime {
     this.OPTIM_ADAMW = this.Instance.OPTIM_ADAMW
     const modules = createBoundModules(this)
     const optim = createBoundOptim(this)
-    const model = createBoundModel(this)
     this.nn = {
       Linear: modules.Linear,
-      Input: model.Input,
-      Target: model.Target,
-      Model: model.Model,
-      trace: model.trace,
-      export: model.export,
-      getParameters: model.getParameters,
-      getStateDict: model.getStateDict,
+      getParameters,
+      getStateDict,
       optim,
       Optimizer: optim.Optimizer,
       OptimizerGroup: optim.OptimizerGroup,

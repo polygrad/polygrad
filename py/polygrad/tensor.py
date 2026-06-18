@@ -1770,10 +1770,27 @@ class Tensor:
 
     @staticmethod
     def empty(*shape, **kwargs):
+        if 'name' in kwargs:
+            raise TypeError('Tensor.empty does not accept name; pass names to Instance.from_tensors')
+        ctx, dev, requires_grad = _creation_meta(kwargs)
+        dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        np_dt = Tensor._resolve_np_dtype(kwargs)
-        return Tensor(np.empty(shape, dtype=np_dt), **kwargs)
+        shape = tuple(_require_i64(_py_scalar(x), 'shape') for x in shape)
+        if any(dim < 0 for dim in shape):
+            raise ValueError(f'negative dimensions are not allowed: {shape}')
+        numel = 1
+        for dim in shape:
+            numel *= dim
+        uop = _ffi._lib.poly_buffer_by_id(ctx, _dtype_id(dtype_name), numel)
+        if not uop:
+            raise RuntimeError('poly_buffer_by_id failed')
+        if len(shape) != 1 or (shape and shape[0] != numel):
+            dims, ndim = _int64_array(shape)
+            uop = _ffi._lib.poly_reshape(ctx, uop, dims, ndim)
+            if not uop:
+                raise RuntimeError('poly_reshape failed')
+        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_buffer_by_id')
 
     @staticmethod
     def manual_seed(seed):

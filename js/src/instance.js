@@ -6,6 +6,15 @@ const ROLE_TARGET = 2
 const ROLE_OUTPUT = 3
 const ROLE_AUX = 4
 
+const ROLE_IDS = {
+  param: ROLE_PARAM,
+  state: ROLE_PARAM,
+  input: ROLE_INPUT,
+  target: ROLE_TARGET,
+  output: ROLE_OUTPUT,
+  aux: ROLE_AUX
+}
+
 const OPTIM_NONE = 0
 const OPTIM_SGD = 1
 const OPTIM_ADAM = 2
@@ -21,11 +30,6 @@ function optimizerKind(kind) {
   return Number(kind)
 }
 
-function normalizeSpec(spec) {
-  if (typeof spec === 'string') return spec
-  if (spec && typeof spec === 'object') return JSON.stringify(spec)
-  throw new TypeError('polygrad: model spec must be an object or JSON string')
-}
 
 function normalizeBytes(bytes, name) {
   if (bytes == null) return null
@@ -60,15 +64,201 @@ function normalizeBindings(io) {
   return { names, arrays }
 }
 
+function normalizeNamed(value, defaultName) {
+  if (!value) return {}
+  if (value && value._tensor) return { [defaultName]: value }
+  return { ...value }
+}
+
+function normalizeParams(params) {
+  if (!params) return []
+  if (Array.isArray(params)) return params.map((p, i) => [`param_${i}`, p])
+  if (params instanceof Map) return Array.from(params.entries())
+  return Object.entries(params)
+}
+
+function roleId(role) {
+  if (typeof role === 'string') {
+    const key = role.toLowerCase()
+    if (!Object.prototype.hasOwnProperty.call(ROLE_IDS, key)) {
+      throw new Error(`polygrad: unknown Instance binding role '${role}'`)
+    }
+    return ROLE_IDS[key]
+  }
+  return Number(role)
+}
+
+function entryNameList(names) {
+  if (names == null) return []
+  if (typeof names === 'string') return [names]
+  return Array.from(names)
+}
+
+function bindingFields(binding) {
+  if (Array.isArray(binding)) {
+    if (binding.length === 3) {
+      const [name, role, tensor] = binding
+      return { name, role, tensor, flags: 0 }
+    }
+    if (binding.length === 4) {
+      const [name, role, tensor, flags] = binding
+      return { name, role, tensor, flags }
+    }
+  } else if (binding && typeof binding === 'object') {
+    return {
+      name: binding.name,
+      role: binding.role,
+      tensor: binding.tensor,
+      flags: binding.flags || 0
+    }
+  }
+  throw new TypeError('polygrad: Instance bindings must be objects or [name, role, tensor, flags] arrays')
+}
+
+function entryFields(entry) {
+  if (Array.isArray(entry)) {
+    if (entry.length === 3) {
+      const [name, inputs, outputs] = entry
+      return { name, inputs, outputs, objective: null, flags: 0 }
+    }
+    if (entry.length === 4) {
+      const [name, inputs, outputs, objective] = entry
+      return { name, inputs, outputs, objective, flags: 0 }
+    }
+    if (entry.length === 5) {
+      const [name, inputs, outputs, objective, flags] = entry
+      return { name, inputs, outputs, objective, flags }
+    }
+  } else if (entry && typeof entry === 'object') {
+    return {
+      name: entry.name,
+      inputs: entry.inputs,
+      outputs: entry.outputs,
+      objective: entry.objective || null,
+      flags: entry.flags || 0
+    }
+  }
+  throw new TypeError('polygrad: Instance entrypoints must be objects or [name, inputs, outputs] arrays')
+}
+
 function isPromiseLike(v) {
   return v && typeof v.then === 'function'
+}
+
+function isInstanceSpec(v) {
+  return v && typeof v === 'object' && !Array.isArray(v) &&
+    (v.inputs || v.targets || v.outputs || v.losses || v.params || v.state || v.entrypoints)
 }
 
 function createBoundInstanceClass(runtime) {
   const _runtime = runtime
 
+  function requireTensor(name, tensor) {
+    if (!tensor || !tensor._tensor) throw new Error(`${name} is not a Tensor`)
+    return tensor
+  }
+
+  async function ensureStorageBinding(name, tensor, opts = {}) {
+    if (opts.realizeIfNeeded && (!tensor.uop || !tensor.uop.hasBufferIdentity())) {
+      await tensor.realize()
+    }
+    if (!tensor.uop || !tensor.uop.hasBufferIdentity()) {
+      throw new Error(`${name} has no buffer identity`)
+    }
+  }
+
+  function requireStorageBinding(name, tensor) {
+    if (!tensor.uop || !tensor.uop.hasBufferIdentity()) {
+      throw new Error(`${name} has no buffer identity; use await Instance.fromTensors(...) for lazy params`)
+    }
+  }
+
+  function lowerTensorSpecSync(spec = {}) {
+    const { inputs, outputs, targets, losses, entrypoints } = spec
+    let { params, state } = spec
+    if (params != null && state != null) {
+      throw new Error('Instance accepts params or state, not both')
+    }
+    if (state != null) params = state
+
+    const inps = normalizeNamed(inputs, 'input')
+    const tgts = normalizeNamed(targets, 'target')
+    const outs = normalizeNamed(outputs, 'output')
+    const lossMap = normalizeNamed(losses, 'loss')
+    const paramItems = normalizeParams(params).filter(([, tensor]) => tensor && tensor._tensor)
+
+    const namedTensors = []
+    for (const group of [inps, tgts, outs, lossMap]) {
+      for (const [name, tensor] of Object.entries(group)) {
+        namedTensors.push([name, requireTensor(name, tensor)])
+      }
+    }
+    for (const [name, tensor] of paramItems) namedTensors.push([name, requireTensor(name, tensor)])
+    if (!namedTensors.length) throw new Error('Instance requires at least one tensor binding')
+    if (!Object.keys(outs).length && !Object.keys(lossMap).length) {
+      throw new Error('Instance requires outputs or losses')
+    }
+
+    const ctx = namedTensors[0][1]._ctx
+    for (const [name, tensor] of namedTensors) {
+      if (tensor._ctx !== ctx) throw new Error(`${name} belongs to another PolyCtx`)
+    }
+    for (const [name, tensor] of paramItems) requireStorageBinding(name, tensor)
+    for (const [name, tensor] of [...Object.entries(inps), ...Object.entries(tgts)]) {
+      requireStorageBinding(name, tensor)
+    }
+
+    const bindings = []
+    const addBinding = (name, role, tensor, flags = 0) => {
+      bindings.push({ name: String(name), role, tensor: tensor._tensor, flags })
+    }
+    for (const [name, tensor] of Object.entries(inps)) addBinding(name, ROLE_INPUT, tensor)
+    for (const [name, tensor] of Object.entries(tgts)) addBinding(name, ROLE_TARGET, tensor)
+    for (const [name, tensor] of paramItems) addBinding(name, ROLE_PARAM, tensor)
+    for (const [name, tensor] of Object.entries(outs)) addBinding(name, ROLE_OUTPUT, tensor)
+    for (const [name, tensor] of Object.entries(lossMap)) addBinding(name, ROLE_OUTPUT, tensor)
+
+    const entries = []
+    if (entrypoints != null) {
+      for (const entry of entrypoints) {
+        const e = entryFields(entry)
+        if (e.name == null) throw new Error('Instance entrypoint is missing a name')
+        entries.push({
+          name: String(e.name),
+          inputs: entryNameList(e.inputs),
+          outputs: entryNameList(e.outputs),
+          objective: e.objective == null ? null : String(e.objective),
+          flags: Number(e.flags || 0)
+        })
+      }
+    } else {
+      const inputNames = Object.keys(inps)
+      const targetNames = Object.keys(tgts)
+      const outputNames = Object.keys(outs)
+      const lossNames = Object.keys(lossMap)
+      if (outputNames.length) entries.push({ name: 'forward', inputs: inputNames, outputs: outputNames })
+      if (lossNames.length) {
+        const objective = lossNames.length === 1 && Object.prototype.hasOwnProperty.call(lossMap, 'loss')
+          ? 'loss' : null
+        entries.push({
+          name: 'loss',
+          inputs: inputNames.concat(targetNames),
+          outputs: lossNames,
+          objective
+        })
+      }
+    }
+
+    const api = _runtime._core.instance
+    if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
+    const handle = api.fromBindings(ctx, bindings, entries)
+    if (!handle) throw new Error('polygrad: failed to create Instance from tensor bindings')
+    return handle
+  }
+
   class Instance {
     constructor(handle) {
+      if (isInstanceSpec(handle)) handle = lowerTensorSpecSync(handle)
       if (!handle) throw new Error('polygrad: failed to create PolyInstance')
       this._rt = _runtime
       this._handle = handle
@@ -105,28 +295,156 @@ function createBoundInstanceClass(runtime) {
       return new Instance(inst)
     }
 
-    static mlp(spec) {
+    static fromBindings(bindings, entrypoints) {
+      bindings = Array.from(bindings || [])
+      entrypoints = Array.from(entrypoints || [])
+      if (!bindings.length) throw new Error('Instance.fromBindings requires at least one binding')
+      if (!entrypoints.length) throw new Error('Instance.fromBindings requires at least one entrypoint')
+
+      const parsed = bindings.map(binding => {
+        const b = bindingFields(binding)
+        if (b.name == null) throw new Error('Instance binding is missing a name')
+        if (b.role == null) throw new Error(`Instance binding '${b.name}' is missing a role`)
+        const tensor = requireTensor(b.name, b.tensor)
+        return { name: String(b.name), role: roleId(b.role), tensor, flags: Number(b.flags || 0) }
+      })
+
+      const ctx = parsed[0].tensor._ctx
+      for (const b of parsed) {
+        if (b.tensor._ctx !== ctx) throw new Error(`${b.name} belongs to another PolyCtx`)
+      }
+
+      const entries = entrypoints.map(entry => {
+        const e = entryFields(entry)
+        if (e.name == null) throw new Error('Instance entrypoint is missing a name')
+        return {
+          name: String(e.name),
+          inputs: entryNameList(e.inputs),
+          outputs: entryNameList(e.outputs),
+          objective: e.objective == null ? null : String(e.objective),
+          flags: Number(e.flags || 0)
+        }
+      })
+
       const api = _runtime._core.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
-      const inst = api.mlp(normalizeSpec(spec))
-      if (!inst) throw new Error('polygrad: failed to create MLP instance')
-      return new Instance(inst)
+      if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
+      const handle = api.fromBindings(ctx, parsed.map(b => ({
+        name: b.name, role: b.role, tensor: b.tensor._tensor, flags: b.flags
+      })), entries)
+      if (!handle) throw new Error('polygrad: failed to create Instance from bindings')
+      return new Instance(handle)
     }
 
-    static tabm(spec) {
+    static async fromTensors({ inputs, outputs, targets, losses, params, state, entrypoints } = {}) {
+      if (params != null && state != null) {
+        throw new Error('Instance.fromTensors accepts params or state, not both')
+      }
+      if (state != null) params = state
+
+      const inps = normalizeNamed(inputs, 'input')
+      const tgts = normalizeNamed(targets, 'target')
+      const outs = normalizeNamed(outputs, 'output')
+      const lossMap = normalizeNamed(losses, 'loss')
+      const paramItems = normalizeParams(params).filter(([, tensor]) => tensor && tensor._tensor)
+
+      const namedTensors = []
+      for (const group of [inps, tgts, outs, lossMap]) {
+        for (const [name, tensor] of Object.entries(group)) {
+          namedTensors.push([name, requireTensor(name, tensor)])
+        }
+      }
+      for (const [name, tensor] of paramItems) namedTensors.push([name, requireTensor(name, tensor)])
+      if (!namedTensors.length) throw new Error('Instance.fromTensors requires at least one tensor')
+      if (!Object.keys(outs).length && !Object.keys(lossMap).length) {
+        throw new Error('Instance.fromTensors requires outputs or losses')
+      }
+
+      const ctx = namedTensors[0][1]._ctx
+      for (const [name, tensor] of namedTensors) {
+        if (tensor._ctx !== ctx) throw new Error(`${name} belongs to another PolyCtx`)
+      }
+
+      // Match Python and the previous JS path: params may be lazy
+      // initializers. Realize them before packaging so live output/loss graphs
+      // are retargeted to the storage snapshot.
+      for (const [name, tensor] of paramItems) {
+        await ensureStorageBinding(name, tensor, { realizeIfNeeded: true })
+      }
+      for (const [name, tensor] of [...Object.entries(inps), ...Object.entries(tgts)]) {
+        await ensureStorageBinding(name, tensor)
+      }
+
+      const bindings = []
+      const addBinding = (name, role, tensor, flags = 0) => {
+        bindings.push({ name: String(name), role, tensor: tensor._tensor, flags })
+      }
+      for (const [name, tensor] of Object.entries(inps)) addBinding(name, ROLE_INPUT, tensor)
+      for (const [name, tensor] of Object.entries(tgts)) addBinding(name, ROLE_TARGET, tensor)
+      for (const [name, tensor] of paramItems) addBinding(name, ROLE_PARAM, tensor)
+      for (const [name, tensor] of Object.entries(outs)) addBinding(name, ROLE_OUTPUT, tensor)
+      for (const [name, tensor] of Object.entries(lossMap)) addBinding(name, ROLE_OUTPUT, tensor)
+
+      const entries = []
+      if (entrypoints != null) {
+        for (const entry of entrypoints) {
+          const e = entryFields(entry)
+          if (e.name == null) throw new Error('Instance entrypoint is missing a name')
+          entries.push({
+            name: String(e.name),
+            inputs: entryNameList(e.inputs),
+            outputs: entryNameList(e.outputs),
+            objective: e.objective == null ? null : String(e.objective),
+            flags: Number(e.flags || 0)
+          })
+        }
+      } else {
+        const inputNames = Object.keys(inps)
+        const targetNames = Object.keys(tgts)
+        const outputNames = Object.keys(outs)
+        const lossNames = Object.keys(lossMap)
+        if (outputNames.length) {
+          entries.push({ name: 'forward', inputs: inputNames, outputs: outputNames })
+        }
+        if (lossNames.length) {
+          const objective = lossNames.length === 1 && Object.prototype.hasOwnProperty.call(lossMap, 'loss')
+            ? 'loss' : null
+          entries.push({
+            name: 'loss',
+            inputs: inputNames.concat(targetNames),
+            outputs: lossNames,
+            objective
+          })
+        }
+      }
+
       const api = _runtime._core.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
-      const inst = api.tabm(normalizeSpec(spec))
-      if (!inst) throw new Error('polygrad: failed to create TabM instance')
-      return new Instance(inst)
+      if (!api.fromBindings) throw new Error('polygrad: fromBindings unavailable for this core')
+      const handle = api.fromBindings(ctx, bindings, entries)
+      if (!handle) throw new Error('polygrad: failed to create Instance from tensors')
+      return new Instance(handle)
     }
 
-    static nam(spec) {
+    static fromHF(configBytes, weightFiles, opts = {}) {
       const api = _runtime._core.instance
-      if (!api) throw new Error('polygrad: model runtime unavailable for this core')
-      const inst = api.nam(normalizeSpec(spec))
-      if (!inst) throw new Error('polygrad: failed to create NAM instance')
-      return new Instance(inst)
+      const cfg = normalizeBytes(configBytes, 'config')
+      const wf = weightFiles.map((f, i) => normalizeBytes(f, `weight file ${i}`))
+      const handle = api.loadHF(cfg, wf, opts.maxBatch, opts.maxSeqLen)
+      if (!handle) {
+        const err = api.importLastError && api.importLastError()
+        throw new Error('polygrad: fromHF failed' + (err ? ': ' + err.message : ''))
+      }
+      return new Instance(handle)
+    }
+
+    static fromGGUF(ggufBytes, opts = {}) {
+      const api = _runtime._core.instance
+      const bytes = normalizeBytes(ggufBytes, 'gguf')
+      const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
+      if (!handle) {
+        const err = api.importLastError && api.importLastError()
+        throw new Error('polygrad: fromGGUF failed' + (err ? ': ' + err.message : ''))
+      }
+      return new Instance(handle)
     }
 
     dispose() {
@@ -255,28 +573,6 @@ function createBoundInstanceClass(runtime) {
       return new Instance(handle)
     }
 
-    static loadHF(configBytes, weightFiles, opts = {}) {
-      const api = _runtime._core.instance
-      const cfg = normalizeBytes(configBytes, 'config')
-      const wf = weightFiles.map((f, i) => normalizeBytes(f, `weight file ${i}`))
-      const handle = api.loadHF(cfg, wf, opts.maxBatch, opts.maxSeqLen)
-      if (!handle) {
-        const err = api.importLastError && api.importLastError()
-        throw new Error('polygrad: loadHF failed' + (err ? ': ' + err.message : ''))
-      }
-      return new Instance(handle)
-    }
-
-    static loadGGUF(ggufBytes, opts = {}) {
-      const api = _runtime._core.instance
-      const bytes = normalizeBytes(ggufBytes, 'gguf')
-      const handle = api.loadGGUF(bytes, opts.maxBatch, opts.maxSeqLen)
-      if (!handle) {
-        const err = api.importLastError && api.importLastError()
-        throw new Error('polygrad: loadGGUF failed' + (err ? ': ' + err.message : ''))
-      }
-      return new Instance(handle)
-    }
 
     setOptimizer(kind, lr = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weightDecay = 0.0) {
       const rc = this._rt._core.instance.setOptimizer(

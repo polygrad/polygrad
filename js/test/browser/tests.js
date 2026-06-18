@@ -70,6 +70,20 @@
           assertShape(t.shape, [2, 2]);
           assertClose(await t.toArray(), [1, 2, 3, 4]);
         });
+        await test("empty creates unrealized buffer placeholder", async () => {
+          const t = Tensor.empty([2, 3]);
+          assertShape(t.shape, [2, 3]);
+          assert(t.uop.hasBufferIdentity(), "empty should be backed by a BUFFER UOp");
+        });
+        await test("empty rejects named tensor keyword like tinygrad", async () => {
+          let threw = false;
+          try {
+            Tensor.empty([2, 3], { name: "z" });
+          } catch (_) {
+            threw = true;
+          }
+          assert(threw, "expected Tensor.empty(..., {name}) to reject");
+        });
         console.log("\n-- Elementwise --");
         await test("add", async () => {
           const a = new Tensor([1, 2, 3]);
@@ -883,6 +897,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
       }
       async function runInstanceTests(pg) {
         const Instance = pg.Instance;
+        const { MLP, TabM, NAM } = pg.models;
         let passed = 0;
         let failed = 0;
         if (!pg.supportsInstance) {
@@ -901,8 +916,12 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         }
         console.log("\n== Instance ==");
+        await test("model-family constructors are not Instance methods", async () => {
+          assert(typeof Instance.mlp === "undefined", "Instance.mlp should not exist");
+          assert(typeof MLP === "function", "pg.models.MLP should exist");
+        });
         await test("mlp create + param enumeration", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 4, 1],
             activation: "relu",
             bias: true,
@@ -919,7 +938,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("param trainability freezes optimizer updates", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 1],
             activation: "none",
             bias: true,
@@ -953,7 +972,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("param trainability survives IR round trip", async () => {
-          const inst1 = Instance.mlp({
+          const inst1 = MLP({
             layers: [2, 1],
             activation: "none",
             bias: true,
@@ -975,7 +994,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp forward produces output", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 4, 1],
             activation: "relu",
             bias: true,
@@ -993,7 +1012,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp train step decreases loss", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 1],
             activation: "none",
             bias: true,
@@ -1025,8 +1044,8 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             batch_size: 1,
             seed: 42
           };
-          const inst1 = Instance.mlp(spec);
-          const inst2 = Instance.mlp({ ...spec, seed: 99 });
+          const inst1 = MLP(spec);
+          const inst2 = MLP({ ...spec, seed: 99 });
           try {
             const original = await inst1.paramData(0);
             const different = await inst2.paramData(0);
@@ -1048,7 +1067,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("ir export/fromIR round trip", async () => {
-          const inst1 = Instance.mlp({
+          const inst1 = MLP({
             layers: [2, 4, 1],
             activation: "relu",
             bias: true,
@@ -1072,7 +1091,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp batch_size=32 forward produces correct shape", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [4, 8, 3],
             activation: "relu",
             bias: true,
@@ -1100,7 +1119,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp batch_size=32 train step decreases loss (P0)", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [4, 8, 3],
             activation: "relu",
             bias: true,
@@ -1128,7 +1147,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("tabm and nam builders are available", async () => {
-          const tabm = Instance.tabm({
+          const tabm = TabM({
             layers: [2, 4, 1],
             activation: "relu",
             loss: "mse",
@@ -1136,7 +1155,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
             seed: 42,
             n_ensemble: 4
           });
-          const nam = Instance.nam({
+          const nam = NAM({
             n_features: 2,
             hidden_sizes: [4],
             activation: "relu",
@@ -1156,7 +1175,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp train step with Adam", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 4, 1],
             activation: "relu",
             bias: true,
@@ -1180,7 +1199,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp batch_size=4 mse train", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 4, 2],
             activation: "relu",
             bias: true,
@@ -1206,7 +1225,7 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         });
         await test("mlp 100-step convergence", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 8, 1],
             activation: "relu",
             bias: true,
@@ -1235,6 +1254,7 @@ Instance tests: ${passed} passed, ${failed} failed`);
       }
       async function runInstanceSmokeTests(pg) {
         const Instance = pg.Instance;
+        const { MLP, TabM, NAM } = pg.models;
         let passed = 0;
         let failed = 0;
         if (!pg.supportsInstance) {
@@ -1254,7 +1274,7 @@ Instance tests: ${passed} passed, ${failed} failed`);
         }
         console.log("\n== Instance ==");
         await test("webgpu mlp forward smoke", async () => {
-          const inst = Instance.mlp({
+          const inst = MLP({
             layers: [2, 4, 1],
             activation: "relu",
             bias: true,

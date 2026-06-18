@@ -12,8 +12,9 @@ atexit.register(lambda: _ffi.get_lib().poly_ctx_destroy(_default_ctx))
 from .tensor import Tensor, Variable, BoundVariable
 from .dtype import dtypes
 from .device import Device
+from .instance import Instance
 
-__all__ = ['Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device']
+__all__ = ['Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance']
 
 try:
     __version__ = _pkg_version('polygrad')

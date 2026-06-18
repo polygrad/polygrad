@@ -17,6 +17,7 @@ function assertClose(actual, expected, tol = 1e-4) {
 
 async function runInstanceTests(pg) {
   const Instance = pg.Instance
+  const { MLP, TabM, NAM } = pg.models
   let passed = 0
   let failed = 0
 
@@ -39,8 +40,13 @@ async function runInstanceTests(pg) {
 
   console.log('\n== Instance ==')
 
+  await test('model-family constructors are not Instance methods', async () => {
+    assert(typeof Instance.mlp === 'undefined', 'Instance.mlp should not exist')
+    assert(typeof MLP === 'function', 'pg.models.MLP should exist')
+  })
+
   await test('mlp create + param enumeration', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 4, 1],
       activation: 'relu',
       bias: true,
@@ -58,7 +64,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('param trainability freezes optimizer updates', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 1],
       activation: 'none',
       bias: true,
@@ -95,7 +101,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('param trainability survives IR round trip', async () => {
-    const inst1 = Instance.mlp({
+    const inst1 = MLP({
       layers: [2, 1],
       activation: 'none',
       bias: true,
@@ -118,7 +124,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('mlp forward produces output', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 4, 1],
       activation: 'relu',
       bias: true,
@@ -137,7 +143,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('mlp train step decreases loss', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 1],
       activation: 'none',
       bias: true,
@@ -170,8 +176,8 @@ async function runInstanceTests(pg) {
       batch_size: 1,
       seed: 42
     }
-    const inst1 = Instance.mlp(spec)
-    const inst2 = Instance.mlp({ ...spec, seed: 99 })
+    const inst1 = MLP(spec)
+    const inst2 = MLP({ ...spec, seed: 99 })
     try {
       const original = await inst1.paramData(0)
       const different = await inst2.paramData(0)
@@ -195,7 +201,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('ir export/fromIR round trip', async () => {
-    const inst1 = Instance.mlp({
+    const inst1 = MLP({
       layers: [2, 4, 1],
       activation: 'relu',
       bias: true,
@@ -220,7 +226,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('mlp batch_size=32 forward produces correct shape', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [4, 8, 3],
       activation: 'relu',
       bias: true,
@@ -247,7 +253,7 @@ async function runInstanceTests(pg) {
   // Known bug: batch_size>1 cross_entropy backward has shape mismatch in codegen
   // Reproduces on CPU too (not WASM-specific). See PLAN.md P0.
   await test('mlp batch_size=32 train step decreases loss (P0)', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [4, 8, 3],
       activation: 'relu',
       bias: true,
@@ -276,7 +282,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('tabm and nam builders are available', async () => {
-    const tabm = Instance.tabm({
+    const tabm = TabM({
       layers: [2, 4, 1],
       activation: 'relu',
       loss: 'mse',
@@ -284,7 +290,7 @@ async function runInstanceTests(pg) {
       seed: 42,
       n_ensemble: 4
     })
-    const nam = Instance.nam({
+    const nam = NAM({
       n_features: 2,
       hidden_sizes: [4],
       activation: 'relu',
@@ -305,7 +311,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('mlp train step with Adam', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 4, 1],
       activation: 'relu',
       bias: true,
@@ -330,7 +336,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('mlp batch_size=4 mse train', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 4, 2],
       activation: 'relu',
       bias: true,
@@ -357,7 +363,7 @@ async function runInstanceTests(pg) {
   })
 
   await test('mlp 100-step convergence', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 8, 1],
       activation: 'relu',
       bias: true,
@@ -387,6 +393,7 @@ async function runInstanceTests(pg) {
 
 async function runInstanceSmokeTests(pg) {
   const Instance = pg.Instance
+  const { MLP, TabM, NAM } = pg.models
   let passed = 0
   let failed = 0
 
@@ -410,7 +417,7 @@ async function runInstanceSmokeTests(pg) {
   console.log('\n== Instance ==')
 
   await test('webgpu mlp forward smoke', async () => {
-    const inst = Instance.mlp({
+    const inst = MLP({
       layers: [2, 4, 1],
       activation: 'relu',
       bias: true,

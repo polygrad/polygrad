@@ -137,6 +137,27 @@ function createNativeCore() {
       if (inst) binding.poly_instance_set_device(inst, 0)
       return inst
     },
+    fromBindings(ctxPtr, bindings, entries) {
+      const bindingNames = bindings.map(b => b.name)
+      const bindingRoles = bindings.map(b => b.role)
+      const bindingTensors = bindings.map(b => b.tensor)
+      const bindingFlags = bindings.map(b => b.flags || 0)
+      const entryNames = entries.map(e => e.name)
+      const entryInputs = entries.flatMap(e => e.inputs || [])
+      const entryInputCounts = entries.map(e => (e.inputs || []).length)
+      const entryOutputs = entries.flatMap(e => e.outputs || [])
+      const entryOutputCounts = entries.map(e => (e.outputs || []).length)
+      const entryObjectives = entries.map(e => e.objective || null)
+      const entryFlags = entries.map(e => e.flags || 0)
+      const inst = binding.poly_instance_from_binding_arrays(
+        ctxPtr,
+        bindingNames, bindingRoles, bindingTensors, bindingFlags,
+        entryNames, entryInputs, entryInputCounts, entryOutputs, entryOutputCounts,
+        entryObjectives, entryFlags
+      )
+      if (inst) binding.poly_instance_set_device(inst, 0)
+      return inst
+    },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_hf_load(configBytes, weightFilesBytes,
         maxBatch || 1, maxSeqLen || 0)

@@ -7,7 +7,7 @@ const { create } = require('../src')
 
 async function main() {
   const pg = await create({ core: process.env.POLY_CORE || 'auto' })
-  const inst = pg.Instance.mlp({
+  const inst = pg.models.MLP({
     layers: [2, 4, 1],
     activation: 'relu',
     bias: true,

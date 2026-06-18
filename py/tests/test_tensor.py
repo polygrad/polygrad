@@ -22,6 +22,16 @@ class TestCreation:
         assert t.shape == (2, 3)
         np.testing.assert_allclose(t.numpy(), [[1, 2, 3], [4, 5, 6]])
 
+    def test_empty_creates_unrealized_buffer_placeholder(self):
+        t = Tensor.empty((2, 3))
+        assert t.shape == (2, 3)
+        assert t.uop.has_buffer_identity()
+        assert not t.uop.is_realized
+
+    def test_empty_rejects_name_like_tinygrad(self):
+        with pytest.raises(TypeError, match='Tensor.empty does not accept name'):
+            Tensor.empty((2, 3), name='z')
+
     def test_zeros(self):
         t = Tensor.zeros(3, 4)
         assert t.shape == (3, 4)

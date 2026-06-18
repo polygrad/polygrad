@@ -1,4 +1,4 @@
-"""Plain Python model object + nn.Linear + nn.Model.fit convenience.
+"""Plain Python object + nn.Linear exported with Instance.from_tensors.
 
 Run from repo root:
   PYTHONPATH=py POLYGRAD_LIB=build/libpolygrad.so python py/examples/nn_linear_model_fit.py
@@ -6,7 +6,7 @@ Run from repo root:
 
 import numpy as np
 
-from polygrad import Tensor, nn
+from polygrad import Instance, Tensor, nn
 
 
 class Net:
@@ -20,16 +20,19 @@ class Net:
 
 
 net = Net()
-x = nn.Input("x", shape=(1, 2))
-y = nn.Target("y", shape=(1, 1))
-model = nn.Model.trace(
-    net,
+x = Tensor.empty((1, 2))
+y = Tensor.empty((1, 1))
+pred = net(x)
+loss = (pred - y).square().mean()
+inst = Instance.from_tensors(
     inputs={"x": x},
     targets={"y": y},
-    loss=lambda pred, target: (pred - target).square().mean(),
+    outputs={"output": pred},
+    losses={"loss": loss},
+    params={"fc.weight": net.fc.weight, "fc.bias": net.fc.bias},
 )
 
-history = model.fit(
+history = inst.fit(
     {"x": np.array([[1.0, 2.0]], dtype=np.float32),
      "y": np.array([[4.0]], dtype=np.float32)},
     epochs=8,
@@ -38,4 +41,4 @@ history = model.fit(
 )
 
 print("loss", history[0], "->", history[-1])
-print("forward", model.instance.forward(x=np.array([[1.0, 2.0]], dtype=np.float32))["output"])
+print("forward", inst.forward(x=np.array([[1.0, 2.0]], dtype=np.float32))["output"])

@@ -79,6 +79,22 @@ async function runTests(pg) {
     assertClose(await t.toArray(), [1, 2, 3, 4])
   })
 
+  await test('empty creates unrealized buffer placeholder', async () => {
+    const t = Tensor.empty([2, 3])
+    assertShape(t.shape, [2, 3])
+    assert(t.uop.hasBufferIdentity(), 'empty should be backed by a BUFFER UOp')
+  })
+
+  await test('empty rejects named tensor keyword like tinygrad', async () => {
+    let threw = false
+    try {
+      Tensor.empty([2, 3], { name: 'z' })
+    } catch (_) {
+      threw = true
+    }
+    assert(threw, 'expected Tensor.empty(..., {name}) to reject')
+  })
+
   // -- Elementwise --
   console.log('\n-- Elementwise --')
 

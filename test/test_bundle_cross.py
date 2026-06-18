@@ -13,13 +13,14 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'py'))
 from polygrad.instance import Instance
+from polygrad.models import MLP
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 
 def generate_fixture():
     os.makedirs(FIXTURE_DIR, exist_ok=True)
 
-    inst = Instance.mlp({
+    inst = MLP({
         'layers': [2, 4, 1],
         'activation': 'relu',
         'bias': True,

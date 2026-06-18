@@ -1542,11 +1542,27 @@ function createBoundTensorClass(runtime) {
         opts = args[args.length - 1]; shape = args.slice(0, -1)
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
-      const AT = Tensor._resolveArrayType(opts)
+      shape = shape.map(x => Number(x))
+      if (shape.some(x => x < 0)) throw new Error(`negative dimensions are not allowed: ${shape}`)
+      if (opts && Object.prototype.hasOwnProperty.call(opts, 'name')) {
+        throw new TypeError('Tensor.empty does not accept name; pass names to Instance.fromTensors')
+      }
+      const ctx = (opts && opts._ctx) || _runtime._core.ctx
+      const dtype = (opts && opts.dtype) || 'float32'
+      const dtypeId = DTYPE_ID[dtype] || DTYPE_ID.float32
       const numel = shape.reduce((a, b) => a * b, 1)
-      const t = new Tensor(new AT(numel), opts)
-      if (shape.length > 1) return t.reshape(...shape)
-      return t
+      let uop = ffi.poly_buffer_by_id(ctx, dtypeId, numel)
+      if (!uop) throw new Error('poly_buffer_by_id failed')
+      if (shape.length !== 1 || (shape.length === 1 && shape[0] !== numel)) {
+        uop = ffi.poly_reshape(ctx, uop, shape, shape.length)
+        if (!uop) throw new Error('poly_reshape failed')
+      }
+      return new Tensor(null, {
+        _ctx: ctx,
+        _uop: new UOp(ctx, ffi, uop),
+        _dtype: dtype,
+        _device: opts && (opts._device || opts.device)
+      })
     }
 
     static cat(...tensors) {

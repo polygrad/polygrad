@@ -1,13 +1,13 @@
 """PolyInstance -- Python wrapper for the C PolyInstance runtime.
 
-Provides forward pass, training, and weight I/O for models created from
-IR bytes or family builders (MLP, etc.). This is the "product layer" API,
-independent of the Tensor class used in polygrad's tinygrad-compatible frontend.
+Provides forward pass, training, and weight I/O for runnable/exportable
+instances created from IR bytes, bundles, or frontend tensor graphs. Named
+architecture factories live in ``polygrad.models``.
 """
 
 import ctypes
 import ctypes.util
-import json
+import pathlib
 import numpy as np
 from . import _ffi
 
@@ -24,6 +24,15 @@ ROLE_INPUT = 1
 ROLE_TARGET = 2
 ROLE_OUTPUT = 3
 ROLE_AUX = 4
+
+_ROLE_IDS = {
+    'param': ROLE_PARAM,
+    'state': ROLE_PARAM,
+    'input': ROLE_INPUT,
+    'target': ROLE_TARGET,
+    'output': ROLE_OUTPUT,
+    'aux': ROLE_AUX,
+}
 
 # Optimizer constants
 OPTIM_NONE = 0
@@ -44,10 +53,192 @@ def _optimizer_kind(kind):
     return int(kind)
 
 
+def _normalize_named_tensors(value, default_name):
+    if value is None:
+        return {}
+    from .tensor import Tensor
+    if isinstance(value, Tensor):
+        return {default_name: value}
+    return dict(value)
+
+
+def _param_items(params):
+    if params is None:
+        return []
+    if isinstance(params, dict):
+        return list(params.items())
+    return [(f'param_{i}', p) for i, p in enumerate(params)]
+
+
+def _name_bytes(name):
+    text = str(name)
+    if not text:
+        raise ValueError('Instance binding names must be non-empty')
+    if '\x00' in text:
+        raise ValueError(f'Instance binding name contains NUL: {text!r}')
+    return text.encode('utf-8')
+
+
+def _require_tensor(name, tensor):
+    from .tensor import Tensor
+
+    if not isinstance(tensor, Tensor):
+        raise TypeError(f'{name!r} is not a Tensor')
+    if not tensor._tensor:
+        raise RuntimeError(f'{name!r} has no core PolyTensor')
+    return tensor
+
+
+def _role_id(role):
+    if isinstance(role, str):
+        key = role.lower()
+        if key not in _ROLE_IDS:
+            raise ValueError(f'unknown Instance binding role: {role!r}')
+        return _ROLE_IDS[key]
+    return int(role)
+
+
+def _binding_fields(binding):
+    if isinstance(binding, dict):
+        return (
+            binding.get('name'),
+            binding.get('role'),
+            binding.get('tensor'),
+            binding.get('flags', 0),
+        )
+    if len(binding) == 3:
+        name, role, tensor = binding
+        return name, role, tensor, 0
+    if len(binding) == 4:
+        return binding
+    raise TypeError('Instance bindings must be dicts or (name, role, tensor[, flags]) tuples')
+
+
+def _entry_fields(entry):
+    if isinstance(entry, dict):
+        return (
+            entry.get('name'),
+            entry.get('inputs', ()),
+            entry.get('outputs', ()),
+            entry.get('objective'),
+            entry.get('flags', 0),
+        )
+    if len(entry) == 3:
+        name, inputs, outputs = entry
+        return name, inputs, outputs, None, 0
+    if len(entry) == 4:
+        name, inputs, outputs, objective = entry
+        return name, inputs, outputs, objective, 0
+    if len(entry) == 5:
+        return entry
+    raise TypeError(
+        'Instance entrypoints must be dicts or '
+        '(name, inputs, outputs[, objective[, flags]]) tuples'
+    )
+
+
+def _entry_name_list(names):
+    if names is None:
+        return []
+    if isinstance(names, str):
+        return [names]
+    return list(names)
+
+
+def _check_ctx(name, tensor, ctx, ctx_key):
+    from .tensor import _ptr_value
+
+    if _ptr_value(tensor._ctx) != ctx_key:
+        raise ValueError(f'{name!r} belongs to another PolyCtx')
+    return ctx
+
+
+def _ensure_storage_binding(name, tensor, *, realize_if_needed=False):
+    if realize_if_needed and (not tensor.uop.has_buffer_identity() or not tensor.uop.is_realized):
+        tensor.realize()
+    if not tensor.uop.has_buffer_identity():
+        raise RuntimeError(f'{name!r} has no buffer identity')
+
+
+def _entrypoint_spec(name, inputs, outputs, objective=None, flags=0, keepalive=None):
+    keepalive = keepalive if keepalive is not None else []
+    name_b = _name_bytes(name)
+    keepalive.append(name_b)
+
+    input_bs = [_name_bytes(n) for n in inputs]
+    output_bs = [_name_bytes(n) for n in outputs]
+    keepalive.extend(input_bs)
+    keepalive.extend(output_bs)
+
+    input_arr = None
+    output_arr = None
+    if input_bs:
+        input_arr = (ctypes.c_char_p * len(input_bs))(*input_bs)
+        keepalive.append(input_arr)
+    if output_bs:
+        output_arr = (ctypes.c_char_p * len(output_bs))(*output_bs)
+        keepalive.append(output_arr)
+
+    objective_b = _name_bytes(objective) if objective is not None else None
+    if objective_b is not None:
+        keepalive.append(objective_b)
+
+    return _ffi.PolyEntrypointSpec(
+        name_b,
+        input_arr,
+        len(input_bs),
+        output_arr,
+        len(output_bs),
+        objective_b,
+        int(flags),
+    )
+
+
+def _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive):
+    bindings = (_ffi.PolyBindingSpec * len(binding_rows))(*binding_rows)
+    entries = (_ffi.PolyEntrypointSpec * len(entry_rows))(*entry_rows)
+    keepalive.extend([bindings, entries])
+    err = _ffi.PolyInstanceError()
+    ptr = _ffi._lib.poly_instance_from_bindings(
+        ctx,
+        bindings,
+        len(binding_rows),
+        entries,
+        len(entry_rows),
+        None,
+        ctypes.byref(err),
+    )
+    if not ptr:
+        msg = bytes(err.message).split(b'\0', 1)[0].decode('utf-8', 'replace')
+        func = err.func.decode('utf-8', 'replace') if err.func else 'poly_instance_from_bindings'
+        detail = f'{func}: {msg}' if msg else func
+        raise RuntimeError(f'poly_instance_from_bindings failed: {detail}')
+    return Instance(ptr)
+
+
 class Instance:
     """Opaque model instance with forward, train, and weight I/O."""
 
-    def __init__(self, ptr):
+    def __init__(self, ptr=None, *, inputs=None, targets=None, state=None,
+                 outputs=None, entrypoints=None, params=None, losses=None):
+        spec_args = (inputs, targets, state, outputs, entrypoints, params, losses)
+        has_spec = any(v is not None for v in spec_args)
+        if has_spec:
+            if ptr is not None:
+                raise TypeError('Instance handle cannot be combined with tensor bindings')
+            built = Instance.from_tensors(
+                inputs=inputs,
+                targets=targets,
+                outputs=outputs,
+                losses=losses,
+                params=params,
+                state=state,
+                entrypoints=entrypoints,
+            )
+            self._ptr = built._ptr
+            built._ptr = None
+            return
+
         if not ptr:
             raise RuntimeError('Failed to create PolyInstance (NULL pointer)')
         self._ptr = ptr
@@ -76,33 +267,183 @@ class Instance:
         return Instance(ptr)
 
     @staticmethod
-    def mlp(spec):
-        """Create an MLP from a spec dict or JSON string."""
-        if isinstance(spec, dict):
-            spec = json.dumps(spec)
-        if isinstance(spec, str):
-            spec = spec.encode('utf-8')
-        ptr = _get_lib().poly_mlp_from_json(spec, len(spec))
-        return Instance(ptr)
+    def from_bindings(bindings, entrypoints):
+        """Create an Instance from explicit binding and entrypoint records.
+
+        Bindings may be dicts with ``name``, ``role``, ``tensor``, and optional
+        ``flags`` fields, or ``(name, role, tensor[, flags])`` tuples. Roles
+        accept the C role ids or strings: ``input``, ``target``, ``state``/
+        ``param``, ``output``, and ``aux``. Entrypoints may be dicts with
+        ``name``, ``inputs``, ``outputs``, optional ``objective``/``flags``, or
+        matching tuples.
+        """
+        from .tensor import _ptr_value
+
+        bindings = list(bindings or ())
+        entrypoints = list(entrypoints or ())
+        if not bindings:
+            raise ValueError('Instance.from_bindings requires at least one binding')
+        if not entrypoints:
+            raise ValueError('Instance.from_bindings requires at least one entrypoint')
+
+        parsed = []
+        for binding in bindings:
+            name, role, tensor, flags = _binding_fields(binding)
+            if name is None:
+                raise ValueError('Instance binding is missing a name')
+            if role is None:
+                raise ValueError(f'Instance binding {name!r} is missing a role')
+            parsed.append((name, _role_id(role), _require_tensor(name, tensor), int(flags)))
+
+        ctx = parsed[0][2]._ctx
+        ctx_key = _ptr_value(ctx)
+        for name, _, tensor, _ in parsed:
+            _check_ctx(name, tensor, ctx, ctx_key)
+
+        keepalive = []
+        binding_rows = []
+        for name, role, tensor, flags in parsed:
+            name_b = _name_bytes(name)
+            keepalive.append(name_b)
+            binding_rows.append(_ffi.PolyBindingSpec(name_b, role, tensor._tensor, flags))
+
+        entry_rows = []
+        for entry in entrypoints:
+            name, inputs, outputs, objective, flags = _entry_fields(entry)
+            if name is None:
+                raise ValueError('Instance entrypoint is missing a name')
+            entry_rows.append(_entrypoint_spec(
+                name,
+                _entry_name_list(inputs),
+                _entry_name_list(outputs),
+                objective=objective,
+                flags=flags,
+                keepalive=keepalive,
+            ))
+
+        return _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
 
     @staticmethod
-    def tabm(spec):
-        """Create a TabM (BatchEnsemble MLP) from a spec dict or JSON string."""
-        if isinstance(spec, dict):
-            spec = json.dumps(spec)
-        if isinstance(spec, str):
-            spec = spec.encode('utf-8')
-        ptr = _get_lib().poly_tabm_instance(spec, len(spec))
-        return Instance(ptr)
+    def from_tensors(
+        inputs=None,
+        outputs=None,
+        *,
+        targets=None,
+        losses=None,
+        params=None,
+        state=None,
+        entrypoints=None,
+    ):
+        """Package named Tensor roots as a runnable/exportable Instance."""
+        from .tensor import Tensor, _ptr_value
+
+        if params is not None and state is not None:
+            raise ValueError('Instance.from_tensors accepts params or state, not both')
+        if state is not None:
+            params = state
+
+        inputs = _normalize_named_tensors(inputs, 'input')
+        targets = _normalize_named_tensors(targets, 'target')
+        outputs = _normalize_named_tensors(outputs, 'output')
+        losses = _normalize_named_tensors(losses, 'loss')
+        param_items = [(name, tensor) for name, tensor in _param_items(params)
+                       if isinstance(tensor, Tensor)]
+
+        named_tensors = []
+        for group in (inputs, targets, outputs, losses):
+            for name, tensor in group.items():
+                named_tensors.append((name, _require_tensor(name, tensor)))
+        for name, tensor in param_items:
+            named_tensors.append((name, _require_tensor(name, tensor)))
+        if not named_tensors:
+            raise ValueError('Instance.from_tensors requires at least one tensor')
+        if not outputs and not losses:
+            raise ValueError('Instance.from_tensors requires outputs or losses')
+
+        ctx = named_tensors[0][1]._ctx
+        ctx_key = _ptr_value(ctx)
+        for name, tensor in named_tensors:
+            _check_ctx(name, tensor, ctx, ctx_key)
+
+        # Match the old export path: parameters may be lazy initializers, so
+        # materialize them first. Live-tensor retargeting rewrites output/loss
+        # graphs to read the realized storage snapshot.
+        for name, tensor in param_items:
+            _ensure_storage_binding(name, tensor, realize_if_needed=True)
+        for name, tensor in list(inputs.items()) + list(targets.items()):
+            _ensure_storage_binding(name, tensor)
+
+        keepalive = []
+        binding_rows = []
+
+        def add_binding(name, role, tensor, flags=0):
+            name_b = _name_bytes(name)
+            keepalive.append(name_b)
+            binding_rows.append(_ffi.PolyBindingSpec(name_b, int(role), tensor._tensor, int(flags)))
+
+        for name, tensor in inputs.items():
+            add_binding(name, ROLE_INPUT, tensor)
+        for name, tensor in targets.items():
+            add_binding(name, ROLE_TARGET, tensor)
+        for name, tensor in param_items:
+            add_binding(name, ROLE_PARAM, tensor)
+        for name, tensor in outputs.items():
+            add_binding(name, ROLE_OUTPUT, tensor)
+        for name, tensor in losses.items():
+            add_binding(name, ROLE_OUTPUT, tensor)
+
+        entry_rows = []
+        if entrypoints is not None:
+            for entry in entrypoints:
+                name, entry_inputs, entry_outputs, objective, flags = _entry_fields(entry)
+                if name is None:
+                    raise ValueError('Instance entrypoint is missing a name')
+                entry_rows.append(_entrypoint_spec(
+                    name,
+                    _entry_name_list(entry_inputs),
+                    _entry_name_list(entry_outputs),
+                    objective=objective,
+                    flags=flags,
+                    keepalive=keepalive,
+                ))
+        else:
+            if outputs:
+                entry_rows.append(_entrypoint_spec(
+                    'forward', list(inputs.keys()), list(outputs.keys()), keepalive=keepalive
+                ))
+            if losses:
+                objective = 'loss' if len(losses) == 1 and 'loss' in losses else None
+                entry_rows.append(_entrypoint_spec(
+                    'loss', list(inputs.keys()) + list(targets.keys()), list(losses.keys()),
+                    objective=objective, keepalive=keepalive
+                ))
+
+        return _instance_from_binding_specs(ctx, binding_rows, entry_rows, keepalive)
 
     @staticmethod
-    def nam(spec):
-        """Create a NAM (Neural Additive Model) from a spec dict or JSON string."""
-        if isinstance(spec, dict):
-            spec = json.dumps(spec)
-        if isinstance(spec, str):
-            spec = spec.encode('utf-8')
-        ptr = _get_lib().poly_nam_instance(spec, len(spec))
+    def from_hf(model_path=None, *, config_json=None, weight_bytes_list=None,
+                max_batch=1, max_seq_len=0):
+        """Load a HuggingFace-format model as an Instance."""
+        from .hf import load_hf, load_hf_bytes
+
+        if config_json is not None or weight_bytes_list is not None:
+            if config_json is None or weight_bytes_list is None:
+                raise ValueError('config_json and weight_bytes_list must be provided together')
+            return load_hf_bytes(config_json, weight_bytes_list, max_batch, max_seq_len)
+        if model_path is None:
+            raise ValueError('model_path is required')
+        return load_hf(model_path, max_batch=max_batch, max_seq_len=max_seq_len)
+
+    @staticmethod
+    def from_gguf(data, *, max_batch=1, max_seq_len=0):
+        """Load a GGUF byte buffer or file path as an Instance."""
+        if isinstance(data, (str, pathlib.Path)):
+            data = pathlib.Path(data).read_bytes()
+        data = bytes(data)
+        buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+        ptr = _get_lib().poly_gguf_load(buf, len(data), int(max_batch), int(max_seq_len))
+        if not ptr:
+            raise RuntimeError('poly_gguf_load returned NULL')
         return Instance(ptr)
 
     # ── Param Enumeration ────────────────────────────────────────────

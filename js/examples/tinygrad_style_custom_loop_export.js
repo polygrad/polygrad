@@ -28,8 +28,13 @@ async function main() {
     await opt.step()
   }
 
-  const input = pg.nn.Input('x', { shape: [1, 2] })
-  const inst = await pg.nn.trace(model, { inputs: { x: input } }).export()
+  const input = pg.Tensor.empty([1, 2])
+  const output = model.call(input)
+  const inst = await pg.Instance.fromTensors({
+    inputs: { x: input },
+    outputs: { output },
+    params: { weight: model.weight }
+  })
   const out = inst.forward({ x: new Float32Array([1, 2]) })
   console.log('forward', Array.from(out.output))
   console.log('bundle bytes', inst.saveBundle().length)

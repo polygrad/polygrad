@@ -5,21 +5,28 @@ import os
 import numpy as np
 import pytest
 from polygrad.instance import Instance, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
+from polygrad.models import MLP
+
+
+class TestModelConstructors:
+    def test_family_constructors_are_not_instance_methods(self):
+        assert not hasattr(Instance, 'mlp')
+        assert callable(MLP)
 
 
 class TestMLPCreate:
     def test_create_simple(self):
-        inst = Instance.mlp({
-            'layers': [2, 4, 1], 'activation': 'relu',
-            'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
-        })
+        inst = MLP(
+            layers=[2, 4, 1], activation='relu',
+            bias=True, loss='mse', batch_size=1, seed=42,
+        )
         assert inst.param_count == 4
         assert inst.param_name(0) == 'layers.0.weight'
         assert inst.param_shape(0) == [4, 2]
         inst.free()
 
     def test_create_no_bias(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [3, 2], 'activation': 'none',
             'bias': False, 'loss': 'none', 'batch_size': 1, 'seed': 42
         })
@@ -33,20 +40,20 @@ class TestMLPCreate:
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         }
-        i1 = Instance.mlp(spec)
-        i2 = Instance.mlp(spec)
+        i1 = MLP(spec)
+        i2 = MLP(spec)
         np.testing.assert_array_equal(i1.param_data(0), i2.param_data(0))
         i1.free()
         i2.free()
 
     def test_null_spec(self):
         with pytest.raises(RuntimeError):
-            Instance.mlp('{}')
+            MLP('{}')
 
 
 class TestForward:
     def test_forward_produces_output(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -56,7 +63,7 @@ class TestForward:
         inst.free()
 
     def test_forward_deterministic(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -68,7 +75,7 @@ class TestForward:
 
 class TestTrain:
     def test_train_sgd(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 1], 'activation': 'none',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -86,7 +93,7 @@ class TestTrain:
         inst.free()
 
     def test_train_multi_layer(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [1, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -110,7 +117,7 @@ class TestWeightIO:
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         }
-        inst = Instance.mlp(spec)
+        inst = MLP(spec)
         original_w = inst.param_data(0).copy()
 
         # Export
@@ -120,7 +127,7 @@ class TestWeightIO:
 
         # Create fresh instance with different seed
         spec2 = dict(spec, seed=99)
-        inst2 = Instance.mlp(spec2)
+        inst2 = MLP(spec2)
         different_w = inst2.param_data(0).copy()
         assert not np.array_equal(original_w, different_w)
 
@@ -134,7 +141,7 @@ class TestWeightIO:
 
 class TestBufferEnumeration:
     def test_buf_roles(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 1], 'activation': 'none',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -149,7 +156,7 @@ class TestBufferEnumeration:
         inst.free()
 
     def test_find_buf(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 1], 'activation': 'none',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -162,7 +169,7 @@ class TestBufferEnumeration:
 
 class TestParams:
     def test_param_iteration(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -175,7 +182,7 @@ class TestParams:
         inst.free()
 
     def test_param_trainability_freezes_optimizer_updates(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 1], 'activation': 'none',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -200,7 +207,7 @@ class TestParams:
             inst.free()
 
     def test_trainability_survives_ir_roundtrip(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 1], 'activation': 'none',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -222,7 +229,7 @@ class TestTrainBatch:
     """batch_size>1 training (P0 regression coverage)."""
 
     def test_train_batch2_mse(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 3, 2], 'activation': 'relu',
             'bias': False, 'loss': 'mse', 'batch_size': 2, 'seed': 42
         })
@@ -237,7 +244,7 @@ class TestTrainBatch:
         inst.free()
 
     def test_train_batch32_cross_entropy(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [4, 8, 3], 'activation': 'relu',
             'bias': True, 'loss': 'cross_entropy', 'batch_size': 32, 'seed': 42
         })
@@ -258,7 +265,7 @@ class TestTrainOptimizers:
     """Adam/AdamW optimizer coverage."""
 
     def test_train_adam(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -273,7 +280,7 @@ class TestTrainOptimizers:
         inst.free()
 
     def test_train_adamw(self):
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -296,7 +303,7 @@ class TestSetDevice:
         lib.poly_instance_set_device.restype = ctypes.c_int
         lib.poly_instance_set_device.argtypes = [ctypes.c_void_p, ctypes.c_int]
 
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 4, 1], 'activation': 'relu',
             'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
@@ -321,7 +328,7 @@ class TestInstanceTensorParity:
         from polygrad.tensor import Tensor
 
         # Instance path
-        inst = Instance.mlp({
+        inst = MLP({
             'layers': [2, 1], 'activation': 'none',
             'bias': False, 'loss': 'mse', 'batch_size': 1, 'seed': 42
         })
