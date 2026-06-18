@@ -1005,6 +1005,64 @@ TEST(realize, transform_to_call_wraps_sink_body_in_call) {
   PASS();
 }
 
+TEST(realize, transform_to_call_deep_view_stack_retargets_all_views) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer_f32(ctx, 1);
+  PolyUOp *u = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
+  for (int i = 0; i < 20; i++) {
+    int64_t pads[1][2] = {{1, 1}};
+    u = poly_pad(ctx, u, pads, 1);
+  }
+
+  PolyUOp *targets[] = {u};
+  PolyUOp *realized[] = {NULL};
+  PolyUOp *big_call = poly_transform_to_call(ctx, targets, 1, realized);
+  ASSERT_NOT_NULL(big_call);
+  ASSERT_INT_EQ(big_call->op, POLY_OP_CALL);
+  ASSERT_NOT_NULL(realized[0]);
+  ASSERT_INT_EQ(count_root_ops(ctx, realized[0], POLY_OP_PAD), 20);
+
+  PolyShape shape = poly_uop_shape_cached(ctx, realized[0]);
+  ASSERT_INT_EQ(shape.ndim, 1);
+  ASSERT_INT_EQ(shape.dims[0], 41);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_many_reduce_view_sources_materialize_all) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  enum { N_TERMS = 70 };
+  PolyUOp *sum = NULL;
+  for (int i = 0; i < N_TERMS; i++) {
+    PolyUOp *buf = poly_buffer_f32(ctx, 4);
+    int64_t axis[] = {0};
+    PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_ADD, buf, axis, 1);
+    PolyUOp *view = poly_reshape(ctx, reduced, (int64_t[]){1}, 1);
+    sum = sum ? poly_alu2(ctx, POLY_OP_ADD, sum, view) : view;
+  }
+
+  PolyUOp *targets[] = {sum};
+  PolyUOp *realized[] = {NULL};
+  PolyUOp *big_call = poly_transform_to_call(ctx, targets, 1, realized);
+  ASSERT_NOT_NULL(big_call);
+  ASSERT_INT_EQ(big_call->op, POLY_OP_CALL);
+  ASSERT_NOT_NULL(big_call->src[0]);
+  ASSERT_INT_EQ(big_call->src[0]->op, POLY_OP_SINK);
+  ASSERT_TRUE(big_call->src[0]->n_src >= N_TERMS + 1);
+
+  PolyUOp *final_store = big_call->src[0]->src[big_call->src[0]->n_src - 1];
+  ASSERT_NOT_NULL(final_store);
+  ASSERT_INT_EQ(final_store->op, POLY_OP_STORE);
+  ASSERT_TRUE(final_store->n_src >= 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, final_store->src[1], POLY_OP_REDUCE_AXIS), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, schedule_with_vars_then_run_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
 

@@ -58,6 +58,30 @@ static PolyUOp *mk_reduce(
 
 /* D1 stub smoke tests (kept after D2 lands) */
 
+TEST(reduce_simplify, split_ranges_without_ctx_is_noop_not_abort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_const_int(ctx, 1);
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, c, poly_arg_none());
+
+  PolyUOp *out = poly_graph_rewrite(ctx, sink, poly_pm_split_ranges());
+  ASSERT_PTR_EQ(out, sink);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(reduce_simplify, reduce_pass_without_ctx_is_noop_not_abort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_const_int(ctx, 1);
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, c, poly_arg_none());
+
+  PolyUOp *out = poly_graph_rewrite(ctx, sink, poly_pm_reduce_pass());
+  ASSERT_PTR_EQ(out, sink);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(reduce_simplify, d1_stub_noop_on_const) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_const_int(ctx, 42);

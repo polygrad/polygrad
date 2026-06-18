@@ -346,12 +346,16 @@ typedef struct {
   int top, cap;
 } WorkStack;
 
-static void ws_push(WorkStack *ws, PolyUOp *n, int stage, PolyUOp *new_n) {
+static bool ws_push(WorkStack *ws, PolyUOp *n, int stage, PolyUOp *new_n) {
   if (ws->top >= ws->cap) {
-    ws->cap = ws->cap ? ws->cap * 2 : 256;
-    ws->items = realloc(ws->items, ws->cap * sizeof(WorkItem));
+    int new_cap = ws->cap ? ws->cap * 2 : 256;
+    WorkItem *new_items = realloc(ws->items, (size_t)new_cap * sizeof(WorkItem));
+    if (!new_items) return false;
+    ws->items = new_items;
+    ws->cap = new_cap;
   }
   ws->items[ws->top++] = (WorkItem){n, stage, new_n};
+  return true;
 }
 
 /* Waitlist: linked list of work items per UOp key */
@@ -360,27 +364,60 @@ typedef struct WaitNode {
   struct WaitNode *next;
 } WaitNode;
 
-static void waitlist_add(PolyMap *wl, PolyUOp *key, WorkItem item) {
+static bool waitlist_add(PolyMap *wl, PolyUOp *key, WorkItem item) {
   uint32_t h = poly_ptr_hash(key);
   WaitNode *node = malloc(sizeof(WaitNode));
+  if (!node) return false;
   node->item = item;
   node->next = poly_map_get(wl, h, key, poly_ptr_eq);
   poly_map_set(wl, h, key, node, poly_ptr_eq);
+  return true;
 }
 
-static void waitlist_flush(PolyMap *wl, PolyUOp *key, WorkStack *ws) {
-  uint32_t h = poly_ptr_hash(key);
-  WaitNode *chain = poly_map_get(wl, h, key, poly_ptr_eq);
+static void waitlist_free_chain(WaitNode *chain) {
   while (chain) {
-    ws_push(ws, chain->item.n, chain->item.stage, chain->item.new_n);
     WaitNode *next = chain->next;
     free(chain);
     chain = next;
   }
+}
+
+static bool waitlist_flush(PolyMap *wl, PolyUOp *key, WorkStack *ws) {
+  uint32_t h = poly_ptr_hash(key);
+  WaitNode *chain = poly_map_get(wl, h, key, poly_ptr_eq);
+  while (chain) {
+    WaitNode *next = chain->next;
+    bool ok = ws_push(ws, chain->item.n, chain->item.stage, chain->item.new_n);
+    free(chain);
+    if (!ok) {
+      waitlist_free_chain(next);
+      poly_map_remove(wl, h, key, poly_ptr_eq);
+      return false;
+    }
+    chain = next;
+  }
   poly_map_remove(wl, h, key, poly_ptr_eq);
+  return true;
+}
+
+static void waitlist_free_entry(const void *key, void *value, void *userdata) {
+  (void)key;
+  (void)userdata;
+  waitlist_free_chain((WaitNode *)value);
+}
+
+static void waitlist_destroy(PolyMap *wl) {
+  if (!wl) return;
+  poly_map_foreach(wl, waitlist_free_entry, NULL);
+  poly_map_destroy(wl);
 }
 
 #define REWRITE_STACK_LIMIT 100000
+
+static int rewrite_stack_limit(void) {
+  int limit = poly_getenv_int("POLY_REWRITE_STACK_LIMIT", REWRITE_STACK_LIMIT);
+  return limit > 0 ? limit : REWRITE_STACK_LIMIT;
+}
 
 static PolyUOp *replace_get(PolyMap *m, PolyUOp *key) {
   return poly_map_get(m, poly_ptr_hash(key), key, poly_ptr_eq);
@@ -391,7 +428,7 @@ static void replace_set(PolyMap *m, PolyUOp *key, PolyUOp *val) {
 }
 
 /* Active graph_rewrite user context for callbacks that need pass-local state. */
-static void *g_graph_rewrite_userctx = NULL;
+static _Thread_local void *g_graph_rewrite_userctx = NULL;
 
 void *poly_graph_rewrite_userctx(void) {
   return g_graph_rewrite_userctx;
@@ -405,6 +442,8 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
     bool bottom_up,
     bool enter_calls
 ) {
+  if (!ctx || !sink) return NULL;
+
   void *prev_userctx = g_graph_rewrite_userctx;
   g_graph_rewrite_userctx = user_ctx;
 
@@ -412,34 +451,62 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
   PolyMap *on_stack = poly_map_new(256);
   PolyMap *waitlist = poly_map_new(64);
   WorkStack ws = {NULL, 0, 0};
+  bool failed = false;
+  PolyUOp *result = NULL;
+  int stack_limit = rewrite_stack_limit();
 
-  /* Mark root as on_stack and push */
+  if (!replace || !on_stack || !waitlist) {
+    fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+    failed = true;
+    goto cleanup;
+  }
+
+  /* Mark root as on_stack and push. */
   poly_map_set(on_stack, poly_ptr_hash(sink), sink, (void *)(uintptr_t)1, poly_ptr_eq);
-  ws_push(&ws, sink, 0, sink);
+  if (!ws_push(&ws, sink, 0, sink)) {
+    fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+    failed = true;
+    goto cleanup;
+  }
 
   while (ws.top > 0) {
-    if (ws.top > REWRITE_STACK_LIMIT) {
+    if (ws.top > stack_limit) {
       fprintf(stderr, "polygrad: graph_rewrite stack overflow\n");
+      failed = true;
       break;
     }
     WorkItem wi = ws.items[--ws.top];
     PolyUOp *n = wi.n, *new_n = wi.new_n;
     int stage = wi.stage;
 
-    /* Skip if already done */
+    /* Skip if already done. */
     if (replace_get(replace, n)) continue;
 
     if (stage == 0) {
-      /* Bottom-up: apply matcher first to a fixed point, then descend. */
+      /* Bottom-up: apply matcher first to a fixed point, then descend.
+       * tinygrad tracks seen UOps and raises on repeated fixed-point state;
+       * in C the equivalent hard failure is returning NULL from this pass. */
       if (bottom_up && pm) {
         PolyUOp *cur = new_n;
-        for (int iter = 0; iter < 4096; iter++) {
+        PolyMap *seen = poly_map_new(16);
+        if (!seen) {
+          fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+          failed = true;
+          goto cleanup;
+        }
+        while (cur) {
+          if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) {
+            fprintf(stderr, "polygrad: graph_rewrite fixed-point cycle\n");
+            poly_map_destroy(seen);
+            failed = true;
+            goto cleanup;
+          }
+          poly_map_set(seen, poly_ptr_hash(cur), cur, (void *)(uintptr_t)1, poly_ptr_eq);
           PolyUOp *next = poly_pm_rewrite(pm, ctx, cur);
           if (!next || next == cur) break;
           cur = next;
-          if (iter == 4095)
-            fprintf(stderr, "polygrad: graph_rewrite fixed-point iteration limit hit\n");
         }
+        poly_map_destroy(seen);
         new_n = cur;
       }
 
@@ -450,18 +517,31 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
         PolyUOp *callee = new_n->src[0];
         int n_callee = 0;
         PolyUOp **callee_topo = poly_toposort(ctx, callee, &n_callee);
+        if (!callee_topo && n_callee > 0) {
+          fprintf(stderr, "polygrad: graph_rewrite callee toposort failed\n");
+          failed = true;
+          goto cleanup;
+        }
         for (int ci = 0; ci < n_callee; ci++)
           replace_set(replace, callee_topo[ci], callee_topo[ci]);
       }
 
       /* Stage 1 rebuilds from rewritten sources and applies top-down rewrite. */
-      ws_push(&ws, n, 1, new_n);
+      if (!ws_push(&ws, n, 1, new_n)) {
+        fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+        failed = true;
+        goto cleanup;
+      }
       int src_start = (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 1) ? 1 : 0;
       for (int i = new_n->n_src - 1; i >= src_start; i--) {
         PolyUOp *x = new_n->src[i];
         if (poly_map_get(on_stack, poly_ptr_hash(x), x, poly_ptr_eq)) continue;
         poly_map_set(on_stack, poly_ptr_hash(x), x, (void *)(uintptr_t)1, poly_ptr_eq);
-        ws_push(&ws, x, 0, x);
+        if (!ws_push(&ws, x, 0, x)) {
+          fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+          failed = true;
+          goto cleanup;
+        }
       }
     } else if (stage == 1) {
       /* All sources should be rewritten. Collect them. */
@@ -469,12 +549,22 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
       bool any_changed = false;
       bool heap_src = (new_n->n_src > 16);
       PolyUOp *new_src_buf[16];
-      PolyUOp **new_src = heap_src ? malloc(new_n->n_src * sizeof(PolyUOp *)) : new_src_buf;
+      PolyUOp **new_src = heap_src ? malloc((size_t)new_n->n_src * sizeof(PolyUOp *)) : new_src_buf;
+      if (heap_src && !new_src) {
+        fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+        failed = true;
+        goto cleanup;
+      }
 
       for (int i = 0; i < new_n->n_src; i++) {
         PolyUOp *rx = replace_get(replace, new_n->src[i]);
         if (!rx) {
-          waitlist_add(waitlist, new_n->src[i], (WorkItem){n, 1, new_n});
+          if (!waitlist_add(waitlist, new_n->src[i], (WorkItem){n, 1, new_n})) {
+            fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+            if (heap_src) free(new_src);
+            failed = true;
+            goto cleanup;
+          }
           all_ready = false;
           break;
         }
@@ -491,7 +581,12 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
         new_src_n = bottom_up ? NULL : poly_pm_rewrite(pm, ctx, new_n);
         if (!new_src_n || new_src_n == new_n) {
           replace_set(replace, n, new_n);
-          waitlist_flush(waitlist, n, &ws);
+          if (!waitlist_flush(waitlist, n, &ws)) {
+            fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+            if (heap_src) free(new_src);
+            failed = true;
+            goto cleanup;
+          }
           if (heap_src) free(new_src);
           continue;
         }
@@ -505,31 +600,53 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
       }
       if (heap_src) free(new_src);
 
-      /* Push the new node for full rewrite, then link back in stage 2 */
-      ws_push(&ws, n, 2, new_src_n);
-      ws_push(&ws, new_src_n, 0, new_src_n);
+      /* Push the new node for full rewrite, then link back in stage 2. */
+      if (!ws_push(&ws, n, 2, new_src_n) || !ws_push(&ws, new_src_n, 0, new_src_n)) {
+        fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+        failed = true;
+        goto cleanup;
+      }
     } else {
-      /* Stage 2: link n -> result of new_n */
+      /* Stage 2: link n -> result of new_n. */
       PolyUOp *replaced = replace_get(replace, new_n);
       if (!replaced) {
-        waitlist_add(waitlist, new_n, (WorkItem){n, 2, new_n});
+        if (!waitlist_add(waitlist, new_n, (WorkItem){n, 2, new_n})) {
+          fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+          failed = true;
+          goto cleanup;
+        }
       } else {
         replace_set(replace, n, replaced);
-        waitlist_flush(waitlist, n, &ws);
+        if (!waitlist_flush(waitlist, n, &ws)) {
+          fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+          failed = true;
+          goto cleanup;
+        }
       }
     }
   }
 
-  PolyUOp *result = replace_get(replace, sink);
+  if (!failed && waitlist && poly_map_len(waitlist) > 0) {
+    fprintf(stderr, "polygrad: graph_rewrite unresolved waitlist\n");
+    failed = true;
+  }
 
+  if (!failed) {
+    result = replace_get(replace, sink);
+    if (!result) {
+      fprintf(stderr, "polygrad: graph_rewrite root was not rewritten\n");
+      failed = true;
+    }
+  }
+
+cleanup:
   free(ws.items);
-  poly_map_destroy(replace);
-  poly_map_destroy(on_stack);
-  /* Free any remaining waitlist nodes */
-  poly_map_destroy(waitlist);
+  if (replace) poly_map_destroy(replace);
+  if (on_stack) poly_map_destroy(on_stack);
+  waitlist_destroy(waitlist);
 
   g_graph_rewrite_userctx = prev_userctx;
-  return result ? result : sink;
+  return failed ? NULL : result;
 }
 
 /* walk_rewrite: MLIR-style single-pass, no re-traversal */
@@ -548,7 +665,12 @@ PolyUOp *poly_graph_walk_rewrite(
   PolyMap *replace = poly_map_new(256);
   WorkStack ws = {NULL, 0, 0};
 
-  ws_push(&ws, sink, 0, sink);
+  if (!ws_push(&ws, sink, 0, sink)) {
+    g_graph_rewrite_userctx = prev_userctx;
+    free(ws.items);
+    poly_map_destroy(replace);
+    return NULL;
+  }
 
   while (ws.top > 0) {
     WorkItem wi = ws.items[--ws.top];
@@ -568,7 +690,12 @@ PolyUOp *poly_graph_walk_rewrite(
       }
 
       /* Push for rebuild, then push children */
-      ws_push(&ws, n, 1, n);
+      if (!ws_push(&ws, n, 1, n)) {
+        free(ws.items);
+        poly_map_destroy(replace);
+        g_graph_rewrite_userctx = prev_userctx;
+        return NULL;
+      }
 
       /* CALL gating: identity-map entire callee subgraph */
       if (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 0) {
@@ -580,7 +707,12 @@ PolyUOp *poly_graph_walk_rewrite(
 
       int start = (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 1) ? 1 : 0;
       for (int i = n->n_src - 1; i >= start; i--) {
-        if (!replace_get(replace, n->src[i])) ws_push(&ws, n->src[i], 0, n->src[i]);
+        if (!replace_get(replace, n->src[i]) && !ws_push(&ws, n->src[i], 0, n->src[i])) {
+          free(ws.items);
+          poly_map_destroy(replace);
+          g_graph_rewrite_userctx = prev_userctx;
+          return NULL;
+        }
       }
     } else {
       /* Rebuild with rewritten sources */
@@ -668,18 +800,22 @@ PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
    * interpret arg.i as arg.f, lowering it to a denormal/zero. Verified
    * against test/parity_scripts/tg_cast_const_fold_gt.py cases A-E. */
   if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_FLOAT || val.kind == POLY_ARG_BOOL) {
-    double dval;
-    if (val.kind == POLY_ARG_INT)
-      dval = (double)val.i;
-    else if (val.kind == POLY_ARG_FLOAT)
-      dval = val.f;
-    else
-      dval = val.b ? 1.0 : 0.0;
-    if (poly_dtype_is_float(ref->dtype))
+    if (poly_dtype_is_float(ref->dtype)) {
+      double dval = (val.kind == POLY_ARG_INT)    ? (double)val.i
+                    : (val.kind == POLY_ARG_BOOL) ? (val.b ? 1.0 : 0.0)
+                                                  : val.f;
       return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_float(dval));
-    if (poly_dtype_is_bool(ref->dtype))
-      return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(dval != 0.0));
-    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_int((int64_t)dval));
+    }
+    if (poly_dtype_is_bool(ref->dtype)) {
+      bool bval = (val.kind == POLY_ARG_INT)    ? (val.i != 0)
+                  : (val.kind == POLY_ARG_BOOL) ? val.b
+                                                : (val.f != 0.0);
+      return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(bval));
+    }
+    int64_t ival = (val.kind == POLY_ARG_INT)    ? val.i
+                   : (val.kind == POLY_ARG_BOOL) ? (val.b ? 1 : 0)
+                                                 : (int64_t)val.f;
+    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_int(ival));
   }
   /* Non-numeric arg kinds (NONE, OPS, RANGE, etc.) are passed through as-is
    * for callers like rule_const_fold_unary that synthesise the right kind

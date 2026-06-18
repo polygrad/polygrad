@@ -10,6 +10,7 @@
 #include "../src/schedule/indexing.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
+#include "../src/tensor.h"
 #include "../src/utils.h"
 
 /* Cleanup helper */
@@ -474,6 +475,48 @@ TEST(rangeify, range_prop_multi_consumer_realize) {
   PASS();
 }
 
+TEST(rangeify, range_prop_multi_consumer_overflow_realizes) {
+  /* More than 16 consumers exceeds poly_range_propagate's fixed scratch
+   * proof set. The first 16 consumers below all inherit the same final store
+   * range, while the 17th is FLIP(x), whose input index differs. If the 17th
+   * consumer is silently ignored, x incorrectly remains fused. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *x = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
+
+  PolyUOp *acc = NULL;
+  for (int i = 0; i < 16; i++) {
+    PolyUOp *c = poly_const_float(ctx, (double)(i + 1));
+    PolyUOp *term = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, x, c, poly_arg_none());
+    acc = acc ? poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, acc, term, poly_arg_none()) : term;
+  }
+  PolyUOp *flipped = poly_flip(ctx, x, (int64_t[]){0}, 1);
+  acc = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, acc, flipped, poly_arg_none());
+
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, acc, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  poly_realize_map_build(ictx, sink);
+  poly_range_propagate(ictx, sink);
+
+  ASSERT_TRUE(poly_is_realized(ictx, x));
+
+  PolyRangeEntry *re_x = poly_range_map_get(ictx, x);
+  PolyRangeEntry *re_store = poly_range_map_get(ictx, store);
+  ASSERT_NOT_NULL(re_x);
+  ASSERT_NOT_NULL(re_store);
+  ASSERT_INT_EQ(re_x->n_out, 1);
+  ASSERT_PTR_NEQ(re_x->out_rngs[0], re_store->out_rngs[0]);
+
+  poly_indexing_ctx_destroy(ictx);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, range_prop_expand_ending_realizes_elementwise_default_pcontig) {
   /* tinygrad indexing.py realizes ended ranges unconditionally when
    * PCONTIG <= 1. The default tinygrad setting is PCONTIG=0, so an
@@ -688,6 +731,24 @@ static int count_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int count = 0;
   for (int i = 0; i < n; i++)
     if (topo[i]->op == op) count++;
+  return count;
+}
+
+static bool is_direct_storage_source(PolyUOp *u) {
+  return u && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM ||
+               u->op == POLY_OP_BUFFER_VIEW);
+}
+
+static int count_alu_direct_storage_sources(PolyCtx *ctx, PolyUOp *root) {
+  int n;
+  PolyUOp **topo = poly_toposort(ctx, root, &n);
+  int count = 0;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || !poly_opset_has(POLY_GROUP_ALU, u->op)) continue;
+    for (int j = 0; j < u->n_src; j++)
+      if (is_direct_storage_source(u->src[j])) count++;
+  }
   return count;
 }
 
@@ -1711,6 +1772,42 @@ TEST(rangeify, bufferize_index_wrapping_structural) {
   PASS();
 }
 
+TEST(rangeify, scalar_bufferize_read_indexes_singleton_intermediate) {
+  /* Regression for tinygrad parity: new_range(1) is CONST(0), so a
+   * singleton intermediate BUFFERIZE read must still become INDEX(..., 0).
+   * Otherwise add_buffers can split it to a raw PARAM inside ALU, which
+   * renders invalid C and bypasses the INDEX->LOAD late-codegen boundary. */
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = poly_buffer_f32(ctx, 1);
+  PolyUOp *lg = poly_lgamma(ctx, x);
+  int64_t axes[] = {0};
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, lg, axes, 1);
+  PolyUOp *grad = poly_grad(ctx, loss, x);
+  ASSERT_NOT_NULL(grad);
+
+  PolyUOp *loss_out = poly_buffer_f32(ctx, 1);
+  PolyUOp *grad_out = poly_buffer_f32(ctx, 1);
+  PolyUOp *stores[] = {
+      poly_store_val(ctx, loss_out, loss),
+      poly_store_val(ctx, grad_out, grad),
+  };
+  PolyUOp *sink = poly_sink_n(ctx, stores, 2);
+
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->n_items > 1);
+
+  int bad = 0;
+  for (int i = 0; i < sched->n_items; i++)
+    bad += count_alu_direct_storage_sources(ctx, sched->items[i].root);
+  ASSERT_INT_EQ(bad, 0);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, bufferize_foreign_range_same_size_dims_e2e) {
   /* Regression: multi-store kernel with shared 3x3 BUFFERIZE (both dims
    * size 3). With kernel-local split scheduling, this should lower
@@ -1785,6 +1882,37 @@ TEST(rangeify, bufferize_foreign_range_same_size_dims_e2e) {
     ASSERT_FLOAT_EQ(o2_d[i], neg_a * c_d[i], 1e-5);
   }
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, buffer_alt_ranges_grow_past_old_fixed_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 32);
+  PolyUOp *terms[9];
+  for (int i = 0; i < 9; i++) {
+    int64_t pairs[][2] = {{i, i + 4}};
+    terms[i] = poly_shrink(ctx, x, pairs, 1);
+  }
+
+  PolyUOp *acc = terms[0];
+  for (int i = 1; i < 9; i++)
+    acc = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, acc, terms[i], poly_arg_none());
+
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, acc, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
+  poly_rangeify_stats_reset();
+  PolyUOp *result = run_apply_rangeify(ictx, sink);
+  ASSERT_NOT_NULL(result);
+
+  PolyRangeifyStats stats = poly_rangeify_stats_get();
+  ASSERT_TRUE(stats.buffer_alt_max_count > 8);
+
+  poly_indexing_ctx_destroy(ictx);
   poly_ctx_destroy(ctx);
   PASS();
 }

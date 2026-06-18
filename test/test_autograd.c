@@ -864,6 +864,57 @@ TEST(autograd, fdiv_both_e2e) {
   PASS();
 }
 
+TEST(autograd, substitute_nested_replacements_rewrite_replacement_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *y = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *z = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *replacement = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, y, one, poly_arg_none());
+  PolyUOp *expr = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, x, two, poly_arg_none());
+
+  PolyUOp *from[2] = {x, y};
+  PolyUOp *to[2] = {replacement, z};
+  PolyUOp *sub = poly_uop_substitute(ctx, expr, from, to, 2);
+
+  ASSERT_TRUE(sub->op == POLY_OP_MUL);
+  ASSERT_TRUE(sub->src[1] == two);
+  ASSERT_TRUE(sub->src[0]->op == POLY_OP_ADD);
+  ASSERT_TRUE(sub->src[0]->src[0] == z);
+  ASSERT_TRUE(sub->src[0]->src[1] == one);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, substitute_deep_chain_is_iterative) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *y = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *expr = x;
+  const int depth = 20000;
+  for (int i = 0; i < depth; i++) {
+    expr = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, expr, one, poly_arg_none());
+  }
+
+  PolyUOp *from[1] = {x};
+  PolyUOp *to[1] = {y};
+  PolyUOp *sub = poly_uop_substitute(ctx, expr, from, to, 1);
+
+  PolyUOp *cur = sub;
+  for (int i = 0; i < depth; i++) {
+    ASSERT_TRUE(cur->op == POLY_OP_ADD);
+    ASSERT_TRUE(cur->src[1] == one);
+    cur = cur->src[0];
+  }
+  ASSERT_TRUE(cur == y);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(autograd, multi_wrt_same_loss_e2e) {
   int N = 5;
   float x_d[5], y_d[5], gx_d[5], gy_d[5];

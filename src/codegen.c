@@ -756,7 +756,7 @@ static PolyUOp *and_all_clauses(PolyCtx *ctx, PolyUOp **clauses, int n, PolyUOp 
 /* TensorCore helpers (port of tc.py) */
 
 /* tc.py:33 -- get_reduce_axes: returns [(0,2), (1,2), ...] for K dimension */
-int tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]) {
+int poly_tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]) {
   int k = tc->dims[2], n = 0;
   while (k > 1) {
     out[n][0] = n;
@@ -768,13 +768,13 @@ int tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]) {
 }
 
 /* tc.py:34-35 -- count local/upcast opts */
-int tc_count_local(const PolyTensorCore *tc) {
+int poly_tc_count_local(const PolyTensorCore *tc) {
   int n = 0;
   for (int i = 0; i < tc->n_opts; i++)
     if (tc->opts[i].type == 'l') n++;
   return n;
 }
-int tc_count_upcast(const PolyTensorCore *tc) {
+int poly_tc_count_upcast(const PolyTensorCore *tc) {
   int n = 0;
   for (int i = 0; i < tc->n_opts; i++)
     if (tc->opts[i].type == 'u') n++;
@@ -783,7 +783,7 @@ int tc_count_upcast(const PolyTensorCore *tc) {
 
 /* tc.py:25-32 -- base_shape_str: build axis name list from opts + reduce axes.
  * Returns count of entries written to out[]. Each entry is a string like "l0","u1","r3". */
-int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n) {
+int poly_tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n) {
   int n = 0, cnt_l = 0, cnt_u = 0;
   for (int i = 0; i < tc->n_opts && n < max_n; i++) {
     static const char *l_names[] = {"l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7"};
@@ -795,7 +795,7 @@ int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n) {
   }
   /* Append reduce axes */
   int ra[16][2];
-  int n_ra = tc_get_reduce_axes(tc, ra);
+  int n_ra = poly_tc_get_reduce_axes(tc, ra);
   static const char *r_names[] = {"r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"};
   for (int i = 0; i < n_ra && n < max_n; i++)
     out[n++] = r_names[i];
@@ -803,10 +803,10 @@ int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n) {
 }
 
 /* tc.py:36-38 -- base_upcast_axes: reversed list of reduce + upcast axis names */
-int tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n) {
-  int n_upcast = tc_count_upcast(tc);
+int poly_tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n) {
+  int n_upcast = poly_tc_count_upcast(tc);
   int ra[16][2];
-  int n_ra = tc_get_reduce_axes(tc, ra);
+  int n_ra = poly_tc_get_reduce_axes(tc, ra);
   /* Build forward: [r0..rN, u0..uM] then reverse */
   const char *fwd[32];
   int n_fwd = 0;
@@ -825,7 +825,7 @@ int tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n) 
 /* tc.py:17-20 -- _remaps: build two remap dicts from swizzle.
  * fwd_st = base_shape_str, remap[i] maps fwd_st[j] -> swizzle[i] flattened.
  * Returns remap as parallel arrays: remap_from[k], remap_to[k] for k in 0..n-1. */
-int tc_build_remap(
+static int poly_tc_build_remap(
     const PolyTensorCore *tc,
     int swz_idx,
     const char *remap_from[],
@@ -833,7 +833,7 @@ int tc_build_remap(
     int max_n
 ) {
   const char *fwd[32];
-  int n_fwd = tc_base_shape_str(tc, fwd, 32);
+  int n_fwd = poly_tc_base_shape_str(tc, fwd, 32);
   /* Flatten swizzle[swz_idx]: [local_axes] + [upcast_axes] + [reduce_axes] */
   const char *flat[32];
   int n_flat = 0;
@@ -852,7 +852,7 @@ int tc_build_remap(
 /* tc.py:21-23 -- permutes_for_shape_str: given shape_str, apply remap and return permutation.
  * shape_str[i] is an axis name. Output perm[i] = shape_str.index(remap[shape_str[i]]).
  * If shape_str[i] is not in remap, perm[i] = i. */
-void tc_permute_for_shape_str(
+void poly_tc_permute_for_shape_str(
     const PolyTensorCore *tc,
     int swz_idx,
     const char *shape_str[],
@@ -861,7 +861,7 @@ void tc_permute_for_shape_str(
     int max_n
 ) {
   const char *rf[32], *rt[32];
-  int n_remap = tc_build_remap(tc, swz_idx, rf, rt, 32);
+  int n_remap = poly_tc_build_remap(tc, swz_idx, rf, rt, 32);
   for (int i = 0; i < n_shape && i < max_n; i++) {
     /* Find shape_str[i] in remap_from -> get remap_to */
     const char *mapped = NULL;
@@ -1143,7 +1143,7 @@ static bool sched_apply_tc_opt(
 
     /* 8. Apply reduce axes (postrange.py:276-278) */
     int ra[16][2];
-    int n_ra = tc_get_reduce_axes(tc, ra);
+    int n_ra = poly_tc_get_reduce_axes(tc, ra);
     for (int i = 0; i < n_ra; i++) {
       PolyUOp *new_rng = NULL;
       axes[2] = sched_shift_to_core(s, axes[2], ra[i][1], POLY_AXIS_UNROLL, false, NULL, &new_rng);
@@ -1187,11 +1187,11 @@ static bool sched_apply_tc_opt(
        * srcs[k] = x.substitute(dict(zip(tne, [ne[i] for i in argsort(p)])))
        * where p = tc.permutes_for_shape_str(tc.base_shape_str()) */
       const char *bss[32];
-      int n_bss = tc_base_shape_str(tc, bss, 32);
+      int n_bss = poly_tc_base_shape_str(tc, bss, 32);
 
       int perm0[32], perm1[32];
-      tc_permute_for_shape_str(tc, 0, bss, n_bss, perm0, 32);
-      tc_permute_for_shape_str(tc, 1, bss, n_bss, perm1, 32);
+      poly_tc_permute_for_shape_str(tc, 0, bss, n_bss, perm0, 32);
+      poly_tc_permute_for_shape_str(tc, 1, bss, n_bss, perm1, 32);
 
       /* argsort(perm): inverse permutation. argsort[j] = i where perm[i] = j */
       int argsort0[32], argsort1[32];
@@ -1221,14 +1221,15 @@ static bool sched_apply_tc_opt(
       int n_ss = sched_shape_str(s, shape_str, 64);
 
       const char *bua[32];
-      int n_bua = tc_base_upcast_axes(tc, bua, 32);
+      int n_bua = poly_tc_base_upcast_axes(tc, bua, 32);
 
       /* tc_reduce_axes: axis ids for "r0","r1",... in scheduler shape_str */
       int tc_reduce_axis_ids[16];
       int n_tc_ra = 0;
       for (int ri = 0; ri < n_ra; ri++) {
-        char rname[8];
-        snprintf(rname, 8, "r%d", ri);
+        char rname[32];
+        int rname_len = snprintf(rname, sizeof(rname), "r%d", ri);
+        if (rname_len < 0 || rname_len >= (int)sizeof(rname)) continue;
         for (int si = 0; si < n_ss; si++) {
           if (strcmp(shape_str[si], rname) == 0) {
             tc_reduce_axis_ids[n_tc_ra++] = (int)poly_range_axis_id(s->rngs[si]->arg);
@@ -2179,14 +2180,7 @@ typedef struct {
 } ReduceContext;
 
 static ReduceContext *current_reduce_ctx(void) {
-  ReduceContext *rctx = (ReduceContext *)poly_graph_rewrite_userctx();
-  if (!rctx) {
-    fprintf(
-        stderr, "polygrad codegen: pm_reduce requires rewrite ctx (use poly_apply_pm_reduce)\n"
-    );
-    abort();
-  }
-  return rctx;
+  return (ReduceContext *)poly_graph_rewrite_userctx();
 }
 
 static bool same_range_tuple(PolyUOp **a, int na, PolyUOp **b, int nb) {
@@ -2348,6 +2342,10 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
     identity = poly_uop0(ctx, POLY_OP_CONST, red->dtype, poly_arg_int((int64_t)ident_val));
 
   ReduceContext *rctx = current_reduce_ctx();
+  if (!rctx) {
+    free(lst);
+    return NULL;
+  }
 
   /* DEFINE_REG: accumulator register */
   int acc_id = rctx->acc_num++;
@@ -2413,6 +2411,7 @@ static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBi
   (void)b;
   if (!root || root->op != POLY_OP_SINK) return NULL;
   ReduceContext *rctx = current_reduce_ctx();
+  if (!rctx) return NULL;
 
   int n_subs = 0;
   for (int i = 0; i < rctx->n_groups; i++)
@@ -6051,6 +6050,7 @@ static PolyUOp *lane_or_gep(PolyCtx *ctx, PolyUOp *src, int lane) {
 }
 
 static PolyUOp *rule_render_gep_single_shortcut(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)ctx;
   (void)b;
   if (!u || u->op != POLY_OP_GEP || u->n_src < 1) return NULL;
   int lane = -1;
@@ -6062,8 +6062,7 @@ static PolyUOp *rule_render_gep_single_shortcut(PolyCtx *ctx, PolyUOp *u, const 
   if (lane < 0) return NULL;
 
   PolyUOp *src = u->src[0];
-  if (src->dtype.count <= 1) return lane == 0 ? src : NULL;
-  return scalarize_lane_expr(ctx, src, lane);
+  return (src->dtype.count <= 1 && lane == 0) ? src : NULL;
 }
 
 static PolyUOp *rule_vector_cmp_to_scalarized_vector(
@@ -8540,12 +8539,23 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 
   poly_debug_stage_graph("input", sink);
 
+#define POLY_REWRITE_CHECK(stage_name)                                                             \
+  do {                                                                                             \
+    if (!sink) {                                                                                   \
+      fprintf(stderr, "polygrad: full_rewrite_to_sink failed at %s\n", (stage_name));              \
+      return NULL;                                                                                 \
+    }                                                                                              \
+  } while (0)
+
+  POLY_REWRITE_CHECK("input");
+
   /* 1. Preprocess
    *
    * tinygrad runs pm_mops + pm_syntactic_sugar + pm_store_ranges here. Polygrad
    * does not have a dedicated codegen-side port of those passes yet, so keep
    * this as an explicit trace boundary while stage-order parity is restored. */
   poly_debug_stage_graph("preprocess", sink);
+  POLY_REWRITE_CHECK("preprocess");
 
   /* 2. Optimization block (gated by optimize).
    * Matches tinygrad stage boundaries even where individual subpasses are still
@@ -8554,25 +8564,32 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     /* tinygrad: pm_load_collapse */
     sink = poly_graph_rewrite(ctx, sink, poly_pm_load_collapse());
     poly_debug_stage_graph("load collapse", sink);
+    POLY_REWRITE_CHECK("load collapse");
 
     /* tinygrad: pm_split_ranges + pm_flatten_range */
     SplitRangeCtx srctx = {0};
     sink = poly_graph_rewrite_ctx(ctx, sink, poly_pm_split_ranges(), &srctx);
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     poly_debug_stage_graph("split ranges", sink);
+    POLY_REWRITE_CHECK("split ranges");
 
     /* tinygrad: sym + pm_flatten_range */
     sink = poly_graph_rewrite(ctx, sink, poly_symbolic());
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     poly_debug_stage_graph("initial symbolic", sink);
+    POLY_REWRITE_CHECK("initial symbolic");
 
     /* tinygrad: pm_flatten_range + pm_simplify_ranges */
     sink = poly_graph_rewrite(ctx, sink, poly_pm_simplify_ranges());
     poly_debug_stage_graph("simplify ranges", sink);
+    POLY_REWRITE_CHECK("simplify ranges");
 
     /* tinygrad apply_opts prelude: convert eligible LOOP output ranges to
      * GLOBAL before running heuristic/beam/tensor-core scheduling. */
-    if (device_is_gpu(opts.device)) sink = convert_loop_output_ranges_to_global(ctx, sink);
+    if (device_is_gpu(opts.device)) {
+      sink = convert_loop_output_ranges_to_global(ctx, sink);
+      POLY_REWRITE_CHECK("convert loop output ranges");
+    }
 
     /* tinygrad: apply_opts
      *
@@ -8589,12 +8606,14 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     }
     sink = poly_graph_rewrite(ctx, sink, poly_pm_flatten_range());
     poly_debug_stage_graph("apply opts", sink);
+    POLY_REWRITE_CHECK("apply opts");
   }
 
   /* 3. Postopt symbolic */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic());
   sink = poly_graph_rewrite(ctx, sink, poly_pm_move_where_on_load());
   poly_debug_stage_graph("postopt symbolic", sink);
+  POLY_REWRITE_CHECK("postopt symbolic");
 
   /* 4. Expander.
    * tinygrad groups sym + pm_pre_expander + pm_group_for_reduce + expander. */
@@ -8607,17 +8626,20 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
    * later in lower_index_dtype. Keep that stage boundary aligned. */
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic());
   poly_debug_stage_graph("expander", sink);
+  POLY_REWRITE_CHECK("expander");
 
   /* 5. Add local buffers.
    * tinygrad runs pm_add_buffers_local + rangeify_codegen here. Polygrad keeps
    * this stage explicit in traces while still using the shared prepared-step
    * scheduling path outside full_rewrite_to_sink_ex. */
   poly_debug_stage_graph("add local buffers", sink);
+  POLY_REWRITE_CHECK("add local buffers");
 
   /* 6. Remove reduce */
   sink = poly_apply_pm_reduce(ctx, sink);
   sink = poly_graph_rewrite(ctx, sink, poly_pm_gep_pushing());
   poly_debug_stage_graph("remove reduce", sink);
+  POLY_REWRITE_CHECK("remove reduce");
 
   /* 7. Add gpudims / CPU thread dims */
   if (opts.caps.has_threads)
@@ -8625,10 +8647,12 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   else if (device_is_gpu(opts.device))
     sink = poly_add_gpudims_ex(ctx, sink, opts.caps);
   poly_debug_stage_graph("add gpudims", sink);
+  POLY_REWRITE_CHECK("add gpudims");
 
   /* 8. Add loads */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_add_loads());
   poly_debug_stage_graph("add loads", sink);
+  POLY_REWRITE_CHECK("add loads");
 
   /* 9. Devectorize */
   g_max_fold_width = fold_width_from_caps(opts.caps);
@@ -8638,11 +8662,13 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
     );
   }
   poly_debug_stage_graph("devectorize", sink);
+  POLY_REWRITE_CHECK("devectorize");
 
   /* 10. Lower index dtype */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_post_index_lower());
   sink = poly_graph_rewrite(ctx, sink, poly_symbolic());
   poly_debug_stage_graph("lower index dtype", sink);
+  POLY_REWRITE_CHECK("lower index dtype");
 
   /* 11. Decompositions */
   sink = poly_graph_rewrite(
@@ -8653,6 +8679,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
       ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry)
   );
   poly_debug_stage_graph("decompositions", sink);
+  POLY_REWRITE_CHECK("decompositions");
 
   /* 12. Final rewrite */
   sink = poly_graph_rewrite(
@@ -8667,12 +8694,16 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   else
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_vec());
   poly_debug_stage_graph("final rewrite", sink);
+  POLY_REWRITE_CHECK("final rewrite");
 
   /* 13. Control flow */
   sink = poly_apply_control_flow(ctx, sink);
   poly_debug_stage_graph("control flow", sink);
+  POLY_REWRITE_CHECK("control flow");
   poly_debug_stage_graph("rewritten", sink);
+  POLY_REWRITE_CHECK("rewritten");
 
+#undef POLY_REWRITE_CHECK
   return sink;
 }
 

@@ -296,6 +296,39 @@ TEST(codegen, render_vecmul) {
 
 /* End-to-end tests */
 
+TEST(codegen, render_int64_min_literal_is_portable) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_i64 = poly_dtype_ptr(POLY_INT64, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_i64, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_i64, out, zero, poly_arg_none());
+  PolyUOp *val = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(INT64_MIN));
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, val, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
+
+  int n = 0;
+  PolyUOp **lin = poly_linearize(ctx, sink, &n);
+  ASSERT_NOT_NULL(lin);
+  char *src = poly_render_c(lin, n, "store_i64_min");
+  ASSERT_NOT_NULL(src);
+  ASSERT_TRUE(strstr(src, "(-9223372036854775807ll - 1ll)") != NULL);
+  ASSERT_TRUE(strstr(src, "-9223372036854775808ll") == NULL);
+
+  PolyProgram *prog = poly_compile_c(src, "store_i64_min");
+  ASSERT_NOT_NULL(prog);
+  int64_t out_data = 0;
+  void *args[1] = {&out_data};
+  poly_program_call(prog, args, 1);
+  ASSERT_TRUE(out_data == INT64_MIN);
+
+  poly_program_destroy(prog);
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, e2e_vecadd) {
   /* c[i] = a[i] + b[i] for i in 0..9 */
   VecKernel k = make_vec_binop(POLY_OP_ADD, 10);

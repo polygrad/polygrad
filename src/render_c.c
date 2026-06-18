@@ -1085,6 +1085,16 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
 /* Render helpers */
 
+/* Render INT64_MIN without spelling an out-of-range positive literal followed
+ * by unary minus. */
+static char *render_int64_const(int64_t v, char *buf, int cap) {
+  if (v == INT64_MIN)
+    snprintf(buf, cap, "(-9223372036854775807ll - 1ll)");
+  else
+    snprintf(buf, cap, "%lldll", (long long)v);
+  return buf;
+}
+
 /* Render a float constant, dtype-aware: f64 gets full precision with no suffix,
  * f32 (and all other float types) get %.9g with the 'f' suffix. */
 static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
@@ -1509,7 +1519,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         else
           snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(sdt, POLY_INT64)) {
-        snprintf(val, sizeof(val), "%lldll", (long long)u->arg.i);
+        render_int64_const(u->arg.i, val, sizeof(val));
       } else if (poly_dtype_eq(sdt, POLY_UINT64)) {
         snprintf(val, sizeof(val), "%lluull", (unsigned long long)(uint64_t)u->arg.i);
       } else if (poly_dtype_eq(sdt, POLY_UINT32)) {

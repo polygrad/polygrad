@@ -97,6 +97,29 @@ static PolyUOp *rangeify_to_index_dtype(PolyCtx *ctx, PolyUOp *u) {
   return poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, u, poly_arg_none());
 }
 
+static bool rangeify_is_indexable_source(PolyUOp *u) {
+  if (!u) return false;
+  return u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM ||
+         u->op == POLY_OP_BUFFER_VIEW || u->op == POLY_OP_MSTACK ||
+         u->op == POLY_OP_MSELECT || u->op == POLY_OP_AFTER;
+}
+
+static int64_t rangeify_indexable_numel(PolyUOp *u) {
+  if (!u) return -1;
+  const PolyUOp *identity = NULL;
+  if (u->op == POLY_OP_AFTER && u->n_src >= 1)
+    identity = poly_uop_get_buffer_identity(u->src[0]);
+  if (!identity) identity = poly_uop_get_buffer_identity(u);
+  if (!identity) identity = u;
+
+  if (identity->op == POLY_OP_BUFFER && identity->arg.kind == POLY_ARG_INT)
+    return identity->arg.i;
+  if ((identity->op == POLY_OP_PARAM || identity->op == POLY_OP_BUFFER_VIEW) &&
+      identity->dtype.is_ptr && identity->dtype.ptr_size > 0)
+    return identity->dtype.ptr_size;
+  return -1;
+}
+
 /* Pointer hashing/equality (shared with the retired single-kernel scheduler) */
 
 /* Consumer list helpers */
@@ -197,7 +220,66 @@ static void free_shape_entry(const void *key, void *value, void *ud) {
 static void free_alt_rngs_entry(const void *key, void *value, void *ud) {
   (void)key;
   (void)ud;
-  free(value);
+  PolyBufferAltRngs *alt = value;
+  if (!alt) return;
+  free(alt->lens);
+  free(alt->rngs);
+  free(alt);
+}
+
+static PolyBufferAltRngs *alt_rngs_new(int cap) {
+  if (cap < 4) cap = 4;
+  PolyBufferAltRngs *alt = calloc(1, sizeof(PolyBufferAltRngs));
+  if (!alt) return NULL;
+  alt->lens = calloc((size_t)cap, sizeof(int));
+  alt->rngs = calloc((size_t)cap, sizeof(*alt->rngs));
+  if (!alt->lens || !alt->rngs) {
+    free(alt->lens);
+    free(alt->rngs);
+    free(alt);
+    return NULL;
+  }
+  alt->cap = cap;
+  return alt;
+}
+
+static bool alt_rngs_reserve(PolyBufferAltRngs *alt, int needed) {
+  if (!alt) return false;
+  if (needed <= alt->cap) return true;
+  int new_cap = alt->cap ? alt->cap : 4;
+  while (new_cap < needed) {
+    if (new_cap > INT_MAX / 2) return false;
+    new_cap *= 2;
+  }
+  int *new_lens = calloc((size_t)new_cap, sizeof(int));
+  PolyUOp *(*new_rngs)[POLY_MAX_DIMS] = calloc((size_t)new_cap, sizeof(*new_rngs));
+  if (!new_lens || !new_rngs) {
+    free(new_lens);
+    free(new_rngs);
+    return false;
+  }
+  if (alt->count > 0) {
+    memcpy(new_lens, alt->lens, (size_t)alt->count * sizeof(int));
+    memcpy(new_rngs, alt->rngs, (size_t)alt->count * sizeof(*alt->rngs));
+  }
+  free(alt->lens);
+  free(alt->rngs);
+  alt->lens = new_lens;
+  alt->rngs = new_rngs;
+  alt->cap = new_cap;
+  return true;
+}
+
+static bool alt_rngs_append(PolyBufferAltRngs *alt, PolyUOp **rngs, int n_rngs) {
+  if (!alt || !rngs || n_rngs <= 0 || n_rngs > POLY_MAX_DIMS) return false;
+  if (!alt_rngs_reserve(alt, alt->count + 1)) return false;
+  int ai = alt->count++;
+  alt->lens[ai] = n_rngs;
+  for (int d = 0; d < n_rngs; d++)
+    alt->rngs[ai][d] = rngs[d];
+  if (alt->count > g_rangeify_stats.buffer_alt_max_count)
+    g_rangeify_stats.buffer_alt_max_count = alt->count;
+  return true;
 }
 
 static bool alt_entry_equals(PolyBufferAltRngs *alt, PolyUOp **rngs, int n) {
@@ -221,17 +303,12 @@ static void buffer_alt_add(PolyIndexingCtx *ictx, PolyUOp *buf, PolyUOp **rngs, 
   PolyBufferAltRngs *alt =
       poly_map_get(ictx->buffer_alt_rngs, poly_ptr_hash(buf), buf, poly_ptr_eq);
   if (!alt) {
-    alt = malloc(sizeof(PolyBufferAltRngs));
+    alt = alt_rngs_new(4);
     if (!alt) return;
-    memset(alt, 0, sizeof(*alt));
     poly_map_set(ictx->buffer_alt_rngs, poly_ptr_hash(buf), buf, alt, poly_ptr_eq);
   }
   if (alt_entry_equals(alt, rngs, n_rngs)) return;
-  if (alt->count >= POLY_MAX_ALT_RNGS) return;
-  int ai = alt->count++;
-  alt->lens[ai] = n_rngs;
-  for (int d = 0; d < n_rngs; d++)
-    alt->rngs[ai][d] = rngs[d];
+  (void)alt_rngs_append(alt, rngs, n_rngs);
 }
 
 /* tinygrad indexing.py merges multi-consumer ranges by comparing the local
@@ -540,6 +617,11 @@ static PolyShape ictx_shape(PolyIndexingCtx *ictx, PolyUOp *u) {
   return s;
 }
 
+static bool ictx_uop_numel_is_one(PolyIndexingCtx *ictx, PolyUOp *u) {
+  PolyShape s = ictx_shape(ictx, u);
+  return poly_shape_numel(s) == 1;
+}
+
 /* Store a range entry in the range map */
 static void range_map_set_valid(
     PolyIndexingCtx *ictx,
@@ -663,15 +745,20 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
     memset(consumer_rngs_buf, 0, sizeof(consumer_rngs_buf));
     memset(consumer_rngs_lens, 0, sizeof(consumer_rngs_lens));
     int n_consumer_rngs = 0;
+    bool consumer_rngs_overflow = false;
 
     PolyConsumerList *consumers = poly_consumer_map_get(ictx->consumer_map, x);
     PolyEndingRanges *ending = ending_get_or_create(ending_map, x);
     ending_clear(ending);
     if (consumers) {
-      for (int ci = 0; ci < consumers->count && n_consumer_rngs < 16; ci++) {
+      for (int ci = 0; ci < consumers->count; ci++) {
         PolyUOp *consumer = consumers->items[ci];
         PolyRangeEntry *cre = poly_range_map_get(ictx, consumer);
         if (!cre) continue;
+        if (n_consumer_rngs >= 16) {
+          consumer_rngs_overflow = true;
+          continue;
+        }
 
         /* The consumer's in_rngs contain the ranges it passes to its
          * sources. We need to find which source position x occupies
@@ -696,6 +783,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           ending_add(ending, ec->items[ei]);
       }
     }
+    if (consumer_rngs_overflow) realize_mark(ictx, x);
 
     /* Determine output ranges for x */
     PolyUOp *out_rngs[POLY_MAX_DIMS];
@@ -824,21 +912,20 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           /* For BUFFER nodes with disagreeing consumers: save
            * per-consumer ranges for the BUFFER handler. */
           if (x->op == POLY_OP_BUFFER && n_consumer_rngs > 0) {
-            PolyBufferAltRngs *alt = malloc(sizeof(PolyBufferAltRngs));
-            alt->count = 0;
-            for (int ci = 0; ci < n_consumer_rngs && alt->count < POLY_MAX_ALT_RNGS; ci++) {
-              int len = consumer_rngs_lens[ci];
-              if (len <= 0 || len > POLY_MAX_DIMS) continue;
-              int ai = alt->count;
-              alt->lens[ai] = len;
-              memcpy(alt->rngs[ai], consumer_rngs_buf[ci], len * sizeof(PolyUOp *));
-              alt->count++;
+            PolyBufferAltRngs *alt = alt_rngs_new(n_consumer_rngs);
+            if (alt) {
+              for (int ci = 0; ci < n_consumer_rngs; ci++) {
+                int len = consumer_rngs_lens[ci];
+                if (len <= 0 || len > POLY_MAX_DIMS) continue;
+                (void)alt_rngs_append(alt, consumer_rngs_buf[ci], len);
+              }
+              if (alt->count > 0) {
+                poly_map_set(ictx->buffer_alt_rngs, poly_ptr_hash(x), x, alt, poly_ptr_eq);
+                g_rangeify_stats.buffer_alt_created++;
+              } else {
+                free_alt_rngs_entry(NULL, alt, NULL);
+              }
             }
-            if (alt->count > 0)
-              poly_map_set(ictx->buffer_alt_rngs, poly_ptr_hash(x), x, alt, poly_ptr_eq);
-            else
-              free(alt);
-            if (alt->count > 0) g_rangeify_stats.buffer_alt_created++;
           }
 
           PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
@@ -1154,7 +1241,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
       if (new_src[j]->op == POLY_OP_BUFFERIZE) {
         int n_buf_rngs = new_src[j]->n_src - 1;
-        if (re && n_buf_rngs > 0) {
+        if (re) {
           PolyUOp *orig_src = u->src[j];
           PolyUOp *idx_rngs[POLY_MAX_DIMS];
           int n_idx = 0;
@@ -1184,7 +1271,15 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
             }
           }
 
-          if (n_idx != n_buf_rngs) continue;
+          if (n_buf_rngs == 0 && n_idx == 0 && ictx_uop_numel_is_one(ictx, orig_src)) {
+            /* tinygrad new_range(1) returns CONST(0), so singleton
+             * BUFFERIZE reads are still INDEXed. Without this, add_buffers can
+             * split a scalar intermediate into a bare PARAM used directly in
+             * ALU, bypassing the later INDEX->LOAD boundary. */
+            idx_rngs[n_idx++] = rangeify_index_const(ctx, 0);
+          } else if (n_idx != n_buf_rngs) {
+            continue;
+          }
 
           if (ictx->add_buffer_indices) {
             /* Tinygrad create_bufferize_and_index_based_on_ranges keeps BUFFERIZE
@@ -1219,7 +1314,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
       /* Wrap bare BUFFER sources with flat INDEX (new split path only).
        * Store target (STORE src[0]) uses out_rngs; read sources use
        * movement-chain-mapped in_rngs or direct in_rngs. */
-      else if (ictx->add_buffer_indices && new_src[j]->op == POLY_OP_BUFFER &&
+      else if (ictx->add_buffer_indices && rangeify_is_indexable_source(new_src[j]) &&
                u->op != POLY_OP_SINK) {
         if (!re) continue;
         PolyUOp *idx_rngs[POLY_MAX_DIMS];
@@ -1247,14 +1342,18 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
           }
         }
 
-        /* Scalar output: full reduction eliminated all ranges but the output
-         * buffer still needs INDEX(buf, 0). Tinygrad handles this in
-         * run_rangeify/apply_rangeify (indexing.py:55-84): size-1 buffers
-         * get CONST(0) as their range, producing INDEX(PARAM, 0). */
-        if (n_idx == 0 && j == 0 && (u->op == POLY_OP_STORE || u->op == POLY_OP_ASSIGN)) {
-          PolyUOp *zero = rangeify_index_const(ctx, 0);
-          idx_rngs[0] = zero;
-          n_idx = 1;
+        /* Scalar access: full reduction or size-1 tensors can eliminate all
+         * open RANGE nodes, but buffers still need INDEX(buf, 0). tinygrad's
+         * IndexingContext.new_range(1) returns CONST(0), so both singleton
+         * store targets and singleton reads reach codegen as INDEX(PARAM, 0),
+         * then pm_add_loads turns read INDEX nodes into LOADs. */
+        if (n_idx == 0) {
+          bool store_target = j == 0 && (u->op == POLY_OP_STORE || u->op == POLY_OP_ASSIGN);
+          bool singleton_read = !store_target && rangeify_indexable_numel(new_src[j]) == 1;
+          if (store_target || singleton_read) {
+            idx_rngs[0] = rangeify_index_const(ctx, 0);
+            n_idx = 1;
+          }
         }
 
         if (n_idx > 0) {
@@ -1833,6 +1932,40 @@ static PolyUOp *rule_split_unbind(PolyCtx *ctx, PolyUOp *root, const PolyBinding
   return root->src[0];
 }
 
+static PolyUOp *rule_split_nested_index_concat(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_INDEX || root->n_src < 2 || root->n_src > 3) return NULL;
+  if (root->dtype.is_ptr || root->src[1]->dtype.count > 1) return NULL;
+
+  PolyUOp *inner = root->src[0];
+  if (!inner || inner->op != POLY_OP_INDEX || inner->n_src < 2 || inner->n_src > 3) return NULL;
+  if (!inner->src[0] || !inner->src[0]->dtype.is_ptr || inner->src[1]->dtype.count > 1)
+    return NULL;
+
+  /* tinygrad schedule/rangeify.py pm_syntactic_sugar concatenates
+   * INDEX(INDEX(ptr, i), j). Polygrad's kernel graph boundary expects flat
+   * scalar offsets, so concatenate by adding the two flat indices. */
+  PolyUOp *outer_idx = root->src[1];
+  PolyUOp *inner_idx = inner->src[1];
+  PolyDType idx_dt = poly_dtype_scalar(inner_idx->dtype);
+  if (!poly_dtype_eq(poly_dtype_scalar(outer_idx->dtype), idx_dt))
+    outer_idx = poly_uop1(ctx, POLY_OP_CAST, idx_dt, outer_idx, poly_arg_none());
+  PolyUOp *flat_idx = poly_uop2(ctx, POLY_OP_ADD, idx_dt, inner_idx, outer_idx, poly_arg_none());
+
+  PolyUOp *srcs[3];
+  int n_src = 0;
+  srcs[n_src++] = inner->src[0];
+  srcs[n_src++] = flat_idx;
+  PolyUOp *gate = NULL;
+  if (inner->n_src == 3) gate = inner->src[2];
+  if (root->n_src == 3) {
+    gate = gate ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, gate, root->src[2], poly_arg_none())
+                : root->src[2];
+  }
+  if (gate) srcs[n_src++] = gate;
+  return poly_uop(ctx, POLY_OP_INDEX, root->dtype, srcs, n_src, root->arg);
+}
+
 static PolyUOp *rule_split_index_define_var(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)ctx;
   (void)b;
@@ -1901,6 +2034,7 @@ static PolyPatternMatcher *poly_pm_to_define_global_local(void) {
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_BUFFER, NULL, 0, "buf"), rule_split_debuf},
       {poly_pat_op(POLY_OP_DEFINE_VAR, NULL, 0, "v"), rule_split_track_define_var},
+      {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_split_nested_index_concat},
       {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_split_index_define_var},
       {poly_pat_op(POLY_OP_BIND, NULL, 0, "b"), rule_split_unbind},
       {poly_pat_op(POLY_OP_AFTER, NULL, 0, "after"), rule_split_handle_after},

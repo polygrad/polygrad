@@ -187,12 +187,7 @@ PolyPatternMatcher *poly_pm_simplify_ranges(void) {
 /* simplify.py: mark_range_mod / do_substitute / pm_split_ranges */
 
 static SplitRangeCtx *current_split_ctx(void) {
-  SplitRangeCtx *sctx = (SplitRangeCtx *)poly_graph_rewrite_userctx();
-  if (!sctx) {
-    fprintf(stderr, "polygrad codegen: pm_split_ranges requires rewrite ctx\n");
-    abort();
-  }
-  return sctx;
+  return (SplitRangeCtx *)poly_graph_rewrite_userctx();
 }
 
 static PolyUOp *mark_range_mod(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -208,6 +203,7 @@ static PolyUOp *mark_range_mod(PolyCtx *ctx, PolyUOp *root, const PolyBindings *
   if ((rv % cv) != 0) return NULL;
 
   SplitRangeCtx *sctx = current_split_ctx();
+  if (!sctx) return NULL;
   for (int i = 0; i < sctx->n; i++)
     if (sctx->r[i] == r) return NULL;
   if (sctx->n < POLY_MAX_DIMS) {
@@ -221,7 +217,7 @@ static PolyUOp *mark_range_mod(PolyCtx *ctx, PolyUOp *root, const PolyBindings *
 static PolyUOp *do_substitute(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   SplitRangeCtx *sctx = current_split_ctx();
-  if (sctx->n <= 0) return NULL;
+  if (!sctx || sctx->n <= 0) return NULL;
 
   PolyUOp *from[POLY_MAX_DIMS];
   PolyUOp *to[POLY_MAX_DIMS];

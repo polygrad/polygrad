@@ -537,6 +537,48 @@ TEST(schedule_runtime, lower_sink_to_linear_cache_ignores_bind_values) {
   PASS();
 }
 
+static PolyUOp *make_deep_cache_key_sink(PolyCtx *ctx, int64_t tag_base, int depth) {
+  PolyUOp *unique_a = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag_base));
+  PolyUOp *unique_b = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag_base + 1));
+  PolyUOp *unique_o = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag_base + 2));
+  PolyUOp *dim = poly_const_int(ctx, 4);
+  PolyUOp *src_a[2] = {unique_a, dim};
+  PolyUOp *src_b[2] = {unique_b, dim};
+  PolyUOp *src_o[2] = {unique_o, dim};
+  PolyUOp *a = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_a, 2, poly_arg_int(4));
+  PolyUOp *b = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_b, 2, poly_arg_int(4));
+  PolyUOp *out = poly_uop(ctx, POLY_OP_BUFFER, POLY_FLOAT32, src_o, 2, poly_arg_int(4));
+  PolyUOp *expr = a;
+  for (int i = 0; i < depth; i++)
+    expr = poly_alu2(ctx, POLY_OP_ADD, expr, b);
+  return poly_sink1(ctx, poly_store_val(ctx, out, expr));
+}
+
+TEST(schedule_runtime, lower_sink_to_linear_deep_cache_key_is_iterative) {
+  ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
+  setenv("POLY_SCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int depth = 2048;
+  PolyUOp *sink1 = make_deep_cache_key_sink(ctx, 3100000, depth);
+  PolyUOp *linear1 = poly_lower_sink_to_linear(ctx, sink1, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear1);
+  ASSERT_EQ(linear1->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  PolyUOp *sink2 = make_deep_cache_key_sink(ctx, 3200000, depth);
+  PolyUOp *linear2 = poly_lower_sink_to_linear(ctx, sink2, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear2);
+  ASSERT_PTR_EQ(linear1, linear2);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&scache);
+  PASS();
+}
+
 static bool schedule_has_buf_slot(PolySchedule *sched, PolyUOp *buf) {
   for (int i = 0; sched && i < sched->n_buf_slots; i++)
     if (sched->buf_slots[i].buf_uop == buf) return true;

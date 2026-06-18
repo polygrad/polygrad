@@ -94,6 +94,14 @@ static void csmap_destroy(CudaStrMap *m) {
 
 /* Render helpers */
 
+static char *cuda_render_int64_const(int64_t v, char *buf, int cap) {
+  if (v == INT64_MIN)
+    snprintf(buf, cap, "(-9223372036854775807ll - 1ll)");
+  else
+    snprintf(buf, cap, "%lldll", (long long)v);
+  return buf;
+}
+
 static char *cuda_render_float_const(double v, PolyDType dt, char *buf, int cap) {
   bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
   if (isinf(v)) {
@@ -534,7 +542,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {
-        snprintf(val, sizeof(val), "%lldll", (long long)u->arg.i);
+        cuda_render_int64_const(u->arg.i, val, sizeof(val));
       } else if (poly_dtype_eq(u->dtype, POLY_UINT64)) {
         snprintf(val, sizeof(val), "%lluull", (unsigned long long)(uint64_t)u->arg.i);
       } else if (poly_dtype_eq(u->dtype, POLY_UINT32)) {

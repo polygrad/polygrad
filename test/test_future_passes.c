@@ -1372,6 +1372,23 @@ TEST(conformance, fma_rounding_divergence) {
   PASS();
 }
 
+static bool simplify_after_range_subst_i64(
+    PolyCtx *ctx,
+    PolyUOp *expr,
+    PolyUOp *range,
+    int64_t value,
+    int64_t *out
+) {
+  PolyUOp *cv = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
+  PolyUOp *from[1] = {range};
+  PolyUOp *to[1] = {cv};
+  PolyUOp *sub = poly_uop_substitute(ctx, expr, from, to, 1);
+  PolyUOp *folded = simplify(ctx, sub);
+  if (!folded || folded->op != POLY_OP_CONST || folded->arg.kind != POLY_ARG_INT) return false;
+  *out = folded->arg.i;
+  return true;
+}
+
 /* C1 divmod rules (tinygrad divandmod.py alignment) */
 
 /* nested_div_mod: (x%6)//3 → (x//3)%2.  Ref: divandmod.py:25-27 */
@@ -1472,6 +1489,35 @@ TEST(sym_future, gcd_with_remainder) {
   /* Verify correctness: evaluate for x=0..9 */
   /* (6*0)%4=0, (6*1)%4=2, (6*2)%4=0, (6*3)%4=2, etc. */
   /* The simplified form should produce the same values when evaluated */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym_future, gcd_with_negative_additive_const_uses_floor_splits) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *r0 = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, five, poly_arg_int(0));
+  PolyUOp *four_off = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *v = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r0, four_off, poly_arg_none());
+  PolyUOp *six = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(6));
+  PolyUOp *neg_three = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(-3));
+  PolyUOp *num = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT32,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, six, v, poly_arg_none()), neg_three, poly_arg_none()
+  );
+  PolyUOp *den = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *mod = simplify(ctx, poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, num, den, poly_arg_none()));
+  PolyUOp *div = simplify(ctx, poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, num, den, poly_arg_none()));
+
+  for (int64_t i = 0; i < 5; i++) {
+    int64_t vv = i + 4;
+    int64_t want_num = 6 * vv - 3;
+    int64_t got = 0;
+    ASSERT_TRUE(simplify_after_range_subst_i64(ctx, mod, r0, i, &got));
+    ASSERT_INT_EQ((int)got, (int)(want_num % 4));
+    ASSERT_TRUE(simplify_after_range_subst_i64(ctx, div, r0, i, &got));
+    ASSERT_INT_EQ((int)got, (int)(want_num / 4));
+  }
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1871,7 +1917,8 @@ TEST(beam, chain_correct) {
   }
   memset(dout, 0, sizeof(dout));
   PolyTestBufferView bindings[] = {
-      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(c, dc), POLY_TEST_HOST_VIEW(out, dout)
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(c, dc),
+      POLY_TEST_HOST_VIEW(out, dout)
   };
 
   setenv("POLY_OPTIMIZE", "1", 1);
@@ -1958,7 +2005,7 @@ static const PolyTensorCore *get_test_cdna_tc(void) {
 
 TEST(tc, get_reduce_axes) {
   int ra[16][2];
-  int n = tc_get_reduce_axes(get_test_cdna_tc(), ra);
+  int n = poly_tc_get_reduce_axes(get_test_cdna_tc(), ra);
   /* K=16 -> log2(16)=4 pairs, each with amt=2 */
   ASSERT_INT_EQ(n, 4);
   for (int i = 0; i < 4; i++) {
@@ -1969,14 +2016,14 @@ TEST(tc, get_reduce_axes) {
 }
 
 TEST(tc, count_local_upcast) {
-  ASSERT_INT_EQ(tc_count_local(get_test_cdna_tc()), 6); /* l0,l0,l0,l0,l1,l1 */
-  ASSERT_INT_EQ(tc_count_upcast(get_test_cdna_tc()), 2); /* u1,u1 */
+  ASSERT_INT_EQ(poly_tc_count_local(get_test_cdna_tc()), 6); /* l0,l0,l0,l0,l1,l1 */
+  ASSERT_INT_EQ(poly_tc_count_upcast(get_test_cdna_tc()), 2); /* u1,u1 */
   PASS();
 }
 
 TEST(tc, base_shape_str) {
   const char *out[32];
-  int n = tc_base_shape_str(get_test_cdna_tc(), out, 32);
+  int n = poly_tc_base_shape_str(get_test_cdna_tc(), out, 32);
   /* 8 opts + 4 reduce = 12 entries */
   ASSERT_INT_EQ(n, 12);
   /* Expected: l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3 */
@@ -1991,7 +2038,7 @@ TEST(tc, base_shape_str) {
 
 TEST(tc, base_upcast_axes) {
   const char *out[32];
-  int n = tc_base_upcast_axes(get_test_cdna_tc(), out, 32);
+  int n = poly_tc_base_upcast_axes(get_test_cdna_tc(), out, 32);
   /* reversed [r0,r1,r2,r3,u0,u1] -> [u1,u0,r3,r2,r1,r0] */
   ASSERT_INT_EQ(n, 6);
   const char *expected[] = {"u1", "u0", "r3", "r2", "r1", "r0"};
@@ -2006,12 +2053,12 @@ TEST(tc, base_upcast_axes) {
 TEST(tc, permute_for_shape_str) {
   /* Use base_shape_str as input (identity-like case) */
   const char *shape_str[32];
-  int n = tc_base_shape_str(get_test_cdna_tc(), shape_str, 32);
+  int n = poly_tc_base_shape_str(get_test_cdna_tc(), shape_str, 32);
   ASSERT_INT_EQ(n, 12);
 
   int perm0[32], perm1[32];
-  tc_permute_for_shape_str(get_test_cdna_tc(), 0, shape_str, n, perm0, 32);
-  tc_permute_for_shape_str(get_test_cdna_tc(), 1, shape_str, n, perm1, 32);
+  poly_tc_permute_for_shape_str(get_test_cdna_tc(), 0, shape_str, n, perm0, 32);
+  poly_tc_permute_for_shape_str(get_test_cdna_tc(), 1, shape_str, n, perm1, 32);
 
   /* swizzle[0] flattened: u0,u1,l4,l5,r2,r3, r0,r1, l0,l1,l2,l3
    * fwd (base_shape_str): l0,l1,l2,l3,u0,u1,l4,l5,r0,r1,r2,r3

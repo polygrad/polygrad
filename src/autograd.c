@@ -791,64 +791,154 @@ int poly_grad_many(
 
 /* UOp graph substitution */
 
-static PolyUOp *substitute_rec(PolyCtx *ctx, PolyUOp *u, PolyMap *sub_map, PolyMap *memo) {
-  /* Check substitution map first — and recurse into the replacement
-   * to handle nested intermediates (e.g. var's internal mean realize
-   * inside layernorm's var realize). */
-  void *sub = poly_map_get(sub_map, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (sub) return substitute_rec(ctx, (PolyUOp *)sub, sub_map, memo);
+typedef struct {
+  PolyUOp *u;
+  PolyUOp *link;
+  int stage;
+} SubFrame;
 
-  /* Check memo */
-  void *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (cached) return (PolyUOp *)cached;
+static bool sub_stack_push(SubFrame **stack, int *n, int *cap, SubFrame f) {
+  if (*n >= *cap) {
+    int new_cap = (*cap > 0) ? (*cap * 2) : 256;
+    SubFrame *new_stack = realloc(*stack, (size_t)new_cap * sizeof(SubFrame));
+    if (!new_stack) return false;
+    *stack = new_stack;
+    *cap = new_cap;
+  }
+  (*stack)[(*n)++] = f;
+  return true;
+}
 
-  /* Leaf node: no sources to recurse into */
-  if (u->n_src == 0) {
-    poly_map_set(memo, poly_ptr_hash(u), u, u, poly_ptr_eq);
-    return u;
+static bool substitute_iter(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    PolyMap *sub_map,
+    PolyMap *memo,
+    PolyUOp **out
+) {
+  if (!ctx || !root || !sub_map || !memo || !out) return false;
+
+  PolyMap *visiting = poly_map_new(256);
+  SubFrame *stack = NULL;
+  int n_stack = 0, cap_stack = 0;
+  bool ok = visiting && sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){root, NULL, 0});
+
+  while (ok && n_stack > 0) {
+    SubFrame f = stack[--n_stack];
+    PolyUOp *u = f.u;
+    if (!u) {
+      ok = false;
+      break;
+    }
+    uint32_t h = poly_ptr_hash(u);
+
+    if (f.stage == 0) {
+      if (poly_map_get(memo, h, u, poly_ptr_eq)) continue;
+      if (poly_map_get(visiting, h, u, poly_ptr_eq)) {
+        ok = false;
+        break;
+      }
+      poly_map_set(visiting, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+
+      PolyUOp *sub = poly_map_get(sub_map, h, u, poly_ptr_eq);
+      if (sub) {
+        PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(sub), sub, poly_ptr_eq);
+        if (cached) {
+          poly_map_set(memo, h, u, cached, poly_ptr_eq);
+          poly_map_remove(visiting, h, u, poly_ptr_eq);
+          continue;
+        }
+        ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, sub, 2}) &&
+             sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){sub, NULL, 0});
+        continue;
+      }
+
+      ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){u, NULL, 1});
+      for (int i = u->n_src - 1; ok && i >= 0; i--) {
+        PolyUOp *src = u->src[i];
+        if (!src || poly_map_get(memo, poly_ptr_hash(src), src, poly_ptr_eq)) continue;
+        ok = sub_stack_push(&stack, &n_stack, &cap_stack, (SubFrame){src, NULL, 0});
+      }
+      continue;
+    }
+
+    if (f.stage == 2) {
+      PolyUOp *mapped =
+          f.link ? poly_map_get(memo, poly_ptr_hash(f.link), f.link, poly_ptr_eq) : NULL;
+      if (!mapped) {
+        ok = false;
+        break;
+      }
+      poly_map_set(memo, h, u, mapped, poly_ptr_eq);
+      poly_map_remove(visiting, h, u, poly_ptr_eq);
+      continue;
+    }
+
+    PolyUOp *src_buf[POLY_MAX_DIMS + 2];
+    PolyUOp **new_srcs = src_buf;
+    if ((size_t)u->n_src > sizeof(src_buf) / sizeof(src_buf[0])) {
+      new_srcs = malloc((size_t)u->n_src * sizeof(PolyUOp *));
+      if (!new_srcs) {
+        ok = false;
+        break;
+      }
+    }
+
+    bool changed = false;
+    for (int i = 0; i < u->n_src; i++) {
+      PolyUOp *src = u->src[i];
+      PolyUOp *mapped = src ? poly_map_get(memo, poly_ptr_hash(src), src, poly_ptr_eq) : NULL;
+      if (!mapped) {
+        if (new_srcs != src_buf) free(new_srcs);
+        ok = false;
+        break;
+      }
+      new_srcs[i] = mapped;
+      if (mapped != src) changed = true;
+    }
+    if (!ok) break;
+
+    PolyUOp *result = u;
+    if (changed) {
+      result = (u->tag != 0)
+                   ? poly_uop_tagged(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag)
+                   : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
+    }
+    if (new_srcs != src_buf) free(new_srcs);
+    poly_map_set(memo, h, u, result, poly_ptr_eq);
+    poly_map_remove(visiting, h, u, poly_ptr_eq);
   }
 
-  /* Recursively substitute sources. Stack buffer for the common small-arity
-   * case; arena fallback for high-arity nodes (VECTORIZE, AFTER chains, large
-   * BUFFERIZE/INDEX, etc.) so we never silently truncate. Arena, not malloc,
-   * matches the lifetime model used by uop.c when allocating src[] arrays. */
-  PolyUOp *ns_buf[POLY_MAX_DIMS + 2];
-  PolyUOp **new_srcs = ns_buf;
-  if ((size_t)u->n_src > sizeof(ns_buf) / sizeof(ns_buf[0])) {
-    new_srcs = poly_arena_alloc(
-        poly_ctx_arena(ctx), (size_t)u->n_src * sizeof(PolyUOp *), _Alignof(PolyUOp *)
-    );
-    if (!new_srcs) return u;
+  if (ok) {
+    *out = poly_map_get(memo, poly_ptr_hash(root), root, poly_ptr_eq);
+    if (!*out) ok = false;
   }
-  bool changed = false;
-  for (int i = 0; i < u->n_src; i++) {
-    new_srcs[i] = substitute_rec(ctx, u->src[i], sub_map, memo);
-    if (new_srcs[i] != u->src[i]) changed = true;
-  }
-
-  PolyUOp *result;
-  if (!changed) {
-    result = u;
-  } else {
-    result = (u->tag != 0)
-                 ? poly_uop_tagged(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag)
-                 : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
-  }
-  poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
-  return result;
+  if (visiting) poly_map_destroy(visiting);
+  free(stack);
+  return ok;
 }
 
 PolyUOp *poly_uop_substitute(PolyCtx *ctx, PolyUOp *root, PolyUOp **from, PolyUOp **to, int n) {
   if (!ctx || !root || n <= 0) return root;
 
   PolyMap *sub_map = poly_map_new((size_t)n * 2 + 16);
+  PolyMap *memo = poly_map_new(256);
+  if (!sub_map || !memo) {
+    if (sub_map) poly_map_destroy(sub_map);
+    if (memo) poly_map_destroy(memo);
+    return root;
+  }
+
   for (int i = 0; i < n; i++) {
-    if (from[i] == to[i]) continue; /* skip identity maps (would infinite-recurse) */
+    if (!from[i] || !to[i] || from[i] == to[i]) continue;
     poly_map_set(sub_map, poly_ptr_hash(from[i]), from[i], to[i], poly_ptr_eq);
   }
 
-  PolyMap *memo = poly_map_new(256);
-  PolyUOp *result = substitute_rec(ctx, root, sub_map, memo);
+  PolyUOp *result = root;
+  if (poly_map_len(sub_map) > 0) {
+    PolyUOp *rewritten = NULL;
+    if (substitute_iter(ctx, root, sub_map, memo, &rewritten) && rewritten) result = rewritten;
+  }
 
   poly_map_destroy(sub_map);
   poly_map_destroy(memo);

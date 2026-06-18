@@ -379,6 +379,59 @@ TEST(pat, graph_rewrite_skips_call_body) {
   PASS();
 }
 
+static PolyUOp *rewrite_add_to_sub(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  return poly_uop(ctx, POLY_OP_SUB, root->dtype, root->src, root->n_src, root->arg);
+}
+
+static PolyUOp *rewrite_sub_to_add(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  return poly_uop(ctx, POLY_OP_ADD, root->dtype, root->src, root->n_src, root->arg);
+}
+
+TEST(pat, graph_rewrite_bottom_up_cycle_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, b, poly_arg_none());
+
+  PolyPat *add_pat = poly_pat_op2(POLY_OP_ADD, poly_pat_any("x"), poly_pat_any("y"), NULL);
+  PolyPat *sub_pat = poly_pat_op2(POLY_OP_SUB, poly_pat_any("x"), poly_pat_any("y"), NULL);
+  PolyRule rules[] = {{add_pat, rewrite_add_to_sub}, {sub_pat, rewrite_sub_to_add}};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 2);
+
+  PolyUOp *result = poly_graph_rewrite_ex(ctx, add, pm, true);
+  ASSERT_TRUE(result == NULL);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(add_pat);
+  poly_pat_free(sub_pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, graph_rewrite_stack_limit_fails_closed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[32];
+  for (int i = 0; i < 32; i++)
+    src[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, 32, poly_arg_none());
+
+  PolyPat *never_pat = poly_pat_op(POLY_OP_ADD, NULL, 0, NULL);
+  PolyRule rules[] = {{never_pat, test_rewrite_identity}};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  setenv("POLY_REWRITE_STACK_LIMIT", "8", 1);
+  PolyUOp *result = poly_graph_rewrite(ctx, sink, pm);
+  unsetenv("POLY_REWRITE_STACK_LIMIT");
+  ASSERT_TRUE(result == NULL);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(never_pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* walk_rewrite tests */
 
 static PolyUOp *rewrite_const5_to_const6(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {

@@ -29,6 +29,12 @@ static const PolyDType *_dtype_table_ffi[] = {
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
+PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  return poly_buffer(ctx, poly_dtype_scalar(dt), size);
+}
+
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT32, size);
 }

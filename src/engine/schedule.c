@@ -1151,47 +1151,139 @@ void poly_schedule_free(PolySchedule *step) {
  * execution order. This keeps the stage boundary inspectable without
  * introducing a second schedule container type. */
 
-static PolyUOp *schedule_cache_strip_bind(PolyCtx *ctx, PolyMap *memo, PolyUOp *u) {
-  if (!u) return NULL;
+static PolyArg schedule_cache_buffer_param_arg(PolyUOp *u, int pos, int64_t *vals, int cap);
 
-  PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (cached) return cached;
+typedef struct {
+  PolyUOp *u;
+  int state;
+} ScheduleCacheVisit;
 
-  PolyUOp *stack_src[16];
-  PolyUOp **new_src =
-      (u->n_src > (int)(sizeof(stack_src) / sizeof(stack_src[0]))) ?
-          malloc((size_t)u->n_src * sizeof(PolyUOp *)) :
-          stack_src;
-  if (!new_src) return NULL;
+static int schedule_cache_rewrite_child_count(PolyUOp *u, bool normalize_buffers) {
+  if (!u) return 0;
+  if (normalize_buffers && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW)) return 0;
+  if (u->op == POLY_OP_BIND && u->n_src >= 1) return 1;
+  return u->n_src;
+}
 
-  bool changed = false;
-  for (int i = 0; i < u->n_src; i++) {
-    new_src[i] = schedule_cache_strip_bind(ctx, memo, u->src[i]);
-    if (!new_src[i]) {
-      if (new_src != stack_src) free(new_src);
-      return NULL;
+static bool schedule_cache_visit_push(
+    ScheduleCacheVisit **stack,
+    int *sp,
+    int *cap,
+    PolyUOp *u,
+    int state
+) {
+  if (*sp >= *cap) {
+    int new_cap = *cap * 2;
+    ScheduleCacheVisit *new_stack = realloc(*stack, (size_t)new_cap * sizeof(ScheduleCacheVisit));
+    if (!new_stack) return false;
+    *stack = new_stack;
+    *cap = new_cap;
+  }
+  (*stack)[(*sp)++] = (ScheduleCacheVisit){u, state};
+  return true;
+}
+
+static PolyUOp *schedule_cache_rewrite_iter(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    PolyUOp **input_order,
+    int n_inputs,
+    bool normalize_buffers
+) {
+  if (!ctx || !root) return NULL;
+
+  PolyMap *memo = poly_map_new(64);
+  if (!memo) return NULL;
+
+  int stack_cap = 256;
+  int sp = 0;
+  ScheduleCacheVisit *stack = malloc((size_t)stack_cap * sizeof(ScheduleCacheVisit));
+  if (!stack) {
+    poly_map_destroy(memo);
+    return NULL;
+  }
+  bool ok = schedule_cache_visit_push(&stack, &sp, &stack_cap, root, 0);
+
+  while (ok && sp > 0) {
+    ScheduleCacheVisit cur = stack[--sp];
+    PolyUOp *u = cur.u;
+    if (!u) {
+      ok = false;
+      break;
     }
-    if (new_src[i] != u->src[i]) changed = true;
+    if (poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq)) continue;
+
+    if (cur.state == 0) {
+      ok = schedule_cache_visit_push(&stack, &sp, &stack_cap, u, 1);
+      if (!ok) break;
+
+      int n_child = schedule_cache_rewrite_child_count(u, normalize_buffers);
+      for (int i = n_child - 1; i >= 0; i--) {
+        PolyUOp *child = u->src[i];
+        if (!child) {
+          ok = false;
+          break;
+        }
+        if (poly_map_get(memo, poly_ptr_hash(child), child, poly_ptr_eq)) continue;
+        ok = schedule_cache_visit_push(&stack, &sp, &stack_cap, child, 0);
+        if (!ok) break;
+      }
+      continue;
+    }
+
+    PolyUOp *result = u;
+    if (normalize_buffers && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW)) {
+      int pos = poly_find_buf_position(u, input_order, n_inputs);
+      if (pos >= 0) {
+        /* This is Polygrad's C analogue of tinygrad callify.pm_replace_buf for
+         * schedule-cache identity: replace concrete BUFFER/BUFFER_VIEW identity
+         * with a stable parameter position, while retaining dtype, size/view
+         * metadata, and concrete device. This must be a PARAM-like key node:
+         * Polygrad structural equality intentionally ignores BUFFER sources. */
+        int64_t key_vals[64];
+        result = poly_uop0(
+            ctx, POLY_OP_PARAM, u->dtype,
+            schedule_cache_buffer_param_arg(
+                u, pos, key_vals, (int)(sizeof(key_vals) / sizeof(key_vals[0]))
+            )
+        );
+      }
+    } else if (u->op == POLY_OP_BIND && u->n_src >= 1) {
+      result = poly_map_get(memo, poly_ptr_hash(u->src[0]), u->src[0], poly_ptr_eq);
+      if (!result) ok = false;
+    } else {
+      PolyUOp *stack_src[16];
+      PolyUOp **new_src = (u->n_src > (int)(sizeof(stack_src) / sizeof(stack_src[0])))
+                              ? malloc((size_t)u->n_src * sizeof(PolyUOp *))
+                              : stack_src;
+      if (!new_src) {
+        ok = false;
+      } else {
+        bool changed = false;
+        for (int i = 0; i < u->n_src; i++) {
+          new_src[i] = poly_map_get(memo, poly_ptr_hash(u->src[i]), u->src[i], poly_ptr_eq);
+          if (!new_src[i]) {
+            ok = false;
+            break;
+          }
+          if (new_src[i] != u->src[i]) changed = true;
+        }
+        if (ok && changed) result = poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg);
+        if (new_src != stack_src) free(new_src);
+      }
+    }
+    if (ok && !result) ok = false;
+    if (ok) poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
   }
 
-  PolyUOp *result = u;
-  if (u->op == POLY_OP_BIND && u->n_src >= 1) {
-    result = new_src[0];
-  } else if (changed) {
-    result = poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg);
-  }
-
-  poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
-  if (new_src != stack_src) free(new_src);
-  return result;
+  PolyUOp *ret = ok ? poly_map_get(memo, poly_ptr_hash(root), root, poly_ptr_eq) : NULL;
+  free(stack);
+  poly_map_destroy(memo);
+  return ret;
 }
 
 static PolyUOp *schedule_cache_key_for_kernel_graph(PolyCtx *ctx, PolyUOp *kernel_graph) {
-  PolyMap *memo = poly_map_new(64);
-  if (!memo) return NULL;
-  PolyUOp *key = schedule_cache_strip_bind(ctx, memo, kernel_graph);
-  poly_map_destroy(memo);
-  return key;
+  return schedule_cache_rewrite_iter(ctx, kernel_graph, NULL, 0, false);
 }
 
 static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
@@ -1294,26 +1386,59 @@ static PolyUOp *poly_lower_kernel_graph_to_linear(PolyCtx *ctx, PolyUOp *kernel_
   return linear;
 }
 
-static void schedule_cache_collect_inputs(
+static bool schedule_cache_stack_push(PolyUOp ***stack, int *sp, int *cap, PolyUOp *u) {
+  if (*sp >= *cap) {
+    int new_cap = *cap * 2;
+    PolyUOp **new_stack = realloc(*stack, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!new_stack) return false;
+    *stack = new_stack;
+    *cap = new_cap;
+  }
+  (*stack)[(*sp)++] = u;
+  return true;
+}
+
+static bool schedule_cache_collect_inputs(
     PolyUOp *u,
     PolyUOp **input_order,
     int *n_inputs,
-    PolyUOp **visited,
     int *n_visited
 ) {
-  if (!u) return;
-  for (int i = 0; i < *n_visited; i++)
-    if (visited[i] == u) return;
-  if (*n_visited < POLY_MAX_STRUCT_NODES) visited[(*n_visited)++] = u;
+  if (!u || !n_inputs || !n_visited) return false;
 
-  if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) {
-    if (*n_inputs < POLY_MAX_REALIZE_BUFS) input_order[*n_inputs] = u;
-    (*n_inputs)++;
-    return;
+  PolyMap *seen = poly_map_new(1024);
+  if (!seen) return false;
+
+  int cap = 1024;
+  int sp = 0;
+  PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
+  bool ok = stack && schedule_cache_stack_push(&stack, &sp, &cap, u);
+
+  while (ok && sp > 0) {
+    PolyUOp *cur = stack[--sp];
+    if (!cur) {
+      ok = false;
+      break;
+    }
+    if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
+    poly_map_set(seen, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
+    (*n_visited)++;
+
+    if (cur->op == POLY_OP_BUFFER || cur->op == POLY_OP_BUFFER_VIEW) {
+      if (*n_inputs < POLY_MAX_REALIZE_BUFS) input_order[*n_inputs] = cur;
+      (*n_inputs)++;
+      continue;
+    }
+
+    for (int i = cur->n_src - 1; i >= 0; i--) {
+      ok = schedule_cache_stack_push(&stack, &sp, &cap, cur->src[i]);
+      if (!ok) break;
+    }
   }
 
-  for (int i = 0; i < u->n_src; i++)
-    schedule_cache_collect_inputs(u->src[i], input_order, n_inputs, visited, n_visited);
+  free(stack);
+  poly_map_destroy(seen);
+  return ok;
 }
 
 static PolyArg schedule_cache_buffer_param_arg(PolyUOp *u, int pos, int64_t *vals, int cap) {
@@ -1337,72 +1462,13 @@ static PolyArg schedule_cache_buffer_param_arg(PolyUOp *u, int pos, int64_t *val
   return arg;
 }
 
-static PolyUOp *schedule_cache_key_rewrite_sink(
-    PolyCtx *ctx,
-    PolyMap *memo,
-    PolyUOp *u,
-    PolyUOp **input_order,
-    int n_inputs
-) {
-  if (!u) return NULL;
-
-  PolyUOp *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (cached) return cached;
-
-  PolyUOp *result = u;
-  if (u->op == POLY_OP_BIND && u->n_src >= 1) {
-    result = schedule_cache_key_rewrite_sink(ctx, memo, u->src[0], input_order, n_inputs);
-  } else if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) {
-    int pos = poly_find_buf_position(u, input_order, n_inputs);
-    if (pos >= 0) {
-      /* This is Polygrad's C analogue of tinygrad callify.pm_replace_buf for
-       * schedule-cache identity: replace concrete BUFFER/BUFFER_VIEW identity
-       * with a stable parameter position, while retaining dtype, size/view
-       * metadata, and concrete device. This must be a PARAM-like key node:
-       * Polygrad structural equality intentionally ignores BUFFER sources. */
-      int64_t key_vals[64];
-      result = poly_uop0(
-          ctx, POLY_OP_PARAM, u->dtype,
-          schedule_cache_buffer_param_arg(
-              u, pos, key_vals, (int)(sizeof(key_vals) / sizeof(key_vals[0]))
-          )
-      );
-    }
-  } else {
-    PolyUOp *stack_src[16];
-    PolyUOp **new_src =
-        (u->n_src > (int)(sizeof(stack_src) / sizeof(stack_src[0]))) ?
-            malloc((size_t)u->n_src * sizeof(PolyUOp *)) :
-            stack_src;
-    if (!new_src) return NULL;
-    bool changed = false;
-    for (int i = 0; i < u->n_src; i++) {
-      new_src[i] = schedule_cache_key_rewrite_sink(ctx, memo, u->src[i], input_order, n_inputs);
-      if (!new_src[i]) {
-        if (new_src != stack_src) free(new_src);
-        return NULL;
-      }
-      if (new_src[i] != u->src[i]) changed = true;
-    }
-    if (changed) result = poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg);
-    if (new_src != stack_src) free(new_src);
-  }
-
-  poly_map_set(memo, poly_ptr_hash(u), u, result, poly_ptr_eq);
-  return result;
-}
-
 static PolyUOp *schedule_cache_key_for_sink(
     PolyCtx *ctx,
     PolyUOp *sink,
     PolyUOp **input_order,
     int n_inputs
 ) {
-  PolyMap *memo = poly_map_new(64);
-  if (!memo) return NULL;
-  PolyUOp *key = schedule_cache_key_rewrite_sink(ctx, memo, sink, input_order, n_inputs);
-  poly_map_destroy(memo);
-  return key;
+  return schedule_cache_rewrite_iter(ctx, sink, input_order, n_inputs, true);
 }
 
 PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode mode) {
@@ -1417,9 +1483,8 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
   }
 
   PolyUOp *input_order[POLY_MAX_REALIZE_BUFS];
-  PolyUOp *visited[POLY_MAX_STRUCT_NODES];
   int n_inputs = 0, n_visited = 0;
-  schedule_cache_collect_inputs(sink, input_order, &n_inputs, visited, &n_visited);
+  if (!schedule_cache_collect_inputs(sink, input_order, &n_inputs, &n_visited)) return NULL;
   if (n_inputs > POLY_MAX_REALIZE_BUFS) return NULL;
   double t_inputs = timing ? poly_now_ms() : 0.0;
 

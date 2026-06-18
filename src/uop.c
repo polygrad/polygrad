@@ -15,19 +15,7 @@
 /* PolyArg equality and hashing */
 
 bool poly_arg_eq(PolyArg a, PolyArg b) {
-  if (a.kind != b.kind) {
-    /* Migration compatibility: allow INT-vs-RANGE equality for RANGE ids. */
-    if (poly_arg_is_range(a) && poly_arg_is_range(b)) {
-      if (poly_range_axis_id(a) != poly_range_axis_id(b)) return false;
-      if (poly_range_axis_type(a) != poly_range_axis_type(b)) return false;
-      if (poly_range_n_extra(a) != poly_range_n_extra(b)) return false;
-      int n_extra = poly_range_n_extra(a);
-      if (n_extra == 0) return true;
-      return memcmp(poly_range_extra(a), poly_range_extra(b), (size_t)n_extra * sizeof(int64_t)) ==
-             0;
-    }
-    return false;
-  }
+  if (a.kind != b.kind) return false;
   switch (a.kind) {
   case POLY_ARG_NONE:
     return true;
@@ -169,6 +157,16 @@ static uint32_t cse_hash(const CseKey *k) {
   h = hash_mix(h, (uint32_t)k->dtype.priority);
   h = hash_mix(h, (uint32_t)k->dtype.bitsize);
   h = hash_mix(h, (uint32_t)k->dtype.count);
+  h = hash_mix(h, k->dtype.is_ptr ? 1u : 0u);
+  h = hash_mix(h, (uint32_t)k->dtype.addrspace);
+  h = hash_mix(h, (uint32_t)k->dtype.vcount);
+  h = hash_mix(h, (uint32_t)(k->dtype.ptr_size ^ (k->dtype.ptr_size >> 32)));
+  h = hash_mix(h, (uint32_t)k->dtype.fmt);
+  if (k->dtype.name) {
+    const unsigned char *p = (const unsigned char *)k->dtype.name;
+    while (*p)
+      h = hash_mix(h, (uint32_t)*p++);
+  }
   for (int i = 0; i < k->n_src; i++) {
     /* hash pointer as integer — identity-based like tinygrad */
     uintptr_t p = (uintptr_t)k->src[i];
@@ -204,6 +202,13 @@ static PolyUOp *poly_uop_internal(
     PolyArg arg,
     int32_t tag
 ) {
+  /* Canonicalize legacy RANGE(axis_id as INT) at the UOp boundary. tinygrad
+   * stores RANGE args as (axis_id, AxisType, ...); keeping the legacy form out
+   * of CSE lets PolyArg equality stay exact by kind. */
+  if (op == POLY_OP_RANGE && arg.kind == POLY_ARG_INT) {
+    arg = poly_arg_range(arg.i, POLY_AXIS_LOOP);
+  }
+
   /* Build a CSE key on the stack */
   CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag};
   uint32_t h = cse_hash(&key);
@@ -335,8 +340,6 @@ PolyUOp *poly_uop3(
 }
 
 /* Toposort (iterative DFS, mirrors tinygrad's toposort) */
-
-
 
 /* Shared iterative DFS worker. Either `gate_simple` or `gate_user` may be
  * non-NULL (never both). The gate signature difference is bridged here so
@@ -571,13 +574,29 @@ static void range_set_subtract(PolyRangeSet *dst, const PolyRangeSet *src) {
     range_set_remove(dst, src->items[i]);
 }
 
-static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo);
+static const PolyRangeSet *range_memo_get(PolyMap *memo, PolyUOp *u) {
+  return (const PolyRangeSet *)poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
+}
+
+static void range_memo_set(PolyMap *memo, PolyUOp *u, PolyRangeSet *ranges) {
+  poly_map_set(memo, poly_ptr_hash(u), u, ranges, poly_ptr_eq);
+}
 
 /* ended_ranges per tinygrad ops.py:351-358. Writes into `out` (caller-owned).
  * For entries that are themselves RANGE nodes we just add them; for non-RANGE
  * entries we union in their full ranges set so the caller's subtract does the
- * right thing regardless of entry shape. */
-static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u, PolyRangeSet *out, PolyMap *memo) {
+ * right thing regardless of entry shape.
+ *
+ * This helper assumes `ranges_memo` and `ended_memo` already contain every
+ * source node, which is true because compute_ranges() processes topological
+ * order. */
+static bool compute_ended_ranges_node(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyRangeSet *out,
+    PolyMap *ranges_memo,
+    PolyMap *ended_memo
+) {
   int rs = uop_range_start_for_op(u->op);
   if (rs >= 0) {
     if (rs > u->n_src) rs = u->n_src;
@@ -586,21 +605,25 @@ static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u, PolyRangeSet *out, Po
       if (er->op == POLY_OP_RANGE) {
         range_set_add(ctx, out, er);
       } else {
-        const PolyRangeSet *er_r = compute_ranges(ctx, er, memo);
+        const PolyRangeSet *er_r = range_memo_get(ranges_memo, er);
+        if (!er_r) return false;
         range_set_union(ctx, out, er_r);
       }
     }
-    return;
+    return true;
   }
   if (u->op == POLY_OP_AFTER) {
-    /* flatten(ended_ranges(x) for x in src[1:]) — recursive flatten */
+    /* flatten(ended_ranges(x) for x in src[1:]) */
     for (int i = 1; i < u->n_src; i++) {
-      compute_ended_ranges(ctx, u->src[i], out, memo);
+      const PolyRangeSet *src_ended = range_memo_get(ended_memo, u->src[i]);
+      if (!src_ended) return false;
+      range_set_union(ctx, out, src_ended);
     }
-    return;
+    return true;
   }
   if (u->op == POLY_OP_CONTRACT && u->n_src >= 1 && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
-    const PolyRangeSet *s0 = compute_ranges(ctx, u->src[0], memo);
+    const PolyRangeSet *s0 = range_memo_get(ranges_memo, u->src[0]);
+    if (!s0) return false;
     int n_pairs = u->arg.pair_tuple.n;
     for (int i = 0; i < s0->n; i++) {
       PolyUOp *r = s0->items[i];
@@ -613,38 +636,53 @@ static void compute_ended_ranges(PolyCtx *ctx, PolyUOp *u, PolyRangeSet *out, Po
         }
       }
     }
-    return;
+    return true;
   }
   /* No ended ranges for other ops. */
+  return true;
 }
 
 static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
-  void *cached = poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (cached) return (PolyRangeSet *)cached;
+  PolyRangeSet *cached = (PolyRangeSet *)range_memo_get(memo, u);
+  if (cached) return cached;
 
-  PolyRangeSet *ret = range_set_new(ctx, 4);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, u, &n_topo);
+  if (!topo) return NULL;
 
-  /* Union of src ranges */
-  for (int i = 0; i < u->n_src; i++) {
-    const PolyRangeSet *s = compute_ranges(ctx, u->src[i], memo);
-    range_set_union(ctx, ret, s);
+  PolyMap *ended_memo = poly_map_new((size_t)n_topo * 2 + 16);
+  if (!ended_memo) return NULL;
+
+  bool ok = true;
+  for (int ti = 0; ok && ti < n_topo; ti++) {
+    PolyUOp *cur = topo[ti];
+
+    PolyRangeSet *ended = range_set_new(ctx, 4);
+    ok = compute_ended_ranges_node(ctx, cur, ended, memo, ended_memo);
+    if (!ok) break;
+    range_memo_set(ended_memo, cur, ended);
+
+    if (range_memo_get(memo, cur)) continue;
+
+    PolyRangeSet *ret = range_set_new(ctx, 4);
+    for (int i = 0; i < cur->n_src; i++) {
+      const PolyRangeSet *src_ranges = range_memo_get(memo, cur->src[i]);
+      if (!src_ranges) {
+        ok = false;
+        break;
+      }
+      range_set_union(ctx, ret, src_ranges);
+    }
+    if (!ok) break;
+
+    range_set_subtract(ret, ended);
+    if (cur->op == POLY_OP_RANGE) range_set_add(ctx, ret, cur);
+    range_memo_set(memo, cur, ret);
   }
 
-  /* Subtract ended ranges */
-  PolyRangeSet ended = {.items = NULL, .n = 0, .cap = 0};
-  PolyRangeSet *ended_ptr = &ended;
-  /* Give ended a minimal arena buffer */
-  ended_ptr->items =
-      poly_arena_alloc(poly_ctx_arena(ctx), 4 * sizeof(PolyUOp *), _Alignof(PolyUOp *));
-  ended_ptr->cap = 4;
-  compute_ended_ranges(ctx, u, ended_ptr, memo);
-  range_set_subtract(ret, ended_ptr);
-
-  /* If self is a RANGE, include self */
-  if (u->op == POLY_OP_RANGE) range_set_add(ctx, ret, u);
-
-  poly_map_set(memo, poly_ptr_hash(u), u, ret, poly_ptr_eq);
-  return ret;
+  cached = ok ? (PolyRangeSet *)range_memo_get(memo, u) : NULL;
+  poly_map_destroy(ended_memo);
+  return cached;
 }
 
 /* PolyUOpCache: per-pass unified cache for minmax + ranges *
@@ -694,8 +732,7 @@ const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u) {
       u = u->src[0];
       continue;
     }
-    if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW ||
-        u->op == POLY_OP_PARAM) {
+    if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW || u->op == POLY_OP_PARAM) {
       return u;
     }
     return NULL;
@@ -747,8 +784,9 @@ bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r) {
 bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *cache) {
   if (!ctx || !u || !r || r->op != POLY_OP_RANGE) return false;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
+  if (!memo) return false;
   const PolyRangeSet *s = compute_ranges(ctx, u, memo);
-  bool found = range_set_contains(s, r);
+  bool found = s && range_set_contains(s, r);
   if (!cache) poly_map_destroy(memo);
   return found;
 }
@@ -760,7 +798,12 @@ int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out) {
 int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache) {
   if (!ctx || !u || !out || max_out <= 0) return 0;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
+  if (!memo) return 0;
   const PolyRangeSet *s = compute_ranges(ctx, u, memo);
+  if (!s) {
+    if (!cache) poly_map_destroy(memo);
+    return 0;
+  }
   int n_out = s->n < max_out ? s->n : max_out;
   memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
   if (!cache) poly_map_destroy(memo);
@@ -1064,9 +1107,7 @@ static PolyUOp *register_existing_named(
       return NULL;
     }
     if (existing->ndim != ndim) {
-      fprintf(
-          stderr, "poly_register_existing_buffer: '%s' registered with different ndim\n", name
-      );
+      fprintf(stderr, "poly_register_existing_buffer: '%s' registered with different ndim\n", name);
       return NULL;
     }
     for (int i = 0; i < ndim; i++) {

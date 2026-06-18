@@ -79,16 +79,22 @@ static uint64_t source_hash(const char *s) {
 static int ensure_cache_dir(char *dir, int cap) {
   const char *xdg = getenv("XDG_CACHE_HOME");
   const char *home = getenv("HOME");
+  int n = -1;
   if (xdg && xdg[0])
-    snprintf(dir, cap, "%s/polygrad", xdg);
+    n = snprintf(dir, cap, "%s/polygrad", xdg);
   else if (home && home[0])
-    snprintf(dir, cap, "%s/.cache/polygrad", home);
+    n = snprintf(dir, cap, "%s/.cache/polygrad", home);
   else
     return -1;
+  if (n < 0 || n >= cap) {
+    dir[0] = '\0';
+    return -1;
+  }
 
   /* mkdir -p (two levels: ~/.cache, ~/.cache/polygrad) */
   char parent[512];
-  snprintf(parent, sizeof(parent), "%s", dir);
+  int parent_len = snprintf(parent, sizeof(parent), "%s", dir);
+  if (parent_len < 0 || parent_len >= (int)sizeof(parent)) return -1;
   char *last_slash = strrchr(parent, '/');
   if (last_slash) {
     *last_slash = '\0';
@@ -289,10 +295,15 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
     }
 
     if (ensure_cache_dir(cache_dir, sizeof(cache_dir)) == 0) {
-      snprintf(cache_path, sizeof(cache_path), "%s/%016llx.so", cache_dir, (unsigned long long)h);
+      int path_len = snprintf(
+          cache_path, sizeof(cache_path), "%s/%016llx.so", cache_dir, (unsigned long long)h
+      );
+      if (path_len < 0 || path_len >= (int)sizeof(cache_path)) {
+        cache_path[0] = '\0'; /* path too long: fall through without disk cache */
+      }
 
       /* Try loading cached .so */
-      if (access(cache_path, F_OK) == 0) {
+      if (cache_path[0] && access(cache_path, F_OK) == 0) {
         PolyProgram *prog = load_so(cache_path, fn_name, 1);
         if (prog) return prog;
         /* Cache entry corrupt — remove and recompile */
@@ -321,21 +332,23 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
   if (use_cache && cache_path[0]) {
     /* Atomic: write to .tmp, then rename (prevents corrupt partial reads) */
     char tmp_path[520];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path);
+    int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path);
 
     /* Read compiled .so */
-    FILE *src_f = fopen(so_path, "rb");
-    if (src_f) {
-      FILE *dst_f = fopen(tmp_path, "wb");
-      if (dst_f) {
-        char buf[8192];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), src_f)) > 0)
-          fwrite(buf, 1, n, dst_f);
-        fclose(dst_f);
-        rename(tmp_path, cache_path);
+    if (tmp_len >= 0 && tmp_len < (int)sizeof(tmp_path)) {
+      FILE *src_f = fopen(so_path, "rb");
+      if (src_f) {
+        FILE *dst_f = fopen(tmp_path, "wb");
+        if (dst_f) {
+          char buf[8192];
+          size_t n;
+          while ((n = fread(buf, 1, sizeof(buf), src_f)) > 0)
+            fwrite(buf, 1, n, dst_f);
+          fclose(dst_f);
+          rename(tmp_path, cache_path);
+        }
+        fclose(src_f);
       }
-      fclose(src_f);
     }
   }
 

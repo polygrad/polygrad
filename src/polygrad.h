@@ -365,14 +365,18 @@ static inline PolyArg poly_arg_define_var(const char *name, int64_t min_val, int
  * and removable preserves the rangeify optimization contract for eliminating
  * redundant temporary buffers.
  */
-static inline PolyArg poly_arg_bufferize_opts(int32_t device, PolyAddrSpace addrspace, bool removable) {
+static inline PolyArg poly_arg_bufferize_opts(
+    int32_t device,
+    PolyAddrSpace addrspace,
+    bool removable
+) {
   return (PolyArg
   ){.kind = POLY_ARG_BUFFERIZE_OPTS,
     .bufferize_opts = {.device = device, .addrspace = addrspace, .removable = removable}};
 }
 
-/* Compatibility helpers: legacy RANGE arg kind may still be POLY_ARG_INT
- * during migration; treat that as LOOP axis with id=arg.i. */
+/* RANGE metadata helpers. New RANGE UOps store POLY_ARG_RANGE; poly_uop()
+ * canonicalizes legacy POLY_ARG_INT range ids to LOOP ranges at creation. */
 static inline int64_t poly_range_axis_id(PolyArg a) {
   if (a.kind == POLY_ARG_RANGE) return a.range.axis_id;
   if (a.kind == POLY_ARG_INT) return a.i;
@@ -459,11 +463,11 @@ void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata);
 
 typedef enum {
   POLY_DEVICE_AUTO = 0,
-  POLY_DEVICE_HOST,    /* imported frontend data, never a kernel target */
-  POLY_DEVICE_CPU,     /* native compiled CPU backend */
-  POLY_DEVICE_INTERP,  /* interpreter (shares CPU/WASM storage) */
-  POLY_DEVICE_WASM,    /* WASM JIT backend */
-  POLY_DEVICE_WEBGPU,  /* WebGPU GPU backend */
+  POLY_DEVICE_HOST, /* imported frontend data, never a kernel target */
+  POLY_DEVICE_CPU, /* native compiled CPU backend */
+  POLY_DEVICE_INTERP, /* interpreter (shares CPU/WASM storage) */
+  POLY_DEVICE_WASM, /* WASM JIT backend */
+  POLY_DEVICE_WEBGPU, /* WebGPU GPU backend */
   POLY_DEVICE_CUDA,
   POLY_DEVICE_HIP,
   POLY_DEVICE_X64_JIT,
@@ -515,9 +519,7 @@ struct PolyTensor {
   PolyTensor *source;
 };
 
-PolyTensor *poly_tensor_create(
-    PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device
-);
+PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device);
 PolyTensor *poly_tensor_create_with_roots(
     PolyCtx *ctx,
     PolyUOp *uop_logical,
@@ -925,7 +927,12 @@ PolyUOp *poly_store_val(PolyCtx *ctx, PolyUOp *buf, PolyUOp *value);
 PolyUOp *poly_sink1(PolyCtx *ctx, PolyUOp *store);
 PolyUOp *poly_sink_n(PolyCtx *ctx, PolyUOp **stores, int n);
 
-PolyUOp *poly_buffer_on_device(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size, PolyDevice device);
+PolyUOp *poly_buffer_on_device(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    int64_t size,
+    PolyDevice device
+);
 PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size);
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);

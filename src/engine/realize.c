@@ -12,32 +12,59 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Current proven top-level view slice from tinygrad's transform_to_call:
- * realize the smaller base compute, then rebuild only the pinned outer views
- * on top of the fresh buffer for frontend retargeting. */
-#define POLY_TRANSFORM_TO_CALL_MAX_VIEWS 16
-#define POLY_TRANSFORM_TO_CALL_MAX_REDUCE_TMPS 64
+/* Tinygrad's callify state is list/dict-backed. Keep the same semantics in C:
+ * the initial sizes match the old fixed caps, but both grow when needed. */
+#define POLY_TRANSFORM_TO_CALL_INITIAL_VIEWS 16
+#define POLY_TRANSFORM_TO_CALL_INITIAL_REDUCE_CACHE 64
 
 static bool poly_transform_to_call_view_op(PolyOps op) {
   return op == POLY_OP_RESHAPE || op == POLY_OP_EXPAND || op == POLY_OP_PAD;
 }
 
 typedef struct {
+  PolyUOp **items;
+  int n;
+  int cap;
+} PolyTransformViewStack;
+
+typedef struct {
   PolyUOp **stores;
   int n_stores;
   int stores_cap;
-  PolyUOp *cached_orig[POLY_TRANSFORM_TO_CALL_MAX_REDUCE_TMPS];
-  PolyUOp *cached_repl[POLY_TRANSFORM_TO_CALL_MAX_REDUCE_TMPS];
+  PolyUOp **cached_orig;
+  PolyUOp **cached_repl;
   int n_cached;
+  int cached_cap;
+  bool failed;
 } PolyTransformToCallCtx;
 
-static PolyUOp *poly_transform_to_call_root(PolyUOp *u, PolyUOp **views, int *n_views) {
+static void poly_transform_view_stack_free(PolyTransformViewStack *views) {
+  if (!views) return;
+  free(views->items);
+  views->items = NULL;
+  views->n = 0;
+  views->cap = 0;
+}
+
+static bool poly_transform_view_stack_push(PolyTransformViewStack *views, PolyUOp *u) {
+  if (!views || !u) return false;
+  if (views->n >= views->cap) {
+    int new_cap = views->cap ? views->cap * 2 : POLY_TRANSFORM_TO_CALL_INITIAL_VIEWS;
+    PolyUOp **new_items = realloc(views->items, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!new_items) return false;
+    views->items = new_items;
+    views->cap = new_cap;
+  }
+  views->items[views->n++] = u;
+  return true;
+}
+
+static PolyUOp *poly_transform_to_call_root(PolyUOp *u, PolyTransformViewStack *views) {
   PolyUOp *root = u;
-  *n_views = 0;
+  if (views) views->n = 0;
   while (root && root->n_src >= 1 && !poly_uop_has_buffer_identity(root) &&
          poly_transform_to_call_view_op(root->op)) {
-    if (*n_views >= POLY_TRANSFORM_TO_CALL_MAX_VIEWS) break;
-    views[(*n_views)++] = root;
+    if (!poly_transform_view_stack_push(views, root)) return NULL;
     root = root->src[0];
   }
   return root ? root : u;
@@ -47,15 +74,15 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
     PolyCtx *ctx,
     PolyUOp *buf,
     PolyShape root_shape,
-    PolyUOp **views,
-    int n_views
+    const PolyTransformViewStack *views
 ) {
   /* Tinygrad's becomes_map rewrites tensors back to their original outer view
    * stack after materializing the base compute into a fresh flat buffer. */
   PolyUOp *view = buf;
   if (root_shape.ndim != 1) view = poly_reshape(ctx, view, root_shape.dims, root_shape.ndim);
+  int n_views = views ? views->n : 0;
   for (int i = n_views - 1; i >= 0; i--) {
-    PolyUOp *step = views[i];
+    PolyUOp *step = views->items[i];
     if (step->op == POLY_OP_RESHAPE) {
       view = poly_reshape(ctx, view, step->arg.int_tuple.vals, step->arg.int_tuple.n);
     } else if (step->op == POLY_OP_EXPAND) {
@@ -68,15 +95,18 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
 }
 
 static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp *u) {
-  PolyUOp *views[POLY_TRANSFORM_TO_CALL_MAX_VIEWS];
-  int n_views = 0;
-  PolyUOp *root = poly_transform_to_call_root(u, views, &n_views);
+  PolyTransformViewStack views = {0};
+  PolyUOp *root = poly_transform_to_call_root(u, &views);
   if (!root || root->op != POLY_OP_AFTER || root->n_src < 1 ||
-      !poly_uop_has_buffer_identity(root->src[0]))
+      !poly_uop_has_buffer_identity(root->src[0])) {
+    poly_transform_view_stack_free(&views);
     return NULL;
+  }
 
   PolyShape root_shape = poly_uop_shape_cached(ctx, root);
-  return poly_transform_to_call_rebuild_view(ctx, root->src[0], root_shape, views, n_views);
+  PolyUOp *ret = poly_transform_to_call_rebuild_view(ctx, root->src[0], root_shape, &views);
+  poly_transform_view_stack_free(&views);
+  return ret;
 }
 
 static PolyUOp *poly_transform_to_call_alloc_buffer_on_device(
@@ -116,6 +146,20 @@ static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, Po
   }
   tctx->stores[tctx->n_stores++] = store;
   return true;
+}
+
+static void poly_transform_to_call_ctx_free(PolyTransformToCallCtx *tctx) {
+  if (!tctx) return;
+  free(tctx->stores);
+  free(tctx->cached_orig);
+  free(tctx->cached_repl);
+  tctx->stores = NULL;
+  tctx->cached_orig = NULL;
+  tctx->cached_repl = NULL;
+  tctx->n_stores = 0;
+  tctx->stores_cap = 0;
+  tctx->n_cached = 0;
+  tctx->cached_cap = 0;
 }
 
 static bool poly_transform_to_call_after_store_assign(
@@ -211,7 +255,17 @@ static bool poly_transform_to_call_cache_reduce(
     PolyUOp *repl
 ) {
   if (!tctx || !orig || !repl) return false;
-  if (tctx->n_cached >= POLY_TRANSFORM_TO_CALL_MAX_REDUCE_TMPS) return false;
+  if (tctx->n_cached >= tctx->cached_cap) {
+    int new_cap =
+        tctx->cached_cap ? tctx->cached_cap * 2 : POLY_TRANSFORM_TO_CALL_INITIAL_REDUCE_CACHE;
+    PolyUOp **new_orig = realloc(tctx->cached_orig, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!new_orig) return false;
+    tctx->cached_orig = new_orig;
+    PolyUOp **new_repl = realloc(tctx->cached_repl, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!new_repl) return false;
+    tctx->cached_repl = new_repl;
+    tctx->cached_cap = new_cap;
+  }
   tctx->cached_orig[tctx->n_cached] = orig;
   tctx->cached_repl[tctx->n_cached] = repl;
   tctx->n_cached++;
@@ -243,25 +297,40 @@ static PolyUOp *poly_transform_to_call_materialize_reduce_source(
   PolyUOp *cached = poly_transform_to_call_cached_reduce(tctx, u);
   if (cached) return cached;
 
-  PolyUOp *views[POLY_TRANSFORM_TO_CALL_MAX_VIEWS];
-  int n_views = 0;
-  PolyUOp *base = poly_transform_to_call_root(u, views, &n_views);
-  if (n_views == 0) return NULL;
-  if (!poly_transform_to_call_reduce_root(base)) return NULL;
-  if (!poly_transform_to_call_depends_on_input_buffer(ctx, base)) return NULL;
+  PolyTransformViewStack views = {0};
+  PolyUOp *base = poly_transform_to_call_root(u, &views);
+  if (!base) {
+    tctx->failed = true;
+    poly_transform_view_stack_free(&views);
+    return NULL;
+  }
+  if (views.n == 0 || !poly_transform_to_call_reduce_root(base) ||
+      !poly_transform_to_call_depends_on_input_buffer(ctx, base)) {
+    poly_transform_view_stack_free(&views);
+    return NULL;
+  }
 
   PolyShape base_shape = poly_uop_shape_cached(ctx, base);
   PolyUOp *buf = poly_transform_to_call_alloc_buffer(ctx, u->dtype, base_shape);
   if (!buf) {
     fprintf(stderr, "poly_realize: buffer allocate failed\n");
+    tctx->failed = true;
+    poly_transform_view_stack_free(&views);
+    return NULL;
+  }
+
+  PolyUOp *replacement = poly_transform_to_call_rebuild_view(ctx, buf, base_shape, &views);
+  poly_transform_view_stack_free(&views);
+  if (!replacement || !poly_transform_to_call_cache_reduce(tctx, u, replacement)) {
+    tctx->failed = true;
     return NULL;
   }
 
   PolyUOp *store = poly_store_val(ctx, buf, base);
-  if (!poly_transform_to_call_append_store(tctx, store)) return NULL;
-
-  PolyUOp *replacement = poly_transform_to_call_rebuild_view(ctx, buf, base_shape, views, n_views);
-  if (!poly_transform_to_call_cache_reduce(tctx, u, replacement)) return NULL;
+  if (!poly_transform_to_call_append_store(tctx, store)) {
+    tctx->failed = true;
+    return NULL;
+  }
   return replacement;
 }
 
@@ -277,14 +346,24 @@ static PolyUOp *poly_transform_to_call_rewrite_reduce_sources(
   PolyUOp *replacement =
       allow_materialize ? poly_transform_to_call_materialize_reduce_source(ctx, u, tctx) : NULL;
   if (replacement) return replacement;
+  if (tctx->failed) return NULL;
 
   bool can_descend =
       poly_opset_has(POLY_GROUP_ELEMENTWISE, u->op) || poly_transform_to_call_view_op(u->op);
   if (!can_descend) return u;
 
-  PolyUOp *new_src[16] = {0};
+  PolyUOp *src_buf[16];
+  PolyUOp **new_src = src_buf;
+  if (u->n_src > (int)(sizeof(src_buf) / sizeof(src_buf[0]))) {
+    new_src = malloc((size_t)u->n_src * sizeof(PolyUOp *));
+    if (!new_src) {
+      tctx->failed = true;
+      return NULL;
+    }
+  }
+
   bool changed = false;
-  for (int i = 0; i < u->n_src && i < 16; i++) {
+  for (int i = 0; i < u->n_src; i++) {
     bool child_allow = allow_materialize;
     if (!child_allow && poly_opset_has(POLY_GROUP_ELEMENTWISE, u->op)) {
       for (int j = 0; j < u->n_src; j++) {
@@ -297,11 +376,16 @@ static PolyUOp *poly_transform_to_call_rewrite_reduce_sources(
       }
     }
     new_src[i] = poly_transform_to_call_rewrite_reduce_sources(ctx, u->src[i], tctx, child_allow);
-    if (!new_src[i]) return NULL;
+    if (!new_src[i]) {
+      if (new_src != src_buf) free(new_src);
+      return NULL;
+    }
     if (new_src[i] != u->src[i]) changed = true;
   }
-  if (!changed) return u;
-  return poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg);
+
+  PolyUOp *ret = changed ? poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : u;
+  if (new_src != src_buf) free(new_src);
+  return ret;
 }
 
 /* Partial C analogue of tinygrad's transform_to_call(UOp.sink(...)).
@@ -311,12 +395,7 @@ static PolyUOp *poly_transform_to_call_rewrite_reduce_sources(
  * - preserve already-realized values and ASSIGN targets in out_uops
  * - apply the proven top-level RESHAPE(compute) remap before scheduling
  * - materialize reduction-through-view inputs before outer elementwise stores */
-static PolyUOp *poly_transform_to_call_ex(
-    PolyCtx *ctx,
-    PolyUOp **uops,
-    int n,
-    PolyUOp **out_uops
-) {
+static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (!ctx || !uops || !out_uops || n < 0) return NULL;
   if (n == 0) return NULL;
 
@@ -343,7 +422,7 @@ static PolyUOp *poly_transform_to_call_ex(
     if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
       int before = tctx.n_stores;
       if (!poly_transform_to_call_collect_after_stores(&tctx, u)) {
-        free(tctx.stores);
+        poly_transform_to_call_ctx_free(&tctx);
         return NULL;
       }
       if (tctx.n_stores > before) {
@@ -361,7 +440,7 @@ static PolyUOp *poly_transform_to_call_ex(
     if (poly_transform_to_call_after_store_assign(u, &assign_target, &assign_store)) {
       if (poly_uop_has_buffer_identity(assign_target)) {
         if (!poly_transform_to_call_append_store(&tctx, assign_store)) {
-          free(tctx.stores);
+          poly_transform_to_call_ctx_free(&tctx);
           return NULL;
         }
         out_uops[i] = assign_target;
@@ -374,33 +453,39 @@ static PolyUOp *poly_transform_to_call_ex(
      * store boundary and report the target buffer as the realized result. */
     if (u->op == POLY_OP_ASSIGN && u->n_src >= 1) {
       if (!poly_transform_to_call_append_store(&tctx, u)) {
-        free(tctx.stores);
+        poly_transform_to_call_ctx_free(&tctx);
         return NULL;
       }
       out_uops[i] = u->src[0];
       continue;
     }
 
-    PolyUOp *target_views[POLY_TRANSFORM_TO_CALL_MAX_VIEWS];
-    int n_target_views = 0;
-    PolyUOp *target_root = poly_transform_to_call_root(u, target_views, &n_target_views);
+    PolyTransformViewStack target_views = {0};
+    PolyUOp *target_root = poly_transform_to_call_root(u, &target_views);
+    if (!target_root) {
+      poly_transform_view_stack_free(&target_views);
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
     if (!poly_transform_to_call_reduce_root(target_root)) {
       u = poly_transform_to_call_rewrite_reduce_sources(ctx, u, &tctx, false);
       if (!u) {
-        free(tctx.stores);
+        poly_transform_view_stack_free(&target_views);
+        poly_transform_to_call_ctx_free(&tctx);
         return NULL;
       }
     }
+    poly_transform_view_stack_free(&target_views);
 
     PolyMap *pending_visited = poly_map_new(64);
     if (!pending_visited) {
-      free(tctx.stores);
+      poly_transform_to_call_ctx_free(&tctx);
       return NULL;
     }
     bool pending_ok = poly_transform_to_call_collect_pending_effects(&tctx, u, pending_visited);
     poly_map_destroy(pending_visited);
     if (!pending_ok) {
-      free(tctx.stores);
+      poly_transform_to_call_ctx_free(&tctx);
       return NULL;
     }
 
@@ -410,9 +495,13 @@ static PolyUOp *poly_transform_to_call_ex(
       continue;
     }
 
-    PolyUOp *views[POLY_TRANSFORM_TO_CALL_MAX_VIEWS];
-    int n_views = 0;
-    PolyUOp *materialized = poly_transform_to_call_root(u, views, &n_views);
+    PolyTransformViewStack views = {0};
+    PolyUOp *materialized = poly_transform_to_call_root(u, &views);
+    if (!materialized) {
+      poly_transform_view_stack_free(&views);
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
     PolyShape root_shape = poly_uop_shape_cached(ctx, materialized);
     if (materialized->op == POLY_OP_CONTIGUOUS && materialized->n_src >= 1 &&
         !poly_uop_has_buffer_identity(materialized->src[0])) {
@@ -429,24 +518,27 @@ static PolyUOp *poly_transform_to_call_ex(
         poly_transform_to_call_alloc_buffer_on_device(ctx, u->dtype, root_shape, out_dev);
     if (!buf) {
       fprintf(stderr, "poly_realize: buffer allocate failed\n");
-      free(tctx.stores);
+      poly_transform_view_stack_free(&views);
+      poly_transform_to_call_ctx_free(&tctx);
       return NULL;
     }
 
     if (!poly_transform_to_call_append_store(&tctx, poly_store_val(ctx, buf, materialized))) {
-      free(tctx.stores);
+      poly_transform_view_stack_free(&views);
+      poly_transform_to_call_ctx_free(&tctx);
       return NULL;
     }
-    out_uops[i] = poly_transform_to_call_rebuild_view(ctx, buf, root_shape, views, n_views);
+    out_uops[i] = poly_transform_to_call_rebuild_view(ctx, buf, root_shape, &views);
+    poly_transform_view_stack_free(&views);
   }
 
   if (tctx.n_stores == 0) {
-    free(tctx.stores);
+    poly_transform_to_call_ctx_free(&tctx);
     return NULL;
   }
 
   PolyUOp *sink_body = poly_sink_n(ctx, tctx.stores, tctx.n_stores);
-  free(tctx.stores);
+  poly_transform_to_call_ctx_free(&tctx);
   PolyUOp *call = poly_transform_to_call_wrap_call(ctx, sink_body);
   if (!call) return NULL;
   return call;
@@ -468,7 +560,9 @@ static PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink) {
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
   if (timing) {
-    fprintf(stderr, "[polygrad:schedule_effect] begin sink=%p n_src=%d\n", (void *)sink, sink->n_src);
+    fprintf(
+        stderr, "[polygrad:schedule_effect] begin sink=%p n_src=%d\n", (void *)sink, sink->n_src
+    );
     fflush(stderr);
   }
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
@@ -538,8 +632,7 @@ int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink) {
   poly_schedule_free(sched);
   if (timing) {
     fprintf(
-        stderr,
-        "[polygrad:realize_sink] schedule=%.3fms run=%.3fms total=%.3fms ret=%d\n",
+        stderr, "[polygrad:realize_sink] schedule=%.3fms run=%.3fms total=%.3fms ret=%d\n",
         t_sched - t0, t_run - t_sched, t_run - t0, ret
     );
   }

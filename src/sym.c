@@ -126,7 +126,6 @@ typedef struct MinMaxBox {
   int64_t lo, hi;
 } MinMaxBox;
 
-
 static int64_t min4(int64_t a, int64_t b, int64_t c, int64_t d) {
   int64_t x = a < b ? a : b;
   int64_t y = c < d ? c : d;
@@ -144,59 +143,149 @@ static int64_t i64_max(int64_t a, int64_t b) {
   return a > b ? a : b;
 }
 
-static void poly_uop_minmax_rec(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    int64_t *vmin,
-    int64_t *vmax,
-    PolyMap *memo
-);
+typedef struct MinMaxHeapBox {
+  MinMaxBox box;
+  struct MinMaxHeapBox *next;
+} MinMaxHeapBox;
 
-static void minmax_src(PolyCtx *ctx, PolyUOp *s, int64_t *lo, int64_t *hi, PolyMap *memo) {
-  poly_uop_minmax_rec(ctx, s, lo, hi, memo);
+static bool minmax_memo_get(PolyMap *memo, PolyUOp *u, int64_t *lo, int64_t *hi) {
+  if (!memo || !u) return false;
+  MinMaxBox *cached = (MinMaxBox *)poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
+  if (!cached) return false;
+  *lo = cached->lo;
+  *hi = cached->hi;
+  return true;
 }
 
-/* Public single-call wrapper. Allocates a throwaway memo per call; Phase D
- * hot paths should use poly_uop_minmax_ex with a shared PolyUOpCache. */
-void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
-  PolyMap *memo = poly_map_new(64);
-  poly_uop_minmax_rec(ctx, u, vmin, vmax, memo);
-  poly_map_destroy(memo);
-}
-
-void poly_uop_minmax_ex(
+static void minmax_memo_set(
     PolyCtx *ctx,
+    PolyMap *memo,
     PolyUOp *u,
-    PolyUOpCache *cache,
-    int64_t *vmin,
-    int64_t *vmax
+    int64_t lo,
+    int64_t hi,
+    MinMaxHeapBox **heap_boxes
 ) {
-  PolyMap *memo = cache ? poly_uop_cache_minmax_map(cache) : NULL;
-  if (memo)
-    poly_uop_minmax_rec(ctx, u, vmin, vmax, memo);
-  else
-    poly_uop_minmax(ctx, u, vmin, vmax);
+  if (!memo || !u) return;
+  MinMaxBox *box = NULL;
+  if (ctx) {
+    box = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(MinMaxBox), _Alignof(MinMaxBox));
+  } else if (heap_boxes) {
+    MinMaxHeapBox *heap_box = malloc(sizeof(MinMaxHeapBox));
+    if (!heap_box) return;
+    heap_box->next = *heap_boxes;
+    *heap_boxes = heap_box;
+    box = &heap_box->box;
+  }
+  if (!box) return;
+  box->lo = lo;
+  box->hi = hi;
+  poly_map_set(memo, poly_ptr_hash(u), u, box, poly_ptr_eq);
 }
 
-static void poly_uop_minmax_rec(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    int64_t *vmin,
-    int64_t *vmax,
-    PolyMap *memo
-) {
+static bool minmax_src(PolyMap *memo, PolyUOp *s, int64_t *lo, int64_t *hi) {
+  return minmax_memo_get(memo, s, lo, hi);
+}
+
+static void minmax_default(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
   if (!u) {
     *vmin = 0;
     *vmax = 0;
     return;
   }
+  *vmin = dtype_min(u->dtype);
+  *vmax = dtype_max(u->dtype);
+}
 
-  uint32_t h = poly_ptr_hash(u);
-  MinMaxBox *cached = memo ? (MinMaxBox *)poly_map_get(memo, h, u, poly_ptr_eq) : NULL;
-  if (cached) {
-    *vmin = cached->lo;
-    *vmax = cached->hi;
-    return;
+typedef struct MinMaxTopoFrame {
+  PolyUOp *u;
+  int state;
+} MinMaxTopoFrame;
+
+static PolyUOp **minmax_toposort_heap(PolyUOp *root, int *n_out) {
+  if (n_out) *n_out = 0;
+  if (!root || !n_out) return NULL;
+
+  int result_cap = 256;
+  int n = 0;
+  PolyUOp **result = malloc((size_t)result_cap * sizeof(PolyUOp *));
+  PolyMap *visited = poly_map_new(256);
+  int stack_cap = 256;
+  int stack_top = 0;
+  MinMaxTopoFrame *stack = malloc((size_t)stack_cap * sizeof(MinMaxTopoFrame));
+  if (!result || !visited || !stack) goto fail;
+
+  stack[stack_top++] = (MinMaxTopoFrame){root, 0};
+  while (stack_top > 0) {
+    MinMaxTopoFrame *frame = &stack[stack_top - 1];
+    PolyUOp *u = frame->u;
+    uint32_t h = poly_ptr_hash(u);
+
+    if (frame->state == 0 && poly_map_get(visited, h, u, poly_ptr_eq)) {
+      stack_top--;
+      continue;
+    }
+    if (frame->state == 0) {
+      frame->state = 1;
+      for (int i = u->n_src - 1; i >= 0; i--) {
+        PolyUOp *src = u->src[i];
+        if (!src || poly_map_get(visited, poly_ptr_hash(src), src, poly_ptr_eq)) continue;
+        if (stack_top >= stack_cap) {
+          int new_cap = stack_cap * 2;
+          MinMaxTopoFrame *new_stack = realloc(stack, (size_t)new_cap * sizeof(MinMaxTopoFrame));
+          if (!new_stack) goto fail;
+          stack = new_stack;
+          stack_cap = new_cap;
+        }
+        stack[stack_top++] = (MinMaxTopoFrame){src, 0};
+      }
+      continue;
+    }
+
+    stack_top--;
+    if (poly_map_get(visited, h, u, poly_ptr_eq)) continue;
+    poly_map_set(visited, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+    if (n >= result_cap) {
+      int new_cap = result_cap * 2;
+      PolyUOp **new_result = realloc(result, (size_t)new_cap * sizeof(PolyUOp *));
+      if (!new_result) goto fail;
+      result = new_result;
+      result_cap = new_cap;
+    }
+    result[n++] = u;
+  }
+
+  free(stack);
+  poly_map_destroy(visited);
+  *n_out = n;
+  return result;
+
+fail:
+  free(stack);
+  free(result);
+  if (visited) poly_map_destroy(visited);
+  return NULL;
+}
+
+static void minmax_heap_boxes_free(MinMaxHeapBox *boxes) {
+  while (boxes) {
+    MinMaxHeapBox *next = boxes->next;
+    free(boxes);
+    boxes = next;
+  }
+}
+
+static bool poly_uop_minmax_node(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    int64_t *vmin,
+    int64_t *vmax,
+    PolyMap *memo
+) {
+  (void)ctx;
+  if (!u) {
+    *vmin = 0;
+    *vmax = 0;
+    return true;
   }
 
   /* CONST */
@@ -210,7 +299,7 @@ static void poly_uop_minmax_rec(
     } else {
       *vmin = *vmax = u->arg.i;
     }
-    goto done;
+    return true;
   }
 
   /* VCONST — child CONSTs in src[]. Min/max over lanes. */
@@ -218,20 +307,20 @@ static void poly_uop_minmax_rec(
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     for (int i = 0; i < u->n_src; i++) {
       int64_t a, b;
-      minmax_src(ctx, u->src[i], &a, &b, memo);
+      if (!minmax_src(memo, u->src[i], &a, &b)) return false;
       if (a < lo) lo = a;
       if (b > hi) hi = b;
     }
     *vmin = lo;
     *vmax = hi;
-    goto done;
+    return true;
   }
 
   /* DEFINE_VAR: (name, min_val, max_val) */
   if (u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR) {
     *vmin = u->arg.define_var.min_val;
     *vmax = u->arg.define_var.max_val;
-    goto done;
+    return true;
   }
 
   /* RANGE / SPECIAL: tinygrad ops.py:888
@@ -242,22 +331,20 @@ static void poly_uop_minmax_rec(
    * which is mathematically identical and avoids the allocation. */
   if ((u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL) && u->n_src >= 1) {
     int64_t lo, hi;
-    minmax_src(ctx, u->src[0], &lo, &hi, memo);
+    if (!minmax_src(memo, u->src[0], &lo, &hi)) return false;
     *vmin = 0;
     *vmax = hi - 1;
-    goto done;
+    return true;
   }
 
   /* BIND: passthrough src[0] (ignore bound value) */
   if (u->op == POLY_OP_BIND && u->n_src >= 1) {
-    minmax_src(ctx, u->src[0], vmin, vmax, memo);
-    goto done;
+    return minmax_src(memo, u->src[0], vmin, vmax);
   }
 
   /* GEP: passthrough src[0] */
   if (u->op == POLY_OP_GEP && u->n_src >= 1) {
-    minmax_src(ctx, u->src[0], vmin, vmax, memo);
-    goto done;
+    return minmax_src(memo, u->src[0], vmin, vmax);
   }
 
   /* UNROLL/VECTORIZE: min/max over all srcs */
@@ -265,13 +352,13 @@ static void poly_uop_minmax_rec(
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     for (int i = 0; i < u->n_src; i++) {
       int64_t a, b;
-      minmax_src(ctx, u->src[i], &a, &b, memo);
+      if (!minmax_src(memo, u->src[i], &a, &b)) return false;
       if (a < lo) lo = a;
       if (b > hi) hi = b;
     }
     *vmin = lo;
     *vmax = hi;
-    goto done;
+    return true;
   }
 
   /* Binary ops — gated on `not is_float` to match tinygrad ops.py:858.
@@ -280,15 +367,15 @@ static void poly_uop_minmax_rec(
    * operands are dispatched separately below since their result is bool. */
   if (u->n_src == 2 && !poly_dtype_is_float(u->dtype)) {
     int64_t a0, a1, b0, b1;
-    minmax_src(ctx, u->src[0], &a0, &a1, memo);
-    minmax_src(ctx, u->src[1], &b0, &b1, memo);
+    if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
+    if (!minmax_src(memo, u->src[1], &b0, &b1)) return false;
 
     if (u->op == POLY_OP_ADD) {
       int64_t lo, hi;
       if (i64_add_ok(a0, b0, &lo) && i64_add_ok(a1, b1, &hi)) {
         *vmin = lo;
         *vmax = hi;
-        goto done;
+        return true;
       }
       /* overflow: fall through */
     }
@@ -297,7 +384,7 @@ static void poly_uop_minmax_rec(
       if (i64_sub_ok(a0, b1, &lo) && i64_sub_ok(a1, b0, &hi)) {
         *vmin = lo;
         *vmax = hi;
-        goto done;
+        return true;
       }
       /* overflow: fall through */
     }
@@ -307,14 +394,14 @@ static void poly_uop_minmax_rec(
           i64_mul_ok(a1, b1, &v3)) {
         *vmin = min4(v0, v1, v2, v3);
         *vmax = max4(v0, v1, v2, v3);
-        goto done;
+        return true;
       }
       /* overflow: fall through */
     }
     if (u->op == POLY_OP_MAX) {
       *vmin = i64_max(a0, b0);
       *vmax = i64_max(a1, b1);
-      goto done;
+      return true;
     }
     if (u->op == POLY_OP_MOD) {
       /* tinygrad ops.py:868-872 */
@@ -324,7 +411,7 @@ static void poly_uop_minmax_rec(
         int64_t hi = (a1 < 0) ? 0 : (a1 >= 0 && a1 < c ? a1 : c - 1);
         *vmin = lo;
         *vmax = hi;
-        goto done;
+        return true;
       }
       if (b0 > 0) {
         if (a0 >= 0) {
@@ -337,7 +424,7 @@ static void poly_uop_minmax_rec(
           *vmin = -(b1 - 1);
           *vmax = b1 - 1;
         }
-        goto done;
+        return true;
       }
       if (b1 < 0) {
         int64_t m = -b0 - 1;
@@ -351,7 +438,7 @@ static void poly_uop_minmax_rec(
           *vmin = -m;
           *vmax = m;
         }
-        goto done;
+        return true;
       }
     }
     if (u->op == POLY_OP_IDIV) {
@@ -364,7 +451,7 @@ static void poly_uop_minmax_rec(
         int64_t v2 = cdiv(a1, b0), v3 = cdiv(a1, b1);
         *vmin = min4(v0, v1, v2, v3);
         *vmax = max4(v0, v1, v2, v3);
-        goto done;
+        return true;
       }
     }
     if (u->op == POLY_OP_SHL && b0 == b1 && b0 >= 0 && b0 < 63) {
@@ -372,20 +459,20 @@ static void poly_uop_minmax_rec(
       if (i64_shl_ok(a0, b0, &v0) && i64_shl_ok(a1, b0, &v1)) {
         *vmin = i64_min(v0, v1);
         *vmax = i64_max(v0, v1);
-        goto done;
+        return true;
       }
       /* overflow or negative lhs: fall through */
     }
     if (u->op == POLY_OP_SHR && b0 == b1 && b0 >= 0 && b0 < 63) {
       *vmin = a0 >> b0;
       *vmax = a1 >> b0;
-      goto done;
+      return true;
     }
     if (u->op == POLY_OP_XOR && b0 == b1 && b0 == -1) {
       /* ~x: bitwise not */
       *vmin = ~a1;
       *vmax = ~a0;
-      goto done;
+      return true;
     }
     if (u->op == POLY_OP_AND && poly_dtype_is_int(u->dtype) && b0 == b1 && b0 >= 0) {
       /* tinygrad ops.py:862-863:
@@ -394,53 +481,53 @@ static void poly_uop_minmax_rec(
        *     return 0, s1_vmax if s0_vmin < 0 else min(s0_vmax, s1_vmax) */
       *vmin = 0;
       *vmax = (a0 < 0) ? b1 : i64_min(a1, b1);
-      goto done;
+      return true;
     }
   }
 
   /* Bool binary ops (AND / OR on bool dtype) */
   if (u->n_src == 2 && poly_dtype_eq(u->dtype, POLY_BOOL)) {
     int64_t a0, a1, b0, b1;
-    minmax_src(ctx, u->src[0], &a0, &a1, memo);
-    minmax_src(ctx, u->src[1], &b0, &b1, memo);
+    if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
+    if (!minmax_src(memo, u->src[1], &b0, &b1)) return false;
     if (u->op == POLY_OP_AND) {
       *vmin = (a0 && b0) ? 1 : 0;
       *vmax = (a1 && b1) ? 1 : 0;
-      goto done;
+      return true;
     }
     if (u->op == POLY_OP_OR) {
       *vmin = (a0 || b0) ? 1 : 0;
       *vmax = (a1 || b1) ? 1 : 0;
-      goto done;
+      return true;
     }
   }
 
   /* Comparisons: always bool, regardless of operand dtype */
   if (u->n_src == 2 && (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE)) {
     int64_t a0, a1, b0, b1;
-    minmax_src(ctx, u->src[0], &a0, &a1, memo);
-    minmax_src(ctx, u->src[1], &b0, &b1, memo);
+    if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
+    if (!minmax_src(memo, u->src[1], &b0, &b1)) return false;
     if (u->op == POLY_OP_CMPLT) {
       *vmin = (a1 < b0) ? 1 : 0;
       *vmax = (a0 < b1) ? 1 : 0;
-      goto done;
+      return true;
     }
     /* CMPNE */
     bool def_ne = (a1 < b0) || (b1 < a0);
     bool all_eq = (a0 == a1) && (b0 == b1) && (a0 == b0);
     *vmin = def_ne ? 1 : 0;
     *vmax = all_eq ? 0 : 1;
-    goto done;
+    return true;
   }
 
   /* WHERE (int branches): min/max over both branches */
   if (u->op == POLY_OP_WHERE && u->n_src == 3 && poly_dtype_is_int(u->dtype)) {
     int64_t t0, t1, f0, f1;
-    minmax_src(ctx, u->src[1], &t0, &t1, memo);
-    minmax_src(ctx, u->src[2], &f0, &f1, memo);
+    if (!minmax_src(memo, u->src[1], &t0, &t1)) return false;
+    if (!minmax_src(memo, u->src[2], &f0, &f1)) return false;
     *vmin = i64_min(t0, f0);
     *vmax = i64_max(t1, f1);
-    goto done;
+    return true;
   }
 
   /* CAST: clamp src[0] bounds to dtype range. Matches tinygrad ops.py:895 —
@@ -452,26 +539,86 @@ static void poly_uop_minmax_rec(
                      !poly_dtype_eq(u->dtype, POLY_BOOL));
     if (monotone) {
       int64_t a0, a1;
-      minmax_src(ctx, u->src[0], &a0, &a1, memo);
+      if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
       *vmin = i64_max(dtype_min(u->dtype), a0);
       *vmax = i64_min(a1, dtype_max(u->dtype));
-      goto done;
+      return true;
     }
   }
 
   /* Fallback: dtype range */
   *vmin = dtype_min(u->dtype);
   *vmax = dtype_max(u->dtype);
+  return true;
+}
 
-done:
-  if (memo && ctx) {
-    MinMaxBox *box = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(MinMaxBox), _Alignof(MinMaxBox));
-    if (box) {
-      box->lo = *vmin;
-      box->hi = *vmax;
-      poly_map_set(memo, h, u, box, poly_ptr_eq);
-    }
+static void poly_uop_minmax_compute(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    int64_t *vmin,
+    int64_t *vmax,
+    PolyMap *memo
+) {
+  if (!u) {
+    *vmin = 0;
+    *vmax = 0;
+    return;
   }
+
+  if (minmax_memo_get(memo, u, vmin, vmax)) return;
+  if (!memo) {
+    minmax_default(u, vmin, vmax);
+    return;
+  }
+
+  int n_topo = 0;
+  bool heap_topo = !ctx;
+  PolyUOp **topo = ctx ? poly_toposort(ctx, u, &n_topo) : minmax_toposort_heap(u, &n_topo);
+  if (!topo) {
+    minmax_default(u, vmin, vmax);
+    return;
+  }
+
+  MinMaxHeapBox *heap_boxes = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *cur = topo[i];
+    int64_t lo, hi;
+    if (minmax_memo_get(memo, cur, &lo, &hi)) continue;
+    if (!poly_uop_minmax_node(ctx, cur, &lo, &hi, memo)) minmax_default(cur, &lo, &hi);
+    minmax_memo_set(ctx, memo, cur, lo, hi, &heap_boxes);
+  }
+
+  if (!minmax_memo_get(memo, u, vmin, vmax)) minmax_default(u, vmin, vmax);
+  if (heap_topo) free(topo);
+  minmax_heap_boxes_free(heap_boxes);
+}
+
+/* Public single-call wrapper. Allocates a throwaway memo per call; Phase D
+ * hot paths should use poly_uop_minmax_ex with a shared PolyUOpCache. */
+void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
+  if (!vmin || !vmax) return;
+  PolyMap *memo = poly_map_new(64);
+  if (!memo) {
+    minmax_default(u, vmin, vmax);
+    return;
+  }
+  poly_uop_minmax_compute(ctx, u, vmin, vmax, memo);
+  poly_map_destroy(memo);
+}
+
+void poly_uop_minmax_ex(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOpCache *cache,
+    int64_t *vmin,
+    int64_t *vmax
+) {
+  if (!vmin || !vmax) return;
+  PolyMap *memo = cache ? poly_uop_cache_minmax_map(cache) : NULL;
+  if (memo && ctx)
+    poly_uop_minmax_compute(ctx, u, vmin, vmax, memo);
+  else
+    poly_uop_minmax(ctx, u, vmin, vmax);
 }
 
 /* Rewrite callbacks */
@@ -564,9 +711,9 @@ static PolyUOp *rule_or_one(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) 
 
 /* ALU/variable min==max -> CONST.
  * tinygrad symbolic.py:
- *   (UPat({Ops.CMPLT, Ops.CMPNE, Ops.IDIV, Ops.MOD, Ops.DEFINE_VAR, Ops.BIND, Ops.SPECIAL}, name="x"),
- *    lambda x: x.const_like(x.vmin) if x.vmin == x.vmax else None)
- *   (UPat(Ops.RANGE, src=(UPat(Ops.CONST,)), name="x"), lambda x: x.const_like(x.vmin) if x.vmin == x.vmax else None)
+ *   (UPat({Ops.CMPLT, Ops.CMPNE, Ops.IDIV, Ops.MOD, Ops.DEFINE_VAR, Ops.BIND, Ops.SPECIAL},
+ * name="x"), lambda x: x.const_like(x.vmin) if x.vmin == x.vmax else None) (UPat(Ops.RANGE,
+ * src=(UPat(Ops.CONST,)), name="x"), lambda x: x.const_like(x.vmin) if x.vmin == x.vmax else None)
  */
 static PolyUOp *rule_const_when_minmax_point(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
@@ -610,13 +757,9 @@ static bool const_lane_arg(PolyUOp *u, int lane, PolyArg *out) {
   return false;
 }
 
-static PolyUOp *build_vector_const_fold(
-    PolyCtx *ctx,
-    PolyUOp *root,
-    PolyOps op,
-    int n_ops
-) {
-  if (!root || root->dtype.count <= 1 || root->dtype.count > 128 || n_ops < 1 || n_ops > 3) return NULL;
+static PolyUOp *build_vector_const_fold(PolyCtx *ctx, PolyUOp *root, PolyOps op, int n_ops) {
+  if (!root || root->dtype.count <= 1 || root->dtype.count > 128 || n_ops < 1 || n_ops > 3)
+    return NULL;
   PolyUOp *elts[128];
   PolyDType lane_dt = poly_dtype_scalar(root->dtype);
   for (int lane = 0; lane < root->dtype.count; lane++) {
@@ -660,7 +803,10 @@ static PolyUOp *rule_const_fold_binary(PolyCtx *ctx, PolyUOp *root, const PolyBi
     if (a->op == POLY_OP_MUL && !i64_mul_ok(av, bv, &rv)) return NULL;
   }
   PolyArg operands[2] = {a->src[0]->arg, a->src[1]->arg};
-  PolyArg result = poly_exec_alu(a->op, a->dtype, operands, 2);
+  PolyDType exec_dtype = a->dtype;
+  if ((a->op == POLY_OP_CMPLT || a->op == POLY_OP_CMPNE || a->op == POLY_OP_CMPEQ) && a->n_src >= 1)
+    exec_dtype = poly_dtype_scalar(a->src[0]->dtype);
+  PolyArg result = poly_exec_alu(a->op, exec_dtype, operands, 2);
   return poly_const_like(ctx, a, result);
 }
 
@@ -755,7 +901,8 @@ static PolyUOp *rule_where_logical_not(PolyCtx *ctx, PolyUOp *root, const PolyBi
 }
 
 static PolyUOp *strip_casted_index_ptr(PolyUOp *u) {
-  while (u && u->op == POLY_OP_CAST && u->n_src >= 1) u = u->src[0];
+  while (u && u->op == POLY_OP_CAST && u->n_src >= 1)
+    u = u->src[0];
   return (u && u->op == POLY_OP_INDEX && u->n_src >= 2) ? u : NULL;
 }
 
@@ -765,7 +912,8 @@ static PolyUOp *strip_casted_index_ptr(PolyUOp *u) {
  * This is what removes dead masked lanes after devectorization. */
 static PolyUOp *rule_fold_invalid_load_store(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  if (!root || (root->op != POLY_OP_LOAD && root->op != POLY_OP_STORE) || root->n_src < 1) return NULL;
+  if (!root || (root->op != POLY_OP_LOAD && root->op != POLY_OP_STORE) || root->n_src < 1)
+    return NULL;
   PolyUOp *idx = strip_casted_index_ptr(root->src[0]);
   if (!idx || !is_invalid_const_uop(idx->src[1])) return NULL;
   if (root->op == POLY_OP_STORE) return poly_uop0(ctx, POLY_OP_NOOP, POLY_VOID, poly_arg_none());
@@ -917,8 +1065,7 @@ static PolyUOp *rule_move_const_to_end(PolyCtx *ctx, PolyUOp *root, const PolyBi
 
   PolyUOp *inner = root->src[0];
   PolyUOp *y = root->src[1];
-  if (!inner || inner->op != root->op || inner->n_src != 2 || is_scalar_const_uop(y))
-    return NULL;
+  if (!inner || inner->op != root->op || inner->n_src != 2 || is_scalar_const_uop(y)) return NULL;
 
   PolyUOp *x = NULL;
   PolyUOp *c = NULL;
@@ -999,7 +1146,9 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
   case POLY_ARG_INT_TUPLE:
     return arg_int_tuple_cmp(a.int_tuple.vals, a.int_tuple.n, b.int_tuple.vals, b.int_tuple.n);
   case POLY_ARG_PAIR_TUPLE:
-    return arg_pair_tuple_cmp(a.pair_tuple.pairs, a.pair_tuple.n, b.pair_tuple.pairs, b.pair_tuple.n);
+    return arg_pair_tuple_cmp(
+        a.pair_tuple.pairs, a.pair_tuple.n, b.pair_tuple.pairs, b.pair_tuple.n
+    );
   case POLY_ARG_STRING:
     return cmp_cstr(a.str, b.str);
   case POLY_ARG_OPS:
@@ -1094,7 +1243,11 @@ static bool is_flat_index_term_uop(PolyUOp *u) {
 /* tinygrad's reshape/indexing path simplifies weakint flat indexes at movement
  * construction time. Polygrad represents these as POLY_INDEX, so keep the
  * canonical innermost-first grouping scoped to integer index-like ADD chains. */
-static PolyUOp *rule_flat_index_outer_term_to_end(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+static PolyUOp *rule_flat_index_outer_term_to_end(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *b
+) {
   (void)b;
   if (!root || root->op != POLY_OP_ADD || root->n_src != 2) return NULL;
   if (!poly_dtype_is_int(root->dtype) || poly_dtype_is_bool(root->dtype)) return NULL;
@@ -1180,7 +1333,7 @@ static int64_t floordiv(int64_t a, int64_t b) {
 }
 
 /* Floor mod (Python-style %) */
-static int64_t cmod(int64_t a, int64_t b) {
+static int64_t poly_floormod(int64_t a, int64_t b) {
   return a - floordiv(a, b) * b;
 }
 
@@ -1316,10 +1469,12 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
 
   /* 4. fold_binary_numerator: single non-const term with range of 2 */
   if (n_nc == 1 && base_maxs[0] - base_mins[0] == 1) {
-    int64_t y1 = (root->op == POLY_OP_MOD) ? cmod(nc_factors[0] * base_mins[0] + additive_const, c)
-                                           : cdiv(nc_factors[0] * base_mins[0] + additive_const, c);
-    int64_t y2 = (root->op == POLY_OP_MOD) ? cmod(nc_factors[0] * base_maxs[0] + additive_const, c)
-                                           : cdiv(nc_factors[0] * base_maxs[0] + additive_const, c);
+    int64_t y1 = (root->op == POLY_OP_MOD)
+                     ? poly_floormod(nc_factors[0] * base_mins[0] + additive_const, c)
+                     : cdiv(nc_factors[0] * base_mins[0] + additive_const, c);
+    int64_t y2 = (root->op == POLY_OP_MOD)
+                     ? poly_floormod(nc_factors[0] * base_maxs[0] + additive_const, c)
+                     : cdiv(nc_factors[0] * base_maxs[0] + additive_const, c);
     /* result = (y2-y1)*(v-v_min) + y1 */
     int64_t slope = y2 - y1;
     PolyUOp *v_off = poly_uop2(
@@ -1346,7 +1501,7 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
   }
 
   /* Compute bounds of rem = sum(rems[i]*base[i]) + additive_const%c */
-  int64_t crem = additive_const % c;
+  int64_t crem = poly_floormod(additive_const, c);
   int64_t rem_lo = crem, rem_hi = crem;
   for (int i = 0; i < n_nc; i++) {
     int64_t v0 = rems[i] * base_mins[i], v1 = rems[i] * base_maxs[i];
@@ -1375,8 +1530,8 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
                         : divided;
         }
         /* Add (additive_const/g) % new_c */
-        int64_t ac_g = additive_const / g;
-        int64_t ac_rem = cmod(ac_g, new_c);
+        int64_t ac_g = floordiv(additive_const, g);
+        int64_t ac_rem = poly_floormod(ac_g, new_c);
         if (ac_rem != 0 || !new_x) {
           PolyUOp *ac_uop = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(ac_rem));
           new_x = new_x ? poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_x, ac_uop, poly_arg_none())
@@ -1391,7 +1546,7 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
                 poly_uop2(ctx, POLY_OP_MOD, root->dtype, new_x, new_y, poly_arg_none());
             PolyUOp *gc = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(g));
             PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, root->dtype, inner, gc, poly_arg_none());
-            int64_t const_rem = additive_const % g;
+            int64_t const_rem = poly_floormod(additive_const, g);
             if (const_rem != 0) {
               PolyUOp *cr = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(const_rem));
               return poly_uop2(ctx, POLY_OP_ADD, root->dtype, scaled, cr, poly_arg_none());
@@ -1399,7 +1554,7 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
             return scaled;
           }
           PolyUOp *inner = poly_uop2(ctx, POLY_OP_IDIV, root->dtype, new_x, new_y, poly_arg_none());
-          int64_t const_div = additive_const / c;
+          int64_t const_div = floordiv(additive_const, c);
           if (const_div != 0) {
             PolyUOp *cd = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(const_div));
             return poly_uop2(ctx, POLY_OP_ADD, root->dtype, inner, cd, poly_arg_none());
@@ -1774,9 +1929,7 @@ static PolyUOp *rule_vcat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindi
     PolyUOp *src = x->src[i];
     int cnt = src->dtype.count > 0 ? src->dtype.count : 1;
     for (int j = 0; j < cnt; j++) {
-      elts[p++] = poly_uop1(
-          ctx, POLY_OP_GEP, poly_dtype_scalar(src->dtype), src, poly_arg_int(j)
-      );
+      elts[p++] = poly_uop1(ctx, POLY_OP_GEP, poly_dtype_scalar(src->dtype), src, poly_arg_int(j));
     }
   }
   PolyUOp *ret = poly_uop(ctx, POLY_OP_VECTORIZE, x->dtype, elts, p, poly_arg_none());
@@ -2015,8 +2168,10 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
        ),
        rule_where_same},
       /* LOAD/STORE with Invalid index folds away */
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "x")), rule_fold_invalid_load_store},
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "x")), rule_fold_invalid_load_store},
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "x")), rule_fold_invalid_load_store
+      },
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "x")),
+       rule_fold_invalid_load_store},
       /* WHERE(const_gate, c0, c1) -> c0 or c1 */
       {poly_pat_op3(
            POLY_OP_WHERE, poly_pat_cvar("gate"), poly_pat_any("c0"), poly_pat_any("c1"), NULL
@@ -2041,10 +2196,8 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
        ),
        rule_const_when_minmax_point},
       {poly_pat_ops(
-           poly_opset_add(
-               poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BIND), POLY_OP_SPECIAL
-           ),
-           NULL, 0, "x"
+           poly_opset_add(poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BIND), POLY_OP_SPECIAL), NULL,
+           0, "x"
        ),
        rule_const_when_minmax_point},
       {poly_pat_op1(POLY_OP_RANGE, poly_pat_op(POLY_OP_CONST, NULL, 0, NULL), "x"),
@@ -2083,8 +2236,8 @@ PolyPatternMatcher *poly_symbolic(void) {
   PolyRule rules[] = {
       {poly_pat_ops2(POLY_GROUP_COMMUTATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "x"),
        rule_commutative_index_tuplize_order},
-      {poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), "cast"),
-       rule_cast_index_add_const_to_add_casts},
+      {poly_pat_op1(POLY_OP_CAST, poly_pat_any("x"), "cast"), rule_cast_index_add_const_to_add_casts
+      },
       {poly_pat_ops2(POLY_GROUP_ASSOCIATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "alu"),
        rule_assoc_fold_consts},
       {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_const_mul_over_add},

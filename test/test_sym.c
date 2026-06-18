@@ -6,6 +6,7 @@
 #include "../src/pat.h"
 #include "../src/tensor.h"
 #include <limits.h>
+#include <math.h>
 
 /* Helper: apply symbolic_simple via graph_rewrite */
 
@@ -74,6 +75,51 @@ TEST(alu, fold_where) {
   ops[0] = poly_arg_bool(false);
   r = poly_exec_alu(POLY_OP_WHERE, POLY_INT32, ops, 3);
   ASSERT_INT_EQ(r.i, 20);
+  PASS();
+}
+
+
+TEST(alu, compare_int64_preserves_precision) {
+  PolyArg ops[2] = {poly_arg_int(9007199254740992LL), poly_arg_int(9007199254740993LL)};
+  PolyArg r = poly_exec_alu(POLY_OP_CMPNE, POLY_INT64, ops, 2);
+  ASSERT_TRUE(r.b == true);
+  r = poly_exec_alu(POLY_OP_CMPEQ, POLY_INT64, ops, 2);
+  ASSERT_TRUE(r.b == false);
+  PASS();
+}
+
+TEST(alu, compare_uint64_uses_unsigned_order) {
+  PolyArg ops[2] = {
+      poly_arg_int((int64_t)UINT64_C(0x8000000000000005)),
+      poly_arg_int((int64_t)UINT64_C(0x4000000000000000)),
+  };
+  PolyArg r = poly_exec_alu(POLY_OP_CMPLT, POLY_UINT64, ops, 2);
+  ASSERT_TRUE(r.b == false);
+  PolyArg rev[2] = {ops[1], ops[0]};
+  r = poly_exec_alu(POLY_OP_CMPLT, POLY_UINT64, rev, 2);
+  ASSERT_TRUE(r.b == true);
+  PASS();
+}
+
+TEST(alu, fdiv_zero_zero_is_nan) {
+  PolyArg ops[2] = {poly_arg_float(0.0), poly_arg_float(0.0)};
+  PolyArg r = poly_exec_alu(POLY_OP_FDIV, POLY_FLOAT32, ops, 2);
+  ASSERT_TRUE(isnan(r.f));
+  PASS();
+}
+
+
+TEST(alu, fold_float16_truncates_output) {
+  PolyArg ops[2] = {poly_arg_float(1.0), poly_arg_float(0.0001)};
+  PolyArg r = poly_exec_alu(POLY_OP_ADD, POLY_FLOAT16, ops, 2);
+  ASSERT_FLOAT_EQ(r.f, 1.0, 0.0);
+  PASS();
+}
+
+TEST(alu, fold_bfloat16_truncates_output) {
+  PolyArg ops[2] = {poly_arg_float(1.0), poly_arg_float(0.001)};
+  PolyArg r = poly_exec_alu(POLY_OP_ADD, POLY_BFLOAT16, ops, 2);
+  ASSERT_FLOAT_EQ(r.f, 1.0, 0.0);
   PASS();
 }
 
@@ -719,6 +765,18 @@ TEST(sym, minmax_diamond_r3_mul2) {
   PASS();
 }
 
+TEST(sym, minmax_deep_chain_is_iterative) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *expr = mk_range(ctx, 10, 0);
+  PolyUOp *one = mk_const(ctx, 1);
+  for (int i = 0; i < 12000; i++) {
+    expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, expr, one, poly_arg_none());
+  }
+  check_mm(ctx, expr, 12000, 12009, "deep add chain");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* Phase D end-to-end gate * poly_arange returns a *Tensor-level* UOp graph composed of movement ops
  * (RESHAPE / EXPAND / PAD / PERMUTE / SHRINK) over a CONST + REDUCE_AXIS
  * + ADD. Tinygrad's _min_max has no special case for any of these (they
@@ -867,6 +925,21 @@ TEST(sym, cast_const_float_to_int) {
   ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_INT32));
   ASSERT_TRUE(folded->arg.kind == POLY_ARG_INT);
   ASSERT_INT_EQ((int)folded->arg.i, 3); /* truncates to 3 */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+
+TEST(sym, cast_const_large_int_to_uint64_preserves_integer_bits) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t big = 9007199254740993LL;
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(big));
+  PolyUOp *cast = poly_cast(ctx, c, POLY_UINT64);
+  PolyUOp *folded = simplify(ctx, cast);
+  ASSERT_TRUE(folded->op == POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(folded->dtype, POLY_UINT64));
+  ASSERT_TRUE(folded->arg.kind == POLY_ARG_INT);
+  ASSERT_TRUE(folded->arg.i == big);
   poly_ctx_destroy(ctx);
   PASS();
 }

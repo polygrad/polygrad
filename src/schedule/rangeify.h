@@ -34,12 +34,11 @@ typedef struct {
   PolyUOp *valid;
 } PolyRangeEntry;
 
-#define POLY_MAX_ALT_RNGS 8
-
 typedef struct {
   int count;
-  int lens[POLY_MAX_ALT_RNGS];
-  PolyUOp *rngs[POLY_MAX_ALT_RNGS][POLY_MAX_DIMS];
+  int cap;
+  int *lens;
+  PolyUOp *(*rngs)[POLY_MAX_DIMS];
 } PolyBufferAltRngs;
 
 typedef struct {
@@ -68,6 +67,7 @@ typedef struct {
   int deep_orphan_hits;
   int buffer_alt_created;
   int buffer_alt_used;
+  int buffer_alt_max_count;
 } PolyRangeifyStats;
 
 void poly_rangeify_stats_reset(void);

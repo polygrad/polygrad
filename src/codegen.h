@@ -111,12 +111,12 @@ PolyUOp *poly_apply_opts_heuristic_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererC
 PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps);
 
 /* TensorCore helpers (internal, exposed for testing) */
-int tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]);
-int tc_count_local(const PolyTensorCore *tc);
-int tc_count_upcast(const PolyTensorCore *tc);
-int tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n);
-int tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n);
-void tc_permute_for_shape_str(
+int poly_tc_get_reduce_axes(const PolyTensorCore *tc, int out[][2]);
+int poly_tc_count_local(const PolyTensorCore *tc);
+int poly_tc_count_upcast(const PolyTensorCore *tc);
+int poly_tc_base_shape_str(const PolyTensorCore *tc, const char *out[], int max_n);
+int poly_tc_base_upcast_axes(const PolyTensorCore *tc, const char *out[], int max_n);
+void poly_tc_permute_for_shape_str(
     const PolyTensorCore *tc,
     int swz_idx,
     const char *shape_str[],

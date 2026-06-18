@@ -76,6 +76,23 @@ TEST(uop, create_int_tuple_arg) {
   PASS();
 }
 
+TEST(uop, range_arg_canonicalizes_legacy_int_at_uop_creation) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(8));
+  PolyUOp *legacy = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(5));
+  PolyUOp *canonical =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(5, POLY_AXIS_LOOP));
+
+  ASSERT_TRUE(!poly_arg_eq(poly_arg_int(5), poly_arg_range(5, POLY_AXIS_LOOP)));
+  ASSERT_PTR_EQ(legacy, canonical);
+  ASSERT_EQ(legacy->arg.kind, POLY_ARG_RANGE);
+  ASSERT_INT_EQ(poly_range_axis_id(legacy->arg), 5);
+  ASSERT_EQ(poly_range_axis_type(legacy->arg), POLY_AXIS_LOOP);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* CSE (Common Subexpression Elimination) */
 
 TEST(uop, cse_same_const) {
@@ -101,6 +118,25 @@ TEST(uop, cse_different_dtype) {
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT64, poly_arg_float(1.0));
   ASSERT_PTR_NEQ(a, b);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, cse_hash_includes_pointer_dtype_fields) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType global4 = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyDType global8 = poly_dtype_ptr(POLY_FLOAT32, 8, POLY_ADDR_GLOBAL);
+  PolyDType local4 = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_LOCAL);
+
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_DEFINE_REG, global4, poly_arg_int(0));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_DEFINE_REG, global8, poly_arg_int(0));
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_DEFINE_REG, local4, poly_arg_int(0));
+  PolyUOp *d = poly_uop0(ctx, POLY_OP_DEFINE_REG, global4, poly_arg_int(0));
+
+  ASSERT_PTR_NEQ(a, b);
+  ASSERT_PTR_NEQ(a, c);
+  ASSERT_PTR_EQ(a, d);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -526,6 +562,24 @@ TEST(uop, ranges_partial_reduce_leaves_other_active) {
   ASSERT_TRUE(rs[0] == r2);
   ASSERT_TRUE(!poly_uop_in_ranges(ctx, red, r));
   ASSERT_TRUE(poly_uop_in_ranges(ctx, red, r2));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, ranges_deep_chain_is_iterative) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = make_range(ctx, 5, 0);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *expr = r;
+  for (int i = 0; i < 12000; i++) {
+    expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, expr, one, poly_arg_none());
+  }
+
+  PolyUOp *rs[8] = {0};
+  int n = poly_uop_ranges(ctx, expr, rs, 8);
+  ASSERT_INT_EQ(n, 1);
+  ASSERT_TRUE(rs[0] == r);
+  ASSERT_TRUE(poly_uop_in_ranges(ctx, expr, r));
   poly_ctx_destroy(ctx);
   PASS();
 }

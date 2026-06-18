@@ -20,6 +20,7 @@ extern "C" {
 #endif
 
 /* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
+PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
