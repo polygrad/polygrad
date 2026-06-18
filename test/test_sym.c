@@ -497,6 +497,15 @@ static bool sym_eval_i64(PolyUOp *u, const SymEvalEnv *env, int64_t *out) {
   }
 }
 
+static int sym_count_ops_in_root(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, root, &n);
+  int count = 0;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == op) count++;
+  return count;
+}
+
 static uint32_t sym_fuzz_next(uint32_t *state) {
   *state = *state * 1664525u + 1013904223u;
   return *state;
@@ -616,6 +625,58 @@ TEST(sym, symbolic_fuzzer_integer_rewrite_equivalence) {
     }
     poly_ctx_destroy(ctx);
   }
+  PASS();
+}
+
+TEST(sym, add_divmod_recombine_preserves_terms_past_old_cap) {
+  /* tinygrad symbolic.fold_add_divmod_recombine uses list(x.split_uop(ADD))
+   * with no fixed scratch cap. Polygrad used to collect only the first 32
+   * terms, then rebuild after a match, which could drop tail terms. Shape the
+   * tree so the div/mod pair appears together only at the root. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = mk_range(ctx, 100, 0);
+  PolyUOp *tail = mk_range(ctx, 11, 1);
+  PolyUOp *c4 = mk_const(ctx, 4);
+
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, base, c4, poly_arg_none());
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, base, c4, poly_arg_none());
+  PolyUOp *divmul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, div, c4, poly_arg_none());
+
+  PolyUOp *left = mod;
+  for (int i = 0; i < 30; i++)
+    left = sym_add(ctx, left, tail);
+
+  PolyUOp *right = divmul;
+  for (int i = 0; i < 20; i++)
+    right = sym_add(ctx, right, tail);
+
+  PolyUOp *root = sym_add(ctx, left, right);
+  PolyUOp *rewritten = poly_graph_rewrite(ctx, root, poly_symbolic());
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_MOD), 0);
+  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_IDIV), 0);
+
+  for (int r0 = 0; r0 < 100; r0 += 17) {
+    for (int r1 = 0; r1 < 11; r1 += 5) {
+      SymEvalEnv env = {0};
+      env.ranges[0] = r0;
+      env.ranges[1] = r1;
+      env.n_ranges = 2;
+      int64_t got = 0, want = 0;
+      ASSERT_TRUE(sym_eval_i64(root, &env, &want));
+      ASSERT_TRUE(sym_eval_i64(rewritten, &env, &got));
+      if (got != want) {
+        char *root_s = poly_uop_str(root);
+        char *rewritten_s = poly_uop_str(rewritten);
+        fprintf(stderr, "    root=%s\n    rewritten=%s\n", root_s, rewritten_s);
+        free(root_s);
+        free(rewritten_s);
+        FAIL("sample r0=%d r1=%d got %lld want %lld", r0, r1, (long long)got, (long long)want);
+      }
+    }
+  }
+
+  poly_ctx_destroy(ctx);
   PASS();
 }
 /* check_mm queries minmax and asserts both bounds match the tinygrad

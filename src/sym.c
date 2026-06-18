@@ -1285,15 +1285,49 @@ static PolyUOp *rule_flat_index_outer_term_to_end(
 
 /* fold_divmod helpers (port of tinygrad divandmod.py) */
 
-/* Split ADD chain into flat list of additive terms */
-static int split_add_terms(PolyUOp *u, PolyUOp **terms, int max) {
-  if (max <= 0) return 0;
-  if (u->op == POLY_OP_ADD && u->n_src == 2) {
-    int n = split_add_terms(u->src[0], terms, max);
-    return n + split_add_terms(u->src[1], terms + n, max - n);
+typedef struct {
+  PolyUOp **items;
+  int count;
+  int cap;
+  PolyUOp *inline_items[16];
+} PolyAddTermList;
+
+static void add_term_list_init(PolyAddTermList *list) {
+  list->items = list->inline_items;
+  list->count = 0;
+  list->cap = (int)(sizeof(list->inline_items) / sizeof(list->inline_items[0]));
+}
+
+static void add_term_list_free(PolyAddTermList *list) {
+  if (list->items != list->inline_items) free(list->items);
+  list->items = NULL;
+  list->count = list->cap = 0;
+}
+
+static bool add_term_list_push(PolyAddTermList *list, PolyUOp *u) {
+  if (list->count == list->cap) {
+    int new_cap = list->cap * 2;
+    PolyUOp **new_items = NULL;
+    if (list->items == list->inline_items) {
+      new_items = malloc((size_t)new_cap * sizeof(*new_items));
+      if (new_items) memcpy(new_items, list->items, (size_t)list->count * sizeof(*new_items));
+    } else {
+      new_items = realloc(list->items, (size_t)new_cap * sizeof(*new_items));
+    }
+    if (!new_items) return false;
+    list->items = new_items;
+    list->cap = new_cap;
   }
-  terms[0] = u;
-  return 1;
+  list->items[list->count++] = u;
+  return true;
+}
+
+/* Split ADD chain into a flat list of additive terms.
+ * Mirrors tinygrad's unbounded `x.split_uop(Ops.ADD)` consumer model. */
+static bool collect_add_terms(PolyUOp *u, PolyAddTermList *terms) {
+  if (u->op == POLY_OP_ADD && u->n_src == 2)
+    return collect_add_terms(u->src[0], terms) && collect_add_terms(u->src[1], terms);
+  return add_term_list_push(terms, u);
 }
 
 /* Get constant factor of a UOp (MUL(x,3)→3, CONST(5)→5, x→1) */
@@ -1425,10 +1459,23 @@ static PolyUOp *try_fold_divmod_congruence(
     int n_bases,
     int64_t additive_const
 ) {
-  if (n_bases <= 0 || n_bases > 15) return NULL;
+  if (n_bases <= 0) return NULL;
 
-  int64_t choices[16][2];
-  int n_choices[16];
+  int64_t(*choices)[2] = calloc((size_t)n_bases, sizeof(*choices));
+  int *n_choices = calloc((size_t)n_bases, sizeof(*n_choices));
+  int *idx = calloc((size_t)n_bases, sizeof(*idx));
+  int64_t *rems = calloc((size_t)n_bases, sizeof(*rems));
+  int64_t *coeffs = calloc((size_t)n_bases, sizeof(*coeffs));
+  if (!choices || !n_choices || !idx || !rems || !coeffs) {
+    free(choices);
+    free(n_choices);
+    free(idx);
+    free(rems);
+    free(coeffs);
+    return NULL;
+  }
+
+  PolyUOp *result = NULL;
   for (int i = 0; i < n_bases; i++) {
     int64_t r = poly_floormod(factors[i], c);
     int64_t r_neg = r - c;
@@ -1442,9 +1489,6 @@ static PolyUOp *try_fold_divmod_congruence(
     }
   }
 
-  int idx[16] = {0};
-  int64_t rems[16];
-  int64_t coeffs[16];
   while (true) {
     int64_t rem_lo = poly_floormod(additive_const, c);
     int64_t rem_hi = rem_lo;
@@ -1459,16 +1503,18 @@ static PolyUOp *try_fold_divmod_congruence(
     int64_t interval = floordiv(rem_lo, c);
     if (interval == floordiv(rem_hi, c)) {
       if (root->op == POLY_OP_MOD) {
-        return uop_sum_scaled_bases_raw(
+        result = uop_sum_scaled_bases_raw(
             ctx, root->dtype, bases, rems, n_bases, poly_floormod(additive_const, c) - interval * c
         );
+        break;
       }
 
       for (int i = 0; i < n_bases; i++)
         coeffs[i] = floordiv(factors[i] - rems[i], c);
-      return uop_sum_scaled_bases_raw(
+      result = uop_sum_scaled_bases_raw(
           ctx, root->dtype, bases, coeffs, n_bases, floordiv(additive_const, c) + interval
       );
+      break;
     }
 
     int pos = n_bases - 1;
@@ -1480,7 +1526,13 @@ static PolyUOp *try_fold_divmod_congruence(
     }
     if (pos < 0) break;
   }
-  return NULL;
+
+  free(choices);
+  free(n_choices);
+  free(idx);
+  free(rems);
+  free(coeffs);
+  return result;
 }
 
 static PolyUOp *try_nest_by_factor(
@@ -1494,7 +1546,8 @@ static PolyUOp *try_nest_by_factor(
     int n_terms,
     int64_t additive_const
 ) {
-  int64_t divs[16];
+  int64_t *divs = calloc((size_t)(n_terms > 0 ? n_terms : 1), sizeof(*divs));
+  if (!divs) return NULL;
   int n_divs = 0;
   for (int i = 0; i < n_terms; i++) {
     int64_t f = factors[i] < 0 ? -factors[i] : factors[i];
@@ -1502,11 +1555,20 @@ static PolyUOp *try_nest_by_factor(
     bool seen = false;
     for (int j = 0; j < n_divs; j++)
       if (divs[j] == f) seen = true;
-    if (!seen && n_divs < 16) divs[n_divs++] = f;
+    if (!seen) divs[n_divs++] = f;
   }
 
   PolyUOp *best = NULL;
   int best_size = 0;
+  PolyUOp **b_parts = NULL;
+  if (root->op == POLY_OP_MOD) {
+    b_parts = calloc((size_t)n_terms + 1, sizeof(*b_parts));
+    if (!b_parts) {
+      free(divs);
+      return NULL;
+    }
+  }
+
   for (int i = 0; i < n_divs; i++) {
     int64_t div = divs[i];
     PolyUOp *div_uop = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(div));
@@ -1528,7 +1590,6 @@ static PolyUOp *try_nest_by_factor(
       }
       continue;
     } else {
-      PolyUOp *b_parts[17];
       int n_b = 0;
       for (int j = 0; j < n_terms; j++) {
         int64_t rem = factors[j] % div;
@@ -1555,6 +1616,8 @@ static PolyUOp *try_nest_by_factor(
       best_size = size;
     }
   }
+  free(b_parts);
+  free(divs);
   return best;
 }
 
@@ -1571,8 +1634,14 @@ static PolyUOp *try_factor_remainder(
   if (y->op != POLY_OP_CONST || y->arg.kind != POLY_ARG_INT || y->arg.i <= 0) return NULL;
   int64_t c = y->arg.i;
 
-  PolyUOp *quo[16];
-  PolyUOp *rem[16];
+  PolyUOp **quo = calloc((size_t)(n_terms > 0 ? n_terms : 1), sizeof(*quo));
+  PolyUOp **rem = calloc((size_t)(n_terms > 0 ? n_terms : 1), sizeof(*rem));
+  if (!quo || !rem) {
+    free(quo);
+    free(rem);
+    return NULL;
+  }
+  PolyUOp *result = NULL;
   int n_quo = 0, n_rem = 0;
   for (int i = 0; i < n_terms; i++) {
     PolyUOp *u = all_terms[i];
@@ -1586,7 +1655,7 @@ static PolyUOp *try_factor_remainder(
     int64_t f_rem = poly_floormod(f, c);
     if (f_rem != f) {
       PolyUOp *base = uop_divides(ctx, u, f);
-      if (!base) return NULL;
+      if (!base) goto cleanup;
       rem[n_rem++] = uop_mul_const_i64(ctx, root->dtype, base, f_rem);
       if (root->op == POLY_OP_IDIV)
         quo[n_quo++] = uop_mul_const_i64(ctx, root->dtype, base, floordiv(f, c));
@@ -1597,18 +1666,25 @@ static PolyUOp *try_factor_remainder(
     }
   }
 
-  if (n_quo == 0) return NULL;
+  if (n_quo == 0) goto cleanup;
   PolyUOp *new_x = uop_sum_terms(ctx, root->dtype, rem, n_rem);
   int64_t nx_min, nx_max;
   poly_uop_minmax(ctx, new_x, &nx_min, &nx_max);
-  if (nx_min < 0) return NULL;
+  if (nx_min < 0) goto cleanup;
 
-  if (root->op == POLY_OP_MOD)
-    return poly_uop2(ctx, POLY_OP_MOD, root->dtype, new_x, y, poly_arg_none());
+  if (root->op == POLY_OP_MOD) {
+    result = poly_uop2(ctx, POLY_OP_MOD, root->dtype, new_x, y, poly_arg_none());
+    goto cleanup;
+  }
 
   PolyUOp *new_div = poly_uop2(ctx, POLY_OP_IDIV, root->dtype, new_x, y, poly_arg_none());
   PolyUOp *quo_sum = uop_sum_terms(ctx, root->dtype, quo, n_quo);
-  return poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_div, quo_sum, poly_arg_none());
+  result = poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_div, quo_sum, poly_arg_none());
+
+cleanup:
+  free(quo);
+  free(rem);
+  return result;
 }
 
 /* fold_divmod_general (port of tinygrad divandmod.py) */
@@ -1659,56 +1735,74 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
 
   /* 3. remove_nested_mod: (a%4 + b)%2 → (a+b)%2 when x >= 0 */
   if (root->op == POLY_OP_MOD && x_min >= 0) {
-    PolyUOp *sum_terms[16];
-    int n_sum = split_add_terms(x, sum_terms, 16);
-    if (n_sum > 0 && n_sum <= 15) {
+    PolyAddTermList sum_terms;
+    add_term_list_init(&sum_terms);
+    if (collect_add_terms(x, &sum_terms) && sum_terms.count > 0) {
       bool changed = false;
-      for (int i = 0; i < n_sum; i++) {
-        if (sum_terms[i]->op == POLY_OP_MOD && sum_terms[i]->n_src == 2 &&
-            uop_divides_const(sum_terms[i]->src[1], c) > 0) {
-          sum_terms[i] = sum_terms[i]->src[0];
+      for (int i = 0; i < sum_terms.count; i++) {
+        if (sum_terms.items[i]->op == POLY_OP_MOD && sum_terms.items[i]->n_src == 2 &&
+            uop_divides_const(sum_terms.items[i]->src[1], c) > 0) {
+          sum_terms.items[i] = sum_terms.items[i]->src[0];
           changed = true;
         }
       }
       if (changed) {
-        PolyUOp *new_x = sum_terms[0];
-        for (int i = 1; i < n_sum; i++)
-          new_x = poly_uop2(ctx, POLY_OP_ADD, root->dtype, new_x, sum_terms[i], poly_arg_none());
+        PolyUOp *new_x = uop_sum_terms(ctx, root->dtype, sum_terms.items, sum_terms.count);
         int64_t nx_min, nx_max;
         poly_uop_minmax(ctx, new_x, &nx_min, &nx_max);
-        if (nx_min >= 0) return poly_uop2(ctx, POLY_OP_MOD, root->dtype, new_x, y, poly_arg_none());
+        if (nx_min >= 0) {
+          PolyUOp *ret = poly_uop2(ctx, POLY_OP_MOD, root->dtype, new_x, y, poly_arg_none());
+          add_term_list_free(&sum_terms);
+          return ret;
+        }
       }
     }
+    add_term_list_free(&sum_terms);
   }
 
   if (x_min < 0) return NULL;
 
   /* Split x into additive terms */
-  PolyUOp *terms[16];
-  int n_terms = split_add_terms(x, terms, 16);
-  if (n_terms == 0 || n_terms > 15) return NULL;
+  PolyAddTermList terms;
+  add_term_list_init(&terms);
+  if (!collect_add_terms(x, &terms) || terms.count == 0) {
+    add_term_list_free(&terms);
+    return NULL;
+  }
+  int n_terms = terms.count;
 
   /* Separate additive constant from non-constant terms */
   int64_t additive_const = 0;
-  PolyUOp *nc_terms[16];
-  int64_t nc_factors[16];
+  PolyUOp **nc_terms = calloc((size_t)n_terms, sizeof(*nc_terms));
+  int64_t *nc_factors = calloc((size_t)n_terms, sizeof(*nc_factors));
+  PolyUOp **bases = calloc((size_t)n_terms, sizeof(*bases));
+  int64_t *base_mins = calloc((size_t)n_terms, sizeof(*base_mins));
+  int64_t *base_maxs = calloc((size_t)n_terms, sizeof(*base_maxs));
+  if (!nc_terms || !nc_factors || !bases || !base_mins || !base_maxs) {
+    free(nc_terms);
+    free(nc_factors);
+    free(bases);
+    free(base_mins);
+    free(base_maxs);
+    add_term_list_free(&terms);
+    return NULL;
+  }
+  PolyUOp *result = NULL;
   int n_nc = 0;
   for (int i = 0; i < n_terms; i++) {
-    if (terms[i]->op == POLY_OP_CONST && terms[i]->arg.kind == POLY_ARG_INT) {
-      additive_const += terms[i]->arg.i;
+    if (terms.items[i]->op == POLY_OP_CONST && terms.items[i]->arg.kind == POLY_ARG_INT) {
+      additive_const += terms.items[i]->arg.i;
     } else {
-      nc_terms[n_nc] = terms[i];
+      nc_terms[n_nc] = terms.items[i];
       nc_factors[n_nc] = uop_const_factor(nc_terms[n_nc]);
       n_nc++;
     }
   }
 
   /* Get base for each term: base[i] = nc_terms[i] / nc_factors[i] */
-  PolyUOp *bases[16];
-  int64_t base_mins[16], base_maxs[16];
   for (int i = 0; i < n_nc; i++) {
     bases[i] = uop_divides(ctx, nc_terms[i], nc_factors[i]);
-    if (!bases[i]) return NULL;
+    if (!bases[i]) goto cleanup;
     poly_uop_minmax(ctx, bases[i], &base_mins[i], &base_maxs[i]);
   }
 
@@ -1742,13 +1836,14 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
           poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(y1)), poly_arg_none()
       );
     }
-    return r;
+    result = r;
+    goto cleanup;
   }
 
-  PolyUOp *congruent = try_fold_divmod_congruence(
+  result = try_fold_divmod_congruence(
       ctx, root, c, bases, base_mins, base_maxs, nc_factors, n_nc, additive_const
   );
-  if (congruent) return congruent;
+  if (result) goto cleanup;
 
   /* 5. gcd_with_remainder: factor out GCD of all factors and c */
   if (x_min >= 0 && n_nc > 0) {
@@ -1786,34 +1881,49 @@ static PolyUOp *fold_divmod_general(PolyCtx *ctx, PolyUOp *root) {
           int64_t const_rem = poly_floormod(additive_const, g);
           if (const_rem != 0) {
             PolyUOp *cr = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(const_rem));
-            return poly_uop2(ctx, POLY_OP_ADD, root->dtype, scaled, cr, poly_arg_none());
+            result = poly_uop2(ctx, POLY_OP_ADD, root->dtype, scaled, cr, poly_arg_none());
+            goto cleanup;
           }
-          return scaled;
+          result = scaled;
+          goto cleanup;
         }
         PolyUOp *inner = poly_uop2(ctx, POLY_OP_IDIV, root->dtype, new_x, new_y, poly_arg_none());
         int64_t const_div = floordiv(additive_const, c);
         if (const_div != 0) {
           PolyUOp *cd = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(const_div));
-          return poly_uop2(ctx, POLY_OP_ADD, root->dtype, inner, cd, poly_arg_none());
+          result = poly_uop2(ctx, POLY_OP_ADD, root->dtype, inner, cd, poly_arg_none());
+          goto cleanup;
         }
-        return inner;
+        result = inner;
+        goto cleanup;
       }
     }
   }
 skip_gcd : {
-  PolyUOp *nested =
-      try_nest_by_factor(ctx, root, x, c, nc_terms, bases, nc_factors, n_nc, additive_const);
-  if (nested) return nested;
+  result = try_nest_by_factor(ctx, root, x, c, nc_terms, bases, nc_factors, n_nc, additive_const);
+  if (result) goto cleanup;
 }
   {
-    PolyUOp *all_terms[16];
-    int n_all = split_add_terms(x, all_terms, 16);
-    if (n_all > 0 && n_all <= 16) {
-      PolyUOp *factored = try_factor_remainder(ctx, root, y, all_terms, n_all, x_min, y_min);
-      if (factored) return factored;
+    PolyAddTermList all_terms;
+    add_term_list_init(&all_terms);
+    if (collect_add_terms(x, &all_terms) && all_terms.count > 0) {
+      result = try_factor_remainder(ctx, root, y, all_terms.items, all_terms.count, x_min, y_min);
+      if (result) {
+        add_term_list_free(&all_terms);
+        goto cleanup;
+      }
     }
+    add_term_list_free(&all_terms);
   }
-  return NULL;
+
+cleanup:
+  free(nc_terms);
+  free(nc_factors);
+  free(bases);
+  free(base_mins);
+  free(base_maxs);
+  add_term_list_free(&terms);
+  return result;
 }
 
 static PolyUOp *rule_cancel_divmod(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -1834,12 +1944,17 @@ static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, cons
   /* only on int types (tinygrad gates on dtypes.weakint/index) */
   if (poly_dtype_is_float(root->dtype) || root->dtype.bitsize == 1) return NULL;
 
-  PolyUOp *terms[32];
-  int n = split_add_terms(root, terms, 32);
-  if (n < 2) return NULL;
+  PolyAddTermList terms;
+  add_term_list_init(&terms);
+  if (!collect_add_terms(root, &terms) || terms.count < 2) {
+    add_term_list_free(&terms);
+    return NULL;
+  }
+  int n = terms.count;
+  PolyUOp *ret = NULL;
 
   for (int i = 0; i < n; i++) {
-    PolyUOp *u = terms[i];
+    PolyUOp *u = terms.items[i];
     PolyUOp *base = NULL;
     int64_t div_val = 0, mul_val = 0;
 
@@ -1865,7 +1980,7 @@ static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, cons
 
     for (int j = 0; j < n; j++) {
       if (i == j) continue;
-      PolyUOp *v = terms[j];
+      PolyUOp *v = terms.items[j];
       /* v must be MUL(q, div*mul) */
       if (v->op != POLY_OP_MUL || v->n_src != 2 || v->src[1]->op != POLY_OP_CONST ||
           v->src[1]->arg.kind != POLY_ARG_INT || v->src[1]->arg.i != div_val * mul_val)
@@ -1899,10 +2014,11 @@ static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, cons
         }
         for (int k = 0; k < n; k++) {
           if (k == i || k == j) continue;
-          PolyUOp *as[2] = {result, terms[k]};
+          PolyUOp *as[2] = {result, terms.items[k]};
           result = poly_uop(ctx, POLY_OP_ADD, root->dtype, as, 2, poly_arg_none());
         }
-        return result;
+        ret = result;
+        goto cleanup;
       }
 
       /* ((base//div)%d)*div + base%div -> base%(div*d) */
@@ -1917,15 +2033,19 @@ static PolyUOp *rule_fold_add_divmod_recombine(PolyCtx *ctx, PolyUOp *root, cons
           PolyUOp *result = poly_uop(ctx, POLY_OP_MOD, root->dtype, ms, 2, poly_arg_none());
           for (int k = 0; k < n; k++) {
             if (k == i || k == j) continue;
-            PolyUOp *as[2] = {result, terms[k]};
+            PolyUOp *as[2] = {result, terms.items[k]};
             result = poly_uop(ctx, POLY_OP_ADD, root->dtype, as, 2, poly_arg_none());
           }
-          return result;
+          ret = result;
+          goto cleanup;
         }
       }
     }
   }
-  return NULL;
+
+cleanup:
+  add_term_list_free(&terms);
+  return ret;
 }
 
 /* (x * y) / y → x.  Ref: tinygrad symbolic_simple line 90 */

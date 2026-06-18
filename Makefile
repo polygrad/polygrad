@@ -431,5 +431,5 @@ build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 
 # ── Full verification ──────────────────────────────────────────────────
 
-verify: test test-parity format-check analyze
+verify: test test-parity format-check analyze fuzz-smoke
 	@echo "All verification checks passed."
