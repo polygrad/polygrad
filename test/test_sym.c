@@ -78,7 +78,6 @@ TEST(alu, fold_where) {
   PASS();
 }
 
-
 TEST(alu, compare_int64_preserves_precision) {
   PolyArg ops[2] = {poly_arg_int(9007199254740992LL), poly_arg_int(9007199254740993LL)};
   PolyArg r = poly_exec_alu(POLY_OP_CMPNE, POLY_INT64, ops, 2);
@@ -107,7 +106,6 @@ TEST(alu, fdiv_zero_zero_is_nan) {
   ASSERT_TRUE(isnan(r.f));
   PASS();
 }
-
 
 TEST(alu, fold_float16_truncates_output) {
   PolyArg ops[2] = {poly_arg_float(1.0), poly_arg_float(0.0001)};
@@ -332,6 +330,212 @@ static PolyUOp *mk_range(PolyCtx *ctx, int64_t n, int64_t axis_id) {
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
   return poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(axis_id, POLY_AXIS_LOOP));
 }
+
+typedef struct {
+  int64_t ranges[8];
+  int n_ranges;
+  const char *var_names[8];
+  int64_t var_values[8];
+  int n_vars;
+} SymEvalEnv;
+
+static bool sym_eval_i64(PolyUOp *u, const SymEvalEnv *env, int64_t *out) {
+  if (!u || !out) return false;
+  switch (u->op) {
+  case POLY_OP_CONST:
+    if (u->arg.kind == POLY_ARG_BOOL) {
+      *out = u->arg.b ? 1 : 0;
+      return true;
+    }
+    if (u->arg.kind != POLY_ARG_INT) return false;
+    *out = u->arg.i;
+    return true;
+  case POLY_OP_RANGE: {
+    int64_t axis = poly_range_axis_id(u->arg);
+    if (axis < 0 || axis >= env->n_ranges) return false;
+    *out = env->ranges[axis];
+    return true;
+  }
+  case POLY_OP_DEFINE_VAR:
+    if (u->arg.kind != POLY_ARG_DEFINE_VAR) return false;
+    for (int i = 0; i < env->n_vars; i++) {
+      if (strcmp(env->var_names[i], u->arg.define_var.name) == 0) {
+        *out = env->var_values[i];
+        return true;
+      }
+    }
+    return false;
+  default:
+    break;
+  }
+
+  int64_t a = 0, b = 0, c = 0;
+  if (u->n_src > 0 && !sym_eval_i64(u->src[0], env, &a)) return false;
+  if (u->n_src > 1 && !sym_eval_i64(u->src[1], env, &b)) return false;
+  if (u->n_src > 2 && !sym_eval_i64(u->src[2], env, &c)) return false;
+
+  switch (u->op) {
+  case POLY_OP_NEG:
+    *out = -a;
+    return true;
+  case POLY_OP_ADD:
+    *out = a + b;
+    return true;
+  case POLY_OP_SUB:
+    *out = a - b;
+    return true;
+  case POLY_OP_MUL:
+    *out = a * b;
+    return true;
+  case POLY_OP_IDIV:
+    if (b == 0) return false;
+    *out = a / b;
+    return true;
+  case POLY_OP_MOD:
+    if (b == 0) return false;
+    *out = a % b;
+    return true;
+  case POLY_OP_CMPLT:
+    *out = a < b;
+    return true;
+  case POLY_OP_CMPNE:
+    *out = a != b;
+    return true;
+  case POLY_OP_CMPEQ:
+    *out = a == b;
+    return true;
+  case POLY_OP_WHERE:
+    *out = a ? b : c;
+    return true;
+  case POLY_OP_MAX:
+    *out = a > b ? a : b;
+    return true;
+  case POLY_OP_AND:
+    *out = a & b;
+    return true;
+  case POLY_OP_OR:
+    *out = a | b;
+    return true;
+  case POLY_OP_XOR:
+    *out = a ^ b;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static uint32_t sym_fuzz_next(uint32_t *state) {
+  *state = *state * 1664525u + 1013904223u;
+  return *state;
+}
+
+static int64_t sym_fuzz_i64(uint32_t *state, int64_t lo, int64_t hi) {
+  return lo + (int64_t)(sym_fuzz_next(state) % (uint32_t)(hi - lo + 1));
+}
+
+static PolyUOp *sym_mul_const(PolyCtx *ctx, PolyUOp *x, int64_t c) {
+  if (c == 1) return x;
+  PolyUOp *cc = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(c));
+  return poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, x, cc, poly_arg_none());
+}
+
+static PolyUOp *sym_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, b, poly_arg_none());
+}
+
+static PolyUOp *sym_fuzz_linear(PolyCtx *ctx, PolyUOp **vars, int n_vars, uint32_t *state) {
+  PolyUOp *ret =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(sym_fuzz_i64(state, -15, 15)));
+  int n_terms = 1 + (int)(sym_fuzz_next(state) % 4);
+  for (int i = 0; i < n_terms; i++) {
+    PolyUOp *v = vars[sym_fuzz_next(state) % (uint32_t)n_vars];
+    int64_t f = sym_fuzz_i64(state, -12, 12);
+    if (f == 0) f = 1;
+    ret = sym_add(ctx, ret, sym_mul_const(ctx, v, f));
+  }
+  return ret;
+}
+
+static PolyUOp *sym_fuzz_expr(PolyCtx *ctx, PolyUOp **vars, int n_vars, uint32_t *state) {
+  PolyUOp *x = sym_fuzz_linear(ctx, vars, n_vars, state);
+  int64_t d = sym_fuzz_i64(state, 2, 19);
+  PolyUOp *den = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(d));
+  switch (sym_fuzz_next(state) % 7) {
+  case 0:
+    return poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, x, den, poly_arg_none());
+  case 1:
+    return poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, x, den, poly_arg_none());
+  case 2: {
+    int64_t k = sym_fuzz_i64(state, 2, 6);
+    PolyUOp *wide_den = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(d * k));
+    PolyUOp *inner = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, x, wide_den, poly_arg_none());
+    return poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, inner, den, poly_arg_none());
+  }
+  case 3: {
+    int64_t k = sym_fuzz_i64(state, 2, 6);
+    PolyUOp *wide_den = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(d * k));
+    PolyUOp *inner = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, x, wide_den, poly_arg_none());
+    return poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, inner, den, poly_arg_none());
+  }
+  case 4: {
+    PolyUOp *y = sym_fuzz_linear(ctx, vars, n_vars, state);
+    PolyUOp *cond =
+        poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, vars[0], mk_const(ctx, 4), poly_arg_none());
+    return poly_uop3(ctx, POLY_OP_WHERE, POLY_INT32, cond, x, y, poly_arg_none());
+  }
+  case 5:
+    return poly_uop2(
+        ctx, POLY_OP_MOD, POLY_INT32, sym_add(ctx, x, mk_const(ctx, 31)), den, poly_arg_none()
+    );
+  default:
+    return x;
+  }
+}
+
+TEST(sym, symbolic_fuzzer_integer_rewrite_equivalence) {
+  uint32_t seed = 0xC0FFEEu;
+  for (int trial = 0; trial < 512; trial++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyUOp *vars[4] = {
+        mk_range(ctx, 9, 0),
+        mk_range(ctx, 7, 1),
+        mk_dvar(ctx, "a", 4, 11),
+        mk_dvar(ctx, "b", -3, 5),
+    };
+    PolyUOp *root = sym_fuzz_expr(ctx, vars, 4, &seed);
+    PolyUOp *rewritten = poly_graph_rewrite(ctx, root, poly_symbolic());
+    ASSERT_TRUE(rewritten != NULL);
+
+    for (int r0 = 0; r0 < 9; r0 += 2) {
+      for (int r1 = 0; r1 < 7; r1 += 3) {
+        for (int a = 4; a <= 11; a += 3) {
+          for (int b = -3; b <= 5; b += 4) {
+            SymEvalEnv env = {0};
+            env.ranges[0] = r0;
+            env.ranges[1] = r1;
+            env.n_ranges = 2;
+            env.var_names[0] = "a";
+            env.var_values[0] = a;
+            env.var_names[1] = "b";
+            env.var_values[1] = b;
+            env.n_vars = 2;
+            int64_t got = 0, want = 0;
+            ASSERT_TRUE(sym_eval_i64(root, &env, &want));
+            ASSERT_TRUE(sym_eval_i64(rewritten, &env, &got));
+            if (got != want) {
+              FAIL(
+                  "trial %d sample r0=%d r1=%d a=%d b=%d got %lld want %lld", trial, r0, r1, a, b,
+                  (long long)got, (long long)want
+              );
+            }
+          }
+        }
+      }
+    }
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
 /* check_mm queries minmax and asserts both bounds match the tinygrad
  * ground truth. Implemented as a macro because ASSERT_INT_EQ touches the
  * test-local _passed/_failed counters that only exist inside a TEST. */
@@ -434,9 +638,11 @@ TEST(sym, minmax_sub_dv_dvn) {
 }
 TEST(sym, minmax_add_int64_overflow_falls_back_to_dtype) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x =
-      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MAX - 1, INT64_MAX));
-  PolyUOp *y = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("y", 1, INT32_MAX));
+  PolyUOp *x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MAX - 1, INT64_MAX)
+  );
+  PolyUOp *y =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("y", 1, INT32_MAX));
   PolyUOp *u = poly_uop2(ctx, POLY_OP_ADD, POLY_INT64, x, y, poly_arg_none());
   check_mm(ctx, u, INT64_MIN, INT64_MAX, "i64 add overflow fallback");
   poly_ctx_destroy(ctx);
@@ -444,9 +650,11 @@ TEST(sym, minmax_add_int64_overflow_falls_back_to_dtype) {
 }
 TEST(sym, minmax_sub_int64_overflow_falls_back_to_dtype) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *x =
-      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MIN, INT64_MIN + 1));
-  PolyUOp *y = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("y", 1, INT32_MAX));
+  PolyUOp *x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MIN, INT64_MIN + 1)
+  );
+  PolyUOp *y =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("y", 1, INT32_MAX));
   PolyUOp *u = poly_uop2(ctx, POLY_OP_SUB, POLY_INT64, x, y, poly_arg_none());
   check_mm(ctx, u, INT64_MIN, INT64_MAX, "i64 sub overflow fallback");
   poly_ctx_destroy(ctx);
@@ -587,7 +795,8 @@ TEST(sym, minmax_and_negative_var_nonnegative_mask) {
    * when the mask has no sign bit, x & mask is known non-negative even if x
    * spans negative and positive values. A negative mask falls back to dtype
    * bounds because the sign bit can survive. */
-  PolyUOp *mask511 = poly_uop2(ctx, POLY_OP_AND, POLY_INT32, x, mk_const(ctx, 511), poly_arg_none());
+  PolyUOp *mask511 =
+      poly_uop2(ctx, POLY_OP_AND, POLY_INT32, x, mk_const(ctx, 511), poly_arg_none());
   check_mm(ctx, mask511, 0, 511, "[-100..100] & 511");
 
   PolyUOp *mask_all =
@@ -600,8 +809,7 @@ TEST(sym, minmax_and_negative_var_nonnegative_mask) {
 
 TEST(sym, minmax_special_with_define_var_source) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *dv =
-      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("i", 1, 10));
+  PolyUOp *dv = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("i", 1, 10));
   PolyUOp *special = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, dv, poly_arg_str("gidx0"));
 
   /* tinygrad SPECIAL uses the source bound as an extent, so [1..10] becomes
@@ -627,7 +835,8 @@ TEST(sym, minmax_nested_max_min_clamp) {
   PolyUOp *lo = poly_uop2(ctx, POLY_OP_MAX, POLY_INT32, x, mk_const(ctx, 5), poly_arg_none());
   PolyUOp *neg_one = mk_const(ctx, -1);
   PolyUOp *not_lo = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, lo, neg_one, poly_arg_none());
-  PolyUOp *not_8 = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, mk_const(ctx, 8), neg_one, poly_arg_none());
+  PolyUOp *not_8 =
+      poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, mk_const(ctx, 8), neg_one, poly_arg_none());
   PolyUOp *inner = poly_uop2(ctx, POLY_OP_MAX, POLY_INT32, not_lo, not_8, poly_arg_none());
   PolyUOp *clamped = poly_uop2(ctx, POLY_OP_XOR, POLY_INT32, inner, neg_one, poly_arg_none());
 
@@ -928,7 +1137,6 @@ TEST(sym, cast_const_float_to_int) {
   poly_ctx_destroy(ctx);
   PASS();
 }
-
 
 TEST(sym, cast_const_large_int_to_uint64_preserves_integer_bits) {
   PolyCtx *ctx = poly_ctx_new();
