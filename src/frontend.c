@@ -70,51 +70,88 @@ PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value) {
 
 /* POLY_MAX_REALIZE_BUFS defined in frontend_internal.h */
 
+static bool uop_vec_append(PolyUOp ***items, int *count, int *cap, PolyUOp *u) {
+  if (!items || !count || !cap) return false;
+  if (*count >= *cap) {
+    int new_cap = *cap ? *cap * 2 : 16;
+    PolyUOp **tmp = realloc(*items, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!tmp) return false;
+    *items = tmp;
+    *cap = new_cap;
+  }
+  (*items)[(*count)++] = u;
+  return true;
+}
+
+static bool uop_vec_contains(PolyUOp **items, int count, PolyUOp *u) {
+  for (int i = 0; i < count; i++)
+    if (items[i] == u) return true;
+  return false;
+}
+
 /* Reconstruct the buffer-to-PARAM ordering used by kernel-graph scheduling:
  * 1. Output buffers (STORE targets in SINK source order)
  * 2. Remaining input buffers (toposort encounter order) */
+bool poly_collect_ordered_buffers_alloc(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp ***out_ordered,
+    int *out_n_ordered
+) {
+  if (!ctx || !tensor_sink || !out_ordered || !out_n_ordered) return false;
+  *out_ordered = NULL;
+  *out_n_ordered = 0;
+
+  PolyUOp **ordered = NULL;
+  int n = 0, cap = 0;
+
+  /* Output buffers first */
+  for (int i = 0; i < tensor_sink->n_src; i++) {
+    PolyUOp *store = tensor_sink->src[i];
+    if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
+        store->src[0]->op == POLY_OP_BUFFER) {
+      PolyUOp *buf = store->src[0];
+      if (!uop_vec_contains(ordered, n, buf) && !uop_vec_append(&ordered, &n, &cap, buf)) {
+        free(ordered);
+        return false;
+      }
+    }
+  }
+
+  /* Input buffers in toposort order */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, tensor_sink, &n_topo);
+  if (!topo && n_topo > 0) {
+    free(ordered);
+    return false;
+  }
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_BUFFER && !uop_vec_contains(ordered, n, topo[i]) &&
+        !uop_vec_append(&ordered, &n, &cap, topo[i])) {
+      free(ordered);
+      return false;
+    }
+  }
+
+  *out_ordered = ordered;
+  *out_n_ordered = n;
+  return true;
+}
+
 int poly_collect_ordered_buffers(
     PolyCtx *ctx,
     PolyUOp *tensor_sink,
     PolyUOp **ordered,
     int max_bufs
 ) {
-  int n = 0;
-
-  /* Output buffers first */
-  for (int i = 0; i < tensor_sink->n_src; i++) {
-    PolyUOp *store = tensor_sink->src[i];
-    if (store->op == POLY_OP_STORE && store->n_src >= 1 && store->src[0]->op == POLY_OP_BUFFER) {
-      PolyUOp *buf = store->src[0];
-      /* Dedup */
-      bool dup = false;
-      for (int j = 0; j < n; j++) {
-        if (ordered[j] == buf) {
-          dup = true;
-          break;
-        }
-      }
-      if (!dup && n < max_bufs) ordered[n++] = buf;
-    }
-  }
-
-  /* Input buffers in toposort order */
-  int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, tensor_sink, &n_topo);
-  for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_BUFFER) {
-      bool dup = false;
-      for (int j = 0; j < n; j++) {
-        if (ordered[j] == topo[i]) {
-          dup = true;
-          break;
-        }
-      }
-      if (!dup && n < max_bufs) ordered[n++] = topo[i];
-    }
-  }
-
-  return n;
+  PolyUOp **all = NULL;
+  int n_all = 0;
+  if (!poly_collect_ordered_buffers_alloc(ctx, tensor_sink, &all, &n_all)) return 0;
+  int n_copy = n_all < max_bufs ? n_all : max_bufs;
+  for (int i = 0; i < n_copy; i++)
+    ordered[i] = all[i];
+  free(all);
+  return n_copy;
 }
 
 /* Weak context cleanup hook called from ctx.c when this translation unit is
@@ -311,7 +348,8 @@ void poly_collect_buf_order(
   if (!seen) return;
   int initial_visited = *n_visited;
   for (int i = 0; visited && i < initial_visited && i < POLY_MAX_STRUCT_NODES; i++) {
-    if (visited[i]) poly_map_set(seen, poly_ptr_hash(visited[i]), visited[i], visited[i], poly_ptr_eq);
+    if (visited[i])
+      poly_map_set(seen, poly_ptr_hash(visited[i]), visited[i], visited[i], poly_ptr_eq);
   }
 
   int cap = 1024;
@@ -352,6 +390,72 @@ void poly_collect_buf_order(
 
   free(stack);
   poly_map_destroy(seen);
+}
+
+bool poly_collect_buf_order_alloc(
+    PolyUOp *u,
+    PolyUOp ***out_buf_order,
+    int *out_n_bufs,
+    int *out_n_visited
+) {
+  if (!u || !out_buf_order || !out_n_bufs || !out_n_visited) return false;
+  *out_buf_order = NULL;
+  *out_n_bufs = 0;
+  *out_n_visited = 0;
+
+  PolyMap *seen = poly_map_new(1024);
+  if (!seen) return false;
+
+  int stack_cap = 1024;
+  int sp = 0;
+  PolyUOp **stack = malloc((size_t)stack_cap * sizeof(PolyUOp *));
+  if (!stack) {
+    poly_map_destroy(seen);
+    return false;
+  }
+  stack[sp++] = u;
+
+  PolyUOp **buf_order = NULL;
+  int n_bufs = 0, buf_cap = 0;
+  bool ok = true;
+
+  while (ok && sp > 0) {
+    PolyUOp *cur = stack[--sp];
+    if (!cur) continue;
+    if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) continue;
+    poly_map_set(seen, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
+    (*out_n_visited)++;
+
+    if (cur->op == POLY_OP_BUFFER) {
+      ok = uop_vec_append(&buf_order, &n_bufs, &buf_cap, cur);
+      continue;
+    }
+
+    if (sp + cur->n_src > stack_cap) {
+      int new_cap = stack_cap;
+      while (sp + cur->n_src > new_cap)
+        new_cap *= 2;
+      PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
+      if (!new_stack) {
+        ok = false;
+        break;
+      }
+      stack = new_stack;
+      stack_cap = new_cap;
+    }
+    for (int i = cur->n_src - 1; i >= 0; i--)
+      stack[sp++] = cur->src[i];
+  }
+
+  free(stack);
+  poly_map_destroy(seen);
+  if (!ok) {
+    free(buf_order);
+    return false;
+  }
+  *out_buf_order = buf_order;
+  *out_n_bufs = n_bufs;
+  return true;
 }
 
 int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {

@@ -356,26 +356,26 @@ static PolyDevice poly_exec_item_device(
   return fallback == POLY_DEVICE_AUTO ? poly_device_default() : fallback;
 }
 
-static int collect_external_buf_order_from_kernel_graph(
+static bool collect_external_buf_order_from_kernel_graph(
     PolyUOp *kernel_graph,
-    PolyUOp **buf_order
+    PolyUOp ***out_buf_order,
+    int *out_n_external
 ) {
-  if (!kernel_graph || !buf_order) return -1;
-  PolyUOp **all_bufs = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
-  if (!all_bufs) return -1;
+  if (!kernel_graph || !out_buf_order || !out_n_external) return false;
+  *out_buf_order = NULL;
+  *out_n_external = 0;
+
+  PolyUOp **all_bufs = NULL;
   int n_all = 0, n_visited = 0;
-  poly_collect_buf_order(kernel_graph, all_bufs, &n_all, NULL, &n_visited);
-  if (n_all > POLY_MAX_REALIZE_BUFS) {
-    free(all_bufs);
-    return -1;
-  }
+  if (!poly_collect_buf_order_alloc(kernel_graph, &all_bufs, &n_all, &n_visited)) return false;
 
   int n_external = 0;
   for (int i = 0; i < n_all; i++) {
-    if (!is_intermediate_buffer_uop(all_bufs[i])) buf_order[n_external++] = all_bufs[i];
+    if (!is_intermediate_buffer_uop(all_bufs[i])) all_bufs[n_external++] = all_bufs[i];
   }
-  free(all_bufs);
-  return n_external;
+  *out_buf_order = all_bufs;
+  *out_n_external = n_external;
+  return true;
 }
 
 static bool uop_ptr_in_list(PolyUOp *u, PolyUOp **list, int n) {
@@ -438,10 +438,7 @@ static int collect_bind_defaults(
     if (existing >= 0) {
       if (out[existing].value != value) {
         fprintf(
-            stderr,
-            "polygrad: BIND mismatch for DEFINE_VAR: %d != %d\n",
-            out[existing].value,
-            value
+            stderr, "polygrad: BIND mismatch for DEFINE_VAR: %d != %d\n", out[existing].value, value
         );
         return -1;
       }
@@ -521,7 +518,8 @@ static int linear_param_to_slot(
 }
 
 static PolyUOp *linear_call_param_for_buf(PolyCtx *ctx, PolyUOp *buf, int external_slot) {
-  if (external_slot >= 0) return poly_uop0(ctx, POLY_OP_PARAM, POLY_VOID, poly_arg_int(external_slot));
+  if (external_slot >= 0)
+    return poly_uop0(ctx, POLY_OP_PARAM, POLY_VOID, poly_arg_int(external_slot));
   return buf;
 }
 
@@ -633,9 +631,9 @@ static PolySchedule *build_schedule_from_linear(
     PolyUOp *call = linear->src[k];
     PolyExecItem *item = &ps->items[k];
     item->root = call->src[0];
-    item->kind = (call->arg.kind == POLY_ARG_INT && call->arg.i == POLY_EXEC_COPY) ?
-                     POLY_EXEC_COPY :
-                     POLY_EXEC_COMPUTE;
+    item->kind = (call->arg.kind == POLY_ARG_INT && call->arg.i == POLY_EXEC_COPY)
+                     ? POLY_EXEC_COPY
+                     : POLY_EXEC_COMPUTE;
     ps->exec_order[k] = k;
 
     int n_params = 0, n_vars = 0;
@@ -894,12 +892,9 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   }
 
   /* --- Collect pre-strip buffer ordering -------------------------------- */
-  PolyUOp **buf_order_orig = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
-  PolyUOp **dfs_visited = calloc(POLY_MAX_STRUCT_NODES, sizeof(PolyUOp *));
+  PolyUOp **buf_order_orig = NULL;
   int n_bufs_orig = 0, n_dfs = 0;
-  poly_collect_buf_order(sink, buf_order_orig, &n_bufs_orig, dfs_visited, &n_dfs);
-
-  free(dfs_visited);
+  if (!poly_collect_buf_order_alloc(sink, &buf_order_orig, &n_bufs_orig, &n_dfs)) return NULL;
   double t_bufs = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *used_vars[64];
@@ -910,8 +905,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   }
 
   PolyVarBinding bind_vals[64];
-  int n_bind_vals =
-      collect_bind_defaults(ctx, sink, used_vars, n_used_vars, bind_vals, 64);
+  int n_bind_vals = collect_bind_defaults(ctx, sink, used_vars, n_used_vars, bind_vals, 64);
   if (n_bind_vals < 0) {
     free(buf_order_orig);
     return NULL;
@@ -920,7 +914,8 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   if (timing) {
     fprintf(
         stderr,
-        "[polygrad:create_schedule] prepass bufs=%d dfs=%d vars=%d binds=%d collect=%.3fms vars=%.3fms\n",
+        "[polygrad:create_schedule] prepass bufs=%d dfs=%d vars=%d binds=%d collect=%.3fms "
+        "vars=%.3fms\n",
         n_bufs_orig, n_dfs, n_used_vars, n_bind_vals, t_bufs - t0, t_vars - t_bufs
     );
     fflush(stderr);
@@ -946,8 +941,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
       free(buf_order_orig);
       return NULL;
     }
-    uint32_t ghash =
-        poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+    uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
     double t_build0 = timing ? poly_now_ms() : 0.0;
     PolySchedule *ps = build_schedule_from_kernel_graph(
         ctx, kernel_graph, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals,
@@ -957,7 +951,8 @@ PolySchedule *poly_complete_create_schedule_with_vars(
     if (timing) {
       fprintf(
           stderr,
-          "[polygrad:create_schedule] done path=cached_linear_current_graph lower=%.3fms build=%.3fms total=%.3fms items=%d slots=%d\n",
+          "[polygrad:create_schedule] done path=cached_linear_current_graph lower=%.3fms "
+          "build=%.3fms total=%.3fms items=%d slots=%d\n",
           t_lower1 - t_lower0, t_build1 - t_build0, t_build1 - t0, ps ? ps->n_items : -1,
           ps ? ps->n_buf_slots : -1
       );
@@ -974,8 +969,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
     free(buf_order_orig);
     return NULL;
   }
-  uint32_t ghash =
-      poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   double t_build0 = timing ? poly_now_ms() : 0.0;
   PolySchedule *ps = build_schedule_from_kernel_graph(
       ctx, kernel_graph, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals, NULL
@@ -984,7 +978,8 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   if (timing) {
     fprintf(
         stderr,
-        "[polygrad:create_schedule] done path=kernel_graph kernel=%.3fms build=%.3fms total=%.3fms items=%d slots=%d\n",
+        "[polygrad:create_schedule] done path=kernel_graph kernel=%.3fms build=%.3fms total=%.3fms "
+        "items=%d slots=%d\n",
         t_kernel1 - t_kernel0, t_build1 - t_build0, t_build1 - t0, ps ? ps->n_items : -1,
         ps ? ps->n_buf_slots : -1
     );
@@ -1000,12 +995,16 @@ static PolySchedule *poly_create_schedule_uncached(PolyCtx *ctx, PolyUOp *kernel
     return NULL;
   }
 
-  PolyUOp *buf_order[POLY_MAX_REALIZE_BUFS];
-  int n_external = collect_external_buf_order_from_kernel_graph(kernel_graph, buf_order);
+  PolyUOp **buf_order = NULL;
+  int n_external = 0;
+  if (!collect_external_buf_order_from_kernel_graph(kernel_graph, &buf_order, &n_external))
+    return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  return build_schedule_from_kernel_graph(
+  PolySchedule *schedule = build_schedule_from_kernel_graph(
       ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, NULL
   );
+  free(buf_order);
+  return schedule;
 }
 
 /* tinygrad/engine/schedule.py: create_schedule
@@ -1021,12 +1020,16 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
       poly_schedule_cache_enabled() ? poly_lower_kernel_graph_to_linear(ctx, kernel_graph) : NULL;
   if (poly_schedule_cache_enabled() && !linear_template) return NULL;
 
-  PolyUOp *buf_order[POLY_MAX_REALIZE_BUFS];
-  int n_external = collect_external_buf_order_from_kernel_graph(kernel_graph, buf_order);
+  PolyUOp **buf_order = NULL;
+  int n_external = 0;
+  if (!collect_external_buf_order_from_kernel_graph(kernel_graph, &buf_order, &n_external))
+    return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  return build_schedule_from_kernel_graph(
+  PolySchedule *schedule = build_schedule_from_kernel_graph(
       ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, linear_template
   );
+  free(buf_order);
+  return schedule;
 }
 
 static void poly_runner_cleanup(PolyRunner *runner, PolyDevice device) {
@@ -1312,44 +1315,34 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
   double t_schedule = timing ? poly_now_ms() : 0.0;
   if (timing) {
     fprintf(
-        stderr, "[polygrad:build_linear] schedule items=%d slots=%d ms=%.3f\n",
-        schedule->n_items, schedule->n_buf_slots, t_schedule - t0
+        stderr, "[polygrad:build_linear] schedule items=%d slots=%d ms=%.3f\n", schedule->n_items,
+        schedule->n_buf_slots, t_schedule - t0
     );
     fflush(stderr);
   }
 
-  PolyUOp **external_bufs = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
-  if (!external_bufs) {
-    poly_schedule_free(schedule);
-    return NULL;
-  }
+  PolyUOp **external_bufs = NULL;
+  bool external_bufs_owned = false;
   int n_external = 0;
   if (external_buf_order) {
     /* LINEAR CALL params are replayed later against the schedule caller's
      * external buffer slots. For sink-level caching that slot list comes from
      * the original SINK, not from the optimized kernel graph. Keeping the same
      * numbering here prevents dropped/rewritten inputs from shifting params. */
-    if (n_external_buf_order > POLY_MAX_REALIZE_BUFS) {
-      free(external_bufs);
-      poly_schedule_free(schedule);
-      return NULL;
-    }
     n_external = n_external_buf_order;
-    for (int i = 0; i < n_external; i++)
-      external_bufs[i] = external_buf_order[i];
+    external_bufs = external_buf_order;
   } else {
     /* Kernel-graph callers do not have a pre-rangeify SINK, so their natural
      * external order is the one discovered from the kernel graph itself. */
-    n_external = collect_external_buf_order_from_kernel_graph(kernel_graph, external_bufs);
-    if (n_external < 0) {
-      free(external_bufs);
+    if (!collect_external_buf_order_from_kernel_graph(kernel_graph, &external_bufs, &n_external)) {
       poly_schedule_free(schedule);
       return NULL;
     }
+    external_bufs_owned = true;
   }
   PolyUOp **linear_src = calloc((size_t)schedule->n_items, sizeof(PolyUOp *));
   if (!linear_src) {
-    free(external_bufs);
+    if (external_bufs_owned) free(external_bufs);
     poly_schedule_free(schedule);
     return NULL;
   }
@@ -1360,16 +1353,15 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
     PolyUOp **call_src = calloc((size_t)n_call_src, sizeof(PolyUOp *));
     if (!call_src) {
       free(linear_src);
-      free(external_bufs);
+      if (external_bufs_owned) free(external_bufs);
       poly_schedule_free(schedule);
       return NULL;
     }
     call_src[0] = item->root;
     for (int i = 0; i < item->n_buf_slots; i++) {
       int slot = item->buf_slot_indices[i];
-      PolyUOp *buf = (slot >= 0 && slot < schedule->n_buf_slots) ?
-                         schedule->buf_slots[slot].buf_uop :
-                         NULL;
+      PolyUOp *buf =
+          (slot >= 0 && slot < schedule->n_buf_slots) ? schedule->buf_slots[slot].buf_uop : NULL;
       int external_slot = poly_find_buf_position(buf, external_bufs, n_external);
       call_src[1 + i] = linear_call_param_for_buf(ctx, buf, external_slot);
     }
@@ -1382,7 +1374,7 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
   PolyUOp *linear =
       poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, schedule->n_items, poly_arg_none());
   free(linear_src);
-  free(external_bufs);
+  if (external_bufs_owned) free(external_bufs);
   poly_schedule_free(schedule);
   if (timing) {
     double t_done = poly_now_ms();
@@ -1399,8 +1391,7 @@ static PolyUOp *poly_lower_kernel_graph_to_linear(PolyCtx *ctx, PolyUOp *kernel_
   PolyUOp *cache_key = schedule_cache_key_for_kernel_graph(ctx, kernel_graph);
   if (!cache_key) return NULL;
   uint32_t cache_hash = poly_structural_hash(cache_key) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  PolyUOp *cached =
-      poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_structural_eq);
+  PolyUOp *cached = poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_structural_eq);
   if (cached) return cached;
 
   PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(ctx, kernel_graph, NULL, 0);
@@ -1423,15 +1414,20 @@ static bool schedule_cache_stack_push(PolyUOp ***stack, int *sp, int *cap, PolyU
 
 static bool schedule_cache_collect_inputs(
     PolyUOp *u,
-    PolyUOp **input_order,
+    PolyUOp ***out_input_order,
     int *n_inputs,
     int *n_visited
 ) {
-  if (!u || !n_inputs || !n_visited) return false;
+  if (!u || !out_input_order || !n_inputs || !n_visited) return false;
+  *out_input_order = NULL;
+  *n_inputs = 0;
+  *n_visited = 0;
 
   PolyMap *seen = poly_map_new(1024);
   if (!seen) return false;
 
+  PolyUOp **input_order = NULL;
+  int input_cap = 0;
   int cap = 1024;
   int sp = 0;
   PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
@@ -1448,8 +1444,17 @@ static bool schedule_cache_collect_inputs(
     (*n_visited)++;
 
     if (cur->op == POLY_OP_BUFFER || cur->op == POLY_OP_BUFFER_VIEW) {
-      if (*n_inputs < POLY_MAX_REALIZE_BUFS) input_order[*n_inputs] = cur;
-      (*n_inputs)++;
+      if (*n_inputs >= input_cap) {
+        int new_cap = input_cap ? input_cap * 2 : 16;
+        PolyUOp **tmp = realloc(input_order, (size_t)new_cap * sizeof(PolyUOp *));
+        if (!tmp) {
+          ok = false;
+          break;
+        }
+        input_order = tmp;
+        input_cap = new_cap;
+      }
+      input_order[(*n_inputs)++] = cur;
       continue;
     }
 
@@ -1461,6 +1466,11 @@ static bool schedule_cache_collect_inputs(
 
   free(stack);
   poly_map_destroy(seen);
+  if (!ok) {
+    free(input_order);
+    return false;
+  }
+  *out_input_order = input_order;
   return ok;
 }
 
@@ -1505,52 +1515,56 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
     fflush(stderr);
   }
 
-  PolyUOp *input_order[POLY_MAX_REALIZE_BUFS];
+  PolyUOp **input_order = NULL;
   int n_inputs = 0, n_visited = 0;
-  if (!schedule_cache_collect_inputs(sink, input_order, &n_inputs, &n_visited)) return NULL;
-  if (n_inputs > POLY_MAX_REALIZE_BUFS) return NULL;
+  if (!schedule_cache_collect_inputs(sink, &input_order, &n_inputs, &n_visited)) return NULL;
   double t_inputs = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *cache_key = schedule_cache_key_for_sink(ctx, sink, input_order, n_inputs);
-  if (!cache_key) return NULL;
+  if (!cache_key) {
+    free(input_order);
+    return NULL;
+  }
   uint32_t cache_hash = poly_structural_hash(cache_key) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolyUOp *cached =
-      poly_schedule_cache_enabled() ?
-          poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_structural_eq) :
-          NULL;
+      poly_schedule_cache_enabled()
+          ? poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_structural_eq)
+          : NULL;
   double t_key = timing ? poly_now_ms() : 0.0;
   if (cached) {
     if (timing) {
       fprintf(
           stderr,
-          "[polygrad:lower_sink_to_linear] cache hit inputs=%d visited=%d inputs_ms=%.3f key_ms=%.3f total=%.3f\n",
+          "[polygrad:lower_sink_to_linear] cache hit inputs=%d visited=%d inputs_ms=%.3f "
+          "key_ms=%.3f total=%.3f\n",
           n_inputs, n_visited, t_inputs - t0, t_key - t_inputs, t_key - t0
       );
       fflush(stderr);
     }
+    free(input_order);
     return cached;
   }
   if (timing) {
     fprintf(
         stderr,
-        "[polygrad:lower_sink_to_linear] cache miss inputs=%d visited=%d inputs_ms=%.3f key_ms=%.3f\n",
+        "[polygrad:lower_sink_to_linear] cache miss inputs=%d visited=%d inputs_ms=%.3f "
+        "key_ms=%.3f\n",
         n_inputs, n_visited, t_inputs - t0, t_key - t_inputs
     );
     fflush(stderr);
   }
 
-  PolyUOp **raw_external_bufs = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
-  if (!raw_external_bufs) return NULL;
+  PolyUOp **raw_external_bufs = NULL;
   int n_raw_external = 0, n_raw_visited = 0;
-  poly_collect_buf_order(sink, raw_external_bufs, &n_raw_external, NULL, &n_raw_visited);
-  if (n_raw_external > POLY_MAX_REALIZE_BUFS) {
-    free(raw_external_bufs);
+  if (!poly_collect_buf_order_alloc(sink, &raw_external_bufs, &n_raw_external, &n_raw_visited)) {
+    free(input_order);
     return NULL;
   }
   double t_raw = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, sink);
   if (!kernel_graph) {
+    free(input_order);
     free(raw_external_bufs);
     return NULL;
   }
@@ -1558,6 +1572,7 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
   PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(
       ctx, kernel_graph, raw_external_bufs, n_raw_external
   );
+  free(input_order);
   free(raw_external_bufs);
   if (!linear) return NULL;
   double t_linear = timing ? poly_now_ms() : 0.0;
@@ -1566,7 +1581,8 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
   if (timing) {
     fprintf(
         stderr,
-        "[polygrad:lower_sink_to_linear] done raw_bufs=%d raw_visited=%d raw=%.3fms kernel=%.3fms linear=%.3fms total=%.3fms calls=%d\n",
+        "[polygrad:lower_sink_to_linear] done raw_bufs=%d raw_visited=%d raw=%.3fms kernel=%.3fms "
+        "linear=%.3fms total=%.3fms calls=%d\n",
         n_raw_external, n_raw_visited, t_raw - t_key, t_kernel - t_raw, t_linear - t_kernel,
         t_linear - t0, linear ? linear->n_src : -1
     );
@@ -2003,9 +2019,9 @@ static int poly_lower_compute_item_cached(
   };
   uint32_t hash = poly_program_cache_hash(item->root, device, env_stamp);
   PolyProgramCacheEntry *entry =
-      (poly_program_cache_enabled() && ctx && ctx->program_cache) ?
-          poly_map_get(ctx->program_cache, hash, &key, poly_program_cache_eq) :
-          NULL;
+      (poly_program_cache_enabled() && ctx && ctx->program_cache)
+          ? poly_map_get(ctx->program_cache, hash, &key, poly_program_cache_eq)
+          : NULL;
 
   if (!entry) {
     char fn_name[64];
@@ -2653,8 +2669,8 @@ static const PolyBackendDesc BACKENDS[] = {
 #endif
 #ifdef POLY_HAS_HIP
     [POLY_DEVICE_HIP] =
-        {"hip", POLY_DEVICE_HIP, false, hip_lower_item, hip_execute, hip_free_runner,
-         poly_hip_init, hip_get_allocator},
+        {"hip", POLY_DEVICE_HIP, false, hip_lower_item, hip_execute, hip_free_runner, poly_hip_init,
+         hip_get_allocator},
 #else
     [POLY_DEVICE_HIP] = {NULL, POLY_DEVICE_HIP, false, NULL, NULL, NULL, NULL, NULL},
 #endif
@@ -2939,7 +2955,7 @@ static void poly_zero_buffer(PolyBuffer *h) {
 #ifdef __EMSCRIPTEN__
       || h->device == POLY_DEVICE_WASM
 #endif
-) {
+  ) {
     memset(h->ptr, 0, h->nbytes);
   }
 #ifdef POLY_HAS_CUDA
@@ -3108,8 +3124,8 @@ int poly_exec_item_lower(PolyCtx *ctx, PolySchedule *schedule, int item_index, P
     fprintf(
         stderr,
         "[polygrad:exec_lower] begin item=%d/%d kind=%s device=%s root=%p slots=%d vars=%d\n",
-        item_index, schedule->n_items, poly_exec_item_kind_name(item->kind), poly_device_name(device),
-        (void *)item->root, item->n_buf_slots, item->n_var_uops
+        item_index, schedule->n_items, poly_exec_item_kind_name(item->kind),
+        poly_device_name(device), (void *)item->root, item->n_buf_slots, item->n_var_uops
     );
     fflush(stderr);
   }
@@ -3286,7 +3302,9 @@ int poly_exec_item_run(
   if (poly_exec_item_lower(ctx, schedule, item_index, item_device) != 0) return -1;
   if (poly_fill_schedule_slot_data(ctx, schedule, device, schedule->run_slot_to_data) != 0)
     return -1;
-  poly_zero_schedule_intermediates(schedule, schedule->run_intermediates, schedule->n_run_intermediates);
+  poly_zero_schedule_intermediates(
+      schedule, schedule->run_intermediates, schedule->n_run_intermediates
+  );
 
   int n_all = poly_schedule_merge_runtime_vars(schedule, var_bindings, n_var_bindings);
   int var_int_idx = 0;
@@ -3308,7 +3326,8 @@ int poly_run_schedule(
   if (timing) {
     fprintf(
         stderr,
-        "[polygrad:run_schedule] begin device=%s items=%d slots=%d intermediates=%d default_vars=%d runtime_vars=%d\n",
+        "[polygrad:run_schedule] begin device=%s items=%d slots=%d intermediates=%d "
+        "default_vars=%d runtime_vars=%d\n",
         poly_device_name(device), schedule->n_items, schedule->n_buf_slots,
         schedule->n_run_intermediates, schedule->n_default_vars, n_var_bindings
     );
@@ -3323,7 +3342,9 @@ int poly_run_schedule(
     return -1;
   double t_slots = timing ? poly_now_ms() : 0.0;
 
-  poly_zero_schedule_intermediates(schedule, schedule->run_intermediates, schedule->n_run_intermediates);
+  poly_zero_schedule_intermediates(
+      schedule, schedule->run_intermediates, schedule->n_run_intermediates
+  );
   double t_zero = timing ? poly_now_ms() : 0.0;
 
   int n_all = poly_schedule_merge_runtime_vars(schedule, var_bindings, n_var_bindings);
@@ -3366,9 +3387,10 @@ int poly_run_schedule(
     double t_done = poly_now_ms();
     fprintf(
         stderr,
-        "[polygrad:run_schedule] done prepare=%.3fms slots=%.3fms zero=%.3fms vars=%.3fms loop=%.3fms total=%.3fms ret=%d\n",
-        t_prepare - t0, t_slots - t_prepare, t_zero - t_slots, t_vars - t_zero,
-        t_done - t_vars, t_done - t0, ret
+        "[polygrad:run_schedule] done prepare=%.3fms slots=%.3fms zero=%.3fms vars=%.3fms "
+        "loop=%.3fms total=%.3fms ret=%d\n",
+        t_prepare - t0, t_slots - t_prepare, t_zero - t_slots, t_vars - t_zero, t_done - t_vars,
+        t_done - t0, ret
     );
     fflush(stderr);
   }

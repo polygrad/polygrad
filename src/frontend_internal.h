@@ -41,6 +41,15 @@ void poly_collect_buf_order(
     int *n_visited
 );
 
+/* Owned dynamic version of poly_collect_buf_order. Caller frees *out_buf_order
+ * with free(). */
+bool poly_collect_buf_order_alloc(
+    PolyUOp *u,
+    PolyUOp ***out_buf_order,
+    int *out_n_bufs,
+    int *out_n_visited
+);
+
 /* Linear scan for a BUFFER UOp in a buf_order array. Returns index or -1. */
 int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs);
 
@@ -51,6 +60,15 @@ int poly_collect_ordered_buffers(
     PolyUOp *tensor_sink,
     PolyUOp **ordered,
     int max_bufs
+);
+
+/* Owned dynamic version of poly_collect_ordered_buffers. Caller frees
+ * *out_ordered with free(). */
+bool poly_collect_ordered_buffers_alloc(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    PolyUOp ***out_ordered,
+    int *out_n_ordered
 );
 
 /* Collect output BUFFER UOps from SINK -> STORE -> BUFFER chain.

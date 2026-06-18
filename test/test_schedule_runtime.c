@@ -456,6 +456,58 @@ TEST(schedule_runtime, structural_helpers_handle_model_scale_graphs) {
   PASS();
 }
 
+TEST(schedule_runtime, buffer_order_alloc_collects_past_old_realize_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int n = POLY_MAX_REALIZE_BUFS + 9;
+  PolyUOp **src = malloc((size_t)n * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(src);
+  for (int i = 0; i < n; i++)
+    src[i] = poly_buffer_f32(ctx, i + 1);
+
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, n, poly_arg_none());
+  ASSERT_NOT_NULL(sink);
+
+  PolyUOp **buf_order = NULL;
+  int n_bufs = 0, n_visited = 0;
+  ASSERT_TRUE(poly_collect_buf_order_alloc(sink, &buf_order, &n_bufs, &n_visited));
+  ASSERT_INT_EQ(n_bufs, n);
+  ASSERT_TRUE(n_visited >= n);
+  for (int i = 0; i < n; i++)
+    ASSERT_PTR_EQ(buf_order[i], src[i]);
+
+  free(buf_order);
+  free(src);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, lower_sink_to_linear_handles_external_buffers_past_old_cap) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int n_inputs = POLY_MAX_REALIZE_BUFS + 8;
+  PolyUOp **inputs = malloc((size_t)n_inputs * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(inputs);
+  for (int i = 0; i < n_inputs; i++)
+    inputs[i] = poly_buffer_f32(ctx, 1);
+
+  PolyUOp *acc = inputs[0];
+  for (int i = 1; i < n_inputs; i++)
+    acc = poly_alu2(ctx, POLY_OP_ADD, acc, inputs[i]);
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, acc));
+
+  PolyUOp *linear = poly_lower_sink_to_linear(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(linear->op, POLY_OP_LINEAR);
+
+  free(inputs);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static PolyUOp *make_bufferview_cache_sink(PolyCtx *ctx, int64_t tag) {
   PolyUOp *base = poly_buffer(ctx, POLY_FLOAT32, 8);
   PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(tag));
@@ -2352,8 +2404,8 @@ TEST(schedule_runtime, lower_matches_realize_uops) {
   /* Direct realize path */
   float dout_direct[4] = {0};
   PolyTestBufferView bindings[] = {
-      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db), POLY_TEST_HOST_VIEW(out, dout_direct)
-  };
+      POLY_TEST_HOST_VIEW(a, da), POLY_TEST_HOST_VIEW(b, db),
+      POLY_TEST_HOST_VIEW(out, dout_direct)};
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, bindings, 3), 0);
 
   /* New path */

@@ -226,17 +226,22 @@ static bool poly_transform_to_call_collect_pending_effects(
 static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
   if (!ctx || !sink || sink->op != POLY_OP_SINK) return sink;
 
-  PolyUOp *ordered[POLY_MAX_REALIZE_BUFS] = {0};
-  int n_ordered = poly_collect_ordered_buffers(ctx, sink, ordered, POLY_MAX_REALIZE_BUFS);
+  PolyUOp **ordered = NULL;
+  int n_ordered = 0;
+  if (!poly_collect_ordered_buffers_alloc(ctx, sink, &ordered, &n_ordered)) return NULL;
   int n_src = 1 + n_ordered;
   PolyUOp **src = calloc((size_t)n_src, sizeof(PolyUOp *));
-  if (!src) return NULL;
+  if (!src) {
+    free(ordered);
+    return NULL;
+  }
 
   src[0] = sink;
   for (int i = 0; i < n_ordered; i++)
     src[1 + i] = ordered[i];
 
   PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_src, poly_arg_none());
+  free(ordered);
   free(src);
   return call;
 }
