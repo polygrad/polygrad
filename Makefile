@@ -73,7 +73,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -199,6 +199,32 @@ bench-regression: bench-ratios bench-compare
 bench-update-baseline:
 	cp $$(ls -t bench/results/2*.json | head -1) bench/results/baseline.json
 	@echo "Updated. Review and commit bench/results/baseline.json"
+
+FUZZ_CC ?= clang
+FUZZ_ARGS ?= -runs=256 -max_len=512 -timeout=5
+FUZZ_SMOKE_ARGS ?= -runs=256 -max_len=512 -timeout=5
+FUZZ_NIGHTLY_ARGS ?= -runs=8192 -max_len=2048 -timeout=10
+FUZZ_WORK_DIR ?= temp/fuzz-corpus
+FUZZ_RUN_ENV ?= UBSAN_OPTIONS=$(UBSAN_OPTIONS)
+FUZZ_CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -g -O1 \
+	-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+	-Wall -Wextra -Wpedantic -Wno-unused-parameter -Isrc
+
+fuzz: fuzz-symbolic
+
+fuzz-smoke:
+	$(MAKE) fuzz FUZZ_ARGS="$(FUZZ_SMOKE_ARGS)"
+
+fuzz-nightly:
+	$(MAKE) fuzz FUZZ_ARGS="$(FUZZ_NIGHTLY_ARGS)"
+
+fuzz-symbolic: build/fuzz_sym
+	@mkdir -p $(FUZZ_WORK_DIR)/symbolic
+	$(FUZZ_RUN_ENV) ./build/fuzz_sym $(FUZZ_WORK_DIR)/symbolic $(FUZZ_ARGS)
+
+build/fuzz_sym: test/fuzz_sym.c $(SRC) $(CODEC_SRC)
+	@mkdir -p build
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^ $(LDFLAGS_DEBUG)
 
 NODE ?= $(shell which node 2>/dev/null || echo node)
 test-wasm: test-js-browser
