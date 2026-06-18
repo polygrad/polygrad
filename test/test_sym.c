@@ -7,6 +7,7 @@
 #include "../src/tensor.h"
 #include <limits.h>
 #include <math.h>
+#include <stdlib.h>
 
 /* Helper: apply symbolic_simple via graph_rewrite */
 
@@ -523,6 +524,15 @@ TEST(sym, symbolic_fuzzer_integer_rewrite_equivalence) {
             ASSERT_TRUE(sym_eval_i64(root, &env, &want));
             ASSERT_TRUE(sym_eval_i64(rewritten, &env, &got));
             if (got != want) {
+              char *root_s = poly_uop_str(root);
+              char *rewritten_s = poly_uop_str(rewritten);
+              fprintf(stderr, "    root=%s\n    rewritten=%s\n", root_s, rewritten_s);
+              fprintf(stderr, "    root tree:\n");
+              poly_uop_dump_tree(stderr, root, 0, 10);
+              fprintf(stderr, "    rewritten tree:\n");
+              poly_uop_dump_tree(stderr, rewritten, 0, 10);
+              free(root_s);
+              free(rewritten_s);
               FAIL(
                   "trial %d sample r0=%d r1=%d a=%d b=%d got %lld want %lld", trial, r0, r1, a, b,
                   (long long)got, (long long)want
