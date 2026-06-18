@@ -32,8 +32,6 @@ static const PolyDType *_dtype_table_ffi[] = {
 };
 #define N_DTYPE_FFI ((int)(sizeof(_dtype_table_ffi) / sizeof(_dtype_table_ffi[0])))
 
-static int poly_dyn_buffer_id = 1000000; /* avoid colliding with regular small buffer tags */
-
 PolyUOp *poly_buffer_var(
     PolyCtx *ctx,
     PolyDType dt,
@@ -52,7 +50,8 @@ PolyUOp *poly_buffer_var(
    * src[2..] = fixed inner dimension CONSTs. */
   int n_src = 2 + n_inner;
   PolyUOp *src[POLY_MAX_DIMS + 2];
-  src[0] = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_dyn_buffer_id++));
+  src[0] =
+      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
   src[1] = batch_var;
   for (int i = 0; i < n_inner; i++) {
     if (inner_dims[i] < 0) return NULL;

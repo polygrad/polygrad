@@ -8,6 +8,7 @@
  */
 
 #include "polygrad.h"
+#include "ctx.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,16 +21,21 @@
  * scheduler wrapper, but they are core IR-building APIs rather than a
  * scheduling implementation detail. */
 
-static int poly_buffer_id = 0;
-
 static bool rank_tuple_valid(const void *data, int n) {
   return n >= 0 && n <= POLY_MAX_DIMS && (n == 0 || data != NULL);
 }
 
-PolyUOp *poly_buffer_on_device(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size, PolyDevice device) {
-  int id = poly_buffer_id++;
+PolyUOp *poly_buffer_on_device(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    int64_t size,
+    PolyDevice device
+) {
+  if (!ctx) return NULL;
+  int64_t id = poly_ctx_next_unique_id(ctx);
   PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(id));
-  if (device == POLY_DEVICE_AUTO) return poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(size));
+  if (device == POLY_DEVICE_AUTO)
+    return poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(size));
 
   PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
   PolyUOp *src[2] = {unique, dev};
@@ -145,8 +151,6 @@ PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
   arg.pair_tuple.n = ndim;
   return poly_uop1(ctx, POLY_OP_PAD, src->dtype, src, arg);
 }
-
-
 
 /* Heap-allocate a shape with copied dims */
 static PolyShape heap_shape(int64_t *dims, int ndim) {

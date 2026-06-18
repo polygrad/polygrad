@@ -666,6 +666,39 @@ TEST(shape_uop, buffer_dynamic) {
   PASS();
 }
 
+TEST(shape_uop, buffer_unique_ids_are_ctx_local) {
+  PolyCtx *ctx1 = poly_ctx_new();
+  PolyCtx *ctx2 = poly_ctx_new();
+
+  PolyUOp *a0 = poly_buffer(ctx1, POLY_FLOAT32, 4);
+  PolyUOp *a1 = poly_buffer(ctx1, POLY_FLOAT32, 4);
+  PolyUOp *n = poly_define_var(ctx1, "N", 1, 8);
+  PolyUOp *ad = poly_buffer_var(ctx1, POLY_FLOAT32, n, NULL, 0);
+  PolyUOp *b0 = poly_buffer(ctx2, POLY_FLOAT32, 4);
+  PolyUOp *m = poly_define_var(ctx2, "M", 1, 8);
+  PolyUOp *bd = poly_buffer_var(ctx2, POLY_FLOAT32, m, NULL, 0);
+
+  ASSERT_NOT_NULL(a0);
+  ASSERT_NOT_NULL(a1);
+  ASSERT_NOT_NULL(ad);
+  ASSERT_NOT_NULL(b0);
+  ASSERT_NOT_NULL(bd);
+  ASSERT_INT_EQ(a0->src[0]->op, POLY_OP_UNIQUE);
+  ASSERT_INT_EQ(a1->src[0]->op, POLY_OP_UNIQUE);
+  ASSERT_INT_EQ(ad->src[0]->op, POLY_OP_UNIQUE);
+  ASSERT_INT_EQ(b0->src[0]->op, POLY_OP_UNIQUE);
+  ASSERT_INT_EQ(bd->src[0]->op, POLY_OP_UNIQUE);
+  ASSERT_INT_EQ(a0->src[0]->arg.i, 0);
+  ASSERT_INT_EQ(a1->src[0]->arg.i, 1);
+  ASSERT_INT_EQ(ad->src[0]->arg.i, 2);
+  ASSERT_INT_EQ(b0->src[0]->arg.i, 0);
+  ASSERT_INT_EQ(bd->src[0]->arg.i, 1);
+
+  poly_ctx_destroy(ctx2);
+  poly_ctx_destroy(ctx1);
+  PASS();
+}
+
 TEST(shape_uop, reshape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *r = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, 24), (int64_t[]){2, 3, 4}, 3);

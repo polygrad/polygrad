@@ -57,6 +57,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->n_ep = 0;
   ctx->ep_cap = 0;
   ctx->next_buf_tag = 1;
+  ctx->next_unique_id = 0;
   ctx->preferred_device = POLY_DEVICE_AUTO;
   return ctx;
 }
@@ -104,3 +105,7 @@ PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx) {
 
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
 PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
+
+int64_t poly_ctx_next_unique_id(PolyCtx *ctx) {
+  return ctx ? ctx->next_unique_id++ : 0;
+}
