@@ -149,3 +149,66 @@ TEST(bundle, instance_save_load_roundtrip) {
   poly_instance_free(inst2);
   PASS();
 }
+
+TEST(bundle, instance_save_includes_entrypoint_manifest_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t shape[] = {1};
+  PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(x);
+  PolyTensor *y = poly_instance_target(inst, "y", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(y);
+
+  ASSERT_INT_EQ(poly_instance_output(inst, "logits", x), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_instance_output(inst, "loss", y), POLY_STATUS_OK);
+
+  const char *forward_inputs[] = {"x"};
+  const char *forward_outputs[] = {"logits"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL),
+      POLY_STATUS_OK
+  );
+
+  const char *loss_inputs[] = {"x", "y"};
+  const char *loss_outputs[] = {"loss"};
+  PolyEntrypointOptions opts = {.objective = "loss", .flags = 7};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &opts), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+
+  int bundle_len = 0;
+  uint8_t *bundle = poly_instance_save_bundle(inst, &bundle_len);
+  ASSERT_NOT_NULL(bundle);
+
+  PolyBundleSections sections;
+  ASSERT_INT_EQ(poly_bundle_decode(bundle, bundle_len, &sections), 0);
+  ASSERT_NOT_NULL(sections.metadata_json);
+  ASSERT_TRUE(sections.metadata_len > 0);
+
+  char *meta = malloc((size_t)sections.metadata_len + 1);
+  ASSERT_NOT_NULL(meta);
+  memcpy(meta, sections.metadata_json, (size_t)sections.metadata_len);
+  meta[sections.metadata_len] = '\0';
+
+  ASSERT_TRUE(strstr(meta, "\"format\":\"poly.bundle@1\"") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"ir_format\":\"poly.ir.uops@2\"") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"name\":\"forward\"") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"inputs\":[\"x\"]") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"outputs\":[\"logits\"]") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"objective\":null") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"name\":\"loss\"") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"inputs\":[\"x\",\"y\"]") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"outputs\":[\"loss\"]") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"objective\":\"loss\"") != NULL);
+  ASSERT_TRUE(strstr(meta, "\"flags\":7") != NULL);
+
+  free(meta);
+  free(bundle);
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}

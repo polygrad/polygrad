@@ -6,6 +6,8 @@
 #include "ir.h"
 #include "safetensors.h"
 #include "instance.h"
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -22,6 +24,137 @@ static void write_le32(uint8_t *dst, uint32_t v) {
 static uint32_t read_le32(const uint8_t *src) {
   return (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16) |
          ((uint32_t)src[3] << 24);
+}
+
+typedef struct {
+  char *data;
+  int len;
+  int cap;
+  bool failed;
+} JsonBuf;
+
+static void jb_reserve(JsonBuf *b, int extra) {
+  if (!b || b->failed || extra < 0) return;
+  if (b->len + extra + 1 <= b->cap) return;
+  int new_cap = b->cap ? b->cap : 256;
+  while (new_cap < b->len + extra + 1) {
+    if (new_cap > INT32_MAX / 2) {
+      b->failed = true;
+      return;
+    }
+    new_cap *= 2;
+  }
+  char *new_data = realloc(b->data, (size_t)new_cap);
+  if (!new_data) {
+    b->failed = true;
+    return;
+  }
+  b->data = new_data;
+  b->cap = new_cap;
+}
+
+static void jb_add_n(JsonBuf *b, const char *s, int n) {
+  if (!s || n <= 0) return;
+  jb_reserve(b, n);
+  if (!b || b->failed) return;
+  memcpy(b->data + b->len, s, (size_t)n);
+  b->len += n;
+  b->data[b->len] = '\0';
+}
+
+static void jb_add(JsonBuf *b, const char *s) {
+  if (s) jb_add_n(b, s, (int)strlen(s));
+}
+
+static void jb_add_u32(JsonBuf *b, uint32_t v) {
+  char tmp[16];
+  snprintf(tmp, sizeof(tmp), "%u", v);
+  jb_add(b, tmp);
+}
+
+static void jb_add_json_string(JsonBuf *b, const char *s) {
+  jb_add(b, "\"");
+  for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+    switch (*p) {
+    case '\"':
+      jb_add(b, "\\\"");
+      break;
+    case '\\':
+      jb_add(b, "\\\\");
+      break;
+    case '\b':
+      jb_add(b, "\\b");
+      break;
+    case '\f':
+      jb_add(b, "\\f");
+      break;
+    case '\n':
+      jb_add(b, "\\n");
+      break;
+    case '\r':
+      jb_add(b, "\\r");
+      break;
+    case '\t':
+      jb_add(b, "\\t");
+      break;
+    default:
+      if (*p < 0x20) {
+        char tmp[8];
+        snprintf(tmp, sizeof(tmp), "\\u%04x", *p);
+        jb_add(b, tmp);
+      } else {
+        jb_add_n(b, (const char *)p, 1);
+      }
+      break;
+    }
+  }
+  jb_add(b, "\"");
+}
+
+static void jb_add_string_array(JsonBuf *b, const char *key, const char **items, int n_items) {
+  jb_add_json_string(b, key);
+  jb_add(b, ":[");
+  for (int i = 0; i < n_items; i++) {
+    if (i) jb_add(b, ",");
+    jb_add_json_string(b, items[i]);
+  }
+  jb_add(b, "]");
+}
+
+static char *bundle_metadata_from_ir(const uint8_t *ir_data, int ir_len) {
+  PolyIrSpec spec;
+  if (poly_ir_import(ir_data, ir_len, &spec) != 0) return NULL;
+
+  JsonBuf b = {0};
+  jb_add(&b, "{\"format\":\"poly.bundle@1\",\"ir_format\":\"poly.ir.uops@2\",\"entrypoints\":[");
+  for (int i = 0; i < spec.n_entrypoints; i++) {
+    PolyIrEntrypoint *ep = &spec.entrypoints[i];
+    if (i) jb_add(&b, ",");
+    jb_add(&b, "{\"name\":");
+    jb_add_json_string(&b, ep->name);
+    jb_add(&b, ",");
+    jb_add_string_array(&b, "inputs", ep->inputs, ep->n_inputs);
+    jb_add(&b, ",");
+    jb_add_string_array(&b, "outputs", ep->outputs, ep->n_outputs);
+    jb_add(&b, ",\"objective\":");
+    if (ep->objective)
+      jb_add_json_string(&b, ep->objective);
+    else
+      jb_add(&b, "null");
+    jb_add(&b, ",\"flags\":");
+    jb_add_u32(&b, ep->flags);
+    jb_add(&b, "}");
+  }
+  jb_add(&b, "]}");
+
+  poly_ir_spec_free(&spec);
+  poly_ctx_destroy(spec.ctx);
+
+  if (b.failed) {
+    free(b.data);
+    return NULL;
+  }
+  return b.data;
 }
 
 /* Encode */
@@ -201,13 +334,20 @@ uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len) {
   uint8_t *weights_data = poly_instance_export_weights(inst, &weights_len);
   /* weights_data may be NULL if no params -- that's ok */
 
+  char *metadata_json = bundle_metadata_from_ir(ir_data, ir_len);
+  if (!metadata_json) {
+    free(ir_data);
+    free(weights_data);
+    if (out_len) *out_len = 0;
+    return NULL;
+  }
+
   /* Encode bundle */
-  uint8_t *bundle = poly_bundle_encode(
-      ir_data, ir_len, weights_data, weights_len, NULL, /* no metadata yet */
-      out_len
-  );
+  uint8_t *bundle =
+      poly_bundle_encode(ir_data, ir_len, weights_data, weights_len, metadata_json, out_len);
   free(ir_data);
   free(weights_data);
+  free(metadata_json);
   return bundle;
 }
 
