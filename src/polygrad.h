@@ -510,6 +510,15 @@ typedef enum {
   POLY_TENSOR_BARRIER = 2,
 } PolyTensorRole;
 
+typedef enum {
+  POLY_TENSOR_PROVENANCE_UNKNOWN = 0,
+  POLY_TENSOR_PROVENANCE_USER_INPUT = 1,
+  POLY_TENSOR_PROVENANCE_PARAM_INIT = 2,
+  POLY_TENSOR_PROVENANCE_STATE_LOADED = 3,
+  POLY_TENSOR_PROVENANCE_CONST_INIT = 4,
+  POLY_TENSOR_PROVENANCE_COMPUTED = 5,
+} PolyTensorProvenance;
+
 struct PolyTensor {
   PolyUOp *uop_logical;
   PolyUOp *uop_physical;
@@ -517,6 +526,8 @@ struct PolyTensor {
   PolyDevice device;
   uint64_t order;
   PolyTensor *source;
+  bool requires_grad;
+  PolyTensorProvenance provenance;
 };
 
 PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, PolyDevice device);
@@ -541,6 +552,10 @@ PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
 PolyDevice poly_tensor_device(PolyTensor *tensor);
+bool poly_tensor_requires_grad(PolyTensor *tensor);
+void poly_tensor_set_requires_grad(PolyTensor *tensor, bool requires_grad);
+PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
+void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);
 PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor);
 int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs);
 

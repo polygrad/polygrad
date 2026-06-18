@@ -98,8 +98,16 @@ bool poly_broadcast_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b, int64_t *out_sh
 /* Current-placement index lookup. `role == (PolyTensorRole)-1` means any role.
  * The index is keyed by poly_tensor_uop(t), not by the preserved logical root. */
 PolyTensor *poly_tensor_find_current(
-    PolyCtx *ctx, PolyUOp *current, PolyDevice device, PolyTensorRole role
+    PolyCtx *ctx,
+    PolyUOp *current,
+    PolyDevice device,
+    PolyTensorRole role
 );
+
+/* Find a live PolyTensor representative for this storage identity, preferring
+ * trainable/state metadata over anonymous aliases. This is for instance/export
+ * validation, not placement decisions. */
+PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *storage);
 
 typedef struct {
   PolyTensor *selected;
@@ -210,7 +218,13 @@ PolyUOp *poly_detach(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_rand(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
 PolyUOp *poly_randn(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed);
 PolyUOp *poly_rand_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id);
-PolyUOp *poly_randn_by_id(PolyCtx *ctx, const int64_t *shape, int ndim, uint64_t seed, int dtype_id);
+PolyUOp *poly_randn_by_id(
+    PolyCtx *ctx,
+    const int64_t *shape,
+    int ndim,
+    uint64_t seed,
+    int dtype_id
+);
 
 /* Creation helpers (constant-backed tensors). */
 PolyUOp *poly_arange(PolyCtx *ctx, double start, double stop, double step);
@@ -233,8 +247,20 @@ PolyUOp *poly_full_float_by_id(
     double fill_value,
     int dtype_id
 );
-PolyUOp *poly_arange_int_by_id(PolyCtx *ctx, int64_t start, int64_t stop, int64_t step, int dtype_id);
-PolyUOp *poly_arange_float_by_id(PolyCtx *ctx, double start, double stop, double step, int dtype_id);
+PolyUOp *poly_arange_int_by_id(
+    PolyCtx *ctx,
+    int64_t start,
+    int64_t stop,
+    int64_t step,
+    int dtype_id
+);
+PolyUOp *poly_arange_float_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    double step,
+    int dtype_id
+);
 PolyUOp *poly_linspace_by_id(PolyCtx *ctx, double start, double stop, int64_t steps, int dtype_id);
 PolyUOp *poly_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id);
 PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal);

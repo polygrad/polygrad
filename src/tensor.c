@@ -247,6 +247,28 @@ PolyTensor *poly_tensor_find_current(
   return best;
 }
 
+PolyTensor *poly_tensor_find_storage_identity(PolyCtx *ctx, const PolyUOp *storage) {
+  if (!ctx || !storage) return NULL;
+  PolyTensor *best = NULL;
+  int best_score = -1;
+  for (int i = 0; i < ctx->n_tensors; i++) {
+    PolyTensor *t = ctx->tensors[i];
+    if (!t) continue;
+    const PolyUOp *identity = poly_uop_get_buffer_identity(tensor_current_uop(t));
+    if (identity != storage) continue;
+    int score = 0;
+    if (t->provenance != POLY_TENSOR_PROVENANCE_UNKNOWN &&
+        t->provenance != POLY_TENSOR_PROVENANCE_CONST_INIT)
+      score = 1;
+    if (t->requires_grad) score = 2;
+    if (score > best_score || (score == best_score && (!best || t->order > best->order))) {
+      best = t;
+      best_score = score;
+    }
+  }
+  return best;
+}
+
 static void free_tensor_list_entry(const void *key, void *value, void *userdata) {
   (void)key;
   (void)userdata;
@@ -290,6 +312,7 @@ PolyTensor *poly_tensor_create_with_roots(
   tensor->role = role;
   tensor->device = device;
   tensor->order = ctx->next_tensor_order++;
+  tensor->provenance = POLY_TENSOR_PROVENANCE_UNKNOWN;
 
   if (!tensor_index_add_current(ctx, tensor)) {
     free(tensor);
@@ -355,7 +378,11 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   PolyUOp *physical = (current && current != tensor->uop_logical) ? current : NULL;
   PolyTensor *placed =
       poly_tensor_create_with_roots(ctx, tensor->uop_logical, physical, POLY_TENSOR_PLACE, device);
-  if (placed) placed->source = tensor;
+  if (placed) {
+    placed->source = tensor;
+    placed->requires_grad = tensor->requires_grad;
+    placed->provenance = tensor->provenance;
+  }
   return placed;
 }
 
@@ -410,6 +437,25 @@ PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor) {
 
 PolyDevice poly_tensor_device(PolyTensor *tensor) {
   return tensor ? tensor->device : POLY_DEVICE_AUTO;
+}
+
+bool poly_tensor_requires_grad(PolyTensor *tensor) {
+  return tensor ? tensor->requires_grad : false;
+}
+
+void poly_tensor_set_requires_grad(PolyTensor *tensor, bool requires_grad) {
+  if (tensor) tensor->requires_grad = requires_grad;
+}
+
+PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor) {
+  return tensor ? tensor->provenance : POLY_TENSOR_PROVENANCE_UNKNOWN;
+}
+
+void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance) {
+  if (!tensor) return;
+  if (provenance < POLY_TENSOR_PROVENANCE_UNKNOWN || provenance > POLY_TENSOR_PROVENANCE_COMPUTED)
+    provenance = POLY_TENSOR_PROVENANCE_UNKNOWN;
+  tensor->provenance = provenance;
 }
 
 /* Internal helpers */

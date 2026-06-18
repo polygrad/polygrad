@@ -110,6 +110,17 @@ typedef struct {
 } BuildEntrypoint;
 
 typedef struct {
+  char *name;
+  PolyUOp *sink;
+  char **inputs;
+  int n_inputs;
+  char **outputs;
+  int n_outputs;
+  char *objective;
+  uint32_t flags;
+} RuntimeEntrypoint;
+
+typedef struct {
   PolyInstanceOptions opts;
 
   BuildBinding *bindings;
@@ -142,16 +153,7 @@ struct PolyInstance {
   int n_trainable_params;
 
   /* Entrypoints */
-  struct {
-    char *name;
-    PolyUOp *sink;
-    char **inputs;
-    int n_inputs;
-    char **outputs;
-    int n_outputs;
-    char *objective;
-    uint32_t flags;
-  } *entrypoints;
+  RuntimeEntrypoint *entrypoints;
   int n_entrypoints;
   PolySchedule **entry_schedules; /* lazy, one per generic entrypoint */
 
@@ -358,7 +360,8 @@ static PolyStatus append_build_binding(
     PolyUOp *buffer,
     const int64_t *shape,
     int ndim,
-    bool trainable
+    bool trainable,
+    PolyTensorProvenance provenance
 ) {
   if (!inst || !inst->build || !name || !tensor) return POLY_STATUS_INVALID;
   char *full_name = scoped_name(inst, name);
@@ -405,6 +408,13 @@ static PolyStatus append_build_binding(
   b->ndim = ndim;
   if (ndim > 0) memcpy(b->shape, shape, (size_t)ndim * sizeof(int64_t));
   b->trainable = trainable;
+  if (role == POLY_ROLE_OUTPUT) {
+    if (poly_tensor_provenance(tensor) == POLY_TENSOR_PROVENANCE_UNKNOWN)
+      poly_tensor_set_provenance(tensor, provenance);
+  } else {
+    poly_tensor_set_requires_grad(tensor, trainable);
+    poly_tensor_set_provenance(tensor, provenance);
+  }
   return POLY_STATUS_OK;
 }
 
@@ -415,7 +425,8 @@ static PolyTensor *make_bound_storage_tensor(
     PolyDType dt,
     const int64_t *shape,
     int ndim,
-    bool trainable
+    bool trainable,
+    PolyTensorProvenance provenance
 ) {
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK) return NULL;
   if (!inst->ctx || (ndim > 0 && !shape) || ndim < 0 || ndim > 8) {
@@ -441,7 +452,7 @@ static PolyTensor *make_bound_storage_tensor(
     poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create tensor");
     return NULL;
   }
-  if (append_build_binding(inst, name, role, 0, tensor, buf, shape, ndim, trainable) !=
+  if (append_build_binding(inst, name, role, 0, tensor, buf, shape, ndim, trainable, provenance) !=
       POLY_STATUS_OK)
     return NULL;
   return tensor;
@@ -454,7 +465,8 @@ static PolyStatus append_existing_tensor_binding(
     PolyTensor *tensor,
     uint32_t flags,
     bool require_buffer,
-    bool trainable
+    bool trainable,
+    PolyTensorProvenance provenance
 ) {
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
     return POLY_STATUS_BAD_STAGE;
@@ -477,7 +489,9 @@ static PolyStatus append_existing_tensor_binding(
     );
     return POLY_STATUS_INVALID;
   }
-  return append_build_binding(inst, name, role, flags, tensor, buffer, shape, ndim, trainable);
+  return append_build_binding(
+      inst, name, role, flags, tensor, buffer, shape, ndim, trainable, provenance
+  );
 }
 
 static char **dup_string_array(const char **items, int n) {
@@ -583,7 +597,9 @@ PolyTensor *poly_instance_input(
     const int64_t *shape,
     int ndim
 ) {
-  return make_bound_storage_tensor(inst, name, POLY_ROLE_INPUT, dt, shape, ndim, false);
+  return make_bound_storage_tensor(
+      inst, name, POLY_ROLE_INPUT, dt, shape, ndim, false, POLY_TENSOR_PROVENANCE_USER_INPUT
+  );
 }
 
 PolyTensor *poly_instance_target(
@@ -593,7 +609,9 @@ PolyTensor *poly_instance_target(
     const int64_t *shape,
     int ndim
 ) {
-  return make_bound_storage_tensor(inst, name, POLY_ROLE_TARGET, dt, shape, ndim, false);
+  return make_bound_storage_tensor(
+      inst, name, POLY_ROLE_TARGET, dt, shape, ndim, false, POLY_TENSOR_PROVENANCE_USER_INPUT
+  );
 }
 
 PolyTensor *poly_instance_param(
@@ -603,7 +621,9 @@ PolyTensor *poly_instance_param(
     const int64_t *shape,
     int ndim
 ) {
-  return make_bound_storage_tensor(inst, name, POLY_ROLE_PARAM, dt, shape, ndim, true);
+  return make_bound_storage_tensor(
+      inst, name, POLY_ROLE_PARAM, dt, shape, ndim, true, POLY_TENSOR_PROVENANCE_PARAM_INIT
+  );
 }
 
 PolyStatus poly_instance_state(
@@ -612,11 +632,15 @@ PolyStatus poly_instance_state(
     PolyTensor *tensor,
     uint32_t flags
 ) {
-  return append_existing_tensor_binding(inst, name, POLY_ROLE_PARAM, tensor, flags, true, true);
+  return append_existing_tensor_binding(
+      inst, name, POLY_ROLE_PARAM, tensor, flags, true, true, POLY_TENSOR_PROVENANCE_STATE_LOADED
+  );
 }
 
 PolyStatus poly_instance_output(PolyInstance *inst, const char *name, PolyTensor *tensor) {
-  return append_existing_tensor_binding(inst, name, POLY_ROLE_OUTPUT, tensor, 0, false, false);
+  return append_existing_tensor_binding(
+      inst, name, POLY_ROLE_OUTPUT, tensor, 0, false, false, POLY_TENSOR_PROVENANCE_COMPUTED
+  );
 }
 
 PolyStatus poly_instance_aux(
@@ -625,7 +649,9 @@ PolyStatus poly_instance_aux(
     PolyTensor *tensor,
     uint32_t flags
 ) {
-  return append_existing_tensor_binding(inst, name, POLY_ROLE_AUX, tensor, flags, true, false);
+  return append_existing_tensor_binding(
+      inst, name, POLY_ROLE_AUX, tensor, flags, true, false, POLY_TENSOR_PROVENANCE_STATE_LOADED
+  );
 }
 
 PolyStatus poly_instance_entrypoint(
@@ -715,6 +741,25 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
       if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_BUFFER_VIEW && u->op != POLY_OP_PARAM))
         continue;
       if (find_build_storage_binding(build, u)) continue;
+      PolyTensor *leaf_tensor = poly_tensor_find_storage_identity(inst->ctx, u);
+      if (leaf_tensor && poly_tensor_requires_grad(leaf_tensor)) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "output '%s' references unbound trainable storage %s", out->name, poly_op_name(u->op)
+        );
+        return POLY_STATUS_INVALID;
+      }
+      if (leaf_tensor && poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_UNKNOWN &&
+          poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_CONST_INIT) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound %s storage %s",
+            out->name,
+            poly_tensor_provenance(leaf_tensor) == POLY_TENSOR_PROVENANCE_USER_INPUT ? "input"
+                                                                                     : "state",
+            poly_op_name(u->op)
+        );
+        return POLY_STATUS_INVALID;
+      }
       poly_instance_set_error(
           inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound storage %s",
           out->name, poly_op_name(u->op)
@@ -931,8 +976,24 @@ PolyInstance *poly_instance_from_bindings(
     const PolyBindingSpec *b = &bindings[i];
     bool output = b->role == POLY_ROLE_OUTPUT;
     bool trainable = b->role == POLY_ROLE_PARAM;
+    PolyTensorProvenance provenance = POLY_TENSOR_PROVENANCE_UNKNOWN;
+    switch (b->role) {
+    case POLY_ROLE_INPUT:
+    case POLY_ROLE_TARGET:
+      provenance = POLY_TENSOR_PROVENANCE_USER_INPUT;
+      break;
+    case POLY_ROLE_PARAM:
+    case POLY_ROLE_AUX:
+      provenance = POLY_TENSOR_PROVENANCE_STATE_LOADED;
+      break;
+    case POLY_ROLE_OUTPUT:
+      provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+      break;
+    default:
+      break;
+    }
     PolyStatus st = append_existing_tensor_binding(
-        inst, b->name, (uint8_t)b->role, b->tensor, b->flags, !output, trainable
+        inst, b->name, (uint8_t)b->role, b->tensor, b->flags, !output, trainable, provenance
     );
     if (st != POLY_STATUS_OK) {
       poly_instance_copy_error(inst, err);
