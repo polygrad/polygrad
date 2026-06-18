@@ -477,6 +477,9 @@ async function createWasmCore(device) {
     poly_tensor_uop_logical: (tensor) => Module._poly_tensor_uop_logical(tensor),
     poly_tensor_uop_physical: (tensor) => Module._poly_tensor_uop_physical(tensor),
     poly_tensor_device: (tensor) => Module._poly_tensor_device(tensor),
+    poly_tensor_requires_grad: (tensor) => Boolean(Module._poly_tensor_requires_grad(tensor)),
+    poly_tensor_set_requires_grad: (tensor, requiresGrad) =>
+      Module._poly_tensor_set_requires_grad(tensor, Boolean(requiresGrad)),
     poly_set_frontend_buffer_release: (fn) => {
       Module.__polygradFrontendBufferRelease = fn
       if (!Module.__polygradFrontendBufferReleasePtr) {
@@ -799,7 +802,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 4
+  const EXPECTED_ABI = 5
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

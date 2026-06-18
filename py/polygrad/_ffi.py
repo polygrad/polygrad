@@ -503,6 +503,15 @@ def _declare_signatures(lib):
     lib.poly_tensor_device.restype = ctypes.c_int
     lib.poly_tensor_device.argtypes = [_ptr]
 
+    lib.poly_tensor_requires_grad.restype = ctypes.c_bool
+    lib.poly_tensor_requires_grad.argtypes = [_ptr]
+
+    lib.poly_tensor_requires_grad_is_set.restype = ctypes.c_bool
+    lib.poly_tensor_requires_grad_is_set.argtypes = [_ptr]
+
+    lib.poly_tensor_set_requires_grad.restype = None
+    lib.poly_tensor_set_requires_grad.argtypes = [_ptr, ctypes.c_bool]
+
     lib.poly_realize_tensors.restype = ctypes.c_int
     lib.poly_realize_tensors.argtypes = [
         _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)

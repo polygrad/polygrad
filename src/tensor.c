@@ -381,6 +381,7 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   if (placed) {
     placed->source = tensor;
     placed->requires_grad = tensor->requires_grad;
+    placed->requires_grad_set = tensor->requires_grad_set;
     placed->provenance = tensor->provenance;
   }
   return placed;
@@ -443,8 +444,15 @@ bool poly_tensor_requires_grad(PolyTensor *tensor) {
   return tensor ? tensor->requires_grad : false;
 }
 
+bool poly_tensor_requires_grad_is_set(PolyTensor *tensor) {
+  return tensor ? tensor->requires_grad_set : false;
+}
+
 void poly_tensor_set_requires_grad(PolyTensor *tensor, bool requires_grad) {
-  if (tensor) tensor->requires_grad = requires_grad;
+  if (tensor) {
+    tensor->requires_grad = requires_grad;
+    tensor->requires_grad_set = true;
+  }
 }
 
 PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor) {

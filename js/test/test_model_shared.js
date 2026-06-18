@@ -89,6 +89,21 @@ async function runModelTests(pg) {
     assertClose(out.bind_y, [21])
   })
 
+  await test('fromBindings uses tensor requiresGrad for trainability', async () => {
+    const w = new Tensor([[7]], { requiresGrad: false })
+    await w.realize()
+    const x = pg.Tensor.empty([1, 1])
+    const y = x.dot(w)
+    const inst = pg.Instance.fromBindings([
+      { name: 'x', role: 'input', tensor: x },
+      { name: 'w', role: 'state', tensor: w },
+      { name: 'y', role: 'output', tensor: y }
+    ], [
+      { name: 'forward', inputs: ['x'], outputs: ['y'] }
+    ])
+    assert(inst.paramTrainable(0) === false, 'state tensor should be frozen when requiresGrad is false')
+  })
+
   await test('fromTensors keeps tinygrad-style plain object', async () => {
     class LinearNet {
       constructor() {

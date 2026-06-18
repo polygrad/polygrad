@@ -527,6 +527,7 @@ struct PolyTensor {
   uint64_t order;
   PolyTensor *source;
   bool requires_grad;
+  bool requires_grad_set;
   PolyTensorProvenance provenance;
 };
 
@@ -553,6 +554,7 @@ PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
 PolyDevice poly_tensor_device(PolyTensor *tensor);
 bool poly_tensor_requires_grad(PolyTensor *tensor);
+bool poly_tensor_requires_grad_is_set(PolyTensor *tensor);
 void poly_tensor_set_requires_grad(PolyTensor *tensor, bool requires_grad);
 PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
 void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);

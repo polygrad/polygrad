@@ -96,7 +96,6 @@ typedef struct {
   PolyUOp *buffer;
   int64_t shape[8];
   int ndim;
-  bool trainable;
 } BuildBinding;
 
 typedef struct {
@@ -360,7 +359,7 @@ static PolyStatus append_build_binding(
     PolyUOp *buffer,
     const int64_t *shape,
     int ndim,
-    bool trainable,
+    bool default_requires_grad,
     PolyTensorProvenance provenance
 ) {
   if (!inst || !inst->build || !name || !tensor) return POLY_STATUS_INVALID;
@@ -407,12 +406,12 @@ static PolyStatus append_build_binding(
   b->buffer = buffer;
   b->ndim = ndim;
   if (ndim > 0) memcpy(b->shape, shape, (size_t)ndim * sizeof(int64_t));
-  b->trainable = trainable;
   if (role == POLY_ROLE_OUTPUT) {
     if (poly_tensor_provenance(tensor) == POLY_TENSOR_PROVENANCE_UNKNOWN)
       poly_tensor_set_provenance(tensor, provenance);
   } else {
-    poly_tensor_set_requires_grad(tensor, trainable);
+    if (!poly_tensor_requires_grad_is_set(tensor))
+      poly_tensor_set_requires_grad(tensor, default_requires_grad);
     poly_tensor_set_provenance(tensor, provenance);
   }
   return POLY_STATUS_OK;
@@ -425,7 +424,7 @@ static PolyTensor *make_bound_storage_tensor(
     PolyDType dt,
     const int64_t *shape,
     int ndim,
-    bool trainable,
+    bool default_requires_grad,
     PolyTensorProvenance provenance
 ) {
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK) return NULL;
@@ -452,8 +451,9 @@ static PolyTensor *make_bound_storage_tensor(
     poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create tensor");
     return NULL;
   }
-  if (append_build_binding(inst, name, role, 0, tensor, buf, shape, ndim, trainable, provenance) !=
-      POLY_STATUS_OK)
+  if (append_build_binding(
+          inst, name, role, 0, tensor, buf, shape, ndim, default_requires_grad, provenance
+      ) != POLY_STATUS_OK)
     return NULL;
   return tensor;
 }
@@ -465,7 +465,7 @@ static PolyStatus append_existing_tensor_binding(
     PolyTensor *tensor,
     uint32_t flags,
     bool require_buffer,
-    bool trainable,
+    bool default_requires_grad,
     PolyTensorProvenance provenance
 ) {
   if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
@@ -490,7 +490,7 @@ static PolyStatus append_existing_tensor_binding(
     return POLY_STATUS_INVALID;
   }
   return append_build_binding(
-      inst, name, role, flags, tensor, buffer, shape, ndim, trainable, provenance
+      inst, name, role, flags, tensor, buffer, shape, ndim, default_requires_grad, provenance
   );
 }
 
@@ -878,7 +878,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
         .role = b->role,
         .buffer = b->buffer,
         .ndim = b->ndim,
-        .trainable = b->trainable,
+        .trainable = (b->role == POLY_ROLE_PARAM) && poly_tensor_requires_grad(b->tensor),
         .trainable_set = true,
     };
     if (b->ndim > 0) memcpy(bufs[i].shape, b->shape, (size_t)b->ndim * sizeof(int64_t));

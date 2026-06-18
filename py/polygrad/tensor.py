@@ -463,10 +463,11 @@ class Tensor:
             if key:
                 _host_buffers[key] = self._data
 
+        self._requires_grad = bool(requires_grad)
         if self._tensor is None and current_uop is not None:
             self._tensor = self._core_create(current_uop, _POLY_TENSOR_VALUE, self._device)
+        self._sync_core_requires_grad()
 
-        self._requires_grad = requires_grad
         self._grad = None
         self._is_param = False     # True for model parameters (set by nn modules)
         all_tensors[weakref.ref(self)] = None
@@ -484,6 +485,10 @@ class Tensor:
         return Tensor._core_create_for(
             self._ctx, uop, role, self._device if device is None else device
         )
+
+    def _sync_core_requires_grad(self):
+        if self._tensor:
+            _ffi._lib.poly_tensor_set_requires_grad(self._tensor, bool(self._requires_grad))
 
     @staticmethod
     def _core_uop_raw(tensor):
@@ -573,10 +578,11 @@ class Tensor:
 
     @requires_grad.setter
     def requires_grad(self, val):
-        self._requires_grad = val
+        self._requires_grad = bool(val)
+        self._sync_core_requires_grad()
 
     def requires_grad_(self, val=True):
-        self._requires_grad = val
+        self.requires_grad = val
         return self
 
     @property
@@ -616,6 +622,7 @@ class Tensor:
         ret._data = None
         ret._is_param = False
         ret._tensor = ret._core_create(new_uop, _POLY_TENSOR_VALUE, ret._device)
+        ret._sync_core_requires_grad()
         all_tensors[weakref.ref(ret)] = None
         return ret
 
@@ -661,6 +668,7 @@ class Tensor:
         if not assigned:
             raise RuntimeError('poly_tensor_assign failed')
         self._tensor = assigned
+        self._sync_core_requires_grad()
         self._data = None
         return self
 

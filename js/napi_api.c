@@ -759,6 +759,29 @@ static napi_value napi_poly_tensor_device(napi_env env, napi_callback_info info)
   return out;
 }
 
+static napi_value napi_poly_tensor_requires_grad(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyTensor *tensor = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_get_boolean(env, poly_tensor_requires_grad(tensor), &out));
+  return out;
+}
+
+static napi_value napi_poly_tensor_set_requires_grad(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyTensor *tensor = get_external(env, argv[0]);
+  bool requires_grad = false;
+  napi_get_value_bool(env, argv[1], &requires_grad);
+  poly_tensor_set_requires_grad(tensor, requires_grad);
+  napi_value out;
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
 static napi_value napi_poly_realize_tensors(napi_env env, napi_callback_info info) {
   napi_value argv[2];
   size_t argc = 2;
@@ -2823,6 +2846,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_uop_logical", napi_poly_tensor_uop_logical),
       DECLARE_NAPI_METHOD("poly_tensor_uop_physical", napi_poly_tensor_uop_physical),
       DECLARE_NAPI_METHOD("poly_tensor_device", napi_poly_tensor_device),
+      DECLARE_NAPI_METHOD("poly_tensor_requires_grad", napi_poly_tensor_requires_grad),
+      DECLARE_NAPI_METHOD("poly_tensor_set_requires_grad", napi_poly_tensor_set_requires_grad),
       DECLARE_NAPI_METHOD("poly_realize_tensors", napi_poly_realize_tensors),
       DECLARE_NAPI_METHOD("poly_optim_build_step", napi_poly_optim_build_step),
       DECLARE_NAPI_METHOD("poly_buffer_read", napi_poly_buffer_read),

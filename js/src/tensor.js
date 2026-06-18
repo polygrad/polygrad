@@ -277,7 +277,7 @@ function createBoundTensorClass(runtime) {
       const core = _runtime._core
       this._rt = _runtime
       this._ctx = opts._ctx || core.ctx
-      this._requiresGrad = opts.requiresGrad || false
+      this._requiresGrad = Boolean(opts.requiresGrad)
       this._grad = null
       this._device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       this._tensor = opts._tensor || null
@@ -331,11 +331,18 @@ function createBoundTensorClass(runtime) {
       if (!this._tensor && currentUop) {
         this._tensor = this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
       }
+      this._syncCoreRequiresGrad()
       registerTensor(this)
     }
 
     _coreCreate(uop, role, device) {
       return tensorCreate(this._ctx, uop, role, device || this._device)
+    }
+
+    _syncCoreRequiresGrad() {
+      if (this._tensor && ffi.poly_tensor_set_requires_grad) {
+        ffi.poly_tensor_set_requires_grad(this._tensor, Boolean(this._requiresGrad))
+      }
     }
 
     _currentUopRaw() { return this._tensor ? tensorUop(this._tensor) : null }
@@ -386,7 +393,10 @@ function createBoundTensorClass(runtime) {
     }
     get ndim() { return this._rt._core.ffi.poly_uop_ndim(this._ctx, this._uop) || 0 }
     get requiresGrad() { return this._requiresGrad }
-    set requiresGrad(v) { this._requiresGrad = v }
+    set requiresGrad(v) {
+      this._requiresGrad = Boolean(v)
+      this._syncCoreRequiresGrad()
+    }
     get grad() { return this._grad }
     get T() { return this.transpose() }
 
@@ -513,7 +523,7 @@ function createBoundTensorClass(runtime) {
 
     async clone() {
       const t = new Tensor(await this.toArray(), { dtype: this._dtype })
-      t._requiresGrad = this._requiresGrad
+      t.requiresGrad = this._requiresGrad
       return t
     }
 
@@ -543,6 +553,7 @@ function createBoundTensorClass(runtime) {
       const assigned = ffi.poly_tensor_assign(this._ctx, this._tensor, x._tensor)
       if (!assigned) throw new Error('poly_tensor_assign failed')
       this._tensor = assigned
+      this._syncCoreRequiresGrad()
       this._data = null
       return this
     }
@@ -583,7 +594,7 @@ function createBoundTensorClass(runtime) {
         _device: this._inferDevice(inputs)
       })
       for (let i = 0; i < inputs.length; i++) {
-        if (inputs[i]._requiresGrad) { t._requiresGrad = true; break }
+        if (inputs[i]._requiresGrad) { t.requiresGrad = true; break }
       }
       return t
     }
@@ -1367,7 +1378,7 @@ function createBoundTensorClass(runtime) {
       const r = ffi.poly_einsum(ctx, formula, operands)
       if (!r.uop) throw new Error(`poly_einsum failed for formula: ${formula}`)
       const t = new Tensor(null, { _ctx: ctx, _uop: r.uop })
-      t._requiresGrad = operands.some(x => x._requiresGrad)
+      t.requiresGrad = operands.some(x => x._requiresGrad)
       t._device = operands[0]._device
       return t
     }

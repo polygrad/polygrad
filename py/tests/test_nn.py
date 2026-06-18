@@ -409,6 +409,24 @@ class TestInstanceExport:
         out = inst.forward(bind_x=np.array([[3.0]], dtype=np.float32))
         assert np.allclose(out["bind_y"], [21.0], atol=1e-5)
 
+    def test_from_bindings_uses_tensor_requires_grad_for_trainability(self):
+        w = Tensor([[7.0]], requires_grad=False).realize()
+        x = Tensor.empty((1, 1))
+        y = x.dot(w)
+
+        inst = Instance.from_bindings(
+            bindings=[
+                {"name": "x", "role": "input", "tensor": x},
+                {"name": "w", "role": "state", "tensor": w},
+                {"name": "y", "role": "output", "tensor": y},
+            ],
+            entrypoints=[
+                {"name": "forward", "inputs": ["x"], "outputs": ["y"]},
+            ],
+        )
+
+        assert inst.param_trainable(0) is False
+
     def test_from_tensors_keeps_tinygrad_style_plain_object(self):
         class LinearNet:
             def __init__(self):

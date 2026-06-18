@@ -13,7 +13,7 @@
 
 /* The graph-side realize ABI now uses the batched Tensor-style poly_realize
  * entrypoint, so bump the public ABI version alongside that refactor. */
-#define POLYGRAD_ABI_VERSION 4
+#define POLYGRAD_ABI_VERSION 5
 
 #ifdef __cplusplus
 extern "C" {

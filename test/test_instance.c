@@ -462,6 +462,39 @@ TEST(instance, staged_build_rejects_unbound_trainable_storage_leaf) {
   PASS();
 }
 
+TEST(instance, staged_runtime_trainability_uses_tensor_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t x_shape[] = {1, 1};
+  PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  PolyTensor *w = poly_instance_param(inst, "w", POLY_FLOAT32, x_shape, 2);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+  ASSERT_TRUE(poly_tensor_requires_grad(w));
+
+  poly_tensor_set_requires_grad(w, false);
+
+  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, poly_tensor_uop(x), poly_tensor_uop(w));
+  PolyTensor *out = poly_tensor_create(ctx, prod, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
+
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_instance_param_count(inst), 1);
+  ASSERT_TRUE(!poly_instance_param_trainable(inst, 0));
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, staged_objective_accepts_one_element_output) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
