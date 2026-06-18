@@ -490,6 +490,26 @@ TEST(schedule_runtime, lower_sink_to_linear_cache_normalizes_buffer_view_identit
   PASS();
 }
 
+TEST(schedule_runtime, lower_sink_to_linear_deep_graph_uses_heap_scratch) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *in = poly_buffer_f32(ctx, 1);
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *one = poly_const_float(ctx, 1.0);
+  PolyUOp *acc = in;
+  for (int i = 0; i < POLY_MAX_STRUCT_NODES + 16; i++)
+    acc = poly_alu2(ctx, POLY_OP_ADD, acc, one);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, acc));
+
+  PolyUOp *linear = poly_lower_sink_to_linear(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_INT_EQ(linear->op, POLY_OP_LINEAR);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static PolyUOp *make_bound_vecadd_sink(
     PolyCtx *ctx,
     PolyUOp *N,

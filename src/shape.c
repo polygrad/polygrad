@@ -152,7 +152,6 @@ typedef struct {
   int64_t *dims; /* arena-allocated, NULL if scalar/none */
 } ShapeCacheEntry;
 
-/* Forward declaration */
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u);
 
 PolyMap *poly_ctx_shape_cache(PolyCtx *ctx); /* defined in uop.c */
@@ -241,19 +240,56 @@ static ShapeCacheEntry *make_entry_dims(PolyCtx *ctx, const int64_t *dims, int n
   return e;
 }
 
-/* Read source shape via cache (recursive lazy ensure) */
-#define SRC_NDIM(i) (ensure_shape(ctx, u->src[i])->ndim)
-#define SRC_DIMS(i) (ensure_shape(ctx, u->src[i])->dims)
+static ShapeCacheEntry *shape_cache_lookup(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  PolyMap *cache = poly_ctx_shape_cache(ctx);
+  return poly_map_get(cache, poly_ptr_hash(u), u, poly_ptr_eq);
+}
+
+static int8_t src_ndim(PolyCtx *ctx, PolyUOp *u, int idx) {
+  if (!u || idx < 0 || idx >= u->n_src) return -1;
+  ShapeCacheEntry *e = shape_cache_lookup(ctx, u->src[idx]);
+  return e ? e->ndim : -1;
+}
+
+static const int64_t *src_dims(PolyCtx *ctx, PolyUOp *u, int idx) {
+  if (!u || idx < 0 || idx >= u->n_src) return NULL;
+  ShapeCacheEntry *e = shape_cache_lookup(ctx, u->src[idx]);
+  return e ? e->dims : NULL;
+}
+
+/* Read source shape from the ctx cache. ensure_shape() fills the cache in
+ * topological order, matching tinygrad's recursive_property behavior without
+ * recursive C calls through deep UOp chains. */
+#define SRC_NDIM(i) src_ndim(ctx, u, (i))
+#define SRC_DIMS(i) src_dims(ctx, u, (i))
 
 static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u);
 
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
-  PolyMap *cache = poly_ctx_shape_cache(ctx);
-  uint32_t h = poly_ptr_hash(u);
-  ShapeCacheEntry *cached = poly_map_get(cache, h, u, poly_ptr_eq);
+  ShapeCacheEntry *cached = shape_cache_lookup(ctx, u);
   if (cached) return cached;
-  ShapeCacheEntry *entry = compute_and_cache(ctx, u);
-  poly_map_set(cache, h, u, entry, poly_ptr_eq);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, u, &n_topo);
+  PolyMap *cache = poly_ctx_shape_cache(ctx);
+  if (!topo) {
+    ShapeCacheEntry *entry = make_entry_none(ctx);
+    poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
+    return entry;
+  }
+
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *cur = topo[i];
+    if (shape_cache_lookup(ctx, cur)) continue;
+    ShapeCacheEntry *entry = compute_and_cache(ctx, cur);
+    poly_map_set(cache, poly_ptr_hash(cur), cur, entry, poly_ptr_eq);
+  }
+
+  cached = shape_cache_lookup(ctx, u);
+  if (cached) return cached;
+  ShapeCacheEntry *entry = make_entry_none(ctx);
+  poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
   return entry;
 }
 
@@ -330,12 +366,12 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     if (u->n_src < 1 || SRC_NDIM(0) <= 0) {
       return make_entry_none(ctx);
     }
-    int8_t src_ndim = SRC_NDIM(0);
+    int8_t source_ndim = SRC_NDIM(0);
     int n_indices = u->n_src - 1;
-    if (n_indices >= src_ndim) {
+    if (n_indices >= source_ndim) {
       return make_entry_none(ctx);
     }
-    int remaining = src_ndim - n_indices;
+    int remaining = source_ndim - n_indices;
     return make_entry_dims(ctx, SRC_DIMS(0) + n_indices, remaining);
   }
 
@@ -474,9 +510,9 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     int64_t out_dims[POLY_MAX_DIMS];
     int out_ndim = -1;
     for (int i = 0; i < u->n_src; i++) {
-      int8_t si_ndim = ensure_shape(ctx, u->src[i])->ndim;
+      int8_t si_ndim = SRC_NDIM(i);
       if (si_ndim < 0) continue;
-      const int64_t *si_dims = ensure_shape(ctx, u->src[i])->dims;
+      const int64_t *si_dims = SRC_DIMS(i);
       if (out_ndim < 0) {
         out_ndim = si_ndim;
         if (si_ndim > 0) memcpy(out_dims, si_dims, si_ndim * sizeof(int64_t));

@@ -360,15 +360,21 @@ static int collect_external_buf_order_from_kernel_graph(
     PolyUOp *kernel_graph,
     PolyUOp **buf_order
 ) {
-  PolyUOp *all_bufs[POLY_MAX_REALIZE_BUFS];
-  PolyUOp *visited[POLY_MAX_STRUCT_NODES];
+  if (!kernel_graph || !buf_order) return -1;
+  PolyUOp **all_bufs = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
+  if (!all_bufs) return -1;
   int n_all = 0, n_visited = 0;
-  poly_collect_buf_order(kernel_graph, all_bufs, &n_all, visited, &n_visited);
+  poly_collect_buf_order(kernel_graph, all_bufs, &n_all, NULL, &n_visited);
+  if (n_all > POLY_MAX_REALIZE_BUFS) {
+    free(all_bufs);
+    return -1;
+  }
 
   int n_external = 0;
-  for (int i = 0; i < n_all && i < POLY_MAX_REALIZE_BUFS; i++) {
+  for (int i = 0; i < n_all; i++) {
     if (!is_intermediate_buffer_uop(all_bufs[i])) buf_order[n_external++] = all_bufs[i];
   }
+  free(all_bufs);
   return n_external;
 }
 
@@ -1312,23 +1318,38 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
     fflush(stderr);
   }
 
-  PolyUOp *external_bufs[POLY_MAX_REALIZE_BUFS];
+  PolyUOp **external_bufs = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
+  if (!external_bufs) {
+    poly_schedule_free(schedule);
+    return NULL;
+  }
   int n_external = 0;
   if (external_buf_order) {
     /* LINEAR CALL params are replayed later against the schedule caller's
      * external buffer slots. For sink-level caching that slot list comes from
      * the original SINK, not from the optimized kernel graph. Keeping the same
      * numbering here prevents dropped/rewritten inputs from shifting params. */
+    if (n_external_buf_order > POLY_MAX_REALIZE_BUFS) {
+      free(external_bufs);
+      poly_schedule_free(schedule);
+      return NULL;
+    }
     n_external = n_external_buf_order;
-    for (int i = 0; i < n_external && i < POLY_MAX_REALIZE_BUFS; i++)
+    for (int i = 0; i < n_external; i++)
       external_bufs[i] = external_buf_order[i];
   } else {
     /* Kernel-graph callers do not have a pre-rangeify SINK, so their natural
      * external order is the one discovered from the kernel graph itself. */
     n_external = collect_external_buf_order_from_kernel_graph(kernel_graph, external_bufs);
+    if (n_external < 0) {
+      free(external_bufs);
+      poly_schedule_free(schedule);
+      return NULL;
+    }
   }
   PolyUOp **linear_src = calloc((size_t)schedule->n_items, sizeof(PolyUOp *));
   if (!linear_src) {
+    free(external_bufs);
     poly_schedule_free(schedule);
     return NULL;
   }
@@ -1339,6 +1360,7 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
     PolyUOp **call_src = calloc((size_t)n_call_src, sizeof(PolyUOp *));
     if (!call_src) {
       free(linear_src);
+      free(external_bufs);
       poly_schedule_free(schedule);
       return NULL;
     }
@@ -1360,6 +1382,7 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
   PolyUOp *linear =
       poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, schedule->n_items, poly_arg_none());
   free(linear_src);
+  free(external_bufs);
   poly_schedule_free(schedule);
   if (timing) {
     double t_done = poly_now_ms();
@@ -1516,18 +1539,26 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
     fflush(stderr);
   }
 
-  PolyUOp *raw_external_bufs[POLY_MAX_REALIZE_BUFS];
-  PolyUOp *raw_visited[POLY_MAX_STRUCT_NODES];
+  PolyUOp **raw_external_bufs = calloc(POLY_MAX_REALIZE_BUFS, sizeof(PolyUOp *));
+  if (!raw_external_bufs) return NULL;
   int n_raw_external = 0, n_raw_visited = 0;
-  poly_collect_buf_order(sink, raw_external_bufs, &n_raw_external, raw_visited, &n_raw_visited);
-  if (n_raw_external > POLY_MAX_REALIZE_BUFS) return NULL;
+  poly_collect_buf_order(sink, raw_external_bufs, &n_raw_external, NULL, &n_raw_visited);
+  if (n_raw_external > POLY_MAX_REALIZE_BUFS) {
+    free(raw_external_bufs);
+    return NULL;
+  }
   double t_raw = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, sink);
-  if (!kernel_graph) return NULL;
+  if (!kernel_graph) {
+    free(raw_external_bufs);
+    return NULL;
+  }
   double t_kernel = timing ? poly_now_ms() : 0.0;
-  PolyUOp *linear =
-      poly_build_linear_from_kernel_graph_uncached(ctx, kernel_graph, raw_external_bufs, n_raw_external);
+  PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(
+      ctx, kernel_graph, raw_external_bufs, n_raw_external
+  );
+  free(raw_external_bufs);
   if (!linear) return NULL;
   double t_linear = timing ? poly_now_ms() : 0.0;
   if (poly_schedule_cache_enabled())
