@@ -71,6 +71,40 @@ static PolyUOp *make_binary_kernel(PolyCtx *ctx, PolyOps op, int n) {
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
 
+static int count_range_axis_type(PolyCtx *ctx, PolyUOp *sink, PolyAxisType type) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  int count = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_RANGE && poly_arg_is_range(topo[i]->arg) &&
+        poly_range_axis_type(topo[i]->arg) == type)
+      count++;
+  }
+  return count;
+}
+
+static PolyUOp *make_many_index_kernel(PolyCtx *ctx, int n_pairs, int n) {
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
+  PolyUOp *range =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp **stores = (PolyUOp **)malloc((size_t)n_pairs * sizeof(PolyUOp *));
+  if (!stores) return NULL;
+
+  for (int i = 0; i < n_pairs; i++) {
+    PolyUOp *src = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(i * 2));
+    PolyUOp *dst = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(i * 2 + 1));
+    PolyUOp *idx_src = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, src, range, poly_arg_none());
+    PolyUOp *idx_dst = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, dst, range, poly_arg_none());
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx_src, poly_arg_none());
+    stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_dst, load, poly_arg_none());
+  }
+
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, n_pairs, poly_arg_none());
+  free(stores);
+  return sink;
+}
+
 static PolyUOp *simplify(PolyCtx *ctx, PolyUOp *root) {
   return poly_graph_rewrite(ctx, root, poly_symbolic_simple());
 }
@@ -2074,6 +2108,32 @@ TEST(beam, zero_is_heuristic) {
   ASSERT_INT_EQ(ret, 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(dout[i], da[i] + db[i], 1e-6);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optimizer_caps, heuristic_upcasts_when_scheduler_view_is_complete) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_binary_kernel(ctx, POLY_OP_ADD, 16);
+  PolyRendererCaps caps = {.max_vec_width = 4};
+
+  PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  ASSERT_TRUE(optimized != NULL);
+  ASSERT_TRUE(count_range_axis_type(ctx, optimized, POLY_AXIS_UPCAST) > 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optimizer_caps, heuristic_skips_when_index_buffer_cap_would_truncate) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = make_many_index_kernel(ctx, 17, 16);
+  PolyRendererCaps caps = {.max_vec_width = 4};
+
+  PolyUOp *optimized = poly_apply_opts_heuristic_ex(ctx, sink, caps);
+  ASSERT_PTR_EQ(optimized, sink);
+  ASSERT_INT_EQ(count_range_axis_type(ctx, optimized, POLY_AXIS_UPCAST), 0);
 
   poly_ctx_destroy(ctx);
   PASS();

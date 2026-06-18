@@ -227,7 +227,16 @@ typedef struct {
 
   /* Has reduce op */
   bool has_reduce;
+
+  /* The real tinygrad Scheduler uses dynamic Python lists for rngs/bufs.
+   * If the C scratch caps would truncate those lists, skip optional
+   * optimization rather than optimizing a partial scheduler view. */
+  bool overflow;
 } OptScheduler;
+
+static bool sched_can_optimize(const OptScheduler *s) {
+  return s && !s->overflow && s->n_rngs > 0;
+}
 
 static int sched_rng_cmp(const void *ap, const void *bp) {
   const PolyUOp *a = *(const PolyUOp *const *)ap;
@@ -372,6 +381,7 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
   s->n_bufs = 0;
   s->has_reduce = false;
   s->has_reach = false;
+  s->overflow = false;
   for (int i = 0; i < SCHED_MAX_BUFS; i++)
     s->buf_reach[i] = 0;
 
@@ -396,15 +406,22 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
           break;
         }
       }
-      if (!dup && s->n_rngs < SCHED_MAX_RNGS) {
-        s->rngs[s->n_rngs] = u;
-        s->n_rngs++;
+      if (!dup) {
+        if (s->n_rngs < SCHED_MAX_RNGS) {
+          s->rngs[s->n_rngs] = u;
+          s->n_rngs++;
+        } else {
+          s->overflow = true;
+        }
       }
       int64_t aid = poly_range_axis_id(u->arg);
       if (aid > max_id) max_id = aid;
     }
     if (u->op == POLY_OP_INDEX && u->n_src > 0 && u->src[0]->op == POLY_OP_PARAM) {
-      if (s->n_bufs < SCHED_MAX_BUFS) s->bufs[s->n_bufs++] = u;
+      if (s->n_bufs < SCHED_MAX_BUFS)
+        s->bufs[s->n_bufs++] = u;
+      else
+        s->overflow = true;
     }
   }
   s->opt_range_next = max_id + 1;
@@ -430,7 +447,7 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
   }
 
   /* Build reachability bitmask: single forward pass over toposort */
-  if (s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
+  if (!s->overflow && s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
     uint64_t *reach = build_reachability_bitmask(topo, n_topo, s->rngs, s->n_rngs);
     /* Extract per-buffer bitmasks */
     PolyMap *idx_map = poly_map_new((size_t)(n_topo < 64 ? 64 : (size_t)n_topo * 2));
@@ -456,6 +473,8 @@ static void sched_refresh(OptScheduler *s) {
   s->n_rngs = 0;
   s->n_bufs = 0;
   s->has_reduce = false;
+  s->has_reach = false;
+  s->overflow = false;
 
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(s->ctx, s->ast, &n_topo);
@@ -476,12 +495,20 @@ static void sched_refresh(OptScheduler *s) {
           break;
         }
       }
-      if (!dup && s->n_rngs < SCHED_MAX_RNGS) s->rngs[s->n_rngs++] = u;
+      if (!dup) {
+        if (s->n_rngs < SCHED_MAX_RNGS)
+          s->rngs[s->n_rngs++] = u;
+        else
+          s->overflow = true;
+      }
       int64_t aid = poly_range_axis_id(u->arg);
       if (aid > max_id) max_id = aid;
     }
     if (u->op == POLY_OP_INDEX && u->n_src > 0 && u->src[0]->op == POLY_OP_PARAM) {
-      if (s->n_bufs < SCHED_MAX_BUFS) s->bufs[s->n_bufs++] = u;
+      if (s->n_bufs < SCHED_MAX_BUFS)
+        s->bufs[s->n_bufs++] = u;
+      else
+        s->overflow = true;
     }
   }
   if (max_id + 1 > s->opt_range_next) s->opt_range_next = max_id + 1;
@@ -504,8 +531,7 @@ static void sched_refresh(OptScheduler *s) {
   /* Rebuild reachability bitmask */
   for (int i = 0; i < SCHED_MAX_BUFS; i++)
     s->buf_reach[i] = 0;
-  s->has_reach = false;
-  if (s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
+  if (!s->overflow && s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
     int n_topo2 = 0;
     PolyUOp **topo2 = poly_toposort(s->ctx, s->ast, &n_topo2);
     uint64_t *reach = build_reachability_bitmask(topo2, n_topo2, s->rngs, s->n_rngs);
@@ -545,6 +571,9 @@ static PolyUOp *sched_shift_to_core(
     PolyUOp *input_new_rng,
     PolyUOp **out_new_rng
 ) {
+  if (!s || s->overflow) return NULL;
+  if (!input_new_rng && s->n_rngs >= SCHED_MAX_RNGS) return NULL;
+
   int64_t bound = 0;
   if (rng->n_src > 0 && rng->src[0]->op == POLY_OP_CONST && rng->src[0]->arg.kind == POLY_ARG_INT)
     bound = rng->src[0]->arg.i;
@@ -586,8 +615,13 @@ static PolyUOp *sched_shift_to_core(
 
   PolyUOp *from[1] = {rng};
   PolyUOp *to[1] = {sub_axis};
+  OptScheduler old = *s;
   s->ast = poly_uop_substitute(ctx, s->ast, from, to, 1);
   sched_refresh(s);
+  if (s->overflow) {
+    *s = old;
+    return NULL;
+  }
   if (out_new_rng) *out_new_rng = new_rng;
   return replaced;
 }
@@ -1354,7 +1388,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
 
   OptScheduler s;
   sched_init(&s, ctx, sink);
-  if (s.n_rngs == 0) return sink;
+  if (!sched_can_optimize(&s)) return sink;
 
   /* == Tensor core optimization (heuristic.py:28-46) ==
    * Try TC before other heuristics. On success, return immediately. */
@@ -1539,8 +1573,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
                 if (c->src[0] == rng && c->src[1]->op == POLY_OP_CONST &&
                     c->src[1]->arg.kind == POLY_ARG_INT)
                   sum_strides += c->src[1]->arg.i;
-                else if (c->src[1] == rng && c->src[0]->op == POLY_OP_CONST &&
-                         c->src[0]->arg.kind == POLY_ARG_INT)
+                else if (c->src[1] == rng && c->src[0]->op == POLY_OP_CONST && c->src[0]->arg.kind == POLY_ARG_INT)
                   sum_strides += c->src[0]->arg.i;
               }
             }
@@ -1780,6 +1813,7 @@ typedef struct {
 
 /* Try to apply a single BEAM action to a scheduler. Returns true on success. */
 static bool sched_apply_action(OptScheduler *s, PolyBeamAction act) {
+  if (!sched_can_optimize(s)) return false;
   int dims[SCHED_MAX_RNGS];
   int n_dims;
 
@@ -2041,6 +2075,7 @@ static PolyUOp *poly_beam_search(
     /* Replay cached actions */
     OptScheduler s;
     sched_init(&s, ctx, sink);
+    if (!sched_can_optimize(&s)) return sink;
     for (int i = 0; i < cached_n; i++) {
       OptScheduler copy;
       sched_copy(&copy, &s);
@@ -2053,6 +2088,10 @@ static PolyUOp *poly_beam_search(
   /* Initialize beam with unoptimized baseline */
   BeamEntry *beam = (BeamEntry *)calloc(BEAM_MAX_BEAM, sizeof(BeamEntry));
   sched_init(&beam[0].sched, ctx, sink);
+  if (!sched_can_optimize(&beam[0].sched)) {
+    free(beam);
+    return sink;
+  }
   beam[0].time_us = INFINITY;
   beam[0].n_actions = 0;
   int beam_size = 1;
@@ -3195,14 +3234,12 @@ static PolyUOp *rule_decomp_exp2(PolyCtx *ctx, PolyUOp *root, const PolyBindings
       0.5550347269e-1,
       0.2402264476e+0,
       0.6931471825e+0,
-      1.0
-  };
-  static const double coeffs_f64[] = {0.4434359082926529454e-9, 0.7073164598085707425e-8,
-                                      0.1017819260921760451e-6, 0.1321543872511327615e-5,
-                                      0.1525273353517584730e-4, 0.1540353045101147808e-3,
-                                      0.1333355814670499073e-2, 0.9618129107597600536e-2,
-                                      0.5550410866482046596e-1, 0.2402265069591012214e+0,
-                                      0.6931471805599452862e+0, 0.1000000000000000000e+1};
+      1.0};
+  static const double coeffs_f64[] = {
+      0.4434359082926529454e-9, 0.7073164598085707425e-8, 0.1017819260921760451e-6,
+      0.1321543872511327615e-5, 0.1525273353517584730e-4, 0.1540353045101147808e-3,
+      0.1333355814670499073e-2, 0.9618129107597600536e-2, 0.5550410866482046596e-1,
+      0.2402265069591012214e+0, 0.6931471805599452862e+0, 0.1000000000000000000e+1};
   const double *coeffs = is_f64 ? coeffs_f64 : coeffs_f32;
   int ncoeffs = is_f64 ? 12 : 7;
 
@@ -3351,8 +3388,7 @@ static PolyUOp *sin_poly(PolyCtx *ctx, PolyUOp *d) {
   PolyUOp *d2 = poly_uop2(ctx, POLY_OP_MUL, ft, d, d, poly_arg_none());
   static const double coeffs_f32[] = {
       2.6083159809786593541503e-06, -0.0001981069071916863322258, 0.00833307858556509017944336,
-      -0.166666597127914428710938, 1.0
-  };
+      -0.166666597127914428710938, 1.0};
   static const double coeffs_f64[] = {-7.97255955009037868891952e-18, 2.81009972710863200091251e-15,
                                       -7.64712219118158833288484e-13, 1.60590430605664501629054e-10,
                                       -2.50521083763502045810755e-08, 2.75573192239198747630416e-06,
@@ -8459,7 +8495,7 @@ PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   if (caps.n_tensor_cores <= 0) return sink;
   OptScheduler s;
   sched_init(&s, ctx, sink);
-  if (s.n_rngs == 0) return sink;
+  if (!sched_can_optimize(&s)) return sink;
 
   int n_reduce = 0;
   for (int i = 0; i < s.n_rngs; i++)
