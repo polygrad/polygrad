@@ -1,9 +1,10 @@
 /*
  * nn.h — Neural network layers
  *
- * Two functions per layer:
- *   poly_X_apply — takes explicit weight UOps, does the math
- *   poly_X       — registers named params on ctx, calls apply
+ * Three functions per layer:
+ *   poly_X_apply    — takes explicit weight UOps, does the math
+ *   poly_instance_X — declares staged PolyInstance params, calls apply
+ *   poly_X          — legacy ctx-global param registration, calls apply
  */
 
 #ifndef POLY_NN_H
@@ -30,7 +31,7 @@ PolyUOp *poly_linear(
     int in_features,
     int out_features,
     bool use_bias
-);
+) POLY_DEPRECATED("use poly_instance_linear or poly_linear_apply with explicit params");
 PolyUOp *poly_instance_linear(
     PolyInstance *inst,
     const char *prefix,
@@ -50,7 +51,8 @@ PolyUOp *poly_layernorm_apply(
     int axis,
     double eps
 );
-PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps);
+PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
+    POLY_DEPRECATED("use poly_instance_layernorm or poly_layernorm_apply with explicit params");
 PolyUOp *poly_instance_layernorm(
     PolyInstance *inst,
     const char *prefix,
@@ -62,7 +64,8 @@ PolyUOp *poly_instance_layernorm(
 /* RMSNorm: x * rsqrt(mean(x^2) + eps) * w */
 
 PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps);
-PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps);
+PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps)
+    POLY_DEPRECATED("use poly_instance_rmsnorm or poly_rmsnorm_apply with explicit params");
 PolyUOp *poly_instance_rmsnorm(
     PolyInstance *inst,
     const char *prefix,
@@ -80,7 +83,7 @@ PolyUOp *poly_embedding(
     PolyUOp *tokens,
     int vocab_size,
     int embed_dim
-);
+) POLY_DEPRECATED("use poly_instance_embedding or poly_embedding_apply with explicit params");
 PolyUOp *poly_instance_embedding(
     PolyInstance *inst,
     const char *prefix,

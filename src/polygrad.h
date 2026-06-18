@@ -12,6 +12,18 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#ifndef POLY_DEPRECATED
+/* Define POLY_ENABLE_DEPRECATED_WARNINGS before including this header to make
+ * compatibility-only APIs produce compiler diagnostics. The default is quiet so
+ * Polygrad's own compatibility tests and legacy shims do not flood normal
+ * builds with expected warnings. */
+#if defined(POLY_ENABLE_DEPRECATED_WARNINGS) && (defined(__GNUC__) || defined(__clang__))
+#define POLY_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+#define POLY_DEPRECATED(msg)
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -791,7 +803,11 @@ const int64_t *poly_uop_dims(PolyCtx *ctx, const PolyUOp *u);
 PolyShape poly_uop_shape_cached(PolyCtx *ctx, const PolyUOp *u);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
-/* Named buffer registry */
+/* Named buffer registry.
+ *
+ * Compatibility API for old ctx-global instance construction. New C model
+ * builders should use staged PolyInstance declarations from instance.h:
+ * poly_instance_input/param/state/output/entrypoint/build. */
 
 typedef enum {
   POLY_ROLE_PARAM = 0,
@@ -821,7 +837,8 @@ PolyUOp *poly_param(
     int ndim,
     const char *fmt,
     ...
-) __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_instance_param/poly_instance_state")
+    __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_input(
     PolyCtx *ctx,
     PolyDType dt,
@@ -829,7 +846,7 @@ PolyUOp *poly_input(
     int ndim,
     const char *fmt,
     ...
-) __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_instance_input") __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_output(
     PolyCtx *ctx,
     PolyDType dt,
@@ -837,7 +854,7 @@ PolyUOp *poly_output(
     int ndim,
     const char *fmt,
     ...
-) __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_instance_output") __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_target(
     PolyCtx *ctx,
     PolyDType dt,
@@ -845,9 +862,9 @@ PolyUOp *poly_target(
     int ndim,
     const char *fmt,
     ...
-) __attribute__((format(printf, 5, 6)));
+) POLY_DEPRECATED("use staged poly_instance_target") __attribute__((format(printf, 5, 6)));
 PolyUOp *poly_aux(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim, const char *fmt, ...)
-    __attribute__((format(printf, 5, 6)));
+    POLY_DEPRECATED("use staged poly_instance_aux") __attribute__((format(printf, 5, 6)));
 
 /* Non-variadic named-buffer registration for FFI/frontends. These mirror
  * poly_param/poly_input/poly_output/poly_target/poly_aux, but accept an exact
@@ -859,7 +876,7 @@ PolyUOp *poly_register_buffer_by_id(
     const int64_t *shape,
     int ndim,
     const char *name
-);
+) POLY_DEPRECATED("use poly_instance_from_binding_arrays");
 
 /* Register an existing BUFFER-like UOp as a named ABI buffer. This is the
  * export path for tinygrad-style lazy model objects whose parameters already
@@ -872,35 +889,46 @@ PolyUOp *poly_register_existing_buffer(
     int ndim,
     const char *name,
     bool trainable
-);
+) POLY_DEPRECATED("use poly_instance_from_bindings/poly_instance_from_binding_arrays");
 
 /* Create an alias: alias_name resolves to the same buffer as existing_name.
  * Returns 0 on success, -1 on error (existing_name not found, or alias_name
  * already taken by a different buffer). */
-int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name);
+int poly_alias(PolyCtx *ctx, const char *alias_name, const char *existing_name)
+    POLY_DEPRECATED("declare multiple state bindings for the same PolyTensor");
 
 /* Lookup a named buffer by name. Returns the BUFFER UOp, or NULL. */
-PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...)
+    POLY_DEPRECATED("ctx-global registry lookup is compatibility-only")
+        __attribute__((format(printf, 2, 3)));
 
 /* Lookup a registry entry by name. Returns NULL if not found. */
-const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name);
+const PolyRegEntry *poly_ctx_get_entry(PolyCtx *ctx, const char *name)
+    POLY_DEPRECATED("ctx-global registry lookup is compatibility-only");
 
 /* Mark a named PARAM trainable/frozen. Non-PARAM buffers ignore optimizer
  * trainability but still carry the bit for import/export round-trips. */
-int poly_ctx_set_trainable(PolyCtx *ctx, const char *name, bool trainable);
-bool poly_ctx_is_trainable(PolyCtx *ctx, const char *name);
+int poly_ctx_set_trainable(PolyCtx *ctx, const char *name, bool trainable)
+    POLY_DEPRECATED("set PolyTensor requires_grad before staged instance build");
+bool poly_ctx_is_trainable(PolyCtx *ctx, const char *name)
+    POLY_DEPRECATED("read trainability from PolyTensor or built PolyInstance");
 
 /* Enumeration of all named entries (including aliases). */
-int poly_ctx_named_count(PolyCtx *ctx);
-const PolyRegEntry *poly_ctx_named_entry(PolyCtx *ctx, int i);
+int poly_ctx_named_count(PolyCtx *ctx) POLY_DEPRECATED("ctx-global registry is compatibility-only");
+const PolyRegEntry *poly_ctx_named_entry(PolyCtx *ctx, int i)
+    POLY_DEPRECATED("ctx-global registry is compatibility-only");
 
 /* Register a named entrypoint (SINK UOp). Returns 0 on success, -1 on error. */
-int poly_register_entrypoint(PolyCtx *ctx, const char *name, PolyUOp *sink);
+int poly_register_entrypoint(PolyCtx *ctx, const char *name, PolyUOp *sink)
+    POLY_DEPRECATED("use staged poly_instance_entrypoint");
 
 /* Entrypoint enumeration. */
-int poly_ctx_entrypoint_count(PolyCtx *ctx);
-const char *poly_ctx_entrypoint_name(PolyCtx *ctx, int i);
-PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i);
+int poly_ctx_entrypoint_count(PolyCtx *ctx)
+    POLY_DEPRECATED("ctx-global entrypoints are compatibility-only");
+const char *poly_ctx_entrypoint_name(PolyCtx *ctx, int i)
+    POLY_DEPRECATED("ctx-global entrypoints are compatibility-only");
+PolyUOp *poly_ctx_entrypoint_sink(PolyCtx *ctx, int i)
+    POLY_DEPRECATED("ctx-global entrypoints are compatibility-only");
 
 /* Autograd */
 /* Reverse-mode gradient of loss w.r.t. wrt.

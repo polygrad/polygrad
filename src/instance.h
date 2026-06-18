@@ -197,8 +197,12 @@ PolyInstance *poly_instance_from_ir(
 /* Create from a PolyCtx with named buffer registry + entrypoints.
  * Requires at least one entrypoint registered. The ctx is NOT owned
  * by the instance (caller manages ctx lifetime, must outlive the instance).
- * Returns NULL on error (zero entrypoints, allocation failure). */
-PolyInstance *poly_instance_from_ctx(PolyCtx *ctx);
+ * Returns NULL on error (zero entrypoints, allocation failure).
+ *
+ * Compatibility API for old ctx-global instance construction. New code should
+ * use staged PolyInstance construction or poly_instance_from_bindings(). */
+PolyInstance *poly_instance_from_ctx(PolyCtx *ctx)
+    POLY_DEPRECATED("use staged PolyInstance construction or poly_instance_from_bindings");
 
 /* Create from selected named sinks instead of every entrypoint registered on
  * the ctx. Frontend export uses this to package one traced lazy graph even if
