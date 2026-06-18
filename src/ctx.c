@@ -59,6 +59,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_buf_tag = 1;
   ctx->next_unique_id = 0;
   ctx->preferred_device = POLY_DEVICE_AUTO;
+  ctx->frontend_buffer_release = NULL;
   return ctx;
 }
 
@@ -101,6 +102,11 @@ void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device) {
 
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx) {
   return ctx ? ctx->preferred_device : POLY_DEVICE_AUTO;
+}
+
+void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleaseFn fn) {
+  if (!ctx) return;
+  ctx->frontend_buffer_release = fn;
 }
 
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }

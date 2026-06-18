@@ -37,6 +37,7 @@ struct PolyCtx {
   int32_t next_buf_tag;
   int64_t next_unique_id;
   PolyDevice preferred_device;
+  PolyFrontendBufferReleaseFn frontend_buffer_release;
 };
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx);

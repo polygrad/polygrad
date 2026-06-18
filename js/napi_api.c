@@ -1042,6 +1042,25 @@ static napi_value napi_poly_set_frontend_buffer_release(napi_env env, napi_callb
   return undef;
 }
 
+static napi_value napi_poly_ctx_set_frontend_buffer_release(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+
+  if (g_frontend_buffer_release_ref) {
+    napi_delete_reference(env, g_frontend_buffer_release_ref);
+    g_frontend_buffer_release_ref = NULL;
+  }
+  g_frontend_buffer_release_env = env;
+  NAPI_CALL(env, napi_create_reference(env, argv[1], 1, &g_frontend_buffer_release_ref));
+  poly_ctx_set_frontend_buffer_release(ctx, napi_frontend_buffer_release);
+
+  napi_value undef;
+  NAPI_CALL(env, napi_get_undefined(env, &undef));
+  return undef;
+}
+
 /* Copy `nbytes` from the buffer's host pointer into a fresh Node Buffer.
  * Used by JS Tensor.toArray() / item() / tolist() when no JS-side host
  * owner is registered (e.g. realize() allocated the buffer in C). */
@@ -2830,6 +2849,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_buffer_get_key", napi_poly_buffer_get_key),
       DECLARE_NAPI_METHOD(
           "poly_set_frontend_buffer_release", napi_poly_set_frontend_buffer_release
+      ),
+      DECLARE_NAPI_METHOD(
+          "poly_ctx_set_frontend_buffer_release", napi_poly_ctx_set_frontend_buffer_release
       ),
       DECLARE_NAPI_METHOD("poly_uop_key", napi_poly_uop_key),
       DECLARE_NAPI_METHOD("poly_uop_substitute", napi_poly_uop_substitute),

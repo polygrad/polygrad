@@ -190,6 +190,12 @@ def _declare_signatures(lib):
     lib.poly_ctx_set_preferred_device.restype = None
     lib.poly_ctx_set_preferred_device.argtypes = [_ptr, ctypes.c_int]
 
+    try:
+        lib.poly_ctx_set_frontend_buffer_release.restype = None
+        lib.poly_ctx_set_frontend_buffer_release.argtypes = [_ptr, PolyFrontendBufferReleaseFn]
+    except AttributeError:
+        pass
+
     lib.poly_device_by_name.restype = ctypes.c_int
     lib.poly_device_by_name.argtypes = [ctypes.c_char_p]
 

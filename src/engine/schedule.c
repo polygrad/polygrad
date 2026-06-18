@@ -1664,7 +1664,10 @@ static void *host_alloc(size_t nbytes, void *dev_ctx) {
 static void host_free_alloc(const PolyBuffer *buffer, void *dev_ctx) {
   (void)dev_ctx;
   if (!buffer) return;
-  poly_frontend_buffer_release_key((uintptr_t)buffer);
+  if (buffer->frontend_release)
+    buffer->frontend_release((uintptr_t)buffer);
+  else
+    poly_frontend_buffer_release_key((uintptr_t)buffer);
 #ifdef __EMSCRIPTEN__
   free(buffer->ptr);
 #endif

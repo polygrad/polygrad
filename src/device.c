@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static PolyFrontendBufferReleaseFn g_frontend_buffer_release = NULL;
+static _Thread_local PolyFrontendBufferReleaseFn g_frontend_buffer_release = NULL;
 
 void poly_set_frontend_buffer_release(PolyFrontendBufferReleaseFn fn) {
   g_frontend_buffer_release = fn;
@@ -17,6 +17,11 @@ void poly_set_frontend_buffer_release(PolyFrontendBufferReleaseFn fn) {
 
 void poly_frontend_buffer_release_key(uintptr_t buffer_key) {
   if (g_frontend_buffer_release) g_frontend_buffer_release(buffer_key);
+}
+
+static PolyFrontendBufferReleaseFn frontend_buffer_release_for_ctx(PolyCtx *ctx) {
+  if (ctx && ctx->frontend_buffer_release) return ctx->frontend_buffer_release;
+  return g_frontend_buffer_release;
 }
 
 uint64_t poly_buffer_get_key(PolyCtx *ctx, PolyUOp *buf) {
@@ -34,6 +39,7 @@ PolyBuffer poly_buffer_make_host_view(void *ptr, size_t nbytes) {
       .allocator = be ? be->get_allocator() : NULL,
       .src = NULL,
       .valid = true,
+      .frontend_release = NULL,
   };
 }
 
@@ -163,6 +169,8 @@ void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int d
       .allocator = be ? be->get_allocator() : NULL,
       .src = NULL,
       .valid = true, /* frontend just gave us valid data */
+      .frontend_release =
+          ((PolyDevice)device == POLY_DEVICE_HOST) ? frontend_buffer_release_for_ctx(ctx) : NULL,
   };
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
 }
@@ -177,6 +185,7 @@ void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
   h->owned = false;
   h->src = NULL;
   h->valid = true;
+  h->frontend_release = NULL;
   if (!h->allocator) {
     const PolyBackendDesc *be = poly_backend_get(h->device);
     h->allocator = be ? be->get_allocator() : NULL;
@@ -303,6 +312,7 @@ int poly_buffer_allocate(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) {
       .allocator = alloc,
       .src = new_src,
       .valid = false, /* freshly allocated, not yet populated */
+      .frontend_release = NULL,
   };
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
   return 0;

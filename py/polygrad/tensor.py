@@ -37,12 +37,14 @@ def frontend_buffer_release(buffer_key):
     _host_buffers.pop(int(buffer_key), None)
 
 
-def _ensure_frontend_buffer_release_registered():
+def _ensure_frontend_buffer_release_registered(ctx=None):
     global _frontend_buffer_release_cb
-    if _frontend_buffer_release_cb is not None:
-        return
-    _frontend_buffer_release_cb = _ffi.PolyFrontendBufferReleaseFn(frontend_buffer_release)
-    _ffi._lib.poly_set_frontend_buffer_release(_frontend_buffer_release_cb)
+    if _frontend_buffer_release_cb is None:
+        _frontend_buffer_release_cb = _ffi.PolyFrontendBufferReleaseFn(frontend_buffer_release)
+    if ctx is not None and hasattr(_ffi._lib, 'poly_ctx_set_frontend_buffer_release'):
+        _ffi._lib.poly_ctx_set_frontend_buffer_release(ctx, _frontend_buffer_release_cb)
+    else:
+        _ffi._lib.poly_set_frontend_buffer_release(_frontend_buffer_release_cb)
 
 
 def _buffer_key(ctx, uop):
@@ -424,7 +426,7 @@ class Tensor:
             self._dtype_str = _dtype or 'float32'
         else:
             # User construction from data
-            _ensure_frontend_buffer_release_registered()
+            _ensure_frontend_buffer_release_registered(self._ctx)
             if isinstance(data, (int, float)):
                 data = [data]
             dt = _dtype_name(dtype, default='float32')

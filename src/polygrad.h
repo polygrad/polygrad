@@ -586,6 +586,7 @@ PolyDevice poly_uop_device(PolyUOp *u);
  * release function with that key so the frontend can drop its owner entry. */
 typedef void (*PolyFrontendBufferReleaseFn)(uintptr_t buffer_key);
 void poly_set_frontend_buffer_release(PolyFrontendBufferReleaseFn fn);
+void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleaseFn fn);
 
 /* PolyBuffer is defined in device.h (needs PolyAllocator pointer) */
 

@@ -491,6 +491,17 @@ async function createWasmCore(device) {
       }
       Module._poly_set_frontend_buffer_release(Module.__polygradFrontendBufferReleasePtr)
     },
+    poly_ctx_set_frontend_buffer_release: (ctx, fn) => {
+      Module.__polygradFrontendBufferRelease = fn
+      if (!Module.__polygradFrontendBufferReleasePtr) {
+        Module.__polygradFrontendBufferReleasePtr = Module.addFunction((bufferKey) => {
+          if (Module.__polygradFrontendBufferRelease) {
+            Module.__polygradFrontendBufferRelease(bufferKey)
+          }
+        }, 'vi')
+      }
+      Module._poly_ctx_set_frontend_buffer_release(ctx, Module.__polygradFrontendBufferReleasePtr)
+    },
 
     // Batched raw-UOp realize. JS signature: poly_realize_uops(ctx, [uop, ...]) -> [raw, ...].
     // Builds an input pointer array in WASM memory, calls C, reads back the
@@ -802,7 +813,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 5
+  const EXPECTED_ABI = 6
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

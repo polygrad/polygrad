@@ -26,7 +26,41 @@ static PolyArg reduce_ax(PolyOps op, int64_t *axes, int n) {
   return a;
 }
 
+static int g_frontend_release_a = 0;
+static int g_frontend_release_b = 0;
+
+static void test_frontend_release_a(uintptr_t buffer_key) {
+  (void)buffer_key;
+  g_frontend_release_a++;
+}
+
+static void test_frontend_release_b(uintptr_t buffer_key) {
+  (void)buffer_key;
+  g_frontend_release_b++;
+}
+
 /* Shape tests */
+
+TEST(device, frontend_release_callback_is_captured_per_host_buffer) {
+  g_frontend_release_a = 0;
+  g_frontend_release_b = 0;
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_ctx_set_frontend_buffer_release(ctx, test_frontend_release_a);
+
+  PolyUOp *buf = poly_buffer(ctx, POLY_FLOAT32, 1);
+  ASSERT_NOT_NULL(buf);
+  float data = 1.0f;
+  poly_buffer_set(ctx, buf, &data, sizeof(data), POLY_DEVICE_HOST);
+
+  poly_ctx_set_frontend_buffer_release(ctx, test_frontend_release_b);
+  poly_ctx_destroy(ctx);
+
+  ASSERT_INT_EQ(g_frontend_release_a, 1);
+  ASSERT_INT_EQ(g_frontend_release_b, 0);
+  PASS();
+}
 
 TEST(shape, buffer) {
   PolyCtx *ctx = poly_ctx_new();

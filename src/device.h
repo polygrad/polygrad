@@ -43,11 +43,12 @@ typedef struct PolyAllocator {
 struct PolyBuffer {
   void *ptr;
   size_t nbytes;
-  PolyDevice device; 
+  PolyDevice device;
   bool owned; /* should allocator->free be called when this residency is retired? */
   const PolyAllocator *allocator; /* allocator for this buffer (set at allocation time) */
   PolyBuffer *src;  /* root source buffer (usually host), or NULL */
   bool valid; /* does ptr contain current logical contents? */
+  PolyFrontendBufferReleaseFn frontend_release; /* imported HOST owner release hook */
 };
 
 /* Attach buffer data to a BUFFER UOp.

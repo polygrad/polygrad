@@ -256,14 +256,21 @@ function createBoundTensorClass(runtime) {
     liveTensors.length = 0
     liveTensors.push(...kept)
   }
-  if (ffi.poly_set_frontend_buffer_release && !_runtime._core.__frontendBufferReleaseRegistered) {
-    ffi.poly_set_frontend_buffer_release((bufferKey) => {
+  const canRegisterFrontendRelease =
+    ffi.poly_ctx_set_frontend_buffer_release || ffi.poly_set_frontend_buffer_release
+  if (canRegisterFrontendRelease && !_runtime._core.__frontendBufferReleaseRegistered) {
+    const releaseFrontendBuffer = (bufferKey) => {
       const key = normalizeBufferKey(bufferKey)
       hostBuffers.delete(key)
       if (_runtime._core.unregisterHostBuffer) {
         _runtime._core.unregisterHostBuffer(key)
       }
-    })
+    }
+    if (ffi.poly_ctx_set_frontend_buffer_release) {
+      ffi.poly_ctx_set_frontend_buffer_release(_runtime._core.ctx, releaseFrontendBuffer)
+    } else {
+      ffi.poly_set_frontend_buffer_release(releaseFrontendBuffer)
+    }
     _runtime._core.__frontendBufferReleaseRegistered = true
   }
 

@@ -11,9 +11,9 @@
 
 #include "polygrad.h"
 
-/* The graph-side realize ABI now uses the batched Tensor-style poly_realize
- * entrypoint, so bump the public ABI version alongside that refactor. */
-#define POLYGRAD_ABI_VERSION 5
+/* Public C/frontend ABI version. Bump when exported symbols or public struct
+ * layouts used by frontends change. */
+#define POLYGRAD_ABI_VERSION 6
 
 #ifdef __cplusplus
 extern "C" {
