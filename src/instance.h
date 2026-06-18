@@ -29,6 +29,53 @@ extern "C" {
 /* Opaque handle */
 typedef struct PolyInstance PolyInstance;
 
+typedef enum {
+  POLY_STATUS_OK = 0,
+  POLY_STATUS_ERROR = -1,
+  POLY_STATUS_BAD_STAGE = -2,
+  POLY_STATUS_INVALID = -3,
+  POLY_STATUS_NOMEM = -4,
+} PolyStatus;
+
+typedef enum {
+  POLY_INSTANCE_BUILDING = 0,
+  POLY_INSTANCE_BUILT = 1,
+  POLY_INSTANCE_FAILED = 2,
+} PolyInstanceStage;
+
+typedef struct {
+  bool own_ctx_on_success;
+  bool own_ctx_on_failure;
+} PolyInstanceOptions;
+
+typedef struct {
+  int code;
+  const char *func;
+  char message[256];
+} PolyInstanceError;
+
+typedef struct {
+  const char *objective; /* nullable; must name one output if set */
+  uint32_t flags;
+} PolyEntrypointOptions;
+
+typedef struct {
+  const char *name;
+  int role;
+  PolyTensor *tensor;
+  uint32_t flags;
+} PolyBindingSpec;
+
+typedef struct {
+  const char *name;
+  const char **inputs;
+  int n_inputs;
+  const char **outputs;
+  int n_outputs;
+  const char *objective;
+  uint32_t flags;
+} PolyEntrypointSpec;
+
 /* Buffer roles (matches poly_ir.h) */
 #define POLY_ROLE_PARAM 0
 #define POLY_ROLE_INPUT 1
@@ -46,6 +93,96 @@ typedef struct PolyInstance PolyInstance;
 #endif
 
 /* Lifecycle */
+
+/* Create a mutable build-mode instance. Construction calls append local
+ * BindingSpec/EntrypointSpec records. Runtime calls are invalid until
+ * poly_instance_build() succeeds. */
+PolyInstance *poly_instance_new(PolyCtx *ctx, const PolyInstanceOptions *opts);
+
+PolyInstanceStage poly_instance_stage(const PolyInstance *inst);
+const PolyInstanceError *poly_instance_last_error(const PolyInstance *inst);
+
+PolyStatus poly_instance_scope_push(PolyInstance *inst, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+PolyStatus poly_instance_scope_pop(PolyInstance *inst);
+
+PolyTensor *poly_instance_input(
+    PolyInstance *inst,
+    const char *name,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim
+);
+PolyTensor *poly_instance_target(
+    PolyInstance *inst,
+    const char *name,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim
+);
+PolyTensor *poly_instance_param(
+    PolyInstance *inst,
+    const char *name,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim
+);
+PolyStatus poly_instance_state(
+    PolyInstance *inst,
+    const char *name,
+    PolyTensor *tensor,
+    uint32_t flags
+);
+PolyStatus poly_instance_output(PolyInstance *inst, const char *name, PolyTensor *tensor);
+PolyStatus poly_instance_aux(
+    PolyInstance *inst,
+    const char *name,
+    PolyTensor *tensor,
+    uint32_t flags
+);
+PolyStatus poly_instance_entrypoint(
+    PolyInstance *inst,
+    const char *name,
+    const char **inputs,
+    int n_inputs,
+    const char **outputs,
+    int n_outputs,
+    const PolyEntrypointOptions *opts
+);
+PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err);
+
+PolyInstance *poly_instance_from_bindings(
+    PolyCtx *ctx,
+    const PolyBindingSpec *bindings,
+    int n_bindings,
+    const PolyEntrypointSpec *entrypoints,
+    int n_entrypoints,
+    const PolyInstanceOptions *opts,
+    PolyInstanceError *err
+);
+
+/* FFI-friendly flat-array adapter for languages where C struct marshalling is
+ * awkward. Entry inputs/outputs are flat arrays concatenated in entrypoint
+ * order; the per-entry counts split them. String and tensor pointers are only
+ * borrowed for the duration of this call. */
+PolyInstance *poly_instance_from_binding_arrays(
+    PolyCtx *ctx,
+    const char **binding_names,
+    const int *binding_roles,
+    PolyTensor **binding_tensors,
+    const uint32_t *binding_flags,
+    int n_bindings,
+    const char **entry_names,
+    const char **entry_inputs,
+    const int *entry_input_counts,
+    const char **entry_outputs,
+    const int *entry_output_counts,
+    const char **entry_objectives,
+    const uint32_t *entry_flags,
+    int n_entrypoints,
+    const PolyInstanceOptions *opts,
+    PolyInstanceError *err
+);
 
 /* Create from IR bytes + optional safetensors weights.
  * Pass NULL/0 for weights to skip (params zero-initialized).
@@ -225,11 +362,7 @@ int poly_instance_inline_entrypoint(
 );
 
 /* Copy parameter host values from src into dst using prefix+src_param_name. */
-int poly_instance_copy_prefixed_weights(
-    PolyInstance *dst,
-    PolyInstance *src,
-    const char *prefix
-);
+int poly_instance_copy_prefixed_weights(PolyInstance *dst, PolyInstance *src, const char *prefix);
 
 #ifdef __cplusplus
 }

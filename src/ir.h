@@ -43,6 +43,12 @@ typedef struct {
 typedef struct {
   const char *name; /* e.g. "forward", "loss" */
   PolyUOp *sink; /* SINK UOp */
+  const char **inputs; /* nullable explicit ABI input binding names */
+  int n_inputs;
+  const char **outputs; /* nullable explicit ABI output binding names */
+  int n_outputs;
+  const char *objective; /* nullable; must name one output when present */
+  uint32_t flags;
 } PolyIrEntrypoint;
 
 /* Full IR spec: graph context + named buffers + named entrypoints */

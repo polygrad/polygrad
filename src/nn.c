@@ -9,6 +9,7 @@
  */
 
 #include "nn.h"
+#include "instance.h"
 #include "tensor.h" /* poly_mean_reduce */
 #include "engine/schedule.h" /* poly_reshape, poly_permute, poly_expand */
 #include <stdint.h>
@@ -58,6 +59,36 @@ PolyUOp *poly_linear(
   return poly_linear_apply(ctx, x, w, b);
 }
 
+PolyUOp *poly_instance_linear(
+    PolyInstance *inst,
+    const char *prefix,
+    PolyUOp *x,
+    int in_features,
+    int out_features,
+    bool use_bias
+) {
+  if (!inst || !x) return NULL;
+  PolyCtx *ctx = poly_instance_ctx(inst);
+  if (!ctx) return NULL;
+  bool scoped = prefix && prefix[0];
+  if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
+
+  int64_t ws[] = {out_features, in_features};
+  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
+  PolyUOp *w = w_tensor ? poly_tensor_uop(w_tensor) : NULL;
+
+  PolyUOp *b = NULL;
+  if (w && use_bias) {
+    int64_t bs[] = {out_features};
+    PolyTensor *b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, bs, 1);
+    b = b_tensor ? poly_tensor_uop(b_tensor) : NULL;
+  }
+
+  if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
+  if (!w || (use_bias && !b)) return NULL;
+  return poly_linear_apply(ctx, x, w, b);
+}
+
 /* LayerNorm */
 
 PolyUOp *poly_layernorm_apply(
@@ -91,6 +122,31 @@ PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, d
 
   return poly_layernorm_apply(
       ctx, x, poly_reshape(ctx, w, ds, 1), poly_reshape(ctx, b, ds, 1), -1, eps
+  );
+}
+
+PolyUOp *poly_instance_layernorm(
+    PolyInstance *inst,
+    const char *prefix,
+    PolyUOp *x,
+    int dim,
+    double eps
+) {
+  if (!inst || !x) return NULL;
+  PolyCtx *ctx = poly_instance_ctx(inst);
+  if (!ctx) return NULL;
+  bool scoped = prefix && prefix[0];
+  if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
+
+  int64_t ds[] = {dim};
+  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ds, 1);
+  PolyTensor *b_tensor = poly_instance_param(inst, "bias", POLY_FLOAT32, ds, 1);
+
+  if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
+  if (!w_tensor || !b_tensor) return NULL;
+  return poly_layernorm_apply(
+      ctx, x, poly_reshape(ctx, poly_tensor_uop(w_tensor), ds, 1),
+      poly_reshape(ctx, poly_tensor_uop(b_tensor), ds, 1), -1, eps
   );
 }
 
@@ -137,6 +193,27 @@ PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, dou
   return poly_rmsnorm_apply(ctx, x, poly_reshape(ctx, w, ds, 1), eps);
 }
 
+PolyUOp *poly_instance_rmsnorm(
+    PolyInstance *inst,
+    const char *prefix,
+    PolyUOp *x,
+    int dim,
+    double eps
+) {
+  if (!inst || !x) return NULL;
+  PolyCtx *ctx = poly_instance_ctx(inst);
+  if (!ctx) return NULL;
+  bool scoped = prefix && prefix[0];
+  if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
+
+  int64_t ds[] = {dim};
+  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ds, 1);
+
+  if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
+  if (!w_tensor) return NULL;
+  return poly_rmsnorm_apply(ctx, x, poly_reshape(ctx, poly_tensor_uop(w_tensor), ds, 1), eps);
+}
+
 /* Embedding */
 
 PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table) {
@@ -154,6 +231,27 @@ PolyUOp *poly_embedding(
   PolyUOp *w = poly_param(ctx, POLY_FLOAT32, ws, 2, "%s.weight", prefix);
   if (!w) return NULL;
   return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, w, ws, 2));
+}
+
+PolyUOp *poly_instance_embedding(
+    PolyInstance *inst,
+    const char *prefix,
+    PolyUOp *tokens,
+    int vocab_size,
+    int embed_dim
+) {
+  if (!inst || !tokens) return NULL;
+  PolyCtx *ctx = poly_instance_ctx(inst);
+  if (!ctx) return NULL;
+  bool scoped = prefix && prefix[0];
+  if (scoped && poly_instance_scope_push(inst, "%s", prefix) != POLY_STATUS_OK) return NULL;
+
+  int64_t ws[] = {vocab_size, embed_dim};
+  PolyTensor *w_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, ws, 2);
+
+  if (scoped && poly_instance_scope_pop(inst) != POLY_STATUS_OK) return NULL;
+  if (!w_tensor) return NULL;
+  return poly_embedding_apply(ctx, tokens, poly_reshape(ctx, poly_tensor_uop(w_tensor), ws, 2));
 }
 
 /* Causal attention mask */

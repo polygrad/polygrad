@@ -70,6 +70,14 @@ TEST(tabm, create_simple) {
   PASS();
 }
 
+TEST(tabm, staged_builder_does_not_use_ctx_registry) {
+  PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+  poly_instance_free(inst);
+  PASS();
+}
+
 TEST(tabm, init_values) {
   PolyInstance *inst = poly_tabm_instance(simple_tabm_spec, (int)strlen(simple_tabm_spec));
   ASSERT_NOT_NULL(inst);

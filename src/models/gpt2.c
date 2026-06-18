@@ -52,8 +52,7 @@ GPT2Config poly_gpt2_config_default(void) {
 /* GPT-2 Builder */
 
 PolyInstance *poly_gpt2(const GPT2Config *cfg) {
-  if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1)
-    return NULL;
+  if (!cfg || cfg->n_layer < 1 || cfg->n_embd < 1 || cfg->vocab_size < 1) return NULL;
 
   int V = cfg->vocab_size;
   int D = cfg->n_embd;
@@ -70,121 +69,144 @@ PolyInstance *poly_gpt2(const GPT2Config *cfg) {
   }
 
   PolyCtx *ctx = poly_ctx_new();
+  if (!ctx) return NULL;
+  PolyInstanceOptions opts = {
+      .own_ctx_on_success = true,
+      .own_ctx_on_failure = true,
+  };
+  PolyInstance *inst = poly_instance_new(ctx, &opts);
+  if (!inst) {
+    poly_ctx_destroy(ctx);
+    return NULL;
+  }
 
-  /* Register I/O buffers */
+  int64_t x_shape[] = {B, T};
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, x_shape, 2);
+  if (!x_tensor) goto fail_pre_build;
 
-  int64_t x_shape[] = { B, T };
-  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, x_shape, 2, "x");
+  int64_t pos_shape[] = {1, T};
+  PolyTensor *pos_tensor = poly_instance_input(inst, "positions", POLY_FLOAT32, pos_shape, 2);
+  if (!pos_tensor) goto fail_pre_build;
 
-  int64_t out_shape[] = { B, T, V };
-  PolyUOp *out_buf = poly_output(ctx, POLY_FLOAT32, out_shape, 3, "output");
+  /* Token + position embeddings. Keep wte table visible for LM-head tying. */
+  PolyUOp *x_shaped = poly_tensor_uop(x_tensor);
+  if (poly_instance_scope_push(inst, "wte") != POLY_STATUS_OK) goto fail_pre_build;
+  int64_t wte_shape[] = {V, D};
+  PolyTensor *wte_tensor = poly_instance_param(inst, "weight", POLY_FLOAT32, wte_shape, 2);
+  if (!wte_tensor) goto fail_pre_build;
+  if (poly_instance_scope_pop(inst) != POLY_STATUS_OK) goto fail_pre_build;
+  PolyUOp *wte = poly_tensor_uop(wte_tensor);
+  PolyUOp *tok_emb = poly_embedding_apply(ctx, x_shaped, poly_reshape(ctx, wte, wte_shape, 2));
+  tok_emb = poly_contiguous(ctx, tok_emb);
 
-  int64_t pos_shape[] = { 1, T };
-  PolyUOp *pos_buf = poly_input(ctx, POLY_FLOAT32, pos_shape, 2, "positions");
+  PolyUOp *pos_shaped = poly_tensor_uop(pos_tensor);
+  PolyUOp *pos_emb = poly_instance_embedding(inst, "wpe", pos_shaped, T, D);
+  pos_emb = poly_contiguous(ctx, pos_emb);
 
-  /* Build forward graph */
-
-  /* Token + position embeddings */
-  PolyUOp *x_shaped = poly_reshape(ctx, x_buf, x_shape, 2);
-  PolyUOp *tok_emb = poly_embedding(ctx, "wte", x_shaped, V, D);
-  tok_emb = poly_contiguous(ctx,tok_emb);
-
-  PolyUOp *pos_shaped = poly_reshape(ctx, pos_buf, pos_shape, 2);
-  PolyUOp *pos_emb = poly_embedding(ctx, "wpe", pos_shaped, T, D);
-  pos_emb = poly_contiguous(ctx,pos_emb);
-
-  int64_t h_shape[] = { B, T, D };
+  int64_t h_shape[] = {B, T, D};
   PolyUOp *pos_exp = poly_expand(ctx, pos_emb, h_shape, 3);
   PolyUOp *h = poly_alu2(ctx, POLY_OP_ADD, tok_emb, pos_exp);
-  h = poly_contiguous(ctx,h);
+  h = poly_contiguous(ctx, h);
+  if (!h) goto fail_pre_build;
 
   /* Causal mask: (T, T) -> (1, 1, T, T) */
-  PolyUOp *mask = poly_contiguous(ctx,poly_reshape(ctx, poly_causal_mask(ctx, T),
-                                        (int64_t[]){ 1, 1, T, T }, 4));
-
-  /* Transformer blocks */
+  PolyUOp *mask =
+      poly_contiguous(ctx, poly_reshape(ctx, poly_causal_mask(ctx, T), (int64_t[]){1, 1, T, T}, 4));
+  if (!mask) goto fail_pre_build;
 
   for (int i = 0; i < L; i++) {
     char prefix[64];
 
-    /* LayerNorm 1 */
     snprintf(prefix, sizeof(prefix), "h.%d.ln_1", i);
-    PolyUOp *ln1 = poly_contiguous(ctx,poly_layernorm(ctx, prefix, h, D, eps));
+    PolyUOp *ln1 = poly_contiguous(ctx, poly_instance_layernorm(inst, prefix, h, D, eps));
+    if (!ln1) goto fail_pre_build;
 
-    /* QKV = Linear(D, 3D) */
     snprintf(prefix, sizeof(prefix), "h.%d.attn.c_attn", i);
-    PolyUOp *qkv = poly_contiguous(ctx,poly_linear(ctx, prefix, ln1, D, 3 * D, true));
+    PolyUOp *qkv = poly_contiguous(ctx, poly_instance_linear(inst, prefix, ln1, D, 3 * D, true));
+    if (!qkv) goto fail_pre_build;
 
-    /* Split Q, K, V via shrink */
-    int64_t shrink_q[][2] = { {0, B}, {0, T}, {0, D} };
-    int64_t shrink_k[][2] = { {0, B}, {0, T}, {D, 2*D} };
-    int64_t shrink_v[][2] = { {0, B}, {0, T}, {2*D, 3*D} };
-    PolyUOp *q = poly_contiguous(ctx,poly_shrink(ctx, qkv, shrink_q, 3));
-    PolyUOp *k = poly_contiguous(ctx,poly_shrink(ctx, qkv, shrink_k, 3));
-    PolyUOp *v = poly_contiguous(ctx,poly_shrink(ctx, qkv, shrink_v, 3));
+    int64_t shrink_q[][2] = {{0, B}, {0, T}, {0, D}};
+    int64_t shrink_k[][2] = {{0, B}, {0, T}, {D, 2 * D}};
+    int64_t shrink_v[][2] = {{0, B}, {0, T}, {2 * D, 3 * D}};
+    PolyUOp *q = poly_contiguous(ctx, poly_shrink(ctx, qkv, shrink_q, 3));
+    PolyUOp *k = poly_contiguous(ctx, poly_shrink(ctx, qkv, shrink_k, 3));
+    PolyUOp *v = poly_contiguous(ctx, poly_shrink(ctx, qkv, shrink_v, 3));
+    if (!q || !k || !v) goto fail_pre_build;
 
-    /* Multi-head reshape + permute: (B,T,D) -> (B,H,T,hd) */
-    int64_t mh[] = { B, T, H, head_dim };
-    int64_t perm[] = { 0, 2, 1, 3 };
+    int64_t mh[] = {B, T, H, head_dim};
+    int64_t perm[] = {0, 2, 1, 3};
     q = poly_permute(ctx, poly_reshape(ctx, q, mh, 4), perm, 4);
     k = poly_permute(ctx, poly_reshape(ctx, k, mh, 4), perm, 4);
     v = poly_permute(ctx, poly_reshape(ctx, v, mh, 4), perm, 4);
 
-    /* Scaled dot-product attention with causal mask */
     PolyUOp *attn_out = poly_contiguous(ctx, poly_sdpa(ctx, q, k, v, mask, 0));
+    if (!attn_out) goto fail_pre_build;
 
-    /* Merge heads: (B,H,T,hd) -> (B,T,D) */
     attn_out = poly_reshape(
-        ctx,
-        poly_permute(ctx, attn_out, (int64_t[]){ 0, 2, 1, 3 }, 4),
-        (int64_t[]){ B, T, D }, 3
+        ctx, poly_permute(ctx, attn_out, (int64_t[]){0, 2, 1, 3}, 4), (int64_t[]){B, T, D}, 3
     );
 
-    /* Output projection + residual */
     snprintf(prefix, sizeof(prefix), "h.%d.attn.c_proj", i);
-    attn_out = poly_contiguous(ctx,poly_linear(ctx, prefix, attn_out, D, D, true));
-    h = poly_contiguous(ctx,poly_alu2(ctx, POLY_OP_ADD, h, attn_out));
+    attn_out = poly_contiguous(ctx, poly_instance_linear(inst, prefix, attn_out, D, D, true));
+    h = poly_contiguous(ctx, poly_alu2(ctx, POLY_OP_ADD, h, attn_out));
+    if (!h) goto fail_pre_build;
 
-    /* LayerNorm 2 + FFN + residual */
     snprintf(prefix, sizeof(prefix), "h.%d.ln_2", i);
-    PolyUOp *ln2 = poly_contiguous(ctx,poly_layernorm(ctx, prefix, h, D, eps));
+    PolyUOp *ln2 = poly_contiguous(ctx, poly_instance_layernorm(inst, prefix, h, D, eps));
+    if (!ln2) goto fail_pre_build;
 
     snprintf(prefix, sizeof(prefix), "h.%d.mlp.c_fc", i);
-    PolyUOp *ffn = poly_contiguous(ctx,poly_linear(ctx, prefix, ln2, D, 4 * D, true));
-    ffn = poly_contiguous(ctx,poly_gelu(ctx, ffn));
+    PolyUOp *ffn = poly_contiguous(ctx, poly_instance_linear(inst, prefix, ln2, D, 4 * D, true));
+    ffn = poly_contiguous(ctx, poly_gelu(ctx, ffn));
+    if (!ffn) goto fail_pre_build;
 
     snprintf(prefix, sizeof(prefix), "h.%d.mlp.c_proj", i);
-    ffn = poly_contiguous(ctx,poly_linear(ctx, prefix, ffn, 4 * D, D, true));
-    h = poly_contiguous(ctx,poly_alu2(ctx, POLY_OP_ADD, h, ffn));
+    ffn = poly_contiguous(ctx, poly_instance_linear(inst, prefix, ffn, 4 * D, D, true));
+    h = poly_contiguous(ctx, poly_alu2(ctx, POLY_OP_ADD, h, ffn));
+    if (!h) goto fail_pre_build;
   }
 
-  /* Final layernorm */
-  h = poly_contiguous(ctx,poly_layernorm(ctx, "ln_f", h, D, eps));
+  h = poly_contiguous(ctx, poly_instance_layernorm(inst, "ln_f", h, D, eps));
+  if (!h) goto fail_pre_build;
 
-  /* LM head: weight-tied linear (h @ wte.T, no bias) */
-  PolyUOp *wte = poly_ctx_get(ctx, "wte.weight");
-  int64_t wte_shape[] = { V, D };
   PolyUOp *logits = poly_linear_apply(ctx, h, poly_reshape(ctx, wte, wte_shape, 2), NULL);
+  if (!logits) goto fail_pre_build;
 
-  /* Store output */
-  PolyUOp *fwd_store = poly_store_val(ctx, out_buf, logits);
-  PolyUOp *fwd_sink = poly_sink1(ctx, fwd_store);
-  poly_register_entrypoint(ctx, "forward", fwd_sink);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, logits, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  if (!out_tensor || poly_instance_output(inst, "output", out_tensor) != POLY_STATUS_OK)
+    goto fail_pre_build;
+  const char *forward_inputs[] = {"x", "positions"};
+  const char *forward_outputs[] = {"output"};
+  if (poly_instance_entrypoint(inst, "forward", forward_inputs, 2, forward_outputs, 1, NULL) !=
+      POLY_STATUS_OK)
+    goto fail_pre_build;
 
-  /* Loss: sum(logits^2) — surrogate for training test */
-  PolyUOp *loss_buf = poly_output(ctx, POLY_FLOAT32, (int64_t[]){1}, 1, "loss");
   PolyUOp *logits_sq = poly_alu2(ctx, POLY_OP_MUL, logits, logits);
-  int64_t reduce_all[] = { 0, 1, 2 };
+  int64_t reduce_all[] = {0, 1, 2};
   PolyUOp *loss_sum = poly_reduce_axis(ctx, POLY_OP_ADD, logits_sq, reduce_all, 3);
   PolyUOp *loss_val = poly_reshape(ctx, loss_sum, (int64_t[]){1}, 1);
-  PolyUOp *loss_store = poly_store_val(ctx, loss_buf, loss_val);
-  poly_register_entrypoint(ctx, "loss", poly_sink1(ctx, loss_store));
+  PolyTensor *loss_tensor = poly_tensor_create(ctx, loss_val, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  if (!loss_tensor || poly_instance_output(inst, "loss", loss_tensor) != POLY_STATUS_OK)
+    goto fail_pre_build;
+  const char *loss_inputs[] = {"x", "positions"};
+  const char *loss_outputs[] = {"loss"};
+  PolyEntrypointOptions loss_opts = {.objective = "loss"};
+  if (poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts) !=
+      POLY_STATUS_OK)
+    goto fail_pre_build;
 
-  /* Create instance */
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
-  if (inst) poly_instance_own_ctx(inst);
-
+  PolyInstanceError err = {0};
+  if (poly_instance_build(inst, &err) != POLY_STATUS_OK) {
+    if (err.message[0]) fprintf(stderr, "poly_gpt2: build failed: %s\n", err.message);
+    poly_instance_free(inst);
+    return NULL;
+  }
   return inst;
+
+fail_pre_build:
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  return NULL;
 }
 
 PolyInstance *poly_gpt2_from_json(const char *json, int len) {

@@ -59,6 +59,14 @@ TEST(mlp, create_simple) {
   PASS();
 }
 
+TEST(mlp, staged_builder_does_not_use_ctx_registry) {
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+  poly_instance_free(inst);
+  PASS();
+}
+
 TEST(mlp, create_no_bias) {
   PolyInstance *inst = poly_mlp_from_json(no_bias_spec, (int)strlen(no_bias_spec));
   ASSERT_NOT_NULL(inst);

@@ -12,6 +12,8 @@
 #include "polygrad.h"
 #include <stdbool.h>
 
+typedef struct PolyInstance PolyInstance;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -23,6 +25,14 @@ void poly_nn_seed(uint32_t seed);
 PolyUOp *poly_linear_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, PolyUOp *b);
 PolyUOp *poly_linear(
     PolyCtx *ctx,
+    const char *prefix,
+    PolyUOp *x,
+    int in_features,
+    int out_features,
+    bool use_bias
+);
+PolyUOp *poly_instance_linear(
+    PolyInstance *inst,
     const char *prefix,
     PolyUOp *x,
     int in_features,
@@ -41,17 +51,38 @@ PolyUOp *poly_layernorm_apply(
     double eps
 );
 PolyUOp *poly_layernorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps);
+PolyUOp *poly_instance_layernorm(
+    PolyInstance *inst,
+    const char *prefix,
+    PolyUOp *x,
+    int dim,
+    double eps
+);
 
 /* RMSNorm: x * rsqrt(mean(x^2) + eps) * w */
 
 PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps);
 PolyUOp *poly_rmsnorm(PolyCtx *ctx, const char *prefix, PolyUOp *x, int dim, double eps);
+PolyUOp *poly_instance_rmsnorm(
+    PolyInstance *inst,
+    const char *prefix,
+    PolyUOp *x,
+    int dim,
+    double eps
+);
 
 /* Embedding: gather(table, tokens) */
 
 PolyUOp *poly_embedding_apply(PolyCtx *ctx, PolyUOp *tokens, PolyUOp *table);
 PolyUOp *poly_embedding(
     PolyCtx *ctx,
+    const char *prefix,
+    PolyUOp *tokens,
+    int vocab_size,
+    int embed_dim
+);
+PolyUOp *poly_instance_embedding(
+    PolyInstance *inst,
     const char *prefix,
     PolyUOp *tokens,
     int vocab_size,

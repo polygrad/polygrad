@@ -8,6 +8,7 @@
 #include "test_harness.h"
 #include "../src/safetensors.h"
 #include "../src/models/models.h"
+#include "../src/models/qwen3.h"
 #include "../src/nn.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
@@ -256,6 +257,8 @@ TEST(hf, gpt2_build_tiny) {
   ASSERT_TRUE(found_x);
   ASSERT_TRUE(found_output);
 
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+
   poly_instance_free(inst);
   PASS();
 }
@@ -290,6 +293,42 @@ TEST(hf, gpt2_build_multi_layer) {
 }
 
 /* HF loader */
+
+TEST(hf, qwen3_build_tiny_staged) {
+  Qwen3Config cfg = poly_qwen3_config_default();
+  cfg.vocab_size = 32;
+  cfg.dim = 16;
+  cfg.n_heads = 2;
+  cfg.n_kv_heads = 1;
+  cfg.n_layers = 1;
+  cfg.hidden_dim = 32;
+  cfg.head_dim = 8;
+  cfg.max_seq_len = 4;
+  cfg.batch_size = 1;
+  cfg.qk_norm = 0;
+
+  PolyInstance *inst = poly_qwen3(&cfg);
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+
+  ASSERT_INT_EQ(poly_instance_param_count(inst), 11);
+  ASSERT_STR_EQ(poly_instance_param_name(inst, 0), "token_embd.weight");
+  ASSERT_STR_EQ(poly_instance_param_name(inst, 1), "blk.0.attn_norm.weight");
+  ASSERT_STR_EQ(poly_instance_param_name(inst, 2), "blk.0.attn_q.weight");
+
+  int64_t numel = 0;
+  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "x", &numel));
+  ASSERT_INT_EQ(numel, 4);
+  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "rope_cos", &numel));
+  ASSERT_INT_EQ(numel, 16);
+  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "rope_sin", &numel));
+  ASSERT_INT_EQ(numel, 16);
+  ASSERT_NOT_NULL(poly_instance_buf_data_named(inst, "output", &numel));
+  ASSERT_INT_EQ(numel, 4 * 32);
+
+  poly_instance_free(inst);
+  PASS();
+}
 
 TEST(hf, hf_load_tiny_gpt2) {
   const char *config = "{\"model_type\":\"gpt2\",\"vocab_size\":32,"

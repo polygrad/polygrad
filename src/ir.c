@@ -1,12 +1,15 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@1 format:
+ * poly.ir.uops@2 format:
  *   Header (32 bytes)
  *   String table (variable)
  *   Node table (variable, strict toposort order)
  *   Interface table (named buffers with roles)
- *   Entrypoint table (named SINKs)
+ *   Entrypoint table (named SINKs plus v2 ABI metadata)
+ *
+ * Import remains backward-compatible with v1 payloads, whose entrypoints only
+ * contain name + SINK.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -130,7 +133,8 @@ static double br_f64(ByteReader *r) {
 /* Magic */
 
 #define IR_MAGIC 0x52494750 /* "PGIR" LE */
-#define IR_VERSION 1
+#define IR_VERSION 2
+#define IR_MIN_VERSION 1
 
 /* Dtype index table */
 
@@ -178,6 +182,28 @@ static void st_free(StringTable *st) {
   for (int i = 0; i < st->n; i++)
     free(st->strs[i]);
   free(st->strs);
+}
+
+static void st_add_entrypoint_strings(StringTable *strings, const PolyIrEntrypoint *ep) {
+  if (!strings || !ep) return;
+  if (ep->name) st_add(strings, ep->name);
+  for (int i = 0; i < ep->n_inputs; i++)
+    if (ep->inputs && ep->inputs[i]) st_add(strings, ep->inputs[i]);
+  for (int i = 0; i < ep->n_outputs; i++)
+    if (ep->outputs && ep->outputs[i]) st_add(strings, ep->outputs[i]);
+  if (ep->objective) st_add(strings, ep->objective);
+}
+
+static void free_ir_entrypoint(PolyIrEntrypoint *ep) {
+  if (!ep) return;
+  free((char *)ep->name);
+  for (int i = 0; i < ep->n_inputs; i++)
+    free((char *)ep->inputs[i]);
+  free((char **)ep->inputs);
+  for (int i = 0; i < ep->n_outputs; i++)
+    free((char *)ep->outputs[i]);
+  free((char **)ep->outputs);
+  free((char *)ep->objective);
 }
 
 /* Export */
@@ -297,7 +323,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   for (int i = 0; i < spec->n_bufs; i++)
     st_add(&strings, spec->bufs[i].name);
   for (int i = 0; i < spec->n_entrypoints; i++)
-    st_add(&strings, spec->entrypoints[i].name);
+    st_add_entrypoint_strings(&strings, &spec->entrypoints[i]);
 
   /* Compute flags */
   uint32_t flags = 0;
@@ -419,9 +445,8 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
      * poly.ir.uops@1 payloads still import.
      *   bit0 = trainable value
      *   bit1 = trainability metadata present */
-    bool trainable =
-        spec->bufs[i].trainable_set ? spec->bufs[i].trainable
-                                    : (spec->bufs[i].role == POLY_IR_ROLE_PARAM);
+    bool trainable = spec->bufs[i].trainable_set ? spec->bufs[i].trainable
+                                                 : (spec->bufs[i].role == POLY_IR_ROLE_PARAM);
     bb_u8(&buf, 2 | (trainable ? 1 : 0));
     bb_u8(&buf, 0);
     bb_u8(&buf, 0); /* padding */
@@ -435,9 +460,18 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
 
   /* Entrypoint table */
   for (int i = 0; i < spec->n_entrypoints; i++) {
-    bb_u32(&buf, st_add(&strings, spec->entrypoints[i].name));
-    uint32_t nidx = FIND_IDX(spec->entrypoints[i].sink);
+    const PolyIrEntrypoint *ep = &spec->entrypoints[i];
+    bb_u32(&buf, st_add(&strings, ep->name));
+    uint32_t nidx = FIND_IDX(ep->sink);
     bb_u32(&buf, nidx);
+    bb_u32(&buf, ep->flags);
+    bb_u16(&buf, (uint16_t)ep->n_inputs);
+    bb_u16(&buf, (uint16_t)ep->n_outputs);
+    bb_u32(&buf, ep->objective ? st_add(&strings, ep->objective) : UINT32_MAX);
+    for (int j = 0; j < ep->n_inputs; j++)
+      bb_u32(&buf, st_add(&strings, ep->inputs[j]));
+    for (int j = 0; j < ep->n_outputs; j++)
+      bb_u32(&buf, st_add(&strings, ep->outputs[j]));
   }
 
 #undef FIND_IDX
@@ -469,7 +503,7 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     return -1;
   }
   uint32_t version = br_u32(&r);
-  if (version != IR_VERSION) {
+  if (version < IR_MIN_VERSION || version > IR_VERSION) {
     fprintf(stderr, "poly_ir_import: unsupported version %u\n", version);
     return -1;
   }
@@ -681,6 +715,39 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     uint32_t node_idx = br_u32(&r);
     out->entrypoints[i].name = (name_idx < n_strings) ? strdup(strings[name_idx]) : strdup("");
     out->entrypoints[i].sink = (node_idx < n_nodes) ? nodes[node_idx] : NULL;
+
+    if (version >= 2) {
+      if (br_remaining(&r) < 12) goto fail_ep;
+      out->entrypoints[i].flags = br_u32(&r);
+      uint16_t n_inputs = br_u16(&r);
+      uint16_t n_outputs = br_u16(&r);
+      uint32_t objective_idx = br_u32(&r);
+      out->entrypoints[i].n_inputs = n_inputs;
+      out->entrypoints[i].n_outputs = n_outputs;
+      if (objective_idx != UINT32_MAX)
+        out->entrypoints[i].objective =
+            (objective_idx < n_strings) ? strdup(strings[objective_idx]) : strdup("");
+      if (n_inputs > 0) {
+        char **inputs = calloc(n_inputs, sizeof(char *));
+        if (!inputs) goto fail_ep;
+        out->entrypoints[i].inputs = (const char **)inputs;
+        for (uint16_t j = 0; j < n_inputs; j++) {
+          if (br_remaining(&r) < 4) goto fail_ep;
+          uint32_t idx = br_u32(&r);
+          inputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
+        }
+      }
+      if (n_outputs > 0) {
+        char **outputs = calloc(n_outputs, sizeof(char *));
+        if (!outputs) goto fail_ep;
+        out->entrypoints[i].outputs = (const char **)outputs;
+        for (uint16_t j = 0; j < n_outputs; j++) {
+          if (br_remaining(&r) < 4) goto fail_ep;
+          uint32_t idx = br_u32(&r);
+          outputs[j] = (idx < n_strings) ? strdup(strings[idx]) : strdup("");
+        }
+      }
+    }
   }
 
   out->ctx = ctx;
@@ -694,7 +761,7 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
 
 fail_ep:
   for (int i = 0; i < out->n_entrypoints; i++)
-    free((char *)out->entrypoints[i].name);
+    free_ir_entrypoint(&out->entrypoints[i]);
   free(out->entrypoints);
 fail_bufs:
   for (int i = 0; i < out->n_bufs; i++)
@@ -716,7 +783,7 @@ void poly_ir_spec_free(PolyIrSpec *spec) {
     free((char *)spec->bufs[i].name);
   free(spec->bufs);
   for (int i = 0; i < spec->n_entrypoints; i++)
-    free((char *)spec->entrypoints[i].name);
+    free_ir_entrypoint(&spec->entrypoints[i]);
   free(spec->entrypoints);
   spec->bufs = NULL;
   spec->entrypoints = NULL;

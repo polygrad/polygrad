@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 /* Internal types */
 
@@ -60,6 +61,7 @@ typedef struct {
 
 typedef struct {
   PolyUOp *combined_sink; /* fwd+bwd+optimizer SINK */
+  PolySchedule *schedule; /* cached lowering for the stable train graph */
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss scalar output */
   float loss_data; /* scalar loss value after step */
   PolyBuffer loss_handle; /* device-aware handle for loss output */
@@ -86,9 +88,49 @@ typedef struct {
   PolyBuffer bc2_handle;
 } TrainState;
 
+typedef struct {
+  char *name;
+  uint8_t role;
+  uint32_t flags;
+  PolyTensor *tensor;
+  PolyUOp *buffer;
+  int64_t shape[8];
+  int ndim;
+  bool trainable;
+} BuildBinding;
+
+typedef struct {
+  char *name;
+  char **inputs;
+  int n_inputs;
+  char **outputs;
+  int n_outputs;
+  char *objective;
+  uint32_t flags;
+} BuildEntrypoint;
+
+typedef struct {
+  PolyInstanceOptions opts;
+
+  BuildBinding *bindings;
+  int n_bindings;
+  int bindings_cap;
+
+  BuildEntrypoint *entrypoints;
+  int n_entrypoints;
+  int entrypoints_cap;
+
+  char **scopes;
+  int n_scopes;
+  int scopes_cap;
+} PolyInstanceBuildState;
+
 struct PolyInstance {
   PolyCtx *ctx;
   bool owns_ctx; /* true: poly_instance_free destroys ctx */
+  PolyInstanceStage stage;
+  PolyInstanceBuildState *build;
+  PolyInstanceError last_error;
 
   NamedBuf *bufs;
   int n_bufs;
@@ -103,6 +145,12 @@ struct PolyInstance {
   struct {
     char *name;
     PolyUOp *sink;
+    char **inputs;
+    int n_inputs;
+    char **outputs;
+    int n_outputs;
+    char *objective;
+    uint32_t flags;
   } *entrypoints;
   int n_entrypoints;
   PolySchedule **entry_schedules; /* lazy, one per generic entrypoint */
@@ -141,6 +189,858 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
   return -1;
 }
 
+static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool free_spec);
+
+static const char *instance_stage_name(PolyInstanceStage stage) {
+  switch (stage) {
+  case POLY_INSTANCE_BUILDING:
+    return "BUILDING";
+  case POLY_INSTANCE_BUILT:
+    return "BUILT";
+  case POLY_INSTANCE_FAILED:
+    return "FAILED";
+  }
+  return "UNKNOWN";
+}
+
+static void poly_instance_set_error(
+    PolyInstance *inst,
+    int code,
+    const char *func,
+    const char *fmt,
+    ...
+) {
+  if (!inst) return;
+  inst->last_error.code = code;
+  inst->last_error.func = func;
+  if (!fmt) {
+    inst->last_error.message[0] = '\0';
+    return;
+  }
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(inst->last_error.message, sizeof(inst->last_error.message), fmt, ap);
+  va_end(ap);
+}
+
+static void poly_instance_copy_error(PolyInstance *inst, PolyInstanceError *err) {
+  if (inst && err) *err = inst->last_error;
+}
+
+static PolyStatus require_stage(PolyInstance *inst, PolyInstanceStage want, const char *func) {
+  if (!inst) return POLY_STATUS_INVALID;
+  if (inst->stage == want) return POLY_STATUS_OK;
+  poly_instance_set_error(
+      inst, POLY_STATUS_BAD_STAGE, func, "expected %s, got %s", instance_stage_name(want),
+      instance_stage_name(inst->stage)
+  );
+  return POLY_STATUS_BAD_STAGE;
+}
+
+static int grow_array(void **ptr, int *cap, int n, size_t elem_size) {
+  if (n <= *cap) return 0;
+  int new_cap = *cap ? *cap * 2 : 8;
+  while (new_cap < n)
+    new_cap *= 2;
+  void *new_ptr = realloc(*ptr, (size_t)new_cap * elem_size);
+  if (!new_ptr) return -1;
+  *ptr = new_ptr;
+  *cap = new_cap;
+  return 0;
+}
+
+static void build_entrypoint_free(BuildEntrypoint *ep) {
+  if (!ep) return;
+  free(ep->name);
+  for (int i = 0; i < ep->n_inputs; i++)
+    free(ep->inputs[i]);
+  free(ep->inputs);
+  for (int i = 0; i < ep->n_outputs; i++)
+    free(ep->outputs[i]);
+  free(ep->outputs);
+  free(ep->objective);
+}
+
+static void build_state_free(PolyInstanceBuildState *build) {
+  if (!build) return;
+  for (int i = 0; i < build->n_bindings; i++)
+    free(build->bindings[i].name);
+  free(build->bindings);
+  for (int i = 0; i < build->n_entrypoints; i++)
+    build_entrypoint_free(&build->entrypoints[i]);
+  free(build->entrypoints);
+  for (int i = 0; i < build->n_scopes; i++)
+    free(build->scopes[i]);
+  free(build->scopes);
+  free(build);
+}
+
+static char *dup_cstr(const char *s) {
+  if (!s) return NULL;
+  size_t len = strlen(s);
+  char *out = malloc(len + 1);
+  if (!out) return NULL;
+  memcpy(out, s, len + 1);
+  return out;
+}
+
+static char *vformat_cstr(const char *fmt, va_list ap) {
+  if (!fmt) return NULL;
+  va_list cp;
+  va_copy(cp, ap);
+  int n = vsnprintf(NULL, 0, fmt, cp);
+  va_end(cp);
+  if (n < 0) return NULL;
+  char *out = malloc((size_t)n + 1);
+  if (!out) return NULL;
+  vsnprintf(out, (size_t)n + 1, fmt, ap);
+  return out;
+}
+
+static bool valid_binding_name(const char *name) {
+  if (!name || !name[0]) return false;
+  if (name[0] == '.') return false;
+  char prev = 0;
+  for (const char *p = name; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c < 32) return false;
+    if (*p == '.') {
+      if (prev == 0 || prev == '.') return false;
+      if (!p[1]) return false;
+    }
+    prev = *p;
+  }
+  return true;
+}
+
+static char *scoped_name(PolyInstance *inst, const char *name) {
+  PolyInstanceBuildState *build = inst ? inst->build : NULL;
+  if (!build || build->n_scopes == 0) return dup_cstr(name);
+  size_t len = strlen(name);
+  for (int i = 0; i < build->n_scopes; i++)
+    len += strlen(build->scopes[i]) + 1;
+  char *out = malloc(len + 1);
+  if (!out) return NULL;
+  out[0] = '\0';
+  for (int i = 0; i < build->n_scopes; i++) {
+    if (i > 0) strcat(out, ".");
+    strcat(out, build->scopes[i]);
+  }
+  strcat(out, ".");
+  strcat(out, name);
+  return out;
+}
+
+static int copy_tensor_shape(PolyCtx *ctx, PolyTensor *tensor, int64_t shape[8], int *ndim) {
+  if (!ctx || !tensor || !ndim) return -1;
+  PolyUOp *u = poly_tensor_uop(tensor);
+  if (!u) return -1;
+  PolyShape s = poly_uop_shape_cached(ctx, u);
+  if (s.ndim < 0 || s.ndim > 8) return -1;
+  *ndim = s.ndim;
+  if (s.ndim > 0) memcpy(shape, s.dims, (size_t)s.ndim * sizeof(int64_t));
+  return 0;
+}
+
+static BuildBinding *find_build_binding(PolyInstanceBuildState *build, const char *name) {
+  if (!build || !name) return NULL;
+  for (int i = 0; i < build->n_bindings; i++)
+    if (strcmp(build->bindings[i].name, name) == 0) return &build->bindings[i];
+  return NULL;
+}
+
+static PolyStatus append_build_binding(
+    PolyInstance *inst,
+    const char *name,
+    uint8_t role,
+    uint32_t flags,
+    PolyTensor *tensor,
+    PolyUOp *buffer,
+    const int64_t *shape,
+    int ndim,
+    bool trainable
+) {
+  if (!inst || !inst->build || !name || !tensor) return POLY_STATUS_INVALID;
+  char *full_name = scoped_name(inst, name);
+  if (!full_name) {
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    return POLY_STATUS_NOMEM;
+  }
+  if (!valid_binding_name(full_name)) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "invalid binding name '%s'", full_name
+    );
+    free(full_name);
+    return POLY_STATUS_INVALID;
+  }
+  if (find_build_binding(inst->build, full_name)) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "duplicate binding '%s'", full_name
+    );
+    free(full_name);
+    return POLY_STATUS_INVALID;
+  }
+  if (ndim < 0 || ndim > 8 || poly_shape_numel_checked(shape, ndim) < 0) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "invalid shape for '%s'", full_name
+    );
+    free(full_name);
+    return POLY_STATUS_INVALID;
+  }
+  if (grow_array(
+          (void **)&inst->build->bindings, &inst->build->bindings_cap, inst->build->n_bindings + 1,
+          sizeof(BuildBinding)
+      ) != 0) {
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    free(full_name);
+    return POLY_STATUS_NOMEM;
+  }
+  BuildBinding *b = &inst->build->bindings[inst->build->n_bindings++];
+  *b = (BuildBinding){0};
+  b->name = full_name;
+  b->role = role;
+  b->flags = flags;
+  b->tensor = tensor;
+  b->buffer = buffer;
+  b->ndim = ndim;
+  if (ndim > 0) memcpy(b->shape, shape, (size_t)ndim * sizeof(int64_t));
+  b->trainable = trainable;
+  return POLY_STATUS_OK;
+}
+
+static PolyTensor *make_bound_storage_tensor(
+    PolyInstance *inst,
+    const char *name,
+    uint8_t role,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim,
+    bool trainable
+) {
+  if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK) return NULL;
+  if (!inst->ctx || (ndim > 0 && !shape) || ndim < 0 || ndim > 8) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "invalid tensor shape");
+    return NULL;
+  }
+  int64_t numel = poly_shape_numel_checked(shape, ndim);
+  if (numel < 0) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "invalid tensor shape");
+    return NULL;
+  }
+  PolyDType scalar = poly_dtype_scalar(dt);
+  PolyUOp *buf = poly_buffer(inst->ctx, scalar, numel);
+  if (!buf) {
+    poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create storage buffer");
+    return NULL;
+  }
+  PolyUOp *root = buf;
+  if (!(ndim == 1 && shape[0] == numel))
+    root = poly_reshape(inst->ctx, buf, (int64_t *)shape, ndim);
+  PolyTensor *tensor = poly_tensor_create(inst->ctx, root, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  if (!tensor) {
+    poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to create tensor");
+    return NULL;
+  }
+  if (append_build_binding(inst, name, role, 0, tensor, buf, shape, ndim, trainable) !=
+      POLY_STATUS_OK)
+    return NULL;
+  return tensor;
+}
+
+static PolyStatus append_existing_tensor_binding(
+    PolyInstance *inst,
+    const char *name,
+    uint8_t role,
+    PolyTensor *tensor,
+    uint32_t flags,
+    bool require_buffer,
+    bool trainable
+) {
+  if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
+    return POLY_STATUS_BAD_STAGE;
+  if (!inst->ctx || !tensor) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "null tensor binding");
+    return POLY_STATUS_INVALID;
+  }
+  int64_t shape[8] = {0};
+  int ndim = 0;
+  if (copy_tensor_shape(inst->ctx, tensor, shape, &ndim) != 0) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "could not infer binding shape");
+    return POLY_STATUS_INVALID;
+  }
+  PolyUOp *buffer = NULL;
+  const PolyUOp *identity = poly_uop_get_buffer_identity(poly_tensor_uop(tensor));
+  if (identity) buffer = (PolyUOp *)identity;
+  if (require_buffer && !buffer) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "binding '%s' has no buffer identity", name
+    );
+    return POLY_STATUS_INVALID;
+  }
+  return append_build_binding(inst, name, role, flags, tensor, buffer, shape, ndim, trainable);
+}
+
+static char **dup_string_array(const char **items, int n) {
+  if (n <= 0) return NULL;
+  if (!items) return NULL;
+  char **out = calloc((size_t)n, sizeof(char *));
+  if (!out) return NULL;
+  for (int i = 0; i < n; i++) {
+    out[i] = dup_cstr(items[i]);
+    if (!out[i]) {
+      for (int j = 0; j < i; j++)
+        free(out[j]);
+      free(out);
+      return NULL;
+    }
+  }
+  return out;
+}
+
+static int copy_initial_buffer_data(PolyInstance *inst, PolyCtx *ctx) {
+  if (!inst || !ctx) return -1;
+  for (int i = 0; i < inst->n_bufs; i++) {
+    PolyBuffer *src = poly_buffer_get(ctx, inst->bufs[i].buffer);
+    size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
+    if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
+    if (poly_buffer_read(ctx, inst->bufs[i].buffer, inst->bufs[i].data, nbytes) != 0 &&
+        src->valid && poly_device_is_host_addressable(src->device))
+      memcpy(inst->bufs[i].data, src->ptr, nbytes);
+  }
+  return 0;
+}
+
+PolyInstance *poly_instance_new(PolyCtx *ctx, const PolyInstanceOptions *opts) {
+  if (!ctx) return NULL;
+  PolyInstance *inst = calloc(1, sizeof(PolyInstance));
+  if (!inst) return NULL;
+  PolyInstanceBuildState *build = calloc(1, sizeof(PolyInstanceBuildState));
+  if (!build) {
+    free(inst);
+    return NULL;
+  }
+  if (opts) build->opts = *opts;
+  inst->ctx = ctx;
+  inst->owns_ctx = false;
+  inst->stage = POLY_INSTANCE_BUILDING;
+  inst->build = build;
+  inst->optim.kind = POLY_OPTIM_NONE;
+  return inst;
+}
+
+PolyInstanceStage poly_instance_stage(const PolyInstance *inst) {
+  return inst ? inst->stage : POLY_INSTANCE_FAILED;
+}
+
+const PolyInstanceError *poly_instance_last_error(const PolyInstance *inst) {
+  return inst ? &inst->last_error : NULL;
+}
+
+PolyStatus poly_instance_scope_push(PolyInstance *inst, const char *fmt, ...) {
+  if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
+    return POLY_STATUS_BAD_STAGE;
+  va_list ap;
+  va_start(ap, fmt);
+  char *scope = vformat_cstr(fmt, ap);
+  va_end(ap);
+  if (!scope) {
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    return POLY_STATUS_NOMEM;
+  }
+  if (!valid_binding_name(scope)) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "invalid scope '%s'", scope);
+    free(scope);
+    return POLY_STATUS_INVALID;
+  }
+  if (grow_array(
+          (void **)&inst->build->scopes, &inst->build->scopes_cap, inst->build->n_scopes + 1,
+          sizeof(char *)
+      ) != 0) {
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    free(scope);
+    return POLY_STATUS_NOMEM;
+  }
+  inst->build->scopes[inst->build->n_scopes++] = scope;
+  return POLY_STATUS_OK;
+}
+
+PolyStatus poly_instance_scope_pop(PolyInstance *inst) {
+  if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
+    return POLY_STATUS_BAD_STAGE;
+  if (inst->build->n_scopes <= 0) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "scope stack is empty");
+    return POLY_STATUS_INVALID;
+  }
+  free(inst->build->scopes[--inst->build->n_scopes]);
+  inst->build->scopes[inst->build->n_scopes] = NULL;
+  return POLY_STATUS_OK;
+}
+
+PolyTensor *poly_instance_input(
+    PolyInstance *inst,
+    const char *name,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim
+) {
+  return make_bound_storage_tensor(inst, name, POLY_ROLE_INPUT, dt, shape, ndim, false);
+}
+
+PolyTensor *poly_instance_target(
+    PolyInstance *inst,
+    const char *name,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim
+) {
+  return make_bound_storage_tensor(inst, name, POLY_ROLE_TARGET, dt, shape, ndim, false);
+}
+
+PolyTensor *poly_instance_param(
+    PolyInstance *inst,
+    const char *name,
+    PolyDType dt,
+    const int64_t *shape,
+    int ndim
+) {
+  return make_bound_storage_tensor(inst, name, POLY_ROLE_PARAM, dt, shape, ndim, true);
+}
+
+PolyStatus poly_instance_state(
+    PolyInstance *inst,
+    const char *name,
+    PolyTensor *tensor,
+    uint32_t flags
+) {
+  return append_existing_tensor_binding(inst, name, POLY_ROLE_PARAM, tensor, flags, true, true);
+}
+
+PolyStatus poly_instance_output(PolyInstance *inst, const char *name, PolyTensor *tensor) {
+  return append_existing_tensor_binding(inst, name, POLY_ROLE_OUTPUT, tensor, 0, false, false);
+}
+
+PolyStatus poly_instance_aux(
+    PolyInstance *inst,
+    const char *name,
+    PolyTensor *tensor,
+    uint32_t flags
+) {
+  return append_existing_tensor_binding(inst, name, POLY_ROLE_AUX, tensor, flags, true, false);
+}
+
+PolyStatus poly_instance_entrypoint(
+    PolyInstance *inst,
+    const char *name,
+    const char **inputs,
+    int n_inputs,
+    const char **outputs,
+    int n_outputs,
+    const PolyEntrypointOptions *opts
+) {
+  if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK)
+    return POLY_STATUS_BAD_STAGE;
+  if (!valid_binding_name(name) || n_inputs < 0 || n_outputs <= 0 || (n_inputs > 0 && !inputs) ||
+      !outputs) {
+    poly_instance_set_error(
+        inst, POLY_STATUS_INVALID, __func__, "invalid entrypoint '%s'", name ? name : "?"
+    );
+    return POLY_STATUS_INVALID;
+  }
+  if (grow_array(
+          (void **)&inst->build->entrypoints, &inst->build->entrypoints_cap,
+          inst->build->n_entrypoints + 1, sizeof(BuildEntrypoint)
+      ) != 0) {
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    return POLY_STATUS_NOMEM;
+  }
+  BuildEntrypoint *ep = &inst->build->entrypoints[inst->build->n_entrypoints++];
+  *ep = (BuildEntrypoint){0};
+  ep->name = dup_cstr(name);
+  ep->inputs = dup_string_array(inputs, n_inputs);
+  ep->n_inputs = n_inputs;
+  ep->outputs = dup_string_array(outputs, n_outputs);
+  ep->n_outputs = n_outputs;
+  ep->objective = opts && opts->objective ? dup_cstr(opts->objective) : NULL;
+  ep->flags = opts ? opts->flags : 0;
+  if (!ep->name || (n_inputs > 0 && !ep->inputs) || !ep->outputs ||
+      (opts && opts->objective && !ep->objective)) {
+    build_entrypoint_free(ep);
+    inst->build->n_entrypoints--;
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    return POLY_STATUS_NOMEM;
+  }
+  return POLY_STATUS_OK;
+}
+
+static BuildBinding *find_build_storage_binding(
+    PolyInstanceBuildState *build,
+    const PolyUOp *storage
+) {
+  if (!build || !storage) return NULL;
+  for (int i = 0; i < build->n_bindings; i++) {
+    BuildBinding *b = &build->bindings[i];
+    if (b->role == POLY_ROLE_OUTPUT) continue;
+    if (b->buffer == storage) return b;
+  }
+  return NULL;
+}
+
+static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
+  PolyInstanceBuildState *build = inst ? inst->build : NULL;
+  if (!inst || !build || !inst->ctx) return POLY_STATUS_INVALID;
+
+  for (int i = 0; i < build->n_bindings; i++) {
+    BuildBinding *out = &build->bindings[i];
+    if (out->role != POLY_ROLE_OUTPUT) continue;
+
+    PolyUOp *root = poly_tensor_uop(out->tensor);
+    if (!root) {
+      poly_instance_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "output '%s' has no tensor root", out->name
+      );
+      return POLY_STATUS_INVALID;
+    }
+
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(inst->ctx, root, &n_topo);
+    if (!topo && n_topo != 0) {
+      poly_instance_set_error(
+          inst, POLY_STATUS_ERROR, __func__, "failed to walk output '%s' graph", out->name
+      );
+      return POLY_STATUS_ERROR;
+    }
+
+    for (int j = 0; j < n_topo; j++) {
+      PolyUOp *u = topo[j];
+      if (!u || (u->op != POLY_OP_BUFFER && u->op != POLY_OP_BUFFER_VIEW && u->op != POLY_OP_PARAM))
+        continue;
+      if (find_build_storage_binding(build, u)) continue;
+      poly_instance_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound storage %s",
+          out->name, poly_op_name(u->op)
+      );
+      return POLY_STATUS_INVALID;
+    }
+  }
+  return POLY_STATUS_OK;
+}
+
+static PolyStatus validate_build_entrypoints(PolyInstance *inst) {
+  PolyInstanceBuildState *build = inst->build;
+  if (build->n_entrypoints <= 0) {
+    poly_instance_set_error(inst, POLY_STATUS_INVALID, __func__, "instance has no entrypoints");
+    return POLY_STATUS_INVALID;
+  }
+  for (int i = 0; i < build->n_entrypoints; i++) {
+    BuildEntrypoint *ep = &build->entrypoints[i];
+    for (int j = 0; j < ep->n_inputs; j++) {
+      BuildBinding *b = find_build_binding(build, ep->inputs[j]);
+      if (!b || !(b->role == POLY_ROLE_INPUT || b->role == POLY_ROLE_TARGET ||
+                  b->role == POLY_ROLE_PARAM || b->role == POLY_ROLE_AUX)) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s' references unknown input '%s'",
+            ep->name, ep->inputs[j]
+        );
+        return POLY_STATUS_INVALID;
+      }
+    }
+    for (int j = 0; j < ep->n_outputs; j++) {
+      BuildBinding *b = find_build_binding(build, ep->outputs[j]);
+      if (!b || b->role != POLY_ROLE_OUTPUT) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s' references unknown output '%s'",
+            ep->name, ep->outputs[j]
+        );
+        return POLY_STATUS_INVALID;
+      }
+    }
+    if (ep->objective) {
+      BuildBinding *objective = NULL;
+      for (int j = 0; j < ep->n_outputs; j++) {
+        if (strcmp(ep->objective, ep->outputs[j]) == 0) {
+          objective = find_build_binding(build, ep->outputs[j]);
+          break;
+        }
+      }
+      if (!objective) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_INVALID, __func__, "entrypoint '%s' objective '%s' is not an output",
+            ep->name, ep->objective
+        );
+        return POLY_STATUS_INVALID;
+      }
+      int64_t numel = poly_shape_numel_checked(objective->shape, objective->ndim);
+      if (numel != 1) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_INVALID, __func__,
+            "entrypoint '%s' objective '%s' must be scalar or one element", ep->name, ep->objective
+        );
+        return POLY_STATUS_INVALID;
+      }
+    }
+  }
+  return POLY_STATUS_OK;
+}
+
+PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
+  if (require_stage(inst, POLY_INSTANCE_BUILDING, __func__) != POLY_STATUS_OK) {
+    poly_instance_copy_error(inst, err);
+    return POLY_STATUS_BAD_STAGE;
+  }
+  PolyInstanceBuildState *build = inst->build;
+  PolyStatus st = validate_build_entrypoints(inst);
+  if (st != POLY_STATUS_OK) goto fail;
+  st = validate_build_reachable_storage(inst);
+  if (st != POLY_STATUS_OK) goto fail;
+
+  PolyIrBufEntry *bufs = calloc((size_t)build->n_bindings, sizeof(PolyIrBufEntry));
+  PolyIrEntrypoint *eps = calloc((size_t)build->n_entrypoints, sizeof(PolyIrEntrypoint));
+  if (!bufs || !eps) {
+    free(bufs);
+    free(eps);
+    poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+    st = POLY_STATUS_NOMEM;
+    goto fail;
+  }
+
+  for (int i = 0; i < build->n_bindings; i++) {
+    BuildBinding *b = &build->bindings[i];
+    if (b->role == POLY_ROLE_OUTPUT) {
+      PolyUOp *value = poly_tensor_uop(b->tensor);
+      int64_t numel = poly_shape_numel_checked(b->shape, b->ndim);
+      b->buffer = poly_buffer(inst->ctx, poly_dtype_scalar(value->dtype), numel);
+      if (!b->buffer) {
+        poly_instance_set_error(
+            inst, POLY_STATUS_ERROR, __func__, "failed to create output buffer '%s'", b->name
+        );
+        st = POLY_STATUS_ERROR;
+        free(bufs);
+        free(eps);
+        goto fail;
+      }
+    }
+    if (!b->buffer) {
+      poly_instance_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "binding '%s' has no buffer", b->name
+      );
+      st = POLY_STATUS_INVALID;
+      free(bufs);
+      free(eps);
+      goto fail;
+    }
+    bufs[i] = (PolyIrBufEntry){
+        .name = b->name,
+        .role = b->role,
+        .buffer = b->buffer,
+        .ndim = b->ndim,
+        .trainable = b->trainable,
+        .trainable_set = true,
+    };
+    if (b->ndim > 0) memcpy(bufs[i].shape, b->shape, (size_t)b->ndim * sizeof(int64_t));
+  }
+
+  for (int i = 0; i < build->n_entrypoints; i++) {
+    BuildEntrypoint *ep = &build->entrypoints[i];
+    PolyUOp **stores = calloc((size_t)ep->n_outputs, sizeof(PolyUOp *));
+    if (!stores) {
+      poly_instance_set_error(inst, POLY_STATUS_NOMEM, __func__, "out of memory");
+      st = POLY_STATUS_NOMEM;
+      free(bufs);
+      free(eps);
+      goto fail;
+    }
+    for (int j = 0; j < ep->n_outputs; j++) {
+      BuildBinding *out = find_build_binding(build, ep->outputs[j]);
+      PolyUOp *value = poly_tensor_uop(out->tensor);
+      int64_t numel = poly_shape_numel_checked(out->shape, out->ndim);
+      if (!(out->ndim == 1 && out->shape[0] == numel)) {
+        int64_t flat[] = {numel};
+        value = poly_reshape(inst->ctx, value, flat, 1);
+      }
+      stores[j] = poly_store_val(inst->ctx, out->buffer, value);
+    }
+    eps[i].name = ep->name;
+    eps[i].sink = ep->n_outputs == 1 ? poly_sink1(inst->ctx, stores[0])
+                                     : poly_sink_n(inst->ctx, stores, ep->n_outputs);
+    eps[i].inputs = (const char **)ep->inputs;
+    eps[i].n_inputs = ep->n_inputs;
+    eps[i].outputs = (const char **)ep->outputs;
+    eps[i].n_outputs = ep->n_outputs;
+    eps[i].objective = ep->objective;
+    eps[i].flags = ep->flags;
+    free(stores);
+    if (!eps[i].sink) {
+      poly_instance_set_error(
+          inst, POLY_STATUS_ERROR, __func__, "failed to build entrypoint '%s'", ep->name
+      );
+      st = POLY_STATUS_ERROR;
+      free(bufs);
+      free(eps);
+      goto fail;
+    }
+  }
+
+  PolyIrSpec spec = {
+      .ctx = inst->ctx,
+      .bufs = bufs,
+      .n_bufs = build->n_bindings,
+      .entrypoints = eps,
+      .n_entrypoints = build->n_entrypoints,
+  };
+  PolyInstance *built = instance_from_spec(&spec, false, false);
+  free(bufs);
+  free(eps);
+  if (!built) {
+    poly_instance_set_error(inst, POLY_STATUS_ERROR, __func__, "failed to pack runtime instance");
+    st = POLY_STATUS_ERROR;
+    goto fail;
+  }
+  copy_initial_buffer_data(built, inst->ctx);
+
+  PolyInstanceOptions opts = build->opts;
+  build_state_free(build);
+  *inst = *built;
+  free(built);
+  inst->stage = POLY_INSTANCE_BUILT;
+  inst->build = NULL;
+  inst->owns_ctx = opts.own_ctx_on_success;
+  memset(&inst->last_error, 0, sizeof(inst->last_error));
+  if (err) memset(err, 0, sizeof(*err));
+  return POLY_STATUS_OK;
+
+fail:
+  inst->stage = POLY_INSTANCE_FAILED;
+  if (build && build->opts.own_ctx_on_failure) inst->owns_ctx = true;
+  poly_instance_copy_error(inst, err);
+  return st;
+}
+
+PolyInstance *poly_instance_from_bindings(
+    PolyCtx *ctx,
+    const PolyBindingSpec *bindings,
+    int n_bindings,
+    const PolyEntrypointSpec *entrypoints,
+    int n_entrypoints,
+    const PolyInstanceOptions *opts,
+    PolyInstanceError *err
+) {
+  if (!ctx || !bindings || n_bindings <= 0 || !entrypoints || n_entrypoints <= 0) return NULL;
+  PolyInstance *inst = poly_instance_new(ctx, opts);
+  if (!inst) return NULL;
+  for (int i = 0; i < n_bindings; i++) {
+    const PolyBindingSpec *b = &bindings[i];
+    bool output = b->role == POLY_ROLE_OUTPUT;
+    bool trainable = b->role == POLY_ROLE_PARAM;
+    PolyStatus st = append_existing_tensor_binding(
+        inst, b->name, (uint8_t)b->role, b->tensor, b->flags, !output, trainable
+    );
+    if (st != POLY_STATUS_OK) {
+      poly_instance_copy_error(inst, err);
+      poly_instance_free(inst);
+      return NULL;
+    }
+  }
+  for (int i = 0; i < n_entrypoints; i++) {
+    const PolyEntrypointSpec *ep = &entrypoints[i];
+    PolyEntrypointOptions ep_opts = {.objective = ep->objective, .flags = ep->flags};
+    PolyStatus st = poly_instance_entrypoint(
+        inst, ep->name, ep->inputs, ep->n_inputs, ep->outputs, ep->n_outputs, &ep_opts
+    );
+    if (st != POLY_STATUS_OK) {
+      poly_instance_copy_error(inst, err);
+      poly_instance_free(inst);
+      return NULL;
+    }
+  }
+  if (poly_instance_build(inst, err) != POLY_STATUS_OK) {
+    poly_instance_free(inst);
+    return NULL;
+  }
+  return inst;
+}
+
+static void set_plain_instance_error(
+    PolyInstanceError *err,
+    int code,
+    const char *func,
+    const char *msg
+) {
+  if (!err) return;
+  err->code = code;
+  err->func = func;
+  snprintf(err->message, sizeof(err->message), "%s", msg ? msg : "error");
+}
+
+PolyInstance *poly_instance_from_binding_arrays(
+    PolyCtx *ctx,
+    const char **binding_names,
+    const int *binding_roles,
+    PolyTensor **binding_tensors,
+    const uint32_t *binding_flags,
+    int n_bindings,
+    const char **entry_names,
+    const char **entry_inputs,
+    const int *entry_input_counts,
+    const char **entry_outputs,
+    const int *entry_output_counts,
+    const char **entry_objectives,
+    const uint32_t *entry_flags,
+    int n_entrypoints,
+    const PolyInstanceOptions *opts,
+    PolyInstanceError *err
+) {
+  if (!ctx || !binding_names || !binding_roles || !binding_tensors || n_bindings <= 0 ||
+      !entry_names || !entry_input_counts || !entry_output_counts || n_entrypoints <= 0) {
+    set_plain_instance_error(err, POLY_STATUS_INVALID, __func__, "invalid binding array inputs");
+    return NULL;
+  }
+
+  PolyBindingSpec *bindings = calloc((size_t)n_bindings, sizeof(PolyBindingSpec));
+  PolyEntrypointSpec *entrypoints = calloc((size_t)n_entrypoints, sizeof(PolyEntrypointSpec));
+  if (!bindings || !entrypoints) {
+    free(bindings);
+    free(entrypoints);
+    set_plain_instance_error(err, POLY_STATUS_NOMEM, __func__, "out of memory");
+    return NULL;
+  }
+
+  for (int i = 0; i < n_bindings; i++) {
+    bindings[i].name = binding_names[i];
+    bindings[i].role = binding_roles[i];
+    bindings[i].tensor = binding_tensors[i];
+    bindings[i].flags = binding_flags ? binding_flags[i] : 0;
+  }
+
+  int input_off = 0;
+  int output_off = 0;
+  for (int i = 0; i < n_entrypoints; i++) {
+    int n_inputs = entry_input_counts[i];
+    int n_outputs = entry_output_counts[i];
+    if (n_inputs < 0 || n_outputs < 0 || (n_inputs > 0 && !entry_inputs) ||
+        (n_outputs > 0 && !entry_outputs)) {
+      free(bindings);
+      free(entrypoints);
+      set_plain_instance_error(err, POLY_STATUS_INVALID, __func__, "invalid entrypoint arrays");
+      return NULL;
+    }
+    entrypoints[i].name = entry_names[i];
+    entrypoints[i].inputs = n_inputs ? &entry_inputs[input_off] : NULL;
+    entrypoints[i].n_inputs = n_inputs;
+    entrypoints[i].outputs = n_outputs ? &entry_outputs[output_off] : NULL;
+    entrypoints[i].n_outputs = n_outputs;
+    entrypoints[i].objective = entry_objectives ? entry_objectives[i] : NULL;
+    entrypoints[i].flags = entry_flags ? entry_flags[i] : 0;
+    input_off += n_inputs;
+    output_off += n_outputs;
+  }
+
+  PolyInstance *inst =
+      poly_instance_from_bindings(ctx, bindings, n_bindings, entrypoints, n_entrypoints, opts, err);
+  free(bindings);
+  free(entrypoints);
+  return inst;
+}
+
 /* Lifecycle */
 
 /* Build a PolyInstance from a PolyIrSpec.
@@ -151,6 +1051,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   PolyInstance *inst = calloc(1, sizeof(PolyInstance));
   inst->ctx = spec->ctx;
   inst->owns_ctx = owns_ctx;
+  inst->stage = POLY_INSTANCE_BUILT;
 
   /* Copy buffers with alias data sharing */
   inst->n_bufs = spec->n_bufs;
@@ -160,9 +1061,8 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   for (int i = 0; i < spec->n_bufs; i++) {
     inst->bufs[i].name = strdup(spec->bufs[i].name);
     inst->bufs[i].role = spec->bufs[i].role;
-    inst->bufs[i].trainable = spec->bufs[i].trainable_set
-      ? spec->bufs[i].trainable
-      : (spec->bufs[i].role == POLY_ROLE_PARAM);
+    inst->bufs[i].trainable = spec->bufs[i].trainable_set ? spec->bufs[i].trainable
+                                                          : (spec->bufs[i].role == POLY_ROLE_PARAM);
     inst->bufs[i].buffer = spec->bufs[i].buffer;
     inst->bufs[i].ndim = spec->bufs[i].ndim;
     memcpy(inst->bufs[i].shape, spec->bufs[i].shape, spec->bufs[i].ndim * sizeof(int64_t));
@@ -237,6 +1137,14 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   for (int i = 0; i < spec->n_entrypoints; i++) {
     inst->entrypoints[i].name = strdup(spec->entrypoints[i].name);
     inst->entrypoints[i].sink = spec->entrypoints[i].sink;
+    inst->entrypoints[i].inputs =
+        dup_string_array(spec->entrypoints[i].inputs, spec->entrypoints[i].n_inputs);
+    inst->entrypoints[i].n_inputs = spec->entrypoints[i].n_inputs;
+    inst->entrypoints[i].outputs =
+        dup_string_array(spec->entrypoints[i].outputs, spec->entrypoints[i].n_outputs);
+    inst->entrypoints[i].n_outputs = spec->entrypoints[i].n_outputs;
+    inst->entrypoints[i].objective = dup_cstr(spec->entrypoints[i].objective);
+    inst->entrypoints[i].flags = spec->entrypoints[i].flags;
   }
 
   if (free_spec) poly_ir_spec_free(spec);
@@ -436,8 +1344,23 @@ static bool retarget_handle_if_shared(
   return true;
 }
 
+static void train_schedule_clear(TrainState *ts) {
+  if (!ts) return;
+  poly_schedule_free(ts->schedule);
+  ts->schedule = NULL;
+}
+
+static void entry_schedules_clear(PolyInstance *inst) {
+  if (!inst || !inst->entry_schedules) return;
+  for (int i = 0; i < inst->n_entrypoints; i++) {
+    poly_schedule_free(inst->entry_schedules[i]);
+    inst->entry_schedules[i] = NULL;
+  }
+}
+
 static void train_free(TrainState *ts, int n_params) {
   if (!ts) return;
+  train_schedule_clear(ts);
   /* Free device-owned moment handles before freeing host data */
   for (int i = 0; i < ts->n_moment_bufs; i++) {
     if (ts->m_handles) free_owned_handle(&ts->m_handles[i]);
@@ -466,6 +1389,9 @@ static void train_free(TrainState *ts, int n_params) {
 void poly_instance_free(PolyInstance *inst) {
   if (!inst) return;
 
+  build_state_free(inst->build);
+  inst->build = NULL;
+
   /* Free device-owned buffer handles */
   if (inst->buf_handles) {
     for (int i = 0; i < inst->n_bufs; i++) {
@@ -489,12 +1415,19 @@ void poly_instance_free(PolyInstance *inst) {
 
   /* Free entrypoints */
   if (inst->entry_schedules) {
-    for (int i = 0; i < inst->n_entrypoints; i++)
-      poly_schedule_free(inst->entry_schedules[i]);
+    entry_schedules_clear(inst);
     free(inst->entry_schedules);
   }
-  for (int i = 0; i < inst->n_entrypoints; i++)
+  for (int i = 0; i < inst->n_entrypoints; i++) {
     free(inst->entrypoints[i].name);
+    for (int j = 0; j < inst->entrypoints[i].n_inputs; j++)
+      free(inst->entrypoints[i].inputs[j]);
+    free(inst->entrypoints[i].inputs);
+    for (int j = 0; j < inst->entrypoints[i].n_outputs; j++)
+      free(inst->entrypoints[i].outputs[j]);
+    free(inst->entrypoints[i].outputs);
+    free(inst->entrypoints[i].objective);
+  }
   free(inst->entrypoints);
 
   /* Free execution caches.
@@ -686,7 +1619,7 @@ int poly_instance_upload_param(PolyInstance *inst, int i, const void *host_src, 
 /* Weight I/O */
 
 uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
-  if (!inst || inst->n_params == 0) {
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || inst->n_params == 0) {
     *out_len = 0;
     return NULL;
   }
@@ -710,7 +1643,7 @@ uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
 }
 
 int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int len) {
-  if (!inst) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
 
   int n_views = 0;
   char *metadata = NULL;
@@ -746,7 +1679,7 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
 /* IR Export */
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
-  if (!inst) {
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT) {
     *out_len = 0;
     return NULL;
   }
@@ -767,6 +1700,12 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
   for (int i = 0; i < inst->n_entrypoints; i++) {
     eps[i].name = inst->entrypoints[i].name;
     eps[i].sink = inst->entrypoints[i].sink;
+    eps[i].inputs = (const char **)inst->entrypoints[i].inputs;
+    eps[i].n_inputs = inst->entrypoints[i].n_inputs;
+    eps[i].outputs = (const char **)inst->entrypoints[i].outputs;
+    eps[i].n_outputs = inst->entrypoints[i].n_outputs;
+    eps[i].objective = inst->entrypoints[i].objective;
+    eps[i].flags = inst->entrypoints[i].flags;
   }
 
   PolyIrSpec spec = {inst->ctx, bufs, inst->n_bufs, eps, inst->n_entrypoints};
@@ -779,7 +1718,7 @@ uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len) {
 /* Device configuration */
 
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
-  if (!inst) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
 
   /* Resolve AUTO the same way tensor placement does: an explicit environment
    * device wins, otherwise use the platform default. */
@@ -1070,6 +2009,9 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
     }
   }
 
+  entry_schedules_clear(inst);
+  train_schedule_clear(inst->train);
+
   return 0;
 }
 
@@ -1168,7 +2110,7 @@ static int run_instance_sink(
 }
 
 int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding *io, int n_io) {
-  if (!inst || !entrypoint) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !entrypoint) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
   if (ep_idx < 0) {
@@ -1198,7 +2140,7 @@ int poly_instance_set_optimizer(
     float eps,
     float weight_decay
 ) {
-  if (!inst) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
 
   inst->optim.kind = kind;
   inst->optim.lr = lr;
@@ -1367,7 +2309,7 @@ int poly_instance_value_and_grad(
     int n_io,
     float *loss_out
 ) {
-  if (!inst || !entrypoint) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT || !entrypoint) return -1;
 
   int ep_idx = find_entrypoint(inst, entrypoint);
   if (ep_idx < 0) {
@@ -1661,7 +2603,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 /* Train Step */
 
 int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, float *loss_out) {
-  if (!inst) return -1;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
   if (inst->optim.kind == POLY_OPTIM_NONE) {
     fprintf(stderr, "poly_instance_train_step: no optimizer configured\n");
     return -1;
@@ -1713,7 +2655,7 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   }
 
   int ret = run_instance_sink(
-      inst, ts->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra, NULL
+      inst, ts->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra, &ts->schedule
   );
   free(extra_bufs);
   free(extra_handles);

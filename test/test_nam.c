@@ -66,6 +66,14 @@ TEST(nam, create_simple) {
   PASS();
 }
 
+TEST(nam, staged_builder_does_not_use_ctx_registry) {
+  PolyInstance *inst = poly_nam_instance(simple_nam_spec, (int)strlen(simple_nam_spec));
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_ctx_named_count(poly_instance_ctx(inst)), 0);
+  poly_instance_free(inst);
+  PASS();
+}
+
 TEST(nam, create_exu) {
   PolyInstance *inst = poly_nam_instance(exu_nam_spec, (int)strlen(exu_nam_spec));
   ASSERT_NOT_NULL(inst);
