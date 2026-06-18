@@ -1,4 +1,5 @@
 #include "test_harness.h"
+#include "../src/polygrad.h"
 #include "../src/utils.h"
 
 #include <stdbool.h>
@@ -46,6 +47,18 @@ TEST(utils, debug_level_precedence) {
 
   restore_env(&poly_debug);
   restore_env(&debug);
+  PASS();
+}
+
+TEST(utils, poly_free_releases_public_api_allocations) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.0));
+  char *s = poly_uop_str(c);
+  ASSERT_TRUE(s != NULL);
+  ASSERT_TRUE(strstr(s, "CONST") != NULL);
+  poly_free(s);
+  poly_free(NULL);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 

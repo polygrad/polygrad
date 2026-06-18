@@ -11,6 +11,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+// clang-format off
 EM_JS(int, poly_browser_debug_level, (), {
   if (typeof globalThis === 'undefined') return 0;
   const v = globalThis.__polygradDebugLevel;
@@ -18,7 +19,12 @@ EM_JS(int, poly_browser_debug_level, (), {
   const n = Number(v);
   return Number.isFinite(n) ? (n | 0) : 0;
 });
+// clang-format on
 #endif
+
+void poly_free(void *ptr) {
+  free(ptr);
+}
 
 bool poly_ptr_eq(const void *a, const void *b) { return a == b; }
 

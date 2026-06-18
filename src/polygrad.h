@@ -28,6 +28,10 @@
 extern "C" {
 #endif
 
+/* Free heap memory returned by Polygrad public APIs.
+ * This keeps bindings from having to match Polygrad's C runtime allocator. */
+void poly_free(void *ptr);
+
 /* Ops enum mirrors tinygrad_latest's Ops ordering for shared ops.
  * The numeric order is observable through exported IR and is also used by
  * tinygrad's linearizer tuplize tiebreak, so Polygrad-only compatibility ops
