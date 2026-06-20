@@ -681,10 +681,11 @@ PolyUOp **poly_toposort_ex_user(
  * but we keep the cache external so it can be scoped to one rewrite pass
  * and thrown away cleanly.
  *
- * PolyUOpCache unifies two per-UOp caches that Phase D's reduce_collapse
+ * PolyUOpCache unifies per-UOp caches that Phase D's reduce_collapse
  * driver queries together:
  *   - minmax: UOp -> (int64_t vmin, int64_t vmax) per tinygrad _min_max
  *   - ranges: UOp -> set of active RANGE ancestors per tinygrad u.ranges
+ *   - ended_ranges: UOp -> set of ended RANGE ancestors per tinygrad u.ended_ranges
  *
  * Without caching, the minmax computation is exponential on diamond DAGs
  * (MUL alone is a 4-corner recurrence; hash-consed graphs like
@@ -700,7 +701,7 @@ PolyUOp **poly_toposort_ex_user(
  *   poly_uop_cache_destroy(c);
  *
  * Lifetime: cache entries are allocated from the PolyCtx arena and live
- * until the ctx is destroyed. poly_uop_cache_destroy frees the two PolyMap
+ * until the ctx is destroyed. poly_uop_cache_destroy frees the PolyMap
  * wrappers only; the arena-backed entries are reclaimed at ctx teardown.
  * Cache invalidation is NOT automatic — if the graph is mutated via
  * poly_uop_substitute between queries, destroy and recreate the cache. */

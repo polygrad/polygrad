@@ -670,31 +670,58 @@ static bool compute_ended_ranges_node(
   return true;
 }
 
-static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
-  PolyRangeSet *cached = (PolyRangeSet *)range_memo_get(memo, u);
+typedef struct {
+  PolyMap *ranges;
+  PolyMap *ended;
+} RangeComputeGateCtx;
+
+static bool range_compute_gate(PolyUOp *u, void *user_data) {
+  RangeComputeGateCtx *g = (RangeComputeGateCtx *)user_data;
+  if (!g || !u) return false;
+  return !range_memo_get(g->ranges, u) || !range_memo_get(g->ended, u);
+}
+
+static PolyRangeSet *compute_ranges_with_ended(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyMap *ranges_memo,
+    PolyMap *ended_memo
+) {
+  PolyRangeSet *cached = (PolyRangeSet *)range_memo_get(ranges_memo, u);
   if (cached) return cached;
 
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, u, &n_topo);
-  if (!topo) return NULL;
+  bool own_ended = false;
+  if (!ended_memo) {
+    ended_memo = poly_map_new(64);
+    if (!ended_memo) return NULL;
+    own_ended = true;
+  }
 
-  PolyMap *ended_memo = poly_map_new((size_t)n_topo * 2 + 16);
-  if (!ended_memo) return NULL;
+  int n_topo = 0;
+  RangeComputeGateCtx gate = {ranges_memo, ended_memo};
+  PolyUOp **topo = poly_toposort_ex_user(ctx, u, &n_topo, range_compute_gate, &gate, true);
+  if (!topo) {
+    if (own_ended) poly_map_destroy(ended_memo);
+    return NULL;
+  }
 
   bool ok = true;
   for (int ti = 0; ok && ti < n_topo; ti++) {
     PolyUOp *cur = topo[ti];
 
-    PolyRangeSet *ended = range_set_new(ctx, 4);
-    ok = compute_ended_ranges_node(ctx, cur, ended, memo, ended_memo);
-    if (!ok) break;
-    range_memo_set(ended_memo, cur, ended);
+    PolyRangeSet *ended = (PolyRangeSet *)range_memo_get(ended_memo, cur);
+    if (!ended) {
+      ended = range_set_new(ctx, 4);
+      ok = compute_ended_ranges_node(ctx, cur, ended, ranges_memo, ended_memo);
+      if (!ok) break;
+      range_memo_set(ended_memo, cur, ended);
+    }
 
-    if (range_memo_get(memo, cur)) continue;
+    if (range_memo_get(ranges_memo, cur)) continue;
 
     PolyRangeSet *ret = range_set_new(ctx, 4);
     for (int i = 0; i < cur->n_src; i++) {
-      const PolyRangeSet *src_ranges = range_memo_get(memo, cur->src[i]);
+      const PolyRangeSet *src_ranges = range_memo_get(ranges_memo, cur->src[i]);
       if (!src_ranges) {
         ok = false;
         break;
@@ -705,16 +732,16 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
 
     range_set_subtract(ret, ended);
     if (cur->op == POLY_OP_RANGE) range_set_add(ctx, ret, cur);
-    range_memo_set(memo, cur, ret);
+    range_memo_set(ranges_memo, cur, ret);
   }
 
-  cached = ok ? (PolyRangeSet *)range_memo_get(memo, u) : NULL;
-  poly_map_destroy(ended_memo);
+  cached = ok ? (PolyRangeSet *)range_memo_get(ranges_memo, u) : NULL;
+  if (own_ended) poly_map_destroy(ended_memo);
   return cached;
 }
 
 /* PolyUOpCache: per-pass unified cache for minmax + ranges *
- * Owns two PolyMaps keyed by PolyUOp*. The struct is opaque in the public
+ * Owns PolyMaps keyed by PolyUOp*. The struct is opaque in the public
  * header; callers get it via poly_uop_cache_new and pass it to any `_ex`
  * query. Values (PolyRangeSet*, PolyMinMaxBox*) are arena-allocated and
  * reclaimed at ctx teardown; destroying the cache only tears down the map
@@ -722,6 +749,7 @@ static PolyRangeSet *compute_ranges(PolyCtx *ctx, PolyUOp *u, PolyMap *memo) {
 
 struct PolyUOpCache {
   PolyMap *ranges; /* PolyUOp* -> PolyRangeSet* */
+  PolyMap *ended; /* PolyUOp* -> PolyRangeSet* for ended_ranges */
   PolyMap *minmax; /* PolyUOp* -> PolyMinMaxBox* (populated by src/sym.c) */
 };
 
@@ -729,9 +757,11 @@ PolyUOpCache *poly_uop_cache_new(void) {
   PolyUOpCache *c = malloc(sizeof(PolyUOpCache));
   if (!c) return NULL;
   c->ranges = poly_map_new(64);
+  c->ended = poly_map_new(64);
   c->minmax = poly_map_new(64);
-  if (!c->ranges || !c->minmax) {
+  if (!c->ranges || !c->ended || !c->minmax) {
     if (c->ranges) poly_map_destroy(c->ranges);
+    if (c->ended) poly_map_destroy(c->ended);
     if (c->minmax) poly_map_destroy(c->minmax);
     free(c);
     return NULL;
@@ -742,6 +772,7 @@ PolyUOpCache *poly_uop_cache_new(void) {
 void poly_uop_cache_destroy(PolyUOpCache *c) {
   if (!c) return;
   if (c->ranges) poly_map_destroy(c->ranges);
+  if (c->ended) poly_map_destroy(c->ended);
   if (c->minmax) poly_map_destroy(c->minmax);
   free(c);
 }
@@ -812,10 +843,18 @@ bool poly_uop_in_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp *r) {
 bool poly_uop_in_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp *r, PolyUOpCache *cache) {
   if (!ctx || !u || !r || r->op != POLY_OP_RANGE) return false;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
+  PolyMap *ended = cache ? cache->ended : poly_map_new(64);
   if (!memo) return false;
-  const PolyRangeSet *s = compute_ranges(ctx, u, memo);
+  if (!ended) {
+    if (!cache) poly_map_destroy(memo);
+    return false;
+  }
+  const PolyRangeSet *s = compute_ranges_with_ended(ctx, u, memo, ended);
   bool found = s && range_set_contains(s, r);
-  if (!cache) poly_map_destroy(memo);
+  if (!cache) {
+    poly_map_destroy(memo);
+    poly_map_destroy(ended);
+  }
   return found;
 }
 
@@ -826,15 +865,26 @@ int poly_uop_ranges(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out) {
 int poly_uop_ranges_ex(PolyCtx *ctx, PolyUOp *u, PolyUOp **out, int max_out, PolyUOpCache *cache) {
   if (!ctx || !u || !out || max_out <= 0) return 0;
   PolyMap *memo = cache ? cache->ranges : poly_map_new(64);
+  PolyMap *ended = cache ? cache->ended : poly_map_new(64);
   if (!memo) return 0;
-  const PolyRangeSet *s = compute_ranges(ctx, u, memo);
-  if (!s) {
+  if (!ended) {
     if (!cache) poly_map_destroy(memo);
+    return 0;
+  }
+  const PolyRangeSet *s = compute_ranges_with_ended(ctx, u, memo, ended);
+  if (!s) {
+    if (!cache) {
+      poly_map_destroy(memo);
+      poly_map_destroy(ended);
+    }
     return 0;
   }
   int n_out = s->n < max_out ? s->n : max_out;
   memcpy(out, s->items, (size_t)n_out * sizeof(PolyUOp *));
-  if (!cache) poly_map_destroy(memo);
+  if (!cache) {
+    poly_map_destroy(memo);
+    poly_map_destroy(ended);
+  }
   return n_out;
 }
 
