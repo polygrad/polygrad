@@ -2314,7 +2314,7 @@ static PolyUOp *rule_group_singleton(PolyCtx *ctx, PolyUOp *root, const PolyBind
 
 /* GEP pushing PM (for combined devec pass) */
 
-static PolyPatternMatcher *g_pm_gep_pushing = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_gep_pushing = NULL;
 
 PolyPatternMatcher *poly_pm_gep_pushing(void) {
   if (g_pm_gep_pushing) return g_pm_gep_pushing;
@@ -2333,8 +2333,8 @@ PolyPatternMatcher *poly_pm_gep_pushing(void) {
 
 /* Build the symbolic_simple PatternMatcher */
 
-static PolyPatternMatcher *g_symbolic_simple = NULL;
-static PolyPatternMatcher *g_symbolic = NULL;
+static _Thread_local PolyPatternMatcher *g_symbolic_simple = NULL;
+static _Thread_local PolyPatternMatcher *g_symbolic = NULL;
 
 PolyPatternMatcher *poly_symbolic_simple(void) {
   if (g_symbolic_simple) return g_symbolic_simple;

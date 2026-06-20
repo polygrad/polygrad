@@ -143,7 +143,7 @@ build/polygrad_parity_runner: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 bench: build/bench_polygrad
 	./build/bench_polygrad
 
-build/bench_polygrad: $(SRC) bench/bench_polygrad.c
+build/bench_polygrad: $(SRC) $(CODEC_SRC) bench/bench_polygrad.c
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
 
@@ -151,7 +151,7 @@ ifeq ($(HAS_CUDA), 1)
 bench-cuda: build/bench_cuda
 	./build/bench_cuda
 
-build/bench_cuda: $(SRC) bench/bench_cuda.c
+build/bench_cuda: $(SRC) $(CODEC_SRC) bench/bench_cuda.c
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
 
@@ -177,7 +177,7 @@ build/polygrad_parity_runner_hip: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 bench-hip: build/bench_hip
 	./build/bench_hip
 
-build/bench_hip: bench/bench_hip.c $(SRC)
+build/bench_hip: bench/bench_hip.c $(SRC) $(CODEC_SRC)
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
 endif

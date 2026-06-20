@@ -2499,7 +2499,7 @@ static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBi
 
 /* Build the pm_reduce PatternMatcher */
 
-static PolyPatternMatcher *g_pm_reduce = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce = NULL;
 
 static PolyPatternMatcher *poly_pm_reduce(void) {
   if (g_pm_reduce) return g_pm_reduce;
@@ -2967,7 +2967,7 @@ static PolyUOp *rule_store_dtype_cast(PolyCtx *ctx, PolyUOp *root, const PolyBin
 }
 
 /* Cached variants by (has_mulacc, has_threefry_native). */
-static PolyPatternMatcher *g_pm_decomp_caps[2][2] = {{NULL, NULL}, {NULL, NULL}};
+static _Thread_local PolyPatternMatcher *g_pm_decomp_caps[2][2] = {{NULL, NULL}, {NULL, NULL}};
 
 static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_threefry) {
   PolyPatternMatcher **target = &g_pm_decomp_caps[has_mulacc ? 1 : 0][has_threefry ? 1 : 0];
@@ -4000,7 +4000,7 @@ static PolyUOp *rule_bf16_const(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   return poly_uop1(ctx, POLY_OP_CAST, POLY_BFLOAT16, f32_const, poly_arg_none());
 }
 
-static PolyPatternMatcher *g_pm_bf16_non_native = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_bf16_non_native = NULL;
 
 PolyPatternMatcher *poly_pm_bf16_non_native(void) {
   if (g_pm_bf16_non_native) return g_pm_bf16_non_native;
@@ -4044,7 +4044,7 @@ PolyPatternMatcher *poly_pm_bf16_non_native(void) {
   return g_pm_bf16_non_native;
 }
 
-static PolyPatternMatcher *g_pm_c_renderer_extra = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_c_renderer_extra = NULL;
 
 PolyPatternMatcher *poly_pm_c_renderer_extra(void) {
   if (g_pm_c_renderer_extra) return g_pm_c_renderer_extra;
@@ -4061,7 +4061,7 @@ PolyPatternMatcher *poly_pm_c_renderer_extra(void) {
 
 /* Build the pm_transcendental PatternMatcher */
 
-static PolyPatternMatcher *g_pm_transcendental = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_transcendental = NULL;
 
 static PolyPatternMatcher *poly_pm_transcendental(void) {
   if (g_pm_transcendental) return g_pm_transcendental;
@@ -4613,7 +4613,7 @@ static PolyUOp *rule_fix_store_unroll(PolyCtx *ctx, PolyUOp *x, const PolyBindin
   );
 }
 
-static PolyPatternMatcher *g_pm_pre_expander = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_pre_expander = NULL;
 static PolyPatternMatcher *poly_pm_pre_expander(void) {
   if (g_pm_pre_expander) return g_pm_pre_expander;
   PolyRule rules[] = {
@@ -4625,7 +4625,7 @@ static PolyPatternMatcher *poly_pm_pre_expander(void) {
   return g_pm_pre_expander;
 }
 
-static PolyPatternMatcher *g_pm_expander = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_expander = NULL;
 static PolyPatternMatcher *poly_pm_expander(void) {
   if (g_pm_expander) return g_pm_expander;
   PolyOpSet exp_ops = POLY_GROUP_ALU;
@@ -4692,7 +4692,7 @@ static PolyUOp *rule_remove_load_from_store(PolyCtx *ctx, PolyUOp *s, const Poly
   return poly_uop(ctx, POLY_OP_STORE, s->dtype, new_src, n_new, s->arg);
 }
 
-static PolyPatternMatcher *g_pm_add_loads = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_add_loads = NULL;
 static PolyPatternMatcher *poly_pm_add_loads(void) {
   if (g_pm_add_loads) return g_pm_add_loads;
   PolyRule rules[] = {
@@ -5379,7 +5379,7 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   return out;
 }
 
-static PolyPatternMatcher *g_pm_load_store_folding = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_load_store_folding = NULL;
 static PolyPatternMatcher *poly_pm_load_store_folding(void) {
   if (g_pm_load_store_folding) return g_pm_load_store_folding;
   PolyRule rules[] = {
@@ -5472,7 +5472,7 @@ static PolyUOp *rule_split_ends(PolyCtx *ctx, PolyUOp *end, const PolyBindings *
   return ret;
 }
 
-static PolyPatternMatcher *g_pm_split_ends = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_split_ends = NULL;
 static PolyPatternMatcher *poly_pm_split_ends(void) {
   if (g_pm_split_ends) return g_pm_split_ends;
   PolyRule rules[] = {
@@ -5757,7 +5757,7 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
   );
 }
 
-static PolyPatternMatcher *g_pm_move_where_on_load = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_move_where_on_load = NULL;
 static PolyPatternMatcher *poly_pm_move_where_on_load(void) {
   if (g_pm_move_where_on_load) return g_pm_move_where_on_load;
   PolyRule rules[] = {
@@ -5946,7 +5946,7 @@ static PolyUOp *rule_no_vectorized_index(PolyCtx *ctx, PolyUOp *idx_uop, const P
   return ret;
 }
 
-static PolyPatternMatcher *g_pm_devectorize = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_devectorize = NULL;
 static PolyPatternMatcher *poly_pm_devectorize(void) {
   if (g_pm_devectorize) return g_pm_devectorize;
 
@@ -6618,7 +6618,7 @@ static PolyUOp *rule_cat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindin
 
 /* Render subset: full (DEVECTORIZE>=1) scatters vec CMP/WHERE to scalar.
  * Minimal (DEVECTORIZE=0) keeps vec ALU, only lowers VCONST/VCAT. */
-static PolyPatternMatcher *g_pm_render_subset = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_render_subset = NULL;
 static PolyPatternMatcher *poly_pm_render_subset(void) {
   if (g_pm_render_subset) return g_pm_render_subset;
   PolyRule rules[] = {
@@ -6655,7 +6655,7 @@ static PolyPatternMatcher *poly_pm_render_subset(void) {
   return g_pm_render_subset;
 }
 
-static PolyPatternMatcher *g_pm_render_subset_vec = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_render_subset_vec = NULL;
 static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
   if (g_pm_render_subset_vec) return g_pm_render_subset_vec;
   PolyRule rules[] = {
@@ -6695,7 +6695,7 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
 
 /* Render subset for x64 with SIMD integer: keep vector CMP/WHERE packed.
  * Unlike render_subset_vec, does NOT scatter CMP/WHERE to per-lane scalar. */
-static PolyPatternMatcher *g_pm_render_subset_x64 = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_render_subset_x64 = NULL;
 static PolyPatternMatcher *poly_pm_render_subset_x64(void) {
   if (g_pm_render_subset_x64) return g_pm_render_subset_x64;
   PolyRule rules[] = {
@@ -6722,7 +6722,7 @@ static PolyPatternMatcher *poly_pm_render_subset_x64(void) {
  * All rules in ONE graph_rewrite so folding sees vectorized INDEX before devectorize scatters.
  */
 
-static PolyPatternMatcher *g_combined_devec = NULL;
+static _Thread_local PolyPatternMatcher *g_combined_devec = NULL;
 static PolyPatternMatcher *poly_pm_combined_devec(void) {
   if (g_combined_devec) return g_combined_devec;
   /* Matches tinygrad codegen/__init__.py:79:
@@ -6735,7 +6735,7 @@ static PolyPatternMatcher *poly_pm_combined_devec(void) {
   return g_combined_devec;
 }
 
-static PolyPatternMatcher *g_combined_nodevec = NULL;
+static _Thread_local PolyPatternMatcher *g_combined_nodevec = NULL;
 static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
   if (g_combined_nodevec) return g_combined_nodevec;
   /* Matches tinygrad pm_no_devec = sym + load_store_folding + correct_load_store +
@@ -6931,7 +6931,7 @@ static PolyUOp *rule_lower_index_dtype(PolyCtx *ctx, PolyUOp *idx, const PolyBin
   return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, idx->n_src);
 }
 
-static PolyPatternMatcher *g_pm_lower_index_dtype = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_lower_index_dtype = NULL;
 static PolyPatternMatcher *poly_pm_lower_index_dtype(void) {
   if (g_pm_lower_index_dtype) return g_pm_lower_index_dtype;
   PolyRule rules[] = {
@@ -7328,7 +7328,7 @@ static PolyUOp *rule_index_gate_selects_where_branch(
   return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, ns);
 }
 
-static PolyPatternMatcher *g_pm_post_index_lower = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_post_index_lower = NULL;
 static PolyPatternMatcher *poly_pm_post_index_lower(void) {
   if (g_pm_post_index_lower) return g_pm_post_index_lower;
   PolyRule indexing_rules[] = {

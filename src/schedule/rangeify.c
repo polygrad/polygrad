@@ -2029,7 +2029,7 @@ static PolyUOp *rule_split_noop(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
 }
 
 static PolyPatternMatcher *poly_pm_to_define_global_local(void) {
-  static PolyPatternMatcher *pm = NULL;
+  static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_BUFFER, NULL, 0, "buf"), rule_split_debuf},
@@ -2049,7 +2049,7 @@ static PolyPatternMatcher *poly_pm_to_define_global_local(void) {
 }
 
 static PolyPatternMatcher *poly_pm_kernel_split_local(void) {
-  static PolyPatternMatcher *pm = NULL;
+  static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
   PolyPatternMatcher *a = poly_pm_concat(poly_pm_to_define_global_local(), poly_pm_flatten_range());
   pm = a;
@@ -3284,7 +3284,7 @@ static PolyUOp *rule_add_range_tag(PolyCtx *ctx, PolyUOp *root, const PolyBindin
 }
 
 static PolyPatternMatcher *poly_pm_add_range_tags_local(void) {
-  static PolyPatternMatcher *pm = NULL;
+  static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_RANGE, NULL, 0, "x"), rule_add_range_tag},

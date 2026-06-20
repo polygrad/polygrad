@@ -95,7 +95,7 @@ static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
              : poly_uop(ctx, root->op, root->dtype, new_src, n_new, root->arg);
 }
 
-static PolyPatternMatcher *g_pm_flatten_range = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_flatten_range = NULL;
 PolyPatternMatcher *poly_pm_flatten_range(void) {
   if (g_pm_flatten_range) return g_pm_flatten_range;
   PolyOpSet ops = {{0, 0}};
@@ -171,7 +171,7 @@ static PolyUOp *simplify_merge_adjacent(PolyCtx *ctx, PolyUOp *root, const PolyB
   return (best != root) ? best : NULL;
 }
 
-static PolyPatternMatcher *g_pm_simplify_ranges = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_simplify_ranges = NULL;
 PolyPatternMatcher *poly_pm_simplify_ranges(void) {
   if (g_pm_simplify_ranges) return g_pm_simplify_ranges;
   PolyOpSet ops = {{0, 0}};
@@ -260,7 +260,7 @@ static PolyUOp *do_substitute(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
   return out;
 }
 
-static PolyPatternMatcher *g_pm_split_ranges = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_split_ranges = NULL;
 PolyPatternMatcher *poly_pm_split_ranges(void) {
   if (g_pm_split_ranges) return g_pm_split_ranges;
   PolyRule rules[] = {
@@ -881,13 +881,13 @@ static PolyUOp *reduce_simplify(PolyCtx *ctx, PolyUOp *red, const PolyBindings *
  * for that fusion. pm_remove_bufferize runs separately as a polygrad-side
  * stage before this pass — see src/rangeify.c.
  */
-static PolyPatternMatcher *g_pm_reduce_unparented = NULL;
-static PolyPatternMatcher *g_pm_reduce_collapse_base = NULL;
-static PolyPatternMatcher *g_pm_reduce_collapse = NULL;
-static PolyPatternMatcher *g_pm_reduce_load_collapse = NULL;
-static PolyPatternMatcher *g_pm_reduce_simplify_base = NULL;
-static PolyPatternMatcher *g_pm_reduce_simplify = NULL;
-static PolyPatternMatcher *g_pm_symbolic_reduce_simplify = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce_unparented = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce_collapse_base = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce_collapse = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce_load_collapse = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce_simplify_base = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_reduce_simplify = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_symbolic_reduce_simplify = NULL;
 
 static PolyPatternMatcher *pm_reduce_unparented_get(void) {
   if (g_pm_reduce_unparented) return g_pm_reduce_unparented;
@@ -1070,7 +1070,7 @@ static PolyUOp *undo_loaded_index_math(PolyCtx *ctx, PolyUOp *cmplt, const PolyB
   return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, rhs, poly_arg_none());
 }
 
-static PolyPatternMatcher *g_pm_load_collapse = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_load_collapse = NULL;
 PolyPatternMatcher *poly_pm_load_collapse(void) {
   if (g_pm_load_collapse) return g_pm_load_collapse;
   PolyRule rules[] = {

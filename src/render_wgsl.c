@@ -1050,7 +1050,7 @@ static PolyUOp *rule_wgsl_bool_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings 
   return poly_uop1(ctx, POLY_OP_CAST, POLY_BOOL, result, poly_arg_none());
 }
 
-static PolyPatternMatcher *g_pm_wgsl_extra = NULL;
+static _Thread_local PolyPatternMatcher *g_pm_wgsl_extra = NULL;
 
 PolyPatternMatcher *poly_pm_wgsl_extra(void) {
   if (g_pm_wgsl_extra) return g_pm_wgsl_extra;
