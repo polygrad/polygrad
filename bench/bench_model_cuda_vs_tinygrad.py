@@ -164,7 +164,7 @@ def run_polygrad_node(cases: list[dict]) -> dict[str, float]:
           batch_size: tc.batch,
           seed: 42
         }
-        const inst = pg.Instance.mlp(spec)
+        const inst = pg.models.MLP(spec)
         const x = new Float32Array(tc.batch * tc.layers[0])
         const y = new Float32Array(tc.batch * tc.layers[tc.layers.length - 1])
         fill(x, 1)

@@ -35,7 +35,7 @@ function benchMlpForward(pg, inputSize, iters) {
     loss: 'mse',
     seed: 42
   }
-  const inst = pg.Instance.mlp(spec)
+  const inst = pg.models.MLP(spec)
   if (!inst) return null
 
   const input = new Float32Array(inputSize)
@@ -59,7 +59,7 @@ function benchMlpTrain(pg, inputSize, iters) {
     loss: 'mse',
     seed: 42
   }
-  const inst = pg.Instance.mlp(spec)
+  const inst = pg.models.MLP(spec)
   if (!inst) return null
 
   inst.setOptimizer(pg.OPTIM_SGD, 0.01, 0.9, 0.999, 1e-8, 0)
@@ -87,7 +87,7 @@ function benchBundleRoundtrip(pg, inputSize, iters) {
     loss: 'mse',
     seed: 42
   }
-  const inst = pg.Instance.mlp(spec)
+  const inst = pg.models.MLP(spec)
   if (!inst) return null
 
   // Save bundle, reload, forward -- tests the full portable artifact path

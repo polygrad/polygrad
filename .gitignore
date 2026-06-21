@@ -27,5 +27,8 @@ temp/
 *.canvas
 out*.txt
 bench/results/2*.json
+bench/results/smoke-*.json
+bench/results/smoke-latest.json
+bench/baselines/local/
 py/csrc/
 py/dist/

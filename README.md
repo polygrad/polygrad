@@ -186,6 +186,32 @@ Speedup = numpy_time / polygrad_time. Numpy time scales linearly with op count (
 
 This is relevant for workloads like Monte Carlo simulation, where millions of samples pass through a chain of numeric transforms (pricing models, risk calculations). The compute phase fuses into a single kernel with bounded memory, regardless of model complexity.
 
+### Local absolute smoke benchmarks
+
+Use this before commits that touch scheduler, rewrite, codegen, runtime, or
+tensor realization hot paths:
+
+```bash
+make bench-local-baseline      # once per machine/configuration
+make bench-smoke-regression    # run current smoke suite and compare locally
+```
+
+The local baseline is written under `bench/baselines/local/`, which is ignored
+by git because absolute timings are machine-specific. The comparator fails only
+when a workload exceeds both its relative and absolute threshold, so tiny
+microsecond workloads do not fail on normal jitter while real regressions still
+trip the gate.
+
+CI/self-hosted runners can provide an explicit checked or artifact-managed
+baseline:
+
+```bash
+make bench-ci-regression BENCH_CI_BASELINE=bench/baselines/ci/runner.json
+```
+
+These smoke benchmarks are not a replacement for tinygrad parity or model
+benchmarks. They are a fast guard for local hot-path regressions.
+
 ### Relative benchmarks
 
 `make bench-ratios` runs polygrad against numpy, tinygrad, and PyTorch on a standard workload suite. Results are reported as speedup ratios (polygrad_time / baseline_time) which are stable across hardware:

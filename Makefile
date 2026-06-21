@@ -7,8 +7,8 @@ LDFLAGS_DEBUG = -lm -ldl -fsanitize=address,undefined
 # Keep LeakSanitizer enabled by default for the native debug test binary.
 # Driver/runtime targets can still opt out when investigating external runtime
 # leaks:
-#   make test-cuda ASAN_OPTIONS=detect_leaks=0,protect_shadow_gap=0
-ASAN_OPTIONS ?= detect_leaks=1,protect_shadow_gap=0
+#   make test-cuda ASAN_OPTIONS=detect_leaks=0:protect_shadow_gap=0
+ASAN_OPTIONS ?= detect_leaks=1:protect_shadow_gap=0
 UBSAN_OPTIONS ?= print_stacktrace=1:halt_on_error=1
 SAN_RUN = ASAN_OPTIONS=$(ASAN_OPTIONS) UBSAN_OPTIONS=$(UBSAN_OPTIONS)
 EMCC ?= emcc
@@ -73,7 +73,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -146,6 +146,36 @@ bench: build/bench_polygrad
 build/bench_polygrad: $(SRC) $(CODEC_SRC) bench/bench_polygrad.c
 	@mkdir -p build
 	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+
+BENCH_SMOKE_JSON ?= bench/results/smoke-latest.json
+BENCH_LOCAL_BASELINE ?= bench/baselines/local/$(shell hostname -s)-cpu.json
+BENCH_BASELINE ?= $(BENCH_LOCAL_BASELINE)
+BENCH_CI_BASELINE ?=
+BENCH_SMOKE_ARGS ?=
+BENCH_COMPARE_ARGS ?=
+
+build/bench_smoke: $(SRC) $(CODEC_SRC) bench/bench_smoke.c
+	@mkdir -p build
+	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+
+bench-smoke: build/bench_smoke
+	$(PYTHON) bench/bench_smoke.py --runner $< --output $(BENCH_SMOKE_JSON) $(BENCH_SMOKE_ARGS)
+
+bench-local-baseline: build/bench_smoke
+	$(PYTHON) bench/bench_smoke.py --runner $< --output $(BENCH_LOCAL_BASELINE) $(BENCH_SMOKE_ARGS)
+	@echo "Updated local benchmark baseline: $(BENCH_LOCAL_BASELINE)"
+
+bench-update-local-baseline: bench-local-baseline
+
+bench-smoke-regression: bench-smoke
+	$(PYTHON) bench/bench_compare_abs.py $(BENCH_BASELINE) $(BENCH_SMOKE_JSON) $(BENCH_COMPARE_ARGS)
+
+bench-ci-regression: bench-smoke
+	@if [ -z "$(BENCH_CI_BASELINE)" ]; then \
+		echo "Set BENCH_CI_BASELINE=path/to/runner-specific-baseline.json"; \
+		exit 2; \
+	fi
+	$(PYTHON) bench/bench_compare_abs.py $(BENCH_CI_BASELINE) $(BENCH_SMOKE_JSON) $(BENCH_COMPARE_ARGS)
 
 ifeq ($(HAS_CUDA), 1)
 bench-cuda: build/bench_cuda
