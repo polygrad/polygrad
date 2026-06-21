@@ -299,6 +299,8 @@ class Instance:
         ctx_key = _ptr_value(ctx)
         for name, _, tensor, _ in parsed:
             _check_ctx(name, tensor, ctx, ctx_key)
+            if tensor._requires_grad is not None:
+                tensor._sync_core_requires_grad(force=True)
 
         keepalive = []
         binding_rows = []
