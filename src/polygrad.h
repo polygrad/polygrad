@@ -600,6 +600,11 @@ struct PolyUOp {
   PolyArg arg;
   int32_t tag;
   uint32_t hash;
+  bool minmax_cached;
+  int64_t minmax_vmin;
+  int64_t minmax_vmax;
+  void *ranges_cache;
+  void *ended_ranges_cache;
 };
 
 /* Context owns the arena, CSE cache, schedule/program caches, and all UOps */
@@ -677,9 +682,10 @@ PolyUOp **poly_toposort_ex_user(
 /* Per-pass cache for UOp queries (ranges, vmin/vmax) *
  * Tinygrad caches every queryable UOp property as @functools.cached_property
  * on the immutable UOp instance, which gives per-UOp-lifetime memoization
- * for free. Polygrad's UOps are also immutable (arena-allocated, hash-consed)
- * but we keep the cache external so it can be scoped to one rewrite pass
- * and thrown away cleanly.
+ * for free. Polygrad's UOps are also immutable (arena-allocated, hash-consed),
+ * and the default min/max query caches directly on the UOp. Callers may still
+ * pass their own PolyUOpCache to scope batch/rewrite-local range queries and
+ * throw those maps away cleanly.
  *
  * PolyUOpCache unifies per-UOp caches that Phase D's reduce_collapse
  * driver queries together:
@@ -720,9 +726,9 @@ void poly_uop_cache_destroy(PolyUOpCache *c);
  * where ended_ranges() matches ops.py:351-358 (trailing srcs past range_start,
  * AFTER: recursive flatten, CONTRACT: filter by axis_id). See src/uop.c.
  *
- * Every helper has a public one-off entry point (allocates a throwaway cache
- * per call, destroys on return) and an `_ex` variant that takes a caller-
- * owned PolyUOpCache for batch queries. Use the `_ex` form in any hot loop. */
+ * Every helper has a public entry point and an `_ex` variant that takes a
+ * caller-owned PolyUOpCache for batch queries. Use the `_ex` form in hot loops
+ * that need a pass-local cache distinct from UOp-local cached properties. */
 /* Returns the terminal buffer-identity UOp (BUFFER / BUFFER_VIEW / PARAM)
  * after unwrapping RESHAPE/MULTI, or NULL if `u` has no buffer identity. */
 const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u);

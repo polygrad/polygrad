@@ -144,14 +144,34 @@ int poly_collect_ordered_buffers(
     PolyUOp **ordered,
     int max_bufs
 ) {
-  PolyUOp **all = NULL;
-  int n_all = 0;
-  if (!poly_collect_ordered_buffers_alloc(ctx, tensor_sink, &all, &n_all)) return 0;
-  int n_copy = n_all < max_bufs ? n_all : max_bufs;
-  for (int i = 0; i < n_copy; i++)
-    ordered[i] = all[i];
-  free(all);
-  return n_copy;
+  if (!ctx || !tensor_sink || !ordered || max_bufs <= 0) return 0;
+  int n = 0;
+
+  /* Output buffers first */
+  for (int i = 0; i < tensor_sink->n_src; i++) {
+    PolyUOp *store = tensor_sink->src[i];
+    if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
+        store->src[0]->op == POLY_OP_BUFFER) {
+      PolyUOp *buf = store->src[0];
+      if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, buf)) {
+        if (n < max_bufs) ordered[n] = buf;
+        n++;
+      }
+    }
+  }
+
+  /* Input buffers in toposort order */
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, tensor_sink, &n_topo);
+  if (!topo && n_topo > 0) return 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op != POLY_OP_BUFFER) continue;
+    if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, topo[i])) {
+      if (n < max_bufs) ordered[n] = topo[i];
+      n++;
+    }
+  }
+  return n;
 }
 
 /* Weak context cleanup hook called from ctx.c when this translation unit is

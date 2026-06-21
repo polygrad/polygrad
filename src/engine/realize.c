@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Tinygrad's callify state is list/dict-backed. Keep the same semantics in C:
  * the initial sizes match the old fixed caps, but both grow when needed. */
@@ -25,6 +26,7 @@ typedef struct {
   PolyUOp **items;
   int n;
   int cap;
+  PolyUOp *stack[POLY_TRANSFORM_TO_CALL_INITIAL_VIEWS];
 } PolyTransformViewStack;
 
 typedef struct {
@@ -40,7 +42,7 @@ typedef struct {
 
 static void poly_transform_view_stack_free(PolyTransformViewStack *views) {
   if (!views) return;
-  free(views->items);
+  if (views->items != views->stack) free(views->items);
   views->items = NULL;
   views->n = 0;
   views->cap = 0;
@@ -48,9 +50,19 @@ static void poly_transform_view_stack_free(PolyTransformViewStack *views) {
 
 static bool poly_transform_view_stack_push(PolyTransformViewStack *views, PolyUOp *u) {
   if (!views || !u) return false;
+  if (!views->items) {
+    views->items = views->stack;
+    views->cap = (int)(sizeof(views->stack) / sizeof(views->stack[0]));
+  }
   if (views->n >= views->cap) {
     int new_cap = views->cap ? views->cap * 2 : POLY_TRANSFORM_TO_CALL_INITIAL_VIEWS;
-    PolyUOp **new_items = realloc(views->items, (size_t)new_cap * sizeof(PolyUOp *));
+    PolyUOp **new_items = NULL;
+    if (views->items == views->stack) {
+      new_items = malloc((size_t)new_cap * sizeof(PolyUOp *));
+      if (new_items) memcpy(new_items, views->stack, (size_t)views->n * sizeof(PolyUOp *));
+    } else {
+      new_items = realloc(views->items, (size_t)new_cap * sizeof(PolyUOp *));
+    }
     if (!new_items) return false;
     views->items = new_items;
     views->cap = new_cap;
@@ -226,13 +238,21 @@ static bool poly_transform_to_call_collect_pending_effects(
 static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
   if (!ctx || !sink || sink->op != POLY_OP_SINK) return sink;
 
-  PolyUOp **ordered = NULL;
+  PolyUOp *ordered_stack[16];
+  PolyUOp **ordered = ordered_stack;
   int n_ordered = 0;
-  if (!poly_collect_ordered_buffers_alloc(ctx, sink, &ordered, &n_ordered)) return NULL;
+  n_ordered = poly_collect_ordered_buffers(
+      ctx, sink, ordered_stack, (int)(sizeof(ordered_stack) / sizeof(ordered_stack[0]))
+  );
+  if (n_ordered > (int)(sizeof(ordered_stack) / sizeof(ordered_stack[0]))) {
+    ordered = NULL;
+    n_ordered = 0;
+    if (!poly_collect_ordered_buffers_alloc(ctx, sink, &ordered, &n_ordered)) return NULL;
+  }
   int n_src = 1 + n_ordered;
   PolyUOp **src = calloc((size_t)n_src, sizeof(PolyUOp *));
   if (!src) {
-    free(ordered);
+    if (ordered != ordered_stack) free(ordered);
     return NULL;
   }
 
@@ -241,7 +261,7 @@ static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
     src[1 + i] = ordered[i];
 
   PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_src, poly_arg_none());
-  free(ordered);
+  if (ordered != ordered_stack) free(ordered);
   free(src);
   return call;
 }

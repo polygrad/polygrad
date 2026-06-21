@@ -359,22 +359,36 @@ static PolyDevice poly_exec_item_device(
 static bool collect_external_buf_order_from_kernel_graph(
     PolyUOp *kernel_graph,
     PolyUOp ***out_buf_order,
-    int *out_n_external
+    int *out_n_external,
+    PolyUOp **stack_buf_order,
+    bool *out_owned
 ) {
-  if (!kernel_graph || !out_buf_order || !out_n_external) return false;
-  *out_buf_order = NULL;
+  if (!kernel_graph || !out_buf_order || !out_n_external || !out_owned) return false;
+  *out_buf_order = stack_buf_order;
   *out_n_external = 0;
+  *out_owned = false;
+
+  PolyUOp *all_stack[POLY_MAX_REALIZE_BUFS];
+  int n_all = 0, n_visited = 0;
+  poly_collect_buf_order(kernel_graph, all_stack, &n_all, NULL, &n_visited);
+  if (n_all <= POLY_MAX_REALIZE_BUFS) {
+    int n_external = 0;
+    for (int i = 0; i < n_all; i++) {
+      if (!is_intermediate_buffer_uop(all_stack[i])) stack_buf_order[n_external++] = all_stack[i];
+    }
+    *out_n_external = n_external;
+    return true;
+  }
 
   PolyUOp **all_bufs = NULL;
-  int n_all = 0, n_visited = 0;
   if (!poly_collect_buf_order_alloc(kernel_graph, &all_bufs, &n_all, &n_visited)) return false;
-
   int n_external = 0;
   for (int i = 0; i < n_all; i++) {
     if (!is_intermediate_buffer_uop(all_bufs[i])) all_bufs[n_external++] = all_bufs[i];
   }
   *out_buf_order = all_bufs;
   *out_n_external = n_external;
+  *out_owned = true;
   return true;
 }
 
@@ -892,22 +906,31 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   }
 
   /* --- Collect pre-strip buffer ordering -------------------------------- */
-  PolyUOp **buf_order_orig = NULL;
+  PolyUOp *buf_order_orig_stack[POLY_MAX_REALIZE_BUFS];
+  PolyUOp **buf_order_orig = buf_order_orig_stack;
   int n_bufs_orig = 0, n_dfs = 0;
-  if (!poly_collect_buf_order_alloc(sink, &buf_order_orig, &n_bufs_orig, &n_dfs)) return NULL;
+  bool buf_order_orig_owned = false;
+  poly_collect_buf_order(sink, buf_order_orig_stack, &n_bufs_orig, NULL, &n_dfs);
+  if (n_bufs_orig > POLY_MAX_REALIZE_BUFS) {
+    buf_order_orig = NULL;
+    n_bufs_orig = 0;
+    n_dfs = 0;
+    if (!poly_collect_buf_order_alloc(sink, &buf_order_orig, &n_bufs_orig, &n_dfs)) return NULL;
+    buf_order_orig_owned = true;
+  }
   double t_bufs = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *used_vars[64];
   int n_used_vars = collect_define_vars(ctx, sink, used_vars, 64);
   if (n_used_vars < 0) {
-    free(buf_order_orig);
+    if (buf_order_orig_owned) free(buf_order_orig);
     return NULL;
   }
 
   PolyVarBinding bind_vals[64];
   int n_bind_vals = collect_bind_defaults(ctx, sink, used_vars, n_used_vars, bind_vals, 64);
   if (n_bind_vals < 0) {
-    free(buf_order_orig);
+    if (buf_order_orig_owned) free(buf_order_orig);
     return NULL;
   }
   double t_vars = timing ? poly_now_ms() : 0.0;
@@ -932,13 +955,13 @@ PolySchedule *poly_complete_create_schedule_with_vars(
     double t_lower0 = timing ? poly_now_ms() : 0.0;
     PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, sink);
     if (!kernel_graph) {
-      free(buf_order_orig);
+      if (buf_order_orig_owned) free(buf_order_orig);
       return NULL;
     }
     PolyUOp *linear_template = poly_lower_sink_to_linear(ctx, sink, mode);
     double t_lower1 = timing ? poly_now_ms() : 0.0;
     if (!linear_template) {
-      free(buf_order_orig);
+      if (buf_order_orig_owned) free(buf_order_orig);
       return NULL;
     }
     uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
@@ -958,7 +981,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
       );
       fflush(stderr);
     }
-    free(buf_order_orig);
+    if (buf_order_orig_owned) free(buf_order_orig);
     return ps;
   }
 
@@ -966,7 +989,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, sink);
   double t_kernel1 = timing ? poly_now_ms() : 0.0;
   if (!kernel_graph) {
-    free(buf_order_orig);
+    if (buf_order_orig_owned) free(buf_order_orig);
     return NULL;
   }
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
@@ -985,7 +1008,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
     );
     fflush(stderr);
   }
-  free(buf_order_orig);
+  if (buf_order_orig_owned) free(buf_order_orig);
   return ps;
 }
 
@@ -995,15 +1018,19 @@ static PolySchedule *poly_create_schedule_uncached(PolyCtx *ctx, PolyUOp *kernel
     return NULL;
   }
 
-  PolyUOp **buf_order = NULL;
+  PolyUOp *buf_order_stack[POLY_MAX_REALIZE_BUFS];
+  PolyUOp **buf_order = buf_order_stack;
   int n_external = 0;
-  if (!collect_external_buf_order_from_kernel_graph(kernel_graph, &buf_order, &n_external))
+  bool buf_order_owned = false;
+  if (!collect_external_buf_order_from_kernel_graph(
+          kernel_graph, &buf_order, &n_external, buf_order_stack, &buf_order_owned
+      ))
     return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolySchedule *schedule = build_schedule_from_kernel_graph(
       ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, NULL
   );
-  free(buf_order);
+  if (buf_order_owned) free(buf_order);
   return schedule;
 }
 
@@ -1020,15 +1047,19 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
       poly_schedule_cache_enabled() ? poly_lower_kernel_graph_to_linear(ctx, kernel_graph) : NULL;
   if (poly_schedule_cache_enabled() && !linear_template) return NULL;
 
-  PolyUOp **buf_order = NULL;
+  PolyUOp *buf_order_stack[POLY_MAX_REALIZE_BUFS];
+  PolyUOp **buf_order = buf_order_stack;
   int n_external = 0;
-  if (!collect_external_buf_order_from_kernel_graph(kernel_graph, &buf_order, &n_external))
+  bool buf_order_owned = false;
+  if (!collect_external_buf_order_from_kernel_graph(
+          kernel_graph, &buf_order, &n_external, buf_order_stack, &buf_order_owned
+      ))
     return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolySchedule *schedule = build_schedule_from_kernel_graph(
       ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, linear_template
   );
-  free(buf_order);
+  if (buf_order_owned) free(buf_order);
   return schedule;
 }
 
@@ -1323,6 +1354,7 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
 
   PolyUOp **external_bufs = NULL;
   bool external_bufs_owned = false;
+  PolyUOp *external_bufs_stack[POLY_MAX_REALIZE_BUFS];
   int n_external = 0;
   if (external_buf_order) {
     /* LINEAR CALL params are replayed later against the schedule caller's
@@ -1334,11 +1366,12 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
   } else {
     /* Kernel-graph callers do not have a pre-rangeify SINK, so their natural
      * external order is the one discovered from the kernel graph itself. */
-    if (!collect_external_buf_order_from_kernel_graph(kernel_graph, &external_bufs, &n_external)) {
+    if (!collect_external_buf_order_from_kernel_graph(
+            kernel_graph, &external_bufs, &n_external, external_bufs_stack, &external_bufs_owned
+        )) {
       poly_schedule_free(schedule);
       return NULL;
     }
-    external_bufs_owned = true;
   }
   PolyUOp **linear_src = calloc((size_t)schedule->n_items, sizeof(PolyUOp *));
   if (!linear_src) {
@@ -1412,7 +1445,39 @@ static bool schedule_cache_stack_push(PolyUOp ***stack, int *sp, int *cap, PolyU
   return true;
 }
 
-static bool schedule_cache_collect_inputs(
+static bool schedule_cache_collect_inputs_fast(
+    PolyUOp *u,
+    PolyUOp **input_order,
+    int *n_inputs,
+    PolyUOp **visited,
+    int *n_visited,
+    int depth
+) {
+  if (!u) return true;
+  if (!input_order || !n_inputs || !visited || !n_visited) return false;
+  if (depth > 512) return false;
+
+  for (int i = 0; i < *n_visited; i++)
+    if (visited[i] == u) return true;
+  if (*n_visited >= POLY_MAX_STRUCT_NODES) return false;
+  visited[(*n_visited)++] = u;
+
+  if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) {
+    if (*n_inputs >= POLY_MAX_REALIZE_BUFS) return false;
+    input_order[(*n_inputs)++] = u;
+    return true;
+  }
+
+  for (int i = 0; i < u->n_src; i++) {
+    if (!schedule_cache_collect_inputs_fast(
+            u->src[i], input_order, n_inputs, visited, n_visited, depth + 1
+        ))
+      return false;
+  }
+  return true;
+}
+
+static bool schedule_cache_collect_inputs_alloc(
     PolyUOp *u,
     PolyUOp ***out_input_order,
     int *n_inputs,
@@ -1515,14 +1580,26 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
     fflush(stderr);
   }
 
-  PolyUOp **input_order = NULL;
+  PolyUOp *input_order_stack[POLY_MAX_REALIZE_BUFS];
+  PolyUOp *input_visited_stack[POLY_MAX_STRUCT_NODES];
+  PolyUOp **input_order = input_order_stack;
+  bool input_order_owned = false;
   int n_inputs = 0, n_visited = 0;
-  if (!schedule_cache_collect_inputs(sink, &input_order, &n_inputs, &n_visited)) return NULL;
+  if (!schedule_cache_collect_inputs_fast(
+          sink, input_order_stack, &n_inputs, input_visited_stack, &n_visited, 0
+      )) {
+    input_order = NULL;
+    n_inputs = 0;
+    n_visited = 0;
+    if (!schedule_cache_collect_inputs_alloc(sink, &input_order, &n_inputs, &n_visited))
+      return NULL;
+    input_order_owned = true;
+  }
   double t_inputs = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *cache_key = schedule_cache_key_for_sink(ctx, sink, input_order, n_inputs);
   if (!cache_key) {
-    free(input_order);
+    if (input_order_owned) free(input_order);
     return NULL;
   }
   uint32_t cache_hash = poly_structural_hash(cache_key) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
@@ -1541,7 +1618,7 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
       );
       fflush(stderr);
     }
-    free(input_order);
+    if (input_order_owned) free(input_order);
     return cached;
   }
   if (timing) {
@@ -1554,26 +1631,35 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
     fflush(stderr);
   }
 
-  PolyUOp **raw_external_bufs = NULL;
+  PolyUOp *raw_external_stack[POLY_MAX_REALIZE_BUFS];
+  PolyUOp **raw_external_bufs = raw_external_stack;
   int n_raw_external = 0, n_raw_visited = 0;
-  if (!poly_collect_buf_order_alloc(sink, &raw_external_bufs, &n_raw_external, &n_raw_visited)) {
-    free(input_order);
-    return NULL;
+  bool raw_external_owned = false;
+  poly_collect_buf_order(sink, raw_external_stack, &n_raw_external, NULL, &n_raw_visited);
+  if (n_raw_external > POLY_MAX_REALIZE_BUFS) {
+    raw_external_bufs = NULL;
+    n_raw_external = 0;
+    n_raw_visited = 0;
+    if (!poly_collect_buf_order_alloc(sink, &raw_external_bufs, &n_raw_external, &n_raw_visited)) {
+      if (input_order_owned) free(input_order);
+      return NULL;
+    }
+    raw_external_owned = true;
   }
   double t_raw = timing ? poly_now_ms() : 0.0;
 
   PolyUOp *kernel_graph = poly_get_kernel_graph(ctx, sink);
   if (!kernel_graph) {
-    free(input_order);
-    free(raw_external_bufs);
+    if (input_order_owned) free(input_order);
+    if (raw_external_owned) free(raw_external_bufs);
     return NULL;
   }
   double t_kernel = timing ? poly_now_ms() : 0.0;
   PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(
       ctx, kernel_graph, raw_external_bufs, n_raw_external
   );
-  free(input_order);
-  free(raw_external_bufs);
+  if (input_order_owned) free(input_order);
+  if (raw_external_owned) free(raw_external_bufs);
   if (!linear) return NULL;
   double t_linear = timing ? poly_now_ms() : 0.0;
   if (poly_schedule_cache_enabled())

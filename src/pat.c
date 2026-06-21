@@ -197,7 +197,7 @@ PolyUOp *poly_bind(const PolyBindings *b, const char *name) {
 
 void poly_bindings_free(PolyBindings *b) {
   if (!b) return;
-  free(b->extra);
+  if (b->extra) free(b->extra);
   b->extra = NULL;
   b->extra_cap = 0;
   b->n = 0;
@@ -541,25 +541,48 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
        * in C the equivalent hard failure is returning NULL from this pass. */
       if (bottom_up && pm) {
         PolyUOp *cur = new_n;
-        PolyMap *seen = poly_map_new(16);
-        if (!seen) {
-          fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
-          failed = true;
-          goto cleanup;
-        }
+        PolyUOp *seen_inline[16];
+        int n_seen_inline = 0;
+        PolyMap *seen = NULL;
         while (cur) {
-          if (poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq)) {
+          bool already_seen = false;
+          for (int si = 0; si < n_seen_inline; si++) {
+            if (seen_inline[si] == cur) {
+              already_seen = true;
+              break;
+            }
+          }
+          if (!already_seen && seen)
+            already_seen = poly_map_get(seen, poly_ptr_hash(cur), cur, poly_ptr_eq) != NULL;
+          if (already_seen) {
             fprintf(stderr, "polygrad: graph_rewrite fixed-point cycle\n");
-            poly_map_destroy(seen);
+            if (seen) poly_map_destroy(seen);
             failed = true;
             goto cleanup;
           }
-          poly_map_set(seen, poly_ptr_hash(cur), cur, (void *)(uintptr_t)1, poly_ptr_eq);
+          if (n_seen_inline < (int)(sizeof(seen_inline) / sizeof(seen_inline[0]))) {
+            seen_inline[n_seen_inline++] = cur;
+          } else {
+            if (!seen) {
+              seen = poly_map_new(32);
+              if (!seen) {
+                fprintf(stderr, "polygrad: graph_rewrite allocation failure\n");
+                failed = true;
+                goto cleanup;
+              }
+              for (int si = 0; si < n_seen_inline; si++)
+                poly_map_set(
+                    seen, poly_ptr_hash(seen_inline[si]), seen_inline[si],
+                    (void *)(uintptr_t)1, poly_ptr_eq
+                );
+            }
+            poly_map_set(seen, poly_ptr_hash(cur), cur, (void *)(uintptr_t)1, poly_ptr_eq);
+          }
           PolyUOp *next = poly_pm_rewrite(pm, ctx, cur);
           if (!next || next == cur) break;
           cur = next;
         }
-        poly_map_destroy(seen);
+        if (seen) poly_map_destroy(seen);
         new_n = cur;
       }
 

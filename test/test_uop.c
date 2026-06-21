@@ -104,6 +104,21 @@ TEST(uop, cse_same_const) {
   PASS();
 }
 
+TEST(uop, cse_hash_matches_dtype_eq_for_fmtless_scalar) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType fmtless = POLY_FLOAT32;
+  fmtless.fmt = 0;
+
+  ASSERT_TRUE(poly_dtype_eq(POLY_FLOAT32, fmtless));
+
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, fmtless, poly_arg_float(0.0));
+
+  ASSERT_PTR_EQ(a, b);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, cse_different_const) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
