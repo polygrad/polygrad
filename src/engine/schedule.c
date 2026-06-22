@@ -341,7 +341,7 @@ static void poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
   info->has_local_size = true;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, body, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
     if (!u || u->op != POLY_OP_SPECIAL || u->n_src <= 0 || u->arg.kind != POLY_ARG_STRING)
@@ -364,6 +364,7 @@ static void poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
       info->global_exprs[dim] = bound;
     }
   }
+  poly_toposort_free(topo);
 }
 
 static int poly_call_get_outs_ins(PolyCtx *ctx, PolyUOp *call, bool *outs, bool *ins, int n_args) {
@@ -1591,7 +1592,7 @@ static bool uop_ptr_in_list(PolyUOp *u, PolyUOp **list, int n) {
 
 static int collect_define_vars(PolyCtx *ctx, PolyUOp *root, PolyUOp **out, int cap) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
   if (!topo) return 0;
 
   int n = 0;
@@ -1600,10 +1601,12 @@ static int collect_define_vars(PolyCtx *ctx, PolyUOp *root, PolyUOp **out, int c
     if (!u || u->op != POLY_OP_DEFINE_VAR || uop_ptr_in_list(u, out, n)) continue;
     if (n >= cap) {
       fprintf(stderr, "polygrad: too many DEFINE_VARs in schedule (cap=%d)\n", cap);
+      poly_toposort_free(topo);
       return -1;
     }
     out[n++] = u;
   }
+  poly_toposort_free(topo);
   return n;
 }
 
@@ -1622,7 +1625,7 @@ static int collect_bind_defaults(
     int cap
 ) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
   if (!topo) return 0;
 
   int n = 0;
@@ -1635,6 +1638,7 @@ static int collect_bind_defaults(
     if (!uop_ptr_in_list(var, used_vars, n_used_vars)) continue;
     if (val->arg.kind != POLY_ARG_INT) {
       fprintf(stderr, "polygrad: BIND default for DEFINE_VAR must be integer CONST\n");
+      poly_toposort_free(topo);
       return -1;
     }
 
@@ -1645,16 +1649,19 @@ static int collect_bind_defaults(
         fprintf(
             stderr, "polygrad: BIND mismatch for DEFINE_VAR: %d != %d\n", out[existing].value, value
         );
+        poly_toposort_free(topo);
         return -1;
       }
       continue;
     }
     if (n >= cap) {
       fprintf(stderr, "polygrad: too many BIND defaults (cap=%d)\n", cap);
+      poly_toposort_free(topo);
       return -1;
     }
     out[n++] = (PolyVarBinding){.var = var, .value = value};
   }
+  poly_toposort_free(topo);
   return n;
 }
 
