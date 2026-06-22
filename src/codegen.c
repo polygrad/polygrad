@@ -386,7 +386,7 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
     s->buf_reach[i] = 0;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
 
   /* Collect unique RANGE ops with vmax > 0 and INDEX ops */
   int64_t max_id = -1;
@@ -466,6 +466,7 @@ static void sched_init(OptScheduler *s, PolyCtx *ctx, PolyUOp *sink) {
     free(indices);
     free(reach);
   }
+  poly_toposort_free(topo);
 }
 
 /* Refresh rngs, shapes, types after a shift_to modifies the AST */
@@ -477,7 +478,7 @@ static void sched_refresh(OptScheduler *s) {
   s->overflow = false;
 
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(s->ctx, s->ast, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(s->ctx, s->ast, &n_topo);
   int64_t max_id = -1;
 
   for (int i = 0; i < n_topo; i++) {
@@ -532,14 +533,12 @@ static void sched_refresh(OptScheduler *s) {
   for (int i = 0; i < SCHED_MAX_BUFS; i++)
     s->buf_reach[i] = 0;
   if (!s->overflow && s->n_bufs > 0 && s->n_rngs > 0 && s->n_rngs <= 64) {
-    int n_topo2 = 0;
-    PolyUOp **topo2 = poly_toposort(s->ctx, s->ast, &n_topo2);
-    uint64_t *reach = build_reachability_bitmask(topo2, n_topo2, s->rngs, s->n_rngs);
-    PolyMap *idx_map = poly_map_new((size_t)(n_topo2 < 64 ? 64 : (size_t)n_topo2 * 2));
-    int *indices = (int *)malloc((size_t)n_topo2 * sizeof(int));
-    for (int i = 0; i < n_topo2; i++) {
+    uint64_t *reach = build_reachability_bitmask(topo, n_topo, s->rngs, s->n_rngs);
+    PolyMap *idx_map = poly_map_new((size_t)(n_topo < 64 ? 64 : (size_t)n_topo * 2));
+    int *indices = (int *)malloc((size_t)n_topo * sizeof(int));
+    for (int i = 0; i < n_topo; i++) {
       indices[i] = i;
-      poly_map_set(idx_map, poly_ptr_hash(topo2[i]), topo2[i], &indices[i], poly_ptr_eq);
+      poly_map_set(idx_map, poly_ptr_hash(topo[i]), topo[i], &indices[i], poly_ptr_eq);
     }
     for (int bi = 0; bi < s->n_bufs; bi++) {
       int *pidx =
@@ -551,6 +550,7 @@ static void sched_refresh(OptScheduler *s) {
     free(indices);
     free(reach);
   }
+  poly_toposort_free(topo);
 }
 
 /* shift_to_ex: split a RANGE into two. Port of tinygrad Scheduler.shift_to.
