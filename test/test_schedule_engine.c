@@ -18,11 +18,11 @@
 static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
   PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!schedule) return NULL;
-  if (schedule->n_items < 1 || !schedule->items[schedule->n_items - 1].root) {
+  if (schedule->template->n_calls < 1 || !poly_schedule_call_body(schedule, schedule->template->n_calls - 1)) {
     poly_schedule_free(schedule);
     return NULL;
   }
-  PolyUOp *root = schedule->items[schedule->n_items - 1].root;
+  PolyUOp *root = poly_schedule_call_body(schedule, schedule->template->n_calls - 1);
   poly_schedule_free(schedule);
   return root;
 }
@@ -148,7 +148,7 @@ TEST(sched, vecadd_e2e) {
   PASS();
 }
 
-TEST(sched, direct_sink_copy_uses_copy_exec_item) {
+TEST(sched, direct_sink_copy_uses_copy_call) {
   int N = 8;
   float src_d[8], dst_d[8];
   for (int i = 0; i < N; i++) {
@@ -163,10 +163,10 @@ TEST(sched, direct_sink_copy_uses_copy_exec_item) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
-  ASSERT_EQ(sched->items[0].kind, POLY_EXEC_COPY);
-  ASSERT_TRUE(sched->items[0].root->op != POLY_OP_SINK);
-  ASSERT_TRUE(sched->items[0].root->op != POLY_OP_STORE);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
+  ASSERT_TRUE(poly_schedule_call_is_copy(sched, 0));
+  ASSERT_TRUE(poly_schedule_call_body(sched, 0)->op != POLY_OP_SINK);
+  ASSERT_TRUE(poly_schedule_call_body(sched, 0)->op != POLY_OP_STORE);
 
   poly_buffer_set(ctx, dst, dst_d, sizeof(dst_d), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, src, src_d, sizeof(src_d), POLY_DEVICE_CPU);
@@ -254,11 +254,11 @@ TEST(sched, placement_copy_item_uses_copy_root_and_two_slots) {
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, physical));
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 2);
-  ASSERT_EQ(sched->items[0].kind, POLY_EXEC_COPY);
-  ASSERT_NOT_NULL(sched->items[0].root);
-  ASSERT_INT_EQ(sched->items[0].root->op, POLY_OP_COPY);
-  ASSERT_INT_EQ(sched->items[0].n_buf_slots, 2);
+  ASSERT_INT_EQ(sched->template->n_calls, 2);
+  ASSERT_TRUE(poly_schedule_call_is_copy(sched, 0));
+  ASSERT_NOT_NULL(poly_schedule_call_body(sched, 0));
+  ASSERT_INT_EQ(poly_schedule_call_body(sched, 0)->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(poly_schedule_call_n_buffer_args(sched, 0), 2);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -290,18 +290,18 @@ TEST(sched, placement_computed_copy_source_materializes_before_copy) {
 
   int n_copy = 0;
   int n_compute = 0;
-  for (int i = 0; i < sched->n_items; i++) {
-    if (sched->items[i].kind == POLY_EXEC_COPY) {
+  for (int i = 0; i < sched->template->n_calls; i++) {
+    if (poly_schedule_call_is_copy(sched, i)) {
       n_copy++;
-      ASSERT_INT_EQ(sched->items[i].root->op, POLY_OP_COPY);
-      ASSERT_INT_EQ(sched->items[i].n_buf_slots, 2);
+      ASSERT_INT_EQ(poly_schedule_call_body(sched, i)->op, POLY_OP_COPY);
+      ASSERT_INT_EQ(poly_schedule_call_n_buffer_args(sched, i), 2);
     } else {
       n_compute++;
-      ASSERT_INT_EQ(count_root_ops(ctx, sched->items[i].root, POLY_OP_COPY), 0);
-      ASSERT_TRUE(sched->items[i].n_buf_slots >= 1);
-      int dst_slot = sched->items[i].buf_slot_indices[0];
-      ASSERT_TRUE(dst_slot >= 0 && dst_slot < sched->n_buf_slots);
-      ASSERT_INT_EQ(sched->buf_slots[dst_slot].device, POLY_DEVICE_CPU);
+      ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, i), POLY_OP_COPY), 0);
+      ASSERT_TRUE(poly_schedule_call_n_buffer_args(sched, i) >= 1);
+      int dst_slot = poly_schedule_call_buffer_slot(sched, i, 0);
+      ASSERT_TRUE(dst_slot >= 0 && dst_slot < sched->template->n_buf_slots);
+      ASSERT_INT_EQ(sched->template->buf_slots[dst_slot].device, POLY_DEVICE_CPU);
     }
   }
   ASSERT_INT_EQ(n_compute, 1);
@@ -333,11 +333,11 @@ TEST(sched, placement_scalar_copy_operand_splits_before_compute) {
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
 
-  ASSERT_INT_EQ(sched->n_items, 2);
-  ASSERT_EQ(sched->items[0].kind, POLY_EXEC_COPY);
-  ASSERT_INT_EQ(sched->items[0].root->op, POLY_OP_COPY);
-  ASSERT_INT_EQ(sched->items[0].n_buf_slots, 2);
-  ASSERT_EQ(sched->items[1].kind, POLY_EXEC_COMPUTE);
+  ASSERT_INT_EQ(sched->template->n_calls, 2);
+  ASSERT_TRUE(poly_schedule_call_is_copy(sched, 0));
+  ASSERT_INT_EQ(poly_schedule_call_body(sched, 0)->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(poly_schedule_call_n_buffer_args(sched, 0), 2);
+  ASSERT_FALSE(poly_schedule_call_is_copy(sched, 1));
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -356,9 +356,9 @@ TEST(sched, max_reduce_tail_keeps_only_store_index_ptr_typed) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_TRUE(sched->n_items >= 1);
+  ASSERT_TRUE(sched->template->n_calls >= 1);
 
-  PolyUOp *tail = sched->items[sched->n_items - 1].root;
+  PolyUOp *tail = poly_schedule_call_body(sched, sched->template->n_calls - 1);
   ASSERT_NOT_NULL(tail);
   ASSERT_INT_EQ(count_param_index_ptrs(ctx, tail, true), 1);
   ASSERT_INT_EQ(count_param_index_ptrs(ctx, tail, false), 3);
@@ -919,20 +919,20 @@ TEST(sched, reduce_scalar_chain_e2e) {
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
   ASSERT_NOT_NULL(realized[0]);
-  ASSERT_INT_EQ(sched->n_items, 2);
+  ASSERT_INT_EQ(sched->template->n_calls, 2);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_REDUCE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_RANGE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_END), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_INDEX), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_RANGE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_END), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_INDEX), 2);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_REDUCE), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_RANGE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_END), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_INDEX), 3);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_ADD), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_REDUCE), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_RANGE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_INDEX), 3);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_ADD), 1);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
 
@@ -986,21 +986,21 @@ TEST(sched, reduce_vector_chain_e2e) {
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
   ASSERT_NOT_NULL(realized[0]);
-  ASSERT_INT_EQ(sched->n_items, 2);
+  ASSERT_INT_EQ(sched->template->n_calls, 2);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_REDUCE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_RANGE), 2);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_END), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_INDEX), 2);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_ADD), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_RANGE), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_INDEX), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_ADD), 1);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_REDUCE), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_RANGE), 2);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_END), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_INDEX), 3);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_ADD), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_REDUCE), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_RANGE), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_INDEX), 3);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_ADD), 2);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
 
@@ -1068,29 +1068,29 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
   ASSERT_NOT_NULL(sched);
   ASSERT_NOT_NULL(realized[0]);
   ASSERT_NOT_NULL(realized[1]);
-  ASSERT_INT_EQ(sched->n_items, 3);
+  ASSERT_INT_EQ(sched->template->n_calls, 3);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_REDUCE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_RANGE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_END), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_INDEX), 2);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_RANGE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_END), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_INDEX), 2);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_REDUCE), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_RANGE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_END), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_INDEX), 3);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_ADD), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[1].root, POLY_OP_MUL), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_REDUCE), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_RANGE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_INDEX), 3);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_ADD), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_MUL), 0);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_REDUCE), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_RANGE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_END), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_INDEX), 3);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_ADD), 0);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[2].root, POLY_OP_MUL), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_REDUCE), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_RANGE), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_INDEX), 3);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_ADD), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 2), POLY_OP_MUL), 1);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
 

@@ -115,8 +115,8 @@ function createNativeCore() {
     bufData(inst, i) {
       return binding.poly_instance_buf_data(inst, i)
     },
-    exportWeights(inst) {
-      return binding.poly_instance_export_weights(inst)
+    exportWeights(inst, flags) {
+      return binding.poly_instance_export_weights(inst, flags)
     },
     importWeights(inst, bytes) {
       return binding.poly_instance_import_weights(inst, bytes)
@@ -124,8 +124,8 @@ function createNativeCore() {
     exportIR(inst) {
       return binding.poly_instance_export_ir(inst)
     },
-    saveBundle(inst) {
-      return binding.poly_instance_save_bundle(inst)
+    saveBundle(inst, flags) {
+      return binding.poly_instance_save_bundle(inst, flags)
     },
     fromBundle(bytes) {
       const inst = binding.poly_instance_from_bundle(bytes)
@@ -188,8 +188,10 @@ function createNativeCore() {
     tokenizerVocabSize(tokPtr) { return binding.poly_tokenizer_vocab_size(tokPtr) },
     tokenizerBosId(tokPtr) { return binding.poly_tokenizer_bos_id(tokPtr) },
     tokenizerEosId(tokPtr) { return binding.poly_tokenizer_eos_id(tokPtr) },
-    setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay) {
-      return binding.poly_instance_set_optimizer(inst, kind, lr, beta1, beta2, eps, weightDecay)
+    setOptimizer(inst, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic) {
+      return binding.poly_instance_set_optimizer(
+        inst, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic
+      )
     },
     forward(inst, names, arrays) {
       return binding.poly_instance_forward(inst, names, arrays)

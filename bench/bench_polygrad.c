@@ -75,11 +75,16 @@ static int compile_from_sink(PolyCtx *ctx, PolyUOp *sink, const char *fn_name, P
   int n_lin = 0;
   PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!schedule) return 0;
-  if (schedule->n_items != 1 || schedule->items[0].kind != POLY_EXEC_COMPUTE) {
+  if (schedule->n_calls != 1 || poly_schedule_call_is_copy(schedule, 0)) {
     poly_schedule_free(schedule);
     return 0;
   }
-  PolyUOp **lin = poly_linearize(ctx, schedule->items[0].root, &n_lin);
+  PolyUOp *body = poly_schedule_call_body(schedule, 0);
+  if (!body) {
+    poly_schedule_free(schedule);
+    return 0;
+  }
+  PolyUOp **lin = poly_linearize(ctx, body, &n_lin);
   if (!lin) {
     poly_schedule_free(schedule);
     return 0;

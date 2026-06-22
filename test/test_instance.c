@@ -4,12 +4,14 @@
 
 #include "test_harness.h"
 #include "../src/instance.h"
+#include "../src/codegen.h"
 #include "../src/engine/schedule.h"
 #include "../src/ir.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include "../src/optim.h"
 #include "../src/tensor.h"
+#include "../src/safetensors.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -978,6 +980,213 @@ TEST(instance, train_step_adam) {
   PASS();
 }
 
+static int test_find_instance_buf(PolyInstance *inst, const char *name) {
+  for (int i = 0; i < poly_instance_buf_count(inst); i++)
+    if (strcmp(poly_instance_buf_name(inst, i), name) == 0) return i;
+  return -1;
+}
+
+static bool test_safetensors_has_name(PolySafetensorView *views, int n, const char *name) {
+  for (int i = 0; i < n; i++)
+    if (strcmp(views[i].name, name) == 0) return true;
+  return false;
+}
+
+static void test_safetensors_free_views(PolySafetensorView *views, int n, char *metadata) {
+  if (views) {
+    for (int i = 0; i < n; i++)
+      free(views[i].name);
+  }
+  free(views);
+  free(metadata);
+}
+
+TEST(instance, adam_optimizer_state_is_named_checkpoint_state) {
+  int ir_len = 0;
+  uint8_t *ir = make_train_ir(4, &ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t numel;
+  float *w = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_INT_EQ(numel, 4);
+  for (int i = 0; i < 4; i++)
+    w[i] = 0.5f;
+
+  ASSERT_INT_EQ(poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.05f, 0.9f, 0.999f, 1e-8f, 0.0f), 0);
+
+  float x[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float y[] = {3.0f, 3.0f, 3.0f, 3.0f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
+  float loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+
+  int b1_idx = test_find_instance_buf(inst, "optim.adam.b1_t");
+  int b2_idx = test_find_instance_buf(inst, "optim.adam.b2_t");
+  int m_idx = test_find_instance_buf(inst, "optim.adam.m.w");
+  int v_idx = test_find_instance_buf(inst, "optim.adam.v.w");
+  ASSERT_TRUE(b1_idx >= 0);
+  ASSERT_TRUE(b2_idx >= 0);
+  ASSERT_TRUE(m_idx >= 0);
+  ASSERT_TRUE(v_idx >= 0);
+  ASSERT_INT_EQ(poly_instance_buf_role(inst, b1_idx), POLY_ROLE_AUX);
+  ASSERT_INT_EQ(poly_instance_buf_role(inst, m_idx), POLY_ROLE_AUX);
+
+  int64_t n_b1 = 0;
+  float *b1 = poly_instance_buf_data(inst, b1_idx, &n_b1);
+  ASSERT_INT_EQ(n_b1, 1);
+  ASSERT_FLOAT_EQ(b1[0], 0.9f, 1e-6f);
+  int64_t n_m = 0;
+  float *m = poly_instance_buf_data(inst, m_idx, &n_m);
+  ASSERT_INT_EQ(n_m, 4);
+  ASSERT_TRUE(fabsf(m[0]) > 0.0f);
+
+  int weights_len = 0;
+  uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
+  ASSERT_NOT_NULL(weights);
+  int n_views = 0;
+  char *metadata = NULL;
+  PolySafetensorView *views = poly_safetensors_decode(weights, weights_len, &n_views, &metadata);
+  ASSERT_NOT_NULL(views);
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "w"));
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "optim.adam.b1_t"));
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "optim.adam.b2_t"));
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "optim.adam.m.w"));
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "optim.adam.v.w"));
+  test_safetensors_free_views(views, n_views, metadata);
+
+  int model_only_len = 0;
+  uint8_t *model_only =
+      poly_instance_export_weights_ex(inst, &model_only_len, POLY_EXPORT_WEIGHTS_PARAMS);
+  ASSERT_NOT_NULL(model_only);
+  n_views = 0;
+  metadata = NULL;
+  views = poly_safetensors_decode(model_only, model_only_len, &n_views, &metadata);
+  ASSERT_NOT_NULL(views);
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "w"));
+  ASSERT_FALSE(test_safetensors_has_name(views, n_views, "optim.adam.b1_t"));
+  ASSERT_FALSE(test_safetensors_has_name(views, n_views, "optim.adam.m.w"));
+  test_safetensors_free_views(views, n_views, metadata);
+  free(model_only);
+
+  int ir2_len = 0;
+  uint8_t *ir2 = poly_instance_export_ir(inst, &ir2_len);
+  ASSERT_NOT_NULL(ir2);
+  PolyInstance *restored = poly_instance_from_ir(ir2, ir2_len, weights, weights_len);
+  ASSERT_NOT_NULL(restored);
+  int rb1_idx = test_find_instance_buf(restored, "optim.adam.b1_t");
+  ASSERT_TRUE(rb1_idx >= 0);
+  float *rb1 = poly_instance_buf_data(restored, rb1_idx, NULL);
+  ASSERT_FLOAT_EQ(rb1[0], 0.9f, 1e-6f);
+
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(restored, POLY_OPTIM_ADAM, 0.05f, 0.9f, 0.999f, 1e-8f, 0.0f), 0
+  );
+  ASSERT_INT_EQ(poly_instance_train_step(restored, io, 2, &loss), 0);
+  rb1_idx = test_find_instance_buf(restored, "optim.adam.b1_t");
+  rb1 = poly_instance_buf_data(restored, rb1_idx, NULL);
+  ASSERT_FLOAT_EQ(rb1[0], 0.81f, 1e-5f);
+
+  poly_instance_free(restored);
+  poly_instance_free(inst);
+  free(ir2);
+  free(weights);
+  free(ir);
+  PASS();
+}
+
+TEST(instance, sgd_momentum_state_is_named_checkpoint_state) {
+  int ir_len = 0;
+  uint8_t *ir = make_train_ir(4, &ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t numel;
+  float *w = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_INT_EQ(numel, 4);
+  for (int i = 0; i < 4; i++)
+    w[i] = 0.5f;
+
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer_ex(
+          inst, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, false, false
+      ),
+      0
+  );
+
+  float x[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float y[] = {3.0f, 3.0f, 3.0f, 3.0f};
+  PolyIOBinding io[] = {{"x", x}, {"y", y}};
+  float loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss), 0);
+
+  int b_idx = test_find_instance_buf(inst, "optim.sgd.b.w");
+  ASSERT_TRUE(b_idx >= 0);
+  ASSERT_INT_EQ(poly_instance_buf_role(inst, b_idx), POLY_ROLE_AUX);
+
+  int64_t n_b = 0;
+  float *b = poly_instance_buf_data(inst, b_idx, &n_b);
+  ASSERT_INT_EQ(n_b, 4);
+  ASSERT_TRUE(fabsf(b[0]) > 0.0f);
+
+  /* Make the reuse check strong: imported optimizer state should be consumed
+   * as-is, not silently reinitialized to zero on the next train graph build. */
+  for (int i = 0; i < 4; i++)
+    b[i] = 7.0f;
+
+  int weights_len = 0;
+  uint8_t *weights = poly_instance_export_weights(inst, &weights_len);
+  ASSERT_NOT_NULL(weights);
+  int n_views = 0;
+  char *metadata = NULL;
+  PolySafetensorView *views = poly_safetensors_decode(weights, weights_len, &n_views, &metadata);
+  ASSERT_NOT_NULL(views);
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "w"));
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "optim.sgd.b.w"));
+  test_safetensors_free_views(views, n_views, metadata);
+
+  int model_only_len = 0;
+  uint8_t *model_only =
+      poly_instance_export_weights_ex(inst, &model_only_len, POLY_EXPORT_WEIGHTS_PARAMS);
+  ASSERT_NOT_NULL(model_only);
+  n_views = 0;
+  metadata = NULL;
+  views = poly_safetensors_decode(model_only, model_only_len, &n_views, &metadata);
+  ASSERT_NOT_NULL(views);
+  ASSERT_TRUE(test_safetensors_has_name(views, n_views, "w"));
+  ASSERT_FALSE(test_safetensors_has_name(views, n_views, "optim.sgd.b.w"));
+  test_safetensors_free_views(views, n_views, metadata);
+  free(model_only);
+
+  int ir2_len = 0;
+  uint8_t *ir2 = poly_instance_export_ir(inst, &ir2_len);
+  ASSERT_NOT_NULL(ir2);
+  PolyInstance *restored = poly_instance_from_ir(ir2, ir2_len, weights, weights_len);
+  ASSERT_NOT_NULL(restored);
+  int rb_idx = test_find_instance_buf(restored, "optim.sgd.b.w");
+  ASSERT_TRUE(rb_idx >= 0);
+  float *rb = poly_instance_buf_data(restored, rb_idx, NULL);
+  ASSERT_FLOAT_EQ(rb[0], 7.0f, 1e-6f);
+
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer_ex(
+          restored, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, false, false
+      ),
+      0
+  );
+  ASSERT_INT_EQ(poly_instance_train_step(restored, io, 2, &loss), 0);
+  rb_idx = test_find_instance_buf(restored, "optim.sgd.b.w");
+  rb = poly_instance_buf_data(restored, rb_idx, NULL);
+  ASSERT_TRUE(rb[0] > 5.0f);
+
+  poly_instance_free(restored);
+  poly_instance_free(inst);
+  free(ir2);
+  free(weights);
+  free(ir);
+  PASS();
+}
+
 TEST(instance, inline_forward_copies_prefixed_weights) {
   int child_ir_len = 0;
   uint8_t *child_ir = make_train_ir(4, &child_ir_len);
@@ -991,8 +1200,12 @@ TEST(instance, inline_forward_copies_prefixed_weights) {
     cw[i] = (float)(i + 2);
 
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *parent = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(parent);
   int64_t s[] = {4};
-  PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
+  PolyTensor *x_tensor = poly_instance_input(parent, "x", POLY_FLOAT32, s, 1);
+  ASSERT_NOT_NULL(x_tensor);
+  PolyUOp *x = poly_tensor_uop(x_tensor);
 
   PolyInstanceInlineBinding binds[] = {{"x", x}};
   PolyInstanceInlineOutput outs[2];
@@ -1006,13 +1219,26 @@ TEST(instance, inline_forward_copies_prefixed_weights) {
   ASSERT_INT_EQ(n_out, 1);
   ASSERT_STR_EQ(outs[0].name, "output");
 
+  PolyUOp *child_w = poly_ctx_get(ctx, "%s", "child.w");
+  ASSERT_NOT_NULL(child_w);
+  PolyTensor *child_w_tensor =
+      poly_tensor_create(ctx, child_w, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(child_w_tensor);
+  poly_tensor_set_requires_grad(child_w_tensor, false);
+  ASSERT_INT_EQ(poly_instance_state(parent, "child.w", child_w_tensor, 0), POLY_STATUS_OK);
+
   PolyUOp *one = poly_const_float(ctx, 1.0);
   PolyUOp *y = poly_alu2(ctx, POLY_OP_ADD, outs[0].uop, one);
-  PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
-  poly_register_entrypoint(ctx, "forward", poly_sink1(ctx, poly_store_val(ctx, out, y)));
+  PolyTensor *out_tensor = poly_tensor_create(ctx, y, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(parent, "output", out_tensor), POLY_STATUS_OK);
 
-  PolyInstance *parent = poly_instance_from_ctx(ctx);
-  ASSERT_NOT_NULL(parent);
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(parent, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(parent, NULL), POLY_STATUS_OK);
   ASSERT_INT_EQ(poly_instance_copy_prefixed_weights(parent, child, "child."), 0);
 
   float x_data[] = {1, 1, 1, 1};
@@ -1049,11 +1275,18 @@ TEST(instance, inline_frozen_submodel_not_updated_by_parent_train) {
     cw[i] = 2.0f;
 
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *parent = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(parent);
   int64_t s[] = {4};
-  int64_t one_shape[] = {1};
-  PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
-  PolyUOp *target = poly_target(ctx, POLY_FLOAT32, s, 1, "y");
-  PolyUOp *head = poly_param(ctx, POLY_FLOAT32, s, 1, "head");
+  PolyTensor *x_tensor = poly_instance_input(parent, "x", POLY_FLOAT32, s, 1);
+  PolyTensor *target_tensor = poly_instance_target(parent, "y", POLY_FLOAT32, s, 1);
+  PolyTensor *head_tensor = poly_instance_param(parent, "head", POLY_FLOAT32, s, 1);
+  ASSERT_NOT_NULL(x_tensor);
+  ASSERT_NOT_NULL(target_tensor);
+  ASSERT_NOT_NULL(head_tensor);
+  PolyUOp *x = poly_tensor_uop(x_tensor);
+  PolyUOp *target = poly_tensor_uop(target_tensor);
+  PolyUOp *head = poly_tensor_uop(head_tensor);
 
   PolyInstanceInlineBinding binds[] = {{"x", x}};
   PolyInstanceInlineOutput outs[2];
@@ -1066,9 +1299,18 @@ TEST(instance, inline_frozen_submodel_not_updated_by_parent_train) {
   );
   ASSERT_INT_EQ(n_out, 1);
 
+  PolyUOp *enc_w_uop = poly_ctx_get(ctx, "%s", "enc.w");
+  ASSERT_NOT_NULL(enc_w_uop);
+  PolyTensor *enc_w_tensor =
+      poly_tensor_create(ctx, enc_w_uop, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(enc_w_tensor);
+  poly_tensor_set_requires_grad(enc_w_tensor, false);
+  ASSERT_INT_EQ(poly_instance_state(parent, "enc.w", enc_w_tensor, 0), POLY_STATUS_OK);
+
   PolyUOp *pred = poly_alu2(ctx, POLY_OP_MUL, outs[0].uop, head);
-  PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
-  poly_register_entrypoint(ctx, "forward", poly_sink1(ctx, poly_store_val(ctx, out, pred)));
+  PolyTensor *out_tensor = poly_tensor_create(ctx, pred, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(parent, "output", out_tensor), POLY_STATUS_OK);
 
   PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, pred, poly_alu1(ctx, POLY_OP_NEG, target));
   PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
@@ -1076,11 +1318,26 @@ TEST(instance, inline_frozen_submodel_not_updated_by_parent_train) {
   PolyUOp *loss_val = poly_alu2(
       ctx, POLY_OP_MUL, poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1), poly_const_float(ctx, 0.25)
   );
-  PolyUOp *loss = poly_output(ctx, POLY_FLOAT32, one_shape, 1, "loss");
-  poly_register_entrypoint(ctx, "loss", poly_sink1(ctx, poly_store_val(ctx, loss, loss_val)));
+  PolyTensor *loss_tensor = poly_tensor_create(ctx, loss_val, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(loss_tensor);
+  ASSERT_INT_EQ(poly_instance_output(parent, "loss", loss_tensor), POLY_STATUS_OK);
 
-  PolyInstance *parent = poly_instance_from_ctx(ctx);
-  ASSERT_NOT_NULL(parent);
+  const char *forward_inputs[] = {"x"};
+  const char *forward_outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(
+          parent, "forward", forward_inputs, 1, forward_outputs, 1, NULL
+      ),
+      POLY_STATUS_OK
+  );
+  const char *loss_inputs[] = {"x", "y"};
+  const char *loss_outputs[] = {"loss"};
+  PolyEntrypointOptions loss_opts = {.objective = "loss"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(parent, "loss", loss_inputs, 2, loss_outputs, 1, &loss_opts),
+      POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(parent, NULL), POLY_STATUS_OK);
   ASSERT_INT_EQ(poly_instance_copy_prefixed_weights(parent, child, "enc."), 0);
 
   for (int i = 0; i < poly_instance_param_count(parent); i++) {

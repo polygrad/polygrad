@@ -2902,16 +2902,15 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
   /* Schedule */
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_TRUE(sched->n_items > 0);
+  ASSERT_TRUE(sched->template->n_calls > 0);
 
   /* Run each scheduled kernel through GPU-like opts but render to C */
   float x_d[75], o_d[1] = {0.0f};
   for (int i = 0; i < 75; i++)
     x_d[i] = (float)(i + 1);
 
-  for (int k = 0; k < sched->n_items; k++) {
-    PolyExecItem *item = &sched->items[k];
-    if (item->kind != POLY_EXEC_COMPUTE) continue;
+  for (int k = 0; k < sched->template->n_calls; k++) {
+    if (poly_schedule_call_is_copy(sched, k)) continue;
 
     /* Exact HIP opts with optimize=true (the tinygrad-parity path) */
     PolyRewriteOpts opts = {
@@ -2922,7 +2921,7 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
         .opt_policy = POLY_OPT_TC_ONLY,
         .gpu_block_size = 256,
     };
-    PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, item->root, opts);
+    PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, poly_schedule_call_body(sched, k), opts);
 
     int n_lin = 0;
     PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
@@ -2953,10 +2952,11 @@ TEST(unify_pre, pad_shrink_reduce_gpu_opts) {
     /* Build args from slot indices */
     void *bufs[2] = {o_d, x_d};
     void *args[16];
-    for (int p = 0; p < item->n_buf_slots && p < 16; p++)
-      args[p] = bufs[item->buf_slot_indices[p]];
+    int n_args = poly_schedule_call_n_buffer_args(sched, k);
+    for (int p = 0; p < n_args && p < 16; p++)
+      args[p] = bufs[poly_schedule_call_buffer_slot(sched, k, p)];
 
-    poly_program_call(prog, args, item->n_buf_slots);
+    poly_program_call(prog, args, n_args);
     poly_program_destroy(prog);
   }
 

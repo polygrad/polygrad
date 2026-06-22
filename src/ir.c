@@ -14,6 +14,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "ir.h"
+#include "ctx.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -212,53 +213,61 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
   *out_len = 0;
   if (!spec || !spec->ctx) return NULL;
 
-  /* Collect all SINKs from entrypoints */
-  int n_sinks = spec->n_entrypoints;
-  if (n_sinks == 0) {
+  if (spec->n_entrypoints == 0) {
     fprintf(stderr, "poly_ir_export: no entrypoints\n");
     return NULL;
   }
 
-  /* Collect all nodes via toposort. For multiple entrypoints,
-   * toposort each sink and merge (dedup by pointer). */
+  /* Collect all nodes via toposort. Entrypoint sinks define executable graphs;
+   * interface BUFFERs are also roots because package/checkpoint state can be
+   * named without being read by a normal inference/loss entrypoint. */
   int n_nodes = 0;
   PolyUOp **topo = NULL;
-  int topo_is_heap = 0; /* whether topo is malloc'd (needs free) */
+  int topo_is_heap = 1;
 
-  if (n_sinks == 1) {
-    topo = poly_toposort(spec->ctx, spec->entrypoints[0].sink, &n_nodes);
-  } else {
-    /* Merge toposorts from all sinks */
-    int total_cap = 0;
-    int *counts = malloc(n_sinks * sizeof(int));
-    PolyUOp ***per_sink = malloc(n_sinks * sizeof(PolyUOp **));
-    for (int i = 0; i < n_sinks; i++) {
-      per_sink[i] = poly_toposort(spec->ctx, spec->entrypoints[i].sink, &counts[i]);
-      total_cap += counts[i];
-    }
-
-    /* Merge and dedup */
-    PolyUOp **merged = malloc(total_cap * sizeof(PolyUOp *));
-    int merged_n = 0;
-    for (int i = 0; i < n_sinks; i++) {
-      for (int j = 0; j < counts[i]; j++) {
-        PolyUOp *u = per_sink[i][j];
-        int dup = 0;
-        for (int k = 0; k < merged_n; k++)
-          if (merged[k] == u) {
-            dup = 1;
-            break;
-          }
-        if (!dup) merged[merged_n++] = u;
-      }
-    }
-
-    topo = merged;
-    n_nodes = merged_n;
-    topo_is_heap = 1;
+  int n_roots = spec->n_entrypoints + spec->n_bufs;
+  int total_cap = 0;
+  int *counts = calloc((size_t)n_roots, sizeof(int));
+  PolyUOp ***per_root = calloc((size_t)n_roots, sizeof(PolyUOp **));
+  if (!counts || !per_root) {
     free(counts);
-    free(per_sink);
+    free(per_root);
+    return NULL;
   }
+
+  int ri = 0;
+  for (int i = 0; i < spec->n_entrypoints; i++, ri++) {
+    per_root[ri] = poly_toposort(spec->ctx, spec->entrypoints[i].sink, &counts[ri]);
+    total_cap += counts[ri];
+  }
+  for (int i = 0; i < spec->n_bufs; i++, ri++) {
+    per_root[ri] = poly_toposort(spec->ctx, spec->bufs[i].buffer, &counts[ri]);
+    total_cap += counts[ri];
+  }
+
+  PolyUOp **merged = total_cap > 0 ? malloc((size_t)total_cap * sizeof(PolyUOp *)) : NULL;
+  if (total_cap > 0 && !merged) {
+    free(counts);
+    free(per_root);
+    return NULL;
+  }
+  int merged_n = 0;
+  for (int i = 0; i < n_roots; i++) {
+    for (int j = 0; j < counts[i]; j++) {
+      PolyUOp *u = per_root[i][j];
+      int dup = 0;
+      for (int k = 0; k < merged_n; k++)
+        if (merged[k] == u) {
+          dup = 1;
+          break;
+        }
+      if (!dup) merged[merged_n++] = u;
+    }
+  }
+  topo = merged;
+  n_nodes = merged_n;
+  free(counts);
+  free(per_root);
 
   if (!topo || n_nodes == 0) {
     fprintf(stderr, "poly_ir_export: toposort failed\n");
@@ -676,6 +685,9 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       free(arg.range.extra);
 
     if (tag != 0) ((PolyUOp *)u)->tag = tag;
+    if (tag > 0) poly_ctx_reserve_buf_tag(ctx, tag);
+    if (op_val == POLY_OP_UNIQUE && arg.kind == POLY_ARG_INT)
+      poly_ctx_reserve_unique_id(ctx, arg.i);
 
     nodes[i] = (PolyUOp *)u;
     if (srcs) free(srcs);

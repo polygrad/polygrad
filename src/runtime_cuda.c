@@ -251,6 +251,7 @@ int poly_cuda_arch_major(void) {
 }
 
 unsigned long long poly_cuda_alloc(size_t bytes) {
+  if (cuda_state == CUDA_NOT_TRIED && poly_cuda_init() != 0) return 0;
   if (cuda_state != CUDA_INIT_OK) {
     fprintf(stderr, "polygrad: cuda: alloc called but CUDA not initialized\n");
     return 0;

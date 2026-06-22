@@ -17,81 +17,116 @@
 #include "../src/codegen.h"
 #include "../src/engine/schedule.h"
 
+static int nn_param_index(PolyInstance *inst, const char *name) {
+  int n = poly_instance_param_count(inst);
+  for (int i = 0; i < n; i++) {
+    const char *got = poly_instance_param_name(inst, i);
+    if (got && strcmp(got, name) == 0) return i;
+  }
+  return -1;
+}
+
 /* Convenience builder tests */
 
-TEST(nn, nn_linear_registers_params) {
+TEST(nn, instance_linear_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t xs[] = {2, 4};
-  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 2, "x");
-  PolyUOp *x = poly_reshape(ctx, x_buf, xs, 2);
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  ASSERT_NOT_NULL(x_tensor);
+  PolyUOp *x = poly_tensor_uop(x_tensor);
 
-  PolyUOp *out = poly_linear(ctx, "fc1", x, 4, 8, true);
+  PolyUOp *out = poly_instance_linear(inst, "fc1", x, 4, 8, true);
   ASSERT_TRUE(out != NULL);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
 
-  /* Check registered params */
-  ASSERT_TRUE(poly_ctx_get(ctx, "fc1.weight") != NULL);
-  ASSERT_TRUE(poly_ctx_get(ctx, "fc1.bias") != NULL);
+  int wi = nn_param_index(inst, "fc1.weight");
+  int bi = nn_param_index(inst, "fc1.bias");
+  ASSERT_TRUE(wi >= 0);
+  ASSERT_TRUE(bi >= 0);
+  int64_t shape[8];
+  ASSERT_INT_EQ(poly_instance_param_shape(inst, wi, shape, 8), 2);
+  ASSERT_INT_EQ(shape[0], 8);
+  ASSERT_INT_EQ(shape[1], 4);
+  ASSERT_TRUE(poly_instance_param_trainable(inst, wi));
+  ASSERT_INT_EQ(poly_instance_param_shape(inst, bi, shape, 8), 1);
+  ASSERT_INT_EQ(shape[0], 8);
 
-  const PolyRegEntry *we = poly_ctx_get_entry(ctx, "fc1.weight");
-  ASSERT_INT_EQ(we->ndim, 2);
-  ASSERT_INT_EQ(we->shape[0], 8);
-  ASSERT_INT_EQ(we->shape[1], 4);
-  ASSERT_INT_EQ(we->role, POLY_ROLE_PARAM);
-
-  const PolyRegEntry *be = poly_ctx_get_entry(ctx, "fc1.bias");
-  ASSERT_INT_EQ(be->ndim, 1);
-  ASSERT_INT_EQ(be->shape[0], 8);
-
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, nn_linear_no_bias) {
+TEST(nn, instance_linear_no_bias) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t xs[] = {1, 4};
-  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_linear(ctx, "fc", x, 4, 2, false);
+  PolyUOp *out = poly_instance_linear(inst, "fc", poly_tensor_uop(x_tensor), 4, 2, false);
   ASSERT_TRUE(out != NULL);
-  ASSERT_TRUE(poly_ctx_get(ctx, "fc.weight") != NULL);
-  ASSERT_EQ(poly_ctx_get(ctx, "fc.bias"), NULL);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_TRUE(nn_param_index(inst, "fc.weight") >= 0);
+  ASSERT_INT_EQ(nn_param_index(inst, "fc.bias"), -1);
 
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, nn_linear_idempotent_reuse) {
+TEST(nn, instance_linear_duplicate_prefix_rejected) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t xs[] = {1, 4};
-  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  ASSERT_NOT_NULL(x_tensor);
+  PolyUOp *x = poly_tensor_uop(x_tensor);
 
-  /* Two calls with same prefix reuse the same weight buffers */
-  poly_linear(ctx, "shared", x, 4, 8, true);
-  int count_after_first = poly_ctx_named_count(ctx);
-  poly_linear(ctx, "shared", x, 4, 8, true);
-  ASSERT_INT_EQ(poly_ctx_named_count(ctx), count_after_first);
+  ASSERT_NOT_NULL(poly_instance_linear(inst, "shared", x, 4, 8, true));
+  ASSERT_TRUE(poly_instance_linear(inst, "shared", x, 4, 8, true) == NULL);
+  const PolyInstanceError *err = poly_instance_last_error(inst);
+  ASSERT_TRUE(err && strstr(err->message, "duplicate binding") != NULL);
 
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
 TEST(nn, nn_linear_e2e) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t xs[] = {1, 2};
-  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 2, "x");
-  PolyUOp *x = poly_reshape(ctx, x_buf, xs, 2);
-  int64_t os[] = {1, 3};
-  PolyUOp *o_buf = poly_output(ctx, POLY_FLOAT32, os, 2, "output");
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_linear(ctx, "fc", x, 2, 3, true);
+  PolyUOp *out = poly_instance_linear(inst, "fc", poly_tensor_uop(x_tensor), 2, 3, true);
   ASSERT_TRUE(out != NULL);
-
-  PolyUOp *store = poly_store_val(ctx, o_buf, out);
-  PolyUOp *sink = poly_sink1(ctx, store);
-  poly_register_entrypoint(ctx, "forward", sink);
-
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
-  ASSERT_TRUE(inst != NULL);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
 
   /* Set weights: W = [[1,0],[0,1],[1,1]], b = [0,0,0] */
   float *wd = poly_instance_buf_data_named(inst, "fc.weight", NULL);
@@ -116,46 +151,84 @@ TEST(nn, nn_linear_e2e) {
   PASS();
 }
 
-TEST(nn, nn_layernorm_registers_params) {
+TEST(nn, instance_layernorm_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t xs[] = {2, 4};
-  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_layernorm(ctx, "ln", x, 4, 1e-5);
+  PolyUOp *out = poly_instance_layernorm(inst, "ln", poly_tensor_uop(x_tensor), 4, 1e-5);
   ASSERT_TRUE(out != NULL);
-  ASSERT_TRUE(poly_ctx_get(ctx, "ln.weight") != NULL);
-  ASSERT_TRUE(poly_ctx_get(ctx, "ln.bias") != NULL);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_TRUE(nn_param_index(inst, "ln.weight") >= 0);
+  ASSERT_TRUE(nn_param_index(inst, "ln.bias") >= 0);
 
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, nn_rmsnorm_registers_params) {
+TEST(nn, instance_rmsnorm_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t xs[] = {2, 4};
-  PolyUOp *x = poly_reshape(ctx, poly_input(ctx, POLY_FLOAT32, xs, 2, "x"), xs, 2);
+  PolyTensor *x_tensor = poly_instance_input(inst, "x", POLY_FLOAT32, xs, 2);
+  ASSERT_NOT_NULL(x_tensor);
 
-  PolyUOp *out = poly_rmsnorm(ctx, "rms", x, 4, 1e-6);
+  PolyUOp *out = poly_instance_rmsnorm(inst, "rms", poly_tensor_uop(x_tensor), 4, 1e-6);
   ASSERT_TRUE(out != NULL);
-  ASSERT_TRUE(poly_ctx_get(ctx, "rms.weight") != NULL);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_TRUE(nn_param_index(inst, "rms.weight") >= 0);
 
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(nn, nn_embedding_registers_params) {
+TEST(nn, instance_embedding_declares_params) {
   PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
   int64_t ts[] = {3};
-  PolyUOp *tok = poly_reshape(ctx, poly_input(ctx, POLY_INT32, ts, 1, "tokens"), ts, 1);
+  PolyTensor *tok_tensor = poly_instance_input(inst, "tokens", POLY_INT32, ts, 1);
+  ASSERT_NOT_NULL(tok_tensor);
 
-  PolyUOp *out = poly_embedding(ctx, "emb", tok, 100, 64);
+  PolyUOp *out = poly_instance_embedding(inst, "emb", poly_tensor_uop(tok_tensor), 100, 64);
   ASSERT_TRUE(out != NULL);
+  PolyTensor *out_tensor = poly_tensor_create(ctx, out, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out_tensor);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out_tensor), POLY_STATUS_OK);
+  const char *inputs[] = {"tokens"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
 
-  const PolyRegEntry *we = poly_ctx_get_entry(ctx, "emb.weight");
-  ASSERT_TRUE(we != NULL);
-  ASSERT_INT_EQ(we->shape[0], 100);
-  ASSERT_INT_EQ(we->shape[1], 64);
+  int wi = nn_param_index(inst, "emb.weight");
+  ASSERT_TRUE(wi >= 0);
+  int64_t shape[8];
+  ASSERT_INT_EQ(poly_instance_param_shape(inst, wi, shape, 8), 2);
+  ASSERT_INT_EQ(shape[0], 100);
+  ASSERT_INT_EQ(shape[1], 64);
 
+  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -499,7 +572,7 @@ TEST(nn, log_softmax_non_last_axis_flat_buffer) {
 TEST(nn, layernorm_non_last_axis) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t xs[] = {2, 3, 2};
-  PolyUOp *x_buf = poly_input(ctx, POLY_FLOAT32, xs, 3, "x");
+  PolyUOp *x_buf = poly_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *x = poly_reshape(ctx, x_buf, xs, 3);
 
   PolyUOp *y = poly_layernorm_apply(ctx, x, NULL, NULL, 1, 1e-5);
@@ -511,27 +584,24 @@ TEST(nn, layernorm_non_last_axis) {
   ASSERT_INT_EQ(s.dims[2], 2);
   if (s.dims) free(s.dims);
 
-  int64_t os[] = {12};
-  PolyUOp *out_buf = poly_output(ctx, POLY_FLOAT32, os, 1, "output");
+  PolyUOp *out_buf = poly_buffer(ctx, POLY_FLOAT32, 12);
   PolyUOp *store = poly_store_val(ctx, out_buf, y);
   PolyUOp *sink = poly_sink1(ctx, store);
-  poly_register_entrypoint(ctx, "forward", sink);
-
-  PolyInstance *inst = poly_instance_from_ctx(ctx);
-  ASSERT_NOT_NULL(inst);
 
   /* All-zero input → layernorm output is 0/0 → NaN, but 0-0=0 so var=0.
    * Actually: (0-0)/sqrt(0+eps) = 0. Output should be 0. */
   float x_data[12] = {0};
-  PolyIOBinding io[] = {{"x", x_data}};
-  int ret = poly_instance_call(inst, "forward", io, 1);
+  float out_data[12] = {0};
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW(x_buf, x_data),
+      POLY_TEST_HOST_VIEW(out_buf, out_data),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
   ASSERT_INT_EQ(ret, 0);
 
-  float *out_data = poly_instance_buf_data_named(inst, "output", NULL);
   for (int i = 0; i < 12; i++)
     ASSERT_FLOAT_EQ(out_data[i], 0.0f, 1e-5f);
 
-  poly_instance_free(inst);
   poly_ctx_destroy(ctx);
   PASS();
 }

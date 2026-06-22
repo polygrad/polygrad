@@ -15,6 +15,7 @@ struct PolyCtx {
   PolyMap *cse;
   PolyMap *schedule_cache;
   PolyMap *program_cache;
+  PolyMap *program_infos;
   PolyMap *shape_cache;
   PolyMap *buffers;
   PolyMap *tensors_by_uop;
@@ -41,5 +42,7 @@ struct PolyCtx {
 };
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx);
+void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
+void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);
 
 #endif /* POLY_CTX_H */

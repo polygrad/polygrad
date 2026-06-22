@@ -90,6 +90,7 @@ typedef struct PolyInstance PolyInstance;
  * Exports IR + weights + metadata into a single byte array.
  * Caller frees returned bytes. Returns NULL on error. */
 uint8_t *poly_instance_save_bundle(PolyInstance *inst, int *out_len);
+uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t weight_flags);
 
 /* Load a PolyInstance from a bundle.
  * Decodes bundle, imports IR, imports weights.

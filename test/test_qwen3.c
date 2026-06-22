@@ -1,17 +1,15 @@
 /*
  * test_qwen3.c -- Qwen3 0.6B GGUF end-to-end tests
  *
- * Optional: requires GGUF model file. Set POLY_QWEN3_GGUF env var or
- * place at ~/.cache/polygrad/Qwen3-0.6B-Q8_0.gguf.
+ * Optional: requires GGUF model file. Set POLY_QWEN3_GGUF env var.
  *
- * Run: make test -f qwen3
- *      POLY_QWEN3_GGUF=/path/to/model.gguf ./build/polygrad_test qwen3
+ * Run: POLY_QWEN3_GGUF=/path/to/Qwen3-0.6B-Q8_0.gguf ./build/polygrad_test qwen3
  */
 
 #include "test_harness.h"
 #include "../src/models/qwen3.h"
+#include "../src/codegen.h"
 #include "../src/loaders/gguf_decode.h"
-#include "../src/loaders/gguf_loader.h"
 #include "../src/instance.h"
 #include "../src/engine/schedule.h"
 #include "../src/tokenizer.h"
@@ -19,57 +17,56 @@
 
 /* GGUF file loading */
 
+#define QWEN3_GGUF_EXPECTED_LEN 639447744LL
+#define QWEN3_GGUF_EXPECTED_CRC32 0xa014a8efu
+
 static const char *find_gguf_path(void) {
   const char *env = getenv("POLY_QWEN3_GGUF");
   if (env && env[0]) return env;
-
-  /* Check common cache paths */
-  static char buf[1024];
-  const char *home = getenv("HOME");
-  if (!home) return NULL;
-
-  /* Standard polygrad cache */
-  snprintf(buf, sizeof(buf), "%s/.cache/polygrad/Qwen3-0.6B-Q8_0.gguf", home);
-  FILE *f = fopen(buf, "rb");
-  if (f) {
-    fclose(f);
-    return buf;
-  }
-
-  /* HF hub cache (symlink from unsloth) */
-  snprintf(
-      buf, sizeof(buf),
-      "%s/.cache/huggingface/hub/models--unsloth--Qwen3-0.6B-GGUF/"
-      "snapshots/50968a4468ef4233ed78cd7c3de230dd1d61a56b/Qwen3-0.6B-Q8_0.gguf",
-      home
-  );
-  f = fopen(buf, "rb");
-  if (f) {
-    fclose(f);
-    return buf;
-  }
-
   return NULL;
 }
 
 static uint8_t *g_gguf_data = NULL;
 static int64_t g_gguf_len = 0;
 static PolyGgufDecoded *g_gguf = NULL;
+static int g_gguf_state = 0; /* 0 unknown, 1 ok, 2 skip, 3 error */
+static char g_gguf_error[256];
+
+static uint32_t crc32_bytes(const uint8_t *data, int64_t len) {
+  static uint32_t table[256];
+  static int table_ready = 0;
+  if (!table_ready) {
+    for (uint32_t i = 0; i < 256; i++) {
+      uint32_t c = i;
+      for (int j = 0; j < 8; j++)
+        c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+      table[i] = c;
+    }
+    table_ready = 1;
+  }
+
+  uint32_t crc = 0xffffffffu;
+  for (int64_t i = 0; i < len; i++)
+    crc = table[(crc ^ data[i]) & 0xffu] ^ (crc >> 8);
+  return crc ^ 0xffffffffu;
+}
 
 static int ensure_gguf(void) {
   if (g_gguf) return 1;
-  if (g_gguf_data == (uint8_t *)-1) return 0; /* already tried, failed */
+  if (g_gguf_state == 2) return 0;
+  if (g_gguf_state == 3) return -1;
 
   const char *path = find_gguf_path();
   if (!path) {
-    g_gguf_data = (uint8_t *)-1;
+    g_gguf_state = 2;
     return 0;
   }
 
   FILE *f = fopen(path, "rb");
   if (!f) {
-    g_gguf_data = (uint8_t *)-1;
-    return 0;
+    snprintf(g_gguf_error, sizeof(g_gguf_error), "failed to open %s", path);
+    g_gguf_state = 3;
+    return -1;
   }
 
   fseek(f, 0, SEEK_END);
@@ -78,24 +75,42 @@ static int ensure_gguf(void) {
   g_gguf_data = malloc(g_gguf_len);
   if (fread(g_gguf_data, 1, g_gguf_len, f) != (size_t)g_gguf_len) {
     free(g_gguf_data);
-    g_gguf_data = (uint8_t *)-1;
     fclose(f);
-    return 0;
+    snprintf(g_gguf_error, sizeof(g_gguf_error), "failed to read %s", path);
+    g_gguf_state = 3;
+    return -1;
   }
   fclose(f);
 
+  uint32_t crc = crc32_bytes(g_gguf_data, g_gguf_len);
+  if (g_gguf_len != QWEN3_GGUF_EXPECTED_LEN || crc != QWEN3_GGUF_EXPECTED_CRC32) {
+    snprintf(
+        g_gguf_error, sizeof(g_gguf_error),
+        "unexpected GGUF fixture len=%lld crc32=0x%08x", (long long)g_gguf_len, crc
+    );
+    free(g_gguf_data);
+    g_gguf_data = NULL;
+    g_gguf_state = 3;
+    return -1;
+  }
+
   if (poly_gguf_decode(g_gguf_data, g_gguf_len, &g_gguf) != 0 || !g_gguf) {
     free(g_gguf_data);
-    g_gguf_data = (uint8_t *)-1;
-    return 0;
+    g_gguf_data = NULL;
+    snprintf(g_gguf_error, sizeof(g_gguf_error), "GGUF decode failed");
+    g_gguf_state = 3;
+    return -1;
   }
+  g_gguf_state = 1;
   return 1;
 }
 
 #define SKIP_IF_NO_GGUF()                                                                          \
   do {                                                                                             \
-    if (!ensure_gguf()) {                                                                          \
-      fprintf(stderr, "    (skipped: no GGUF model found)\n");                                     \
+    int _gguf_ok = ensure_gguf();                                                                  \
+    if (_gguf_ok < 0) FAIL("%s", g_gguf_error);                                                    \
+    if (!_gguf_ok) {                                                                               \
+      fprintf(stderr, "    (skipped: POLY_QWEN3_GGUF not set)\n");                                 \
       PASS();                                                                                      \
     }                                                                                              \
   } while (0)

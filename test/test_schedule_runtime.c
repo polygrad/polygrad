@@ -13,6 +13,7 @@
 #include "../src/codegen.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/tensor.h"
+#include "../src/device.h"
 #include "../src/utils.h"
 
 #include <stdbool.h>
@@ -67,13 +68,13 @@ static int cpu_interp_parity(
   }
   memset(out_cpu, 0, (size_t)out_numel * sizeof(float));
   void *slot_cpu[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
     for (int j = 0; j < n_bufs; j++) {
-      if (ps->buf_slots[i].buf_uop == bufs[j])
+      if (ps->template->buf_slots[i].buf_uop == bufs[j])
         slot_cpu[i] = (bufs[j] == out_buf) ? out_cpu : datas[j];
     }
   }
-  int rc = poly_run_compiled_schedule(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
+  int rc = poly_run_compiled_schedule(cpu, slot_cpu, ps->template->n_buf_slots, NULL, 0);
   poly_compiled_schedule_free(cpu);
   if (rc < 0) {
     poly_schedule_free(ps);
@@ -88,13 +89,13 @@ static int cpu_interp_parity(
   }
   memset(out_interp, 0, (size_t)out_numel * sizeof(float));
   void *slot_interp[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
     for (int j = 0; j < n_bufs; j++) {
-      if (ps->buf_slots[i].buf_uop == bufs[j])
+      if (ps->template->buf_slots[i].buf_uop == bufs[j])
         slot_interp[i] = (bufs[j] == out_buf) ? out_interp : datas[j];
     }
   }
-  rc = poly_run_compiled_schedule(interp, slot_interp, ps->n_buf_slots, NULL, 0);
+  rc = poly_run_compiled_schedule(interp, slot_interp, ps->template->n_buf_slots, NULL, 0);
   poly_compiled_schedule_free(interp);
   poly_schedule_free(ps);
   if (rc < 0) return -5;
@@ -139,6 +140,139 @@ static int count_root_ranges_of_type(PolyCtx *ctx, PolyUOp *root, PolyAxisType a
     if (poly_range_axis_type(u->arg) == axis_type) count++;
   }
   return count;
+}
+
+TEST(schedule_runtime, programinfo_uses_filtered_call_buffer_arg_indices) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *a = poly_buffer_f32(ctx, 1);
+  PolyUOp *b = poly_buffer_f32(ctx, 1);
+  PolyUOp *var = poly_define_var(ctx, "N", 1, 8);
+  ASSERT_NOT_NULL(var);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(0));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(2));
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, p0, p2, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, p0, sum));
+
+  PolyUOp *src[] = {sink, out, var, a, b};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 5, poly_arg_none());
+  PolyUOp *program = poly_program_from_call(ctx, call, "filtered_args");
+  ASSERT_NOT_NULL(program);
+  ASSERT_INT_EQ(program->op, POLY_OP_PROGRAM);
+
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  ASSERT_NOT_NULL(info);
+  ASSERT_STR_EQ(info->name, "filtered_args");
+  ASSERT_INT_EQ(info->n_globals, 2);
+  ASSERT_INT_EQ(info->globals[0], 0);
+  ASSERT_INT_EQ(info->globals[1], 2);
+  ASSERT_INT_EQ(info->n_vars, 1);
+  ASSERT_PTR_EQ(info->vars[0], var);
+
+  ASSERT_INT_EQ(info->n_outs, 1);
+  ASSERT_INT_EQ(info->outs[0], 0);
+  ASSERT_INT_EQ(info->n_ins, 2);
+  ASSERT_INT_EQ(info->ins[0], 0);
+  ASSERT_INT_EQ(info->ins[1], 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, programinfo_metadata_survives_program_cse_reuse) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *out = poly_buffer_f32(ctx, 1);
+  PolyUOp *x = poly_buffer_f32(ctx, 1);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(1));
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, p0, p1));
+  PolyUOp *src[] = {sink, out, x};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, 3, poly_arg_none());
+
+  PolyUOp *p_a = poly_program_from_call(ctx, call, "same_program");
+  PolyUOp *p_b = poly_program_from_call(ctx, call, "same_program");
+  ASSERT_PTR_EQ(p_a, p_b);
+
+  const PolyProgramInfo *info = poly_program_info(ctx, p_b);
+  ASSERT_NOT_NULL(info);
+  ASSERT_INT_EQ(info->n_globals, 2);
+  ASSERT_INT_EQ(info->n_outs, 1);
+  ASSERT_INT_EQ(info->outs[0], 0);
+  ASSERT_INT_EQ(info->n_ins, 1);
+  ASSERT_INT_EQ(info->ins[0], 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, programinfo_collects_special_launch_dims) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *out = poly_buffer_f32(ctx, 128);
+  PolyUOp *x = poly_buffer_f32(ctx, 128);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(1));
+  PolyUOp *g_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(128));
+  PolyUOp *l_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(16));
+  PolyUOp *gidx = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, g_bound, poly_arg_str("gidx0"));
+  PolyUOp *lidx = poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, l_bound, poly_arg_str("lidx0"));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, gidx, lidx, poly_arg_none());
+  PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p0, idx, poly_arg_none());
+  PolyUOp *src = poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, p1, idx, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, src, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, load, poly_arg_none()));
+  PolyUOp *call_src[] = {sink, out, x};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, 3, poly_arg_none());
+
+  PolyUOp *program = poly_program_from_call(ctx, call, "launch_dims");
+  ASSERT_NOT_NULL(program);
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  ASSERT_NOT_NULL(info);
+  ASSERT_INT_EQ(info->global_size[0], 128);
+  ASSERT_INT_EQ(info->global_size[1], 1);
+  ASSERT_INT_EQ(info->global_size[2], 1);
+  ASSERT_TRUE(info->has_local_size);
+  ASSERT_INT_EQ(info->local_size[0], 16);
+  ASSERT_INT_EQ(info->local_size[1], 1);
+  ASSERT_INT_EQ(info->local_size[2], 1);
+  ASSERT_PTR_EQ(info->global_exprs[0], g_bound);
+  ASSERT_PTR_EQ(info->local_exprs[0], l_bound);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compute_schedule_calls_are_program_backed) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
+
+  PolyUOp *call = poly_schedule_call(sched, 0);
+  ASSERT_NOT_NULL(call);
+  ASSERT_INT_EQ(call->op, POLY_OP_CALL);
+  ASSERT_TRUE(call->n_src >= 1);
+  ASSERT_NOT_NULL(call->src[0]);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
+  ASSERT_NOT_NULL(poly_program_info(ctx, call->src[0]));
+  ASSERT_INT_EQ(poly_schedule_call_body(sched, 0)->op, POLY_OP_SINK);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 static PolyUOp *make_validator_comb_graph(PolyCtx *ctx, int depth, PolyUOp **bad_node) {
@@ -266,30 +400,29 @@ TEST(schedule_runtime, prepare_vecadd) {
   ASSERT_TRUE(ps != NULL);
 
   /* Single kernel */
-  ASSERT_INT_EQ(ps->n_items, 1);
-  ASSERT_EQ(ps->items[0].kind, POLY_EXEC_COMPUTE);
-  ASSERT_TRUE(ps->items[0].root != NULL);
+  ASSERT_INT_EQ(ps->template->n_calls, 1);
+  ASSERT_FALSE(poly_schedule_call_is_copy(ps, 0));
+  ASSERT_TRUE(poly_schedule_call_body(ps, 0) != NULL);
 
   /* 3 external buffers (a, b, out), 0 intermediates */
-  ASSERT_INT_EQ(ps->n_buf_slots, 3);
+  ASSERT_INT_EQ(ps->template->n_buf_slots, 3);
   for (int i = 0; i < 3; i++) {
-    ASSERT_FALSE(ps->buf_slots[i].is_intermediate);
-    ASSERT_INT_EQ(ps->buf_slots[i].numel, 4);
-    ASSERT_INT_EQ(ps->buf_slots[i].external_buf_idx, i);
+    ASSERT_FALSE(ps->template->buf_slots[i].is_intermediate);
+    ASSERT_INT_EQ(ps->template->buf_slots[i].numel, 4);
+    ASSERT_INT_EQ(ps->template->buf_slots[i].external_buf_idx, i);
   }
 
-  /* Exec order: single kernel at index 0 */
-  ASSERT_TRUE(ps->exec_order != NULL);
-  ASSERT_INT_EQ(ps->exec_order[0], 0);
+  ASSERT_NOT_NULL(ps->template->linear);
+  ASSERT_INT_EQ(ps->template->linear->n_src, 1);
 
   /* Mode and defaults */
-  ASSERT_EQ(ps->mode, POLY_MODE_CALL);
-  ASSERT_INT_EQ(ps->loss_buf_slot, -1);
+  ASSERT_EQ(ps->template->mode, POLY_MODE_CALL);
+  ASSERT_INT_EQ(ps->template->loss_buf_slot, -1);
 
   /* Kernel params should reference buf slots */
-  ASSERT_TRUE(ps->items[0].n_buf_slots > 0);
-  for (int i = 0; i < ps->items[0].n_buf_slots; i++)
-    ASSERT_TRUE(ps->items[0].buf_slot_indices[i] >= 0);
+  ASSERT_TRUE(poly_schedule_call_n_buffer_args(ps, 0) > 0);
+  for (int i = 0; i < poly_schedule_call_n_buffer_args(ps, 0); i++)
+    ASSERT_TRUE(poly_schedule_call_buffer_slot(ps, 0, i) >= 0);
 
   poly_schedule_free(ps);
   poly_ctx_destroy(ctx);
@@ -312,13 +445,16 @@ TEST(schedule_runtime, create_schedule_matches_complete_schedule_vecadd) {
   ASSERT_NOT_NULL(from_sink);
   ASSERT_NOT_NULL(kernel_graph);
   ASSERT_NOT_NULL(from_kernel_graph);
-  ASSERT_INT_EQ(from_sink->n_items, 1);
-  ASSERT_INT_EQ(from_kernel_graph->n_items, 1);
-  ASSERT_TRUE(poly_structural_eq(from_sink->items[0].root, from_kernel_graph->items[0].root));
+  ASSERT_INT_EQ(from_sink->template->n_calls, 1);
+  ASSERT_INT_EQ(from_kernel_graph->template->n_calls, 1);
+  ASSERT_TRUE(poly_structural_eq(
+      poly_schedule_call_body(from_sink, 0), poly_schedule_call_body(from_kernel_graph, 0)
+  ));
 
   int n_sink_lin = 0, n_graph_lin = 0;
-  PolyUOp **sink_lin = poly_linearize(ctx, from_sink->items[0].root, &n_sink_lin);
-  PolyUOp **graph_lin = poly_linearize(ctx, from_kernel_graph->items[0].root, &n_graph_lin);
+  PolyUOp **sink_lin = poly_linearize(ctx, poly_schedule_call_body(from_sink, 0), &n_sink_lin);
+  PolyUOp **graph_lin =
+      poly_linearize(ctx, poly_schedule_call_body(from_kernel_graph, 0), &n_graph_lin);
   ASSERT_NOT_NULL(sink_lin);
   ASSERT_NOT_NULL(graph_lin);
   ASSERT_INT_EQ(n_sink_lin, n_graph_lin);
@@ -371,16 +507,17 @@ TEST(schedule_runtime, lower_sink_to_linear_matches_create_schedule_vecadd) {
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(linear);
   ASSERT_EQ(linear->op, POLY_OP_LINEAR);
-  ASSERT_INT_EQ(linear->n_src, schedule->n_items);
+  ASSERT_INT_EQ(linear->n_src, schedule->template->n_calls);
 
-  for (int step = 0; step < schedule->n_items; step++) {
-    int idx = schedule->exec_order ? schedule->exec_order[step] : step;
+  for (int step = 0; step < schedule->template->n_calls; step++) {
     PolyUOp *linear_item = linear->src[step];
     /* Cached LINEAR mirrors tinygrad's callified form: each entry is a CALL
      * carrying the reusable kernel root plus its parameter order. */
     if (linear_item && linear_item->op == POLY_OP_CALL && linear_item->n_src >= 1)
       linear_item = linear_item->src[0];
-    ASSERT_TRUE(poly_structural_eq(linear_item, schedule->items[idx].root));
+    if (linear_item && linear_item->op == POLY_OP_PROGRAM && linear_item->n_src >= 1)
+      linear_item = linear_item->src[0];
+    ASSERT_TRUE(poly_structural_eq(linear_item, poly_schedule_call_body(schedule, step)));
   }
 
   poly_schedule_free(schedule);
@@ -554,6 +691,81 @@ static PolyUOp *make_bufferview_cache_sink(PolyCtx *ctx, int64_t tag) {
   return poly_sink1(ctx, poly_store_val(ctx, out, add));
 }
 
+static PolySchedule *make_manual_bufferview_call_schedule_ex(
+    PolyCtx *ctx,
+    PolyUOp **base_out,
+    PolyUOp **view_out,
+    bool offset_view
+) {
+  PolyUOp *base = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(7001));
+  static int64_t full_view_shape[1] = {4};
+  static int64_t offset_view_shape[2] = {2, (int64_t)sizeof(float)};
+  int64_t *view_shape = offset_view ? offset_view_shape : full_view_shape;
+  int view_arg_n = offset_view ? 2 : 1;
+  int64_t view_numel = offset_view ? 2 : 4;
+  PolyArg view_arg = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {view_shape, view_arg_n}};
+  PolyUOp *view_src[2] = {base, unique};
+  PolyUOp *view = poly_uop(ctx, POLY_OP_BUFFER_VIEW, POLY_FLOAT32, view_src, 2, view_arg);
+  PolyUOp *call_src[3] = {view, view, base};
+  PolyUOp *call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, 3, poly_arg_none());
+  PolyUOp *linear = poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  if (!base || !unique || !view || !call || !linear) return NULL;
+
+  PolySchedule *sched = calloc(1, sizeof(PolySchedule));
+  if (!sched) return NULL;
+  sched->template = calloc(1, sizeof(PolyScheduleTemplate));
+  sched->run = calloc(1, sizeof(PolyScheduleRuntime));
+  if (!sched->template || !sched->run) return sched;
+
+  sched->template->refcount = 1;
+  sched->template->linear = linear;
+  sched->template->n_calls = 1;
+  sched->template->n_buf_slots = 2;
+  sched->template->buf_slots = calloc(2, sizeof(PolyScheduleBufSlot));
+  sched->template->call_io = calloc(1, sizeof(PolyCallIO));
+  sched->run->calls = calloc(1, sizeof(PolyCallRuntime));
+  if (!sched->template->buf_slots || !sched->template->call_io || !sched->run->calls) return sched;
+
+  sched->template->buf_slots[0] = (PolyScheduleBufSlot){
+      .dtype = POLY_FLOAT32,
+      .numel = view_numel,
+      .nbytes = view_numel * (int64_t)sizeof(float),
+      .buf_uop = view,
+      .device = POLY_DEVICE_CPU,
+  };
+  sched->template->buf_slots[1] = (PolyScheduleBufSlot){
+      .dtype = POLY_FLOAT32,
+      .numel = 4,
+      .nbytes = 4 * (int64_t)sizeof(float),
+      .buf_uop = base,
+      .device = POLY_DEVICE_CPU,
+  };
+  sched->template->call_io[0].n_args = 2;
+  sched->template->call_io[0].arg_to_slot = calloc(2, sizeof(int));
+  sched->template->call_io[0].outs = calloc(2, sizeof(bool));
+  sched->template->call_io[0].ins = calloc(2, sizeof(bool));
+  if (!sched->template->call_io[0].arg_to_slot || !sched->template->call_io[0].outs ||
+      !sched->template->call_io[0].ins)
+    return sched;
+  sched->template->call_io[0].arg_to_slot[0] = 0;
+  sched->template->call_io[0].arg_to_slot[1] = 1;
+  sched->template->call_io[0].outs[0] = true;
+  sched->template->call_io[0].ins[1] = true;
+
+  if (base_out) *base_out = base;
+  if (view_out) *view_out = view;
+  return sched;
+}
+
+static PolySchedule *make_manual_bufferview_call_schedule(
+    PolyCtx *ctx,
+    PolyUOp **base_out,
+    PolyUOp **view_out
+) {
+  return make_manual_bufferview_call_schedule_ex(ctx, base_out, view_out, false);
+}
+
 TEST(schedule_runtime, lower_sink_to_linear_cache_normalizes_buffer_view_identity) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -571,6 +783,147 @@ TEST(schedule_runtime, lower_sink_to_linear_cache_normalizes_buffer_view_identit
   ASSERT_PTR_EQ(linear1, linear2);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, call_bufferview_installs_alias_residency_like_tinygrad_slice) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *base = NULL;
+  PolyUOp *view = NULL;
+  PolySchedule *sched = make_manual_bufferview_call_schedule(ctx, &base, &view);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(view);
+  ASSERT_NOT_NULL(sched->template);
+  ASSERT_NOT_NULL(sched->run);
+  ASSERT_NOT_NULL(sched->template->buf_slots);
+  ASSERT_NOT_NULL(sched->template->call_io);
+  ASSERT_NOT_NULL(sched->run->calls);
+  ASSERT_NOT_NULL(sched->template->call_io[0].arg_to_slot);
+  ASSERT_NOT_NULL(sched->template->call_io[0].outs);
+  ASSERT_NOT_NULL(sched->template->call_io[0].ins);
+
+  float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyBuffer base_handle = poly_buffer_make_host_view(data, sizeof(data));
+  poly_buffer_attach(ctx, base, &base_handle);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  PolyBuffer *alias = poly_buffer_get(ctx, view);
+  ASSERT_NOT_NULL(alias);
+  ASSERT_PTR_EQ(alias->ptr, data);
+  ASSERT_FALSE(alias->owned);
+  ASSERT_TRUE(alias->valid);
+  ASSERT_INT_EQ((int)alias->nbytes, (int)sizeof(data));
+  float out[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, view, out, sizeof(out)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], data[i], 0.0);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compiled_call_bufferview_installs_alias_from_slot_data) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *base = NULL;
+  PolyUOp *view = NULL;
+  PolySchedule *sched = make_manual_bufferview_call_schedule(ctx, &base, &view);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(view);
+
+  PolyCompiledSchedule *plan = poly_lower_schedule(ctx, sched, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(plan);
+
+  float data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+  void *slot_data[2] = {NULL, data};
+  ASSERT_INT_EQ(poly_run_compiled_schedule(plan, slot_data, 2, NULL, 0), 0);
+
+  PolyBuffer *alias = poly_buffer_get(ctx, view);
+  ASSERT_NOT_NULL(alias);
+  ASSERT_PTR_EQ(alias->ptr, data);
+  ASSERT_FALSE(alias->owned);
+  ASSERT_TRUE(alias->valid);
+  float out[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, view, out, sizeof(out)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], data[i], 0.0);
+
+  poly_compiled_schedule_free(plan);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, call_bufferview_offset_aliases_source_slice) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *base = NULL;
+  PolyUOp *view = NULL;
+  PolySchedule *sched = make_manual_bufferview_call_schedule_ex(ctx, &base, &view, true);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(view);
+
+  float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyBuffer base_handle = poly_buffer_make_host_view(data, sizeof(data));
+  poly_buffer_attach(ctx, base, &base_handle);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  PolyBuffer *alias = poly_buffer_get(ctx, view);
+  ASSERT_NOT_NULL(alias);
+  ASSERT_PTR_EQ(alias->ptr, data + 1);
+  ASSERT_FALSE(alias->owned);
+  ASSERT_TRUE(alias->valid);
+  ASSERT_INT_EQ((int)alias->nbytes, (int)(2 * sizeof(float)));
+  float out[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, view, out, sizeof(out)), 0);
+  ASSERT_FLOAT_EQ(out[0], 2.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[1], 3.0f, 0.0);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compiled_call_bufferview_offset_aliases_slot_slice) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *base = NULL;
+  PolyUOp *view = NULL;
+  PolySchedule *sched = make_manual_bufferview_call_schedule_ex(ctx, &base, &view, true);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_NOT_NULL(base);
+  ASSERT_NOT_NULL(view);
+
+  PolyCompiledSchedule *plan = poly_lower_schedule(ctx, sched, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(plan);
+
+  float data[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+  void *slot_data[2] = {NULL, data};
+  ASSERT_INT_EQ(poly_run_compiled_schedule(plan, slot_data, 2, NULL, 0), 0);
+
+  PolyBuffer *alias = poly_buffer_get(ctx, view);
+  ASSERT_NOT_NULL(alias);
+  ASSERT_PTR_EQ(alias->ptr, data + 1);
+  ASSERT_FALSE(alias->owned);
+  ASSERT_TRUE(alias->valid);
+  ASSERT_INT_EQ((int)alias->nbytes, (int)(2 * sizeof(float)));
+  float out[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, view, out, sizeof(out)), 0);
+  ASSERT_FLOAT_EQ(out[0], 6.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[1], 7.0f, 0.0);
+
+  poly_compiled_schedule_free(plan);
+  poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -685,8 +1038,8 @@ TEST(schedule_runtime, lower_sink_to_linear_deep_cache_key_is_iterative) {
 }
 
 static bool schedule_has_buf_slot(PolySchedule *sched, PolyUOp *buf) {
-  for (int i = 0; sched && i < sched->n_buf_slots; i++)
-    if (sched->buf_slots[i].buf_uop == buf) return true;
+  for (int i = 0; sched && i < sched->template->n_buf_slots; i++)
+    if (sched->template->buf_slots[i].buf_uop == buf) return true;
   return false;
 }
 
@@ -710,9 +1063,9 @@ TEST(schedule_runtime, complete_schedule_reuses_linear_cache_with_current_buf_sl
   ASSERT_NOT_NULL(sched2);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
 
-  ASSERT_INT_EQ(sched1->n_items, 1);
-  ASSERT_INT_EQ(sched2->n_items, 1);
-  ASSERT_PTR_EQ(sched1->items[0].root, sched2->items[0].root);
+  ASSERT_INT_EQ(sched1->template->n_calls, 1);
+  ASSERT_INT_EQ(sched2->template->n_calls, 1);
+  ASSERT_PTR_EQ(poly_schedule_call_body(sched1, 0), poly_schedule_call_body(sched2, 0));
   ASSERT_TRUE(schedule_has_buf_slot(sched2, a2));
   ASSERT_TRUE(schedule_has_buf_slot(sched2, b2));
   ASSERT_TRUE(schedule_has_buf_slot(sched2, out2));
@@ -1058,15 +1411,17 @@ TEST(schedule_runtime, cached_linear_copy_e2e_uses_current_copy_slots) {
   PolySchedule *sched2 = poly_complete_create_schedule_with_vars(ctx, sink2, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched2);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
-  PolyExecItem *copy_item = NULL;
-  for (int i = 0; i < sched2->n_items; i++)
-    if (sched2->items[i].kind == POLY_EXEC_COPY) copy_item = &sched2->items[i];
-  ASSERT_TRUE(copy_item != NULL);
-  ASSERT_INT_EQ(copy_item->n_buf_slots, 2);
-  ASSERT_TRUE(copy_item->buf_slot_indices[0] >= 0);
-  ASSERT_TRUE(copy_item->buf_slot_indices[1] >= 0);
-  ASSERT_PTR_EQ(sched2->buf_slots[copy_item->buf_slot_indices[0]].buf_uop, dst2);
-  ASSERT_PTR_EQ(sched2->buf_slots[copy_item->buf_slot_indices[1]].buf_uop, src2);
+  int copy_call = -1;
+  for (int i = 0; i < sched2->template->n_calls; i++)
+    if (poly_schedule_call_is_copy(sched2, i)) copy_call = i;
+  ASSERT_TRUE(copy_call >= 0);
+  ASSERT_INT_EQ(poly_schedule_call_n_buffer_args(sched2, copy_call), 2);
+  int dst_slot = poly_schedule_call_buffer_slot(sched2, copy_call, 0);
+  int src_slot = poly_schedule_call_buffer_slot(sched2, copy_call, 1);
+  ASSERT_TRUE(dst_slot >= 0);
+  ASSERT_TRUE(src_slot >= 0);
+  ASSERT_PTR_EQ(sched2->template->buf_slots[dst_slot].buf_uop, dst2);
+  ASSERT_PTR_EQ(sched2->template->buf_slots[src_slot].buf_uop, src2);
   ASSERT_TRUE(schedule_has_buf_slot(sched2, src2));
   ASSERT_TRUE(schedule_has_buf_slot(sched2, dst2));
   ASSERT_FALSE(schedule_has_buf_slot(sched2, src1));
@@ -1107,12 +1462,12 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   ASSERT_NOT_NULL(ps);
 
   int n_copy_items = 0, n_intermediates = 0, n_zero = 0;
-  for (int i = 0; i < ps->n_items; i++)
-    if (ps->items[i].kind == POLY_EXEC_COPY) n_copy_items++;
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (!ps->buf_slots[i].is_intermediate) continue;
+  for (int i = 0; i < ps->template->n_calls; i++)
+    if (poly_schedule_call_is_copy(ps, i)) n_copy_items++;
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (!ps->template->buf_slots[i].is_intermediate) continue;
     n_intermediates++;
-    if (ps->buf_slots[i].needs_zero) n_zero++;
+    if (ps->template->buf_slots[i].needs_zero) n_zero++;
   }
 
   ASSERT_INT_EQ(n_copy_items, 2);
@@ -1148,7 +1503,7 @@ TEST(schedule_runtime, cached_linear_multikernel_e2e_uses_current_buffers) {
   };
   PolySchedule *sched1 = poly_complete_create_schedule_with_vars(ctx, sink1, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched1);
-  ASSERT_TRUE(sched1->n_items > 1);
+  ASSERT_TRUE(sched1->template->n_calls > 1);
   poly_schedule_free(sched1);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
@@ -1190,7 +1545,7 @@ TEST(schedule_runtime, full_rewrite_vecadd_upcast_preserves_end_ranges_like_tiny
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRewriteOpts opts = {
       .optimize = true,
@@ -1201,7 +1556,7 @@ TEST(schedule_runtime, full_rewrite_vecadd_upcast_preserves_end_ranges_like_tiny
       .opt_policy = POLY_OPT_HEURISTIC,
   };
 
-  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sched->items[0].root, opts);
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, poly_schedule_call_body(sched, 0), opts);
   ASSERT_TRUE(rewritten != NULL);
   ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_END), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, rewritten, POLY_OP_RANGE), 1);
@@ -1235,10 +1590,10 @@ TEST(schedule_runtime, linearize_vecadd_upcast_has_no_singleton_group_like_tinyg
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize(ctx, sched->items[0].root, &n_lin);
+  PolyUOp **lin = poly_linearize(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_TRUE(lin != NULL);
   ASSERT_INT_EQ(n_lin, 31);
 
@@ -1278,27 +1633,27 @@ TEST(schedule_runtime, prepare_multikernel) {
   ASSERT_TRUE(ps != NULL);
 
   /* Should have multiple kernels (reduce produces intermediate) */
-  ASSERT_TRUE(ps->n_items >= 2);
+  ASSERT_TRUE(ps->template->n_calls >= 2);
 
   /* Should have intermediate buffer slots */
   int n_inter = 0;
-  for (int i = 0; i < ps->n_buf_slots; i++)
-    if (ps->buf_slots[i].is_intermediate) n_inter++;
+  for (int i = 0; i < ps->template->n_buf_slots; i++)
+    if (ps->template->buf_slots[i].is_intermediate) n_inter++;
   ASSERT_TRUE(n_inter > 0);
 
-  /* All exec items should be COMPUTE */
-  for (int i = 0; i < ps->n_items; i++)
-    ASSERT_EQ(ps->items[i].kind, POLY_EXEC_COMPUTE);
+  /* All calls should be COMPUTE */
+  for (int i = 0; i < ps->template->n_calls; i++)
+    ASSERT_FALSE(poly_schedule_call_is_copy(ps, i));
 
   /* All buf_slot_indices should be valid */
-  for (int i = 0; i < ps->n_items; i++)
-    for (int j = 0; j < ps->items[i].n_buf_slots; j++) {
-      ASSERT_TRUE(ps->items[i].buf_slot_indices[j] >= 0);
-      ASSERT_TRUE(ps->items[i].buf_slot_indices[j] < ps->n_buf_slots);
+  for (int i = 0; i < ps->template->n_calls; i++)
+    for (int j = 0; j < poly_schedule_call_n_buffer_args(ps, i); j++) {
+      ASSERT_TRUE(poly_schedule_call_buffer_slot(ps, i, j) >= 0);
+      ASSERT_TRUE(poly_schedule_call_buffer_slot(ps, i, j) < ps->template->n_buf_slots);
     }
 
-  /* Exec order should cover all kernels */
-  ASSERT_TRUE(ps->exec_order != NULL);
+  ASSERT_NOT_NULL(ps->template->linear);
+  ASSERT_INT_EQ(ps->template->linear->n_src, ps->template->n_calls);
 
   poly_schedule_free(ps);
   poly_ctx_destroy(ctx);
@@ -1320,10 +1675,10 @@ TEST(schedule_runtime, prepare_buf_slot_metadata) {
   ASSERT_TRUE(ps != NULL);
 
   /* Check dtype and size are populated */
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (!ps->buf_slots[i].is_intermediate) {
-      ASSERT_TRUE(ps->buf_slots[i].numel > 0);
-      ASSERT_TRUE(ps->buf_slots[i].nbytes > 0);
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (!ps->template->buf_slots[i].is_intermediate) {
+      ASSERT_TRUE(ps->template->buf_slots[i].numel > 0);
+      ASSERT_TRUE(ps->template->buf_slots[i].nbytes > 0);
     }
   }
 
@@ -1351,29 +1706,31 @@ TEST(schedule_runtime, webgpu_triu_param_order_matches_runtime_slots) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_TRUE(sched->n_items >= 1);
+  ASSERT_TRUE(sched->template->n_calls >= 1);
 
   bool checked_kernel = false;
-  for (int k = 0; k < sched->n_items; k++) {
-    PolyExecItem *item = &sched->items[k];
-    ASSERT_INT_EQ(poly_exec_item_lower(ctx, sched, k, POLY_DEVICE_WEBGPU), 0);
-    ASSERT_INT_EQ(item->prg.n_params, item->n_buf_slots);
+  for (int k = 0; k < sched->template->n_calls; k++) {
+    ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched, k, POLY_DEVICE_WEBGPU), 0);
+    PolyCallRuntime *rt = &sched->run->calls[k];
+    int n_params = poly_schedule_call_n_buffer_args(sched, k);
+    ASSERT_INT_EQ(rt->prg.n_params, n_params);
 
     int n_lin = 0;
-    PolyUOp **lin = poly_linearize_webgpu(ctx, item->root, &n_lin);
+    PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, k), &n_lin);
     ASSERT_TRUE(lin != NULL);
 
     int seen_params = 0;
     for (int i = 0; i < n_lin; i++) {
       if (lin[i]->op != POLY_OP_PARAM) continue;
-      ASSERT_TRUE(seen_params < item->n_buf_slots);
+      ASSERT_TRUE(seen_params < n_params);
       ASSERT_INT_EQ((int)lin[i]->arg.i, seen_params);
       ASSERT_INT_EQ(
-          item->prg.param_to_slot[seen_params], item->buf_slot_indices[(int)lin[i]->arg.i]
+          rt->prg.param_to_slot[seen_params],
+          poly_schedule_call_buffer_slot(sched, k, (int)lin[i]->arg.i)
       );
       seen_params++;
     }
-    ASSERT_INT_EQ(seen_params, item->n_buf_slots);
+    ASSERT_INT_EQ(seen_params, n_params);
     free(lin);
     checked_kernel = true;
   }
@@ -1399,11 +1756,11 @@ TEST(schedule_runtime, webgpu_unified_triu_renders_single_kernel_no_helper_param
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
-  ASSERT_INT_EQ(sched->items[0].n_buf_slots, 2);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
+  ASSERT_INT_EQ(poly_schedule_call_n_buffer_args(sched, 0), 2);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[0].root, &n_lin);
+  PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_TRUE(lin != NULL);
   ASSERT_TRUE(n_lin > 0);
 
@@ -1439,10 +1796,10 @@ TEST(schedule_runtime, webgpu_unified_triu_has_no_vector_gated_loads) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[0].root, &n_lin);
+  PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_TRUE(lin != NULL);
   ASSERT_TRUE(n_lin > 0);
 
@@ -1483,7 +1840,7 @@ TEST(schedule_runtime, webgpu_triu_move_where_keeps_residual_where_like_tinygrad
 
     PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
     ASSERT_TRUE(sched != NULL);
-    ASSERT_INT_EQ(sched->n_items, 1);
+    ASSERT_INT_EQ(sched->template->n_calls, 1);
 
     /* Match tinygrad's current boundary check from temp/tiny_triu_probe_stages.py:
      * postopt symbolic should keep a residual WHERE after only the safe clauses
@@ -1505,7 +1862,7 @@ TEST(schedule_runtime, webgpu_triu_move_where_keeps_residual_where_like_tinygrad
         .gpu_block_size = 256,
     };
 
-    PolyUOp *u = sched->items[0].root;
+    PolyUOp *u = poly_schedule_call_body(sched, 0);
     u = poly_apply_opts_heuristic_ex(ctx, u, opts.caps);
     u = poly_graph_rewrite(ctx, u, poly_symbolic());
     u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
@@ -1533,7 +1890,7 @@ TEST(schedule_runtime, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1541,7 +1898,7 @@ TEST(schedule_runtime, webgpu_triu_heuristic_adds_local_split_like_tinygrad) {
       .has_local = true,
       .max_vec_width = 1,
   };
-  PolyUOp *heur = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *heur = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
 
   ASSERT_INT_EQ(count_root_ranges_of_type(ctx, heur, POLY_AXIS_LOOP), 2);
   ASSERT_INT_EQ(count_root_ranges_of_type(ctx, heur, POLY_AXIS_LOCAL), 2);
@@ -1566,7 +1923,7 @@ TEST(schedule_runtime, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1575,7 +1932,7 @@ TEST(schedule_runtime, webgpu_triu_gpudims_replaces_all_ranges_like_tinygrad) {
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1603,7 +1960,7 @@ TEST(schedule_runtime, webgpu_triu_small_expander_drops_residual_where_like_tiny
 
   PolySchedule *sched = build_tri_schedule(ctx, 3, false);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1612,7 +1969,7 @@ TEST(schedule_runtime, webgpu_triu_small_expander_drops_residual_where_like_tiny
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1634,7 +1991,7 @@ TEST(schedule_runtime, webgpu_tril_small_expander_drops_residual_where_like_tiny
 
   PolySchedule *sched = build_tri_schedule(ctx, 3, true);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1643,7 +2000,7 @@ TEST(schedule_runtime, webgpu_tril_small_expander_drops_residual_where_like_tiny
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1665,7 +2022,7 @@ TEST(schedule_runtime, webgpu_triu_small_devector_matches_tinygrad_load_count) {
 
   PolySchedule *sched = build_tri_schedule(ctx, 3, false);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1674,7 +2031,7 @@ TEST(schedule_runtime, webgpu_triu_small_devector_matches_tinygrad_load_count) {
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1702,7 +2059,7 @@ TEST(schedule_runtime, webgpu_tril_small_devector_matches_tinygrad_load_count) {
 
   PolySchedule *sched = build_tri_schedule(ctx, 3, true);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1711,7 +2068,7 @@ TEST(schedule_runtime, webgpu_tril_small_devector_matches_tinygrad_load_count) {
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1747,7 +2104,7 @@ TEST(schedule_runtime, webgpu_triu_add_loads_keeps_residual_where_like_tinygrad)
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1756,7 +2113,7 @@ TEST(schedule_runtime, webgpu_triu_add_loads_keeps_residual_where_like_tinygrad)
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1791,7 +2148,7 @@ TEST(schedule_runtime, webgpu_triu_post_index_symbolic_lowers_where_to_gated_loa
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRendererCaps caps = {
       .has_mulacc = false,
@@ -1800,7 +2157,7 @@ TEST(schedule_runtime, webgpu_triu_post_index_symbolic_lowers_where_to_gated_loa
       .max_vec_width = 1,
   };
 
-  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, sched->items[0].root, caps);
+  PolyUOp *u = poly_apply_opts_heuristic_ex(ctx, poly_schedule_call_body(sched, 0), caps);
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
   u = poly_graph_rewrite(ctx, u, poly_pm_move_where_on_load_pass());
   u = poly_graph_rewrite(ctx, u, poly_symbolic());
@@ -1839,7 +2196,7 @@ TEST(schedule_runtime, webgpu_triu_final_rewrite_keeps_gated_load_like_tinygrad)
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRewriteOpts opts = {
       .optimize = true,
@@ -1858,7 +2215,7 @@ TEST(schedule_runtime, webgpu_triu_final_rewrite_keeps_gated_load_like_tinygrad)
       .gpu_block_size = 256,
   };
 
-  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sched->items[0].root, opts);
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, poly_schedule_call_body(sched, 0), opts);
   ASSERT_TRUE(rewritten != NULL);
   /* Matches temp/tg_webgpu_tri_stage_probe.py: after final WGSL rewrite the
    * mask is still represented as the LOAD's INDEX.valid gate, not a WHERE. */
@@ -1877,10 +2234,10 @@ TEST(schedule_runtime, webgpu_unified_tril_has_no_vector_gated_loads) {
 
   PolySchedule *sched = build_tri_schedule(ctx, 3, true);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[0].root, &n_lin);
+  PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_TRUE(lin != NULL);
   ASSERT_TRUE(n_lin > 0);
 
@@ -1911,9 +2268,9 @@ TEST(schedule_runtime, webgpu_tril_add_loads_keeps_residual_where_like_tinygrad)
 
   PolySchedule *sched = build_tri_schedule(ctx, 9, true);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
-  PolyUOp *u = apply_webgpu_tri_stage_root(ctx, sched->items[0].root, true, false);
+  PolyUOp *u = apply_webgpu_tri_stage_root(ctx, poly_schedule_call_body(sched, 0), true, false);
 
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_LOAD), 1);
@@ -1930,9 +2287,9 @@ TEST(schedule_runtime, webgpu_tril_post_index_symbolic_lowers_where_to_gated_loa
 
   PolySchedule *sched = build_tri_schedule(ctx, 9, true);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
-  PolyUOp *u = apply_webgpu_tri_stage_root(ctx, sched->items[0].root, true, true);
+  PolyUOp *u = apply_webgpu_tri_stage_root(ctx, poly_schedule_call_body(sched, 0), true, true);
 
   /* tinygrad_latest WGSL pipeline keeps the residual WHERE through add_loads,
    * then pm_lower_index_dtype/load_store_indexing lowers it into INDEX.valid. */
@@ -1951,7 +2308,7 @@ TEST(schedule_runtime, webgpu_tril_final_rewrite_keeps_gated_load_like_tinygrad)
 
   PolySchedule *sched = build_tri_schedule(ctx, 9, true);
   ASSERT_TRUE(sched != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   PolyRewriteOpts opts = {
       .optimize = true,
@@ -1970,7 +2327,7 @@ TEST(schedule_runtime, webgpu_tril_final_rewrite_keeps_gated_load_like_tinygrad)
       .gpu_block_size = 256,
   };
 
-  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sched->items[0].root, opts);
+  PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, poly_schedule_call_body(sched, 0), opts);
   ASSERT_TRUE(rewritten != NULL);
   /* Matches temp/tg_webgpu_tri_stage_probe.py: after final WGSL rewrite the
    * mask is still represented as the LOAD's INDEX.valid gate, not a WHERE. */
@@ -2074,7 +2431,7 @@ TEST(schedule_runtime, prepare_graph_hash) {
 
   PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(ps != NULL);
-  ASSERT_TRUE(ps->graph_hash != 0);
+  ASSERT_TRUE(ps->template->graph_hash != 0);
 
   poly_schedule_free(ps);
   poly_ctx_destroy(ctx);
@@ -2097,7 +2454,8 @@ TEST(schedule_runtime, lower_and_run_vecadd) {
 
   PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
   ASSERT_TRUE(es != NULL);
-  ASSERT_INT_EQ(es->n_runners, ps->n_items);
+  ASSERT_TRUE(es->run != NULL);
+  ASSERT_TRUE(ps->template->n_calls == 0 || es->run->calls != NULL);
   ASSERT_EQ(es->device, POLY_DEVICE_CPU);
 
   /* Prepare data */
@@ -2107,24 +2465,177 @@ TEST(schedule_runtime, lower_and_run_vecadd) {
 
   /* Build slot_data array indexed by buf_slot */
   void *slot_data[3];
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout;
     else
       slot_data[i] = NULL;
   }
 
-  int ret = poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0);
+  int ret = poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0);
   ASSERT_INT_EQ(ret, 0);
 
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-6);
   ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-6);
   ASSERT_FLOAT_EQ(dout[2], 33.0f, 1e-6);
   ASSERT_FLOAT_EQ(dout[3], 44.0f, 1e-6);
+
+  poly_compiled_schedule_free(es);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compiled_schedule_retains_template_after_schedule_free) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, c));
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+
+  float da[] = {1, 2, 3, 4};
+  float db[] = {10, 20, 30, 40};
+  float dout[4] = {0};
+  void *slot_data[3] = {0};
+  int n_slots = ps->template->n_buf_slots;
+  for (int i = 0; i < n_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
+      slot_data[i] = da;
+    else if (ps->template->buf_slots[i].buf_uop == b)
+      slot_data[i] = db;
+    else if (ps->template->buf_slots[i].buf_uop == out)
+      slot_data[i] = dout;
+  }
+
+  poly_schedule_free(ps);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, n_slots, NULL, 0), 0);
+  ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-6);
+  ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-6);
+  ASSERT_FLOAT_EQ(dout[2], 33.0f, 1e-6);
+  ASSERT_FLOAT_EQ(dout[3], 44.0f, 1e-6);
+
+  poly_compiled_schedule_free(es);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compiled_schedule_uses_ctx_buffers_when_slots_missing) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, c));
+
+  float da[] = {1, 2, 3, 4};
+  float db[] = {10, 20, 30, 40};
+  float got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a, da, sizeof(da)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b, db, sizeof(db)), 0);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, NULL, 0, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, got, sizeof(got)), 0);
+
+  ASSERT_FLOAT_EQ(got[0], 11.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[1], 22.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[2], 33.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[3], 44.0f, 1e-6);
+
+  poly_compiled_schedule_free(es);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compiled_schedule_ctx_readwrite_arg_updates_current_residency) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *c = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, a, c));
+
+  float a1[] = {1, 2, 3, 4};
+  float a2[] = {5, 6, 7, 8};
+  float db[] = {10, 20, 30, 40};
+  float got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a, a1, sizeof(a1)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b, db, sizeof(db)), 0);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, NULL, 0, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, a, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 11.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[1], 22.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[2], 33.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[3], 44.0f, 1e-6);
+
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a, a2, sizeof(a2)), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, NULL, 0, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, a, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 15.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[1], 26.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[2], 37.0f, 1e-6);
+  ASSERT_FLOAT_EQ(got[3], 48.0f, 1e-6);
+
+  poly_compiled_schedule_free(es);
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, compiled_schedule_runtime_var_override_uses_ctx_buffers) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+  PolyUOp *a = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *out = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, add));
+
+  float a_data[16];
+  float out_data[16];
+  float got[16];
+  for (int i = 0; i < 16; i++) {
+    a_data[i] = (float)(i + 1);
+    out_data[i] = -999.0f;
+    got[i] = 0.0f;
+  }
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a, a_data, sizeof(a_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, out, out_data, sizeof(out_data)), 0);
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(ps != NULL);
+  PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_TRUE(es != NULL);
+
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, NULL, 0, NULL, 0), -1);
+
+  PolyVarBinding bind = {.var = N, .value = 6};
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, NULL, 0, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, got, sizeof(got)), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(got[i], (float)(i + 2), 1e-5f);
+  ASSERT_FLOAT_EQ(got[6], -999.0f, 1e-5f);
 
   poly_compiled_schedule_free(es);
   poly_schedule_free(ps);
@@ -2149,7 +2660,7 @@ TEST(schedule_runtime, cpu_threaded_render_uses_core_id_and_arg_slots) {
 
   PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_TRUE(ps != NULL);
-  ASSERT_INT_EQ(ps->n_items, 1);
+  ASSERT_INT_EQ(ps->template->n_calls, 1);
 
   PolyRewriteOpts opts = {
       .optimize = true,
@@ -2160,7 +2671,7 @@ TEST(schedule_runtime, cpu_threaded_render_uses_core_id_and_arg_slots) {
       .extra_matcher = poly_pm_c_renderer_extra(),
   };
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_ex(ctx, ps->items[0].root, opts, &n_lin);
+  PolyUOp **lin = poly_linearize_ex(ctx, poly_schedule_call_body(ps, 0), opts, &n_lin);
   ASSERT_TRUE(lin != NULL);
   char *src = poly_render_c(lin, n_lin, "thread_probe");
   ASSERT_TRUE(src != NULL);
@@ -2203,13 +2714,14 @@ TEST(schedule_runtime, cpu_threaded_large_vecadd_e2e) {
   ASSERT_TRUE(ps != NULL);
   PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
   ASSERT_TRUE(es != NULL);
-  ASSERT_INT_EQ(es->n_runners, 1);
-  ASSERT_INT_EQ(es->runners[0].grid[0], 4);
+  ASSERT_TRUE(es->run != NULL);
+  ASSERT_INT_EQ(ps->template->n_calls, 1);
+  ASSERT_INT_EQ(es->run->calls[0].prg.grid[0], 4);
 
   float *da = malloc((size_t)N * sizeof(float));
   float *db = malloc((size_t)N * sizeof(float));
   float *dout = calloc((size_t)N, sizeof(float));
-  void **slot_data = calloc((size_t)ps->n_buf_slots, sizeof(void *));
+  void **slot_data = calloc((size_t)ps->template->n_buf_slots, sizeof(void *));
   ASSERT_TRUE(da != NULL);
   ASSERT_TRUE(db != NULL);
   ASSERT_TRUE(dout != NULL);
@@ -2219,16 +2731,16 @@ TEST(schedule_runtime, cpu_threaded_large_vecadd_e2e) {
     da[i] = (float)i;
     db[i] = (float)(N - i);
   }
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout;
   }
 
-  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0), 0);
   ASSERT_FLOAT_EQ(dout[0], (float)N, 1e-6);
   ASSERT_FLOAT_EQ(dout[1], (float)N, 1e-6);
   ASSERT_FLOAT_EQ(dout[12345], (float)N, 1e-6);
@@ -2265,8 +2777,9 @@ TEST(schedule_runtime, cpu_threaded_reuses_workers_with_current_slots) {
   ASSERT_TRUE(ps != NULL);
   PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
   ASSERT_TRUE(es != NULL);
-  ASSERT_INT_EQ(es->n_runners, 1);
-  ASSERT_INT_EQ(es->runners[0].grid[0], 4);
+  ASSERT_TRUE(es->run != NULL);
+  ASSERT_INT_EQ(ps->template->n_calls, 1);
+  ASSERT_INT_EQ(es->run->calls[0].prg.grid[0], 4);
 
   float *a1 = malloc((size_t)N * sizeof(float));
   float *b1 = malloc((size_t)N * sizeof(float));
@@ -2274,8 +2787,8 @@ TEST(schedule_runtime, cpu_threaded_reuses_workers_with_current_slots) {
   float *a2 = malloc((size_t)N * sizeof(float));
   float *b2 = malloc((size_t)N * sizeof(float));
   float *o2 = calloc((size_t)N, sizeof(float));
-  void **slots1 = calloc((size_t)ps->n_buf_slots, sizeof(void *));
-  void **slots2 = calloc((size_t)ps->n_buf_slots, sizeof(void *));
+  void **slots1 = calloc((size_t)ps->template->n_buf_slots, sizeof(void *));
+  void **slots2 = calloc((size_t)ps->template->n_buf_slots, sizeof(void *));
   ASSERT_TRUE(a1 != NULL);
   ASSERT_TRUE(b1 != NULL);
   ASSERT_TRUE(o1 != NULL);
@@ -2291,21 +2804,21 @@ TEST(schedule_runtime, cpu_threaded_reuses_workers_with_current_slots) {
     a2[i] = (float)(2 * i);
     b2[i] = 3.0f;
   }
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a) {
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a) {
       slots1[i] = a1;
       slots2[i] = a2;
-    } else if (ps->buf_slots[i].buf_uop == b) {
+    } else if (ps->template->buf_slots[i].buf_uop == b) {
       slots1[i] = b1;
       slots2[i] = b2;
-    } else if (ps->buf_slots[i].buf_uop == out) {
+    } else if (ps->template->buf_slots[i].buf_uop == out) {
       slots1[i] = o1;
       slots2[i] = o2;
     }
   }
 
-  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slots1, ps->n_buf_slots, NULL, 0), 0);
-  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slots2, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slots1, ps->template->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slots2, ps->template->n_buf_slots, NULL, 0), 0);
 
   ASSERT_FLOAT_EQ(o1[0], 1.0f, 1e-6);
   ASSERT_FLOAT_EQ(o1[12345], 12346.0f, 1e-6);
@@ -2348,8 +2861,9 @@ TEST(schedule_runtime, cpu_threads_env_zero_keeps_single_core) {
   ASSERT_TRUE(ps != NULL);
   PolyCompiledSchedule *es = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
   ASSERT_TRUE(es != NULL);
-  ASSERT_INT_EQ(es->n_runners, 1);
-  ASSERT_INT_EQ(es->runners[0].grid[0], 1);
+  ASSERT_TRUE(es->run != NULL);
+  ASSERT_INT_EQ(ps->template->n_calls, 1);
+  ASSERT_INT_EQ(es->run->calls[0].prg.grid[0], 1);
 
   poly_compiled_schedule_free(es);
   poly_schedule_free(ps);
@@ -2385,8 +2899,8 @@ TEST(schedule_runtime, lower_and_run_multikernel) {
   ASSERT_TRUE(es != NULL);
   /* Plan has intermediate buffer slots (intermediates are per-run now) */
   int n_inter = 0;
-  for (int i = 0; i < ps->n_buf_slots; i++)
-    if (ps->buf_slots[i].is_intermediate) n_inter++;
+  for (int i = 0; i < ps->template->n_buf_slots; i++)
+    if (ps->template->buf_slots[i].is_intermediate) n_inter++;
   ASSERT_TRUE(n_inter > 0);
 
   /* a = [1..8], sum = 36, b = [10..17], out = 36 + b */
@@ -2398,16 +2912,16 @@ TEST(schedule_runtime, lower_and_run_multikernel) {
   memset(dout, 0, sizeof(dout));
 
   void *slot_data[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout;
   }
 
-  int ret = poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0);
+  int ret = poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0);
   ASSERT_INT_EQ(ret, 0);
 
   /* sum(1..8) = 36, out[i] = 36 + (i + 10) */
@@ -2449,15 +2963,15 @@ TEST(schedule_runtime, lower_matches_realize_uops) {
   ASSERT_TRUE(es != NULL);
 
   void *slot_data[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout_new;
   }
-  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0), 0);
 
   /* Must match exactly */
   for (int i = 0; i < 4; i++)
@@ -2492,18 +3006,18 @@ TEST(schedule_runtime, interp_vecadd) {
   float dout[4] = {0};
 
   void *slot_data[3];
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout;
     else
       slot_data[i] = NULL;
   }
 
-  int ret = poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0);
+  int ret = poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0);
   ASSERT_INT_EQ(ret, 0);
 
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-6);
@@ -2549,16 +3063,16 @@ TEST(schedule_runtime, interp_reduce) {
   memset(dout, 0, sizeof(dout));
 
   void *slot_data[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_data[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout;
   }
 
-  int ret = poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0);
+  int ret = poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0);
   ASSERT_INT_EQ(ret, 0);
 
   for (int i = 0; i < N; i++)
@@ -2592,15 +3106,15 @@ TEST(schedule_runtime, interp_matches_cpu) {
   ASSERT_TRUE(cpu != NULL);
 
   void *slot_cpu[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_cpu[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_cpu[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_cpu[i] = dout_cpu;
   }
-  ASSERT_INT_EQ(poly_run_compiled_schedule(cpu, slot_cpu, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(cpu, slot_cpu, ps->template->n_buf_slots, NULL, 0), 0);
 
   /* INTERP path */
   float dout_interp[4] = {0};
@@ -2608,15 +3122,15 @@ TEST(schedule_runtime, interp_matches_cpu) {
   ASSERT_TRUE(interp != NULL);
 
   void *slot_interp[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_interp[i] = da;
-    else if (ps->buf_slots[i].buf_uop == b)
+    else if (ps->template->buf_slots[i].buf_uop == b)
       slot_interp[i] = db;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_interp[i] = dout_interp;
   }
-  ASSERT_INT_EQ(poly_run_compiled_schedule(interp, slot_interp, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(interp, slot_interp, ps->template->n_buf_slots, NULL, 0), 0);
 
   /* Bitwise identical (integer multiply, no FP rounding differences) */
   ASSERT_TRUE(memcmp(dout_cpu, dout_interp, sizeof(dout_cpu)) == 0);
@@ -2648,14 +3162,14 @@ TEST(schedule_runtime, interp_transcendental) {
   float dout[4] = {0};
 
   void *slot_data[16] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot_data[i] = da;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot_data[i] = dout;
   }
 
-  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(es, slot_data, ps->template->n_buf_slots, NULL, 0), 0);
 
   /* exp2(log2(x)) ~= x, within polynomial approximation tolerance */
   for (int i = 0; i < 4; i++)
@@ -2859,14 +3373,15 @@ TEST(schedule_runtime, workspace_reuse) {
   /* Verify persistent intermediates were allocated */
   int n_inter = 0;
   int n_zero = 0;
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (!ps->buf_slots[i].is_intermediate) continue;
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (!ps->template->buf_slots[i].is_intermediate) continue;
     n_inter++;
-    if (ps->buf_slots[i].needs_zero) n_zero++;
+    if (ps->template->buf_slots[i].needs_zero) n_zero++;
   }
   ASSERT_TRUE(n_inter > 0);
   ASSERT_TRUE(n_zero > 0);
-  ASSERT_INT_EQ(plan->n_intermediates, n_inter);
+  ASSERT_TRUE(plan->run != NULL);
+  ASSERT_INT_EQ(plan->run->n_intermediates, n_inter);
 
   /* Run 100 times with different multipliers */
   for (int iter = 0; iter < 100; iter++) {
@@ -2879,16 +3394,16 @@ TEST(schedule_runtime, workspace_reuse) {
     memset(dout, 0, sizeof(dout));
 
     void *slot_data[16] = {0};
-    for (int i = 0; i < ps->n_buf_slots; i++) {
-      if (ps->buf_slots[i].buf_uop == a)
+    for (int i = 0; i < ps->template->n_buf_slots; i++) {
+      if (ps->template->buf_slots[i].buf_uop == a)
         slot_data[i] = da;
-      else if (ps->buf_slots[i].buf_uop == b)
+      else if (ps->template->buf_slots[i].buf_uop == b)
         slot_data[i] = db;
-      else if (ps->buf_slots[i].buf_uop == out)
+      else if (ps->template->buf_slots[i].buf_uop == out)
         slot_data[i] = dout;
     }
 
-    int ret = poly_run_compiled_schedule(plan, slot_data, ps->n_buf_slots, NULL, 0);
+    int ret = poly_run_compiled_schedule(plan, slot_data, ps->template->n_buf_slots, NULL, 0);
     ASSERT_INT_EQ(ret, 0);
 
     /* sum(1..8 * mult) = 36*mult, out[i] = 36*mult + (i+10) */
@@ -2927,26 +3442,26 @@ TEST(schedule_runtime, workspace_reduce_zeroed) {
   float da1[] = {1, 2, 3, 4};
   float dout1 = 0;
   void *slot1[8] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot1[i] = da1;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot1[i] = &dout1;
   }
-  ASSERT_INT_EQ(poly_run_compiled_schedule(plan, slot1, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(plan, slot1, ps->template->n_buf_slots, NULL, 0), 0);
   ASSERT_FLOAT_EQ(dout1, 10.0f, 1e-6);
 
   /* Run 2: sum([10,20,30,40]) = 100, NOT 110 (accumulated from run 1) */
   float da2[] = {10, 20, 30, 40};
   float dout2 = 0;
   void *slot2[8] = {0};
-  for (int i = 0; i < ps->n_buf_slots; i++) {
-    if (ps->buf_slots[i].buf_uop == a)
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    if (ps->template->buf_slots[i].buf_uop == a)
       slot2[i] = da2;
-    else if (ps->buf_slots[i].buf_uop == out)
+    else if (ps->template->buf_slots[i].buf_uop == out)
       slot2[i] = &dout2;
   }
-  ASSERT_INT_EQ(poly_run_compiled_schedule(plan, slot2, ps->n_buf_slots, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_run_compiled_schedule(plan, slot2, ps->template->n_buf_slots, NULL, 0), 0);
   ASSERT_FLOAT_EQ(dout2, 100.0f, 1e-5);
 
   poly_compiled_schedule_free(plan);

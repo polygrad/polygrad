@@ -596,14 +596,14 @@ TEST(wasm, sparse_cross_entropy_i64_gather_index_validates) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 3);
+  ASSERT_INT_EQ(sched->template->n_calls, 3);
 
   bool saw_i64_index = false;
   bool saw_i32_wrap = false;
 
-  for (int item = 0; item < sched->n_items; item++) {
+  for (int item = 0; item < sched->template->n_calls; item++) {
     int n_lin = 0;
-    PolyUOp **lin = poly_linearize_wasm_env(ctx, sched->items[item].root, &n_lin);
+    PolyUOp **lin = poly_linearize_wasm_env(ctx, poly_schedule_call_body(sched, item), &n_lin);
     ASSERT_NOT_NULL(lin);
 
     bool item_has_i64_index = false;

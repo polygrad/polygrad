@@ -40,6 +40,10 @@ OPTIM_SGD = 1
 OPTIM_ADAM = 2
 OPTIM_ADAMW = 3
 
+EXPORT_WEIGHTS_PARAMS = 1
+EXPORT_WEIGHTS_OPTIMIZER = 2
+EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_PARAMS | EXPORT_WEIGHTS_OPTIMIZER
+
 
 def _optimizer_kind(kind):
     if isinstance(kind, str):
@@ -535,10 +539,19 @@ class Instance:
 
     # ── Weight I/O ───────────────────────────────────────────────────
 
-    def export_weights(self):
-        """Export param weights as safetensors bytes."""
+    def export_weights(self, *, include_optimizer=True):
+        """Export model weights as safetensors bytes.
+
+        Optimizer state is included by default because a PolyInstance packages
+        model and optimizer state together. Pass include_optimizer=False for a
+        model-only checkpoint, matching tinygrad's separate model/optimizer
+        state_dict calls.
+        """
+        flags = EXPORT_WEIGHTS_PARAMS
+        if include_optimizer:
+            flags |= EXPORT_WEIGHTS_OPTIMIZER
         out_len = ctypes.c_int(0)
-        ptr = _get_lib().poly_instance_export_weights(self._ptr, ctypes.byref(out_len))
+        ptr = _get_lib().poly_instance_export_weights_ex(self._ptr, ctypes.byref(out_len), flags)
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -564,10 +577,13 @@ class Instance:
 
     # ── Bundle I/O ───────────────────────────────────────────────────
 
-    def save_bundle(self):
+    def save_bundle(self, *, include_optimizer=True):
         """Save as a poly.bundle@1 byte array (IR + weights + metadata)."""
+        flags = EXPORT_WEIGHTS_PARAMS
+        if include_optimizer:
+            flags |= EXPORT_WEIGHTS_OPTIMIZER
         out_len = ctypes.c_int(0)
-        ptr = _get_lib().poly_instance_save_bundle(self._ptr, ctypes.byref(out_len))
+        ptr = _get_lib().poly_instance_save_bundle_ex(self._ptr, ctypes.byref(out_len), flags)
         if not ptr:
             return None
         data = bytes(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint8 * out_len.value)).contents)
@@ -584,12 +600,14 @@ class Instance:
     # ── Execution ────────────────────────────────────────────────────
 
     def set_optimizer(self, kind, lr=0.01, beta1=0.9, beta2=0.999,
-                      eps=1e-8, weight_decay=0.0):
+                      eps=1e-8, weight_decay=0.0, momentum=0.0,
+                      nesterov=False, classic=False):
         """Configure optimizer before first train_step."""
-        ret = _get_lib().poly_instance_set_optimizer(
+        ret = _get_lib().poly_instance_set_optimizer_ex(
             self._ptr, kind,
             ctypes.c_float(lr), ctypes.c_float(beta1), ctypes.c_float(beta2),
-            ctypes.c_float(eps), ctypes.c_float(weight_decay))
+            ctypes.c_float(eps), ctypes.c_float(weight_decay),
+            ctypes.c_float(momentum), bool(nesterov), bool(classic))
         if ret != 0:
             raise RuntimeError(f'set_optimizer failed (ret={ret})')
 
@@ -619,6 +637,7 @@ class Instance:
 
     def fit(self, data=None, *, epochs=1, optimizer=None, lr=0.01,
             beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.0,
+            momentum=0.0, nesterov=False, classic=False,
             on_step=None, **io):
         """Run a small Keras-style training loop over this instance.
 
@@ -633,7 +652,8 @@ class Instance:
         if optimizer is not None:
             self.set_optimizer(
                 _optimizer_kind(optimizer), lr=lr, beta1=beta1, beta2=beta2,
-                eps=eps, weight_decay=weight_decay,
+                eps=eps, weight_decay=weight_decay, momentum=momentum,
+                nesterov=nesterov, classic=classic,
             )
         losses = []
         for step in range(int(epochs)):

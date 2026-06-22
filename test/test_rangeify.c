@@ -1344,11 +1344,11 @@ TEST(rangeify, schedule_v2_reduce_e2e) {
 static bool run_via_v1(PolyCtx *ctx, PolyUOp *sink, void **args, int n_args, const char *name) {
   PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!schedule) return false;
-  if (schedule->n_items != 1 || !schedule->items[0].root) {
+  if (schedule->template->n_calls != 1 || !poly_schedule_call_body(schedule, 0)) {
     poly_schedule_free(schedule);
     return false;
   }
-  PolyUOp *kernel = schedule->items[0].root;
+  PolyUOp *kernel = poly_schedule_call_body(schedule, 0);
   poly_schedule_free(schedule);
   int n_lin;
   PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
@@ -1883,11 +1883,11 @@ TEST(rangeify, scalar_bufferize_read_indexes_singleton_intermediate) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_TRUE(sched->n_items > 1);
+  ASSERT_TRUE(sched->template->n_calls > 1);
 
   int bad = 0;
-  for (int i = 0; i < sched->n_items; i++)
-    bad += count_alu_direct_storage_sources(ctx, sched->items[i].root);
+  for (int i = 0; i < sched->template->n_calls; i++)
+    bad += count_alu_direct_storage_sources(ctx, poly_schedule_call_body(sched, i));
   ASSERT_INT_EQ(bad, 0);
 
   poly_schedule_free(sched);
@@ -2601,7 +2601,7 @@ TEST(rangeify, moved_const_folding_add_shrunk_zero_e2e) {
    * single output kernel, not force an intermediate materialization. */
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   poly_schedule_free(sched);
 
   float a_d[] = {1, 2, 3, 4};
@@ -2632,7 +2632,7 @@ TEST(rangeify, moved_const_folding_add_padded_zero_e2e) {
    * where identity folding stops at movement boundaries. */
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   poly_schedule_free(sched);
 
   float a_d[] = {5, 6, 7, 8};
@@ -2661,7 +2661,7 @@ TEST(rangeify, moved_const_folding_mul_shrunk_one_e2e) {
   /* Port of tinygrad test_const_folding.py::test_mul_shrunk_one. */
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   poly_schedule_free(sched);
 
   float a_d[] = {-1, 2, -3, 4};

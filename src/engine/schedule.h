@@ -29,13 +29,6 @@ typedef enum {
 } PolyCompileMode;
 
 typedef enum {
-  POLY_EXEC_COMPUTE,
-  POLY_EXEC_COPY,
-  POLY_EXEC_VIEW,
-  POLY_EXEC_ENCDEC,
-} PolyExecItemKind;
-
-typedef enum {
   POLY_RUNNER_COMPILED,
   POLY_RUNNER_COPY,
   POLY_RUNNER_VIEW,
@@ -76,27 +69,48 @@ typedef struct {
 } PolyScheduleBufSlot;
 
 typedef struct {
-  PolyExecItemKind kind;
-  PolyUOp *root; /* scheduled kernel root before backend lowering */
+  int n_args;
+  int *arg_to_slot;
+  bool *outs;
+  bool *ins;
+} PolyCallIO;
 
-  int *buf_slot_indices;
-  int n_buf_slots;
+typedef struct {
+  const char *name;
 
-  PolyVarBinding *fixedvars;
-  int n_fixedvars;
+  int global_size[3];
+  int local_size[3];
+  PolyUOp *global_exprs[3];
+  PolyUOp *local_exprs[3];
+  bool has_local_size;
 
-  PolyUOp **var_uops;
-  int n_var_uops;
+  PolyUOp **vars;
+  int n_vars;
 
-  /* Tinygrad ExecItem analogue for the direct run_schedule path:
-   * cache the lowered runner on the item itself. */
+  int *globals;
+  int n_globals;
+
+  int *outs;
+  int n_outs;
+
+  int *ins;
+  int n_ins;
+} PolyProgramInfo;
+
+typedef struct {
+  PolyUOp *call; /* LINEAR source: CALL(body, buffer args..., DEFINE_VAR args...) */
+
+  /* Runtime cache parallel to LINEAR.src[]. Mutable backend state stays here,
+   * never in the CALL UOp itself. */
   PolyRunner prg;
   PolyDevice lowered_device;
   uint32_t lowered_env_stamp;
   bool prg_valid;
-} PolyExecItem;
+} PolyCallRuntime;
 
 typedef struct {
+  int refcount;
+
   const char *entrypoint_name;
   PolyCompileMode mode;
   uint32_t graph_hash;
@@ -104,54 +118,52 @@ typedef struct {
   PolyScheduleBufSlot *buf_slots;
   int n_buf_slots;
 
-  PolyExecItem *items;
-  int n_items;
-
-  int *exec_order;
+  PolyUOp *linear; /* POLY_OP_LINEAR; srcs are ordered POLY_OP_CALL UOps */
+  PolyCallIO *call_io;
+  int n_calls;
 
   PolyVarBinding *default_vars;
   int n_default_vars;
 
   int loss_buf_slot;
   int *grad_buf_slots;
+} PolyScheduleTemplate;
 
-  /* Direct run_schedule runtime state. This moves the main execution path
-   * closer to tinygrad's Schedule + ExecItem ownership while compiled-plan
-   * wrappers remain as a compatibility layer during migration. */
-  PolyDevice run_device;
-  const PolyAllocator *run_allocator;
-  PolyBuffer *run_intermediates;
-  int n_run_intermediates;
-  void ***run_kernel_args;
-  void **run_slot_to_data;
-  int n_run_slot_to_data;
-  PolyVarBinding *run_merged_vars;
-  int run_merged_vars_cap;
-  int *run_var_int_storage;
-  int run_var_int_cap;
+typedef struct {
+  PolyCallRuntime *calls;
+  PolyDevice device;
+  const PolyAllocator *allocator;
+  PolyBuffer *intermediates;
+  int n_intermediates;
+  void ***kernel_args;
+  void **slot_to_data;
+  int n_slot_to_data;
+  PolyVarBinding *merged_vars;
+  int merged_vars_cap;
+  int *var_int_storage;
+  int var_int_cap;
+} PolyScheduleRuntime;
+
+typedef struct {
+  /* LINEAR/CALL schedule metadata. This is structurally immutable after
+   * schedule construction and is separated from mutable runtime state. */
+  PolyScheduleTemplate *template;
+
+  /* Direct run_schedule runtime state. Mutable backend runners, intermediates,
+   * argument arrays, and merged variables live here, not in the template. */
+  PolyScheduleRuntime *run;
 } PolySchedule;
 
 typedef struct {
-  PolySchedule *schedule;
+  PolyCtx *ctx;
+  PolyScheduleTemplate *template;
   PolyDevice device;
   const PolyAllocator *allocator;
 
-  PolyRunner *runners;
-  int n_runners;
-
-  PolyBuffer *intermediates;
-  int n_intermediates;
-
-  void ***kernel_args;
-
-  void **slot_to_data;
-  int n_slot_to_data;
-
-  PolyVarBinding *merged_vars;
-  int merged_vars_cap;
-
-  int *var_int_storage;
-  int var_int_cap;
+  /* Compiled/replay runtime workspace. This has the same shape as direct
+   * schedule execution; the compiled plan owns the workspace and borrows the
+   * schedule template. */
+  PolyScheduleRuntime *run;
 } PolyCompiledSchedule;
 
 typedef struct {
@@ -191,12 +203,27 @@ void poly_program_cache_clear(PolyCtx *ctx);
 
 void poly_schedule_free(PolySchedule *schedule);
 
-/* Tinygrad ExecItem analogues for the direct schedule runner. */
-int poly_exec_item_lower(PolyCtx *ctx, PolySchedule *schedule, int item_index, PolyDevice device);
-int poly_exec_item_run(
+PolyUOp *poly_schedule_call(const PolySchedule *schedule, int call_index);
+PolyUOp *poly_schedule_call_body(const PolySchedule *schedule, int call_index);
+bool poly_schedule_call_is_copy(const PolySchedule *schedule, int call_index);
+int poly_schedule_call_n_buffer_args(const PolySchedule *schedule, int call_index);
+int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index, int arg_index);
+
+/* Tinygrad ProgramInfo analogue for PROGRAM CALL bodies. Indices are over
+ * filtered CALL buffer arguments, excluding DEFINE_VAR/BIND-like arguments. */
+PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
+const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
+
+int poly_schedule_call_lower(
     PolyCtx *ctx,
     PolySchedule *schedule,
-    int item_index,
+    int call_index,
+    PolyDevice device
+);
+int poly_schedule_call_run(
+    PolyCtx *ctx,
+    PolySchedule *schedule,
+    int call_index,
     PolyVarBinding *var_bindings,
     int n_var_bindings
 );

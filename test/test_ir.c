@@ -202,6 +202,39 @@ TEST(ir, round_trip_multi_entry) {
   PASS();
 }
 
+TEST(ir, import_reserves_unique_ids_for_future_buffers) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = poly_buffer_f32(ctx, 4);
+  PolyUOp *loss_out = poly_buffer_f32(ctx, 1);
+  PolyUOp *loss_store = poly_store_val(ctx, loss_out, poly_const_float(ctx, 0.0));
+  PolyUOp *sink = poly_sink1(ctx, loss_store);
+
+  PolyIrBufEntry bufs[] = {
+      {.name = "x", .role = POLY_IR_ROLE_INPUT, .buffer = x, .shape = {4}, .ndim = 1},
+      {.name = "loss", .role = POLY_IR_ROLE_OUTPUT, .buffer = loss_out, .shape = {1}, .ndim = 1},
+  };
+  PolyIrEntrypoint eps[] = {{.name = "loss", .sink = sink}};
+  PolyIrSpec spec = {ctx, bufs, 2, eps, 1};
+
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+  PolyUOp *fresh = poly_buffer(imported.ctx, POLY_FLOAT32, 1);
+  ASSERT_NOT_NULL(fresh);
+  for (int i = 0; i < imported.n_bufs; i++)
+    ASSERT_TRUE(fresh != imported.bufs[i].buffer);
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
 TEST(ir, round_trip_entrypoint_metadata) {
   PolyCtx *ctx = poly_ctx_new();
 

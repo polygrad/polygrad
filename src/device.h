@@ -61,6 +61,11 @@ void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int d
  * the same schedule/realize path as normal tensors. */
 void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
 
+/* Adopt an existing runtime buffer as the authoritative ctx residency.
+ * Unlike poly_buffer_attach(), this preserves handle->owned and is intended
+ * for runtime-owned storage that ctx must release when the binding is retired. */
+void poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle);
+
 PolyUOp *poly_buffer_from_host(
     PolyCtx *ctx, void *ptr, size_t nbytes, int dtype_id,
     int64_t *dims, int ndim
@@ -95,11 +100,37 @@ void poly_buffer_remove(PolyCtx *ctx, PolyUOp *buf);
 /* Copy logical contents from src residency into dst residency. */
 int poly_buffer_copy(PolyBuffer *dst, const PolyBuffer *src);
 
-/* Allocate device memory for a BUFFER UOp. No-op if already allocated. */
+/* Ensure device memory exists for a BUFFER UOp. If the buffer already has valid
+ * logical contents, preserve them on the requested device. */
 int poly_buffer_allocate(PolyCtx *ctx, PolyUOp *buf, PolyDevice device);
 
-/* Ensure a buffer is allocated. No-op if already allocated. */
+/* Ensure a buffer is allocated. Preserves valid contents when present. */
 int poly_buffer_ensure_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device);
+
+/* Ensure target-device residency exists for an output-only write. Does not copy
+ * logical contents and may discard stale current residency. */
+int poly_buffer_ensure_device_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device);
+
+/* Allocate or reuse ctx-owned host storage for a BUFFER UOp. */
+int poly_buffer_alloc_owned_host(
+    PolyCtx *ctx,
+    PolyUOp *buf,
+    size_t nbytes,
+    bool zero,
+    PolyBuffer **host_out
+);
+
+/* Ensure target-device residency exists and contains current logical contents. */
+int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice device);
+
+/* Ensure a host-addressable root exists and contains current logical contents. */
+int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **host_out);
+
+/* Mark host root as the newest logical contents after caller mutation. */
+int poly_buffer_mark_host_written(PolyCtx *ctx, PolyUOp *buf);
+
+/* Mark the current residency as written by a successful backend execution. */
+int poly_buffer_mark_residency_written(PolyCtx *ctx, PolyUOp *buf, PolyDevice device);
 
 /* Host -> device data transfer. Buffer must be allocated. */
 int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes);
@@ -110,6 +141,9 @@ int poly_buffer_copyout(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
 /* Read bytes from a realized buffer into dst. Alias for copyout, but used by
  * frontends that need a backend-aware readback path rather than raw ptr access. */
 int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes);
+
+/* Replace logical contents from host bytes, preserving cached device residency. */
+int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes);
 
 /* Check if a buffer has data in the side table. */
 bool poly_buffer_is_allocated(PolyCtx *ctx, PolyUOp *buf);

@@ -1,8 +1,7 @@
 /*
  * gpt2.c -- GPT-2 model builder + HF import semantics
  *
- * Uses the nn.h layer API (poly_linear, poly_layernorm, poly_embedding)
- * and the named buffer registry (poly_param/poly_input/poly_output).
+ * Uses staged PolyInstance bindings with nn.h apply/instance helpers.
  *
  * Weight naming matches HuggingFace GPT-2 (minus "transformer." prefix).
  * Weights stored in PyTorch nn.Linear convention: (out, in).

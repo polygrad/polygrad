@@ -596,9 +596,9 @@ static PolySchedule *poly_schedule_effect_sink(PolyCtx *ctx, PolyUOp *sink) {
     double t1 = poly_now_ms();
     fprintf(
         stderr,
-        "[polygrad:schedule_effect] done schedule=%.3fms items=%d slots=%d default_vars=%d\n",
-        t1 - t0, sched ? sched->n_items : -1, sched ? sched->n_buf_slots : -1,
-        sched ? sched->n_default_vars : -1
+        "[polygrad:schedule_effect] done schedule=%.3fms calls=%d slots=%d default_vars=%d\n",
+        t1 - t0, sched ? sched->template->n_calls : -1, sched ? sched->template->n_buf_slots : -1,
+        sched ? sched->template->n_default_vars : -1
     );
     fflush(stderr);
   }
@@ -649,7 +649,7 @@ int poly_realize_sink(PolyCtx *ctx, PolyUOp *sink) {
   double t_sched = timing ? poly_now_ms() : 0.0;
   if (!sched) return -1;
   if (timing) {
-    fprintf(stderr, "[polygrad:realize_sink] run begin items=%d\n", sched->n_items);
+    fprintf(stderr, "[polygrad:realize_sink] run begin calls=%d\n", sched->template->n_calls);
     fflush(stderr);
   }
   int ret = poly_run_schedule(ctx, sched, NULL, 0);

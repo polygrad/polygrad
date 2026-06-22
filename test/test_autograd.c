@@ -16,11 +16,11 @@
 static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
   PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!schedule) return NULL;
-  if (schedule->n_items != 1 || !schedule->items[0].root) {
+  if (schedule->template->n_calls != 1 || !poly_schedule_call_body(schedule, 0)) {
     poly_schedule_free(schedule);
     return NULL;
   }
-  PolyUOp *root = schedule->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(schedule, 0);
   poly_schedule_free(schedule);
   return root;
 }
@@ -40,12 +40,12 @@ static int run_grad_expr(
 
   PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!schedule) return -1;
-  if (schedule->n_items != 1 || !schedule->items[0].root) {
+  if (schedule->template->n_calls != 1 || !poly_schedule_call_body(schedule, 0)) {
     poly_schedule_free(schedule);
     return -1;
   }
 
-  if (schedule->items[0].kind == POLY_EXEC_COPY) {
+  if (poly_schedule_call_is_copy(schedule, 0)) {
     PolyTestBufferView *bindings =
         calloc((size_t)(n_args > 0 ? n_args : 1), sizeof(PolyTestBufferView));
     if (!bindings) {
@@ -53,14 +53,14 @@ static int run_grad_expr(
       return -1;
     }
     int n_bindings = 0;
-    for (int i = 0; i < schedule->n_buf_slots; i++) {
-      if (schedule->buf_slots[i].is_intermediate) continue;
+    for (int i = 0; i < schedule->template->n_buf_slots; i++) {
+      if (schedule->template->buf_slots[i].is_intermediate) continue;
       if (n_bindings >= n_args) {
         free(bindings);
         poly_schedule_free(schedule);
         return -1;
       }
-      bindings[n_bindings] = POLY_TEST_HOST_VIEW(schedule->buf_slots[i].buf_uop, args[n_bindings]);
+      bindings[n_bindings] = POLY_TEST_HOST_VIEW(schedule->template->buf_slots[i].buf_uop, args[n_bindings]);
       n_bindings++;
     }
     poly_schedule_free(schedule);
@@ -69,7 +69,7 @@ static int run_grad_expr(
     return ret;
   }
 
-  PolyUOp *kernel = schedule->items[0].root;
+  PolyUOp *kernel = poly_schedule_call_body(schedule, 0);
   int n_lin = 0;
   PolyUOp **lin = poly_linearize(ctx, kernel, &n_lin);
   if (!lin || n_lin <= 0) {

@@ -1102,9 +1102,9 @@ TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
   ASSERT_NOT_NULL(sched);
 
   bool found = false;
-  for (int i = 0; i < sched->n_items; i++) {
+  for (int i = 0; i < sched->template->n_calls; i++) {
     int n_lin = 0;
-    PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[i].root, &n_lin);
+    PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, i), &n_lin);
     ASSERT_NOT_NULL(lin);
     char *wgsl = poly_render_wgsl(lin, n_lin, "reduce_webgpu");
     ASSERT_NOT_NULL(wgsl);
@@ -1139,10 +1139,10 @@ TEST(codegen, linearize_webgpu_qwen_downproj_workgroup_matches_tinygrad) {
 
   PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_webgpu(ctx, sched->items[0].root, &n_lin);
+  PolyUOp **lin = poly_linearize_webgpu(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_NOT_NULL(lin);
   char *wgsl = poly_render_wgsl(lin, n_lin, "qwen_downproj");
   ASSERT_NOT_NULL(wgsl);

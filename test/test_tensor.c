@@ -70,11 +70,11 @@ static PolyUOp *base_buf(PolyUOp *u) {
 static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
   PolySchedule *schedule = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   if (!schedule) return NULL;
-  if (schedule->n_items != 1 || !schedule->items[0].root) {
+  if (schedule->template->n_calls != 1 || !poly_schedule_call_body(schedule, 0)) {
     poly_schedule_free(schedule);
     return NULL;
   }
-  PolyUOp *root = schedule->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(schedule, 0);
   poly_schedule_free(schedule);
   return root;
 }

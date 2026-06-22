@@ -20,6 +20,10 @@ const OPTIM_SGD = 1
 const OPTIM_ADAM = 2
 const OPTIM_ADAMW = 3
 
+const EXPORT_WEIGHTS_PARAMS = 1
+const EXPORT_WEIGHTS_OPTIMIZER = 2
+const EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_PARAMS | EXPORT_WEIGHTS_OPTIMIZER
+
 function optimizerKind(kind) {
   if (typeof kind === 'string') {
     const k = kind.toLowerCase()
@@ -28,6 +32,18 @@ function optimizerKind(kind) {
     if (k === 'adamw') return OPTIM_ADAMW
   }
   return Number(kind)
+}
+
+function weightExportFlags(options) {
+  if (options == null) return EXPORT_WEIGHTS_DEFAULT
+  if (typeof options === 'boolean') {
+    return options ? EXPORT_WEIGHTS_DEFAULT : EXPORT_WEIGHTS_PARAMS
+  }
+  const includeOptimizer =
+    options.includeOptimizer != null ? !!options.includeOptimizer :
+      options.include_optimizer != null ? !!options.include_optimizer :
+        true
+  return EXPORT_WEIGHTS_PARAMS | (includeOptimizer ? EXPORT_WEIGHTS_OPTIMIZER : 0)
 }
 
 
@@ -541,8 +557,9 @@ function createBoundInstanceClass(runtime) {
       return -1
     }
 
-    exportWeights() {
-      const run = () => this._rt._core.instance.exportWeights(this._handle)
+    exportWeights(options = null) {
+      const flags = weightExportFlags(options)
+      const run = () => this._rt._core.instance.exportWeights(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return run()
     }
@@ -559,8 +576,9 @@ function createBoundInstanceClass(runtime) {
       return this._rt._core.instance.exportIR(this._handle)
     }
 
-    saveBundle() {
-      const run = () => this._rt._core.instance.saveBundle(this._handle)
+    saveBundle(options = null) {
+      const flags = weightExportFlags(options)
+      const run = () => this._rt._core.instance.saveBundle(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
       return run()
     }
@@ -574,9 +592,19 @@ function createBoundInstanceClass(runtime) {
     }
 
 
-    setOptimizer(kind, lr = 0.01, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weightDecay = 0.0) {
+    setOptimizer(
+      kind,
+      lr = 0.01,
+      beta1 = 0.9,
+      beta2 = 0.999,
+      eps = 1e-8,
+      weightDecay = 0.0,
+      momentum = 0.0,
+      nesterov = false,
+      classic = false
+    ) {
       const rc = this._rt._core.instance.setOptimizer(
-        this._handle, kind, lr, beta1, beta2, eps, weightDecay
+        this._handle, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic
       )
       if (rc !== 0) throw new Error(`polygrad: setOptimizer failed (rc=${rc})`)
       return this
@@ -656,7 +684,10 @@ function createBoundInstanceClass(runtime) {
           opts.beta1 == null ? 0.9 : opts.beta1,
           opts.beta2 == null ? 0.999 : opts.beta2,
           opts.eps == null ? 1e-8 : opts.eps,
-          opts.weightDecay == null ? 0.0 : opts.weightDecay
+          opts.weightDecay == null ? 0.0 : opts.weightDecay,
+          opts.momentum == null ? 0.0 : opts.momentum,
+          !!opts.nesterov,
+          !!opts.classic
         )
       }
       const losses = []
@@ -695,6 +726,9 @@ function createBoundInstanceClass(runtime) {
   Instance.OPTIM_SGD = OPTIM_SGD
   Instance.OPTIM_ADAM = OPTIM_ADAM
   Instance.OPTIM_ADAMW = OPTIM_ADAMW
+  Instance.EXPORT_WEIGHTS_PARAMS = EXPORT_WEIGHTS_PARAMS
+  Instance.EXPORT_WEIGHTS_OPTIMIZER = EXPORT_WEIGHTS_OPTIMIZER
+  Instance.EXPORT_WEIGHTS_DEFAULT = EXPORT_WEIGHTS_DEFAULT
 
   return Instance
 }

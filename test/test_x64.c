@@ -610,9 +610,9 @@ static int three_way_parity(
 #define FILL_SLOTS(slot_arr, out_ptr)                                                              \
   do {                                                                                             \
     memset(slot_arr, 0, sizeof(void *) * 16);                                                      \
-    for (int _i = 0; _i < ps->n_buf_slots; _i++)                                                   \
+    for (int _i = 0; _i < ps->template->n_buf_slots; _i++)                                                   \
       for (int _j = 0; _j < n_bufs; _j++)                                                          \
-        if (ps->buf_slots[_i].buf_uop == bufs[_j])                                                 \
+        if (ps->template->buf_slots[_i].buf_uop == bufs[_j])                                                 \
           slot_arr[_i] = (bufs[_j] == out_buf) ? (out_ptr) : datas[_j];                            \
   } while (0)
 
@@ -625,7 +625,7 @@ static int three_way_parity(
   memset(out_cpu, 0, (size_t)out_numel * sizeof(float));
   void *slot_cpu[16];
   FILL_SLOTS(slot_cpu, out_cpu);
-  int rc = poly_run_compiled_schedule(cpu, slot_cpu, ps->n_buf_slots, NULL, 0);
+  int rc = poly_run_compiled_schedule(cpu, slot_cpu, ps->template->n_buf_slots, NULL, 0);
   poly_compiled_schedule_free(cpu);
   if (rc < 0) {
     poly_schedule_free(ps);
@@ -641,7 +641,7 @@ static int three_way_parity(
   memset(out_interp, 0, (size_t)out_numel * sizeof(float));
   void *slot_interp[16];
   FILL_SLOTS(slot_interp, out_interp);
-  rc = poly_run_compiled_schedule(interp, slot_interp, ps->n_buf_slots, NULL, 0);
+  rc = poly_run_compiled_schedule(interp, slot_interp, ps->template->n_buf_slots, NULL, 0);
   poly_compiled_schedule_free(interp);
   if (rc < 0) {
     poly_schedule_free(ps);
@@ -657,7 +657,7 @@ static int three_way_parity(
   memset(out_x64, 0, (size_t)out_numel * sizeof(float));
   void *slot_x64[16];
   FILL_SLOTS(slot_x64, out_x64);
-  rc = poly_run_compiled_schedule(x64, slot_x64, ps->n_buf_slots, NULL, 0);
+  rc = poly_run_compiled_schedule(x64, slot_x64, ps->template->n_buf_slots, NULL, 0);
   poly_compiled_schedule_free(x64);
   poly_schedule_free(ps);
   if (rc < 0) return -7;

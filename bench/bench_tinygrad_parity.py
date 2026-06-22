@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import typing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -73,12 +74,28 @@ def _check(actual: np.ndarray, expected: np.ndarray) -> dict[str, Any]:
     return {"ok": ok, "max_abs_err": max_abs_err, "reason": None if ok else "value mismatch"}
 
 
+def _tensor_make(Tensor: Any, data: np.ndarray, *, requires_grad: bool = False):
+    if not requires_grad:
+        return Tensor(data)
+    try:
+        return Tensor(data, requires_grad=True)
+    except TypeError as exc:
+        if "requires_grad" not in str(exc):
+            raise
+    t = Tensor(data)
+    if hasattr(t, "is_param"):
+        t.is_param = True
+    else:
+        t.requires_grad = True
+    return t
+
+
 def _build_workload(Tensor: Any, name: str, mode: str) -> tuple[Callable[[], Any], np.ndarray]:
     if name in FRESH_ONLY and mode != "fresh-inputs":
         raise ValueError(f"{name} requires --mode fresh-inputs or --mode both")
 
     def tensor(x: np.ndarray, *, requires_grad: bool = False):
-        return Tensor(x, requires_grad=requires_grad)
+        return _tensor_make(Tensor, x, requires_grad=requires_grad)
 
     if name == "add_1024":
         a_np = np.linspace(-1.0, 1.0, 1024, dtype=np.float32)
@@ -227,6 +244,13 @@ def _import_polygrad(repo_root: Path, lib_path: Path) -> tuple[Any, Callable[[],
 
 def _import_tinygrad(tinygrad_path: Path) -> tuple[Any, Callable[[], dict[str, int]]]:
     sys.path.insert(0, str(tinygrad_path))
+    if not hasattr(typing, "Self"):
+        try:
+            from typing_extensions import Self as _Self
+
+            typing.Self = _Self
+        except Exception:
+            pass
     from tinygrad import Tensor
 
     def cache_stats() -> dict[str, int]:

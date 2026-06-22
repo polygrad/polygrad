@@ -29,6 +29,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->cse = poly_map_new(256);
   ctx->schedule_cache = poly_map_new(16);
   ctx->program_cache = poly_map_new(16);
+  ctx->program_infos = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
   ctx->tensors_by_uop = poly_map_new(64);
@@ -38,11 +39,13 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_tensor_order = 1;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->cse || !ctx->schedule_cache || !ctx->program_cache ||
+      !ctx->program_infos ||
       !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->program_cache) poly_map_destroy(ctx->program_cache);
+    if (ctx->program_infos) poly_map_destroy(ctx->program_infos);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
     if (ctx->tensors_by_uop) poly_map_destroy(ctx->tensors_by_uop);
@@ -70,6 +73,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
   poly_map_destroy(ctx->schedule_cache);
   poly_map_destroy(ctx->program_cache);
+  poly_map_destroy(ctx->program_infos);
   poly_map_destroy(ctx->shape_cache);
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, NULL);
@@ -114,4 +118,14 @@ PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx) {
   return ctx ? ctx->next_unique_id++ : 0;
+}
+
+void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id) {
+  if (!ctx || id < 0) return;
+  if (ctx->next_unique_id <= id) ctx->next_unique_id = id + 1;
+}
+
+void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag) {
+  if (!ctx || tag <= 0) return;
+  if (ctx->next_buf_tag <= tag) ctx->next_buf_tag = tag + 1;
 }

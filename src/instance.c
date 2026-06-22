@@ -2,12 +2,8 @@
  * poly_instance.c -- Runtime for portable tensor-level model instances
  *
  * Product layer above the tinygrad-aligned compiler core.
- * Owns graph + named buffers + execution caches + optimizer state.
- *
- * Backend-aware: uses the exec_plan API (prepare + lower + run) for
- * all execution. Device selection at runtime via set_device().
- * Prepared step cache is backend-neutral and survives device changes.
- * Executable step cache retains entries for all previously-used devices.
+ * Owns ABI names, binding metadata, entrypoints, and optimizer state.
+ * Buffer residency is owned by PolyCtx through ctx->buffers.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -30,18 +26,28 @@
 typedef struct {
   char *name;
   uint8_t role;
+  uint32_t flags;
   PolyUOp *buffer;
   int64_t shape[8];
   int ndim;
-  float *data; /* owned, allocated for all roles */
+  void *data; /* non-owning cached host-root pointer */
   int64_t numel;
   bool owns_data; /* false for aliases sharing another entry's allocation */
   bool trainable; /* PARAMs can be frozen while still saved as weights */
 } NamedBuf;
 
+static size_t named_buf_nbytes(const NamedBuf *b) {
+  if (!b || !b->buffer || b->numel <= 0) return 0;
+  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(b->buffer->dtype));
+  return (size_t)b->numel * itemsize;
+}
+
 typedef struct {
   int kind;
   float lr, beta1, beta2, eps, weight_decay;
+  float momentum;
+  bool nesterov;
+  bool classic;
   int step;
 } OptimState;
 
@@ -64,28 +70,18 @@ typedef struct {
   PolySchedule *schedule; /* cached lowering for the stable train graph */
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss scalar output */
   float loss_data; /* scalar loss value after step */
-  PolyBuffer loss_handle; /* device-aware handle for loss output */
 
-  /* Moment buffers (Adam/AdamW only) */
-  PolyUOp **m_bufs; /* [n_params] first moment BUFFER UOps */
+  /* Momentum/first-moment buffers. For SGD this is tinygrad's b[] state; for
+   * Adam/AdamW this is m[]. */
+  PolyUOp **m_bufs; /* [n_params] momentum/first moment BUFFER UOps */
   PolyUOp **v_bufs; /* [n_params] second moment BUFFER UOps */
   int n_moment_bufs;
-
-  /* Moment host data (for initialization + set_device upload) */
-  float **m_datas; /* [n_params] first moment host data */
-  float **v_datas; /* [n_params] second moment host data */
-
-  /* Moment buffer handles (for bindings) */
-  PolyBuffer *m_handles; /* [n_params] */
-  PolyBuffer *v_handles; /* [n_params] */
 
   /* Adam beta-power scalar buffers (tinygrad b1_t/b2_t). */
   PolyUOp *bc1_buf;
   PolyUOp *bc2_buf;
   float bc1_data;
   float bc2_data;
-  PolyBuffer bc1_handle;
-  PolyBuffer bc2_handle;
 } TrainState;
 
 typedef struct {
@@ -156,9 +152,6 @@ struct PolyInstance {
   int n_entrypoints;
   PolySchedule **entry_schedules; /* lazy, one per generic entrypoint */
 
-  /* Buffer handles (one per named buffer, carries domain) */
-  PolyBuffer *buf_handles; /* [n_bufs], ptr + domain + nbytes */
-
   /* Value-and-grad state (lazy, per-entrypoint -- currently only "loss") */
   VagState *vag; /* NULL until first value_and_grad call */
 
@@ -188,6 +181,21 @@ static int find_buf_by_name(const PolyInstance *inst, const char *name) {
   for (int i = 0; i < inst->n_bufs; i++)
     if (strcmp(inst->bufs[i].name, name) == 0) return i;
   return -1;
+}
+
+static bool is_optimizer_binding_name(const char *name) {
+  return name && strncmp(name, "optim.", 6) == 0;
+}
+
+static bool is_optimizer_binding(const NamedBuf *b) {
+  return b && ((b->flags & POLY_BIND_F_OPTIM) || is_optimizer_binding_name(b->name));
+}
+
+static bool should_export_weight_buf_flags(const NamedBuf *b, uint32_t flags) {
+  if (!b || (b->flags & POLY_BIND_F_NO_SAVE)) return false;
+  if ((flags & POLY_EXPORT_WEIGHTS_PARAMS) && b->role == POLY_ROLE_PARAM) return true;
+  if ((flags & POLY_EXPORT_WEIGHTS_OPTIMIZER) && is_optimizer_binding(b)) return true;
+  return false;
 }
 
 static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool free_spec);
@@ -515,7 +523,7 @@ static int copy_initial_buffer_data(PolyInstance *inst, PolyCtx *ctx) {
   if (!inst || !ctx) return -1;
   for (int i = 0; i < inst->n_bufs; i++) {
     PolyBuffer *src = poly_buffer_get(ctx, inst->bufs[i].buffer);
-    size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
+    size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
     if (poly_buffer_read(ctx, inst->bufs[i].buffer, inst->bufs[i].data, nbytes) != 0 &&
         src->valid && poly_device_is_host_addressable(src->device))
@@ -1130,7 +1138,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
     inst->bufs[i].numel = compute_numel(spec->bufs[i].shape, spec->bufs[i].ndim);
 
     /* Check if an earlier entry shares the same buffer UOp (alias) */
-    float *shared = NULL;
+    void *shared = NULL;
     for (int j = 0; j < i; j++) {
       if (inst->bufs[j].buffer == spec->bufs[i].buffer) {
         shared = inst->bufs[j].data;
@@ -1141,41 +1149,24 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
       inst->bufs[i].data = shared;
       inst->bufs[i].owns_data = false;
     } else {
-      inst->bufs[i].data = calloc(inst->bufs[i].numel, sizeof(float));
-      if (!inst->bufs[i].data && inst->bufs[i].numel > 0)
+      size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
+      PolyBuffer *host = NULL;
+      if (nbytes > 0 &&
+          poly_buffer_alloc_owned_host(spec->ctx, spec->bufs[i].buffer, nbytes, true, &host) != 0) {
         fprintf(
-            stderr, "poly_instance: calloc FAILED for '%s' (%lld floats = %lld MB)\n",
+            stderr, "poly_instance: host buffer allocation FAILED for '%s' (%lld elements = %lld MB)\n",
             spec->bufs[i].name ? spec->bufs[i].name : "?", (long long)inst->bufs[i].numel,
-            (long long)(inst->bufs[i].numel * 4 / 1024 / 1024)
+            (long long)(nbytes / 1024 / 1024)
         );
-      inst->bufs[i].owns_data = true;
+        goto fail;
+      }
+      inst->bufs[i].data = host ? host->ptr : NULL;
+      inst->bufs[i].owns_data = false;
     }
     if (spec->bufs[i].role == POLY_ROLE_PARAM) {
       n_params++;
       if (inst->bufs[i].trainable) n_trainable++;
     }
-  }
-
-  /* Initialize buffer handles with host device domain.
-   *
-   * Uses POLY_DEVICE_HOST (not hardcoded POLY_DEVICE_CPU) because in
-   * Emscripten/WASM builds the CPU backend is not registered -- only
-   * POLY_DEVICE_WASM is. Tagging buffers as CPU in WASM causes
-   * poly_device_is_host_addressable() to return false, making
-   * poly_instance_buf_data() return NULL even though the data pointer
-   * is valid host memory. Fixed in commit after 9a061b9 (which added
-   * the host_addressable flag but didn't handle the WASM case).
-   */
-  inst->buf_handles = calloc(spec->n_bufs, sizeof(PolyBuffer));
-  for (int i = 0; i < spec->n_bufs; i++) {
-    inst->buf_handles[i] = (PolyBuffer){
-        .ptr = inst->bufs[i].data,
-        .nbytes = (size_t)inst->bufs[i].numel * sizeof(float),
-        .device = POLY_DEVICE_HOST,
-        .owned = false,
-        .allocator = poly_backend_get(POLY_DEVICE_HOST)->get_allocator(),
-        .valid = true,
-    };
   }
 
   /* Build param index table */
@@ -1214,6 +1205,11 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   inst->optim.kind = POLY_OPTIM_NONE;
 
   return inst;
+
+fail:
+  if (free_spec) poly_ir_spec_free(spec);
+  poly_instance_free(inst);
+  return NULL;
 }
 
 PolyInstance *poly_instance_from_ir(
@@ -1230,6 +1226,7 @@ PolyInstance *poly_instance_from_ir(
   }
 
   PolyInstance *inst = instance_from_spec(&spec, true, true);
+  if (!inst) return NULL;
 
   /* Import weights if provided */
   if (weights_data && weights_len > 0) {
@@ -1319,7 +1316,7 @@ static PolyInstance *instance_from_named_sinks(
   if (inst) {
     for (int i = 0; i < inst->n_bufs; i++) {
       PolyBuffer *src = poly_buffer_get(ctx, inst->bufs[i].buffer);
-      size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
+      size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
       if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
       /* Instances own host-side ABI storage, but the source tensor may already
        * live in a backend-specific residency (WASM heap, CUDA, WebGPU, etc.).
@@ -1384,27 +1381,6 @@ static void vag_free(VagState *vag, int n_params) {
   free(vag);
 }
 
-static void free_owned_handle(PolyBuffer *h) {
-  if (h->owned && h->ptr) {
-    const PolyBackendDesc *be = poly_backend_get(h->device);
-    if (be) be->get_allocator()->free(h, be->get_allocator()->dev_ctx);
-  }
-}
-
-static bool retarget_handle_if_shared(
-    PolyBuffer *h,
-    PolyDevice resolved,
-    const PolyAllocator *alloc
-) {
-  if (!h) return false;
-  if (h->device == resolved) return true;
-  if (!poly_devices_share_storage(h->device, resolved)) return false;
-  h->device = resolved;
-  h->allocator = alloc;
-  h->valid = (h->ptr != NULL);
-  return true;
-}
-
 static void train_schedule_clear(TrainState *ts) {
   if (!ts) return;
   poly_schedule_free(ts->schedule);
@@ -1422,28 +1398,8 @@ static void entry_schedules_clear(PolyInstance *inst) {
 static void train_free(TrainState *ts, int n_params) {
   if (!ts) return;
   train_schedule_clear(ts);
-  /* Free device-owned moment handles before freeing host data */
-  for (int i = 0; i < ts->n_moment_bufs; i++) {
-    if (ts->m_handles) free_owned_handle(&ts->m_handles[i]);
-    if (ts->v_handles) free_owned_handle(&ts->v_handles[i]);
-  }
-  free_owned_handle(&ts->loss_handle);
-  free_owned_handle(&ts->bc1_handle);
-  free_owned_handle(&ts->bc2_handle);
-  if (ts->m_datas) {
-    for (int i = 0; i < ts->n_moment_bufs; i++)
-      free(ts->m_datas[i]);
-    free(ts->m_datas);
-  }
-  if (ts->v_datas) {
-    for (int i = 0; i < ts->n_moment_bufs; i++)
-      free(ts->v_datas[i]);
-    free(ts->v_datas);
-  }
   free(ts->m_bufs);
   free(ts->v_bufs);
-  free(ts->m_handles);
-  free(ts->v_handles);
   free(ts);
 }
 
@@ -1452,18 +1408,6 @@ void poly_instance_free(PolyInstance *inst) {
 
   build_state_free(inst->build);
   inst->build = NULL;
-
-  /* Free device-owned buffer handles */
-  if (inst->buf_handles) {
-    for (int i = 0; i < inst->n_bufs; i++) {
-      PolyBuffer *h = &inst->buf_handles[i];
-      if (h->owned && h->ptr) {
-        const PolyBackendDesc *be = poly_backend_get(h->device);
-        if (be) be->get_allocator()->free(h, be->get_allocator()->dev_ctx);
-      }
-    }
-    free(inst->buf_handles);
-  }
 
   /* Free named buffers */
   for (int i = 0; i < inst->n_bufs; i++) {
@@ -1526,21 +1470,121 @@ int poly_instance_param_shape(const PolyInstance *inst, int i, int64_t *shape_ou
   return b->ndim;
 }
 
-static int readback_handle(const PolyBuffer *h, void *dst, size_t len);
-static PolyBuffer make_handle(
-    void *host_data,
-    size_t nbytes,
-    PolyDevice dev,
-    const PolyAllocator *alloc
-);
-
 /* Sync device buffer to host shadow if on a non-host domain.
  * Returns 0 on success or if already on host; -1 on readback failure. */
 static int sync_buf_to_host(PolyInstance *inst, int bi) {
-  if (!inst->buf_handles) return 0;
-  if (poly_device_is_host_addressable(inst->buf_handles[bi].device)) return 0;
-  size_t nbytes = (size_t)inst->bufs[bi].numel * sizeof(float);
-  return readback_handle(&inst->buf_handles[bi], inst->bufs[bi].data, nbytes);
+  if (!inst || bi < 0 || bi >= inst->n_bufs) return -1;
+  PolyBuffer *host = NULL;
+  if (poly_buffer_ensure_host_current(inst->ctx, inst->bufs[bi].buffer, &host) != 0 || !host ||
+      !host->ptr)
+    return -1;
+  inst->bufs[bi].data = host->ptr;
+  return 0;
+}
+
+static int append_runtime_named_buffer(
+    PolyInstance *inst,
+    const char *name,
+    uint8_t role,
+    uint32_t flags,
+    PolyUOp *buffer,
+    const int64_t *shape,
+    int ndim,
+    bool trainable,
+    bool zero,
+    int *out_index
+) {
+  if (out_index) *out_index = -1;
+  if (!inst || !name || !buffer || ndim < 0 || ndim > 8 || (ndim > 0 && !shape))
+    return -1;
+  if (!valid_binding_name(name) || find_buf_by_name(inst, name) >= 0) return -1;
+
+  int64_t numel = poly_shape_numel_checked(shape, ndim);
+  if (numel < 0) return -1;
+
+  NamedBuf *next = realloc(inst->bufs, (size_t)(inst->n_bufs + 1) * sizeof(NamedBuf));
+  if (!next) return -1;
+  inst->bufs = next;
+
+  NamedBuf nb = {0};
+  nb.name = strdup(name);
+  if (!nb.name) return -1;
+  nb.role = role;
+  nb.flags = flags;
+  nb.buffer = buffer;
+  nb.ndim = ndim;
+  if (ndim > 0) memcpy(nb.shape, shape, (size_t)ndim * sizeof(int64_t));
+  nb.numel = numel;
+  nb.trainable = trainable;
+
+  size_t nbytes = named_buf_nbytes(&nb);
+  PolyBuffer *host = NULL;
+  if (nbytes > 0 && poly_buffer_alloc_owned_host(inst->ctx, buffer, nbytes, zero, &host) != 0) {
+    free(nb.name);
+    return -1;
+  }
+  nb.data = host ? host->ptr : NULL;
+  nb.owns_data = false;
+
+  int idx = inst->n_bufs++;
+  inst->bufs[idx] = nb;
+  if (out_index) *out_index = idx;
+  return 0;
+}
+
+static char *optimizer_param_state_name(const char *optimizer, const char *kind, const char *param_name) {
+  if (!optimizer || !kind || !param_name) return NULL;
+  const char *prefix = "optim.";
+  size_t lp = strlen(prefix), lo = strlen(optimizer), lk = strlen(kind), ln = strlen(param_name);
+  char *out = malloc(lp + lo + 1 + lk + 1 + ln + 1);
+  if (!out) return NULL;
+  memcpy(out, prefix, lp);
+  memcpy(out + lp, optimizer, lo);
+  out[lp + lo] = '.';
+  memcpy(out + lp + lo + 1, kind, lk);
+  out[lp + lo + 1 + lk] = '.';
+  memcpy(out + lp + lo + 1 + lk + 1, param_name, ln + 1);
+  return out;
+}
+
+static int ensure_optimizer_state_buffer(
+    PolyInstance *inst,
+    const char *name,
+    const int64_t *shape,
+    int ndim,
+    bool init_scalar,
+    float scalar_value,
+    PolyUOp **out
+) {
+  if (out) *out = NULL;
+  if (!inst || !name || !shape || ndim <= 0 || ndim > 8) return -1;
+  int64_t numel = poly_shape_numel_checked(shape, ndim);
+  if (numel <= 0) return -1;
+
+  int bi = find_buf_by_name(inst, name);
+  if (bi >= 0) {
+    NamedBuf *b = &inst->bufs[bi];
+    if (!b->buffer || b->role != POLY_ROLE_AUX || !poly_dtype_eq(poly_dtype_scalar(b->buffer->dtype), POLY_FLOAT32) ||
+        b->numel != numel)
+      return -1;
+    b->flags |= POLY_BIND_F_OPTIM;
+    if (out) *out = b->buffer;
+    return 0;
+  }
+
+  PolyUOp *buf = poly_buffer(inst->ctx, POLY_FLOAT32, numel);
+  if (!buf) return -1;
+  if (append_runtime_named_buffer(
+          inst, name, POLY_ROLE_AUX, POLY_BIND_F_OPTIM, buf, shape, ndim, false, true, &bi
+      ) != 0)
+    return -1;
+  if (init_scalar) {
+    if (numel != 1 || poly_buffer_write(inst->ctx, buf, &scalar_value, sizeof(float)) != 0)
+      return -1;
+    if (sync_buf_to_host(inst, bi) != 0) return -1;
+  }
+  if (out) *out = buf;
+  return 0;
 }
 
 float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out) {
@@ -1548,7 +1592,8 @@ float *poly_instance_param_data(PolyInstance *inst, int i, int64_t *numel_out) {
   int bi = inst->param_indices[i];
   if (numel_out) *numel_out = inst->bufs[bi].numel;
   if (sync_buf_to_host(inst, bi) != 0) return NULL;
-  return inst->bufs[bi].data;
+  if (poly_buffer_mark_host_written(inst->ctx, inst->bufs[bi].buffer) != 0) return NULL;
+  return (float *)inst->bufs[bi].data;
 }
 
 /* Buffer Enumeration */
@@ -1628,43 +1673,22 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
   if (!inst || i < 0 || i >= inst->n_bufs) return NULL;
   if (numel_out) *numel_out = inst->bufs[i].numel;
   if (sync_buf_to_host(inst, i) != 0) return NULL;
-  return inst->bufs[i].data;
+  if (poly_buffer_mark_host_written(inst->ctx, inst->bufs[i].buffer) != 0) return NULL;
+  return (float *)inst->bufs[i].data;
 }
 
 /* Readback / Upload */
 
-static int readback_handle(const PolyBuffer *h, void *dst, size_t len) {
-  if (!h || !h->ptr || !dst || len == 0) return -1;
-  if (poly_device_is_host_addressable(h->device)) {
-    memcpy(dst, h->ptr, len);
-    return 0;
-  }
-  const PolyBackendDesc *be = poly_backend_get(h->device);
-  if (!be) return -1;
-  PolyBuffer dst_view = poly_buffer_make_host_view(dst, len);
-  return be->get_allocator()->copy_out(&dst_view, h, len, be->get_allocator()->dev_ctx);
-}
-
-static int upload_handle(PolyBuffer *h, const void *src, size_t len) {
-  if (!h || !h->ptr || !src || len == 0) return -1;
-  if (poly_device_is_host_addressable(h->device)) {
-    memcpy(h->ptr, src, len);
-    return 0;
-  }
-  const PolyBackendDesc *be = poly_backend_get(h->device);
-  if (!be) return -1;
-  PolyBuffer src_view = poly_buffer_make_host_view((void *)src, len);
-  return be->get_allocator()->copy_in(h, &src_view, len, be->get_allocator()->dev_ctx);
-}
-
 int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
-  if (!inst || i < 0 || i >= inst->n_bufs || !inst->buf_handles) return -1;
-  return readback_handle(&inst->buf_handles[i], host_dst, dst_len);
+  if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+  return poly_buffer_read(inst->ctx, inst->bufs[i].buffer, host_dst, dst_len);
 }
 
 int poly_instance_upload_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
-  if (!inst || i < 0 || i >= inst->n_bufs || !inst->buf_handles) return -1;
-  return upload_handle(&inst->buf_handles[i], host_src, src_len);
+  if (!inst || i < 0 || i >= inst->n_bufs) return -1;
+  int rc = poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
+  if (rc == 0) sync_buf_to_host(inst, i);
+  return rc;
 }
 
 int poly_instance_readback_param(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
@@ -1679,28 +1703,41 @@ int poly_instance_upload_param(PolyInstance *inst, int i, const void *host_src, 
 
 /* Weight I/O */
 
-uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
-  if (!inst || inst->stage != POLY_INSTANCE_BUILT || inst->n_params == 0) {
-    *out_len = 0;
+uint8_t *poly_instance_export_weights_ex(PolyInstance *inst, int *out_len, uint32_t flags) {
+  if (out_len) *out_len = 0;
+  if (!inst || inst->stage != POLY_INSTANCE_BUILT) {
     return NULL;
   }
 
-  /* Readback all params from device to host before serializing */
-  for (int i = 0; i < inst->n_params; i++)
-    sync_buf_to_host(inst, inst->param_indices[i]);
+  int n_export = 0;
+  for (int i = 0; i < inst->n_bufs; i++)
+    if (should_export_weight_buf_flags(&inst->bufs[i], flags)) n_export++;
+  if (n_export == 0) return NULL;
 
-  PolySafetensorEntry *entries = malloc(inst->n_params * sizeof(PolySafetensorEntry));
-  for (int i = 0; i < inst->n_params; i++) {
-    NamedBuf *b = &inst->bufs[inst->param_indices[i]];
-    entries[i].name = b->name;
-    entries[i].data = b->data;
-    entries[i].shape = b->shape;
-    entries[i].ndim = b->ndim;
+  PolySafetensorEntry *entries = malloc((size_t)n_export * sizeof(PolySafetensorEntry));
+  if (!entries) return NULL;
+  int ei = 0;
+  for (int i = 0; i < inst->n_bufs; i++) {
+    NamedBuf *b = &inst->bufs[i];
+    if (!should_export_weight_buf_flags(b, flags)) continue;
+    if (sync_buf_to_host(inst, i) != 0) {
+      free(entries);
+      return NULL;
+    }
+    entries[ei].name = b->name;
+    entries[ei].data = (const float *)b->data;
+    entries[ei].shape = b->shape;
+    entries[ei].ndim = b->ndim;
+    ei++;
   }
 
-  uint8_t *bytes = poly_safetensors_encode(entries, inst->n_params, NULL, out_len);
+  uint8_t *bytes = poly_safetensors_encode(entries, n_export, NULL, out_len);
   free(entries);
   return bytes;
+}
+
+uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len) {
+  return poly_instance_export_weights_ex(inst, out_len, POLY_EXPORT_WEIGHTS_DEFAULT);
 }
 
 int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int len) {
@@ -1718,10 +1755,18 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
       fprintf(stderr, "poly_instance_import_weights: unknown tensor '%s'\n", views[i].name);
       /* Continue - non-fatal */
     } else if (inst->bufs[bi].data && views[i].numel == inst->bufs[bi].numel) {
-      memcpy(inst->bufs[bi].data, views[i].data, views[i].numel * sizeof(float));
-      /* Sync to device if buffer handle is on non-host memory */
-      if (inst->buf_handles && !poly_device_is_host_addressable(inst->buf_handles[bi].device))
-        upload_handle(&inst->buf_handles[bi], inst->bufs[bi].data, views[i].numel * sizeof(float));
+      size_t nbytes = named_buf_nbytes(&inst->bufs[bi]);
+      if (nbytes != (size_t)views[i].numel * sizeof(float)) {
+        fprintf(
+            stderr,
+            "poly_instance_import_weights: dtype mismatch for '%s' "
+            "(F32 safetensor into %zu-byte storage)\n",
+            views[i].name, nbytes
+        );
+      } else if (poly_buffer_write(inst->ctx, inst->bufs[bi].buffer, views[i].data, nbytes) != 0)
+        fprintf(stderr, "poly_instance_import_weights: write failed for '%s'\n", views[i].name);
+      else
+        sync_buf_to_host(inst, bi);
     } else if (inst->bufs[bi].data) {
       fprintf(
           stderr,
@@ -1814,259 +1859,19 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
   }
 #endif
 
-  const PolyAllocator *alloc = backend->get_allocator();
+  poly_ctx_set_preferred_device(inst->ctx, resolved);
 
-  /* Bulk rematerialization: move all buffer handles to the new domain */
+  /* Prefetch readable ABI buffers. Pure outputs are allocated by the CALL that
+   * writes them, matching tinygrad's per-CALL outs/ins execution boundary. */
   for (int i = 0; i < inst->n_bufs; i++) {
-    PolyBuffer *h = &inst->buf_handles[i];
-    if (retarget_handle_if_shared(h, resolved, alloc)) continue;
-
-    size_t nbytes = (size_t)inst->bufs[i].numel * sizeof(float);
-    if (nbytes == 0) continue;
-
-    /* For host-addressable devices, point at existing data */
-    if (poly_device_is_host_addressable(resolved)) {
-      /* Free old device handle if it was device-owned */
-      if (h->owned && !poly_device_is_host_addressable(h->device)) {
-        const PolyBackendDesc *old_be = poly_backend_get(h->device);
-        if (old_be) {
-          const PolyAllocator *old_alloc = old_be->get_allocator();
-          /* Readback to host before freeing device memory */
-          if (inst->bufs[i].data) {
-            PolyBuffer dst_view = poly_buffer_make_host_view(inst->bufs[i].data, nbytes);
-            old_alloc->copy_out(&dst_view, h, nbytes, old_alloc->dev_ctx);
-          }
-          old_alloc->free(h, old_alloc->dev_ctx);
-        }
-      }
-      *h = (PolyBuffer){
-          .ptr = inst->bufs[i].data,
-          .nbytes = nbytes,
-          .device = resolved,
-          .owned = false,
-          .allocator = alloc,
-          .valid = true,
-      };
-      continue;
-    }
-
-    /* For device-memory backends (CUDA, future WEBGPU): allocate + upload */
-    void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-    if (!dptr) {
-      fprintf(stderr, "poly_instance_set_device: alloc failed for buffer %d\n", i);
+    if (inst->bufs[i].role == POLY_ROLE_OUTPUT) continue;
+    bool seen = false;
+    for (int j = 0; j < i; j++)
+      if (inst->bufs[j].buffer == inst->bufs[i].buffer) seen = true;
+    if (seen || inst->bufs[i].numel <= 0) continue;
+    if (poly_buffer_ensure_device_current(inst->ctx, inst->bufs[i].buffer, resolved) != 0) {
+      fprintf(stderr, "poly_instance_set_device: migration failed for buffer %d\n", i);
       return -1;
-    }
-    if (inst->bufs[i].data) {
-      PolyBuffer dst = {
-          .ptr = dptr,
-          .nbytes = nbytes,
-          .device = resolved,
-          .owned = true,
-          .allocator = alloc,
-      };
-      PolyBuffer src_view = poly_buffer_make_host_view(inst->bufs[i].data, nbytes);
-      alloc->copy_in(&dst, &src_view, nbytes, alloc->dev_ctx);
-    }
-
-    /* Free old device handle if owned and from a non-host domain */
-    if (h->owned && h->ptr && !poly_device_is_host_addressable(h->device)) {
-      const PolyBackendDesc *old_be = poly_backend_get(h->device);
-      if (old_be) old_be->get_allocator()->free(h, old_be->get_allocator()->dev_ctx);
-    }
-
-    *h = (PolyBuffer){
-        .ptr = dptr,
-        .nbytes = nbytes,
-        .device = resolved,
-        .owned = true,
-        .allocator = alloc,
-        .valid = true,
-    };
-  }
-
-  /* Migrate training state moment handles if they exist */
-  if (inst->train) {
-    TrainState *ts = inst->train;
-    for (int i = 0; i < ts->n_moment_bufs; i++) {
-      /* m handles */
-      if (ts->m_handles[i].device != resolved) {
-        if (retarget_handle_if_shared(&ts->m_handles[i], resolved, alloc)) {
-          /* shared storage, executor-only retarget */
-        } else {
-          free_owned_handle(&ts->m_handles[i]);
-          if (poly_device_is_host_addressable(resolved)) {
-            ts->m_handles[i] = (PolyBuffer){
-                .ptr = ts->m_datas[i],
-                .nbytes = ts->m_handles[i].nbytes,
-                .device = resolved,
-                .owned = false,
-                .allocator = alloc,
-                .valid = true,
-            };
-          } else {
-            size_t nb = ts->m_handles[i].nbytes;
-            void *mp = alloc->alloc(nb, alloc->dev_ctx);
-            if (mp) {
-              if (ts->m_datas[i]) {
-                PolyBuffer dst = {
-                    .ptr = mp,
-                    .nbytes = nb,
-                    .device = resolved,
-                    .owned = true,
-                    .allocator = alloc,
-                };
-                PolyBuffer src_view = poly_buffer_make_host_view(ts->m_datas[i], nb);
-                alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
-              }
-              ts->m_handles[i] = (PolyBuffer){
-                  .ptr = mp,
-                  .nbytes = nb,
-                  .device = resolved,
-                  .owned = true,
-                  .allocator = alloc,
-                  .valid = true,
-              };
-            }
-          }
-        }
-      }
-      /* v handles */
-      if (ts->v_handles[i].device != resolved) {
-        if (retarget_handle_if_shared(&ts->v_handles[i], resolved, alloc)) {
-          /* shared storage, executor-only retarget */
-        } else {
-          free_owned_handle(&ts->v_handles[i]);
-          if (poly_device_is_host_addressable(resolved)) {
-            ts->v_handles[i] = (PolyBuffer){
-                .ptr = ts->v_datas[i],
-                .nbytes = ts->v_handles[i].nbytes,
-                .device = resolved,
-                .owned = false,
-                .allocator = alloc,
-                .valid = true,
-            };
-          } else {
-            size_t nb = ts->v_handles[i].nbytes;
-            void *vp = alloc->alloc(nb, alloc->dev_ctx);
-            if (vp) {
-              if (ts->v_datas[i]) {
-                PolyBuffer dst = {
-                    .ptr = vp,
-                    .nbytes = nb,
-                    .device = resolved,
-                    .owned = true,
-                    .allocator = alloc,
-                };
-                PolyBuffer src_view = poly_buffer_make_host_view(ts->v_datas[i], nb);
-                alloc->copy_in(&dst, &src_view, nb, alloc->dev_ctx);
-              }
-              ts->v_handles[i] = (PolyBuffer){
-                  .ptr = vp,
-                  .nbytes = nb,
-                  .device = resolved,
-                  .owned = true,
-                  .allocator = alloc,
-                  .valid = true,
-              };
-            }
-          }
-        }
-      }
-    }
-    /* Migrate loss output handle */
-    if (ts->loss_handle.device != resolved) {
-      if (!retarget_handle_if_shared(&ts->loss_handle, resolved, alloc)) {
-        free_owned_handle(&ts->loss_handle);
-        if (poly_device_is_host_addressable(resolved)) {
-          ts->loss_handle = (PolyBuffer){
-              .ptr = &ts->loss_data,
-              .nbytes = sizeof(float),
-              .device = resolved,
-              .owned = false,
-              .allocator = alloc,
-              .valid = true,
-          };
-        } else {
-          void *lp = alloc->alloc(sizeof(float), alloc->dev_ctx);
-          if (lp) {
-            ts->loss_handle = (PolyBuffer){
-                .ptr = lp,
-                .nbytes = sizeof(float),
-                .device = resolved,
-                .owned = true,
-                .allocator = alloc,
-                .valid = true,
-            };
-          }
-        }
-      }
-    }
-    /* Migrate bc scalar handles */
-    if (ts->bc1_handle.device != resolved) {
-      if (!retarget_handle_if_shared(&ts->bc1_handle, resolved, alloc) ||
-          !retarget_handle_if_shared(&ts->bc2_handle, resolved, alloc)) {
-        free_owned_handle(&ts->bc1_handle);
-        free_owned_handle(&ts->bc2_handle);
-        if (poly_device_is_host_addressable(resolved)) {
-          ts->bc1_handle = (PolyBuffer){
-              .ptr = &ts->bc1_data,
-              .nbytes = sizeof(float),
-              .device = resolved,
-              .owned = false,
-              .allocator = alloc,
-              .valid = true,
-          };
-          ts->bc2_handle = (PolyBuffer){
-              .ptr = &ts->bc2_data,
-              .nbytes = sizeof(float),
-              .device = resolved,
-              .owned = false,
-              .allocator = alloc,
-              .valid = true,
-          };
-        } else {
-          void *bp1 = alloc->alloc(sizeof(float), alloc->dev_ctx);
-          if (bp1) {
-            PolyBuffer dst = {
-                .ptr = bp1,
-                .nbytes = sizeof(float),
-                .device = resolved,
-                .owned = true,
-                .allocator = alloc,
-            };
-            PolyBuffer src_view = poly_buffer_make_host_view(&ts->bc1_data, sizeof(float));
-            alloc->copy_in(&dst, &src_view, sizeof(float), alloc->dev_ctx);
-            ts->bc1_handle = (PolyBuffer){
-                .ptr = bp1,
-                .nbytes = sizeof(float),
-                .device = resolved,
-                .owned = true,
-                .allocator = alloc,
-                .valid = true,
-            };
-          }
-          void *bp2 = alloc->alloc(sizeof(float), alloc->dev_ctx);
-          if (bp2) {
-            PolyBuffer dst = {
-                .ptr = bp2,
-                .nbytes = sizeof(float),
-                .device = resolved,
-                .owned = true,
-                .allocator = alloc,
-            };
-            PolyBuffer src_view = poly_buffer_make_host_view(&ts->bc2_data, sizeof(float));
-            alloc->copy_in(&dst, &src_view, sizeof(float), alloc->dev_ctx);
-            ts->bc2_handle = (PolyBuffer){
-                .ptr = bp2,
-                .nbytes = sizeof(float),
-                .device = resolved,
-                .owned = true,
-                .allocator = alloc,
-                .valid = true,
-            };
-          }
-        }
-      }
     }
   }
 
@@ -2078,68 +1883,71 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
 
 /* Generic entrypoint execution */
 
-static int attach_instance_buffers(PolyInstance *inst, PolyIOBinding *io, int n_io) {
-  if (!inst || !inst->ctx || !inst->buf_handles) return -1;
+static bool entrypoint_accepts_input(
+    const PolyInstance *inst,
+    const RuntimeEntrypoint *entry,
+    const char *name
+) {
+  if (!inst || !entry || !name) return false;
+  for (int i = 0; i < entry->n_inputs; i++)
+    if (entry->inputs[i] && strcmp(entry->inputs[i], name) == 0) return true;
+  if (entry->n_inputs > 0) return false;
 
-  for (int i = 0; i < inst->n_bufs; i++)
-    poly_buffer_attach(inst->ctx, inst->bufs[i].buffer, &inst->buf_handles[i]);
+  /* Legacy ctx-built instances sometimes carry no per-entrypoint input list.
+   * Keep the boundary strict by falling back only to binding roles, never to
+   * arbitrary name acceptance. */
+  int bi = find_buf_by_name(inst, name);
+  return bi >= 0 &&
+         (inst->bufs[bi].role == POLY_ROLE_INPUT || inst->bufs[bi].role == POLY_ROLE_TARGET);
+}
+
+static int prepare_instance_io(
+    PolyInstance *inst,
+    const RuntimeEntrypoint *entry,
+    PolyIOBinding *io,
+    int n_io
+) {
+  if (!inst || !inst->ctx) return -1;
 
   for (int i = 0; i < n_io; i++) {
     if (!io[i].data) continue;
-    int bi = find_buf_by_name(inst, io[i].name);
-    if (bi < 0) continue;
-
-    PolyBuffer *h = &inst->buf_handles[bi];
-    if (!poly_device_is_host_addressable(h->device)) {
-      if (upload_handle(h, io[i].data, h->nbytes) != 0) return -1;
-      poly_buffer_attach(inst->ctx, inst->bufs[bi].buffer, h);
-    } else {
-      PolyBuffer view = *h;
-      view.ptr = io[i].data;
-      view.owned = false;
-      view.src = NULL;
-      view.valid = true;
-      poly_buffer_attach(inst->ctx, inst->bufs[bi].buffer, &view);
+    if (!io[i].name || !entrypoint_accepts_input(inst, entry, io[i].name)) {
+      fprintf(
+          stderr, "poly_instance_call: '%s' is not an input of entrypoint '%s'\n",
+          io[i].name ? io[i].name : "(null)", entry && entry->name ? entry->name : "(null)"
+      );
+      return -1;
     }
+
+    int bi = find_buf_by_name(inst, io[i].name);
+    if (bi < 0) return -1;
+    size_t nbytes = named_buf_nbytes(&inst->bufs[bi]);
+    if (poly_buffer_write(inst->ctx, inst->bufs[bi].buffer, io[i].data, nbytes) != 0) return -1;
+    if (sync_buf_to_host(inst, bi) != 0) return -1;
   }
 
   return 0;
 }
 
-static void attach_extra_buffers(
-    PolyInstance *inst,
-    PolyUOp **extra_bufs,
-    PolyBuffer *extra_handles,
-    int n_extra
-) {
-  if (!inst || !extra_bufs || !extra_handles) return;
-  for (int i = 0; i < n_extra; i++)
-    poly_buffer_attach(inst->ctx, extra_bufs[i], &extra_handles[i]);
-}
-
 static int run_instance_sink(
     PolyInstance *inst,
+    const RuntimeEntrypoint *entry,
     PolyUOp *sink,
     PolyIOBinding *io,
     int n_io,
-    PolyUOp **extra_bufs,
-    PolyBuffer *extra_handles,
-    int n_extra,
     PolySchedule **cached_schedule
 ) {
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
   if (timing) {
     fprintf(
-        stderr, "[polygrad:instance] enter sink=%p n_io=%d n_extra=%d device=%s\n", (void *)sink,
-        n_io, n_extra, poly_device_name(poly_ctx_get_preferred_device(inst->ctx))
+        stderr, "[polygrad:instance] enter sink=%p n_io=%d device=%s\n", (void *)sink, n_io,
+        poly_device_name(poly_ctx_get_preferred_device(inst->ctx))
     );
     fflush(stderr);
   }
-  if (attach_instance_buffers(inst, io, n_io) != 0) return -1;
+  if (prepare_instance_io(inst, entry, io, n_io) != 0) return -1;
   double t_attach = timing ? poly_now_ms() : 0.0;
-  attach_extra_buffers(inst, extra_bufs, extra_handles, n_extra);
-  double t_extra = timing ? poly_now_ms() : 0.0;
   /* Instance entrypoints and train/value-grad combined graphs are already
    * effect sinks. They must skip tensor callify and enter the schedule runner
    * directly, matching tinygrad's separation between tensor realization and
@@ -2161,9 +1969,9 @@ static int run_instance_sink(
     double t_done = poly_now_ms();
     fprintf(
         stderr,
-        "[polygrad:instance] attach=%.3fms extra=%.3fms schedule=%.3fms run=%.3fms total=%.3fms "
+        "[polygrad:instance] input=%.3fms schedule=%.3fms run=%.3fms total=%.3fms "
         "ret=%d cached=%d\n",
-        t_attach - t0, t_extra - t_attach, t_sched - t_extra, t_done - t_sched, t_done - t0, ret,
+        t_attach - t0, t_sched - t_attach, t_done - t_sched, t_done - t0, ret,
         cached_schedule && *cached_schedule
     );
   }
@@ -2181,7 +1989,7 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
   PolySchedule **cached = inst->entry_schedules ? &inst->entry_schedules[ep_idx] : NULL;
-  return run_instance_sink(inst, sink, io, n_io, NULL, NULL, 0, cached);
+  return run_instance_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached);
 }
 
 /* Convenience wrapper */
@@ -2201,7 +2009,23 @@ int poly_instance_set_optimizer(
     float eps,
     float weight_decay
 ) {
+  return poly_instance_set_optimizer_ex(inst, kind, lr, beta1, beta2, eps, weight_decay, 0.0f, false, false);
+}
+
+int poly_instance_set_optimizer_ex(
+    PolyInstance *inst,
+    int kind,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float momentum,
+    bool nesterov,
+    bool classic
+) {
   if (!inst || inst->stage != POLY_INSTANCE_BUILT) return -1;
+  if (momentum < 0.0f) return -1;
 
   inst->optim.kind = kind;
   inst->optim.lr = lr;
@@ -2209,6 +2033,9 @@ int poly_instance_set_optimizer(
   inst->optim.beta2 = beta2;
   inst->optim.eps = eps;
   inst->optim.weight_decay = weight_decay;
+  inst->optim.momentum = momentum;
+  inst->optim.nesterov = nesterov;
+  inst->optim.classic = classic;
   inst->optim.step = 0;
 
   /* Invalidate training state and slot cache (will be rebuilt lazily) */
@@ -2382,53 +2209,20 @@ int poly_instance_value_and_grad(
   if (ensure_vag_graph(inst, ep_idx) != 0) return -1;
   VagState *vag = inst->vag;
 
-  /* Build extra bindings for vag output buffers (loss + grads).
-   * Use the instance's device domain so handles match the device
-   * that instance buffers live on (avoids mixing host pointers into
-   * device kernel args when on CUDA/HIP). */
-  PolyDevice device = inst->buf_handles[0].device;
-  const PolyBackendDesc *vag_be = poly_backend_get(device);
-  const PolyAllocator *vag_alloc = vag_be ? vag_be->get_allocator() : NULL;
+  int ret = run_instance_sink(inst, &inst->entrypoints[ep_idx], vag->combined_sink, io, n_io, NULL);
 
-  int n_extra = 1 + inst->n_params;
-  PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
-  PolyBuffer *extra_handles = malloc((size_t)n_extra * sizeof(PolyBuffer));
-  if (!extra_bufs || !extra_handles) {
-    free(extra_bufs);
-    free(extra_handles);
-    return -1;
-  }
-
-  /* Loss output buffer */
-  extra_bufs[0] = vag->loss_out_buf;
-  extra_handles[0] = make_handle(&vag->loss_data, sizeof(float), device, vag_alloc);
-
-  /* Gradient output buffers */
-  for (int i = 0; i < inst->n_params; i++) {
-    NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-    size_t nbytes = (size_t)pb->numel * sizeof(float);
-    extra_bufs[1 + i] = vag->grad_out_bufs[i];
-    extra_handles[1 + i] = make_handle(vag->grad_datas[i], nbytes, device, vag_alloc);
-  }
-
-  int ret = run_instance_sink(
-      inst, vag->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra, NULL
-  );
-
-  /* Readback loss + grads from device to host if needed */
-  if (ret == 0 && !poly_device_is_host_addressable(device)) {
-    readback_handle(&extra_handles[0], &vag->loss_data, sizeof(float));
+  if (ret == 0) {
+    if (poly_buffer_read(inst->ctx, vag->loss_out_buf, &vag->loss_data, sizeof(float)) != 0)
+      ret = -1;
     for (int i = 0; i < inst->n_params; i++) {
       NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
-      readback_handle(&extra_handles[1 + i], vag->grad_datas[i], (size_t)pb->numel * sizeof(float));
+      if (poly_buffer_read(
+              inst->ctx, vag->grad_out_bufs[i], vag->grad_datas[i],
+              (size_t)pb->numel * sizeof(float)
+          ) != 0)
+        ret = -1;
     }
   }
-
-  /* Free device-owned extra handles */
-  for (int i = 0; i < n_extra; i++)
-    free_owned_handle(&extra_handles[i]);
-  free(extra_bufs);
-  free(extra_handles);
 
   if (ret != 0) return ret;
   if (loss_out) *loss_out = vag->loss_data;
@@ -2436,57 +2230,6 @@ int poly_instance_value_and_grad(
 }
 
 /* Optimizer Graph Builder */
-
-/* Create a buffer handle on the given device. For host-addressable devices,
- * points directly at host_data. For device memory, allocates and uploads. */
-static PolyBuffer make_handle(
-    void *host_data,
-    size_t nbytes,
-    PolyDevice dev,
-    const PolyAllocator *alloc
-) {
-  if (poly_device_is_host_addressable(dev)) {
-    return (PolyBuffer){
-        .ptr = host_data,
-        .nbytes = nbytes,
-        .device = dev,
-        .owned = false,
-        .allocator = alloc,
-        .valid = true,
-    };
-  }
-  void *dptr = alloc->alloc(nbytes, alloc->dev_ctx);
-  if (!dptr) {
-    fprintf(stderr, "make_handle: device alloc(%zu) failed\n", nbytes);
-    return (PolyBuffer){
-        .ptr = NULL,
-        .nbytes = 0,
-        .device = dev,
-        .owned = false,
-        .allocator = alloc,
-        .valid = false,
-    };
-  }
-  if (host_data) {
-    PolyBuffer dst = {
-        .ptr = dptr,
-        .nbytes = nbytes,
-        .device = dev,
-        .owned = true,
-        .allocator = alloc,
-    };
-    PolyBuffer src_view = poly_buffer_make_host_view(host_data, nbytes);
-    alloc->copy_in(&dst, &src_view, nbytes, alloc->dev_ctx);
-  }
-  return (PolyBuffer){
-      .ptr = dptr,
-      .nbytes = nbytes,
-      .device = dev,
-      .owned = true,
-      .allocator = alloc,
-      .valid = true,
-  };
-}
 
 static int param_ordinal_for_buf(const PolyInstance *inst, int buf_idx) {
   if (!inst) return -1;
@@ -2522,17 +2265,18 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   if (!poly_dtype_is_float(out_dt)) out_dt = POLY_FLOAT32;
   ts->loss_out_buf = poly_buffer(ctx, out_dt, 1);
 
-  /* Initialize all train handles on the current device so kernels write
-   * to the correct memory domain (host or device). */
-  PolyDevice cur_dev = inst->buf_handles ? inst->buf_handles[0].device : POLY_DEVICE_CPU;
-  const PolyBackendDesc *cur_be = poly_backend_get(cur_dev);
-  const PolyAllocator *alloc = cur_be ? cur_be->get_allocator() : NULL;
-  ts->loss_handle = make_handle(&ts->loss_data, sizeof(float), cur_dev, alloc);
+  if (poly_buffer_write(ctx, ts->loss_out_buf, &ts->loss_data, sizeof(float)) != 0) {
+    train_free(ts, np);
+    return -1;
+  }
 
-  /* Count SINK sources: loss_store + param assigns + optimizer state assigns */
-  int has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
+  /* Count SINK sources: loss_store + param assigns + optimizer state assigns. */
+  bool is_adam = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
+  bool sgd_momentum = (o->kind == POLY_OPTIM_SGD && o->momentum > 0.0f);
+  bool has_m_bufs = is_adam || sgd_momentum;
   int n_sink_srcs = 1 + np; /* loss_store + param assigns */
-  if (has_moments) n_sink_srcs += 2 * np + 2; /* + m/v assigns + b1_t/b2_t assigns */
+  if (is_adam) n_sink_srcs += 2 * np + 2; /* + m/v assigns + b1_t/b2_t assigns */
+  else if (sgd_momentum) n_sink_srcs += np; /* + momentum assigns */
 
   PolyUOp **sink_srcs = calloc((size_t)n_sink_srcs, sizeof(PolyUOp *));
   if (!sink_srcs) {
@@ -2548,40 +2292,74 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
   }
   sink_srcs[0] = poly_store_val(ctx, ts->loss_out_buf, loss_flat);
 
-  /* Allocate moment buffers for Adam/AdamW */
-  if (has_moments) {
+  /* Allocate optimizer state buffers. */
+  if (has_m_bufs) {
     ts->m_bufs = calloc((size_t)np, sizeof(PolyUOp *));
-    ts->v_bufs = calloc((size_t)np, sizeof(PolyUOp *));
-    ts->m_datas = calloc((size_t)np, sizeof(float *));
-    ts->v_datas = calloc((size_t)np, sizeof(float *));
-    ts->m_handles = calloc((size_t)np, sizeof(PolyBuffer));
-    ts->v_handles = calloc((size_t)np, sizeof(PolyBuffer));
+    if (is_adam) ts->v_bufs = calloc((size_t)np, sizeof(PolyUOp *));
+    if (!ts->m_bufs || (is_adam && !ts->v_bufs)) {
+      free(sink_srcs);
+      train_free(ts, np);
+      return -1;
+    }
     ts->n_moment_bufs = np;
+  }
 
+  if (is_adam) {
     /* Bias correction scalar buffers */
-    ts->bc1_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
-    ts->bc2_buf = poly_buffer(ctx, POLY_FLOAT32, 1);
+    int64_t scalar_shape[1] = {1};
     /* tinygrad stores beta powers as state tensors initialized to 1, then
      * schedule_step multiplies them by beta each step before computing
      * 1/(1-beta_t). */
     ts->bc1_data = 1.0f;
     ts->bc2_data = 1.0f;
-    ts->bc1_handle = make_handle(&ts->bc1_data, sizeof(float), cur_dev, alloc);
-    ts->bc2_handle = make_handle(&ts->bc2_data, sizeof(float), cur_dev, alloc);
+    if (ensure_optimizer_state_buffer(
+            inst, "optim.adam.b1_t", scalar_shape, 1, true, ts->bc1_data, &ts->bc1_buf
+        ) != 0 ||
+        ensure_optimizer_state_buffer(
+            inst, "optim.adam.b2_t", scalar_shape, 1, true, ts->bc2_data, &ts->bc2_buf
+        ) != 0) {
+      free(sink_srcs);
+      train_free(ts, np);
+      return -1;
+    }
 
     for (int i = 0; i < np; i++) {
       NamedBuf *pb = &inst->bufs[inst->trainable_param_indices[i]];
-      int64_t numel = pb->numel;
-
-      ts->m_bufs[i] = poly_buffer(ctx, POLY_FLOAT32, numel);
-      ts->v_bufs[i] = poly_buffer(ctx, POLY_FLOAT32, numel);
-
-      ts->m_datas[i] = calloc((size_t)numel, sizeof(float));
-      ts->v_datas[i] = calloc((size_t)numel, sizeof(float));
-
-      size_t nbytes = (size_t)numel * sizeof(float);
-      ts->m_handles[i] = make_handle(ts->m_datas[i], nbytes, cur_dev, alloc);
-      ts->v_handles[i] = make_handle(ts->v_datas[i], nbytes, cur_dev, alloc);
+      int64_t opt_shape[8] = {0};
+      int opt_ndim = pb->ndim;
+      if (opt_ndim > 0) memcpy(opt_shape, pb->shape, (size_t)opt_ndim * sizeof(int64_t));
+      char *m_name = optimizer_param_state_name("adam", "m", pb->name);
+      char *v_name = optimizer_param_state_name("adam", "v", pb->name);
+      if (!m_name || !v_name ||
+          ensure_optimizer_state_buffer(inst, m_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]) !=
+              0 ||
+          ensure_optimizer_state_buffer(inst, v_name, opt_shape, opt_ndim, false, 0.0f, &ts->v_bufs[i]) !=
+              0) {
+        free(m_name);
+        free(v_name);
+        free(sink_srcs);
+        train_free(ts, np);
+        return -1;
+      }
+      free(m_name);
+      free(v_name);
+    }
+  } else if (sgd_momentum) {
+    for (int i = 0; i < np; i++) {
+      NamedBuf *pb = &inst->bufs[inst->trainable_param_indices[i]];
+      int64_t opt_shape[8] = {0};
+      int opt_ndim = pb->ndim;
+      if (opt_ndim > 0) memcpy(opt_shape, pb->shape, (size_t)opt_ndim * sizeof(int64_t));
+      char *b_name = optimizer_param_state_name("sgd", "b", pb->name);
+      if (!b_name ||
+          ensure_optimizer_state_buffer(inst, b_name, opt_shape, opt_ndim, false, 0.0f, &ts->m_bufs[i]) !=
+              0) {
+        free(b_name);
+        free(sink_srcs);
+        train_free(ts, np);
+        return -1;
+      }
+      free(b_name);
     }
   }
 
@@ -2621,10 +2399,13 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
         .beta2 = o->beta2,
         .eps = o->eps,
         .weight_decay = o->weight_decay,
+        .momentum = o->momentum,
+        .nesterov = o->nesterov,
+        .classic = o->classic,
     };
     PolyOptimUpdate upd;
-    PolyUOp *m_buf = has_moments ? ts->m_bufs[i] : NULL;
-    PolyUOp *v_buf = has_moments ? ts->v_bufs[i] : NULL;
+    PolyUOp *m_buf = has_m_bufs ? ts->m_bufs[i] : NULL;
+    PolyUOp *v_buf = is_adam ? ts->v_bufs[i] : NULL;
     if (poly_optim_build_update(
             ctx, &cfg, param_buf, grad, m_buf, v_buf, ts->bc1_buf, ts->bc2_buf, pb_opt->numel, &upd
         ) != 0) {
@@ -2634,24 +2415,25 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
       return -1;
     }
     sink_srcs[si++] = poly_store_buffer_update(ctx, param_buf, upd.param_new);
-    if (has_moments) {
+    if (sgd_momentum) {
+      sink_srcs[si++] = poly_store_buffer_update(ctx, m_buf, upd.m_new);
+    } else if (is_adam) {
       if (!bc1_new) bc1_new = upd.bc1_new;
       if (!bc2_new) bc2_new = upd.bc2_new;
-      sink_srcs[1 + np + 2 * i] = poly_store_buffer_update(ctx, m_buf, upd.m_new);
-      sink_srcs[1 + np + 2 * i + 1] = poly_store_buffer_update(ctx, v_buf, upd.v_new);
+      sink_srcs[si++] = poly_store_buffer_update(ctx, m_buf, upd.m_new);
+      sink_srcs[si++] = poly_store_buffer_update(ctx, v_buf, upd.v_new);
     }
   }
 
-  if (has_moments) {
-    sink_srcs[1 + np + 2 * np] = poly_store_buffer_update(ctx, ts->bc1_buf, bc1_new);
-    sink_srcs[1 + np + 2 * np + 1] = poly_store_buffer_update(ctx, ts->bc2_buf, bc2_new);
+  if (is_adam) {
+    sink_srcs[si++] = poly_store_buffer_update(ctx, ts->bc1_buf, bc1_new);
+    sink_srcs[si++] = poly_store_buffer_update(ctx, ts->bc2_buf, bc2_new);
   }
 
-  /* For Adam/AdamW, si covered param updates (1..np), moment updates
-   * were written directly to their positions. Verify: */
-  if (has_moments) {
-    /* param assigns: indices 1..np (written by si++)
-     * moment assigns: indices (1+np)..(1+np+2*np-1) (written directly) */
+  if (si != n_sink_srcs) {
+    free(sink_srcs);
+    train_free(ts, np);
+    return -1;
   }
 
   ts->combined_sink = poly_sink_n(ctx, sink_srcs, n_sink_srcs);
@@ -2681,59 +2463,29 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   if (ensure_train_graph(inst, ep_idx) != 0) return -1;
   TrainState *ts = inst->train;
   OptimState *o = &inst->optim;
-  int np = inst->n_trainable_params;
 
   /* tinygrad updates Adam beta-power state inside the scheduled optimizer
    * graph. Keep step only as bookkeeping for public state/checkpoints. */
   o->step++;
 
-  /* Build extra bindings: loss output + moment buffers + bc scalars */
-  bool has_moments = (o->kind == POLY_OPTIM_ADAM || o->kind == POLY_OPTIM_ADAMW);
-  int n_extra = 1 + (has_moments ? 2 * np + 2 : 0);
-
-  PolyUOp **extra_bufs = malloc((size_t)n_extra * sizeof(PolyUOp *));
-  PolyBuffer *extra_handles = malloc((size_t)n_extra * sizeof(PolyBuffer));
-  if (!extra_bufs || !extra_handles) {
-    free(extra_bufs);
-    free(extra_handles);
-    o->step--;
-    return -1;
-  }
-
-  extra_bufs[0] = ts->loss_out_buf;
-  extra_handles[0] = ts->loss_handle;
-  if (has_moments) {
-    for (int i = 0; i < np; i++) {
-      extra_bufs[1 + i] = ts->m_bufs[i];
-      extra_handles[1 + i] = ts->m_handles[i];
-      extra_bufs[1 + np + i] = ts->v_bufs[i];
-      extra_handles[1 + np + i] = ts->v_handles[i];
-    }
-    extra_bufs[1 + 2 * np] = ts->bc1_buf;
-    extra_handles[1 + 2 * np] = ts->bc1_handle;
-    extra_bufs[1 + 2 * np + 1] = ts->bc2_buf;
-    extra_handles[1 + 2 * np + 1] = ts->bc2_handle;
-  }
-
   int ret = run_instance_sink(
-      inst, ts->combined_sink, io, n_io, extra_bufs, extra_handles, n_extra, &ts->schedule
+      inst, &inst->entrypoints[ep_idx], ts->combined_sink, io, n_io, &ts->schedule
   );
-  free(extra_bufs);
-  free(extra_handles);
   if (ret != 0) {
     o->step--;
     return ret;
   }
 
-  /* Read back loss from device to host if not host-addressable */
-  if (!poly_device_is_host_addressable(ts->loss_handle.device))
-    readback_handle(&ts->loss_handle, &ts->loss_data, sizeof(float));
+  if (poly_buffer_read(inst->ctx, ts->loss_out_buf, &ts->loss_data, sizeof(float)) != 0) {
+    o->step--;
+    return -1;
+  }
   if (loss_out) *loss_out = ts->loss_data;
 
   /* Update instance "loss" named buffer for consumers */
   int loss_named_idx = find_buf_by_name(inst, "loss");
-  if (loss_named_idx >= 0 && inst->bufs[loss_named_idx].data)
-    inst->bufs[loss_named_idx].data[0] = ts->loss_data;
+  if (loss_named_idx >= 0)
+    poly_instance_upload_buf(inst, loss_named_idx, &ts->loss_data, sizeof(float));
 
   return 0;
 }
@@ -2924,7 +2676,6 @@ int poly_instance_copy_prefixed_weights(PolyInstance *dst, PolyInstance *src, co
   if (!dst || !src) return -1;
   for (int i = 0; i < src->n_params; i++) {
     int sbi = src->param_indices[i];
-    if (sync_buf_to_host(src, sbi) != 0) return -1;
     const NamedBuf *sb = &src->bufs[sbi];
     char *dst_name = prefixed_name(prefix, sb->name);
     if (!dst_name) return -1;
@@ -2932,11 +2683,15 @@ int poly_instance_copy_prefixed_weights(PolyInstance *dst, PolyInstance *src, co
     free(dst_name);
     if (dbi < 0) return -1;
     NamedBuf *db = &dst->bufs[dbi];
-    if (db->numel != sb->numel || !db->data || !sb->data) return -1;
-    memcpy(db->data, sb->data, (size_t)sb->numel * sizeof(float));
-    if (dst->buf_handles && !poly_device_is_host_addressable(dst->buf_handles[dbi].device))
-      if (upload_handle(&dst->buf_handles[dbi], db->data, (size_t)db->numel * sizeof(float)) != 0)
-        return -1;
+    size_t nbytes = named_buf_nbytes(sb);
+    if (db->numel != sb->numel || named_buf_nbytes(db) != nbytes || nbytes == 0) return -1;
+    uint8_t *tmp = malloc(nbytes);
+    if (!tmp) return -1;
+    int rc = poly_buffer_read(src->ctx, sb->buffer, tmp, nbytes);
+    if (rc == 0) rc = poly_buffer_write(dst->ctx, db->buffer, tmp, nbytes);
+    if (rc == 0) rc = sync_buf_to_host(dst, dbi);
+    free(tmp);
+    if (rc != 0) return -1;
   }
   return 0;
 }
@@ -2967,8 +2722,7 @@ float *poly_instance_buf_data_named(PolyInstance *inst, const char *name, int64_
   if (!inst || !name) return NULL;
   int idx = find_buf_by_name(inst, name);
   if (idx < 0) return NULL;
-  if (numel_out) *numel_out = inst->bufs[idx].numel;
-  return inst->bufs[idx].data;
+  return poly_instance_buf_data(inst, idx, numel_out);
 }
 
 int64_t poly_instance_buf_numel_named(const PolyInstance *inst, const char *name) {

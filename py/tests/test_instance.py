@@ -8,6 +8,13 @@ from polygrad.instance import Instance, OPTIM_SGD, OPTIM_ADAM, OPTIM_ADAMW
 from polygrad.models import MLP
 
 
+def safetensor_names(data):
+    header_len = int.from_bytes(data[:8], 'little')
+    header = data[8:8 + header_len].decode('utf-8')
+    import json
+    return set(json.loads(header).keys()) - {'__metadata__'}
+
+
 class TestModelConstructors:
     def test_family_constructors_are_not_instance_methods(self):
         assert not hasattr(Instance, 'mlp')
@@ -292,6 +299,28 @@ class TestTrainOptimizers:
             last = inst.train_step(x=x, y=y)
         assert np.isfinite(first) and np.isfinite(last)
         assert last < first
+        inst.free()
+
+    def test_train_sgd_momentum_creates_named_state(self):
+        inst = MLP({
+            'layers': [2, 4, 1], 'activation': 'relu',
+            'bias': True, 'loss': 'mse', 'batch_size': 1, 'seed': 42
+        })
+        inst.set_optimizer(OPTIM_SGD, lr=0.01, momentum=0.9)
+        x = np.array([1.0, 2.0], dtype=np.float32)
+        y = np.array([3.0], dtype=np.float32)
+        loss = inst.train_step(x=x, y=y)
+        assert np.isfinite(loss)
+        bi = inst.find_buf('optim.sgd.b.layers.0.weight')
+        assert bi >= 0
+        buf = inst.buf_data(bi)
+        assert buf is not None
+        assert np.any(np.abs(buf) > 0)
+        default_names = safetensor_names(inst.export_weights())
+        assert 'optim.sgd.b.layers.0.weight' in default_names
+        model_only_names = safetensor_names(inst.export_weights(include_optimizer=False))
+        assert 'layers.0.weight' in model_only_names
+        assert 'optim.sgd.b.layers.0.weight' not in model_only_names
         inst.free()
 
 

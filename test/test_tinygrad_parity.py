@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import json
 import os
 import pathlib
+import platform
 import subprocess
 import sys
 from typing import Callable
-
 import numpy as np
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+if sys.version_info < (3, 11):
+    raise RuntimeError("tinygrad_latest parity requires Python 3.11+; set PARITY_PY=references/.venv-tinygrad-py311/bin/python")
+
 os.environ.setdefault("CACHELEVEL", "0")
 os.environ.setdefault("DEVECTORIZE", "-1")
 # Always use CPU for value evaluation; CUDA flag only affects IR extraction
@@ -20,9 +24,48 @@ sys.path.insert(0, str(ROOT / "references" / "tinygrad_latest"))
 from tinygrad import Context, Tensor, dtypes  # noqa: E402
 from tinygrad.codegen import to_program, full_rewrite_to_sink  # noqa: E402
 from tinygrad.codegen.late.linearizer import linearize  # noqa: E402
-from tinygrad.helpers import Target  # noqa: E402
+from tinygrad.helpers import ContextVar, Target  # noqa: E402
 from tinygrad.renderer.cstyle import ClangRenderer, CUDARenderer, HIPRenderer  # noqa: E402
 from tinygrad.uop.ops import Ops  # noqa: E402
+
+
+def _tiny_context(**kwargs):
+    supported = getattr(ContextVar, "_cache", {})
+    filtered = {k: v for k, v in kwargs.items() if k in supported}
+    if not filtered:
+        return contextlib.nullcontext()
+    return Context(**filtered)
+
+
+def _cpu_target() -> Target:
+    target = Target.parse("CPU")
+    if getattr(target, "arch", ""):
+        return target
+    machine = platform.machine().lower()
+    arch = {
+        "amd64": "x86_64,native",
+        "x86_64": "x86_64,native",
+        "aarch64": "arm64,native",
+        "arm64": "arm64,native",
+        "riscv64": "riscv64,native",
+    }.get(machine, f"{machine},native")
+    return Target.parse(f"CPU:CLANG:{arch}")
+
+
+def _tensor(data, *, requires_grad=None, **kwargs) -> Tensor:
+    if requires_grad is None:
+        return Tensor(data, **kwargs)
+    try:
+        return Tensor(data, requires_grad=requires_grad, **kwargs)
+    except TypeError as exc:
+        if "requires_grad" not in str(exc):
+            raise
+    t = Tensor(data, **kwargs)
+    if hasattr(t, "is_param"):
+        t.is_param = bool(requires_grad)
+    else:
+        t.requires_grad = bool(requires_grad)
+    return t
 
 
 def _flatten(x) -> np.ndarray:
@@ -124,33 +167,33 @@ def build_chain_pad_flip() -> tuple[Tensor, ...]:
 
 
 def build_grad_mul_sum() -> tuple[Tensor, ...]:
-    x = Tensor(np.arange(-3, 5, dtype=np.float32), requires_grad=True)
+    x = _tensor(np.arange(-3, 5, dtype=np.float32), requires_grad=True)
     (x * x).sum().backward()
     return (x.grad,)
 
 
 def build_grad_exp2_sum() -> tuple[Tensor, ...]:
-    x = Tensor(np.array([-2.0, -1.0, 0.0, 0.5, 1.0, 2.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([-2.0, -1.0, 0.0, 0.5, 1.0, 2.0], dtype=np.float32), requires_grad=True)
     x.exp2().sum().backward()
     return (x.grad,)
 
 
 def build_grad_fdiv_sum_x() -> tuple[Tensor, ...]:
-    x = Tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32), requires_grad=True)
-    y = Tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32), requires_grad=False)
+    x = _tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32), requires_grad=True)
+    y = _tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32), requires_grad=False)
     (x / y).sum().backward()
     return (x.grad,)
 
 
 def build_grad_fdiv_sum_y() -> tuple[Tensor, ...]:
-    x = Tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32), requires_grad=False)
-    y = Tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([1.0, 2.0, 3.0, -1.0, -2.0, 4.0], dtype=np.float32), requires_grad=False)
+    y = _tensor(np.array([2.0, 4.0, -2.0, 5.0, -3.0, 8.0], dtype=np.float32), requires_grad=True)
     (x / y).sum().backward()
     return (y.grad,)
 
 
 def build_grad_chain_movement() -> tuple[Tensor, ...]:
-    x = Tensor(np.arange(1, 7, dtype=np.float32), requires_grad=True)
+    x = _tensor(np.arange(1, 7, dtype=np.float32), requires_grad=True)
     x.reshape(2, 3).permute(1, 0).sum().backward()
     return (x.grad,)
 
@@ -209,25 +252,25 @@ def build_multi_movement() -> tuple[Tensor, ...]:
 
 
 def build_grad_log2_sum() -> tuple[Tensor, ...]:
-    x = Tensor(np.array([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=np.float32), requires_grad=True)
     x.log2().sum().backward()
     return (x.grad,)
 
 
 def build_grad_sqrt_sum() -> tuple[Tensor, ...]:
-    x = Tensor(np.array([1.0, 4.0, 9.0, 16.0, 25.0, 0.25], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([1.0, 4.0, 9.0, 16.0, 25.0, 0.25], dtype=np.float32), requires_grad=True)
     x.sqrt().sum().backward()
     return (x.grad,)
 
 
 def build_grad_where_sum() -> tuple[Tensor, ...]:
-    x = Tensor(np.arange(-3, 5, dtype=np.float32), requires_grad=True)
+    x = _tensor(np.arange(-3, 5, dtype=np.float32), requires_grad=True)
     (x > 0).where(x, 0).sum().backward()
     return (x.grad,)
 
 
 def build_grad_multi_use() -> tuple[Tensor, ...]:
-    x = Tensor(np.array([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], dtype=np.float32), requires_grad=True)
+    x = _tensor(np.array([-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], dtype=np.float32), requires_grad=True)
     ((x * x) + (x * 2.0)).sum().backward()
     return (x.grad,)
 
@@ -477,24 +520,23 @@ def run_polygrad_case(runner: pathlib.Path, case: str, mode: str,
 
 
 def evaluate_tinygrad_case(case_builder: CaseBuilder) -> np.ndarray:
-    # Current tinygrad_latest CPU can render invalid C for vector bool masks
-    # under DEVECTORIZE=0 (for example non-last-axis cross_entropy emits
-    # `_Bool __attribute__((ext_vector_type(4)))`). DEVECTORIZE=1 keeps value
-    # evaluation runnable while preserving the same high-level Tensor case.
-    with Context(DEVECTORIZE=1):
+    # Older tinygrad CPU could render invalid C for vector bool masks under
+    # DEVECTORIZE=0. Current tinygrad removed that context key; keep the
+    # override only when the reference checkout still exposes it.
+    with _tiny_context(DEVECTORIZE=1):
         outputs = _to_output_tuple(case_builder())
         return _concat_outputs(outputs)
 
 
 def extract_tinygrad_kernels(case_builder: CaseBuilder, optimize: bool = True, renderer=None) -> dict:
-    # Some tinygrad backends can produce non-runnable IR when DEVECTORIZE=-1.
-    # Use DEVECTORIZE=0 for stable linearized kernel extraction.
-    with Context(DEVECTORIZE=0):
+    # Some older tinygrad backends produced non-runnable IR when
+    # DEVECTORIZE=-1. Current tinygrad removed that context key.
+    with _tiny_context(DEVECTORIZE=0):
         outputs = _to_output_tuple(case_builder())
         linear_schedule = outputs[0].schedule_linear(*outputs[1:])
 
         if renderer is None:
-            renderer = ClangRenderer(Target.parse("CPU"))
+            renderer = ClangRenderer(_cpu_target())
         kernels = []
         for call in linear_schedule.src:
             if call.op is not Ops.CALL or len(call.src) == 0:
@@ -631,7 +673,7 @@ def main() -> int:
         hip_arch = os.environ.get("HIP_ARCH", "gfx90a")
         renderer = HIPRenderer(Target.parse("HIP:AMD:" + hip_arch))
     else:
-        renderer = ClangRenderer(Target.parse("CPU"))
+        renderer = ClangRenderer(_cpu_target())
 
     failures: list[tuple[str, str]] = []
     ir_diverged: list[tuple[str, str]] = []

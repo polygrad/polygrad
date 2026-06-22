@@ -1082,7 +1082,7 @@ TEST(realize, schedule_with_vars_then_run_vecadd) {
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
   ASSERT_TRUE(realized[0] != NULL);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
 
@@ -1190,8 +1190,8 @@ TEST(realize, contiguous_scalar_reduce_materializes_without_extra_copy_kernel) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_REDUCE), 1);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   ASSERT_NOT_NULL(realized[0]);
@@ -1222,10 +1222,10 @@ TEST(realize, schedule_with_vars_chained_singleton_reduce_matches_tinygrad_count
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  PolyUOp *root = sched->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(sched, 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_REDUCE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_RANGE), 2);
@@ -1253,10 +1253,10 @@ TEST(realize, schedule_with_vars_mixed_multiaxis_singleton_reduce_matches_tinygr
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  PolyUOp *root = sched->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(sched, 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_REDUCE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_RANGE), 2);
@@ -1284,10 +1284,10 @@ TEST(realize, schedule_with_vars_flip_add_matches_tinygrad_counts) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  PolyUOp *root = sched->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(sched, 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_REDUCE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_RANGE), 2);
@@ -1317,10 +1317,10 @@ TEST(realize, schedule_with_vars_reshape_add_matches_tinygrad_counts) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  PolyUOp *root = sched->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(sched, 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_REDUCE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_RANGE), 1);
@@ -1352,10 +1352,10 @@ TEST(realize, schedule_with_vars_pad_add_matches_tinygrad_counts) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  PolyUOp *root = sched->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(sched, 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_REDUCE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_RANGE), 1);
@@ -1391,10 +1391,10 @@ TEST(realize, schedule_with_vars_expand_add_matches_tinygrad_counts) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  PolyUOp *root = sched->items[0].root;
+  PolyUOp *root = poly_schedule_call_body(sched, 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_STORE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_REDUCE), 0);
   ASSERT_INT_EQ(count_root_ops(ctx, root, POLY_OP_RANGE), 1);
@@ -1429,7 +1429,7 @@ TEST(realize, schedule_with_vars_cross_entropy_sparse_last_axis_matches_tinygrad
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
   ASSERT_NOT_NULL(realized[0]);
-  ASSERT_INT_EQ(sched->n_items, 3);
+  ASSERT_INT_EQ(sched->template->n_calls, 3);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -1452,7 +1452,7 @@ TEST(realize, schedule_with_vars_cross_entropy_sparse_non_last_axis_matches_tiny
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
   ASSERT_NOT_NULL(realized[0]);
-  ASSERT_INT_EQ(sched->n_items, 3);
+  ASSERT_INT_EQ(sched->template->n_calls, 3);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -1639,13 +1639,13 @@ TEST(realize, schedule_with_vars_triu_root_has_no_early_loads) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
   /* tinygrad schedule_with_vars boundary: triu root still has WHERE and no
    * LOAD. Late load insertion happens later in codegen pm_add_loads. */
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_LOAD), 0);
-  ASSERT_TRUE(count_root_ops(ctx, sched->items[0].root, POLY_OP_WHERE) > 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_LOAD), 0);
+  ASSERT_TRUE(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_WHERE) > 0);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   PolyBuffer *buf = realized_buffer(ctx, realized[0]);
@@ -1679,11 +1679,11 @@ TEST(realize, schedule_with_vars_tril_root_has_no_early_loads) {
   PolyUOp *realized[] = {NULL};
   PolySchedule *sched = poly_schedule_with_vars(ctx, targets, 1, realized);
   ASSERT_NOT_NULL(sched);
-  ASSERT_INT_EQ(sched->n_items, 1);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
   ASSERT_NOT_NULL(realized[0]);
 
-  ASSERT_INT_EQ(count_root_ops(ctx, sched->items[0].root, POLY_OP_LOAD), 0);
-  ASSERT_TRUE(count_root_ops(ctx, sched->items[0].root, POLY_OP_WHERE) > 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_LOAD), 0);
+  ASSERT_TRUE(count_root_ops(ctx, poly_schedule_call_body(sched, 0), POLY_OP_WHERE) > 0);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   PolyBuffer *buf = realized_buffer(ctx, realized[0]);

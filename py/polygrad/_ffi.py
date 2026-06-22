@@ -259,9 +259,6 @@ def _declare_signatures(lib):
         _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int, ctypes.c_char_p, ctypes.c_bool
     ]
 
-    lib.poly_register_entrypoint.restype = ctypes.c_int
-    lib.poly_register_entrypoint.argtypes = [_ptr, ctypes.c_char_p, _ptr]
-
     lib.poly_buffer_by_id.restype = _ptr
     lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
 
@@ -559,9 +556,6 @@ def _declare_signatures(lib):
     lib.poly_instance_from_ir.restype = _ptr
     lib.poly_instance_from_ir.argtypes = [_u8p, ctypes.c_int, _u8p, ctypes.c_int]
 
-    lib.poly_instance_from_ctx.restype = _ptr
-    lib.poly_instance_from_ctx.argtypes = [_ptr]
-
     lib.poly_instance_from_sinks.restype = _ptr
     lib.poly_instance_from_sinks.argtypes = [
         _ptr, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(_ptr), ctypes.c_int
@@ -620,6 +614,8 @@ def _declare_signatures(lib):
 
     lib.poly_instance_export_weights.restype = _u8p
     lib.poly_instance_export_weights.argtypes = [_ptr, _ip]
+    lib.poly_instance_export_weights_ex.restype = _u8p
+    lib.poly_instance_export_weights_ex.argtypes = [_ptr, _ip, ctypes.c_uint32]
 
     lib.poly_instance_import_weights.restype = ctypes.c_int
     lib.poly_instance_import_weights.argtypes = [_ptr, _u8p, ctypes.c_int]
@@ -630,6 +626,8 @@ def _declare_signatures(lib):
     # Bundle format
     lib.poly_instance_save_bundle.restype = _u8p
     lib.poly_instance_save_bundle.argtypes = [_ptr, _ip]
+    lib.poly_instance_save_bundle_ex.restype = _u8p
+    lib.poly_instance_save_bundle_ex.argtypes = [_ptr, _ip, ctypes.c_uint32]
 
     lib.poly_instance_from_bundle.restype = _ptr
     lib.poly_instance_from_bundle.argtypes = [_u8p, ctypes.c_int]
@@ -644,6 +642,11 @@ def _declare_signatures(lib):
     lib.poly_instance_set_optimizer.argtypes = [_ptr, ctypes.c_int,
         ctypes.c_float, ctypes.c_float, ctypes.c_float,
         ctypes.c_float, ctypes.c_float]
+    lib.poly_instance_set_optimizer_ex.restype = ctypes.c_int
+    lib.poly_instance_set_optimizer_ex.argtypes = [_ptr, ctypes.c_int,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.c_float, ctypes.c_float, ctypes.c_float,
+        ctypes.c_bool, ctypes.c_bool]
 
     # MLP family builder (model_mlp.h)
     lib.poly_mlp_from_json.restype = _ptr

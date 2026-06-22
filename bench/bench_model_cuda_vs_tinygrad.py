@@ -22,9 +22,18 @@ import sys
 import tempfile
 import textwrap
 import time
+import typing
 from pathlib import Path
 
 import numpy as np
+
+if not hasattr(typing, "Self"):
+    try:
+        from typing_extensions import Self as _Self
+
+        typing.Self = _Self
+    except Exception:
+        pass
 
 from tinygrad import Tensor, Device
 from tinygrad.helpers import DEV
@@ -54,6 +63,22 @@ def sync_cuda() -> None:
     Device["CUDA"].synchronize()
 
 
+def tg_tensor(data: np.ndarray, *, requires_grad: bool = False) -> Tensor:
+    if not requires_grad:
+        return Tensor(data)
+    try:
+        return Tensor(data, requires_grad=True)
+    except TypeError as exc:
+        if "requires_grad" not in str(exc):
+            raise
+    t = Tensor(data)
+    if hasattr(t, "is_param"):
+        t.is_param = True
+    else:
+        t.requires_grad = True
+    return t
+
+
 def init_arrays(layers: list[int], batch: int) -> tuple[np.ndarray, np.ndarray, list[tuple[np.ndarray, np.ndarray]]]:
     rng = np.random.default_rng(42)
     x = rng.normal(0.0, 1.0, size=(batch, layers[0])).astype(np.float32)
@@ -70,7 +95,7 @@ def init_arrays(layers: list[int], batch: int) -> tuple[np.ndarray, np.ndarray, 
 def tinygrad_forward_case(case: dict) -> float:
     layers, batch, iters = case["layers"], case["batch"], case["iters"]
     x_np, _y_np, params_np = init_arrays(layers, batch)
-    params = [(Tensor(w).realize(), Tensor(b).realize()) for w, b in params_np]
+    params = [(tg_tensor(w).realize(), tg_tensor(b).realize()) for w, b in params_np]
     sync_cuda()
 
     def fwd(x):
@@ -81,7 +106,7 @@ def tinygrad_forward_case(case: dict) -> float:
         return x
 
     def run():
-        out = fwd(Tensor(x_np).realize()).realize()
+        out = fwd(tg_tensor(x_np).realize()).realize()
         sync_cuda()
         _ = out.numpy()
 
@@ -96,8 +121,8 @@ def tinygrad_train_case(case: dict) -> float:
     Tensor.training = True
     params = []
     for w_np, b_np in params_np:
-        w = Tensor(w_np, requires_grad=True).realize()
-        b = Tensor(b_np, requires_grad=True).realize()
+        w = tg_tensor(w_np, requires_grad=True).realize()
+        b = tg_tensor(b_np, requires_grad=True).realize()
         params.extend([w, b])
     opt = SGD(params, lr=0.01)
     sync_cuda()
@@ -111,8 +136,8 @@ def tinygrad_train_case(case: dict) -> float:
 
     def run():
         opt.zero_grad()
-        pred = fwd(Tensor(x_np).realize())
-        target = Tensor(y_np).realize()
+        pred = fwd(tg_tensor(x_np).realize())
+        target = tg_tensor(y_np).realize()
         loss = ((pred - target) * (pred - target)).mean()
         loss.backward()
         opt.step()

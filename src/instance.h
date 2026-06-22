@@ -6,13 +6,11 @@
  *   - Entrypoints (forward, loss, etc.)
  *   - Optimizer state
  *
- * Execution goes through poly_realize_with_bindings() in the core. The
- * instance
- * builds PolyBufferBinding[] from its named buffers and calls
- * poly_realize_with_bindings(). Device is implicit in buffer handles.
+ * Execution goes through the core schedule runner. The instance maps ABI names
+ * to logical BUFFER UOps; buffer residency is owned by ctx->buffers.
  *
- * set_device() is a bulk rematerialization API that moves all buffer
- * handles to a new memory domain.
+ * set_device() sets the preferred execution device and prefetches readable
+ * bound buffers through the ctx buffer residency table.
  */
 
 #ifndef POLY_INSTANCE_H
@@ -82,6 +80,16 @@ typedef struct {
 #define POLY_ROLE_TARGET 2
 #define POLY_ROLE_OUTPUT 3
 #define POLY_ROLE_AUX 4
+
+/* Binding flags for instance-local ABI state. The current IR payload preserves
+ * roles/trainability; these flags are runtime/package policy for now. */
+#define POLY_BIND_F_NONE 0u
+#define POLY_BIND_F_NO_SAVE (1u << 0)
+#define POLY_BIND_F_OPTIM (1u << 1)
+
+#define POLY_EXPORT_WEIGHTS_PARAMS (1u << 0)
+#define POLY_EXPORT_WEIGHTS_OPTIMIZER (1u << 1)
+#define POLY_EXPORT_WEIGHTS_DEFAULT (POLY_EXPORT_WEIGHTS_PARAMS | POLY_EXPORT_WEIGHTS_OPTIMIZER)
 
 /* Optimizer kinds. Kept here for existing instance callers; optim.h exposes
  * the same constants for custom optimizer graph construction. */
@@ -244,8 +252,11 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out);
 
 /* Weight I/O (safetensors) */
 
-/* Export all param buffers as safetensors. Caller frees returned bytes. */
+/* Export selected persistent buffers as safetensors. Caller frees returned bytes.
+ * poly_instance_export_weights() preserves the historical default: params and
+ * optimizer state. */
 uint8_t *poly_instance_export_weights(PolyInstance *inst, int *out_len);
+uint8_t *poly_instance_export_weights_ex(PolyInstance *inst, int *out_len, uint32_t flags);
 
 /* Import weights from safetensors. Matches by name. Returns 0 on success. */
 int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int len);
@@ -253,14 +264,13 @@ int poly_instance_import_weights(PolyInstance *inst, const uint8_t *data, int le
 /* IR Export */
 
 uint8_t *poly_instance_export_ir(PolyInstance *inst, int *out_len);
+uint8_t *poly_instance_save_bundle_ex(PolyInstance *inst, int *out_len, uint32_t weight_flags);
 
 /* Device configuration */
 
-/* Bulk rematerialization: moves all buffer handles to the target domain.
- * After set_device(CUDA), all buf_handles[].device are CUDA.
- * The next poly_instance_call() builds CUDA-domain bindings,
- * poly_realize_with_bindings() infers CUDA, compiles for CUDA, runs on CUDA.
- * Returns 0 on success, <0 if device is unsupported or unavailable. */
+/* Set preferred execution device and prefetch readable bound buffers through
+ * ctx->buffers. Returns 0 on success, <0 if device is unsupported or
+ * unavailable. */
 int poly_instance_set_device(PolyInstance *inst, PolyDevice device);
 
 /* Explicit readback/upload for device-resident buffers */
@@ -313,6 +323,19 @@ int poly_instance_set_optimizer(
     float beta2,
     float eps,
     float weight_decay
+);
+
+int poly_instance_set_optimizer_ex(
+    PolyInstance *inst,
+    int kind,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float momentum,
+    bool nesterov,
+    bool classic
 );
 
 /* Named accessor helpers */

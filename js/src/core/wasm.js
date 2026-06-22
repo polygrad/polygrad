@@ -958,13 +958,14 @@ async function createWasmCore(device) {
       const dataPtr = Module._poly_instance_buf_data(instPtr, i, _scratchNumelPtr)
       return read(dataPtr)
     },
-    exportWeights(instPtr) {
+    exportWeights(instPtr, flags) {
+      const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {
         return Module.ccall(
-          'poly_instance_export_weights',
+          'poly_instance_export_weights_ex',
           'number',
-          ['number', 'number'],
-          [instPtr, _scratchLenPtr],
+          ['number', 'number', 'number'],
+          [instPtr, _scratchLenPtr, exportFlags],
           { async: true }
         ).then(bytesPtr => {
           if (!bytesPtr) return null
@@ -974,7 +975,7 @@ async function createWasmCore(device) {
           return bytes
         })
       }
-      const bytesPtr = Module._poly_instance_export_weights(instPtr, _scratchLenPtr)
+      const bytesPtr = Module._poly_instance_export_weights_ex(instPtr, _scratchLenPtr, exportFlags)
       if (!bytesPtr) return null
       const len = heap32()[_scratchLenPtr >> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
@@ -995,13 +996,14 @@ async function createWasmCore(device) {
       Module._free(bytesPtr)
       return bytes
     },
-    saveBundle(instPtr) {
+    saveBundle(instPtr, flags) {
+      const exportFlags = flags == null ? 3 : flags
       if (deviceName === 'webgpu' && Module.ccall) {
         return Module.ccall(
-          'poly_instance_save_bundle',
+          'poly_instance_save_bundle_ex',
           'number',
-          ['number', 'number'],
-          [instPtr, _scratchLenPtr],
+          ['number', 'number', 'number'],
+          [instPtr, _scratchLenPtr, exportFlags],
           { async: true }
         ).then(bytesPtr => {
           if (!bytesPtr) return null
@@ -1011,7 +1013,7 @@ async function createWasmCore(device) {
           return bytes
         })
       }
-      const bytesPtr = Module._poly_instance_save_bundle(instPtr, _scratchLenPtr)
+      const bytesPtr = Module._poly_instance_save_bundle_ex(instPtr, _scratchLenPtr, exportFlags)
       if (!bytesPtr) return null
       const len = heap32()[_scratchLenPtr >> 2]
       const bytes = new Uint8Array(heapU8().buffer.slice(bytesPtr, bytesPtr + len))
@@ -1209,9 +1211,9 @@ async function createWasmCore(device) {
     tokenizerBosId(tokPtr) { return Module._poly_tokenizer_bos_id(tokPtr) },
     tokenizerEosId(tokPtr) { return Module._poly_tokenizer_eos_id(tokPtr) },
 
-    setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay) {
-      return Module._poly_instance_set_optimizer(
-        instPtr, kind, lr, beta1, beta2, eps, weightDecay)
+    setOptimizer(instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum, nesterov, classic) {
+      return Module._poly_instance_set_optimizer_ex(
+        instPtr, kind, lr, beta1, beta2, eps, weightDecay, momentum || 0, !!nesterov, !!classic)
     },
 
     forward(instPtr, names, arrays) {

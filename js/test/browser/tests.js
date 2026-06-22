@@ -895,6 +895,13 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
           }
         }
       }
+      function safetensorNames(bytes) {
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const headerLen = Number(view.getBigUint64(0, true));
+        const headerBytes = bytes.subarray(8, 8 + headerLen);
+        const header = JSON.parse(new TextDecoder().decode(headerBytes));
+        return new Set(Object.keys(header).filter((k) => k !== "__metadata__"));
+      }
       async function runInstanceTests(pg) {
         const Instance = pg.Instance;
         const { MLP, TabM, NAM } = pg.models;
@@ -1194,6 +1201,34 @@ Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + fail
               if (first == null) first = last;
             }
             assert(last < first, `expected loss to decrease (${first} -> ${last})`);
+          } finally {
+            inst.dispose();
+          }
+        });
+        await test("mlp train step with SGD momentum creates named state", async () => {
+          const inst = MLP({
+            layers: [2, 4, 1],
+            activation: "relu",
+            bias: true,
+            loss: "mse",
+            batch_size: 1,
+            seed: 42
+          });
+          try {
+            inst.setOptimizer(pg.OPTIM_SGD, 0.01, 0.9, 0.999, 1e-8, 0, 0.9);
+            const x = new Float32Array([1, 2]);
+            const y = new Float32Array([3]);
+            const loss = await inst.trainStep({ x, y });
+            assert(Number.isFinite(loss), `loss should be finite, got ${loss}`);
+            const bi = inst.findBuf("optim.sgd.b.layers.0.weight");
+            assert(bi >= 0, "missing SGD momentum state buffer");
+            const b = await inst.bufData(bi);
+            assert(Array.from(b).some((v) => Math.abs(v) > 0), "momentum state should update");
+            const defaultNames = safetensorNames(await inst.exportWeights());
+            assert(defaultNames.has("optim.sgd.b.layers.0.weight"), "default export should include optimizer state");
+            const modelOnlyNames = safetensorNames(await inst.exportWeights({ includeOptimizer: false }));
+            assert(modelOnlyNames.has("layers.0.weight"), "model-only export should include params");
+            assert(!modelOnlyNames.has("optim.sgd.b.layers.0.weight"), "model-only export should exclude optimizer state");
           } finally {
             inst.dispose();
           }

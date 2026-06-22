@@ -2302,12 +2302,14 @@ static napi_value napi_poly_instance_buf_data(napi_env env, napi_callback_info i
 }
 
 static napi_value napi_poly_instance_export_weights(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
+  napi_value argv[2];
+  size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyInstance *inst = get_external(env, argv[0]);
+  uint32_t flags = POLY_EXPORT_WEIGHTS_DEFAULT;
+  if (argc > 1) napi_get_value_uint32(env, argv[1], &flags);
   int out_len = 0;
-  uint8_t *bytes = poly_instance_export_weights(inst, &out_len);
+  uint8_t *bytes = poly_instance_export_weights_ex(inst, &out_len, flags);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
@@ -2347,12 +2349,14 @@ static napi_value napi_poly_instance_export_ir(napi_env env, napi_callback_info 
 }
 
 static napi_value napi_poly_instance_save_bundle(napi_env env, napi_callback_info info) {
-  napi_value argv[1];
-  size_t argc = 1;
+  napi_value argv[2];
+  size_t argc = 2;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyInstance *inst = get_external(env, argv[0]);
+  uint32_t flags = POLY_EXPORT_WEIGHTS_DEFAULT;
+  if (argc > 1) napi_get_value_uint32(env, argv[1], &flags);
   int out_len = 0;
-  uint8_t *bytes = poly_instance_save_bundle(inst, &out_len);
+  uint8_t *bytes = poly_instance_save_bundle_ex(inst, &out_len, flags);
   napi_value result = make_uint8_array_copy(env, bytes, (size_t)(out_len > 0 ? out_len : 0));
   free(bytes);
   return result;
@@ -2380,25 +2384,30 @@ static napi_value napi_poly_instance_from_bundle(napi_env env, napi_callback_inf
 }
 
 static napi_value napi_poly_instance_set_optimizer(napi_env env, napi_callback_info info) {
-  napi_value argv[7];
-  size_t argc = 7;
+  napi_value argv[10];
+  size_t argc = 10;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
   PolyInstance *inst = get_external(env, argv[0]);
   int32_t kind;
-  double lr, beta1, beta2, eps, weight_decay;
+  double lr, beta1, beta2, eps, weight_decay, momentum = 0.0;
+  bool nesterov = false, classic = false;
   napi_get_value_int32(env, argv[1], &kind);
   napi_get_value_double(env, argv[2], &lr);
   napi_get_value_double(env, argv[3], &beta1);
   napi_get_value_double(env, argv[4], &beta2);
   napi_get_value_double(env, argv[5], &eps);
   napi_get_value_double(env, argv[6], &weight_decay);
+  if (argc > 7) napi_get_value_double(env, argv[7], &momentum);
+  if (argc > 8) napi_get_value_bool(env, argv[8], &nesterov);
+  if (argc > 9) napi_get_value_bool(env, argv[9], &classic);
   napi_value result;
   NAPI_CALL(
       env,
       napi_create_int32(
           env,
-          poly_instance_set_optimizer(
-              inst, kind, (float)lr, (float)beta1, (float)beta2, (float)eps, (float)weight_decay
+          poly_instance_set_optimizer_ex(
+              inst, kind, (float)lr, (float)beta1, (float)beta2, (float)eps, (float)weight_decay,
+              (float)momentum, nesterov, classic
           ),
           &result
       )
