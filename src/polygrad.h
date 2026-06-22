@@ -679,6 +679,27 @@ PolyUOp **poly_toposort_ex_user(
     bool enter_calls
 );
 
+/* Owned toposort variants for local scans. These mirror tinygrad's temporary
+ * `u.toposort()` result lifetime: the returned array is heap-owned and must be
+ * released with poly_toposort_free(). UOp nodes themselves remain ctx-owned. */
+PolyUOp **poly_toposort_alloc(PolyCtx *ctx, PolyUOp *root, int *n_out);
+PolyUOp **poly_toposort_ex_alloc(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *),
+    bool enter_calls
+);
+PolyUOp **poly_toposort_ex_user_alloc(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *, void *),
+    void *user_data,
+    bool enter_calls
+);
+void poly_toposort_free(PolyUOp **topo);
+
 /* Per-pass cache for UOp queries (ranges, vmin/vmax) *
  * Tinygrad caches every queryable UOp property as @functools.cached_property
  * on the immutable UOp instance, which gives per-UOp-lifetime memoization

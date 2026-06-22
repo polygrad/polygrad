@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
+#include "../src/frontend_internal.h"
 
 /* Basic creation */
 
@@ -260,6 +261,69 @@ TEST(uop, toposort_shared_subgraph) {
   PolyUOp **sorted = poly_toposort(ctx, root, &n);
   ASSERT_INT_EQ(n, 4); /* a, b, shared, root */
   ASSERT_PTR_EQ(sorted[3], root);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, toposort_arena_result_contract) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *b = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, a, poly_arg_none());
+
+  int n = 0;
+  PolyUOp **sorted = poly_toposort(ctx, b, &n);
+  ASSERT_INT_EQ(n, 2);
+  ASSERT_TRUE(poly_ctx_owns_ptr(ctx, sorted));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, toposort_alloc_is_owned_and_does_not_grow_ctx_arena) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *x = a;
+  for (int i = 0; i < 32; i++)
+    x = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, x, poly_arg_none());
+
+  size_t before = poly_arena_used(poly_ctx_arena(ctx));
+  for (int i = 0; i < 128; i++) {
+    int n = 0;
+    PolyUOp **sorted = poly_toposort_alloc(ctx, x, &n);
+    ASSERT_NOT_NULL(sorted);
+    ASSERT_INT_EQ(n, 33);
+    ASSERT_FALSE(poly_ctx_owns_ptr(ctx, sorted));
+    poly_toposort_free(sorted);
+  }
+  size_t after = poly_arena_used(poly_ctx_arena(ctx));
+  ASSERT_INT_EQ(after, before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, collect_ordered_buffers_uses_transient_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *val = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *store = poly_store_val(ctx, out, val);
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  size_t before = poly_arena_used(poly_ctx_arena(ctx));
+  for (int i = 0; i < 128; i++) {
+    PolyUOp *ordered[8];
+    int n = poly_collect_ordered_buffers(ctx, sink, ordered, 8);
+    ASSERT_INT_EQ(n, 3);
+    ASSERT_PTR_EQ(ordered[0], out);
+    ASSERT_TRUE(
+        (ordered[1] == a && ordered[2] == b) || (ordered[1] == b && ordered[2] == a)
+    );
+  }
+  size_t after = poly_arena_used(poly_ctx_arena(ctx));
+  ASSERT_INT_EQ(after, before);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

@@ -89,6 +89,115 @@ static bool uop_vec_contains(PolyUOp **items, int count, PolyUOp *u) {
   return false;
 }
 
+typedef bool (*CollectBufferFn)(PolyUOp *u, void *user_data);
+
+static bool collect_input_buffers_postorder(
+    PolyUOp *root,
+    CollectBufferFn collect,
+    void *user_data
+) {
+  if (!root || !collect) return false;
+
+  PolyMap *visited = poly_map_new(256);
+  if (!visited) return false;
+
+  int stack_cap = 256;
+  int stack_top = 0;
+  PolyUOp **stack = malloc((size_t)stack_cap * sizeof(PolyUOp *));
+  int *state = malloc((size_t)stack_cap * sizeof(int));
+  if (!stack || !state) {
+    free(stack);
+    free(state);
+    poly_map_destroy(visited);
+    return false;
+  }
+
+  stack[stack_top] = root;
+  state[stack_top++] = 0;
+
+  while (stack_top > 0) {
+    PolyUOp *u = stack[stack_top - 1];
+    int s = state[stack_top - 1];
+    uint32_t h = poly_ptr_hash(u);
+
+    if (s == 0 && poly_map_get(visited, h, u, poly_ptr_eq) != NULL) {
+      stack_top--;
+      continue;
+    }
+
+    if (s == 0) {
+      state[stack_top - 1] = 1;
+      for (int i = u->n_src - 1; i >= 0; i--) {
+        PolyUOp *src = u->src[i];
+        if (!src) continue;
+        uint32_t sh = poly_ptr_hash(src);
+        if (poly_map_get(visited, sh, src, poly_ptr_eq) != NULL) continue;
+        if (stack_top >= stack_cap) {
+          int new_cap = stack_cap * 2;
+          PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
+          int *new_state = realloc(state, (size_t)new_cap * sizeof(int));
+          if (!new_stack || !new_state) {
+            free(new_stack ? new_stack : stack);
+            free(new_state ? new_state : state);
+            poly_map_destroy(visited);
+            return false;
+          }
+          stack = new_stack;
+          state = new_state;
+          stack_cap = new_cap;
+        }
+        stack[stack_top] = src;
+        state[stack_top++] = 0;
+      }
+      continue;
+    }
+
+    stack_top--;
+    if (poly_map_get(visited, h, u, poly_ptr_eq) != NULL) continue;
+    poly_map_set(visited, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
+    if (u->op == POLY_OP_BUFFER && !collect(u, user_data)) {
+      free(stack);
+      free(state);
+      poly_map_destroy(visited);
+      return false;
+    }
+  }
+
+  free(stack);
+  free(state);
+  poly_map_destroy(visited);
+  return true;
+}
+
+typedef struct {
+  PolyUOp ***ordered;
+  int *n;
+  int *cap;
+} DynamicBufferCollect;
+
+static bool collect_dynamic_buffer(PolyUOp *u, void *user_data) {
+  DynamicBufferCollect *c = (DynamicBufferCollect *)user_data;
+  if (!c || !c->ordered || !c->n || !c->cap) return false;
+  return uop_vec_contains(*c->ordered, *c->n, u) ||
+         uop_vec_append(c->ordered, c->n, c->cap, u);
+}
+
+typedef struct {
+  PolyUOp **ordered;
+  int *n;
+  int max_bufs;
+} FixedBufferCollect;
+
+static bool collect_fixed_buffer(PolyUOp *u, void *user_data) {
+  FixedBufferCollect *c = (FixedBufferCollect *)user_data;
+  if (!c || !c->ordered || !c->n || c->max_bufs <= 0) return false;
+  int stored = *c->n < c->max_bufs ? *c->n : c->max_bufs;
+  if (uop_vec_contains(c->ordered, stored, u)) return true;
+  if (*c->n < c->max_bufs) c->ordered[*c->n] = u;
+  (*c->n)++;
+  return true;
+}
+
 /* Reconstruct the buffer-to-PARAM ordering used by kernel-graph scheduling:
  * 1. Output buffers (STORE targets in SINK source order)
  * 2. Remaining input buffers (toposort encounter order) */
@@ -118,19 +227,12 @@ bool poly_collect_ordered_buffers_alloc(
     }
   }
 
-  /* Input buffers in toposort order */
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, tensor_sink, &n_topo);
-  if (!topo && n_topo > 0) {
+  /* Input buffers in toposort order. This is a local scan, like tinygrad's
+   * temporary UOp.toposort() result, so do not grow the persistent ctx arena. */
+  DynamicBufferCollect collect = {.ordered = &ordered, .n = &n, .cap = &cap};
+  if (!collect_input_buffers_postorder(tensor_sink, collect_dynamic_buffer, &collect)) {
     free(ordered);
     return false;
-  }
-  for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_BUFFER && !uop_vec_contains(ordered, n, topo[i]) &&
-        !uop_vec_append(&ordered, &n, &cap, topo[i])) {
-      free(ordered);
-      return false;
-    }
   }
 
   *out_ordered = ordered;
@@ -160,17 +262,8 @@ int poly_collect_ordered_buffers(
     }
   }
 
-  /* Input buffers in toposort order */
-  int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, tensor_sink, &n_topo);
-  if (!topo && n_topo > 0) return 0;
-  for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op != POLY_OP_BUFFER) continue;
-    if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, topo[i])) {
-      if (n < max_bufs) ordered[n] = topo[i];
-      n++;
-    }
-  }
+  FixedBufferCollect collect = {.ordered = ordered, .n = &n, .max_bufs = max_bufs};
+  if (!collect_input_buffers_postorder(tensor_sink, collect_fixed_buffer, &collect)) return 0;
   return n;
 }
 
