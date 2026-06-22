@@ -79,6 +79,12 @@ typedef struct {
   int *arg_to_slot;
   bool *outs;
   bool *ins;
+  int *read_args;
+  int n_read_args;
+  int *write_args;
+  int n_write_args;
+  int *active_args;
+  int n_active_args;
 } PolyCallIO;
 
 typedef struct {
