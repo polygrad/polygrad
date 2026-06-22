@@ -932,7 +932,7 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
   for (int s = 0; s < n_slots_orig; s++) {
     PolyScheduleBufSlot *slot = &tpl->buf_slots[s];
     if (!slot->is_intermediate || slot->is_memory_arena || slot->has_memory_parent ||
-        !slot->buf_uop || slot->nbytes <= 0 || slot->device == POLY_DEVICE_WEBGPU)
+        !slot->buf_uop || slot->nbytes <= 0)
       continue;
     if (n_items >= cap_items) {
       int new_cap = cap_items ? cap_items * 2 : 8;
@@ -2228,6 +2228,13 @@ static void poly_schedule_runtime_cleanup(
       free(run->kernel_args[i]);
     free(run->kernel_args);
   }
+  if (run->slot_views) {
+    for (int i = 0; i < run->n_slot_views; i++) {
+      if (run->slot_views[i].ptr && run->slot_views[i].allocator && run->slot_views[i].owned)
+        run->slot_views[i].allocator->free(&run->slot_views[i], run->slot_views[i].allocator->dev_ctx);
+    }
+    free(run->slot_views);
+  }
   free(run->slot_to_data);
   free(run->merged_vars);
   free(run->var_int_storage);
@@ -2239,6 +2246,8 @@ static void poly_schedule_runtime_cleanup(
   run->kernel_args = NULL;
   run->slot_to_data = NULL;
   run->n_slot_to_data = 0;
+  run->slot_views = NULL;
+  run->n_slot_views = 0;
   run->merged_vars = NULL;
   run->merged_vars_cap = 0;
   run->var_int_storage = NULL;
@@ -3937,6 +3946,71 @@ bool poly_device_is_host_addressable(PolyDevice device) {
   return be && be->get_allocator()->host_addressable;
 }
 
+static int poly_schedule_runtime_fill_parent_views(
+    const PolyScheduleTemplate *tpl,
+    PolyScheduleRuntime *run,
+    PolyDevice fallback_device
+) {
+  if (!tpl || !run || !run->slot_to_data) return -1;
+  bool need_slot_views = false;
+  for (int i = 0; i < run->n_slot_to_data && i < tpl->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
+    if (!slot->is_intermediate || !slot->has_memory_parent) continue;
+    int parent = slot->memory_parent_slot;
+    if (parent < 0 || parent >= run->n_slot_to_data || parent >= tpl->n_buf_slots ||
+        !run->slot_to_data[parent])
+      return -1;
+    PolyDevice parent_device = tpl->buf_slots[parent].device;
+    if (parent_device == POLY_DEVICE_AUTO || parent_device == POLY_DEVICE_HOST)
+      parent_device = fallback_device;
+    if (parent_device == POLY_DEVICE_WEBGPU) need_slot_views = true;
+  }
+
+  if (need_slot_views && !run->slot_views) {
+    run->slot_views = calloc((size_t)run->n_slot_to_data, sizeof(PolyBuffer));
+    if (!run->slot_views) return -1;
+    run->n_slot_views = run->n_slot_to_data;
+  }
+
+  for (int i = 0; i < run->n_slot_to_data && i < tpl->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
+    if (!slot->is_intermediate || !slot->has_memory_parent) continue;
+    int parent = slot->memory_parent_slot;
+    PolyDevice parent_device = tpl->buf_slots[parent].device;
+    if (parent_device == POLY_DEVICE_AUTO || parent_device == POLY_DEVICE_HOST)
+      parent_device = fallback_device;
+
+    if (parent_device == POLY_DEVICE_WEBGPU) {
+#ifdef __EMSCRIPTEN__
+      if (slot->memory_offset < 0 || slot->nbytes <= 0) return -1;
+      uintptr_t view = poly_webgpu_create_buffer_view(
+          (uintptr_t)run->slot_to_data[parent],
+          (size_t)slot->memory_offset,
+          (size_t)slot->nbytes
+      );
+      if (!view) return -1;
+      run->slot_views[i] = (PolyBuffer){
+          .ptr = (void *)view,
+          .nbytes = (size_t)slot->nbytes,
+          .device = POLY_DEVICE_WEBGPU,
+          .owned = true,
+          .allocator = poly_webgpu_get_allocator(),
+          .src = NULL,
+          .valid = true,
+          .frontend_release = NULL,
+      };
+      run->slot_to_data[i] = (void *)view;
+#else
+      return -1;
+#endif
+    } else {
+      run->slot_to_data[i] =
+          (void *)((char *)run->slot_to_data[parent] + slot->memory_offset);
+    }
+  }
+  return 0;
+}
+
 /* Cache flush (called from napi_api.c) */
 
 void poly_sched_cache_flush(void) {
@@ -4091,15 +4165,8 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
         idx++;
       }
     }
-    for (int i = 0; i < plan->run->n_slot_to_data; i++) {
-      PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
-      if (!slot->is_intermediate || !slot->has_memory_parent) continue;
-      int parent = slot->memory_parent_slot;
-      if (parent < 0 || parent >= plan->run->n_slot_to_data || !plan->run->slot_to_data[parent])
-        goto cleanup;
-      plan->run->slot_to_data[i] =
-          (void *)((char *)plan->run->slot_to_data[parent] + slot->memory_offset);
-    }
+    if (poly_schedule_runtime_fill_parent_views(schedule->template, plan->run, device) != 0)
+      goto cleanup;
   }
 
   /* Allocate merged vars array */
@@ -4415,9 +4482,10 @@ static int poly_schedule_execute_view_call(
     PolySchedule *sched,
     int call_index,
     PolyDevice device,
-    void **slot_data
+    PolyScheduleRuntime *run
 ) {
-  if (!ctx || !sched || !slot_data) return -1;
+  if (!ctx || !sched || !run || !run->slot_to_data) return -1;
+  void **slot_data = run->slot_to_data;
   PolyUOp *call = poly_schedule_call(sched, call_index);
   const PolyCallIO *io = poly_schedule_call_io(sched, call_index);
   if (!poly_call_is_view(call) || !io || io->n_args < 2) return -1;
@@ -4471,20 +4539,53 @@ static int poly_schedule_execute_view_call(
   if (nbytes == 0) nbytes = src_buf->nbytes;
   size_t offset = (size_t)poly_buffer_view_offset_bytes(call->src[0]);
   if (offset > src_buf->nbytes || nbytes > src_buf->nbytes - offset) return -1;
-  if (offset != 0 && src_buf->device == POLY_DEVICE_WEBGPU) return -1;
-  void *alias_ptr = (void *)((char *)src_buf->ptr + offset);
+
+  void *alias_ptr = NULL;
+  PolyBuffer webgpu_alias = {0};
+  bool has_webgpu_alias = false;
+  if (src_buf->device == POLY_DEVICE_WEBGPU && offset != 0) {
+#ifdef __EMSCRIPTEN__
+    uintptr_t view =
+        poly_webgpu_create_buffer_view((uintptr_t)src_buf->ptr, offset, nbytes);
+    if (!view) return -1;
+    webgpu_alias = *src_buf;
+    webgpu_alias.ptr = (void *)view;
+    webgpu_alias.nbytes = nbytes;
+    webgpu_alias.owned = true;
+    webgpu_alias.src = NULL;
+    webgpu_alias.frontend_release = NULL;
+    webgpu_alias.valid = src_buf->valid;
+    alias_ptr = webgpu_alias.ptr;
+    has_webgpu_alias = true;
+#else
+    return -1;
+#endif
+  } else {
+    alias_ptr = (void *)((char *)src_buf->ptr + offset);
+  }
 
   if (dst_meta->is_intermediate) {
+    if (has_webgpu_alias) {
+      if (!run->slot_views) {
+        run->slot_views = calloc((size_t)run->n_slot_to_data, sizeof(PolyBuffer));
+        if (!run->slot_views) return -1;
+        run->n_slot_views = run->n_slot_to_data;
+      }
+      run->slot_views[dst_slot] = webgpu_alias;
+    }
     slot_data[dst_slot] = alias_ptr;
   } else {
-    PolyBuffer alias = *src_buf;
+    PolyBuffer alias = has_webgpu_alias ? webgpu_alias : *src_buf;
     alias.ptr = alias_ptr;
     alias.nbytes = nbytes;
-    alias.owned = false;
+    if (!has_webgpu_alias) alias.owned = false;
     alias.src = NULL;
     alias.frontend_release = NULL;
     alias.valid = src_buf->valid;
-    poly_buffer_attach(ctx, dst_meta->buf_uop, &alias);
+    if (has_webgpu_alias)
+      poly_buffer_adopt(ctx, dst_meta->buf_uop, &alias);
+    else
+      poly_buffer_attach(ctx, dst_meta->buf_uop, &alias);
     slot_data[dst_slot] = alias.ptr;
   }
 
@@ -4673,15 +4774,8 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
           idx < sched->run->n_intermediates)
         sched->run->slot_to_data[i] = sched->run->intermediates[idx++].ptr;
     }
-    for (int i = 0; i < sched->run->n_slot_to_data; i++) {
-      PolyScheduleBufSlot *slot = &sched->template->buf_slots[i];
-      if (!slot->is_intermediate || !slot->has_memory_parent) continue;
-      int parent = slot->memory_parent_slot;
-      if (parent < 0 || parent >= sched->run->n_slot_to_data || !sched->run->slot_to_data[parent])
-        goto fail;
-      sched->run->slot_to_data[i] =
-          (void *)((char *)sched->run->slot_to_data[parent] + slot->memory_offset);
-    }
+    if (poly_schedule_runtime_fill_parent_views(sched->template, sched->run, device) != 0)
+      goto fail;
   }
 
   {
@@ -4864,9 +4958,7 @@ static int poly_schedule_call_run_prepared(
 ) {
   PolyCallRuntime *rt = &sched->run->calls[call_index];
   if (poly_call_is_view(poly_schedule_call(sched, call_index))) {
-    return poly_schedule_execute_view_call(
-        ctx, sched, call_index, rt->lowered_device, sched->run->slot_to_data
-    );
+    return poly_schedule_execute_view_call(ctx, sched, call_index, rt->lowered_device, sched->run);
   }
 
   PolyRunner *runner = &rt->prg;
@@ -5158,7 +5250,7 @@ int poly_run_compiled_schedule(
     poly_zero_schedule_call_intermediates(plan->ctx, sched, run, k);
 
     if (poly_call_is_view(poly_schedule_call(sched, k))) {
-      ret = poly_schedule_execute_view_call(plan->ctx, sched, k, plan->device, run->slot_to_data);
+      ret = poly_schedule_execute_view_call(plan->ctx, sched, k, plan->device, run);
       continue;
     }
 

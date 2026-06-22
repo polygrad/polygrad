@@ -144,6 +144,8 @@ typedef struct {
   void ***kernel_args;
   void **slot_to_data;
   int n_slot_to_data;
+  PolyBuffer *slot_views;
+  int n_slot_views;
   PolyVarBinding *merged_vars;
   int merged_vars_cap;
   int *var_int_storage;

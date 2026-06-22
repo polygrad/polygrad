@@ -1483,6 +1483,48 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   PASS();
 }
 
+TEST(schedule_runtime, webgpu_intermediates_are_memory_planned_into_views) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_WEBGPU));
+  PolyUOp *copy_a_src[2] = {a, dev};
+  PolyUOp *copy_b_src[2] = {b, dev};
+  PolyUOp *copy_a = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_a_src, 2, poly_arg_none());
+  PolyUOp *copy_b = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_b_src, 2, poly_arg_none());
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, copy_a, copy_b);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(ps);
+
+  int n_arenas = 0, n_views = 0;
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    PolyScheduleBufSlot *slot = &ps->template->buf_slots[i];
+    if (!slot->is_intermediate) continue;
+    if (slot->is_memory_arena) {
+      n_arenas++;
+      ASSERT_INT_EQ(slot->device, POLY_DEVICE_WEBGPU);
+    }
+    if (slot->has_memory_parent) {
+      n_views++;
+      ASSERT_TRUE(slot->memory_parent_slot >= 0);
+      ASSERT_TRUE(slot->memory_offset >= 0);
+      ASSERT_INT_EQ(slot->device, POLY_DEVICE_WEBGPU);
+    }
+  }
+
+  ASSERT_TRUE(n_arenas >= 1);
+  ASSERT_TRUE(n_views >= 2);
+
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, cached_linear_multikernel_e2e_uses_current_buffers) {
   int N = 4;
   PolyCtx *ctx = poly_ctx_new();

@@ -313,6 +313,8 @@ async function createWasmCore(device) {
         infinityBuf,
         buffers: new Map(),
         bufferSizes: new Map(),
+        bufferOffsets: new Map(),
+        bufferViews: new Set(),
         nextBufferId: 1,
         pipelines: new Map(),
         pipelineKeyToId: new Map(),

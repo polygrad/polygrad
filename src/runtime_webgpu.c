@@ -77,6 +77,9 @@ EM_JS(uintptr_t, js_webgpu_create_buffer, (size_t nbytes), {
   });
   st.buffers.set(id, buf);
   st.bufferSizes.set(id, size);
+  if (!st.bufferOffsets) st.bufferOffsets = new Map();
+  if (!st.bufferViews) st.bufferViews = new Set();
+  st.bufferOffsets.set(id, 0);
   return id;
 })
 
@@ -84,9 +87,34 @@ EM_JS(void, js_webgpu_destroy_buffer, (uintptr_t handle), {
   const st = Module.__polygradWebGpuState;
   if (!st) return;
   const buf = st.buffers.get(handle);
-  if (buf) buf.destroy();
+  const isView = st.bufferViews && st.bufferViews.has(handle);
+  if (buf && !isView) buf.destroy();
   st.buffers.delete(handle);
   st.bufferSizes.delete(handle);
+  if (st.bufferOffsets) st.bufferOffsets.delete(handle);
+  if (st.bufferViews) st.bufferViews.delete(handle);
+})
+
+EM_JS(uintptr_t, js_webgpu_create_buffer_view, (uintptr_t base_handle, int byte_offset, int nbytes), {
+  const st = Module.__polygradWebGpuState;
+  if (!st || !st.device) return 0;
+  const base = st.buffers.get(base_handle);
+  if (!base) return 0;
+  const baseOffset = st.bufferOffsets ? (st.bufferOffsets.get(base_handle) || 0) : 0;
+  const baseSize = st.bufferSizes.get(base_handle) || 0;
+  const off = Math.max(0, byte_offset | 0);
+  const logical = Math.max(0, nbytes | 0);
+  const size = Math.max(4, Math.ceil(logical / 4) * 4);
+  if (off % 256 !== 0) return 0;
+  if (logical <= 0 || off > baseSize || size > baseSize - off) return 0;
+  if (!st.bufferOffsets) st.bufferOffsets = new Map();
+  if (!st.bufferViews) st.bufferViews = new Set();
+  const id = st.nextBufferId++;
+  st.buffers.set(id, base);
+  st.bufferOffsets.set(id, baseOffset + off);
+  st.bufferSizes.set(id, size);
+  st.bufferViews.add(id);
+  return id;
 })
 
 EM_JS(int, js_webgpu_write_buffer_from_wasm, (uintptr_t handle, const uint8_t *src, int nbytes), {
@@ -100,7 +128,8 @@ EM_JS(int, js_webgpu_write_buffer_from_wasm, (uintptr_t handle, const uint8_t *s
    * The GPU allocation is rounded up, but typed-array inputs can be uint8. */
   const data = new Uint8Array(writeBytes);
   data.set(HEAPU8.subarray(src, src + logical));
-  st.device.queue.writeBuffer(buf, 0, data);
+  const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
+  st.device.queue.writeBuffer(buf, dstOffset, data);
   return 0;
 })
 
@@ -118,7 +147,8 @@ EM_JS(int, js_webgpu_write_buffer_from_hostkey, (uintptr_t handle, uintptr_t src
   const copyBytes = Math.min(logical, src.byteLength);
   const data = new Uint8Array(writeBytes);
   data.set(new Uint8Array(src.buffer, src.byteOffset, copyBytes));
-  st.device.queue.writeBuffer(buf, 0, data);
+  const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
+  st.device.queue.writeBuffer(buf, dstOffset, data);
   return 0;
 })
 
@@ -129,12 +159,13 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer_to_wasm, (uint8_t *dst, uintptr_t handle,
   const logical = Math.max(0, nbytes | 0);
   if (logical === 0) return 0;
   const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
+  const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   const staging = st.device.createBuffer({
     size: copyBytes,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
   });
   const enc = st.device.createCommandEncoder();
-  enc.copyBufferToBuffer(src, 0, staging, 0, copyBytes);
+  enc.copyBufferToBuffer(src, srcOffset, staging, 0, copyBytes);
   st.device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
   const mapped = staging.getMappedRange();
@@ -153,12 +184,13 @@ EM_ASYNC_JS(int, js_webgpu_read_buffer_to_hostkey, (uintptr_t dst_key, uintptr_t
   const logical = Math.max(0, nbytes | 0);
   if (logical === 0) return 0;
   const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
+  const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   const staging = st.device.createBuffer({
     size: copyBytes,
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
   });
   const enc = st.device.createCommandEncoder();
-  enc.copyBufferToBuffer(src, 0, staging, 0, copyBytes);
+  enc.copyBufferToBuffer(src, srcOffset, staging, 0, copyBytes);
   st.device.queue.submit([enc.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
   const mapped = staging.getMappedRange();
@@ -179,8 +211,10 @@ EM_JS(int, js_webgpu_copy_buffer_to_buffer, (uintptr_t dst_handle, uintptr_t src
   const copyBytes = Math.max(4, Math.ceil(logical / 4) * 4);
   const dstSize = st.bufferSizes.get(dst_handle) || copyBytes;
   const srcSize = st.bufferSizes.get(src_handle) || copyBytes;
+  const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(dst_handle) || 0) : 0;
+  const srcOffset = st.bufferOffsets ? (st.bufferOffsets.get(src_handle) || 0) : 0;
   const enc = st.device.createCommandEncoder();
-  enc.copyBufferToBuffer(src, 0, dst, 0, Math.min(copyBytes, dstSize, srcSize));
+  enc.copyBufferToBuffer(src, srcOffset, dst, dstOffset, Math.min(copyBytes, dstSize, srcSize));
   st.device.queue.submit([enc.finish()]);
   return 0;
 })
@@ -191,10 +225,11 @@ EM_JS(int, js_webgpu_memset_zero_impl, (uintptr_t handle, int nbytes), {
   if (!buf) return -1;
   const logical = Math.max(0, nbytes | 0);
   if (logical === 0) return 0;
-  const writeBytes = st.bufferSizes.get(handle) || Math.max(4, Math.ceil(logical / 4) * 4);
+  const writeBytes = Math.max(4, Math.ceil(logical / 4) * 4);
+  const dstOffset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
   /* Zero the rounded allocation. Later copy/read calls may use rounded WebGPU
    * transfer sizes even when the logical tensor byte count is smaller. */
-  st.device.queue.writeBuffer(buf, 0, new Uint8Array(writeBytes));
+  st.device.queue.writeBuffer(buf, dstOffset, new Uint8Array(writeBytes));
   return 0;
 })
 
@@ -295,18 +330,21 @@ EM_ASYNC_JS(
     paramHandles.push(handle);
     let buf = st.buffers.get(handle);
     if (!buf) return -1;
+    let offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
+    let size = st.bufferSizes.get(handle) || 0;
     if (i > 0 && handle === outHandle) {
       const copyBuf = st.device.createBuffer({
-        size: st.bufferSizes.get(handle),
+        size,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
       });
       const copyEnc = st.device.createCommandEncoder();
-      copyEnc.copyBufferToBuffer(buf, 0, copyBuf, 0, st.bufferSizes.get(handle));
+      copyEnc.copyBufferToBuffer(buf, offset, copyBuf, 0, size);
       st.device.queue.submit([copyEnc.finish()]);
       tempCopies.push(copyBuf);
       buf = copyBuf;
+      offset = 0;
     }
-    bgEntries.push({ binding: i + 1, resource: { buffer: buf } });
+    bgEntries.push({ binding: i + 1, resource: { buffer: buf, offset, size } });
   }
 
   for (let i = n_params; i < n_args; i++) {
@@ -324,7 +362,8 @@ EM_ASYNC_JS(
   if (debug_level >= 7) {
     const desc = paramHandles.map((handle, i) => {
       const size = st.bufferSizes.get(handle) || 0;
-      return `p${i}=h${handle}[${size}]`;
+      const offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
+      return `p${i}=h${handle}+${offset}[${size}]`;
     }).join(' ');
     console.log(
       `[polygrad:webgpu:dispatch] entry=${rec.entry} pipeline=${pipeline_id} ` +
@@ -335,6 +374,7 @@ EM_ASYNC_JS(
     const dumpBuffer = async (handle, label) => {
       const src = st.buffers.get(handle);
       const nbytes = st.bufferSizes.get(handle) || 0;
+      const offset = st.bufferOffsets ? (st.bufferOffsets.get(handle) || 0) : 0;
       const dumpBytes = Math.min(nbytes, 64);
       if (!src || dumpBytes <= 0) return;
       const staging = st.device.createBuffer({
@@ -342,7 +382,7 @@ EM_ASYNC_JS(
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
       });
       const enc = st.device.createCommandEncoder();
-      enc.copyBufferToBuffer(src, 0, staging, 0, dumpBytes);
+      enc.copyBufferToBuffer(src, offset, staging, 0, dumpBytes);
       st.device.queue.submit([enc.finish()]);
       await staging.mapAsync(GPUMapMode.READ);
       const mapped = staging.getMappedRange();
@@ -453,6 +493,11 @@ static const PolyAllocator POLY_WEBGPU_ALLOCATOR = {
 
 int poly_webgpu_memset_zero(uintptr_t handle, size_t nbytes) {
   return js_webgpu_memset_zero_impl(handle, (int)nbytes);
+}
+
+uintptr_t poly_webgpu_create_buffer_view(uintptr_t base_handle, size_t byte_offset, size_t nbytes) {
+  if (byte_offset > (size_t)INT32_MAX || nbytes > (size_t)INT32_MAX) return 0;
+  return js_webgpu_create_buffer_view(base_handle, (int)byte_offset, (int)nbytes);
 }
 
 int poly_webgpu_lower_item(
