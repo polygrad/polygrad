@@ -531,17 +531,40 @@ static size_t poly_round_up_size(size_t x, size_t block) {
 }
 
 typedef struct {
-  size_t off;
+  size_t *starts;
+  int n;
+  int cap;
+} PolyTLSFBucket;
+
+typedef struct {
+  size_t start;
   size_t size;
-} PolyMemFreeBlock;
+  size_t next;
+  size_t prev;
+  bool has_prev;
+  bool is_free;
+  bool alive;
+} PolyTLSFBlock;
+
+typedef struct {
+  size_t size;
+  size_t base;
+  size_t block_size;
+  int l2_bits;
+  int n_l2;
+  int n_l1;
+  PolyTLSFBucket *buckets;
+  int *lv1_entries;
+  PolyTLSFBlock *blocks;
+  int n_blocks;
+  int cap_blocks;
+} PolyTLSF;
 
 typedef struct {
   PolyDevice device;
   bool copy_lane;
   size_t peak;
-  PolyMemFreeBlock *free_blocks;
-  int n_free;
-  int cap_free;
+  PolyTLSF *alloc;
   int arena_slot;
 } PolyMemLane;
 
@@ -571,6 +594,299 @@ static int poly_mem_event_cmp(const void *a, const void *b) {
   return ea->item - eb->item;
 }
 
+static int poly_size_bit_length(size_t x) {
+  int n = 0;
+  while (x) {
+    n++;
+    x >>= 1;
+  }
+  return n;
+}
+
+static int poly_int_bit_length(int x) {
+  int n = 0;
+  unsigned int u = (unsigned int)x;
+  while (u) {
+    n++;
+    u >>= 1;
+  }
+  return n;
+}
+
+static size_t poly_pow2_size(int exp) {
+  if (exp <= 0) return 1;
+  int bits = (int)(sizeof(size_t) * CHAR_BIT);
+  if (exp >= bits) return (size_t)1 << (bits - 1);
+  return (size_t)1 << exp;
+}
+
+static int poly_tlsf_lv1(PolyTLSF *a, size_t size) {
+  (void)a;
+  return poly_size_bit_length(size);
+}
+
+static int poly_tlsf_lv2(PolyTLSF *a, size_t size) {
+  int bl = poly_size_bit_length(size);
+  if (bl <= 0) return 0;
+  size_t base = poly_pow2_size(bl - 1);
+  size_t denom = poly_pow2_size(bl - a->l2_bits);
+  int v = (int)((size - base) / denom);
+  if (v < 0) return 0;
+  if (v >= a->n_l2) return a->n_l2 - 1;
+  return v;
+}
+
+static PolyTLSFBucket *poly_tlsf_bucket(PolyTLSF *a, size_t size) {
+  int l1 = poly_tlsf_lv1(a, size);
+  int l2 = poly_tlsf_lv2(a, size);
+  if (l1 < 0 || l1 >= a->n_l1 || l2 < 0 || l2 >= a->n_l2) return NULL;
+  return &a->buckets[l1 * a->n_l2 + l2];
+}
+
+static int poly_tlsf_bucket_push(PolyTLSFBucket *b, size_t start) {
+  if (b->n >= b->cap) {
+    int new_cap = b->cap ? b->cap * 2 : 4;
+    size_t *ns = realloc(b->starts, (size_t)new_cap * sizeof(size_t));
+    if (!ns) return -1;
+    b->starts = ns;
+    b->cap = new_cap;
+  }
+  b->starts[b->n++] = start;
+  return 0;
+}
+
+static int poly_tlsf_bucket_remove(PolyTLSFBucket *b, size_t start) {
+  if (!b) return -1;
+  for (int i = 0; i < b->n; i++) {
+    if (b->starts[i] != start) continue;
+    memmove(b->starts + i, b->starts + i + 1, (size_t)(b->n - i - 1) * sizeof(size_t));
+    b->n--;
+    return 0;
+  }
+  return -1;
+}
+
+static int poly_tlsf_find_block(PolyTLSF *a, size_t start) {
+  if (!a) return -1;
+  for (int i = 0; i < a->n_blocks; i++)
+    if (a->blocks[i].alive && a->blocks[i].start == start) return i;
+  return -1;
+}
+
+static int poly_tlsf_add_or_update_block(
+    PolyTLSF *a,
+    size_t start,
+    size_t size,
+    size_t prev,
+    bool has_prev,
+    bool is_free
+) {
+  int idx = poly_tlsf_find_block(a, start);
+  if (idx < 0) {
+    if (a->n_blocks >= a->cap_blocks) {
+      int new_cap = a->cap_blocks ? a->cap_blocks * 2 : 16;
+      PolyTLSFBlock *nb = realloc(a->blocks, (size_t)new_cap * sizeof(PolyTLSFBlock));
+      if (!nb) return -1;
+      a->blocks = nb;
+      a->cap_blocks = new_cap;
+    }
+    idx = a->n_blocks++;
+  }
+  a->blocks[idx] = (PolyTLSFBlock){
+      .start = start,
+      .size = size,
+      .next = start + size,
+      .prev = prev,
+      .has_prev = has_prev,
+      .is_free = is_free,
+      .alive = true,
+  };
+  return idx;
+}
+
+static int poly_tlsf_insert_block(PolyTLSF *a, size_t start, size_t size, size_t prev, bool has_prev) {
+  int existing = poly_tlsf_find_block(a, start);
+  if (!has_prev && existing >= 0) {
+    has_prev = a->blocks[existing].has_prev;
+    prev = a->blocks[existing].prev;
+  }
+  PolyTLSFBucket *bucket = poly_tlsf_bucket(a, size);
+  if (!bucket) return -1;
+  if (poly_tlsf_bucket_push(bucket, start) != 0) return -1;
+  int l1 = poly_tlsf_lv1(a, size);
+  if (l1 >= 0 && l1 < a->n_l1) a->lv1_entries[l1]++;
+  return poly_tlsf_add_or_update_block(a, start, size, prev, has_prev, true) >= 0 ? 0 : -1;
+}
+
+static int poly_tlsf_remove_block(PolyTLSF *a, size_t start, size_t size, size_t prev, bool has_prev) {
+  int existing = poly_tlsf_find_block(a, start);
+  if (!has_prev && existing >= 0) {
+    has_prev = a->blocks[existing].has_prev;
+    prev = a->blocks[existing].prev;
+  }
+  PolyTLSFBucket *bucket = poly_tlsf_bucket(a, size);
+  if (!bucket || poly_tlsf_bucket_remove(bucket, start) != 0) return -1;
+  int l1 = poly_tlsf_lv1(a, size);
+  if (l1 >= 0 && l1 < a->n_l1) a->lv1_entries[l1]--;
+  return poly_tlsf_add_or_update_block(a, start, size, prev, has_prev, false) >= 0 ? 0 : -1;
+}
+
+static void poly_tlsf_delete_block(PolyTLSF *a, size_t start) {
+  int idx = poly_tlsf_find_block(a, start);
+  if (idx >= 0) a->blocks[idx].alive = false;
+}
+
+static int poly_tlsf_split_block(PolyTLSF *a, size_t start, size_t size, size_t new_size) {
+  if (!a || new_size == 0 || new_size >= size) return -1;
+  int idx = poly_tlsf_find_block(a, start);
+  if (idx < 0 || !a->blocks[idx].is_free) return -1;
+  size_t nxt = a->blocks[idx].next;
+  size_t prev = a->blocks[idx].prev;
+  bool has_prev = a->blocks[idx].has_prev;
+  if (poly_tlsf_remove_block(a, start, size, prev, has_prev) != 0) return -1;
+  if (poly_tlsf_insert_block(a, start, new_size, prev, has_prev) != 0) return -1;
+  if (poly_tlsf_insert_block(a, start + new_size, size - new_size, start, true) != 0) return -1;
+  int nidx = poly_tlsf_find_block(a, nxt);
+  if (nidx >= 0) {
+    a->blocks[nidx].prev = start + new_size;
+    a->blocks[nidx].has_prev = true;
+  }
+  return 0;
+}
+
+static int poly_tlsf_merge_right(PolyTLSF *a, size_t start) {
+  int idx = poly_tlsf_find_block(a, start);
+  if (idx < 0 || !a->blocks[idx].is_free) return -1;
+  size_t size = a->blocks[idx].size;
+  size_t prev = a->blocks[idx].prev;
+  bool has_prev = a->blocks[idx].has_prev;
+  size_t nxt = a->blocks[idx].next;
+
+  while (true) {
+    int nidx = poly_tlsf_find_block(a, nxt);
+    if (nidx < 0 || !a->blocks[nidx].is_free) break;
+    size_t nsize = a->blocks[nidx].size;
+    size_t nnxt = a->blocks[nidx].next;
+    if (poly_tlsf_remove_block(a, start, size, prev, has_prev) != 0) return -1;
+    if (poly_tlsf_remove_block(a, nxt, nsize, start, true) != 0) return -1;
+    if (poly_tlsf_insert_block(a, start, size + nsize, prev, has_prev) != 0) return -1;
+    poly_tlsf_delete_block(a, nxt);
+    size += nsize;
+    nxt = nnxt;
+  }
+
+  int next_idx = poly_tlsf_find_block(a, nxt);
+  if (next_idx >= 0) {
+    a->blocks[next_idx].prev = start;
+    a->blocks[next_idx].has_prev = true;
+  }
+  return 0;
+}
+
+static int poly_tlsf_merge_block(PolyTLSF *a, size_t start) {
+  int idx = poly_tlsf_find_block(a, start);
+  if (idx < 0) return -1;
+  while (a->blocks[idx].has_prev) {
+    int pidx = poly_tlsf_find_block(a, a->blocks[idx].prev);
+    if (pidx < 0 || !a->blocks[pidx].is_free) break;
+    start = a->blocks[pidx].start;
+    idx = pidx;
+  }
+  return poly_tlsf_merge_right(a, start);
+}
+
+static PolyTLSF *poly_tlsf_new(size_t size, size_t block_size, int lv2_cnt) {
+  PolyTLSF *a = calloc(1, sizeof(PolyTLSF));
+  if (!a) return NULL;
+  a->size = size;
+  a->block_size = block_size ? block_size : 16;
+  a->l2_bits = poly_int_bit_length(lv2_cnt > 0 ? lv2_cnt : 16);
+  a->n_l2 = 1 << a->l2_bits;
+  a->n_l1 = poly_size_bit_length(size) + 1;
+  if (a->n_l1 <= 0) a->n_l1 = 1;
+  a->buckets = calloc((size_t)a->n_l1 * (size_t)a->n_l2, sizeof(PolyTLSFBucket));
+  a->lv1_entries = calloc((size_t)a->n_l1, sizeof(int));
+  if (!a->buckets || !a->lv1_entries) {
+    free(a->buckets);
+    free(a->lv1_entries);
+    free(a);
+    return NULL;
+  }
+  if (size > 0 && poly_tlsf_insert_block(a, 0, size, 0, false) != 0) {
+    for (int i = 0; i < a->n_l1 * a->n_l2; i++) free(a->buckets[i].starts);
+    free(a->buckets);
+    free(a->lv1_entries);
+    free(a->blocks);
+    free(a);
+    return NULL;
+  }
+  return a;
+}
+
+static void poly_tlsf_destroy(PolyTLSF *a) {
+  if (!a) return;
+  for (int i = 0; i < a->n_l1 * a->n_l2; i++) free(a->buckets[i].starts);
+  free(a->buckets);
+  free(a->lv1_entries);
+  free(a->blocks);
+  free(a);
+}
+
+static size_t poly_tlsf_alloc(PolyTLSF *a, size_t req_size, size_t align) {
+  if (!a) return (size_t)-1;
+  if (align == 0) align = 1;
+  if (req_size < a->block_size) req_size = a->block_size;
+  size_t size = req_size + align - 1;
+  if (size < a->block_size) size = a->block_size;
+  int bl = poly_size_bit_length(size);
+  size_t bucket = poly_pow2_size(bl - a->l2_bits);
+  size = poly_round_up_size(size, bucket);
+
+  int start_l1 = poly_tlsf_lv1(a, size);
+  int size_bl = poly_size_bit_length(size);
+  for (int l1 = start_l1; l1 < a->n_l1; l1++) {
+    if (a->lv1_entries[l1] == 0) continue;
+    int l2_start = (l1 == size_bl) ? poly_tlsf_lv2(a, size) : 0;
+    for (int l2 = l2_start; l2 < a->n_l2; l2++) {
+      PolyTLSFBucket *bucket_list = &a->buckets[l1 * a->n_l2 + l2];
+      if (bucket_list->n <= 0) continue;
+
+      size_t start = bucket_list->starts[0];
+      int idx = poly_tlsf_find_block(a, start);
+      if (idx < 0) return (size_t)-1;
+      size_t nsize = a->blocks[idx].size;
+      if (nsize < size) continue;
+
+      size_t new_start = poly_round_up_size(start, align);
+      if (new_start != start) {
+        if (poly_tlsf_split_block(a, start, nsize, new_start - start) != 0) return (size_t)-1;
+        start = new_start;
+        idx = poly_tlsf_find_block(a, start);
+        if (idx < 0) return (size_t)-1;
+        nsize = a->blocks[idx].size;
+      }
+
+      if (nsize > req_size && poly_tlsf_split_block(a, start, nsize, req_size) != 0)
+        return (size_t)-1;
+      if (poly_tlsf_remove_block(a, start, req_size, 0, false) != 0) return (size_t)-1;
+      return start + a->base;
+    }
+  }
+  return (size_t)-1;
+}
+
+static int poly_tlsf_free(PolyTLSF *a, size_t start) {
+  if (!a || start < a->base) return -1;
+  start -= a->base;
+  int idx = poly_tlsf_find_block(a, start);
+  if (idx < 0) return -1;
+  size_t size = a->blocks[idx].size;
+  size_t prev = a->blocks[idx].prev;
+  bool has_prev = a->blocks[idx].has_prev;
+  if (poly_tlsf_insert_block(a, start, size, prev, has_prev) != 0) return -1;
+  return poly_tlsf_merge_block(a, start);
+}
+
 static int poly_mem_lane_for(PolyMemLane **lanes, int *n_lanes, int *cap_lanes, PolyDevice dev, bool copy_lane) {
   for (int i = 0; i < *n_lanes; i++)
     if ((*lanes)[i].device == dev && (*lanes)[i].copy_lane == copy_lane) return i;
@@ -589,64 +905,6 @@ static int poly_mem_lane_for(PolyMemLane **lanes, int *n_lanes, int *cap_lanes, 
       .arena_slot = -1,
   };
   return idx;
-}
-
-static int poly_mem_lane_add_free(PolyMemLane *lane, size_t off, size_t size) {
-  if (!lane || size == 0) return 0;
-  if (lane->n_free >= lane->cap_free) {
-    int new_cap = lane->cap_free ? lane->cap_free * 2 : 8;
-    PolyMemFreeBlock *nf = realloc(lane->free_blocks, (size_t)new_cap * sizeof(PolyMemFreeBlock));
-    if (!nf) return -1;
-    lane->free_blocks = nf;
-    lane->cap_free = new_cap;
-  }
-  lane->free_blocks[lane->n_free++] = (PolyMemFreeBlock){off, size};
-
-  for (int i = 0; i < lane->n_free; i++) {
-    for (int j = i + 1; j < lane->n_free; j++) {
-      if (lane->free_blocks[j].off < lane->free_blocks[i].off) {
-        PolyMemFreeBlock tmp = lane->free_blocks[i];
-        lane->free_blocks[i] = lane->free_blocks[j];
-        lane->free_blocks[j] = tmp;
-      }
-    }
-  }
-  for (int i = 0; i + 1 < lane->n_free;) {
-    size_t end = lane->free_blocks[i].off + lane->free_blocks[i].size;
-    if (end == lane->free_blocks[i + 1].off) {
-      lane->free_blocks[i].size += lane->free_blocks[i + 1].size;
-      memmove(
-          lane->free_blocks + i + 1,
-          lane->free_blocks + i + 2,
-          (size_t)(lane->n_free - i - 2) * sizeof(PolyMemFreeBlock)
-      );
-      lane->n_free--;
-    } else {
-      i++;
-    }
-  }
-  return 0;
-}
-
-static size_t poly_mem_lane_alloc(PolyMemLane *lane, size_t size) {
-  for (int i = 0; i < lane->n_free; i++) {
-    if (lane->free_blocks[i].size < size) continue;
-    size_t off = lane->free_blocks[i].off;
-    lane->free_blocks[i].off += size;
-    lane->free_blocks[i].size -= size;
-    if (lane->free_blocks[i].size == 0) {
-      memmove(
-          lane->free_blocks + i,
-          lane->free_blocks + i + 1,
-          (size_t)(lane->n_free - i - 1) * sizeof(PolyMemFreeBlock)
-      );
-      lane->n_free--;
-    }
-    return off;
-  }
-  size_t off = lane->peak;
-  lane->peak += size;
-  return off;
 }
 
 static int poly_schedule_slot_index_for_uop(PolyScheduleTemplate *tpl, PolyUOp *u) {
@@ -741,10 +999,18 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
 
   PolyMemLane *lanes = NULL;
   int n_lanes = 0, cap_lanes = 0;
+  size_t total_memory = 0;
   for (int i = 0; i < n_items; i++) {
+    total_memory += items[i].alloc_size;
     items[i].lane =
         poly_mem_lane_for(&lanes, &n_lanes, &cap_lanes, items[i].device, items[i].copy_lane);
     if (items[i].lane < 0) goto fail;
+  }
+  total_memory *= 2;
+  if (total_memory == 0) total_memory = 256;
+  for (int l = 0; l < n_lanes; l++) {
+    lanes[l].alloc = poly_tlsf_new(total_memory, 256, 32);
+    if (!lanes[l].alloc) goto fail;
   }
 
   PolyMemEvent *events = calloc((size_t)n_items * 2, sizeof(PolyMemEvent));
@@ -760,8 +1026,14 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
     PolyMemItem *item = &items[events[e].item];
     PolyMemLane *lane = &lanes[item->lane];
     if (events[e].open) {
-      item->offset = poly_mem_lane_alloc(lane, item->alloc_size);
-    } else if (poly_mem_lane_add_free(lane, item->offset, item->alloc_size) != 0) {
+      item->offset = poly_tlsf_alloc(lane->alloc, item->alloc_size, 1);
+      if (item->offset == (size_t)-1) {
+        free(events);
+        goto fail;
+      }
+      size_t end = item->offset + item->nbytes;
+      if (end > lane->peak) lane->peak = end;
+    } else if (poly_tlsf_free(lane->alloc, item->offset) != 0) {
       free(events);
       goto fail;
     }
@@ -871,7 +1143,7 @@ static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
     );
   }
 
-  for (int l = 0; l < n_lanes; l++) free(lanes[l].free_blocks);
+  for (int l = 0; l < n_lanes; l++) poly_tlsf_destroy(lanes[l].alloc);
   free(lanes);
   free(slot_to_item);
   free(items);
@@ -881,7 +1153,7 @@ fail_after_resize:
   /* The template is unusable if arena/view construction failed after resizing. */
 fail:
   if (lanes) {
-    for (int l = 0; l < n_lanes; l++) free(lanes[l].free_blocks);
+    for (int l = 0; l < n_lanes; l++) poly_tlsf_destroy(lanes[l].alloc);
   }
   free(lanes);
   free(slot_to_item);
