@@ -47,7 +47,7 @@ static int collect_unique_ranges(
   if (!rngs || n_rngs <= 0 || max_out <= 0) return 0;
   PolyUOp *tmp_sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, rngs, n_rngs, poly_arg_none());
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, tmp_sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, tmp_sink, &n_topo);
   int n_out = 0;
   for (int i = 0; i < n_topo && n_out < max_out; i++) {
     if (topo[i]->op != POLY_OP_RANGE) continue;
@@ -59,6 +59,7 @@ static int collect_unique_ranges(
       }
     if (!dup) out[n_out++] = topo[i];
   }
+  poly_toposort_free(topo);
   return n_out;
 }
 
@@ -113,11 +114,12 @@ PolyPatternMatcher *poly_pm_flatten_range(void) {
 
 static int count_divmod(PolyCtx *ctx, PolyUOp *u) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, u, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n_topo);
   int n = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_IDIV || topo[i]->op == POLY_OP_MOD) n++;
   }
+  poly_toposort_free(topo);
   return n;
 }
 
@@ -1048,11 +1050,16 @@ static PolyPatternMatcher *pm_symbolic_reduce_simplify_get(void) {
 
 static bool no_load(PolyCtx *ctx, PolyUOp *u) {
   int n = 0;
-  PolyUOp **topo = poly_toposort(ctx, u, &n);
+  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
   if (!topo) return true;
+  bool ret = true;
   for (int i = 0; i < n; i++)
-    if (topo[i] && topo[i]->op == POLY_OP_INDEX) return false;
-  return true;
+    if (topo[i] && topo[i]->op == POLY_OP_INDEX) {
+      ret = false;
+      break;
+    }
+  poly_toposort_free(topo);
+  return ret;
 }
 
 static PolyUOp *undo_loaded_index_math(PolyCtx *ctx, PolyUOp *cmplt, const PolyBindings *b) {
