@@ -1461,17 +1461,21 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   PolySchedule *ps = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
   ASSERT_NOT_NULL(ps);
 
-  int n_copy_items = 0, n_intermediates = 0, n_zero = 0;
+  int n_copy_items = 0, n_intermediates = 0, n_zero = 0, n_arenas = 0, n_views = 0;
   for (int i = 0; i < ps->template->n_calls; i++)
     if (poly_schedule_call_is_copy(ps, i)) n_copy_items++;
   for (int i = 0; i < ps->template->n_buf_slots; i++) {
     if (!ps->template->buf_slots[i].is_intermediate) continue;
     n_intermediates++;
+    if (ps->template->buf_slots[i].is_memory_arena) n_arenas++;
+    if (ps->template->buf_slots[i].has_memory_parent) n_views++;
     if (ps->template->buf_slots[i].needs_zero) n_zero++;
   }
 
   ASSERT_INT_EQ(n_copy_items, 2);
-  ASSERT_INT_EQ(n_intermediates, 2);
+  ASSERT_INT_EQ(n_intermediates, 3);
+  ASSERT_INT_EQ(n_arenas, 1);
+  ASSERT_INT_EQ(n_views, 2);
   ASSERT_INT_EQ(n_zero, 0);
 
   poly_schedule_free(ps);
@@ -3372,16 +3376,19 @@ TEST(schedule_runtime, workspace_reuse) {
 
   /* Verify persistent intermediates were allocated */
   int n_inter = 0;
+  int n_owning_inter = 0;
   int n_zero = 0;
   for (int i = 0; i < ps->template->n_buf_slots; i++) {
     if (!ps->template->buf_slots[i].is_intermediate) continue;
     n_inter++;
+    if (!ps->template->buf_slots[i].has_memory_parent) n_owning_inter++;
     if (ps->template->buf_slots[i].needs_zero) n_zero++;
   }
   ASSERT_TRUE(n_inter > 0);
+  ASSERT_TRUE(n_owning_inter > 0);
   ASSERT_TRUE(n_zero > 0);
   ASSERT_TRUE(plan->run != NULL);
-  ASSERT_INT_EQ(plan->run->n_intermediates, n_inter);
+  ASSERT_INT_EQ(plan->run->n_intermediates, n_owning_inter);
 
   /* Run 100 times with different multipliers */
   for (int iter = 0; iter < 100; iter++) {

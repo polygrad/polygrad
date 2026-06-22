@@ -515,6 +515,380 @@ static int poly_call_io_init(PolyCtx *ctx, PolySchedule *sched, int call_index) 
   return poly_call_get_outs_ins(ctx, call, io->outs, io->ins, io->n_args);
 }
 
+static bool poly_memory_plan_enabled(void) {
+#ifdef __EMSCRIPTEN__
+  return false;
+#else
+  const char *v = getenv("POLY_NO_MEMORY_PLANNER");
+  return !(v && v[0] && strcmp(v, "0") != 0);
+#endif
+}
+
+static size_t poly_round_up_size(size_t x, size_t block) {
+  if (block == 0) return x;
+  size_t r = x % block;
+  return r ? x + (block - r) : x;
+}
+
+typedef struct {
+  size_t off;
+  size_t size;
+} PolyMemFreeBlock;
+
+typedef struct {
+  PolyDevice device;
+  bool copy_lane;
+  size_t peak;
+  PolyMemFreeBlock *free_blocks;
+  int n_free;
+  int cap_free;
+  int arena_slot;
+} PolyMemLane;
+
+typedef struct {
+  int slot;
+  int first;
+  int last;
+  bool copy_lane;
+  PolyDevice device;
+  size_t nbytes;
+  size_t alloc_size;
+  size_t offset;
+  int lane;
+  PolyUOp *view;
+} PolyMemItem;
+
+typedef struct {
+  int t;
+  bool open;
+  int item;
+} PolyMemEvent;
+
+static int poly_mem_event_cmp(const void *a, const void *b) {
+  const PolyMemEvent *ea = a, *eb = b;
+  if (ea->t != eb->t) return (ea->t < eb->t) ? -1 : 1;
+  if (ea->open != eb->open) return ea->open ? 1 : -1; /* closes before opens */
+  return ea->item - eb->item;
+}
+
+static int poly_mem_lane_for(PolyMemLane **lanes, int *n_lanes, int *cap_lanes, PolyDevice dev, bool copy_lane) {
+  for (int i = 0; i < *n_lanes; i++)
+    if ((*lanes)[i].device == dev && (*lanes)[i].copy_lane == copy_lane) return i;
+  if (*n_lanes >= *cap_lanes) {
+    int new_cap = *cap_lanes ? *cap_lanes * 2 : 4;
+    PolyMemLane *nl = realloc(*lanes, (size_t)new_cap * sizeof(PolyMemLane));
+    if (!nl) return -1;
+    memset(nl + *cap_lanes, 0, (size_t)(new_cap - *cap_lanes) * sizeof(PolyMemLane));
+    *lanes = nl;
+    *cap_lanes = new_cap;
+  }
+  int idx = (*n_lanes)++;
+  (*lanes)[idx] = (PolyMemLane){
+      .device = dev,
+      .copy_lane = copy_lane,
+      .arena_slot = -1,
+  };
+  return idx;
+}
+
+static int poly_mem_lane_add_free(PolyMemLane *lane, size_t off, size_t size) {
+  if (!lane || size == 0) return 0;
+  if (lane->n_free >= lane->cap_free) {
+    int new_cap = lane->cap_free ? lane->cap_free * 2 : 8;
+    PolyMemFreeBlock *nf = realloc(lane->free_blocks, (size_t)new_cap * sizeof(PolyMemFreeBlock));
+    if (!nf) return -1;
+    lane->free_blocks = nf;
+    lane->cap_free = new_cap;
+  }
+  lane->free_blocks[lane->n_free++] = (PolyMemFreeBlock){off, size};
+
+  for (int i = 0; i < lane->n_free; i++) {
+    for (int j = i + 1; j < lane->n_free; j++) {
+      if (lane->free_blocks[j].off < lane->free_blocks[i].off) {
+        PolyMemFreeBlock tmp = lane->free_blocks[i];
+        lane->free_blocks[i] = lane->free_blocks[j];
+        lane->free_blocks[j] = tmp;
+      }
+    }
+  }
+  for (int i = 0; i + 1 < lane->n_free;) {
+    size_t end = lane->free_blocks[i].off + lane->free_blocks[i].size;
+    if (end == lane->free_blocks[i + 1].off) {
+      lane->free_blocks[i].size += lane->free_blocks[i + 1].size;
+      memmove(
+          lane->free_blocks + i + 1,
+          lane->free_blocks + i + 2,
+          (size_t)(lane->n_free - i - 2) * sizeof(PolyMemFreeBlock)
+      );
+      lane->n_free--;
+    } else {
+      i++;
+    }
+  }
+  return 0;
+}
+
+static size_t poly_mem_lane_alloc(PolyMemLane *lane, size_t size) {
+  for (int i = 0; i < lane->n_free; i++) {
+    if (lane->free_blocks[i].size < size) continue;
+    size_t off = lane->free_blocks[i].off;
+    lane->free_blocks[i].off += size;
+    lane->free_blocks[i].size -= size;
+    if (lane->free_blocks[i].size == 0) {
+      memmove(
+          lane->free_blocks + i,
+          lane->free_blocks + i + 1,
+          (size_t)(lane->n_free - i - 1) * sizeof(PolyMemFreeBlock)
+      );
+      lane->n_free--;
+    }
+    return off;
+  }
+  size_t off = lane->peak;
+  lane->peak += size;
+  return off;
+}
+
+static int poly_schedule_slot_index_for_uop(PolyScheduleTemplate *tpl, PolyUOp *u) {
+  if (!tpl || !u) return -1;
+  for (int i = 0; i < tpl->n_buf_slots; i++)
+    if (tpl->buf_slots[i].buf_uop == u) return i;
+  return -1;
+}
+
+static int poly_schedule_memory_plan(PolyCtx *ctx, PolySchedule *sched) {
+  if (!poly_memory_plan_enabled() || !ctx || !sched || !sched->template ||
+      !sched->template->linear || sched->template->n_calls <= 1)
+    return 0;
+
+  PolyScheduleTemplate *tpl = sched->template;
+  int n_slots_orig = tpl->n_buf_slots;
+  if (n_slots_orig <= 0) return 0;
+
+  int *slot_to_item = malloc((size_t)n_slots_orig * sizeof(int));
+  if (!slot_to_item) return -1;
+  for (int i = 0; i < n_slots_orig; i++) slot_to_item[i] = -1;
+
+  PolyMemItem *items = NULL;
+  int n_items = 0, cap_items = 0;
+  for (int s = 0; s < n_slots_orig; s++) {
+    PolyScheduleBufSlot *slot = &tpl->buf_slots[s];
+    if (!slot->is_intermediate || slot->is_memory_arena || slot->has_memory_parent ||
+        !slot->buf_uop || slot->nbytes <= 0 || slot->device == POLY_DEVICE_WEBGPU)
+      continue;
+    if (n_items >= cap_items) {
+      int new_cap = cap_items ? cap_items * 2 : 8;
+      PolyMemItem *ni = realloc(items, (size_t)new_cap * sizeof(PolyMemItem));
+      if (!ni) {
+        free(slot_to_item);
+        free(items);
+        return -1;
+      }
+      items = ni;
+      cap_items = new_cap;
+    }
+    slot_to_item[s] = n_items;
+    items[n_items++] = (PolyMemItem){
+        .slot = s,
+        .first = INT_MAX,
+        .last = -1,
+        .device = slot->device,
+        .nbytes = (size_t)slot->nbytes,
+        .alloc_size = poly_round_up_size((size_t)slot->nbytes, 256),
+        .lane = -1,
+    };
+  }
+  if (n_items == 0) {
+    free(slot_to_item);
+    free(items);
+    return 0;
+  }
+
+  for (int k = 0; k < tpl->n_calls; k++) {
+    PolyUOp *call = tpl->linear->src[k];
+    bool is_copy = poly_call_is_copy(call);
+    int n_args = poly_call_n_buffer_args(call);
+    for (int a = 0; a < n_args; a++) {
+      PolyUOp *arg = poly_call_buffer_arg(call, a);
+      int slot = poly_schedule_slot_index_for_uop(tpl, arg);
+      if (slot < 0 || slot >= n_slots_orig) continue;
+      int item = slot_to_item[slot];
+      if (item < 0) continue;
+      if (items[item].first == INT_MAX) items[item].first = k;
+      items[item].last = k;
+      if (is_copy) items[item].copy_lane = true;
+    }
+  }
+
+  int compact = 0;
+  for (int i = 0; i < n_items; i++) {
+    if (items[i].first == INT_MAX || items[i].last < items[i].first) {
+      slot_to_item[items[i].slot] = -1;
+      continue;
+    }
+    if (compact != i) {
+      items[compact] = items[i];
+      slot_to_item[items[compact].slot] = compact;
+    }
+    compact++;
+  }
+  n_items = compact;
+  if (n_items <= 1) {
+    free(slot_to_item);
+    free(items);
+    return 0;
+  }
+
+  PolyMemLane *lanes = NULL;
+  int n_lanes = 0, cap_lanes = 0;
+  for (int i = 0; i < n_items; i++) {
+    items[i].lane =
+        poly_mem_lane_for(&lanes, &n_lanes, &cap_lanes, items[i].device, items[i].copy_lane);
+    if (items[i].lane < 0) goto fail;
+  }
+
+  PolyMemEvent *events = calloc((size_t)n_items * 2, sizeof(PolyMemEvent));
+  if (!events) goto fail;
+  for (int i = 0; i < n_items; i++) {
+    int hold = items[i].copy_lane ? (items[i].last - items[i].first + 1) : 0;
+    events[2 * i] = (PolyMemEvent){items[i].first, true, i};
+    events[2 * i + 1] = (PolyMemEvent){items[i].last + 1 + hold, false, i};
+  }
+  qsort(events, (size_t)n_items * 2, sizeof(PolyMemEvent), poly_mem_event_cmp);
+
+  for (int e = 0; e < n_items * 2; e++) {
+    PolyMemItem *item = &items[events[e].item];
+    PolyMemLane *lane = &lanes[item->lane];
+    if (events[e].open) {
+      item->offset = poly_mem_lane_alloc(lane, item->alloc_size);
+    } else if (poly_mem_lane_add_free(lane, item->offset, item->alloc_size) != 0) {
+      free(events);
+      goto fail;
+    }
+  }
+  free(events);
+
+  int n_new_slots = n_lanes;
+  PolyScheduleBufSlot *new_slots =
+      realloc(tpl->buf_slots, (size_t)(n_slots_orig + n_new_slots) * sizeof(PolyScheduleBufSlot));
+  if (!new_slots) goto fail;
+  tpl->buf_slots = new_slots;
+  memset(tpl->buf_slots + n_slots_orig, 0, (size_t)n_new_slots * sizeof(PolyScheduleBufSlot));
+  tpl->n_buf_slots = n_slots_orig + n_new_slots;
+
+  for (int l = 0; l < n_lanes; l++) {
+    size_t arena_size = poly_round_up_size(lanes[l].peak, 256);
+    if (arena_size == 0) arena_size = 256;
+    PolyUOp *arena = poly_buffer(ctx, POLY_UINT8, (int64_t)arena_size);
+    if (!arena) goto fail_after_resize;
+    int slot = n_slots_orig + l;
+    lanes[l].arena_slot = slot;
+    tpl->buf_slots[slot] = (PolyScheduleBufSlot){
+        .dtype = POLY_UINT8,
+        .numel = (int64_t)arena_size,
+        .nbytes = (int64_t)arena_size,
+        .buf_uop = arena,
+        .device = lanes[l].device,
+        .is_intermediate = true,
+        .needs_zero = false,
+        .external_buf_idx = -1,
+        .is_memory_arena = true,
+    };
+  }
+
+  PolyUOp **old_uops = calloc((size_t)n_items, sizeof(PolyUOp *));
+  if (!old_uops) goto fail_after_resize;
+  for (int i = 0; i < n_items; i++) {
+    PolyScheduleBufSlot *slot = &tpl->buf_slots[items[i].slot];
+    old_uops[i] = slot->buf_uop;
+    int64_t view_arg_vals[2] = {slot->numel, (int64_t)items[i].offset};
+    PolyArg view_arg = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {view_arg_vals, 2}};
+    PolyUOp *view_src[2] = {tpl->buf_slots[lanes[items[i].lane].arena_slot].buf_uop, old_uops[i]};
+    PolyUOp *view = poly_uop(ctx, POLY_OP_BUFFER_VIEW, slot->dtype, view_src, 2, view_arg);
+    if (!view) {
+      free(old_uops);
+      goto fail_after_resize;
+    }
+    items[i].view = view;
+    slot->buf_uop = view;
+    slot->has_memory_parent = true;
+    slot->memory_parent_slot = lanes[items[i].lane].arena_slot;
+    slot->memory_offset = (int64_t)items[i].offset;
+    if (slot->needs_zero) {
+      slot->has_zero_before_call = true;
+      slot->zero_before_call = items[i].first;
+    }
+  }
+
+  PolyUOp **new_linear_src = calloc((size_t)tpl->linear->n_src, sizeof(PolyUOp *));
+  if (!new_linear_src) {
+    free(old_uops);
+    goto fail_after_resize;
+  }
+  for (int k = 0; k < tpl->linear->n_src; k++) {
+    PolyUOp *call = tpl->linear->src[k];
+    bool changed = false;
+    PolyUOp **call_src = calloc((size_t)call->n_src, sizeof(PolyUOp *));
+    if (!call_src) {
+      free(new_linear_src);
+      free(old_uops);
+      goto fail_after_resize;
+    }
+    for (int s = 0; s < call->n_src; s++) {
+      PolyUOp *src = call->src[s];
+      if (s > 0 && !poly_call_arg_is_var(src)) {
+        for (int i = 0; i < n_items; i++) {
+          if (src == old_uops[i]) {
+            src = items[i].view;
+            changed = true;
+            break;
+          }
+        }
+      }
+      call_src[s] = src;
+    }
+    new_linear_src[k] = changed ? poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg) : call;
+    free(call_src);
+    if (!new_linear_src[k]) {
+      free(new_linear_src);
+      free(old_uops);
+      goto fail_after_resize;
+    }
+  }
+  tpl->linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, new_linear_src, tpl->linear->n_src, tpl->linear->arg);
+  free(new_linear_src);
+  free(old_uops);
+  if (!tpl->linear) goto fail_after_resize;
+
+  if (poly_debug_at_least(2)) {
+    size_t old_bytes = 0, arena_bytes = 0;
+    for (int i = 0; i < n_items; i++) old_bytes += items[i].alloc_size;
+    for (int l = 0; l < n_lanes; l++) arena_bytes += poly_round_up_size(lanes[l].peak, 256);
+    fprintf(
+        stderr,
+        "[polygrad:memory-plan] planned %d buffers into %d arenas: %.3f MB -> %.3f MB\n",
+        n_items, n_lanes, old_bytes / 1000000.0, arena_bytes / 1000000.0
+    );
+  }
+
+  for (int l = 0; l < n_lanes; l++) free(lanes[l].free_blocks);
+  free(lanes);
+  free(slot_to_item);
+  free(items);
+  return 0;
+
+fail_after_resize:
+  /* The template is unusable if arena/view construction failed after resizing. */
+fail:
+  if (lanes) {
+    for (int l = 0; l < n_lanes; l++) free(lanes[l].free_blocks);
+  }
+  free(lanes);
+  free(slot_to_item);
+  free(items);
+  return -1;
+}
+
 int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index, int arg_index) {
   const PolyCallIO *io = poly_schedule_call_io(schedule, call_index);
   if (!io || arg_index < 0 || arg_index >= io->n_args || !io->arg_to_slot) return -1;
@@ -1077,7 +1451,8 @@ static PolySchedule *build_schedule_from_kernel_graph(
     int n_bufs_orig,
     const PolyVarBinding *default_vars,
     int n_default_vars,
-    PolyUOp *linear_template
+    PolyUOp *linear_template,
+    bool apply_memory_plan
 ) {
   if (!kernel_graph || kernel_graph->op != POLY_OP_SINK) {
     fprintf(stderr, "polygrad: build_schedule_from_kernel_graph: expected SINK\n");
@@ -1265,6 +1640,10 @@ static PolySchedule *build_schedule_from_kernel_graph(
   linear_src = NULL;
   if (!ps->template->linear) goto cleanup;
   ps->template->n_calls = ps->template->linear->n_src;
+
+  if (apply_memory_plan && poly_schedule_memory_plan(ctx, ps) != 0) goto cleanup;
+  ps->template->n_calls = ps->template->linear->n_src;
+
   ps->template->call_io = calloc((size_t)ps->template->n_calls, sizeof(PolyCallIO));
   ps->run->calls = calloc((size_t)ps->template->n_calls, sizeof(PolyCallRuntime));
   if (ps->template->n_calls > 0 && !ps->template->call_io) goto cleanup;
@@ -1385,7 +1764,7 @@ PolySchedule *poly_complete_create_schedule_with_vars(
     double t_build0 = timing ? poly_now_ms() : 0.0;
     PolySchedule *ps = build_schedule_from_kernel_graph(
         ctx, kernel_graph, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals,
-        linear_template
+        linear_template, true
     );
     double t_build1 = timing ? poly_now_ms() : 0.0;
     if (timing) {
@@ -1412,7 +1791,8 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   double t_build0 = timing ? poly_now_ms() : 0.0;
   PolySchedule *ps = build_schedule_from_kernel_graph(
-      ctx, kernel_graph, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals, NULL
+      ctx, kernel_graph, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals, NULL,
+      true
   );
   double t_build1 = timing ? poly_now_ms() : 0.0;
   if (timing) {
@@ -1445,7 +1825,7 @@ static PolySchedule *poly_create_schedule_uncached(PolyCtx *ctx, PolyUOp *kernel
     return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolySchedule *schedule = build_schedule_from_kernel_graph(
-      ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, NULL
+      ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, NULL, false
   );
   if (buf_order_owned) free(buf_order);
   return schedule;
@@ -1474,7 +1854,8 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
     return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolySchedule *schedule = build_schedule_from_kernel_graph(
-      ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, linear_template
+      ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, linear_template,
+      true
   );
   if (buf_order_owned) free(buf_order);
   return schedule;
@@ -3380,7 +3761,9 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   /* Allocate persistent intermediates */
   plan->run->n_intermediates = 0;
   for (int i = 0; i < schedule->template->n_buf_slots; i++)
-    if (schedule->template->buf_slots[i].is_intermediate) plan->run->n_intermediates++;
+    if (schedule->template->buf_slots[i].is_intermediate &&
+        !schedule->template->buf_slots[i].has_memory_parent)
+      plan->run->n_intermediates++;
 
   if (plan->run->n_intermediates > 0) {
     plan->run->intermediates = calloc((size_t)plan->run->n_intermediates, sizeof(PolyBuffer));
@@ -3388,6 +3771,7 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
     int idx = 0;
     for (int i = 0; i < schedule->template->n_buf_slots; i++) {
       if (!schedule->template->buf_slots[i].is_intermediate) continue;
+      if (schedule->template->buf_slots[i].has_memory_parent) continue;
       size_t nbytes = (size_t)schedule->template->buf_slots[i].nbytes;
       if (nbytes == 0) nbytes = sizeof(float);
       PolyDevice slot_device = poly_schedule_slot_target_device(ctx, schedule, i, device);
@@ -3428,10 +3812,21 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   {
     int idx = 0;
     for (int i = 0; i < plan->run->n_slot_to_data; i++) {
-      if (schedule->template->buf_slots[i].is_intermediate && idx < plan->run->n_intermediates) {
+      if (schedule->template->buf_slots[i].is_intermediate &&
+          !schedule->template->buf_slots[i].has_memory_parent &&
+          idx < plan->run->n_intermediates) {
         plan->run->slot_to_data[i] = plan->run->intermediates[idx].ptr;
         idx++;
       }
+    }
+    for (int i = 0; i < plan->run->n_slot_to_data; i++) {
+      PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
+      if (!slot->is_intermediate || !slot->has_memory_parent) continue;
+      int parent = slot->memory_parent_slot;
+      if (parent < 0 || parent >= plan->run->n_slot_to_data || !plan->run->slot_to_data[parent])
+        goto cleanup;
+      plan->run->slot_to_data[i] =
+          (void *)((char *)plan->run->slot_to_data[parent] + slot->memory_offset);
     }
   }
 
@@ -3498,6 +3893,12 @@ static PolyDevice poly_schedule_slot_runtime_device(
     int slot,
     PolyDevice fallback
 ) {
+  if (sched && sched->template && slot >= 0 && slot < sched->template->n_buf_slots &&
+      sched->template->buf_slots[slot].has_memory_parent) {
+    int parent = sched->template->buf_slots[slot].memory_parent_slot;
+    if (parent >= 0 && parent < sched->template->n_buf_slots)
+      return poly_schedule_slot_runtime_device(ctx, sched, parent, fallback);
+  }
   PolyDevice device = poly_schedule_slot_target_device(ctx, sched, slot, fallback);
   if (device == POLY_DEVICE_AUTO) device = fallback;
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
@@ -3876,14 +4277,56 @@ static void poly_zero_buffer(PolyBuffer *h) {
 #endif
 }
 
-static void poly_zero_schedule_intermediates(PolySchedule *sched, PolyBuffer *bufs, int n_bufs) {
-  if (!sched || !bufs) return;
-  int idx = 0;
+static void poly_zero_schedule_slot(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    PolyScheduleRuntime *run,
+    int slot_idx
+) {
+  if (!ctx || !sched || !run || !run->slot_to_data || slot_idx < 0 ||
+      slot_idx >= sched->template->n_buf_slots)
+    return;
+  PolyScheduleBufSlot *slot = &sched->template->buf_slots[slot_idx];
+  if (!slot->is_intermediate || !slot->needs_zero || !run->slot_to_data[slot_idx]) return;
+  size_t nbytes = (size_t)(slot->nbytes > 0 ? slot->nbytes : (int64_t)sizeof(float));
+  PolyDevice dev = poly_schedule_slot_runtime_device(ctx, sched, slot_idx, run->device);
+  const PolyBackendDesc *be = poly_backend_get(dev);
+  PolyBuffer tmp = {
+      .ptr = run->slot_to_data[slot_idx],
+      .nbytes = nbytes,
+      .device = dev,
+      .owned = false,
+      .allocator = be ? be->get_allocator() : NULL,
+      .src = NULL,
+      .valid = true,
+  };
+  poly_zero_buffer(&tmp);
+}
+
+static void poly_zero_schedule_initial_intermediates(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    PolyScheduleRuntime *run
+) {
+  if (!sched || !run) return;
   for (int s = 0; s < sched->template->n_buf_slots; s++) {
-    if (!sched->template->buf_slots[s].is_intermediate) continue;
-    if (idx >= n_bufs) break;
-    if (sched->template->buf_slots[s].needs_zero) poly_zero_buffer(&bufs[idx]);
-    idx++;
+    PolyScheduleBufSlot *slot = &sched->template->buf_slots[s];
+    if (!slot->is_intermediate || !slot->needs_zero || slot->has_zero_before_call) continue;
+    poly_zero_schedule_slot(ctx, sched, run, s);
+  }
+}
+
+static void poly_zero_schedule_call_intermediates(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    PolyScheduleRuntime *run,
+    int call_index
+) {
+  if (!sched || !run) return;
+  for (int s = 0; s < sched->template->n_buf_slots; s++) {
+    PolyScheduleBufSlot *slot = &sched->template->buf_slots[s];
+    if (!slot->is_intermediate || !slot->needs_zero || !slot->has_zero_before_call) continue;
+    if (slot->zero_before_call == call_index) poly_zero_schedule_slot(ctx, sched, run, s);
   }
 }
 
@@ -3910,7 +4353,9 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
 
   sched->run->n_intermediates = 0;
   for (int i = 0; i < sched->template->n_buf_slots; i++)
-    if (sched->template->buf_slots[i].is_intermediate) sched->run->n_intermediates++;
+    if (sched->template->buf_slots[i].is_intermediate &&
+        !sched->template->buf_slots[i].has_memory_parent)
+      sched->run->n_intermediates++;
 
   if (sched->run->n_intermediates > 0) {
     sched->run->intermediates = calloc((size_t)sched->run->n_intermediates, sizeof(PolyBuffer));
@@ -3918,6 +4363,7 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
     int idx = 0;
     for (int i = 0; i < sched->template->n_buf_slots; i++) {
       if (!sched->template->buf_slots[i].is_intermediate) continue;
+      if (sched->template->buf_slots[i].has_memory_parent) continue;
       size_t nbytes = (size_t)sched->template->buf_slots[i].nbytes;
       if (nbytes == 0) nbytes = sizeof(float);
       PolyDevice slot_device = poly_intermediate_slot_runtime_device(ctx, sched, i, device);
@@ -3950,8 +4396,19 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
   {
     int idx = 0;
     for (int i = 0; i < sched->run->n_slot_to_data; i++) {
-      if (sched->template->buf_slots[i].is_intermediate && idx < sched->run->n_intermediates)
+      if (sched->template->buf_slots[i].is_intermediate &&
+          !sched->template->buf_slots[i].has_memory_parent &&
+          idx < sched->run->n_intermediates)
         sched->run->slot_to_data[i] = sched->run->intermediates[idx++].ptr;
+    }
+    for (int i = 0; i < sched->run->n_slot_to_data; i++) {
+      PolyScheduleBufSlot *slot = &sched->template->buf_slots[i];
+      if (!slot->is_intermediate || !slot->has_memory_parent) continue;
+      int parent = slot->memory_parent_slot;
+      if (parent < 0 || parent >= sched->run->n_slot_to_data || !sched->run->slot_to_data[parent])
+        goto fail;
+      sched->run->slot_to_data[i] =
+          (void *)((char *)sched->run->slot_to_data[parent] + slot->memory_offset);
     }
   }
 
@@ -4273,9 +4730,8 @@ int poly_schedule_call_run(
   if (poly_schedule_runtime_prepare(ctx, schedule, device) != 0) return -1;
   PolyDevice item_device = poly_call_device(ctx, schedule, call_index, device);
   if (poly_schedule_call_lower(ctx, schedule, call_index, item_device) != 0) return -1;
-  poly_zero_schedule_intermediates(
-      schedule, schedule->run->intermediates, schedule->run->n_intermediates
-  );
+  poly_zero_schedule_initial_intermediates(ctx, schedule, schedule->run);
+  poly_zero_schedule_call_intermediates(ctx, schedule, schedule->run, call_index);
 
   int n_all = poly_schedule_merge_runtime_vars(schedule, var_bindings, n_var_bindings);
   int var_int_idx = 0;
@@ -4312,9 +4768,7 @@ int poly_run_schedule(
   double t_prepare = timing ? poly_now_ms() : 0.0;
   double t_slots = timing ? poly_now_ms() : 0.0;
 
-  poly_zero_schedule_intermediates(
-      schedule, schedule->run->intermediates, schedule->run->n_intermediates
-  );
+  poly_zero_schedule_initial_intermediates(ctx, schedule, schedule->run);
   double t_zero = timing ? poly_now_ms() : 0.0;
 
   int n_all = poly_schedule_merge_runtime_vars(schedule, var_bindings, n_var_bindings);
@@ -4336,6 +4790,7 @@ int poly_run_schedule(
       ret = -1;
       break;
     }
+    poly_zero_schedule_call_intermediates(ctx, schedule, schedule->run, k);
     if (poly_debug_at_least(7)) {
       fprintf(
           stderr, "[polygrad:run_schedule] step=%d/%d call=%d run begin\n", k + 1,
@@ -4385,8 +4840,6 @@ int poly_run_compiled_schedule(
 
   int ret = 0;
 
-  poly_zero_schedule_intermediates(sched, run->intermediates, run->n_intermediates);
-
   /* Fill external slots in persistent slot_to_data */
   for (int i = 0; i < run->n_slot_to_data; i++) {
     if (!sched->template->buf_slots[i].is_intermediate) {
@@ -4398,6 +4851,8 @@ int poly_run_compiled_schedule(
       calloc((size_t)(run->n_slot_to_data > 0 ? run->n_slot_to_data : 1), sizeof(bool));
   if (!ctx_slots) return -1;
   bool used_ctx_slots = false;
+
+  poly_zero_schedule_initial_intermediates(plan->ctx, sched, run);
 
   /* Merge default vars with runtime overrides */
   int n_all = 0;
@@ -4428,6 +4883,7 @@ int poly_run_compiled_schedule(
   int var_int_idx = 0;
   for (int k = 0; k < sched->template->n_calls && ret == 0; k++) {
     PolyRunner *runner = &run->calls[k].prg;
+    poly_zero_schedule_call_intermediates(plan->ctx, sched, run, k);
 
     if (poly_call_is_view(poly_schedule_call(sched, k))) {
       ret = poly_schedule_execute_view_call(plan->ctx, sched, k, plan->device, run->slot_to_data);

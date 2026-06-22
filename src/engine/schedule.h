@@ -66,6 +66,12 @@ typedef struct {
   bool is_intermediate;
   bool needs_zero;
   int external_buf_idx;
+  bool is_memory_arena;
+  bool has_memory_parent;
+  int memory_parent_slot;
+  int64_t memory_offset;
+  bool has_zero_before_call;
+  int zero_before_call;
 } PolyScheduleBufSlot;
 
 typedef struct {
