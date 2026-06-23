@@ -8,6 +8,7 @@
 #include "../src/frontend.h"
 #include "../src/instance.h"
 #include "../src/ir.h"
+#include "../src/ctx.h"
 #include "../src/engine/schedule.h"
 
 /* Registration + lookup */
@@ -473,6 +474,29 @@ TEST(registry, instance_from_ctx_unreachable_excluded) {
   ASSERT_TRUE(poly_instance_get_buffer(inst, "w") != NULL);
   ASSERT_TRUE(poly_instance_get_buffer(inst, "x") != NULL);
   ASSERT_TRUE(poly_instance_get_buffer(inst, "unused_aux") == NULL);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(registry, instance_from_ctx_reachability_scan_rewinds_scratch) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t s[] = {4};
+
+  PolyUOp *w = poly_param(ctx, POLY_FLOAT32, s, 1, "w");
+  PolyUOp *x = poly_input(ctx, POLY_FLOAT32, s, 1, "x");
+  PolyUOp *out = poly_output(ctx, POLY_FLOAT32, s, 1, "output");
+
+  PolyUOp *mul =
+      poly_alu2(ctx, POLY_OP_MUL, poly_reshape(ctx, w, s, 1), poly_reshape(ctx, x, s, 1));
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, mul));
+  poly_register_entrypoint(ctx, "forward", sink);
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyInstance *inst = poly_instance_from_ctx(ctx);
+  ASSERT_TRUE(inst != NULL);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
 
   poly_instance_free(inst);
   poly_ctx_destroy(ctx);

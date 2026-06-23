@@ -1272,8 +1272,15 @@ static PolyInstance *instance_from_named_sinks(
       return NULL;
     }
     PolyUOp *sink = sinks[i];
-    int n_topo;
-    PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+    PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort_scratch(ctx, sink, &n_topo);
+    if (!topo && n_topo != 0) {
+      fprintf(stderr, "poly_instance_from_sinks: failed to walk entrypoint %d\n", i);
+      poly_ctx_scratch_rewind(ctx, scratch);
+      poly_map_destroy(reachable);
+      return NULL;
+    }
     for (int j = 0; j < n_topo; j++) {
       if (topo[j]->op == POLY_OP_BUFFER) {
         uint32_t h = poly_ptr_hash(topo[j]);
@@ -1281,6 +1288,7 @@ static PolyInstance *instance_from_named_sinks(
           poly_map_set(reachable, h, topo[j], topo[j], poly_ptr_eq);
       }
     }
+    poly_ctx_scratch_rewind(ctx, scratch);
   }
 
   /* Build PolyIrBufEntry array from registry entries (reachable only) */
