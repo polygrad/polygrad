@@ -26,6 +26,7 @@ PolyCtx *poly_ctx_new(void) {
   PolyCtx *ctx = malloc(sizeof(PolyCtx));
   if (!ctx) return NULL;
   ctx->arena = poly_arena_new(0);
+  ctx->scratch = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
   ctx->schedule_cache = poly_map_new(16);
   ctx->program_cache = poly_map_new(16);
@@ -38,10 +39,11 @@ PolyCtx *poly_ctx_new(void) {
   ctx->tensors_cap = 0;
   ctx->next_tensor_order = 1;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->cse || !ctx->schedule_cache || !ctx->program_cache ||
+  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->program_cache ||
       !ctx->program_infos ||
       !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
+    if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->program_cache) poly_map_destroy(ctx->program_cache);
@@ -84,6 +86,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->cse);
   free(ctx->entries);
   free(ctx->ep);
+  poly_arena_destroy(ctx->scratch);
   poly_arena_destroy(ctx->arena);
   free(ctx);
 }
@@ -115,6 +118,20 @@ void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleas
 
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
 PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
+
+PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx) {
+  return poly_arena_mark(ctx ? ctx->scratch : NULL);
+}
+
+void poly_ctx_scratch_rewind(PolyCtx *ctx, PolyScratchMark mark) {
+  if (!ctx) return;
+  poly_arena_rewind(ctx->scratch, mark);
+}
+
+void *poly_ctx_scratch_alloc(PolyCtx *ctx, size_t size, size_t align) {
+  if (!ctx || !ctx->scratch) return NULL;
+  return poly_arena_alloc(ctx->scratch, size, align);
+}
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx) {
   return ctx ? ctx->next_unique_id++ : 0;

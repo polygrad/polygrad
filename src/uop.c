@@ -373,6 +373,25 @@ PolyUOp *poly_uop3(
 
 /* Toposort (iterative DFS, mirrors tinygrad's toposort) */
 
+typedef enum {
+  POLY_TOPO_RESULT_ARENA,
+  POLY_TOPO_RESULT_OWNED,
+  POLY_TOPO_RESULT_SCRATCH,
+} PolyTopoResultStorage;
+
+static PolyUOp **toposort_result_alloc(PolyCtx *ctx, int cap, PolyTopoResultStorage storage) {
+  size_t nbytes = (size_t)cap * sizeof(PolyUOp *);
+  switch (storage) {
+  case POLY_TOPO_RESULT_OWNED:
+    return malloc(nbytes);
+  case POLY_TOPO_RESULT_SCRATCH:
+    return poly_ctx_scratch_alloc(ctx, nbytes, _Alignof(PolyUOp *));
+  case POLY_TOPO_RESULT_ARENA:
+  default:
+    return poly_arena_alloc(ctx->arena, nbytes, _Alignof(PolyUOp *));
+  }
+}
+
 /* Shared iterative DFS worker. Either `gate_simple` or `gate_user` may be
  * non-NULL (never both). The gate signature difference is bridged here so
  * callers can use closure-style gating without another whole copy. */
@@ -384,23 +403,19 @@ static PolyUOp **toposort_worker(
     bool (*gate_user)(PolyUOp *, void *),
     void *user_data,
     bool enter_calls,
-    bool owned_result
+    PolyTopoResultStorage storage
 ) {
   if (n_out) *n_out = 0;
   if (!ctx || !root || !n_out) return NULL;
   int cap = 256;
   int n = 0;
-  PolyUOp **result = owned_result ?
-                         malloc((size_t)cap * sizeof(PolyUOp *)) :
-                         poly_arena_alloc(
-                             ctx->arena, (size_t)cap * sizeof(PolyUOp *), _Alignof(PolyUOp *)
-                         );
+  PolyUOp **result = toposort_result_alloc(ctx, cap, storage);
   if (!result) return NULL;
 
   /* Visited set — pointer identity map */
   PolyMap *visited = poly_map_new(256);
   if (!visited) {
-    if (owned_result) free(result);
+    if (storage == POLY_TOPO_RESULT_OWNED) free(result);
     return NULL;
   }
 
@@ -413,7 +428,7 @@ static PolyUOp **toposort_worker(
     free(stack);
     free(state);
     poly_map_destroy(visited);
-    if (owned_result) free(result);
+    if (storage == POLY_TOPO_RESULT_OWNED) free(result);
     return NULL;
   }
 
@@ -455,7 +470,7 @@ static PolyUOp **toposort_worker(
             free(new_stack ? new_stack : stack);
             free(new_state ? new_state : state);
             poly_map_destroy(visited);
-            if (owned_result) free(result);
+            if (storage == POLY_TOPO_RESULT_OWNED) free(result);
             *n_out = 0;
             return NULL;
           }
@@ -475,21 +490,20 @@ static PolyUOp **toposort_worker(
 
       if (n >= cap) {
         int new_cap = cap * 2;
-        PolyUOp **new_result = owned_result ?
-                                   realloc(result, (size_t)new_cap * sizeof(PolyUOp *)) :
-                                   poly_arena_alloc(
-                                       ctx->arena, (size_t)new_cap * sizeof(PolyUOp *),
-                                       _Alignof(PolyUOp *)
-                                   );
+        PolyUOp **new_result =
+            (storage == POLY_TOPO_RESULT_OWNED) ?
+                realloc(result, (size_t)new_cap * sizeof(PolyUOp *)) :
+                toposort_result_alloc(ctx, new_cap, storage);
         if (!new_result) {
           free(stack);
           free(state);
           poly_map_destroy(visited);
-          if (owned_result) free(result);
+          if (storage == POLY_TOPO_RESULT_OWNED) free(result);
           *n_out = 0;
           return NULL;
         }
-        if (!owned_result) memcpy(new_result, result, (size_t)n * sizeof(PolyUOp *));
+        if (storage != POLY_TOPO_RESULT_OWNED)
+          memcpy(new_result, result, (size_t)n * sizeof(PolyUOp *));
         result = new_result;
         cap = new_cap;
       }
@@ -511,7 +525,7 @@ PolyUOp **poly_toposort_ex(
     bool (*gate)(PolyUOp *),
     bool enter_calls
 ) {
-  return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls, false);
+  return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls, POLY_TOPO_RESULT_ARENA);
 }
 
 PolyUOp **poly_toposort_ex_user(
@@ -522,11 +536,11 @@ PolyUOp **poly_toposort_ex_user(
     void *user_data,
     bool enter_calls
 ) {
-  return toposort_worker(ctx, root, n_out, NULL, gate, user_data, enter_calls, false);
+  return toposort_worker(ctx, root, n_out, NULL, gate, user_data, enter_calls, POLY_TOPO_RESULT_ARENA);
 }
 
 PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out) {
-  return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, false);
+  return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, POLY_TOPO_RESULT_ARENA);
 }
 
 PolyUOp **poly_toposort_ex_alloc(
@@ -536,7 +550,7 @@ PolyUOp **poly_toposort_ex_alloc(
     bool (*gate)(PolyUOp *),
     bool enter_calls
 ) {
-  return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls, true);
+  return toposort_worker(ctx, root, n_out, gate, NULL, NULL, enter_calls, POLY_TOPO_RESULT_OWNED);
 }
 
 PolyUOp **poly_toposort_ex_user_alloc(
@@ -547,11 +561,15 @@ PolyUOp **poly_toposort_ex_user_alloc(
     void *user_data,
     bool enter_calls
 ) {
-  return toposort_worker(ctx, root, n_out, NULL, gate, user_data, enter_calls, true);
+  return toposort_worker(ctx, root, n_out, NULL, gate, user_data, enter_calls, POLY_TOPO_RESULT_OWNED);
 }
 
 PolyUOp **poly_toposort_alloc(PolyCtx *ctx, PolyUOp *root, int *n_out) {
-  return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, true);
+  return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, POLY_TOPO_RESULT_OWNED);
+}
+
+PolyUOp **poly_toposort_scratch(PolyCtx *ctx, PolyUOp *root, int *n_out) {
+  return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, POLY_TOPO_RESULT_SCRATCH);
 }
 
 void poly_toposort_free(PolyUOp **topo) {

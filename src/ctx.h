@@ -12,6 +12,7 @@
 
 struct PolyCtx {
   PolyArena *arena;
+  PolyArena *scratch;
   PolyMap *cse;
   PolyMap *schedule_cache;
   PolyMap *program_cache;
@@ -40,6 +41,14 @@ struct PolyCtx {
   PolyDevice preferred_device;
   PolyFrontendBufferReleaseFn frontend_buffer_release;
 };
+
+typedef PolyArenaMark PolyScratchMark;
+
+PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx);
+void poly_ctx_scratch_rewind(PolyCtx *ctx, PolyScratchMark mark);
+void *poly_ctx_scratch_alloc(PolyCtx *ctx, size_t size, size_t align);
+
+PolyUOp **poly_toposort_scratch(PolyCtx *ctx, PolyUOp *root, int *n_out);
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);

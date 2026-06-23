@@ -10,6 +10,7 @@
 
 #include "schedule/rangeify.h"
 #include "schedule/indexing.h"
+#include "ctx.h"
 #include "device.h"
 #include "simplify.h"
 #include <assert.h>
@@ -3590,8 +3591,9 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
    * realized. LUNIQUE only means "allocate a schedule temporary"; a normal
    * UNIQUE buffer can still be a producer when callify creates
    * AFTER(buffer, STORE(buffer, value)) for a fresh materialization. */
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, kernel_graph, &n_topo);
+  PolyUOp **topo = poly_toposort_scratch(ctx, kernel_graph, &n_topo);
   PolyUOp **after_nodes = NULL;
   bool *after_is_intermediate = NULL;
   bool *after_is_assign = NULL;
@@ -4064,6 +4066,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   free(after_is_intermediate);
   free(after_is_assign);
   free(intermediate_idx);
+  poly_ctx_scratch_rewind(ctx, scratch);
   return result;
 }
 

@@ -84,3 +84,32 @@ void poly_arena_destroy(PolyArena *a) {
 size_t poly_arena_used(PolyArena *a) {
   return a->total_used;
 }
+
+PolyArenaMark poly_arena_mark(PolyArena *a) {
+  PolyArenaMark mark = {0};
+  if (!a || !a->head) return mark;
+  mark.head = a->head;
+  mark.used = a->head->used;
+  mark.total_used = a->total_used;
+  return mark;
+}
+
+void poly_arena_rewind(PolyArena *a, PolyArenaMark mark) {
+  if (!a || !mark.head) return;
+
+  PolyArenaBlock *scan = a->head;
+  while (scan && scan != mark.head)
+    scan = scan->next;
+  if (!scan) return;
+
+  while (a->head && a->head != mark.head) {
+    PolyArenaBlock *next = a->head->next;
+    free(a->head);
+    a->head = next;
+  }
+
+  if (a->head) {
+    a->head->used = mark.used;
+    a->total_used = mark.total_used;
+  }
+}

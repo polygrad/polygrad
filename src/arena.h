@@ -19,4 +19,13 @@ struct PolyArena {
   size_t total_used;
 };
 
+typedef struct {
+  PolyArenaBlock *head;
+  size_t used;
+  size_t total_used;
+} PolyArenaMark;
+
+PolyArenaMark poly_arena_mark(PolyArena *a);
+void poly_arena_rewind(PolyArena *a, PolyArenaMark mark);
+
 #endif /* POLY_ARENA_H */

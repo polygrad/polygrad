@@ -5,6 +5,7 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 #include "../src/frontend_internal.h"
+#include "../src/ctx.h"
 
 /* Basic creation */
 
@@ -297,6 +298,33 @@ TEST(uop, toposort_alloc_is_owned_and_does_not_grow_ctx_arena) {
   }
   size_t after = poly_arena_used(poly_ctx_arena(ctx));
   ASSERT_INT_EQ(after, before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, toposort_scratch_rewinds_without_growing_ctx_arena) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *x = a;
+  for (int i = 0; i < 32; i++)
+    x = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, x, poly_arg_none());
+
+  size_t main_before = poly_arena_used(poly_ctx_arena(ctx));
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyScratchMark mark = poly_ctx_scratch_mark(ctx);
+
+  int n = 0;
+  PolyUOp **sorted = poly_toposort_scratch(ctx, x, &n);
+  ASSERT_NOT_NULL(sorted);
+  ASSERT_INT_EQ(n, 33);
+  ASSERT_FALSE(poly_ctx_owns_ptr(ctx, sorted));
+  ASSERT_INT_EQ(poly_arena_used(poly_ctx_arena(ctx)), main_before);
+  ASSERT_TRUE(poly_arena_used(ctx->scratch) > scratch_before);
+
+  poly_ctx_scratch_rewind(ctx, mark);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+  ASSERT_INT_EQ(poly_arena_used(poly_ctx_arena(ctx)), main_before);
 
   poly_ctx_destroy(ctx);
   PASS();
