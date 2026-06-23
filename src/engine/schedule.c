@@ -31,7 +31,7 @@ static void stable_kernel_fn_name(char *out, size_t cap, PolyDevice device, Poly
 }
 
 typedef struct {
-  PolyUOp *root;
+  PolyUOp *program;
   PolyDevice device;
   uint32_t env_stamp;
   PolyRunner runner;
@@ -2304,8 +2304,8 @@ static bool poly_program_cache_enabled(void) {
   return !v || v[0] != '0';
 }
 
-static uint32_t poly_program_cache_hash(PolyUOp *root, PolyDevice device, uint32_t env_stamp) {
-  uint32_t h = poly_structural_hash(root);
+static uint32_t poly_program_cache_hash(PolyUOp *program, PolyDevice device, uint32_t env_stamp) {
+  uint32_t h = poly_structural_hash(program);
   h ^= ((uint32_t)device + 0x9e3779b9u + (h << 6) + (h >> 2));
   h ^= (env_stamp + 0x85ebca6bu + (h << 6) + (h >> 2));
   return h;
@@ -2315,7 +2315,7 @@ static bool poly_program_cache_eq(const void *a, const void *b) {
   const PolyProgramCacheEntry *ka = (const PolyProgramCacheEntry *)a;
   const PolyProgramCacheEntry *kb = (const PolyProgramCacheEntry *)b;
   return ka && kb && ka->device == kb->device && ka->env_stamp == kb->env_stamp &&
-         poly_structural_eq(ka->root, kb->root);
+         poly_structural_eq(ka->program, kb->program);
 }
 
 static void poly_program_cache_entry_free(const void *key, void *value, void *userdata) {
@@ -3405,15 +3405,17 @@ static int poly_lower_compute_call_cached(
   if (!backend || !backend->lower_item) return -1;
   if (poly_backend_ensure_open(device) != 0) return -1;
 
-  PolyUOp *body = poly_program_body(poly_call_raw_body(call));
+  PolyUOp *program = poly_call_raw_body(call);
+  PolyUOp *body = poly_program_body(program);
   if (!body || !poly_validate_kernel_graph(ctx, body)) return -2;
+  if (!program) return -1;
 
   PolyProgramCacheEntry key = {
-      .root = body,
+      .program = program,
       .device = device,
       .env_stamp = env_stamp,
   };
-  uint32_t hash = poly_program_cache_hash(body, device, env_stamp);
+  uint32_t hash = poly_program_cache_hash(program, device, env_stamp);
   PolyProgramCacheEntry *entry =
       (poly_program_cache_enabled() && ctx && ctx->program_cache)
           ? poly_map_get(ctx->program_cache, hash, &key, poly_program_cache_eq)
@@ -3421,7 +3423,7 @@ static int poly_lower_compute_call_cached(
 
   if (!entry) {
     char fn_name[64];
-    stable_kernel_fn_name(fn_name, sizeof(fn_name), device, body);
+    stable_kernel_fn_name(fn_name, sizeof(fn_name), device, program);
 
     PolyRunner lowered = {0};
     if (backend->lower_item(ctx, body, fn_name, &lowered) != 0) return -1;
@@ -3429,7 +3431,7 @@ static int poly_lower_compute_call_cached(
     if (poly_program_cache_enabled() && ctx && ctx->program_cache) {
       entry = calloc(1, sizeof(*entry));
       if (entry) {
-        entry->root = body;
+        entry->program = program;
         entry->device = device;
         entry->env_stamp = env_stamp;
         entry->runner = lowered;

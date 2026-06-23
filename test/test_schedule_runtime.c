@@ -1391,6 +1391,71 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
   PASS();
 }
 
+TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
+  ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
+  setenv("POLY_PCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+
+  PolySchedule *sched1 = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *sched2 = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched1);
+  ASSERT_NOT_NULL(sched2);
+  ASSERT_INT_EQ(sched1->template->n_calls, 1);
+  ASSERT_INT_EQ(sched2->template->n_calls, 1);
+
+  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched1, 0, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+
+  PolyUOp *old_call = poly_schedule_call(sched2, 0);
+  ASSERT_NOT_NULL(old_call);
+  ASSERT_TRUE(old_call->n_src >= 1);
+  PolyUOp *body = poly_schedule_call_body(sched2, 0);
+  ASSERT_NOT_NULL(body);
+  ASSERT_INT_EQ(body->op, POLY_OP_SINK);
+
+  PolyUOp **base_src = malloc((size_t)old_call->n_src * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(base_src);
+  memcpy(base_src, old_call->src, (size_t)old_call->n_src * sizeof(PolyUOp *));
+  base_src[0] = body;
+  PolyUOp *base_call =
+      poly_uop(ctx, POLY_OP_CALL, POLY_VOID, base_src, old_call->n_src, poly_arg_none());
+  free(base_src);
+  ASSERT_NOT_NULL(base_call);
+
+  PolyUOp *alt_program = poly_program_from_call(ctx, base_call, "alt_program_cache_key");
+  ASSERT_NOT_NULL(alt_program);
+  ASSERT_PTR_NEQ(alt_program, old_call->src[0]);
+
+  PolyUOp **alt_src = malloc((size_t)old_call->n_src * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(alt_src);
+  memcpy(alt_src, old_call->src, (size_t)old_call->n_src * sizeof(PolyUOp *));
+  alt_src[0] = alt_program;
+  PolyUOp *alt_call =
+      poly_uop(ctx, POLY_OP_CALL, POLY_VOID, alt_src, old_call->n_src, poly_arg_none());
+  free(alt_src);
+  ASSERT_NOT_NULL(alt_call);
+
+  sched2->template->linear->src[0] = alt_call;
+  sched2->run->calls[0].call = alt_call;
+
+  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched2, 0, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 2);
+
+  poly_schedule_free(sched2);
+  poly_schedule_free(sched1);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&pcache);
+  PASS();
+}
+
 TEST(schedule_runtime, schedule_cache_misses_on_changed_op_shape) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
