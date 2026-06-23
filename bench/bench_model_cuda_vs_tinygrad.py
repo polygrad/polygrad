@@ -8,7 +8,7 @@ the timed loop, moving them to CUDA, realizing, synchronizing, and reading the
 result.
 
 Usage:
-  PYTHONPATH=references/tinygrad_latest python bench/bench_model_cuda_vs_tinygrad.py
+  make HAS_CUDA=1 bench-model-cuda
 """
 
 from __future__ import annotations
@@ -22,18 +22,9 @@ import sys
 import tempfile
 import textwrap
 import time
-import typing
 from pathlib import Path
 
 import numpy as np
-
-if not hasattr(typing, "Self"):
-    try:
-        from typing_extensions import Self as _Self
-
-        typing.Self = _Self
-    except Exception:
-        pass
 
 from tinygrad import Tensor, Device
 from tinygrad.helpers import DEV

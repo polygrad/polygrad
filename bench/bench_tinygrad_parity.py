@@ -22,7 +22,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import typing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -244,13 +243,6 @@ def _import_polygrad(repo_root: Path, lib_path: Path) -> tuple[Any, Callable[[],
 
 def _import_tinygrad(tinygrad_path: Path) -> tuple[Any, Callable[[], dict[str, int]]]:
     sys.path.insert(0, str(tinygrad_path))
-    if not hasattr(typing, "Self"):
-        try:
-            from typing_extensions import Self as _Self
-
-            typing.Self = _Self
-        except Exception:
-            pass
     from tinygrad import Tensor
 
     def cache_stats() -> dict[str, int]:
