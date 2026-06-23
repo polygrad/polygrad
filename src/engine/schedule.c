@@ -68,6 +68,11 @@ static PolyUOp *poly_program_body(PolyUOp *body) {
   return body;
 }
 
+static PolyUOp *poly_program_kernel_body(PolyUOp *program) {
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 1) return NULL;
+  return program->src[0];
+}
+
 PolyUOp *poly_schedule_call_body(const PolySchedule *schedule, int call_index) {
   return poly_program_body(poly_call_raw_body(poly_schedule_call(schedule, call_index)));
 }
@@ -3406,9 +3411,8 @@ static int poly_lower_compute_call_cached(
   if (poly_backend_ensure_open(device) != 0) return -1;
 
   PolyUOp *program = poly_call_raw_body(call);
-  PolyUOp *body = poly_program_body(program);
+  PolyUOp *body = poly_program_kernel_body(program);
   if (!body || !poly_validate_kernel_graph(ctx, body)) return -2;
-  if (!program) return -1;
 
   PolyProgramCacheEntry key = {
       .program = program,
@@ -3426,7 +3430,7 @@ static int poly_lower_compute_call_cached(
     stable_kernel_fn_name(fn_name, sizeof(fn_name), device, program);
 
     PolyRunner lowered = {0};
-    if (backend->lower_item(ctx, body, fn_name, &lowered) != 0) return -1;
+    if (backend->lower_item(ctx, program, fn_name, &lowered) != 0) return -1;
 
     if (poly_program_cache_enabled() && ctx && ctx->program_cache) {
       entry = calloc(1, sizeof(*entry));
@@ -3477,10 +3481,12 @@ static void cpu_free_fn(void *self);
 
 static int cpu_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
+  PolyUOp *scheduled_root = poly_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   int n_lin;
   PolyRewriteOpts opts = {
       .optimize = true,
@@ -3573,11 +3579,13 @@ static const PolyAllocator *host_get_allocator(void) {
 
 static int interp_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
   (void)fn_name;
+  PolyUOp *scheduled_root = poly_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   int n_lin;
   PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
@@ -3660,10 +3668,12 @@ static void cuda_extract_dims(
 
 static int cuda_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
+  PolyUOp *scheduled_root = poly_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   int n_lin;
   PolyUOp **lin = poly_linearize_cuda(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
@@ -3762,10 +3772,12 @@ static const PolyAllocator *cuda_get_allocator(void) {
 
 static int hip_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
+  PolyUOp *scheduled_root = poly_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   int n_lin;
   PolyUOp **lin = poly_linearize_hip(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
@@ -3960,10 +3972,12 @@ static bool x64_can_handle(PolyUOp *root) {
 
 static int x64_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
+  PolyUOp *scheduled_root = poly_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   /* Pre-check: fall back to CPU for unsupported patterns/dtypes */
   if (!x64_can_handle(scheduled_root)) goto fallback;
 
@@ -3995,7 +4009,7 @@ fallback:
    * Fall back to CPU compiled backend for unsupported kernels.
    * Both use host memory, so buffer layout is compatible. */
 #ifndef __EMSCRIPTEN__
-  return cpu_lower_item(ctx, scheduled_root, fn_name, out);
+  return cpu_lower_item(ctx, program, fn_name, out);
 #else
   return -1;
 #endif

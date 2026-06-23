@@ -16,6 +16,11 @@ typedef struct {
 static int poly_wasm_execute_fn(void *self, void **args, int n_args);
 static void poly_wasm_free_fn(void *self);
 
+static PolyUOp *wasm_program_kernel_body(PolyUOp *program) {
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 1) return NULL;
+  return program->src[0];
+}
+
 EM_JS(int, js_host_copy_out_to_wasm, (uintptr_t src_key, uint8_t *dst, int nbytes), {
   const map = Module.__polygradHostBuffers;
   const src = map && map.get(String(src_key));
@@ -136,11 +141,13 @@ static const PolyAllocator POLY_WASM_ALLOCATOR = {
 
 int poly_wasm_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
   (void)fn_name;
+  PolyUOp *scheduled_root = wasm_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   int n_lin;
   PolyUOp **lin = poly_linearize_wasm_env(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;

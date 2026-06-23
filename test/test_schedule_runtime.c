@@ -357,6 +357,45 @@ TEST(schedule_runtime, compute_schedule_calls_are_program_backed) {
   PASS();
 }
 
+TEST(schedule_runtime, compute_call_lower_rejects_raw_sink_body) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
+
+  PolyUOp *call = poly_schedule_call(sched, 0);
+  ASSERT_NOT_NULL(call);
+  ASSERT_TRUE(call->n_src >= 1);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
+
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_NOT_NULL(body);
+  ASSERT_INT_EQ(body->op, POLY_OP_SINK);
+
+  PolyUOp **src = malloc((size_t)call->n_src * sizeof(PolyUOp *));
+  ASSERT_NOT_NULL(src);
+  memcpy(src, call->src, (size_t)call->n_src * sizeof(PolyUOp *));
+  src[0] = body;
+  PolyUOp *raw_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, call->n_src, poly_arg_none());
+  free(src);
+  ASSERT_NOT_NULL(raw_call);
+
+  sched->template->linear->src[0] = raw_call;
+  sched->run->calls[0].call = raw_call;
+  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched, 0, POLY_DEVICE_CPU), -1);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(schedule_runtime, runner_launch_uses_programinfo_metadata) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

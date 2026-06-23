@@ -18,6 +18,11 @@ typedef struct {
   int n_bindings;
 } PolyWebGpuRunnerHandle;
 
+static PolyUOp *webgpu_program_kernel_body(PolyUOp *program) {
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 1) return NULL;
+  return program->src[0];
+}
+
 static int webgpu_launch_dim_upper_bound(PolyCtx *ctx, PolyUOp *expr) {
   if (!expr) return 1;
   int64_t lo = 0, hi = 1;
@@ -502,10 +507,12 @@ uintptr_t poly_webgpu_create_buffer_view(uintptr_t base_handle, size_t byte_offs
 
 int poly_webgpu_lower_item(
     PolyCtx *ctx,
-    PolyUOp *scheduled_root,
+    PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
+  PolyUOp *scheduled_root = webgpu_program_kernel_body(program);
+  if (!scheduled_root) return -1;
   bool timing = poly_debug_at_least(7);
   double t0 = timing ? poly_now_ms() : 0.0;
   if (timing) {

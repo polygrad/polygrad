@@ -185,7 +185,10 @@ typedef struct {
   PolyDevice id;
   bool host_executed;
 
-  int (*lower_item)(PolyCtx *ctx, PolyUOp *scheduled_root, const char *fn_name, PolyRunner *runner_out);
+  /* Lower a PROGRAM-rooted scheduled compute call body. Backends may unwrap the
+   * PROGRAM to a renderer-specific kernel body internally, but the vtable
+   * boundary follows tinygrad's runtime cache boundary. */
+  int (*lower_item)(PolyCtx *ctx, PolyUOp *program, const char *fn_name, PolyRunner *runner_out);
   int (*execute)(PolyRunner *runner, void **args, int n_args);
   void (*free_runner)(PolyRunner *runner);
   int (*ensure_open)(void);
