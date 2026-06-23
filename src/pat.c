@@ -586,20 +586,11 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
         new_n = cur;
       }
 
-      /* CALL gating: when enter_calls=false, set identity mappings for the
-       * entire callee subgraph (src[0]) so stage 1 lookups resolve immediately
-       * instead of stalling in the waitlist. */
+      /* CALL gating: tinygrad's graph_rewrite treats CALL/FUNCTION bodies as
+       * opaque when enter_calls=false by identity-mapping only src[0]. CALL
+       * arguments remain normal graph inputs and must still be traversed. */
       if (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 0) {
-        PolyUOp *callee = new_n->src[0];
-        int n_callee = 0;
-        PolyUOp **callee_topo = poly_toposort(ctx, callee, &n_callee);
-        if (!callee_topo && n_callee > 0) {
-          fprintf(stderr, "polygrad: graph_rewrite callee toposort failed\n");
-          failed = true;
-          goto cleanup;
-        }
-        for (int ci = 0; ci < n_callee; ci++)
-          replace_set(replace, callee_topo[ci], callee_topo[ci]);
+        replace_set(replace, new_n->src[0], new_n->src[0]);
       }
 
       /* Stage 1 rebuilds from rewritten sources and applies top-down rewrite. */
@@ -773,12 +764,10 @@ PolyUOp *poly_graph_walk_rewrite(
         return NULL;
       }
 
-      /* CALL gating: identity-map entire callee subgraph */
+      /* CALL gating: identity-map only the opaque callee root, matching
+       * tinygrad RewriteContext.walk_rewrite. */
       if (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 0) {
-        int n_callee = 0;
-        PolyUOp **ct = poly_toposort(ctx, n->src[0], &n_callee);
-        for (int i = 0; i < n_callee; i++)
-          replace_set(replace, ct[i], ct[i]);
+        replace_set(replace, n->src[0], n->src[0]);
       }
 
       int start = (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 1) ? 1 : 0;

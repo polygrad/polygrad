@@ -407,6 +407,56 @@ TEST(pat, graph_rewrite_skips_call_body) {
   PASS();
 }
 
+TEST(pat, graph_rewrite_call_args_do_not_inherit_callee_body_gating) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *shared_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
+  PolyUOp *callee = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared_neg, c2, poly_arg_none());
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee, shared_neg, poly_arg_none());
+
+  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  PolyUOp *result = poly_graph_rewrite_ctx_ex2(ctx, call, pm, NULL, false, false);
+  ASSERT_NOT_NULL(result);
+  ASSERT_INT_EQ(result->op, POLY_OP_CALL);
+  ASSERT_PTR_EQ(result->src[0], callee);
+  ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(neg_pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, walk_rewrite_call_args_do_not_inherit_callee_body_gating) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+  PolyUOp *shared_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
+  PolyUOp *callee = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared_neg, c2, poly_arg_none());
+  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee, shared_neg, poly_arg_none());
+
+  PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
+  PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  PolyUOp *result = poly_graph_walk_rewrite(ctx, call, pm, NULL, NULL, false);
+  ASSERT_NOT_NULL(result);
+  ASSERT_INT_EQ(result->op, POLY_OP_CALL);
+  ASSERT_PTR_EQ(result->src[0], callee);
+  ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(neg_pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static PolyUOp *rewrite_add_to_sub(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
   return poly_uop(ctx, POLY_OP_SUB, root->dtype, root->src, root->n_src, root->arg);
