@@ -6,6 +6,7 @@
  */
 
 #include "test_harness.h"
+#include "../src/ctx.h"
 #include "../src/engine/realize.h"
 #include "../src/device.h"
 #include "../src/frontend.h"
@@ -1058,6 +1059,28 @@ TEST(realize, transform_to_call_many_reduce_view_sources_materialize_all) {
   ASSERT_INT_EQ(final_store->op, POLY_OP_STORE);
   ASSERT_TRUE(final_store->n_src >= 2);
   ASSERT_INT_EQ(count_root_ops(ctx, final_store->src[1], POLY_OP_REDUCE_AXIS), 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, transform_to_call_reduce_dependency_scan_rewinds_scratch) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *value = poly_alu2(ctx, POLY_OP_ADD, buf, poly_const_float(ctx, 1.0f));
+  int64_t axis[] = {0};
+  PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_ADD, value, axis, 1);
+  PolyUOp *view = poly_reshape(ctx, reduced, (int64_t[]){1}, 1);
+  PolyUOp *target = poly_alu2(ctx, POLY_OP_ADD, view, poly_const_float(ctx, 2.0f));
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyUOp *targets[] = {target};
+  PolyUOp *realized[] = {NULL};
+  PolyUOp *big_call = poly_transform_to_call(ctx, targets, 1, realized);
+  ASSERT_NOT_NULL(big_call);
+  ASSERT_NOT_NULL(realized[0]);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
 
   poly_ctx_destroy(ctx);
   PASS();

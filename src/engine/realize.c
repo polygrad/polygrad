@@ -304,13 +304,19 @@ static bool poly_transform_to_call_reduce_root(PolyUOp *u) {
 static bool poly_transform_to_call_depends_on_input_buffer(PolyCtx *ctx, PolyUOp *u) {
   if (!ctx || !u) return false;
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, u, &n_topo);
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  PolyUOp **topo = poly_toposort_scratch(ctx, u, &n_topo);
+  bool depends = false;
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *t = topo[i];
     if (!t) continue;
-    if (poly_uop_has_buffer_identity(t)) return true;
+    if (poly_uop_has_buffer_identity(t)) {
+      depends = true;
+      break;
+    }
   }
-  return false;
+  poly_ctx_scratch_rewind(ctx, scratch);
+  return depends;
 }
 
 static PolyUOp *poly_transform_to_call_materialize_reduce_source(
