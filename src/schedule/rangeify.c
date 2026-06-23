@@ -2686,7 +2686,7 @@ static int poly_red_gate_collect(
 /* Substitute RANGE UOps in val's subgraph per sub_map, return rewritten val. */
 static PolyUOp *poly_substitute_ranges(PolyCtx *ctx, PolyUOp *val, PolyMap *sub_map) {
   int n;
-  PolyUOp **topo = poly_toposort(ctx, val, &n);
+  PolyUOp **topo = poly_toposort_alloc(ctx, val, &n);
   PolyMap *rmap = poly_map_new(n < 8 ? 8 : (uint32_t)n);
 
   for (int t = 0; t < n; t++) {
@@ -2719,6 +2719,7 @@ static PolyUOp *poly_substitute_ranges(PolyCtx *ctx, PolyUOp *val, PolyMap *sub_
 
   PolyUOp *result = rmap_get(rmap, val);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return result ? result : val;
 }
 
@@ -3509,7 +3510,8 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
   poly_indexing_ctx_destroy(ictx);
   if (timing) {
     int n_topo = 0;
-    poly_toposort(ctx, kernel_graph, &n_topo);
+    PolyUOp **topo_dbg = poly_toposort_alloc(ctx, kernel_graph, &n_topo);
+    poly_toposort_free(topo_dbg);
     fprintf(
         stderr,
         "[polygrad:get_kernel_graph] done earliest=%.3fms realize_map=%.3fms range_prop=%.3fms rangeify=%.3fms cleanup=%.3fms symbolic_reduce=%.3fms remove=%.3fms limit=%.3fms flatten=%.3fms addbuf=%.3fms tags=%.3fms total=%.3fms topo=%d\n",
@@ -3525,11 +3527,16 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
 
 static bool poly_kernel_body_needs_zero(PolyCtx *ctx, PolyUOp *u) {
   int n = 0;
-  PolyUOp **topo = poly_toposort(ctx, u, &n);
+  PolyUOp **topo = poly_toposort_alloc(ctx, u, &n);
+  bool needs_zero = false;
   for (int i = 0; i < n; i++) {
-    if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_REDUCE_AXIS) return true;
+    if (topo[i]->op == POLY_OP_REDUCE || topo[i]->op == POLY_OP_REDUCE_AXIS) {
+      needs_zero = true;
+      break;
+    }
   }
-  return false;
+  poly_toposort_free(topo);
+  return needs_zero;
 }
 
 PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
