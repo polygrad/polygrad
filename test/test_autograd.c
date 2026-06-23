@@ -5,6 +5,7 @@
 #include <math.h>
 
 #include "test_harness.h"
+#include "../src/ctx.h"
 #include "../src/polygrad.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
@@ -957,6 +958,42 @@ TEST(autograd, multi_wrt_same_loss_e2e) {
    * ambiguity in the single-kernel compilation path. The analytical gradient
    * check above (y + 2x) is sufficient. The fdiv_both_e2e test validates
    * the finite_diff_check path for two-variable graphs. */
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, grad_reverse_pass_rewinds_scratch_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *y = poly_alu2(ctx, POLY_OP_MUL, x, x);
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, y, (int64_t[]){0}, 1);
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyUOp *gx = poly_grad(ctx, loss, x);
+  ASSERT_NOT_NULL(gx);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, grad_many_reverse_pass_rewinds_scratch_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *y = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyUOp *xy = poly_alu2(ctx, POLY_OP_MUL, x, y);
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, xy, (int64_t[]){0}, 1);
+
+  PolyUOp *wrts[] = {x, y};
+  PolyUOp *grads[] = {NULL, NULL};
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  ASSERT_INT_EQ(poly_grad_many(ctx, loss, NULL, wrts, 2, grads), 0);
+  ASSERT_NOT_NULL(grads[0]);
+  ASSERT_NOT_NULL(grads[1]);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
 
   poly_ctx_destroy(ctx);
   PASS();

@@ -15,6 +15,7 @@
  */
 
 #include "engine/schedule.h"
+#include "ctx.h"
 #include "pat.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,8 +234,12 @@ static PolyMap *grad_reverse_pass(
     int n_targets
 ) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, loss, &n_topo);
-  if (!topo || n_topo <= 0) return NULL;
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  PolyUOp **topo = poly_toposort_scratch(ctx, loss, &n_topo);
+  if (!topo || n_topo <= 0) {
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return NULL;
+  }
 
   /* Target-prune: only walk nodes on paths to targets */
   PolyUOp **walk = topo;
@@ -247,12 +252,25 @@ static PolyMap *grad_reverse_pass(
       /* No path from loss to any target — return empty gradient map */
       free(walk);
       PolyMap *grads = poly_map_new(16);
+      poly_ctx_scratch_rewind(ctx, scratch);
       return grads;
     }
   }
 
   PolyMap *grads = poly_map_new((size_t)n_walk * 2 + 16);
-  if (!grads) return NULL;
+  if (!grads) {
+    if (walk_owned) free(walk);
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return NULL;
+  }
+
+#define GRAD_REVERSE_FAIL()                \
+  do {                                     \
+    if (walk_owned) free(walk);            \
+    poly_map_destroy(grads);               \
+    poly_ctx_scratch_rewind(ctx, scratch); \
+    return NULL;                           \
+  } while (0)
 
   grad_add(ctx, grads, loss, initial_grad);
 
@@ -577,16 +595,12 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_PERMUTE: {
       if (u->arg.kind != POLY_ARG_INT_TUPLE) {
         fprintf(stderr, "polygrad: autograd: PERMUTE missing int tuple arg\n");
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       int n = u->arg.int_tuple.n;
       if (n < 0 || n > POLY_MAX_DIMS) {
         fprintf(stderr, "polygrad: autograd: PERMUTE rank %d out of bounds\n", n);
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       int64_t inv[POLY_MAX_DIMS];
       for (int i = 0; i < n; i++)
@@ -601,16 +615,12 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_PAD: {
       if (u->arg.kind != POLY_ARG_PAIR_TUPLE) {
         fprintf(stderr, "polygrad: autograd: PAD missing pair tuple arg\n");
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       int n = u->arg.pair_tuple.n;
       if (n < 0 || n > POLY_MAX_DIMS) {
         fprintf(stderr, "polygrad: autograd: PAD rank %d out of bounds\n", n);
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       PolyShape in_shape = poly_uop_shape_cached(ctx, u->src[0]);
       int64_t shrink_pairs[POLY_MAX_DIMS][2];
@@ -628,16 +638,12 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_SHRINK: {
       if (u->arg.kind != POLY_ARG_PAIR_TUPLE) {
         fprintf(stderr, "polygrad: autograd: SHRINK missing pair tuple arg\n");
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       int n = u->arg.pair_tuple.n;
       if (n < 0 || n > POLY_MAX_DIMS) {
         fprintf(stderr, "polygrad: autograd: SHRINK rank %d out of bounds\n", n);
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       PolyShape in_shape = poly_uop_shape_cached(ctx, u->src[0]);
       int64_t pad_pairs[POLY_MAX_DIMS][2];
@@ -656,9 +662,7 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_FLIP: {
       if (u->arg.kind != POLY_ARG_INT_TUPLE) {
         fprintf(stderr, "polygrad: autograd: FLIP missing int tuple arg\n");
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       PolyUOp *gx = poly_flip(ctx, g, u->arg.int_tuple.vals, u->arg.int_tuple.n);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
@@ -668,9 +672,7 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_REDUCE_AXIS: {
       if (u->arg.kind != POLY_ARG_REDUCE_AXIS) {
         fprintf(stderr, "polygrad: autograd: REDUCE_AXIS missing reduce_axis arg\n");
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
       PolyOps reduce_op = u->arg.reduce_axis.op;
       PolyShape in_shape = poly_uop_shape_cached(ctx, u->src[0]);
@@ -728,9 +730,7 @@ static PolyMap *grad_reverse_pass(
             stderr, "polygrad: autograd: unsupported REDUCE_AXIS op: %s\n", poly_op_name(reduce_op)
         );
 
-        if (walk_owned) free(walk);
-        poly_map_destroy(grads);
-        return NULL;
+        GRAD_REVERSE_FAIL();
       }
 
     } break;
@@ -740,13 +740,13 @@ static PolyMap *grad_reverse_pass(
        * because it lies on a path to a target. Silent skip hides bugs.
        * Fail hard so callers get NULL and can report the error. */
       fprintf(stderr, "polygrad: autograd: missing gradient rule for %s\n", poly_op_name(u->op));
-      poly_map_destroy(grads);
-      if (walk_owned) free(walk);
-      return NULL;
+      GRAD_REVERSE_FAIL();
     }
   }
 
   if (walk_owned) free(walk);
+  poly_ctx_scratch_rewind(ctx, scratch);
+#undef GRAD_REVERSE_FAIL
   return grads;
 }
 
