@@ -17,7 +17,6 @@ struct PolyCtx {
   PolyMap *schedule_cache;
   PolyMap *to_program_cache;
   PolyMap *program_cache;
-  PolyMap *program_infos;
   PolyMap *shape_cache;
   PolyMap *buffers;
   PolyMap *tensors_by_uop;

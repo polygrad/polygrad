@@ -235,10 +235,10 @@ static int poly_call_mask_to_indices(
 }
 
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program) {
+  (void)ctx;
   if (!program || program->op != POLY_OP_PROGRAM) return NULL;
   if (program->arg.kind == POLY_ARG_PROGRAM_INFO) return program->arg.program_info;
-  if (!ctx || !ctx->program_infos) return NULL;
-  return poly_map_get(ctx->program_infos, poly_ptr_hash(program), program, poly_ptr_eq);
+  return NULL;
 }
 
 static bool str_eq(const char *a, const char *b) {
@@ -609,11 +609,6 @@ static PolyUOp *poly_program_attach_linear(PolyCtx *ctx, PolyUOp *program) {
 
   PolyUOp *src[3] = {program->src[0], program->src[1], linear};
   PolyUOp *with_linear = poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 3, program->arg);
-  if (!with_linear) return NULL;
-
-  const PolyProgramInfo *info = poly_program_info(ctx, program);
-  if (info && ctx->program_infos)
-    poly_map_set(ctx->program_infos, poly_ptr_hash(with_linear), with_linear, (void *)info, poly_ptr_eq);
   return with_linear;
 }
 
