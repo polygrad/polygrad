@@ -528,7 +528,16 @@ int poly_webgpu_lower_item(
   double t_check = timing ? poly_now_ms() : 0.0;
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+  bool lin_owned = false;
+  PolyUOp *linear = poly_program_linear(program);
+  PolyUOp **lin = NULL;
+  if (linear) {
+    n_lin = linear->n_src;
+    lin = linear->src;
+  } else {
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
   if (!lin) return -1;
   double t_lin = timing ? poly_now_ms() : 0.0;
 
@@ -536,7 +545,7 @@ int poly_webgpu_lower_item(
   webgpu_extract_dims(ctx, lin, n_lin, grid, local);
 
   char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
-  free(lin);
+  if (lin_owned) free(lin);
   if (!wgsl) return -1;
   double t_render = timing ? poly_now_ms() : 0.0;
   if (timing) {

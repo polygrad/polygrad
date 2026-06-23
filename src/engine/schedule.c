@@ -87,6 +87,19 @@ static PolyUOp *poly_program_kernel_body(PolyUOp *program) {
   return program->src[0];
 }
 
+PolyUOp *poly_program_linear(PolyUOp *program) {
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 3) return NULL;
+  PolyUOp *linear = program->src[2];
+  return (linear && linear->op == POLY_OP_LINEAR) ? linear : NULL;
+}
+
+static PolyUOp **poly_program_linear_uops(PolyUOp *program, int *n_out) {
+  PolyUOp *linear = poly_program_linear(program);
+  if (!linear) return NULL;
+  if (n_out) *n_out = linear->n_src;
+  return linear->src;
+}
+
 PolyUOp *poly_schedule_call_body(const PolySchedule *schedule, int call_index) {
   return poly_program_body(poly_call_raw_body(poly_schedule_call(schedule, call_index)));
 }
@@ -500,6 +513,32 @@ PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name) {
   if (!body) return NULL;
   if (body->op == POLY_OP_PROGRAM) return body;
   return poly_program_from_call_body(ctx, call, body, name, poly_uop_device(body));
+}
+
+static PolyUOp *poly_program_attach_linear(PolyCtx *ctx, PolyUOp *program) {
+  if (!ctx || !program || program->op != POLY_OP_PROGRAM) return NULL;
+  if (poly_program_linear(program)) return program;
+  if (program->n_src < 2) return NULL;
+
+  PolyUOp *body = poly_program_kernel_body(program);
+  if (!body) return NULL;
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, body, &n_lin);
+  if (!lin) return NULL;
+
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, lin, n_lin, poly_arg_none());
+  free(lin);
+  if (!linear) return NULL;
+
+  PolyUOp *src[3] = {program->src[0], program->src[1], linear};
+  PolyUOp *with_linear = poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 3, program->arg);
+  if (!with_linear) return NULL;
+
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  if (info && ctx->program_infos)
+    poly_map_set(ctx->program_infos, poly_ptr_hash(with_linear), with_linear, (void *)info, poly_ptr_eq);
+  return with_linear;
 }
 
 static int webgpu_collect_param_order(PolyUOp **lin, int n_lin, int *order, int n_params) {
@@ -3863,6 +3902,8 @@ static PolyUOp *poly_prepare_program_for_backend(
   PolyUOp *prepared =
       poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(program), device);
   if (!prepared) return NULL;
+  prepared = poly_program_attach_linear(ctx, prepared);
+  if (!prepared) return NULL;
 
   if (poly_program_cache_enabled() && ctx->to_program_cache) {
     entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyToProgramCacheEntry));
@@ -3994,9 +4035,14 @@ static int cpu_lower_item_impl(
   PolyUOp *scheduled_root = poly_program_kernel_body(program);
   if (!scheduled_root) return -1;
   int n_lin;
-  PolyUOp **lin = already_rewritten
-                        ? poly_linearize_rewritten(ctx, scheduled_root, &n_lin)
-                        : poly_linearize_ex(ctx, scheduled_root, cpu_schedule_rewrite_opts(), &n_lin);
+  bool lin_owned = false;
+  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
+  if (!lin) {
+    lin = already_rewritten
+              ? poly_linearize_rewritten(ctx, scheduled_root, &n_lin)
+              : poly_linearize_ex(ctx, scheduled_root, cpu_schedule_rewrite_opts(), &n_lin);
+    lin_owned = true;
+  }
   if (!lin) return -1;
   int cpu_threads = 1;
   for (int j = 0; j < n_lin; j++) {
@@ -4016,7 +4062,7 @@ static int cpu_lower_item_impl(
   }
 
   char *src = poly_render_c(lin, n_lin, fn_name);
-  free(lin);
+  if (lin_owned) free(lin);
   if (!src) return -1;
 
   if (poly_dump_kernels_enabled())
@@ -4105,7 +4151,15 @@ static int interp_lower_item(
   PolyUOp *scheduled_root = poly_program_kernel_body(program);
   if (!scheduled_root) return -1;
   int n_lin;
-  PolyUOp **lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
+  if (lin) {
+    PolyUOp **copy = n_lin > 0 ? malloc((size_t)n_lin * sizeof(PolyUOp *)) : NULL;
+    if (n_lin > 0 && !copy) return -1;
+    if (n_lin > 0) memcpy(copy, lin, (size_t)n_lin * sizeof(PolyUOp *));
+    lin = copy;
+  } else {
+    lin = poly_linearize(ctx, scheduled_root, &n_lin);
+  }
   if (!lin) return -1;
 
   InterpHandle *ih = malloc(sizeof(InterpHandle));
@@ -4193,7 +4247,12 @@ static int cuda_lower_item(
   PolyUOp *scheduled_root = poly_program_kernel_body(program);
   if (!scheduled_root) return -1;
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+  bool lin_owned = false;
+  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
+  if (!lin) {
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
   if (!lin) return -1;
 
   int grid[3], local[3], launch_bounds = 1;
@@ -4201,7 +4260,7 @@ static int cuda_lower_item(
   cuda_extract_dims(ctx, lin, n_lin, grid, local, grid_exprs, block_exprs, &launch_bounds);
 
   char *src = poly_render_cuda(lin, n_lin, fn_name, launch_bounds);
-  free(lin);
+  if (lin_owned) free(lin);
   if (!src) return -1;
 
   if (poly_dump_kernels_enabled())
@@ -4297,7 +4356,12 @@ static int hip_lower_item(
   PolyUOp *scheduled_root = poly_program_kernel_body(program);
   if (!scheduled_root) return -1;
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+  bool lin_owned = false;
+  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
+  if (!lin) {
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
   if (!lin) return -1;
 
   /* Extract grid/block from SPECIAL ops */
@@ -4315,7 +4379,7 @@ static int hip_lower_item(
   int block_size = local_size > 0 ? local_size : 256;
 
   char *src = poly_render_hip(lin, n_lin, fn_name, block_size);
-  free(lin);
+  if (lin_owned) free(lin);
   if (!src) return -1;
 
   if (poly_dump_kernels_enabled())
@@ -4503,12 +4567,17 @@ static int x64_lower_item(
   /* Use renderer-specific x64 linearization here, matching tinygrad's
    * renderer-driven lowering contract. Falling back to CPU is still allowed
    * later if the x64 renderer cannot handle the resulting kernel. */
-  PolyUOp **lin = poly_linearize_x64(ctx, scheduled_root, &n_lin);
+  bool lin_owned = false;
+  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
+  if (!lin) {
+    lin = poly_linearize_x64(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
   if (!lin) goto fallback;
 
   int code_size;
   uint8_t *code = poly_render_x64(lin, n_lin, &code_size);
-  free(lin);
+  if (lin_owned) free(lin);
   if (!code) goto fallback;
 
   PolyX64Program *prog = poly_compile_x64(code, code_size);

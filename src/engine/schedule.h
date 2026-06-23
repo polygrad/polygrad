@@ -233,6 +233,10 @@ int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index,
  * filtered CALL buffer arguments, excluding DEFINE_VAR/BIND-like arguments. */
 PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
+/* Return PROGRAM's cached POLY_OP_LINEAR child when present. This mirrors
+ * tinygrad's PROGRAM(SINK, DEVICE, LINEAR, SOURCE, BINARY...) staging while
+ * keeping Polygrad's SOURCE/BINARY/runtime handles in backend caches for now. */
+PolyUOp *poly_program_linear(PolyUOp *program);
 PolyUOp *poly_schedule_call_to_program(
     PolyCtx *ctx,
     PolySchedule *schedule,

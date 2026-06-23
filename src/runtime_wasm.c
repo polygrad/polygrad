@@ -149,12 +149,21 @@ int poly_wasm_lower_item(
   PolyUOp *scheduled_root = wasm_program_kernel_body(program);
   if (!scheduled_root) return -1;
   int n_lin;
-  PolyUOp **lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+  bool lin_owned = false;
+  PolyUOp *linear = poly_program_linear(program);
+  PolyUOp **lin = NULL;
+  if (linear) {
+    n_lin = linear->n_src;
+    lin = linear->src;
+  } else {
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
   if (!lin) return -1;
 
   int wasm_len = 0;
   uint8_t *wasm_bytes = poly_render_wasm(lin, n_lin, &wasm_len, false);
-  free(lin);
+  if (lin_owned) free(lin);
   if (!wasm_bytes || wasm_len <= 0) return -1;
 
   int kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
