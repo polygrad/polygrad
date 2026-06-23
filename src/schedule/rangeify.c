@@ -1823,7 +1823,7 @@ static PolyUOp *bufferize_to_store_global(
  * Returns the rewritten graph (no BUFFERIZE nodes remain). */
 PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_map) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
   int lunique_counter = 0;
 
@@ -1857,6 +1857,7 @@ PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_m
 
   PolyUOp *new_sink = rmap_get(rmap, sink);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
@@ -2234,8 +2235,9 @@ static PolyUOp *normalize_kernel_read_index_dtypes_impl(
 
 static PolyUOp *normalize_kernel_read_index_dtypes(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new((size_t)(n_topo < 16 ? 16 : n_topo));
+  poly_toposort_free(topo);
   PolyUOp *ret = normalize_kernel_read_index_dtypes_impl(ctx, rmap, sink, false);
   poly_map_destroy(rmap);
   return ret ? ret : sink;
@@ -2250,7 +2252,7 @@ static PolyUOp *normalize_kernel_read_index_dtypes(PolyCtx *ctx, PolyUOp *sink) 
  * This is the polygrad equivalent of tinygrad's pm_add_loads. */
 static PolyUOp *add_kernel_loads(PolyCtx *ctx, PolyUOp *kernel_sink) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, kernel_sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, kernel_sink, &n_topo);
 
   /* Bottom-up rewrite: wrap ALL ptr-dtype INDEX with LOAD.
    * STORE's src[0] (store target) is never remapped, so it keeps the
@@ -2294,6 +2296,7 @@ static PolyUOp *add_kernel_loads(PolyCtx *ctx, PolyUOp *kernel_sink) {
 
   PolyUOp *new_sink = poly_map_get(rmap, poly_ptr_hash(kernel_sink), kernel_sink, poly_ptr_eq);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : kernel_sink;
 }
 
@@ -2309,7 +2312,7 @@ static PolyUOp *add_kernel_loads(PolyCtx *ctx, PolyUOp *kernel_sink) {
  */
 static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
   bool changed = false;
 
@@ -2413,7 +2416,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
         while (root_target->op == POLY_OP_ASSIGN && root_target->n_src >= 1)
           root_target = root_target->src[0];
         int n_val;
-        PolyUOp **val_topo = poly_toposort(ctx, value, &n_val);
+        PolyUOp **val_topo = poly_toposort_alloc(ctx, value, &n_val);
         bool target_in_value = false;
         for (int v = 0; v < n_val; v++) {
           if (val_topo[v] == target) {
@@ -2421,6 +2424,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
             break;
           }
         }
+        poly_toposort_free(val_topo);
         if (target_in_value)
           value = poly_uop1(ctx, POLY_OP_CONTIGUOUS, value->dtype, value, poly_arg_none());
         PolyUOp *assign_src[2] = {root_target, value};
@@ -2449,18 +2453,19 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
         bool target_has_shrink = false;
         {
           int n_t_topo;
-          PolyUOp **t_topo = poly_toposort(ctx, cur_target, &n_t_topo);
+          PolyUOp **t_topo = poly_toposort_alloc(ctx, cur_target, &n_t_topo);
           for (int t = 0; t < n_t_topo; t++) {
             if (t_topo[t]->op == POLY_OP_SHRINK) {
               target_has_shrink = true;
               break;
             }
           }
+          poly_toposort_free(t_topo);
         }
 
         /* Walk value subtree looking for unsafe movement ops */
         int n_val_topo;
-        PolyUOp **val_topo = poly_toposort(ctx, value, &n_val_topo);
+        PolyUOp **val_topo = poly_toposort_alloc(ctx, value, &n_val_topo);
         bool needs_contiguous = false;
         for (int v = 0; v < n_val_topo && !needs_contiguous; v++) {
           PolyUOp *vn = val_topo[v];
@@ -2469,14 +2474,16 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
               !(target_has_shrink && vn->op == POLY_OP_SHRINK))
             continue;
           int n_h_topo;
-          PolyUOp **h_topo = poly_toposort(ctx, vn, &n_h_topo);
+          PolyUOp **h_topo = poly_toposort_alloc(ctx, vn, &n_h_topo);
           for (int h = 0; h < n_h_topo; h++) {
             if (h_topo[h] == target_base) {
               needs_contiguous = true;
               break;
             }
           }
+          poly_toposort_free(h_topo);
         }
+        poly_toposort_free(val_topo);
         if (needs_contiguous) {
           PolyUOp *cont_val =
               poly_uop1(ctx, POLY_OP_CONTIGUOUS, value->dtype, value, poly_arg_none());
@@ -2510,6 +2517,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
 
   PolyUOp *new_sink = changed ? rmap_get(rmap, sink) : NULL;
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
@@ -2526,7 +2534,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
  */
 static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
   PolyUOpCache *range_cache = poly_uop_cache_new();
 
@@ -2610,6 +2618,7 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
   PolyUOp *new_sink = rmap_get(rmap, sink);
   poly_uop_cache_destroy(range_cache);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
@@ -2749,7 +2758,7 @@ static PolyUOp *poly_substitute_ranges(PolyCtx *ctx, PolyUOp *val, PolyMap *sub_
  */
 static PolyUOp *poly_remove_bufferize(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
 
   bool dbg_all = getenv("POLY_DEBUG_REMOVE") != NULL;
@@ -2867,7 +2876,7 @@ static PolyUOp *poly_remove_bufferize(PolyCtx *ctx, PolyUOp *sink) {
               PolyUOp *reduce = reduces[ri];
               if (reduce->n_src >= 1) {
                 int nv;
-                PolyUOp **vtopo = poly_toposort(ctx, reduce->src[0], &nv);
+                PolyUOp **vtopo = poly_toposort_alloc(ctx, reduce->src[0], &nv);
                 for (int j = 0; j < nv; j++) {
                   PolyOps op = vtopo[j]->op;
                   if (op == POLY_OP_BUFFER || op == POLY_OP_PARAM || op == POLY_OP_BUFFERIZE ||
@@ -2876,6 +2885,7 @@ static PolyUOp *poly_remove_bufferize(PolyCtx *ctx, PolyUOp *sink) {
                     break;
                   }
                 }
+                poly_toposort_free(vtopo);
               }
             }
           } /* !skip_cost_gates */
@@ -2924,6 +2934,7 @@ static PolyUOp *poly_remove_bufferize(PolyCtx *ctx, PolyUOp *sink) {
 
   PolyUOp *new_sink = rmap_get(rmap, sink);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
@@ -3063,7 +3074,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
   if (ictx->max_kernel_bufs <= 0) return sink;
 
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
   PolyMap *device_memo = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
 
@@ -3177,6 +3188,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
   PolyUOp *new_sink = rmap_get(rmap, sink);
   if (device_memo) poly_map_destroy(device_memo);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
@@ -3197,7 +3209,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
  */
 static PolyUOp *poly_flatten_bufferize_indices(PolyCtx *ctx, PolyUOp *sink) {
   int n_topo;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
 
   for (int t = 0; t < n_topo; t++) {
@@ -3279,6 +3291,7 @@ static PolyUOp *poly_flatten_bufferize_indices(PolyCtx *ctx, PolyUOp *sink) {
 
   PolyUOp *new_sink = rmap_get(rmap, sink);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
