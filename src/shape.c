@@ -287,10 +287,12 @@ static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
   ShapeCacheEntry *cached = shape_cache_lookup(ctx, u);
   if (cached) return cached;
 
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
   int n_topo = 0;
-  PolyUOp **topo = poly_toposort(ctx, u, &n_topo);
+  PolyUOp **topo = poly_toposort_scratch(ctx, u, &n_topo);
   PolyMap *cache = poly_ctx_shape_cache(ctx);
   if (!topo) {
+    poly_ctx_scratch_rewind(ctx, scratch);
     ShapeCacheEntry *entry = make_entry_none(ctx);
     poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
     return entry;
@@ -304,10 +306,13 @@ static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u) {
   }
 
   cached = shape_cache_lookup(ctx, u);
-  if (cached) return cached;
-  ShapeCacheEntry *entry = make_entry_none(ctx);
-  poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
-  return entry;
+  if (!cached) {
+    ShapeCacheEntry *entry = make_entry_none(ctx);
+    poly_map_set(cache, poly_ptr_hash(u), u, entry, poly_ptr_eq);
+    cached = entry;
+  }
+  poly_ctx_scratch_rewind(ctx, scratch);
+  return cached;
 }
 
 static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {

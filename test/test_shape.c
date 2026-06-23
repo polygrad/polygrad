@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
+#include "../src/ctx.h"
 #include "../src/device.h"
 #include "../src/tensor.h"
 
@@ -159,6 +160,31 @@ TEST(shape, chain) {
   ASSERT_INT_EQ(s.dims[0], 5);
   ASSERT_INT_EQ(s.dims[1], 4);
   if (s.dims) free(s.dims);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape, ensure_shape_uses_rewound_scratch_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(8));
+  for (int i = 0; i < 32; i++)
+    x = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, x, poly_arg_none());
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyShape first = poly_uop_shape(ctx, x);
+  ASSERT_INT_EQ(first.ndim, 1);
+  ASSERT_INT_EQ(first.dims[0], 8);
+  if (first.dims) free(first.dims);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  size_t main_after_first = poly_arena_used(poly_ctx_arena(ctx));
+  PolyShape second = poly_uop_shape(ctx, x);
+  ASSERT_INT_EQ(second.ndim, 1);
+  ASSERT_INT_EQ(second.dims[0], 8);
+  if (second.dims) free(second.dims);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+  ASSERT_INT_EQ(poly_arena_used(poly_ctx_arena(ctx)), main_after_first);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
