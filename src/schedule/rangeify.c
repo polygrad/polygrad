@@ -152,7 +152,7 @@ PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink) {
 
   /* Toposort to get all UOps in dependency order */
   int n_uops;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_uops);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_uops);
   if (!topo) return cmap;
 
   /* Ensure every UOp has an entry (even if 0 consumers) */
@@ -174,6 +174,7 @@ PolyMap *poly_consumer_map_build(PolyCtx *ctx, PolyUOp *sink) {
     }
   }
 
+  poly_toposort_free(topo);
   return cmap;
 }
 
@@ -492,10 +493,15 @@ static void realize_unmark(PolyIndexingCtx *ictx, PolyUOp *u) {
 /* Check if any node in uop's backward slice (including self) has the given op. */
 static bool uop_has_op_in_backward_slice(PolyCtx *ctx, PolyUOp *uop, PolyOps op) {
   int n;
-  PolyUOp **topo = poly_toposort(ctx, uop, &n);
+  PolyUOp **topo = poly_toposort_alloc(ctx, uop, &n);
+  bool found = false;
   for (int i = 0; i < n; i++)
-    if (topo[i]->op == op) return true;
-  return false;
+    if (topo[i]->op == op) {
+      found = true;
+      break;
+    }
+  poly_toposort_free(topo);
+  return found;
 }
 
 static bool store_dest_has_movement(PolyCtx *ctx, PolyUOp *dest) {
@@ -537,7 +543,7 @@ void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
   /* Rule 2: Walk graph for ops that always realize */
   int n_uops;
-  PolyUOp **topo = poly_toposort(ictx->ctx, sink, &n_uops);
+  PolyUOp **topo = poly_toposort_alloc(ictx->ctx, sink, &n_uops);
   if (!topo) return;
 
   for (int i = 0; i < n_uops; i++) {
@@ -590,14 +596,16 @@ void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
     PolyUOp *buf_base = uop_base_after_movement(buf);
 
     int n_x_topo;
-    PolyUOp **x_topo = poly_toposort(ictx->ctx, x, &n_x_topo);
+    PolyUOp **x_topo = poly_toposort_alloc(ictx->ctx, x, &n_x_topo);
     for (int j = 0; j < n_x_topo; j++) {
       if (x_topo[j] == buf_base) {
         realize_mark(ictx, x);
         break;
       }
     }
+    poly_toposort_free(x_topo);
   }
+  poly_toposort_free(topo);
 }
 
 bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u) {
@@ -719,7 +727,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
   /* Get toposort (we'll walk in reverse) */
   int n_uops;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_uops);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_uops);
   if (!topo) return;
 
   /* Build consumer map if not already built */
@@ -1065,6 +1073,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
   poly_map_foreach(ending_map, ending_destroy, NULL);
   poly_map_destroy(ending_map);
+  poly_toposort_free(topo);
 }
 
 /* Apply rangeify graph rewrite */
@@ -1181,7 +1190,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyCtx *ctx = ictx->ctx;
 
   int n_uops;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n_uops);
+  PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_uops);
   if (!topo) return sink;
 
   /* Replace map: old UOp → new UOp */
@@ -1569,6 +1578,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyUOp *new_sink = rmap_get(rmap, sink);
   if (device_memo) poly_map_destroy(device_memo);
   poly_map_destroy(rmap);
+  poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
 }
 
