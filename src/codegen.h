@@ -81,6 +81,8 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 /* WASM linearizer: keep scalar memory/ALU IR and let render_wasm form SIMD
  * loops itself. Avoids feeding CPU float4/GEP/VECTORIZE IR into the WASM
  * renderer, which only supports scalar LOAD/STORE/ALU plus its own SIMD path. */
+PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink);
+PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
@@ -199,6 +201,7 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void);
 /* Linearize a kernel for WebGPU execution.
  * Full codegen pipeline with GPU dims (SPECIAL, BARRIER, shared memory).
  * WebGPU constraints: supports_float4=false, local_max=256, no tensor cores. */
+PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Render linearized UOps to a WASM binary module.
@@ -228,6 +231,7 @@ void poly_program_destroy(PolyProgram *prog);
 #ifdef POLY_HAS_CUDA
 
 /* CUDA linearizer: rewrite + gpudims + linearize. */
+PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Render linearized UOps to CUDA C source code.
@@ -268,6 +272,7 @@ int poly_cuda_memset(unsigned long long ptr, unsigned char val, size_t bytes);
 #ifdef POLY_HAS_HIP
 
 /* HIP linearizer: rewrite + gpudims + linearize (same pipeline as CUDA). */
+PolyUOp *poly_rewrite_hip(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Render linearized UOps to HIP C++ source code.
@@ -308,6 +313,7 @@ int poly_hip_memset(void *ptr, unsigned char val, size_t bytes);
 #ifdef POLY_HAS_X64
 
 /* x86-64 linearizer: rewrite with CPUID-based caps + linearize. */
+PolyUOp *poly_rewrite_x64(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 
 /* Render linearized UOps to x86-64 machine code.

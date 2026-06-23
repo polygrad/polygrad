@@ -528,7 +528,7 @@ int poly_webgpu_lower_item(
   double t_check = timing ? poly_now_ms() : 0.0;
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_webgpu(ctx, scheduled_root, &n_lin);
+  PolyUOp **lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
   double t_lin = timing ? poly_now_ms() : 0.0;
 

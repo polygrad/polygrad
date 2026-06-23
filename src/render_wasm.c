@@ -1841,7 +1841,7 @@ uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd) {
   return mod.data; /* caller must free() */
 }
 
-PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize = true,
       .devectorize = 1,
@@ -1849,10 +1849,15 @@ PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .device = POLY_DEVICE_WASM,
       .opt_policy = POLY_OPT_HEURISTIC,
   };
-  return poly_linearize_ex(ctx, sink, opts, n_out);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }
 
-PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  sink = poly_rewrite_wasm(ctx, sink);
+  return poly_linearize_rewritten(ctx, sink, n_out);
+}
+
+PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink) {
   /* Browser/Node WASM often runs without a normal POSIX environment, so the
    * runtime path must default to the same optimized pipeline as
    * poly_linearize_wasm(). That pipeline lowers Invalid-carrying pad/triu
@@ -1874,5 +1879,10 @@ PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .device = POLY_DEVICE_WASM,
       .opt_policy = POLY_OPT_HEURISTIC,
   };
-  return poly_linearize_ex(ctx, sink, opts, n_out);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+}
+
+PolyUOp **poly_linearize_wasm_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  sink = poly_rewrite_wasm_env(ctx, sink);
+  return poly_linearize_rewritten(ctx, sink, n_out);
 }

@@ -421,7 +421,7 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
 
 /* HIP Linearizer */
 
-PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+PolyUOp *poly_rewrite_hip(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize = true, /* shared optimized pipeline (tinygrad parity) */
       .devectorize = -1, /* HIP: no add_loads/devectorize */
@@ -431,7 +431,11 @@ PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .extra_matcher = poly_pm_bf16_non_native(),
       .gpu_block_size = 256,
   };
-  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+}
+
+PolyUOp **poly_linearize_hip(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  sink = poly_rewrite_hip(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 

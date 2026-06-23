@@ -412,7 +412,7 @@ static int cuda_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool cre
 
 /* CUDA Linearizer */
 
-PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
   /* tinygrad CUDA still uses the normal postrange apply_opts path for
    * non-TC kernels. Tensor core matching is only the first branch inside
    * that heuristic. Keep CUDA on the shared heuristic policy so LOCAL/UNROLL
@@ -439,7 +439,11 @@ PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .extra_matcher = extra,
       .gpu_block_size = 256,
   };
-  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+}
+
+PolyUOp **poly_linearize_cuda(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  sink = poly_rewrite_cuda(ctx, sink);
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 

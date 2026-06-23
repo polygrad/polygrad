@@ -1087,7 +1087,7 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
  *   - No MULACC/THREEFRY hardware support
  *   - No tensor cores
  *   - extra_matcher: shift u32 normalization, bool CMPLT/XOR */
-PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize = true,
       .devectorize = 1, /* supports_float4=false: full devectorize */
@@ -1106,7 +1106,11 @@ PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .extra_matcher = poly_pm_wgsl_extra(),
       .gpu_block_size = 256, /* WebGPU local_max[0] */
   };
-  sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+}
+
+PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  sink = poly_rewrite_webgpu(ctx, sink);
   /* apply_control_flow already called inside full_rewrite_to_sink_ex (codegen.c:5674) */
   return poly_linearize_rewritten(ctx, sink, n_out);
 }

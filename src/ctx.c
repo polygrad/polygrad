@@ -29,6 +29,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->scratch = poly_arena_new(0);
   ctx->cse = poly_map_new(256);
   ctx->schedule_cache = poly_map_new(16);
+  ctx->to_program_cache = poly_map_new(16);
   ctx->program_cache = poly_map_new(16);
   ctx->program_infos = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
@@ -39,13 +40,14 @@ PolyCtx *poly_ctx_new(void) {
   ctx->tensors_cap = 0;
   ctx->next_tensor_order = 1;
   ctx->name_map = poly_map_new(16);
-  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->program_cache ||
-      !ctx->program_infos ||
+  if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
+      !ctx->program_cache || !ctx->program_infos ||
       !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop || !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
+    if (ctx->to_program_cache) poly_map_destroy(ctx->to_program_cache);
     if (ctx->program_cache) poly_map_destroy(ctx->program_cache);
     if (ctx->program_infos) poly_map_destroy(ctx->program_infos);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
@@ -74,6 +76,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (poly_tensor_ctx_cleanup) poly_tensor_ctx_cleanup(ctx);
   if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
   poly_map_destroy(ctx->schedule_cache);
+  poly_map_destroy(ctx->to_program_cache);
   poly_map_destroy(ctx->program_cache);
   poly_map_destroy(ctx->program_infos);
   poly_map_destroy(ctx->shape_cache);

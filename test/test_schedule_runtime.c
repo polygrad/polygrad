@@ -413,7 +413,10 @@ TEST(schedule_runtime, runner_launch_uses_programinfo_metadata) {
   ASSERT_TRUE(call->n_src >= 1);
   ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
 
-  PolyProgramInfo *info = (PolyProgramInfo *)poly_program_info(ctx, call->src[0]);
+  PolyUOp *program = poly_schedule_call_to_program(ctx, sched, 0, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(program);
+  ASSERT_INT_EQ(program->op, POLY_OP_PROGRAM);
+  PolyProgramInfo *info = (PolyProgramInfo *)poly_program_info(ctx, program);
   ASSERT_NOT_NULL(info);
   PolyUOp *g_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
   PolyUOp *l_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
@@ -1374,6 +1377,7 @@ TEST(schedule_runtime, cached_linear_assign_chain_uses_raw_sink_param_slots) {
 TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 0);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
 
   /* This mirrors tinygrad's to_program/runtime cache layer: the schedule is
@@ -1392,6 +1396,7 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
       POLY_TEST_HOST_VIEW(out1, out1_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out1_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out1_data[3], 44.0f, 1e-5);
@@ -1409,6 +1414,7 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
       POLY_TEST_HOST_VIEW(out2, out2_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 3), 0);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out2_data[0], 55.0f, 1e-5);
   ASSERT_FLOAT_EQ(out2_data[3], 88.0f, 1e-5);
@@ -1422,6 +1428,7 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
       POLY_TEST_HOST_VIEW(out3, out3_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink3, views3, 3), 0);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 2);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 2);
   ASSERT_FLOAT_EQ(out3_data[0], 250.0f, 1e-5);
   ASSERT_FLOAT_EQ(out3_data[3], 640.0f, 1e-5);
@@ -1436,6 +1443,7 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
 
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 0);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
 
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -1451,6 +1459,7 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
   ASSERT_INT_EQ(sched2->template->n_calls, 1);
 
   ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched1, 0, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
 
   PolyUOp *old_call = poly_schedule_call(sched2, 0);
@@ -1486,6 +1495,7 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
   sched2->run->calls[0].call = alt_call;
 
   ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched2, 0, POLY_DEVICE_CPU), 0);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 2);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 2);
 
   poly_schedule_free(sched2);

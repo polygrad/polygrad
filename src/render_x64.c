@@ -3926,7 +3926,7 @@ x64_fail:
 /*  Linearize with x64-specific caps (Phase 4)                           */
 /* ══════════════════════════════════════════════════════════════════════ */
 
-PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+PolyUOp *poly_rewrite_x64(PolyCtx *ctx, PolyUOp *sink) {
   X64CpuCaps cpu = get_cpu_caps();
   PolyRewriteOpts opts = {0};
   opts.optimize = true;
@@ -3950,7 +3950,12 @@ PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
    * (vcmpps, vandps, vpaddd, etc.) which requires AVX hardware support. */
   if (!cpu.has_avx && opts.devectorize < 1) opts.devectorize = 1;
 
-  return poly_linearize_ex(ctx, sink, opts, n_out);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+}
+
+PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  sink = poly_rewrite_x64(ctx, sink);
+  return poly_linearize_rewritten(ctx, sink, n_out);
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */

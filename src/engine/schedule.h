@@ -188,6 +188,7 @@ typedef struct {
   /* Lower a PROGRAM-rooted scheduled compute call body. Backends may unwrap the
    * PROGRAM to a renderer-specific kernel body internally, but the vtable
    * boundary follows tinygrad's runtime cache boundary. */
+  PolyUOp *(*rewrite_program)(PolyCtx *ctx, PolyUOp *sink);
   int (*lower_item)(PolyCtx *ctx, PolyUOp *program, const char *fn_name, PolyRunner *runner_out);
   int (*execute)(PolyRunner *runner, void **args, int n_args);
   void (*free_runner)(PolyRunner *runner);
@@ -217,6 +218,8 @@ void poly_schedule_cache_clear(PolyCtx *ctx);
  * race an in-flight PolySchedule that is borrowing cached runners. */
 size_t poly_program_cache_len(PolyCtx *ctx);
 void poly_program_cache_clear(PolyCtx *ctx);
+size_t poly_to_program_cache_len(PolyCtx *ctx);
+void poly_to_program_cache_clear(PolyCtx *ctx);
 
 void poly_schedule_free(PolySchedule *schedule);
 
@@ -230,6 +233,12 @@ int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index,
  * filtered CALL buffer arguments, excluding DEFINE_VAR/BIND-like arguments. */
 PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
+PolyUOp *poly_schedule_call_to_program(
+    PolyCtx *ctx,
+    PolySchedule *schedule,
+    int call_index,
+    PolyDevice device
+);
 
 int poly_schedule_call_lower(
     PolyCtx *ctx,

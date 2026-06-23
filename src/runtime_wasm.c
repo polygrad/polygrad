@@ -149,7 +149,7 @@ int poly_wasm_lower_item(
   PolyUOp *scheduled_root = wasm_program_kernel_body(program);
   if (!scheduled_root) return -1;
   int n_lin;
-  PolyUOp **lin = poly_linearize_wasm_env(ctx, scheduled_root, &n_lin);
+  PolyUOp **lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
   if (!lin) return -1;
 
   int wasm_len = 0;
