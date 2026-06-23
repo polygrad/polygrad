@@ -8,6 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "ctx.h"
 #include "utils.h"
 #include "pat.h"
 #include <stdio.h>
@@ -483,7 +484,12 @@ static PolyUOp *cf_rewrite(
 
 PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   int n;
-  PolyUOp **topo = poly_toposort(ctx, sink, &n);
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  PolyUOp **topo = poly_toposort_scratch(ctx, sink, &n);
+  if (!topo && n != 0) {
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return sink;
+  }
 
   IntMap idx;
   imap_init(&idx, n);
@@ -503,6 +509,7 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   if (!has_edges) {
     free(extra_dep);
     imap_destroy(&idx);
+    poly_ctx_scratch_rewind(ctx, scratch);
     return sink;
   }
 
@@ -531,6 +538,7 @@ PolyUOp *poly_apply_control_flow(PolyCtx *ctx, PolyUOp *sink) {
   free(memo);
   free(extra_dep);
   imap_destroy(&idx);
+  poly_ctx_scratch_rewind(ctx, scratch);
   return result;
 }
 

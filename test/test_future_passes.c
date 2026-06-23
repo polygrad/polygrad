@@ -18,6 +18,7 @@
 
 #include "test_harness.h"
 #include "../src/codegen.h"
+#include "../src/ctx.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include "../src/simplify.h"
@@ -3163,6 +3164,25 @@ TEST(unify_pre, control_flow_adds_predecessors) {
   /* The pass should not crash or corrupt the graph */
   int n_lin = 0;
   PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_TRUE(n_lin > 0);
+  free(lin);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(unify_pre, control_flow_rewinds_scratch_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *sink = build_2range_kernel(ctx, 32, 64);
+  sink = poly_graph_rewrite(ctx, sink, poly_symbolic_simple());
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyUOp *rewritten = poly_apply_control_flow(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
   ASSERT_TRUE(n_lin > 0);
   free(lin);
 
