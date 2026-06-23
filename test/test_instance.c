@@ -258,6 +258,42 @@ TEST(instance, forward_add) {
   PASS();
 }
 
+TEST(instance, forward_reuses_entry_schedule_after_ctx_schedule_cache_clear) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  float a1[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b1[] = {10.0f, 20.0f, 30.0f, 40.0f};
+  PolyIOBinding io1[] = {{"a", a1}, {"b", b1}};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io1, 2), 0);
+
+  /* Instance calls keep a per-entrypoint PolySchedule. Clearing the ctx
+   * structural LINEAR lookup must not force the second call to rebuild. */
+  poly_schedule_cache_clear(poly_instance_ctx(inst));
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(poly_instance_ctx(inst)), 0);
+
+  float a2[] = {5.0f, 6.0f, 7.0f, 8.0f};
+  float b2[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyIOBinding io2[] = {{"a", a2}, {"b", b2}};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io2, 2), 0);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(poly_instance_ctx(inst)), 0);
+
+  int64_t numel = 0;
+  float *out = poly_instance_buf_data(inst, 2, &numel);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ((int)numel, 4);
+  ASSERT_FLOAT_EQ(out[0], 6.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[1], 8.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[2], 10.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[3], 12.0f, 1e-5f);
+
+  poly_instance_free(inst);
+  free(ir);
+  PASS();
+}
+
 TEST(instance, staged_build_forward_e2e) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
