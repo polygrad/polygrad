@@ -235,18 +235,32 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     return NULL;
   }
 
+  PolyScratchMark scratch = poly_ctx_scratch_mark(spec->ctx);
   int ri = 0;
   for (int i = 0; i < spec->n_entrypoints; i++, ri++) {
-    per_root[ri] = poly_toposort(spec->ctx, spec->entrypoints[i].sink, &counts[ri]);
+    per_root[ri] = poly_toposort_scratch(spec->ctx, spec->entrypoints[i].sink, &counts[ri]);
+    if (!per_root[ri] && counts[ri] != 0) {
+      poly_ctx_scratch_rewind(spec->ctx, scratch);
+      free(counts);
+      free(per_root);
+      return NULL;
+    }
     total_cap += counts[ri];
   }
   for (int i = 0; i < spec->n_bufs; i++, ri++) {
-    per_root[ri] = poly_toposort(spec->ctx, spec->bufs[i].buffer, &counts[ri]);
+    per_root[ri] = poly_toposort_scratch(spec->ctx, spec->bufs[i].buffer, &counts[ri]);
+    if (!per_root[ri] && counts[ri] != 0) {
+      poly_ctx_scratch_rewind(spec->ctx, scratch);
+      free(counts);
+      free(per_root);
+      return NULL;
+    }
     total_cap += counts[ri];
   }
 
   PolyUOp **merged = total_cap > 0 ? malloc((size_t)total_cap * sizeof(PolyUOp *)) : NULL;
   if (total_cap > 0 && !merged) {
+    poly_ctx_scratch_rewind(spec->ctx, scratch);
     free(counts);
     free(per_root);
     return NULL;
@@ -264,6 +278,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       if (!dup) merged[merged_n++] = u;
     }
   }
+  poly_ctx_scratch_rewind(spec->ctx, scratch);
   topo = merged;
   n_nodes = merged_n;
   free(counts);

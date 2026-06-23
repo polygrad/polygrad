@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/ir.h"
+#include "../src/ctx.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
 #include <string.h>
@@ -65,6 +66,35 @@ TEST(ir, round_trip_add) {
   poly_ctx_destroy(imported.ctx);
   poly_ctx_destroy(ctx);
   free(bytes);
+  PASS();
+}
+
+TEST(ir, export_rewinds_scratch_root_toposorts) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out_buf, sum));
+
+  PolyIrBufEntry bufs[] = {
+      {.name = "a", .role = POLY_IR_ROLE_INPUT, .buffer = a, .shape = {4}, .ndim = 1},
+      {.name = "b", .role = POLY_IR_ROLE_INPUT, .buffer = b, .shape = {4}, .ndim = 1},
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out_buf, .shape = {4}, .ndim = 1},
+  };
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, bufs, 3, eps, 1};
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_TRUE(out_len > 0);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  free(bytes);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
