@@ -3,6 +3,7 @@
  */
 
 #include "test_harness.h"
+#include "../src/ctx.h"
 #include "../src/pat.h"
 #include "../src/tensor.h"
 #include <limits.h>
@@ -1125,6 +1126,24 @@ TEST(sym, minmax_deep_chain_is_iterative) {
     expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, expr, one, poly_arg_none());
   }
   check_mm(ctx, expr, 12000, 12009, "deep add chain");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_backward_slice_score_uses_rewound_scratch_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *expr = mk_range(ctx, 10, 0);
+  PolyUOp *one = mk_const(ctx, 1);
+  for (int i = 0; i < 64; i++)
+    expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, expr, one, poly_arg_none());
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  int64_t lo = 0, hi = 0;
+  poly_uop_minmax(ctx, expr, &lo, &hi);
+  ASSERT_INT_EQ(lo, 64);
+  ASSERT_INT_EQ(hi, 73);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

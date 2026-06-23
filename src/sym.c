@@ -1432,7 +1432,9 @@ static PolyUOp *uop_sum_scaled_bases_raw(
 
 static int uop_backward_slice_size(PolyCtx *ctx, PolyUOp *u) {
   int n_topo = 0;
-  (void)poly_toposort(ctx, u, &n_topo);
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  (void)poly_toposort_scratch(ctx, u, &n_topo);
+  poly_ctx_scratch_rewind(ctx, scratch);
   return n_topo;
 }
 
