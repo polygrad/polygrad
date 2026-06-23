@@ -413,6 +413,7 @@ TEST(schedule_runtime, to_program_attaches_linear_child) {
   PolyUOp *program = poly_schedule_call_to_program(ctx, sched, 0, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(program);
   ASSERT_INT_EQ(program->op, POLY_OP_PROGRAM);
+  ASSERT_INT_EQ(program->arg.kind, POLY_ARG_PROGRAM_INFO);
   ASSERT_TRUE(program->n_src >= 3);
   ASSERT_NOT_NULL(poly_program_info(ctx, program));
 

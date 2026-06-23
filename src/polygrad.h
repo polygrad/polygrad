@@ -276,6 +276,8 @@ typedef enum {
 
 /* PolyArg — tagged union for UOp arg field */
 
+typedef struct PolyProgramInfo PolyProgramInfo;
+
 typedef enum {
   POLY_ARG_NONE = 0,
   POLY_ARG_INT,
@@ -289,6 +291,7 @@ typedef enum {
   POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
   POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
   POLY_ARG_BUFFERIZE_OPTS, /* (device, addrspace, removable) */
+  POLY_ARG_PROGRAM_INFO, /* PolyProgramInfo* value metadata for PROGRAM */
   POLY_ARG_INVALID,
 } PolyArgKind;
 
@@ -329,6 +332,7 @@ typedef struct {
       PolyAddrSpace addrspace;
       bool removable;
     } bufferize_opts;
+    const PolyProgramInfo *program_info;
   };
 } PolyArg;
 
@@ -390,6 +394,12 @@ static inline PolyArg poly_arg_bufferize_opts(
   ){.kind = POLY_ARG_BUFFERIZE_OPTS,
     .bufferize_opts = {.device = device, .addrspace = addrspace, .removable = removable}};
 }
+static inline PolyArg poly_arg_program_info(const PolyProgramInfo *info) {
+  return (PolyArg){.kind = POLY_ARG_PROGRAM_INFO, .program_info = info};
+}
+
+bool poly_program_info_eq(const PolyProgramInfo *a, const PolyProgramInfo *b);
+uint32_t poly_program_info_hash(const PolyProgramInfo *info);
 
 /* RANGE metadata helpers. New RANGE UOps store POLY_ARG_RANGE; poly_uop()
  * canonicalizes legacy POLY_ARG_INT range ids to LOOP ranges at creation. */

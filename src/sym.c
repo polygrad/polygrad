@@ -1217,6 +1217,12 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     if (ret) return ret;
     return cmp_bool(a.bufferize_opts.removable, b.bufferize_opts.removable);
   }
+  case POLY_ARG_PROGRAM_INFO: {
+    uint32_t ah = poly_program_info_hash(a.program_info);
+    uint32_t bh = poly_program_info_hash(b.program_info);
+    if (ah != bh) return (ah > bh) - (ah < bh);
+    return (a.program_info > b.program_info) - (a.program_info < b.program_info);
+  }
   }
   return 0;
 }

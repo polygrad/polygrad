@@ -66,6 +66,8 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     return a.bufferize_opts.device == b.bufferize_opts.device &&
            a.bufferize_opts.addrspace == b.bufferize_opts.addrspace &&
            a.bufferize_opts.removable == b.bufferize_opts.removable;
+  case POLY_ARG_PROGRAM_INFO:
+    return poly_program_info_eq(a.program_info, b.program_info);
   }
   return false;
 }
@@ -136,6 +138,9 @@ uint32_t poly_arg_hash(PolyArg a) {
     h = hash_mix(h, (uint32_t)a.bufferize_opts.device);
     h = hash_mix(h, (uint32_t)a.bufferize_opts.addrspace);
     h = hash_mix(h, a.bufferize_opts.removable ? 1u : 0u);
+    break;
+  case POLY_ARG_PROGRAM_INFO:
+    h = hash_mix(h, poly_program_info_hash(a.program_info));
     break;
   }
   return h;

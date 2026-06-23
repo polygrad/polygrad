@@ -456,6 +456,13 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       bb_u8(&buf, (uint8_t)u->arg.bufferize_opts.addrspace);
       bb_u8(&buf, u->arg.bufferize_opts.removable ? 1 : 0);
       break;
+    case POLY_ARG_PROGRAM_INFO:
+      fprintf(stderr, "poly_ir_export: PROGRAM metadata is not exportable IR\n");
+      free(node_map);
+      if (topo_is_heap) free(topo);
+      st_free(&strings);
+      free(buf.data);
+      return NULL;
     case POLY_ARG_INVALID:
       break;
     }

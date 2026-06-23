@@ -235,8 +235,85 @@ static int poly_call_mask_to_indices(
 }
 
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program) {
-  if (!ctx || !ctx->program_infos || !program || program->op != POLY_OP_PROGRAM) return NULL;
+  if (!program || program->op != POLY_OP_PROGRAM) return NULL;
+  if (program->arg.kind == POLY_ARG_PROGRAM_INFO) return program->arg.program_info;
+  if (!ctx || !ctx->program_infos) return NULL;
   return poly_map_get(ctx->program_infos, poly_ptr_hash(program), program, poly_ptr_eq);
+}
+
+static bool str_eq(const char *a, const char *b) {
+  return a == b || (a && b && strcmp(a, b) == 0);
+}
+
+static bool int_arr_eq(const int *a, int na, const int *b, int nb) {
+  if (na != nb) return false;
+  if (na == 0) return true;
+  return a && b && memcmp(a, b, (size_t)na * sizeof(int)) == 0;
+}
+
+static uint32_t program_info_hash_mix(uint32_t h, uint32_t v) {
+  h ^= v;
+  h *= 0x9e3779b9;
+  h ^= h >> 16;
+  return h;
+}
+
+static uint32_t program_info_hash_ptr(uint32_t h, const void *p) {
+  uintptr_t v = (uintptr_t)p;
+  uint32_t folded = (uint32_t)v;
+  if (sizeof(v) > 4) folded ^= (uint32_t)(v >> 32);
+  h = program_info_hash_mix(h, folded);
+  return h;
+}
+
+bool poly_program_info_eq(const PolyProgramInfo *a, const PolyProgramInfo *b) {
+  if (a == b) return true;
+  if (!a || !b) return false;
+  if (!str_eq(a->name, b->name)) return false;
+  if (memcmp(a->global_size, b->global_size, sizeof(a->global_size)) != 0) return false;
+  if (memcmp(a->local_size, b->local_size, sizeof(a->local_size)) != 0) return false;
+  if (a->has_local_size != b->has_local_size) return false;
+  if (a->n_vars != b->n_vars || a->n_globals != b->n_globals || a->n_outs != b->n_outs ||
+      a->n_ins != b->n_ins)
+    return false;
+  for (int i = 0; i < 3; i++) {
+    if (a->global_exprs[i] != b->global_exprs[i]) return false;
+    if (a->local_exprs[i] != b->local_exprs[i]) return false;
+  }
+  for (int i = 0; i < a->n_vars; i++)
+    if (a->vars[i] != b->vars[i]) return false;
+  return int_arr_eq(a->globals, a->n_globals, b->globals, b->n_globals) &&
+         int_arr_eq(a->outs, a->n_outs, b->outs, b->n_outs) &&
+         int_arr_eq(a->ins, a->n_ins, b->ins, b->n_ins);
+}
+
+uint32_t poly_program_info_hash(const PolyProgramInfo *info) {
+  uint32_t h = 0x811c9dc5u;
+  if (!info) return h;
+  if (info->name) {
+    for (const unsigned char *p = (const unsigned char *)info->name; *p; p++)
+      h = program_info_hash_mix(h, (uint32_t)*p);
+  }
+  for (int i = 0; i < 3; i++) {
+    h = program_info_hash_mix(h, (uint32_t)info->global_size[i]);
+    h = program_info_hash_mix(h, (uint32_t)info->local_size[i]);
+    h = program_info_hash_ptr(h, info->global_exprs[i]);
+    h = program_info_hash_ptr(h, info->local_exprs[i]);
+  }
+  h = program_info_hash_mix(h, info->has_local_size ? 1u : 0u);
+  h = program_info_hash_mix(h, (uint32_t)info->n_vars);
+  for (int i = 0; i < info->n_vars; i++)
+    h = program_info_hash_ptr(h, info->vars[i]);
+  h = program_info_hash_mix(h, (uint32_t)info->n_globals);
+  for (int i = 0; i < info->n_globals; i++)
+    h = program_info_hash_mix(h, (uint32_t)info->globals[i]);
+  h = program_info_hash_mix(h, (uint32_t)info->n_outs);
+  for (int i = 0; i < info->n_outs; i++)
+    h = program_info_hash_mix(h, (uint32_t)info->outs[i]);
+  h = program_info_hash_mix(h, (uint32_t)info->n_ins);
+  for (int i = 0; i < info->n_ins; i++)
+    h = program_info_hash_mix(h, (uint32_t)info->ins[i]);
+  return h;
 }
 
 static int poly_call_get_outs_ins_from_body(
@@ -494,16 +571,15 @@ static PolyUOp *poly_program_from_call_body(
 
   const char *program_name = name ? name : "test";
   if (device == POLY_DEVICE_AUTO) device = poly_uop_device(body);
-  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
-  PolyUOp *program_src[2] = {body, dev};
-  PolyUOp *program =
-      poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, program_src, 2, poly_arg_str(program_name));
-  if (!program || !ctx->program_infos) return NULL;
-  if (poly_program_info(ctx, program)) return program;
 
   PolyProgramInfo *info = poly_program_info_build(ctx, call, body, program_name);
   if (!info) return NULL;
-  poly_map_set(ctx->program_infos, poly_ptr_hash(program), program, info, poly_ptr_eq);
+
+  PolyUOp *dev = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  PolyUOp *program_src[2] = {body, dev};
+  PolyUOp *program =
+      poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, program_src, 2, poly_arg_program_info(info));
+  if (!program) return NULL;
   return program;
 }
 
@@ -3865,7 +3941,11 @@ static int poly_bind_runner_param_slots(
 }
 
 static const char *poly_program_arg_name(PolyUOp *program) {
-  if (!program || program->arg.kind != POLY_ARG_STRING || !program->arg.str) return "test";
+  if (!program) return "test";
+  if (program->arg.kind == POLY_ARG_PROGRAM_INFO && program->arg.program_info &&
+      program->arg.program_info->name)
+    return program->arg.program_info->name;
+  if (program->arg.kind != POLY_ARG_STRING || !program->arg.str) return "test";
   return program->arg.str;
 }
 

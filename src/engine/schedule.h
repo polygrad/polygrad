@@ -87,7 +87,7 @@ typedef struct {
   int n_active_args;
 } PolyCallIO;
 
-typedef struct {
+struct PolyProgramInfo {
   const char *name;
 
   int global_size[3];
@@ -107,7 +107,7 @@ typedef struct {
 
   int *ins;
   int n_ins;
-} PolyProgramInfo;
+};
 
 typedef struct {
   PolyUOp *call; /* LINEAR source: CALL(body, buffer args..., DEFINE_VAR args...) */
