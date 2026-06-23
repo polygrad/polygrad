@@ -1008,6 +1008,75 @@ TEST(instance, train_step_sgd) {
   PASS();
 }
 
+TEST(instance, train_step_rewinds_vag_shape_scan_scratch) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t shape[] = {4};
+  PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
+  PolyTensor *y = poly_instance_target(inst, "y", POLY_FLOAT32, shape, 1);
+  PolyTensor *w = poly_instance_param(inst, "w", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(y);
+  ASSERT_NOT_NULL(w);
+
+  PolyUOp *prod_u = poly_alu2(ctx, POLY_OP_MUL, poly_tensor_uop(w), poly_tensor_uop(x));
+  PolyTensor *prod = poly_tensor_create(ctx, prod_u, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(prod);
+  PolyUOp *neg_y = poly_alu1(ctx, POLY_OP_NEG, poly_tensor_uop(y));
+  PolyUOp *diff = poly_alu2(ctx, POLY_OP_ADD, prod_u, neg_y);
+  PolyUOp *sq = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
+  int64_t axes[] = {0};
+  PolyUOp *loss_val = poly_reduce_axis(ctx, POLY_OP_ADD, sq, axes, 1);
+  PolyUOp *mse = poly_alu2(ctx, POLY_OP_MUL, loss_val, poly_const_float(ctx, 0.25));
+  PolyTensor *loss = poly_tensor_create(ctx, mse, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(loss);
+
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", prod), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_instance_output(inst, "loss", loss), POLY_STATUS_OK);
+
+  const char *forward_inputs[] = {"x"};
+  const char *forward_outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", forward_inputs, 1, forward_outputs, 1, NULL),
+      POLY_STATUS_OK
+  );
+
+  const char *loss_inputs[] = {"x", "y"};
+  const char *loss_outputs[] = {"loss"};
+  PolyEntrypointOptions opts = {.objective = "loss"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "loss", loss_inputs, 2, loss_outputs, 1, &opts),
+      POLY_STATUS_OK
+  );
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f), 0
+  );
+
+  int64_t numel = 0;
+  float *w_data = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(w_data);
+  ASSERT_INT_EQ((int)numel, 4);
+  for (int i = 0; i < 4; i++)
+    w_data[i] = 1.0f;
+
+  float x_data[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float y_data[] = {3.0f, 3.0f, 3.0f, 3.0f};
+  PolyIOBinding io[] = {{"x", x_data}, {"y", y_data}};
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  float loss_out = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss_out), 0);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+  ASSERT_TRUE(loss_out > 0.0f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, train_step_adam) {
   int ir_len = 0;
   uint8_t *ir = make_train_ir(4, &ir_len);

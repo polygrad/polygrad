@@ -2092,8 +2092,14 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
   PolyUOp **param_bufs = malloc((size_t)inst->n_params * sizeof(PolyUOp *));
   if (!param_bufs) return -1;
 
-  int n_topo;
-  PolyUOp **topo = poly_toposort(inst->ctx, loss_value, &n_topo);
+  PolyScratchMark scratch = poly_ctx_scratch_mark(inst->ctx);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_scratch(inst->ctx, loss_value, &n_topo);
+  if (!topo && n_topo != 0) {
+    poly_ctx_scratch_rewind(inst->ctx, scratch);
+    free(param_bufs);
+    return -1;
+  }
 
   for (int i = 0; i < inst->n_params; i++) {
     NamedBuf *pb = &inst->bufs[inst->param_indices[i]];
@@ -2123,6 +2129,7 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
     }
     param_bufs[i] = shaped ? shaped : raw_buf;
   }
+  poly_ctx_scratch_rewind(inst->ctx, scratch);
 
   /* Compute gradients */
   PolyUOp **grads = calloc((size_t)inst->n_params, sizeof(PolyUOp *));
