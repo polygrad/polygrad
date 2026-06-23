@@ -357,6 +357,49 @@ TEST(schedule_runtime, compute_schedule_calls_are_program_backed) {
   PASS();
 }
 
+TEST(schedule_runtime, runner_launch_uses_programinfo_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->template->n_calls, 1);
+  PolyUOp *call = poly_schedule_call(sched, 0);
+  ASSERT_NOT_NULL(call);
+  ASSERT_TRUE(call->n_src >= 1);
+  ASSERT_INT_EQ(call->src[0]->op, POLY_OP_PROGRAM);
+
+  PolyProgramInfo *info = (PolyProgramInfo *)poly_program_info(ctx, call->src[0]);
+  ASSERT_NOT_NULL(info);
+  PolyUOp *g_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
+  PolyUOp *l_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  info->global_size[0] = 7;
+  info->local_size[0] = 3;
+  info->global_exprs[0] = g_bound;
+  info->local_exprs[0] = l_bound;
+  info->has_local_size = true;
+
+  ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched, 0, POLY_DEVICE_CPU), 0);
+  PolyRunner *runner = &sched->run->calls[0].prg;
+  ASSERT_INT_EQ(runner->grid[0], 7);
+  ASSERT_INT_EQ(runner->grid[1], 1);
+  ASSERT_INT_EQ(runner->grid[2], 1);
+  ASSERT_INT_EQ(runner->block[0], 3);
+  ASSERT_INT_EQ(runner->block[1], 1);
+  ASSERT_INT_EQ(runner->block[2], 1);
+  ASSERT_PTR_EQ(runner->grid_exprs[0], g_bound);
+  ASSERT_PTR_EQ(runner->block_exprs[0], l_bound);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 static PolyUOp *make_validator_comb_graph(PolyCtx *ctx, int depth, PolyUOp **bad_node) {
   PolyUOp *srcs[64];
   for (int i = 0; i < 64; i++)

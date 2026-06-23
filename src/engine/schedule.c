@@ -1414,6 +1414,40 @@ static int poly_resolve_runner_launch_dims(
   return 0;
 }
 
+static void poly_runner_apply_program_launch_info(PolyCtx *ctx, PolyUOp *call, PolyRunner *runner) {
+  if (!ctx || !call || !runner) return;
+  PolyUOp *program = poly_call_raw_body(call);
+  if (!program || program->op != POLY_OP_PROGRAM) return;
+  const PolyProgramInfo *info = poly_program_info(ctx, program);
+  if (!info) return;
+
+  bool has_launch_expr = false;
+  for (int dim = 0; dim < 3; dim++) {
+    if (info->global_exprs[dim] || info->local_exprs[dim]) {
+      has_launch_expr = true;
+      break;
+    }
+  }
+  if (!has_launch_expr) return;
+
+  for (int dim = 0; dim < 3; dim++) {
+    if (info->global_exprs[dim]) {
+      int global = info->global_size[dim];
+      runner->grid[dim] = global > 0 ? global : 1;
+      runner->grid_exprs[dim] = info->global_exprs[dim];
+    }
+
+    if (info->has_local_size && info->local_exprs[dim]) {
+      int local = info->local_size[dim];
+      runner->block[dim] = local > 0 ? local : 1;
+      runner->block_exprs[dim] = info->local_exprs[dim];
+    } else if (!info->has_local_size) {
+      runner->block[dim] = 1;
+      runner->block_exprs[dim] = NULL;
+    }
+  }
+}
+
 static void debug_dump_webgpu_runner_args(
     const PolyCompiledSchedule *plan,
     int exec_step,
@@ -3408,10 +3442,12 @@ static int poly_lower_compute_call_cached(
         poly_map_set(ctx->program_cache, hash, entry, entry, poly_program_cache_eq);
       } else {
         *out = lowered;
+        poly_runner_apply_program_launch_info(ctx, call, out);
         return 0;
       }
     } else {
       *out = lowered;
+      poly_runner_apply_program_launch_info(ctx, call, out);
       return 0;
     }
   }
@@ -3422,6 +3458,7 @@ static int poly_lower_compute_call_cached(
   out->var_indices = NULL;
   out->n_vars = 0;
   out->free_handle = borrowed_runner_free_fn;
+  poly_runner_apply_program_launch_info(ctx, call, out);
   return 0;
 }
 
