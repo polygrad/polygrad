@@ -49,6 +49,14 @@ void poly_ctx_scratch_rewind(PolyCtx *ctx, PolyScratchMark mark);
 void *poly_ctx_scratch_alloc(PolyCtx *ctx, size_t size, size_t align);
 
 PolyUOp **poly_toposort_scratch(PolyCtx *ctx, PolyUOp *root, int *n_out);
+PolyUOp **poly_toposort_ex_user_scratch(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *, void *),
+    void *user_data,
+    bool enter_calls
+);
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);

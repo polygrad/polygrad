@@ -691,6 +691,25 @@ TEST(uop, ranges_deep_chain_is_iterative) {
   PASS();
 }
 
+TEST(uop, ranges_use_rewound_scratch_toposort) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = make_range(ctx, 5, 0);
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *expr = r;
+  for (int i = 0; i < 32; i++)
+    expr = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, expr, one, poly_arg_none());
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyUOp *rs[8] = {0};
+  int n = poly_uop_ranges(ctx, expr, rs, 8);
+  ASSERT_INT_EQ(n, 1);
+  ASSERT_TRUE(rs[0] == r);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* Gate closure test for poly_toposort_ex_user: collect only nodes whose
  * backward slice contains a specific RANGE. */
 static bool gate_in_r(PolyUOp *u, void *user_data) {
@@ -712,6 +731,32 @@ TEST(uop, toposort_ex_user_passes_user_data) {
   /* Gate returns true for all nodes (no collision with the xor sentinel),
    * so we should see every node in the graph. */
   ASSERT_TRUE(n >= 3); /* at least RANGE size const, RANGE, ADD */
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, toposort_ex_user_scratch_rewinds_without_growing_ctx_arena) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *r = make_range(ctx, 5, 0);
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *e = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, r, c, poly_arg_none());
+
+  size_t main_before = poly_arena_used(poly_ctx_arena(ctx));
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  PolyScratchMark mark = poly_ctx_scratch_mark(ctx);
+
+  int n = 0;
+  PolyUOp **topo = poly_toposort_ex_user_scratch(ctx, e, &n, gate_in_r, r, true);
+  ASSERT_NOT_NULL(topo);
+  ASSERT_TRUE(n >= 3);
+  ASSERT_FALSE(poly_ctx_owns_ptr(ctx, topo));
+  ASSERT_INT_EQ(poly_arena_used(poly_ctx_arena(ctx)), main_before);
+  ASSERT_TRUE(poly_arena_used(ctx->scratch) > scratch_before);
+
+  poly_ctx_scratch_rewind(ctx, mark);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+  ASSERT_INT_EQ(poly_arena_used(poly_ctx_arena(ctx)), main_before);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

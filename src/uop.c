@@ -572,6 +572,19 @@ PolyUOp **poly_toposort_scratch(PolyCtx *ctx, PolyUOp *root, int *n_out) {
   return toposort_worker(ctx, root, n_out, NULL, NULL, NULL, true, POLY_TOPO_RESULT_SCRATCH);
 }
 
+PolyUOp **poly_toposort_ex_user_scratch(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    int *n_out,
+    bool (*gate)(PolyUOp *, void *),
+    void *user_data,
+    bool enter_calls
+) {
+  return toposort_worker(
+      ctx, root, n_out, NULL, gate, user_data, enter_calls, POLY_TOPO_RESULT_SCRATCH
+  );
+}
+
 void poly_toposort_free(PolyUOp **topo) {
   free(topo);
 }
@@ -807,8 +820,12 @@ static PolyRangeSet *compute_ranges_with_ended(
 
   int n_topo = 0;
   RangeComputeGateCtx gate = {ranges_memo, ended_memo};
-  PolyUOp **topo = poly_toposort_ex_user(ctx, u, &n_topo, range_compute_gate, &gate, true);
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  PolyUOp **topo = poly_toposort_ex_user_scratch(
+      ctx, u, &n_topo, range_compute_gate, &gate, true
+  );
   if (!topo) {
+    poly_ctx_scratch_rewind(ctx, scratch);
     if (own_ended) poly_map_destroy(ended_memo);
     return NULL;
   }
@@ -844,6 +861,7 @@ static PolyRangeSet *compute_ranges_with_ended(
   }
 
   cached = ok ? (PolyRangeSet *)ranges_memo_get(ranges_memo, u) : NULL;
+  poly_ctx_scratch_rewind(ctx, scratch);
   if (own_ended) poly_map_destroy(ended_memo);
   return cached;
 }

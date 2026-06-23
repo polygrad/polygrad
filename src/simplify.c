@@ -9,6 +9,7 @@
 
 #include "pat.h"
 #include "polygrad.h"
+#include "ctx.h"
 #include "tensor.h"
 #include "utils.h"
 
@@ -765,6 +766,7 @@ static PolyUOp *reduce_collapse(
   PolyMap *included_map = NULL;
   PolyMap *replaces_map = NULL;
   bool dbg = getenv("POLY_DEBUG_REDUCE_SIMPLIFY") != NULL;
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
 
   /* Loop over each reduce range. */
   for (uint16_t ridx = 1; ridx < red->n_src; ridx++) {
@@ -774,8 +776,7 @@ static PolyUOp *reduce_collapse(
     /* Toposort u, gated by "r in node.ranges" — yields "included" set. */
     GateCtx g = {.ctx = ctx, .r = r, .cache = cache};
     int n_inc = 0;
-    PolyUOp **included = poly_toposort_ex_user(ctx, u, &n_inc, collapse_gate, &g, true);
-    /* `included` is arena-allocated by toposort; do NOT free. */
+    PolyUOp **included = poly_toposort_ex_user_scratch(ctx, u, &n_inc, collapse_gate, &g, true);
     if (dbg) {
       fprintf(stderr, "  [reduce_collapse] r=%p included.n=%d value tree:\n", (void *)r, n_inc);
       poly_uop_dump_tree(stderr, u, 4, 12);
@@ -848,12 +849,14 @@ static PolyUOp *reduce_collapse(
 
   if (included_map) poly_map_destroy(included_map);
   if (replaces_map) poly_map_destroy(replaces_map);
+  poly_ctx_scratch_rewind(ctx, scratch);
   poly_uop_cache_destroy(cache);
   return u;
 
 fail:
   if (included_map) poly_map_destroy(included_map);
   if (replaces_map) poly_map_destroy(replaces_map);
+  poly_ctx_scratch_rewind(ctx, scratch);
   poly_uop_cache_destroy(cache);
   return NULL;
 }
