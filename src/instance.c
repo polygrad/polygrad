@@ -8,6 +8,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "instance.h"
+#include "ctx.h"
 #include "utils.h"
 #include "ir.h"
 #include "safetensors.h"
@@ -735,9 +736,11 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
       return POLY_STATUS_INVALID;
     }
 
+    PolyScratchMark scratch = poly_ctx_scratch_mark(inst->ctx);
     int n_topo = 0;
-    PolyUOp **topo = poly_toposort(inst->ctx, root, &n_topo);
+    PolyUOp **topo = poly_toposort_scratch(inst->ctx, root, &n_topo);
     if (!topo && n_topo != 0) {
+      poly_ctx_scratch_rewind(inst->ctx, scratch);
       poly_instance_set_error(
           inst, POLY_STATUS_ERROR, __func__, "failed to walk output '%s' graph", out->name
       );
@@ -751,6 +754,7 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
       if (find_build_storage_binding(build, u)) continue;
       PolyTensor *leaf_tensor = poly_tensor_find_storage_identity(inst->ctx, u);
       if (leaf_tensor && poly_tensor_requires_grad(leaf_tensor)) {
+        poly_ctx_scratch_rewind(inst->ctx, scratch);
         poly_instance_set_error(
             inst, POLY_STATUS_INVALID, __func__,
             "output '%s' references unbound trainable storage %s", out->name, poly_op_name(u->op)
@@ -759,6 +763,7 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
       }
       if (leaf_tensor && poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_UNKNOWN &&
           poly_tensor_provenance(leaf_tensor) != POLY_TENSOR_PROVENANCE_CONST_INIT) {
+        poly_ctx_scratch_rewind(inst->ctx, scratch);
         poly_instance_set_error(
             inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound %s storage %s",
             out->name,
@@ -768,12 +773,14 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
         );
         return POLY_STATUS_INVALID;
       }
+      poly_ctx_scratch_rewind(inst->ctx, scratch);
       poly_instance_set_error(
           inst, POLY_STATUS_INVALID, __func__, "output '%s' references unbound storage %s",
           out->name, poly_op_name(u->op)
       );
       return POLY_STATUS_INVALID;
     }
+    poly_ctx_scratch_rewind(inst->ctx, scratch);
   }
   return POLY_STATUS_OK;
 }

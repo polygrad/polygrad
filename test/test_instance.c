@@ -5,6 +5,7 @@
 #include "test_harness.h"
 #include "../src/instance.h"
 #include "../src/codegen.h"
+#include "../src/ctx.h"
 #include "../src/engine/schedule.h"
 #include "../src/ir.h"
 #include "../src/frontend.h"
@@ -310,6 +311,37 @@ TEST(instance, staged_build_forward_e2e) {
   PASS();
 }
 
+TEST(instance, staged_build_validation_rewinds_scratch_on_success) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t shape[] = {4};
+  PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
+  PolyTensor *w = poly_instance_param(inst, "w", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(w);
+
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(x), poly_tensor_uop(w));
+  PolyTensor *out = poly_tensor_create(ctx, sum, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
+
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_OK);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, staged_stage_guards) {
   PolyCtx *ctx = poly_ctx_new();
   PolyInstance *inst = poly_instance_new(ctx, NULL);
@@ -330,6 +362,39 @@ TEST(instance, staged_stage_guards) {
   const PolyInstanceError *err = poly_instance_last_error(inst);
   ASSERT_NOT_NULL(err);
   ASSERT_INT_EQ(err->code, POLY_STATUS_BAD_STAGE);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(instance, staged_build_validation_rewinds_scratch_on_unbound_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInstance *inst = poly_instance_new(ctx, NULL);
+  ASSERT_NOT_NULL(inst);
+
+  int64_t shape[] = {4};
+  PolyTensor *x = poly_instance_input(inst, "x", POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(x);
+
+  PolyUOp *w_buf = poly_buffer_f32(ctx, 4);
+  PolyTensor *w = poly_tensor_create(ctx, w_buf, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(w);
+
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(x), poly_tensor_uop(w));
+  PolyTensor *out = poly_tensor_create(ctx, sum, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_instance_output(inst, "output", out), POLY_STATUS_OK);
+
+  const char *inputs[] = {"x"};
+  const char *outputs[] = {"output"};
+  ASSERT_INT_EQ(
+      poly_instance_entrypoint(inst, "forward", inputs, 1, outputs, 1, NULL), POLY_STATUS_OK
+  );
+
+  size_t scratch_before = poly_arena_used(ctx->scratch);
+  ASSERT_INT_EQ(poly_instance_build(inst, NULL), POLY_STATUS_INVALID);
+  ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
 
   poly_instance_free(inst);
   poly_ctx_destroy(ctx);
