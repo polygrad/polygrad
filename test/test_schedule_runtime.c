@@ -142,6 +142,88 @@ static int count_root_ranges_of_type(PolyCtx *ctx, PolyUOp *root, PolyAxisType a
   return count;
 }
 
+static PolyUOp *test_call_buffer_arg(PolyUOp *call, int arg_idx) {
+  int seen = 0;
+  for (int i = 1; call && i < call->n_src; i++) {
+    if (call->src[i]->op == POLY_OP_DEFINE_VAR) continue;
+    if (seen++ == arg_idx) return call->src[i];
+  }
+  return NULL;
+}
+
+static int count_body_call_arg_overlap(PolyCtx *ctx, PolyUOp *body, PolyUOp *call) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, body, &n_topo);
+  int count = 0;
+  int n_args = 0;
+  for (int i = 1; call && i < call->n_src; i++)
+    if (call->src[i]->op != POLY_OP_DEFINE_VAR) n_args++;
+  for (int i = 0; i < n_topo; i++) {
+    for (int a = 0; a < n_args; a++) {
+      if (topo[i] == test_call_buffer_arg(call, a)) count++;
+    }
+  }
+  return count;
+}
+
+static bool schedule_calls_are_parameterized(PolyCtx *ctx, PolySchedule *sched) {
+  if (!sched) return false;
+  for (int k = 0; k < sched->template->n_calls; k++) {
+    PolyUOp *call = poly_schedule_call(sched, k);
+    PolyUOp *body = poly_schedule_call_body(sched, k);
+    if (!call || !body || poly_schedule_call_is_copy(sched, k) || body->op == POLY_OP_BUFFER_VIEW)
+      continue;
+    if (count_body_call_arg_overlap(ctx, body, call) != 0) return false;
+    if (count_root_ops(ctx, body, POLY_OP_BUFFER) != 0) return false;
+    if (count_root_ops(ctx, body, POLY_OP_PARAM) <= 0) return false;
+  }
+  return true;
+}
+
+TEST(schedule_runtime, compute_call_bodies_are_parameterized_like_tinygrad) {
+  ScheduleEnvSave validate_env = schedule_save_env("POLY_VALIDATE_SCHEDULE");
+  setenv("POLY_VALIDATE_SCHEDULE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 16);
+  PolyUOp *b = poly_buffer_f32(ctx, 16);
+  PolyUOp *out = poly_buffer_f32(ctx, 16);
+  PolyUOp *add = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolySchedule *add_sched =
+      poly_complete_create_schedule_with_vars(ctx, poly_sink1(ctx, poly_store_val(ctx, out, add)), POLY_MODE_CALL);
+  ASSERT_TRUE(schedule_calls_are_parameterized(ctx, add_sched));
+  poly_schedule_free(add_sched);
+
+  PolyUOp *rout = poly_buffer_f32(ctx, 1);
+  int64_t axes[1] = {0};
+  PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, a, axes, 1);
+  PolySchedule *reduce_sched =
+      poly_complete_create_schedule_with_vars(ctx, poly_sink1(ctx, poly_store_val(ctx, rout, sum)), POLY_MODE_CALL);
+  ASSERT_TRUE(schedule_calls_are_parameterized(ctx, reduce_sched));
+  poly_schedule_free(reduce_sched);
+
+  PolyUOp *base = poly_buffer_f32(ctx, 8);
+  PolyUOp *unique = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(9001));
+  int64_t view_shape[1] = {8};
+  PolyArg view_arg = {.kind = POLY_ARG_INT_TUPLE, .int_tuple = {view_shape, 1}};
+  PolyUOp *view_src[2] = {base, unique};
+  PolyUOp *view = poly_uop(ctx, POLY_OP_BUFFER_VIEW, POLY_FLOAT32, view_src, 2, view_arg);
+  PolyUOp *view_out = poly_buffer_f32(ctx, 8);
+  PolySchedule *view_sched = poly_complete_create_schedule_with_vars(
+      ctx, poly_sink1(ctx, poly_store_val(ctx, view_out, poly_alu2(ctx, POLY_OP_ADD, view, b))),
+      POLY_MODE_CALL
+  );
+  ASSERT_TRUE(schedule_calls_are_parameterized(ctx, view_sched));
+  ASSERT_TRUE(count_root_ops(ctx, poly_schedule_call_body(view_sched, 0), POLY_OP_BUFFER_VIEW) > 0);
+  poly_schedule_free(view_sched);
+
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&validate_env);
+  PASS();
+}
+
 TEST(schedule_runtime, programinfo_uses_filtered_call_buffer_arg_indices) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

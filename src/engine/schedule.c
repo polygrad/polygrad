@@ -540,10 +540,67 @@ static int poly_call_io_build_arg_lists(PolyCallIO *io) {
   return 0;
 }
 
+static int poly_verify_parameterized_compute_call(PolyCtx *ctx, PolyUOp *call, int call_index) {
+  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 1) return -1;
+  if (poly_call_is_copy(call) || poly_call_is_view(call)) return 0;
+
+  PolyUOp *body = poly_program_body(call->src[0]);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
+  if (!topo && n_topo > 0) return -1;
+
+  int n_args = poly_call_n_buffer_args(call);
+  int bad_arg = -1;
+  PolyUOp *bad_raw_buffer = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u) continue;
+    if (u->op == POLY_OP_BUFFER) {
+      bad_raw_buffer = u;
+      break;
+    }
+    for (int a = 0; a < n_args; a++) {
+      if (u != poly_call_buffer_arg(call, a)) continue;
+      bad_arg = a;
+      break;
+    }
+    if (bad_arg >= 0) break;
+  }
+  poly_toposort_free(topo);
+
+  if (bad_raw_buffer) {
+    fprintf(
+        stderr,
+        "polygrad: schedule: compute CALL %d body contains raw BUFFER %p; "
+        "scheduled bodies must use PARAM placeholders\n",
+        call_index, (void *)bad_raw_buffer
+    );
+    return -1;
+  }
+  if (bad_arg >= 0) {
+    fprintf(
+        stderr,
+        "polygrad: schedule: compute CALL %d body contains external arg %d directly; "
+        "scheduled bodies must be parameterized\n",
+        call_index, bad_arg
+    );
+    return -1;
+  }
+  return 0;
+}
+
+static bool poly_schedule_validation_enabled(void) {
+  const char *v = getenv("POLY_VALIDATE_SCHEDULE");
+  return v && v[0] && strcmp(v, "0") != 0;
+}
+
 static int poly_call_io_init(PolyCtx *ctx, PolySchedule *sched, int call_index) {
   if (!ctx || !sched || call_index < 0 || call_index >= sched->template->n_calls || !sched->template->call_io)
     return -1;
   PolyUOp *call = poly_schedule_call(sched, call_index);
+  if (poly_schedule_validation_enabled() &&
+      poly_verify_parameterized_compute_call(ctx, call, call_index) != 0)
+    return -1;
   PolyCallIO *io = &sched->template->call_io[call_index];
   io->n_args = poly_call_n_buffer_args(call);
   if (io->n_args <= 0) return 0;
