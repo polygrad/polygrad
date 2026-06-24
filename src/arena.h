@@ -17,6 +17,7 @@ typedef struct PolyArenaBlock {
 struct PolyArena {
   PolyArenaBlock *head;
   size_t total_used;
+  size_t high_water;
 };
 
 typedef struct {

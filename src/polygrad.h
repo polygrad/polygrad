@@ -451,6 +451,7 @@ void *poly_arena_alloc(PolyArena *a, size_t size, size_t align);
 void poly_arena_reset(PolyArena *a);
 void poly_arena_destroy(PolyArena *a);
 size_t poly_arena_used(PolyArena *a);
+size_t poly_arena_high_water(PolyArena *a);
 
 /* Hash map (for CSE) */
 
@@ -623,6 +624,26 @@ void poly_ctx_destroy(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
 PolyDevice poly_ctx_get_preferred_device(PolyCtx *ctx);
 bool poly_ctx_owns_ptr(PolyCtx *ctx, const void *p);
+
+typedef struct {
+  size_t arena_bytes;
+  size_t arena_high_water;
+  size_t scratch_bytes;
+  size_t scratch_high_water;
+  size_t cse_entries;
+  size_t schedule_cache_entries;
+  size_t to_program_cache_entries;
+  size_t program_cache_entries;
+  size_t shape_cache_entries;
+  size_t buffer_entries;
+  size_t tensor_entries;
+  size_t tensor_records;
+  size_t registry_entries;
+  size_t entrypoint_entries;
+  size_t compiled_artifact_bytes;
+} PolyCtxStats;
+
+int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out);
 
 /* Return the current ctx->buffers entry address for a BUFFER UOp as an opaque
  * frontend key. Returns 0 when no PolyBuffer is attached. */

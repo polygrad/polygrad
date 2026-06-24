@@ -330,6 +330,51 @@ TEST(uop, toposort_scratch_rewinds_without_growing_ctx_arena) {
   PASS();
 }
 
+TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
+  ASSERT_INT_EQ(poly_ctx_stats(NULL, NULL), -1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(poly_arena_high_water(poly_ctx_arena(ctx)), stats.arena_high_water);
+  ASSERT_INT_EQ(poly_arena_high_water(ctx->scratch), stats.scratch_high_water);
+  ASSERT_INT_EQ(stats.scratch_bytes, 0);
+
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+  PolyUOp *x = a;
+  for (int i = 0; i < 16; i++)
+    x = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, x, poly_arg_none());
+
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.arena_bytes > 0);
+  ASSERT_TRUE(stats.arena_high_water >= stats.arena_bytes);
+  ASSERT_TRUE(stats.cse_entries >= 17);
+
+  PolyScratchMark mark = poly_ctx_scratch_mark(ctx);
+  int n = 0;
+  PolyUOp **sorted = poly_toposort_scratch(ctx, x, &n);
+  ASSERT_NOT_NULL(sorted);
+  ASSERT_INT_EQ(n, 17);
+
+  PolyCtxStats during = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &during), 0);
+  ASSERT_TRUE(during.scratch_bytes > 0);
+  ASSERT_TRUE(during.scratch_high_water >= during.scratch_bytes);
+
+  poly_ctx_scratch_rewind(ctx, mark);
+
+  PolyCtxStats after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_INT_EQ(after.scratch_bytes, 0);
+  ASSERT_TRUE(after.scratch_high_water >= during.scratch_high_water);
+  ASSERT_INT_EQ(after.arena_bytes, during.arena_bytes);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, collect_ordered_buffers_uses_transient_toposort) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);

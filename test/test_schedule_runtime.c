@@ -1736,6 +1736,60 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
   PASS();
 }
 
+TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
+  ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
+  setenv("POLY_PCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.schedule_cache_entries, 0);
+  ASSERT_INT_EQ(stats.to_program_cache_entries, 0);
+  ASSERT_INT_EQ(stats.program_cache_entries, 0);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+
+  float a_data[4] = {1, 2, 3, 4};
+  float b_data[4] = {10, 20, 30, 40};
+  float out_data[4] = {0};
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(a, a_data),
+      POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data),
+  };
+
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, views, 3), 0);
+  ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
+
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.schedule_cache_entries, poly_schedule_cache_len(ctx));
+  ASSERT_INT_EQ(stats.to_program_cache_entries, poly_to_program_cache_len(ctx));
+  ASSERT_INT_EQ(stats.program_cache_entries, poly_program_cache_len(ctx));
+  ASSERT_INT_EQ(stats.schedule_cache_entries, 1);
+  ASSERT_INT_EQ(stats.to_program_cache_entries, 1);
+  ASSERT_INT_EQ(stats.program_cache_entries, 1);
+  ASSERT_TRUE(stats.buffer_entries >= 3);
+
+  poly_program_cache_clear(ctx);
+  poly_to_program_cache_clear(ctx);
+  poly_schedule_cache_clear(ctx);
+
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.schedule_cache_entries, 0);
+  ASSERT_INT_EQ(stats.to_program_cache_entries, 0);
+  ASSERT_INT_EQ(stats.program_cache_entries, 0);
+
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&pcache);
+  PASS();
+}
+
 TEST(schedule_runtime, schedule_cache_clear_keeps_live_schedule_blueprint_valid) {
   ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
   setenv("POLY_SCACHE", "1", 1);

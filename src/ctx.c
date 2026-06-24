@@ -5,6 +5,7 @@
 #include "utils.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 /* Defined in ops.c */
 void poly_init_group_ops(void);
@@ -118,6 +119,26 @@ void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleas
 
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
 PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
+
+int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
+  if (!ctx || !out) return -1;
+  memset(out, 0, sizeof(*out));
+  out->arena_bytes = poly_arena_used(ctx->arena);
+  out->arena_high_water = poly_arena_high_water(ctx->arena);
+  out->scratch_bytes = poly_arena_used(ctx->scratch);
+  out->scratch_high_water = poly_arena_high_water(ctx->scratch);
+  out->cse_entries = poly_map_len(ctx->cse);
+  out->schedule_cache_entries = poly_map_len(ctx->schedule_cache);
+  out->to_program_cache_entries = poly_map_len(ctx->to_program_cache);
+  out->program_cache_entries = poly_map_len(ctx->program_cache);
+  out->shape_cache_entries = poly_map_len(ctx->shape_cache);
+  out->buffer_entries = poly_map_len(ctx->buffers);
+  out->tensor_entries = poly_map_len(ctx->tensors_by_uop);
+  out->tensor_records = (size_t)ctx->n_tensors;
+  out->registry_entries = (size_t)ctx->n_entries;
+  out->entrypoint_entries = (size_t)ctx->n_ep;
+  return 0;
+}
 
 PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx) {
   return poly_arena_mark(ctx ? ctx->scratch : NULL);

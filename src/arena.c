@@ -31,6 +31,7 @@ PolyArena *poly_arena_new(size_t initial_cap) {
     return NULL;
   }
   a->total_used = 0;
+  a->high_water = 0;
   return a;
 }
 
@@ -56,6 +57,8 @@ void *poly_arena_alloc(PolyArena *a, size_t size, size_t align) {
   void *ptr = b->data + offset;
   b->used = offset + size;
   a->total_used += size;
+  if (a->total_used > a->high_water)
+    a->high_water = a->total_used;
   return ptr;
 }
 
@@ -69,6 +72,7 @@ void poly_arena_reset(PolyArena *a) {
   }
   b->used = 0;
   a->total_used = 0;
+  a->high_water = 0;
 }
 
 void poly_arena_destroy(PolyArena *a) {
@@ -82,7 +86,11 @@ void poly_arena_destroy(PolyArena *a) {
 }
 
 size_t poly_arena_used(PolyArena *a) {
-  return a->total_used;
+  return a ? a->total_used : 0;
+}
+
+size_t poly_arena_high_water(PolyArena *a) {
+  return a ? a->high_water : 0;
 }
 
 PolyArenaMark poly_arena_mark(PolyArena *a) {
