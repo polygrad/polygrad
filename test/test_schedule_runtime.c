@@ -2078,6 +2078,11 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
 
+  PolyCompiledSchedule *plan = poly_lower_schedule(ctx, ps, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(plan);
+  ASSERT_INT_EQ(poly_compiled_schedule_runtime_intermediate_bytes(plan), expected_runtime_bytes);
+  poly_compiled_schedule_free(plan);
+
   poly_schedule_free(ps);
   poly_ctx_destroy(ctx);
   PASS();
