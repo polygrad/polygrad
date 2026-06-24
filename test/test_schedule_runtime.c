@@ -1736,6 +1736,55 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
   PASS();
 }
 
+TEST(schedule_runtime, schedule_cache_clear_keeps_live_schedule_blueprint_valid) {
+  ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
+  setenv("POLY_SCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+
+  poly_schedule_cache_clear(ctx);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+
+  float a_data[4] = {1, 2, 3, 4};
+  float b_data[4] = {10, 20, 30, 40};
+  float out_data[4] = {0};
+  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
+  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
+  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
+  poly_buffer_attach(ctx, a, &a_view);
+  poly_buffer_attach(ctx, b, &b_view);
+  poly_buffer_attach(ctx, out, &out_view);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
+
+  poly_schedule_free(sched);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 0);
+
+  PolyUOp *c = poly_buffer_f32(ctx, 4);
+  PolyUOp *d = poly_buffer_f32(ctx, 4);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_ADD, c, d)));
+  PolySchedule *fresh = poly_complete_create_schedule_with_vars(ctx, sink2, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(fresh);
+  ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
+  poly_schedule_free(fresh);
+
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&scache);
+  PASS();
+}
+
 TEST(schedule_runtime, schedule_cache_misses_on_changed_op_shape) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
