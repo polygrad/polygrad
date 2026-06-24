@@ -18,6 +18,31 @@ static const char *simple_mlp_spec = "{\"layers\":[2,4,1],\"activation\":\"relu\
 static const char *no_bias_spec = "{\"layers\":[3,2],\"activation\":\"none\",\"bias\":false,"
                                   "\"loss\":\"none\",\"batch_size\":1,\"seed\":42}";
 
+typedef struct {
+  const char *key;
+  char *value;
+  bool had_value;
+} MlpEnvSave;
+
+static MlpEnvSave mlp_save_env(const char *key) {
+  const char *cur = getenv(key);
+  return (MlpEnvSave){
+      .key = key,
+      .value = cur ? strdup(cur) : NULL,
+      .had_value = cur != NULL,
+  };
+}
+
+static void mlp_restore_env(MlpEnvSave *s) {
+  if (!s) return;
+  if (s->had_value)
+    setenv(s->key, s->value ? s->value : "", 1);
+  else
+    unsetenv(s->key);
+  free(s->value);
+  s->value = NULL;
+}
+
 /* Tests */
 
 TEST(mlp, create_simple) {
@@ -224,6 +249,78 @@ TEST(mlp, forward_deterministic) {
   ASSERT_TRUE(out1 == out2);
 
   poly_instance_free(inst);
+  PASS();
+}
+
+TEST(mlp, forward_and_train_replay_stats_plateau) {
+  MlpEnvSave pcache = mlp_save_env("POLY_PCACHE");
+  MlpEnvSave scache = mlp_save_env("POLY_SCACHE");
+  setenv("POLY_PCACHE", "1", 1);
+  setenv("POLY_SCACHE", "1", 1);
+
+  PolyInstance *inst = poly_mlp_from_json(simple_mlp_spec, (int)strlen(simple_mlp_spec));
+  ASSERT_NOT_NULL(inst);
+  PolyCtx *ctx = poly_instance_ctx(inst);
+  ASSERT_NOT_NULL(ctx);
+
+  float x[] = {1.0f, 2.0f};
+  float y[] = {5.0f};
+  PolyIOBinding forward_io[] = {{"x", x}};
+  PolyIOBinding train_io[] = {{"x", x}, {"y", y}};
+
+  ASSERT_INT_EQ(poly_instance_forward(inst, forward_io, 1), 0);
+  PolyCtxStats forward_first = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &forward_first), 0);
+  ASSERT_INT_EQ(forward_first.schedule_cache_entries, 1);
+  ASSERT_TRUE(forward_first.to_program_cache_entries > 0);
+  ASSERT_TRUE(forward_first.runtime_cache_entries > 0);
+
+  for (int iter = 0; iter < 16; iter++)
+    ASSERT_INT_EQ(poly_instance_forward(inst, forward_io, 1), 0);
+
+  PolyCtxStats forward_replay = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &forward_replay), 0);
+  ASSERT_INT_EQ(forward_replay.arena_bytes, forward_first.arena_bytes);
+  ASSERT_INT_EQ(forward_replay.cse_entries, forward_first.cse_entries);
+  ASSERT_INT_EQ(forward_replay.schedule_cache_entries, forward_first.schedule_cache_entries);
+  ASSERT_INT_EQ(forward_replay.to_program_cache_entries, forward_first.to_program_cache_entries);
+  ASSERT_INT_EQ(forward_replay.runtime_cache_entries, forward_first.runtime_cache_entries);
+  ASSERT_INT_EQ(forward_replay.shape_cache_entries, forward_first.shape_cache_entries);
+  ASSERT_INT_EQ(forward_replay.buffer_entries, forward_first.buffer_entries);
+  ASSERT_INT_EQ(forward_replay.compiled_artifact_bytes, forward_first.compiled_artifact_bytes);
+
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(inst, POLY_OPTIM_ADAM, 0.001f, 0.9f, 0.999f, 1e-8f, 0.0f), 0
+  );
+  float loss = 0.0f;
+  ASSERT_INT_EQ(poly_instance_train_step(inst, train_io, 2, &loss), 0);
+  ASSERT_TRUE(isfinite(loss));
+
+  PolyCtxStats train_first = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &train_first), 0);
+  ASSERT_TRUE(train_first.schedule_cache_entries >= forward_first.schedule_cache_entries);
+  ASSERT_TRUE(train_first.to_program_cache_entries >= forward_first.to_program_cache_entries);
+  ASSERT_TRUE(train_first.runtime_cache_entries >= forward_first.runtime_cache_entries);
+
+  for (int iter = 0; iter < 16; iter++) {
+    ASSERT_INT_EQ(poly_instance_train_step(inst, train_io, 2, &loss), 0);
+    ASSERT_TRUE(isfinite(loss));
+  }
+
+  PolyCtxStats train_replay = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &train_replay), 0);
+  ASSERT_INT_EQ(train_replay.arena_bytes, train_first.arena_bytes);
+  ASSERT_INT_EQ(train_replay.cse_entries, train_first.cse_entries);
+  ASSERT_INT_EQ(train_replay.schedule_cache_entries, train_first.schedule_cache_entries);
+  ASSERT_INT_EQ(train_replay.to_program_cache_entries, train_first.to_program_cache_entries);
+  ASSERT_INT_EQ(train_replay.runtime_cache_entries, train_first.runtime_cache_entries);
+  ASSERT_INT_EQ(train_replay.shape_cache_entries, train_first.shape_cache_entries);
+  ASSERT_INT_EQ(train_replay.buffer_entries, train_first.buffer_entries);
+  ASSERT_INT_EQ(train_replay.compiled_artifact_bytes, train_first.compiled_artifact_bytes);
+
+  poly_instance_free(inst);
+  mlp_restore_env(&scache);
+  mlp_restore_env(&pcache);
   PASS();
 }
 

@@ -1863,6 +1863,80 @@ TEST(schedule_runtime, ctx_stats_fixed_shape_replay_plateaus) {
   PASS();
 }
 
+TEST(schedule_runtime, ctx_stats_runtime_var_replay_plateaus) {
+  ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
+  ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
+  setenv("POLY_PCACHE", "1", 1);
+  setenv("POLY_SCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *N = poly_define_var(ctx, "N", 1, 16);
+  ASSERT_NOT_NULL(N);
+  PolyUOp *a = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  PolyUOp *out = poly_buffer_var(ctx, POLY_FLOAT32, N, NULL, 0);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(out);
+  PolyUOp *sink = poly_sink1(
+      ctx,
+      poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f)))
+  );
+
+  float a_data[16];
+  float out_data[16];
+  for (int i = 0; i < 16; i++)
+    a_data[i] = (float)(i + 1);
+  poly_buffer_set(ctx, a, a_data, sizeof(a_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, out, out_data, sizeof(out_data), POLY_DEVICE_CPU);
+
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+
+  PolyVarBinding bind = {.var = N, .value = 6};
+  for (int i = 0; i < 16; i++)
+    out_data[i] = -999.0f;
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, &bind, 1), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
+  ASSERT_FLOAT_EQ(out_data[6], -999.0f, 1e-5f);
+
+  PolyCtxStats first = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &first), 0);
+  ASSERT_INT_EQ(first.schedule_cache_entries, 1);
+  ASSERT_INT_EQ(first.to_program_cache_entries, 1);
+  ASSERT_INT_EQ(first.runtime_cache_entries, 1);
+
+  const int vals[] = {12, 6, 16, 12, 1, 15};
+  for (int iter = 0; iter < (int)(sizeof(vals) / sizeof(vals[0])); iter++) {
+    bind.value = vals[iter];
+    for (int i = 0; i < 16; i++)
+      out_data[i] = -999.0f;
+    ASSERT_INT_EQ(poly_run_schedule(ctx, sched, &bind, 1), 0);
+    for (int i = 0; i < vals[iter]; i++)
+      ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
+    if (vals[iter] < 16)
+      ASSERT_FLOAT_EQ(out_data[vals[iter]], -999.0f, 1e-5f);
+  }
+
+  PolyCtxStats replay = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &replay), 0);
+  ASSERT_INT_EQ(replay.arena_bytes, first.arena_bytes);
+  ASSERT_INT_EQ(replay.cse_entries, first.cse_entries);
+  ASSERT_INT_EQ(replay.schedule_cache_entries, first.schedule_cache_entries);
+  ASSERT_INT_EQ(replay.to_program_cache_entries, first.to_program_cache_entries);
+  ASSERT_INT_EQ(replay.runtime_cache_entries, first.runtime_cache_entries);
+  ASSERT_INT_EQ(replay.shape_cache_entries, first.shape_cache_entries);
+  ASSERT_INT_EQ(replay.buffer_entries, first.buffer_entries);
+  ASSERT_INT_EQ(replay.compiled_artifact_bytes, first.compiled_artifact_bytes);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&scache);
+  schedule_restore_env(&pcache);
+  PASS();
+}
+
 TEST(schedule_runtime, schedule_cache_clear_keeps_live_schedule_blueprint_valid) {
   ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
   setenv("POLY_SCACHE", "1", 1);
