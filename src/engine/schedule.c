@@ -700,58 +700,77 @@ static int poly_schedule_slot_for_call_arg(
 }
 
 static const PolyCallIO *poly_schedule_call_io(const PolySchedule *sched, int call_index) {
-  if (!sched || !sched->template->call_io || call_index < 0 || call_index >= sched->template->n_calls) return NULL;
-  return &sched->template->call_io[call_index];
+  if (!sched || !sched->run || !sched->run->call_io || call_index < 0 ||
+      call_index >= sched->template->n_calls)
+    return NULL;
+  return &sched->run->call_io[call_index];
+}
+
+static void poly_call_access_free(PolyCallAccess *access) {
+  if (!access) return;
+  free(access->outs);
+  free(access->ins);
+  free(access->read_args);
+  free(access->write_args);
+  free(access->active_args);
+  memset(access, 0, sizeof(*access));
 }
 
 static void poly_call_io_free(PolyCallIO *io) {
   if (!io) return;
   free(io->arg_to_slot);
-  free(io->outs);
-  free(io->ins);
-  free(io->read_args);
-  free(io->write_args);
-  free(io->active_args);
   memset(io, 0, sizeof(*io));
 }
 
-static int poly_call_io_build_arg_lists(PolyCallIO *io) {
-  if (!io || io->n_args < 0 || !io->outs || !io->ins) return -1;
+static int poly_call_io_clone_resolved(PolyCallIO *dst, const PolyCallIO *src) {
+  if (!dst || !src) return -1;
+  dst->n_args = src->n_args;
+  dst->access = src->access;
+  if (src->n_args <= 0) return 0;
+  if (!src->arg_to_slot || !src->access) return -1;
+  dst->arg_to_slot = malloc((size_t)src->n_args * sizeof(int));
+  if (!dst->arg_to_slot) return -1;
+  memcpy(dst->arg_to_slot, src->arg_to_slot, (size_t)src->n_args * sizeof(int));
+  return 0;
+}
 
-  free(io->read_args);
-  free(io->write_args);
-  free(io->active_args);
-  io->read_args = NULL;
-  io->write_args = NULL;
-  io->active_args = NULL;
-  io->n_read_args = 0;
-  io->n_write_args = 0;
-  io->n_active_args = 0;
+static int poly_call_access_build_arg_lists(PolyCallAccess *access) {
+  if (!access || access->n_args < 0 || !access->outs || !access->ins) return -1;
 
-  for (int i = 0; i < io->n_args; i++) {
-    if (io->ins[i]) io->n_read_args++;
-    if (io->outs[i]) io->n_write_args++;
-    if (io->outs[i] || io->ins[i]) io->n_active_args++;
+  free(access->read_args);
+  free(access->write_args);
+  free(access->active_args);
+  access->read_args = NULL;
+  access->write_args = NULL;
+  access->active_args = NULL;
+  access->n_read_args = 0;
+  access->n_write_args = 0;
+  access->n_active_args = 0;
+
+  for (int i = 0; i < access->n_args; i++) {
+    if (access->ins[i]) access->n_read_args++;
+    if (access->outs[i]) access->n_write_args++;
+    if (access->outs[i] || access->ins[i]) access->n_active_args++;
   }
 
-  if (io->n_read_args > 0) {
-    io->read_args = malloc((size_t)io->n_read_args * sizeof(int));
-    if (!io->read_args) return -1;
+  if (access->n_read_args > 0) {
+    access->read_args = malloc((size_t)access->n_read_args * sizeof(int));
+    if (!access->read_args) return -1;
   }
-  if (io->n_write_args > 0) {
-    io->write_args = malloc((size_t)io->n_write_args * sizeof(int));
-    if (!io->write_args) return -1;
+  if (access->n_write_args > 0) {
+    access->write_args = malloc((size_t)access->n_write_args * sizeof(int));
+    if (!access->write_args) return -1;
   }
-  if (io->n_active_args > 0) {
-    io->active_args = malloc((size_t)io->n_active_args * sizeof(int));
-    if (!io->active_args) return -1;
+  if (access->n_active_args > 0) {
+    access->active_args = malloc((size_t)access->n_active_args * sizeof(int));
+    if (!access->active_args) return -1;
   }
 
   int r = 0, w = 0, a = 0;
-  for (int i = 0; i < io->n_args; i++) {
-    if (io->ins[i]) io->read_args[r++] = i;
-    if (io->outs[i]) io->write_args[w++] = i;
-    if (io->outs[i] || io->ins[i]) io->active_args[a++] = i;
+  for (int i = 0; i < access->n_args; i++) {
+    if (access->ins[i]) access->read_args[r++] = i;
+    if (access->outs[i]) access->write_args[w++] = i;
+    if (access->outs[i] || access->ins[i]) access->active_args[a++] = i;
   }
   return 0;
 }
@@ -811,27 +830,32 @@ static bool poly_schedule_validation_enabled(void) {
 }
 
 static int poly_call_io_init(PolyCtx *ctx, PolySchedule *sched, int call_index) {
-  if (!ctx || !sched || call_index < 0 || call_index >= sched->template->n_calls || !sched->template->call_io)
+  if (!ctx || !sched || !sched->run || call_index < 0 || call_index >= sched->template->n_calls ||
+      !sched->template->call_access || !sched->run->call_io)
     return -1;
   PolyUOp *call = poly_schedule_call(sched, call_index);
   if (poly_schedule_validation_enabled() &&
       poly_verify_parameterized_compute_call(ctx, call, call_index) != 0)
     return -1;
-  PolyCallIO *io = &sched->template->call_io[call_index];
-  io->n_args = poly_call_n_buffer_args(call);
-  if (io->n_args <= 0) return 0;
+  PolyCallAccess *access = &sched->template->call_access[call_index];
+  PolyCallIO *io = &sched->run->call_io[call_index];
+  access->n_args = poly_call_n_buffer_args(call);
+  io->n_args = access->n_args;
+  io->access = access;
+  if (access->n_args <= 0) return 0;
 
-  io->arg_to_slot = malloc((size_t)io->n_args * sizeof(int));
-  io->outs = calloc((size_t)io->n_args, sizeof(bool));
-  io->ins = calloc((size_t)io->n_args, sizeof(bool));
-  if (!io->arg_to_slot || !io->outs || !io->ins) return -1;
+  io->arg_to_slot = malloc((size_t)access->n_args * sizeof(int));
+  access->outs = calloc((size_t)access->n_args, sizeof(bool));
+  access->ins = calloc((size_t)access->n_args, sizeof(bool));
+  if (!io->arg_to_slot || !access->outs || !access->ins) return -1;
 
-  for (int i = 0; i < io->n_args; i++) {
+  for (int i = 0; i < access->n_args; i++) {
     io->arg_to_slot[i] = poly_schedule_slot_for_call_arg(sched, call, i);
     if (io->arg_to_slot[i] < 0 || io->arg_to_slot[i] >= sched->template->n_buf_slots) return -1;
   }
-  if (poly_call_get_outs_ins(ctx, call, io->outs, io->ins, io->n_args) != 0) return -1;
-  return poly_call_io_build_arg_lists(io);
+  if (poly_call_get_outs_ins(ctx, call, access->outs, access->ins, access->n_args) != 0)
+    return -1;
+  return poly_call_access_build_arg_lists(access);
 }
 
 static bool poly_memory_plan_enabled(void) {
@@ -1770,9 +1794,10 @@ static bool poly_schedule_slot_used_by_compute(const PolySchedule *sched, int sl
     PolyUOp *call = poly_schedule_call(sched, k);
     const PolyCallIO *io = poly_schedule_call_io(sched, k);
     if (poly_call_is_copy(call) || poly_call_is_view(call)) continue;
-    if (!io) continue;
-    for (int ai = 0; ai < io->n_active_args; ai++) {
-      int arg = io->active_args[ai];
+    const PolyCallAccess *access = io ? io->access : NULL;
+    if (!io || !access) continue;
+    for (int ai = 0; ai < access->n_active_args; ai++) {
+      int arg = access->active_args[ai];
       if (io->arg_to_slot[arg] == slot_idx) return true;
     }
   }
@@ -1826,8 +1851,9 @@ static PolyDevice poly_call_device(
   if (n_params <= 0) return fallback == POLY_DEVICE_AUTO ? poly_device_default() : fallback;
 
   if (poly_call_is_copy(call) || poly_call_is_view(call)) {
-    for (int wi = 0; wi < io->n_write_args; wi++) {
-      int arg = io->write_args[wi];
+    const PolyCallAccess *access = io->access;
+    for (int wi = 0; wi < access->n_write_args; wi++) {
+      int arg = access->write_args[wi];
       int slot = io->arg_to_slot[arg];
       PolyDevice dev = poly_schedule_slot_target_device(ctx, sched, slot, fallback);
       if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST && poly_device_can_execute(dev)) {
@@ -1841,8 +1867,9 @@ static PolyDevice poly_call_device(
    * Explicit slot/device annotations still win; otherwise the selected schedule
    * device is the call device, matching tinygrad's CALL execution boundary. */
   if (!poly_call_is_copy(call) && !poly_call_is_view(call)) {
-    for (int ai = 0; ai < io->n_active_args; ai++) {
-      int arg = io->active_args[ai];
+    const PolyCallAccess *access = io->access;
+    for (int ai = 0; ai < access->n_active_args; ai++) {
+      int arg = access->active_args[ai];
       int slot = io->arg_to_slot[arg];
       PolyDevice dev = poly_schedule_slot_declared_execution_device(sched, slot);
       if (dev != POLY_DEVICE_AUTO) {
@@ -1855,8 +1882,9 @@ static PolyDevice poly_call_device(
     }
   }
 
-  for (int ri = 0; ri < io->n_read_args; ri++) {
-    int arg = io->read_args[ri];
+  const PolyCallAccess *access = io->access;
+  for (int ri = 0; ri < access->n_read_args; ri++) {
+    int arg = access->read_args[ri];
     int slot = io->arg_to_slot[arg];
     PolyDevice dev = poly_schedule_slot_target_device(ctx, sched, slot, fallback);
     if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST && poly_device_can_execute(dev)) {
@@ -1877,11 +1905,12 @@ static PolyDevice poly_intermediate_slot_runtime_device(
 
   for (int k = 0; k < sched->template->n_calls; k++) {
     const PolyCallIO *io = poly_schedule_call_io(sched, k);
-    if (!io || io->n_args <= 0) continue;
+    const PolyCallAccess *access = io ? io->access : NULL;
+    if (!io || !access || io->n_args <= 0) continue;
 
     bool touches = false;
-    for (int ai = 0; ai < io->n_active_args; ai++) {
-      int arg = io->active_args[ai];
+    for (int ai = 0; ai < access->n_active_args; ai++) {
+      int arg = access->active_args[ai];
       if (io->arg_to_slot[arg] == slot) {
         touches = true;
         break;
@@ -2208,9 +2237,10 @@ static PolyUOp *linear_replay_resolve_arg(
 static int poly_schedule_init_call_io_and_runtime(PolyCtx *ctx, PolySchedule *ps) {
   if (!ctx || !ps || !ps->template || !ps->run || !ps->template->linear) return -1;
   ps->template->n_calls = ps->template->linear->n_src;
-  ps->template->call_io = calloc((size_t)ps->template->n_calls, sizeof(PolyCallIO));
+  ps->template->call_access = calloc((size_t)ps->template->n_calls, sizeof(PolyCallAccess));
+  ps->run->call_io = calloc((size_t)ps->template->n_calls, sizeof(PolyCallIO));
   ps->run->calls = calloc((size_t)ps->template->n_calls, sizeof(PolyCallRuntime));
-  if (ps->template->n_calls > 0 && !ps->template->call_io) return -1;
+  if (ps->template->n_calls > 0 && (!ps->template->call_access || !ps->run->call_io)) return -1;
   if (ps->template->n_calls > 0 && !ps->run->calls) return -1;
   for (int k = 0; k < ps->template->n_calls; k++) {
     ps->run->calls[k].call = ps->template->linear->src[k];
@@ -2925,6 +2955,11 @@ static void poly_schedule_runtime_cleanup(
     PolyCallRuntime *rt = &run->calls[i];
     poly_call_runtime_cleanup(rt);
   }
+  if (run->call_io) {
+    for (int i = 0; i < n_calls; i++)
+      poly_call_io_free(&run->call_io[i]);
+    free(run->call_io);
+  }
 
   if (run->intermediates) {
     for (int i = 0; i < run->n_intermediates; i++) {
@@ -2952,6 +2987,7 @@ static void poly_schedule_runtime_cleanup(
   free(run->var_int_storage);
 
   run->device = POLY_DEVICE_AUTO;
+  run->call_io = NULL;
   run->allocator = NULL;
   run->intermediates = NULL;
   run->n_intermediates = 0;
@@ -2973,10 +3009,10 @@ static void poly_schedule_runtime_destroy(PolySchedule *sched) {
 
 static void poly_schedule_template_destroy(PolyScheduleTemplate *tpl) {
   if (!tpl) return;
-  if (tpl->call_io) {
+  if (tpl->call_access) {
     for (int i = 0; i < tpl->n_calls; i++)
-      poly_call_io_free(&tpl->call_io[i]);
-    free(tpl->call_io);
+      poly_call_access_free(&tpl->call_access[i]);
+    free(tpl->call_access);
   }
   free(tpl->buf_slots);
   free(tpl->default_vars);
@@ -5127,7 +5163,13 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
   plan->run->device = device;
   plan->run->allocator = plan->allocator;
   plan->run->calls = calloc((size_t)schedule->template->n_calls, sizeof(PolyCallRuntime));
+  plan->run->call_io = calloc((size_t)schedule->template->n_calls, sizeof(PolyCallIO));
   if (schedule->template->n_calls > 0 && !plan->run->calls) goto cleanup;
+  if (schedule->template->n_calls > 0 && !plan->run->call_io) goto cleanup;
+  for (int k = 0; k < schedule->template->n_calls; k++) {
+    const PolyCallIO *src_io = poly_schedule_call_io(schedule, k);
+    if (poly_call_io_clone_resolved(&plan->run->call_io[k], src_io) != 0) goto cleanup;
+  }
 
   /* Lower each CALL via backend vtable. Function names are structural so
    * backend compiler caches see identical kernels as identical source. */
@@ -5407,11 +5449,13 @@ static int poly_prepare_call_buffer_slots_common(
   PolyUOp *call = poly_schedule_call(sched, call_index);
   const PolyCallIO *io = poly_schedule_call_io(sched, call_index);
   if (!call || !io) return -1;
+  const PolyCallAccess *access = io->access;
+  if (!access) return -1;
   if (!label) label = "run_schedule";
   int rc = 0;
 
-  for (int ai = 0; ai < io->n_active_args; ai++) {
-    int i = io->active_args[ai];
+  for (int ai = 0; ai < access->n_active_args; ai++) {
+    int i = access->active_args[ai];
     int slot = io->arg_to_slot[i];
     if (slot < 0 || slot >= sched->template->n_buf_slots) {
       rc = -1;
@@ -5422,10 +5466,10 @@ static int poly_prepare_call_buffer_slots_common(
 
     PolyUOp *buf_uop = sched->template->buf_slots[slot].buf_uop;
     PolyDevice slot_device =
-        poly_call_arg_runtime_device(ctx, sched, call, slot, io->outs[i], io->ins[i], device);
+        poly_call_arg_runtime_device(ctx, sched, call, slot, access->outs[i], access->ins[i], device);
     PolyBuffer *b = NULL;
     if (slot_device == POLY_DEVICE_HOST) {
-      b = poly_call_host_slot_residency(ctx, buf_uop, io->ins[i]);
+      b = poly_call_host_slot_residency(ctx, buf_uop, access->ins[i]);
       if (!b || !b->ptr) {
         fprintf(stderr, "polygrad: %s: buffer slot %d has no data attached\n", label, slot);
         rc = -1;
@@ -5437,13 +5481,13 @@ static int poly_prepare_call_buffer_slots_common(
       goto prepared;
     }
 
-    if (io->ins[i]) {
+    if (access->ins[i]) {
       if (poly_buffer_ensure_device_current(ctx, buf_uop, slot_device) != 0) {
         fprintf(stderr, "polygrad: %s: buffer slot %d migration copy failed\n", label, slot);
         rc = -1;
         break;
       }
-    } else if (io->outs[i]) {
+    } else if (access->outs[i]) {
       if (poly_buffer_ensure_device_allocated(ctx, buf_uop, slot_device) != 0) {
         fprintf(stderr, "polygrad: %s: buffer slot %d output alloc failed\n", label, slot);
         rc = -1;
@@ -5471,7 +5515,7 @@ prepared:
           stderr,
           "[polygrad:slot] call=%p arg=%d slot=%d access=%s%s device=%s ptr=%p valid=%d src=%p "
           "src_valid=%d\n",
-          (void *)call, i, slot, io->outs[i] ? "out" : "", io->ins[i] ? "in" : "",
+          (void *)call, i, slot, access->outs[i] ? "out" : "", access->ins[i] ? "in" : "",
           poly_device_name(b->device), b->ptr, (int)b->valid, b->src ? b->src->ptr : NULL,
           b->src ? (int)b->src->valid : -1
       );
@@ -5519,18 +5563,20 @@ static int poly_commit_call_buffer_writes(
   PolyUOp *call = poly_schedule_call(sched, call_index);
   const PolyCallIO *io = poly_schedule_call_io(sched, call_index);
   if (!call || !io) return -1;
+  const PolyCallAccess *access = io->access;
+  if (!access) return -1;
   int rc = 0;
 
-  for (int wi = 0; wi < io->n_write_args; wi++) {
-    int i = io->write_args[wi];
+  for (int wi = 0; wi < access->n_write_args; wi++) {
+    int i = access->write_args[wi];
     int slot = io->arg_to_slot[i];
     if (slot < 0 || slot >= sched->template->n_buf_slots || sched->template->buf_slots[slot].is_intermediate) continue;
     if (commit_slots && !commit_slots[slot]) continue;
     PolyDevice slot_device =
-        poly_call_arg_runtime_device(ctx, sched, call, slot, io->outs[i], io->ins[i], device);
+        poly_call_arg_runtime_device(ctx, sched, call, slot, access->outs[i], access->ins[i], device);
     if (slot_device == POLY_DEVICE_HOST) {
       PolyUOp *buf_uop = sched->template->buf_slots[slot].buf_uop;
-      PolyBuffer *written = poly_call_host_slot_residency(ctx, buf_uop, io->ins[i]);
+      PolyBuffer *written = poly_call_host_slot_residency(ctx, buf_uop, access->ins[i]);
       if (poly_mark_call_host_residency_written(ctx, buf_uop, written) != 0) {
         rc = -1;
         break;

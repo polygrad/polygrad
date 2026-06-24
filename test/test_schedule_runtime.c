@@ -973,9 +973,12 @@ static PolySchedule *make_manual_bufferview_call_schedule_ex(
   sched->template->n_calls = 1;
   sched->template->n_buf_slots = 2;
   sched->template->buf_slots = calloc(2, sizeof(PolyScheduleBufSlot));
-  sched->template->call_io = calloc(1, sizeof(PolyCallIO));
+  sched->template->call_access = calloc(1, sizeof(PolyCallAccess));
   sched->run->calls = calloc(1, sizeof(PolyCallRuntime));
-  if (!sched->template->buf_slots || !sched->template->call_io || !sched->run->calls) return sched;
+  sched->run->call_io = calloc(1, sizeof(PolyCallIO));
+  if (!sched->template->buf_slots || !sched->template->call_access || !sched->run->calls ||
+      !sched->run->call_io)
+    return sched;
 
   sched->template->buf_slots[0] = (PolyScheduleBufSlot){
       .dtype = POLY_FLOAT32,
@@ -991,17 +994,19 @@ static PolySchedule *make_manual_bufferview_call_schedule_ex(
       .buf_uop = base,
       .device = POLY_DEVICE_CPU,
   };
-  sched->template->call_io[0].n_args = 2;
-  sched->template->call_io[0].arg_to_slot = calloc(2, sizeof(int));
-  sched->template->call_io[0].outs = calloc(2, sizeof(bool));
-  sched->template->call_io[0].ins = calloc(2, sizeof(bool));
-  if (!sched->template->call_io[0].arg_to_slot || !sched->template->call_io[0].outs ||
-      !sched->template->call_io[0].ins)
+  sched->template->call_access[0].n_args = 2;
+  sched->template->call_access[0].outs = calloc(2, sizeof(bool));
+  sched->template->call_access[0].ins = calloc(2, sizeof(bool));
+  sched->run->call_io[0].n_args = 2;
+  sched->run->call_io[0].access = &sched->template->call_access[0];
+  sched->run->call_io[0].arg_to_slot = calloc(2, sizeof(int));
+  if (!sched->template->call_access[0].outs || !sched->template->call_access[0].ins ||
+      !sched->run->call_io[0].arg_to_slot)
     return sched;
-  sched->template->call_io[0].arg_to_slot[0] = 0;
-  sched->template->call_io[0].arg_to_slot[1] = 1;
-  sched->template->call_io[0].outs[0] = true;
-  sched->template->call_io[0].ins[1] = true;
+  sched->run->call_io[0].arg_to_slot[0] = 0;
+  sched->run->call_io[0].arg_to_slot[1] = 1;
+  sched->template->call_access[0].outs[0] = true;
+  sched->template->call_access[0].ins[1] = true;
 
   if (base_out) *base_out = base;
   if (view_out) *view_out = view;
@@ -1050,11 +1055,12 @@ TEST(schedule_runtime, call_bufferview_installs_alias_residency_like_tinygrad_sl
   ASSERT_NOT_NULL(sched->template);
   ASSERT_NOT_NULL(sched->run);
   ASSERT_NOT_NULL(sched->template->buf_slots);
-  ASSERT_NOT_NULL(sched->template->call_io);
+  ASSERT_NOT_NULL(sched->template->call_access);
   ASSERT_NOT_NULL(sched->run->calls);
-  ASSERT_NOT_NULL(sched->template->call_io[0].arg_to_slot);
-  ASSERT_NOT_NULL(sched->template->call_io[0].outs);
-  ASSERT_NOT_NULL(sched->template->call_io[0].ins);
+  ASSERT_NOT_NULL(sched->run->call_io);
+  ASSERT_NOT_NULL(sched->run->call_io[0].arg_to_slot);
+  ASSERT_NOT_NULL(sched->template->call_access[0].outs);
+  ASSERT_NOT_NULL(sched->template->call_access[0].ins);
 
   float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   PolyBuffer base_handle = poly_buffer_make_host_view(data, sizeof(data));

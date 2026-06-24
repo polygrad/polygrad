@@ -77,7 +77,6 @@ typedef struct {
 
 typedef struct {
   int n_args;
-  int *arg_to_slot;
   bool *outs;
   bool *ins;
   int *read_args;
@@ -86,6 +85,12 @@ typedef struct {
   int n_write_args;
   int *active_args;
   int n_active_args;
+} PolyCallAccess;
+
+typedef struct {
+  int n_args;
+  int *arg_to_slot;
+  const PolyCallAccess *access;
 } PolyCallIO;
 
 struct PolyProgramInfo {
@@ -135,7 +140,7 @@ typedef struct {
   int n_buf_slots;
 
   PolyUOp *linear; /* POLY_OP_LINEAR; srcs are ordered POLY_OP_CALL UOps */
-  PolyCallIO *call_io;
+  PolyCallAccess *call_access;
   int n_calls;
 
   PolyVarBinding *default_vars;
@@ -147,6 +152,7 @@ typedef struct {
 
 typedef struct {
   PolyCallRuntime *calls;
+  PolyCallIO *call_io;
   PolyDevice device;
   const PolyAllocator *allocator;
   PolyBuffer *intermediates;
