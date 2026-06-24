@@ -636,6 +636,9 @@ typedef struct {
   size_t program_cache_entries;
   size_t shape_cache_entries;
   size_t buffer_entries;
+  size_t buffer_owned_bytes;
+  size_t buffer_owned_current_bytes;
+  size_t buffer_owned_source_bytes;
   size_t tensor_entries;
   size_t tensor_records;
   size_t registry_entries;

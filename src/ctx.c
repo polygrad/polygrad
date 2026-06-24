@@ -121,6 +121,20 @@ void poly_ctx_set_frontend_buffer_release(PolyCtx *ctx, PolyFrontendBufferReleas
 PolyArena *poly_ctx_arena(PolyCtx *ctx) { return ctx->arena; }
 PolyMap *poly_ctx_shape_cache(PolyCtx *ctx) { return ctx->shape_cache; }
 
+typedef struct {
+  size_t current;
+  size_t source;
+} BufferByteStats;
+
+static void accum_buffer_bytes(const void *key, void *value, void *userdata) {
+  (void)key;
+  BufferByteStats *stats = (BufferByteStats *)userdata;
+  PolyBuffer *b = (PolyBuffer *)value;
+  if (!stats || !b) return;
+  if (b->owned) stats->current += b->nbytes;
+  if (b->src && b->src->owned) stats->source += b->src->nbytes;
+}
+
 int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   if (!ctx || !out) return -1;
   memset(out, 0, sizeof(*out));
@@ -134,6 +148,11 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->program_cache_entries = poly_map_len(ctx->program_cache);
   out->shape_cache_entries = poly_map_len(ctx->shape_cache);
   out->buffer_entries = poly_map_len(ctx->buffers);
+  BufferByteStats buf_stats = {0};
+  poly_map_foreach(ctx->buffers, accum_buffer_bytes, &buf_stats);
+  out->buffer_owned_current_bytes = buf_stats.current;
+  out->buffer_owned_source_bytes = buf_stats.source;
+  out->buffer_owned_bytes = buf_stats.current + buf_stats.source;
   out->tensor_entries = poly_map_len(ctx->tensors_by_uop);
   out->tensor_records = (size_t)ctx->n_tensors;
   out->registry_entries = (size_t)ctx->n_entries;

@@ -6,6 +6,7 @@
 #include "../src/polygrad.h"
 #include "../src/frontend_internal.h"
 #include "../src/ctx.h"
+#include "../src/device.h"
 
 /* Basic creation */
 
@@ -341,6 +342,29 @@ TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
   ASSERT_INT_EQ(poly_arena_high_water(poly_ctx_arena(ctx)), stats.arena_high_water);
   ASSERT_INT_EQ(poly_arena_high_water(ctx->scratch), stats.scratch_high_water);
   ASSERT_INT_EQ(stats.scratch_bytes, 0);
+  ASSERT_INT_EQ(stats.buffer_owned_bytes, 0);
+  ASSERT_INT_EQ(stats.buffer_owned_current_bytes, 0);
+  ASSERT_INT_EQ(stats.buffer_owned_source_bytes, 0);
+
+  PolyUOp *borrowed_buf = poly_buffer(ctx, POLY_FLOAT32, 4);
+  float borrowed_data[4] = {0};
+  PolyBuffer borrowed = poly_buffer_make_host_view(borrowed_data, sizeof(borrowed_data));
+  poly_buffer_attach(ctx, borrowed_buf, &borrowed);
+
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_entries, 1);
+  ASSERT_INT_EQ(stats.buffer_owned_bytes, 0);
+
+  PolyUOp *owned_buf = poly_buffer(ctx, POLY_FLOAT32, 8);
+  PolyBuffer *owned_host = NULL;
+  ASSERT_INT_EQ(poly_buffer_alloc_owned_host(ctx, owned_buf, 8 * sizeof(float), true, &owned_host), 0);
+  ASSERT_NOT_NULL(owned_host);
+
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_entries, 2);
+  ASSERT_INT_EQ(stats.buffer_owned_current_bytes, 8 * sizeof(float));
+  ASSERT_INT_EQ(stats.buffer_owned_source_bytes, 0);
+  ASSERT_INT_EQ(stats.buffer_owned_bytes, 8 * sizeof(float));
 
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *x = a;
