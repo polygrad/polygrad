@@ -69,13 +69,17 @@ typedef struct {
 } PolyToProgramCacheEntry;
 
 typedef struct {
+  PolyUOp *template_buf;
+  bool needs_zero;
+} PolyScheduleIntermediateDesc;
+
+typedef struct {
   PolyUOp *linear;
   PolyCallAccess *call_access;
   int n_calls;
-  PolyUOp **intermediate_bufs;
-  bool *intermediate_needs_zero;
+  PolyScheduleIntermediateDesc *intermediates;
   int n_intermediates;
-} PolyScheduleCacheEntry;
+} PolyScheduleBlueprint;
 
 static uint32_t poly_schedule_lower_env_stamp(void);
 static int poly_launch_dim_upper_bound(PolyCtx *ctx, PolyUOp *expr);
@@ -2222,7 +2226,7 @@ static int linear_replay_intermediate_index(
 
 static int linear_replay_add_intermediate(
     PolyCtx *ctx,
-    const PolyScheduleCacheEntry *entry,
+    const PolyScheduleBlueprint *blueprint,
     PolyLinearReplayIntermediate **items,
     int *n_items,
     int *cap_items,
@@ -2232,10 +2236,10 @@ static int linear_replay_add_intermediate(
     return -1;
   int idx = linear_replay_intermediate_index(*items, *n_items, old_buf);
   if (idx >= 0) return idx;
-  if (!entry) return -1;
+  if (!blueprint) return -1;
   int entry_idx = -1;
-  for (int i = 0; i < entry->n_intermediates; i++) {
-    if (entry->intermediate_bufs[i] == old_buf) {
+  for (int i = 0; i < blueprint->n_intermediates; i++) {
+    if (blueprint->intermediates[i].template_buf == old_buf) {
       entry_idx = i;
       break;
     }
@@ -2254,15 +2258,14 @@ static int linear_replay_add_intermediate(
   idx = (*n_items)++;
   (*items)[idx].old_buf = old_buf;
   (*items)[idx].new_buf = fresh;
-  (*items)[idx].needs_zero =
-      entry->intermediate_needs_zero ? entry->intermediate_needs_zero[entry_idx] : false;
+  (*items)[idx].needs_zero = blueprint->intermediates[entry_idx].needs_zero;
   return idx;
 }
 
 static int linear_replay_collect_intermediates(
     PolyCtx *ctx,
     PolyUOp *linear_template,
-    const PolyScheduleCacheEntry *entry,
+    const PolyScheduleBlueprint *blueprint,
     PolyLinearReplayIntermediate **items,
     int *n_items,
     int *cap_items,
@@ -2295,7 +2298,7 @@ static int linear_replay_collect_intermediates(
           );
         return -1;
       }
-      if (linear_replay_add_intermediate(ctx, entry, items, n_items, cap_items, arg) < 0)
+      if (linear_replay_add_intermediate(ctx, blueprint, items, n_items, cap_items, arg) < 0)
         return -1;
     }
   }
@@ -2335,7 +2338,7 @@ static int poly_schedule_init_call_io_and_runtime(PolyCtx *ctx, PolySchedule *ps
 
 static PolySchedule *build_schedule_from_linear_template(
     PolyCtx *ctx,
-    const PolyScheduleCacheEntry *linear_entry,
+    const PolyScheduleBlueprint *blueprint,
     PolyCompileMode mode,
     uint32_t graph_hash,
     PolyUOp **buf_order_orig,
@@ -2344,15 +2347,15 @@ static PolySchedule *build_schedule_from_linear_template(
     int n_default_vars,
     bool apply_memory_plan
 ) {
-  if (!ctx || !linear_entry || !linear_entry->linear || linear_entry->linear->op != POLY_OP_LINEAR ||
+  if (!ctx || !blueprint || !blueprint->linear || blueprint->linear->op != POLY_OP_LINEAR ||
       n_bufs_orig < 0)
     return NULL;
-  PolyUOp *linear_template = linear_entry->linear;
+  PolyUOp *linear_template = blueprint->linear;
 
   PolyLinearReplayIntermediate *intermediates = NULL;
   int n_intermediates = 0, cap_intermediates = 0;
   if (linear_replay_collect_intermediates(
-          ctx, linear_template, linear_entry, &intermediates, &n_intermediates, &cap_intermediates,
+          ctx, linear_template, blueprint, &intermediates, &n_intermediates, &cap_intermediates,
           n_bufs_orig
       ) != 0) {
     free(intermediates);
@@ -2450,10 +2453,10 @@ static PolySchedule *build_schedule_from_linear_template(
   free(linear_src);
   if (!ps->template->linear) goto cleanup;
   ps->template->n_calls = ps->template->linear->n_src;
-  if (linear_entry->call_access) {
-    if (linear_entry->n_calls != ps->template->n_calls) goto cleanup;
+  if (blueprint->call_access) {
+    if (blueprint->n_calls != ps->template->n_calls) goto cleanup;
     ps->template->call_access =
-        poly_call_access_clone_array(linear_entry->call_access, linear_entry->n_calls);
+        poly_call_access_clone_array(blueprint->call_access, blueprint->n_calls);
     if (!ps->template->call_access) goto cleanup;
   }
 
@@ -2690,11 +2693,11 @@ cleanup:
 
 /* tinygrad/engine/schedule.py: complete_create_schedule_with_vars */
 
-static PolyScheduleCacheEntry *poly_lower_kernel_graph_to_linear_entry(
+static PolyScheduleBlueprint *poly_lower_kernel_graph_to_blueprint(
     PolyCtx *ctx,
     PolyUOp *kernel_graph
 );
-static PolyScheduleCacheEntry *poly_lower_sink_to_linear_entry_with_kernel_graph(
+static PolyScheduleBlueprint *poly_lower_sink_to_blueprint_with_kernel_graph(
     PolyCtx *ctx,
     PolyUOp *sink,
     PolyCompileMode mode,
@@ -2776,24 +2779,24 @@ PolySchedule *poly_complete_create_schedule_with_vars(
       if (buf_order_orig_owned) free(buf_order_orig);
       return NULL;
     }
-    PolyScheduleCacheEntry *linear_entry =
-        poly_lower_sink_to_linear_entry_with_kernel_graph(ctx, sink, mode, kernel_graph);
+    PolyScheduleBlueprint *blueprint =
+        poly_lower_sink_to_blueprint_with_kernel_graph(ctx, sink, mode, kernel_graph);
     double t_lower1 = timing ? poly_now_ms() : 0.0;
-    if (!linear_entry) {
+    if (!blueprint) {
       if (buf_order_orig_owned) free(buf_order_orig);
       return NULL;
     }
     uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
     double t_build0 = timing ? poly_now_ms() : 0.0;
     PolySchedule *ps = build_schedule_from_linear_template(
-        ctx, linear_entry, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals, true
+        ctx, blueprint, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals, true
     );
     if (!ps) {
       /* Keep the old resolver as a correctness fallback for cached LINEAR
        * shapes that still contain non-replayable call arguments. */
       ps = build_schedule_from_kernel_graph(
           ctx, kernel_graph, mode, ghash, buf_order_orig, n_bufs_orig, bind_vals, n_bind_vals,
-          linear_entry->linear, true
+          blueprint->linear, true
       );
     }
     double t_build1 = timing ? poly_now_ms() : 0.0;
@@ -2870,9 +2873,9 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
     return NULL;
   }
 
-  PolyScheduleCacheEntry *linear_entry =
-      poly_schedule_cache_enabled() ? poly_lower_kernel_graph_to_linear_entry(ctx, kernel_graph) : NULL;
-  if (poly_schedule_cache_enabled() && !linear_entry) return NULL;
+  PolyScheduleBlueprint *blueprint =
+      poly_schedule_cache_enabled() ? poly_lower_kernel_graph_to_blueprint(ctx, kernel_graph) : NULL;
+  if (poly_schedule_cache_enabled() && !blueprint) return NULL;
 
   PolyUOp *buf_order_stack[POLY_MAX_REALIZE_BUFS];
   PolyUOp **buf_order = buf_order_stack;
@@ -2884,12 +2887,12 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph) {
     return NULL;
   uint32_t ghash = poly_structural_hash(kernel_graph) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolySchedule *schedule = build_schedule_from_linear_template(
-      ctx, linear_entry, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, true
+      ctx, blueprint, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0, true
   );
   if (!schedule) {
     schedule = build_schedule_from_kernel_graph(
         ctx, kernel_graph, POLY_MODE_CALL, ghash, buf_order, n_external, NULL, 0,
-        linear_entry ? linear_entry->linear : NULL,
+        blueprint ? blueprint->linear : NULL,
         true
     );
   }
@@ -3303,37 +3306,36 @@ static PolyUOp *schedule_cache_key_for_kernel_graph(PolyCtx *ctx, PolyUOp *kerne
   return ret;
 }
 
-static void poly_schedule_cache_entry_free_obj(PolyScheduleCacheEntry *entry) {
+static void poly_schedule_blueprint_free_obj(PolyScheduleBlueprint *entry) {
   if (!entry) return;
   if (entry->call_access) {
     for (int i = 0; i < entry->n_calls; i++)
       poly_call_access_free(&entry->call_access[i]);
     free(entry->call_access);
   }
-  free(entry->intermediate_bufs);
-  free(entry->intermediate_needs_zero);
+  free(entry->intermediates);
   free(entry);
 }
 
-static void poly_schedule_cache_entry_free_iter(const void *key, void *value, void *userdata) {
+static void poly_schedule_blueprint_free_iter(const void *key, void *value, void *userdata) {
   (void)key;
   (void)userdata;
-  poly_schedule_cache_entry_free_obj((PolyScheduleCacheEntry *)value);
+  poly_schedule_blueprint_free_obj((PolyScheduleBlueprint *)value);
 }
 
-static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_schedule(
+static PolyScheduleBlueprint *poly_schedule_blueprint_from_schedule(
     const PolySchedule *schedule,
     PolyUOp *linear
 ) {
   if (!schedule || !schedule->template || !linear) return NULL;
-  PolyScheduleCacheEntry *entry = calloc(1, sizeof(PolyScheduleCacheEntry));
+  PolyScheduleBlueprint *entry = calloc(1, sizeof(PolyScheduleBlueprint));
   if (!entry) return NULL;
   entry->linear = linear;
   entry->n_calls = schedule->template->n_calls;
   if (entry->n_calls > 0) {
     entry->call_access = poly_call_access_clone_array(schedule->template->call_access, entry->n_calls);
     if (!entry->call_access) {
-      poly_schedule_cache_entry_free_obj(entry);
+      poly_schedule_blueprint_free_obj(entry);
       return NULL;
     }
   }
@@ -3347,10 +3349,9 @@ static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_schedule(
   }
   entry->n_intermediates = n_intermediates;
   if (n_intermediates > 0) {
-    entry->intermediate_bufs = malloc((size_t)n_intermediates * sizeof(PolyUOp *));
-    entry->intermediate_needs_zero = malloc((size_t)n_intermediates * sizeof(bool));
-    if (!entry->intermediate_bufs || !entry->intermediate_needs_zero) {
-      poly_schedule_cache_entry_free_obj(entry);
+    entry->intermediates = calloc((size_t)n_intermediates, sizeof(PolyScheduleIntermediateDesc));
+    if (!entry->intermediates) {
+      poly_schedule_blueprint_free_obj(entry);
       return NULL;
     }
     int j = 0;
@@ -3359,8 +3360,8 @@ static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_schedule(
       if (!slot->is_intermediate || slot->is_memory_arena || slot->has_memory_parent ||
           !slot->buf_uop)
         continue;
-      entry->intermediate_bufs[j] = slot->buf_uop;
-      entry->intermediate_needs_zero[j] = slot->needs_zero;
+      entry->intermediates[j].template_buf = slot->buf_uop;
+      entry->intermediates[j].needs_zero = slot->needs_zero;
       j++;
     }
   }
@@ -3372,7 +3373,7 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
     PolyUOp *kernel_graph,
     PolyUOp **external_buf_order,
     int n_external_buf_order,
-    PolyScheduleCacheEntry **entry_out
+    PolyScheduleBlueprint **entry_out
 ) {
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
@@ -3455,9 +3456,9 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
       poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, schedule->template->n_calls, poly_arg_none());
   free(linear_src);
   if (external_bufs_owned) free(external_bufs);
-  PolyScheduleCacheEntry *entry = NULL;
+  PolyScheduleBlueprint *entry = NULL;
   if (linear && entry_out) {
-    entry = poly_schedule_cache_entry_from_schedule(schedule, linear);
+    entry = poly_schedule_blueprint_from_schedule(schedule, linear);
     if (!entry) {
       poly_schedule_free(schedule);
       return NULL;
@@ -3476,14 +3477,14 @@ static PolyUOp *poly_build_linear_from_kernel_graph_uncached(
   return linear;
 }
 
-static PolyScheduleCacheEntry *poly_lower_kernel_graph_to_linear_entry(PolyCtx *ctx, PolyUOp *kernel_graph) {
+static PolyScheduleBlueprint *poly_lower_kernel_graph_to_blueprint(PolyCtx *ctx, PolyUOp *kernel_graph) {
   PolyUOp *cache_key = schedule_cache_key_for_kernel_graph(ctx, kernel_graph);
   if (!cache_key) return NULL;
   uint32_t cache_hash = poly_ptr_hash(cache_key) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  PolyScheduleCacheEntry *cached = poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_ptr_eq);
+  PolyScheduleBlueprint *cached = poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_ptr_eq);
   if (cached) return cached;
 
-  PolyScheduleCacheEntry *entry = NULL;
+  PolyScheduleBlueprint *entry = NULL;
   PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(ctx, kernel_graph, NULL, 0, &entry);
   if (!linear || !entry) return NULL;
   poly_map_set(ctx->schedule_cache, cache_hash, cache_key, entry, poly_ptr_eq);
@@ -3626,7 +3627,7 @@ static PolyUOp *schedule_cache_key_for_sink(
   return schedule_cache_rewrite_iter(ctx, sink, input_order, n_inputs, true);
 }
 
-static PolyScheduleCacheEntry *poly_lower_sink_to_linear_entry_with_kernel_graph(
+static PolyScheduleBlueprint *poly_lower_sink_to_blueprint_with_kernel_graph(
     PolyCtx *ctx,
     PolyUOp *sink,
     PolyCompileMode mode,
@@ -3665,7 +3666,7 @@ static PolyScheduleCacheEntry *poly_lower_sink_to_linear_entry_with_kernel_graph
     return NULL;
   }
   uint32_t cache_hash = poly_ptr_hash(cache_key) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
-  PolyScheduleCacheEntry *cached =
+  PolyScheduleBlueprint *cached =
       poly_schedule_cache_enabled()
           ? poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_ptr_eq)
           : NULL;
@@ -3717,7 +3718,7 @@ static PolyScheduleCacheEntry *poly_lower_sink_to_linear_entry_with_kernel_graph
     return NULL;
   }
   double t_kernel = timing ? poly_now_ms() : 0.0;
-  PolyScheduleCacheEntry *entry = NULL;
+  PolyScheduleBlueprint *entry = NULL;
   PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(
       ctx, kernel_graph, raw_external_bufs, n_raw_external,
       poly_schedule_cache_enabled() ? &entry : NULL
@@ -3741,7 +3742,7 @@ static PolyScheduleCacheEntry *poly_lower_sink_to_linear_entry_with_kernel_graph
   }
   if (poly_schedule_cache_enabled()) return entry;
 
-  static PolyScheduleCacheEntry uncached_entry;
+  static PolyScheduleBlueprint uncached_entry;
   memset(&uncached_entry, 0, sizeof(uncached_entry));
   uncached_entry.linear = linear;
   return &uncached_entry;
@@ -3753,8 +3754,8 @@ static PolyUOp *poly_lower_sink_to_linear_with_kernel_graph(
     PolyCompileMode mode,
     PolyUOp *kernel_graph
 ) {
-  PolyScheduleCacheEntry *entry =
-      poly_lower_sink_to_linear_entry_with_kernel_graph(ctx, sink, mode, kernel_graph);
+  PolyScheduleBlueprint *entry =
+      poly_lower_sink_to_blueprint_with_kernel_graph(ctx, sink, mode, kernel_graph);
   return entry ? entry->linear : NULL;
 }
 
@@ -3768,7 +3769,7 @@ size_t poly_schedule_cache_len(PolyCtx *ctx) {
 
 void poly_schedule_cache_clear(PolyCtx *ctx) {
   if (!ctx || !ctx->schedule_cache) return;
-  poly_map_foreach(ctx->schedule_cache, poly_schedule_cache_entry_free_iter, NULL);
+  poly_map_foreach(ctx->schedule_cache, poly_schedule_blueprint_free_iter, NULL);
   poly_map_clear(ctx->schedule_cache);
 }
 
