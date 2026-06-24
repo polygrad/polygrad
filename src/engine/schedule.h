@@ -231,10 +231,11 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
 size_t poly_schedule_cache_len(PolyCtx *ctx);
 void poly_schedule_cache_clear(PolyCtx *ctx);
 /* Tinygrad to_program/runtime-cache analogue: count/clear backend program
- * handles cached below scheduling. Clearing is intended for tests and must not
- * race an in-flight PolySchedule that is borrowing cached runners. */
+ * handles cached below scheduling. Clearing evicts future lookups; refcounted
+ * live schedules/plans remain usable until they release their cached runners. */
 size_t poly_program_cache_len(PolyCtx *ctx);
 void poly_program_cache_clear(PolyCtx *ctx);
+size_t poly_program_cache_artifact_bytes(PolyCtx *ctx);
 size_t poly_to_program_cache_len(PolyCtx *ctx);
 void poly_to_program_cache_clear(PolyCtx *ctx);
 int poly_program_source_render_count(void);

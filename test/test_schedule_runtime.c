@@ -1748,6 +1748,7 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
   ASSERT_INT_EQ(stats.schedule_cache_entries, 0);
   ASSERT_INT_EQ(stats.to_program_cache_entries, 0);
   ASSERT_INT_EQ(stats.program_cache_entries, 0);
+  ASSERT_INT_EQ(stats.compiled_artifact_bytes, 0);
 
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -1774,6 +1775,7 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
   ASSERT_INT_EQ(stats.schedule_cache_entries, 1);
   ASSERT_INT_EQ(stats.to_program_cache_entries, 1);
   ASSERT_INT_EQ(stats.program_cache_entries, 1);
+  ASSERT_INT_EQ(stats.compiled_artifact_bytes, poly_program_cache_artifact_bytes(ctx));
   ASSERT_TRUE(stats.buffer_entries >= 3);
 
   poly_program_cache_clear(ctx);
@@ -1784,6 +1786,7 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
   ASSERT_INT_EQ(stats.schedule_cache_entries, 0);
   ASSERT_INT_EQ(stats.to_program_cache_entries, 0);
   ASSERT_INT_EQ(stats.program_cache_entries, 0);
+  ASSERT_INT_EQ(stats.compiled_artifact_bytes, 0);
 
   poly_ctx_destroy(ctx);
   schedule_restore_env(&pcache);

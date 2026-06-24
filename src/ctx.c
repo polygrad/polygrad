@@ -2,6 +2,7 @@
 
 #include "ctx.h"
 #include "device.h"
+#include "engine/schedule.h"
 #include "utils.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -137,6 +138,7 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->tensor_records = (size_t)ctx->n_tensors;
   out->registry_entries = (size_t)ctx->n_entries;
   out->entrypoint_entries = (size_t)ctx->n_ep;
+  out->compiled_artifact_bytes = poly_program_cache_artifact_bytes(ctx);
   return 0;
 }
 

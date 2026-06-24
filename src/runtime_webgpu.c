@@ -620,7 +620,7 @@ int poly_webgpu_lower_item(
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = wh;
-  out->handle_size = (int)strlen(wgsl);
+  out->handle_size = (int)(sizeof(*wh) + strlen(wgsl) + strlen(fn_name) + 1);
   out->grid[0] = grid[0];
   out->grid[1] = grid[1];
   out->grid[2] = grid[2];

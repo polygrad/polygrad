@@ -179,7 +179,7 @@ int poly_wasm_lower_item(
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = wh;
-  out->handle_size = 0;
+  out->handle_size = (int)sizeof(*wh);
   out->execute = poly_wasm_execute_fn;
   out->free_handle = poly_wasm_free_fn;
   return 0;

@@ -3009,6 +3009,24 @@ size_t poly_program_cache_len(PolyCtx *ctx) {
   return (ctx && ctx->program_cache) ? poly_map_len(ctx->program_cache) : 0;
 }
 
+static void poly_program_cache_artifact_size_accum(const void *key, void *value, void *userdata) {
+  (void)key;
+  size_t *total = (size_t *)userdata;
+  PolyProgramCacheEntry *entry = (PolyProgramCacheEntry *)value;
+  if (!total || !entry || !entry->runtime_program) return;
+  *total += sizeof(*entry);
+  *total += sizeof(*entry->runtime_program);
+  if (entry->runtime_program->runner.handle_size > 0)
+    *total += (size_t)entry->runtime_program->runner.handle_size;
+}
+
+size_t poly_program_cache_artifact_bytes(PolyCtx *ctx) {
+  if (!ctx || !ctx->program_cache) return 0;
+  size_t total = 0;
+  poly_map_foreach(ctx->program_cache, poly_program_cache_artifact_size_accum, &total);
+  return total;
+}
+
 void poly_to_program_cache_clear(PolyCtx *ctx) {
   if (ctx && ctx->to_program_cache) poly_map_clear(ctx->to_program_cache);
 }
@@ -4597,7 +4615,7 @@ static int interp_lower_item(
 
   out->kind = POLY_RUNNER_INTERP;
   out->handle = ih;
-  out->handle_size = 0;
+  out->handle_size = (int)(sizeof(*ih) + (size_t)n_lin * sizeof(PolyUOp *));
   return 0;
 }
 
@@ -4734,7 +4752,7 @@ static int cuda_lower_item(
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = ch;
-  out->handle_size = 0;
+  out->handle_size = (int)sizeof(*ch);
   out->grid[0] = grid[0];
   out->grid[1] = grid[1];
   out->grid[2] = grid[2];
@@ -4899,7 +4917,7 @@ static int hip_lower_item(
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = hh;
-  out->handle_size = 0;
+  out->handle_size = (int)sizeof(*hh);
   out->grid[0] = gx;
   out->grid[1] = 1;
   out->grid[2] = 1;
@@ -5072,7 +5090,7 @@ static int x64_lower_item(
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = prog;
-  out->handle_size = 0;
+  out->handle_size = code_size;
   out->execute = x64_execute_fn;
   out->free_handle = x64_free_fn;
   return 0;
