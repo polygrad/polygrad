@@ -230,9 +230,13 @@ PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode 
 
 size_t poly_schedule_cache_len(PolyCtx *ctx);
 void poly_schedule_cache_clear(PolyCtx *ctx);
-/* Tinygrad to_program/runtime-cache analogue: count/clear backend program
- * handles cached below scheduling. Clearing evicts future lookups; refcounted
- * live schedules/plans remain usable until they release their cached runners. */
+/* Tinygrad runtime_cache analogue: count/clear backend runtime handles cached
+ * below PROGRAM UOps. Clearing evicts future lookups; refcounted live
+ * schedules/plans remain usable until they release their cached runners.
+ * poly_program_cache_* names are compatibility aliases. */
+size_t poly_runtime_cache_len(PolyCtx *ctx);
+void poly_runtime_cache_clear(PolyCtx *ctx);
+size_t poly_runtime_cache_artifact_bytes(PolyCtx *ctx);
 size_t poly_program_cache_len(PolyCtx *ctx);
 void poly_program_cache_clear(PolyCtx *ctx);
 size_t poly_program_cache_artifact_bytes(PolyCtx *ctx);

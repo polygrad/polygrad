@@ -59,7 +59,7 @@ typedef struct {
   PolyDevice device;
   uint32_t env_stamp;
   PolyRuntimeCacheEntry *runtime_program;
-} PolyProgramCacheEntry;
+} PolyRuntimeCacheMapEntry;
 
 typedef struct {
   PolyUOp *program;
@@ -2975,9 +2975,9 @@ static uint32_t poly_program_cache_hash(PolyUOp *program, PolyDevice device, uin
   return h;
 }
 
-static bool poly_program_cache_eq(const void *a, const void *b) {
-  const PolyProgramCacheEntry *ka = (const PolyProgramCacheEntry *)a;
-  const PolyProgramCacheEntry *kb = (const PolyProgramCacheEntry *)b;
+static bool poly_runtime_cache_eq(const void *a, const void *b) {
+  const PolyRuntimeCacheMapEntry *ka = (const PolyRuntimeCacheMapEntry *)a;
+  const PolyRuntimeCacheMapEntry *kb = (const PolyRuntimeCacheMapEntry *)b;
   return ka && kb && ka->device == kb->device && ka->env_stamp == kb->env_stamp &&
          ka->program == kb->program;
 }
@@ -2989,30 +2989,30 @@ static bool poly_to_program_cache_eq(const void *a, const void *b) {
          ka->program == kb->program;
 }
 
-static void poly_program_cache_entry_free(const void *key, void *value, void *userdata) {
+static void poly_runtime_cache_entry_free(const void *key, void *value, void *userdata) {
   (void)key;
   (void)userdata;
-  PolyProgramCacheEntry *entry = (PolyProgramCacheEntry *)value;
+  PolyRuntimeCacheMapEntry *entry = (PolyRuntimeCacheMapEntry *)value;
   if (!entry) return;
   if (entry->runtime_program) entry->runtime_program->in_cache = false;
   poly_runtime_cache_entry_release(entry->runtime_program);
   free(entry);
 }
 
-void poly_program_cache_clear(PolyCtx *ctx) {
-  if (!ctx || !ctx->program_cache) return;
-  poly_map_foreach(ctx->program_cache, poly_program_cache_entry_free, NULL);
-  poly_map_clear(ctx->program_cache);
+void poly_runtime_cache_clear(PolyCtx *ctx) {
+  if (!ctx || !ctx->runtime_cache) return;
+  poly_map_foreach(ctx->runtime_cache, poly_runtime_cache_entry_free, NULL);
+  poly_map_clear(ctx->runtime_cache);
 }
 
-size_t poly_program_cache_len(PolyCtx *ctx) {
-  return (ctx && ctx->program_cache) ? poly_map_len(ctx->program_cache) : 0;
+size_t poly_runtime_cache_len(PolyCtx *ctx) {
+  return (ctx && ctx->runtime_cache) ? poly_map_len(ctx->runtime_cache) : 0;
 }
 
-static void poly_program_cache_artifact_size_accum(const void *key, void *value, void *userdata) {
+static void poly_runtime_cache_artifact_size_accum(const void *key, void *value, void *userdata) {
   (void)key;
   size_t *total = (size_t *)userdata;
-  PolyProgramCacheEntry *entry = (PolyProgramCacheEntry *)value;
+  PolyRuntimeCacheMapEntry *entry = (PolyRuntimeCacheMapEntry *)value;
   if (!total || !entry || !entry->runtime_program) return;
   *total += sizeof(*entry);
   *total += sizeof(*entry->runtime_program);
@@ -3020,11 +3020,23 @@ static void poly_program_cache_artifact_size_accum(const void *key, void *value,
     *total += (size_t)entry->runtime_program->runner.handle_size;
 }
 
-size_t poly_program_cache_artifact_bytes(PolyCtx *ctx) {
-  if (!ctx || !ctx->program_cache) return 0;
+size_t poly_runtime_cache_artifact_bytes(PolyCtx *ctx) {
+  if (!ctx || !ctx->runtime_cache) return 0;
   size_t total = 0;
-  poly_map_foreach(ctx->program_cache, poly_program_cache_artifact_size_accum, &total);
+  poly_map_foreach(ctx->runtime_cache, poly_runtime_cache_artifact_size_accum, &total);
   return total;
+}
+
+size_t poly_program_cache_len(PolyCtx *ctx) {
+  return poly_runtime_cache_len(ctx);
+}
+
+void poly_program_cache_clear(PolyCtx *ctx) {
+  poly_runtime_cache_clear(ctx);
+}
+
+size_t poly_program_cache_artifact_bytes(PolyCtx *ctx) {
+  return poly_runtime_cache_artifact_bytes(ctx);
 }
 
 void poly_to_program_cache_clear(PolyCtx *ctx) {
@@ -3057,7 +3069,7 @@ void poly_schedule_ctx_cleanup(PolyCtx *ctx) {
    * to_program/runtime caches. LINEAR schedule UOps are arena-owned; schedule
    * cache entries only own heap metadata parallel to those UOps. */
   poly_schedule_cache_clear(ctx);
-  poly_program_cache_clear(ctx);
+  poly_runtime_cache_clear(ctx);
   poly_to_program_cache_clear(ctx);
 }
 
@@ -4346,15 +4358,15 @@ static int poly_lower_compute_call_cached(
   PolyUOp *body = poly_program_kernel_body(program);
   if (!body || !poly_validate_kernel_graph(ctx, body)) return -2;
 
-  PolyProgramCacheEntry key = {
+  PolyRuntimeCacheMapEntry key = {
       .program = program,
       .device = device,
       .env_stamp = env_stamp,
   };
   uint32_t hash = poly_program_cache_hash(program, device, env_stamp);
-  PolyProgramCacheEntry *entry =
-      (poly_program_cache_enabled() && ctx && ctx->program_cache)
-          ? poly_map_get(ctx->program_cache, hash, &key, poly_program_cache_eq)
+  PolyRuntimeCacheMapEntry *entry =
+      (poly_program_cache_enabled() && ctx && ctx->runtime_cache)
+          ? poly_map_get(ctx->runtime_cache, hash, &key, poly_runtime_cache_eq)
           : NULL;
 
   if (!entry) {
@@ -4364,7 +4376,7 @@ static int poly_lower_compute_call_cached(
     PolyRunner lowered = {0};
     if (backend->lower_item(ctx, program, fn_name, &lowered) != 0) return -1;
 
-    if (poly_program_cache_enabled() && ctx && ctx->program_cache) {
+    if (poly_program_cache_enabled() && ctx && ctx->runtime_cache) {
       entry = calloc(1, sizeof(*entry));
       PolyRuntimeCacheEntry *runtime_entry =
           entry ? poly_runtime_cache_entry_new(program, device, env_stamp, &lowered) : NULL;
@@ -4380,7 +4392,7 @@ static int poly_lower_compute_call_cached(
         runtime_entry->runner.n_params = 0;
         runtime_entry->runner.var_indices = NULL;
         runtime_entry->runner.n_vars = 0;
-        poly_map_set(ctx->program_cache, hash, entry, entry, poly_program_cache_eq);
+        poly_map_set(ctx->runtime_cache, hash, entry, entry, poly_runtime_cache_eq);
         if (runtime_entry_out) *runtime_entry_out = runtime_entry;
         *out = runtime_entry->runner;
         out->param_to_slot = NULL;

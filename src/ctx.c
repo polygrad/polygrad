@@ -32,7 +32,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->cse = poly_map_new(256);
   ctx->schedule_cache = poly_map_new(16);
   ctx->to_program_cache = poly_map_new(16);
-  ctx->program_cache = poly_map_new(16);
+  ctx->runtime_cache = poly_map_new(16);
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
   ctx->tensors_by_uop = poly_map_new(64);
@@ -42,14 +42,14 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_tensor_order = 1;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
-      !ctx->program_cache || !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop ||
+      !ctx->runtime_cache || !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop ||
       !ctx->name_map) {
     if (ctx->arena) poly_arena_destroy(ctx->arena);
     if (ctx->scratch) poly_arena_destroy(ctx->scratch);
     if (ctx->cse) poly_map_destroy(ctx->cse);
     if (ctx->schedule_cache) poly_map_destroy(ctx->schedule_cache);
     if (ctx->to_program_cache) poly_map_destroy(ctx->to_program_cache);
-    if (ctx->program_cache) poly_map_destroy(ctx->program_cache);
+    if (ctx->runtime_cache) poly_map_destroy(ctx->runtime_cache);
     if (ctx->shape_cache) poly_map_destroy(ctx->shape_cache);
     if (ctx->buffers) poly_map_destroy(ctx->buffers);
     if (ctx->tensors_by_uop) poly_map_destroy(ctx->tensors_by_uop);
@@ -77,7 +77,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   if (poly_schedule_ctx_cleanup) poly_schedule_ctx_cleanup(ctx);
   poly_map_destroy(ctx->schedule_cache);
   poly_map_destroy(ctx->to_program_cache);
-  poly_map_destroy(ctx->program_cache);
+  poly_map_destroy(ctx->runtime_cache);
   poly_map_destroy(ctx->shape_cache);
   /* Free owned buffer ptrs before destroying the map. */
   poly_map_foreach(ctx->buffers, free_buffer_entry, NULL);
@@ -145,7 +145,8 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->cse_entries = poly_map_len(ctx->cse);
   out->schedule_cache_entries = poly_map_len(ctx->schedule_cache);
   out->to_program_cache_entries = poly_map_len(ctx->to_program_cache);
-  out->program_cache_entries = poly_map_len(ctx->program_cache);
+  out->runtime_cache_entries = poly_map_len(ctx->runtime_cache);
+  out->program_cache_entries = out->runtime_cache_entries;
   out->shape_cache_entries = poly_map_len(ctx->shape_cache);
   out->buffer_entries = poly_map_len(ctx->buffers);
   BufferByteStats buf_stats = {0};
@@ -157,7 +158,7 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->tensor_records = (size_t)ctx->n_tensors;
   out->registry_entries = (size_t)ctx->n_entries;
   out->entrypoint_entries = (size_t)ctx->n_ep;
-  out->compiled_artifact_bytes = poly_program_cache_artifact_bytes(ctx);
+  out->compiled_artifact_bytes = poly_runtime_cache_artifact_bytes(ctx);
   return 0;
 }
 

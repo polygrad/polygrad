@@ -618,7 +618,7 @@ struct PolyUOp {
   void *ended_ranges_cache;
 };
 
-/* Context owns the arena, CSE cache, schedule/program caches, and all UOps */
+/* Context owns the arena, CSE cache, schedule/to-program/runtime caches, and all UOps */
 PolyCtx *poly_ctx_new(void);
 void poly_ctx_destroy(PolyCtx *ctx);
 void poly_ctx_set_preferred_device(PolyCtx *ctx, PolyDevice device);
@@ -633,6 +633,8 @@ typedef struct {
   size_t cse_entries;
   size_t schedule_cache_entries;
   size_t to_program_cache_entries;
+  size_t runtime_cache_entries;
+  /* Compatibility alias for runtime_cache_entries. */
   size_t program_cache_entries;
   size_t shape_cache_entries;
   size_t buffer_entries;

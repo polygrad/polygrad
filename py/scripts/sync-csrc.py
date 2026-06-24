@@ -92,7 +92,6 @@ HEADERS = [
     'src/engine/realize.h',
     'src/runtime_wasm.h',
     'src/runtime_webgpu.h',
-    'src/uop_cache_internal.h',
     'src/codegen.h',
     'src/frontend.h',
     'src/tensor.h',

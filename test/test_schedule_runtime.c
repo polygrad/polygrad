@@ -1490,11 +1490,11 @@ TEST(schedule_runtime, cached_linear_assign_chain_uses_raw_sink_param_slots) {
   PASS();
 }
 
-TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
+TEST(schedule_runtime, runtime_cache_reuses_runner_across_fresh_schedules) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 0);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
 
   /* This mirrors tinygrad's to_program/runtime cache layer: the schedule is
    * rebuilt for a fresh realization, but the backend program for the same
@@ -1513,7 +1513,7 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out1_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out1_data[3], 44.0f, 1e-5);
 
@@ -1531,7 +1531,7 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 3), 0);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out2_data[0], 55.0f, 1e-5);
   ASSERT_FLOAT_EQ(out2_data[3], 88.0f, 1e-5);
 
@@ -1545,7 +1545,7 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink3, views3, 3), 0);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 2);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 2);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 2);
   ASSERT_FLOAT_EQ(out3_data[0], 250.0f, 1e-5);
   ASSERT_FLOAT_EQ(out3_data[3], 640.0f, 1e-5);
 
@@ -1553,14 +1553,14 @@ TEST(schedule_runtime, program_cache_reuses_runner_across_fresh_schedules) {
   PASS();
 }
 
-TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
+TEST(schedule_runtime, runtime_cache_keys_distinct_program_wrappers) {
   ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
   setenv("POLY_PCACHE", "1", 1);
 
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 0);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
 
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -1576,7 +1576,7 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
 
   ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched1, 0, POLY_DEVICE_CPU), 0);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
 
   PolyUOp *old_call = poly_schedule_call(sched2, 0);
   ASSERT_NOT_NULL(old_call);
@@ -1612,7 +1612,7 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
 
   ASSERT_INT_EQ(poly_schedule_call_lower(ctx, sched2, 0, POLY_DEVICE_CPU), 0);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 2);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 2);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 2);
 
   poly_schedule_free(sched2);
   poly_schedule_free(sched1);
@@ -1621,7 +1621,7 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
   PASS();
 }
 
-TEST(schedule_runtime, program_cache_clear_keeps_live_schedule_runner_valid) {
+TEST(schedule_runtime, runtime_cache_clear_keeps_live_schedule_runner_valid) {
   ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
   setenv("POLY_PCACHE", "1", 1);
 
@@ -1646,12 +1646,12 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_schedule_runner_valid) {
   poly_buffer_attach(ctx, out, &out_view);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
 
-  poly_program_cache_clear(ctx);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+  poly_runtime_cache_clear(ctx);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
 
   a_data[0] = 5.0f;
   a_data[1] = 6.0f;
@@ -1673,7 +1673,7 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_schedule_runner_valid) {
   PASS();
 }
 
-TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
+TEST(schedule_runtime, runtime_cache_clear_keeps_live_compiled_runner_valid) {
   ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
   setenv("POLY_PCACHE", "1", 1);
 
@@ -1688,7 +1688,7 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
   ASSERT_NOT_NULL(sched);
   PolyCompiledSchedule *plan = poly_lower_schedule(ctx, sched, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(plan);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
 
   float a_data[4] = {1, 2, 3, 4};
   float b_data[4] = {10, 20, 30, 40};
@@ -1710,8 +1710,8 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
   ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
 
-  poly_program_cache_clear(ctx);
-  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+  poly_runtime_cache_clear(ctx);
+  ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
 
   a_data[0] = 5.0f;
   a_data[1] = 6.0f;
@@ -1736,7 +1736,7 @@ TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
   PASS();
 }
 
-TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
+TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
   ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
   setenv("POLY_PCACHE", "1", 1);
 
@@ -1747,6 +1747,7 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_INT_EQ(stats.schedule_cache_entries, 0);
   ASSERT_INT_EQ(stats.to_program_cache_entries, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_entries, 0);
   ASSERT_INT_EQ(stats.program_cache_entries, 0);
   ASSERT_INT_EQ(stats.compiled_artifact_bytes, 0);
 
@@ -1771,20 +1772,28 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_program_caches) {
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_INT_EQ(stats.schedule_cache_entries, poly_schedule_cache_len(ctx));
   ASSERT_INT_EQ(stats.to_program_cache_entries, poly_to_program_cache_len(ctx));
-  ASSERT_INT_EQ(stats.program_cache_entries, poly_program_cache_len(ctx));
+  ASSERT_INT_EQ(stats.runtime_cache_entries, poly_runtime_cache_len(ctx));
+  ASSERT_INT_EQ(stats.program_cache_entries, stats.runtime_cache_entries);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), (int)poly_runtime_cache_len(ctx));
   ASSERT_INT_EQ(stats.schedule_cache_entries, 1);
   ASSERT_INT_EQ(stats.to_program_cache_entries, 1);
+  ASSERT_INT_EQ(stats.runtime_cache_entries, 1);
   ASSERT_INT_EQ(stats.program_cache_entries, 1);
-  ASSERT_INT_EQ(stats.compiled_artifact_bytes, poly_program_cache_artifact_bytes(ctx));
+  ASSERT_INT_EQ(stats.compiled_artifact_bytes, poly_runtime_cache_artifact_bytes(ctx));
+  ASSERT_INT_EQ(
+      (int)poly_program_cache_artifact_bytes(ctx),
+      (int)poly_runtime_cache_artifact_bytes(ctx)
+  );
   ASSERT_TRUE(stats.buffer_entries >= 3);
 
-  poly_program_cache_clear(ctx);
+  poly_runtime_cache_clear(ctx);
   poly_to_program_cache_clear(ctx);
   poly_schedule_cache_clear(ctx);
 
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_INT_EQ(stats.schedule_cache_entries, 0);
   ASSERT_INT_EQ(stats.to_program_cache_entries, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_entries, 0);
   ASSERT_INT_EQ(stats.program_cache_entries, 0);
   ASSERT_INT_EQ(stats.compiled_artifact_bytes, 0);
 
