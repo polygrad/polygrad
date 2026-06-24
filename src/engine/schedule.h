@@ -44,6 +44,7 @@ typedef struct {
 
   int (*execute)(void *self, void **args, int n_args);
   void (*free_handle)(void *self);
+  bool borrowed_handle;
 
   int grid[3];
   int block[3];
@@ -109,12 +110,15 @@ struct PolyProgramInfo {
   int n_ins;
 };
 
+typedef struct PolyRuntimeCacheEntry PolyRuntimeCacheEntry;
+
 typedef struct {
   PolyUOp *call; /* LINEAR source: CALL(body, buffer args..., DEFINE_VAR args...) */
 
   /* Runtime cache parallel to LINEAR.src[]. Mutable backend state stays here,
    * never in the CALL UOp itself. */
   PolyRunner prg;
+  PolyRuntimeCacheEntry *runtime_program;
   PolyDevice lowered_device;
   uint32_t lowered_env_stamp;
   bool prg_valid;
@@ -189,6 +193,7 @@ typedef struct {
    * PROGRAM to a renderer-specific kernel body internally, but the vtable
    * boundary follows tinygrad's runtime cache boundary. */
   PolyUOp *(*rewrite_program)(PolyCtx *ctx, PolyUOp *sink);
+  char *(*render_source)(PolyCtx *ctx, PolyUOp *program, const char *fn_name);
   int (*lower_item)(PolyCtx *ctx, PolyUOp *program, const char *fn_name, PolyRunner *runner_out);
   int (*execute)(PolyRunner *runner, void **args, int n_args);
   void (*free_runner)(PolyRunner *runner);
@@ -220,6 +225,8 @@ size_t poly_program_cache_len(PolyCtx *ctx);
 void poly_program_cache_clear(PolyCtx *ctx);
 size_t poly_to_program_cache_len(PolyCtx *ctx);
 void poly_to_program_cache_clear(PolyCtx *ctx);
+int poly_program_source_render_count(void);
+void poly_program_source_render_count_reset(void);
 
 void poly_schedule_free(PolySchedule *schedule);
 
@@ -234,8 +241,9 @@ int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index,
 PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
 /* Return PROGRAM's cached POLY_OP_LINEAR child when present. This mirrors
- * tinygrad's PROGRAM(SINK, DEVICE, LINEAR, SOURCE, BINARY...) staging while
- * keeping Polygrad's SOURCE/BINARY/runtime handles in backend caches for now. */
+ * tinygrad's PROGRAM(SINK, DEVICE, LINEAR, SOURCE, BINARY...) staging.
+ * Polygrad currently stores SOURCE as a PROGRAM child and keeps compiled
+ * BINARY/runtime handles in backend caches. */
 PolyUOp *poly_program_linear(PolyUOp *program);
 PolyUOp *poly_schedule_call_to_program(
     PolyCtx *ctx,

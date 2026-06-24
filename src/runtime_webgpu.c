@@ -23,6 +23,22 @@ static PolyUOp *webgpu_program_kernel_body(PolyUOp *program) {
   return program->src[0];
 }
 
+static const char *webgpu_program_source_text(PolyUOp *program) {
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 4) return NULL;
+  PolyUOp *source = program->src[3];
+  if (!source || source->op != POLY_OP_SOURCE || source->arg.kind != POLY_ARG_STRING)
+    return NULL;
+  return source->arg.str;
+}
+
+static char *webgpu_strdup(const char *s) {
+  if (!s) return NULL;
+  size_t n = strlen(s) + 1;
+  char *out = malloc(n);
+  if (out) memcpy(out, s, n);
+  return out;
+}
+
 static int webgpu_launch_dim_upper_bound(PolyCtx *ctx, PolyUOp *expr) {
   if (!expr) return 1;
   int64_t lo = 0, hi = 1;
@@ -505,6 +521,32 @@ uintptr_t poly_webgpu_create_buffer_view(uintptr_t base_handle, size_t byte_offs
   return js_webgpu_create_buffer_view(base_handle, (int)byte_offset, (int)nbytes);
 }
 
+char *poly_webgpu_render_source(PolyCtx *ctx, PolyUOp *program, const char *fn_name) {
+  PolyUOp *scheduled_root = webgpu_program_kernel_body(program);
+  if (!scheduled_root) return NULL;
+  if (webgpu_graph_has_unsupported_dtype(ctx, scheduled_root)) {
+    fprintf(stderr, "polygrad: webgpu: float64 kernels are not supported\n");
+    return NULL;
+  }
+
+  int n_lin = 0;
+  bool lin_owned = false;
+  PolyUOp *linear = poly_program_linear(program);
+  PolyUOp **lin = NULL;
+  if (linear) {
+    n_lin = linear->n_src;
+    lin = linear->src;
+  } else {
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+    lin_owned = true;
+  }
+  if (!lin) return NULL;
+
+  char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
+  if (lin_owned) free(lin);
+  return wgsl;
+}
+
 int poly_webgpu_lower_item(
     PolyCtx *ctx,
     PolyUOp *program,
@@ -544,7 +586,8 @@ int poly_webgpu_lower_item(
   int grid[3], local[3];
   webgpu_extract_dims(ctx, lin, n_lin, grid, local);
 
-  char *wgsl = poly_render_wgsl(lin, n_lin, fn_name);
+  const char *source = webgpu_program_source_text(program);
+  char *wgsl = source ? webgpu_strdup(source) : poly_render_wgsl(lin, n_lin, fn_name);
   if (lin_owned) free(lin);
   if (!wgsl) return -1;
   double t_render = timing ? poly_now_ms() : 0.0;

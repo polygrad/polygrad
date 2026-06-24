@@ -343,7 +343,7 @@ static char *scoped_name(PolyInstance *inst, const char *name) {
 
 static int copy_tensor_shape(PolyCtx *ctx, PolyTensor *tensor, int64_t shape[8], int *ndim) {
   if (!ctx || !tensor || !ndim) return -1;
-  PolyUOp *u = poly_tensor_uop(tensor);
+  PolyUOp *u = poly_tensor_uop_logical(tensor);
   if (!u) return -1;
   PolyShape s = poly_uop_shape_cached(ctx, u);
   if (s.ndim < 0 || s.ndim > 8) return -1;
@@ -490,7 +490,7 @@ static PolyStatus append_existing_tensor_binding(
     return POLY_STATUS_INVALID;
   }
   PolyUOp *buffer = NULL;
-  const PolyUOp *identity = poly_uop_get_buffer_identity(poly_tensor_uop(tensor));
+  const PolyUOp *identity = poly_uop_get_buffer_identity(poly_tensor_uop_logical(tensor));
   if (identity) buffer = (PolyUOp *)identity;
   if (require_buffer && !buffer) {
     poly_instance_set_error(
@@ -728,7 +728,7 @@ static PolyStatus validate_build_reachable_storage(PolyInstance *inst) {
     BuildBinding *out = &build->bindings[i];
     if (out->role != POLY_ROLE_OUTPUT) continue;
 
-    PolyUOp *root = poly_tensor_uop(out->tensor);
+    PolyUOp *root = poly_tensor_uop_logical(out->tensor);
     if (!root) {
       poly_instance_set_error(
           inst, POLY_STATUS_INVALID, __func__, "output '%s' has no tensor root", out->name
@@ -866,7 +866,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
   for (int i = 0; i < build->n_bindings; i++) {
     BuildBinding *b = &build->bindings[i];
     if (b->role == POLY_ROLE_OUTPUT) {
-      PolyUOp *value = poly_tensor_uop(b->tensor);
+      PolyUOp *value = poly_tensor_uop_logical(b->tensor);
       int64_t numel = poly_shape_numel_checked(b->shape, b->ndim);
       b->buffer = poly_buffer(inst->ctx, poly_dtype_scalar(value->dtype), numel);
       if (!b->buffer) {
@@ -911,7 +911,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
     }
     for (int j = 0; j < ep->n_outputs; j++) {
       BuildBinding *out = find_build_binding(build, ep->outputs[j]);
-      PolyUOp *value = poly_tensor_uop(out->tensor);
+      PolyUOp *value = poly_tensor_uop_logical(out->tensor);
       int64_t numel = poly_shape_numel_checked(out->shape, out->ndim);
       if (!(out->ndim == 1 && out->shape[0] == numel)) {
         int64_t flat[] = {numel};

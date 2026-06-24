@@ -17,6 +17,7 @@
 #include "../src/utils.h"
 
 #include <stdbool.h>
+#include <string.h>
 
 typedef struct {
   const char *key;
@@ -396,10 +397,11 @@ TEST(schedule_runtime, compute_call_lower_rejects_raw_sink_body) {
   PASS();
 }
 
-TEST(schedule_runtime, to_program_attaches_linear_child) {
+TEST(schedule_runtime, to_program_attaches_linear_and_source_children) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 0);
+  poly_program_source_render_count_reset();
 
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -421,12 +423,58 @@ TEST(schedule_runtime, to_program_attaches_linear_child) {
   ASSERT_NOT_NULL(linear);
   ASSERT_INT_EQ(linear->op, POLY_OP_LINEAR);
   ASSERT_TRUE(linear->n_src > 0);
+  ASSERT_TRUE(program->n_src >= 4);
+  ASSERT_NOT_NULL(program->src[3]);
+  ASSERT_INT_EQ(program->src[3]->op, POLY_OP_SOURCE);
+  ASSERT_INT_EQ(program->src[3]->arg.kind, POLY_ARG_STRING);
+  ASSERT_NOT_NULL(program->src[3]->arg.str);
+  ASSERT_TRUE(strstr(program->src[3]->arg.str, "poly_k_") != NULL);
+  ASSERT_INT_EQ(poly_program_source_render_count(), 1);
 
   PolyUOp *again = poly_schedule_call_to_program(ctx, sched, 0, POLY_DEVICE_CPU);
   ASSERT_PTR_EQ(again, program);
   ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ(poly_program_source_render_count(), 1);
 
   poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, to_program_cache_reuses_source_across_fresh_schedules) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  poly_program_source_render_count_reset();
+
+  PolyUOp *a1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *b1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *out1 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink1 = poly_sink1(ctx, poly_store_val(ctx, out1, poly_alu2(ctx, POLY_OP_ADD, a1, b1)));
+  PolySchedule *sched1 = poly_complete_create_schedule_with_vars(ctx, sink1, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched1);
+  ASSERT_INT_EQ(sched1->template->n_calls, 1);
+
+  PolyUOp *program1 = poly_schedule_call_to_program(ctx, sched1, 0, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(program1);
+  ASSERT_TRUE(program1->n_src >= 4);
+  ASSERT_INT_EQ(program1->src[3]->op, POLY_OP_SOURCE);
+  ASSERT_INT_EQ(poly_program_source_render_count(), 1);
+
+  PolyUOp *a2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *b2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *out2 = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink2 = poly_sink1(ctx, poly_store_val(ctx, out2, poly_alu2(ctx, POLY_OP_ADD, a2, b2)));
+  PolySchedule *sched2 = poly_complete_create_schedule_with_vars(ctx, sink2, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched2);
+  ASSERT_INT_EQ(sched2->template->n_calls, 1);
+
+  PolyUOp *program2 = poly_schedule_call_to_program(ctx, sched2, 0, POLY_DEVICE_CPU);
+  ASSERT_PTR_EQ(program2, program1);
+  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ(poly_program_source_render_count(), 1);
+
+  poly_schedule_free(sched2);
+  poly_schedule_free(sched1);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1535,6 +1583,121 @@ TEST(schedule_runtime, program_cache_keys_distinct_program_wrappers) {
 
   poly_schedule_free(sched2);
   poly_schedule_free(sched1);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&pcache);
+  PASS();
+}
+
+TEST(schedule_runtime, program_cache_clear_keeps_live_schedule_runner_valid) {
+  ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
+  setenv("POLY_PCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+
+  float a_data[4] = {1, 2, 3, 4};
+  float b_data[4] = {10, 20, 30, 40};
+  float out_data[4] = {0};
+  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
+  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
+  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
+  poly_buffer_attach(ctx, a, &a_view);
+  poly_buffer_attach(ctx, b, &b_view);
+  poly_buffer_attach(ctx, out, &out_view);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+  ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
+
+  poly_program_cache_clear(ctx);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+
+  a_data[0] = 5.0f;
+  a_data[1] = 6.0f;
+  a_data[2] = 7.0f;
+  a_data[3] = 8.0f;
+  b_data[0] = 50.0f;
+  b_data[1] = 60.0f;
+  b_data[2] = 70.0f;
+  b_data[3] = 80.0f;
+  memset(out_data, 0, sizeof(out_data));
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_FLOAT_EQ(out_data[0], 55.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 88.0f, 1e-5);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  schedule_restore_env(&pcache);
+  PASS();
+}
+
+TEST(schedule_runtime, program_cache_clear_keeps_live_compiled_runner_valid) {
+  ScheduleEnvSave pcache = schedule_save_env("POLY_PCACHE");
+  setenv("POLY_PCACHE", "1", 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *a = poly_buffer_f32(ctx, 4);
+  PolyUOp *b = poly_buffer_f32(ctx, 4);
+  PolyUOp *out = poly_buffer_f32(ctx, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_alu2(ctx, POLY_OP_ADD, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  PolyCompiledSchedule *plan = poly_lower_schedule(ctx, sched, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(plan);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 1);
+
+  float a_data[4] = {1, 2, 3, 4};
+  float b_data[4] = {10, 20, 30, 40};
+  float out_data[4] = {0};
+  void *slot_data[16] = {0};
+  ASSERT_TRUE(sched->template->n_buf_slots <= 16);
+  for (int i = 0; i < sched->template->n_buf_slots; i++) {
+    if (sched->template->buf_slots[i].buf_uop == a)
+      slot_data[i] = a_data;
+    else if (sched->template->buf_slots[i].buf_uop == b)
+      slot_data[i] = b_data;
+    else if (sched->template->buf_slots[i].buf_uop == out)
+      slot_data[i] = out_data;
+  }
+
+  ASSERT_INT_EQ(
+      poly_run_compiled_schedule(plan, slot_data, sched->template->n_buf_slots, NULL, 0), 0
+  );
+  ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
+
+  poly_program_cache_clear(ctx);
+  ASSERT_INT_EQ((int)poly_program_cache_len(ctx), 0);
+
+  a_data[0] = 5.0f;
+  a_data[1] = 6.0f;
+  a_data[2] = 7.0f;
+  a_data[3] = 8.0f;
+  b_data[0] = 50.0f;
+  b_data[1] = 60.0f;
+  b_data[2] = 70.0f;
+  b_data[3] = 80.0f;
+  memset(out_data, 0, sizeof(out_data));
+
+  ASSERT_INT_EQ(
+      poly_run_compiled_schedule(plan, slot_data, sched->template->n_buf_slots, NULL, 0), 0
+  );
+  ASSERT_FLOAT_EQ(out_data[0], 55.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 88.0f, 1e-5);
+
+  poly_compiled_schedule_free(plan);
+  poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   schedule_restore_env(&pcache);
   PASS();
