@@ -1007,6 +1007,19 @@ static PolySchedule *make_manual_bufferview_call_schedule_ex(
   sched->run->call_io[0].arg_to_slot[1] = 1;
   sched->template->call_access[0].outs[0] = true;
   sched->template->call_access[0].ins[1] = true;
+  sched->template->call_access[0].n_write_args = 1;
+  sched->template->call_access[0].write_args = malloc(sizeof(int));
+  sched->template->call_access[0].n_read_args = 1;
+  sched->template->call_access[0].read_args = malloc(sizeof(int));
+  sched->template->call_access[0].n_active_args = 2;
+  sched->template->call_access[0].active_args = malloc(2 * sizeof(int));
+  if (!sched->template->call_access[0].write_args || !sched->template->call_access[0].read_args ||
+      !sched->template->call_access[0].active_args)
+    return sched;
+  sched->template->call_access[0].write_args[0] = 0;
+  sched->template->call_access[0].read_args[0] = 1;
+  sched->template->call_access[0].active_args[0] = 0;
+  sched->template->call_access[0].active_args[1] = 1;
 
   if (base_out) *base_out = base;
   if (view_out) *view_out = view;
@@ -1322,12 +1335,26 @@ TEST(schedule_runtime, complete_schedule_reuses_linear_cache_with_current_buf_sl
   ASSERT_INT_EQ(sched1->template->n_calls, 1);
   ASSERT_INT_EQ(sched2->template->n_calls, 1);
   ASSERT_PTR_EQ(poly_schedule_call_body(sched1, 0), poly_schedule_call_body(sched2, 0));
+  ASSERT_NOT_NULL(sched2->template->call_access);
+  ASSERT_NOT_NULL(sched2->run->call_io);
+  ASSERT_PTR_EQ(sched2->run->call_io[0].access, &sched2->template->call_access[0]);
+  ASSERT_INT_EQ(sched2->template->call_access[0].n_write_args, 1);
+  ASSERT_INT_EQ(sched2->template->call_access[0].n_read_args, 2);
   ASSERT_TRUE(schedule_has_buf_slot(sched2, a2));
   ASSERT_TRUE(schedule_has_buf_slot(sched2, b2));
   ASSERT_TRUE(schedule_has_buf_slot(sched2, out2));
   ASSERT_FALSE(schedule_has_buf_slot(sched2, a1));
   ASSERT_FALSE(schedule_has_buf_slot(sched2, b1));
   ASSERT_FALSE(schedule_has_buf_slot(sched2, out1));
+  int out_slot = poly_schedule_call_buffer_slot(sched2, 0, 0);
+  int a_slot = poly_schedule_call_buffer_slot(sched2, 0, 1);
+  int b_slot = poly_schedule_call_buffer_slot(sched2, 0, 2);
+  ASSERT_TRUE(out_slot >= 0 && out_slot < sched2->template->n_buf_slots);
+  ASSERT_TRUE(a_slot >= 0 && a_slot < sched2->template->n_buf_slots);
+  ASSERT_TRUE(b_slot >= 0 && b_slot < sched2->template->n_buf_slots);
+  ASSERT_PTR_EQ(sched2->template->buf_slots[out_slot].buf_uop, out2);
+  ASSERT_PTR_EQ(sched2->template->buf_slots[a_slot].buf_uop, a2);
+  ASSERT_PTR_EQ(sched2->template->buf_slots[b_slot].buf_uop, b2);
 
   poly_schedule_free(sched1);
   poly_schedule_free(sched2);

@@ -70,6 +70,8 @@ typedef struct {
 
 typedef struct {
   PolyUOp *linear;
+  PolyCallAccess *call_access;
+  int n_calls;
   PolyUOp **intermediate_bufs;
   bool *intermediate_needs_zero;
   int n_intermediates;
@@ -716,6 +718,65 @@ static void poly_call_access_free(PolyCallAccess *access) {
   memset(access, 0, sizeof(*access));
 }
 
+static int clone_bool_array(bool **dst, const bool *src, int n) {
+  if (!dst || n < 0) return -1;
+  *dst = NULL;
+  if (n == 0) return 0;
+  if (!src) return -1;
+  *dst = malloc((size_t)n * sizeof(bool));
+  if (!*dst) return -1;
+  memcpy(*dst, src, (size_t)n * sizeof(bool));
+  return 0;
+}
+
+static int clone_int_array(int **dst, const int *src, int n) {
+  if (!dst || n < 0) return -1;
+  *dst = NULL;
+  if (n == 0) return 0;
+  if (!src) return -1;
+  *dst = malloc((size_t)n * sizeof(int));
+  if (!*dst) return -1;
+  memcpy(*dst, src, (size_t)n * sizeof(int));
+  return 0;
+}
+
+static int poly_call_access_clone(PolyCallAccess *dst, const PolyCallAccess *src) {
+  if (!dst || !src || src->n_args < 0 || src->n_read_args < 0 || src->n_write_args < 0 ||
+      src->n_active_args < 0)
+    return -1;
+  memset(dst, 0, sizeof(*dst));
+  dst->n_args = src->n_args;
+  dst->n_read_args = src->n_read_args;
+  dst->n_write_args = src->n_write_args;
+  dst->n_active_args = src->n_active_args;
+  if (clone_bool_array(&dst->outs, src->outs, src->n_args) != 0 ||
+      clone_bool_array(&dst->ins, src->ins, src->n_args) != 0 ||
+      clone_int_array(&dst->read_args, src->read_args, src->n_read_args) != 0 ||
+      clone_int_array(&dst->write_args, src->write_args, src->n_write_args) != 0 ||
+      clone_int_array(&dst->active_args, src->active_args, src->n_active_args) != 0) {
+    poly_call_access_free(dst);
+    return -1;
+  }
+  return 0;
+}
+
+static PolyCallAccess *poly_call_access_clone_array(const PolyCallAccess *src, int n) {
+  if (n < 0) return NULL;
+  if (n == 0) return calloc(1, sizeof(PolyCallAccess));
+  if (!src) return NULL;
+  PolyCallAccess *out = calloc((size_t)n, sizeof(PolyCallAccess));
+  if (!out) return NULL;
+  for (int i = 0; i < n; i++) {
+    if (poly_call_access_clone(&out[i], &src[i]) != 0) {
+      for (int j = 0; j < i; j++)
+        poly_call_access_free(&out[j]);
+      free(out);
+      return NULL;
+    }
+  }
+  return out;
+}
+
 static void poly_call_io_free(PolyCallIO *io) {
   if (!io) return;
   free(io->arg_to_slot);
@@ -839,23 +900,45 @@ static int poly_call_io_init(PolyCtx *ctx, PolySchedule *sched, int call_index) 
     return -1;
   PolyCallAccess *access = &sched->template->call_access[call_index];
   PolyCallIO *io = &sched->run->call_io[call_index];
-  access->n_args = poly_call_n_buffer_args(call);
+  int n_args = poly_call_n_buffer_args(call);
+  bool access_precomputed =
+      access->n_args != 0 || access->outs || access->ins || access->read_args ||
+      access->write_args || access->active_args;
+  if (access_precomputed) {
+    if (access->n_args != n_args || (n_args > 0 && (!access->outs || !access->ins)))
+      return -1;
+    bool lists_absent = !access->read_args && !access->write_args && !access->active_args;
+    bool lists_incomplete =
+        (access->n_read_args > 0 && !access->read_args) ||
+        (access->n_write_args > 0 && !access->write_args) ||
+        (access->n_active_args > 0 && !access->active_args);
+    if (lists_incomplete) return -1;
+    if (lists_absent && poly_call_access_build_arg_lists(access) != 0) return -1;
+  } else {
+    access->n_args = n_args;
+  }
   io->n_args = access->n_args;
   io->access = access;
   if (access->n_args <= 0) return 0;
 
   io->arg_to_slot = malloc((size_t)access->n_args * sizeof(int));
-  access->outs = calloc((size_t)access->n_args, sizeof(bool));
-  access->ins = calloc((size_t)access->n_args, sizeof(bool));
-  if (!io->arg_to_slot || !access->outs || !access->ins) return -1;
+  if (!io->arg_to_slot) return -1;
+  if (!access_precomputed) {
+    access->outs = calloc((size_t)access->n_args, sizeof(bool));
+    access->ins = calloc((size_t)access->n_args, sizeof(bool));
+    if (!access->outs || !access->ins) return -1;
+  }
 
   for (int i = 0; i < access->n_args; i++) {
     io->arg_to_slot[i] = poly_schedule_slot_for_call_arg(sched, call, i);
     if (io->arg_to_slot[i] < 0 || io->arg_to_slot[i] >= sched->template->n_buf_slots) return -1;
   }
-  if (poly_call_get_outs_ins(ctx, call, access->outs, access->ins, access->n_args) != 0)
-    return -1;
-  return poly_call_access_build_arg_lists(access);
+  if (!access_precomputed) {
+    if (poly_call_get_outs_ins(ctx, call, access->outs, access->ins, access->n_args) != 0)
+      return -1;
+    return poly_call_access_build_arg_lists(access);
+  }
+  return 0;
 }
 
 static bool poly_memory_plan_enabled(void) {
@@ -2237,7 +2320,8 @@ static PolyUOp *linear_replay_resolve_arg(
 static int poly_schedule_init_call_io_and_runtime(PolyCtx *ctx, PolySchedule *ps) {
   if (!ctx || !ps || !ps->template || !ps->run || !ps->template->linear) return -1;
   ps->template->n_calls = ps->template->linear->n_src;
-  ps->template->call_access = calloc((size_t)ps->template->n_calls, sizeof(PolyCallAccess));
+  if (!ps->template->call_access)
+    ps->template->call_access = calloc((size_t)ps->template->n_calls, sizeof(PolyCallAccess));
   ps->run->call_io = calloc((size_t)ps->template->n_calls, sizeof(PolyCallIO));
   ps->run->calls = calloc((size_t)ps->template->n_calls, sizeof(PolyCallRuntime));
   if (ps->template->n_calls > 0 && (!ps->template->call_access || !ps->run->call_io)) return -1;
@@ -2366,6 +2450,12 @@ static PolySchedule *build_schedule_from_linear_template(
   free(linear_src);
   if (!ps->template->linear) goto cleanup;
   ps->template->n_calls = ps->template->linear->n_src;
+  if (linear_entry->call_access) {
+    if (linear_entry->n_calls != ps->template->n_calls) goto cleanup;
+    ps->template->call_access =
+        poly_call_access_clone_array(linear_entry->call_access, linear_entry->n_calls);
+    if (!ps->template->call_access) goto cleanup;
+  }
 
   if (apply_memory_plan && poly_schedule_memory_plan(ctx, ps) != 0) goto cleanup;
   if (poly_schedule_init_call_io_and_runtime(ctx, ps) != 0) goto cleanup;
@@ -3215,6 +3305,11 @@ static PolyUOp *schedule_cache_key_for_kernel_graph(PolyCtx *ctx, PolyUOp *kerne
 
 static void poly_schedule_cache_entry_free_obj(PolyScheduleCacheEntry *entry) {
   if (!entry) return;
+  if (entry->call_access) {
+    for (int i = 0; i < entry->n_calls; i++)
+      poly_call_access_free(&entry->call_access[i]);
+    free(entry->call_access);
+  }
   free(entry->intermediate_bufs);
   free(entry->intermediate_needs_zero);
   free(entry);
@@ -3234,6 +3329,14 @@ static PolyScheduleCacheEntry *poly_schedule_cache_entry_from_schedule(
   PolyScheduleCacheEntry *entry = calloc(1, sizeof(PolyScheduleCacheEntry));
   if (!entry) return NULL;
   entry->linear = linear;
+  entry->n_calls = schedule->template->n_calls;
+  if (entry->n_calls > 0) {
+    entry->call_access = poly_call_access_clone_array(schedule->template->call_access, entry->n_calls);
+    if (!entry->call_access) {
+      poly_schedule_cache_entry_free_obj(entry);
+      return NULL;
+    }
+  }
 
   int n_intermediates = 0;
   for (int i = 0; i < schedule->template->n_buf_slots; i++) {
