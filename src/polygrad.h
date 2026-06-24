@@ -742,9 +742,10 @@ void poly_toposort_free(PolyUOp **topo);
  * pass their own PolyUOpCache to scope batch/rewrite-local range queries and
  * throw those maps away cleanly.
  *
- * PolyUOpCache unifies per-UOp caches that Phase D's reduce_collapse
- * driver queries together:
- *   - minmax: UOp -> (int64_t vmin, int64_t vmax) per tinygrad _min_max
+ * PolyUOpCache unifies the query maps that Phase D's reduce_collapse
+ * driver uses together:
+ *   - minmax: UOp inline cached (int64_t vmin, int64_t vmax), matching
+ *     tinygrad's cached UOp._min_max property
  *   - ranges: UOp -> set of active RANGE ancestors per tinygrad u.ranges
  *   - ended_ranges: UOp -> set of ended RANGE ancestors per tinygrad u.ended_ranges
  *
@@ -761,9 +762,11 @@ void poly_toposort_free(PolyUOp **topo);
  *   ... more queries reusing c ...
  *   poly_uop_cache_destroy(c);
  *
- * Lifetime: cache entries are allocated from the PolyCtx arena and live
- * until the ctx is destroyed. poly_uop_cache_destroy frees the PolyMap
- * wrappers only; the arena-backed entries are reclaimed at ctx teardown.
+ * Lifetime: minmax values live inline on immutable UOps. Range-set values
+ * are allocated from the PolyCtx arena and live until the ctx is destroyed,
+ * matching tinygrad's UOp-lifetime cached properties. poly_uop_cache_destroy
+ * frees the range-query PolyMap wrappers only. The minmax `_ex` entry accepts
+ * a cache argument for API symmetry but does not allocate cache-owned values.
  * Cache invalidation is NOT automatic — if the graph is mutated via
  * poly_uop_substitute between queries, destroy and recreate the cache. */
 

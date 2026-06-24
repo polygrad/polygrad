@@ -1192,6 +1192,38 @@ TEST(sym, minmax_cache_reuse_yields_same) {
   PASS();
 }
 
+TEST(sym, minmax_explicit_cache_does_not_allocate_arena_values) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOpCache *c = poly_uop_cache_new();
+  ASSERT_NOT_NULL(c);
+
+  PolyUOp *x = mk_dvar(ctx, "x", 0, 1023);
+  PolyUOp *y = mk_dvar(ctx, "y", -7, 11);
+  PolyUOp *u = x;
+  for (int i = 0; i < 8; i++) {
+    PolyUOp *k = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i + 1));
+    PolyUOp *a = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, u, k, poly_arg_none());
+    PolyUOp *b = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, y, k, poly_arg_none());
+    u = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, a, b, poly_arg_none());
+  }
+
+  PolyCtxStats before = {0}, after = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &before), 0);
+
+  int64_t lo = 0, hi = 0;
+  poly_uop_minmax_ex(ctx, u, c, &lo, &hi);
+
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &after), 0);
+  ASSERT_INT_EQ(after.arena_bytes, before.arena_bytes);
+  ASSERT_INT_EQ(lo, -216);
+  ASSERT_INT_EQ(hi, 1455);
+
+  poly_uop_cache_destroy(c);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* poly_logical_not / bool comparison parity (Phase A P5) *
  * Tinygrad's `logical_not()` (mixin/elementwise.py:25-33) lowers to
  *   CMPNE(CAST(x, bool), CONST(true))

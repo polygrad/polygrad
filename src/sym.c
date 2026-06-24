@@ -7,7 +7,6 @@
 
 #include "pat.h"
 #include "ctx.h"
-#include "uop_cache_internal.h"
 #include <math.h>
 #include <stdint.h>
 #include <limits.h>
@@ -123,10 +122,6 @@ static int64_t dtype_max(PolyDType dt) {
   return INT64_MAX / 2;
 }
 
-typedef struct MinMaxBox {
-  int64_t lo, hi;
-} MinMaxBox;
-
 static int64_t min4(int64_t a, int64_t b, int64_t c, int64_t d) {
   int64_t x = a < b ? a : b;
   int64_t y = c < d ? c : d;
@@ -144,57 +139,25 @@ static int64_t i64_max(int64_t a, int64_t b) {
   return a > b ? a : b;
 }
 
-typedef struct MinMaxHeapBox {
-  MinMaxBox box;
-  struct MinMaxHeapBox *next;
-} MinMaxHeapBox;
-
-static bool minmax_memo_get(PolyMap *memo, PolyUOp *u, int64_t *lo, int64_t *hi) {
+static bool minmax_memo_get(PolyUOp *u, int64_t *lo, int64_t *hi) {
   if (!u) return false;
   if (u->minmax_cached) {
     *lo = u->minmax_vmin;
     *hi = u->minmax_vmax;
     return true;
   }
-  if (!memo) return false;
-  MinMaxBox *cached = (MinMaxBox *)poly_map_get(memo, poly_ptr_hash(u), u, poly_ptr_eq);
-  if (!cached) return false;
-  *lo = cached->lo;
-  *hi = cached->hi;
-  return true;
+  return false;
 }
 
-static void minmax_memo_set(
-    PolyCtx *ctx,
-    PolyMap *memo,
-    PolyUOp *u,
-    int64_t lo,
-    int64_t hi,
-    MinMaxHeapBox **heap_boxes
-) {
+static void minmax_memo_set(PolyUOp *u, int64_t lo, int64_t hi) {
   if (!u) return;
   u->minmax_vmin = lo;
   u->minmax_vmax = hi;
   u->minmax_cached = true;
-  if (!memo) return;
-  MinMaxBox *box = NULL;
-  if (ctx) {
-    box = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(MinMaxBox), _Alignof(MinMaxBox));
-  } else if (heap_boxes) {
-    MinMaxHeapBox *heap_box = malloc(sizeof(MinMaxHeapBox));
-    if (!heap_box) return;
-    heap_box->next = *heap_boxes;
-    *heap_boxes = heap_box;
-    box = &heap_box->box;
-  }
-  if (!box) return;
-  box->lo = lo;
-  box->hi = hi;
-  poly_map_set(memo, poly_ptr_hash(u), u, box, poly_ptr_eq);
 }
 
-static bool minmax_src(PolyMap *memo, PolyUOp *s, int64_t *lo, int64_t *hi) {
-  return minmax_memo_get(memo, s, lo, hi);
+static bool minmax_src(PolyUOp *s, int64_t *lo, int64_t *hi) {
+  return minmax_memo_get(s, lo, hi);
 }
 
 static void minmax_default(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
@@ -207,20 +170,11 @@ static void minmax_default(PolyUOp *u, int64_t *vmin, int64_t *vmax) {
   *vmax = dtype_max(u->dtype);
 }
 
-static void minmax_heap_boxes_free(MinMaxHeapBox *boxes) {
-  while (boxes) {
-    MinMaxHeapBox *next = boxes->next;
-    free(boxes);
-    boxes = next;
-  }
-}
-
 static bool poly_uop_minmax_node(
     PolyCtx *ctx,
     PolyUOp *u,
     int64_t *vmin,
-    int64_t *vmax,
-    PolyMap *memo
+    int64_t *vmax
 ) {
   (void)ctx;
   if (!u) {
@@ -248,7 +202,7 @@ static bool poly_uop_minmax_node(
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     for (int i = 0; i < u->n_src; i++) {
       int64_t a, b;
-      if (!minmax_src(memo, u->src[i], &a, &b)) return false;
+      if (!minmax_src(u->src[i], &a, &b)) return false;
       if (a < lo) lo = a;
       if (b > hi) hi = b;
     }
@@ -272,7 +226,7 @@ static bool poly_uop_minmax_node(
    * which is mathematically identical and avoids the allocation. */
   if ((u->op == POLY_OP_RANGE || u->op == POLY_OP_SPECIAL) && u->n_src >= 1) {
     int64_t lo, hi;
-    if (!minmax_src(memo, u->src[0], &lo, &hi)) return false;
+    if (!minmax_src(u->src[0], &lo, &hi)) return false;
     *vmin = 0;
     *vmax = hi - 1;
     return true;
@@ -280,12 +234,12 @@ static bool poly_uop_minmax_node(
 
   /* BIND: passthrough src[0] (ignore bound value) */
   if (u->op == POLY_OP_BIND && u->n_src >= 1) {
-    return minmax_src(memo, u->src[0], vmin, vmax);
+    return minmax_src(u->src[0], vmin, vmax);
   }
 
   /* GEP: passthrough src[0] */
   if (u->op == POLY_OP_GEP && u->n_src >= 1) {
-    return minmax_src(memo, u->src[0], vmin, vmax);
+    return minmax_src(u->src[0], vmin, vmax);
   }
 
   /* UNROLL/VECTORIZE: min/max over all srcs */
@@ -293,7 +247,7 @@ static bool poly_uop_minmax_node(
     int64_t lo = INT64_MAX, hi = INT64_MIN;
     for (int i = 0; i < u->n_src; i++) {
       int64_t a, b;
-      if (!minmax_src(memo, u->src[i], &a, &b)) return false;
+      if (!minmax_src(u->src[i], &a, &b)) return false;
       if (a < lo) lo = a;
       if (b > hi) hi = b;
     }
@@ -308,8 +262,8 @@ static bool poly_uop_minmax_node(
    * operands are dispatched separately below since their result is bool. */
   if (u->n_src == 2 && !poly_dtype_is_float(u->dtype)) {
     int64_t a0, a1, b0, b1;
-    if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
-    if (!minmax_src(memo, u->src[1], &b0, &b1)) return false;
+    if (!minmax_src(u->src[0], &a0, &a1)) return false;
+    if (!minmax_src(u->src[1], &b0, &b1)) return false;
 
     if (u->op == POLY_OP_ADD) {
       int64_t lo, hi;
@@ -429,8 +383,8 @@ static bool poly_uop_minmax_node(
   /* Bool binary ops (AND / OR on bool dtype) */
   if (u->n_src == 2 && poly_dtype_eq(u->dtype, POLY_BOOL)) {
     int64_t a0, a1, b0, b1;
-    if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
-    if (!minmax_src(memo, u->src[1], &b0, &b1)) return false;
+    if (!minmax_src(u->src[0], &a0, &a1)) return false;
+    if (!minmax_src(u->src[1], &b0, &b1)) return false;
     if (u->op == POLY_OP_AND) {
       *vmin = (a0 && b0) ? 1 : 0;
       *vmax = (a1 && b1) ? 1 : 0;
@@ -446,8 +400,8 @@ static bool poly_uop_minmax_node(
   /* Comparisons: always bool, regardless of operand dtype */
   if (u->n_src == 2 && (u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE)) {
     int64_t a0, a1, b0, b1;
-    if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
-    if (!minmax_src(memo, u->src[1], &b0, &b1)) return false;
+    if (!minmax_src(u->src[0], &a0, &a1)) return false;
+    if (!minmax_src(u->src[1], &b0, &b1)) return false;
     if (u->op == POLY_OP_CMPLT) {
       *vmin = (a1 < b0) ? 1 : 0;
       *vmax = (a0 < b1) ? 1 : 0;
@@ -464,8 +418,8 @@ static bool poly_uop_minmax_node(
   /* WHERE (int branches): min/max over both branches */
   if (u->op == POLY_OP_WHERE && u->n_src == 3 && poly_dtype_is_int(u->dtype)) {
     int64_t t0, t1, f0, f1;
-    if (!minmax_src(memo, u->src[1], &t0, &t1)) return false;
-    if (!minmax_src(memo, u->src[2], &f0, &f1)) return false;
+    if (!minmax_src(u->src[1], &t0, &t1)) return false;
+    if (!minmax_src(u->src[2], &f0, &f1)) return false;
     *vmin = i64_min(t0, f0);
     *vmax = i64_max(t1, f1);
     return true;
@@ -480,7 +434,7 @@ static bool poly_uop_minmax_node(
                      !poly_dtype_eq(u->dtype, POLY_BOOL));
     if (monotone) {
       int64_t a0, a1;
-      if (!minmax_src(memo, u->src[0], &a0, &a1)) return false;
+      if (!minmax_src(u->src[0], &a0, &a1)) return false;
       *vmin = i64_max(dtype_min(u->dtype), a0);
       *vmax = i64_min(a1, dtype_max(u->dtype));
       return true;
@@ -498,8 +452,6 @@ static bool poly_uop_minmax_rec_fast(
     PolyUOp *u,
     int64_t *vmin,
     int64_t *vmax,
-    PolyMap *memo,
-    MinMaxHeapBox **heap_boxes,
     int depth
 ) {
   if (!u) {
@@ -507,18 +459,18 @@ static bool poly_uop_minmax_rec_fast(
     *vmax = 0;
     return true;
   }
-  if (minmax_memo_get(memo, u, vmin, vmax)) return true;
-  if (!memo || depth > 128) return false;
+  if (minmax_memo_get(u, vmin, vmax)) return true;
+  if (depth > 128) return false;
 
   for (int i = 0; i < u->n_src; i++) {
     int64_t lo = 0, hi = 0;
-    if (!poly_uop_minmax_rec_fast(ctx, u->src[i], &lo, &hi, memo, heap_boxes, depth + 1))
+    if (!poly_uop_minmax_rec_fast(ctx, u->src[i], &lo, &hi, depth + 1))
       return false;
   }
 
   int64_t lo = 0, hi = 0;
-  if (!poly_uop_minmax_node(ctx, u, &lo, &hi, memo)) minmax_default(u, &lo, &hi);
-  minmax_memo_set(ctx, memo, u, lo, hi, heap_boxes);
+  if (!poly_uop_minmax_node(ctx, u, &lo, &hi)) minmax_default(u, &lo, &hi);
+  minmax_memo_set(u, lo, hi);
   *vmin = lo;
   *vmax = hi;
   return true;
@@ -528,8 +480,7 @@ static void poly_uop_minmax_compute(
     PolyCtx *ctx,
     PolyUOp *u,
     int64_t *vmin,
-    int64_t *vmax,
-    PolyMap *memo
+    int64_t *vmax
 ) {
   if (!u) {
     *vmin = 0;
@@ -537,18 +488,9 @@ static void poly_uop_minmax_compute(
     return;
   }
 
-  if (minmax_memo_get(memo, u, vmin, vmax)) return;
-  if (!memo) {
-    minmax_default(u, vmin, vmax);
-    return;
-  }
+  if (minmax_memo_get(u, vmin, vmax)) return;
 
-  MinMaxHeapBox *fast_heap_boxes = NULL;
-  if (poly_uop_minmax_rec_fast(ctx, u, vmin, vmax, memo, &fast_heap_boxes, 0)) {
-    minmax_heap_boxes_free(fast_heap_boxes);
-    return;
-  }
-  minmax_heap_boxes_free(fast_heap_boxes);
+  if (poly_uop_minmax_rec_fast(ctx, u, vmin, vmax, 0)) return;
 
   typedef struct {
     PolyUOp *u;
@@ -558,7 +500,6 @@ static void poly_uop_minmax_compute(
   int stack_cap = (int)(sizeof(stack_buf) / sizeof(stack_buf[0]));
   int stack_top = 0;
   MinMaxFrame *stack = stack_buf;
-  MinMaxHeapBox *heap_boxes = NULL;
 
   stack[stack_top++] = (MinMaxFrame){u, 0};
   bool ok = true;
@@ -567,7 +508,7 @@ static void poly_uop_minmax_compute(
     PolyUOp *cur = frame->u;
     int64_t lo, hi;
 
-    if (!cur || minmax_memo_get(memo, cur, &lo, &hi)) {
+    if (!cur || minmax_memo_get(cur, &lo, &hi)) {
       stack_top--;
       continue;
     }
@@ -576,7 +517,7 @@ static void poly_uop_minmax_compute(
       frame->state = 1;
       for (int i = cur->n_src - 1; i >= 0; i--) {
         PolyUOp *src = cur->src[i];
-        if (!src || minmax_memo_get(memo, src, &lo, &hi)) continue;
+        if (!src || minmax_memo_get(src, &lo, &hi)) continue;
         if (stack_top >= stack_cap) {
           int new_cap = stack_cap * 2;
           MinMaxFrame *new_stack = NULL;
@@ -599,19 +540,17 @@ static void poly_uop_minmax_compute(
       continue;
     }
 
-    if (!poly_uop_minmax_node(ctx, cur, &lo, &hi, memo)) minmax_default(cur, &lo, &hi);
-    minmax_memo_set(ctx, memo, cur, lo, hi, &heap_boxes);
+    if (!poly_uop_minmax_node(ctx, cur, &lo, &hi)) minmax_default(cur, &lo, &hi);
+    minmax_memo_set(cur, lo, hi);
     stack_top--;
   }
 
-  if (!ok || !minmax_memo_get(memo, u, vmin, vmax)) minmax_default(u, vmin, vmax);
+  if (!ok || !minmax_memo_get(u, vmin, vmax)) minmax_default(u, vmin, vmax);
   if (stack != stack_buf) free(stack);
-  minmax_heap_boxes_free(heap_boxes);
 }
 
 /* Public wrapper. Caches on the immutable UOp itself, matching tinygrad's
- * cached UOp properties. A local memo is still used while computing the
- * dependency slice so repeated children inside one query are shared. */
+ * cached UOp properties. */
 void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
   if (!vmin || !vmax) return;
   if (u && u->minmax_cached) {
@@ -619,13 +558,7 @@ void poly_uop_minmax(PolyCtx *ctx, PolyUOp *u, int64_t *vmin, int64_t *vmax) {
     *vmax = u->minmax_vmax;
     return;
   }
-  PolyMap *memo = poly_map_new(64);
-  if (!memo) {
-    minmax_default(u, vmin, vmax);
-    return;
-  }
-  poly_uop_minmax_compute(ctx, u, vmin, vmax, memo);
-  poly_map_destroy(memo);
+  poly_uop_minmax_compute(ctx, u, vmin, vmax);
 }
 
 void poly_uop_minmax_ex(
@@ -635,12 +568,9 @@ void poly_uop_minmax_ex(
     int64_t *vmin,
     int64_t *vmax
 ) {
+  (void)cache;
   if (!vmin || !vmax) return;
-  PolyMap *memo = cache ? poly_uop_cache_minmax_map(cache) : NULL;
-  if (memo && ctx)
-    poly_uop_minmax_compute(ctx, u, vmin, vmax, memo);
-  else
-    poly_uop_minmax(ctx, u, vmin, vmax);
+  poly_uop_minmax(ctx, u, vmin, vmax);
 }
 
 /* Rewrite callbacks */

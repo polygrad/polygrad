@@ -871,17 +871,16 @@ static PolyRangeSet *compute_ranges_with_ended(
   return cached;
 }
 
-/* PolyUOpCache: per-pass unified cache for minmax + ranges *
+/* PolyUOpCache: per-pass query maps for minmax + ranges *
  * Owns PolyMaps keyed by PolyUOp*. The struct is opaque in the public
  * header; callers get it via poly_uop_cache_new and pass it to any `_ex`
- * query. Values (PolyRangeSet*, PolyMinMaxBox*) are arena-allocated and
- * reclaimed at ctx teardown; destroying the cache only tears down the map
+ * query. Range-set values are UOp-lifetime cached in the ctx arena. Minmax
+ * values live inline on the UOp. Destroying the cache only tears down the map
  * wrappers. */
 
 struct PolyUOpCache {
   PolyMap *ranges; /* PolyUOp* -> PolyRangeSet* */
   PolyMap *ended; /* PolyUOp* -> PolyRangeSet* for ended_ranges */
-  PolyMap *minmax; /* PolyUOp* -> PolyMinMaxBox* (populated by src/sym.c) */
 };
 
 PolyUOpCache *poly_uop_cache_new(void) {
@@ -889,11 +888,9 @@ PolyUOpCache *poly_uop_cache_new(void) {
   if (!c) return NULL;
   c->ranges = poly_map_new(64);
   c->ended = poly_map_new(64);
-  c->minmax = poly_map_new(64);
-  if (!c->ranges || !c->ended || !c->minmax) {
+  if (!c->ranges || !c->ended) {
     if (c->ranges) poly_map_destroy(c->ranges);
     if (c->ended) poly_map_destroy(c->ended);
-    if (c->minmax) poly_map_destroy(c->minmax);
     free(c);
     return NULL;
   }
@@ -904,13 +901,7 @@ void poly_uop_cache_destroy(PolyUOpCache *c) {
   if (!c) return;
   if (c->ranges) poly_map_destroy(c->ranges);
   if (c->ended) poly_map_destroy(c->ended);
-  if (c->minmax) poly_map_destroy(c->minmax);
   free(c);
-}
-
-/* Internal accessor for src/sym.c's minmax code (declared in uop_cache_internal.h). */
-PolyMap *poly_uop_cache_minmax_map(PolyUOpCache *c) {
-  return c ? c->minmax : NULL;
 }
 
 /* Walks RESHAPE/MULTI wrappers and returns the terminal buffer-identity UOp
