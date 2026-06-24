@@ -52,10 +52,15 @@ typedef struct {
   int step;
 } OptimState;
 
+typedef struct {
+  PolySchedule *schedule; /* resolved concrete plan for one instance entrypoint */
+} PolyEntrypointPlan;
+
 /* Value-and-grad metadata (built lazily on first train call) */
 
 typedef struct {
   PolyUOp *combined_sink; /* combined fwd+bwd SINK */
+  PolyEntrypointPlan plan; /* cached lowering for the stable value+grad graph */
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss output */
   PolyUOp **grad_out_bufs; /* [n_params] gradient BUFFER UOps */
   float **grad_datas; /* [n_params] gradient host data */
@@ -68,7 +73,7 @@ typedef struct {
 
 typedef struct {
   PolyUOp *combined_sink; /* fwd+bwd+optimizer SINK */
-  PolySchedule *schedule; /* cached lowering for the stable train graph */
+  PolyEntrypointPlan plan; /* cached lowering for the stable train graph */
   PolyUOp *loss_out_buf; /* BUFFER UOp for loss scalar output */
   float loss_data; /* scalar loss value after step */
 
@@ -151,7 +156,7 @@ struct PolyInstance {
   /* Entrypoints */
   RuntimeEntrypoint *entrypoints;
   int n_entrypoints;
-  PolySchedule **entry_schedules; /* lazy, one per generic entrypoint */
+  PolyEntrypointPlan *entry_plans; /* lazy, one per generic entrypoint */
 
   /* Value-and-grad state (lazy, per-entrypoint -- currently only "loss") */
   VagState *vag; /* NULL until first value_and_grad call */
@@ -1192,7 +1197,7 @@ static PolyInstance *instance_from_spec(PolyIrSpec *spec, bool owns_ctx, bool fr
   /* Copy entrypoints */
   inst->n_entrypoints = spec->n_entrypoints;
   inst->entrypoints = calloc(spec->n_entrypoints, sizeof(*inst->entrypoints));
-  inst->entry_schedules = calloc(spec->n_entrypoints, sizeof(*inst->entry_schedules));
+  inst->entry_plans = calloc(spec->n_entrypoints, sizeof(*inst->entry_plans));
   for (int i = 0; i < spec->n_entrypoints; i++) {
     inst->entrypoints[i].name = strdup(spec->entrypoints[i].name);
     inst->entrypoints[i].sink = spec->entrypoints[i].sink;
@@ -1384,8 +1389,11 @@ PolyInstance *poly_instance_from_sinks(
   return instance_from_named_sinks(ctx, names, sinks, n_sinks);
 }
 
+static void entrypoint_plan_clear(PolyEntrypointPlan *plan);
+
 static void vag_free(VagState *vag, int n_params) {
   if (!vag) return;
+  entrypoint_plan_clear(&vag->plan);
   if (vag->grad_datas) {
     for (int i = 0; i < n_params; i++)
       free(vag->grad_datas[i]);
@@ -1396,23 +1404,26 @@ static void vag_free(VagState *vag, int n_params) {
   free(vag);
 }
 
-static void train_schedule_clear(TrainState *ts) {
-  if (!ts) return;
-  poly_schedule_free(ts->schedule);
-  ts->schedule = NULL;
+static void entrypoint_plan_clear(PolyEntrypointPlan *plan) {
+  if (!plan) return;
+  poly_schedule_free(plan->schedule);
+  plan->schedule = NULL;
 }
 
-static void entry_schedules_clear(PolyInstance *inst) {
-  if (!inst || !inst->entry_schedules) return;
-  for (int i = 0; i < inst->n_entrypoints; i++) {
-    poly_schedule_free(inst->entry_schedules[i]);
-    inst->entry_schedules[i] = NULL;
-  }
+static void train_plan_clear(TrainState *ts) {
+  if (!ts) return;
+  entrypoint_plan_clear(&ts->plan);
+}
+
+static void entry_plans_clear(PolyInstance *inst) {
+  if (!inst || !inst->entry_plans) return;
+  for (int i = 0; i < inst->n_entrypoints; i++)
+    entrypoint_plan_clear(&inst->entry_plans[i]);
 }
 
 static void train_free(TrainState *ts, int n_params) {
   if (!ts) return;
-  train_schedule_clear(ts);
+  train_plan_clear(ts);
   free(ts->m_bufs);
   free(ts->v_bufs);
   free(ts);
@@ -1434,9 +1445,9 @@ void poly_instance_free(PolyInstance *inst) {
   free(inst->trainable_param_indices);
 
   /* Free entrypoints */
-  if (inst->entry_schedules) {
-    entry_schedules_clear(inst);
-    free(inst->entry_schedules);
+  if (inst->entry_plans) {
+    entry_plans_clear(inst);
+    free(inst->entry_plans);
   }
   for (int i = 0; i < inst->n_entrypoints; i++) {
     free(inst->entrypoints[i].name);
@@ -1890,8 +1901,9 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device) {
     }
   }
 
-  entry_schedules_clear(inst);
-  train_schedule_clear(inst->train);
+  entry_plans_clear(inst);
+  if (inst->vag) entrypoint_plan_clear(&inst->vag->plan);
+  train_plan_clear(inst->train);
 
   return 0;
 }
@@ -1950,7 +1962,7 @@ static int run_instance_sink(
     PolyUOp *sink,
     PolyIOBinding *io,
     int n_io,
-    PolySchedule **cached_schedule
+    PolyEntrypointPlan *plan
 ) {
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
@@ -1967,12 +1979,12 @@ static int run_instance_sink(
    * effect sinks. They must skip tensor callify and enter the schedule runner
    * directly, matching tinygrad's separation between tensor realization and
    * schedule execution. */
-  PolySchedule *sched = cached_schedule ? *cached_schedule : NULL;
+  PolySchedule *sched = plan ? plan->schedule : NULL;
   bool schedule_owned = false;
   if (!sched) {
     sched = poly_complete_create_schedule_with_vars(inst->ctx, sink, POLY_MODE_CALL);
-    if (cached_schedule) {
-      *cached_schedule = sched;
+    if (plan) {
+      plan->schedule = sched;
     } else {
       schedule_owned = true;
     }
@@ -1987,7 +1999,7 @@ static int run_instance_sink(
         "[polygrad:instance] input=%.3fms schedule=%.3fms run=%.3fms total=%.3fms "
         "ret=%d cached=%d\n",
         t_attach - t0, t_sched - t_attach, t_done - t_sched, t_done - t0, ret,
-        cached_schedule && *cached_schedule
+        plan && plan->schedule
     );
   }
   return ret;
@@ -2003,8 +2015,8 @@ int poly_instance_call(PolyInstance *inst, const char *entrypoint, PolyIOBinding
   }
 
   PolyUOp *sink = inst->entrypoints[ep_idx].sink;
-  PolySchedule **cached = inst->entry_schedules ? &inst->entry_schedules[ep_idx] : NULL;
-  return run_instance_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, cached);
+  PolyEntrypointPlan *plan = inst->entry_plans ? &inst->entry_plans[ep_idx] : NULL;
+  return run_instance_sink(inst, &inst->entrypoints[ep_idx], sink, io, n_io, plan);
 }
 
 /* Convenience wrapper */
@@ -2231,7 +2243,7 @@ int poly_instance_value_and_grad(
   if (ensure_vag_graph(inst, ep_idx) != 0) return -1;
   VagState *vag = inst->vag;
 
-  int ret = run_instance_sink(inst, &inst->entrypoints[ep_idx], vag->combined_sink, io, n_io, NULL);
+  int ret = run_instance_sink(inst, &inst->entrypoints[ep_idx], vag->combined_sink, io, n_io, &vag->plan);
 
   if (ret == 0) {
     if (poly_buffer_read(inst->ctx, vag->loss_out_buf, &vag->loss_data, sizeof(float)) != 0)
@@ -2491,7 +2503,7 @@ int poly_instance_train_step(PolyInstance *inst, PolyIOBinding *io, int n_io, fl
   o->step++;
 
   int ret = run_instance_sink(
-      inst, &inst->entrypoints[ep_idx], ts->combined_sink, io, n_io, &ts->schedule
+      inst, &inst->entrypoints[ep_idx], ts->combined_sink, io, n_io, &ts->plan
   );
   if (ret != 0) {
     o->step--;
