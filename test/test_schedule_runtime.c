@@ -2083,6 +2083,119 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   PASS();
 }
 
+typedef struct {
+  int n_calls;
+  int n_intermediates;
+  int n_owner_slots;
+  int n_arenas;
+  int n_views;
+  size_t runtime_bytes;
+  int64_t owner_slot_bytes;
+  float out0;
+  float out_last;
+} MemoryPlanStats;
+
+static int run_reduce_expand_memory_plan_case(MemoryPlanStats *stats) {
+  PolyCtx *ctx = poly_ctx_new();
+  if (!ctx || !stats) return -1;
+  memset(stats, 0, sizeof(*stats));
+
+  enum { N = 64, K = 3 };
+  PolyUOp *inputs[K];
+  PolyUOp *outs[K];
+  PolyUOp *stores[K];
+  float in_data[K][N];
+  float out_data[K][N];
+  for (int k = 0; k < K; k++) {
+    inputs[k] = poly_buffer_f32(ctx, N);
+    outs[k] = poly_buffer_f32(ctx, N);
+    int64_t red_axes[1] = {0};
+    int64_t one_shape[1] = {1};
+    int64_t out_shape[1] = {N};
+    PolyUOp *red = poly_reduce_axis(ctx, POLY_OP_ADD, inputs[k], red_axes, 1);
+    PolyUOp *exp = poly_expand(ctx, poly_reshape(ctx, red, one_shape, 1), out_shape, 1);
+    stores[k] =
+        poly_store_val(ctx, outs[k], poly_alu2(ctx, POLY_OP_ADD, exp, poly_const_float(ctx, k)));
+    for (int i = 0; i < N; i++) {
+      in_data[k][i] = 1.0f;
+      out_data[k][i] = 0.0f;
+    }
+  }
+
+  PolySchedule *ps = poly_complete_create_schedule_with_vars(
+      ctx,
+      poly_sink_n(ctx, stores, K),
+      POLY_MODE_CALL
+  );
+  if (!ps) {
+    poly_ctx_destroy(ctx);
+    return -1;
+  }
+
+  stats->n_calls = ps->template->n_calls;
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    PolyScheduleBufSlot *slot = &ps->template->buf_slots[i];
+    if (!slot->is_intermediate) continue;
+    stats->n_intermediates++;
+    if (slot->is_memory_arena) stats->n_arenas++;
+    if (slot->has_memory_parent) stats->n_views++;
+    if (!slot->has_memory_parent) {
+      stats->n_owner_slots++;
+      stats->owner_slot_bytes += slot->nbytes;
+    }
+  }
+
+  for (int k = 0; k < K; k++) {
+    PolyBuffer in_view = poly_buffer_make_host_view(in_data[k], sizeof(in_data[k]));
+    PolyBuffer out_view = poly_buffer_make_host_view(out_data[k], sizeof(out_data[k]));
+    poly_buffer_attach(ctx, inputs[k], &in_view);
+    poly_buffer_attach(ctx, outs[k], &out_view);
+  }
+
+  int rc = poly_run_schedule(ctx, ps, NULL, 0);
+  stats->runtime_bytes = poly_schedule_runtime_intermediate_bytes(ps);
+  stats->out0 = out_data[0][0];
+  stats->out_last = out_data[K - 1][N - 1];
+
+  poly_schedule_free(ps);
+  poly_ctx_destroy(ctx);
+  return rc;
+}
+
+TEST(schedule_runtime, compute_intermediates_are_memory_planned_into_views) {
+  /* Mirrors tinygrad's memory_plan_rewrite shape for three scalar reductions:
+   * tinygrad rewrites the three reduction output buffers to SLICEs into one
+   * char arena. The 256-byte TLSF block size means this increases tiny scalar
+   * runtime bytes; this test is about representation parity, not peak savings. */
+  ScheduleEnvSave saved = schedule_save_env("POLY_NO_MEMORY_PLANNER");
+
+  unsetenv("POLY_NO_MEMORY_PLANNER");
+  MemoryPlanStats planned;
+  ASSERT_INT_EQ(run_reduce_expand_memory_plan_case(&planned), 0);
+
+  setenv("POLY_NO_MEMORY_PLANNER", "1", 1);
+  MemoryPlanStats disabled;
+  ASSERT_INT_EQ(run_reduce_expand_memory_plan_case(&disabled), 0);
+
+  schedule_restore_env(&saved);
+
+  ASSERT_INT_EQ(planned.n_calls, 6);
+  ASSERT_INT_EQ(disabled.n_calls, planned.n_calls);
+  ASSERT_INT_EQ(planned.n_arenas, 1);
+  ASSERT_INT_EQ(planned.n_views, 3);
+  ASSERT_INT_EQ(planned.n_owner_slots, 1);
+  ASSERT_INT_EQ(disabled.n_arenas, 0);
+  ASSERT_INT_EQ(disabled.n_views, 0);
+  ASSERT_INT_EQ(disabled.n_owner_slots, 3);
+  ASSERT_INT_EQ((int)disabled.runtime_bytes, 3 * (int)sizeof(float));
+  ASSERT_TRUE(planned.runtime_bytes > disabled.runtime_bytes);
+  ASSERT_FLOAT_EQ(planned.out0, 64.0f, 1e-5);
+  ASSERT_FLOAT_EQ(planned.out_last, 66.0f, 1e-5);
+  ASSERT_FLOAT_EQ(disabled.out0, 64.0f, 1e-5);
+  ASSERT_FLOAT_EQ(disabled.out_last, 66.0f, 1e-5);
+  PASS();
+}
+
 TEST(schedule_runtime, webgpu_intermediates_are_memory_planned_into_views) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
