@@ -505,6 +505,15 @@ void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int 
   pthread_mutex_unlock(&p->mu);
 }
 
+size_t poly_program_estimated_size(const PolyProgram *prog) {
+  if (!prog) return 0;
+  size_t nbytes = sizeof(*prog);
+  struct stat st;
+  if (prog->so_path[0] && stat(prog->so_path, &st) == 0 && st.st_size > 0)
+    nbytes += (size_t)st.st_size;
+  return nbytes;
+}
+
 void poly_program_destroy(PolyProgram *prog) {
   if (!prog) return;
   if (!prog->cached) dlclose(prog->handle);

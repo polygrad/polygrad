@@ -1784,6 +1784,7 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
       (int)poly_program_cache_artifact_bytes(ctx),
       (int)poly_runtime_cache_artifact_bytes(ctx)
   );
+  ASSERT_TRUE(stats.compiled_artifact_bytes > 4096);
   ASSERT_TRUE(stats.buffer_entries >= 3);
 
   poly_runtime_cache_clear(ctx);

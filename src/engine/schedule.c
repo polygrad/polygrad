@@ -4545,7 +4545,8 @@ static int cpu_lower_item_impl(
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = prog;
-  out->handle_size = 0;
+  size_t prog_size = poly_program_estimated_size(prog);
+  out->handle_size = prog_size > (size_t)INT_MAX ? INT_MAX : (int)prog_size;
   out->grid[0] = cpu_threads;
   out->grid[1] = 1;
   out->grid[2] = 1;

@@ -223,6 +223,10 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name);
 void poly_program_call(PolyProgram *prog, void **args, int n_args);
 void poly_program_call_threaded(PolyProgram *prog, void **args, int n_args, int threads);
 
+/* Approximate C runtime artifact bytes retained by a compiled program.
+ * Includes the PolyProgram wrapper and backing shared object when available. */
+size_t poly_program_estimated_size(const PolyProgram *prog);
+
 /* Free a compiled program (dlclose + cleanup). */
 void poly_program_destroy(PolyProgram *prog);
 
