@@ -242,6 +242,7 @@ int poly_program_source_render_count(void);
 void poly_program_source_render_count_reset(void);
 
 void poly_schedule_free(PolySchedule *schedule);
+size_t poly_schedule_runtime_intermediate_bytes(const PolySchedule *schedule);
 
 PolyUOp *poly_schedule_call(const PolySchedule *schedule, int call_index);
 PolyUOp *poly_schedule_call_body(const PolySchedule *schedule, int call_index);
@@ -301,6 +302,7 @@ int poly_run_compiled_schedule(
 );
 
 void poly_compiled_schedule_free(PolyCompiledSchedule *schedule);
+size_t poly_compiled_schedule_runtime_intermediate_bytes(const PolyCompiledSchedule *schedule);
 void poly_sched_cache_flush(void);
 
 extern const PolyAllocator POLY_CPU_ALLOCATOR;

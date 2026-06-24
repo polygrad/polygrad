@@ -2054,6 +2054,30 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   ASSERT_INT_EQ(n_views, 2);
   ASSERT_INT_EQ(n_zero, 0);
 
+  size_t expected_runtime_bytes = 0;
+  for (int i = 0; i < ps->template->n_buf_slots; i++) {
+    PolyScheduleBufSlot *slot = &ps->template->buf_slots[i];
+    if (slot->is_intermediate && !slot->has_memory_parent)
+      expected_runtime_bytes += (size_t)slot->nbytes;
+  }
+  ASSERT_TRUE(expected_runtime_bytes > 0);
+  ASSERT_INT_EQ(poly_schedule_runtime_intermediate_bytes(ps), 0);
+
+  float a_data[4] = {1, 2, 3, 4};
+  float b_data[4] = {10, 20, 30, 40};
+  float out_data[4] = {0};
+  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
+  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
+  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
+  poly_buffer_attach(ctx, a, &a_view);
+  poly_buffer_attach(ctx, b, &b_view);
+  poly_buffer_attach(ctx, out, &out_view);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, ps, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_schedule_runtime_intermediate_bytes(ps), expected_runtime_bytes);
+  ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
+  ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
+
   poly_schedule_free(ps);
   poly_ctx_destroy(ctx);
   PASS();

@@ -3124,6 +3124,18 @@ static void poly_schedule_runtime_destroy(PolySchedule *sched) {
   poly_schedule_runtime_cleanup(sched->template, sched->run);
 }
 
+static size_t poly_schedule_runtime_owned_bytes(const PolyScheduleRuntime *run) {
+  if (!run || !run->intermediates) return 0;
+  size_t total = 0;
+  for (int i = 0; i < run->n_intermediates; i++)
+    if (run->intermediates[i].owned) total += run->intermediates[i].nbytes;
+  return total;
+}
+
+size_t poly_schedule_runtime_intermediate_bytes(const PolySchedule *schedule) {
+  return schedule ? poly_schedule_runtime_owned_bytes(schedule->run) : 0;
+}
+
 static void poly_schedule_template_destroy(PolyScheduleTemplate *tpl) {
   if (!tpl) return;
   if (tpl->call_access) {
@@ -6556,4 +6568,8 @@ void poly_compiled_schedule_free(PolyCompiledSchedule *plan) {
   poly_schedule_template_release(plan->template);
 
   free(plan);
+}
+
+size_t poly_compiled_schedule_runtime_intermediate_bytes(const PolyCompiledSchedule *plan) {
+  return plan ? poly_schedule_runtime_owned_bytes(plan->run) : 0;
 }
