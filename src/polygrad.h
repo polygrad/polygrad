@@ -653,6 +653,7 @@ typedef struct {
   size_t registry_entries;
   size_t entrypoint_entries;
   size_t compiled_artifact_bytes;
+  size_t runtime_artifact_entries;
 } PolyCtxStats;
 
 int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out);

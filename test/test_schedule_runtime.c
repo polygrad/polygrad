@@ -1647,11 +1647,22 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_schedule_runner_valid) {
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
+  PolyCtxStats cached = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &cached), 0);
+  ASSERT_INT_EQ(cached.runtime_cache_entries, 1);
+  ASSERT_TRUE(cached.runtime_artifact_entries > 0);
+  ASSERT_TRUE(cached.compiled_artifact_bytes > 0);
   ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
 
   poly_runtime_cache_clear(ctx);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
+  PolyCtxStats evicted = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &evicted), 0);
+  ASSERT_INT_EQ(evicted.runtime_cache_entries, 0);
+  ASSERT_INT_EQ(evicted.runtime_artifact_entries, cached.runtime_artifact_entries);
+  ASSERT_TRUE(evicted.compiled_artifact_bytes > 0);
+  ASSERT_TRUE(evicted.compiled_artifact_bytes < cached.compiled_artifact_bytes);
 
   a_data[0] = 5.0f;
   a_data[1] = 6.0f;
@@ -1668,6 +1679,10 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_schedule_runner_valid) {
   ASSERT_FLOAT_EQ(out_data[3], 88.0f, 1e-5);
 
   poly_schedule_free(sched);
+  PolyCtxStats released = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &released), 0);
+  ASSERT_INT_EQ(released.runtime_artifact_entries, 0);
+  ASSERT_INT_EQ(released.compiled_artifact_bytes, 0);
   poly_ctx_destroy(ctx);
   schedule_restore_env(&pcache);
   PASS();

@@ -33,6 +33,8 @@ PolyCtx *poly_ctx_new(void) {
   ctx->schedule_cache = poly_map_new(16);
   ctx->to_program_cache = poly_map_new(16);
   ctx->runtime_cache = poly_map_new(16);
+  ctx->runtime_artifact_entries = 0;
+  ctx->runtime_artifact_live_bytes = 0;
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
   ctx->tensors_by_uop = poly_map_new(64);
@@ -147,6 +149,7 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->to_program_cache_entries = poly_map_len(ctx->to_program_cache);
   out->runtime_cache_entries = poly_map_len(ctx->runtime_cache);
   out->program_cache_entries = out->runtime_cache_entries;
+  out->runtime_artifact_entries = ctx->runtime_artifact_entries;
   out->shape_cache_entries = poly_map_len(ctx->shape_cache);
   out->buffer_entries = poly_map_len(ctx->buffers);
   BufferByteStats buf_stats = {0};

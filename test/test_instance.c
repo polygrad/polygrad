@@ -349,12 +349,24 @@ TEST(instance, forward_reuses_entry_runtime_after_ctx_runtime_cache_clear) {
   PolyIOBinding io1[] = {{"a", a1}, {"b", b1}};
   ASSERT_INT_EQ(poly_instance_forward(inst, io1, 2), 0);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
+  PolyCtxStats cached = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &cached), 0);
+  ASSERT_INT_EQ(cached.runtime_cache_entries, 1);
+  ASSERT_TRUE(cached.runtime_artifact_entries > 0);
+  ASSERT_TRUE(cached.compiled_artifact_bytes > 0);
 
   /* The instance entrypoint plan retains its compiled runner. Evicting the ctx
    * runtime-cache lookup must not invalidate that live plan or force the next
-   * call to repopulate the lookup table. */
+   * call to repopulate the lookup table. Artifact stats should still account
+   * for the live retained runner after lookup eviction. */
   poly_runtime_cache_clear(ctx);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
+  PolyCtxStats evicted = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &evicted), 0);
+  ASSERT_INT_EQ(evicted.runtime_cache_entries, 0);
+  ASSERT_INT_EQ(evicted.runtime_artifact_entries, cached.runtime_artifact_entries);
+  ASSERT_TRUE(evicted.compiled_artifact_bytes > 0);
+  ASSERT_TRUE(evicted.compiled_artifact_bytes < cached.compiled_artifact_bytes);
 
   float a2[] = {5.0f, 6.0f, 7.0f, 8.0f};
   float b2[] = {1.0f, 2.0f, 3.0f, 4.0f};

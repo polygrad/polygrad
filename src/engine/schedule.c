@@ -48,6 +48,8 @@ static void stable_kernel_fn_name(
 struct PolyRuntimeCacheEntry {
   int refcount;
   bool in_cache;
+  PolyCtx *ctx;
+  size_t accounted_bytes;
   PolyUOp *program;
   PolyDevice device;
   uint32_t env_stamp;
@@ -2926,6 +2928,7 @@ static void poly_runner_cleanup_local_mappings(PolyRunner *runner) {
 }
 
 static PolyRuntimeCacheEntry *poly_runtime_cache_entry_new(
+    PolyCtx *ctx,
     PolyUOp *program,
     PolyDevice device,
     uint32_t env_stamp,
@@ -2935,10 +2938,17 @@ static PolyRuntimeCacheEntry *poly_runtime_cache_entry_new(
   PolyRuntimeCacheEntry *entry = calloc(1, sizeof(*entry));
   if (!entry) return NULL;
   entry->refcount = 1;
+  entry->ctx = ctx;
+  entry->accounted_bytes = sizeof(*entry);
+  if (runner->handle_size > 0) entry->accounted_bytes += (size_t)runner->handle_size;
   entry->program = program;
   entry->device = device;
   entry->env_stamp = env_stamp;
   entry->runner = *runner;
+  if (ctx) {
+    ctx->runtime_artifact_entries++;
+    ctx->runtime_artifact_live_bytes += entry->accounted_bytes;
+  }
   return entry;
 }
 
@@ -2951,6 +2961,13 @@ static void poly_runtime_cache_entry_release(PolyRuntimeCacheEntry *entry) {
   if (!entry) return;
   entry->refcount--;
   if (entry->refcount <= 0) {
+    if (entry->ctx) {
+      if (entry->ctx->runtime_artifact_entries > 0) entry->ctx->runtime_artifact_entries--;
+      if (entry->ctx->runtime_artifact_live_bytes >= entry->accounted_bytes)
+        entry->ctx->runtime_artifact_live_bytes -= entry->accounted_bytes;
+      else
+        entry->ctx->runtime_artifact_live_bytes = 0;
+    }
     poly_runner_cleanup(&entry->runner, entry->device);
     free(entry);
   }
@@ -3010,17 +3027,14 @@ static void poly_runtime_cache_artifact_size_accum(const void *key, void *value,
   (void)key;
   size_t *total = (size_t *)userdata;
   PolyRuntimeCacheMapEntry *entry = (PolyRuntimeCacheMapEntry *)value;
-  if (!total || !entry || !entry->runtime_program) return;
+  if (!total || !entry) return;
   *total += sizeof(*entry);
-  *total += sizeof(*entry->runtime_program);
-  if (entry->runtime_program->runner.handle_size > 0)
-    *total += (size_t)entry->runtime_program->runner.handle_size;
 }
 
 size_t poly_runtime_cache_artifact_bytes(PolyCtx *ctx) {
-  if (!ctx || !ctx->runtime_cache) return 0;
-  size_t total = 0;
-  poly_map_foreach(ctx->runtime_cache, poly_runtime_cache_artifact_size_accum, &total);
+  if (!ctx) return 0;
+  size_t total = ctx->runtime_artifact_live_bytes;
+  if (ctx->runtime_cache) poly_map_foreach(ctx->runtime_cache, poly_runtime_cache_artifact_size_accum, &total);
   return total;
 }
 
@@ -4376,7 +4390,7 @@ static int poly_lower_compute_call_cached(
     if (poly_program_cache_enabled() && ctx && ctx->runtime_cache) {
       entry = calloc(1, sizeof(*entry));
       PolyRuntimeCacheEntry *runtime_entry =
-          entry ? poly_runtime_cache_entry_new(program, device, env_stamp, &lowered) : NULL;
+          entry ? poly_runtime_cache_entry_new(ctx, program, device, env_stamp, &lowered) : NULL;
       if (entry && runtime_entry) {
         entry->program = program;
         entry->device = device;

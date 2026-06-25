@@ -236,6 +236,8 @@ void poly_schedule_cache_clear(PolyCtx *ctx);
  * poly_program_cache_* names are compatibility aliases. */
 size_t poly_runtime_cache_len(PolyCtx *ctx);
 void poly_runtime_cache_clear(PolyCtx *ctx);
+/* Includes live refcounted runtime payloads retained by schedules/plans plus
+ * cache-map wrapper bytes for entries still available for future lookup. */
 size_t poly_runtime_cache_artifact_bytes(PolyCtx *ctx);
 size_t poly_program_cache_len(PolyCtx *ctx);
 void poly_program_cache_clear(PolyCtx *ctx);
