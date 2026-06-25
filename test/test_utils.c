@@ -62,6 +62,18 @@ TEST(utils, poly_free_releases_public_api_allocations) {
   PASS();
 }
 
+TEST(utils, poly_selftest_runs_portable_interp_path) {
+  ASSERT_INT_EQ(poly_selftest(), 0);
+  ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_AUTO), 0);
+  ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_INTERP), 0);
+  PASS();
+}
+
+TEST(utils, poly_selftest_rejects_non_execution_device) {
+  ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_HOST), -1);
+  PASS();
+}
+
 TEST(utils, dump_thresholds_follow_tinygrad) {
   EnvSave debug = save_env("DEBUG");
   EnvSave poly_debug = save_env("POLY_DEBUG");

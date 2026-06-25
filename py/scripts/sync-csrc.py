@@ -23,6 +23,7 @@ SOURCES = [
     'src/arena.c',
     'src/hashmap.c',
     'src/utils.c',
+    'src/selftest.c',
     'src/ctx.c',
     'src/device.c',
     # poly_realize_tensors calls the tensor physicalizer; sdists need this

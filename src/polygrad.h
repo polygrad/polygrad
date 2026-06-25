@@ -516,6 +516,13 @@ bool poly_devices_share_storage(PolyDevice a, PolyDevice b);
 PolyDevice poly_device_by_name(const char *name);
 const char *poly_device_name(PolyDevice device);
 
+/* Run a small embeddable sanity check for ALU folding plus schedule/runtime
+ * execution through ctx->buffers. `poly_selftest()` uses the interpreter so it
+ * does not require a host C compiler. `poly_selftest_device()` lets embedders
+ * explicitly validate a backend/runtime device. Returns 0 on success. */
+int poly_selftest(void);
+int poly_selftest_device(PolyDevice device);
+
 typedef struct PolyCtx PolyCtx;
 typedef struct PolyUOp PolyUOp;
 
