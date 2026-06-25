@@ -562,6 +562,39 @@ async function createWasmCore(device) {
       return rc === 0 ? out : null
     },
 
+    poly_jit_new: (ctx) => Module._poly_jit_new(ctx),
+    poly_jit_free: (jit) => Module._poly_jit_free(jit),
+    poly_jit_set_prune: (jit, prune) => Module._poly_jit_set_prune(jit, Boolean(prune)),
+    poly_jit_begin_capture: (jit, tensors) => {
+      const ptr = writePtrArray(tensors)
+      try {
+        return Module._poly_jit_begin_capture(jit, ptr, tensors.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_jit_end_capture: (jit) => Module._poly_jit_end_capture(jit),
+    poly_jit_cancel_capture: (jit) => Module._poly_jit_cancel_capture(jit),
+    poly_jit_is_captured: (jit) => Boolean(Module._poly_jit_is_captured(jit)),
+    poly_jit_schedule_count: (jit) => Module._poly_jit_schedule_count(jit),
+    poly_jit_run: async (jit, tensors) => {
+      const ptr = writePtrArray(tensors)
+      try {
+        if (deviceName === 'webgpu' && Module.ccall) {
+          return await Module.ccall(
+            'poly_jit_run',
+            'number',
+            ['number', 'number', 'number'],
+            [jit, ptr, tensors.length],
+            { async: true }
+          )
+        }
+        return Module._poly_jit_run(jit, ptr, tensors.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+
     poly_optim_build_step: (ctx, cfg, params, grads, mTensors, vTensors, bc1, bc2) => {
       const n = params.length
       const cfgPtr = writeOptimConfig(cfg || {})

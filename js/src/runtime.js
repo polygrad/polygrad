@@ -1,6 +1,7 @@
 'use strict'
 
 const { createBoundInstanceClass } = require('./instance')
+const { createBoundJit } = require('./jit')
 const { createBoundModels } = require('./models')
 const { createBoundModules } = require('./nn/modules')
 const { createBoundOptim } = require('./nn/optim')
@@ -26,6 +27,7 @@ class PolyRuntime {
     this._core = binding
     this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
+    this.jit = createBoundJit(this)
     this.Instance = createBoundInstanceClass(this)
     this.models = createBoundModels(this)
     this.Tokenizer = createBoundTokenizerClass(this)
@@ -64,6 +66,7 @@ class PolyRuntime {
   }
 
   async dispose() {
+    if (this.jit && this.jit.disposeAll) this.jit.disposeAll()
     if (this._core && this._core.destroy) this._core.destroy()
     this._core = null
   }

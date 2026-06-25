@@ -907,6 +907,129 @@ static bool napi_read_tensor_ptr_array(
   return true;
 }
 
+static bool napi_read_tensor_ptr_array_len(
+    napi_env env,
+    napi_value val,
+    PolyTensor ***out,
+    int *out_n
+) {
+  *out = NULL;
+  *out_n = 0;
+  bool is_arr = false;
+  if (napi_is_array(env, val, &is_arr) != napi_ok || !is_arr) {
+    napi_throw_error(env, NULL, "polygrad: expected tensor pointer array");
+    return false;
+  }
+
+  uint32_t n = 0;
+  napi_get_array_length(env, val, &n);
+  if (!napi_read_tensor_ptr_array(env, val, (int)n, false, out)) return false;
+  *out_n = (int)n;
+  return true;
+}
+
+static napi_value napi_poly_jit_new(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  return make_external(env, poly_jit_new(ctx));
+}
+
+static napi_value napi_poly_jit_free(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  poly_jit_free(jit);
+  napi_value out;
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_set_prune(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  bool prune = false;
+  napi_get_value_bool(env, argv[1], &prune);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_jit_set_prune(jit, prune), &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_begin_capture(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  PolyTensor **inputs = NULL;
+  int n_inputs = 0;
+  if (!napi_read_tensor_ptr_array_len(env, argv[1], &inputs, &n_inputs)) return NULL;
+  int rc = poly_jit_begin_capture(jit, inputs, n_inputs);
+  free(inputs);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_end_capture(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_jit_end_capture(jit), &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_cancel_capture(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  poly_jit_cancel_capture(jit);
+  napi_value out;
+  NAPI_CALL(env, napi_get_undefined(env, &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_is_captured(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_get_boolean(env, poly_jit_is_captured(jit), &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_schedule_count(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_jit_schedule_count(jit), &out));
+  return out;
+}
+
+static napi_value napi_poly_jit_run(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyJit *jit = get_external(env, argv[0]);
+  PolyTensor **inputs = NULL;
+  int n_inputs = 0;
+  if (!napi_read_tensor_ptr_array_len(env, argv[1], &inputs, &n_inputs)) return NULL;
+  int rc = poly_jit_run(jit, inputs, n_inputs);
+  free(inputs);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
 static napi_value napi_poly_optim_build_step(napi_env env, napi_callback_info info) {
   napi_value argv[8];
   size_t argc = 8;
@@ -2883,6 +3006,15 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_optim_build_step", napi_poly_optim_build_step),
       DECLARE_NAPI_METHOD("poly_buffer_read", napi_poly_buffer_read),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
+      DECLARE_NAPI_METHOD("poly_jit_new", napi_poly_jit_new),
+      DECLARE_NAPI_METHOD("poly_jit_free", napi_poly_jit_free),
+      DECLARE_NAPI_METHOD("poly_jit_set_prune", napi_poly_jit_set_prune),
+      DECLARE_NAPI_METHOD("poly_jit_begin_capture", napi_poly_jit_begin_capture),
+      DECLARE_NAPI_METHOD("poly_jit_end_capture", napi_poly_jit_end_capture),
+      DECLARE_NAPI_METHOD("poly_jit_cancel_capture", napi_poly_jit_cancel_capture),
+      DECLARE_NAPI_METHOD("poly_jit_is_captured", napi_poly_jit_is_captured),
+      DECLARE_NAPI_METHOD("poly_jit_schedule_count", napi_poly_jit_schedule_count),
+      DECLARE_NAPI_METHOD("poly_jit_run", napi_poly_jit_run),
 
       /* Autograd */
       DECLARE_NAPI_METHOD("poly_grad", napi_poly_grad),
