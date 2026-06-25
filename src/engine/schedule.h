@@ -116,7 +116,7 @@ struct PolyProgramInfo {
 };
 
 typedef struct PolyRuntimeCacheEntry PolyRuntimeCacheEntry;
-typedef struct PolyScheduleBlueprint PolyScheduleBlueprint;
+typedef struct PolyScheduleCacheEntry PolyScheduleCacheEntry;
 
 typedef struct {
   PolyUOp *call; /* LINEAR source: CALL(body, buffer args..., DEFINE_VAR args...) */
@@ -140,10 +140,10 @@ typedef struct {
   PolyScheduleBufSlot *buf_slots;
   int n_buf_slots;
 
-  /* Optional retained source blueprint. This is a ctx-cache object containing
+  /* Optional retained source schedule-cache entry. This is a ctx-cache object containing
    * parameterized LINEAR/static CALL metadata; this concrete template owns
    * resolved slots and fresh intermediates. */
-  PolyScheduleBlueprint *blueprint;
+  PolyScheduleCacheEntry *cache_entry;
 
   PolyUOp *linear; /* POLY_OP_LINEAR; srcs are ordered POLY_OP_CALL UOps */
   PolyCallAccess *call_access;

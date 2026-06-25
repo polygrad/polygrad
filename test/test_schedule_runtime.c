@@ -1968,7 +1968,7 @@ TEST(schedule_runtime, ctx_stats_runtime_var_replay_plateaus) {
   PASS();
 }
 
-TEST(schedule_runtime, schedule_cache_clear_keeps_live_schedule_blueprint_valid) {
+TEST(schedule_runtime, schedule_cache_clear_keeps_live_schedule_cache_entry_valid) {
   ScheduleEnvSave scache = schedule_save_env("POLY_SCACHE");
   setenv("POLY_SCACHE", "1", 1);
 
