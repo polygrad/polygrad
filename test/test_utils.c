@@ -62,6 +62,26 @@ TEST(utils, poly_free_releases_public_api_allocations) {
   PASS();
 }
 
+TEST(utils, getenv_flag_default_preserves_absent_default) {
+  EnvSave flag = save_env("POLY_TEST_FLAG_DEFAULT");
+
+  unsetenv("POLY_TEST_FLAG_DEFAULT");
+  ASSERT_TRUE(poly_getenv_flag_default("POLY_TEST_FLAG_DEFAULT", true));
+  ASSERT_FALSE(poly_getenv_flag_default("POLY_TEST_FLAG_DEFAULT", false));
+
+  setenv("POLY_TEST_FLAG_DEFAULT", "0", 1);
+  ASSERT_FALSE(poly_getenv_flag_default("POLY_TEST_FLAG_DEFAULT", true));
+
+  setenv("POLY_TEST_FLAG_DEFAULT", "1", 1);
+  ASSERT_TRUE(poly_getenv_flag_default("POLY_TEST_FLAG_DEFAULT", false));
+
+  setenv("POLY_TEST_FLAG_DEFAULT", "no", 1);
+  ASSERT_FALSE(poly_getenv_flag_default("POLY_TEST_FLAG_DEFAULT", true));
+
+  restore_env(&flag);
+  PASS();
+}
+
 TEST(utils, poly_selftest_runs_portable_interp_path) {
   ASSERT_INT_EQ(poly_selftest(), 0);
   ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_AUTO), 0);

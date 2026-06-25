@@ -19,6 +19,7 @@ uint32_t poly_ptr_hash(const void *p);
 /* Tinygrad-style env helpers */
 int poly_getenv_int(const char *key, int default_value);
 bool poly_getenv_flag(const char *key);
+bool poly_getenv_flag_default(const char *key, bool default_value);
 
 /* Shared debug level. Fallback order:
  *   1. POLY_DEBUG

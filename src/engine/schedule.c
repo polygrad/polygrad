@@ -954,8 +954,7 @@ static bool poly_memory_plan_enabled(void) {
 #ifdef __EMSCRIPTEN__
   return false;
 #else
-  const char *v = getenv("POLY_NO_MEMORY_PLANNER");
-  return !(v && v[0] && strcmp(v, "0") != 0);
+  return !poly_getenv_flag("POLY_NO_MEMORY_PLANNER");
 #endif
 }
 
@@ -2711,8 +2710,7 @@ static PolyScheduleBlueprint *poly_lower_sink_to_blueprint_with_kernel_graph(
 );
 
 static bool poly_schedule_cache_enabled(void) {
-  const char *v = getenv("POLY_SCACHE");
-  return !v || v[0] != '0';
+  return poly_getenv_flag_default("POLY_SCACHE", true);
 }
 
 PolySchedule *poly_complete_create_schedule_with_vars(
@@ -2959,8 +2957,7 @@ static void poly_runtime_cache_entry_release(PolyRuntimeCacheEntry *entry) {
 }
 
 static bool poly_program_cache_enabled(void) {
-  const char *v = getenv("POLY_PCACHE");
-  return !v || v[0] != '0';
+  return poly_getenv_flag_default("POLY_PCACHE", true);
 }
 
 static uint32_t poly_program_cache_hash(PolyUOp *program, PolyDevice device, uint32_t env_stamp) {
@@ -5897,16 +5894,12 @@ static int poly_schedule_execute_view_call(
 }
 
 static uint32_t poly_schedule_lower_env_stamp(void) {
-  const char *opt = getenv("POLY_OPTIMIZE");
-  const char *devec = getenv("POLY_DEVECTORIZE");
-  const char *tc_opt = getenv("POLY_TC_OPT");
-  const char *use_tc = getenv("POLY_USE_TC");
   uint32_t stamp = 2166136261u;
   uint8_t bytes[] = {
-      (uint8_t)(opt && opt[0] != '\0' && opt[0] != '0'),
-      (uint8_t)(devec && devec[0] != '\0' ? (atoi(devec) & 0xFF) : 0),
-      (uint8_t)(tc_opt && tc_opt[0] != '\0' ? (atoi(tc_opt) & 0xFF) : 0),
-      (uint8_t)(use_tc && use_tc[0] != '\0' ? (atoi(use_tc) & 0xFF) : 1),
+      (uint8_t)poly_getenv_flag("POLY_OPTIMIZE"),
+      (uint8_t)(poly_getenv_int("POLY_DEVECTORIZE", 0) & 0xFF),
+      (uint8_t)(poly_getenv_int("POLY_TC_OPT", 0) & 0xFF),
+      (uint8_t)(poly_getenv_int("POLY_USE_TC", 1) & 0xFF),
   };
   for (size_t i = 0; i < sizeof(bytes) / sizeof(bytes[0]); i++) {
     stamp ^= bytes[i];

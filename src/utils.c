@@ -61,6 +61,13 @@ bool poly_getenv_flag(const char *key) {
          strcmp(v, "no") != 0 && strcmp(v, "NO") != 0;
 }
 
+bool poly_getenv_flag_default(const char *key, bool default_value) {
+  if (!key || !key[0]) return default_value;
+  const char *v = getenv(key);
+  if (!v || !v[0]) return default_value;
+  return poly_getenv_flag(key);
+}
+
 int poly_debug_level(void) {
   const char *poly_debug = getenv("POLY_DEBUG");
   if (poly_debug && poly_debug[0]) return poly_getenv_int("POLY_DEBUG", 0);

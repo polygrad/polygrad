@@ -13,6 +13,7 @@
  */
 
 #include "codegen.h"
+#include "utils.h"
 #include "wasm_builder.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -313,12 +314,6 @@ static bool dt_is_i64(PolyDType dt) {
 }
 static bool dt_is_64(PolyDType dt) {
   return dt.bitsize == 64;
-}
-
-static bool wasm_env_true(const char *name) {
-  const char *v = getenv(name);
-  return v && v[0] != '\0' && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
-         strcmp(v, "False") != 0;
 }
 
 static PolyRendererCaps poly_wasm_renderer_caps(void) {
@@ -1863,14 +1858,9 @@ PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink) {
    * poly_linearize_wasm(). That pipeline lowers Invalid-carrying pad/triu
    * indexes into gated loads; leaving it off turns invalid indexes into
    * address 0 in the renderer. */
-  bool opt = true;
-  const char *ov = getenv("POLY_OPTIMIZE");
-  if (ov && ov[0] != '\0') opt = wasm_env_true("POLY_OPTIMIZE");
-  const char *dev = getenv("POLY_DEVECTORIZE");
-  int devec = dev && dev[0] != '\0' ? atoi(dev) : (opt ? 1 : 0);
-  int beam = 0;
-  const char *bv = getenv("POLY_BEAM");
-  if (bv && bv[0] != '\0') beam = atoi(bv);
+  bool opt = poly_getenv_flag_default("POLY_OPTIMIZE", true);
+  int devec = poly_getenv_int("POLY_DEVECTORIZE", opt ? 1 : 0);
+  int beam = poly_getenv_int("POLY_BEAM", 0);
   PolyRewriteOpts opts = {
       .optimize = opt,
       .devectorize = devec,

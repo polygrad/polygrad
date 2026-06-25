@@ -1000,24 +1000,9 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   return result;
 }
 
-static bool env_true(const char *name) {
-  const char *v = getenv(name);
-  return v && v[0] != '\0' && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
-         strcmp(v, "False") != 0;
-}
-
-static bool env_not_false(const char *name) {
-  const char *v = getenv(name);
-  return !v || (v[0] != '\0' && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 &&
-                strcmp(v, "False") != 0);
-}
-
 static int cpu_thread_count(void) {
-  const char *v = getenv("CPU_COUNT");
-  if (v && v[0]) {
-    int n = atoi(v);
-    if (n > 0) return n;
-  }
+  int n_env = poly_getenv_int("CPU_COUNT", 0);
+  if (n_env > 0) return n_env;
 #ifdef _SC_NPROCESSORS_ONLN
   long n = sysconf(_SC_NPROCESSORS_ONLN);
   if (n > 0 && n < INT32_MAX) return (int)n;
@@ -1026,7 +1011,7 @@ static int cpu_thread_count(void) {
 }
 
 PolyRendererCaps poly_c_renderer_caps(void) {
-  bool has_threads = env_not_false("THREADS");
+  bool has_threads = poly_getenv_flag_default("THREADS", true);
   return (PolyRendererCaps){
       .has_mulacc = false,
       .has_threefry = false,
@@ -1071,14 +1056,11 @@ PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, i
 }
 
 PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  bool opt = env_true("POLY_OPTIMIZE");
-  const char *dev = getenv("POLY_DEVECTORIZE");
+  bool opt = poly_getenv_flag("POLY_OPTIMIZE");
   /* Default: OPTIMIZE=1 implies DEVECTORIZE=1 (vec load/store, scalar ALU — safe).
    * DEVECTORIZE=0 (full vec ALU) is opt-in only. */
-  int devec = dev && dev[0] != '\0' ? atoi(dev) : (opt ? 1 : 0);
-  int beam = 0;
-  const char *bv = getenv("POLY_BEAM");
-  if (bv && bv[0] != '\0') beam = atoi(bv);
+  int devec = poly_getenv_int("POLY_DEVECTORIZE", opt ? 1 : 0);
+  int beam = poly_getenv_int("POLY_BEAM", 0);
   PolyRewriteOpts opts = {
       .optimize = opt,
       .devectorize = devec,

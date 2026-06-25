@@ -1398,16 +1398,8 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     for (int i = 0; i < s.n_rngs; i++) {
       if (s.types[i] == POLY_AXIS_GROUP_REDUCE || s.types[i] == POLY_AXIS_REDUCE) n_reduce++;
     }
-    int tc_opt_env = 0;
-    {
-      const char *e = getenv("POLY_TC_OPT");
-      if (e) tc_opt_env = atoi(e);
-    }
-    int use_tc_env = 1;
-    {
-      const char *e = getenv("POLY_USE_TC");
-      if (e) use_tc_env = atoi(e);
-    }
+    int tc_opt_env = poly_getenv_int("POLY_TC_OPT", 0);
+    int use_tc_env = poly_getenv_int("POLY_USE_TC", 1);
 
     if (use_tc_env > 0 && (n_reduce == 1 || tc_opt_env >= 1)) {
       OptScheduler tk;
@@ -8501,16 +8493,8 @@ PolyUOp *poly_apply_tc_opt(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps) {
   for (int i = 0; i < s.n_rngs; i++)
     if (s.types[i] == POLY_AXIS_GROUP_REDUCE || s.types[i] == POLY_AXIS_REDUCE) n_reduce++;
 
-  int tc_opt_env = 0;
-  {
-    const char *e = getenv("POLY_TC_OPT");
-    if (e) tc_opt_env = atoi(e);
-  }
-  int use_tc_env = 1;
-  {
-    const char *e = getenv("POLY_USE_TC");
-    if (e) use_tc_env = atoi(e);
-  }
+  int tc_opt_env = poly_getenv_int("POLY_TC_OPT", 0);
+  int use_tc_env = poly_getenv_int("POLY_USE_TC", 1);
 
   if (use_tc_env > 0 && (n_reduce == 1 || tc_opt_env >= 1)) {
     OptScheduler tk;

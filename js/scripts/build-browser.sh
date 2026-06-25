@@ -42,8 +42,10 @@ COMMON_FLAGS=(
   --minify
   --alias:fs=./scripts/empty.js
   --alias:path=./scripts/empty.js
+  --alias:crypto=./scripts/empty.js
   --alias:node:fs=./scripts/empty.js
   --alias:node:path=./scripts/empty.js
+  --alias:node:crypto=./scripts/empty.js
   --define:__dirname='""'
   --define:__filename='""'
 )
