@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from polygrad import Device, Tensor
+from polygrad import Device, Jit, JitError, Tensor, Variable, jit
 
 
 class TestCreation:
@@ -31,6 +31,22 @@ class TestCreation:
     def test_empty_rejects_name_like_tinygrad(self):
         with pytest.raises(TypeError, match='Tensor.empty does not accept name'):
             Tensor.empty((2, 3), name='z')
+
+    def test_empty_symbolic_shape_survives_realize_and_add(self):
+        n = Variable('N', 1, 8)
+        x = Tensor.empty(n.bind(4))
+        assert not isinstance(x.shape[0], int)
+
+        x.realize()
+        assert not isinstance(x.shape[0], int)
+
+        y = x + 1
+        assert not isinstance(y.shape[0], int)
+        y.realize()
+        assert not isinstance(y.shape[0], int)
+
+        with pytest.raises(AssertionError, match='no data if shape is symbolic'):
+            y.numpy()
 
     def test_zeros(self):
         t = Tensor.zeros(3, 4)
@@ -88,6 +104,189 @@ class TestCreation:
     def test_item(self):
         t = Tensor([42.0])
         assert t.item() == pytest.approx(42.0)
+
+
+class TestJit:
+    def test_jit_replays_raw_tensor_realize(self):
+        @Jit
+        def f(x):
+            return (x + 1).realize()
+
+        x0 = Tensor([1.0, 2.0, 3.0]).realize()
+        y0 = f(x0)
+        np.testing.assert_allclose(y0.numpy(), [2.0, 3.0, 4.0])
+        assert not f.captured
+
+        x1 = Tensor([10.0, 20.0, 30.0]).realize()
+        y1 = f(x1)
+        np.testing.assert_allclose(y1.numpy(), [11.0, 21.0, 31.0])
+        assert f.captured
+        assert f.schedule_count == 1
+
+        x2 = Tensor([100.0, 200.0, 300.0]).realize()
+        y2 = f(x2)
+        assert y2 is y1
+        np.testing.assert_allclose(y2.numpy(), [101.0, 201.0, 301.0])
+        np.testing.assert_allclose(x1.numpy(), [10.0, 20.0, 30.0])
+        np.testing.assert_allclose(x2.numpy(), [100.0, 200.0, 300.0])
+
+    def test_jit_replays_assign_with_current_input(self):
+        @Jit
+        def f(x):
+            return x.assign(x + 1).realize()
+
+        x0 = Tensor([1.0, 2.0, 3.0]).realize()
+        y0 = f(x0)
+        np.testing.assert_allclose(y0.numpy(), [2.0, 3.0, 4.0])
+        np.testing.assert_allclose(x0.numpy(), [2.0, 3.0, 4.0])
+        assert not f.captured
+
+        x1 = Tensor([10.0, 20.0, 30.0]).realize()
+        y1 = f(x1)
+        np.testing.assert_allclose(y1.numpy(), [11.0, 21.0, 31.0])
+        np.testing.assert_allclose(x1.numpy(), [11.0, 21.0, 31.0])
+        assert f.captured
+
+        x2 = Tensor([100.0, 200.0, 300.0]).realize()
+        y2 = f(x2)
+        assert y2 is y1
+        np.testing.assert_allclose(y2.numpy(), [11.0, 21.0, 31.0])
+        np.testing.assert_allclose(x1.numpy(), [11.0, 21.0, 31.0])
+        np.testing.assert_allclose(x2.numpy(), [101.0, 201.0, 301.0])
+
+    def test_jit_replays_write_only_assign_with_current_input(self):
+        @Jit
+        def f(x):
+            return x.assign(Tensor([7.0, 8.0, 9.0]).realize()).realize()
+
+        x0 = Tensor([1.0, 2.0, 3.0]).realize()
+        y0 = f(x0)
+        np.testing.assert_allclose(y0.numpy(), [7.0, 8.0, 9.0])
+        np.testing.assert_allclose(x0.numpy(), [7.0, 8.0, 9.0])
+        assert not f.captured
+
+        x1 = Tensor([10.0, 20.0, 30.0]).realize()
+        y1 = f(x1)
+        np.testing.assert_allclose(y1.numpy(), [7.0, 8.0, 9.0])
+        np.testing.assert_allclose(x1.numpy(), [7.0, 8.0, 9.0])
+        assert f.captured
+
+        x2 = Tensor([100.0, 200.0, 300.0]).realize()
+        y2 = f(x2)
+        assert y2 is y1
+        np.testing.assert_allclose(y2.numpy(), [7.0, 8.0, 9.0])
+        np.testing.assert_allclose(x1.numpy(), [7.0, 8.0, 9.0])
+        np.testing.assert_allclose(x2.numpy(), [7.0, 8.0, 9.0])
+
+    def test_jit_replays_multiple_realizes(self):
+        @Jit
+        def f(x):
+            y = (x + 1).realize()
+            z = (x * 2).realize()
+            return y, z
+
+        x0 = Tensor([1.0, 2.0, 3.0]).realize()
+        y0, z0 = f(x0)
+        np.testing.assert_allclose(y0.numpy(), [2.0, 3.0, 4.0])
+        np.testing.assert_allclose(z0.numpy(), [2.0, 4.0, 6.0])
+        assert not f.captured
+
+        x1 = Tensor([10.0, 20.0, 30.0]).realize()
+        ret1 = f(x1)
+        y1, z1 = ret1
+        np.testing.assert_allclose(y1.numpy(), [11.0, 21.0, 31.0])
+        np.testing.assert_allclose(z1.numpy(), [20.0, 40.0, 60.0])
+        assert f.captured
+        assert f.schedule_count == 2
+
+        x2 = Tensor([100.0, 200.0, 300.0]).realize()
+        ret2 = f(x2)
+        assert ret2 is ret1
+        np.testing.assert_allclose(y1.numpy(), [101.0, 201.0, 301.0])
+        np.testing.assert_allclose(z1.numpy(), [200.0, 400.0, 600.0])
+        np.testing.assert_allclose(x2.numpy(), [100.0, 200.0, 300.0])
+
+    def test_jit_rejects_duplicate_input_buffers(self):
+        @Jit
+        def f(x, y):
+            return (x + y).realize()
+
+        x = Tensor([1.0, 2.0, 3.0]).realize()
+        with pytest.raises(JitError, match='duplicate inputs'):
+            f(x, x)
+
+    def test_jit_rejects_shape_mismatch_after_capture(self):
+        @Jit
+        def f(x):
+            return (x + 1).realize()
+
+        f(Tensor([1.0, 2.0, 3.0]).realize())
+        f(Tensor([10.0, 20.0, 30.0]).realize())
+        assert f.captured
+
+        with pytest.raises(JitError, match='args mismatch'):
+            f(Tensor([100.0, 200.0, 300.0, 400.0]).realize())
+
+    def test_jit_rejects_dtype_mismatch_after_capture(self):
+        @Jit
+        def f(x):
+            return (x + 1).realize()
+
+        f(Tensor([1.0, 2.0, 3.0], dtype='float32').realize())
+        f(Tensor([10.0, 20.0, 30.0], dtype='float32').realize())
+        assert f.captured
+
+        with pytest.raises(JitError, match='args mismatch'):
+            f(Tensor([100, 200, 300], dtype='int32').realize())
+
+    def test_jit_prune_skips_onetime_side_realize_on_replay(self):
+        side = Tensor([-1.0, -1.0, -1.0]).realize()
+        seed = Tensor([7.0, 8.0, 9.0]).realize()
+
+        def raw(x):
+            side.assign(seed).realize()
+            return (x + 1).realize()
+
+        f = Jit(raw, prune=True)
+        np.testing.assert_allclose(f(Tensor([1.0, 2.0, 3.0]).realize()).numpy(), [2.0, 3.0, 4.0])
+        np.testing.assert_allclose(side.numpy(), [7.0, 8.0, 9.0])
+        np.testing.assert_allclose(f(Tensor([10.0, 20.0, 30.0]).realize()).numpy(), [11.0, 21.0, 31.0])
+        assert f.captured
+        assert f.schedule_count == 2
+
+        side.assign(Tensor([-9.0, -9.0, -9.0])).realize()
+        y = f(Tensor([100.0, 200.0, 300.0]).realize())
+        np.testing.assert_allclose(y.numpy(), [101.0, 201.0, 301.0])
+        np.testing.assert_allclose(side.numpy(), [-9.0, -9.0, -9.0])
+
+    def test_jit_prune_decorator_form(self):
+        @jit(prune=True)
+        def f(x):
+            return (x * 2).realize()
+
+        np.testing.assert_allclose(f(Tensor([1.0, 2.0]).realize()).numpy(), [2.0, 4.0])
+        np.testing.assert_allclose(f(Tensor([3.0, 4.0]).realize()).numpy(), [6.0, 8.0])
+        assert f.captured
+
+    def test_jit_symbolic_empty_shape_replays_with_runtime_var(self):
+        n = Variable('N', 1, 8)
+
+        @Jit
+        def f(x):
+            return (x + 1).realize()
+
+        y0 = f(Tensor.empty(n.bind(4)))
+        assert not f.captured
+        assert not isinstance(y0.shape[0], int)
+
+        y1 = f(Tensor.empty(n.bind(4)))
+        assert f.captured
+        assert f.schedule_count == 1
+        assert not isinstance(y1.shape[0], int)
+
+        y2 = f(Tensor.empty(n.bind(6)))
+        assert y2 is y1
+        assert not isinstance(y2.shape[0], int)
 
 
 class TestElementwise:

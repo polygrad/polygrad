@@ -13,6 +13,7 @@
         "csrc/src/ctx.c",
         "csrc/src/device.c",
         "csrc/src/dtype.c",
+        "csrc/src/engine/jit.c",
         "csrc/src/engine/realize.c",
         "csrc/src/utils.c",
         "csrc/src/engine/schedule.c",

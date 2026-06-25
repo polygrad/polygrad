@@ -525,6 +525,7 @@ int poly_selftest_device(PolyDevice device);
 
 typedef struct PolyCtx PolyCtx;
 typedef struct PolyUOp PolyUOp;
+typedef struct PolyJit PolyJit;
 
 /* Core frontend tensor handle.
  *
@@ -594,6 +595,36 @@ PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
 void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);
 PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor);
 int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs);
+
+typedef struct PolyVarBinding {
+  PolyUOp *var; /* DEFINE_VAR UOp */
+  int32_t value; /* concrete runtime value */
+} PolyVarBinding;
+
+/* Tinygrad-style raw Tensor JIT capture/replay.
+ *
+ * This is deliberately a tensor/schedule-layer object, not an Instance
+ * entrypoint plan. Capture records the LINEAR schedules produced by normal
+ * poly_realize_tensors calls. Replay rebuilds concrete schedules from those
+ * captured parameterized LINEAR templates with current input BUFFER identities,
+ * matching tinygrad's CapturedJit input_uops substitution boundary.
+ */
+PolyJit *poly_jit_new(PolyCtx *ctx);
+void poly_jit_free(PolyJit *jit);
+int poly_jit_set_prune(PolyJit *jit, bool prune);
+int poly_jit_begin_capture(PolyJit *jit, PolyTensor **inputs, int n_inputs);
+int poly_jit_end_capture(PolyJit *jit);
+void poly_jit_cancel_capture(PolyJit *jit);
+bool poly_jit_is_captured(PolyJit *jit);
+int poly_jit_schedule_count(PolyJit *jit);
+int poly_jit_run(PolyJit *jit, PolyTensor **inputs, int n_inputs);
+int poly_jit_run_with_vars(
+    PolyJit *jit,
+    PolyTensor **inputs,
+    int n_inputs,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
 
 PolyDevice poly_device_from_device_uop(PolyUOp *device);
 PolyDevice poly_uop_device(PolyUOp *u);
@@ -862,15 +893,19 @@ typedef struct {
 #define POLY_SHAPE_NONE ((PolyShape){NULL, -1})
 #define POLY_MAX_DIMS 16
 
-PolyShape poly_uop_shape(PolyCtx *ctx, PolyUOp *u);
+PolyShape poly_uop_max_shape(PolyCtx *ctx, PolyUOp *u);
 int64_t poly_shape_numel(PolyShape s);
 bool poly_shape_eq(PolyShape a, PolyShape b);
 
 /* Lazy cached shape accessors -- computes on first access, O(1) thereafter.
  * Returns arena-owned dims, do NOT free. */
 int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u);
-const int64_t *poly_uop_dims(PolyCtx *ctx, const PolyUOp *u);
-PolyShape poly_uop_shape_cached(PolyCtx *ctx, const PolyUOp *u);
+const int64_t *poly_uop_max_shape_dims(PolyCtx *ctx, const PolyUOp *u);
+PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim);
+int poly_uop_const_i64(const PolyUOp *u, int64_t *out);
+PolyUOp *poly_uop_unbind_var(PolyUOp *u);
+int poly_uop_bind_value(PolyUOp *u, int64_t *out);
+PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u);
 PolyArena *poly_ctx_arena(PolyCtx *ctx);
 
 /* Named buffer registry.

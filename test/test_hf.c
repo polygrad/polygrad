@@ -411,7 +411,7 @@ TEST(hf, poly_gather_basic) {
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
-  PolyShape s = poly_uop_shape(ctx, result);
+  PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 2); /* num indices */
   ASSERT_INT_EQ(s.dims[1], 3); /* embedding dim */
@@ -434,7 +434,7 @@ TEST(hf, poly_gather_2d_indices) {
 
   PolyUOp *result = poly_gather(ctx, table, indices);
   ASSERT_NOT_NULL(result);
-  PolyShape s = poly_uop_shape(ctx, result);
+  PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 3);
   ASSERT_INT_EQ(s.dims[0], 2); /* batch */
   ASSERT_INT_EQ(s.dims[1], 3); /* seq_len */
@@ -452,7 +452,7 @@ TEST(hf, poly_layernorm_shape) {
 
   PolyUOp *result = poly_layernorm_apply(ctx, x, NULL, NULL, -1, 1e-5);
   ASSERT_NOT_NULL(result);
-  PolyShape s = poly_uop_shape(ctx, result);
+  PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 3);
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 3);
@@ -474,7 +474,7 @@ TEST(hf, poly_linear_shape) {
   PolyUOp *result = poly_linear_apply(ctx, x, w, b);
   ASSERT_NOT_NULL(result);
 
-  PolyShape s = poly_uop_shape(ctx, result);
+  PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 3);
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 3);
@@ -494,7 +494,7 @@ TEST(hf, poly_linear_no_bias) {
   PolyUOp *result = poly_linear_apply(ctx, x, w, NULL);
   ASSERT_NOT_NULL(result);
 
-  PolyShape s = poly_uop_shape(ctx, result);
+  PolyShape s = poly_uop_max_shape(ctx, result);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 4);
   ASSERT_INT_EQ(s.dims[1], 16);
@@ -509,7 +509,7 @@ TEST(hf, poly_causal_mask_shape) {
 
   PolyUOp *mask = poly_causal_mask(ctx, 5);
   ASSERT_NOT_NULL(mask);
-  PolyShape s = poly_uop_shape(ctx, mask);
+  PolyShape s = poly_uop_max_shape(ctx, mask);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 5);
   ASSERT_INT_EQ(s.dims[1], 5);

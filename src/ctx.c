@@ -42,6 +42,7 @@ PolyCtx *poly_ctx_new(void) {
   ctx->n_tensors = 0;
   ctx->tensors_cap = 0;
   ctx->next_tensor_order = 1;
+  ctx->active_jit_capture = NULL;
   ctx->name_map = poly_map_new(16);
   if (!ctx->arena || !ctx->scratch || !ctx->cse || !ctx->schedule_cache || !ctx->to_program_cache ||
       !ctx->runtime_cache || !ctx->shape_cache || !ctx->buffers || !ctx->tensors_by_uop ||

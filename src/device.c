@@ -511,6 +511,13 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
   if (device == POLY_DEVICE_HOST) device = poly_device_default();
 
   PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  if (!cur) {
+    size_t nbytes = poly_buffer_nbytes_for_uop(buf);
+    PolyBuffer *dst = NULL;
+    if (poly_buffer_alloc_residency(ctx, buf, device, nbytes, true, NULL, &dst) != 0) return -1;
+    poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
+    return 0;
+  }
   if (cur && poly_devices_share_storage(cur->device, device)) {
     cur->device = device;
     if (cur->valid) return 0;

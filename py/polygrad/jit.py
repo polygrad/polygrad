@@ -1,0 +1,286 @@
+"""JIT capture/replay for raw Tensor functions."""
+
+import functools
+import ctypes
+
+from . import _ffi
+from .tensor import BoundVariable, Tensor, Variable
+from polygrad.uop.ops import UOp
+
+
+class JitError(RuntimeError):
+    pass
+
+
+def _ret_tensors(ret):
+    if ret is None:
+        return []
+    if isinstance(ret, Tensor):
+        return [ret]
+    if isinstance(ret, (tuple, list)):
+        out = []
+        for item in ret:
+            out.extend(_ret_tensors(item))
+        return out
+    if isinstance(ret, dict):
+        out = []
+        for item in ret.values():
+            out.extend(_ret_tensors(item))
+        return out
+    raise JitError(f'JIT return contains non-Tensor value of type {type(ret).__name__}')
+
+
+def _input_tensors(args, kwargs):
+    inputs = []
+    names = []
+
+    def add(name, value, dedup):
+        if isinstance(value, Tensor) and (not dedup or not any(value is x for x in inputs)):
+            names.append(name)
+            inputs.append(value)
+
+    for i, arg in enumerate(args):
+        add(i, arg, False)
+    for name in sorted(kwargs):
+        add(name, kwargs[name], False)
+
+    for value in list(args) + [kwargs[k] for k in sorted(kwargs)]:
+        if isinstance(value, dict):
+            iterable = value.values()
+        elif isinstance(value, (tuple, list)):
+            iterable = value
+        else:
+            iterable = ()
+        for item in iterable:
+            add(f'container:{len(inputs)}', item, True)
+
+    return names, inputs
+
+
+def _bound_var_items(args, kwargs):
+    values = list(args) + [kwargs[k] for k in sorted(kwargs)]
+    for value in list(values):
+        if isinstance(value, dict):
+            values.extend(value.values())
+        elif isinstance(value, (tuple, list)):
+            values.extend(value)
+
+    out = []
+    seen = {}
+    for value in values:
+        if isinstance(value, Variable):
+            raise JitError('JIT variables must be bound')
+        if not isinstance(value, BoundVariable):
+            continue
+        raw = int(value.variable.uop.raw)
+        val = int(value.value)
+        if raw in seen:
+            if seen[raw] != val:
+                raise JitError('conflicting JIT variable bindings')
+            continue
+        seen[raw] = val
+        out.append((value.variable.uop.raw, val))
+    return out
+
+
+def _raw_int(raw):
+    return 0 if raw is None else int(raw)
+
+
+def _merge_var_bindings(*binding_lists):
+    out = []
+    seen = {}
+    for bindings in binding_lists:
+        for raw, value in bindings:
+            key = _raw_int(raw)
+            val = int(value)
+            if key in seen:
+                if seen[key] != val:
+                    raise JitError('conflicting JIT variable bindings')
+                continue
+            seen[key] = val
+            out.append((raw, val))
+    return out
+
+
+def _var_binding_array(bindings):
+    n = len(bindings)
+    arr = (_ffi.PolyVarBinding * max(1, n))()
+    for i, (raw, value) in enumerate(bindings):
+        arr[i].var = raw
+        arr[i].value = value
+    return arr, n
+
+
+def _check_duplicate_input_buffers(inputs):
+    seen = set()
+    lib = _ffi._lib
+    for t in inputs:
+        raw = lib.poly_tensor_uop(t._tensor)
+        buf = lib.poly_uop_get_buffer_identity(raw) if raw else None
+        key = int(buf) if buf else 0
+        if key == 0:
+            raise JitError('JIT inputs must be real buffers')
+        if key in seen:
+            raise JitError('duplicate inputs to JIT')
+        seen.add(key)
+
+
+def _shape_key_and_bindings(shape):
+    key = []
+    bindings = []
+    lib = _ffi._lib
+    for dim in shape:
+        if isinstance(dim, int):
+            key.append(('i', int(dim)))
+            continue
+        if not isinstance(dim, UOp) or not dim.raw:
+            raise JitError(f'unsupported symbolic shape dimension {dim!r}')
+        var = lib.poly_uop_unbind_var(dim.raw)
+        if var:
+            key.append(('v', _raw_int(var)))
+            value = ctypes.c_int64()
+            if lib.poly_uop_bind_value(dim.raw, ctypes.byref(value)) == 0:
+                bindings.append((var, int(value.value)))
+        else:
+            key.append(('u', _raw_int(dim.raw)))
+    return tuple(key), bindings
+
+
+def _input_shape(t):
+    raw = _ffi._lib.poly_tensor_uop_logical(t._tensor)
+    if not raw:
+        raw = _ffi._lib.poly_tensor_uop(t._tensor)
+    from .tensor import _shape_from_uop
+    return _shape_from_uop(t._ctx, raw)
+
+
+def _input_info(names, inputs, explicit_var_bindings):
+    tensor_info = []
+    shape_bindings = []
+    for t in inputs:
+        shape_key, binds = _shape_key_and_bindings(_input_shape(t))
+        shape_bindings.extend(binds)
+        tensor_info.append((shape_key, t.dtype, t.device))
+    var_bindings = _merge_var_bindings(explicit_var_bindings, shape_bindings)
+    signature = (
+        tuple(names),
+        tuple(tensor_info),
+        tuple(_raw_int(raw) for raw, _ in var_bindings),
+    )
+    return signature, var_bindings
+
+
+def _tensor_array(inputs):
+    n = len(inputs)
+    arr = (_ffi._ptr * max(1, n))()
+    for i, t in enumerate(inputs):
+        arr[i] = t._tensor
+    return arr, n
+
+
+class Jit:
+    """Tinygrad-style capture/replay wrapper for Tensor functions.
+
+    The wrapped function must trigger realization during capture, e.g.
+    `return (x + 1).realize()`. First call runs normally, second call captures,
+    later calls replay the captured schedules with current input BUFFERs.
+    """
+
+    def __init__(self, fxn, *, prune=False):
+        if fxn is None:
+            raise TypeError('Jit requires a function')
+        functools.update_wrapper(self, fxn)
+        self.fxn = fxn
+        self.prune = bool(prune)
+        self.cnt = 0
+        self.captured = False
+        self.ret = None
+        self.signature = None
+        self._jit = None
+
+    def reset(self):
+        if self._jit:
+            _ffi._lib.poly_jit_free(self._jit)
+        self._jit = None
+        self.cnt = 0
+        self.captured = False
+        self.ret = None
+        self.signature = None
+
+    @property
+    def schedule_count(self):
+        if not self._jit:
+            return 0
+        return int(_ffi._lib.poly_jit_schedule_count(self._jit))
+
+    def __del__(self):
+        try:
+            if self._jit:
+                _ffi._lib.poly_jit_free(self._jit)
+        except Exception:
+            pass
+
+    def __get__(self, obj, objtype):
+        return functools.partial(self.__call__, obj)
+
+    def __call__(self, *args, **kwargs):
+        names, inputs = _input_tensors(args, kwargs)
+        explicit_var_bindings = _bound_var_items(args, kwargs)
+        for t in inputs:
+            t.realize()
+        _check_duplicate_input_buffers(inputs)
+        sig, var_bindings = _input_info(names, inputs, explicit_var_bindings)
+
+        if self.cnt == 0:
+            ret = self.fxn(*args, **kwargs)
+        elif self.cnt == 1:
+            if inputs:
+                ctx = inputs[0]._ctx
+                if any(t._ctx != ctx for t in inputs):
+                    raise JitError('JIT inputs must share one PolyCtx')
+            else:
+                raise JitError('JIT requires at least one Tensor input')
+
+            self._jit = _ffi._lib.poly_jit_new(ctx)
+            if not self._jit:
+                raise JitError('poly_jit_new failed')
+            if _ffi._lib.poly_jit_set_prune(self._jit, self.prune) != 0:
+                _ffi._lib.poly_jit_free(self._jit)
+                self._jit = None
+                raise JitError('poly_jit_set_prune failed')
+            arr, n = _tensor_array(inputs)
+            if _ffi._lib.poly_jit_begin_capture(self._jit, arr, n) != 0:
+                _ffi._lib.poly_jit_free(self._jit)
+                self._jit = None
+                raise JitError('poly_jit_begin_capture failed')
+            try:
+                ret = self.fxn(*args, **kwargs)
+                if _ffi._lib.poly_jit_end_capture(self._jit) != 0:
+                    raise JitError("didn't JIT anything")
+            except Exception:
+                _ffi._lib.poly_jit_cancel_capture(self._jit)
+                raise
+            _ret_tensors(ret)
+            self.ret = ret
+            self.signature = sig
+            self.captured = True
+        else:
+            if not self.captured or not self._jit:
+                raise JitError('JIT has not captured')
+            if sig != self.signature:
+                raise JitError(f'args mismatch in JIT: expected {self.signature}, got {sig}')
+            arr, n = _tensor_array(inputs)
+            var_arr, n_vars = _var_binding_array(var_bindings)
+            if _ffi._lib.poly_jit_run_with_vars(self._jit, arr, n, var_arr, n_vars) != 0:
+                raise JitError('poly_jit_run failed')
+            ret = self.ret
+
+        self.cnt += 1
+        return ret
+
+
+def jit(fxn=None, *, prune=False):
+    if fxn is None:
+        return lambda f: Jit(f, prune=prune)
+    return Jit(fxn, prune=prune)

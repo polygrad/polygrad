@@ -1603,6 +1603,25 @@ int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index,
   return io->arg_to_slot[arg_index];
 }
 
+int poly_schedule_external_slot_count(const PolySchedule *schedule) {
+  if (!schedule || !schedule->template) return 0;
+  int n = 0;
+  for (int i = 0; i < schedule->template->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
+    if (slot->external_buf_idx >= n) n = slot->external_buf_idx + 1;
+  }
+  return n;
+}
+
+PolyUOp *poly_schedule_external_slot_buffer(const PolySchedule *schedule, int external_index) {
+  if (!schedule || !schedule->template || external_index < 0) return NULL;
+  for (int i = 0; i < schedule->template->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &schedule->template->buf_slots[i];
+    if (slot->external_buf_idx == external_index) return slot->buf_uop;
+  }
+  return NULL;
+}
+
 static int webgpu_fill_param_slots(
     PolyCtx *ctx,
     const PolySchedule *sched,
@@ -2879,6 +2898,377 @@ PolySchedule *poly_complete_create_schedule_with_vars(
   }
   if (buf_order_orig_owned) free(buf_order_orig);
   return ps;
+}
+
+PolySchedule *poly_schedule_replay_with_buffers(
+    PolyCtx *ctx,
+    const PolySchedule *captured,
+    PolyUOp **external_bufs,
+    int n_external
+) {
+  if (!ctx || !captured || !captured->template || !captured->template->cache_entry ||
+      n_external < 0 || (n_external > 0 && !external_bufs))
+    return NULL;
+  if (n_external != poly_schedule_external_slot_count(captured)) return NULL;
+
+  /* This is Polygrad's C-side equivalent of tinygrad JIT replay resolving
+   * PARAM-backed CALL arguments against the current input_uops. The captured
+   * schedule owns the parameterized LINEAR cache entry; this function creates a
+   * fresh concrete schedule with current external BUFFER identities and fresh
+   * intermediates, while preserving the captured outputs and default vars. */
+  return build_schedule_from_linear_template(
+      ctx, captured->template->cache_entry, captured->template->mode, captured->template->graph_hash,
+      external_bufs, n_external, captured->template->default_vars, captured->template->n_default_vars,
+      true
+  );
+}
+
+static int schedule_append_var_binding(
+    PolyVarBinding **vars,
+    int *n_vars,
+    int *cap_vars,
+    PolyVarBinding binding
+) {
+  if (!vars || !n_vars || !cap_vars || !binding.var) return -1;
+  for (int i = 0; i < *n_vars; i++) {
+    if ((*vars)[i].var != binding.var) continue;
+    return ((*vars)[i].value == binding.value) ? 0 : -1;
+  }
+  if (*n_vars >= *cap_vars) {
+    int new_cap = *cap_vars ? *cap_vars * 2 : 8;
+    PolyVarBinding *tmp = realloc(*vars, (size_t)new_cap * sizeof(PolyVarBinding));
+    if (!tmp) return -1;
+    *vars = tmp;
+    *cap_vars = new_cap;
+  }
+  (*vars)[(*n_vars)++] = binding;
+  return 0;
+}
+
+static int schedule_combined_intermediate_index(
+    const PolyScheduleCacheEntry *entry,
+    PolyUOp *template_buf
+) {
+  if (!entry || !template_buf) return -1;
+  for (int i = 0; i < entry->n_intermediates; i++)
+    if (entry->intermediates[i].template_buf == template_buf) return i;
+  return -1;
+}
+
+static int schedule_combined_append_intermediate(
+    PolyScheduleCacheEntry *dst,
+    const PolyScheduleCacheEntry *src,
+    PolyUOp *template_buf
+) {
+  if (!dst || !src || !template_buf) return -1;
+  if (schedule_combined_intermediate_index(dst, template_buf) >= 0) return 0;
+  int src_idx = schedule_combined_intermediate_index(src, template_buf);
+  if (src_idx < 0) return -1;
+  PolyScheduleIntermediateDesc *tmp =
+      realloc(dst->intermediates, (size_t)(dst->n_intermediates + 1) * sizeof(*dst->intermediates));
+  if (!tmp) return -1;
+  dst->intermediates = tmp;
+  dst->intermediates[dst->n_intermediates++] = src->intermediates[src_idx];
+  return 0;
+}
+
+static bool schedule_prune_internal_contains(PolyUOp **items, int n_items, PolyUOp *buf) {
+  for (int i = 0; i < n_items; i++)
+    if (items[i] == buf) return true;
+  return false;
+}
+
+static int schedule_prune_mark_internal(
+    PolyUOp ***items,
+    int *n_items,
+    int *cap_items,
+    PolyUOp *buf
+) {
+  if (!items || !n_items || !cap_items || !buf) return -1;
+  if (schedule_prune_internal_contains(*items, *n_items, buf)) return 0;
+  if (*n_items >= *cap_items) {
+    int new_cap = *cap_items ? *cap_items * 2 : 8;
+    PolyUOp **tmp = realloc(*items, (size_t)new_cap * sizeof(*tmp));
+    if (!tmp) return -1;
+    *items = tmp;
+    *cap_items = new_cap;
+  }
+  (*items)[(*n_items)++] = buf;
+  return 0;
+}
+
+static int schedule_prune_call_intersects_needed(
+    PolyUOp *call,
+    bool *needed_external,
+    int n_external,
+    PolyUOp **needed_internal,
+    int n_needed_internal,
+    bool *intersects_out
+) {
+  if (!call || (n_external > 0 && !needed_external) || !intersects_out) return -1;
+  *intersects_out = false;
+  for (int i = 1; i < call->n_src; i++) {
+    PolyUOp *arg = call->src[i];
+    int slot = -1;
+    if (poly_call_arg_is_var(arg)) continue;
+    if (linear_replay_arg_is_external_param(arg, &slot)) {
+      if (slot < 0 || slot >= n_external) return -1;
+      if (needed_external[slot]) {
+        *intersects_out = true;
+        return 0;
+      }
+      continue;
+    }
+    if (!arg || arg->op != POLY_OP_BUFFER) return -1;
+    if (schedule_prune_internal_contains(needed_internal, n_needed_internal, arg)) {
+      *intersects_out = true;
+      return 0;
+    }
+  }
+  return 0;
+}
+
+static int schedule_prune_mark_call_buffers(
+    PolyUOp *call,
+    bool *needed_external,
+    int n_external,
+    PolyUOp ***needed_internal,
+    int *n_needed_internal,
+    int *cap_needed_internal
+) {
+  if (!call || (n_external > 0 && !needed_external) || !needed_internal ||
+      !n_needed_internal || !cap_needed_internal)
+    return -1;
+  for (int i = 1; i < call->n_src; i++) {
+    PolyUOp *arg = call->src[i];
+    int slot = -1;
+    if (poly_call_arg_is_var(arg)) continue;
+    if (linear_replay_arg_is_external_param(arg, &slot)) {
+      if (slot < 0 || slot >= n_external) return -1;
+      needed_external[slot] = true;
+      continue;
+    }
+    if (!arg || arg->op != POLY_OP_BUFFER) return -1;
+    if (schedule_prune_mark_internal(
+            needed_internal, n_needed_internal, cap_needed_internal, arg
+        ) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+PolySchedule *poly_schedule_prune_for_buffers(
+    PolyCtx *ctx,
+    const PolySchedule *captured,
+    PolyUOp **needed_bufs,
+    int n_needed
+) {
+  if (!ctx || !captured || !captured->template || !captured->template->cache_entry ||
+      !captured->template->cache_entry->linear || n_needed < 0 ||
+      (n_needed > 0 && !needed_bufs))
+    return NULL;
+
+  int n_external = poly_schedule_external_slot_count(captured);
+  if (n_external < 0) return NULL;
+
+  bool *needed_external = NULL;
+  bool *keep = NULL;
+  PolyUOp **external = NULL;
+  PolyUOp **linear_src = NULL;
+  PolyUOp **needed_internal = NULL;
+  int n_needed_internal = 0, cap_needed_internal = 0;
+  PolyScheduleCacheEntry *entry = NULL;
+  PolySchedule *out = NULL;
+
+  if (n_external > 0) {
+    needed_external = calloc((size_t)n_external, sizeof(*needed_external));
+    external = calloc((size_t)n_external, sizeof(*external));
+    if (!needed_external || !external) goto cleanup;
+  }
+
+  for (int i = 0; i < n_external; i++) {
+    external[i] = poly_schedule_external_slot_buffer(captured, i);
+    for (int j = 0; j < n_needed; j++) {
+      if (external[i] == needed_bufs[j]) {
+        needed_external[i] = true;
+        break;
+      }
+    }
+  }
+
+  PolyScheduleCacheEntry *src_entry = captured->template->cache_entry;
+  PolyUOp *src_linear = src_entry->linear;
+  int n_calls = src_linear->n_src;
+  keep = calloc((size_t)(n_calls > 0 ? n_calls : 1), sizeof(*keep));
+  if (!keep) goto cleanup;
+
+  int n_keep = 0;
+  for (int k = 0; k < n_calls; k++) {
+    PolyUOp *call = src_linear->src[k];
+    bool intersects = false;
+    if (schedule_prune_call_intersects_needed(
+            call, needed_external, n_external, needed_internal, n_needed_internal, &intersects
+        ) != 0)
+      goto cleanup;
+    if (!intersects) continue;
+    keep[k] = true;
+    n_keep++;
+    if (schedule_prune_mark_call_buffers(
+            call, needed_external, n_external, &needed_internal, &n_needed_internal,
+            &cap_needed_internal
+        ) != 0)
+      goto cleanup;
+  }
+
+  entry = calloc(1, sizeof(*entry));
+  if (!entry) goto cleanup;
+  entry->refcount = 1;
+  entry->n_calls = n_keep;
+  entry->n_intermediates = src_entry->n_intermediates;
+  if (entry->n_intermediates > 0) {
+    entry->intermediates =
+        malloc((size_t)entry->n_intermediates * sizeof(*entry->intermediates));
+    if (!entry->intermediates) goto cleanup;
+    memcpy(
+        entry->intermediates, src_entry->intermediates,
+        (size_t)entry->n_intermediates * sizeof(*entry->intermediates)
+    );
+  }
+  if (n_keep > 0) {
+    linear_src = calloc((size_t)n_keep, sizeof(*linear_src));
+    entry->call_access = calloc((size_t)n_keep, sizeof(*entry->call_access));
+    if (!linear_src || !entry->call_access) goto cleanup;
+  }
+
+  int out_call = 0;
+  for (int k = 0; k < n_calls; k++) {
+    if (!keep[k]) continue;
+    linear_src[out_call] = src_linear->src[k];
+    if (poly_call_access_clone(&entry->call_access[out_call], &src_entry->call_access[k]) != 0)
+      goto cleanup;
+    out_call++;
+  }
+
+  entry->linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, n_keep, poly_arg_none());
+  if (!entry->linear) goto cleanup;
+  out = build_schedule_from_linear_template(
+      ctx, entry, captured->template->mode, captured->template->graph_hash ^ 0x9e3779b9u,
+      external, n_external, captured->template->default_vars, captured->template->n_default_vars,
+      true
+  );
+
+cleanup:
+  free(needed_external);
+  free(keep);
+  free(external);
+  free(linear_src);
+  free(needed_internal);
+  poly_schedule_cache_entry_release(entry);
+  return out;
+}
+
+PolySchedule *poly_schedule_replay_many_with_buffers(
+    PolyCtx *ctx,
+    PolySchedule **captured,
+    int n_captured,
+    PolyUOp **captured_external_bufs,
+    PolyUOp **replay_external_bufs,
+    int n_external
+) {
+  if (!ctx || !captured || n_captured <= 0 || n_external < 0 ||
+      (n_external > 0 && (!captured_external_bufs || !replay_external_bufs)))
+    return NULL;
+
+  int n_calls = 0;
+  PolyCompileMode mode = POLY_MODE_CALL;
+  uint32_t graph_hash = POLY_SCHED_CACHE_VERSION * 2654435761u;
+  for (int s = 0; s < n_captured; s++) {
+    PolySchedule *sched = captured[s];
+    if (!sched || !sched->template || !sched->template->cache_entry ||
+        !sched->template->cache_entry->linear ||
+        sched->template->cache_entry->linear->op != POLY_OP_LINEAR)
+      return NULL;
+    if (s == 0) mode = sched->template->mode;
+    else if (sched->template->mode != mode) return NULL;
+    n_calls += sched->template->cache_entry->linear->n_src;
+    graph_hash ^= sched->template->graph_hash + 0x9e3779b9u + (graph_hash << 6) + (graph_hash >> 2);
+  }
+
+  PolyScheduleCacheEntry *entry = calloc(1, sizeof(*entry));
+  PolyUOp **linear_src = NULL;
+  PolyVarBinding *vars = NULL;
+  int n_vars = 0, cap_vars = 0;
+  PolySchedule *out = NULL;
+  if (!entry) goto cleanup;
+  entry->refcount = 1;
+  entry->n_calls = n_calls;
+  if (n_calls > 0) {
+    linear_src = calloc((size_t)n_calls, sizeof(*linear_src));
+    entry->call_access = calloc((size_t)n_calls, sizeof(*entry->call_access));
+    if (!linear_src || !entry->call_access) goto cleanup;
+  }
+
+  int out_call = 0;
+  for (int s = 0; s < n_captured; s++) {
+    PolySchedule *sched = captured[s];
+    PolyScheduleCacheEntry *src_entry = sched->template->cache_entry;
+    PolyUOp *src_linear = src_entry->linear;
+    for (int v = 0; v < sched->template->n_default_vars; v++) {
+      if (schedule_append_var_binding(
+              &vars, &n_vars, &cap_vars, sched->template->default_vars[v]
+          ) != 0)
+        goto cleanup;
+    }
+    for (int k = 0; k < src_linear->n_src; k++, out_call++) {
+      PolyUOp *call = src_linear->src[k];
+      if (!call || call->op != POLY_OP_CALL || call->n_src < 1) goto cleanup;
+      PolyUOp **call_src = calloc((size_t)call->n_src, sizeof(*call_src));
+      if (!call_src) goto cleanup;
+      call_src[0] = call->src[0];
+      bool ok = true;
+      for (int i = 1; i < call->n_src; i++) {
+        PolyUOp *arg = call->src[i];
+        int old_slot = -1;
+        if (poly_call_arg_is_var(arg)) {
+          call_src[i] = arg;
+        } else if (linear_replay_arg_is_external_param(arg, &old_slot)) {
+          PolyUOp *old_buf = poly_schedule_external_slot_buffer(sched, old_slot);
+          int new_slot = poly_find_buf_position(old_buf, captured_external_bufs, n_external);
+          if (new_slot < 0) {
+            ok = false;
+            break;
+          }
+          call_src[i] = poly_uop0(ctx, POLY_OP_PARAM, arg->dtype, poly_arg_int(new_slot));
+        } else if (arg && arg->op == POLY_OP_BUFFER) {
+          if (schedule_combined_append_intermediate(entry, src_entry, arg) != 0) {
+            ok = false;
+            break;
+          }
+          call_src[i] = arg;
+        } else {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) linear_src[out_call] = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+      free(call_src);
+      if (!ok || !linear_src[out_call]) goto cleanup;
+      if (poly_call_access_clone(&entry->call_access[out_call], &src_entry->call_access[k]) != 0)
+        goto cleanup;
+    }
+  }
+
+  entry->linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, n_calls, poly_arg_none());
+  if (!entry->linear) goto cleanup;
+  out = build_schedule_from_linear_template(
+      ctx, entry, mode, graph_hash, replay_external_bufs, n_external, vars, n_vars, true
+  );
+
+cleanup:
+  free(linear_src);
+  free(vars);
+  poly_schedule_cache_entry_release(entry);
+  return out;
 }
 
 static PolySchedule *poly_create_schedule_uncached(PolyCtx *ctx, PolyUOp *kernel_graph) {

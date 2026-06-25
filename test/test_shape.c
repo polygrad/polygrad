@@ -66,7 +66,7 @@ TEST(device, frontend_release_callback_is_captured_per_host_buffer) {
 TEST(shape, buffer) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *buf = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(100));
-  PolyShape s = poly_uop_shape(ctx, buf);
+  PolyShape s = poly_uop_max_shape(ctx, buf);
   ASSERT_INT_EQ(s.ndim, 1);
   ASSERT_INT_EQ(s.dims[0], 100);
   if (s.dims) free(s.dims);
@@ -77,7 +77,7 @@ TEST(shape, buffer) {
 TEST(shape, const_scalar) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(3.14));
-  PolyShape s = poly_uop_shape(ctx, c);
+  PolyShape s = poly_uop_max_shape(ctx, c);
   ASSERT_INT_EQ(s.ndim, 0);
   poly_ctx_destroy(ctx);
   PASS();
@@ -88,7 +88,7 @@ TEST(shape, elementwise) {
   PolyUOp *a = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(100));
   PolyUOp *b = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(100));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
-  PolyShape s = poly_uop_shape(ctx, add);
+  PolyShape s = poly_uop_max_shape(ctx, add);
   ASSERT_INT_EQ(s.ndim, 1);
   ASSERT_INT_EQ(s.dims[0], 100);
   if (s.dims) free(s.dims);
@@ -101,7 +101,7 @@ TEST(shape, reshape) {
   PolyUOp *buf = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(100));
   int64_t dims[] = {10, 10};
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf, int_tuple(dims, 2));
-  PolyShape s = poly_uop_shape(ctx, r);
+  PolyShape s = poly_uop_max_shape(ctx, r);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 10);
   ASSERT_INT_EQ(s.dims[1], 10);
@@ -117,7 +117,7 @@ TEST(shape, expand) {
   PolyUOp *r = poly_uop1(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, buf, int_tuple(rdims, 2));
   int64_t edims[] = {5, 10};
   PolyUOp *e = poly_uop1(ctx, POLY_OP_EXPAND, POLY_FLOAT32, r, int_tuple(edims, 2));
-  PolyShape s = poly_uop_shape(ctx, e);
+  PolyShape s = poly_uop_max_shape(ctx, e);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 5);
   ASSERT_INT_EQ(s.dims[1], 10);
@@ -134,7 +134,7 @@ TEST(shape, reduce_axis) {
   int64_t axes[] = {1};
   PolyUOp *red =
       poly_uop1(ctx, POLY_OP_REDUCE_AXIS, POLY_FLOAT32, r, reduce_ax(POLY_OP_ADD, axes, 1));
-  PolyShape s = poly_uop_shape(ctx, red);
+  PolyShape s = poly_uop_max_shape(ctx, red);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 10);
   ASSERT_INT_EQ(s.dims[1], 1);
@@ -155,7 +155,7 @@ TEST(shape, chain) {
   int64_t d3[] = {5, 4};
   PolyUOp *e2 = poly_uop1(ctx, POLY_OP_EXPAND, POLY_FLOAT32, r2, int_tuple(d3, 2));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, r1, e2, poly_arg_none());
-  PolyShape s = poly_uop_shape(ctx, add);
+  PolyShape s = poly_uop_max_shape(ctx, add);
   ASSERT_INT_EQ(s.ndim, 2);
   ASSERT_INT_EQ(s.dims[0], 5);
   ASSERT_INT_EQ(s.dims[1], 4);
@@ -171,14 +171,14 @@ TEST(shape, ensure_shape_uses_rewound_scratch_toposort) {
     x = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, x, poly_arg_none());
 
   size_t scratch_before = poly_arena_used(ctx->scratch);
-  PolyShape first = poly_uop_shape(ctx, x);
+  PolyShape first = poly_uop_max_shape(ctx, x);
   ASSERT_INT_EQ(first.ndim, 1);
   ASSERT_INT_EQ(first.dims[0], 8);
   if (first.dims) free(first.dims);
   ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
 
   size_t main_after_first = poly_arena_used(poly_ctx_arena(ctx));
-  PolyShape second = poly_uop_shape(ctx, x);
+  PolyShape second = poly_uop_max_shape(ctx, x);
   ASSERT_INT_EQ(second.ndim, 1);
   ASSERT_INT_EQ(second.dims[0], 8);
   if (second.dims) free(second.dims);
@@ -195,7 +195,7 @@ TEST(shape, mismatch) {
   PolyUOp *a = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(10));
   PolyUOp *b = poly_uop0(ctx, POLY_OP_BUFFER, POLY_FLOAT32, poly_arg_int(20));
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, b, poly_arg_none());
-  PolyShape s = poly_uop_shape(ctx, add);
+  PolyShape s = poly_uop_max_shape(ctx, add);
   ASSERT_INT_EQ(s.ndim, -1); /* mismatch → no shape */
   poly_ctx_destroy(ctx);
   PASS();
@@ -206,7 +206,7 @@ TEST(shape, noshape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(10));
   PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
-  PolyShape s = poly_uop_shape(ctx, range);
+  PolyShape s = poly_uop_max_shape(ctx, range);
   ASSERT_INT_EQ(s.ndim, -1);
   poly_ctx_destroy(ctx);
   PASS();

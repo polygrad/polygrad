@@ -257,7 +257,7 @@ typedef struct {
 static inline size_t poly_test_buffer_nbytes(PolyCtx *ctx, PolyUOp *buf) {
   if (!buf) return 0;
   int64_t numel = -1;
-  PolyShape shape = poly_uop_shape(ctx, buf);
+  PolyShape shape = poly_uop_max_shape(ctx, buf);
   if (shape.ndim >= 0) numel = poly_shape_numel(shape);
   if (shape.ndim > 0 && shape.dims) free(shape.dims);
   if (numel < 0 && buf->arg.kind == POLY_ARG_INT) numel = buf->arg.i;

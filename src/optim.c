@@ -11,14 +11,14 @@ static int64_t optim_uop_numel(PolyCtx *ctx, PolyUOp *u) {
   int ndim = poly_uop_ndim(ctx, u);
   if (ndim < 0) return -1;
   if (ndim == 0) return 1;
-  const int64_t *dims = poly_uop_dims(ctx, u);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
   return poly_shape_numel_checked(dims, ndim);
 }
 
 static PolyUOp *optim_flatten(PolyCtx *ctx, PolyUOp *u, int64_t numel) {
   if (!ctx || !u || numel <= 0) return NULL;
   int ndim = poly_uop_ndim(ctx, u);
-  const int64_t *dims = poly_uop_dims(ctx, u);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
   if (ndim == 1 && dims && dims[0] == numel) return u;
   int64_t flat[1] = {numel};
   return poly_reshape(ctx, u, flat, 1);
@@ -28,7 +28,7 @@ static PolyUOp *optim_reshape_like(PolyCtx *ctx, PolyUOp *value, PolyUOp *like) 
   if (!ctx || !value || !like) return NULL;
   int ndim = poly_uop_ndim(ctx, like);
   if (ndim < 0) return value;
-  const int64_t *dims = poly_uop_dims(ctx, like);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, like);
   return poly_reshape(ctx, value, (int64_t *)dims, ndim);
 }
 

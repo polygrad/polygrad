@@ -677,7 +677,7 @@ static PolyUOp *reshape_logical_input(PolyCtx *ctx, PolyUOp *x, const int64_t *s
 static int uop_shape(PolyCtx *ctx, PolyUOp *u, int64_t *out_shape) {
   int ndim = poly_uop_ndim(ctx, u);
   if (ndim > 0) {
-    const int64_t *dims = poly_uop_dims(ctx, u);
+    const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
     if (dims) memcpy(out_shape, dims, ndim * sizeof(int64_t));
   }
   return ndim;

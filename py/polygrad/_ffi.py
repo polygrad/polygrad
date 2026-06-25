@@ -262,6 +262,11 @@ def _declare_signatures(lib):
     lib.poly_buffer_by_id.restype = _ptr
     lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
 
+    lib.poly_buffer_var_by_id.restype = _ptr
+    lib.poly_buffer_var_by_id.argtypes = [
+        _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int
+    ]
+
     lib.poly_buffer_f32.restype = _ptr
     lib.poly_buffer_f32.argtypes = [_ptr, ctypes.c_int64]
 
@@ -520,6 +525,39 @@ def _declare_signatures(lib):
         _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)
     ]
 
+    # --- Raw Tensor JIT capture/replay ---
+    lib.poly_jit_new.restype = _ptr
+    lib.poly_jit_new.argtypes = [_ptr]
+
+    lib.poly_jit_free.restype = None
+    lib.poly_jit_free.argtypes = [_ptr]
+
+    lib.poly_jit_set_prune.restype = ctypes.c_int
+    lib.poly_jit_set_prune.argtypes = [_ptr, ctypes.c_bool]
+
+    lib.poly_jit_begin_capture.restype = ctypes.c_int
+    lib.poly_jit_begin_capture.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_jit_end_capture.restype = ctypes.c_int
+    lib.poly_jit_end_capture.argtypes = [_ptr]
+
+    lib.poly_jit_cancel_capture.restype = None
+    lib.poly_jit_cancel_capture.argtypes = [_ptr]
+
+    lib.poly_jit_is_captured.restype = ctypes.c_bool
+    lib.poly_jit_is_captured.argtypes = [_ptr]
+
+    lib.poly_jit_schedule_count.restype = ctypes.c_int
+    lib.poly_jit_schedule_count.argtypes = [_ptr]
+
+    lib.poly_jit_run.restype = ctypes.c_int
+    lib.poly_jit_run.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_jit_run_with_vars.restype = ctypes.c_int
+    lib.poly_jit_run_with_vars.argtypes = [
+        _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(PolyVarBinding), ctypes.c_int
+    ]
+
     # --- Optimizer graph builders (optim.h) ---
     lib.poly_optim_build_step.restype = ctypes.c_int
     lib.poly_optim_build_step.argtypes = [
@@ -676,8 +714,20 @@ def _declare_signatures(lib):
     lib.poly_uop_ndim.restype = ctypes.c_int
     lib.poly_uop_ndim.argtypes = [_ptr, _ptr]
 
-    lib.poly_uop_dims.restype = _i64p
-    lib.poly_uop_dims.argtypes = [_ptr, _ptr]
+    lib.poly_uop_max_shape_dims.restype = _i64p
+    lib.poly_uop_max_shape_dims.argtypes = [_ptr, _ptr]
+
+    lib.poly_uop_shape_dim.restype = _ptr
+    lib.poly_uop_shape_dim.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_uop_const_i64.restype = ctypes.c_int
+    lib.poly_uop_const_i64.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int64)]
+
+    lib.poly_uop_unbind_var.restype = _ptr
+    lib.poly_uop_unbind_var.argtypes = [_ptr]
+
+    lib.poly_uop_bind_value.restype = ctypes.c_int
+    lib.poly_uop_bind_value.argtypes = [_ptr, ctypes.POINTER(ctypes.c_int64)]
 
     # --- Additional composed ops (shape read from UOp) ---
     lib.poly_rmsnorm_apply.restype = _ptr

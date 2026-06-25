@@ -306,7 +306,7 @@ TEST(nn, matmul_broadcast_batch_numeric) {
 
   PolyUOp *r = poly_dot(ctx, a, b);
   ASSERT_NOT_NULL(r);
-  PolyShape s = poly_uop_shape(ctx, r);
+  PolyShape s = poly_uop_max_shape(ctx, r);
   ASSERT_INT_EQ(s.ndim, 3);
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 2);
@@ -577,7 +577,7 @@ TEST(nn, layernorm_non_last_axis) {
 
   PolyUOp *y = poly_layernorm_apply(ctx, x, NULL, NULL, 1, 1e-5);
   ASSERT_NOT_NULL(y);
-  PolyShape s = poly_uop_shape(ctx, y);
+  PolyShape s = poly_uop_max_shape(ctx, y);
   ASSERT_INT_EQ(s.ndim, 3);
   ASSERT_INT_EQ(s.dims[0], 2);
   ASSERT_INT_EQ(s.dims[1], 3);

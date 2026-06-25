@@ -346,7 +346,7 @@ static int copy_tensor_shape(PolyCtx *ctx, PolyTensor *tensor, int64_t shape[8],
   if (!ctx || !tensor || !ndim) return -1;
   PolyUOp *u = poly_tensor_uop_logical(tensor);
   if (!u) return -1;
-  PolyShape s = poly_uop_shape_cached(ctx, u);
+  PolyShape s = poly_uop_max_shape_cached(ctx, u);
   if (s.ndim < 0 || s.ndim > 8) return -1;
   *ndim = s.ndim;
   if (s.ndim > 0) memcpy(shape, s.dims, (size_t)s.ndim * sizeof(int64_t));
@@ -2099,7 +2099,7 @@ int poly_instance_set_optimizer_ex(
 
 /* Compute numel from shape inference. Returns -1 on failure. */
 static int64_t uop_numel(PolyCtx *ctx, PolyUOp *u) {
-  PolyShape s = poly_uop_shape(ctx, u);
+  PolyShape s = poly_uop_max_shape(ctx, u);
   if (s.ndim < 0) {
     if (s.dims) free(s.dims);
     return -1;
@@ -2144,7 +2144,7 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
     for (int j = 0; j < n_topo; j++) {
       if (topo[j]->op != POLY_OP_RESHAPE || topo[j]->n_src < 1 || topo[j]->src[0] != raw_buf)
         continue;
-      PolyShape rs = poly_uop_shape(inst->ctx, topo[j]);
+      PolyShape rs = poly_uop_max_shape(inst->ctx, topo[j]);
       bool match = (rs.ndim == pb->ndim);
       if (match) {
         for (int d = 0; d < rs.ndim; d++) {
@@ -2222,7 +2222,7 @@ static int ensure_vag_graph(PolyInstance *inst, int loss_ep_idx) {
 
     /* Flatten gradient if needed */
     PolyUOp *gflat = grads[i];
-    PolyShape gs = poly_uop_shape(inst->ctx, grads[i]);
+    PolyShape gs = poly_uop_max_shape(inst->ctx, grads[i]);
     if (gs.ndim != 1 || (gs.ndim == 1 && gs.dims[0] != numel)) {
       int64_t flat_shape[1] = {numel};
       gflat = poly_reshape(inst->ctx, grads[i], flat_shape, 1);
@@ -2441,7 +2441,7 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
      * differentiates w.r.t. the shaped view, not the raw buffer. */
     PolyUOp *grad = vag->grad_uops[param_ord];
     {
-      PolyShape gs = poly_uop_shape(ctx, grad);
+      PolyShape gs = poly_uop_max_shape(ctx, grad);
       if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != pb_opt->numel)) {
         int64_t flat[1] = {pb_opt->numel};
         grad = poly_reshape(ctx, grad, flat, 1);

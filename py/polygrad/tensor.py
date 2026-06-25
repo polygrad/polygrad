@@ -99,12 +99,28 @@ def _pair_array(pairs):
 
 
 def _shape_from_uop(ctx, uop):
-    """Read shape tuple from a UOp via poly_uop_ndim/poly_uop_dims."""
+    """Read tinygrad-style shape tuple from a UOp.
+
+    Static dimensions are returned as ints. Symbolic dimensions are returned as
+    UOp wrappers around DEFINE_VAR/BIND expressions, matching tinygrad's
+    `uop.shape`. `poly_uop_max_shape_dims` exposes max_shape storage.
+    """
     ndim = _ffi._lib.poly_uop_ndim(ctx, uop)
     if ndim <= 0:
         return ()
-    dims = _ffi._lib.poly_uop_dims(ctx, uop)
-    return tuple(dims[i] for i in range(ndim))
+    dims = _ffi._lib.poly_uop_max_shape_dims(ctx, uop)
+    out = []
+    for i in range(ndim):
+        dim_raw = _ffi._lib.poly_uop_shape_dim(ctx, uop, i)
+        if dim_raw:
+            value = ctypes.c_int64()
+            if _ffi._lib.poly_uop_const_i64(dim_raw, ctypes.byref(value)) == 0:
+                out.append(int(value.value))
+            else:
+                out.append(UOp(ctx, dim_raw))
+        else:
+            out.append(dims[i])
+    return tuple(out)
 
 
 I64_MIN = -(1 << 63)
@@ -211,11 +227,31 @@ def _creation_meta(kwargs):
 def _shape_arg(shape):
     # Reuse one normalization path so every constructor feeds the C helpers the
     # same shape encoding and errors on bad dimensions the same way.
+    if any(_is_symbolic_dim(s) for s in shape):
+        raise TypeError('this constructor does not yet accept symbolic dimensions')
     shape = tuple(int(s) for s in shape)
     if not shape:
         return None, 0, shape
     dims, ndim = _int64_array(shape)
     return dims, ndim, shape
+
+
+def _is_symbolic_dim(value):
+    return isinstance(value, (Variable, BoundVariable, UOp))
+
+
+def _shape_all_int(shape):
+    return all(isinstance(s, int) for s in shape)
+
+
+def _symbolic_dim_raw(value):
+    if isinstance(value, BoundVariable):
+        return value.uop.raw
+    if isinstance(value, Variable):
+        return value.uop.raw
+    if isinstance(value, UOp):
+        return value.raw
+    return None
 
 
 def _py_scalar(value):
@@ -440,9 +476,9 @@ class Tensor:
             arr = np.ascontiguousarray(data, dtype=np_dt)
             self._data = arr.ravel()
             self._dtype_str = dt
-            # Polygrad equivalent of tinygrad's _fromnp: UOp.from_host creates
-            # the BUFFER UOp, registers a PolyBuffer wrapping the NumPy host
-            # bytes in ctx->buffers, and wraps in RESHAPE when ndim>1.
+            # UOp.from_host creates the BUFFER UOp, registers a PolyBuffer
+            # wrapping the NumPy host bytes in ctx->buffers, and wraps in
+            # RESHAPE when ndim>1.
             # The frontend keeps a second strong owner entry keyed by the
             # C-side PolyBuffer* address value, not by the BUFFER UOp.
             dtype_id = _dtype_id(import_dt)
@@ -545,20 +581,16 @@ class Tensor:
     @property
     def shape(self):
         """Read shape from cached UOp fields (O(1), no allocation)."""
-        if self.uop is None:
+        if self._tensor is None:
             return ()
-        lib = _ffi._lib
-        ndim = lib.poly_uop_ndim(self._ctx, self.uop)
-        if ndim <= 0:
+        raw = self._core_uop_logical_raw(self._tensor) or self._core_uop_raw(self._tensor)
+        if not raw:
             return ()
-        dims = lib.poly_uop_dims(self._ctx, self.uop)
-        return tuple(dims[i] for i in range(ndim))
+        return _shape_from_uop(self._ctx, raw)
 
     @property
     def ndim(self):
-        if self.uop is None:
-            return 0
-        return max(0, _ffi._lib.poly_uop_ndim(self._ctx, self.uop))
+        return len(self.shape)
 
     @property
     def dtype(self):
@@ -597,8 +629,11 @@ class Tensor:
         return self.transpose()
 
     def numel(self):
+        shape = self.shape
+        if not _shape_all_int(shape):
+            raise AssertionError(f'no data if shape is symbolic, self.shape={shape}')
         n = 1
-        for s in self.shape:
+        for s in shape:
             n *= s
         return n
 
@@ -662,7 +697,10 @@ class Tensor:
         if not isinstance(x, Tensor):
             x = Tensor(x, dtype=self._dtype_str, device=self._device)
         if self.shape != x.shape:
-            x = x._broadcast_to(self.shape)
+            x = Tensor(
+                _ctx=x._ctx, _uop=x._broadcast_uop(self.shape),
+                requires_grad=x._requires_grad, _dtype=x.dtype, _device=x._device,
+            )
         if self.device != x.device:
             raise RuntimeError(f'assign device mismatch {self.device} != {x.device}')
         if self.dtype != x.dtype:
@@ -685,7 +723,7 @@ class Tensor:
         targets = []
         seen = set()
         for x in (self,) + lst:
-            if x.uop.has_buffer_identity() and x.uop.is_realized:
+            if x.uop.has_buffer_identity():
                 continue
             current_raw = Tensor._core_uop_raw(x._tensor)
             device_id = int(_ffi._lib.poly_tensor_device(x._tensor))
@@ -727,6 +765,7 @@ class Tensor:
         np_dt = _to_np_dtype(self._dtype_str)
         if 0 in shape:
             return np.empty(shape, dtype=np_dt)
+        assert _shape_all_int(shape), f'no data if shape is symbolic, self.shape={shape}'
         return self._buffer().numpy().reshape(shape)
 
     def item(self):
@@ -929,6 +968,8 @@ class Tensor:
         # CONST scalars (from _ensure_tensor) auto-broadcast — no EXPAND needed
         if not cur_shape and self.uop.buffer is None:
             return uop
+        if not _shape_all_int(target_shape) or not _shape_all_int(cur_shape):
+            raise NotImplementedError('symbolic movement broadcast is not implemented')
         # Scalar tensor or lower-rank: pad left with 1s
         target_nd = len(target_shape)
         if len(cur_shape) < target_nd:
@@ -1789,7 +1830,23 @@ class Tensor:
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
-        shape = tuple(_require_i64(_py_scalar(x), 'shape') for x in shape)
+        shape = tuple(_py_scalar(x) for x in shape)
+        if any(_is_symbolic_dim(x) for x in shape):
+            if not shape or not _is_symbolic_dim(shape[0]):
+                raise NotImplementedError('symbolic Tensor.empty currently requires the leading dimension to be symbolic')
+            if any(_is_symbolic_dim(x) for x in shape[1:]):
+                raise NotImplementedError('symbolic Tensor.empty currently supports one leading symbolic dimension')
+            batch_raw = _symbolic_dim_raw(shape[0])
+            if not batch_raw or not _ffi._lib.poly_uop_unbind_var(batch_raw):
+                raise ValueError('symbolic Tensor.empty dimension must be a Variable, BoundVariable, or variable UOp')
+            inner = tuple(_require_i64(_py_scalar(x), 'shape') for x in shape[1:])
+            if any(dim < 0 for dim in inner):
+                raise ValueError(f'negative dimensions are not allowed: {shape}')
+            dims, n_inner = _int64_array(inner) if inner else (None, 0)
+            uop = _ffi._lib.poly_buffer_var_by_id(ctx, _dtype_id(dtype_name), batch_raw, dims, n_inner)
+            return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_buffer_var_by_id')
+
+        shape = tuple(_require_i64(x, 'shape') for x in shape)
         if any(dim < 0 for dim in shape):
             raise ValueError(f'negative dimensions are not allowed: {shape}')
         numel = 1

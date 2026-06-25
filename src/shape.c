@@ -81,7 +81,7 @@ PolyUOp *poly_reduce_axis(
   /* Use the ctx-owned cached shape here. poly_reduce_axis only inspects dims;
    * requesting a heap copy would make this hot constructor responsible for
    * extra ownership bookkeeping on every reduce. */
-  PolyShape shape = poly_uop_shape_cached(ctx, src);
+  PolyShape shape = poly_uop_max_shape_cached(ctx, src);
   int64_t filtered_buf[POLY_MAX_DIMS];
   int filtered_n = 0;
   for (int i = 0; i < n_axes; i++) {
@@ -166,6 +166,7 @@ static PolyShape heap_shape(int64_t *dims, int ndim) {
 typedef struct {
   int8_t ndim; /* -1 = no shape, 0 = scalar, >0 = tensor */
   int64_t *dims; /* arena-allocated, NULL if scalar/none */
+  PolyUOp **dim_uops; /* arena-allocated symbolic dims, NULL if scalar/none */
 } ShapeCacheEntry;
 
 static ShapeCacheEntry *ensure_shape(PolyCtx *ctx, PolyUOp *u);
@@ -179,12 +180,38 @@ int poly_uop_ndim(PolyCtx *ctx, const PolyUOp *u) {
   return ensure_shape(ctx, (PolyUOp *)u)->ndim;
 }
 
-const int64_t *poly_uop_dims(PolyCtx *ctx, const PolyUOp *u) {
+const int64_t *poly_uop_max_shape_dims(PolyCtx *ctx, const PolyUOp *u) {
   if (!u) return NULL;
   return ensure_shape(ctx, (PolyUOp *)u)->dims;
 }
 
-PolyShape poly_uop_shape_cached(PolyCtx *ctx, const PolyUOp *u) {
+PolyUOp *poly_uop_shape_dim(PolyCtx *ctx, const PolyUOp *u, int dim) {
+  if (!u || dim < 0) return NULL;
+  ShapeCacheEntry *e = ensure_shape(ctx, (PolyUOp *)u);
+  if (!e || dim >= e->ndim || !e->dim_uops) return NULL;
+  return e->dim_uops[dim];
+}
+
+int poly_uop_const_i64(const PolyUOp *u, int64_t *out) {
+  if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return -1;
+  if (out) *out = u->arg.i;
+  return 0;
+}
+
+PolyUOp *poly_uop_unbind_var(PolyUOp *u) {
+  if (!u) return NULL;
+  if (u->op == POLY_OP_DEFINE_VAR) return u;
+  if (u->op == POLY_OP_BIND && u->n_src >= 1 && u->src[0]->op == POLY_OP_DEFINE_VAR)
+    return u->src[0];
+  return NULL;
+}
+
+int poly_uop_bind_value(PolyUOp *u, int64_t *out) {
+  if (!u || u->op != POLY_OP_BIND || u->n_src < 2) return -1;
+  return poly_uop_const_i64(u->src[1], out);
+}
+
+PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u) {
   if (!u) return POLY_SHAPE_NONE;
   ShapeCacheEntry *e = ensure_shape(ctx, (PolyUOp *)u);
   return (PolyShape){e->dims, e->ndim};
@@ -210,10 +237,10 @@ bool poly_shape_eq(PolyShape a, PolyShape b) {
 
 /* Delegates to the ctx-cached engine (ensure_shape) and heap-copies the
  * result.  Callers that received a PolyShape from this function must free
- * dims when ndim > 0.  New code should prefer poly_uop_shape_cached()
- * or poly_uop_ndim()/poly_uop_dims() which avoid the heap copy. */
-PolyShape poly_uop_shape(PolyCtx *ctx, PolyUOp *u) {
-  PolyShape cached = poly_uop_shape_cached(ctx, (const PolyUOp *)u);
+ * dims when ndim > 0.  New code should prefer poly_uop_max_shape_cached()
+ * or poly_uop_ndim()/poly_uop_max_shape_dims() which avoid the heap copy. */
+PolyShape poly_uop_max_shape(PolyCtx *ctx, PolyUOp *u) {
+  PolyShape cached = poly_uop_max_shape_cached(ctx, (const PolyUOp *)u);
   return heap_shape(cached.dims, cached.ndim);
 }
 
@@ -226,6 +253,7 @@ static ShapeCacheEntry *make_entry_none(PolyCtx *ctx) {
   ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
   e->ndim = -1;
   e->dims = NULL;
+  e->dim_uops = NULL;
   return e;
 }
 
@@ -233,28 +261,43 @@ static ShapeCacheEntry *make_entry_scalar(PolyCtx *ctx) {
   ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
   e->ndim = 0;
   e->dims = NULL;
+  e->dim_uops = NULL;
   return e;
 }
 
-static ShapeCacheEntry *make_entry_1d(PolyCtx *ctx, int64_t dim0) {
-  ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
-  e->ndim = 1;
-  e->dims = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(int64_t), _Alignof(int64_t));
-  e->dims[0] = dim0;
-  return e;
+static PolyUOp *shape_dim_const(PolyCtx *ctx, int64_t value) {
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(value));
 }
 
-static ShapeCacheEntry *make_entry_dims(PolyCtx *ctx, const int64_t *dims, int ndim) {
+static ShapeCacheEntry *make_entry_dims_uops(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    PolyUOp *const *dim_uops,
+    int ndim
+) {
   if (ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims)) return make_entry_none(ctx);
   ShapeCacheEntry *e = poly_arena_alloc(poly_ctx_arena(ctx), sizeof(ShapeCacheEntry), 8);
   e->ndim = (int8_t)ndim;
   if (ndim > 0) {
     e->dims = poly_arena_alloc(poly_ctx_arena(ctx), ndim * sizeof(int64_t), _Alignof(int64_t));
     memcpy(e->dims, dims, ndim * sizeof(int64_t));
+    e->dim_uops =
+        poly_arena_alloc(poly_ctx_arena(ctx), ndim * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+    for (int i = 0; i < ndim; i++)
+      e->dim_uops[i] = dim_uops && dim_uops[i] ? dim_uops[i] : shape_dim_const(ctx, dims[i]);
   } else {
     e->dims = NULL;
+    e->dim_uops = NULL;
   }
   return e;
+}
+
+static ShapeCacheEntry *make_entry_1d(PolyCtx *ctx, int64_t dim0) {
+  return make_entry_dims_uops(ctx, &dim0, NULL, 1);
+}
+
+static ShapeCacheEntry *make_entry_dims(PolyCtx *ctx, const int64_t *dims, int ndim) {
+  return make_entry_dims_uops(ctx, dims, NULL, ndim);
 }
 
 static ShapeCacheEntry *shape_cache_lookup(PolyCtx *ctx, PolyUOp *u) {
@@ -275,11 +318,18 @@ static const int64_t *src_dims(PolyCtx *ctx, PolyUOp *u, int idx) {
   return e ? e->dims : NULL;
 }
 
+static PolyUOp *const *src_dim_uops(PolyCtx *ctx, PolyUOp *u, int idx) {
+  if (!u || idx < 0 || idx >= u->n_src) return NULL;
+  ShapeCacheEntry *e = shape_cache_lookup(ctx, u->src[idx]);
+  return e ? (PolyUOp *const *)e->dim_uops : NULL;
+}
+
 /* Read source shape from the ctx cache. ensure_shape() fills the cache in
  * topological order, matching tinygrad's recursive_property behavior without
  * recursive C calls through deep UOp chains. */
 #define SRC_NDIM(i) src_ndim(ctx, u, (i))
 #define SRC_DIMS(i) src_dims(ctx, u, (i))
+#define SRC_DIM_UOPS(i) src_dim_uops(ctx, u, (i))
 
 static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u);
 
@@ -320,7 +370,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
 
   /* STORE: inherit shape from value (src[1]) */
   if (op == POLY_OP_STORE && u->n_src >= 2 && SRC_NDIM(1) >= 0)
-    return make_entry_dims(ctx, SRC_DIMS(1), SRC_NDIM(1));
+    return make_entry_dims_uops(ctx, SRC_DIMS(1), SRC_DIM_UOPS(1), SRC_NDIM(1));
 
   /* No-shape ops (kernel-level, never have tensor shapes) */
   if (op == POLY_OP_RANGE || op == POLY_OP_LOAD || op == POLY_OP_SINK || op == POLY_OP_IF ||
@@ -342,15 +392,24 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   /* BUFFER */
   if (op == POLY_OP_BUFFER) {
     if (u->arg.kind == POLY_ARG_INT) {
-      /* Dynamic buffer: BUFFER(src=(UNIQUE, DEFINE_VAR, CONST...)) → (max_val, K, ...) */
-      if (u->n_src >= 2 && u->src[1]->op == POLY_OP_DEFINE_VAR) {
+      /* Dynamic buffer: BUFFER(src=(UNIQUE, DEFINE_VAR/BIND, CONST...)).
+       * dims stores max allocation shape; dim_uops stores the symbolic shape
+       * expression, matching tinygrad's shape tuple carrying BIND/PARAM UOps. */
+      PolyUOp *dynamic_var = u->n_src >= 2 ? poly_uop_unbind_var(u->src[1]) : NULL;
+      if (dynamic_var) {
         int ndim = u->n_src - 1;
         if (ndim <= 0 || ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
         int64_t dims[POLY_MAX_DIMS];
-        dims[0] = u->src[1]->arg.define_var.max_val;
-        for (int i = 1; i < ndim && i < POLY_MAX_DIMS; i++)
+        PolyUOp *dim_uops[POLY_MAX_DIMS];
+        dims[0] = dynamic_var->arg.define_var.max_val;
+        dim_uops[0] = u->src[1];
+        for (int i = 1; i < ndim && i < POLY_MAX_DIMS; i++) {
+          if (u->src[1 + i]->op != POLY_OP_CONST || u->src[1 + i]->arg.kind != POLY_ARG_INT)
+            return make_entry_none(ctx);
           dims[i] = u->src[1 + i]->arg.i;
-        return make_entry_dims(ctx, dims, ndim);
+          dim_uops[i] = u->src[1 + i];
+        }
+        return make_entry_dims_uops(ctx, dims, dim_uops, ndim);
       } else {
         return make_entry_1d(ctx, u->arg.i);
       }
@@ -395,7 +454,10 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
       return make_entry_none(ctx);
     }
     int remaining = source_ndim - n_indices;
-    return make_entry_dims(ctx, SRC_DIMS(0) + n_indices, remaining);
+    PolyUOp *const *dim_uops = SRC_DIM_UOPS(0);
+    return make_entry_dims_uops(
+        ctx, SRC_DIMS(0) + n_indices, dim_uops ? dim_uops + n_indices : NULL, remaining
+    );
   }
 
   /* BUFFERIZE: shape from range bounds */
@@ -437,7 +499,13 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
       if (idx < 0 || idx >= in_ndim) return make_entry_none(ctx);
       dims[i] = SRC_DIMS(0)[idx];
     }
-    return make_entry_dims(ctx, dims, n);
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    PolyUOp *const *in_dim_uops = SRC_DIM_UOPS(0);
+    for (int i = 0; i < n; i++) {
+      int64_t idx = u->arg.int_tuple.vals[i];
+      dim_uops[i] = in_dim_uops ? in_dim_uops[idx] : NULL;
+    }
+    return make_entry_dims_uops(ctx, dims, dim_uops, n);
   }
 
   /* PAD: output = input + begin + end per axis */
@@ -475,7 +543,8 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     if (u->arg.kind == POLY_ARG_INT_TUPLE &&
         !rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n))
       return make_entry_none(ctx);
-    if (u->n_src >= 1 && SRC_NDIM(0) >= 0) return make_entry_dims(ctx, SRC_DIMS(0), SRC_NDIM(0));
+    if (u->n_src >= 1 && SRC_NDIM(0) >= 0)
+      return make_entry_dims_uops(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), SRC_NDIM(0));
     return make_entry_none(ctx);
   }
 
@@ -488,12 +557,19 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     if (!rank_tuple_valid(u->arg.reduce_axis.axes, u->arg.reduce_axis.n))
       return make_entry_none(ctx);
     int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    PolyUOp *const *in_dim_uops = SRC_DIM_UOPS(0);
     memcpy(dims, SRC_DIMS(0), in_ndim * sizeof(int64_t));
+    for (int i = 0; i < in_ndim; i++)
+      dim_uops[i] = in_dim_uops ? in_dim_uops[i] : NULL;
     for (int i = 0; i < u->arg.reduce_axis.n; i++) {
       int ax = (int)u->arg.reduce_axis.axes[i];
-      if (ax >= 0 && ax < in_ndim) dims[ax] = 1;
+      if (ax >= 0 && ax < in_ndim) {
+        dims[ax] = 1;
+        dim_uops[ax] = NULL;
+      }
     }
-    return make_entry_dims(ctx, dims, in_ndim);
+    return make_entry_dims_uops(ctx, dims, dim_uops, in_ndim);
   }
 
   /* ASSIGN: use stored logical shape (arg) if present */
@@ -502,7 +578,8 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
       if (!rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n)) return make_entry_none(ctx);
       return make_entry_dims(ctx, u->arg.int_tuple.vals, u->arg.int_tuple.n);
     }
-    if (u->n_src >= 1 && SRC_NDIM(0) >= 0) return make_entry_dims(ctx, SRC_DIMS(0), SRC_NDIM(0));
+    if (u->n_src >= 1 && SRC_NDIM(0) >= 0)
+      return make_entry_dims_uops(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), SRC_NDIM(0));
     return make_entry_none(ctx);
   }
 
@@ -510,7 +587,8 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   if (op == POLY_OP_CONTIGUOUS || op == POLY_OP_DETACH || op == POLY_OP_CONTIGUOUS_BACKWARD ||
       op == POLY_OP_COPY || op == POLY_OP_NOOP || op == POLY_OP_REDUCE || op == POLY_OP_AFTER ||
       op == POLY_OP_END || op == POLY_OP_GROUP) {
-    if (u->n_src >= 1 && SRC_NDIM(0) >= 0) return make_entry_dims(ctx, SRC_DIMS(0), SRC_NDIM(0));
+    if (u->n_src >= 1 && SRC_NDIM(0) >= 0)
+      return make_entry_dims_uops(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), SRC_NDIM(0));
     return make_entry_none(ctx);
   }
 
@@ -527,11 +605,17 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     int in_sz = poly_dtype_itemsize(poly_dtype_scalar(u->src[0]->dtype));
     if (out_sz != in_sz && in_sz > 0 && out_sz > 0) {
       int64_t dims[POLY_MAX_DIMS];
+      PolyUOp *dim_uops[POLY_MAX_DIMS];
+      PolyUOp *const *in_dim_uops = SRC_DIM_UOPS(0);
       memcpy(dims, SRC_DIMS(0), in_ndim * sizeof(int64_t));
+      for (int i = 0; i < in_ndim; i++)
+        dim_uops[i] = in_dim_uops ? in_dim_uops[i] : NULL;
       dims[in_ndim - 1] = (SRC_DIMS(0)[in_ndim - 1] * in_sz) / out_sz;
-      return make_entry_dims(ctx, dims, in_ndim);
+      dim_uops[in_ndim - 1] = NULL;
+      return make_entry_dims_uops(ctx, dims, dim_uops, in_ndim);
     } else {
-      if (u->n_src >= 1 && SRC_NDIM(0) >= 0) return make_entry_dims(ctx, SRC_DIMS(0), SRC_NDIM(0));
+      if (u->n_src >= 1 && SRC_NDIM(0) >= 0)
+        return make_entry_dims_uops(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), SRC_NDIM(0));
       return make_entry_none(ctx);
     }
   }
@@ -549,37 +633,57 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
    * a==1 or b==1 for expansion. Ported from old compute_shape(). */
   if (poly_opset_has(POLY_GROUP_ALU, op) || op == POLY_OP_CAST) {
     int64_t out_dims[POLY_MAX_DIMS];
+    PolyUOp *out_dim_uops[POLY_MAX_DIMS];
     int out_ndim = -1;
     for (int i = 0; i < u->n_src; i++) {
       int8_t si_ndim = SRC_NDIM(i);
       if (si_ndim < 0) continue;
       if (si_ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
       const int64_t *si_dims = SRC_DIMS(i);
+      PolyUOp *const *si_dim_uops = SRC_DIM_UOPS(i);
       if (out_ndim < 0) {
         out_ndim = si_ndim;
         if (si_ndim > 0) memcpy(out_dims, si_dims, si_ndim * sizeof(int64_t));
+        for (int ax = 0; ax < si_ndim; ax++)
+          out_dim_uops[ax] = si_dim_uops ? si_dim_uops[ax] : NULL;
         continue;
       }
       int ndim = (out_ndim > si_ndim) ? out_ndim : si_ndim;
       if (ndim > POLY_MAX_DIMS) return make_entry_none(ctx);
       int64_t merged[POLY_MAX_DIMS];
+      PolyUOp *merged_dim_uops[POLY_MAX_DIMS];
       for (int ax = 0; ax < ndim; ax++) {
         int ai = out_ndim - 1 - ax;
         int bi = si_ndim - 1 - ax;
         int64_t a = (ai >= 0) ? out_dims[ai] : 1;
         int64_t b = (bi >= 0) ? si_dims[bi] : 1;
+        PolyUOp *au = (ai >= 0) ? out_dim_uops[ai] : NULL;
+        PolyUOp *bu = (bi >= 0 && si_dim_uops) ? si_dim_uops[bi] : NULL;
         if (a != b && a != 1 && b != 1) {
           return make_entry_none(ctx);
         }
-        merged[ndim - 1 - ax] = (a > b) ? a : b;
+        if (a == 1) {
+          merged[ndim - 1 - ax] = b;
+          merged_dim_uops[ndim - 1 - ax] = bu;
+        } else if (b == 1) {
+          merged[ndim - 1 - ax] = a;
+          merged_dim_uops[ndim - 1 - ax] = au;
+        } else {
+          if (au && bu && au != bu) return make_entry_none(ctx);
+          if ((au && !bu) || (!au && bu)) return make_entry_none(ctx);
+          merged[ndim - 1 - ax] = a;
+          merged_dim_uops[ndim - 1 - ax] = au ? au : bu;
+        }
       }
       out_ndim = ndim;
       memcpy(out_dims, merged, ndim * sizeof(int64_t));
+      for (int ax = 0; ax < ndim; ax++)
+        out_dim_uops[ax] = merged_dim_uops[ax];
     }
     if (out_ndim < 0) {
       return make_entry_none(ctx);
     }
-    return make_entry_dims(ctx, out_dims, out_ndim);
+    return make_entry_dims_uops(ctx, out_dims, out_dim_uops, out_ndim);
   }
 
   /* Default: no shape */

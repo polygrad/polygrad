@@ -156,7 +156,7 @@ PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
   if (!ctx || !x) return NULL;
   int ndim = poly_uop_ndim(ctx, x);
   if (ndim < 1) return NULL;
-  const int64_t *dims = poly_uop_dims(ctx, x);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, x);
   if (!dims) return NULL;
   int64_t shape[POLY_MAX_DIMS];
   memcpy(shape, dims, ndim * sizeof(int64_t));
@@ -173,7 +173,7 @@ PolyUOp *poly_rmsnorm_apply(PolyCtx *ctx, PolyUOp *x, PolyUOp *w, double eps) {
   if (w) {
     int w_ndim = poly_uop_ndim(ctx, w);
     if (w_ndim == 1) {
-      const int64_t *w_dims = poly_uop_dims(ctx, w);
+      const int64_t *w_dims = poly_uop_max_shape_dims(ctx, w);
       int64_t bc[POLY_MAX_DIMS];
       for (int i = 0; i < ndim - 1; i++)
         bc[i] = 1;
@@ -283,7 +283,7 @@ PolyUOp *poly_causal_mask(PolyCtx *ctx, int64_t T) {
  */
 static PolyUOp *repeat_kv(PolyCtx *ctx, PolyUOp *kv, int n_rep) {
   if (n_rep <= 1) return kv;
-  const int64_t *dims = poly_uop_dims(ctx, kv);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, kv);
   int ndim = poly_uop_ndim(ctx, kv);
   if (ndim != 4 || !dims) return NULL;
   /* (B, n_kv_heads, T, hd) -> (B, n_kv_heads, 1, T, hd) */
@@ -302,8 +302,8 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
   int k_ndim = poly_uop_ndim(ctx, k);
   int v_ndim = poly_uop_ndim(ctx, v);
   if (q_ndim < 2 || k_ndim < 2 || v_ndim < 2) return NULL;
-  const int64_t *q_dims = poly_uop_dims(ctx, q);
-  const int64_t *k_dims = poly_uop_dims(ctx, k);
+  const int64_t *q_dims = poly_uop_max_shape_dims(ctx, q);
+  const int64_t *k_dims = poly_uop_max_shape_dims(ctx, k);
   if (!q_dims || !k_dims) return NULL;
 
   /* GQA: if Q has more heads than K/V, repeat K/V */
@@ -311,7 +311,7 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
     int n_rep = (int)(q_dims[1] / k_dims[1]);
     k = repeat_kv(ctx, k, n_rep);
     v = repeat_kv(ctx, v, n_rep);
-    k_dims = poly_uop_dims(ctx, k);
+    k_dims = poly_uop_max_shape_dims(ctx, k);
   }
 
   int64_t d_k = q_dims[q_ndim - 1];
@@ -329,7 +329,7 @@ PolyUOp *poly_sdpa(PolyCtx *ctx, PolyUOp *q, PolyUOp *k, PolyUOp *v, PolyUOp *ma
 
   if (is_causal) {
     int64_t seq_q = q_dims[q_ndim - 2];
-    int64_t seq_k = poly_uop_dims(ctx, k)[k_ndim - 2];
+    int64_t seq_k = poly_uop_max_shape_dims(ctx, k)[k_ndim - 2];
     PolyUOp *ones = poly_full(ctx, (int64_t[]){seq_q, seq_k}, 2, 1.0);
     PolyUOp *tril_m = poly_tril(ctx, ones, 0);
     PolyUOp *cond = poly_alu2(ctx, POLY_OP_CMPLT, tril_m, poly_const_float(ctx, 0.5));

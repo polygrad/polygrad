@@ -17,11 +17,6 @@
 extern "C" {
 #endif
 
-typedef struct PolyVarBinding {
-  PolyUOp *var; /* DEFINE_VAR UOp */
-  int32_t value; /* concrete runtime value */
-} PolyVarBinding;
-
 /* Compilation mode mirrors the entrypoint intent used by tinygrad call sites. */
 typedef enum {
   POLY_MODE_CALL = 0,
@@ -255,6 +250,28 @@ PolyUOp *poly_schedule_call_body(const PolySchedule *schedule, int call_index);
 bool poly_schedule_call_is_copy(const PolySchedule *schedule, int call_index);
 int poly_schedule_call_n_buffer_args(const PolySchedule *schedule, int call_index);
 int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index, int arg_index);
+int poly_schedule_external_slot_count(const PolySchedule *schedule);
+PolyUOp *poly_schedule_external_slot_buffer(const PolySchedule *schedule, int external_index);
+PolySchedule *poly_schedule_replay_with_buffers(
+    PolyCtx *ctx,
+    const PolySchedule *captured,
+    PolyUOp **external_bufs,
+    int n_external
+);
+PolySchedule *poly_schedule_replay_many_with_buffers(
+    PolyCtx *ctx,
+    PolySchedule **captured,
+    int n_captured,
+    PolyUOp **captured_external_bufs,
+    PolyUOp **replay_external_bufs,
+    int n_external
+);
+PolySchedule *poly_schedule_prune_for_buffers(
+    PolyCtx *ctx,
+    const PolySchedule *captured,
+    PolyUOp **needed_bufs,
+    int n_needed
+);
 
 /* Tinygrad ProgramInfo analogue for PROGRAM CALL bodies. Indices are over
  * filtered CALL buffer arguments, excluding DEFINE_VAR/BIND-like arguments. */

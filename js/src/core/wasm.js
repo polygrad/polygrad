@@ -127,7 +127,7 @@ async function createWasmCore(device) {
     if (!uop) return []
     const ndim = Module._poly_uop_ndim(ctx, uop)
     if (ndim <= 0) return []
-    const dimsPtr = Module._poly_uop_dims(ctx, uop)
+    const dimsPtr = Module._poly_uop_max_shape_dims(ctx, uop)
     if (!dimsPtr) return []
     const result = []
     const h32 = heap32()
@@ -646,10 +646,10 @@ async function createWasmCore(device) {
 
     // Shape-on-UOp accessors
     poly_uop_ndim: (ctx, uop) => Module._poly_uop_ndim(ctx, uop),
-    poly_uop_dims: (ctx, uop) => {
+    poly_uop_max_shape_dims: (ctx, uop) => {
       const ndim = Module._poly_uop_ndim(ctx, uop)
       if (ndim <= 0) return []
-      const dimsPtr = Module._poly_uop_dims(ctx, uop)
+      const dimsPtr = Module._poly_uop_max_shape_dims(ctx, uop)
       if (!dimsPtr) return []
       const result = []
       const h32 = heap32()
@@ -815,7 +815,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 6
+  const EXPECTED_ABI = 7
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

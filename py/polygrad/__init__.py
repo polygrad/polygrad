@@ -13,8 +13,9 @@ from .tensor import Tensor, Variable, BoundVariable
 from .dtype import dtypes
 from .device import Device
 from .instance import Instance
+from .jit import Jit, JitError, jit
 
-__all__ = ['Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance']
+__all__ = ['Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance', 'Jit', 'JitError', 'jit']
 
 try:
     __version__ = _pkg_version('polygrad')

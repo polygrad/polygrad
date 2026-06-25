@@ -4,6 +4,7 @@
 #include "engine/realize.h"
 #include "device.h"
 #include "ctx.h"
+#include "engine/jit.h"
 #include "engine/schedule.h"
 #include "frontend_internal.h"
 #include "tensor.h"
@@ -115,7 +116,7 @@ static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp
     return NULL;
   }
 
-  PolyShape root_shape = poly_uop_shape_cached(ctx, root);
+  PolyShape root_shape = poly_uop_max_shape_cached(ctx, root);
   PolyUOp *ret = poly_transform_to_call_rebuild_view(ctx, root->src[0], root_shape, &views);
   poly_transform_view_stack_free(&views);
   return ret;
@@ -341,7 +342,7 @@ static PolyUOp *poly_transform_to_call_materialize_reduce_source(
     return NULL;
   }
 
-  PolyShape base_shape = poly_uop_shape_cached(ctx, base);
+  PolyShape base_shape = poly_uop_max_shape_cached(ctx, base);
   PolyUOp *buf = poly_transform_to_call_alloc_buffer(ctx, u->dtype, base_shape);
   if (!buf) {
     fprintf(stderr, "poly_realize: buffer allocate failed\n");
@@ -533,7 +534,7 @@ static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, P
       poly_transform_to_call_ctx_free(&tctx);
       return NULL;
     }
-    PolyShape root_shape = poly_uop_shape_cached(ctx, materialized);
+    PolyShape root_shape = poly_uop_max_shape_cached(ctx, materialized);
     if (materialized->op == POLY_OP_CONTIGUOUS && materialized->n_src >= 1 &&
         !poly_uop_has_buffer_identity(materialized->src[0])) {
       /* tinygrad engine/allocations.py pm_early_transform_tensor_graph:
@@ -694,8 +695,17 @@ int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
     }
     return (!needs_run || all_outputs_resolved) ? 0 : -1;
   }
+  bool captured = false;
+  PolyJit *cap = ctx->active_jit_capture;
+  if (poly_jit_is_capturing(cap)) {
+    if (poly_jit_record_schedule(cap, sched) != 0) {
+      poly_schedule_free(sched);
+      return -1;
+    }
+    captured = true;
+  }
   int ret = poly_run_schedule(ctx, sched, NULL, 0);
-  poly_schedule_free(sched);
+  if (!captured) poly_schedule_free(sched);
   return ret;
 }
 

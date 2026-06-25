@@ -55,7 +55,7 @@ static int count_lin_ops(PolyUOp **lin, int n, PolyOps op) {
 }
 
 static int64_t test_uop_numel(PolyCtx *ctx, PolyUOp *u) {
-  PolyShape s = poly_uop_shape(ctx, u);
+  PolyShape s = poly_uop_max_shape(ctx, u);
   if (s.ndim < 0 || !s.dims) return -1;
   int64_t n = 1;
   for (int i = 0; i < s.ndim; i++)
@@ -803,7 +803,7 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   for (int i = 0; i < 4; i++) {
     ASSERT_NOT_NULL(grads[i]);
     PolyUOp *grad = grads[i];
-    PolyShape gs = poly_uop_shape(ctx, grad);
+    PolyShape gs = poly_uop_max_shape(ctx, grad);
     if (gs.ndim > 1 || (gs.ndim == 1 && gs.dims && gs.dims[0] != param_numels[i])) {
       int64_t flat[1] = {param_numels[i]};
       grad = poly_reshape(ctx, grad, flat, 1);

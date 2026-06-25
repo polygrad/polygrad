@@ -63,7 +63,7 @@ static PolyUOp *reduce_sum_axes(PolyCtx *ctx, PolyUOp *u, int64_t *axes, int n_a
 static PolyUOp *reduce_to_shape(PolyCtx *ctx, PolyUOp *grad, PolyShape target) {
   if (target.ndim < 0) return grad;
 
-  PolyShape gshape = poly_uop_shape_cached(ctx, grad);
+  PolyShape gshape = poly_uop_max_shape_cached(ctx, grad);
   if (gshape.ndim < 0) {
 
     return grad;
@@ -96,7 +96,7 @@ static PolyUOp *reduce_to_shape(PolyCtx *ctx, PolyUOp *grad, PolyShape target) {
       axes[n_axes++] = i;
     grad = reduce_sum_axes(ctx, grad, axes, n_axes);
 
-    gshape = poly_uop_shape_cached(ctx, grad);
+    gshape = poly_uop_max_shape_cached(ctx, grad);
     if (gshape.ndim < 0) return grad;
   } else if (gshape.ndim < target.ndim) {
     grad = poly_expand(ctx, grad, target.dims, target.ndim);
@@ -111,7 +111,7 @@ static PolyUOp *reduce_to_shape(PolyCtx *ctx, PolyUOp *grad, PolyShape target) {
   }
   grad = reduce_sum_axes(ctx, grad, axes, n_axes);
 
-  gshape = poly_uop_shape_cached(ctx, grad);
+  gshape = poly_uop_max_shape_cached(ctx, grad);
   if (gshape.ndim == 0) {
     grad = poly_expand(ctx, grad, target.dims, target.ndim);
   } else if (gshape.ndim == target.ndim) {
@@ -133,7 +133,7 @@ static PolyUOp *reduce_to_shape(PolyCtx *ctx, PolyUOp *grad, PolyShape target) {
 
 static PolyUOp *ones_like(PolyCtx *ctx, PolyUOp *u) {
   PolyUOp *one = const_scalar(ctx, u->dtype, 1.0);
-  PolyShape s = poly_uop_shape_cached(ctx, u);
+  PolyShape s = poly_uop_max_shape_cached(ctx, u);
   if (s.ndim > 0) one = poly_expand(ctx, one, s.dims, s.ndim);
 
   return one;
@@ -141,7 +141,7 @@ static PolyUOp *ones_like(PolyCtx *ctx, PolyUOp *u) {
 
 static PolyUOp *zeros_like(PolyCtx *ctx, PolyUOp *u) {
   PolyUOp *zero = const_scalar(ctx, u->dtype, 0.0);
-  PolyShape s = poly_uop_shape_cached(ctx, u);
+  PolyShape s = poly_uop_max_shape_cached(ctx, u);
   if (s.ndim > 0) zero = poly_expand(ctx, zero, s.dims, s.ndim);
 
   return zero;
@@ -305,7 +305,7 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_COPY:
     case POLY_OP_NOOP:
     case POLY_OP_BUFFERIZE: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = reduce_to_shape(ctx, g, s0);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
@@ -315,7 +315,7 @@ static PolyMap *grad_reverse_pass(
     /* CONTIGUOUS_BACKWARD: wrap gradient in CONTIGUOUS (realize barrier).
      * Matches tinygrad gradient.py:44: (ctx.contiguous(),) */
     case POLY_OP_CONTIGUOUS_BACKWARD: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = reduce_to_shape(ctx, g, s0);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       gx = poly_uop1(ctx, POLY_OP_CONTIGUOUS, gx->dtype, gx, poly_arg_none());
@@ -324,7 +324,7 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_CAST: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = reduce_to_shape(ctx, g, s0);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
@@ -332,7 +332,7 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_NEG: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = poly_uop1(ctx, POLY_OP_NEG, g->dtype, g, poly_arg_none());
       gx = reduce_to_shape(ctx, gx, s0);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
@@ -342,8 +342,8 @@ static PolyMap *grad_reverse_pass(
 
     case POLY_OP_ADD:
     case POLY_OP_SUB: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
-      PolyShape s1 = poly_uop_shape_cached(ctx, u->src[1]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
+      PolyShape s1 = poly_uop_max_shape_cached(ctx, u->src[1]);
 
       PolyUOp *ga = reduce_to_shape(ctx, g, s0);
       ga = cast_to(ctx, ga, u->src[0]->dtype);
@@ -358,8 +358,8 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_MUL: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
-      PolyShape s1 = poly_uop_shape_cached(ctx, u->src[1]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
+      PolyShape s1 = poly_uop_max_shape_cached(ctx, u->src[1]);
 
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *ga = mul_grad(ctx, g0, u->src[1], u->dtype);
@@ -375,8 +375,8 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_FDIV: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
-      PolyShape s1 = poly_uop_shape_cached(ctx, u->src[1]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
+      PolyShape s1 = poly_uop_max_shape_cached(ctx, u->src[1]);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
 
       /* d(a/b)/da = g/b */
@@ -398,7 +398,7 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_EXP2: {
       /* d/dx exp2(x) = exp2(x) * ln2
        * tinygrad: ret * ctx * math.log(2) → exp2(x) * g * ln2 */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *ln2 = const_scalar(ctx, u->dtype, 0.69314718055994530942);
       PolyUOp *tmp = poly_uop2(ctx, POLY_OP_MUL, u->dtype, u, ln2, poly_arg_none());
@@ -413,7 +413,7 @@ static PolyMap *grad_reverse_pass(
       /* d/dx log2(x) = 1/(x*ln2) = (1/ln2)/x
        * Pre-fold 1/ln2 to match tinygrad's symbolic simplification.
        * tinygrad: ctx / (ret.src[0] * math.log(2)) → (g*(1/ln2))/x */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *rln2 = const_scalar(ctx, u->dtype, 1.0 / 0.69314718055994530942);
       PolyUOp *gx = mul_grad(ctx, g0, rln2, u->dtype);
@@ -428,7 +428,7 @@ static PolyMap *grad_reverse_pass(
       /* d/dx sqrt(x) = 1/(2*sqrt(x)) = 0.5/sqrt(x)
        * tinygrad: ctx / (ret*2) → g / (2*sqrt(x))
        * Pre-fold as (g*0.5)/sqrt(x) to match tinygrad output. */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *half = const_scalar(ctx, u->dtype, 0.5);
       PolyUOp *gx = mul_grad(ctx, g0, half, u->dtype);
@@ -442,7 +442,7 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_RECIPROCAL: {
       /* d/dx (1/x) = -1/x^2 = -(1/x)^2 = -ret^2
        * tinygrad: -ctx * ret * ret */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *sq = poly_uop2(ctx, POLY_OP_MUL, u->dtype, u, u, poly_arg_none());
       PolyUOp *gx = mul_grad(ctx, g0, sq, u->dtype);
@@ -456,7 +456,7 @@ static PolyMap *grad_reverse_pass(
     case POLY_OP_SIN: {
       /* d/dx sin(x) = cos(x) = sin(π/2 - x)
        * tinygrad: (math.pi/2 - ret.src[0]).sin() * ctx */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *half_pi = const_scalar(ctx, u->dtype, 1.5707963267948966);
       PolyUOp *shifted = poly_uop2(ctx, POLY_OP_SUB, u->dtype, half_pi, u->src[0], poly_arg_none());
@@ -472,8 +472,8 @@ static PolyMap *grad_reverse_pass(
       /* d/dx max(x, y): gradient goes to x when x>y, to y when x<y,
        * split 50/50 when x==y.
        * tinygrad: (x>y).where(ctx, (x.eq(y)).where(ctx*0.5, 0)) */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
-      PolyShape s1 = poly_uop_shape_cached(ctx, u->src[1]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
+      PolyShape s1 = poly_uop_max_shape_cached(ctx, u->src[1]);
       PolyDType bdt = POLY_BOOL;
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *half = const_scalar(ctx, u->dtype, 0.5);
@@ -509,8 +509,8 @@ static PolyMap *grad_reverse_pass(
       /* d/db b^e = e * b^(e-1), with edge case: if b==0 && e==0, use e
        * d/de b^e = b^e * ln(b), with edge case: if b==0, use -inf when e<0 else 0
        * tinygrad gradient.py:35-36 */
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]); /* base */
-      PolyShape s1 = poly_uop_shape_cached(ctx, u->src[1]); /* exponent */
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]); /* base */
+      PolyShape s1 = poly_uop_max_shape_cached(ctx, u->src[1]); /* exponent */
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *b = u->src[0], *e = u->src[1];
       PolyDType dt = u->dtype;
@@ -561,8 +561,8 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_WHERE: {
-      PolyShape s1 = poly_uop_shape_cached(ctx, u->src[1]);
-      PolyShape s2 = poly_uop_shape_cached(ctx, u->src[2]);
+      PolyShape s1 = poly_uop_max_shape_cached(ctx, u->src[1]);
+      PolyShape s2 = poly_uop_max_shape_cached(ctx, u->src[2]);
       PolyUOp *zero = const_scalar(ctx, u->dtype, 0.0);
       PolyUOp *g0 = cast_to(ctx, g, u->dtype);
       PolyUOp *gt = poly_uop3(ctx, POLY_OP_WHERE, u->dtype, u->src[0], g0, zero, poly_arg_none());
@@ -577,7 +577,7 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_RESHAPE: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = poly_reshape(ctx, g, s0.dims, s0.ndim);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
@@ -585,7 +585,7 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_EXPAND: {
-      PolyShape s0 = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape s0 = poly_uop_max_shape_cached(ctx, u->src[0]);
       PolyUOp *gx = reduce_to_shape(ctx, g, s0);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
@@ -622,7 +622,7 @@ static PolyMap *grad_reverse_pass(
         fprintf(stderr, "polygrad: autograd: PAD rank %d out of bounds\n", n);
         GRAD_REVERSE_FAIL();
       }
-      PolyShape in_shape = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape in_shape = poly_uop_max_shape_cached(ctx, u->src[0]);
       int64_t shrink_pairs[POLY_MAX_DIMS][2];
       for (int i = 0; i < n; i++) {
         int64_t before = u->arg.pair_tuple.pairs[i][0];
@@ -645,7 +645,7 @@ static PolyMap *grad_reverse_pass(
         fprintf(stderr, "polygrad: autograd: SHRINK rank %d out of bounds\n", n);
         GRAD_REVERSE_FAIL();
       }
-      PolyShape in_shape = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape in_shape = poly_uop_max_shape_cached(ctx, u->src[0]);
       int64_t pad_pairs[POLY_MAX_DIMS][2];
       for (int i = 0; i < n; i++) {
         int64_t start = u->arg.pair_tuple.pairs[i][0];
@@ -675,7 +675,7 @@ static PolyMap *grad_reverse_pass(
         GRAD_REVERSE_FAIL();
       }
       PolyOps reduce_op = u->arg.reduce_axis.op;
-      PolyShape in_shape = poly_uop_shape_cached(ctx, u->src[0]);
+      PolyShape in_shape = poly_uop_max_shape_cached(ctx, u->src[0]);
 
       if (reduce_op == POLY_OP_ADD) {
         /* d/dx sum(x) = expand(g, input_shape) */

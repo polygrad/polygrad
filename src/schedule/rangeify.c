@@ -619,7 +619,7 @@ bool poly_is_realized(PolyIndexingCtx *ictx, PolyUOp *u) {
 static PolyShape ictx_shape(PolyIndexingCtx *ictx, PolyUOp *u) {
   PolyShape *cached = poly_map_get(ictx->shape_cache, poly_ptr_hash(u), u, poly_ptr_eq);
   if (cached) return *cached;
-  PolyShape s = poly_uop_shape(ictx->ctx, u);
+  PolyShape s = poly_uop_max_shape(ictx->ctx, u);
   PolyShape *stored = malloc(sizeof(PolyShape));
   *stored = s;
   poly_map_set(ictx->shape_cache, poly_ptr_hash(u), u, stored, poly_ptr_eq);
@@ -2360,7 +2360,7 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
          * is handled by sym constant folding, not here. */
       } else if (u->arg.kind == POLY_ARG_REDUCE_AXIS) {
         /* Check shape of input -- if any reduce axis has size 0 */
-        PolyShape sh = poly_uop_shape(ctx, input);
+        PolyShape sh = poly_uop_max_shape(ctx, input);
         bool has_zero = false;
         if (sh.ndim > 0) {
           int n_axes = u->arg.reduce_axis.n;

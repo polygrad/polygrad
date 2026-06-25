@@ -12,6 +12,7 @@
 #include "engine/schedule.h"
 #include "schedule/rangeify.h"
 #include "codegen.h"
+#include "tensor.h"
 #include "interp.h"
 #include <assert.h>
 #include <stdio.h>
@@ -33,6 +34,18 @@ PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size) {
   PolyDType dt;
   if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
   return poly_buffer(ctx, poly_dtype_scalar(dt), size);
+}
+
+PolyUOp *poly_buffer_var_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    PolyUOp *batch_var,
+    const int64_t *inner_dims,
+    int n_inner
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  return poly_buffer_var(ctx, poly_dtype_scalar(dt), batch_var, inner_dims, n_inner);
 }
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
@@ -781,7 +794,7 @@ void poly_debug_uop(PolyCtx *ctx, PolyUOp *u) {
     );
   }
   /* Try shape */
-  PolyShape s = poly_uop_shape(ctx, u);
+  PolyShape s = poly_uop_max_shape(ctx, u);
   if (s.ndim >= 0) {
     fprintf(stderr, "  shape: (");
     for (int i = 0; i < s.ndim; i++) {

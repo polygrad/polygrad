@@ -6,7 +6,7 @@
  *
  * The core ffi table normalizes int64 marshalling:
  *   - Functions taking shape/axis arrays accept plain JS number[]
- *   - Shapes are read from UOps via poly_uop_dims (shape-on-UOp)
+ *   - JS currently reads concrete max_shape dims from UOps
  */
 
 'use strict'
@@ -388,7 +388,7 @@ function createBoundTensorClass(runtime) {
     get shape() {
       const { ffi } = this._rt._core
       if (!this._uop) return []
-      return ffi.poly_uop_dims(this._ctx, this._uop)
+      return ffi.poly_uop_max_shape_dims(this._ctx, this._uop)
     }
     get dtype() { return this._dtype }
     get device() {
