@@ -275,6 +275,12 @@ int poly_instance_set_device(PolyInstance *inst, PolyDevice device);
 
 /* Explicit readback/upload for device-resident buffers */
 
+int poly_instance_read_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len);
+int poly_instance_write_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len);
+int poly_instance_read_buf_named(PolyInstance *inst, const char *name, void *host_dst, size_t dst_len);
+int poly_instance_write_buf_named(PolyInstance *inst, const char *name, const void *host_src, size_t src_len);
+
+/* Compatibility names for the original copy-style API. */
 int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len);
 int poly_instance_upload_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len);
 int poly_instance_readback_param(PolyInstance *inst, int i, void *host_dst, size_t dst_len);

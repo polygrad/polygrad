@@ -258,6 +258,48 @@ TEST(instance, forward_add) {
   PASS();
 }
 
+TEST(instance, read_write_buf_named_forward_e2e) {
+  int ir_len = 0;
+  uint8_t *ir = make_add_ir(&ir_len);
+  PolyInstance *inst = poly_instance_from_ir(ir, ir_len, NULL, 0);
+  ASSERT_NOT_NULL(inst);
+
+  float a_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_data[] = {10.0f, 20.0f, 30.0f, 40.0f};
+  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "a", a_data, sizeof(a_data)), 0);
+  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "b", b_data, sizeof(b_data)), 0);
+  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "missing", b_data, sizeof(b_data)), -1);
+
+  ASSERT_INT_EQ(poly_instance_forward(inst, NULL, 0), 0);
+
+  float out[4] = {0};
+  ASSERT_INT_EQ(poly_instance_read_buf_named(inst, "output", out, sizeof(out)), 0);
+  ASSERT_FLOAT_EQ(out[0], 11.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[1], 22.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[2], 33.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[3], 44.0f, 1e-5f);
+  ASSERT_INT_EQ(poly_instance_read_buf_named(inst, "missing", out, sizeof(out)), -1);
+
+  float a2[] = {5.0f, 6.0f, 7.0f, 8.0f};
+  ASSERT_INT_EQ(poly_instance_write_buf_named(inst, "a", a2, sizeof(a2)), 0);
+  ASSERT_INT_EQ(poly_instance_forward(inst, NULL, 0), 0);
+
+  int out_idx = -1;
+  for (int i = 0; i < poly_instance_buf_count(inst); i++)
+    if (strcmp(poly_instance_buf_name(inst, i), "output") == 0) out_idx = i;
+  ASSERT_TRUE(out_idx >= 0);
+  memset(out, 0, sizeof(out));
+  ASSERT_INT_EQ(poly_instance_read_buf(inst, out_idx, out, sizeof(out)), 0);
+  ASSERT_FLOAT_EQ(out[0], 15.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[1], 26.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[2], 37.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out[3], 48.0f, 1e-5f);
+
+  poly_instance_free(inst);
+  free(ir);
+  PASS();
+}
+
 TEST(instance, forward_reuses_entry_schedule_after_ctx_schedule_cache_clear) {
   int ir_len = 0;
   uint8_t *ir = make_add_ir(&ir_len);

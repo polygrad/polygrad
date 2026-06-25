@@ -1703,28 +1703,48 @@ float *poly_instance_buf_data(PolyInstance *inst, int i, int64_t *numel_out) {
   return (float *)inst->bufs[i].data;
 }
 
-/* Readback / Upload */
+/* Read / Write */
 
-int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
+int poly_instance_read_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   return poly_buffer_read(inst->ctx, inst->bufs[i].buffer, host_dst, dst_len);
 }
 
-int poly_instance_upload_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
+int poly_instance_write_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_bufs) return -1;
   int rc = poly_buffer_write(inst->ctx, inst->bufs[i].buffer, host_src, src_len);
   if (rc == 0) sync_buf_to_host(inst, i);
   return rc;
 }
 
+int poly_instance_read_buf_named(PolyInstance *inst, const char *name, void *host_dst, size_t dst_len) {
+  int idx = find_buf_by_name(inst, name);
+  if (idx < 0) return -1;
+  return poly_instance_read_buf(inst, idx, host_dst, dst_len);
+}
+
+int poly_instance_write_buf_named(PolyInstance *inst, const char *name, const void *host_src, size_t src_len) {
+  int idx = find_buf_by_name(inst, name);
+  if (idx < 0) return -1;
+  return poly_instance_write_buf(inst, idx, host_src, src_len);
+}
+
+int poly_instance_readback_buf(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
+  return poly_instance_read_buf(inst, i, host_dst, dst_len);
+}
+
+int poly_instance_upload_buf(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
+  return poly_instance_write_buf(inst, i, host_src, src_len);
+}
+
 int poly_instance_readback_param(PolyInstance *inst, int i, void *host_dst, size_t dst_len) {
   if (!inst || i < 0 || i >= inst->n_params) return -1;
-  return poly_instance_readback_buf(inst, inst->param_indices[i], host_dst, dst_len);
+  return poly_instance_read_buf(inst, inst->param_indices[i], host_dst, dst_len);
 }
 
 int poly_instance_upload_param(PolyInstance *inst, int i, const void *host_src, size_t src_len) {
   if (!inst || i < 0 || i >= inst->n_params) return -1;
-  return poly_instance_upload_buf(inst, inst->param_indices[i], host_src, src_len);
+  return poly_instance_write_buf(inst, inst->param_indices[i], host_src, src_len);
 }
 
 /* Weight I/O */
