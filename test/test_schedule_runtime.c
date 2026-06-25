@@ -1704,6 +1704,11 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_compiled_runner_valid) {
   PolyCompiledSchedule *plan = poly_lower_schedule(ctx, sched, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(plan);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
+  PolyCtxStats cached = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &cached), 0);
+  ASSERT_INT_EQ(cached.runtime_cache_entries, 1);
+  ASSERT_TRUE(cached.runtime_artifact_entries > 0);
+  ASSERT_TRUE(cached.compiled_artifact_bytes > 0);
 
   float a_data[4] = {1, 2, 3, 4};
   float b_data[4] = {10, 20, 30, 40};
@@ -1727,6 +1732,12 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_compiled_runner_valid) {
 
   poly_runtime_cache_clear(ctx);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 0);
+  PolyCtxStats evicted = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &evicted), 0);
+  ASSERT_INT_EQ(evicted.runtime_cache_entries, 0);
+  ASSERT_INT_EQ(evicted.runtime_artifact_entries, cached.runtime_artifact_entries);
+  ASSERT_TRUE(evicted.compiled_artifact_bytes > 0);
+  ASSERT_TRUE(evicted.compiled_artifact_bytes < cached.compiled_artifact_bytes);
 
   a_data[0] = 5.0f;
   a_data[1] = 6.0f;
@@ -1745,6 +1756,10 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_compiled_runner_valid) {
   ASSERT_FLOAT_EQ(out_data[3], 88.0f, 1e-5);
 
   poly_compiled_schedule_free(plan);
+  PolyCtxStats released = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &released), 0);
+  ASSERT_INT_EQ(released.runtime_artifact_entries, 0);
+  ASSERT_INT_EQ(released.compiled_artifact_bytes, 0);
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   schedule_restore_env(&pcache);

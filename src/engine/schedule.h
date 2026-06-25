@@ -299,6 +299,14 @@ int poly_run_schedule(
 );
 
 /* Low-level runner for pre-lowered compiled schedules. */
+/* Low-level compiled schedule replay helper.
+ *
+ * This is an internal/runtime API, not the public Instance execution surface.
+ * Passing slot_data preserves the old raw-slot compatibility path used by
+ * backend tests. Passing NULL or omitting a slot resolves external buffers
+ * through ctx->buffers and still performs the normal prepare/execute/commit
+ * residency protocol.
+ */
 int poly_run_compiled_schedule(
     PolyCompiledSchedule *schedule,
     void **slot_data,
