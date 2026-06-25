@@ -82,14 +82,38 @@ typedef struct {
   PolyRewriteFn fn;
 } PolyRule;
 
+typedef struct {
+  PolyPat *pat;
+  PolyRewriteFn fn;
+  /* Borrowed diagnostic name. It must outlive the matcher. */
+  const char *name;
+} PolyNamedRule;
+
+#define POLY_RULE(pat_, fn_) ((PolyNamedRule){.pat = (pat_), .fn = (fn_), .name = #fn_})
+
+typedef struct {
+  /* Borrowed diagnostic name. */
+  const char *name;
+  uint64_t candidates;       /* by-op rule candidates considered */
+  uint64_t attempts;         /* candidates that pass early-reject */
+  uint64_t pattern_matches;  /* pattern matched before callback */
+  uint64_t rewrites;         /* callback produced a different UOp */
+  double total_ms;           /* candidate handling time */
+  double rewrite_ms;         /* callback-produced rewrite time */
+} PolyRuleStats;
+
 /* PatternMatcher */
 
 typedef struct PolyPatternMatcher PolyPatternMatcher;
 
 PolyPatternMatcher *poly_pm_new(const PolyRule *rules, int n_rules);
+PolyPatternMatcher *poly_pm_new_named(const PolyNamedRule *rules, int n_rules);
 void poly_pm_destroy(PolyPatternMatcher *pm);
 PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop);
 PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b);
+int poly_pm_rule_count(const PolyPatternMatcher *pm);
+int poly_pm_get_rule_stats(const PolyPatternMatcher *pm, int idx, PolyRuleStats *out);
+void poly_pm_reset_rule_stats(PolyPatternMatcher *pm);
 
 /* graph_rewrite (top-down worklist engine) */
 

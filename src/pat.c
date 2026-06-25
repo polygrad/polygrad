@@ -298,13 +298,24 @@ bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
 
 struct PolyPatternMatcher {
   PolyRule *rules;
+  PolyRuleStats *stats;
   int n_rules;
+  bool stats_enabled;
   struct {
     int *indices;
     int n;
     int cap;
   } by_op[POLY_OP_COUNT];
 };
+
+static bool pm_stats_env_enabled(void) {
+  int tracked = poly_getenv_int(
+      "POLY_TRACK_MATCH_STATS",
+      poly_getenv_int("TRACK_MATCH_STATS", 0)
+  );
+  return tracked > 0 || poly_getenv_flag("POLY_PRINT_MATCH_STATS") ||
+         poly_getenv_flag("PRINT_MATCH_STATS");
+}
 
 static void pm_add_op(PolyPatternMatcher *pm, int op, int rule_idx) {
   if (op < 0 || op >= POLY_OP_COUNT) return;
@@ -315,11 +326,29 @@ static void pm_add_op(PolyPatternMatcher *pm, int op, int rule_idx) {
   pm->by_op[op].indices[pm->by_op[op].n++] = rule_idx;
 }
 
-PolyPatternMatcher *poly_pm_new(const PolyRule *rules, int n_rules) {
+static PolyPatternMatcher *poly_pm_new_impl(
+    const PolyRule *rules,
+    const char *const *names,
+    int n_rules
+) {
+  if (n_rules < 0 || (n_rules > 0 && !rules)) return NULL;
   PolyPatternMatcher *pm = calloc(1, sizeof(PolyPatternMatcher));
-  pm->rules = malloc(n_rules * sizeof(PolyRule));
-  memcpy(pm->rules, rules, n_rules * sizeof(PolyRule));
+  if (!pm) return NULL;
+  if (n_rules > 0) {
+    pm->rules = malloc((size_t)n_rules * sizeof(PolyRule));
+    pm->stats = calloc((size_t)n_rules, sizeof(PolyRuleStats));
+    if (!pm->rules || !pm->stats) {
+      free(pm->rules);
+      free(pm->stats);
+      free(pm);
+      return NULL;
+    }
+    memcpy(pm->rules, rules, (size_t)n_rules * sizeof(PolyRule));
+  }
   pm->n_rules = n_rules;
+  pm->stats_enabled = pm_stats_env_enabled();
+  for (int i = 0; i < n_rules; i++)
+    pm->stats[i].name = (names && names[i]) ? names[i] : "<unnamed>";
 
   for (int i = 0; i < n_rules; i++) {
     PolyPat *p = rules[i].pat;
@@ -336,15 +365,42 @@ PolyPatternMatcher *poly_pm_new(const PolyRule *rules, int n_rules) {
   return pm;
 }
 
+PolyPatternMatcher *poly_pm_new(const PolyRule *rules, int n_rules) {
+  return poly_pm_new_impl(rules, NULL, n_rules);
+}
+
+PolyPatternMatcher *poly_pm_new_named(const PolyNamedRule *rules, int n_rules) {
+  if (n_rules < 0 || (n_rules > 0 && !rules)) return NULL;
+  if (n_rules == 0) return poly_pm_new_impl(NULL, NULL, 0);
+
+  PolyRule *plain = malloc((size_t)n_rules * sizeof(PolyRule));
+  const char **names = malloc((size_t)n_rules * sizeof(const char *));
+  if (!plain || !names) {
+    free(plain);
+    free(names);
+    return NULL;
+  }
+  for (int i = 0; i < n_rules; i++) {
+    plain[i] = (PolyRule){.pat = rules[i].pat, .fn = rules[i].fn};
+    names[i] = rules[i].name;
+  }
+  PolyPatternMatcher *pm = poly_pm_new_impl(plain, names, n_rules);
+  free(plain);
+  free(names);
+  return pm;
+}
+
 void poly_pm_destroy(PolyPatternMatcher *pm) {
   if (!pm) return;
   for (int i = 0; i < POLY_OP_COUNT; i++)
     free(pm->by_op[i].indices);
+  free(pm->stats);
   free(pm->rules);
   free(pm);
 }
 
 PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
+  if (!pm || !uop) return NULL;
   int op = (int)uop->op;
   if (op < 0 || op >= POLY_OP_COUNT || pm->by_op[op].n == 0) return NULL;
 
@@ -356,29 +412,76 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
   for (int i = 0; i < pm->by_op[op].n; i++) {
     int idx = pm->by_op[op].indices[i];
     PolyRule *rule = &pm->rules[idx];
+    PolyRuleStats *st = pm->stats_enabled ? &pm->stats[idx] : NULL;
+    double t0 = st ? poly_now_ms() : 0.0;
+    if (st) st->candidates++;
 
     /* Early reject: required ops must appear in sources */
-    if (!poly_opset_subset(rule->pat->early_reject, src_ops)) continue;
+    if (!poly_opset_subset(rule->pat->early_reject, src_ops)) {
+      if (st) st->total_ms += poly_now_ms() - t0;
+      continue;
+    }
+    if (st) st->attempts++;
 
     PolyBindings binds = {.n = 0};
     if (poly_pat_match(rule->pat, uop, &binds)) {
+      if (st) st->pattern_matches++;
       PolyUOp *result = rule->fn(ctx, uop, &binds);
       poly_bindings_free(&binds);
-      if (result != NULL && result != uop) return result;
+      if (result != NULL && result != uop) {
+        if (st) {
+          double dt = poly_now_ms() - t0;
+          st->rewrites++;
+          st->rewrite_ms += dt;
+          st->total_ms += dt;
+        }
+        return result;
+      }
     } else {
       poly_bindings_free(&binds);
     }
+    if (st) st->total_ms += poly_now_ms() - t0;
   }
   return NULL;
 }
 
+int poly_pm_rule_count(const PolyPatternMatcher *pm) {
+  return pm ? pm->n_rules : 0;
+}
+
+int poly_pm_get_rule_stats(const PolyPatternMatcher *pm, int idx, PolyRuleStats *out) {
+  if (!pm || !out || idx < 0 || idx >= pm->n_rules) return -1;
+  *out = pm->stats[idx];
+  return 0;
+}
+
+void poly_pm_reset_rule_stats(PolyPatternMatcher *pm) {
+  if (!pm || !pm->stats) return;
+  for (int i = 0; i < pm->n_rules; i++) {
+    const char *name = pm->stats[i].name;
+    pm->stats[i] = (PolyRuleStats){.name = name};
+  }
+}
+
 PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b) {
+  if (!a || !b) return NULL;
   int total = a->n_rules + b->n_rules;
-  PolyRule *combined = malloc(total * sizeof(PolyRule));
-  memcpy(combined, a->rules, a->n_rules * sizeof(PolyRule));
-  memcpy(combined + a->n_rules, b->rules, b->n_rules * sizeof(PolyRule));
-  PolyPatternMatcher *result = poly_pm_new(combined, total);
+  PolyRule *combined = total > 0 ? malloc((size_t)total * sizeof(PolyRule)) : NULL;
+  const char **names = total > 0 ? malloc((size_t)total * sizeof(const char *)) : NULL;
+  if (total > 0 && (!combined || !names)) {
+    free(combined);
+    free(names);
+    return NULL;
+  }
+  memcpy(combined, a->rules, (size_t)a->n_rules * sizeof(PolyRule));
+  memcpy(combined + a->n_rules, b->rules, (size_t)b->n_rules * sizeof(PolyRule));
+  for (int i = 0; i < a->n_rules; i++)
+    names[i] = (a->stats && a->stats[i].name) ? a->stats[i].name : NULL;
+  for (int i = 0; i < b->n_rules; i++)
+    names[a->n_rules + i] = (b->stats && b->stats[i].name) ? b->stats[i].name : NULL;
+  PolyPatternMatcher *result = poly_pm_new_impl(combined, names, total);
   free(combined);
+  free(names);
   return result;
 }
 

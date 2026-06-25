@@ -5,6 +5,34 @@
 #include "test_harness.h"
 #include "../src/pat.h"
 
+typedef struct {
+  const char *key;
+  char *value;
+  bool had;
+} PatEnvSave;
+
+static PatEnvSave pat_save_env(const char *key) {
+  const char *v = getenv(key);
+  char *copy = NULL;
+  if (v) {
+    size_t n = strlen(v) + 1;
+    copy = malloc(n);
+    if (copy) memcpy(copy, v, n);
+  }
+  return (PatEnvSave){.key = key, .value = copy, .had = (v != NULL)};
+}
+
+static void pat_restore_env(PatEnvSave *s) {
+  if (!s) return;
+  if (s->had) {
+    setenv(s->key, s->value ? s->value : "", 1);
+  } else {
+    unsetenv(s->key);
+  }
+  free(s->value);
+  s->value = NULL;
+}
+
 /* Pattern matching tests */
 
 TEST(pat, match_op_literal) {
@@ -253,6 +281,86 @@ TEST(pat, pm_early_reject) {
   PASS();
 }
 
+TEST(pat, pm_rule_stats_disabled_by_default) {
+  PatEnvSave track = pat_save_env("POLY_TRACK_MATCH_STATS");
+  PatEnvSave track_tg = pat_save_env("TRACK_MATCH_STATS");
+  PatEnvSave print = pat_save_env("POLY_PRINT_MATCH_STATS");
+  PatEnvSave print_tg = pat_save_env("PRINT_MATCH_STATS");
+  unsetenv("POLY_TRACK_MATCH_STATS");
+  unsetenv("TRACK_MATCH_STATS");
+  unsetenv("POLY_PRINT_MATCH_STATS");
+  unsetenv("PRINT_MATCH_STATS");
+
+  PolyPat *p =
+      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyNamedRule rules[] = {POLY_RULE(p, test_rewrite_identity)};
+  PolyPatternMatcher *pm = poly_pm_new_named(rules, 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, x, zero, poly_arg_none());
+  ASSERT_PTR_EQ(poly_pm_rewrite(pm, ctx, add), x);
+
+  PolyRuleStats stats = {0};
+  ASSERT_INT_EQ(poly_pm_get_rule_stats(pm, 0, &stats), 0);
+  ASSERT_STR_EQ(stats.name, "test_rewrite_identity");
+  ASSERT_INT_EQ((int)stats.candidates, 0);
+  ASSERT_INT_EQ((int)stats.attempts, 0);
+  ASSERT_INT_EQ((int)stats.pattern_matches, 0);
+  ASSERT_INT_EQ((int)stats.rewrites, 0);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  pat_restore_env(&print_tg);
+  pat_restore_env(&print);
+  pat_restore_env(&track_tg);
+  pat_restore_env(&track);
+  PASS();
+}
+
+TEST(pat, pm_rule_stats_track_named_rewrites) {
+  PatEnvSave track = pat_save_env("POLY_TRACK_MATCH_STATS");
+  setenv("POLY_TRACK_MATCH_STATS", "1", 1);
+
+  PolyPat *p =
+      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyNamedRule rules[] = {POLY_RULE(p, test_rewrite_identity)};
+  PolyPatternMatcher *pm = poly_pm_new_named(rules, 1);
+  ASSERT_INT_EQ(poly_pm_rule_count(pm), 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, x, zero, poly_arg_none());
+  ASSERT_PTR_EQ(poly_pm_rewrite(pm, ctx, add), x);
+
+  PolyRuleStats stats = {0};
+  ASSERT_INT_EQ(poly_pm_get_rule_stats(pm, 0, &stats), 0);
+  ASSERT_STR_EQ(stats.name, "test_rewrite_identity");
+  ASSERT_INT_EQ((int)stats.candidates, 1);
+  ASSERT_INT_EQ((int)stats.attempts, 1);
+  ASSERT_INT_EQ((int)stats.pattern_matches, 1);
+  ASSERT_INT_EQ((int)stats.rewrites, 1);
+  ASSERT_TRUE(stats.total_ms >= 0.0);
+  ASSERT_TRUE(stats.rewrite_ms >= 0.0);
+
+  poly_pm_reset_rule_stats(pm);
+  ASSERT_INT_EQ(poly_pm_get_rule_stats(pm, 0, &stats), 0);
+  ASSERT_STR_EQ(stats.name, "test_rewrite_identity");
+  ASSERT_INT_EQ((int)stats.candidates, 0);
+  ASSERT_INT_EQ((int)stats.rewrites, 0);
+
+  ASSERT_INT_EQ(poly_pm_get_rule_stats(pm, 1, &stats), -1);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  pat_restore_env(&track);
+  PASS();
+}
+
 /* graph_rewrite tests */
 
 TEST(pat, graph_rewrite_noop) {
@@ -329,12 +437,17 @@ TEST(pat, pm_concat) {
   PolyPat *p1 =
       poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
   PolyPat *p2 = poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_any("x"), NULL);
-  PolyRule r1[] = {{p1, test_rewrite_identity}};
-  PolyRule r2[] = {{p2, test_rewrite_div_self}};
+  PolyNamedRule r1[] = {POLY_RULE(p1, test_rewrite_identity)};
+  PolyNamedRule r2[] = {POLY_RULE(p2, test_rewrite_div_self)};
 
-  PolyPatternMatcher *pm1 = poly_pm_new(r1, 1);
-  PolyPatternMatcher *pm2 = poly_pm_new(r2, 1);
+  PolyPatternMatcher *pm1 = poly_pm_new_named(r1, 1);
+  PolyPatternMatcher *pm2 = poly_pm_new_named(r2, 1);
   PolyPatternMatcher *combined = poly_pm_concat(pm1, pm2);
+  PolyRuleStats stats = {0};
+  ASSERT_INT_EQ(poly_pm_get_rule_stats(combined, 0, &stats), 0);
+  ASSERT_STR_EQ(stats.name, "test_rewrite_identity");
+  ASSERT_INT_EQ(poly_pm_get_rule_stats(combined, 1, &stats), 0);
+  ASSERT_STR_EQ(stats.name, "test_rewrite_div_self");
 
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *five = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
