@@ -98,6 +98,24 @@ for i in range(100):
 print(f"loss: {loss.item():.4f}")
 ```
 
+## Tensor JIT
+
+`@jit` follows tinygrad's raw Tensor capture/replay model. The first call runs
+normally, the second call captures realized schedules, and later calls replay
+those schedules with current input buffers.
+
+```python
+from polygrad import Tensor, jit
+
+@jit
+def step(x):
+    return (x + 1).realize()
+
+print(step(Tensor([1, 2, 3])).numpy())  # normal run
+print(step(Tensor([4, 5, 6])).numpy())  # capture
+print(step(Tensor([7, 8, 9])).numpy())  # replay
+```
+
 ## Tensor API
 
 ### Construction
