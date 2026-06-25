@@ -78,7 +78,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -139,6 +139,14 @@ test-parity-ir: build/polygrad_parity_runner
 
 test-parity-ir-opt: build/polygrad_parity_runner
 	$(SAN_RUN) CACHELEVEL=0 POLY_OPTIMIZE=1 POLY_DEVECTORIZE=0 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
+
+Z3_FUZZ_ITERS ?= 128
+Z3_FUZZ_SEED ?= 0
+test-symbolic-z3: build/libpolygrad.so
+	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
+		test/external/fuzz_symbolic_z3.py --mode general --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
+	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
+		test/external/fuzz_symbolic_z3.py --mode div --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
 
 build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
