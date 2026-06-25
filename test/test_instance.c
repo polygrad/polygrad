@@ -947,6 +947,100 @@ TEST(instance, from_binding_arrays_forward_e2e) {
   PASS();
 }
 
+TEST(instance, from_binding_arrays_train_after_set_device_auto_updates_param) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int64_t matrix_shape[] = {1, 1};
+  PolyUOp *x_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *y_buf = poly_buffer_f32(ctx, 1);
+  float w_init[] = {1.0f};
+  PolyUOp *w_root = poly_buffer_from_host(
+      ctx, w_init, sizeof(w_init), poly_dtype_id_by_name("float32"), matrix_shape, 2
+  );
+  ASSERT_NOT_NULL(x_buf);
+  ASSERT_NOT_NULL(y_buf);
+  ASSERT_NOT_NULL(w_root);
+
+  PolyUOp *x_root = poly_reshape(ctx, x_buf, matrix_shape, 2);
+  PolyUOp *y_root = poly_reshape(ctx, y_buf, matrix_shape, 2);
+  ASSERT_NOT_NULL(x_root);
+  ASSERT_NOT_NULL(y_root);
+
+  PolyTensor *x = poly_tensor_create(ctx, x_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *y = poly_tensor_create(ctx, y_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *w = poly_tensor_create(ctx, w_root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(y);
+  ASSERT_NOT_NULL(w);
+
+  PolyUOp *pred_u = poly_dot(ctx, poly_tensor_uop(x), poly_tensor_uop(w));
+  PolyTensor *pred = poly_tensor_create(ctx, pred_u, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(pred);
+
+  PolyUOp *diff = poly_alu2(ctx, POLY_OP_SUB, pred_u, poly_tensor_uop(y));
+  PolyUOp *loss_u = poly_alu2(ctx, POLY_OP_MUL, diff, diff);
+  loss_u = poly_mean_reduce(ctx, loss_u, 0, 0);
+  loss_u = poly_mean_reduce(ctx, loss_u, 0, 0);
+  PolyTensor *loss = poly_tensor_create(ctx, loss_u, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(loss);
+
+  const char *binding_names[] = {"fit_x", "fit_y", "fit_w", "fit_out", "loss"};
+  int binding_roles[] = {
+      POLY_ROLE_INPUT,
+      POLY_ROLE_TARGET,
+      POLY_ROLE_PARAM,
+      POLY_ROLE_OUTPUT,
+      POLY_ROLE_OUTPUT,
+  };
+  PolyTensor *binding_tensors[] = {x, y, w, pred, loss};
+  uint32_t binding_flags[] = {0, 0, 0, 0, 0};
+
+  const char *entry_names[] = {"forward", "loss"};
+  const char *entry_inputs[] = {"fit_x", "fit_x", "fit_y"};
+  int entry_input_counts[] = {1, 2};
+  const char *entry_outputs[] = {"fit_out", "loss"};
+  int entry_output_counts[] = {1, 1};
+  const char *entry_objectives[] = {NULL, "loss"};
+  uint32_t entry_flags[] = {0, 0};
+
+  PolyInstanceError err = {0};
+  PolyInstance *inst = poly_instance_from_binding_arrays(
+      ctx, binding_names, binding_roles, binding_tensors, binding_flags, 5, entry_names,
+      entry_inputs, entry_input_counts, entry_outputs, entry_output_counts, entry_objectives,
+      entry_flags, 2, NULL, &err
+  );
+  ASSERT_NOT_NULL(inst);
+  ASSERT_INT_EQ(poly_instance_set_device(inst, POLY_DEVICE_AUTO), 0);
+  ASSERT_INT_EQ(
+      poly_instance_set_optimizer(inst, POLY_OPTIM_SGD, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f), 0
+  );
+
+  float x_data[] = {1.0f};
+  float y_data[] = {3.0f};
+  PolyIOBinding io[] = {{"fit_x", x_data}, {"fit_y", y_data}};
+
+  float first = 0.0f;
+  float last = 0.0f;
+  for (int step = 0; step < 4; step++) {
+    float loss_out = 0.0f;
+    ASSERT_INT_EQ(poly_instance_train_step(inst, io, 2, &loss_out), 0);
+    if (step == 0) first = loss_out;
+    last = loss_out;
+  }
+
+  int64_t numel = 0;
+  float *w_data = poly_instance_param_data(inst, 0, &numel);
+  ASSERT_NOT_NULL(w_data);
+  ASSERT_INT_EQ((int)numel, 1);
+  ASSERT_TRUE(last < first);
+  ASSERT_TRUE(w_data[0] > 1.0f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, from_sinks_wraps_selected_lazy_tensor_graph) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[] = {4};

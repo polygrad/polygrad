@@ -289,6 +289,11 @@ int poly_schedule_call_run(
 /* Backend lowering from backend-neutral schedule to compiled runners. */
 PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, PolyDevice device);
 
+/* Internal execution-device selection shared by direct schedule execution and
+ * cached entrypoint replay. Preferred executable device wins, otherwise slot
+ * annotations/current non-host residencies are used, then the default device. */
+PolyDevice poly_schedule_infer_device(PolyCtx *ctx, const PolySchedule *schedule);
+
 /* Tinygrad engine/realize.py analogue: lower and run a backend-neutral
  * schedule using ctx->buffers as the runtime data source. */
 int poly_run_schedule(

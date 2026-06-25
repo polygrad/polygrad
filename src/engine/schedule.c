@@ -1922,10 +1922,16 @@ static PolyDevice poly_schedule_slot_target_device(
 
 static PolyDevice poly_schedule_slot_declared_execution_device(
     const PolySchedule *sched,
-    int slot_idx
+    int slot_idx,
+    PolyDevice fallback
 ) {
   if (!sched || slot_idx < 0 || slot_idx >= sched->template->n_buf_slots) return POLY_DEVICE_AUTO;
   PolyDevice dev = sched->template->buf_slots[slot_idx].device;
+  if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST &&
+      poly_device_is_host_addressable(dev) && fallback != POLY_DEVICE_AUTO &&
+      fallback != POLY_DEVICE_HOST && poly_device_can_execute(fallback) &&
+      !poly_device_is_host_addressable(fallback))
+    return POLY_DEVICE_AUTO;
   if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST && poly_device_can_execute(dev))
     return dev;
   return POLY_DEVICE_AUTO;
@@ -1964,7 +1970,7 @@ static PolyDevice poly_call_device(
     for (int ai = 0; ai < access->n_active_args; ai++) {
       int arg = access->active_args[ai];
       int slot = io->arg_to_slot[arg];
-      PolyDevice dev = poly_schedule_slot_declared_execution_device(sched, slot);
+      PolyDevice dev = poly_schedule_slot_declared_execution_device(sched, slot, fallback);
       if (dev != POLY_DEVICE_AUTO) {
         return dev;
       }
@@ -1996,6 +2002,7 @@ static PolyDevice poly_intermediate_slot_runtime_device(
   if (!ctx || !sched || slot < 0 || slot >= sched->template->n_buf_slots)
     return fallback == POLY_DEVICE_AUTO ? poly_device_default() : fallback;
 
+  PolyDevice copy_device = POLY_DEVICE_AUTO;
   for (int k = 0; k < sched->template->n_calls; k++) {
     const PolyCallIO *io = poly_schedule_call_io(sched, k);
     const PolyCallAccess *access = io ? io->access : NULL;
@@ -2012,14 +2019,40 @@ static PolyDevice poly_intermediate_slot_runtime_device(
     if (!touches) continue;
 
     PolyDevice device = poly_call_device(ctx, sched, k, fallback);
+    if (poly_call_is_copy(poly_schedule_call(sched, k)) ||
+        poly_call_is_view(poly_schedule_call(sched, k))) {
+      if (copy_device == POLY_DEVICE_AUTO && device != POLY_DEVICE_AUTO)
+        copy_device = device;
+      continue;
+    }
     if (device != POLY_DEVICE_AUTO && device != POLY_DEVICE_HOST && poly_device_can_execute(device))
       return device;
   }
+  if (copy_device != POLY_DEVICE_AUTO) return copy_device;
 
   PolyDevice device = poly_schedule_slot_target_device(ctx, sched, slot, fallback);
   if (device == POLY_DEVICE_AUTO) device = fallback;
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
   return device;
+}
+
+static PolyDevice poly_memory_arena_slot_runtime_device(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    int arena_slot,
+    PolyDevice fallback
+) {
+  if (!ctx || !sched || arena_slot < 0 || arena_slot >= sched->template->n_buf_slots)
+    return fallback == POLY_DEVICE_AUTO ? poly_device_default() : fallback;
+  for (int i = 0; i < sched->template->n_buf_slots; i++) {
+    const PolyScheduleBufSlot *slot = &sched->template->buf_slots[i];
+    if (!slot->is_intermediate || !slot->has_memory_parent ||
+        slot->memory_parent_slot != arena_slot)
+      continue;
+    PolyDevice device = poly_intermediate_slot_runtime_device(ctx, sched, i, fallback);
+    if (device != POLY_DEVICE_AUTO) return device;
+  }
+  return fallback == POLY_DEVICE_AUTO ? poly_device_default() : fallback;
 }
 
 static bool collect_external_buf_order_from_kernel_graph(
@@ -4207,8 +4240,14 @@ static int poly_lower_copy_call(
       src_slot >= schedule->template->n_buf_slots)
     return -1;
 
-  PolyDevice dst_device = poly_schedule_slot_target_device(ctx, schedule, dst_slot, device);
-  PolyDevice src_device = poly_schedule_slot_target_device(ctx, schedule, src_slot, device);
+  PolyDevice placement_fallback =
+      (schedule->run && schedule->run->device != POLY_DEVICE_AUTO) ? schedule->run->device : device;
+  PolyDevice dst_device = schedule->template->buf_slots[dst_slot].is_intermediate
+                              ? poly_intermediate_slot_runtime_device(ctx, schedule, dst_slot, placement_fallback)
+                              : poly_schedule_slot_target_device(ctx, schedule, dst_slot, device);
+  PolyDevice src_device = schedule->template->buf_slots[src_slot].is_intermediate
+                              ? poly_intermediate_slot_runtime_device(ctx, schedule, src_slot, placement_fallback)
+                              : poly_schedule_slot_target_device(ctx, schedule, src_slot, device);
   if (dst_device == POLY_DEVICE_AUTO) dst_device = device;
   if (src_device == POLY_DEVICE_AUTO) src_device = device;
 
@@ -5238,6 +5277,38 @@ bool poly_device_is_host_addressable(PolyDevice device) {
   return be && be->get_allocator()->host_addressable;
 }
 
+static PolyDevice poly_schedule_runtime_slot_allocated_device(
+    const PolyScheduleTemplate *tpl,
+    const PolyScheduleRuntime *run,
+    int slot_idx,
+    PolyDevice fallback_device
+) {
+  if (!tpl || !run || slot_idx < 0 || slot_idx >= tpl->n_buf_slots)
+    return fallback_device;
+
+  if (run->slot_views && slot_idx < run->n_slot_views && run->slot_views[slot_idx].ptr)
+    return run->slot_views[slot_idx].device;
+
+  const PolyScheduleBufSlot *slot = &tpl->buf_slots[slot_idx];
+  if (slot->is_intermediate && slot->has_memory_parent) {
+    int parent = slot->memory_parent_slot;
+    if (parent >= 0 && parent < tpl->n_buf_slots)
+      return poly_schedule_runtime_slot_allocated_device(tpl, run, parent, fallback_device);
+  }
+
+  if (run->slot_to_data && slot_idx < run->n_slot_to_data) {
+    void *ptr = run->slot_to_data[slot_idx];
+    for (int i = 0; ptr && i < run->n_intermediates; i++) {
+      if (run->intermediates[i].ptr == ptr)
+        return run->intermediates[i].device;
+    }
+  }
+
+  PolyDevice dev = slot->device;
+  if (dev == POLY_DEVICE_AUTO || dev == POLY_DEVICE_HOST) dev = fallback_device;
+  return dev;
+}
+
 static int poly_schedule_runtime_fill_parent_views(
     const PolyScheduleTemplate *tpl,
     PolyScheduleRuntime *run,
@@ -5252,9 +5323,8 @@ static int poly_schedule_runtime_fill_parent_views(
     if (parent < 0 || parent >= run->n_slot_to_data || parent >= tpl->n_buf_slots ||
         !run->slot_to_data[parent])
       return -1;
-    PolyDevice parent_device = tpl->buf_slots[parent].device;
-    if (parent_device == POLY_DEVICE_AUTO || parent_device == POLY_DEVICE_HOST)
-      parent_device = fallback_device;
+    PolyDevice parent_device =
+        poly_schedule_runtime_slot_allocated_device(tpl, run, parent, fallback_device);
     if (parent_device == POLY_DEVICE_WEBGPU) need_slot_views = true;
   }
 
@@ -5268,9 +5338,8 @@ static int poly_schedule_runtime_fill_parent_views(
     const PolyScheduleBufSlot *slot = &tpl->buf_slots[i];
     if (!slot->is_intermediate || !slot->has_memory_parent) continue;
     int parent = slot->memory_parent_slot;
-    PolyDevice parent_device = tpl->buf_slots[parent].device;
-    if (parent_device == POLY_DEVICE_AUTO || parent_device == POLY_DEVICE_HOST)
-      parent_device = fallback_device;
+    PolyDevice parent_device =
+        poly_schedule_runtime_slot_allocated_device(tpl, run, parent, fallback_device);
 
     if (parent_device == POLY_DEVICE_WEBGPU) {
 #ifdef __EMSCRIPTEN__
@@ -5420,7 +5489,9 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
       if (schedule->template->buf_slots[i].has_memory_parent) continue;
       size_t nbytes = (size_t)schedule->template->buf_slots[i].nbytes;
       if (nbytes == 0) nbytes = sizeof(float);
-      PolyDevice slot_device = poly_schedule_slot_target_device(ctx, schedule, i, device);
+      PolyDevice slot_device = schedule->template->buf_slots[i].is_memory_arena
+                                   ? poly_memory_arena_slot_runtime_device(ctx, schedule, i, device)
+                                   : poly_intermediate_slot_runtime_device(ctx, schedule, i, device);
       if (slot_device == POLY_DEVICE_HOST || slot_device == POLY_DEVICE_AUTO) slot_device = device;
       const PolyBackendDesc *slot_backend = poly_backend_get(slot_device);
       const PolyAllocator *slot_alloc = slot_backend ? slot_backend->get_allocator() : NULL;
@@ -5495,7 +5566,7 @@ cleanup:
 
 /* Infer the execution device from attached runtime buffers, matching the
  * graph-driven realize path. HOST buffers never force the executor. */
-static PolyDevice poly_infer_schedule_device(PolyCtx *ctx, const PolySchedule *sched) {
+PolyDevice poly_schedule_infer_device(PolyCtx *ctx, const PolySchedule *sched) {
   PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
   if (preferred != POLY_DEVICE_AUTO && preferred != POLY_DEVICE_HOST &&
       poly_device_can_execute(preferred))
@@ -5568,8 +5639,6 @@ static PolyDevice poly_call_arg_runtime_device(
         (slot >= 0 && slot < sched->template->n_buf_slots) ? sched->template->buf_slots[slot].buf_uop : NULL;
     PolyBuffer *b = poly_buffer_get(ctx, buf_uop);
     if (b && b->ptr && b->device == POLY_DEVICE_HOST) return POLY_DEVICE_HOST;
-    if (is_out && b && b->src && b->src->ptr && b->src->device == POLY_DEVICE_HOST)
-      return POLY_DEVICE_HOST;
   }
 
   /* For PROGRAM-like calls, outs/ins are arguments to the same kernel. A
@@ -5963,7 +6032,8 @@ static void poly_zero_schedule_slot(
   PolyScheduleBufSlot *slot = &sched->template->buf_slots[slot_idx];
   if (!slot->is_intermediate || !slot->needs_zero || !run->slot_to_data[slot_idx]) return;
   size_t nbytes = (size_t)(slot->nbytes > 0 ? slot->nbytes : (int64_t)sizeof(float));
-  PolyDevice dev = poly_schedule_slot_runtime_device(ctx, sched, slot_idx, run->device);
+  PolyDevice dev =
+      poly_schedule_runtime_slot_allocated_device(sched->template, run, slot_idx, run->device);
   const PolyBackendDesc *be = poly_backend_get(dev);
   PolyBuffer tmp = {
       .ptr = run->slot_to_data[slot_idx],
@@ -6040,7 +6110,9 @@ static int poly_schedule_runtime_prepare(PolyCtx *ctx, PolySchedule *sched, Poly
       if (sched->template->buf_slots[i].has_memory_parent) continue;
       size_t nbytes = (size_t)sched->template->buf_slots[i].nbytes;
       if (nbytes == 0) nbytes = sizeof(float);
-      PolyDevice slot_device = poly_intermediate_slot_runtime_device(ctx, sched, i, device);
+      PolyDevice slot_device = sched->template->buf_slots[i].is_memory_arena
+                                   ? poly_memory_arena_slot_runtime_device(ctx, sched, i, device)
+                                   : poly_intermediate_slot_runtime_device(ctx, sched, i, device);
       if (slot_device == POLY_DEVICE_HOST || slot_device == POLY_DEVICE_AUTO) slot_device = device;
       const PolyBackendDesc *slot_backend = poly_backend_get(slot_device);
       const PolyAllocator *slot_alloc = slot_backend ? slot_backend->get_allocator() : NULL;
@@ -6358,7 +6430,7 @@ static int poly_schedule_execute_runner_call(
     return -1;
   }
 
-  if (compiled_debug_plan)
+  if (compiled_debug_plan && compiled_debug_plan->device == POLY_DEVICE_WEBGPU)
     debug_dump_webgpu_runner_args(compiled_debug_plan, exec_step, call_index, runner, args);
   else
     debug_dump_schedule_args(sched, device, exec_step, call_index, runner, args);
@@ -6392,7 +6464,7 @@ int poly_schedule_call_run(
 ) {
   if (!ctx || !schedule || call_index < 0 || call_index >= schedule->template->n_calls) return -1;
 
-  PolyDevice device = poly_infer_schedule_device(ctx, schedule);
+  PolyDevice device = poly_schedule_infer_device(ctx, schedule);
   if (poly_schedule_runtime_prepare(ctx, schedule, device) != 0) return -1;
   PolyDevice item_device = poly_call_device(ctx, schedule, call_index, device);
   if (poly_schedule_call_lower(ctx, schedule, call_index, item_device) != 0) return -1;
@@ -6416,7 +6488,7 @@ int poly_run_schedule(
 
   bool timing = poly_debug_at_least(2);
   double t0 = timing ? poly_now_ms() : 0.0;
-  PolyDevice device = poly_infer_schedule_device(ctx, schedule);
+  PolyDevice device = poly_schedule_infer_device(ctx, schedule);
   if (timing) {
     fprintf(
         stderr,

@@ -54,6 +54,7 @@ typedef struct {
 
 typedef struct {
   PolySchedule *schedule; /* resolved concrete plan for one instance entrypoint */
+  PolyCompiledSchedule *compiled; /* lowered replay plan for the schedule/device */
 } PolyEntrypointPlan;
 
 /* Value-and-grad metadata (built lazily on first train call) */
@@ -1406,6 +1407,8 @@ static void vag_free(VagState *vag, int n_params) {
 
 static void entrypoint_plan_clear(PolyEntrypointPlan *plan) {
   if (!plan) return;
+  poly_compiled_schedule_free(plan->compiled);
+  plan->compiled = NULL;
   poly_schedule_free(plan->schedule);
   plan->schedule = NULL;
 }
@@ -2010,16 +2013,26 @@ static int run_instance_sink(
     }
   }
   double t_sched = timing ? poly_now_ms() : 0.0;
-  int ret = sched ? poly_run_schedule(inst->ctx, sched, NULL, 0) : -1;
+  int ret = -1;
+  if (sched && plan) {
+    PolyDevice device = poly_schedule_infer_device(inst->ctx, sched);
+    if (!plan->compiled || plan->compiled->device != device) {
+      poly_compiled_schedule_free(plan->compiled);
+      plan->compiled = poly_lower_schedule(inst->ctx, sched, device);
+    }
+    ret = plan->compiled ? poly_run_compiled_schedule(plan->compiled, NULL, 0, NULL, 0) : -1;
+  } else if (sched) {
+    ret = poly_run_schedule(inst->ctx, sched, NULL, 0);
+  }
   if (schedule_owned) poly_schedule_free(sched);
   if (timing) {
     double t_done = poly_now_ms();
     fprintf(
         stderr,
         "[polygrad:instance] input=%.3fms schedule=%.3fms run=%.3fms total=%.3fms "
-        "ret=%d cached=%d\n",
+        "ret=%d cached=%d compiled=%d\n",
         t_attach - t0, t_sched - t_attach, t_done - t_sched, t_done - t0, ret,
-        plan && plan->schedule
+        plan && plan->schedule, plan && plan->compiled
     );
   }
   return ret;
