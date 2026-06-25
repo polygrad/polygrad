@@ -73,7 +73,9 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
+QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
+
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -105,6 +107,16 @@ test-interp: build/polygrad_test
 
 test-x64: build/polygrad_test
 	$(SAN_RUN) POLY_DEVICE=x64 ./build/polygrad_test
+
+require-qwen3-gguf:
+	@if [ ! -f "$(QWEN3_GGUF)" ]; then \
+		echo "Qwen3 GGUF fixture not found: $(QWEN3_GGUF)"; \
+		echo "Set POLY_QWEN3_GGUF=/path/to/Qwen3-0.6B-Q8_0.gguf or place it under temp/."; \
+		exit 2; \
+	fi
+
+test-qwen3: build/polygrad_test require-qwen3-gguf
+	$(SAN_RUN) POLY_QWEN3_GGUF="$(QWEN3_GGUF)" ./build/polygrad_test qwen3
 
 # Backend-specific tests only (uses substring filter)
 test-cuda-only: build/polygrad_test
@@ -314,6 +326,12 @@ test-browser: test-js-browser
 
 test-js-browser: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/browser/run.js
+
+test-browser-qwen3: verify-source-mirrors wasm-pkg require-qwen3-gguf
+	@mkdir -p temp/chrome_tmp
+	cd js && bash scripts/build-browser.sh
+	TMPDIR=$(abspath temp/chrome_tmp) POLY_QWEN3_GGUF="$(abspath $(QWEN3_GGUF))" \
+		$(NODE) js/test/browser/qwen_webgpu.js
 
 test-js-legacy: build/libpolygrad.so
 	$(NODE) js_legacy/test/test_tensor.js
