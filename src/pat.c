@@ -301,6 +301,8 @@ struct PolyPatternMatcher {
   PolyRuleStats *stats;
   int n_rules;
   bool stats_enabled;
+  FILE *trace_fp;
+  bool trace_owned;
   struct {
     int *indices;
     int n;
@@ -315,6 +317,70 @@ static bool pm_stats_env_enabled(void) {
   );
   return tracked > 0 || poly_getenv_flag("POLY_PRINT_MATCH_STATS") ||
          poly_getenv_flag("PRINT_MATCH_STATS");
+}
+
+static bool pm_trace_env_false(const char *v) {
+  return !v || !v[0] || strcmp(v, "0") == 0 || strcmp(v, "false") == 0 ||
+         strcmp(v, "False") == 0 || strcmp(v, "no") == 0 || strcmp(v, "NO") == 0;
+}
+
+static FILE *pm_trace_open(bool *owned) {
+  if (owned) *owned = false;
+  const char *v = getenv("POLY_REWRITE_TRACE_JSON");
+  if (!v || !v[0]) v = getenv("REWRITE_TRACE_JSON");
+  if (pm_trace_env_false(v)) return NULL;
+  if (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "True") == 0 ||
+      strcmp(v, "stderr") == 0 || strcmp(v, "-") == 0) {
+    return stderr;
+  }
+  FILE *fp = fopen(v, "a");
+  if (fp && owned) *owned = true;
+  return fp;
+}
+
+static void pm_trace_json_string(FILE *fp, const char *s) {
+  fputc('"', fp);
+  if (s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+      switch (*p) {
+        case '\\': fputs("\\\\", fp); break;
+        case '"': fputs("\\\"", fp); break;
+        case '\b': fputs("\\b", fp); break;
+        case '\f': fputs("\\f", fp); break;
+        case '\n': fputs("\\n", fp); break;
+        case '\r': fputs("\\r", fp); break;
+        case '\t': fputs("\\t", fp); break;
+        default:
+          if (*p < 0x20) fprintf(fp, "\\u%04x", (unsigned)*p);
+          else fputc((int)*p, fp);
+          break;
+      }
+    }
+  }
+  fputc('"', fp);
+}
+
+static void pm_trace_emit_rewrite(
+    PolyPatternMatcher *pm,
+    const PolyRuleStats *st,
+    PolyUOp *before,
+    PolyUOp *after,
+    double elapsed_ms
+) {
+  if (!pm || !pm->trace_fp || !before || !after) return;
+  FILE *fp = pm->trace_fp;
+  fputs("{\"event\":\"rewrite\",\"rule\":", fp);
+  pm_trace_json_string(fp, st ? st->name : "<unnamed>");
+  fputs(",\"before\":\"", fp);
+  fprintf(fp, "%p", (void *)before);
+  fputs("\",\"before_op\":", fp);
+  pm_trace_json_string(fp, poly_op_name(before->op));
+  fputs(",\"after\":\"", fp);
+  fprintf(fp, "%p", (void *)after);
+  fputs("\",\"after_op\":", fp);
+  pm_trace_json_string(fp, poly_op_name(after->op));
+  fprintf(fp, ",\"elapsed_ms\":%.6f}\n", elapsed_ms);
+  fflush(fp);
 }
 
 static void pm_add_op(PolyPatternMatcher *pm, int op, int rule_idx) {
@@ -347,6 +413,7 @@ static PolyPatternMatcher *poly_pm_new_impl(
   }
   pm->n_rules = n_rules;
   pm->stats_enabled = pm_stats_env_enabled();
+  pm->trace_fp = pm_trace_open(&pm->trace_owned);
   for (int i = 0; i < n_rules; i++)
     pm->stats[i].name = (names && names[i]) ? names[i] : "<unnamed>";
 
@@ -394,6 +461,7 @@ void poly_pm_destroy(PolyPatternMatcher *pm) {
   if (!pm) return;
   for (int i = 0; i < POLY_OP_COUNT; i++)
     free(pm->by_op[i].indices);
+  if (pm->trace_owned && pm->trace_fp) fclose(pm->trace_fp);
   free(pm->stats);
   free(pm->rules);
   free(pm);
@@ -413,7 +481,8 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
     int idx = pm->by_op[op].indices[i];
     PolyRule *rule = &pm->rules[idx];
     PolyRuleStats *st = pm->stats_enabled ? &pm->stats[idx] : NULL;
-    double t0 = st ? poly_now_ms() : 0.0;
+    PolyRuleStats *trace_st = pm->trace_fp ? &pm->stats[idx] : st;
+    double t0 = (st || pm->trace_fp) ? poly_now_ms() : 0.0;
     if (st) st->candidates++;
 
     /* Early reject: required ops must appear in sources */
@@ -429,12 +498,13 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
       PolyUOp *result = rule->fn(ctx, uop, &binds);
       poly_bindings_free(&binds);
       if (result != NULL && result != uop) {
+        double dt = (st || pm->trace_fp) ? poly_now_ms() - t0 : 0.0;
         if (st) {
-          double dt = poly_now_ms() - t0;
           st->rewrites++;
           st->rewrite_ms += dt;
           st->total_ms += dt;
         }
+        pm_trace_emit_rewrite(pm, trace_st, uop, result, dt);
         return result;
       }
     } else {

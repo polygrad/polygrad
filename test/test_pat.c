@@ -361,6 +361,44 @@ TEST(pat, pm_rule_stats_track_named_rewrites) {
   PASS();
 }
 
+TEST(pat, pm_rewrite_trace_json_env) {
+  const char *path = "temp/pat_rewrite_trace_test.jsonl";
+  PatEnvSave trace = pat_save_env("POLY_REWRITE_TRACE_JSON");
+  remove(path);
+  setenv("POLY_REWRITE_TRACE_JSON", path, 1);
+
+  PolyPat *p =
+      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("x"), poly_pat_const_val(poly_arg_int(0)), NULL);
+  PolyNamedRule rules[] = {POLY_RULE(p, test_rewrite_identity)};
+  PolyPatternMatcher *pm = poly_pm_new_named(rules, 1);
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, x, zero, poly_arg_none());
+  ASSERT_PTR_EQ(poly_pm_rewrite(pm, ctx, add), x);
+
+  poly_pm_destroy(pm);
+  pm = NULL;
+
+  FILE *fp = fopen(path, "rb");
+  ASSERT_NOT_NULL(fp);
+  char buf[1024];
+  size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+  fclose(fp);
+  buf[n] = '\0';
+  ASSERT_TRUE(strstr(buf, "\"event\":\"rewrite\"") != NULL);
+  ASSERT_TRUE(strstr(buf, "\"rule\":\"test_rewrite_identity\"") != NULL);
+  ASSERT_TRUE(strstr(buf, "\"before_op\":\"ADD\"") != NULL);
+  ASSERT_TRUE(strstr(buf, "\"after_op\":\"CONST\"") != NULL);
+
+  remove(path);
+  poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  pat_restore_env(&trace);
+  PASS();
+}
+
 /* graph_rewrite tests */
 
 TEST(pat, graph_rewrite_noop) {
