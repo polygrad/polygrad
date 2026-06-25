@@ -4,6 +4,9 @@ CFLAGS_RELEASE = $(CFLAGS_COMMON) -O2
 CFLAGS_DEBUG = $(CFLAGS_COMMON) -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
 LDFLAGS = -lm
 LDFLAGS_DEBUG = -lm -ldl -fsanitize=address,undefined
+TSAN_CC ?= clang
+TSAN_OPTIONS ?= halt_on_error=1:second_deadlock_stack=1
+TSAN_RUNNER ?= setarch $$(uname -m) -R
 # Keep LeakSanitizer enabled by default for the native debug test binary.
 # Driver/runtime targets can still opt out when investigating external runtime
 # leaks:
@@ -30,7 +33,7 @@ SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/selftest.c
 FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/runtime_cpu.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/simplify.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/instance.c src/tokenizer.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
-TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_realize.c
+TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_realize.c test/test_threading.c
 
 ifeq ($(HAS_CUDA), 1)
   SRC += src/render_cuda.c src/runtime_cuda.c
@@ -75,7 +78,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -490,6 +493,16 @@ build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	clang -std=c11 -g -O1 -fsanitize=memory -fno-omit-frame-pointer \
 		-o $@ $^ -lm -ldl -fsanitize=memory
+
+# ThreadSanitizer focused smoke. The current threading contract permits
+# independent contexts on separate threads; one PolyCtx remains thread-confined.
+test-tsan: build/polygrad_test_tsan
+	TSAN_OPTIONS=$(TSAN_OPTIONS) $(TSAN_RUNNER) ./build/polygrad_test_tsan threading
+
+build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
+	@mkdir -p build
+	$(TSAN_CC) $(CFLAGS_COMMON) -g -O1 -fsanitize=thread -fno-omit-frame-pointer \
+		-o $@ $^ -lm -ldl -pthread -fsanitize=thread
 
 # ── Full verification ──────────────────────────────────────────────────
 
