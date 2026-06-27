@@ -3546,6 +3546,7 @@ static void poly_schedule_runtime_cleanup(
     free(run->slot_views);
   }
   free(run->slot_to_data);
+  free(run->ctx_slots);
   free(run->merged_vars);
   free(run->var_int_storage);
 
@@ -3559,6 +3560,8 @@ static void poly_schedule_runtime_cleanup(
   run->n_slot_to_data = 0;
   run->slot_views = NULL;
   run->n_slot_views = 0;
+  run->ctx_slots = NULL;
+  run->n_ctx_slots = 0;
   run->merged_vars = NULL;
   run->merged_vars_cap = 0;
   run->var_int_storage = NULL;
@@ -4323,10 +4326,10 @@ const PolyAllocator POLY_CPU_ALLOCATOR = {
  * residency should drop the frontend's strong owner entry keyed by this
  * PolyBuffer* address value; the actual host bytes remain frontend-managed.
  *
- * Emscripten builds currently stage imported host data into wasm heap in the
- * JS binding before calling poly_buffer_from_host. Retiring the HOST residency
- * still notifies the frontend so it can drop its strong owner entry, and then
- * frees the staged wasm heap pointer.
+ * Emscripten WebGPU imports use a NULL pointer host key so browser JS can own
+ * zero-copy HOST bytes. Retiring that HOST residency still notifies the
+ * frontend so it can drop its strong owner entry. Non-WebGPU WASM imports pass
+ * a wasm-heap pointer and are adopted as WASM residency in poly_buffer_from_host.
  */
 
 static void *host_alloc(size_t nbytes, void *dev_ctx) {
@@ -4596,7 +4599,17 @@ static int copy_execute_fn(void *self, void **args, int n_args) {
       .valid = true,
   };
 
-  return poly_buffer_copy(&dst, &src);
+  int rc = poly_buffer_copy(&dst, &src);
+  if (poly_debug_at_least(7)) {
+    fprintf(
+        stderr,
+        "[polygrad:copy_exec] dst=%s ptr=%p key=%p src=%s ptr=%p key=%p nbytes=%zu rc=%d\n",
+        poly_device_name(ch->dst_device), args[0], (void *)ch->dst_identity,
+        poly_device_name(ch->src_device), args[1], (void *)ch->src_identity, ch->nbytes, rc
+    );
+    fflush(stderr);
+  }
+  return rc;
 }
 
 static bool runner_copy_param_allows_null(const PolyRunner *runner, int param_index) {
@@ -4635,9 +4648,19 @@ static int poly_lower_copy_call(
   PolyDevice dst_device = schedule->template->buf_slots[dst_slot].is_intermediate
                               ? poly_intermediate_slot_runtime_device(ctx, schedule, dst_slot, placement_fallback)
                               : poly_schedule_slot_target_device(ctx, schedule, dst_slot, device);
-  PolyDevice src_device = schedule->template->buf_slots[src_slot].is_intermediate
-                              ? poly_intermediate_slot_runtime_device(ctx, schedule, src_slot, placement_fallback)
-                              : poly_schedule_slot_target_device(ctx, schedule, src_slot, device);
+  PolyDevice src_device = POLY_DEVICE_AUTO;
+  PolyBuffer *src_buf = poly_buffer_get(ctx, schedule->template->buf_slots[src_slot].buf_uop);
+  if (schedule->template->buf_slots[src_slot].is_intermediate) {
+    src_device = poly_intermediate_slot_runtime_device(ctx, schedule, src_slot, placement_fallback);
+  } else if (src_buf && src_buf->device != POLY_DEVICE_AUTO) {
+    /* COPY is directional. Arg 1 is the source, so lower the runner for the
+     * source's actual current residency. Placement of the destination or a
+     * later compute consumer must not turn a HOST/WASM source pointer into a
+     * fake GPU handle. */
+    src_device = src_buf->device;
+  } else {
+    src_device = poly_schedule_slot_target_device(ctx, schedule, src_slot, device);
+  }
   if (dst_device == POLY_DEVICE_AUTO) dst_device = device;
   if (src_device == POLY_DEVICE_AUTO) src_device = device;
 
@@ -4651,9 +4674,21 @@ static int poly_lower_copy_call(
   ch->dst_device = dst_device;
   ch->src_device = src_device;
   PolyBuffer *dst_buf = poly_buffer_get(ctx, schedule->template->buf_slots[dst_slot].buf_uop);
-  PolyBuffer *src_buf = poly_buffer_get(ctx, schedule->template->buf_slots[src_slot].buf_uop);
   ch->dst_identity = (dst_buf && dst_buf->device == POLY_DEVICE_HOST) ? dst_buf : NULL;
   ch->src_identity = (src_buf && src_buf->device == POLY_DEVICE_HOST) ? src_buf : NULL;
+  if (poly_debug_at_least(7)) {
+    fprintf(
+        stderr,
+        "[polygrad:copy_lower] call=%d dst_slot=%d src_slot=%d dst_dev=%s src_dev=%s "
+        "dst_uop=%p src_uop=%p dst_cur=%s/%p src_cur=%s/%p\n",
+        call_index, dst_slot, src_slot, poly_device_name(dst_device), poly_device_name(src_device),
+        (void *)schedule->template->buf_slots[dst_slot].buf_uop,
+        (void *)schedule->template->buf_slots[src_slot].buf_uop,
+        dst_buf ? poly_device_name(dst_buf->device) : "none", dst_buf ? dst_buf->ptr : NULL,
+        src_buf ? poly_device_name(src_buf->device) : "none", src_buf ? src_buf->ptr : NULL
+    );
+    fflush(stderr);
+  }
 
   out->kind = POLY_RUNNER_COPY;
   out->handle = ch;
@@ -6018,8 +6053,18 @@ static PolyDevice poly_call_arg_runtime_device(
     bool is_in,
     PolyDevice call_device
 ) {
-  if (poly_call_is_copy(call))
+  if (poly_call_is_copy(call)) {
+    /* COPY is directional: argument 0 is destination and argument 1 is source.
+     * For an external source, use the current residency's device instead of a
+     * slot placement hint. This keeps browser WebGPU HOST-key imports as HOST
+     * COPY sources instead of staging them through WASM first. */
+    if (is_in && !is_out && sched && slot >= 0 && slot < sched->template->n_buf_slots &&
+        !sched->template->buf_slots[slot].is_intermediate) {
+      PolyBuffer *b = poly_buffer_get(ctx, sched->template->buf_slots[slot].buf_uop);
+      if (b && b->device != POLY_DEVICE_AUTO) return b->device;
+    }
     return poly_schedule_slot_runtime_device(ctx, sched, slot, call_device);
+  }
 
   PolyDevice device = call_device;
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
@@ -6111,7 +6156,9 @@ static int poly_prepare_call_buffer_slots_common(
     PolyBuffer *b = NULL;
     if (slot_device == POLY_DEVICE_HOST) {
       b = poly_call_host_slot_residency(ctx, buf_uop, access->ins[i]);
-      if (!b || !b->ptr) {
+      bool allow_keyed_host =
+          poly_call_is_copy(call) && b && b->device == POLY_DEVICE_HOST && !b->ptr;
+      if (!b || (!b->ptr && !allow_keyed_host)) {
         fprintf(stderr, "polygrad: %s: buffer slot %d has no data attached\n", label, slot);
         rc = -1;
         break;
@@ -6368,11 +6415,20 @@ static int poly_schedule_execute_view_call(
 
 static uint32_t poly_schedule_lower_env_stamp(void) {
   uint32_t stamp = 2166136261u;
+#ifdef __EMSCRIPTEN__
+  /* WASM runtime lowering currently emits SIMD-capable modules. Keep that
+   * renderer feature in the existing tinygrad-style program/runtime cache key
+   * so future scalar/SIMD/relaxed/threaded variants cannot collide. */
+  const uint8_t wasm_features = 1;
+#else
+  const uint8_t wasm_features = 0;
+#endif
   uint8_t bytes[] = {
       (uint8_t)poly_getenv_flag("POLY_OPTIMIZE"),
       (uint8_t)(poly_getenv_int("POLY_DEVECTORIZE", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("POLY_TC_OPT", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("POLY_USE_TC", 1) & 0xFF),
+      wasm_features,
   };
   for (size_t i = 0; i < sizeof(bytes) / sizeof(bytes[0]); i++) {
     stamp ^= bytes[i];
@@ -6957,6 +7013,8 @@ int poly_run_compiled_schedule(
     int n_var_bindings
 ) {
   if (!plan || !plan->template) return -1;
+  bool timing = poly_debug_at_least(7);
+  double t0 = timing ? poly_now_ms() : 0.0;
   PolySchedule sched_view = {.template = plan->template, .run = plan->run};
   PolySchedule *sched = &sched_view;
   PolyScheduleRuntime *run = plan->run;
@@ -6965,6 +7023,7 @@ int poly_run_compiled_schedule(
   const PolyBackendDesc *backend = poly_backend_get(plan->device);
   if (!backend) return -1;
   if (poly_backend_ensure_open(plan->device) != 0) return -1;
+  double t_backend = timing ? poly_now_ms() : 0.0;
 
   int ret = 0;
 
@@ -6975,12 +7034,21 @@ int poly_run_compiled_schedule(
     }
     /* intermediate slots are pre-filled at compile time and don't change */
   }
-  bool *ctx_slots =
-      calloc((size_t)(run->n_slot_to_data > 0 ? run->n_slot_to_data : 1), sizeof(bool));
-  if (!ctx_slots) return -1;
+  if (run->n_ctx_slots < run->n_slot_to_data) {
+    bool *ctx_slots = realloc(
+        run->ctx_slots, (size_t)(run->n_slot_to_data > 0 ? run->n_slot_to_data : 1) * sizeof(bool)
+    );
+    if (!ctx_slots) return -1;
+    run->ctx_slots = ctx_slots;
+    run->n_ctx_slots = run->n_slot_to_data;
+  }
+  memset(run->ctx_slots, 0, (size_t)run->n_ctx_slots * sizeof(bool));
+  bool *ctx_slots = run->ctx_slots;
   bool used_ctx_slots = false;
+  double t_slots = timing ? poly_now_ms() : 0.0;
 
   poly_zero_schedule_initial_intermediates(plan->ctx, sched, run);
+  double t_zero = timing ? poly_now_ms() : 0.0;
 
   /* Merge default vars with runtime overrides */
   int n_all = 0;
@@ -7006,9 +7074,13 @@ int poly_run_compiled_schedule(
     }
     if (!found) run->merged_vars[n_all++] = var_bindings[i];
   }
+  double t_vars = timing ? poly_now_ms() : 0.0;
 
   /* Execute LINEAR calls in order via backend vtable. */
   int var_int_idx = 0;
+  double t_loop_prepare = 0.0;
+  double t_loop_execute = 0.0;
+  double t_loop_commit = 0.0;
   for (int k = 0; k < sched->template->n_calls && ret == 0; k++) {
     PolyRunner *runner = &run->calls[k].prg;
     poly_zero_schedule_call_intermediates(plan->ctx, sched, run, k);
@@ -7018,24 +7090,44 @@ int poly_run_compiled_schedule(
       continue;
     }
 
+    memset(ctx_slots, 0, (size_t)run->n_ctx_slots * sizeof(bool));
+    used_ctx_slots = false;
+    double t_call_prepare0 = timing ? poly_now_ms() : 0.0;
     if (poly_prepare_missing_compiled_call_slots(
             plan->ctx, sched, k, plan->device, run->slot_to_data, ctx_slots, &used_ctx_slots
         ) != 0) {
       ret = -1;
       break;
     }
+    double t_call_execute0 = timing ? poly_now_ms() : 0.0;
+    if (timing) t_loop_prepare += t_call_execute0 - t_call_prepare0;
 
     ret = poly_schedule_execute_runner_call(
         sched, k, k, runner, plan->device, run->slot_to_data, run->kernel_args[k],
         run->merged_vars, n_all, &var_int_idx, &run->var_int_storage, &run->var_int_cap, plan,
         "plan_run"
     );
+    double t_call_commit0 = timing ? poly_now_ms() : 0.0;
+    if (timing) t_loop_execute += t_call_commit0 - t_call_execute0;
     if (ret == 0 && used_ctx_slots) {
       ret = poly_commit_call_buffer_writes(plan->ctx, sched, k, plan->device, ctx_slots);
     }
+    if (timing) t_loop_commit += poly_now_ms() - t_call_commit0;
   }
 
-  free(ctx_slots);
+  if (timing) {
+    double t_done = poly_now_ms();
+    fprintf(
+        stderr,
+        "[polygrad:compiled_schedule] device=%s calls=%d slots=%d backend=%.3fms "
+        "slots=%.3fms zero=%.3fms vars=%.3fms loop=%.3fms "
+        "loop_prepare=%.3fms loop_execute=%.3fms loop_commit=%.3fms total=%.3fms ret=%d\n",
+        poly_device_name(plan->device), sched->template->n_calls, sched->template->n_buf_slots,
+        t_backend - t0, t_slots - t_backend, t_zero - t_slots, t_vars - t_zero,
+        t_done - t_vars, t_loop_prepare, t_loop_execute, t_loop_commit, t_done - t0, ret
+    );
+    fflush(stderr);
+  }
   return ret;
 }
 

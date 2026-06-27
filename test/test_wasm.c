@@ -5,6 +5,7 @@
 #include "test_harness.h"
 #include "../src/codegen.h"
 #include "../src/engine/realize.h"
+#include "../src/engine/schedule.h"
 #include "../src/frontend.h"
 #include "../src/tensor.h"
 #include "../src/wasm_builder.h"
@@ -53,6 +54,24 @@ static int wasm_write_module(const char *path, const uint8_t *wasm, int wasm_siz
   return (written == (size_t)wasm_size && close_rc == 0) ? 0 : -1;
 }
 
+static int wasm_count_simd_opcode(const uint8_t *wasm, int wasm_size, int opcode) {
+  int count = 0;
+  for (int i = 0; wasm && i + 1 < wasm_size; i++)
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == opcode) count++;
+  return count;
+}
+
+static int node_compile_wasm_module(const char *path) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[2048];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');new WebAssembly.Module(fs.readFileSync('%s'))\"",
+      path
+  );
+  return system(cmd);
+}
+
 static int node_run_wasm_i32(const char *path, int32_t expected) {
   if (system("which node > /dev/null 2>&1") != 0) return 0;
   char cmd[2048];
@@ -89,6 +108,174 @@ static int node_run_wasm_f32_buffer(const char *path, float expected) {
       "'+expected);process.exit(2)}\"",
       path, (double)expected
   );
+  return system(cmd);
+}
+
+static int node_run_wasm_where_f32(const char *path, int n) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[4096];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');"
+      "const N=%d;"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "const f=new Float32Array(mem.buffer);"
+      "const offA=0,offB=N,offC=N*2;"
+      "for(let i=0;i<N;i++){f[offA+i]=i-3;f[offB+i]=100+i;f[offC+i]=0;}"
+      "inst.exports.kernel(offA*4,offB*4,offC*4);"
+      "for(let i=0;i<N;i++){"
+      " const a=i-3,b=100+i,exp=(a<2.5)?a+1:b-1;"
+      " const got=f[offC+i];"
+      " if(Math.abs(got-exp)>1e-6){console.error('i='+i+' got '+got+' expected '+exp);process.exit(2);}"
+      "}\"",
+      n, path
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_reg_group_f32(const char *path) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[4096];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "const f=new Float32Array(mem.buffer);"
+      "const inOff=0,outOff=16;"
+      "for(let i=0;i<4;i++){f[inOff+i]=i+2;f[outOff+i]=0;}"
+      "inst.exports.kernel(inOff*4,outOff*4);"
+      "for(let i=0;i<4;i++){const exp=i+3,got=f[outOff+i];"
+      " if(Math.abs(got-exp)>1e-6){console.error('i='+i+' got '+got+' expected '+exp);process.exit(2);}"
+      "}\"",
+      path
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_wide_vector_gep_f32(const char *path) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  char cmd[4096];
+  snprintf(
+      cmd, sizeof(cmd),
+      "node -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "const f=new Float32Array(mem.buffer);"
+      "inst.exports.kernel(0);"
+      "for(let i=0;i<16;i++){"
+      " const src=i+0.25;"
+      " const exp=src+1.0;"
+      " const got=f[i];"
+      " if(Math.abs(got-exp)>1e-6){console.error('i='+i+' got '+got+' expected '+exp);process.exit(2);}"
+      "}\"",
+      path
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_broadcast_reduce_relu(const char *path, int n) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+
+  const char *js_path = "/tmp/polygrad_test_broadcast_reduce_relu.js";
+  FILE *f = fopen(js_path, "w");
+  if (!f) return -1;
+  fprintf(
+      f,
+      "const fs=require('fs');\n"
+      "const N=%d;\n"
+      "const outF=0;\n"
+      "const xF=N;\n"
+      "const rowF=xF+N*N;\n"
+      "const colF=rowF+N;\n"
+      "const totalF=colF+N+16;\n"
+      "const mem=new WebAssembly.Memory({initial:Math.ceil(totalF*4/65536)+1});\n"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};\n"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));\n"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});\n"
+      "const a=new Float32Array(mem.buffer);\n"
+      "for(let r=0;r<N;r++){\n"
+      "  a[rowF+r]=((r*5)%%23-11)/31;\n"
+      "  a[colF+r]=((r*11)%%29-14)/29;\n"
+      "  for(let c=0;c<N;c++) a[xF+r*N+c]=((r*13+c*7)%%37-18)/37;\n"
+      "}\n"
+      "inst.exports.kernel(outF*4,xF*4,rowF*4,colF*4);\n"
+      "const checks=[0,1,17,N-1];\n"
+      "for(const r of checks){\n"
+      "  let exp=0;\n"
+      "  for(let k=0;k<N;k++){\n"
+      "    let v=(a[xF+r*N+k]+a[rowF+r])*a[colF+k]-0.25;\n"
+      "    if(v<0) v=0;\n"
+      "    exp+=v;\n"
+      "  }\n"
+      "  const got=a[outF+r];\n"
+      "  if(Math.abs(got-exp)>2e-2){\n"
+      "    console.error('row '+r+' got '+got+' expected '+exp+' diff '+Math.abs(got-exp));\n"
+      "    process.exit(2);\n"
+      "  }\n"
+      "}\n",
+      n, path
+  );
+  if (fclose(f) != 0) return -1;
+
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  return system(cmd);
+}
+
+static int node_run_wasm_matmul_bias_relu(
+    const char *path,
+    int tokens,
+    int d,
+    int hidden
+) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+
+  const char *js_path = "/tmp/polygrad_test_matmul_bias_relu.js";
+  FILE *f = fopen(js_path, "w");
+  if (!f) return -1;
+  fprintf(
+      f,
+      "const fs=require('fs');\n"
+      "const T=%d,D=%d,H=%d;\n"
+      "const outF=0;\n"
+      "const xF=outF+T*H;\n"
+      "const wF=xF+T*D;\n"
+      "const bF=wF+H*D;\n"
+      "const totalF=bF+H+16;\n"
+      "const mem=new WebAssembly.Memory({initial:Math.ceil(totalF*4/65536)+1});\n"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};\n"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));\n"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});\n"
+      "const a=new Float32Array(mem.buffer);\n"
+      "for(let i=0;i<T*D;i++) a[xF+i]=((i*17+13)%%101-50)/504;\n"
+      "for(let i=0;i<H*D;i++) a[wF+i]=((i*19+7)%%103-51)/611;\n"
+      "for(let i=0;i<H;i++) a[bF+i]=((i*23+5)%%31-15)/257;\n"
+      "inst.exports.kernel(outF*4,xF*4,wF*4,bF*4);\n"
+      "const checks=[[0,0],[0,1],[3,5],[T-1,H-1]];\n"
+      "for(const [r,h] of checks){\n"
+      "  let exp=a[bF+h];\n"
+      "  for(let k=0;k<D;k++) exp+=a[xF+r*D+k]*a[wF+h*D+k];\n"
+      "  if(exp<0) exp=0;\n"
+      "  const got=a[outF+r*H+h];\n"
+      "  if(Math.abs(got-exp)>1e-3){\n"
+      "    console.error('cell '+r+','+h+' got '+got+' expected '+exp+' diff '+Math.abs(got-exp));\n"
+      "    process.exit(2);\n"
+      "  }\n"
+      "}\n",
+      tokens, d, hidden, path
+  );
+  if (fclose(f) != 0) return -1;
+
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "node %s", js_path);
   return system(cmd);
 }
 
@@ -332,6 +519,40 @@ static WasmVecKernel wasm_make_vec_unary(PolyOps alu_op, int n) {
   return (WasmVecKernel){ctx, sink, n};
 }
 
+/* Helper: c[i] = where(a[i] < 2.5, a[i] + 1, b[i] - 1) */
+static WasmVecKernel wasm_make_vec_where_f32(int n) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *p1 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *p2 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(2));
+
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(n));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+
+  PolyUOp *idx0 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, range, poly_arg_none());
+  PolyUOp *idx1 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p1, range, poly_arg_none());
+  PolyUOp *idx2 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p2, range, poly_arg_none());
+
+  PolyUOp *a = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
+  PolyUOp *b = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
+  PolyUOp *cutoff = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.5f));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0f));
+  PolyUOp *cond = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, a, cutoff, poly_arg_none());
+  PolyUOp *if_true = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, a, one, poly_arg_none());
+  PolyUOp *if_false = poly_uop2(ctx, POLY_OP_SUB, POLY_FLOAT32, b, one, poly_arg_none());
+  PolyUOp *where_src[3] = {cond, if_true, if_false};
+  PolyUOp *out = poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT32, where_src, 3, poly_arg_none());
+
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx2, out, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  return (WasmVecKernel){ctx, sink, n};
+}
+
 /* WASM renderer tests */
 
 TEST(wasm, render_vecadd) {
@@ -340,7 +561,7 @@ TEST(wasm, render_vecadd) {
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
-  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
 
   /* Must produce non-empty output */
   ASSERT_TRUE(wasm != NULL);
@@ -367,7 +588,7 @@ TEST(wasm, render_vecmul) {
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
-  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
 
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 8);
@@ -388,7 +609,7 @@ TEST(wasm, render_unary) {
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
-  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
 
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 8);
@@ -526,7 +747,7 @@ TEST(wasm, render_simd_flag) {
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 
   int wasm_size;
-  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
 
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 8);
@@ -544,6 +765,374 @@ TEST(wasm, render_simd_flag) {
   free(wasm);
   free(lin);
   poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, render_simd_where_mask) {
+  /* N=10 keeps the post-rewrite kernel scalar-loop shaped, so this test covers
+   * the WASM renderer's explicit v128 compare/select lowering. Fully upcasted
+   * N=16 kernels currently go through the shared scalarized-lane render shape. */
+  WasmVecKernel k = wasm_make_vec_where_f32(10);
+  int n_lin;
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+
+  bool found_f32x4_lt = false;
+  bool found_bitselect = false;
+  for (int i = 0; i < wasm_size - 1; i++) {
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_F32X4_LT)
+      found_f32x4_lt = true;
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_V128_BITSELECT)
+      found_bitselect = true;
+  }
+  ASSERT_TRUE(found_f32x4_lt);
+  ASSERT_TRUE(found_bitselect);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t n = 64;
+  int64_t shape2[2] = {n, n};
+  PolyUOp *a = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, n * n), shape2, 2);
+  PolyUOp *b = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, n * n), shape2, 2);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, n * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab.wasm"), 0);
+  free(wasm);
+
+  int relaxed_size = 0;
+  wasm = poly_render_wasm_matmul(body, &relaxed_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(relaxed_size > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_relaxed.wasm", wasm, relaxed_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_relaxed.wasm"), 0);
+  free(wasm);
+
+  poly_schedule_free(sched);
+
+  PolyUOp *b0 = poly_reshape(ctx, poly_buffer(ctx, POLY_FLOAT32, n * n), shape2, 2);
+  PolyUOp *bt = poly_permute(ctx, b0, (int64_t[]){1, 0}, 2);
+  PolyUOp *out_t = poly_buffer(ctx, POLY_FLOAT32, n * n);
+  PolyUOp *sink_t = poly_sink1(ctx, poly_store_val(ctx, out_t, poly_dot(ctx, a, bt)));
+  PolySchedule *sched_t = poly_complete_create_schedule_with_vars(ctx, sink_t, POLY_MODE_CALL);
+  ASSERT_TRUE(sched_t != NULL);
+  PolyUOp *body_t = poly_schedule_call_body(sched_t, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body_t));
+
+  wasm = poly_render_wasm_matmul(body_t, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt.wasm"), 0);
+  free(wasm);
+
+  wasm = poly_render_wasm_matmul(body_t, &relaxed_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(relaxed_size > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_relaxed.wasm", wasm, relaxed_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_relaxed.wasm"), 0);
+  free(wasm);
+
+  poly_schedule_free(sched_t);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, packed_reg_store_group_uses_simd) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType reg_ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_REG);
+
+  PolyUOp *inp = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *reg = poly_uop0(ctx, POLY_OP_DEFINE_REG, reg_ptr, poly_arg_int(0));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+
+  PolyUOp *stores[4];
+  PolyUOp *out_stores[4];
+  PolyUOp *idxs[4];
+  for (int i = 0; i < 4; i++) {
+    idxs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+    PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, inp, idxs[i], poly_arg_none());
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, in_idx, poly_arg_none());
+    PolyUOp *value = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, load, one, poly_arg_none());
+    PolyUOp *reg_idx = poly_uop2(ctx, POLY_OP_INDEX, reg_ptr, reg, idxs[i], poly_arg_none());
+    stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, reg_idx, value, poly_arg_none());
+  }
+  PolyUOp *store_group = poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, 4, poly_arg_none());
+  PolyUOp *after_src[2] = {reg, store_group};
+  PolyUOp *after = poly_uop(ctx, POLY_OP_AFTER, reg_ptr, after_src, 2, poly_arg_none());
+  for (int i = 0; i < 4; i++) {
+    PolyUOp *reg_idx = poly_uop2(ctx, POLY_OP_INDEX, reg_ptr, after, idxs[i], poly_arg_none());
+    PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, reg_idx, poly_arg_none());
+    PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, idxs[i], poly_arg_none());
+    out_stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, load, poly_arg_none());
+  }
+  PolyUOp *out_group = poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, out_stores, 4, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, out_group);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+
+  bool found_add = false;
+  for (int i = 0; i + 1 < wasm_size; i++)
+    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_F32X4_ADD)
+      found_add = true;
+  ASSERT_TRUE(found_add);
+
+  const char *path = "/tmp/polygrad_test_packed_reg_store_group.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_reg_group_f32(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, wide_vector_gep_scalar_consumers_use_selected_lanes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType f32x16 = poly_dtype_vec(POLY_FLOAT32, 16);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+
+  PolyUOp *lanes[16];
+  for (int i = 0; i < 16; i++)
+    lanes[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float((double)i + 0.25));
+  PolyUOp *wide = poly_uop(ctx, POLY_OP_VECTORIZE, f32x16, lanes, 16, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+
+  PolyUOp *stores[16];
+  for (int i = 0; i < 16; i++) {
+    PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+    PolyUOp *dst = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, idx, poly_arg_none());
+    PolyUOp *lane = poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wide, poly_arg_int(i));
+    PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, lane, one, poly_arg_none());
+    PolyUOp *cond = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, zero, lane, poly_arg_none());
+    PolyUOp *sel_src[3] = {cond, sum, zero};
+    PolyUOp *sel = poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT32, sel_src, 3, poly_arg_none());
+    stores[i] = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst, sel, poly_arg_none());
+  }
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 16, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_toposort_alloc(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "/tmp/polygrad_test_wide_vector_gep.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_wide_vector_gep_f32(path), 0);
+
+  free(wasm);
+  poly_toposort_free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, packed_group_reduce_uses_simd_alu) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *x =
+      poly_reshape(ctx, poly_buffer_f32(ctx, 1024 * 1024), (int64_t[]){1024, 1024}, 2);
+  PolyUOp *row = poly_reshape(ctx, poly_buffer_f32(ctx, 1024), (int64_t[]){1024, 1}, 2);
+  PolyUOp *col = poly_reshape(ctx, poly_buffer_f32(ctx, 1024), (int64_t[]){1, 1024}, 2);
+  PolyUOp *row_e = poly_expand(ctx, row, (int64_t[]){1024, 1024}, 2);
+  PolyUOp *col_e = poly_expand(ctx, col, (int64_t[]){1024, 1024}, 2);
+  PolyUOp *expr = poly_relu(
+      ctx,
+      poly_alu2(
+          ctx, POLY_OP_SUB,
+          poly_alu2(ctx, POLY_OP_MUL, poly_alu2(ctx, POLY_OP_ADD, x, row_e), col_e),
+          poly_full(ctx, (int64_t[]){1024, 1024}, 2, 0.25)
+      )
+  );
+  PolyUOp *sum = poly_sum_reduce(ctx, expr, 1, 0);
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f32(ctx, 1024), (int64_t[]){1024}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm_env(ctx, poly_schedule_call_body(sched, 0), &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int n_range = 0;
+  int n_define_reg = 0;
+  int n_vec_load = 0;
+  int n_stack16 = 0;
+  for (int i = 0; i < n_lin; i++) {
+    if (lin[i]->op == POLY_OP_RANGE) n_range++;
+    if (lin[i]->op == POLY_OP_DEFINE_REG) n_define_reg++;
+    if (lin[i]->op == POLY_OP_LOAD && lin[i]->dtype.count == 4) n_vec_load++;
+    if ((lin[i]->op == POLY_OP_STACK || lin[i]->op == POLY_OP_VECTORIZE) &&
+        lin[i]->dtype.count == 16)
+      n_stack16++;
+  }
+  /* Matches current tinygrad CPU-style reduce lowering: output-axis UPCAST plus
+   * reduce-axis UNROLL becomes a small register tile, vector loads, scalar
+   * lane arithmetic, horizontal accumulation, and a packed output store. */
+  ASSERT_INT_EQ(n_range, 2);
+  ASSERT_TRUE(n_define_reg >= 1);
+  ASSERT_TRUE(n_vec_load >= 5);
+  ASSERT_TRUE(n_stack16 >= 2);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  int n_add = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_ADD);
+  int n_mul = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_MUL);
+  int n_select = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_BITSELECT);
+  int n_shuffle = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE);
+  int n_extract = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_EXTRACT);
+  int n_replace = wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_REPLACE);
+  ASSERT_TRUE(n_add + n_mul + n_select > 0);
+  ASSERT_TRUE(n_shuffle + n_extract + n_replace > 0);
+
+  free(wasm);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, packed_group_reduce_relu_executes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int64_t n = 1024;
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, n * n), (int64_t[]){n, n}, 2);
+  PolyUOp *row = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n, 1}, 2);
+  PolyUOp *col = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){1, n}, 2);
+  PolyUOp *row_e = poly_expand(ctx, row, (int64_t[]){n, n}, 2);
+  PolyUOp *col_e = poly_expand(ctx, col, (int64_t[]){n, n}, 2);
+  PolyUOp *expr = poly_relu(
+      ctx,
+      poly_alu2(
+          ctx, POLY_OP_SUB,
+          poly_alu2(ctx, POLY_OP_MUL, poly_alu2(ctx, POLY_OP_ADD, x, row_e), col_e),
+          poly_full(ctx, (int64_t[]){n, n}, 2, 0.25)
+      )
+  );
+  PolyUOp *sum = poly_sum_reduce(ctx, expr, 1, 0);
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm_env(ctx, poly_schedule_call_body(sched, 0), &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "/tmp/polygrad_test_broadcast_reduce_relu.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_broadcast_reduce_relu(path, (int)n), 0);
+
+  free(wasm);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_bias_relu_executes_after_packed_reduce) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int64_t tokens = 32, d = 128, hidden = 256;
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, tokens * d), (int64_t[]){tokens, d}, 2);
+  PolyUOp *w0 = poly_reshape(ctx, poly_buffer_f32(ctx, hidden * d), (int64_t[]){hidden, d}, 2);
+  PolyUOp *w = poly_permute(ctx, w0, (int64_t[]){1, 0}, 2);
+  PolyUOp *bias = poly_reshape(ctx, poly_buffer_f32(ctx, hidden), (int64_t[]){1, hidden}, 2);
+  PolyUOp *bias_e = poly_expand(ctx, bias, (int64_t[]){tokens, hidden}, 2);
+  PolyUOp *h = poly_relu(ctx, poly_alu2(ctx, POLY_OP_ADD, poly_dot(ctx, x, w), bias_e));
+  PolyUOp *out =
+      poly_reshape(ctx, poly_buffer_f32(ctx, tokens * hidden), (int64_t[]){tokens, hidden}, 2);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, h));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm_env(ctx, poly_schedule_call_body(sched, 0), &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "/tmp/polygrad_test_matmul_bias_relu.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(
+      node_run_wasm_matmul_bias_relu(path, (int)tokens, (int)d, (int)hidden), 0
+  );
+
+  free(wasm);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, render_rand_threefry_dag_terminates) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int64_t shape[1] = {100};
+  PolyUOp *rand = poly_rand(ctx, shape, 1, 42);
+  PolyUOp *out = poly_buffer_f32(ctx, 100);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, rand));
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm_env(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  ASSERT_TRUE(n_lin > 0);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -925,7 +1514,8 @@ TEST(wasm, render_pow) {
 }
 
 TEST(wasm, render_pow_simd_fallback) {
-  /* POW kernel with use_simd=true must fall back to scalar (no SIMD for POW) */
+  /* POW has no WASM SIMD opcode. The renderer may still use vector loads/stores,
+   * but the exponentiation itself must lower through the scalar math import. */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_POW, 16);
   int n_lin;
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
@@ -935,17 +1525,7 @@ TEST(wasm, render_pow_simd_fallback) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 8);
 
-  /* Should NOT contain SIMD prefix (POW forces scalar fallback) */
-  bool found_simd = false;
-  for (int i = 0; i < wasm_size; i++) {
-    if (wasm[i] == WASM_SIMD_PREFIX) {
-      found_simd = true;
-      break;
-    }
-  }
-  ASSERT_TRUE(!found_simd);
-
-  /* Should still contain a CALL for powf */
+  /* Should contain a CALL for powf. */
   bool found_call = false;
   for (int i = 0; i < wasm_size; i++) {
     if (wasm[i] == WASM_OP_CALL) {
@@ -1021,6 +1601,46 @@ TEST(wasm, e2e_node_vecadd) {
   /* Run the Node.js test runner */
   int rc = system("node test/run_wasm.js /tmp/polygrad_e2e_vecadd.wasm add 8");
   ASSERT_INT_EQ(rc, 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, e2e_node_vecadd_simd) {
+  WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
+  int n_lin;
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+
+  const char *path = "/tmp/polygrad_e2e_vecadd_simd.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+
+  int has_node = system("which node > /dev/null 2>&1");
+  if (has_node == 0) ASSERT_INT_EQ(system("node test/run_wasm.js /tmp/polygrad_e2e_vecadd_simd.wasm add 10"), 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, e2e_node_where_simd) {
+  WasmVecKernel k = wasm_make_vec_where_f32(10);
+  int n_lin;
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
+
+  int wasm_size;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+
+  const char *path = "/tmp/polygrad_e2e_where_simd.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_where_f32(path, 10), 0);
 
   free(wasm);
   free(lin);
@@ -1163,7 +1783,7 @@ TEST(wasm_f64, render_neg_f64_scalar) {
 
 TEST(wasm_f64, render_simd_f64x2) {
   /* Render f64 vecadd with SIMD enabled -- verify f64x2 SIMD opcodes */
-  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 16);
+  WasmVecKernel k = wasm_make_vec_binop_f64(POLY_OP_ADD, 10);
   int n_lin;
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
 

@@ -95,6 +95,8 @@ async function createWasmCore(device) {
   const _scratchAxisPtr = Module._malloc(64)  // 8 dims * 8 bytes
   const _scratchOutShapePtr = Module._malloc(64)
   const _scratchOutNdimPtr = Module._malloc(4)
+  let _scratchPtrArrayPtr = 0
+  let _scratchPtrArrayCap = 0
 
   // --- Int64 marshalling helpers ---
   function writeInt64Array(arr) {
@@ -167,6 +169,18 @@ async function createWasmCore(device) {
     const h32 = heap32()
     for (let i = 0; i < arr.length; i++) h32[(ptr >> 2) + i] = arr[i] || 0
     return ptr
+  }
+
+  function writePtrArrayScratch(arr) {
+    if (!arr || arr.length === 0) return 0
+    if (arr.length > _scratchPtrArrayCap) {
+      if (_scratchPtrArrayPtr) Module._free(_scratchPtrArrayPtr)
+      _scratchPtrArrayCap = Math.max(arr.length, _scratchPtrArrayCap ? _scratchPtrArrayCap * 2 : 8)
+      _scratchPtrArrayPtr = Module._malloc(_scratchPtrArrayCap * 4)
+    }
+    const h32 = heap32()
+    for (let i = 0; i < arr.length; i++) h32[(_scratchPtrArrayPtr >> 2) + i] = arr[i] || 0
+    return _scratchPtrArrayPtr
   }
 
   function writeI32Array(arr) {
@@ -578,21 +592,17 @@ async function createWasmCore(device) {
     poly_jit_is_captured: (jit) => Boolean(Module._poly_jit_is_captured(jit)),
     poly_jit_schedule_count: (jit) => Module._poly_jit_schedule_count(jit),
     poly_jit_run: async (jit, tensors) => {
-      const ptr = writePtrArray(tensors)
-      try {
-        if (deviceName === 'webgpu' && Module.ccall) {
-          return await Module.ccall(
-            'poly_jit_run',
-            'number',
-            ['number', 'number', 'number'],
-            [jit, ptr, tensors.length],
-            { async: true }
-          )
-        }
-        return Module._poly_jit_run(jit, ptr, tensors.length)
-      } finally {
-        if (ptr) Module._free(ptr)
+      const ptr = writePtrArrayScratch(tensors)
+      if (deviceName === 'webgpu' && Module.ccall) {
+        return await Module.ccall(
+          'poly_jit_run',
+          'number',
+          ['number', 'number', 'number'],
+          [jit, ptr, tensors.length],
+          { async: true }
+        )
       }
+      return Module._poly_jit_run(jit, ptr, tensors.length)
     },
 
     poly_optim_build_step: (ctx, cfg, params, grads, mTensors, vTensors, bc1, bc2) => {
@@ -1354,6 +1364,11 @@ async function createWasmCore(device) {
     },
     destroy() {
       ffi.poly_ctx_destroy(ctx)
+      if (_scratchPtrArrayPtr) {
+        Module._free(_scratchPtrArrayPtr)
+        _scratchPtrArrayPtr = 0
+        _scratchPtrArrayCap = 0
+      }
       Module._free(_scratchLenPtr)
       Module._free(_scratchNumelPtr)
       Module._free(_scratchAxisPtr)

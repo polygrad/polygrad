@@ -326,7 +326,10 @@ function createBoundTensorClass(runtime) {
         const dims = shape.length > 1 ? shape : null
         currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
         const buffer = currentUop.buffer ? currentUop.buffer.raw : null
-        if (buffer && core.ffi.poly_buffer_get_key) {
+        const needsFrontendHostOwner =
+          Boolean(core.registerHostBuffer) &&
+          (!core.caps || core.caps.core !== 'wasm' || core.caps.device === 'webgpu')
+        if (needsFrontendHostOwner && buffer && core.ffi.poly_buffer_get_key) {
           const bufferKey = core.ffi.poly_buffer_get_key(this._ctx, buffer)
           if (bufferKey) {
             const key = normalizeBufferKey(bufferKey)

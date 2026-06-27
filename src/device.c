@@ -123,9 +123,23 @@ PolyUOp *poly_buffer_from_host(
   }
   PolyUOp *buf = poly_buffer(ctx, scalar, numel);
   if (!buf) return NULL;
-  /* Register imported source data in ctx->buffers so graph-driven realize
-   * can materialize or reuse it later without external binding arrays. */
+  /* Register imported source data in ctx->buffers so graph-driven realize can
+   * materialize or reuse it later without external binding arrays. In
+   * Emscripten, a nonzero pointer passed by the JS binding already points into
+   * the WebAssembly linear memory used by WASM kernels, so adopting it as WASM
+   * residency avoids an immediate HOST->WASM copy on every replay. A null
+   * pointer is the browser/WebGPU host-key path and must remain HOST. */
+#ifdef __EMSCRIPTEN__
+  if (ptr) {
+    PolyBuffer h = poly_buffer_make_host_view(ptr, nbytes);
+    h.owned = true;
+    poly_buffer_adopt(ctx, buf, &h);
+  } else {
+    poly_buffer_set(ctx, buf, ptr, nbytes, (int)POLY_DEVICE_HOST);
+  }
+#else
   poly_buffer_set(ctx, buf, ptr, nbytes, (int)POLY_DEVICE_HOST);
+#endif
   /* BUFFER is 1D; a multi-dim tensor needs RESHAPE on top so the scheduler
    * sees the intended shape. */
   if (ndim > 1) return poly_reshape(ctx, buf, dims, ndim);

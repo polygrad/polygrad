@@ -163,6 +163,8 @@ typedef struct {
   int n_slot_to_data;
   PolyBuffer *slot_views;
   int n_slot_views;
+  bool *ctx_slots;
+  int n_ctx_slots;
   PolyVarBinding *merged_vars;
   int merged_vars_cap;
   int *var_int_storage;

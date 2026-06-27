@@ -3,14 +3,18 @@
 #ifdef __EMSCRIPTEN__
 
 #include "codegen.h"
+#include "utils.h"
 
 #include <emscripten.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 typedef struct {
   int kernel_id;
+  int *iargs;
+  int iargs_cap;
 } PolyWasmJitRunnerHandle;
 
 static int poly_wasm_execute_fn(void *self, void **args, int n_args);
@@ -40,7 +44,35 @@ EM_JS(int, js_host_copy_in_from_wasm, (uintptr_t dst_key, const uint8_t *src, in
 })
 
 EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
-  var mod = new WebAssembly.Module(HEAPU8.subarray(bytes, bytes + len));
+  var mod;
+  try {
+    mod = new WebAssembly.Module(HEAPU8.subarray(bytes, bytes + len));
+  } catch (e) {
+    var dbg = 0;
+    if (typeof globalThis !== 'undefined' && globalThis.__polygradDebugLevel)
+      dbg = Number(globalThis.__polygradDebugLevel) | 0;
+    if (typeof process !== 'undefined' && process.env) {
+      var envDbg = Number(process.env.POLY_DEBUG || process.env.DEBUG || 0);
+      if (Number.isFinite(envDbg) && envDbg > dbg) dbg = envDbg | 0;
+    }
+    if (dbg >= 4)
+      console.error('[polygrad:wasm] WebAssembly.Module failed len=' + len + ': ' +
+                    (e && e.message ? e.message : String(e)));
+    if (dbg >= 4) {
+      var msg = e && e.message ? e.message : String(e);
+      var m = /@\\+(\\d+)/.exec(msg);
+      if (m) {
+        var off = Number(m[1]) | 0;
+        var start = Math.max(0, off - 32), end = Math.min(len, off + 32);
+        var windowBytes = HEAPU8.subarray(bytes + start, bytes + end);
+        var hex = [];
+        for (var i = 0; i < windowBytes.length; i++)
+          hex.push(windowBytes[i].toString(16).padStart(2, '0'));
+        console.error('[polygrad:wasm] bytes ' + start + '..' + end + ': ' + hex.join(' '));
+      }
+    }
+    return -1;
+  }
   var imports = {env : {memory : wasmMemory}, math : {exp2f : function(x){return Math.pow(2, x); },
       log2f: function(x) {
   return Math.log2(x); },
@@ -60,11 +92,25 @@ return Module._polyKernelCache.length - 1;
 EM_JS(int, js_exec_wasm_kernel, (int kernel_id, const int *args, int n_args), {
   var inst = Module._polyKernelCache[kernel_id];
   if (!inst) return -1;
-  var params = [];
-  for (var i = 0; i < n_args; i++) {
-    params.push(HEAP32[(args >> 2) + i]);
+  var h = HEAP32;
+  var p = args >> 2;
+  var kernel = inst.exports.kernel;
+  switch (n_args) {
+    case 0: kernel(); break;
+    case 1: kernel(h[p]); break;
+    case 2: kernel(h[p], h[p + 1]); break;
+    case 3: kernel(h[p], h[p + 1], h[p + 2]); break;
+    case 4: kernel(h[p], h[p + 1], h[p + 2], h[p + 3]); break;
+    case 5: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4]); break;
+    case 6: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5]); break;
+    case 7: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6]); break;
+    case 8: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6], h[p + 7]); break;
+    default: {
+      var params = [];
+      for (var i = 0; i < n_args; i++) params.push(h[p + i]);
+      kernel.apply(null, params);
+    }
   }
-  inst.exports.kernel.apply(null, params);
   return 0;
 });
 
@@ -152,21 +198,34 @@ int poly_wasm_lower_item(
   bool lin_owned = false;
   PolyUOp *linear = poly_program_linear(program);
   PolyUOp **lin = NULL;
-  if (linear) {
-    n_lin = linear->n_src;
-    lin = linear->src;
-  } else {
-    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
-    lin_owned = true;
-  }
-  if (!lin) return -1;
 
   int wasm_len = 0;
-  uint8_t *wasm_bytes = poly_render_wasm(lin, n_lin, &wasm_len, false);
-  if (lin_owned) free(lin);
-  if (!wasm_bytes || wasm_len <= 0) return -1;
+  int kernel_id = -1;
+  uint8_t *wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, true);
+  if (wasm_bytes && wasm_len > 0) {
+    kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+    free(wasm_bytes);
+    wasm_bytes = NULL;
+    wasm_len = 0;
+    if (kernel_id < 0)
+      wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, false);
+  }
+  if (kernel_id < 0 && !wasm_bytes) {
+    if (linear) {
+      n_lin = linear->n_src;
+      lin = linear->src;
+    } else {
+      lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
+      lin_owned = true;
+    }
+    if (!lin) return -1;
+    wasm_bytes = poly_render_wasm(lin, n_lin, &wasm_len, true);
+    if (lin_owned) free(lin);
+  }
+  if (kernel_id < 0 && (!wasm_bytes || wasm_len <= 0)) return -1;
 
-  int kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
+  if (kernel_id < 0)
+    kernel_id = js_compile_wasm_kernel(wasm_bytes, wasm_len);
   free(wasm_bytes);
   if (kernel_id < 0) return -1;
 
@@ -176,6 +235,8 @@ int poly_wasm_lower_item(
     return -1;
   }
   wh->kernel_id = kernel_id;
+  wh->iargs = NULL;
+  wh->iargs_cap = 0;
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = wh;
@@ -187,12 +248,30 @@ int poly_wasm_lower_item(
 
 int poly_wasm_execute(PolyRunner *runner, void **args, int n_args) {
   PolyWasmJitRunnerHandle *wh = (PolyWasmJitRunnerHandle *)runner->handle;
-  if (!wh) return -1;
-  int *iargs = malloc((size_t)n_args * sizeof(int));
-  if (!iargs) return -1;
-  for (int i = 0; i < n_args; i++) iargs[i] = (int)(intptr_t)args[i];
-  int ret = js_exec_wasm_kernel(wh->kernel_id, iargs, n_args);
-  free(iargs);
+  if (!wh || n_args < 0) return -1;
+  bool timing = poly_debug_at_least(7);
+  double t0 = timing ? poly_now_ms() : 0.0;
+  if (n_args > wh->iargs_cap) {
+    int new_cap = wh->iargs_cap > 0 ? wh->iargs_cap : 8;
+    while (new_cap < n_args) new_cap *= 2;
+    int *new_iargs = realloc(wh->iargs, (size_t)new_cap * sizeof(*new_iargs));
+    if (!new_iargs) return -1;
+    wh->iargs = new_iargs;
+    wh->iargs_cap = new_cap;
+  }
+  for (int i = 0; i < n_args; i++)
+    wh->iargs[i] = (int)(intptr_t)args[i];
+  double t_args = timing ? poly_now_ms() : 0.0;
+  int ret = js_exec_wasm_kernel(wh->kernel_id, wh->iargs, n_args);
+  double t_exec = timing ? poly_now_ms() : 0.0;
+  if (timing) {
+    fprintf(
+        stderr,
+        "[polygrad:wasm_execute] kernel=%d args=%d pack=%.3fms exec=%.3fms total=%.3fms ret=%d\n",
+        wh->kernel_id, n_args, t_args - t0, t_exec - t_args, t_exec - t0, ret
+    );
+    fflush(stderr);
+  }
   return ret;
 }
 
@@ -200,6 +279,7 @@ void poly_wasm_free_runner(PolyRunner *runner) {
   if (runner->handle) {
     PolyWasmJitRunnerHandle *wh = (PolyWasmJitRunnerHandle *)runner->handle;
     js_free_wasm_kernel(wh->kernel_id);
+    free(wh->iargs);
     free(wh);
   }
 }

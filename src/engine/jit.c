@@ -4,6 +4,7 @@
 #include "ctx.h"
 #include "device.h"
 #include "tensor.h"
+#include "utils.h"
 
 #include <stdlib.h>
 
@@ -18,6 +19,8 @@ struct PolyJit {
   int schedules_cap;
   int n_recorded_schedules;
   PolySchedule *captured_linear;
+  PolyCompiledSchedule *compiled_linear;
+  PolyDevice compiled_device;
   bool prune;
   bool capturing;
   bool captured;
@@ -30,12 +33,15 @@ static void poly_jit_clear(PolyJit *jit) {
       poly_schedule_free(jit->schedules[i]);
   }
   free(jit->schedules);
+  poly_compiled_schedule_free(jit->compiled_linear);
   poly_schedule_free(jit->captured_linear);
   free(jit->input_buffers);
   free(jit->input_dtypes);
   free(jit->input_devices);
   jit->schedules = NULL;
   jit->captured_linear = NULL;
+  jit->compiled_linear = NULL;
+  jit->compiled_device = POLY_DEVICE_AUTO;
   jit->input_buffers = NULL;
   jit->input_dtypes = NULL;
   jit->input_devices = NULL;
@@ -282,6 +288,30 @@ fail:
   return NULL;
 }
 
+static bool poly_jit_inputs_are_captured(PolyJit *jit, PolyUOp **current_inputs) {
+  if (!jit || (!current_inputs && jit->n_inputs > 0)) return false;
+  for (int i = 0; i < jit->n_inputs; i++) {
+    if (current_inputs[i] != jit->input_buffers[i]) return false;
+  }
+  return true;
+}
+
+static int poly_jit_run_captured_linear(
+    PolyJit *jit,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+) {
+  if (!jit || !jit->captured_linear) return -1;
+  PolyDevice device = poly_schedule_infer_device(jit->ctx, jit->captured_linear);
+  if (!jit->compiled_linear || jit->compiled_device != device) {
+    poly_compiled_schedule_free(jit->compiled_linear);
+    jit->compiled_linear = poly_lower_schedule(jit->ctx, jit->captured_linear, device);
+    jit->compiled_device = jit->compiled_linear ? device : POLY_DEVICE_AUTO;
+    if (!jit->compiled_linear) return -1;
+  }
+  return poly_run_compiled_schedule(jit->compiled_linear, NULL, 0, var_bindings, n_var_bindings);
+}
+
 int poly_jit_run_with_vars(
     PolyJit *jit,
     PolyTensor **inputs,
@@ -294,11 +324,14 @@ int poly_jit_run_with_vars(
     return -1;
   if (n_inputs != jit->n_inputs) return -1;
 
+  bool timing = poly_debug_at_least(7);
+  double t0 = timing ? poly_now_ms() : 0.0;
   int ret = -1;
-  PolyUOp **current_inputs = NULL;
-  if (n_inputs > 0) {
+  PolyUOp *current_inputs_stack[16];
+  PolyUOp **current_inputs = current_inputs_stack;
+  if (n_inputs > (int)(sizeof(current_inputs_stack) / sizeof(current_inputs_stack[0]))) {
     current_inputs = calloc((size_t)n_inputs, sizeof(*current_inputs));
-    if (!current_inputs) goto cleanup;
+    if (!current_inputs) return -1;
   }
 
   for (int i = 0; i < n_inputs; i++) {
@@ -306,16 +339,44 @@ int poly_jit_run_with_vars(
     if (!current_inputs[i] || !poly_jit_input_matches_spec(jit, i, inputs[i], current_inputs[i]))
       goto cleanup;
   }
+  double t_inputs = timing ? poly_now_ms() : 0.0;
 
+  if (poly_jit_inputs_are_captured(jit, current_inputs)) {
+    ret = poly_jit_run_captured_linear(jit, var_bindings, n_var_bindings);
+    if (timing) {
+      double t_done = poly_now_ms();
+      fprintf(
+          stderr,
+          "[polygrad:jit_run] path=captured inputs=%d input_check=%.3fms run=%.3fms "
+          "total=%.3fms ret=%d\n",
+          n_inputs, t_inputs - t0, t_done - t_inputs, t_done - t0, ret
+      );
+      fflush(stderr);
+    }
+    goto cleanup;
+  }
+
+  double t_replay0 = timing ? poly_now_ms() : 0.0;
   PolySchedule *replay = poly_jit_build_replay_schedule(jit, current_inputs);
   if (!replay) goto cleanup;
+  double t_replay = timing ? poly_now_ms() : 0.0;
   int run_ret = poly_run_schedule(jit->ctx, replay, var_bindings, n_var_bindings);
+  double t_run = timing ? poly_now_ms() : 0.0;
   poly_schedule_free(replay);
   if (run_ret != 0) goto cleanup;
   ret = 0;
+  if (timing) {
+    fprintf(
+        stderr,
+        "[polygrad:jit_run] path=replay inputs=%d input_check=%.3fms build=%.3fms run=%.3fms "
+        "total=%.3fms ret=%d\n",
+        n_inputs, t_inputs - t0, t_replay - t_replay0, t_run - t_replay, t_run - t0, ret
+    );
+    fflush(stderr);
+  }
 
 cleanup:
-  free(current_inputs);
+  if (current_inputs != current_inputs_stack) free(current_inputs);
   return ret;
 }
 

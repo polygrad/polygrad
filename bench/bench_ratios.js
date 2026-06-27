@@ -42,10 +42,10 @@ function benchMlpForward(pg, inputSize, iters) {
   for (let i = 0; i < inputSize; i++) input[i] = Math.random()
 
   for (let i = 0; i < WARMUP; i++) {
-    inst.forward({ input })
+    inst.forward({ x: input })
   }
   const us = medianTime(() => {
-    inst.forward({ input })
+    inst.forward({ x: input })
   }, iters)
 
   inst.dispose()
@@ -70,10 +70,10 @@ function benchMlpTrain(pg, inputSize, iters) {
   target[0] = 1.0
 
   for (let i = 0; i < WARMUP; i++) {
-    inst.trainStep({ input, target })
+    inst.trainStep({ x: input, y: target })
   }
   const us = medianTime(() => {
-    inst.trainStep({ input, target })
+    inst.trainStep({ x: input, y: target })
   }, iters)
 
   inst.dispose()
@@ -102,10 +102,10 @@ function benchBundleRoundtrip(pg, inputSize, iters) {
   for (let i = 0; i < inputSize; i++) input[i] = Math.random()
 
   for (let i = 0; i < WARMUP; i++) {
-    inst2.forward({ input })
+    inst2.forward({ x: input })
   }
   const us = medianTime(() => {
-    inst2.forward({ input })
+    inst2.forward({ x: input })
   }, iters)
 
   inst2.dispose()

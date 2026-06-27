@@ -83,6 +83,7 @@ function createBoundJit(runtime) {
       this.captured = false
       this.ret = null
       this.signature = null
+      this.inputCount = 0
       this._jit = 0
       this.disposed = false
       live.add(this)
@@ -95,6 +96,7 @@ function createBoundJit(runtime) {
       this.captured = false
       this.ret = null
       this.signature = null
+      this.inputCount = 0
     }
 
     reset() {
@@ -122,16 +124,18 @@ function createBoundJit(runtime) {
 
       const inputs = inputTensors(args, Tensor)
       if (inputs.length === 0) throw new Error('jit requires at least one Tensor input')
-      for (const t of inputs) await t.realize()
-      checkDuplicateBuffers(inputs)
-      const sig = inputSignature(inputs)
 
       let ret
       if (this.cnt === 0) {
+        for (const t of inputs) await t.realize()
+        checkDuplicateBuffers(inputs)
         ret = this.fxn(...args)
         await realizeReturn(ret, Tensor)
       } else if (this.cnt === 1) {
         if (inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
+        for (const t of inputs) await t.realize()
+        checkDuplicateBuffers(inputs)
+        const sig = inputSignature(inputs)
         this._jit = ffi.poly_jit_new(ctx)
         if (!this._jit) throw new Error('poly_jit_new failed')
         if (ffi.poly_jit_set_prune(this._jit, this.prune) !== 0) {
@@ -152,9 +156,14 @@ function createBoundJit(runtime) {
         }
         this.ret = ret
         this.signature = sig
+        this.inputCount = inputs.length
         this.captured = true
       } else {
         if (!this.captured || !this._jit) throw new Error('jit has not captured')
+        if (inputs.length !== this.inputCount) {
+          throw new Error(`args mismatch in jit: expected ${this.inputCount} inputs, got ${inputs.length}`)
+        }
+        const sig = inputSignature(inputs)
         if (sig !== this.signature) {
           throw new Error(`args mismatch in jit: expected ${this.signature}, got ${sig}`)
         }

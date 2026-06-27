@@ -210,6 +210,8 @@ PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out);
  * If use_simd is true, emits f32x4 SIMD ops for the main loop body
  * with a scalar epilogue for remainder elements. */
 uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd);
+bool poly_wasm_can_render_matmul(PolyUOp *sink);
+uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_madd);
 
 /* CPU Runtime: compile C source, load, execute */
 typedef struct PolyProgram PolyProgram;
