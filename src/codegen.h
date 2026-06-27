@@ -44,6 +44,7 @@ typedef struct {
   bool has_local; /* Backend supports local/workgroup scheduling */
   bool has_threads; /* Backend supports CPU-style core_id runtime threading */
   bool has_simd_int; /* Backend supports packed integer ops in vector regs (vpaddd etc) */
+  bool has_simd_float; /* Backend supports packed f32 vector ops in native vector regs */
   int max_vec_width; /* Max elements in VECTORIZE (0=scalar-only, 4=SSE, 8=AVX2) */
   int max_threads; /* Max CPU worker threads for THREAD axes (0=disabled) */
   int global_max[3]; /* GPU SPECIAL global/workgroup caps, 0 = unbounded */
@@ -78,9 +79,9 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out);
 /* Like poly_linearize but reads POLY_OPTIMIZE/POLY_DEVECTORIZE from env. */
 PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out);
-/* WASM linearizer: keep scalar memory/ALU IR and let render_wasm form SIMD
- * loops itself. Avoids feeding CPU float4/GEP/VECTORIZE IR into the WASM
- * renderer, which only supports scalar LOAD/STORE/ALU plus its own SIMD path. */
+/* WASM linearizer: use the shared late pipeline, preserving only the native
+ * renderer-capability vector subset (currently f32x4 ALU/compare/compare-mask
+ * WHERE) and scalarizing unsupported semantic vectors before rendering. */
 PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out);
@@ -212,6 +213,8 @@ PolyUOp **poly_linearize_webgpu(PolyCtx *ctx, PolyUOp *sink, int *n_out);
 uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd);
 bool poly_wasm_can_render_matmul(PolyUOp *sink);
 uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_madd);
+bool poly_wasm_can_render_reduce(PolyUOp *sink);
+uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out);
 
 /* CPU Runtime: compile C source, load, execute */
 typedef struct PolyProgram PolyProgram;

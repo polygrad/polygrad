@@ -375,6 +375,7 @@ static PolyRendererCaps poly_wasm_renderer_caps(void) {
       .has_threefry = false,
       .has_local = false,
       .has_simd_int = false,
+      .has_simd_float = true,
       .max_vec_width = 4,
   };
 }
@@ -516,6 +517,7 @@ static PolyDType wasm_compare_dtype(PolyDType a, PolyDType b) {
 }
 
 static bool has_simd_op(PolyOps op);
+static bool wasm_uop_value_is_v128(PolyUOp *u);
 static void emit_alu_scalar(
     WasmBuf *code,
     PolyOps op,
@@ -810,25 +812,36 @@ static void emit_v128_cast_lanes(
 static void emit_local_get_for_vector_src(
     WasmBuf *body,
     int local,
-    PolyDType src_dt,
+    PolyUOp *src_uop,
     PolyDType vec_dt
 ) {
   wb_byte(body, WASM_OP_LOCAL_GET);
   wb_uleb128(body, local);
-  if (dt_is_v128(src_dt)) return;
-  emit_cast_stack_value(body, src_dt, poly_dtype_scalar(vec_dt));
+  if (wasm_uop_value_is_v128(src_uop)) return;
+  emit_cast_stack_value(body, src_uop->dtype, poly_dtype_scalar(vec_dt));
   emit_v128_splat(body, vec_dt);
 }
 
 static void emit_vector_sources(WasmBuf *body, LocalMap *locals, PolyUOp *u) {
   if (!u) return;
+  PolyDType vec_dt = wasm_simd_value_dtype(u);
 
   if (u->op == POLY_OP_MULACC && u->n_src >= 3) {
     int order[3] = {2, 0, 1};
     for (int k = 0; k < 3; k++) {
       int j = order[k];
       int src = lm_get(locals, u->src[j]);
-      emit_local_get_for_vector_src(body, src, u->src[j]->dtype, u->dtype);
+      emit_local_get_for_vector_src(body, src, u->src[j], vec_dt);
+    }
+    return;
+  }
+
+  if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
+    int order[3] = {1, 2, 0}; /* v128.bitselect: true, false, mask */
+    for (int k = 0; k < 3; k++) {
+      int j = order[k];
+      int src = lm_get(locals, u->src[j]);
+      emit_local_get_for_vector_src(body, src, u->src[j], vec_dt);
     }
     return;
   }
@@ -839,7 +852,7 @@ static void emit_vector_sources(WasmBuf *body, LocalMap *locals, PolyUOp *u) {
   if (n_operands > u->n_src) n_operands = u->n_src;
   for (int j = 0; j < n_operands; j++) {
     int src = lm_get(locals, u->src[j]);
-    emit_local_get_for_vector_src(body, src, u->src[j]->dtype, u->dtype);
+    emit_local_get_for_vector_src(body, src, u->src[j], vec_dt);
   }
 }
 
@@ -1323,13 +1336,19 @@ static bool has_simd_op(PolyOps op) {
 }
 
 static bool wasm_vector_alu_has_direct_simd(PolyUOp *u) {
-  return u && dt_is_v128(u->dtype) && poly_dtype_is_float(poly_dtype_scalar(u->dtype)) &&
-         has_simd_op(u->op);
+  if (!u || !poly_opset_has(POLY_GROUP_ALU, u->op) || !has_simd_op(u->op)) return false;
+  if (u->dtype.count <= 1) return false;
+  if (!dt_is_v128(wasm_simd_value_dtype(u))) return false;
+  return wasm_simd_loop_can_vectorize_alu(u);
 }
 
 static bool wasm_vector_alu_needs_lane_fallback(PolyUOp *u) {
   return u && poly_opset_has(POLY_GROUP_ALU, u->op) && dt_is_v128(u->dtype) &&
          !wasm_vector_alu_has_direct_simd(u);
+}
+
+static bool wasm_uop_value_is_v128(PolyUOp *u) {
+  return u && (dt_is_v128(u->dtype) || wasm_vector_alu_has_direct_simd(u));
 }
 
 /* Check if entire kernel is SIMD-able */
@@ -1447,100 +1466,9 @@ static bool kernel_is_simdable(PolyUOp **uops, int n) {
   return true;
 }
 
-static int wasm_gep_lane(PolyUOp *u) {
-  if (!u || u->op != POLY_OP_GEP) return -1;
-  if (u->arg.kind == POLY_ARG_INT) return (int)u->arg.i;
-  if (u->arg.kind == POLY_ARG_INT_TUPLE && u->arg.int_tuple.n == 1)
-    return (int)u->arg.int_tuple.vals[0];
-  return -1;
-}
-
-static PolyUOp *wasm_resolve_lane_alias(PolyUOp *u) {
-  for (int depth = 0; depth < 8 && u && u->op == POLY_OP_GEP && u->n_src >= 1; depth++) {
-    int lane = wasm_gep_lane(u);
-    PolyUOp *base = u->src[0];
-    if (lane < 0 || !base) break;
-    if (base->op != POLY_OP_STACK && base->op != POLY_OP_VECTORIZE && base->op != POLY_OP_VCONST)
-      break;
-    if (lane >= base->n_src) break;
-    u = base->src[lane];
-  }
-  return u;
-}
-
-static bool wasm_resolve_lane_aliases(PolyUOp **lanes, int n, PolyUOp **resolved, bool *changed) {
-  if (!lanes || !resolved || n <= 0 || n > 16) return false;
-  bool any = false;
-  for (int i = 0; i < n; i++) {
-    resolved[i] = wasm_resolve_lane_alias(lanes[i]);
-    if (!resolved[i]) return false;
-    any = any || resolved[i] != lanes[i];
-  }
-  if (changed) *changed = any;
-  return true;
-}
-
-static bool wasm_same_float_const_lanes(PolyUOp **lanes, int n) {
-  if (!lanes || n <= 0 || !lanes[0] || lanes[0]->op != POLY_OP_CONST) return false;
-  if (!poly_dtype_is_float(poly_dtype_scalar(lanes[0]->dtype))) return false;
-  if (lanes[0]->arg.kind != POLY_ARG_FLOAT) return false;
-  for (int i = 1; i < n; i++) {
-    if (!lanes[i] || lanes[i]->op != POLY_OP_CONST) return false;
-    if (lanes[i]->arg.kind != POLY_ARG_FLOAT) return false;
-    if (lanes[i]->arg.f != lanes[0]->arg.f) return false;
-  }
-  return true;
-}
-
-static bool wasm_packed_lanes_match(PolyUOp **lanes, int n);
-
-static bool wasm_same_gep_lanes(PolyUOp **lanes, int n, PolyUOp **base_out) {
-  if (!lanes || n <= 0 || !lanes[0] || lanes[0]->op != POLY_OP_GEP || lanes[0]->n_src < 1)
-    return false;
-  PolyUOp *base = lanes[0]->src[0];
-  for (int i = 0; i < n; i++) {
-    if (!lanes[i] || lanes[i]->op != POLY_OP_GEP || lanes[i]->n_src < 1) return false;
-    if (lanes[i]->src[0] != base) return false;
-    if (wasm_gep_lane(lanes[i]) != i) return false;
-  }
-  if (base_out) *base_out = base;
-  return true;
-}
-
 static bool wasm_wide_lane_source(PolyUOp *u) {
   return u && (u->op == POLY_OP_STACK || u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) &&
          !u->dtype.is_ptr && u->dtype.count > 1 && !dt_is_v128(u->dtype) && u->n_src > 0;
-}
-
-static bool wasm_repeated_gep_lanes(
-    PolyUOp **lanes,
-    int n,
-    PolyUOp **base_out,
-    int *lane_out
-) {
-  if (!lanes || n <= 1 || !lanes[0] || lanes[0]->op != POLY_OP_GEP || lanes[0]->n_src < 1)
-    return false;
-  PolyUOp *base = lanes[0]->src[0];
-  int lane = wasm_gep_lane(lanes[0]);
-  if (!base || !dt_is_v128(base->dtype) || lane < 0 || lane >= base->dtype.count)
-    return false;
-  if (!poly_dtype_is_float(poly_dtype_scalar(base->dtype))) return false;
-  for (int i = 1; i < n; i++) {
-    if (!lanes[i] || lanes[i]->op != POLY_OP_GEP || lanes[i]->n_src < 1) return false;
-    if (lanes[i]->src[0] != base || wasm_gep_lane(lanes[i]) != lane) return false;
-  }
-  if (base_out) *base_out = base;
-  if (lane_out) *lane_out = lane;
-  return true;
-}
-
-static bool wasm_same_load_lanes(PolyUOp **lanes, int n) {
-  if (!lanes || n <= 0) return false;
-  for (int i = 0; i < n; i++) {
-    if (!lanes[i] || lanes[i]->op != POLY_OP_LOAD) return false;
-    if (!poly_dtype_is_float(poly_dtype_scalar(lanes[i]->dtype))) return false;
-  }
-  return true;
 }
 
 static bool wasm_reg_addr_index(PolyUOp *addr, PolyUOp **reg_base_out, int *idx_out) {
@@ -1572,477 +1500,6 @@ static bool wasm_reg_addr_lane(PolyUOp *addr, PolyUOp **reg_base_out, int *lane_
   return true;
 }
 
-static bool wasm_reg_load_lane(PolyUOp *u, PolyUOp **reg_base_out, int *lane_out);
-
-static bool wasm_direct_load_lane_packable(PolyUOp *u) {
-  if (!u || u->op != POLY_OP_LOAD || u->n_src != 1 || !u->src[0]) return false;
-  if (!poly_dtype_is_float(poly_dtype_scalar(u->dtype))) return false;
-  if (wasm_reg_addr_index(u->src[0], NULL, NULL)) return false;
-  return true;
-}
-
-static bool wasm_reg_load_lane(PolyUOp *u, PolyUOp **reg_base_out, int *lane_out) {
-  if (!u || u->op != POLY_OP_LOAD || u->n_src < 1) return false;
-  return wasm_reg_addr_lane(u->src[0], reg_base_out, lane_out);
-}
-
-static bool wasm_reg_load_index(PolyUOp *u, PolyUOp **reg_base_out, int *idx_out) {
-  if (!u || u->op != POLY_OP_LOAD || u->n_src < 1) return false;
-  return wasm_reg_addr_index(u->src[0], reg_base_out, idx_out);
-}
-
-static bool wasm_same_reg_load_lanes(PolyUOp **lanes, int n, PolyUOp **reg_base_out) {
-  if (!lanes || n <= 0 || n > 16) return false;
-  PolyUOp *reg_base = NULL;
-  for (int i = 0; i < n; i++) {
-    PolyUOp *base = NULL;
-    int lane = -1;
-    if (!wasm_reg_load_lane(lanes[i], &base, &lane)) return false;
-    if (lane != i) return false;
-    if (reg_base && reg_base != base) return false;
-    reg_base = base;
-  }
-  if (!reg_base) return false;
-  PolyDType scalar = wasm_reg_base_dtype(reg_base->dtype);
-  int n_lanes = scalar.bitsize == 64 ? 2 : 4;
-  if (n != n_lanes) return false;
-  if (reg_base_out) *reg_base_out = reg_base;
-  return true;
-}
-
-static bool wasm_gep_lanes_packable(PolyUOp **lanes, int n) {
-  if (!lanes || n <= 0 || n > 16) return false;
-  for (int i = 0; i < n; i++) {
-    if (!lanes[i] || lanes[i]->op != POLY_OP_GEP || lanes[i]->n_src < 1) return false;
-    PolyUOp *base = lanes[i]->src[0];
-    int lane = wasm_gep_lane(lanes[i]);
-    if (!base || !dt_is_v128(base->dtype) || lane < 0 || lane >= base->dtype.count)
-      return false;
-    if (!poly_dtype_is_float(poly_dtype_scalar(base->dtype))) return false;
-  }
-  return true;
-}
-
-static bool emit_gep_lanes_shuffle(
-    WasmBuf *body,
-    LocalMap *locals,
-    PolyUOp **lanes,
-    int n,
-    PolyDType vec_dt
-) {
-  if (!body || !locals || !lanes || !dt_is_v128(vec_dt)) return false;
-  PolyDType scalar = poly_dtype_scalar(vec_dt);
-  if (!poly_dtype_is_float(scalar)) return false;
-  if (!((scalar.bitsize == 32 && n == 4) || (scalar.bitsize == 64 && n == 2)))
-    return false;
-
-  PolyUOp *base[4] = {0};
-  int lane[4] = {0};
-  int local[4] = {0};
-  for (int i = 0; i < n; i++) {
-    if (!lanes[i] || lanes[i]->op != POLY_OP_GEP || lanes[i]->n_src < 1) return false;
-    base[i] = lanes[i]->src[0];
-    lane[i] = wasm_gep_lane(lanes[i]);
-    if (!base[i] || !dt_is_v128(base[i]->dtype) || lane[i] < 0 || lane[i] >= base[i]->dtype.count)
-      return false;
-    PolyDType base_scalar = poly_dtype_scalar(base[i]->dtype);
-    if (!poly_dtype_is_float(base_scalar) || base_scalar.bitsize != scalar.bitsize) return false;
-    local[i] = lm_get(locals, base[i]);
-    if (local[i] < 0) return false;
-  }
-
-  if (scalar.bitsize == 64) {
-    uint8_t shuf[16];
-    for (int b = 0; b < 8; b++) shuf[b] = (uint8_t)(lane[0] * 8 + b);
-    for (int b = 0; b < 8; b++) shuf[8 + b] = (uint8_t)(16 + lane[1] * 8 + b);
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, local[0]);
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, local[1]);
-    emit_v128_shuffle(body, shuf);
-    return true;
-  }
-
-  /* For f32x4 lanes drawn from different v128 values, i8x16.shuffle needs a
-   * three-shuffle tree. Use the simpler extract/replace path for those
-   * cross-vector packs while keeping same-base swizzles on shuffle. */
-  bool all_same_base = true;
-  for (int i = 1; i < n; i++) {
-    if (base[i] != base[0]) {
-      all_same_base = false;
-      break;
-    }
-  }
-  if (!all_same_base) return false;
-
-  uint8_t pair0[16] = {0};
-  uint8_t pair1[16] = {0};
-  uint8_t final[16] = {0};
-  for (int b = 0; b < 4; b++) {
-    pair0[b] = (uint8_t)(lane[0] * 4 + b);
-    pair0[4 + b] = (uint8_t)(16 + lane[1] * 4 + b);
-    pair1[b] = (uint8_t)(lane[2] * 4 + b);
-    pair1[4 + b] = (uint8_t)(16 + lane[3] * 4 + b);
-  }
-  for (int b = 8; b < 16; b++) {
-    pair0[b] = (uint8_t)b;
-    pair1[b] = (uint8_t)b;
-  }
-  for (int b = 0; b < 8; b++) final[b] = (uint8_t)b;
-  for (int b = 0; b < 8; b++) final[8 + b] = (uint8_t)(16 + b);
-
-  wb_byte(body, WASM_OP_LOCAL_GET);
-  wb_uleb128(body, local[0]);
-  wb_byte(body, WASM_OP_LOCAL_GET);
-  wb_uleb128(body, local[1]);
-  emit_v128_shuffle(body, pair0);
-  wb_byte(body, WASM_OP_LOCAL_GET);
-  wb_uleb128(body, local[2]);
-  wb_byte(body, WASM_OP_LOCAL_GET);
-  wb_uleb128(body, local[3]);
-  emit_v128_shuffle(body, pair1);
-  emit_v128_shuffle(body, final);
-  return true;
-}
-
-static bool wasm_packed_lanes_match(PolyUOp **lanes, int n) {
-  if (!lanes || n <= 0) return false;
-  PolyUOp *resolved[16];
-  bool changed = false;
-  if (wasm_resolve_lane_aliases(lanes, n, resolved, &changed) && changed)
-    return wasm_packed_lanes_match(resolved, n);
-
-  PolyUOp *base = NULL;
-  if (wasm_same_gep_lanes(lanes, n, &base))
-    return base && dt_is_v128(base->dtype) && base->dtype.count == n;
-  if (wasm_repeated_gep_lanes(lanes, n, NULL, NULL)) return true;
-  if (wasm_same_float_const_lanes(lanes, n)) return true;
-  if (wasm_same_reg_load_lanes(lanes, n, NULL)) return true;
-  if (wasm_same_load_lanes(lanes, n)) return true;
-  if (wasm_gep_lanes_packable(lanes, n)) return true;
-
-  PolyUOp *first = lanes[0];
-  if (!first || !poly_opset_has(POLY_GROUP_ALU, first->op)) return false;
-  if (!has_simd_op(first->op)) return false;
-  if (first->op == POLY_OP_WHERE &&
-      !(first->n_src >= 3 && poly_dtype_is_float(poly_dtype_scalar(first->dtype))))
-    return false;
-  if (first->op != POLY_OP_WHERE && !wasm_is_compare_op(first->op) &&
-      !poly_dtype_is_float(poly_dtype_scalar(first->dtype)))
-    return false;
-
-  int n_operands = poly_opset_has(POLY_GROUP_TERNARY, first->op)  ? 3
-                   : poly_opset_has(POLY_GROUP_BINARY, first->op) ? 2
-                                                                  : 1;
-  if (n_operands > first->n_src) n_operands = first->n_src;
-  if (n_operands <= 0 || n_operands > 3) return false;
-
-  PolyUOp *operand_lanes[3][16];
-  if (n > 16) return false;
-  for (int lane = 0; lane < n; lane++) {
-    PolyUOp *u = lanes[lane];
-    if (!u || u->op != first->op || u->n_src < n_operands) return false;
-    for (int j = 0; j < n_operands; j++)
-      operand_lanes[j][lane] = u->src[j];
-  }
-  for (int j = 0; j < n_operands; j++)
-    if (!wasm_packed_lanes_match(operand_lanes[j], n)) return false;
-  return true;
-}
-
-static bool wasm_reg_store_group_lanes(
-    PolyUOp *group,
-    PolyUOp **value_lanes,
-    int *n_lanes_out,
-    PolyUOp **reg_base_out,
-    PolyDType *vec_dt_out
-) {
-  if (!group || group->op != POLY_OP_GROUP || !value_lanes || !n_lanes_out || !reg_base_out ||
-      !vec_dt_out)
-    return false;
-  if (group->n_src <= 1 || group->n_src > 16) return false;
-
-  PolyUOp *reg_base = NULL;
-  PolyDType scalar = POLY_FLOAT32;
-  int n_lanes = 0;
-  bool seen[16] = {0};
-  for (int i = 0; i < 16; i++)
-    value_lanes[i] = NULL;
-
-  for (int i = 0; i < group->n_src; i++) {
-    PolyUOp *store = group->src[i];
-    if (!store || store->op != POLY_OP_STORE || store->n_src < 2) return false;
-    PolyUOp *base = NULL;
-    int lane = -1;
-    if (!wasm_reg_addr_lane(store->src[0], &base, &lane)) return false;
-    if (reg_base && reg_base != base) return false;
-    reg_base = base;
-
-    PolyUOp *value = store->src[1];
-    if (!value || !poly_dtype_is_float(poly_dtype_scalar(value->dtype))) return false;
-    PolyDType value_scalar = poly_dtype_scalar(value->dtype);
-    if (i == 0) {
-      scalar = value_scalar;
-      n_lanes = value_scalar.bitsize == 64 ? 2 : 4;
-      if (n_lanes <= 0 || n_lanes > 16 || group->n_src != n_lanes) return false;
-    } else if (!poly_dtype_eq(value_scalar, scalar)) {
-      return false;
-    }
-
-    if (lane < 0 || lane >= n_lanes || seen[lane]) return false;
-    seen[lane] = true;
-    value_lanes[lane] = value;
-  }
-
-  for (int i = 0; i < n_lanes; i++)
-    if (!seen[i] || !value_lanes[i]) return false;
-
-  *n_lanes_out = n_lanes;
-  *reg_base_out = reg_base;
-  *vec_dt_out = poly_dtype_vec(scalar, n_lanes);
-  return true;
-}
-
-static int wasm_uop_linear_index(PolyUOp **uops, int n, PolyUOp *u) {
-  if (!uops || !u) return -1;
-  for (int i = 0; i < n; i++)
-    if (uops[i] == u) return i;
-  return -1;
-}
-
-static bool wasm_store_targets_reg(PolyUOp *u, PolyUOp *reg_base) {
-  if (!u || u->op != POLY_OP_STORE || u->n_src < 1 || !reg_base) return false;
-  PolyUOp *base = NULL;
-  return wasm_reg_addr_index(u->src[0], &base, NULL) && base == reg_base;
-}
-
-static bool wasm_reg_vector_cache_safe(PolyUOp **uops, int n, PolyUOp *reg_base, const bool *skip_packed) {
-  if (!uops || !reg_base || !skip_packed) return false;
-  PolyDType scalar = wasm_reg_base_dtype(reg_base->dtype);
-  if (!poly_dtype_is_float(poly_dtype_scalar(scalar))) return false;
-  int n_lanes = scalar.bitsize == 64 ? 2 : 4;
-  if (reg_base->dtype.ptr_size > 0 && reg_base->dtype.ptr_size != n_lanes) return false;
-  bool saw_store = false;
-  for (int i = 0; i < n; i++) {
-    if (!wasm_store_targets_reg(uops[i], reg_base)) continue;
-    saw_store = true;
-    if (!skip_packed[i]) return false;
-  }
-  return saw_store;
-}
-
-static bool wasm_reg_needs_scalar_materialization(
-    PolyUOp **uops,
-    int n,
-    PolyUOp *reg_base,
-    const bool *skip_packed
-) {
-  if (!uops || !reg_base || !skip_packed) return true;
-  for (int i = 0; i < n; i++) {
-    PolyUOp *base = NULL;
-    if (!wasm_reg_load_index(uops[i], &base, NULL) || base != reg_base) continue;
-    if (!skip_packed[i]) return true;
-  }
-  return false;
-}
-
-static void wasm_mark_packed_expr(PolyUOp **uops, int n, PolyUOp *u, int *packed_uses) {
-  int idx = wasm_uop_linear_index(uops, n, u);
-  if (idx >= 0 &&
-      (u->op == POLY_OP_GEP || poly_opset_has(POLY_GROUP_ALU, u->op) ||
-       wasm_reg_load_lane(u, NULL, NULL) || wasm_direct_load_lane_packable(u)))
-    packed_uses[idx]++;
-  if (!u || !poly_opset_has(POLY_GROUP_ALU, u->op)) return;
-  int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op)  ? 3
-                   : poly_opset_has(POLY_GROUP_BINARY, u->op) ? 2
-                                                              : 1;
-  if (n_operands > u->n_src) n_operands = u->n_src;
-  for (int i = 0; i < n_operands; i++)
-    wasm_mark_packed_expr(uops, n, u->src[i], packed_uses);
-}
-
-static bool wasm_consumes_packed_sources(PolyUOp *u);
-
-static void wasm_clear_skip_reachable(
-    PolyUOp **uops,
-    int n,
-    PolyUOp *u,
-    bool *skip_packed,
-    bool *clear_seen
-) {
-  if (!uops || !u || !skip_packed) return;
-  int idx = wasm_uop_linear_index(uops, n, u);
-  if (idx < 0) return;
-  if (clear_seen) {
-    if (clear_seen[idx]) return;
-    clear_seen[idx] = true;
-  }
-  skip_packed[idx] = false;
-  if (wasm_consumes_packed_sources(u)) return;
-  int n_operands = poly_opset_has(POLY_GROUP_TERNARY, u->op)  ? 3
-                   : poly_opset_has(POLY_GROUP_BINARY, u->op) ? 2
-                                                              : 1;
-  if (n_operands > u->n_src) n_operands = u->n_src;
-  for (int i = 0; i < n_operands; i++)
-    wasm_clear_skip_reachable(uops, n, u->src[i], skip_packed, clear_seen);
-}
-
-static bool wasm_consumes_packed_sources(PolyUOp *u) {
-  if (!u) return false;
-  if (u->op == POLY_OP_STACK && dt_is_v128(u->dtype) &&
-      wasm_packed_lanes_match(u->src, u->n_src))
-    return true;
-  PolyUOp *values[16];
-  int n_lanes = 0;
-  PolyUOp *reg_base = NULL;
-  PolyDType vec_dt = POLY_FLOAT32;
-  return wasm_reg_store_group_lanes(u, values, &n_lanes, &reg_base, &vec_dt) &&
-         wasm_packed_lanes_match(values, n_lanes);
-}
-
-static bool emit_packed_lanes(
-    WasmBuf *body,
-    LocalMap *locals,
-    PolyUOp **lanes,
-    int n,
-    PolyDType vec_dt,
-    PolyUOp **uops,
-    int n_uops,
-    const bool *skip_packed
-) {
-  if (!wasm_packed_lanes_match(lanes, n)) return false;
-  PolyUOp *resolved[16];
-  bool changed = false;
-  if (wasm_resolve_lane_aliases(lanes, n, resolved, &changed) && changed)
-    return emit_packed_lanes(body, locals, resolved, n, vec_dt, uops, n_uops, skip_packed);
-
-  PolyUOp *base = NULL;
-  if (wasm_same_gep_lanes(lanes, n, &base)) {
-    if (!base || !dt_is_v128(base->dtype)) return false;
-    int local = lm_get(locals, base);
-    if (local < 0) return false;
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, local);
-    return true;
-  }
-
-  int repeated_lane = -1;
-  if (wasm_repeated_gep_lanes(lanes, n, &base, &repeated_lane)) {
-    int local = lm_get(locals, base);
-    if (local < 0) return false;
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, local);
-    emit_v128_extract_lane(body, base->dtype, repeated_lane);
-    emit_cast_stack_value(body, poly_dtype_scalar(base->dtype), poly_dtype_scalar(vec_dt));
-    emit_v128_splat(body, vec_dt);
-    return true;
-  }
-
-  if (wasm_same_float_const_lanes(lanes, n)) {
-    PolyDType scalar = poly_dtype_scalar(vec_dt);
-    if (scalar.bitsize == 64) {
-      wb_byte(body, WASM_OP_F64_CONST);
-      wb_f64(body, lanes[0]->arg.f);
-    } else {
-      wb_byte(body, WASM_OP_F32_CONST);
-      wb_f32(body, (float)lanes[0]->arg.f);
-    }
-    emit_v128_splat(body, vec_dt);
-    return true;
-  }
-
-  PolyUOp *reg_base = NULL;
-  if (wasm_same_reg_load_lanes(lanes, n, &reg_base) &&
-      wasm_reg_vector_cache_safe(uops, n_uops, reg_base, skip_packed)) {
-    int local = lm_get(locals, reg_base);
-    if (local < 0) return false;
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, local);
-    return true;
-  }
-
-  if (wasm_same_load_lanes(lanes, n)) {
-    if (!wasm_direct_load_lane_packable(lanes[0])) return false;
-    int addr0 = lm_get(locals, lanes[0]->src[0]);
-    if (addr0 < 0) return false;
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, addr0);
-    emit_scalar_load_opcode(body, lanes[0]->dtype);
-    emit_cast_stack_value(body, lanes[0]->dtype, poly_dtype_scalar(vec_dt));
-    emit_v128_splat(body, vec_dt);
-    for (int j = 1; j < n; j++) {
-      if (!wasm_direct_load_lane_packable(lanes[j])) return false;
-      int addrj = lm_get(locals, lanes[j]->src[0]);
-      if (addrj < 0) return false;
-      wb_byte(body, WASM_OP_LOCAL_GET);
-      wb_uleb128(body, addrj);
-      emit_scalar_load_opcode(body, lanes[j]->dtype);
-      emit_cast_stack_value(body, lanes[j]->dtype, poly_dtype_scalar(vec_dt));
-      emit_v128_replace_lane(body, vec_dt, j);
-    }
-    return true;
-  }
-
-  if (emit_gep_lanes_shuffle(body, locals, lanes, n, vec_dt)) return true;
-
-  if (wasm_gep_lanes_packable(lanes, n)) {
-    for (int j = 0; j < n; j++) {
-      PolyUOp *base_uop = lanes[j]->src[0];
-      int base_local = lm_get(locals, base_uop);
-      int lane = wasm_gep_lane(lanes[j]);
-      if (base_local < 0 || lane < 0) return false;
-      wb_byte(body, WASM_OP_LOCAL_GET);
-      wb_uleb128(body, base_local);
-      emit_v128_extract_lane(body, base_uop->dtype, lane);
-      emit_cast_stack_value(body, poly_dtype_scalar(base_uop->dtype), poly_dtype_scalar(vec_dt));
-      if (j == 0) {
-        emit_v128_splat(body, vec_dt);
-      } else {
-        emit_v128_replace_lane(body, vec_dt, j);
-      }
-    }
-    return true;
-  }
-
-  PolyUOp *first = lanes[0];
-  int n_operands = poly_opset_has(POLY_GROUP_TERNARY, first->op)  ? 3
-                   : poly_opset_has(POLY_GROUP_BINARY, first->op) ? 2
-                                                                  : 1;
-  if (n_operands > first->n_src) n_operands = first->n_src;
-
-  PolyUOp *operand_lanes[3][16];
-  for (int lane = 0; lane < n; lane++)
-    for (int j = 0; j < n_operands; j++)
-      operand_lanes[j][lane] = lanes[lane]->src[j];
-
-  PolyDType op_vec_dt = wasm_simd_value_dtype(first);
-  if (first->op == POLY_OP_MULACC && n_operands >= 3) {
-    int order[3] = {2, 0, 1};
-    for (int oi = 0; oi < 3; oi++) {
-      int j = order[oi];
-      if (!emit_packed_lanes(body, locals, operand_lanes[j], n, op_vec_dt, uops, n_uops, skip_packed))
-        return false;
-    }
-  } else if (first->op == POLY_OP_WHERE && n_operands >= 3) {
-    if (!emit_packed_lanes(body, locals, operand_lanes[1], n, op_vec_dt, uops, n_uops, skip_packed))
-      return false;
-    if (!emit_packed_lanes(body, locals, operand_lanes[2], n, op_vec_dt, uops, n_uops, skip_packed))
-      return false;
-    if (!emit_packed_lanes(body, locals, operand_lanes[0], n, op_vec_dt, uops, n_uops, skip_packed))
-      return false;
-  } else {
-    for (int j = 0; j < n_operands; j++)
-      if (!emit_packed_lanes(body, locals, operand_lanes[j], n, op_vec_dt, uops, n_uops, skip_packed))
-        return false;
-  }
-
-  if (poly_dtype_scalar(op_vec_dt).bitsize == 64)
-    emit_alu_simd_f64x2(body, first->op);
-  else
-    emit_alu_simd_f32x4(body, first->op);
-  return true;
-}
-
 static int alloc_local(
     PolyDType dt,
     int *next_i32,
@@ -2051,53 +1508,6 @@ static int alloc_local(
     int *next_f64,
     int *next_v128
 );
-
-static bool emit_packed_reg_store_group(
-    WasmBuf *body,
-    LocalMap *locals,
-    RegLocalMap *reg_locals,
-    PolyUOp *group,
-    bool update_scalar_lanes,
-    PolyUOp **uops,
-    int n_uops,
-    const bool *skip_packed,
-    int *next_i32,
-    int *next_i64,
-    int *next_f32,
-    int *next_f64,
-    int *next_v128
-) {
-  PolyUOp *values[16];
-  int n_lanes = 0;
-  PolyUOp *reg_base = NULL;
-  PolyDType vec_dt = POLY_FLOAT32;
-  if (!wasm_reg_store_group_lanes(group, values, &n_lanes, &reg_base, &vec_dt)) return false;
-  if (!wasm_packed_lanes_match(values, n_lanes)) return false;
-
-  int vec_local = lm_get(locals, reg_base);
-  if (vec_local < 0)
-    vec_local = alloc_local(vec_dt, next_i32, next_i64, next_f32, next_f64, next_v128);
-  if (!emit_packed_lanes(body, locals, values, n_lanes, vec_dt, uops, n_uops, skip_packed)) {
-    return false;
-  }
-  wb_byte(body, WASM_OP_LOCAL_SET);
-  wb_uleb128(body, vec_local);
-  lm_set(locals, reg_base, vec_local);
-
-  if (!update_scalar_lanes) return true;
-  for (int lane = 0; lane < n_lanes; lane++) {
-    int dst = rlm_get(reg_locals, reg_base, lane);
-    if (dst < 0) {
-      return false;
-    }
-    wb_byte(body, WASM_OP_LOCAL_GET);
-    wb_uleb128(body, vec_local);
-    emit_v128_extract_lane(body, vec_dt, lane);
-    wb_byte(body, WASM_OP_LOCAL_SET);
-    wb_uleb128(body, dst);
-  }
-  return true;
-}
 
 /* Build code section (scalar) */
 
@@ -2159,84 +1569,10 @@ static void build_code_scalar(
 ) {
   /* --- Count locals needed (beyond function params) --- */
   int n_locals_i32 = 0, n_locals_i64 = 0, n_locals_f32 = 0, n_locals_f64 = 0, n_locals_v128 = 0;
-  int *use_counts = calloc((size_t)n, sizeof(*use_counts));
-  int *packed_uses = calloc((size_t)n, sizeof(*packed_uses));
-  bool *skip_packed = calloc((size_t)n, sizeof(*skip_packed));
-  bool *clear_seen = calloc((size_t)n, sizeof(*clear_seen));
-  if (use_counts && packed_uses && skip_packed) {
-    for (int i = 0; i < n; i++) {
-      PolyUOp *u = uops[i];
-      for (int j = 0; j < u->n_src; j++) {
-        int si = wasm_uop_linear_index(uops, n, u->src[j]);
-        if (si >= 0) use_counts[si]++;
-      }
-    }
-    for (int i = 0; i < n; i++) {
-      PolyUOp *u = uops[i];
-      if (u->op != POLY_OP_STACK || !dt_is_v128(u->dtype) || !wasm_packed_lanes_match(u->src, u->n_src))
-        continue;
-      for (int j = 0; j < u->n_src; j++)
-        wasm_mark_packed_expr(uops, n, u->src[j], packed_uses);
-    }
-    for (int i = 0; i < n; i++) {
-      PolyUOp *u = uops[i];
-      PolyUOp *values[16];
-      int n_lanes = 0;
-      PolyUOp *reg_base = NULL;
-      PolyDType vec_dt = POLY_FLOAT32;
-      if (!wasm_reg_store_group_lanes(u, values, &n_lanes, &reg_base, &vec_dt)) continue;
-      if (!wasm_packed_lanes_match(values, n_lanes)) continue;
-      for (int j = 0; j < n_lanes; j++)
-        wasm_mark_packed_expr(uops, n, values[j], packed_uses);
-      for (int j = 0; j < u->n_src; j++) {
-        int si = wasm_uop_linear_index(uops, n, u->src[j]);
-        if (si >= 0) skip_packed[si] = true;
-      }
-    }
-    for (int i = 0; i < n; i++) {
-      PolyUOp *u = uops[i];
-      if (!(u->op == POLY_OP_GEP || poly_opset_has(POLY_GROUP_ALU, u->op) ||
-            wasm_reg_load_lane(u, NULL, NULL)))
-        continue;
-      skip_packed[i] = use_counts[i] > 0 && packed_uses[i] >= use_counts[i];
-      if (u->op == POLY_OP_WHERE) skip_packed[i] = false;
-    }
-    for (int i = 0; i < n; i++) {
-      PolyUOp *reg_base = NULL;
-      if (!skip_packed[i] || !wasm_reg_load_lane(uops[i], &reg_base, NULL)) continue;
-      if (!wasm_reg_vector_cache_safe(uops, n, reg_base, skip_packed))
-        skip_packed[i] = false;
-    }
-    for (int i = 0; i < n; i++) {
-      PolyUOp *u = uops[i];
-      if (!wasm_vector_alu_needs_lane_fallback(u)) continue;
-      for (int j = 0; j < u->n_src; j++)
-        wasm_clear_skip_reachable(uops, n, u->src[j], skip_packed, clear_seen);
-    }
-    for (int i = 0; i < n; i++) {
-      PolyUOp *u = uops[i];
-      if (skip_packed[i] || wasm_consumes_packed_sources(u)) continue;
-      for (int j = 0; j < u->n_src; j++)
-        wasm_clear_skip_reachable(uops, n, u->src[j], skip_packed, clear_seen);
-    }
-  }
-
-  int n_packed_reg_store_groups = 0;
-  for (int i = 0; i < n; i++) {
-    PolyUOp *values[16];
-    int n_lanes = 0;
-    PolyUOp *reg_base = NULL;
-    PolyDType vec_dt = POLY_FLOAT32;
-    if (wasm_reg_store_group_lanes(uops[i], values, &n_lanes, &reg_base, &vec_dt) &&
-        wasm_packed_lanes_match(values, n_lanes) &&
-        !wasm_reg_vector_cache_safe(uops, n, reg_base, skip_packed))
-      n_packed_reg_store_groups++;
-  }
 
   /* First pass: count locals */
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (skip_packed && skip_packed[i]) continue;
     if (u->op == POLY_OP_RANGE) n_locals_i32++; /* loop counter always i32 */
     if (u->op == POLY_OP_LOAD) {
       bool is_reg_load =
@@ -2248,11 +1584,13 @@ static void build_code_scalar(
             &n_locals_v128
         );
     }
-    if (poly_opset_has(POLY_GROUP_ALU, u->op))
+    if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
+      PolyDType local_dt = wasm_vector_alu_has_direct_simd(u) ? wasm_simd_value_dtype(u) : u->dtype;
       count_local(
-          u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
+          local_dt, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
           &n_locals_v128
       );
+    }
     if (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST)
       count_local(
           u->dtype, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
@@ -2272,13 +1610,6 @@ static void build_code_scalar(
             base, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
             &n_locals_v128
         );
-      if (wasm_reg_vector_cache_safe(uops, n, u, skip_packed)) {
-        PolyDType vec_dt = poly_dtype_vec(base, base.bitsize == 64 ? 2 : 4);
-        count_local(
-            vec_dt, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
-            &n_locals_v128
-        );
-      }
     }
     if (u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST ||
         (u->op == POLY_OP_STACK && dt_is_v128(u->dtype)) || u->op == POLY_OP_GEP)
@@ -2296,7 +1627,6 @@ static void build_code_scalar(
           &n_locals_v128
       );
   }
-  n_locals_v128 += n_packed_reg_store_groups;
 
   /* Locals declaration: count of (count, type) pairs */
   int n_local_types = 0;
@@ -2350,37 +1680,21 @@ static void build_code_scalar(
     PolyUOp *u = uops[i];
 
     if (u->op == POLY_OP_SINK || u->op == POLY_OP_NOOP) continue;
-    if (skip_packed && skip_packed[i]) continue;
 
     if (u->op == POLY_OP_GROUP) {
-      PolyUOp *values[16];
-      int n_lanes = 0;
-      PolyUOp *reg_base = NULL;
-      PolyDType vec_dt = POLY_FLOAT32;
-      bool update_scalar_lanes = true;
-      if (wasm_reg_store_group_lanes(u, values, &n_lanes, &reg_base, &vec_dt) &&
-          wasm_reg_vector_cache_safe(uops, n, reg_base, skip_packed)) {
-        update_scalar_lanes = wasm_reg_needs_scalar_materialization(uops, n, reg_base, skip_packed);
-      }
-      bool emitted_group = emit_packed_reg_store_group(
-          &body, &locals, &reg_locals, u, update_scalar_lanes, uops, n, skip_packed,
-          &next_i32, &next_i64, &next_f32, &next_f64, &next_v128
-      );
-      if (!emitted_group) {
-        for (int j = 0; j < u->n_src; j++) {
-          PolyUOp *store = u->src[j];
-          if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
-          PolyUOp *base = NULL;
-          int lane = -1;
-          if (!wasm_reg_addr_lane(store->src[0], &base, &lane)) continue;
-          int acc_local = rlm_get(&reg_locals, base, lane);
-          int val_local = lm_get(&locals, store->src[1]);
-          if (acc_local < 0 || val_local < 0) continue;
-          wb_byte(&body, WASM_OP_LOCAL_GET);
-          wb_uleb128(&body, val_local);
-          wb_byte(&body, WASM_OP_LOCAL_SET);
-          wb_uleb128(&body, acc_local);
-        }
+      for (int j = 0; j < u->n_src; j++) {
+        PolyUOp *store = u->src[j];
+        if (!store || store->op != POLY_OP_STORE || store->n_src < 2) continue;
+        PolyUOp *base = NULL;
+        int lane = -1;
+        if (!wasm_reg_addr_lane(store->src[0], &base, &lane)) continue;
+        int acc_local = rlm_get(&reg_locals, base, lane);
+        int val_local = lm_get(&locals, store->src[1]);
+        if (acc_local < 0 || val_local < 0) continue;
+        wb_byte(&body, WASM_OP_LOCAL_GET);
+        wb_uleb128(&body, val_local);
+        wb_byte(&body, WASM_OP_LOCAL_SET);
+        wb_uleb128(&body, acc_local);
       }
       continue;
     }
@@ -2490,17 +1804,7 @@ static void build_code_scalar(
       }
       if (reg_size > 0) {
         rlm_set(&reg_locals, u, reg_slots, reg_size);
-        if (wasm_reg_vector_cache_safe(uops, n, u, skip_packed)) {
-          PolyDType vec_dt = poly_dtype_vec(base, base.bitsize == 64 ? 2 : 4);
-          int vec_local =
-              alloc_local(vec_dt, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
-          emit_v128_zero(&body);
-          wb_byte(&body, WASM_OP_LOCAL_SET);
-          wb_uleb128(&body, vec_local);
-          lm_set(&locals, u, vec_local);
-        } else {
-          lm_set(&locals, u, reg_slots[0]);
-        }
+        lm_set(&locals, u, reg_slots[0]);
       }
       continue;
     }
@@ -2523,10 +1827,7 @@ static void build_code_scalar(
 
       int local_idx =
           alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
-      if (dt_is_v128(u->dtype) &&
-          emit_packed_lanes(&body, &locals, u->src, u->n_src, u->dtype, uops, n, skip_packed)) {
-        /* emitted directly */
-      } else if (dt_is_v128(u->dtype) && u->n_src > 0) {
+      if (dt_is_v128(u->dtype) && u->n_src > 0) {
         int lanes = u->dtype.count;
         int n_lanes = u->n_src < lanes ? u->n_src : lanes;
         int s0 = lm_get(&locals, u->src[0]);
@@ -2961,10 +2262,11 @@ static void build_code_scalar(
 
     /* --- ALU --- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      int local_idx =
-          alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
       bool vector_alu = wasm_vector_alu_has_direct_simd(u);
       bool vector_lane_fallback = wasm_vector_alu_needs_lane_fallback(u);
+      PolyDType local_dt = vector_alu ? wasm_simd_value_dtype(u) : u->dtype;
+      int local_idx =
+          alloc_local(local_dt, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
 
       /* RECIPROCAL: push 1.0 first, then src, then div */
       if (!vector_alu && !vector_lane_fallback && u->op == POLY_OP_RECIPROCAL) {
@@ -3037,7 +2339,7 @@ static void build_code_scalar(
         alu_dtype = wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
       }
       if (vector_alu) {
-        PolyDType scalar = poly_dtype_scalar(u->dtype);
+        PolyDType scalar = poly_dtype_scalar(wasm_simd_value_dtype(u));
         if (scalar.bitsize == 64)
           emit_alu_simd_f64x2(&body, u->op);
         else
@@ -3086,10 +2388,6 @@ static void build_code_scalar(
   wb_free(&sec);
   rlm_destroy(&reg_locals);
   lm_destroy(&locals);
-  free(use_counts);
-  free(packed_uses);
-  free(skip_packed);
-  free(clear_seen);
 }
 
 /* Build code section (SIMD) */
@@ -3535,6 +2833,15 @@ typedef struct {
   int64_t offset;
 } WasmAffine;
 
+typedef struct {
+  int m;
+  int k;
+  int out_param;
+  PolyUOp *out_range;
+  PolyUOp *red_range;
+  PolyUOp *expr;
+} WasmReduceSpec;
+
 static bool wasm_affine_expr(PolyUOp *u, PolyUOp *r0, PolyUOp *r1, PolyUOp *r2, WasmAffine *out) {
   if (!u || !out) return false;
   memset(out, 0, sizeof(*out));
@@ -3638,6 +2945,120 @@ static bool wasm_affine_eq(WasmAffine a, int64_t c0, int64_t c1, int64_t c2) {
   return a.offset == 0 && a.c[0] == c0 && a.c[1] == c1 && a.c[2] == c2;
 }
 
+static bool wasm_const_f32(PolyUOp *u, float *out) {
+  if (!u || u->op != POLY_OP_CONST) return false;
+  if (u->arg.kind == POLY_ARG_FLOAT) {
+    if (out) *out = (float)u->arg.f;
+    return true;
+  }
+  if (u->arg.kind == POLY_ARG_INT) {
+    if (out) *out = (float)u->arg.i;
+    return true;
+  }
+  return false;
+}
+
+static bool wasm_reduce_expr_supported(PolyUOp *u, const WasmReduceSpec *s);
+
+static bool wasm_reduce_index_supported(PolyUOp *u, const WasmReduceSpec *s) {
+  int param = -1;
+  WasmAffine aff;
+  if (!wasm_index_param_affine(u, s->red_range, s->out_range, NULL, &param, &aff))
+    return false;
+  if (param == s->out_param) return false;
+  PolyDType scalar = poly_dtype_scalar(u->dtype);
+  if (!poly_dtype_is_float(scalar) || scalar.bitsize != 32) return false;
+  return aff.c[0] == 0 || aff.c[0] == 1;
+}
+
+static bool wasm_reduce_expr_supported(PolyUOp *u, const WasmReduceSpec *s) {
+  if (!u || !s) return false;
+  if (u->op == POLY_OP_INDEX) return wasm_reduce_index_supported(u, s);
+  if (u->op == POLY_OP_CONST) {
+    float v = 0.0f;
+    return wasm_const_f32(u, &v);
+  }
+  if (u->op == POLY_OP_WHERE) {
+    if (u->n_src < 3 || !wasm_is_compare_op(u->src[0]->op)) return false;
+    return wasm_reduce_expr_supported(u->src[0], s) && wasm_reduce_expr_supported(u->src[1], s) &&
+           wasm_reduce_expr_supported(u->src[2], s);
+  }
+  if (wasm_is_compare_op(u->op)) {
+    return u->n_src >= 2 && wasm_reduce_expr_supported(u->src[0], s) &&
+           wasm_reduce_expr_supported(u->src[1], s);
+  }
+  switch (u->op) {
+  case POLY_OP_ADD:
+  case POLY_OP_SUB:
+  case POLY_OP_MUL:
+  case POLY_OP_FDIV:
+  case POLY_OP_MAX:
+    return u->n_src >= 2 && wasm_reduce_expr_supported(u->src[0], s) &&
+           wasm_reduce_expr_supported(u->src[1], s);
+  case POLY_OP_NEG:
+  case POLY_OP_SQRT:
+    return u->n_src >= 1 && wasm_reduce_expr_supported(u->src[0], s);
+  default:
+    return false;
+  }
+}
+
+static int wasm_reduce_expr_max_param(PolyUOp *u) {
+  if (!u) return -1;
+  int maxp = -1;
+  if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_INT) maxp = (int)u->arg.i;
+  if (u->op == POLY_OP_INDEX && u->n_src >= 1) {
+    PolyUOp *base = u->src[0];
+    while (base && (base->op == POLY_OP_CAST || base->op == POLY_OP_BITCAST ||
+                    base->op == POLY_OP_RESHAPE || base->op == POLY_OP_EXPAND))
+      base = base->src[0];
+    if (base && base->op == POLY_OP_PARAM && base->arg.kind == POLY_ARG_INT)
+      maxp = (int)base->arg.i;
+  }
+  for (int i = 0; i < u->n_src; i++) {
+    int child = wasm_reduce_expr_max_param(u->src[i]);
+    if (child > maxp) maxp = child;
+  }
+  return maxp;
+}
+
+static bool wasm_match_row_reduce_root(PolyUOp *sink, WasmReduceSpec *spec) {
+  if (!sink || sink->op != POLY_OP_SINK || sink->n_src != 1 || !spec) return false;
+  PolyUOp *end = sink->src[0];
+  if (!end || end->op != POLY_OP_END || end->n_src != 2) return false;
+  PolyUOp *store = end->src[0];
+  if (!store || store->op != POLY_OP_STORE || store->n_src < 2) return false;
+  PolyUOp *reduce = store->src[1];
+  if (!reduce || reduce->op != POLY_OP_REDUCE || reduce->arg.kind != POLY_ARG_OPS ||
+      reduce->arg.ops != POLY_OP_ADD || reduce->n_src != 2)
+    return false;
+
+  PolyUOp *out_range = end->src[1];
+  PolyUOp *red_range = reduce->src[1];
+  int64_t m = 0, k = 0;
+  if (!wasm_range_bound(out_range, &m) || !wasm_range_bound(red_range, &k)) return false;
+  if (m <= 0 || k <= 0 || (k % 4) != 0) return false;
+
+  int out_param = -1;
+  WasmAffine out_aff;
+  if (!wasm_index_param_affine(store->src[0], red_range, out_range, NULL, &out_param, &out_aff))
+    return false;
+  if (!wasm_affine_eq(out_aff, 0, 1, 0)) return false;
+  if (out_param < 0) return false;
+
+  WasmReduceSpec tmp = {
+      .m = (int)m,
+      .k = (int)k,
+      .out_param = out_param,
+      .out_range = out_range,
+      .red_range = red_range,
+      .expr = reduce->src[0],
+  };
+  if (!wasm_reduce_expr_supported(tmp.expr, &tmp)) return false;
+  *spec = tmp;
+  return true;
+}
+
 static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
   if (!sink || sink->op != POLY_OP_SINK || sink->n_src != 1 || !spec) return false;
   PolyUOp *end = sink->src[0];
@@ -3700,6 +3121,11 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
 bool poly_wasm_can_render_matmul(PolyUOp *sink) {
   WasmMatmulSpec spec;
   return wasm_match_matmul_root(sink, &spec);
+}
+
+bool poly_wasm_can_render_reduce(PolyUOp *sink) {
+  WasmReduceSpec spec;
+  return wasm_match_row_reduce_root(sink, &spec);
 }
 
 static void wasm_emit_local_get(WasmBuf *body, int local) {
@@ -3900,6 +3326,98 @@ static void wasm_emit_f32x4_horizontal_sum(
   wb_byte(body, WASM_SIMD_PREFIX);
   wb_uleb128(body, WASM_SIMD_F32X4_ADD);
   emit_v128_extract_lane(body, poly_dtype_vec(POLY_FLOAT32, 4), 0);
+}
+
+static void wasm_emit_f32x4_splat_const(WasmBuf *body, float v) {
+  wb_byte(body, WASM_OP_F32_CONST);
+  wb_f32(body, v);
+  emit_v128_splat(body, poly_dtype_vec(POLY_FLOAT32, 4));
+}
+
+static void wasm_emit_reduce_index_v128(
+    WasmBuf *body,
+    PolyUOp *idx,
+    const WasmReduceSpec *s,
+    int row_local,
+    int kk_local
+) {
+  int param = -1;
+  WasmAffine aff;
+  if (!wasm_index_param_affine(idx, s->red_range, s->out_range, NULL, &param, &aff)) {
+    emit_v128_zero(body);
+    return;
+  }
+
+  wasm_emit_param_element_addr(
+      body, param, row_local, (int)aff.c[1], kk_local, (int)aff.c[0], -1, 0
+  );
+  if (aff.offset != 0) {
+    wasm_emit_i32_const(body, (int32_t)(aff.offset * 4));
+    wasm_emit_i32_add(body);
+  }
+
+  if (aff.c[0] == 0) {
+    emit_scalar_load_opcode(body, POLY_FLOAT32);
+    emit_v128_splat(body, poly_dtype_vec(POLY_FLOAT32, 4));
+  } else {
+    wasm_emit_v128_load_addr_align(body, 2);
+  }
+}
+
+static bool wasm_emit_reduce_expr_v128(
+    WasmBuf *body,
+    PolyUOp *u,
+    const WasmReduceSpec *s,
+    int row_local,
+    int kk_local
+) {
+  if (!u) return false;
+  if (u->op == POLY_OP_INDEX) {
+    if (!wasm_reduce_index_supported(u, s)) return false;
+    wasm_emit_reduce_index_v128(body, u, s, row_local, kk_local);
+    return true;
+  }
+  if (u->op == POLY_OP_CONST) {
+    float v = 0.0f;
+    if (!wasm_const_f32(u, &v)) return false;
+    wasm_emit_f32x4_splat_const(body, v);
+    return true;
+  }
+
+  if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
+    if (!wasm_is_compare_op(u->src[0]->op)) return false;
+    if (!wasm_emit_reduce_expr_v128(body, u->src[1], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_v128(body, u->src[2], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_v128(body, u->src[0], s, row_local, kk_local)) return false;
+    wb_byte(body, WASM_SIMD_PREFIX);
+    wb_uleb128(body, WASM_SIMD_V128_BITSELECT);
+    return true;
+  }
+
+  if (u->op == POLY_OP_NEG || u->op == POLY_OP_SQRT) {
+    if (u->n_src < 1) return false;
+    if (!wasm_emit_reduce_expr_v128(body, u->src[0], s, row_local, kk_local)) return false;
+    emit_alu_simd_f32x4(body, u->op);
+    return true;
+  }
+
+  if (u->n_src < 2) return false;
+  switch (u->op) {
+  case POLY_OP_ADD:
+  case POLY_OP_SUB:
+  case POLY_OP_MUL:
+  case POLY_OP_FDIV:
+  case POLY_OP_MAX:
+  case POLY_OP_CMPLT:
+  case POLY_OP_CMPEQ:
+  case POLY_OP_CMPNE:
+    if (!wasm_emit_reduce_expr_v128(body, u->src[0], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_v128(body, u->src[1], s, row_local, kk_local)) return false;
+    emit_alu_simd_f32x4(body, u->op);
+    return true;
+  default:
+    return false;
+  }
 }
 
 static void wasm_emit_matmul_ab_body(
@@ -4290,6 +3808,95 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   return mod.data;
 }
 
+uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
+  WasmReduceSpec s;
+  if (!wasm_match_row_reduce_root(sink, &s)) return NULL;
+  if (poly_debug_at_least(4)) {
+    fprintf(
+        stderr,
+        "[polygrad:wasm] row-reduce m=%d k=%d out=%d max_param=%d\n",
+        s.m, s.k, s.out_param, wasm_reduce_expr_max_param(s.expr)
+    );
+  }
+
+  int n_params = s.out_param;
+  int expr_max = wasm_reduce_expr_max_param(s.expr);
+  if (expr_max > n_params) n_params = expr_max;
+  n_params++;
+
+  MathImports math = {0};
+  WasmBuf mod;
+  wb_init(&mod);
+  wb_module_header(&mod);
+  build_type_section(&mod, n_params, &math);
+  int n_imported_funcs = build_import_section(&mod, &math);
+  build_function_section(&mod);
+  build_export_section(&mod, n_imported_funcs);
+
+  WasmBuf body;
+  wb_init(&body);
+
+  const int n_i32 = 2;  /* row, kk */
+  const int n_v128 = 2; /* acc, tmp */
+  wb_uleb128(&body, 2);
+  wb_uleb128(&body, n_i32);
+  wb_byte(&body, WASM_TYPE_I32);
+  wb_uleb128(&body, n_v128);
+  wb_byte(&body, WASM_TYPE_V128);
+
+  int row = n_params;
+  int kk = n_params + 1;
+  int acc = n_params + n_i32;
+  int tmp = acc + 1;
+
+  wasm_emit_i32_const(&body, 0);
+  wasm_emit_local_set(&body, row);
+  wasm_emit_loop_header(&body);
+  wasm_emit_break_if_ge_const(&body, row, s.m);
+
+  emit_v128_zero(&body);
+  wasm_emit_local_set(&body, acc);
+
+  wasm_emit_i32_const(&body, 0);
+  wasm_emit_local_set(&body, kk);
+  wasm_emit_loop_header(&body);
+  wasm_emit_break_if_ge_const(&body, kk, s.k);
+
+  wasm_emit_local_get(&body, acc);
+  if (!wasm_emit_reduce_expr_v128(&body, s.expr, &s, row, kk)) {
+    wb_free(&body);
+    wb_free(&mod);
+    return NULL;
+  }
+  wb_byte(&body, WASM_SIMD_PREFIX);
+  wb_uleb128(&body, WASM_SIMD_F32X4_ADD);
+  wasm_emit_local_set(&body, acc);
+
+  wasm_emit_inc_const(&body, kk, 4);
+  wasm_emit_loop_footer(&body);
+
+  wasm_emit_param_element_addr(&body, s.out_param, row, 1, -1, 0, -1, 0);
+  wasm_emit_f32x4_horizontal_sum(&body, acc, tmp);
+  wasm_emit_f32_store_addr(&body);
+
+  wasm_emit_inc_const(&body, row, 1);
+  wasm_emit_loop_footer(&body);
+
+  wb_byte(&body, WASM_OP_END);
+
+  WasmBuf sec;
+  wb_init(&sec);
+  wb_uleb128(&sec, 1);
+  wb_uleb128(&sec, body.len);
+  wb_append(&sec, &body);
+  wb_section(&mod, WASM_SEC_CODE, &sec);
+  wb_free(&body);
+  wb_free(&sec);
+
+  if (size_out) *size_out = mod.len;
+  return mod.data;
+}
+
 /* Public API */
 
 uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd) {
@@ -4327,7 +3934,7 @@ uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd) {
 }
 
 PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
-  if (poly_wasm_can_render_matmul(sink)) return sink;
+  if (poly_wasm_can_render_matmul(sink) || poly_wasm_can_render_reduce(sink)) return sink;
   PolyRewriteOpts opts = {
       .optimize = true,
       .devectorize = 1,
@@ -4344,7 +3951,7 @@ PolyUOp **poly_linearize_wasm(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 }
 
 PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink) {
-  if (poly_wasm_can_render_matmul(sink)) return sink;
+  if (poly_wasm_can_render_matmul(sink) || poly_wasm_can_render_reduce(sink)) return sink;
   /* Browser/Node WASM often runs without a normal POSIX environment, so the
    * runtime path must default to the same optimized pipeline as
    * poly_linearize_wasm(). That pipeline lowers Invalid-carrying pad/triu

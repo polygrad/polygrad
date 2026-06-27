@@ -34,6 +34,7 @@ static PolyUOp *scalarize_lane_expr(PolyCtx *ctx, PolyUOp *u, int lane);
  * Acceptable for now (single-threaded); thread-safe fix requires passing
  * fold width through rewrite context instead of a mutable global. */
 static int g_max_fold_width = 4;
+static PolyRendererCaps g_render_caps = {0};
 
 static void poly_debug_print_graph(FILE *fp, PolyUOp *u, const char *tag) {
   if (!fp || !u) return;
@@ -5500,11 +5501,57 @@ static PolyDType poly_dtype_ptr_vec(PolyDType ptr, int lanes) {
   return poly_dtype_ptr(base, ptr.ptr_size, ptr.addrspace);
 }
 
+static bool poly_vector_compare_op(PolyOps op) {
+  return op == POLY_OP_CMPLT || op == POLY_OP_CMPEQ || op == POLY_OP_CMPNE;
+}
+
+static bool poly_caps_packs_vector_alu(PolyRendererCaps caps, PolyOps op, PolyDType dt) {
+  if (!caps.has_simd_float || dt.is_ptr || dt.count <= 1) return false;
+  PolyDType s = poly_dtype_scalar(dt);
+  if (!poly_dtype_is_float(s) || s.bitsize != 32 || dt.count != 4 || caps.max_vec_width < 4)
+    return false;
+
+  switch (op) {
+  case POLY_OP_NEG:
+  case POLY_OP_SQRT:
+  case POLY_OP_ADD:
+  case POLY_OP_SUB:
+  case POLY_OP_MUL:
+  case POLY_OP_FDIV:
+  case POLY_OP_MAX:
+  case POLY_OP_MULACC:
+  case POLY_OP_CMPLT:
+  case POLY_OP_CMPEQ:
+  case POLY_OP_CMPNE:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool poly_caps_packs_vector_compare(PolyRendererCaps caps, PolyUOp *u) {
+  if (!u || !poly_vector_compare_op(u->op) || u->n_src < 2) return false;
+  if (!caps.has_simd_float || u->dtype.count != 4 || caps.max_vec_width < 4) return false;
+  PolyDType a = poly_dtype_scalar(u->src[0]->dtype);
+  PolyDType b = poly_dtype_scalar(u->src[1]->dtype);
+  return poly_dtype_is_float(a) && poly_dtype_is_float(b) && a.bitsize == 32 && b.bitsize == 32;
+}
+
+static bool poly_caps_packs_vector_where(PolyRendererCaps caps, PolyUOp *w) {
+  if (!w || w->op != POLY_OP_WHERE || w->n_src < 3) return false;
+  if (!caps.has_simd_float || w->dtype.is_ptr || w->dtype.count != 4 || caps.max_vec_width < 4)
+    return false;
+  PolyDType s = poly_dtype_scalar(w->dtype);
+  if (!poly_dtype_is_float(s) || s.bitsize != 32) return false;
+  return poly_caps_packs_vector_compare(caps, w->src[0]);
+}
+
 /* devectorize (tinygrad codegen/late/devectorizer.py) */
 /*
  * Scatters vectorized ALU/CAST/BITCAST ops into per-element scalar ops
- * wrapped in VECTORIZE. This ensures the renderer only sees scalar ALU.
- * Vector LOAD/STORE survive and are handled by load_store_folding.
+ * wrapped in VECTORIZE. Renderers that directly emit a native vector value can
+ * preserve a small, explicit subset through caps; vector LOAD/STORE survive and
+ * are handled by load_store_folding.
  *
  * OP(vec_a, vec_b) → VECTORIZE(OP(GEP(a,0), GEP(b,0)), OP(GEP(a,1), GEP(b,1)), ...)
  */
@@ -5516,6 +5563,13 @@ static PolyUOp *rule_no_vectorized_alu(PolyCtx *ctx, PolyUOp *alu, const PolyBin
    * type conversions, not value ALU. tinygrad: PtrDType.vcount returns 1,
    * so no_vectorized_alu naturally skips them. */
   if (alu->dtype.is_ptr) return NULL;
+  if (alu->op == POLY_OP_WHERE) {
+    if (poly_caps_packs_vector_where(g_render_caps, alu)) return NULL;
+  } else if (poly_vector_compare_op(alu->op)) {
+    if (poly_caps_packs_vector_compare(g_render_caps, alu)) return NULL;
+  } else if (poly_caps_packs_vector_alu(g_render_caps, alu->op, alu->dtype)) {
+    return NULL;
+  }
   int lanes = alu->dtype.count;
   PolyDType sdt = poly_dtype_scalar(alu->dtype);
   PolyUOp **elts = calloc((size_t)lanes, sizeof(*elts));
@@ -6101,6 +6155,7 @@ static PolyUOp *rule_vector_cmp_to_scalarized_vector(
   (void)b;
   if (!(u->op == POLY_OP_CMPLT || u->op == POLY_OP_CMPNE || u->op == POLY_OP_CMPEQ)) return NULL;
   if (u->n_src != 2 || u->dtype.count <= 1) return NULL;
+  if (poly_caps_packs_vector_compare(g_render_caps, u)) return NULL;
   int lanes = u->dtype.count;
   PolyUOp **elts = calloc((size_t)lanes, sizeof(*elts));
   if (!elts) return NULL;
@@ -6117,6 +6172,7 @@ static PolyUOp *rule_vector_cmp_to_scalarized_vector(
 static PolyUOp *rule_vector_where_to_scalar(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (u->op != POLY_OP_WHERE || u->n_src != 3 || u->dtype.count <= 1) return NULL;
+  if (poly_caps_packs_vector_where(g_render_caps, u)) return NULL;
   int lanes = u->dtype.count;
   PolyUOp **elts = calloc((size_t)lanes, sizeof(*elts));
   if (!elts) return NULL;
@@ -6135,6 +6191,7 @@ static PolyUOp *rule_vector_where_to_scalar(PolyCtx *ctx, PolyUOp *u, const Poly
 static PolyUOp *rule_vector_const_where_to_stack(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || u->dtype.count <= 1) return NULL;
+  if (poly_caps_packs_vector_where(g_render_caps, u)) return NULL;
   int lanes = u->dtype.count;
   if (lanes <= 0) return NULL;
 
@@ -6608,8 +6665,8 @@ static PolyUOp *rule_cat_to_vectorize(PolyCtx *ctx, PolyUOp *x, const PolyBindin
   return ret;
 }
 
-/* Render subset: full (DEVECTORIZE>=1) scatters vec CMP/WHERE to scalar.
- * Minimal (DEVECTORIZE=0) keeps vec ALU, only lowers VCONST/VCAT. */
+/* Render subset: full (DEVECTORIZE>=1) scatters unsupported vec CMP/WHERE to
+ * scalar. A renderer capability can preserve native f32x4 compare/where ops. */
 static _Thread_local PolyPatternMatcher *g_pm_render_subset = NULL;
 static PolyPatternMatcher *poly_pm_render_subset(void) {
   if (g_pm_render_subset) return g_pm_render_subset;
@@ -6667,9 +6724,9 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
       /* See the full render subset: scalarized valid masks need the late
        * not-CMPLT bound form that tinygrad emits before stacking gates. */
       {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_not_cmplt_to_bound},
-      /* Scatter vec CMP/WHERE to per-lane scalar (same as render_subset).
-       * tinygrad does this even with DEVECTORIZE=0 — comparison semantics
-       * require per-element evaluation, not packed SSE cmpps. */
+      /* Scatter unsupported vec CMP/WHERE to per-lane scalar (same as
+       * render_subset). Native vector compare/where backends opt out through
+       * the caps-gated rules. */
       {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
       {poly_pat_op(POLY_OP_CMPNE, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
       {poly_pat_op(POLY_OP_CMPEQ, NULL, 0, "u"), rule_vector_cmp_to_scalarized_vector},
@@ -7358,6 +7415,7 @@ PolyUOp *poly_apply_devectorize_stage(
 ) {
   if (!ctx || !sink || devectorize < 0) return sink;
   g_max_fold_width = fold_width_from_caps(caps);
+  g_render_caps = caps;
   return poly_graph_rewrite(
       ctx, sink, (devectorize >= 1) ? poly_pm_combined_devec() : poly_pm_combined_nodevec()
   );
@@ -8676,6 +8734,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
 
   /* 9. Devectorize */
   g_max_fold_width = fold_width_from_caps(opts.caps);
+  g_render_caps = opts.caps;
   if (opts.devectorize >= 0) {
     sink = poly_graph_rewrite(
         ctx, sink, (opts.devectorize >= 1) ? poly_pm_combined_devec() : poly_pm_combined_nodevec()

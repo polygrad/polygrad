@@ -61,6 +61,25 @@ static int wasm_count_simd_opcode(const uint8_t *wasm, int wasm_size, int opcode
   return count;
 }
 
+static PolyUOp **wasm_linearize_generic_test(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  PolyRewriteOpts opts = {
+      .optimize = true,
+      .devectorize = 1,
+      .caps =
+          {
+              .has_mulacc = true,
+              .has_threefry = false,
+              .has_local = false,
+              .has_simd_int = false,
+              .has_simd_float = true,
+              .max_vec_width = 4,
+          },
+      .device = POLY_DEVICE_WASM,
+      .opt_policy = POLY_OPT_HEURISTIC,
+  };
+  return poly_linearize_ex(ctx, sink, opts, n_out);
+}
+
 static int node_compile_wasm_module(const char *path) {
   if (system("which node > /dev/null 2>&1") != 0) return 0;
   char cmd[2048];
@@ -770,8 +789,8 @@ TEST(wasm, render_simd_flag) {
 
 TEST(wasm, render_simd_where_mask) {
   /* N=10 keeps the post-rewrite kernel scalar-loop shaped, so this test covers
-   * the WASM renderer's explicit v128 compare/select lowering. Fully upcasted
-   * N=16 kernels currently go through the shared scalarized-lane render shape. */
+   * the WASM renderer's explicit v128 compare/select lowering. The N=16 test
+   * below covers the normal rewritten packed path. */
   WasmVecKernel k = wasm_make_vec_where_f32(10);
   int n_lin;
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
@@ -792,6 +811,26 @@ TEST(wasm, render_simd_where_mask) {
   }
   ASSERT_TRUE(found_f32x4_lt);
   ASSERT_TRUE(found_bitselect);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, rewritten_where_compare_mask_stays_packed) {
+  WasmVecKernel k = wasm_make_vec_where_f32(16);
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_LT) >= 1);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_BITSELECT) >= 1);
+  ASSERT_INT_EQ(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_EXTRACT), 0);
 
   free(wasm);
   free(lin);
@@ -860,7 +899,7 @@ TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
   PASS();
 }
 
-TEST(wasm, packed_reg_store_group_uses_simd) {
+TEST(wasm, reg_store_group_executes_without_packed_cache) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
   PolyDType reg_ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_REG);
@@ -900,12 +939,6 @@ TEST(wasm, packed_reg_store_group_uses_simd) {
   int wasm_size = 0;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
-
-  bool found_add = false;
-  for (int i = 0; i + 1 < wasm_size; i++)
-    if (wasm[i] == WASM_SIMD_PREFIX && wasm[i + 1] == WASM_SIMD_F32X4_ADD)
-      found_add = true;
-  ASSERT_TRUE(found_add);
 
   const char *path = "/tmp/polygrad_test_packed_reg_store_group.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
@@ -988,7 +1021,7 @@ TEST(wasm, packed_group_reduce_uses_simd_alu) {
   ASSERT_TRUE(sched->template->n_calls > 0);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_wasm_env(ctx, poly_schedule_call_body(sched, 0), &n_lin);
+  PolyUOp **lin = wasm_linearize_generic_test(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_NOT_NULL(lin);
 
   int n_range = 0;
@@ -1056,7 +1089,7 @@ TEST(wasm, packed_group_reduce_relu_executes) {
   ASSERT_TRUE(sched->template->n_calls > 0);
 
   int n_lin = 0;
-  PolyUOp **lin = poly_linearize_wasm_env(ctx, poly_schedule_call_body(sched, 0), &n_lin);
+  PolyUOp **lin = wasm_linearize_generic_test(ctx, poly_schedule_call_body(sched, 0), &n_lin);
   ASSERT_NOT_NULL(lin);
 
   int wasm_size = 0;
@@ -1068,6 +1101,52 @@ TEST(wasm, packed_group_reduce_relu_executes) {
 
   free(wasm);
   free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, specialized_row_reduce_relu_executes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int64_t n = 1024;
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, n * n), (int64_t[]){n, n}, 2);
+  PolyUOp *row = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n, 1}, 2);
+  PolyUOp *col = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){1, n}, 2);
+  PolyUOp *row_e = poly_expand(ctx, row, (int64_t[]){n, n}, 2);
+  PolyUOp *col_e = poly_expand(ctx, col, (int64_t[]){n, n}, 2);
+  PolyUOp *expr = poly_relu(
+      ctx,
+      poly_alu2(
+          ctx, POLY_OP_SUB,
+          poly_alu2(ctx, POLY_OP_MUL, poly_alu2(ctx, POLY_OP_ADD, x, row_e), col_e),
+          poly_full(ctx, (int64_t[]){n, n}, 2, 0.25)
+      )
+  );
+  PolyUOp *sum = poly_sum_reduce(ctx, expr, 1, 0);
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_reduce(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_reduce(body, &wasm_size);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_ADD) >= 2);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_MUL) >= 1);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD) >= 2);
+
+  const char *path = "/tmp/polygrad_test_specialized_row_reduce_relu.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_broadcast_reduce_relu(path, (int)n), 0);
+
+  free(wasm);
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();

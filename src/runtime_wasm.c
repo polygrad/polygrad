@@ -211,6 +211,9 @@ int poly_wasm_lower_item(
       wasm_bytes = poly_render_wasm_matmul(scheduled_root, &wasm_len, false);
   }
   if (kernel_id < 0 && !wasm_bytes) {
+    wasm_bytes = poly_render_wasm_reduce(scheduled_root, &wasm_len);
+  }
+  if (kernel_id < 0 && !wasm_bytes) {
     if (linear) {
       n_lin = linear->n_src;
       lin = linear->src;
