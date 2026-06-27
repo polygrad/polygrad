@@ -3037,7 +3037,7 @@ static bool wasm_match_row_reduce_root(PolyUOp *sink, WasmReduceSpec *spec) {
   PolyUOp *red_range = reduce->src[1];
   int64_t m = 0, k = 0;
   if (!wasm_range_bound(out_range, &m) || !wasm_range_bound(red_range, &k)) return false;
-  if (m <= 0 || k <= 0 || (k % 4) != 0) return false;
+  if (m <= 0 || k <= 0) return false;
 
   int out_param = -1;
   WasmAffine out_aff;
@@ -3364,6 +3364,29 @@ static void wasm_emit_reduce_index_v128(
   }
 }
 
+static bool wasm_emit_reduce_index_f32(
+    WasmBuf *body,
+    PolyUOp *idx,
+    const WasmReduceSpec *s,
+    int row_local,
+    int kk_local
+) {
+  int param = -1;
+  WasmAffine aff;
+  if (!wasm_index_param_affine(idx, s->red_range, s->out_range, NULL, &param, &aff))
+    return false;
+
+  wasm_emit_param_element_addr(
+      body, param, row_local, (int)aff.c[1], kk_local, (int)aff.c[0], -1, 0
+  );
+  if (aff.offset != 0) {
+    wasm_emit_i32_const(body, (int32_t)(aff.offset * 4));
+    wasm_emit_i32_add(body);
+  }
+  emit_scalar_load_opcode(body, POLY_FLOAT32);
+  return true;
+}
+
 static bool wasm_emit_reduce_expr_v128(
     WasmBuf *body,
     PolyUOp *u,
@@ -3414,6 +3437,67 @@ static bool wasm_emit_reduce_expr_v128(
     if (!wasm_emit_reduce_expr_v128(body, u->src[0], s, row_local, kk_local)) return false;
     if (!wasm_emit_reduce_expr_v128(body, u->src[1], s, row_local, kk_local)) return false;
     emit_alu_simd_f32x4(body, u->op);
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool wasm_emit_reduce_expr_f32(
+    WasmBuf *body,
+    PolyUOp *u,
+    const WasmReduceSpec *s,
+    int row_local,
+    int kk_local
+) {
+  if (!u) return false;
+  MathImports math = {0};
+
+  if (u->op == POLY_OP_INDEX) {
+    if (!wasm_reduce_index_supported(u, s)) return false;
+    return wasm_emit_reduce_index_f32(body, u, s, row_local, kk_local);
+  }
+  if (u->op == POLY_OP_CONST) {
+    float v = 0.0f;
+    if (!wasm_const_f32(u, &v)) return false;
+    wb_byte(body, WASM_OP_F32_CONST);
+    wb_f32(body, v);
+    return true;
+  }
+
+  if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
+    if (!wasm_is_compare_op(u->src[0]->op)) return false;
+    if (!wasm_emit_reduce_expr_f32(body, u->src[1], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_f32(body, u->src[2], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_f32(body, u->src[0], s, row_local, kk_local)) return false;
+    emit_alu_scalar(body, POLY_OP_WHERE, POLY_FLOAT32, &math, 0);
+    return true;
+  }
+
+  if (u->op == POLY_OP_NEG || u->op == POLY_OP_SQRT) {
+    if (u->n_src < 1) return false;
+    if (!wasm_emit_reduce_expr_f32(body, u->src[0], s, row_local, kk_local)) return false;
+    emit_alu_scalar(body, u->op, POLY_FLOAT32, &math, 0);
+    return true;
+  }
+
+  if (u->n_src < 2) return false;
+  switch (u->op) {
+  case POLY_OP_ADD:
+  case POLY_OP_SUB:
+  case POLY_OP_MUL:
+  case POLY_OP_FDIV:
+  case POLY_OP_MAX:
+    if (!wasm_emit_reduce_expr_f32(body, u->src[0], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_f32(body, u->src[1], s, row_local, kk_local)) return false;
+    emit_alu_scalar(body, u->op, POLY_FLOAT32, &math, 0);
+    return true;
+  case POLY_OP_CMPLT:
+  case POLY_OP_CMPEQ:
+  case POLY_OP_CMPNE:
+    if (!wasm_emit_reduce_expr_f32(body, u->src[0], s, row_local, kk_local)) return false;
+    if (!wasm_emit_reduce_expr_f32(body, u->src[1], s, row_local, kk_local)) return false;
+    emit_alu_scalar(body, u->op, POLY_FLOAT32, &math, 0);
     return true;
   default:
     return false;
@@ -3837,17 +3921,22 @@ uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
   wb_init(&body);
 
   const int n_i32 = 2;  /* row, kk */
+  const int n_f32 = 1;  /* sum */
   const int n_v128 = 2; /* acc, tmp */
-  wb_uleb128(&body, 2);
+  wb_uleb128(&body, 3);
   wb_uleb128(&body, n_i32);
   wb_byte(&body, WASM_TYPE_I32);
+  wb_uleb128(&body, n_f32);
+  wb_byte(&body, WASM_TYPE_F32);
   wb_uleb128(&body, n_v128);
   wb_byte(&body, WASM_TYPE_V128);
 
   int row = n_params;
   int kk = n_params + 1;
-  int acc = n_params + n_i32;
+  int sum = n_params + n_i32;
+  int acc = n_params + n_i32 + n_f32;
   int tmp = acc + 1;
+  int vec_end = s.k & ~3;
 
   wasm_emit_i32_const(&body, 0);
   wasm_emit_local_set(&body, row);
@@ -3860,7 +3949,7 @@ uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
   wasm_emit_i32_const(&body, 0);
   wasm_emit_local_set(&body, kk);
   wasm_emit_loop_header(&body);
-  wasm_emit_break_if_ge_const(&body, kk, s.k);
+  wasm_emit_break_if_ge_const(&body, kk, vec_end);
 
   wasm_emit_local_get(&body, acc);
   if (!wasm_emit_reduce_expr_v128(&body, s.expr, &s, row, kk)) {
@@ -3875,8 +3964,26 @@ uint8_t *poly_render_wasm_reduce(PolyUOp *sink, int *size_out) {
   wasm_emit_inc_const(&body, kk, 4);
   wasm_emit_loop_footer(&body);
 
-  wasm_emit_param_element_addr(&body, s.out_param, row, 1, -1, 0, -1, 0);
   wasm_emit_f32x4_horizontal_sum(&body, acc, tmp);
+  wasm_emit_local_set(&body, sum);
+
+  wasm_emit_loop_header(&body);
+  wasm_emit_break_if_ge_const(&body, kk, s.k);
+
+  wasm_emit_local_get(&body, sum);
+  if (!wasm_emit_reduce_expr_f32(&body, s.expr, &s, row, kk)) {
+    wb_free(&body);
+    wb_free(&mod);
+    return NULL;
+  }
+  wb_byte(&body, WASM_OP_F32_ADD);
+  wasm_emit_local_set(&body, sum);
+
+  wasm_emit_inc_const(&body, kk, 1);
+  wasm_emit_loop_footer(&body);
+
+  wasm_emit_param_element_addr(&body, s.out_param, row, 1, -1, 0, -1, 0);
+  wasm_emit_local_get(&body, sum);
   wasm_emit_f32_store_addr(&body);
 
   wasm_emit_inc_const(&body, row, 1);

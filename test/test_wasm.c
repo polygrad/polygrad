@@ -1152,6 +1152,121 @@ TEST(wasm, specialized_row_reduce_relu_executes) {
   PASS();
 }
 
+TEST(wasm, specialized_row_reduce_relu_tail_executes) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int64_t n = 1027;
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, n * n), (int64_t[]){n, n}, 2);
+  PolyUOp *row = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n, 1}, 2);
+  PolyUOp *col = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){1, n}, 2);
+  PolyUOp *row_e = poly_expand(ctx, row, (int64_t[]){n, n}, 2);
+  PolyUOp *col_e = poly_expand(ctx, col, (int64_t[]){n, n}, 2);
+  PolyUOp *expr = poly_relu(
+      ctx,
+      poly_alu2(
+          ctx, POLY_OP_SUB,
+          poly_alu2(ctx, POLY_OP_MUL, poly_alu2(ctx, POLY_OP_ADD, x, row_e), col_e),
+          poly_full(ctx, (int64_t[]){n, n}, 2, 0.25)
+      )
+  );
+  PolyUOp *sum = poly_sum_reduce(ctx, expr, 1, 0);
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_reduce(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_reduce(body, &wasm_size);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_ADD) >= 2);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD) >= 2);
+
+  const char *path = "/tmp/polygrad_test_specialized_row_reduce_relu_tail.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_broadcast_reduce_relu(path, (int)n), 0);
+
+  free(wasm);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, row_reduce_f64_uses_generic_renderer) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int64_t n = 17;
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f64(ctx, n * n), (int64_t[]){n, n}, 2);
+  PolyUOp *sum = poly_sum_reduce(ctx, x, 1, 0);
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f64(ctx, n), (int64_t[]){n}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_FALSE(poly_wasm_can_render_reduce(body));
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm_env(ctx, body, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "/tmp/polygrad_test_f64_row_reduce_generic.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, row_reduce_noncompare_where_uses_generic_renderer) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  const int64_t n = 16;
+  PolyUOp *x = poly_reshape(ctx, poly_buffer_f32(ctx, n * n), (int64_t[]){n, n}, 2);
+  PolyUOp *row = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n, 1}, 2);
+  PolyUOp *row_e = poly_expand(ctx, row, (int64_t[]){n, n}, 2);
+  PolyUOp *mask = poly_alu2(ctx, POLY_OP_ADD, x, row_e);
+  PolyUOp *zero = poly_full(ctx, (int64_t[]){n, n}, 2, 0.0);
+  PolyUOp *selected = poly_alu3(ctx, POLY_OP_WHERE, mask, x, zero);
+  PolyUOp *sum = poly_sum_reduce(ctx, selected, 1, 0);
+  PolyUOp *out = poly_reshape(ctx, poly_buffer_f32(ctx, n), (int64_t[]){n}, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_TRUE(sched->template->n_calls > 0);
+
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_FALSE(poly_wasm_can_render_reduce(body));
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm_env(ctx, body, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "/tmp/polygrad_test_noncompare_where_reduce_generic.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, matmul_bias_relu_executes_after_packed_reduce) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
