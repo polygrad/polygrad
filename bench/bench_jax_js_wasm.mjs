@@ -34,7 +34,7 @@ function parseArgs(argv) {
       out.json = true;
     } else if (a === "--help" || a === "-h") {
       console.log(`Usage: node bench/bench_jax_js_wasm.mjs [iters warmup]
-       node bench/bench_jax_js_wasm.mjs --iters N --warmup N [--rounds N] [--json]`);
+       node bench/bench_jax_js_wasm.mjs --iters N --warmup N [--rounds N] [--paired] [--json]`);
       process.exit(0);
     } else {
       positional.push(a);
@@ -71,7 +71,7 @@ function median(xs) {
   return ys[Math.floor(ys.length / 2)];
 }
 
-async function bench(name, call, ready, dispose) {
+async function collectTimes(call, ready, dispose) {
   let y = await call();
   await ready(y);
   if (dispose) dispose(y);
@@ -83,8 +83,7 @@ async function bench(name, call, ready, dispose) {
   }
 
   const times = [];
-  const samples = args.iters * args.rounds;
-  for (let i = 0; i < samples; i++) {
+  for (let i = 0; i < args.iters; i++) {
     const t0 = performance.now();
     y = await call();
     await ready(y);
@@ -92,7 +91,19 @@ async function bench(name, call, ready, dispose) {
     if (dispose) dispose(y);
     times.push((t1 - t0) * 1000);
   }
+  return times;
+}
+
+function resultFromTimes(name, times) {
   return { name, median_us: median(times), min_us: Math.min(...times), iters: args.iters, rounds: args.rounds };
+}
+
+async function bench(name, call, ready, dispose) {
+  const times = [];
+  for (let r = 0; r < args.rounds; r++) {
+    times.push(...await collectTimes(call, ready, dispose));
+  }
+  return resultFromTimes(name, times);
 }
 
 function printSummary(pgResults, jaxResults) {
@@ -118,7 +129,7 @@ function printSummary(pgResults, jaxResults) {
       warmup: args.warmup,
       rounds: args.rounds,
       paired_requested: args.paired,
-      paired_actual: false,
+      paired_actual: args.paired,
       results: rows,
     }, null, 2));
     return;
@@ -132,7 +143,7 @@ function printSummary(pgResults, jaxResults) {
   }
 }
 
-async function runPolygrad(inputs) {
+async function setupPolygrad(inputs) {
   const pg = await polygrad.create({ core: "wasm" });
   const { Tensor } = pg;
   const [a0, b0, c0, d0, x20, row0, col0] = inputs;
@@ -146,36 +157,52 @@ async function runPolygrad(inputs) {
   await a.realize(b, c, d, x2, row, col);
 
   const workloads = [
-    ["pointwise_1m", pg.jit((aa, bb) => aa.add(bb).mul(aa.sub(bb)).add(aa.mul(bb)).relu()), [a, b]],
-    [
-      "where_1m",
-      pg.jit((aa, bb, cc, dd) =>
+    { name: "pointwise_1m", fn: pg.jit((aa, bb) => aa.add(bb).mul(aa.sub(bb)).add(aa.mul(bb)).relu()), args: [a, b] },
+    {
+      name: "where_1m",
+      fn: pg.jit((aa, bb, cc, dd) =>
         aa.gt(bb).where(aa.add(cc).mul(bb.sub(dd)), aa.sub(cc).mul(bb.add(dd)))
       ),
-      [a, b, c, d],
-    ],
-    [
-      "broadcast_reduce_1024",
-      pg.jit((xx, rr, cc) => xx.add(rr).mul(cc).sub(0.25).relu().sum(1)),
-      [x2, row, col],
-    ],
-    [
-      "transpose_copy_1024",
-      pg.jit((xx) => xx.reshape(512, 2048).permute(1, 0).contiguous()),
-      [x2],
-    ],
+      args: [a, b, c, d],
+    },
+    {
+      name: "broadcast_reduce_1024",
+      fn: pg.jit((xx, rr, cc) => xx.add(rr).mul(cc).sub(0.25).relu().sum(1)),
+      args: [x2, row, col],
+    },
+    {
+      name: "transpose_copy_1024",
+      fn: pg.jit((xx) => xx.reshape(512, 2048).permute(1, 0).contiguous()),
+      args: [x2],
+    },
   ];
 
+  return {
+    workloads: workloads.map((w) => ({
+      name: w.name,
+      call: () => w.fn(...w.args),
+      ready: async () => {},
+      dispose: null,
+      fn: w.fn,
+    })),
+    cleanup() {
+      for (const w of workloads) w.fn.dispose?.();
+      pg.destroy?.();
+    },
+  };
+}
+
+async function runPolygrad(inputs) {
+  const setup = await setupPolygrad(inputs);
   const results = [];
-  for (const [name, fn, args] of workloads) {
-    results.push(await bench(name, () => fn(...args), async () => {}, null));
+  for (const w of setup.workloads) {
+    results.push(await bench(w.name, w.call, w.ready, w.dispose));
   }
-  for (const [, fn] of workloads) fn.dispose?.();
-  pg.destroy?.();
+  setup.cleanup();
   return results;
 }
 
-async function runJax(inputs) {
+async function setupJax(inputs) {
   await init("wasm");
   defaultDevice("wasm");
   const [a0, b0, c0, d0, x20, row0, col0] = inputs;
@@ -189,14 +216,14 @@ async function runJax(inputs) {
   await blockUntilReady({ a, b, c, d, x2, row, col });
 
   const workloads = [
-    [
-      "pointwise_1m",
-      jit((aa, bb) => np.maximum(aa.ref.add(bb.ref).mul(aa.ref.sub(bb.ref)).add(aa.ref.mul(bb.ref)), 0), { device: "wasm" }),
-      [a, b],
-    ],
-    [
-      "where_1m",
-      jit((aa, bb, cc, dd) =>
+    {
+      name: "pointwise_1m",
+      fn: jit((aa, bb) => np.maximum(aa.ref.add(bb.ref).mul(aa.ref.sub(bb.ref)).add(aa.ref.mul(bb.ref)), 0), { device: "wasm" }),
+      args: [a, b],
+    },
+    {
+      name: "where_1m",
+      fn: jit((aa, bb, cc, dd) =>
         np.where(
           np.greater(aa.ref, bb.ref),
           aa.ref.add(cc.ref).mul(bb.ref.sub(dd.ref)),
@@ -204,27 +231,73 @@ async function runJax(inputs) {
         ),
         { device: "wasm" },
       ),
-      [a, b, c, d],
-    ],
-    [
-      "broadcast_reduce_1024",
-      jit((xx, rr, cc) => np.sum(np.maximum(xx.ref.add(rr.ref).mul(cc.ref).sub(0.25), 0), 1), { device: "wasm" }),
-      [x2, row, col],
-    ],
-    [
-      "transpose_copy_1024",
-      jit((xx) => np.reshape(xx.ref, [512, 2048]).transpose().add(0), { device: "wasm" }),
-      [x2],
-    ],
+      args: [a, b, c, d],
+    },
+    {
+      name: "broadcast_reduce_1024",
+      fn: jit((xx, rr, cc) => np.sum(np.maximum(xx.ref.add(rr.ref).mul(cc.ref).sub(0.25), 0), 1), { device: "wasm" }),
+      args: [x2, row, col],
+    },
+    {
+      name: "transpose_copy_1024",
+      fn: jit((xx) => np.reshape(xx.ref, [512, 2048]).transpose().add(0), { device: "wasm" }),
+      args: [x2],
+    },
   ];
 
+  return {
+    workloads: workloads.map((w) => ({
+      name: w.name,
+      call: () => w.fn(...w.args.map(x => x.ref)),
+      ready: y => y.blockUntilReady(),
+      dispose: y => y.dispose(),
+      fn: w.fn,
+    })),
+    cleanup() {
+      for (const w of workloads) w.fn.dispose?.();
+      for (const x of [a, b, c, d, x2, row, col]) x.dispose();
+    },
+  };
+}
+
+async function runJax(inputs) {
+  const setup = await setupJax(inputs);
   const results = [];
-  for (const [name, fn, args] of workloads) {
-    results.push(await bench(name, () => fn(...args.map(x => x.ref)), y => y.blockUntilReady(), y => y.dispose()));
+  for (const w of setup.workloads) {
+    results.push(await bench(w.name, w.call, w.ready, w.dispose));
   }
-  for (const [, fn] of workloads) fn.dispose?.();
-  for (const x of [a, b, c, d, x2, row, col]) x.dispose();
+  setup.cleanup();
   return results;
+}
+
+async function runPaired(inputs) {
+  const pg = await setupPolygrad(inputs);
+  const jax = await setupJax(inputs);
+  const pgResults = [];
+  const jaxResults = [];
+
+  for (let i = 0; i < pg.workloads.length; i++) {
+    const pw = pg.workloads[i];
+    const jw = jax.workloads[i];
+    const pgTimes = [];
+    const jaxTimes = [];
+    for (let r = 0; r < args.rounds; r++) {
+      if (args.progress) console.error(`[paired] ${pw.name} round=${r + 1}/${args.rounds}`);
+      if (r % 2 === 0) {
+        pgTimes.push(...await collectTimes(pw.call, pw.ready, pw.dispose));
+        jaxTimes.push(...await collectTimes(jw.call, jw.ready, jw.dispose));
+      } else {
+        jaxTimes.push(...await collectTimes(jw.call, jw.ready, jw.dispose));
+        pgTimes.push(...await collectTimes(pw.call, pw.ready, pw.dispose));
+      }
+    }
+    pgResults.push(resultFromTimes(pw.name, pgTimes));
+    jaxResults.push(resultFromTimes(jw.name, jaxTimes));
+  }
+
+  pg.cleanup();
+  jax.cleanup();
+  return { pgResults, jaxResults };
 }
 
 const n = 1 << 20;
@@ -238,6 +311,7 @@ const inputs = [
   makeLin(1024, 0.75, 1.25),
 ];
 
-const pgResults = await runPolygrad(inputs);
-const jaxResults = await runJax(inputs);
+const { pgResults, jaxResults } = args.paired
+  ? await runPaired(inputs)
+  : { pgResults: await runPolygrad(inputs), jaxResults: await runJax(inputs) };
 printSummary(pgResults, jaxResults);

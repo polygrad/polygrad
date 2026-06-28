@@ -5,8 +5,8 @@ A C11 port of tinygrad's compiler core. Same IR, same pattern-matcher-driven rew
 **Why C11?** A single library that every language can call natively:
 
 ```
-              ┌── Python (ctypes / cffi)       ✓ 170 tests
-              ├── JavaScript (Node-API + WASM)  ✓ 109 tests
+              ┌── Python (ctypes / cffi)       ✓ tested
+              ├── JavaScript (Node-API + WASM)  ✓ tested
 polygrad (C11) ──┼── Rust (FFI)
               ├── Go (cgo)
               ├── Julia (ccall)
@@ -50,9 +50,9 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 
 **Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, x64 JIT, CUDA, HIP, interpreter, WASM JIT). All backends share one unified linearizer pipeline (`poly_full_rewrite_to_sink_ex`), with backend differences expressed via `PolyRewriteOpts`. The x64 JIT (`render_x64.c`) emits x86-64 machine code directly -- no C compiler dependency, zero compile latency, SSE2 packed vectorization. CUDA uses native `half`/`nv_bfloat16` types with h* intrinsics. HIP supports AMD MI250X with MFMA tensor core codegen. The interpreter supports vector operations via a lane-array value model with pre-allocated arena. Backend selection via `POLY_DEVICE=cpu|cuda|hip|x64|interp`. `PolyInstance` caches schedules/runtime state and executes through the same ctx-owned buffer residency path as raw tensors. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
 
-**Codegen optimization:** Late pipeline matches tinygrad's architecture (codegen/__init__.py). Devectorizer scalarizes unsupported vector ALU, load/store folding regroups contiguous accesses into vector loads, and direct emitters may preserve a renderer-capability subset such as WASM f32x4 ALU/compare/compare-mask `WHERE`. `POLY_OPTIMIZE=1 POLY_DEVECTORIZE=1` enables UPCAST + devectorize for CPU SIMD. BEAM search optimizer (`POLY_BEAM=N`) explores the optimization space by compiling and timing candidates, with disk cache for results. All 607 tests pass in both default and optimized modes across all backends.
+**Codegen optimization:** Late pipeline matches tinygrad's architecture (codegen/__init__.py). Devectorizer scalarizes unsupported vector ALU, load/store folding regroups contiguous accesses into vector loads, and direct emitters may preserve a renderer-capability subset such as WASM f32x4 ALU/compare/compare-mask `WHERE`. WASM also has backend renderers for selected affine row-reduce and matmul reductions, with scalar epilogues for supported tail shapes. `POLY_OPTIMIZE=1 POLY_DEVECTORIZE=1` enables UPCAST + devectorize for CPU SIMD. BEAM search optimizer (`POLY_BEAM=N`) explores the shared optimization space by compiling and timing candidates, with disk cache for results.
 
-**What's next:** WebGPU backend, more model families (LLaMA), x64 gt segfault fix.
+**What's next:** broader WASM reduction/matmul planning, browser worker/shared-memory execution, more model families, and flash-attention-style kernels.
 
 ## Documentation
 
@@ -108,7 +108,8 @@ ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 \
 
 ## Core/API parity contract
 
-This project tracks parity against tinygrad commit `c2be31e75b366638965337b96f2c66c2ba8c4068`.
+This project tracks parity against the vendored `references/tinygrad_latest`
+checkout.
 
 `Core parity` gates:
 - Differential value parity (`make test-parity`) must pass.
@@ -247,7 +248,7 @@ Environment variables:
 
 ```bash
 make               # build libpolygrad.a + libpolygrad.so
-make test           # build + run 607 C tests (ASan/UBSan) on CPU
+make test           # build + run C tests with ASan/UBSan
 make test-interp   # full suite on interpreter backend
 make test-cuda     # full suite on CUDA (requires GPU)
 make test-hip      # full suite on HIP/AMD (requires ROCm)
@@ -257,10 +258,10 @@ make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
 
 # Frontend tests
-python -m pytest py/tests/ -v        # 164 Python tests (tensor, nn, hf, instance, perf)
-node js/test/test_tensor.js          # 109 JS tests
-node js/test/test_instance.js        # 192 JS tests (MLP Instance)
-node js/test/test_hf.js              # 36 JS tests (HF model loading)
+python -m pytest py/tests/ -v        # Python frontend tests
+make test-js-native                  # JS native frontend tests
+make test-js-wasm                    # JS WASM frontend tests
+make test-browser                    # browser WASM/interp/WebGPU tests
 ```
 
 ## Status
@@ -270,7 +271,7 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Pattern matcher + symbolic simplification (~25 rules)
 - [x] Linearizer + C renderer + CPU runtime (end-to-end)
 - [x] Shape inference + tensor-to-kernel scheduler (elementwise, reshape, expand, broadcast)
-- [x] WASM binary renderer (scalar f32/f64 + f32x4/f64x2 SIMD) + binary builder
+- [x] WASM binary renderer (scalar f32/f64 + f32x4 SIMD subset) + binary builder
 - [x] Reduce ops (REDUCE_AXIS → accumulation kernel: sum, max, product)
 - [x] Movement ops (PERMUTE, SHRINK, FLIP, PAD index transforms)
 - [x] Reverse-mode autograd core (`poly_grad`) for ALU/movement/reduce-sum paths
@@ -279,14 +280,14 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] Codegen pipeline (`full_rewrite_to_sink`): pm_reduce, pm_decomp, pm_transcendental, pm_add_control_flow
 - [x] Frontend composed ops (~35): elementwise math, comparisons, matmul, softmax, layernorm, cross_entropy
 - [x] Dtype-correct special math: lgamma, digamma, erf/erfc/erfinv, ndtri, log1p, expm1 propagate input dtype through all internal constants (f64 inputs get f64 kernels)
-- [~] **33/33 value parity, 31/33 full IR parity** with tinygrad ClangRenderer (CPU, no vectorization)
+- [x] Differential value parity with the vendored tinygrad reference (`make test-parity`)
 - [x] ASSIGN + WAR ordering (in-place buffer writes, WAR/WAW dependency edges, `Tensor.assign()`)
 - [x] Float16 (`__fp16`) and BFloat16 (`__bf16`) end-to-end on all backends (cast, arithmetic, mixed precision)
 - [x] Disk cache for compiled kernels (`~/.cache/polygrad/<hash>.so`, 300x+ speedup on cache hit)
 - [x] Unified linearizer (`poly_full_rewrite_to_sink_ex`) -- one pipeline for all backends, config via `PolyRewriteOpts`
-- [x] CUDA backend with native f16/bf16 (`half`, `nv_bfloat16`, h* intrinsics) -- 607/607
-- [x] HIP/AMD backend with MFMA tensor core codegen, comgr compilation -- 609/609 on MI250X
-- [x] Interpreter with vector value model (lane-array, pre-allocated arena) -- 607/607
+- [x] CUDA backend with native f16/bf16 (`half`, `nv_bfloat16`, h* intrinsics)
+- [x] HIP/AMD backend with MFMA tensor core codegen, comgr compilation
+- [x] Interpreter with vector value model (lane-array, pre-allocated arena)
 - [x] `POLY_DEVICE=cpu|cuda|hip|x64|interp` backend selector
 
 ### Instances and Model Families
@@ -307,13 +308,15 @@ node js/test/test_hf.js              # 36 JS tests (HF model loading)
 - [x] JS model/Instance parity with Python (builders, model runtime, HF/GGUF loading, weight I/O) in the unified package
 
 ### Planned
-- [ ] WASM build fix (sched_copy symbol portability)
-- [ ] WebGPU backend (WGSL renderer exists, needs execution backend)
+- [ ] Broader WASM reduction/matmul planner coverage and browser worker/shared-memory execution
 - [ ] More model families (LLaMA, BERT)
 - [ ] Flash attention (depends on WMMA + wave shuffles + LDS)
 
-1038+ tests (607 C + 164 Python + 101 JS native + 95 JS WASM/browser + 71 WASM C + 31 parity), ASan/UBSan clean. All 5 native backends at 607/607+.
+Current verification uses C, Python, JS native, JS WASM, browser, CUDA/HIP where
+available, and tinygrad parity targets from the Makefile. Keep exact counts in
+test logs rather than this README.
 
 ## Reference
 
-Port of [tinygrad](https://github.com/tinygrad/tinygrad) commit `c2be31e75b366638965337b96f2c66c2ba8c4068`.
+Port of [tinygrad](https://github.com/tinygrad/tinygrad), tracked locally in
+`references/tinygrad_latest`.
