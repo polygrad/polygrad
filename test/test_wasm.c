@@ -899,6 +899,46 @@ TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
   PASS();
 }
 
+TEST(wasm, matmul_ab_specializes_nonmultiple_k_tail) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t m = 8, n = 16, k = 5;
+  PolyUOp *a = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, m * k), (int64_t[]){m, k}, 2
+  );
+  PolyUOp *b = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, k * n), (int64_t[]){k, n}, 2
+  );
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_k_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_k_tail.wasm"), 0);
+  free(wasm);
+  poly_schedule_free(sched);
+
+  PolyUOp *bt0 = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, n * k), (int64_t[]){n, k}, 2
+  );
+  PolyUOp *bt = poly_permute(ctx, bt0, (int64_t[]){1, 0}, 2);
+  PolyUOp *out_t = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink_t = poly_sink1(ctx, poly_store_val(ctx, out_t, poly_dot(ctx, a, bt)));
+  PolySchedule *sched_t = poly_complete_create_schedule_with_vars(ctx, sink_t, POLY_MODE_CALL);
+  ASSERT_TRUE(sched_t != NULL);
+  ASSERT_FALSE(poly_wasm_can_render_matmul(poly_schedule_call_body(sched_t, 0)));
+  poly_schedule_free(sched_t);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, reg_store_group_executes_without_packed_cache) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);

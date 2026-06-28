@@ -111,6 +111,30 @@ async function runJitTests(pg) {
     f.dispose()
   })
 
+  await test('jit matmul A@B nonmultiple k tail captures and replays', async () => {
+    const m = 8, n = 16, kDim = 5
+    const aData = new Float32Array(m * kDim)
+    const bData = new Float32Array(kDim * n)
+    for (let i = 0; i < aData.length; i++) aData[i] = ((i * 7) % 19 - 9) * 0.0625
+    for (let i = 0; i < bData.length; i++) bData[i] = ((i * 11) % 23 - 11) * 0.03125
+
+    const a = new Tensor(aData).reshape(m, kDim)
+    const b = new Tensor(bData).reshape(kDim, n)
+    const f = pg.jit((x, y) => x.matmul(y))
+
+    await (await f(a, b)).realize()
+    const out = await (await f(a, b)).toArray()
+    assert(f.scheduleCount === 1, `expected one captured tail matmul schedule, got ${f.scheduleCount}`)
+
+    const checks = [[0, 0], [2, 7], [7, 15]]
+    for (const [row, col] of checks) {
+      let expected = 0
+      for (let kk = 0; kk < kDim; kk++) expected += aData[row * kDim + kk] * bData[kk * n + col]
+      assertClose([out[row * n + col]], [expected], 1e-4)
+    }
+    f.dispose()
+  })
+
   await test('jit matmul 64x64 transposed rhs captures and replays', async () => {
     const n = 64
     const aData = new Float32Array(n * n)

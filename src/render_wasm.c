@@ -3079,7 +3079,7 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
   if (!wasm_range_bound(r_row, &m) || !wasm_range_bound(r_col, &n) ||
       !wasm_range_bound(r_k, &k))
     return false;
-  if (m <= 0 || n <= 0 || k <= 0 || m % 4 != 0 || n % 4 != 0 || k % 4 != 0) return false;
+  if (m <= 0 || n <= 0 || k <= 0) return false;
 
   int out_param = -1, a_param = -1, b_param = -1;
   WasmAffine out_aff, a_aff, b_aff;
@@ -3100,7 +3100,11 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
   } else {
     return false;
   }
-  if (kind == WASM_MATMUL_AB && n % 16 != 0) return false;
+  if (kind == WASM_MATMUL_AB) {
+    if (m % 4 != 0 || n % 16 != 0) return false;
+  } else {
+    if (m % 4 != 0 || n % 4 != 0 || k % 4 != 0) return false;
+  }
 
   if (out_param < 0 || a_param < 0 || b_param < 0 || out_param == a_param ||
       out_param == b_param || a_param == b_param)
@@ -3517,6 +3521,7 @@ static void wasm_emit_matmul_ab_body(
     int tile_end,
     int b_addr,
     int a_addr,
+    int out_addr,
     int acc0,
     int bvec0,
     int avec,
@@ -3569,6 +3574,15 @@ static void wasm_emit_matmul_ab_body(
   wasm_emit_loop_header(body);
   wasm_emit_break_if_ge_local_plus_const(body, col, col_tile, tile_cols);
 
+  wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
+  wasm_emit_local_set(body, out_addr);
+  for (int r = 1; r < 4; r++) {
+    wasm_emit_local_get(body, out_addr);
+    wasm_emit_i32_const(body, r * s->n * 4);
+    wasm_emit_i32_add(body);
+    wasm_emit_local_set(body, out_addr + r);
+  }
+
   wasm_emit_local_get(body, k_tile);
   wb_byte(body, WASM_OP_I32_EQZ);
   wb_byte(body, WASM_OP_IF);
@@ -3582,9 +3596,9 @@ static void wasm_emit_matmul_ab_body(
   wb_byte(body, WASM_OP_ELSE);
   for (int r = 0; r < 4; r++) {
     for (int v = 0; v < 4; v++) {
-      wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
-      if (r != 0 || v != 0) {
-        wasm_emit_i32_const(body, (r * s->n + v * 4) * 4);
+      wasm_emit_local_get(body, out_addr + r);
+      if (v != 0) {
+        wasm_emit_i32_const(body, v * 4 * 4);
         wasm_emit_i32_add(body);
       }
       wasm_emit_v128_load_addr_align(body, 4);
@@ -3641,9 +3655,9 @@ static void wasm_emit_matmul_ab_body(
 
   for (int r = 0; r < 4; r++) {
     for (int v = 0; v < 4; v++) {
-      wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
-      if (r != 0 || v != 0) {
-        wasm_emit_i32_const(body, (r * s->n + v * 4) * 4);
+      wasm_emit_local_get(body, out_addr + r);
+      if (v != 0) {
+        wasm_emit_i32_const(body, v * 4 * 4);
         wasm_emit_i32_add(body);
       }
       wasm_emit_local_get(body, acc0 + r * 4 + v);
@@ -3822,7 +3836,7 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   WasmBuf body;
   wb_init(&body);
 
-  int n_i32 = s.kind == WASM_MATMUL_ABT ? 14 : 16;
+  int n_i32 = s.kind == WASM_MATMUL_ABT ? 14 : 20;
   int n_f32 = s.kind == WASM_MATMUL_ABT ? 1 : 0;
   int n_v128 = s.kind == WASM_MATMUL_AB ? 21 : 21;
   int n_local_types = 2 + (n_f32 > 0 ? 1 : 0);
@@ -3841,7 +3855,7 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   int col = next++;
   int kk = next++;
   int row_tile = -1, col_tile = -1, row_off = -1, k_tile = -1, tile_end = -1;
-  int b_addr = -1, a_addr = -1;
+  int b_addr = -1, a_addr = -1, out_addr = -1;
   if (s.kind == WASM_MATMUL_ABT) {
     row_tile = next++;
     col_tile = next++;
@@ -3860,6 +3874,8 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
     next += 4;
     a_addr = next;
     next += 4;
+    out_addr = next;
+    next += 4;
   }
   int sum = n_f32 > 0 ? next++ : -1;
   int acc = next;
@@ -3868,8 +3884,8 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
 
   if (s.kind == WASM_MATMUL_AB)
     wasm_emit_matmul_ab_body(
-        &body, &s, row, col, kk, row_tile, col_tile, row_off, k_tile, tile_end, b_addr,
-        a_addr, acc, acc + 16, acc + 20, use_relaxed_for_kind
+      &body, &s, row, col, kk, row_tile, col_tile, row_off, k_tile, tile_end, b_addr,
+      a_addr, out_addr, acc, acc + 16, acc + 20, use_relaxed_for_kind
     );
   else
     wasm_emit_matmul_abt_body(
