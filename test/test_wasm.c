@@ -337,6 +337,84 @@ static int node_run_wasm_matmul_abt_row1(const char *path, int n, int k) {
   return system(cmd);
 }
 
+static int node_run_wasm_matmul_ab(const char *path, int m, int n, int k) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *js_path = "/tmp/polygrad_test_matmul_ab.js";
+  FILE *f = fopen(js_path, "w");
+  if (!f) return -1;
+  fprintf(
+      f,
+      "const fs=require('fs');\n"
+      "const M=%d,N=%d,K=%d;\n"
+      "const outF=0;\n"
+      "const aF=outF+M*N;\n"
+      "const bF=aF+M*K;\n"
+      "const totalF=bF+K*N+16;\n"
+      "const mem=new WebAssembly.Memory({initial:Math.ceil(totalF*4/65536)+1});\n"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};\n"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));\n"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});\n"
+      "const a=new Float32Array(mem.buffer);\n"
+      "for(let r=0;r<M;r++) for(let i=0;i<K;i++) a[aF+r*K+i]=((r*17+i*13+5)%%23-11)/13;\n"
+      "for(let i=0;i<K;i++) for(let c=0;c<N;c++) a[bF+i*N+c]=((i*7+c*11+3)%%29-14)/17;\n"
+      "inst.exports.kernel(outF*4,aF*4,bF*4);\n"
+      "for(let r=0;r<M;r++) for(let c=0;c<N;c++){\n"
+      "  let exp=0;\n"
+      "  for(let i=0;i<K;i++) exp+=a[aF+r*K+i]*a[bF+i*N+c];\n"
+      "  const got=a[outF+r*N+c];\n"
+      "  if(Math.abs(got-exp)>1e-4){\n"
+      "    console.error('row '+r+' col '+c+' got '+got+' expected '+exp+' diff '+Math.abs(got-exp));\n"
+      "    process.exit(2);\n"
+      "  }\n"
+      "}\n",
+      m, n, k, path
+  );
+  if (fclose(f) != 0) return -1;
+
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  return system(cmd);
+}
+
+static int node_run_wasm_matmul_abt(const char *path, int m, int n, int k) {
+  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *js_path = "/tmp/polygrad_test_matmul_abt.js";
+  FILE *f = fopen(js_path, "w");
+  if (!f) return -1;
+  fprintf(
+      f,
+      "const fs=require('fs');\n"
+      "const M=%d,N=%d,K=%d;\n"
+      "const outF=0;\n"
+      "const aF=outF+M*N;\n"
+      "const bF=aF+M*K;\n"
+      "const totalF=bF+N*K+16;\n"
+      "const mem=new WebAssembly.Memory({initial:Math.ceil(totalF*4/65536)+1});\n"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};\n"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));\n"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});\n"
+      "const a=new Float32Array(mem.buffer);\n"
+      "for(let r=0;r<M;r++) for(let i=0;i<K;i++) a[aF+r*K+i]=((r*17+i*13+5)%%23-11)/13;\n"
+      "for(let c=0;c<N;c++) for(let i=0;i<K;i++) a[bF+c*K+i]=((c*7+i*11+3)%%29-14)/17;\n"
+      "inst.exports.kernel(outF*4,aF*4,bF*4);\n"
+      "for(let r=0;r<M;r++) for(let c=0;c<N;c++){\n"
+      "  let exp=0;\n"
+      "  for(let i=0;i<K;i++) exp+=a[aF+r*K+i]*a[bF+c*K+i];\n"
+      "  const got=a[outF+r*N+c];\n"
+      "  if(Math.abs(got-exp)>1e-4){\n"
+      "    console.error('row '+r+' col '+c+' got '+got+' expected '+exp+' diff '+Math.abs(got-exp));\n"
+      "    process.exit(2);\n"
+      "  }\n"
+      "}\n",
+      m, n, k, path
+  );
+  if (fclose(f) != 0) return -1;
+
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  return system(cmd);
+}
+
 static int node_run_wasm_i64(const char *path, int64_t expected) {
   if (system("which node > /dev/null 2>&1") != 0) return 0;
   char cmd[2048];
@@ -964,16 +1042,162 @@ TEST(wasm, matmul_ab_specializes_nonmultiple_k_tail) {
   free(wasm);
   poly_schedule_free(sched);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_ab_specializes_nonmultiple_m_tail) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t m = 6, n = 16, k = 8;
+  PolyUOp *a = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, m * k), (int64_t[]){m, k}, 2
+  );
+  PolyUOp *b = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, k * n), (int64_t[]){k, n}, 2
+  );
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_m_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_m_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_m_tail.wasm", m, n, k), 0);
+  free(wasm);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_ab_specializes_nonmultiple_n_tail) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t m = 8, n = 18, k = 5;
+  PolyUOp *a = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, m * k), (int64_t[]){m, k}, 2
+  );
+  PolyUOp *b = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, k * n), (int64_t[]){k, n}, 2
+  );
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_n_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_n_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_n_tail.wasm", m, n, k), 0);
+  free(wasm);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_ab_specializes_combined_m_n_k_tails) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t m = 6, n = 18, k = 5;
+  PolyUOp *a = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, m * k), (int64_t[]){m, k}, 2
+  );
+  PolyUOp *b = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, k * n), (int64_t[]){k, n}, 2
+  );
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, b)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_all_tails.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_all_tails.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_all_tails.wasm", m, n, k), 0);
+  free(wasm);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_abt_specializes_nonmultiple_k_tail) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t m = 8, n = 16, k = 5;
+  PolyUOp *a = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, m * k), (int64_t[]){m, k}, 2
+  );
   PolyUOp *bt0 = poly_reshape(
       ctx, poly_buffer(ctx, POLY_FLOAT32, n * k), (int64_t[]){n, k}, 2
   );
   PolyUOp *bt = poly_permute(ctx, bt0, (int64_t[]){1, 0}, 2);
-  PolyUOp *out_t = poly_buffer(ctx, POLY_FLOAT32, m * n);
-  PolyUOp *sink_t = poly_sink1(ctx, poly_store_val(ctx, out_t, poly_dot(ctx, a, bt)));
-  PolySchedule *sched_t = poly_complete_create_schedule_with_vars(ctx, sink_t, POLY_MODE_CALL);
-  ASSERT_TRUE(sched_t != NULL);
-  ASSERT_FALSE(poly_wasm_can_render_matmul(poly_schedule_call_body(sched_t, 0)));
-  poly_schedule_free(sched_t);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, bt)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_k_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_k_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_abt("/tmp/polygrad_test_matmul_abt_k_tail.wasm", m, n, k), 0);
+  free(wasm);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, matmul_abt_row1_specializes_nonmultiple_k_tail) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t m = 1, n = 16, k = 5;
+  PolyUOp *a = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, m * k), (int64_t[]){m, k}, 2
+  );
+  PolyUOp *bt0 = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, n * k), (int64_t[]){n, k}, 2
+  );
+  PolyUOp *bt = poly_permute(ctx, bt0, (int64_t[]){1, 0}, 2);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, m * n);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, poly_dot(ctx, a, bt)));
+  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  ASSERT_TRUE(sched != NULL);
+  PolyUOp *body = poly_schedule_call_body(sched, 0);
+  ASSERT_TRUE(poly_wasm_can_render_matmul(body));
+
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 0);
+  ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
+  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_row1_k_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_row1_k_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_abt_row1("/tmp/polygrad_test_matmul_abt_row1_k_tail.wasm", n, k), 0);
+  free(wasm);
+
+  poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
   PASS();
 }

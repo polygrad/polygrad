@@ -3077,7 +3077,7 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
     PolyUOp *r_col = end->src[1];
     int64_t n = 0, k = 0;
     if (!wasm_range_bound(r_col, &n) || !wasm_range_bound(r_k, &k)) return false;
-    if (n <= 0 || k <= 0 || n % 4 != 0 || k % 4 != 0) return false;
+    if (n <= 0 || k <= 0 || n % 4 != 0) return false;
 
     int out_param = -1, a_param = -1, b_param = -1;
     WasmAffine out_aff, a_aff, b_aff;
@@ -3134,9 +3134,9 @@ static bool wasm_match_matmul_root(PolyUOp *sink, WasmMatmulSpec *spec) {
     return false;
   }
   if (kind == WASM_MATMUL_AB) {
-    if (m % 4 != 0 || n % 16 != 0) return false;
+    /* A@B has scalar epilogues for row and column tails. */
   } else {
-    if (!((m == 1 || m % 4 == 0) && n % 4 == 0 && k % 4 == 0)) return false;
+    if (!((m == 1 || m % 4 == 0) && n % 4 == 0)) return false;
   }
 
   if (out_param < 0 || a_param < 0 || b_param < 0 || out_param == a_param ||
@@ -3233,6 +3233,21 @@ static void wasm_emit_break_if_ge_local(WasmBuf *body, int local, int bound_loca
   wb_uleb128(body, 1);
 }
 
+static void wasm_emit_break_if_local_plus_ge_const(
+    WasmBuf *body,
+    int lhs_local,
+    int rhs_local,
+    int bound
+) {
+  wasm_emit_local_get(body, lhs_local);
+  wasm_emit_local_get(body, rhs_local);
+  wasm_emit_i32_add(body);
+  wasm_emit_i32_const(body, bound);
+  wasm_emit_i32_ge_u(body);
+  wb_byte(body, WASM_OP_BR_IF);
+  wb_uleb128(body, 1);
+}
+
 static void wasm_emit_inc_const(WasmBuf *body, int local, int inc) {
   wasm_emit_local_get(body, local);
   wasm_emit_i32_const(body, inc);
@@ -3286,6 +3301,10 @@ static void wasm_emit_param_element_addr(
 
 static void wasm_emit_f32_store_addr(WasmBuf *body) {
   emit_scalar_store_opcode(body, POLY_FLOAT32);
+}
+
+static void wasm_emit_f32_load_addr(WasmBuf *body) {
+  emit_scalar_load_opcode(body, POLY_FLOAT32);
 }
 
 static void wasm_emit_v128_load_addr_align(WasmBuf *body, int align_log2) {
@@ -3558,21 +3577,24 @@ static void wasm_emit_matmul_ab_body(
     int acc0,
     int bvec0,
     int avec,
+    int tail_acc0,
     bool use_relaxed_madd
 ) {
-  const int tile_rows = s->m < 128 ? s->m : 128;
-  const int tile_cols = s->n < 128 ? s->n : 128;
+  const int vector_rows = (s->m / 4) * 4;
+  const int tile_rows = vector_rows < 128 ? vector_rows : 128;
+  const int vector_cols = (s->n / 16) * 16;
+  const int tile_cols = vector_cols < 128 ? vector_cols : 128;
   const int tile_k = (s->k >= 2048 && s->k % 64 == 0) ? 64 : s->k;
 
   wasm_emit_i32_const(body, 0);
   wasm_emit_local_set(body, row_tile);
   wasm_emit_loop_header(body);
-  wasm_emit_break_if_ge_const(body, row_tile, s->m);
+  wasm_emit_break_if_ge_const(body, row_tile, vector_rows);
 
   wasm_emit_i32_const(body, 0);
   wasm_emit_local_set(body, col_tile);
   wasm_emit_loop_header(body);
-  wasm_emit_break_if_ge_const(body, col_tile, s->n);
+  wasm_emit_break_if_ge_const(body, col_tile, vector_cols);
 
   wasm_emit_i32_const(body, 0);
   wasm_emit_local_set(body, k_tile);
@@ -3596,6 +3618,7 @@ static void wasm_emit_matmul_ab_body(
   wasm_emit_local_set(body, row_off);
   wasm_emit_loop_header(body);
   wasm_emit_break_if_ge_const(body, row_off, tile_rows);
+  wasm_emit_break_if_local_plus_ge_const(body, row_tile, row_off, s->m);
 
   wasm_emit_local_get(body, row_tile);
   wasm_emit_local_get(body, row_off);
@@ -3606,6 +3629,7 @@ static void wasm_emit_matmul_ab_body(
   wasm_emit_local_set(body, col);
   wasm_emit_loop_header(body);
   wasm_emit_break_if_ge_local_plus_const(body, col, col_tile, tile_cols);
+  wasm_emit_break_if_ge_const(body, col, vector_cols);
 
   wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
   wasm_emit_local_set(body, out_addr);
@@ -3712,6 +3736,123 @@ static void wasm_emit_matmul_ab_body(
 
   wasm_emit_inc_const(body, row_tile, tile_rows);
   wasm_emit_loop_footer(body);
+
+  if (vector_cols != s->n) {
+    wasm_emit_i32_const(body, 0);
+    wasm_emit_local_set(body, row_tile);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, row_tile, vector_rows);
+
+    wasm_emit_i32_const(body, 0);
+    wasm_emit_local_set(body, row_off);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, row_off, tile_rows);
+    wasm_emit_break_if_local_plus_ge_const(body, row_tile, row_off, s->m);
+
+    wasm_emit_local_get(body, row_tile);
+    wasm_emit_local_get(body, row_off);
+    wasm_emit_i32_add(body);
+    wasm_emit_local_set(body, row);
+
+    wasm_emit_i32_const(body, vector_cols);
+    wasm_emit_local_set(body, col);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, col, s->n);
+
+    for (int r = 0; r < 4; r++) {
+      wb_byte(body, WASM_OP_F32_CONST);
+      wb_f32(body, 0.0f);
+      wasm_emit_local_set(body, tail_acc0 + r);
+    }
+
+    wasm_emit_i32_const(body, 0);
+    wasm_emit_local_set(body, kk);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, kk, s->k);
+
+    for (int r = 0; r < 4; r++) {
+      wasm_emit_local_get(body, tail_acc0 + r);
+
+      wasm_emit_param_element_addr(body, s->a_param, row, s->k, kk, 1, -1, 0);
+      if (r != 0) {
+        wasm_emit_i32_const(body, r * s->k * 4);
+        wasm_emit_i32_add(body);
+      }
+      wasm_emit_f32_load_addr(body);
+
+      wasm_emit_param_element_addr(body, s->b_param, kk, s->n, col, 1, -1, 0);
+      wasm_emit_f32_load_addr(body);
+
+      wb_byte(body, WASM_OP_F32_MUL);
+      wb_byte(body, WASM_OP_F32_ADD);
+      wasm_emit_local_set(body, tail_acc0 + r);
+    }
+
+    wasm_emit_inc_const(body, kk, 1);
+    wasm_emit_loop_footer(body);
+
+    for (int r = 0; r < 4; r++) {
+      wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
+      if (r != 0) {
+        wasm_emit_i32_const(body, r * s->n * 4);
+        wasm_emit_i32_add(body);
+      }
+      wasm_emit_local_get(body, tail_acc0 + r);
+      wasm_emit_f32_store_addr(body);
+    }
+
+    wasm_emit_inc_const(body, col, 1);
+    wasm_emit_loop_footer(body);
+
+    wasm_emit_inc_const(body, row_off, 4);
+    wasm_emit_loop_footer(body);
+
+    wasm_emit_inc_const(body, row_tile, tile_rows);
+    wasm_emit_loop_footer(body);
+  }
+
+  if (vector_rows != s->m) {
+    wasm_emit_i32_const(body, vector_rows);
+    wasm_emit_local_set(body, row);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, row, s->m);
+
+    wasm_emit_i32_const(body, 0);
+    wasm_emit_local_set(body, col);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, col, s->n);
+
+    wb_byte(body, WASM_OP_F32_CONST);
+    wb_f32(body, 0.0f);
+    wasm_emit_local_set(body, tail_acc0);
+
+    wasm_emit_i32_const(body, 0);
+    wasm_emit_local_set(body, kk);
+    wasm_emit_loop_header(body);
+    wasm_emit_break_if_ge_const(body, kk, s->k);
+
+    wasm_emit_local_get(body, tail_acc0);
+    wasm_emit_param_element_addr(body, s->a_param, row, s->k, kk, 1, -1, 0);
+    wasm_emit_f32_load_addr(body);
+    wasm_emit_param_element_addr(body, s->b_param, kk, s->n, col, 1, -1, 0);
+    wasm_emit_f32_load_addr(body);
+    wb_byte(body, WASM_OP_F32_MUL);
+    wb_byte(body, WASM_OP_F32_ADD);
+    wasm_emit_local_set(body, tail_acc0);
+
+    wasm_emit_inc_const(body, kk, 1);
+    wasm_emit_loop_footer(body);
+
+    wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
+    wasm_emit_local_get(body, tail_acc0);
+    wasm_emit_f32_store_addr(body);
+
+    wasm_emit_inc_const(body, col, 1);
+    wasm_emit_loop_footer(body);
+
+    wasm_emit_inc_const(body, row, 1);
+    wasm_emit_loop_footer(body);
+  }
 }
 
 static void wasm_emit_matmul_abt_body(
@@ -3734,6 +3875,7 @@ static void wasm_emit_matmul_abt_body(
   const int tile_rows = s->m < 128 ? s->m : 128;
   const int tile_cols = s->n < 128 ? s->n : 128;
   const int k_unroll = (s->k % 16 == 0) ? 4 : 1;
+  const int vector_k = (s->k / 4) * 4;
 
   wasm_emit_i32_const(body, 0);
   wasm_emit_local_set(body, row_tile);
@@ -3749,6 +3891,7 @@ static void wasm_emit_matmul_abt_body(
   wasm_emit_local_set(body, row_off);
   wasm_emit_loop_header(body);
   wasm_emit_break_if_ge_const(body, row_off, tile_rows);
+  wasm_emit_break_if_local_plus_ge_const(body, row_tile, row_off, s->m);
 
   wasm_emit_local_get(body, row_tile);
   wasm_emit_local_get(body, row_off);
@@ -3785,7 +3928,7 @@ static void wasm_emit_matmul_abt_body(
     wasm_emit_local_set(body, b_addr + c);
   }
   wasm_emit_loop_header(body);
-  wasm_emit_break_if_ge_const(body, kk, s->k);
+  wasm_emit_break_if_ge_const(body, kk, vector_k);
 
   for (int u = 0; u < k_unroll; u++) {
     for (int c = 0; c < 4; c++) {
@@ -3816,6 +3959,35 @@ static void wasm_emit_matmul_abt_body(
       int acc = acc0 + r * 4 + c;
       wasm_emit_f32x4_horizontal_sum(body, acc, avec);
       wasm_emit_local_set(body, sum);
+
+      if (vector_k != s->k) {
+        wasm_emit_i32_const(body, vector_k);
+        wasm_emit_local_set(body, kk);
+        wasm_emit_loop_header(body);
+        wasm_emit_break_if_ge_const(body, kk, s->k);
+
+        wasm_emit_local_get(body, sum);
+        wasm_emit_param_element_addr(body, s->a_param, row, s->k, kk, 1, -1, 0);
+        if (r != 0) {
+          wasm_emit_i32_const(body, r * s->k * 4);
+          wasm_emit_i32_add(body);
+        }
+        wasm_emit_f32_load_addr(body);
+
+        wasm_emit_param_element_addr(body, s->b_param, col, s->k, kk, 1, -1, 0);
+        if (c != 0) {
+          wasm_emit_i32_const(body, c * s->k * 4);
+          wasm_emit_i32_add(body);
+        }
+        wasm_emit_f32_load_addr(body);
+
+        wb_byte(body, WASM_OP_F32_MUL);
+        wb_byte(body, WASM_OP_F32_ADD);
+        wasm_emit_local_set(body, sum);
+
+        wasm_emit_inc_const(body, kk, 1);
+        wasm_emit_loop_footer(body);
+      }
 
       wasm_emit_param_element_addr(body, s->out_param, row, s->n, col, 1, -1, 0);
       if (r != 0 || c != 0) {
@@ -3856,6 +4028,7 @@ static void wasm_emit_matmul_abt_row1_body(
 ) {
   const int tile_cols = s->n < 128 ? s->n : 128;
   const int k_unroll = (s->k % 16 == 0) ? 4 : 1;
+  const int vector_k = (s->k / 4) * 4;
 
   wasm_emit_i32_const(body, 0);
   wasm_emit_local_set(body, col_tile);
@@ -3885,7 +4058,7 @@ static void wasm_emit_matmul_abt_row1_body(
   }
 
   wasm_emit_loop_header(body);
-  wasm_emit_break_if_ge_const(body, kk, s->k);
+  wasm_emit_break_if_ge_const(body, kk, vector_k);
 
   for (int u = 0; u < k_unroll; u++) {
     wasm_emit_local_get(body, a_addr);
@@ -3908,6 +4081,29 @@ static void wasm_emit_matmul_abt_row1_body(
   for (int c = 0; c < 4; c++) {
     wasm_emit_f32x4_horizontal_sum(body, acc0 + c, avec);
     wasm_emit_local_set(body, sum);
+
+    if (vector_k != s->k) {
+      wasm_emit_i32_const(body, vector_k);
+      wasm_emit_local_set(body, kk);
+      wasm_emit_loop_header(body);
+      wasm_emit_break_if_ge_const(body, kk, s->k);
+
+      wasm_emit_local_get(body, sum);
+      wasm_emit_param_element_addr(body, s->a_param, kk, 1, -1, 0, -1, 0);
+      wasm_emit_f32_load_addr(body);
+      wasm_emit_param_element_addr(body, s->b_param, col, s->k, kk, 1, -1, 0);
+      if (c != 0) {
+        wasm_emit_i32_const(body, c * s->k * 4);
+        wasm_emit_i32_add(body);
+      }
+      wasm_emit_f32_load_addr(body);
+      wb_byte(body, WASM_OP_F32_MUL);
+      wb_byte(body, WASM_OP_F32_ADD);
+      wasm_emit_local_set(body, sum);
+
+      wasm_emit_inc_const(body, kk, 1);
+      wasm_emit_loop_footer(body);
+    }
 
     wasm_emit_param_element_addr(body, s->out_param, col, 1, -1, 0, -1, 0);
     if (c != 0) {
@@ -3955,7 +4151,8 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   wb_init(&body);
 
   int n_i32 = s.kind == WASM_MATMUL_ABT ? 14 : 20;
-  int n_f32 = s.kind == WASM_MATMUL_ABT ? 1 : 0;
+  int n_f32 =
+      s.kind == WASM_MATMUL_ABT ? 1 : (((s.n % 16) != 0 || (s.m % 4) != 0) ? 4 : 0);
   int n_v128 = s.kind == WASM_MATMUL_AB ? 21 : 21;
   int n_local_types = 2 + (n_f32 > 0 ? 1 : 0);
   wb_uleb128(&body, n_local_types);
@@ -3995,7 +4192,8 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
     out_addr = next;
     next += 4;
   }
-  int sum = n_f32 > 0 ? next++ : -1;
+  int sum = n_f32 > 0 ? next : -1;
+  next += n_f32;
   int acc = next;
 
   bool use_relaxed_for_kind = use_relaxed_madd;
@@ -4003,7 +4201,7 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   if (s.kind == WASM_MATMUL_AB)
     wasm_emit_matmul_ab_body(
       &body, &s, row, col, kk, row_tile, col_tile, row_off, k_tile, tile_end, b_addr,
-      a_addr, out_addr, acc, acc + 16, acc + 20, use_relaxed_for_kind
+      a_addr, out_addr, acc, acc + 16, acc + 20, sum, use_relaxed_for_kind
     );
   else if (s.m == 1)
     wasm_emit_matmul_abt_row1_body(
