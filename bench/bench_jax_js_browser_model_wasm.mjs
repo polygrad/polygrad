@@ -21,6 +21,7 @@ function parseArgs(argv) {
     cases: ["mlp_small", "mlp_token", "mlp_batch", "qwen_ffn_token", "qwen_ffn_batch"],
     iters: 10,
     warmup: 2,
+    stageBreakdown: false,
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -31,8 +32,9 @@ function parseArgs(argv) {
     if (a === "--cases") args.cases = next().split(",").map((x) => x.trim()).filter(Boolean);
     else if (a === "--iters") args.iters = Number(next());
     else if (a === "--warmup") args.warmup = Number(next());
+    else if (a === "--stage-breakdown") args.stageBreakdown = true;
     else if (a === "--help" || a === "-h") {
-      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--cases a,b] [--iters N] [--warmup N]");
+      console.log("Usage: node bench/bench_jax_js_browser_model_wasm.mjs [--cases a,b] [--iters N] [--warmup N] [--stage-breakdown]");
       process.exit(0);
     } else if (a === "--paired" || a === "--quiet") {
       // Accepted for Makefile BENCH_JAX_JS_EXTRA parity with the Node model bench.
@@ -341,6 +343,84 @@ async function runJaxCase(name, c, inputData) {
   };
 }
 
+async function runPolyQwenStages(pg, name, c, inputData) {
+  if (c.kind !== "qwen_ffn") return [];
+  const [x, wg, wu, wd] = await createPolyInputs(pg, c, inputData);
+  const fGate = pg.jit((xx, ww) => xx.matmul(ww.permute(1, 0)).silu());
+  const fUp = pg.jit((xx, ww) => xx.matmul(ww.permute(1, 0)));
+  const fMul = pg.jit((gate, up) => gate.mul(up));
+  const fDown = pg.jit((h, ww) => h.matmul(ww.permute(1, 0)));
+
+  const gate0 = await fGate(x, wg);
+  const up0 = await fUp(x, wu);
+  await gate0.realize(up0);
+  const h0 = await fMul(gate0, up0);
+  await h0.realize();
+  await (await fDown(h0, wd)).realize();
+
+  const timeStage = async (stage, call, getSchedules) => {
+    const samples = await timeAsync(call, (y) => y.realize(), null);
+    const s = median(samples);
+    return {
+      name, stage, seconds: s, us: s * 1e6,
+      tokens_per_s: c.tokens / s, schedules: getSchedules(),
+    };
+  };
+
+  const rows = [
+    await timeStage("gate", () => fGate(x, wg), () => fGate.scheduleCount || 0),
+    await timeStage("up", () => fUp(x, wu), () => fUp.scheduleCount || 0),
+    await timeStage("mul", () => fMul(gate0, up0), () => fMul.scheduleCount || 0),
+    await timeStage("down", () => fDown(h0, wd), () => fDown.scheduleCount || 0),
+  ];
+
+  fGate.dispose?.();
+  fUp.dispose?.();
+  fMul.dispose?.();
+  fDown.dispose?.();
+  return rows;
+}
+
+async function runJaxQwenStages(name, c, inputData) {
+  if (c.kind !== "qwen_ffn") return [];
+  const [x, wg, wu, wd] = createJaxInputs(c, inputData);
+  await blockUntilReady([x, wg, wu, wd]);
+  const fGate = jit((xx, ww) => nn.silu(np.matmul(xx.ref, ww.ref.transpose())), { device: "wasm" });
+  const fUp = jit((xx, ww) => np.matmul(xx.ref, ww.ref.transpose()), { device: "wasm" });
+  const fMul = jit((gate, up) => gate.ref.mul(up.ref), { device: "wasm" });
+  const fDown = jit((h, ww) => np.matmul(h.ref, ww.ref.transpose()), { device: "wasm" });
+
+  const gate0 = fGate(x.ref, wg.ref);
+  const up0 = fUp(x.ref, wu.ref);
+  await blockUntilReady([gate0, up0]);
+  const h0 = fMul(gate0.ref, up0.ref);
+  await h0.blockUntilReady();
+  await fDown(h0.ref, wd.ref).blockUntilReady();
+
+  const timeStage = async (stage, call) => {
+    const samples = await timeAsync(call, (y) => y.blockUntilReady(), (y) => y.dispose());
+    const s = median(samples);
+    return { name, stage, seconds: s, us: s * 1e6, tokens_per_s: c.tokens / s };
+  };
+
+  const rows = [
+    await timeStage("gate", () => fGate(x.ref, wg.ref)),
+    await timeStage("up", () => fUp(x.ref, wu.ref)),
+    await timeStage("mul", () => fMul(gate0.ref, up0.ref)),
+    await timeStage("down", () => fDown(h0.ref, wd.ref)),
+  ];
+
+  fGate.dispose?.();
+  fUp.dispose?.();
+  fMul.dispose?.();
+  fDown.dispose?.();
+  gate0.dispose();
+  up0.dispose();
+  h0.dispose();
+  for (const arr of [x, wg, wu, wd]) arr.dispose();
+  return rows;
+}
+
 function printSummary(pgResults, jaxResults) {
   console.log(JSON.stringify({ backend: "polygrad-browser-wasm-model-jit", results: pgResults }));
   console.log(JSON.stringify({ backend: "jax-js-browser-wasm-model-jit", results: jaxResults }));
@@ -350,6 +430,27 @@ function printSummary(pgResults, jaxResults) {
     if (!jx) continue;
     console.log([
       pg.name,
+      pg.us.toFixed(3),
+      jx.us.toFixed(3),
+      (pg.us / jx.us).toFixed(3),
+      pg.tokens_per_s.toFixed(3),
+      jx.tokens_per_s.toFixed(3),
+      pg.schedules,
+    ].join(","));
+  }
+}
+
+function printStageSummary(pgRows, jaxRows) {
+  if (!pgRows.length && !jaxRows.length) return;
+  console.log(JSON.stringify({ backend: "polygrad-browser-wasm-qwen-ffn-stages", results: pgRows }));
+  console.log(JSON.stringify({ backend: "jax-js-browser-wasm-qwen-ffn-stages", results: jaxRows }));
+  console.log("\\ncase,stage,polygrad_us,jax_js_us,ratio_pg_over_jax,polygrad_tok_s,jax_js_tok_s,schedules");
+  for (const pg of pgRows) {
+    const jx = jaxRows.find((x) => x.name === pg.name && x.stage === pg.stage);
+    if (!jx) continue;
+    console.log([
+      pg.name,
+      pg.stage,
       pg.us.toFixed(3),
       jx.us.toFixed(3),
       (pg.us / jx.us).toFixed(3),
@@ -386,7 +487,27 @@ async function main() {
 
   printSummary(pgResults, jaxResults);
   console.log(JSON.stringify({ jaxWorkerCreates: workerCreatesDuringJax }));
-  window.__benchResults = { env, workerCreatesDuringJax, pgResults, jaxResults };
+
+  let pgStageResults = [];
+  let jaxStageResults = [];
+  let stageWorkerCreatesDuringJax = 0;
+  if (args.stageBreakdown) {
+    for (const name of args.cases) {
+      pgStageResults.push(...await runPolyQwenStages(pg, name, CASES[name], inputsByCase.get(name)));
+    }
+    const stageWorkerCreatesBeforeJax = workerCreates;
+    for (const name of args.cases) {
+      jaxStageResults.push(...await runJaxQwenStages(name, CASES[name], inputsByCase.get(name)));
+    }
+    stageWorkerCreatesDuringJax = workerCreates - stageWorkerCreatesBeforeJax;
+    printStageSummary(pgStageResults, jaxStageResults);
+    console.log(JSON.stringify({ jaxStageWorkerCreates: stageWorkerCreatesDuringJax }));
+  }
+
+  window.__benchResults = {
+    env, workerCreatesDuringJax, stageWorkerCreatesDuringJax,
+    pgResults, jaxResults, pgStageResults, jaxStageResults,
+  };
   await pg.dispose?.();
 }
 
