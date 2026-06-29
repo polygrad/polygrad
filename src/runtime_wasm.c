@@ -85,32 +85,53 @@ EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
 ;
 var inst = new WebAssembly.Instance(mod, imports);
 if (!Module._polyKernelCache) Module._polyKernelCache = [];
-Module._polyKernelCache.push(inst);
+var kernel = inst.exports.kernel;
+var n_params = kernel.length;
+var launcher;
+switch (n_params) {
+  case 0: launcher = function(args) { kernel(); }; break;
+  case 1: launcher = function(args) {
+    var h = HEAP32, p = args >> 2; kernel(h[p]);
+  }; break;
+  case 2: launcher = function(args) {
+    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1]);
+  }; break;
+  case 3: launcher = function(args) {
+    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1], h[p + 2]);
+  }; break;
+  case 4: launcher = function(args) {
+    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1], h[p + 2], h[p + 3]);
+  }; break;
+  case 5: launcher = function(args) {
+    var h = HEAP32, p = args >> 2; kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4]);
+  }; break;
+  case 6: launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5]);
+  }; break;
+  case 7: launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6]);
+  }; break;
+  case 8: launcher = function(args) {
+    var h = HEAP32, p = args >> 2;
+    kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6], h[p + 7]);
+  }; break;
+  default: launcher = function(args) {
+    var h = HEAP32, p = args >> 2, params = [];
+    for (var i = 0; i < n_params; i++) params.push(h[p + i]);
+    kernel.apply(null, params);
+  }; break;
+}
+Module._polyKernelCache.push({ inst: inst, launch: launcher });
 return Module._polyKernelCache.length - 1;
 });
 
 EM_JS(int, js_exec_wasm_kernel, (int kernel_id, const int *args, int n_args), {
-  var inst = Module._polyKernelCache[kernel_id];
-  if (!inst) return -1;
-  var h = HEAP32;
-  var p = args >> 2;
-  var kernel = inst.exports.kernel;
-  switch (n_args) {
-    case 0: kernel(); break;
-    case 1: kernel(h[p]); break;
-    case 2: kernel(h[p], h[p + 1]); break;
-    case 3: kernel(h[p], h[p + 1], h[p + 2]); break;
-    case 4: kernel(h[p], h[p + 1], h[p + 2], h[p + 3]); break;
-    case 5: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4]); break;
-    case 6: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5]); break;
-    case 7: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6]); break;
-    case 8: kernel(h[p], h[p + 1], h[p + 2], h[p + 3], h[p + 4], h[p + 5], h[p + 6], h[p + 7]); break;
-    default: {
-      var params = [];
-      for (var i = 0; i < n_args; i++) params.push(h[p + i]);
-      kernel.apply(null, params);
-    }
-  }
+  n_args = n_args | 0;
+  var entry = Module._polyKernelCache && Module._polyKernelCache[kernel_id];
+  if (!entry || !entry.launch) return -1;
+  entry.launch(args);
   return 0;
 });
 
