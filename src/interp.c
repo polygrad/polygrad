@@ -523,15 +523,18 @@ static int find_matching_end(PolyUOp **lin, int n, int range_pos) {
   return n;
 }
 
-/* DEFINE_REG / DEFINE_LOCAL can remain scalar-typed in the linearized IR while
+/* Register/local buffers can remain scalar-typed in the linearized IR while
  * being used as backing storage for packed LOAD/STORE paths. Size the backing
  * allocation from actual uses in the kernel instead of only from the define
  * node's nominal dtype. */
 static PolyUOp *interp_follow_storage_base(PolyUOp *u) {
   while (u) {
     if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
+    if (u->op == POLY_OP_BUFFER && u->dtype.is_ptr &&
+        (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))
+      return u;
     if ((u->op == POLY_OP_AFTER || u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST ||
-         u->op == POLY_OP_INDEX) &&
+         u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) &&
         u->n_src > 0) {
       u = u->src[0];
       continue;
@@ -551,7 +554,7 @@ static int interp_storage_extent_for_use(PolyUOp *ptr_uop, int access_lanes) {
   int64_t base_hi = 0;
   bool saw_index = false;
   for (PolyUOp *u = ptr_uop; u; ) {
-    if (u->op == POLY_OP_INDEX && u->n_src > 1) {
+    if ((u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) && u->n_src > 1) {
       int64_t lo = 0, hi = 0;
       poly_uop_minmax(NULL, u->src[1], &lo, &hi);
       if (hi >= 0 && hi <= (1 << 20)) {
@@ -664,6 +667,13 @@ static int interp_region(
       break;
     }
 
+    case POLY_OP_BUFFER:
+      if (!(u->dtype.is_ptr &&
+            (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))) {
+        fprintf(stderr, "polygrad: interp: unexpected BUFFER in program IR\n");
+        return -1;
+      }
+      /* fallthrough */
     case POLY_OP_DEFINE_REG: {
       PolyDType base = poly_dtype_scalar(u->dtype);
       int sz = poly_dtype_itemsize(base);
@@ -718,6 +728,12 @@ static int interp_region(
         fprintf(stderr, "polygrad: interp: INDEX src not found\n");
         return -1;
       }
+      if (!poly_is_program_memory_base(u->src[0])) {
+        int64_t lane = as_int(iv_get(&vals[src1], 0), u->src[1]->dtype);
+        vals[i] = iv_scalar(iv_get(&vals[src0], (int)lane));
+        iv_fixup(&vals[i]);
+        break;
+      }
       PolyDType base_dt = poly_dtype_scalar(u->dtype);
       int itemsize = poly_dtype_itemsize(base_dt);
       if (itemsize < 1) itemsize = 1;
@@ -726,6 +742,23 @@ static int interp_region(
       char *base_ptr = (char *)iv_get(&vals[src0], 0).p;
       int64_t offset = as_int(iv_get(&vals[src1], 0), u->src[1]->dtype);
       vals[i] = iv_scalar(il_ptr(base_ptr + offset * itemsize * vec_count));
+      iv_fixup(&vals[i]);
+      break;
+    }
+
+    case POLY_OP_SHRINK: {
+      int src0 = uop_index_map_get(idx_map, u->src[0]);
+      int src1 = uop_index_map_get(idx_map, u->src[1]);
+      if (src0 < 0 || src1 < 0) {
+        fprintf(stderr, "polygrad: interp: SHRINK src not found\n");
+        return -1;
+      }
+      PolyDType scalar_dt = poly_dtype_scalar(u->dtype);
+      int itemsize = poly_dtype_itemsize(scalar_dt);
+      if (itemsize < 1) itemsize = 1;
+      char *base_ptr = (char *)iv_get(&vals[src0], 0).p;
+      int64_t offset = as_int(iv_get(&vals[src1], 0), u->src[1]->dtype);
+      vals[i] = iv_scalar(il_ptr(base_ptr + offset * itemsize));
       iv_fixup(&vals[i]);
       break;
     }
@@ -739,9 +772,11 @@ static int interp_region(
 
       /* Gated load check */
       PolyUOp *ld_idx = poly_find_index_through_cast(u->src[0]);
-      if (ld_idx && ld_idx->n_src >= 3) {
-        int gate_i = uop_index_map_get(idx_map, ld_idx->src[2]);
-        if (gate_i >= 0 && !as_int(iv_get(&vals[gate_i], 0), ld_idx->src[2]->dtype)) {
+      PolyUOp *gate_uop =
+          (u->n_src >= 3) ? u->src[2] : ((ld_idx && ld_idx->n_src >= 3) ? ld_idx->src[2] : NULL);
+      if (gate_uop) {
+        int gate_i = uop_index_map_get(idx_map, gate_uop);
+        if (gate_i >= 0 && !as_int(iv_get(&vals[gate_i], 0), gate_uop->dtype)) {
           /* Gate is false: use alt value or zero */
           int cnt = u->dtype.count > 0 ? u->dtype.count : 1;
           vals[i].count = (uint16_t)cnt;
@@ -1024,7 +1059,10 @@ int poly_interp_eval(PolyUOp **lin, int n_lin, void **args, int n_args) {
 
   /* Free register/local accumulator allocations */
   for (int i = 0; i < n_lin; i++) {
-    if ((lin[i]->op == POLY_OP_DEFINE_REG || lin[i]->op == POLY_OP_DEFINE_LOCAL) &&
+    if ((lin[i]->op == POLY_OP_DEFINE_REG || lin[i]->op == POLY_OP_DEFINE_LOCAL ||
+         (lin[i]->op == POLY_OP_BUFFER && lin[i]->dtype.is_ptr &&
+          (lin[i]->dtype.addrspace == POLY_ADDR_REG ||
+           lin[i]->dtype.addrspace == POLY_ADDR_LOCAL))) &&
         vals[i].lanes[0].p)
       free(vals[i].lanes[0].p);
   }

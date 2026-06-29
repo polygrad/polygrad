@@ -510,7 +510,13 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       csmap_set(&names, u, strdup(name));
 
       char type[64];
-      cuda_render_ctype(u->dtype, type, sizeof(type));
+      if (u->dtype.is_ptr) {
+        cuda_render_ctype(u->dtype, type, sizeof(type));
+      } else {
+        char base_type[64];
+        cuda_render_ctype_nonptr(u->dtype, base_type, sizeof(base_type));
+        snprintf(type, sizeof(type), "%s* __restrict__", base_type);
+      }
       param_types[n_params] = strdup(type);
       param_names[n_params] = strdup(name);
       param_order[n_params] = (int)u->arg.i;
@@ -558,12 +564,27 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       continue;
     }
 
-    /* --- INDEX -------------------------------------------------------- */
+    /* --- INDEX: pointer arithmetic or vector lane extract ------------- */
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = csmap_get(&names, u->src[0]);
       char *idx_s = csmap_get(&names, u->src[1]);
       char expr[256];
-      snprintf(expr, sizeof(expr), "(%s+%s)", buf_s, idx_s);
+      if (poly_is_program_memory_base(u->src[0]))
+        snprintf(expr, sizeof(expr), "(%s+%s)", buf_s, idx_s);
+      else if (u->src[1] && u->src[1]->op == POLY_OP_CONST && u->src[1]->arg.kind == POLY_ARG_INT)
+        snprintf(expr, sizeof(expr), "%s.%s", buf_s ? buf_s : "0", cuda_lane_name((int)u->src[1]->arg.i));
+      else
+        snprintf(expr, sizeof(expr), "((&(%s).x)[%s])", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      csmap_set(&names, u, strdup(expr));
+      continue;
+    }
+
+    /* --- SHRINK: late codegen memory slice --------------------------- */
+    if (u->op == POLY_OP_SHRINK) {
+      char *buf_s = csmap_get(&names, u->src[0]);
+      char *idx_s = csmap_get(&names, u->src[1]);
+      char expr[256];
+      snprintf(expr, sizeof(expr), "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
       csmap_set(&names, u, strdup(expr));
       continue;
     }
@@ -698,8 +719,9 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       continue;
     }
 
-    /* --- DEFINE_REG --------------------------------------------------- */
-    if (u->op == POLY_OP_DEFINE_REG) {
+    /* --- register buffer --------------------------------------------- */
+    if (u->op == POLY_OP_DEFINE_REG ||
+        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
       char name[32];
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       csmap_set(&names, u, strdup(name));
@@ -741,14 +763,17 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
 
-      /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
+      /* Gated load: LOAD(INDEX(buf, idx), alt, gate) in tinygrad final IR.
+       * Keep accepting INDEX(..., gate) during transition. */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
-      if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
-        char *gate_s = csmap_get(&names, idx_uop->src[2]);
+      PolyUOp *gate_uop =
+          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+      if (gate_uop && u->n_src >= 2) {
+        char *gate_s = csmap_get(&names, gate_uop);
         char *alt_s = csmap_get(&names, u->src[1]);
         csb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
-      } else if (idx_uop && idx_uop->n_src >= 3) {
-        char *gate_s = csmap_get(&names, idx_uop->src[2]);
+      } else if (gate_uop) {
+        char *gate_s = csmap_get(&names, gate_uop);
         csb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
       } else {
         csb_printf(&body, "%s = (*%s);\n", name, bidx);
@@ -768,8 +793,11 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
        * pm_linearize_cleanups which converts gated INDEX+STORE into
        * IF/STORE/ENDIF post-linearization. */
       PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
-      bool gated_store =
-          (store_idx && store_idx->n_src >= 3 && u->src[0]->op != POLY_OP_DEFINE_LOCAL);
+      bool store_to_local =
+          u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
+          (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
+           u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
+      bool gated_store = (store_idx && store_idx->n_src >= 3 && !store_to_local);
       if (gated_store) {
         char *gate_s = csmap_get(&names, store_idx->src[2]);
         for (int d = 0; d < depth; d++)
@@ -780,7 +808,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
-      if (u->src[0]->op == POLY_OP_DEFINE_LOCAL)
+      if (store_to_local)
         csb_printf(&body, "%s = %s;\n", target, val);
       else
         csb_printf(&body, "*%s = %s;\n", target, val);

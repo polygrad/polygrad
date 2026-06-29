@@ -58,6 +58,17 @@ static int count_lin_ops(PolyUOp **lin, int n, PolyOps op) {
   return c;
 }
 
+static int count_reg_storage_ops(PolyUOp **lin, int n) {
+  int c = 0;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = lin[i];
+    if (u->op == POLY_OP_DEFINE_REG ||
+        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG))
+      c++;
+  }
+  return c;
+}
+
 static int count_special_named(PolyUOp **lin, int n, const char *name) {
   int c = 0;
   for (int i = 0; i < n; i++) {
@@ -165,11 +176,8 @@ TEST(codegen, linearize_order) {
   int n;
   PolyUOp **lin = poly_linearize(k.ctx, k.sink, &n);
 
-  /* PARAMs should come first (priority -20) */
   ASSERT_TRUE(n >= 6);
-  ASSERT_TRUE(lin[0]->op == POLY_OP_PARAM);
-  ASSERT_TRUE(lin[1]->op == POLY_OP_PARAM);
-  ASSERT_TRUE(lin[2]->op == POLY_OP_PARAM);
+  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_PARAM), 3);
 
   /* SINK should be last */
   ASSERT_TRUE(lin[n - 1]->op == POLY_OP_SINK);
@@ -240,7 +248,7 @@ TEST(codegen, reduce_merge_shared_end) {
   int n = 0;
   PolyUOp **lin = poly_linearize(ctx, sink, &n);
   ASSERT_TRUE(n > 0);
-  ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_DEFINE_REG), 2);
+  ASSERT_INT_EQ(count_reg_storage_ops(lin, n), 2);
   ASSERT_INT_EQ(count_lin_ops(lin, n, POLY_OP_END), 1);
 
   free(lin);

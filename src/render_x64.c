@@ -1635,17 +1635,52 @@ static bool dtype_is_int(PolyDType dt) {
   return !dtype_is_float(dt) && dt.bitsize > 0;
 }
 
-/* Walk through AFTER/CAST/BITCAST/INDEX to find the underlying DEFINE_REG
+static int x64_memory_slice_itemsize(PolyUOp *addr) {
+  if (!addr || (addr->op != POLY_OP_INDEX && addr->op != POLY_OP_SHRINK) || addr->n_src < 1)
+    return 1;
+  PolyUOp *base = addr->src[0];
+  int itemsize = poly_dtype_itemsize(base->dtype);
+  if (base->dtype.is_ptr && base->dtype.bitsize > 0) itemsize = base->dtype.bitsize / 8;
+  return itemsize > 0 ? itemsize : 1;
+}
+
+static int x64_const_index(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_CONST) return -1;
+  if (u->arg.kind == POLY_ARG_INT) return (int)u->arg.i;
+  return -1;
+}
+
+static int x64_shrink_width(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_SHRINK || u->n_src < 3) return 1;
+  int width = x64_const_index(u->src[2]);
+  return width > 0 ? width : 1;
+}
+
+static PolyDType x64_load_effective_dtype(PolyUOp *u) {
+  PolyDType dt = u->dtype;
+  if (!u || u->op != POLY_OP_LOAD || u->n_src < 1) return dt;
+  PolyUOp *slice = poly_find_memory_slice_through_cast(u->src[0]);
+  if (!slice || slice->op != POLY_OP_SHRINK) return dt;
+  int width = x64_shrink_width(slice);
+  if (width > dt.count) dt = poly_dtype_vec(poly_dtype_scalar(dt), width);
+  return dt;
+}
+
+/* Walk through AFTER/CAST/BITCAST/INDEX/SHRINK to find the underlying DEFINE_REG
  * or DEFINE_LOCAL.  The core's pm_reduce emits AFTER(DEFINE_REG, ...)
- * chains, so INDEX(AFTER(DEFINE_REG)) must resolve to the DEFINE_REG for
- * accumulator LOAD/STORE fast paths. */
+ * chains, so INDEX/SHRINK(AFTER(DEFINE_REG)) must resolve to the DEFINE_REG
+ * for accumulator LOAD/STORE fast paths. */
 static PolyUOp *resolve_acc_base_fn(PolyUOp *u) {
   if (!u) return NULL;
   if (u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_DEFINE_LOCAL) return u;
+  if (u->op == POLY_OP_BUFFER && u->dtype.is_ptr &&
+      (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))
+    return u;
   if (u->op == POLY_OP_AFTER && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
   if (u->op == POLY_OP_CAST && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
   if (u->op == POLY_OP_BITCAST && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
   if (u->op == POLY_OP_INDEX && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
+  if (u->op == POLY_OP_SHRINK && u->n_src > 0) return resolve_acc_base_fn(u->src[0]);
   return NULL;
 }
 
@@ -1832,7 +1867,8 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     if (u->op == POLY_OP_END) continue;
     if (u->op == POLY_OP_PARAM) n_params++;
     if (u->op == POLY_OP_RANGE) n_ranges++;
-    if (u->dtype.count > max_vec_width) max_vec_width = u->dtype.count;
+    PolyDType width_dt = (u->op == POLY_OP_LOAD) ? x64_load_effective_dtype(u) : u->dtype;
+    if (width_dt.count > max_vec_width) max_vec_width = width_dt.count;
     n_slots++;
   }
 
@@ -2076,7 +2112,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
     }
 
     /* DEFINE_LOCAL / DEFINE_REG: initialize accumulator */
-    if (u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG) {
+    if (u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG ||
+        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr &&
+         (u->dtype.addrspace == POLY_ADDR_REG || u->dtype.addrspace == POLY_ADDR_LOCAL))) {
       if (!x64_emit_define_acc(&c, u, i)) goto x64_fail;
       continue;
     }
@@ -2087,8 +2125,62 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       continue;
     }
 
-    /* INDEX: pointer arithmetic (base + idx * itemsize) */
-    if (u->op == POLY_OP_INDEX) {
+    /* INDEX over a vector value: lane extract. tinygrad's pm_index_is_shrink
+     * rewrites GEP to INDEX, so direct ISA renderers must handle this before
+     * considering INDEX a memory address. */
+    if (u->op == POLY_OP_INDEX && u->n_src >= 2 && dtype_is_float(u->dtype) &&
+        u->dtype.count == 1 && !poly_is_program_memory_base(u->src[0])) {
+      PolyDType src_dt =
+          (u->src[0]->op == POLY_OP_LOAD) ? x64_load_effective_dtype(u->src[0]) : u->src[0]->dtype;
+      int lane = x64_const_index(u->src[1]);
+      if (src_dt.count > 1 && lane >= 0 && lane < src_dt.count) {
+        int src_slot = lm_get(&locals, u->src[0]);
+        if (src_slot < 0) goto skip_slot;
+        int slot = next_slot++;
+        int sr = xf_find(&xf, src_slot);
+        if (sr < 0) sr = xf_get_packed_w(&xf, &buf, src_slot, src_dt.count, &jit_ok);
+        int dr = xf_alloc(&xf, &buf, slot, sr, -1, &jit_ok);
+
+        if (use_avx2 && src_dt.count >= 8 && lane >= 4) {
+          emit_vextractf128(&buf, XMM0, sr, 1);
+          int hilo_lane = lane - 4;
+          if (hilo_lane == 0) {
+            emit_movss_xmm_xmm(&buf, dr, XMM0);
+          } else {
+            uint8_t imm =
+                (uint8_t)(hilo_lane | (hilo_lane << 2) | (hilo_lane << 4) | (hilo_lane << 6));
+            xb_byte(&buf, 0x66);
+            xb_byte(&buf, 0x0F);
+            xb_byte(&buf, 0x70);
+            emit_modrm(&buf, 3, dr, XMM0);
+            xb_byte(&buf, imm);
+          }
+        } else if (lane == 0) {
+          emit_movss_xmm_xmm(&buf, dr, sr);
+        } else {
+          uint8_t imm = (uint8_t)(lane | (lane << 2) | (lane << 4) | (lane << 6));
+          if (use_avx2) {
+            emit_vpshufd(&buf, dr, sr, imm, 0);
+          } else {
+            xb_byte(&buf, 0x66);
+            if (dr >= 8 || sr >= 8) emit_rex(&buf, 0, dr >> 3, 0, sr >> 3);
+            xb_byte(&buf, 0x0F);
+            xb_byte(&buf, 0x70);
+            emit_modrm(&buf, 3, dr, sr);
+            xb_byte(&buf, imm);
+          }
+        }
+        xf.e[dr - XF_BASE].dirty = true;
+        xf.e[dr - XF_BASE].vec_width = 0;
+        LM_SET(u, slot);
+        continue;
+      }
+    }
+
+    /* INDEX/SHRINK: pointer arithmetic (base + idx * itemsize).
+     * tinygrad x86 folds both Ops.INDEX and Ops.SHRINK as address operands.
+     * SHRINK src[2] is the slice width, not a gate. */
+    if (u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK) {
       int slot = next_slot++;
       int off = -slot_offset(slot);
 
@@ -2096,34 +2188,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       int idx_slot = lm_get(&locals, u->src[1]);
       if (base_slot < 0 || idx_slot < 0) goto skip_slot;
 
-      /* Get itemsize from the buffer's dtype */
-      int itemsize = poly_dtype_itemsize(u->src[0]->dtype);
-      if (u->src[0]->dtype.is_ptr && u->src[0]->dtype.bitsize > 0)
-        itemsize = u->src[0]->dtype.bitsize / 8;
+      int itemsize = x64_memory_slice_itemsize(u);
 
-      /* Check if all consumers of this INDEX can fuse via SIB.
-       * If so, skip emission — LOAD/STORE will use [base+idx*scale] directly. */
       int base_reg = find_reg(reg_assigns, n_reg_assigns, u->src[0]);
-      int idx_reg_check = query_index_gpr(u->src[1], reg_assigns, n_reg_assigns, &locals);
-      /* Pure query: no code emitted, safe to check before deciding to skip INDEX */
-      if (base_reg >= 0 && idx_reg_check >= 0 && valid_sib_scale(itemsize)) {
-        /* Check all consumers: every consumer must be LOAD/STORE/CAST.
-         * Scan only up to last_consumer[i] (precomputed) instead of n. */
-        bool all_fuse = true;
-        for (int j = i + 1; j <= last_consumer[i] && all_fuse; j++) {
-          for (int k = 0; k < uops[j]->n_src; k++) {
-            if (uops[j]->src[k] == u) {
-              PolyOps cop = uops[j]->op;
-              if (cop != POLY_OP_LOAD && cop != POLY_OP_STORE && cop != POLY_OP_CAST)
-                all_fuse = false;
-            }
-          }
-        }
-        if (all_fuse) {
-          LM_SET(u, slot);
-          continue; /* skip INDEX emission */
-        }
-      }
       if (base_reg >= 0) {
         emit_alu_rr(&buf, 1, 0x8B, RAX, base_reg);
       } else if (base_slot != rax_slot) {
@@ -2177,7 +2244,9 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       PolyUOp *gate_uop = NULL;
       {
         PolyUOp *idx_src = u->src[0];
-        if (idx_src->op == POLY_OP_INDEX && idx_src->n_src >= 3)
+        if (u->n_src >= 3)
+          gate_uop = u->src[2];
+        else if (idx_src->op == POLY_OP_INDEX && idx_src->n_src >= 3)
           gate_uop = idx_src->src[2];
         else {
           PolyUOp *found = poly_find_index_through_cast(idx_src);
@@ -2186,9 +2255,11 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
       int gate_jmp_done_fixup = -1;
 
+      PolyDType load_dt = x64_load_effective_dtype(u);
+
       /* Float LOAD (scalar or packed): use register file */
-      if (dtype_is_float(u->dtype)) {
-        bool packed = dtype_is_vec_float(u->dtype);
+      if (dtype_is_float(load_dt)) {
+        bool packed = dtype_is_vec_float(load_dt);
 
         /* For gated float LOADs, pre-allocate XMM and emit gate branch.
          * The XMM must be allocated BEFORE the branch so both paths
@@ -2212,7 +2283,7 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
             /* Zero the XMM register */
             emit_xorps(&buf, gated_dr, gated_dr);
             xf.e[gated_dr - XF_BASE].dirty = true;
-            xf.e[gated_dr - XF_BASE].vec_width = packed ? u->dtype.count : 0;
+            xf.e[gated_dr - XF_BASE].vec_width = packed ? load_dt.count : 0;
             /* jmp load_done */
             xb_byte(&buf, 0xEB);
             gate_jmp_done_fixup = buf.len;
@@ -2230,14 +2301,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
 
         /* Check for fusable INDEX (walk through pointer CAST/BITCAST) */
-        PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+        PolyUOp *idx_uop = poly_find_memory_slice_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
           int idx_reg =
               materialize_index_gpr(&buf, idx_uop->src[1], reg_assigns, n_reg_assigns, &locals);
-          int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
-          if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
-            is = idx_uop->src[0]->dtype.bitsize / 8;
+          int is = x64_memory_slice_itemsize(idx_uop);
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
             /* No deferred loads for gated LOADs */
             if (gated_dr < 0 && n_consumers[i] == 1) {
@@ -2263,14 +2332,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
 
             /* Emit fused SIB LOAD (use pre-allocated XMM if gated) */
             int dst = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
-            if (packed && u->dtype.count >= 8)
+            if (packed && load_dt.count >= 8)
               emit_vmovups_ymm_sib(&buf, dst, base_reg, idx_reg, is);
             else if (packed)
               emit_movups_xmm_sib(&buf, dst, base_reg, idx_reg, is);
             else
               emit_movss_xmm_sib(&buf, dst, base_reg, idx_reg, is);
             xf.e[dst - XF_BASE].dirty = true;
-            xf.e[dst - XF_BASE].vec_width = packed ? u->dtype.count : 0;
+            xf.e[dst - XF_BASE].vec_width = packed ? load_dt.count : 0;
             LM_SET(u, slot);
             goto x64_load_done;
           }
@@ -2280,14 +2349,14 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         {
           int dst2 = (gated_dr >= 0) ? gated_dr : xf_alloc(&xf, &buf, slot, -1, -1, &jit_ok);
           if (ptr_slot != rax_slot) emit_mov_r64_rbp(&buf, RAX, -slot_offset(ptr_slot));
-          if (packed && u->dtype.count >= 8)
+          if (packed && load_dt.count >= 8)
             emit_vmovups_ymm_mem(&buf, dst2, RAX);
           else if (packed)
             emit_movups_xmm_mem(&buf, dst2, RAX);
           else
             emit_movss_xmm_mem(&buf, dst2, RAX);
           xf.e[dst2 - XF_BASE].dirty = true;
-          xf.e[dst2 - XF_BASE].vec_width = packed ? u->dtype.count : 0;
+          xf.e[dst2 - XF_BASE].vec_width = packed ? load_dt.count : 0;
           LM_SET(u, slot);
           goto x64_load_done;
         }
@@ -2322,14 +2391,12 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
       }
       /* Check for fused SIB addressing (INDEX was skipped). */
       {
-        PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+        PolyUOp *idx_uop = poly_find_memory_slice_through_cast(u->src[0]);
         if (idx_uop) {
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
           int idx_reg =
               materialize_index_gpr(&buf, idx_uop->src[1], reg_assigns, n_reg_assigns, &locals);
-          int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
-          if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
-            is = idx_uop->src[0]->dtype.bitsize / 8;
+          int is = x64_memory_slice_itemsize(idx_uop);
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
             /* SIB integer LOAD: mov r32/r64, [base + idx * scale] */
             int ss = scale_to_ss(is);
@@ -2455,15 +2522,13 @@ uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out) {
         }
 
         /* Check for fused INDEX store (walk through pointer CAST/BITCAST) */
-        PolyUOp *st_idx = poly_find_index_through_cast(u->src[0]);
+        PolyUOp *st_idx = poly_find_memory_slice_through_cast(u->src[0]);
         if (st_idx) {
           PolyUOp *idx_uop = st_idx;
           int base_reg = find_reg(reg_assigns, n_reg_assigns, idx_uop->src[0]);
           int idx_reg =
               materialize_index_gpr(&buf, idx_uop->src[1], reg_assigns, n_reg_assigns, &locals);
-          int is = poly_dtype_itemsize(idx_uop->src[0]->dtype);
-          if (idx_uop->src[0]->dtype.is_ptr && idx_uop->src[0]->dtype.bitsize > 0)
-            is = idx_uop->src[0]->dtype.bitsize / 8;
+          int is = x64_memory_slice_itemsize(idx_uop);
           if (base_reg >= 0 && idx_reg >= 0 && valid_sib_scale(is)) {
             if (packed && sw >= 8)
               emit_vmovups_sib_ymm(&buf, vr, base_reg, idx_reg, is);

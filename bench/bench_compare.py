@@ -9,10 +9,16 @@ Exit code 0: no regressions. Exit code 1: regression detected.
 
 import json
 import sys
+from pathlib import Path
 
 
 def load_json(path):
-    with open(path) as f:
+    p = Path(path)
+    if not p.exists():
+        print(f'No benchmark baseline found: {path}', file=sys.stderr)
+        print('Run: make bench-update-local-ratio-baseline', file=sys.stderr)
+        sys.exit(2)
+    with p.open() as f:
         return json.load(f)
 
 
@@ -96,6 +102,11 @@ def _rfmt(v):
     return f'{v:.2f}x'
 
 
+def _machine_cpu(report):
+    machine = report.get('machine')
+    return machine.get('cpu') if isinstance(machine, dict) else None
+
+
 def print_section(title, lines):
     if not lines:
         return
@@ -122,6 +133,18 @@ def main():
 
     baseline = load_json(baseline_path)
     current = load_json(current_path)
+
+    base_cpu = _machine_cpu(baseline)
+    current_cpu = _machine_cpu(current)
+    if base_cpu and current_cpu and base_cpu != current_cpu:
+        print(
+            f'WARNING: comparing different CPUs: baseline={base_cpu!r}, current={current_cpu!r}',
+            file=sys.stderr,
+        )
+        print(
+            'Use a local ignored baseline: make bench-update-local-ratio-baseline',
+            file=sys.stderr,
+        )
 
     total_regress = 0
     total_improved = 0

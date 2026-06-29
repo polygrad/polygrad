@@ -32,10 +32,8 @@ extern "C" {
  * This keeps bindings from having to match Polygrad's C runtime allocator. */
 void poly_free(void *ptr);
 
-/* Ops enum mirrors tinygrad_latest's Ops ordering for shared ops.
- * The numeric order is observable through exported IR and is also used by
- * tinygrad's linearizer tuplize tiebreak, so Polygrad-only compatibility ops
- * live at the tail instead of shifting current tinygrad values. */
+/* Polygrad's public op enum keeps a few C-side compatibility ops. Use
+ * poly_op_value(op) where tinygrad's Ops.value ordering is required. */
 
 typedef enum {
   /* 1 — defines/special */
@@ -87,9 +85,11 @@ typedef enum {
   POLY_OP_MUL,
   POLY_OP_SHL,
   POLY_OP_SHR,
-  POLY_OP_IDIV,
+  POLY_OP_CDIV,
+  POLY_OP_IDIV = POLY_OP_CDIV, /* compatibility alias: tinygrad name is CDIV */
   POLY_OP_MAX,
-  POLY_OP_MOD,
+  POLY_OP_CMOD,
+  POLY_OP_MOD = POLY_OP_CMOD, /* compatibility alias: tinygrad name is CMOD */
   POLY_OP_CMPLT,
   POLY_OP_CMPNE,
   POLY_OP_CMPEQ,
@@ -205,6 +205,7 @@ static inline bool poly_opset_subset(PolyOpSet sub, PolyOpSet super) {
 }
 
 const char *poly_op_name(PolyOps op);
+int poly_op_value(PolyOps op);
 
 /* DType */
 

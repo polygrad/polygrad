@@ -30,6 +30,34 @@ static void json_ops_array(PolyUOp **lin, int n_lin) {
   printf("]");
 }
 
+static int lin_index_of(PolyUOp **lin, int n_lin, PolyUOp *u) {
+  for (int i = 0; i < n_lin; i++)
+    if (lin[i] == u) return i;
+  return -1;
+}
+
+static void dump_linear_details(int kernel, PolyUOp **lin, int n_lin) {
+  const char *dump = getenv("POLY_PARITY_DUMP_DETAIL");
+  if (!dump || strcmp(dump, "0") == 0 || strcmp(dump, "false") == 0 || strcmp(dump, "False") == 0)
+    return;
+  fprintf(stderr, "K%d N %d\n", kernel, n_lin);
+  for (int i = 0; i < n_lin; i++) {
+    PolyUOp *u = lin[i];
+    fprintf(stderr, "%03d %-8s dtype_prio=%d bits=%d dtype_count=%d ptr=%d src=[",
+            i, poly_op_name(u->op), u->dtype.priority, u->dtype.bitsize,
+            u->dtype.count, u->dtype.is_ptr ? 1 : 0);
+    for (int j = 0; j < u->n_src; j++) {
+      if (j) fprintf(stderr, ",");
+      fprintf(stderr, "%d", lin_index_of(lin, n_lin, u->src[j]));
+    }
+    fprintf(stderr, "] arg_kind=%d", u->arg.kind);
+    if (u->arg.kind == POLY_ARG_INT) fprintf(stderr, " arg_i=%lld", (long long)u->arg.i);
+    if (u->arg.kind == POLY_ARG_FLOAT) fprintf(stderr, " arg_f=%.9g", u->arg.f);
+    if (u->arg.kind == POLY_ARG_BOOL) fprintf(stderr, " arg_b=%d", u->arg.b ? 1 : 0);
+    fprintf(stderr, "\n");
+  }
+}
+
 /* run_and_report: schedule → linearize → render → execute → JSON */
 
 typedef struct {
@@ -42,9 +70,19 @@ static int env_enabled(const char *name) {
   return v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0 && strcmp(v, "False") != 0;
 }
 
-/* tinygrad can schedule pure movement outputs as COPY-only work with no SINK
- * kernels. For full parity mode, optionally mirror that at report level while
- * still executing the generated kernels for value correctness. */
+/* tinygrad can schedule pure movement outputs as COPY-only calls with no SINK
+ * kernels. Mirror that at report level while still executing the generated
+ * kernels for value correctness. Use the schedule item kind, not graph-shape
+ * guesses: Tensor.full and movement-gradient fills contain no LOAD/ALU but are
+ * still SINK calls in tinygrad. */
+static int schedule_is_copy_only(const PolyKernelScheduleResult *sr) {
+  if (!sr || sr->n_kernels <= 0 || !sr->kernel_kinds) return 0;
+  for (int i = 0; i < sr->n_kernels; i++) {
+    if (sr->kernel_kinds[i] != POLY_KERNEL_ITEM_COPY) return 0;
+  }
+  return 1;
+}
+
 static int graph_has_compute_ops(PolyCtx *ctx, PolyUOp *tensor_sink) {
   int n = 0;
   PolyUOp **nodes = poly_toposort(ctx, tensor_sink, &n);
@@ -57,16 +95,41 @@ static int graph_has_compute_ops(PolyCtx *ctx, PolyUOp *tensor_sink) {
   return 0;
 }
 
+static int graph_reads_input_binding(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    const ParityBinding *bindings,
+    int n_bindings
+) {
+  if (!bindings || n_bindings <= 1) return 0;
+  int n = 0;
+  PolyUOp **nodes = poly_toposort(ctx, tensor_sink, &n);
+  for (int i = 0; i < n; i++) {
+    for (int j = 1; j < n_bindings; j++) {
+      if (nodes[i] == bindings[j].buffer) return 1;
+    }
+  }
+  return 0;
+}
+
+enum {
+  PARITY_REPORT_DEFAULT = 0,
+  /* The tinygrad expression has no scheduled compute SINK at the extraction
+   * boundary. The runner still executes an explicit STORE to get values. */
+  PARITY_REPORT_NO_SINK = 1 << 0,
+};
+
 /* Schedules, linearizes, renders, executes, and emits JSON with both
  * kernel ops and output data. For kernel-only cases, pass NULL/0 for
  * out_data/out_n and NULL/0 for bindings/n_bindings. */
-static int run_and_report(
+static int run_and_report_flags(
     PolyCtx *ctx,
     PolyUOp *tensor_sink,
     ParityBinding *bindings,
     int n_bindings,
     float *out_data,
-    int out_n
+    int out_n,
+    int report_flags
 ) {
   int use_cuda = env_enabled("POLY_PARITY_CUDA");
   int use_hip = env_enabled("POLY_PARITY_HIP");
@@ -209,13 +272,18 @@ static int run_and_report(
       poly_kernel_schedule_result_free(&sr);
       return 0;
     }
+    dump_linear_details(k, all_lin[k], all_n_lin[k]);
   }
 
   /* 3. Emit JSON */
   if (ok) {
+    int no_sink_report = report_flags & PARITY_REPORT_NO_SINK;
     int movement_as_copy =
-        env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") && !graph_has_compute_ops(ctx, tensor_sink);
-    if (movement_as_copy) {
+        env_enabled("POLY_PARITY_MOVEMENT_AS_COPY") &&
+        (schedule_is_copy_only(&sr) ||
+         (!graph_has_compute_ops(ctx, tensor_sink) &&
+          graph_reads_input_binding(ctx, tensor_sink, bindings, n_bindings)));
+    if (no_sink_report || movement_as_copy) {
       printf("{\"n_kernels\":0,\"kernels\":[]");
     } else {
       printf("{\"n_kernels\":%d,\"kernels\":[", sr.n_kernels);
@@ -241,6 +309,18 @@ static int run_and_report(
   free(all_n_lin);
   poly_kernel_schedule_result_free(&sr);
   return ok;
+}
+
+static int run_and_report(
+    PolyCtx *ctx,
+    PolyUOp *tensor_sink,
+    ParityBinding *bindings,
+    int n_bindings,
+    float *out_data,
+    int out_n
+) {
+  return run_and_report_flags(ctx, tensor_sink, bindings, n_bindings, out_data, out_n,
+                              PARITY_REPORT_DEFAULT);
 }
 
 /* Original 16 test cases */
@@ -1091,7 +1171,7 @@ static int case_arange_simple(void) {
   PolyUOp *store = poly_store_val(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
-  int ok = run_and_report(ctx, sink, b, 1, out_d, 5);
+  int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 5, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
   return ok;
 }
@@ -1105,7 +1185,7 @@ static int case_arange_start_step(void) {
   PolyUOp *store = poly_store_val(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
-  int ok = run_and_report(ctx, sink, b, 1, out_d, 2);
+  int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 2, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
   return ok;
 }
@@ -1119,7 +1199,7 @@ static int case_eye_3(void) {
   PolyUOp *store = poly_store_val(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
-  int ok = run_and_report(ctx, sink, b, 1, out_d, 9);
+  int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 9, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
   return ok;
 }
@@ -1167,7 +1247,7 @@ static int case_linspace_5(void) {
   PolyUOp *store = poly_store_val(ctx, out, val);
   PolyUOp *sink = poly_sink1(ctx, store);
   ParityBinding b[] = {{out, out_d}};
-  int ok = run_and_report(ctx, sink, b, 1, out_d, 5);
+  int ok = run_and_report_flags(ctx, sink, b, 1, out_d, 5, PARITY_REPORT_NO_SINK);
   poly_ctx_destroy(ctx);
   return ok;
 }

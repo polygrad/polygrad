@@ -128,14 +128,30 @@ void poly_tc_permute_for_shape_str(
     int max_n
 );
 
-/* Walk through transparent pointer casts to find the underlying INDEX.
- * Returns the INDEX UOp if found, NULL otherwise. Used by renderers to
- * detect gated loads: LOAD(CAST(INDEX(buf, idx, gate)), alt). */
+/* Walk through transparent pointer casts to find an INDEX. INDEX src[2], when
+ * present, is a validity gate. Do not return late-codegen SHRINK here: its
+ * src[2] is width, not a gate. */
 static inline PolyUOp *poly_find_index_through_cast(PolyUOp *u) {
   while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0 && u->dtype.is_ptr
   )
     u = u->src[0];
   return (u && u->op == POLY_OP_INDEX) ? u : NULL;
+}
+
+/* Memory-addressing form accepted by renderers after tinygrad-style
+ * pm_index_is_shrink. SHRINK(src, idx, width) is a late codegen slice, not a
+ * frontend movement op. */
+static inline PolyUOp *poly_find_memory_slice_through_cast(PolyUOp *u) {
+  while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0 && u->dtype.is_ptr
+  )
+    u = u->src[0];
+  return (u && (u->op == POLY_OP_INDEX || u->op == POLY_OP_SHRINK)) ? u : NULL;
+}
+
+static inline bool poly_is_program_memory_base(const PolyUOp *u) {
+  if (!u) return false;
+  return u->dtype.is_ptr || u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER ||
+         u->op == POLY_OP_DEFINE_LOCAL || u->op == POLY_OP_DEFINE_REG || u->op == POLY_OP_AFTER;
 }
 
 /* Codegen pipeline: full rewrite to sink (sym → reduce → decomp → transcendental) */

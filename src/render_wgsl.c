@@ -633,6 +633,16 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
+    /* --- SHRINK: late codegen memory slice --------------------------- */
+    if (u->op == POLY_OP_SHRINK) {
+      char *buf_s = wsm_get(&names, u->src[0]);
+      char *idx_s = wsm_get(&names, u->src[1]);
+      char expr[256];
+      snprintf(expr, sizeof(expr), "%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      wsm_set(&names, u, strdup(expr));
+      continue;
+    }
+
     /* --- RANGE: for loop --------------------------------------------- */
     if (u->op == POLY_OP_RANGE) {
       char name[32];
@@ -697,8 +707,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- DEFINE_REG: register-local array ----------------------------- */
-    if (u->op == POLY_OP_DEFINE_REG) {
+    /* --- register-local array ---------------------------------------- */
+    if (u->op == POLY_OP_DEFINE_REG ||
+        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
       char name[32];
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       wsm_set(&names, u, strdup(name));
@@ -736,8 +747,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
 
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
-      if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
-        PolyUOp *gate_uop = idx_uop->src[2];
+      PolyUOp *gate_uop =
+          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+      if (gate_uop && u->n_src >= 2) {
         PolyUOp *alt_uop = u->src[1];
         if (u->dtype.count == 1 &&
             ((gate_uop && gate_uop->dtype.count > 1) || (alt_uop && alt_uop->dtype.count > 1))) {
@@ -763,8 +775,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         char *gate_s = wsm_get(&names, gate_uop);
         char *alt_s = wsm_get(&names, alt_uop);
         wsb_printf(&body, "%s = select(%s, %s, %s);\n", name, alt_s, load_expr, gate_s);
-      } else if (idx_uop && idx_uop->n_src >= 3) {
-        PolyUOp *gate_uop = idx_uop->src[2];
+      } else if (gate_uop) {
         if (u->dtype.count == 1 && gate_uop && gate_uop->dtype.count > 1) {
           int lane = wgsl_infer_gated_load_lane(idx_uop->src[1], gate_uop);
           if (lane < 0) {
@@ -843,8 +854,11 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       /* Gated store: INDEX with 3rd bool source → if (gate) { store; }
        * Matches CUDA renderer pattern (render_cuda.c gated STORE). */
       PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
-      bool gated_store =
-          (store_idx && store_idx->n_src >= 3 && u->src[0]->op != POLY_OP_DEFINE_LOCAL);
+      bool store_to_local =
+          u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
+          (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
+           u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
+      bool gated_store = (store_idx && store_idx->n_src >= 3 && !store_to_local);
       if (gated_store) {
         char *gate_s = wsm_get(&names, store_idx->src[2]);
         for (int d = 0; d < depth; d++)

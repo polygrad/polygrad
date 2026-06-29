@@ -435,6 +435,19 @@ TEST(ops, op_name) {
   PASS();
 }
 
+TEST(ops, op_value_matches_tinygrad_sort_order) {
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_PARAM), 6);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_INDEX), 21);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_SHRINK), 22);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_LOAD), 23);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_STORE), 24);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_ADD), 36);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_CONST), 63);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_BUFFER), 3);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_DEFINE_REG), 3);
+  PASS();
+}
+
 TEST(ops, opset) {
   ASSERT_TRUE(poly_opset_has(POLY_GROUP_UNARY, POLY_OP_EXP2));
   ASSERT_TRUE(poly_opset_has(POLY_GROUP_UNARY, POLY_OP_NEG));

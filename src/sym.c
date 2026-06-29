@@ -852,6 +852,32 @@ static bool is_true_const_uop(PolyUOp *u) {
          (u->arg.kind == POLY_ARG_INT && u->arg.i != 0);
 }
 
+static bool is_false_const_uop(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_CONST) return false;
+  if (!poly_dtype_eq(u->dtype, POLY_BOOL)) return false;
+  return (u->arg.kind == POLY_ARG_BOOL && !u->arg.b) ||
+         (u->arg.kind == POLY_ARG_INT && u->arg.i == 0);
+}
+
+/* WHERE(cond, true, false) -> cond
+ * WHERE(cond, false, true) -> cond.logical_not()
+ *
+ * tinygrad symbolic.py:
+ *   UPat.var("x", dtype=dtypes.bool).where(True, False) -> x
+ *   UPat.var("x", dtype=dtypes.bool).where(False, True) -> x.logical_not()
+ */
+static PolyUOp *rule_where_bool_identity(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->n_src != 3) return NULL;
+  PolyUOp *cond = root->src[0];
+  if (!cond || !poly_dtype_eq(cond->dtype, POLY_BOOL) || !poly_dtype_eq(root->dtype, POLY_BOOL))
+    return NULL;
+  if (is_true_const_uop(root->src[1]) && is_false_const_uop(root->src[2])) return cond;
+  if (is_false_const_uop(root->src[1]) && is_true_const_uop(root->src[2]))
+    return poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, cond, poly_const_like_bool(ctx, cond, true), poly_arg_none());
+  return NULL;
+}
+
 /* WHERE(CMPNE(cond, true), t, f) -> WHERE(cond, f, t)
  * Tinygrad symbolic.py:230-231:
  *   cond.logical_not().where(t, f) -> cond.where(f, t)
@@ -2447,6 +2473,12 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
            POLY_OP_WHERE, poly_pat_any(NULL), poly_pat_any("val"), poly_pat_any("val"), NULL
        ),
        rule_where_same},
+      /* WHERE(cond, true, false) -> cond; WHERE(cond, false, true) -> cond.logical_not() */
+      {poly_pat_op3(
+           POLY_OP_WHERE, poly_pat_dtype("cond", (PolyDType[]){POLY_BOOL}, 1),
+           poly_pat_cvar(NULL), poly_pat_cvar(NULL), NULL
+       ),
+       rule_where_bool_identity},
       /* LOAD/STORE with Invalid index folds away */
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "x")),
        rule_fold_invalid_load_store},

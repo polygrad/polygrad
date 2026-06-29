@@ -108,11 +108,20 @@ bool poly_dtype_is_bool(PolyDType dt) {
 PolyDType poly_dtype_scalar(PolyDType dt) {
   if (dtype_is_weakint_like(dt)) return POLY_INDEX;
   if (dt.count == 1) return dt;
-  /* return the base scalar type by matching priority+name */
+  /* Match tinygrad DType.scalar(): vector dtypes return the canonical scalar
+   * dtype, including its fmt field. */
   PolyDType s = dt;
   s.count = 1;
   s.bitsize = dt.bitsize / dt.count;
   if (dtype_is_weakint_like(s)) return POLY_INDEX;
+  if (!s.is_ptr) {
+    for (int i = 0; i < N_DTYPE_TABLE; i++) {
+      const PolyDType *canon = _dtype_table[i];
+      if (canon->priority == s.priority && canon->bitsize == s.bitsize &&
+          canon->count == 1 && canon->name && s.name && strcmp(canon->name, s.name) == 0)
+        return *canon;
+    }
+  }
   return s;
 }
 

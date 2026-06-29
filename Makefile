@@ -78,7 +78,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -245,6 +245,8 @@ BENCH_JAX_JS_LARGE_ITERS ?= 3
 BENCH_JAX_JS_MATMUL_SIZES ?= 64,128,256,512,1024,2048
 BENCH_JAX_JS_MODEL_CASES ?= mlp_small,mlp_token,mlp_batch,qwen_ffn_token,qwen_ffn_batch
 BENCH_JAX_JS_EXTRA ?=
+BENCH_RATIO_LOCAL_BASELINE ?= bench/baselines/local/$(shell hostname -s)-ratios.json
+BENCH_RATIO_BASELINE ?= $(BENCH_RATIO_LOCAL_BASELINE)
 
 bench-ratios: build/libpolygrad.so wasm-pkg
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) bench/bench_ratios.py
@@ -275,13 +277,23 @@ bench-jax-js-browser-model-wasm: wasm-pkg
 	$(NODE) bench/bench_jax_js_browser_model_wasm.mjs --cases $(BENCH_JAX_JS_MODEL_CASES) --iters $(BENCH_JAX_JS_ITERS) --warmup $(BENCH_JAX_JS_WARMUP) $(BENCH_JAX_JS_EXTRA)
 
 bench-compare:
-	python bench/bench_compare.py bench/results/baseline.json $$(ls -t bench/results/2*.json | head -1)
+	$(PYTHON) bench/bench_compare.py $(BENCH_RATIO_BASELINE) $$(ls -t bench/results/2*.json | head -1)
+
+bench-compare-global:
+	$(PYTHON) bench/bench_compare.py bench/results/baseline.json $$(ls -t bench/results/2*.json | head -1)
 
 bench-regression: bench-ratios bench-compare
 
+bench-ratio-local-baseline: bench-ratios
+	@mkdir -p $$(dirname $(BENCH_RATIO_LOCAL_BASELINE))
+	cp $$(ls -t bench/results/2*.json | head -1) $(BENCH_RATIO_LOCAL_BASELINE)
+	@echo "Updated local ratio benchmark baseline: $(BENCH_RATIO_LOCAL_BASELINE)"
+
+bench-update-local-ratio-baseline: bench-ratio-local-baseline
+
 bench-update-baseline:
 	cp $$(ls -t bench/results/2*.json | head -1) bench/results/baseline.json
-	@echo "Updated. Review and commit bench/results/baseline.json"
+	@echo "Updated global ratio benchmark baseline. Review before committing bench/results/baseline.json"
 
 FUZZ_CC ?= clang
 FUZZ_ARGS ?= -runs=256 -max_len=512 -timeout=5

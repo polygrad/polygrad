@@ -1663,16 +1663,21 @@ PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, 
   PolyUOp *padded_X = poly_pad(ctx, X, nn_pads, ndim);
   if (value == 0.0) return padded_X;
 
-  /* Pad ones_like(X) with the same pads, where==0 -> value, else 0; then add */
-  PolyUOp *ones = poly_ones_like(ctx, X);
+  /* Tinygrad _pad_constant:
+   *   MovementMixin.pad(X.const_like(1).cast(bool), pads).where(base, value)
+   * Keep the same graph shape; do not synthesize base + fill. */
+  int64_t mask_shape[POLY_MAX_DIMS];
+  int mask_ndim = uop_shape(ctx, X, mask_shape);
+  if (mask_ndim < 0) return NULL;
+  int64_t mask_ones[POLY_MAX_DIMS];
+  for (int i = 0; i < mask_ndim; i++)
+    mask_ones[i] = 1;
+  PolyUOp *true_const = poly_const_typed(ctx, POLY_BOOL, 1.0);
+  PolyUOp *ones = poly_expand(ctx, poly_reshape(ctx, true_const, mask_ones, mask_ndim), mask_shape, mask_ndim);
   PolyUOp *padded_ones = poly_pad(ctx, ones, nn_pads, ndim);
   PolyDType dt = poly_dtype_scalar(x->dtype);
-  PolyUOp *zero_c = poly_const_typed(ctx, dt, 0.0);
   PolyUOp *value_c = poly_const_typed(ctx, dt, value);
-  /* where(padded_ones, 0, value): tinygrad's .where(0, value) means
-   * "where padded_ones is true (=1, the data region) -> 0, else -> value" */
-  PolyUOp *fill = poly_where_op(ctx, padded_ones, zero_c, value_c);
-  return poly_alu2(ctx, POLY_OP_ADD, padded_X, fill);
+  return poly_where_op(ctx, padded_ones, padded_X, value_c);
 }
 
 /* Tensor._pad_circular -- tensor.py:1075

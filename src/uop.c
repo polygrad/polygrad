@@ -209,6 +209,9 @@ static bool uop_rank_arg_valid(PolyOps op, PolyArg arg) {
   case POLY_OP_FLIP:
     return arg.kind == POLY_ARG_INT_TUPLE && rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n);
   case POLY_OP_SHRINK:
+    if (arg.kind == POLY_ARG_NONE) return true;
+    return arg.kind == POLY_ARG_PAIR_TUPLE &&
+           rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
   case POLY_OP_PAD:
     return arg.kind == POLY_ARG_PAIR_TUPLE &&
            rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);

@@ -201,16 +201,19 @@ static void heap_destroy(Heap *h) {
 
 /* Linearizer */
 
-static int op_priority(PolyOps op) {
-  switch (op) {
+static int uop_priority(const PolyUOp *u) {
+  if (!u) return 0;
+  switch (u->op) {
   case POLY_OP_PARAM:
     return -20;
   case POLY_OP_DEFINE_VAR:
     return -19;
+  case POLY_OP_BUFFER:
+    return (u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_LOCAL) ? -17 : -18;
   case POLY_OP_DEFINE_LOCAL:
-    return -18;
-  case POLY_OP_DEFINE_REG:
     return -17;
+  case POLY_OP_DEFINE_REG:
+    return -18;
   /* NOTE: in the reference tinygrad commit, CONST has no special
    * priority — it falls through to default priority 0.  This is
    * critical for matching the tuplize-based ordering. */
@@ -594,6 +597,33 @@ static int dtype_lt_cmp(PolyDType a, PolyDType b) {
   return 0;
 }
 
+static PolyDType linearizer_tuplize_dtype(PolyUOp *u) {
+  if (!u) return POLY_VOID;
+  PolyDType dt = u->dtype;
+  /* tinygrad runs pm_remove_vec_dtypes before linearize:
+   *   PARAM/BUFFER ptrs become base dtype + size source
+   *   every other op becomes dtype.base.scalar().base
+   * Polygrad renderers still use vector/pointer dtype metadata internally, so
+   * normalize only the linearizer tuplize key until all renderers consume the
+   * new-style structural width representation directly. */
+  if (u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER) {
+    if (dt.is_ptr) {
+      dt.is_ptr = false;
+      dt.addrspace = POLY_ADDR_GLOBAL;
+      dt.ptr_size = 0;
+      dt.vcount = 0;
+      dt = poly_dtype_scalar(dt);
+    }
+    return dt;
+  }
+  dt = poly_dtype_scalar(dt);
+  dt.is_ptr = false;
+  dt.addrspace = POLY_ADDR_GLOBAL;
+  dt.ptr_size = 0;
+  dt.vcount = 0;
+  return dt;
+}
+
 typedef struct {
   uint64_t *keys;
   int8_t *vals;
@@ -715,27 +745,26 @@ static int tuplize_cmp_idx(TuplizeCmpCtx *tc, int ai, int bi) {
    * tinygrad caches the recursive tuple on each UOp. Here the pair memo gives
    * the same effect for sorting: each structural pair comparison is computed at
    * most once, while sources are compared recursively in tuple order. */
-  int ao = (int)a->op, bo = (int)b->op;
+  int ao = poly_op_value(a->op), bo = poly_op_value(b->op);
   if (ao != bo) {
     ret = ao < bo ? -1 : 1;
   } else {
     int ac = arg_cmp(a->arg, b->arg);
     if (ac != 0) {
       ret = ac;
-    } else if (!poly_dtype_eq(a->dtype, b->dtype)) {
-      int dc = dtype_lt_cmp(a->dtype, b->dtype);
-      /* Python tuple comparison stops at the dtype element. PtrDType can be
-       * unequal while neither side orders below the other, so do not use source
-       * UOps as an extra tiebreak in that case. */
-      ret = dc;
     } else {
-      int min_src = a->n_src < b->n_src ? a->n_src : b->n_src;
-      for (int i = 0; i < min_src && ret == 0; i++) {
-        int as = imap_get(tc->idx, a->src[i]);
-        int bs = imap_get(tc->idx, b->src[i]);
-        ret = tuplize_cmp_idx(tc, as, bs);
+      int dc = dtype_lt_cmp(linearizer_tuplize_dtype(a), linearizer_tuplize_dtype(b));
+      if (dc != 0) {
+        ret = dc;
+      } else {
+        int min_src = a->n_src < b->n_src ? a->n_src : b->n_src;
+        for (int i = 0; i < min_src && ret == 0; i++) {
+          int as = imap_get(tc->idx, a->src[i]);
+          int bs = imap_get(tc->idx, b->src[i]);
+          ret = tuplize_cmp_idx(tc, as, bs);
+        }
+        if (ret == 0) ret = a->n_src < b->n_src ? -1 : (a->n_src > b->n_src ? 1 : 0);
       }
-      if (ret == 0) ret = a->n_src < b->n_src ? -1 : (a->n_src > b->n_src ? 1 : 0);
     }
   }
 
@@ -784,12 +813,12 @@ static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
   TuplizeCmpCtx tc = {.topo = topo, .idx = idx, .memo = &memo};
   tuplize_merge_sort_rec(&tc, order, tmp, 0, n);
 
-  int cur_rank = 0;
-  rank[order[0]] = 0;
-  for (int i = 1; i < n; i++) {
-    if (tuplize_cmp_idx(&tc, order[i - 1], order[i]) != 0) cur_rank++;
-    rank[order[i]] = cur_rank;
-  }
+  /* tinygrad enumerates the stable sorted list directly:
+   *   nkey = {u:i for i,u in enumerate(sorted(... + x.tuplize))}
+   * Equal tuplize keys therefore still get distinct positions according to
+   * their stable topo order. Do not collapse equal tuplize keys into one rank. */
+  for (int i = 0; i < n; i++)
+    rank[order[i]] = i;
 
   tuplize_pair_memo_destroy(&memo);
   free(order);
@@ -865,7 +894,7 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       }
     }
 
-    prio[i] = op_priority(u->op);
+    prio[i] = uop_priority(u);
     extra[i] = INT64_MIN; /* sentinel for None (sorts before any int) */
     if (u->op == POLY_OP_PARAM) extra[i] = u->arg.i;
   }
@@ -941,13 +970,20 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   if (poly_dump_linear_enabled()) {
     for (int i = 0; i < n; i++) {
       PolyUOp *u = topo[i];
-      if (u->op == POLY_OP_RANGE || u->op == POLY_OP_STORE || u->op == POLY_OP_DEFINE_REG ||
-          u->op == POLY_OP_AFTER) {
-        fprintf(
-            stderr, "[lin] topo[%d] %s run_count=%lld prio=%d nkey=%d out_deg=%d\n", i,
-            poly_op_name(u->op), (long long)run_count[i], prio[i], nkey[i], out_deg[i]
-        );
+      PolyDType ldt = linearizer_tuplize_dtype(u);
+      fprintf(
+          stderr,
+          "[lin] topo[%d] %s run_count=%lld prio=%d nkey=%d out_deg=%d arg=%d:%lld "
+          "ldt=%s/%d/%d/%d src=[",
+          i, poly_op_name(u->op), (long long)run_count[i], prio[i], nkey[i], out_deg[i],
+          u->arg.kind, (long long)(u->arg.kind == POLY_ARG_INT ? u->arg.i : 0),
+          ldt.name ? ldt.name : "?", ldt.priority, ldt.bitsize, ldt.count
+      );
+      for (int j = 0; j < u->n_src; j++) {
+        int si = imap_try_get(&idx, u->src[j]);
+        fprintf(stderr, "%s%d", j ? "," : "", si);
       }
+      fprintf(stderr, "]\n");
     }
   }
 
@@ -1186,7 +1222,7 @@ static void render_ctype(PolyDType dt, char *buf, int cap) {
 }
 
 static bool render_index_lane_ptr(StrMap *names, PolyUOp *ptr_uop, int lane, char *buf, int cap) {
-  PolyUOp *idx = poly_find_index_through_cast(ptr_uop);
+  PolyUOp *idx = poly_find_memory_slice_through_cast(ptr_uop);
   if (!idx || idx->n_src < 2) return false;
   char *base = smap_get(names, idx->src[0]);
   char *idx_s = smap_get(names, idx->src[1]);
@@ -1604,8 +1640,22 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- INDEX: inline pointer arithmetic --------------------------- */
+    /* --- INDEX: pointer arithmetic or vector lane extract ------------ */
     if (u->op == POLY_OP_INDEX) {
+      char *buf_s = smap_get(&names, u->src[0]);
+      char *idx_s = smap_get(&names, u->src[1]);
+      StrBuf expr;
+      sb_init(&expr);
+      if (poly_is_program_memory_base(u->src[0]))
+        sb_printf(&expr, "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      else
+        sb_printf(&expr, "(%s[%s])", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      smap_set(&names, u, expr.buf);
+      continue;
+    }
+
+    /* --- SHRINK: late codegen memory slice -------------------------- */
+    if (u->op == POLY_OP_SHRINK) {
       char *buf_s = smap_get(&names, u->src[0]);
       char *idx_s = smap_get(&names, u->src[1]);
       StrBuf expr;
@@ -1723,8 +1773,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
-    /* --- DEFINE_REG: register accumulator (float r0[1];) ------------ */
-    if (u->op == POLY_OP_DEFINE_REG) {
+    /* --- register accumulator (float r0[1];) ------------------------ */
+    if (u->op == POLY_OP_DEFINE_REG ||
+        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
       char name[32];
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       smap_set(&names, u, strdup(name));
@@ -1772,22 +1823,30 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       for (int d = 0; d < depth; d++)
         sb_puts(&body, "  ");
 
-      /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt)
-       * Walks through pointer casts to find the underlying gated INDEX. */
+      /* Gated load: tinygrad final IR is LOAD(INDEX(buf, idx), alt, gate).
+       * Accept the older INDEX(..., gate) form while schedules still exist. */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
-      if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
-        char *gate_s = smap_get(&names, idx_uop->src[2]);
+      bool is_lane_load =
+          idx_uop && idx_uop->n_src >= 1 && !poly_is_program_memory_base(idx_uop->src[0]);
+      PolyUOp *gate_uop =
+          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+      if (gate_uop && u->n_src >= 2) {
+        char *gate_s = smap_get(&names, gate_uop);
         char *alt_s = smap_get(&names, u->src[1]);
-        if (u->dtype.count > 1) {
+        if (is_lane_load) {
+          sb_printf(&body, "%s = (%s?%s:%s);\n", name, gate_s, bidx, alt_s);
+        } else if (u->dtype.count > 1) {
           sb_printf(&body, "if (%s) %s = ", gate_s, name);
           render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
           sb_printf(&body, "; else %s = %s;\n", name, alt_s);
         } else {
           sb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
         }
-      } else if (idx_uop && idx_uop->n_src >= 3) {
-        char *gate_s = smap_get(&names, idx_uop->src[2]);
-        if (u->dtype.count > 1) {
+      } else if (gate_uop) {
+        char *gate_s = smap_get(&names, gate_uop);
+        if (is_lane_load) {
+          sb_printf(&body, "%s = (%s?%s:(%s)0);\n", name, gate_s, bidx, dtype_s);
+        } else if (u->dtype.count > 1) {
           sb_printf(&body, "if (%s) %s = ", gate_s, name);
           render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
           sb_printf(&body, "; else memset(&%s, 0, sizeof(%s));\n", name, name);
@@ -1795,7 +1854,9 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
           sb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, dtype_s);
         }
       } else {
-        if (u->dtype.count > 1 && idx_uop) {
+        if (is_lane_load) {
+          sb_printf(&body, "%s = %s;\n", name, bidx);
+        } else if (u->dtype.count > 1 && poly_find_memory_slice_through_cast(u->src[0])) {
           sb_printf(&body, "%s = ", name);
           render_vector_load_expr(&body, &names, u->src[0], u->dtype, dtype_s);
           sb_puts(&body, ";\n");
@@ -1814,10 +1875,13 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         sb_puts(&body, "  ");
       /* Guard: STORE src[0] is always set by construction, but null-check
        * satisfies the analyzer's path-sensitive null-deref tracking. */
-      if (u->src[0] && u->src[0]->op == POLY_OP_DEFINE_LOCAL)
+      if (u->src[0] &&
+          (u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
+           (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
+            u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL)))
         sb_printf(&body, "%s = %s;\n", target, val);
       else if (u->src[1] && u->src[1]->dtype.count > 1 &&
-               poly_find_index_through_cast(u->src[0])) {
+               poly_find_memory_slice_through_cast(u->src[0])) {
         for (int lane = 0; lane < u->src[1]->dtype.count; lane++) {
           char lane_ptr[512];
           if (!render_index_lane_ptr(&names, u->src[0], lane, lane_ptr, sizeof(lane_ptr))) break;

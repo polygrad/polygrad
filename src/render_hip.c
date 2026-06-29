@@ -635,12 +635,25 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       continue;
     }
 
-    /* --- INDEX -------------------------------------------------------- */
+    /* --- INDEX: pointer arithmetic or vector lane extract ------------- */
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = hsmap_get(&names, u->src[0]);
       char *idx_s = hsmap_get(&names, u->src[1]);
       char expr[256];
-      snprintf(expr, sizeof(expr), "(%s+%s)", buf_s, idx_s);
+      if (poly_is_program_memory_base(u->src[0]))
+        snprintf(expr, sizeof(expr), "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      else
+        snprintf(expr, sizeof(expr), "%s[%s]", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
+      hsmap_set(&names, u, strdup(expr));
+      continue;
+    }
+
+    /* --- SHRINK: late codegen memory slice --------------------------- */
+    if (u->op == POLY_OP_SHRINK) {
+      char *buf_s = hsmap_get(&names, u->src[0]);
+      char *idx_s = hsmap_get(&names, u->src[1]);
+      char expr[256];
+      snprintf(expr, sizeof(expr), "(%s+%s)", buf_s ? buf_s : "0", idx_s ? idx_s : "0");
       hsmap_set(&names, u, strdup(expr));
       continue;
     }
@@ -766,8 +779,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       continue;
     }
 
-    /* --- DEFINE_REG --------------------------------------------------- */
-    if (u->op == POLY_OP_DEFINE_REG) {
+    /* --- register buffer --------------------------------------------- */
+    if (u->op == POLY_OP_DEFINE_REG ||
+        (u->op == POLY_OP_BUFFER && u->dtype.is_ptr && u->dtype.addrspace == POLY_ADDR_REG)) {
       char name[32];
       snprintf(name, sizeof(name), "r%lld", (long long)u->arg.i);
       hsmap_set(&names, u, strdup(name));
@@ -799,14 +813,17 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
 
-      /* Gated load: LOAD(INDEX(buf, idx, gate), alt) or LOAD(CAST(INDEX(..., gate)), alt) */
+      /* Gated load: LOAD(INDEX(buf, idx), alt, gate) in tinygrad final IR.
+       * Keep accepting INDEX(..., gate) during transition. */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
-      if (idx_uop && idx_uop->n_src >= 3 && u->n_src >= 2) {
-        char *gate_s = hsmap_get(&names, idx_uop->src[2]);
+      PolyUOp *gate_uop =
+          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+      if (gate_uop && u->n_src >= 2) {
+        char *gate_s = hsmap_get(&names, gate_uop);
         char *alt_s = hsmap_get(&names, u->src[1]);
         hsb_printf(&body, "%s = (%s?(*%s):%s);\n", name, gate_s, bidx, alt_s);
-      } else if (idx_uop && idx_uop->n_src >= 3) {
-        char *gate_s = hsmap_get(&names, idx_uop->src[2]);
+      } else if (gate_uop) {
+        char *gate_s = hsmap_get(&names, gate_uop);
         char ctype[128];
         hip_render_ctype(u->dtype, ctype, sizeof(ctype));
         hsb_printf(&body, "%s = (%s?(*%s):(%s)0);\n", name, gate_s, bidx, ctype);
@@ -822,7 +839,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       char *val = hsmap_get(&names, u->src[1]);
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
-      if (u->src[0]->op == POLY_OP_DEFINE_LOCAL)
+      if (u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
+          (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
+           u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL))
         hsb_printf(&body, "%s = %s;\n", target, val);
       else
         hsb_printf(&body, "*%s = %s;\n", target, val);

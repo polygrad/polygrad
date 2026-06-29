@@ -89,6 +89,8 @@ TEST(dtype, scalar) {
   PolyDType s = poly_dtype_scalar(v4);
   ASSERT_INT_EQ(s.count, 1);
   ASSERT_INT_EQ(s.bitsize, 32);
+  ASSERT_TRUE(poly_dtype_eq(s, POLY_FLOAT32));
+  ASSERT_EQ(s.fmt, POLY_FLOAT32.fmt);
 
   /* scalar of scalar is identity */
   PolyDType s2 = poly_dtype_scalar(POLY_INT64);

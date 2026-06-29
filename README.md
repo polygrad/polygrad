@@ -215,13 +215,22 @@ benchmarks. They are a fast guard for local hot-path regressions.
 
 ### Relative benchmarks
 
-`make bench-ratios` runs polygrad against numpy, tinygrad, and PyTorch on a standard workload suite. Results are reported as speedup ratios (polygrad_time / baseline_time) which are stable across hardware:
+`make bench-ratios` runs polygrad against numpy, tinygrad, and PyTorch on a
+standard workload suite. Results are reported as speedup ratios
+(`polygrad_time / baseline_time`), but they are still sensitive to CPU, BLAS,
+Python, and frontend overhead. Compare them against a local machine baseline,
+not an unrelated committed result from another host.
 
 ```
-make bench-ratios       # run benchmarks, output JSON
-make bench-compare      # compare to stored baseline, flag regressions >10%
-make bench-regression   # run + compare (exit 1 on regression)
+make bench-update-local-ratio-baseline  # once per machine/configuration
+make bench-ratios                       # run benchmarks, output JSON
+make bench-compare                      # compare to local ignored baseline
+make bench-regression                   # run + compare (exit 1 on regression)
 ```
+
+`make bench-compare-global` compares against `bench/results/baseline.json` for
+historical context only. Do not use it as a local regression gate unless the
+baseline was produced on the same machine/configuration.
 
 **JS (WASM vs native, instance API -- compile once, execute many):**
 
