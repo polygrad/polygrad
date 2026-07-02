@@ -18,6 +18,12 @@ static PolyBuffer *realized_buffer(PolyCtx *ctx, PolyUOp *realized) {
   return buf_uop ? poly_buffer_get(ctx, (PolyUOp *)buf_uop) : NULL;
 }
 
+#define READ_REALIZED_F32(ctx, realized, out, count) do { \
+  const PolyUOp *_read_buf = poly_uop_get_buffer_identity(realized); \
+  ASSERT_NOT_NULL(_read_buf); \
+  ASSERT_INT_EQ(poly_buffer_read((ctx), (PolyUOp *)_read_buf, (out), (count) * sizeof(float)), 0); \
+} while (0)
+
 static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   int n_topo = 0;
   PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
@@ -440,9 +446,11 @@ TEST(realize, tensor_place_assign_realize_materializes_value_without_mutating_so
   ASSERT_PTR_NEQ(poly_uop_get_buffer_identity(out_uop), a);
   PolyBuffer *out = realized_buffer(ctx, out_uop);
   ASSERT_NOT_NULL(out);
-  ASSERT_FLOAT_EQ(((float *)out->ptr)[0], 5.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(((float *)out->ptr)[1], 6.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(((float *)out->ptr)[2], 7.0f, 1e-5f);
+  float out_vals[3];
+  READ_REALIZED_F32(ctx, out_uop, out_vals, 3);
+  ASSERT_FLOAT_EQ(out_vals[0], 5.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out_vals[1], 6.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(out_vals[2], 7.0f, 1e-5f);
   ASSERT_FLOAT_EQ(da[0], 1.0f, 1e-5f);
   ASSERT_FLOAT_EQ(da[1], 2.0f, 1e-5f);
   ASSERT_FLOAT_EQ(da[2], 3.0f, 1e-5f);
@@ -485,7 +493,7 @@ TEST(realize, tensor_physicalize_uses_selected_tensor_device) {
   PASS();
 }
 
-TEST(realize, tensor_realize_cpu_e2e) {
+TEST_COMMON(realize, tensor_realize_cpu_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer_f32(ctx, 4);
@@ -505,8 +513,8 @@ TEST(realize, tensor_realize_cpu_e2e) {
 
   PolyBuffer *buf = realized_buffer(ctx, poly_tensor_uop(out_tensor));
   ASSERT_NOT_NULL(buf);
-  float *out = (float *)buf->ptr;
-  ASSERT_NOT_NULL(out);
+  float out[4];
+  READ_REALIZED_F32(ctx, poly_tensor_uop(out_tensor), out, 4);
   ASSERT_FLOAT_EQ(out[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(out[1], 22.0f, 1e-5f);
   ASSERT_FLOAT_EQ(out[2], 33.0f, 1e-5f);
@@ -537,8 +545,8 @@ TEST(realize, tensor_host_to_cpu_copy_feeds_compute_e2e) {
 
   PolyBuffer *buf = realized_buffer(ctx, poly_tensor_uop(out_tensor));
   ASSERT_NOT_NULL(buf);
-  float *out = (float *)buf->ptr;
-  ASSERT_NOT_NULL(out);
+  float out[3];
+  READ_REALIZED_F32(ctx, poly_tensor_uop(out_tensor), out, 3);
   ASSERT_FLOAT_EQ(out[0], 2.0f, 1e-5f);
   ASSERT_FLOAT_EQ(out[1], 3.0f, 1e-5f);
   ASSERT_FLOAT_EQ(out[2], 4.0f, 1e-5f);
@@ -574,8 +582,8 @@ TEST(realize, tensor_host_to_cpu_copy_feeds_reduce_broadcast_e2e) {
 
   PolyBuffer *buf = realized_buffer(ctx, poly_tensor_uop(out_tensor));
   ASSERT_NOT_NULL(buf);
-  float *out = (float *)buf->ptr;
-  ASSERT_NOT_NULL(out);
+  float out[4];
+  READ_REALIZED_F32(ctx, poly_tensor_uop(out_tensor), out, 4);
   ASSERT_FLOAT_EQ(out[0], -1.5f, 1e-5f);
   ASSERT_FLOAT_EQ(out[1], -0.5f, 1e-5f);
   ASSERT_FLOAT_EQ(out[2], 0.5f, 1e-5f);
@@ -781,7 +789,9 @@ TEST(realize, tensor_current_index_tracks_realize_and_assign) {
   ASSERT_PTR_EQ(poly_tensor_uop(x), x_buf);
   PolyBuffer *x_storage = realized_buffer(ctx, poly_tensor_uop(x));
   ASSERT_NOT_NULL(x_storage);
-  ASSERT_FLOAT_EQ(((float *)x_storage->ptr)[0], 5.0f, 1e-5f);
+  float x_val = 0.0f;
+  READ_REALIZED_F32(ctx, poly_tensor_uop(x), &x_val, 1);
+  ASSERT_FLOAT_EQ(x_val, 5.0f, 1e-5f);
 
   PolyUOp *fresh_inner = poly_alu2(ctx, POLY_OP_ADD, a, one);
   ASSERT_PTR_EQ(fresh_inner, x_expr);
@@ -794,7 +804,9 @@ TEST(realize, tensor_current_index_tracks_realize_and_assign) {
   PolyBuffer *z_storage = realized_buffer(ctx, poly_tensor_uop(z));
   ASSERT_NOT_NULL(z_storage);
   ASSERT_PTR_NEQ(z_storage, x_storage);
-  ASSERT_FLOAT_EQ(((float *)z_storage->ptr)[0], 3.0f, 1e-5f);
+  float z_val = 0.0f;
+  READ_REALIZED_F32(ctx, poly_tensor_uop(z), &z_val, 1);
+  ASSERT_FLOAT_EQ(z_val, 3.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   free(da);
@@ -822,7 +834,9 @@ TEST(realize, tensor_realized_current_feeds_later_ops_after_source_mutation) {
   ASSERT_PTR_EQ(out, ar);
   PolyBuffer *ar_storage = realized_buffer(ctx, poly_tensor_uop(ar));
   ASSERT_NOT_NULL(ar_storage);
-  ASSERT_FLOAT_EQ(((float *)ar_storage->ptr)[0], 2.0f, 1e-5f);
+  float ar_val = 0.0f;
+  READ_REALIZED_F32(ctx, poly_tensor_uop(ar), &ar_val, 1);
+  ASSERT_FLOAT_EQ(ar_val, 2.0f, 1e-5f);
 
   PolyUOp *ten = poly_buffer_f32(ctx, 1);
   float *dten = malloc(sizeof(float));
@@ -843,7 +857,9 @@ TEST(realize, tensor_realized_current_feeds_later_ops_after_source_mutation) {
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &b, 1, &out), 0);
   PolyBuffer *b_storage = realized_buffer(ctx, poly_tensor_uop(b));
   ASSERT_NOT_NULL(b_storage);
-  ASSERT_FLOAT_EQ(((float *)b_storage->ptr)[0], 3.0f, 1e-5f);
+  float b_val = 0.0f;
+  READ_REALIZED_F32(ctx, poly_tensor_uop(b), &b_val, 1);
+  ASSERT_FLOAT_EQ(b_val, 3.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   free(da);
@@ -896,7 +912,9 @@ TEST(realize, tensor_shared_lazy_retarget_keeps_distinct_tensor_records) {
   ASSERT_PTR_EQ(poly_tensor_uop(x2), shared_buf);
   PolyBuffer *storage = realized_buffer(ctx, shared_buf);
   ASSERT_NOT_NULL(storage);
-  ASSERT_FLOAT_EQ(((float *)storage->ptr)[0], 5.0f, 1e-5f);
+  float stored_val = 0.0f;
+  READ_REALIZED_F32(ctx, shared_buf, &stored_val, 1);
+  ASSERT_FLOAT_EQ(stored_val, 5.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   free(da);
@@ -904,7 +922,7 @@ TEST(realize, tensor_shared_lazy_retarget_keeps_distinct_tensor_records) {
   PASS();
 }
 
-TEST(realize, graph_vecadd) {
+TEST_COMMON(realize, graph_vecadd) {
   PolyCtx *ctx = poly_ctx_new();
 
   /* Build: add = a + b */
@@ -927,8 +945,8 @@ TEST(realize, graph_vecadd) {
   ASSERT_TRUE(out != NULL);
   PolyBuffer *buf = poly_buffer_get(ctx, (PolyUOp *)out);
   ASSERT_TRUE(buf != NULL);
-  float *dout = (float *)buf->ptr;
-  ASSERT_TRUE(dout != NULL);
+  float dout[4];
+  READ_REALIZED_F32(ctx, realized[0], dout, 4);
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[2], 33.0f, 1e-5f);
@@ -1113,8 +1131,8 @@ TEST(realize, schedule_with_vars_then_run_vecadd) {
   ASSERT_TRUE(out != NULL);
   PolyBuffer *buf = poly_buffer_get(ctx, (PolyUOp *)out);
   ASSERT_NOT_NULL(buf);
-  float *dout = (float *)buf->ptr;
-  ASSERT_NOT_NULL(dout);
+  float dout[4];
+  READ_REALIZED_F32(ctx, realized[0], dout, 4);
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[2], 33.0f, 1e-5f);
@@ -1222,8 +1240,9 @@ TEST(realize, contiguous_scalar_reduce_materializes_without_extra_copy_kernel) {
   ASSERT_NOT_NULL(out);
   PolyBuffer *buf = poly_buffer_get(ctx, (PolyUOp *)out);
   ASSERT_NOT_NULL(buf);
-  ASSERT_NOT_NULL(buf->ptr);
-  ASSERT_FLOAT_EQ(((float *)buf->ptr)[0], 10.0f, 1e-5f);
+  float reduced = 0.0f;
+  READ_REALIZED_F32(ctx, realized[0], &reduced, 1);
+  ASSERT_FLOAT_EQ(reduced, 10.0f, 1e-5f);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -1506,8 +1525,8 @@ TEST(realize, schedule_with_vars_mixed_passthrough_and_unrealized) {
 
   PolyBuffer *buf = realized_buffer(ctx, realized[1]);
   ASSERT_NOT_NULL(buf);
-  float *dout = (float *)buf->ptr;
-  ASSERT_NOT_NULL(dout);
+  float dout[4];
+  READ_REALIZED_F32(ctx, realized[1], dout, 4);
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[1], 22.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[2], 33.0f, 1e-5f);
@@ -1544,10 +1563,10 @@ TEST(realize, schedule_with_vars_multi_target_batch) {
   PolyBuffer *mul_buf = realized_buffer(ctx, realized[1]);
   ASSERT_NOT_NULL(add_buf);
   ASSERT_NOT_NULL(mul_buf);
-  float *add_out = (float *)add_buf->ptr;
-  float *mul_out = (float *)mul_buf->ptr;
-  ASSERT_NOT_NULL(add_out);
-  ASSERT_NOT_NULL(mul_out);
+  float add_out[4];
+  float mul_out[4];
+  READ_REALIZED_F32(ctx, realized[0], add_out, 4);
+  READ_REALIZED_F32(ctx, realized[1], mul_out, 4);
   ASSERT_FLOAT_EQ(add_out[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(add_out[3], 44.0f, 1e-5f);
   ASSERT_FLOAT_EQ(mul_out[0], 10.0f, 1e-5f);
@@ -1586,8 +1605,8 @@ TEST(realize, schedule_with_vars_preserves_2d_shape) {
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   PolyBuffer *buf = realized_buffer(ctx, realized[0]);
   ASSERT_NOT_NULL(buf);
-  float *dout = (float *)buf->ptr;
-  ASSERT_NOT_NULL(dout);
+  float dout[6];
+  READ_REALIZED_F32(ctx, realized[0], dout, 6);
   ASSERT_FLOAT_EQ(dout[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[5], 66.0f, 1e-5f);
 
@@ -1676,8 +1695,8 @@ TEST(realize, schedule_with_vars_triu_root_has_no_early_loads) {
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   PolyBuffer *buf = realized_buffer(ctx, realized[0]);
   ASSERT_NOT_NULL(buf);
-  float *dout = (float *)buf->ptr;
-  ASSERT_NOT_NULL(dout);
+  float dout[9];
+  READ_REALIZED_F32(ctx, realized[0], dout, 9);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[1], 2.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[2], 3.0f, 1e-5f);
@@ -1714,8 +1733,8 @@ TEST(realize, schedule_with_vars_tril_root_has_no_early_loads) {
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
   PolyBuffer *buf = realized_buffer(ctx, realized[0]);
   ASSERT_NOT_NULL(buf);
-  float *dout = (float *)buf->ptr;
-  ASSERT_NOT_NULL(dout);
+  float dout[9];
+  READ_REALIZED_F32(ctx, realized[0], dout, 9);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[1], 0.0f, 1e-5f);
   ASSERT_FLOAT_EQ(dout[2], 0.0f, 1e-5f);

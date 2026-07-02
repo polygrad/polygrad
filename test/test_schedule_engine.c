@@ -8,6 +8,7 @@
 #include "../src/codegen.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/frontend.h"
+#include "../src/device.h"
 
 /* Helper: build tensor-level graph, schedule, verify structure */
 
@@ -103,7 +104,7 @@ TEST(sched, vecadd_ir) {
 
 /* End-to-end tests */
 
-TEST(sched, vecadd_e2e) {
+TEST_COMMON(sched, vecadd_e2e) {
   /* c = a + b: build tensor graph, schedule, compile, run, verify */
   int N = 16;
   PolyCtx *ctx = poly_ctx_new();
@@ -179,7 +180,7 @@ TEST(sched, direct_sink_copy_uses_copy_call) {
   PASS();
 }
 
-TEST(sched, realize_uops_reads_ctx_buffers) {
+TEST_COMMON(sched, realize_uops_reads_ctx_buffers) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
@@ -196,8 +197,10 @@ TEST(sched, realize_uops_reads_ctx_buffers) {
   ASSERT_NOT_NULL(out_uop);
   PolyBuffer *out_buf = test_realized_buffer(ctx, out_uop);
   ASSERT_NOT_NULL(out_buf);
-  float *out = (float *)out_buf->ptr;
-  ASSERT_NOT_NULL(out);
+  PolyUOp *out_storage = (PolyUOp *)poly_uop_get_buffer_identity(out_uop);
+  ASSERT_NOT_NULL(out_storage);
+  float out[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_storage, out, sizeof(out)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(out[i], a_d[i] + b_d[i], 1e-6f);
 
@@ -205,7 +208,7 @@ TEST(sched, realize_uops_reads_ctx_buffers) {
   PASS();
 }
 
-TEST(sched, ctx_buffer_rebinding_overrides_previous_storage) {
+TEST_COMMON(sched, ctx_buffer_rebinding_overrides_previous_storage) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
@@ -225,8 +228,10 @@ TEST(sched, ctx_buffer_rebinding_overrides_previous_storage) {
   ASSERT_NOT_NULL(out_uop);
   PolyBuffer *out_buf = test_realized_buffer(ctx, out_uop);
   ASSERT_NOT_NULL(out_buf);
-  float *out = (float *)out_buf->ptr;
-  ASSERT_NOT_NULL(out);
+  PolyUOp *out_storage = (PolyUOp *)poly_uop_get_buffer_identity(out_uop);
+  ASSERT_NOT_NULL(out_storage);
+  float out[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_storage, out, sizeof(out)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(out[i], a_call[i] + b_d[i], 1e-6f);
 
@@ -368,7 +373,7 @@ TEST(sched, max_reduce_tail_keeps_only_store_index_ptr_typed) {
   PASS();
 }
 
-TEST(sched, chain_e2e) {
+TEST_COMMON(sched, chain_e2e) {
   /* d = (a + b) * c: verify single kernel with correct results */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -413,7 +418,7 @@ TEST(sched, chain_e2e) {
   PASS();
 }
 
-TEST(sched, broadcast_e2e) {
+TEST_COMMON(sched, broadcast_e2e) {
   /* c = a + scalar(2.0): scalar broadcast */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -453,7 +458,7 @@ TEST(sched, broadcast_e2e) {
   PASS();
 }
 
-TEST(sched, unary_e2e) {
+TEST_COMMON(sched, unary_e2e) {
   /* b = neg(a) */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -492,7 +497,7 @@ TEST(sched, unary_e2e) {
   PASS();
 }
 
-TEST(sched, 2d_e2e) {
+TEST_COMMON(sched, 2d_e2e) {
   /* c = a + b where a, b are 4x8 (32 elements) */
   int N = 32;
   PolyCtx *ctx = poly_ctx_new();
@@ -543,7 +548,7 @@ TEST(sched, 2d_e2e) {
   PASS();
 }
 
-TEST(sched, expand_e2e) {
+TEST_COMMON(sched, expand_e2e) {
   /* Broadcast: a is (5, 4), b is (1, 4) expanded to (5, 4)
    * c[i,j] = a[i,j] + b[0,j] */
   int N = 20;
@@ -603,7 +608,7 @@ TEST(sched, expand_e2e) {
   PASS();
 }
 
-TEST(sched, reshape_e2e) {
+TEST_COMMON(sched, reshape_e2e) {
   /* b = reshape(a, (2,4)) then flatten back — should be identity */
   int N = 8;
   PolyCtx *ctx = poly_ctx_new();
@@ -686,7 +691,7 @@ TEST(sched, reduce_sum_1d_ir) {
   PASS();
 }
 
-TEST(sched, reduce_sum_1d_e2e) {
+TEST_COMMON(sched, reduce_sum_1d_e2e) {
   /* sum([1, 2, ..., 10]) = 55 */
   int N = 10;
   PolyCtx *ctx = poly_ctx_new();
@@ -727,7 +732,7 @@ TEST(sched, reduce_sum_1d_e2e) {
   PASS();
 }
 
-TEST(sched, reduce_sum_axis0_e2e) {
+TEST_COMMON(sched, reduce_sum_axis0_e2e) {
   /* Column sum: a(4,3) reduced on axis 0 -> 3 output elements */
   PolyCtx *ctx = poly_ctx_new();
 
@@ -770,7 +775,7 @@ TEST(sched, reduce_sum_axis0_e2e) {
   PASS();
 }
 
-TEST(sched, reduce_sum_axis1_e2e) {
+TEST_COMMON(sched, reduce_sum_axis1_e2e) {
   /* Row sum: a(4,3) reduced on axis 1 -> 4 output elements */
   PolyCtx *ctx = poly_ctx_new();
 
@@ -813,7 +818,7 @@ TEST(sched, reduce_sum_axis1_e2e) {
   PASS();
 }
 
-TEST(sched, reduce_sum_all_e2e) {
+TEST_COMMON(sched, reduce_sum_all_e2e) {
   /* Full reduction: a(4,3) reduced on both axes -> scalar */
   PolyCtx *ctx = poly_ctx_new();
 
@@ -888,7 +893,7 @@ TEST(sched, reduce_max_e2e) {
   PASS();
 }
 
-TEST(sched, reduce_scalar_chain_e2e) {
+TEST_COMMON(sched, reduce_scalar_chain_e2e) {
   /* tinygrad parity boundary: schedule_with_vars splits the reduced scalar
    * producer from the broadcasted consumer kernel. */
   int N = 8;
@@ -938,10 +943,8 @@ TEST(sched, reduce_scalar_chain_e2e) {
 
   const PolyUOp *out = poly_uop_get_buffer_identity(realized[0]);
   ASSERT_TRUE(out != NULL);
-  PolyBuffer *buf = poly_buffer_get(ctx, (PolyUOp *)out);
-  ASSERT_TRUE(buf != NULL);
-  float *dout = (float *)buf->ptr;
-  ASSERT_TRUE(dout != NULL);
+  float dout[8] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)out, dout, sizeof(dout)), 0);
 
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(dout[i], sumv + b_d[i], 1e-5);
@@ -951,7 +954,7 @@ TEST(sched, reduce_scalar_chain_e2e) {
   PASS();
 }
 
-TEST(sched, reduce_vector_chain_e2e) {
+TEST_COMMON(sched, reduce_vector_chain_e2e) {
   /* tinygrad parity boundary: schedule_with_vars splits the reduced row sums
    * from the expanded consumer kernel. */
   int N = 12;
@@ -1006,10 +1009,8 @@ TEST(sched, reduce_vector_chain_e2e) {
 
   const PolyUOp *out = poly_uop_get_buffer_identity(realized[0]);
   ASSERT_TRUE(out != NULL);
-  PolyBuffer *buf = poly_buffer_get(ctx, (PolyUOp *)out);
-  ASSERT_TRUE(buf != NULL);
-  float *dout = (float *)buf->ptr;
-  ASSERT_TRUE(dout != NULL);
+  float dout[12] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)out, dout, sizeof(dout)), 0);
 
   for (int i = 0; i < 4; i++) {
     float row_sum = 0.0f;
@@ -1026,7 +1027,7 @@ TEST(sched, reduce_vector_chain_e2e) {
   PASS();
 }
 
-TEST(sched, shared_scalar_reduce_two_stores_e2e) {
+TEST_COMMON(sched, shared_scalar_reduce_two_stores_e2e) {
   /* tinygrad parity boundary: two realized targets that share the same scalar
    * reduction schedule as:
    *   1. the shared reduction producer
@@ -1098,14 +1099,10 @@ TEST(sched, shared_scalar_reduce_two_stores_e2e) {
   const PolyUOp *e_out = poly_uop_get_buffer_identity(realized[1]);
   ASSERT_TRUE(c_out != NULL);
   ASSERT_TRUE(e_out != NULL);
-  PolyBuffer *c_buf = poly_buffer_get(ctx, (PolyUOp *)c_out);
-  PolyBuffer *e_buf = poly_buffer_get(ctx, (PolyUOp *)e_out);
-  ASSERT_TRUE(c_buf != NULL);
-  ASSERT_TRUE(e_buf != NULL);
-  float *c_res = (float *)c_buf->ptr;
-  float *e_res = (float *)e_buf->ptr;
-  ASSERT_TRUE(c_res != NULL);
-  ASSERT_TRUE(e_res != NULL);
+  float c_res[8] = {0};
+  float e_res[8] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)c_out, c_res, sizeof(c_res)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)e_out, e_res, sizeof(e_res)), 0);
 
   for (int i = 0; i < N; i++) {
     ASSERT_FLOAT_EQ(c_res[i], c0[i] + sumv, 1e-5);

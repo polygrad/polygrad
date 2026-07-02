@@ -62,7 +62,7 @@ ifeq ($(HAS_X86), 1)
 endif
 PARITY_RUNNER_SRC = test/test_tinygrad_runner.c
 PARITY_SCRIPT = test/test_tinygrad_parity.py
-PARITY_PY ?= conda run -n tiny python
+PARITY_PY ?= $(if $(wildcard references/.venv-tinygrad-py311/bin/python),references/.venv-tinygrad-py311/bin/python,conda run -n tiny python)
 
 # Emscripten WASM build (excludes runtime_cpu.c — no fork/dlopen in WASM)
 WASM_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/simplify.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c vendor/cjson/cJSON.c src/safetensors.c src/ir.c src/bundle.c src/instance.c src/tokenizer.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
@@ -78,7 +78,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x86 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -98,17 +98,34 @@ test: build/polygrad_test
 test-fast: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test --fast
 
-# Full suite routed through specific backend (POLY_DEVICE selector)
-test-cuda: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=cuda ./build/polygrad_test
+# Portable C backend suite routed through specific backend (POLY_DEVICE selector).
+test-common: build/polygrad_test
+	$(SAN_RUN) ./build/polygrad_test --common
 
-test-hip: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=hip ./build/polygrad_test
+test-common-cpu: build/polygrad_test
+	$(SAN_RUN) POLY_DEVICE=cpu ./build/polygrad_test --common
 
-test-interp: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=interp ./build/polygrad_test
+test-common-cuda: build/polygrad_test
+	$(SAN_RUN) POLY_DEVICE=cuda ./build/polygrad_test --common
 
-test-x86: build/polygrad_test
+test-common-hip: build/polygrad_test
+	$(SAN_RUN) POLY_DEVICE=hip ./build/polygrad_test --common
+
+test-common-interp: build/polygrad_test
+	$(SAN_RUN) POLY_DEVICE=interp ./build/polygrad_test --common
+
+test-common-x86: build/polygrad_test
+	$(SAN_RUN) POLY_DEVICE=x86 ./build/polygrad_test --common
+
+test-cuda: test-common-cuda test-specific-cuda
+
+test-hip: test-common-hip test-specific-hip
+
+test-interp: test-common-interp
+
+test-x86: test-common-x86 test-specific-x86
+
+test-specific-x86: build/polygrad_test
 	$(SAN_RUN) POLY_DEVICE=x86 ./build/polygrad_test x86
 
 require-qwen3-gguf:
@@ -122,10 +139,10 @@ test-qwen3: build/polygrad_test require-qwen3-gguf
 	$(SAN_RUN) POLY_QWEN3_GGUF="$(QWEN3_GGUF)" ./build/polygrad_test qwen3
 
 # Backend-specific tests only (uses substring filter)
-test-cuda-only: build/polygrad_test
+test-specific-cuda: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test cuda
 
-test-hip-only: build/polygrad_test
+test-specific-hip: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test hip
 
 test-parity: build/polygrad_parity_runner
@@ -138,7 +155,7 @@ test-parity-ir: build/polygrad_parity_runner
 	$(SAN_RUN) CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full --no-opt
 
 test-parity-ir-opt: build/polygrad_parity_runner
-	$(SAN_RUN) CACHELEVEL=0 POLY_OPTIMIZE=1 POLY_DEVECTORIZE=0 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
+	$(SAN_RUN) CACHELEVEL=0 POLY_OPTIMIZE=1 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
 
 Z3_FUZZ_ITERS ?= 128
 Z3_FUZZ_SEED ?= 0

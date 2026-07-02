@@ -23,6 +23,13 @@ static bool poly_transform_to_call_view_op(PolyOps op) {
   return op == POLY_OP_RESHAPE || op == POLY_OP_EXPAND || op == POLY_OP_PAD;
 }
 
+static bool poly_realize_devices_share_host_addressable_storage(PolyDevice a, PolyDevice b) {
+  if (a == POLY_DEVICE_AUTO || b == POLY_DEVICE_AUTO || a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST)
+    return false;
+  if (poly_devices_share_storage(a, b)) return true;
+  return poly_device_is_host_addressable(a) && poly_device_is_host_addressable(b);
+}
+
 typedef struct {
   PolyUOp **items;
   int n;
@@ -784,7 +791,11 @@ int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **
     for (int i = 0; i < n; i++) {
       if (!inputs[i] || !out_uops[i]) continue;
       PolyDevice device = poly_uop_device(out_uops[i]);
-      if (device == POLY_DEVICE_AUTO) device = inputs[i]->device;
+      PolyDevice requested = inputs[i]->device;
+      if (requested == POLY_DEVICE_AUTO) requested = poly_ctx_get_preferred_device(ctx);
+      if (requested == POLY_DEVICE_AUTO) requested = poly_device_default();
+      if (device == POLY_DEVICE_AUTO) device = requested;
+      else if (poly_realize_devices_share_host_addressable_storage(device, requested)) device = requested;
       if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
       if (device == POLY_DEVICE_AUTO) device = poly_device_default();
       if (poly_tensor_update(ctx, inputs[i], NULL, out_uops[i], POLY_TENSOR_VALUE, device) != 0) {

@@ -135,6 +135,24 @@ static bool jit_asan_enabled(void) {
 #endif
 }
 
+static const char *compile_tmp_dir(void) {
+  const char *dir = getenv("POLY_TMPDIR");
+  if (dir && dir[0]) return dir;
+  dir = getenv("TMPDIR");
+  if (dir && dir[0]) return dir;
+  return "/tmp";
+}
+
+static int compile_tmp_path(char *out, size_t cap, const char *suffix, int id) {
+  const char *dir = compile_tmp_dir();
+  int n = snprintf(out, cap, "%s/polygrad_%d_%d.%s", dir, (int)getpid(), id, suffix);
+  if (n < 0 || n >= (int)cap) {
+    if (cap) out[0] = '\0';
+    return -1;
+  }
+  return 0;
+}
+
 /* Load a .so and resolve the _call wrapper */
 
 static PolyProgram *load_so(const char *so_path, const char *fn_name, int cached) {
@@ -315,10 +333,13 @@ PolyProgram *poly_compile_c(const char *source, const char *fn_name) {
   }
 
   /* Cache miss: compile to temp .so */
-  char c_path[256], so_path[256];
-  snprintf(c_path, sizeof(c_path), "/tmp/polygrad_%d_%d.c", (int)getpid(), poly_compile_id);
-  snprintf(so_path, sizeof(so_path), "/tmp/polygrad_%d_%d.so", (int)getpid(), poly_compile_id);
-  poly_compile_id++;
+  char c_path[512], so_path[512];
+  int compile_id = poly_compile_id++;
+  if (compile_tmp_path(c_path, sizeof(c_path), "c", compile_id) != 0 ||
+      compile_tmp_path(so_path, sizeof(so_path), "so", compile_id) != 0) {
+    fprintf(stderr, "polygrad: temporary compile path is too long\n");
+    return NULL;
+  }
 
   int ret = compile_to_so_with_flag(source, c_path, so_path, cpu_flag);
   if (ret != 0) {

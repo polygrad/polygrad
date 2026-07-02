@@ -26,19 +26,28 @@ typedef struct {
   const char *suite;
   const char *name;
   TestFn fn;
+  unsigned flags;
 } TestEntry;
+
+enum {
+  POLY_TEST_COMMON = 1u << 0,
+};
 
 #define MAX_TESTS 2048
 extern TestEntry g_tests[MAX_TESTS];
 extern int g_n_tests;
 
-#define TEST(suite, name) \
+#define POLY_TEST_REGISTER(suite, name, test_flags) \
   static void test_##suite##_##name(int *_passed, int *_failed); \
   __attribute__((constructor)) \
   static void register_##suite##_##name(void) { \
-    g_tests[g_n_tests++] = (TestEntry){ #suite, #name, test_##suite##_##name }; \
+    g_tests[g_n_tests++] = (TestEntry){ #suite, #name, test_##suite##_##name, (test_flags) }; \
   } \
   static void test_##suite##_##name(int *_passed, int *_failed)
+
+#define TEST(suite, name) POLY_TEST_REGISTER(suite, name, 0)
+
+#define TEST_COMMON(suite, name) POLY_TEST_REGISTER(suite, name, POLY_TEST_COMMON)
 
 #define PASS() do { (*_passed)++; return; } while(0)
 

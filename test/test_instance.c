@@ -12,6 +12,7 @@
 #include "../src/engine/schedule.h"
 #include "../src/optim.h"
 #include "../src/tensor.h"
+#include "../src/device.h"
 #include "../src/safetensors.h"
 #include <string.h>
 #include <stdlib.h>
@@ -80,9 +81,9 @@ TEST(optim, build_step_sgd_updates_param_with_after_store) {
   PolyTensor *realized = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 1, &realized), 0);
   ASSERT_PTR_EQ(realized, param);
-  PolyBuffer *buf = poly_buffer_get(ctx, p_buf);
-  ASSERT_NOT_NULL(buf);
-  ASSERT_FLOAT_EQ(((float *)buf->ptr)[0], 0.8f, 1e-5f);
+  float p_after = 0.0f;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p_buf, &p_after, sizeof(p_after)), 0);
+  ASSERT_FLOAT_EQ(p_after, 0.8f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -141,11 +142,17 @@ TEST(optim, build_step_adam_updates_beta_power_state_in_graph) {
   PolyTensor *realized[5] = {0};
   ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 5, realized), 0);
 
-  ASSERT_FLOAT_EQ(((float *)poly_buffer_get(ctx, p_buf)->ptr)[0], 0.9f, 1e-4f);
-  ASSERT_FLOAT_EQ(((float *)poly_buffer_get(ctx, m_buf)->ptr)[0], 0.1f, 1e-5f);
-  ASSERT_FLOAT_EQ(((float *)poly_buffer_get(ctx, v_buf)->ptr)[0], 0.001f, 1e-6f);
-  ASSERT_FLOAT_EQ(((float *)poly_buffer_get(ctx, bc1_buf)->ptr)[0], 0.9f, 1e-6f);
-  ASSERT_FLOAT_EQ(((float *)poly_buffer_get(ctx, bc2_buf)->ptr)[0], 0.999f, 1e-6f);
+  float p_after = 0.0f, m_after = 0.0f, v_after = 0.0f, bc1_after = 0.0f, bc2_after = 0.0f;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p_buf, &p_after, sizeof(p_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, m_buf, &m_after, sizeof(m_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, v_buf, &v_after, sizeof(v_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, bc1_buf, &bc1_after, sizeof(bc1_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, bc2_buf, &bc2_after, sizeof(bc2_after)), 0);
+  ASSERT_FLOAT_EQ(p_after, 0.9f, 1e-4f);
+  ASSERT_FLOAT_EQ(m_after, 0.1f, 1e-5f);
+  ASSERT_FLOAT_EQ(v_after, 0.001f, 1e-6f);
+  ASSERT_FLOAT_EQ(bc1_after, 0.9f, 1e-6f);
+  ASSERT_FLOAT_EQ(bc2_after, 0.999f, 1e-6f);
 
   poly_ctx_destroy(ctx);
   PASS();

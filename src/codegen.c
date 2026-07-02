@@ -2593,25 +2593,6 @@ static PolyUOp *rule_idiv_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBindings
 }
 
 /*
- * rule_mod_to_and — Port of tinygrad's MOD→AND rule.
- * x % c → x & (c-1)  when c is a power of 2 and x is integer type.
- */
-static PolyUOp *rule_mod_to_and(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  PolyUOp *c_node = poly_bind(b, "c");
-  PolyUOp *x_node = poly_bind(b, "x");
-  if (!c_node || !x_node) return NULL;
-  /* tinygrad does not apply the scalar MOD-to-AND shortcut to vector MOD by a
-   * vector-typed constant; keep vector modulo in the late vector form. */
-  if (root->dtype.count > 1) return NULL;
-  if (!poly_dtype_is_int(root->dtype)) return NULL;
-  if (c_node->arg.kind != POLY_ARG_INT) return NULL;
-  int64_t c = c_node->arg.i;
-  if (c <= 0 || (c & (c - 1)) != 0) return NULL; /* not a power of 2 */
-  PolyUOp *mask = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(c - 1));
-  return poly_uop2(ctx, POLY_OP_AND, root->dtype, x_node, mask, poly_arg_none());
-}
-
-/*
  * rule_mulacc_to_mul_add — MULACC(a, b, c) → ADD(MUL(a, b), c)
  * For renderers without native FMA (CPU/ClangRenderer).
  * Gated on !caps.has_mulacc in poly_pm_decomp_with_caps().
@@ -2983,9 +2964,6 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
   /* IDIV(x:int, c:const) → SHR(x, log2(c)) when c is power of 2 */
   rules[n++] = (PolyRule
   ){poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_cvar("c"), NULL), rule_idiv_to_shr};
-  /* MOD(x:int, c:const) → AND(x, c-1) when c is power of 2 */
-  rules[n++] = (PolyRule
-  ){poly_pat_op2(POLY_OP_MOD, poly_pat_any("x"), poly_pat_cvar("c"), NULL), rule_mod_to_and};
   /* x + NEG(y) → SUB(x, y) */
   rules[n++] = (PolyRule
   ){poly_pat_op2(

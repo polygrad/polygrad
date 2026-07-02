@@ -19,14 +19,23 @@ os.environ.setdefault("CACHELEVEL", "0")
 os.environ.setdefault("DEVECTORIZE", "-1")
 # Always use CPU for value evaluation; CUDA flag only affects IR extraction
 os.environ["DEV"] = "CPU"
-sys.path.insert(0, str(ROOT / "references" / "tinygrad_latest"))
+TG_ROOT = (ROOT / "references" / "tinygrad_latest").resolve()
+sys.path.insert(0, str(TG_ROOT))
 
+import tinygrad as _tinygrad_module  # noqa: E402
 from tinygrad import Context, Tensor, dtypes  # noqa: E402
 from tinygrad.codegen import to_program, full_rewrite_to_sink  # noqa: E402
 from tinygrad.codegen.late.linearizer import linearize  # noqa: E402
 from tinygrad.helpers import ContextVar, Target  # noqa: E402
 from tinygrad.renderer.cstyle import ClangRenderer, CUDARenderer, HIPRenderer  # noqa: E402
 from tinygrad.uop.ops import Ops  # noqa: E402
+
+_loaded_tinygrad = pathlib.Path(_tinygrad_module.__file__).resolve()
+_expected_tinygrad = (TG_ROOT / "tinygrad").resolve()
+if _expected_tinygrad not in _loaded_tinygrad.parents:
+    raise RuntimeError(
+        f"loaded tinygrad from {_loaded_tinygrad}, expected {_expected_tinygrad}"
+    )
 
 
 def _tiny_context(**kwargs):

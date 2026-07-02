@@ -149,10 +149,12 @@ TEST(transcendental, decomp_sin_ir) {
  * ════════════════════════════════════════════════════════════════════════ */
 
 /*
- * MOD → AND: x % (2^n) → x & (2^n - 1) for int
- * Ref: tinygrad/uop/decompositions.py get_late_rewrite_patterns line 445
+ * Current tinygrad keeps CMOD by a power-of-two divisor in the late Clang
+ * pipeline. This matters for xexp2/ldexp2k strict IR parity:
+ * tinygrad/uop/decompositions.py ldexp2k uses shr(e, 1), which lowers through
+ * the floor-div correction and leaves CMOD(q, 2) in the final no-opt LINEAR.
  */
-TEST(decomp, mod_to_and) {
+TEST(decomp, cmod_power_of_two_stays_cmod_like_tinygrad) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_i32 = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_i32, poly_arg_int(0));
@@ -172,8 +174,8 @@ TEST(decomp, mod_to_and) {
   int n_mod = count_ops_in(ctx, rewritten, POLY_OP_MOD);
   int n_and = count_ops_in(ctx, rewritten, POLY_OP_AND);
   poly_ctx_destroy(ctx);
-  ASSERT_INT_EQ(n_mod, 0); /* MOD must be eliminated */
-  ASSERT_TRUE(n_and > 0); /* AND must appear */
+  ASSERT_TRUE(n_mod > 0); /* CMOD must remain */
+  ASSERT_INT_EQ(n_and, 0); /* no stale MOD->AND shortcut */
   PASS();
 }
 

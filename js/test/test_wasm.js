@@ -54,6 +54,42 @@ async function runWasmOwnershipTests() {
   return { passed, failed }
 }
 
+async function runWasmInterpTests() {
+  console.log('\n== WASM interp ==')
+  let passed = 0
+  let failed = 0
+
+  async function test(name, fn) {
+    try {
+      await fn()
+      console.log(`  [PASS] ${name}`)
+      passed++
+    } catch (e) {
+      console.log(`  [FAIL] ${name}: ${e.message}`)
+      failed++
+    }
+  }
+
+  await test('realized expression assign keeps interp placement', async () => {
+    const pg = await polygrad.create({ core: 'wasm', device: 'interp' })
+    try {
+      const Tensor = pg.Tensor
+      const x = await new Tensor([1]).add(1).realize()
+      const xBuffer = x.uop.buffer.key
+      x.assign(new Tensor([9]))
+      await x.realize()
+      if (x.uop.buffer.key !== xBuffer) {
+        throw new Error('realized assign did not reuse current buffer')
+      }
+      assertClose(await x.toArray(), [9])
+    } finally {
+      await pg.dispose()
+    }
+  })
+
+  return { passed, failed }
+}
+
 async function main() {
   const pg = await polygrad.create({ core: 'wasm' })
   try {
@@ -64,8 +100,9 @@ async function main() {
     const modelResult = await runModelTests(pg)
     await pg.dispose()
     const ownershipResult = await runWasmOwnershipTests()
+    const interpResult = await runWasmInterpTests()
     const failed = tensorResult.failed + instanceResult.failed + jitResult.failed +
-      optimResult.failed + modelResult.failed + ownershipResult.failed
+      optimResult.failed + modelResult.failed + ownershipResult.failed + interpResult.failed
     if (failed > 0) process.exit(1)
   } catch (e) {
     try { await pg.dispose() } catch (_) {}
