@@ -122,6 +122,43 @@ static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp
   return ret;
 }
 
+static int poly_transform_to_call_try_host_current_copy(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **out
+) {
+  if (out) *out = NULL;
+  if (!ctx || !u || !out) return -1;
+
+  PolyTransformViewStack views = {0};
+  PolyUOp *root = poly_transform_to_call_root(u, &views);
+  if (!root || root->op != POLY_OP_COPY || root->n_src < 2) {
+    poly_transform_view_stack_free(&views);
+    return 0;
+  }
+
+  PolyDevice dev = poly_device_from_device_uop(root->src[1]);
+  if (dev == POLY_DEVICE_AUTO || !poly_device_is_host_addressable(dev)) {
+    poly_transform_view_stack_free(&views);
+    return 0;
+  }
+
+  const PolyUOp *buf = poly_uop_get_buffer_identity(root->src[0]);
+  if (!buf) {
+    poly_transform_view_stack_free(&views);
+    return 0;
+  }
+  if (poly_buffer_ensure_device_current(ctx, (PolyUOp *)buf, dev) != 0) {
+    poly_transform_view_stack_free(&views);
+    return -1;
+  }
+
+  PolyShape root_shape = poly_uop_max_shape_cached(ctx, root);
+  *out = poly_transform_to_call_rebuild_view(ctx, root->src[0], root_shape, &views);
+  poly_transform_view_stack_free(&views);
+  return *out ? 1 : -1;
+}
+
 static PolyUOp *poly_transform_to_call_alloc_buffer_on_device(
     PolyCtx *ctx,
     PolyDType dtype,
@@ -524,6 +561,18 @@ static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, P
     PolyUOp *after_result = poly_transform_to_call_after_result_buffer(ctx, u);
     if (after_result) {
       out_uops[i] = after_result;
+      continue;
+    }
+
+    PolyUOp *host_current_result = NULL;
+    int host_current_rc =
+        poly_transform_to_call_try_host_current_copy(ctx, u, &host_current_result);
+    if (host_current_rc < 0) {
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
+    if (host_current_rc > 0) {
+      out_uops[i] = host_current_result;
       continue;
     }
 

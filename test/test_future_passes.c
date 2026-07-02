@@ -830,7 +830,7 @@ TEST(regression, sin_decomp_large_e2e) {
   ASSERT_INT_EQ(count_ops_in(ctx, rewritten, POLY_OP_SIN), 0);
 
   int n;
-  PolyUOp **lin = poly_linearize(ctx, rewritten, &n);
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n);
   char *src = poly_render_c(lin, n, "sin_decomp_large_kernel");
   PolyProgram *prog = poly_compile_c(src, "sin_decomp_large_kernel");
   ASSERT_NOT_NULL(prog);

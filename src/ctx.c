@@ -69,6 +69,12 @@ PolyCtx *poly_ctx_new(void) {
   ctx->next_buf_tag = 1;
   ctx->next_unique_id = 0;
   ctx->preferred_device = POLY_DEVICE_AUTO;
+  const char *dev_env = getenv("POLY_DEVICE");
+  if (dev_env && dev_env[0]) {
+    PolyDevice env_device = poly_device_by_name(dev_env);
+    if (env_device != POLY_DEVICE_AUTO && env_device != POLY_DEVICE_HOST)
+      ctx->preferred_device = env_device;
+  }
   ctx->frontend_buffer_release = NULL;
   return ctx;
 }

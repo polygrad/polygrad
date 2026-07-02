@@ -616,6 +616,16 @@ static PolyDType wasm_simd_value_dtype(PolyUOp *u) {
   return wasm_vec_dtype_for_scalar(u->dtype);
 }
 
+static PolyDType wasm_native_v128_dtype(PolyUOp *u) {
+  if (u && wasm_is_compare_op(u->op) && u->n_src >= 2) {
+    PolyDType cmp = wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
+    PolyDType scalar = poly_dtype_scalar(cmp);
+    return scalar.bitsize == 64 ? poly_dtype_vec(POLY_INT64, 2)
+                                : poly_dtype_vec(POLY_INT32, 4);
+  }
+  return wasm_simd_value_dtype(u);
+}
+
 static bool wasm_simd_loop_can_vectorize_alu(PolyUOp *u) {
   if (!u || !poly_opset_has(POLY_GROUP_ALU, u->op) || !has_simd_op(u->op)) return false;
   if (wasm_is_compare_op(u->op) && u->n_src >= 2)
@@ -2021,12 +2031,13 @@ static void build_code_scalar(
           emit_cast_stack_value(&body, poly_dtype_scalar(u->src[0]->dtype), poly_dtype_scalar(u->dtype));
           emit_v128_replace_lane(&body, u->dtype, j);
         }
-      } else if (dt_is_v128(u->src[0]->dtype)) {
+      } else if (wasm_uop_value_is_v128(u->src[0])) {
+        PolyDType src_native = wasm_native_v128_dtype(u->src[0]);
         int src_local = lm_get(&locals, u->src[0]);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, src_local);
-        emit_v128_extract_lane(&body, u->src[0]->dtype, lanes[0]);
-        emit_cast_stack_value(&body, poly_dtype_scalar(u->src[0]->dtype), u->dtype);
+        emit_v128_extract_lane(&body, src_native, lanes[0]);
+        emit_cast_stack_value(&body, poly_dtype_scalar(src_native), u->dtype);
       } else {
         int src_local = lm_get(&locals, u->src[0]);
         wb_byte(&body, WASM_OP_LOCAL_GET);
@@ -2103,7 +2114,8 @@ static void build_code_scalar(
         int lane = wasm_const_index(u->src[1]);
         wb_byte(&body, WASM_OP_LOCAL_GET);
         wb_uleb128(&body, src);
-        PolyDType src_dt = u->src[0]->dtype;
+        PolyDType src_dt = wasm_uop_value_is_v128(u->src[0]) ? wasm_native_v128_dtype(u->src[0])
+                                                             : u->src[0]->dtype;
         PolyDType shrink_vec;
         if (wasm_load_shrink_native_vec(u->src[0], &shrink_vec)) {
           src_dt = shrink_vec;

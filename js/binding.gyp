@@ -69,8 +69,8 @@
           "libraries": ["-ldl", "-lm"]
         }],
         ["target_arch=='x64'", {
-          "sources": ["csrc/src/render_x64.c"],
-          "defines": ["POLY_HAS_X64=1"]
+          "sources": ["csrc/src/render_x86.c"],
+          "defines": ["POLY_HAS_X86=1"]
         }],
         ["'<!(test -f /usr/include/cuda.h && echo 1 || echo 0)'=='1'", {
           "sources": ["csrc/src/render_cuda.c", "csrc/src/runtime_cuda.c"],

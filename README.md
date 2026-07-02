@@ -30,7 +30,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 │  │ arena.c  │  │          │  │ shape.c    │  │ wasm_builder.c │ │
 │  │ hashmap.c│  │          │  │            │  │ codegen.c      │ │
 │  └──────────┘  └──────────┘  └────────────┘  │ runtime_cpu.c  │ │
-│                                               │ render_x64.c   │ │
+│                                               │ render_x86.c   │ │
 │                                               └────────────────┘ │
 │  ┌──────────┐  ┌──────────────────────────────────────────────┐  │
 │  │ Autograd │  │ Frontend (FFI surface + ~35 composed ops)    │  │
@@ -48,7 +48,7 @@ tinygrad is Python-only. To use it from Rust, JS, or a compiled training recipe 
 
 **What works today:** Full tinygrad-compatible Tensor API from Python and the unified JS package. C core handles: UOp IR -> schedule -> unified codegen pipeline -> render (C, x86-64 JIT, CUDA, HIP, WASM, interpreter) -> execute. Elementwise ops, reductions, matmul, softmax, movement ops, step slicing, reverse-mode autograd, multi-kernel scheduling, in-place buffer writes, raw Tensor JIT capture/replay, and staged Instance packaging/training are covered by C, Python, JS native, JS WASM, browser, CUDA, and tinygrad parity tests. The JS package uses `await polygrad.create({ core, device })`, prefers a native Node-API binding in Node, falls back to packaged WASM, and ships browser bundles. Python `nn` includes common layers and optimizers. HuggingFace model loading covers GPT-2/Qwen-style bundles through config + safetensors/GGUF paths.
 
-**Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU, x64 JIT, CUDA, HIP, interpreter, WASM JIT). All backends share one unified linearizer pipeline (`poly_full_rewrite_to_sink_ex`), with backend differences expressed via `PolyRewriteOpts`. The x64 JIT (`render_x64.c`) emits x86-64 machine code directly -- no C compiler dependency, zero compile latency, SSE2 packed vectorization. CUDA uses native `half`/`nv_bfloat16` types with h* intrinsics. HIP supports AMD MI250X with MFMA tensor core codegen. The interpreter supports vector operations via a lane-array value model with pre-allocated arena. Backend selection via `POLY_DEVICE=cpu|cuda|hip|x64|interp`. `PolyInstance` caches schedules/runtime state and executes through the same ctx-owned buffer residency path as raw tensors. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
+**Cross-platform execution:** `poly_realize()` dispatches through a backend vtable (CPU C, x86 ISA, CUDA, HIP, interpreter, WASM JIT). All backends share one unified linearizer pipeline (`poly_full_rewrite_to_sink_ex`), with backend differences expressed via `PolyRewriteOpts`. The x86 backend (`render_x86.c`) follows tinygrad's X86Renderer-style direct ISA lowering; the CPU backend remains the C/Clang performance baseline. CUDA uses native `half`/`nv_bfloat16` types with h* intrinsics. HIP supports AMD MI250X with MFMA tensor core codegen. The interpreter supports vector operations via a lane-array value model with pre-allocated arena. Backend selection via `POLY_DEVICE=cpu|cuda|hip|x86|interp`. `PolyInstance` caches schedules/runtime state and executes through the same ctx-owned buffer residency path as raw tensors. The `poly.bundle@1` format packages IR + weights into a single portable file. Save in Python, load in JS (WASM or native) -- predictions match exactly.
 
 **Codegen optimization:** Late pipeline matches tinygrad's architecture (codegen/__init__.py). Devectorizer scalarizes unsupported vector ALU, load/store folding regroups contiguous accesses into vector loads, and direct emitters may preserve a renderer-capability subset such as WASM f32x4 ALU/compare/compare-mask `WHERE`. WASM also has backend renderers for selected affine row-reduce and matmul reductions, with scalar epilogues for supported tail shapes. `POLY_OPTIMIZE=1 POLY_DEVECTORIZE=1` enables UPCAST + devectorize for CPU SIMD. BEAM search optimizer (`POLY_BEAM=N`) explores the shared optimization space by compiling and timing candidates, with disk cache for results.
 
@@ -246,7 +246,7 @@ mlp_train (in=1024)      104us    225us    2.2x
 WASM JIT matches native CPU at larger model sizes. At small sizes, WASM dispatch overhead adds 1.5-2.7x.
 
 Environment variables:
-- `POLY_DEVICE=cpu|cuda|hip|x64|interp` -- backend selector (default: cpu)
+- `POLY_DEVICE=cpu|cuda|hip|x86|interp` -- backend selector (default: cpu)
 - `POLY_OPT=0|1|2` -- optimization level for kernel compilation (default: 2)
 - `POLY_OPTIMIZE=1` -- enable codegen optimizer (UPCAST, devectorize, BEAM)
 - `POLY_BEAM=N` -- BEAM search width for optimization space exploration
@@ -261,7 +261,7 @@ make test           # build + run C tests with ASan/UBSan
 make test-interp   # full suite on interpreter backend
 make test-cuda     # full suite on CUDA (requires GPU)
 make test-hip      # full suite on HIP/AMD (requires ROCm)
-make test-x64      # full suite on x64 JIT backend
+make test-x86      # focused suite on the x86 ISA backend
 make test-wasm     # build + run WASM tests (Emscripten)
 make test-parity   # 1-to-1 differential parity tests vs tinygrad reference
 make bench         # build + run benchmark
@@ -297,7 +297,7 @@ make test-browser                    # browser WASM/interp/WebGPU tests
 - [x] CUDA backend with native f16/bf16 (`half`, `nv_bfloat16`, h* intrinsics)
 - [x] HIP/AMD backend with MFMA tensor core codegen, comgr compilation
 - [x] Interpreter with vector value model (lane-array, pre-allocated arena)
-- [x] `POLY_DEVICE=cpu|cuda|hip|x64|interp` backend selector
+- [x] `POLY_DEVICE=cpu|cuda|hip|x86|interp` backend selector
 
 ### Instances and Model Families
 - [x] PolyInstance runtime (forward, train_step, optimizer, weight import/export)

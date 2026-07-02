@@ -82,6 +82,29 @@ TEST(utils, getenv_flag_default_preserves_absent_default) {
   PASS();
 }
 
+TEST(utils, device_name_accepts_tinygrad_style_cpu_renderer_aliases) {
+  ASSERT_INT_EQ(poly_device_by_name("cpu"), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_device_by_name("CPU"), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(poly_device_by_name("x86"), POLY_DEVICE_X86);
+  ASSERT_INT_EQ(poly_device_by_name("X86"), POLY_DEVICE_X86);
+  ASSERT_INT_EQ(poly_device_by_name("cpu:x86"), POLY_DEVICE_X86);
+  ASSERT_INT_EQ(poly_device_by_name("CPU:X86"), POLY_DEVICE_X86);
+  ASSERT_INT_EQ(poly_device_by_name("x64"), POLY_DEVICE_AUTO);
+  ASSERT_INT_EQ(poly_device_by_name("CPU:X64"), POLY_DEVICE_AUTO);
+  PASS();
+}
+
+TEST(utils, ctx_uses_poly_device_env_as_preferred_device) {
+  EnvSave dev = save_env("POLY_DEVICE");
+  setenv("POLY_DEVICE", "CPU:X86", 1);
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_INT_EQ(poly_ctx_get_preferred_device(ctx), POLY_DEVICE_X86);
+  poly_ctx_destroy(ctx);
+  restore_env(&dev);
+  PASS();
+}
+
 TEST(utils, poly_selftest_runs_portable_interp_path) {
   ASSERT_INT_EQ(poly_selftest(), 0);
   ASSERT_INT_EQ(poly_selftest_device(POLY_DEVICE_AUTO), 0);

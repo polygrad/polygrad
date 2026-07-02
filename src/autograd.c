@@ -900,8 +900,10 @@ static bool substitute_iter(
 
     PolyUOp *result = u;
     if (changed) {
-      result = (u->tag != 0)
-                   ? poly_uop_tagged(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag)
+      result = (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+                   ? poly_uop_tagged_arg(
+                         ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg, u->tag, u->tag_arg
+                     )
                    : poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
     }
     if (new_srcs != src_buf) free(new_srcs);

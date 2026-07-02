@@ -10,7 +10,7 @@ async function resolveNodeCore(name, opts) {
 
   if (name === 'native') {
     /* Native core delegates device selection to the C library via POLY_DEVICE
-     * env var. The C runtime validates and routes to cpu/x64/cuda/hip/interp. */
+     * env var. The C runtime validates and routes to cpu/x86/cuda/hip/interp. */
     const { createNativeCore } = require('./core/native')
     return createNativeCore()
   }

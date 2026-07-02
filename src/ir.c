@@ -463,6 +463,13 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       st_free(&strings);
       free(buf.data);
       return NULL;
+    case POLY_ARG_BYTES:
+      fprintf(stderr, "poly_ir_export: BINARY byte payloads are not exportable IR\n");
+      free(node_map);
+      if (topo_is_heap) free(topo);
+      st_free(&strings);
+      free(buf.data);
+      return NULL;
     case POLY_ARG_INVALID:
       break;
     }
@@ -682,6 +689,10 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       arg.bufferize_opts.addrspace = (PolyAddrSpace)br_u8(&r);
       arg.bufferize_opts.removable = br_u8(&r) != 0;
       break;
+    case POLY_ARG_BYTES:
+      fprintf(stderr, "poly_ir_import: BINARY byte payloads are not package IR\n");
+      if (srcs) free(srcs);
+      goto fail_nodes;
     case POLY_ARG_INVALID:
       break;
     default:

@@ -68,6 +68,11 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
            a.bufferize_opts.removable == b.bufferize_opts.removable;
   case POLY_ARG_PROGRAM_INFO:
     return poly_program_info_eq(a.program_info, b.program_info);
+  case POLY_ARG_BYTES:
+    if (a.bytes.n != b.bytes.n) return false;
+    if (a.bytes.n == 0) return true;
+    if (!a.bytes.data || !b.bytes.data) return false;
+    return memcmp(a.bytes.data, b.bytes.data, (size_t)a.bytes.n) == 0;
   }
   return false;
 }
@@ -142,6 +147,10 @@ uint32_t poly_arg_hash(PolyArg a) {
   case POLY_ARG_PROGRAM_INFO:
     h = hash_mix(h, poly_program_info_hash(a.program_info));
     break;
+  case POLY_ARG_BYTES:
+    for (int i = 0; i < a.bytes.n; i++)
+      h = hash_mix(h, a.bytes.data ? a.bytes.data[i] : 0);
+    break;
   }
   return h;
 }
@@ -155,6 +164,7 @@ typedef struct {
   uint16_t n_src;
   PolyArg arg;
   int32_t tag;
+  PolyArg tag_arg;
 } CseKey;
 
 static uint32_t cse_hash(const CseKey *k) {
@@ -178,6 +188,7 @@ static uint32_t cse_hash(const CseKey *k) {
   }
   h = hash_mix(h, poly_arg_hash(k->arg));
   h = hash_mix(h, (uint32_t)k->tag);
+  h = hash_mix(h, poly_arg_hash(k->tag_arg));
   return h;
 }
 
@@ -190,6 +201,7 @@ static bool cse_eq(const void *a, const void *b) {
     if (ka->src[i] != kb->src[i]) return false;
   if (!poly_arg_eq(ka->arg, kb->arg)) return false;
   if (ka->tag != kb->tag) return false;
+  if (!poly_arg_eq(ka->tag_arg, kb->tag_arg)) return false;
   return true;
 }
 
@@ -225,6 +237,46 @@ static bool uop_rank_arg_valid(PolyOps op, PolyArg arg) {
   }
 }
 
+static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
+  if (!arena || !dst) return;
+  if (dst->kind == POLY_ARG_INT_TUPLE && dst->int_tuple.n > 0) {
+    int64_t *vals =
+        poly_arena_alloc(arena, dst->int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
+    memcpy(vals, dst->int_tuple.vals, dst->int_tuple.n * sizeof(int64_t));
+    dst->int_tuple.vals = vals;
+  } else if (dst->kind == POLY_ARG_PAIR_TUPLE && dst->pair_tuple.n > 0) {
+    int64_t(*pairs)[2] =
+        poly_arena_alloc(arena, dst->pair_tuple.n * 2 * sizeof(int64_t), _Alignof(int64_t));
+    memcpy(pairs, dst->pair_tuple.pairs, dst->pair_tuple.n * 2 * sizeof(int64_t));
+    dst->pair_tuple.pairs = pairs;
+  } else if (dst->kind == POLY_ARG_REDUCE_AXIS && dst->reduce_axis.n > 0) {
+    int64_t *axes =
+        poly_arena_alloc(arena, dst->reduce_axis.n * sizeof(int64_t), _Alignof(int64_t));
+    memcpy(axes, dst->reduce_axis.axes, dst->reduce_axis.n * sizeof(int64_t));
+    dst->reduce_axis.axes = axes;
+  } else if (dst->kind == POLY_ARG_RANGE && dst->range.n_extra > 0) {
+    int64_t *extra = poly_arena_alloc(
+        arena, (size_t)dst->range.n_extra * sizeof(int64_t), _Alignof(int64_t)
+    );
+    memcpy(extra, dst->range.extra, (size_t)dst->range.n_extra * sizeof(int64_t));
+    dst->range.extra = extra;
+  } else if (dst->kind == POLY_ARG_STRING && dst->str) {
+    size_t len = strlen(dst->str);
+    char *s = poly_arena_alloc(arena, len + 1, 1);
+    memcpy(s, dst->str, len + 1);
+    dst->str = s;
+  } else if (dst->kind == POLY_ARG_DEFINE_VAR && dst->define_var.name) {
+    size_t len = strlen(dst->define_var.name);
+    char *s = poly_arena_alloc(arena, len + 1, 1);
+    memcpy(s, dst->define_var.name, len + 1);
+    dst->define_var.name = s;
+  } else if (dst->kind == POLY_ARG_BYTES && dst->bytes.n > 0 && dst->bytes.data) {
+    uint8_t *data = poly_arena_alloc(arena, (size_t)dst->bytes.n, 1);
+    memcpy(data, dst->bytes.data, (size_t)dst->bytes.n);
+    dst->bytes.data = data;
+  }
+}
+
 static PolyUOp *poly_uop_internal(
     PolyCtx *ctx,
     PolyOps op,
@@ -232,7 +284,8 @@ static PolyUOp *poly_uop_internal(
     PolyUOp **src,
     int n_src,
     PolyArg arg,
-    int32_t tag
+    int32_t tag,
+    PolyArg tag_arg
 ) {
   if (!ctx || n_src < 0 || n_src > UINT16_MAX || (n_src > 0 && !src)) return NULL;
   /* Canonicalize legacy RANGE(axis_id as INT) at the UOp boundary. tinygrad
@@ -245,7 +298,7 @@ static PolyUOp *poly_uop_internal(
   if (!uop_rank_arg_valid(op, arg)) return NULL;
 
   /* Build a CSE key on the stack */
-  CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag};
+  CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag, tag_arg};
   uint32_t h = cse_hash(&key);
 
   /* DEFINE_LOCAL represents mutable accumulators — each REDUCE needs its
@@ -253,7 +306,10 @@ static PolyUOp *poly_uop_internal(
    * two reductions in a multi-store kernel that happen to share identity
    * value and outer-range deps would get merged into a single acc variable,
    * corrupting both computations. */
-  if (op != POLY_OP_DEFINE_LOCAL) {
+  bool cse_lookup = op != POLY_OP_DEFINE_LOCAL;
+  if (op == POLY_OP_INS)
+    cse_lookup = n_src == 0 && tag == 0 && tag_arg.kind == POLY_ARG_NONE;
+  if (cse_lookup) {
     PolyUOp *existing = poly_map_get(ctx->cse, h, &key, cse_eq);
     if (existing) return existing;
   }
@@ -265,6 +321,7 @@ static PolyUOp *poly_uop_internal(
   u->n_src = (uint16_t)n_src;
   u->arg = arg;
   u->tag = tag;
+  u->tag_arg = tag_arg;
   u->hash = h;
   u->minmax_cached = false;
   u->minmax_vmin = 0;
@@ -280,43 +337,13 @@ static PolyUOp *poly_uop_internal(
     u->src = NULL;
   }
 
-  /* Copy arg data that needs arena allocation */
-  if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.n > 0) {
-    int64_t *vals =
-        poly_arena_alloc(ctx->arena, arg.int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
-    memcpy(vals, arg.int_tuple.vals, arg.int_tuple.n * sizeof(int64_t));
-    u->arg.int_tuple.vals = vals;
-  } else if (arg.kind == POLY_ARG_PAIR_TUPLE && arg.pair_tuple.n > 0) {
-    int64_t(*pairs)[2] =
-        poly_arena_alloc(ctx->arena, arg.pair_tuple.n * 2 * sizeof(int64_t), _Alignof(int64_t));
-    memcpy(pairs, arg.pair_tuple.pairs, arg.pair_tuple.n * 2 * sizeof(int64_t));
-    u->arg.pair_tuple.pairs = pairs;
-  } else if (arg.kind == POLY_ARG_REDUCE_AXIS && arg.reduce_axis.n > 0) {
-    int64_t *axes =
-        poly_arena_alloc(ctx->arena, arg.reduce_axis.n * sizeof(int64_t), _Alignof(int64_t));
-    memcpy(axes, arg.reduce_axis.axes, arg.reduce_axis.n * sizeof(int64_t));
-    u->arg.reduce_axis.axes = axes;
-  } else if (arg.kind == POLY_ARG_RANGE && arg.range.n_extra > 0) {
-    int64_t *extra = poly_arena_alloc(
-        ctx->arena, (size_t)arg.range.n_extra * sizeof(int64_t), _Alignof(int64_t)
-    );
-    memcpy(extra, arg.range.extra, (size_t)arg.range.n_extra * sizeof(int64_t));
-    u->arg.range.extra = extra;
-  } else if (arg.kind == POLY_ARG_STRING && arg.str) {
-    size_t len = strlen(arg.str);
-    char *s = poly_arena_alloc(ctx->arena, len + 1, 1);
-    memcpy(s, arg.str, len + 1);
-    u->arg.str = s;
-  } else if (arg.kind == POLY_ARG_DEFINE_VAR && arg.define_var.name) {
-    size_t len = strlen(arg.define_var.name);
-    char *s = poly_arena_alloc(ctx->arena, len + 1, 1);
-    memcpy(s, arg.define_var.name, len + 1);
-    u->arg.define_var.name = s;
-  }
+  /* Copy arg/tag data that needs arena allocation */
+  poly_arg_copy_to_arena(ctx->arena, &u->arg);
+  poly_arg_copy_to_arena(ctx->arena, &u->tag_arg);
 
   /* Also store the CSE key in the arena so it persists for hash map lookups */
   CseKey *stored_key = poly_arena_alloc(ctx->arena, sizeof(CseKey), _Alignof(CseKey));
-  *stored_key = (CseKey){op, dtype, u->src, (uint16_t)n_src, u->arg, tag};
+  *stored_key = (CseKey){op, dtype, u->src, (uint16_t)n_src, u->arg, tag, u->tag_arg};
 
   poly_map_set(ctx->cse, h, stored_key, u, cse_eq);
   return u;
@@ -330,7 +357,7 @@ PolyUOp *poly_uop(
     int n_src,
     PolyArg arg
 ) {
-  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, 0);
+  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, 0, poly_arg_none());
 }
 
 PolyUOp *poly_uop_tagged(
@@ -342,7 +369,20 @@ PolyUOp *poly_uop_tagged(
     PolyArg arg,
     int32_t tag
 ) {
-  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, tag);
+  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, tag, poly_arg_none());
+}
+
+PolyUOp *poly_uop_tagged_arg(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    int32_t tag,
+    PolyArg tag_arg
+) {
+  return poly_uop_internal(ctx, op, dtype, src, n_src, arg, tag, tag_arg);
 }
 
 PolyUOp *poly_uop0(PolyCtx *ctx, PolyOps op, PolyDType dtype, PolyArg arg) {

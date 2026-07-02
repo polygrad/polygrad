@@ -293,6 +293,7 @@ typedef enum {
   POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
   POLY_ARG_BUFFERIZE_OPTS, /* (device, addrspace, removable) */
   POLY_ARG_PROGRAM_INFO, /* PolyProgramInfo* value metadata for PROGRAM */
+  POLY_ARG_BYTES, /* immutable runtime bytes for BINARY UOps */
   POLY_ARG_INVALID,
 } PolyArgKind;
 
@@ -334,6 +335,10 @@ typedef struct {
       bool removable;
     } bufferize_opts;
     const PolyProgramInfo *program_info;
+    struct {
+      const uint8_t *data;
+      int n;
+    } bytes;
   };
 } PolyArg;
 
@@ -397,6 +402,9 @@ static inline PolyArg poly_arg_bufferize_opts(
 }
 static inline PolyArg poly_arg_program_info(const PolyProgramInfo *info) {
   return (PolyArg){.kind = POLY_ARG_PROGRAM_INFO, .program_info = info};
+}
+static inline PolyArg poly_arg_bytes(const uint8_t *data, int n) {
+  return (PolyArg){.kind = POLY_ARG_BYTES, .bytes = {.data = data, .n = n}};
 }
 
 bool poly_program_info_eq(const PolyProgramInfo *a, const PolyProgramInfo *b);
@@ -498,7 +506,7 @@ typedef enum {
   POLY_DEVICE_WEBGPU, /* WebGPU GPU backend */
   POLY_DEVICE_CUDA,
   POLY_DEVICE_HIP,
-  POLY_DEVICE_X64_JIT,
+  POLY_DEVICE_X86,
 } PolyDevice;
 
 /* Default compute backend for the current build */
@@ -649,6 +657,7 @@ struct PolyUOp {
   uint16_t n_src;
   PolyArg arg;
   int32_t tag;
+  PolyArg tag_arg;
   uint32_t hash;
   bool minmax_cached;
   int64_t minmax_vmin;
@@ -710,6 +719,16 @@ PolyUOp *poly_uop_tagged(
     int n_src,
     PolyArg arg,
     int32_t tag
+);
+PolyUOp *poly_uop_tagged_arg(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    int32_t tag,
+    PolyArg tag_arg
 );
 
 /* Convenience: create a UOp with 0, 1, 2, or 3 sources */

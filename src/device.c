@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 static _Thread_local PolyFrontendBufferReleaseFn g_frontend_buffer_release = NULL;
 
@@ -77,11 +78,17 @@ static const PolyDeviceNameEntry POLY_DEVICE_NAMES[] = {
     {"cpu", POLY_DEVICE_CPU},     {"interp", POLY_DEVICE_INTERP},
     {"wasm", POLY_DEVICE_WASM},   {"webgpu", POLY_DEVICE_WEBGPU},
     {"cuda", POLY_DEVICE_CUDA},   {"hip", POLY_DEVICE_HIP},
-    {"x64", POLY_DEVICE_X64_JIT}, {"x64_jit", POLY_DEVICE_X64_JIT},
+    {"x86", POLY_DEVICE_X86},
 };
 
 PolyDevice poly_device_by_name(const char *name) {
   if (!name || !name[0]) return POLY_DEVICE_AUTO;
+  char buf[64];
+  size_t n = strlen(name);
+  if (n >= sizeof(buf)) return POLY_DEVICE_AUTO;
+  for (size_t i = 0; i <= n; i++) buf[i] = (char)tolower((unsigned char)name[i]);
+  name = buf;
+  if (strncmp(name, "cpu:", 4) == 0) name += 4;
   for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
     if (strcmp(name, POLY_DEVICE_NAMES[i].name) == 0) return POLY_DEVICE_NAMES[i].device;
   return POLY_DEVICE_AUTO;

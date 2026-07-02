@@ -2273,10 +2273,10 @@ static void reduce_ctx_add_end(ReduceContext *rctx, PolyUOp **ranges, int n_rang
  * Transforms REDUCE(reduce_op, value, reduce_range_0, ...) into:
  *   DEFINE_REG(acc_id)
  *   acc.after(input_ranges...).index(0).store(identity)   [init]
- *   acc.after(init, reduce_ranges...).index(0)             [loop read + LOAD]
+ *   acc.after(init, reduce_ranges...).index(0)             [loop read; LOAD added later]
  *   reduce_op(loop_read, value)                            [accumulate]
  *   acc.index(0).store(result).end(reduce_ranges...)       [finalize]
- *   acc.after(end).index(0)                                [final read + LOAD]
+ *   acc.after(end).index(0)                                [final read; LOAD added later]
  */
 static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
@@ -2401,10 +2401,13 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   } else {
     acc_base = acc;
   }
-  PolyUOp *init_idx = poly_uop2(ctx, POLY_OP_INDEX, acc_ptr, acc_base, zero, poly_arg_none());
+  PolyUOp *init_idx = poly_uop2(ctx, POLY_OP_INDEX, red->dtype, acc_base, zero, poly_arg_none());
   PolyUOp *acc_init = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, init_idx, identity, poly_arg_none());
 
-  /* Loop read: acc.after(init, reduce_ranges...).index(0) + LOAD */
+  /* Loop read: acc.after(init, reduce_ranges...).index(0).
+   * tinygrad adds LOAD in pm_add_loads, after thread/global dimensions are
+   * inserted. Keep the same boundary so x86 isel sees the same REG-backed
+   * address forms that tinygrad folds into memory operands. */
   PolyUOp *loop_srcs[POLY_MAX_DIMS + 2];
   loop_srcs[0] = acc;
   loop_srcs[1] = acc_init;
@@ -2412,16 +2415,15 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
     loop_srcs[i + 2] = reduce_ranges[i];
   PolyUOp *loop_after =
       poly_uop(ctx, POLY_OP_AFTER, acc_ptr, loop_srcs, n_reduce_range + 2, poly_arg_none());
-  PolyUOp *loop_idx = poly_uop2(ctx, POLY_OP_INDEX, acc_ptr, loop_after, zero, poly_arg_none());
-  PolyUOp *loop_load = poly_uop1(ctx, POLY_OP_LOAD, red->dtype, loop_idx, poly_arg_none());
+  PolyUOp *loop_idx = poly_uop2(ctx, POLY_OP_INDEX, red->dtype, loop_after, zero, poly_arg_none());
 
   /* Accumulate: reduce_op(loop_load, horizontal_reduce(inp)) */
-  PolyUOp *alu = loop_load;
+  PolyUOp *alu = loop_idx;
   for (int i = 0; i < n_lst; i++)
     alu = poly_uop2(ctx, reduce_op, red->dtype, alu, lst[i], poly_arg_none());
 
   /* Store back + END: acc.index(0).store(alu).end(reduce_ranges...) */
-  PolyUOp *store_idx = poly_uop2(ctx, POLY_OP_INDEX, acc_ptr, acc, zero, poly_arg_none());
+  PolyUOp *store_idx = poly_uop2(ctx, POLY_OP_INDEX, red->dtype, acc, zero, poly_arg_none());
   PolyUOp *acc_store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, store_idx, alu, poly_arg_none());
 
   /* Build END chain (innermost first to match tinygrad) */
@@ -2432,14 +2434,13 @@ static PolyUOp *rule_reduce_to_acc(PolyCtx *ctx, PolyUOp *root, const PolyBindin
   }
   reduce_ctx_add_end(rctx, reduce_ranges, n_reduce_range, chain);
 
-  /* Final read: acc.after(end).index(0) + LOAD */
+  /* Final read: acc.after(end).index(0); LOAD is added by pm_add_loads. */
   PolyUOp *final_srcs[2] = {acc, chain};
   PolyUOp *final_after = poly_uop(ctx, POLY_OP_AFTER, acc_ptr, final_srcs, 2, poly_arg_none());
-  PolyUOp *final_idx = poly_uop2(ctx, POLY_OP_INDEX, acc_ptr, final_after, zero, poly_arg_none());
-  PolyUOp *final_load = poly_uop1(ctx, POLY_OP_LOAD, red->dtype, final_idx, poly_arg_none());
+  PolyUOp *final_idx = poly_uop2(ctx, POLY_OP_INDEX, red->dtype, final_after, zero, poly_arg_none());
 
   free(lst);
-  return final_load;
+  return final_idx;
 }
 
 static PolyUOp *rule_merge_reduce_ends(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -3178,13 +3179,14 @@ static PolyUOp *xd_ldexp2k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d,
 }
 
 /* ldexp3k: d * 2^e via bit manipulation.
- * (d.bitcast(int) + e.cast(int) << mantissa_bits).bitcast(float) */
+ * tinygrad's helper uses shl(x, n) = x * 2**n here, not a raw Ops.SHL. The
+ * late MUL->SHL rewrite may still form an immediate shift for scalar lanes. */
 static PolyUOp *xd_ldexp3k(PolyCtx *ctx, PolyDType ft, PolyDType it, PolyUOp *d, PolyUOp *e) {
   int mbits = xd_mantissa_bits(ft);
-  PolyUOp *i_mb = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(mbits));
+  PolyUOp *factor = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(1LL << mbits));
   PolyUOp *d_bits = poly_uop1(ctx, POLY_OP_BITCAST, it, d, poly_arg_none());
   PolyUOp *e_int = poly_uop1(ctx, POLY_OP_CAST, it, e, poly_arg_none());
-  PolyUOp *e_shift = poly_uop2(ctx, POLY_OP_SHL, it, e_int, i_mb, poly_arg_none());
+  PolyUOp *e_shift = poly_uop2(ctx, POLY_OP_MUL, it, e_int, factor, poly_arg_none());
   PolyUOp *m_bits = poly_uop2(ctx, POLY_OP_ADD, it, d_bits, e_shift, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_BITCAST, ft, m_bits, poly_arg_none());
 }
@@ -3433,6 +3435,39 @@ static PolyUOp *take_two_over_pi_f32(PolyCtx *ctx, PolyUOp *i_u64, int offset) {
     out = poly_uop3(ctx, POLY_OP_WHERE, POLY_UINT32, ne, out, val, poly_arg_none());
   }
   return out;
+}
+
+/* tinygrad's Payne-Hanek _shl_lazy/_shr_lazy use pow2if multiply/divide
+ * instead of raw dynamic SHL/SHR. This keeps the generated x86 shape aligned
+ * with tinygrad's X86Renderer, which only encodes immediate scalar shifts. */
+static PolyUOp *xd_lazy_shl_u32(
+    PolyCtx *ctx,
+    PolyDType ft,
+    PolyDType it,
+    PolyDType ut64,
+    PolyDType ut32,
+    PolyUOp *x,
+    PolyUOp *y
+) {
+  PolyUOp *x64 = poly_uop1(ctx, POLY_OP_CAST, ut64, x, poly_arg_none());
+  PolyUOp *pow = poly_uop1(ctx, POLY_OP_CAST, ut64, xd_pow2if(ctx, ft, it, y), poly_arg_none());
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, ut64, x64, pow, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, ut32, mul, poly_arg_none());
+}
+
+static PolyUOp *xd_lazy_shr_u32(
+    PolyCtx *ctx,
+    PolyDType ft,
+    PolyDType it,
+    PolyDType ut64,
+    PolyDType ut32,
+    PolyUOp *x,
+    PolyUOp *y
+) {
+  PolyUOp *x64 = poly_uop1(ctx, POLY_OP_CAST, ut64, x, poly_arg_none());
+  PolyUOp *pow = poly_uop1(ctx, POLY_OP_CAST, ut64, xd_pow2if(ctx, ft, it, y), poly_arg_none());
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_CDIV, ut64, x64, pow, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_CAST, ut32, div, poly_arg_none());
 }
 
 /* Cody-Waite _reduce_d for f32: 4-term PI subtraction. */
@@ -3687,58 +3722,17 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyUOp *a1 = take_two_over_pi_f32(ctx, i_u64, 1);
   PolyUOp *a2 = take_two_over_pi_f32(ctx, i_u64, 2);
   PolyUOp *a3 = take_two_over_pi_f32(ctx, i_u64, 3);
-  /* Payne-Hanek word assembly: shift and OR adjacent 2/pi words.
-   * When e_lo == 0, offset == 32 and (uint32 >> 32) is UB in C.
-   * Fix: do shifts in uint64, then truncate to uint32. */
-  PolyUOp *e_lo_64 = poly_uop1(ctx, POLY_OP_CAST, ut64, e_lo, poly_arg_none());
-  PolyUOp *offset_64 = poly_uop1(ctx, POLY_OP_CAST, ut64, offset, poly_arg_none());
-  PolyUOp *hi = poly_uop1(
-      ctx, POLY_OP_CAST, ut32,
-      poly_uop2(
-          ctx, POLY_OP_OR, ut64,
-          poly_uop2(
-              ctx, POLY_OP_SHL, ut64, poly_uop1(ctx, POLY_OP_CAST, ut64, a0, poly_arg_none()),
-              e_lo_64, poly_arg_none()
-          ),
-          poly_uop2(
-              ctx, POLY_OP_SHR, ut64, poly_uop1(ctx, POLY_OP_CAST, ut64, a1, poly_arg_none()),
-              offset_64, poly_arg_none()
-          ),
-          poly_arg_none()
-      ),
-      poly_arg_none()
+  PolyUOp *hi = poly_uop2(
+      ctx, POLY_OP_OR, ut32, xd_lazy_shl_u32(ctx, ft, it, ut64, ut32, a0, e_lo),
+      xd_lazy_shr_u32(ctx, ft, it, ut64, ut32, a1, offset), poly_arg_none()
   );
-  PolyUOp *mi = poly_uop1(
-      ctx, POLY_OP_CAST, ut32,
-      poly_uop2(
-          ctx, POLY_OP_OR, ut64,
-          poly_uop2(
-              ctx, POLY_OP_SHL, ut64, poly_uop1(ctx, POLY_OP_CAST, ut64, a1, poly_arg_none()),
-              e_lo_64, poly_arg_none()
-          ),
-          poly_uop2(
-              ctx, POLY_OP_SHR, ut64, poly_uop1(ctx, POLY_OP_CAST, ut64, a2, poly_arg_none()),
-              offset_64, poly_arg_none()
-          ),
-          poly_arg_none()
-      ),
-      poly_arg_none()
+  PolyUOp *mi = poly_uop2(
+      ctx, POLY_OP_OR, ut32, xd_lazy_shl_u32(ctx, ft, it, ut64, ut32, a1, e_lo),
+      xd_lazy_shr_u32(ctx, ft, it, ut64, ut32, a2, offset), poly_arg_none()
   );
-  PolyUOp *lo = poly_uop1(
-      ctx, POLY_OP_CAST, ut32,
-      poly_uop2(
-          ctx, POLY_OP_OR, ut64,
-          poly_uop2(
-              ctx, POLY_OP_SHL, ut64, poly_uop1(ctx, POLY_OP_CAST, ut64, a2, poly_arg_none()),
-              e_lo_64, poly_arg_none()
-          ),
-          poly_uop2(
-              ctx, POLY_OP_SHR, ut64, poly_uop1(ctx, POLY_OP_CAST, ut64, a3, poly_arg_none()),
-              offset_64, poly_arg_none()
-          ),
-          poly_arg_none()
-      ),
-      poly_arg_none()
+  PolyUOp *lo = poly_uop2(
+      ctx, POLY_OP_OR, ut32, xd_lazy_shl_u32(ctx, ft, it, ut64, ut32, a2, e_lo),
+      xd_lazy_shr_u32(ctx, ft, it, ut64, ut32, a3, offset), poly_arg_none()
   );
 
   PolyUOp *hp_hi = poly_uop2(
@@ -5269,12 +5263,17 @@ static PolyUOp *rule_split_load_store(PolyCtx *ctx, PolyUOp *ls, const PolyBindi
   bool is_store = (ls->op == POLY_OP_STORE);
   if (!is_load && !is_store) return NULL;
   if (ls->n_src < 1) return NULL;
-  /* Match CAST(INDEX) source — the vec pointer form */
-  PolyUOp *cast = ls->src[0];
-  if (!cast || cast->op != POLY_OP_CAST) return NULL;
-  if (cast->n_src < 1 || !cast->src[0] || cast->src[0]->op != POLY_OP_INDEX) return NULL;
-  PolyUOp *idx = cast->src[0];
-  int sz = poly_ptr_lane_count(cast->dtype);
+  /* Match tinygrad's UPat(Ops.INDEX).cast(): both a bare pointer INDEX/SHRINK
+   * and an explicit CAST(INDEX) vector pointer form. */
+  PolyUOp *ptr = ls->src[0];
+  PolyUOp *idx = ptr;
+  if (ptr && ptr->op == POLY_OP_CAST && ptr->n_src >= 1) idx = ptr->src[0];
+  if (!idx || (idx->op != POLY_OP_INDEX && idx->op != POLY_OP_SHRINK)) return NULL;
+  if (idx->n_src < 2) return NULL;
+
+  int sz = poly_ptr_lane_count(ptr->dtype);
+  if (sz <= 1 && is_store && ls->n_src >= 2) sz = ls->src[1]->dtype.count;
+  if (sz <= 1 && is_load) sz = ls->dtype.count;
   if (sz <= 1) return NULL; /* nothing to split */
   PolyUOp *buf = idx->src[0];
   if (!buf) return NULL;
@@ -6986,11 +6985,12 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
   return g_pm_render_subset_vec;
 }
 
-/* Render subset for x64 with SIMD integer: keep vector CMP/WHERE packed.
- * Unlike render_subset_vec, does NOT scatter CMP/WHERE to per-lane scalar. */
-static _Thread_local PolyPatternMatcher *g_pm_render_subset_x64 = NULL;
-static PolyPatternMatcher *poly_pm_render_subset_x64(void) {
-  if (g_pm_render_subset_x64) return g_pm_render_subset_x64;
+/* Render subset for direct backends with packed integer masks: keep vector
+ * CMP/WHERE packed. Unlike render_subset_vec, this does not scatter CMP/WHERE
+ * to per-lane scalar. */
+static _Thread_local PolyPatternMatcher *g_pm_render_subset_packed_int = NULL;
+static PolyPatternMatcher *poly_pm_render_subset_packed_int(void) {
+  if (g_pm_render_subset_packed_int) return g_pm_render_subset_packed_int;
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_CONST, NULL, 0, "u"), rule_render_vector_const},
       {poly_pat_op(POLY_OP_VCONST, NULL, 0, "u"), rule_render_vconst},
@@ -7000,12 +7000,12 @@ static PolyPatternMatcher *poly_pm_render_subset_x64(void) {
       {poly_pat_op(POLY_OP_SUB, NULL, 0, "u"), rule_vector_sub_same_stack_rhs_to_add_neg},
       {poly_pat_op(POLY_OP_GEP, NULL, 0, "u"), rule_render_gep_single_shortcut},
       {poly_pat_op(POLY_OP_GEP, NULL, 0, "u"), rule_render_gep_multi},
-      /* Keep vector CMP/WHERE packed -- x64 handles them natively */
+      /* Keep vector CMP/WHERE packed: the backend handles masks natively. */
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_const_where_to_stack},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
   };
-  g_pm_render_subset_x64 = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
-  return g_pm_render_subset_x64;
+  g_pm_render_subset_packed_int = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  return g_pm_render_subset_packed_int;
 }
 
 /* tinygrad codegen/__init__.py::pm_remove_vec_dtypes, pointer storage part:
@@ -7194,8 +7194,9 @@ static PolyUOp *rebuild_preserve_tag(
     PolyUOp **srcs,
     int n_src
 ) {
-  return (u->tag != 0) ? poly_uop_tagged(ctx, u->op, dtype, srcs, n_src, u->arg, u->tag)
-                       : poly_uop(ctx, u->op, dtype, srcs, n_src, u->arg);
+  return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(ctx, u->op, dtype, srcs, n_src, u->arg, u->tag, u->tag_arg)
+             : poly_uop(ctx, u->op, dtype, srcs, n_src, u->arg);
 }
 
 static bool uop_tree_contains_op_codegen(PolyUOp *u, PolyOps op);
@@ -9119,7 +9120,7 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   if (opts.devectorize >= 1 || opts.devectorize < 0)
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset());
   else if (opts.caps.has_simd_int)
-    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_x64());
+    sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_packed_int());
   else
     sink = poly_graph_rewrite(ctx, sink, poly_pm_render_subset_vec());
   /* Match tinygrad's final rewrite ordering: render-subset scalarization can

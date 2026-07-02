@@ -831,12 +831,18 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
           continue;
         }
       } else {
-        new_src_n =
-            (new_n->tag != 0)
-                ? poly_uop_tagged(
-                      ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg, new_n->tag
-                  )
-                : poly_uop(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg);
+        new_src_n = (new_n->tag != 0 || new_n->tag_arg.kind != POLY_ARG_NONE)
+                        ? poly_uop_tagged_arg(
+                              ctx,
+                              new_n->op,
+                              new_n->dtype,
+                              new_src,
+                              new_n->n_src,
+                              new_n->arg,
+                              new_n->tag,
+                              new_n->tag_arg
+                          )
+                        : poly_uop(ctx, new_n->op, new_n->dtype, new_src, new_n->n_src, new_n->arg);
       }
       if (heap_src) free(new_src);
 
@@ -967,8 +973,10 @@ PolyUOp *poly_graph_walk_rewrite(
 
       PolyUOp *new_n;
       if (changed) {
-        new_n = (n->tag != 0)
-                    ? poly_uop_tagged(ctx, n->op, n->dtype, new_src, n->n_src, n->arg, n->tag)
+        new_n = (n->tag != 0 || n->tag_arg.kind != POLY_ARG_NONE)
+                    ? poly_uop_tagged_arg(
+                          ctx, n->op, n->dtype, new_src, n->n_src, n->arg, n->tag, n->tag_arg
+                      )
                     : poly_uop(ctx, n->op, n->dtype, new_src, n->n_src, n->arg);
       } else {
         new_n = n;

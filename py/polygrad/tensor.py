@@ -717,14 +717,11 @@ class Tensor:
 
     def realize(self, *lst, do_update_stats=True):
         """Triggers the computation needed to create these Tensor(s).
-        Filters out tensors already with buffer identity, batches the rest
-        into a single graph-side realize call, and retargets every live
-        tensor whose current UOp graph contains a realized root."""
+        Batches tensors into a single graph-side realize call, and retargets
+        every live tensor whose current UOp graph contains a realized root."""
         targets = []
         seen = set()
         for x in (self,) + lst:
-            if x.uop.has_buffer_identity():
-                continue
             current_raw = Tensor._core_uop_raw(x._tensor)
             device_id = int(_ffi._lib.poly_tensor_device(x._tensor))
             key = (_ptr_value(current_raw), device_id)
@@ -762,7 +759,10 @@ class Tensor:
         Matches tinygrad's Tensor.numpy signature."""
         from .dtype import _to_np_dtype
         shape = self.shape
-        np_dt = _to_np_dtype(self._dtype_str)
+        dtype = to_dtype(self._dtype_str)
+        if dtype.base in {dtypes.bfloat16, *dtypes.fp8s}:
+            return self.float().numpy()
+        np_dt = _to_np_dtype(dtype)
         if 0 in shape:
             return np.empty(shape, dtype=np_dt)
         assert _shape_all_int(shape), f'no data if shape is symbolic, self.shape={shape}'

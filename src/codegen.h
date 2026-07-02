@@ -333,26 +333,26 @@ int poly_hip_memset(void *ptr, unsigned char val, size_t bytes);
 
 #endif /* POLY_HAS_HIP */
 
-/* x86-64 JIT support (conditional on POLY_HAS_X64) */
+/* x86 ISA backend (tinygrad X86Renderer parity, conditional on POLY_HAS_X86) */
 
-#ifdef POLY_HAS_X64
+#ifdef POLY_HAS_X86
 
-/* x86-64 linearizer: rewrite with CPUID-based caps + linearize. */
-PolyUOp *poly_rewrite_x64(PolyCtx *ctx, PolyUOp *sink);
-PolyUOp **poly_linearize_x64(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+PolyUOp *poly_rewrite_x86(PolyCtx *ctx, PolyUOp *sink);
+PolyUOp **poly_linearize_x86_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+PolyUOp **poly_linearize_x86(PolyCtx *ctx, PolyUOp *sink, int *n_out);
+uint8_t *poly_render_x86(PolyUOp **uops, int n, int *size_out);
+char *poly_render_x86_source(PolyUOp **uops, int n);
+uint32_t poly_x86_feature_stamp(void);
 
-/* Render linearized UOps to x86-64 machine code.
- * Returns malloc'd byte array. Caller must free().
- * *size_out receives the byte count. */
-uint8_t *poly_render_x64(PolyUOp **uops, int n, int *size_out);
+typedef struct PolyX86Program PolyX86Program;
 
-/* x86-64 JIT Runtime */
-typedef struct PolyX64Program PolyX64Program;
+PolyX86Program *poly_compile_x86(const uint8_t *code, int code_size);
+PolyX86Program *poly_compile_x86_source(const char *source);
+int poly_x86_program_call(PolyX86Program *prog, void **args, int n_args);
+int poly_x86_program_call_core(PolyX86Program *prog, void **args, int n_args, int core_id);
+int poly_x86_program_call_threaded(PolyX86Program *prog, void **args, int n_args, int threads);
+void poly_x86_program_destroy(PolyX86Program *prog);
 
-PolyX64Program *poly_compile_x64(uint8_t *code, int code_size);
-void poly_x64_program_call(PolyX64Program *prog, void **args, int n_args);
-void poly_x64_program_destroy(PolyX64Program *prog);
-
-#endif /* POLY_HAS_X64 */
+#endif /* POLY_HAS_X86 */
 
 #endif /* POLY_CODEGEN_H */

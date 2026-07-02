@@ -281,8 +281,8 @@ PolyUOp *poly_program_from_call(PolyCtx *ctx, PolyUOp *call, const char *name);
 const PolyProgramInfo *poly_program_info(PolyCtx *ctx, PolyUOp *program);
 /* Return PROGRAM's cached POLY_OP_LINEAR child when present. This mirrors
  * tinygrad's PROGRAM(SINK, DEVICE, LINEAR, SOURCE, BINARY...) staging.
- * Polygrad currently stores SOURCE as a PROGRAM child and keeps compiled
- * BINARY/runtime handles in backend caches. */
+ * Polygrad stores immutable SOURCE/BINARY artifacts as PROGRAM children when
+ * the backend produces them; executable runner handles stay in runtime_cache. */
 PolyUOp *poly_program_linear(PolyUOp *program);
 PolyUOp *poly_schedule_call_to_program(
     PolyCtx *ctx,

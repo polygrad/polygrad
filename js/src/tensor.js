@@ -438,17 +438,15 @@ function createBoundTensorClass(runtime) {
     }
 
     async realize(...lst) {
-      // Triggers the computation needed to create these Tensor(s). Filters
-      // out tensors already with buffer identity, batches the rest into a
-      // single graph-side realize call, and retargets every live tensor whose
-      // current UOp graph contains a realized root.
+      // Triggers the computation needed to create these Tensor(s). The core
+      // decides whether a buffer identity is already current on the requested
+      // device or still needs an allocation/copy.
       const { ffi, ctx } = this._rt._core
       const tensors = [this, ...lst]
       if (!ffi.poly_realize_tensors) throw new Error('poly_realize_tensors is required')
       const targets = []
       const seen = new Set()
       for (const t of tensors) {
-        if (t.uop.hasBufferIdentity()) continue
         const key = `${uopKey(t._currentUopRaw())}:${tensorDevice(t._tensor)}`
         if (seen.has(key)) continue
         seen.add(key)

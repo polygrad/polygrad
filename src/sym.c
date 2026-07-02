@@ -823,6 +823,153 @@ static PolyUOp *rule_fdiv_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *
   return poly_const_like_float(ctx, poly_bind(b, "x"), 1.0);
 }
 
+static bool pow_const_double(PolyUOp *c, double *out) {
+  if (!c || c->op != POLY_OP_CONST || !out) return false;
+  switch (c->arg.kind) {
+  case POLY_ARG_INT:
+    *out = (double)c->arg.i;
+    return true;
+  case POLY_ARG_FLOAT:
+    *out = c->arg.f;
+    return true;
+  case POLY_ARG_BOOL:
+    *out = c->arg.b ? 1.0 : 0.0;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool pow_const_integer(double v, int64_t *out) {
+  if (!isfinite(v) || v < (double)INT64_MIN || v > (double)INT64_MAX) return false;
+  double ip = 0.0;
+  if (modf(v, &ip) != 0.0) return false;
+  if (out) *out = (int64_t)ip;
+  return true;
+}
+
+static PolyUOp *pow_const_like_exp(PolyCtx *ctx, PolyUOp *exp_ref, double value) {
+  if (exp_ref && !poly_dtype_is_float(exp_ref->dtype) && pow_const_integer(value, NULL))
+    return poly_const_like_int(ctx, exp_ref, (int64_t)value);
+  return poly_const_like_float(ctx, exp_ref, value);
+}
+
+/* tinygrad symbolic.py:simplify_pow:
+ *   x**c, c const:
+ *     c < 0      -> (1/x)**(-c)
+ *     c == 0     -> 1
+ *     c == n+.5  -> x**n * sqrt(x)
+ *     c integer  -> square-and-multiply recursion
+ */
+static PolyUOp *rule_simplify_pow_const_exp(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)root;
+  PolyUOp *x = poly_bind(b, "x");
+  PolyUOp *c = poly_bind(b, "c");
+  if (!x || !c) return NULL;
+  double cv = 0.0;
+  if (!pow_const_double(c, &cv) || !isfinite(cv)) return NULL;
+
+  if (cv < 0.0) {
+    if (!poly_dtype_is_float(x->dtype)) return NULL;
+    PolyUOp *rec = poly_uop1(ctx, POLY_OP_RECIPROCAL, x->dtype, x, poly_arg_none());
+    PolyUOp *pos = pow_const_like_exp(ctx, c, -cv);
+    return poly_uop2(ctx, POLY_OP_POW, x->dtype, rec, pos, poly_arg_none());
+  }
+  if (cv == 0.0) return poly_const_like_int(ctx, x, 1);
+
+  if (poly_dtype_is_float(x->dtype)) {
+    double half_base = floor(cv - 0.5);
+    if (half_base + 0.5 == cv) {
+      PolyUOp *exp = pow_const_like_exp(ctx, c, cv - 0.5);
+      PolyUOp *pow_part = poly_uop2(ctx, POLY_OP_POW, x->dtype, x, exp, poly_arg_none());
+      PolyUOp *sqrt_part = poly_uop1(ctx, POLY_OP_SQRT, x->dtype, x, poly_arg_none());
+      return poly_uop2(ctx, POLY_OP_MUL, x->dtype, pow_part, sqrt_part, poly_arg_none());
+    }
+  }
+
+  int64_t ci = 0;
+  if (!pow_const_integer(cv, &ci) || ci <= 0) return NULL;
+  if (ci > 256) return NULL; /* avoid pathological rewrite expansion */
+  PolyUOp *half = pow_const_like_exp(ctx, c, (double)(ci / 2));
+  PolyUOp *y = poly_uop2(ctx, POLY_OP_POW, x->dtype, x, half, poly_arg_none());
+  PolyUOp *yy = poly_uop2(ctx, POLY_OP_MUL, x->dtype, y, y, poly_arg_none());
+  if (ci & 1) return poly_uop2(ctx, POLY_OP_MUL, x->dtype, yy, x, poly_arg_none());
+  return yy;
+}
+
+/* tinygrad symbolic.py:
+ *   c**x -> c                         if c == 1
+ *   c**x -> exp2(x * log2(c))          if c > 0
+ */
+static PolyUOp *rule_simplify_pow_const_base(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  PolyUOp *c = poly_bind(b, "c");
+  PolyUOp *x = poly_bind(b, "x");
+  if (!c || !x) return NULL;
+  double cv = 0.0;
+  if (!pow_const_double(c, &cv) || !isfinite(cv)) return NULL;
+  if (cv == 1.0) return c;
+  if (cv <= 0.0 || !poly_dtype_is_float(root->dtype)) return NULL;
+  PolyUOp *scale = poly_const_like_float(ctx, x, log2(cv));
+  PolyUOp *arg = poly_uop2(ctx, POLY_OP_MUL, x->dtype, x, scale, poly_arg_none());
+  return poly_uop1(ctx, POLY_OP_EXP2, root->dtype, arg, poly_arg_none());
+}
+
+/* tinygrad decompositions.py:xpow, invoked from symbolic.py:sym for remaining POW. */
+static PolyUOp *rule_decomp_pow_generic(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->op != POLY_OP_POW || root->n_src < 2) return NULL;
+  if (!poly_dtype_is_float(root->dtype)) return NULL;
+  PolyUOp *base = root->src[0];
+  PolyUOp *exponent = root->src[1];
+  PolyDType ft = root->dtype;
+  PolyDType bt = (ft.count > 1) ? poly_dtype_vec(POLY_BOOL, ft.count) : POLY_BOOL;
+  PolyDType it = (ft.count > 1) ? poly_dtype_vec(POLY_INT32, ft.count) : POLY_INT32;
+
+  PolyUOp *base_zero = poly_const_like_float(ctx, base, 0.0);
+  PolyUOp *exp_zero = poly_const_like_float(ctx, exponent, 0.0);
+  PolyUOp *one = poly_const_like_float(ctx, root, 1.0);
+  PolyUOp *nanv = poly_const_like_float(ctx, root, NAN);
+
+  PolyUOp *base_lt0 = poly_uop2(ctx, POLY_OP_CMPLT, bt, base, base_zero, poly_arg_none());
+  PolyUOp *abs_base = poly_uop3(
+      ctx, POLY_OP_WHERE, base->dtype, base_lt0,
+      poly_uop1(ctx, POLY_OP_NEG, base->dtype, base, poly_arg_none()), base, poly_arg_none()
+  );
+
+  PolyUOp *log_abs = poly_uop1(ctx, POLY_OP_LOG2, ft, abs_base, poly_arg_none());
+  PolyUOp *scaled = poly_uop2(ctx, POLY_OP_MUL, ft, log_abs, exponent, poly_arg_none());
+  PolyUOp *ret = poly_uop1(ctx, POLY_OP_EXP2, ft, scaled, poly_arg_none());
+
+  PolyUOp *exp_int = poly_uop1(ctx, POLY_OP_CAST, it, exponent, poly_arg_none());
+  PolyUOp *exp_back = poly_uop1(ctx, POLY_OP_CAST, ft, exp_int, poly_arg_none());
+  PolyUOp *non_int = poly_uop2(ctx, POLY_OP_CMPNE, bt, exponent, exp_back, poly_arg_none());
+
+  PolyUOp *exp_lt0 = poly_uop2(ctx, POLY_OP_CMPLT, bt, exponent, exp_zero, poly_arg_none());
+  PolyUOp *abs_exp = poly_uop3(
+      ctx, POLY_OP_WHERE, ft, exp_lt0, poly_uop1(ctx, POLY_OP_NEG, ft, exponent, poly_arg_none()),
+      exponent, poly_arg_none()
+  );
+  PolyUOp *abs_exp_int = poly_uop1(ctx, POLY_OP_CAST, it, abs_exp, poly_arg_none());
+  PolyUOp *rem = poly_uop2(
+      ctx, POLY_OP_MOD, it, abs_exp_int, poly_const_like_int(ctx, abs_exp_int, 2), poly_arg_none()
+  );
+  PolyUOp *is_odd = poly_uop1(ctx, POLY_OP_CAST, bt, rem, poly_arg_none());
+
+  PolyUOp *signed_ret = poly_uop3(
+      ctx, POLY_OP_WHERE, ft, is_odd, poly_uop1(ctx, POLY_OP_NEG, ft, ret, poly_arg_none()), ret,
+      poly_arg_none()
+  );
+  PolyUOp *neg_base_result =
+      poly_uop3(ctx, POLY_OP_WHERE, ft, non_int, nanv, signed_ret, poly_arg_none());
+
+  PolyUOp *base_eq0 = poly_uop2(ctx, POLY_OP_CMPEQ, bt, base, base_zero, poly_arg_none());
+  PolyUOp *exp_eq0 = poly_uop2(ctx, POLY_OP_CMPEQ, bt, exponent, exp_zero, poly_arg_none());
+  PolyUOp *zero_pow_zero = poly_uop2(ctx, POLY_OP_AND, bt, base_eq0, exp_eq0, poly_arg_none());
+  PolyUOp *base_result =
+      poly_uop3(ctx, POLY_OP_WHERE, ft, base_lt0, neg_base_result, ret, poly_arg_none());
+  return poly_uop3(ctx, POLY_OP_WHERE, ft, zero_pow_zero, one, base_result, poly_arg_none());
+}
+
 /* WHERE(cond, val, val) -> val */
 static PolyUOp *rule_where_same(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)ctx;
@@ -1178,6 +1325,15 @@ static int arg_tuplize_cmp(PolyArg a, PolyArg b) {
     uint32_t bh = poly_program_info_hash(b.program_info);
     if (ah != bh) return (ah > bh) - (ah < bh);
     return (a.program_info > b.program_info) - (a.program_info < b.program_info);
+  }
+  case POLY_ARG_BYTES: {
+    int n = a.bytes.n < b.bytes.n ? a.bytes.n : b.bytes.n;
+    for (int i = 0; i < n; i++) {
+      uint8_t av = a.bytes.data ? a.bytes.data[i] : 0;
+      uint8_t bv = b.bytes.data ? b.bytes.data[i] : 0;
+      if (av != bv) return (av > bv) - (av < bv);
+    }
+    return (a.bytes.n > b.bytes.n) - (a.bytes.n < b.bytes.n);
   }
   }
   return 0;
@@ -2425,6 +2581,12 @@ PolyPatternMatcher *poly_symbolic_simple(void) {
       /* VECTORIZE(GEP(x,a0), ...) → x.gep((a0,...)) is in gep_pushing (tinygrad symbolic.py:199).
        * Then rule_gep_identity handles the (0,1,...,N-1) → identity case. */
 
+      /* -- POW folding (tinygrad symbolic.py:simplify_pow) -- */
+      {poly_pat_op2(POLY_OP_POW, poly_pat_any("x"), poly_pat_cvar("c"), NULL),
+       rule_simplify_pow_const_exp},
+      {poly_pat_op2(POLY_OP_POW, poly_pat_cvar("c"), poly_pat_any("x"), NULL),
+       rule_simplify_pow_const_base},
+
       /* -- Cast folding -- */
       /* CAST(CONST) -> CONST */
       {poly_pat_op1(POLY_OP_CAST, poly_pat_cvar("c"), NULL), rule_cast_const},
@@ -2552,6 +2714,8 @@ PolyPatternMatcher *poly_symbolic(void) {
        rule_cast_index_add_const_to_add_casts},
       {poly_pat_ops2(POLY_GROUP_ASSOCIATIVE, poly_pat_any(NULL), poly_pat_any(NULL), "alu"),
        rule_assoc_fold_consts},
+      /* Remaining POW lowers through xpow, matching tinygrad symbolic.py:sym. */
+      {poly_pat_op(POLY_OP_POW, NULL, 0, NULL), rule_decomp_pow_generic},
       {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_distribute_const_mul_over_add},
       {poly_pat_op(POLY_OP_ADD, NULL, 0, "add"), rule_move_const_to_end},
       {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_move_const_to_end},

@@ -92,8 +92,10 @@ static PolyUOp *flatten_range(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
     new_src[n_new++] = root->src[i];
   for (int i = 0; i < n_flat; i++)
     new_src[n_new++] = flat_rngs[i];
-  return (root->tag != 0)
-             ? poly_uop_tagged(ctx, root->op, root->dtype, new_src, n_new, root->arg, root->tag)
+  return (root->tag != 0 || root->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(
+                   ctx, root->op, root->dtype, new_src, n_new, root->arg, root->tag, root->tag_arg
+               )
              : poly_uop(ctx, root->op, root->dtype, new_src, n_new, root->arg);
 }
 

@@ -2657,8 +2657,10 @@ static PolyUOp *clone_uop_into_ctx(PolyCtx *dst_ctx, PolyMap *memo, PolyUOp *u) 
 
   /* Preserve nonzero tags when cloning cross-ctx UOps so BUFFER uniqueness and
    * imported UNIQUE-like identities remain stable inside the destination ctx. */
-  PolyUOp *cloned = u->tag
-                        ? poly_uop_tagged(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag)
+  PolyUOp *cloned = (u->tag || u->tag_arg.kind != POLY_ARG_NONE)
+                        ? poly_uop_tagged_arg(
+                              dst_ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag, u->tag_arg
+                          )
                         : poly_uop(dst_ctx, u->op, u->dtype, src, u->n_src, u->arg);
   if (src != stack_src) free(src);
   if (cloned) poly_map_set(memo, poly_ptr_hash(u), u, cloned, poly_ptr_eq);

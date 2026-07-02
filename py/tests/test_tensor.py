@@ -62,6 +62,13 @@ class TestCreation:
         t = Tensor.full((2, 2), 7.0)
         np.testing.assert_allclose(t.numpy(), np.full((2, 2), 7.0))
 
+    def test_bfloat16_numpy_widens_to_float32(self):
+        t = Tensor([1.0, 2.0, 3.0, 4.0], dtype='bfloat16')
+        y = (t + t).realize()
+        out = y.numpy()
+        assert out.dtype == np.float32
+        np.testing.assert_allclose(out, [2.0, 4.0, 6.0, 8.0])
+
     def test_arange(self):
         t = Tensor.arange(5)
         np.testing.assert_allclose(t.numpy(), np.arange(5, dtype=np.float32))

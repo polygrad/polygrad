@@ -2130,7 +2130,8 @@ TEST(wasm, define_reg_array_constant_indexes_match_c_renderer) {
 }
 
 TEST(wasm, render_pow) {
-  /* POW kernel: c[i] = a[i] ^ b[i] — must import powf */
+  /* POW kernel: c[i] = a[i] ^ b[i] — lowered through tinygrad-style
+   * transcendental decomposition, so a math import call is expected. */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_POW, 4);
   int n_lin;
   PolyUOp **lin = poly_linearize_wasm(k.ctx, k.sink, &n_lin);
@@ -2146,7 +2147,7 @@ TEST(wasm, render_pow) {
   ASSERT_INT_EQ(wasm[2], 0x73);
   ASSERT_INT_EQ(wasm[3], 0x6D);
 
-  /* Must contain a CALL instruction (0x10) for the imported powf */
+  /* Must contain a CALL instruction (0x10) for the math import. */
   bool found_call = false;
   for (int i = 0; i < wasm_size; i++) {
     if (wasm[i] == WASM_OP_CALL) {

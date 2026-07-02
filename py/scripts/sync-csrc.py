@@ -58,7 +58,6 @@ SOURCES = [
     'src/optim.c',
     'src/tokenizer.c',
     'src/render_hip.c',
-    'src/render_x64.c',
     'src/runtime_hip.c',
     # CODEC_SRC
     'vendor/cjson/cJSON.c',

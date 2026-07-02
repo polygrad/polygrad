@@ -16,6 +16,7 @@ function parseArgs(argv) {
     paired: false,
     json: false,
     progress: true,
+    attribution: false,
   };
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -32,9 +33,11 @@ function parseArgs(argv) {
       out.progress = false;
     } else if (a === "--json") {
       out.json = true;
+    } else if (a === "--attribution") {
+      out.attribution = true;
     } else if (a === "--help" || a === "-h") {
       console.log(`Usage: node bench/bench_jax_js_wasm.mjs [iters warmup]
-       node bench/bench_jax_js_wasm.mjs --iters N --warmup N [--rounds N] [--paired] [--json]`);
+       node bench/bench_jax_js_wasm.mjs --iters N --warmup N [--rounds N] [--paired] [--json] [--attribution]`);
       process.exit(0);
     } else {
       positional.push(a);
@@ -106,10 +109,12 @@ async function bench(name, call, ready, dispose) {
   return resultFromTimes(name, times);
 }
 
-function printSummary(pgResults, jaxResults) {
+function printSummary(pgResults, jaxResults, pgDirectResults) {
+  const directByName = new Map((pgDirectResults || []).map((x) => [x.name, x]));
   const rows = pgResults.map((pg) => {
     const jx = jaxResults.find(x => x.name === pg.name);
-    return {
+    const direct = directByName.get(pg.name) || null;
+    const row = {
       name: pg.name,
       polygrad_us: pg.median_us,
       jax_js_us: jx?.median_us ?? NaN,
@@ -117,6 +122,14 @@ function printSummary(pgResults, jaxResults) {
       polygrad_min_us: pg.min_us,
       jax_js_min_us: jx?.min_us ?? NaN,
     };
+    if (args.attribution) {
+      row.polygrad_public_us = pg.median_us;
+      row.polygrad_direct_c_jit_us = direct?.median_us ?? null;
+      row.polygrad_js_over_direct_us = direct ? pg.median_us - direct.median_us : null;
+      row.polygrad_public_over_direct = direct ? pg.median_us / direct.median_us : null;
+      row.polygrad_direct_c_jit_min_us = direct?.min_us ?? null;
+    }
+    return row;
   });
   if (args.json) {
     console.log(JSON.stringify({
@@ -130,17 +143,68 @@ function printSummary(pgResults, jaxResults) {
       rounds: args.rounds,
       paired_requested: args.paired,
       paired_actual: args.paired,
+      attribution: args.attribution,
+      attribution_notes: args.attribution ? [
+        "polygrad_public_us measures the public JS pg.jit wrapper.",
+        "polygrad_direct_c_jit_us measures ffi.poly_jit_run on the same captured graph and tensors after public warmup.",
+        "raw generated-kernel timing is not included in this wrapper benchmark; use raw module probes for renderer-only timing.",
+      ] : [],
       results: rows,
     }, null, 2));
     return;
   }
   console.log(JSON.stringify({ backend: "polygrad-js-wasm-jit", results: pgResults }));
   console.log(JSON.stringify({ backend: "jax-js-wasm-node-jit", results: jaxResults }));
-  console.log("\ncase,polygrad_us,jax_js_us,ratio_pg_over_jax");
+  console.log(args.attribution
+    ? "\ncase,polygrad_public_us,polygrad_direct_c_jit_us,polygrad_js_over_direct_us,jax_js_us,ratio_pg_over_jax"
+    : "\ncase,polygrad_us,jax_js_us,ratio_pg_over_jax");
   for (const row of rows) {
     if (!Number.isFinite(row.jax_js_us)) continue;
-    console.log(`${row.name},${row.polygrad_us.toFixed(3)},${row.jax_js_us.toFixed(3)},${row.ratio_pg_over_jax.toFixed(3)}`);
+    if (args.attribution) {
+      const direct = row.polygrad_direct_c_jit_us == null ? "" : row.polygrad_direct_c_jit_us.toFixed(3);
+      const overhead = row.polygrad_js_over_direct_us == null ? "" : row.polygrad_js_over_direct_us.toFixed(3);
+      console.log(`${row.name},${row.polygrad_public_us.toFixed(3)},${direct},${overhead},${row.jax_js_us.toFixed(3)},${row.ratio_pg_over_jax.toFixed(3)}`);
+    } else {
+      console.log(`${row.name},${row.polygrad_us.toFixed(3)},${row.jax_js_us.toFixed(3)},${row.ratio_pg_over_jax.toFixed(3)}`);
+    }
   }
+}
+
+async function buildDirectPolygradJit(pg, workload) {
+  const { ffi, ctx } = pg._core;
+  if (!ffi.poly_jit_new) throw new Error("polygrad core does not expose poly_jit");
+  const handles = workload.args.map((t) => t._tensor);
+  const jit = ffi.poly_jit_new(ctx);
+  if (!jit) throw new Error("poly_jit_new failed");
+  if (ffi.poly_jit_begin_capture(jit, handles) !== 0) {
+    ffi.poly_jit_free(jit);
+    throw new Error(`poly_jit_begin_capture failed for ${workload.name}`);
+  }
+  let ret = null;
+  try {
+    ret = workload.build(...workload.args);
+    await ret.realize();
+    if (ffi.poly_jit_end_capture(jit) !== 0) {
+      throw new Error(`poly_jit_end_capture failed for ${workload.name}`);
+    }
+  } catch (err) {
+    if (ffi.poly_jit_cancel_capture) ffi.poly_jit_cancel_capture(jit);
+    ffi.poly_jit_free(jit);
+    throw err;
+  }
+  return {
+    name: workload.name,
+    call: async () => {
+      const rc = await ffi.poly_jit_run(jit, handles);
+      if (rc !== 0) throw new Error(`poly_jit_run failed for ${workload.name}: ${rc}`);
+      return ret;
+    },
+    ready: async () => {},
+    dispose: null,
+    cleanup() {
+      ffi.poly_jit_free(jit);
+    },
+  };
 }
 
 async function setupPolygrad(inputs) {
@@ -156,26 +220,25 @@ async function setupPolygrad(inputs) {
   const col = new Tensor(col0).reshape(1, 1024);
   await a.realize(b, c, d, x2, row, col);
 
-  const workloads = [
-    { name: "pointwise_1m", fn: pg.jit((aa, bb) => aa.add(bb).mul(aa.sub(bb)).add(aa.mul(bb)).relu()), args: [a, b] },
+  const defs = [
+    { name: "pointwise_1m", build: (aa, bb) => aa.add(bb).mul(aa.sub(bb)).add(aa.mul(bb)).relu(), args: [a, b] },
     {
       name: "where_1m",
-      fn: pg.jit((aa, bb, cc, dd) =>
-        aa.gt(bb).where(aa.add(cc).mul(bb.sub(dd)), aa.sub(cc).mul(bb.add(dd)))
-      ),
+      build: (aa, bb, cc, dd) => aa.gt(bb).where(aa.add(cc).mul(bb.sub(dd)), aa.sub(cc).mul(bb.add(dd))),
       args: [a, b, c, d],
     },
     {
       name: "broadcast_reduce_1024",
-      fn: pg.jit((xx, rr, cc) => xx.add(rr).mul(cc).sub(0.25).relu().sum(1)),
+      build: (xx, rr, cc) => xx.add(rr).mul(cc).sub(0.25).relu().sum(1),
       args: [x2, row, col],
     },
     {
       name: "transpose_copy_1024",
-      fn: pg.jit((xx) => xx.reshape(512, 2048).permute(1, 0).contiguous()),
+      build: (xx) => xx.reshape(512, 2048).permute(1, 0).contiguous(),
       args: [x2],
     },
   ];
+  const workloads = defs.map((w) => ({ ...w, fn: pg.jit(w.build) }));
 
   return {
     workloads: workloads.map((w) => ({
@@ -184,10 +247,13 @@ async function setupPolygrad(inputs) {
       ready: async () => {},
       dispose: null,
       fn: w.fn,
+      args: w.args,
+      build: w.build,
     })),
-    cleanup() {
+    directWorkload: (w) => buildDirectPolygradJit(pg, w),
+    async cleanup() {
       for (const w of workloads) w.fn.dispose?.();
-      pg.destroy?.();
+      await pg.dispose?.();
     },
   };
 }
@@ -195,11 +261,19 @@ async function setupPolygrad(inputs) {
 async function runPolygrad(inputs) {
   const setup = await setupPolygrad(inputs);
   const results = [];
+  const directResults = [];
+  const directCleanups = [];
   for (const w of setup.workloads) {
     results.push(await bench(w.name, w.call, w.ready, w.dispose));
+    if (args.attribution) {
+      const direct = await setup.directWorkload(w);
+      directCleanups.push(direct.cleanup);
+      directResults.push(await bench(w.name, direct.call, direct.ready, direct.dispose));
+    }
   }
-  setup.cleanup();
-  return results;
+  for (const cleanup of directCleanups.reverse()) cleanup();
+  await setup.cleanup();
+  return { results, directResults };
 }
 
 async function setupJax(inputs) {
@@ -274,6 +348,8 @@ async function runPaired(inputs) {
   const pg = await setupPolygrad(inputs);
   const jax = await setupJax(inputs);
   const pgResults = [];
+  const pgDirectResults = [];
+  const directCleanups = [];
   const jaxResults = [];
 
   for (let i = 0; i < pg.workloads.length; i++) {
@@ -293,11 +369,22 @@ async function runPaired(inputs) {
     }
     pgResults.push(resultFromTimes(pw.name, pgTimes));
     jaxResults.push(resultFromTimes(jw.name, jaxTimes));
+    if (args.attribution) {
+      const direct = await pg.directWorkload(pw);
+      directCleanups.push(direct.cleanup);
+      const directTimes = [];
+      for (let r = 0; r < args.rounds; r++) {
+        if (args.progress) console.error(`[direct] ${pw.name} round=${r + 1}/${args.rounds}`);
+        directTimes.push(...await collectTimes(direct.call, direct.ready, direct.dispose));
+      }
+      pgDirectResults.push(resultFromTimes(pw.name, directTimes));
+    }
   }
 
-  pg.cleanup();
+  for (const cleanup of directCleanups.reverse()) cleanup();
+  await pg.cleanup();
   jax.cleanup();
-  return { pgResults, jaxResults };
+  return { pgResults, pgDirectResults, jaxResults };
 }
 
 const n = 1 << 20;
@@ -311,7 +398,13 @@ const inputs = [
   makeLin(1024, 0.75, 1.25),
 ];
 
-const { pgResults, jaxResults } = args.paired
-  ? await runPaired(inputs)
-  : { pgResults: await runPolygrad(inputs), jaxResults: await runJax(inputs) };
-printSummary(pgResults, jaxResults);
+let pgResults, pgDirectResults, jaxResults;
+if (args.paired) {
+  ({ pgResults, pgDirectResults, jaxResults } = await runPaired(inputs));
+} else {
+  const pg = await runPolygrad(inputs);
+  pgResults = pg.results;
+  pgDirectResults = pg.directResults;
+  jaxResults = await runJax(inputs);
+}
+printSummary(pgResults, jaxResults, pgDirectResults);

@@ -36,7 +36,7 @@ static PolyDevice device_from_string_arg(const char *s) {
   if (strcmp(s, "HIP") == 0) return POLY_DEVICE_HIP;
   if (strcmp(s, "WEBGPU") == 0) return POLY_DEVICE_WEBGPU;
   if (strcmp(s, "INTERP") == 0) return POLY_DEVICE_INTERP;
-  if (strcmp(s, "X64") == 0 || strcmp(s, "X64_JIT") == 0) return POLY_DEVICE_X64_JIT;
+  if (strcmp(s, "X86") == 0) return POLY_DEVICE_X86;
   return poly_device_by_name(s);
 }
 
@@ -125,11 +125,19 @@ static PolyUOp *copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) 
   return poly_uop(ctx, POLY_OP_COPY, value->dtype, src, 2, poly_arg_none());
 }
 
+static bool placement_devices_share_storage(PolyDevice a, PolyDevice b) {
+  if (a == POLY_DEVICE_AUTO || b == POLY_DEVICE_AUTO) return false;
+  if (poly_devices_share_storage(a, b)) return true;
+  if (a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST) return false;
+  return poly_device_is_host_addressable(a) && poly_device_is_host_addressable(b);
+}
+
 static PolyUOp *ensure_on_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) {
   if (!ctx || !value || device == POLY_DEVICE_AUTO) return value;
   PolyDevice current = poly_uop_device(value);
-  if (current != POLY_DEVICE_AUTO && poly_devices_share_storage(current, device)) return value;
-  if (current == POLY_DEVICE_AUTO && poly_devices_share_storage(poly_device_default(), device)) return value;
+  if (current != POLY_DEVICE_AUTO && placement_devices_share_storage(current, device)) return value;
+  if (current == POLY_DEVICE_AUTO && placement_devices_share_storage(poly_device_default(), device))
+    return value;
   return copy_to_device(ctx, value, device);
 }
 
@@ -280,7 +288,8 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
 
   if (!result && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM)) {
     PolyBuffer *buf = poly_buffer_get(p->ctx, u);
-    if (buf && buf->ptr && buf->device != POLY_DEVICE_AUTO && poly_devices_share_storage(buf->device, device))
+    if (buf && buf->ptr && buf->device != POLY_DEVICE_AUTO &&
+        placement_devices_share_storage(buf->device, device))
       result = u;
     else
       result = copy_to_device(p->ctx, u, device);

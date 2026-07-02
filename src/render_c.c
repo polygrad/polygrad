@@ -827,9 +827,12 @@ static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
 }
 
 PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
+  if (n_out) *n_out = 0;
+  if (!ctx || !sink) return NULL;
   /* 1. Standard toposort */
   int n;
   PolyUOp **topo = poly_toposort(ctx, sink, &n);
+  if (!topo || n <= 0) return NULL;
 
   /* 2. Build UOp* → topo-index lookup */
   IntMap idx;
@@ -1032,7 +1035,7 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   free(ideal);
   free(nkey);
 
-  *n_out = rlen;
+  if (n_out) *n_out = rlen;
   return result;
 }
 
@@ -1055,8 +1058,8 @@ PolyRendererCaps poly_c_renderer_caps(void) {
       .has_threads = has_threads,
       /* Clang/C rendering follows tinygrad's CStyle pm_render path, which
        * inserts masked-load alt values and scalarizes vector comparisons.
-       * The packed-int render subset is reserved for the handwritten x64
-       * backend, which sets this capability in render_x64.c. */
+       * Direct ISA backends that keep packed integer masks set this capability
+       * themselves. */
       .has_simd_int = false,
       .max_vec_width = 4,
       .max_threads = has_threads ? cpu_thread_count() : 0,
@@ -1088,6 +1091,10 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
 
 PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, int *n_out) {
   sink = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
+  if (!sink) {
+    if (n_out) *n_out = 0;
+    return NULL;
+  }
   return poly_linearize_rewritten(ctx, sink, n_out);
 }
 

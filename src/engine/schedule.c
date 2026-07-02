@@ -151,6 +151,12 @@ static PolyUOp *poly_program_source(PolyUOp *program) {
   return (source && source->op == POLY_OP_SOURCE) ? source : NULL;
 }
 
+static PolyUOp *poly_program_binary(PolyUOp *program) {
+  if (!program || program->op != POLY_OP_PROGRAM || program->n_src < 5) return NULL;
+  PolyUOp *binary = program->src[4];
+  return (binary && binary->op == POLY_OP_BINARY) ? binary : NULL;
+}
+
 #ifndef __EMSCRIPTEN__
 static const char *poly_program_source_text(PolyUOp *program) {
   PolyUOp *source = poly_program_source(program);
@@ -519,6 +525,12 @@ static void poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
   PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
   for (int i = 0; i < n_topo; i++) {
     PolyUOp *u = topo[i];
+    if (u && u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR &&
+        u->arg.define_var.name && strcmp(u->arg.define_var.name, "core_id") == 0) {
+      int64_t n = u->arg.define_var.max_val + 1;
+      if (n > 0 && n <= INT32_MAX) info->global_size[0] = (int)n;
+      continue;
+    }
     if (!u || u->op != POLY_OP_SPECIAL || u->n_src <= 0 || u->arg.kind != POLY_ARG_STRING)
       continue;
     const char *name = u->arg.str;
@@ -540,6 +552,24 @@ static void poly_program_info_collect_launch(PolyCtx *ctx, PolyUOp *body, PolyPr
     }
   }
   poly_toposort_free(topo);
+}
+
+static PolyUOp *poly_program_core_id_var(PolyCtx *ctx, PolyUOp *body) {
+  if (!ctx || !body) return NULL;
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, body, &n_topo);
+  if (!topo) return NULL;
+  PolyUOp *out = NULL;
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u && u->op == POLY_OP_DEFINE_VAR && u->arg.kind == POLY_ARG_DEFINE_VAR &&
+        u->arg.define_var.name && strcmp(u->arg.define_var.name, "core_id") == 0) {
+      out = u;
+      break;
+    }
+  }
+  poly_toposort_free(topo);
+  return out;
 }
 
 static int poly_call_get_outs_ins(PolyCtx *ctx, PolyUOp *call, bool *outs, bool *ins, int n_args) {
@@ -589,17 +619,29 @@ static PolyProgramInfo *poly_program_info_build(
   info->name = poly_schedule_arena_strdup(ctx, program_name);
   poly_program_info_collect_launch(ctx, body, info);
 
-  int n_vars = poly_call_n_var_args(call);
+  int n_call_vars = poly_call_n_var_args(call);
+  PolyUOp *core_id = poly_program_core_id_var(ctx, body);
+  bool core_id_in_call = false;
+  for (int i = 0; i < n_call_vars; i++) {
+    if (poly_call_var_arg(call, i) == core_id) {
+      core_id_in_call = true;
+      break;
+    }
+  }
+  int n_vars = n_call_vars + (core_id && !core_id_in_call ? 1 : 0);
   if (n_vars > 0) {
-    info->vars = poly_arena_alloc(ctx->arena, (size_t)n_vars * sizeof(PolyUOp *), _Alignof(PolyUOp *));
+    info->vars = poly_arena_alloc(
+        ctx->arena, (size_t)n_vars * sizeof(PolyUOp *), _Alignof(PolyUOp *)
+    );
     if (!info->vars) {
       free(globals);
       free(outs);
       free(ins);
       return NULL;
     }
-    for (int i = 0; i < n_vars; i++)
+    for (int i = 0; i < n_call_vars; i++)
       info->vars[i] = poly_call_var_arg(call, i);
+    if (core_id && !core_id_in_call) info->vars[n_call_vars] = core_id;
     info->n_vars = n_vars;
   }
 
@@ -686,6 +728,21 @@ static PolyUOp *poly_program_attach_source(PolyCtx *ctx, PolyUOp *program, const
   if (!source) return NULL;
   PolyUOp *src[4] = {program->src[0], program->src[1], program->src[2], source};
   return poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 4, program->arg);
+}
+
+static PolyUOp *poly_program_attach_binary(
+    PolyCtx *ctx,
+    PolyUOp *program,
+    const uint8_t *bytes,
+    int n_bytes
+) {
+  if (!ctx || !program || program->op != POLY_OP_PROGRAM || !bytes || n_bytes <= 0) return NULL;
+  if (poly_program_binary(program)) return program;
+  if (program->n_src != 4 || !poly_program_linear(program) || !poly_program_source(program)) return NULL;
+  PolyUOp *binary = poly_uop0(ctx, POLY_OP_BINARY, POLY_VOID, poly_arg_bytes(bytes, n_bytes));
+  if (!binary) return NULL;
+  PolyUOp *src[5] = {program->src[0], program->src[1], program->src[2], program->src[3], binary};
+  return poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 5, program->arg);
 }
 
 static int webgpu_collect_param_order(PolyUOp **lin, int n_lin, int *order, int n_params) {
@@ -1773,7 +1830,8 @@ static void poly_runner_apply_program_launch_info(PolyCtx *ctx, PolyUOp *program
 
   bool has_launch_expr = false;
   for (int dim = 0; dim < 3; dim++) {
-    if (info->global_exprs[dim] || info->local_exprs[dim]) {
+    if (info->global_exprs[dim] || info->local_exprs[dim] ||
+        info->global_size[dim] != 1 || info->local_size[dim] != 1 || !info->has_local_size) {
       has_launch_expr = true;
       break;
     }
@@ -1781,16 +1839,18 @@ static void poly_runner_apply_program_launch_info(PolyCtx *ctx, PolyUOp *program
   if (!has_launch_expr) return;
 
   for (int dim = 0; dim < 3; dim++) {
-    if (info->global_exprs[dim]) {
-      int global = info->global_size[dim];
-      runner->grid[dim] = global > 0 ? global : 1;
-      runner->grid_exprs[dim] = info->global_exprs[dim];
-    }
+    int global = info->global_size[dim];
+    runner->grid[dim] = global > 0 ? global : 1;
+    runner->grid_exprs[dim] = info->global_exprs[dim];
 
     if (info->has_local_size && info->local_exprs[dim]) {
       int local = info->local_size[dim];
       runner->block[dim] = local > 0 ? local : 1;
       runner->block_exprs[dim] = info->local_exprs[dim];
+    } else if (info->has_local_size) {
+      int local = info->local_size[dim];
+      runner->block[dim] = local > 0 ? local : 1;
+      runner->block_exprs[dim] = NULL;
     } else if (!info->has_local_size) {
       runner->block[dim] = 1;
       runner->block_exprs[dim] = NULL;
@@ -1946,6 +2006,11 @@ static PolyDevice poly_schedule_slot_declared_execution_device(
 ) {
   if (!sched || slot_idx < 0 || slot_idx >= sched->template->n_buf_slots) return POLY_DEVICE_AUTO;
   PolyDevice dev = sched->template->buf_slots[slot_idx].device;
+  if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST &&
+      fallback != POLY_DEVICE_AUTO && fallback != POLY_DEVICE_HOST &&
+      dev != fallback && poly_device_can_execute(fallback) &&
+      poly_device_is_host_addressable(dev) && poly_device_is_host_addressable(fallback))
+    return POLY_DEVICE_AUTO;
   if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST &&
       poly_device_is_host_addressable(dev) && fallback != POLY_DEVICE_AUTO &&
       fallback != POLY_DEVICE_HOST && poly_device_can_execute(fallback) &&
@@ -4734,6 +4799,15 @@ static const char *poly_program_arg_name(PolyUOp *program) {
   return program->arg.str;
 }
 
+#ifdef POLY_HAS_X86
+static PolyUOp *poly_prepare_x86_program_for_backend(
+    PolyCtx *ctx,
+    PolyUOp *call,
+    PolyDevice device,
+    uint32_t env_stamp
+);
+#endif
+
 static PolyUOp *poly_prepare_program_for_backend(
     PolyCtx *ctx,
     PolyUOp *call,
@@ -4741,6 +4815,10 @@ static PolyUOp *poly_prepare_program_for_backend(
     uint32_t env_stamp
 ) {
   if (!ctx || !call || call->op != POLY_OP_CALL) return NULL;
+#ifdef POLY_HAS_X86
+  if (device == POLY_DEVICE_X86)
+    return poly_prepare_x86_program_for_backend(ctx, call, device, env_stamp);
+#endif
   const PolyBackendDesc *backend = poly_backend_get(device);
   if (!backend || !backend->rewrite_program) return poly_call_raw_body(call);
 
@@ -4933,8 +5011,7 @@ static PolyUOp *cpu_rewrite_program(PolyCtx *ctx, PolyUOp *sink) {
 static char *cpu_render_source_impl(
     PolyCtx *ctx,
     PolyUOp *program,
-    const char *fn_name,
-    bool already_rewritten
+    const char *fn_name
 ) {
   PolyUOp *scheduled_root = poly_program_kernel_body(program);
   if (!scheduled_root) return NULL;
@@ -4942,9 +5019,7 @@ static char *cpu_render_source_impl(
   bool lin_owned = false;
   PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
   if (!lin) {
-    lin = already_rewritten
-              ? poly_linearize_rewritten(ctx, scheduled_root, &n_lin)
-              : poly_linearize_ex(ctx, scheduled_root, cpu_schedule_rewrite_opts(), &n_lin);
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
     lin_owned = true;
   }
   if (!lin) return NULL;
@@ -4962,15 +5037,14 @@ static char *cpu_render_source_impl(
 }
 
 static char *cpu_render_source(PolyCtx *ctx, PolyUOp *program, const char *fn_name) {
-  return cpu_render_source_impl(ctx, program, fn_name, true);
+  return cpu_render_source_impl(ctx, program, fn_name);
 }
 
 static int cpu_lower_item_impl(
     PolyCtx *ctx,
     PolyUOp *program,
     const char *fn_name,
-    PolyRunner *out,
-    bool already_rewritten
+    PolyRunner *out
 ) {
   PolyUOp *scheduled_root = poly_program_kernel_body(program);
   if (!scheduled_root) return -1;
@@ -4978,9 +5052,7 @@ static int cpu_lower_item_impl(
   bool lin_owned = false;
   PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
   if (!lin) {
-    lin = already_rewritten
-              ? poly_linearize_rewritten(ctx, scheduled_root, &n_lin)
-              : poly_linearize_ex(ctx, scheduled_root, cpu_schedule_rewrite_opts(), &n_lin);
+    lin = poly_linearize_rewritten(ctx, scheduled_root, &n_lin);
     lin_owned = true;
   }
   if (!lin) return -1;
@@ -4997,7 +5069,7 @@ static int cpu_lower_item_impl(
   const char *src = poly_program_source_text(program);
   char *src_owned = NULL;
   if (!src) {
-    src_owned = cpu_render_source_impl(ctx, program, fn_name, already_rewritten);
+    src_owned = cpu_render_source_impl(ctx, program, fn_name);
     src = src_owned;
   }
   if (!src) {
@@ -5039,16 +5111,7 @@ static int cpu_lower_item(
     const char *fn_name,
     PolyRunner *out
 ) {
-  return cpu_lower_item_impl(ctx, program, fn_name, out, true);
-}
-
-static int cpu_lower_raw_item(
-    PolyCtx *ctx,
-    PolyUOp *program,
-    const char *fn_name,
-    PolyRunner *out
-) {
-  return cpu_lower_item_impl(ctx, program, fn_name, out, false);
+  return cpu_lower_item_impl(ctx, program, fn_name, out);
 }
 
 static int cpu_execute_fn(void *self, void **args, int n_args) {
@@ -5464,157 +5527,225 @@ static const PolyAllocator *hip_get_allocator(void) {
 
 #endif /* POLY_HAS_HIP */
 
-/* x86-64 JIT backend */
+/* tinygrad-style x86 ISA backend */
 
-#ifdef POLY_HAS_X64
+#ifdef POLY_HAS_X86
 
-static int x64_execute_fn(void *self, void **args, int n_args) {
+static int x86_execute_fn(void *self, void **args, int n_args) {
   PolyRunner *runner = (PolyRunner *)self;
-  poly_x64_program_call((PolyX64Program *)runner->handle, args, n_args);
-  return 0;
+  int threads = runner->grid[0] > 1 ? runner->grid[0] : 1;
+  if (threads > 1)
+    return poly_x86_program_call_threaded((PolyX86Program *)runner->handle, args, n_args, threads);
+  return poly_x86_program_call((PolyX86Program *)runner->handle, args, n_args);
 }
 
-static void x64_free_fn(void *self) {
+static void x86_free_fn(void *self) {
   PolyRunner *runner = (PolyRunner *)self;
-  if (runner->handle) poly_x64_program_destroy((PolyX64Program *)runner->handle);
+  if (runner->handle) poly_x86_program_destroy((PolyX86Program *)runner->handle);
 }
 
-/* Check if the kernel uses only dtypes the x64 renderer supports (f32, int32, bool).
- * Returns false if f64, f16, bf16 or other unsupported types are found.
- * Simple iterative DFS over the DAG. */
-/* Check if kernel uses only features the x64 renderer handles correctly.
- * Rejects: f64/f16/bf16 dtypes, multi-range reduce patterns (DEFINE_REG with
- * nested RANGEs and AFTER chains — the renderer compiles but produces wrong code).
- * Iterative DFS with simple open-addressing pointer set. */
-static bool x64_can_handle(PolyUOp *root) {
-  int cap = 256, top = 0;
-  PolyUOp **stack = malloc((size_t)cap * sizeof(PolyUOp *));
-  if (!stack) return false;
-  int set_cap = 512;
-  PolyUOp **set = calloc((size_t)set_cap, sizeof(PolyUOp *));
-  if (!set) {
-    free(stack);
-    return false;
-  }
+static bool x86_can_handle(PolyCtx *ctx, PolyUOp *root) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n_topo);
+  if (!topo) return false;
   bool ok = true;
-  int n_ranges = 0, n_stores = 0;
+  for (int ti = 0; ti < n_topo; ti++) {
+    PolyUOp *u = topo[ti];
+    if (!u) continue;
 
-  stack[top++] = root;
-  while (top > 0) {
-    PolyUOp *u = stack[--top];
-    uint32_t h = (uint32_t)((uintptr_t)u >> 3) % (uint32_t)set_cap;
-    bool found = false;
-    for (int probe = 0; probe < set_cap; probe++) {
-      uint32_t idx = (h + (uint32_t)probe) % (uint32_t)set_cap;
-      if (!set[idx]) {
-        set[idx] = u;
-        break;
-      }
-      if (set[idx] == u) {
-        found = true;
-        break;
-      }
-    }
-    if (found) continue;
-
-    /* Reject unsupported dtypes: non-float32 floats (f64, f16, bf16) */
     PolyDType dt = u->dtype;
+    PolyDType scalar = poly_dtype_scalar(dt);
     if (!dt.is_ptr && !poly_dtype_eq(dt, POLY_VOID) && poly_dtype_is_float(dt) &&
-        poly_dtype_scalar(dt).bitsize != 32) {
-      ok = false;
-      break;
-    }
-    /* Reject 64-bit integers (uint64 from THREEFRY, etc.) */
-    if (!dt.is_ptr && !poly_dtype_eq(dt, POLY_VOID) && !poly_dtype_is_float(dt) &&
-        poly_dtype_scalar(dt).bitsize > 32) {
-      ok = false;
-      break;
-    }
-    /* Reject unsupported ops */
-    if (u->op == POLY_OP_THREEFRY) {
-      ok = false;
-      break;
-    }
-    if (u->op == POLY_OP_RANGE) n_ranges++;
-    if (u->op == POLY_OP_STORE) n_stores++;
-
-    for (int i = 0; i < u->n_src; i++) {
-      if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, (size_t)cap * sizeof(PolyUOp *));
+        scalar.bitsize != 16 && scalar.bitsize != 32 && scalar.bitsize != 64) {
+      if (poly_debug_at_least(4)) {
+        char *s = poly_uop_str(u);
+        fprintf(stderr, "x86 can_handle: unsupported float dtype bits=%d uop=%s\n",
+                scalar.bitsize, s ? s : "<uop>");
+        free(s);
       }
-      stack[top++] = u->src[i];
+      ok = false;
+      break;
+    }
+    if (!dt.is_ptr && !poly_dtype_eq(dt, POLY_VOID) && !poly_dtype_is_float(dt) &&
+        !poly_dtype_is_bool(scalar) && !poly_dtype_is_index(scalar) &&
+        (!poly_dtype_is_int(scalar) || scalar.bitsize > 64)) {
+      if (poly_debug_at_least(4)) {
+        char *s = poly_uop_str(u);
+        fprintf(stderr, "x86 can_handle: unsupported int dtype bits=%d uop=%s\n",
+                scalar.bitsize, s ? s : "<uop>");
+        free(s);
+      }
+      ok = false;
+      break;
+    }
+    if (u->op == POLY_OP_THREEFRY) {
+      if (poly_debug_at_least(4)) fprintf(stderr, "x86 can_handle: unsupported THREEFRY\n");
+      ok = false;
+      break;
     }
   }
-  /* Previously rejected multi-store + multi-range patterns due to SHL R8
-   * clobber in nested loops (fixed in commit 439f957). The renderer now
-   * handles these correctly. Keeping the check commented for reference:
-   * if (ok && n_stores > 1 && n_ranges > 1) ok = false; */
-
-  free(stack);
-  free(set);
+  poly_toposort_free(topo);
   return ok;
 }
 
-static int x64_lower_item(
+static char *poly_hex_from_bytes(const uint8_t *bytes, int n_bytes) {
+  if (!bytes || n_bytes <= 0) return NULL;
+  char *hex = malloc((size_t)n_bytes * 2 + 1);
+  if (!hex) return NULL;
+  static const char digits[] = "0123456789abcdef";
+  for (int i = 0; i < n_bytes; i++) {
+    hex[2 * i] = digits[bytes[i] >> 4];
+    hex[2 * i + 1] = digits[bytes[i] & 0x0f];
+  }
+  hex[(size_t)n_bytes * 2] = '\0';
+  return hex;
+}
+
+static PolyUOp *poly_prepare_x86_program_for_backend(
+    PolyCtx *ctx,
+    PolyUOp *call,
+    PolyDevice device,
+    uint32_t env_stamp
+) {
+  if (!ctx || !call || call->op != POLY_OP_CALL) return NULL;
+  PolyUOp *raw = poly_call_raw_body(call);
+  if (!raw) return NULL;
+
+  PolyToProgramCacheEntry key = {
+      .program = raw,
+      .device = device,
+      .env_stamp = env_stamp,
+      .prepared_program = NULL,
+  };
+  uint32_t hash = poly_program_cache_hash(raw, device, env_stamp);
+  PolyToProgramCacheEntry *entry =
+      (poly_program_cache_enabled() && ctx->to_program_cache)
+          ? poly_map_get(ctx->to_program_cache, hash, &key, poly_to_program_cache_eq)
+          : NULL;
+  if (entry) return entry->prepared_program;
+
+  PolyUOp *body = poly_program_body(raw);
+  if (!body) return NULL;
+  PolyUOp *rewritten = poly_rewrite_x86(ctx, body);
+  if (!rewritten) return NULL;
+  if (!x86_can_handle(ctx, rewritten)) return NULL;
+
+  PolyUOp *base =
+      poly_program_from_call_body(ctx, call, rewritten, poly_program_arg_name(raw), device);
+  if (!base) return NULL;
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_x86_rewritten(ctx, rewritten, &n_lin);
+  if (!lin) return NULL;
+
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, lin, n_lin, poly_arg_none());
+  if (!linear) {
+    free(lin);
+    return NULL;
+  }
+  PolyUOp *src3[3] = {base->src[0], base->src[1], linear};
+  PolyUOp *prepared = poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src3, 3, base->arg);
+  if (!prepared) {
+    free(lin);
+    return NULL;
+  }
+
+  int n_code = 0;
+  uint8_t *code = poly_render_x86(lin, n_lin, &n_code);
+  free(lin);
+  if (!code || n_code <= 0) {
+    free(code);
+    return NULL;
+  }
+
+  char *source = poly_hex_from_bytes(code, n_code);
+  if (!source) {
+    free(code);
+    return NULL;
+  }
+  g_program_source_render_count++;
+  prepared = poly_program_attach_source(ctx, prepared, source);
+  free(source);
+  if (!prepared) {
+    free(code);
+    return NULL;
+  }
+  prepared = poly_program_attach_binary(ctx, prepared, code, n_code);
+  free(code);
+  if (!prepared) return NULL;
+
+  if (poly_program_cache_enabled() && ctx->to_program_cache) {
+    entry = poly_arena_alloc(ctx->arena, sizeof(*entry), _Alignof(PolyToProgramCacheEntry));
+    if (entry) {
+      entry->program = raw;
+      entry->device = device;
+      entry->env_stamp = env_stamp;
+      entry->prepared_program = prepared;
+      poly_map_set(ctx->to_program_cache, hash, entry, entry, poly_to_program_cache_eq);
+    }
+  }
+
+  return prepared;
+}
+
+static int x86_lower_item(
     PolyCtx *ctx,
     PolyUOp *program,
     const char *fn_name,
     PolyRunner *out
 ) {
-  PolyUOp *scheduled_root = poly_program_kernel_body(program);
-  if (!scheduled_root) return -1;
-  /* Pre-check: fall back to CPU for unsupported patterns/dtypes */
-  if (!x64_can_handle(scheduled_root)) goto fallback;
-
-  int n_lin;
-  /* Use renderer-specific x64 linearization here, matching tinygrad's
-   * renderer-driven lowering contract. Falling back to CPU is still allowed
-   * later if the x64 renderer cannot handle the resulting kernel. */
-  bool lin_owned = false;
-  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
-  if (!lin) {
-    lin = poly_linearize_x64(ctx, scheduled_root, &n_lin);
-    lin_owned = true;
+  (void)ctx;
+  (void)fn_name;
+  PolyX86Program *prog = NULL;
+  int code_size = 0;
+  PolyUOp *binary = poly_program_binary(program);
+  if (binary && binary->arg.kind == POLY_ARG_BYTES && binary->arg.bytes.data &&
+      binary->arg.bytes.n > 0) {
+    code_size = binary->arg.bytes.n;
+    prog = poly_compile_x86(binary->arg.bytes.data, binary->arg.bytes.n);
+  } else {
+    const char *source = poly_program_source_text(program);
+    if (source) {
+      code_size = (int)(strlen(source) / 2);
+      prog = poly_compile_x86_source(source);
+    }
   }
-  if (!lin) goto fallback;
-
-  int code_size;
-  uint8_t *code = poly_render_x64(lin, n_lin, &code_size);
-  if (lin_owned) free(lin);
-  if (!code) goto fallback;
-
-  PolyX64Program *prog = poly_compile_x64(code, code_size);
-  free(code);
-  if (!prog) goto fallback;
+  if (!prog) return -1;
 
   out->kind = POLY_RUNNER_COMPILED;
   out->handle = prog;
   out->handle_size = code_size;
-  out->execute = x64_execute_fn;
-  out->free_handle = x64_free_fn;
+  int n_lin = 0;
+  PolyUOp **lin = poly_program_linear_uops(program, &n_lin);
+  int threads = 1;
+  for (int j = 0; j < n_lin; j++) {
+    PolyUOp *u = lin[j];
+    if (!u || u->op != POLY_OP_DEFINE_VAR || u->arg.kind != POLY_ARG_DEFINE_VAR ||
+        !u->arg.define_var.name || strcmp(u->arg.define_var.name, "core_id") != 0)
+      continue;
+    int64_t n = u->arg.define_var.max_val + 1;
+    if (n > 1 && n <= INT32_MAX) threads = (int)n;
+  }
+  out->grid[0] = threads;
+  out->grid[1] = 1;
+  out->grid[2] = 1;
+  out->block[0] = 1;
+  out->block[1] = 1;
+  out->block[2] = 1;
+  out->execute = x86_execute_fn;
+  out->free_handle = x86_free_fn;
   return 0;
-
-fallback:
-  /* x64 renderer doesn't support all ops yet (DEFINE_LOCAL, BARRIER, etc.).
-   * Fall back to CPU compiled backend for unsupported kernels.
-   * Both use host memory, so buffer layout is compatible. */
-#ifndef __EMSCRIPTEN__
-  return cpu_lower_raw_item(ctx, program, fn_name, out);
-#else
-  return -1;
-#endif
 }
 
-static int x64_execute(PolyRunner *runner, void **args, int n_args) {
+static int x86_execute(PolyRunner *runner, void **args, int n_args) {
   return runner->execute(runner, args, n_args);
 }
 
-static void x64_free_runner(PolyRunner *runner) {
+static void x86_free_runner(PolyRunner *runner) {
   if (runner->free_handle) runner->free_handle(runner);
 }
 
-#endif /* POLY_HAS_X64 */
+#endif /* POLY_HAS_X86 */
 
 static int backend_noop_ensure_open(void) {
   return 0;
@@ -5667,12 +5798,12 @@ static const PolyBackendDesc BACKENDS[] = {
 #else
     [POLY_DEVICE_WEBGPU] = {NULL, POLY_DEVICE_WEBGPU, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
 #endif
-#ifdef POLY_HAS_X64
-    [POLY_DEVICE_X64_JIT] =
-        {"x64_jit", POLY_DEVICE_X64_JIT, false, NULL, NULL, x64_lower_item, x64_execute,
-         x64_free_runner, backend_noop_ensure_open, cpu_get_allocator},
+#ifdef POLY_HAS_X86
+    [POLY_DEVICE_X86] =
+        {"x86", POLY_DEVICE_X86, false, NULL, NULL, x86_lower_item, x86_execute,
+         x86_free_runner, backend_noop_ensure_open, cpu_get_allocator},
 #else
-    [POLY_DEVICE_X64_JIT] = {NULL, POLY_DEVICE_X64_JIT, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+    [POLY_DEVICE_X86] = {NULL, POLY_DEVICE_X86, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
 #endif
 #ifdef POLY_HAS_HIP
     [POLY_DEVICE_HIP] =
@@ -5821,9 +5952,6 @@ PolyCompiledSchedule *poly_lower_schedule(PolyCtx *ctx, PolySchedule *schedule, 
     fprintf(stderr, "polygrad: compile_schedule: backend '%s' failed to open\n", backend->name);
     return NULL;
   }
-
-  /* x64 JIT uses per-runner dispatch: x64_execute delegates to runner->execute,
-   * which is either x64_execute_fn (native) or cpu_execute_fn (fallback). */
 
   PolyCompiledSchedule *plan = calloc(1, sizeof(PolyCompiledSchedule));
   if (!plan) return NULL;
@@ -6041,7 +6169,7 @@ static PolyDevice poly_schedule_slot_runtime_device(
 }
 
 static bool poly_call_device_can_use_host_residency(PolyDevice device) {
-  return device == POLY_DEVICE_CPU || device == POLY_DEVICE_INTERP || device == POLY_DEVICE_X64_JIT;
+  return device == POLY_DEVICE_CPU || device == POLY_DEVICE_INTERP || device == POLY_DEVICE_X86;
 }
 
 static PolyDevice poly_call_arg_runtime_device(
@@ -6423,12 +6551,21 @@ static uint32_t poly_schedule_lower_env_stamp(void) {
 #else
   const uint8_t wasm_features = 0;
 #endif
+#ifdef POLY_HAS_X86
+  uint32_t x86_features = poly_x86_feature_stamp();
+#else
+  uint32_t x86_features = 0;
+#endif
   uint8_t bytes[] = {
       (uint8_t)poly_getenv_flag("POLY_OPTIMIZE"),
       (uint8_t)(poly_getenv_int("POLY_DEVECTORIZE", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("POLY_TC_OPT", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("POLY_USE_TC", 1) & 0xFF),
       wasm_features,
+      (uint8_t)(x86_features & 0xFF),
+      (uint8_t)((x86_features >> 8) & 0xFF),
+      (uint8_t)((x86_features >> 16) & 0xFF),
+      (uint8_t)((x86_features >> 24) & 0xFF),
   };
   for (size_t i = 0; i < sizeof(bytes) / sizeof(bytes[0]); i++) {
     stamp ^= bytes[i];
@@ -6440,8 +6577,8 @@ static uint32_t poly_schedule_lower_env_stamp(void) {
 static void poly_zero_buffer(PolyBuffer *h) {
   if (!h || !h->ptr) return;
   if (h->device == POLY_DEVICE_CPU || h->device == POLY_DEVICE_INTERP
-#ifdef POLY_HAS_X64
-      || h->device == POLY_DEVICE_X64_JIT
+#ifdef POLY_HAS_X86
+      || h->device == POLY_DEVICE_X86
 #endif
 #ifdef __EMSCRIPTEN__
       || h->device == POLY_DEVICE_WASM
@@ -6880,6 +7017,8 @@ static int poly_schedule_execute_runner_call(
     debug_dump_webgpu_runner_args(compiled_debug_plan, exec_step, call_index, runner, args);
   else
     debug_dump_schedule_args(sched, device, exec_step, call_index, runner, args);
+  bool call_timing = poly_debug_at_least(7);
+  double t_exec0 = call_timing ? poly_now_ms() : 0.0;
   int ret;
   if (runner->execute) {
     ret = runner->execute(runner, args, n_args);
@@ -6891,6 +7030,18 @@ static int poly_schedule_execute_runner_call(
         backend && backend->name ? backend->name : "<unknown>", call_index
     );
     return -1;
+  }
+  if (call_timing) {
+    double t_exec1 = poly_now_ms();
+    fprintf(
+        stderr,
+        "[polygrad:%s] call=%d step=%d device=%s kind=%d params=%d vars=%d grid=(%d,%d,%d) "
+        "block=(%d,%d,%d) exec=%.3fms ret=%d\n",
+        label, call_index, exec_step, poly_device_name(device), (int)runner->kind, runner->n_params,
+        n_vars, runner->grid[0], runner->grid[1], runner->grid[2], runner->block[0],
+        runner->block[1], runner->block[2], t_exec1 - t_exec0, ret
+    );
+    fflush(stderr);
   }
   if (ret != 0) {
     fprintf(

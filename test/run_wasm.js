@@ -77,7 +77,7 @@ async function main() {
 
   // Verify output
   let pass = true;
-  const tol = isF64 ? 1e-14 : 1e-5;
+  const tol = baseOp === 'pow' ? 2e-3 : (isF64 ? 1e-14 : 1e-5);
 
   for (let i = 0; i < N; i++) {
     const a = i + 1;

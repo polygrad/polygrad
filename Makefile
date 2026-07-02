@@ -53,12 +53,12 @@ ifeq ($(HAS_HIP), 1)
   CFLAGS_COMMON += -DPOLY_HAS_HIP=1
 endif
 
-# Detect x86-64 (not available in Emscripten WASM builds)
-HAS_X64 := $(shell uname -m | grep -c x86_64)
-ifeq ($(HAS_X64), 1)
-  SRC += src/render_x64.c
-  TEST_SRC += test/test_x64.c
-  CFLAGS_COMMON += -DPOLY_HAS_X64=1
+# Detect x86-64 for the tinygrad-style x86 ISA backend.
+HAS_X86 := $(shell uname -m | grep -c x86_64)
+ifeq ($(HAS_X86), 1)
+  SRC += src/render_x86.c
+  TEST_SRC += test/test_x86.c
+  CFLAGS_COMMON += -DPOLY_HAS_X86=1
 endif
 PARITY_RUNNER_SRC = test/test_tinygrad_runner.c
 PARITY_SCRIPT = test/test_tinygrad_parity.py
@@ -78,7 +78,7 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 
-.PHONY: all test test-fast test-cuda test-hip test-interp test-x64 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x64 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors
+.PHONY: all test test-fast test-cuda test-hip test-interp test-x86 test-cuda-only test-hip-only test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -108,8 +108,8 @@ test-hip: build/polygrad_test
 test-interp: build/polygrad_test
 	$(SAN_RUN) POLY_DEVICE=interp ./build/polygrad_test
 
-test-x64: build/polygrad_test
-	$(SAN_RUN) POLY_DEVICE=x64 ./build/polygrad_test
+test-x86: build/polygrad_test
+	$(SAN_RUN) POLY_DEVICE=x86 ./build/polygrad_test x86
 
 require-qwen3-gguf:
 	@if [ ! -f "$(QWEN3_GGUF)" ]; then \
@@ -340,6 +340,9 @@ verify-source-mirrors:
 test-py: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/ -v
 
+test-py-x86: verify-source-mirrors build/libpolygrad.so
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_instance.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
+
 test-js: test-js-wasm test-js-native
 
 test-js-wasm: verify-source-mirrors wasm-pkg
@@ -354,8 +357,8 @@ js/build/Release/polygrad_napi.node: build/libpolygrad.a
 test-js-native-cpu: verify-source-mirrors js/build/Release/polygrad_napi.node
 	POLY_DEVICE=cpu $(NODE) js/test/test_native.js
 
-test-js-native-x64: verify-source-mirrors js/build/Release/polygrad_napi.node
-	POLY_DEVICE=x64 $(NODE) js/test/test_native.js
+test-js-native-x86: verify-source-mirrors js/build/Release/polygrad_napi.node
+	POLY_DEVICE=x86 $(NODE) js/test/test_native.js
 
 test-js-native-interp: verify-source-mirrors js/build/Release/polygrad_napi.node
 	POLY_DEVICE=interp $(NODE) js/test/test_native.js
@@ -396,12 +399,12 @@ test-browser-legacy: wasm-pkg
 	$(NODE) js_legacy/polygrad/test/browser/test_browser.js
 
 # Full cross-backend test suite:
-#   C:      cpu (default), x64, interp, cuda*, hip*
+#   C:      cpu (default), x86, interp, cuda*, hip*
 #   JS:     wasm core + wasm backend
-#           native core + cpu/x64/interp/cuda*/hip* backends
+#           native core + cpu/x86/interp/cuda*/hip* backends
 #   Python: py/tests/
 #   * only when hardware is available
-TEST_ALL_DEPS = test test-x64 test-interp test-js-wasm test-js-native-cpu test-js-native-x64 test-js-native-interp test-py
+TEST_ALL_DEPS = test test-x86 test-interp test-js-wasm test-js-native-cpu test-js-native-x86 test-js-native-interp test-py
 ifeq ($(HAS_CUDA), 1)
   TEST_ALL_DEPS += test-cuda test-js-native-cuda
 endif
