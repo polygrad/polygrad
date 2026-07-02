@@ -221,6 +221,10 @@ static int build_cuda_bindings(PolyTestBufferView *out, PolyUOp **bufs, float **
 static void free_cuda_bindings(PolyTestBufferView *bindings, int n);
 static void readback_cuda_binding(PolyTestBufferView *b, void *host_dst, size_t nbytes);
 
+static void select_cuda_for_cuda_phase(PolyCtx *ctx) {
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CUDA);
+}
+
 /* E2E tests (require GPU) */
 
 TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
@@ -239,6 +243,7 @@ TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
   ASSERT_NOT_NULL(bt);
 
   PolyTensor *out = NULL;
+  select_cuda_for_cuda_phase(ctx);
   int rc = poly_realize_tensors(ctx, &bt, 1, &out);
   if (rc != 0) {
     bool cuda_available_after_failure = poly_cuda_available();
@@ -298,6 +303,7 @@ TEST(cuda, e2e_vecadd) {
   float *ptrs[] = {NULL, a, b};
   PolyTestBufferView cuda_binds[3];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 3), 0);
+  select_cuda_for_cuda_phase(tv.ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(tv.ctx, tv.sink, cuda_binds, 3), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 3);
@@ -339,6 +345,7 @@ TEST(cuda, e2e_neg) {
   float *ptrs[] = {NULL, a};
   PolyTestBufferView cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
@@ -385,6 +392,7 @@ TEST(cuda, e2e_chain) {
   float *ptrs[] = {NULL, a, b};
   PolyTestBufferView cuda_binds[3];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 3), 0);
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, cuda_binds, 3), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 3);
@@ -424,6 +432,7 @@ TEST(cuda, e2e_exp2) {
   float *ptrs[] = {NULL, a};
   PolyTestBufferView cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], c_gpu, n * sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
@@ -462,6 +471,7 @@ TEST(cuda, e2e_reduce_sum) {
   float *ptrs[] = {NULL, a};
   PolyTestBufferView cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], &c_gpu, sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
@@ -498,6 +508,7 @@ TEST(cuda, e2e_reduce_sum_parallel) {
   float *ptrs[] = {NULL, a};
   PolyTestBufferView cuda_binds[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_binds, bufs, ptrs, 2), 0);
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, cuda_binds, 2), 0);
   readback_cuda_binding(&cuda_binds[0], &c_gpu, sizeof(float));
   free_cuda_bindings(cuda_binds, 2);
@@ -567,6 +578,7 @@ TEST(cuda, realize_unified_vecadd) {
   PolyTestBufferView cuda_b[3];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_b, bufs, ptrs, 3), 0);
 
+  select_cuda_for_cuda_phase(tv.ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(tv.ctx, tv.sink, cuda_b, 3), 0);
 
   readback_cuda_binding(&cuda_b[0], c_gpu, n * sizeof(float));
@@ -601,6 +613,7 @@ TEST(cuda, tensor_place_computed_expression_to_cuda_e2e) {
   ASSERT_NOT_NULL(cuda_t);
 
   PolyTensor *out = NULL;
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &cuda_t, 1, &out), 0);
   ASSERT_PTR_EQ(out, cuda_t);
 
@@ -681,6 +694,7 @@ TEST(cuda, realize_unified_reduce) {
   float *ptrs[] = {NULL, a};
   PolyTestBufferView cuda_b[2];
   ASSERT_INT_EQ(build_cuda_bindings(cuda_b, bufs, ptrs, 2), 0);
+  select_cuda_for_cuda_phase(ctx);
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, cuda_b, 2), 0);
   readback_cuda_binding(&cuda_b[0], &c_gpu, sizeof(float));
   free_cuda_bindings(cuda_b, 2);

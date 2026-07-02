@@ -44,6 +44,10 @@ static void schedule_restore_env(ScheduleEnvSave *s) {
   s->value = NULL;
 }
 
+static int expected_to_program_cache_entries(PolyCtx *ctx, int source_backend_entries) {
+  return poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP ? 0 : source_backend_entries;
+}
+
 /* Helper: run same graph on CPU and INTERP, compare outputs */
 
 static int cpu_interp_parity(
@@ -1512,7 +1516,9 @@ TEST(schedule_runtime, runtime_cache_reuses_runner_across_fresh_schedules) {
       POLY_TEST_HOST_VIEW(out1, out1_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink1, views1, 3), 0);
-  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ(
+      (int)poly_to_program_cache_len(ctx), expected_to_program_cache_entries(ctx, 1)
+  );
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out1_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out1_data[3], 44.0f, 1e-5);
@@ -1530,7 +1536,9 @@ TEST(schedule_runtime, runtime_cache_reuses_runner_across_fresh_schedules) {
       POLY_TEST_HOST_VIEW(out2, out2_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink2, views2, 3), 0);
-  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 1);
+  ASSERT_INT_EQ(
+      (int)poly_to_program_cache_len(ctx), expected_to_program_cache_entries(ctx, 1)
+  );
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out2_data[0], 55.0f, 1e-5);
   ASSERT_FLOAT_EQ(out2_data[3], 88.0f, 1e-5);
@@ -1544,7 +1552,9 @@ TEST(schedule_runtime, runtime_cache_reuses_runner_across_fresh_schedules) {
       POLY_TEST_HOST_VIEW(out3, out3_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink3, views3, 3), 0);
-  ASSERT_INT_EQ((int)poly_to_program_cache_len(ctx), 2);
+  ASSERT_INT_EQ(
+      (int)poly_to_program_cache_len(ctx), expected_to_program_cache_entries(ctx, 2)
+  );
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 2);
   ASSERT_FLOAT_EQ(out3_data[0], 250.0f, 1e-5);
   ASSERT_FLOAT_EQ(out3_data[3], 640.0f, 1e-5);
@@ -1806,7 +1816,7 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
   ASSERT_INT_EQ(stats.program_cache_entries, stats.runtime_cache_entries);
   ASSERT_INT_EQ((int)poly_program_cache_len(ctx), (int)poly_runtime_cache_len(ctx));
   ASSERT_INT_EQ(stats.schedule_cache_entries, 1);
-  ASSERT_INT_EQ(stats.to_program_cache_entries, 1);
+  ASSERT_INT_EQ(stats.to_program_cache_entries, expected_to_program_cache_entries(ctx, 1));
   ASSERT_INT_EQ(stats.runtime_cache_entries, 1);
   ASSERT_INT_EQ(stats.program_cache_entries, 1);
   ASSERT_INT_EQ(stats.compiled_artifact_bytes, poly_runtime_cache_artifact_bytes(ctx));
@@ -1814,7 +1824,10 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
       (int)poly_program_cache_artifact_bytes(ctx),
       (int)poly_runtime_cache_artifact_bytes(ctx)
   );
-  ASSERT_TRUE(stats.compiled_artifact_bytes > 4096);
+  if (poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP)
+    ASSERT_TRUE(stats.compiled_artifact_bytes > 0);
+  else
+    ASSERT_TRUE(stats.compiled_artifact_bytes > 4096);
   ASSERT_TRUE(stats.buffer_entries >= 3);
 
   poly_runtime_cache_clear(ctx);
@@ -1867,7 +1880,7 @@ TEST(schedule_runtime, ctx_stats_fixed_shape_replay_plateaus) {
   PolyCtxStats first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &first), 0);
   ASSERT_INT_EQ(first.schedule_cache_entries, 1);
-  ASSERT_INT_EQ(first.to_program_cache_entries, 1);
+  ASSERT_INT_EQ(first.to_program_cache_entries, expected_to_program_cache_entries(ctx, 1));
   ASSERT_INT_EQ(first.runtime_cache_entries, 1);
 
   for (int iter = 0; iter < 32; iter++) {
@@ -1935,7 +1948,7 @@ TEST(schedule_runtime, ctx_stats_runtime_var_replay_plateaus) {
   PolyCtxStats first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &first), 0);
   ASSERT_INT_EQ(first.schedule_cache_entries, 1);
-  ASSERT_INT_EQ(first.to_program_cache_entries, 1);
+  ASSERT_INT_EQ(first.to_program_cache_entries, expected_to_program_cache_entries(ctx, 1));
   ASSERT_INT_EQ(first.runtime_cache_entries, 1);
 
   const int vals[] = {12, 6, 16, 12, 1, 15};

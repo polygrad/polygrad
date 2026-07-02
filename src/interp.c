@@ -123,6 +123,57 @@ static uint64_t as_uint(InterpLane v, PolyDType dt) {
   return (uint64_t)v.i;
 }
 
+static bool interp_is_bf16(PolyDType dt) {
+  PolyDType s = poly_dtype_scalar(dt);
+  return poly_dtype_is_float(s) && s.bitsize == 16 && s.name && strcmp(s.name, "__bf16") == 0;
+}
+
+static float interp_bf16_bits_to_f32(uint16_t bits) {
+  uint32_t f32 = (uint32_t)bits << 16;
+  float out;
+  memcpy(&out, &f32, sizeof(out));
+  return out;
+}
+
+static uint16_t interp_f32_to_bf16_bits(float v) {
+  uint32_t bits;
+  memcpy(&bits, &v, sizeof(bits));
+  return (uint16_t)(bits >> 16);
+}
+
+static float interp_f16_bits_to_f32(uint16_t bits) {
+  uint32_t sign = (uint32_t)(bits >> 15) << 31;
+  uint32_t exp = (bits >> 10) & 0x1F;
+  uint32_t mant = bits & 0x3FF;
+  uint32_t f32;
+  if (exp == 0) {
+    if (mant == 0) {
+      f32 = sign;
+    } else {
+      float sv = (float)mant / 1024.0f * (1.0f / 16384.0f);
+      return sign ? -sv : sv;
+    }
+  } else if (exp == 31) {
+    f32 = sign | 0x7F800000 | (mant << 13);
+  } else {
+    f32 = sign | ((exp + 112) << 23) | (mant << 13);
+  }
+  float out;
+  memcpy(&out, &f32, sizeof(out));
+  return out;
+}
+
+static uint16_t interp_f32_to_f16_bits(float v) {
+  uint32_t f32;
+  memcpy(&f32, &v, sizeof(f32));
+  uint32_t sign = (f32 >> 16) & 0x8000;
+  int32_t exp = ((f32 >> 23) & 0xFF) - 127 + 15;
+  uint32_t mant = (f32 >> 13) & 0x3FF;
+  if (exp <= 0) return (uint16_t)sign;
+  if (exp >= 31) return (uint16_t)(sign | 0x7C00);
+  return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
+}
+
 /* Memory access (per scalar lane) */
 /*
  * Type dispatch uses poly_dtype_is_float/is_unsigned + bitsize instead
@@ -193,37 +244,16 @@ static InterpLane mem_load_scalar(void *ptr, PolyDType s) {
   }
 
   /* bfloat16: top 16 bits of float32 */
-  if (is_flt && bs == 16 && s.name && strcmp(s.name, "__bf16") == 0) {
+  if (interp_is_bf16(s)) {
     uint16_t bits;
     memcpy(&bits, ptr, 2);
-    uint32_t f32 = (uint32_t)bits << 16;
-    float fv;
-    memcpy(&fv, &f32, 4);
-    return il_flt(fv);
+    return il_flt(interp_bf16_bits_to_f32(bits));
   }
   /* float16: IEEE 754 half-precision */
   if (is_flt && bs == 16) {
     uint16_t bits;
     memcpy(&bits, ptr, 2);
-    uint32_t sign = (uint32_t)(bits >> 15) << 31;
-    uint32_t exp = (bits >> 10) & 0x1F;
-    uint32_t mant = bits & 0x3FF;
-    uint32_t f32;
-    if (exp == 0) {
-      if (mant == 0)
-        f32 = sign;
-      else {
-        float sv = (float)mant / 1024.0f * (1.0f / 16384.0f);
-        return il_flt(sign ? -sv : sv);
-      }
-    } else if (exp == 31) {
-      f32 = sign | 0x7F800000 | (mant << 13);
-    } else {
-      f32 = sign | ((exp + 112) << 23) | (mant << 13);
-    }
-    float fv;
-    memcpy(&fv, &f32, 4);
-    return il_flt(fv);
+    return il_flt(interp_f16_bits_to_f32(bits));
   }
   return il_int(0);
 }
@@ -287,29 +317,14 @@ static void mem_store_scalar(void *ptr, InterpLane v, PolyDType s) {
   }
 
   /* bfloat16 */
-  if (is_flt && bs == 16 && s.name && strcmp(s.name, "__bf16") == 0) {
-    float fv = (float)v.f;
-    uint32_t f32;
-    memcpy(&f32, &fv, 4);
-    uint16_t bf = (uint16_t)(f32 >> 16);
+  if (interp_is_bf16(s)) {
+    uint16_t bf = interp_f32_to_bf16_bits((float)v.f);
     memcpy(ptr, &bf, 2);
     return;
   }
   /* float16 */
   if (is_flt && bs == 16) {
-    float fv = (float)v.f;
-    uint32_t f32;
-    memcpy(&f32, &fv, 4);
-    uint32_t sign = (f32 >> 16) & 0x8000;
-    int32_t exp = ((f32 >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant = (f32 >> 13) & 0x3FF;
-    uint16_t h;
-    if (exp <= 0)
-      h = (uint16_t)sign;
-    else if (exp >= 31)
-      h = (uint16_t)(sign | 0x7C00);
-    else
-      h = (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
+    uint16_t h = interp_f32_to_f16_bits((float)v.f);
     memcpy(ptr, &h, 2);
     return;
   }
@@ -423,7 +438,28 @@ static InterpLane interp_truncate_lane(InterpLane v, PolyDType dt) {
 
 /* BITCAST one lane: reinterpret bits without value conversion. */
 static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_dt) {
-  if (src_dt.bitsize == 32 && dst_dt.bitsize == 32) {
+  if (src_dt.bitsize == 16 && dst_dt.bitsize == 16) {
+    uint16_t bits;
+    if (interp_is_bf16(src_dt)) {
+      bits = interp_f32_to_bf16_bits((float)src.f);
+    } else if (poly_dtype_is_float(src_dt)) {
+      bits = interp_f32_to_f16_bits((float)src.f);
+    } else if (poly_dtype_is_unsigned(src_dt)) {
+      bits = (uint16_t)src.u;
+    } else {
+      bits = (uint16_t)src.i;
+    }
+
+    if (interp_is_bf16(dst_dt)) {
+      return il_flt(interp_bf16_bits_to_f32(bits));
+    } else if (poly_dtype_is_float(dst_dt)) {
+      return il_flt(interp_f16_bits_to_f32(bits));
+    } else if (poly_dtype_is_unsigned(dst_dt)) {
+      return il_uint(bits);
+    } else {
+      return il_int((int16_t)bits);
+    }
+  } else if (src_dt.bitsize == 32 && dst_dt.bitsize == 32) {
     uint32_t bits;
     if (poly_dtype_is_float(src_dt)) {
       float fv = (float)src.f;
