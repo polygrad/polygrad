@@ -160,6 +160,7 @@ Polygrad compiles tensor operations into fused C kernels at runtime. A disk cach
 | Warm cache hit | ~0.5ms per kernel (300x+ speedup) |
 | Tensor creation from numpy | Zero-copy (no memcpy for contiguous arrays) |
 | numpy() readback | Zero-copy (returns view) |
+| Multi-output readback | `Tensor.numpy_many(...)` in Python and `Tensor.toTypedArrays(...)` in JS batch realization before per-output buffer reads |
 
 ### Kernel fusion
 

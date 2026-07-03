@@ -522,6 +522,33 @@ function createBoundTensorClass(runtime) {
       return await this.toArray()
     }
 
+    static async toTypedArrays(...tensors) {
+      if (tensors.length === 1 && Array.isArray(tensors[0])) tensors = tensors[0]
+      if (!tensors.length) return []
+      for (const t of tensors) {
+        if (!(t instanceof Tensor)) throw new TypeError('Tensor.toTypedArrays expects Tensor arguments')
+      }
+      const prepared = tensors.map(t => {
+        if (t.numel() === 0) return t
+        let out = t
+        if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
+        if (!out.uop.hasBufferIdentity()) out = out.contiguous()
+        return out
+      })
+      const targets = prepared.filter(t => t.numel() !== 0)
+      if (targets.length) await targets[0].realize(...targets.slice(1))
+      const out = []
+      for (const t of prepared) {
+        if (t.numel() === 0) {
+          const AT = TA_BY_DTYPE[t._dtype] || Float32Array
+          out.push(new AT(0))
+        } else {
+          out.push(await t._readBufferBytes())
+        }
+      }
+      return out
+    }
+
     async item() {
       const arr = await this.toArray()
       if (arr.length !== 1) {

@@ -85,6 +85,24 @@ class TestCreation:
         assert out.dtype == np.float32
         np.testing.assert_allclose(out, [2.0, 4.0, 6.0, 8.0])
 
+    def test_numpy_many_batches_realize_and_readback(self):
+        t = Tensor([1.0, 2.0, 3.0])
+        add, mul = Tensor.numpy_many(t + 1, t * 2)
+        assert isinstance(add, np.ndarray)
+        assert isinstance(mul, np.ndarray)
+        np.testing.assert_allclose(add, [2.0, 3.0, 4.0])
+        np.testing.assert_allclose(mul, [2.0, 4.0, 6.0])
+
+        i32 = Tensor(np.array([1, 2, 3], dtype=np.int32)) + Tensor(np.array([10, 20, 30], dtype=np.int32))
+        f64 = Tensor(np.array([1.0, 2.0], dtype=np.float64)) + 0.5
+        empty = Tensor.zeros(0)
+        out_i32, out_f64, out_empty = Tensor.numpy_many([i32, f64, empty])
+        assert out_i32.dtype == np.int32
+        assert out_f64.dtype == np.float64
+        assert out_empty.shape == (0,)
+        np.testing.assert_array_equal(out_i32, [11, 22, 33])
+        np.testing.assert_allclose(out_f64, [1.5, 2.5])
+
     def test_arange(self):
         t = Tensor.arange(5)
         np.testing.assert_allclose(t.numpy(), np.arange(5, dtype=np.float32))

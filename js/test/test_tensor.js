@@ -145,6 +145,22 @@ async function runTensorTests(pg) {
     assertClose(arr, [1, 2, 3])
   })
 
+  await test('toTypedArrays batches flat typed readback', async () => {
+    const t = new Tensor([1, 2, 3])
+    const outs = await Tensor.toTypedArrays(t.add(1), t.mul(2))
+    assert(Array.isArray(outs) && outs.length === 2, 'expected two output arrays')
+    assert(outs[0] instanceof Float32Array, `expected Float32Array, got ${outs[0].constructor.name}`)
+    assertClose(outs[0], [2, 3, 4])
+    assertClose(outs[1], [2, 4, 6])
+
+    const i32 = new Tensor(new Int32Array([1, 2, 3]), { dtype: 'int32' })
+    const empty = Tensor.empty([0])
+    const more = await Tensor.toTypedArrays([i32, empty])
+    assert(more[0] instanceof Int32Array, `expected Int32Array, got ${more[0].constructor.name}`)
+    assert(more[1] instanceof Float32Array && more[1].length === 0, 'expected empty Float32Array')
+    assertClose(more[0], [1, 2, 3])
+  })
+
   await test('empty rejects named tensor keyword like tinygrad', async () => {
     let threw = false
     try {

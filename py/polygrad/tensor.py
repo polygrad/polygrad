@@ -793,6 +793,24 @@ class Tensor:
         assert _shape_all_int(shape), f'no data if shape is symbolic, self.shape={shape}'
         return self._buffer().numpy().reshape(shape)
 
+    @staticmethod
+    def numpy_many(*tensors):
+        """Return multiple tensors as numpy arrays after one batched realize.
+
+        This is a Polygrad embedding/readback helper. tinygrad exposes batched
+        realization through Tensor.realize(*lst), but readback remains per
+        tensor via numpy()/tolist().
+        """
+        if len(tensors) == 1 and isinstance(tensors[0], (list, tuple)):
+            tensors = tuple(tensors[0])
+        if not tensors:
+            return tuple()
+        for t in tensors:
+            if not isinstance(t, Tensor):
+                raise TypeError('Tensor.numpy_many expects Tensor arguments')
+        tensors[0].realize(*tensors[1:])
+        return tuple(t.numpy() for t in tensors)
+
     def item(self):
         """Return scalar value."""
         arr = self.numpy()
