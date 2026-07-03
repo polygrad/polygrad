@@ -284,10 +284,33 @@ PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int co
 PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 
 PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
+int poly_qr(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp **out_r);
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis);
+
+/* Tinygrad-style sort/topk composed helpers.
+ * Return 0 on success and populate both outputs. */
+int poly_sort(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int dim,
+    int descending,
+    PolyUOp **out_values,
+    PolyUOp **out_indices
+);
+PolyUOp *poly_argsort(PolyCtx *ctx, PolyUOp *x, int dim, int descending);
+int poly_topk(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t k,
+    int dim,
+    int largest,
+    int sorted,
+    PolyUOp **out_values,
+    PolyUOp **out_indices
+);
 
 /* Einsum */
 
@@ -307,6 +330,17 @@ PolyUOp *poly_rearrange(
 /* Gather (embedding lookup) */
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices);
+PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index);
+PolyUOp *poly_scatter(PolyCtx *ctx, PolyUOp *self, int dim, PolyUOp *index, PolyUOp *src, const char *reduce);
+PolyUOp *poly_scatter_reduce(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    int dim,
+    PolyUOp *index,
+    PolyUOp *src,
+    const char *reduce,
+    int include_self
+);
 
 /* Additional composed ops */
 

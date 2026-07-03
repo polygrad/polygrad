@@ -116,6 +116,27 @@ print(step(Tensor([4, 5, 6])).numpy())  # capture
 print(step(Tensor([7, 8, 9])).numpy())  # replay
 ```
 
+For embedding loops that need deterministic setup, `compile(...)` performs the
+same first normal run and second capture run up front, then exposes explicit
+`run(...)`, `stats()`, and `dispose()` methods. This is a Polygrad wrapper over
+the same JIT path, not a separate compiler pipeline.
+
+```python
+from polygrad import Tensor, compile
+
+def step(x):
+    return (x + 1).realize()
+
+compiled = compile(step, [Tensor([1, 2, 3]).realize()])
+print(compiled.run([Tensor([7, 8, 9]).realize()]).numpy())
+print(compiled.stats())
+compiled.dispose()
+```
+
+`Jit.stats()` and `CompiledCallable.stats()` currently expose wrapper-level
+capture/replay counts and wall-clock timings. Lower-level launch counts and
+transfer bytes will be added only when the shared C runtime exposes them.
+
 ## Tensor API
 
 ### Construction
@@ -155,6 +176,7 @@ print(step(Tensor([7, 8, 9])).numpy())  # replay
 | `numpy()` | ndarray | Realize and return numpy array |
 | `item()` | float | Scalar value |
 | `tolist()` | list | Nested Python list |
+| `copy_from(data)` / `update_from(data)` | Tensor | Update an already-buffer-backed tensor in place from matching host data |
 | `to(device)` | Tensor | Copy tensor view to `'cpu'` or `'cuda'` |
 | `cpu()` / `cuda()` | Tensor | Convenience wrappers for `to(...)` |
 | `numel()` | int | Total elements |
@@ -224,6 +246,10 @@ Returns float tensor (1.0 = true, 0.0 = false).
 |--------|-------------|
 | `sum(axis=None, keepdim=False)` | Sum along axes |
 | `max(axis=None, keepdim=False)` | Maximum along axes |
+| `argmax(axis=None, keepdim=False)` | Index of first maximum, tinygrad-style |
+| `sort(dim=-1, descending=False)` | Stable tinygrad-style sort, returns `(values, indices)` |
+| `argsort(dim=-1, descending=False)` | Indices that sort along a dimension |
+| `topk(k, dim=-1, largest=True, sorted_=True)` | Top-k values and stable indices |
 | `min(axis=None, keepdim=False)` | Minimum along axes |
 | `mean(axis=None, keepdim=False)` | Mean along axes |
 | `var(axis=None, keepdim=False, correction=1)` | Variance |
@@ -245,6 +271,8 @@ Returns float tensor (1.0 = true, 0.0 = false).
 | `pad(arg)` | Pad: [(before, after), ...] |
 | `flip(axis)` | Reverse along axes |
 | `repeat(*repeats)` | Tile tensor |
+| `gather(dim, index)` | tinygrad-style gather along dim |
+| `take_along_axis(index, axis)` | Alias for `gather(axis, index)` |
 
 ### Linear Algebra
 
@@ -292,7 +320,7 @@ Call `backward()` on a scalar loss before calling `item()` or `numpy()` on the l
 ### Layers
 
 ```python
-from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding, Dropout
+from polygrad.nn import Linear, LayerNorm, RMSNorm, GroupNorm, Embedding, Dropout, Conv2d, BatchNorm
 ```
 
 | Class | Signature | Description |
@@ -303,6 +331,8 @@ from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding, Dropout
 | `Embedding(vocab, dim)` | Lookup table | Token embedding |
 | `Dropout(p=0.5)` | Random zeroing | Training-only (controlled by `Tensor.training`) |
 | `GroupNorm(groups, channels)` | Group normalization | Per-group normalization |
+| `Conv2d(in_ch, out_ch, kernel_size, stride=1, padding=0, bias=True)` | 2D convolution | Tensor-op implementation |
+| `BatchNorm(num_features, eps=1e-5, momentum=0.1)` | Batch normalization | Tracks running stats when enabled |
 
 ### Optimizers
 
@@ -328,45 +358,34 @@ sd = get_state_dict(model)           # {'weight': Tensor, 'bias': Tensor, ...}
 load_state_dict(model2, sd)          # Load params into another model
 ```
 
-## Compiled Training Steps
+## JIT Training Helpers
 
-Compile a training step into a reusable C program. The first call traces the computation graph; subsequent calls execute with zero scheduling overhead.
+Use `@jit` for repeated raw Tensor steps. The first call runs normally, the
+second call captures realized schedules, and later calls replay with current
+input buffers.
 
 ```python
-from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters, compile_step
+from polygrad import Tensor, jit
+from polygrad.nn import Linear, SGD, get_parameters
 
 Tensor.manual_seed(42)
 model = Linear(4, 1)
 opt = SGD(get_parameters(model), lr=0.01)
 
-# Sample inputs (shapes must match at runtime)
-x = Tensor.rand(8, 4)
-y = Tensor.rand(8, 1)
-
-def train_step(model, opt, x, y):
+@jit
+def train_step(x, y):
     loss = (model(x) - y).square().mean()
     loss.backward()
     opt.step()
     opt.zero_grad()
-    return loss
+    return loss.realize()
 
-# Compile: traces forward + backward + optimizer into one PolyStep
-step = compile_step(train_step, model, opt, x, y)
-
-# Run: executes compiled kernels with current buffer data
 for i in range(100):
-    x._data[:] = ...  # update input data in-place
-    y._data[:] = ...
-    step.run()
-    print(f"step {i}: loss = {step.loss_value():.4f}")
+    x = Tensor.rand(8, 4).realize()
+    y = Tensor.rand(8, 1).realize()
+    loss = train_step(x, y)
+    print(f"step {i}: loss = {loss.item():.4f}")
 ```
-
-`compile_step` returns a `CompiledTrainingStep` with:
-- `run()` -- execute all compiled kernels (forward + backward + optimizer)
-- `loss_value()` -- read the loss scalar from the output buffer
-- `n_kernels` -- number of compiled kernels
-- `n_intermediates` -- number of pre-allocated intermediate buffers
 
 ## HuggingFace Model Loading
 
@@ -427,10 +446,12 @@ Supported model types: GPT-2. Weight formats: F32, F16, BF16 safetensors (single
 ## Limitations
 
 - CPU is the default path. CUDA execution requires a working CUDA runtime (`libcuda` and `libnvrtc`) on the host.
-- Conv2d and BatchNorm are stubs (forward raises NotImplementedError)
+- Python currently targets Linux. The default CPU runtime compiles native kernels
+  through the shared C core; `POLY_DEVICE=x86|cuda|interp` selects other tested
+  backends when available.
 
 ## Tests
 
 ```bash
-python -m pytest py/tests/ -v   # 130 tests (tensor + nn + compiled step + GPT-2 + HF loading + instance)
+python -m pytest py/tests/ -v   # Tensor, nn, JIT, GPT-2/HF loading, and instance coverage
 ```

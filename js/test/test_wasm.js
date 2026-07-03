@@ -1,11 +1,11 @@
 'use strict'
 
 const polygrad = require('..')
-const { runTests } = require('./test_shared')
-const { runInstanceTests } = require('./test_instance_shared')
-const { runJitTests } = require('./test_jit_shared')
-const { runOptimTests } = require('./test_optim_shared')
-const { runModelTests } = require('./test_model_shared')
+const { runTensorTests } = require('./test_tensor')
+const { runInstanceTests } = require('./test_instance')
+const { runJitTests } = require('./test_jit')
+const { runOptimTests } = require('./test_optim')
+const { runModelTests } = require('./test_model')
 
 function assertClose(actual, expected, tol = 1e-4) {
   if (actual.length !== expected.length) throw new Error(`length mismatch: ${actual.length} vs ${expected.length}`)
@@ -93,7 +93,7 @@ async function runWasmInterpTests() {
 async function main() {
   const pg = await polygrad.create({ core: 'wasm' })
   try {
-    const tensorResult = await runTests(pg)
+    const tensorResult = await runTensorTests(pg)
     const instanceResult = await runInstanceTests(pg)
     const jitResult = await runJitTests(pg)
     const optimResult = await runOptimTests(pg)

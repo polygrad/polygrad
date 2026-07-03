@@ -71,9 +71,8 @@ Package versions use semver, but `major.minor` tracks the shared C core line acr
 Current parity snapshot against `references/tinygrad_latest`:
 - Value parity: **51/51** (`make test-parity`)
 - Optimized value parity: **51/51** (`make test-parity-opt`)
-- Strict IR comparison is tracked separately by `make test-parity-ir` and
-  `make test-parity-ir-opt`. These diagnostic targets currently report
-  structural divergences against tinygrad's latest schedule-linear output.
+- Strict IR parity: **51/51** (`make test-parity-ir`)
+- Optimized strict IR parity: **51/51** (`make test-parity-ir-opt`)
 
 The value parity test (`make test-parity`) schedules each case through both
 Polygrad and tinygrad and compares output values. The strict IR diagnostic
@@ -97,12 +96,12 @@ The parity suite covers 51 cases:
 | Padding/cumulative helpers | pad_value_1d, pad_circular_1d, pad_reflect_1d, pad_replicate_1d, cumsum_1d, cumprod_1d, cummax_1d |
 
 ```bash
-# Run parity tests (requires conda env 'tiny' with tinygrad)
+# Run parity tests (uses references/.venv-tinygrad-py311 when present)
 make test-parity
 
 # Dump strict IR comparison for a specific case
-ASAN_OPTIONS=detect_leaks=0 CACHELEVEL=0 \
-  conda run -n tiny python test/test_tinygrad_parity.py \
+ASAN_OPTIONS=detect_leaks=1:protect_shadow_gap=0 CACHELEVEL=0 \
+  references/.venv-tinygrad-py311/bin/python test/test_tinygrad_parity.py \
   --runner build/polygrad_parity_runner --mode full --no-opt --dump vecadd
 ```
 
@@ -113,8 +112,8 @@ checkout.
 
 `Core parity` gates:
 - Differential value parity (`make test-parity`) must pass.
-- Strict IR parity (`make test-parity-ir`) is a diagnostic target while
-  Polygrad catches up to current tinygrad schedule-linear structure.
+- Strict IR parity (`make test-parity-ir`) must pass on the covered live
+  `references/tinygrad_latest` cases.
 - No silent scheduler/indexing fallbacks for invalid mappings; failures must be explicit.
 - Any intentional divergence from tinygrad must be documented in `Whats different` with reason.
 

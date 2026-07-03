@@ -715,6 +715,28 @@ class Tensor:
         self._data = None
         return self
 
+    def copy_from(self, data):
+        """Update this tensor's existing buffer from host data without changing
+        its BUFFER identity. This is the explicit Polygrad update API for
+        JIT/replay loops; tinygrad's closest public mutation API is assign()."""
+        buf = self.uop.buffer
+        if buf is None:
+            raise RuntimeError('copy_from requires a tensor backed by a BUFFER UOp')
+        np_dt = _to_np_dtype(to_dtype(self._dtype_str))
+        arr = np.asarray(data, dtype=np_dt)
+        if arr.size != self.numel():
+            raise ValueError(f'copy_from size mismatch {arr.size} != {self.numel()}')
+        arr = np.ascontiguousarray(arr.reshape(self.shape))
+        ptr = ctypes.c_void_p(arr.ctypes.data)
+        rc = _ffi._lib.poly_buffer_write(self._ctx, buf.raw, ptr, arr.nbytes)
+        if rc != 0:
+            raise RuntimeError('poly_buffer_write failed')
+        self._data = None
+        return self
+
+    def update_from(self, data):
+        return self.copy_from(data)
+
     def realize(self, *lst, do_update_stats=True):
         """Triggers the computation needed to create these Tensor(s).
         Batches tensors into a single graph-side realize call, and retargets
@@ -1466,6 +1488,64 @@ class Tensor:
         result = self._make_result(uop, new_shape, [self])
         return result
 
+    def argmax(self, axis=None, keepdim=False):
+        if axis is None:
+            return self.flatten().argmax(0)
+        axis = self._resolve_dim(int(axis))
+        uop = _ffi._lib.poly_argmax(self._ctx, self.uop, axis)
+        if not uop:
+            raise RuntimeError('poly_argmax failed')
+        shape = _shape_from_uop(self._ctx, uop)
+        result = self._make_result(uop, shape, [self])
+        if keepdim:
+            keep_shape = list(self.shape)
+            keep_shape[axis] = 1
+            result = result.reshape(tuple(keep_shape))
+        return result
+
+    def sort(self, dim=-1, descending=False):
+        dim = self._resolve_dim(int(dim))
+        values = _ffi._ptr()
+        indices = _ffi._ptr()
+        rc = _ffi._lib.poly_sort(
+            self._ctx, self.uop, dim, int(bool(descending)),
+            ctypes.byref(values), ctypes.byref(indices)
+        )
+        if rc != 0 or not values or not indices:
+            raise RuntimeError('poly_sort failed')
+        val_shape = _shape_from_uop(self._ctx, values)
+        idx_shape = _shape_from_uop(self._ctx, indices)
+        vals = self._make_result(values, val_shape, [self])
+        idx = Tensor(_ctx=self._ctx, _uop=indices, _shape=idx_shape,
+                     _dtype=_uop_dtype_name(self._ctx, indices, 'int32'),
+                     _device=self._device, requires_grad=False)
+        return vals, idx
+
+    def argsort(self, dim=-1, descending=False):
+        return self.sort(dim, descending)[1]
+
+    def topk(self, k, dim=-1, largest=True, sorted_=True):
+        if not sorted_:
+            raise NotImplementedError('topk with sorted_=False is not supported')
+        dim = self._resolve_dim(int(dim))
+        if int(k) > self.shape[dim]:
+            raise ValueError(f'selected index k={int(k)} is out of range')
+        values = _ffi._ptr()
+        indices = _ffi._ptr()
+        rc = _ffi._lib.poly_topk(
+            self._ctx, self.uop, int(k), dim, int(bool(largest)), int(bool(sorted_)),
+            ctypes.byref(values), ctypes.byref(indices)
+        )
+        if rc != 0 or not values or not indices:
+            raise RuntimeError('poly_topk failed')
+        val_shape = _shape_from_uop(self._ctx, values)
+        idx_shape = _shape_from_uop(self._ctx, indices)
+        vals = self._make_result(values, val_shape, [self])
+        idx = Tensor(_ctx=self._ctx, _uop=indices, _shape=idx_shape,
+                     _dtype=_uop_dtype_name(self._ctx, indices, 'int32'),
+                     _device=self._device, requires_grad=False)
+        return vals, idx
+
     def min(self, axis=None, keepdim=False):
         return (-self).max(axis=axis, keepdim=keepdim).__neg__()
 
@@ -1499,6 +1579,87 @@ class Tensor:
     def std(self, axis=None, keepdim=False, correction=1):
         return self.var(axis=axis, keepdim=keepdim, correction=correction).sqrt()
 
+    def gather(self, dim, index):
+        if not isinstance(index, Tensor):
+            index = Tensor(index, dtype='int32', device=self._device)
+        if index.device != self.device:
+            raise RuntimeError(
+                f"expected index and self on the same device, index.device={index.device}, self.device={self.device}"
+            )
+        if index.ndim != self.ndim:
+            raise RuntimeError(f"self.ndim must equal index.ndim, self.ndim={self.ndim}, index.ndim={index.ndim}")
+        dim = self._resolve_dim(int(dim))
+        for d, (s, i) in enumerate(zip(self.shape, index.shape)):
+            if d != dim and s < i:
+                raise AssertionError('requires self.shape[d] >= index.shape[d] for all d != dim')
+
+        uop = _ffi._lib.poly_gather_dim(self._ctx, self.uop, dim, index.uop)
+        if not uop:
+            raise RuntimeError('poly_gather_dim failed')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, index])
+
+    def take_along_axis(self, index, axis):
+        return self.gather(axis, index)
+
+    def _pre_scatter_validate(self, dim, index, src):
+        if not isinstance(index, Tensor):
+            index = Tensor(index, dtype='int32', device=self._device)
+        if not isinstance(src, Tensor):
+            src = Tensor.full(index.shape, _py_scalar(src), dtype=self._dtype_str, device=self._device)
+        if index.device != self.device:
+            raise RuntimeError(
+                f"expected index and self on the same device, index.device={index.device}, self.device={self.device}"
+            )
+        if src.device != self.device:
+            raise RuntimeError(
+                f"expected src and self on the same device, src.device={src.device}, self.device={self.device}"
+            )
+        dim = self._resolve_dim(int(dim))
+        if index.ndim != self.ndim or src.ndim != self.ndim:
+            raise RuntimeError(
+                f"index.ndim, self.ndim and src.ndim must all match, index.ndim={index.ndim}, "
+                f"self.ndim={self.ndim}, src.ndim={src.ndim}"
+            )
+        for d, (self_d, index_d, src_d) in enumerate(zip(self.shape, index.shape, src.shape)):
+            if ((d != dim and self_d < index_d) or src_d < index_d):
+                raise AssertionError(
+                    'requires self.shape[d] >= index.shape[d] for all d != dim and '
+                    'src.shape[d] >= index.shape[d] for all d'
+                )
+        if self.dtype != src.dtype:
+            raise RuntimeError(f"expected self and src to have the same dtype, self.dtype={self.dtype}, src.dtype={src.dtype}")
+        return dim, index, src
+
+    def scatter_reduce(self, dim, index, src, reduce, include_self=True):
+        if reduce not in {'sum', 'prod', 'mean', 'amax', 'amin'}:
+            raise RuntimeError(f"reduce={reduce!r} must be one of 'sum', 'prod', 'mean', 'amax', 'amin'")
+        if not isinstance(src, Tensor):
+            src = Tensor(src, dtype=self._dtype_str, device=self._device)
+        dim, index, src = self._pre_scatter_validate(dim, index, src)
+        uop = _ffi._lib.poly_scatter_reduce(
+            self._ctx, self.uop, dim, index.uop, src.uop,
+            reduce.encode('utf-8'), int(bool(include_self))
+        )
+        if not uop:
+            raise RuntimeError('poly_scatter_reduce failed')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, index, src])
+
+    def scatter(self, dim, index, src, reduce=None):
+        if reduce not in {None, 'add', 'multiply'}:
+            raise TypeError(f"reduce={reduce!r} must be one of None, 'multiply', or 'add'")
+        src_is_tensor = isinstance(src, Tensor)
+        if not src_is_tensor:
+            src = Tensor.full(index.shape if isinstance(index, Tensor) else np.asarray(index).shape,
+                              _py_scalar(src), dtype=self._dtype_str, device=self._device)
+        elif reduce is not None:
+            raise TypeError('non-scalar src is not supported with reduce arg. use scatter_reduce')
+        dim, index, src = self._pre_scatter_validate(dim, index, src)
+        reduce_arg = b'' if reduce is None else reduce.encode('utf-8')
+        uop = _ffi._lib.poly_scatter(self._ctx, self.uop, dim, index.uop, src.uop, reduce_arg)
+        if not uop:
+            raise RuntimeError('poly_scatter failed')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, index, src])
+
     # --- Matmul (C core dot) ---
 
     def dot(self, w):
@@ -1512,6 +1673,17 @@ class Tensor:
 
     def matmul(self, other):
         return self.dot(other)
+
+    def qr(self):
+        q = _ffi._ptr()
+        r = _ffi._ptr()
+        rc = _ffi._lib.poly_qr(self._ctx, self.uop, ctypes.byref(q), ctypes.byref(r))
+        if rc != 0 or not q or not r:
+            raise RuntimeError('poly_qr failed')
+        return (
+            self._make_result(q, _shape_from_uop(self._ctx, q), [self]),
+            self._make_result(r, _shape_from_uop(self._ctx, r), [self]),
+        )
 
     def __matmul__(self, other):
         return self.dot(other)

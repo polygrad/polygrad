@@ -150,6 +150,18 @@ async function createWasmCore(device) {
       : -(~hi * 0x100000000 + (~lo >>> 0) + 1)
   }
 
+  function callUopPair(fn, args, name) {
+    const outPtr = Module._malloc(8)
+    try {
+      const rc = fn(...args, outPtr, outPtr + 4)
+      if (rc !== 0) throw new Error(`${name} failed (rc=${rc})`)
+      const h32 = heap32()
+      return [h32[outPtr >> 2], h32[(outPtr >> 2) + 1]]
+    } finally {
+      Module._free(outPtr)
+    }
+  }
+
   function readShapeFromPtr(ptr, ndim) {
     const shape = []
     for (let i = 0; i < ndim; i++) shape.push(readInt64At(ptr + i * 8))
@@ -660,6 +672,27 @@ async function createWasmCore(device) {
         Module._free(dst)
       }
     },
+    poly_buffer_write: (ctx, buf, src) => {
+      let bytes
+      if (src instanceof Uint8Array) {
+        bytes = src
+      } else if (ArrayBuffer.isView(src)) {
+        bytes = new Uint8Array(src.buffer, src.byteOffset, src.byteLength)
+      } else if (src instanceof ArrayBuffer) {
+        bytes = new Uint8Array(src)
+      } else {
+        throw new TypeError('poly_buffer_write expects a TypedArray or ArrayBuffer')
+      }
+      const nbytes = bytes.byteLength
+      const ptr = nbytes ? Module._malloc(nbytes) : 0
+      try {
+        if (nbytes) heapU8().set(bytes, ptr)
+        const rc = Module._poly_buffer_write(ctx, buf, ptr, nbytes)
+        if (rc !== 0) throw new Error('poly_buffer_write failed (rc=' + rc + ')')
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
     poly_grad: Module._poly_grad,
     poly_grad_many: (ctx, loss, initialGrad, targets) => {
       const n = targets.length
@@ -741,7 +774,31 @@ async function createWasmCore(device) {
     poly_softmax: Module._poly_softmax,
     poly_log_softmax: Module._poly_log_softmax,
     poly_dot: Module._poly_dot,
+    poly_qr: (ctx, uop) => callUopPair(Module._poly_qr, [ctx, uop], 'poly_qr'),
     poly_cross_entropy: Module._poly_cross_entropy,
+    poly_gather_dim: Module._poly_gather_dim,
+    poly_scatter: (ctx, self, dim, index, src, reduce) => {
+      const reducePtr = allocString(reduce || '')
+      const result = Module._poly_scatter(ctx, self, dim, index, src, reducePtr)
+      Module._free(reducePtr)
+      return result
+    },
+    poly_scatter_reduce: (ctx, self, dim, index, src, reduce, includeSelf) => {
+      const reducePtr = allocString(reduce)
+      const result = Module._poly_scatter_reduce(ctx, self, dim, index, src, reducePtr, includeSelf ? 1 : 0)
+      Module._free(reducePtr)
+      return result
+    },
+    poly_argmax: Module._poly_argmax,
+    poly_argsort: Module._poly_argsort,
+    poly_sort: (ctx, uop, dim, descending) =>
+      callUopPair(Module._poly_sort, [ctx, uop, dim, descending ? 1 : 0], 'poly_sort'),
+    poly_topk: (ctx, uop, k, dim, largest, sorted) =>
+      callUopPair(
+        Module._poly_topk,
+        [ctx, uop, BigInt(k), dim, largest ? 1 : 0, sorted ? 1 : 0],
+        'poly_topk'
+      ),
 
     poly_einsum: (ctx, formula, operands) => {
       const n = operands.length

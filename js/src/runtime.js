@@ -8,6 +8,7 @@ const { createBoundOptim } = require('./nn/optim')
 const { getParameters, getStateDict } = require('./nn/state')
 const { createBoundTensorClass } = require('./tensor')
 const { createBoundTokenizerClass } = require('./tokenizer')
+const { createBoundUopNamespace } = require('./uop/ops')
 
 function normalizeOptions(opts) {
   const options = opts ? { ...opts } : {}
@@ -27,7 +28,9 @@ class PolyRuntime {
     this._core = binding
     this.supportsInstance = Boolean(binding.instance)
     this.Tensor = createBoundTensorClass(this)
+    this.uop = createBoundUopNamespace(this)
     this.jit = createBoundJit(this)
+    this.compile = this.jit.compile
     this.Instance = createBoundInstanceClass(this)
     this.models = createBoundModels(this)
     this.Tokenizer = createBoundTokenizerClass(this)
@@ -63,6 +66,28 @@ class PolyRuntime {
     // Public capability surface for tests and callers to avoid dispatching
     // unsupported dtype/backend combinations, mirroring tinygrad's checks.
     return { ...this._core.caps }
+  }
+
+  stats() {
+    return {
+      core: this.core,
+      device: this.device,
+      caps: this.caps,
+      jit: this.jit && this.jit.stats ? this.jit.stats() : null
+    }
+  }
+
+  canRun(query) {
+    const q = query || {}
+    if (q.op != null || q.shape != null) {
+      throw new Error('canRun currently supports only coarse device/dtype checks')
+    }
+    const caps = this.caps
+    if (q.core && q.core !== 'auto' && q.core !== caps.core) return false
+    if (q.device && q.device !== 'auto' && q.device !== caps.device) return false
+    if (q.dtype === 'float64' && caps.f64 === false) return false
+    if ((q.dtype === 'float16' || q.dtype === 'half') && caps.f16 === false) return false
+    return true
   }
 
   async dispose() {

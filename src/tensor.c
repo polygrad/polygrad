@@ -538,6 +538,34 @@ static PolyUOp *poly_const_unique_exact_float(PolyCtx *ctx, PolyDType dt, double
   );
 }
 
+static bool poly_dtype_bound_const(PolyCtx *ctx, PolyDType dt, bool use_min, PolyUOp **out) {
+  if (!ctx || !out) return false;
+  dt = poly_dtype_scalar(dt);
+  if (poly_dtype_is_float(dt)) {
+    *out = poly_const_exact_float(ctx, dt, use_min ? -INFINITY : INFINITY);
+    return *out != NULL;
+  }
+  if (poly_dtype_is_bool(dt)) {
+    *out = poly_const_exact_int(ctx, dt, use_min ? 0 : 1);
+    return *out != NULL;
+  }
+  if (!poly_dtype_is_int(dt)) return false;
+  if (poly_dtype_is_unsigned(dt)) {
+    *out = poly_const_exact_int(ctx, dt, use_min ? 0 : -1);
+    return *out != NULL;
+  }
+
+  int64_t v = 0;
+  if (dt.bitsize >= 64)
+    v = use_min ? INT64_MIN : INT64_MAX;
+  else {
+    int bits = (int)dt.bitsize;
+    v = use_min ? -(1LL << (bits - 1)) : ((1LL << (bits - 1)) - 1);
+  }
+  *out = poly_const_exact_int(ctx, dt, v);
+  return *out != NULL;
+}
+
 static PolyUOp *poly_empty_shaped(PolyCtx *ctx, PolyDType dt, const int64_t *shape, int ndim) {
   PolyUOp *buf = poly_buffer(ctx, dt, 0);
   if (!buf || ndim <= 1) return buf;
@@ -1533,21 +1561,6 @@ PolyUOp *poly_pool(
 
 /* Pad with arbitrary value / circular / reflect / replicate */
 
-/* ones_like(x): same shape and dtype as x, filled with 1.
- * Pure UOp (no const-registry): scalar CONST -> reshape to (1,)*ndim -> expand. */
-static PolyUOp *poly_ones_like(PolyCtx *ctx, PolyUOp *x) {
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim = uop_shape(ctx, x, shape);
-  if (ndim < 0) return NULL;
-  PolyDType dt = poly_dtype_scalar(x->dtype);
-  PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
-  int64_t ones[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++)
-    ones[i] = 1;
-  PolyUOp *r = poly_reshape(ctx, one, ones, ndim);
-  return poly_expand(ctx, r, shape, ndim);
-}
-
 /* Tensor.cat -- tensor.py:1364
  *   dim_cumsum = accumulate([t.shape[dim] for t in tensors], initial=0)
  *   for i, t in enumerate(tensors):
@@ -2499,6 +2512,126 @@ PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w) {
   return poly_reshape(ctx, summed, out_shape, on);
 }
 
+static PolyUOp *poly_transpose_last2(PolyCtx *ctx, PolyUOp *x) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 2) return NULL;
+  int64_t perm[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    perm[i] = i;
+  perm[ndim - 2] = ndim - 1;
+  perm[ndim - 1] = ndim - 2;
+  return poly_permute(ctx, x, perm, ndim);
+}
+
+static PolyUOp *poly_qr_column(PolyCtx *ctx, PolyUOp *r, int64_t col) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, r, shape);
+  if (ndim < 2 || col < 0 || col >= shape[ndim - 1]) return NULL;
+  int64_t pairs[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) {
+    pairs[i][0] = 0;
+    pairs[i][1] = shape[i];
+  }
+  pairs[ndim - 1][0] = col;
+  pairs[ndim - 1][1] = col + 1;
+  PolyUOp *s = poly_shrink(ctx, r, pairs, ndim);
+  int64_t out_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim - 1; i++)
+    out_shape[i] = shape[i];
+  return poly_reshape(ctx, s, out_shape, ndim - 1);
+}
+
+static PolyUOp *poly_unsqueeze_axis(PolyCtx *ctx, PolyUOp *x, int axis);
+
+/* tinygrad Tensor.qr -- mixin/__init__.py:1703
+ * Householder QR in tensor composition form.  For integer input tinygrad's
+ * sqrt/div path promotes to float; Polygrad mirrors that by casting to f32. */
+int poly_qr(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp **out_r) {
+  if (!ctx || !x || !out_q || !out_r) return -1;
+  *out_q = NULL;
+  *out_r = NULL;
+
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 2) return -1;
+  int64_t m = shape[ndim - 2], n = shape[ndim - 1];
+  if (m < 0 || n < 0) return -1;
+
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  if (!poly_dtype_is_float(dt)) {
+    dt = POLY_FLOAT32;
+    x = poly_cast(ctx, x, dt);
+  }
+
+  int64_t q_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim - 2; i++)
+    q_shape[i] = shape[i];
+  q_shape[ndim - 2] = m;
+  q_shape[ndim - 1] = m;
+
+  PolyUOp *eye_bool = poly_eq(
+      ctx,
+      poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, m, 1, 7), (int64_t[]){m, 1}, 2),
+      poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, m, 1, 7), (int64_t[]){1, m}, 2)
+  );
+  PolyUOp *q = poly_dtype_is_bool(dt) ? eye_bool : poly_cast(ctx, eye_bool, dt);
+  if (ndim > 2) {
+    int64_t q_view[POLY_MAX_DIMS];
+    for (int i = 0; i < ndim - 2; i++)
+      q_view[i] = 1;
+    q_view[ndim - 2] = m;
+    q_view[ndim - 1] = m;
+    q = poly_expand(ctx, poly_reshape(ctx, q, q_view, ndim), q_shape, ndim);
+  }
+
+  PolyUOp *r = x;
+  PolyUOp *idx = poly_arange_int_by_id(ctx, 0, m, 1, 7);
+  int64_t steps = m < n ? m : n;
+  PolyUOp *zero = poly_const_typed(ctx, dt, 0.0);
+  PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
+
+  for (int64_t i = 0; i < steps; i++) {
+    PolyUOp *i_c = poly_const_exact_int(ctx, POLY_INT32, i);
+    PolyUOp *at_i = poly_eq(ctx, idx, i_c);
+    PolyUOp *active_rows = poly_ge(ctx, idx, i_c);
+    PolyUOp *col_i = poly_qr_column(ctx, r, i);
+    if (!col_i) return -1;
+
+    PolyUOp *x_vec = poly_where_op(ctx, active_rows, col_i, zero);
+    PolyUOp *norm =
+        poly_alu1(ctx, POLY_OP_SQRT, poly_sum_reduce(ctx, poly_square(ctx, x_vec), ndim - 2, 1));
+    PolyUOp *x0 = poly_sum_reduce(ctx, poly_where_op(ctx, at_i, x_vec, zero), ndim - 2, 1);
+    PolyUOp *active = poly_ne(ctx, norm, zero);
+    PolyUOp *sgn = poly_where_op(ctx, poly_ne(ctx, x0, zero), poly_sign(ctx, x0), one);
+    PolyUOp *u0 = poly_add(ctx, x0, poly_mul(ctx, sgn, norm));
+
+    PolyUOp *safe_u0 = poly_where_op(ctx, active, u0, one);
+    PolyUOp *v_num = poly_where_op(ctx, at_i, u0, x_vec);
+    PolyUOp *v_vec = poly_div(ctx, v_num, safe_u0);
+    PolyUOp *v = poly_unsqueeze_axis(ctx, v_vec, -1);
+
+    PolyUOp *safe_norm = poly_where_op(ctx, active, norm, one);
+    PolyUOp *w_scale = poly_div(ctx, poly_mul(ctx, sgn, u0), safe_norm);
+    PolyUOp *w = poly_mul(
+        ctx,
+        poly_unsqueeze_axis(ctx, poly_where_op(ctx, active, w_scale, zero), -1),
+        v
+    );
+
+    PolyUOp *v_t = poly_transpose_last2(ctx, v);
+    PolyUOp *w_t = poly_transpose_last2(ctx, w);
+    if (!v_t || !w_t) return -1;
+    r = poly_sub(ctx, r, poly_dot(ctx, w, poly_dot(ctx, v_t, r)));
+    q = poly_sub(ctx, q, poly_dot(ctx, poly_dot(ctx, q, v), w_t));
+    if (!r || !q) return -1;
+  }
+
+  *out_q = q;
+  *out_r = r;
+  return 0;
+}
+
 /* Softmax */
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
@@ -2640,6 +2773,337 @@ PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int 
   PolyUOp *scale = cf(ctx, log_probs, -1.0 / (double)denom);
   PolyUOp *loss = poly_alu2(ctx, POLY_OP_MUL, total, scale);
   return poly_reshape(ctx, loss, NULL, 0);
+}
+
+static PolyUOp *poly_unsqueeze_axis(PolyCtx *ctx, PolyUOp *x, int axis) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 0 || ndim >= POLY_MAX_DIMS) return NULL;
+  if (axis < 0) axis += ndim + 1;
+  if (axis < 0 || axis > ndim) return NULL;
+  int64_t out[POLY_MAX_DIMS];
+  for (int i = 0, j = 0; i < ndim + 1; i++) {
+    out[i] = (i == axis) ? 1 : shape[j++];
+  }
+  return poly_reshape(ctx, x, out, ndim + 1);
+}
+
+static PolyUOp *poly_flatten_axes(PolyCtx *ctx, PolyUOp *x, int start_dim, int end_dim) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 0) return NULL;
+  if (start_dim < 0) start_dim += ndim;
+  if (end_dim < 0) end_dim += ndim;
+  if (start_dim < 0 || end_dim < start_dim || end_dim >= ndim) return NULL;
+  int64_t out[POLY_MAX_DIMS];
+  int on = 0;
+  for (int i = 0; i < start_dim; i++)
+    out[on++] = shape[i];
+  int64_t prod = 1;
+  for (int i = start_dim; i <= end_dim; i++) {
+    if (shape[i] < 0 || prod > INT64_MAX / shape[i]) return NULL;
+    prod *= shape[i];
+  }
+  out[on++] = prod;
+  for (int i = end_dim + 1; i < ndim; i++)
+    out[on++] = shape[i];
+  return poly_reshape(ctx, x, out, on);
+}
+
+static bool poly_split_two_ones(PolyCtx *ctx, PolyUOp *x, int axis, PolyUOp **a, PolyUOp **b) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 0) return false;
+  if (axis < 0) axis += ndim;
+  if (axis < 0 || axis >= ndim || shape[axis] != 2) return false;
+  int64_t pairs[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) {
+    pairs[i][0] = 0;
+    pairs[i][1] = shape[i];
+  }
+  pairs[axis][0] = 0;
+  pairs[axis][1] = 1;
+  *a = poly_shrink(ctx, x, pairs, ndim);
+  pairs[axis][0] = 1;
+  pairs[axis][1] = 2;
+  *b = poly_shrink(ctx, x, pairs, ndim);
+  return *a && *b;
+}
+
+static int poly_resolve_sort_flip_axes(int64_t *axes, int n_axes, int ndim) {
+  if (!axes || n_axes < 0 || ndim < 0) return -1;
+  for (int i = 0; i < n_axes; i++) {
+    if (axes[i] < 0) axes[i] += ndim;
+    if (axes[i] < 0 || axes[i] >= ndim) return -1;
+    for (int j = 0; j < i; j++)
+      if (axes[j] == axes[i]) return -1;
+  }
+  return 0;
+}
+
+static bool poly_sort_bound_const(PolyCtx *ctx, PolyDType dt, bool use_min, PolyUOp **out) {
+  dt = poly_dtype_scalar(dt);
+  if (poly_dtype_is_float(dt)) {
+    *out = poly_const_exact_float(ctx, dt, use_min ? -INFINITY : INFINITY);
+    return *out != NULL;
+  }
+  if (poly_dtype_is_bool(dt)) {
+    *out = poly_const_exact_int(ctx, dt, use_min ? 0 : 1);
+    return *out != NULL;
+  }
+  if (!poly_dtype_is_int(dt)) return false;
+
+  int bits = poly_dtype_itemsize(dt) * 8;
+  int64_t val;
+  if (poly_dtype_is_unsigned(dt)) {
+    if (use_min) {
+      val = 0;
+    } else {
+      if (bits >= 63) return false;
+      val = ((int64_t)1 << bits) - 1;
+    }
+  } else if (use_min) {
+    val = (bits >= 64) ? INT64_MIN : -((int64_t)1 << (bits - 1));
+  } else {
+    val = (bits >= 64) ? INT64_MAX : (((int64_t)1 << (bits - 1)) - 1);
+  }
+  *out = poly_const_exact_int(ctx, dt, val);
+  return *out != NULL;
+}
+
+static PolyUOp *poly_pad_with_scalar_nonnegative(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t (*pads)[2],
+    int ndim,
+    PolyUOp *value
+) {
+  if (!ctx || !x || !pads || !value) return NULL;
+  int64_t shape[POLY_MAX_DIMS];
+  int xndim = uop_shape(ctx, x, shape);
+  if (xndim != ndim) return NULL;
+  bool any_pad = false;
+  for (int i = 0; i < ndim; i++) {
+    if (pads[i][0] < 0 || pads[i][1] < 0) return NULL;
+    any_pad = any_pad || pads[i][0] != 0 || pads[i][1] != 0;
+  }
+  if (!any_pad) return x;
+
+  PolyUOp *padded_x = poly_pad(ctx, x, pads, ndim);
+  if (!padded_x) return NULL;
+
+  int64_t ones_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    ones_shape[i] = 1;
+  PolyUOp *one = poly_const_typed(ctx, POLY_BOOL, 1.0);
+  PolyUOp *mask = poly_expand(ctx, poly_reshape(ctx, one, ones_shape, ndim), shape, ndim);
+  PolyUOp *padded_mask = poly_pad(ctx, mask, pads, ndim);
+  return poly_where_op(ctx, padded_mask, padded_x, value);
+}
+
+static PolyUOp *poly_sort_count_equal_before(PolyCtx *ctx, PolyUOp *mask, PolyUOp *t, int dim) {
+  PolyUOp *lhs = poly_unsqueeze_axis(ctx, t, dim);
+  PolyUOp *rhs = poly_unsqueeze_axis(ctx, t, dim + 1);
+  if (!lhs || !rhs) return NULL;
+  PolyUOp *eq = poly_eq(ctx, lhs, rhs);
+  if (!eq) return NULL;
+  int64_t out_shape[POLY_MAX_DIMS];
+  int out_ndim = 0;
+  PolyUOp *mask_bc = mask;
+  PolyUOp *eq_bc = eq;
+  if (!poly_broadcast_pair(ctx, &mask_bc, &eq_bc, out_shape, &out_ndim)) return NULL;
+  PolyUOp *m = poly_alu2(ctx, POLY_OP_AND, mask_bc, eq_bc);
+  PolyUOp *mi = poly_cast(ctx, m, POLY_INT32);
+  return poly_sum_reduce(ctx, mi, dim + 1, 0);
+}
+
+int poly_sort(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int dim,
+    int descending,
+    PolyUOp **out_values,
+    PolyUOp **out_indices
+) {
+  if (!ctx || !x || !out_values || !out_indices) return -1;
+  *out_values = NULL;
+  *out_indices = NULL;
+
+  int64_t orig_shape[POLY_MAX_DIMS];
+  int orig_ndim = uop_shape(ctx, x, orig_shape);
+  if (orig_ndim < 1) return -1;
+  if (dim < 0) dim += orig_ndim;
+  if (dim < 0 || dim >= orig_ndim) return -1;
+  int64_t orig_len = orig_shape[dim];
+  int int32_id = poly_dtype_id_by_name("int32");
+  if (int32_id < 0) return -1;
+
+  if (orig_len <= 1) {
+    *out_values = x;
+    *out_indices = poly_full_int_by_id(ctx, orig_shape, orig_ndim, 0, int32_id);
+    return *out_indices ? 0 : -1;
+  }
+
+  int n_stages = 0;
+  int64_t padded_len = 1;
+  while (padded_len < orig_len) {
+    if (padded_len > INT64_MAX / 2) return -1;
+    padded_len *= 2;
+    n_stages++;
+  }
+  if (orig_ndim + n_stages - 1 > POLY_MAX_DIMS) return -1;
+
+  PolyUOp *pad_value = NULL;
+  if (!poly_sort_bound_const(ctx, x->dtype, descending != 0, &pad_value)) return -1;
+
+  int64_t pads[POLY_MAX_DIMS][2];
+  for (int i = 0; i < orig_ndim; i++) {
+    pads[i][0] = 0;
+    pads[i][1] = (i == dim) ? (padded_len - orig_len) : 0;
+  }
+  PolyUOp *cur = poly_pad_with_scalar_nonnegative(ctx, x, pads, orig_ndim, pad_value);
+  if (!cur) return -1;
+
+  int64_t unflat_shape[POLY_MAX_DIMS];
+  int un = 0;
+  for (int i = 0; i < dim; i++)
+    unflat_shape[un++] = orig_shape[i];
+  for (int i = 0; i < n_stages; i++)
+    unflat_shape[un++] = 2;
+  for (int i = dim + 1; i < orig_ndim; i++)
+    unflat_shape[un++] = orig_shape[i];
+  cur = poly_reshape(ctx, cur, unflat_shape, un);
+  if (!cur) return -1;
+
+  for (int stage = 1; stage <= n_stages; stage++) {
+    int crossover_dim = dim + n_stages - stage - 1;
+    int64_t flip_axes[POLY_MAX_DIMS];
+    int n_flip_axes = 0;
+    if (stage != n_stages) {
+      PolyUOp *blue = NULL, *green = NULL;
+      if (!poly_split_two_ones(ctx, cur, crossover_dim, &blue, &green)) return -1;
+      for (int i = 1; i < stage + 1 + (orig_ndim - dim); i++)
+        flip_axes[n_flip_axes++] = -i;
+      if (poly_resolve_sort_flip_axes(flip_axes, n_flip_axes, un) != 0) return -1;
+      PolyUOp *flipped = poly_flip(ctx, green, flip_axes, n_flip_axes);
+      PolyUOp *parts[2] = {blue, flipped};
+      cur = poly_contiguous(ctx, poly_cat(ctx, parts, 2, crossover_dim));
+      if (!cur) return -1;
+    }
+
+    for (int substage = stage - 1; substage >= 0; substage--) {
+      int partner_dim = dim + n_stages - substage - 1;
+      PolyUOp *top = NULL, *bottom = NULL;
+      if (!poly_split_two_ones(ctx, cur, partner_dim, &top, &bottom)) return -1;
+      PolyUOp *larger = poly_maximum(ctx, top, bottom);
+      PolyUOp *smaller = poly_minimum(ctx, top, bottom);
+      PolyUOp *parts[2] = {descending ? larger : smaller, descending ? smaller : larger};
+      cur = poly_contiguous(ctx, poly_cat(ctx, parts, 2, partner_dim));
+      if (!cur) return -1;
+    }
+
+    if (stage != n_stages) {
+      PolyUOp *blue = NULL, *flipped_green = NULL;
+      if (!poly_split_two_ones(ctx, cur, crossover_dim, &blue, &flipped_green)) return -1;
+      PolyUOp *green = poly_flip(ctx, flipped_green, flip_axes, n_flip_axes);
+      PolyUOp *parts[2] = {blue, green};
+      cur = poly_cat(ctx, parts, 2, crossover_dim);
+      if (!cur) return -1;
+    }
+  }
+
+  cur = poly_flatten_axes(ctx, cur, dim, dim + n_stages - 1);
+  if (!cur) return -1;
+  cur = poly_shrink_to(ctx, cur, orig_shape, orig_ndim);
+  if (!cur) return -1;
+
+  int64_t mask_shape[POLY_MAX_DIMS];
+  int mask_ndim = 0;
+  mask_shape[mask_ndim++] = orig_len;
+  mask_shape[mask_ndim++] = orig_len;
+  for (int i = 0; i < orig_ndim - dim - 1; i++)
+    mask_shape[mask_ndim++] = 1;
+  PolyUOp *mask = poly_full_int_by_id(ctx, mask_shape, mask_ndim, 1, poly_dtype_id_by_name("bool"));
+  if (!mask) return -1;
+  mask = poly_tril(ctx, mask, 0);
+  if (!mask) return -1;
+
+  PolyUOp *count_orig = poly_sort_count_equal_before(ctx, mask, x, dim);
+  PolyUOp *count_sorted = poly_sort_count_equal_before(ctx, mask, cur, dim);
+  if (!count_orig || !count_sorted) return -1;
+
+  PolyUOp *orig_us = poly_unsqueeze_axis(ctx, x, dim + 1);
+  PolyUOp *sorted_us = poly_unsqueeze_axis(ctx, cur, dim);
+  if (!orig_us || !sorted_us) return -1;
+  PolyUOp *value_eq = poly_eq(ctx, orig_us, sorted_us);
+  PolyUOp *count_eq =
+      poly_eq(ctx, poly_unsqueeze_axis(ctx, count_orig, dim + 1), poly_unsqueeze_axis(ctx, count_sorted, dim));
+  if (!value_eq || !count_eq) return -1;
+  int64_t cond_shape[POLY_MAX_DIMS];
+  int cond_ndim = 0;
+  PolyUOp *value_eq_bc = value_eq;
+  PolyUOp *count_eq_bc = count_eq;
+  if (!poly_broadcast_pair(ctx, &value_eq_bc, &count_eq_bc, cond_shape, &cond_ndim)) return -1;
+  PolyUOp *cond = poly_alu2(ctx, POLY_OP_AND, value_eq_bc, count_eq_bc);
+  PolyUOp *cond_i = poly_cast(ctx, cond, POLY_INT32);
+
+  PolyUOp *idx = poly_arange_int_by_id(ctx, 0, orig_len, 1, int32_id);
+  if (!idx) return -1;
+  int64_t idx_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < orig_ndim; i++)
+    idx_shape[i] = (i == dim) ? orig_len : 1;
+  idx = poly_reshape(ctx, idx, idx_shape, orig_ndim);
+  idx = poly_unsqueeze_axis(ctx, idx, dim + 1);
+  if (!idx) return -1;
+
+  PolyUOp *cond_bc = cond_i;
+  PolyUOp *idx_bc = idx;
+  int64_t mul_shape[POLY_MAX_DIMS];
+  int mul_ndim = 0;
+  if (!poly_broadcast_pair(ctx, &cond_bc, &idx_bc, mul_shape, &mul_ndim)) return -1;
+  PolyUOp *idx_masked = poly_alu2(ctx, POLY_OP_MUL, cond_bc, idx_bc);
+  PolyUOp *idx_sum = poly_sum_reduce(ctx, idx_masked, dim, 0);
+  if (!idx_sum) return -1;
+
+  *out_values = cur;
+  *out_indices = idx_sum;
+  return 0;
+}
+
+PolyUOp *poly_argsort(PolyCtx *ctx, PolyUOp *x, int dim, int descending) {
+  PolyUOp *values = NULL, *indices = NULL;
+  if (poly_sort(ctx, x, dim, descending, &values, &indices) != 0) return NULL;
+  (void)values;
+  return indices;
+}
+
+int poly_topk(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t k,
+    int dim,
+    int largest,
+    int sorted,
+    PolyUOp **out_values,
+    PolyUOp **out_indices
+) {
+  if (!ctx || !x || !out_values || !out_indices) return -1;
+  if (!sorted) return -1;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 1) return -1;
+  if (dim < 0) dim += ndim;
+  if (dim < 0 || dim >= ndim) return -1;
+  if (k > shape[dim]) return -1;
+
+  PolyUOp *values = NULL, *indices = NULL;
+  if (poly_sort(ctx, x, dim, largest, &values, &indices) != 0) return -1;
+  int64_t ends[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    ends[i] = (i == dim) ? k : -1;
+  *out_values = poly_shrink_to(ctx, values, ends, ndim);
+  *out_indices = poly_shrink_to(ctx, indices, ends, ndim);
+  return (*out_values && *out_indices) ? 0 : -1;
 }
 
 /* Einsum */
@@ -3149,6 +3613,324 @@ PolyUOp *poly_rearrange(
 }
 
 /* Gather (embedding lookup) */
+
+PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
+  if (!ctx || !x || !index) return NULL;
+  int64_t shape[POLY_MAX_DIMS], index_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  int index_ndim = uop_shape(ctx, index, index_shape);
+  if (ndim < 0 || index_ndim < 0 || ndim != index_ndim) return NULL;
+  if (dim < 0) dim += ndim;
+  if (dim < 0 || dim >= ndim) return NULL;
+  for (int d = 0; d < ndim; d++)
+    if (d != dim && shape[d] < index_shape[d]) return NULL;
+
+  int64_t ends[POLY_MAX_DIMS];
+  for (int d = 0; d < ndim; d++)
+    ends[d] = (d == dim) ? -1 : index_shape[d];
+  PolyUOp *xs = poly_shrink_to(ctx, x, ends, ndim);
+  if (!xs) return NULL;
+
+  PolyUOp *xu = poly_unsqueeze_axis(ctx, xs, -1);
+  if (!xu) return NULL;
+  int xu_ndim = ndim + 1;
+  int64_t perm[POLY_MAX_DIMS];
+  for (int i = 0; i < xu_ndim; i++)
+    perm[i] = i;
+  perm[dim] = xu_ndim - 1;
+  perm[xu_ndim - 1] = dim;
+  PolyUOp *xg = poly_permute(ctx, xu, perm, xu_ndim);
+  if (!xg) return NULL;
+
+  int arange_dtype_id = (shape[dim] > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
+                                                          : poly_dtype_id_by_name("int32");
+  PolyUOp *ar = poly_arange_int_by_id(ctx, 0, shape[dim], 1, arange_dtype_id);
+  if (!ar) return NULL;
+
+  PolyUOp *index_u = poly_unsqueeze_axis(ctx, index, -1);
+  if (!index_u) return NULL;
+
+  int64_t ar_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    ar_shape[i] = 1;
+  ar_shape[ndim] = shape[dim];
+  PolyUOp *ar_r = poly_reshape(ctx, ar, ar_shape, ndim + 1);
+  if (!ar_r) return NULL;
+
+  PolyUOp *mask = poly_eq(ctx, index_u, ar_r);
+  if (!mask) return NULL;
+  PolyUOp *zero = poly_alu2(ctx, POLY_OP_MUL, xg, cf(ctx, xg, 0.0));
+  if (!zero) return NULL;
+  PolyUOp *selected = poly_where_op(ctx, mask, xg, zero);
+  if (!selected) return NULL;
+  return poly_sum_reduce(ctx, selected, -1, 0);
+}
+
+typedef struct {
+  PolyUOp *src;
+  PolyUOp *mask;
+  int64_t self_shape[POLY_MAX_DIMS];
+  int ndim;
+} PolyScatterPrepared;
+
+static PolyUOp *poly_pad_to_scatter_self(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *self_shape,
+    int ndim
+) {
+  if (!ctx || !x || !self_shape || ndim < 0 || ndim + 1 > POLY_MAX_DIMS) return NULL;
+  int64_t cur_shape[POLY_MAX_DIMS];
+  int cur_ndim = uop_shape(ctx, x, cur_shape);
+  if (cur_ndim != ndim + 1) return NULL;
+  int64_t pads[POLY_MAX_DIMS][2];
+  for (int i = 0; i < ndim; i++) {
+    if (cur_shape[i] > self_shape[i]) return NULL;
+    pads[i][0] = 0;
+    pads[i][1] = self_shape[i] - cur_shape[i];
+  }
+  pads[ndim][0] = 0;
+  pads[ndim][1] = 0;
+  return poly_pad(ctx, x, pads, ndim + 1);
+}
+
+static PolyUOp *poly_scatter_one_hot(
+    PolyCtx *ctx,
+    PolyUOp *index,
+    const int64_t *self_shape,
+    const int64_t *index_shape,
+    int ndim,
+    int dim
+) {
+  if (!ctx || !index || !self_shape || !index_shape || ndim < 0 || ndim + 1 > POLY_MAX_DIMS)
+    return NULL;
+
+  int arange_dtype_id = (self_shape[dim] > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
+                                                               : poly_dtype_id_by_name("int32");
+  PolyUOp *ar = poly_arange_int_by_id(ctx, 0, self_shape[dim], 1, arange_dtype_id);
+  if (!ar) return NULL;
+
+  PolyUOp *index_u = poly_unsqueeze_axis(ctx, index, -1);
+  if (!index_u) return NULL;
+
+  int64_t ar_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    ar_shape[i] = 1;
+  ar_shape[ndim] = self_shape[dim];
+  PolyUOp *ar_r = poly_reshape(ctx, ar, ar_shape, ndim + 1);
+  if (!ar_r) return NULL;
+
+  PolyUOp *mask = poly_eq(ctx, index_u, ar_r);
+  if (!mask) return NULL;
+
+  int64_t perm[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim + 1; i++)
+    perm[i] = i;
+  perm[dim] = ndim;
+  perm[ndim] = dim;
+  (void)index_shape;
+  return poly_permute(ctx, mask, perm, ndim + 1);
+}
+
+static bool poly_prepare_scatter(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    int dim,
+    PolyUOp *index,
+    PolyUOp *src,
+    PolyScatterPrepared *out
+) {
+  if (!ctx || !self || !index || !src || !out) return false;
+  int64_t self_shape[POLY_MAX_DIMS], index_shape[POLY_MAX_DIMS], src_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, self, self_shape);
+  int index_ndim = uop_shape(ctx, index, index_shape);
+  int src_ndim = uop_shape(ctx, src, src_shape);
+  if (ndim < 0 || index_ndim != ndim || src_ndim != ndim || ndim + 1 > POLY_MAX_DIMS) return false;
+  if (dim < 0) dim += ndim;
+  if (dim < 0 || dim >= ndim) return false;
+  if (!poly_dtype_eq(poly_dtype_scalar(self->dtype), poly_dtype_scalar(src->dtype))) return false;
+
+  for (int d = 0; d < ndim; d++) {
+    if (d != dim && self_shape[d] < index_shape[d]) return false;
+    if (src_shape[d] < index_shape[d]) return false;
+  }
+
+  int64_t ends[POLY_MAX_DIMS];
+  for (int d = 0; d < ndim; d++)
+    ends[d] = index_shape[d];
+  PolyUOp *src_s = poly_shrink_to(ctx, src, ends, ndim);
+  if (!src_s) return false;
+
+  PolyUOp *src_u = poly_unsqueeze_axis(ctx, src_s, -1);
+  if (!src_u) return false;
+  int64_t src_exp_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    src_exp_shape[i] = index_shape[i];
+  src_exp_shape[ndim] = self_shape[dim];
+  src_u = poly_expand(ctx, src_u, src_exp_shape, ndim + 1);
+  if (!src_u) return false;
+
+  int64_t perm[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim + 1; i++)
+    perm[i] = i;
+  perm[dim] = ndim;
+  perm[ndim] = dim;
+  PolyUOp *src_t = poly_permute(ctx, src_u, perm, ndim + 1);
+  if (!src_t) return false;
+  src_t = poly_pad_to_scatter_self(ctx, src_t, self_shape, ndim);
+  if (!src_t) return false;
+
+  PolyUOp *mask = poly_scatter_one_hot(ctx, index, self_shape, index_shape, ndim, dim);
+  if (!mask) return false;
+  mask = poly_pad_to_scatter_self(ctx, mask, self_shape, ndim);
+  if (!mask) return false;
+
+  memcpy(out->self_shape, self_shape, sizeof(int64_t) * (size_t)ndim);
+  out->ndim = ndim;
+  out->src = src_t;
+  out->mask = mask;
+  return true;
+}
+
+static PolyUOp *poly_scatter_masked_merge(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    PolyUOp *values,
+    PolyUOp *mask,
+    const int64_t *self_shape,
+    int ndim
+) {
+  if (!ctx || !self || !values || !mask || !self_shape || ndim < 0) return NULL;
+  int64_t mask_shape[POLY_MAX_DIMS];
+  int mask_ndim = uop_shape(ctx, mask, mask_shape);
+  if (mask_ndim != ndim + 1) return NULL;
+  int64_t dup = mask_shape[ndim];
+  if (dup <= 0) return NULL;
+
+  PolyUOp *acc_val = NULL;
+  PolyUOp *acc_mask = NULL;
+  for (int64_t k = 0; k < dup; k++) {
+    int64_t pairs[POLY_MAX_DIMS][2];
+    for (int i = 0; i < ndim; i++) {
+      pairs[i][0] = 0;
+      pairs[i][1] = self_shape[i];
+    }
+    pairs[ndim][0] = k;
+    pairs[ndim][1] = k + 1;
+
+    PolyUOp *mk = poly_shrink(ctx, mask, pairs, ndim + 1);
+    PolyUOp *vk = poly_shrink(ctx, values, pairs, ndim + 1);
+    if (!mk || !vk) return NULL;
+    mk = poly_reshape(ctx, mk, (int64_t *)self_shape, ndim);
+    vk = poly_reshape(ctx, vk, (int64_t *)self_shape, ndim);
+    if (!mk || !vk) return NULL;
+
+    if (!acc_val) {
+      acc_val = vk;
+      acc_mask = mk;
+    } else {
+      acc_val = poly_where_op(ctx, mk, vk, acc_val);
+      acc_mask = poly_alu2(ctx, POLY_OP_OR, acc_mask, mk);
+    }
+    if (!acc_val || !acc_mask) return NULL;
+  }
+  return poly_where_op(ctx, acc_mask, acc_val, self);
+}
+
+static PolyUOp *poly_reduce_last_drop(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyUOp *x,
+    const int64_t *full_shape,
+    int ndim
+) {
+  if (!ctx || !x || !full_shape || ndim < 0) return NULL;
+  int64_t axes[1] = {ndim};
+  PolyUOp *r = poly_reduce_axis(ctx, op, x, axes, 1);
+  if (!r) return NULL;
+  return poly_reshape(ctx, r, (int64_t *)full_shape, ndim);
+}
+
+PolyUOp *poly_scatter_reduce(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    int dim,
+    PolyUOp *index,
+    PolyUOp *src,
+    const char *reduce,
+    int include_self
+) {
+  if (!reduce) return NULL;
+  PolyScatterPrepared p = {0};
+  if (!poly_prepare_scatter(ctx, self, dim, index, src, &p)) return NULL;
+
+  PolyDType dt = poly_dtype_scalar(src->dtype);
+  PolyUOp *zero = poly_const_typed(ctx, dt, 0.0);
+  PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
+  if (!zero || !one) return NULL;
+
+  PolyUOp *mask_i = poly_where_op(ctx, p.mask, poly_const_exact_int(ctx, POLY_INT32, 1), poly_const_exact_int(ctx, POLY_INT32, 0));
+  PolyUOp *count = poly_reduce_last_drop(ctx, POLY_OP_ADD, mask_i, p.self_shape, p.ndim);
+  if (!count) return NULL;
+  PolyUOp *no_hit = poly_eq(ctx, count, poly_const_exact_int(ctx, POLY_INT32, 0));
+  if (!no_hit) return NULL;
+
+  if (strcmp(reduce, "sum") == 0 || strcmp(reduce, "mean") == 0) {
+    PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, zero);
+    PolyUOp *sum = poly_reduce_last_drop(ctx, POLY_OP_ADD, selected, p.self_shape, p.ndim);
+    if (!sum) return NULL;
+    PolyUOp *base = include_self ? self : poly_where_op(ctx, no_hit, self, zero);
+    PolyUOp *total = poly_add(ctx, sum, base);
+    if (strcmp(reduce, "sum") == 0) return total;
+
+    PolyUOp *inc = include_self ? poly_const_exact_int(ctx, POLY_INT32, 1)
+                                : poly_where_op(ctx, no_hit, poly_const_exact_int(ctx, POLY_INT32, 1),
+                                                poly_const_exact_int(ctx, POLY_INT32, 0));
+    PolyUOp *den = poly_add(ctx, count, inc);
+    den = poly_cast(ctx, den, dt);
+    return poly_div(ctx, total, den);
+  }
+
+  if (strcmp(reduce, "prod") == 0) {
+    PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, one);
+    PolyUOp *prod = poly_reduce_last_drop(ctx, POLY_OP_MUL, selected, p.self_shape, p.ndim);
+    if (!prod) return NULL;
+    PolyUOp *base = include_self ? self : poly_where_op(ctx, no_hit, self, one);
+    return poly_mul(ctx, prod, base);
+  }
+
+  if (strcmp(reduce, "amax") == 0 || strcmp(reduce, "amin") == 0) {
+    bool is_min = strcmp(reduce, "amin") == 0;
+    PolyUOp *fill = NULL;
+    if (!poly_dtype_bound_const(ctx, dt, !is_min, &fill)) return NULL;
+    PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, fill);
+    PolyUOp *reduced = NULL;
+    if (is_min) {
+      PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, selected);
+      PolyUOp *max_neg = poly_reduce_last_drop(ctx, POLY_OP_MAX, neg, p.self_shape, p.ndim);
+      reduced = max_neg ? poly_alu1(ctx, POLY_OP_NEG, max_neg) : NULL;
+    } else
+      reduced = poly_reduce_last_drop(ctx, POLY_OP_MAX, selected, p.self_shape, p.ndim);
+    if (!reduced) return NULL;
+
+    PolyUOp *base = include_self ? self : poly_where_op(ctx, no_hit, self, fill);
+    return is_min ? poly_minimum(ctx, reduced, base) : poly_maximum(ctx, reduced, base);
+  }
+
+  return NULL;
+}
+
+PolyUOp *poly_scatter(PolyCtx *ctx, PolyUOp *self, int dim, PolyUOp *index, PolyUOp *src, const char *reduce) {
+  if (reduce && strcmp(reduce, "add") == 0)
+    return poly_scatter_reduce(ctx, self, dim, index, src, "sum", 1);
+  if (reduce && strcmp(reduce, "multiply") == 0)
+    return poly_scatter_reduce(ctx, self, dim, index, src, "prod", 1);
+  if (reduce && reduce[0]) return NULL;
+
+  PolyScatterPrepared p = {0};
+  if (!poly_prepare_scatter(ctx, self, dim, index, src, &p)) return NULL;
+  return poly_scatter_masked_merge(ctx, self, p.src, p.mask, p.self_shape, p.ndim);
+}
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {
   if (!ctx || !table || !indices) return NULL;

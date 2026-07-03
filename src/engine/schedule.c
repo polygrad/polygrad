@@ -745,16 +745,23 @@ static PolyUOp *poly_program_attach_binary(
   return poly_uop(ctx, POLY_OP_PROGRAM, POLY_VOID, src, 5, program->arg);
 }
 
-static int webgpu_collect_param_order(PolyUOp **lin, int n_lin, int *order, int n_params) {
+static int webgpu_collect_param_order(
+    PolyUOp **lin,
+    int n_lin,
+    int *order,
+    int cap,
+    int *n_out
+) {
   int seen = 0;
   for (int i = 0; i < n_lin; i++) {
     if (lin[i]->op != POLY_OP_PARAM) continue;
-    if (seen >= n_params) return -1;
+    if (seen >= cap) return -1;
     int idx = (int)lin[i]->arg.i;
-    if (idx < 0 || idx >= n_params) return -1;
+    if (idx < 0) return -1;
     order[seen++] = idx;
   }
-  return (seen == n_params) ? 0 : -1;
+  if (n_out) *n_out = seen;
+  return 0;
 }
 
 static int poly_schedule_slot_for_call_arg(
@@ -1686,25 +1693,31 @@ static int webgpu_fill_param_slots(
     int call_index,
     PolyRunner *runner
 ) {
-  int n_params = poly_call_n_buffer_args(call);
-  runner->n_params = n_params;
-  if (n_params <= 0) return 0;
-
   int n_lin = 0;
   PolyUOp *body = poly_schedule_call_body(sched, call_index);
   PolyUOp **lin = poly_linearize_webgpu(ctx, body, &n_lin);
   if (!lin) return -1;
 
-  int *param_order = malloc((size_t)n_params * sizeof(int));
-  int *param_to_slot = malloc((size_t)n_params * sizeof(int));
-  if (!param_order || !param_to_slot ||
-      webgpu_collect_param_order(lin, n_lin, param_order, n_params) != 0) {
+  int *param_order = malloc((size_t)(n_lin > 0 ? n_lin : 1) * sizeof(int));
+  int n_params = 0;
+  if (!param_order || webgpu_collect_param_order(lin, n_lin, param_order, n_lin, &n_params) != 0) {
     free(param_order);
-    free(param_to_slot);
     free(lin);
     return -1;
   }
+  runner->n_params = n_params;
+  if (n_params <= 0) {
+    free(param_order);
+    free(lin);
+    return 0;
+  }
 
+  int *param_to_slot = malloc((size_t)n_params * sizeof(int));
+  if (!param_to_slot) {
+    free(param_order);
+    free(lin);
+    return -1;
+  }
   for (int i = 0; i < n_params; i++) {
     int src_idx = param_order[i];
     param_to_slot[i] = poly_schedule_call_buffer_slot(sched, call_index, src_idx);

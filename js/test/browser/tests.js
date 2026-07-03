@@ -5,9 +5,9 @@
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
   };
 
-  // test/test_shared.js
-  var require_test_shared = __commonJS({
-    "test/test_shared.js"(exports, module) {
+  // test/test_tensor.js
+  var require_test_tensor = __commonJS({
+    "test/test_tensor.js"(exports, module) {
       "use strict";
       function assertClose(arr, expected, tol) {
         if (tol === void 0) tol = 1e-4;
@@ -28,13 +28,24 @@
           throw new Error(`shape mismatch: got [${actual}], expected [${expected}]`);
         }
       }
-      async function runTests(pg) {
+      async function runTensorTests(pg) {
         const Tensor = pg.Tensor;
         const caps = pg.caps || {};
+        const testFilter = (() => {
+          if (pg && pg.testFilter) return String(pg.testFilter);
+          if (typeof globalThis !== "undefined" && globalThis.__POLY_TEST_FILTER) {
+            return String(globalThis.__POLY_TEST_FILTER);
+          }
+          if (typeof process !== "undefined" && process.env && process.env.POLY_TEST_FILTER) {
+            return String(process.env.POLY_TEST_FILTER);
+          }
+          return "";
+        })();
         const supportsF16 = caps.f16 !== false;
         const supportsF64 = caps.f64 !== false;
         let passed = 0, failed = 0, skipped = 0;
         async function test(name, fn) {
+          if (testFilter && !name.includes(testFilter)) return;
           try {
             await fn();
             console.log(`  [PASS] ${name}`);
@@ -74,6 +85,51 @@
           const t = Tensor.empty([2, 3]);
           assertShape(t.shape, [2, 3]);
           assert(t.uop.hasBufferIdentity(), "empty should be backed by a BUFFER UOp");
+        });
+        await test("runtime exposes uop namespace", async () => {
+          const t = new Tensor([[1, 2], [3, 4]]);
+          assert(pg.uop, "runtime should expose pg.uop");
+          assertShape(pg.uop.shape(t.uop), [2, 2]);
+          assert(pg.uop.dtype(t.uop) === "float32", `expected float32, got ${pg.uop.dtype(t.uop)}`);
+          assert(pg.uop.hasBufferIdentity(t.uop), "host tensor should have buffer identity");
+          assert(pg.uop.buffer(t.uop), "pg.uop.buffer should return a UOp");
+        });
+        await test("runtime exposes conservative stats and capability checks", async () => {
+          assert(typeof pg.stats === "function", "runtime should expose stats()");
+          assert(typeof pg.canRun === "function", "runtime should expose canRun()");
+          const stats = pg.stats();
+          assert(stats.core === pg.core, "runtime stats should include core");
+          assert(stats.device === pg.device, "runtime stats should include device");
+          assert(stats.jit && typeof stats.jit.liveCount === "number", "runtime stats should include jit live count");
+          assert(pg.canRun({ dtype: "float32" }), "float32 should be supported by every current runtime");
+          if (pg.caps.f64 === false) {
+            assert(!pg.canRun({ dtype: "float64" }), "canRun should reject f64 when caps.f64 is false");
+          }
+          let threw = false;
+          try {
+            pg.canRun({ op: "matmul", dtype: "float32" });
+          } catch (e) {
+            threw = String(e.message || e).includes("coarse device/dtype");
+          }
+          assert(threw, "op/shape canRun queries should fail explicitly until core supports them");
+        });
+        await test("runtime compile wrapper warms capture and replays", async () => {
+          assert(typeof pg.compile === "function", "runtime should expose pg.compile");
+          const sample = new Tensor(new Float32Array([1, 2, 3]));
+          const compiled = await pg.compile((x) => x.add(1).realize(), [sample]);
+          assert(compiled.scheduleCount === 1, `expected one captured schedule, got ${compiled.scheduleCount}`);
+          const out = await compiled.run([new Tensor(new Float32Array([10, 20, 30]))]);
+          assertClose(await out.toArray(), [11, 21, 31]);
+          const stats = compiled.stats();
+          assert(stats.captureRuns === 2, "compile should perform two setup runs");
+          assert(stats.runCount === 1, "compiled run should update runCount");
+          compiled.dispose();
+        });
+        await test("toTypedArray aliases flat typed readback", async () => {
+          const t = new Tensor([1, 2, 3]);
+          const arr = await t.toTypedArray();
+          assert(arr instanceof Float32Array, `expected Float32Array, got ${arr.constructor.name}`);
+          assertClose(arr, [1, 2, 3]);
         });
         await test("empty rejects named tensor keyword like tinygrad", async () => {
           let threw = false;
@@ -176,6 +232,11 @@
           const b = new Tensor([2, 3, 3]);
           assertClose(await a.gt(b).toArray(), [0, 1, 0]);
         });
+        await test("where with optimized-away middle input keeps param slots", async () => {
+          const idx = Tensor.arange(2);
+          const out = idx.ge(0).where(new Tensor([1, 3]), new Tensor([7, 8]));
+          assertClose(await out.toArray(), [1, 3]);
+        });
         await test("maximum", async () => {
           const a = new Tensor([1, 5, 3]);
           const b = new Tensor([2, 3, 4]);
@@ -220,6 +281,65 @@
           const arr = await p.toArray();
           assert(arr instanceof Uint8Array, `expected Uint8Array-compatible view, got ${arr.constructor.name}`);
           assertClose(arr, [0, 1, 0, 1, 0]);
+        });
+        await test("gather matches tinygrad probe", async () => {
+          const t = new Tensor([[1, 2], [3, 4]]);
+          const idx = new Tensor(new Int32Array([0, 0, 1, 0]), { dtype: "int32" }).reshape(2, 2);
+          const out = t.gather(1, idx);
+          assertShape(out.shape, [2, 2]);
+          assertClose(await out.toArray(), [1, 1, 4, 3]);
+          const x3 = Tensor.arange(24).reshape(2, 3, 4);
+          const idx3 = new Tensor(new Int32Array([0, 2, 1, 0, 2, 1, 0, 2]), { dtype: "int32" }).reshape(2, 2, 2);
+          const out3 = x3.gather(1, idx3);
+          assertShape(out3.shape, [2, 2, 2]);
+          assertClose(await out3.toArray(), [0, 9, 4, 1, 20, 17, 12, 21]);
+        });
+        await test("scatter matches tinygrad probe", async () => {
+          const base = Tensor.zeros(3, 5);
+          const idx0 = new Tensor(new Int32Array([0, 1, 2, 0]), { dtype: "int32" }).reshape(1, 4);
+          const src0 = new Tensor([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).reshape(2, 5);
+          assertClose(await base.scatter(0, idx0, src0).toArray(), [1, 0, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0]);
+          const idx1 = new Tensor(new Int32Array([0, 1, 2, 0, 1, 4, 2, 3, 4]), { dtype: "int32" }).reshape(3, 3);
+          const src1 = new Tensor([1, 2, 3, 6, 7, 8, 9, 10, 11]).reshape(3, 3);
+          assertClose(await base.scatter(1, idx1, src1).toArray(), [1, 2, 3, 0, 0, 6, 7, 0, 0, 8, 0, 0, 9, 10, 11]);
+          const dupIdx = new Tensor(new Int32Array([1, 1, 2]), { dtype: "int32" }).reshape(1, 3);
+          const dupSrc = new Tensor([7, 9, 8]).reshape(1, 3);
+          assertClose(await new Tensor([[0, 0, 0, 0]]).scatter(1, dupIdx, dupSrc).toArray(), [0, 9, 8, 0]);
+          const scalarIdx = new Tensor(new Int32Array([2, 3]), { dtype: "int32" }).reshape(2, 1);
+          assertClose(await Tensor.full([2, 4], 2).scatter(1, scalarIdx, 1.23, "add").toArray(), [2, 2, 3.23, 2, 2, 2, 2, 3.23]);
+          assertClose(await Tensor.full([2, 4], 2).scatter(1, scalarIdx, 1.23, "multiply").toArray(), [2, 2, 2.46, 2, 2, 2, 2, 2.46]);
+          let threw = false;
+          try {
+            base.scatter(1, idx1, src1, "sum");
+          } catch (e) {
+            threw = true;
+          }
+          assert(threw, "expected invalid scatter reduce string to throw");
+          threw = false;
+          try {
+            base.scatter(1, idx1, src1, "add");
+          } catch (e) {
+            threw = true;
+          }
+          assert(threw, "expected tensor src with scatter reduce arg to throw");
+        });
+        await test("scatterReduce matches tinygrad probe", async () => {
+          const base = new Tensor([[1, 2, 3, 4, 5]]);
+          const idx = new Tensor(new Int32Array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]), { dtype: "int32" }).reshape(1, 10);
+          const src = new Tensor([[1, 6, 2, 7, 3, 8, 4, 9, 5, 10]]);
+          assertClose(await base.scatterReduce(1, idx, src, "sum").toArray(), [8, 11, 14, 17, 20]);
+          assertClose(await base.scatter_reduce(1, idx, src, "prod").toArray(), [6, 28, 72, 144, 250]);
+          assertClose(await base.scatterReduce(1, idx, src, "mean", false).toArray(), [3.5, 4.5, 5.5, 6.5, 7.5]);
+          const extremeBase = new Tensor([[-10, 20, 0, 5, 10]]);
+          assertClose(await extremeBase.scatterReduce(1, idx, src, "amax").toArray(), [6, 20, 8, 9, 10]);
+          assertClose(await extremeBase.scatterReduce(1, idx, src, "amin").toArray(), [-10, 2, 0, 4, 5]);
+          let threw = false;
+          try {
+            base.scatterReduce(1, idx, src, "max");
+          } catch (e) {
+            threw = true;
+          }
+          assert(threw, "expected invalid scatterReduce reduction to throw");
         });
         console.log("\n-- Step slicing --");
         await test("step2 1d", async () => {
@@ -351,6 +471,55 @@
           const m = t.max(1);
           assertClose(await m.toArray(), [5, 3]);
         });
+        await test("argmax matches tinygrad probe", async () => {
+          const t = new Tensor([[1.2, 0.5, 1.2], [2.2, 1.9, 0]]);
+          assertClose(await t.argmax(1).toArray(), [0, 0]);
+          assertShape(t.argmax(1, true).shape, [2, 1]);
+          assertClose(await t.argmax(1, true).toArray(), [0, 0]);
+          const flat = await t.argmax().item();
+          assert(flat === 3, `expected flattened argmax 3, got ${flat}`);
+        });
+        await test("sort argsort topk match tinygrad probe", async () => {
+          const x = new Tensor([[0.1, 0.5, 1.2, 3.4, 2.1], [2.2, 1.9, 0.3, 4.5, 0.8]]);
+          let pair = x.sort(1, false);
+          assertShape(pair[0].shape, [2, 5]);
+          assertShape(pair[1].shape, [2, 5]);
+          assertClose(await pair[0].toArray(), [0.1, 0.5, 1.2, 2.1, 3.4, 0.3, 0.8, 1.9, 2.2, 4.5]);
+          assertClose(await pair[1].toArray(), [0, 1, 2, 4, 3, 2, 4, 1, 0, 3]);
+          pair = x.sort(1, true);
+          assertClose(await pair[0].toArray(), [3.4, 2.1, 1.2, 0.5, 0.1, 4.5, 2.2, 1.9, 0.8, 0.3]);
+          assertClose(await pair[1].toArray(), [3, 4, 2, 1, 0, 3, 0, 1, 4, 2]);
+          pair = x.topk(2, 1);
+          assertShape(pair[0].shape, [2, 2]);
+          assertShape(pair[1].shape, [2, 2]);
+          assertClose(await pair[0].toArray(), [3.4, 2.1, 4.5, 2.2]);
+          assertClose(await pair[1].toArray(), [3, 4, 3, 0]);
+          pair = x.topk(2, 1, false);
+          assertClose(await pair[0].toArray(), [0.1, 0.5, 0.3, 0.8]);
+          assertClose(await pair[1].toArray(), [0, 1, 2, 4]);
+          const t = new Tensor([[2, 3, 4, 1], [1, 4, 3, 2]]);
+          assertClose(await t.argsort().toArray(), [3, 0, 1, 2, 0, 3, 2, 1]);
+        });
+        await test("topk tie order and errors match tinygrad probe", async () => {
+          const tie = new Tensor([[1, 1, 0, 1]]);
+          const pair = tie.topk(3, 1);
+          assertClose(await pair[0].toArray(), [1, 1, 1]);
+          assertClose(await pair[1].toArray(), [0, 1, 3]);
+          let threw = false;
+          try {
+            new Tensor([[0.1, 0.2]]).topk(6, 1);
+          } catch (_) {
+            threw = true;
+          }
+          assert(threw, "expected topk k out of range to throw");
+          threw = false;
+          try {
+            new Tensor([[0.1, 0.2]]).topk(1, 1, true, false);
+          } catch (_) {
+            threw = true;
+          }
+          assert(threw, "expected topk sorted_=false to throw");
+        });
         await test("softmax", async () => {
           const t = new Tensor([1, 2, 3]);
           const arr = await (await t.softmax()).toArray();
@@ -405,6 +574,22 @@
             ok = true;
           }
           assert(ok, "expected dot to fail on broadcast-mismatched shapes");
+        });
+        await test("qr matches tinygrad probe", async () => {
+          let pair = new Tensor([[1, 2], [3, 4]]).qr();
+          assertShape(pair[0].shape, [2, 2]);
+          assertShape(pair[1].shape, [2, 2]);
+          assertClose(await pair[0].dot(pair[1]).toArray(), [1, 2, 3, 4], 1e-3);
+          pair = new Tensor([[1, 2], [3, 4], [5, 6]]).qr();
+          assertShape(pair[0].shape, [3, 3]);
+          assertShape(pair[1].shape, [3, 2]);
+          assertClose(await pair[0].dot(pair[1]).toArray(), [1, 2, 3, 4, 5, 6], 1e-3);
+          pair = new Tensor([[0, 1], [0, 2]]).qr();
+          assertClose(await pair[0].dot(pair[1]).toArray(), [0, 1, 0, 2], 1e-3);
+          const qVals = Array.from(await pair[0].toArray());
+          const rVals = Array.from(await pair[1].toArray());
+          const vals = qVals.concat(rVals);
+          for (const v of vals) assert(Number.isFinite(v), `expected finite QR value, got ${v}`);
         });
         await test("crossEntropy with sparse targets", async () => {
           const logits = new Tensor([[0, 0, 0], [0, 0, 0]]);
@@ -563,6 +748,22 @@
           await x.realize();
           assert(x.uop.buffer.key === xBuffer, "realized expression assign should reuse target buffer");
           assertClose(await x.toArray(), [9]);
+        });
+        await test("copyFrom preserves buffer identity and updates JIT replay input", async () => {
+          const x = Tensor.empty([3], { dtype: "float32" });
+          const bufferKey = x.uop.buffer.key;
+          x.copyFrom(new Float32Array([1, 2, 3]));
+          assert(x.uop.buffer.key === bufferKey, "copyFrom should preserve input buffer identity");
+          assertClose(await x.toArray(), [1, 2, 3]);
+          const f = pg.jit((a) => a.add(1).realize());
+          assertClose(await (await f(x)).toArray(), [2, 3, 4]);
+          assertClose(await (await f(x)).toArray(), [2, 3, 4]);
+          assert(f.scheduleCount === 1, `expected one captured schedule, got ${f.scheduleCount}`);
+          const replayBufferKey = x.uop.buffer.key;
+          x.updateFrom(new Float32Array([10, 20, 30]));
+          assert(x.uop.buffer.key === replayBufferKey, "updateFrom should preserve captured input buffer identity");
+          assertClose(await (await f(x)).toArray(), [11, 21, 31]);
+          f.dispose();
         });
         console.log("\n-- Static constructors --");
         await test("zeros", async () => {
@@ -874,13 +1075,13 @@
 Results: ${passed} passed, ${failed} failed, ${skipped} skipped, ${passed + failed + skipped} total`);
         return { passed, failed, skipped };
       }
-      module.exports = { runTests };
+      module.exports = { runTensorTests };
     }
   });
 
-  // test/test_instance_shared.js
-  var require_test_instance_shared = __commonJS({
-    "test/test_instance_shared.js"(exports, module) {
+  // test/test_instance.js
+  var require_test_instance = __commonJS({
+    "test/test_instance.js"(exports, module) {
       "use strict";
       function assert(cond, msg) {
         if (!cond) throw new Error(msg || "assertion failed");
@@ -1337,9 +1538,9 @@ Instance smoke tests: ${passed} passed, ${failed} failed`);
   // test/browser/test_browser_entry.js
   var require_test_browser_entry = __commonJS({
     "test/browser/test_browser_entry.js"() {
-      var { runTests } = require_test_shared();
-      var { runInstanceTests, runInstanceSmokeTests } = require_test_instance_shared();
-      window.__runTests = runTests;
+      var { runTensorTests } = require_test_tensor();
+      var { runInstanceTests, runInstanceSmokeTests } = require_test_instance();
+      window.__runTensorTests = runTensorTests;
       window.__runInstanceTests = runInstanceTests;
       window.__runInstanceSmokeTests = runInstanceSmokeTests;
     }

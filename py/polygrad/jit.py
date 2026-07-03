@@ -2,6 +2,7 @@
 
 import functools
 import ctypes
+import time
 
 from . import _ffi
 from .tensor import BoundVariable, Tensor, Variable
@@ -198,6 +199,9 @@ class Jit:
         self.ret = None
         self.signature = None
         self._jit = None
+        self.call_count = 0
+        self.replay_count = 0
+        self.last_call_ms = 0.0
 
     def reset(self):
         if self._jit:
@@ -207,12 +211,25 @@ class Jit:
         self.captured = False
         self.ret = None
         self.signature = None
+        self.call_count = 0
+        self.replay_count = 0
+        self.last_call_ms = 0.0
 
     @property
     def schedule_count(self):
         if not self._jit:
             return 0
         return int(_ffi._lib.poly_jit_schedule_count(self._jit))
+
+    def stats(self):
+        return {
+            'captured': self.captured,
+            'prune': self.prune,
+            'call_count': self.call_count,
+            'replay_count': self.replay_count,
+            'last_call_ms': self.last_call_ms,
+            'schedule_count': self.schedule_count,
+        }
 
     def __del__(self):
         try:
@@ -225,6 +242,8 @@ class Jit:
         return functools.partial(self.__call__, obj)
 
     def __call__(self, *args, **kwargs):
+        start = time.perf_counter()
+        replayed = False
         names, inputs = _input_tensors(args, kwargs)
         explicit_var_bindings = _bound_var_items(args, kwargs)
         for t in inputs:
@@ -275,8 +294,13 @@ class Jit:
             if _ffi._lib.poly_jit_run_with_vars(self._jit, arr, n, var_arr, n_vars) != 0:
                 raise JitError('poly_jit_run failed')
             ret = self.ret
+            replayed = True
 
         self.cnt += 1
+        self.call_count += 1
+        if replayed:
+            self.replay_count += 1
+        self.last_call_ms = (time.perf_counter() - start) * 1000.0
         return ret
 
 
@@ -284,3 +308,82 @@ def jit(fxn=None, *, prune=False):
     if fxn is None:
         return lambda f: Jit(f, prune=prune)
     return Jit(fxn, prune=prune)
+
+
+class CompiledCallable:
+    """Explicit wrapper around the same tinygrad-style JIT capture/replay path.
+
+    Construction performs the normal first run and second capture run. Later
+    calls replay the captured schedules through the wrapped Jit object.
+    """
+
+    def __init__(self, jit_obj, compile_ms, input_count):
+        self._jit = jit_obj
+        self.compile_ms = float(compile_ms)
+        self.input_count = int(input_count)
+        self.last_run_ms = 0.0
+        self.run_count = 0
+        self.disposed = False
+
+    @property
+    def schedule_count(self):
+        return 0 if self.disposed else self._jit.schedule_count
+
+    def stats(self):
+        return {
+            'captured': not self.disposed and self._jit.captured,
+            'capture_runs': 2,
+            'compile_ms': self.compile_ms,
+            'last_run_ms': self.last_run_ms,
+            'run_count': self.run_count,
+            'call_count': self.run_count,
+            'schedule_count': self.schedule_count,
+            'input_count': self.input_count,
+        }
+
+    def run(self, inputs):
+        if self.disposed:
+            raise JitError('compiled callable has been disposed')
+        if isinstance(inputs, Tensor):
+            args = (inputs,)
+        elif isinstance(inputs, (tuple, list)):
+            args = tuple(inputs)
+        else:
+            raise TypeError('CompiledCallable.run requires a Tensor or sequence of Tensors')
+
+        start = time.perf_counter()
+        ret = self._jit(*args)
+        self.last_run_ms = (time.perf_counter() - start) * 1000.0
+        self.run_count += 1
+        return ret
+
+    def __call__(self, *inputs):
+        return self.run(inputs)
+
+    def dispose(self):
+        if self.disposed:
+            return
+        self._jit.reset()
+        self.disposed = True
+
+
+def compile(fxn, sample_inputs, *, prune=False):
+    """Warm and capture a Jit function, returning an explicit replay wrapper."""
+    if not callable(fxn):
+        raise TypeError('compile requires a function')
+    if isinstance(sample_inputs, Tensor):
+        args = (sample_inputs,)
+    elif isinstance(sample_inputs, (tuple, list)):
+        args = tuple(sample_inputs)
+    else:
+        raise TypeError('compile requires a Tensor or sequence of Tensors')
+
+    j = Jit(fxn, prune=prune)
+    start = time.perf_counter()
+    j(*args)
+    j(*args)
+    compile_ms = (time.perf_counter() - start) * 1000.0
+    if not j.captured or j.schedule_count <= 0:
+        j.reset()
+        raise JitError("didn't JIT anything")
+    return CompiledCallable(j, compile_ms, len(args))

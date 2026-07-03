@@ -243,6 +243,9 @@ static bool wasm_load_shrink_native_vec(PolyUOp *u, PolyDType *vec_out) {
   int width = wasm_shrink_width(shr);
   PolyDType vec = poly_dtype_vec(poly_dtype_scalar(u->dtype), width);
   if (!dt_is_v128(vec)) return false;
+  PolyDType scalar = poly_dtype_scalar(vec);
+  if (scalar.bitsize == 32 && width != 2 && width != 4) return false;
+  if (scalar.bitsize == 64 && width != 2) return false;
   if (vec_out) *vec_out = vec;
   return true;
 }
@@ -284,17 +287,21 @@ static void prescan(
     int *n_ranges_out
 ) {
   memset(math, 0, sizeof(*math));
-  int np = 0, nr = 0;
+  int n_param_nodes = 0, max_param = -1, nr = 0;
   for (int i = 0; i < n; i++) {
     PolyUOp *u = uops[i];
-    if (u->op == POLY_OP_PARAM || u->op == POLY_OP_DEFINE_VAR) np++;
+    if (u->op == POLY_OP_PARAM || u->op == POLY_OP_DEFINE_VAR) {
+      n_param_nodes++;
+      if (u->arg.kind == POLY_ARG_INT && (int)u->arg.i > max_param)
+        max_param = (int)u->arg.i;
+    }
     if (u->op == POLY_OP_RANGE) nr++;
     if (u->op == POLY_OP_EXP2) math->need_exp2f = true;
     if (u->op == POLY_OP_LOG2) math->need_log2f = true;
     if (u->op == POLY_OP_SIN) math->need_sinf = true;
     if (u->op == POLY_OP_POW) math->need_powf = true;
   }
-  *n_params_out = np;
+  *n_params_out = max_param >= 0 ? max_param + 1 : n_param_nodes;
   *n_ranges_out = nr;
 }
 
@@ -526,6 +533,29 @@ static void emit_cast_stack_value(WasmBuf *body, PolyDType src_dt, PolyDType dst
   bool src_64 = dt_is_64(src_dt);
   bool dst_64 = dt_is_64(dst_dt);
 
+  if (poly_dtype_is_bool(dst_dt)) {
+    if (src_float) {
+      if (src_64) {
+        wb_byte(body, WASM_OP_F64_CONST);
+        wb_f64(body, 0.0);
+        wb_byte(body, WASM_OP_F64_NE);
+      } else {
+        wb_byte(body, WASM_OP_F32_CONST);
+        wb_f32(body, 0.0f);
+        wb_byte(body, WASM_OP_F32_NE);
+      }
+    } else if (src_64) {
+      wb_byte(body, WASM_OP_I64_CONST);
+      wb_sleb128(body, 0);
+      wb_byte(body, WASM_OP_I64_NE);
+    } else {
+      wb_byte(body, WASM_OP_I32_CONST);
+      wb_sleb128(body, 0);
+      wb_byte(body, WASM_OP_I32_NE);
+    }
+    return;
+  }
+
   if (src_float == dst_float && src_64 == dst_64) return;
 
   if (!src_float && !dst_float) {
@@ -617,6 +647,8 @@ static PolyDType wasm_simd_value_dtype(PolyUOp *u) {
 }
 
 static PolyDType wasm_native_v128_dtype(PolyUOp *u) {
+  PolyDType shrink_vec;
+  if (wasm_load_shrink_native_vec(u, &shrink_vec)) return shrink_vec;
   if (u && wasm_is_compare_op(u->op) && u->n_src >= 2) {
     PolyDType cmp = wasm_compare_dtype(u->src[0]->dtype, u->src[1]->dtype);
     PolyDType scalar = poly_dtype_scalar(cmp);
@@ -749,7 +781,8 @@ static void emit_v128_shuffle(WasmBuf *body, const uint8_t lanes[16]) {
 
 static void emit_v128_load_opcode(WasmBuf *body, PolyDType dt) {
   wb_byte(body, WASM_SIMD_PREFIX);
-  int bits = dt.bitsize;
+  PolyDType scalar = poly_dtype_scalar(dt);
+  int bits = scalar.bitsize * (dt.count > 0 ? dt.count : 1);
   if (bits >= 128)
     wb_uleb128(body, WASM_SIMD_V128_LOAD);
   else if (bits <= 32)
@@ -762,7 +795,8 @@ static void emit_v128_load_opcode(WasmBuf *body, PolyDType dt) {
 
 static void emit_v128_store_opcode(WasmBuf *body, PolyDType dt) {
   wb_byte(body, WASM_SIMD_PREFIX);
-  int bits = dt.bitsize;
+  PolyDType scalar = poly_dtype_scalar(dt);
+  int bits = scalar.bitsize * (dt.count > 0 ? dt.count : 1);
   if (bits >= 128) {
     wb_uleb128(body, WASM_SIMD_V128_STORE);
     wb_uleb128(body, 2);
@@ -880,15 +914,13 @@ static void emit_v128_cast_lanes(
   if (src_dt.count > 0 && src_dt.count < n_lanes) n_lanes = src_dt.count;
   if (n_lanes <= 0) n_lanes = 1;
 
+  emit_v128_zero(body);
   for (int j = 0; j < n_lanes; j++) {
     wb_byte(body, WASM_OP_LOCAL_GET);
     wb_uleb128(body, src_local);
     emit_v128_extract_lane(body, src_dt, j);
     emit_cast_stack_value(body, src_scalar, dst_scalar);
-    if (j == 0)
-      emit_v128_splat(body, dst_dt);
-    else
-      emit_v128_replace_lane(body, dst_dt, j);
+    emit_v128_replace_lane(body, dst_dt, j);
   }
 }
 
@@ -989,6 +1021,7 @@ static void emit_vector_alu_lane_fallback(
   int n_lanes = u->dtype.count;
   if (n_lanes <= 0) n_lanes = dst_scalar.bitsize == 64 ? 2 : 4;
 
+  emit_v128_zero(body);
   for (int lane = 0; lane < n_lanes; lane++) {
     if (u->op == POLY_OP_RECIPROCAL) {
       if (dst_scalar.bitsize == 64) {
@@ -1043,10 +1076,7 @@ static void emit_vector_alu_lane_fallback(
     }
 
     emit_alu_scalar(body, u->op, alu_dtype, math, n_imported_funcs);
-    if (lane == 0)
-      emit_v128_splat(body, u->dtype);
-    else
-      emit_v128_replace_lane(body, u->dtype, lane);
+    emit_v128_replace_lane(body, u->dtype, lane);
   }
 }
 
@@ -1431,7 +1461,17 @@ static bool wasm_vector_alu_needs_lane_fallback(PolyUOp *u) {
 }
 
 static bool wasm_uop_value_is_v128(PolyUOp *u) {
-  return u && (dt_is_v128(u->dtype) || wasm_vector_alu_has_direct_simd(u));
+  PolyDType shrink_vec;
+  return u && (dt_is_v128(u->dtype) || wasm_vector_alu_has_direct_simd(u) ||
+               wasm_load_shrink_native_vec(u, &shrink_vec));
+}
+
+static PolyDType wasm_local_value_dtype(PolyUOp *u) {
+  if (!u) return POLY_INT32;
+  PolyDType shrink_vec;
+  if (wasm_load_shrink_native_vec(u, &shrink_vec)) return shrink_vec;
+  if (wasm_vector_alu_has_direct_simd(u)) return wasm_simd_value_dtype(u);
+  return u->dtype;
 }
 
 /* Check if entire kernel is SIMD-able */
@@ -1682,7 +1722,7 @@ static void build_code_scalar(
       }
     }
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      PolyDType local_dt = wasm_vector_alu_has_direct_simd(u) ? wasm_simd_value_dtype(u) : u->dtype;
+      PolyDType local_dt = wasm_local_value_dtype(u);
       count_local(
           local_dt, &n_locals_i32, &n_locals_i64, &n_locals_f32, &n_locals_f64,
           &n_locals_v128
@@ -1939,13 +1979,8 @@ static void build_code_scalar(
       if (dt_is_v128(u->dtype) && u->n_src > 0) {
         int lanes = u->dtype.count;
         int n_lanes = u->n_src < lanes ? u->n_src : lanes;
-        int s0 = lm_get(&locals, u->src[0]);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, s0);
-        emit_cast_stack_value(&body, u->src[0]->dtype, poly_dtype_scalar(u->dtype));
-        emit_v128_splat(&body, u->dtype);
-
-        for (int j = 1; j < n_lanes; j++) {
+        emit_v128_zero(&body);
+        for (int j = 0; j < n_lanes; j++) {
           int sj = lm_get(&locals, u->src[j]);
           wb_byte(&body, WASM_OP_LOCAL_GET);
           wb_uleb128(&body, sj);
@@ -1998,6 +2033,7 @@ static void build_code_scalar(
       if (wasm_wide_lane_source(base_uop) && dt_is_v128(u->dtype)) {
         int max_lanes = u->dtype.count < n_lanes ? u->dtype.count : n_lanes;
         if (max_lanes <= 0) max_lanes = 1;
+        emit_v128_zero(&body);
         for (int j = 0; j < max_lanes; j++) {
           int lane = lanes[j];
           if (lane < 0 || lane >= base_uop->n_src) lane = 0;
@@ -2006,10 +2042,7 @@ static void build_code_scalar(
           emit_local_get_lane_for_alu_src(
               &body, src_local, src->dtype, poly_dtype_scalar(u->dtype), 0
           );
-          if (j == 0)
-            emit_v128_splat(&body, u->dtype);
-          else
-            emit_v128_replace_lane(&body, u->dtype, j);
+          emit_v128_replace_lane(&body, u->dtype, j);
         }
       } else if (wasm_wide_lane_source(base_uop) && !u->dtype.is_ptr && u->dtype.count <= 1) {
         int lane = lanes[0];
@@ -2019,12 +2052,9 @@ static void build_code_scalar(
         emit_local_get_lane_for_alu_src(&body, src_local, src->dtype, u->dtype, 0);
       } else if (dt_is_v128(u->dtype)) {
         int src_local = lm_get(&locals, u->src[0]);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, src_local);
-        emit_v128_extract_lane(&body, u->src[0]->dtype, lanes[0]);
-        emit_v128_splat(&body, u->dtype);
         int max_lanes = u->dtype.count < n_lanes ? u->dtype.count : n_lanes;
-        for (int j = 1; j < max_lanes; j++) {
+        emit_v128_zero(&body);
+        for (int j = 0; j < max_lanes; j++) {
           wb_byte(&body, WASM_OP_LOCAL_GET);
           wb_uleb128(&body, src_local);
           emit_v128_extract_lane(&body, u->src[0]->dtype, lanes[j]);
@@ -2201,15 +2231,13 @@ static void build_code_scalar(
               reg_base->dtype.addrspace == POLY_ADDR_REG))) {
           int offset = wasm_shrink_offset(shr);
           int lanes = shrink_vec.count;
+          emit_v128_zero(&body);
           for (int lane = 0; lane < lanes; lane++) {
             int src_local = rlm_get(&reg_locals, reg_base, offset + lane);
             wb_byte(&body, WASM_OP_LOCAL_GET);
             wb_uleb128(&body, src_local);
             emit_cast_stack_value(&body, wasm_reg_base_dtype(reg_base->dtype), poly_dtype_scalar(shrink_vec));
-            if (lane == 0)
-              emit_v128_splat(&body, shrink_vec);
-            else
-              emit_v128_replace_lane(&body, shrink_vec, lane);
+            emit_v128_replace_lane(&body, shrink_vec, lane);
           }
         } else {
           int addr = lm_get(&locals, u->src[0]);
@@ -2311,7 +2339,7 @@ static void build_code_scalar(
         wb_uleb128(&body, acc_local);
       } else {
         int addr = lm_get(&locals, u->src[0]);
-        PolyDType val_dt = u->src[1]->dtype;
+        PolyDType val_dt = wasm_local_value_dtype(u->src[1]);
         bool val_is_v128 = dt_is_v128(val_dt);
         bool val_is_float = poly_dtype_is_float(val_dt);
         bool buf_is_float = u->src[0]->dtype.is_ptr && poly_dtype_is_float(u->src[0]->dtype);
@@ -2356,7 +2384,7 @@ static void build_code_scalar(
       wb_byte(&body, WASM_OP_LOCAL_GET);
       wb_uleb128(&body, src);
 
-      PolyDType src_dt = u->src[0]->dtype;
+      PolyDType src_dt = wasm_local_value_dtype(u->src[0]);
       PolyDType dst_dt = u->dtype;
       bool src_v128 = dt_is_v128(src_dt);
       bool dst_v128 = dt_is_v128(dst_dt);
@@ -2458,7 +2486,7 @@ static void build_code_scalar(
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
       bool vector_alu = wasm_vector_alu_has_direct_simd(u);
       bool vector_lane_fallback = wasm_vector_alu_needs_lane_fallback(u);
-      PolyDType local_dt = vector_alu ? wasm_simd_value_dtype(u) : u->dtype;
+      PolyDType local_dt = wasm_local_value_dtype(u);
       int local_idx =
           alloc_local(local_dt, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
 

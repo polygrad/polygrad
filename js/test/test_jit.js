@@ -52,13 +52,22 @@ async function runJitTests(pg) {
 
     assertClose(await (await f(a)).toArray(), [4, 6, 8])
     assert(f.scheduleCount === 0, 'first call should not capture')
+    let stats = f.stats()
+    assert(stats.callCount === 1, `expected one jit call, got ${stats.callCount}`)
+    assert(stats.replayCount === 0, 'first jit call should not replay')
     assertClose(await (await f(a)).toArray(), [4, 6, 8])
     assert(f.scheduleCount === 1, `expected one captured schedule, got ${f.scheduleCount}`)
     assert(f.schedule_count === f.scheduleCount, 'schedule_count alias should match scheduleCount')
+    stats = f.stats()
+    assert(stats.captured, 'second jit call should capture')
+    assert(stats.callCount === 2, `expected two jit calls, got ${stats.callCount}`)
+    assert(stats.lastCallMs >= 0, 'lastCallMs should be non-negative')
     assertClose(await (await f(b)).toArray(), [22, 42, 62])
+    assert(f.stats().replayCount === 1, 'third jit call should replay')
 
     f.reset()
     assert(f.scheduleCount === 0, 'reset should release captured schedules')
+    assert(f.stats().callCount === 0, 'reset should clear stats')
   })
 
   await test('supports decorator-style options', async () => {
@@ -68,6 +77,31 @@ async function runJitTests(pg) {
     assertClose(await (await f(x)).toArray(), [4, 5])
     assert(f.schedule_count === 1, 'decorator-style jit should capture on second call')
     f.dispose()
+  })
+
+  await test('compile warms capture and exposes replay stats', async () => {
+    const sample = new Tensor(new Float32Array([1, 2, 3]))
+    const compiled = await pg.compile((x) => x.add(1).realize(), [sample])
+
+    assert(compiled.scheduleCount === 1, `expected one captured schedule, got ${compiled.scheduleCount}`)
+    let stats = compiled.stats()
+    assert(stats.captureRuns === 2, 'compile should perform normal run plus capture run')
+    assert(stats.compileMs >= 0, 'compileMs should be non-negative')
+    assert(stats.inputCount === 1, 'inputCount should be 1')
+
+    const out = await compiled.run([new Tensor(new Float32Array([10, 20, 30]))])
+    assertClose(await out.toArray(), [11, 21, 31])
+    stats = compiled.stats()
+    assert(stats.runCount === 1, `expected one replay run, got ${stats.runCount}`)
+    assert(stats.lastRunMs >= 0, 'lastRunMs should be non-negative')
+    assert(stats.scheduleCount === 1, 'compiled stats should retain schedule count')
+
+    await assertThrowsAsync(
+      () => compiled.run([new Tensor(new Float32Array([1, 2, 3, 4]))]),
+      'args mismatch'
+    )
+    compiled.dispose()
+    await assertThrowsAsync(() => compiled.run([sample]), 'disposed')
   })
 
   await test('rejects duplicate input buffers', async () => {

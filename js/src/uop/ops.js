@@ -53,4 +53,46 @@ class UOp {
   }
 }
 
-module.exports = { UOp }
+function rawUop(value) {
+  if (value instanceof UOp) return value.raw
+  if (value && Object.prototype.hasOwnProperty.call(value, 'raw')) return value.raw
+  return value || null
+}
+
+function createBoundUopNamespace(runtime) {
+  const { ffi, ctx, dtypeIds } = runtime._core
+  const dtypeNameById = {}
+  for (const [name, id] of Object.entries(dtypeIds || {})) dtypeNameById[Number(id)] = name
+
+  function wrap(value) {
+    if (value instanceof UOp) return value
+    return new UOp(ctx, ffi, value)
+  }
+
+  return {
+    UOp,
+    wrap,
+    key(value) {
+      return wrap(rawUop(value)).key
+    },
+    shape(value) {
+      const raw = rawUop(value)
+      if (!raw) return []
+      return ffi.poly_uop_max_shape_dims(ctx, raw)
+    },
+    dtype(value) {
+      const raw = rawUop(value)
+      if (!raw) return null
+      const id = Number(ffi.poly_uop_dtype_id(ctx, raw))
+      return dtypeNameById[id] || String(id)
+    },
+    hasBufferIdentity(value) {
+      return wrap(rawUop(value)).hasBufferIdentity()
+    },
+    buffer(value) {
+      return wrap(rawUop(value)).buffer
+    }
+  }
+}
+
+module.exports = { UOp, createBoundUopNamespace }

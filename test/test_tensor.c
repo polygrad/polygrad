@@ -536,6 +536,168 @@ TEST(pe, argmax_2d_e2e) {
   PASS();
 }
 
+TEST(pe, gather_dim_e2e_matches_tinygrad_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3, 4}, 3);
+  PolyUOp *idx = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 8), (int64_t[]){2, 2, 2}, 3);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 8);
+  PolyUOp *r = poly_gather_dim(ctx, x, 1, idx);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
+
+  float dx[24];
+  for (int i = 0; i < 24; i++)
+    dx[i] = (float)i;
+  int32_t di[] = {0, 2, 1, 0, 2, 1, 0, 2};
+  float dout[8] = {0};
+  PolyUOp *leaves[] = {base_buf(x), base_buf(idx)};
+  float *ld[] = {dx, (float *)di};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
+  const float expected[] = {0, 9, 4, 1, 20, 17, 12, 21};
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(dout[i], expected[i], 1e-5f);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, scatter_e2e_matches_tinygrad_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *self0 = make_buf(ctx, (int64_t[]){3, 5}, 2);
+  PolyUOp *idx0 = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 4), (int64_t[]){1, 4}, 2);
+  PolyUOp *src0 = make_buf(ctx, (int64_t[]){2, 5}, 2);
+  PolyUOp *r0 = poly_scatter(ctx, self0, 0, idx0, src0, NULL);
+  ASSERT_NOT_NULL(r0);
+  float dself0[15] = {0};
+  int32_t didx0[] = {0, 1, 2, 0};
+  float dsrc0[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+  float got0[15] = {0};
+  PolyUOp *leaves0[] = {base_buf(self0), base_buf(idx0), base_buf(src0)};
+  float *ld0[] = {dself0, (float *)didx0, dsrc0};
+  ASSERT_INT_EQ(realize_uop(ctx, r0, poly_buffer_f32(ctx, 15), got0, leaves0, ld0, 3), 0);
+  const float exp0[] = {1, 0, 0, 4, 0, 0, 2, 0, 0, 0, 0, 0, 3, 0, 0};
+  for (int i = 0; i < 15; i++)
+    ASSERT_FLOAT_EQ(got0[i], exp0[i], 1e-5f);
+
+  PolyUOp *self = make_buf(ctx, (int64_t[]){3, 5}, 2);
+  PolyUOp *idx = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 9), (int64_t[]){3, 3}, 2);
+  PolyUOp *src = make_buf(ctx, (int64_t[]){3, 3}, 2);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 15);
+
+  PolyUOp *r = poly_scatter(ctx, self, 1, idx, src, NULL);
+  ASSERT_NOT_NULL(r);
+
+  float dself[15] = {0};
+  int32_t didx[] = {0, 1, 2, 0, 1, 4, 2, 3, 4};
+  float dsrc[] = {1, 2, 3, 6, 7, 8, 9, 10, 11};
+  float dout[15] = {0};
+  PolyUOp *leaves[] = {base_buf(self), base_buf(idx), base_buf(src)};
+  float *ld[] = {dself, (float *)didx, dsrc};
+  ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 3), 0);
+  const float exp[] = {1, 2, 3, 0, 0, 6, 7, 0, 0, 8, 0, 0, 9, 10, 11};
+  for (int i = 0; i < 15; i++)
+    ASSERT_FLOAT_EQ(dout[i], exp[i], 1e-5f);
+
+  PolyUOp *self_dup = make_buf(ctx, (int64_t[]){1, 4}, 2);
+  PolyUOp *idx_dup = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 3), (int64_t[]){1, 3}, 2);
+  PolyUOp *src_dup = make_buf(ctx, (int64_t[]){1, 3}, 2);
+  PolyUOp *dup = poly_scatter(ctx, self_dup, 1, idx_dup, src_dup, NULL);
+  ASSERT_NOT_NULL(dup);
+  float dself_dup[] = {0, 0, 0, 0};
+  int32_t didx_dup[] = {1, 1, 2};
+  float dsrc_dup[] = {7, 9, 8};
+  float got_dup[4] = {0};
+  PolyUOp *dup_leaves[] = {base_buf(self_dup), base_buf(idx_dup), base_buf(src_dup)};
+  float *dup_ld[] = {dself_dup, (float *)didx_dup, dsrc_dup};
+  ASSERT_INT_EQ(realize_uop(ctx, dup, poly_buffer_f32(ctx, 4), got_dup, dup_leaves, dup_ld, 3), 0);
+  const float exp_dup[] = {0, 9, 8, 0};
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_dup[i], exp_dup[i], 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, scatter_reduce_e2e_matches_tinygrad_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *self = make_buf(ctx, (int64_t[]){1, 5}, 2);
+  PolyUOp *idx = poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 10), (int64_t[]){1, 10}, 2);
+  PolyUOp *src = make_buf(ctx, (int64_t[]){1, 10}, 2);
+  float dself[] = {1, 2, 3, 4, 5};
+  int32_t didx[] = {0, 0, 1, 1, 2, 2, 3, 3, 4, 4};
+  float dsrc[] = {1, 6, 2, 7, 3, 8, 4, 9, 5, 10};
+  PolyUOp *leaves[] = {base_buf(self), base_buf(idx), base_buf(src)};
+  float *ld[] = {dself, (float *)didx, dsrc};
+
+  const struct {
+    const char *reduce;
+    int include_self;
+    float expected[5];
+  } cases[] = {
+      {"sum", 1, {8, 11, 14, 17, 20}},
+      {"prod", 1, {6, 28, 72, 144, 250}},
+      {"mean", 0, {3.5f, 4.5f, 5.5f, 6.5f, 7.5f}},
+      {"amax", 1, {6, 7, 8, 9, 10}},
+      {"amin", 1, {1, 2, 3, 4, 5}},
+  };
+
+  for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+    PolyUOp *r =
+        poly_scatter_reduce(ctx, self, 1, idx, src, cases[c].reduce, cases[c].include_self);
+    ASSERT_NOT_NULL(r);
+    float got[5] = {0};
+    ASSERT_INT_EQ(realize_uop(ctx, r, poly_buffer_f32(ctx, 5), got, leaves, ld, 3), 0);
+    for (int i = 0; i < 5; i++)
+      ASSERT_FLOAT_EQ(got[i], cases[c].expected[i], 1e-5f);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2, 5}, 2);
+  float dx[] = {0.1f, 0.5f, 1.2f, 3.4f, 2.1f, 2.2f, 1.9f, 0.3f, 4.5f, 0.8f};
+  PolyUOp *leaves[] = {base_buf(x)};
+  float *ld[] = {dx};
+
+  PolyUOp *vals = NULL, *idx = NULL;
+  ASSERT_INT_EQ(poly_sort(ctx, x, 1, 0, &vals, &idx), 0);
+  ASSERT_NOT_NULL(vals);
+  ASSERT_NOT_NULL(idx);
+
+  PolyUOp *out_vals = poly_buffer_f32(ctx, 10);
+  PolyUOp *out_idx = poly_buffer_f32(ctx, 10);
+  float got_vals[10] = {0}, got_idx[10] = {0};
+  ASSERT_INT_EQ(realize_uop(ctx, vals, out_vals, got_vals, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(realize_uop(ctx, poly_cast(ctx, idx, POLY_FLOAT32), out_idx, got_idx, leaves, ld, 1), 0);
+  const float exp_vals[] = {0.1f, 0.5f, 1.2f, 2.1f, 3.4f, 0.3f, 0.8f, 1.9f, 2.2f, 4.5f};
+  const float exp_idx[] = {0, 1, 2, 4, 3, 2, 4, 1, 0, 3};
+  for (int i = 0; i < 10; i++) {
+    ASSERT_FLOAT_EQ(got_vals[i], exp_vals[i], 1e-5f);
+    ASSERT_FLOAT_EQ(got_idx[i], exp_idx[i], 1e-5f);
+  }
+
+  PolyUOp *top_vals = NULL, *top_idx = NULL;
+  ASSERT_INT_EQ(poly_topk(ctx, x, 2, 1, 1, 1, &top_vals, &top_idx), 0);
+  ASSERT_NOT_NULL(top_vals);
+  ASSERT_NOT_NULL(top_idx);
+  PolyUOp *out_top_vals = poly_buffer_f32(ctx, 4);
+  PolyUOp *out_top_idx = poly_buffer_f32(ctx, 4);
+  float got_top_vals[4] = {0}, got_top_idx[4] = {0};
+  ASSERT_INT_EQ(realize_uop(ctx, top_vals, out_top_vals, got_top_vals, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(realize_uop(ctx, poly_cast(ctx, top_idx, POLY_FLOAT32), out_top_idx, got_top_idx, leaves, ld, 1), 0);
+  const float exp_top_vals[] = {3.4f, 2.1f, 4.5f, 2.2f};
+  const float exp_top_idx[] = {3, 4, 3, 0};
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(got_top_vals[i], exp_top_vals[i], 1e-5f);
+    ASSERT_FLOAT_EQ(got_top_idx[i], exp_top_idx[i], 1e-5f);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, mse_loss_e2e) {
   /* mse([1,2,3], [4,5,6]) = mean([9,9,9]) = 9 */
   PolyCtx *ctx = poly_ctx_new();
@@ -590,6 +752,48 @@ TEST(pe, dot_v2_e2e) {
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 2), 0);
   ASSERT_FLOAT_EQ(dout[0], 22.0f, 1e-4);
   ASSERT_FLOAT_EQ(dout[3], 64.0f, 1e-4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, qr_e2e_matches_tinygrad_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = make_buf(ctx, (int64_t[]){2, 2}, 2);
+  float da[] = {1, 2, 3, 4};
+  PolyUOp *q = NULL, *r = NULL;
+  ASSERT_INT_EQ(poly_qr(ctx, a, &q, &r), 0);
+  ASSERT_NOT_NULL(q);
+  ASSERT_NOT_NULL(r);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, q)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, q)[1], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[1], 2);
+
+  PolyUOp *recon = poly_dot(ctx, q, r);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  float got[4] = {0};
+  PolyUOp *leaves[] = {base_buf(a)};
+  float *ld[] = {da};
+  ASSERT_INT_EQ(realize_uop(ctx, recon, out_buf, got, leaves, ld, 1), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(isfinite(got[i]));
+    ASSERT_FLOAT_EQ(got[i], da[i], 1e-3f);
+  }
+
+  PolyUOp *z = make_buf(ctx, (int64_t[]){2, 2}, 2);
+  float dz[] = {0, 1, 0, 2};
+  PolyUOp *zq = NULL, *zr = NULL;
+  ASSERT_INT_EQ(poly_qr(ctx, z, &zq, &zr), 0);
+  recon = poly_dot(ctx, zq, zr);
+  float got_z[4] = {0};
+  leaves[0] = base_buf(z);
+  ld[0] = dz;
+  ASSERT_INT_EQ(realize_uop(ctx, recon, out_buf, got_z, leaves, ld, 1), 0);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_TRUE(isfinite(got_z[i]));
+    ASSERT_FLOAT_EQ(got_z[i], dz[i], 1e-3f);
+  }
+
   poly_ctx_destroy(ctx);
   PASS();
 }

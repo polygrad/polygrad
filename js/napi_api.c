@@ -12,6 +12,7 @@
 
 #include "polygrad.h"
 #include "frontend.h"
+#include "device.h"
 #include "tensor.h"
 #include "nn.h"
 #include "optim.h"
@@ -55,6 +56,16 @@ static napi_value make_external(napi_env env, void *ptr) {
   }
   NAPI_CALL(env, napi_create_external(env, ptr, NULL, NULL, &result));
   return result;
+}
+
+static napi_value make_external_pair(napi_env env, void *a, void *b) {
+  napi_value out;
+  NAPI_CALL(env, napi_create_array_with_length(env, 2, &out));
+  napi_value av = make_external(env, a);
+  napi_value bv = make_external(env, b);
+  NAPI_CALL(env, napi_set_element(env, out, 0, av));
+  NAPI_CALL(env, napi_set_element(env, out, 1, bv));
+  return out;
 }
 
 static napi_env g_frontend_buffer_release_env = NULL;
@@ -118,6 +129,70 @@ static char *read_utf8_arg(napi_env env, napi_value val, size_t *out_len) {
   NAPI_CALL(env, napi_get_value_string_utf8(env, val, buf, len + 1, &len));
   if (out_len) *out_len = len;
   return buf;
+}
+
+static size_t typedarray_element_size(napi_typedarray_type type) {
+  switch (type) {
+    case napi_int8_array:
+    case napi_uint8_array:
+    case napi_uint8_clamped_array:
+      return 1;
+    case napi_int16_array:
+    case napi_uint16_array:
+      return 2;
+    case napi_int32_array:
+    case napi_uint32_array:
+    case napi_float32_array:
+      return 4;
+    case napi_float64_array:
+    case napi_bigint64_array:
+    case napi_biguint64_array:
+      return 8;
+    default:
+      return 0;
+  }
+}
+
+static int read_bytes_arg(napi_env env, napi_value val, void **data, size_t *nbytes) {
+  bool is_buffer = false;
+  if (napi_is_buffer(env, val, &is_buffer) == napi_ok && is_buffer) {
+    if (napi_get_buffer_info(env, val, data, nbytes) != napi_ok) {
+      napi_throw_error(env, NULL, "polygrad: failed to read Buffer data");
+      return 0;
+    }
+    return 1;
+  }
+
+  bool is_typedarray = false;
+  if (napi_is_typedarray(env, val, &is_typedarray) == napi_ok && is_typedarray) {
+    napi_typedarray_type type;
+    size_t length = 0, byte_offset = 0;
+    napi_value arraybuffer;
+    if (napi_get_typedarray_info(env, val, &type, &length, data, &arraybuffer, &byte_offset) !=
+        napi_ok) {
+      napi_throw_error(env, NULL, "polygrad: failed to read TypedArray data");
+      return 0;
+    }
+    size_t itemsize = typedarray_element_size(type);
+    if (!itemsize) {
+      napi_throw_type_error(env, NULL, "polygrad: unsupported TypedArray type");
+      return 0;
+    }
+    *nbytes = length * itemsize;
+    return 1;
+  }
+
+  bool is_arraybuffer = false;
+  if (napi_is_arraybuffer(env, val, &is_arraybuffer) == napi_ok && is_arraybuffer) {
+    if (napi_get_arraybuffer_info(env, val, data, nbytes) != napi_ok) {
+      napi_throw_error(env, NULL, "polygrad: failed to read ArrayBuffer data");
+      return 0;
+    }
+    return 1;
+  }
+
+  napi_throw_type_error(env, NULL, "polygrad: expected Buffer, TypedArray, or ArrayBuffer");
+  return 0;
 }
 
 static napi_value make_float32_array_copy(napi_env env, const float *src, size_t len) {
@@ -1207,6 +1282,24 @@ static napi_value napi_poly_buffer_read(napi_env env, napi_callback_info info) {
     return NULL;
   }
   return out;
+}
+
+static napi_value napi_poly_buffer_write(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *buf = get_external(env, argv[1]);
+  void *src = NULL;
+  size_t nbytes = 0;
+  if (!read_bytes_arg(env, argv[2], &src, &nbytes)) return NULL;
+  if (poly_buffer_write(ctx, buf, src, nbytes) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_buffer_write failed");
+    return NULL;
+  }
+  napi_value undef;
+  NAPI_CALL(env, napi_get_undefined(env, &undef));
+  return undef;
 }
 
 static napi_value napi_poly_ctx_set_preferred_device(napi_env env, napi_callback_info info) {
@@ -2651,6 +2744,20 @@ static napi_value napi_poly_dot(napi_env env, napi_callback_info info) {
   return make_external(env, poly_dot(ctx, x, w));
 }
 
+static napi_value napi_poly_qr(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  PolyUOp *q = NULL, *r = NULL;
+  if (poly_qr(ctx, x, &q, &r) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_qr failed");
+    return NULL;
+  }
+  return make_external_pair(env, q, r);
+}
+
 static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -2671,6 +2778,111 @@ static napi_value napi_poly_gather(napi_env env, napi_callback_info info) {
   PolyUOp *table = get_external(env, argv[1]);
   PolyUOp *indices = get_external(env, argv[2]);
   return make_external(env, poly_gather(ctx, table, indices));
+}
+
+static napi_value napi_poly_gather_dim(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t dim;
+  napi_get_value_int32(env, argv[2], &dim);
+  PolyUOp *index = get_external(env, argv[3]);
+  return make_external(env, poly_gather_dim(ctx, x, dim, index));
+}
+
+static napi_value napi_poly_scatter(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *self = get_external(env, argv[1]);
+  int32_t dim;
+  napi_get_value_int32(env, argv[2], &dim);
+  PolyUOp *index = get_external(env, argv[3]);
+  PolyUOp *src = get_external(env, argv[4]);
+  char *reduce = read_utf8_arg(env, argv[5], NULL);
+  PolyUOp *out = poly_scatter(ctx, self, dim, index, src, reduce);
+  free(reduce);
+  return make_external(env, out);
+}
+
+static napi_value napi_poly_scatter_reduce(napi_env env, napi_callback_info info) {
+  napi_value argv[7];
+  size_t argc = 7;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *self = get_external(env, argv[1]);
+  int32_t dim, include_self;
+  napi_get_value_int32(env, argv[2], &dim);
+  PolyUOp *index = get_external(env, argv[3]);
+  PolyUOp *src = get_external(env, argv[4]);
+  char *reduce = read_utf8_arg(env, argv[5], NULL);
+  napi_get_value_int32(env, argv[6], &include_self);
+  PolyUOp *out = poly_scatter_reduce(ctx, self, dim, index, src, reduce, include_self);
+  free(reduce);
+  return make_external(env, out);
+}
+
+static napi_value napi_poly_argmax(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t axis;
+  napi_get_value_int32(env, argv[2], &axis);
+  return make_external(env, poly_argmax(ctx, x, axis));
+}
+
+static napi_value napi_poly_sort(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t dim, descending;
+  napi_get_value_int32(env, argv[2], &dim);
+  napi_get_value_int32(env, argv[3], &descending);
+  PolyUOp *values = NULL, *indices = NULL;
+  if (poly_sort(ctx, x, dim, descending, &values, &indices) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_sort failed");
+    return NULL;
+  }
+  return make_external_pair(env, values, indices);
+}
+
+static napi_value napi_poly_argsort(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t dim, descending;
+  napi_get_value_int32(env, argv[2], &dim);
+  napi_get_value_int32(env, argv[3], &descending);
+  return make_external(env, poly_argsort(ctx, x, dim, descending));
+}
+
+static napi_value napi_poly_topk(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int64_t k;
+  int32_t dim, largest, sorted;
+  napi_get_value_int64(env, argv[2], &k);
+  napi_get_value_int32(env, argv[3], &dim);
+  napi_get_value_int32(env, argv[4], &largest);
+  napi_get_value_int32(env, argv[5], &sorted);
+  PolyUOp *values = NULL, *indices = NULL;
+  if (poly_topk(ctx, x, k, dim, largest, sorted, &values, &indices) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_topk failed");
+    return NULL;
+  }
+  return make_external_pair(env, values, indices);
 }
 
 static napi_value napi_poly_sum_reduce(napi_env env, napi_callback_info info) {
@@ -3005,6 +3217,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_realize_tensors", napi_poly_realize_tensors),
       DECLARE_NAPI_METHOD("poly_optim_build_step", napi_poly_optim_build_step),
       DECLARE_NAPI_METHOD("poly_buffer_read", napi_poly_buffer_read),
+      DECLARE_NAPI_METHOD("poly_buffer_write", napi_poly_buffer_write),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
       DECLARE_NAPI_METHOD("poly_jit_new", napi_poly_jit_new),
       DECLARE_NAPI_METHOD("poly_jit_free", napi_poly_jit_free),
@@ -3152,8 +3365,16 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_softmax", napi_poly_softmax),
       DECLARE_NAPI_METHOD("poly_log_softmax", napi_poly_log_softmax),
       DECLARE_NAPI_METHOD("poly_dot", napi_poly_dot),
+      DECLARE_NAPI_METHOD("poly_qr", napi_poly_qr),
       DECLARE_NAPI_METHOD("poly_cross_entropy", napi_poly_cross_entropy),
       DECLARE_NAPI_METHOD("poly_gather", napi_poly_gather),
+      DECLARE_NAPI_METHOD("poly_gather_dim", napi_poly_gather_dim),
+      DECLARE_NAPI_METHOD("poly_scatter", napi_poly_scatter),
+      DECLARE_NAPI_METHOD("poly_scatter_reduce", napi_poly_scatter_reduce),
+      DECLARE_NAPI_METHOD("poly_argmax", napi_poly_argmax),
+      DECLARE_NAPI_METHOD("poly_sort", napi_poly_sort),
+      DECLARE_NAPI_METHOD("poly_argsort", napi_poly_argsort),
+      DECLARE_NAPI_METHOD("poly_topk", napi_poly_topk),
       DECLARE_NAPI_METHOD("poly_sum_reduce", napi_poly_sum_reduce),
       DECLARE_NAPI_METHOD("poly_max_reduce", napi_poly_max_reduce),
       DECLARE_NAPI_METHOD("poly_mean_reduce", napi_poly_mean_reduce),

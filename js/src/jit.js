@@ -45,6 +45,11 @@ function inputSignature(inputs) {
   })))
 }
 
+async function resolveUserReturn(value) {
+  if (value && typeof value.then === 'function') return await value
+  return value
+}
+
 function checkDuplicateBuffers(inputs) {
   const seen = new Set()
   for (const t of inputs) {
@@ -59,6 +64,13 @@ function checkDuplicateBuffers(inputs) {
 
 function tensorHandles(inputs) {
   return inputs.map(t => t._tensor)
+}
+
+function nowMs() {
+  if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') {
+    return performance.now()
+  }
+  return Date.now()
 }
 
 async function realizeReturn(value, Tensor) {
@@ -86,6 +98,9 @@ function createBoundJit(runtime) {
       this.inputCount = 0
       this._jit = 0
       this.disposed = false
+      this.callCount = 0
+      this.replayCount = 0
+      this.lastCallMs = 0
       live.add(this)
     }
 
@@ -97,6 +112,9 @@ function createBoundJit(runtime) {
       this.ret = null
       this.signature = null
       this.inputCount = 0
+      this.callCount = 0
+      this.replayCount = 0
+      this.lastCallMs = 0
     }
 
     reset() {
@@ -118,23 +136,37 @@ function createBoundJit(runtime) {
       return this.scheduleCount
     }
 
+    stats() {
+      return {
+        captured: this.captured,
+        disposed: this.disposed,
+        prune: this.prune,
+        callCount: this.callCount,
+        replayCount: this.replayCount,
+        lastCallMs: this.lastCallMs,
+        scheduleCount: this.scheduleCount,
+        schedule_count: this.schedule_count,
+        inputCount: this.inputCount
+      }
+    }
+
     async call(...args) {
       if (this.disposed) throw new Error('jit has been disposed')
       if (!ffi.poly_jit_new) throw new Error('polygrad core does not expose poly_jit')
+      const callStart = nowMs()
+      let replayed = false
 
       const inputs = inputTensors(args, Tensor)
       if (inputs.length === 0) throw new Error('jit requires at least one Tensor input')
+      if (this.cnt > 0 && inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
+      for (const t of inputs) await t.realize()
+      checkDuplicateBuffers(inputs)
 
       let ret
       if (this.cnt === 0) {
-        for (const t of inputs) await t.realize()
-        checkDuplicateBuffers(inputs)
-        ret = this.fxn(...args)
+        ret = await resolveUserReturn(this.fxn(...args))
         await realizeReturn(ret, Tensor)
       } else if (this.cnt === 1) {
-        if (inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
-        for (const t of inputs) await t.realize()
-        checkDuplicateBuffers(inputs)
         const sig = inputSignature(inputs)
         this._jit = ffi.poly_jit_new(ctx)
         if (!this._jit) throw new Error('poly_jit_new failed')
@@ -147,7 +179,7 @@ function createBoundJit(runtime) {
           throw new Error('poly_jit_begin_capture failed')
         }
         try {
-          ret = this.fxn(...args)
+          ret = await resolveUserReturn(this.fxn(...args))
           await realizeReturn(ret, Tensor)
           if (ffi.poly_jit_end_capture(this._jit) !== 0) throw new Error("didn't jit anything")
         } catch (err) {
@@ -171,9 +203,13 @@ function createBoundJit(runtime) {
           throw new Error('poly_jit_run failed')
         }
         ret = this.ret
+        replayed = true
       }
 
       this.cnt++
+      this.callCount++
+      if (replayed) this.replayCount++
+      this.lastCallMs = nowMs() - callStart
       return ret
     }
   }
@@ -191,14 +227,79 @@ function createBoundJit(runtime) {
     Object.defineProperty(wrapped, 'schedule_count', {
       get() { return state.schedule_count }
     })
+    wrapped.stats = () => state.stats()
     return wrapped
+  }
+
+  async function compile(fxn, sampleInputs, opts) {
+    if (typeof fxn !== 'function') throw new TypeError('compile requires a function')
+    if (!Array.isArray(sampleInputs)) throw new TypeError('compile requires sample input array')
+
+    const wrapped = jit(fxn, opts)
+    const t0 = nowMs()
+    await wrapped(...sampleInputs)
+    await wrapped(...sampleInputs)
+    const compileMs = nowMs() - t0
+    if (wrapped.scheduleCount <= 0) {
+      wrapped.dispose()
+      throw new Error("didn't jit anything")
+    }
+
+    let disposed = false
+    let runCount = 0
+    let lastRunMs = 0
+
+    const compiled = {
+      async run(inputs) {
+        if (disposed) throw new Error('compiled callable has been disposed')
+        if (!Array.isArray(inputs)) throw new TypeError('compiled.run requires input array')
+        const rt0 = nowMs()
+        const ret = await wrapped(...inputs)
+        lastRunMs = nowMs() - rt0
+        runCount++
+        return ret
+      },
+      async call(...inputs) {
+        return this.run(inputs)
+      },
+      dispose() {
+        if (disposed) return
+        disposed = true
+        wrapped.dispose()
+      },
+      stats() {
+        return {
+          captured: !disposed,
+          captureRuns: 2,
+          compileMs,
+          lastRunMs,
+          runCount,
+          callCount: runCount,
+          scheduleCount: wrapped.scheduleCount,
+          schedule_count: wrapped.schedule_count,
+          inputCount: sampleInputs.length
+        }
+      },
+      get scheduleCount() { return wrapped.scheduleCount },
+      get schedule_count() { return wrapped.schedule_count },
+      get runCount() { return runCount },
+      get lastRunMs() { return lastRunMs },
+      get compileMs() { return compileMs }
+    }
+    return compiled
   }
 
   function disposeAll() {
     for (const state of Array.from(live)) state.dispose()
   }
 
+  function stats() {
+    return { liveCount: live.size }
+  }
+
   jit.disposeAll = disposeAll
+  jit.compile = compile
+  jit.stats = stats
   return jit
 }
 

@@ -2244,63 +2244,6 @@ static PolyUOp *normalize_kernel_read_index_dtypes(PolyCtx *ctx, PolyUOp *sink) 
   return ret ? ret : sink;
 }
 
-/* add_kernel_loads: post-pass that wraps non-STORE INDEX nodes with LOAD.
- *
- * After split_kernel_rewrite, the kernel graph has INDEX(PARAM, flat) nodes.
- * Store targets: STORE(INDEX(PARAM, flat), value) — INDEX stays as-is.
- * Read accesses: INDEX(PARAM, flat) consumed by ALU/REDUCE — needs LOAD.
- *
- * This is the polygrad equivalent of tinygrad's pm_add_loads. */
-static PolyUOp *add_kernel_loads(PolyCtx *ctx, PolyUOp *kernel_sink) {
-  int n_topo;
-  PolyUOp **topo = poly_toposort_alloc(ctx, kernel_sink, &n_topo);
-
-  /* Bottom-up rewrite: wrap ALL ptr-dtype INDEX with LOAD.
-   * STORE's src[0] (store target) is never remapped, so it keeps the
-   * original INDEX. This handles the case where the same INDEX UOp is used
-   * as both a store target and a read operand (CSE deduplication). */
-  PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
-
-  for (int i = 0; i < n_topo; i++) {
-    PolyUOp *u = topo[i];
-    bool src_changed = false;
-    PolyUOp *new_src_buf[16];
-    PolyUOp **new_src = (u->n_src > 16) ? malloc(u->n_src * sizeof(PolyUOp *)) : new_src_buf;
-    for (int j = 0; j < u->n_src; j++) {
-      /* STORE's src[0] is the store target — do NOT remap (keep as INDEX). */
-      if (u->op == POLY_OP_STORE && j == 0) {
-        new_src[j] = u->src[j];
-        continue;
-      }
-      PolyUOp *mapped = poly_map_get(rmap, poly_ptr_hash(u->src[j]), u->src[j], poly_ptr_eq);
-      new_src[j] = mapped ? mapped : u->src[j];
-      if (new_src[j] != u->src[j]) src_changed = true;
-    }
-
-    PolyUOp *result = NULL;
-
-    if (u->op == POLY_OP_INDEX && u->n_src >= 2 && u->dtype.is_ptr) {
-      /* Wrap INDEX with LOAD — strip pointer flag to get scalar element type. */
-      PolyUOp *idx = src_changed ? poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : u;
-      PolyDType elem = u->dtype;
-      elem.is_ptr = false;
-      elem.ptr_size = 0;
-      result = poly_uop1(ctx, POLY_OP_LOAD, elem, idx, poly_arg_none());
-    } else if (src_changed) {
-      result = poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg);
-    }
-
-    if (result && result != u) poly_map_set(rmap, poly_ptr_hash(u), u, result, poly_ptr_eq);
-
-    if (new_src != new_src_buf) free(new_src);
-  }
-
-  PolyUOp *new_sink = poly_map_get(rmap, poly_ptr_hash(kernel_sink), kernel_sink, poly_ptr_eq);
-  poly_map_destroy(rmap);
-  poly_toposort_free(topo);
-  return new_sink ? new_sink : kernel_sink;
-}
-
 /* Pre-rangeify graph normalization.
  *
  * Port of tinygrad's earliest_rewrites (rangeify.py:101-157), subset:
@@ -3203,7 +3146,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
  * Before poly_apply_add_buffers we must flatten survivors back to:
  *   INDEX(BUFFERIZE(val, buf_r0..buf_rN), flat_scalar)  -- 2-source, ptr_dt
  *
- * split_kernel_rewrite and add_kernel_loads require flat-scalar INDEX.
+ * Later kernel splitting and load insertion require flat-scalar INDEX.
  *
  * Without Stage 3 this pass is behavior-neutral: it un-flattens then re-flattens.
  * With Stage 3, only BUFFERIZEs that were NOT removed reach this pass.

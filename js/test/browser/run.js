@@ -62,8 +62,10 @@ async function launchForDevice(chromium, device) {
 
 async function runForDevice(browser, port, device) {
   const debugLevel = process.env.POLY_DEBUG || process.env.DEBUG || ''
+  const testFilter = process.env.POLY_TEST_FILTER || ''
   const url = `http://127.0.0.1:${port}/?device=${device}` +
-    (debugLevel ? `&debug=${encodeURIComponent(debugLevel)}` : '')
+    (debugLevel ? `&debug=${encodeURIComponent(debugLevel)}` : '') +
+    (testFilter ? `&filter=${encodeURIComponent(testFilter)}` : '')
   const page = await browser.newPage()
 
   page.on('console', msg => {
@@ -101,7 +103,7 @@ async function runForDevice(browser, port, device) {
 }
 
 async function main() {
-  // Build browser test bundle from test_shared.js + test_instance_shared.js
+  // Build browser test bundle from test_tensor.js + test_instance.js
   const { execSync } = require('child_process')
   execSync('npx esbuild test/browser/test_browser_entry.js --bundle --format=iife --platform=browser --outfile=test/browser/tests.js', {
     cwd: path.resolve(__dirname, '..', '..'),
@@ -114,7 +116,10 @@ async function main() {
   const port = server.address().port
   console.log(`Server listening on http://127.0.0.1:${port}/`)
 
-  const devices = ['auto', 'interp', 'webgpu']
+  const devices = (process.env.POLY_BROWSER_DEVICES || 'auto,interp,webgpu')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
   let totalFailed = 0
 
   for (const device of devices) {

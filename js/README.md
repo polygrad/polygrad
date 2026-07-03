@@ -91,6 +91,14 @@ Creates a runtime with the selected core. Options:
 ### `PolyRuntime`
 
 - `pg.Tensor` -- runtime-bound Tensor class
+- `pg.uop` -- thin UOp namespace for inspection helpers (`wrap`, `key`, `shape`, `dtype`, `buffer`)
+- `pg.jit(fn, opts?)` -- tinygrad-style first-run / capture / replay wrapper
+- `pg.compile(fn, sampleInputs, opts?)` -- explicit warm-and-capture wrapper
+  over `pg.jit`, returning `{ run(inputs), stats(), dispose() }`
+- `pg.stats()` -- structured runtime/JIT counters currently available from the
+  JS wrapper
+- `pg.canRun({ core?, device?, dtype? })` -- conservative coarse capability
+  check; op/shape checks intentionally throw until backed by core support data
 - `pg.core` -- `'native'` or `'wasm'`
 - `pg.device` -- resolved device, e.g. `'cpu'` for native or `'wasm'` for the WASM core
 - `pg.dispose()` -- release resources
@@ -101,13 +109,49 @@ Creation: `new Tensor(data, opts?)`, `Tensor.zeros(...)`, `Tensor.ones(...)`, `T
 
 Elementwise: `add`, `sub`, `mul`, `div`, `neg`, `exp`, `log`, `sqrt`, `square`, `abs`, `sigmoid`, `relu`, `tanh`, `gelu`, `silu`
 
-Reduce: `sum`, `mean`, `max`, `var`, `std`, `softmax`
+Reduce: `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std`, `softmax`
 
-Movement: `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`
+Movement: `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `gather`, `takeAlongAxis`
 
 Comparison: `eq`, `gt`, `where`, `clamp`, `maximum`
 
-Other: `dot` (matmul), `backward`, `realize`, `toArray`, `tolist`, `repr`
+Other: `dot` (matmul), `backward`, `realize`, `toArray`, `toTypedArray`, `tolist`, `copyFrom`, `updateFrom`, `repr`
+
+`copyFrom` / `updateFrom` are Polygrad embedding helpers: they update an
+already-buffer-backed Tensor from matching host data while preserving buffer
+identity for JIT replay. The canonical tinygrad-style update remains
+`assign(...)`.
+
+### JIT and explicit compile
+
+`pg.jit(fn)` follows tinygrad's raw Tensor JIT behavior: first call runs
+normally, second call captures, later calls replay.
+
+```js
+const f = pg.jit((x) => x.add(1).realize())
+await f(new pg.Tensor([1, 2, 3])) // normal run
+await f(new pg.Tensor([4, 5, 6])) // capture
+await f(new pg.Tensor([7, 8, 9])) // replay
+```
+
+`pg.compile(fn, sampleInputs)` is a Polygrad embedding wrapper over the same JIT
+path. It performs the normal run and capture run immediately, then exposes
+explicit replay and timing metadata.
+
+```js
+const compiled = await pg.compile(
+  (x) => x.add(1).realize(),
+  [new pg.Tensor([1, 2, 3])]
+)
+const out = await compiled.run([new pg.Tensor([7, 8, 9])])
+console.log(await out.toArray())
+console.log(compiled.stats())
+compiled.dispose()
+```
+
+`stats()` currently reports wrapper-level timing and counts. It is intended for
+embedding and benchmark attribution; lower-level launch counts and transfer
+bytes will be added only when exposed by the shared C runtime.
 
 ## License
 

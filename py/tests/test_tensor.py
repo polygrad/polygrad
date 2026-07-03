@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from polygrad import Device, Jit, JitError, Tensor, Variable, jit
+from polygrad import Device, Jit, JitError, Tensor, Variable, compile as pg_compile, jit
 
 
 class TestCreation:
@@ -112,6 +112,25 @@ class TestCreation:
         t = Tensor([42.0])
         assert t.item() == pytest.approx(42.0)
 
+    def test_copy_from_preserves_buffer_identity_and_updates_jit_input(self):
+        x = Tensor.empty((3,), dtype='float32')
+        buf = x.uop.buffer
+        x.copy_from(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        assert x.uop.buffer == buf
+        np.testing.assert_allclose(x.numpy(), [1.0, 2.0, 3.0])
+
+        @Jit
+        def f(a):
+            return (a + 1).realize()
+
+        np.testing.assert_allclose(f(x).numpy(), [2.0, 3.0, 4.0])
+        np.testing.assert_allclose(f(x).numpy(), [2.0, 3.0, 4.0])
+        assert f.captured
+
+        x.update_from(np.array([10.0, 20.0, 30.0], dtype=np.float32))
+        np.testing.assert_allclose(f(x).numpy(), [11.0, 21.0, 31.0])
+        assert x.uop.buffer == buf
+
 
 class TestJit:
     def test_jit_replays_raw_tensor_realize(self):
@@ -129,6 +148,12 @@ class TestJit:
         np.testing.assert_allclose(y1.numpy(), [11.0, 21.0, 31.0])
         assert f.captured
         assert f.schedule_count == 1
+        stats = f.stats()
+        assert stats['captured']
+        assert stats['call_count'] == 2
+        assert stats['replay_count'] == 0
+        assert stats['schedule_count'] == 1
+        assert stats['last_call_ms'] >= 0
 
         x2 = Tensor([100.0, 200.0, 300.0]).realize()
         y2 = f(x2)
@@ -136,6 +161,7 @@ class TestJit:
         np.testing.assert_allclose(y2.numpy(), [101.0, 201.0, 301.0])
         np.testing.assert_allclose(x1.numpy(), [10.0, 20.0, 30.0])
         np.testing.assert_allclose(x2.numpy(), [100.0, 200.0, 300.0])
+        assert f.stats()['replay_count'] == 1
 
     def test_jit_replays_assign_with_current_input(self):
         @Jit
@@ -212,6 +238,31 @@ class TestJit:
         np.testing.assert_allclose(y1.numpy(), [101.0, 201.0, 301.0])
         np.testing.assert_allclose(z1.numpy(), [200.0, 400.0, 600.0])
         np.testing.assert_allclose(x2.numpy(), [100.0, 200.0, 300.0])
+
+    def test_jit_preserves_list_and_dict_returns_like_tinygrad(self):
+        @Jit
+        def as_list(x):
+            return [(x + 1).realize()]
+
+        @Jit
+        def as_dict(x):
+            return {'out': (x * 2).realize()}
+
+        np.testing.assert_allclose(as_list(Tensor([1.0, 2.0]).realize())[0].numpy(), [2.0, 3.0])
+        list_ret = as_list(Tensor([10.0, 20.0]).realize())
+        assert as_list.captured
+        np.testing.assert_allclose(list_ret[0].numpy(), [11.0, 21.0])
+        replayed_list = as_list(Tensor([100.0, 200.0]).realize())
+        assert replayed_list is list_ret
+        np.testing.assert_allclose(list_ret[0].numpy(), [101.0, 201.0])
+
+        np.testing.assert_allclose(as_dict(Tensor([1.0, 2.0]).realize())['out'].numpy(), [2.0, 4.0])
+        dict_ret = as_dict(Tensor([10.0, 20.0]).realize())
+        assert as_dict.captured
+        np.testing.assert_allclose(dict_ret['out'].numpy(), [20.0, 40.0])
+        replayed_dict = as_dict(Tensor([100.0, 200.0]).realize())
+        assert replayed_dict is dict_ret
+        np.testing.assert_allclose(dict_ret['out'].numpy(), [200.0, 400.0])
 
     def test_jit_rejects_duplicate_input_buffers(self):
         @Jit
@@ -294,6 +345,32 @@ class TestJit:
         y2 = f(Tensor.empty(n.bind(6)))
         assert y2 is y1
         assert not isinstance(y2.shape[0], int)
+
+    def test_compile_warms_capture_and_replays(self):
+        def f(x):
+            return (x + 1).realize()
+
+        sample = Tensor([1.0, 2.0, 3.0]).realize()
+        compiled = pg_compile(f, [sample])
+        assert compiled.schedule_count == 1
+        stats = compiled.stats()
+        assert stats['capture_runs'] == 2
+        assert stats['compile_ms'] >= 0
+        assert stats['input_count'] == 1
+
+        out = compiled.run([Tensor([10.0, 20.0, 30.0]).realize()])
+        np.testing.assert_allclose(out.numpy(), [11.0, 21.0, 31.0])
+        stats = compiled.stats()
+        assert stats['run_count'] == 1
+        assert stats['last_run_ms'] >= 0
+        assert stats['schedule_count'] == 1
+
+        with pytest.raises(JitError, match='args mismatch'):
+            compiled.run([Tensor([1.0, 2.0, 3.0, 4.0]).realize()])
+
+        compiled.dispose()
+        with pytest.raises(JitError, match='disposed'):
+            compiled.run([sample])
 
 
 class TestElementwise:
@@ -396,6 +473,55 @@ class TestMovement:
         with pytest.raises(RuntimeError, match=r"len\(dims\)=2 != len\(shifts\)=1"):
             Tensor.arange(12).reshape(3, 4).roll(1, (0, 1))
 
+    def test_gather_matches_tinygrad_probe(self):
+        t = Tensor([[1.0, 2.0], [3.0, 4.0]])
+        idx = Tensor(np.array([[0, 0], [1, 0]], dtype=np.int32), dtype='int32')
+        out = t.gather(1, idx)
+        assert out.shape == (2, 2)
+        np.testing.assert_allclose(out.numpy(), [[1.0, 1.0], [4.0, 3.0]])
+        x3 = Tensor.arange(24).reshape(2, 3, 4)
+        idx3 = Tensor(np.array([[[0, 2], [1, 0]], [[2, 1], [0, 2]]], dtype=np.int32), dtype='int32')
+        out3 = x3.gather(1, idx3)
+        assert out3.shape == (2, 2, 2)
+        np.testing.assert_allclose(out3.numpy(), [[[0, 9], [4, 1]], [[20, 17], [12, 21]]])
+
+    def test_scatter_matches_tinygrad_probe(self):
+        idx0 = Tensor(np.array([[0, 1, 2, 0]], dtype=np.int32), dtype='int32')
+        src = Tensor.arange(1, 11).reshape(2, 5)
+        base0 = Tensor.zeros(3, 5, dtype=src.dtype)
+        np.testing.assert_allclose(base0.scatter(0, idx0, src).numpy(), [[1, 0, 0, 4, 0], [0, 2, 0, 0, 0], [0, 0, 3, 0, 0]])
+
+        base = Tensor(np.zeros((3, 5), dtype=np.float32))
+        idx1 = Tensor(np.array([[0, 1, 2], [0, 1, 4], [2, 3, 4]], dtype=np.int32), dtype='int32')
+        src1 = Tensor(np.array([[1, 2, 3], [6, 7, 8], [9, 10, 11]], dtype=np.float32))
+        np.testing.assert_allclose(base.scatter(1, idx1, src1).numpy(), [[1, 2, 3, 0, 0], [6, 7, 0, 0, 8], [0, 0, 9, 10, 11]])
+
+        dup_idx = Tensor(np.array([[1, 1, 2]], dtype=np.int32), dtype='int32')
+        dup_src = Tensor(np.array([[7, 9, 8]], dtype=np.float32))
+        np.testing.assert_allclose(Tensor([[0.0, 0.0, 0.0, 0.0]]).scatter(1, dup_idx, dup_src).numpy(), [[0, 9, 8, 0]])
+
+        scalar_idx = Tensor(np.array([[2], [3]], dtype=np.int32), dtype='int32')
+        np.testing.assert_allclose(Tensor.full((2, 4), 2.0).scatter(1, scalar_idx, 1.23, reduce='add').numpy(), [[2, 2, 3.23, 2], [2, 2, 2, 3.23]], rtol=1e-6)
+        np.testing.assert_allclose(Tensor.full((2, 4), 2.0).scatter(1, scalar_idx, 1.23, reduce='multiply').numpy(), [[2, 2, 2.46, 2], [2, 2, 2, 2.46]], rtol=1e-6)
+
+        with pytest.raises(TypeError, match="must be one of"):
+            base.scatter(1, idx1, src1, reduce='sum')
+        with pytest.raises(TypeError, match="non-scalar src"):
+            base.scatter(1, idx1, src1, reduce='add')
+
+    def test_scatter_reduce_matches_tinygrad_probe(self):
+        base = Tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
+        idx = Tensor(np.array([[0, 0, 1, 1, 2, 2, 3, 3, 4, 4]], dtype=np.int32), dtype='int32')
+        src = Tensor([[1.0, 6.0, 2.0, 7.0, 3.0, 8.0, 4.0, 9.0, 5.0, 10.0]])
+        np.testing.assert_allclose(base.scatter_reduce(1, idx, src, 'sum').numpy(), [[8, 11, 14, 17, 20]])
+        np.testing.assert_allclose(base.scatter_reduce(1, idx, src, 'prod').numpy(), [[6, 28, 72, 144, 250]])
+        np.testing.assert_allclose(base.scatter_reduce(1, idx, src, 'mean', include_self=False).numpy(), [[3.5, 4.5, 5.5, 6.5, 7.5]])
+        extreme_base = Tensor([[-10.0, 20.0, 0.0, 5.0, 10.0]])
+        np.testing.assert_allclose(extreme_base.scatter_reduce(1, idx, src, 'amax').numpy(), [[6, 20, 8, 9, 10]])
+        np.testing.assert_allclose(extreme_base.scatter_reduce(1, idx, src, 'amin').numpy(), [[-10, 2, 0, 4, 5]])
+        with pytest.raises(RuntimeError, match="must be one of"):
+            base.scatter_reduce(1, idx, src, 'max')
+
 
 class TestStepSlicing:
     def test_step2_1d(self):
@@ -472,6 +598,40 @@ class TestReduce:
         s = a.reshape(2, 3).sum(axis=1)
         np.testing.assert_allclose(s.numpy(), [6, 15])
 
+    def test_argmax_matches_tinygrad_probe(self):
+        a = Tensor([[1.2, 0.5, 1.2], [2.2, 1.9, 0.0]])
+        np.testing.assert_allclose(a.argmax(axis=1).numpy(), [0, 0])
+        np.testing.assert_allclose(a.argmax(axis=1, keepdim=True).numpy(), [[0], [0]])
+        assert a.argmax().item() == 3
+
+    def test_sort_argsort_topk_match_tinygrad_probe(self):
+        x = Tensor([[0.1, 0.5, 1.2, 3.4, 2.1], [2.2, 1.9, 0.3, 4.5, 0.8]])
+        vals, idx = x.sort(1, False)
+        np.testing.assert_allclose(vals.numpy(), [[0.1, 0.5, 1.2, 2.1, 3.4],
+                                                  [0.3, 0.8, 1.9, 2.2, 4.5]], rtol=1e-6)
+        np.testing.assert_array_equal(idx.numpy(), [[0, 1, 2, 4, 3], [2, 4, 1, 0, 3]])
+
+        vals, idx = x.topk(2, dim=1)
+        np.testing.assert_allclose(vals.numpy(), [[3.4, 2.1], [4.5, 2.2]], rtol=1e-6)
+        np.testing.assert_array_equal(idx.numpy(), [[3, 4], [3, 0]])
+
+        vals, idx = x.topk(2, dim=1, largest=False)
+        np.testing.assert_allclose(vals.numpy(), [[0.1, 0.5], [0.3, 0.8]], rtol=1e-6)
+        np.testing.assert_array_equal(idx.numpy(), [[0, 1], [2, 4]])
+
+        t = Tensor([[2, 3, 4, 1], [1, 4, 3, 2]])
+        np.testing.assert_array_equal(t.argsort().numpy(), [[3, 0, 1, 2], [0, 3, 2, 1]])
+
+    def test_topk_tie_order_and_errors_match_tinygrad_probe(self):
+        tie = Tensor([[1.0, 1.0, 0.0, 1.0]])
+        vals, idx = tie.topk(3, dim=1)
+        np.testing.assert_allclose(vals.numpy(), [[1.0, 1.0, 1.0]])
+        np.testing.assert_array_equal(idx.numpy(), [[0, 1, 3]])
+        with pytest.raises(ValueError, match='selected index k=6 is out of range'):
+            Tensor([[0.1, 0.2]]).topk(6, dim=1)
+        with pytest.raises(NotImplementedError, match='sorted_=False'):
+            Tensor([[0.1, 0.2]]).topk(1, dim=1, sorted_=False)
+
 
 class TestMatmulAndLoss:
     def test_matmul_shape_mismatch_raises(self):
@@ -497,6 +657,37 @@ class TestMatmulAndLoss:
         b = Tensor(np.zeros((5, 4, 6), dtype=np.float32))
         with pytest.raises(ValueError, match='cannot dot'):
             a @ b
+
+    def test_qr_matches_tinygrad_probe(self):
+        cases = [
+            np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+            np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+            np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32),
+            np.array([
+                [[1.0, 2.0], [3.0, 4.0]],
+                [[2.0, 0.0], [0.0, 2.0]],
+            ], dtype=np.float32),
+        ]
+        for arr in cases:
+            q, r = Tensor(arr).qr()
+            assert q.shape == arr.shape[:-2] + (arr.shape[-2], arr.shape[-2])
+            assert r.shape == arr.shape
+            q_np, r_np = q.numpy(), r.numpy()
+            assert not np.isnan(q_np).any()
+            assert not np.isnan(r_np).any()
+            np.testing.assert_allclose(np.matmul(q_np, r_np), arr, rtol=1e-4, atol=1e-4)
+
+    def test_qr_zero_column_and_int_promote_match_tinygrad_probe(self):
+        arr = np.array([[0.0, 1.0], [0.0, 2.0]], dtype=np.float32)
+        q, r = Tensor(arr).qr()
+        np.testing.assert_allclose(q.numpy() @ r.numpy(), arr, rtol=1e-4, atol=1e-4)
+        assert not np.isnan(q.numpy()).any()
+        assert not np.isnan(r.numpy()).any()
+
+        qi, ri = Tensor(np.array([[1, 2], [3, 4]], dtype=np.int32)).qr()
+        assert qi.dtype == 'float32'
+        assert ri.dtype == 'float32'
+        np.testing.assert_allclose(qi.numpy() @ ri.numpy(), [[1, 2], [3, 4]], rtol=1e-4, atol=1e-4)
 
     def test_cross_entropy_sparse_targets(self):
         logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])

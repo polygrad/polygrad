@@ -1,14 +1,14 @@
 'use strict'
 
 const polygrad = require('..')
-const { runTests } = require('./test_shared')
-const { runInstanceTests } = require('./test_instance_shared')
-const { runJitTests } = require('./test_jit_shared')
-const { runOptimTests } = require('./test_optim_shared')
-const { runModelTests } = require('./test_model_shared')
+const { runTensorTests } = require('./test_tensor')
+const { runInstanceTests } = require('./test_instance')
+const { runJitTests } = require('./test_jit')
+const { runOptimTests } = require('./test_optim')
+const { runModelTests } = require('./test_model')
 
 polygrad.create({ core: 'native' }).then(pg =>
-  runTests(pg).then(async tensorResult => {
+  runTensorTests(pg).then(async tensorResult => {
     const instanceResult = await runInstanceTests(pg)
     const jitResult = await runJitTests(pg)
     const optimResult = await runOptimTests(pg)

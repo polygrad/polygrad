@@ -19,6 +19,7 @@ _has_cuda_ffi = False
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
+_ptrp = ctypes.POINTER(_ptr)
 _i64p = ctypes.POINTER(ctypes.c_int64)
 _ip = ctypes.POINTER(ctypes.c_int)
 _uintptr = ctypes.c_size_t
@@ -392,6 +393,9 @@ def _declare_signatures(lib):
     lib.poly_dot.restype = _ptr
     lib.poly_dot.argtypes = [_ptr, _ptr, _ptr]
 
+    lib.poly_qr.restype = ctypes.c_int
+    lib.poly_qr.argtypes = [_ptr, _ptr, _ptrp, _ptrp]
+
     lib.poly_cross_entropy.restype = _ptr
     lib.poly_cross_entropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
 
@@ -403,6 +407,17 @@ def _declare_signatures(lib):
 
     lib.poly_gather.restype = _ptr
     lib.poly_gather.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_gather_dim.restype = _ptr
+    lib.poly_gather_dim.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
+
+    lib.poly_scatter.restype = _ptr
+    lib.poly_scatter.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr, _ptr, ctypes.c_char_p]
+
+    lib.poly_scatter_reduce.restype = _ptr
+    lib.poly_scatter_reduce.argtypes = [
+        _ptr, _ptr, ctypes.c_int, _ptr, _ptr, ctypes.c_char_p, ctypes.c_int
+    ]
 
     # --- Dynamic shapes (DEFINE_VAR / BIND) ---
     lib.poly_define_var.restype = _ptr
@@ -465,6 +480,9 @@ def _declare_signatures(lib):
 
     lib.poly_buffer_read.restype = ctypes.c_int
     lib.poly_buffer_read.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t]
+
+    lib.poly_buffer_write.restype = ctypes.c_int
+    lib.poly_buffer_write.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t]
 
     lib.poly_buffer_from_host.restype = _ptr
     lib.poly_buffer_from_host.argtypes = [
@@ -744,6 +762,16 @@ def _declare_signatures(lib):
 
     lib.poly_argmax.restype = _ptr
     lib.poly_argmax.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_sort.restype = ctypes.c_int
+    lib.poly_sort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int, _ptrp, _ptrp]
+
+    lib.poly_argsort.restype = _ptr
+    lib.poly_argsort.argtypes = [_ptr, _ptr, ctypes.c_int, ctypes.c_int]
+
+    lib.poly_topk.restype = ctypes.c_int
+    lib.poly_topk.argtypes = [_ptr, _ptr, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_int, _ptrp, _ptrp]
 
     lib.poly_mse_loss.restype = _ptr
     lib.poly_mse_loss.argtypes = [_ptr, _ptr, _ptr]

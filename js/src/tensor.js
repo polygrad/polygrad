@@ -327,7 +327,7 @@ function createBoundTensorClass(runtime) {
         currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
         const buffer = currentUop.buffer ? currentUop.buffer.raw : null
         const needsFrontendHostOwner =
-          Boolean(core.registerHostBuffer) &&
+          Boolean(buffer && core.ffi.poly_buffer_get_key) &&
           (!core.caps || core.caps.core !== 'wasm' || core.caps.device === 'webgpu')
         if (needsFrontendHostOwner && buffer && core.ffi.poly_buffer_get_key) {
           const bufferKey = core.ffi.poly_buffer_get_key(this._ctx, buffer)
@@ -513,6 +513,10 @@ function createBoundTensorClass(runtime) {
       return await t._readBufferBytes()
     }
 
+    async toTypedArray() {
+      return await this.toArray()
+    }
+
     async item() {
       const arr = await this.toArray()
       if (arr.length !== 1) {
@@ -564,6 +568,39 @@ function createBoundTensorClass(runtime) {
       this._syncCoreRequiresGrad()
       this._data = null
       return this
+    }
+
+    copyFrom(data) {
+      if (!ffi.poly_buffer_write) throw new Error('poly_buffer_write is required for Tensor.copyFrom')
+      const buf = this.uop && this.uop.buffer ? this.uop.buffer.raw : null
+      if (!buf) throw new Error('copyFrom requires a tensor backed by a BUFFER UOp')
+      const AT = TA_BY_DTYPE[this._dtype] || Float32Array
+      const expectedBytes = this.numel() * AT.BYTES_PER_ELEMENT
+      let view
+      if (data instanceof AT) {
+        view = data
+      } else if (Array.isArray(data) || typeof data === 'number') {
+        view = flattenArray(data, this._dtype).data
+      } else if (data instanceof ArrayBuffer) {
+        view = new AT(data)
+      } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
+        if (!(data instanceof AT)) {
+          throw new TypeError(`copyFrom dtype mismatch: expected ${AT.name}, got ${data.constructor.name}`)
+        }
+        view = data
+      } else {
+        throw new TypeError('copyFrom expects a TypedArray, ArrayBuffer, number, or array')
+      }
+      if (view.byteLength !== expectedBytes) {
+        throw new Error(`copyFrom byte size mismatch ${view.byteLength} != ${expectedBytes}`)
+      }
+      ffi.poly_buffer_write(this._ctx, buf, view)
+      this._data = null
+      return this
+    }
+
+    updateFrom(data) {
+      return this.copyFrom(data)
     }
 
     to(device) {
@@ -1204,6 +1241,65 @@ function createBoundTensorClass(runtime) {
       return this._makeResult(uop, [this])
     }
 
+    argmax(axis, keepdim) {
+      if (keepdim === undefined) keepdim = false
+      if (axis === undefined || axis === null) return this.flatten().argmax(0, false)
+      if (axis < 0) axis += this.shape.length
+      const { ffi } = this._rt._core
+      const uop = ffi.poly_argmax(this._ctx, this._uop, axis)
+      if (!uop) throw new Error('poly_argmax failed')
+      let result = this._makeResult(uop, [this])
+      if (keepdim) {
+        const keepShape = [...this.shape]
+        keepShape[axis] = 1
+        result = result.reshape(keepShape)
+      }
+      return result
+    }
+
+    sort(dim, descending) {
+      if (dim === undefined) dim = -1
+      if (descending === undefined) descending = false
+      if (dim < 0) dim += this.shape.length
+      const { ffi } = this._rt._core
+      if (!ffi.poly_sort) throw new Error('poly_sort is required for Tensor.sort')
+      const pair = ffi.poly_sort(this._ctx, this._uop, dim, descending ? 1 : 0)
+      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('poly_sort failed')
+      const values = this._makeResult(pair[0], [this])
+      const indices = new Tensor(null, {
+        _ctx: this._ctx,
+        _uop: pair[1],
+        _device: this._device,
+        requiresGrad: false
+      })
+      return [values, indices]
+    }
+
+    argsort(dim, descending) {
+      return this.sort(dim, descending)[1]
+    }
+
+    topk(k, dim, largest, sorted_) {
+      if (dim === undefined) dim = -1
+      if (largest === undefined) largest = true
+      if (sorted_ === undefined) sorted_ = true
+      if (!sorted_) throw new Error('topk with sorted_=False is not supported')
+      if (dim < 0) dim += this.shape.length
+      if (k > this.shape[dim]) throw new Error(`selected index k=${k} is out of range`)
+      const { ffi } = this._rt._core
+      if (!ffi.poly_topk) throw new Error('poly_topk is required for Tensor.topk')
+      const pair = ffi.poly_topk(this._ctx, this._uop, k, dim, largest ? 1 : 0, sorted_ ? 1 : 0)
+      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('poly_topk failed')
+      const values = this._makeResult(pair[0], [this])
+      const indices = new Tensor(null, {
+        _ctx: this._ctx,
+        _uop: pair[1],
+        _device: this._device,
+        requiresGrad: false
+      })
+      return [values, indices]
+    }
+
     min(opts) {
       if (!opts) opts = {}
       return this.neg().max(opts).neg()
@@ -1245,6 +1341,92 @@ function createBoundTensorClass(runtime) {
       return this.var(axis, keepdim, correction).sqrt()
     }
 
+    gather(dim, index) {
+      if (!(index instanceof Tensor)) index = new Tensor(index, { dtype: 'int32', device: this._device })
+      if (index._device !== this._device) {
+        throw new Error(`expected index and self on the same device, index.device=${index.device}, self.device=${this.device}`)
+      }
+      if (index.ndim !== this.ndim) {
+        throw new Error(`self.ndim must equal index.ndim, self.ndim=${this.ndim}, index.ndim=${index.ndim}`)
+      }
+      if (dim < 0) dim += this.ndim
+      if (dim < 0 || dim >= this.ndim) throw new Error(`dim=${dim} out of range`)
+      for (let d = 0; d < this.ndim; d++) {
+        if (d !== dim && this.shape[d] < index.shape[d]) {
+          throw new Error('requires self.shape[d] >= index.shape[d] for all d != dim')
+        }
+      }
+
+      const uop = this._rt._core.ffi.poly_gather_dim(this._ctx, this._uop, dim, index._uop)
+      if (!uop) throw new Error('poly_gather_dim failed')
+      return this._makeResult(uop, [this, index])
+    }
+
+    takeAlongAxis(index, axis) {
+      return this.gather(axis, index)
+    }
+
+    _preScatterValidate(dim, index, src) {
+      if (!(index instanceof Tensor)) index = new Tensor(index, { dtype: 'int32', device: this._device })
+      if (!(src instanceof Tensor)) src = Tensor.full(index.shape, src, { dtype: this._dtype, device: this._device })
+      if (index._device !== this._device) {
+        throw new Error(`expected index and self on the same device, index.device=${index.device}, self.device=${this.device}`)
+      }
+      if (src._device !== this._device) {
+        throw new Error(`expected src and self on the same device, src.device=${src.device}, self.device=${this.device}`)
+      }
+      if (dim < 0) dim += this.ndim
+      if (dim < 0 || dim >= this.ndim) throw new Error(`dim=${dim} out of range`)
+      if (index.ndim !== this.ndim || src.ndim !== this.ndim) {
+        throw new Error(`index.ndim, self.ndim and src.ndim must all match, index.ndim=${index.ndim}, self.ndim=${this.ndim}, src.ndim=${src.ndim}`)
+      }
+      for (let d = 0; d < this.ndim; d++) {
+        if ((d !== dim && this.shape[d] < index.shape[d]) || src.shape[d] < index.shape[d]) {
+          throw new Error('requires self.shape[d] >= index.shape[d] for all d != dim and src.shape[d] >= index.shape[d] for all d')
+        }
+      }
+      if (this._dtype !== src._dtype) {
+        throw new Error(`expected self and src to have the same dtype, self.dtype=${this._dtype}, src.dtype=${src._dtype}`)
+      }
+      return { dim, index, src }
+    }
+
+    scatterReduce(dim, index, src, reduce, includeSelf) {
+      if (includeSelf === undefined) includeSelf = true
+      if (!['sum', 'prod', 'mean', 'amax', 'amin'].includes(reduce)) {
+        throw new Error(`reduce=${JSON.stringify(reduce)} must be one of 'sum', 'prod', 'mean', 'amax', 'amin'`)
+      }
+      if (!(src instanceof Tensor)) src = new Tensor(src, { dtype: this._dtype, device: this._device })
+      const p = this._preScatterValidate(dim, index, src)
+      const { ffi } = this._rt._core
+      const uop = ffi.poly_scatter_reduce(this._ctx, this._uop, p.dim, p.index._uop, p.src._uop, reduce, includeSelf ? 1 : 0)
+      if (!uop) throw new Error('poly_scatter_reduce failed')
+      return this._makeResult(uop, [this, p.index, p.src])
+    }
+
+    scatter_reduce(dim, index, src, reduce, includeSelf) {
+      return this.scatterReduce(dim, index, src, reduce, includeSelf)
+    }
+
+    scatter(dim, index, src, reduce) {
+      if (reduce === undefined) reduce = null
+      if (![null, 'add', 'multiply'].includes(reduce)) {
+        throw new TypeError(`reduce=${JSON.stringify(reduce)} must be one of None, 'multiply', or 'add'`)
+      }
+      const srcIsTensor = src instanceof Tensor
+      if (!srcIsTensor) {
+        const idxShape = index instanceof Tensor ? index.shape : flattenArray(index, 'int32').shape
+        src = Tensor.full(idxShape, src, { dtype: this._dtype, device: this._device })
+      } else if (reduce !== null) {
+        throw new TypeError('non-scalar src is not supported with reduce arg. use scatter_reduce')
+      }
+      const p = this._preScatterValidate(dim, index, src)
+      const { ffi } = this._rt._core
+      const uop = ffi.poly_scatter(this._ctx, this._uop, p.dim, p.index._uop, p.src._uop, reduce || '')
+      if (!uop) throw new Error('poly_scatter failed')
+      return this._makeResult(uop, [this, p.index, p.src])
+    }
+
     // --- Matmul (C core dot) ---
 
     dot(w) {
@@ -1260,6 +1442,14 @@ function createBoundTensorClass(runtime) {
     }
 
     matmul(other) { return this.dot(other) }
+
+    qr() {
+      const { ffi } = this._rt._core
+      if (!ffi.poly_qr) throw new Error('poly_qr is required for Tensor.qr')
+      const pair = ffi.poly_qr(this._ctx, this._uop)
+      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('poly_qr failed')
+      return [this._makeResult(pair[0], [this]), this._makeResult(pair[1], [this])]
+    }
 
     linear(weight, bias) {
       let result = this.dot(weight.transpose(-1, -2))

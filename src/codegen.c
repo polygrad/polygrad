@@ -3575,14 +3575,12 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
   PolyUOp *f_neg_one = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-1.0));
   PolyUOp *f_pi_2 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(1.57079632679489661923));
   PolyUOp *f_half = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(0.5));
-  PolyUOp *f_neg_half = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-0.5));
   PolyUOp *f_switch = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(30.0));
   PolyUOp *f_pos_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_inf()));
   PolyUOp *f_neg_inf = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(-__builtin_inf()));
   PolyUOp *f_nan = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(__builtin_nan("")));
   double m_1_pi = 0.318309886183790671537767526745028724;
   PolyUOp *f_m_1_pi = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(m_1_pi));
-  PolyUOp *f_2p32 = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(4294967296.0));
   PolyUOp *f_ph_mul = poly_uop0(ctx, POLY_OP_CONST, ft, poly_arg_float(3.4061215800865545e-19));
   PolyUOp *i_zero = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(0));
   PolyUOp *i_one = poly_uop0(ctx, POLY_OP_CONST, it, poly_arg_int(1));
@@ -3651,17 +3649,6 @@ static PolyUOp *rule_decomp_sin(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
 
   /* Payne-Hanek reduction (large branch, same for f32/f64) */
   /* frexp via bit manipulation — always uses f32 intermediates for Payne-Hanek */
-  PolyUOp *x_abs_f32;
-  if (is_f64) {
-    /* Demote to f32 for Payne-Hanek (tinygrad uses intermediate_dtype=d.dtype for non-f16) */
-    /* Actually tinygrad uses d.dtype as intermediate for f64 too. But the two_over_pi_f table
-     * is uint32-based. Let's keep the same Payne-Hanek as f32 since it operates on the
-     * frexp decomposition which is dtype-independent for the bit table lookup. */
-    x_abs_f32 = x_abs; /* We'll use the same Payne-Hanek for both */
-  } else {
-    x_abs_f32 = x_abs;
-  }
-
   PolyUOp *bits = poly_uop1(
       ctx, POLY_OP_BITCAST, ut32,
       is_f64 ? poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, x_abs, poly_arg_none()) : x_abs,
@@ -4101,12 +4088,6 @@ static bool pair_list_contains(int64_t (*pairs)[2], int n, int64_t axis, int64_t
   for (int i = 0; i < n; i++)
     if (pairs[i][0] == axis && pairs[i][1] == sz) return true;
   return false;
-}
-
-static int pair_list_find_axis(int64_t (*pairs)[2], int n, int64_t axis) {
-  for (int i = 0; i < n; i++)
-    if (pairs[i][0] == axis) return i;
-  return -1;
 }
 
 static int find_assignment(int64_t *ids, int64_t *vals, int n, int64_t axis, int64_t *out) {
@@ -4788,10 +4769,6 @@ static int uop_ptr_cmp(const void *ap, const void *bp) {
   return 0;
 }
 
-static bool lanes_supported_for_fold(int lanes) {
-  return lanes > 1 && lanes <= 4 && ((lanes & (lanes - 1)) == 0);
-}
-
 static bool expr_divides_const_codegen(PolyUOp *u, int64_t v) {
   if (!u || v == 0) return false;
   if (v == 1) return true;
@@ -4843,13 +4820,6 @@ static void collect_add_terms(PolyCtx *ctx, PolyUOp *u, LaneAffineExpr *out, boo
   out->terms[out->n_terms++] = u;
 }
 
-static bool affine_terms_equal(PolyUOp **a, int n_a, PolyUOp **b, int n_b) {
-  if (n_a != n_b) return false;
-  for (int i = 0; i < n_a; i++)
-    if (a[i] != b[i]) return false;
-  return true;
-}
-
 static PolyUOp *build_add_expr(
     PolyCtx *ctx,
     PolyDType dt,
@@ -4868,48 +4838,6 @@ static PolyUOp *build_add_expr(
     ret = ret ? poly_uop2(ctx, POLY_OP_ADD, dt, ret, c, poly_arg_none()) : c;
   }
   return ret;
-}
-
-static bool match_contiguous_lane_pattern(
-    PolyCtx *ctx,
-    PolyUOp *vidx,
-    int lanes,
-    PolyUOp **out_terms,
-    int *out_n_terms,
-    int64_t *out_base_const
-) {
-  if (!vidx || lanes <= 0 || !out_terms || !out_n_terms || !out_base_const) return false;
-  bool have_common = false;
-  int n_common_terms = 0;
-  int64_t base_const = 0;
-  PolyUOp *common_terms[64];
-
-  for (int i = 0; i < lanes; i++) {
-    PolyUOp *lane_expr = scalarize_lane_expr(ctx, vidx, i);
-    if (!lane_expr) return false;
-
-    LaneAffineExpr ae = {.n_terms = 0, .cst = 0, .ok = true};
-    collect_add_terms(ctx, lane_expr, &ae, false);
-    if (!ae.ok) return false;
-    qsort(ae.terms, (size_t)ae.n_terms, sizeof(ae.terms[0]), uop_ptr_cmp);
-
-    if (!have_common) {
-      have_common = true;
-      n_common_terms = ae.n_terms;
-      base_const = ae.cst;
-      for (int j = 0; j < ae.n_terms; j++)
-        common_terms[j] = ae.terms[j];
-    } else {
-      if (!affine_terms_equal(common_terms, n_common_terms, ae.terms, ae.n_terms)) return false;
-      if (ae.cst != base_const + i) return false;
-    }
-  }
-  if (!have_common) return false;
-  for (int i = 0; i < n_common_terms; i++)
-    out_terms[i] = common_terms[i];
-  *out_n_terms = n_common_terms;
-  *out_base_const = base_const;
-  return true;
 }
 
 static PolyUOp *build_scalar_lane_index(PolyCtx *ctx, PolyUOp *idx, PolyUOp *buf_base, int lane) {

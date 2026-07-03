@@ -16,11 +16,14 @@ console.log = function(...args) {
 const params = new URLSearchParams(location.search)
 const device = params.get('device') || 'auto'
 const debugLevel = Number(params.get('debug') || 0) || 0
+const testFilter = params.get('filter') || ''
 const isWebGpu = device === 'webgpu'
 globalThis.__polygradDebugLevel = debugLevel
+if (testFilter) globalThis.__POLY_TEST_FILTER = testFilter
 
 async function main() {
   console.log('=== device: ' + device + ' ===\n')
+  if (testFilter) console.log('Test filter: ' + testFilter)
 
   let pg
   try {
@@ -31,8 +34,8 @@ async function main() {
     return
   }
 
-  // Run the full shared tensor test suite
-  const tensorResult = await window.__runTests(pg)
+  // Run the full tensor test suite
+  const tensorResult = await window.__runTensorTests(pg)
 
   let instanceResult = { passed: 0, failed: 0 }
   if (isWebGpu) {

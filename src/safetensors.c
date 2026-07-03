@@ -44,14 +44,6 @@ static int64_t compute_numel(const int64_t *shape, int ndim) {
   return n;
 }
 
-/* Compare entries by name for deterministic output */
-static int entry_cmp(const void *a, const void *b) {
-  const int *ia = (const int *)a;
-  const int *ib = (const int *)b;
-  /* We'll pass indices via a wrapper; use a global for qsort context */
-  return 0; /* placeholder -- replaced by actual sort below */
-}
-
 /* Encode */
 
 uint8_t *poly_safetensors_encode(
