@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 10
+#define POLYGRAD_ABI_VERSION 11
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +42,25 @@ PolyUOp *poly_bind_var(PolyCtx *ctx, PolyUOp *var, int64_t value);
 
 /* ABI version (callers check at load time for compatibility). */
 int poly_abi_version(void);
+
+/* FFI capability probe. Builds a representative tensor graph for `op` and
+ * `shape`, then asks the selected backend to lower it. Returns 1 for supported,
+ * 0 for unsupported, and a negative value for an invalid/too-large query.
+ *
+ * Shape conventions:
+ * - elementwise/unary/reduce/qr/cholesky: input shape
+ * - matmul/dot: [m, k, n] for (m,k) @ (k,n)
+ * - triangular_solve/solve: [n, n] for vector RHS or [n, n, nrhs]
+ * - lstsq: [m, n] for vector RHS or [m, n, nrhs]
+ */
+int poly_can_run_op(
+    PolyCtx *ctx,
+    int device_id,
+    const char *op,
+    int dtype_id,
+    const int64_t *shape,
+    int n_shape
+);
 
 /* Debug: print UOp info to stderr */
 void poly_debug_uop(PolyCtx *ctx, PolyUOp *u);

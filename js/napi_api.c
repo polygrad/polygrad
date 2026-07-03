@@ -1367,6 +1367,25 @@ static napi_value napi_poly_ctx_stats(napi_env env, napi_callback_info info) {
   return out;
 }
 
+static napi_value napi_poly_can_run_op(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t device = 0, dtype_id = 0;
+  napi_get_value_int32(env, argv[1], &device);
+  char *op = read_utf8_arg(env, argv[2], NULL);
+  if (!op) return NULL;
+  napi_get_value_int32(env, argv[3], &dtype_id);
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = read_int64_array(env, argv[4], shape, POLY_MAX_DIMS);
+  int rc = poly_can_run_op(ctx, device, op, dtype_id, shape, ndim);
+  free(op);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, rc, &out));
+  return out;
+}
+
 /* ── Autograd ──────────────────────────────────────────────────────────── */
 
 static napi_value napi_poly_grad(napi_env env, napi_callback_info info) {
@@ -3345,6 +3364,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_buffer_write", napi_poly_buffer_write),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
       DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),
+      DECLARE_NAPI_METHOD("poly_can_run_op", napi_poly_can_run_op),
       DECLARE_NAPI_METHOD("poly_jit_new", napi_poly_jit_new),
       DECLARE_NAPI_METHOD("poly_jit_free", napi_poly_jit_free),
       DECLARE_NAPI_METHOD("poly_jit_set_prune", napi_poly_jit_set_prune),

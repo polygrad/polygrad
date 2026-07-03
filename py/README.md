@@ -133,9 +133,16 @@ print(compiled.stats())
 compiled.dispose()
 ```
 
-`Jit.stats()` and `CompiledCallable.stats()` currently expose wrapper-level
-capture/replay counts and wall-clock timings. Lower-level launch counts and
-transfer bytes will be added only when the shared C runtime exposes them.
+`polygrad.stats()` exposes shared C runtime counters, including launch count,
+schedule/runtime cache hits and misses, buffer transfer counts/bytes, cache
+sizes, and arena/scratch high-water marks. `Jit.stats()` and
+`CompiledCallable.stats()` expose wrapper-level capture/replay counts and
+wall-clock timings.
+
+`polygrad.can_run(op, dtype="float32", shape=..., shapes=..., device="auto")`
+is an advisory capability probe. It builds a representative tensor graph and
+asks the selected backend to lower it. Multi-input ops use `shapes`, for
+example `can_run("matmul", shapes=((2, 3), (3, 4)))`.
 
 ## Tensor API
 

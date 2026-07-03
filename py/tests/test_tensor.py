@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from polygrad import Device, Jit, JitError, Tensor, Variable, compile as pg_compile, jit, stats as pg_stats
+from polygrad import Device, Jit, JitError, Tensor, Variable, can_run, compile as pg_compile, jit, stats as pg_stats
 
 
 class TestCreation:
@@ -55,6 +55,14 @@ class TestCreation:
         assert after['buffer_read_bytes'] >= before['buffer_read_bytes'] + 12
         assert after['launch_count'] >= before['launch_count'] + 1
         assert after['runtime_cache_misses'] >= before['runtime_cache_misses']
+
+    def test_can_run_probes_core_op_shape_support(self):
+        assert can_run('add', dtype='float32', shape=(4,))
+        assert can_run('matmul', dtype='float32', shapes=((2, 3), (3, 4)))
+        with pytest.raises(ValueError, match='shape is required'):
+            can_run('add', dtype='float32')
+        with pytest.raises(ValueError, match='shape queries require an op'):
+            can_run(shape=(4,), dtype='float32')
 
     def test_empty_rejects_name_like_tinygrad(self):
         with pytest.raises(TypeError, match='Tensor.empty does not accept name'):

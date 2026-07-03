@@ -244,6 +244,9 @@ def _declare_signatures(lib):
     lib.poly_ctx_stats.restype = ctypes.c_int
     lib.poly_ctx_stats.argtypes = [_ptr, ctypes.POINTER(PolyCtxStats)]
 
+    lib.poly_can_run_op.restype = ctypes.c_int
+    lib.poly_can_run_op.argtypes = [_ptr, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+
     # --- Op helpers ---
     lib.poly_op_count.restype = ctypes.c_int
     lib.poly_op_count.argtypes = []

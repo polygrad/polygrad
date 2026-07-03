@@ -100,18 +100,33 @@
           const stats = pg.stats();
           assert(stats.core === pg.core, "runtime stats should include core");
           assert(stats.device === pg.device, "runtime stats should include device");
+          assert(stats.coreStats && typeof stats.coreStats.launchCount === "number", "runtime stats should include core counters");
           assert(stats.jit && typeof stats.jit.liveCount === "number", "runtime stats should include jit live count");
+          const before = stats.coreStats;
+          const x = Tensor.empty([3], { dtype: "float32" });
+          x.copyFrom(new Float32Array([1, 2, 3]));
+          const t = await x.add(1).realize();
+          assertClose(await t.toArray(), [2, 3, 4]);
+          const after = pg.stats().coreStats;
+          assert(after.bufferWriteBytes >= before.bufferWriteBytes + 12, "stats should count host writes");
+          assert(after.bufferReadBytes >= before.bufferReadBytes + 12, "stats should count host reads");
+          assert(after.launchCount >= before.launchCount + 1, "stats should count backend launches");
           assert(pg.canRun({ dtype: "float32" }), "float32 should be supported by every current runtime");
           if (pg.caps.f64 === false) {
             assert(!pg.canRun({ dtype: "float64" }), "canRun should reject f64 when caps.f64 is false");
           }
+          assert(pg.canRun({ op: "add", dtype: "float32", shape: [4] }), "canRun should probe add");
+          assert(
+            pg.canRun({ op: "matmul", dtype: "float32", shapes: [[2, 3], [3, 4]] }),
+            "canRun should probe matmul shapes"
+          );
           let threw = false;
           try {
-            pg.canRun({ op: "matmul", dtype: "float32" });
+            pg.canRun({ shape: [4], dtype: "float32" });
           } catch (e) {
-            threw = String(e.message || e).includes("coarse device/dtype");
+            threw = String(e.message || e).includes("require an op");
           }
-          assert(threw, "op/shape canRun queries should fail explicitly until core supports them");
+          assert(threw, "shape-only canRun queries should fail explicitly");
         });
         await test("runtime compile wrapper warms capture and replays", async () => {
           assert(typeof pg.compile === "function", "runtime should expose pg.compile");

@@ -166,7 +166,10 @@ Runtime stats are exposed as structured embedding/debug data: Python
 `polygrad.stats()` returns `PolyCtxStats` fields, and JS `pg.stats().coreStats`
 includes launch counts, schedule/runtime cache hits and misses, buffer
 read/write/copy bytes, cache sizes, and runtime artifact bytes. tinygrad keeps
-similar counters internal through `GlobalCounters` and DEBUG output.
+similar counters internal through `GlobalCounters` and DEBUG output. Python
+`polygrad.can_run(...)` and JS `pg.canRun(...)` provide advisory op/shape/device
+capability checks by building a representative graph and asking the selected
+backend to lower it.
 
 ### Kernel fusion
 

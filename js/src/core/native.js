@@ -43,7 +43,7 @@ function createNativeCore() {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 10
+  const EXPECTED_ABI = 11
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -208,6 +208,9 @@ function createNativeCore() {
     ctx,
     ops,
     caps: { simd: false, f64: true, core: 'native', device: 'cpu' },
+    canRunOp(device, op, dtypeId, shape) {
+      return binding.poly_can_run_op(ctx, device, op, dtypeId, Array.from(shape || []))
+    },
     destroy() {
       binding.poly_ctx_destroy(ctx)
     }

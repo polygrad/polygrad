@@ -126,13 +126,18 @@ async function runTensorTests(pg) {
     if (pg.caps.f64 === false) {
       assert(!pg.canRun({ dtype: 'float64' }), 'canRun should reject f64 when caps.f64 is false')
     }
+    assert(pg.canRun({ op: 'add', dtype: 'float32', shape: [4] }), 'canRun should probe add')
+    assert(
+      pg.canRun({ op: 'matmul', dtype: 'float32', shapes: [[2, 3], [3, 4]] }),
+      'canRun should probe matmul shapes'
+    )
     let threw = false
     try {
-      pg.canRun({ op: 'matmul', dtype: 'float32' })
+      pg.canRun({ shape: [4], dtype: 'float32' })
     } catch (e) {
-      threw = String(e.message || e).includes('coarse device/dtype')
+      threw = String(e.message || e).includes('require an op')
     }
-    assert(threw, 'op/shape canRun queries should fail explicitly until core supports them')
+    assert(threw, 'shape-only canRun queries should fail explicitly')
   })
 
   await test('runtime compile wrapper warms capture and replays', async () => {

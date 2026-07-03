@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/polygrad.h"
+#include "../src/frontend.h"
 #include "../src/frontend_internal.h"
 #include "../src/ctx.h"
 #include "../src/device.h"
@@ -415,6 +416,25 @@ TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
   ASSERT_INT_EQ(after.scratch_bytes, 0);
   ASSERT_TRUE(after.scratch_high_water >= during.scratch_high_water);
   ASSERT_INT_EQ(after.arena_bytes, during.arena_bytes);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, can_run_op_probes_backend_lowering) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int f32 = poly_dtype_id_by_name("float32");
+  ASSERT_TRUE(f32 >= 0);
+
+  int64_t add_shape[1] = {4};
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "add", f32, add_shape, 1), 1);
+
+  int64_t mm_shape[3] = {2, 3, 4};
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "matmul", f32, mm_shape, 3), 1);
+
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_HOST, "add", f32, add_shape, 1), 0);
+  ASSERT_TRUE(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "add", f32, NULL, -1) < 0);
 
   poly_ctx_destroy(ctx);
   PASS();

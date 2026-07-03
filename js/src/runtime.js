@@ -83,15 +83,29 @@ class PolyRuntime {
 
   canRun(query) {
     const q = query || {}
-    if (q.op != null || q.shape != null) {
-      throw new Error('canRun currently supports only coarse device/dtype checks')
-    }
     const caps = this.caps
     if (q.core && q.core !== 'auto' && q.core !== caps.core) return false
     if (q.device && q.device !== 'auto' && q.device !== caps.device) return false
-    if (q.dtype === 'float64' && caps.f64 === false) return false
-    if ((q.dtype === 'float16' || q.dtype === 'half') && caps.f16 === false) return false
-    return true
+    const dtype = normalizeCanRunDType(q.dtype || 'float32')
+    if (dtype === 'float64' && caps.f64 === false) return false
+    if (dtype === 'float16' && caps.f16 === false) return false
+    if (q.shape != null && q.op == null) {
+      throw new Error('canRun shape queries require an op')
+    }
+    if (q.op == null) return true
+    if (!this._core || typeof this._core.canRunOp !== 'function') {
+      throw new Error('canRun op/shape queries require core support')
+    }
+    const op = normalizeCanRunOp(q.op)
+    const shape = normalizeCanRunShape(op, q.shape, q.shapes)
+    const dtypeId = this._core.dtypeIds && this._core.dtypeIds[dtype]
+    if (dtypeId == null || dtypeId < 0) return false
+    const deviceId = canRunDeviceId(this._core, q.device || caps.device || 'auto')
+    const rc = this._core.canRunOp(deviceId, op, dtypeId, shape)
+    if (rc < 0) {
+      throw new Error('canRun cannot prove this op/shape query')
+    }
+    return rc === 1
   }
 
   async dispose() {
@@ -99,6 +113,71 @@ class PolyRuntime {
     if (this._core && this._core.destroy) this._core.destroy()
     this._core = null
   }
+}
+
+function normalizeCanRunDType(dtype) {
+  if (dtype == null) return 'float32'
+  const d = String(dtype).toLowerCase()
+  if (d === 'half') return 'float16'
+  if (d === 'double') return 'float64'
+  return d
+}
+
+function normalizeCanRunOp(op) {
+  const raw = String(op)
+  const s = raw.replace(/[A-Z]/g, c => '_' + c.toLowerCase()).replace(/-/g, '_').toLowerCase()
+  if (s === 'reduce_sum') return 'reduce_sum'
+  if (s === 'triangularsolve') return 'triangular_solve'
+  return s
+}
+
+function normalizeShapeArray(shape, label) {
+  if (!Array.isArray(shape)) throw new TypeError(`canRun ${label} must be an array`)
+  return shape.map(x => {
+    const v = Number(x)
+    if (!Number.isSafeInteger(v) || v < 0) {
+      throw new RangeError(`canRun ${label} contains invalid dimension ${x}`)
+    }
+    return v
+  })
+}
+
+function normalizeCanRunShape(op, shape, shapes) {
+  if (shapes != null) {
+    if (!Array.isArray(shapes) || shapes.length === 0) {
+      throw new TypeError('canRun shapes must be a non-empty array of shapes')
+    }
+    const ss = shapes.map((s, i) => normalizeShapeArray(s, `shapes[${i}]`))
+    if (op === 'matmul' || op === 'dot') {
+      if (ss.length < 2 || ss[0].length < 2 || ss[1].length < 2) {
+        throw new Error('canRun matmul shapes must be [[m,k],[k,n]]')
+      }
+      const a = ss[0], b = ss[1]
+      return [a[a.length - 2], a[a.length - 1], b[b.length - 1]]
+    }
+    if (op === 'triangular_solve' || op === 'solve' || op === 'lstsq') {
+      if (ss.length < 2 || ss[0].length < 2 || ss[1].length < 1) {
+        throw new Error(`canRun ${op} shapes must be [matrixShape, rhsShape]`)
+      }
+      const a = ss[0], b = ss[1]
+      const rhs = b.length >= 2 ? b[b.length - 1] : null
+      return rhs == null ? [a[a.length - 2], a[a.length - 1]] : [a[a.length - 2], a[a.length - 1], rhs]
+    }
+    return ss[0]
+  }
+  if (shape == null) throw new Error('canRun op queries require shape or shapes')
+  return normalizeShapeArray(shape, 'shape')
+}
+
+function canRunDeviceId(core, device) {
+  const name = device || 'auto'
+  if (core.deviceIds && Object.prototype.hasOwnProperty.call(core.deviceIds, name)) {
+    return core.deviceIds[name]
+  }
+  if (core.ffi && typeof core.ffi.poly_device_by_name === 'function') {
+    return core.ffi.poly_device_by_name(name)
+  }
+  return 0
 }
 
 async function createRuntime(opts, resolveCore) {

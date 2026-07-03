@@ -260,6 +260,18 @@ async function createWasmCore(device) {
     }
   }
 
+  function canRunOp(device, op, dtypeId, shape) {
+    const dims = Array.from(shape || [])
+    const opPtr = allocString(op)
+    const shapePtr = dims.length > 0 ? writeInt64Array(dims) : 0
+    try {
+      return Module._poly_can_run_op(ctx, device, opPtr, dtypeId, shapePtr, dims.length)
+    } finally {
+      if (shapePtr) Module._free(shapePtr)
+      Module._free(opPtr)
+    }
+  }
+
   function writeOptimConfig(cfg) {
     const ptr = Module._malloc(32)
     const u8 = heapU8()
@@ -971,7 +983,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 10
+  const EXPECTED_ABI = 11
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -1453,6 +1465,7 @@ async function createWasmCore(device) {
     instance,
     int64: BigInt,
     readShape: readOutShape,
+    canRunOp,
     caps: {
       simd: true,
       f16: deviceName !== 'webgpu' || webgpuSupportsF16,

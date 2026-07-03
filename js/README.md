@@ -95,10 +95,11 @@ Creates a runtime with the selected core. Options:
 - `pg.jit(fn, opts?)` -- tinygrad-style first-run / capture / replay wrapper
 - `pg.compile(fn, sampleInputs, opts?)` -- explicit warm-and-capture wrapper
   over `pg.jit`, returning `{ run(inputs), stats(), dispose() }`
-- `pg.stats()` -- structured runtime/JIT counters currently available from the
-  JS wrapper
-- `pg.canRun({ core?, device?, dtype? })` -- conservative coarse capability
-  check; op/shape checks intentionally throw until backed by core support data
+- `pg.stats()` -- structured runtime/JIT counters from the JS wrapper and shared
+  C runtime
+- `pg.canRun({ core?, device?, dtype?, op?, shape?, shapes? })` -- advisory
+  capability check; op/shape queries build a representative graph and ask the
+  selected backend to lower it
 - `pg.core` -- `'native'` or `'wasm'`
 - `pg.device` -- resolved device, e.g. `'cpu'` for native or `'wasm'` for the WASM core
 - `pg.dispose()` -- release resources
@@ -157,9 +158,9 @@ console.log(compiled.stats())
 compiled.dispose()
 ```
 
-`stats()` currently reports wrapper-level timing and counts. It is intended for
-embedding and benchmark attribution; lower-level launch counts and transfer
-bytes will be added only when exposed by the shared C runtime.
+`stats()` reports wrapper-level timing/counts plus shared C runtime counters
+such as launch count, schedule/runtime cache hits and misses, transfer
+counts/bytes, cache sizes, and arena/scratch high-water marks.
 
 ## License
 
