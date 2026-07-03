@@ -3080,7 +3080,7 @@ PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (a_ndim < 2 || a_ndim > POLY_MAX_DIMS) return NULL;
   int64_t m = a_shape[a_ndim - 2];
   int64_t n = a_shape[a_ndim - 1];
-  if (m <= 0 || n <= 0 || m < n) return NULL;
+  if (m <= 0 || n <= 0) return NULL;
 
   bool vector_rhs = false;
   int64_t vector_out_shape[POLY_MAX_DIMS];
@@ -3094,6 +3094,18 @@ PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   a = poly_linalg_cast_compute(ctx, a, compute_dt);
   b = poly_linalg_cast_compute(ctx, b, compute_dt);
   if (!a || !b) return NULL;
+
+  if (m < n) {
+    PolyUOp *at = poly_transpose_last2(ctx, a);
+    if (!at) return NULL;
+    PolyUOp *q = NULL, *r = NULL;
+    if (poly_qr_ex(ctx, at, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r) return NULL;
+    PolyUOp *y = poly_triangular_solve(ctx, r, b, 1, 1, 0);
+    if (!y) return NULL;
+    PolyUOp *x = poly_dot(ctx, q, y);
+    if (!x) return NULL;
+    return vector_rhs ? poly_reshape(ctx, x, vector_out_shape, vector_out_ndim) : x;
+  }
 
   PolyUOp *q = NULL, *r = NULL;
   if (poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r) return NULL;

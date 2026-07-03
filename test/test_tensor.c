@@ -1325,9 +1325,42 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_lxbv_single[i], expect_lstsq_broadcast_vec[i], 5e-4f);
 
+  const int64_t wide_shape[] = {2, 3};
+  const int64_t wide_vec_shape[] = {2};
+  const int64_t wide_mat_shape[] = {2, 2};
+  float wide_a[] = {1, 2, 0, 0, 1, 1};
+  float wide_b_vec[] = {1, 2};
+  float wide_b_mat[] = {1, 3, 2, 4};
+  float expect_wide_vec[] = {-0.33333334f, 0.6666667f, 1.3333334f};
+  float expect_wide_mat[] = {
+      -0.33333334f, -0.33333334f,
+      0.6666667f, 1.6666666f,
+      1.3333334f, 2.3333333f,
+  };
+  PolyUOp *lwa = make_buf(ctx, wide_shape, 2);
+  PolyUOp *lwv = make_buf(ctx, wide_vec_shape, 1);
+  PolyUOp *lwxv = poly_lstsq(ctx, lwa, lwv);
+  ASSERT_NOT_NULL(lwxv);
+  float got_lwxv[3] = {0};
+  PolyUOp *lwide_vec_leaves[] = {base_buf(lwa), base_buf(lwv)};
+  float *lwide_vec_ld[] = {wide_a, wide_b_vec};
+  ASSERT_INT_EQ(realize_uop(ctx, lwxv, poly_buffer_f32(ctx, 3), got_lwxv, lwide_vec_leaves, lwide_vec_ld, 2), 0);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(got_lwxv[i], expect_wide_vec[i], 6e-4f);
+
+  PolyUOp *lwB = make_buf(ctx, wide_mat_shape, 2);
+  PolyUOp *lwxm = poly_lstsq(ctx, lwa, lwB);
+  ASSERT_NOT_NULL(lwxm);
+  float got_lwxm[6] = {0};
+  PolyUOp *lwide_mat_leaves[] = {base_buf(lwa), base_buf(lwB)};
+  float *lwide_mat_ld[] = {wide_a, wide_b_mat};
+  ASSERT_INT_EQ(realize_uop(ctx, lwxm, poly_buffer_f32(ctx, 6), got_lwxm, lwide_mat_leaves, lwide_mat_ld, 2), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_FLOAT_EQ(got_lwxm[i], expect_wide_mat[i], 8e-4f);
+
   PolyUOp *bad_a = make_buf(ctx, (int64_t[]){2, 3}, 2);
   ASSERT_TRUE(poly_solve(ctx, bad_a, b_m) == NULL);
-  ASSERT_TRUE(poly_lstsq(ctx, bad_a, b_v) == NULL);
+  ASSERT_TRUE(poly_lstsq(ctx, bad_a, lbv) == NULL);
 
   poly_ctx_destroy(ctx);
   PASS();

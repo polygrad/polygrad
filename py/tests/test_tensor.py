@@ -999,8 +999,38 @@ class TestMatmulAndLoss:
         assert got64.dtype == 'float64'
         np.testing.assert_allclose(got64.numpy(), np.linalg.lstsq(a64, b64, rcond=None)[0], rtol=1e-10, atol=1e-10)
 
+        wide = np.array([[1.0, 2.0, 0.0], [0.0, 1.0, 1.0]], dtype=np.float32)
+        wide_b_vec = np.array([1.0, 2.0], dtype=np.float32)
+        wide_b_mat = np.array([[1.0, 3.0], [2.0, 4.0]], dtype=np.float32)
+        got_wide_vec = Tensor(wide).lstsq(Tensor(wide_b_vec))
+        np.testing.assert_allclose(
+            got_wide_vec.numpy(),
+            np.linalg.lstsq(wide, wide_b_vec, rcond=None)[0],
+            rtol=3e-5,
+            atol=3e-5,
+        )
+        np.testing.assert_allclose(
+            got_wide_vec.numpy(),
+            torch.linalg.lstsq(torch.tensor(wide), torch.tensor(wide_b_vec)).solution.numpy(),
+            rtol=3e-5,
+            atol=3e-5,
+        )
+        got_wide_mat = Tensor(wide).lstsq(Tensor(wide_b_mat))
+        np.testing.assert_allclose(
+            got_wide_mat.numpy(),
+            np.linalg.lstsq(wide, wide_b_mat, rcond=None)[0],
+            rtol=4e-5,
+            atol=4e-5,
+        )
+        np.testing.assert_allclose(
+            got_wide_mat.numpy(),
+            torch.linalg.lstsq(torch.tensor(wide), torch.tensor(wide_b_mat)).solution.numpy(),
+            rtol=4e-5,
+            atol=4e-5,
+        )
+
         with pytest.raises(ValueError, match='cannot lstsq'):
-            Tensor(np.ones((2, 3), dtype=np.float32)).lstsq(Tensor(np.ones((2,), dtype=np.float32)))
+            Tensor(np.ones((2, 3), dtype=np.float32)).lstsq(Tensor(np.ones((3,), dtype=np.float32)))
 
     def test_cross_entropy_sparse_targets(self):
         logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])

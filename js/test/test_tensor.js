@@ -900,11 +900,24 @@ async function runTensorTests(pg) {
     assertShape(xbBroadcastVec.shape, [2, 2])
     assertClose(await xbBroadcastVec.toArray(), [1.0833334, 0.75, 1.0833334, 0.5], 6e-4)
 
+    const wide = [[1, 2, 0], [0, 1, 1]]
+    const wideVec = new Tensor(wide).lstsq(new Tensor([1, 2]))
+    assertShape(wideVec.shape, [3])
+    assertClose(await wideVec.toArray(), [-0.33333334, 0.6666667, 1.3333334], 8e-4)
+
+    const wideMat = new Tensor(wide).lstsq(new Tensor([[1, 3], [2, 4]]))
+    assertShape(wideMat.shape, [3, 2])
+    assertClose(
+      await wideMat.toArray(),
+      [-0.33333334, -0.33333334, 0.6666667, 1.6666666, 1.3333334, 2.3333333],
+      1e-3
+    )
+
     let ok = false
     try {
-      new Tensor([[1, 1, 1], [1, 1, 1]]).lstsq(new Tensor([1, 1]))
+      new Tensor([[1, 1, 1], [1, 1, 1]]).lstsq(new Tensor([1, 1, 1]))
     } catch (e) { ok = true }
-    assert(ok, 'expected lstsq to reject underdetermined A')
+    assert(ok, 'expected lstsq to reject incompatible RHS rows')
   })
 
   await test('crossEntropy with sparse targets', async () => {
