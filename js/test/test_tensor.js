@@ -751,6 +751,10 @@ async function runTensorTests(pg) {
         a: lowerBatch, b: bBatch, opts: {}, shape: [2, 3, 2],
         out: [1, 0.5, 2, 0.5, 2.5, 0.9375, 1, 0.6666666865, 1.75, 0.5833333135, 2.2249999046, 1.0083333254]
       },
+      {
+        a: lowerBatch, b: bVec, opts: {}, shape: [2, 3],
+        out: [1, 2, 2.5, 0.6666666865, 1.5833333731, 1.9083333015]
+      },
     ]
     for (const c of cases) {
       const x = new Tensor(c.a).triangularSolve(new Tensor(c.b), c.opts)
@@ -805,6 +809,10 @@ async function runTensorTests(pg) {
       const x = f.choleskySolve(new Tensor(bbVec), { upper })
       assertShape(x.shape, [2, 2])
       assertClose(await x.toArray(), [-0.0625, 0.625, -0.8888889, 3.3333333], 5e-4)
+
+      const xb = f.choleskySolve(new Tensor([1, 4]), { upper })
+      assertShape(xb.shape, [2, 2])
+      assertClose(await xb.toArray(), [-0.1875, 0.875, -1.1111112, 3.6666667], 6e-4)
     }
   })
 
@@ -830,6 +838,14 @@ async function runTensorTests(pg) {
     const xbVec = new Tensor(ab).solve(new Tensor(bbVec))
     assertShape(xbVec.shape, [2, 2])
     assertClose(await xbVec.toArray(), [-0.2, 1.4, 0.27272728, 1.1818182], 4e-4)
+
+    const xbBroadcastVec = new Tensor(ab).solve(new Tensor(bVec))
+    assertShape(xbBroadcastVec.shape, [2, 2])
+    assertClose(await xbBroadcastVec.toArray(), [-0.2, 1.4, 0, 1], 4e-4)
+
+    const xbSingletonMatrix = new Tensor(ab).solve(new Tensor([bMat]))
+    assertShape(xbSingletonMatrix.shape, [2, 2, 2])
+    assertClose(await xbSingletonMatrix.toArray(), [0, 0.4, 1, 1.2, 0.09090909, 0.36363637, 0.7272727, 0.9090909], 5e-4)
 
     let ok = false
     try {
@@ -860,6 +876,10 @@ async function runTensorTests(pg) {
     const xbVec = new Tensor(ab).lstsq(new Tensor(bbVec))
     assertShape(xbVec.shape, [2, 2])
     assertClose(await xbVec.toArray(), [1.0833334, 0.75, 1.3333334, 0.5], 6e-4)
+
+    const xbBroadcastVec = new Tensor(ab).lstsq(new Tensor(bVec))
+    assertShape(xbBroadcastVec.shape, [2, 2])
+    assertClose(await xbBroadcastVec.toArray(), [1.0833334, 0.75, 1.0833334, 0.5], 6e-4)
 
     let ok = false
     try {

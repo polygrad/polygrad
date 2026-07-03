@@ -1088,10 +1088,12 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
 
   float spd[] = {4, 2, 2, 5};
   float rhs_mat[] = {1, 2, 3, 4};
+  float b_vec[] = {1, 4};
   float expect_cholsolve[] = {-0.0625f, 0.125f, 0.625f, 0.75f};
   float spd_batch[] = {4, 2, 2, 5, 9, 3, 3, 2};
   float chol_rhs_batch_vec[] = {1, 3, 2, 4};
   float expect_cholsolve_batch_vec[] = {-0.0625f, 0.625f, -0.8888889f, 3.3333333f};
+  float expect_cholsolve_broadcast_vec[] = {-0.1875f, 0.875f, -1.1111112f, 3.6666667f};
 
   for (int upper = 0; upper <= 1; upper++) {
     PolyUOp *a = make_buf(ctx, shape2, 2);
@@ -1124,8 +1126,22 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
       ASSERT_FLOAT_EQ(got[i], expect_cholsolve_batch_vec[i], 4e-4f);
   }
 
+  for (int upper = 0; upper <= 1; upper++) {
+    PolyUOp *a = make_buf(ctx, batch_shape, 3);
+    PolyUOp *b = make_buf(ctx, vec_shape, 1);
+    PolyUOp *factor = poly_cholesky(ctx, a, upper);
+    ASSERT_NOT_NULL(factor);
+    PolyUOp *x = poly_cholesky_solve(ctx, factor, b, upper);
+    ASSERT_NOT_NULL(x);
+    float got[4] = {0};
+    PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
+    float *ld[] = {spd_batch, b_vec};
+    ASSERT_INT_EQ(realize_uop(ctx, x, poly_buffer_f32(ctx, 4), got, leaves, ld, 2), 0);
+    for (int i = 0; i < 4; i++)
+      ASSERT_FLOAT_EQ(got[i], expect_cholsolve_broadcast_vec[i], 5e-4f);
+  }
+
   float a2[] = {2, 1, 1, 3};
-  float b_vec[] = {1, 4};
   float expect_vec[] = {-0.2f, 1.4f};
   PolyUOp *a_vec = make_buf(ctx, shape2, 2);
   PolyUOp *b_v = make_buf(ctx, vec_shape, 1);
@@ -1178,6 +1194,54 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   ASSERT_INT_EQ(realize_uop(ctx, xbv, poly_buffer_f32(ctx, 4), got_batch_vec, batch_vec_leaves, batch_vec_ld, 2), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_batch_vec[i], expect_batch_vec[i], 4e-4f);
+
+  PolyUOp *bbv_single = make_buf(ctx, vec_shape, 1);
+  PolyUOp *xbv_single = poly_solve(ctx, ab, bbv_single);
+  ASSERT_NOT_NULL(xbv_single);
+  float expect_broadcast_vec[] = {-0.2f, 1.4f, 0.0f, 1.0f};
+  float got_broadcast_vec[4] = {0};
+  PolyUOp *broadcast_vec_leaves[] = {base_buf(ab), base_buf(bbv_single)};
+  float *broadcast_vec_ld[] = {a_batch, b_vec};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, xbv_single, poly_buffer_f32(ctx, 4), got_broadcast_vec, broadcast_vec_leaves, broadcast_vec_ld, 2),
+      0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_broadcast_vec[i], expect_broadcast_vec[i], 5e-4f);
+
+  const int64_t singleton_batch_shape[] = {1, 2, 2};
+  PolyUOp *bb_single_batch = make_buf(ctx, singleton_batch_shape, 3);
+  PolyUOp *xb_single_batch = poly_solve(ctx, ab, bb_single_batch);
+  ASSERT_NOT_NULL(xb_single_batch);
+  float expect_single_batch[] = {
+      0, 0.4f, 1, 1.2f,
+      0.09090909f, 0.36363637f, 0.7272727f, 0.9090909f,
+  };
+  float got_single_batch[8] = {0};
+  PolyUOp *single_batch_leaves[] = {base_buf(ab), base_buf(bb_single_batch)};
+  float *single_batch_ld[] = {a_batch, rhs_mat};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, xb_single_batch, poly_buffer_f32(ctx, 8), got_single_batch, single_batch_leaves, single_batch_ld, 2),
+      0
+  );
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(got_single_batch[i], expect_single_batch[i], 5e-4f);
+
+  float tri_batch[] = {2, 0, 1, 3, 3, 0, 1, 4};
+  float expect_tri_broadcast_vec[] = {0.5f, 1.1666667f, 0.33333334f, 0.9166667f};
+  PolyUOp *tri_a = make_buf(ctx, batch_shape, 3);
+  PolyUOp *tri_b = make_buf(ctx, vec_shape, 1);
+  PolyUOp *tri_x = poly_triangular_solve(ctx, tri_a, tri_b, 0, 0, 0);
+  ASSERT_NOT_NULL(tri_x);
+  float got_tri_broadcast_vec[4] = {0};
+  PolyUOp *tri_leaves[] = {base_buf(tri_a), base_buf(tri_b)};
+  float *tri_ld[] = {tri_batch, b_vec};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, tri_x, poly_buffer_f32(ctx, 4), got_tri_broadcast_vec, tri_leaves, tri_ld, 2),
+      0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_tri_broadcast_vec[i], expect_tri_broadcast_vec[i], 5e-4f);
 
   const int64_t tall_shape[] = {3, 2};
   const int64_t tall_vec_shape[] = {3};
@@ -1246,6 +1310,20 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   ASSERT_INT_EQ(realize_uop(ctx, lxbv, poly_buffer_f32(ctx, 4), got_lxbv, lbatch_vec_leaves, lbatch_vec_ld, 2), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_lxbv[i], expect_lstsq_batch_vec[i], 5e-4f);
+
+  PolyUOp *lbbv_single = make_buf(ctx, tall_vec_shape, 1);
+  PolyUOp *lxbv_single = poly_lstsq(ctx, lab, lbbv_single);
+  ASSERT_NOT_NULL(lxbv_single);
+  float expect_lstsq_broadcast_vec[] = {1.0833334f, 0.75f, 1.0833334f, 0.5f};
+  float got_lxbv_single[4] = {0};
+  PolyUOp *lbatch_broadcast_leaves[] = {base_buf(lab), base_buf(lbbv_single)};
+  float *lbatch_broadcast_ld[] = {tall_a_batch, tall_b_vec};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, lxbv_single, poly_buffer_f32(ctx, 4), got_lxbv_single, lbatch_broadcast_leaves, lbatch_broadcast_ld, 2),
+      0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_lxbv_single[i], expect_lstsq_broadcast_vec[i], 5e-4f);
 
   PolyUOp *bad_a = make_buf(ctx, (int64_t[]){2, 3}, 2);
   ASSERT_TRUE(poly_solve(ctx, bad_a, b_m) == NULL);

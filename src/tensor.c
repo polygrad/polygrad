@@ -2376,6 +2376,149 @@ static PolyUOp *poly_linalg_slice_last2(
   return poly_shrink(ctx, x, pairs, ndim);
 }
 
+static bool poly_linalg_broadcast_batch_shape(
+    const int64_t *a_shape,
+    int a_ndim,
+    const int64_t *b_shape,
+    int b_ndim,
+    int64_t *out_shape,
+    int *out_ndim
+) {
+  if (!a_shape || !b_shape || !out_shape || !out_ndim) return false;
+  if (a_ndim < 0 || b_ndim < 0 || a_ndim > POLY_MAX_DIMS || b_ndim > POLY_MAX_DIMS)
+    return false;
+  int nd = a_ndim > b_ndim ? a_ndim : b_ndim;
+  if (nd > POLY_MAX_DIMS) return false;
+  for (int i = 0; i < nd; i++) {
+    int ai = i - (nd - a_ndim);
+    int bi = i - (nd - b_ndim);
+    int64_t ad = ai >= 0 ? a_shape[ai] : 1;
+    int64_t bd = bi >= 0 ? b_shape[bi] : 1;
+    if (ad != bd && ad != 1 && bd != 1) return false;
+    out_shape[i] = ad > bd ? ad : bd;
+  }
+  *out_ndim = nd;
+  return true;
+}
+
+static PolyUOp *poly_linalg_broadcast_last(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *target_batch_shape,
+    int target_batch_ndim,
+    const int64_t *tail_shape,
+    int tail_ndim
+) {
+  if (!ctx || !x || !target_batch_shape || !tail_shape) return NULL;
+  if (target_batch_ndim < 0 || tail_ndim < 0 || target_batch_ndim + tail_ndim > POLY_MAX_DIMS)
+    return NULL;
+
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < tail_ndim) return NULL;
+  int batch_ndim = ndim - tail_ndim;
+  if (batch_ndim > target_batch_ndim) return NULL;
+  for (int i = 0; i < tail_ndim; i++)
+    if (shape[batch_ndim + i] != tail_shape[i]) return NULL;
+
+  int out_ndim = target_batch_ndim + tail_ndim;
+  int64_t view_shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int pad = target_batch_ndim - batch_ndim;
+  for (int i = 0; i < pad; i++)
+    view_shape[i] = 1;
+  for (int i = 0; i < batch_ndim; i++)
+    view_shape[pad + i] = shape[i];
+  for (int i = 0; i < tail_ndim; i++)
+    view_shape[target_batch_ndim + i] = tail_shape[i];
+  for (int i = 0; i < target_batch_ndim; i++)
+    out_shape[i] = target_batch_shape[i];
+  for (int i = 0; i < tail_ndim; i++)
+    out_shape[target_batch_ndim + i] = tail_shape[i];
+
+  PolyUOp *r = (pad > 0) ? poly_reshape(ctx, x, view_shape, out_ndim) : x;
+  if (!r) return NULL;
+  return poly_expand(ctx, r, out_shape, out_ndim);
+}
+
+static bool poly_linalg_prepare_system_inputs(
+    PolyCtx *ctx,
+    PolyUOp **a_io,
+    PolyUOp **b_io,
+    int64_t rhs_rows,
+    int64_t solution_rows,
+    bool *vector_rhs,
+    int64_t *vector_out_shape,
+    int *vector_out_ndim
+) {
+  if (!ctx || !a_io || !b_io || !*a_io || !*b_io || !vector_rhs || !vector_out_shape ||
+      !vector_out_ndim)
+    return false;
+
+  int64_t a_shape[POLY_MAX_DIMS], b_shape[POLY_MAX_DIMS];
+  int a_ndim = uop_shape(ctx, *a_io, a_shape);
+  int b_ndim = uop_shape(ctx, *b_io, b_shape);
+  if (a_ndim < 2 || b_ndim < 1 || a_ndim > POLY_MAX_DIMS || b_ndim > POLY_MAX_DIMS)
+    return false;
+  if (a_shape[a_ndim - 2] != rhs_rows || a_shape[a_ndim - 1] != solution_rows)
+    return false;
+
+  int a_batch_ndim = a_ndim - 2;
+  bool can_vector = b_shape[b_ndim - 1] == rhs_rows;
+  bool can_matrix = b_ndim >= 2 && b_shape[b_ndim - 2] == rhs_rows && b_shape[b_ndim - 1] > 0;
+  bool as_matrix = can_matrix && b_ndim >= a_ndim;
+  bool as_vector = can_vector && !as_matrix;
+  if (!as_vector && !as_matrix) {
+    if (can_matrix)
+      as_matrix = true;
+    else
+      return false;
+  }
+
+  int b_batch_ndim = as_vector ? b_ndim - 1 : b_ndim - 2;
+  int64_t batch_shape[POLY_MAX_DIMS];
+  int batch_ndim = 0;
+  if (!poly_linalg_broadcast_batch_shape(
+          a_shape, a_batch_ndim, b_shape, b_batch_ndim, batch_shape, &batch_ndim
+      ))
+    return false;
+  if (batch_ndim + 2 > POLY_MAX_DIMS) return false;
+
+  int64_t a_tail[2] = {rhs_rows, solution_rows};
+  PolyUOp *a_bc =
+      poly_linalg_broadcast_last(ctx, *a_io, batch_shape, batch_ndim, a_tail, 2);
+  if (!a_bc) return false;
+
+  int64_t nrhs = as_vector ? 1 : b_shape[b_ndim - 1];
+  int64_t b_tail_matrix[2] = {rhs_rows, nrhs};
+  PolyUOp *b_bc = NULL;
+  if (as_vector) {
+    int64_t b_tail_vector[1] = {rhs_rows};
+    b_bc = poly_linalg_broadcast_last(ctx, *b_io, batch_shape, batch_ndim, b_tail_vector, 1);
+    if (!b_bc) return false;
+    int64_t b_matrix_shape[POLY_MAX_DIMS];
+    for (int i = 0; i < batch_ndim; i++)
+      b_matrix_shape[i] = batch_shape[i];
+    b_matrix_shape[batch_ndim] = rhs_rows;
+    b_matrix_shape[batch_ndim + 1] = 1;
+    b_bc = poly_reshape(ctx, b_bc, b_matrix_shape, batch_ndim + 2);
+  } else {
+    b_bc = poly_linalg_broadcast_last(ctx, *b_io, batch_shape, batch_ndim, b_tail_matrix, 2);
+  }
+  if (!b_bc) return false;
+
+  *vector_rhs = as_vector;
+  *vector_out_ndim = 0;
+  if (as_vector) {
+    for (int i = 0; i < batch_ndim; i++)
+      vector_out_shape[i] = batch_shape[i];
+    vector_out_shape[batch_ndim] = solution_rows;
+    *vector_out_ndim = batch_ndim + 1;
+  }
+  *a_io = a_bc;
+  *b_io = b_bc;
+  return true;
+}
+
 PolyUOp *poly_triangular_solve(
     PolyCtx *ctx,
     PolyUOp *a,
@@ -2394,30 +2537,14 @@ PolyUOp *poly_triangular_solve(
   if (n <= 0 || a_shape[a_ndim - 2] != n) return NULL;
 
   bool vector_rhs = false;
-  int solve_ndim = a_ndim;
-  int64_t nrhs = 0;
-  if (b_ndim == a_ndim - 1) {
-    vector_rhs = true;
-    for (int i = 0; i < a_ndim - 2; i++)
-      if (b_shape[i] != a_shape[i]) return NULL;
-    if (b_shape[b_ndim - 1] != n) return NULL;
-    for (int i = 0; i < a_ndim - 2; i++)
-      solve_shape[i] = b_shape[i];
-    solve_shape[a_ndim - 2] = n;
-    solve_shape[a_ndim - 1] = 1;
-    nrhs = 1;
-    b = poly_reshape(ctx, b, solve_shape, solve_ndim);
-  } else if (b_ndim == a_ndim) {
-    for (int i = 0; i < a_ndim - 2; i++)
-      if (b_shape[i] != a_shape[i]) return NULL;
-    if (b_shape[a_ndim - 2] != n) return NULL;
-    for (int i = 0; i < a_ndim; i++)
-      solve_shape[i] = b_shape[i];
-    nrhs = b_shape[a_ndim - 1];
-  } else {
+  int64_t vector_out_shape[POLY_MAX_DIMS];
+  int vector_out_ndim = 0;
+  if (!poly_linalg_prepare_system_inputs(
+          ctx, &a, &b, n, n, &vector_rhs, vector_out_shape, &vector_out_ndim
+      ))
     return NULL;
-  }
-  if (nrhs <= 0) return NULL;
+  int solve_ndim = uop_shape(ctx, b, solve_shape);
+  if (solve_ndim < 2) return NULL;
 
   PolyDType compute_dt = poly_linalg_compute_dtype(a, b);
   a = poly_linalg_cast_compute(ctx, a, compute_dt);
@@ -2452,7 +2579,7 @@ PolyUOp *poly_triangular_solve(
     if (!x) return NULL;
   }
 
-  if (vector_rhs) return poly_reshape(ctx, x, b_shape, b_ndim);
+  if (vector_rhs) return poly_reshape(ctx, x, vector_out_shape, vector_out_ndim);
   return x;
 }
 
@@ -2917,49 +3044,6 @@ int poly_qr(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp **out_r) {
   return poly_qr_ex(ctx, x, POLY_QR_COMPLETE, out_q, out_r);
 }
 
-static PolyUOp *poly_linalg_prepare_rhs_matrix(
-    PolyCtx *ctx,
-    PolyUOp *b,
-    const int64_t *a_shape,
-    int a_ndim,
-    int64_t rhs_rows,
-    int64_t solution_rows,
-    bool *vector_rhs,
-    int64_t *vector_out_shape,
-    int *vector_out_ndim
-) {
-  if (!ctx || !b || !a_shape || !vector_rhs || !vector_out_shape || !vector_out_ndim) return NULL;
-  int64_t b_shape[POLY_MAX_DIMS];
-  int b_ndim = uop_shape(ctx, b, b_shape);
-  if (a_ndim < 2 || b_ndim < 1 || b_ndim > POLY_MAX_DIMS) return NULL;
-
-  *vector_rhs = false;
-  *vector_out_ndim = 0;
-  if (b_ndim == a_ndim - 1) {
-    for (int i = 0; i < a_ndim - 2; i++)
-      if (b_shape[i] != a_shape[i]) return NULL;
-    if (b_shape[b_ndim - 1] != rhs_rows) return NULL;
-
-    int64_t matrix_shape[POLY_MAX_DIMS];
-    for (int i = 0; i < a_ndim - 2; i++) {
-      matrix_shape[i] = a_shape[i];
-      vector_out_shape[i] = a_shape[i];
-    }
-    matrix_shape[a_ndim - 2] = rhs_rows;
-    matrix_shape[a_ndim - 1] = 1;
-    vector_out_shape[a_ndim - 2] = solution_rows;
-    *vector_out_ndim = a_ndim - 1;
-    *vector_rhs = true;
-    return poly_reshape(ctx, b, matrix_shape, a_ndim);
-  }
-
-  if (b_ndim != a_ndim) return NULL;
-  for (int i = 0; i < a_ndim - 2; i++)
-    if (b_shape[i] != a_shape[i]) return NULL;
-  if (b_shape[a_ndim - 2] != rhs_rows || b_shape[a_ndim - 1] <= 0) return NULL;
-  return b;
-}
-
 PolyUOp *poly_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!ctx || !a || !b) return NULL;
 
@@ -2969,15 +3053,16 @@ PolyUOp *poly_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t n = a_shape[a_ndim - 1];
   if (n <= 0 || a_shape[a_ndim - 2] != n) return NULL;
 
-  PolyUOp *q = NULL, *r = NULL;
-  if (poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r) return NULL;
   bool vector_rhs = false;
   int64_t vector_out_shape[POLY_MAX_DIMS];
   int vector_out_ndim = 0;
-  b = poly_linalg_prepare_rhs_matrix(
-      ctx, b, a_shape, a_ndim, n, n, &vector_rhs, vector_out_shape, &vector_out_ndim
-  );
-  if (!b) return NULL;
+  if (!poly_linalg_prepare_system_inputs(
+          ctx, &a, &b, n, n, &vector_rhs, vector_out_shape, &vector_out_ndim
+      ))
+    return NULL;
+
+  PolyUOp *q = NULL, *r = NULL;
+  if (poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r) return NULL;
   PolyUOp *qt = poly_transpose_last2(ctx, q);
   if (!qt) return NULL;
   PolyUOp *y = poly_dot(ctx, qt, b);
@@ -2997,6 +3082,14 @@ PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t n = a_shape[a_ndim - 1];
   if (m <= 0 || n <= 0 || m < n) return NULL;
 
+  bool vector_rhs = false;
+  int64_t vector_out_shape[POLY_MAX_DIMS];
+  int vector_out_ndim = 0;
+  if (!poly_linalg_prepare_system_inputs(
+          ctx, &a, &b, m, n, &vector_rhs, vector_out_shape, &vector_out_ndim
+      ))
+    return NULL;
+
   PolyDType compute_dt = poly_linalg_compute_dtype(a, b);
   a = poly_linalg_cast_compute(ctx, a, compute_dt);
   b = poly_linalg_cast_compute(ctx, b, compute_dt);
@@ -3004,13 +3097,6 @@ PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 
   PolyUOp *q = NULL, *r = NULL;
   if (poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r) return NULL;
-  bool vector_rhs = false;
-  int64_t vector_out_shape[POLY_MAX_DIMS];
-  int vector_out_ndim = 0;
-  b = poly_linalg_prepare_rhs_matrix(
-      ctx, b, a_shape, a_ndim, m, n, &vector_rhs, vector_out_shape, &vector_out_ndim
-  );
-  if (!b) return NULL;
   PolyUOp *qt = poly_transpose_last2(ctx, q);
   if (!qt) return NULL;
   PolyUOp *y = poly_dot(ctx, qt, b);

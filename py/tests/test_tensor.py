@@ -727,6 +727,7 @@ class TestMatmulAndLoss:
         b_mat = np.array([[2.0, 1.0], [7.0, 2.0], [9.0, 3.0]], dtype=np.float32)
         lower_batched = np.stack([lower, lower + np.eye(3, dtype=np.float32)], axis=0)
         b_batched = np.stack([b_mat, b_mat + 1.0], axis=0)
+        b_broadcast_vec = np.array([2.0, 7.0, 9.0], dtype=np.float32)
         cases = [
             (lower, b_vec, False, False, False),
             (lower, b_mat, False, False, False),
@@ -735,6 +736,7 @@ class TestMatmulAndLoss:
             (upper, b_mat, True, True, False),
             (lower + np.diag([3.0, 4.0, 5.0]).astype(np.float32), b_mat, False, False, True),
             (lower_batched, b_batched, False, False, False),
+            (lower_batched, b_broadcast_vec, False, False, False),
         ]
         for a, b, upper_flag, transpose_a, unit_diagonal in cases:
             eff_a = np.swapaxes(a, -1, -2) if transpose_a else a
@@ -751,7 +753,7 @@ class TestMatmulAndLoss:
                 transpose_a=transpose_a,
                 unit_diagonal=unit_diagonal,
             )
-            assert got.shape == b.shape
+            assert got.shape == expected.shape
             np.testing.assert_allclose(got.numpy(), expected, rtol=1e-5, atol=1e-5)
 
             if b.ndim >= 2:
@@ -834,6 +836,7 @@ class TestMatmulAndLoss:
         torch = pytest.importorskip('torch')
         a = np.array([[4.0, 2.0], [2.0, 5.0]], dtype=np.float32)
         b = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        b_vec = np.array([1.0, 4.0], dtype=np.float32)
         for upper in [False, True]:
             factor = Tensor(a).cholesky(upper=upper)
             got = factor.cholesky_solve(Tensor(b), upper=upper)
@@ -856,6 +859,14 @@ class TestMatmulAndLoss:
                 upper=upper,
             ).squeeze(-1).numpy()
             np.testing.assert_allclose(got.numpy(), torch_expected, rtol=1e-5, atol=1e-5)
+
+            got_broadcast = factor.cholesky_solve(Tensor(b_vec), upper=upper)
+            torch_broadcast = torch.cholesky_solve(
+                torch.tensor(b_vec).reshape(1, 2, 1).expand(2, 2, 1),
+                torch.linalg.cholesky(torch.tensor(ab), upper=upper),
+                upper=upper,
+            ).squeeze(-1).numpy()
+            np.testing.assert_allclose(got_broadcast.numpy(), torch_broadcast, rtol=1e-5, atol=1e-5)
 
     def test_solve_matches_numpy_torch_probe(self):
         torch = pytest.importorskip('torch')
@@ -897,6 +908,20 @@ class TestMatmulAndLoss:
             rtol=1e-5,
             atol=1e-5,
         )
+
+        got_broadcast_vec = Tensor(ab).solve(Tensor(b_vec))
+        expected_broadcast_vec = np.stack([np.linalg.solve(ab[i], b_vec) for i in range(2)])
+        np.testing.assert_allclose(got_broadcast_vec.numpy(), expected_broadcast_vec, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            got_broadcast_vec.numpy(),
+            torch.linalg.solve(torch.tensor(ab), torch.tensor(b_vec)).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        got_singleton_matrix = Tensor(ab).solve(Tensor(b_mat.reshape(1, 2, 2)))
+        expected_singleton_matrix = np.stack([np.linalg.solve(ab[i], b_mat) for i in range(2)])
+        np.testing.assert_allclose(got_singleton_matrix.numpy(), expected_singleton_matrix, rtol=1e-5, atol=1e-5)
 
         a64 = np.array([[3.0, 1.0], [1.0, 2.0]], dtype=np.float64)
         b64 = np.array([[4.0], [5.0]], dtype=np.float64)
@@ -947,6 +972,10 @@ class TestMatmulAndLoss:
             rtol=2e-5,
             atol=2e-5,
         )
+
+        got_broadcast_vec = Tensor(ab).lstsq(Tensor(b_vec))
+        expected_broadcast_vec = np.stack([np.linalg.lstsq(ab[i], b_vec, rcond=None)[0] for i in range(2)])
+        np.testing.assert_allclose(got_broadcast_vec.numpy(), expected_broadcast_vec, rtol=2e-5, atol=2e-5)
 
         a64 = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 7.0]], dtype=np.float64)
         b64 = np.array([1.0, 2.0, 4.0], dtype=np.float64)
