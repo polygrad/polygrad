@@ -878,6 +878,17 @@ async function runTensorTests(pg) {
     assertShape(xMat.shape, [2, 2])
     assertClose(await xMat.toArray(), [0, 0.4, 1, 1.2], 3e-4)
 
+    const pivotA = [[0, 2], [1, 3]]
+    const pivotBVec = [4, 5]
+    const pivotBMat = [[4, 1], [5, 2]]
+    const xpVec = new Tensor(pivotA).solve(new Tensor(pivotBVec))
+    assertShape(xpVec.shape, [2])
+    assertClose(await xpVec.toArray(), [-1, 2], 3e-4)
+
+    const xpMat = new Tensor(pivotA).solve(new Tensor(pivotBMat))
+    assertShape(xpMat.shape, [2, 2])
+    assertClose(await xpMat.toArray(), [-1, 0.5, 2, 0.5], 3e-4)
+
     const ab = [a, [[3, 1], [1, 4]]]
     const bb = [bMat, [[2, 3], [4, 5]]]
     const xb = new Tensor(ab).solve(new Tensor(bb))
@@ -888,6 +899,12 @@ async function runTensorTests(pg) {
     const xbVec = new Tensor(ab).solve(new Tensor(bbVec))
     assertShape(xbVec.shape, [2, 2])
     assertClose(await xbVec.toArray(), [-0.2, 1.4, 0.27272728, 1.1818182], 4e-4)
+
+    const pivotAB = [pivotA, [[3, 1], [0, 2]]]
+    const pivotBBVec = [pivotBVec, [7, 4]]
+    const xpbVec = new Tensor(pivotAB).solve(new Tensor(pivotBBVec))
+    assertShape(xpbVec.shape, [2, 2])
+    assertClose(await xpbVec.toArray(), [-1, 2, 1.6666667, 2], 4e-4)
 
     const xbBroadcastVec = new Tensor(ab).solve(new Tensor(bVec))
     assertShape(xbBroadcastVec.shape, [2, 2])

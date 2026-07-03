@@ -2356,6 +2356,15 @@ static PolyUOp *poly_linalg_col_mask(PolyCtx *ctx, int ndim, int64_t n, int col_
   return poly_linalg_row_mask(ctx, ndim, n, col_axis, col);
 }
 
+static PolyUOp *poly_linalg_slice_last2(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    int64_t row0,
+    int64_t row1,
+    int64_t col0,
+    int64_t col1
+);
+
 static PolyUOp *poly_linalg_position_mask(
     PolyCtx *ctx,
     int ndim,
@@ -2371,6 +2380,32 @@ static PolyUOp *poly_linalg_position_mask(
   int out_ndim = 0;
   if (!poly_broadcast_pair(ctx, &rm_bc, &cm_bc, out_shape, &out_ndim)) return NULL;
   return poly_alu2(ctx, POLY_OP_AND, rm_bc, cm_bc);
+}
+
+static PolyUOp *poly_linalg_onehot_pivot_mask(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    int64_t k
+) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, u, shape);
+  if (ndim < 2 || shape[ndim - 2] != shape[ndim - 1]) return NULL;
+  int64_t n = shape[ndim - 1];
+  if (k < 0 || k >= n) return NULL;
+
+  PolyUOp *best_abs = poly_abs(ctx, poly_linalg_slice_last2(ctx, u, k, k + 1, k, k + 1));
+  PolyUOp *pivot_mask = poly_linalg_row_mask(ctx, ndim, n, ndim - 2, k);
+  if (!best_abs || !pivot_mask) return NULL;
+
+  for (int64_t i = k + 1; i < n; i++) {
+    PolyUOp *val_i = poly_abs(ctx, poly_linalg_slice_last2(ctx, u, i, i + 1, k, k + 1));
+    PolyUOp *take_i = val_i ? poly_gt(ctx, val_i, best_abs) : NULL;
+    PolyUOp *row_i = poly_linalg_row_mask(ctx, ndim, n, ndim - 2, i);
+    pivot_mask = (take_i && row_i) ? poly_where_op(ctx, take_i, row_i, pivot_mask) : NULL;
+    best_abs = take_i ? poly_where_op(ctx, take_i, val_i, best_abs) : NULL;
+    if (!pivot_mask || !best_abs) return NULL;
+  }
+  return pivot_mask;
 }
 
 static PolyUOp *poly_linalg_slice_last2(
@@ -3195,6 +3230,67 @@ int poly_qr(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp **out_r) {
   return poly_qr_ex(ctx, x, POLY_QR_COMPLETE, out_q, out_r);
 }
 
+static PolyUOp *poly_lu_solve_prepared(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!ctx || !a || !b) return NULL;
+
+  int64_t a_shape[POLY_MAX_DIMS], b_shape[POLY_MAX_DIMS];
+  int a_ndim = uop_shape(ctx, a, a_shape);
+  int b_ndim = uop_shape(ctx, b, b_shape);
+  if (a_ndim < 2 || b_ndim != a_ndim || a_ndim > POLY_MAX_DIMS) return NULL;
+  int64_t n = a_shape[a_ndim - 1];
+  if (n <= 0 || a_shape[a_ndim - 2] != n) return NULL;
+  if (b_shape[b_ndim - 2] != n || b_shape[b_ndim - 1] <= 0) return NULL;
+  for (int i = 0; i < a_ndim - 2; i++)
+    if (a_shape[i] != b_shape[i]) return NULL;
+
+  PolyDType compute_dt = poly_linalg_compute_dtype(a, b);
+  PolyUOp *u = poly_linalg_cast_compute(ctx, a, compute_dt);
+  PolyUOp *rhs = poly_linalg_cast_compute(ctx, b, compute_dt);
+  PolyUOp *zero = poly_const_typed(ctx, compute_dt, 0.0);
+  if (!u || !rhs || !zero) return NULL;
+
+  int row_axis = a_ndim - 2;
+  int64_t nrhs = b_shape[b_ndim - 1];
+  for (int64_t k = 0; k < n; k++) {
+    PolyUOp *pivot_mask = poly_linalg_onehot_pivot_mask(ctx, u, k);
+    PolyUOp *k_mask = poly_linalg_row_mask(ctx, a_ndim, n, row_axis, k);
+    PolyUOp *u_k = poly_linalg_slice_last2(ctx, u, k, k + 1, 0, n);
+    PolyUOp *rhs_k = poly_linalg_slice_last2(ctx, rhs, k, k + 1, 0, nrhs);
+    PolyUOp *pivot_u =
+        pivot_mask ? poly_sum_reduce(ctx, poly_where_op(ctx, pivot_mask, u, zero), row_axis, 1)
+                   : NULL;
+    PolyUOp *pivot_rhs =
+        pivot_mask ? poly_sum_reduce(ctx, poly_where_op(ctx, pivot_mask, rhs, zero), row_axis, 1)
+                   : NULL;
+    if (!pivot_mask || !k_mask || !u_k || !rhs_k || !pivot_u || !pivot_rhs) return NULL;
+
+    u = poly_where_op(ctx, k_mask, pivot_u, poly_where_op(ctx, pivot_mask, u_k, u));
+    rhs = poly_where_op(ctx, k_mask, pivot_rhs, poly_where_op(ctx, pivot_mask, rhs_k, rhs));
+    if (!u || !rhs) return NULL;
+
+    u_k = poly_linalg_slice_last2(ctx, u, k, k + 1, 0, n);
+    rhs_k = poly_linalg_slice_last2(ctx, rhs, k, k + 1, 0, nrhs);
+    PolyUOp *pivot = poly_linalg_slice_last2(ctx, u, k, k + 1, k, k + 1);
+    if (!u_k || !rhs_k || !pivot) return NULL;
+
+    for (int64_t i = k + 1; i < n; i++) {
+      PolyUOp *i_mask = poly_linalg_row_mask(ctx, a_ndim, n, row_axis, i);
+      PolyUOp *u_i = poly_linalg_slice_last2(ctx, u, i, i + 1, 0, n);
+      PolyUOp *rhs_i = poly_linalg_slice_last2(ctx, rhs, i, i + 1, 0, nrhs);
+      PolyUOp *u_ik = poly_linalg_slice_last2(ctx, u, i, i + 1, k, k + 1);
+      PolyUOp *factor = u_ik ? poly_div(ctx, u_ik, pivot) : NULL;
+      PolyUOp *new_u_i = factor ? poly_sub(ctx, u_i, poly_mul(ctx, factor, u_k)) : NULL;
+      PolyUOp *new_rhs_i = factor ? poly_sub(ctx, rhs_i, poly_mul(ctx, factor, rhs_k)) : NULL;
+      if (!i_mask || !u_i || !rhs_i || !factor || !new_u_i || !new_rhs_i) return NULL;
+      u = poly_where_op(ctx, i_mask, new_u_i, u);
+      rhs = poly_where_op(ctx, i_mask, new_rhs_i, rhs);
+      if (!u || !rhs) return NULL;
+    }
+  }
+
+  return poly_triangular_solve(ctx, u, rhs, 1, 0, 0);
+}
+
 PolyUOp *poly_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   if (!ctx || !a || !b) return NULL;
 
@@ -3212,13 +3308,7 @@ PolyUOp *poly_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
       ))
     return NULL;
 
-  PolyUOp *q = NULL, *r = NULL;
-  if (poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r) != 0 || !q || !r) return NULL;
-  PolyUOp *qt = poly_transpose_last2(ctx, q);
-  if (!qt) return NULL;
-  PolyUOp *y = poly_dot(ctx, qt, b);
-  if (!y) return NULL;
-  PolyUOp *x = poly_triangular_solve(ctx, r, y, 1, 0, 0);
+  PolyUOp *x = poly_lu_solve_prepared(ctx, a, b);
   if (!x) return NULL;
   return vector_rhs ? poly_reshape(ctx, x, vector_out_shape, vector_out_ndim) : x;
 }

@@ -1166,6 +1166,63 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_mat[i], expect_mat[i], 3e-4f);
 
+  float pivot_a[] = {0, 2, 1, 3};
+  float pivot_b_vec[] = {4, 5};
+  float expect_pivot_vec[] = {-1, 2};
+  PolyUOp *pa_vec = make_buf(ctx, shape2, 2);
+  PolyUOp *pb_vec = make_buf(ctx, vec_shape, 1);
+  PolyUOp *px_vec = poly_solve(ctx, pa_vec, pb_vec);
+  ASSERT_NOT_NULL(px_vec);
+  float got_pivot_vec[2] = {0};
+  PolyUOp *pivot_vec_leaves[] = {base_buf(pa_vec), base_buf(pb_vec)};
+  float *pivot_vec_ld[] = {pivot_a, pivot_b_vec};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, px_vec, poly_buffer_f32(ctx, 2), got_pivot_vec, pivot_vec_leaves, pivot_vec_ld, 2),
+      0
+  );
+  for (int i = 0; i < 2; i++)
+    ASSERT_FLOAT_EQ(got_pivot_vec[i], expect_pivot_vec[i], 3e-4f);
+
+  float pivot_b_mat[] = {4, 1, 5, 2};
+  float expect_pivot_mat[] = {-1, 0.5f, 2, 0.5f};
+  PolyUOp *pa_mat = make_buf(ctx, shape2, 2);
+  PolyUOp *pb_mat = make_buf(ctx, shape2, 2);
+  PolyUOp *px_mat = poly_solve(ctx, pa_mat, pb_mat);
+  ASSERT_NOT_NULL(px_mat);
+  float got_pivot_mat[4] = {0};
+  PolyUOp *pivot_mat_leaves[] = {base_buf(pa_mat), base_buf(pb_mat)};
+  float *pivot_mat_ld[] = {pivot_a, pivot_b_mat};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, px_mat, poly_buffer_f32(ctx, 4), got_pivot_mat, pivot_mat_leaves, pivot_mat_ld, 2),
+      0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_pivot_mat[i], expect_pivot_mat[i], 3e-4f);
+
+  int f32_id = poly_dtype_id_by_name("float32");
+  ASSERT_TRUE(f32_id >= 0);
+  float public_a[] = {2, 1, 1, 3};
+  float public_b[] = {1, 4};
+  int64_t public_a_shape[] = {2, 2};
+  int64_t public_b_shape[] = {2};
+  PolyUOp *public_au = poly_buffer_from_host(ctx, public_a, sizeof(public_a), f32_id, public_a_shape, 2);
+  PolyUOp *public_bu = poly_buffer_from_host(ctx, public_b, sizeof(public_b), f32_id, public_b_shape, 1);
+  ASSERT_NOT_NULL(public_au);
+  ASSERT_NOT_NULL(public_bu);
+  PolyUOp *public_xu = poly_solve(ctx, public_au, public_bu);
+  ASSERT_NOT_NULL(public_xu);
+  PolyTensor *public_xt = poly_tensor_create(ctx, public_xu, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(public_xt);
+  PolyTensor *public_out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &public_xt, 1, &public_out), 0);
+  ASSERT_NOT_NULL(public_out);
+  const PolyUOp *public_buf = poly_uop_get_buffer_identity(poly_tensor_uop(public_out));
+  ASSERT_NOT_NULL(public_buf);
+  float public_got[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)public_buf, public_got, sizeof(public_got)), 0);
+  ASSERT_FLOAT_EQ(public_got[0], -0.2f, 3e-4f);
+  ASSERT_FLOAT_EQ(public_got[1], 1.4f, 3e-4f);
+
   float a_batch[] = {2, 1, 1, 3, 3, 1, 1, 4};
   float b_batch[] = {1, 2, 3, 4, 2, 3, 4, 5};
   float b_batch_vec[] = {1, 4, 2, 5};
@@ -1194,6 +1251,23 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   ASSERT_INT_EQ(realize_uop(ctx, xbv, poly_buffer_f32(ctx, 4), got_batch_vec, batch_vec_leaves, batch_vec_ld, 2), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(got_batch_vec[i], expect_batch_vec[i], 4e-4f);
+
+  float pivot_batch_a[] = {0, 2, 1, 3, 3, 1, 0, 2};
+  float pivot_batch_bv[] = {4, 5, 7, 4};
+  float expect_pivot_batch_vec[] = {-1, 2, 1.6666667f, 2};
+  PolyUOp *pab = make_buf(ctx, batch_shape, 3);
+  PolyUOp *pbbv = make_buf(ctx, shape2, 2);
+  PolyUOp *pxbv = poly_solve(ctx, pab, pbbv);
+  ASSERT_NOT_NULL(pxbv);
+  float got_pivot_batch_vec[4] = {0};
+  PolyUOp *pivot_batch_leaves[] = {base_buf(pab), base_buf(pbbv)};
+  float *pivot_batch_ld[] = {pivot_batch_a, pivot_batch_bv};
+  ASSERT_INT_EQ(
+      realize_uop(ctx, pxbv, poly_buffer_f32(ctx, 4), got_pivot_batch_vec, pivot_batch_leaves, pivot_batch_ld, 2),
+      0
+  );
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_pivot_batch_vec[i], expect_pivot_batch_vec[i], 5e-4f);
 
   PolyUOp *bbv_single = make_buf(ctx, vec_shape, 1);
   PolyUOp *xbv_single = poly_solve(ctx, ab, bbv_single);

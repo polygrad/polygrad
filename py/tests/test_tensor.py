@@ -946,6 +946,25 @@ class TestMatmulAndLoss:
             atol=1e-5,
         )
 
+        pivot_a = np.array([[0.0, 2.0], [1.0, 3.0]], dtype=np.float32)
+        pivot_b_vec = np.array([4.0, 5.0], dtype=np.float32)
+        pivot_b_mat = np.array([[4.0, 1.0], [5.0, 2.0]], dtype=np.float32)
+        got_pivot_vec = Tensor(pivot_a).solve(Tensor(pivot_b_vec))
+        np.testing.assert_allclose(got_pivot_vec.numpy(), np.linalg.solve(pivot_a, pivot_b_vec), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            got_pivot_vec.numpy(),
+            torch.linalg.solve(torch.tensor(pivot_a), torch.tensor(pivot_b_vec)).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        got_pivot_mat = Tensor(pivot_a).solve(Tensor(pivot_b_mat))
+        np.testing.assert_allclose(got_pivot_mat.numpy(), np.linalg.solve(pivot_a, pivot_b_mat), rtol=1e-5, atol=1e-5)
+
+        pivot3 = np.array([[0.0, 2.0, 1.0], [1.0, 0.0, 3.0], [4.0, 1.0, 8.0]], dtype=np.float32)
+        pivot3_b = np.array([3.0, 4.0, 13.0], dtype=np.float32)
+        got_pivot3 = Tensor(pivot3).solve(Tensor(pivot3_b))
+        np.testing.assert_allclose(got_pivot3.numpy(), np.linalg.solve(pivot3, pivot3_b), rtol=1e-5, atol=1e-5)
+
         ab = np.stack([a, a + np.eye(2, dtype=np.float32)], axis=0)
         bb = np.stack([b_mat, b_mat + 1.0], axis=0)
         got_batch = Tensor(ab).solve(Tensor(bb))
@@ -959,6 +978,18 @@ class TestMatmulAndLoss:
         np.testing.assert_allclose(
             got_batch_vec.numpy(),
             torch.linalg.solve(torch.tensor(ab), torch.tensor(bb_vec)).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        pivot_ab = np.stack([pivot_a, np.array([[3.0, 1.0], [0.0, 2.0]], dtype=np.float32)], axis=0)
+        pivot_bb_vec = np.stack([pivot_b_vec, np.array([7.0, 4.0], dtype=np.float32)], axis=0)
+        got_pivot_batch = Tensor(pivot_ab).solve(Tensor(pivot_bb_vec))
+        expected_pivot_batch = np.stack([np.linalg.solve(pivot_ab[i], pivot_bb_vec[i]) for i in range(2)])
+        np.testing.assert_allclose(got_pivot_batch.numpy(), expected_pivot_batch, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            got_pivot_batch.numpy(),
+            torch.linalg.solve(torch.tensor(pivot_ab), torch.tensor(pivot_bb_vec)).numpy(),
             rtol=1e-5,
             atol=1e-5,
         )
