@@ -1749,6 +1749,49 @@ static PolyUOp *rule_x86_isel_wide_load_lane_graph(PolyCtx *ctx, PolyUOp *u, con
   return poly_uop1(ctx, POLY_OP_LOAD, u->dtype, addr, poly_arg_none());
 }
 
+static int x86_compare_mask_lane_itemsize(PolyUOp *base) {
+  PolyX86Op op = 0;
+  if (!x86_ins_op(base, &op)) return 0;
+  switch (op) {
+  case POLY_X86_VCMPPS:
+  case POLY_X86_VCMPSD:
+  case POLY_X86_VCMPPD:
+  case POLY_X86_VPCMPGTB:
+  case POLY_X86_VPCMPGTW:
+  case POLY_X86_VPCMPGTD:
+  case POLY_X86_VPCMPGTQ:
+  case POLY_X86_VPCMPEQB:
+  case POLY_X86_VPCMPEQW:
+  case POLY_X86_VPCMPEQD:
+  case POLY_X86_VPCMPEQQ:
+    break;
+  default:
+    return 0;
+  }
+  if (base->n_src < 1 || !base->src[0]) return 0;
+  int item = x86_dtype_itemsize(base->src[0]->dtype);
+  return item > 0 ? item : 0;
+}
+
+static PolyDType x86_uint_dtype_for_itemsize(int item) {
+  return item <= 1 ? POLY_UINT8 : item == 2 ? POLY_UINT16 : item == 4 ? POLY_UINT32 : POLY_UINT64;
+}
+
+static PolyUOp *x86_extract_compare_mask_bool_lane(PolyCtx *ctx, PolyUOp *base, int lane) {
+  int item = x86_compare_mask_lane_itemsize(base);
+  if (item <= 1) return NULL;
+  PolyX86Op op = item == 2 ? POLY_X86_VPEXTRW : item == 4 ? POLY_X86_VPEXTRD : POLY_X86_VPEXTRQ;
+  PolyDType idt = x86_uint_dtype_for_itemsize(item);
+  PolyUOp *srcs[2] = {base, x86_const_i(ctx, POLY_UINT8, lane)};
+  PolyUOp *bits = x86_ins(ctx, op, idt, srcs, 2, x86_graph_vreg(idt, false));
+  PolyUOp *one = x86_const_i(ctx, idt, 1);
+  PolyUOp *one_imm = x86_imm_for_const(ctx, one);
+  if (!one_imm) return NULL;
+  PolyUOp *and_srcs[2] = {bits, one_imm};
+  PolyUOp *one_bit = x86_ins(ctx, POLY_X86_ANDi, idt, and_srcs, 2, x86_graph_vreg(idt, false));
+  return poly_uop1(ctx, POLY_OP_NOOP, POLY_BOOL, one_bit, poly_arg_none());
+}
+
 static PolyUOp *rule_x86_isel_vector_index_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || (u->op != POLY_OP_INDEX && u->op != POLY_OP_GEP)) return NULL;
@@ -1770,6 +1813,10 @@ static PolyUOp *rule_x86_isel_vector_index_graph(PolyCtx *ctx, PolyUOp *u, const
   PolyUOp *scalar_load =
       x86_graph_scalar_load_from_reg_vector_lane(ctx, base, u->dtype, (int)lane);
   if (scalar_load) return scalar_load;
+  if (poly_dtype_is_bool(poly_dtype_scalar(u->dtype))) {
+    PolyUOp *mask_lane = x86_extract_compare_mask_bool_lane(ctx, base, (int)lane);
+    if (mask_lane) return mask_lane;
+  }
   PolyX86Op op = x86_is_float_dtype(u->dtype) ? POLY_X86_VPSRLDQ
                 : x86_dtype_itemsize(u->dtype) == 1 ? POLY_X86_VPEXTRB
                 : x86_dtype_itemsize(u->dtype) == 2 ? POLY_X86_VPEXTRW
@@ -2275,11 +2322,27 @@ static PolyUOp *x86_graph_materialize_scalar_int_const(PolyCtx *ctx, PolyUOp *u)
   return x86_ins(ctx, op, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
 }
 
+static PolyUOp *x86_graph_materialize_cmp_lhs(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  u = x86_graph_materialize_scalar_int_const(ctx, u);
+  if (!u) return NULL;
+  if (u->op != POLY_OP_LOAD) return u;
+  if (u->n_src != 1 || !x86_graph_load_dtype_supported(u->dtype)) return NULL;
+  PolyUOp *addr[4];
+  if (x86_graph_fold_address(ctx, u->src[0], addr) != 0) return NULL;
+  return x86_ins(
+      ctx, x86_mov_op_for_dtype(u->dtype, false), u->dtype, addr, 4,
+      x86_graph_vreg(u->dtype, false)
+  );
+}
+
 static PolyUOp *x86_graph_flag_compare(PolyCtx *ctx, PolyUOp *mask) {
   if (!ctx || !mask || !x86_op_is_comparison(mask->op) || mask->n_src != 2) return NULL;
-  PolyDType lhs_dt = mask->src[0]->dtype;
+  PolyUOp *lhs = x86_graph_materialize_cmp_lhs(ctx, mask->src[0]);
+  if (!lhs) return NULL;
+  PolyDType lhs_dt = lhs->dtype;
   PolyX86Op cmp_op = 0;
-  PolyUOp *srcs[2] = {mask->src[0], mask->src[1]};
+  PolyUOp *srcs[2] = {lhs, mask->src[1]};
   if (x86_is_float_dtype(lhs_dt)) {
     cmp_op = x86_dtype_is_float_bits(lhs_dt, 64) ? POLY_X86_VUCOMISD : POLY_X86_VUCOMISS;
   } else {

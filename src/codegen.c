@@ -7275,6 +7275,14 @@ static bool is_invalid_const_codegen(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST && u->arg.kind == POLY_ARG_INVALID;
 }
 
+static bool uop_tree_contains_invalid_const_codegen(PolyUOp *u) {
+  if (!u) return false;
+  if (is_invalid_const_codegen(u)) return true;
+  for (int i = 0; i < u->n_src; i++)
+    if (uop_tree_contains_invalid_const_codegen(u->src[i])) return true;
+  return false;
+}
+
 static bool match_invalid_gate_expr(
     PolyCtx *ctx,
     PolyUOp *u,
@@ -7475,6 +7483,55 @@ static PolyUOp *rule_index_invalid_gate_to_valid(
   return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, 3);
 }
 
+static PolyUOp *rule_where_branch_given_gate(
+    PolyCtx *ctx,
+    PolyUOp *w,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!w || w->op != POLY_OP_WHERE || w->n_src != 3) return NULL;
+
+  PolyUOp *new_true = w->src[1];
+  PolyUOp *new_false = w->src[2];
+  bool changed = false;
+
+  /* tinygrad's symbolic valid simplification (`uop_given_valid`) removes
+   * Invalid-bearing index expressions once the surrounding gate proves the
+   * branch. This catches value-producing index kernels such as gather's
+   * intermediate offset program, where the Invalid is not inside an INDEX
+   * address and therefore rule_index_invalid_gate_to_valid cannot see it. */
+  if (uop_tree_contains_invalid_const_codegen(new_true)) {
+    PolyUOp *memo_old[256], *memo_new[256];
+    int memo_n = 0;
+    PolyUOp *simplified = simplify_index_expr_given_gate(
+        ctx, new_true, w->src[0], memo_old, memo_new, &memo_n, 256
+    );
+    if (simplified != new_true) {
+      new_true = simplified;
+      changed = true;
+    }
+  }
+
+  if (uop_tree_contains_invalid_const_codegen(new_false)) {
+    PolyUOp *true_uop = poly_const_like_bool(ctx, w->src[0], true);
+    PolyUOp *not_gate =
+        poly_uop2(ctx, POLY_OP_CMPNE, w->src[0]->dtype, w->src[0], true_uop, poly_arg_none());
+    PolyUOp *memo_old[256], *memo_new[256];
+    int memo_n = 0;
+    PolyUOp *simplified = simplify_index_expr_given_gate(
+        ctx, new_false, not_gate, memo_old, memo_new, &memo_n, 256
+    );
+    if (simplified != new_false) {
+      new_false = simplified;
+      changed = true;
+    }
+  }
+
+  if (!changed) return NULL;
+  PolyUOp *new_srcs[3] = {w->src[0], new_true, new_false};
+  return rebuild_preserve_tag(ctx, w, w->dtype, new_srcs, 3);
+}
+
 static bool is_true_const_codegen(PolyUOp *u) {
   return u && u->op == POLY_OP_CONST &&
          ((u->arg.kind == POLY_ARG_BOOL && u->arg.b) ||
@@ -7638,6 +7695,7 @@ static PolyPatternMatcher *poly_pm_post_index_lower(void) {
        rule_index_invalid_gate_to_valid},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
        rule_index_gate_selects_where_branch},
+      {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_branch_given_gate},
       {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_canonicalize_and_valid_bounds},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load_rev},
@@ -7645,7 +7703,8 @@ static PolyPatternMatcher *poly_pm_post_index_lower(void) {
   };
   /* Match tinygrad's post-index cleanup shape: lower dtype, push GEP, then only
    * the checked load/store indexing cleanup needed for Invalid-carrying indexes. */
-  PolyPatternMatcher *pm_indexing = poly_pm_new(indexing_rules, 6);
+  PolyPatternMatcher *pm_indexing =
+      poly_pm_new(indexing_rules, (int)(sizeof(indexing_rules) / sizeof(indexing_rules[0])));
   PolyPatternMatcher *base = poly_pm_concat(poly_pm_lower_index_dtype(), poly_pm_gep_pushing());
   g_pm_post_index_lower = poly_pm_concat(base, pm_indexing);
   poly_pm_destroy(base);

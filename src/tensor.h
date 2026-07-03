@@ -266,6 +266,7 @@ PolyUOp *poly_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id);
 PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal);
 PolyUOp *poly_cholesky(PolyCtx *ctx, PolyUOp *x, int upper);
+PolyUOp *poly_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper);
 PolyUOp *poly_triangular_solve(
     PolyCtx *ctx,
     PolyUOp *a,
@@ -284,7 +285,13 @@ PolyUOp *poly_var_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim, int co
 PolyUOp *poly_logsumexp(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim);
 
 PolyUOp *poly_dot(PolyCtx *ctx, PolyUOp *x, PolyUOp *w);
+#define POLY_QR_COMPLETE 0
+#define POLY_QR_REDUCED 1
+#define POLY_QR_R_ONLY 2
 int poly_qr(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp **out_r);
+int poly_qr_ex(PolyCtx *ctx, PolyUOp *x, int mode, PolyUOp **out_q, PolyUOp **out_r);
+PolyUOp *poly_solve(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
+PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis);
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis);

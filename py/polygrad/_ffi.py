@@ -368,6 +368,9 @@ def _declare_signatures(lib):
     lib.poly_cholesky.restype = _ptr
     lib.poly_cholesky.argtypes = [_ptr, _ptr, ctypes.c_int]
 
+    lib.poly_cholesky_solve.restype = _ptr
+    lib.poly_cholesky_solve.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]
+
     lib.poly_triangular_solve.restype = _ptr
     lib.poly_triangular_solve.argtypes = [
         _ptr, _ptr, _ptr,
@@ -395,6 +398,15 @@ def _declare_signatures(lib):
 
     lib.poly_qr.restype = ctypes.c_int
     lib.poly_qr.argtypes = [_ptr, _ptr, _ptrp, _ptrp]
+
+    lib.poly_qr_ex.restype = ctypes.c_int
+    lib.poly_qr_ex.argtypes = [_ptr, _ptr, ctypes.c_int, _ptrp, _ptrp]
+
+    lib.poly_solve.restype = _ptr
+    lib.poly_solve.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_lstsq.restype = _ptr
+    lib.poly_lstsq.argtypes = [_ptr, _ptr, _ptr]
 
     lib.poly_cross_entropy.restype = _ptr
     lib.poly_cross_entropy.argtypes = [_ptr, _ptr, _ptr, ctypes.c_int]

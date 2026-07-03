@@ -465,7 +465,10 @@ class Tensor:
             _ensure_frontend_buffer_release_registered(self._ctx)
             if isinstance(data, (int, float)):
                 data = [data]
-            dt = _dtype_name(dtype, default='float32')
+            if dtype is None and isinstance(data, np.ndarray):
+                dt = _dtype_name(data.dtype, default='float32')
+            else:
+                dt = _dtype_name(dtype, default='float32')
             import_dt = dt
             post_cast_dt = None
             np_dt = _to_np_dtype(dt)
@@ -1674,16 +1677,69 @@ class Tensor:
     def matmul(self, other):
         return self.dot(other)
 
-    def qr(self):
+    def qr(self, mode='complete'):
+        mode_id = {'complete': 0, 'reduced': 1, 'r': 2}.get(mode)
+        if mode_id is None:
+            raise ValueError("qr mode must be 'complete', 'reduced', or 'r'")
         q = _ffi._ptr()
         r = _ffi._ptr()
-        rc = _ffi._lib.poly_qr(self._ctx, self.uop, ctypes.byref(q), ctypes.byref(r))
-        if rc != 0 or not q or not r:
-            raise RuntimeError('poly_qr failed')
+        rc = _ffi._lib.poly_qr_ex(self._ctx, self.uop, mode_id, ctypes.byref(q), ctypes.byref(r))
+        if rc != 0 or not r or (mode_id != 2 and not q):
+            raise RuntimeError('poly_qr_ex failed')
+        if mode_id == 2:
+            return self._make_result(r, _shape_from_uop(self._ctx, r), [self])
         return (
             self._make_result(q, _shape_from_uop(self._ctx, q), [self]),
             self._make_result(r, _shape_from_uop(self._ctx, r), [self]),
         )
+
+    def triangular_solve(self, b, upper=False, transpose_a=False, unit_diagonal=False):
+        if not isinstance(b, Tensor):
+            b = self._ensure_tensor(b)
+        uop = _ffi._lib.poly_triangular_solve(
+            self._ctx, self.uop, b.uop,
+            int(bool(upper)), int(bool(transpose_a)), int(bool(unit_diagonal))
+        )
+        if not uop:
+            raise ValueError(
+                f'cannot triangular_solve A.shape={self.shape} and b.shape={b.shape}'
+            )
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+
+    def solve_triangular(self, b, upper=False, transpose_a=False, unit_diagonal=False):
+        return self.triangular_solve(b, upper, transpose_a, unit_diagonal)
+
+    def cholesky(self, upper=False):
+        uop = _ffi._lib.poly_cholesky(self._ctx, self.uop, int(bool(upper)))
+        if not uop:
+            raise ValueError(f'cannot cholesky shape={self.shape}')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
+
+    def cholesky_solve(self, b, upper=False):
+        if not isinstance(b, Tensor):
+            b = self._ensure_tensor(b)
+        uop = _ffi._lib.poly_cholesky_solve(self._ctx, self.uop, b.uop, int(bool(upper)))
+        if not uop:
+            raise ValueError(
+                f'cannot cholesky_solve factor.shape={self.shape} and b.shape={b.shape}'
+            )
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+
+    def solve(self, b):
+        if not isinstance(b, Tensor):
+            b = self._ensure_tensor(b)
+        uop = _ffi._lib.poly_solve(self._ctx, self.uop, b.uop)
+        if not uop:
+            raise ValueError(f'cannot solve A.shape={self.shape} and b.shape={b.shape}')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+
+    def lstsq(self, b):
+        if not isinstance(b, Tensor):
+            b = self._ensure_tensor(b)
+        uop = _ffi._lib.poly_lstsq(self._ctx, self.uop, b.uop)
+        if not uop:
+            raise ValueError(f'cannot lstsq A.shape={self.shape} and b.shape={b.shape}')
+        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
 
     def __matmul__(self, other):
         return self.dot(other)

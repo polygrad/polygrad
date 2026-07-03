@@ -1443,12 +1443,90 @@ function createBoundTensorClass(runtime) {
 
     matmul(other) { return this.dot(other) }
 
-    qr() {
+    qr(opts) {
+      let mode = 'complete'
+      if (typeof opts === 'string') mode = opts
+      else if (opts && typeof opts.mode === 'string') mode = opts.mode
+      const modeId = mode === 'complete' ? 0 : mode === 'reduced' ? 1 : mode === 'r' ? 2 : -1
+      if (modeId < 0) throw new Error("qr mode must be 'complete', 'reduced', or 'r'")
       const { ffi } = this._rt._core
-      if (!ffi.poly_qr) throw new Error('poly_qr is required for Tensor.qr')
-      const pair = ffi.poly_qr(this._ctx, this._uop)
-      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('poly_qr failed')
+      if (!ffi.poly_qr_ex && !ffi.poly_qr) throw new Error('poly_qr_ex is required for Tensor.qr')
+      const qrFn = ffi.poly_qr_ex || ((ctx, uop, m) => {
+        if (m !== 0) throw new Error('poly_qr_ex is required for non-complete Tensor.qr modes')
+        return ffi.poly_qr(ctx, uop)
+      })
+      const pair = qrFn(this._ctx, this._uop, modeId)
+      if (!pair || pair.length !== 2 || !pair[1] || (modeId !== 2 && !pair[0])) throw new Error('poly_qr_ex failed')
+      if (modeId === 2) return this._makeResult(pair[1], [this])
       return [this._makeResult(pair[0], [this]), this._makeResult(pair[1], [this])]
+    }
+
+    triangularSolve(b, opts) {
+      if (!(b instanceof Tensor)) b = new Tensor(b)
+      opts = opts || {}
+      const { ffi } = this._rt._core
+      if (!ffi.poly_triangular_solve) {
+        throw new Error('poly_triangular_solve is required for Tensor.triangularSolve')
+      }
+      const uop = ffi.poly_triangular_solve(
+        this._ctx, this._uop, b._uop,
+        opts.upper ? 1 : 0,
+        opts.transposeA || opts.transpose_a ? 1 : 0,
+        opts.unitDiagonal || opts.unit_diagonal ? 1 : 0
+      )
+      if (!uop) {
+        throw new Error(`cannot triangularSolve A.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
+      }
+      return this._makeResult(uop, [this, b])
+    }
+
+    triangular_solve(b, upper, transpose_a, unit_diagonal) {
+      return this.triangularSolve(b, { upper, transpose_a, unit_diagonal })
+    }
+
+    solveTriangular(b, opts) { return this.triangularSolve(b, opts) }
+
+    cholesky(opts) {
+      opts = opts || {}
+      const { ffi } = this._rt._core
+      if (!ffi.poly_cholesky) throw new Error('poly_cholesky is required for Tensor.cholesky')
+      const uop = ffi.poly_cholesky(this._ctx, this._uop, opts.upper ? 1 : 0)
+      if (!uop) throw new Error(`cannot cholesky shape=${JSON.stringify(this.shape)}`)
+      return this._makeResult(uop, [this])
+    }
+
+    choleskySolve(b, opts) {
+      if (!(b instanceof Tensor)) b = new Tensor(b)
+      opts = opts || {}
+      const { ffi } = this._rt._core
+      if (!ffi.poly_cholesky_solve) {
+        throw new Error('poly_cholesky_solve is required for Tensor.choleskySolve')
+      }
+      const uop = ffi.poly_cholesky_solve(this._ctx, this._uop, b._uop, opts.upper ? 1 : 0)
+      if (!uop) {
+        throw new Error(`cannot choleskySolve factor.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
+      }
+      return this._makeResult(uop, [this, b])
+    }
+
+    cholesky_solve(b, upper) { return this.choleskySolve(b, { upper }) }
+
+    solve(b) {
+      if (!(b instanceof Tensor)) b = new Tensor(b)
+      const { ffi } = this._rt._core
+      if (!ffi.poly_solve) throw new Error('poly_solve is required for Tensor.solve')
+      const uop = ffi.poly_solve(this._ctx, this._uop, b._uop)
+      if (!uop) throw new Error(`cannot solve A.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
+      return this._makeResult(uop, [this, b])
+    }
+
+    lstsq(b) {
+      if (!(b instanceof Tensor)) b = new Tensor(b)
+      const { ffi } = this._rt._core
+      if (!ffi.poly_lstsq) throw new Error('poly_lstsq is required for Tensor.lstsq')
+      const uop = ffi.poly_lstsq(this._ctx, this._uop, b._uop)
+      if (!uop) throw new Error(`cannot lstsq A.shape=${JSON.stringify(this.shape)} and b.shape=${JSON.stringify(b.shape)}`)
+      return this._makeResult(uop, [this, b])
     }
 
     linear(weight, bias) {

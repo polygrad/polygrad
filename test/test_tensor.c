@@ -19,13 +19,13 @@
 #include "../src/tensor.h"
 #include "../src/codegen.h"
 
-/* Helper: realize a UOp into a float array */
+/* Helper: realize a UOp into a host array */
 
 static int realize_uop(
     PolyCtx *ctx,
     PolyUOp *val,
     PolyUOp *out_buf,
-    float *out_data,
+    void *out_data,
     PolyUOp **leaf_bufs,
     float **leaf_datas,
     int n_leaves
@@ -668,14 +668,18 @@ TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
 
   PolyUOp *out_vals = poly_buffer_f32(ctx, 10);
   PolyUOp *out_idx = poly_buffer_f32(ctx, 10);
+  PolyUOp *out_idx_i32 = poly_buffer(ctx, POLY_INT32, 10);
   float got_vals[10] = {0}, got_idx[10] = {0};
+  int32_t got_idx_i32[10] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, vals, out_vals, got_vals, leaves, ld, 1), 0);
   ASSERT_INT_EQ(realize_uop(ctx, poly_cast(ctx, idx, POLY_FLOAT32), out_idx, got_idx, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(realize_uop(ctx, idx, out_idx_i32, got_idx_i32, leaves, ld, 1), 0);
   const float exp_vals[] = {0.1f, 0.5f, 1.2f, 2.1f, 3.4f, 0.3f, 0.8f, 1.9f, 2.2f, 4.5f};
   const float exp_idx[] = {0, 1, 2, 4, 3, 2, 4, 1, 0, 3};
   for (int i = 0; i < 10; i++) {
     ASSERT_FLOAT_EQ(got_vals[i], exp_vals[i], 1e-5f);
     ASSERT_FLOAT_EQ(got_idx[i], exp_idx[i], 1e-5f);
+    ASSERT_INT_EQ(got_idx_i32[i], (int32_t)exp_idx[i]);
   }
 
   PolyUOp *top_vals = NULL, *top_idx = NULL;
@@ -684,14 +688,18 @@ TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
   ASSERT_NOT_NULL(top_idx);
   PolyUOp *out_top_vals = poly_buffer_f32(ctx, 4);
   PolyUOp *out_top_idx = poly_buffer_f32(ctx, 4);
+  PolyUOp *out_top_idx_i32 = poly_buffer(ctx, POLY_INT32, 4);
   float got_top_vals[4] = {0}, got_top_idx[4] = {0};
+  int32_t got_top_idx_i32[4] = {0};
   ASSERT_INT_EQ(realize_uop(ctx, top_vals, out_top_vals, got_top_vals, leaves, ld, 1), 0);
   ASSERT_INT_EQ(realize_uop(ctx, poly_cast(ctx, top_idx, POLY_FLOAT32), out_top_idx, got_top_idx, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(realize_uop(ctx, top_idx, out_top_idx_i32, got_top_idx_i32, leaves, ld, 1), 0);
   const float exp_top_vals[] = {3.4f, 2.1f, 4.5f, 2.2f};
   const float exp_top_idx[] = {3, 4, 3, 0};
   for (int i = 0; i < 4; i++) {
     ASSERT_FLOAT_EQ(got_top_vals[i], exp_top_vals[i], 1e-5f);
     ASSERT_FLOAT_EQ(got_top_idx[i], exp_top_idx[i], 1e-5f);
+    ASSERT_INT_EQ(got_top_idx_i32[i], (int32_t)exp_top_idx[i]);
   }
 
   poly_ctx_destroy(ctx);
@@ -827,6 +835,421 @@ TEST(pe, qr_e2e_matches_tinygrad_probe) {
       ASSERT_FLOAT_EQ(got[i], cases[c].data[i], 2e-3f);
     }
   }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, qr_reduced_and_r_modes_match_reference_shapes) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  const int64_t shape_tall[] = {3, 2};
+  const int64_t q_tall[] = {3, 2};
+  const int64_t r_tall[] = {2, 2};
+  float data_tall[] = {1, 2, 3, 4, 5, 6};
+
+  const int64_t shape_wide[] = {2, 3};
+  const int64_t q_wide[] = {2, 2};
+  const int64_t r_wide[] = {2, 3};
+  float data_wide[] = {1, 2, 3, 4, 5, 6};
+
+  const int64_t shape_batched_tall[] = {2, 3, 2};
+  const int64_t q_batched_tall[] = {2, 3, 2};
+  const int64_t r_batched_tall[] = {2, 2, 2};
+  float data_batched_tall[] = {1, 2, 3, 4, 5, 6, 2, 1, 0, 3, 4, 5};
+
+  struct {
+    const int64_t *shape;
+    int ndim;
+    const int64_t *q_shape;
+    const int64_t *r_shape;
+    float *data;
+    int64_t numel;
+  } cases[] = {
+      {shape_tall, 2, q_tall, r_tall, data_tall, 6},
+      {shape_wide, 2, q_wide, r_wide, data_wide, 6},
+      {shape_batched_tall, 3, q_batched_tall, r_batched_tall, data_batched_tall, 12},
+  };
+
+  for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+    PolyUOp *a = make_buf(ctx, cases[c].shape, cases[c].ndim);
+    PolyUOp *q = NULL, *r = NULL;
+    ASSERT_INT_EQ(poly_qr_ex(ctx, a, POLY_QR_REDUCED, &q, &r), 0);
+    ASSERT_NOT_NULL(q);
+    ASSERT_NOT_NULL(r);
+    for (int i = 0; i < cases[c].ndim; i++) {
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, q)[i], cases[c].q_shape[i]);
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[i], cases[c].r_shape[i]);
+    }
+
+    PolyUOp *recon = poly_dot(ctx, q, r);
+    PolyUOp *out_buf = poly_buffer_f32(ctx, cases[c].numel);
+    float got[32] = {0};
+    PolyUOp *leaves[] = {base_buf(a)};
+    float *ld[] = {cases[c].data};
+    ASSERT_INT_EQ(realize_uop(ctx, recon, out_buf, got, leaves, ld, 1), 0);
+    for (int64_t i = 0; i < cases[c].numel; i++) {
+      ASSERT_TRUE(isfinite(got[i]));
+      ASSERT_FLOAT_EQ(got[i], cases[c].data[i], 2e-3f);
+    }
+
+    PolyUOp *q_r_only = (PolyUOp *)(uintptr_t)1;
+    PolyUOp *r_only = NULL;
+    ASSERT_INT_EQ(poly_qr_ex(ctx, a, POLY_QR_R_ONLY, &q_r_only, &r_only), 0);
+    ASSERT_TRUE(q_r_only == NULL);
+    ASSERT_NOT_NULL(r_only);
+    for (int i = 0; i < cases[c].ndim; i++) {
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r_only)[i], cases[c].r_shape[i]);
+    }
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, triangular_solve_matches_numpy_torch_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  const int64_t a_shape[] = {3, 3};
+  const int64_t b_vec_shape[] = {3};
+  const int64_t b_mat_shape[] = {3, 2};
+  const int64_t a_batch_shape[] = {2, 3, 3};
+  const int64_t b_batch_shape[] = {2, 3, 2};
+
+  float lower[] = {2, 0, 0, 1, 3, 0, -2, 0.5f, 4};
+  float upper[] = {2, -1, 0.5f, 0, 3, 2, 0, 0, 4};
+  float lower_unit[] = {5, 0, 0, 1, 7, 0, -2, 0.5f, 9};
+  float b_vec[] = {2, 7, 9};
+  float b_mat[] = {2, 1, 7, 2, 9, 3};
+  float lower_batch[] = {
+      2, 0, 0, 1, 3, 0, -2, 0.5f, 4,
+      3, 0, 0, 1, 4, 0, -2, 0.5f, 5,
+  };
+  float b_batch[] = {
+      2, 1, 7, 2, 9, 3,
+      3, 2, 8, 3, 10, 4,
+  };
+
+  float expect_lower_vec[] = {1, 2, 2.5f};
+  float expect_lower_mat[] = {1, 0.5f, 2, 0.5f, 2.5f, 0.9375f};
+  float expect_upper_mat[] = {
+      0.8541666865f, 0.3958333433f, 0.8333333135f, 0.1666666716f, 2.25f, 0.75f};
+  float expect_lower_trans[] = {
+      2.2708332539f, 0.9791666865f, 1.9583333731f, 0.5416666865f, 2.25f, 0.75f};
+  float expect_upper_trans[] = {1, 0.5f, 2.6666667461f, 0.8333333135f, 0.7916666865f, 0.2708333433f};
+  float expect_lower_unit[] = {2, 1, 5, 1, 10.5f, 4.5f};
+  float expect_batch[] = {
+      1, 0.5f, 2, 0.5f, 2.5f, 0.9375f,
+      1, 0.6666666865f, 1.75f, 0.5833333135f, 2.2249999046f, 1.0083333254f,
+  };
+
+  struct {
+    const int64_t *a_shape;
+    int a_ndim;
+    float *a_data;
+    const int64_t *b_shape;
+    int b_ndim;
+    float *b_data;
+    int upper;
+    int transpose_a;
+    int unit_diagonal;
+    float *expected;
+    int64_t n_out;
+  } cases[] = {
+      {a_shape, 2, lower, b_vec_shape, 1, b_vec, 0, 0, 0, expect_lower_vec, 3},
+      {a_shape, 2, lower, b_mat_shape, 2, b_mat, 0, 0, 0, expect_lower_mat, 6},
+      {a_shape, 2, upper, b_mat_shape, 2, b_mat, 1, 0, 0, expect_upper_mat, 6},
+      {a_shape, 2, lower, b_mat_shape, 2, b_mat, 0, 1, 0, expect_lower_trans, 6},
+      {a_shape, 2, upper, b_mat_shape, 2, b_mat, 1, 1, 0, expect_upper_trans, 6},
+      {a_shape, 2, lower_unit, b_mat_shape, 2, b_mat, 0, 0, 1, expect_lower_unit, 6},
+      {a_batch_shape, 3, lower_batch, b_batch_shape, 3, b_batch, 0, 0, 0, expect_batch, 12},
+  };
+
+  for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+    PolyUOp *a = make_buf(ctx, cases[c].a_shape, cases[c].a_ndim);
+    PolyUOp *b = make_buf(ctx, cases[c].b_shape, cases[c].b_ndim);
+    PolyUOp *x = poly_triangular_solve(
+        ctx, a, b, cases[c].upper, cases[c].transpose_a, cases[c].unit_diagonal
+    );
+    ASSERT_NOT_NULL(x);
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, x), cases[c].b_ndim);
+    for (int i = 0; i < cases[c].b_ndim; i++)
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, x)[i], cases[c].b_shape[i]);
+
+    PolyUOp *out_buf = poly_buffer_f32(ctx, cases[c].n_out);
+    float got[32] = {0};
+    PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
+    float *ld[] = {cases[c].a_data, cases[c].b_data};
+    ASSERT_INT_EQ(realize_uop(ctx, x, out_buf, got, leaves, ld, 2), 0);
+    for (int64_t i = 0; i < cases[c].n_out; i++) {
+      ASSERT_TRUE(isfinite(got[i]));
+      ASSERT_FLOAT_EQ(got[i], cases[c].expected[i], 2e-4f);
+    }
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, cholesky_matches_numpy_torch_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  const int64_t shape1[] = {1, 1};
+  const int64_t shape2[] = {2, 2};
+  const int64_t shape3[] = {3, 3};
+  const int64_t shape4[] = {4, 4};
+  const int64_t shape_batch[] = {2, 2, 2};
+
+  float a1[] = {4};
+  float e1[] = {2};
+  float a2[] = {4, 2, 2, 5};
+  float e2[] = {2, 0, 1, 2};
+  float e2_upper[] = {2, 1, 0, 2};
+  float a3[] = {6, 2, 1, 2, 5, 2, 1, 2, 4};
+  float e3[] = {
+      2.4494898319f, 0, 0,
+      0.8164966106f, 2.0816659927f, 0,
+      0.4082483053f, 0.8006407619f, 1.7867029905f,
+  };
+  float a4_eye[] = {
+      4, 0, 0, 0,
+      0, 4, 0, 0,
+      0, 0, 4, 0,
+      0, 0, 0, 4,
+  };
+  float e4_eye[] = {
+      2, 0, 0, 0,
+      0, 2, 0, 0,
+      0, 0, 2, 0,
+      0, 0, 0, 2,
+  };
+  float abat[] = {4, 2, 2, 5, 9, 3, 3, 2};
+  float ebat[] = {2, 0, 1, 2, 3, 0, 1, 1};
+
+  struct {
+    const int64_t *shape;
+    int ndim;
+    float *data;
+    int upper;
+    float *expected;
+    int64_t n_out;
+  } cases[] = {
+      {shape1, 2, a1, 0, e1, 1},
+      {shape2, 2, a2, 0, e2, 4},
+      {shape2, 2, a2, 1, e2_upper, 4},
+      {shape3, 2, a3, 0, e3, 9},
+      {shape4, 2, a4_eye, 0, e4_eye, 16},
+      {shape_batch, 3, abat, 0, ebat, 8},
+  };
+
+  for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+    PolyUOp *a = make_buf(ctx, cases[c].shape, cases[c].ndim);
+    PolyUOp *l = poly_cholesky(ctx, a, cases[c].upper);
+    ASSERT_NOT_NULL(l);
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, l), cases[c].ndim);
+    for (int i = 0; i < cases[c].ndim; i++)
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, l)[i], cases[c].shape[i]);
+
+    PolyUOp *out_buf = poly_buffer_f32(ctx, cases[c].n_out);
+    float got[32] = {0};
+    PolyUOp *leaves[] = {base_buf(a)};
+    float *ld[] = {cases[c].data};
+    ASSERT_INT_EQ(realize_uop(ctx, l, out_buf, got, leaves, ld, 1), 0);
+    for (int64_t i = 0; i < cases[c].n_out; i++) {
+      ASSERT_TRUE(isfinite(got[i]));
+      ASSERT_FLOAT_EQ(got[i], cases[c].expected[i], 2e-4f);
+    }
+  }
+
+  PolyUOp *bad = make_buf(ctx, shape2, 2);
+  float dbad[] = {1, 2, 2, 1};
+  PolyUOp *bad_l = poly_cholesky(ctx, bad, 0);
+  ASSERT_NOT_NULL(bad_l);
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  float got_bad[4] = {0};
+  PolyUOp *bad_leaves[] = {base_buf(bad)};
+  float *bad_ld[] = {dbad};
+  ASSERT_INT_EQ(realize_uop(ctx, bad_l, out_buf, got_bad, bad_leaves, bad_ld, 1), 0);
+  bool has_nonfinite = false;
+  for (int i = 0; i < 4; i++)
+    if (!isfinite(got_bad[i])) has_nonfinite = true;
+  ASSERT_TRUE(has_nonfinite);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  const int64_t shape2[] = {2, 2};
+  const int64_t vec_shape[] = {2};
+  const int64_t batch_shape[] = {2, 2, 2};
+
+  float spd[] = {4, 2, 2, 5};
+  float rhs_mat[] = {1, 2, 3, 4};
+  float expect_cholsolve[] = {-0.0625f, 0.125f, 0.625f, 0.75f};
+  float spd_batch[] = {4, 2, 2, 5, 9, 3, 3, 2};
+  float chol_rhs_batch_vec[] = {1, 3, 2, 4};
+  float expect_cholsolve_batch_vec[] = {-0.0625f, 0.625f, -0.8888889f, 3.3333333f};
+
+  for (int upper = 0; upper <= 1; upper++) {
+    PolyUOp *a = make_buf(ctx, shape2, 2);
+    PolyUOp *b = make_buf(ctx, shape2, 2);
+    PolyUOp *factor = poly_cholesky(ctx, a, upper);
+    ASSERT_NOT_NULL(factor);
+    PolyUOp *x = poly_cholesky_solve(ctx, factor, b, upper);
+    ASSERT_NOT_NULL(x);
+    PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+    float got[4] = {0};
+    PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
+    float *ld[] = {spd, rhs_mat};
+    ASSERT_INT_EQ(realize_uop(ctx, x, out_buf, got, leaves, ld, 2), 0);
+    for (int i = 0; i < 4; i++)
+      ASSERT_FLOAT_EQ(got[i], expect_cholsolve[i], 2e-4f);
+  }
+
+  for (int upper = 0; upper <= 1; upper++) {
+    PolyUOp *a = make_buf(ctx, batch_shape, 3);
+    PolyUOp *b = make_buf(ctx, shape2, 2);
+    PolyUOp *factor = poly_cholesky(ctx, a, upper);
+    ASSERT_NOT_NULL(factor);
+    PolyUOp *x = poly_cholesky_solve(ctx, factor, b, upper);
+    ASSERT_NOT_NULL(x);
+    float got[4] = {0};
+    PolyUOp *leaves[] = {base_buf(a), base_buf(b)};
+    float *ld[] = {spd_batch, chol_rhs_batch_vec};
+    ASSERT_INT_EQ(realize_uop(ctx, x, poly_buffer_f32(ctx, 4), got, leaves, ld, 2), 0);
+    for (int i = 0; i < 4; i++)
+      ASSERT_FLOAT_EQ(got[i], expect_cholsolve_batch_vec[i], 4e-4f);
+  }
+
+  float a2[] = {2, 1, 1, 3};
+  float b_vec[] = {1, 4};
+  float expect_vec[] = {-0.2f, 1.4f};
+  PolyUOp *a_vec = make_buf(ctx, shape2, 2);
+  PolyUOp *b_v = make_buf(ctx, vec_shape, 1);
+  PolyUOp *x_vec = poly_solve(ctx, a_vec, b_v);
+  ASSERT_NOT_NULL(x_vec);
+  float got_vec[2] = {0};
+  PolyUOp *vec_leaves[] = {base_buf(a_vec), base_buf(b_v)};
+  float *vec_ld[] = {a2, b_vec};
+  ASSERT_INT_EQ(realize_uop(ctx, x_vec, poly_buffer_f32(ctx, 2), got_vec, vec_leaves, vec_ld, 2), 0);
+  for (int i = 0; i < 2; i++)
+    ASSERT_FLOAT_EQ(got_vec[i], expect_vec[i], 3e-4f);
+
+  float expect_mat[] = {0, 0.4f, 1, 1.2f};
+  PolyUOp *a_mat = make_buf(ctx, shape2, 2);
+  PolyUOp *b_m = make_buf(ctx, shape2, 2);
+  PolyUOp *x_mat = poly_solve(ctx, a_mat, b_m);
+  ASSERT_NOT_NULL(x_mat);
+  float got_mat[4] = {0};
+  PolyUOp *mat_leaves[] = {base_buf(a_mat), base_buf(b_m)};
+  float *mat_ld[] = {a2, rhs_mat};
+  ASSERT_INT_EQ(realize_uop(ctx, x_mat, poly_buffer_f32(ctx, 4), got_mat, mat_leaves, mat_ld, 2), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_mat[i], expect_mat[i], 3e-4f);
+
+  float a_batch[] = {2, 1, 1, 3, 3, 1, 1, 4};
+  float b_batch[] = {1, 2, 3, 4, 2, 3, 4, 5};
+  float b_batch_vec[] = {1, 4, 2, 5};
+  float expect_batch[] = {
+      0, 0.4f, 1, 1.2f,
+      0.3636363745f, 0.6363636255f, 0.9090909362f, 1.0909091234f,
+  };
+  float expect_batch_vec[] = {-0.2f, 1.4f, 0.27272728f, 1.1818182f};
+  PolyUOp *ab = make_buf(ctx, batch_shape, 3);
+  PolyUOp *bb = make_buf(ctx, batch_shape, 3);
+  PolyUOp *xb = poly_solve(ctx, ab, bb);
+  ASSERT_NOT_NULL(xb);
+  float got_batch[8] = {0};
+  PolyUOp *batch_leaves[] = {base_buf(ab), base_buf(bb)};
+  float *batch_ld[] = {a_batch, b_batch};
+  ASSERT_INT_EQ(realize_uop(ctx, xb, poly_buffer_f32(ctx, 8), got_batch, batch_leaves, batch_ld, 2), 0);
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(got_batch[i], expect_batch[i], 3e-4f);
+
+  PolyUOp *bbv = make_buf(ctx, shape2, 2);
+  PolyUOp *xbv = poly_solve(ctx, ab, bbv);
+  ASSERT_NOT_NULL(xbv);
+  float got_batch_vec[4] = {0};
+  PolyUOp *batch_vec_leaves[] = {base_buf(ab), base_buf(bbv)};
+  float *batch_vec_ld[] = {a_batch, b_batch_vec};
+  ASSERT_INT_EQ(realize_uop(ctx, xbv, poly_buffer_f32(ctx, 4), got_batch_vec, batch_vec_leaves, batch_vec_ld, 2), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_batch_vec[i], expect_batch_vec[i], 4e-4f);
+
+  const int64_t tall_shape[] = {3, 2};
+  const int64_t tall_vec_shape[] = {3};
+  const int64_t tall_mat_shape[] = {3, 2};
+  const int64_t tall_batch_shape[] = {2, 3, 2};
+  const int64_t tall_batch_rhs_shape[] = {2, 3, 2};
+  const int64_t tall_batch_vec_shape[] = {2, 3};
+  float tall_a[] = {1, 0, 1, 1, 1, 2};
+  float tall_b_vec[] = {1, 2, 2.5f};
+  float tall_b_mat[] = {1, 0.5f, 2, 1, 2.5f, 1.5f};
+  float tall_a_batch[] = {
+      1, 0, 1, 1, 1, 2,
+      1, 0, 1, 1.5f, 1, 3,
+  };
+  float tall_b_batch[] = {
+      1, 0.5f, 2, 1, 2.5f, 1.5f,
+      1.25f, 0.75f, 2.25f, 1.25f, 2.75f, 1.75f,
+  };
+  float tall_b_batch_vec[] = {1, 2, 2.5f, 1.25f, 2.25f, 2.75f};
+  float expect_lstsq_vec[] = {1.0833334f, 0.75f};
+  float expect_lstsq_mat[] = {1.0833334f, 0.5f, 0.75f, 0.5f};
+  float expect_lstsq_batch[] = {
+      1.0833334f, 0.5f, 0.75f, 0.5f,
+      1.3333334f, 0.75f, 0.5f, 0.33333334f,
+  };
+  float expect_lstsq_batch_vec[] = {1.0833334f, 0.75f, 1.3333334f, 0.5f};
+
+  PolyUOp *la = make_buf(ctx, tall_shape, 2);
+  PolyUOp *lbv = make_buf(ctx, tall_vec_shape, 1);
+  PolyUOp *lxv = poly_lstsq(ctx, la, lbv);
+  ASSERT_NOT_NULL(lxv);
+  float got_lxv[2] = {0};
+  PolyUOp *lvec_leaves[] = {base_buf(la), base_buf(lbv)};
+  float *lvec_ld[] = {tall_a, tall_b_vec};
+  ASSERT_INT_EQ(realize_uop(ctx, lxv, poly_buffer_f32(ctx, 2), got_lxv, lvec_leaves, lvec_ld, 2), 0);
+  for (int i = 0; i < 2; i++)
+    ASSERT_FLOAT_EQ(got_lxv[i], expect_lstsq_vec[i], 4e-4f);
+
+  PolyUOp *lB = make_buf(ctx, tall_mat_shape, 2);
+  PolyUOp *lxm = poly_lstsq(ctx, la, lB);
+  ASSERT_NOT_NULL(lxm);
+  float got_lxm[4] = {0};
+  PolyUOp *lmat_leaves[] = {base_buf(la), base_buf(lB)};
+  float *lmat_ld[] = {tall_a, tall_b_mat};
+  ASSERT_INT_EQ(realize_uop(ctx, lxm, poly_buffer_f32(ctx, 4), got_lxm, lmat_leaves, lmat_ld, 2), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_lxm[i], expect_lstsq_mat[i], 4e-4f);
+
+  PolyUOp *lab = make_buf(ctx, tall_batch_shape, 3);
+  PolyUOp *lbb = make_buf(ctx, tall_batch_rhs_shape, 3);
+  PolyUOp *lxb = poly_lstsq(ctx, lab, lbb);
+  ASSERT_NOT_NULL(lxb);
+  float got_lxb[8] = {0};
+  PolyUOp *lbatch_leaves[] = {base_buf(lab), base_buf(lbb)};
+  float *lbatch_ld[] = {tall_a_batch, tall_b_batch};
+  ASSERT_INT_EQ(realize_uop(ctx, lxb, poly_buffer_f32(ctx, 8), got_lxb, lbatch_leaves, lbatch_ld, 2), 0);
+  for (int i = 0; i < 8; i++)
+    ASSERT_FLOAT_EQ(got_lxb[i], expect_lstsq_batch[i], 5e-4f);
+
+  PolyUOp *lbbv = make_buf(ctx, tall_batch_vec_shape, 2);
+  PolyUOp *lxbv = poly_lstsq(ctx, lab, lbbv);
+  ASSERT_NOT_NULL(lxbv);
+  float got_lxbv[4] = {0};
+  PolyUOp *lbatch_vec_leaves[] = {base_buf(lab), base_buf(lbbv)};
+  float *lbatch_vec_ld[] = {tall_a_batch, tall_b_batch_vec};
+  ASSERT_INT_EQ(realize_uop(ctx, lxbv, poly_buffer_f32(ctx, 4), got_lxbv, lbatch_vec_leaves, lbatch_vec_ld, 2), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_lxbv[i], expect_lstsq_batch_vec[i], 5e-4f);
+
+  PolyUOp *bad_a = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  ASSERT_TRUE(poly_solve(ctx, bad_a, b_m) == NULL);
+  ASSERT_TRUE(poly_lstsq(ctx, bad_a, b_v) == NULL);
 
   poly_ctx_destroy(ctx);
   PASS();

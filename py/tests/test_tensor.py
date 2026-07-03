@@ -697,6 +697,266 @@ class TestMatmulAndLoss:
         assert ri.dtype == 'float32'
         np.testing.assert_allclose(qi.numpy() @ ri.numpy(), [[1, 2], [3, 4]], rtol=1e-4, atol=1e-4)
 
+    def test_qr_reduced_and_r_modes_match_numpy_shapes(self):
+        cases = [
+            np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32),
+            np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32),
+            np.array([
+                [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+                [[2.0, 1.0], [0.0, 3.0], [4.0, 5.0]],
+            ], dtype=np.float32),
+        ]
+        for arr in cases:
+            q, r = Tensor(arr).qr(mode='reduced')
+            nq, nr = np.linalg.qr(arr, mode='reduced')
+            assert q.shape == nq.shape
+            assert r.shape == nr.shape
+            np.testing.assert_allclose(np.matmul(q.numpy(), r.numpy()), arr, rtol=1e-4, atol=1e-4)
+
+            r_only = Tensor(arr).qr(mode='r')
+            assert r_only.shape == nr.shape
+
+        with pytest.raises(ValueError, match='qr mode'):
+            Tensor(cases[0]).qr(mode='raw')
+
+    def test_triangular_solve_matches_numpy_torch_probe(self):
+        torch = pytest.importorskip('torch')
+        lower = np.array([[2.0, 0.0, 0.0], [1.0, 3.0, 0.0], [-2.0, 0.5, 4.0]], dtype=np.float32)
+        upper = np.array([[2.0, -1.0, 0.5], [0.0, 3.0, 2.0], [0.0, 0.0, 4.0]], dtype=np.float32)
+        b_vec = np.array([2.0, 7.0, 9.0], dtype=np.float32)
+        b_mat = np.array([[2.0, 1.0], [7.0, 2.0], [9.0, 3.0]], dtype=np.float32)
+        lower_batched = np.stack([lower, lower + np.eye(3, dtype=np.float32)], axis=0)
+        b_batched = np.stack([b_mat, b_mat + 1.0], axis=0)
+        cases = [
+            (lower, b_vec, False, False, False),
+            (lower, b_mat, False, False, False),
+            (upper, b_mat, True, False, False),
+            (lower, b_mat, False, True, False),
+            (upper, b_mat, True, True, False),
+            (lower + np.diag([3.0, 4.0, 5.0]).astype(np.float32), b_mat, False, False, True),
+            (lower_batched, b_batched, False, False, False),
+        ]
+        for a, b, upper_flag, transpose_a, unit_diagonal in cases:
+            eff_a = np.swapaxes(a, -1, -2) if transpose_a else a
+            eff_upper = (not upper_flag) if transpose_a else upper_flag
+            np_a = eff_a.copy()
+            if unit_diagonal:
+                diag = np.arange(np_a.shape[-1])
+                np_a[..., diag, diag] = 1.0
+            expected = np.linalg.solve(np_a, b)
+
+            got = Tensor(a).triangular_solve(
+                Tensor(b),
+                upper=upper_flag,
+                transpose_a=transpose_a,
+                unit_diagonal=unit_diagonal,
+            )
+            assert got.shape == b.shape
+            np.testing.assert_allclose(got.numpy(), expected, rtol=1e-5, atol=1e-5)
+
+            if b.ndim >= 2:
+                torch_expected = torch.linalg.solve_triangular(
+                    torch.tensor(eff_a),
+                    torch.tensor(b),
+                    upper=eff_upper,
+                    left=True,
+                    unitriangular=unit_diagonal,
+                ).numpy()
+                np.testing.assert_allclose(got.numpy(), torch_expected, rtol=1e-5, atol=1e-5)
+
+    def test_triangular_solve_edge_cases(self):
+        a1 = np.array([[4.0]], dtype=np.float32)
+        b1 = np.array([8.0], dtype=np.float32)
+        np.testing.assert_allclose(Tensor(a1).triangular_solve(Tensor(b1)).numpy(), [2.0], rtol=1e-6)
+
+        a_int = np.array([[2, 0], [4, 2]], dtype=np.int32)
+        b_int = np.array([2, 8], dtype=np.int32)
+        x_int = Tensor(a_int).triangular_solve(Tensor(b_int))
+        assert x_int.dtype == 'float32'
+        np.testing.assert_allclose(x_int.numpy(), np.linalg.solve(a_int.astype(np.float32), b_int), rtol=1e-6)
+
+        a64 = np.array([[2.0, 0.0], [1.0, 4.0]], dtype=np.float64)
+        b64 = np.array([[2.0], [9.0]], dtype=np.float64)
+        x64 = Tensor(a64, dtype='float64').triangular_solve(Tensor(b64, dtype='float64'))
+        assert x64.dtype == 'float64'
+        np.testing.assert_allclose(x64.numpy(), np.linalg.solve(a64, b64), rtol=1e-12, atol=1e-12)
+
+        with pytest.raises(ValueError, match='cannot triangular_solve'):
+            Tensor(np.eye(2, dtype=np.float32)).triangular_solve(Tensor(np.ones((3,), dtype=np.float32)))
+
+        singular = Tensor(np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float32))
+        out = singular.triangular_solve(Tensor(np.array([1.0, 2.0], dtype=np.float32))).numpy()
+        assert np.isinf(out).any() or np.isnan(out).any()
+
+    def test_cholesky_matches_numpy_torch_probe(self):
+        torch = pytest.importorskip('torch')
+        cases = [
+            np.array([[4.0]], dtype=np.float32),
+            np.array([[4.0, 2.0], [2.0, 5.0]], dtype=np.float32),
+            np.array([[6.0, 2.0, 1.0], [2.0, 5.0, 2.0], [1.0, 2.0, 4.0]], dtype=np.float32),
+            np.eye(4, dtype=np.float32) * 4.0,
+            np.array([
+                [[4.0, 2.0], [2.0, 5.0]],
+                [[9.0, 3.0], [3.0, 2.0]],
+            ], dtype=np.float32),
+        ]
+        for a in cases:
+            l = Tensor(a).cholesky()
+            expected = np.linalg.cholesky(a)
+            torch_expected = torch.linalg.cholesky(torch.tensor(a)).numpy()
+            np.testing.assert_allclose(l.numpy(), expected, rtol=1e-5, atol=1e-5)
+            np.testing.assert_allclose(l.numpy(), torch_expected, rtol=1e-5, atol=1e-5)
+            np.testing.assert_allclose(l.numpy() @ np.swapaxes(l.numpy(), -1, -2), a, rtol=1e-5, atol=1e-5)
+
+        a = np.array([[4.0, 2.0], [2.0, 5.0]], dtype=np.float32)
+        u = Tensor(a).cholesky(upper=True)
+        np.testing.assert_allclose(u.numpy(), np.swapaxes(np.linalg.cholesky(a), -1, -2), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.swapaxes(u.numpy(), -1, -2) @ u.numpy(), a, rtol=1e-5, atol=1e-5)
+
+    def test_cholesky_edge_cases(self):
+        a_int = np.array([[4, 2], [2, 5]], dtype=np.int32)
+        l_int = Tensor(a_int).cholesky()
+        assert l_int.dtype == 'float32'
+        np.testing.assert_allclose(l_int.numpy(), np.linalg.cholesky(a_int.astype(np.float32)), rtol=1e-5)
+
+        a64 = np.array([[4.0, 2.0], [2.0, 5.0]], dtype=np.float64)
+        l64 = Tensor(a64, dtype='float64').cholesky()
+        assert l64.dtype == 'float64'
+        np.testing.assert_allclose(l64.numpy(), np.linalg.cholesky(a64), rtol=1e-12, atol=1e-12)
+
+        with pytest.raises(ValueError, match='cannot cholesky'):
+            Tensor(np.ones((2, 3), dtype=np.float32)).cholesky()
+
+        bad = Tensor(np.array([[1.0, 2.0], [2.0, 1.0]], dtype=np.float32)).cholesky().numpy()
+        assert np.isnan(bad).any()
+
+    def test_cholesky_solve_matches_torch_probe(self):
+        torch = pytest.importorskip('torch')
+        a = np.array([[4.0, 2.0], [2.0, 5.0]], dtype=np.float32)
+        b = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        for upper in [False, True]:
+            factor = Tensor(a).cholesky(upper=upper)
+            got = factor.cholesky_solve(Tensor(b), upper=upper)
+            torch_expected = torch.cholesky_solve(
+                torch.tensor(b),
+                torch.linalg.cholesky(torch.tensor(a), upper=upper),
+                upper=upper,
+            ).numpy()
+            np.testing.assert_allclose(got.numpy(), torch_expected, rtol=1e-5, atol=1e-5)
+            np.testing.assert_allclose(a @ got.numpy(), b, rtol=1e-5, atol=1e-5)
+
+        ab = np.stack([a, np.array([[9.0, 3.0], [3.0, 2.0]], dtype=np.float32)], axis=0)
+        bb_vec = np.array([[1.0, 3.0], [2.0, 4.0]], dtype=np.float32)
+        for upper in [False, True]:
+            factor = Tensor(ab).cholesky(upper=upper)
+            got = factor.cholesky_solve(Tensor(bb_vec), upper=upper)
+            torch_expected = torch.cholesky_solve(
+                torch.tensor(bb_vec).unsqueeze(-1),
+                torch.linalg.cholesky(torch.tensor(ab), upper=upper),
+                upper=upper,
+            ).squeeze(-1).numpy()
+            np.testing.assert_allclose(got.numpy(), torch_expected, rtol=1e-5, atol=1e-5)
+
+    def test_solve_matches_numpy_torch_probe(self):
+        torch = pytest.importorskip('torch')
+        a = np.array([[2.0, 1.0], [1.0, 3.0]], dtype=np.float32)
+        b_vec = np.array([1.0, 4.0], dtype=np.float32)
+        b_mat = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+        got_vec = Tensor(a).solve(Tensor(b_vec))
+        np.testing.assert_allclose(got_vec.numpy(), np.linalg.solve(a, b_vec), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            got_vec.numpy(),
+            torch.linalg.solve(torch.tensor(a), torch.tensor(b_vec)).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        got_mat = Tensor(a).solve(Tensor(b_mat))
+        np.testing.assert_allclose(got_mat.numpy(), np.linalg.solve(a, b_mat), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            got_mat.numpy(),
+            torch.linalg.solve(torch.tensor(a), torch.tensor(b_mat)).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        ab = np.stack([a, a + np.eye(2, dtype=np.float32)], axis=0)
+        bb = np.stack([b_mat, b_mat + 1.0], axis=0)
+        got_batch = Tensor(ab).solve(Tensor(bb))
+        expected_batch = np.stack([np.linalg.solve(ab[i], bb[i]) for i in range(2)])
+        np.testing.assert_allclose(got_batch.numpy(), expected_batch, rtol=1e-5, atol=1e-5)
+
+        bb_vec = np.stack([b_vec, np.array([2.0, 5.0], dtype=np.float32)], axis=0)
+        got_batch_vec = Tensor(ab).solve(Tensor(bb_vec))
+        expected_batch_vec = np.stack([np.linalg.solve(ab[i], bb_vec[i]) for i in range(2)])
+        np.testing.assert_allclose(got_batch_vec.numpy(), expected_batch_vec, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(
+            got_batch_vec.numpy(),
+            torch.linalg.solve(torch.tensor(ab), torch.tensor(bb_vec)).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        a64 = np.array([[3.0, 1.0], [1.0, 2.0]], dtype=np.float64)
+        b64 = np.array([[4.0], [5.0]], dtype=np.float64)
+        got64 = Tensor(a64).solve(Tensor(b64))
+        assert got64.dtype == 'float64'
+        np.testing.assert_allclose(got64.numpy(), np.linalg.solve(a64, b64), rtol=1e-10, atol=1e-10)
+
+        with pytest.raises(ValueError, match='cannot solve'):
+            Tensor(np.ones((2, 3), dtype=np.float32)).solve(Tensor(np.ones((2,), dtype=np.float32)))
+
+    def test_lstsq_matches_numpy_torch_probe(self):
+        torch = pytest.importorskip('torch')
+        a = np.array([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]], dtype=np.float32)
+        b_vec = np.array([1.0, 2.0, 2.5], dtype=np.float32)
+        b_mat = np.array([[1.0, 0.5], [2.0, 1.0], [2.5, 1.5]], dtype=np.float32)
+
+        got_vec = Tensor(a).lstsq(Tensor(b_vec))
+        np.testing.assert_allclose(got_vec.numpy(), np.linalg.lstsq(a, b_vec, rcond=None)[0], rtol=2e-5, atol=2e-5)
+        np.testing.assert_allclose(
+            got_vec.numpy(),
+            torch.linalg.lstsq(torch.tensor(a), torch.tensor(b_vec)).solution.numpy(),
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        got_mat = Tensor(a).lstsq(Tensor(b_mat))
+        np.testing.assert_allclose(got_mat.numpy(), np.linalg.lstsq(a, b_mat, rcond=None)[0], rtol=2e-5, atol=2e-5)
+        np.testing.assert_allclose(
+            got_mat.numpy(),
+            torch.linalg.lstsq(torch.tensor(a), torch.tensor(b_mat)).solution.numpy(),
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        ab = np.stack([a, np.array([[1.0, 0.0], [1.0, 1.5], [1.0, 3.0]], dtype=np.float32)], axis=0)
+        bb = np.stack([b_mat, b_mat + 0.25], axis=0)
+        got_batch = Tensor(ab).lstsq(Tensor(bb))
+        expected_batch = np.stack([np.linalg.lstsq(ab[i], bb[i], rcond=None)[0] for i in range(2)])
+        np.testing.assert_allclose(got_batch.numpy(), expected_batch, rtol=2e-5, atol=2e-5)
+
+        bb_vec = np.stack([b_vec, np.array([1.25, 2.25, 2.75], dtype=np.float32)], axis=0)
+        got_batch_vec = Tensor(ab).lstsq(Tensor(bb_vec))
+        expected_batch_vec = np.stack([np.linalg.lstsq(ab[i], bb_vec[i], rcond=None)[0] for i in range(2)])
+        np.testing.assert_allclose(got_batch_vec.numpy(), expected_batch_vec, rtol=2e-5, atol=2e-5)
+        np.testing.assert_allclose(
+            got_batch_vec.numpy(),
+            torch.linalg.lstsq(torch.tensor(ab), torch.tensor(bb_vec)).solution.numpy(),
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        a64 = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 7.0]], dtype=np.float64)
+        b64 = np.array([1.0, 2.0, 4.0], dtype=np.float64)
+        got64 = Tensor(a64).lstsq(Tensor(b64))
+        assert got64.dtype == 'float64'
+        np.testing.assert_allclose(got64.numpy(), np.linalg.lstsq(a64, b64, rcond=None)[0], rtol=1e-10, atol=1e-10)
+
+        with pytest.raises(ValueError, match='cannot lstsq'):
+            Tensor(np.ones((2, 3), dtype=np.float32)).lstsq(Tensor(np.ones((2,), dtype=np.float32)))
+
     def test_cross_entropy_sparse_targets(self):
         logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
         target = Tensor([0.0, 2.0])
@@ -833,6 +1093,18 @@ class TestRepr:
 
 class TestFloat64:
     """Tests for float64 dtype support."""
+
+    def test_numpy_dtype_is_preserved_like_tinygrad(self):
+        f64 = Tensor(np.array([1.0, 2.0], dtype=np.float64))
+        assert f64.dtype == 'float64'
+        assert f64.numpy().dtype == np.float64
+
+        i64 = Tensor(np.array([1, 2], dtype=np.int64))
+        assert i64.dtype == 'int64'
+        assert i64.numpy().dtype == np.int64
+
+        default_list = Tensor([1.0, 2.0])
+        assert default_list.dtype == 'float32'
 
     def test_creation_from_list(self):
         t = Tensor([1.0, 2.0, 3.0], dtype='float64')

@@ -115,7 +115,15 @@ Movement: `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `gathe
 
 Comparison: `eq`, `gt`, `where`, `clamp`, `maximum`
 
-Other: `dot` (matmul), `backward`, `realize`, `toArray`, `toTypedArray`, `tolist`, `copyFrom`, `updateFrom`, `repr`
+Linear algebra: `dot` (matmul), `qr`, `triangularSolve`, `solveTriangular`, `cholesky`, `choleskySolve`, `solve`, `lstsq`
+
+Other: `backward`, `realize`, `toArray`, `toTypedArray`, `tolist`, `copyFrom`, `updateFrom`, `repr`
+
+`qr()` defaults to tinygrad-compatible complete QR. `triangularSolve`,
+`cholesky`, `choleskySolve`, `solve`, and `lstsq` are Polygrad structured
+linalg extensions implemented as portable tensor-composed fallbacks. Current
+`lstsq` is solution-only for full-rank tall/square systems; underdetermined and
+rank-deficient least squares need a later SVD or pivoted-QR path.
 
 `copyFrom` / `updateFrom` are Polygrad embedding helpers: they update an
 already-buffer-backed Tensor from matching host data while preserving buffer

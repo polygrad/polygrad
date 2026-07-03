@@ -280,6 +280,18 @@ Returns float tensor (1.0 = true, 0.0 = false).
 |--------|-------------|
 | `matmul(other)` / `dot(other)` / `@` | Matrix multiplication |
 | `linear(weight, bias=None)` | x @ weight.T + bias |
+| `qr(mode="complete")` | Householder QR; default mode matches tinygrad complete QR. Polygrad also supports `"reduced"` and `"r"` |
+| `triangular_solve(b, upper=False, transpose_a=False, unit_diagonal=False)` | Polygrad extension: composed triangular solve |
+| `solve_triangular(...)` | Alias for `triangular_solve(...)` |
+| `cholesky(upper=False)` | Polygrad extension: composed Cholesky factorization |
+| `cholesky_solve(b, upper=False)` | Polygrad extension: solve from a Cholesky factor |
+| `solve(b)` | Polygrad extension: initial square solve using reduced QR + triangular solve |
+| `lstsq(b)` | Polygrad extension: initial full-rank tall/square least-squares solution |
+
+The structured linalg extensions are portable tensor-composed fallbacks tested
+against NumPy/Torch. They do not add LAPACK/runtime dependencies. Current
+`lstsq` is solution-only and rejects underdetermined systems; robust
+rank-deficient least squares is planned as a later SVD or pivoted-QR path.
 
 ### Normalization & Loss
 

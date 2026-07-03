@@ -611,6 +611,193 @@
             for (const v of vals) assert(Number.isFinite(v), `expected finite QR value, got ${v}`);
           }
         });
+        await test("qr reduced and r modes match reference shapes", async () => {
+          const cases = [
+            { arr: [[1, 2], [3, 4], [5, 6]], q: [3, 2], r: [2, 2], flat: [1, 2, 3, 4, 5, 6] },
+            { arr: [[1, 2, 3], [4, 5, 6]], q: [2, 2], r: [2, 3], flat: [1, 2, 3, 4, 5, 6] },
+            {
+              arr: [[[1, 2], [3, 4], [5, 6]], [[2, 1], [0, 3], [4, 5]]],
+              q: [2, 3, 2],
+              r: [2, 2, 2],
+              flat: [1, 2, 3, 4, 5, 6, 2, 1, 0, 3, 4, 5]
+            }
+          ];
+          for (const c of cases) {
+            const pair = new Tensor(c.arr).qr("reduced");
+            assertShape(pair[0].shape, c.q);
+            assertShape(pair[1].shape, c.r);
+            assertClose(await pair[0].dot(pair[1]).toArray(), c.flat, 2e-3);
+            const rOnly = new Tensor(c.arr).qr("r");
+            assertShape(rOnly.shape, c.r);
+          }
+          let ok = false;
+          try {
+            new Tensor([[1, 2], [3, 4]]).qr("raw");
+          } catch (e) {
+            ok = true;
+          }
+          assert(ok, "expected invalid QR mode to fail");
+        });
+        await test("triangularSolve matches numpy torch probe", async () => {
+          const lower = [[2, 0, 0], [1, 3, 0], [-2, 0.5, 4]];
+          const upper = [[2, -1, 0.5], [0, 3, 2], [0, 0, 4]];
+          const lowerUnit = [[5, 0, 0], [1, 7, 0], [-2, 0.5, 9]];
+          const bVec = [2, 7, 9];
+          const bMat = [[2, 1], [7, 2], [9, 3]];
+          const lowerBatch = [
+            [[2, 0, 0], [1, 3, 0], [-2, 0.5, 4]],
+            [[3, 0, 0], [1, 4, 0], [-2, 0.5, 5]]
+          ];
+          const bBatch = [
+            [[2, 1], [7, 2], [9, 3]],
+            [[3, 2], [8, 3], [10, 4]]
+          ];
+          const cases = [
+            { a: lower, b: bVec, opts: {}, shape: [3], out: [1, 2, 2.5] },
+            { a: lower, b: bMat, opts: {}, shape: [3, 2], out: [1, 0.5, 2, 0.5, 2.5, 0.9375] },
+            {
+              a: upper,
+              b: bMat,
+              opts: { upper: true },
+              shape: [3, 2],
+              out: [0.8541666865, 0.3958333433, 0.8333333135, 0.1666666716, 2.25, 0.75]
+            },
+            {
+              a: lower,
+              b: bMat,
+              opts: { transposeA: true },
+              shape: [3, 2],
+              out: [2.2708332539, 0.9791666865, 1.9583333731, 0.5416666865, 2.25, 0.75]
+            },
+            {
+              a: upper,
+              b: bMat,
+              opts: { upper: true, transposeA: true },
+              shape: [3, 2],
+              out: [1, 0.5, 2.6666667461, 0.8333333135, 0.7916666865, 0.2708333433]
+            },
+            {
+              a: lowerUnit,
+              b: bMat,
+              opts: { unitDiagonal: true },
+              shape: [3, 2],
+              out: [2, 1, 5, 1, 10.5, 4.5]
+            },
+            {
+              a: lowerBatch,
+              b: bBatch,
+              opts: {},
+              shape: [2, 3, 2],
+              out: [1, 0.5, 2, 0.5, 2.5, 0.9375, 1, 0.6666666865, 1.75, 0.5833333135, 2.2249999046, 1.0083333254]
+            }
+          ];
+          for (const c of cases) {
+            const x = new Tensor(c.a).triangularSolve(new Tensor(c.b), c.opts);
+            assertShape(x.shape, c.shape);
+            assertClose(await x.toArray(), c.out, 2e-4);
+          }
+        });
+        await test("cholesky matches numpy torch probe", async () => {
+          const cases = [
+            { a: [[4]], shape: [1, 1], out: [2] },
+            { a: [[4, 2], [2, 5]], shape: [2, 2], out: [2, 0, 1, 2] },
+            {
+              a: [[6, 2, 1], [2, 5, 2], [1, 2, 4]],
+              shape: [3, 3],
+              out: [2.4494898319, 0, 0, 0.8164966106, 2.0816659927, 0, 0.4082483053, 0.8006407619, 1.7867029905]
+            },
+            {
+              a: [[4, 0, 0, 0], [0, 4, 0, 0], [0, 0, 4, 0], [0, 0, 0, 4]],
+              shape: [4, 4],
+              out: [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2]
+            },
+            {
+              a: [[[4, 2], [2, 5]], [[9, 3], [3, 2]]],
+              shape: [2, 2, 2],
+              out: [2, 0, 1, 2, 3, 0, 1, 1]
+            }
+          ];
+          for (const c of cases) {
+            const l = new Tensor(c.a).cholesky();
+            assertShape(l.shape, c.shape);
+            assertClose(await l.toArray(), c.out, 2e-4);
+          }
+          const u = new Tensor([[4, 2], [2, 5]]).cholesky({ upper: true });
+          assertShape(u.shape, [2, 2]);
+          assertClose(await u.toArray(), [2, 1, 0, 2], 2e-4);
+        });
+        await test("choleskySolve matches torch probe", async () => {
+          const a = [[4, 2], [2, 5]];
+          const b = [[1, 2], [3, 4]];
+          for (const upper of [false, true]) {
+            const f = new Tensor(a).cholesky({ upper });
+            const x = f.choleskySolve(new Tensor(b), { upper });
+            assertShape(x.shape, [2, 2]);
+            assertClose(await x.toArray(), [-0.0625, 0.125, 0.625, 0.75], 2e-4);
+          }
+          const ab = [a, [[9, 3], [3, 2]]];
+          const bbVec = [[1, 3], [2, 4]];
+          for (const upper of [false, true]) {
+            const f = new Tensor(ab).cholesky({ upper });
+            const x = f.choleskySolve(new Tensor(bbVec), { upper });
+            assertShape(x.shape, [2, 2]);
+            assertClose(await x.toArray(), [-0.0625, 0.625, -0.8888889, 3.3333333], 5e-4);
+          }
+        });
+        await test("solve matches numpy torch probe", async () => {
+          const a = [[2, 1], [1, 3]];
+          const bVec = [1, 4];
+          const bMat = [[1, 2], [3, 4]];
+          const xVec = new Tensor(a).solve(new Tensor(bVec));
+          assertShape(xVec.shape, [2]);
+          assertClose(await xVec.toArray(), [-0.2, 1.4], 3e-4);
+          const xMat = new Tensor(a).solve(new Tensor(bMat));
+          assertShape(xMat.shape, [2, 2]);
+          assertClose(await xMat.toArray(), [0, 0.4, 1, 1.2], 3e-4);
+          const ab = [a, [[3, 1], [1, 4]]];
+          const bb = [bMat, [[2, 3], [4, 5]]];
+          const xb = new Tensor(ab).solve(new Tensor(bb));
+          assertShape(xb.shape, [2, 2, 2]);
+          assertClose(await xb.toArray(), [0, 0.4, 1, 1.2, 0.3636363745, 0.6363636255, 0.9090909362, 1.0909091234], 3e-4);
+          const bbVec = [bVec, [2, 5]];
+          const xbVec = new Tensor(ab).solve(new Tensor(bbVec));
+          assertShape(xbVec.shape, [2, 2]);
+          assertClose(await xbVec.toArray(), [-0.2, 1.4, 0.27272728, 1.1818182], 4e-4);
+          let ok = false;
+          try {
+            new Tensor([[1, 1, 1], [1, 1, 1]]).solve(new Tensor([1, 1]));
+          } catch (e) {
+            ok = true;
+          }
+          assert(ok, "expected solve to reject non-square A");
+        });
+        await test("lstsq matches numpy torch probe", async () => {
+          const a = [[1, 0], [1, 1], [1, 2]];
+          const bVec = [1, 2, 2.5];
+          const bMat = [[1, 0.5], [2, 1], [2.5, 1.5]];
+          const xVec = new Tensor(a).lstsq(new Tensor(bVec));
+          assertShape(xVec.shape, [2]);
+          assertClose(await xVec.toArray(), [1.0833334, 0.75], 5e-4);
+          const xMat = new Tensor(a).lstsq(new Tensor(bMat));
+          assertShape(xMat.shape, [2, 2]);
+          assertClose(await xMat.toArray(), [1.0833334, 0.5, 0.75, 0.5], 5e-4);
+          const ab = [a, [[1, 0], [1, 1.5], [1, 3]]];
+          const bb = [bMat, [[1.25, 0.75], [2.25, 1.25], [2.75, 1.75]]];
+          const xb = new Tensor(ab).lstsq(new Tensor(bb));
+          assertShape(xb.shape, [2, 2, 2]);
+          assertClose(await xb.toArray(), [1.0833334, 0.5, 0.75, 0.5, 1.3333334, 0.75, 0.5, 0.33333334], 6e-4);
+          const bbVec = [bVec, [1.25, 2.25, 2.75]];
+          const xbVec = new Tensor(ab).lstsq(new Tensor(bbVec));
+          assertShape(xbVec.shape, [2, 2]);
+          assertClose(await xbVec.toArray(), [1.0833334, 0.75, 1.3333334, 0.5], 6e-4);
+          let ok = false;
+          try {
+            new Tensor([[1, 1, 1], [1, 1, 1]]).lstsq(new Tensor([1, 1]));
+          } catch (e) {
+            ok = true;
+          }
+          assert(ok, "expected lstsq to reject underdetermined A");
+        });
         await test("crossEntropy with sparse targets", async () => {
           const logits = new Tensor([[0, 0, 0], [0, 0, 0]]);
           const target = new Tensor([0, 2]);

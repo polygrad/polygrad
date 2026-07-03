@@ -775,6 +775,7 @@ async function createWasmCore(device) {
     poly_log_softmax: Module._poly_log_softmax,
     poly_dot: Module._poly_dot,
     poly_qr: (ctx, uop) => callUopPair(Module._poly_qr, [ctx, uop], 'poly_qr'),
+    poly_qr_ex: (ctx, uop, mode) => callUopPair(Module._poly_qr_ex, [ctx, uop, mode], 'poly_qr_ex'),
     poly_cross_entropy: Module._poly_cross_entropy,
     poly_gather_dim: Module._poly_gather_dim,
     poly_scatter: (ctx, self, dim, index, src, reduce) => {
@@ -903,7 +904,10 @@ async function createWasmCore(device) {
     poly_tril: Module._poly_tril,
     poly_triu: Module._poly_triu,
     poly_cholesky: Module._poly_cholesky,
+    poly_cholesky_solve: Module._poly_cholesky_solve,
     poly_triangular_solve: Module._poly_triangular_solve,
+    poly_solve: Module._poly_solve,
+    poly_lstsq: Module._poly_lstsq,
 
     // Reduction (non-shape-returning)
     poly_sum_reduce: Module._poly_sum_reduce,
@@ -915,7 +919,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 7
+  const EXPECTED_ABI = 9
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

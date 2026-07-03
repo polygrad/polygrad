@@ -2758,6 +2758,79 @@ static napi_value napi_poly_qr(napi_env env, napi_callback_info info) {
   return make_external_pair(env, q, r);
 }
 
+static napi_value napi_poly_qr_ex(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t mode = 0;
+  napi_get_value_int32(env, argv[2], &mode);
+  PolyUOp *q = NULL, *r = NULL;
+  if (poly_qr_ex(ctx, x, mode, &q, &r) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_qr_ex failed");
+    return NULL;
+  }
+  return make_external_pair(env, q, r);
+}
+
+static napi_value napi_poly_cholesky(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *x = get_external(env, argv[1]);
+  int32_t upper = 0;
+  napi_get_value_int32(env, argv[2], &upper);
+  return make_external(env, poly_cholesky(ctx, x, upper));
+}
+
+static napi_value napi_poly_cholesky_solve(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *chol = get_external(env, argv[1]);
+  PolyUOp *b = get_external(env, argv[2]);
+  int32_t upper = 0;
+  napi_get_value_int32(env, argv[3], &upper);
+  return make_external(env, poly_cholesky_solve(ctx, chol, b, upper));
+}
+
+static napi_value napi_poly_triangular_solve(napi_env env, napi_callback_info info) {
+  napi_value argv[6];
+  size_t argc = 6;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *a = get_external(env, argv[1]);
+  PolyUOp *b = get_external(env, argv[2]);
+  int32_t upper = 0, transpose_a = 0, unit_diagonal = 0;
+  napi_get_value_int32(env, argv[3], &upper);
+  napi_get_value_int32(env, argv[4], &transpose_a);
+  napi_get_value_int32(env, argv[5], &unit_diagonal);
+  return make_external(env, poly_triangular_solve(ctx, a, b, upper, transpose_a, unit_diagonal));
+}
+
+static napi_value napi_poly_solve(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *a = get_external(env, argv[1]);
+  PolyUOp *b = get_external(env, argv[2]);
+  return make_external(env, poly_solve(ctx, a, b));
+}
+
+static napi_value napi_poly_lstsq(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *a = get_external(env, argv[1]);
+  PolyUOp *b = get_external(env, argv[2]);
+  return make_external(env, poly_lstsq(ctx, a, b));
+}
+
 static napi_value napi_poly_cross_entropy(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -3366,6 +3439,12 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_log_softmax", napi_poly_log_softmax),
       DECLARE_NAPI_METHOD("poly_dot", napi_poly_dot),
       DECLARE_NAPI_METHOD("poly_qr", napi_poly_qr),
+      DECLARE_NAPI_METHOD("poly_qr_ex", napi_poly_qr_ex),
+      DECLARE_NAPI_METHOD("poly_cholesky", napi_poly_cholesky),
+      DECLARE_NAPI_METHOD("poly_cholesky_solve", napi_poly_cholesky_solve),
+      DECLARE_NAPI_METHOD("poly_triangular_solve", napi_poly_triangular_solve),
+      DECLARE_NAPI_METHOD("poly_solve", napi_poly_solve),
+      DECLARE_NAPI_METHOD("poly_lstsq", napi_poly_lstsq),
       DECLARE_NAPI_METHOD("poly_cross_entropy", napi_poly_cross_entropy),
       DECLARE_NAPI_METHOD("poly_gather", napi_poly_gather),
       DECLARE_NAPI_METHOD("poly_gather_dim", napi_poly_gather_dim),
