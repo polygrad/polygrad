@@ -2877,9 +2877,13 @@ PolyUOp *poly_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper)
   if (upper) {
     PolyUOp *y = poly_triangular_solve(ctx, chol, b, 1, 1, 0);
     if (!y) return NULL;
+    y = poly_contiguous(ctx, y);
+    if (!y) return NULL;
     return poly_triangular_solve(ctx, chol, y, 1, 0, 0);
   }
   PolyUOp *y = poly_triangular_solve(ctx, chol, b, 0, 0, 0);
+  if (!y) return NULL;
+  y = poly_contiguous(ctx, y);
   if (!y) return NULL;
   return poly_triangular_solve(ctx, chol, y, 0, 1, 0);
 }
@@ -3169,6 +3173,9 @@ static int poly_qr_complete(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp *
 
     PolyUOp *safe_u0 = poly_where_op(ctx, active, u0, one);
     PolyUOp *v_num = poly_where_op(ctx, at_i, u0, x_vec);
+    v_num = poly_contiguous(ctx, v_num);
+    safe_u0 = poly_contiguous(ctx, safe_u0);
+    if (!v_num || !safe_u0) return -1;
     PolyUOp *v_vec = poly_div(ctx, v_num, safe_u0);
     PolyUOp *v = poly_unsqueeze_axis(ctx, v_vec, -1);
 
@@ -3288,6 +3295,9 @@ static PolyUOp *poly_lu_solve_prepared(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
     }
   }
 
+  u = poly_contiguous(ctx, u);
+  rhs = poly_contiguous(ctx, rhs);
+  if (!u || !rhs) return NULL;
   return poly_triangular_solve(ctx, u, rhs, 1, 0, 0);
 }
 

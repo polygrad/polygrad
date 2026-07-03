@@ -59,6 +59,7 @@ class TestCreation:
     def test_can_run_probes_core_op_shape_support(self):
         assert can_run('add', dtype='float32', shape=(4,))
         assert can_run('matmul', dtype='float32', shapes=((2, 3), (3, 4)))
+        assert can_run('gather', dtype='float32', shape=(2, 3))
         with pytest.raises(ValueError, match='shape is required'):
             can_run('add', dtype='float32')
         with pytest.raises(ValueError, match='shape queries require an op'):
@@ -350,6 +351,12 @@ class TestJit:
 
         with pytest.raises(JitError, match='args mismatch'):
             f(Tensor([100, 200, 300], dtype='int32').realize())
+
+    def test_compile_realizes_lazy_return_like_tinygrad(self):
+        compiled = pg_compile(lambda x: x * 3 - 1, Tensor([1.0, 2.0, 3.0]))
+        out = compiled(Tensor([4.0, 5.0, 6.0]))
+        np.testing.assert_allclose(out.numpy(), [11.0, 14.0, 17.0])
+        assert compiled.schedule_count == 1
 
     def test_jit_prune_skips_onetime_side_realize_on_replay(self):
         side = Tensor([-1.0, -1.0, -1.0]).realize()

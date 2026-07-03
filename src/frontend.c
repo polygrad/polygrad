@@ -183,6 +183,12 @@ static PolyUOp *canrun_build_probe_graph(
       return NULL;
     return poly_cholesky(ctx, a, 0);
   }
+  if (!strcmp(op, "gather") || !strcmp(op, "gather_dim")) {
+    if (ndim < 1) return NULL;
+    if (!canrun_shape_budget_ok(shape, ndim, 4096)) return NULL;
+    PolyUOp *idx = canrun_buffer(ctx, POLY_INT32, shape, ndim);
+    return idx ? poly_gather_dim(ctx, a, ndim - 1, idx) : NULL;
+  }
   if (!strcmp(op, "sum") || !strcmp(op, "reduce_sum"))
     return poly_sum_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
   if (!strcmp(op, "max") || !strcmp(op, "reduce_max"))

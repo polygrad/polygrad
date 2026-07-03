@@ -433,6 +433,9 @@ TEST(uop, can_run_op_probes_backend_lowering) {
   int64_t mm_shape[3] = {2, 3, 4};
   ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "matmul", f32, mm_shape, 3), 1);
 
+  int64_t gather_shape[2] = {2, 3};
+  ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "gather", f32, gather_shape, 2), 1);
+
   ASSERT_INT_EQ(poly_can_run_op(ctx, POLY_DEVICE_HOST, "add", f32, add_shape, 1), 0);
   ASSERT_TRUE(poly_can_run_op(ctx, POLY_DEVICE_INTERP, "add", f32, NULL, -1) < 0);
 

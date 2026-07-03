@@ -1495,6 +1495,81 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   PASS();
 }
 
+TEST_COMMON(pe, linalg_structured_boundaries_backend_common) {
+  PolyCtx *ctx = poly_ctx_new();
+  int f32_id = poly_dtype_id_by_name("float32");
+  ASSERT_TRUE(f32_id >= 0);
+  int64_t shape2[] = {2, 2};
+  int64_t vec_shape[] = {2};
+
+  float qr_data[] = {1, 2, 3, 4};
+  PolyUOp *qr_a = poly_buffer_from_host(ctx, qr_data, sizeof(qr_data), f32_id, shape2, 2);
+  ASSERT_NOT_NULL(qr_a);
+  PolyUOp *q = NULL, *r = NULL;
+  ASSERT_INT_EQ(poly_qr(ctx, qr_a, &q, &r), 0);
+  ASSERT_NOT_NULL(q);
+  ASSERT_NOT_NULL(r);
+  PolyUOp *qr_recon = poly_dot(ctx, q, r);
+  PolyTensor *qr_t = poly_tensor_create(ctx, qr_recon, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(qr_t);
+  PolyTensor *qr_out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &qr_t, 1, &qr_out), 0);
+  ASSERT_NOT_NULL(qr_out);
+  const PolyUOp *qr_buf = poly_uop_get_buffer_identity(poly_tensor_uop(qr_out));
+  ASSERT_NOT_NULL(qr_buf);
+  float qr_got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)qr_buf, qr_got, sizeof(qr_got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(qr_got[i], qr_data[i], 2e-3f);
+
+  float spd[] = {4, 2, 2, 5};
+  float rhs_mat[] = {1, 2, 3, 4};
+  float expect_cholsolve[] = {-0.0625f, 0.125f, 0.625f, 0.75f};
+  PolyUOp *chol_a = poly_buffer_from_host(ctx, spd, sizeof(spd), f32_id, shape2, 2);
+  PolyUOp *chol_b = poly_buffer_from_host(ctx, rhs_mat, sizeof(rhs_mat), f32_id, shape2, 2);
+  ASSERT_NOT_NULL(chol_a);
+  ASSERT_NOT_NULL(chol_b);
+  PolyUOp *factor = poly_cholesky(ctx, chol_a, 0);
+  ASSERT_NOT_NULL(factor);
+  PolyUOp *chol_x = poly_cholesky_solve(ctx, factor, chol_b, 0);
+  ASSERT_NOT_NULL(chol_x);
+  PolyTensor *chol_t = poly_tensor_create(ctx, chol_x, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(chol_t);
+  PolyTensor *chol_out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &chol_t, 1, &chol_out), 0);
+  ASSERT_NOT_NULL(chol_out);
+  const PolyUOp *chol_buf = poly_uop_get_buffer_identity(poly_tensor_uop(chol_out));
+  ASSERT_NOT_NULL(chol_buf);
+  float chol_got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)chol_buf, chol_got, sizeof(chol_got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(chol_got[i], expect_cholsolve[i], 2e-4f);
+
+  float a2[] = {2, 1, 1, 3};
+  float b_vec[] = {1, 4};
+  float expect_vec[] = {-0.2f, 1.4f};
+  PolyUOp *solve_a = poly_buffer_from_host(ctx, a2, sizeof(a2), f32_id, shape2, 2);
+  PolyUOp *solve_b = poly_buffer_from_host(ctx, b_vec, sizeof(b_vec), f32_id, vec_shape, 1);
+  ASSERT_NOT_NULL(solve_a);
+  ASSERT_NOT_NULL(solve_b);
+  PolyUOp *solve_x = poly_solve(ctx, solve_a, solve_b);
+  ASSERT_NOT_NULL(solve_x);
+  PolyTensor *solve_t = poly_tensor_create(ctx, solve_x, POLY_TENSOR_VALUE, POLY_DEVICE_AUTO);
+  ASSERT_NOT_NULL(solve_t);
+  PolyTensor *solve_out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &solve_t, 1, &solve_out), 0);
+  ASSERT_NOT_NULL(solve_out);
+  const PolyUOp *solve_buf = poly_uop_get_buffer_identity(poly_tensor_uop(solve_out));
+  ASSERT_NOT_NULL(solve_buf);
+  float solve_got[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)solve_buf, solve_got, sizeof(solve_got)), 0);
+  for (int i = 0; i < 2; i++)
+    ASSERT_FLOAT_EQ(solve_got[i], expect_vec[i], 3e-4f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, layernorm_v2_shape) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);

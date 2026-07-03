@@ -131,6 +131,7 @@ async function runTensorTests(pg) {
       pg.canRun({ op: 'matmul', dtype: 'float32', shapes: [[2, 3], [3, 4]] }),
       'canRun should probe matmul shapes'
     )
+    assert(pg.canRun({ op: 'gather', dtype: 'float32', shape: [2, 3] }), 'canRun should probe gather')
     let threw = false
     try {
       pg.canRun({ shape: [4], dtype: 'float32' })
@@ -143,7 +144,7 @@ async function runTensorTests(pg) {
   await test('runtime compile wrapper warms capture and replays', async () => {
     assert(typeof pg.compile === 'function', 'runtime should expose pg.compile')
     const sample = new Tensor(new Float32Array([1, 2, 3]))
-    const compiled = await pg.compile((x) => x.add(1).realize(), [sample])
+    const compiled = await pg.compile((x) => x.add(1), [sample])
     assert(compiled.scheduleCount === 1, `expected one captured schedule, got ${compiled.scheduleCount}`)
     const out = await compiled.run([new Tensor(new Float32Array([10, 20, 30]))])
     assertClose(await out.toArray(), [11, 21, 31])

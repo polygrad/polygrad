@@ -31,6 +31,13 @@ def _ret_tensors(ret):
     raise JitError(f'JIT return contains non-Tensor value of type {type(ret).__name__}')
 
 
+def _realize_return(ret):
+    tensors = _ret_tensors(ret)
+    if tensors:
+        tensors[0].realize(*tensors[1:])
+    return tensors
+
+
 def _input_tensors(args, kwargs):
     inputs = []
     names = []
@@ -183,9 +190,8 @@ def _tensor_array(inputs):
 class Jit:
     """Tinygrad-style capture/replay wrapper for Tensor functions.
 
-    The wrapped function must trigger realization during capture, e.g.
-    `return (x + 1).realize()`. First call runs normally, second call captures,
-    later calls replay the captured schedules with current input BUFFERs.
+    First call runs normally, second call captures returned tensor realization,
+    and later calls replay the captured schedules with current input BUFFERs.
     """
 
     def __init__(self, fxn, *, prune=False):
@@ -253,6 +259,7 @@ class Jit:
 
         if self.cnt == 0:
             ret = self.fxn(*args, **kwargs)
+            _realize_return(ret)
         elif self.cnt == 1:
             if inputs:
                 ctx = inputs[0]._ctx
@@ -275,12 +282,12 @@ class Jit:
                 raise JitError('poly_jit_begin_capture failed')
             try:
                 ret = self.fxn(*args, **kwargs)
+                _realize_return(ret)
                 if _ffi._lib.poly_jit_end_capture(self._jit) != 0:
                     raise JitError("didn't JIT anything")
             except Exception:
                 _ffi._lib.poly_jit_cancel_capture(self._jit)
                 raise
-            _ret_tensors(ret)
             self.ret = ret
             self.signature = sig
             self.captured = True
