@@ -2974,6 +2974,49 @@ TEST(pe, triu_pure_uop_diag_neg1) {
   PASS();
 }
 
+TEST(pe, triu_tril_batched_last_two_dims_match_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  const int64_t shape[3] = {2, 3, 3};
+  PolyUOp *in = make_buf(ctx, shape, 3);
+
+  PolyUOp *upper = poly_triu(ctx, in, 0);
+  PolyUOp *lower = poly_tril(ctx, in, 1);
+  ASSERT_NOT_NULL(upper);
+  ASSERT_NOT_NULL(lower);
+
+  float in_d[18];
+  for (int i = 0; i < 18; i++)
+    in_d[i] = (float)(i + 1);
+  PolyUOp *leaves[] = {base_buf(in)};
+  float *ld[] = {in_d};
+
+  float got_upper[18] = {0};
+  float got_lower[18] = {0};
+  ASSERT_INT_EQ(realize_uop(ctx, upper, poly_buffer_f32(ctx, 18), got_upper, leaves, ld, 1), 0);
+  ASSERT_INT_EQ(realize_uop(ctx, lower, poly_buffer_f32(ctx, 18), got_lower, leaves, ld, 1), 0);
+
+  float expect_upper[18] = {
+      1, 2, 3, 0, 5, 6, 0, 0, 9,
+      10, 11, 12, 0, 14, 15, 0, 0, 18,
+  };
+  float expect_lower[18] = {
+      1, 2, 0, 4, 5, 6, 7, 8, 9,
+      10, 11, 0, 13, 14, 15, 16, 17, 18,
+  };
+  for (int i = 0; i < 18; i++) {
+    ASSERT_FLOAT_EQ(got_upper[i], expect_upper[i], 1e-5);
+    ASSERT_FLOAT_EQ(got_lower[i], expect_lower[i], 1e-5);
+  }
+
+  const int64_t zero_shape[3] = {5, 0, 3};
+  PolyUOp *zero_in = make_buf(ctx, zero_shape, 3);
+  ASSERT_NOT_NULL(poly_triu(ctx, zero_in, 0));
+  ASSERT_NOT_NULL(poly_tril(ctx, zero_in, 0));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════════ */
 /*  Structural gate for the const-registry root fix                       */
 /*                                                                        */

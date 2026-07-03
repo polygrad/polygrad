@@ -2173,11 +2173,11 @@ PolyUOp *poly_tril(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   if (!x) return NULL;
   int64_t shape[POLY_MAX_DIMS];
   int ndim = uop_shape(ctx, x, shape);
-  if (ndim != 2) {
-    fprintf(stderr, "polygrad: tril: only 2D tensors are supported\n");
-    return NULL;
-  }
-  PolyUOp *mask = poly_tri_mask(ctx, shape[0], shape[1], diagonal + 1);
+  if (ndim < 2) return NULL;
+  if (shape[ndim - 2] < 0 || shape[ndim - 1] < 0) return NULL;
+  if (shape[ndim - 2] == 0 || shape[ndim - 1] == 0)
+    return poly_empty_shaped(ctx, poly_dtype_scalar(x->dtype), shape, ndim);
+  PolyUOp *mask = poly_tri_mask(ctx, shape[ndim - 2], shape[ndim - 1], diagonal + 1);
   PolyUOp *zero = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0);
   return poly_where_op(ctx, mask, zero, x);
 }
@@ -2188,11 +2188,11 @@ PolyUOp *poly_triu(PolyCtx *ctx, PolyUOp *x, int diagonal) {
   if (!x) return NULL;
   int64_t shape[POLY_MAX_DIMS];
   int ndim = uop_shape(ctx, x, shape);
-  if (ndim != 2) {
-    fprintf(stderr, "polygrad: triu: only 2D tensors are supported\n");
-    return NULL;
-  }
-  PolyUOp *mask = poly_tri_mask(ctx, shape[0], shape[1], diagonal);
+  if (ndim < 2) return NULL;
+  if (shape[ndim - 2] < 0 || shape[ndim - 1] < 0) return NULL;
+  if (shape[ndim - 2] == 0 || shape[ndim - 1] == 0)
+    return poly_empty_shaped(ctx, poly_dtype_scalar(x->dtype), shape, ndim);
+  PolyUOp *mask = poly_tri_mask(ctx, shape[ndim - 2], shape[ndim - 1], diagonal);
   PolyUOp *zero = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0);
   return poly_where_op(ctx, mask, x, zero);
 }

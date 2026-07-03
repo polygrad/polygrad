@@ -22,6 +22,22 @@ class TestCreation:
         assert t.shape == (2, 3)
         np.testing.assert_allclose(t.numpy(), [[1, 2, 3], [4, 5, 6]])
 
+    def test_triu_tril_batched_last_two_dims(self):
+        arr = np.arange(1, 19, dtype=np.float32).reshape(2, 3, 3)
+        np.testing.assert_allclose(
+            Tensor(arr).triu().numpy(),
+            np.triu(arr),
+        )
+        np.testing.assert_allclose(
+            Tensor(arr).tril(1).numpy(),
+            np.tril(arr, k=1),
+        )
+
+        z = Tensor.zeros(5, 0, 3)
+        assert z.triu().shape == (5, 0, 3)
+        assert z.tril().shape == (5, 0, 3)
+        np.testing.assert_allclose(z.triu().numpy(), np.zeros((5, 0, 3), dtype=np.float32))
+
     def test_empty_creates_unrealized_buffer_placeholder(self):
         t = Tensor.empty((2, 3))
         assert t.shape == (2, 3)

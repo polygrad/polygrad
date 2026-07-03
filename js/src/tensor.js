@@ -411,7 +411,7 @@ function createBoundTensorClass(runtime) {
     get T() { return this.transpose() }
 
     numel() {
-      return this.shape.reduce((a, b) => a * b, 1) || 1
+      return this.shape.reduce((a, b) => a * b, 1)
     }
 
     size(dim) {
@@ -506,6 +506,11 @@ function createBoundTensorClass(runtime) {
     }
 
     async toArray() {
+      const numel = this.numel()
+      if (numel === 0) {
+        const AT = TA_BY_DTYPE[this._dtype] || Float32Array
+        return new AT(0)
+      }
       let t = this
       if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
       if (!t.uop.hasBufferIdentity()) t = t.contiguous()

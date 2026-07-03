@@ -449,6 +449,23 @@
           console.log("DEBUG triu diag", Array.from(arr));
           assertClose(arr, [0, 2, 3, 0, 0, 6, 0, 0, 0]);
         });
+        await test("triu/tril batched last two dims", async () => {
+          const data = [
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+            [[10, 11, 12], [13, 14, 15], [16, 17, 18]]
+          ];
+          const t = new Tensor(data);
+          const upper = t.triu();
+          const lower = t.tril(1);
+          assertShape(upper.shape, [2, 3, 3]);
+          assertShape(lower.shape, [2, 3, 3]);
+          assertClose(await upper.toArray(), [1, 2, 3, 0, 5, 6, 0, 0, 9, 10, 11, 12, 0, 14, 15, 0, 0, 18]);
+          assertClose(await lower.toArray(), [1, 2, 0, 4, 5, 6, 7, 8, 9, 10, 11, 0, 13, 14, 15, 16, 17, 18]);
+          const z = Tensor.zeros(5, 0, 3);
+          assertShape(z.triu().shape, [5, 0, 3]);
+          assertShape(z.tril().shape, [5, 0, 3]);
+          assertClose(await z.triu().toArray(), []);
+        });
         console.log("\n-- Reduction --");
         await test("sum all", async () => {
           const t = new Tensor([1, 2, 3]);
