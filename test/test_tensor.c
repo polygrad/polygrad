@@ -1358,6 +1358,61 @@ TEST(pe, cholesky_solve_and_solve_match_numpy_torch_probe) {
   for (int i = 0; i < 6; i++)
     ASSERT_FLOAT_EQ(got_lwxm[i], expect_wide_mat[i], 8e-4f);
 
+  const int64_t rankdef_square_shape[] = {2, 2};
+  const int64_t rankdef_tall_shape[] = {3, 2};
+  const int64_t rankdef_wide_shape[] = {2, 3};
+  float rankdef_square_a[] = {1, 1, 2, 2};
+  float rankdef_tall_a[] = {1, 1, 2, 2, 3, 3};
+  float rankdef_wide_a[] = {1, 1, 0, 2, 2, 0};
+  float rankdef_square_bv[] = {3, 6};
+  float rankdef_tall_bv[] = {1, 2, 3};
+  float rankdef_square_bm[] = {3, 1, 6, 2};
+
+  PolyUOp *rd_sq_a = make_buf(ctx, rankdef_square_shape, 2);
+  PolyUOp *rd_sq_bv = make_buf(ctx, wide_vec_shape, 1);
+  PolyUOp *rd_sq_xv = poly_lstsq(ctx, rd_sq_a, rd_sq_bv);
+  ASSERT_NOT_NULL(rd_sq_xv);
+  float got_rd_sq_v[2] = {0};
+  PolyUOp *rd_sq_v_leaves[] = {base_buf(rd_sq_a), base_buf(rd_sq_bv)};
+  float *rd_sq_v_ld[] = {rankdef_square_a, rankdef_square_bv};
+  ASSERT_INT_EQ(realize_uop(ctx, rd_sq_xv, poly_buffer_f32(ctx, 2), got_rd_sq_v, rd_sq_v_leaves, rd_sq_v_ld, 2), 0);
+  ASSERT_FLOAT_EQ(got_rd_sq_v[0], 1.5f, 1e-3f);
+  ASSERT_FLOAT_EQ(got_rd_sq_v[1], 1.5f, 1e-3f);
+
+  PolyUOp *rd_sq_bm = make_buf(ctx, wide_mat_shape, 2);
+  PolyUOp *rd_sq_xm = poly_lstsq(ctx, rd_sq_a, rd_sq_bm);
+  ASSERT_NOT_NULL(rd_sq_xm);
+  float got_rd_sq_m[4] = {0};
+  PolyUOp *rd_sq_m_leaves[] = {base_buf(rd_sq_a), base_buf(rd_sq_bm)};
+  float *rd_sq_m_ld[] = {rankdef_square_a, rankdef_square_bm};
+  ASSERT_INT_EQ(realize_uop(ctx, rd_sq_xm, poly_buffer_f32(ctx, 4), got_rd_sq_m, rd_sq_m_leaves, rd_sq_m_ld, 2), 0);
+  float expect_rd_sq_m[] = {1.5f, 0.5f, 1.5f, 0.5f};
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got_rd_sq_m[i], expect_rd_sq_m[i], 1e-3f);
+
+  PolyUOp *rd_tall_a = make_buf(ctx, rankdef_tall_shape, 2);
+  PolyUOp *rd_tall_bv = make_buf(ctx, tall_vec_shape, 1);
+  PolyUOp *rd_tall_x = poly_lstsq(ctx, rd_tall_a, rd_tall_bv);
+  ASSERT_NOT_NULL(rd_tall_x);
+  float got_rd_tall[2] = {0};
+  PolyUOp *rd_tall_leaves[] = {base_buf(rd_tall_a), base_buf(rd_tall_bv)};
+  float *rd_tall_ld[] = {rankdef_tall_a, rankdef_tall_bv};
+  ASSERT_INT_EQ(realize_uop(ctx, rd_tall_x, poly_buffer_f32(ctx, 2), got_rd_tall, rd_tall_leaves, rd_tall_ld, 2), 0);
+  ASSERT_FLOAT_EQ(got_rd_tall[0], 0.5f, 1e-3f);
+  ASSERT_FLOAT_EQ(got_rd_tall[1], 0.5f, 1e-3f);
+
+  PolyUOp *rd_wide_a = make_buf(ctx, rankdef_wide_shape, 2);
+  PolyUOp *rd_wide_bv = make_buf(ctx, wide_vec_shape, 1);
+  PolyUOp *rd_wide_x = poly_lstsq(ctx, rd_wide_a, rd_wide_bv);
+  ASSERT_NOT_NULL(rd_wide_x);
+  float got_rd_wide[3] = {0};
+  PolyUOp *rd_wide_leaves[] = {base_buf(rd_wide_a), base_buf(rd_wide_bv)};
+  float *rd_wide_ld[] = {rankdef_wide_a, rankdef_square_bv};
+  ASSERT_INT_EQ(realize_uop(ctx, rd_wide_x, poly_buffer_f32(ctx, 3), got_rd_wide, rd_wide_leaves, rd_wide_ld, 2), 0);
+  ASSERT_FLOAT_EQ(got_rd_wide[0], 1.5f, 1e-3f);
+  ASSERT_FLOAT_EQ(got_rd_wide[1], 1.5f, 1e-3f);
+  ASSERT_FLOAT_EQ(got_rd_wide[2], 0.0f, 1e-3f);
+
   PolyUOp *bad_a = make_buf(ctx, (int64_t[]){2, 3}, 2);
   ASSERT_TRUE(poly_solve(ctx, bad_a, b_m) == NULL);
   ASSERT_TRUE(poly_lstsq(ctx, bad_a, lbv) == NULL);

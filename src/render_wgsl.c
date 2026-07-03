@@ -1052,15 +1052,24 @@ static PolyUOp *rule_wgsl_shift_u32(PolyCtx *ctx, PolyUOp *u, const PolyBindings
   return poly_uop2(ctx, u->op, u->dtype, u->src[0], cast_amount, u->arg);
 }
 
-/* Rule: CMPLT/XOR on bools → cast to i32, apply op, cast back to bool.
- * WGSL doesn't support comparison/xor on bool operands. tinygrad wgsl.py:41-42. */
+/* Rule: unsupported/mixed bool ALU → cast to i32, apply op, cast back to bool.
+ * tinygrad wgsl.py:41-42 handles bool CMPLT/XOR this way. Polygrad can also
+ * produce mixed bool/int equality after packed bool storage loads; normalize
+ * those before WGSL so expressions like `0u != bool_val` never reach render. */
 static PolyUOp *rule_wgsl_bool_alu(PolyCtx *ctx, PolyUOp *u, const PolyBindings *bindings) {
   (void)bindings;
   if (u->n_src < 2) return NULL;
-  if (!poly_dtype_is_bool(u->src[0]->dtype)) return NULL;
+  bool src0_bool = poly_dtype_is_bool(poly_dtype_scalar(u->src[0]->dtype));
+  bool src1_bool = poly_dtype_is_bool(poly_dtype_scalar(u->src[1]->dtype));
+  if (!src0_bool && !src1_bool) return NULL;
+  if ((u->op == POLY_OP_CMPEQ || u->op == POLY_OP_CMPNE) && src0_bool && src1_bool)
+    return NULL;
   PolyUOp *a = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[0], poly_arg_none());
   PolyUOp *b = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, u->src[1], poly_arg_none());
-  PolyUOp *result = poly_uop2(ctx, u->op, POLY_INT32, a, b, poly_arg_none());
+  PolyDType result_dt =
+      (u->op == POLY_OP_XOR) ? POLY_INT32 : ((u->dtype.count > 1) ? poly_dtype_vec(POLY_BOOL, u->dtype.count) : POLY_BOOL);
+  PolyUOp *result = poly_uop2(ctx, u->op, result_dt, a, b, poly_arg_none());
+  if (poly_dtype_is_bool(poly_dtype_scalar(result->dtype))) return result;
   return poly_uop1(ctx, POLY_OP_CAST, POLY_BOOL, result, poly_arg_none());
 }
 
@@ -1075,12 +1084,14 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
 
   PolyOpSet bool_alu_set = {{0, 0}};
   bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_CMPLT);
+  bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_CMPEQ);
+  bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_CMPNE);
   bool_alu_set = poly_opset_add(bool_alu_set, POLY_OP_XOR);
 
   PolyRule rules[] = {
       /* WGSL shift amounts must be u32 (tinygrad wgsl.py:49-50) */
       {poly_pat_ops(shift_set, NULL, 0, NULL), rule_wgsl_shift_u32},
-      /* WGSL bool CMPLT/XOR: cast to i32, apply, cast back (tinygrad wgsl.py:41-42) */
+      /* WGSL bool ALU normalization: tinygrad wgsl.py:41-42 plus mixed equality guard. */
       {poly_pat_ops(bool_alu_set, NULL, 0, NULL), rule_wgsl_bool_alu},
   };
 

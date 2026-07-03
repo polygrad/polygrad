@@ -837,6 +837,18 @@
             [-0.33333334, -0.33333334, 0.6666667, 1.6666666, 1.3333334, 2.3333333],
             1e-3
           );
+          const rankSquareVec = new Tensor([[1, 1], [2, 2]]).lstsq(new Tensor([3, 6]));
+          assertShape(rankSquareVec.shape, [2]);
+          assertClose(await rankSquareVec.toArray(), [1.5, 1.5], 2e-3);
+          const rankSquareMat = new Tensor([[1, 1], [2, 2]]).lstsq(new Tensor([[3, 1], [6, 2]]));
+          assertShape(rankSquareMat.shape, [2, 2]);
+          assertClose(await rankSquareMat.toArray(), [1.5, 0.5, 1.5, 0.5], 2e-3);
+          const rankTall = new Tensor([[1, 1], [2, 2], [3, 3]]).lstsq(new Tensor([1, 2, 3]));
+          assertShape(rankTall.shape, [2]);
+          assertClose(await rankTall.toArray(), [0.5, 0.5], 2e-3);
+          const rankWide = new Tensor([[1, 1, 0], [2, 2, 0]]).lstsq(new Tensor([3, 6]));
+          assertShape(rankWide.shape, [3]);
+          assertClose(await rankWide.toArray(), [1.5, 1.5, 0], 2e-3);
           let ok = false;
           try {
             new Tensor([[1, 1, 1], [1, 1, 1]]).lstsq(new Tensor([1, 1, 1]));

@@ -1029,6 +1029,39 @@ class TestMatmulAndLoss:
             atol=4e-5,
         )
 
+        rankdef_cases = [
+            (
+                np.array([[1.0, 1.0], [2.0, 2.0]], dtype=np.float32),
+                np.array([3.0, 6.0], dtype=np.float32),
+            ),
+            (
+                np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float32),
+                np.array([1.0, 2.0, 3.0], dtype=np.float32),
+            ),
+            (
+                np.array([[1.0, 1.0, 0.0], [2.0, 2.0, 0.0]], dtype=np.float32),
+                np.array([3.0, 6.0], dtype=np.float32),
+            ),
+            (
+                np.array([[1.0, 1.0], [2.0, 2.0]], dtype=np.float32),
+                np.array([[3.0, 1.0], [6.0, 2.0]], dtype=np.float32),
+            ),
+        ]
+        for rd_a, rd_b in rankdef_cases:
+            got = Tensor(rd_a).lstsq(Tensor(rd_b)).numpy()
+            np.testing.assert_allclose(
+                got,
+                np.linalg.lstsq(rd_a, rd_b, rcond=None)[0],
+                rtol=2e-4,
+                atol=2e-4,
+            )
+            np.testing.assert_allclose(
+                got,
+                torch.linalg.lstsq(torch.tensor(rd_a), torch.tensor(rd_b)).solution.numpy(),
+                rtol=2e-4,
+                atol=2e-4,
+            )
+
         with pytest.raises(ValueError, match='cannot lstsq'):
             Tensor(np.ones((2, 3), dtype=np.float32)).lstsq(Tensor(np.ones((3,), dtype=np.float32)))
 

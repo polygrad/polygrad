@@ -321,6 +321,7 @@ async function createWasmCore(device) {
         requiredLimits: {
           maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
           maxComputeWorkgroupsPerDimension: adapter.limits.maxComputeWorkgroupsPerDimension,
+          maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
           maxBufferSize: adapter.limits.maxBufferSize
         }
       })
