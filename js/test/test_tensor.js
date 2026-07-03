@@ -662,22 +662,34 @@ async function runTensorTests(pg) {
   })
 
   await test('qr matches tinygrad probe', async () => {
-    let pair = new Tensor([[1, 2], [3, 4]]).qr()
-    assertShape(pair[0].shape, [2, 2])
-    assertShape(pair[1].shape, [2, 2])
-    assertClose(await pair[0].dot(pair[1]).toArray(), [1, 2, 3, 4], 1e-3)
-
-    pair = new Tensor([[1, 2], [3, 4], [5, 6]]).qr()
-    assertShape(pair[0].shape, [3, 3])
-    assertShape(pair[1].shape, [3, 2])
-    assertClose(await pair[0].dot(pair[1]).toArray(), [1, 2, 3, 4, 5, 6], 1e-3)
-
-    pair = new Tensor([[0, 1], [0, 2]]).qr()
-    assertClose(await pair[0].dot(pair[1]).toArray(), [0, 1, 0, 2], 1e-3)
-    const qVals = Array.from(await pair[0].toArray())
-    const rVals = Array.from(await pair[1].toArray())
-    const vals = qVals.concat(rVals)
-    for (const v of vals) assert(Number.isFinite(v), `expected finite QR value, got ${v}`)
+    const cases = [
+      { arr: [[1, 2], [3, 4]], q: [2, 2], r: [2, 2], flat: [1, 2, 3, 4] },
+      { arr: [[1, 2], [3, 4], [5, 6]], q: [3, 3], r: [3, 2], flat: [1, 2, 3, 4, 5, 6] },
+      { arr: [[1, 2, 3], [4, 5, 6]], q: [2, 2], r: [2, 3], flat: [1, 2, 3, 4, 5, 6] },
+      { arr: [[0, 1], [0, 2]], q: [2, 2], r: [2, 2], flat: [0, 1, 0, 2] },
+      {
+        arr: [[[1, 2], [3, 4]], [[2, 0], [0, 2]]],
+        q: [2, 2, 2], r: [2, 2, 2], flat: [1, 2, 3, 4, 2, 0, 0, 2]
+      },
+      {
+        arr: [[[1, 2], [3, 4], [5, 6]], [[2, 1], [0, 3], [4, 5]]],
+        q: [2, 3, 3], r: [2, 3, 2], flat: [1, 2, 3, 4, 5, 6, 2, 1, 0, 3, 4, 5]
+      },
+      {
+        arr: [[[1, 2, 3], [4, 5, 6]], [[2, 1, 0], [0, 3, 4]]],
+        q: [2, 2, 2], r: [2, 2, 3], flat: [1, 2, 3, 4, 5, 6, 2, 1, 0, 0, 3, 4]
+      },
+    ]
+    for (const c of cases) {
+      const pair = new Tensor(c.arr).qr()
+      assertShape(pair[0].shape, c.q)
+      assertShape(pair[1].shape, c.r)
+      assertClose(await pair[0].dot(pair[1]).toArray(), c.flat, 2e-3)
+      const qVals = Array.from(await pair[0].toArray())
+      const rVals = Array.from(await pair[1].toArray())
+      const vals = qVals.concat(rVals)
+      for (const v of vals) assert(Number.isFinite(v), `expected finite QR value, got ${v}`)
+    }
   })
 
   await test('crossEntropy with sparse targets', async () => {

@@ -758,40 +758,74 @@ TEST(pe, dot_v2_e2e) {
 
 TEST(pe, qr_e2e_matches_tinygrad_probe) {
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *a = make_buf(ctx, (int64_t[]){2, 2}, 2);
-  float da[] = {1, 2, 3, 4};
-  PolyUOp *q = NULL, *r = NULL;
-  ASSERT_INT_EQ(poly_qr(ctx, a, &q, &r), 0);
-  ASSERT_NOT_NULL(q);
-  ASSERT_NOT_NULL(r);
-  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, q)[0], 2);
-  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, q)[1], 2);
-  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[0], 2);
-  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[1], 2);
 
-  PolyUOp *recon = poly_dot(ctx, q, r);
-  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
-  float got[4] = {0};
-  PolyUOp *leaves[] = {base_buf(a)};
-  float *ld[] = {da};
-  ASSERT_INT_EQ(realize_uop(ctx, recon, out_buf, got, leaves, ld, 1), 0);
-  for (int i = 0; i < 4; i++) {
-    ASSERT_TRUE(isfinite(got[i]));
-    ASSERT_FLOAT_EQ(got[i], da[i], 1e-3f);
-  }
+  const int64_t shape_square[] = {2, 2};
+  const int64_t q_square[] = {2, 2};
+  float data_square[] = {1, 2, 3, 4};
 
-  PolyUOp *z = make_buf(ctx, (int64_t[]){2, 2}, 2);
-  float dz[] = {0, 1, 0, 2};
-  PolyUOp *zq = NULL, *zr = NULL;
-  ASSERT_INT_EQ(poly_qr(ctx, z, &zq, &zr), 0);
-  recon = poly_dot(ctx, zq, zr);
-  float got_z[4] = {0};
-  leaves[0] = base_buf(z);
-  ld[0] = dz;
-  ASSERT_INT_EQ(realize_uop(ctx, recon, out_buf, got_z, leaves, ld, 1), 0);
-  for (int i = 0; i < 4; i++) {
-    ASSERT_TRUE(isfinite(got_z[i]));
-    ASSERT_FLOAT_EQ(got_z[i], dz[i], 1e-3f);
+  const int64_t shape_tall[] = {3, 2};
+  const int64_t q_tall[] = {3, 3};
+  float data_tall[] = {1, 2, 3, 4, 5, 6};
+
+  const int64_t shape_wide[] = {2, 3};
+  const int64_t q_wide[] = {2, 2};
+  float data_wide[] = {1, 2, 3, 4, 5, 6};
+
+  const int64_t shape_zero[] = {2, 2};
+  const int64_t q_zero[] = {2, 2};
+  float data_zero[] = {0, 1, 0, 2};
+
+  const int64_t shape_batched_square[] = {2, 2, 2};
+  const int64_t q_batched_square[] = {2, 2, 2};
+  float data_batched_square[] = {1, 2, 3, 4, 2, 0, 0, 2};
+
+  const int64_t shape_batched_tall[] = {2, 3, 2};
+  const int64_t q_batched_tall[] = {2, 3, 3};
+  float data_batched_tall[] = {1, 2, 3, 4, 5, 6, 2, 1, 0, 3, 4, 5};
+
+  const int64_t shape_batched_wide[] = {2, 2, 3};
+  const int64_t q_batched_wide[] = {2, 2, 2};
+  float data_batched_wide[] = {1, 2, 3, 4, 5, 6, 2, 1, 0, 0, 3, 4};
+
+  struct {
+    const int64_t *shape;
+    int ndim;
+    const int64_t *q_shape;
+    float *data;
+    int64_t numel;
+  } cases[] = {
+      {shape_square, 2, q_square, data_square, 4},
+      {shape_tall, 2, q_tall, data_tall, 6},
+      {shape_wide, 2, q_wide, data_wide, 6},
+      {shape_zero, 2, q_zero, data_zero, 4},
+      {shape_batched_square, 3, q_batched_square, data_batched_square, 8},
+      {shape_batched_tall, 3, q_batched_tall, data_batched_tall, 12},
+      {shape_batched_wide, 3, q_batched_wide, data_batched_wide, 12},
+  };
+
+  for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+    PolyUOp *a = make_buf(ctx, cases[c].shape, cases[c].ndim);
+    PolyUOp *q = NULL, *r = NULL;
+    ASSERT_INT_EQ(poly_qr(ctx, a, &q, &r), 0);
+    ASSERT_NOT_NULL(q);
+    ASSERT_NOT_NULL(r);
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, q), cases[c].ndim);
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, r), cases[c].ndim);
+    for (int i = 0; i < cases[c].ndim; i++) {
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, q)[i], cases[c].q_shape[i]);
+      ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[i], cases[c].shape[i]);
+    }
+
+    PolyUOp *recon = poly_dot(ctx, q, r);
+    PolyUOp *out_buf = poly_buffer_f32(ctx, cases[c].numel);
+    float got[32] = {0};
+    PolyUOp *leaves[] = {base_buf(a)};
+    float *ld[] = {cases[c].data};
+    ASSERT_INT_EQ(realize_uop(ctx, recon, out_buf, got, leaves, ld, 1), 0);
+    for (int64_t i = 0; i < cases[c].numel; i++) {
+      ASSERT_TRUE(isfinite(got[i]));
+      ASSERT_FLOAT_EQ(got[i], cases[c].data[i], 2e-3f);
+    }
   }
 
   poly_ctx_destroy(ctx);
