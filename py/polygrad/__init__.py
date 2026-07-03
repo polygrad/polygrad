@@ -15,9 +15,19 @@ from .device import Device
 from .instance import Instance
 from .jit import CompiledCallable, Jit, JitError, compile, jit
 
+
+def stats():
+    """Return monotonically accumulated counters for the module default context."""
+    s = _ffi.PolyCtxStats()
+    rc = _ffi.get_lib().poly_ctx_stats(_default_ctx, s)
+    if rc != 0:
+        raise RuntimeError('poly_ctx_stats failed')
+    return {name: getattr(s, name) for name, _ in s._fields_}
+
+
 __all__ = [
     'Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance',
-    'CompiledCallable', 'Jit', 'JitError', 'compile', 'jit',
+    'CompiledCallable', 'Jit', 'JitError', 'compile', 'jit', 'stats',
 ]
 
 try:

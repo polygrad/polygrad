@@ -695,6 +695,17 @@ typedef struct {
   size_t entrypoint_entries;
   size_t compiled_artifact_bytes;
   size_t runtime_artifact_entries;
+  size_t launch_count;
+  size_t schedule_cache_hits;
+  size_t schedule_cache_misses;
+  size_t runtime_cache_hits;
+  size_t runtime_cache_misses;
+  size_t buffer_read_count;
+  size_t buffer_read_bytes;
+  size_t buffer_write_count;
+  size_t buffer_write_bytes;
+  size_t buffer_copy_count;
+  size_t buffer_copy_bytes;
 } PolyCtxStats;
 
 int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out);

@@ -343,6 +343,17 @@ TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
   ASSERT_INT_EQ(poly_arena_high_water(ctx->scratch), stats.scratch_high_water);
   ASSERT_INT_EQ(stats.scratch_bytes, 0);
   ASSERT_INT_EQ(stats.buffer_owned_bytes, 0);
+  ASSERT_INT_EQ(stats.launch_count, 0);
+  ASSERT_INT_EQ(stats.schedule_cache_hits, 0);
+  ASSERT_INT_EQ(stats.schedule_cache_misses, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_hits, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_misses, 0);
+  ASSERT_INT_EQ(stats.buffer_read_count, 0);
+  ASSERT_INT_EQ(stats.buffer_read_bytes, 0);
+  ASSERT_INT_EQ(stats.buffer_write_count, 0);
+  ASSERT_INT_EQ(stats.buffer_write_bytes, 0);
+  ASSERT_INT_EQ(stats.buffer_copy_count, 0);
+  ASSERT_INT_EQ(stats.buffer_copy_bytes, 0);
   ASSERT_INT_EQ(stats.buffer_owned_current_bytes, 0);
   ASSERT_INT_EQ(stats.buffer_owned_source_bytes, 0);
 
@@ -365,6 +376,16 @@ TEST(uop, ctx_stats_reports_arena_and_scratch_high_water) {
   ASSERT_INT_EQ(stats.buffer_owned_current_bytes, 8 * sizeof(float));
   ASSERT_INT_EQ(stats.buffer_owned_source_bytes, 0);
   ASSERT_INT_EQ(stats.buffer_owned_bytes, 8 * sizeof(float));
+
+  float write_data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  float read_data[8] = {0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, owned_buf, write_data, sizeof(write_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, owned_buf, read_data, sizeof(read_data)), 0);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_INT_EQ(stats.buffer_write_count, 1);
+  ASSERT_INT_EQ(stats.buffer_write_bytes, sizeof(write_data));
+  ASSERT_INT_EQ(stats.buffer_read_count, 1);
+  ASSERT_INT_EQ(stats.buffer_read_bytes, sizeof(read_data));
 
   PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
   PolyUOp *x = a;

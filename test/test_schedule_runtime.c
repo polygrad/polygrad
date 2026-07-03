@@ -1790,6 +1790,11 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
   ASSERT_INT_EQ(stats.runtime_cache_entries, 0);
   ASSERT_INT_EQ(stats.program_cache_entries, 0);
   ASSERT_INT_EQ(stats.compiled_artifact_bytes, 0);
+  ASSERT_INT_EQ(stats.launch_count, 0);
+  ASSERT_INT_EQ(stats.schedule_cache_hits, 0);
+  ASSERT_INT_EQ(stats.schedule_cache_misses, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_hits, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_misses, 0);
 
   PolyUOp *a = poly_buffer_f32(ctx, 4);
   PolyUOp *b = poly_buffer_f32(ctx, 4);
@@ -1819,6 +1824,11 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
   ASSERT_INT_EQ(stats.to_program_cache_entries, expected_to_program_cache_entries(ctx, 1));
   ASSERT_INT_EQ(stats.runtime_cache_entries, 1);
   ASSERT_INT_EQ(stats.program_cache_entries, 1);
+  ASSERT_TRUE(stats.launch_count >= 1);
+  ASSERT_INT_EQ(stats.schedule_cache_misses, 1);
+  ASSERT_INT_EQ(stats.runtime_cache_misses, 1);
+  ASSERT_INT_EQ(stats.schedule_cache_hits, 0);
+  ASSERT_INT_EQ(stats.runtime_cache_hits, 0);
   ASSERT_INT_EQ(stats.compiled_artifact_bytes, poly_runtime_cache_artifact_bytes(ctx));
   ASSERT_INT_EQ(
       (int)poly_program_cache_artifact_bytes(ctx),
@@ -1900,6 +1910,11 @@ TEST(schedule_runtime, ctx_stats_fixed_shape_replay_plateaus) {
   ASSERT_INT_EQ(replay.shape_cache_entries, first.shape_cache_entries);
   ASSERT_INT_EQ(replay.buffer_entries, first.buffer_entries);
   ASSERT_INT_EQ(replay.compiled_artifact_bytes, first.compiled_artifact_bytes);
+  ASSERT_TRUE(replay.launch_count >= first.launch_count + 32);
+  ASSERT_TRUE(replay.schedule_cache_hits >= first.schedule_cache_hits + 32);
+  ASSERT_INT_EQ(replay.schedule_cache_misses, first.schedule_cache_misses);
+  ASSERT_TRUE(replay.runtime_cache_hits >= first.runtime_cache_hits + 32);
+  ASSERT_INT_EQ(replay.runtime_cache_misses, first.runtime_cache_misses);
 
   poly_ctx_destroy(ctx);
   schedule_restore_env(&scache);
@@ -1973,6 +1988,11 @@ TEST(schedule_runtime, ctx_stats_runtime_var_replay_plateaus) {
   ASSERT_INT_EQ(replay.shape_cache_entries, first.shape_cache_entries);
   ASSERT_INT_EQ(replay.buffer_entries, first.buffer_entries);
   ASSERT_INT_EQ(replay.compiled_artifact_bytes, first.compiled_artifact_bytes);
+  ASSERT_TRUE(replay.launch_count >= first.launch_count + (int)(sizeof(vals) / sizeof(vals[0])));
+  ASSERT_INT_EQ(replay.schedule_cache_hits, first.schedule_cache_hits);
+  ASSERT_INT_EQ(replay.schedule_cache_misses, first.schedule_cache_misses);
+  ASSERT_INT_EQ(replay.runtime_cache_hits, first.runtime_cache_hits);
+  ASSERT_INT_EQ(replay.runtime_cache_misses, first.runtime_cache_misses);
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);

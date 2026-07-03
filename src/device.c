@@ -44,6 +44,19 @@ PolyBuffer poly_buffer_make_host_view(void *ptr, size_t nbytes) {
   };
 }
 
+static void poly_ctx_record_buffer_copy(PolyCtx *ctx, size_t nbytes) {
+  if (!ctx || nbytes == 0) return;
+  ctx->buffer_copy_count++;
+  ctx->buffer_copy_bytes += nbytes;
+}
+
+static size_t poly_buffer_copy_nbytes(const PolyBuffer *dst, const PolyBuffer *src) {
+  if (!dst || !src) return 0;
+  size_t nbytes = dst->nbytes;
+  if (src->nbytes > 0 && (nbytes == 0 || src->nbytes < nbytes)) nbytes = src->nbytes;
+  return nbytes;
+}
+
 /* Device helpers */
 
 PolyDevice poly_device_default(void) {
@@ -266,8 +279,7 @@ int poly_buffer_copy(PolyBuffer *dst, const PolyBuffer *src) {
   const PolyAllocator *src_alloc = buffer_allocator(src);
   if (!dst_alloc || !src_alloc) return -1;
 
-  size_t nbytes = dst->nbytes;
-  if (src->nbytes > 0 && (nbytes == 0 || src->nbytes < nbytes)) nbytes = src->nbytes;
+  size_t nbytes = poly_buffer_copy_nbytes(dst, src);
   if (nbytes == 0) return 0;
 
   int rc = -1;
@@ -400,7 +412,9 @@ int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **hos
   PolyBuffer *root = cur->src;
   if (root && poly_device_is_host_addressable(root->device)) {
     if (!root->valid) {
+      size_t copied = poly_buffer_copy_nbytes(root, cur);
       if (!cur->valid || poly_buffer_copy(root, cur) != 0) return -1;
+      poly_ctx_record_buffer_copy(ctx, copied);
     }
     if (host_out) *host_out = root;
     return 0;
@@ -409,10 +423,12 @@ int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **hos
   size_t nbytes = cur->nbytes ? cur->nbytes : poly_buffer_nbytes_for_uop(buf);
   if (poly_buffer_alloc_host_root(ctx, nbytes, false, &root) != 0) return -1;
   if (cur->valid) {
+    size_t copied = poly_buffer_copy_nbytes(root, cur);
     if (poly_buffer_copy(root, cur) != 0) {
       poly_buffer_free(root);
       return -1;
     }
+    poly_ctx_record_buffer_copy(ctx, copied);
   }
   cur->src = root;
   if (host_out) *host_out = root;
@@ -495,6 +511,8 @@ int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes
   if (nbytes == 0 || root->nbytes < nbytes) return -1;
   memcpy(root->ptr, src, nbytes);
   root->valid = true;
+  ctx->buffer_write_count++;
+  ctx->buffer_write_bytes += nbytes;
   PolyBuffer *cur = poly_buffer_get(ctx, buf);
   if (cur && cur != root && cur->src == root) cur->valid = false;
   return 0;
@@ -543,7 +561,10 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
     cur->device = device;
     if (cur->valid) return 0;
     if (!cur->src || !cur->src->valid) return -1;
-    return poly_buffer_copy(cur, cur->src);
+    size_t copied = poly_buffer_copy_nbytes(cur, cur->src);
+    int rc = poly_buffer_copy(cur, cur->src);
+    if (rc == 0) poly_ctx_record_buffer_copy(ctx, copied);
+    return rc;
   }
 
   const PolyBuffer *source = poly_buffer_valid_source(cur);
@@ -553,10 +574,12 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
   PolyBuffer *src_root = poly_buffer_retained_root(cur);
   PolyBuffer *dst = NULL;
   if (poly_buffer_alloc_residency(ctx, buf, device, nbytes, false, src_root, &dst) != 0) return -1;
+  size_t copied = poly_buffer_copy_nbytes(dst, source);
   if (poly_buffer_copy(dst, source) != 0) {
     poly_buffer_free(dst);
     return -1;
   }
+  poly_ctx_record_buffer_copy(ctx, copied);
   poly_buffer_free_except_root(cur, src_root);
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
   return 0;
@@ -615,5 +638,7 @@ int poly_buffer_read(PolyCtx *ctx, PolyUOp *buf, void *dst, size_t nbytes) {
   if (poly_buffer_ensure_host_current(ctx, buf, &host) != 0 || !host || !host->ptr) return -1;
   if (nbytes == 0 || host->nbytes < nbytes) return -1;
   memcpy(dst, host->ptr, nbytes);
+  ctx->buffer_read_count++;
+  ctx->buffer_read_bytes += nbytes;
   return 0;
 }

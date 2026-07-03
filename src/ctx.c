@@ -35,6 +35,17 @@ PolyCtx *poly_ctx_new(void) {
   ctx->runtime_cache = poly_map_new(16);
   ctx->runtime_artifact_entries = 0;
   ctx->runtime_artifact_live_bytes = 0;
+  ctx->launch_count = 0;
+  ctx->schedule_cache_hits = 0;
+  ctx->schedule_cache_misses = 0;
+  ctx->runtime_cache_hits = 0;
+  ctx->runtime_cache_misses = 0;
+  ctx->buffer_read_count = 0;
+  ctx->buffer_read_bytes = 0;
+  ctx->buffer_write_count = 0;
+  ctx->buffer_write_bytes = 0;
+  ctx->buffer_copy_count = 0;
+  ctx->buffer_copy_bytes = 0;
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
   ctx->tensors_by_uop = poly_map_new(64);
@@ -169,6 +180,17 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->registry_entries = (size_t)ctx->n_entries;
   out->entrypoint_entries = (size_t)ctx->n_ep;
   out->compiled_artifact_bytes = poly_runtime_cache_artifact_bytes(ctx);
+  out->launch_count = ctx->launch_count;
+  out->schedule_cache_hits = ctx->schedule_cache_hits;
+  out->schedule_cache_misses = ctx->schedule_cache_misses;
+  out->runtime_cache_hits = ctx->runtime_cache_hits;
+  out->runtime_cache_misses = ctx->runtime_cache_misses;
+  out->buffer_read_count = ctx->buffer_read_count;
+  out->buffer_read_bytes = ctx->buffer_read_bytes;
+  out->buffer_write_count = ctx->buffer_write_count;
+  out->buffer_write_bytes = ctx->buffer_write_bytes;
+  out->buffer_copy_count = ctx->buffer_copy_count;
+  out->buffer_copy_bytes = ctx->buffer_copy_bytes;
   return 0;
 }
 

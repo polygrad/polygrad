@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from polygrad import Device, Jit, JitError, Tensor, Variable, compile as pg_compile, jit
+from polygrad import Device, Jit, JitError, Tensor, Variable, compile as pg_compile, jit, stats as pg_stats
 
 
 class TestCreation:
@@ -43,6 +43,18 @@ class TestCreation:
         assert t.shape == (2, 3)
         assert t.uop.has_buffer_identity()
         assert not t.uop.is_realized
+
+    def test_default_context_stats_track_core_work(self):
+        before = pg_stats()
+        x = Tensor.empty((3,), dtype='float32')
+        x.copy_from(np.array([1.0, 2.0, 3.0], dtype=np.float32))
+        y = (x + 1).realize()
+        np.testing.assert_allclose(y.numpy(), [2.0, 3.0, 4.0])
+        after = pg_stats()
+        assert after['buffer_write_bytes'] >= before['buffer_write_bytes'] + 12
+        assert after['buffer_read_bytes'] >= before['buffer_read_bytes'] + 12
+        assert after['launch_count'] >= before['launch_count'] + 1
+        assert after['runtime_cache_misses'] >= before['runtime_cache_misses']
 
     def test_empty_rejects_name_like_tinygrad(self):
         with pytest.raises(TypeError, match='Tensor.empty does not accept name'):

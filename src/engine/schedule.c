@@ -4060,7 +4060,11 @@ static PolyScheduleCacheEntry *poly_lower_kernel_graph_to_cache_entry(PolyCtx *c
   if (!cache_key) return NULL;
   uint32_t cache_hash = poly_ptr_hash(cache_key) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
   PolyScheduleCacheEntry *cached = poly_map_get(ctx->schedule_cache, cache_hash, cache_key, poly_ptr_eq);
-  if (cached) return cached;
+  if (cached) {
+    if (ctx) ctx->schedule_cache_hits++;
+    return cached;
+  }
+  if (ctx) ctx->schedule_cache_misses++;
 
   PolyScheduleCacheEntry *entry = NULL;
   PolyUOp *linear = poly_build_linear_from_kernel_graph_uncached(ctx, kernel_graph, NULL, 0, &entry);
@@ -4251,6 +4255,7 @@ static PolyScheduleCacheEntry *poly_lower_sink_to_cache_entry_with_kernel_graph(
           : NULL;
   double t_key = timing ? poly_now_ms() : 0.0;
   if (cached) {
+    if (ctx) ctx->schedule_cache_hits++;
     if (timing) {
       fprintf(
           stderr,
@@ -4263,6 +4268,7 @@ static PolyScheduleCacheEntry *poly_lower_sink_to_cache_entry_with_kernel_graph(
     if (input_order_owned) free(input_order);
     return cached;
   }
+  if (poly_schedule_cache_enabled() && ctx) ctx->schedule_cache_misses++;
   if (timing) {
     fprintf(
         stderr,
@@ -4936,6 +4942,7 @@ static int poly_lower_compute_call_cached(
           : NULL;
 
   if (!entry) {
+    if (poly_program_cache_enabled() && ctx && ctx->runtime_cache) ctx->runtime_cache_misses++;
     char fn_name[64];
     stable_kernel_fn_name(ctx, fn_name, sizeof(fn_name), device, program);
 
@@ -4983,6 +4990,7 @@ static int poly_lower_compute_call_cached(
   }
 
   if (!entry || !entry->runtime_program) return -1;
+  if (poly_program_cache_enabled() && ctx && ctx->runtime_cache) ctx->runtime_cache_hits++;
   if (runtime_entry_out)
     *runtime_entry_out = poly_runtime_cache_entry_retain(entry->runtime_program);
   *out = entry->runtime_program->runner;
@@ -6942,6 +6950,7 @@ static int poly_schedule_call_run_prepared(
       sched->run->kernel_args[call_index], sched->run->merged_vars, n_all, var_int_idx,
       &sched->run->var_int_storage, &sched->run->var_int_cap, NULL, "run_schedule"
   );
+  if (ret == 0) ctx->launch_count++;
   if (ret != 0) return ret;
 
   if (poly_commit_call_buffer_writes(ctx, sched, call_index, rt->lowered_device, NULL) != 0)
@@ -7271,6 +7280,7 @@ int poly_run_compiled_schedule(
         run->merged_vars, n_all, &var_int_idx, &run->var_int_storage, &run->var_int_cap, plan,
         "plan_run"
     );
+    if (ret == 0) plan->ctx->launch_count++;
     double t_call_commit0 = timing ? poly_now_ms() : 0.0;
     if (timing) t_loop_execute += t_call_commit0 - t_call_execute0;
     if (ret == 0 && used_ctx_slots) {

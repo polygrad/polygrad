@@ -71,6 +71,41 @@ class PolyOptimConfig(ctypes.Structure):
         ('classic', ctypes.c_bool),
     ]
 
+class PolyCtxStats(ctypes.Structure):
+    _fields_ = [
+        ('arena_bytes', ctypes.c_size_t),
+        ('arena_high_water', ctypes.c_size_t),
+        ('scratch_bytes', ctypes.c_size_t),
+        ('scratch_high_water', ctypes.c_size_t),
+        ('cse_entries', ctypes.c_size_t),
+        ('schedule_cache_entries', ctypes.c_size_t),
+        ('to_program_cache_entries', ctypes.c_size_t),
+        ('runtime_cache_entries', ctypes.c_size_t),
+        ('program_cache_entries', ctypes.c_size_t),
+        ('shape_cache_entries', ctypes.c_size_t),
+        ('buffer_entries', ctypes.c_size_t),
+        ('buffer_owned_bytes', ctypes.c_size_t),
+        ('buffer_owned_current_bytes', ctypes.c_size_t),
+        ('buffer_owned_source_bytes', ctypes.c_size_t),
+        ('tensor_entries', ctypes.c_size_t),
+        ('tensor_records', ctypes.c_size_t),
+        ('registry_entries', ctypes.c_size_t),
+        ('entrypoint_entries', ctypes.c_size_t),
+        ('compiled_artifact_bytes', ctypes.c_size_t),
+        ('runtime_artifact_entries', ctypes.c_size_t),
+        ('launch_count', ctypes.c_size_t),
+        ('schedule_cache_hits', ctypes.c_size_t),
+        ('schedule_cache_misses', ctypes.c_size_t),
+        ('runtime_cache_hits', ctypes.c_size_t),
+        ('runtime_cache_misses', ctypes.c_size_t),
+        ('buffer_read_count', ctypes.c_size_t),
+        ('buffer_read_bytes', ctypes.c_size_t),
+        ('buffer_write_count', ctypes.c_size_t),
+        ('buffer_write_bytes', ctypes.c_size_t),
+        ('buffer_copy_count', ctypes.c_size_t),
+        ('buffer_copy_bytes', ctypes.c_size_t),
+    ]
+
 class PolyInstanceOptions(ctypes.Structure):
     _fields_ = [
         ('own_ctx_on_success', ctypes.c_bool),
@@ -205,6 +240,9 @@ def _declare_signatures(lib):
 
     lib.poly_ctx_named_count.restype = ctypes.c_int
     lib.poly_ctx_named_count.argtypes = [_ptr]
+
+    lib.poly_ctx_stats.restype = ctypes.c_int
+    lib.poly_ctx_stats.argtypes = [_ptr, ctypes.POINTER(PolyCtxStats)]
 
     # --- Op helpers ---
     lib.poly_op_count.restype = ctypes.c_int

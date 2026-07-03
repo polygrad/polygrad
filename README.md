@@ -162,6 +162,12 @@ Polygrad compiles tensor operations into fused C kernels at runtime. A disk cach
 | numpy() readback | Zero-copy (returns view) |
 | Multi-output readback | `Tensor.numpy_many(...)` in Python and `Tensor.toTypedArrays(...)` in JS batch realization before per-output buffer reads |
 
+Runtime stats are exposed as structured embedding/debug data: Python
+`polygrad.stats()` returns `PolyCtxStats` fields, and JS `pg.stats().coreStats`
+includes launch counts, schedule/runtime cache hits and misses, buffer
+read/write/copy bytes, cache sizes, and runtime artifact bytes. tinygrad keeps
+similar counters internal through `GlobalCounters` and DEBUG output.
+
 ### Kernel fusion
 
 Polygrad fuses chains of element-wise operations into a single kernel that makes one pass over memory. Numpy executes each operation separately, allocating a temporary array for each intermediate result.

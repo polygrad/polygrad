@@ -210,6 +210,56 @@ async function createWasmCore(device) {
     return out
   }
 
+  const ctxStatsFields = [
+    'arenaBytes',
+    'arenaHighWater',
+    'scratchBytes',
+    'scratchHighWater',
+    'cseEntries',
+    'scheduleCacheEntries',
+    'toProgramCacheEntries',
+    'runtimeCacheEntries',
+    'programCacheEntries',
+    'shapeCacheEntries',
+    'bufferEntries',
+    'bufferOwnedBytes',
+    'bufferOwnedCurrentBytes',
+    'bufferOwnedSourceBytes',
+    'tensorEntries',
+    'tensorRecords',
+    'registryEntries',
+    'entrypointEntries',
+    'compiledArtifactBytes',
+    'runtimeArtifactEntries',
+    'launchCount',
+    'scheduleCacheHits',
+    'scheduleCacheMisses',
+    'runtimeCacheHits',
+    'runtimeCacheMisses',
+    'bufferReadCount',
+    'bufferReadBytes',
+    'bufferWriteCount',
+    'bufferWriteBytes',
+    'bufferCopyCount',
+    'bufferCopyBytes'
+  ]
+
+  function readCtxStats(ctx) {
+    const ptr = Module._malloc(ctxStatsFields.length * 4)
+    try {
+      const rc = Module._poly_ctx_stats(ctx, ptr)
+      if (rc !== 0) throw new Error('poly_ctx_stats failed (rc=' + rc + ')')
+      const h32 = heap32()
+      const out = {}
+      for (let i = 0; i < ctxStatsFields.length; i++) {
+        out[ctxStatsFields[i]] = h32[(ptr >> 2) + i] >>> 0
+      }
+      return out
+    } finally {
+      Module._free(ptr)
+    }
+  }
+
   function writeOptimConfig(cfg) {
     const ptr = Module._malloc(32)
     const u8 = heapU8()
@@ -694,6 +744,7 @@ async function createWasmCore(device) {
         if (ptr) Module._free(ptr)
       }
     },
+    poly_ctx_stats: readCtxStats,
     poly_grad: Module._poly_grad,
     poly_grad_many: (ctx, loss, initialGrad, targets) => {
       const n = targets.length
@@ -920,7 +971,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 9
+  const EXPECTED_ABI = 10
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

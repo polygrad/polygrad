@@ -68,6 +68,12 @@ static napi_value make_external_pair(napi_env env, void *a, void *b) {
   return out;
 }
 
+static void set_named_size(napi_env env, napi_value obj, const char *name, size_t value) {
+  napi_value v;
+  napi_create_double(env, (double)value, &v);
+  napi_set_named_property(env, obj, name, v);
+}
+
 static napi_env g_frontend_buffer_release_env = NULL;
 static napi_ref g_frontend_buffer_release_ref = NULL;
 
@@ -1313,6 +1319,52 @@ static napi_value napi_poly_ctx_set_preferred_device(napi_env env, napi_callback
   napi_value undef;
   NAPI_CALL(env, napi_get_undefined(env, &undef));
   return undef;
+}
+
+static napi_value napi_poly_ctx_stats(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyCtxStats s;
+  if (poly_ctx_stats(ctx, &s) != 0) {
+    napi_throw_error(env, NULL, "polygrad: poly_ctx_stats failed");
+    return NULL;
+  }
+  napi_value out;
+  NAPI_CALL(env, napi_create_object(env, &out));
+  set_named_size(env, out, "arenaBytes", s.arena_bytes);
+  set_named_size(env, out, "arenaHighWater", s.arena_high_water);
+  set_named_size(env, out, "scratchBytes", s.scratch_bytes);
+  set_named_size(env, out, "scratchHighWater", s.scratch_high_water);
+  set_named_size(env, out, "cseEntries", s.cse_entries);
+  set_named_size(env, out, "scheduleCacheEntries", s.schedule_cache_entries);
+  set_named_size(env, out, "toProgramCacheEntries", s.to_program_cache_entries);
+  set_named_size(env, out, "runtimeCacheEntries", s.runtime_cache_entries);
+  set_named_size(env, out, "programCacheEntries", s.program_cache_entries);
+  set_named_size(env, out, "shapeCacheEntries", s.shape_cache_entries);
+  set_named_size(env, out, "bufferEntries", s.buffer_entries);
+  set_named_size(env, out, "bufferOwnedBytes", s.buffer_owned_bytes);
+  set_named_size(env, out, "bufferOwnedCurrentBytes", s.buffer_owned_current_bytes);
+  set_named_size(env, out, "bufferOwnedSourceBytes", s.buffer_owned_source_bytes);
+  set_named_size(env, out, "tensorEntries", s.tensor_entries);
+  set_named_size(env, out, "tensorRecords", s.tensor_records);
+  set_named_size(env, out, "registryEntries", s.registry_entries);
+  set_named_size(env, out, "entrypointEntries", s.entrypoint_entries);
+  set_named_size(env, out, "compiledArtifactBytes", s.compiled_artifact_bytes);
+  set_named_size(env, out, "runtimeArtifactEntries", s.runtime_artifact_entries);
+  set_named_size(env, out, "launchCount", s.launch_count);
+  set_named_size(env, out, "scheduleCacheHits", s.schedule_cache_hits);
+  set_named_size(env, out, "scheduleCacheMisses", s.schedule_cache_misses);
+  set_named_size(env, out, "runtimeCacheHits", s.runtime_cache_hits);
+  set_named_size(env, out, "runtimeCacheMisses", s.runtime_cache_misses);
+  set_named_size(env, out, "bufferReadCount", s.buffer_read_count);
+  set_named_size(env, out, "bufferReadBytes", s.buffer_read_bytes);
+  set_named_size(env, out, "bufferWriteCount", s.buffer_write_count);
+  set_named_size(env, out, "bufferWriteBytes", s.buffer_write_bytes);
+  set_named_size(env, out, "bufferCopyCount", s.buffer_copy_count);
+  set_named_size(env, out, "bufferCopyBytes", s.buffer_copy_bytes);
+  return out;
 }
 
 /* ── Autograd ──────────────────────────────────────────────────────────── */
@@ -3292,6 +3344,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_buffer_read", napi_poly_buffer_read),
       DECLARE_NAPI_METHOD("poly_buffer_write", napi_poly_buffer_write),
       DECLARE_NAPI_METHOD("poly_ctx_set_preferred_device", napi_poly_ctx_set_preferred_device),
+      DECLARE_NAPI_METHOD("poly_ctx_stats", napi_poly_ctx_stats),
       DECLARE_NAPI_METHOD("poly_jit_new", napi_poly_jit_new),
       DECLARE_NAPI_METHOD("poly_jit_free", napi_poly_jit_free),
       DECLARE_NAPI_METHOD("poly_jit_set_prune", napi_poly_jit_set_prune),

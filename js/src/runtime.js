@@ -69,10 +69,14 @@ class PolyRuntime {
   }
 
   stats() {
+    const coreStats = this._core && this._core.ffi && this._core.ffi.poly_ctx_stats
+      ? this._core.ffi.poly_ctx_stats(this._core.ctx)
+      : null
     return {
       core: this.core,
       device: this.device,
       caps: this.caps,
+      coreStats,
       jit: this.jit && this.jit.stats ? this.jit.stats() : null
     }
   }
