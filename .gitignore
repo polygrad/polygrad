@@ -1,4 +1,8 @@
 build/
+_site/
+.jekyll-cache/
+.sass-cache/
+Gemfile.lock
 notebooks/
 *.o
 *.a
@@ -6,6 +10,8 @@ notebooks/
 *.dylib
 *.pyc
 *.svg
+!assets/
+!assets/polygrad.svg
 *.png
 *.jpg
 __pycache__/

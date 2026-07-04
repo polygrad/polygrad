@@ -1,43 +1,39 @@
 # Polygrad Python
 
-Python bindings for polygrad, a C11 port of tinygrad's compiler core.
+Python bindings for Polygrad, a C11 port of tinygrad's compiler core.
 
-Polygrad moves the compiler and runtime out of Python and into a reusable native library that can be called from multiple frontends, including Python, JavaScript, and R.
+The Python frontend exposes a lazy Tensor API with autograd, JIT
+capture/replay, neural network layers, structured linalg helpers, and model
+loading utilities.
 
-This package exposes that core as a lazy Tensor API with autograd, neural network layers, compiled training steps, and HuggingFace model loading.
-
-- Project home and docs: https://polygrad.org
-- Source code and issue tracker: https://github.com/polygrad/polygrad
-
-## Installation
+## Install
 
 ```bash
 pip install polygrad
 ```
 
-**Build requirements:** A C compiler (`gcc` or `clang`) and Python development headers (`python3-dev`).
+Requirements:
 
-**Runtime requirement:** `clang` must be on `PATH`. polygrad compiles compute kernels at runtime.
+- Linux
+- Python 3.9 or newer
+- NumPy
+- A C compiler and Python development headers for source builds
+- `clang` on `PATH` for the CPU runtime
 
-Package requirements: Python >= 3.9 and `numpy`.
-
-Platform support: Linux only. The current CPU runtime uses POSIX `fork()` and `dlopen()`.
-
-PyPI package notes:
-- `float32` and `float64` dtypes
-- tinygrad-style `device=` and `.to(...)`
-- CPU works by default, CUDA is detected at runtime
-- `download_hf()` additionally requires `huggingface_hub`
-
-For development:
+Optional:
 
 ```bash
-# Editable install (compiles C sources, auto-syncs from repo)
-pip install -e py/
+pip install huggingface_hub
+```
 
-# Or build the shared library manually and point to it
+From this repository:
+
+```bash
 make
-export POLYGRAD_LIB=/path/to/build/libpolygrad.so
+POLYGRAD_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python - <<'PY'
+from polygrad import Tensor
+print((Tensor([1, 2, 3]) * 2 + 1).numpy())
+PY
 ```
 
 ## Quick Start
@@ -45,20 +41,46 @@ export POLYGRAD_LIB=/path/to/build/libpolygrad.so
 ```python
 from polygrad import Tensor
 
-# Create tensors
 a = Tensor.rand(3, 4)
 b = Tensor.rand(4, 5)
-
-# Matrix multiply + softmax
 c = (a @ b).softmax(-1)
-print(c.numpy())
 
-# Autograd
+print(c.numpy())
+```
+
+Autograd:
+
+```python
+from polygrad import Tensor
+
 x = Tensor([1.0, 2.0, 3.0])
 x.requires_grad = True
+
 loss = (x * x).sum()
 loss.backward()
+
 print(x.grad.numpy())  # [2.0, 4.0, 6.0]
+```
+
+Training:
+
+```python
+from polygrad import Tensor
+from polygrad.nn import Linear, SGD, get_parameters
+
+Tensor.manual_seed(42)
+model = Linear(2, 1)
+opt = SGD(get_parameters(model), lr=0.01)
+
+for _ in range(100):
+    opt.zero_grad()
+    x = Tensor([[1.0, 2.0], [3.0, 4.0]])
+    y = Tensor([[5.0], [11.0]])
+    loss = (model(x) - y).square().mean()
+    loss.backward()
+    opt.step()
+
+print(loss.item())
 ```
 
 ## Devices
@@ -69,40 +91,26 @@ from polygrad import Device, Tensor
 x = Tensor.rand(4)
 
 if Device.cuda_available():
-    y = (x * 2).to('cuda')
-    print(y.device)      # CUDA
-    print(y.numpy())     # executes on CUDA, returns host numpy array
+    y = (x * 2).to("cuda")
 else:
-    y = (x * 2).to('cpu')
-    print(y.device)      # CPU
+    y = (x * 2).to("cpu")
+
+print(y.numpy())
 ```
 
-## Training Example
+Environment variables:
 
-```python
-from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters
-
-Tensor.manual_seed(42)
-model = Linear(2, 1)
-opt = SGD(get_parameters(model), lr=0.01)
-
-for i in range(100):
-    opt.zero_grad()
-    x = Tensor([[1.0, 2.0], [3.0, 4.0]])
-    target = Tensor([[5.0], [11.0]])
-    loss = (model(x) - target).square().mean()
-    loss.backward()
-    opt.step()
-
-print(f"loss: {loss.item():.4f}")
+```bash
+POLY_DEVICE=cpu|cuda|hip|x86|interp
+POLY_DUMP_KERNELS=1
+POLY_BEAM=4
 ```
 
-## Tensor JIT
+## JIT
 
-`@jit` follows tinygrad's raw Tensor capture/replay model. The first call runs
-normally, the second call captures realized schedules, and later calls replay
-those schedules with current input buffers.
+`@jit` follows tinygrad's raw Tensor JIT behavior. The first call runs normally,
+the second call captures realized schedules, and later calls replay those
+schedules with current input buffers.
 
 ```python
 from polygrad import Tensor, jit
@@ -116,10 +124,8 @@ print(step(Tensor([4, 5, 6])).numpy())  # capture
 print(step(Tensor([7, 8, 9])).numpy())  # replay
 ```
 
-For embedding loops that need deterministic setup, `compile(...)` performs the
-same first normal run and second capture run up front, then exposes explicit
-`run(...)`, `stats()`, and `dispose()` methods. This is a Polygrad wrapper over
-the same JIT path, not a separate compiler pipeline.
+For embedding loops, `compile(...)` performs the same warmup and capture up
+front and exposes an explicit callable:
 
 ```python
 from polygrad import Tensor, compile
@@ -128,349 +134,105 @@ def step(x):
     return (x + 1).realize()
 
 compiled = compile(step, [Tensor([1, 2, 3]).realize()])
-print(compiled.run([Tensor([7, 8, 9]).realize()]).numpy())
+out = compiled.run([Tensor([7, 8, 9]).realize()])
+
+print(out.numpy())
 print(compiled.stats())
 compiled.dispose()
 ```
 
-`polygrad.stats()` exposes shared C runtime counters, including launch count,
-schedule/runtime cache hits and misses, buffer transfer counts/bytes, cache
-sizes, and arena/scratch high-water marks. `Jit.stats()` and
-`CompiledCallable.stats()` expose wrapper-level capture/replay counts and
-wall-clock timings.
+`polygrad.stats()` exposes shared C runtime counters. `Jit.stats()` and
+`CompiledCallable.stats()` expose wrapper-level capture and replay counters.
 
 `polygrad.can_run(op, dtype="float32", shape=..., shapes=..., device="auto")`
-is an advisory capability probe. It builds a representative tensor graph and
-asks the selected backend to lower it. Multi-input ops use `shapes`, for
-example `can_run("matmul", shapes=((2, 3), (3, 4)))`.
+is an advisory backend capability probe.
 
-## Tensor API
+## Tensor API Summary
 
-### Construction
+Construction:
 
 | Method | Description |
-|--------|-------------|
-| `Tensor(data)` | From list, numpy array, or scalar |
+|---|---|
+| `Tensor(data)` | From list, NumPy array, or scalar |
 | `Tensor.zeros(*shape)` | Tensor of zeros |
 | `Tensor.ones(*shape)` | Tensor of ones |
 | `Tensor.full(shape, val)` | Tensor filled with value |
-| `Tensor.rand(*shape)` | Uniform random [0, 1) |
-| `Tensor.randn(*shape)` | Standard normal |
-| `Tensor.randint(low, high, shape)` | Random integers [low, high) |
-| `Tensor.arange(stop, start=0, step=1)` | Arithmetic progression |
+| `Tensor.rand(*shape)` | Uniform random values in `[0, 1)` |
+| `Tensor.randn(*shape)` | Standard normal values |
+| `Tensor.randint(low, high, shape)` | Random integers in `[low, high)` |
+| `Tensor.arange(...)` | Arithmetic progression |
 | `Tensor.linspace(start, stop, steps)` | Evenly spaced values |
 | `Tensor.eye(n)` | Identity matrix |
 | `Tensor.empty(*shape)` | Uninitialized tensor |
-| `Tensor.manual_seed(seed)` | Set random seed |
 
-### Properties
+Core methods:
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `shape` | tuple | Dimension sizes |
-| `ndim` | int | Number of dimensions |
-| `dtype` | str | `'float32'` or `'float64'` |
-| `device` | str | Current tensor device (`'CPU'` or `'CUDA'`) |
-| `T` | Tensor | Transpose of last two dims |
-| `requires_grad` | bool | Settable; enables autograd |
-| `grad` | Tensor/None | Gradient after `.backward()` |
+| Category | Methods |
+|---|---|
+| Arithmetic | `+`, `-`, `*`, `/`, `**`, `neg`, broadcasting with scalars |
+| Elementwise | `exp`, `log`, `sqrt`, `square`, `abs`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `silu` |
+| Reductions | `sum`, `mean`, `max`, `min`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
+| Movement | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat` |
+| Indexing | `__getitem__`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
+| Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
+| Data | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |
 
-### Realization & Conversion
-
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `realize()` | Tensor | Execute lazy graph, return self |
-| `numpy()` | ndarray | Realize and return numpy array |
-| `item()` | float | Scalar value |
-| `tolist()` | list | Nested Python list |
-| `copy_from(data)` / `update_from(data)` | Tensor | Update an already-buffer-backed tensor in place from matching host data |
-| `to(device)` | Tensor | Copy tensor view to `'cpu'` or `'cuda'` |
-| `cpu()` / `cuda()` | Tensor | Convenience wrappers for `to(...)` |
-| `numel()` | int | Total elements |
-| `size(dim=None)` | tuple/int | Shape or dimension size |
-| `detach()` | Tensor | Copy without graph |
-| `clone()` | Tensor | Copy preserving requires_grad |
-
-### Arithmetic
-
-```python
-a + b, a - b, a * b, a / b, -a, a ** b
-```
-
-All support broadcasting and scalar operands.
-
-### Comparisons
-
-```python
-a < b, a == b, a != b, a > b, a >= b, a <= b
-```
-
-Returns float tensor (1.0 = true, 0.0 = false).
-
-### Element-wise Math
-
-| Method | Description |
-|--------|-------------|
-| `exp()` | e^x |
-| `log()` | ln(x) |
-| `sqrt()` | Square root |
-| `square()` | x^2 |
-| `abs()` | Absolute value |
-| `sign()` | Sign (-1, 0, +1) |
-| `reciprocal()` | 1/x |
-| `rsqrt()` | 1/sqrt(x) |
-| `sin()`, `cos()`, `tan()` | Trigonometric |
-| `ceil()`, `floor()`, `round()`, `trunc()` | Rounding |
-| `isnan()`, `isinf()` | NaN/Inf detection |
-| `exp2()`, `log2()` | Base-2 functions |
-| `where(x, y)` | Conditional: self ? x : y |
-| `maximum(other)` | Element-wise max |
-| `minimum(other)` | Element-wise min |
-| `clamp(min_=None, max_=None)` | Clamp to range |
-
-### Activations
-
-| Method | Description |
-|--------|-------------|
-| `relu()` | max(0, x) |
-| `relu6()` | clamp(relu(x), 0, 6) |
-| `leaky_relu(neg_slope=0.01)` | Leaky ReLU |
-| `sigmoid()` | 1 / (1 + e^-x) |
-| `tanh()` | Hyperbolic tangent |
-| `gelu()` | Gaussian Error Linear Unit |
-| `quick_gelu()` | Fast GELU approximation |
-| `silu()` / `swish()` | x * sigmoid(x) |
-| `elu(alpha=1.0)` | Exponential Linear Unit |
-| `softplus(beta=1.0)` | log(1 + e^(beta*x)) / beta |
-| `mish()` | x * tanh(softplus(x)) |
-| `hardtanh(min_val=-1, max_val=1)` | Clamped linear |
-| `hardswish()` | Hard swish |
-| `hardsigmoid()` | Hard sigmoid |
-
-### Reductions
-
-| Method | Description |
-|--------|-------------|
-| `sum(axis=None, keepdim=False)` | Sum along axes |
-| `max(axis=None, keepdim=False)` | Maximum along axes |
-| `argmax(axis=None, keepdim=False)` | Index of first maximum, tinygrad-style |
-| `sort(dim=-1, descending=False)` | Stable tinygrad-style sort, returns `(values, indices)` |
-| `argsort(dim=-1, descending=False)` | Indices that sort along a dimension |
-| `topk(k, dim=-1, largest=True, sorted_=True)` | Top-k values and stable indices |
-| `min(axis=None, keepdim=False)` | Minimum along axes |
-| `mean(axis=None, keepdim=False)` | Mean along axes |
-| `var(axis=None, keepdim=False, correction=1)` | Variance |
-| `std(axis=None, keepdim=False, correction=1)` | Standard deviation |
-
-### Movement / Shape
-
-| Method | Description |
-|--------|-------------|
-| `reshape(*shape)` / `view(*shape)` | Reshape (supports -1) |
-| `permute(*order)` | Permute dimensions |
-| `transpose(dim0=-2, dim1=-1)` | Swap two dimensions |
-| `expand(*shape)` | Broadcast to shape |
-| `squeeze(dim=None)` | Remove size-1 dims |
-| `unsqueeze(dim)` | Add size-1 dim |
-| `flatten(start_dim=0, end_dim=-1)` | Flatten dim range |
-| `unflatten(dim, sizes)` | Split dim into multiple |
-| `shrink(arg)` | Slice: [(start, end), ...] |
-| `pad(arg)` | Pad: [(before, after), ...] |
-| `flip(axis)` | Reverse along axes |
-| `repeat(*repeats)` | Tile tensor |
-| `gather(dim, index)` | tinygrad-style gather along dim |
-| `take_along_axis(index, axis)` | Alias for `gather(axis, index)` |
-
-### Linear Algebra
-
-| Method | Description |
-|--------|-------------|
-| `matmul(other)` / `dot(other)` / `@` | Matrix multiplication |
-| `linear(weight, bias=None)` | x @ weight.T + bias |
-| `qr(mode="complete")` | Householder QR; default mode matches tinygrad complete QR. Polygrad also supports `"reduced"` and `"r"` |
-| `triangular_solve(b, upper=False, transpose_a=False, unit_diagonal=False)` | Polygrad extension: composed triangular solve |
-| `solve_triangular(...)` | Alias for `triangular_solve(...)` |
-| `cholesky(upper=False)` | Polygrad extension: composed Cholesky factorization |
-| `cholesky_solve(b, upper=False)` | Polygrad extension: solve from a Cholesky factor |
-| `solve(b)` | Polygrad extension: initial square solve using reduced QR + triangular solve |
-| `lstsq(b)` | Polygrad extension: initial full-rank tall/square least-squares solution |
-
-The structured linalg extensions are portable tensor-composed fallbacks tested
-against NumPy/Torch. They do not add LAPACK/runtime dependencies. Current
-`lstsq` is solution-only and rejects underdetermined systems; robust
-rank-deficient least squares is planned as a later SVD or pivoted-QR path.
-
-### Normalization & Loss
-
-| Method | Description |
-|--------|-------------|
-| `softmax(axis=-1)` | Softmax normalization |
-| `log_softmax(axis=-1)` | Log-softmax |
-| `layernorm(axis=-1, eps=1e-5)` | Layer normalization |
-| `cross_entropy(target, axis=-1)` | Cross-entropy loss |
-| `binary_crossentropy(target)` | Binary cross-entropy |
-
-### Advanced Operations
-
-| Method | Description |
-|--------|-------------|
-| `Tensor.einsum(formula, *operands)` | Einstein summation |
-| `rearrange(formula, **kwargs)` | einops-style rearrange |
-| `Tensor.cat(*tensors, dim=0)` | Concatenate along dim |
-| `Tensor.stack(*tensors, dim=0)` | Stack along new dim |
-| `split(sizes, dim=0)` | Split into chunks |
-| `chunk(n, dim=0)` | Split into n chunks |
-| `__getitem__` | Indexing: int, slice, None, Ellipsis |
-
-### Autograd
-
-```python
-x = Tensor([1.0, 2.0])
-x.requires_grad = True
-loss = (x * x).sum()
-loss.backward()
-print(x.grad.numpy())  # [2.0, 4.0]
-```
-
-Call `backward()` on a scalar loss before calling `item()` or `numpy()` on the loss.
+Structured linalg methods are portable tensor-composed fallbacks tested against
+NumPy and Torch. They do not add LAPACK or runtime library dependencies.
+Current `lstsq` is solution-only for full-rank tall or square systems.
 
 ## nn Module
 
-### Layers
-
 ```python
-from polygrad.nn import Linear, LayerNorm, RMSNorm, GroupNorm, Embedding, Dropout, Conv2d, BatchNorm
-```
-
-| Class | Signature | Description |
-|-------|-----------|-------------|
-| `Linear(in_f, out_f, bias=True)` | y = x @ W.T + b | Fully connected layer |
-| `LayerNorm(shape, eps=1e-5)` | (x - mean) / sqrt(var + eps) * w + b | Layer normalization |
-| `RMSNorm(dim, eps=1e-5)` | x / rms(x) * w | Root mean square normalization |
-| `Embedding(vocab, dim)` | Lookup table | Token embedding |
-| `Dropout(p=0.5)` | Random zeroing | Training-only (controlled by `Tensor.training`) |
-| `GroupNorm(groups, channels)` | Group normalization | Per-group normalization |
-| `Conv2d(in_ch, out_ch, kernel_size, stride=1, padding=0, bias=True)` | 2D convolution | Tensor-op implementation |
-| `BatchNorm(num_features, eps=1e-5, momentum=0.1)` | Batch normalization | Tracks running stats when enabled |
-
-### Optimizers
-
-```python
+from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding
 from polygrad.nn import SGD, Adam, AdamW, get_parameters
 ```
 
-| Class | Signature |
-|-------|-----------|
-| `SGD(params, lr=0.01, momentum=0.0, weight_decay=0.0)` |
-| `Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)` |
-| `AdamW(params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)` |
+Layers:
 
-All optimizers have `step()` and `zero_grad()` methods.
+| Class | Description |
+|---|---|
+| `Linear(in_features, out_features, bias=True)` | Fully connected layer |
+| `LayerNorm(shape, eps=1e-5)` | Layer normalization |
+| `RMSNorm(dim, eps=1e-5)` | Root mean square normalization |
+| `Embedding(vocab, dim)` | Token embedding |
+| `Dropout(p=0.5)` | Training-time dropout |
+| `GroupNorm(groups, channels)` | Group normalization |
+| `Conv2d(...)` | Tensor-op 2D convolution |
+| `BatchNorm(...)` | Batch normalization |
 
-### State Dict
+Optimizers:
 
-```python
-from polygrad.nn import get_parameters, get_state_dict, load_state_dict
+| Class | Description |
+|---|---|
+| `SGD(params, lr=0.01, momentum=0.0, weight_decay=0.0)` | SGD with optional momentum |
+| `Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-8)` | Adam |
+| `AdamW(params, lr=0.001, weight_decay=0.01)` | AdamW |
 
-params = get_parameters(model)       # List of Tensor
-sd = get_state_dict(model)           # {'weight': Tensor, 'bias': Tensor, ...}
-load_state_dict(model2, sd)          # Load params into another model
-```
+All optimizers provide `step()` and `zero_grad()`.
 
-## JIT Training Helpers
-
-Use `@jit` for repeated raw Tensor steps. The first call runs normally, the
-second call captures realized schedules, and later calls replay with current
-input buffers.
-
-```python
-from polygrad import Tensor, jit
-from polygrad.nn import Linear, SGD, get_parameters
-
-Tensor.manual_seed(42)
-model = Linear(4, 1)
-opt = SGD(get_parameters(model), lr=0.01)
-
-@jit
-def train_step(x, y):
-    loss = (model(x) - y).square().mean()
-    loss.backward()
-    opt.step()
-    opt.zero_grad()
-    return loss.realize()
-
-for i in range(100):
-    x = Tensor.rand(8, 4).realize()
-    y = Tensor.rand(8, 1).realize()
-    loss = train_step(x, y)
-    print(f"step {i}: loss = {loss.item():.4f}")
-```
-
-## HuggingFace Model Loading
-
-Load pre-trained models directly from HuggingFace format (`config.json` + safetensors).
-
-To use `download_hf()`, install the optional Hub client first:
-
-```bash
-pip install huggingface_hub
-```
+## HuggingFace Loading
 
 ```python
-from polygrad.hf import load_hf, download_hf, generate
+from polygrad.hf import download_hf, load_hf, generate
 import numpy as np
-import json
-from pathlib import Path
 
-# Download a small GPT-2 checkpoint from HuggingFace Hub
-model_path = download_hf('hf-internal-testing/tiny-random-gpt2')
-config = json.loads((Path(model_path) / 'config.json').read_text())
-vocab_size = config['vocab_size']
-max_seq_len = 16
+model_path = download_hf("hf-internal-testing/tiny-random-gpt2")
+inst = load_hf(model_path, max_batch=1, max_seq_len=16)
 
-# Load into a PolyInstance
-inst = load_hf(model_path, max_batch=1, max_seq_len=max_seq_len)
-
-# Run forward pass
 tokens = np.array([[1, 2, 3, 4]], dtype=np.float32)
-outputs = inst.forward(
-    x=tokens,
-    positions=np.arange(tokens.shape[1], dtype=np.float32).reshape(1, -1),
-    arange=np.arange(max_seq_len, dtype=np.float32)
-)
-logits = outputs['output'].reshape(1, max_seq_len, vocab_size)
-
-# Autoregressive generation
 result = generate(inst, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
 ```
 
-### HF API
-
-| Function | Description |
-|----------|-------------|
-| `load_hf(path, max_batch=1, max_seq_len=0)` | Load model from local directory |
-| `load_hf_bytes(config, weights, ...)` | Load from raw bytes (no filesystem) |
-| `download_hf(repo_id, cache_dir=None)` | Download from HuggingFace Hub |
-| `generate(inst, tokens, max_new_tokens, ...)` | Autoregressive text generation |
-
-Supported model types: GPT-2. Weight formats: F32, F16, BF16 safetensors (single or sharded).
-
-## How It Works
-
-1. **Lazy evaluation**: Operations build a UOp graph in the C core. No computation happens until `realize()`, `numpy()`, `item()`, or `backward()`.
-2. **One FFI call per op**: Each Tensor method calls one C function via ctypes. The C core handles all op composition (e.g., `gelu` = `0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))`).
-3. **Realize boundaries**: Some ops (softmax, layernorm, var) insert implicit `.realize()` calls to create kernel boundaries for the scheduler.
-4. **Autograd**: `backward()` calls C's `poly_grad()` for each parameter, then realizes the gradient tensors.
-
-## Limitations
-
-- CPU is the default path. CUDA execution requires a working CUDA runtime (`libcuda` and `libnvrtc`) on the host.
-- Python currently targets Linux. The default CPU runtime compiles native kernels
-  through the shared C core; `POLY_DEVICE=x86|cuda|interp` selects other tested
-  backends when available.
+Supported path today: GPT-2 style configs and F32/F16/BF16 safetensors. Qwen
+family loading is available through the shared C/GGUF paths where configured.
 
 ## Tests
 
 ```bash
-python -m pytest py/tests/ -v   # Tensor, nn, JIT, GPT-2/HF loading, and instance coverage
+POLYGRAD_LIB=$PWD/build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests -q
 ```
+
+## License
+
+MIT

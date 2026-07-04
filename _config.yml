@@ -1,0 +1,53 @@
+title: "Polygrad"
+description: >
+  A C11 port of tinygrad's compiler core with Python, JavaScript, WASM, and GPU backends
+
+show_excerpts: false
+
+logo_header:
+  src: /assets/polygrad.svg
+  href: https://polygrad.org/
+  width: 44
+
+logo_footer:
+  src: /assets/polygrad.svg
+  href: https://polygrad.org/
+  width: 36
+
+header_pages:
+  -
+
+minima:
+  social_links:
+    github: polygrad
+
+remote_theme: "jseeio/minima"
+
+defaults:
+  - scope:
+      path: "README.md"
+    values:
+      layout: page
+      title: Polygrad
+      show_title: false
+      permalink: /
+
+exclude:
+  - AGENTS.md
+  - ARCHITECTURE.md
+  - CLAUDE.md
+  - PLAN*.md
+  - MEMORY*.md
+  - Makefile
+  - build/
+  - bench/
+  - js/csrc/
+  - js/node_modules/
+  - js/wasm/
+  - node_modules/
+  - oracle/
+  - py/csrc/
+  - py/dist/
+  - references/
+  - temp/
+  - test/
