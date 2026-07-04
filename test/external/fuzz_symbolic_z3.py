@@ -302,10 +302,10 @@ class Z3Translator:
                 out = src[0] - src[1]
             elif op == "MUL":
                 out = src[0] * src[1]
-            elif op == "IDIV":
+            elif op in ("CDIV", "IDIV"):
                 self.solver.add(src[1] != 0)
                 out = z3_cdiv(src[0], src[1])
-            elif op == "MOD":
+            elif op in ("CMOD", "MOD"):
                 self.solver.add(src[1] != 0)
                 out = z3_cmod(src[0], src[1])
             elif op == "MAX":
@@ -346,9 +346,9 @@ def random_int_expr(poly: Poly, rng: random.Random, leaves: list[PolyUOpPtr], de
     if choice == 0:
         return poly.alu1("NEG", a)
     if choice == 1:
-        return poly.alu2("IDIV", a, poly.const(rng.choice([-9, -7, -3, -2, -1, 1, 2, 3, 7, 9])))
+        return poly.alu2("CDIV", a, poly.const(rng.choice([-9, -7, -3, -2, -1, 1, 2, 3, 7, 9])))
     if choice == 2:
-        return poly.alu2("MOD", a, poly.const(rng.choice([1, 2, 3, 4, 7, 9])))
+        return poly.alu2("CMOD", a, poly.const(rng.choice([1, 2, 3, 4, 7, 9])))
     if choice == 3:
         return poly.alu3("WHERE", random_bool_expr(poly, rng, leaves, 2), a, random_int_expr(poly, rng, leaves, depth - 1))
 
@@ -387,7 +387,7 @@ def random_div_expr(poly: Poly, rng: random.Random, variables: list[PolyUOpPtr])
     den = random_factor(poly, rng, factors)
     if rng.randrange(4) == 0:
         den = poly.alu1("NEG", den)
-    return poly.alu2(rng.choice(["IDIV", "MOD"]), expr, den)
+    return poly.alu2(rng.choice(["CDIV", "CMOD"]), expr, den)
 
 
 def prove_equivalent(poly: Poly, expr: PolyUOpPtr, rewritten: PolyUOpPtr) -> tuple[bool, str | None]:

@@ -38,6 +38,16 @@ async function runModelTests(pg) {
     await w.realize()
     const x = pg.Tensor.empty([1, 2])
     const y = x.dot(w)
+    const ffi = pg._core.ffi
+    const reach = (a, b) => Boolean(
+      ffi.poly_uop_reachable(pg._core.ctx, a && a.raw ? a.raw : a, b && b.raw ? b.raw : b)
+    )
+    assert(reach(y.uopLogical, w.uopLogical), 'logical output should reach logical param')
+    if (String(w.uopLogical.key) !== String(w.uop.key)) {
+      assert(!reach(y.uopLogical, w.uop), 'logical output should not reach placed param root')
+      assert(y.uopPhysical, 'physical output should exist for placed param root')
+      assert(reach(y.uopPhysical, w.uop), 'physical output should reach placed param root')
+    }
     const inst = await pg.Instance.fromTensors({
       inputs: { js_export_x: x },
       outputs: { js_export_output: y },

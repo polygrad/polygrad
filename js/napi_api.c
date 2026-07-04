@@ -627,6 +627,16 @@ static napi_value napi_poly_uop_key(napi_env env, napi_callback_info info) {
   return out;
 }
 
+static napi_value napi_poly_uop_op(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyUOp *u = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_uop_op(u), &out));
+  return out;
+}
+
 static napi_value napi_poly_uop_get_buffer_identity(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -3342,6 +3352,7 @@ NAPI_MODULE_INIT() {
           "poly_ctx_set_frontend_buffer_release", napi_poly_ctx_set_frontend_buffer_release
       ),
       DECLARE_NAPI_METHOD("poly_uop_key", napi_poly_uop_key),
+      DECLARE_NAPI_METHOD("poly_uop_op", napi_poly_uop_op),
       DECLARE_NAPI_METHOD("poly_uop_substitute", napi_poly_uop_substitute),
       DECLARE_NAPI_METHOD("poly_uop_has_buffer_identity", napi_poly_uop_has_buffer_identity),
       DECLARE_NAPI_METHOD("poly_uop_get_buffer_identity", napi_poly_uop_get_buffer_identity),

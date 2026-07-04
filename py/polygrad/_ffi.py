@@ -315,6 +315,9 @@ def _declare_signatures(lib):
     lib.poly_buffer_f64.restype = _ptr
     lib.poly_buffer_f64.argtypes = [_ptr, ctypes.c_int64]
 
+    lib.poly_uop_op.restype = ctypes.c_int
+    lib.poly_uop_op.argtypes = [_ptr]
+
     lib.poly_uop_dtype_id.restype = ctypes.c_int
     lib.poly_uop_dtype_id.argtypes = [_ptr, _ptr]
 

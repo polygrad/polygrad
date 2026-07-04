@@ -12,7 +12,7 @@ function loadNativeBinding() {
   }
 }
 
-function createNativeCore() {
+function createNativeCore(device) {
   const binding = loadNativeBinding()
   if (!binding) {
     throw new Error('polygrad: core=\'native\' unavailable (N-API addon not built)')
@@ -35,6 +35,18 @@ function createNativeCore() {
   }
 
   const ctx = binding.poly_ctx_new()
+  const nativeDevice = resolveNativeDevice(binding, device)
+  const deviceId = nativeDevice.id
+  binding.poly_ctx_set_preferred_device(ctx, deviceId)
+
+  function setInstanceDevice(inst) {
+    if (!inst) return inst
+    if (binding.poly_instance_set_device(inst, deviceId) !== 0) {
+      binding.poly_instance_free(inst)
+      throw new Error(`polygrad: set_device failed for native device '${nativeDevice.name}'`)
+    }
+    return inst
+  }
 
   const ops = {}
   const opCount = binding.poly_op_count()
@@ -43,7 +55,7 @@ function createNativeCore() {
     if (name) ops[name] = i
   }
 
-  const EXPECTED_ABI = 11
+  const EXPECTED_ABI = 12
   const abi = binding.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
@@ -55,23 +67,19 @@ function createNativeCore() {
   const instance = {
     fromIR(irBytes, weightsBytes) {
       const inst = binding.poly_instance_from_ir(irBytes, weightsBytes ?? null)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     mlp(specJson) {
       const inst = binding.poly_mlp_from_json(specJson)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     tabm(specJson) {
       const inst = binding.poly_tabm_instance(specJson)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     nam(specJson) {
       const inst = binding.poly_nam_instance(specJson)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     free(inst) {
       binding.poly_instance_free(inst)
@@ -129,13 +137,11 @@ function createNativeCore() {
     },
     fromBundle(bytes) {
       const inst = binding.poly_instance_from_bundle(bytes)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     fromSinks(ctxPtr, names, sinks) {
       const inst = binding.poly_instance_from_sinks(ctxPtr, names, sinks)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     fromBindings(ctxPtr, bindings, entries) {
       const bindingNames = bindings.map(b => b.name)
@@ -155,19 +161,16 @@ function createNativeCore() {
         entryNames, entryInputs, entryInputCounts, entryOutputs, entryOutputCounts,
         entryObjectives, entryFlags
       )
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     loadHF(configBytes, weightFilesBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_hf_load(configBytes, weightFilesBytes,
         maxBatch || 1, maxSeqLen || 0)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     loadGGUF(ggufBytes, maxBatch, maxSeqLen) {
       const inst = binding.poly_gguf_load(ggufBytes, maxBatch || 1, maxSeqLen || 0)
-      if (inst) binding.poly_instance_set_device(inst, 0)
-      return inst
+      return setInstanceDevice(inst)
     },
     importLastError() {
       const code = binding.poly_import_last_error_code()
@@ -207,7 +210,8 @@ function createNativeCore() {
     instance,
     ctx,
     ops,
-    caps: { simd: false, f64: true, core: 'native', device: 'cpu' },
+    deviceIds: makeDeviceIds(binding),
+    caps: { simd: false, f64: true, core: 'native', device: nativeDevice.name },
     canRunOp(device, op, dtypeId, shape) {
       return binding.poly_can_run_op(ctx, device, op, dtypeId, Array.from(shape || []))
     },
@@ -215,6 +219,35 @@ function createNativeCore() {
       binding.poly_ctx_destroy(ctx)
     }
   }
+}
+
+const NATIVE_DEVICE_NAMES = new Set(['cpu', 'interp', 'x86', 'cuda', 'hip'])
+
+function normalizeDeviceName(device) {
+  let name = null
+  if (device && device !== 'auto') name = String(device)
+  else if (process.env.POLY_DEVICE && process.env.POLY_DEVICE !== 'auto') name = String(process.env.POLY_DEVICE)
+  else name = 'cpu'
+  name = name.toLowerCase()
+  if (name.startsWith('cpu:')) name = name.slice(4)
+  return name
+}
+
+function resolveNativeDevice(binding, device) {
+  const name = normalizeDeviceName(device)
+  if (!NATIVE_DEVICE_NAMES.has(name)) {
+    throw new Error(`polygrad: unsupported native device '${name}'`)
+  }
+  const id = binding.poly_device_by_name(name)
+  if (!id) throw new Error(`polygrad: unknown native device '${name}'`)
+  return { id, name: binding.poly_device_name(id) || name }
+}
+
+function makeDeviceIds(binding) {
+  const names = ['auto', 'cpu', 'interp', 'x86', 'cuda', 'hip']
+  const ids = {}
+  for (const name of names) ids[name] = binding.poly_device_by_name(name)
+  return ids
 }
 
 module.exports = { createNativeCore }

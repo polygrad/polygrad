@@ -9,10 +9,10 @@ async function resolveNodeCore(name, opts) {
   }
 
   if (name === 'native') {
-    /* Native core delegates device selection to the C library via POLY_DEVICE
-     * env var. The C runtime validates and routes to cpu/x86/cuda/hip/interp. */
+    /* Native core validates and routes cpu/x86/cuda/hip/interp through the C
+     * context. POLY_DEVICE is folded into opts.device above. */
     const { createNativeCore } = require('./core/native')
-    return createNativeCore()
+    return createNativeCore(opts.device)
   }
 
   if (name !== 'auto') {
@@ -21,7 +21,7 @@ async function resolveNodeCore(name, opts) {
 
   try {
     const { createNativeCore } = require('./core/native')
-    return createNativeCore()
+    return createNativeCore(opts.device)
   } catch (e) { /* fall through to WASM */ }
 
   const { createWasmCore } = require('./core/wasm')

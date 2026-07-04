@@ -350,9 +350,16 @@ class TestAssign:
 
 class TestInstanceExport:
     def test_functional_model_exports_selected_forward_entrypoint(self):
+        from polygrad import _ffi
+
         w = Tensor([[2.0], [3.0]], requires_grad=True).realize()
         x = Tensor.empty((1, 2))
         y = x.dot(w)
+        assert _ffi._lib.poly_uop_reachable(x._ctx, y.uop_logical.raw, w.uop_logical.raw)
+        if w.uop_logical.raw != w.uop.raw:
+            assert not _ffi._lib.poly_uop_reachable(x._ctx, y.uop_logical.raw, w.uop.raw)
+            assert y.uop_physical is not None
+            assert _ffi._lib.poly_uop_reachable(x._ctx, y.uop_physical.raw, w.uop.raw)
 
         inst = Instance.from_tensors(
             inputs={"py_export_x": x},

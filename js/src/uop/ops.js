@@ -25,6 +25,11 @@ class UOp {
     return String(this.raw)
   }
 
+  get op() {
+    if (!this.raw || !this.ffi.poly_uop_op) return 0
+    return Number(this.ffi.poly_uop_op(this.raw))
+  }
+
   hasBufferIdentity() {
     if (!this.raw) return false
     return !!this.ffi.poly_uop_has_buffer_identity(this.raw)
@@ -85,6 +90,9 @@ function createBoundUopNamespace(runtime) {
       if (!raw) return null
       const id = Number(ffi.poly_uop_dtype_id(ctx, raw))
       return dtypeNameById[id] || String(id)
+    },
+    op(value) {
+      return wrap(rawUop(value)).op
     },
     hasBufferIdentity(value) {
       return wrap(rawUop(value)).hasBufferIdentity()

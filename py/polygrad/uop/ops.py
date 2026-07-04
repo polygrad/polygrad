@@ -39,6 +39,16 @@ class UOp:
     def __repr__(self):
         return f"UOp(0x{self.raw:x})" if self.raw else "UOp(null)"
 
+    @property
+    def op(self):
+        """Integer Ops value, mirroring tinygrad's UOp.op."""
+        return _ffi._lib.poly_uop_op(self.raw) if self.raw is not None else 0
+
+    @property
+    def op_name(self):
+        name = _ffi._lib.poly_op_name(self.op)
+        return name.decode('utf-8') if name else 'UNKNOWN'
+
     # --- Factories ---
 
     @staticmethod

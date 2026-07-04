@@ -277,6 +277,7 @@ async function main() {
     const timeout = Math.max(120000, (iters + warmup) * 8000);
     const results = await page.waitForFunction(
       () => window.__benchResults,
+      undefined,
       { timeout },
     ).then(h => h.jsonValue());
     if (results.error) {

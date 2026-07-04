@@ -60,6 +60,9 @@ class TestCreation:
         assert can_run('add', dtype='float32', shape=(4,))
         assert can_run('matmul', dtype='float32', shapes=((2, 3), (3, 4)))
         assert can_run('gather', dtype='float32', shape=(2, 3))
+        assert can_run('sort', dtype='float32', shape=(2, 3))
+        assert can_run('argsort', dtype='float32', shape=(2, 3))
+        assert can_run('topk', dtype='float32', shape=(2, 3))
         with pytest.raises(ValueError, match='shape is required'):
             can_run('add', dtype='float32')
         with pytest.raises(ValueError, match='shape queries require an op'):

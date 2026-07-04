@@ -528,6 +528,7 @@ async function createWasmCore(device) {
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
+    poly_uop_op: (uop) => Module._poly_uop_op(uop),
     poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
     poly_uop_key: (uop) => BigInt(uop || 0),
     poly_uop_reachable: (ctx, root, target) =>
@@ -983,7 +984,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 11
+  const EXPECTED_ABI = 12
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

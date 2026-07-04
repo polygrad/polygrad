@@ -565,7 +565,7 @@ async function main() {
   try {
     await page.goto("http://127.0.0.1:" + port + "/", { waitUntil: "load" });
     const timeout = Math.max(180000, (args.iters + args.warmup) * args.cases.length * 30000);
-    const results = await page.waitForFunction(() => window.__benchResults, { timeout });
+    const results = await page.waitForFunction(() => window.__benchResults, undefined, { timeout });
     const value = await results.jsonValue();
     if (value?.error) throw new Error(value.error + "\\n" + (value.stack || ""));
   } finally {

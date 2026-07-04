@@ -132,6 +132,9 @@ async function runTensorTests(pg) {
       'canRun should probe matmul shapes'
     )
     assert(pg.canRun({ op: 'gather', dtype: 'float32', shape: [2, 3] }), 'canRun should probe gather')
+    assert(pg.canRun({ op: 'sort', dtype: 'float32', shape: [2, 3] }), 'canRun should probe sort')
+    assert(pg.canRun({ op: 'argsort', dtype: 'float32', shape: [2, 3] }), 'canRun should probe argsort')
+    assert(pg.canRun({ op: 'topk', dtype: 'float32', shape: [2, 3] }), 'canRun should probe topk')
     let threw = false
     try {
       pg.canRun({ shape: [4], dtype: 'float32' })

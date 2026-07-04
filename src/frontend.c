@@ -56,6 +56,10 @@ PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT64, size);
 }
 
+int poly_uop_op(PolyUOp *u) {
+  return u ? (int)u->op : 0;
+}
+
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u) {
   (void)ctx;
   if (!u) return 0;
@@ -188,6 +192,25 @@ static PolyUOp *canrun_build_probe_graph(
     if (!canrun_shape_budget_ok(shape, ndim, 4096)) return NULL;
     PolyUOp *idx = canrun_buffer(ctx, POLY_INT32, shape, ndim);
     return idx ? poly_gather_dim(ctx, a, ndim - 1, idx) : NULL;
+  }
+  if (!strcmp(op, "sort")) {
+    if (ndim < 1) return NULL;
+    PolyUOp *values = NULL, *indices = NULL;
+    if (poly_sort(ctx, a, ndim - 1, 0, &values, &indices) != 0) return NULL;
+    (void)indices;
+    return values;
+  }
+  if (!strcmp(op, "argsort")) {
+    if (ndim < 1) return NULL;
+    return poly_argsort(ctx, a, ndim - 1, 0);
+  }
+  if (!strcmp(op, "topk")) {
+    if (ndim < 1 || shape[ndim - 1] <= 0) return NULL;
+    int64_t k = shape[ndim - 1] >= 2 ? 2 : 1;
+    PolyUOp *values = NULL, *indices = NULL;
+    if (poly_topk(ctx, a, k, ndim - 1, 1, 1, &values, &indices) != 0) return NULL;
+    (void)indices;
+    return values;
   }
   if (!strcmp(op, "sum") || !strcmp(op, "reduce_sum"))
     return poly_sum_reduce(ctx, a, ndim > 0 ? ndim - 1 : 0, 0);
