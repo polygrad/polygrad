@@ -147,7 +147,7 @@ Runtime fields:
 - `pg.compile(fn, sampleInputs)`: explicit wrapper over the same JIT path.
 - `pg.stats()`: wrapper and C runtime counters.
 - `pg.canRun(query)`: advisory backend capability probe.
-- `pg.uop`: small UOp inspection namespace.
+- `pg.uop`: UOp helpers for inspection and custom kernels.
 - `pg.dispose()`: release runtime resources.
 
 Tensor methods include:
@@ -159,7 +159,7 @@ Tensor methods include:
 | Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std`, `softmax` |
 | Movement | `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `gather`, `takeAlongAxis` |
 | Linalg | `dot`, `qr`, `triangularSolve`, `solveTriangular`, `cholesky`, `choleskySolve`, `solve`, `lstsq` |
-| Data | `realize`, `toArray`, `toTypedArray`, `toTypedArrays`, `copyFrom`, `updateFrom`, `repr` |
+| Data | `realize`, `toArray`, `toTypedArray`, `toTypedArrays`, `copyFrom`, `updateFrom`, `repr`, `customKernel` |
 
 Structured linalg methods are portable tensor-composed fallbacks. Current
 `lstsq` is solution-only for full-rank tall or square systems.
@@ -189,6 +189,32 @@ console.log(await out.toArray())
 console.log(compiled.stats())
 compiled.dispose()
 ```
+
+## Custom Kernels
+
+`Tensor.customKernel(...)` mirrors tinygrad's alpha custom-kernel shape. The
+kernel function receives placeholder UOps and returns a `SINK` body. Polygrad
+wraps the body in `CALL`, returns `AFTER(...)` tensors, and keeps execution in
+the normal schedule and runtime caches.
+
+```js
+function addKernel(out, a, b) {
+  out = out.flatten(); a = a.flatten(); b = b.flatten()
+  const i = pg.uop.range(out.numel(), 0)
+  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+}
+
+const out = pg.Tensor.empty([4], { dtype: 'float32' })
+const y = out.customKernel(
+  new pg.Tensor([1, 2, 3, 4]),
+  new pg.Tensor([10, 20, 30, 40]),
+  addKernel
+)[0]
+console.log(await y.toArray())
+```
+
+This is a UOp `CALL` extension point, not a raw program-launch API. Custom
+backward functions are not implemented yet.
 
 ## Testing
 

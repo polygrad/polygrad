@@ -190,6 +190,42 @@ static bool poly_call_is_view(PolyUOp *call) {
          call->src[0]->op == POLY_OP_BUFFER_VIEW;
 }
 
+static PolyUOp *poly_strip_copy_effect_wrappers(PolyUOp *u) {
+  while (u && u->op == POLY_OP_END && u->n_src >= 1) u = u->src[0];
+  return u;
+}
+
+static PolyUOp *poly_copy_identity_source(PolyUOp *u) {
+  while (u) {
+    if (poly_uop_has_buffer_identity(u)) return u;
+    if (u->op == POLY_OP_CONTIGUOUS && u->n_src >= 1) {
+      u = u->src[0];
+      continue;
+    }
+    return NULL;
+  }
+  return NULL;
+}
+
+static PolyUOp *poly_call_copy_body_from_store(PolyUOp *body) {
+  body = poly_program_body(body);
+  if (!body) return NULL;
+  if (body->op == POLY_OP_COPY) return body;
+  if (body->op == POLY_OP_SINK) {
+    if (body->n_src != 1) return NULL;
+    body = body->src[0];
+  }
+  body = poly_strip_copy_effect_wrappers(body);
+  if (!body || body->op != POLY_OP_STORE || body->n_src < 2) return NULL;
+  if (!poly_uop_has_buffer_identity(body->src[0])) return NULL;
+  PolyUOp *value = body->src[1];
+  if (!value || value->op != POLY_OP_COPY || value->n_src < 2 || !value->src[1] ||
+      value->src[1]->op != POLY_OP_DEVICE)
+    return NULL;
+  if (!poly_copy_identity_source(value->src[0])) return NULL;
+  return value;
+}
+
 bool poly_schedule_call_is_copy(const PolySchedule *schedule, int call_index) {
   return poly_call_is_copy(poly_schedule_call(schedule, call_index));
 }
@@ -2578,7 +2614,27 @@ static PolySchedule *build_schedule_from_linear_template(
         break;
       }
     }
-    if (ok) linear_src[k] = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+    if (ok) {
+      PolyUOp *resolved_call =
+          poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+      PolyUOp *copy_body = poly_call_copy_body_from_store(resolved_call ? resolved_call->src[0] : NULL);
+      if (resolved_call && copy_body && resolved_call->src[0] != copy_body) {
+        call_src[0] = copy_body;
+        resolved_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+      }
+      if (resolved_call && !poly_call_is_copy(resolved_call) && !poly_call_is_view(resolved_call) &&
+          resolved_call->src[0] && resolved_call->src[0]->op != POLY_OP_PROGRAM) {
+        PolyUOp *program = poly_program_from_call(ctx, resolved_call, "test");
+        if (program) {
+          call_src[0] = program;
+          resolved_call =
+              poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+        } else {
+          resolved_call = NULL;
+        }
+      }
+      linear_src[k] = resolved_call;
+    }
     free(call_src);
     if (!ok || !linear_src[k]) {
       free(linear_src);
@@ -2607,6 +2663,103 @@ cleanup:
   free(intermediates);
   poly_schedule_free(ps);
   return NULL;
+}
+
+PolySchedule *poly_create_schedule_from_linear(PolyCtx *ctx, PolyUOp *linear, PolyCompileMode mode) {
+  if (!ctx || !linear || linear->op != POLY_OP_LINEAR) {
+    fprintf(stderr, "polygrad: create_schedule_from_linear: expected LINEAR\n");
+    return NULL;
+  }
+
+  PolyUOp **external = NULL;
+  int n_external = 0, cap_external = 0;
+  PolyUOp **linear_src = NULL;
+  PolyScheduleCacheEntry *entry = NULL;
+  PolySchedule *out = NULL;
+
+  for (int k = 0; k < linear->n_src; k++) {
+    PolyUOp *call = linear->src[k];
+    if (!call || call->op != POLY_OP_CALL || call->n_src < 1) goto cleanup;
+    for (int i = 1; i < call->n_src; i++) {
+      PolyUOp *arg = call->src[i];
+      if (poly_call_arg_is_var(arg)) continue;
+      PolyUOp *buf = (PolyUOp *)poly_uop_get_buffer_identity(arg);
+      if (!buf) goto cleanup;
+      if (poly_find_buf_position(buf, external, n_external) >= 0) continue;
+      if (n_external >= cap_external) {
+        int new_cap = cap_external ? cap_external * 2 : 8;
+        PolyUOp **tmp = realloc(external, (size_t)new_cap * sizeof(*external));
+        if (!tmp) goto cleanup;
+        external = tmp;
+        cap_external = new_cap;
+      }
+      external[n_external++] = buf;
+    }
+  }
+
+  linear_src = calloc((size_t)(linear->n_src > 0 ? linear->n_src : 1), sizeof(*linear_src));
+  if (linear->n_src > 0 && !linear_src) goto cleanup;
+
+  for (int k = 0; k < linear->n_src; k++) {
+    PolyUOp *call = linear->src[k];
+    PolyUOp **call_src = calloc((size_t)call->n_src, sizeof(*call_src));
+    if (!call_src) goto cleanup;
+    call_src[0] = call->src[0];
+    bool ok = true;
+    for (int i = 1; i < call->n_src; i++) {
+      PolyUOp *arg = call->src[i];
+      if (poly_call_arg_is_var(arg)) {
+        call_src[i] = arg;
+        continue;
+      }
+      PolyUOp *buf = (PolyUOp *)poly_uop_get_buffer_identity(arg);
+      int slot = poly_find_buf_position(buf, external, n_external);
+      if (slot < 0) {
+        ok = false;
+        break;
+      }
+      call_src[i] = linear_call_param_for_buf(ctx, buf, slot);
+    }
+    if (ok) {
+      PolyUOp *resolved_call =
+          poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+      PolyUOp *copy_body = poly_call_copy_body_from_store(resolved_call ? resolved_call->src[0] : NULL);
+      if (resolved_call && copy_body && resolved_call->src[0] != copy_body) {
+        call_src[0] = copy_body;
+        resolved_call = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+      }
+      if (resolved_call && !poly_call_is_copy(resolved_call) && !poly_call_is_view(resolved_call) &&
+          resolved_call->src[0] && resolved_call->src[0]->op != POLY_OP_PROGRAM) {
+        PolyUOp *program = poly_program_from_call(ctx, resolved_call, "test");
+        if (program) {
+          call_src[0] = program;
+          resolved_call =
+              poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
+        } else {
+          resolved_call = NULL;
+        }
+      }
+      linear_src[k] = resolved_call;
+    }
+    free(call_src);
+    if (!ok || !linear_src[k]) goto cleanup;
+  }
+
+  entry = calloc(1, sizeof(*entry));
+  if (!entry) goto cleanup;
+  entry->refcount = 1;
+  entry->linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, linear->n_src, linear->arg);
+  if (!entry->linear) goto cleanup;
+  entry->n_calls = entry->linear->n_src;
+
+  uint32_t ghash = poly_structural_hash(entry->linear) ^ (POLY_SCHED_CACHE_VERSION * 2654435761u);
+  out = build_schedule_from_linear_template(ctx, entry, mode, ghash, external, n_external, NULL, 0, true);
+
+cleanup:
+  free(external);
+  free(linear_src);
+  poly_schedule_cache_entry_release(entry);
+  return out;
 }
 
 static PolySchedule *build_schedule_from_kernel_graph(

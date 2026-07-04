@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from polygrad import Device, Jit, JitError, Tensor, Variable, can_run, compile as pg_compile, jit, stats as pg_stats
+from polygrad.uop.ops import UOp
 
 
 class TestCreation:
@@ -67,6 +68,38 @@ class TestCreation:
             can_run('add', dtype='float32')
         with pytest.raises(ValueError, match='shape queries require an op'):
             can_run(shape=(4,), dtype='float32')
+
+    def test_custom_kernel_uop_call(self):
+        def add_kernel(c, a, b):
+            c, a, b = c.flatten(), a.flatten(), b.flatten()
+            i = UOp.range(c.ctx, c.numel(), 0)
+            return c[i].store(a[i] + b[i]).end(i).sink()
+
+        a = Tensor([1.0, 2.0, 3.0, 4.0])
+        b = Tensor([10.0, 20.0, 30.0, 40.0])
+        c = Tensor.empty((4,), dtype='float32')
+        out = c.custom_kernel(a, b, fxn=add_kernel)[0]
+        np.testing.assert_allclose(out.numpy(), [11.0, 22.0, 33.0, 44.0])
+
+    def test_custom_kernel_reuses_buffers_after_input_update(self):
+        def add_kernel(c, a, b):
+            c, a, b = c.flatten(), a.flatten(), b.flatten()
+            i = UOp.range(c.ctx, c.numel(), 0)
+            return c[i].store(a[i] + b[i]).end(i).sink()
+
+        a = Tensor.empty((4,), dtype='float32')
+        b = Tensor([10.0, 20.0, 30.0, 40.0])
+        c = Tensor.empty((4,), dtype='float32')
+        for vals, expected in (
+            ([1.0, 2.0, 3.0, 4.0], [11.0, 22.0, 33.0, 44.0]),
+            ([5.0, 6.0, 7.0, 8.0], [15.0, 26.0, 37.0, 48.0]),
+        ):
+            a.copy_from(np.array(vals, dtype=np.float32))
+            out = c.custom_kernel(a, b, fxn=add_kernel)[0]
+            assert out.uop_logical.op_name == 'AFTER'
+            out.realize()
+            assert out.uop_physical.has_buffer_identity()
+            np.testing.assert_allclose(out.numpy(), expected)
 
     def test_empty_rejects_name_like_tinygrad(self):
         with pytest.raises(TypeError, match='Tensor.empty does not accept name'):

@@ -105,6 +105,42 @@ async function runTensorTests(pg) {
     assert(pg.uop.buffer(t.uop), 'pg.uop.buffer should return a UOp')
   })
 
+  await test('customKernel executes UOp CALL body', async () => {
+    function addKernel(c, a, b) {
+      c = c.flatten(); a = a.flatten(); b = b.flatten()
+      const i = pg.uop.range(c.numel(), 0)
+      return c.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+    }
+    const a = new Tensor([1, 2, 3, 4])
+    const b = new Tensor([10, 20, 30, 40])
+    const c = Tensor.empty([4], { dtype: 'float32' })
+    const out = c.customKernel(a, b, addKernel)[0]
+    assertClose(await out.toArray(), [11, 22, 33, 44])
+  })
+
+  await test('customKernel reuses buffers after input update', async () => {
+    function addKernel(c, a, b) {
+      c = c.flatten(); a = a.flatten(); b = b.flatten()
+      const i = pg.uop.range(c.numel(), 0)
+      return c.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+    }
+    const a = Tensor.empty([4], { dtype: 'float32' })
+    const b = new Tensor([10, 20, 30, 40])
+    const c = Tensor.empty([4], { dtype: 'float32' })
+    const runs = [
+      [new Float32Array([1, 2, 3, 4]), [11, 22, 33, 44]],
+      [new Float32Array([5, 6, 7, 8]), [15, 26, 37, 48]],
+    ]
+    for (const [vals, expected] of runs) {
+      a.copyFrom(vals)
+      const out = c.customKernel(a, b, addKernel)[0]
+      assert(out.uopLogical, 'custom output should keep a logical root')
+      await out.realize()
+      assert(out.uopPhysical && out.uopPhysical.hasBufferIdentity(), 'custom output should realize to a buffer-backed root')
+      assertClose(await out.toArray(), expected)
+    }
+  })
+
   await test('runtime exposes conservative stats and capability checks', async () => {
     assert(typeof pg.stats === 'function', 'runtime should expose stats()')
     assert(typeof pg.canRun === 'function', 'runtime should expose canRun()')

@@ -9,6 +9,8 @@ change when `Tensor.uop` is migrated to hold a `UOp` instance.
 
 from .. import _ffi
 
+POLY_AXIS_LOOP = 3
+
 
 class UOp:
     __slots__ = ('ctx', 'raw')
@@ -75,6 +77,119 @@ class UOp:
     def contiguous(self):
         raw = _ffi._lib.poly_contiguous(self.ctx, self.raw)
         return UOp(self.ctx, raw) if raw else None
+
+    @staticmethod
+    def placeholder_like(uop, slot=0):
+        """Mirrors tinygrad's UOp.placeholder_like for custom-kernel bodies."""
+        if not isinstance(uop, UOp):
+            raise TypeError('placeholder_like expects a UOp')
+        raw = _ffi._lib.poly_uop_placeholder_like(uop.ctx, uop.raw, int(slot))
+        return UOp(uop.ctx, raw) if raw else None
+
+    @staticmethod
+    def range(ctx, bound, axis_id=0, axis_type=POLY_AXIS_LOOP):
+        raw = _ffi._lib.poly_uop_range(ctx, int(bound), int(axis_id), int(axis_type))
+        return UOp(ctx, raw) if raw else None
+
+    def numel(self):
+        n = _ffi._lib.poly_uop_numel(self.ctx, self.raw)
+        if n < 0:
+            raise RuntimeError('poly_uop_numel failed')
+        return int(n)
+
+    def flatten(self):
+        raw = _ffi._lib.poly_uop_flatten(self.ctx, self.raw)
+        return UOp(self.ctx, raw) if raw else None
+
+    def index(self, *idx, ptr=False):
+        if len(idx) == 1 and isinstance(idx[0], (tuple, list)):
+            idx = tuple(idx[0])
+        indices = []
+        for x in idx:
+            if isinstance(x, UOp):
+                indices.append(x.raw)
+            elif isinstance(x, int):
+                indices.append(_ffi._lib.poly_const_int(self.ctx, int(x)))
+            else:
+                raise TypeError(f'unsupported index type {type(x).__name__}')
+        arr = (_ffi._ptr * len(indices))(*indices) if indices else None
+        raw = _ffi._lib.poly_uop_index(self.ctx, self.raw, arr, len(indices), int(bool(ptr)))
+        return UOp(self.ctx, raw) if raw else None
+
+    def __getitem__(self, idx):
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        return self.index(*idx)
+
+    def load(self):
+        raw = _ffi._lib.poly_uop_load(self.ctx, self.raw)
+        return UOp(self.ctx, raw) if raw else None
+
+    def store(self, value):
+        value = self._coerce(value)
+        raw = _ffi._lib.poly_uop_store(self.ctx, self.raw, value.raw)
+        return UOp(self.ctx, raw) if raw else None
+
+    def end(self, *ranges):
+        arr = (_ffi._ptr * len(ranges))(*[r.raw if isinstance(r, UOp) else r for r in ranges]) if ranges else None
+        raw = _ffi._lib.poly_uop_end(self.ctx, self.raw, arr, len(ranges))
+        return UOp(self.ctx, raw) if raw else None
+
+    def sink(self, *srcs):
+        all_srcs = (self,) + tuple(s for s in srcs if s is not None)
+        arr = (_ffi._ptr * len(all_srcs))(*[s.raw if isinstance(s, UOp) else s for s in all_srcs])
+        raw = _ffi._lib.poly_uop_sink(self.ctx, arr, len(all_srcs))
+        return UOp(self.ctx, raw) if raw else None
+
+    def call(self, *srcs):
+        arr = (_ffi._ptr * len(srcs))(*[s.raw if isinstance(s, UOp) else s for s in srcs]) if srcs else None
+        raw = _ffi._lib.poly_uop_call(self.ctx, self.raw, arr, len(srcs))
+        return UOp(self.ctx, raw) if raw else None
+
+    def after(self, *effects):
+        out = self
+        for effect in effects:
+            effect_raw = effect.raw if isinstance(effect, UOp) else effect
+            raw = _ffi._lib.poly_uop_after(self.ctx, out.raw, effect_raw)
+            out = UOp(self.ctx, raw) if raw else None
+            if out is None:
+                return None
+        return out
+
+    def _coerce(self, value):
+        if isinstance(value, UOp):
+            return value
+        if isinstance(value, int):
+            return UOp(self.ctx, _ffi._lib.poly_const_int(self.ctx, value))
+        if isinstance(value, float):
+            return UOp(self.ctx, _ffi._lib.poly_const_float(self.ctx, value))
+        raise TypeError(f'cannot convert {type(value).__name__} to UOp')
+
+    def _alu2(self, op_name, other):
+        other = self._coerce(other)
+        raw = _ffi._lib.poly_alu2(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
+        return UOp(self.ctx, raw) if raw else None
+
+    def __add__(self, other):
+        return self._alu2('ADD', other)
+
+    def __radd__(self, other):
+        return self._coerce(other)._alu2('ADD', self)
+
+    def __sub__(self, other):
+        return self._alu2('SUB', other)
+
+    def __rsub__(self, other):
+        return self._coerce(other)._alu2('SUB', self)
+
+    def __mul__(self, other):
+        return self._alu2('MUL', other)
+
+    def __rmul__(self, other):
+        return self._coerce(other)._alu2('MUL', self)
+
+    def __truediv__(self, other):
+        return self._alu2('FDIV', other)
 
     # --- Buffer identity ---
 

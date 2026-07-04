@@ -222,6 +222,9 @@ PolySchedule *poly_complete_create_schedule_with_vars(PolyCtx *ctx, PolyUOp *sin
 /* Tinygrad engine/schedule.py analogue: create a schedule from a kernel graph. */
 PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph);
 
+/* Create a concrete schedule from already-formed LINEAR(CALL(...)) effects. */
+PolySchedule *poly_create_schedule_from_linear(PolyCtx *ctx, PolyUOp *linear, PolyCompileMode mode);
+
 /* Tinygrad engine/schedule.py analogue: lower a sink into LINEAR form. */
 PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode mode);
 

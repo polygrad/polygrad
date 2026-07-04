@@ -316,12 +316,19 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
     PolyUOp **src = (u->n_src > 16) ? malloc((size_t)u->n_src * sizeof(PolyUOp *)) : stack_src;
     if (!src) return NULL;
     bool changed = false;
-    src[0] = lower_value(p, u->src[0], device);
-    if (!src[0]) {
-      if (src != stack_src) free(src);
-      return NULL;
+    if (poly_uop_has_buffer_identity(u->src[0])) {
+      /* AFTER's value source is the effect target. Preserve buffer identity so
+       * call/store scheduling can see the destination, and let realization
+       * allocate or copy dependencies explicitly. */
+      src[0] = u->src[0];
+    } else {
+      src[0] = lower_value(p, u->src[0], device);
+      if (!src[0]) {
+        if (src != stack_src) free(src);
+        return NULL;
+      }
+      if (src[0] != u->src[0]) changed = true;
     }
-    if (src[0] != u->src[0]) changed = true;
     for (int i = 1; i < u->n_src; i++) {
       src[i] = lower_effect(p, u->src[i], device);
       if (!src[i]) {
@@ -371,6 +378,13 @@ static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device)
     if (!value) return NULL;
     if (value == u->src[1]) return u;
     return poly_uop2(p->ctx, POLY_OP_ASSIGN, u->dtype, u->src[0], value, u->arg);
+  }
+
+  if (u->op == POLY_OP_CALL) {
+    /* CALL bodies are opaque effect kernels. Keep their logical body and
+     * logical buffer arguments intact; schedule/runtime slot preparation owns
+     * residency for the call arguments. */
+    return u;
   }
 
   return lower_value(p, u, device);

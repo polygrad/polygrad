@@ -4639,8 +4639,7 @@ static PolyUOp *rule_add_load_to_index(PolyCtx *ctx, PolyUOp *idx, const PolyBin
   if (idx->n_src < 1 || !idx->src[0]) return NULL;
 
   PolyDType ptr_dt = idx->src[0]->dtype;
-  if (!ptr_dt.is_ptr)
-    ptr_dt = poly_dtype_ptr(poly_dtype_scalar(idx->src[0]->dtype), -1, POLY_ADDR_GLOBAL);
+  if (!ptr_dt.is_ptr) return NULL;
 
   /* Rebuild the same INDEX with a ptr dtype, then LOAD the original scalar
    * element dtype. This matches tinygrad's buf.index(..., ptr=True).load(). */
@@ -4867,13 +4866,11 @@ static PolyUOp *rule_expand_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings
   if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
   PolyUOp *buf_vec = idx->src[0];
   if (!buf_vec || buf_vec->op != POLY_OP_VECTORIZE || buf_vec->n_src <= 1) return NULL;
-  /* All VECTORIZE sources must be Defines (PARAM) or AFTER */
+  /* tinygrad load_store_folding expands INDEX(STACK(buf,...), vec) before
+   * pm_add_loads. The repeated base can be a shaped pointer view such as
+   * RESHAPE(PARAM), not only a raw PARAM/AFTER node. */
   PolyUOp *buf = buf_vec->src[0];
-  if (!buf) return NULL;
-  if (buf->op != POLY_OP_PARAM && buf->op != POLY_OP_DEFINE_LOCAL &&
-      buf->op != POLY_OP_DEFINE_REG && buf->op != POLY_OP_AFTER &&
-      !poly_is_reg_or_local_buffer_codegen(buf))
-    return NULL;
+  if (!buf || !buf->dtype.is_ptr) return NULL;
   for (int i = 1; i < buf_vec->n_src; i++)
     if (buf_vec->src[i] != buf) return NULL; /* all same buf */
 

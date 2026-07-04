@@ -8,6 +8,7 @@
 #include "test_harness.h"
 #include "../src/ctx.h"
 #include "../src/engine/realize.h"
+#include "../src/engine/schedule.h"
 #include "../src/device.h"
 #include "../src/frontend.h"
 #include "../src/polygrad.h"
@@ -45,6 +46,53 @@ static int count_copy_to_device(PolyCtx *ctx, PolyUOp *root, PolyDevice device) 
       count++;
   }
   return count;
+}
+
+TEST(realize, custom_call_copy_output_schedules_copy_call) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *pc = poly_uop_placeholder_like(ctx, c, 0);
+  PolyUOp *pa = poly_uop_placeholder_like(ctx, a, 1);
+  PolyUOp *pb = poly_uop_placeholder_like(ctx, b, 2);
+  PolyUOp *r = poly_uop_range(ctx, 4, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *idxs[1] = {r};
+  PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1, 1);
+  PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1, 1);
+  PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1, 1);
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, ai, bi, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, ci, add, poly_arg_none());
+  PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
+  PolyUOp *sink = poly_uop_sink(ctx, &end, 1);
+  PolyUOp *args[3] = {c, a, b};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
+  PolyUOp *after = poly_uop_after(ctx, c, call);
+  PolyUOp *contig = poly_contiguous(ctx, after);
+  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *copy_src[2] = {contig, device};
+  PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+
+  PolyUOp *out = NULL;
+  PolyUOp *linear = poly_transform_to_call(ctx, &copy, 1, &out);
+  ASSERT_NOT_NULL(linear);
+  ASSERT_EQ(linear->op, POLY_OP_LINEAR);
+  ASSERT_INT_EQ(linear->n_src, 2);
+  ASSERT_NOT_NULL(out);
+  ASSERT_TRUE(poly_uop_has_buffer_identity(out));
+
+  PolySchedule *sched = poly_create_schedule_from_linear(ctx, linear, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->template->n_calls, 2);
+  ASSERT_FALSE(poly_schedule_call_is_copy(sched, 0));
+  ASSERT_TRUE(poly_schedule_call_is_copy(sched, 1));
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_CALL), 0);
+  ASSERT_INT_EQ(count_root_ops(ctx, poly_schedule_call_body(sched, 1), POLY_OP_AFTER), 0);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
 }
 
 TEST(realize, tensor_place_physicalizes_to_tinygrad_copy_device_graph) {

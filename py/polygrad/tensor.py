@@ -724,6 +724,47 @@ class Tensor:
         all_tensors[weakref.ref(ret)] = None
         return ret
 
+    def custom_kernel(self, *lst, fxn, grad_fxn=None):
+        """Call a custom SINK kernel written in UOps.
+
+        Mirrors tinygrad's alpha `Tensor.custom_kernel`: inputs are made
+        contiguous, placeholder PARAM UOps are passed to `fxn`, the returned
+        SINK body is wrapped in CALL, and every source tensor is returned as
+        `AFTER(source, call)`.
+        """
+        if grad_fxn is not None:
+            raise NotImplementedError('custom_kernel grad_fxn is not implemented yet')
+        srcs = (self,) + tuple(lst)
+        for t in srcs:
+            if not isinstance(t, Tensor):
+                raise TypeError('custom_kernel expects Tensor arguments')
+            if t._ctx != self._ctx:
+                raise ValueError('custom_kernel tensors must share a context')
+        contig = tuple(
+            t if t._graph_uop and t._graph_uop.op == _ffi.OPS.get('AFTER') else t.contiguous()
+            for t in srcs
+        )
+        placeholders = [UOp.placeholder_like(t._graph_uop, slot=i) for i, t in enumerate(contig)]
+        body = fxn(*placeholders)
+        if not isinstance(body, UOp):
+            raise TypeError('custom_kernel fxn must return a UOp SINK body')
+        call = body.call(*[t._graph_uop for t in contig])
+        outs = []
+        for t in contig:
+            logical = t._graph_uop.after(call)
+            out = Tensor(
+                _ctx=t._ctx,
+                _tensor=Tensor._core_create_with_roots_for(
+                    t._ctx, logical, None, _POLY_TENSOR_VALUE, t._device
+                ),
+                _dtype=t._dtype_str,
+                _device=t._device,
+            )
+            if t._requires_grad:
+                out.requires_grad = True
+            outs.append(out)
+        return outs
+
     # --- Realization ---
 
     def _live_grad_targets(self):

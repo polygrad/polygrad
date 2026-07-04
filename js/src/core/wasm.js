@@ -482,6 +482,50 @@ async function createWasmCore(device) {
         if (ptr) Module._free(ptr)
       }
     },
+    poly_uop_placeholder_like: Module._poly_uop_placeholder_like,
+    poly_uop_range: (ctx, bound, axisId, axisType) =>
+      Module._poly_uop_range(ctx, BigInt(bound), BigInt(axisId), axisType),
+    poly_uop_index: (ctx, base, indices, keepPtr) => {
+      const idx = indices || []
+      const ptr = writePtrArray(idx)
+      try {
+        return Module._poly_uop_index(ctx, base, ptr, idx.length, keepPtr ? 1 : 0)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_uop_load: Module._poly_uop_load,
+    poly_uop_store: Module._poly_uop_store,
+    poly_uop_end: (ctx, body, ranges) => {
+      const rs = ranges || []
+      const ptr = writePtrArray(rs)
+      try {
+        return Module._poly_uop_end(ctx, body, ptr, rs.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_uop_sink: (ctx, srcs) => {
+      const xs = srcs || []
+      const ptr = writePtrArray(xs)
+      try {
+        return Module._poly_uop_sink(ctx, ptr, xs.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_uop_call: (ctx, body, args) => {
+      const xs = args || []
+      const ptr = writePtrArray(xs)
+      try {
+        return Module._poly_uop_call(ctx, body, ptr, xs.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_uop_after: Module._poly_uop_after,
+    poly_uop_flatten: Module._poly_uop_flatten,
+    poly_uop_numel: (ctx, uop) => Number(Module._poly_uop_numel(ctx, uop)),
     poly_register_buffer_by_id: (ctx, role, dtypeId, shape, name) => {
       const shapePtr = writeInt64Array(shape || [])
       const namePtr = allocString(name)
@@ -984,7 +1028,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 12
+  const EXPECTED_ABI = 13
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

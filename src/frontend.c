@@ -70,6 +70,144 @@ int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u) {
   return 0;
 }
 
+static PolyDType frontend_value_dtype(PolyDType dt) {
+  if (!dt.is_ptr) return poly_dtype_scalar(dt);
+  PolyDType base = dt;
+  base.is_ptr = false;
+  base.addrspace = POLY_ADDR_GLOBAL;
+  base.vcount = 1;
+  base.ptr_size = 0;
+  return poly_dtype_scalar(base);
+}
+
+PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot) {
+  if (!ctx || !like || slot < 0) return NULL;
+  int ndim = poly_uop_ndim(ctx, like);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, like);
+  if (ndim > 0 && !dims) return NULL;
+  int64_t numel = ndim == 0 ? 1 : poly_shape_numel_checked(dims, ndim);
+  if (numel < 0) return NULL;
+  PolyDType ptr_dt = poly_dtype_ptr(frontend_value_dtype(like->dtype), numel, POLY_ADDR_GLOBAL);
+  PolyUOp *param = poly_uop0(ctx, POLY_OP_PARAM, ptr_dt, poly_arg_int(slot));
+  if (!param || ndim <= 1) return param;
+  return poly_reshape(ctx, param, (int64_t *)dims, ndim);
+}
+
+PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type) {
+  if (!ctx || bound < 0) return NULL;
+  if (axis_type < POLY_AXIS_GLOBAL || axis_type > POLY_AXIS_PLACEHOLDER) return NULL;
+  PolyUOp *bound_uop = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(bound));
+  return poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INT32, bound_uop,
+      poly_arg_range(axis_id, (PolyAxisType)axis_type)
+  );
+}
+
+PolyUOp *poly_uop_index(
+    PolyCtx *ctx,
+    PolyUOp *base,
+    PolyUOp **indices,
+    int n_indices,
+    int keep_ptr
+) {
+  if (!ctx || !base || n_indices < 0 || (n_indices > 0 && !indices)) return NULL;
+  if (n_indices > POLY_MAX_DIMS) return NULL;
+  PolyUOp *src[POLY_MAX_DIMS + 1];
+  src[0] = base;
+  for (int i = 0; i < n_indices; i++) {
+    if (!indices[i]) return NULL;
+    src[1 + i] = indices[i];
+  }
+  PolyDType out_dt = keep_ptr ? base->dtype : frontend_value_dtype(base->dtype);
+  return poly_uop(ctx, POLY_OP_INDEX, out_dt, src, n_indices + 1, poly_arg_none());
+}
+
+PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr) {
+  if (!ctx || !addr) return NULL;
+  if (!addr->dtype.is_ptr) return addr;
+  return poly_uop1(ctx, POLY_OP_LOAD, frontend_value_dtype(addr->dtype), addr, poly_arg_none());
+}
+
+PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value) {
+  if (!ctx || !addr || !value) return NULL;
+  PolyUOp *ptr = addr;
+  if (!ptr->dtype.is_ptr && ptr->op == POLY_OP_INDEX && ptr->n_src >= 1 && ptr->src[0] &&
+      ptr->src[0]->dtype.is_ptr) {
+    PolyUOp *src[POLY_MAX_DIMS + 1];
+    if (ptr->n_src > POLY_MAX_DIMS + 1) return NULL;
+    for (int i = 0; i < ptr->n_src; i++)
+      src[i] = ptr->src[i];
+    ptr = poly_uop(ctx, POLY_OP_INDEX, ptr->src[0]->dtype, src, ptr->n_src, ptr->arg);
+  }
+  return poly_store_val(ctx, ptr, value);
+}
+
+PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_ranges) {
+  if (!ctx || !body || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
+  PolyUOp **src = malloc((size_t)(n_ranges + 1) * sizeof(PolyUOp *));
+  if (!src) return NULL;
+  src[0] = body;
+  for (int i = 0; i < n_ranges; i++) {
+    if (!ranges[i]) {
+      free(src);
+      return NULL;
+    }
+    src[1 + i] = ranges[i];
+  }
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_END, POLY_VOID, src, n_ranges + 1, poly_arg_none());
+  free(src);
+  return ret;
+}
+
+PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src) {
+  if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
+  return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, poly_arg_none());
+}
+
+PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args) {
+  if (!ctx || !body || n_args < 0 || (n_args > 0 && !args)) return NULL;
+  PolyUOp **src = malloc((size_t)(n_args + 1) * sizeof(PolyUOp *));
+  if (!src) return NULL;
+  src[0] = body;
+  for (int i = 0; i < n_args; i++) {
+    if (!args[i]) {
+      free(src);
+      return NULL;
+    }
+    src[1 + i] = args[i];
+  }
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, src, n_args + 1, poly_arg_none());
+  free(src);
+  return ret;
+}
+
+PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect) {
+  if (!ctx || !target || !effect) return NULL;
+  PolyUOp *src[2] = {target, effect};
+  return poly_uop(ctx, POLY_OP_AFTER, target->dtype, src, 2, poly_arg_none());
+}
+
+int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return -1;
+  int ndim = poly_uop_ndim(ctx, u);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return -1;
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
+  if (ndim > 0 && !dims) return -1;
+  return ndim == 0 ? 1 : poly_shape_numel_checked(dims, ndim);
+}
+
+PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  int64_t numel = poly_uop_numel(ctx, u);
+  if (numel < 0) return NULL;
+  int ndim = poly_uop_ndim(ctx, u);
+  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
+  if (ndim == 1 && dims && dims[0] == numel) return u;
+  int64_t shape[1] = {numel};
+  return poly_reshape(ctx, u, shape, 1);
+}
+
 /* Dynamic shapes (DEFINE_VAR / BIND) */
 
 PolyUOp *poly_define_var(PolyCtx *ctx, const char *name, int64_t min_val, int64_t max_val) {

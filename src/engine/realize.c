@@ -23,6 +23,10 @@ static bool poly_transform_to_call_view_op(PolyOps op) {
   return op == POLY_OP_RESHAPE || op == POLY_OP_EXPAND || op == POLY_OP_PAD;
 }
 
+static bool poly_transform_to_call_after_result_view_op(PolyOps op) {
+  return poly_transform_to_call_view_op(op) || op == POLY_OP_CONTIGUOUS;
+}
+
 static bool poly_realize_devices_share_host_addressable_storage(PolyDevice a, PolyDevice b) {
   if (a == POLY_DEVICE_AUTO || b == POLY_DEVICE_AUTO || a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST)
     return false;
@@ -41,6 +45,9 @@ typedef struct {
   PolyUOp **stores;
   int n_stores;
   int stores_cap;
+  PolyUOp **calls;
+  int n_calls;
+  int calls_cap;
   PolyUOp **cached_orig;
   PolyUOp **cached_repl;
   int n_cached;
@@ -90,6 +97,17 @@ static PolyUOp *poly_transform_to_call_root(PolyUOp *u, PolyTransformViewStack *
   return root ? root : u;
 }
 
+static PolyUOp *poly_transform_to_call_after_result_root(PolyUOp *u, PolyTransformViewStack *views) {
+  PolyUOp *root = u;
+  if (views) views->n = 0;
+  while (root && root->n_src >= 1 && !poly_uop_has_buffer_identity(root) &&
+         poly_transform_to_call_after_result_view_op(root->op)) {
+    if (!poly_transform_view_stack_push(views, root)) return NULL;
+    root = root->src[0];
+  }
+  return root ? root : u;
+}
+
 static PolyUOp *poly_transform_to_call_rebuild_view(
     PolyCtx *ctx,
     PolyUOp *buf,
@@ -116,7 +134,7 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
 
 static PolyUOp *poly_transform_to_call_after_result_buffer(PolyCtx *ctx, PolyUOp *u) {
   PolyTransformViewStack views = {0};
-  PolyUOp *root = poly_transform_to_call_root(u, &views);
+  PolyUOp *root = poly_transform_to_call_after_result_root(u, &views);
   if (!root || root->op != POLY_OP_AFTER || root->n_src < 1 ||
       !poly_uop_has_buffer_identity(root->src[0])) {
     poly_transform_view_stack_free(&views);
@@ -205,16 +223,33 @@ static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, Po
   return true;
 }
 
+static bool poly_transform_to_call_append_call(PolyTransformToCallCtx *tctx, PolyUOp *call) {
+  if (!tctx || !call || call->op != POLY_OP_CALL) return false;
+  if (tctx->n_calls >= tctx->calls_cap) {
+    int new_cap = tctx->calls_cap ? tctx->calls_cap * 2 : 4;
+    PolyUOp **new_calls = realloc(tctx->calls, (size_t)new_cap * sizeof(PolyUOp *));
+    if (!new_calls) return false;
+    tctx->calls = new_calls;
+    tctx->calls_cap = new_cap;
+  }
+  tctx->calls[tctx->n_calls++] = call;
+  return true;
+}
+
 static void poly_transform_to_call_ctx_free(PolyTransformToCallCtx *tctx) {
   if (!tctx) return;
   free(tctx->stores);
+  free(tctx->calls);
   free(tctx->cached_orig);
   free(tctx->cached_repl);
   tctx->stores = NULL;
+  tctx->calls = NULL;
   tctx->cached_orig = NULL;
   tctx->cached_repl = NULL;
   tctx->n_stores = 0;
   tctx->stores_cap = 0;
+  tctx->n_calls = 0;
+  tctx->calls_cap = 0;
   tctx->n_cached = 0;
   tctx->cached_cap = 0;
 }
@@ -243,6 +278,7 @@ static bool poly_transform_to_call_collect_after_stores(
 ) {
   if (!tctx || !effect) return false;
   if (effect->op == POLY_OP_STORE) return poly_transform_to_call_append_store(tctx, effect);
+  if (effect->op == POLY_OP_CALL) return poly_transform_to_call_append_call(tctx, effect);
   if (effect->op != POLY_OP_AFTER) return true;
 
   /* View assign follows tinygrad's nested shape:
@@ -278,6 +314,45 @@ static bool poly_transform_to_call_collect_pending_effects(
     if (!poly_transform_to_call_collect_pending_effects(tctx, u->src[i], visited)) return false;
   }
   return true;
+}
+
+static PolyUOp *poly_transform_to_call_strip_pending_after(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyMap *visited
+) {
+  if (!ctx || !u || !visited) return u;
+  if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) return u;
+  poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
+
+  /* Once pending effects have been collected into earlier CALLs, consumers
+   * should read the AFTER target. This mirrors tinygrad create_schedule:
+   * AFTER carries dependency edges, while split consumer kernels see src[0].
+   * Do not enter CALL bodies; they are opaque schedule items. */
+  if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0]))
+    return u->src[0];
+  if (u->op == POLY_OP_CALL) return u;
+
+  PolyUOp *stack_src[16];
+  PolyUOp **new_src = stack_src;
+  if (u->n_src > (int)(sizeof(stack_src) / sizeof(stack_src[0]))) {
+    new_src = malloc((size_t)u->n_src * sizeof(*new_src));
+    if (!new_src) return NULL;
+  }
+
+  bool changed = false;
+  for (int i = 0; i < u->n_src; i++) {
+    new_src[i] = poly_transform_to_call_strip_pending_after(ctx, u->src[i], visited);
+    if (!new_src[i]) {
+      if (new_src != stack_src) free(new_src);
+      return NULL;
+    }
+    if (new_src[i] != u->src[i]) changed = true;
+  }
+
+  PolyUOp *ret = changed ? poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : u;
+  if (new_src != stack_src) free(new_src);
+  return ret;
 }
 
 static PolyUOp *poly_transform_to_call_wrap_call(PolyCtx *ctx, PolyUOp *sink) {
@@ -497,11 +572,12 @@ static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, P
 
     if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
       int before = tctx.n_stores;
+      int before_calls = tctx.n_calls;
       if (!poly_transform_to_call_collect_after_stores(&tctx, u)) {
         poly_transform_to_call_ctx_free(&tctx);
         return NULL;
       }
-      if (tctx.n_stores > before) {
+      if (tctx.n_stores > before || tctx.n_calls > before_calls) {
         out_uops[i] = u->src[0];
         continue;
       }
@@ -571,6 +647,18 @@ static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, P
       continue;
     }
 
+    PolyMap *strip_visited = poly_map_new(64);
+    if (!strip_visited) {
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
+    u = poly_transform_to_call_strip_pending_after(ctx, u, strip_visited);
+    poly_map_destroy(strip_visited);
+    if (!u) {
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
+
     PolyUOp *host_current_result = NULL;
     int host_current_rc =
         poly_transform_to_call_try_host_current_copy(ctx, u, &host_current_result);
@@ -620,16 +708,34 @@ static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, P
     poly_transform_view_stack_free(&views);
   }
 
-  if (tctx.n_stores == 0) {
+  PolyUOp *store_call = NULL;
+  if (tctx.n_stores > 0) {
+    PolyUOp *sink_body = poly_sink_n(ctx, tctx.stores, tctx.n_stores);
+    store_call = poly_transform_to_call_wrap_call(ctx, sink_body);
+    if (!store_call) {
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
+  }
+
+  if (tctx.n_calls == 0) {
+    poly_transform_to_call_ctx_free(&tctx);
+    return store_call;
+  }
+
+  int n_linear = tctx.n_calls + (store_call ? 1 : 0);
+  PolyUOp **linear_src = calloc((size_t)n_linear, sizeof(*linear_src));
+  if (!linear_src) {
     poly_transform_to_call_ctx_free(&tctx);
     return NULL;
   }
-
-  PolyUOp *sink_body = poly_sink_n(ctx, tctx.stores, tctx.n_stores);
+  for (int i = 0; i < tctx.n_calls; i++)
+    linear_src[i] = tctx.calls[i];
+  if (store_call) linear_src[tctx.n_calls] = store_call;
+  PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, linear_src, n_linear, poly_arg_none());
+  free(linear_src);
   poly_transform_to_call_ctx_free(&tctx);
-  PolyUOp *call = poly_transform_to_call_wrap_call(ctx, sink_body);
-  if (!call) return NULL;
-  return call;
+  return linear;
 }
 
 PolyUOp *poly_transform_to_call(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
@@ -683,6 +789,15 @@ static PolySchedule *poly_schedule_with_vars_ex(
    * by instance/imported graphs run through poly_realize_sink directly. */
   PolyUOp *big_call = poly_transform_to_call_ex(ctx, uops, n, out_uops);
   if (!big_call) return NULL;
+
+  if (big_call->op == POLY_OP_LINEAR) {
+    PolySchedule *sched = poly_create_schedule_from_linear(ctx, big_call, POLY_MODE_CALL);
+    if (!sched) {
+      for (int i = 0; i < n; i++)
+        out_uops[i] = NULL;
+    }
+    return sched;
+  }
 
   PolyUOp *sched_sink = big_call;
   if (big_call->op == POLY_OP_CALL) {

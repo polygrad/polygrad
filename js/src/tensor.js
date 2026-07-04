@@ -736,6 +736,42 @@ function createBoundTensorClass(runtime) {
       return Array.from(devices)[0]
     }
 
+    customKernel(...args) {
+      let fxn = null
+      if (args.length && typeof args[args.length - 1] === 'function') {
+        fxn = args.pop()
+      } else if (args.length && args[args.length - 1] && typeof args[args.length - 1] === 'object'
+        && typeof args[args.length - 1].fxn === 'function') {
+        fxn = args.pop().fxn
+      }
+      if (!fxn) throw new TypeError('customKernel requires a kernel function')
+      const srcs = [this, ...args]
+      for (const t of srcs) {
+        if (!(t instanceof Tensor)) throw new TypeError('customKernel expects Tensor arguments')
+        if (t._ctx !== this._ctx) throw new Error('customKernel tensors must share a context')
+      }
+      const contig = srcs.map(t => {
+        const graph = t._graphUopRaw()
+        return graph && ffi.poly_uop_op && ffi.poly_uop_op(graph) === ops.AFTER ? t : t.contiguous()
+      })
+      const placeholders = contig.map((t, i) => UOp.placeholderLike(new UOp(t._ctx, ffi, t._graphUopRaw()), i))
+      const body = fxn(...placeholders)
+      if (!(body instanceof UOp)) throw new TypeError('customKernel function must return a UOp SINK body')
+      const call = body.call(...contig.map(t => new UOp(t._ctx, ffi, t._graphUopRaw())))
+      return contig.map(t => {
+        const logical = new UOp(t._ctx, ffi, t._graphUopRaw()).after(call)
+        return new Tensor(null, {
+          _ctx: t._ctx,
+          _tensor: tensorCreateWithRoots(t._ctx, logical.raw, null, POLY_TENSOR_VALUE, t._device),
+          _dtype: t._dtype,
+          _device: t._device,
+          requiresGrad: t._requiresGrad
+        })
+      })
+    }
+
+    custom_kernel(...args) { return this.customKernel(...args) }
+
     _ensureTensor(other) {
       if (other instanceof Tensor) return other
       if (typeof other === 'number') {

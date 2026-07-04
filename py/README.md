@@ -147,6 +147,34 @@ compiled.dispose()
 `polygrad.can_run(op, dtype="float32", shape=..., shapes=..., device="auto")`
 is an advisory backend capability probe.
 
+## Custom Kernels
+
+`Tensor.custom_kernel(...)` mirrors tinygrad's alpha custom-kernel shape. The
+kernel function receives placeholder UOps and returns a `SINK` body. Polygrad
+wraps the body in `CALL`, returns `AFTER(...)` tensors, and keeps execution in
+the normal schedule and runtime caches.
+
+```python
+from polygrad import Tensor
+from polygrad.uop.ops import UOp
+
+def add_kernel(out, a, b):
+    out, a, b = out.flatten(), a.flatten(), b.flatten()
+    i = UOp.range(out.ctx, out.numel(), 0)
+    return out[i].store(a[i] + b[i]).end(i).sink()
+
+out = Tensor.empty((4,), dtype="float32")
+y = out.custom_kernel(
+    Tensor([1, 2, 3, 4]),
+    Tensor([10, 20, 30, 40]),
+    fxn=add_kernel,
+)[0]
+print(y.numpy())
+```
+
+This is a UOp `CALL` extension point, not a raw program-launch API. Custom
+backward functions are not implemented yet.
+
 ## Tensor API Summary
 
 Construction:
@@ -175,7 +203,7 @@ Core methods:
 | Movement | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat` |
 | Indexing | `__getitem__`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
 | Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
-| Data | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |
+| Data | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone`, `custom_kernel` |
 
 Structured linalg methods are portable tensor-composed fallbacks tested against
 NumPy and Torch. They do not add LAPACK or runtime library dependencies.

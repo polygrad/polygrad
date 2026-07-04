@@ -291,6 +291,39 @@ def _declare_signatures(lib):
     lib.poly_sink_n.restype = _ptr
     lib.poly_sink_n.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
+    lib.poly_uop_placeholder_like.restype = _ptr
+    lib.poly_uop_placeholder_like.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_uop_range.restype = _ptr
+    lib.poly_uop_range.argtypes = [_ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int]
+
+    lib.poly_uop_index.restype = _ptr
+    lib.poly_uop_index.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_int]
+
+    lib.poly_uop_load.restype = _ptr
+    lib.poly_uop_load.argtypes = [_ptr, _ptr]
+
+    lib.poly_uop_store.restype = _ptr
+    lib.poly_uop_store.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_uop_end.restype = _ptr
+    lib.poly_uop_end.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_uop_sink.restype = _ptr
+    lib.poly_uop_sink.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_uop_call.restype = _ptr
+    lib.poly_uop_call.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_uop_after.restype = _ptr
+    lib.poly_uop_after.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_uop_flatten.restype = _ptr
+    lib.poly_uop_flatten.argtypes = [_ptr, _ptr]
+
+    lib.poly_uop_numel.restype = ctypes.c_int64
+    lib.poly_uop_numel.argtypes = [_ptr, _ptr]
+
     lib.poly_register_buffer_by_id.restype = _ptr
     lib.poly_register_buffer_by_id.argtypes = [
         _ptr, ctypes.c_int, ctypes.c_int, _i64p, ctypes.c_int, ctypes.c_char_p

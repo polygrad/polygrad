@@ -3285,9 +3285,24 @@ static bool kernel_copy_param_index(PolyUOp *u, PolyUOp **param_out, PolyUOp **i
   return true;
 }
 
+static bool kernel_copy_param_or_index(PolyUOp *u, PolyUOp **param_out, PolyUOp **idx_out) {
+  if (!u) return false;
+  if (u->op == POLY_OP_PARAM) {
+    if (param_out) *param_out = u;
+    if (idx_out) *idx_out = NULL;
+    return true;
+  }
+  return kernel_copy_param_index(u, param_out, idx_out);
+}
+
 static PolyUOp *kernel_copy_source_index_value(PolyUOp *u) {
   while (u) {
     if (u->op == POLY_OP_COPY && u->n_src == 2 && u->src[1] && u->src[1]->op == POLY_OP_DEVICE) {
+      u = u->src[0];
+      continue;
+    }
+    if (u->op == POLY_OP_CONTIGUOUS && u->n_src >= 1 &&
+        poly_uop_has_buffer_identity(u->src[0])) {
       u = u->src[0];
       continue;
     }
@@ -3321,10 +3336,12 @@ static bool kernel_body_copy_info(
 
   PolyUOp *dst_param = NULL, *src_param = NULL;
   PolyUOp *dst_idx = NULL, *src_idx = NULL;
-  if (!kernel_copy_param_index(body->src[0], &dst_param, &dst_idx)) return false;
-  if (!kernel_copy_param_index(kernel_copy_source_index_value(body->src[1]), &src_param, &src_idx))
+  if (!kernel_copy_param_or_index(body->src[0], &dst_param, &dst_idx)) return false;
+  if (!kernel_copy_param_or_index(kernel_copy_source_index_value(body->src[1]), &src_param, &src_idx))
     return false;
-  if (dst_param == src_param || !kernel_copy_indices_match(dst_idx, src_idx)) return false;
+  if (dst_param == src_param) return false;
+  if ((dst_idx || src_idx) && (!dst_idx || !src_idx || !kernel_copy_indices_match(dst_idx, src_idx)))
+    return false;
   if (!poly_dtype_eq(poly_dtype_scalar(dst_param->dtype), poly_dtype_scalar(src_param->dtype)))
     return false;
 

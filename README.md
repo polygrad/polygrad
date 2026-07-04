@@ -166,6 +166,47 @@ For embedding loops, Python and JS also expose `compile(...)`, which warms and
 captures the same JIT path up front and returns an explicit callable with
 `run(...)`, `stats()`, and `dispose()`.
 
+## Custom Kernels
+
+Polygrad exposes a tinygrad-shaped custom kernel path for cases where Tensor
+composition is too indirect. A kernel function receives placeholder UOps and
+returns a `SINK` body. Polygrad wraps that body in `CALL` and returns
+`AFTER(...)` tensors that still run through normal scheduling, placement,
+caches, and device residency.
+
+Python:
+
+```python
+from polygrad import Tensor
+from polygrad.uop.ops import UOp
+
+def add_kernel(out, a, b):
+    out, a, b = out.flatten(), a.flatten(), b.flatten()
+    i = UOp.range(out.ctx, out.numel(), 0)
+    return out[i].store(a[i] + b[i]).end(i).sink()
+
+out = Tensor.empty((4,), dtype="float32")
+y = out.custom_kernel(Tensor([1, 2, 3, 4]), Tensor([10, 20, 30, 40]), fxn=add_kernel)[0]
+print(y.numpy())
+```
+
+JavaScript:
+
+```js
+function addKernel(out, a, b) {
+  out = out.flatten(); a = a.flatten(); b = b.flatten()
+  const i = pg.uop.range(out.numel(), 0)
+  return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+}
+
+const out = pg.Tensor.empty([4], { dtype: 'float32' })
+const y = out.customKernel(new pg.Tensor([1, 2, 3, 4]), new pg.Tensor([10, 20, 30, 40]), addKernel)[0]
+console.log(await y.toArray())
+```
+
+This API is for UOp `CALL` bodies. It is not a raw program-launch API, and
+custom backward functions are not implemented yet.
+
 ## Architecture
 
 The shared execution path is:

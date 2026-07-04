@@ -56,6 +56,95 @@ class UOp {
     )
     return raw ? new UOp(ctx, ffi, raw) : null
   }
+
+  static placeholderLike(uop, slot = 0) {
+    const raw = uop.ffi.poly_uop_placeholder_like(uop.ctx, rawUop(uop), Number(slot))
+    return raw ? new UOp(uop.ctx, uop.ffi, raw) : null
+  }
+
+  static range(ctx, ffi, bound, axisId = 0, axisType = 3) {
+    const raw = ffi.poly_uop_range(ctx, Number(bound), Number(axisId), Number(axisType))
+    return raw ? new UOp(ctx, ffi, raw) : null
+  }
+
+  numel() {
+    const n = this.ffi.poly_uop_numel(this.ctx, this.raw)
+    if (n < 0) throw new Error('poly_uop_numel failed')
+    return Number(n)
+  }
+
+  flatten() {
+    const raw = this.ffi.poly_uop_flatten(this.ctx, this.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  index(...idx) {
+    if (idx.length === 1 && Array.isArray(idx[0])) idx = idx[0]
+    const rawIdx = idx.map(x => {
+      if (x instanceof UOp) return x.raw
+      if (Number.isInteger(x)) return this.ffi.poly_const_int(this.ctx, x)
+      throw new TypeError(`unsupported index type ${typeof x}`)
+    })
+    const raw = this.ffi.poly_uop_index(this.ctx, this.raw, rawIdx, false)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  load() {
+    const raw = this.ffi.poly_uop_load(this.ctx, this.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  store(value) {
+    const v = this._coerce(value)
+    const raw = this.ffi.poly_uop_store(this.ctx, this.raw, v.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  end(...ranges) {
+    const raw = this.ffi.poly_uop_end(this.ctx, this.raw, ranges.map(rawUop))
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  sink(...srcs) {
+    const raw = this.ffi.poly_uop_sink(this.ctx, [this, ...srcs].filter(Boolean).map(rawUop))
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  call(...srcs) {
+    const raw = this.ffi.poly_uop_call(this.ctx, this.raw, srcs.map(rawUop))
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  after(...effects) {
+    let out = this
+    for (const effect of effects) {
+      const raw = this.ffi.poly_uop_after(this.ctx, out.raw, rawUop(effect))
+      out = raw ? new UOp(this.ctx, this.ffi, raw) : null
+      if (!out) return null
+    }
+    return out
+  }
+
+  _coerce(value) {
+    if (value instanceof UOp) return value
+    if (Number.isInteger(value)) return new UOp(this.ctx, this.ffi, this.ffi.poly_const_int(this.ctx, value))
+    if (typeof value === 'number') return new UOp(this.ctx, this.ffi, this.ffi.poly_const_float(this.ctx, value))
+    throw new TypeError(`cannot convert ${typeof value} to UOp`)
+  }
+
+  _alu2(name, other) {
+    const ops = this.ffi.__polygradOps || {}
+    const op = ops[name]
+    if (op === undefined) throw new Error(`polygrad: missing op ${name}`)
+    const b = this._coerce(other)
+    const raw = this.ffi.poly_alu2(this.ctx, op, this.raw, b.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  add(other) { return this._alu2('ADD', other) }
+  sub(other) { return this._alu2('SUB', other) }
+  mul(other) { return this._alu2('MUL', other) }
+  div(other) { return this._alu2('FDIV', other) }
 }
 
 function rawUop(value) {
@@ -66,6 +155,7 @@ function rawUop(value) {
 
 function createBoundUopNamespace(runtime) {
   const { ffi, ctx, dtypeIds } = runtime._core
+  ffi.__polygradOps = runtime._core.ops || {}
   const dtypeNameById = {}
   for (const [name, id] of Object.entries(dtypeIds || {})) dtypeNameById[Number(id)] = name
 
@@ -77,6 +167,12 @@ function createBoundUopNamespace(runtime) {
   return {
     UOp,
     wrap,
+    range(bound, axisId = 0, axisType = 3) {
+      return UOp.range(ctx, ffi, bound, axisId, axisType)
+    },
+    placeholderLike(value, slot = 0) {
+      return UOp.placeholderLike(wrap(rawUop(value)), slot)
+    },
     key(value) {
       return wrap(rawUop(value)).key
     },

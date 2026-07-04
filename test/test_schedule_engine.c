@@ -1644,6 +1644,91 @@ TEST(sched, realize_vecadd) {
   PASS();
 }
 
+TEST(sched, custom_kernel_call_after_executes) {
+  int N = 4;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_buffer_f32(ctx, N);
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+
+  PolyUOp *pc = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, c, 0));
+  PolyUOp *pa = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, a, 1));
+  PolyUOp *pb = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, b, 2));
+  PolyUOp *i = poly_uop_range(ctx, N, 0, POLY_AXIS_LOOP);
+  PolyUOp *idxs[1] = {i};
+  PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1, 0);
+  PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1, 0);
+  PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1, 0);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ai, bi);
+  PolyUOp *store = poly_uop_store(ctx, ci, sum);
+  PolyUOp *body = poly_uop_end(ctx, store, idxs, 1);
+  PolyUOp *sink = poly_uop_sink(ctx, &body, 1);
+  PolyUOp *args[3] = {c, a, b};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
+  PolyUOp *out = poly_uop_after(ctx, c, call);
+
+  float a_d[] = {1, 2, 3, 4};
+  float b_d[] = {10, 20, 30, 40};
+  float c_d[] = {0, 0, 0, 0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, c, c_d, sizeof(c_d)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a, a_d, sizeof(a_d)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b, b_d, sizeof(b_d)), 0);
+
+  PolyUOp *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_uops(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, c);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, c, c_d, sizeof(c_d)), 0);
+  for (int j = 0; j < N; j++)
+    ASSERT_FLOAT_EQ(c_d[j], a_d[j] + b_d[j], 1e-6);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sched, custom_kernel_call_replays_after_input_mutation) {
+  int N = 4;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *c = poly_buffer_f32(ctx, N);
+  PolyUOp *a = poly_buffer_f32(ctx, N);
+  PolyUOp *b = poly_buffer_f32(ctx, N);
+
+  PolyUOp *pc = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, c, 0));
+  PolyUOp *pa = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, a, 1));
+  PolyUOp *pb = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, b, 2));
+  PolyUOp *i = poly_uop_range(ctx, N, 0, POLY_AXIS_LOOP);
+  PolyUOp *idxs[1] = {i};
+  PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1, 0);
+  PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1, 0);
+  PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1, 0);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ai, bi);
+  PolyUOp *store = poly_uop_store(ctx, ci, sum);
+  PolyUOp *body = poly_uop_end(ctx, store, idxs, 1);
+  PolyUOp *sink = poly_uop_sink(ctx, &body, 1);
+  PolyUOp *args[3] = {c, a, b};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
+  PolyUOp *out = poly_uop_after(ctx, c, call);
+
+  float b_d[] = {10, 20, 30, 40};
+  float c_d[] = {0, 0, 0, 0};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b, b_d, sizeof(b_d)), 0);
+
+  float runs[][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}};
+  float expected[][4] = {{11, 22, 33, 44}, {15, 26, 37, 48}};
+  for (int pass = 0; pass < 2; pass++) {
+    ASSERT_INT_EQ(poly_buffer_write(ctx, a, runs[pass], sizeof(runs[pass])), 0);
+    ASSERT_INT_EQ(poly_buffer_write(ctx, c, c_d, sizeof(c_d)), 0);
+    PolyUOp *realized = NULL;
+    ASSERT_INT_EQ(poly_realize_uops(ctx, &out, 1, &realized), 0);
+    ASSERT_PTR_EQ(realized, c);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, c, c_d, sizeof(c_d)), 0);
+    for (int j = 0; j < N; j++)
+      ASSERT_FLOAT_EQ(c_d[j], expected[pass][j], 1e-6);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sched, realize_reduce_sum) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_buffer_f32(ctx, 8);
