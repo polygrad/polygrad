@@ -6,6 +6,7 @@
  */
 
 #include "polygrad.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,11 @@ struct PolyMap {
   size_t len;
 };
 
+static void poly_map_oom(void) {
+  fprintf(stderr, "polygrad: hashmap allocation failed\n");
+  abort();
+}
+
 static size_t probe_distance(PolyMap *m, uint32_t hash, size_t slot) {
   size_t ideal = hash & (m->cap - 1);
   return (slot + m->cap - ideal) & (m->cap - 1);
@@ -35,24 +41,22 @@ PolyMap *poly_map_new(size_t initial_cap) {
     cap <<= 1;
 
   PolyMap *m = malloc(sizeof(PolyMap));
-  if (!m) return NULL;
+  if (!m) poly_map_oom();
   m->entries = calloc(cap, sizeof(PolyMapEntry));
-  if (!m->entries) {
-    free(m);
-    return NULL;
-  }
+  if (!m->entries) poly_map_oom();
   m->cap = cap;
   m->len = 0;
   return m;
 }
 
 void poly_map_destroy(PolyMap *m) {
+  if (!m) return;
   free(m->entries);
   free(m);
 }
 
 size_t poly_map_len(PolyMap *m) {
-  return m->len;
+  return m ? m->len : 0;
 }
 
 static void map_grow(PolyMap *m);
@@ -145,11 +149,13 @@ void poly_map_remove(
 }
 
 void poly_map_clear(PolyMap *m) {
+  if (!m) return;
   memset(m->entries, 0, m->cap * sizeof(PolyMapEntry));
   m->len = 0;
 }
 
 void poly_map_foreach(PolyMap *m, PolyMapIterFn fn, void *userdata) {
+  if (!m || !fn) return;
   for (size_t i = 0; i < m->cap; i++) {
     if (m->entries[i].occupied) fn(m->entries[i].key, m->entries[i].value, userdata);
   }
@@ -159,8 +165,11 @@ static void map_grow(PolyMap *m) {
   size_t old_cap = m->cap;
   PolyMapEntry *old = m->entries;
   size_t new_cap = old_cap * 2;
+  if (new_cap <= old_cap) poly_map_oom();
 
-  m->entries = calloc(new_cap, sizeof(PolyMapEntry));
+  PolyMapEntry *entries = calloc(new_cap, sizeof(PolyMapEntry));
+  if (!entries) poly_map_oom();
+  m->entries = entries;
   m->cap = new_cap;
   m->len = 0;
 

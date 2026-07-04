@@ -1094,6 +1094,38 @@ TEST(codegen, linearize_webgpu_special_stays_int32_under_wide_index_use) {
   PASS();
 }
 
+TEST(codegen, lower_index_dtype_preserves_rank10_index_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+
+  PolyUOp *idx_srcs[11];
+  idx_srcs[0] = buf;
+  for (int i = 1; i < 11; i++)
+    idx_srcs[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+
+  PolyUOp *idx = poly_uop(ctx, POLY_OP_INDEX, ptr_f32, idx_srcs, 11, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, load, poly_arg_str("rank10_index"));
+
+  PolyUOp *rewritten = poly_apply_post_index_symbolic_stage(ctx, sink, 1);
+  ASSERT_NOT_NULL(rewritten);
+
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n);
+  bool saw_rank10_index = false;
+  for (int i = 0; i < n; i++) {
+    if (topo[i]->op != POLY_OP_INDEX || topo[i]->n_src != 11) continue;
+    saw_rank10_index = true;
+    for (int j = 1; j < topo[i]->n_src; j++)
+      ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(topo[i]->src[j]->dtype), POLY_INT32));
+  }
+  ASSERT_TRUE(saw_rank10_index);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(codegen, linearize_webgpu_reduce_emits_tinygrad_sized_shared_barrier) {
   /* tinygrad emits shared memory for this reduce, but with one local axis:
    * @workgroup_size(16). The regression is growing an extra local reduce axis

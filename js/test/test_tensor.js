@@ -663,6 +663,73 @@ async function runTensorTests(pg) {
     assert(Math.abs(sum - 1.0) < 1e-4, `Softmax sum should be 1, got ${sum}`)
   })
 
+  await test('fusion fuzzer smoke patterns', async () => {
+    const movement = new Tensor([
+      [0, 1, 2, 3],
+      [4, 5, 6, 7],
+      [8, 9, 10, 11]
+    ]).pad([[1, 0], [0, 1]]).shrink([[1, 4], [1, 5]])
+      .mul(0.25).add(1).sum(1)
+    assertShape(movement.shape, [3])
+    assertClose(await movement.toArray(), [5.5, 8.5, 11.5], 2e-4)
+
+    const x = new Tensor([
+      [0, 1, 2, 3],
+      [4, 5, 6, 7],
+      [8, 9, 10, 11],
+      [12, 13, 14, 15]
+    ])
+    const whereReduce = Tensor.full([4, 4], 7).gt(x).where(x, Tensor.full([4, 4], -2)).sum(0)
+    assertShape(whereReduce.shape, [4])
+    assertClose(await whereReduce.toArray(), [0, 2, 4, -3], 2e-4)
+
+    const base = new Tensor([
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9]
+    ])
+    const noBarrier = base.add(1)
+    assertClose(await noBarrier.square().add(noBarrier).sum(0).toArray(), [108, 144, 186], 2e-4)
+
+    const barrier = base.add(1)
+    await barrier.realize()
+    assertClose(await barrier.square().add(barrier).sum(0).toArray(), [108, 144, 186], 2e-4)
+
+    const [q, r] = new Tensor([[1, 2], [-1, 3], [0.5, 4]]).qr()
+    assertClose(await q.dot(r).toArray(), [1, 2, -1, 3, 0.5, 4], 2e-3)
+
+    const [qb, rb] = new Tensor([[1, 2], [-1, 3], [0.5, 4]]).qr()
+    await qb.realize(rb)
+    assertClose(await qb.dot(rb).toArray(), [1, 2, -1, 3, 0.5, 4], 2e-3)
+
+    const chol = new Tensor([[4, 2], [2, 5]]).cholesky()
+    assertClose(
+      await chol.choleskySolve(new Tensor([[1, 2], [3, 4]])).toArray(),
+      [-0.0625, 0.125, 0.625, 0.75],
+      3e-4
+    )
+
+    const cholBarrier = new Tensor([[4, 2], [2, 5]]).cholesky()
+    await cholBarrier.realize()
+    assertClose(
+      await cholBarrier.choleskySolve(new Tensor([[1, 2], [3, 4]])).toArray(),
+      [-0.0625, 0.125, 0.625, 0.75],
+      3e-4
+    )
+
+    assertClose(
+      await new Tensor([[0, 2], [1, 3]]).solve(new Tensor([4, 5])).toArray(),
+      [-1, 2],
+      4e-4
+    )
+
+    assertClose(
+      await new Tensor([[1, 0], [1, 1], [1, 2]]).lstsq(new Tensor([1, 2, 3])).toArray(),
+      [1, 1],
+      6e-4
+    )
+  })
+
   await test('matmul', async () => {
     const a = new Tensor([[1, 2], [3, 4]])
     const b = new Tensor([[5, 6], [7, 8]])

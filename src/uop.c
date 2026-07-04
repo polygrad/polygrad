@@ -1551,8 +1551,9 @@ PolyUOp *poly_ctx_get(PolyCtx *ctx, const char *fmt, ...) {
   char buf[256];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
+  if (n < 0 || n >= (int)sizeof(buf)) return NULL;
   PolyRegEntry *entry = poly_map_get(ctx->name_map, reg_str_hash(buf), buf, reg_str_eq);
   return entry ? entry->buffer : NULL;
 }

@@ -695,6 +695,16 @@ class TestReduce:
 
 
 class TestMatmulAndLoss:
+    def test_einsum_c_api_wrapper(self):
+        a = Tensor([[1.0, 2.0], [3.0, 4.0]])
+        b = Tensor([[5.0, 6.0], [7.0, 8.0]])
+        out = Tensor.einsum('ij,jk->ik', a, b)
+        assert out.shape == (2, 2)
+        np.testing.assert_allclose(out.numpy(), np.array([[19.0, 22.0], [43.0, 50.0]], dtype=np.float32))
+
+        with pytest.raises(ValueError, match='poly_einsum failed'):
+            Tensor.einsum('a->' + ('a' * 80), Tensor([1.0]))
+
     def test_matmul_shape_mismatch_raises(self):
         a = Tensor([[1.0, 2.0], [3.0, 4.0]])
         b = Tensor([[1.0, 2.0, 3.0]])
@@ -1026,6 +1036,12 @@ class TestMatmulAndLoss:
 
     def test_lstsq_matches_numpy_torch_probe(self):
         torch = pytest.importorskip('torch')
+        def torch_lstsq(a, b):
+            # Use the SVD-based driver so rank-deficient cases check the same
+            # minimum-norm policy as numpy.linalg.lstsq instead of a QR-driver
+            # default that can vary across LAPACK builds.
+            return torch.linalg.lstsq(torch.tensor(a), torch.tensor(b), driver='gelsd').solution.numpy()
+
         a = np.array([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]], dtype=np.float32)
         b_vec = np.array([1.0, 2.0, 2.5], dtype=np.float32)
         b_mat = np.array([[1.0, 0.5], [2.0, 1.0], [2.5, 1.5]], dtype=np.float32)
@@ -1034,7 +1050,7 @@ class TestMatmulAndLoss:
         np.testing.assert_allclose(got_vec.numpy(), np.linalg.lstsq(a, b_vec, rcond=None)[0], rtol=2e-5, atol=2e-5)
         np.testing.assert_allclose(
             got_vec.numpy(),
-            torch.linalg.lstsq(torch.tensor(a), torch.tensor(b_vec)).solution.numpy(),
+            torch_lstsq(a, b_vec),
             rtol=2e-5,
             atol=2e-5,
         )
@@ -1043,7 +1059,7 @@ class TestMatmulAndLoss:
         np.testing.assert_allclose(got_mat.numpy(), np.linalg.lstsq(a, b_mat, rcond=None)[0], rtol=2e-5, atol=2e-5)
         np.testing.assert_allclose(
             got_mat.numpy(),
-            torch.linalg.lstsq(torch.tensor(a), torch.tensor(b_mat)).solution.numpy(),
+            torch_lstsq(a, b_mat),
             rtol=2e-5,
             atol=2e-5,
         )
@@ -1060,7 +1076,7 @@ class TestMatmulAndLoss:
         np.testing.assert_allclose(got_batch_vec.numpy(), expected_batch_vec, rtol=2e-5, atol=2e-5)
         np.testing.assert_allclose(
             got_batch_vec.numpy(),
-            torch.linalg.lstsq(torch.tensor(ab), torch.tensor(bb_vec)).solution.numpy(),
+            torch_lstsq(ab, bb_vec),
             rtol=2e-5,
             atol=2e-5,
         )
@@ -1087,7 +1103,7 @@ class TestMatmulAndLoss:
         )
         np.testing.assert_allclose(
             got_wide_vec.numpy(),
-            torch.linalg.lstsq(torch.tensor(wide), torch.tensor(wide_b_vec)).solution.numpy(),
+            torch_lstsq(wide, wide_b_vec),
             rtol=3e-5,
             atol=3e-5,
         )
@@ -1100,7 +1116,7 @@ class TestMatmulAndLoss:
         )
         np.testing.assert_allclose(
             got_wide_mat.numpy(),
-            torch.linalg.lstsq(torch.tensor(wide), torch.tensor(wide_b_mat)).solution.numpy(),
+            torch_lstsq(wide, wide_b_mat),
             rtol=4e-5,
             atol=4e-5,
         )
@@ -1133,7 +1149,7 @@ class TestMatmulAndLoss:
             )
             np.testing.assert_allclose(
                 got,
-                torch.linalg.lstsq(torch.tensor(rd_a), torch.tensor(rd_b)).solution.numpy(),
+                torch_lstsq(rd_a, rd_b),
                 rtol=2e-4,
                 atol=2e-4,
             )

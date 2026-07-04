@@ -31,11 +31,10 @@ static bool poly_is_reg_or_local_buffer_codegen(PolyUOp *u);
 /* Max hardware vector fold width for load/store splitting.
  * Set by the pipeline before running correct_load_store pass.
  * Default 4 (SSE). Set to 8 for AVX2.
- * NOT THREAD-SAFE: concurrent codegen with different caps will race.
- * Acceptable for now (single-threaded); thread-safe fix requires passing
- * fold width through rewrite context instead of a mutable global. */
-static int g_max_fold_width = 4;
-static PolyRendererCaps g_render_caps = {0};
+ * Thread-local because concurrent codegen with different backend caps must not
+ * share vector width or renderer capability state. */
+static _Thread_local int g_max_fold_width = 4;
+static _Thread_local PolyRendererCaps g_render_caps = {0};
 
 static void poly_debug_print_graph(FILE *fp, PolyUOp *u, const char *tag) {
   if (!fp || !u) return;
@@ -7246,10 +7245,11 @@ static PolyUOp *rule_lower_index_dtype(PolyCtx *ctx, PolyUOp *idx, const PolyBin
   }
 
   if (idx->n_src < 2) return NULL;
-  PolyUOp *new_srcs[8];
+  PolyUOp *new_srcs[POLY_MAX_DIMS + 1];
+  if (idx->n_src > (int)(sizeof(new_srcs) / sizeof(new_srcs[0]))) return NULL;
   bool changed = false;
   new_srcs[0] = idx->src[0];
-  for (int i = 1; i < idx->n_src && i < 8; i++) {
+  for (int i = 1; i < idx->n_src; i++) {
     new_srcs[i] = lower_index_subtree(ctx, idx->src[i], memo_old, memo_new, &memo_n, 256);
     if (new_srcs[i] != idx->src[i]) changed = true;
   }
@@ -7679,12 +7679,12 @@ static PolyUOp *rule_index_gate_selects_where_branch(
   );
   if (new_idx == idx->src[1]) return NULL;
 
-  PolyUOp *new_srcs[8];
-  int ns = idx->n_src < 8 ? idx->n_src : 8;
-  for (int i = 0; i < ns; i++)
+  PolyUOp *new_srcs[POLY_MAX_DIMS + 1];
+  if (idx->n_src > (int)(sizeof(new_srcs) / sizeof(new_srcs[0]))) return NULL;
+  for (int i = 0; i < idx->n_src; i++)
     new_srcs[i] = idx->src[i];
   new_srcs[1] = new_idx;
-  return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, ns);
+  return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, idx->n_src);
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_post_index_lower = NULL;

@@ -1895,7 +1895,7 @@ class Tensor:
         ctx = operands[0]._ctx
         n = len(operands)
 
-        tensor_arr = (_ffi._ptr * n)(*[t.uop for t in operands])
+        tensor_arr = (_ffi._ptr * n)(*[_uop_raw(t.uop) for t in operands])
 
         uop = _ffi._lib.poly_einsum(
             ctx, formula.encode('utf-8'),

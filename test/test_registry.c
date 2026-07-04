@@ -62,6 +62,32 @@ TEST(registry, lookup_by_name) {
   PASS();
 }
 
+TEST(registry, formatted_lookup_rejects_truncated_name) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t s[] = {1};
+
+  char prefix[256];
+  memset(prefix, 'x', sizeof(prefix));
+  prefix[sizeof(prefix) - 1] = '\0';
+
+  char long_name[320];
+  memset(long_name, 'x', sizeof(long_name));
+  long_name[sizeof(long_name) - 1] = '\0';
+
+  PolyUOp *short_buf = poly_param(ctx, POLY_FLOAT32, s, 1, "%s", prefix);
+  PolyUOp *long_buf = poly_param(ctx, POLY_FLOAT32, s, 1, "%s", long_name);
+  ASSERT_NOT_NULL(short_buf);
+  ASSERT_NOT_NULL(long_buf);
+  ASSERT_NEQ(short_buf, long_buf);
+
+  ASSERT_EQ(poly_ctx_get(ctx, "%s", long_name), NULL);
+  ASSERT_EQ(poly_ctx_get_entry(ctx, long_name)->buffer, long_buf);
+  ASSERT_EQ(poly_ctx_get(ctx, "%s", prefix), short_buf);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(registry, get_entry) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t s[] = {4, 8};

@@ -630,6 +630,14 @@ TEST(hashmap, grow) {
   PASS();
 }
 
+TEST(hashmap, null_helpers_are_noops) {
+  poly_map_destroy(NULL);
+  poly_map_clear(NULL);
+  poly_map_foreach(NULL, NULL, NULL);
+  ASSERT_INT_EQ(poly_map_len(NULL), 0);
+  PASS();
+}
+
 /* Toposort gate and enter_calls */
 
 static bool gate_skip_neg(PolyUOp *u) {

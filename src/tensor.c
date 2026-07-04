@@ -3866,19 +3866,25 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
 
   char clean[256];
   int ci = 0;
-  for (const char *p = formula; *p && ci < 255; p++)
-    if (*p != ' ') clean[ci++] = *p;
+  for (const char *p = formula; *p; p++) {
+    if (*p == ' ') continue;
+    if (ci >= (int)sizeof(clean) - 1) return NULL;
+    clean[ci++] = *p;
+  }
   clean[ci] = '\0';
 
   char lhs_buf[256], rhs_buf[64];
   char *arrow = strstr(clean, "->");
   if (arrow) {
     int lhs_len = (int)(arrow - clean);
+    size_t rhs_len = strlen(arrow + 2);
+    if (lhs_len <= 0 || lhs_len >= (int)sizeof(lhs_buf) || rhs_len >= sizeof(rhs_buf)) return NULL;
     memcpy(lhs_buf, clean, lhs_len);
     lhs_buf[lhs_len] = '\0';
-    strcpy(rhs_buf, arrow + 2);
+    memcpy(rhs_buf, arrow + 2, rhs_len + 1);
   } else {
-    strcpy(lhs_buf, clean);
+    if (strlen(clean) >= sizeof(lhs_buf)) return NULL;
+    memcpy(lhs_buf, clean, strlen(clean) + 1);
     int count[26] = {0};
     for (char *p2 = lhs_buf; *p2; p2++)
       if (*p2 >= 'a' && *p2 <= 'z') count[*p2 - 'a']++;
@@ -4118,6 +4124,12 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
       }
     if (!summed) remaining[n_remaining++] = alpha[i];
   }
+
+  int64_t remaining_shape[POLY_MAX_DIMS];
+  for (int i = 0; i < n_remaining; i++)
+    remaining_shape[i] = sz[(int)(remaining[i] - 'a')];
+  result = poly_reshape(ctx, result, n_remaining > 0 ? remaining_shape : NULL, n_remaining);
+  if (!result) return NULL;
 
   int rhs_len = (int)strlen(rhs_buf);
   if (rhs_len != n_remaining) return NULL;

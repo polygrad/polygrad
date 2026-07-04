@@ -83,6 +83,51 @@ static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
 /*  v2 composed op e2e tests (tinygrad-verified reference values)         */
 /* ═══════════════════════════════════════════════════════════════════════ */
 
+TEST(tensor, einsum_c_api_rejects_oversized_formula_parts) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = make_buf(ctx, (int64_t[]){1}, 1);
+  PolyUOp *inputs[] = {x};
+
+  PolyUOp *same = poly_einsum(ctx, "a->a", inputs, 1);
+  ASSERT_NOT_NULL(same);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, same), 1);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, same)[0], 1);
+
+  char long_rhs[128];
+  memset(long_rhs, 'a', sizeof(long_rhs));
+  long_rhs[0] = 'a';
+  long_rhs[1] = '-';
+  long_rhs[2] = '>';
+  for (int i = 3; i < 126; i++)
+    long_rhs[i] = 'a';
+  long_rhs[126] = '\0';
+  ASSERT_EQ(poly_einsum(ctx, long_rhs, inputs, 1), NULL);
+
+  char long_formula[320];
+  memset(long_formula, 'a', sizeof(long_formula) - 1);
+  long_formula[sizeof(long_formula) - 1] = '\0';
+  ASSERT_EQ(poly_einsum(ctx, long_formula, inputs, 1), NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, einsum_c_api_matmul_shape_matches_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = make_buf(ctx, (int64_t[]){2, 2}, 2);
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2, 2}, 2);
+  PolyUOp *inputs[] = {a, b};
+
+  PolyUOp *out = poly_einsum(ctx, "ij,jk->ik", inputs, 2);
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, out)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, out)[1], 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, rmsnorm_e2e) {
   /* Reference: [[0.4629, 0.9258, 1.3887], [0.7895, 0.9869, 1.1843]] */
   PolyCtx *ctx = poly_ctx_new();
