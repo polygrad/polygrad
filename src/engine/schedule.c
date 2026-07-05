@@ -378,6 +378,7 @@ bool poly_program_info_eq(const PolyProgramInfo *a, const PolyProgramInfo *b) {
   if (a == b) return true;
   if (!a || !b) return false;
   if (!str_eq(a->name, b->name)) return false;
+  if (a->optimize != b->optimize) return false;
   if (memcmp(a->global_size, b->global_size, sizeof(a->global_size)) != 0) return false;
   if (memcmp(a->local_size, b->local_size, sizeof(a->local_size)) != 0) return false;
   if (a->has_local_size != b->has_local_size) return false;
@@ -402,6 +403,7 @@ uint32_t poly_program_info_hash(const PolyProgramInfo *info) {
     for (const unsigned char *p = (const unsigned char *)info->name; *p; p++)
       h = program_info_hash_mix(h, (uint32_t)*p);
   }
+  h = program_info_hash_mix(h, info->optimize ? 1u : 0u);
   for (int i = 0; i < 3; i++) {
     h = program_info_hash_mix(h, (uint32_t)info->global_size[i]);
     h = program_info_hash_mix(h, (uint32_t)info->local_size[i]);
@@ -653,6 +655,7 @@ static PolyProgramInfo *poly_program_info_build(
   }
   memset(info, 0, sizeof(*info));
   info->name = poly_schedule_arena_strdup(ctx, program_name);
+  info->optimize = poly_kernel_optimize_enabled(body);
   poly_program_info_collect_launch(ctx, body, info);
 
   int n_call_vars = poly_call_n_var_args(call);
@@ -713,7 +716,7 @@ static PolyUOp *poly_program_from_call_body(
   if (!ctx || !call || call->op != POLY_OP_CALL || !body) return NULL;
   if (body->op == POLY_OP_PROGRAM) return body;
 
-  const char *program_name = name ? name : "test";
+  const char *program_name = poly_kernel_name(body, name ? name : "test");
   if (device == POLY_DEVICE_AUTO) device = poly_uop_device(body);
 
   PolyProgramInfo *info = poly_program_info_build(ctx, call, body, program_name);
@@ -3413,6 +3416,7 @@ PolySchedule *poly_schedule_replay_many_with_buffers(
   int n_calls = 0;
   PolyCompileMode mode = POLY_MODE_CALL;
   uint32_t graph_hash = POLY_SCHED_CACHE_VERSION * 2654435761u;
+  bool has_cached_call_access = true;
   for (int s = 0; s < n_captured; s++) {
     PolySchedule *sched = captured[s];
     if (!sched || !sched->template || !sched->template->cache_entry ||
@@ -3422,6 +3426,7 @@ PolySchedule *poly_schedule_replay_many_with_buffers(
     if (s == 0) mode = sched->template->mode;
     else if (sched->template->mode != mode) return NULL;
     n_calls += sched->template->cache_entry->linear->n_src;
+    if (!sched->template->cache_entry->call_access) has_cached_call_access = false;
     graph_hash ^= sched->template->graph_hash + 0x9e3779b9u + (graph_hash << 6) + (graph_hash >> 2);
   }
 
@@ -3435,8 +3440,9 @@ PolySchedule *poly_schedule_replay_many_with_buffers(
   entry->n_calls = n_calls;
   if (n_calls > 0) {
     linear_src = calloc((size_t)n_calls, sizeof(*linear_src));
-    entry->call_access = calloc((size_t)n_calls, sizeof(*entry->call_access));
-    if (!linear_src || !entry->call_access) goto cleanup;
+    if (has_cached_call_access)
+      entry->call_access = calloc((size_t)n_calls, sizeof(*entry->call_access));
+    if (!linear_src || (has_cached_call_access && !entry->call_access)) goto cleanup;
   }
 
   int out_call = 0;
@@ -3484,7 +3490,8 @@ PolySchedule *poly_schedule_replay_many_with_buffers(
       if (ok) linear_src[out_call] = poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, call->n_src, call->arg);
       free(call_src);
       if (!ok || !linear_src[out_call]) goto cleanup;
-      if (poly_call_access_clone(&entry->call_access[out_call], &src_entry->call_access[k]) != 0)
+      if (entry->call_access &&
+          poly_call_access_clone(&entry->call_access[out_call], &src_entry->call_access[k]) != 0)
         goto cleanup;
     }
   }
@@ -5179,7 +5186,9 @@ static PolyRewriteOpts cpu_schedule_rewrite_opts(void) {
 }
 
 static PolyUOp *cpu_rewrite_program(PolyCtx *ctx, PolyUOp *sink) {
-  return poly_full_rewrite_to_sink_ex(ctx, sink, cpu_schedule_rewrite_opts());
+  PolyRewriteOpts opts = cpu_schedule_rewrite_opts();
+  opts.optimize = poly_kernel_optimize_enabled(sink);
+  return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }
 
 static char *cpu_render_source_impl(

@@ -72,6 +72,18 @@ typedef struct {
   int gpu_block_size; /* group_for_reduce block size (0 = skip) */
 } PolyRewriteOpts;
 
+static inline bool poly_kernel_optimize_enabled(PolyUOp *sink) {
+  return !(sink && sink->op == POLY_OP_SINK && sink->tag_arg.kind == POLY_ARG_BOOL &&
+           sink->tag_arg.b == false);
+}
+
+static inline const char *poly_kernel_name(PolyUOp *sink, const char *fallback) {
+  if (sink && sink->op == POLY_OP_SINK && sink->arg.kind == POLY_ARG_STRING && sink->arg.str &&
+      sink->arg.str[0])
+    return sink->arg.str;
+  return fallback ? fallback : "test";
+}
+
 /* Linearize: full codegen pipeline + priority-based toposort.
  * Returns malloc'd array of UOp pointers in execution order.
  * Caller must free() the returned array. */

@@ -423,7 +423,7 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
 
 PolyUOp *poly_rewrite_hip(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
-      .optimize = true, /* shared optimized pipeline (tinygrad parity) */
+      .optimize = poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
       .devectorize = -1, /* HIP: no add_loads/devectorize */
       .caps = poly_hip_renderer_caps(),
       .device = POLY_DEVICE_HIP,
@@ -817,7 +817,12 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
        * Keep accepting INDEX(..., gate) during transition. */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       PolyUOp *gate_uop =
-          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+          (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+              ? u->src[2]
+              : ((idx_uop && idx_uop->n_src >= 3 &&
+                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
+                     ? idx_uop->src[2]
+                     : NULL);
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = hsmap_get(&names, gate_uop);
         char *alt_s = hsmap_get(&names, u->src[1]);

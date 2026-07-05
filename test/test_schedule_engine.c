@@ -1729,6 +1729,64 @@ TEST(sched, custom_kernel_call_replays_after_input_mutation) {
   PASS();
 }
 
+TEST(sched, custom_kernel_set_accumulator_noopt_executes) {
+  const int candidates = 4;
+  const int rows = 64;
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *out = poly_buffer_f32(ctx, candidates);
+  PolyUOp *x = poly_buffer_f32(ctx, candidates * rows);
+
+  PolyUOp *pout = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, out, 0));
+  PolyUOp *px = poly_uop_flatten(ctx, poly_uop_placeholder_like(ctx, x, 1));
+  PolyUOp *c = poly_uop_range(ctx, candidates, 0, POLY_AXIS_LOOP);
+  PolyUOp *r = poly_uop_range(ctx, rows, 1, POLY_AXIS_REDUCE);
+  PolyUOp *out_idx[1] = {c};
+  PolyUOp *rows_const = poly_const_int(ctx, rows);
+  PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, rows_const), r);
+  PolyUOp *x_idx[1] = {offset};
+
+  PolyUOp *acc = poly_uop_set(ctx, poly_uop_index(ctx, pout, out_idx, 1, 0), poly_const_float(ctx, 0.0f), NULL, 0);
+  ASSERT_NOT_NULL(acc);
+  PolyUOp *acc_after_r = poly_uop_after(ctx, acc, r);
+  PolyUOp *sum = poly_alu2(
+      ctx, POLY_OP_ADD,
+      poly_uop_index(ctx, acc_after_r, out_idx, 1, 0),
+      poly_uop_index(ctx, px, x_idx, 1, 0)
+  );
+  acc = poly_uop_set(ctx, poly_uop_index(ctx, acc, out_idx, 1, 0), sum, &r, 1);
+  ASSERT_NOT_NULL(acc);
+  PolyUOp *body = poly_uop_end(ctx, acc, &c, 1);
+  PolyUOp *sink = poly_uop_sink_ex(ctx, &body, 1, "custom_sum_4_64", 0);
+  PolyUOp *args[2] = {out, x};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 2);
+  PolyUOp *root = poly_uop_after(ctx, out, call);
+
+  float x_data[candidates * rows];
+  float expected[candidates];
+  float out_data[candidates];
+  for (int ci = 0; ci < candidates; ci++) {
+    expected[ci] = 0.0f;
+    out_data[ci] = 0.0f;
+    for (int ri = 0; ri < rows; ri++) {
+      float v = (float)(ci * rows + ri + 1);
+      x_data[ci * rows + ri] = v;
+      expected[ci] += v;
+    }
+  }
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x, x_data, sizeof(x_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, out, out_data, sizeof(out_data)), 0);
+
+  PolyUOp *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_uops(ctx, &root, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, out_data, sizeof(out_data)), 0);
+  for (int ci = 0; ci < candidates; ci++)
+    ASSERT_FLOAT_EQ(out_data[ci], expected[ci], 1e-4);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(sched, realize_reduce_sum) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_buffer_f32(ctx, 8);

@@ -13,6 +13,7 @@
 #include "../src/frontend.h"
 #include "../src/polygrad.h"
 #include "../src/tensor.h"
+#include <string.h>
 
 static PolyBuffer *realized_buffer(PolyCtx *ctx, PolyUOp *realized) {
   const PolyUOp *buf_uop = poly_uop_get_buffer_identity(realized);
@@ -46,6 +47,151 @@ static int count_copy_to_device(PolyCtx *ctx, PolyUOp *root, PolyDevice device) 
       count++;
   }
   return count;
+}
+
+static PolyTensor *custom_add_tensor(
+    PolyCtx *ctx,
+    PolyTensor *a,
+    PolyTensor *b,
+    PolyUOp **out_buf
+) {
+  PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, 4);
+  if (out_buf) *out_buf = c;
+  PolyUOp *pc = poly_uop_placeholder_like(ctx, c, 0);
+  PolyUOp *pa = poly_uop_placeholder_like(ctx, poly_tensor_uop(a), 1);
+  PolyUOp *pb = poly_uop_placeholder_like(ctx, poly_tensor_uop(b), 2);
+  PolyUOp *r = poly_uop_range(ctx, 4, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *idxs[1] = {r};
+  PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1, 0);
+  PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1, 0);
+  PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1, 0);
+  PolyUOp *av = poly_uop_load(ctx, ai);
+  PolyUOp *bv = poly_uop_load(ctx, bi);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, av, bv);
+  PolyUOp *store = poly_uop_store(ctx, ci, sum);
+  PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
+  PolyUOp *sink = poly_uop_sink(ctx, &end, 1);
+  PolyUOp *args[3] = {c, poly_tensor_uop(a), poly_tensor_uop(b)};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
+  PolyUOp *after = poly_uop_after(ctx, c, call);
+  return poly_tensor_create(ctx, after, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+}
+
+static PolyTensor *custom_summary_tensor(
+    PolyCtx *ctx,
+    PolyTensor *a,
+    PolyTensor *b,
+    PolyUOp **out_buf
+) {
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 2);
+  if (out_buf) *out_buf = out;
+  PolyUOp *pout = poly_uop_placeholder_like(ctx, out, 0);
+  PolyUOp *pa = poly_uop_placeholder_like(ctx, poly_tensor_uop(a), 1);
+  PolyUOp *pb = poly_uop_placeholder_like(ctx, poly_tensor_uop(b), 2);
+  PolyUOp *c = poly_uop_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *r = poly_uop_range(ctx, 4, 1, POLY_AXIS_LOOP);
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, four), r);
+  PolyUOp *out_idx[1] = {c};
+  PolyUOp *a_idx[1] = {offset};
+  PolyUOp *b_idx[1] = {r};
+  PolyUOp *prod = poly_alu2(
+      ctx, POLY_OP_MUL,
+      poly_uop_index(ctx, pa, a_idx, 1, 0),
+      poly_uop_index(ctx, pb, b_idx, 1, 0)
+  );
+  PolyUOp *sum = poly_uop_reduce(ctx, POLY_OP_ADD, prod, &r, 1);
+  PolyUOp *store = poly_uop_store(ctx, poly_uop_index(ctx, pout, out_idx, 1, 0), sum);
+  PolyUOp *end = poly_uop_end(ctx, store, &c, 1);
+  PolyUOp *sink = poly_uop_sink(ctx, &end, 1);
+  PolyUOp *args[3] = {out, poly_tensor_uop(a), poly_tensor_uop(b)};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
+  PolyUOp *after = poly_uop_after(ctx, out, call);
+  return poly_tensor_create(ctx, after, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+}
+
+static void custom_multi_summary_tensors(
+    PolyCtx *ctx,
+    PolyTensor *a,
+    PolyTensor *b,
+    PolyTensor **out0_tensor,
+    PolyTensor **out1_tensor,
+    PolyUOp **out0_buf,
+    PolyUOp **out1_buf
+) {
+  PolyUOp *out0 = poly_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *out1 = poly_buffer(ctx, POLY_FLOAT32, 2);
+  if (out0_buf) *out0_buf = out0;
+  if (out1_buf) *out1_buf = out1;
+  PolyUOp *pout0 = poly_uop_placeholder_like(ctx, out0, 0);
+  PolyUOp *pout1 = poly_uop_placeholder_like(ctx, out1, 1);
+  PolyUOp *pa = poly_uop_placeholder_like(ctx, poly_tensor_uop(a), 2);
+  PolyUOp *pb = poly_uop_placeholder_like(ctx, poly_tensor_uop(b), 3);
+  PolyUOp *c = poly_uop_range(ctx, 2, 0, POLY_AXIS_GLOBAL);
+  PolyUOp *r = poly_uop_range(ctx, 4, 1, POLY_AXIS_LOOP);
+  PolyUOp *four = poly_const_int(ctx, 4);
+  PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, four), r);
+  PolyUOp *out_idx[1] = {c};
+  PolyUOp *a_idx[1] = {offset};
+  PolyUOp *b_idx[1] = {r};
+  PolyUOp *term = poly_uop_index(ctx, pa, a_idx, 1, 0);
+  PolyUOp *s0 = poly_uop_reduce(ctx, POLY_OP_ADD, term, &r, 1);
+  PolyUOp *prod = poly_alu2(ctx, POLY_OP_MUL, term, poly_uop_index(ctx, pb, b_idx, 1, 0));
+  PolyUOp *s1 = poly_uop_reduce(ctx, POLY_OP_ADD, prod, &r, 1);
+  PolyUOp *st0 = poly_uop_store(ctx, poly_uop_index(ctx, pout0, out_idx, 1, 0), s0);
+  PolyUOp *st1 = poly_uop_store(ctx, poly_uop_index(ctx, pout1, out_idx, 1, 0), s1);
+  PolyUOp *end0 = poly_uop_end(ctx, st0, &c, 1);
+  PolyUOp *end1 = poly_uop_end(ctx, st1, &c, 1);
+  PolyUOp *ends[2] = {end0, end1};
+  PolyUOp *sink = poly_uop_sink(ctx, ends, 2);
+  PolyUOp *args[4] = {out0, out1, poly_tensor_uop(a), poly_tensor_uop(b)};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 4);
+  *out0_tensor = poly_tensor_create(ctx, poly_uop_after(ctx, out0, call), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  *out1_tensor = poly_tensor_create(ctx, poly_uop_after(ctx, out1, call), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+}
+
+static PolyTensor *custom_grouped_intercept_summary_tensor(
+    PolyCtx *ctx,
+    PolyTensor *x,
+    PolyTensor *y,
+    PolyUOp **out_buf
+) {
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 10);
+  if (out_buf) *out_buf = out;
+  PolyUOp *pout = poly_uop_placeholder_like(ctx, out, 0);
+  PolyUOp *px = poly_uop_placeholder_like(ctx, poly_tensor_uop(x), 1);
+  PolyUOp *py = poly_uop_placeholder_like(ctx, poly_tensor_uop(y), 2);
+  PolyUOp *c = poly_uop_range(ctx, 2, 0, POLY_AXIS_LOOP);
+  PolyUOp *r = poly_uop_range(ctx, 128, 1, POLY_AXIS_REDUCE);
+  PolyUOp *rows = poly_const_int(ctx, 128);
+  PolyUOp *two = poly_const_int(ctx, 2);
+  PolyUOp *offset = poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, c, rows), r);
+  PolyUOp *x_idx[1] = {offset};
+  PolyUOp *y_idx[1] = {r};
+  PolyUOp *xv = poly_uop_index(ctx, px, x_idx, 1, 0);
+  PolyUOp *yv = poly_uop_index(ctx, py, y_idx, 1, 0);
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+
+  PolyUOp *vals[5];
+  vals[0] = poly_uop_reduce(ctx, POLY_OP_ADD, one, &r, 1);
+  vals[1] = poly_uop_reduce(ctx, POLY_OP_ADD, xv, &r, 1);
+  vals[2] = poly_uop_reduce(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, xv, xv), &r, 1);
+  vals[3] = poly_uop_reduce(ctx, POLY_OP_ADD, yv, &r, 1);
+  vals[4] = poly_uop_reduce(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, xv, yv), &r, 1);
+
+  PolyUOp *stores[5];
+  for (int i = 0; i < 5; i++) {
+    PolyUOp *stat = poly_const_int(ctx, i);
+    PolyUOp *idx = poly_alu2(ctx, POLY_OP_ADD, c, poly_alu2(ctx, POLY_OP_MUL, stat, two));
+    PolyUOp *out_idx[1] = {idx};
+    stores[i] = poly_uop_store(ctx, poly_uop_index(ctx, pout, out_idx, 1, 0), vals[i]);
+  }
+  PolyUOp *group = poly_uop_group(ctx, stores, 5);
+  PolyUOp *end = poly_uop_end(ctx, group, &c, 1);
+  PolyUOp *sink = poly_uop_sink(ctx, &end, 1);
+  PolyUOp *args[3] = {out, poly_tensor_uop(x), poly_tensor_uop(y)};
+  PolyUOp *call = poly_uop_call(ctx, sink, args, 3);
+  return poly_tensor_create(ctx, poly_uop_after(ctx, out, call), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
 }
 
 TEST(realize, custom_call_copy_output_schedules_copy_call) {
@@ -1857,6 +2003,211 @@ TEST(realize, poly_jit_replays_raw_tensor_realize_with_new_input) {
   ASSERT_FLOAT_EQ(replay_input[2], 30.0f, 1e-5f);
 
   poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, poly_jit_captures_custom_call_and_replays_after_input_mutation) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *b_buf = poly_buffer_f32(ctx, 4);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a_buf, a_data, sizeof(a_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b_buf, b_data, sizeof(b_data)), 0);
+  PolyTensor *a = poly_tensor_create(ctx, a_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_create(ctx, b_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  PolyTensor *inputs[2] = {a, b};
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, inputs, 2), 0);
+
+  PolyUOp *out_buf = NULL;
+  PolyTensor *out = custom_add_tensor(ctx, a, b, &out_buf);
+  ASSERT_NOT_NULL(out);
+  ASSERT_NOT_NULL(out_buf);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_INT_EQ(poly_jit_schedule_count(jit), 1);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit), 0);
+  ASSERT_TRUE(poly_jit_is_captured(jit));
+  ASSERT_INT_EQ(poly_jit_schedule_count(jit), 1);
+
+  float got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 11.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 22.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[2], 33.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[3], 44.0f, 1e-5f);
+
+  float a_update[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a_buf, a_update, sizeof(a_update)), 0);
+  ASSERT_INT_EQ(poly_jit_run(jit, inputs, 2), 0);
+  memset(got, 0, sizeof(got));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 15.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 26.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[2], 37.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[3], 48.0f, 1e-5f);
+
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, poly_jit_captures_custom_reduction_call_and_replays_after_input_mutation) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  float a_data[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+  float b_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 8);
+  PolyUOp *b_buf = poly_buffer_f32(ctx, 4);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a_buf, a_data, sizeof(a_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b_buf, b_data, sizeof(b_data)), 0);
+  PolyTensor *a = poly_tensor_create(ctx, a_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_create(ctx, b_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  PolyTensor *inputs[2] = {a, b};
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, inputs, 2), 0);
+
+  PolyUOp *out_buf = NULL;
+  PolyTensor *out = custom_summary_tensor(ctx, a, b, &out_buf);
+  ASSERT_NOT_NULL(out);
+  ASSERT_NOT_NULL(out_buf);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  ASSERT_INT_EQ(poly_jit_schedule_count(jit), 1);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit), 0);
+  ASSERT_TRUE(poly_jit_is_captured(jit));
+
+  float got[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 30.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 70.0f, 1e-5f);
+
+  float a_update[8] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a_buf, a_update, sizeof(a_update)), 0);
+  ASSERT_INT_EQ(poly_jit_run(jit, inputs, 2), 0);
+  memset(got, 0, sizeof(got));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got[0], 40.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got[1], 80.0f, 1e-5f);
+
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, poly_jit_captures_custom_multi_output_reduction_call_and_replays_after_input_mutation) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  float a_data[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+  float b_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  PolyUOp *a_buf = poly_buffer_f32(ctx, 8);
+  PolyUOp *b_buf = poly_buffer_f32(ctx, 4);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a_buf, a_data, sizeof(a_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, b_buf, b_data, sizeof(b_data)), 0);
+  PolyTensor *a = poly_tensor_create(ctx, a_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *b = poly_tensor_create(ctx, b_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyJit *jit = poly_jit_new(ctx);
+  ASSERT_NOT_NULL(jit);
+  PolyTensor *inputs[2] = {a, b};
+  ASSERT_INT_EQ(poly_jit_begin_capture(jit, inputs, 2), 0);
+
+  PolyTensor *out0 = NULL;
+  PolyTensor *out1 = NULL;
+  PolyUOp *out0_buf = NULL;
+  PolyUOp *out1_buf = NULL;
+  custom_multi_summary_tensors(ctx, a, b, &out0, &out1, &out0_buf, &out1_buf);
+  ASSERT_NOT_NULL(out0);
+  ASSERT_NOT_NULL(out1);
+  PolyTensor *outs[2] = {out0, out1};
+  PolyTensor *realized[2] = {NULL, NULL};
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 2, realized), 0);
+  ASSERT_PTR_EQ(realized[0], out0);
+  ASSERT_PTR_EQ(realized[1], out1);
+  ASSERT_INT_EQ(poly_jit_end_capture(jit), 0);
+  ASSERT_TRUE(poly_jit_is_captured(jit));
+
+  float got0[2] = {0};
+  float got1[2] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out0_buf, got0, sizeof(got0)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out1_buf, got1, sizeof(got1)), 0);
+  ASSERT_FLOAT_EQ(got0[0], 10.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got0[1], 26.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got1[0], 30.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got1[1], 70.0f, 1e-5f);
+
+  float a_update[8] = {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+  ASSERT_INT_EQ(poly_buffer_write(ctx, a_buf, a_update, sizeof(a_update)), 0);
+  ASSERT_INT_EQ(poly_jit_run(jit, inputs, 2), 0);
+  memset(got0, 0, sizeof(got0));
+  memset(got1, 0, sizeof(got1));
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out0_buf, got0, sizeof(got0)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out1_buf, got1, sizeof(got1)), 0);
+  ASSERT_FLOAT_EQ(got0[0], 14.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got0[1], 30.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got1[0], 40.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(got1[1], 80.0f, 1e-5f);
+
+  poly_jit_free(jit);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, custom_grouped_compact_summary_keeps_independent_reduce_per_output) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  float x_data[256];
+  float y_data[128];
+  for (int i = 0; i < 256; i++) x_data[i] = (float)(i + 1);
+  for (int i = 0; i < 128; i++) y_data[i] = (float)(i + 1);
+  PolyUOp *x_buf = poly_buffer_f32(ctx, 256);
+  PolyUOp *y_buf = poly_buffer_f32(ctx, 128);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, x_buf, x_data, sizeof(x_data)), 0);
+  ASSERT_INT_EQ(poly_buffer_write(ctx, y_buf, y_data, sizeof(y_data)), 0);
+  PolyTensor *x = poly_tensor_create(ctx, x_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *y = poly_tensor_create(ctx, y_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(y);
+
+  PolyUOp *out_buf = NULL;
+  PolyTensor *out = custom_grouped_intercept_summary_tensor(ctx, x, y, &out_buf);
+  ASSERT_NOT_NULL(out);
+  ASSERT_NOT_NULL(out_buf);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+
+  float got[10] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, got, sizeof(got)), 0);
+  float expected[10] = {128.0f, 128.0f, 0};
+  for (int c = 0; c < 2; c++) {
+    for (int r = 0; r < 128; r++) {
+      float x = x_data[c * 128 + r];
+      float y = y_data[r];
+      expected[c + 2] += x;
+      expected[c + 4] += x * x;
+      expected[c + 6] += y;
+      expected[c + 8] += x * y;
+    }
+  }
+  for (int i = 0; i < 10; i++)
+    ASSERT_FLOAT_EQ(got[i], expected[i], 1e-5f);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

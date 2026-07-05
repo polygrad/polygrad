@@ -194,6 +194,54 @@ function createBoundTensorClass(runtime) {
     if (fallback) return fallback
     throw new Error(`unknown Polygrad dtype id ${id}`)
   }
+  const gradManyRaw = (ctx, root, initialGrad, wrts) => {
+    const clean = wrts.map(rawUop).filter(Boolean)
+    if (!clean.length) return []
+    const out = ffi.poly_grad_many(ctx, rawUop(root) || 0, rawUop(initialGrad) || 0, clean)
+    if (!out || out.length !== clean.length) throw new Error('poly_grad_many failed')
+    return out
+  }
+  const substituteUops = (ctx, root, from, to) => {
+    const f = [], t = []
+    for (let i = 0; i < Math.min(from.length, to.length); i++) {
+      const fr = rawUop(from[i])
+      const tr = rawUop(to[i])
+      if (fr && tr && uopKey(fr) !== uopKey(tr)) {
+        f.push(fr)
+        t.push(tr)
+      }
+    }
+    if (!f.length) return rawUop(root)
+    return ffi.poly_uop_substitute(ctx, rawUop(root), f, t)
+  }
+  const customKernelGradRecords = []
+  const customGradRecordsFor = (ctx, root) => {
+    const rootRaw = rawUop(root)
+    if (!rootRaw || !ffi.poly_uop_reachable) return []
+    const out = []
+    for (const rec of customKernelGradRecords) {
+      if (rec.ctx !== ctx) continue
+      const active = []
+      for (let i = 0; i < rec.afters.length; i++) {
+        if (ffi.poly_uop_reachable(ctx, rootRaw, rawUop(rec.afters[i]))) active.push(i)
+      }
+      if (active.length) out.push({ rec, active })
+    }
+    return out
+  }
+  const gradResultRaw = (grad) => {
+    if (!grad) return null
+    if (grad instanceof Tensor) return grad._graphUopRaw()
+    if (grad instanceof UOp) return grad.raw
+    return rawUop(grad)
+  }
+  const accumulateGradRaw = (ctx, current, next) => {
+    const cur = rawUop(current)
+    const nxt = rawUop(next)
+    if (!cur) return nxt
+    if (!nxt) return cur
+    return ffi.poly_alu2(ctx, ops.ADD, cur, nxt)
+  }
   const liveTensors = []
   const useWeakRef = typeof WeakRef !== 'undefined'
   const registerTensor = (tensor) => {
@@ -286,6 +334,10 @@ function createBoundTensorClass(runtime) {
      */
     constructor(data, opts) {
       if (!opts) opts = {}
+      if (data instanceof UOp && !opts._uop) {
+        opts = Object.assign({}, opts, { _uop: data, _ctx: opts._ctx || data.ctx })
+        data = null
+      }
       const core = _runtime._core
       this._rt = _runtime
       this._ctx = opts._ctx || core.ctx
@@ -451,13 +503,19 @@ function createBoundTensorClass(runtime) {
       }
       const root = this._graphUopRaw()
       const targets = []
+      const seen = new Set()
       /* tinygrad discovers backward targets from all_tensors, not from a saved
        * input list: tensors whose logical UOp appears in the loss graph and
        * require gradients receive gradients. */
       for (const t of liveTensorSnapshot()) {
         if (!t || t._ctx !== this._ctx || !t._tensor || !t._requiresGrad) continue
         const target = t._graphUopRaw()
-        if (target && ffi.poly_uop_reachable(this._ctx, root, target)) targets.push(t)
+        if (target && ffi.poly_uop_reachable(this._ctx, root, target)) {
+          const key = uopKey(target)
+          if (seen.has(key)) continue
+          seen.add(key)
+          targets.push(t)
+        }
       }
       return targets
     }
@@ -629,7 +687,9 @@ function createBoundTensorClass(runtime) {
 
     copyFrom(data) {
       if (!ffi.poly_buffer_write) throw new Error('poly_buffer_write is required for Tensor.copyFrom')
-      const buf = this.uop && this.uop.buffer ? this.uop.buffer.raw : null
+      const logicalRaw = this._logicalUopRaw() || this._currentUopRaw()
+      const logical = logicalRaw ? new UOp(this._ctx, this._rt._core.ffi, logicalRaw) : null
+      const buf = logical && logical.buffer ? logical.buffer.raw : null
       if (!buf) throw new Error('copyFrom requires a tensor backed by a BUFFER UOp')
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
       const expectedBytes = this.numel() * AT.BYTES_PER_ELEMENT
@@ -652,6 +712,22 @@ function createBoundTensorClass(runtime) {
         throw new Error(`copyFrom byte size mismatch ${view.byteLength} != ${expectedBytes}`)
       }
       ffi.poly_buffer_write(this._ctx, buf, view)
+      let physicalRaw = this._physicalUopRaw()
+      if (physicalRaw) {
+        const physical = new UOp(this._ctx, this._rt._core.ffi, physicalRaw)
+        const physicalBuf = physical && physical.buffer ? physical.buffer.raw : null
+        if (physicalBuf && (!buf || uopKey(physicalBuf) !== uopKey(buf))) {
+          ffi.poly_buffer_write(this._ctx, physicalBuf, view)
+        } else if (!physicalBuf) {
+          physicalRaw = null
+        }
+      }
+      if (ffi.poly_tensor_update && logicalRaw) {
+        const rc = ffi.poly_tensor_update(
+          this._ctx, this._tensor, logicalRaw, physicalRaw, POLY_TENSOR_VALUE, deviceId(this._device)
+        )
+        if (rc !== 0) throw new Error('poly_tensor_update failed during copyFrom')
+      }
       this._data = null
       return this
     }
@@ -738,11 +814,14 @@ function createBoundTensorClass(runtime) {
 
     customKernel(...args) {
       let fxn = null
+      let gradFxn = null
       if (args.length && typeof args[args.length - 1] === 'function') {
         fxn = args.pop()
       } else if (args.length && args[args.length - 1] && typeof args[args.length - 1] === 'object'
         && typeof args[args.length - 1].fxn === 'function') {
-        fxn = args.pop().fxn
+        const opts = args.pop()
+        fxn = opts.fxn
+        gradFxn = opts.gradFxn || opts.grad_fxn || null
       }
       if (!fxn) throw new TypeError('customKernel requires a kernel function')
       const srcs = [this, ...args]
@@ -758,8 +837,10 @@ function createBoundTensorClass(runtime) {
       const body = fxn(...placeholders)
       if (!(body instanceof UOp)) throw new TypeError('customKernel function must return a UOp SINK body')
       const call = body.call(...contig.map(t => new UOp(t._ctx, ffi, t._graphUopRaw())))
-      return contig.map(t => {
+      const afters = []
+      const outs = contig.map(t => {
         const logical = new UOp(t._ctx, ffi, t._graphUopRaw()).after(call)
+        afters.push(logical)
         return new Tensor(null, {
           _ctx: t._ctx,
           _tensor: tensorCreateWithRoots(t._ctx, logical.raw, null, POLY_TENSOR_VALUE, t._device),
@@ -768,6 +849,16 @@ function createBoundTensorClass(runtime) {
           requiresGrad: t._requiresGrad
         })
       })
+      if (gradFxn) {
+        customKernelGradRecords.push({
+          ctx: this._ctx,
+          call,
+          args: contig.map(t => new UOp(t._ctx, ffi, t._graphUopRaw())),
+          afters,
+          gradFxn
+        })
+      }
+      return outs
     }
 
     custom_kernel(...args) { return this.customKernel(...args) }
@@ -1804,13 +1895,69 @@ function createBoundTensorClass(runtime) {
         throw new Error('No leaf tensors require grad')
       }
 
+      const root = this._graphUopRaw()
       const targetUops = gradLeaves.map(leaf => leaf._graphUopRaw())
-      // tinygrad computes all target gradients in one reverse pass. Keeping
-      // JS backward lazy also avoids realize-time live-retargeting while the
-      // gradient set is still being built.
-      const gradUops = ffi.poly_grad_many(this._ctx, this._graphUopRaw(), 0, targetUops)
-      if (!gradUops || gradUops.length !== gradLeaves.length) {
-        throw new Error('poly_grad_many failed')
+      const customRecords = customGradRecordsFor(this._ctx, root)
+      let gradUops
+      if (customRecords.length) {
+        const from = [], to = []
+        for (const { rec } of customRecords) {
+          from.push(...rec.afters)
+          to.push(...rec.args)
+        }
+        const detachedRoot = substituteUops(this._ctx, root, from, to)
+        const tempWrts = [...targetUops]
+        const seen = new Set(tempWrts.map(uopKey))
+        const activeByCall = []
+        for (const { rec, active } of customRecords) {
+          const activeRoots = []
+          for (const idx of active) {
+            const argRaw = rawUop(rec.args[idx])
+            activeRoots.push(argRaw)
+            const key = uopKey(argRaw)
+            if (!seen.has(key)) {
+              seen.add(key)
+              tempWrts.push(argRaw)
+            }
+          }
+          activeByCall.push({ rec, activeRoots })
+        }
+        const tempGrads = gradManyRaw(this._ctx, detachedRoot, 0, tempWrts)
+        const gradByRoot = new Map()
+        for (let i = 0; i < tempWrts.length; i++) gradByRoot.set(uopKey(tempWrts[i]), tempGrads[i])
+        const targetGradRoots = new Map()
+        for (const targetRaw of targetUops) targetGradRoots.set(uopKey(targetRaw), gradByRoot.get(uopKey(targetRaw)))
+
+        for (const { rec, activeRoots } of activeByCall) {
+          const upstreams = activeRoots
+            .map(argRaw => gradByRoot.get(uopKey(argRaw)))
+            .filter(Boolean)
+            .map(raw => new UOp(this._ctx, ffi, raw))
+          if (!upstreams.length) continue
+          const returned = upstreams.length > 1
+            ? rec.gradFxn(...upstreams, rec.call)
+            : rec.gradFxn(upstreams[0], rec.call)
+          if (!returned) continue
+          const returnedList = Array.isArray(returned) ? returned : [returned]
+          if (returnedList.length !== rec.args.length) {
+            throw new Error(`customKernel gradFxn returned ${returnedList.length} grads, expected ${rec.args.length}`)
+          }
+          for (let i = 0; i < rec.args.length; i++) {
+            const argGradRaw = gradResultRaw(returnedList[i])
+            if (!argGradRaw) continue
+            const propagated = gradManyRaw(this._ctx, rawUop(rec.args[i]), argGradRaw, targetUops)
+            for (let j = 0; j < targetUops.length; j++) {
+              const key = uopKey(targetUops[j])
+              targetGradRoots.set(key, accumulateGradRaw(this._ctx, targetGradRoots.get(key), propagated[j]))
+            }
+          }
+        }
+        gradUops = targetUops.map(raw => targetGradRoots.get(uopKey(raw)))
+      } else {
+        // tinygrad computes all target gradients in one reverse pass. Keeping
+        // JS backward lazy also avoids realize-time live-retargeting while the
+        // gradient set is still being built.
+        gradUops = gradManyRaw(this._ctx, root, 0, targetUops)
       }
 
       for (let i = 0; i < gradLeaves.length; i++) {

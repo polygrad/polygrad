@@ -70,6 +70,15 @@ int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u) {
   return 0;
 }
 
+int poly_uop_n_src(PolyUOp *u) {
+  return u ? u->n_src : 0;
+}
+
+PolyUOp *poly_uop_src(PolyUOp *u, int idx) {
+  if (!u || idx < 0 || idx >= u->n_src) return NULL;
+  return u->src[idx];
+}
+
 static PolyDType frontend_value_dtype(PolyDType dt) {
   if (!dt.is_ptr) return poly_dtype_scalar(dt);
   PolyDType base = dt;
@@ -143,6 +152,24 @@ PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value) {
   return poly_store_val(ctx, ptr, value);
 }
 
+PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges) {
+  if (!ctx || !addr || !value || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
+  if (addr->op != POLY_OP_INDEX || addr->n_src < 1 || !addr->src[0]) return NULL;
+  PolyUOp *store = poly_uop_store(ctx, addr, value);
+  if (!store) return NULL;
+  PolyUOp *effect = store;
+  if (n_ranges > 0) {
+    effect = poly_uop_end(ctx, store, ranges, n_ranges);
+    if (!effect) return NULL;
+  }
+  return poly_uop_after(ctx, addr->src[0], effect);
+}
+
+PolyUOp *poly_uop_group(PolyCtx *ctx, PolyUOp **srcs, int n_src) {
+  if (!ctx || n_src <= 0 || !srcs) return NULL;
+  return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, srcs, n_src, poly_arg_none());
+}
+
 PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_ranges) {
   if (!ctx || !body || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
   PolyUOp **src = malloc((size_t)(n_ranges + 1) * sizeof(PolyUOp *));
@@ -163,6 +190,21 @@ PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_range
 PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src) {
   if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
   return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, poly_arg_none());
+}
+
+PolyUOp *poly_uop_sink_ex(
+    PolyCtx *ctx,
+    PolyUOp **srcs,
+    int n_src,
+    const char *name,
+    int optimize
+) {
+  if (!ctx || n_src < 0 || (n_src > 0 && !srcs)) return NULL;
+  PolyArg arg = (name && name[0]) ? poly_arg_str(name) : poly_arg_none();
+  if (optimize) return poly_uop(ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg);
+  return poly_uop_tagged_arg(
+      ctx, POLY_OP_SINK, POLY_VOID, srcs, n_src, arg, 0, poly_arg_bool(false)
+  );
 }
 
 PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args) {
@@ -186,6 +228,79 @@ PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect) {
   if (!ctx || !target || !effect) return NULL;
   PolyUOp *src[2] = {target, effect};
   return poly_uop(ctx, POLY_OP_AFTER, target->dtype, src, 2, poly_arg_none());
+}
+
+PolyUOp *poly_uop_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *expr, PolyUOp **ranges, int n_ranges) {
+  if (!ctx || !expr || n_ranges < 0 || (n_ranges > 0 && !ranges)) return NULL;
+  switch (reduce_op) {
+    case POLY_OP_ADD:
+    case POLY_OP_MUL:
+    case POLY_OP_MAX:
+    case POLY_OP_AND:
+    case POLY_OP_OR:
+      break;
+    default:
+      return NULL;
+  }
+  if (n_ranges == 0) return expr;
+  PolyUOp **src = malloc((size_t)(n_ranges + 1) * sizeof(PolyUOp *));
+  if (!src) return NULL;
+  PolyUOp **from = malloc((size_t)n_ranges * sizeof(PolyUOp *));
+  PolyUOp **to = malloc((size_t)n_ranges * sizeof(PolyUOp *));
+  if (!from || !to) {
+    free(src);
+    free(from);
+    free(to);
+    return NULL;
+  }
+  int n_subs = 0;
+  src[0] = expr;
+  for (int i = 0; i < n_ranges; i++) {
+    if (!ranges[i] || ranges[i]->op != POLY_OP_RANGE) {
+      free(src);
+      free(from);
+      free(to);
+      return NULL;
+    }
+    PolyAxisType axis_type = poly_range_axis_type(ranges[i]->arg);
+    if (axis_type == POLY_AXIS_LOOP) {
+      PolyArg range_arg = ranges[i]->arg;
+      PolyArg new_arg = poly_arg_range(
+          poly_range_axis_id(range_arg), POLY_AXIS_REDUCE
+      );
+      if (poly_range_n_extra(range_arg) > 0) {
+        new_arg = poly_arg_range_ex(
+            poly_range_axis_id(range_arg), POLY_AXIS_REDUCE,
+            poly_range_extra(range_arg), poly_range_n_extra(range_arg)
+        );
+      }
+      PolyUOp *rr = poly_uop(ctx, POLY_OP_RANGE, ranges[i]->dtype, ranges[i]->src, ranges[i]->n_src, new_arg);
+      if (!rr) {
+        free(src);
+        free(from);
+        free(to);
+        return NULL;
+      }
+      from[n_subs] = ranges[i];
+      to[n_subs] = rr;
+      n_subs++;
+      src[i + 1] = rr;
+    } else if (axis_type == POLY_AXIS_REDUCE || axis_type == POLY_AXIS_GROUP_REDUCE ||
+               axis_type == POLY_AXIS_UNROLL) {
+      src[i + 1] = ranges[i];
+    } else {
+      free(src);
+      free(from);
+      free(to);
+      return NULL;
+    }
+  }
+  if (n_subs > 0) src[0] = poly_uop_substitute(ctx, expr, from, to, n_subs);
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_REDUCE, expr->dtype, src, n_ranges + 1, poly_arg_ops(reduce_op));
+  free(src);
+  free(from);
+  free(to);
+  return ret;
 }
 
 int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u) {

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from polygrad import Device, Jit, JitError, Tensor, Variable, can_run, compile as pg_compile, jit, stats as pg_stats
-from polygrad.uop.ops import UOp
+from polygrad.uop.ops import AxisType, KernelInfo, UOp
 
 
 class TestCreation:
@@ -80,6 +80,38 @@ class TestCreation:
         c = Tensor.empty((4,), dtype='float32')
         out = c.custom_kernel(a, b, fxn=add_kernel)[0]
         np.testing.assert_allclose(out.numpy(), [11.0, 22.0, 33.0, 44.0])
+
+    def test_custom_kernel_multi_output_backward_like_tinygrad(self):
+        def addmul_kernel(c, d, a, b):
+            c, d, a, b = c.flatten(), d.flatten(), a.flatten(), b.flatten()
+            i = UOp.range(c.ctx, c.numel(), 0)
+            store_c = c[i].store(a[i] + b[i])
+            store_d = d[i].store(a[i] * b[i])
+            return store_c.group(store_d).end(i).sink(arg=KernelInfo(name='addmul'))
+
+        def backward_addmul(grad_c, grad_d, call):
+            _c, _d, a, b = call.src[1:]
+            grad_a = (Tensor(grad_c) + Tensor(grad_d) * Tensor(b)).uop
+            grad_b = (Tensor(grad_c) + Tensor(grad_d) * Tensor(a)).uop
+            return (None, None, grad_a, grad_b)
+
+        rng = np.random.default_rng(7)
+        a_np = rng.standard_normal((4, 4), dtype=np.float32)
+        b_np = rng.standard_normal((4, 4), dtype=np.float32)
+
+        a_ref = Tensor(a_np, requires_grad=True)
+        b_ref = Tensor(b_np, requires_grad=True)
+        ((a_ref + b_ref).sum() + (a_ref * b_ref).sum()).backward()
+
+        a = Tensor(a_np, requires_grad=True)
+        b = Tensor(b_np, requires_grad=True)
+        a.realize(b)
+        c, d, _, _ = Tensor.empty((4, 4)).custom_kernel(
+            Tensor.empty((4, 4)), a, b, fxn=addmul_kernel, grad_fxn=backward_addmul
+        )
+        (c.sum() + d.sum()).backward()
+        np.testing.assert_allclose(a.grad.numpy(), a_ref.grad.numpy(), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(b.grad.numpy(), b_ref.grad.numpy(), rtol=1e-5, atol=1e-6)
 
     def test_custom_kernel_reuses_buffers_after_input_update(self):
         def add_kernel(c, a, b):
@@ -468,6 +500,307 @@ class TestJit:
         compiled.dispose()
         with pytest.raises(JitError, match='disposed'):
             compiled.run([sample])
+
+    def test_jit_captures_custom_kernel_and_replays_after_input_update(self):
+        def add_kernel(c, a, b):
+            c, a, b = c.flatten(), a.flatten(), b.flatten()
+            i = UOp.range(c.ctx, c.numel(), 0)
+            return c[i].store(a[i] + b[i]).end(i).sink()
+
+        @Jit
+        def f(a, b):
+            c = Tensor.empty((4,), dtype='float32')
+            return c.custom_kernel(a, b, fxn=add_kernel)[0]
+
+        a = Tensor.empty((4,), dtype='float32')
+        b = Tensor([10.0, 20.0, 30.0, 40.0])
+        a.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+        np.testing.assert_allclose(f(a, b).numpy(), [11.0, 22.0, 33.0, 44.0])
+        np.testing.assert_allclose(f(a, b).numpy(), [11.0, 22.0, 33.0, 44.0])
+        assert f.captured
+        assert f.schedule_count == 1
+
+        a.copy_from(np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float32))
+        np.testing.assert_allclose(f(a, b).numpy(), [15.0, 26.0, 37.0, 48.0])
+        assert f.replay_count == 1
+
+    def test_compile_captures_custom_kernel_and_replays_after_input_update(self):
+        def add_kernel(c, a, b):
+            c, a, b = c.flatten(), a.flatten(), b.flatten()
+            i = UOp.range(c.ctx, c.numel(), 0)
+            return c[i].store(a[i] + b[i]).end(i).sink()
+
+        def f(a, b):
+            c = Tensor.empty((4,), dtype='float32')
+            return c.custom_kernel(a, b, fxn=add_kernel)[0]
+
+        a = Tensor.empty((4,), dtype='float32')
+        b = Tensor([10.0, 20.0, 30.0, 40.0])
+        a.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+        compiled = pg_compile(f, [a, b])
+        assert compiled.schedule_count == 1
+
+        a.copy_from(np.array([5.0, 6.0, 7.0, 8.0], dtype=np.float32))
+        out = compiled.run([a, b])
+        np.testing.assert_allclose(out.numpy(), [15.0, 26.0, 37.0, 48.0])
+        assert compiled.stats()['run_count'] == 1
+
+    def test_compile_captures_custom_kernel_fused_reduction_and_replays_after_input_update(self):
+        def summary_kernel(out, a, b):
+            out, a, b = out.flatten(), a.flatten(), b.flatten()
+            c = UOp.range(out.ctx, 2, 0)
+            r = UOp.range(out.ctx, 4, 1, AxisType.REDUCE)
+            offset = c * 4 + r
+            term = a[offset] * b[r]
+            return out[c].store(term.sum(r)).end(c).sink()
+
+        def f(a, b):
+            out = Tensor.empty((2,), dtype='float32')
+            return out.custom_kernel(a, b, fxn=summary_kernel)[0]
+
+        a = Tensor.empty((8,), dtype='float32')
+        b = Tensor([1.0, 2.0, 3.0, 4.0])
+        a.copy_from(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float32))
+        compiled = pg_compile(f, [a, b])
+        assert compiled.schedule_count == 1
+        np.testing.assert_allclose(compiled.run([a, b]).numpy(), [30.0, 70.0])
+
+        a.copy_from(np.array([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], dtype=np.float32))
+        np.testing.assert_allclose(compiled.run([a, b]).numpy(), [40.0, 80.0])
+        assert compiled.stats()['run_count'] == 2
+
+    def test_compile_captures_custom_kernel_multi_output_fused_reductions(self):
+        def summary_kernel(out0, out1, a, b):
+            out0, out1, a, b = out0.flatten(), out1.flatten(), a.flatten(), b.flatten()
+            c = UOp.range(out0.ctx, 2, 0)
+            r = UOp.range(out0.ctx, 4, 1, AxisType.REDUCE)
+            term = a[c * 4 + r]
+            s0 = term.sum(r)
+            s1 = (term * b[r]).sum(r)
+            st0 = out0[c].store(s0)
+            st1 = out1[c].store(s1)
+            return st0.end(c).sink(st1.end(c))
+
+        def f(a, b):
+            out0 = Tensor.empty((2,), dtype='float32')
+            out1 = Tensor.empty((2,), dtype='float32')
+            outs = out0.custom_kernel(out1, a, b, fxn=summary_kernel)
+            return [outs[0], outs[1]]
+
+        a = Tensor.empty((8,), dtype='float32')
+        b = Tensor([1.0, 2.0, 3.0, 4.0])
+        a.copy_from(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=np.float32))
+        compiled = pg_compile(f, [a, b])
+        out0, out1 = compiled.run([a, b])
+        np.testing.assert_allclose(out0.numpy(), [10.0, 26.0])
+        np.testing.assert_allclose(out1.numpy(), [30.0, 70.0])
+
+        a.copy_from(np.array([2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], dtype=np.float32))
+        out0, out1 = compiled.run([a, b])
+        np.testing.assert_allclose(out0.numpy(), [14.0, 30.0])
+        np.testing.assert_allclose(out1.numpy(), [40.0, 80.0])
+        assert compiled.stats()['run_count'] == 2
+
+    def test_compile_captures_grouped_custom_kernel_compact_summary_with_intercept_reductions(self):
+        def summary_kernel(out, x, y):
+            out, x, y = out.flatten(), x.flatten(), y.flatten()
+            candidates = 2
+            rows = 128
+            c = UOp.range(out.ctx, candidates, 0)
+            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
+            one = UOp.const(out.ctx, 1.0)
+            xv = x[c * rows + r]
+            yv = y[r]
+            stats = [
+                one.sum(r),
+                xv.sum(r),
+                (xv * xv).sum(r),
+                yv.sum(r),
+                (xv * yv).sum(r),
+            ]
+            stores = [out[c + stat * candidates].store(s) for stat, s in enumerate(stats)]
+            return stores[0].group(*stores[1:]).end(c).sink()
+
+        def f(x, y):
+            out = Tensor.empty((10,), dtype='float32')
+            return out.custom_kernel(x, y, fxn=summary_kernel)[0]
+
+        def expected(xv, yv):
+            out = np.zeros((10,), dtype=np.float32)
+            out[0:2] = 128.0
+            for c in range(2):
+                xs = xv[c * 128:(c + 1) * 128]
+                out[c + 2] = xs.sum()
+                out[c + 4] = (xs * xs).sum()
+                out[c + 6] = yv.sum()
+                out[c + 8] = (xs * yv).sum()
+            return out
+
+        x = Tensor.empty((256,), dtype='float32')
+        y_data = np.arange(1, 129, dtype=np.float32)
+        y = Tensor(y_data)
+        x0 = np.arange(1, 257, dtype=np.float32)
+        x.copy_from(x0)
+        compiled = pg_compile(f, [x, y])
+        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x0, y_data))
+
+        x1 = np.arange(2, 258, dtype=np.float32)
+        x.copy_from(x1)
+        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x1, y_data))
+
+    def test_compile_captures_sym_style_custom_kernel_fused_summary_reductions(self):
+        candidates = 4
+        rows = 32
+        terms = 5
+        stats_per_candidate = 2 + 2 * terms + (terms * (terms + 1)) // 2
+
+        def summary_kernel(out, x, y):
+            out, x, y = out.flatten(), x.flatten(), y.flatten()
+            c = UOp.range(out.ctx, candidates, 0)
+            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
+            one = UOp.const(out.ctx, 1.0)
+            yv = y[r]
+
+            def term_at(t):
+                return x[(c * terms + t) * rows + r]
+
+            stats = [one.sum(r), yv.sum(r)]
+            for t in range(terms):
+                tv = term_at(t)
+                stats.append(tv.sum(r))
+                stats.append((tv * yv).sum(r))
+            for i in range(terms):
+                ti = term_at(i)
+                for j in range(i, terms):
+                    stats.append((ti * term_at(j)).sum(r))
+            stores = [out[c + stat * candidates].store(s) for stat, s in enumerate(stats)]
+            return stores[0].group(*stores[1:]).end(c).sink()
+
+        def f(x, y):
+            out = Tensor.empty((candidates * stats_per_candidate,), dtype='float32')
+            return out.custom_kernel(x, y, fxn=summary_kernel)[0]
+
+        def make_x(shift=0):
+            i = np.arange(candidates * terms * rows, dtype=np.float32)
+            return np.sin((i + shift) * 0.013).astype(np.float32) + np.cos((np.mod(i, 17)) * 0.07).astype(np.float32) + 0.001 * i
+
+        y_data = np.array([np.cos(i * 0.05) - 0.25 for i in range(rows)], dtype=np.float32)
+
+        def expected(xv):
+            out = np.zeros((candidates * stats_per_candidate,), dtype=np.float32)
+            for c in range(candidates):
+                out[c] = rows
+                out[c + candidates] = y_data.sum()
+                stat = 2
+                for t in range(terms):
+                    tv = xv[(c * terms + t) * rows:(c * terms + t + 1) * rows]
+                    out[c + stat * candidates] = tv.sum()
+                    out[c + (stat + 1) * candidates] = (tv * y_data).sum()
+                    stat += 2
+                for i in range(terms):
+                    ti = xv[(c * terms + i) * rows:(c * terms + i + 1) * rows]
+                    for j in range(i, terms):
+                        tj = xv[(c * terms + j) * rows:(c * terms + j + 1) * rows]
+                        out[c + stat * candidates] = (ti * tj).sum()
+                        stat += 1
+            return out
+
+        x = Tensor.empty((candidates * terms * rows,), dtype='float32')
+        y = Tensor(y_data)
+        x0 = make_x(0)
+        x.copy_from(x0)
+        compiled = pg_compile(f, [x, y])
+        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x0), rtol=2e-5, atol=2e-3)
+
+        x1 = make_x(3)
+        x.copy_from(x1)
+        np.testing.assert_allclose(compiled.run([x, y]).numpy(), expected(x1), rtol=2e-5, atol=2e-3)
+
+    def test_compile_captures_custom_kernel_tinygrad_style_set_accumulator_reduction(self):
+        def sum_kernel(out, x):
+            out, x = out.flatten(), x.flatten()
+            candidates = 4
+            rows = 64
+            c = UOp.range(out.ctx, candidates, 0)
+            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
+            acc = out[c].set(0.0)
+            acc = acc[c].set(acc.after(r)[c] + x[c * rows + r], end=r)
+            return acc.end(c).sink(arg=KernelInfo(name='custom_sum_4_64', opts_to_apply=()))
+
+        def f(x):
+            out = Tensor.empty((4,), dtype='float32')
+            return out.custom_kernel(x, fxn=sum_kernel)[0]
+
+        x_data = np.arange(1, 257, dtype=np.float32)
+        x = Tensor(x_data)
+        compiled = pg_compile(f, [x])
+        expected = x_data.reshape(4, 64).sum(axis=1)
+        np.testing.assert_allclose(compiled.run([x]).numpy(), expected, rtol=1e-5, atol=1e-5)
+
+    def test_compile_captures_staged_custom_kernel_outputs_feeding_another_custom_kernel(self):
+        candidates = 4
+        rows = 64
+
+        def term_kernel(t0, t1, x, y):
+            t0, t1, x, y = t0.flatten(), t1.flatten(), x.flatten(), y.flatten()
+            c = UOp.range(t0.ctx, candidates, 0)
+            r = UOp.range(t0.ctx, rows, 1)
+            idx = c * rows + r
+            xv = x[idx]
+            yv = y[r]
+            st0 = t0[idx].store(xv + yv)
+            st1 = t1[idx].store(xv * yv)
+            return st0.group(st1).end(c, r).sink(
+                arg=KernelInfo(name='custom_stage_terms_4_64', opts_to_apply=())
+            )
+
+        def summary_kernel(out, t0, t1):
+            out, t0, t1 = out.flatten(), t0.flatten(), t1.flatten()
+            c = UOp.range(out.ctx, candidates, 0)
+            r = UOp.range(out.ctx, rows, 1, AxisType.REDUCE)
+            idx = c * rows + r
+            s0 = t0[idx].sum(r)
+            s1 = t1[idx].sum(r)
+            st0 = out[c].store(s0)
+            st1 = out[c + candidates].store(s1)
+            return st0.group(st1).end(c).sink(
+                arg=KernelInfo(name='custom_stage_summary_4_64', opts_to_apply=())
+            )
+
+        def f(x, y):
+            t0 = Tensor.empty((candidates * rows,), dtype='float32')
+            t1 = Tensor.empty((candidates * rows,), dtype='float32')
+            staged = t0.custom_kernel(t1, x, y, fxn=term_kernel)
+            out = Tensor.empty((candidates * 2,), dtype='float32')
+            return out.custom_kernel(staged[0], staged[1], fxn=summary_kernel)[0]
+
+        x_data = np.array([np.sin(i * 0.01) + i * 0.001 for i in range(candidates * rows)], dtype=np.float32)
+        y_data = np.array([np.cos(i * 0.02) - 0.25 for i in range(rows)], dtype=np.float32)
+        expected = np.zeros((candidates * 2,), dtype=np.float32)
+        for c in range(candidates):
+            xs = x_data[c * rows:(c + 1) * rows]
+            expected[c] = (xs + y_data).sum()
+            expected[c + candidates] = (xs * y_data).sum()
+
+        compiled = pg_compile(f, [Tensor(x_data), Tensor(y_data)])
+        np.testing.assert_allclose(compiled.run([Tensor(x_data), Tensor(y_data)]).numpy(), expected, rtol=1e-5, atol=1e-5)
+
+    def test_custom_kernel_exposes_uop_compare_where_and_unary_methods(self):
+        def select_kernel(out, a, b):
+            out, a, b = out.flatten(), a.flatten(), b.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            av = a[i]
+            bv = b[i]
+            selected = av.lt(0).where(-av, av.max(bv))
+            return out[i].store(selected).end(i).sink()
+
+        out = Tensor.empty((4,), dtype='float32')
+        a = Tensor([-3.0, 2.0, 5.0, -1.0])
+        b = Tensor([1.0, 4.0, 3.0, 9.0])
+        np.testing.assert_allclose(
+            out.custom_kernel(a, b, fxn=select_kernel)[0].numpy(),
+            [3.0, 4.0, 5.0, 1.0],
+        )
 
 
 class TestElementwise:

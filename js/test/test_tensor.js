@@ -118,6 +118,47 @@ async function runTensorTests(pg) {
     assertClose(await out.toArray(), [11, 22, 33, 44])
   })
 
+  await test('customKernel multi-output backward matches tinygrad pattern', async () => {
+    function addmulKernel(c, d, a, b) {
+      c = c.flatten(); d = d.flatten(); a = a.flatten(); b = b.flatten()
+      const i = pg.uop.range(c.numel(), 0)
+      const storeC = c.index(i).store(a.index(i).add(b.index(i)))
+      const storeD = d.index(i).store(a.index(i).mul(b.index(i)))
+      return storeC.group(storeD).end(i).sink({ arg: new pg.uop.KernelInfo('addmul') })
+    }
+    function backwardAddmul(gradC, gradD, call) {
+      const [, , , a, b] = call.src
+      const gradA = new Tensor(gradC).add(new Tensor(gradD).mul(new Tensor(b))).uop
+      const gradB = new Tensor(gradC).add(new Tensor(gradD).mul(new Tensor(a))).uop
+      return [null, null, gradA, gradB]
+    }
+    const aVals = [
+      0.3, -1.2, 0.7, 2.1,
+      -0.5, 1.4, -2.2, 0.9,
+      1.1, -0.8, 2.4, -1.7,
+      0.2, 0.6, -0.4, 1.8,
+    ]
+    const bVals = [
+      1.2, 0.5, -0.3, 0.8,
+      2.0, -1.1, 0.4, -0.7,
+      0.9, 1.5, -2.5, 0.1,
+      -1.3, 0.2, 1.7, -0.6,
+    ]
+    const aRef = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4)
+    const bRef = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4)
+    await aRef.add(bRef).sum().add(aRef.mul(bRef).sum()).backward()
+
+    const a = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4)
+    const b = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4)
+    await a.realize(b)
+    const [c, d] = Tensor.empty([4, 4]).customKernel(
+      Tensor.empty([4, 4]), a, b, { fxn: addmulKernel, gradFxn: backwardAddmul }
+    )
+    await c.sum().add(d.sum()).backward()
+    assertClose(await a.grad.toArray(), await aRef.grad.toArray(), 1e-4)
+    assertClose(await b.grad.toArray(), await bRef.grad.toArray(), 1e-4)
+  })
+
   await test('customKernel reuses buffers after input update', async () => {
     function addKernel(c, a, b) {
       c = c.flatten(); a = a.flatten(); b = b.flatten()
@@ -139,6 +180,323 @@ async function runTensorTests(pg) {
       assert(out.uopPhysical && out.uopPhysical.hasBufferIdentity(), 'custom output should realize to a buffer-backed root')
       assertClose(await out.toArray(), expected)
     }
+  })
+
+  await test('customKernel exposes UOp compare where and unary methods', async () => {
+    function selectKernel(out, a, b) {
+      out = out.flatten(); a = a.flatten(); b = b.flatten()
+      const i = pg.uop.range(out.numel(), 0)
+      const av = a.index(i)
+      const bv = b.index(i)
+      const selected = av.lt(0).where(av.neg(), av.max(bv))
+      return out.index(i).store(selected).end(i).sink()
+    }
+    const out = Tensor.empty([4], { dtype: 'float32' })
+    const a = new Tensor([-3, 2, 5, -1])
+    const b = new Tensor([1, 4, 3, 9])
+    assertClose(await out.customKernel(a, b, selectKernel)[0].toArray(), [3, 4, 5, 1])
+  })
+
+  await test('jit captures customKernel and replays after input update', async () => {
+    function addKernel(c, a, b) {
+      c = c.flatten(); a = a.flatten(); b = b.flatten()
+      const i = pg.uop.range(c.numel(), 0)
+      return c.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+    }
+    const f = pg.jit((a, b) => {
+      const c = Tensor.empty([4], { dtype: 'float32' })
+      return c.customKernel(a, b, addKernel)[0]
+    })
+    const a = Tensor.empty([4], { dtype: 'float32' })
+    const b = new Tensor([10, 20, 30, 40])
+    a.copyFrom(new Float32Array([1, 2, 3, 4]))
+    assertClose(await (await f(a, b)).toArray(), [11, 22, 33, 44])
+    assertClose(await (await f(a, b)).toArray(), [11, 22, 33, 44])
+    assert(f.scheduleCount === 1, `expected one captured schedule, got ${f.scheduleCount}`)
+    a.copyFrom(new Float32Array([5, 6, 7, 8]))
+    assertClose(await (await f(a, b)).toArray(), [15, 26, 37, 48])
+    assert(f.stats().replayCount === 1, 'third customKernel call should replay')
+  })
+
+  await test('compile captures customKernel and replays after input update', async () => {
+    function addKernel(c, a, b) {
+      c = c.flatten(); a = a.flatten(); b = b.flatten()
+      const i = pg.uop.range(c.numel(), 0)
+      return c.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
+    }
+    const a = Tensor.empty([4], { dtype: 'float32' })
+    const b = new Tensor([10, 20, 30, 40])
+    a.copyFrom(new Float32Array([1, 2, 3, 4]))
+    const compiled = await pg.compile((x, y) => {
+      const c = Tensor.empty([4], { dtype: 'float32' })
+      return c.customKernel(x, y, addKernel)[0]
+    }, [a, b])
+    assert(compiled.scheduleCount === 1, `expected one captured schedule, got ${compiled.scheduleCount}`)
+    a.copyFrom(new Float32Array([5, 6, 7, 8]))
+    const out = await compiled.run([a, b])
+    assertClose(await out.toArray(), [15, 26, 37, 48])
+    assert(compiled.stats().runCount === 1, 'compiled customKernel run should update runCount')
+    compiled.dispose()
+  })
+
+  await test('compile captures customKernel fused reduction and replays after input update', async () => {
+    function summaryKernel(out, a, b) {
+      out = out.flatten(); a = a.flatten(); b = b.flatten()
+      const c = pg.uop.range(2, 0)
+      const r = pg.uop.range(4, 1, pg.uop.AxisType.REDUCE)
+      const offset = c.mul(4).add(r)
+      const term = a.index(offset).mul(b.index(r))
+      const sum = term.sum(r)
+      return out.index(c).store(sum).end(c).sink()
+    }
+    const a = Tensor.empty([8], { dtype: 'float32' })
+    const b = new Tensor([1, 2, 3, 4])
+    a.copyFrom(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
+    const compiled = await pg.compile((x, y) => {
+      const out = Tensor.empty([2], { dtype: 'float32' })
+      return out.customKernel(x, y, summaryKernel)[0]
+    }, [a, b])
+    assert(compiled.scheduleCount === 1, `expected one captured schedule, got ${compiled.scheduleCount}`)
+    assertClose(await (await compiled.run([a, b])).toArray(), [30, 70])
+    a.copyFrom(new Float32Array([2, 3, 4, 5, 6, 7, 8, 9]))
+    assertClose(await (await compiled.run([a, b])).toArray(), [40, 80])
+    assert(compiled.stats().runCount === 2, 'compiled custom reduction should replay twice')
+    compiled.dispose()
+  })
+
+  await test('compile captures customKernel multi-output fused reductions', async () => {
+    function summaryKernel(out0, out1, a, b) {
+      out0 = out0.flatten(); out1 = out1.flatten(); a = a.flatten(); b = b.flatten()
+      const c = pg.uop.range(2, 0)
+      const r = pg.uop.range(4, 1, pg.uop.AxisType.REDUCE)
+      const term = a.index(c.mul(4).add(r))
+      const s0 = term.sum(r)
+      const s1 = term.mul(b.index(r)).sum(r)
+      const st0 = out0.index(c).store(s0)
+      const st1 = out1.index(c).store(s1)
+      return st0.end(c).sink(st1.end(c))
+    }
+    const a = Tensor.empty([8], { dtype: 'float32' })
+    const b = new Tensor([1, 2, 3, 4])
+    a.copyFrom(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]))
+    const compiled = await pg.compile((x, y) => {
+      const out0 = Tensor.empty([2], { dtype: 'float32' })
+      const out1 = Tensor.empty([2], { dtype: 'float32' })
+      const outs = out0.customKernel(out1, x, y, summaryKernel)
+      return [outs[0], outs[1]]
+    }, [a, b])
+    const got0 = await compiled.run([a, b])
+    assertClose(await got0[0].toArray(), [10, 26])
+    assertClose(await got0[1].toArray(), [30, 70])
+    a.copyFrom(new Float32Array([2, 3, 4, 5, 6, 7, 8, 9]))
+    const got1 = await compiled.run([a, b])
+    assertClose(await got1[0].toArray(), [14, 30])
+    assertClose(await got1[1].toArray(), [40, 80])
+    assert(compiled.stats().runCount === 2, 'compiled custom multi-output reduction should replay twice')
+    compiled.dispose()
+  })
+
+  await test('compile captures grouped customKernel compact summary with intercept reductions', async () => {
+    function summaryKernel(out, x, y) {
+      out = out.flatten(); x = x.flatten(); y = y.flatten()
+      const candidates = 2
+      const rows = 128
+      const c = pg.uop.range(candidates, 0)
+      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
+      const one = pg.uop.constant(1.0)
+      const xv = x.index(c.mul(rows).add(r))
+      const yv = y.index(r)
+      const stats = [
+        one.sum(r),
+        xv.sum(r),
+        xv.mul(xv).sum(r),
+        yv.sum(r),
+        xv.mul(yv).sum(r),
+      ]
+      const stores = stats.map((s, stat) => out.index(c.add(stat * candidates)).store(s))
+      return stores[0].group(...stores.slice(1)).end(c).sink()
+    }
+    const makeX = (shift = 0) => Float32Array.from({ length: 256 }, (_, i) => i + 1 + shift)
+    const makeY = () => Float32Array.from({ length: 128 }, (_, i) => i + 1)
+    const expected = (xv, yv) => {
+      const out = new Float32Array(10)
+      out[0] = out[1] = 128
+      for (let c = 0; c < 2; c++) {
+        for (let r = 0; r < 128; r++) {
+          const xval = xv[c * 128 + r]
+          const yval = yv[r]
+          out[c + 2] += xval
+          out[c + 4] += xval * xval
+          out[c + 6] += yval
+          out[c + 8] += xval * yval
+        }
+      }
+      return Array.from(out)
+    }
+    const x = Tensor.empty([256], { dtype: 'float32' })
+    const yData = makeY()
+    const y = new Tensor(yData)
+    const x0 = makeX(0)
+    x.copyFrom(x0)
+    const compiled = await pg.compile((tx, ty) => {
+      const out = Tensor.empty([10], { dtype: 'float32' })
+      return out.customKernel(tx, ty, summaryKernel)[0]
+    }, [x, y])
+    assertClose(await (await compiled.run([x, y])).toArray(), expected(x0, yData))
+    const x1 = makeX(1)
+    x.copyFrom(x1)
+    assertClose(await (await compiled.run([x, y])).toArray(), expected(x1, yData))
+    compiled.dispose()
+  })
+
+  await test('compile captures sym-style customKernel fused summary reductions', async () => {
+    const candidates = 4
+    const rows = 32
+    const terms = 5
+    const statsPerCandidate = 2 + 2 * terms + (terms * (terms + 1)) / 2
+    function summaryKernel(out, x, y) {
+      out = out.flatten(); x = x.flatten(); y = y.flatten()
+      const c = pg.uop.range(candidates, 0)
+      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
+      const one = pg.uop.constant(1.0)
+      const yv = y.index(r)
+      const termAt = (t) => x.index(c.mul(terms).add(t).mul(rows).add(r))
+      const stats = [one.sum(r), yv.sum(r)]
+      for (let t = 0; t < terms; t++) {
+        const tv = termAt(t)
+        stats.push(tv.sum(r))
+        stats.push(tv.mul(yv).sum(r))
+      }
+      for (let i = 0; i < terms; i++) {
+        const ti = termAt(i)
+        for (let j = i; j < terms; j++) stats.push(ti.mul(termAt(j)).sum(r))
+      }
+      const stores = stats.map((s, stat) => out.index(c.add(stat * candidates)).store(s))
+      return stores[0].group(...stores.slice(1)).end(c).sink()
+    }
+    const makeX = (shift = 0) => Float32Array.from(
+      { length: candidates * terms * rows },
+      (_, i) => Math.sin((i + shift) * 0.013) + Math.cos((i % 17) * 0.07) + 0.001 * i
+    )
+    const yData = Float32Array.from({ length: rows }, (_, i) => Math.cos(i * 0.05) - 0.25)
+    const expected = (xv) => {
+      const out = new Float32Array(candidates * statsPerCandidate)
+      for (let c = 0; c < candidates; c++) {
+        out[c] = rows
+        for (let r = 0; r < rows; r++) out[c + candidates] += yData[r]
+        let stat = 2
+        for (let t = 0; t < terms; t++) {
+          for (let r = 0; r < rows; r++) {
+            const tv = xv[(c * terms + t) * rows + r]
+            out[c + stat * candidates] += tv
+            out[c + (stat + 1) * candidates] += tv * yData[r]
+          }
+          stat += 2
+        }
+        for (let i = 0; i < terms; i++) {
+          for (let j = i; j < terms; j++) {
+            for (let r = 0; r < rows; r++) {
+              out[c + stat * candidates] += xv[(c * terms + i) * rows + r] * xv[(c * terms + j) * rows + r]
+            }
+            stat += 1
+          }
+        }
+      }
+      return Array.from(out)
+    }
+    const x = Tensor.empty([candidates * terms * rows], { dtype: 'float32' })
+    const y = new Tensor(yData)
+    const x0 = makeX(0)
+    x.copyFrom(x0)
+    const compiled = await pg.compile((tx, ty) => {
+      const out = Tensor.empty([candidates * statsPerCandidate], { dtype: 'float32' })
+      return out.customKernel(tx, ty, summaryKernel)[0]
+    }, [x, y])
+    assertClose(await (await compiled.run([x, y])).toArray(), expected(x0), 2e-3)
+    const x1 = makeX(3)
+    x.copyFrom(x1)
+    assertClose(await (await compiled.run([x, y])).toArray(), expected(x1), 2e-3)
+    compiled.dispose()
+  })
+
+  await test('compile captures customKernel tinygrad-style set accumulator reduction', async () => {
+    function sumKernel(out, x) {
+      out = out.flatten(); x = x.flatten()
+      const candidates = 4
+      const rows = 64
+      const c = pg.uop.range(candidates, 0)
+      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
+      let acc = out.index(c).set(0.0)
+      acc = acc.index(c).set(acc.after(r).index(c).add(x.index(c.mul(rows).add(r))), r)
+      return acc.end(c).sink(new pg.uop.KernelInfo({ name: 'custom_sum_4_64', opts_to_apply: [] }))
+    }
+    const xData = Float32Array.from({ length: 256 }, (_, i) => i + 1)
+    const expected = []
+    for (let c = 0; c < 4; c++) {
+      let s = 0
+      for (let r = 0; r < 64; r++) s += xData[c * 64 + r]
+      expected.push(s)
+    }
+    const x = new Tensor(xData)
+    const compiled = await pg.compile((tx) => {
+      const out = Tensor.empty([4], { dtype: 'float32' })
+      return out.customKernel(tx, sumKernel)[0]
+    }, [x])
+    assertClose(await (await compiled.run([x])).toArray(), expected)
+    compiled.dispose()
+  })
+
+  await test('compile captures staged customKernel outputs feeding another customKernel', async () => {
+    const candidates = 4
+    const rows = 64
+    function termKernel(t0, t1, x, y) {
+      t0 = t0.flatten(); t1 = t1.flatten(); x = x.flatten(); y = y.flatten()
+      const c = pg.uop.range(candidates, 0)
+      const r = pg.uop.range(rows, 1)
+      const idx = c.mul(rows).add(r)
+      const xv = x.index(idx)
+      const yv = y.index(r)
+      const st0 = t0.index(idx).store(xv.add(yv))
+      const st1 = t1.index(idx).store(xv.mul(yv))
+      return st0.group(st1).end(c, r).sink(
+        new pg.uop.KernelInfo({ name: 'custom_stage_terms_4_64', opts_to_apply: [] })
+      )
+    }
+    function summaryKernel(out, t0, t1) {
+      out = out.flatten(); t0 = t0.flatten(); t1 = t1.flatten()
+      const c = pg.uop.range(candidates, 0)
+      const r = pg.uop.range(rows, 1, pg.uop.AxisType.REDUCE)
+      const idx = c.mul(rows).add(r)
+      const s0 = t0.index(idx).sum(r)
+      const s1 = t1.index(idx).sum(r)
+      const st0 = out.index(c).store(s0)
+      const st1 = out.index(c.add(candidates)).store(s1)
+      return st0.group(st1).end(c).sink(
+        new pg.uop.KernelInfo({ name: 'custom_stage_summary_4_64', opts_to_apply: [] })
+      )
+    }
+    const xData = Float32Array.from({ length: candidates * rows }, (_, i) => Math.sin(i * 0.01) + i * 0.001)
+    const yData = Float32Array.from({ length: rows }, (_, i) => Math.cos(i * 0.02) - 0.25)
+    const expected = new Float32Array(candidates * 2)
+    for (let c = 0; c < candidates; c++) {
+      for (let r = 0; r < rows; r++) {
+        const xv = xData[c * rows + r]
+        const yv = yData[r]
+        expected[c] += xv + yv
+        expected[c + candidates] += xv * yv
+      }
+    }
+    const x = new Tensor(xData)
+    const y = new Tensor(yData)
+    const compiled = await pg.compile((tx, ty) => {
+      const t0 = Tensor.empty([candidates * rows], { dtype: 'float32' })
+      const t1 = Tensor.empty([candidates * rows], { dtype: 'float32' })
+      const staged = t0.customKernel(t1, tx, ty, termKernel)
+      const out = Tensor.empty([candidates * 2], { dtype: 'float32' })
+      return out.customKernel(staged[0], staged[1], summaryKernel)[0]
+    }, [x, y])
+    assertClose(await (await compiled.run([x, y])).toArray(), Array.from(expected), 1e-4)
+    compiled.dispose()
   })
 
   await test('runtime exposes conservative stats and capability checks', async () => {

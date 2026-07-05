@@ -421,7 +421,7 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
   PolyPatternMatcher *extra = NULL;
   if (poly_cuda_arch_major() < 8) extra = poly_pm_bf16_non_native();
   PolyRewriteOpts opts = {
-      .optimize = true, /* shared optimized pipeline (tinygrad parity) */
+      .optimize = poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
       /* tinygrad default DEVECTORIZE=1 also applies to CUDA. Keeping this at
        * -1 leaves VECTORIZE/GEP nodes alive past add_gpudims for ordinary CUDA
        * kernels such as broadcast matmul, which does not match the reference
@@ -767,7 +767,12 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
        * Keep accepting INDEX(..., gate) during transition. */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       PolyUOp *gate_uop =
-          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+          (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+              ? u->src[2]
+              : ((idx_uop && idx_uop->n_src >= 3 &&
+                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
+                     ? idx_uop->src[2]
+                     : NULL);
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = csmap_get(&names, gate_uop);
         char *alt_s = csmap_get(&names, u->src[1]);
@@ -797,7 +802,9 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
           u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
           (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
            u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
-      bool gated_store = (store_idx && store_idx->n_src >= 3 && !store_to_local);
+      bool gated_store =
+          (store_idx && store_idx->n_src >= 3 && !store_to_local &&
+           poly_dtype_is_bool(poly_dtype_scalar(store_idx->src[2]->dtype)));
       if (gated_store) {
         char *gate_s = csmap_get(&names, store_idx->src[2]);
         for (int d = 0; d < depth; d++)

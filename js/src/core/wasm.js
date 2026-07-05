@@ -183,6 +183,14 @@ async function createWasmCore(device) {
     return ptr
   }
 
+  function writeCString(s) {
+    const bytes = new TextEncoder().encode(String(s))
+    const ptr = Module._malloc(bytes.length + 1)
+    heapU8().set(bytes, ptr)
+    heapU8()[ptr + bytes.length] = 0
+    return ptr
+  }
+
   function writePtrArrayScratch(arr) {
     if (!arr || arr.length === 0) return 0
     if (arr.length > _scratchPtrArrayCap) {
@@ -496,6 +504,24 @@ async function createWasmCore(device) {
     },
     poly_uop_load: Module._poly_uop_load,
     poly_uop_store: Module._poly_uop_store,
+    poly_uop_set: (ctx, addr, value, ranges) => {
+      const rs = ranges || []
+      const ptr = rs.length ? writePtrArray(rs) : 0
+      try {
+        return Module._poly_uop_set(ctx, addr, value, ptr, rs.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
+    poly_uop_group: (ctx, srcs) => {
+      const xs = srcs || []
+      const ptr = writePtrArray(xs)
+      try {
+        return Module._poly_uop_group(ctx, ptr, xs.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
     poly_uop_end: (ctx, body, ranges) => {
       const rs = ranges || []
       const ptr = writePtrArray(rs)
@@ -514,6 +540,17 @@ async function createWasmCore(device) {
         if (ptr) Module._free(ptr)
       }
     },
+    poly_uop_sink_ex: (ctx, srcs, name, optimize) => {
+      const xs = srcs || []
+      const ptr = writePtrArray(xs)
+      const namePtr = name ? writeCString(String(name)) : 0
+      try {
+        return Module._poly_uop_sink_ex(ctx, ptr, xs.length, namePtr, optimize ? 1 : 0)
+      } finally {
+        if (ptr) Module._free(ptr)
+        if (namePtr) Module._free(namePtr)
+      }
+    },
     poly_uop_call: (ctx, body, args) => {
       const xs = args || []
       const ptr = writePtrArray(xs)
@@ -524,6 +561,15 @@ async function createWasmCore(device) {
       }
     },
     poly_uop_after: Module._poly_uop_after,
+    poly_uop_reduce: (ctx, op, expr, ranges) => {
+      const rs = ranges || []
+      const ptr = writePtrArray(rs)
+      try {
+        return Module._poly_uop_reduce(ctx, op, expr, ptr, rs.length)
+      } finally {
+        if (ptr) Module._free(ptr)
+      }
+    },
     poly_uop_flatten: Module._poly_uop_flatten,
     poly_uop_numel: (ctx, uop) => Number(Module._poly_uop_numel(ctx, uop)),
     poly_register_buffer_by_id: (ctx, role, dtypeId, shape, name) => {
@@ -575,6 +621,8 @@ async function createWasmCore(device) {
     poly_uop_op: (uop) => Module._poly_uop_op(uop),
     poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
     poly_uop_key: (uop) => BigInt(uop || 0),
+    poly_uop_n_src: (uop) => Module._poly_uop_n_src(uop || 0),
+    poly_uop_src: (uop, idx) => Module._poly_uop_src(uop || 0, idx | 0),
     poly_uop_reachable: (ctx, root, target) =>
       !!Module._poly_uop_reachable(ctx, root || 0, target || 0),
     poly_uop_substitute: (ctx, root, from, to) => {
@@ -1028,7 +1076,7 @@ async function createWasmCore(device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 13
+  const EXPECTED_ABI = 18
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

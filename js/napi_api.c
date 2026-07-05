@@ -119,6 +119,10 @@ static PolyUOp **read_uop_array(napi_env env, napi_value arr, int *out_n) {
   }
   uint32_t n = 0;
   napi_get_array_length(env, arr, &n);
+  if (n == 0) {
+    if (out_n) *out_n = 0;
+    return (PolyUOp **)calloc(1, sizeof(PolyUOp *));
+  }
   PolyUOp **out = (PolyUOp **)malloc((size_t)n * sizeof(PolyUOp *));
   if (!out) {
     napi_throw_error(env, NULL, "malloc failed");
@@ -553,6 +557,34 @@ static napi_value napi_poly_uop_store(napi_env env, napi_callback_info info) {
   );
 }
 
+static napi_value napi_poly_uop_set(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyUOp *addr = get_external(env, argv[1]);
+  PolyUOp *value = get_external(env, argv[2]);
+  int n = 0;
+  PolyUOp **ranges = read_uop_array(env, argv[3], &n);
+  if (!ranges && n != 0) return NULL;
+  PolyUOp *ret = poly_uop_set(ctx, addr, value, ranges, n);
+  free(ranges);
+  return make_external(env, ret);
+}
+
+static napi_value napi_poly_uop_group(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int n = 0;
+  PolyUOp **srcs = read_uop_array(env, argv[1], &n);
+  if (!srcs) return NULL;
+  PolyUOp *ret = poly_uop_group(ctx, srcs, n);
+  free(srcs);
+  return make_external(env, ret);
+}
+
 static napi_value napi_poly_uop_end(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -580,6 +612,28 @@ static napi_value napi_poly_uop_sink(napi_env env, napi_callback_info info) {
   return make_external(env, ret);
 }
 
+static napi_value napi_poly_uop_sink_ex(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int n = 0;
+  PolyUOp **srcs = read_uop_array(env, argv[1], &n);
+  if (!srcs) return NULL;
+  char *name = NULL;
+  if (argc > 2) {
+    napi_valuetype ty;
+    NAPI_CALL(env, napi_typeof(env, argv[2], &ty));
+    if (ty == napi_string) name = read_utf8_arg(env, argv[2], NULL);
+  }
+  bool optimize = true;
+  if (argc > 3) napi_get_value_bool(env, argv[3], &optimize);
+  PolyUOp *ret = poly_uop_sink_ex(ctx, srcs, n, name, optimize ? 1 : 0);
+  free(name);
+  free(srcs);
+  return make_external(env, ret);
+}
+
 static napi_value napi_poly_uop_call(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -601,6 +655,22 @@ static napi_value napi_poly_uop_after(napi_env env, napi_callback_info info) {
   return make_external(
       env, poly_uop_after(get_external(env, argv[0]), get_external(env, argv[1]), get_external(env, argv[2]))
   );
+}
+
+static napi_value napi_poly_uop_reduce(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t op = 0;
+  napi_get_value_int32(env, argv[1], &op);
+  PolyUOp *expr = get_external(env, argv[2]);
+  int n = 0;
+  PolyUOp **ranges = read_uop_array(env, argv[3], &n);
+  if (!ranges) return NULL;
+  PolyUOp *ret = poly_uop_reduce(ctx, (PolyOps)op, expr, ranges, n);
+  free(ranges);
+  return make_external(env, ret);
 }
 
 static napi_value napi_poly_uop_flatten(napi_env env, napi_callback_info info) {
@@ -782,6 +852,26 @@ static napi_value napi_poly_uop_op(napi_env env, napi_callback_info info) {
   napi_value out;
   NAPI_CALL(env, napi_create_int32(env, poly_uop_op(u), &out));
   return out;
+}
+
+static napi_value napi_poly_uop_n_src(napi_env env, napi_callback_info info) {
+  napi_value argv[1];
+  size_t argc = 1;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyUOp *u = get_external(env, argv[0]);
+  napi_value out;
+  NAPI_CALL(env, napi_create_int32(env, poly_uop_n_src(u), &out));
+  return out;
+}
+
+static napi_value napi_poly_uop_src(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyUOp *u = get_external(env, argv[0]);
+  int32_t idx = 0;
+  NAPI_CALL(env, napi_get_value_int32(env, argv[1], &idx));
+  return make_external(env, poly_uop_src(u, idx));
 }
 
 static napi_value napi_poly_uop_get_buffer_identity(napi_env env, napi_callback_info info) {
@@ -3487,12 +3577,18 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_index", napi_poly_uop_index),
       DECLARE_NAPI_METHOD("poly_uop_load", napi_poly_uop_load),
       DECLARE_NAPI_METHOD("poly_uop_store", napi_poly_uop_store),
+      DECLARE_NAPI_METHOD("poly_uop_set", napi_poly_uop_set),
+      DECLARE_NAPI_METHOD("poly_uop_group", napi_poly_uop_group),
       DECLARE_NAPI_METHOD("poly_uop_end", napi_poly_uop_end),
       DECLARE_NAPI_METHOD("poly_uop_sink", napi_poly_uop_sink),
+      DECLARE_NAPI_METHOD("poly_uop_sink_ex", napi_poly_uop_sink_ex),
       DECLARE_NAPI_METHOD("poly_uop_call", napi_poly_uop_call),
       DECLARE_NAPI_METHOD("poly_uop_after", napi_poly_uop_after),
+      DECLARE_NAPI_METHOD("poly_uop_reduce", napi_poly_uop_reduce),
       DECLARE_NAPI_METHOD("poly_uop_flatten", napi_poly_uop_flatten),
       DECLARE_NAPI_METHOD("poly_uop_numel", napi_poly_uop_numel),
+      DECLARE_NAPI_METHOD("poly_uop_n_src", napi_poly_uop_n_src),
+      DECLARE_NAPI_METHOD("poly_uop_src", napi_poly_uop_src),
       DECLARE_NAPI_METHOD("poly_register_buffer_by_id", napi_poly_register_buffer_by_id),
       DECLARE_NAPI_METHOD("poly_register_existing_buffer", napi_poly_register_existing_buffer),
 

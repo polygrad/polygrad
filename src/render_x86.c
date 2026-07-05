@@ -5710,7 +5710,7 @@ uint32_t poly_x86_feature_stamp(void) {
 
 PolyUOp *poly_rewrite_x86(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
-      .optimize = true,
+      .optimize = poly_kernel_optimize_enabled(sink),
       .devectorize = 1,
       .caps = poly_x86_caps(),
       .device = POLY_DEVICE_CPU,

@@ -20,6 +20,7 @@ from polygrad.device import Buffer
 # automatically. Used for post-realize retargeting and backward graph
 # discovery, matching tinygrad's live-tensor registry.
 all_tensors: dict[weakref.ref, None] = {}
+_custom_kernel_grad_records = []
 
 # Strong frontend owner registry keyed by the C-side PolyBuffer* address value.
 # This is intentionally keyed by the retired/imported residency object, not by
@@ -447,6 +448,11 @@ class Tensor:
         """Create a tensor from a list, numpy array, or scalar."""
         from . import _default_ctx
         from .device import Device
+        if isinstance(data, UOp) and _uop is None:
+            _uop = data
+            data = None
+            if _ctx is None:
+                _ctx = _uop.ctx
         self._ctx = _ctx or _default_ctx
         self._device = Device.canonicalize(_device if _device is not None else device)
         self._tensor = _tensor
@@ -459,7 +465,16 @@ class Tensor:
             # Accept either a UOp instance or a raw ctypes pointer from FFI.
             current_uop = _uop if isinstance(_uop, UOp) else UOp(self._ctx, _uop)
             self._data = _data
-            self._dtype_str = _dtype or 'float32'
+            if _dtype is not None:
+                self._dtype_str = _dtype
+            elif dtype is not None:
+                self._dtype_str = _dtype_name(dtype)
+            elif current_uop.raw is not None:
+                self._dtype_str = _dtype_name_from_id(
+                    int(_ffi._lib.poly_uop_dtype_id(self._ctx, current_uop.raw))
+                )
+            else:
+                self._dtype_str = 'float32'
         else:
             # User construction from data
             _ensure_frontend_buffer_release_registered(self._ctx)
@@ -732,8 +747,6 @@ class Tensor:
         SINK body is wrapped in CALL, and every source tensor is returned as
         `AFTER(source, call)`.
         """
-        if grad_fxn is not None:
-            raise NotImplementedError('custom_kernel grad_fxn is not implemented yet')
         srcs = (self,) + tuple(lst)
         for t in srcs:
             if not isinstance(t, Tensor):
@@ -750,8 +763,10 @@ class Tensor:
             raise TypeError('custom_kernel fxn must return a UOp SINK body')
         call = body.call(*[t._graph_uop for t in contig])
         outs = []
+        afters = []
         for t in contig:
             logical = t._graph_uop.after(call)
+            afters.append(logical)
             out = Tensor(
                 _ctx=t._ctx,
                 _tensor=Tensor._core_create_with_roots_for(
@@ -763,6 +778,14 @@ class Tensor:
             if t._requires_grad:
                 out.requires_grad = True
             outs.append(out)
+        if grad_fxn is not None:
+            _custom_kernel_grad_records.append({
+                'ctx': _ptr_value(self._ctx),
+                'call': call,
+                'args': tuple(t._graph_uop for t in contig),
+                'afters': tuple(afters),
+                'grad_fxn': grad_fxn,
+            })
         return outs
 
     # --- Realization ---
@@ -777,6 +800,7 @@ class Tensor:
         stale_refs = []
         root = self._graph_uop
         ctx_key = _ptr_value(self._ctx)
+        seen = set()
         for tref in list(all_tensors):
             t = tref()
             if t is None:
@@ -786,10 +810,79 @@ class Tensor:
                 continue
             target = t._graph_uop
             if target and _ffi._lib.poly_uop_reachable(self._ctx, root, target):
+                key = _ptr_value(target)
+                if key in seen:
+                    continue
+                seen.add(key)
                 targets.append(t)
         for tref in stale_refs:
             all_tensors.pop(tref, None)
         return targets
+
+    @staticmethod
+    def _grad_many_raw(ctx, root, initial_grad, wrts):
+        wrts = tuple(_uop_raw(w) for w in wrts if _uop_raw(w))
+        if not wrts:
+            return ()
+        wrt_arr = (_ffi._ptr * len(wrts))(*wrts)
+        out_arr = (_ffi._ptr * len(wrts))()
+        rc = _ffi._lib.poly_grad_many(ctx, _uop_raw(root), _uop_raw(initial_grad), wrt_arr, len(wrts), out_arr)
+        if rc != 0:
+            raise RuntimeError('poly_grad_many failed')
+        return tuple(out_arr)
+
+    @staticmethod
+    def _substitute_uops(ctx, root, from_uops, to_uops):
+        pairs = []
+        for f, t in zip(from_uops, to_uops):
+            fr = _uop_raw(f)
+            tr = _uop_raw(t)
+            if fr and tr and fr != tr:
+                pairs.append((fr, tr))
+        if not pairs:
+            return _uop_raw(root)
+        from_arr = (_ffi._ptr * len(pairs))(*[p[0] for p in pairs])
+        to_arr = (_ffi._ptr * len(pairs))(*[p[1] for p in pairs])
+        return _ffi._lib.poly_uop_substitute(ctx, _uop_raw(root), from_arr, to_arr, len(pairs))
+
+    @staticmethod
+    def _custom_grad_records_for(ctx, root):
+        root_raw = _uop_raw(root)
+        if not root_raw:
+            return []
+        ctx_key = _ptr_value(ctx)
+        out = []
+        for rec in list(_custom_kernel_grad_records):
+            if rec.get('ctx') != ctx_key:
+                continue
+            active = []
+            for i, after in enumerate(rec['afters']):
+                if _ffi._lib.poly_uop_reachable(ctx, root_raw, _uop_raw(after)):
+                    active.append(i)
+            if active:
+                out.append((rec, tuple(active)))
+        return out
+
+    @staticmethod
+    def _grad_result_raw(grad):
+        if grad is None:
+            return None
+        if isinstance(grad, Tensor):
+            return _uop_raw(grad._graph_uop)
+        if isinstance(grad, UOp):
+            return grad.raw
+        raw = _uop_raw(grad)
+        return raw if raw else None
+
+    @staticmethod
+    def _accumulate_grad_raw(ctx, current, new_grad):
+        cur = _uop_raw(current)
+        nxt = _uop_raw(new_grad)
+        if not cur:
+            return nxt
+        if not nxt:
+            return cur
+        return _ffi._lib.poly_alu2(ctx, _ffi.OPS['ADD'], cur, nxt)
 
     def assign(self, x):
         """In-place assignment: self's buffer will be overwritten with x's values.
@@ -819,7 +912,8 @@ class Tensor:
         """Update this tensor's existing buffer from host data without changing
         its BUFFER identity. This is the explicit Polygrad update API for
         JIT/replay loops; tinygrad's closest public mutation API is assign()."""
-        buf = self.uop.buffer
+        logical = self.uop_logical or self.uop
+        buf = logical.buffer if logical is not None else None
         if buf is None:
             raise RuntimeError('copy_from requires a tensor backed by a BUFFER UOp')
         np_dt = _to_np_dtype(to_dtype(self._dtype_str))
@@ -831,6 +925,27 @@ class Tensor:
         rc = _ffi._lib.poly_buffer_write(self._ctx, buf.raw, ptr, arr.nbytes)
         if rc != 0:
             raise RuntimeError('poly_buffer_write failed')
+        physical = self.uop_physical
+        physical_raw = physical.raw if physical is not None else None
+        if physical is not None:
+            physical_buf = physical.buffer
+            if physical_buf is None:
+                physical_raw = None
+            elif physical_buf.raw != buf.raw:
+                rc = _ffi._lib.poly_buffer_write(self._ctx, physical_buf.raw, ptr, arr.nbytes)
+                if rc != 0:
+                    raise RuntimeError('poly_buffer_write failed for current device buffer')
+        if logical is not None:
+            rc = _ffi._lib.poly_tensor_update(
+                self._ctx,
+                self._tensor,
+                logical.raw,
+                physical_raw,
+                _POLY_TENSOR_VALUE,
+                _device_id(self._device),
+            )
+            if rc != 0:
+                raise RuntimeError('poly_tensor_update failed during copy_from')
         self._data = None
         return self
 
@@ -2320,16 +2435,73 @@ class Tensor:
         if not targets:
             raise RuntimeError('No leaf tensors require grad')
 
-        wrts = (_ffi._ptr * len(targets))(*[_uop_raw(t._graph_uop) for t in targets])
-        out_grads = (_ffi._ptr * len(targets))()
-        # tinygrad calls gradient(*targets), so every live target is handled by
-        # one reverse pass. Calling poly_grad repeatedly can observe frontend
-        # retargeting side effects between targets.
-        rc = _ffi._lib.poly_grad_many(
-            self._ctx, _uop_raw(self._graph_uop), None, wrts, len(targets), out_grads
-        )
-        if rc != 0:
-            raise RuntimeError('poly_grad_many failed')
+        root = self._graph_uop
+        target_roots = tuple(_uop_raw(t._graph_uop) for t in targets)
+        custom_records = Tensor._custom_grad_records_for(self._ctx, root)
+        if custom_records:
+            from_uops = []
+            to_uops = []
+            for rec, _active in custom_records:
+                from_uops.extend(rec['afters'])
+                to_uops.extend(rec['args'])
+            detached_root = Tensor._substitute_uops(self._ctx, root, from_uops, to_uops)
+
+            temp_wrts = list(target_roots)
+            seen = set(temp_wrts)
+            active_by_call = []
+            for rec, active in custom_records:
+                active_roots = []
+                for idx in active:
+                    arg_raw = _uop_raw(rec['args'][idx])
+                    active_roots.append(arg_raw)
+                    if arg_raw not in seen:
+                        seen.add(arg_raw)
+                        temp_wrts.append(arg_raw)
+                active_by_call.append((rec, active, tuple(active_roots)))
+
+            temp_grads = Tensor._grad_many_raw(self._ctx, detached_root, None, temp_wrts)
+            grad_by_root = dict(zip(temp_wrts, temp_grads))
+            target_grad_roots = {
+                target_roots[i]: grad_by_root.get(target_roots[i])
+                for i in range(len(targets))
+            }
+
+            for rec, _active, active_roots in active_by_call:
+                upstreams = [
+                    UOp(self._ctx, grad_by_root.get(arg_raw))
+                    for arg_raw in active_roots
+                    if grad_by_root.get(arg_raw)
+                ]
+                if not upstreams:
+                    continue
+                call = UOp(self._ctx, _uop_raw(rec['call']))
+                if len(upstreams) > 1:
+                    returned = rec['grad_fxn'](*upstreams, call=call)
+                else:
+                    returned = rec['grad_fxn'](upstreams[0], call)
+                if returned is None:
+                    continue
+                if isinstance(returned, (Tensor, UOp)):
+                    returned = (returned,)
+                if len(returned) != len(rec['args']):
+                    raise RuntimeError(
+                        f"custom_kernel grad_fxn returned {len(returned)} grads, expected {len(rec['args'])}"
+                    )
+                for arg, arg_grad in zip(rec['args'], returned):
+                    arg_grad_raw = Tensor._grad_result_raw(arg_grad)
+                    if not arg_grad_raw:
+                        continue
+                    propagated = Tensor._grad_many_raw(self._ctx, _uop_raw(arg), arg_grad_raw, target_roots)
+                    for target_raw, contrib in zip(target_roots, propagated):
+                        target_grad_roots[target_raw] = Tensor._accumulate_grad_raw(
+                            self._ctx, target_grad_roots.get(target_raw), contrib
+                        )
+            out_grads = tuple(target_grad_roots.get(raw) for raw in target_roots)
+        else:
+            # tinygrad calls gradient(*targets), so every live target is handled by
+            # one reverse pass. Calling poly_grad repeatedly can observe frontend
+            # retargeting side effects between targets.
+            out_grads = Tensor._grad_many_raw(self._ctx, root, None, target_roots)
 
         for target, grad_uop in zip(targets, out_grads):
             if not grad_uop:

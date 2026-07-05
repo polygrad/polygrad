@@ -225,6 +225,8 @@ static bool poly_transform_to_call_append_store(PolyTransformToCallCtx *tctx, Po
 
 static bool poly_transform_to_call_append_call(PolyTransformToCallCtx *tctx, PolyUOp *call) {
   if (!tctx || !call || call->op != POLY_OP_CALL) return false;
+  for (int i = 0; i < tctx->n_calls; i++)
+    if (tctx->calls[i] == call) return true;
   if (tctx->n_calls >= tctx->calls_cap) {
     int new_cap = tctx->calls_cap ? tctx->calls_cap * 2 : 4;
     PolyUOp **new_calls = realloc(tctx->calls, (size_t)new_cap * sizeof(PolyUOp *));
@@ -234,6 +236,50 @@ static bool poly_transform_to_call_append_call(PolyTransformToCallCtx *tctx, Pol
   }
   tctx->calls[tctx->n_calls++] = call;
   return true;
+}
+
+static bool poly_transform_to_call_contains_uop(PolyUOp *u, PolyUOp *needle, PolyMap *visited) {
+  if (!u || !needle || !visited) return false;
+  if (u == needle) return true;
+  if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) return false;
+  poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
+  for (int i = 0; i < u->n_src; i++)
+    if (poly_transform_to_call_contains_uop(u->src[i], needle, visited)) return true;
+  return false;
+}
+
+static bool poly_transform_to_call_arg_depends_on_call(PolyUOp *arg, PolyUOp *producer) {
+  PolyMap *visited = poly_map_new(64);
+  if (!visited) return false;
+  bool ret = poly_transform_to_call_contains_uop(arg, producer, visited);
+  poly_map_destroy(visited);
+  return ret;
+}
+
+static bool poly_transform_to_call_call_depends_on_call(PolyUOp *consumer, PolyUOp *producer) {
+  if (!consumer || consumer->op != POLY_OP_CALL || !producer || producer->op != POLY_OP_CALL)
+    return false;
+  for (int i = 1; i < consumer->n_src; i++)
+    if (poly_transform_to_call_arg_depends_on_call(consumer->src[i], producer)) return true;
+  return false;
+}
+
+static void poly_transform_to_call_order_calls(PolyTransformToCallCtx *tctx) {
+  if (!tctx || tctx->n_calls <= 1) return;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (int i = 0; i < tctx->n_calls; i++) {
+      for (int j = i + 1; j < tctx->n_calls; j++) {
+        if (!poly_transform_to_call_call_depends_on_call(tctx->calls[i], tctx->calls[j]))
+          continue;
+        PolyUOp *tmp = tctx->calls[i];
+        tctx->calls[i] = tctx->calls[j];
+        tctx->calls[j] = tmp;
+        changed = true;
+      }
+    }
+  }
 }
 
 static void poly_transform_to_call_ctx_free(PolyTransformToCallCtx *tctx) {
@@ -275,10 +321,45 @@ static bool poly_transform_to_call_after_store_assign(
 static bool poly_transform_to_call_collect_after_stores(
     PolyTransformToCallCtx *tctx,
     PolyUOp *effect
+);
+
+static bool poly_transform_to_call_collect_arg_effects(
+    PolyTransformToCallCtx *tctx,
+    PolyUOp *u,
+    PolyMap *visited
+) {
+  if (!tctx || !u || !visited) return false;
+  if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) return true;
+  poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
+
+  if (u->op == POLY_OP_CALL)
+    return poly_transform_to_call_collect_after_stores(tctx, u);
+
+  if (u->op == POLY_OP_AFTER && u->n_src >= 2 && poly_uop_has_buffer_identity(u->src[0])) {
+    for (int i = 1; i < u->n_src; i++)
+      if (!poly_transform_to_call_collect_after_stores(tctx, u->src[i])) return false;
+  }
+
+  for (int i = 0; i < u->n_src; i++)
+    if (!poly_transform_to_call_collect_arg_effects(tctx, u->src[i], visited)) return false;
+  return true;
+}
+
+static bool poly_transform_to_call_collect_after_stores(
+    PolyTransformToCallCtx *tctx,
+    PolyUOp *effect
 ) {
   if (!tctx || !effect) return false;
   if (effect->op == POLY_OP_STORE) return poly_transform_to_call_append_store(tctx, effect);
-  if (effect->op == POLY_OP_CALL) return poly_transform_to_call_append_call(tctx, effect);
+  if (effect->op == POLY_OP_CALL) {
+    PolyMap *visited = poly_map_new(64);
+    if (!visited) return false;
+    bool ok = true;
+    for (int i = 1; i < effect->n_src && ok; i++)
+      ok = poly_transform_to_call_collect_arg_effects(tctx, effect->src[i], visited);
+    poly_map_destroy(visited);
+    return ok && poly_transform_to_call_append_call(tctx, effect);
+  }
   if (effect->op != POLY_OP_AFTER) return true;
 
   /* View assign follows tinygrad's nested shape:
@@ -299,6 +380,12 @@ static bool poly_transform_to_call_collect_pending_effects(
   if (!tctx || !u || !visited) return false;
   if (poly_map_get(visited, poly_ptr_hash(u), u, poly_ptr_eq)) return true;
   poly_map_set(visited, poly_ptr_hash(u), u, u, poly_ptr_eq);
+
+  /* CALL bodies are opaque schedule items. Their internal STORE/AFTER nodes are
+   * owned by the CALL itself and must not be re-collected into the caller's
+   * materialization sink. This mirrors tinygrad UOp traversal with
+   * enter_calls=false and matches strip_pending_after below. */
+  if (u->op == POLY_OP_CALL) return true;
 
   /* A requested view can contain the assign boundary below its root, e.g.
    * SHRINK(AFTER(BUFFER, AFTER(SHRINK(BUFFER), STORE(...)))).
@@ -352,6 +439,31 @@ static PolyUOp *poly_transform_to_call_strip_pending_after(
 
   PolyUOp *ret = changed ? poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : u;
   if (new_src != stack_src) free(new_src);
+  return ret;
+}
+
+static PolyUOp *poly_transform_to_call_normalize_call_args(PolyCtx *ctx, PolyUOp *call) {
+  if (!ctx || !call || call->op != POLY_OP_CALL || call->n_src < 1) return call;
+  PolyUOp **new_src = malloc((size_t)call->n_src * sizeof(*new_src));
+  if (!new_src) return NULL;
+  new_src[0] = call->src[0];
+  bool changed = false;
+  for (int i = 1; i < call->n_src; i++) {
+    PolyMap *visited = poly_map_new(64);
+    if (!visited) {
+      free(new_src);
+      return NULL;
+    }
+    new_src[i] = poly_transform_to_call_strip_pending_after(ctx, call->src[i], visited);
+    poly_map_destroy(visited);
+    if (!new_src[i]) {
+      free(new_src);
+      return NULL;
+    }
+    if (new_src[i] != call->src[i]) changed = true;
+  }
+  PolyUOp *ret = changed ? poly_uop(ctx, POLY_OP_CALL, POLY_VOID, new_src, call->n_src, call->arg) : call;
+  free(new_src);
   return ret;
 }
 
@@ -721,6 +833,15 @@ static PolyUOp *poly_transform_to_call_ex(PolyCtx *ctx, PolyUOp **uops, int n, P
   if (tctx.n_calls == 0) {
     poly_transform_to_call_ctx_free(&tctx);
     return store_call;
+  }
+
+  poly_transform_to_call_order_calls(&tctx);
+  for (int i = 0; i < tctx.n_calls; i++) {
+    tctx.calls[i] = poly_transform_to_call_normalize_call_args(ctx, tctx.calls[i]);
+    if (!tctx.calls[i]) {
+      poly_transform_to_call_ctx_free(&tctx);
+      return NULL;
+    }
   }
 
   int n_linear = tctx.n_calls + (store_call ? 1 : 0);

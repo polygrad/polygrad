@@ -8,8 +8,42 @@ change when `Tensor.uop` is migrated to hold a `UOp` instance.
 """
 
 from .. import _ffi
+from enum import IntEnum
 
-POLY_AXIS_LOOP = 3
+
+class AxisType(IntEnum):
+    GLOBAL = 0
+    WARP = 1
+    LOCAL = 2
+    LOOP = 3
+    GROUP_REDUCE = 4
+    REDUCE = 5
+    UPCAST = 6
+    UNROLL = 7
+    THREAD = 8
+    PLACEHOLDER = 9
+
+
+POLY_AXIS_GLOBAL = int(AxisType.GLOBAL)
+POLY_AXIS_WARP = int(AxisType.WARP)
+POLY_AXIS_LOCAL = int(AxisType.LOCAL)
+POLY_AXIS_LOOP = int(AxisType.LOOP)
+POLY_AXIS_GROUP_REDUCE = int(AxisType.GROUP_REDUCE)
+POLY_AXIS_REDUCE = int(AxisType.REDUCE)
+POLY_AXIS_UPCAST = int(AxisType.UPCAST)
+POLY_AXIS_UNROLL = int(AxisType.UNROLL)
+POLY_AXIS_THREAD = int(AxisType.THREAD)
+POLY_AXIS_PLACEHOLDER = int(AxisType.PLACEHOLDER)
+
+
+class KernelInfo:
+    """Minimal tinygrad KernelInfo carrier for custom-kernel SINK metadata."""
+
+    __slots__ = ('name', 'opts_to_apply')
+
+    def __init__(self, name='test', opts_to_apply=None):
+        self.name = name
+        self.opts_to_apply = opts_to_apply
 
 
 class UOp:
@@ -51,6 +85,13 @@ class UOp:
         name = _ffi._lib.poly_op_name(self.op)
         return name.decode('utf-8') if name else 'UNKNOWN'
 
+    @property
+    def src(self):
+        if self.raw is None:
+            return ()
+        n = _ffi._lib.poly_uop_n_src(self.raw)
+        return tuple(UOp(self.ctx, _ffi._lib.poly_uop_src(self.raw, i)) for i in range(n))
+
     # --- Factories ---
 
     @staticmethod
@@ -87,7 +128,7 @@ class UOp:
         return UOp(uop.ctx, raw) if raw else None
 
     @staticmethod
-    def range(ctx, bound, axis_id=0, axis_type=POLY_AXIS_LOOP):
+    def range(ctx, bound, axis_id=0, axis_type=AxisType.LOOP):
         raw = _ffi._lib.poly_uop_range(ctx, int(bound), int(axis_id), int(axis_type))
         return UOp(ctx, raw) if raw else None
 
@@ -130,15 +171,41 @@ class UOp:
         raw = _ffi._lib.poly_uop_store(self.ctx, self.raw, value.raw)
         return UOp(self.ctx, raw) if raw else None
 
+    def set(self, value, end=()):
+        """Mirrors tinygrad's UOp.set: store value and return AFTER(base, effect)."""
+        value = self._coerce(value)
+        if isinstance(end, UOp):
+            ranges = (end,)
+        elif end is None:
+            ranges = ()
+        else:
+            ranges = tuple(end)
+        arr = (_ffi._ptr * len(ranges))(*[r.raw if isinstance(r, UOp) else r for r in ranges]) if ranges else None
+        raw = _ffi._lib.poly_uop_set(self.ctx, self.raw, value.raw, arr, len(ranges))
+        return UOp(self.ctx, raw) if raw else None
+
+    def group(self, *srcs):
+        all_srcs = (self,) + tuple(s for s in srcs if s is not None)
+        arr = (_ffi._ptr * len(all_srcs))(*[s.raw if isinstance(s, UOp) else s for s in all_srcs])
+        raw = _ffi._lib.poly_uop_group(self.ctx, arr, len(all_srcs))
+        return UOp(self.ctx, raw) if raw else None
+
     def end(self, *ranges):
         arr = (_ffi._ptr * len(ranges))(*[r.raw if isinstance(r, UOp) else r for r in ranges]) if ranges else None
         raw = _ffi._lib.poly_uop_end(self.ctx, self.raw, arr, len(ranges))
         return UOp(self.ctx, raw) if raw else None
 
-    def sink(self, *srcs):
+    def sink(self, *srcs, arg=None):
         all_srcs = (self,) + tuple(s for s in srcs if s is not None)
         arr = (_ffi._ptr * len(all_srcs))(*[s.raw if isinstance(s, UOp) else s for s in all_srcs])
-        raw = _ffi._lib.poly_uop_sink(self.ctx, arr, len(all_srcs))
+        if isinstance(arg, KernelInfo):
+            name = arg.name.encode('utf-8') if arg.name else None
+            optimize = 0 if arg.opts_to_apply is not None and len(arg.opts_to_apply) == 0 else 1
+            raw = _ffi._lib.poly_uop_sink_ex(self.ctx, arr, len(all_srcs), name, optimize)
+        elif arg is None:
+            raw = _ffi._lib.poly_uop_sink(self.ctx, arr, len(all_srcs))
+        else:
+            raise TypeError('sink arg must be KernelInfo or None')
         return UOp(self.ctx, raw) if raw else None
 
     def call(self, *srcs):
@@ -165,9 +232,29 @@ class UOp:
             return UOp(self.ctx, _ffi._lib.poly_const_float(self.ctx, value))
         raise TypeError(f'cannot convert {type(value).__name__} to UOp')
 
+    @staticmethod
+    def const(ctx, value):
+        if isinstance(value, UOp):
+            return value
+        if isinstance(value, int):
+            return UOp(ctx, _ffi._lib.poly_const_int(ctx, value))
+        if isinstance(value, float):
+            return UOp(ctx, _ffi._lib.poly_const_float(ctx, value))
+        raise TypeError(f'cannot convert {type(value).__name__} to UOp')
+
+    def _alu1(self, op_name):
+        raw = _ffi._lib.poly_alu1(self.ctx, _ffi.OPS[op_name], self.raw)
+        return UOp(self.ctx, raw) if raw else None
+
     def _alu2(self, op_name, other):
         other = self._coerce(other)
         raw = _ffi._lib.poly_alu2(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
+        return UOp(self.ctx, raw) if raw else None
+
+    def _alu3(self, op_name, b, c):
+        b = self._coerce(b)
+        c = self._coerce(c)
+        raw = _ffi._lib.poly_alu3(self.ctx, _ffi.OPS[op_name], self.raw, b.raw, c.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def __add__(self, other):
@@ -190,6 +277,97 @@ class UOp:
 
     def __truediv__(self, other):
         return self._alu2('FDIV', other)
+
+    def __rtruediv__(self, other):
+        return self._coerce(other)._alu2('FDIV', self)
+
+    def __neg__(self):
+        return self._alu1('NEG')
+
+    def cdiv(self, other):
+        return self._alu2('CDIV', other)
+
+    def mod(self, other):
+        return self._alu2('CMOD', other)
+
+    def maximum(self, other):
+        return self._alu2('MAX', other)
+
+    def max(self, other):
+        return self.maximum(other)
+
+    def bitwise_and(self, other):
+        return self._alu2('AND', other)
+
+    def bitwise_or(self, other):
+        return self._alu2('OR', other)
+
+    def bitwise_xor(self, other):
+        return self._alu2('XOR', other)
+
+    def shl(self, other):
+        return self._alu2('SHL', other)
+
+    def shr(self, other):
+        return self._alu2('SHR', other)
+
+    def pow(self, other):
+        return self._alu2('POW', other)
+
+    def lt(self, other):
+        return self._alu2('CMPLT', other)
+
+    def cmplt(self, other):
+        return self.lt(other)
+
+    def eq(self, other):
+        return self._alu2('CMPEQ', other)
+
+    def cmpeq(self, other):
+        return self.eq(other)
+
+    def ne(self, other):
+        return self._alu2('CMPNE', other)
+
+    def cmpne(self, other):
+        return self.ne(other)
+
+    def sqrt(self):
+        return self._alu1('SQRT')
+
+    def exp2(self):
+        return self._alu1('EXP2')
+
+    def log2(self):
+        return self._alu1('LOG2')
+
+    def sin(self):
+        return self._alu1('SIN')
+
+    def reciprocal(self):
+        return self._alu1('RECIPROCAL')
+
+    def trunc(self):
+        return self._alu1('TRUNC')
+
+    def where(self, yes, no):
+        return self._alu3('WHERE', yes, no)
+
+    def mulacc(self, mul, acc):
+        return self._alu3('MULACC', mul, acc)
+
+    def reduce(self, *ranges, op='ADD'):
+        if not isinstance(op, str):
+            raise TypeError('UOp.reduce expects op as a string name')
+        arr = (_ffi._ptr * len(ranges))(*[r.raw if isinstance(r, UOp) else r for r in ranges]) if ranges else None
+        raw = _ffi._lib.poly_uop_reduce(self.ctx, _ffi.OPS[op], self.raw, arr, len(ranges))
+        return UOp(self.ctx, raw) if raw else None
+
+    def sum(self, *ranges):
+        return self.reduce(*ranges, op='ADD')
+
+    def max_reduce(self, *ranges):
+        return self.reduce(*ranges, op='MAX')
 
     # --- Buffer identity ---
 

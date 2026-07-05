@@ -1079,7 +1079,7 @@ static PolyRendererCaps poly_c_direct_call_caps(void) {
 
 PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   PolyRewriteOpts opts = {
-      .optimize = true,
+      .optimize = poly_kernel_optimize_enabled(sink),
       .devectorize = 1,
       .caps = poly_c_direct_call_caps(),
       .device = POLY_DEVICE_CPU,
@@ -1099,7 +1099,7 @@ PolyUOp **poly_linearize_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts, i
 }
 
 PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
-  bool opt = poly_getenv_flag("POLY_OPTIMIZE");
+  bool opt = poly_getenv_flag("POLY_OPTIMIZE") && poly_kernel_optimize_enabled(sink);
   /* Default: OPTIMIZE=1 implies DEVECTORIZE=1 (vec load/store, scalar ALU — safe).
    * DEVECTORIZE=0 (full vec ALU) is opt-in only. */
   int devec = poly_getenv_int("POLY_DEVECTORIZE", opt ? 1 : 0);
@@ -1836,7 +1836,12 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       bool is_lane_load =
           idx_uop && idx_uop->n_src >= 1 && !poly_is_program_memory_base(idx_uop->src[0]);
       PolyUOp *gate_uop =
-          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+          (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+              ? u->src[2]
+              : ((idx_uop && idx_uop->n_src >= 3 &&
+                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
+                     ? idx_uop->src[2]
+                     : NULL);
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = smap_get(&names, gate_uop);
         char *alt_s = smap_get(&names, u->src[1]);

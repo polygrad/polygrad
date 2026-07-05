@@ -748,7 +748,12 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       wsb_printf(&decls, "  var %s: %s;\n", name, tn);
       /* Gated load: select(alt, load, gate) -- tinygrad WGSL parity */
       PolyUOp *gate_uop =
-          (u->n_src >= 3) ? u->src[2] : ((idx_uop && idx_uop->n_src >= 3) ? idx_uop->src[2] : NULL);
+          (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+              ? u->src[2]
+              : ((idx_uop && idx_uop->n_src >= 3 &&
+                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
+                     ? idx_uop->src[2]
+                     : NULL);
       if (gate_uop && u->n_src >= 2) {
         PolyUOp *alt_uop = u->src[1];
         if (u->dtype.count == 1 &&
@@ -858,7 +863,9 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
           u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
           (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
            u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
-      bool gated_store = (store_idx && store_idx->n_src >= 3 && !store_to_local);
+      bool gated_store =
+          (store_idx && store_idx->n_src >= 3 && !store_to_local &&
+           poly_dtype_is_bool(poly_dtype_scalar(store_idx->src[2]->dtype)));
       if (gated_store) {
         char *gate_s = wsm_get(&names, store_idx->src[2]);
         for (int d = 0; d < depth; d++)
@@ -1114,7 +1121,7 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
  *   - extra_matcher: shift u32 normalization, bool CMPLT/XOR */
 PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
-      .optimize = true,
+      .optimize = poly_kernel_optimize_enabled(sink),
       .devectorize = 1, /* supports_float4=false: full devectorize */
       .beam_width = 0,
       .caps =

@@ -306,17 +306,29 @@ def _declare_signatures(lib):
     lib.poly_uop_store.restype = _ptr
     lib.poly_uop_store.argtypes = [_ptr, _ptr, _ptr]
 
+    lib.poly_uop_set.restype = _ptr
+    lib.poly_uop_set.argtypes = [_ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
+    lib.poly_uop_group.restype = _ptr
+    lib.poly_uop_group.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
+
     lib.poly_uop_end.restype = _ptr
     lib.poly_uop_end.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_uop_sink.restype = _ptr
     lib.poly_uop_sink.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
+    lib.poly_uop_sink_ex.restype = _ptr
+    lib.poly_uop_sink_ex.argtypes = [_ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+
     lib.poly_uop_call.restype = _ptr
     lib.poly_uop_call.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_uop_after.restype = _ptr
     lib.poly_uop_after.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_uop_reduce.restype = _ptr
+    lib.poly_uop_reduce.argtypes = [_ptr, ctypes.c_int, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_uop_flatten.restype = _ptr
     lib.poly_uop_flatten.argtypes = [_ptr, _ptr]
@@ -556,6 +568,12 @@ def _declare_signatures(lib):
 
     lib.poly_uop_reachable.restype = ctypes.c_bool
     lib.poly_uop_reachable.argtypes = [_ptr, _ptr, _ptr]
+
+    lib.poly_uop_n_src.restype = ctypes.c_int
+    lib.poly_uop_n_src.argtypes = [_ptr]
+
+    lib.poly_uop_src.restype = _ptr
+    lib.poly_uop_src.argtypes = [_ptr, ctypes.c_int]
 
     # --- Side-table buffer API (device.h) ---
     lib.poly_buffer_set.restype = None

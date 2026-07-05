@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 13
+#define POLYGRAD_ABI_VERSION 18
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +32,8 @@ PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);
 int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
+int poly_uop_n_src(PolyUOp *u);
+PolyUOp *poly_uop_src(PolyUOp *u, int idx);
 
 /* FFI-safe UOp construction helpers used by tinygrad-style custom kernels.
  * These only build UOps; execution still flows through normal CALL scheduling. */
@@ -40,10 +42,14 @@ PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_t
 PolyUOp *poly_uop_index(PolyCtx *ctx, PolyUOp *base, PolyUOp **indices, int n_indices, int keep_ptr);
 PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr);
 PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value);
+PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges);
+PolyUOp *poly_uop_group(PolyCtx *ctx, PolyUOp **srcs, int n_src);
 PolyUOp *poly_uop_end(PolyCtx *ctx, PolyUOp *body, PolyUOp **ranges, int n_ranges);
 PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src);
+PolyUOp *poly_uop_sink_ex(PolyCtx *ctx, PolyUOp **srcs, int n_src, const char *name, int optimize);
 PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args);
 PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect);
+PolyUOp *poly_uop_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *expr, PolyUOp **ranges, int n_ranges);
 PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u);
 int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u);
 

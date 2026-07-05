@@ -2263,7 +2263,12 @@ static void build_code_scalar(
         /* Gated load: LOAD(INDEX(buf, idx), alt, gate) in tinygrad final IR.
          * Keep accepting INDEX(..., gate) during transition. */
         PolyUOp *gate_uop =
-            (u->n_src >= 3) ? u->src[2] : ((ld_idx && ld_idx->n_src >= 3) ? ld_idx->src[2] : NULL);
+            (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+                ? u->src[2]
+                : ((ld_idx && ld_idx->n_src >= 3 &&
+                    poly_dtype_is_bool(poly_dtype_scalar(ld_idx->src[2]->dtype)))
+                       ? ld_idx->src[2]
+                       : NULL);
         bool gated = gate_uop != NULL;
 
         if (gated) {
@@ -4602,7 +4607,7 @@ uint8_t *poly_render_wasm(PolyUOp **uops, int n, int *size_out, bool use_simd) {
 PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
   if (poly_wasm_can_render_matmul(sink) || poly_wasm_can_render_reduce(sink)) return sink;
   PolyRewriteOpts opts = {
-      .optimize = true,
+      .optimize = poly_kernel_optimize_enabled(sink),
       .devectorize = 1,
       .caps = poly_wasm_renderer_caps_for_sink(ctx, sink),
       .device = POLY_DEVICE_WASM,
@@ -4623,7 +4628,7 @@ PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink) {
    * poly_linearize_wasm(). That pipeline lowers Invalid-carrying pad/triu
    * indexes into gated loads; leaving it off turns invalid indexes into
    * address 0 in the renderer. */
-  bool opt = poly_getenv_flag_default("POLY_OPTIMIZE", true);
+  bool opt = poly_getenv_flag_default("POLY_OPTIMIZE", true) && poly_kernel_optimize_enabled(sink);
   int devec = poly_getenv_int("POLY_DEVECTORIZE", opt ? 1 : 0);
   int beam = poly_getenv_int("POLY_BEAM", 0);
   PolyRewriteOpts opts = {

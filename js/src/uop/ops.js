@@ -10,6 +10,27 @@
  * `ffi` is the core's ffi object (native binding or wasm wrappers).
  */
 
+const AxisType = Object.freeze({
+  GLOBAL: 0,
+  WARP: 1,
+  LOCAL: 2,
+  LOOP: 3,
+  GROUP_REDUCE: 4,
+  REDUCE: 5,
+  UPCAST: 6,
+  UNROLL: 7,
+  THREAD: 8,
+  PLACEHOLDER: 9
+})
+
+class KernelInfo {
+  constructor(opts = {}) {
+    if (typeof opts === 'string') opts = { name: opts }
+    this.name = opts.name || 'test'
+    this.opts_to_apply = opts.opts_to_apply === undefined ? null : opts.opts_to_apply
+  }
+}
+
 class UOp {
   constructor(ctx, ffi, raw) {
     this.ctx = ctx
@@ -28,6 +49,17 @@ class UOp {
   get op() {
     if (!this.raw || !this.ffi.poly_uop_op) return 0
     return Number(this.ffi.poly_uop_op(this.raw))
+  }
+
+  get src() {
+    if (!this.raw || !this.ffi.poly_uop_n_src || !this.ffi.poly_uop_src) return []
+    const n = Number(this.ffi.poly_uop_n_src(this.raw))
+    const out = []
+    for (let i = 0; i < n; i++) {
+      const raw = this.ffi.poly_uop_src(this.raw, i)
+      out.push(new UOp(this.ctx, this.ffi, raw))
+    }
+    return out
   }
 
   hasBufferIdentity() {
@@ -62,7 +94,7 @@ class UOp {
     return raw ? new UOp(uop.ctx, uop.ffi, raw) : null
   }
 
-  static range(ctx, ffi, bound, axisId = 0, axisType = 3) {
+  static range(ctx, ffi, bound, axisId = 0, axisType = AxisType.LOOP) {
     const raw = ffi.poly_uop_range(ctx, Number(bound), Number(axisId), Number(axisType))
     return raw ? new UOp(ctx, ffi, raw) : null
   }
@@ -100,13 +132,37 @@ class UOp {
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
+  set(value, ...ranges) {
+    if (ranges.length === 1 && Array.isArray(ranges[0])) ranges = ranges[0]
+    const v = this._coerce(value)
+    const raw = this.ffi.poly_uop_set(this.ctx, this.raw, v.raw, ranges.map(rawUop))
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  group(...srcs) {
+    const raw = this.ffi.poly_uop_group(this.ctx, [this, ...srcs].filter(Boolean).map(rawUop))
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
   end(...ranges) {
     const raw = this.ffi.poly_uop_end(this.ctx, this.raw, ranges.map(rawUop))
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
   sink(...srcs) {
-    const raw = this.ffi.poly_uop_sink(this.ctx, [this, ...srcs].filter(Boolean).map(rawUop))
+    let arg = null
+    if (srcs.length && srcs[srcs.length - 1] instanceof KernelInfo) {
+      arg = srcs.pop()
+    } else if (srcs.length && srcs[srcs.length - 1] && srcs[srcs.length - 1].arg instanceof KernelInfo) {
+      arg = srcs.pop().arg
+    }
+    const rawSrcs = [this, ...srcs].filter(Boolean).map(rawUop)
+    const raw = arg
+      ? this.ffi.poly_uop_sink_ex(
+        this.ctx, rawSrcs, arg.name || null,
+        !(Array.isArray(arg.opts_to_apply) && arg.opts_to_apply.length === 0)
+      )
+      : this.ffi.poly_uop_sink(this.ctx, rawSrcs)
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
@@ -132,12 +188,28 @@ class UOp {
     throw new TypeError(`cannot convert ${typeof value} to UOp`)
   }
 
-  _alu2(name, other) {
+  _op(name) {
     const ops = this.ffi.__polygradOps || {}
     const op = ops[name]
     if (op === undefined) throw new Error(`polygrad: missing op ${name}`)
+    return op
+  }
+
+  _alu1(name) {
+    const raw = this.ffi.poly_alu1(this.ctx, this._op(name), this.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  _alu2(name, other) {
     const b = this._coerce(other)
-    const raw = this.ffi.poly_alu2(this.ctx, op, this.raw, b.raw)
+    const raw = this.ffi.poly_alu2(this.ctx, this._op(name), this.raw, b.raw)
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  _alu3(name, b, c) {
+    b = this._coerce(b)
+    c = this._coerce(c)
+    const raw = this.ffi.poly_alu3(this.ctx, this._op(name), this.raw, b.raw, c.raw)
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
@@ -145,6 +217,39 @@ class UOp {
   sub(other) { return this._alu2('SUB', other) }
   mul(other) { return this._alu2('MUL', other) }
   div(other) { return this._alu2('FDIV', other) }
+  cdiv(other) { return this._alu2('CDIV', other) }
+  mod(other) { return this._alu2('CMOD', other) }
+  max(other) { return this._alu2('MAX', other) }
+  and(other) { return this._alu2('AND', other) }
+  or(other) { return this._alu2('OR', other) }
+  xor(other) { return this._alu2('XOR', other) }
+  shl(other) { return this._alu2('SHL', other) }
+  shr(other) { return this._alu2('SHR', other) }
+  pow(other) { return this._alu2('POW', other) }
+  lt(other) { return this._alu2('CMPLT', other) }
+  eq(other) { return this._alu2('CMPEQ', other) }
+  ne(other) { return this._alu2('CMPNE', other) }
+  cmplt(other) { return this.lt(other) }
+  cmpeq(other) { return this.eq(other) }
+  cmpne(other) { return this.ne(other) }
+  neg() { return this._alu1('NEG') }
+  sqrt() { return this._alu1('SQRT') }
+  exp2() { return this._alu1('EXP2') }
+  log2() { return this._alu1('LOG2') }
+  sin() { return this._alu1('SIN') }
+  reciprocal() { return this._alu1('RECIPROCAL') }
+  trunc() { return this._alu1('TRUNC') }
+  where(yes, no) { return this._alu3('WHERE', yes, no) }
+  mulacc(mul, acc) { return this._alu3('MULACC', mul, acc) }
+
+  reduce(op, ...ranges) {
+    if (typeof op !== 'string') throw new TypeError('UOp.reduce expects an op name')
+    const raw = this.ffi.poly_uop_reduce(this.ctx, this._op(op), this.raw, ranges.map(rawUop))
+    return raw ? new UOp(this.ctx, this.ffi, raw) : null
+  }
+
+  sum(...ranges) { return this.reduce('ADD', ...ranges) }
+  maxReduce(...ranges) { return this.reduce('MAX', ...ranges) }
 }
 
 function rawUop(value) {
@@ -166,9 +271,16 @@ function createBoundUopNamespace(runtime) {
 
   return {
     UOp,
+    AxisType,
+    KernelInfo,
     wrap,
-    range(bound, axisId = 0, axisType = 3) {
+    range(bound, axisId = 0, axisType = AxisType.LOOP) {
       return UOp.range(ctx, ffi, bound, axisId, axisType)
+    },
+    constant(value) {
+      if (Number.isInteger(value)) return new UOp(ctx, ffi, ffi.poly_const_int(ctx, value))
+      if (typeof value === 'number') return new UOp(ctx, ffi, ffi.poly_const_float(ctx, value))
+      throw new TypeError(`cannot convert ${typeof value} to UOp`)
     },
     placeholderLike(value, slot = 0) {
       return UOp.placeholderLike(wrap(rawUop(value)), slot)
@@ -199,4 +311,7 @@ function createBoundUopNamespace(runtime) {
   }
 }
 
-module.exports = { UOp, createBoundUopNamespace }
+UOp.AxisType = AxisType
+UOp.KernelInfo = KernelInfo
+
+module.exports = { UOp, AxisType, KernelInfo, createBoundUopNamespace }

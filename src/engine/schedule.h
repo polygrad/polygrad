@@ -90,6 +90,7 @@ typedef struct {
 
 struct PolyProgramInfo {
   const char *name;
+  bool optimize;
 
   int global_size[3];
   int local_size[3];
