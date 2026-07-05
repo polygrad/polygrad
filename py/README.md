@@ -2,9 +2,13 @@
 
 Python bindings for Polygrad, a C11 port of tinygrad's compiler core.
 
-The Python frontend exposes a lazy Tensor API with autograd, JIT
-capture/replay, neural network layers, structured linalg helpers, and model
-loading utilities.
+The Python frontend exposes lazy tensors, autograd, JIT capture/replay, neural
+network layers, structured linalg helpers, model loading utilities, and access
+to the same C runtime used by Node, WASM, WebGPU, CUDA, HIP, x86, and the
+interpreter.
+
+Use this package when you want a familiar Python Tensor API but still want the
+compiler/runtime to be embeddable through the shared Polygrad C core.
 
 ## Install
 
@@ -20,7 +24,7 @@ Requirements:
 - A C compiler and Python development headers for source builds
 - `clang` on `PATH` for the CPU runtime
 
-Optional:
+Optional model-loading dependency:
 
 ```bash
 pip install huggingface_hub
@@ -62,26 +66,21 @@ loss.backward()
 print(x.grad.numpy())  # [2.0, 4.0, 6.0]
 ```
 
-Training:
+Linear algebra:
 
 ```python
 from polygrad import Tensor
-from polygrad.nn import Linear, SGD, get_parameters
 
-Tensor.manual_seed(42)
-model = Linear(2, 1)
-opt = SGD(get_parameters(model), lr=0.01)
+A = Tensor([[4.0, 2.0], [2.0, 5.0]])
+b = Tensor([1.0, 3.0])
+x = A.solve(b)
 
-for _ in range(100):
-    opt.zero_grad()
-    x = Tensor([[1.0, 2.0], [3.0, 4.0]])
-    y = Tensor([[5.0], [11.0]])
-    loss = (model(x) - y).square().mean()
-    loss.backward()
-    opt.step()
-
-print(loss.item())
+print(x.numpy())
 ```
+
+Structured linalg methods are portable tensor-composed fallbacks tested against
+NumPy and Torch. They do not add LAPACK or runtime library dependencies.
+Current `lstsq` is solution-only for full-rank tall or square systems.
 
 ## Devices
 
@@ -106,7 +105,58 @@ POLY_DUMP_KERNELS=1
 POLY_BEAM=4
 ```
 
-## JIT
+Polygrad keeps the exportable logical graph separate from the current physical
+placement. Calling `realize()`, `.to("cuda")`, or `.cpu()` changes where values
+live, not what logical graph is exported.
+
+The Python package uses a module-level default C context. Caller-created tensors
+share that context, so package functions should accept and return `Tensor`
+objects rather than copying through NumPy unless readback is required.
+
+## Data Flow
+
+Polygrad tensors are lazy. Use `realize()` to execute and `numpy()` when host
+readback is needed.
+
+```python
+import numpy as np
+from polygrad import Tensor
+
+x = Tensor.empty((4,), dtype="float32")
+x.copy_from(np.array([1, 2, 3, 4], dtype=np.float32))
+
+y = (x * 3 - 1).realize()
+print(y.numpy())
+
+x.update_from(np.array([5, 6, 7, 8], dtype=np.float32))
+print((x + 1).realize().numpy())
+```
+
+Use `copy_from` or `update_from` for repeated loops that should preserve input
+buffer identity for compiled replay.
+
+## Training
+
+```python
+from polygrad import Tensor
+from polygrad.nn import Linear, SGD, get_parameters
+
+Tensor.manual_seed(42)
+model = Linear(2, 1)
+opt = SGD(get_parameters(model), lr=0.01)
+
+for _ in range(100):
+    opt.zero_grad()
+    x = Tensor([[1.0, 2.0], [3.0, 4.0]])
+    y = Tensor([[5.0], [11.0]])
+    loss = (model(x) - y).square().mean()
+    loss.backward()
+    opt.step()
+
+print(loss.item())
+```
+
+## JIT And Compile
 
 `@jit` follows tinygrad's raw Tensor JIT behavior. The first call runs normally,
 the second call captures realized schedules, and later calls replay those
@@ -175,7 +225,23 @@ print(y.numpy())
 This is a UOp `CALL` extension point, not a raw program-launch API. Custom
 backward functions are not implemented yet.
 
-## Tensor API Summary
+## Model Loading
+
+```python
+from polygrad.hf import download_hf, load_hf, generate
+import numpy as np
+
+model_path = download_hf("hf-internal-testing/tiny-random-gpt2")
+inst = load_hf(model_path, max_batch=1, max_seq_len=16)
+
+tokens = np.array([[1, 2, 3, 4]], dtype=np.float32)
+result = generate(inst, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
+```
+
+Supported path today: GPT-2 style configs and F32/F16/BF16 safetensors. Qwen
+family loading is available through the shared C/GGUF paths where configured.
+
+## API Summary
 
 Construction:
 
@@ -205,55 +271,33 @@ Core methods:
 | Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
 | Data | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone`, `custom_kernel` |
 
-Structured linalg methods are portable tensor-composed fallbacks tested against
-NumPy and Torch. They do not add LAPACK or runtime library dependencies.
-Current `lstsq` is solution-only for full-rank tall or square systems.
+## Package Integration
 
-## nn Module
+Python packages should accept caller-created Polygrad tensors and return
+Polygrad tensors:
+
+```python
+from polygrad import Tensor
+
+def normalize(x: Tensor) -> Tensor:
+    mean = x.mean(axis=-1, keepdim=True)
+    scale = (x - mean).square().mean(axis=-1, keepdim=True).sqrt()
+    return (x - mean) / scale
+```
+
+This keeps execution in the caller's Polygrad context and avoids unnecessary
+NumPy readback.
+
+`nn` helpers:
 
 ```python
 from polygrad.nn import Linear, LayerNorm, RMSNorm, Embedding
 from polygrad.nn import SGD, Adam, AdamW, get_parameters
 ```
 
-Layers:
-
-| Class | Description |
-|---|---|
-| `Linear(in_features, out_features, bias=True)` | Fully connected layer |
-| `LayerNorm(shape, eps=1e-5)` | Layer normalization |
-| `RMSNorm(dim, eps=1e-5)` | Root mean square normalization |
-| `Embedding(vocab, dim)` | Token embedding |
-| `Dropout(p=0.5)` | Training-time dropout |
-| `GroupNorm(groups, channels)` | Group normalization |
-| `Conv2d(...)` | Tensor-op 2D convolution |
-| `BatchNorm(...)` | Batch normalization |
-
-Optimizers:
-
-| Class | Description |
-|---|---|
-| `SGD(params, lr=0.01, momentum=0.0, weight_decay=0.0)` | SGD with optional momentum |
-| `Adam(params, lr=0.001, betas=(0.9, 0.999), eps=1e-8)` | Adam |
-| `AdamW(params, lr=0.001, weight_decay=0.01)` | AdamW |
-
-All optimizers provide `step()` and `zero_grad()`.
-
-## HuggingFace Loading
-
-```python
-from polygrad.hf import download_hf, load_hf, generate
-import numpy as np
-
-model_path = download_hf("hf-internal-testing/tiny-random-gpt2")
-inst = load_hf(model_path, max_batch=1, max_seq_len=16)
-
-tokens = np.array([[1, 2, 3, 4]], dtype=np.float32)
-result = generate(inst, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
-```
-
-Supported path today: GPT-2 style configs and F32/F16/BF16 safetensors. Qwen
-family loading is available through the shared C/GGUF paths where configured.
+Layers include `Linear`, `LayerNorm`, `RMSNorm`, `Embedding`, `Dropout`,
+`GroupNorm`, `Conv2d`, and `BatchNorm`. Optimizers include `SGD`, `Adam`, and
+`AdamW`; each provides `step()` and `zero_grad()`.
 
 ## Tests
 

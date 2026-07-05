@@ -4,11 +4,15 @@
   "description": "Tensor computation library with native and WASM backends",
   "type": "commonjs",
   "main": "src/index.js",
+  "browser": "./dist/polygrad.mjs",
   "exports": {
     ".": {
+      "browser": "./dist/polygrad.mjs",
       "require": "./src/index.js",
       "default": "./src/index.js"
-    }
+    },
+    "./dist/polygrad.js": "./dist/polygrad.js",
+    "./dist/polygrad.mjs": "./dist/polygrad.mjs"
   },
   "files": [
     "src/",

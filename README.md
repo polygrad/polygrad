@@ -1,13 +1,101 @@
 # Polygrad
 
-Polygrad is a C11 port of tinygrad's compiler core. It keeps the same broad
-direction as tinygrad: Tensor operations build UOps, rewrites lower the graph,
-the scheduler emits LINEAR/CALL/PROGRAM work, and backends compile or interpret
-the result.
+Polygrad is a portable tensor engine.
 
-The difference is packaging. The compiler and runtime live in a C library, so
-the same core can be used from Python, Node.js, browsers, and other languages
-with a C FFI.
+Write tensor code once, then run the same lazy graph from Python, Node.js, the browser, or native C/C++ applications. The shared C core handles scheduling, compilation, device placement, and execution across CPU, CUDA, HIP, x86, WASM, WebGPU, and interpreter backends.
+
+- [Python guide](py/)
+- [JavaScript guide](js/)
+
+## 30-Second Demo
+
+Python:
+
+```python
+from polygrad import Tensor, jit
+
+@jit
+def step(x, w):
+    return (x @ w).relu().realize()
+
+x = Tensor.randn(32, 128)
+w = Tensor.randn(128, 64)
+
+print(step(x, w).numpy())
+```
+
+Node.js:
+
+```js
+const polygrad = require('polygrad')
+
+;(async () => {
+  const pg = await polygrad.create({ core: 'auto', device: 'auto' })
+  const x = pg.Tensor.randn([32, 128])
+  const w = pg.Tensor.randn([128, 64])
+
+  const step = pg.jit((x, w) => x.dot(w).relu().realize())
+  await step(x, w)  // normal run
+  await step(x, w)  // capture
+  console.log(await (await step(x, w)).toArray())  // replay
+
+  await pg.dispose()
+})()
+```
+
+Browser WebGPU:
+
+```js
+import { create } from 'polygrad'
+
+const pg = await create({ core: 'wasm', device: 'webgpu' })
+const y = new pg.Tensor([1, 2, 3]).mul(2).add(1)
+console.log(await y.toArray())
+await pg.dispose()
+```
+
+## Where Polygrad Fits
+
+Polygrad is not trying to replace every tensor framework. It is aimed at tools
+that need a small, embeddable compiler/runtime.
+
+Good fits:
+
+- browser-first ML tools;
+- Node and Python packages that should share one runtime;
+- native libraries that need tensor kernels without a Python dependency;
+- model packages that need both WASM/WebGPU and native execution;
+- compiler experiments that want tinygrad-like UOps in a C core.
+
+Probably not the right fit yet:
+
+- large distributed training;
+- depending on the largest existing model ecosystem;
+- vendor BLAS/LAPACK as the primary linalg implementation;
+- production workloads that require mature backend-specific kernels for every
+  dense linalg path.
+
+## Tinygrad Relationship
+
+Polygrad is a C11 port of tinygrad's compiler direction, not a fork of
+tinygrad's Python runtime. Shared concepts keep tinygrad naming where possible:
+UOps, rewrites, `LINEAR`, `CALL`, `PROGRAM`, JIT capture/replay, renderer
+capabilities, and backend-specific lowering.
+
+The main intentional differences are:
+
+| Area | Polygrad difference |
+|---|---|
+| Core runtime | Compiler state, buffers, caches, and backend runners live in `PolyCtx` inside a C library |
+| Frontends | Python and JavaScript are wrappers over the same C core rather than separate runtimes |
+| WASM/browser | Browser execution uses the unified C/WASM runtime path, with WebGPU orchestrated from the C backend |
+| Logical vs physical roots | Tensors keep exportable logical graph roots separate from realized/placed physical roots |
+| Model tooling | `PolyInstance` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
+| Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
+
+These differences exist to make Polygrad useful as an embeddable runtime for
+tools and model packages, while preserving tinygrad-style compiler semantics
+where tinygrad has an equivalent.
 
 ## Install
 
@@ -37,6 +125,7 @@ cd js
 npm install
 node - <<'JS'
 const polygrad = require('.')
+
 ;(async () => {
   const pg = await polygrad.create()
   const y = new pg.Tensor([1, 2, 3]).mul(2).add(1)
@@ -46,86 +135,42 @@ const polygrad = require('.')
 JS
 ```
 
-## Quick Start
+## Runtime Choices
 
-Python:
-
-```python
-from polygrad import Tensor
-
-x = Tensor([[1.0, 2.0], [3.0, 4.0]])
-w = Tensor([[2.0], [-1.0]])
-y = (x @ w).relu()
-
-print(y.numpy())
+```text
+Python Tensor API       JavaScript Tensor API       C / native package
+       |                        |                         |
+       +------------------------+-------------------------+
+                                |
+                       Polygrad C11 runtime
+                                |
+       +----------------+-------+-------+----------------+
+       |                |               |                |
+    CPU/x86          CUDA/HIP          WASM            WebGPU
 ```
 
-JavaScript:
+| Situation | Use |
+|---|---|
+| Python research or scripts | `polygrad` from PyPI |
+| Node.js product code | `polygrad` from npm with `polygrad.create()` |
+| Browser CPU/WASM | `polygrad` with `core: "wasm"` |
+| Browser GPU | `polygrad` with `core: "wasm", device: "webgpu"` |
+| Native embedding | C ABI and `libpolygrad` |
+| Package integration | create one runtime and pass it into the package |
 
-```js
-const polygrad = require('polygrad')
+Backend table:
 
-;(async () => {
-  const pg = await polygrad.create()
-  const { Tensor } = pg
+| Backend | Role |
+|---|---|
+| CPU C | Portable compiled CPU path |
+| interp | Reference interpreter for differential testing |
+| x86 | tinygrad-style direct x86 ISA lowering |
+| CUDA | NVIDIA GPU backend |
+| HIP | AMD GPU backend |
+| WASM | Node/browser WebAssembly backend |
+| WebGPU | Browser GPU backend through the WASM runtime |
 
-  const x = new Tensor([[1, 2], [3, 4]])
-  const w = new Tensor([[2], [-1]])
-  const y = x.dot(w).relu()
-
-  console.log(await y.toArray())
-  await pg.dispose()
-})()
-```
-
-Autograd:
-
-```python
-from polygrad import Tensor
-
-x = Tensor([1.0, 2.0, 3.0])
-x.requires_grad = True
-
-loss = (x * x).sum()
-loss.backward()
-
-print(x.grad.numpy())  # [2.0, 4.0, 6.0]
-```
-
-## What Works
-
-- Lazy Tensor API in Python and JavaScript.
-- Elementwise ops, broadcasting, reductions, movement ops, matmul, softmax,
-  normalization, sorting, gather, QR, Cholesky, triangular solve, solve, and
-  least squares.
-- Reverse-mode autograd for first-order training.
-- tinygrad-style raw Tensor JIT capture/replay.
-- Python `nn` layers and optimizers.
-- Node native addon, Node/browser WASM, browser WebGPU path, CUDA, HIP, x86 ISA
-  backend, CPU C backend, and interpreter backend.
-- Portable bundles for saving IR and weights together.
-
-See [py/README.md](py/README.md) and [js/README.md](js/README.md) for frontend APIs.
-
-## Device Selection
-
-Python uses the shared C runtime directly:
-
-```python
-from polygrad import Tensor, Device
-
-x = Tensor.rand(1024)
-y = (x * 2).to("cuda") if Device.cuda_available() else (x * 2).to("cpu")
-print(y.numpy())
-```
-
-JavaScript selects a core first, then a device:
-
-```js
-const pg = await polygrad.create({ core: 'wasm', device: 'webgpu' })
-```
-
-Common environment variables:
+Environment variables:
 
 ```bash
 POLY_DEVICE=cpu|cuda|hip|x86|interp
@@ -134,7 +179,106 @@ POLY_DUMP_KERNELS=1
 POLY_BEAM=4
 ```
 
-## JIT
+## Runtime Ownership
+
+A Polygrad runtime is not just a namespace. It owns a `PolyCtx`, compiled
+program caches, JIT state, buffer residency, and backend handles such as a WASM
+module, WebGPU device state, CUDA runners, or native CPU runners.
+
+The application should usually create one runtime and pass it to libraries that
+need tensor work.
+
+Benefits:
+
+- compiled kernels and JIT captures are reused instead of rebuilt per package;
+- tensors from different packages share one buffer residency table;
+- browser code gets one WASM/WebGPU runtime instead of several hidden ones;
+- Node code gets one native/WASM runtime selection instead of conflicting
+  package defaults;
+- package APIs can accept and return Polygrad tensors without copying through
+  JavaScript arrays or host buffers.
+
+JavaScript package pattern:
+
+```js
+const pg = await polygrad.create({ core: 'wasm', device: 'webgpu' })
+const model = await SomePackage.create({ polygrad: pg })
+
+const x = new pg.Tensor([[1, 2, 3, 4]])
+const y = await model.predict(x)
+
+await pg.dispose()
+```
+
+Inside `SomePackage`, use the supplied runtime to allocate tensors, compile
+kernels, and dispose package-owned compiled callables. Do not call
+`polygrad.create()` internally unless the package explicitly needs isolation:
+
+```js
+async function create({ polygrad: pg }) {
+  const w = await pg.Tensor.randn([4, 2]).realize()
+  const predict = await pg.compile((x) => x.dot(w).realize(), [
+    pg.Tensor.empty([1, 4])
+  ])
+
+  return {
+    predict: (x) => predict.run([x]),
+    dispose: () => predict.dispose()
+  }
+}
+```
+
+Python currently exposes a module-level default context rather than an explicit
+runtime object. Python packages should accept caller-created `Tensor` or
+`Instance` objects and keep outputs in the same context:
+
+```python
+from polygrad import Tensor
+
+def normalize(x: Tensor) -> Tensor:
+    mean = x.mean(axis=-1, keepdim=True)
+    scale = (x - mean).square().mean(axis=-1, keepdim=True).sqrt()
+    return (x - mean) / scale
+```
+
+Use separate runtimes only when isolation is the point: independent caches,
+independent devices, or a package boundary that must outlive/dispose separately.
+
+## The C Core
+
+The C core owns graph construction, scheduling, placement, runtime caches, and
+backend dispatch. Frontends are thin wrappers over the same concepts.
+
+```text
+logical tensor graph
+  -> placed tensor graph
+  -> LINEAR schedule graph with CALLs
+  -> PROGRAM/SOURCE/BINARY plus runtime runner
+```
+
+The key invariant is that exportable logical tensor roots stay independent from
+realized physical roots. That lets the same logical graph be exported, cached, or
+rerun after placement on CUDA, WebGPU, WASM, CPU, or the interpreter.
+
+## High-Level APIs
+
+Polygrad includes the usual tensor building blocks:
+
+- elementwise ops, broadcasting, reductions, movement ops, indexing, gather,
+  sort, argsort, topk, matmul, softmax, normalization, and loss helpers;
+- reverse-mode autograd for first-order training;
+- `nn` layers and optimizers in Python, with JavaScript optimizer helpers;
+- structured linalg: QR, triangular solve, Cholesky, Cholesky solve, solve, and
+  least squares;
+- tinygrad-style raw Tensor JIT capture/replay;
+- portable bundles for saving IR and weights together;
+- model loading paths for supported safetensors/GGUF workflows.
+
+Structured linalg is implemented as portable tensor-composed fallback code. It
+does not add LAPACK or vendor-runtime dependencies. Backend-specific blocked
+kernels are planned for larger matrices.
+
+## JIT And Compile
 
 `jit` follows tinygrad's three-call shape: first call runs normally, second call
 captures, later calls replay.
@@ -162,9 +306,9 @@ await f(new pg.Tensor([4, 5, 6]))
 console.log(await (await f(new pg.Tensor([7, 8, 9]))).toArray())
 ```
 
-For embedding loops, Python and JS also expose `compile(...)`, which warms and
-captures the same JIT path up front and returns an explicit callable with
-`run(...)`, `stats()`, and `dispose()`.
+Python and JS also expose `compile(...)`, which warms and captures the same path
+up front and returns an explicit callable with `run(...)`, `stats()`, and
+`dispose()`.
 
 ## Custom Kernels
 
@@ -204,47 +348,10 @@ const y = out.customKernel(new pg.Tensor([1, 2, 3, 4]), new pg.Tensor([10, 20, 3
 console.log(await y.toArray())
 ```
 
-This API is for UOp `CALL` bodies. It is not a raw program-launch API, and
-custom backward functions are not implemented yet.
+This API is a UOp `CALL` extension point. It is not a raw program-launch API,
+and custom backward functions are not implemented yet.
 
-## Architecture
-
-The shared execution path is:
-
-```text
-logical tensor graph
-  -> placed tensor graph
-  -> LINEAR schedule graph with CALLs
-  -> PROGRAM/SOURCE/BINARY plus runtime runner
-```
-
-Backends share the same compiler pipeline where possible. Target-specific
-details stay in backend renderers and runtimes:
-
-| Backend | Role |
-|---|---|
-| CPU C | Portable compiled CPU path |
-| x86 | tinygrad-style direct x86 ISA lowering |
-| CUDA | NVIDIA GPU backend |
-| HIP | AMD GPU backend |
-| WASM | Node/browser WebAssembly backend |
-| WebGPU | Browser GPU backend through the WASM runtime |
-| interp | Reference interpreter for differential testing |
-
-For implementation details, see [ARCHITECTURE.md](ARCHITECTURE.md).
-
-## Parity And Tests
-
-Polygrad tracks the vendored `references/tinygrad_latest` checkout.
-
-Current local parity snapshot:
-
-| Target | Result |
-|---|---|
-| Value parity | 51/51 |
-| Optimized value parity | 51/51 |
-| Strict IR parity | 51/51 |
-| Optimized strict IR parity | 51/51 |
+## Tests
 
 Run the main gates:
 
@@ -272,12 +379,12 @@ local paths.
 
 - Python currently targets Linux.
 - CUDA, HIP, and WebGPU require matching local runtimes.
-- Structured linalg is implemented as portable tensor-composed fallbacks. It is
-  useful for small and medium problems, but backend-specific blocked kernels are
-  still planned.
+- Browser WebGPU requires a compatible browser and GPU adapter.
+- Structured linalg is portable first. Large blocked linalg kernels are planned.
 - RNG is deterministic, but not bit-compatible with tinygrad's current RNG
   stream.
-- Intentional tinygrad divergences are documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+- Intentional tinygrad divergences are kept in local architecture notes and
+  should be reflected in public docs when they affect users.
 
 ## Repository
 
@@ -287,7 +394,6 @@ local paths.
 | `py/` | Python frontend |
 | `js/` | Node, WASM, and browser frontend |
 | `test/` | C tests |
-| `references/tinygrad_latest` | Vendored tinygrad parity target |
 
 ## License
 

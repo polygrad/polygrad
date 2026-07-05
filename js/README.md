@@ -1,8 +1,16 @@
 # Polygrad JavaScript
 
-JavaScript bindings for Polygrad. The package exposes the shared C11 tensor
-compiler through a Node native addon when available, with a packaged WASM
-fallback for Node and browser use.
+JavaScript bindings for Polygrad, a C11 tensor compiler with Node, WASM, and
+browser runtimes.
+
+The package uses the same C compiler core as Polygrad Python. In Node it tries
+the native addon first and falls back to packaged WASM. In browsers it runs the
+C runtime through WASM, with optional WebGPU execution.
+
+Use this package when JavaScript owns the application flow but tensor execution
+should still come from the shared Polygrad compiler/runtime: Node services,
+browser ML tools, WebGPU demos, or packages that accept a caller-provided
+Polygrad runtime.
 
 ## Install
 
@@ -24,6 +32,48 @@ cd js
 npm install
 node test/test_wasm.js
 ```
+
+## Choose A Runtime
+
+```js
+const polygrad = require('polygrad')
+
+;(async () => {
+  const pg = await polygrad.create()
+  const pgNative = await polygrad.create({ core: 'native' })
+  const pgWasm = await polygrad.create({ core: 'wasm' })
+
+  await pg.dispose()
+  await pgNative.dispose()
+  await pgWasm.dispose()
+})()
+```
+
+| Environment | `core: "auto"` | `core: "native"` | `core: "wasm"` |
+|---|---|---|---|
+| Node with native addon | native | native | wasm |
+| Node without native addon | wasm | error | wasm |
+| Browser | wasm | error | wasm |
+
+Options:
+
+- `core`: `auto`, `native`, or `wasm`.
+- `device`: `auto`, `cpu`, `cuda`, `hip`, `x86`, `interp`, `wasm`, or
+  `webgpu`, depending on the selected core and local runtime support.
+
+Environment variables:
+
+```bash
+POLY_CORE=wasm node app.js
+POLY_DEVICE=cuda node app.js
+```
+
+For the native core, `POLY_DEVICE` is handled by the C runtime and may select
+`cpu`, `cuda`, `hip`, `x86`, or `interp`. For the WASM core, device choices are
+`wasm`, `interp`, and browser `webgpu` when available.
+
+Always call `await pg.dispose()` when a long-running process is done with a
+runtime.
 
 ## Quick Start
 
@@ -62,35 +112,28 @@ const x = A.solve(b)
 console.log(await x.toArray())
 ```
 
-## Runtime Selection
+Structured linalg methods are portable tensor-composed fallbacks. Current
+`lstsq` is solution-only for full-rank tall or square systems.
+
+## Browser
+
+With an npm-installed package and a browser bundler:
 
 ```js
-const pg = await polygrad.create()
-const pgNative = await polygrad.create({ core: 'native' })
-const pgWasm = await polygrad.create({ core: 'wasm' })
-const pgWebgpu = await polygrad.create({ core: 'wasm', device: 'webgpu' })
+import { create } from 'polygrad'
+
+const pg = await create({ core: 'wasm', device: 'webgpu' })
+const y = new pg.Tensor([1, 2, 3]).mul(2)
+console.log(await y.toArray())
+await pg.dispose()
 ```
 
-| Environment | `core: "auto"` | `core: "native"` | `core: "wasm"` |
-|---|---|---|---|
-| Node with native addon | native | native | wasm |
-| Node without native addon | wasm | error | wasm |
-| Browser | wasm | error | wasm |
+Bundlers should resolve `polygrad` to the browser bundle through the package
+`browser` export condition. Node `require('polygrad')` still resolves to the
+Node entry.
 
-Environment variables:
-
-```bash
-POLY_CORE=wasm node app.js
-POLY_DEVICE=interp node app.js
-```
-
-For the native core, `POLY_DEVICE` is handled by the C runtime and may select
-`cpu`, `cuda`, `hip`, `x86`, or `interp`. For the WASM core, device choices are
-`wasm`, `interp`, and browser `webgpu` when available.
-
-## Browser Bundles
-
-Build browser bundles from the repository root:
+For a local checkout or manual browser bundle, build browser artifacts from the
+repository root:
 
 ```bash
 make wasm-pkg
@@ -116,57 +159,52 @@ Browser global:
 </script>
 ```
 
-Browser ESM:
+Browser ESM with WebGPU:
 
 ```html
 <script type="module">
   import { create } from './dist/polygrad.mjs'
 
-  const pg = await create({ device: 'webgpu' })
+  const pg = await create({ core: 'wasm', device: 'webgpu' })
   const y = new pg.Tensor([1, 2, 3]).mul(2)
   console.log(await y.toArray())
   await pg.dispose()
 </script>
 ```
 
-## API Overview
+## Data Flow
 
-`polygrad.create(opts?)` returns a `Promise<PolyRuntime>`.
+Polygrad tensors are lazy. Build expressions freely, then call `realize()` or
+read data back.
 
-Options:
+```js
+const x = new pg.Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
+const y = await x.mul(3).sub(1).realize()
 
-- `core`: `auto`, `native`, or `wasm`.
-- `device`: `auto`, `cpu`, `cuda`, `hip`, `x86`, `interp`, `wasm`, or `webgpu`,
-  depending on the selected core and local runtime support.
+console.log(await y.toTypedArray())  // Float32Array
+```
 
-Runtime fields:
+For repeated loops, reuse tensor buffers instead of constructing new source
+tensors:
 
-- `pg.Tensor`: runtime-bound Tensor class.
-- `pg.nn`: `Linear`, `SGD`, `Adam`, `AdamW`, and parameter helpers.
-- `pg.jit(fn)`: tinygrad-style first-run, capture, replay wrapper.
-- `pg.compile(fn, sampleInputs)`: explicit wrapper over the same JIT path.
-- `pg.stats()`: wrapper and C runtime counters.
-- `pg.canRun(query)`: advisory backend capability probe.
-- `pg.uop`: UOp helpers for inspection and custom kernels.
-- `pg.dispose()`: release runtime resources.
+```js
+const x = new pg.Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
+await x.realize()
+x.copyFrom(new Float32Array([5, 6, 7, 8]))
+```
 
-Tensor methods include:
+Use `toTypedArrays()` when reading several outputs together.
 
-| Category | Methods |
-|---|---|
-| Creation | `new Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `eye`, `arange` |
-| Elementwise | `add`, `sub`, `mul`, `div`, `neg`, `exp`, `log`, `sqrt`, `square`, `relu`, `gelu`, `silu` |
-| Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std`, `softmax` |
-| Movement | `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `gather`, `takeAlongAxis` |
-| Linalg | `dot`, `qr`, `triangularSolve`, `solveTriangular`, `cholesky`, `choleskySolve`, `solve`, `lstsq` |
-| Data | `realize`, `toArray`, `toTypedArray`, `toTypedArrays`, `copyFrom`, `updateFrom`, `repr`, `customKernel` |
-
-Structured linalg methods are portable tensor-composed fallbacks. Current
-`lstsq` is solution-only for full-rank tall or square systems.
+```js
+const a = x.add(1)
+const b = x.mul(2)
+const [aData, bData] = await pg.Tensor.toTypedArrays(a, b)
+```
 
 ## JIT And Compile
 
-`pg.jit(fn)` follows tinygrad raw Tensor JIT behavior:
+`pg.jit(fn)` follows tinygrad raw Tensor JIT behavior: first call runs normally,
+second call captures realized schedules, later calls replay.
 
 ```js
 const f = pg.jit((x) => x.add(1).realize())
@@ -216,7 +254,55 @@ console.log(await y.toArray())
 This is a UOp `CALL` extension point, not a raw program-launch API. Custom
 backward functions are not implemented yet.
 
-## Testing
+## API Summary
+
+`polygrad.create(opts?)` returns a `Promise<PolyRuntime>`.
+
+Runtime fields:
+
+- `pg.Tensor`: runtime-bound Tensor class.
+- `pg.nn`: `Linear`, `SGD`, `Adam`, `AdamW`, and parameter helpers.
+- `pg.jit(fn)`: first-run, capture, replay wrapper.
+- `pg.compile(fn, sampleInputs)`: explicit wrapper over the same JIT path.
+- `pg.stats()`: wrapper and C runtime counters.
+- `pg.canRun(query)`: advisory backend capability probe.
+- `pg.uop`: UOp helpers for inspection and custom kernels.
+- `pg.dispose()`: release runtime resources.
+
+Tensor methods include:
+
+| Category | Methods |
+|---|---|
+| Creation | `new Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `eye`, `arange` |
+| Elementwise | `add`, `sub`, `mul`, `div`, `neg`, `exp`, `log`, `sqrt`, `square`, `relu`, `gelu`, `silu` |
+| Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std`, `softmax` |
+| Movement | `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `gather`, `takeAlongAxis` |
+| Linalg | `dot`, `qr`, `triangularSolve`, `solveTriangular`, `cholesky`, `choleskySolve`, `solve`, `lstsq` |
+| Data | `realize`, `toArray`, `toTypedArray`, `toTypedArrays`, `copyFrom`, `updateFrom`, `repr`, `customKernel` |
+
+## Package Integration
+
+If your package is built on Polygrad, accept a `PolyRuntime` from the caller
+instead of creating a hidden runtime:
+
+```js
+async function createModel({ polygrad: pg }) {
+  const weight = await pg.Tensor.randn([4, 2]).realize()
+  const predict = await pg.compile((x) => x.dot(weight).realize(), [
+    pg.Tensor.empty([1, 4])
+  ])
+
+  return {
+    predict: (x) => predict.run([x]),
+    dispose: () => predict.dispose()
+  }
+}
+```
+
+This lets applications share one set of runtime caches, device handles, and
+buffer residency across packages.
+
+## Tests
 
 From the repository root:
 
