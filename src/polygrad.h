@@ -100,6 +100,8 @@ typedef enum {
   POLY_OP_SUB,
   POLY_OP_FDIV,
   POLY_OP_POW,
+  POLY_OP_FLOORDIV,
+  POLY_OP_FLOORMOD,
   /* ternary */
   POLY_OP_WHERE,
   POLY_OP_MULACC,

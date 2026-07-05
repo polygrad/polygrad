@@ -8,6 +8,7 @@ change when `Tensor.uop` is migrated to hold a `UOp` instance.
 """
 
 from .. import _ffi
+from ..dtype import DTYPES_DICT, INVERSE_DTYPES_DICT, dtypes, to_dtype
 from enum import IntEnum
 
 
@@ -84,6 +85,16 @@ class UOp:
     def op_name(self):
         name = _ffi._lib.poly_op_name(self.op)
         return name.decode('utf-8') if name else 'UNKNOWN'
+
+    @property
+    def dtype(self):
+        dtype_id = _ffi._lib.poly_uop_dtype_id(self.ctx, self.raw) if self.raw is not None else -1
+        if _ffi._lib.poly_dtype_id_by_name(b'void') == dtype_id:
+            return dtypes.void
+        for name, dtype in DTYPES_DICT.items():
+            if _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8')) == dtype_id:
+                return dtype
+        raise RuntimeError(f'unknown UOp dtype id {dtype_id}')
 
     @property
     def src(self):
@@ -232,6 +243,22 @@ class UOp:
             return UOp(self.ctx, _ffi._lib.poly_const_float(self.ctx, value))
         raise TypeError(f'cannot convert {type(value).__name__} to UOp')
 
+    def _coerce_like(self, value, ref):
+        if isinstance(value, UOp):
+            return value
+        if not isinstance(value, (int, float)):
+            raise TypeError(f'cannot convert {type(value).__name__} to UOp')
+        dtype_id = _ffi._lib.poly_uop_dtype_id(ref.ctx, ref.raw) if ref and ref.raw else -1
+        if dtype_id >= 0:
+            raw = _ffi._lib.poly_const_float_by_id(self.ctx, float(value), dtype_id)
+            if raw:
+                return UOp(self.ctx, raw)
+            if isinstance(value, int):
+                raw = _ffi._lib.poly_const_int_by_id(self.ctx, value, dtype_id)
+                if raw:
+                    return UOp(self.ctx, raw)
+        return self._coerce(value)
+
     @staticmethod
     def const(ctx, value):
         if isinstance(value, UOp):
@@ -247,39 +274,48 @@ class UOp:
         return UOp(self.ctx, raw) if raw else None
 
     def _alu2(self, op_name, other):
-        other = self._coerce(other)
+        other = self._coerce_like(other, self)
         raw = _ffi._lib.poly_alu2(self.ctx, _ffi.OPS[op_name], self.raw, other.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def _alu3(self, op_name, b, c):
-        b = self._coerce(b)
-        c = self._coerce(c)
+        b = self._coerce_like(b, self)
+        c = self._coerce_like(c, self)
         raw = _ffi._lib.poly_alu3(self.ctx, _ffi.OPS[op_name], self.raw, b.raw, c.raw)
+        return UOp(self.ctx, raw) if raw else None
+
+    def cast(self, dtype):
+        dtype = to_dtype(dtype)
+        name = INVERSE_DTYPES_DICT.get(dtype.scalar().name, dtype.scalar().name)
+        dtype_id = _ffi._lib.poly_dtype_id_by_name(name.encode('utf-8'))
+        if dtype_id < 0:
+            raise ValueError(f'unknown dtype {dtype}')
+        raw = _ffi._lib.poly_cast_by_id(self.ctx, self.raw, dtype_id)
         return UOp(self.ctx, raw) if raw else None
 
     def __add__(self, other):
         return self._alu2('ADD', other)
 
     def __radd__(self, other):
-        return self._coerce(other)._alu2('ADD', self)
+        return self._coerce_like(other, self)._alu2('ADD', self)
 
     def __sub__(self, other):
         return self._alu2('SUB', other)
 
     def __rsub__(self, other):
-        return self._coerce(other)._alu2('SUB', self)
+        return self._coerce_like(other, self)._alu2('SUB', self)
 
     def __mul__(self, other):
         return self._alu2('MUL', other)
 
     def __rmul__(self, other):
-        return self._coerce(other)._alu2('MUL', self)
+        return self._coerce_like(other, self)._alu2('MUL', self)
 
     def __truediv__(self, other):
         return self._alu2('FDIV', other)
 
     def __rtruediv__(self, other):
-        return self._coerce(other)._alu2('FDIV', self)
+        return self._coerce_like(other, self)._alu2('FDIV', self)
 
     def __neg__(self):
         return self._alu1('NEG')
@@ -287,8 +323,29 @@ class UOp:
     def cdiv(self, other):
         return self._alu2('CDIV', other)
 
-    def mod(self, other):
+    def cmod(self, other):
         return self._alu2('CMOD', other)
+
+    def floordiv(self, other):
+        return self._alu2('FLOORDIV', other)
+
+    def __floordiv__(self, other):
+        return self.floordiv(other)
+
+    def __rfloordiv__(self, other):
+        return self._coerce_like(other, self)._alu2('FLOORDIV', self)
+
+    def floormod(self, other):
+        return self._alu2('FLOORMOD', other)
+
+    def __mod__(self, other):
+        return self.floormod(other)
+
+    def __rmod__(self, other):
+        return self._coerce_like(other, self)._alu2('FLOORMOD', self)
+
+    def mod(self, other):
+        return self.floormod(other)
 
     def maximum(self, other):
         return self._alu2('MAX', other)

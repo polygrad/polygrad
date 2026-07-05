@@ -611,6 +611,13 @@ class Tensor:
         raw = self._core_uop_physical_raw(self._tensor)
         return _uop_wrap(self._ctx, raw)
 
+    def _graph_uop_raw(self):
+        logical = self._core_uop_logical_raw(self._tensor)
+        physical = self._core_uop_physical_raw(self._tensor)
+        if logical and physical and _ffi._lib.poly_uop_op(logical) == _ffi.OPS.get('AFTER'):
+            return physical
+        return logical or self._core_uop_raw(self._tensor)
+
     @property
     def _graph_uop(self):
         """Root used to construct new lazy value graphs.
@@ -619,11 +626,7 @@ class Tensor:
         effects, tinygrad's tensor root is the current BUFFER again; Polygrad
         mirrors that by using the physical root when the logical root is AFTER.
         """
-        logical = self.uop_logical
-        physical = self.uop_physical
-        if logical and physical and logical.op == _ffi.OPS.get('AFTER'):
-            return physical
-        return logical or self.uop
+        return _uop_wrap(self._ctx, self._graph_uop_raw())
 
     @staticmethod
     def _physicalize_result_for(ctx, logical, inputs):
@@ -633,8 +636,8 @@ class Tensor:
         for t in inputs:
             if not isinstance(t, Tensor):
                 continue
-            logical_root = _uop_raw(t._graph_uop)
-            current_root = _uop_raw(t.uop)
+            logical_root = t._graph_uop_raw()
+            current_root = Tensor._core_uop_raw(t._tensor)
             if not logical_root or not current_root or logical_root == current_root:
                 continue
             if logical_root in seen:
@@ -1151,14 +1154,19 @@ class Tensor:
         # inputs was the stale behavior that made bool/int ops look floaty.
         dt = _uop_dtype_name(self._ctx, uop, self._dtype_str)
         physical = self._physicalize_result(uop, inputs)
-        return Tensor(
-            _ctx=self._ctx,
-            _tensor=self._core_create_with_roots(uop, physical, _POLY_TENSOR_VALUE, dev),
-            _shape=shape,
-            requires_grad=any(t._requires_grad for t in inputs),
-            _dtype=dt,
-            _device=dev,
-        )
+        ret = Tensor.__new__(Tensor)
+        ret._ctx = self._ctx
+        ret._device = dev
+        ret._tensor = self._core_create_with_roots(uop, physical, _POLY_TENSOR_VALUE, dev)
+        ret._data = None
+        ret._dtype_str = dt
+        ret._requires_grad = any(t._requires_grad for t in inputs)
+        ret._grad = None
+        ret._is_param = False
+        if ret._requires_grad:
+            ret._sync_core_requires_grad(force=True)
+        all_tensors[weakref.ref(ret)] = None
+        return ret
 
     def _infer_device(self, inputs):
         from .device import Device

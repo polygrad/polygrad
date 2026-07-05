@@ -474,6 +474,9 @@ async function createWasmCore(device) {
     poly_const_float: Module._poly_const_float,
     poly_const_double: Module._poly_const_double,
     poly_const_int: (ctx, val) => Module._poly_const_int(ctx, BigInt(val)),
+    poly_const_float_by_id: Module._poly_const_float_by_id,
+    poly_const_int_by_id: (ctx, val, dtypeId) =>
+      Module._poly_const_int_by_id(ctx, BigInt(val), dtypeId),
     // Tensor.contiguous() is used as the explicit materialization/readback
     // boundary for views, matching the native N-API adapter surface.
     poly_contiguous: Module._poly_contiguous,

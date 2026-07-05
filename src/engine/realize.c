@@ -1001,21 +1001,47 @@ int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   return ret;
 }
 
+static PolyDevice poly_realize_tensor_requested_device(PolyCtx *ctx, PolyTensor *tensor) {
+  PolyDevice device = tensor ? tensor->device : POLY_DEVICE_AUTO;
+  if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
+  if (device == POLY_DEVICE_AUTO) device = poly_device_default();
+  return device;
+}
+
 int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs) {
   if (!ctx || !inputs || !outputs || n < 0) return -1;
   if (n == 0) return 0;
   PolyUOp **physical = calloc((size_t)n, sizeof(PolyUOp *));
   PolyUOp **out_uops = calloc((size_t)n, sizeof(PolyUOp *));
+  bool *already_realized = calloc((size_t)n, sizeof(bool));
   if (!physical) return -1;
-  if (!out_uops) {
+  if (!out_uops || !already_realized) {
     free(physical);
+    free(out_uops);
+    free(already_realized);
     return -1;
   }
 
   for (int i = 0; i < n; i++) {
     outputs[i] = NULL;
+    PolyUOp *current = inputs[i] ? poly_tensor_uop(inputs[i]) : NULL;
+    const PolyUOp *identity = poly_uop_get_buffer_identity(current);
+    if (identity && poly_buffer_is_allocated(ctx, (PolyUOp *)identity)) {
+      PolyDevice requested = poly_realize_tensor_requested_device(ctx, inputs[i]);
+      if (poly_buffer_ensure_device_current(ctx, (PolyUOp *)identity, requested) != 0) {
+        free(already_realized);
+        free(physical);
+        free(out_uops);
+        return -1;
+      }
+      physical[i] = current;
+      out_uops[i] = current;
+      already_realized[i] = true;
+      continue;
+    }
     physical[i] = poly_tensor_physicalize(ctx, inputs[i]);
     if (!physical[i]) {
+      free(already_realized);
       free(physical);
       free(out_uops);
       return -1;
@@ -1026,10 +1052,12 @@ int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **
   if (rc == 0) {
     for (int i = 0; i < n; i++) {
       if (!inputs[i] || !out_uops[i]) continue;
+      if (already_realized[i] && out_uops[i] == poly_tensor_uop(inputs[i])) {
+        outputs[i] = inputs[i];
+        continue;
+      }
       PolyDevice device = poly_uop_device(out_uops[i]);
-      PolyDevice requested = inputs[i]->device;
-      if (requested == POLY_DEVICE_AUTO) requested = poly_ctx_get_preferred_device(ctx);
-      if (requested == POLY_DEVICE_AUTO) requested = poly_device_default();
+      PolyDevice requested = poly_realize_tensor_requested_device(ctx, inputs[i]);
       if (device == POLY_DEVICE_AUTO) device = requested;
       else if (poly_realize_devices_share_host_addressable_storage(device, requested)) device = requested;
       if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
@@ -1042,6 +1070,7 @@ int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **
     }
   }
 
+  free(already_realized);
   free(out_uops);
   free(physical);
   return rc;

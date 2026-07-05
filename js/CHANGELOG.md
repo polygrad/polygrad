@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 (2026-07-05)
+
+### Added
+- `Tensor.customKernel(...)` with public UOp helpers, grouped stores, reductions, comparisons, unary ops, compile/JIT replay, and repeated input mutation coverage.
+- Structured tensor APIs for gather/scatter, sort/argsort/topk, linalg solve helpers, typed readback, and stable input updates.
+- Browser/WebGPU, JS WASM, native CPU/x86, and native CUDA coverage for common tensor and custom-kernel paths.
+- Browser and Node benchmarks for jax-js WASM comparisons, matmul, model-shaped kernels, and Qwen3 smoke tests.
+
+### Changed
+- `create({ core: 'native', device })` now honors the requested device in runtime construction and instance placement.
+- Browser/WebGPU continues through the unified C WASM runtime path rather than separate JavaScript executors.
+
+### Fixed
+- CUDA compiled replay now rebinds custom-kernel producer outputs for downstream compiled consumers.
+- WebGPU WGSL rendering now handles `COPY`/`UNROLL`-wrapped multi-output custom-kernel stores and selects the correct lane for unrolled/vector values.
+- WASM and x86 lowering fixes for larger custom-kernel reductions and vector/lane rendering.
+- `canRun()` now reports sort, argsort, and topk support consistently with direct execution.
+
 ## 0.3.0
 
 ### Changed

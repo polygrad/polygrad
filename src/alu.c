@@ -57,6 +57,22 @@ static int64_t cmod(int64_t a, int64_t b) {
   return a % b;
 }
 
+/* Python-style floor division and modulo. Mirrors tinygrad helpers.py. */
+static int64_t floor_div_i64(int64_t a, int64_t b) {
+  if (b == 0) return 0;
+  if (a == INT64_MIN && b == -1) return INT64_MIN;
+  int64_t q = a / b;
+  int64_t r = a % b;
+  if (r != 0 && ((a < 0) != (b < 0))) q--;
+  return q;
+}
+
+static int64_t floor_mod_i64(int64_t a, int64_t b) {
+  if (b == 0) return 0;
+  if (a == INT64_MIN && b == -1) return 0;
+  return a - floor_div_i64(a, b) * b;
+}
+
 static int64_t i64_from_u64(uint64_t v) {
   int64_t out;
   memcpy(&out, &v, sizeof(out));
@@ -380,6 +396,22 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
       r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a % ub);
     } else {
       r = cmod(a, b);
+    }
+    break;
+  case POLY_OP_FLOORDIV:
+    if (poly_dtype_is_unsigned(dtype)) {
+      uint64_t ub = (uint64_t)b;
+      r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a / ub);
+    } else {
+      r = floor_div_i64(a, b);
+    }
+    break;
+  case POLY_OP_FLOORMOD:
+    if (poly_dtype_is_unsigned(dtype)) {
+      uint64_t ub = (uint64_t)b;
+      r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a % ub);
+    } else {
+      r = floor_mod_i64(a, b);
     }
     break;
   case POLY_OP_MAX:

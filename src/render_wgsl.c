@@ -329,6 +329,139 @@ static int wgsl_next_vector_lane(
   return 0;
 }
 
+static int wgsl_pos_mod_i64(int64_t x, int mod) {
+  if (mod <= 0) return 0;
+  int64_t r = x % mod;
+  if (r < 0) r += mod;
+  return (int)r;
+}
+
+static bool wgsl_const_i64(PolyUOp *u, int64_t *out) {
+  if (!u) return false;
+  if ((u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0)
+    return wgsl_const_i64(u->src[0], out);
+  if (u->op != POLY_OP_CONST || poly_dtype_is_float(poly_dtype_scalar(u->dtype))) return false;
+  if (out) *out = u->arg.i;
+  return true;
+}
+
+static bool wgsl_expr_mod_const(PolyUOp *u, int mod, int *out) {
+  if (!u || mod <= 0) return false;
+  int64_t c0 = 0, c1 = 0;
+  int r0 = 0, r1 = 0;
+  switch (u->op) {
+  case POLY_OP_CONST:
+    if (!wgsl_const_i64(u, &c0)) return false;
+    if (out) *out = wgsl_pos_mod_i64(c0, mod);
+    return true;
+  case POLY_OP_RANGE:
+  case POLY_OP_SPECIAL:
+  case POLY_OP_DEFINE_VAR:
+  case POLY_OP_PARAM:
+    if (out) *out = 0;
+    return true;
+  case POLY_OP_CAST:
+  case POLY_OP_BITCAST:
+    return u->n_src > 0 && wgsl_expr_mod_const(u->src[0], mod, out);
+  case POLY_OP_ADD:
+    if (u->n_src < 2 || !wgsl_expr_mod_const(u->src[0], mod, &r0) ||
+        !wgsl_expr_mod_const(u->src[1], mod, &r1))
+      return false;
+    if (out) *out = (r0 + r1) % mod;
+    return true;
+  case POLY_OP_SUB:
+    if (u->n_src < 2 || !wgsl_expr_mod_const(u->src[0], mod, &r0) ||
+        !wgsl_expr_mod_const(u->src[1], mod, &r1))
+      return false;
+    if (out) *out = wgsl_pos_mod_i64((int64_t)r0 - r1, mod);
+    return true;
+  case POLY_OP_MUL:
+    if (u->n_src < 2) return false;
+    if (wgsl_const_i64(u->src[0], &c0) && (c0 % mod) == 0) {
+      if (out) *out = 0;
+      return true;
+    }
+    if (wgsl_const_i64(u->src[1], &c1) && (c1 % mod) == 0) {
+      if (out) *out = 0;
+      return true;
+    }
+    if (!wgsl_expr_mod_const(u->src[0], mod, &r0) ||
+        !wgsl_expr_mod_const(u->src[1], mod, &r1))
+      return false;
+    if (out) *out = (int)(((int64_t)r0 * r1) % mod);
+    return true;
+  case POLY_OP_MULACC: {
+    if (u->n_src < 3) return false;
+    int racc = 0;
+    if (!wgsl_expr_mod_const(u->src[2], mod, &racc)) return false;
+    if ((wgsl_const_i64(u->src[0], &c0) && (c0 % mod) == 0) ||
+        (wgsl_const_i64(u->src[1], &c1) && (c1 % mod) == 0)) {
+      if (out) *out = racc;
+      return true;
+    }
+    if (!wgsl_expr_mod_const(u->src[0], mod, &r0) ||
+        !wgsl_expr_mod_const(u->src[1], mod, &r1))
+      return false;
+    if (out) *out = (int)(((int64_t)r0 * r1 + racc) % mod);
+    return true;
+  }
+  case POLY_OP_SHL:
+    if (u->n_src < 2 || !wgsl_const_i64(u->src[1], &c1) || c1 < 0 || c1 >= 62) return false;
+    if ((((int64_t)1 << c1) % mod) == 0) {
+      if (out) *out = 0;
+      return true;
+    }
+    if (!wgsl_expr_mod_const(u->src[0], mod, &r0)) return false;
+    if (out) *out = (int)(((int64_t)r0 * ((int64_t)1 << c1)) % mod);
+    return true;
+  default:
+    return false;
+  }
+}
+
+static int wgsl_value_lane_count(PolyUOp *u) {
+  while (u && (u->op == POLY_OP_COPY || u->op == POLY_OP_UNROLL) && u->n_src > 0)
+    u = u->src[0];
+  if (!u) return 1;
+  if ((u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) && u->n_src > 1) return u->n_src;
+  if (u->dtype.count > 1) return u->dtype.count;
+  return 1;
+}
+
+static int wgsl_store_target_lane(PolyUOp *target, int lanes) {
+  if (lanes <= 1) return 0;
+  PolyUOp *idx = poly_find_memory_slice_through_cast(target);
+  if (!idx || idx->n_src < 2) return 0;
+  int lane = 0;
+  return wgsl_expr_mod_const(idx->src[1], lanes, &lane) ? lane : 0;
+}
+
+static bool wgsl_wraps_unroll(PolyUOp *u) {
+  if (!u) return false;
+  if (u->op == POLY_OP_UNROLL) return true;
+  if (u->op == POLY_OP_COPY && u->n_src > 0) return wgsl_wraps_unroll(u->src[0]);
+  return false;
+}
+
+static char *wgsl_render_lane_expr(WgslStrMap *names, PolyUOp *u, int lane) {
+  if (!u) return strdup("0");
+  if (u->op == POLY_OP_COPY && u->n_src > 0) return wgsl_render_lane_expr(names, u->src[0], lane);
+  if (u->op == POLY_OP_UNROLL && u->n_src > 0) return wgsl_render_lane_expr(names, u->src[0], lane);
+  if ((u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) && u->n_src > 0) {
+    int pick = wgsl_pos_mod_i64(lane, u->n_src);
+    char *s = wsm_get(names, u->src[pick]);
+    return strdup(s ? s : "0");
+  }
+  char *s = wsm_get(names, u);
+  if (!s) return strdup("0");
+  if (u->dtype.count > 1) {
+    char expr[256];
+    snprintf(expr, sizeof(expr), "%s[%d]", s, wgsl_pos_mod_i64(lane, u->dtype.count));
+    return strdup(expr);
+  }
+  return strdup(s);
+}
+
 /* WGSL float constant */
 
 static char *render_float_const_wgsl(double v, char *buf, int cap) {
@@ -728,6 +861,13 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       continue;
     }
 
+    /* --- COPY / UNROLL: transparent placement and expansion wrappers -- */
+    if ((u->op == POLY_OP_COPY || u->op == POLY_OP_UNROLL) && u->n_src > 0) {
+      char *src_name = wsm_get(&names, u->src[0]);
+      if (src_name) wsm_set(&names, u, strdup(src_name));
+      continue;
+    }
+
     /* --- LOAD: read from array --------------------------------------- */
     if (u->op == POLY_OP_LOAD) {
       char name[32];
@@ -855,6 +995,13 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_STORE) {
       char *target = wsm_get(&names, u->src[0]);
       char *val = wsm_get(&names, u->src[1]);
+      char *owned_val = NULL;
+      if (wgsl_wraps_unroll(u->src[1])) {
+        int lanes = wgsl_value_lane_count(u->src[1]);
+        int lane = wgsl_store_target_lane(u->src[0], lanes);
+        owned_val = wgsl_render_lane_expr(&names, u->src[1], lane);
+        val = owned_val;
+      }
 
       /* Gated store: INDEX with 3rd bool source → if (gate) { store; }
        * Matches CUDA renderer pattern (render_cuda.c gated STORE). */
@@ -886,6 +1033,7 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
           wsb_puts(&body, "  ");
         wsb_puts(&body, "}\n");
       }
+      free(owned_val);
       continue;
     }
 

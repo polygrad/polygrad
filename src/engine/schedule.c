@@ -7445,8 +7445,18 @@ int poly_run_compiled_schedule(
     if (ret == 0) plan->ctx->launch_count++;
     double t_call_commit0 = timing ? poly_now_ms() : 0.0;
     if (timing) t_loop_execute += t_call_commit0 - t_call_execute0;
-    if (ret == 0 && used_ctx_slots) {
-      ret = poly_commit_call_buffer_writes(plan->ctx, sched, k, plan->device, ctx_slots);
+    if (ret == 0) {
+      /* Normal schedule execution commits every ctx-backed write after a CALL.
+       * Compiled replay must do the same when no raw slot overrides are
+       * supplied; otherwise a CUDA kernel can update device memory while a
+       * previous host readback shadow remains marked current.  With explicit
+       * raw slot overrides, keep the mask so ctx residency is committed only
+       * for slots prepared from ctx->buffers. */
+      bool raw_slot_overrides = (n_slots > 0 && slot_data);
+      if (!raw_slot_overrides || used_ctx_slots) {
+        const bool *commit_slots = raw_slot_overrides ? ctx_slots : NULL;
+        ret = poly_commit_call_buffer_writes(plan->ctx, sched, k, plan->device, commit_slots);
+      }
     }
     if (timing) t_loop_commit += poly_now_ms() - t_call_commit0;
   }

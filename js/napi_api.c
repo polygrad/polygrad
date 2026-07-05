@@ -433,6 +433,30 @@ static napi_value napi_poly_const_int(napi_env env, napi_callback_info info) {
   return make_external(env, poly_const_int(ctx, val));
 }
 
+static napi_value napi_poly_const_float_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  double val;
+  int32_t dtype_id;
+  napi_get_value_double(env, argv[1], &val);
+  napi_get_value_int32(env, argv[2], &dtype_id);
+  return make_external(env, poly_const_float_by_id(ctx, val, dtype_id));
+}
+
+static napi_value napi_poly_const_int_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int64_t val;
+  int32_t dtype_id;
+  napi_get_value_int64(env, argv[1], &val);
+  napi_get_value_int32(env, argv[2], &dtype_id);
+  return make_external(env, poly_const_int_by_id(ctx, val, dtype_id));
+}
+
 /* ── ALU ops ───────────────────────────────────────────────────────────── */
 
 static napi_value napi_poly_contiguous(napi_env env, napi_callback_info info) {
@@ -3561,6 +3585,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_const_float", napi_poly_const_float),
       DECLARE_NAPI_METHOD("poly_const_double", napi_poly_const_double),
       DECLARE_NAPI_METHOD("poly_const_int", napi_poly_const_int),
+      DECLARE_NAPI_METHOD("poly_const_float_by_id", napi_poly_const_float_by_id),
+      DECLARE_NAPI_METHOD("poly_const_int_by_id", napi_poly_const_int_by_id),
 
       /* ALU */
       DECLARE_NAPI_METHOD("poly_contiguous", napi_poly_contiguous),

@@ -29,6 +29,7 @@ SOURCES = [
     # poly_realize_tensors calls the tensor physicalizer; sdists need this
     # source or .to()/placement builds miss COPY/DEVICE lowering.
     'src/placer.c',
+    'src/engine/jit.c',
     'src/engine/realize.c',
     'src/uop.c',
     'src/pat.c',
@@ -89,6 +90,7 @@ HEADERS = [
     'src/utils.h',
     'src/ctx.h',
     'src/device.h',
+    'src/engine/jit.h',
     'src/engine/realize.h',
     'src/runtime_wasm.h',
     'src/runtime_webgpu.h',

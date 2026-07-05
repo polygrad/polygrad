@@ -2033,7 +2033,24 @@ static PolyUOp *rule_x86_isel_stack_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
                          : item == 2 ? POLY_X86_VPBROADCASTW
                          : item == 4 ? POLY_X86_VPBROADCASTD
                                      : POLY_X86_VPBROADCASTQ;
-      PolyUOp *srcs[1] = {u->src[0]};
+      PolyUOp *src = u->src[0];
+      PolyUOp *srcs[1] = {src};
+      PolyUOp *candidate = x86_ins(ctx, bcast, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
+      X86IselUseCtx *uctx = (X86IselUseCtx *)poly_graph_rewrite_userctx();
+      if (src && src->op == POLY_OP_LOAD && src->n_src == 1 &&
+          x86_isel_foldable(uctx, candidate, src))
+        return candidate;
+
+      /* tinygrad x86.py:vpbroadcast: VPBROADCAST* takes an xmm/mem scalar
+       * source. If the source is not a foldable load, move the integer scalar
+       * to xmm by bitcasting through the same-size float dtype first. */
+      if (item == 1) {
+        src = poly_uop1(ctx, POLY_OP_CAST, POLY_INT16, src, poly_arg_none());
+        item = 2;
+      }
+      PolyDType fdt = item == 2 ? POLY_FLOAT16 : item == 4 ? POLY_FLOAT32 : POLY_FLOAT64;
+      src = poly_uop1(ctx, POLY_OP_BITCAST, fdt, src, poly_arg_none());
+      srcs[0] = src;
       return x86_ins(ctx, bcast, u->dtype, srcs, 1, x86_graph_vreg(u->dtype, false));
     }
     PolyX86Op op = item == 1 ? POLY_X86_VPINSRB

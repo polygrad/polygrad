@@ -84,7 +84,7 @@ static PolyDType frontend_value_dtype(PolyDType dt) {
   PolyDType base = dt;
   base.is_ptr = false;
   base.addrspace = POLY_ADDR_GLOBAL;
-  base.vcount = 1;
+  base.vcount = 0;
   base.ptr_size = 0;
   return poly_dtype_scalar(base);
 }

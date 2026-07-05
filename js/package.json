@@ -1,6 +1,6 @@
 {
   "name": "polygrad",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Tensor computation library with native and WASM backends",
   "type": "commonjs",
   "main": "src/index.js",

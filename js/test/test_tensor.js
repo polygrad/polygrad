@@ -13,7 +13,14 @@ function assertClose(arr, expected, tol) {
     throw new Error(`Length mismatch: ${arr.length} vs ${expected.length}`)
   }
   for (let i = 0; i < arr.length; i++) {
-    if (Math.abs(arr[i] - expected[i]) > tol) {
+    if (Number.isNaN(expected[i])) {
+      if (!Number.isNaN(arr[i])) {
+        throw new Error(`Mismatch at [${i}]: ${arr[i]} vs ${expected[i]}`)
+      }
+      continue
+    }
+    const diff = Math.abs(arr[i] - expected[i])
+    if (!Number.isFinite(diff) || diff > tol) {
       throw new Error(`Mismatch at [${i}]: ${arr[i]} vs ${expected[i]}`)
     }
   }
@@ -195,6 +202,100 @@ async function runTensorTests(pg) {
     const a = new Tensor([-3, 2, 5, -1])
     const b = new Tensor([1, 4, 3, 9])
     assertClose(await out.customKernel(a, b, selectKernel)[0].toArray(), [3, 4, 5, 1])
+  })
+
+  await test('customKernel exposes tinygrad-style floor div and mod', async () => {
+    function divKernel(out, x, y) {
+      out = out.flatten(); x = x.flatten(); y = y.flatten()
+      const i = pg.uop.range(x.numel(), 0)
+      const q = x.index(i).floordiv(y.index(i))
+      const r = x.index(i).floormod(y.index(i))
+      return out.index(i).store(q).end(i).sink(out.index(i.add(x.numel())).store(r).end(i))
+    }
+    const x = new Tensor(new Int32Array([-7, -7, 7, 7, -1, 1, 0]), { dtype: 'int32' })
+    const y = new Tensor(new Int32Array([3, -3, -3, 3, 4, -4, 3]), { dtype: 'int32' })
+    const out = Tensor.empty([14], { dtype: 'int32' })
+    assertClose(
+      await out.customKernel(x, y, divKernel)[0].toArray(),
+      [-3, 2, -3, 2, -1, -1, 0, 2, -1, -2, 1, 3, -3, 0]
+    )
+  })
+
+
+  await test('customKernel numeric literals follow float operand dtype', async () => {
+    function literalKernel(out, x) {
+      out = out.flatten(); x = x.flatten()
+      const i = pg.uop.range(x.numel(), 0)
+      const xv = x.index(i)
+      const sameAdd = xv.sub(1).div(xv.add(1))
+      const sameMul = xv.mul(2).div(xv.mul(3))
+      const s0 = out.index(i).store(sameAdd)
+      const s1 = out.index(i.add(x.numel())).store(sameMul)
+      return s0.end(i).sink(s1.end(i))
+    }
+    const xData = new Float32Array(16)
+    for (let i = 0; i < xData.length; i++) xData[i] = i / 10 + 1
+    const out = Tensor.empty([32], { dtype: 'float32' })
+    const got = await out.customKernel(new Tensor(xData, { dtype: 'float32' }), literalKernel)[0].toArray()
+    const expected = []
+    for (const x of xData) expected.push((x - 1) / (x + 1))
+    for (const x of xData) expected.push((x * 2) / (x * 3))
+    assertClose(got, expected, 1e-6)
+  })
+
+  await test('customKernel descriptor branches keep indexed placeholders typed', async () => {
+    function termKernel(out, x, fa, fb, op, p0, p1) {
+      out = out.flatten(); x = x.flatten(); fa = fa.flatten(); fb = fb.flatten()
+      op = op.flatten(); p0 = p0.flatten(); p1 = p1.flatten()
+      const rows = 4
+      const cols = 3
+      const idx = pg.uop.range(out.numel(), 0)
+      const c = idx.floordiv(rows)
+      const r = idx.mod(rows)
+      const a = x.index(r.mul(cols).add(fa.index(c)))
+      const b = x.index(r.mul(cols).add(fb.index(c)))
+      assert(pg.uop.dtype(a) === 'float32', `indexed placeholder should be float32, got ${pg.uop.dtype(a)}`)
+      const ab = b.lt(0).where(b.neg(), b)
+      const safeDen = ab.lt(1e-6).where(b.lt(0).where(-1e-6, 1e-6), b)
+      const z = a.mul(p0.index(c)).add(p1.index(c))
+      const opv = op.index(c)
+      let v = a.add(b)
+      v = opv.eq(1).where(a.sub(b), v)
+      v = opv.eq(2).where(a.mul(b), v)
+      v = opv.eq(3).where(a.div(safeDen), v)
+      v = opv.eq(4).where(z.sin(), v)
+      return out.index(idx).store(v).end(idx).sink()
+    }
+    const xData = new Float32Array([
+      1, 2, 3,
+      4, 5, 6,
+      7, 8, 9,
+      10, 11, 12,
+    ])
+    const fa = new Int32Array([0, 1])
+    const fb = new Int32Array([1, 2])
+    const op = new Int32Array([0, 1])
+    const p0 = new Float32Array([1.25, -0.5])
+    const p1 = new Float32Array([0.1, 0.2])
+    const expected = []
+    for (let c = 0; c < 2; c++) {
+      for (let r = 0; r < 4; r++) {
+        const a = xData[r * 3 + fa[c]]
+        const b = xData[r * 3 + fb[c]]
+        expected.push(c === 0 ? a + b : a - b)
+      }
+    }
+    const out = Tensor.empty([8], { dtype: 'float32' })
+    const got = out.customKernel(
+      new Tensor(xData),
+      new Tensor(fa, { dtype: 'int32' }),
+      new Tensor(fb, { dtype: 'int32' }),
+      new Tensor(op, { dtype: 'int32' }),
+      new Tensor(p0),
+      new Tensor(p1),
+      termKernel
+    )[0]
+    assertClose(await got.toArray(), expected, 1e-4)
   })
 
   await test('jit captures customKernel and replays after input update', async () => {
@@ -497,6 +598,49 @@ async function runTensorTests(pg) {
     }, [x, y])
     assertClose(await (await compiled.run([x, y])).toArray(), Array.from(expected), 1e-4)
     compiled.dispose()
+  })
+
+  await test('compiled customKernel consumer reads producer output after readback', async () => {
+    const n = 1024
+    function producerKernel(out, x) {
+      out = out.flatten(); x = x.flatten()
+      const i = pg.uop.range(out.numel(), 0)
+      return out.index(i).store(x.index(i).mul(2).add(1)).end(i).sink(
+        new pg.uop.KernelInfo({ name: 'custom_producer_readback_rebind', opts_to_apply: [] })
+      )
+    }
+    function consumerKernel(out, y) {
+      out = out.flatten(); y = y.flatten()
+      const r = pg.uop.range(n, 0, pg.uop.AxisType.REDUCE)
+      return out.index(0).store(y.index(r).sum(r)).sink(
+        new pg.uop.KernelInfo({ name: 'custom_consumer_readback_rebind', opts_to_apply: [] })
+      )
+    }
+    const x0 = Float32Array.from({ length: n }, (_, i) => i / 17)
+    const x1 = Float32Array.from({ length: n }, (_, i) => 10 + i / 11)
+    const x = new Tensor(x0, { dtype: 'float32' })
+    const producer = await pg.compile((tx) => {
+      const out = Tensor.empty([n], { dtype: 'float32' })
+      return out.customKernel(tx, producerKernel)[0]
+    }, [x])
+
+    const firstY = await producer.run([x])
+    await firstY.realize()
+    const consumer = await pg.compile((ty) => {
+      const out = Tensor.empty([1], { dtype: 'float32' })
+      return out.customKernel(ty, consumerKernel)[0]
+    }, [firstY])
+
+    const first = await consumer.run([firstY])
+    assertClose(await first.toArray(), [Array.from(x0).reduce((s, v) => s + v * 2 + 1, 0)], 1e-2)
+
+    x.copyFrom(x1)
+    const secondY = await producer.run([x])
+    const second = await consumer.run([secondY])
+    assertClose(await second.toArray(), [Array.from(x1).reduce((s, v) => s + v * 2 + 1, 0)], 1e-2)
+
+    producer.dispose()
+    consumer.dispose()
   })
 
   await test('runtime exposes conservative stats and capability checks', async () => {

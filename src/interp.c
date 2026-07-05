@@ -42,6 +42,21 @@
 #include <math.h>
 #include <limits.h>
 
+static int64_t interp_floor_div_i64(int64_t a, int64_t b) {
+  if (b == 0) return 0;
+  if (a == INT64_MIN && b == -1) return INT64_MIN;
+  int64_t q = a / b;
+  int64_t r = a % b;
+  if (r != 0 && ((a < 0) != (b < 0))) q--;
+  return q;
+}
+
+static int64_t interp_floor_mod_i64(int64_t a, int64_t b) {
+  if (b == 0) return 0;
+  if (a == INT64_MIN && b == -1) return 0;
+  return a - interp_floor_div_i64(a, b) * b;
+}
+
 /* Lane value (scalar) */
 
 typedef union {
@@ -379,6 +394,10 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
     return bi != 0 ? il_int(ai / bi) : il_int(0);
   case POLY_OP_MOD:
     return bi != 0 ? il_int(ai % bi) : il_int(0);
+  case POLY_OP_FLOORDIV:
+    return il_int(interp_floor_div_i64(ai, bi));
+  case POLY_OP_FLOORMOD:
+    return il_int(interp_floor_mod_i64(ai, bi));
   case POLY_OP_MAX:
     return is_flt ? il_flt(a > b ? a : b) : il_int(ai > bi ? ai : bi);
   case POLY_OP_POW:

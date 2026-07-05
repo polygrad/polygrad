@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 (2026-07-05)
+
+### Added
+- Python custom-kernel UOp helpers with compile/JIT replay, grouped stores, reductions, comparisons, unary ops, and repeated input mutation tests.
+- Structured linalg APIs for QR modes, triangular solve, Cholesky, Cholesky solve, solve, and least squares, implemented as portable tensor-composed fallbacks and checked against NumPy and Torch references.
+- Expanded backend coverage for CUDA, x86, WASM, WebGPU, interpreter, and native CPU common tests.
+- Batched typed readback and stable tensor input update helpers for compiled Python loops.
+
+### Changed
+- Runtime placement keeps `uop_logical` export roots independent from realized `uop_physical` roots after device execution.
+- Python source synchronization now includes the engine JIT files needed by sdist and wheel builds.
+
+### Fixed
+- CUDA compiled replay now rebinds custom-kernel producer outputs for downstream compiled consumers.
+- WebGPU, WASM, CUDA, and x86 fixes for custom-kernel reductions, typed constants, floor division/modulo, and vector/lane rendering.
+- Capability checks now report sort, argsort, and topk support consistently with execution.
+
 ## 0.3.0 (2026-05-25)
 
 ### Fixed

@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 """Broad frontend ratio benchmark: polygrad vs numpy/tinygrad/torch.
 
-Reports speedup ratios (polygrad_time / baseline_time) that are stable across
-hardware. Outputs JSON to bench/results/<timestamp>.json and a human-readable
-table to stderr.
+Reports speedup ratios (polygrad_time / baseline_time). Outputs JSON to
+bench/results/<timestamp>.json and a human-readable table to stderr.
 
 This script is intentionally broad and includes NumPy/Torch/frontend overhead.
+By default, sized forward workloads reuse input tensor objects, matching the
+tinygrad worker and NumPy/Torch paths. Use --fresh-inputs to include Polygrad
+Tensor construction in each timed iteration when investigating frontend import
+overhead specifically.
 Use bench/bench_tinygrad_parity.py for the tighter tinygrad_latest regression
 guard with matched input-reuse policy and fail-closed Polygrad library loading.
 
@@ -43,6 +46,7 @@ ITERS_ELEM = {1024: 50, 100_000: 20, 1_000_000: 10}
 ITERS_MATMUL = {64: 50, 256: 10}
 WARMUP = 3
 MLP_ITERS = 20
+FRESH_INPUTS = False
 
 RESULTS_DIR = Path(__file__).parent / 'results'
 
@@ -66,6 +70,11 @@ def pg_vecadd(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n).astype(np.float32)
     b_np = np.random.randn(n).astype(np.float32)
+    if not FRESH_INPUTS:
+        a, b = Tensor(a_np), Tensor(b_np)
+        for _ in range(WARMUP):
+            (a + b).numpy()
+        return _time_iters(lambda: (a + b).numpy(), iters)
     for _ in range(WARMUP):
         (Tensor(a_np) + Tensor(b_np)).numpy()
     return _time_iters(lambda: (Tensor(a_np) + Tensor(b_np)).numpy(), iters)
@@ -73,6 +82,11 @@ def pg_vecadd(n, iters):
 def pg_neg(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n).astype(np.float32)
+    if not FRESH_INPUTS:
+        a = Tensor(a_np)
+        for _ in range(WARMUP):
+            (-a).numpy()
+        return _time_iters(lambda: (-a).numpy(), iters)
     for _ in range(WARMUP):
         (-Tensor(a_np)).numpy()
     return _time_iters(lambda: (-Tensor(a_np)).numpy(), iters)
@@ -80,6 +94,11 @@ def pg_neg(n, iters):
 def pg_exp(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n).astype(np.float32)
+    if not FRESH_INPUTS:
+        a = Tensor(a_np)
+        for _ in range(WARMUP):
+            a.exp().numpy()
+        return _time_iters(lambda: a.exp().numpy(), iters)
     for _ in range(WARMUP):
         Tensor(a_np).exp().numpy()
     return _time_iters(lambda: Tensor(a_np).exp().numpy(), iters)
@@ -87,6 +106,11 @@ def pg_exp(n, iters):
 def pg_reduce_sum(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n).astype(np.float32)
+    if not FRESH_INPUTS:
+        a = Tensor(a_np)
+        for _ in range(WARMUP):
+            a.sum().numpy()
+        return _time_iters(lambda: a.sum().numpy(), iters)
     for _ in range(WARMUP):
         Tensor(a_np).sum().numpy()
     return _time_iters(lambda: Tensor(a_np).sum().numpy(), iters)
@@ -95,6 +119,11 @@ def pg_matmul(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n, n).astype(np.float32)
     b_np = np.random.randn(n, n).astype(np.float32)
+    if not FRESH_INPUTS:
+        a, b = Tensor(a_np), Tensor(b_np)
+        for _ in range(WARMUP):
+            a.matmul(b).numpy()
+        return _time_iters(lambda: a.matmul(b).numpy(), iters)
     for _ in range(WARMUP):
         Tensor(a_np).matmul(Tensor(b_np)).numpy()
     return _time_iters(lambda: Tensor(a_np).matmul(Tensor(b_np)).numpy(), iters)
@@ -103,6 +132,11 @@ def pg_fused_chain(n, iters):
     np.random.seed(42)
     a_np = np.random.randn(n).astype(np.float32)
     b_np = np.random.randn(n).astype(np.float32)
+    if not FRESH_INPUTS:
+        a, b = Tensor(a_np), Tensor(b_np)
+        for _ in range(WARMUP):
+            ((a + b) * (a - b) + a * b).numpy()
+        return _time_iters(lambda: ((a + b) * (a - b) + a * b).numpy(), iters)
     for _ in range(WARMUP):
         a, b = Tensor(a_np), Tensor(b_np)
         ((a + b) * (a - b) + a * b).numpy()
@@ -365,11 +399,17 @@ def _ratio(a, b):
 
 
 def main():
+    global FRESH_INPUTS
     skip_tinygrad = '--no-tinygrad' in sys.argv
     skip_torch = '--no-torch' in sys.argv
+    FRESH_INPUTS = '--fresh-inputs' in sys.argv
 
     print('\n  polygrad ratio benchmark', file=sys.stderr)
     print('  ========================\n', file=sys.stderr)
+    print(
+        f'  Polygrad input policy: {"fresh tensors each iteration" if FRESH_INPUTS else "reuse tensor inputs"}\n',
+        file=sys.stderr,
+    )
 
     # Run tinygrad in one subprocess call
     tg_results = None
@@ -453,6 +493,7 @@ def main():
             'arch': platform.machine(),
             'cpu': cpu_name,
         },
+        'input_policy': 'fresh-inputs' if FRESH_INPUTS else 'reuse-inputs',
         'python': results,
     }
     out_path.write_text(json.dumps(doc, indent=2) + '\n')

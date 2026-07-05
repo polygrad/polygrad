@@ -9,7 +9,14 @@ function assertClose(actual, expected, tol = 1e-4) {
     throw new Error(`length mismatch: ${actual.length} vs ${expected.length}`)
   }
   for (let i = 0; i < actual.length; i++) {
-    if (Math.abs(actual[i] - expected[i]) > tol) {
+    if (Number.isNaN(expected[i])) {
+      if (!Number.isNaN(actual[i])) {
+        throw new Error(`mismatch at [${i}]: ${actual[i]} vs ${expected[i]}`)
+      }
+      continue
+    }
+    const diff = Math.abs(actual[i] - expected[i])
+    if (!Number.isFinite(diff) || diff > tol) {
       throw new Error(`mismatch at [${i}]: ${actual[i]} vs ${expected[i]}`)
     }
   }

@@ -146,6 +146,19 @@ def main():
             file=sys.stderr,
         )
 
+    base_policy = baseline.get('input_policy')
+    current_policy = current.get('input_policy')
+    if base_policy != current_policy:
+        print(
+            f'WARNING: comparing different input policies: baseline={base_policy!r}, current={current_policy!r}',
+            file=sys.stderr,
+        )
+        print(
+            'Refresh the ignored local ratio baseline after intentional benchmark policy changes: '
+            'make bench-update-local-ratio-baseline',
+            file=sys.stderr,
+        )
+
     total_regress = 0
     total_improved = 0
 

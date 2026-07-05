@@ -539,6 +539,10 @@ int poly_buffer_ensure_device_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice d
 
 static const PolyBuffer *poly_buffer_valid_source(PolyBuffer *cur) {
   if (!cur) return NULL;
+  /* Browser HOST residencies can be frontend keys with ptr=NULL.  If a concrete
+   * valid mirror is attached, generic migration must copy from that mirror. */
+  if (cur->device == POLY_DEVICE_HOST && !cur->ptr && cur->src && cur->src->valid)
+    return cur->src;
   if (cur->valid) return cur;
   if (cur->src && cur->src->valid) return cur->src;
   return NULL;

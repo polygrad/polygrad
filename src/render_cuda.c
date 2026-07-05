@@ -265,6 +265,129 @@ static char *cuda_render_vector_expr(CudaStrMap *names, PolyUOp *u) {
   return expr.buf;
 }
 
+static int cuda_pos_mod_i64(int64_t v, int mod) {
+  if (mod <= 0) return 0;
+  int64_t r = v % mod;
+  if (r < 0) r += mod;
+  return (int)r;
+}
+
+static bool cuda_const_i64(PolyUOp *u, int64_t *out) {
+  if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return false;
+  if (out) *out = u->arg.i;
+  return true;
+}
+
+static bool cuda_expr_mod_const(PolyUOp *u, int mod, int *out) {
+  if (!u || mod <= 0) return false;
+  int64_t c0 = 0, c1 = 0;
+  int r0 = 0, r1 = 0;
+  switch (u->op) {
+  case POLY_OP_CONST:
+    if (!cuda_const_i64(u, &c0)) return false;
+    if (out) *out = cuda_pos_mod_i64(c0, mod);
+    return true;
+  case POLY_OP_ADD:
+    if (u->n_src < 2 || !cuda_expr_mod_const(u->src[0], mod, &r0) ||
+        !cuda_expr_mod_const(u->src[1], mod, &r1))
+      return false;
+    if (out) *out = (r0 + r1) % mod;
+    return true;
+  case POLY_OP_SUB:
+    if (u->n_src < 2 || !cuda_expr_mod_const(u->src[0], mod, &r0) ||
+        !cuda_expr_mod_const(u->src[1], mod, &r1))
+      return false;
+    if (out) *out = cuda_pos_mod_i64((int64_t)r0 - r1, mod);
+    return true;
+  case POLY_OP_MUL:
+    if (u->n_src < 2) return false;
+    if (cuda_const_i64(u->src[0], &c0) && (c0 % mod) == 0) {
+      if (out) *out = 0;
+      return true;
+    }
+    if (cuda_const_i64(u->src[1], &c1) && (c1 % mod) == 0) {
+      if (out) *out = 0;
+      return true;
+    }
+    if (cuda_expr_mod_const(u->src[0], mod, &r0) && cuda_expr_mod_const(u->src[1], mod, &r1)) {
+      if (out) *out = (int)(((int64_t)r0 * r1) % mod);
+      return true;
+    }
+    return false;
+  case POLY_OP_MULACC:
+    if (u->n_src < 3) return false;
+    if (!cuda_expr_mod_const(u->src[2], mod, &r1)) return false;
+    if ((cuda_const_i64(u->src[0], &c0) && (c0 % mod) == 0) ||
+        (cuda_const_i64(u->src[1], &c1) && (c1 % mod) == 0)) {
+      if (out) *out = r1;
+      return true;
+    }
+    if (cuda_expr_mod_const(u->src[0], mod, &r0) && cuda_expr_mod_const(u->src[1], mod, &r1)) {
+      int acc = 0;
+      if (!cuda_expr_mod_const(u->src[2], mod, &acc)) return false;
+      if (out) *out = (int)(((int64_t)r0 * r1 + acc) % mod);
+      return true;
+    }
+    return false;
+  case POLY_OP_SHL:
+    if (u->n_src < 2 || !cuda_const_i64(u->src[1], &c1) || c1 < 0 || c1 >= 62) return false;
+    if (((int64_t)1 << c1) % mod == 0) {
+      if (out) *out = 0;
+      return true;
+    }
+    if (!cuda_expr_mod_const(u->src[0], mod, &r0)) return false;
+    if (out) *out = (int)(((int64_t)r0 * ((int64_t)1 << c1)) % mod);
+    return true;
+  default:
+    return false;
+  }
+}
+
+static int cuda_value_lane_count(PolyUOp *u) {
+  while (u && (u->op == POLY_OP_COPY || u->op == POLY_OP_UNROLL) && u->n_src > 0)
+    u = u->src[0];
+  if (!u) return 1;
+  if ((u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) && u->n_src > 1) return u->n_src;
+  if (u->dtype.count > 1) return u->dtype.count;
+  return 1;
+}
+
+static int cuda_store_target_lane(PolyUOp *target, int lanes) {
+  if (lanes <= 1) return 0;
+  PolyUOp *idx = poly_find_memory_slice_through_cast(target);
+  if (!idx || idx->n_src < 2) return 0;
+  int lane = 0;
+  return cuda_expr_mod_const(idx->src[1], lanes, &lane) ? lane : 0;
+}
+
+static bool cuda_wraps_unroll(PolyUOp *u) {
+  if (!u) return false;
+  if (u->op == POLY_OP_UNROLL) return true;
+  if (u->op == POLY_OP_COPY && u->n_src > 0) return cuda_wraps_unroll(u->src[0]);
+  return false;
+}
+
+static char *cuda_render_lane_expr(CudaStrMap *names, PolyUOp *u, int lane) {
+  if (!u) return strdup("0");
+  if (u->op == POLY_OP_COPY && u->n_src > 0) return cuda_render_lane_expr(names, u->src[0], lane);
+  if (u->op == POLY_OP_UNROLL && u->n_src > 0) return cuda_render_lane_expr(names, u->src[0], lane);
+  if ((u->op == POLY_OP_VECTORIZE || u->op == POLY_OP_VCONST) && u->n_src > 0) {
+    int n = u->n_src;
+    int pick = cuda_pos_mod_i64(lane, n);
+    char *s = csmap_get(names, u->src[pick]);
+    return strdup(s ? s : "0");
+  }
+  char *s = csmap_get(names, u);
+  if (!s) return strdup("0");
+  if (u->dtype.count > 1) {
+    CudaStrBuf expr;
+    csb_init(&expr);
+    csb_printf(&expr, "(%s).%s", s, cuda_lane_name(cuda_pos_mod_i64(lane, u->dtype.count)));
+    return expr.buf;
+  }
+  return strdup(s);
+}
+
 static bool cuda_is_half(PolyDType dt) {
   PolyDType s = poly_dtype_scalar(dt);
   return s.priority == POLY_FLOAT16.priority || s.priority == POLY_BFLOAT16.priority;
@@ -750,6 +873,13 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       continue;
     }
 
+    /* --- COPY / UNROLL: transparent placement and expansion wrappers -- */
+    if ((u->op == POLY_OP_COPY || u->op == POLY_OP_UNROLL) && u->n_src > 0) {
+      char *src_name = csmap_get(&names, u->src[0]);
+      if (src_name) csmap_set(&names, u, strdup(src_name));
+      continue;
+    }
+
     /* --- LOAD --------------------------------------------------------- */
     if (u->op == POLY_OP_LOAD) {
       char name[32];
@@ -790,6 +920,13 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     if (u->op == POLY_OP_STORE) {
       char *target = csmap_get(&names, u->src[0]);
       char *val = csmap_get(&names, u->src[1]);
+      char *owned_val = NULL;
+      if (cuda_wraps_unroll(u->src[1])) {
+        int lanes = cuda_value_lane_count(u->src[1]);
+        int lane = cuda_store_target_lane(u->src[0], lanes);
+        owned_val = cuda_render_lane_expr(&names, u->src[1], lane);
+        val = owned_val;
+      }
 
       /* Gated STORE: if the INDEX has a 3rd source (boolean gate), wrap
        * the store in `if (gate) { ... }`.  This is the CUDA-side lowering
@@ -816,9 +953,9 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
       if (store_to_local)
-        csb_printf(&body, "%s = %s;\n", target, val);
+        csb_printf(&body, "%s = %s;\n", target, val ? val : "null");
       else
-        csb_printf(&body, "*%s = %s;\n", target, val);
+        csb_printf(&body, "*%s = %s;\n", target, val ? val : "null");
 
       if (gated_store) {
         depth--;
@@ -826,6 +963,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
           csb_puts(&body, "  ");
         csb_puts(&body, "}\n");
       }
+      free(owned_val);
       continue;
     }
 

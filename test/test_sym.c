@@ -60,6 +60,26 @@ TEST(alu, fold_mod) {
   PASS();
 }
 
+TEST(alu, fold_floordiv_floormod_signed_like_tinygrad) {
+  const int64_t vals[][4] = {
+      {-7, 3, -3, 2},
+      {-7, -3, 2, -1},
+      {7, -3, -3, -2},
+      {7, 3, 2, 1},
+      {-1, 4, -1, 3},
+      {1, -4, -1, -3},
+      {0, 3, 0, 0},
+  };
+  for (int i = 0; i < (int)(sizeof(vals) / sizeof(vals[0])); i++) {
+    PolyArg ops[2] = {poly_arg_int(vals[i][0]), poly_arg_int(vals[i][1])};
+    PolyArg q = poly_exec_alu(POLY_OP_FLOORDIV, POLY_INT32, ops, 2);
+    PolyArg r = poly_exec_alu(POLY_OP_FLOORMOD, POLY_INT32, ops, 2);
+    ASSERT_INT_EQ(q.i, vals[i][2]);
+    ASSERT_INT_EQ(r.i, vals[i][3]);
+  }
+  PASS();
+}
+
 TEST(alu, fold_cmplt) {
   PolyArg ops[2] = {poly_arg_int(2), poly_arg_int(5)};
   PolyArg r = poly_exec_alu(POLY_OP_CMPLT, POLY_INT32, ops, 2);
@@ -871,6 +891,17 @@ TEST(sym, minmax_mod_dvn_3_mixed) {
   PolyUOp *u = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, dvn, mk_const(ctx, 3), poly_arg_none());
   /* tinygrad: dvn vmin=-3 vmax=4, mod 3 -> middle branch -> [-2, 2] */
   check_mm(ctx, u, -2, 2, "dvn%3");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_floordiv_floormod_dvn_3_mixed) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *dvn = mk_dvar(ctx, "y", -3, 4);
+  PolyUOp *q = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT32, dvn, mk_const(ctx, 3), poly_arg_none());
+  PolyUOp *r = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INT32, dvn, mk_const(ctx, 3), poly_arg_none());
+  check_mm(ctx, q, -1, 1, "floor(dvn/3)");
+  check_mm(ctx, r, 0, 2, "floor_mod(dvn,3)");
   poly_ctx_destroy(ctx);
   PASS();
 }

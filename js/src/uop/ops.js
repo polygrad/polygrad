@@ -188,6 +188,39 @@ class UOp {
     throw new TypeError(`cannot convert ${typeof value} to UOp`)
   }
 
+  _dtypeName() {
+    if (!this.raw || !this.ffi.poly_uop_dtype_id) return null
+    const id = Number(this.ffi.poly_uop_dtype_id(this.ctx, this.raw))
+    const names = this.ffi.__polygradDtypeNameById || {}
+    return names[id] || null
+  }
+
+  _dtypeId() {
+    if (!this.raw || !this.ffi.poly_uop_dtype_id) return -1
+    return Number(this.ffi.poly_uop_dtype_id(this.ctx, this.raw))
+  }
+
+  _coerceLike(value, ref) {
+    if (value instanceof UOp) return value
+    if (typeof value !== 'number') throw new TypeError(`cannot convert ${typeof value} to UOp`)
+    const dtypeId = ref instanceof UOp ? ref._dtypeId() : -1
+    if (dtypeId >= 0 && this.ffi.poly_const_float_by_id) {
+      const raw = this.ffi.poly_const_float_by_id(this.ctx, value, dtypeId)
+      if (raw) return new UOp(this.ctx, this.ffi, raw)
+    }
+    if (dtypeId >= 0 && Number.isInteger(value) && this.ffi.poly_const_int_by_id) {
+      const raw = this.ffi.poly_const_int_by_id(this.ctx, value, dtypeId)
+      if (raw) return new UOp(this.ctx, this.ffi, raw)
+    }
+    const dtype = ref instanceof UOp ? ref._dtypeName() : null
+    if (dtype === 'float64') return new UOp(this.ctx, this.ffi, this.ffi.poly_const_double(this.ctx, value))
+    if (dtype && (dtype.startsWith('float') || dtype === 'bfloat16')) {
+      return new UOp(this.ctx, this.ffi, this.ffi.poly_const_float(this.ctx, value))
+    }
+    if (Number.isInteger(value)) return new UOp(this.ctx, this.ffi, this.ffi.poly_const_int(this.ctx, value))
+    return new UOp(this.ctx, this.ffi, this.ffi.poly_const_float(this.ctx, value))
+  }
+
   _op(name) {
     const ops = this.ffi.__polygradOps || {}
     const op = ops[name]
@@ -201,14 +234,14 @@ class UOp {
   }
 
   _alu2(name, other) {
-    const b = this._coerce(other)
+    const b = this._coerceLike(other, this)
     const raw = this.ffi.poly_alu2(this.ctx, this._op(name), this.raw, b.raw)
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
 
   _alu3(name, b, c) {
-    b = this._coerce(b)
-    c = this._coerce(c)
+    b = this._coerceLike(b, this)
+    c = this._coerceLike(c, this)
     const raw = this.ffi.poly_alu3(this.ctx, this._op(name), this.raw, b.raw, c.raw)
     return raw ? new UOp(this.ctx, this.ffi, raw) : null
   }
@@ -218,7 +251,10 @@ class UOp {
   mul(other) { return this._alu2('MUL', other) }
   div(other) { return this._alu2('FDIV', other) }
   cdiv(other) { return this._alu2('CDIV', other) }
-  mod(other) { return this._alu2('CMOD', other) }
+  cmod(other) { return this._alu2('CMOD', other) }
+  floordiv(other) { return this._alu2('FLOORDIV', other) }
+  floormod(other) { return this._alu2('FLOORMOD', other) }
+  mod(other) { return this.floormod(other) }
   max(other) { return this._alu2('MAX', other) }
   and(other) { return this._alu2('AND', other) }
   or(other) { return this._alu2('OR', other) }
@@ -239,7 +275,12 @@ class UOp {
   sin() { return this._alu1('SIN') }
   reciprocal() { return this._alu1('RECIPROCAL') }
   trunc() { return this._alu1('TRUNC') }
-  where(yes, no) { return this._alu3('WHERE', yes, no) }
+  where(yes, no) {
+    const ref = yes instanceof UOp ? yes : no instanceof UOp ? no : this
+    const y = this._coerceLike(yes, ref)
+    const n = this._coerceLike(no, ref)
+    return this._alu3('WHERE', y, n)
+  }
   mulacc(mul, acc) { return this._alu3('MULACC', mul, acc) }
 
   reduce(op, ...ranges) {
@@ -263,6 +304,7 @@ function createBoundUopNamespace(runtime) {
   ffi.__polygradOps = runtime._core.ops || {}
   const dtypeNameById = {}
   for (const [name, id] of Object.entries(dtypeIds || {})) dtypeNameById[Number(id)] = name
+  ffi.__polygradDtypeNameById = dtypeNameById
 
   function wrap(value) {
     if (value instanceof UOp) return value

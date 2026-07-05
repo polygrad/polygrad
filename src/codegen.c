@@ -2724,6 +2724,55 @@ static PolyUOp *rule_idiv_to_shr(PolyCtx *ctx, PolyUOp *root, const PolyBindings
   return poly_uop2(ctx, POLY_OP_SHR, root->dtype, corrected, shift_const, poly_arg_none());
 }
 
+static bool divmod_floor_same_as_c(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  int64_t a_min = 0, a_max = 0, b_min = 0, b_max = 0;
+  poly_uop_minmax(ctx, a, &a_min, &a_max);
+  poly_uop_minmax(ctx, b, &b_min, &b_max);
+  return (a_min >= 0 && b_min > 0) || (a_max <= 0 && b_max < 0);
+}
+
+static PolyUOp *rule_floordiv_to_cdiv(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->n_src != 2 || !poly_dtype_is_int(poly_dtype_scalar(root->dtype))) return NULL;
+  PolyUOp *a = root->src[0];
+  PolyUOp *den = root->src[1];
+  if (poly_dtype_is_unsigned(poly_dtype_scalar(root->dtype)) || divmod_floor_same_as_c(ctx, a, den))
+    return poly_uop2(ctx, POLY_OP_CDIV, root->dtype, a, den, poly_arg_none());
+
+  PolyUOp *trunc = poly_uop2(ctx, POLY_OP_CDIV, root->dtype, a, den, poly_arg_none());
+  PolyUOp *rem = poly_uop2(ctx, POLY_OP_CMOD, root->dtype, a, den, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(0));
+  PolyDType bt = (root->dtype.count > 1) ? poly_dtype_vec(POLY_BOOL, root->dtype.count) : POLY_BOOL;
+  PolyUOp *rem_ne_zero = poly_uop2(ctx, POLY_OP_CMPNE, bt, rem, zero, poly_arg_none());
+  PolyUOp *a_lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, bt, a, zero, poly_arg_none());
+  PolyUOp *b_lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, bt, den, zero, poly_arg_none());
+  PolyUOp *sign_mismatch = poly_uop2(ctx, POLY_OP_CMPNE, bt, a_lt_zero, b_lt_zero, poly_arg_none());
+  PolyUOp *needs_adjust = poly_uop2(ctx, POLY_OP_AND, bt, rem_ne_zero, sign_mismatch, poly_arg_none());
+  PolyUOp *adjust = poly_uop1(ctx, POLY_OP_CAST, root->dtype, needs_adjust, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_SUB, root->dtype, trunc, adjust, poly_arg_none());
+}
+
+static PolyUOp *rule_floormod_to_cmod(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  if (!root || root->n_src != 2 || !poly_dtype_is_int(poly_dtype_scalar(root->dtype))) return NULL;
+  PolyUOp *a = root->src[0];
+  PolyUOp *den = root->src[1];
+  if (poly_dtype_is_unsigned(poly_dtype_scalar(root->dtype)) || divmod_floor_same_as_c(ctx, a, den))
+    return poly_uop2(ctx, POLY_OP_CMOD, root->dtype, a, den, poly_arg_none());
+
+  PolyUOp *rem = poly_uop2(ctx, POLY_OP_CMOD, root->dtype, a, den, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, root->dtype, poly_arg_int(0));
+  PolyDType bt = (root->dtype.count > 1) ? poly_dtype_vec(POLY_BOOL, root->dtype.count) : POLY_BOOL;
+  PolyUOp *rem_ne_zero = poly_uop2(ctx, POLY_OP_CMPNE, bt, rem, zero, poly_arg_none());
+  PolyUOp *a_lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, bt, a, zero, poly_arg_none());
+  PolyUOp *b_lt_zero = poly_uop2(ctx, POLY_OP_CMPLT, bt, den, zero, poly_arg_none());
+  PolyUOp *sign_mismatch = poly_uop2(ctx, POLY_OP_CMPNE, bt, a_lt_zero, b_lt_zero, poly_arg_none());
+  PolyUOp *needs_adjust = poly_uop2(ctx, POLY_OP_AND, bt, rem_ne_zero, sign_mismatch, poly_arg_none());
+  PolyUOp *correction =
+      poly_uop3(ctx, POLY_OP_WHERE, root->dtype, needs_adjust, den, zero, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_ADD, root->dtype, rem, correction, poly_arg_none());
+}
+
 /*
  * rule_mulacc_to_mul_add — MULACC(a, b, c) → ADD(MUL(a, b), c)
  * For renderers without native FMA (CPU/ClangRenderer).
@@ -3084,7 +3133,7 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
   if (*target) return *target;
 
   PolyOpSet max_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_MAX);
-  PolyRule rules[20];
+  PolyRule rules[24];
   int n = 0;
   rules[n++] = (PolyRule){poly_pat_ops(max_set, NULL, 0, NULL), rule_decomp_max};
   /* MUL(x:int, c:const) → SHL(x, log2(c)) when c is power of 2 */
@@ -3093,6 +3142,10 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
   /* x * (-1) → NEG(x) */
   rules[n++] = (PolyRule
   ){poly_pat_op2(POLY_OP_MUL, poly_pat_any("x"), poly_pat_cvar("c"), NULL), rule_mul_neg1_to_neg};
+  rules[n++] = (PolyRule
+  ){poly_pat_op(POLY_OP_FLOORDIV, NULL, 0, NULL), rule_floordiv_to_cdiv};
+  rules[n++] = (PolyRule
+  ){poly_pat_op(POLY_OP_FLOORMOD, NULL, 0, NULL), rule_floormod_to_cmod};
   /* IDIV(x:int, c:const) → SHR(x, log2(c)) when c is power of 2 */
   rules[n++] = (PolyRule
   ){poly_pat_op2(POLY_OP_IDIV, poly_pat_any("x"), poly_pat_cvar("c"), NULL), rule_idiv_to_shr};

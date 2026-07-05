@@ -697,6 +697,33 @@ static PolyDType wasm_alu_src_dtype(PolyUOp *u, int src_idx) {
 static void emit_alu_sources(WasmBuf *body, LocalMap *locals, PolyUOp *u) {
   if (!u) return;
 
+  if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
+    int s1 = lm_get(locals, u->src[1]);
+    int s2 = lm_get(locals, u->src[2]);
+    int s0 = lm_get(locals, u->src[0]);
+    emit_local_get_for_alu_src(body, s1, u->src[1]->dtype, wasm_alu_src_dtype(u, 1));
+    emit_local_get_for_alu_src(body, s2, u->src[2]->dtype, wasm_alu_src_dtype(u, 2));
+    wb_byte(body, WASM_OP_LOCAL_GET);
+    wb_uleb128(body, s0);
+    PolyDType cond_dt = u->src[0]->dtype;
+    if (poly_dtype_is_float(cond_dt)) {
+      if (cond_dt.bitsize == 64) {
+        wb_byte(body, WASM_OP_F64_CONST);
+        wb_f64(body, 0.0);
+        wb_byte(body, WASM_OP_F64_NE);
+      } else {
+        wb_byte(body, WASM_OP_F32_CONST);
+        wb_f32(body, 0.0f);
+        wb_byte(body, WASM_OP_F32_NE);
+      }
+    } else if (cond_dt.bitsize == 64) {
+      wb_byte(body, WASM_OP_I64_CONST);
+      wb_sleb128(body, 0);
+      wb_byte(body, WASM_OP_I64_NE);
+    }
+    return;
+  }
+
   if (u->op == POLY_OP_MULACC && u->n_src >= 3) {
     /* tinygrad defines MULACC(x, y, z) as (x * y) + z. WASM binary ops
      * consume the top two stack values, so push the addend first, then the
@@ -2528,34 +2555,6 @@ static void build_code_scalar(
         emit_vector_sources(&body, &locals, u);
       } else if (vector_lane_fallback) {
         emit_vector_alu_lane_fallback(&body, &locals, u, math, n_imported_funcs);
-      } else if (u->op == POLY_OP_WHERE && u->n_src >= 3) {
-        int s1 = lm_get(&locals, u->src[1]);
-        int s2 = lm_get(&locals, u->src[2]);
-        int s0 = lm_get(&locals, u->src[0]);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, s1);
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, s2);
-        /* Emit condition as i32 */
-        wb_byte(&body, WASM_OP_LOCAL_GET);
-        wb_uleb128(&body, s0);
-        PolyDType cond_dt = u->src[0]->dtype;
-        if (poly_dtype_is_float(cond_dt)) {
-          if (cond_dt.bitsize == 64) {
-            wb_byte(&body, WASM_OP_F64_CONST);
-            wb_f64(&body, 0.0);
-            wb_byte(&body, WASM_OP_F64_NE);
-          } else {
-            wb_byte(&body, WASM_OP_F32_CONST);
-            wb_f32(&body, 0.0f);
-            wb_byte(&body, WASM_OP_F32_NE);
-          }
-        } else if (cond_dt.bitsize == 64) {
-          wb_byte(&body, WASM_OP_I64_CONST);
-          wb_sleb128(&body, 0);
-          wb_byte(&body, WASM_OP_I64_NE);
-        }
-        /* i32/bool: already valid for select */
       } else {
         emit_alu_sources(&body, &locals, u);
       }

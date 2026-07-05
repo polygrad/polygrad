@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include "utils.h"
 
+static int64_t floordiv(int64_t a, int64_t b);
+
 /* Overflow-safe int64 helpers */
 
 static bool i64_add_ok(int64_t a, int64_t b, int64_t *out) {
@@ -336,6 +338,23 @@ static bool poly_uop_minmax_node(
         return true;
       }
     }
+    if (u->op == POLY_OP_FLOORMOD) {
+      if (b0 == b1 && b0 > 0) {
+        *vmin = 0;
+        *vmax = b0 - 1;
+        return true;
+      }
+      if (b0 > 0) {
+        *vmin = 0;
+        *vmax = b1 - 1;
+        return true;
+      }
+      if (b1 < 0) {
+        *vmin = b0 + 1;
+        *vmax = 0;
+        return true;
+      }
+    }
     if (u->op == POLY_OP_IDIV) {
       /* Only handle the case where the divisor sign is known */
       /* Tinygrad ops.py:875 uses `s1_vmin*s1_vmax>0` which can overflow
@@ -344,6 +363,15 @@ static bool poly_uop_minmax_node(
       if ((b0 > 0 && b1 > 0) || (b0 < 0 && b1 < 0)) {
         int64_t v0 = cdiv(a0, b0), v1 = cdiv(a0, b1);
         int64_t v2 = cdiv(a1, b0), v3 = cdiv(a1, b1);
+        *vmin = min4(v0, v1, v2, v3);
+        *vmax = max4(v0, v1, v2, v3);
+        return true;
+      }
+    }
+    if (u->op == POLY_OP_FLOORDIV) {
+      if ((b0 > 0 && b1 > 0) || (b0 < 0 && b1 < 0)) {
+        int64_t v0 = floordiv(a0, b0), v1 = floordiv(a0, b1);
+        int64_t v2 = floordiv(a1, b0), v3 = floordiv(a1, b1);
         *vmin = min4(v0, v1, v2, v3);
         *vmax = max4(v0, v1, v2, v3);
         return true;

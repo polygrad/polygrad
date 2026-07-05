@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0 (2026-07-05)
+
+### Added
+- Tinygrad-style custom kernels across C, Python, and JavaScript frontends, including UOp `CALL` execution, compile/JIT replay, grouped stores, reductions, comparisons, unary ops, and repeated input mutation coverage.
+- Structured linalg APIs for QR modes, triangular solve, Cholesky, Cholesky solve, solve, and least squares, implemented as portable tensor-composed fallbacks with NumPy and Torch reference coverage.
+- Expanded native x86 backend work aligned with tinygrad X86 instruction selection patterns, plus common and x86-specific C, Python, and JavaScript coverage.
+- Batched typed readback helpers and stable tensor input update APIs for compiled loops.
+- Qwen3 GGUF smoke coverage on native CUDA/CPU and browser WebGPU, plus jax-js WASM comparison benchmarks for generic kernels, matmul, and model-shaped workloads.
+
+### Changed
+- Node and browser runtimes now use the unified C realization path for WASM/WebGPU execution and ship refreshed package artifacts.
+- Runtime placement preserves the split between exportable logical tensor roots and realized physical roots after device placement.
+- Python source synchronization now includes the engine JIT sources required by the shared runtime in sdist and wheel builds.
+
+### Fixed
+- CUDA compiled replay now rebinds custom-kernel producer outputs for downstream compiled consumers.
+- WebGPU WGSL rendering now handles `COPY`/`UNROLL`-wrapped multi-output custom-kernel stores and selects the correct lane for unrolled/vector store values.
+- WASM, CUDA, and x86 lowering fixes for custom-kernel reductions, floor division/modulo, typed constants, and vector/lane rendering.
+- Advisory capability checks now cover sort, argsort, and topk queries that direct execution already supported.
+
 ## 0.3.0 (2026-05-25)
 
 ### Fixed

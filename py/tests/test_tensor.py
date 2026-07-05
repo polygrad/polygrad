@@ -785,6 +785,46 @@ class TestJit:
         compiled = pg_compile(f, [Tensor(x_data), Tensor(y_data)])
         np.testing.assert_allclose(compiled.run([Tensor(x_data), Tensor(y_data)]).numpy(), expected, rtol=1e-5, atol=1e-5)
 
+    def test_compiled_custom_kernel_consumer_reads_producer_output_after_readback(self):
+        n = 1024
+
+        def producer_kernel(out, x):
+            out, x = out.flatten(), x.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            return out[i].store(x[i] * 2 + 1).end(i).sink(
+                arg=KernelInfo(name='custom_producer_readback_rebind', opts_to_apply=())
+            )
+
+        def consumer_kernel(out, y):
+            out, y = out.flatten(), y.flatten()
+            r = UOp.range(out.ctx, n, 0, AxisType.REDUCE)
+            return out[0].store(y[r].sum(r)).sink(
+                arg=KernelInfo(name='custom_consumer_readback_rebind', opts_to_apply=())
+            )
+
+        x0 = np.arange(n, dtype=np.float32) / 17
+        x = Tensor(x0)
+        producer = pg_compile(
+            lambda tx: Tensor.empty((n,), dtype='float32').custom_kernel(tx, fxn=producer_kernel)[0],
+            [x],
+        )
+
+        first_y = producer.run([x])
+        first_y.realize()
+        consumer = pg_compile(
+            lambda ty: Tensor.empty((1,), dtype='float32').custom_kernel(ty, fxn=consumer_kernel)[0],
+            [first_y],
+        )
+
+        first = consumer.run([first_y])
+        np.testing.assert_allclose(first.numpy(), [(x0 * 2 + 1).sum()], rtol=1e-5, atol=1e-2)
+
+        x1 = 10 + np.arange(n, dtype=np.float32) / 11
+        x.copy_from(x1)
+        second_y = producer.run([x])
+        second = consumer.run([second_y])
+        np.testing.assert_allclose(second.numpy(), [(x1 * 2 + 1).sum()], rtol=1e-5, atol=1e-2)
+
     def test_custom_kernel_exposes_uop_compare_where_and_unary_methods(self):
         def select_kernel(out, a, b):
             out, a, b = out.flatten(), a.flatten(), b.flatten()
@@ -801,6 +841,56 @@ class TestJit:
             out.custom_kernel(a, b, fxn=select_kernel)[0].numpy(),
             [3.0, 4.0, 5.0, 1.0],
         )
+
+    def test_custom_kernel_exposes_uop_floor_div_and_mod(self):
+        from polygrad.dtype import dtypes
+
+        def index_kernel(out):
+            out = out.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            row = i.floormod(4)
+            col = i.floordiv(4)
+            return out[i].store((col * 10 + row).cast(dtypes.float32)).end(i).sink()
+
+        out = Tensor.empty((12,), dtype='float32')
+        np.testing.assert_allclose(
+            out.custom_kernel(fxn=index_kernel)[0].numpy(),
+            [0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23],
+        )
+
+        def signed_kernel(out, x, y):
+            out, x, y = out.flatten(), x.flatten(), y.flatten()
+            i = UOp.range(out.ctx, x.numel(), 0)
+            q = x[i].floordiv(y[i])
+            r = x[i].floormod(y[i])
+            return out[i].store(q).end(i).sink(out[i + x.numel()].store(r).end(i))
+
+        x = Tensor(np.array([-7, -7, 7, 7, -1, 1, 0], dtype=np.int32))
+        y = Tensor(np.array([3, -3, -3, 3, 4, -4, 3], dtype=np.int32))
+        out = Tensor.empty((14,), dtype='int32')
+        np.testing.assert_array_equal(
+            out.custom_kernel(x, y, fxn=signed_kernel)[0].numpy(),
+            np.array([-3, 2, -3, 2, -1, -1, 0, 2, -1, -2, 1, 3, -3, 0], dtype=np.int32),
+        )
+
+    def test_custom_kernel_numeric_literals_follow_float_operand_dtype(self):
+        def literal_kernel(out, x):
+            out, x = out.flatten(), x.flatten()
+            i = UOp.range(out.ctx, x.numel(), 0)
+            same_add = (x[i] - 1) / (x[i] + 1)
+            same_mul = (x[i] * 2) / (x[i] * 3)
+            s0 = out[i].store(same_add)
+            s1 = out[i + x.numel()].store(same_mul)
+            return s0.end(i).sink(s1.end(i))
+
+        x_np = (np.arange(16, dtype=np.float32) / 10.0) + 1.0
+        out = Tensor.empty((32,), dtype='float32')
+        got = out.custom_kernel(Tensor(x_np), fxn=literal_kernel)[0].numpy()
+        expected = np.concatenate([
+            (x_np - 1.0) / (x_np + 1.0),
+            (x_np * 2.0) / (x_np * 3.0),
+        ])
+        np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-6)
 
 
 class TestElementwise:
