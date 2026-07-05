@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 (2026-07-05)
+
+### Fixed
+- Include the pure Python `polygrad` package files in wheels built from the
+  PyPI source distribution. The 0.4.0 sdist uploaded correctly, but wheels built
+  from it installed only `polygrad._native` and metadata.
+
 ## 0.4.0 (2026-07-05)
 
 ### Added

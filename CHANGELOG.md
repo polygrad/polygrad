@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 (2026-07-05)
+
+### Fixed
+- Python package repair release: wheels built from the PyPI source distribution
+  now include the pure Python `polygrad` package files in addition to
+  `polygrad._native`. The npm 0.4.0 package was not affected.
+
 ## 0.4.0 (2026-07-05)
 
 ### Added

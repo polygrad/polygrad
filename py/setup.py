@@ -3,7 +3,7 @@ import re
 import runpy
 import subprocess
 import sys
-from setuptools import setup, Extension
+from setuptools import setup, Extension, find_packages
 
 if sys.platform == 'win32':
     sys.exit(
@@ -79,6 +79,8 @@ if sys.platform.startswith('linux'):
 setup(
     name='polygrad',
     version=_read_version(),
+    packages=find_packages(include=['polygrad', 'polygrad.*']),
+    package_data={'polygrad': ['_native.c']},
     ext_modules=[
         Extension(
             'polygrad._native',
