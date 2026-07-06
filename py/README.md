@@ -113,6 +113,20 @@ The Python package uses a module-level default C context. Caller-created tensors
 share that context, so package functions should accept and return `Tensor`
 objects rather than copying through NumPy unless readback is required.
 
+For explicit context/device ownership, create a runtime:
+
+```python
+import polygrad
+
+pg = polygrad.create(device="cpu")
+x = pg.Tensor([1, 2, 3])
+print(((x * 2) + 1).numpy())
+pg.dispose()
+```
+
+Use explicit runtimes for isolation, device-specific package wiring, or tests
+that need independent compiler caches.
+
 ## Data Flow
 
 Polygrad tensors are lazy. Use `realize()` to execute and `numpy()` when host
@@ -241,35 +255,153 @@ result = generate(inst, tokens, max_new_tokens=2, temperature=1.0, top_k=10)
 Supported path today: GPT-2 style configs and F32/F16/BF16 safetensors. Qwen
 family loading is available through the shared C/GGUF paths where configured.
 
-## API Summary
+## Common API Recipes
 
-Construction:
+Create tensors:
 
-| Method | Description |
+```python
+from polygrad import Tensor
+
+x = Tensor([1, 2, 3])
+a = Tensor.zeros(2, 3)
+b = Tensor.ones(2, 3)
+c = Tensor.randn(2, 3)
+d = Tensor.arange(0, 6).reshape(2, 3)
+```
+
+Use NumPy buffers:
+
+```python
+import numpy as np
+from polygrad import Tensor
+
+arr = np.array([1, 2, 3, 4], dtype=np.float32)
+x = Tensor(arr).reshape(2, 2)
+print((x * 2 + 1).numpy())
+```
+
+Math, movement, indexing:
+
+```python
+x = Tensor.arange(0, 12).reshape(3, 4)
+y = x.permute(1, 0).reshape(2, 6)
+z = y.relu().sum(axis=1)
+picked = x.gather(1, Tensor([[0, 2], [1, 3], [0, 1]], dtype="int32"))
+```
+
+Autograd:
+
+```python
+x = Tensor([1.0, 2.0, 3.0])
+x.requires_grad = True
+
+loss = (x * x).sum()
+loss.backward()
+print(x.grad.numpy())
+```
+
+Training loop:
+
+```python
+from polygrad import Tensor
+from polygrad.nn import Linear, SGD, get_parameters
+
+model = Linear(4, 1)
+opt = SGD(get_parameters(model), lr=0.01)
+
+x = Tensor.randn(8, 4)
+target = Tensor.randn(8, 1)
+
+opt.zero_grad()
+loss = (model(x) - target).square().mean()
+loss.backward()
+opt.step()
+```
+
+Devices and explicit runtime ownership:
+
+```python
+import polygrad
+from polygrad import Tensor
+
+x = Tensor([1, 2, 3]).to("cpu")
+print((x * 2).numpy())
+
+pg = polygrad.create(device="cpu")
+y = pg.Tensor([1, 2, 3])
+print((y * 2 + 1).numpy())
+pg.dispose()
+```
+
+Linear algebra:
+
+```python
+A = Tensor([[4.0, 2.0], [2.0, 5.0]])
+b = Tensor([1.0, 3.0])
+
+print(A.solve(b).numpy())
+print(A.cholesky().numpy())
+print(A.lstsq(b).numpy())
+```
+
+JIT and compile:
+
+```python
+from polygrad import Tensor, jit, compile
+
+@jit
+def step(x):
+    return (x + 1).realize()
+
+print(step(Tensor([1, 2, 3])).numpy())  # run
+print(step(Tensor([4, 5, 6])).numpy())  # capture
+print(step(Tensor([7, 8, 9])).numpy())  # replay
+
+compiled = compile(lambda x: (x * 2).realize(), [Tensor.empty(3)])
+print(compiled.run([Tensor([1, 2, 3])]).numpy())
+compiled.dispose()
+```
+
+Repeated input updates:
+
+```python
+import numpy as np
+from polygrad import Tensor, compile
+
+x = Tensor(np.array([1, 2, 3], dtype=np.float32)).realize()
+f = compile(lambda x: x.square().sum().realize(), [x])
+
+print(f.run([x]).item())
+x.copy_from(np.array([4, 5, 6], dtype=np.float32))
+print(f.run([x]).item())
+f.dispose()
+```
+
+Runtime inspection:
+
+```python
+import polygrad
+
+print(polygrad.stats())
+print(polygrad.can_run("add", shape=[1024]))
+```
+
+`can_run(...)` is conservative. For some compound op/shape queries it raises
+when support cannot be proven statically.
+
+API reference at a glance:
+
+| Area | Main APIs |
 |---|---|
-| `Tensor(data)` | From list, NumPy array, or scalar |
-| `Tensor.zeros(*shape)` | Tensor of zeros |
-| `Tensor.ones(*shape)` | Tensor of ones |
-| `Tensor.full(shape, val)` | Tensor filled with value |
-| `Tensor.rand(*shape)` | Uniform random values in `[0, 1)` |
-| `Tensor.randn(*shape)` | Standard normal values |
-| `Tensor.randint(low, high, shape)` | Random integers in `[low, high)` |
-| `Tensor.arange(...)` | Arithmetic progression |
-| `Tensor.linspace(start, stop, steps)` | Evenly spaced values |
-| `Tensor.eye(n)` | Identity matrix |
-| `Tensor.empty(*shape)` | Uninitialized tensor |
-
-Core methods:
-
-| Category | Methods |
-|---|---|
-| Arithmetic | `+`, `-`, `*`, `/`, `**`, `neg`, broadcasting with scalars |
-| Elementwise | `exp`, `log`, `sqrt`, `square`, `abs`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `silu` |
+| Runtime | `polygrad.create`, `polygrad.stats`, `polygrad.can_run`, `Device` |
+| Tensor creation | `Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `randint`, `arange`, `linspace`, `eye`, `empty` |
+| Tensor math | `+`, `-`, `*`, `/`, `**`, `exp`, `log`, `sqrt`, `abs`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `gelu`, `silu`, `softmax` |
 | Reductions | `sum`, `mean`, `max`, `min`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
-| Movement | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat` |
-| Indexing | `__getitem__`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
+| Movement/indexing | `reshape`, `view`, `permute`, `transpose`, `expand`, `squeeze`, `unsqueeze`, `flatten`, `shrink`, `pad`, `flip`, `repeat`, `gather`, `take_along_axis`, `cat`, `stack`, `split`, `chunk` |
 | Linalg | `matmul`, `dot`, `linear`, `qr`, `triangular_solve`, `solve_triangular`, `cholesky`, `cholesky_solve`, `solve`, `lstsq` |
-| Data | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone`, `custom_kernel` |
+| Data/readback | `realize`, `numpy`, `item`, `tolist`, `copy_from`, `update_from`, `to`, `cpu`, `cuda`, `detach`, `clone` |
+| Compilation | `jit`, `compile`, `Tensor.custom_kernel` |
+| Neural nets | `polygrad.nn` layers, `SGD`, `Adam`, `AdamW`, `get_parameters`, `get_state_dict` |
 
 ## Package Integration
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.2 (2026-07-06)
+
+### Added
+- Sync-first JavaScript default API with lazy default runtime exports, explicit runtime creation, and explicit async startup/readback variants.
+- Split browser distribution into sync and async bundles with package-export coverage for Node, browser, and async entrypoints.
+
+### Fixed
+- WASM specialized matmul relaxed-SIMD validation now probes Node execution semantics instead of hardcoding one V8 flag.
+- WASM relaxed-madd operand order is corrected, with relaxed-madd enabled for the ABT specialized matmul path and strict SIMD retained for AB until benchmarks justify it.
+- Browser WebGPU lazy-init capability reporting now updates `caps.f16` after device initialization.
+
 ## 0.4.1 (2026-07-05)
 
 ### Fixed

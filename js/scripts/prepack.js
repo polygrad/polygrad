@@ -21,7 +21,7 @@ function run(cmd, args, extraEnv) {
 
 run(process.execPath, [path.join(scriptsDir, 'sync-csrc.js')])
 
-// npm tarballs publish js/wasm/polygrad.js and browser dist artifacts.
+// npm tarballs publish explicit sync/async WASM and browser dist artifacts.
 // Build them here so `npm pack` from a clean checkout produces a complete tarball.
 const makeEnv = {
   EM_CACHE: process.env.EM_CACHE || path.join(repoDir, 'build', '.emcache')
@@ -36,9 +36,14 @@ run('bash', [path.join(scriptsDir, 'build-browser.sh')])
 
 const required = [
   path.join(pkgDir, 'csrc'),
-  path.join(pkgDir, 'wasm', 'polygrad.js'),
-  path.join(pkgDir, 'dist', 'polygrad.js'),
-  path.join(pkgDir, 'dist', 'polygrad.mjs')
+  path.join(pkgDir, 'wasm', 'core.async.js'),
+  path.join(pkgDir, 'wasm', 'core.sync.js'),
+  path.join(pkgDir, 'src', 'index.mjs'),
+  path.join(pkgDir, 'src', 'index.async.mjs'),
+  path.join(pkgDir, 'dist', 'polygrad.sync.js'),
+  path.join(pkgDir, 'dist', 'polygrad.sync.mjs'),
+  path.join(pkgDir, 'dist', 'polygrad.async.js'),
+  path.join(pkgDir, 'dist', 'polygrad.async.mjs')
 ]
 
 for (const target of required) {

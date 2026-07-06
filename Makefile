@@ -78,8 +78,13 @@ WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
+# Broader Playwright browser matrix. The default target stays Chromium-only;
+# test-browser-matrix uses this optional smoke matrix and skips unavailable
+# local executables so developer machines do not need every browser installed.
+BROWSER_MATRIX ?= chromium,firefox,chrome-system=chromium@/usr/bin/google-chrome,chromium-snap=chromium@/snap/bin/chromium
+BROWSER_MATRIX_DEVICES ?= auto
 
-.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-filc-interp-fast verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
@@ -361,13 +366,16 @@ test-py: verify-source-mirrors build/libpolygrad.so
 test-py-x86: verify-source-mirrors build/libpolygrad.so
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 POLY_DEVICE=x86 POLYGRAD_LIB=build/libpolygrad.so PYTHONPATH=py python -m pytest py/tests/test_tensor.py py/tests/test_nn.py py/tests/test_instance.py py/tests/test_hf.py py/tests/test_hf_e2e.py -v
 
-test-js: test-js-wasm test-js-native
+test-js: test-js-wasm test-js-native test-js-package
 
 test-js-wasm: verify-source-mirrors wasm-pkg
 	$(NODE) js/test/test_wasm.js
 
 test-js-native: verify-source-mirrors js/build/Release/polygrad_napi.node
 	$(NODE) js/test/test_native.js
+
+test-js-package: verify-source-mirrors wasm-pkg
+	cd js && bash scripts/build-browser.sh && $(NODE) test/test_package_exports.js
 
 js/build/Release/polygrad_napi.node: build/libpolygrad.a
 	cd js && npm run build:native
@@ -398,6 +406,15 @@ test-browser: test-js-browser
 test-js-browser: verify-source-mirrors wasm-pkg
 	cd js && bash scripts/build-browser.sh && $(NODE) test/browser/run.js
 
+test-browser-matrix: test-js-browser-matrix
+
+test-js-browser-matrix: verify-source-mirrors wasm-pkg
+	cd js && bash scripts/build-browser.sh && \
+		POLY_BROWSER_BROWSERS="$(BROWSER_MATRIX)" \
+		POLY_BROWSER_DEVICES="$(BROWSER_MATRIX_DEVICES)" \
+		POLY_BROWSER_SKIP_UNAVAILABLE=1 \
+		$(NODE) test/browser/run.js
+
 test-browser-qwen3: verify-source-mirrors wasm-pkg require-qwen3-gguf
 	@mkdir -p temp/chrome_tmp
 	cd js && bash scripts/build-browser.sh
@@ -422,7 +439,7 @@ test-browser-legacy: wasm-pkg
 #           native core + cpu/x86/interp/cuda*/hip* backends
 #   Python: py/tests/
 #   * only when hardware is available
-TEST_ALL_DEPS = test test-x86 test-interp test-js-wasm test-js-native-cpu test-js-native-x86 test-js-native-interp test-py
+TEST_ALL_DEPS = test test-x86 test-interp test-js-wasm test-js-package test-js-native-cpu test-js-native-x86 test-js-native-interp test-py
 ifeq ($(HAS_CUDA), 1)
   TEST_ALL_DEPS += test-cuda test-js-native-cuda
 endif
@@ -447,11 +464,12 @@ build/polygrad.js build/polygrad.wasm: $(WASM_SRC) Makefile
 		-s WASM_BIGINT \
 		-o build/polygrad.js $(WASM_SRC)
 
-wasm-pkg: build/polygrad-pkg.js
+wasm-pkg: build/core.async.js build/core.sync.js
 	@mkdir -p js/wasm
-	cp build/polygrad-pkg.js js/wasm/polygrad.js
+	cp build/core.async.js js/wasm/core.async.js
+	cp build/core.sync.js js/wasm/core.sync.js
 
-build/polygrad-pkg.js: $(WASM_SRC) Makefile
+build/core.async.js: $(WASM_SRC) Makefile
 	@mkdir -p build
 		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
 		-s WASM=1 -s MODULARIZE=1 -s EXPORT_NAME=createPolygrad \
@@ -464,7 +482,24 @@ build/polygrad-pkg.js: $(WASM_SRC) Makefile
 		-s SINGLE_FILE=1 \
 		-s SINGLE_FILE_BINARY_ENCODE=0 \
 		-s ENVIRONMENT='web,node' \
-		-o build/polygrad-pkg.js $(WASM_SRC)
+		-o build/core.async.js $(WASM_SRC)
+
+build/core.sync.js: $(WASM_SRC) Makefile js/scripts/wasm-sync-post.js
+	@mkdir -p build
+		EMSDK_PYTHON=$(EMSDK_PYTHON) $(EMCC) $(EMCC_CFLAGS_COMMON) \
+		-s WASM=1 \
+		-s WASM_ASYNC_COMPILATION=0 \
+		$(WASM_ASYNCIFY_FLAGS) \
+		-s EXPORTED_FUNCTIONS='[$(WASM_EXPORTS)]' \
+		-s "EXPORTED_RUNTIME_METHODS=['ccall','cwrap','getValue','setValue','HEAPU8','HEAP32','HEAPF32','HEAPF64','UTF8ToString','addFunction']" \
+		-s ALLOW_TABLE_GROWTH=1 \
+		-s ALLOW_MEMORY_GROWTH=1 -s MAXIMUM_MEMORY=4GB \
+		-s WASM_BIGINT \
+		-s SINGLE_FILE=1 \
+		-s SINGLE_FILE_BINARY_ENCODE=0 \
+		-s ENVIRONMENT='web,node' \
+		--post-js js/scripts/wasm-sync-post.js \
+		-o build/core.sync.js $(WASM_SRC)
 
 VENDOR_SRC = vendor/dht/dht.c vendor/stun/STUNExternalIP.c
 P2P_SRC = src/p2p.c

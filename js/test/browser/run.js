@@ -15,6 +15,11 @@ const jsDir = path.resolve(__dirname, '..', '..')
 
 const server = http.createServer((req, res) => {
   const url = (req.url || '/').split('?')[0]
+  if (url === '/favicon.ico') {
+    res.writeHead(204)
+    res.end()
+    return
+  }
   const filePath = path.join(jsDir, url === '/' ? '/test/browser/index.html' : url)
 
   if (!filePath.startsWith(jsDir)) {
@@ -45,22 +50,90 @@ const WEBGPU_ARGS = [
   '--disable-gpu-sandbox',
 ]
 
-async function launchForDevice(chromium, device) {
-  if (device !== 'webgpu') return chromium.launch()
-  // WebGPU needs the full Chrome binary (not headless-shell) with GPU access.
-  // Use system Chrome if available, fall back to Playwright Chromium.
-  const executablePath = (() => {
-    try { require('fs').accessSync('/usr/bin/google-chrome'); return '/usr/bin/google-chrome' }
-    catch (e) { return undefined }
-  })()
-  return chromium.launch({
-    executablePath,
-    headless: false,
-    args: WEBGPU_ARGS
-  })
+function executableExists(file) {
+  try { fs.accessSync(file, fs.constants.X_OK); return true }
+  catch (e) { return false }
 }
 
-async function runForDevice(browser, port, device) {
+function parseBrowserSpec(raw) {
+  let label = raw
+  let body = raw
+  const eq = raw.indexOf('=')
+  if (eq >= 0) {
+    label = raw.slice(0, eq)
+    body = raw.slice(eq + 1)
+  }
+
+  let name = body
+  let target = ''
+  const at = body.indexOf('@')
+  if (at >= 0) {
+    name = body.slice(0, at)
+    target = body.slice(at + 1)
+  }
+
+  let launcherName = name
+  let channel = ''
+  let executablePath = ''
+  if (name === 'chrome' || name === 'chrome-stable') {
+    launcherName = 'chromium'
+    channel = 'chrome'
+  } else if (name.startsWith('chrome-')) {
+    launcherName = 'chromium'
+    channel = name.slice('chrome-'.length)
+  }
+
+  if (target) {
+    if (target.startsWith('/')) executablePath = target
+    else channel = target
+  }
+
+  if (!['chromium', 'firefox', 'webkit'].includes(launcherName)) {
+    throw new Error(`unknown browser spec '${raw}'`)
+  }
+  return { raw, label, launcherName, channel, executablePath }
+}
+
+function parseBrowserSpecs() {
+  return (process.env.POLY_BROWSER_BROWSERS || process.env.POLY_BROWSER_ENGINES || 'chromium')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(parseBrowserSpec)
+}
+
+function launchOptionsFor(spec, device) {
+  const opts = {}
+  if (spec.channel) opts.channel = spec.channel
+  if (spec.executablePath) opts.executablePath = spec.executablePath
+
+  if (device === 'webgpu') {
+    if (spec.launcherName !== 'chromium') {
+      return { skip: `WebGPU tests currently require a Chromium-family browser` }
+    }
+    // WebGPU needs the full Chrome binary (not headless-shell) with GPU access.
+    // Use an explicitly requested executable/channel first, then system Chrome.
+    if (!opts.executablePath && !opts.channel && executableExists('/usr/bin/google-chrome')) {
+      opts.executablePath = '/usr/bin/google-chrome'
+    }
+    opts.headless = false
+    opts.args = WEBGPU_ARGS
+  }
+  return { opts }
+}
+
+async function launchForDevice(playwright, spec, device) {
+  if (spec.executablePath && !executableExists(spec.executablePath)) {
+    return { skip: `executable not found: ${spec.executablePath}` }
+  }
+  const { skip, opts } = launchOptionsFor(spec, device)
+  if (skip) return { skip }
+  const launcher = playwright[spec.launcherName]
+  const browser = await launcher.launch(opts)
+  return { browser }
+}
+
+async function runForDevice(browser, port, device, spec) {
   const debugLevel = process.env.POLY_DEBUG || process.env.DEBUG || ''
   const testFilter = process.env.POLY_TEST_FILTER || ''
   const url = `http://127.0.0.1:${port}/?device=${device}` +
@@ -75,9 +148,20 @@ async function runForDevice(browser, port, device) {
   })
   page.on('pageerror', err => console.error('PAGE ERROR:', err.message))
 
+  console.log(`=== browser: ${spec.label}, engine: ${spec.launcherName}, device: ${device} ===`)
+  console.log(`[${spec.label}] version: ${browser.version()}`)
+
   await page.goto(url)
 
-  // WebGPU probe: log adapter info before running tests
+  const timeout = device === 'webgpu' ? 120000 : 60000
+  const results = await page.waitForFunction(
+    () => window.__testResults,
+    { timeout }
+  ).then(h => h.jsonValue())
+
+  // Keep the probe out of the test hot path. With lazy WebGPU initialization,
+  // concurrently requesting an adapter while Asyncify-backed readback is
+  // starting can invalidate Chrome's external WebGPU object handles.
   if (device === 'webgpu') {
     const probe = await page.evaluate(async () => {
       if (!navigator.gpu) return { ok: false, reason: 'navigator.gpu missing' }
@@ -92,12 +176,6 @@ async function runForDevice(browser, port, device) {
     }
   }
 
-  const timeout = device === 'webgpu' ? 120000 : 60000
-  const results = await page.waitForFunction(
-    () => window.__testResults,
-    { timeout }
-  ).then(h => h.jsonValue())
-
   await page.close()
   return results
 }
@@ -110,7 +188,7 @@ async function main() {
     stdio: 'inherit'
   })
 
-  const { chromium } = require('playwright')
+  const playwright = require('playwright')
 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const port = server.address().port
@@ -120,23 +198,41 @@ async function main() {
     .split(',')
     .map(s => s.trim())
     .filter(Boolean)
+  const browserSpecs = parseBrowserSpecs()
+  const skipUnavailable = process.env.POLY_BROWSER_SKIP_UNAVAILABLE === '1'
   let totalFailed = 0
 
-  for (const device of devices) {
-    // Launch separate browser per device (WebGPU needs special flags)
-    const browser = await launchForDevice(chromium, device)
-    const r = await runForDevice(browser, port, device)
-    await browser.close()
+  for (const spec of browserSpecs) {
+    for (const device of devices) {
+      let launched
+      try {
+        launched = await launchForDevice(playwright, spec, device)
+      } catch (e) {
+        if (skipUnavailable) {
+          console.log(`\n[${spec.label}/${device}] skipped: ${e.message}`)
+          continue
+        }
+        throw e
+      }
+      if (launched.skip) {
+        console.log(`\n[${spec.label}/${device}] skipped: ${launched.skip}`)
+        continue
+      }
 
-    if (r.error) {
-      console.error(`\n[${device}] ERROR: ${r.error}`)
-      totalFailed++
-    } else {
-      console.log(
-        `\n[${device}] ${r.passed} passed, ${r.failed} failed` +
-        (r.skipped ? `, ${r.skipped} skipped` : '')
-      )
-      totalFailed += r.failed
+      const browser = launched.browser
+      const r = await runForDevice(browser, port, device, spec)
+      await browser.close()
+
+      if (r.error) {
+        console.error(`\n[${spec.label}/${device}] ERROR: ${r.error}`)
+        totalFailed++
+      } else {
+        console.log(
+          `\n[${spec.label}/${device}] ${r.passed} passed, ${r.failed} failed` +
+          (r.skipped ? `, ${r.skipped} skipped` : '')
+        )
+        totalFailed += r.failed
+      }
     }
   }
 

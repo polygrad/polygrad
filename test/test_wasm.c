@@ -61,6 +61,81 @@ static int wasm_count_simd_opcode(const uint8_t *wasm, int wasm_size, int opcode
   return count;
 }
 
+static bool wasm_file_contains_relaxed_madd(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  int a = -1, b = -1, c = 0;
+  bool found = false;
+  while ((c = fgetc(f)) != EOF) {
+    if (a == WASM_SIMD_PREFIX && b == 0x85 && c == 0x02) {
+      found = true;
+      break;
+    }
+    a = b;
+    b = c;
+  }
+  fclose(f);
+  return found;
+}
+
+static const char *poly_test_node_cmd(void) {
+  static int initialized = 0;
+  static char cmd[512];
+  if (!initialized) {
+    initialized = 1;
+    const char *env = getenv("POLY_TEST_NODE");
+    if (env && env[0]) {
+      snprintf(cmd, sizeof(cmd), "%s", env);
+    } else if (system("command -v node > /dev/null 2>&1") == 0) {
+      snprintf(cmd, sizeof(cmd), "%s", "node");
+    }
+  }
+  return cmd[0] ? cmd : NULL;
+}
+
+static bool poly_test_node_relaxed_probe(const char *node_cmd) {
+  if (!node_cmd || !node_cmd[0]) return false;
+  const char *probe =
+      "const b=Buffer.from('AGFzbQEAAAABBAFgAAACDwEDZW52Bm1lbW9yeQIAAQMCAQAHCgEGa2VybmVsAAAKQwFBAEEA/QwAAABAAAAAQAAAAEAAAABA/QwAAEBAAABAQAAAQEAAAEBA/QwAAKBAAACgQAAAoEAAAKBA/YUC/QsEAAs=','base64');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const inst=new WebAssembly.Instance(new WebAssembly.Module(b),{env:{memory:mem}});"
+      "inst.exports.kernel();"
+      "const got=new Float32Array(mem.buffer)[0];"
+      "if(Math.abs(got-11)>1e-6){console.error('relaxed_madd probe got '+got);process.exit(3)}";
+  char cmd[4096];
+  snprintf(cmd, sizeof(cmd), "%s -e \"%s\" > /dev/null 2>&1", node_cmd, probe);
+  return system(cmd) == 0;
+}
+
+static const char *poly_test_node_relaxed_cmd(void) {
+  static int initialized = 0;
+  static char cmd[512];
+  if (!initialized) {
+    initialized = 1;
+    const char *base = poly_test_node_cmd();
+    char wasm_flag[768] = {0};
+    char relaxed_flag[768] = {0};
+    if (base && base[0]) {
+      snprintf(wasm_flag, sizeof(wasm_flag), "%s --experimental-wasm-relaxed-simd", base);
+      snprintf(relaxed_flag, sizeof(relaxed_flag), "%s --experimental-relaxed-simd", base);
+    }
+    const char *candidates[4] = {base, wasm_flag, relaxed_flag, NULL};
+    for (int i = 0; candidates[i]; i++) {
+      if (!candidates[i][0]) continue;
+      if (poly_test_node_relaxed_probe(candidates[i])) {
+        snprintf(cmd, sizeof(cmd), "%s", candidates[i]);
+        break;
+      }
+    }
+  }
+  return cmd[0] ? cmd : NULL;
+}
+
+static const char *poly_test_node_cmd_for_wasm(const char *path) {
+  if (wasm_file_contains_relaxed_madd(path)) return poly_test_node_relaxed_cmd();
+  return poly_test_node_cmd();
+}
+
 static PolyUOp **wasm_linearize_generic_test(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   PolyRewriteOpts opts = {
       .optimize = true,
@@ -81,22 +156,24 @@ static PolyUOp **wasm_linearize_generic_test(PolyCtx *ctx, PolyUOp *sink, int *n
 }
 
 static int node_compile_wasm_module(const char *path) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[2048];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');new WebAssembly.Module(fs.readFileSync('%s'))\"",
-      path
+      "%s -e \"const fs=require('fs');new WebAssembly.Module(fs.readFileSync('%s'))\"",
+      node, path
   );
   return system(cmd);
 }
 
 static int node_run_wasm_i32(const char *path, int32_t expected) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[2048];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');"
+      "%s -e \"const fs=require('fs');"
       "const mem=new WebAssembly.Memory({initial:1});"
       "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
       "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
@@ -104,17 +181,18 @@ static int node_run_wasm_i32(const char *path, int32_t expected) {
       "inst.exports.kernel(0);"
       "const got=new DataView(mem.buffer).getInt32(0,true);"
       "if(got!==%d){console.error('got '+got+' expected %d');process.exit(2)}\"",
-      path, expected, expected
+      node, path, expected, expected
   );
   return system(cmd);
 }
 
 static int node_run_wasm_f32_buffer(const char *path, float expected) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[2048];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');"
+      "%s -e \"const fs=require('fs');"
       "const mem=new WebAssembly.Memory({initial:1});"
       "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
       "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
@@ -125,17 +203,18 @@ static int node_run_wasm_f32_buffer(const char *path, float expected) {
       "const got=dv.getFloat32(0,true);const expected=%.9g;"
       "if(Math.abs(got-expected)>1e-6){console.error('got '+got+' expected "
       "'+expected);process.exit(2)}\"",
-      path, (double)expected
+      node, path, (double)expected
   );
   return system(cmd);
 }
 
 static int node_run_wasm_where_f32(const char *path, int n) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[4096];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');"
+      "%s -e \"const fs=require('fs');"
       "const N=%d;"
       "const mem=new WebAssembly.Memory({initial:1});"
       "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
@@ -150,17 +229,18 @@ static int node_run_wasm_where_f32(const char *path, int n) {
       " const got=f[offC+i];"
       " if(Math.abs(got-exp)>1e-6){console.error('i='+i+' got '+got+' expected '+exp);process.exit(2);}"
       "}\"",
-      n, path
+      node, n, path
   );
   return system(cmd);
 }
 
 static int node_run_wasm_reg_group_f32(const char *path) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[4096];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');"
+      "%s -e \"const fs=require('fs');"
       "const mem=new WebAssembly.Memory({initial:1});"
       "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
       "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
@@ -172,17 +252,18 @@ static int node_run_wasm_reg_group_f32(const char *path) {
       "for(let i=0;i<4;i++){const exp=i+3,got=f[outOff+i];"
       " if(Math.abs(got-exp)>1e-6){console.error('i='+i+' got '+got+' expected '+exp);process.exit(2);}"
       "}\"",
-      path
+      node, path
   );
   return system(cmd);
 }
 
 static int node_run_wasm_wide_vector_gep_f32(const char *path) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[4096];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');"
+      "%s -e \"const fs=require('fs');"
       "const mem=new WebAssembly.Memory({initial:1});"
       "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
       "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
@@ -195,13 +276,14 @@ static int node_run_wasm_wide_vector_gep_f32(const char *path) {
       " const got=f[i];"
       " if(Math.abs(got-exp)>1e-6){console.error('i='+i+' got '+got+' expected '+exp);process.exit(2);}"
       "}\"",
-      path
+      node, path
   );
   return system(cmd);
 }
 
 static int node_run_wasm_broadcast_reduce_relu(const char *path, int n) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
 
   const char *js_path = "/tmp/polygrad_test_broadcast_reduce_relu.js";
   FILE *f = fopen(js_path, "w");
@@ -244,8 +326,8 @@ static int node_run_wasm_broadcast_reduce_relu(const char *path, int n) {
   );
   if (fclose(f) != 0) return -1;
 
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s %s", node, js_path);
   return system(cmd);
 }
 
@@ -255,7 +337,8 @@ static int node_run_wasm_matmul_bias_relu(
     int d,
     int hidden
 ) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
 
   const char *js_path = "/tmp/polygrad_test_matmul_bias_relu.js";
   FILE *f = fopen(js_path, "w");
@@ -293,13 +376,14 @@ static int node_run_wasm_matmul_bias_relu(
   );
   if (fclose(f) != 0) return -1;
 
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s %s", node, js_path);
   return system(cmd);
 }
 
 static int node_run_wasm_matmul_abt_row1(const char *path, int n, int k) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   const char *js_path = "/tmp/polygrad_test_matmul_abt_row1.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
@@ -332,13 +416,14 @@ static int node_run_wasm_matmul_abt_row1(const char *path, int n, int k) {
   );
   if (fclose(f) != 0) return -1;
 
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s %s", node, js_path);
   return system(cmd);
 }
 
 static int node_run_wasm_matmul_ab(const char *path, int m, int n, int k) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   const char *js_path = "/tmp/polygrad_test_matmul_ab.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
@@ -371,13 +456,14 @@ static int node_run_wasm_matmul_ab(const char *path, int m, int n, int k) {
   );
   if (fclose(f) != 0) return -1;
 
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s %s", node, js_path);
   return system(cmd);
 }
 
 static int node_run_wasm_matmul_abt(const char *path, int m, int n, int k) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   const char *js_path = "/tmp/polygrad_test_matmul_abt.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
@@ -410,17 +496,18 @@ static int node_run_wasm_matmul_abt(const char *path, int m, int n, int k) {
   );
   if (fclose(f) != 0) return -1;
 
-  char cmd[256];
-  snprintf(cmd, sizeof(cmd), "node %s", js_path);
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s %s", node, js_path);
   return system(cmd);
 }
 
 static int node_run_wasm_i64(const char *path, int64_t expected) {
-  if (system("which node > /dev/null 2>&1") != 0) return 0;
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
   char cmd[2048];
   snprintf(
       cmd, sizeof(cmd),
-      "node -e \"const fs=require('fs');"
+      "%s -e \"const fs=require('fs');"
       "const mem=new WebAssembly.Memory({initial:1});"
       "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
       "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
@@ -429,7 +516,7 @@ static int node_run_wasm_i64(const char *path, int64_t expected) {
       "const got=new DataView(mem.buffer).getBigInt64(0,true);"
       "const expected=BigInt('%lld');"
       "if(got!==expected){console.error('got '+got+' expected '+expected);process.exit(2)}\"",
-      path, (long long)expected
+      node, path, (long long)expected
   );
   return system(cmd);
 }
@@ -1875,12 +1962,13 @@ TEST(wasm, sparse_cross_entropy_i64_gather_index_validates) {
     fwrite(wasm, 1, (size_t)wasm_size, f);
     fclose(f);
 
-    int has_node = system("which node > /dev/null 2>&1");
-    if (has_node == 0) {
+    const char *node = poly_test_node_cmd_for_wasm(path);
+    if (node) {
       char cmd[512];
       snprintf(
           cmd, sizeof(cmd),
-          "node -e \"const fs=require('fs'); new WebAssembly.Module(fs.readFileSync('%s'))\"", path
+          "%s -e \"const fs=require('fs'); new WebAssembly.Module(fs.readFileSync('%s'))\"",
+          node, path
       );
       ASSERT_INT_EQ(system(cmd), 0);
     }
@@ -2206,15 +2294,17 @@ TEST(wasm, e2e_node_pow) {
   fwrite(wasm, 1, wasm_size, f);
   fclose(f);
 
-  int has_node = system("which node > /dev/null 2>&1");
-  if (has_node != 0) {
+  const char *node = poly_test_node_cmd_for_wasm("/tmp/polygrad_e2e_pow.wasm");
+  if (!node) {
     free(wasm);
     free(lin);
     poly_ctx_destroy(k.ctx);
     PASS();
   }
 
-  int rc = system("node test/run_wasm.js /tmp/polygrad_e2e_pow.wasm pow 4");
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_pow.wasm pow 4", node);
+  int rc = system(cmd);
   ASSERT_INT_EQ(rc, 0);
 
   free(wasm);
@@ -2240,8 +2330,8 @@ TEST(wasm, e2e_node_vecadd) {
   fclose(f);
 
   /* Skip if node is not available */
-  int has_node = system("which node > /dev/null 2>&1");
-  if (has_node != 0) {
+  const char *node = poly_test_node_cmd_for_wasm("/tmp/polygrad_e2e_vecadd.wasm");
+  if (!node) {
     free(wasm);
     free(lin);
     poly_ctx_destroy(k.ctx);
@@ -2249,7 +2339,9 @@ TEST(wasm, e2e_node_vecadd) {
   }
 
   /* Run the Node.js test runner */
-  int rc = system("node test/run_wasm.js /tmp/polygrad_e2e_vecadd.wasm add 8");
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_vecadd.wasm add 8", node);
+  int rc = system(cmd);
   ASSERT_INT_EQ(rc, 0);
 
   free(wasm);
@@ -2270,8 +2362,12 @@ TEST(wasm, e2e_node_vecadd_simd) {
   const char *path = "/tmp/polygrad_e2e_vecadd_simd.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
 
-  int has_node = system("which node > /dev/null 2>&1");
-  if (has_node == 0) ASSERT_INT_EQ(system("node test/run_wasm.js /tmp/polygrad_e2e_vecadd_simd.wasm add 10"), 0);
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (node) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_vecadd_simd.wasm add 10", node);
+    ASSERT_INT_EQ(system(cmd), 0);
+  }
 
   free(wasm);
   free(lin);
@@ -2527,15 +2623,17 @@ TEST(wasm_f64, e2e_node_vecadd_f64) {
   fwrite(wasm, 1, wasm_size, f);
   fclose(f);
 
-  int has_node = system("which node > /dev/null 2>&1");
-  if (has_node != 0) {
+  const char *node = poly_test_node_cmd_for_wasm("/tmp/polygrad_e2e_vecadd_f64.wasm");
+  if (!node) {
     free(wasm);
     free(lin);
     poly_ctx_destroy(k.ctx);
     PASS(); /* skip gracefully */
   }
 
-  int rc = system("node test/run_wasm.js /tmp/polygrad_e2e_vecadd_f64.wasm add_f64 8");
+  char cmd[512];
+  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_vecadd_f64.wasm add_f64 8", node);
+  int rc = system(cmd);
   ASSERT_INT_EQ(rc, 0);
 
   free(wasm);

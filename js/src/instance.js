@@ -1,5 +1,7 @@
 'use strict'
 
+const { PolyAsyncRequired } = require('./errors')
+
 const ROLE_PARAM = 0
 const ROLE_INPUT = 1
 const ROLE_TARGET = 2
@@ -286,6 +288,10 @@ function createBoundInstanceClass(runtime) {
       return caps && caps.core === 'wasm' && caps.device === 'webgpu'
     }
 
+    _requireSync(method, asyncMethod) {
+      if (this._usesAsyncHostBridge()) throw new PolyAsyncRequired(method, asyncMethod)
+    }
+
     _enqueueAsync(fn) {
       const run = this._asyncTail.then(fn, fn)
       this._asyncTail = run.catch(() => {})
@@ -487,8 +493,13 @@ function createBoundInstanceClass(runtime) {
     }
 
     paramData(i) {
-      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._paramDataRaw(i))
+      this._requireSync('paramData()', 'paramDataAsync()')
       return this._paramDataRaw(i)
+    }
+
+    paramDataAsync(i) {
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._paramDataRaw(i))
+      return Promise.resolve(this._paramDataRaw(i))
     }
 
     paramTrainable(i) {
@@ -502,6 +513,16 @@ function createBoundInstanceClass(runtime) {
     }
 
     params() {
+      this._requireSync('params()', 'paramsAsync()')
+
+      const items = []
+      for (let i = 0; i < this.paramCount; i++) {
+        items.push([this.paramName(i), this.paramShape(i), this._paramDataRaw(i)])
+      }
+      return items
+    }
+
+    paramsAsync() {
       if (this._usesAsyncHostBridge()) {
         return this._enqueueAsync(async () => {
           const items = []
@@ -511,12 +532,7 @@ function createBoundInstanceClass(runtime) {
           return items
         })
       }
-
-      const items = []
-      for (let i = 0; i < this.paramCount; i++) {
-        items.push([this.paramName(i), this.paramShape(i), this._paramDataRaw(i)])
-      }
-      return items
+      return Promise.resolve(this.params())
     }
 
     get bufCount() {
@@ -546,8 +562,13 @@ function createBoundInstanceClass(runtime) {
     }
 
     bufData(i) {
-      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._bufDataRaw(i))
+      this._requireSync('bufData()', 'bufDataAsync()')
       return this._bufDataRaw(i)
+    }
+
+    bufDataAsync(i) {
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._bufDataRaw(i))
+      return Promise.resolve(this._bufDataRaw(i))
     }
 
     findBuf(name) {
@@ -558,10 +579,16 @@ function createBoundInstanceClass(runtime) {
     }
 
     exportWeights(options = null) {
+      this._requireSync('exportWeights()', 'exportWeightsAsync()')
+      const flags = weightExportFlags(options)
+      return this._rt._core.instance.exportWeights(this._handle, flags)
+    }
+
+    exportWeightsAsync(options = null) {
       const flags = weightExportFlags(options)
       const run = () => this._rt._core.instance.exportWeights(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
-      return run()
+      return Promise.resolve(run())
     }
 
     importWeights(bytes) {
@@ -577,10 +604,16 @@ function createBoundInstanceClass(runtime) {
     }
 
     saveBundle(options = null) {
+      this._requireSync('saveBundle()', 'saveBundleAsync()')
+      const flags = weightExportFlags(options)
+      return this._rt._core.instance.saveBundle(this._handle, flags)
+    }
+
+    saveBundleAsync(options = null) {
       const flags = weightExportFlags(options)
       const run = () => this._rt._core.instance.saveBundle(this._handle, flags)
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
-      return run()
+      return Promise.resolve(run())
     }
 
     static fromBundle(bytes) {
@@ -611,23 +644,41 @@ function createBoundInstanceClass(runtime) {
     }
 
     forward(io) {
+      this._requireSync('forward()', 'forwardAsync()')
+      const { names, arrays } = normalizeBindings(io)
+      const rc = this._rt._core.instance.forward(this._handle, names, arrays)
+      if (isPromiseLike(rc)) throw new PolyAsyncRequired('forward()', 'forwardAsync()')
+      if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
+      return this._collectOutputsRaw()
+    }
+
+    forwardAsync(io) {
       const { names, arrays } = normalizeBindings(io)
       const run = () => {
         const rc = this._rt._core.instance.forward(this._handle, names, arrays)
         if (isPromiseLike(rc)) {
           return rc.then(v => {
             if (v !== 0) throw new Error(`polygrad: forward failed (rc=${v})`)
-            return this._collectOutputsRaw()
+            return this._collectOutputsRawAsync()
           })
         }
         if (rc !== 0) throw new Error(`polygrad: forward failed (rc=${rc})`)
         return this._collectOutputsRaw()
       }
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
-      return run()
+      return Promise.resolve(run())
     }
 
     trainStep(io) {
+      this._requireSync('trainStep()', 'trainStepAsync()')
+      const { names, arrays } = normalizeBindings(io)
+      const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
+      if (isPromiseLike(loss)) throw new PolyAsyncRequired('trainStep()', 'trainStepAsync()')
+      if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
+      return loss
+    }
+
+    trainStepAsync(io) {
       const { names, arrays } = normalizeBindings(io)
       const run = () => {
         const loss = this._rt._core.instance.trainStep(this._handle, names, arrays)
@@ -637,28 +688,14 @@ function createBoundInstanceClass(runtime) {
             return v
           })
         }
-        if (loss == null || Number.isNaN(loss)) {
-          throw new Error('polygrad: trainStep failed')
-        }
+        if (loss == null || Number.isNaN(loss)) throw new Error('polygrad: trainStep failed')
         return loss
       }
       if (this._usesAsyncHostBridge()) return this._enqueueAsync(run)
-      return run()
+      return Promise.resolve(run())
     }
 
     _collectOutputsRaw() {
-      if (this._usesAsyncHostBridge()) {
-        return (async () => {
-          const outputs = {}
-          for (let i = 0; i < this.bufCount; i++) {
-            if (this.bufRole(i) === ROLE_OUTPUT) {
-              outputs[this.bufName(i)] = await this._bufDataRaw(i)
-            }
-          }
-          return outputs
-        })()
-      }
-
       const outputs = {}
       for (let i = 0; i < this.bufCount; i++) {
         if (this.bufRole(i) === ROLE_OUTPUT) {
@@ -668,9 +705,24 @@ function createBoundInstanceClass(runtime) {
       return outputs
     }
 
+    async _collectOutputsRawAsync() {
+      const outputs = {}
+      for (let i = 0; i < this.bufCount; i++) {
+        if (this.bufRole(i) === ROLE_OUTPUT) {
+          outputs[this.bufName(i)] = await this._bufDataRaw(i)
+        }
+      }
+      return outputs
+    }
+
     _collectOutputs() {
-      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._collectOutputsRaw())
+      this._requireSync('_collectOutputs()', '_collectOutputsAsync()')
       return this._collectOutputsRaw()
+    }
+
+    _collectOutputsAsync() {
+      if (this._usesAsyncHostBridge()) return this._enqueueAsync(() => this._collectOutputsRawAsync())
+      return Promise.resolve(this._collectOutputsRaw())
     }
 
     fit(io, opts = {}) {

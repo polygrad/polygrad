@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2 (2026-07-06)
+
+### Added
+- Sync-first default JavaScript API: `require('polygrad').Tensor`, synchronous `create(...)`, synchronous CPU/native/WASM readback, and explicit `createAsync(...)` / `toArrayAsync()` paths.
+- Split browser bundles: `polygrad.sync.*` for normal sync startup and `polygrad.async.*` for explicit async WASM startup.
+- Package export tests covering Node CJS, Node ESM, browser-condition imports, sync browser subpaths, and async subpaths.
+
+### Fixed
+- WebGPU initialization is lazy and happens at async realization/readback rather than runtime construction.
+- WebGPU `caps.f16` now reflects `shader-f16` support after lazy device initialization.
+- C WASM tests probe Node relaxed-SIMD execution instead of hardcoding a V8 flag, and WASM matmul emits relaxed-madd with the correct `(lhs * rhs) + acc` operand order on the ABT path.
+
 ## 0.4.0 (2026-07-05)
 
 ### Added

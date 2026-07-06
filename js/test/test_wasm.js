@@ -6,6 +6,7 @@ const { runInstanceTests } = require('./test_instance')
 const { runJitTests } = require('./test_jit')
 const { runOptimTests } = require('./test_optim')
 const { runModelTests } = require('./test_model')
+const { runSyncContractTests } = require('./test_sync_contract')
 
 function assertClose(actual, expected, tol = 1e-4) {
   if (actual.length !== expected.length) throw new Error(`length mismatch: ${actual.length} vs ${expected.length}`)
@@ -38,6 +39,31 @@ async function runWasmOwnershipTests() {
       failed++
     }
   }
+
+  await test('explicit runtimes keep host buffers independent across dispose cycles', async () => {
+    const pgA = await polygrad.create({ core: 'wasm' })
+    const pgB = await polygrad.create({ core: 'wasm' })
+    try {
+      const a = await new pgA.Tensor(new Float32Array([1, 2, 3]), { shape: [3] }).realize()
+      const b = await new pgB.Tensor(new Float32Array([10, 20, 30]), { shape: [3] }).realize()
+      assertClose(await a.add(1).toArray(), [2, 3, 4])
+      assertClose(await b.add(1).toArray(), [11, 21, 31])
+      await pgA.dispose()
+      assertClose(await b.mul(2).toArray(), [20, 40, 60])
+      b.copyFrom(new Float32Array([7, 8, 9]))
+      assertClose(await b.add(1).toArray(), [8, 9, 10])
+    } finally {
+      try { await pgB.dispose() } catch (_) {}
+    }
+
+    const pgC = await polygrad.create({ core: 'wasm' })
+    try {
+      const c = await new pgC.Tensor(new Float32Array([4, 5, 6]), { shape: [3] }).realize()
+      assertClose(await c.add(1).toArray(), [5, 6, 7])
+    } finally {
+      await pgC.dispose()
+    }
+  })
 
   await test('typed-array input survives jit replay and runtime disposal', async () => {
     const data = new Float32Array([1, 2, 3, 4])
@@ -100,6 +126,7 @@ async function runWasmInterpTests() {
 async function main() {
   const pg = await polygrad.create({ core: 'wasm' })
   try {
+    const syncResult = await runSyncContractTests(polygrad, pg, { core: 'wasm' })
     const tensorResult = await runTensorTests(pg)
     const instanceResult = await runInstanceTests(pg)
     const jitResult = await runJitTests(pg)
@@ -108,7 +135,7 @@ async function main() {
     await pg.dispose()
     const ownershipResult = await runWasmOwnershipTests()
     const interpResult = await runWasmInterpTests()
-    const failed = tensorResult.failed + instanceResult.failed + jitResult.failed +
+    const failed = syncResult.failed + tensorResult.failed + instanceResult.failed + jitResult.failed +
       optimResult.failed + modelResult.failed + ownershipResult.failed + interpResult.failed
     if (failed > 0) process.exit(1)
   } catch (e) {

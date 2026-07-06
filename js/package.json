@@ -1,18 +1,64 @@
 {
   "name": "polygrad",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "description": "Tensor computation library with native and WASM backends",
   "type": "commonjs",
   "main": "src/index.js",
-  "browser": "./dist/polygrad.mjs",
+  "browser": "./dist/polygrad.sync.mjs",
   "exports": {
     ".": {
-      "browser": "./dist/polygrad.mjs",
+      "browser": {
+        "import": "./dist/polygrad.sync.mjs",
+        "require": "./src/browser.sync.js",
+        "default": "./dist/polygrad.sync.mjs"
+      },
+      "node": {
+        "require": "./src/index.js",
+        "import": "./src/index.mjs"
+      },
       "require": "./src/index.js",
-      "default": "./src/index.js"
+      "import": "./dist/polygrad.sync.mjs",
+      "default": "./dist/polygrad.sync.mjs"
     },
-    "./dist/polygrad.js": "./dist/polygrad.js",
-    "./dist/polygrad.mjs": "./dist/polygrad.mjs"
+    "./browser": {
+      "browser": {
+        "import": "./dist/polygrad.sync.mjs",
+        "require": "./src/browser.sync.js",
+        "default": "./dist/polygrad.sync.mjs"
+      },
+      "import": "./dist/polygrad.sync.mjs",
+      "require": "./src/browser.sync.js",
+      "default": "./dist/polygrad.sync.mjs"
+    },
+    "./async": {
+      "browser": {
+        "import": "./dist/polygrad.async.mjs",
+        "require": "./src/browser.async.js",
+        "default": "./dist/polygrad.async.mjs"
+      },
+      "node": {
+        "require": "./src/index.async.js",
+        "import": "./src/index.async.mjs"
+      },
+      "require": "./src/index.async.js",
+      "import": "./src/index.async.mjs",
+      "default": "./src/index.async.mjs"
+    },
+    "./browser/async": {
+      "browser": {
+        "import": "./dist/polygrad.async.mjs",
+        "require": "./src/browser.async.js",
+        "default": "./dist/polygrad.async.mjs"
+      },
+      "import": "./dist/polygrad.async.mjs",
+      "require": "./src/browser.async.js",
+      "default": "./dist/polygrad.async.mjs"
+    },
+    "./package.json": "./package.json",
+    "./dist/polygrad.sync.js": "./dist/polygrad.sync.js",
+    "./dist/polygrad.sync.mjs": "./dist/polygrad.sync.mjs",
+    "./dist/polygrad.async.js": "./dist/polygrad.async.js",
+    "./dist/polygrad.async.mjs": "./dist/polygrad.async.mjs"
   },
   "files": [
     "src/",

@@ -17,13 +17,17 @@ from .instance import Instance
 from .jit import CompiledCallable, Jit, JitError, compile, jit
 
 
-def stats():
-    """Return monotonically accumulated counters for the module default context."""
+def _stats_for_ctx(ctx):
     s = _ffi.PolyCtxStats()
-    rc = _ffi.get_lib().poly_ctx_stats(_default_ctx, s)
+    rc = _ffi.get_lib().poly_ctx_stats(ctx, s)
     if rc != 0:
         raise RuntimeError('poly_ctx_stats failed')
     return {name: getattr(s, name) for name, _ in s._fields_}
+
+
+def stats():
+    """Return monotonically accumulated counters for the module default context."""
+    return _stats_for_ctx(_default_ctx)
 
 
 def _can_run_dtype(dtype):
@@ -80,6 +84,10 @@ def _can_run_shape(op, shape, shapes):
 
 def can_run(op=None, *, dtype='float32', shape=None, shapes=None, device='auto'):
     """Return whether the default context can lower a representative op/shape."""
+    return _can_run_ctx(_default_ctx, op, dtype=dtype, shape=shape, shapes=shapes, device=device)
+
+
+def _can_run_ctx(ctx, op=None, *, dtype='float32', shape=None, shapes=None, device='auto'):
     if op is None and (shape is not None or shapes is not None):
         raise ValueError('can_run shape queries require an op')
     lib = _ffi.get_lib()
@@ -98,9 +106,124 @@ def can_run(op=None, *, dtype='float32', shape=None, shapes=None, device='auto')
     return rc == 1
 
 
+def _bound_tensor_class(ctx):
+    class RuntimeTensor(Tensor):
+        def __init__(self, data=None, *args, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            super().__init__(data, *args, **kwargs)
+
+        @staticmethod
+        def zeros(*shape, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.zeros(*shape, **kwargs)
+
+        @staticmethod
+        def ones(*shape, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.ones(*shape, **kwargs)
+
+        @staticmethod
+        def full(shape, fill_value, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.full(shape, fill_value, **kwargs)
+
+        @staticmethod
+        def arange(start, stop=None, step=1, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.arange(start, stop, step, **kwargs)
+
+        @staticmethod
+        def rand(*shape, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.rand(*shape, **kwargs)
+
+        @staticmethod
+        def randn(*shape, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.randn(*shape, **kwargs)
+
+        @staticmethod
+        def kaiming_uniform(*shape, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.kaiming_uniform(*shape, **kwargs)
+
+        @staticmethod
+        def randint(low, high=None, shape=(1,), **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.randint(low, high, shape, **kwargs)
+
+        @staticmethod
+        def linspace(start, stop, steps, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.linspace(start, stop, steps, **kwargs)
+
+        @staticmethod
+        def eye(n, m=None, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.eye(n, m, **kwargs)
+
+        @staticmethod
+        def empty(*shape, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.empty(*shape, **kwargs)
+
+    RuntimeTensor.__name__ = 'Tensor'
+    RuntimeTensor.__qualname__ = 'Tensor'
+    return RuntimeTensor
+
+
+class Runtime:
+    """Explicit PolyCtx owner for device/context-scoped Python code."""
+
+    def __init__(self, *, device='auto'):
+      lib = _ffi.get_lib()
+      self._ctx = lib.poly_ctx_new()
+      self._disposed = False
+      dev_id = lib.poly_device_by_name(str(device).lower().encode('utf-8'))
+      if dev_id >= 0 and hasattr(lib, 'poly_ctx_set_preferred_device'):
+          lib.poly_ctx_set_preferred_device(self._ctx, dev_id)
+      self.Tensor = _bound_tensor_class(self._ctx)
+      self.Variable = lambda name, min_val, max_val: Variable(name, min_val, max_val, _ctx=self._ctx)
+      self.Instance = Instance
+      self.jit = jit
+      self.compile = compile
+
+    def stats(self):
+      self._check_live()
+      return _stats_for_ctx(self._ctx)
+
+    def can_run(self, op=None, *, dtype='float32', shape=None, shapes=None, device='auto'):
+      self._check_live()
+      return _can_run_ctx(self._ctx, op, dtype=dtype, shape=shape, shapes=shapes, device=device)
+
+    def dispose(self):
+      if not self._disposed:
+          _ffi.get_lib().poly_ctx_destroy(self._ctx)
+          self._disposed = True
+          self._ctx = None
+
+    def _check_live(self):
+      if self._disposed:
+          raise RuntimeError('polygrad runtime has been disposed')
+
+    def __enter__(self):
+      self._check_live()
+      return self
+
+    def __exit__(self, exc_type, exc, tb):
+      self.dispose()
+      return False
+
+
+def create(*, device='auto'):
+    """Create an explicit Polygrad runtime/context."""
+    return Runtime(device=device)
+
+
 __all__ = [
     'Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance',
-    'CompiledCallable', 'Jit', 'JitError', 'compile', 'jit', 'stats', 'can_run',
+    'CompiledCallable', 'Jit', 'JitError', 'Runtime', 'create',
+    'compile', 'jit', 'stats', 'can_run',
 ]
 
 try:

@@ -4422,7 +4422,10 @@ uint8_t *poly_render_wasm_matmul(PolyUOp *sink, int *size_out, bool use_relaxed_
   next += n_f32;
   int acc = next;
 
-  bool use_relaxed_for_kind = use_relaxed_madd;
+  /* f32x4.relaxed_madd is (lhs * rhs) + acc. ABT benefits from the fused
+   * horizontal-dot inner loop; AB stays on strict mul+add until it wins
+   * consistently in local/browser benchmarks. */
+  bool use_relaxed_for_kind = use_relaxed_madd && s.kind == WASM_MATMUL_ABT;
 
   if (s.kind == WASM_MATMUL_AB)
     wasm_emit_matmul_ab_body(

@@ -12,46 +12,34 @@ Write tensor code once, then run the same lazy graph from Python, Node.js, the b
 Python:
 
 ```python
-from polygrad import Tensor, jit
+from polygrad import Tensor
 
-@jit
-def step(x, w):
-    return (x @ w).relu().realize()
+x = Tensor.rand(3, 4)
+w = Tensor.rand(4, 5)
+y = (x @ w).softmax(-1)
 
-x = Tensor.randn(32, 128)
-w = Tensor.randn(128, 64)
-
-print(step(x, w).numpy())
+print(y.numpy())
 ```
 
 Node.js:
 
 ```js
-const polygrad = require('polygrad')
+const { Tensor } = require('polygrad')
 
-;(async () => {
-  const pg = await polygrad.create({ core: 'auto', device: 'auto' })
-  const x = pg.Tensor.randn([32, 128])
-  const w = pg.Tensor.randn([128, 64])
+const x = Tensor.rand(3, 4)
+const w = Tensor.rand(4, 5)
+const y = x.dot(w).softmax(-1)
 
-  const step = pg.jit((x, w) => x.dot(w).relu().realize())
-  await step(x, w)  // normal run
-  await step(x, w)  // capture
-  console.log(await (await step(x, w)).toArray())  // replay
-
-  await pg.dispose()
-})()
+console.log(y.toArray())
 ```
 
-Browser WebGPU:
+Browser:
 
 ```js
-import { create } from 'polygrad'
+import { Tensor } from 'polygrad'
 
-const pg = await create({ core: 'wasm', device: 'webgpu' })
-const y = new pg.Tensor([1, 2, 3]).mul(2).add(1)
-console.log(await y.toArray())
-await pg.dispose()
+const y = new Tensor([1, 2, 3]).mul(2).add(1)
+console.log(y.toArray())
 ```
 
 ## Where Polygrad Fits
@@ -124,14 +112,10 @@ PY
 cd js
 npm install
 node - <<'JS'
-const polygrad = require('.')
-
-;(async () => {
-  const pg = await polygrad.create()
-  const y = new pg.Tensor([1, 2, 3]).mul(2).add(1)
-  console.log(await y.toArray())
-  await pg.dispose()
-})()
+const { Tensor, disposeDefault } = require('.')
+const y = new Tensor([1, 2, 3]).mul(2).add(1)
+console.log(y.toArray())
+disposeDefault()
 JS
 ```
 
@@ -152,7 +136,7 @@ Python Tensor API       JavaScript Tensor API       C / native package
 | Situation | Use |
 |---|---|
 | Python research or scripts | `polygrad` from PyPI |
-| Node.js product code | `polygrad` from npm with `polygrad.create()` |
+| Node.js product code | `polygrad` from npm with the default `Tensor` API or `polygrad.create()` |
 | Browser CPU/WASM | `polygrad` with `core: "wasm"` |
 | Browser GPU | `polygrad` with `core: "wasm", device: "webgpu"` |
 | Native embedding | C ABI and `libpolygrad` |
@@ -201,13 +185,16 @@ Benefits:
 JavaScript package pattern:
 
 ```js
-const pg = await polygrad.create({ core: 'wasm', device: 'webgpu' })
-const model = await SomePackage.create({ polygrad: pg })
+const polygrad = require('polygrad')
+
+const pg = polygrad.create({ core: 'wasm' })
+const model = SomePackage.create({ polygrad: pg })
 
 const x = new pg.Tensor([[1, 2, 3, 4]])
-const y = await model.predict(x)
+const y = model.predict(x)
+console.log(y.toArray())
 
-await pg.dispose()
+pg.dispose()
 ```
 
 Inside `SomePackage`, use the supplied runtime to allocate tensors, compile
@@ -215,9 +202,9 @@ kernels, and dispose package-owned compiled callables. Do not call
 `polygrad.create()` internally unless the package explicitly needs isolation:
 
 ```js
-async function create({ polygrad: pg }) {
-  const w = await pg.Tensor.randn([4, 2]).realize()
-  const predict = await pg.compile((x) => x.dot(w).realize(), [
+function create({ polygrad: pg }) {
+  const w = pg.Tensor.randn([4, 2]).realize()
+  const predict = pg.compile((x) => x.dot(w).realize(), [
     pg.Tensor.empty([1, 4])
   ])
 
@@ -228,9 +215,10 @@ async function create({ polygrad: pg }) {
 }
 ```
 
-Python currently exposes a module-level default context rather than an explicit
-runtime object. Python packages should accept caller-created `Tensor` or
-`Instance` objects and keep outputs in the same context:
+Python has the same default-context shape for ordinary use and an explicit
+runtime API for package isolation or device-specific wiring. Python packages
+should accept caller-created `Tensor` or `Instance` objects and keep outputs in
+the same context:
 
 ```python
 from polygrad import Tensor
@@ -300,10 +288,12 @@ print(f(Tensor([7, 8, 9])).numpy())  # replay
 JavaScript:
 
 ```js
-const f = pg.jit((x) => x.add(1).realize())
-await f(new pg.Tensor([1, 2, 3]))
-await f(new pg.Tensor([4, 5, 6]))
-console.log(await (await f(new pg.Tensor([7, 8, 9]))).toArray())
+const { Tensor, jit } = require('polygrad')
+
+const f = jit((x) => x.add(1).realize())
+f(new Tensor([1, 2, 3]))
+f(new Tensor([4, 5, 6]))
+console.log(f(new Tensor([7, 8, 9])).toArray())
 ```
 
 Python and JS also expose `compile(...)`, which warms and captures the same path
@@ -337,15 +327,17 @@ print(y.numpy())
 JavaScript:
 
 ```js
+const { Tensor, uop } = require('polygrad')
+
 function addKernel(out, a, b) {
   out = out.flatten(); a = a.flatten(); b = b.flatten()
-  const i = pg.uop.range(out.numel(), 0)
+  const i = uop.range(out.numel(), 0)
   return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
 }
 
-const out = pg.Tensor.empty([4], { dtype: 'float32' })
-const y = out.customKernel(new pg.Tensor([1, 2, 3, 4]), new pg.Tensor([10, 20, 30, 40]), addKernel)[0]
-console.log(await y.toArray())
+const out = Tensor.empty([4], { dtype: 'float32' })
+const y = out.customKernel(new Tensor([1, 2, 3, 4]), new Tensor([10, 20, 30, 40]), addKernel)[0]
+console.log(y.toArray())
 ```
 
 This API is a UOp `CALL` extension point. It is not a raw program-launch API,
@@ -362,7 +354,11 @@ make test-py
 make test-js-native
 TMPDIR=$PWD/temp/cc_tmp EM_CACHE=$PWD/temp/emscripten-cache make test-js-wasm
 DISPLAY=:1 make test-browser
+make test-browser-matrix
 ```
+
+`test-browser-matrix` adds non-WebGPU Playwright coverage across Chromium,
+Firefox, and installed Chrome/Chromium executables where available.
 
 Local performance checks:
 

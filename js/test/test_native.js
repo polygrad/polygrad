@@ -7,6 +7,7 @@ const { runInstanceTests } = require('./test_instance')
 const { runJitTests } = require('./test_jit')
 const { runOptimTests } = require('./test_optim')
 const { runModelTests } = require('./test_model')
+const { runSyncContractTests } = require('./test_sync_contract')
 
 async function expectNativeDeviceReject(device) {
   let threw = false
@@ -38,13 +39,14 @@ async function runNativeDeviceSelectionSmoke() {
 async function main() {
   await runNativeDeviceSelectionSmoke()
   const pg = await polygrad.create({ core: 'native' })
+  const syncResult = await runSyncContractTests(polygrad, pg, { core: 'native' })
   const tensorResult = await runTensorTests(pg)
   const instanceResult = await runInstanceTests(pg)
   const jitResult = await runJitTests(pg)
   const optimResult = await runOptimTests(pg)
   const modelResult = await runModelTests(pg)
   await pg.dispose()
-  const failed = tensorResult.failed + instanceResult.failed + jitResult.failed +
+  const failed = syncResult.failed + tensorResult.failed + instanceResult.failed + jitResult.failed +
     optimResult.failed + modelResult.failed
   if (failed > 0) process.exit(1)
 }

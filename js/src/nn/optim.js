@@ -88,9 +88,14 @@ function createBoundOptim(runtime) {
 
     schedule_step() { return this.scheduleStep() }
 
-    async step() {
+    step() {
       const scheduled = this.scheduleStep()
-      if (scheduled.length) await scheduled[0].realize(...scheduled.slice(1))
+      if (scheduled.length) scheduled[0].realize(...scheduled.slice(1))
+    }
+
+    async stepAsync() {
+      const scheduled = this.scheduleStep()
+      if (scheduled.length) await scheduled[0].realizeAsync(...scheduled.slice(1))
     }
   }
 
@@ -113,9 +118,14 @@ function createBoundOptim(runtime) {
 
     schedule_step() { return this.scheduleStep() }
 
-    async step() {
+    step() {
       const scheduled = this.scheduleStep()
-      if (scheduled.length) await scheduled[0].realize(...scheduled.slice(1))
+      if (scheduled.length) scheduled[0].realize(...scheduled.slice(1))
+    }
+
+    async stepAsync() {
+      const scheduled = this.scheduleStep()
+      if (scheduled.length) await scheduled[0].realizeAsync(...scheduled.slice(1))
     }
   }
 

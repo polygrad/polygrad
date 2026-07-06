@@ -33,21 +33,91 @@ npm install
 node test/test_wasm.js
 ```
 
-## Choose A Runtime
+## Quick Start
+
+```js
+const { Tensor } = require('polygrad')
+
+const a = Tensor.rand(3, 4)
+const b = Tensor.rand(4, 5)
+const c = a.dot(b).softmax(-1)
+
+console.log(c.toArray())
+```
+
+Autograd:
+
+```js
+const { Tensor } = require('polygrad')
+
+const x = new Tensor([1.0, 2.0, 3.0], { requiresGrad: true })
+const loss = x.mul(x).sum()
+
+loss.backward()
+console.log(x.grad.toArray())  // [2, 4, 6]
+```
+
+Explicit runtime:
 
 ```js
 const polygrad = require('polygrad')
 
-;(async () => {
-  const pg = await polygrad.create()
-  const pgNative = await polygrad.create({ core: 'native' })
-  const pgWasm = await polygrad.create({ core: 'wasm' })
-
-  await pg.dispose()
-  await pgNative.dispose()
-  await pgWasm.dispose()
-})()
+const pg = polygrad.create({ core: 'wasm' })
+const y = new pg.Tensor([1, 2, 3]).mul(2).add(1)
+console.log(y.toArray())
+pg.dispose()
 ```
+
+Linear algebra:
+
+```js
+const { Tensor } = require('polygrad')
+
+const A = new Tensor([[4.0, 2.0], [2.0, 5.0]])
+const b = new Tensor([1.0, 3.0])
+const x = A.solve(b)
+
+console.log(x.toArray())
+```
+
+Structured linalg methods are portable tensor-composed fallbacks. Current
+`lstsq` is solution-only for full-rank tall or square systems.
+
+## Choose A Runtime
+
+The default JavaScript API is sync-first. `polygrad.create(...)` returns a
+`PolyRuntime` immediately or throws; tensor construction and graph construction
+are synchronous too.
+
+Use explicit async startup when the host cannot or should not instantiate the
+WASM core synchronously, for example older browser limits or a fetch/streaming
+loader path. The async entry is not a drop-in default `Tensor` import because
+startup itself must be awaited:
+
+```js
+const { createAsync } = require('polygrad/async')
+const pg = await createAsync({ core: 'wasm' })
+```
+
+Runtime matrix:
+
+| Work | Sync API | Async API |
+|---|---|---|
+| Create normal Node/browser runtime | `polygrad.create(opts)` | not needed |
+| Create through async WASM loader | throws with guidance | `createAsync(opts)` from `polygrad/async` |
+| Construct tensors and graph ops | `new Tensor(...)`, `x.mul(2)` | not needed |
+| CPU/native/WASM realize/readback | `x.realize()`, `x.toArray()` | `realizeAsync()` / `toArrayAsync()` also work |
+| WebGPU realize/readback | throws `PolyAsyncRequired` | `await x.realizeAsync()`, `await x.toArrayAsync()` |
+
+```js
+const polygrad = require('polygrad')
+
+const pg = polygrad.create({ core: 'wasm' })
+console.log(pg.core, pg.device)
+pg.dispose()
+```
+
+Runtime selection:
 
 | Environment | `core: "auto"` | `core: "native"` | `core: "wasm"` |
 |---|---|---|---|
@@ -72,65 +142,41 @@ For the native core, `POLY_DEVICE` is handled by the C runtime and may select
 `cpu`, `cuda`, `hip`, `x86`, or `interp`. For the WASM core, device choices are
 `wasm`, `interp`, and browser `webgpu` when available.
 
-Always call `await pg.dispose()` when a long-running process is done with a
-runtime.
-
-## Quick Start
-
-```js
-const polygrad = require('polygrad')
-
-;(async () => {
-  const pg = await polygrad.create()
-  const { Tensor } = pg
-
-  const x = new Tensor([1, 2, 3])
-  const y = x.mul(2).add(1)
-  console.log(await y.toArray())  // [3, 5, 7]
-
-  await pg.dispose()
-})().catch(console.error)
-```
-
-Autograd:
-
-```js
-const a = new pg.Tensor([2, 3], { requiresGrad: true })
-const loss = a.mul(a).sum()
-
-await loss.backward()
-console.log(await a.grad.toArray())  // [4, 6]
-```
-
-Linear algebra:
-
-```js
-const A = new pg.Tensor([[4, 2], [2, 5]])
-const b = new pg.Tensor([1, 3])
-const x = A.solve(b)
-
-console.log(await x.toArray())
-```
-
-Structured linalg methods are portable tensor-composed fallbacks. Current
-`lstsq` is solution-only for full-rank tall or square systems.
+Call `pg.dispose()` when an application or long-running script is done with an
+explicit runtime.
 
 ## Browser
 
 With an npm-installed package and a browser bundler:
 
 ```js
-import { create } from 'polygrad'
+import { Tensor } from 'polygrad'
 
-const pg = await create({ core: 'wasm', device: 'webgpu' })
-const y = new pg.Tensor([1, 2, 3]).mul(2)
-console.log(await y.toArray())
-await pg.dispose()
+const y = new Tensor([1, 2, 3]).mul(2).add(1)
+console.log(y.toArray())
 ```
 
-Bundlers should resolve `polygrad` to the browser bundle through the package
-`browser` export condition. Node `require('polygrad')` still resolves to the
-Node entry.
+For WebGPU, create an explicit runtime and use async execution/readback:
+
+```js
+import { create } from 'polygrad'
+
+const pg = create({ core: 'wasm', device: 'webgpu' })
+const y = new pg.Tensor([1, 2, 3]).mul(2)
+console.log(await y.toArrayAsync())
+pg.dispose()
+```
+
+Bundlers should resolve the bare `polygrad` import to the browser bundle
+through the package `browser` export condition. Node `require('polygrad')`
+still resolves to the Node entry.
+
+If a bundler or CDN resolver picks the Node entry by mistake, force the browser
+entry explicitly:
+
+```js
+import { create } from 'polygrad/browser'
+```
 
 For a local checkout or manual browser bundle, build browser artifacts from the
 repository root:
@@ -143,32 +189,45 @@ npm run build:browser
 
 Outputs:
 
-- `dist/polygrad.js` for a browser global.
-- `dist/polygrad.mjs` for browser ESM.
+- `dist/polygrad.sync.js` for a sync browser global.
+- `dist/polygrad.sync.mjs` for sync browser ESM.
+- `dist/polygrad.async.js` for an explicit async-startup browser global.
+- `dist/polygrad.async.mjs` for explicit async-startup browser ESM.
 
 Browser global:
 
 ```html
-<script src="./dist/polygrad.js"></script>
+<script src="./dist/polygrad.sync.js"></script>
 <script>
-  polygrad.create().then(async (pg) => {
-    const y = new pg.Tensor([1, 2, 3]).mul(2)
-    console.log(await y.toArray())
-    await pg.dispose()
-  })
+  const y = new polygrad.Tensor([1, 2, 3]).mul(2)
+  console.log(y.toArray())
+  polygrad.disposeDefault()
 </script>
 ```
 
-Browser ESM with WebGPU:
+Local browser ESM with WebGPU:
 
 ```html
 <script type="module">
-  import { create } from './dist/polygrad.mjs'
+  import { create } from './dist/polygrad.sync.mjs'
 
-  const pg = await create({ core: 'wasm', device: 'webgpu' })
+  const pg = create({ core: 'wasm', device: 'webgpu' })
   const y = new pg.Tensor([1, 2, 3]).mul(2)
-  console.log(await y.toArray())
-  await pg.dispose()
+  console.log(await y.toArrayAsync())
+  pg.dispose()
+</script>
+```
+
+Explicit async startup bundle:
+
+```html
+<script type="module">
+  import { createAsync } from './dist/polygrad.async.mjs'
+
+  const pg = await createAsync({ core: 'wasm' })
+  const y = new pg.Tensor([1, 2, 3]).mul(2)
+  console.log(y.toArray())
+  pg.dispose()
 </script>
 ```
 
@@ -178,52 +237,61 @@ Polygrad tensors are lazy. Build expressions freely, then call `realize()` or
 read data back.
 
 ```js
-const x = new pg.Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
-const y = await x.mul(3).sub(1).realize()
+const { Tensor } = require('polygrad')
 
-console.log(await y.toTypedArray())  // Float32Array
+const x = new Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
+const y = x.mul(3).sub(1).realize()
+
+console.log(y.toTypedArray())  // Float32Array
 ```
 
 For repeated loops, reuse tensor buffers instead of constructing new source
 tensors:
 
 ```js
-const x = new pg.Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
-await x.realize()
+const { Tensor } = require('polygrad')
+
+const x = new Tensor(new Float32Array([1, 2, 3, 4]), { shape: [4] })
+x.realize()
 x.copyFrom(new Float32Array([5, 6, 7, 8]))
 ```
 
 Use `toTypedArrays()` when reading several outputs together.
 
 ```js
+const { Tensor } = require('polygrad')
+
+const x = new Tensor([1, 2, 3])
 const a = x.add(1)
 const b = x.mul(2)
-const [aData, bData] = await pg.Tensor.toTypedArrays(a, b)
+const [aData, bData] = Tensor.toTypedArrays(a, b)
 ```
 
 ## JIT And Compile
 
-`pg.jit(fn)` follows tinygrad raw Tensor JIT behavior: first call runs normally,
+`jit(fn)` follows tinygrad raw Tensor JIT behavior: first call runs normally,
 second call captures realized schedules, later calls replay.
 
 ```js
-const f = pg.jit((x) => x.add(1).realize())
+const { Tensor, jit, compile } = require('polygrad')
 
-await f(new pg.Tensor([1, 2, 3]))  // normal run
-await f(new pg.Tensor([4, 5, 6]))  // capture
-console.log(await (await f(new pg.Tensor([7, 8, 9]))).toArray())  // replay
+const f = jit((x) => x.add(1).realize())
+
+f(new Tensor([1, 2, 3]))  // normal run
+f(new Tensor([4, 5, 6]))  // capture
+console.log(f(new Tensor([7, 8, 9])).toArray())  // replay
 ```
 
-`pg.compile(fn, sampleInputs)` warms and captures immediately:
+`compile(fn, sampleInputs)` warms and captures immediately:
 
 ```js
-const compiled = await pg.compile(
+const compiled = compile(
   (x) => x.add(1).realize(),
-  [new pg.Tensor([1, 2, 3])]
+  [new Tensor([1, 2, 3])]
 )
 
-const out = await compiled.run([new pg.Tensor([7, 8, 9])])
-console.log(await out.toArray())
+const out = compiled.run([new Tensor([7, 8, 9])])
+console.log(out.toArray())
 console.log(compiled.stats())
 compiled.dispose()
 ```
@@ -236,49 +304,164 @@ wraps the body in `CALL`, returns `AFTER(...)` tensors, and keeps execution in
 the normal schedule and runtime caches.
 
 ```js
+const { Tensor, uop } = require('polygrad')
+
 function addKernel(out, a, b) {
   out = out.flatten(); a = a.flatten(); b = b.flatten()
-  const i = pg.uop.range(out.numel(), 0)
+  const i = uop.range(out.numel(), 0)
   return out.index(i).store(a.index(i).add(b.index(i))).end(i).sink()
 }
 
-const out = pg.Tensor.empty([4], { dtype: 'float32' })
+const out = Tensor.empty([4], { dtype: 'float32' })
 const y = out.customKernel(
-  new pg.Tensor([1, 2, 3, 4]),
-  new pg.Tensor([10, 20, 30, 40]),
+  new Tensor([1, 2, 3, 4]),
+  new Tensor([10, 20, 30, 40]),
   addKernel
 )[0]
-console.log(await y.toArray())
+console.log(y.toArray())
 ```
 
 This is a UOp `CALL` extension point, not a raw program-launch API. Custom
 backward functions are not implemented yet.
 
-## API Summary
+## Common API Recipes
 
-`polygrad.create(opts?)` returns a `Promise<PolyRuntime>`.
+Default runtime:
 
-Runtime fields:
+```js
+const { Tensor, jit, compile, nn } = require('polygrad')
 
-- `pg.Tensor`: runtime-bound Tensor class.
-- `pg.nn`: `Linear`, `SGD`, `Adam`, `AdamW`, and parameter helpers.
-- `pg.jit(fn)`: first-run, capture, replay wrapper.
-- `pg.compile(fn, sampleInputs)`: explicit wrapper over the same JIT path.
-- `pg.stats()`: wrapper and C runtime counters.
-- `pg.canRun(query)`: advisory backend capability probe.
-- `pg.uop`: UOp helpers for inspection and custom kernels.
-- `pg.dispose()`: release runtime resources.
+const x = new Tensor([1, 2, 3])
+console.log(x.mul(2).add(1).toArray())
+```
 
-Tensor methods include:
+Explicit runtime and device selection:
 
-| Category | Methods |
+```js
+const polygrad = require('polygrad')
+const pg = polygrad.create({ core: 'wasm' })
+
+const x = new pg.Tensor([1, 2, 3])
+console.log(x.mul(2).toArray())
+pg.dispose()
+```
+
+Create tensors. Shape constructors accept either `Tensor.zeros(2, 3)` or `Tensor.zeros([2, 3])`:
+
+```js
+const a = Tensor.zeros([2, 3])
+const b = Tensor.ones([2, 3])
+const c = Tensor.randn([2, 3])
+const d = Tensor.arange(6).reshape(2, 3)
+const e = new Tensor(new Float32Array([1, 2, 3, 4]), { shape: [2, 2] })
+```
+
+Math, movement, indexing:
+
+```js
+const x = Tensor.arange(12).reshape(3, 4)
+const y = x.permute(1, 0).reshape(2, 6)
+const z = y.relu().sum(1)
+const picked = x.gather(1, new Tensor([[0, 2], [1, 3], [0, 1]], { dtype: 'int32' }))
+```
+
+Autograd and optimization:
+
+```js
+const model = new nn.Linear(4, 1)
+const opt = new nn.SGD(nn.getParameters(model), { lr: 0.01 })
+
+const x = Tensor.randn(8, 4)
+const target = Tensor.randn(8, 1)
+
+opt.zeroGrad()
+const loss = model.call(x).sub(target).square().mean()
+loss.backward()
+opt.step()
+```
+
+Linear algebra:
+
+```js
+const A = new Tensor([[4, 2], [2, 5]])
+const b = new Tensor([1, 3])
+
+console.log(A.solve(b).toArray())
+console.log(A.cholesky().toArray())
+console.log(A.lstsq(b).toArray())
+```
+
+JIT and compile:
+
+```js
+const f = jit((x) => x.add(1).realize())
+f(new Tensor([1, 2, 3]))  // run
+f(new Tensor([4, 5, 6]))  // capture
+console.log(f(new Tensor([7, 8, 9])).toArray())  // replay
+
+const compiled = compile((x) => x.mul(2).realize(), [Tensor.empty(3)])
+console.log(compiled.run([new Tensor([1, 2, 3])]).toArray())
+compiled.dispose()
+```
+
+Repeated input updates:
+
+```js
+const x = new Tensor(new Float32Array([1, 2, 3]), { shape: [3] }).realize()
+const f = compile((x) => x.square().sum().realize(), [x])
+
+console.log(f.run([x]).item())
+x.copyFrom(new Float32Array([4, 5, 6]))
+console.log(f.run([x]).item())
+f.dispose()
+```
+
+Readback:
+
+```js
+const y = new Tensor([1, 2, 3]).mul(2)
+console.log(y.toArray())              // typed array on sync runtimes
+console.log(y.tolist())               // nested JS arrays
+console.log(y.item())                 // scalar tensors only
+
+const [a, b] = Tensor.toTypedArrays(y, y.add(1))
+```
+
+WebGPU readback is explicit async:
+
+```js
+const polygrad = require('polygrad')
+const pg = polygrad.create({ core: 'wasm', device: 'webgpu' })
+const y = new pg.Tensor([1, 2, 3]).mul(2)
+console.log(await y.toArrayAsync())
+pg.dispose()
+```
+
+Runtime inspection:
+
+```js
+const polygrad = require('polygrad')
+
+console.log(polygrad.stats())
+console.log(polygrad.canRun({ op: 'add', shape: [1024] }))
+```
+
+`canRun(...)` is conservative. For some compound op/shape queries it throws
+when support cannot be proven statically.
+
+API reference at a glance:
+
+| Area | Main APIs |
 |---|---|
-| Creation | `new Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `eye`, `arange` |
-| Elementwise | `add`, `sub`, `mul`, `div`, `neg`, `exp`, `log`, `sqrt`, `square`, `relu`, `gelu`, `silu` |
-| Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std`, `softmax` |
-| Movement | `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `gather`, `takeAlongAxis` |
+| Runtime | `create`, `createAsync`, `disposeDefault`, `stats`, `canRun` |
+| Tensor creation | `new Tensor(data)`, `zeros`, `ones`, `full`, `rand`, `randn`, `eye`, `arange`, `empty` |
+| Tensor math | `add`, `sub`, `mul`, `div`, `exp`, `log`, `sqrt`, `relu`, `gelu`, `silu`, `softmax` |
+| Reductions | `sum`, `mean`, `max`, `argmax`, `sort`, `argsort`, `topk`, `var`, `std` |
+| Movement/indexing | `reshape`, `expand`, `permute`, `shrink`, `flip`, `pad`, `cat`, `stack`, `gather`, `takeAlongAxis`, `scatter`, `scatterReduce` |
 | Linalg | `dot`, `qr`, `triangularSolve`, `solveTriangular`, `cholesky`, `choleskySolve`, `solve`, `lstsq` |
-| Data | `realize`, `toArray`, `toTypedArray`, `toTypedArrays`, `copyFrom`, `updateFrom`, `repr`, `customKernel` |
+| Data/readback | `realize`, `realizeAsync`, `toArray`, `toArrayAsync`, `toTypedArray`, `toTypedArrayAsync`, `toTypedArrays`, `toTypedArraysAsync`, `copyFrom`, `updateFrom` |
+| Compilation | `jit`, `jitAsync`, `compile`, `compileAsync`, `Tensor.customKernel` |
+| Neural nets | `nn.Linear`, `nn.SGD`, `nn.Adam`, `nn.AdamW`, `nn.getParameters`, `nn.getStateDict` |
 
 ## Package Integration
 
@@ -286,9 +469,9 @@ If your package is built on Polygrad, accept a `PolyRuntime` from the caller
 instead of creating a hidden runtime:
 
 ```js
-async function createModel({ polygrad: pg }) {
-  const weight = await pg.Tensor.randn([4, 2]).realize()
-  const predict = await pg.compile((x) => x.dot(weight).realize(), [
+function createModel({ polygrad: pg }) {
+  const weight = pg.Tensor.randn([4, 2]).realize()
+  const predict = pg.compile((x) => x.dot(weight).realize(), [
     pg.Tensor.empty([1, 4])
   ])
 
@@ -310,7 +493,22 @@ From the repository root:
 make test-js-native
 TMPDIR=$PWD/temp/cc_tmp EM_CACHE=$PWD/temp/emscripten-cache make test-js-wasm
 DISPLAY=:1 make test-browser
+make test-browser-matrix
 ```
+
+`test-browser` keeps the default Chromium/WebGPU path. `test-browser-matrix`
+runs the browser sync bundle against a non-WebGPU smoke matrix and skips local
+browser executables that are not installed. Override the matrix when you need a
+specific browser or older Chrome binary:
+
+```bash
+BROWSER_MATRIX="chromium,firefox,old-chrome=chromium@/path/to/chrome" make test-browser-matrix
+BROWSER_MATRIX_DEVICES="auto,interp" make test-browser-matrix
+```
+
+Browser specs are `chromium`, `firefox`, `webkit`, `chrome`, or
+`label=engine@/absolute/path`. WebGPU coverage remains Chromium-only and lives
+in `make test-browser`.
 
 ## License
 

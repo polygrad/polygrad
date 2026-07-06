@@ -4,31 +4,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DIST_DIR="${PROJECT_DIR}/dist"
-WASM_ENTRY="${PROJECT_DIR}/wasm/polygrad.js"
-BROWSER_ENTRY="${PROJECT_DIR}/src/browser.js"
+SYNC_ENTRY="${PROJECT_DIR}/src/browser.sync.js"
+ASYNC_ENTRY="${PROJECT_DIR}/src/browser.async.js"
+REQUIRED_WASM=(
+  "${PROJECT_DIR}/wasm/core.sync.js"
+  "${PROJECT_DIR}/wasm/core.async.js"
+)
 
-if [ ! -f "$WASM_ENTRY" ]; then
-  echo "ERROR: ${WASM_ENTRY} not found"
-  echo "Run 'make -C .. wasm-pkg' first."
-  exit 1
-fi
+for wasm_entry in "${REQUIRED_WASM[@]}"; do
+  if [ ! -f "$wasm_entry" ]; then
+    echo "ERROR: ${wasm_entry} not found"
+    echo "Run 'make -C .. wasm-pkg' first."
+    exit 1
+  fi
+done
 
 PKG_NAME=$(node -e "
   const p = require('${PROJECT_DIR}/package.json')
-  const name = p.name.replace(/^@/, '').replace(/[/-](\\w)/g, (_, c) => c.toUpperCase())
+  const name = p.name.replace(/^@/, '').replace(/[\\/-](\\w)/g, (_, c) => c.toUpperCase())
   console.log(name)
 ")
-
-EXPORTS=$(node -e "
-  const m = require('${BROWSER_ENTRY}')
-  console.log(Object.keys(m).join(','))
-")
-
-echo "=== Building browser bundles ==="
-echo "  Package: ${PKG_NAME}"
-echo "  Exports: ${EXPORTS}"
-
-mkdir -p "$DIST_DIR"
 
 if command -v esbuild >/dev/null 2>&1; then
   ESBUILD=(esbuild)
@@ -50,23 +45,53 @@ COMMON_FLAGS=(
   --define:__filename='""'
 )
 
-"${ESBUILD[@]}" "${BROWSER_ENTRY}" \
-  "${COMMON_FLAGS[@]}" \
-  --format=iife \
-  --global-name="${PKG_NAME}" \
-  --outfile="${DIST_DIR}/${PKG_NAME}.js"
+build_entry() {
+  local entry="$1"
+  local suffix="$2"
+  local global_name="$3"
+  local exports
+  exports=$(node -e "const m = require('${entry}'); console.log(Object.keys(m).join(','))")
 
-INTERNAL="__${PKG_NAME}"
-"${ESBUILD[@]}" "${BROWSER_ENTRY}" \
-  "${COMMON_FLAGS[@]}" \
-  --format=iife \
-  --global-name="${INTERNAL}" \
-  --outfile="${DIST_DIR}/${PKG_NAME}.mjs"
+  echo "  ${suffix}: ${exports}"
 
-IFS=',' read -ra KEYS <<< "$EXPORTS"
-DESTRUCTURE=$(IFS=','; echo "${KEYS[*]}")
-EXPORT_LINE=$(IFS=','; echo "${KEYS[*]}")
-echo "var {${DESTRUCTURE}}=${INTERNAL};export{${EXPORT_LINE}};" >> "${DIST_DIR}/${PKG_NAME}.mjs"
+  "${ESBUILD[@]}" "${entry}" \
+    "${COMMON_FLAGS[@]}" \
+    --format=iife \
+    --global-name="${global_name}" \
+    --outfile="${DIST_DIR}/${PKG_NAME}.${suffix}.js"
+
+  local internal="__${PKG_NAME}_${suffix//./_}"
+  "${ESBUILD[@]}" "${entry}" \
+    "${COMMON_FLAGS[@]}" \
+    --format=iife \
+    --global-name="${internal}" \
+    --outfile="${DIST_DIR}/${PKG_NAME}.${suffix}.mjs"
+
+  IFS=',' read -ra keys <<< "$exports"
+  local destructure export_line
+  destructure=$(IFS=','; echo "${keys[*]}")
+  export_line=$(IFS=','; echo "${keys[*]}")
+  echo "var {${destructure}}=${internal};export{${export_line}};" >> "${DIST_DIR}/${PKG_NAME}.${suffix}.mjs"
+}
+
+echo "=== Building browser bundles ==="
+echo "  Package: ${PKG_NAME}"
+
+mkdir -p "$DIST_DIR"
+rm -f \
+  "${DIST_DIR}/${PKG_NAME}.js" \
+  "${DIST_DIR}/${PKG_NAME}.mjs" \
+  "${DIST_DIR}/${PKG_NAME}.sync.js" \
+  "${DIST_DIR}/${PKG_NAME}.sync.mjs" \
+  "${DIST_DIR}/${PKG_NAME}.async.js" \
+  "${DIST_DIR}/${PKG_NAME}.async.mjs"
+
+build_entry "$SYNC_ENTRY" sync "${PKG_NAME}"
+build_entry "$ASYNC_ENTRY" async "${PKG_NAME}"
 
 echo "=== Browser bundles built ==="
-ls -lh "${DIST_DIR}/${PKG_NAME}.js" "${DIST_DIR}/${PKG_NAME}.mjs"
+ls -lh \
+  "${DIST_DIR}/${PKG_NAME}.sync.js" \
+  "${DIST_DIR}/${PKG_NAME}.sync.mjs" \
+  "${DIST_DIR}/${PKG_NAME}.async.js" \
+  "${DIST_DIR}/${PKG_NAME}.async.mjs"

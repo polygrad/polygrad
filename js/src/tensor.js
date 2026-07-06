@@ -2,7 +2,8 @@
  * tensor.js -- Runtime-bound Tensor class factory for polygrad.
  *
  * All graph construction ops are synchronous (use _runtime._core).
- * All realize/data-extraction ops are async (core already resolved by create()).
+ * Realize/data-extraction are synchronous for native/CPU/WASM and have
+ * explicit Async variants for WebGPU or async WASM loading paths.
  *
  * The core ffi table normalizes int64 marshalling:
  *   - Functions taking shape/axis arrays accept plain JS number[]
@@ -12,6 +13,7 @@
 'use strict'
 
 const { UOp } = require('./uop/ops')
+const { PolyAsyncRequired } = require('./errors')
 
 /**
  * Strong frontend owner registry. Maps C-side PolyBuffer* address value ->
@@ -242,6 +244,13 @@ function createBoundTensorClass(runtime) {
     if (!nxt) return cur
     return ffi.poly_alu2(ctx, ops.ADD, cur, nxt)
   }
+  const usesAsyncHostBridge = () => {
+    const caps = _runtime && _runtime._core && _runtime._core.caps
+    return caps && caps.device === 'webgpu'
+  }
+  const requireSyncHostBridge = (method, asyncMethod) => {
+    if (usesAsyncHostBridge()) throw new PolyAsyncRequired(method, asyncMethod)
+  }
   const liveTensors = []
   const useWeakRef = typeof WeakRef !== 'undefined'
   const registerTensor = (tensor) => {
@@ -312,19 +321,20 @@ function createBoundTensorClass(runtime) {
   const canRegisterFrontendRelease =
     ffi.poly_ctx_set_frontend_buffer_release || ffi.poly_set_frontend_buffer_release
   if (canRegisterFrontendRelease && !_runtime._core.__frontendBufferReleaseRegistered) {
+    const releaseCore = _runtime._core
     const releaseFrontendBuffer = (bufferKey) => {
       const key = normalizeBufferKey(bufferKey)
       hostBuffers.delete(key)
-      if (_runtime._core.unregisterHostBuffer) {
-        _runtime._core.unregisterHostBuffer(key)
+      if (releaseCore.unregisterHostBuffer) {
+        releaseCore.unregisterHostBuffer(key)
       }
     }
     if (ffi.poly_ctx_set_frontend_buffer_release) {
-      ffi.poly_ctx_set_frontend_buffer_release(_runtime._core.ctx, releaseFrontendBuffer)
+      ffi.poly_ctx_set_frontend_buffer_release(releaseCore.ctx, releaseFrontendBuffer)
     } else {
       ffi.poly_set_frontend_buffer_release(releaseFrontendBuffer)
     }
-    _runtime._core.__frontendBufferReleaseRegistered = true
+    releaseCore.__frontendBufferReleaseRegistered = true
   }
 
   class Tensor {
@@ -438,8 +448,17 @@ function createBoundTensorClass(runtime) {
       if (!this._tensor) throw new Error('Tensor has no core PolyTensor')
       return ffi.poly_tensor_to_device(this._ctx, this._tensor, deviceId(device))
     }
-    static async _coreRealizeBatch(ctx, targets) {
-      const realized = await ffi.poly_realize_tensors(ctx, targets.map(t => t._tensor))
+    static _coreRealizeBatch(ctx, targets) {
+      const realized = ffi.poly_realize_tensors(ctx, targets.map(t => t._tensor))
+      if (!realized || realized.length !== targets.length) {
+        throw new Error('poly_realize_tensors failed')
+      }
+      return realized
+    }
+
+    static async _coreRealizeBatchAsync(ctx, targets) {
+      const fn = ffi.poly_realize_tensors_async || ffi.poly_realize_tensors
+      const realized = await fn(ctx, targets.map(t => t._tensor))
       if (!realized || realized.length !== targets.length) {
         throw new Error('poly_realize_tensors failed')
       }
@@ -520,7 +539,7 @@ function createBoundTensorClass(runtime) {
       return targets
     }
 
-    async realize(...lst) {
+    _realizeWith(realizeBatch, ...lst) {
       // Triggers the computation needed to create these Tensor(s). The core
       // decides whether a buffer identity is already current on the requested
       // device or still needs an allocation/copy.
@@ -538,7 +557,7 @@ function createBoundTensorClass(runtime) {
       if (!targets.length) return this
       const oldRoots = targets.map(t => t._currentUopRaw())
       const deviceIds = targets.map(t => tensorDevice(t._tensor))
-      const realized = await Tensor._coreRealizeBatch(ctx, targets)
+      const realized = realizeBatch.call(Tensor, ctx, targets)
       const replacements = []
       for (let i = 0; i < targets.length; i++) {
         replacements.push({
@@ -552,7 +571,43 @@ function createBoundTensorClass(runtime) {
       return this
     }
 
-    async _readBufferBytes() {
+    realize(...lst) {
+      requireSyncHostBridge('realize()', 'realizeAsync()')
+      return this._realizeWith(Tensor._coreRealizeBatch, ...lst)
+    }
+
+    async realizeAsync(...lst) {
+      const { ffi, ctx } = this._rt._core
+      const tensors = [this, ...lst]
+      if (!ffi.poly_realize_tensors_async && !ffi.poly_realize_tensors) {
+        throw new Error('poly_realize_tensors is required')
+      }
+      const targets = []
+      const seen = new Set()
+      for (const t of tensors) {
+        const key = `${uopKey(t._currentUopRaw())}:${tensorDevice(t._tensor)}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        targets.push(t)
+      }
+      if (!targets.length) return this
+      const oldRoots = targets.map(t => t._currentUopRaw())
+      const deviceIds = targets.map(t => tensorDevice(t._tensor))
+      const realized = await Tensor._coreRealizeBatchAsync(ctx, targets)
+      const replacements = []
+      for (let i = 0; i < targets.length; i++) {
+        replacements.push({
+          oldRaw: oldRoots[i],
+          newRaw: tensorUop(realized[i]),
+          deviceId: deviceIds[i],
+          realized: realized[i]
+        })
+      }
+      applyMapToTensors(ctx, replacements)
+      return this
+    }
+
+    _readBufferBytesWith(readBuffer) {
       const { ffi, ctx } = this._rt._core
       const numel = this.numel()
       const AT = TA_BY_DTYPE[this._dtype] || Float32Array
@@ -572,7 +627,7 @@ function createBoundTensorClass(runtime) {
         raw = hostBuffers.get(normKey)
       } else {
         const nbytes = numel * itemsize
-        raw = await ffi.poly_buffer_read(ctx, bufRaw, nbytes)
+        raw = readBuffer(ctx, bufRaw, nbytes)
       }
       if (this._dtype === 'float16') {
         const bits = raw instanceof Uint16Array ? raw :
@@ -588,7 +643,45 @@ function createBoundTensorClass(runtime) {
       return new AT(raw.buffer, raw.byteOffset, numel)
     }
 
-    async toArray() {
+    _readBufferBytes() {
+      requireSyncHostBridge('toArray()', 'toArrayAsync()')
+      return this._readBufferBytesWith(ffi.poly_buffer_read)
+    }
+
+    async _readBufferBytesAsync() {
+      const { ffi, ctx } = this._rt._core
+      const numel = this.numel()
+      const AT = TA_BY_DTYPE[this._dtype] || Float32Array
+      const itemsize = AT.BYTES_PER_ELEMENT
+      const bufRaw = this.uop && this.uop.buffer ? this.uop.buffer.raw : null
+      if (!bufRaw) throw new Error('toArray: tensor has no buffer identity')
+      let raw
+      const bufferKey = ffi.poly_buffer_get_key ? ffi.poly_buffer_get_key(ctx, bufRaw) : 0
+      const normKey = bufferKey ? normalizeBufferKey(bufferKey) : null
+      const ptr = ffi.poly_buffer_get_ptr ? ffi.poly_buffer_get_ptr(ctx, bufRaw) : null
+      if (!hasRuntimePtr(ptr) && normKey && hostBuffers.has(normKey)) {
+        raw = hostBuffers.get(normKey)
+      } else {
+        const nbytes = numel * itemsize
+        const readBuffer = ffi.poly_buffer_read_async || ffi.poly_buffer_read
+        raw = await readBuffer(ctx, bufRaw, nbytes)
+      }
+      if (this._dtype === 'float16') {
+        const bits = raw instanceof Uint16Array ? raw :
+          new Uint16Array(raw.buffer, raw.byteOffset, numel)
+        return decodeFloat16Array(bits)
+      }
+      if (this._dtype === 'bfloat16') {
+        const bits = raw instanceof Uint16Array ? raw :
+          new Uint16Array(raw.buffer, raw.byteOffset, numel)
+        return decodeBfloat16Array(bits)
+      }
+      if (raw instanceof AT) return raw
+      return new AT(raw.buffer, raw.byteOffset, numel)
+    }
+
+    toArray() {
+      requireSyncHostBridge('toArray()', 'toArrayAsync()')
       const numel = this.numel()
       if (numel === 0) {
         const AT = TA_BY_DTYPE[this._dtype] || Float32Array
@@ -597,19 +690,65 @@ function createBoundTensorClass(runtime) {
       let t = this
       if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
       if (!t.uop.hasBufferIdentity()) t = t.contiguous()
-      await t.realize()
-      return await t._readBufferBytes()
+      t.realize()
+      return t._readBufferBytes()
     }
 
-    async toTypedArray() {
-      return await this.toArray()
+    async toArrayAsync() {
+      const numel = this.numel()
+      if (numel === 0) {
+        const AT = TA_BY_DTYPE[this._dtype] || Float32Array
+        return new AT(0)
+      }
+      let t = this
+      if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
+      if (!t.uop.hasBufferIdentity()) t = t.contiguous()
+      await t.realizeAsync()
+      return await t._readBufferBytesAsync()
     }
 
-    static async toTypedArrays(...tensors) {
+    toTypedArray() {
+      requireSyncHostBridge('toTypedArray()', 'toTypedArrayAsync()')
+      return this.toArray()
+    }
+
+    async toTypedArrayAsync() {
+      return await this.toArrayAsync()
+    }
+
+    static toTypedArrays(...tensors) {
       if (tensors.length === 1 && Array.isArray(tensors[0])) tensors = tensors[0]
       if (!tensors.length) return []
       for (const t of tensors) {
         if (!(t instanceof Tensor)) throw new TypeError('Tensor.toTypedArrays expects Tensor arguments')
+      }
+      requireSyncHostBridge('Tensor.toTypedArrays()', 'Tensor.toTypedArraysAsync()')
+      const prepared = tensors.map(t => {
+        if (t.numel() === 0) return t
+        let out = t
+        if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
+        if (!out.uop.hasBufferIdentity()) out = out.contiguous()
+        return out
+      })
+      const targets = prepared.filter(t => t.numel() !== 0)
+      if (targets.length) targets[0].realize(...targets.slice(1))
+      const out = []
+      for (const t of prepared) {
+        if (t.numel() === 0) {
+          const AT = TA_BY_DTYPE[t._dtype] || Float32Array
+          out.push(new AT(0))
+        } else {
+          out.push(t._readBufferBytes())
+        }
+      }
+      return out
+    }
+
+    static async toTypedArraysAsync(...tensors) {
+      if (tensors.length === 1 && Array.isArray(tensors[0])) tensors = tensors[0]
+      if (!tensors.length) return []
+      for (const t of tensors) {
+        if (!(t instanceof Tensor)) throw new TypeError('Tensor.toTypedArraysAsync expects Tensor arguments')
       }
       const prepared = tensors.map(t => {
         if (t.numel() === 0) return t
@@ -619,37 +758,63 @@ function createBoundTensorClass(runtime) {
         return out
       })
       const targets = prepared.filter(t => t.numel() !== 0)
-      if (targets.length) await targets[0].realize(...targets.slice(1))
+      if (targets.length) await targets[0].realizeAsync(...targets.slice(1))
       const out = []
       for (const t of prepared) {
         if (t.numel() === 0) {
           const AT = TA_BY_DTYPE[t._dtype] || Float32Array
           out.push(new AT(0))
         } else {
-          out.push(await t._readBufferBytes())
+          out.push(await t._readBufferBytesAsync())
         }
       }
       return out
     }
 
-    async item() {
-      const arr = await this.toArray()
+    item() {
+      requireSyncHostBridge('item()', 'itemAsync()')
+      const arr = this.toArray()
       if (arr.length !== 1) {
         throw new Error(`item() requires scalar tensor, got shape [${this.shape}]`)
       }
       return arr[0]
     }
 
-    async tolist() {
-      return _buildNested(await this.toArray(), this.shape, 0, 0).value
+    async itemAsync() {
+      const arr = await this.toArrayAsync()
+      if (arr.length !== 1) {
+        throw new Error(`item() requires scalar tensor, got shape [${this.shape}]`)
+      }
+      return arr[0]
     }
 
-    async detach() {
-      return new Tensor(await this.toArray(), { dtype: this._dtype })
+    tolist() {
+      requireSyncHostBridge('tolist()', 'tolistAsync()')
+      return _buildNested(this.toArray(), this.shape, 0, 0).value
     }
 
-    async clone() {
-      const t = new Tensor(await this.toArray(), { dtype: this._dtype })
+    async tolistAsync() {
+      return _buildNested(await this.toArrayAsync(), this.shape, 0, 0).value
+    }
+
+    detach() {
+      requireSyncHostBridge('detach()', 'detachAsync()')
+      return new Tensor(this.toArray(), { dtype: this._dtype })
+    }
+
+    async detachAsync() {
+      return new Tensor(await this.toArrayAsync(), { dtype: this._dtype })
+    }
+
+    clone() {
+      requireSyncHostBridge('clone()', 'cloneAsync()')
+      const t = new Tensor(this.toArray(), { dtype: this._dtype })
+      t.requiresGrad = this._requiresGrad
+      return t
+    }
+
+    async cloneAsync() {
+      const t = new Tensor(await this.toArrayAsync(), { dtype: this._dtype })
       t.requiresGrad = this._requiresGrad
       return t
     }
@@ -1888,7 +2053,7 @@ function createBoundTensorClass(runtime) {
 
     // --- Autograd ---
 
-    async backward() {
+    backward() {
       const { ffi } = this._rt._core
       const gradLeaves = this._liveGradTargets()
       if (!gradLeaves.length) {
@@ -1990,6 +2155,8 @@ function createBoundTensorClass(runtime) {
           && !(args[args.length - 1] instanceof Array)) {
         opts = args[args.length - 1]; shape = args.slice(0, -1)
       }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      shape = shape.map(x => Number(x))
       const AT = Tensor._resolveArrayType(opts)
       const numel = shape.reduce((a, b) => a * b, 1)
       const t = new Tensor(new AT(numel).fill(0), opts)
@@ -2003,6 +2170,8 @@ function createBoundTensorClass(runtime) {
           && !(args[args.length - 1] instanceof Array)) {
         opts = args[args.length - 1]; shape = args.slice(0, -1)
       }
+      if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
+      shape = shape.map(x => Number(x))
       const AT = Tensor._resolveArrayType(opts)
       const numel = shape.reduce((a, b) => a * b, 1)
       const t = new Tensor(new AT(numel).fill(1), opts)
@@ -2019,12 +2188,19 @@ function createBoundTensorClass(runtime) {
       return t
     }
 
-    static arange(stop, start, step, opts) {
-      if (start === undefined) start = 0
+    static arange(start, stop, step, opts) {
+      if (typeof stop === 'object' && stop !== null) { opts = stop; stop = undefined; step = undefined }
+      if (typeof step === 'object' && step !== null) { opts = step; step = undefined }
+      if (stop === undefined) { stop = start; start = 0 }
       if (step === undefined) step = 1
+      if (step === 0) throw new Error('Tensor.arange step must not be zero')
       const AT = Tensor._resolveArrayType(opts)
       const arr = []
-      for (let i = start; i < stop; i += step) arr.push(i)
+      if (step > 0) {
+        for (let i = start; i < stop; i += step) arr.push(i)
+      } else {
+        for (let i = start; i > stop; i += step) arr.push(i)
+      }
       return new Tensor(new AT(arr), opts)
     }
 

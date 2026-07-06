@@ -77,9 +77,7 @@ class TestGPT2Forward:
         x[0, :len(tokens)] = tokens
 
         positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
-        arange = np.arange(max_seq_len, dtype=np.float32)
-
-        outputs = instance.forward(x=x, positions=positions, arange=arange)
+        outputs = instance.forward(x=x, positions=positions)
         logits = outputs.get('output')
         assert logits is not None, 'no output buffer'
 
@@ -99,9 +97,7 @@ class TestGPT2Forward:
         x = np.zeros((1, max_seq_len), dtype=np.float32)
         x[0, :len(tokens)] = tokens
         positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
-        arange = np.arange(max_seq_len, dtype=np.float32)
-
-        outputs = instance.forward(x=x, positions=positions, arange=arange)
+        outputs = instance.forward(x=x, positions=positions)
         poly_logits = outputs['output'].reshape(1, max_seq_len, 50257)
 
         # Get logits at last real token position

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.2 (2026-07-06)
+
+### Added
+- Explicit Python runtime creation via `polygrad.create(...)` for parity with JavaScript multi-runtime workflows, while keeping the default `Tensor` API unchanged.
+
+### Fixed
+- Python packaging now tracks the shared 0.4.2 core line and the full test suite against the rebuilt shared library.
+
 ## 0.4.1 (2026-07-05)
 
 ### Fixed

@@ -46,7 +46,7 @@ const pageHtml = `<!doctype html>
 <head><meta charset="utf-8"><title>polygrad qwen3 webgpu</title></head>
 <body>
 <pre id="log"></pre>
-<script src="/dist/polygrad.js"></script>
+<script src="/dist/polygrad.sync.js"></script>
 <script>
 globalThis.__polygradDebugLevel = Number(new URLSearchParams(location.search).get('debug') || 0) || 0
 const log = document.getElementById('log')
@@ -62,7 +62,7 @@ const EXPECTED_ARGMAX = ${EXPECTED_ARGMAX}
 
 async function main() {
   console.log('creating webgpu runtime')
-  const pg = await polygrad.create({ core: 'wasm', device: 'webgpu' })
+  const pg = polygrad.create({ core: 'wasm', device: 'webgpu' })
   console.log('runtime', pg.core, pg.device)
 
   console.log('fetching gguf')

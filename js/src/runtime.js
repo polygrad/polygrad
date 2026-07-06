@@ -31,6 +31,8 @@ class PolyRuntime {
     this.uop = createBoundUopNamespace(this)
     this.jit = createBoundJit(this)
     this.compile = this.jit.compile
+    this.jitAsync = this.jit.async
+    this.compileAsync = this.jit.compileAsync
     this.Instance = createBoundInstanceClass(this)
     this.models = createBoundModels(this)
     this.Tokenizer = createBoundTokenizerClass(this)
@@ -108,7 +110,7 @@ class PolyRuntime {
     return rc === 1
   }
 
-  async dispose() {
+  dispose() {
     if (this.jit && this.jit.disposeAll) this.jit.disposeAll()
     if (this._core && this._core.destroy) this._core.destroy()
     this._core = null
@@ -180,13 +182,22 @@ function canRunDeviceId(core, device) {
   return 0
 }
 
-async function createRuntime(opts, resolveCore) {
+function createRuntime(opts, resolveCore) {
   if (typeof resolveCore !== 'function') {
     throw new TypeError('polygrad: createRuntime requires a core resolver')
+  }
+  const options = normalizeOptions(opts)
+  const binding = resolveCore(options.core, options)
+  return new PolyRuntime(binding)
+}
+
+async function createRuntimeAsync(opts, resolveCore) {
+  if (typeof resolveCore !== 'function') {
+    throw new TypeError('polygrad: createRuntimeAsync requires a core resolver')
   }
   const options = normalizeOptions(opts)
   const binding = await resolveCore(options.core, options)
   return new PolyRuntime(binding)
 }
 
-module.exports = { PolyRuntime, createRuntime, normalizeOptions }
+module.exports = { PolyRuntime, createRuntime, createRuntimeAsync, normalizeOptions }

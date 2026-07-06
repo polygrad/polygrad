@@ -103,6 +103,23 @@ async function runTensorTests(pg) {
     assert(t.uop.hasBufferIdentity(), 'empty should be backed by a BUFFER UOp')
   })
 
+  await test('static constructors accept tinygrad-style shape arrays', async () => {
+    const z = Tensor.zeros([2, 3])
+    const o = Tensor.ones([2, 3])
+    const e = Tensor.empty([2, 3])
+    assertShape(z.shape, [2, 3])
+    assertShape(o.shape, [2, 3])
+    assertShape(e.shape, [2, 3])
+    assertClose(await z.toArray(), [0, 0, 0, 0, 0, 0])
+    assertClose(await o.toArray(), [1, 1, 1, 1, 1, 1])
+  })
+
+  await test('arange follows tinygrad start stop order', async () => {
+    assertClose(await Tensor.arange(6).toArray(), [0, 1, 2, 3, 4, 5])
+    assertClose(await Tensor.arange(0, 6).toArray(), [0, 1, 2, 3, 4, 5])
+    assertClose(await Tensor.arange(2, 8, 2).toArray(), [2, 4, 6])
+  })
+
   await test('runtime exposes uop namespace', async () => {
     const t = new Tensor([[1, 2], [3, 4]])
     assert(pg.uop, 'runtime should expose pg.uop')

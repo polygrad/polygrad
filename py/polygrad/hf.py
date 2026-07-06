@@ -135,9 +135,7 @@ def generate(instance, tokens, max_new_tokens, temperature=1.0, top_k=None):
         x_padded[0, :actual_len] = tokens[0]
 
         positions = np.arange(max_seq_len, dtype=np.float32).reshape(1, -1)
-        arange = np.arange(max_seq_len, dtype=np.float32)
-
-        outputs = instance.forward(x=x_padded, positions=positions, arange=arange)
+        outputs = instance.forward(x=x_padded, positions=positions)
         logits = outputs.get('output')
         if logits is None:
             raise RuntimeError('Model did not produce output buffer')

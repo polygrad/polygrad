@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><title>polygrad browser tests</title></head>
 <body>
 <pre id="log"></pre>
-<script src="/dist/polygrad.js"></script>
+<script src="/dist/polygrad.sync.js"></script>
 <script src="/test/browser/tests.js"></script>
 <script>
 const log = document.getElementById('log')
@@ -21,18 +21,122 @@ const isWebGpu = device === 'webgpu'
 globalThis.__polygradDebugLevel = debugLevel
 if (testFilter) globalThis.__POLY_TEST_FILTER = testFilter
 
+function installWebGpuLazyInitProbe() {
+  if (!isWebGpu || typeof navigator === 'undefined' || !navigator.gpu) return null
+  const gpu = navigator.gpu
+  const original = gpu.requestAdapter
+  if (typeof original !== 'function') return null
+  let count = 0
+  try {
+    gpu.requestAdapter = function(...args) {
+      count++
+      return original.apply(this, args)
+    }
+  } catch (e) {
+    console.log('[SKIP] webgpu lazy-init requestAdapter hook: ' + e.message)
+    return null
+  }
+  return {
+    count: () => count,
+    restore: () => { gpu.requestAdapter = original }
+  }
+}
+
+function assertWebGpuSyncThrows(label, asyncMethod, fn) {
+  let threw = false
+  try {
+    fn()
+  } catch (e) {
+    threw = e && e.name === 'PolyAsyncRequired' && String(e.message || '').includes(asyncMethod)
+  }
+  if (!threw) throw new Error('WebGPU ' + label + ' did not throw PolyAsyncRequired')
+}
+
+function runWebGpuSyncPreflight(pg, probe) {
+  if (!isWebGpu) return
+  const y = new pg.Tensor([1, 2, 3]).mul(2).add(1)
+  if (probe && probe.count() !== 0) {
+    throw new Error('WebGPU requested adapter during create or graph construction')
+  }
+  assertWebGpuSyncThrows('realize()', 'realizeAsync', () => y.realize())
+  assertWebGpuSyncThrows('toArray()', 'toArrayAsync', () => y.toArray())
+  assertWebGpuSyncThrows('toTypedArray()', 'toTypedArrayAsync', () => y.toTypedArray())
+  assertWebGpuSyncThrows('Tensor.toTypedArrays()', 'toTypedArraysAsync', () => pg.Tensor.toTypedArrays(y))
+  if (probe && probe.count() !== 0) {
+    throw new Error('WebGPU requested adapter during sync API failure checks')
+  }
+}
+
+function runWebGpuCapsCheck(pg) {
+  if (!isWebGpu) return { passed: 0, failed: 0, skipped: 0 }
+  const state = pg && pg._core && pg._core.Module && pg._core.Module.__polygradWebGpuState
+  if (!state || !state.device) {
+    throw new Error('WebGPU caps check ran before lazy initialization')
+  }
+  const expectedF16 = !!state.hasShaderF16
+  if (pg.caps.f16 !== expectedF16) {
+    throw new Error('WebGPU caps.f16 mismatch after lazy init: got ' + pg.caps.f16 + ', expected ' + expectedF16)
+  }
+  console.log('  [PASS] webgpu caps update after lazy init')
+  return { passed: 1, failed: 0, skipped: 0 }
+}
+
+function installWebGpuAsyncTestAdapter(pg) {
+  const Tensor = pg.Tensor
+  const tProto = Tensor && Tensor.prototype
+  if (tProto && !tProto.__polyWebGpuTestAsyncPatched) {
+    tProto.realize = tProto.realizeAsync
+    tProto.toArray = tProto.toArrayAsync
+    tProto.toTypedArray = tProto.toTypedArrayAsync
+    tProto.item = tProto.itemAsync
+    tProto.tolist = tProto.tolistAsync
+    tProto.detach = tProto.detachAsync
+    tProto.clone = tProto.cloneAsync
+    tProto.__polyWebGpuTestAsyncPatched = true
+  }
+  if (Tensor && !Tensor.__polyWebGpuTestAsyncPatched) {
+    Tensor.toTypedArrays = Tensor.toTypedArraysAsync
+    Tensor.__polyWebGpuTestAsyncPatched = true
+  }
+  if (pg.jitAsync) {
+    const asyncJit = pg.jitAsync
+    if (pg.jit && pg.jit.stats) asyncJit.stats = pg.jit.stats
+    if (pg.jit && pg.jit.disposeAll) asyncJit.disposeAll = pg.jit.disposeAll
+    if (pg.jit && pg.jit.compile) asyncJit.compile = pg.jit.compile
+    if (pg.jit && pg.jit.compileAsync) asyncJit.compileAsync = pg.jit.compileAsync
+    pg.jit = asyncJit
+  }
+  if (pg.compileAsync) pg.compile = pg.compileAsync
+
+  const Instance = pg.Instance
+  const iProto = Instance && Instance.prototype
+  if (iProto && !iProto.__polyWebGpuTestAsyncPatched) {
+    iProto.paramData = iProto.paramDataAsync
+    iProto.params = iProto.paramsAsync
+    iProto.bufData = iProto.bufDataAsync
+    iProto.exportWeights = iProto.exportWeightsAsync
+    iProto.saveBundle = iProto.saveBundleAsync
+    iProto.forward = iProto.forwardAsync
+    iProto.trainStep = iProto.trainStepAsync
+    iProto.__polyWebGpuTestAsyncPatched = true
+  }
+}
+
 async function main() {
   console.log('=== device: ' + device + ' ===\n')
   if (testFilter) console.log('Test filter: ' + testFilter)
 
+  const webGpuLazyProbe = installWebGpuLazyInitProbe()
   let pg
   try {
-    pg = await polygrad.create({ core: 'wasm', device: device })
+    pg = polygrad.create({ core: 'wasm', device: device })
+    runWebGpuSyncPreflight(pg, webGpuLazyProbe)
   } catch (e) {
     console.log('FATAL: create failed: ' + e.message)
     window.__testResults = { passed: 0, failed: 1, error: e.message }
     return
   }
+  if (isWebGpu) installWebGpuAsyncTestAdapter(pg)
 
   // Run the full tensor test suite
   const tensorResult = await window.__runTensorTests(pg)
@@ -47,9 +151,19 @@ async function main() {
     instanceResult = await window.__runInstanceTests(pg)
   }
 
-  const totalPassed = tensorResult.passed + instanceResult.passed
-  const totalFailed = tensorResult.failed + instanceResult.failed
-  const totalSkipped = (tensorResult.skipped || 0) + (instanceResult.skipped || 0)
+  let webgpuCapsResult = { passed: 0, failed: 0, skipped: 0 }
+  if (isWebGpu) {
+    try {
+      webgpuCapsResult = runWebGpuCapsCheck(pg)
+    } catch (e) {
+      console.log('  [FAIL] webgpu caps update after lazy init: ' + e.message)
+      webgpuCapsResult = { passed: 0, failed: 1, skipped: 0 }
+    }
+  }
+
+  const totalPassed = tensorResult.passed + instanceResult.passed + webgpuCapsResult.passed
+  const totalFailed = tensorResult.failed + instanceResult.failed + webgpuCapsResult.failed
+  const totalSkipped = (tensorResult.skipped || 0) + (instanceResult.skipped || 0) + (webgpuCapsResult.skipped || 0)
   console.log(
     '\nTotal: ' + totalPassed + ' passed, ' + totalFailed + ' failed' +
     (totalSkipped ? ', ' + totalSkipped + ' skipped' : '')
