@@ -8,7 +8,7 @@
  * - Core ALU: ADD, SUB, MUL, FDIV, NEG, EXP2, LOG2, SQRT, RECIPROCAL, SIN, POW
  * - Binary: MAX (elementwise)
  * - Movement: RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP
- * - Reductions: REDUCE_AXIS with ADD and MAX (CONTIGUOUS barrier for MAX)
+ * - Reductions: tensor REDUCE with ADD and MAX (CONTIGUOUS barrier for MAX)
  * - Utility: CAST pass-through, CONTIGUOUS/COPY/BUFFERIZE pass-through
  * - Stop gradient: DETACH, CMPLT, CMPNE, BITCAST
  * - Target-pruned reverse pass (port of tinygrad's _deepwalk)
@@ -750,9 +750,10 @@ static PolyMap *grad_reverse_pass(
       grad_add(ctx, grads, u->src[0], gx);
     } break;
 
+    case POLY_OP_REDUCE:
     case POLY_OP_REDUCE_AXIS: {
       if (u->arg.kind != POLY_ARG_REDUCE_AXIS) {
-        fprintf(stderr, "polygrad: autograd: REDUCE_AXIS missing reduce_axis arg\n");
+        fprintf(stderr, "polygrad: autograd: tensor REDUCE missing reduce_axis arg\n");
         GRAD_REVERSE_FAIL();
       }
       PolyOps reduce_op = u->arg.reduce_axis.op;
@@ -771,7 +772,7 @@ static PolyMap *grad_reverse_pass(
         int64_t *axes = u->arg.reduce_axis.axes;
 
         /* CONTIGUOUS barrier on the max result: forces rangeify to realize
-         * the forward REDUCE_AXIS(MAX) as a separate kernel. Without this,
+         * the forward REDUCE(MAX) as a separate kernel. Without this,
          * the consumer kernel would recompute max, creating a
          * reduce→expand→alu pattern that rangeify can't handle. */
         PolyUOp *max_contig = poly_uop1(ctx, POLY_OP_CONTIGUOUS, u->dtype, u, poly_arg_none());
@@ -808,7 +809,8 @@ static PolyMap *grad_reverse_pass(
         grad_add(ctx, grads, u->src[0], gx);
       } else {
         fprintf(
-            stderr, "polygrad: autograd: unsupported REDUCE_AXIS op: %s\n", poly_op_name(reduce_op)
+            stderr, "polygrad: autograd: unsupported tensor REDUCE op: %s\n",
+            poly_op_name(reduce_op)
         );
 
         GRAD_REVERSE_FAIL();

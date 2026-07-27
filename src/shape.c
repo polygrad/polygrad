@@ -153,7 +153,10 @@ PolyUOp *poly_reduce_axis(
   arg.reduce_axis.op = reduce_op;
   arg.reduce_axis.axes = stored_axes;
   arg.reduce_axis.n = filtered_n;
-  return poly_uop1(ctx, POLY_OP_REDUCE_AXIS, src->dtype, src, arg);
+  /* Pinned UOp._rop emits REDUCE(value, arg=(op, axes)) before rangeify
+   * (uop/ops.py:567-569). POLY_ARG_REDUCE_AXIS is that tensor-stage arg;
+   * lowered REDUCE uses POLY_ARG_OPS plus RANGE sources. */
+  return poly_uop1(ctx, POLY_OP_REDUCE, src->dtype, src, arg);
 }
 
 PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
@@ -888,8 +891,10 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     return make_entry_none(ctx);
   }
 
-  /* REDUCE_AXIS: dims at reduction axes become 1 */
-  if (op == POLY_OP_REDUCE_AXIS && u->n_src >= 1 && u->arg.kind == POLY_ARG_REDUCE_AXIS) {
+  /* Tensor REDUCE: dims at reduction axes become 1. Accept legacy
+   * REDUCE_AXIS raw/import graphs while Path B is experimental. */
+  if ((op == POLY_OP_REDUCE || op == POLY_OP_REDUCE_AXIS) && u->n_src >= 1 &&
+      u->arg.kind == POLY_ARG_REDUCE_AXIS) {
     int8_t in_ndim = SRC_NDIM(0);
     if (in_ndim <= 0) {
       return make_entry_none(ctx);

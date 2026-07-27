@@ -701,8 +701,13 @@ static PolyUOp *new_range_uop(PolyIndexingCtx *ictx, PolyUOp *bound, PolyAxisTyp
  *  2. If single consumer: inherit consumer's ranges (fusion)
  *  3. If multi-consumer: merge if same, or realize if different
  *  4. Apply movement op transforms to compute input ranges
- *  5. Add reduction ranges for REDUCE_AXIS
+ *  5. Add reduction ranges for tensor REDUCE
  */
+
+static bool is_tensor_reduce(PolyUOp *u) {
+  return u && (u->op == POLY_OP_REDUCE || u->op == POLY_OP_REDUCE_AXIS) &&
+         u->arg.kind == POLY_ARG_REDUCE_AXIS && u->n_src == 1;
+}
 
 void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
   PolyCtx *ctx = ictx->ctx;
@@ -891,7 +896,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
         /* Consumers disagree — must realize this op */
         if (shape.ndim <= 0) {
           /* Scalar with disagreeing consumers: propagate empty ranges
-           * so sources (e.g. REDUCE_AXIS below) still get range entries */
+           * so sources (e.g. tensor REDUCE below) still get range entries */
           n_out = 0;
         } else {
           realize_mark(ictx, x);
@@ -935,7 +940,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
     /* tinygrad parity: if ended ranges flow into elementwise/reduce, realize axes */
     if (ending->count > 0 &&
-        (poly_opset_has(POLY_GROUP_ELEMENTWISE, x->op) || x->op == POLY_OP_REDUCE_AXIS)) {
+        (poly_opset_has(POLY_GROUP_ELEMENTWISE, x->op) || is_tensor_reduce(x))) {
       int realize_axes[POLY_MAX_DIMS];
       int n_realize_axes = 0;
       PolyRealizeInfo *ri = poly_map_get(ictx->realize_map, poly_ptr_hash(x), x, poly_ptr_eq);
@@ -1019,8 +1024,9 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
       }
     }
 
-    /* REDUCE_AXIS: add new reduction ranges for reduced axes */
-    if (x->op == POLY_OP_REDUCE_AXIS && x->arg.kind == POLY_ARG_REDUCE_AXIS) {
+    /* Tensor REDUCE: add new reduction ranges for reduced axes. Pinned
+     * indexing.py:255-257 keys this on REDUCE with a non-empty axis tuple. */
+    if (is_tensor_reduce(x)) {
       PolyShape src_shape = ictx_shape(ictx, x->src[0]);
       if (src_shape.ndim > 0) {
         int n_axes = x->arg.reduce_axis.n;
@@ -1066,7 +1072,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
  * Walks toposort order, applying:
  *  1. Movement ops (RESHAPE, EXPAND, PERMUTE, SHRINK, FLIP) → src[0]
  *  2. PAD → WHERE(valid_mask, src[0], 0.0)
- *  3. REDUCE_AXIS → REDUCE(value, reduce_ranges...) with arg = reduce_op
+ *  3. tensor REDUCE(op, axes) → REDUCE(value, reduce_ranges...) with arg = reduce_op
  *  4. Realized computed ops → BUFFERIZE(op, out_ranges...)
  *  5. Everything else → pass through (rebuild if sources changed)
  */
@@ -1193,7 +1199,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
     /* Remap sources through replace map.
      * Zero-init both paths so the analyzer knows new_src[i] is never garbage
-     * even if accessed before the loop fills it (e.g. REDUCE_AXIS with n_src>0). */
+     * even if accessed before the loop fills it (e.g. tensor REDUCE with n_src>0). */
     bool src_changed = false;
     PolyUOp *new_src_buf[16] = {0};
     PolyUOp **new_src = (u->n_src > 16) ? calloc(u->n_src, sizeof(PolyUOp *)) : new_src_buf;
@@ -1477,8 +1483,10 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
       break;
     }
 
-    /* Rule 3: REDUCE_AXIS → REDUCE with range sources */
+    /* Rule 3: tensor REDUCE → lowered REDUCE with range sources. */
+    case POLY_OP_REDUCE:
     case POLY_OP_REDUCE_AXIS: {
+      if (u->arg.kind != POLY_ARG_REDUCE_AXIS) break;
       PolyRangeEntry *re = poly_range_map_get(ictx, u);
       if (!re) break;
 
@@ -1528,7 +1536,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
 #endif
 
       transformed_compute = true;
-      /* Record mapping: post-rangeify REDUCE → pre-rangeify REDUCE_AXIS */
+      /* Record mapping: post-rangeify REDUCE → tensor REDUCE. */
       rmap_set(ictx->reduce_origin, result, u);
       break;
     }
@@ -1564,7 +1572,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
           /* src[0] = the computed value (with remapped sources).
            * For movement ops: result is the absorbed source (correct).
-           * For REDUCE_AXIS: result is the REDUCE UOp (transformed_compute).
+           * For tensor REDUCE: result is the lowered REDUCE UOp.
            * For unhandled ops: result is NULL, rebuild or use original. */
           PolyUOp *val;
           if (result) {
@@ -2695,9 +2703,7 @@ static bool split_reduceop_expanded_axes(
 }
 
 static PolyUOp *split_reduceop_rewrite(PolyCtx *ctx, PolyUOp *reduce, PolyUOp *x) {
-  if (!ctx || !reduce || reduce->op != POLY_OP_REDUCE_AXIS || !x ||
-      reduce->arg.kind != POLY_ARG_REDUCE_AXIS ||
-      !poly_getenv_flag_default("SPLIT_REDUCEOP", true))
+  if (!ctx || !is_tensor_reduce(reduce) || !x || !poly_getenv_flag_default("SPLIT_REDUCEOP", true))
     return NULL;
 
   int64_t x_dims[POLY_MAX_DIMS], out_dims[POLY_MAX_DIMS];
@@ -2883,7 +2889,7 @@ PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
     /* C2: Pinned split_reduceop runs before the zero-sized reduction rules.
      * It returns NULL for zero output size, symbolic shapes, sub-threshold
      * reductions, expanded candidate axes, or no valid divisor. */
-    else if (u->op == POLY_OP_REDUCE_AXIS && u->n_src >= 1) {
+    else if (is_tensor_reduce(u)) {
       result = split_reduceop_rewrite(ctx, u, ns[0]);
 
       /* Zero-sized reduce -> identity element.

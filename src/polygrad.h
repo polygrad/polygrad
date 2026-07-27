@@ -147,8 +147,9 @@ typedef enum {
   POLY_OP_PTRCAT,
 
   /* Polygrad-only compatibility ops. Current tinygrad spells assign as
-   * AFTER(target, STORE(target, value)); REDUCE_AXIS is frontend/scheduler
-   * sugar lowered before program IR; ENCDEC is not present upstream. */
+   * AFTER(target, STORE(target, value)); REDUCE_AXIS is retained for legacy
+   * raw/import graphs while normal Tensor construction uses REDUCE; ENCDEC is
+   * not present upstream. */
   POLY_OP_ASSIGN,
   POLY_OP_ENCDEC,
   POLY_OP_REDUCE_AXIS,

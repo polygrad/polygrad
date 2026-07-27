@@ -4446,14 +4446,14 @@ TEST(realize, transform_to_call_reduce_views_stay_in_output_graph) {
   ASSERT_INT_EQ(big_call->src[0]->n_src, 1);
   ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_AFTER), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_STORE), 1);
-  ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_REDUCE_AXIS), N_TERMS);
+  ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_REDUCE), N_TERMS);
 
   PolyUOp *output_effect = big_call->src[0]->src[0];
   ASSERT_NOT_NULL(output_effect);
   ASSERT_INT_EQ(output_effect->op, POLY_OP_AFTER);
   ASSERT_INT_EQ(output_effect->n_src, 2);
   ASSERT_INT_EQ(output_effect->src[1]->op, POLY_OP_STORE);
-  ASSERT_INT_EQ(count_root_ops(ctx, output_effect->src[1]->src[1], POLY_OP_REDUCE_AXIS), N_TERMS);
+  ASSERT_INT_EQ(count_root_ops(ctx, output_effect->src[1]->src[1], POLY_OP_REDUCE), N_TERMS);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -4489,7 +4489,7 @@ TEST(realize, transform_to_call_shared_reduce_matches_tinygrad_topology) {
   ASSERT_NOT_NULL(realized[1]);
   ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_AFTER), 2);
   ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_STORE), 2);
-  ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_REDUCE_AXIS), 1);
+  ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_REDUCE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_RESHAPE), 2);
   ASSERT_INT_EQ(count_root_ops(ctx, big_call->src[0], POLY_OP_EXPAND), 1);
   ASSERT_INT_EQ(big_call->src[0]->src[0]->op, POLY_OP_AFTER);

@@ -289,6 +289,10 @@ static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg
       return n_src == 3 && src && shape_value_rank_valid(src[1]) && shape_value_rank_valid(src[2]);
     return arg.kind == POLY_ARG_PAIR_TUPLE &&
            rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
+  case POLY_OP_REDUCE:
+    if (arg.kind == POLY_ARG_OPS) return n_src >= 1;
+    return arg.kind == POLY_ARG_REDUCE_AXIS && n_src == 1 &&
+           rank_tuple_valid(arg.reduce_axis.axes, arg.reduce_axis.n);
   case POLY_OP_REDUCE_AXIS:
     return arg.kind == POLY_ARG_REDUCE_AXIS &&
            rank_tuple_valid(arg.reduce_axis.axes, arg.reduce_axis.n);

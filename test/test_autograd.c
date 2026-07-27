@@ -338,7 +338,7 @@ TEST(autograd, expand_reduce_e2e) {
   ASSERT_INT_EQ(gx->n_src, 2);
   ASSERT_INT_EQ(gx->src[0]->op, POLY_OP_RESHAPE);
   ASSERT_INT_EQ(gx->src[0]->n_src, 2);
-  ASSERT_INT_EQ(gx->src[0]->src[0]->op, POLY_OP_REDUCE_AXIS);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->op, POLY_OP_REDUCE);
   ASSERT_INT_EQ(gx->src[0]->src[0]->arg.kind, POLY_ARG_REDUCE_AXIS);
   ASSERT_INT_EQ(gx->src[0]->src[0]->arg.reduce_axis.op, POLY_OP_ADD);
   ASSERT_INT_EQ(gx->src[0]->src[0]->arg.reduce_axis.n, 1);

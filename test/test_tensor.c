@@ -2036,6 +2036,15 @@ TEST(shape_uop, reduce_axis) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3, 4}, 3);
   PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){1}, 1);
+  /* Pinned UOp._rop emits tensor-stage REDUCE(value, (op, axes))
+   * (uop/ops.py:567-569). */
+  ASSERT_EQ(r->op, POLY_OP_REDUCE);
+  ASSERT_EQ(r->arg.kind, POLY_ARG_REDUCE_AXIS);
+  ASSERT_EQ(r->arg.reduce_axis.op, POLY_OP_ADD);
+  ASSERT_INT_EQ(r->arg.reduce_axis.n, 1);
+  ASSERT_INT_EQ(r->arg.reduce_axis.axes[0], 1);
+  ASSERT_INT_EQ(r->n_src, 1);
+  ASSERT_PTR_EQ(r->src[0], b);
   ASSERT_INT_EQ(poly_uop_ndim(ctx, r), 3);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[0], 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, r)[1], 1);
@@ -2047,7 +2056,7 @@ TEST(shape_uop, reduce_axis) {
 TEST(shape_uop, reduce_axis_drops_singleton_axes_like_tinygrad_rop) {
   PolyCtx *ctx = poly_ctx_new();
 
-  /* tinygrad UOp._rop filters size-1 axes before constructing REDUCE_AXIS.
+  /* tinygrad UOp._rop filters size-1 axes before constructing REDUCE.
    * Keep that parity at the constructor boundary so later schedule/rangeify
    * stages never see no-op singleton reductions. */
   PolyUOp *b = make_buf(ctx, (int64_t[]){1, 4, 3}, 3);
@@ -2057,7 +2066,7 @@ TEST(shape_uop, reduce_axis_drops_singleton_axes_like_tinygrad_rop) {
 
   PolyUOp *mixed = poly_reduce_axis(ctx, POLY_OP_ADD, b, (int64_t[]){2, 0}, 2);
   ASSERT_NOT_NULL(mixed);
-  ASSERT_EQ(mixed->op, POLY_OP_REDUCE_AXIS);
+  ASSERT_EQ(mixed->op, POLY_OP_REDUCE);
   ASSERT_EQ(mixed->arg.kind, POLY_ARG_REDUCE_AXIS);
   ASSERT_INT_EQ(mixed->arg.reduce_axis.n, 1);
   ASSERT_INT_EQ(mixed->arg.reduce_axis.axes[0], 2);

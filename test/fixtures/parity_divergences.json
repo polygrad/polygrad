@@ -213,19 +213,19 @@
     {
       "id": "PG-PARITY-006",
       "status": "open_debt",
-      "stages": ["tensor"],
-      "area": "tensor reduction spelling",
+      "stages": ["raw_import"],
+      "area": "legacy reduction spelling",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["REDUCE_AXIS"]},
-      "tinygrad": "Tensor graphs use REDUCE with shape and axes encoded in UOp sources and args",
-      "polygrad": "Tensor graphs still use REDUCE_AXIS scheduler sugar",
-      "rationale": "REDUCE_AXIS is not an approved tensor-graph divergence.",
+      "tinygrad": "Tensor graphs use REDUCE with axes encoded in the UOp argument",
+      "polygrad": "Normal Tensor construction now matches REDUCE; REDUCE_AXIS remains only for legacy raw/import and preserved Path-A compatibility while Path B is experimental",
+      "rationale": "The extra enum is not an approved permanent shared-IR divergence.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/ops.py",
         "src/polygrad.h:POLY_OP_REDUCE_AXIS",
         "src/shape.c:poly_reduce_axis"
       ],
-      "close_when": "The migrated Tensor subset is node-for-node REDUCE-isomorphic to pinned tinygrad."
+      "close_when": "Path B is promoted, legacy Path-A/raw imports are migrated, and REDUCE_AXIS is removed from the runtime vocabulary."
     },
     {
       "id": "PG-PARITY-008",

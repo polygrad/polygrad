@@ -267,7 +267,7 @@ TEST(rangeify, realize_map_elementwise_fused) {
 }
 
 TEST(rangeify, realize_map_reduce_not_auto_realized) {
-  /* sum(a) → REDUCE_AXIS(a): REDUCE_AXIS is NOT automatically realized.
+  /* sum(a) → tensor REDUCE(a): REDUCE is NOT automatically realized.
    * Only SINK sources (the STORE wrapping it) are realized. */
   PolyCtx *ctx = poly_ctx_new();
 
@@ -285,7 +285,7 @@ TEST(rangeify, realize_map_reduce_not_auto_realized) {
   /* STORE is realized (SINK source) */
   ASSERT_TRUE(poly_is_realized(ictx, store));
 
-  /* REDUCE_AXIS is NOT realized by default */
+  /* Tensor REDUCE is NOT realized by default. */
   ASSERT_FALSE(poly_is_realized(ictx, reduce));
 
   poly_indexing_ctx_destroy(ictx);
@@ -440,7 +440,7 @@ TEST(rangeify, range_prop_reduce) {
   ASSERT_INT_EQ(re_store->n_out, 1);
   ASSERT_EQ(re_store->out_rngs[0]->op, POLY_OP_CONST);
 
-  /* REDUCE_AXIS: inherits STORE's scalar range as output,
+  /* Tensor REDUCE inherits STORE's scalar range as output,
    * but input gets a new RANGE for the reduced axis (dim=10) */
   PolyRangeEntry *re_reduce = poly_range_map_get(ictx, reduce);
   ASSERT_NOT_NULL(re_reduce);
@@ -488,7 +488,7 @@ TEST(rangeify, range_prop_reduce_chain) {
   ASSERT_NOT_NULL(re_b);
   ASSERT_PTR_EQ(re_b->out_rngs[0], re_store->out_rngs[0]);
 
-  /* REDUCE_AXIS gets inner RANGE for reduced axis (different from outer) */
+  /* Tensor REDUCE gets an inner RANGE for the reduced axis (different from outer). */
   PolyRangeEntry *re_reduce = poly_range_map_get(ictx, reduce);
   ASSERT_NOT_NULL(re_reduce);
   ASSERT_INT_EQ(re_reduce->n_in, 1);
@@ -1032,6 +1032,15 @@ static int count_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   return count;
 }
 
+static int count_reduce_arg_kind(PolyCtx *ctx, PolyUOp *root, PolyArgKind kind) {
+  int n;
+  PolyUOp **topo = poly_toposort(ctx, root, &n);
+  int count = 0;
+  for (int i = 0; i < n; i++)
+    if (topo[i]->op == POLY_OP_REDUCE && topo[i]->arg.kind == kind) count++;
+  return count;
+}
+
 static bool is_direct_storage_source(PolyUOp *u) {
   return u && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM ||
                u->op == POLY_OP_BUFFER_VIEW);
@@ -1140,7 +1149,8 @@ TEST(rangeify, apply_movement_removed) {
 
 TEST(rangeify, apply_reduce_to_reduce) {
   /* sum(a) → STORE → SINK
-   * After apply: REDUCE_AXIS becomes REDUCE with range sources */
+   * Pinned indexing.py:89-100 keeps the REDUCE op while replacing its
+   * axis tuple with RANGE sources. */
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, 10);
@@ -1150,17 +1160,19 @@ TEST(rangeify, apply_reduce_to_reduce) {
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out, reduce, poly_arg_none());
   PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, store, poly_arg_none());
 
-  /* Before: REDUCE_AXIS exists, REDUCE does not */
-  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_REDUCE_AXIS), 1);
-  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_REDUCE), 0);
+  /* Before: tensor REDUCE has (op, axes) and one value source. */
+  ASSERT_INT_EQ(count_ops(ctx, sink, POLY_OP_REDUCE_AXIS), 0);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, sink, POLY_ARG_REDUCE_AXIS), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, sink, POLY_ARG_OPS), 0);
 
   PolyIndexingCtx *ictx = poly_indexing_ctx_new(ctx);
   PolyUOp *result = run_apply_rangeify(ictx, sink);
   ASSERT_NOT_NULL(result);
 
-  /* After: REDUCE_AXIS gone, REDUCE exists */
+  /* After: lowered REDUCE has an op arg and RANGE sources. */
   ASSERT_INT_EQ(count_ops(ctx, result, POLY_OP_REDUCE_AXIS), 0);
-  ASSERT_INT_EQ(count_ops(ctx, result, POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, result, POLY_ARG_REDUCE_AXIS), 0);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, result, POLY_ARG_OPS), 1);
 
   /* Find the REDUCE node and verify it has range sources */
   int n;
@@ -3127,7 +3139,7 @@ TEST(rangeify, remove_bufferize_stops_at_after_effect) {
 }
 
 TEST(rangeify, raw_buffer_shared_scalar_reduce_branches_ir) {
-  /* a[8] → REDUCE_AXIS(ADD, axis=0) → RESHAPE([1]) → EXPAND([8]) → sum_exp[8]
+  /* a[8] → REDUCE(ADD, axis=0) → RESHAPE([1]) → EXPAND([8]) → sum_exp[8]
    * Branch 1: ADD(sum_exp, c0) → STORE(oc)
    * Branch 2: MUL(sum_exp, e0) → STORE(oe)
    * Pinned tinygrad raw-UOp parity: concrete BUFFER input is not a callified
@@ -3201,7 +3213,7 @@ TEST(rangeify, callified_param_shared_scalar_reduce_matches_raw_stage_topology) 
   ASSERT_INT_EQ(call->src[0]->n_src, 2);
   ASSERT_INT_EQ(count_ops(ctx, call->src[0], POLY_OP_AFTER), 2);
   ASSERT_INT_EQ(count_ops(ctx, call->src[0], POLY_OP_STORE), 2);
-  ASSERT_INT_EQ(count_ops(ctx, call->src[0], POLY_OP_REDUCE_AXIS), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, call->src[0], POLY_ARG_REDUCE_AXIS), 1);
 
   PolyUOp *function = poly_apply_earliest_rewrites(ctx, call->src[0]);
   ASSERT_NOT_NULL(function);
@@ -3211,7 +3223,7 @@ TEST(rangeify, callified_param_shared_scalar_reduce_matches_raw_stage_topology) 
   PolyUOp *rangeified = run_apply_rangeify(ictx, function);
   ASSERT_NOT_NULL(rangeified);
   ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_STAGE), 2);
-  ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, rangeified, POLY_ARG_OPS), 1);
   ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_AFTER), 2);
   ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_STORE), 2);
   ASSERT_INT_EQ(count_ops(ctx, rangeified, POLY_OP_INDEX), 8);
@@ -3640,20 +3652,20 @@ TEST(rangeify, earliest_split_reduceop_static_threshold_topology) {
 
   ASSERT_NOT_NULL(rewritten);
   ASSERT_EQ(rewritten->op, POLY_OP_SINK);
-  ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_REDUCE_AXIS), 2);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, rewritten, POLY_ARG_REDUCE_AXIS), 2);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_CONTIGUOUS), 1);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_PERMUTE), 1);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_RESHAPE), 1);
 
   PolyUOp *second_reduce = rewritten->src[0];
-  ASSERT_EQ(second_reduce->op, POLY_OP_REDUCE_AXIS);
+  ASSERT_EQ(second_reduce->op, POLY_OP_REDUCE);
   ASSERT_EQ(second_reduce->arg.kind, POLY_ARG_REDUCE_AXIS);
   ASSERT_INT_EQ(second_reduce->arg.reduce_axis.n, 1);
   ASSERT_INT_EQ(second_reduce->arg.reduce_axis.axes[0], 1);
   PolyUOp *contiguous = second_reduce->src[0];
   ASSERT_EQ(contiguous->op, POLY_OP_CONTIGUOUS);
   PolyUOp *first_reduce = contiguous->src[0];
-  ASSERT_EQ(first_reduce->op, POLY_OP_REDUCE_AXIS);
+  ASSERT_EQ(first_reduce->op, POLY_OP_REDUCE);
   ASSERT_INT_EQ(first_reduce->arg.reduce_axis.n, 1);
   ASSERT_INT_EQ(first_reduce->arg.reduce_axis.axes[0], 0);
   PolyUOp *permuted = first_reduce->src[0];
@@ -3699,7 +3711,7 @@ TEST(rangeify, earliest_split_reduceop_rejects_expanded_axis) {
   rangeify_restore_env(&threshold);
   rangeify_restore_env(&split);
 
-  ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_REDUCE_AXIS), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, rewritten, POLY_ARG_REDUCE_AXIS), 1);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_CONTIGUOUS), 0);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_PERMUTE), 0);
   ASSERT_PTR_EQ(rewritten->src[0], reduce);
@@ -3721,7 +3733,7 @@ TEST(rangeify, earliest_split_reduceop_disabled_control) {
 
   rangeify_restore_env(&split);
 
-  ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_REDUCE_AXIS), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, rewritten, POLY_ARG_REDUCE_AXIS), 1);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_CONTIGUOUS), 0);
   ASSERT_PTR_EQ(rewritten->src[0], reduce);
   poly_ctx_destroy(ctx);
@@ -3782,7 +3794,7 @@ TEST(rangeify, earliest_split_reduceop_rejects_symbolic_shape) {
   rangeify_restore_env(&threshold);
   rangeify_restore_env(&split);
 
-  ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_REDUCE_AXIS), 1);
+  ASSERT_INT_EQ(count_reduce_arg_kind(ctx, rewritten, POLY_ARG_REDUCE_AXIS), 1);
   ASSERT_INT_EQ(count_ops(ctx, rewritten, POLY_OP_CONTIGUOUS), 0);
   ASSERT_PTR_EQ(rewritten->src[0], reduce);
   poly_ctx_destroy(ctx);
@@ -4411,7 +4423,7 @@ TEST(rangeify, define_var_cache_hit) {
 }
 
 /* Regression: chained reductions (singleton + real) */
-/* Verifies that REDUCE_AXIS with a singleton dim (size 1) followed by
+/* Verifies that tensor REDUCE with a singleton dim (size 1) followed by
  * a real reduction (size > 1) compiles and executes correctly via
  * poly_test_realize_buffer_views. Regression for the bug where CONST(0) pseudo-ranges
  * from singleton dims entered REDUCE sources, producing END(CONST)
@@ -4420,7 +4432,7 @@ TEST(rangeify, define_var_cache_hit) {
  * Graph shape: (1,4) * (1,4) → reduce axis 0 (singleton, keepdim) → (1,4)
  *              → reduce axis 1 (real sum of 4) → (1,1) → store
  *
- * REDUCE_AXIS keeps dims (sets reduced axis to 1), so reducing axis 0
+ * tensor REDUCE keeps dims (sets reduced axis to 1), so reducing axis 0
  * of (1,4) gives (1,4) (no-op), and reducing axis 1 of (1,4) gives (1,1).
  */
 TEST(rangeify, chained_singleton_reduce_e2e) {
