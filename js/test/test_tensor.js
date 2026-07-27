@@ -1305,8 +1305,9 @@ async function runTensorTests(pg) {
     assertClose(await new Tensor([[0, 0, 0, 0]]).scatter(1, dupIdx, dupSrc).toArray(), [0, 9, 8, 0])
 
     const scalarIdx = new Tensor(new Int32Array([2, 3]), { dtype: 'int32' }).reshape(2, 1)
-    assertClose(await Tensor.full([2, 4], 2).scatter(1, scalarIdx, 1.23, 'add').toArray(), [2, 2, 3.23, 2, 2, 2, 2, 3.23])
-    assertClose(await Tensor.full([2, 4], 2).scatter(1, scalarIdx, 1.23, 'multiply').toArray(), [2, 2, 2.46, 2, 2, 2, 2, 2.46])
+    const floatBase = Tensor.full([2, 4], 2, { dtype: 'float32' })
+    assertClose(await floatBase.scatter(1, scalarIdx, 1.23, 'add').toArray(), [2, 2, 3.23, 2, 2, 2, 2, 3.23])
+    assertClose(await floatBase.scatter(1, scalarIdx, 1.23, 'multiply').toArray(), [2, 2, 2.46, 2, 2, 2, 2, 2.46])
 
     let threw = false
     try { base.scatter(1, idx1, src1, 'sum') } catch (e) { threw = true }
@@ -2296,6 +2297,26 @@ async function runTensorTests(pg) {
   await test('eye', async () => {
     const t = Tensor.eye(2)
     assertClose(await t.toArray(), [1, 0, 0, 1])
+  })
+
+  await test('pure constructors store the pinned device-free root', async () => {
+    const values = [
+      Tensor.full([2, 3], 2, { buffer: false }),
+      Tensor.arange(4),
+      Tensor.linspace(0, 1, 4),
+      Tensor.eye(3)
+    ]
+    for (const value of values) {
+      assert(value.uopPhysical, 'pure constructor must store a physical root')
+      assert(value.uopLogical, 'pure constructor must store a logical root')
+      assert(
+        value.uopPhysical.key === value.uopLogical.key,
+        'pure constructor roots must be the same UOp'
+      )
+    }
+    const arange = values[1]
+    const moved = arange.to('cuda')
+    assert(moved.uop.key === arange.uop.key, 'device-free Tensor.to must preserve the root')
   })
 
   // -- Lazy RNG --

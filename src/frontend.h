@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 27
+#define POLYGRAD_ABI_VERSION 28
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,6 +61,53 @@ PolyTensor *poly_tensor_const_int_by_id(
 PolyTensor *poly_tensor_const_float_by_id(
     PolyCtx *ctx,
     double value,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_full_int_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int64_t value,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_full_float_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    double value,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_arange_int_by_id(
+    PolyCtx *ctx,
+    int64_t start,
+    int64_t stop,
+    int64_t step,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_arange_float_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    double step,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_linspace_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    int64_t steps,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_eye_by_id(
+    PolyCtx *ctx,
+    int64_t n,
+    int64_t m,
     int dtype_id,
     int device_id
 );

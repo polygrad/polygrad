@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 27
+POLYGRAD_ABI_VERSION = 28
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -403,6 +403,36 @@ def _declare_signatures(lib):
     lib.poly_tensor_const_float_by_id.restype = _ptr
     lib.poly_tensor_const_float_by_id.argtypes = [
         _ptr, ctypes.c_double, ctypes.c_int, ctypes.c_int,
+    ]
+
+    lib.poly_tensor_full_int_by_id.restype = _ptr
+    lib.poly_tensor_full_int_by_id.argtypes = [
+        _ptr, _i64p, ctypes.c_int, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
+    ]
+
+    lib.poly_tensor_full_float_by_id.restype = _ptr
+    lib.poly_tensor_full_float_by_id.argtypes = [
+        _ptr, _i64p, ctypes.c_int, ctypes.c_double, ctypes.c_int, ctypes.c_int,
+    ]
+
+    lib.poly_tensor_arange_int_by_id.restype = _ptr
+    lib.poly_tensor_arange_int_by_id.argtypes = [
+        _ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
+    ]
+
+    lib.poly_tensor_arange_float_by_id.restype = _ptr
+    lib.poly_tensor_arange_float_by_id.argtypes = [
+        _ptr, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_int, ctypes.c_int,
+    ]
+
+    lib.poly_tensor_linspace_by_id.restype = _ptr
+    lib.poly_tensor_linspace_by_id.argtypes = [
+        _ptr, ctypes.c_double, ctypes.c_double, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
+    ]
+
+    lib.poly_tensor_eye_by_id.restype = _ptr
+    lib.poly_tensor_eye_by_id.argtypes = [
+        _ptr, ctypes.c_int64, ctypes.c_int64, ctypes.c_int, ctypes.c_int,
     ]
 
     lib.poly_uop_op.restype = ctypes.c_int

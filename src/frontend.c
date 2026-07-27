@@ -163,6 +163,95 @@ PolyTensor *poly_tensor_const_float_by_id(
   );
 }
 
+PolyTensor *poly_tensor_full_int_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    int64_t value,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_full_int_by_id(ctx, dims, ndim, value, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
+PolyTensor *poly_tensor_full_float_by_id(
+    PolyCtx *ctx,
+    const int64_t *dims,
+    int ndim,
+    double value,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_full_float_by_id(ctx, dims, ndim, value, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
+PolyTensor *poly_tensor_arange_int_by_id(
+    PolyCtx *ctx,
+    int64_t start,
+    int64_t stop,
+    int64_t step,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_arange_int_by_id(ctx, start, stop, step, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
+PolyTensor *poly_tensor_arange_float_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    double step,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_arange_float_by_id(ctx, start, stop, step, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
+PolyTensor *poly_tensor_linspace_by_id(
+    PolyCtx *ctx,
+    double start,
+    double stop,
+    int64_t steps,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_linspace_by_id(ctx, start, stop, steps, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
+PolyTensor *poly_tensor_eye_by_id(
+    PolyCtx *ctx,
+    int64_t n,
+    int64_t m,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_eye_by_id(ctx, n, m, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
 int poly_uop_op(PolyUOp *u) {
   return u ? (int)u->op : 0;
 }

@@ -225,6 +225,39 @@ TEST(tensor, scalar_constructors_store_exact_const_as_both_roots) {
   PASS();
 }
 
+TEST(tensor, pure_constructors_store_one_device_free_root) {
+  /* Pinned Tensor.__init__ stores a device-free constructor UOp directly, and
+   * Tensor.to returns self while UOp.device is None (tensor.py:76-119,
+   * 327-335). Path B stores that exact root as both twins; no placement map is
+   * involved. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int i32 = poly_dtype_id_by_name("int32");
+  int f32 = poly_dtype_id_by_name("float32");
+  int64_t shape[] = {2, 3};
+  PolyTensor *values[] = {
+      poly_tensor_full_int_by_id(ctx, shape, 2, 2, i32, POLY_DEVICE_CPU),
+      poly_tensor_full_float_by_id(ctx, shape, 2, 2.0, f32, POLY_DEVICE_CPU),
+      poly_tensor_arange_int_by_id(ctx, 0, 4, 1, i32, POLY_DEVICE_CPU),
+      poly_tensor_arange_float_by_id(ctx, 0.0, 4.0, 1.0, f32, POLY_DEVICE_CPU),
+      poly_tensor_linspace_by_id(ctx, 0.0, 1.0, 4, f32, POLY_DEVICE_CPU),
+      poly_tensor_eye_by_id(ctx, 3, 3, f32, POLY_DEVICE_CPU),
+  };
+
+  for (int i = 0; i < (int)(sizeof(values) / sizeof(values[0])); i++) {
+    ASSERT_NOT_NULL(values[i]);
+    ASSERT_PTR_EQ(values[i]->uop_logical, values[i]->uop_physical);
+    ASSERT_INT_EQ(poly_uop_device(values[i]->uop_physical), POLY_DEVICE_AUTO);
+  }
+
+  PolyTensor *moved = poly_tensor_to_device(ctx, values[2], POLY_DEVICE_CUDA);
+  ASSERT_PTR_EQ(moved, values[2]);
+  ASSERT_PTR_EQ(moved->uop_physical, values[2]->uop_physical);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, movement_constructors_use_exact_logical_and_physical_sources) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -3609,6 +3642,37 @@ TEST(pe, triu_frontend_uses_int_mask_and_broadcast_zero) {
   ASSERT_INT_EQ(zero->src[0]->op, POLY_OP_RESHAPE);
   ASSERT_NOT_NULL(zero->src[0]->src[0]);
   ASSERT_INT_EQ(zero->src[0]->src[0]->op, POLY_OP_CONST);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, zero_dimension_broadcast_matches_tinygrad) {
+  /* Pinned _broadcast_shape chooses zero when either aligned dimension is
+   * zero (uop/ops.py:63-71). This is the core topology reached by
+   * Tensor.zeros(5, 0, 3).triu(). */
+  PolyCtx *ctx = poly_ctx_new();
+  int f32 = poly_dtype_id_by_name("float32");
+  int64_t mask_shape[] = {0, 3};
+  int64_t value_shape[] = {5, 0, 3};
+  PolyUOp *mask_value = poly_full_float_by_id(ctx, mask_shape, 2, 1.0, f32);
+  PolyUOp *mask = poly_eq(ctx, mask_value, mask_value);
+  PolyUOp *value = poly_full_float_by_id(ctx, value_shape, 3, 2.0, f32);
+  PolyUOp *out = poly_where_op(ctx, mask, value, poly_const_float(ctx, 0.0));
+
+  ASSERT_NOT_NULL(out);
+  ASSERT_INT_EQ(mask_value->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(mask_value->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(mask_value->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(out->op, POLY_OP_WHERE);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, out), 3);
+  const int64_t *shape = poly_uop_max_shape_dims(ctx, out);
+  ASSERT_NOT_NULL(shape);
+  ASSERT_INT_EQ(shape[0], 5);
+  ASSERT_INT_EQ(shape[1], 0);
+  ASSERT_INT_EQ(shape[2], 3);
+  ASSERT_INT_EQ(out->src[0]->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(out->src[2]->op, POLY_OP_EXPAND);
 
   poly_ctx_destroy(ctx);
   PASS();

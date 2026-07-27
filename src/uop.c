@@ -1208,7 +1208,10 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     if (written > 0) *pos += written;
     break;
   case POLY_ARG_FLOAT:
-    written = snprintf(buf + *pos, cap - *pos, ", %g", u->arg.f);
+    /* Pinned UOp.argstr uses Python's round-trippable float repr
+     * (uop/ops.py:166-171). Seventeen significant decimal digits preserve a
+     * C double exactly for graph diagnostics and parity tooling. */
+    written = snprintf(buf + *pos, cap - *pos, ", %.17g", u->arg.f);
     if (written > 0) *pos += written;
     break;
   case POLY_ARG_BOOL:

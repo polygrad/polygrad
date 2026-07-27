@@ -2108,7 +2108,8 @@ TEST(realize, tensor_placement_audit_prefers_nested_place_over_value_fact) {
   poly_buffer_set(ctx, a, da, sizeof(da), POLY_DEVICE_CPU);
 
   PolyUOp *x_expr = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
-  PolyUOp *x_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *x_buf =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
   float dx[] = {2.0f};
   poly_buffer_set(ctx, x_buf, dx, sizeof(dx), POLY_DEVICE_CPU);
   PolyTensor *x_cpu =
@@ -2208,7 +2209,8 @@ TEST(realize, tensor_nested_place_fact_feeds_later_value_from_realized_source) {
   poly_buffer_set(ctx, a, da, sizeof(da), POLY_DEVICE_CPU);
 
   PolyUOp *x_expr = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
-  PolyUOp *x_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *x_buf =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
   float dx[] = {2.0f};
   poly_buffer_set(ctx, x_buf, dx, sizeof(dx), POLY_DEVICE_CPU);
 
@@ -4994,7 +4996,10 @@ TEST(realize, tensor_zero_size_placement_copy_adds_no_call) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  PolyUOp *logical = poly_full(ctx, (int64_t[]){0}, 1, 0.0);
+  /* This is a preserved Path-A placement canary. Use explicit unplaced
+   * storage; pinned full(buffer=False) is a pure CONST movement graph
+   * (mixin/__init__.py:55-77) and must not be made storage for the fixture. */
+  PolyUOp *logical = poly_buffer(ctx, POLY_FLOAT32, 0);
   PolyTensor *empty = poly_tensor_create(ctx, logical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(logical);
   ASSERT_NOT_NULL(empty);

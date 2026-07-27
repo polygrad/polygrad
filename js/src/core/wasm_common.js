@@ -772,6 +772,38 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_const_int_by_id(ctx, BigInt(value), dtypeId, targetDevice),
     poly_tensor_const_float_by_id: (ctx, value, dtypeId, targetDevice) =>
       Module._poly_tensor_const_float_by_id(ctx, value, dtypeId, targetDevice),
+    poly_tensor_full_int_by_id: (ctx, shape, ndim, value, dtypeId, targetDevice) => {
+      const dimsPtr = writeInt64Array(shape || [])
+      try {
+        return Module._poly_tensor_full_int_by_id(
+          ctx, dimsPtr, ndim, BigInt(value), dtypeId, targetDevice
+        )
+      } finally {
+        if (dimsPtr) Module._free(dimsPtr)
+      }
+    },
+    poly_tensor_full_float_by_id: (ctx, shape, ndim, value, dtypeId, targetDevice) => {
+      const dimsPtr = writeInt64Array(shape || [])
+      try {
+        return Module._poly_tensor_full_float_by_id(
+          ctx, dimsPtr, ndim, value, dtypeId, targetDevice
+        )
+      } finally {
+        if (dimsPtr) Module._free(dimsPtr)
+      }
+    },
+    poly_tensor_arange_int_by_id: (ctx, start, stop, step, dtypeId, targetDevice) =>
+      Module._poly_tensor_arange_int_by_id(
+        ctx, BigInt(start), BigInt(stop), BigInt(step), dtypeId, targetDevice
+      ),
+    poly_tensor_arange_float_by_id: (ctx, start, stop, step, dtypeId, targetDevice) =>
+      Module._poly_tensor_arange_float_by_id(ctx, start, stop, step, dtypeId, targetDevice),
+    poly_tensor_linspace_by_id: (ctx, start, stop, steps, dtypeId, targetDevice) =>
+      Module._poly_tensor_linspace_by_id(
+        ctx, start, stop, BigInt(steps), dtypeId, targetDevice
+      ),
+    poly_tensor_eye_by_id: (ctx, n, m, dtypeId, targetDevice) =>
+      Module._poly_tensor_eye_by_id(ctx, BigInt(n), BigInt(m), dtypeId, targetDevice),
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
@@ -1293,7 +1325,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 27
+  const EXPECTED_ABI = 28
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

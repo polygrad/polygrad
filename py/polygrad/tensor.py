@@ -416,13 +416,16 @@ def _require_i64(value, what):
     return ivalue
 
 
-def _created_tensor(ctx, uop, dtype_name, device, requires_grad, op_name):
+def _created_tensor(ctx, tensor, dtype_name, device, requires_grad, op_name):
     # Constructors should trust the core for final shape metadata so Python
-    # does not grow a second copy of shape logic for the same helper.
-    if not uop:
+    # does not grow a second copy of shape or Path-B root-ownership logic.
+    if not tensor:
         raise RuntimeError(f'{op_name} failed')
+    uop = _ffi._lib.poly_tensor_uop(tensor)
+    if not uop:
+        raise RuntimeError(f'{op_name} returned a Tensor without a current UOp')
     return Tensor(
-        _ctx=ctx, _uop=uop, _shape=_shape_from_uop(ctx, uop),
+        _ctx=ctx, _tensor=tensor, _shape=_shape_from_uop(ctx, uop),
         requires_grad=requires_grad, _dtype=dtype_name, _device=device,
     )
 
@@ -2944,12 +2947,16 @@ class Tensor:
 
         dt = to_dtype(dtype_name)
         if dtypes.is_float(dt):
-            uop = _ffi._lib.poly_full_float_by_id(ctx, dims, ndim, float(fill_value), dtype_id)
-        else:
-            uop = _ffi._lib.poly_full_int_by_id(
-                ctx, dims, ndim, _require_i64(fill_value, 'fill_value'), dtype_id
+            tensor = _ffi._lib.poly_tensor_full_float_by_id(
+                ctx, dims, ndim, float(fill_value), dtype_id, _device_id(dev)
             )
-        value = _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_full_*_by_id')
+        else:
+            tensor = _ffi._lib.poly_tensor_full_int_by_id(
+                ctx, dims, ndim, _require_i64(fill_value, 'fill_value'), dtype_id, _device_id(dev)
+            )
+        value = _created_tensor(
+            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_full_*_by_id'
+        )
         return value.clone(device=dev) if buffer else value
 
     @staticmethod
@@ -2970,18 +2977,21 @@ class Tensor:
         dt = to_dtype(dtype_name)
 
         if dtypes.is_float(dt):
-            uop = _ffi._lib.poly_arange_float_by_id(
-                ctx, float(start), float(stop), float(step), dtype_id
+            tensor = _ffi._lib.poly_tensor_arange_float_by_id(
+                ctx, float(start), float(stop), float(step), dtype_id, _device_id(dev)
             )
         else:
-            uop = _ffi._lib.poly_arange_int_by_id(
+            tensor = _ffi._lib.poly_tensor_arange_int_by_id(
                 ctx,
                 _require_i64(start, 'start'),
                 _require_i64(stop, 'stop'),
                 _require_i64(step, 'step'),
                 dtype_id,
+                _device_id(dev),
             )
-        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_arange_*_by_id')
+        return _created_tensor(
+            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_arange_*_by_id'
+        )
 
     @staticmethod
     def rand(*shape, **kwargs):
@@ -3057,14 +3067,17 @@ class Tensor:
     def linspace(start, stop, steps, **kwargs):
         ctx, dev, requires_grad = _creation_meta(kwargs)
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
-        uop = _ffi._lib.poly_linspace_by_id(
+        tensor = _ffi._lib.poly_tensor_linspace_by_id(
             ctx,
             float(_py_scalar(start)),
             float(_py_scalar(stop)),
             _require_i64(_py_scalar(steps), 'steps'),
             _dtype_id(dtype_name),
+            _device_id(dev),
         )
-        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_linspace_by_id')
+        return _created_tensor(
+            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_linspace_by_id'
+        )
 
     @staticmethod
     def eye(n, m=None, **kwargs):
@@ -3072,8 +3085,12 @@ class Tensor:
         dtype_name = _dtype_name(kwargs.get('dtype', dtypes.default_float), default='float32')
         rows = _require_i64(_py_scalar(n), 'n')
         cols = rows if m is None else _require_i64(_py_scalar(m), 'm')
-        uop = _ffi._lib.poly_eye_by_id(ctx, rows, cols, _dtype_id(dtype_name))
-        return _created_tensor(ctx, uop, dtype_name, dev, requires_grad, 'poly_eye_by_id')
+        tensor = _ffi._lib.poly_tensor_eye_by_id(
+            ctx, rows, cols, _dtype_id(dtype_name), _device_id(dev)
+        )
+        return _created_tensor(
+            ctx, tensor, dtype_name, dev, requires_grad, 'poly_tensor_eye_by_id'
+        )
 
     @staticmethod
     def empty(*shape, **kwargs):

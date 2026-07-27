@@ -537,6 +537,28 @@ TEST(uop, print_const) {
   PASS();
 }
 
+TEST(uop, print_float_arg_round_trips_double) {
+  /* Pinned tinygrad UOp.argstr uses Python's round-trippable float repr
+   * (uop/ops.py:166-171). Diagnostic serialization must not collapse distinct
+   * double values to the six significant digits provided by plain %g. */
+  PolyCtx *ctx = poly_ctx_new();
+  double expected = 1.0 / 3.0;
+  PolyUOp *c = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(expected));
+  char *s = poly_uop_str(c);
+  ASSERT_NOT_NULL(s);
+
+  const char *arg = strstr(s, ", 0.");
+  ASSERT_NOT_NULL(arg);
+  char *end = NULL;
+  double parsed = strtod(arg + 2, &end);
+  ASSERT_TRUE(end != arg + 2);
+  ASSERT_TRUE(parsed == expected);
+
+  free(s);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(uop, print_preserves_pair_and_reduce_axis_args) {
   /* Pinned tinygrad UOp.argstr (uop/ops.py:166-168) preserves the complete
    * REDUCE operation/axes and movement metadata in diagnostic output. */

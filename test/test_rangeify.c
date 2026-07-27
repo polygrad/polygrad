@@ -3481,7 +3481,13 @@ TEST(rangeify, moved_const_folding_mul_shrunk_one_e2e) {
 TEST(rangeify, zero_size_sum_folds_to_identity_e2e) {
   PolyCtx *ctx = poly_ctx_new();
 
-  PolyUOp *empty = poly_full(ctx, (int64_t[]){1, 0}, 2, 1.0);
+  /* Pinned Tensor.empty is BUFFER(UNIQUE, DEVICE) followed by movement
+   * (uop/ops.py:733-746); full(buffer=False) is a pure CONST graph and is not
+   * bindable storage. */
+  PolyUOp *empty = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_FLOAT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){1, 0}, 2
+  );
   PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, empty, (int64_t[]){0, 1}, 2);
   PolyUOp *scalar = poly_reshape(ctx, sum, NULL, 0);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);

@@ -2521,11 +2521,7 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = shape.map(x => Number(x))
-      const AT = Tensor._resolveArrayType(opts)
-      const numel = shape.reduce((a, b) => a * b, 1)
-      const t = new Tensor(new AT(numel).fill(0), opts)
-      if (shape.length !== 1 || shape[0] !== numel) return t.reshape(...shape)
-      return t
+      return Tensor.full(shape, 0, { ...(opts || {}), dtype: (opts && opts.dtype) || 'float32' })
     }
 
     static ones(...args) {
@@ -2536,20 +2532,36 @@ function createBoundTensorClass(runtime) {
       }
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = shape.map(x => Number(x))
-      const AT = Tensor._resolveArrayType(opts)
-      const numel = shape.reduce((a, b) => a * b, 1)
-      const t = new Tensor(new AT(numel).fill(1), opts)
-      if (shape.length !== 1 || shape[0] !== numel) return t.reshape(...shape)
-      return t
+      return Tensor.full(shape, 1, { ...(opts || {}), dtype: (opts && opts.dtype) || 'float32' })
     }
 
     static full(shape, fillValue, opts) {
       if (typeof shape === 'number') shape = [shape]
-      const AT = Tensor._resolveArrayType(opts)
-      const numel = shape.reduce((a, b) => a * b, 1)
-      const t = new Tensor(new AT(numel).fill(fillValue), opts)
-      if (shape.length !== 1 || shape[0] !== numel) return t.reshape(...shape)
-      return t
+      shape = Array.from(shape, Number)
+      opts = opts ? { ...opts } : {}
+      const ctx = opts._ctx || _runtime._core.ctx
+      const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
+      const dtype = opts.dtype || (
+        typeof fillValue === 'boolean' ? 'bool' : Number.isInteger(fillValue) ? 'int32' : 'float32'
+      )
+      const dtypeId = DTYPE_ID[dtype]
+      if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+      const targetDevice = deviceId(device)
+      const tensor = (dtype === 'bool' || isIntegerDtype(dtype))
+        ? ffi.poly_tensor_full_int_by_id(
+            ctx, shape, shape.length,
+            typeof fillValue === 'boolean' ? (fillValue ? 1 : 0) : Math.trunc(Number(fillValue)),
+            dtypeId, targetDevice
+          )
+        : ffi.poly_tensor_full_float_by_id(
+            ctx, shape, shape.length, Number(fillValue), dtypeId, targetDevice
+          )
+      if (!tensor) throw new Error('C-owned Tensor.full construction failed')
+      const value = new Tensor(null, {
+        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
+      })
+      return opts.buffer === false ? value : value.clone(device)
     }
 
     static arange(start, stop, step, opts) {
@@ -2558,14 +2570,27 @@ function createBoundTensorClass(runtime) {
       if (stop === undefined) { stop = start; start = 0 }
       if (step === undefined) step = 1
       if (step === 0) throw new Error('Tensor.arange step must not be zero')
-      const AT = Tensor._resolveArrayType(opts)
-      const arr = []
-      if (step > 0) {
-        for (let i = start; i < stop; i += step) arr.push(i)
-      } else {
-        for (let i = start; i > stop; i += step) arr.push(i)
-      }
-      return new Tensor(new AT(arr), opts)
+      opts = opts ? { ...opts } : {}
+      const ctx = opts._ctx || _runtime._core.ctx
+      const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
+      const dtype = opts.dtype || (
+        [start, stop, step].every(Number.isInteger) ? 'int32' : 'float32'
+      )
+      const dtypeId = DTYPE_ID[dtype]
+      if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+      const targetDevice = deviceId(device)
+      const tensor = (dtype === 'bool' || isIntegerDtype(dtype))
+        ? ffi.poly_tensor_arange_int_by_id(
+            ctx, Math.trunc(start), Math.trunc(stop), Math.trunc(step), dtypeId, targetDevice
+          )
+        : ffi.poly_tensor_arange_float_by_id(
+            ctx, Number(start), Number(stop), Number(step), dtypeId, targetDevice
+          )
+      if (!tensor) throw new Error('C-owned Tensor.arange construction failed')
+      return new Tensor(null, {
+        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
+      })
     }
 
     static manual_seed(seed) {
@@ -2652,19 +2677,40 @@ function createBoundTensorClass(runtime) {
     }
 
     static linspace(start, stop, steps, opts) {
-      const AT = Tensor._resolveArrayType(opts)
-      const data = new AT(steps)
-      for (let i = 0; i < steps; i++) {
-        data[i] = start + (stop - start) * i / (steps - 1)
-      }
-      return new Tensor(data, opts)
+      opts = opts ? { ...opts } : {}
+      const ctx = opts._ctx || _runtime._core.ctx
+      const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
+      const dtype = opts.dtype || 'float32'
+      const dtypeId = DTYPE_ID[dtype]
+      if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+      const tensor = ffi.poly_tensor_linspace_by_id(
+        ctx, Number(start), Number(stop), Number(steps), dtypeId, deviceId(device)
+      )
+      if (!tensor) throw new Error('C-owned Tensor.linspace construction failed')
+      return new Tensor(null, {
+        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
+      })
     }
 
-    static eye(n, opts) {
-      const AT = Tensor._resolveArrayType(opts)
-      const data = new AT(n * n)
-      for (let i = 0; i < n; i++) data[i * n + i] = 1
-      return new Tensor(data, opts).reshape(n, n)
+    static eye(n, m, opts) {
+      if (typeof m === 'object' && m !== null) { opts = m; m = undefined }
+      opts = opts ? { ...opts } : {}
+      const ctx = opts._ctx || _runtime._core.ctx
+      const device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
+      const dtype = opts.dtype || 'float32'
+      const dtypeId = DTYPE_ID[dtype]
+      if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+      const rows = Number(n)
+      const cols = m === undefined ? rows : Number(m)
+      const tensor = ffi.poly_tensor_eye_by_id(
+        ctx, rows, cols, dtypeId, deviceId(device)
+      )
+      if (!tensor) throw new Error('C-owned Tensor.eye construction failed')
+      return new Tensor(null, {
+        _ctx: ctx, _tensor: tensor, _dtype: dtype, _device: device,
+        requiresGrad: Boolean(opts.requiresGrad || opts.requires_grad)
+      })
     }
 
     static empty(...args) {

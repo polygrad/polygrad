@@ -569,6 +569,7 @@ class TestCreation:
 
         broadcast = Tensor.full((2,), 3.0, buffer=False)
         assert broadcast.uop_logical.op_name == 'EXPAND'
+        assert broadcast.uop_physical == broadcast.uop_logical
         np.testing.assert_allclose(broadcast.numpy(), [3.0, 3.0])
 
     def test_ones(self):
@@ -607,6 +608,8 @@ class TestCreation:
 
     def test_arange(self):
         t = Tensor.arange(5)
+        assert t.uop_physical == t.uop_logical
+        assert t.to('cuda').uop.raw == t.uop.raw
         np.testing.assert_allclose(t.numpy(), np.arange(5, dtype=np.float32))
 
     def test_rand_manual_seed_deterministic(self):

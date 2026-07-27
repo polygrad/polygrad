@@ -362,18 +362,57 @@ def case_view_assign():
     return {"physical": x.uop, "logical": logical(x)}
 
 
+def case_full_const_pair():
+    a = Tensor.full((2, 3), 2.0, buffer=False)
+    b = Tensor.full((2, 3), 2.0, buffer=False)
+    out = a + b
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_arange():
+    out = Tensor.arange(0, 4, 1)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_arange_to_cuda():
+    out = Tensor.arange(0, 4, 1).to("CUDA")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_linspace():
+    out = Tensor.linspace(0, 1, 4)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_eye():
+    out = Tensor.eye(3)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_zero_broadcast():
+    a = Tensor.full((0, 3), 1.0, buffer=False)
+    b = Tensor.full((1, 3), 2.0, buffer=False)
+    out = a + b
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 CASES = {
+    "arange": ("tensor", case_arange),
+    "arange_to_cuda": ("tensor", case_arange_to_cuda),
     "basic_alu": ("tensor", case_basic_alu),
     "clone": ("tensor", case_clone),
     "contiguous": ("tensor", case_contiguous),
     "empty_storage": ("tensor", case_empty_storage),
+    "eye": ("tensor", case_eye),
     "expand": ("tensor", case_expand),
     "flip": ("tensor", case_flip),
     "flip_scalar_noop": ("tensor", case_flip_scalar_noop),
+    "full_const_pair": ("tensor", case_full_const_pair),
     "host_list_2d_cpu": ("tensor", case_host_list_2d_cpu),
     "host_list_2d_cuda": ("tensor", case_host_list_2d_cuda),
     "host_list_cpu": ("tensor", case_host_list_cpu),
     "host_list_cuda": ("tensor", case_host_list_cuda),
+    "linspace": ("tensor", case_linspace),
     "movement_reduce": ("tensor", case_movement_reduce),
     "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),
     "pad": ("tensor", case_pad),
@@ -397,6 +436,7 @@ CASES = {
     "shrink_noop": ("tensor", case_shrink_noop),
     "shrink_scalar_noop": ("tensor", case_shrink_scalar_noop),
     "view_assign": ("tensor", case_view_assign),
+    "zero_broadcast": ("tensor", case_zero_broadcast),
 }
 
 
