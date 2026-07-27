@@ -20,6 +20,17 @@ extern "C" {
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
 
+/* Publish an exact executable root while preserving the Tensor's retained
+ * logical root. Frontend graph construction replaces both roots explicitly
+ * through poly_tensor_replace_roots. */
+int poly_tensor_set_physical(
+    PolyCtx *ctx,
+    PolyTensor *tensor,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+);
+
 /* Apply realized replacements to live PolyTensors, preserving logical roots
  * and updating only executable physical roots. POLY_DEVICE_AUTO applies the
  * map globally; an exact device keeps placement aliases from retargeting a

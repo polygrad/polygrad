@@ -2088,8 +2088,8 @@ static int poly_realize_tensors_impl(
       if (storage && (storage->valid || (storage->src && storage->src->valid)) &&
           poly_buffer_ensure_device_current(ctx, (PolyUOp *)identity, requested) != 0)
         goto cleanup;
-      if (poly_tensor_update(
-              ctx, inputs[i], NULL, physical, inputs[i]->role, inputs[i]->device
+      if (poly_tensor_set_physical(
+              ctx, inputs[i], physical, inputs[i]->role, inputs[i]->device
           ) != 0)
         goto cleanup;
       outputs[i] = inputs[i];
@@ -2129,8 +2129,8 @@ static int poly_realize_tensors_impl(
      * becomes-map above, preserving the live-dependent correctness check. */
     if (current != out && out != pending_roots[pending]) goto cleanup;
     if (poly_tensor_uop_physical(pending_tensors[pending]) != out &&
-        poly_tensor_update(
-            ctx, pending_tensors[pending], NULL, out,
+        poly_tensor_set_physical(
+            ctx, pending_tensors[pending], out,
             pending_tensors[pending]->role, pending_tensors[pending]->device
         ) != 0)
       goto cleanup;

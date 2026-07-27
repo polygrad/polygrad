@@ -341,7 +341,7 @@ int poly_optim_build_step(
    * assignment-effect UOps have been constructed successfully. Match
    * tinygrad Optimizer.schedule_step ordering: optimizer state, parameters. */
   for (int i = 0; i < needed; i++) {
-    if (poly_tensor_update(
+    if (poly_tensor_replace_roots(
             ctx, targets[i], effects[i], NULL, targets[i]->role, targets[i]->device
         ) != 0)
       goto done;

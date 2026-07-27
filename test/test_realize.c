@@ -2997,7 +2997,10 @@ TEST(realize, tensor_shared_lazy_retarget_keeps_distinct_tensor_records) {
   PolyUOp *shared_buf = poly_tensor_uop(x1);
   ASSERT_TRUE(poly_uop_has_buffer_identity(shared_buf));
   ASSERT_INT_EQ(
-      poly_tensor_update(ctx, x2, NULL, shared_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU), 0
+      poly_tensor_set_physical(
+          ctx, x2, shared_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+      ),
+      0
   );
   ASSERT_PTR_NEQ(x1, x2);
   ASSERT_PTR_EQ(poly_tensor_uop(x1), poly_tensor_uop(x2));
@@ -3138,8 +3141,8 @@ TEST(realize, requested_plain_root_retargets_live_dependent_to_final_buffer) {
     ASSERT_PTR_NEQ(requested_placed, requested_logical);
     if (preplace_dependent) {
       ASSERT_INT_EQ(
-          poly_tensor_update(
-              ctx, dependent, NULL, dependent_placed, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+          poly_tensor_set_physical(
+              ctx, dependent, dependent_placed, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
           ),
           0
       );

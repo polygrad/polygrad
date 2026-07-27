@@ -1099,7 +1099,7 @@ static napi_value napi_poly_tensor_create_with_roots(napi_env env, napi_callback
   );
 }
 
-static napi_value napi_poly_tensor_update(napi_env env, napi_callback_info info) {
+static napi_value napi_poly_tensor_replace_roots(napi_env env, napi_callback_info info) {
   napi_value argv[6];
   size_t argc = 6;
   NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
@@ -1115,7 +1115,7 @@ static napi_value napi_poly_tensor_update(napi_env env, napi_callback_info info)
   NAPI_CALL(
       env, napi_create_int32(
                env,
-               poly_tensor_update(
+               poly_tensor_replace_roots(
                    ctx, tensor, uop_logical, uop_physical, (PolyTensorRole)role, (PolyDevice)device
                ),
                &out
@@ -3959,7 +3959,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_create", napi_poly_tensor_create),
       DECLARE_NAPI_METHOD("poly_tensor_empty_by_id", napi_poly_tensor_empty_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_create_with_roots", napi_poly_tensor_create_with_roots),
-      DECLARE_NAPI_METHOD("poly_tensor_update", napi_poly_tensor_update),
+      DECLARE_NAPI_METHOD("poly_tensor_replace_roots", napi_poly_tensor_replace_roots),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),
       DECLARE_NAPI_METHOD("poly_tensor_assign", napi_poly_tensor_assign),
       DECLARE_NAPI_METHOD("poly_tensor_alu1", napi_poly_tensor_alu1),

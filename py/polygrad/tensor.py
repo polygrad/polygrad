@@ -1134,7 +1134,7 @@ class Tensor:
         if rc != 0:
             raise RuntimeError('poly_buffer_write failed')
         if logical is not None:
-            rc = _ffi._lib.poly_tensor_update(
+            rc = _ffi._lib.poly_tensor_replace_roots(
                 self._ctx,
                 self._tensor,
                 logical.raw,
@@ -1143,7 +1143,7 @@ class Tensor:
                 _device_id(self._device),
             )
             if rc != 0:
-                raise RuntimeError('poly_tensor_update failed during copy_from')
+                raise RuntimeError('poly_tensor_replace_roots failed during copy_from')
         self._data = None
         return self
 

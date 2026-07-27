@@ -112,6 +112,40 @@ TEST(tensor, static_empty_shares_unique_with_deviceful_physical_root) {
   PASS();
 }
 
+TEST(tensor, root_mutators_make_physical_clear_explicit) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logical = poly_buffer_f32(ctx, 2);
+  PolyUOp *physical = poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyTensor *tensor = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(tensor);
+
+  PolyUOp *realized = poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(
+      poly_tensor_set_physical(
+          ctx, tensor, realized, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+      ),
+      0
+  );
+  ASSERT_PTR_EQ(tensor->uop_logical, logical);
+  ASSERT_PTR_EQ(tensor->uop_physical, realized);
+
+  PolyUOp *next_logical = poly_add(ctx, logical, poly_const_float(ctx, 1.0));
+  ASSERT_NOT_NULL(next_logical);
+  ASSERT_INT_EQ(
+      poly_tensor_replace_roots(
+          ctx, tensor, next_logical, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+      ),
+      0
+  );
+  ASSERT_PTR_EQ(tensor->uop_logical, next_logical);
+  ASSERT_EQ(tensor->uop_physical, NULL);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, einsum_c_api_rejects_oversized_formula_parts) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){1}, 1);

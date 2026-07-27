@@ -939,11 +939,11 @@ function createBoundTensorClass(runtime) {
       const targetDevice = deviceId(this._device)
       ffi.poly_buffer_ensure_device_allocated(this._ctx, writeBuf, targetDevice)
       ffi.poly_buffer_write(this._ctx, writeBuf, view)
-      if (ffi.poly_tensor_update && logicalRaw) {
-        const rc = ffi.poly_tensor_update(
+      if (ffi.poly_tensor_replace_roots && logicalRaw) {
+        const rc = ffi.poly_tensor_replace_roots(
           this._ctx, this._tensor, logicalRaw, physicalRaw, POLY_TENSOR_VALUE, deviceId(this._device)
         )
-        if (rc !== 0) throw new Error('poly_tensor_update failed during copyFrom')
+        if (rc !== 0) throw new Error('poly_tensor_replace_roots failed during copyFrom')
       }
       this._data = null
       return this

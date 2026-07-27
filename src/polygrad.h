@@ -629,7 +629,7 @@ PolyTensor *poly_tensor_empty(
     int ndim,
     PolyDevice device
 );
-int poly_tensor_update(
+int poly_tensor_replace_roots(
     PolyCtx *ctx,
     PolyTensor *tensor,
     PolyUOp *uop_logical,

@@ -155,7 +155,7 @@ static void tensor_index_remove(PolyCtx *ctx, PolyUOp *current, PolyTensor *tens
 /* Commit fields only after the caller has registered tensor at its future
  * current root. This phase allocates nothing and cannot leave a half-indexed
  * Tensor on recoverable tensor-list allocation failure. */
-static void tensor_update_commit_reserved(
+static void tensor_replace_roots_commit_reserved(
     PolyCtx *ctx,
     PolyTensor *tensor,
     PolyUOp *uop_logical,
@@ -164,11 +164,8 @@ static void tensor_update_commit_reserved(
     PolyDevice device
 ) {
   PolyUOp *old_current = tensor_current_uop(tensor);
-  if (uop_logical) {
-    tensor->uop_logical = uop_logical;
-    tensor->uop_physical = NULL;
-  }
-  if (uop_physical) tensor->uop_physical = uop_physical;
+  tensor->uop_logical = uop_logical;
+  tensor->uop_physical = uop_physical;
   tensor->role = role;
   if (device != POLY_DEVICE_AUTO) tensor->device = device;
   if (role != POLY_TENSOR_PLACE) tensor->source = NULL;
@@ -261,7 +258,8 @@ static int tensor_retarget_logical_uops(
     /* View assign is a semantic effect rewrite, not a runtime materialization
      * retarget. Keep it in logical IR as AFTER/STORE, matching tinygrad's
      * Tensor.assign graph shape. */
-    if (poly_tensor_update(ctx, t, new_current, NULL, t->role, t->device) != 0) return -1;
+    if (poly_tensor_replace_roots(ctx, t, new_current, NULL, t->role, t->device) != 0)
+      return -1;
   }
   return 0;
 }
@@ -567,7 +565,9 @@ int poly_tensor_apply_realize_map(
         tensor_device = requested;
       }
     }
-    tensor_update_commit_reserved(ctx, tensor, NULL, realized, role, tensor_device);
+    tensor_replace_roots_commit_reserved(
+        ctx, tensor, tensor->uop_logical, realized, role, tensor_device
+    );
   }
   rc = 0;
 
@@ -740,7 +740,7 @@ PolyTensor *poly_tensor_empty(
   return poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
 }
 
-int poly_tensor_update(
+int poly_tensor_replace_roots(
     PolyCtx *ctx,
     PolyTensor *tensor,
     PolyUOp *uop_logical,
@@ -748,17 +748,31 @@ int poly_tensor_update(
     PolyTensorRole role,
     PolyDevice device
 ) {
-  if (!ctx || !tensor) return -1;
+  if (!ctx || !tensor || !uop_logical) return -1;
   PolyUOp *old_current = tensor_current_uop(tensor);
-  PolyUOp *new_logical = uop_logical ? uop_logical : tensor->uop_logical;
-  PolyUOp *new_physical = uop_logical ? NULL : tensor->uop_physical;
-  if (uop_physical) new_physical = uop_physical;
-  PolyUOp *new_current = new_physical ? new_physical : new_logical;
-  if (!new_current) return -1;
+  PolyUOp *new_current = uop_physical ? uop_physical : uop_logical;
 
   bool reindex = old_current != new_current;
   if (reindex && !tensor_index_add(ctx, new_current, tensor)) return -1;
-  tensor_update_commit_reserved(ctx, tensor, uop_logical, uop_physical, role, device);
+  tensor_replace_roots_commit_reserved(
+      ctx, tensor, uop_logical, uop_physical, role, device
+  );
+  return 0;
+}
+
+int poly_tensor_set_physical(
+    PolyCtx *ctx,
+    PolyTensor *tensor,
+    PolyUOp *uop_physical,
+    PolyTensorRole role,
+    PolyDevice device
+) {
+  if (!ctx || !tensor || !tensor->uop_logical || !uop_physical) return -1;
+  PolyUOp *old_current = tensor_current_uop(tensor);
+  if (old_current != uop_physical && !tensor_index_add(ctx, uop_physical, tensor)) return -1;
+  tensor_replace_roots_commit_reserved(
+      ctx, tensor, tensor->uop_logical, uop_physical, role, device
+  );
   return 0;
 }
 
@@ -922,7 +936,7 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
    * AFTER. Preserve that same value-version chain independently in both roots
    * instead of leaking target_current into uop_logical. */
   PolyUOp *physical_after = current_after != logical_after ? current_after : NULL;
-  if (poly_tensor_update(
+  if (poly_tensor_replace_roots(
           ctx, target, logical_after, physical_after, target->role, target->device
       ) != 0)
     return NULL;
@@ -972,7 +986,7 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
           : NULL;
   if (!logical_after || !physical_after) return NULL;
 
-  if (poly_tensor_update(
+  if (poly_tensor_replace_roots(
           ctx, target, logical_after, physical_after, POLY_TENSOR_VALUE, target->device
       ) != 0)
     return NULL;
