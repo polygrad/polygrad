@@ -133,6 +133,8 @@ def normalize_arg(node, arg):
         if math.isinf(value):
             return "<float:+inf>" if value > 0 else "<float:-inf>"
         return f"<float:{value.hex()}>"
+    if op == "CONST" and dtype_name(node) == "bool":
+        return "True" if arg.lower() in {"1", "true"} else "False"
     arg = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", arg)
     return arg.replace("Ops.", "").replace(" ", "").replace(",)", ")")
 
@@ -201,6 +203,38 @@ def case_host_list_2d_cpu():
 
 def case_host_list_2d_cuda():
     out = Tensor([[1.0, 2.0], [3.0, 4.0]], device="CUDA")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_bool():
+    out = Tensor(True)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_float():
+    out = Tensor(1.5)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_float_cuda():
+    out = Tensor(1.5, device="CUDA")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_int():
+    out = Tensor(7)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_int_cuda():
+    out = Tensor(7, device="CUDA")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_where_broadcast():
+    cond = Tensor.empty(2, 3, dtype="bool", device="CPU")
+    x = Tensor.empty(2, 3, dtype="float32", device="CPU")
+    out = cond.where(x, Tensor(0.0))
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -352,6 +386,12 @@ CASES = {
     "rebuilt_after_realize": ("realize", case_rebuilt_after_realize),
     "reshape": ("tensor", case_reshape),
     "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
+    "scalar_bool": ("tensor", case_scalar_bool),
+    "scalar_float": ("tensor", case_scalar_float),
+    "scalar_float_cuda": ("tensor", case_scalar_float_cuda),
+    "scalar_int": ("tensor", case_scalar_int),
+    "scalar_int_cuda": ("tensor", case_scalar_int_cuda),
+    "scalar_where_broadcast": ("tensor", case_scalar_where_broadcast),
     "sibling_moves": ("tensor", case_sibling_moves),
     "shrink": ("tensor", case_shrink),
     "shrink_noop": ("tensor", case_shrink_noop),

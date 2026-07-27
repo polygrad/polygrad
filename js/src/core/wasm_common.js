@@ -768,6 +768,10 @@ function createWasmCoreFromModule(Module, device) {
       if (dimsPtr) Module._free(dimsPtr)
       return tensor
     },
+    poly_tensor_const_int_by_id: (ctx, value, dtypeId, targetDevice) =>
+      Module._poly_tensor_const_int_by_id(ctx, BigInt(value), dtypeId, targetDevice),
+    poly_tensor_const_float_by_id: (ctx, value, dtypeId, targetDevice) =>
+      Module._poly_tensor_const_float_by_id(ctx, value, dtypeId, targetDevice),
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
@@ -1277,7 +1281,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 25
+  const EXPECTED_ABI = 26
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

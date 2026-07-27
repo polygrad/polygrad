@@ -198,6 +198,33 @@ TEST(tensor, host_array_uses_deviceful_source_and_real_cpu_copy) {
   PASS();
 }
 
+TEST(tensor, scalar_constructors_store_exact_const_as_both_roots) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int int_id = poly_dtype_id_by_name("int32");
+  int float_id = poly_dtype_id_by_name("float32");
+  ASSERT_TRUE(int_id >= 0);
+  ASSERT_TRUE(float_id >= 0);
+
+  PolyTensor *i =
+      poly_tensor_const_int_by_id(ctx, 7, int_id, POLY_DEVICE_CUDA);
+  PolyTensor *f =
+      poly_tensor_const_float_by_id(ctx, 1.5, float_id, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(i);
+  ASSERT_NOT_NULL(f);
+  ASSERT_PTR_EQ(i->uop_logical, i->uop_physical);
+  ASSERT_PTR_EQ(f->uop_logical, f->uop_physical);
+  ASSERT_EQ(i->uop_physical->op, POLY_OP_CONST);
+  ASSERT_EQ(f->uop_physical->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(i->uop_physical->arg.i, 7);
+  ASSERT_FLOAT_NEAR(f->uop_physical->arg.f, 1.5, 4, 0.0);
+  ASSERT_INT_EQ(i->device, POLY_DEVICE_CUDA);
+  ASSERT_INT_EQ(f->device, POLY_DEVICE_CPU);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, einsum_c_api_rejects_oversized_formula_parts) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){1}, 1);

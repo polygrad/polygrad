@@ -86,9 +86,23 @@ async function runTensorTests(pg) {
   })
 
   await test('from scalar', async () => {
-    const t = new Tensor(42)
-    const v = await t.item()
-    assert(Math.abs(v - 42) < 1e-4, `Expected 42, got ${v}`)
+    const cases = [
+      [new Tensor(true), 'bool', true],
+      [new Tensor(42), 'int32', 42],
+      [new Tensor(42.0, { dtype: 'float32' }), 'float32', 42],
+      [new Tensor(7, { device: 'cuda' }), 'int32', 7],
+      [new Tensor(1.5, { device: 'cuda' }), 'float32', 1.5]
+    ]
+    for (const [tensor, dtype, value] of cases) {
+      assertShape(tensor.shape, [])
+      assert(tensor.dtype === dtype, `expected ${dtype}, got ${tensor.dtype}`)
+      assert(tensor.uop.op === pg._core.ops.CONST, 'expected scalar CONST root')
+      assert(tensor.uop.key === tensor.uopLogical.key, 'expected shared scalar roots')
+      if (tensor.device === 'CPU') {
+        const actual = await tensor.item()
+        assert(Math.abs(Number(actual) - Number(value)) < 1e-4, `Expected ${value}, got ${actual}`)
+      }
+    }
   })
 
   await test('from 2D', async () => {

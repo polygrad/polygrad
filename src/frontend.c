@@ -137,6 +137,32 @@ PolyTensor *poly_tensor_from_host_by_id(
   return poly_tensor_from_host(ctx, ptr, nbytes, poly_dtype_scalar(dt), dims, ndim);
 }
 
+PolyTensor *poly_tensor_const_int_by_id(
+    PolyCtx *ctx,
+    int64_t value,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_const_int_by_id(ctx, value, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
+PolyTensor *poly_tensor_const_float_by_id(
+    PolyCtx *ctx,
+    double value,
+    int dtype_id,
+    int device_id
+) {
+  PolyUOp *value_uop = poly_const_float_by_id(ctx, value, dtype_id);
+  if (!value_uop) return NULL;
+  return poly_tensor_create_with_roots(
+      ctx, value_uop, value_uop, POLY_TENSOR_VALUE, (PolyDevice)device_id
+  );
+}
+
 int poly_uop_op(PolyUOp *u) {
   return u ? (int)u->op : 0;
 }

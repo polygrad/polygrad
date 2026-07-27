@@ -915,6 +915,36 @@ static napi_value napi_poly_tensor_from_host_by_id(napi_env env, napi_callback_i
   );
 }
 
+static napi_value napi_poly_tensor_const_int_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int64_t value;
+  int32_t dtype_id, device_id;
+  NAPI_CALL(env, napi_get_value_int64(env, argv[1], &value));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &dtype_id));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device_id));
+  return make_external(
+      env, poly_tensor_const_int_by_id(ctx, value, dtype_id, device_id)
+  );
+}
+
+static napi_value napi_poly_tensor_const_float_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  double value;
+  int32_t dtype_id, device_id;
+  NAPI_CALL(env, napi_get_value_double(env, argv[1], &value));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[2], &dtype_id));
+  NAPI_CALL(env, napi_get_value_int32(env, argv[3], &device_id));
+  return make_external(
+      env, poly_tensor_const_float_by_id(ctx, value, dtype_id, device_id)
+  );
+}
+
 static napi_value napi_poly_uop_has_buffer_identity(napi_env env, napi_callback_info info) {
   napi_value argv[1];
   size_t argc = 1;
@@ -3975,6 +4005,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_buffer_f64", napi_poly_buffer_f64),
       DECLARE_NAPI_METHOD("poly_buffer_from_host", napi_poly_buffer_from_host),
       DECLARE_NAPI_METHOD("poly_tensor_from_host_by_id", napi_poly_tensor_from_host_by_id),
+      DECLARE_NAPI_METHOD("poly_tensor_const_int_by_id", napi_poly_tensor_const_int_by_id),
+      DECLARE_NAPI_METHOD("poly_tensor_const_float_by_id", napi_poly_tensor_const_float_by_id),
       DECLARE_NAPI_METHOD("poly_buffer_get_ptr", napi_poly_buffer_get_ptr),
       DECLARE_NAPI_METHOD("poly_buffer_is_allocated", napi_poly_buffer_is_allocated),
       DECLARE_NAPI_METHOD("poly_buffer_get_key", napi_poly_buffer_get_key),

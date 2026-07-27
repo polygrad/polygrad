@@ -15,9 +15,20 @@ class TestCreation:
         np.testing.assert_allclose(t.numpy(), [1, 2, 3])
 
     def test_from_scalar(self):
-        t = Tensor(42.0)
-        assert t.shape == (1,)
-        np.testing.assert_allclose(t.numpy(), [42])
+        cases = [
+            (Tensor(True), (), "bool", True),
+            (Tensor(42), (), "int32", 42),
+            (Tensor(42.0), (), "float32", 42.0),
+            (Tensor(7, device="CUDA"), (), "int32", 7),
+            (Tensor(1.5, device="CUDA"), (), "float32", 1.5),
+        ]
+        for tensor, shape, dtype, value in cases:
+            assert tensor.shape == shape
+            assert tensor.dtype == dtype
+            assert tensor.uop.op_name == "CONST"
+            assert tensor.uop_logical.raw == tensor.uop.raw
+            if tensor.device == "CPU":
+                np.testing.assert_allclose(tensor.numpy(), value)
 
     def test_from_2d(self):
         t = Tensor([[1, 2, 3], [4, 5, 6]])

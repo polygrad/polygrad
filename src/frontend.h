@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 25
+#define POLYGRAD_ABI_VERSION 26
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +51,18 @@ PolyTensor *poly_tensor_from_host_by_id(
     int dtype_id,
     const int64_t *dims,
     int ndim
+);
+PolyTensor *poly_tensor_const_int_by_id(
+    PolyCtx *ctx,
+    int64_t value,
+    int dtype_id,
+    int device_id
+);
+PolyTensor *poly_tensor_const_float_by_id(
+    PolyCtx *ctx,
+    double value,
+    int dtype_id,
+    int device_id
 );
 int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);

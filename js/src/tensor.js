@@ -386,8 +386,7 @@ function createBoundTensorClass(runtime) {
         this._data = opts._data || null
         this._dtype = dtypeNameForUop(this._ctx, raw, opts._dtype)
       } else {
-        importedFromHost = true
-        const scalarData = typeof data === 'number'
+        const scalarData = typeof data === 'number' || typeof data === 'boolean'
         // User construction from data. Resolve dtype and flatten to a single
         // TypedArray. Then call UOp.fromHost (one FFI call) which creates
         // the BUFFER UOp, registers a PolyBuffer wrapping the TypedArray's
@@ -395,49 +394,79 @@ function createBoundTensorClass(runtime) {
         // JS also keeps a strong owner entry keyed by the C-side PolyBuffer*
         // address value, not by the BUFFER UOp.
         let dt, flat, shape
-        if (data instanceof Float64Array) {
+        if (scalarData) {
+          dt = opts.dtype || (
+            typeof data === 'boolean' ? 'bool' : Number.isInteger(data) ? 'int32' : 'float32'
+          )
+          const dtypeId = DTYPE_ID[dt]
+          if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dt}`)
+          const targetDeviceId = deviceId(this._device)
+          if (dt === 'bool' || isIntegerDtype(dt)) {
+            const value = dt === 'bool' ? (data ? 1 : 0) : Math.trunc(Number(data))
+            this._tensor = ffi.poly_tensor_const_int_by_id(
+              this._ctx, value, dtypeId, targetDeviceId
+            )
+          } else {
+            this._tensor = ffi.poly_tensor_const_float_by_id(
+              this._ctx, Number(data), dtypeId, targetDeviceId
+            )
+          }
+          if (!this._tensor) throw new Error('C-owned scalar Tensor construction failed')
+          const physical = tensorUopPhysical(this._tensor)
+          if (!physical) throw new Error('scalar Tensor has no physical root')
+          currentUop = new UOp(this._ctx, core.ffi, physical)
+          this._dtype = dt
+          this._data = null
+        } else if (data instanceof Float64Array) {
+          importedFromHost = true
           dt = 'float64'; flat = new Float64Array(data); shape = [data.length]
         } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
+          importedFromHost = true
           dt = 'float32'; flat = new Float32Array(data); shape = [data.length]
         } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
+          importedFromHost = true
           dt = (opts && opts.dtype) || 'float32'
           const ArrayType = TA_BY_DTYPE[dt] || Float32Array
           flat = new ArrayType(data)
           shape = [data.length]
         } else {
+          importedFromHost = true
           dt = (opts && opts.dtype) || 'float32'
           const r = flattenArray(data, dt)
           flat = r.data; shape = r.shape
         }
-        this._dtype = dt
-        this._data = flat
-        const dtypeId = DTYPE_ID[dt] || 12
-        // Preserve one-dimensional zero shapes. Without the explicit [0],
-        // poly_buffer_from_host cannot distinguish an empty vector from an
-        // unspecified/scalar host buffer and applies its scalar numel fallback.
-        const dims = shape.length ? shape : null
-        if (!scalarData && dt !== 'bfloat16' && ffi.poly_tensor_from_host_by_id) {
-          this._tensor = ffi.poly_tensor_from_host_by_id(
-            this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
-          )
-          if (!this._tensor) throw new Error('poly_tensor_from_host_by_id failed')
-          const physical = tensorUopPhysical(this._tensor)
-          if (!physical) throw new Error('host Tensor source has no physical root')
-          currentUop = new UOp(this._ctx, core.ffi, physical)
-          importedTensorFromHost = true
-        } else {
-          currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
-        }
-        const buffer = currentUop.buffer ? currentUop.buffer.raw : null
-        const needsFrontendHostOwner =
-          Boolean(buffer && core.ffi.poly_buffer_get_key) &&
-          (!core.caps || core.caps.core !== 'wasm' || core.caps.device === 'webgpu')
-        if (needsFrontendHostOwner && buffer && core.ffi.poly_buffer_get_key) {
-          const bufferKey = core.ffi.poly_buffer_get_key(this._ctx, buffer)
-          if (bufferKey) {
-            const key = normalizeBufferKey(bufferKey)
-            hostBuffers.set(key, flat)
-            if (core.registerHostBuffer) core.registerHostBuffer(key, flat)
+        if (!scalarData) {
+          this._dtype = dt
+          this._data = flat
+          const dtypeId = DTYPE_ID[dt]
+          if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dt}`)
+          // Preserve one-dimensional zero shapes. Without the explicit [0],
+          // poly_buffer_from_host cannot distinguish an empty vector from an
+          // unspecified/scalar host buffer and applies its scalar numel fallback.
+          const dims = shape.length ? shape : null
+          if (dt !== 'bfloat16' && ffi.poly_tensor_from_host_by_id) {
+            this._tensor = ffi.poly_tensor_from_host_by_id(
+              this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
+            )
+            if (!this._tensor) throw new Error('poly_tensor_from_host_by_id failed')
+            const physical = tensorUopPhysical(this._tensor)
+            if (!physical) throw new Error('host Tensor source has no physical root')
+            currentUop = new UOp(this._ctx, core.ffi, physical)
+            importedTensorFromHost = true
+          } else {
+            currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
+          }
+          const buffer = currentUop.buffer ? currentUop.buffer.raw : null
+          const needsFrontendHostOwner =
+            Boolean(buffer && core.ffi.poly_buffer_get_key) &&
+            (!core.caps || core.caps.core !== 'wasm' || core.caps.device === 'webgpu')
+          if (needsFrontendHostOwner && buffer && core.ffi.poly_buffer_get_key) {
+            const bufferKey = core.ffi.poly_buffer_get_key(this._ctx, buffer)
+            if (bufferKey) {
+              const key = normalizeBufferKey(bufferKey)
+              hostBuffers.set(key, flat)
+              if (core.registerHostBuffer) core.registerHostBuffer(key, flat)
+            }
           }
         }
       }
@@ -1195,7 +1224,6 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       let uop = this._graphUopRaw()
       let curShape = [...this.shape]
-      if (!curShape.length && this._graphBufferRaw() === null) return uop
       const targetNd = targetShape.length
       if (curShape.length < targetNd) {
         curShape = new Array(targetNd - curShape.length).fill(1).concat(curShape)

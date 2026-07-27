@@ -588,67 +588,96 @@ class Tensor:
             current_uop = UOp(self._ctx, raw)
         else:
             # User construction from data
-            imported_from_host = True
-            python_scalar = isinstance(data, (int, float))
-            _ensure_frontend_buffer_release_registered(self._ctx)
+            python_scalar = isinstance(data, (bool, int, float))
             if python_scalar:
-                data = [data]
-            if dtype is None and isinstance(data, np.ndarray):
-                dt = _dtype_name(data.dtype, default='float32')
-            else:
-                dt = _dtype_name(dtype, default='float32')
-            import_dt = dt
-            post_cast_dt = None
-            np_dt = _to_np_dtype(dt)
-            if dt == 'bfloat16':
-                import_dt = 'float32'
-                post_cast_dt = dt
-                np_dt = np.float32
-            arr = np.ascontiguousarray(data, dtype=np_dt)
-            self._data = arr.ravel()
-            self._dtype_str = dt
-            # UOp.from_host creates the BUFFER UOp, registers a PolyBuffer
-            # wrapping the NumPy host bytes in ctx->buffers, and wraps in
-            # RESHAPE when ndim>1.
-            # The frontend keeps a second strong owner entry keyed by the
-            # C-side PolyBuffer* address value, not by the BUFFER UOp.
-            dtype_id = _dtype_id(import_dt)
-            if len(arr.shape) > 0:
-                dims, ndim = _int64_array(arr.shape)
-            else:
-                dims, ndim = None, 0
-            if not python_scalar and arr.ndim > 0 and post_cast_dt is None:
-                # Pinned UOp._frompy builds a deviceful PYTHON source before
-                # Tensor.__init__ adds COPY to the requested device. Keep the
-                # byte owner on that exact C-owned physical source.
-                self._tensor = _ffi._lib.poly_tensor_from_host_by_id(
-                    self._ctx, self._data.ctypes.data, self._data.nbytes,
-                    dtype_id, dims, ndim,
+                default_dt = (
+                    'bool' if isinstance(data, bool)
+                    else 'int32' if isinstance(data, int)
+                    else 'float32'
                 )
+                dt = _dtype_name(dtype, default=default_dt)
+                scalar_dt = to_dtype(dt)
+                normalized = scalar_dt.const(data)
+                dtype_id = _dtype_id(dt)
+                target_device_id = _device_id(self._device)
+                if dtypes.is_bool(scalar_dt) or dtypes.is_int(scalar_dt):
+                    value = int(bool(normalized)) if dtypes.is_bool(scalar_dt) else int(normalized)
+                    if value < I64_MIN or value > I64_MAX:
+                        raise ValueError(f'scalar {value} is out of int64 range')
+                    self._tensor = _ffi._lib.poly_tensor_const_int_by_id(
+                        self._ctx, value, dtype_id, target_device_id
+                    )
+                else:
+                    self._tensor = _ffi._lib.poly_tensor_const_float_by_id(
+                        self._ctx, float(normalized), dtype_id, target_device_id
+                    )
                 if not self._tensor:
-                    raise RuntimeError('poly_tensor_from_host_by_id failed')
+                    raise RuntimeError('C-owned scalar Tensor construction failed')
                 current_raw = self._core_uop_physical_raw(self._tensor)
                 if not current_raw:
-                    raise RuntimeError('host Tensor source has no physical root')
+                    raise RuntimeError('scalar Tensor has no physical root')
                 current_uop = UOp(self._ctx, current_raw)
-                imported_tensor_from_host = True
+                self._data = None
+                self._dtype_str = dt
             else:
-                imported = UOp.from_host(
-                    self._ctx, self._data.ctypes.data, self._data.nbytes,
-                    dtype_id, dims, ndim,
-                )
-                current_uop = imported
-                if post_cast_dt is not None:
-                    cast_uop = _ffi._lib.poly_cast_by_id(
-                        self._ctx, imported.raw, _dtype_id(post_cast_dt)
+                imported_from_host = True
+                _ensure_frontend_buffer_release_registered(self._ctx)
+                if dtype is None and isinstance(data, np.ndarray):
+                    dt = _dtype_name(data.dtype, default='float32')
+                else:
+                    dt = _dtype_name(dtype, default='float32')
+                import_dt = dt
+                post_cast_dt = None
+                np_dt = _to_np_dtype(dt)
+                if dt == 'bfloat16':
+                    import_dt = 'float32'
+                    post_cast_dt = dt
+                    np_dt = np.float32
+                arr = np.ascontiguousarray(data, dtype=np_dt)
+                self._data = arr.ravel()
+                self._dtype_str = dt
+                # UOp.from_host creates the BUFFER UOp, registers a PolyBuffer
+                # wrapping the NumPy host bytes in ctx->buffers, and wraps in
+                # RESHAPE when ndim>1.
+                # The frontend keeps a second strong owner entry keyed by the
+                # C-side PolyBuffer* address value, not by the BUFFER UOp.
+                dtype_id = _dtype_id(import_dt)
+                if len(arr.shape) > 0:
+                    dims, ndim = _int64_array(arr.shape)
+                else:
+                    dims, ndim = None, 0
+                if arr.ndim > 0 and post_cast_dt is None:
+                    # Pinned UOp._frompy builds a deviceful PYTHON source before
+                    # Tensor.__init__ adds COPY to the requested device. Keep the
+                    # byte owner on that exact C-owned physical source.
+                    self._tensor = _ffi._lib.poly_tensor_from_host_by_id(
+                        self._ctx, self._data.ctypes.data, self._data.nbytes,
+                        dtype_id, dims, ndim,
                     )
-                    if not cast_uop:
-                        raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
-                    current_uop = UOp(self._ctx, cast_uop)
-            key_uop = current_uop.buffer or current_uop
-            key = _buffer_key(self._ctx, key_uop)
-            if key:
-                _host_buffers[key] = self._data
+                    if not self._tensor:
+                        raise RuntimeError('poly_tensor_from_host_by_id failed')
+                    current_raw = self._core_uop_physical_raw(self._tensor)
+                    if not current_raw:
+                        raise RuntimeError('host Tensor source has no physical root')
+                    current_uop = UOp(self._ctx, current_raw)
+                    imported_tensor_from_host = True
+                else:
+                    imported = UOp.from_host(
+                        self._ctx, self._data.ctypes.data, self._data.nbytes,
+                        dtype_id, dims, ndim,
+                    )
+                    current_uop = imported
+                    if post_cast_dt is not None:
+                        cast_uop = _ffi._lib.poly_cast_by_id(
+                            self._ctx, imported.raw, _dtype_id(post_cast_dt)
+                        )
+                        if not cast_uop:
+                            raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
+                        current_uop = UOp(self._ctx, cast_uop)
+                key_uop = current_uop.buffer or current_uop
+                key = _buffer_key(self._ctx, key_uop)
+                if key:
+                    _host_buffers[key] = self._data
 
         self._requires_grad = bool(requires_grad)
         if imported_tensor_from_host:
@@ -1604,9 +1633,6 @@ class Tensor:
                 raise ValueError(f"negative dimensions are not allowed: {target_shape}")
             if not (s == ns or s == 1):
                 raise ValueError(f"cannot broadcast {cur_shape} to new_shape={target_shape}")
-        # CONST scalars (from _ensure_tensor) auto-broadcast — no EXPAND needed
-        if not cur_shape and self._graph_uop.buffer is None:
-            return uop
         # Scalar tensor or lower-rank: pad left with 1s
         if len(cur_shape) < target_nd:
             cur_shape = aligned_shape
