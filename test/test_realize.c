@@ -1874,6 +1874,70 @@ TEST(realize, creation_copy_cuda_roundtrip_keeps_exact_call_dependency_topology)
   PASS();
 }
 
+TEST(realize, tensor_alu_preserves_ordered_roundtrip_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical = poly_buffer_f32(ctx, 2);
+  PolyUOp *physical = poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyTensor *x =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *x_cuda = poly_tensor_to_device(ctx, x, POLY_DEVICE_CUDA);
+  PolyTensor *x_cpu = poly_tensor_to_device(ctx, x_cuda, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_ADD, x, x_cpu);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(x_cuda);
+  ASSERT_NOT_NULL(x_cpu);
+  ASSERT_NOT_NULL(out);
+
+  /* Pinned Tensor._apply_uop/Tensor.alu (tensor.py:128-140) consumes ordered
+   * current Tensor.uop operands. The same logical X occurs twice here, but the
+   * executable second operand must remain the exact CUDA->CPU COPY chain. */
+  PolyUOp *out_logical = poly_tensor_uop_logical(out);
+  PolyUOp *out_physical = poly_tensor_uop_physical(out);
+  ASSERT_NOT_NULL(out_logical);
+  ASSERT_NOT_NULL(out_physical);
+  ASSERT_EQ(out_logical->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(out_logical->src[0], logical);
+  ASSERT_PTR_EQ(out_logical->src[1], logical);
+  ASSERT_EQ(out_physical->op, POLY_OP_ADD);
+  ASSERT_PTR_EQ(out_physical->src[0], physical);
+  ASSERT_PTR_EQ(out_physical->src[1], poly_tensor_uop_physical(x_cpu));
+  ASSERT_EQ(out_physical->src[1]->op, POLY_OP_COPY);
+  ASSERT_PTR_EQ(out_physical->src[1]->src[0], poly_tensor_uop_physical(x_cuda));
+  ASSERT_EQ(out_physical->src[1]->src[0]->op, POLY_OP_COPY);
+  ASSERT_PTR_EQ(out_physical->src[1]->src[0]->src[0], physical);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, tensor_alu_rejects_wrong_operation_arity) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical = poly_buffer_f32(ctx, 2);
+  PolyUOp *physical = poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyTensor *x =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(x);
+
+  /* Pinned GroupOp partitions ALU operations by arity
+   * (tinygrad/uop/__init__.py:114-119). UOp.alu can temporarily construct
+   * malformed source counts, but the exact pinned probe shows every such
+   * graph fails during realization. The public C/FFI boundary rejects them
+   * before constructing an invalid UOp. */
+  ASSERT_TRUE(poly_tensor_alu1(ctx, POLY_OP_ADD, x) == NULL);
+  ASSERT_TRUE(poly_tensor_alu2(ctx, POLY_OP_NEG, x, x) == NULL);
+  ASSERT_TRUE(poly_tensor_alu3(ctx, POLY_OP_ADD, x, x, x) == NULL);
+  ASSERT_NOT_NULL(poly_tensor_alu1(ctx, POLY_OP_NEG, x));
+  ASSERT_NOT_NULL(poly_tensor_alu2(ctx, POLY_OP_ADD, x, x));
+  ASSERT_NOT_NULL(poly_tensor_alu3(ctx, POLY_OP_MULACC, x, x, x));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, tensor_value_buffer_identity_is_residency_not_copy) {
   PolyCtx *ctx = poly_ctx_new();
 

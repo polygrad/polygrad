@@ -1055,6 +1055,23 @@ function createBoundTensorClass(runtime) {
       return t
     }
 
+    _makeResultFromCore(coreTensor, inputs, forcedDtype) {
+      if (!coreTensor) throw new Error('core Tensor operation failed')
+      const current = tensorUop(coreTensor)
+      if (!current) throw new Error('core Tensor operation returned no current UOp')
+      const device = this._inferDevice(inputs)
+      const t = new Tensor(null, {
+        _ctx: this._ctx,
+        _tensor: coreTensor,
+        _dtype: dtypeNameForUop(this._ctx, current, forcedDtype || this._dtype),
+        _device: device
+      })
+      for (let i = 0; i < inputs.length; i++) {
+        if (inputs[i]._requiresGrad) { t.requiresGrad = true; break }
+      }
+      return t
+    }
+
     _inferDevice(inputs) {
       const devices = new Set()
       for (const input of inputs) {
@@ -1170,14 +1187,34 @@ function createBoundTensorClass(runtime) {
       return uop
     }
 
+    _broadcastTensor(targetShape) {
+      if (arraysEqual(this.shape, targetShape)) return this
+      if (this.shape.length > targetShape.length) {
+        throw new Error(
+          `cannot broadcast tensor to fewer dimensions. shape=[${this.shape}] ` +
+          `to newShape=[${targetShape}]`
+        )
+      }
+      const aligned = new Array(targetShape.length - this.shape.length)
+        .fill(1).concat(this.shape)
+      for (let i = 0; i < aligned.length; i++) {
+        if (aligned[i] !== targetShape[i] && aligned[i] !== 1) {
+          throw new Error(`cannot broadcast [${this.shape}] to newShape=[${targetShape}]`)
+        }
+      }
+      const reshaped = this.reshape(aligned)
+      const expanded = reshaped.expand(targetShape)
+      return arraysEqual(expanded.shape, reshaped.shape) ? reshaped : expanded
+    }
+
     _binop(other, opName) {
       const { ffi, ops } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const xUop = this._broadcastUop(outShape)
-      const yUop = other._broadcastUop(outShape)
-      const uop = ffi.poly_alu2(this._ctx, ops[opName], xUop, yUop)
-      return this._makeResult(uop, [this, other])
+      const x = this._broadcastTensor(outShape)
+      const y = other._broadcastTensor(outShape)
+      const core = ffi.poly_tensor_alu2(this._ctx, ops[opName], x._tensor, y._tensor)
+      return this._makeResultFromCore(core, [x, y])
     }
 
     // --- Element-wise arithmetic ---
@@ -1191,8 +1228,8 @@ function createBoundTensorClass(runtime) {
 
     neg() {
       const { ffi, ops } = this._rt._core
-      const uop = ffi.poly_alu1(this._ctx, ops.NEG, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.NEG, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     // --- Comparisons (C core) ---
@@ -1251,11 +1288,7 @@ function createBoundTensorClass(runtime) {
     }
 
     maximum(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_maximum(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      return this._binop(other, 'MAX')
     }
 
     minimum(other) {
@@ -1317,32 +1350,32 @@ function createBoundTensorClass(runtime) {
 
     exp2() {
       const { ffi, ops } = this._rt._core
-      const uop = ffi.poly_alu1(this._ctx, ops.EXP2, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.EXP2, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     log2() {
       const { ffi, ops } = this._rt._core
-      const uop = ffi.poly_alu1(this._ctx, ops.LOG2, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.LOG2, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     sqrt() {
       const { ffi, ops } = this._rt._core
-      const uop = ffi.poly_alu1(this._ctx, ops.SQRT, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.SQRT, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     reciprocal() {
       const { ffi, ops } = this._rt._core
-      const uop = ffi.poly_alu1(this._ctx, ops.RECIPROCAL, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.RECIPROCAL, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     trunc() {
       const { ffi, ops } = this._rt._core
-      const uop = ffi.poly_alu1(this._ctx, ops.TRUNC, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.TRUNC, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     exp() {

@@ -1119,6 +1119,42 @@ static napi_value napi_poly_tensor_assign(napi_env env, napi_callback_info info)
   return make_external(env, poly_tensor_assign(ctx, target, value));
 }
 
+static napi_value napi_poly_tensor_alu1(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t op = 0;
+  napi_get_value_int32(env, argv[1], &op);
+  PolyTensor *src = get_external(env, argv[2]);
+  return make_external(env, poly_tensor_alu1(ctx, (PolyOps)op, src));
+}
+
+static napi_value napi_poly_tensor_alu2(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t op = 0;
+  napi_get_value_int32(env, argv[1], &op);
+  PolyTensor *a = get_external(env, argv[2]);
+  PolyTensor *b = get_external(env, argv[3]);
+  return make_external(env, poly_tensor_alu2(ctx, (PolyOps)op, a, b));
+}
+
+static napi_value napi_poly_tensor_alu3(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t op = 0;
+  napi_get_value_int32(env, argv[1], &op);
+  PolyTensor *a = get_external(env, argv[2]);
+  PolyTensor *b = get_external(env, argv[3]);
+  PolyTensor *c = get_external(env, argv[4]);
+  return make_external(env, poly_tensor_alu3(ctx, (PolyOps)op, a, b, c));
+}
+
 static napi_value napi_poly_tensor_clone_into(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -3899,6 +3935,9 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_update", napi_poly_tensor_update),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),
       DECLARE_NAPI_METHOD("poly_tensor_assign", napi_poly_tensor_assign),
+      DECLARE_NAPI_METHOD("poly_tensor_alu1", napi_poly_tensor_alu1),
+      DECLARE_NAPI_METHOD("poly_tensor_alu2", napi_poly_tensor_alu2),
+      DECLARE_NAPI_METHOD("poly_tensor_alu3", napi_poly_tensor_alu3),
       DECLARE_NAPI_METHOD("poly_tensor_clone_into", napi_poly_tensor_clone_into),
       DECLARE_NAPI_METHOD("poly_tensor_uop", napi_poly_tensor_uop),
       DECLARE_NAPI_METHOD("poly_tensor_uop_logical", napi_poly_tensor_uop_logical),

@@ -2441,14 +2441,15 @@ async function runTensorTests(pg) {
 
   await test('nested to keeps realized current and export logical separate', async () => {
     const x = await new Tensor([1]).add(1).realize()
-    const xCuda = x.to('cuda')
+    const xBase = x.to('cpu')
+    const xCuda = xBase.to('cuda')
     const xCpu = xCuda.to('cpu')
 
     // Pinned Tensor.to (tensor.py:327-335) keeps both device moves as exact
     // current COPY occurrences. Polygrad additionally preserves the approved
     // portable logical twin.
     assert(xCuda.uop.op === pg._core.ops.COPY, 'CUDA move should be an eager COPY')
-    assert(xCuda.uop.src[0].key === x.uop.key, 'CUDA COPY should use the realized buffer')
+    assert(xCuda.uop.src[0].key === xBase.uop.key, 'CUDA COPY should use the CPU occurrence')
     assert(xCpu.uop.op === pg._core.ops.COPY, 'CPU roundtrip should be an eager COPY')
     assert(xCpu.uop.src[0].key === xCuda.uop.key, 'CPU COPY should use the CUDA occurrence')
     assert(xCpu.uop.key !== x.uop.key, 'roundtrip COPY should stay occurrence-distinct')
@@ -2458,6 +2459,20 @@ async function runTensorTests(pg) {
     const y = xCpu.add(1)
     assert(y.device === 'CPU', 'downstream value should keep selected CPU placement')
     assert(y.uop.key !== xCpu.uop.key, 'downstream value should build a new current graph')
+
+    // Pinned Tensor.alu consumes ordered current roots (tensor.py:128-140).
+    // Sharing one portable logical X must not collapse the second occurrence.
+    const mixed = xBase.add(xCpu)
+    assert(mixed.uop.op === pg._core.ops.ADD, 'mixed result should be ADD')
+    assert(mixed.uop.src[0].key === xBase.uop.key, 'first ADD input should be CPU occurrence')
+    assert(mixed.uop.src[1].key === xCpu.uop.key, 'second ADD input should be CPU COPY')
+    assert(mixed.uop.src[1].src[0].key === xCuda.uop.key, 'CPU COPY should contain CUDA COPY')
+    assert(
+      mixed.uop.src[1].src[0].src[0].key === xBase.uop.key,
+      'CUDA COPY should contain CPU occurrence'
+    )
+    assert(mixed.uopLogical.src[0].key === x.uopLogical.key, 'logical lhs should be X')
+    assert(mixed.uopLogical.src[1].key === x.uopLogical.key, 'logical rhs should be X')
   })
 
   await test('repeated fused chain produces identical results', async () => {

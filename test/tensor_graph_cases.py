@@ -202,6 +202,13 @@ def case_rebuilt_after_realize():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_roundtrip_occurrence():
+    x = realized_empty(2)
+    moved = x.to("CUDA").to("CPU")
+    out = x + moved
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 CASES = {
     "basic_alu": ("tensor", case_basic_alu),
     "expand": ("tensor", case_expand),
@@ -211,6 +218,7 @@ CASES = {
     "permute": ("tensor", case_permute),
     "rebuilt_after_realize": ("realize", case_rebuilt_after_realize),
     "reshape": ("tensor", case_reshape),
+    "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
     "shrink": ("tensor", case_shrink),
 }
 

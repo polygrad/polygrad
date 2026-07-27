@@ -802,6 +802,12 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_to_device(ctx, tensor, device),
     poly_tensor_assign: (ctx, target, value) =>
       Module._poly_tensor_assign(ctx, target, value),
+    poly_tensor_alu1: (ctx, op, src) =>
+      Module._poly_tensor_alu1(ctx, op, src),
+    poly_tensor_alu2: (ctx, op, a, b) =>
+      Module._poly_tensor_alu2(ctx, op, a, b),
+    poly_tensor_alu3: (ctx, op, a, b, c) =>
+      Module._poly_tensor_alu3(ctx, op, a, b, c),
     poly_tensor_clone_into: (ctx, target, source) =>
       Module._poly_tensor_clone_into(ctx, target, source),
     poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
@@ -1248,7 +1254,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 21
+  const EXPECTED_ABI = 22
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

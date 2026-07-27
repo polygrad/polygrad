@@ -864,7 +864,10 @@ class TestJit:
 
         y1 = f(Tensor.empty(n.bind(4)))
         assert f.captured
-        assert f.schedule_count == 1
+        # Pinned TinyJit captures two linears for this exact expression:
+        # the explicit realize and its returned symbolic SHRINK view
+        # (engine/jit.py:267-293; temp/path_b_probe/tinygrad_symbolic_realize.json).
+        assert f.schedule_count == 2
         assert not isinstance(y1.shape[0], int)
 
         y2 = f(Tensor.empty(n.bind(6)))
@@ -2673,3 +2676,16 @@ class TestMaterializationParity:
         y = x_cpu + 1
         assert y.device == 'CPU'
         assert y.uop != x_cpu.uop
+
+        # Pinned Tensor.alu consumes ordered current roots (tensor.py:128-140).
+        # Both operands share the same portable logical X, but the second
+        # physical occurrence must remain the exact CUDA->CPU COPY chain.
+        mixed = x + x_cpu
+        assert mixed.uop.op_name == 'ADD'
+        assert mixed.uop.src[0].raw == x.uop.raw
+        assert mixed.uop.src[1].raw == x_cpu.uop.raw
+        assert mixed.uop.src[1].src[0].raw == x_cuda.uop.raw
+        assert mixed.uop.src[1].src[0].src[0].raw == x.uop.raw
+        assert mixed.uop_logical.op_name == 'ADD'
+        assert mixed.uop_logical.src[0].raw == x.uop_logical.raw
+        assert mixed.uop_logical.src[1].raw == x.uop_logical.raw

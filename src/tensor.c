@@ -722,6 +722,84 @@ int poly_tensor_update(
   return 0;
 }
 
+/* Pinned tinygrad Tensor._apply_uop/Tensor.alu builds an operation directly
+ * from the ordered current Tensor.uop operands (tensor.py:128-140). Keep the
+ * active Path A logical twin independent, but never derive the executable
+ * result by substituting logical pointers: two ordered occurrences may share
+ * one logical UOp and still have different current physical roots. */
+static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int n) {
+  if (!ctx || !inputs || n < 1 || n > 3) return NULL;
+  PolyOpSet expected_group = n == 1   ? POLY_GROUP_UNARY
+                             : n == 2 ? POLY_GROUP_BINARY
+                                      : POLY_GROUP_TERNARY;
+  if (!poly_opset_has(expected_group, op)) return NULL;
+  PolyUOp *logical_src[3] = {0};
+  PolyUOp *physical_src[3] = {0};
+  PolyDevice device = POLY_DEVICE_AUTO;
+  bool requires_grad = false;
+  bool requires_grad_set = false;
+  for (int i = 0; i < n; i++) {
+    PolyTensor *input = inputs[i];
+    if (!input || !input->uop_logical) return NULL;
+    logical_src[i] = input->uop_logical;
+    physical_src[i] = tensor_current_uop(input);
+    if (!physical_src[i]) return NULL;
+    if (input->device != POLY_DEVICE_AUTO) {
+      if (device != POLY_DEVICE_AUTO && input->device != device) return NULL;
+      device = input->device;
+    }
+    requires_grad |= input->requires_grad;
+    requires_grad_set |= input->requires_grad_set;
+  }
+
+  PolyUOp *logical = NULL;
+  PolyUOp *physical = NULL;
+  switch (n) {
+  case 1:
+    logical = poly_alu1(ctx, op, logical_src[0]);
+    physical = poly_alu1(ctx, op, physical_src[0]);
+    break;
+  case 2:
+    logical = poly_alu2(ctx, op, logical_src[0], logical_src[1]);
+    physical = poly_alu2(ctx, op, physical_src[0], physical_src[1]);
+    break;
+  case 3:
+    logical = poly_alu3(ctx, op, logical_src[0], logical_src[1], logical_src[2]);
+    physical = poly_alu3(ctx, op, physical_src[0], physical_src[1], physical_src[2]);
+    break;
+  }
+  if (!logical || !physical) return NULL;
+
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  if (!out) return NULL;
+  out->requires_grad = requires_grad;
+  out->requires_grad_set = requires_grad_set;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
+PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src) {
+  PolyTensor *inputs[1] = {src};
+  return tensor_alu(ctx, op, inputs, 1);
+}
+
+PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b) {
+  PolyTensor *inputs[2] = {a, b};
+  return tensor_alu(ctx, op, inputs, 2);
+}
+
+PolyTensor *poly_tensor_alu3(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyTensor *a,
+    PolyTensor *b,
+    PolyTensor *c
+) {
+  PolyTensor *inputs[3] = {a, b, c};
+  return tensor_alu(ctx, op, inputs, 3);
+}
+
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device) {
   if (!ctx || !tensor || !tensor->uop_logical) return NULL;
   if (tensor->device == device) return tensor;

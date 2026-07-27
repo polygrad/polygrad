@@ -632,6 +632,9 @@ int poly_tensor_update(
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
 PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source);
+PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
+PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
 PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);

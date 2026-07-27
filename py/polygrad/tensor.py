@@ -1463,6 +1463,28 @@ class Tensor:
         all_tensors[weakref.ref(ret)] = None
         return ret
 
+    def _make_result_from_core(self, core_tensor, shape, inputs):
+        if not core_tensor:
+            raise RuntimeError('core Tensor operation failed')
+        current = self._core_uop_raw(core_tensor)
+        if not current:
+            raise RuntimeError('core Tensor operation returned no current UOp')
+        dev = self._infer_device(inputs)
+        ret = Tensor.__new__(Tensor)
+        ret._ctx = self._ctx
+        ret._device = dev
+        ret._tensor = core_tensor
+        ret._shape_override = tuple(shape) if shape is not None else None
+        ret._data = None
+        ret._dtype_str = _uop_dtype_name(self._ctx, current, self._dtype_str)
+        ret._requires_grad = any(t._requires_grad for t in inputs)
+        ret._grad = None
+        ret._is_param = True
+        if ret._requires_grad:
+            ret._sync_core_requires_grad(force=True)
+        all_tensors[weakref.ref(ret)] = None
+        return ret
+
     def _infer_device(self, inputs):
         from .device import Device
 
@@ -1575,24 +1597,47 @@ class Tensor:
                 raise RuntimeError('poly_expand failed')
         return uop
 
+    def _broadcast_to_tensor(self, target_shape):
+        """Return the ordered Tensor occurrence used by an elementwise ALU.
+
+        Pinned tinygrad's _broadcasted/_broadcast_to first constructs movement
+        Tensor occurrences, then Tensor.alu consumes their current UOps
+        (mixin/__init__.py:439-449, mixin/movement.py:116-128).
+        """
+        target_shape = tuple(target_shape)
+        if self.shape == target_shape:
+            return self
+        if self.ndim > len(target_shape):
+            raise ValueError(
+                f"cannot broadcast tensor to fewer dimensions. shape={self.shape} "
+                f"to new_shape={target_shape}"
+            )
+        aligned_shape = (1,) * (len(target_shape) - self.ndim) + tuple(self.shape)
+        if not all(s == ns or s == 1 for s, ns in zip(aligned_shape, target_shape)):
+            raise ValueError(f"cannot broadcast {self.shape} to new_shape={target_shape}")
+        reshaped = self.reshape(aligned_shape)
+        expanded = reshaped.expand(target_shape)
+        return reshaped if expanded.shape == reshaped.shape else expanded
+
     # --- Element-wise arithmetic ---
 
     def _broadcasted(self, other, reverse=False):
         other = self._ensure_tensor(other)
         x, y = (self, other) if not reverse else (other, self)
         out_shape = x._broadcast_shape(y.shape)
+        x, y = x._broadcast_to_tensor(out_shape), y._broadcast_to_tensor(out_shape)
         if x.dtype != y.dtype:
             out_dtype = least_upper_dtype(to_dtype(x.dtype), to_dtype(y.dtype))
             x, y = x.cast(out_dtype), y.cast(out_dtype)
         return x, y, out_shape
 
     def _binop(self, other, op_name, reverse=False):
-        """Binary op with explicit EXPAND broadcasting and dtype promotion."""
+        """Build a binary Tensor ALU from ordered current operand occurrences."""
         x, y, out_shape = self._broadcasted(other, reverse)
-        x_uop = x._broadcast_uop(out_shape)
-        y_uop = y._broadcast_uop(out_shape)
-        uop = _ffi._lib.poly_alu2(self._ctx, _ffi.OPS[op_name], x_uop, y_uop)
-        return self._make_result(uop, out_shape, [x, y])
+        core = _ffi._lib.poly_tensor_alu2(
+            self._ctx, _ffi.OPS[op_name], x._tensor, y._tensor
+        )
+        return self._make_result_from_core(core, out_shape, [x, y])
 
     def bitwise_and(self, other, reverse=False):
         if not (dtypes.is_int(to_dtype(self.dtype)) or dtypes.is_bool(to_dtype(self.dtype))):
@@ -1691,8 +1736,10 @@ class Tensor:
     def __neg__(self):
         if dtypes.is_bool(to_dtype(self.dtype)):
             return self.logical_not()
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['NEG'], self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_alu1(
+            self._ctx, _ffi.OPS['NEG'], self._tensor
+        )
+        return self._make_result_from_core(core, self.shape, [self])
 
     def logical_not(self):
         return self.cast('bool') != True
@@ -1707,10 +1754,10 @@ class Tensor:
         if (not dtypes.is_float(base.dtype) and
                 not isinstance(other, Tensor) and not (isinstance(other, int) and other >= 0)):
             raise RuntimeError("base needs to be float")
-        uop = _ffi._lib.poly_alu2(self._ctx, _ffi.OPS['POW'],
-                                  base._broadcast_uop(out_shape),
-                                  exponent._broadcast_uop(out_shape))
-        ret = self._make_result(uop, out_shape, [base, exponent])
+        core = _ffi._lib.poly_tensor_alu2(
+            self._ctx, _ffi.OPS['POW'], base._tensor, exponent._tensor
+        )
+        ret = self._make_result_from_core(core, out_shape, [base, exponent])
         if not reverse and not dtypes.is_float(self.dtype) and dtypes.is_float(exponent.dtype):
             return ret.round().cast(self.dtype)
         return ret
@@ -1779,11 +1826,7 @@ class Tensor:
         return self._make_result(uop, out_shape, [self, x, y])
 
     def maximum(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_maximum(self._ctx, self._broadcast_uop(out_shape),
-                                      other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        return self._binop(other, 'MAX')
 
     def minimum(self, other):
         other = self._ensure_tensor(other)
@@ -1803,25 +1846,35 @@ class Tensor:
     # --- Unary math (C core composed ops) ---
 
     def exp2(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['EXP2'], self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_alu1(
+            self._ctx, _ffi.OPS['EXP2'], self._tensor
+        )
+        return self._make_result_from_core(core, self.shape, [self])
 
     def log2(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['LOG2'], self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_alu1(
+            self._ctx, _ffi.OPS['LOG2'], self._tensor
+        )
+        return self._make_result_from_core(core, self.shape, [self])
 
     def sqrt(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['SQRT'], self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_alu1(
+            self._ctx, _ffi.OPS['SQRT'], self._tensor
+        )
+        return self._make_result_from_core(core, self.shape, [self])
 
     def reciprocal(self):
         base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
-        uop = _ffi._lib.poly_alu1(base._ctx, _ffi.OPS['RECIPROCAL'], base._graph_uop)
-        return base._make_result(uop, base.shape, [base])
+        core = _ffi._lib.poly_tensor_alu1(
+            base._ctx, _ffi.OPS['RECIPROCAL'], base._tensor
+        )
+        return base._make_result_from_core(core, base.shape, [base])
 
     def trunc(self):
-        uop = _ffi._lib.poly_alu1(self._ctx, _ffi.OPS['TRUNC'], self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_alu1(
+            self._ctx, _ffi.OPS['TRUNC'], self._tensor
+        )
+        return self._make_result_from_core(core, self.shape, [self])
 
     def exp(self):
         uop = _ffi._lib.poly_exp(self._ctx, self._graph_uop)
