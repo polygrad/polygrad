@@ -1993,14 +1993,14 @@ static int run_instance_sink(
   }
   if (prepare_instance_io(inst, entry, io, n_io) != 0) return -1;
   double t_attach = timing ? poly_now_ms() : 0.0;
-  /* Instance entrypoints and train/value-grad combined graphs are already
-   * effect sinks. They must skip tensor callify and enter the schedule runner
-   * directly, matching tinygrad's separation between tensor realization and
-   * schedule execution. */
+  /* Instance entrypoints and train/value-grad combined graphs already own
+   * their output/effect storage. Skip tensor output allocation, but retain the
+   * shared tinygrad-style concrete-buffer -> shaped-PARAM call boundary before
+   * rangeify. */
   PolySchedule *sched = cached_schedule ? *cached_schedule : NULL;
   bool schedule_owned = false;
   if (!sched) {
-    sched = poly_complete_create_schedule_with_vars(inst->ctx, sink, POLY_MODE_CALL);
+    sched = poly_schedule_effect_sink(inst->ctx, sink);
     if (cached_schedule) {
       *cached_schedule = sched;
     } else {
@@ -2420,10 +2420,25 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     }
   }
 
-  /* Build optimizer update graph for each trainable parameter. */
-  int si = 1; /* sink_srcs index (0 = loss_store) */
-  PolyUOp *bc1_new = NULL;
-  PolyUOp *bc2_new = NULL;
+  /* Build optimizer update graph for each trainable parameter. Keep the loss
+   * output first, then tinygrad's optimizer order: state effects, parameters. */
+  int m_base = -1;
+  int v_base = -1;
+  int param_base = 1;
+  if (is_adam) {
+    m_base = 3;
+    v_base = 3 + np;
+    param_base = 3 + 2 * np;
+  } else if (sgd_momentum) {
+    m_base = 1;
+    param_base = 1 + np;
+  }
+  PolyUOp *lr = poly_const_float(ctx, (double)o->lr);
+  if (!lr) {
+    free(sink_srcs);
+    train_free(ts, np);
+    return -1;
+  }
 
   for (int i = 0; i < np; i++) {
     int buf_idx = inst->trainable_param_indices[i];
@@ -2451,7 +2466,6 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
 
     PolyOptimConfig cfg = {
         .kind = o->kind,
-        .lr = o->lr,
         .beta1 = o->beta1,
         .beta2 = o->beta2,
         .eps = o->eps,
@@ -2464,34 +2478,37 @@ static int ensure_train_graph(PolyInstance *inst, int loss_ep_idx) {
     PolyUOp *m_buf = has_m_bufs ? ts->m_bufs[i] : NULL;
     PolyUOp *v_buf = is_adam ? ts->v_bufs[i] : NULL;
     if (poly_optim_build_update(
-            ctx, &cfg, param_buf, grad, m_buf, v_buf, ts->bc1_buf, ts->bc2_buf, pb_opt->numel, &upd
+            ctx, &cfg, lr, param_buf, grad, m_buf, v_buf, ts->bc1_buf, ts->bc2_buf, pb_opt->numel,
+            &upd
         ) != 0) {
       fprintf(stderr, "ensure_train_graph: unsupported optimizer %d\n", o->kind);
       free(sink_srcs);
       train_free(ts, np);
       return -1;
     }
-    sink_srcs[si++] = poly_store_buffer_update(ctx, param_buf, upd.param_new);
+    sink_srcs[param_base + i] = poly_store_buffer_update(ctx, param_buf, upd.param_new);
     if (sgd_momentum) {
-      sink_srcs[si++] = poly_store_buffer_update(ctx, m_buf, upd.m_new);
+      sink_srcs[m_base + i] = upd.m_new;
     } else if (is_adam) {
-      if (!bc1_new) bc1_new = upd.bc1_new;
-      if (!bc2_new) bc2_new = upd.bc2_new;
-      sink_srcs[si++] = poly_store_buffer_update(ctx, m_buf, upd.m_new);
-      sink_srcs[si++] = poly_store_buffer_update(ctx, v_buf, upd.v_new);
+      if (i == 0) {
+        sink_srcs[1] = upd.bc1_new;
+        sink_srcs[2] = upd.bc2_new;
+      } else if (sink_srcs[1] != upd.bc1_new || sink_srcs[2] != upd.bc2_new) {
+        free(sink_srcs);
+        train_free(ts, np);
+        return -1;
+      }
+      sink_srcs[m_base + i] = upd.m_new;
+      sink_srcs[v_base + i] = upd.v_new;
     }
   }
 
-  if (is_adam) {
-    sink_srcs[si++] = poly_store_buffer_update(ctx, ts->bc1_buf, bc1_new);
-    sink_srcs[si++] = poly_store_buffer_update(ctx, ts->bc2_buf, bc2_new);
-  }
-
-  if (si != n_sink_srcs) {
-    free(sink_srcs);
-    train_free(ts, np);
-    return -1;
-  }
+  for (int i = 0; i < n_sink_srcs; i++)
+    if (!sink_srcs[i]) {
+      free(sink_srcs);
+      train_free(ts, np);
+      return -1;
+    }
 
   ts->combined_sink = poly_sink_n(ctx, sink_srcs, n_sink_srcs);
   free(sink_srcs);

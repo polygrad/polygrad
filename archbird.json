@@ -1,0 +1,656 @@
+{
+  "schema_version": 2,
+  "project": "polygrad",
+  "description": "C11 tensor compiler/runtime with Python, JavaScript, browser/WASM, and R surfaces.",
+  "exclude": [
+    "references/**",
+    "temp/**",
+    "backups/**",
+    "**/csrc/**",
+    "js/wasm/**"
+  ],
+  "layers": [
+    {
+      "name": "core",
+      "role": "core",
+      "language": "c",
+      "globs": ["src/**/*.c", "src/**/*.h"],
+      "public_headers": ["src/polygrad.h", "src/frontend.h"]
+    },
+    {
+      "name": "python",
+      "role": "frontend",
+      "language": "python",
+      "globs": ["py/polygrad/**/*.py"],
+      "import_roots": ["py"]
+    },
+    {
+      "name": "python_examples",
+      "role": "examples",
+      "language": "python",
+      "globs": ["py/examples/**/*.py", "py/extra/**/*.py"],
+      "import_roots": ["py"],
+      "required": false
+    },
+    {
+      "name": "javascript",
+      "role": "frontend",
+      "language": "javascript",
+      "globs": ["js/src/**/*.js", "js/src/**/*.mjs"]
+    },
+    {
+      "name": "r",
+      "role": "frontend",
+      "language": "r",
+      "globs": ["r/R/**/*.R"]
+    },
+    {
+      "name": "native_bridges",
+      "role": "bridge",
+      "language": "c",
+      "globs": ["js/napi_api.c", "r/src/polygrad_wrapper.c"]
+    },
+    {
+      "name": "native_examples",
+      "role": "examples",
+      "language": "c",
+      "globs": ["examples/**/*.c"],
+      "required": false
+    },
+    {
+      "name": "benchmark_c",
+      "role": "benchmarks",
+      "language": "c",
+      "globs": ["bench/**/*.c"],
+      "required": false
+    },
+    {
+      "name": "benchmark_python",
+      "role": "benchmarks",
+      "language": "python",
+      "globs": ["bench/**/*.py"],
+      "import_roots": [".", "py"],
+      "required": false
+    },
+    {
+      "name": "benchmark_javascript",
+      "role": "benchmarks",
+      "language": "javascript",
+      "globs": ["bench/**/*.js", "bench/**/*.mjs"],
+      "required": false
+    },
+    {
+      "name": "test_c",
+      "role": "tests",
+      "language": "c",
+      "globs": ["test/**/*.c"],
+      "required": false
+    },
+    {
+      "name": "test_python",
+      "role": "tests",
+      "language": "python",
+      "globs": ["py/tests/**/*.py", "test/**/*.py"],
+      "import_roots": [".", "py"],
+      "required": false
+    },
+    {
+      "name": "test_javascript",
+      "role": "tests",
+      "language": "javascript",
+      "globs": ["js/test/**/*.js", "js/test/**/*.mjs", "test/**/*.js", "test/**/*.mjs"],
+      "required": false
+    },
+    {
+      "name": "test_r",
+      "role": "tests",
+      "language": "r",
+      "globs": ["r/tests/**/*.R"],
+      "required": false
+    },
+    {
+      "name": "javascript_tools",
+      "role": "tools",
+      "language": "javascript",
+      "globs": ["js/scripts/**/*.js", "js/scripts/**/*.mjs"],
+      "required": false
+    }
+  ],
+  "packages": [
+    {
+      "name": "python",
+      "kind": "python",
+      "path": "py/pyproject.toml",
+      "layer": "python",
+      "entries": ["py/polygrad/__init__.py"]
+    },
+    {
+      "name": "npm",
+      "kind": "npm",
+      "path": "js/package.json",
+      "layer": "javascript",
+      "entries": ["js/src/index.js", "js/src/browser.js"]
+    },
+    {
+      "name": "r",
+      "kind": "r",
+      "path": "r/NAMESPACE",
+      "layer": "r",
+      "entries": ["r/R/polygrad.R"]
+    }
+  ],
+  "builds": [
+    {"name": "make", "kind": "make", "path": "Makefile"},
+    {"name": "npm", "kind": "npm", "path": "js/package.json"}
+  ],
+  "artifacts": [
+    {
+      "name": "browser-bundle-sync-iife",
+      "output": "js/dist/polygrad.sync.js",
+      "inputs": [
+        "js/src/browser.sync.js",
+        "js/src/core/wasm_sync.js",
+        "js/scripts/build-browser.sh"
+      ],
+      "loaded_by": [
+        {
+          "paths": ["js/test/browser/index.html", "js/test/browser/qwen_webgpu.js"],
+          "pattern": "/dist/polygrad\\.sync\\.js"
+        }
+      ],
+      "builds": [{"source": "js/package.json", "target": "build:browser"}]
+    },
+    {
+      "name": "browser-bundle-sync-esm",
+      "output": "js/dist/polygrad.sync.mjs",
+      "inputs": [
+        "js/src/browser.sync.js",
+        "js/src/core/wasm_sync.js",
+        "js/scripts/build-browser.sh"
+      ],
+      "loaded_by": [
+        {"paths": ["js/package.json"], "pattern": "dist/polygrad\\.sync\\.mjs"}
+      ],
+      "builds": [{"source": "js/package.json", "target": "build:browser"}]
+    },
+    {
+      "name": "browser-bundle-async-iife",
+      "output": "js/dist/polygrad.async.js",
+      "inputs": [
+        "js/src/browser.async.js",
+        "js/src/core/wasm_async.js",
+        "js/scripts/build-browser.sh"
+      ],
+      "loaded_by": [
+        {"paths": ["js/scripts/prepack.js"], "pattern": "polygrad\\.async\\.js"}
+      ],
+      "builds": [{"source": "js/package.json", "target": "build:browser"}]
+    },
+    {
+      "name": "browser-bundle-async-esm",
+      "output": "js/dist/polygrad.async.mjs",
+      "inputs": [
+        "js/src/browser.async.js",
+        "js/src/core/wasm_async.js",
+        "js/scripts/build-browser.sh"
+      ],
+      "loaded_by": [
+        {"paths": ["js/package.json"], "pattern": "dist/polygrad\\.async\\.mjs"}
+      ],
+      "builds": [{"source": "js/package.json", "target": "build:browser"}]
+    },
+    {
+      "name": "browser-wasm-runtime-sync",
+      "output": "js/wasm/core.sync.js",
+      "inputs": ["js/scripts/wasm-sync-post.js"],
+      "loaded_by": [
+        {"paths": ["js/src/core/wasm_sync.js"], "pattern": "core\\.sync\\.js"}
+      ],
+      "builds": [
+        {"source": "Makefile", "target": "build/core.sync.js"},
+        {"source": "Makefile", "target": "wasm-pkg"}
+      ]
+    },
+    {
+      "name": "browser-wasm-runtime-async",
+      "output": "js/wasm/core.async.js",
+      "loaded_by": [
+        {"paths": ["js/src/core/wasm_async.js"], "pattern": "core\\.async\\.js"}
+      ],
+      "builds": [
+        {"source": "Makefile", "target": "build/core.async.js"},
+        {"source": "Makefile", "target": "wasm-pkg"}
+      ]
+    },
+    {
+      "name": "native-static-library",
+      "output": "build/libpolygrad.a",
+      "builds": [{"source": "Makefile", "target": "build/libpolygrad.a"}]
+    },
+    {
+      "name": "native-shared-library",
+      "output": "build/libpolygrad.so",
+      "loaded_by": [
+        {"paths": ["py/polygrad/_ffi.py"], "pattern": "libpolygrad\\.so"},
+        {"paths": ["bench/bench_tinygrad_parity.py"], "pattern": "libpolygrad\\.so"}
+      ],
+      "builds": [{"source": "Makefile", "target": "build/libpolygrad.so"}]
+    },
+    {
+      "name": "node-native-addon",
+      "output": "js/build/Release/polygrad_napi.node",
+      "inputs": ["js/napi_api.c", "js/binding.gyp"],
+      "loaded_by": [
+        {"paths": ["js/src/core/native.js"], "pattern": "polygrad_napi\\.node"}
+      ],
+      "builds": [
+        {"source": "Makefile", "target": "js/build/Release/polygrad_napi.node"},
+        {"source": "js/package.json", "target": "build:native"}
+      ]
+    },
+    {
+      "name": "native-test-runner",
+      "output": "build/polygrad_test",
+      "builds": [{"source": "Makefile", "target": "build/polygrad_test"}]
+    },
+    {
+      "name": "tinygrad-parity-runner",
+      "output": "build/polygrad_parity_runner",
+      "builds": [
+        {"source": "Makefile", "target": "build/polygrad_parity_runner"}
+      ]
+    },
+    {
+      "name": "benchmark-smoke-runner",
+      "output": "build/bench_smoke",
+      "builds": [{"source": "Makefile", "target": "build/bench_smoke"}]
+    },
+    {
+      "name": "python-distribution-directory",
+      "output": "py/dist",
+      "inputs": ["py/pyproject.toml", "py/polygrad/**/*.py"],
+      "builds": [
+        {"source": "Makefile", "target": "build-py-sdist"},
+        {"source": "Makefile", "target": "build-py-wheel"}
+      ]
+    },
+    {
+      "name": "npm-publish-tree",
+      "output": "js",
+      "inputs": [
+        "js/package.json",
+        "js/src/**/*.js",
+        "js/src/**/*.mjs",
+        "js/scripts/prepack.js"
+      ],
+      "builds": [
+        {"source": "Makefile", "target": "build-js"},
+        {"source": "js/package.json", "target": "prepack"}
+      ]
+    }
+  ],
+  "bridges": [
+    {
+      "name": "python-ctypes",
+      "kind": "abi",
+      "from": "python",
+      "to": "core",
+      "prefixes": ["poly_"]
+    },
+    {
+      "name": "javascript-wasm",
+      "kind": "abi",
+      "from": "javascript",
+      "to": "core",
+      "prefixes": ["poly_"],
+      "ignore": ["poly_uop_key"],
+      "providers": [
+        {
+          "kind": "make_variable",
+          "path": "Makefile",
+          "variable": "WASM_EXPORTS",
+          "pattern": "_?(poly_[A-Za-z0-9_]+)"
+        }
+      ]
+    },
+    {
+      "name": "javascript-napi",
+      "kind": "binding",
+      "from": "javascript",
+      "exclude_from_paths": ["js/src/core/wasm_common.js"],
+      "to": "native_bridges",
+      "prefixes": ["poly_"],
+      "providers": [
+        {"kind": "exports", "path": "js/napi_api.c"}
+      ]
+    },
+    {
+      "name": "r-call",
+      "kind": "abi",
+      "from": "r",
+      "to": "native_bridges",
+      "prefixes": ["C_poly_"],
+      "providers": [
+        {
+          "kind": "file_pattern",
+          "path": "r/src/polygrad_wrapper.c",
+          "pattern": "\\{\"(C_poly_[A-Za-z0-9_]+)\"\\s*,\\s*\\(DL_FUNC\\)"
+        }
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "name": "c",
+      "language": "c",
+      "globs": ["test/test_*.c"],
+      "route_to": ["core", "native_bridges"],
+      "case_extractors": [
+        {"kind": "c_macro", "call": "TEST", "selector_arguments": [0, 1], "separator": "."},
+        {"kind": "c_macro", "call": "TEST_COMMON", "selector_arguments": [0, 1], "separator": "."},
+        {"kind": "named_dispatch", "name": "CASES", "selector_argument": 0}
+      ]
+    },
+    {
+      "name": "python",
+      "language": "python",
+      "globs": ["py/tests/**/*.py", "test/test_*.py"],
+      "route_to": ["python", "python_examples", "core"],
+      "case_routes": [
+        {
+          "selector": "*permute*",
+          "paths": ["py/tests/test_tensor.py", "test/test_tinygrad_parity.py"],
+          "to": ["py/polygrad/tensor.py"]
+        }
+      ],
+      "case_extractors": [
+        {"kind": "named_dispatch", "name": "CASES"}
+      ]
+    },
+    {
+      "name": "javascript",
+      "language": "javascript",
+      "globs": ["js/test/**/*.js", "js/test/**/*.mjs", "test/test_*.js", "test/test_*.mjs"],
+      "route_to": ["javascript", "native_bridges"],
+      "generated_files": [
+        {
+          "globs": ["js/test/browser/tests.js"],
+          "sources": [
+            "js/test/browser/run.js",
+            "js/test/browser/test_browser_entry.js",
+            "js/test/test_instance.js",
+            "js/test/test_tensor.js"
+          ]
+        }
+      ],
+      "case_routes": [
+        {
+          "selector": "permute",
+          "paths": ["js/test/browser/tests.js"],
+          "to": [
+            "js/src/tensor.js",
+            "js/src/runtime.js",
+            "src/placer.c",
+            "src/engine/schedule.c"
+          ]
+        },
+        {"selector": "customKernel executes UOp CALL body", "paths": ["js/test/browser/tests.js"], "to": "src/runtime_webgpu.c"}
+      ]
+    },
+    {
+      "name": "r",
+      "language": "r",
+      "globs": ["r/tests/**/*.R"],
+      "route_to": ["r", "native_bridges"],
+      "required": false
+    }
+  ],
+  "components": [
+    {"name": "ir", "paths": ["src/uop.c", "src/ir.c", "src/pat.c", "src/sym.c"], "description": "UOp IR, patterns, and symbolic algebra"},
+    {"name": "tensor", "paths": ["src/tensor.c", "src/ops.c", "src/shape.c"], "description": "tensor graph construction and shape semantics"},
+    {"name": "autograd", "paths": ["src/autograd.c"], "description": "gradient construction"},
+    {"name": "schedule", "paths": ["src/engine/schedule.c", "src/schedule/**/*.c", "src/placer.c"], "description": "schedule construction, placement, range/index lowering"},
+    {"name": "realize", "paths": ["src/engine/realize.c"], "description": "schedule execution and realization"},
+    {"name": "codegen", "paths": ["src/codegen.c", "src/render_*.c"], "description": "linearization and backend rendering"},
+    {"name": "runtime", "paths": ["src/device.c", "src/runtime_*.c", "src/interp.c"], "description": "device and runtime execution"},
+    {"name": "jit", "paths": ["src/engine/jit.c"], "description": "capture and replay"},
+    {"name": "frontends", "paths": ["py/polygrad/**/*.py", "py/examples/**/*.py", "py/extra/**/*.py", "js/src/**/*.js", "js/src/**/*.mjs", "r/R/**/*.R", "js/napi_api.c", "r/src/polygrad_wrapper.c"], "description": "public language, example/tooling, and browser surfaces"}
+    ,{"name": "benchmarks", "paths": ["bench/**/*.c", "bench/**/*.py", "bench/**/*.js", "bench/**/*.mjs"], "description": "native, Python, Node, browser, parity, and training benchmark drivers"}
+  ],
+  "named_entries": [
+    {
+      "name": "instance-entrypoints",
+      "kind": "call_string_arg",
+      "functions": ["poly_instance_entrypoint", "poly_register_entrypoint"],
+      "argument": 1,
+      "globs": ["src/**/*.c"]
+    }
+  ],
+  "parity": [
+    {
+      "name": "python-js-package-api",
+      "members": [
+        {"label": "python", "source": "package", "package": "python"},
+        {"label": "javascript", "source": "package", "package": "npm"}
+      ],
+      "case": "snake",
+      "enforce": false
+    }
+  ],
+  "projections": {
+    "tinygrad-ops": {
+      "select": "constant_values",
+      "container": "Ops"
+    },
+    "polygrad-ops": {
+      "select": "constant_values",
+      "container": "PolyOps",
+      "strip_prefix": "POLY_OP_"
+    },
+    "polygrad-op-values": {
+      "select": "constant_values",
+      "container": "op_values",
+      "strip_prefix": "POLY_OP_"
+    },
+    "tinygrad-binary": {
+      "select": "constant_memberships",
+      "container": "GroupOp.Binary"
+    },
+    "polygrad-binary": {
+      "select": "macro_members",
+      "call": "SET",
+      "selector": "POLY_GROUP_BINARY",
+      "strip_prefix": "POLY_OP_"
+    },
+    "tinygrad-irreducible": {
+      "select": "constant_memberships",
+      "container": "GroupOp.Irreducible"
+    },
+    "polygrad-irreducible": {
+      "select": "macro_members",
+      "call": "SET",
+      "selector": "POLY_GROUP_IRREDUCIBLE",
+      "strip_prefix": "POLY_OP_"
+    },
+    "tinygrad-movement": {
+      "select": "constant_memberships",
+      "container": "GroupOp.Movement"
+    },
+    "polygrad-movement": {
+      "select": "macro_members",
+      "call": "SET",
+      "selector": "POLY_GROUP_MOVEMENT",
+      "strip_prefix": "POLY_OP_"
+    }
+  },
+  "constraints": {
+    "TG-UOP-SET-001": {
+      "assert": "required_subset",
+      "expected": {
+        "projection": "tinygrad-ops",
+        "map": "tinygrad",
+        "source_lock": {
+          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+        }
+      },
+      "actual": {"projection": "polygrad-ops"},
+      "severity": "error",
+      "owner": "compiler-core",
+      "requirement": "https://github.com/tinygrad/tinygrad/blob/40de90ab19ff623ef6fcb8e375a5e6ee209ad812/tinygrad/uop/__init__.py#L11-L105",
+      "rationale": "The port must implement every pinned reference operation; reviewed subject aliases, sentinels, and private extensions remain valid superset members."
+    },
+    "TG-UOP-VALUE-001": {
+      "assert": "required_values",
+      "expected": {
+        "projection": "tinygrad-ops",
+        "map": "tinygrad",
+        "source_lock": {
+          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+        }
+      },
+      "actual": {"projection": "polygrad-op-values"},
+      "severity": "error",
+      "owner": "compiler-core",
+      "requirement": "polygrad:poly_op_value-contract",
+      "rationale": "Polygrad declares poly_op_value as the reference Ops.value order, so every reference value must match while subject-only values remain valid."
+    },
+    "TG-GROUP-BINARY-001": {
+      "assert": "required_subset",
+      "expected": {
+        "projection": "tinygrad-binary",
+        "map": "tinygrad",
+        "source_lock": {
+          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+        }
+      },
+      "actual": {"projection": "polygrad-binary"},
+      "mapping": {"IDIV": "CDIV", "MOD": "CMOD"},
+      "severity": "error",
+      "owner": "compiler-core",
+      "requirement": "tinygrad:GroupOp.Binary",
+      "rationale": "Binary operation membership must match after the explicitly declared C compatibility aliases are normalized."
+    },
+    "TG-GROUP-IRREDUCIBLE-001": {
+      "assert": "required_subset",
+      "expected": {
+        "projection": "tinygrad-irreducible",
+        "map": "tinygrad",
+        "source_lock": {
+          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+        }
+      },
+      "actual": {"projection": "polygrad-irreducible"},
+      "mapping": {"IDIV": "CDIV", "MOD": "CMOD"},
+      "severity": "error",
+      "owner": "compiler-core",
+      "requirement": "tinygrad:GroupOp.Irreducible",
+      "rationale": "Irreducible operation membership controls graph termination and must be mapped explicitly."
+    },
+    "TG-GROUP-MOVEMENT-001": {
+      "assert": "required_subset",
+      "expected": {
+        "projection": "tinygrad-movement",
+        "map": "tinygrad",
+        "source_lock": {
+          "tinygrad/uop/__init__.py": "6218635e6939c5d40fe33b40de51275447edd7390b9311b1066fc4831758621e"
+        }
+      },
+      "actual": {"projection": "polygrad-movement"},
+      "severity": "error",
+      "owner": "compiler-core",
+      "requirement": "tinygrad:GroupOp.Movement",
+      "rationale": "Movement operation membership must match the pinned reference."
+    },
+    "TG-PERMUTE-ROUTES-001": {
+      "kind": "test_routes",
+      "selectors": ["*permute*"],
+      "min": 4,
+      "required_routes": [
+        "src/shape.c",
+        "src/placer.c",
+        "py/polygrad/tensor.py",
+        "js/src/tensor.js"
+      ],
+      "severity": "error",
+      "owner": "frontends",
+      "requirement": "polygrad:permute-route-floor",
+      "rationale": "Static permute-related tests must remain connected to the C core, Python, JavaScript, and configured browser path; this is a routing floor, not behavioral conformance."
+    },
+    "REQUIRED-MAPPED-PATHS": {
+      "kind": "required_paths",
+      "paths": [
+        "src/uop.c",
+        "src/engine/schedule.c",
+        "src/engine/realize.c",
+        "py/polygrad/tensor.py",
+        "js/src/tensor.js"
+      ],
+      "owner": "architecture",
+      "rationale": "Reviewed source paths remain inside the configured Map scope."
+    },
+    "REQUIRED-SYMBOLS-CORE": {
+      "kind": "required_symbols",
+      "layer": "core",
+      "symbols": [
+        "poly_tensor_create"
+      ],
+      "owner": "architecture",
+      "rationale": "Reviewed core symbols remain present."
+    },
+    "REQUIRED-SYMBOLS-PYTHON": {
+      "kind": "required_symbols",
+      "layer": "python",
+      "symbols": [
+        "Tensor"
+      ],
+      "owner": "architecture",
+      "rationale": "Reviewed python symbols remain present."
+    },
+    "REQUIRED-SYMBOLS-JAVASCRIPT": {
+      "kind": "required_symbols",
+      "layer": "javascript",
+      "symbols": [
+        "createBoundTensorClass.Tensor"
+      ],
+      "owner": "architecture",
+      "rationale": "Reviewed javascript symbols remain present."
+    },
+    "PROVIDER-SURFACE-JAVASCRIPT-WASM": {
+      "declared": [
+        "poly_ctx_new",
+        "poly_tensor_create"
+      ],
+      "forbid_unregistered": true,
+      "forbid_unresolved": true,
+      "forbid_ambiguous": true,
+      "kind": "provider_surface",
+      "surface": "javascript-wasm",
+      "owner": "architecture",
+      "rationale": "The reviewed provider surface remains declared and resolvable."
+    },
+    "PROVIDER-SURFACE-JAVASCRIPT-NAPI": {
+      "declared": [
+        "poly_ctx_new",
+        "poly_tensor_create"
+      ],
+      "forbid_ambiguous": true,
+      "kind": "provider_surface",
+      "surface": "javascript-napi",
+      "owner": "architecture",
+      "rationale": "The reviewed provider surface remains declared and resolvable."
+    },
+    "PROVIDER-SURFACE-R-CALL": {
+      "declared": [
+        "C_poly_ctx_new",
+        "C_poly_realize_read"
+      ],
+      "forbid_unregistered": true,
+      "forbid_unresolved": true,
+      "forbid_ambiguous": true,
+      "kind": "provider_surface",
+      "surface": "r-call",
+      "owner": "architecture",
+      "rationale": "The reviewed provider surface remains declared and resolvable."
+    }
+  }
+}

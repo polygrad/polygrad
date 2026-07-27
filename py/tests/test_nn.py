@@ -296,8 +296,12 @@ class TestAdam:
         opt = Adam([p], lr=0.1)
         p._grad = Tensor([1.0])
         scheduled = opt.schedule_step()
-        assert any(t is opt.b1_t for t in scheduled)
-        assert any(t is opt.b2_t for t in scheduled)
+        assert len(scheduled) == 5
+        assert scheduled[0] is opt.b1_t
+        assert scheduled[1] is opt.b2_t
+        assert scheduled[2] is opt.m[0]
+        assert scheduled[3] is opt.v[0]
+        assert scheduled[4] is p
         scheduled[0].realize(*scheduled[1:])
         assert approx(opt.b1_t.numpy(), [0.9], tol=1e-6)
         assert approx(opt.b2_t.numpy(), [0.999], tol=1e-6)
@@ -574,6 +578,49 @@ class TestStateDict:
         m = Model()
         params = get_parameters(m)
         assert len(params) == 4  # weight+bias for each layer
+
+    def test_get_parameters_includes_buffers_for_optimizer_partition(self):
+        bn = BatchNorm(4)
+        state = get_state_dict(bn)
+        params = get_parameters(bn)
+        assert [id(x) for x in params] == [id(x) for x in state.values()]
+        assert any(x is bn.running_mean for x in params)
+        assert any(x is bn.running_var for x in params)
+        opt = SGD(params, lr=0.1)
+        assert [id(x) for x in opt.params] == [id(bn.weight), id(bn.bias)]
+        assert [id(x) for x in opt.buffers] == [id(bn.running_mean), id(bn.running_var)]
+
+
+class TestParameterMarkerParity:
+    def test_default_and_result_markers_match_tinygrad(self):
+        source = Tensor.zeros(1).is_param_(False)
+        assert Tensor.zeros(1).is_param is True
+        assert (source + 1).is_param is True
+        assert source.clone().is_param is False
+
+    def test_optimizer_uses_marker_and_enables_polygrad_autograd(self):
+        param = Tensor.zeros(1)
+        buffer = Tensor.ones(1).is_param_(False)
+        assert param.requires_grad is False
+        opt = SGD([param, buffer], lr=0.1)
+        assert opt.params == [param]
+        assert opt.buffers == [buffer]
+        assert param.requires_grad is True
+        assert buffer.requires_grad is False
+
+    def test_hlb_style_custom_norm_split(self):
+        class CustomNorm:
+            def __init__(self):
+                self.weight = Tensor.ones(4).is_param_(False)
+                self.bias = Tensor.zeros(4)
+                self.running_mean = Tensor.zeros(4).is_param_(False)
+
+        state = get_state_dict(CustomNorm())
+        bias = [value for name, value in state.items() if value.is_param and 'bias' in name]
+        non_bias = [value for name, value in state.items() if value.is_param and 'bias' not in name]
+        assert len(bias) == 1
+        assert len(non_bias) == 0
+        assert [id(x) for x in SGD(bias, lr=0.1).params] == [id(x) for x in bias]
 
 
 # ── Segment-wise backward ──

@@ -1,6 +1,7 @@
 """nn.optim -- thin frontend wrappers over the C optimizer graph builders."""
 
 from .. import _ffi
+from ..dtype import dtypes, least_upper_dtype, to_dtype
 from ..tensor import Tensor, _ptr_value
 
 
@@ -41,19 +42,43 @@ class Optimizer:
     """
 
     def __init__(self, params, lr=0.001, device=None):
-        if lr < 0:
-            raise ValueError(f"Invalid learning rate: {lr}")
+        lr_tensor = lr if isinstance(lr, Tensor) else None
+        lr_value = None if lr_tensor is not None else float(lr)
+        if lr_value is not None and lr_value < 0:
+            raise ValueError(f"Invalid learning rate: {lr_value}")
         params = list(params)
-        for p in params:
-            if p.requires_grad is None:
-                p.requires_grad_(True)
-        self.params = _dedup([p for p in params if p.requires_grad])
+        self.params = _dedup([p for p in params if p.is_param])
         if not self.params:
             raise AssertionError("optimizer must have at least one param")
-        self.buffers = _dedup([p for p in params if not p.requires_grad])
-        self.lr = float(lr)
+        self.buffers = _dedup([p for p in params if not p.is_param])
+        # tinygrad's current autograd discovers every reachable floating Tensor
+        # and uses is_param only for optimizer membership.  Polygrad retains a
+        # separate internal autograd switch, so selected parameters must enable
+        # it without conflating buffers with non-differentiable values.
+        for p in self.params:
+            if not p.requires_grad:
+                p.requires_grad_(True)
         self.device = device or self.params[0].device
         self._ctx = self.params[0]._ctx
+        if lr_tensor is not None:
+            lr_dtype = to_dtype(lr_tensor.dtype)
+            if lr_tensor._ctx != self._ctx:
+                raise ValueError("learning rate Tensor must share the optimizer context")
+            if lr_tensor.device != str(self.device).upper():
+                raise ValueError("learning rate Tensor must share the optimizer device")
+            if lr_tensor.shape not in ((), (1,)):
+                raise ValueError("learning rate Tensor must be scalar or have shape (1,)")
+            if not dtypes.is_float(lr_dtype) or lr_dtype.bitsize < 32:
+                raise TypeError("learning rate Tensor must have at least float32 precision")
+            self.lr = lr_tensor
+        else:
+            self.lr = Tensor(
+                [lr_value],
+                dtype=least_upper_dtype(dtypes.default_float, dtypes.float32),
+                device=self.device,
+                _ctx=self._ctx,
+                requires_grad=False,
+            )
 
     def zero_grad(self):
         for p in self.params:
@@ -74,13 +99,20 @@ class Optimizer:
 
         m_state, v_state, bc1, bc2, state_tensors = self._state_args()
         cfg = self._config()
+        if not isinstance(self.lr, Tensor) or self.lr._ctx != self._ctx:
+            raise ValueError("learning rate Tensor must share the optimizer context")
+        if self.lr.device != str(self.device).upper() or self.lr.shape not in ((), (1,)):
+            raise ValueError("learning rate Tensor must be scalar or shape (1,) on the optimizer device")
+        lr_dtype = to_dtype(self.lr.dtype)
+        if not dtypes.is_float(lr_dtype) or lr_dtype.bitsize < 32:
+            raise TypeError("learning rate Tensor must have at least float32 precision")
         params_arr = _ptr_array(self.params)
         grads_arr = _ptr_array(grads)
         m_arr = _ptr_array(m_state)
         v_arr = _ptr_array(v_state)
 
         needed = _ffi._lib.poly_optim_build_step(
-            self._ctx, cfg, params_arr, grads_arr, len(self.params),
+            self._ctx, cfg, self.lr._tensor, params_arr, grads_arr, len(self.params),
             m_arr, v_arr, bc1._tensor if bc1 is not None else None,
             bc2._tensor if bc2 is not None else None, None, 0,
         )
@@ -89,7 +121,7 @@ class Optimizer:
 
         out_arr = (_ffi._ptr * needed)()
         rc = _ffi._lib.poly_optim_build_step(
-            self._ctx, cfg, params_arr, grads_arr, len(self.params),
+            self._ctx, cfg, self.lr._tensor, params_arr, grads_arr, len(self.params),
             m_arr, v_arr, bc1._tensor if bc1 is not None else None,
             bc2._tensor if bc2 is not None else None, out_arr, needed,
         )
@@ -155,15 +187,15 @@ class SGD(Optimizer):
         self.nesterov = bool(nesterov)
         self.classic = bool(classic)
         self.b = [
-            Tensor.zeros(p.numel(), dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False).realize()
+            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False)
             for p in self.params
         ] if self.momentum else []
         self.velocities = self.b
 
     def _config(self):
         return _ffi.PolyOptimConfig(
-            OPTIM_SGD, self.lr, 0.0, 0.0, 0.0, self.weight_decay,
-            self.momentum, self.nesterov, self.classic,
+            OPTIM_SGD, 0.0, 0.0, 0.0, self.weight_decay, self.momentum,
+            self.nesterov, self.classic,
         )
 
     def _state_args(self):
@@ -196,15 +228,19 @@ class Adam(Optimizer):
         self.eps = float(eps)
         self.weight_decay = 0.0
         self.m = [
-            Tensor.zeros(p.numel(), dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False).realize()
+            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False)
             for p in self.params
         ]
         self.v = [
-            Tensor.zeros(p.numel(), dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False).realize()
+            Tensor.zeros(p.shape, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False)
             for p in self.params
         ]
-        self.b1_t = Tensor.ones(1, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False).realize()
-        self.b2_t = Tensor.ones(1, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False).realize()
+        self.b1_t = Tensor.ones(
+            1, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False,
+        ).is_param_(False)
+        self.b2_t = Tensor.ones(
+            1, dtype="float32", device=self.device, _ctx=self._ctx, requires_grad=False,
+        ).is_param_(False)
         self._bc1 = self.b1_t
         self._bc2 = self.b2_t
 
@@ -213,8 +249,8 @@ class Adam(Optimizer):
 
     def _config(self):
         return _ffi.PolyOptimConfig(
-            self._kind(), self.lr, self.b1, self.b2, self.eps,
-            self.weight_decay, 0.0, False, False,
+            self._kind(), self.b1, self.b2, self.eps, self.weight_decay, 0.0,
+            False, False,
         )
 
     def _state_args(self):

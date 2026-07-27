@@ -221,7 +221,13 @@ static PolyUOp *x86_make_unary_cast_range(
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
 
-static PolyUOp *x86_expr_f32_unary_div(PolyCtx *ctx, PolyUOp *f, PolyUOp *g, PolyUOp *h, PolyUOp *range) {
+static PolyUOp *x86_expr_f32_unary_div(
+    PolyCtx *ctx,
+    PolyUOp *f,
+    PolyUOp *g,
+    PolyUOp *h,
+    PolyUOp *range
+) {
   (void)range;
   PolyUOp *sqrt_f = poly_uop1(ctx, POLY_OP_SQRT, POLY_FLOAT32, f, poly_arg_none());
   PolyUOp *div = poly_uop2(ctx, POLY_OP_FDIV, POLY_FLOAT32, h, g, poly_arg_none());
@@ -272,18 +278,18 @@ static PolyUOp *x86_make_f32_reused_mul_add(PolyCtx *ctx) {
   PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(2));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *la = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_FLOAT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pf, a, zero, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_FLOAT32, poly_uop2(ctx, POLY_OP_INDEX, pf, a, zero, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *lb = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_FLOAT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pf, b, zero, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_FLOAT32, poly_uop2(ctx, POLY_OP_INDEX, pf, b, zero, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, la, lb, poly_arg_none());
   PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, mul, poly_arg_none());
   PolyUOp *st = poly_uop2(
-      ctx, POLY_OP_STORE, POLY_VOID,
-      poly_uop2(ctx, POLY_OP_INDEX, pf, out, zero, poly_arg_none()), sum, poly_arg_none()
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pf, out, zero, poly_arg_none()),
+      sum, poly_arg_none()
   );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
@@ -296,13 +302,13 @@ static PolyUOp *x86_make_i32_complex_address_load(PolyCtx *ctx) {
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *idx = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, i, one, poly_arg_none());
   PolyUOp *load = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_INT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, in, idx, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_INT32, poly_uop2(ctx, POLY_OP_INDEX, pi, in, idx, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *st = poly_uop2(
-      ctx, POLY_OP_STORE, POLY_VOID,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()), load, poly_arg_none()
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()),
+      load, poly_arg_none()
   );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
@@ -314,17 +320,17 @@ static PolyUOp *x86_make_i32_fold_load_add(PolyCtx *ctx) {
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *l0 = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_INT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, in, zero, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_INT32, poly_uop2(ctx, POLY_OP_INDEX, pi, in, zero, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *l1 = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_INT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, in, one, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_INT32, poly_uop2(ctx, POLY_OP_INDEX, pi, in, one, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, l0, l1, poly_arg_none());
   PolyUOp *st = poly_uop2(
-      ctx, POLY_OP_STORE, POLY_VOID,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()), sum, poly_arg_none()
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()),
+      sum, poly_arg_none()
   );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
@@ -335,15 +341,15 @@ static PolyUOp *x86_make_i32_multiuse_load_add(PolyCtx *ctx) {
   PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, pi, poly_arg_int(1));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *load = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_INT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, in, zero, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_INT32, poly_uop2(ctx, POLY_OP_INDEX, pi, in, zero, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *plus = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, load, one, poly_arg_none());
   PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, plus, load, poly_arg_none());
   PolyUOp *st = poly_uop2(
-      ctx, POLY_OP_STORE, POLY_VOID,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()), sum, poly_arg_none()
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()),
+      sum, poly_arg_none()
   );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
@@ -354,13 +360,13 @@ static PolyUOp *x86_make_i32_multiuse_load_mul(PolyCtx *ctx) {
   PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, pi, poly_arg_int(1));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *load = poly_uop1(
-      ctx, POLY_OP_LOAD, POLY_INT32,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, in, zero, poly_arg_none()), poly_arg_none()
+      ctx, POLY_OP_LOAD, POLY_INT32, poly_uop2(ctx, POLY_OP_INDEX, pi, in, zero, poly_arg_none()),
+      poly_arg_none()
   );
   PolyUOp *prod = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, load, load, poly_arg_none());
   PolyUOp *st = poly_uop2(
-      ctx, POLY_OP_STORE, POLY_VOID,
-      poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()), prod, poly_arg_none()
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pi, out, zero, poly_arg_none()),
+      prod, poly_arg_none()
   );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
@@ -372,7 +378,12 @@ static PolyUOp *x86_expr_i32_where(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp
   return poly_uop(ctx, POLY_OP_WHERE, POLY_INT32, srcs, 3, poly_arg_none());
 }
 
-static PolyUOp *x86_expr_i32_flag_clobber_where(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
+static PolyUOp *x86_expr_i32_flag_clobber_where(
+    PolyCtx *ctx,
+    PolyUOp *a,
+    PolyUOp *b,
+    PolyUOp *range
+) {
   (void)range;
   PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, a, b, poly_arg_none());
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
@@ -413,6 +424,13 @@ static PolyUOp *x86_expr_u32_where(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp
 static PolyUOp *x86_expr_u64_cdiv(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
   (void)range;
   return poly_uop2(ctx, POLY_OP_CDIV, POLY_UINT64, a, b, poly_arg_none());
+}
+
+static PolyUOp *x86_expr_u64_cdiv_all_ones(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
+  (void)b;
+  (void)range;
+  PolyUOp *all_ones = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(-1));
+  return poly_uop2(ctx, POLY_OP_CDIV, POLY_UINT64, a, all_ones, poly_arg_none());
 }
 
 static PolyUOp *x86_expr_i64_cdiv(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
@@ -485,8 +503,8 @@ static PolyUOp *x86_make_shrink_load_width4(PolyCtx *ctx) {
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *width = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
   PolyUOp *shr_srcs[3] = {p0, zero, width};
-  PolyUOp *shr = poly_uop(ctx, POLY_OP_SHRINK, poly_dtype_vec(POLY_FLOAT32, 4),
-                          shr_srcs, 3, poly_arg_none());
+  PolyUOp *shr =
+      poly_uop(ctx, POLY_OP_SHRINK, poly_dtype_vec(POLY_FLOAT32, 4), shr_srcs, 3, poly_arg_none());
   PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, shr, poly_arg_none());
   PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, pf, p1, zero, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, load, poly_arg_none());
@@ -657,12 +675,7 @@ static PolyUOp *x86_make_int_vec_binary(
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
 }
 
-static PolyUOp *x86_make_load_store(
-    PolyCtx *ctx,
-    PolyDType scalar,
-    int lanes,
-    int n_vec
-) {
+static PolyUOp *x86_make_load_store(PolyCtx *ctx, PolyDType scalar, int lanes, int n_vec) {
   PolyDType ptr = poly_dtype_ptr(scalar, -1, POLY_ADDR_GLOBAL);
   PolyDType val_dt = lanes > 1 ? poly_dtype_vec(scalar, lanes) : scalar;
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
@@ -763,7 +776,8 @@ static PolyUOp *x86_make_f32_broadcast4(PolyCtx *ctx) {
   PolyUOp *iin = poly_uop2(ctx, POLY_OP_INDEX, pf, pin, zero, poly_arg_none());
   PolyUOp *val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, iin, poly_arg_none());
   PolyUOp *srcs[4] = {val, val, val, val};
-  PolyUOp *vec = poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_FLOAT32, 4), srcs, 4, poly_arg_none());
+  PolyUOp *vec =
+      poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_FLOAT32, 4), srcs, 4, poly_arg_none());
   PolyUOp *iout = poly_uop2(ctx, POLY_OP_INDEX, pf, pout, zero, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, iout, vec, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
@@ -777,7 +791,8 @@ static PolyUOp *x86_make_f16_broadcast4(PolyCtx *ctx) {
   PolyUOp *iin = poly_uop2(ctx, POLY_OP_INDEX, pf, pin, zero, poly_arg_none());
   PolyUOp *val = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, iin, poly_arg_none());
   PolyUOp *srcs[4] = {val, val, val, val};
-  PolyUOp *vec = poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_FLOAT16, 4), srcs, 4, poly_arg_none());
+  PolyUOp *vec =
+      poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_FLOAT16, 4), srcs, 4, poly_arg_none());
   PolyUOp *iout = poly_uop2(ctx, POLY_OP_INDEX, pf, pout, zero, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, iout, vec, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
@@ -791,7 +806,8 @@ static PolyUOp *x86_make_i32_broadcast4(PolyCtx *ctx) {
   PolyUOp *iin = poly_uop2(ctx, POLY_OP_INDEX, pi, pin, zero, poly_arg_none());
   PolyUOp *val = poly_uop1(ctx, POLY_OP_LOAD, POLY_INT32, iin, poly_arg_none());
   PolyUOp *srcs[4] = {val, val, val, val};
-  PolyUOp *vec = poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INT32, 4), srcs, 4, poly_arg_none());
+  PolyUOp *vec =
+      poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INT32, 4), srcs, 4, poly_arg_none());
   PolyUOp *iout = poly_uop2(ctx, POLY_OP_INDEX, pi, pout, zero, poly_arg_none());
   PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, iout, vec, poly_arg_none());
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
@@ -804,8 +820,14 @@ static PolyUOp *x86_make_f32_shuffle4(PolyCtx *ctx) {
   PolyUOp *pb = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(1));
   PolyUOp *po = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(2));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *la = poly_uop1(ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pa, zero, poly_arg_none()), poly_arg_none());
-  PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pb, zero, poly_arg_none()), poly_arg_none());
+  PolyUOp *la = poly_uop1(
+      ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pa, zero, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *lb = poly_uop1(
+      ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pb, zero, poly_arg_none()),
+      poly_arg_none()
+  );
   PolyUOp *i0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *i1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *srcs[4] = {
@@ -815,7 +837,10 @@ static PolyUOp *x86_make_f32_shuffle4(PolyCtx *ctx) {
       poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, lb, i1, poly_arg_none()),
   };
   PolyUOp *vec = poly_uop(ctx, POLY_OP_STACK, v4, srcs, 4, poly_arg_none());
-  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pf, po, zero, poly_arg_none()), vec, poly_arg_none());
+  PolyUOp *st = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pf, po, zero, poly_arg_none()),
+      vec, poly_arg_none()
+  );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
 
@@ -826,8 +851,14 @@ static PolyUOp *x86_make_f64_shuffle2(PolyCtx *ctx) {
   PolyUOp *pb = poly_uop0(ctx, POLY_OP_PARAM, pd, poly_arg_int(1));
   PolyUOp *po = poly_uop0(ctx, POLY_OP_PARAM, pd, poly_arg_int(2));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *la = poly_uop1(ctx, POLY_OP_LOAD, v2, poly_uop2(ctx, POLY_OP_INDEX, pd, pa, zero, poly_arg_none()), poly_arg_none());
-  PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, v2, poly_uop2(ctx, POLY_OP_INDEX, pd, pb, zero, poly_arg_none()), poly_arg_none());
+  PolyUOp *la = poly_uop1(
+      ctx, POLY_OP_LOAD, v2, poly_uop2(ctx, POLY_OP_INDEX, pd, pa, zero, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *lb = poly_uop1(
+      ctx, POLY_OP_LOAD, v2, poly_uop2(ctx, POLY_OP_INDEX, pd, pb, zero, poly_arg_none()),
+      poly_arg_none()
+  );
   PolyUOp *i0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *i1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *srcs[2] = {
@@ -835,7 +866,10 @@ static PolyUOp *x86_make_f64_shuffle2(PolyCtx *ctx) {
       poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT64, lb, i0, poly_arg_none()),
   };
   PolyUOp *vec = poly_uop(ctx, POLY_OP_STACK, v2, srcs, 2, poly_arg_none());
-  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pd, po, zero, poly_arg_none()), vec, poly_arg_none());
+  PolyUOp *st = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pd, po, zero, poly_arg_none()),
+      vec, poly_arg_none()
+  );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
 
@@ -848,10 +882,22 @@ static PolyUOp *x86_make_f32_insert4(PolyCtx *ctx) {
   PolyUOp *pd = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(3));
   PolyUOp *po = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(4));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *la = poly_uop1(ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pa, zero, poly_arg_none()), poly_arg_none());
-  PolyUOp *lb = poly_uop1(ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pb, zero, poly_arg_none()), poly_arg_none());
-  PolyUOp *lc = poly_uop1(ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pc, zero, poly_arg_none()), poly_arg_none());
-  PolyUOp *ld = poly_uop1(ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pd, zero, poly_arg_none()), poly_arg_none());
+  PolyUOp *la = poly_uop1(
+      ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pa, zero, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *lb = poly_uop1(
+      ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pb, zero, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *lc = poly_uop1(
+      ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pc, zero, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *ld = poly_uop1(
+      ctx, POLY_OP_LOAD, v4, poly_uop2(ctx, POLY_OP_INDEX, pf, pd, zero, poly_arg_none()),
+      poly_arg_none()
+  );
   PolyUOp *i0 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
   PolyUOp *i1 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
   PolyUOp *i2 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
@@ -863,7 +909,10 @@ static PolyUOp *x86_make_f32_insert4(PolyCtx *ctx) {
       poly_uop2(ctx, POLY_OP_INDEX, POLY_FLOAT32, ld, i3, poly_arg_none()),
   };
   PolyUOp *vec = poly_uop(ctx, POLY_OP_STACK, v4, srcs, 4, poly_arg_none());
-  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pf, po, zero, poly_arg_none()), vec, poly_arg_none());
+  PolyUOp *st = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, pf, po, zero, poly_arg_none()),
+      vec, poly_arg_none()
+  );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
 
@@ -873,10 +922,16 @@ static PolyUOp *x86_make_index_extract(PolyCtx *ctx, PolyDType scalar, int count
   PolyUOp *pin = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
   PolyUOp *pout = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(1));
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, vec, poly_uop2(ctx, POLY_OP_INDEX, ptr, pin, zero, poly_arg_none()), poly_arg_none());
+  PolyUOp *load = poly_uop1(
+      ctx, POLY_OP_LOAD, vec, poly_uop2(ctx, POLY_OP_INDEX, ptr, pin, zero, poly_arg_none()),
+      poly_arg_none()
+  );
   PolyUOp *idx = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(lane));
   PolyUOp *item = poly_uop2(ctx, POLY_OP_INDEX, scalar, load, idx, poly_arg_none());
-  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, ptr, pout, zero, poly_arg_none()), item, poly_arg_none());
+  PolyUOp *st = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID,
+      poly_uop2(ctx, POLY_OP_INDEX, ptr, pout, zero, poly_arg_none()), item, poly_arg_none()
+  );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
 
@@ -893,7 +948,10 @@ static PolyUOp *x86_make_int_stack_from_scalar_lanes(PolyCtx *ctx, PolyDType sca
   }
   PolyUOp *stack = poly_uop(ctx, POLY_OP_STACK, vec, srcs, count, poly_arg_none());
   PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
-  PolyUOp *st = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, poly_uop2(ctx, POLY_OP_INDEX, ptr, pout, zero, poly_arg_none()), stack, poly_arg_none());
+  PolyUOp *st = poly_uop2(
+      ctx, POLY_OP_STORE, POLY_VOID,
+      poly_uop2(ctx, POLY_OP_INDEX, ptr, pout, zero, poly_arg_none()), stack, poly_arg_none()
+  );
   return poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, st, poly_arg_none());
 }
 
@@ -974,8 +1032,7 @@ static int x86_rewritten_linear_count_ins_arg(PolyCtx *ctx, PolyUOp *sink, int a
   int count = 0;
   for (int i = 0; i < n_lin; i++) {
     PolyUOp *u = lin[i];
-    if (u && u->op == POLY_OP_INS && u->arg.kind == POLY_ARG_INT && (int)u->arg.i == arg)
-      count++;
+    if (u && u->op == POLY_OP_INS && u->arg.kind == POLY_ARG_INT && (int)u->arg.i == arg) count++;
   }
   free(lin);
   return count;
@@ -1008,7 +1065,8 @@ static int x86_rewritten_code_count_hex(PolyCtx *ctx, PolyUOp *sink, const char 
   free(lin);
   if (!code) return 0;
   int n_pat = 0;
-  while (hex[n_pat * 2]) n_pat++;
+  while (hex[n_pat * 2])
+    n_pat++;
   uint8_t *pat = malloc((size_t)n_pat);
   if (!pat) {
     free(code);
@@ -1116,15 +1174,15 @@ static PolyUOp *tx86_noop(PolyCtx *ctx) {
 static int tx86_class_for_dtype(PolyDType dt) {
   if (dt.is_ptr || dt.count > 1) return dt.count > 1 ? TX86_REG_CLASS_XMM : TX86_REG_CLASS_WGPR;
   PolyDType s = poly_dtype_scalar(dt);
-  return (poly_dtype_is_float(s) && !poly_dtype_is_bool(s)) ? TX86_REG_CLASS_XMM : TX86_REG_CLASS_WGPR;
+  return (poly_dtype_is_float(s) && !poly_dtype_is_bool(s)) ? TX86_REG_CLASS_XMM
+                                                            : TX86_REG_CLASS_WGPR;
 }
 
 static PolyUOp *tx86_def_reg(PolyCtx *ctx, PolyDType dt, int reg) {
   int32_t tag = tx86_tag_real(tx86_class_for_dtype(dt), reg);
   int64_t vals[1] = {tag};
   return poly_uop_tagged_arg(
-      ctx, POLY_OP_INS, dt, NULL, 0, poly_arg_int(TX86_OP_DEFINE), tag,
-      tx86_arg_int_tuple(vals, 1)
+      ctx, POLY_OP_INS, dt, NULL, 0, poly_arg_int(TX86_OP_DEFINE), tag, tx86_arg_int_tuple(vals, 1)
   );
 }
 
@@ -1183,9 +1241,11 @@ static void tx86_assert_render_hex(
   ASSERT_TRUE(n_expected >= 0);
   if (code_size != n_expected || memcmp(code, expected, (size_t)n_expected) != 0) {
     fprintf(stderr, "    expected:");
-    for (int i = 0; i < n_expected; i++) fprintf(stderr, " %02x", expected[i]);
+    for (int i = 0; i < n_expected; i++)
+      fprintf(stderr, " %02x", expected[i]);
     fprintf(stderr, "\n    actual:  ");
-    for (int i = 0; i < code_size; i++) fprintf(stderr, " %02x", code[i]);
+    for (int i = 0; i < code_size; i++)
+      fprintf(stderr, " %02x", code[i]);
     fprintf(stderr, "\n");
     free(code);
     FAIL("%s", "x86 encoding mismatch");
@@ -1203,8 +1263,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_base_srcs, 4, TX86_REG_RDI),
-      "8b3f", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_base_srcs, 4, TX86_REG_RDI), "8b3f", _passed,
+      _failed
   );
 
   PolyUOp *load_rsp_srcs[] = {
@@ -1214,8 +1274,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_rsp_srcs, 4, TX86_REG_RSP),
-      "8b2424", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_rsp_srcs, 4, TX86_REG_RSP), "8b2424", _passed,
+      _failed
   );
 
   PolyUOp *load_rbp_srcs[] = {
@@ -1225,8 +1285,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_rbp_srcs, 4, TX86_REG_RBP),
-      "8b6d00", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_rbp_srcs, 4, TX86_REG_RBP), "8b6d00", _passed,
+      _failed
   );
 
   PolyUOp *load_base_index_srcs[] = {
@@ -1236,8 +1296,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_base_index_srcs, 4, TX86_REG_RAX),
-      "8b0490", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_base_index_srcs, 4, TX86_REG_RAX), "8b0490",
+      _passed, _failed
   );
 
   PolyUOp *load_rsp_index_srcs[] = {
@@ -1247,8 +1307,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_rsp_index_srcs, 4, TX86_REG_RAX),
-      "8b00", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_rsp_index_srcs, 4, TX86_REG_RAX), "8b00", _passed,
+      _failed
   );
 
   PolyUOp *load_r12_index_srcs[] = {
@@ -1258,8 +1318,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_r12_index_srcs, 4, TX86_REG_RAX),
-      "428b04a0", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_r12_index_srcs, 4, TX86_REG_RAX), "428b04a0",
+      _passed, _failed
   );
 
   PolyUOp *load_disp8_srcs[] = {
@@ -1269,8 +1329,8 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_disp8_srcs, 4, TX86_REG_RDI),
-      "8b7cb70a", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_disp8_srcs, 4, TX86_REG_RDI), "8b7cb70a", _passed,
+      _failed
   );
 
   PolyUOp *load_disp32_srcs[] = {
@@ -1280,27 +1340,27 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_disp32_srcs, 4, TX86_REG_RDI),
-      "8bbcb710270000", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOV, POLY_INT32, load_disp32_srcs, 4, TX86_REG_RDI), "8bbcb710270000",
+      _passed, _failed
   );
 
   PolyUOp *movsx_i8_srcs[] = {tx86_def_reg(ctx, POLY_INT8, TX86_REG_RDX)};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT32, movsx_i8_srcs, 1, TX86_REG_RAX),
-      "0fbec2", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT32, movsx_i8_srcs, 1, TX86_REG_RAX), "0fbec2", _passed,
+      _failed
   );
   PolyUOp *movsx_dil_srcs[] = {tx86_def_reg(ctx, POLY_INT8, TX86_REG_RDI)};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT32, movsx_dil_srcs, 1, TX86_REG_RAX),
-      "400fbec7", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT32, movsx_dil_srcs, 1, TX86_REG_RAX), "400fbec7",
+      _passed, _failed
   );
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT16, movsx_i8_srcs, 1, TX86_REG_RAX),
-      "660fbec2", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT16, movsx_i8_srcs, 1, TX86_REG_RAX), "660fbec2", _passed,
+      _failed
   );
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT64, movsx_i8_srcs, 1, TX86_REG_RAX),
-      "480fbec2", _passed, _failed
+      tx86_ins(ctx, TX86_OP_MOVSX, POLY_INT64, movsx_i8_srcs, 1, TX86_REG_RAX), "480fbec2", _passed,
+      _failed
   );
 
   PolyUOp *movi_addr[] = {
@@ -1311,8 +1371,7 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
       tx86_const_i(ctx, POLY_INT8, 10),
   };
   tx86_assert_render_hex(
-      tx86_ins_nodef(ctx, TX86_OP_MOVi, POLY_VOID, movi_addr, 5),
-      "40c644370a0a", _passed, _failed
+      tx86_ins_nodef(ctx, TX86_OP_MOVi, POLY_VOID, movi_addr, 5), "40c644370a0a", _passed, _failed
   );
 
   PolyUOp *imul_addr[] = {
@@ -1339,13 +1398,13 @@ TEST(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
   PolyUOp *xmm8 = tx86_def_reg(ctx, POLY_FLOAT32, TX86_REG_R8);
   PolyUOp *vadd_srcs[] = {xmm0, xmm1};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_VADDSS, POLY_FLOAT32, vadd_srcs, 2, TX86_REG_RAX),
-      "c5fa58c1", _passed, _failed
+      tx86_ins(ctx, TX86_OP_VADDSS, POLY_FLOAT32, vadd_srcs, 2, TX86_REG_RAX), "c5fa58c1", _passed,
+      _failed
   );
   PolyUOp *vadd_long_srcs[] = {xmm0, xmm8};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_VADDSS, POLY_FLOAT32, vadd_long_srcs, 2, TX86_REG_RAX),
-      "c4c17a58c0", _passed, _failed
+      tx86_ins(ctx, TX86_OP_VADDSS, POLY_FLOAT32, vadd_long_srcs, 2, TX86_REG_RAX), "c4c17a58c0",
+      _passed, _failed
   );
 
   PolyDType f32x8 = poly_dtype_vec(POLY_FLOAT32, 8);
@@ -1353,15 +1412,15 @@ TEST(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
   PolyUOp *ymm1 = tx86_def_reg(ctx, f32x8, TX86_REG_RCX);
   PolyUOp *vaddps_srcs[] = {ymm0, ymm1};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_VADDPS, f32x8, vaddps_srcs, 2, TX86_REG_RAX),
-      "c5fc58c1", _passed, _failed
+      tx86_ins(ctx, TX86_OP_VADDPS, f32x8, vaddps_srcs, 2, TX86_REG_RAX), "c5fc58c1", _passed,
+      _failed
   );
 
   PolyUOp *xmm2 = tx86_def_reg(ctx, POLY_FLOAT32, TX86_REG_RDX);
   PolyUOp *blend_srcs[] = {xmm0, xmm1, xmm2};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_VBLENDVPS, POLY_FLOAT32, blend_srcs, 3, TX86_REG_RAX),
-      "c4e3794ac120", _passed, _failed
+      tx86_ins(ctx, TX86_OP_VBLENDVPS, POLY_FLOAT32, blend_srcs, 3, TX86_REG_RAX), "c4e3794ac120",
+      _passed, _failed
   );
 
   PolyUOp *extr_srcs[] = {
@@ -1373,8 +1432,8 @@ TEST(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 0),
   };
   tx86_assert_render_hex(
-      tx86_ins_nodef(ctx, TX86_OP_VPEXTRD, POLY_VOID, extr_srcs, 6),
-      "c4e3791644b70a00", _passed, _failed
+      tx86_ins_nodef(ctx, TX86_OP_VPEXTRD, POLY_VOID, extr_srcs, 6), "c4e3791644b70a00", _passed,
+      _failed
   );
 
   PolyUOp *cmove_mem_srcs[] = {
@@ -1384,15 +1443,15 @@ TEST(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
       tx86_const_i(ctx, POLY_UINT8, 4),
   };
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_CMOVE, POLY_INT32, cmove_mem_srcs, 4, TX86_REG_RAX),
-      "0f4444b70a", _passed, _failed
+      tx86_ins(ctx, TX86_OP_CMOVE, POLY_INT32, cmove_mem_srcs, 4, TX86_REG_RAX), "0f4444b70a",
+      _passed, _failed
   );
 
   PolyUOp *cmp = tx86_ins_nodef(ctx, TX86_OP_CMP, POLY_VOID, NULL, 0);
   PolyUOp *cmove_reg_srcs[] = {tx86_def_reg(ctx, POLY_INT32, TX86_REG_RAX), cmp};
   tx86_assert_render_hex(
-      tx86_ins(ctx, TX86_OP_CMOVE, POLY_INT32, cmove_reg_srcs, 2, TX86_REG_RDX),
-      "0f44d0", _passed, _failed
+      tx86_ins(ctx, TX86_OP_CMOVE, POLY_INT32, cmove_reg_srcs, 2, TX86_REG_RDX), "0f44d0", _passed,
+      _failed
   );
 
   poly_ctx_destroy(ctx);
@@ -1436,7 +1495,8 @@ TEST(x86, rewritten_float_const_isel_matches_tinygrad_bitcast_path) {
 
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], a[i] + 1.25f, 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], a[i] + 1.25f, 0.0f);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1465,7 +1525,8 @@ TEST(x86, direct_vecadd_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_vecadd(ctx, N);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], a[i] + b[i], 1e-6);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], a[i] + b[i], 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1489,7 +1550,8 @@ TEST(x86, direct_f32_broadcast4_matches_tinygrad_vbroadcastss_probe) {
   PolyUOp *sink = x86_make_f32_broadcast4(ctx);
   void *args[2] = {x, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(out[i], 2.0f, 1e-6);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], 2.0f, 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1501,7 +1563,8 @@ TEST(x86, direct_f16_broadcast4_matches_tinygrad_vpinsrw_probe) {
   PolyUOp *sink = x86_make_f16_broadcast4(ctx);
   void *args[2] = {x, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(x86_f16_bits_to_f32(out[i]), 2.0f, 0.0f);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(x86_f16_bits_to_f32(out[i]), 2.0f, 0.0f);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1513,7 +1576,8 @@ TEST(x86, direct_i32_broadcast4_matches_tinygrad_vpbroadcastd_probe) {
   PolyUOp *sink = x86_make_i32_broadcast4(ctx);
   void *args[2] = {x, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_INT_EQ(out[i], 7);
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(out[i], 7);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1525,7 +1589,8 @@ TEST(x86, rewritten_i32_broadcast4_isel_matches_tinygrad_vpbroadcastd_probe) {
   PolyUOp *sink = x86_make_i32_broadcast4(ctx);
   void *args[2] = {x, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_INT_EQ(out[i], 7);
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(out[i], 7);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1559,6 +1624,45 @@ TEST(x86, direct_scalar_float_where_uses_compare_mask_like_tinygrad) {
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
   ASSERT_FLOAT_EQ(out[0], 12.0f, 1e-6);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(x86, direct_float_compare_selects_integer_with_tinygrad_cmovb) {
+  enum { N = 1 };
+  float in[N] = {1.0f};
+  int16_t out[N] = {0};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType pi = poly_dtype_ptr(POLY_INT16, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *pin = poly_uop0(ctx, POLY_OP_PARAM, pf, poly_arg_int(0));
+  PolyUOp *pout = poly_uop0(ctx, POLY_OP_PARAM, pi, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(N));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *src_idx = poly_uop2(ctx, POLY_OP_INDEX, pf, pin, range, poly_arg_none());
+  PolyUOp *dst_idx = poly_uop2(ctx, POLY_OP_INDEX, pi, pout, range, poly_arg_none());
+  PolyUOp *value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, src_idx, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, zero, value, poly_arg_none());
+  PolyUOp *select_srcs[3] = {
+      mask,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT16, poly_arg_int(7)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT16, poly_arg_int(3)),
+  };
+  PolyUOp *selected = poly_uop(ctx, POLY_OP_WHERE, POLY_INT16, select_srcs, 3, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst_idx, selected, poly_arg_none());
+  PolyUOp *end_srcs[2] = {store, range};
+  PolyUOp *sink = poly_uop1(
+      ctx, POLY_OP_SINK, POLY_VOID,
+      poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none()), poly_arg_none()
+  );
+  void *args[2] = {in, out};
+  ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
+  ASSERT_INT_EQ(out[0], 7);
+  in[0] = -2.0f;
+  out[0] = 0;
+  ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
+  ASSERT_INT_EQ(out[0], 3);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1656,7 +1760,8 @@ TEST(x86, direct_mixed_float_int_compare_matches_python_embedding_mask) {
   void *args[2] = {idx, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
   const uint8_t expected[N] = {0, 0, 1, 0, 0};
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -1689,7 +1794,8 @@ TEST(x86, direct_stack_args_follow_tinygrad_sysv_x86_abi) {
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 8), 0);
   for (int i = 0; i < N; i++) {
     float expected = 0.0f;
-    for (int j = 0; j < IN; j++) expected += in[j][i];
+    for (int j = 0; j < IN; j++)
+      expected += in[j][i];
     ASSERT_FLOAT_EQ(out[i], expected, 1e-6);
   }
   poly_ctx_destroy(ctx);
@@ -1728,7 +1834,8 @@ TEST(x86, direct_f64_where_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pd, POLY_FLOAT64, N, x86_expr_f64_where);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-9);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-9);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1744,7 +1851,8 @@ TEST(x86, direct_f32_max_uses_tinygrad_vmax_pattern) {
   PolyUOp *sink = x86_make_one_range(ctx, pf, POLY_FLOAT32, N, x86_expr_f32_max);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-6);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1761,7 +1869,8 @@ TEST(x86, rewritten_f32_min_where_uses_tinygrad_vmin_pattern) {
   ASSERT_TRUE(x86_rewritten_code_contains_hex(ctx, sink, "c5fa5d"));
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-6);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1777,7 +1886,8 @@ TEST(x86, direct_i32_mix_matches_polygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT32, N, x86_expr_i32_mix);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1877,7 +1987,8 @@ TEST(x86, direct_i32_where_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT32, N, x86_expr_i32_where);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1893,7 +2004,8 @@ TEST(x86, direct_i32_where_rematerializes_flags_after_clobber_like_tinygrad) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT32, N, x86_expr_i32_flag_clobber_where);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1933,7 +2045,8 @@ TEST(x86, direct_cast_i32_f32_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_cast_i32_f32(ctx, N);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], (float)a[i], 1e-6);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], (float)a[i], 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1947,7 +2060,8 @@ TEST(x86, direct_vector_f32_to_i32_cast_uses_tinygrad_vcvttps2dq) {
   PolyUOp *sink = x86_make_vector_cast(ctx, POLY_FLOAT32, LANES, POLY_INT32, LANES, V);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1961,7 +2075,8 @@ TEST(x86, direct_vector_f64_to_i32_cast_uses_tinygrad_vcvttpd2dq) {
   PolyUOp *sink = x86_make_vector_cast(ctx, POLY_FLOAT64, LANES, POLY_INT32, LANES, V);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1974,7 +2089,8 @@ TEST(x86, direct_vector_f64_to_f32_cast_uses_tinygrad_vcvtpd2ps) {
   PolyUOp *sink = x86_make_vector_cast(ctx, POLY_FLOAT64, LANES, POLY_FLOAT32, LANES, V);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], (float)a[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], (float)a[i], 0.0f);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1987,7 +2103,8 @@ TEST(x86, direct_vector_i32_to_f64_cast_uses_tinygrad_vcvtdq2pd) {
   PolyUOp *sink = x86_make_vector_cast(ctx, POLY_INT32, IN_LANES, POLY_FLOAT64, OUT_LANES, V);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], (double)a[i], 0.0);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], (double)a[i], 0.0);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2000,7 +2117,8 @@ TEST(x86, direct_vector_f32_to_f64_cast_uses_tinygrad_vcvtps2pd) {
   PolyUOp *sink = x86_make_vector_cast(ctx, POLY_FLOAT32, IN_LANES, POLY_FLOAT64, OUT_LANES, V);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], (double)a[i], 0.0);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], (double)a[i], 0.0);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2012,7 +2130,8 @@ TEST(x86, direct_shrink_load_width_matches_tinygrad_pre_isel) {
   PolyUOp *sink = x86_make_shrink_load_width4(ctx);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(out[i], a[i], 0.0f);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(out[i], a[i], 0.0f);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2048,7 +2167,8 @@ TEST(x86, direct_u32_to_i64_cast_matches_tinygrad_pre_isel_noop) {
   PolyUOp *sink = x86_make_cast_u32_i64(ctx, N);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], (int64_t)(uint64_t)a[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], (int64_t)(uint64_t)a[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2061,7 +2181,8 @@ TEST(x86, direct_i64_to_i32_cast_matches_tinygrad_pre_isel_noop) {
   PolyUOp *sink = x86_make_cast_i64_i32(ctx, N);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], (int32_t)a[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], (int32_t)a[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2074,7 +2195,8 @@ TEST(x86, direct_vector_u8_to_i32_cast_uses_tinygrad_vpmov_rule) {
   PolyUOp *sink = x86_make_cast_u8x4_i32x4(ctx, V);
   void *args[2] = {a, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], (int32_t)a[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], (int32_t)a[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2088,7 +2210,8 @@ TEST(x86, direct_i32x4_addsub_matches_tinygrad_readmem2nd_group) {
   PolyUOp *sink = x86_make_i32x4_addsub(ctx, V);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], b[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], b[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2102,7 +2225,8 @@ TEST(x86, rewritten_i32x4_addsub_isel_uses_tinygrad_packed_ops) {
   PolyUOp *sink = x86_make_i32x4_addsub(ctx, V);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], b[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], b[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2117,7 +2241,8 @@ TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VMOVSSm) > 0);
   void *args_f32[2] = {f32_in, f32_out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args_f32, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(f32_out[i], f32_in[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(f32_out[i], f32_in[i], 0.0f);
   poly_ctx_destroy(ctx);
 
   double f64_in[N] = {1.0, -2.0, 3.5, 4.25, -5.0, 6.0, 7.75, -8.5};
@@ -2127,7 +2252,8 @@ TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VMOVSDm) > 0);
   void *args_f64[2] = {f64_in, f64_out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args_f64, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ((float)f64_out[i], (float)f64_in[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ((float)f64_out[i], (float)f64_in[i], 0.0f);
   poly_ctx_destroy(ctx);
 
   int32_t i32_in[N] = {1, -2, 3, -4, 5, -6, 7, -8};
@@ -2137,7 +2263,8 @@ TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_MOVm) > 0);
   void *args_i32[2] = {i32_in, i32_out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args_i32, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(i32_out[i], i32_in[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(i32_out[i], i32_in[i]);
   poly_ctx_destroy(ctx);
 
   int32_t const_out[N] = {0};
@@ -2146,7 +2273,8 @@ TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_MOVi) > 0);
   void *args_const[1] = {const_out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args_const, 1), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(const_out[i], 17);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(const_out[i], 17);
   poly_ctx_destroy(ctx);
 
   ctx = poly_ctx_new();
@@ -2159,7 +2287,8 @@ TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   sink = x86_make_load_store(ctx, POLY_FLOAT32, 4, V4);
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VMOVUPSm) > 0);
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args_f32, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(f32_out[i], f32_in[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(f32_out[i], f32_in[i], 0.0f);
   poly_ctx_destroy(ctx);
 
   PASS();
@@ -2186,9 +2315,9 @@ TEST(x86, rewritten_int_vector_bitwise_isel_uses_tinygrad_packed_ops) {
     void *args[3] = {a, b, out};
     ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 3), 0);
     for (int i = 0; i < N; i++) {
-      int32_t expected = cases[ci].op == POLY_OP_AND ? (a[i] & b[i])
+      int32_t expected = cases[ci].op == POLY_OP_AND  ? (a[i] & b[i])
                          : cases[ci].op == POLY_OP_OR ? (a[i] | b[i])
-                                                       : (a[i] ^ b[i]);
+                                                      : (a[i] ^ b[i]);
       ASSERT_INT_EQ(out[i], expected);
     }
     poly_ctx_destroy(ctx);
@@ -2207,7 +2336,8 @@ TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VPMULLW) > 0);
   void *args16[3] = {a16, b16, out16};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args16, 3), 0);
-  for (int i = 0; i < N16; i++) ASSERT_INT_EQ(out16[i], (int16_t)(a16[i] * b16[i]));
+  for (int i = 0; i < N16; i++)
+    ASSERT_INT_EQ(out16[i], (int16_t)(a16[i] * b16[i]));
   poly_ctx_destroy(ctx);
 
   int32_t a32[N32] = {1, 2, 3, 4, 17, 31, 64, 127};
@@ -2229,7 +2359,7 @@ TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
     void *args32[3] = {a32, b32, out32};
     ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args32, 3), 0);
     for (int i = 0; i < N32; i++) {
-      int32_t expected = i32_cases[ci].op == POLY_OP_MUL ? (a32[i] * b32[i])
+      int32_t expected = i32_cases[ci].op == POLY_OP_MUL   ? (a32[i] * b32[i])
                          : i32_cases[ci].op == POLY_OP_SHL ? (a32[i] << b32[i])
                                                            : (a32[i] >> b32[i]);
       ASSERT_INT_EQ(out32[i], expected);
@@ -2245,7 +2375,8 @@ TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VPSRLVD) > 0);
   void *argsu32[3] = {au32, bu32, outu32};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, argsu32, 3), 0);
-  for (int i = 0; i < N32; i++) ASSERT_INT_EQ((int)outu32[i], (int)(au32[i] >> bu32[i]));
+  for (int i = 0; i < N32; i++)
+    ASSERT_INT_EQ((int)outu32[i], (int)(au32[i] >> bu32[i]));
   poly_ctx_destroy(ctx);
 
   int64_t a64[N64] = {1, 2, 3, 4};
@@ -2256,7 +2387,8 @@ TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VPSLLVQ) > 0);
   void *args64[3] = {a64, b64, out64};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args64, 3), 0);
-  for (int i = 0; i < N64; i++) ASSERT_INT_EQ((int)out64[i], (int)(a64[i] << b64[i]));
+  for (int i = 0; i < N64; i++)
+    ASSERT_INT_EQ((int)out64[i], (int)(a64[i] << b64[i]));
   poly_ctx_destroy(ctx);
 
   uint64_t au64[N64] = {0x8000000000000000ull, 0x4000000000000000ull, 16ull, 255ull};
@@ -2267,7 +2399,8 @@ TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VPSRLVQ) > 0);
   void *argsu64[3] = {au64, bu64, outu64};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, argsu64, 3), 0);
-  for (int i = 0; i < N64; i++) ASSERT_INT_EQ((int)outu64[i], (int)(au64[i] >> bu64[i]));
+  for (int i = 0; i < N64; i++)
+    ASSERT_INT_EQ((int)outu64[i], (int)(au64[i] >> bu64[i]));
   poly_ctx_destroy(ctx);
 
   PASS();
@@ -2283,7 +2416,8 @@ TEST(x86, rewritten_i8_add_and_i64_sub_use_tinygrad_packed_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VPADDB) > 0);
   void *args8[3] = {a8, b8, out8};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args8, 3), 0);
-  for (int i = 0; i < N8; i++) ASSERT_INT_EQ(out8[i], (int8_t)(a8[i] + b8[i]));
+  for (int i = 0; i < N8; i++)
+    ASSERT_INT_EQ(out8[i], (int8_t)(a8[i] + b8[i]));
   poly_ctx_destroy(ctx);
 
   int64_t a64[N64] = {100, 200, -300, 400};
@@ -2294,7 +2428,8 @@ TEST(x86, rewritten_i8_add_and_i64_sub_use_tinygrad_packed_ops) {
   ASSERT_TRUE(x86_rewritten_linear_count_ins_arg(ctx, sink, TX86_OP_VPSUBQ) > 0);
   void *args64[3] = {a64, b64, out64};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args64, 3), 0);
-  for (int i = 0; i < N64; i++) ASSERT_INT_EQ((int)out64[i], (int)(a64[i] - b64[i]));
+  for (int i = 0; i < N64; i++)
+    ASSERT_INT_EQ((int)out64[i], (int)(a64[i] - b64[i]));
   poly_ctx_destroy(ctx);
 
   PASS();
@@ -2425,7 +2560,8 @@ TEST(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
   PolyUOp *sink = x86_make_int_stack_from_scalar_lanes(ctx, POLY_INT8, 4);
   void *args[2] = {i8, i8_out};
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_INT_EQ(i8_out[i], i8[i]);
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(i8_out[i], i8[i]);
   poly_ctx_destroy(ctx);
 
   int16_t i16[4] = {5, -6, 7, -8};
@@ -2435,7 +2571,8 @@ TEST(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
   args[0] = i16;
   args[1] = i16_out;
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_INT_EQ(i16_out[i], i16[i]);
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(i16_out[i], i16[i]);
   poly_ctx_destroy(ctx);
 
   int32_t i32[4] = {9, -10, 11, -12};
@@ -2445,7 +2582,8 @@ TEST(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
   args[0] = i32;
   args[1] = i32_out;
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 4; i++) ASSERT_INT_EQ(i32_out[i], i32[i]);
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(i32_out[i], i32[i]);
   poly_ctx_destroy(ctx);
 
   int64_t i64[2] = {13, -14};
@@ -2455,7 +2593,8 @@ TEST(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
   args[0] = i64;
   args[1] = i64_out;
   ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < 2; i++) ASSERT_INT_EQ((int)i64_out[i], (int)i64[i]);
+  for (int i = 0; i < 2; i++)
+    ASSERT_INT_EQ((int)i64_out[i], (int)i64[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2472,7 +2611,8 @@ TEST(x86, direct_f32_unary_div_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_three_input_range(ctx, pf, POLY_FLOAT32, N, x86_expr_f32_unary_div);
   void *args[4] = {f, g, h, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 4), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-6);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2488,7 +2628,8 @@ TEST(x86, direct_f64_unary_div_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pd, POLY_FLOAT64, N, x86_expr_f64_unary_div);
   void *args[3] = {d, e, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-9);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-9);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2504,7 +2645,8 @@ TEST(x86, direct_i64_mix_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT64, N, x86_expr_i64_mix);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2520,7 +2662,8 @@ TEST(x86, direct_i64_where_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT64, N, x86_expr_i64_where);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2536,7 +2679,8 @@ TEST(x86, direct_u32_where_matches_tinygrad_probe_class) {
   PolyUOp *sink = x86_make_one_range(ctx, pu, POLY_UINT32, N, x86_expr_u32_where);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ((int)out[i], (int)expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ((int)out[i], (int)expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2551,7 +2695,26 @@ TEST(x86, direct_u64_cdiv_matches_tinygrad_scalar_idiv_path) {
   PolyUOp *sink = x86_make_one_range(ctx, pu, POLY_UINT64, N, x86_expr_u64_cdiv);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ((int64_t)out[i], (int64_t)(a[i] / b[i]));
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ((int64_t)out[i], (int64_t)(a[i] / b[i]));
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(x86, rewritten_u64_cdiv_all_ones_matches_tinygrad_unsigned_semantics) {
+  enum { N = 4 };
+  uint64_t a[N] = {1, 2, 3, UINT64_MAX - 1};
+  uint64_t unused[N] = {0};
+  uint64_t out[N] = {UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX};
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType pu = poly_dtype_ptr(POLY_UINT64, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *sink = x86_make_one_range(ctx, pu, POLY_UINT64, N, x86_expr_u64_cdiv_all_ones);
+  PolyUOp *rewritten = poly_rewrite_x86(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  void *args[3] = {a, unused, out};
+  ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, rewritten, args, 3), 0);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ((int64_t)out[i], 0);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2566,7 +2729,8 @@ TEST(x86, direct_i64_cdiv_matches_tinygrad_scalar_idiv_path) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT64, N, x86_expr_i64_cdiv);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], a[i] / b[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], a[i] / b[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2581,7 +2745,8 @@ TEST(x86, direct_u8_cdiv_matches_tinygrad_movzx_div_path) {
   PolyUOp *sink = x86_make_one_range(ctx, pu, POLY_UINT8, N, x86_expr_u8_cdiv);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ((int)out[i], (int)(uint8_t)(a[i] / b[i]));
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ((int)out[i], (int)(uint8_t)(a[i] / b[i]));
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2596,7 +2761,8 @@ TEST(x86, direct_i8_cdiv_matches_tinygrad_movsx_idiv_path) {
   PolyUOp *sink = x86_make_one_range(ctx, pi, POLY_INT8, N, x86_expr_i8_cdiv);
   void *args[3] = {a, b, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], (int8_t)(a[i] / b[i]));
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], (int8_t)(a[i] / b[i]));
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2614,12 +2780,14 @@ TEST(x86, direct_i8_mul_and_where_match_tinygrad_extra_matcher) {
   PolyUOp *mul_sink = x86_make_one_range(ctx, pi8, POLY_INT8, N, x86_expr_i8_mul);
   void *mul_args[3] = {a, b, out_mul};
   ASSERT_INT_EQ(x86_run_direct(ctx, mul_sink, mul_args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out_mul[i], expected_mul[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out_mul[i], expected_mul[i]);
 
   PolyUOp *where_sink = x86_make_one_range(ctx, pi8, POLY_INT8, N, x86_expr_i8_where);
   void *where_args[3] = {a, b, out_where};
   ASSERT_INT_EQ(x86_run_direct(ctx, where_sink, where_args, 3), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out_where[i], expected_where[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out_where[i], expected_where[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2666,13 +2834,15 @@ TEST(x86, direct_unsigned_to_float_casts_match_tinygrad_extra_matcher) {
       x86_make_unary_cast_range(ctx, pu32, POLY_UINT32, pf, POLY_FLOAT32, POLY_OP_CAST, N);
   void *args32[2] = {u32, out32};
   ASSERT_INT_EQ(x86_run_direct(ctx, u32_sink, args32, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out32[i], (float)u32[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out32[i], (float)u32[i], 0.0f);
 
   PolyUOp *u64_sink =
       x86_make_unary_cast_range(ctx, pu64, POLY_UINT64, pf, POLY_FLOAT32, POLY_OP_CAST, N);
   void *args64[2] = {u64, out64};
   ASSERT_INT_EQ(x86_run_direct(ctx, u64_sink, args64, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out64[i], (float)u64[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out64[i], (float)u64[i], 0.0f);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2685,10 +2855,12 @@ TEST(x86, direct_bitcast_u32_f32_matches_tinygrad_probe_class) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pu = poly_dtype_ptr(POLY_UINT32, -1, POLY_ADDR_GLOBAL);
   PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *sink = x86_make_unary_cast_range(ctx, pu, POLY_UINT32, pf, POLY_FLOAT32, POLY_OP_BITCAST, N);
+  PolyUOp *sink =
+      x86_make_unary_cast_range(ctx, pu, POLY_UINT32, pf, POLY_FLOAT32, POLY_OP_BITCAST, N);
   void *args[2] = {bits, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 0.0f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 0.0f);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2701,10 +2873,12 @@ TEST(x86, direct_bitcast_f32_i32_matches_tinygrad_probe_class) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType pf = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
   PolyDType pi = poly_dtype_ptr(POLY_INT32, -1, POLY_ADDR_GLOBAL);
-  PolyUOp *sink = x86_make_unary_cast_range(ctx, pf, POLY_FLOAT32, pi, POLY_INT32, POLY_OP_BITCAST, N);
+  PolyUOp *sink =
+      x86_make_unary_cast_range(ctx, pf, POLY_FLOAT32, pi, POLY_INT32, POLY_OP_BITCAST, N);
   void *args[2] = {vals, out};
   ASSERT_INT_EQ(x86_run_direct(ctx, sink, args, 2), 0);
-  for (int i = 0; i < N; i++) ASSERT_INT_EQ(out[i], expected[i]);
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2801,7 +2975,8 @@ TEST(x86, schedule_runtime_vecadd_uses_x86_device) {
   PolyUOp *buf = (PolyUOp *)poly_uop_get_buffer_identity(realized);
   ASSERT_NOT_NULL(buf);
   ASSERT_INT_EQ(poly_buffer_read(ctx, buf, out, sizeof(out)), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], a_data[i] + b_data[i], 1e-6);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], a_data[i] + b_data[i], 1e-6);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2809,7 +2984,8 @@ TEST(x86, schedule_runtime_vecadd_uses_x86_device) {
 TEST(x86, schedule_runtime_reduce_sum_axis1_matches_tinygrad_probe_class) {
   enum { N = 16, OUT = 4 };
   float a_data[N], out[OUT];
-  for (int i = 0; i < N; i++) a_data[i] = (float)i;
+  for (int i = 0; i < N; i++)
+    a_data[i] = (float)i;
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
   PolyUOp *a = poly_buffer_f32(ctx, N);
@@ -2825,7 +3001,8 @@ TEST(x86, schedule_runtime_reduce_sum_axis1_matches_tinygrad_probe_class) {
   ASSERT_NOT_NULL(buf);
   ASSERT_INT_EQ(poly_buffer_read(ctx, buf, out, sizeof(out)), 0);
   const float expected[OUT] = {6.0f, 22.0f, 38.0f, 54.0f};
-  for (int i = 0; i < OUT; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
+  for (int i = 0; i < OUT; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2853,7 +3030,8 @@ TEST(x86, schedule_runtime_dot_matches_tinygrad_probe_class) {
   ASSERT_NOT_NULL(buf);
   ASSERT_INT_EQ(poly_buffer_read(ctx, buf, out, sizeof(out)), 0);
   const float expected[OUT] = {15.0f, 10.0f, 35.0f, 30.0f};
-  for (int i = 0; i < OUT; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 1e-4);
+  for (int i = 0; i < OUT; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 1e-4);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -2903,7 +3081,8 @@ TEST(x86, threaded_vecadd_program_core_id_shards_match_tinygrad_cpu_x86) {
   void *args[3] = {out, a, b};
   ASSERT_INT_EQ(poly_x86_program_call_core(prog, args, 3, 0), 0);
   ASSERT_INT_EQ(poly_x86_program_call_core(prog, args, 3, 1), 0);
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], a[i] + b[i], 1e-6f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], a[i] + b[i], 1e-6f);
 
   poly_x86_program_destroy(prog);
   poly_schedule_free(sched);
@@ -2929,8 +3108,7 @@ TEST(x86, schedule_runtime_cross_entropy_dense_axis1_keeps_fifth_arg_live) {
 
   float logits_data[12] = {0};
   float target_data[12] = {
-      1, 0, 0, 0, 0, 1,
-      0, 1, 1, 0, 0, 0,
+      1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0,
   };
   float out_data[1] = {0};
   PolyTestBufferView bindings[] = {
@@ -2955,8 +3133,7 @@ TEST(x86, schedule_runtime_computed_log2_keeps_loop_live_ins_like_tinygrad) {
   PolyUOp *rf = poly_arange(ctx, 0.0, (double)N, 1.0);
   ASSERT_NOT_NULL(rf);
   PolyUOp *x = poly_alu2(
-      ctx, POLY_OP_FDIV,
-      poly_alu2(ctx, POLY_OP_ADD, rf, poly_const_float(ctx, 1.0)),
+      ctx, POLY_OP_FDIV, poly_alu2(ctx, POLY_OP_ADD, rf, poly_const_float(ctx, 1.0)),
       poly_const_float(ctx, 17.0)
   );
   PolyUOp *y = poly_alu1(ctx, POLY_OP_LOG2, x);
@@ -3032,7 +3209,34 @@ TEST(x86, schedule_runtime_pow_dynamic_exponent_uses_xpow_like_tinygrad) {
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, &view, 1), 0);
 
   const float expected[N] = {8.0f, 9.0f, 2.0f, 5.0f};
-  for (int i = 0; i < N; i++) ASSERT_FLOAT_EQ(out[i], expected[i], 2e-3f);
+  for (int i = 0; i < N; i++)
+    ASSERT_FLOAT_EQ(out[i], expected[i], 2e-3f);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(x86, schedule_runtime_integer_pow_is_exact_backend_superset) {
+  enum { N = 10 };
+  int32_t base[N] = {2, 3, -2, -1, 0, 1, 11, 0, -1, 2};
+  int32_t expv[N] = {3, 2, 3, -3, -1, -2, 7, 0, INT32_MIN, INT32_MIN};
+  int32_t out[N] = {0};
+  const int32_t expected[N] = {8, 9, -8, -1, 0, 1, 19487171, 1, 1, 0};
+  PolyCtx *ctx = poly_ctx_new();
+  poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
+
+  PolyUOp *b = poly_buffer(ctx, POLY_INT32, N);
+  PolyUOp *e = poly_buffer(ctx, POLY_INT32, N);
+  PolyUOp *o = poly_buffer(ctx, POLY_INT32, N);
+  poly_buffer_set(ctx, b, base, sizeof(base), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, e, expv, sizeof(expv), POLY_DEVICE_CPU);
+
+  PolyUOp *pow = poly_alu2(ctx, POLY_OP_POW, b, e);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, o, pow));
+  PolyTestBufferView view = POLY_TEST_HOST_VIEW(o, out);
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, &view, 1), 0);
+
+  for (int i = 0; i < N; i++)
+    ASSERT_INT_EQ(out[i], expected[i]);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -3109,7 +3313,8 @@ TEST(x86, schedule_runtime_qwen_ffn_fused_large_matches_tinygrad_probe_class) {
   ASSERT_NOT_NULL(buf);
   ASSERT_INT_EQ(poly_buffer_read(ctx, buf, out, (size_t)D * sizeof(float)), 0);
 
-  for (int i = 0; i < D; i++) ASSERT_FLOAT_ABS(out[i], ref[i], 2e-6f);
+  for (int i = 0; i < D; i++)
+    ASSERT_FLOAT_ABS(out[i], ref[i], 2e-6f);
 
   poly_ctx_destroy(ctx);
   free(x);

@@ -78,7 +78,15 @@ EM_JS(int, js_compile_wasm_kernel, (const uint8_t *bytes, int len), {
   return Math.log2(x); },
       sinf:  function(x) {
   return Math.sin(x); },
+      exp2: function(x) {
+  return Math.pow(2, x); },
+      log2: function(x) {
+  return Math.log2(x); },
+      sin: function(x) {
+  return Math.sin(x); },
       powf:  function(x, y) {
+  return Math.pow(x, y); },
+      pow:  function(x, y) {
   return Math.pow(x, y); }
 }
 }

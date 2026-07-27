@@ -17,7 +17,7 @@
 
 int range_start_for_op(PolyOps op) {
   switch (op) {
-  case POLY_OP_BUFFERIZE:
+  case POLY_OP_STAGE:
     return 1;
   case POLY_OP_REDUCE:
     return 1;
@@ -109,7 +109,8 @@ PolyPatternMatcher *poly_pm_flatten_range(void) {
   PolyRule rules[] = {
       {poly_pat_allow_any_len(poly_pat_ops(ops, NULL, 0, NULL)), flatten_range},
   };
-  g_pm_flatten_range = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_flatten_range =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_flatten_range;
 }
 
@@ -120,7 +121,7 @@ static int count_divmod(PolyCtx *ctx, PolyUOp *u) {
   PolyUOp **topo = poly_toposort_alloc(ctx, u, &n_topo);
   int n = 0;
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op == POLY_OP_IDIV || topo[i]->op == POLY_OP_MOD) n++;
+    if (topo[i]->op == POLY_OP_FLOORDIV || topo[i]->op == POLY_OP_FLOORMOD) n++;
   }
   poly_toposort_free(topo);
   return n;
@@ -142,8 +143,10 @@ static PolyUOp *try_merge_two_ranges(PolyCtx *ctx, PolyUOp *root, PolyUOp *r0, P
   PolyUOp *prod = poly_uop0(ctx, POLY_OP_CONST, r0->dtype, poly_arg_int(s0 * s1));
   PolyUOp *new_range = poly_uop1(ctx, POLY_OP_RANGE, r0->dtype, prod, r0->arg);
   PolyUOp *s1c = poly_uop0(ctx, POLY_OP_CONST, r0->dtype, poly_arg_int(s1));
-  PolyUOp *sub0 = poly_uop2(ctx, POLY_OP_IDIV, r0->dtype, new_range, s1c, poly_arg_none());
-  PolyUOp *sub1 = poly_uop2(ctx, POLY_OP_MOD, r1->dtype, new_range, s1c, poly_arg_none());
+  PolyUOp *sub0 =
+      poly_uop2(ctx, POLY_OP_FLOORDIV, r0->dtype, new_range, s1c, poly_arg_none());
+  PolyUOp *sub1 =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, r1->dtype, new_range, s1c, poly_arg_none());
   PolyUOp *from[2] = {r0, r1};
   PolyUOp *to[2] = {sub0, sub1};
   PolyUOp *cand = poly_uop_substitute(ctx, root, from, to, 2);
@@ -185,7 +188,8 @@ PolyPatternMatcher *poly_pm_simplify_ranges(void) {
   PolyRule rules[] = {
       {poly_pat_allow_any_len(poly_pat_ops(ops, NULL, 0, NULL)), simplify_merge_adjacent},
   };
-  g_pm_simplify_ranges = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_simplify_ranges =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_simplify_ranges;
 }
 
@@ -247,7 +251,8 @@ static PolyUOp *do_substitute(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b
     PolyArg k1_arg = poly_arg_range_ex(
         poly_range_axis_id(r->arg), poly_range_axis_type(r->arg), extra1, n_extra + 1
     );
-    PolyUOp *k0_bound = poly_uop2(ctx, POLY_OP_IDIV, r->dtype, r->src[0], v, poly_arg_none());
+    PolyUOp *k0_bound =
+        poly_uop2(ctx, POLY_OP_FLOORDIV, r->dtype, r->src[0], v, poly_arg_none());
     PolyUOp *k0 = poly_uop1(ctx, POLY_OP_RANGE, r->dtype, k0_bound, k0_arg);
     PolyUOp *k1 = poly_uop1(ctx, POLY_OP_RANGE, r->dtype, v, k1_arg);
     PolyUOp *k0_mul = poly_uop2(ctx, POLY_OP_MUL, r->dtype, k0, v, poly_arg_none());
@@ -269,10 +274,14 @@ static _Thread_local PolyPatternMatcher *g_pm_split_ranges = NULL;
 PolyPatternMatcher *poly_pm_split_ranges(void) {
   if (g_pm_split_ranges) return g_pm_split_ranges;
   PolyRule rules[] = {
-      {poly_pat_op2(POLY_OP_MOD, poly_pat_any("r"), poly_pat_cvar("c"), NULL), mark_range_mod},
+      {poly_pat_op2(
+           POLY_OP_FLOORMOD, poly_pat_any("r"), poly_pat_cvar("c"), NULL
+       ),
+       mark_range_mod},
       {poly_pat_op(POLY_OP_SINK, NULL, 0, NULL), do_substitute},
   };
-  g_pm_split_ranges = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_split_ranges =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_split_ranges;
 }
 
@@ -455,7 +464,7 @@ static PolyUOp *rule_collapse_lift_mul_from_cmplt(
     PolyUOp *one = typed_const(ctx, c->dtype, 1);
     PolyUOp *cy1 = poly_alu2(ctx, POLY_OP_ADD, c, y);
     PolyUOp *cy1m1 = poly_alu2(ctx, POLY_OP_SUB, cy1, one);
-    PolyUOp *div = poly_alu2(ctx, POLY_OP_IDIV, cy1m1, y);
+    PolyUOp *div = poly_alu2(ctx, POLY_OP_FLOORDIV, cy1m1, y);
     return poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, div, poly_arg_none());
   }
   return NULL;
@@ -901,7 +910,8 @@ static PolyPatternMatcher *pm_reduce_unparented_get(void) {
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
   };
-  g_pm_reduce_unparented = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_reduce_unparented =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_reduce_unparented;
 }
 
@@ -918,13 +928,15 @@ static PolyPatternMatcher *pm_reduce_collapse_base_get(void) {
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), rule_collapse_and_on_where},
       {poly_pat_op(POLY_OP_MUL, NULL, 0, "mul"), rule_collapse_mul_casted_bool},
   };
-  g_pm_reduce_collapse_base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_reduce_collapse_base =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_reduce_collapse_base;
 }
 
 static PolyPatternMatcher *pm_reduce_collapse_get(void) {
   if (g_pm_reduce_collapse) return g_pm_reduce_collapse;
-  g_pm_reduce_collapse = poly_pm_concat(pm_reduce_collapse_base_get(), poly_symbolic());
+  g_pm_reduce_collapse =
+      poly_pm_thread_cache(poly_pm_concat(pm_reduce_collapse_base_get(), poly_symbolic()));
   return g_pm_reduce_collapse;
 }
 
@@ -1015,7 +1027,8 @@ static PolyPatternMatcher *pm_reduce_load_collapse_get(void) {
   };
   PolyPatternMatcher *extra =
       poly_pm_new(extra_rules, (int)(sizeof(extra_rules) / sizeof(extra_rules[0])));
-  g_pm_reduce_load_collapse = poly_pm_concat(pm_reduce_collapse_get(), extra);
+  g_pm_reduce_load_collapse =
+      poly_pm_thread_cache(poly_pm_concat(pm_reduce_collapse_get(), extra));
   poly_pm_destroy(extra); /* poly_pm_concat copies rules. */
   return g_pm_reduce_load_collapse;
 }
@@ -1034,20 +1047,23 @@ static PolyPatternMatcher *pm_reduce_simplify_base_get(void) {
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_unparented},
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_simplify},
   };
-  g_pm_reduce_simplify_base = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_reduce_simplify_base =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_reduce_simplify_base;
 }
 
 static PolyPatternMatcher *pm_reduce_simplify_get(void) {
   if (g_pm_reduce_simplify) return g_pm_reduce_simplify;
-  g_pm_reduce_simplify = poly_pm_concat(pm_reduce_simplify_base_get(), poly_symbolic());
+  g_pm_reduce_simplify =
+      poly_pm_thread_cache(poly_pm_concat(pm_reduce_simplify_base_get(), poly_symbolic()));
   return g_pm_reduce_simplify;
 }
 
 static PolyPatternMatcher *pm_symbolic_reduce_simplify_get(void) {
   if (g_pm_symbolic_reduce_simplify) return g_pm_symbolic_reduce_simplify;
-  g_pm_symbolic_reduce_simplify =
-      poly_pm_concat(poly_symbolic(), pm_reduce_simplify_base_get());
+  g_pm_symbolic_reduce_simplify = poly_pm_thread_cache(
+      poly_pm_concat(poly_symbolic(), pm_reduce_simplify_base_get())
+  );
   return g_pm_symbolic_reduce_simplify;
 }
 
@@ -1089,7 +1105,8 @@ PolyPatternMatcher *poly_pm_load_collapse(void) {
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "red"), reduce_load_collapse},
       {poly_pat_op(POLY_OP_CMPLT, NULL, 0, "cmplt"), undo_loaded_index_math},
   };
-  g_pm_load_collapse = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_load_collapse =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_load_collapse;
 }
 

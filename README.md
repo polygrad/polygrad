@@ -80,6 +80,7 @@ The main intentional differences are:
 | Logical vs physical roots | Tensors keep exportable logical graph roots separate from realized/placed physical roots |
 | Model tooling | `PolyInstance` stores ABI names, logical buffer bindings, entrypoints, objectives, fit/train helpers, and model bundle metadata |
 | Custom kernels | Public custom kernels lower into UOp `CALL` bodies and still run through normal scheduling and runtime caches |
+| WebGPU int64 | WGSL has no native 64-bit integers, so renderer lowering uses two 32-bit lanes while C, CUDA, HIP, WASM, and x86 retain native int64; unlike pinned tinygrad, valid dynamic/uint32 shift counts and signed right shift are handled rather than crashing or changing sign semantics |
 
 These differences exist to make Polygrad useful as an embeddable runtime for
 tools and model packages, while preserving tinygrad-style compiler semantics
@@ -377,8 +378,9 @@ local paths.
 - CUDA, HIP, and WebGPU require matching local runtimes.
 - Browser WebGPU requires a compatible browser and GPU adapter.
 - Structured linalg is portable first. Large blocked linalg kernels are planned.
-- RNG is deterministic, but not bit-compatible with tinygrad's current RNG
-  stream.
+- The tested eager and TinyJit RNG stream is bit-compatible with the pinned
+  tinygrad reference; backend-specific lowering still requires each backend's
+  normal correctness gate.
 - Intentional tinygrad divergences are kept in local architecture notes and
   should be reflected in public docs when they affect users.
 
@@ -389,6 +391,7 @@ local paths.
 | `src/` | C core, compiler, schedulers, runtimes, backends |
 | `py/` | Python frontend |
 | `js/` | Node, WASM, and browser frontend |
+| `r/` | Limited R frontend and `.Call` bridge |
 | `test/` | C tests |
 
 ## License

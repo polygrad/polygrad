@@ -5,15 +5,18 @@ This mirrors the intent of tinygrad's test/external/fuzz_symbolic*.py:
 build bounded symbolic UOp expressions, rewrite them with poly_symbolic(), and
 ask z3 whether the original and rewritten expressions can differ.
 
-The harness intentionally targets the integer/bool subset used by Polygrad's
-current C symbolic fuzzers. It is an external/nightly proof check, not a
-replacement for sanitizer-backed libFuzzer.
+The general mode models unbounded symbolic integers, the div mode models
+tinygrad's weak-index FLOORDIV/FLOORMOD domain, and the fixed mode uses z3
+bit-vectors for typed signed/unsigned wraparound. It is an external/nightly
+proof check, not a replacement for sanitizer-backed libFuzzer or structural
+tinygrad parity probes.
 """
 
 from __future__ import annotations
 
 import argparse
 import ctypes
+import itertools
 import os
 import random
 import sys
@@ -151,6 +154,28 @@ def arg_range(axis_id: int) -> PolyArg:
     return a
 
 
+def arg_none() -> PolyArg:
+    a = PolyArg()
+    a.kind = 0
+    return a
+
+
+def arg_int(value: int) -> PolyArg:
+    a = PolyArg()
+    a.kind = ARG_INT
+    a.value.i = int(value)
+    return a
+
+
+def arg_define_var(name: str, lo: int, hi: int) -> PolyArg:
+    a = PolyArg()
+    a.kind = ARG_DEFINE_VAR
+    a.value.define_var.name = name.encode()
+    a.value.define_var.min_val = int(lo)
+    a.value.define_var.max_val = int(hi)
+    return a
+
+
 def load_lib() -> ctypes.CDLL:
     path = Path(os.environ.get("POLYGRAD_LIB", DEFAULT_LIB))
     if not path.exists():
@@ -180,6 +205,17 @@ def load_lib() -> ctypes.CDLL:
     lib.poly_alu3.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyUOpPtr, PolyUOpPtr, PolyUOpPtr]
     lib.poly_uop1.restype = PolyUOpPtr
     lib.poly_uop1.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyDType, PolyUOpPtr, PolyArg]
+    lib.poly_uop0.restype = PolyUOpPtr
+    lib.poly_uop0.argtypes = [ctypes.c_void_p, ctypes.c_int, PolyDType, PolyArg]
+    lib.poly_uop2.restype = PolyUOpPtr
+    lib.poly_uop2.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        PolyDType,
+        PolyUOpPtr,
+        PolyUOpPtr,
+        PolyArg,
+    ]
 
     lib.poly_symbolic.restype = ctypes.c_void_p
     lib.poly_symbolic.argtypes = []
@@ -202,6 +238,11 @@ class Poly:
             if lib.poly_op_name(i)
         }
         self.int32 = PolyDType.in_dll(lib, "POLY_INT32")
+        self.index = PolyDType.in_dll(lib, "POLY_INDEX")
+        self.fixed_dtypes = {
+            name: PolyDType.in_dll(lib, f"POLY_{name.upper()}")
+            for name in ("int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64")
+        }
 
     def close(self) -> None:
         if self.ctx:
@@ -211,11 +252,28 @@ class Poly:
     def const(self, value: int) -> PolyUOpPtr:
         return self.lib.poly_const_int(self.ctx, int(value))
 
+    def const_typed(self, dtype: PolyDType, value: int) -> PolyUOpPtr:
+        return self.lib.poly_uop0(self.ctx, self.ops["CONST"], dtype, arg_int(value))
+
     def var(self, name: str, lo: int, hi: int) -> PolyUOpPtr:
         return self.lib.poly_define_var(self.ctx, name.encode(), lo, hi)
 
-    def range(self, bound: PolyUOpPtr, axis_id: int) -> PolyUOpPtr:
-        return self.lib.poly_uop1(self.ctx, self.ops["RANGE"], self.int32, bound, arg_range(axis_id))
+    def var_typed(self, dtype: PolyDType, name: str, lo: int, hi: int) -> PolyUOpPtr:
+        return self.lib.poly_uop0(
+            self.ctx,
+            self.ops["DEFINE_VAR"],
+            dtype,
+            arg_define_var(name, lo, hi),
+        )
+
+    def range(self, bound: PolyUOpPtr, axis_id: int, dtype: PolyDType | None = None) -> PolyUOpPtr:
+        return self.lib.poly_uop1(
+            self.ctx,
+            self.ops["RANGE"],
+            self.int32 if dtype is None else dtype,
+            bound,
+            arg_range(axis_id),
+        )
 
     def alu1(self, op: str, a: PolyUOpPtr) -> PolyUOpPtr:
         return self.lib.poly_alu1(self.ctx, self.ops[op], a)
@@ -238,6 +296,31 @@ class Poly:
         finally:
             self.lib.poly_free(raw)
 
+    def render_tree(self, u: PolyUOpPtr, max_depth: int = 12) -> str:
+        lines: list[str] = []
+
+        def visit(node_ptr: PolyUOpPtr, depth: int) -> None:
+            node = node_ptr.contents
+            op = self.lib.poly_op_name(node.op).decode()
+            arg = ""
+            if node.arg.kind == ARG_INT:
+                arg = f" arg={node.arg.value.i}"
+            elif node.arg.kind == ARG_BOOL:
+                arg = f" arg={bool(node.arg.value.b)}"
+            elif node.arg.kind == ARG_DEFINE_VAR:
+                var = node.arg.value.define_var
+                arg = f" arg=({var.name.decode()},{var.min_val},{var.max_val})"
+            lines.append(f"{'  ' * depth}{op}:{dtype_name(node.dtype)}{arg}")
+            if depth >= max_depth:
+                if node.n_src:
+                    lines.append(f"{'  ' * (depth + 1)}...")
+                return
+            for source_index in range(node.n_src):
+                visit(node.src[source_index], depth + 1)
+
+        visit(u, 0)
+        return "\n".join(lines)
+
 
 def z3_cdiv(a, b):
     return z3.If(a < 0, z3.If(0 < b, (a + (b - 1)) / b, (a - (b + 1)) / b), a / b)
@@ -247,14 +330,66 @@ def z3_cmod(a, b):
     return a - z3_cdiv(a, b) * b
 
 
+def z3_floordiv(a, b):
+    trunc = z3_cdiv(a, b)
+    rem = a - trunc * b
+    return trunc - z3.If(z3.And(rem != 0, (a < 0) != (b < 0)), 1, 0)
+
+
+def z3_floormod(a, b):
+    return a - z3_floordiv(a, b) * b
+
+
+def dtype_name(dtype: PolyDType) -> str:
+    return dtype.name.decode() if dtype.name else ""
+
+
+def dtype_is_unsigned(dtype: PolyDType) -> bool:
+    return dtype.priority in (2, 4, 6, 8)
+
+
+def dtype_is_bool(dtype: PolyDType) -> bool:
+    return dtype.priority == 0 and dtype.bitsize == 1
+
+
+def bv_signed_value(value, dtype: PolyDType):
+    return z3.BV2Int(value, is_signed=not dtype_is_unsigned(dtype))
+
+
+def bv_cdiv(a, b, dtype: PolyDType):
+    return z3.UDiv(a, b) if dtype_is_unsigned(dtype) else a / b
+
+
+def bv_cmod(a, b, dtype: PolyDType):
+    return z3.URem(a, b) if dtype_is_unsigned(dtype) else z3.SRem(a, b)
+
+
+def bv_floordiv(a, b, dtype: PolyDType):
+    if dtype_is_unsigned(dtype):
+        return z3.UDiv(a, b)
+    trunc = a / b
+    rem = z3.SRem(a, b)
+    zero = z3.BitVecVal(0, dtype.bitsize, ctx=a.ctx)
+    one = z3.BitVecVal(1, dtype.bitsize, ctx=a.ctx)
+    adjust = z3.And(rem != zero, (a < zero) != (b < zero))
+    return trunc - z3.If(adjust, one, zero)
+
+
+def bv_floormod(a, b, dtype: PolyDType):
+    return a - bv_floordiv(a, b, dtype) * b
+
+
 class Z3Translator:
-    def __init__(self, poly: Poly):
+    def __init__(self, poly: Poly, fixed_width: bool = False):
         self.poly = poly
+        self.fixed_width = fixed_width
         self.ctx = z3.Context()
         self.solver = z3.Solver(ctx=self.ctx)
         self.solver.set(timeout=5000)
         self.memo: dict[int, z3.ExprRef] = {}
         self.z3_vars: dict[str, z3.ExprRef] = {}
+        self.finite_domains: dict[str, tuple[z3.ExprRef, tuple[int, ...]]] = {}
+        self.finite_domains_complete = True
 
     def translate(self, u: PolyUOpPtr):
         key = ptr_key(u)
@@ -268,7 +403,11 @@ class Z3Translator:
             if node.arg.kind == ARG_BOOL:
                 out = z3.BoolVal(bool(node.arg.value.b), ctx=self.ctx)
             elif node.arg.kind == ARG_INT:
-                out = z3.IntVal(int(node.arg.value.i), ctx=self.ctx)
+                out = (
+                    z3.BitVecVal(int(node.arg.value.i), node.dtype.bitsize, ctx=self.ctx)
+                    if self.fixed_width and not dtype_is_bool(node.dtype)
+                    else z3.IntVal(int(node.arg.value.i), ctx=self.ctx)
+                )
             else:
                 raise NotImplementedError(f"unsupported CONST arg kind {node.arg.kind}")
         elif op == "DEFINE_VAR":
@@ -277,13 +416,41 @@ class Z3Translator:
             name = node.arg.value.define_var.name.decode()
             lo = int(node.arg.value.define_var.min_val)
             hi = int(node.arg.value.define_var.max_val)
-            var_key = f"var:{name}"
+            var_key = f"var:{name}:{dtype_name(node.dtype)}"
             out = self.z3_vars.get(var_key)
             if out is None:
-                out = z3.Int(name, ctx=self.ctx)
+                out = (
+                    z3.BitVec(name, node.dtype.bitsize, ctx=self.ctx)
+                    if self.fixed_width
+                    else z3.Int(name, ctx=self.ctx)
+                )
                 self.z3_vars[var_key] = out
-            self.solver.add(lo <= out, out <= hi)
+            if self.fixed_width and hi - lo <= 64:
+                # Fixed-mode boundary ranges are deliberately small. State the
+                # exact finite bit-vector domain instead of routing through
+                # BV2Int, which makes otherwise tiny division/modulo proofs
+                # needlessly expensive while representing the same values.
+                self.solver.add(
+                    z3.Or(
+                        *(
+                            out == z3.BitVecVal(value, node.dtype.bitsize, ctx=self.ctx)
+                            for value in range(lo, hi + 1)
+                        )
+                    )
+                )
+                values = tuple(range(lo, hi + 1))
+                if var_key in self.finite_domains:
+                    previous = self.finite_domains[var_key][1]
+                    values = tuple(value for value in previous if lo <= value <= hi)
+                self.finite_domains[var_key] = (out, values)
+            else:
+                if self.fixed_width:
+                    self.finite_domains_complete = False
+                bounded = bv_signed_value(out, node.dtype) if self.fixed_width else out
+                self.solver.add(lo <= bounded, bounded <= hi)
         elif op == "RANGE":
+            if self.fixed_width:
+                raise NotImplementedError("fixed-width RANGE")
             axis = int(node.arg.value.range.axis_id)
             bound = self.translate(node.src[0])
             var_key = f"range:{axis}"
@@ -304,24 +471,52 @@ class Z3Translator:
                 out = src[0] * src[1]
             elif op in ("CDIV", "IDIV"):
                 self.solver.add(src[1] != 0)
-                out = z3_cdiv(src[0], src[1])
+                out = bv_cdiv(src[0], src[1], node.dtype) if self.fixed_width else z3_cdiv(src[0], src[1])
             elif op in ("CMOD", "MOD"):
                 self.solver.add(src[1] != 0)
-                out = z3_cmod(src[0], src[1])
+                out = bv_cmod(src[0], src[1], node.dtype) if self.fixed_width else z3_cmod(src[0], src[1])
+            elif op == "FLOORDIV":
+                self.solver.add(src[1] != 0)
+                out = (
+                    bv_floordiv(src[0], src[1], node.dtype)
+                    if self.fixed_width
+                    else z3_floordiv(src[0], src[1])
+                )
+            elif op == "FLOORMOD":
+                self.solver.add(src[1] != 0)
+                out = (
+                    bv_floormod(src[0], src[1], node.dtype)
+                    if self.fixed_width
+                    else z3_floormod(src[0], src[1])
+                )
+            elif op == "SHL":
+                out = src[0] << src[1]
+            elif op == "SHR":
+                out = z3.LShR(src[0], src[1]) if dtype_is_unsigned(node.dtype) else src[0] >> src[1]
             elif op == "MAX":
-                out = z3.If(src[0] < src[1], src[1], src[0])
+                less = (
+                    z3.ULT(src[0], src[1])
+                    if self.fixed_width and dtype_is_unsigned(node.dtype)
+                    else src[0] < src[1]
+                )
+                out = z3.If(less, src[1], src[0])
             elif op == "CMPLT":
-                out = src[0] < src[1]
+                src_dtype = node.src[0].contents.dtype
+                out = (
+                    z3.ULT(src[0], src[1])
+                    if self.fixed_width and dtype_is_unsigned(src_dtype)
+                    else src[0] < src[1]
+                )
             elif op == "CMPNE":
                 out = src[0] != src[1]
             elif op == "CMPEQ":
                 out = src[0] == src[1]
             elif op == "AND":
-                out = z3.And(src[0], src[1])
+                out = z3.And(src[0], src[1]) if z3.is_bool(src[0]) else src[0] & src[1]
             elif op == "OR":
-                out = z3.Or(src[0], src[1])
+                out = z3.Or(src[0], src[1]) if z3.is_bool(src[0]) else src[0] | src[1]
             elif op == "XOR":
-                out = src[0] != src[1]
+                out = src[0] != src[1] if z3.is_bool(src[0]) else src[0] ^ src[1]
             elif op == "WHERE":
                 out = z3.If(src[0], src[1], src[2])
             else:
@@ -356,53 +551,218 @@ def random_int_expr(poly: Poly, rng: random.Random, leaves: list[PolyUOpPtr], de
     return poly.alu2(rng.choice(["ADD", "SUB", "MUL", "MAX"]), a, b)
 
 
-def random_factor(poly: Poly, rng: random.Random, factors: list[PolyUOpPtr]) -> PolyUOpPtr:
+def random_factor(
+    poly: Poly,
+    rng: random.Random,
+    factors: list[PolyUOpPtr],
+    dtype: PolyDType | None = None,
+) -> PolyUOpPtr:
     base = rng.choice(factors)
     choice = rng.randrange(4)
     if choice == 0:
         return base
     if choice == 1:
-        return poly.alu2("MUL", base, poly.const(rng.randint(2, 7)))
+        const = poly.const(rng.randint(2, 7)) if dtype is None else poly.const_typed(dtype, rng.randint(2, 7))
+        return poly.alu2("MUL", base, const)
     if choice == 2:
         return poly.alu2("ADD", base, rng.choice(factors))
-    return poly.const(rng.choice([1, 2, 3, 4, 7, 9, 16, 33]))
+    value = rng.choice([1, 2, 3, 4, 7, 9, 16, 33])
+    return poly.const(value) if dtype is None else poly.const_typed(dtype, value)
 
 
 def random_div_expr(poly: Poly, rng: random.Random, variables: list[PolyUOpPtr]) -> PolyUOpPtr:
-    factors = variables + [poly.const(v) for v in [1, 2, 3, 4, 7, 9, 16, 33]]
+    factors = variables + [poly.const_typed(poly.index, v) for v in [1, 2, 3, 4, 7, 9, 16, 33]]
     for _ in range(2):
         factors.append(poly.alu2("MUL", rng.choice(variables), rng.choice(variables)))
     for _ in range(2):
         factors.append(poly.alu2("ADD", rng.choice(variables), rng.choice(factors)))
-    ranges = [poly.range(random_factor(poly, rng, factors), i) for i in range(4)]
+    ranges = [
+        poly.range(random_factor(poly, rng, factors, poly.index), i, poly.index)
+        for i in range(4)
+    ]
 
     def term() -> PolyUOpPtr:
-        out = poly.alu2("MUL", rng.choice(ranges), random_factor(poly, rng, factors))
+        out = poly.alu2("MUL", rng.choice(ranges), random_factor(poly, rng, factors, poly.index))
         return poly.alu1("NEG", out) if rng.randrange(4) == 0 else out
 
     expr = term()
     for _ in range(rng.randint(1, 4)):
         expr = poly.alu2("ADD", expr, term())
 
-    den = random_factor(poly, rng, factors)
+    den = random_factor(poly, rng, factors, poly.index)
     if rng.randrange(4) == 0:
         den = poly.alu1("NEG", den)
-    return poly.alu2(rng.choice(["CDIV", "CMOD"]), expr, den)
+    return poly.alu2(rng.choice(["FLOORDIV", "FLOORMOD"]), expr, den)
 
 
-def prove_equivalent(poly: Poly, expr: PolyUOpPtr, rewritten: PolyUOpPtr) -> tuple[bool, str | None]:
-    t = Z3Translator(poly)
+FIXED_RANGES = {
+    "int8": [(-128, -121), (-5, 5), (120, 127)],
+    "uint8": [(0, 7), (120, 127), (248, 255)],
+    "int16": [(-(1 << 15), -(1 << 15) + 7), (-5, 5), ((1 << 15) - 8, (1 << 15) - 1)],
+    "uint16": [(0, 7), ((1 << 15) - 8, (1 << 15) - 1), ((1 << 16) - 8, (1 << 16) - 1)],
+    "int32": [(-(1 << 31), -(1 << 31) + 7), (-5, 5), ((1 << 31) - 8, (1 << 31) - 1)],
+    "uint32": [(0, 7), ((1 << 31) - 8, (1 << 31) - 1), ((1 << 32) - 8, (1 << 32) - 1)],
+    "int64": [(-(1 << 63), -(1 << 63) + 7), (-5, 5), ((1 << 63) - 8, (1 << 63) - 1)],
+    "uint64": [(0, 7), ((1 << 31) - 8, (1 << 31) - 1), ((1 << 63) - 8, (1 << 63) - 1)],
+}
+
+
+def fixed_regressions(poly: Poly) -> list[tuple[str, PolyUOpPtr]]:
+    u8, i8 = poly.fixed_dtypes["uint8"], poly.fixed_dtypes["int8"]
+    cases: list[tuple[str, PolyUOpPtr]] = []
+
+    u8_add = poly.alu2("ADD", poly.var_typed(u8, "u8_add", 250, 251), poly.const_typed(u8, 10))
+    cases.append(("uint8_add_wrap_cmp", poly.alu2("CMPLT", u8_add, poly.const_typed(u8, 5))))
+
+    i8_add = poly.alu2("ADD", poly.var_typed(i8, "i8_add", 120, 121), poly.const_typed(i8, 10))
+    cases.append(("int8_add_wrap_cmp", poly.alu2("CMPLT", i8_add, poly.const_typed(i8, 0))))
+
+    u8_sub = poly.alu2("SUB", poly.var_typed(u8, "u8_sub", 0, 1), poly.const_typed(u8, 2))
+    cases.append(("uint8_sub_wrap_cmp", poly.alu2("CMPLT", u8_sub, poly.const_typed(u8, 5))))
+
+    i8_mul = poly.alu2("MUL", poly.var_typed(i8, "i8_mul", 64, 65), poly.const_typed(i8, 2))
+    cases.append(("int8_mul_wrap_cmp", poly.alu2("CMPLT", i8_mul, poly.const_typed(i8, 0))))
+
+    u8_shl = poly.alu2("SHL", poly.var_typed(u8, "u8_shl", 128, 129), poly.const_typed(u8, 1))
+    cases.append(("uint8_shl_wrap_cmp", poly.alu2("CMPLT", u8_shl, poly.const_typed(u8, 1))))
+
+    for name, dtype in poly.fixed_dtypes.items():
+        x = poly.var_typed(dtype, f"{name}_all_ones", 2, 3)
+        numerator = poly.alu2("SHR", x, poly.const_typed(dtype, 1))
+        all_ones = poly.const_typed(dtype, -1)
+        cases.append((f"{name}_cdiv_all_ones", poly.alu2("CDIV", numerator, all_ones)))
+        cases.append((f"{name}_cmod_all_ones", poly.alu2("CMOD", numerator, all_ones)))
+    return cases
+
+
+def random_fixed_expr(poly: Poly, rng: random.Random, iteration: int, depth: int) -> PolyUOpPtr:
+    name = rng.choice(tuple(poly.fixed_dtypes))
+    dtype = poly.fixed_dtypes[name]
+    lo0, hi0 = rng.choice(FIXED_RANGES[name])
+    lo1, hi1 = rng.choice(FIXED_RANGES[name])
+    leaves = [
+        poly.var_typed(dtype, f"x{iteration}", lo0, hi0),
+        poly.var_typed(dtype, f"y{iteration}", lo1, hi1),
+    ]
+    const_values = [0, 1, 2, 3, 7, 9] if dtype_is_unsigned(dtype) else [-9, -3, -2, -1, 0, 1, 2, 3, 7, 9]
+    denominator_values = [1, 2, 3, 7, 9] if dtype_is_unsigned(dtype) else [-9, -3, -2, -1, 1, 2, 3, 7, 9]
+
+    def const() -> PolyUOpPtr:
+        # Random expressions use canonical source constants. A negative raw
+        # integer in an unsigned CONST is a useful all-ones shorthand, but the
+        # pinned tinygrad constant folder does not normalize such operands even
+        # though runtime kernels do. fixed_regressions() covers that deliberate
+        # encoding separately at every width.
+        return poly.const_typed(dtype, rng.choice(const_values))
+
+    def integer(level: int) -> PolyUOpPtr:
+        if level <= 0:
+            return rng.choice(leaves + [const()])
+        choice = rng.randrange(9)
+        a = integer(level - 1)
+        if choice == 0:
+            return poly.alu1("NEG", a)
+        if choice == 1:
+            return poly.alu2("SHL", a, poly.const_typed(dtype, rng.choice([1, 2, 3])))
+        if choice in (2, 3, 4, 5):
+            den = poly.const_typed(dtype, rng.choice(denominator_values))
+            return poly.alu2(("CDIV", "CMOD", "FLOORDIV", "FLOORMOD")[choice - 2], a, den)
+        b = integer(level - 1)
+        return poly.alu2(("ADD", "SUB", "MUL")[choice - 6], a, b)
+
+    a = integer(depth)
+    if rng.randrange(2):
+        return a
+    b = integer(max(0, depth - 1))
+    return poly.alu2(rng.choice(["CMPLT", "CMPNE", "CMPEQ"]), a, b)
+
+
+def prove_equivalent(
+    poly: Poly,
+    expr: PolyUOpPtr,
+    rewritten: PolyUOpPtr,
+    *,
+    fixed_width: bool = False,
+) -> tuple[bool, str | None]:
+    t = Z3Translator(poly, fixed_width=fixed_width)
     try:
         a = t.translate(expr)
         b = t.translate(rewritten)
-        check = t.solver.check(a != b)
     except NotImplementedError as exc:
         return True, f"skipped unsupported: {exc}"
+
+    a = z3.simplify(a)
+    b = z3.simplify(b)
+
+    if fixed_width and t.finite_domains_complete:
+        domains = list(t.finite_domains.values())
+        for values in itertools.product(*(domain for _, domain in domains)):
+            substitutions = tuple(
+                (var, z3.BitVecVal(value, var.size(), ctx=t.ctx))
+                for (var, _), value in zip(domains, values)
+            )
+            constraints = [
+                z3.simplify(z3.substitute(assertion, *substitutions))
+                for assertion in t.solver.assertions()
+            ]
+            if any(z3.is_false(constraint) for constraint in constraints):
+                continue
+            ground_a = z3.simplify(z3.substitute(a, *substitutions))
+            ground_b = z3.simplify(z3.substitute(b, *substitutions))
+            equal = z3.simplify(ground_a == ground_b)
+            if z3.is_true(equal):
+                continue
+
+            ground_solver = z3.Solver(ctx=t.ctx)
+            ground_solver.set(timeout=5000)
+            ground_solver.add(*constraints, ground_a != ground_b)
+            ground_check = ground_solver.check()
+            assignment = ", ".join(
+                f"{var}={value}" for (var, _), value in zip(domains, values)
+            )
+            if ground_check == z3.sat:
+                return False, assignment
+            if ground_check == z3.unknown:
+                return True, f"skipped unknown for {assignment}: {ground_solver.reason_unknown()}"
+        return True, None
+
+    check = t.solver.check(a != b)
 
     if check == z3.unsat:
         return True, None
     if check == z3.unknown:
-        return True, f"skipped unknown: {t.solver.reason_unknown()}"
+        primary_reason = t.solver.reason_unknown()
+        goal = z3.Goal(ctx=t.ctx, models=True)
+        goal.add(*t.solver.assertions(), a != b)
+        tactic = z3.TryFor(
+            z3.Then(
+                z3.Tactic("simplify", ctx=t.ctx),
+                z3.Tactic("solve-eqs", ctx=t.ctx),
+                z3.Tactic("smt", ctx=t.ctx),
+            ),
+            5000,
+            ctx=t.ctx,
+        )
+        try:
+            subgoals = tactic(goal)
+        except z3.Z3Exception as exc:
+            return True, f"skipped unknown: {primary_reason}; tactic: {exc}"
+
+        for subgoal in subgoals:
+            if subgoal.inconsistent():
+                continue
+            subsolver = z3.Solver(ctx=t.ctx)
+            subsolver.set(timeout=5000)
+            subsolver.add(subgoal.as_expr())
+            subcheck = subsolver.check()
+            if subcheck == z3.sat:
+                return False, str(subgoal.convert_model(subsolver.model()))
+            if subcheck == z3.unknown:
+                return True, (
+                    f"skipped unknown: {primary_reason}; tactic subgoal: "
+                    f"{subsolver.reason_unknown()}"
+                )
+        return True, None
     return False, str(t.solver.model())
 
 
@@ -410,6 +770,31 @@ def run(args: argparse.Namespace) -> int:
     lib = load_lib()
     rng = random.Random(args.seed)
     skipped = 0
+    checked = 0
+
+    if args.mode == "fixed":
+        poly = Poly(lib)
+        try:
+            for label, expr in fixed_regressions(poly):
+                rewritten = poly.rewrite(expr)
+                ok, note = prove_equivalent(poly, expr, rewritten, fixed_width=True)
+                checked += 1
+                if ok and note:
+                    skipped += 1
+                    print(f"fixed-width proof did not complete: case={label}: {note}", file=sys.stderr)
+                    print(f"expr:\n{poly.render_tree(expr)}", file=sys.stderr)
+                    print(f"rewritten:\n{poly.render_tree(rewritten)}", file=sys.stderr)
+                    return 2
+                if not ok:
+                    print("z3 found mismatched fixed-width symbolic rewrite", file=sys.stderr)
+                    print(f"case={label}", file=sys.stderr)
+                    print(f"expr:\n{poly.render_tree(expr)}", file=sys.stderr)
+                    print(f"rewritten:\n{poly.render_tree(rewritten)}", file=sys.stderr)
+                    print(f"model={note}", file=sys.stderr)
+                    return 1
+        finally:
+            poly.close()
+
     for i in range(args.iters):
         poly = Poly(lib)
         try:
@@ -424,37 +809,50 @@ def run(args: argparse.Namespace) -> int:
             elif args.mode == "div":
                 upper_bounds = [1, 2, 3, 16, 33, 53, 64, 256]
                 variables = [
-                    poly.var("i", 1, rng.choice(upper_bounds)),
-                    poly.var("j", 1, rng.choice(upper_bounds)),
-                    poly.var("k", 1, rng.choice(upper_bounds)),
+                    poly.var_typed(poly.index, "i", 1, rng.choice(upper_bounds)),
+                    poly.var_typed(poly.index, "j", 1, rng.choice(upper_bounds)),
+                    poly.var_typed(poly.index, "k", 1, rng.choice(upper_bounds)),
                 ]
                 expr = random_div_expr(poly, rng, variables)
+            elif args.mode == "fixed":
+                expr = random_fixed_expr(poly, rng, i, min(args.depth, 4))
             else:
                 raise AssertionError(args.mode)
 
             rewritten = poly.rewrite(expr)
-            ok, note = prove_equivalent(poly, expr, rewritten)
-            if note:
+            ok, note = prove_equivalent(poly, expr, rewritten, fixed_width=args.mode == "fixed")
+            checked += 1
+            if ok and note:
                 skipped += 1
+                if args.mode == "fixed":
+                    print(
+                        f"fixed-width proof did not complete: seed={args.seed} iter={i}: {note}",
+                        file=sys.stderr,
+                    )
+                    print(f"expr:\n{poly.render_tree(expr)}", file=sys.stderr)
+                    print(f"rewritten:\n{poly.render_tree(rewritten)}", file=sys.stderr)
+                    return 2
                 if args.verbose:
                     print(f"{i}: {note}")
+                    print(f"expr:\n{poly.render_tree(expr)}")
+                    print(f"rewritten:\n{poly.render_tree(rewritten)}")
             if not ok:
                 print("z3 found mismatched symbolic rewrite", file=sys.stderr)
                 print(f"seed={args.seed} iter={i} mode={args.mode}", file=sys.stderr)
-                print(f"expr={poly.render(expr)}", file=sys.stderr)
-                print(f"rewritten={poly.render(rewritten)}", file=sys.stderr)
+                print(f"expr:\n{poly.render_tree(expr)}", file=sys.stderr)
+                print(f"rewritten:\n{poly.render_tree(rewritten)}", file=sys.stderr)
                 print(f"model={note}", file=sys.stderr)
                 return 1
         finally:
             poly.close()
 
-    print(f"z3 symbolic {args.mode}: {args.iters} expressions checked, {skipped} skipped")
+    print(f"z3 symbolic {args.mode}: {checked} expressions checked, {skipped} skipped")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["general", "div"], default="general")
+    parser.add_argument("--mode", choices=["general", "div", "fixed"], default="general")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iters", type=int, default=128)
     parser.add_argument("--depth", type=int, default=5)

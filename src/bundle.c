@@ -126,7 +126,7 @@ static char *bundle_metadata_from_ir(const uint8_t *ir_data, int ir_len) {
   if (poly_ir_import(ir_data, ir_len, &spec) != 0) return NULL;
 
   JsonBuf b = {0};
-  jb_add(&b, "{\"format\":\"poly.bundle@1\",\"ir_format\":\"poly.ir.uops@2\",\"entrypoints\":[");
+  jb_add(&b, "{\"format\":\"poly.bundle@1\",\"ir_format\":\"poly.ir.uops@3\",\"entrypoints\":[");
   for (int i = 0; i < spec.n_entrypoints; i++) {
     PolyIrEntrypoint *ep = &spec.entrypoints[i];
     if (i) jb_add(&b, ",");

@@ -544,7 +544,8 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
   PolyPatternMatcher *extra = NULL;
   if (poly_cuda_arch_major() < 8) extra = poly_pm_bf16_non_native();
   PolyRewriteOpts opts = {
-      .optimize = poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
+      .optimize =
+          poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
       /* tinygrad default DEVECTORIZE=1 also applies to CUDA. Keeping this at
        * -1 leaves VECTORIZE/GEP nodes alive past add_gpudims for ordinary CUDA
        * kernels such as broadcast matmul, which does not match the reference
@@ -553,6 +554,10 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
       .caps =
           {
               .has_mulacc = true,
+              .has_exp2 = true,
+              .has_log2 = true,
+              .has_sin = true,
+              .has_int64 = true,
               .has_local = true,
               .global_max = {2147483647, 65535, 65535},
               .local_max = {1024, 1024, 64},
@@ -893,16 +898,11 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
 
-      /* Gated load: LOAD(INDEX(buf, idx), alt, gate) in tinygrad final IR.
-       * Keep accepting INDEX(..., gate) during transition. */
-      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
       PolyUOp *gate_uop =
           (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
               ? u->src[2]
-              : ((idx_uop && idx_uop->n_src >= 3 &&
-                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
-                     ? idx_uop->src[2]
-                     : NULL);
+              : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = csmap_get(&names, gate_uop);
         char *alt_s = csmap_get(&names, u->src[1]);
@@ -928,27 +928,10 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
         val = owned_val;
       }
 
-      /* Gated STORE: if the INDEX has a 3rd source (boolean gate), wrap
-       * the store in `if (gate) { ... }`.  This is the CUDA-side lowering
-       * of the gated INDEX added by add_gpudims for GLOBAL stores that
-       * don't reference any local threadIdx dim.  Matches tinygrad's
-       * pm_linearize_cleanups which converts gated INDEX+STORE into
-       * IF/STORE/ENDIF post-linearization. */
-      PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
       bool store_to_local =
           u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
           (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
            u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
-      bool gated_store =
-          (store_idx && store_idx->n_src >= 3 && !store_to_local &&
-           poly_dtype_is_bool(poly_dtype_scalar(store_idx->src[2]->dtype)));
-      if (gated_store) {
-        char *gate_s = csmap_get(&names, store_idx->src[2]);
-        for (int d = 0; d < depth; d++)
-          csb_puts(&body, "  ");
-        csb_printf(&body, "if (%s) {\n", gate_s);
-        depth++;
-      }
 
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
@@ -957,12 +940,6 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       else
         csb_printf(&body, "*%s = %s;\n", target, val ? val : "null");
 
-      if (gated_store) {
-        depth--;
-        for (int d = 0; d < depth; d++)
-          csb_puts(&body, "  ");
-        csb_puts(&body, "}\n");
-      }
       free(owned_val);
       continue;
     }

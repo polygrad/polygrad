@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "pat.h"
 #include "utils.h"
 
 /* Local helpers */
@@ -46,22 +47,38 @@ PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size) {
   return poly_buffer_on_device(ctx, scalar_dtype, size, POLY_DEVICE_AUTO);
 }
 
+/* Pinned tinygrad `shape_to_shape_arg` represents a shape as
+ * STACK(CONST(weakint), ...), including rank-0 as STACK(void). Keep this
+ * tensor-stage spelling exact so movement topology is directly comparable. */
+static PolyUOp *poly_shape_stack(PolyCtx *ctx, PolyUOp **vals, int n) {
+  if (!ctx || !rank_tuple_valid(vals, n)) return NULL;
+  PolyDType dt =
+      n == 0 ? POLY_VOID : (n > 1 ? poly_dtype_vec(POLY_INDEX, n) : POLY_INDEX);
+  return poly_uop(ctx, POLY_OP_STACK, dt, vals, n, poly_arg_none());
+}
+
+static PolyUOp *poly_static_shape_arg(PolyCtx *ctx, const int64_t *dims, int ndim) {
+  if (!ctx || !rank_tuple_valid(dims, ndim)) return NULL;
+  PolyUOp *vals[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    vals[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(dims[i]));
+  return poly_shape_stack(ctx, vals, ndim);
+}
+
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
-  PolyArg arg;
-  arg.kind = POLY_ARG_INT_TUPLE;
-  arg.int_tuple.vals = dims;
-  arg.int_tuple.n = ndim;
-  return poly_uop1(ctx, POLY_OP_RESHAPE, src->dtype, src, arg);
+  PolyUOp *shape = poly_static_shape_arg(ctx, dims, ndim);
+  if (!shape) return NULL;
+  PolyUOp *srcs[2] = {src, shape};
+  return poly_uop(ctx, POLY_OP_RESHAPE, src->dtype, srcs, 2, poly_arg_none());
 }
 
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim) {
   if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
-  PolyArg arg;
-  arg.kind = POLY_ARG_INT_TUPLE;
-  arg.int_tuple.vals = dims;
-  arg.int_tuple.n = ndim;
-  return poly_uop1(ctx, POLY_OP_EXPAND, src->dtype, src, arg);
+  PolyUOp *shape = poly_static_shape_arg(ctx, dims, ndim);
+  if (!shape) return NULL;
+  PolyUOp *srcs[2] = {src, shape};
+  return poly_uop(ctx, POLY_OP_EXPAND, src->dtype, srcs, 2, poly_arg_none());
 }
 
 PolyUOp *poly_reduce_axis(
@@ -123,6 +140,24 @@ PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim) {
   arg.int_tuple.vals = perm;
   arg.int_tuple.n = ndim;
   return poly_uop1(ctx, POLY_OP_PERMUTE, src->dtype, src, arg);
+}
+
+PolyUOp *poly_expand_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(dims, ndim)) return NULL;
+  PolyUOp *dim_stack = poly_shape_stack(ctx, dims, ndim);
+  if (!dim_stack) return NULL;
+  PolyUOp *srcs[2] = {src, dim_stack};
+  return poly_uop(ctx, POLY_OP_EXPAND, src->dtype, srcs, 2, poly_arg_none());
+}
+
+PolyUOp *poly_shrink_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **starts, PolyUOp **sizes, int ndim) {
+  if (!ctx || !src || !rank_tuple_valid(starts, ndim) || !rank_tuple_valid(sizes, ndim))
+    return NULL;
+  PolyUOp *start_stack = poly_shape_stack(ctx, starts, ndim);
+  PolyUOp *size_stack = poly_shape_stack(ctx, sizes, ndim);
+  if (!start_stack || !size_stack) return NULL;
+  PolyUOp *srcs[3] = {src, start_stack, size_stack};
+  return poly_uop(ctx, POLY_OP_SHRINK, src->dtype, srcs, 3, poly_arg_none());
 }
 
 PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim) {
@@ -207,8 +242,118 @@ PolyUOp *poly_uop_unbind_var(PolyUOp *u) {
 }
 
 int poly_uop_bind_value(PolyUOp *u, int64_t *out) {
-  if (!u || u->op != POLY_OP_BIND || u->n_src < 2) return -1;
-  return poly_uop_const_i64(u->src[1], out);
+  if (!u) return -1;
+  if (u->op == POLY_OP_CONST) return poly_uop_const_i64(u, out);
+  if (u->op == POLY_OP_BIND && u->n_src >= 2) return poly_uop_const_i64(u->src[1], out);
+  if ((u->op == POLY_OP_ADD || u->op == POLY_OP_SUB || u->op == POLY_OP_MUL) && u->n_src >= 2) {
+    int64_t a = 0, b = 0, r = 0;
+    if (poly_uop_bind_value(u->src[0], &a) != 0 || poly_uop_bind_value(u->src[1], &b) != 0)
+      return -1;
+    bool ov = false;
+    if (u->op == POLY_OP_ADD) ov = __builtin_add_overflow(a, b, &r);
+    else if (u->op == POLY_OP_SUB) ov = __builtin_sub_overflow(a, b, &r);
+    else ov = __builtin_mul_overflow(a, b, &r);
+    if (ov) return -1;
+    if (out) *out = r;
+    return 0;
+  }
+  return -1;
+}
+
+/* Pinned UOp.as_shape (uop/ops.py:697-700): CONST represents dtype.count
+ * repeated lanes, STACK exposes each source, and any other UOp is one symbolic
+ * dimension. */
+static bool shape_arg_values(
+    PolyCtx *ctx, PolyUOp *shape_arg, int64_t *dims, PolyUOp **dim_uops, int *n_out
+) {
+  if (!shape_arg) return false;
+  if (shape_arg->op == POLY_OP_STACK && shape_arg->n_src > POLY_MAX_DIMS) return false;
+
+  int n = shape_arg->op == POLY_OP_STACK
+              ? shape_arg->n_src
+              : (shape_arg->op == POLY_OP_CONST ? shape_arg->dtype.count : 1);
+  if (n < 0 || n > POLY_MAX_DIMS) return false;
+
+  for (int i = 0; i < n; i++) {
+    PolyUOp *sz = shape_arg->op == POLY_OP_STACK ? shape_arg->src[i] : shape_arg;
+    /* Pinned tinygrad/uop/ops.py:697-705 shape_value.as_shape calls
+     * ssimplify(), which runs the full symbolic matcher for every lane. */
+    sz = poly_graph_rewrite(ctx, sz, poly_symbolic());
+    if (!sz) return false;
+    int64_t v = 0;
+    bool is_const = poly_uop_const_i64(sz, &v) == 0;
+    if (!is_const && sz && sz->op == POLY_OP_CONST &&
+        sz->arg.kind == POLY_ARG_INT_TUPLE && i < sz->arg.int_tuple.n) {
+      v = sz->arg.int_tuple.vals[i];
+      is_const = true;
+    }
+    if (is_const) {
+      /* Pinned movement shape validation rejects negative target dimensions
+       * (uop/ops.py:330-336). */
+      if (v < 0) return false;
+      dims[i] = v;
+      if (dim_uops) dim_uops[i] = NULL;
+      continue;
+    }
+    int64_t vmin = 0, vmax = 0;
+    poly_uop_minmax(ctx, sz, &vmin, &vmax);
+    if (vmin < 0 || vmax < 0) return false;
+    dims[i] = vmax;
+    if (dim_uops) dim_uops[i] = sz;
+  }
+  if (n_out) *n_out = n;
+  return true;
+}
+
+static bool shape_dim_is_static(PolyUOp *u) {
+  int64_t unused = 0;
+  return !u || poly_uop_const_i64(u, &unused) == 0;
+}
+
+static PolyUOp *canonical_shape_dim(
+    PolyCtx *ctx, int64_t max_dim, PolyUOp *dim_uop
+) {
+  PolyUOp *dim = dim_uop
+                     ? dim_uop
+                     : poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(max_dim));
+  if (dim && !poly_dtype_eq(poly_dtype_scalar(dim->dtype), POLY_INDEX))
+    dim = poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, dim, poly_arg_none());
+  /* Pinned UOp.ssimplify uses the complete symbolic matcher
+   * (uop/ops.py:427-434), including commutative canonicalization. */
+  return dim ? poly_graph_rewrite(ctx, dim, poly_symbolic()) : NULL;
+}
+
+static PolyUOp *exact_shape_product(
+    PolyCtx *ctx, const int64_t *max_dims, PolyUOp *const *dim_uops, int ndim
+) {
+  if (!ctx || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !max_dims)) return NULL;
+  PolyUOp *product = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  for (int i = 0; i < ndim; i++) {
+    PolyUOp *dim =
+        canonical_shape_dim(ctx, max_dims[i], dim_uops ? dim_uops[i] : NULL);
+    if (!dim) return NULL;
+    product =
+        poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, product, dim, poly_arg_none());
+    if (!product) return NULL;
+  }
+  return poly_graph_rewrite(ctx, product, poly_symbolic());
+}
+
+static bool expand_dim_compatible(
+    PolyCtx *ctx,
+    int64_t in_dim,
+    PolyUOp *in_uop,
+    int64_t out_dim,
+    PolyUOp *out_uop
+) {
+  /* Pinned uop/ops.py:334-336 compares canonical exact dimensions:
+   * s == ns or s == 1. Allocation maxima are not semantic dimensions. */
+  PolyUOp *in_exact = canonical_shape_dim(ctx, in_dim, in_uop);
+  PolyUOp *out_exact = canonical_shape_dim(ctx, out_dim, out_uop);
+  if (!in_exact || !out_exact) return false;
+  int64_t in_const = 0;
+  if (poly_uop_const_i64(in_exact, &in_const) == 0 && in_const == 1) return true;
+  return in_exact == out_exact;
 }
 
 PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u) {
@@ -221,9 +366,20 @@ PolyShape poly_uop_max_shape_cached(PolyCtx *ctx, const PolyUOp *u) {
 
 int64_t poly_shape_numel(PolyShape s) {
   if (s.ndim <= 0) return (s.ndim == 0) ? 1 : 0;
+  if (!s.dims || s.ndim > POLY_MAX_DIMS) return -1;
+
+  bool has_zero = false;
+  for (int i = 0; i < s.ndim; i++) {
+    if (s.dims[i] < 0) return -1;
+    if (s.dims[i] == 0) has_zero = true;
+  }
+  if (has_zero) return 0;
+
   int64_t prod = 1;
-  for (int i = 0; i < s.ndim; i++)
+  for (int i = 0; i < s.ndim; i++) {
+    if (prod > INT64_MAX / s.dims[i]) return -1;
     prod *= s.dims[i];
+  }
   return prod;
 }
 
@@ -372,10 +528,11 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   if (op == POLY_OP_STORE && u->n_src >= 2 && SRC_NDIM(1) >= 0)
     return make_entry_dims_uops(ctx, SRC_DIMS(1), SRC_DIM_UOPS(1), SRC_NDIM(1));
 
-  /* No-shape ops (kernel-level, never have tensor shapes) */
-  if (op == POLY_OP_RANGE || op == POLY_OP_LOAD || op == POLY_OP_SINK || op == POLY_OP_IF ||
-      op == POLY_OP_ENDIF || op == POLY_OP_BARRIER || op == POLY_OP_SPECIAL ||
-      op == POLY_OP_VECTORIZE || op == POLY_OP_GEP || op == POLY_OP_LINEAR ||
+  /* Late ops with no shape. RANGE and SPECIAL are scalar-shaped in pinned
+   * tinygrad and are handled with the other scalar symbolic values below. */
+  if (op == POLY_OP_LOAD || op == POLY_OP_SINK || op == POLY_OP_IF ||
+      op == POLY_OP_ENDIF || op == POLY_OP_BARRIER || op == POLY_OP_VECTORIZE ||
+      op == POLY_OP_GEP || op == POLY_OP_LINEAR ||
       op == POLY_OP_PROGRAM || op == POLY_OP_SOURCE || op == POLY_OP_BINARY || op == POLY_OP_INS ||
       op == POLY_OP_CUSTOM || op == POLY_OP_CUSTOMI || op == POLY_OP_UNIQUE ||
       op == POLY_OP_LUNIQUE || op == POLY_OP_UNROLL || op == POLY_OP_CONTRACT ||
@@ -383,9 +540,9 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     return make_entry_none(ctx);
   }
 
-  /* Scalar constants */
+  /* Scalar constants and symbolic index values. */
   if (op == POLY_OP_CONST || op == POLY_OP_VCONST || op == POLY_OP_DEFINE_VAR ||
-      op == POLY_OP_BIND) {
+      op == POLY_OP_BIND || op == POLY_OP_RANGE || op == POLY_OP_SPECIAL) {
     return make_entry_scalar(ctx);
   }
 
@@ -431,58 +588,135 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     }
   }
 
-  /* PARAM: shape from pointer dtype size, else no shape */
+  /* tinygrad uop/ops.py::UOp._shape, Ops.PARAM:
+   * pointer PARAMs use their pointer extent; non-pointer PARAMs use
+   * src[0].as_shape. This covers both shaped CALL values (STACK) and the
+   * final scalar PARAM(CONST(ptr_size)) emitted by pm_remove_vec_dtypes. */
   if (op == POLY_OP_PARAM) {
-    if (u->dtype.is_ptr && u->dtype.ptr_size > 0) {
+    if (u->dtype.is_ptr && u->dtype.ptr_size >= 0) {
       return make_entry_1d(ctx, u->dtype.ptr_size);
-    } else {
+    } else if (u->n_src >= 1 && u->src[0] && u->src[0]->op == POLY_OP_STACK) {
+      int64_t dims[POLY_MAX_DIMS];
+      PolyUOp *dim_uops[POLY_MAX_DIMS];
+      int ndim = 0;
+      if (shape_arg_values(ctx, u->src[0], dims, dim_uops, &ndim))
+        return make_entry_dims_uops(ctx, dims, dim_uops, ndim);
       return make_entry_none(ctx);
+    } else if (u->n_src >= 1 && u->src[0]) {
+      /* Pinned tinygrad/uop/ops.py:697-700: a scalar shape source uses the
+       * same full ssimplify path as each STACK lane. */
+      PolyUOp *dim = poly_graph_rewrite(ctx, u->src[0], poly_symbolic());
+      if (!dim) return make_entry_none(ctx);
+      int64_t value = 0;
+      if (poly_uop_const_i64(dim, &value) == 0)
+        return value >= 0 ? make_entry_1d(ctx, value) : make_entry_none(ctx);
+      int64_t vmin = 0, vmax = 0;
+      poly_uop_minmax(ctx, dim, &vmin, &vmax);
+      if (vmin < 0 || vmax < 0) return make_entry_none(ctx);
+      return make_entry_dims_uops(ctx, &vmax, &dim, 1);
     }
+    return make_entry_none(ctx);
   }
 
-  /* INDEX: conditional shape for pointer types */
+  /* Pinned tinygrad INDEX shape is independent of pointer dtype:
+   *   concat(index.shape for index in src[1:]) + src[0].shape[n_indices:]
+   * Scalar indexes therefore consume source axes without contributing axes. */
   if (op == POLY_OP_INDEX) {
-    if (!u->dtype.is_ptr) {
-      return make_entry_none(ctx);
-    }
-    if (u->n_src < 1 || SRC_NDIM(0) <= 0) {
-      return make_entry_none(ctx);
-    }
+    if (u->n_src < 1 || SRC_NDIM(0) < 0) return make_entry_none(ctx);
     int8_t source_ndim = SRC_NDIM(0);
     int n_indices = u->n_src - 1;
-    if (n_indices >= source_ndim) {
-      return make_entry_none(ctx);
+    int tail_start = n_indices < source_ndim ? n_indices : source_ndim;
+    int out_ndim = source_ndim - tail_start;
+    for (int i = 1; i < u->n_src; i++) {
+      int8_t index_ndim = SRC_NDIM(i);
+      if (index_ndim < 0 || out_ndim > POLY_MAX_DIMS - index_ndim)
+        return make_entry_none(ctx);
+      out_ndim += index_ndim;
     }
-    int remaining = source_ndim - n_indices;
-    PolyUOp *const *dim_uops = SRC_DIM_UOPS(0);
-    return make_entry_dims_uops(
-        ctx, SRC_DIMS(0) + n_indices, dim_uops ? dim_uops + n_indices : NULL, remaining
-    );
-  }
 
-  /* BUFFERIZE: shape from range bounds */
-  if (op == POLY_OP_BUFFERIZE) {
-    int n_ranges = u->n_src - 1;
-    if (n_ranges <= 0 || n_ranges > POLY_MAX_DIMS) {
-      return make_entry_none(ctx);
-    }
     int64_t dims[POLY_MAX_DIMS];
-    for (int i = 0; i < n_ranges && i < POLY_MAX_DIMS; i++) {
-      PolyUOp *rng = u->src[1 + i];
-      if (rng->op == POLY_OP_RANGE && rng->n_src >= 1 && rng->src[0]->op == POLY_OP_CONST &&
-          rng->src[0]->arg.kind == POLY_ARG_INT) {
-        dims[i] = rng->src[0]->arg.i;
-      } else {
-        dims[i] = -1; /* symbolic, resolved later */
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    int pos = 0;
+    for (int i = 1; i < u->n_src; i++) {
+      PolyUOp *const *index_dim_uops = SRC_DIM_UOPS(i);
+      for (int d = 0; d < SRC_NDIM(i); d++) {
+        dims[pos] = SRC_DIMS(i)[d];
+        dim_uops[pos++] = index_dim_uops ? index_dim_uops[d] : NULL;
       }
     }
-    return make_entry_dims(ctx, dims, n_ranges);
+    PolyUOp *const *source_dim_uops = SRC_DIM_UOPS(0);
+    for (int d = tail_start; d < source_ndim; d++) {
+      dims[pos] = SRC_DIMS(0)[d];
+      dim_uops[pos++] = source_dim_uops ? source_dim_uops[d] : NULL;
+    }
+    return make_entry_dims_uops(ctx, dims, dim_uops, out_ndim);
   }
 
-  /* RESHAPE, EXPAND: shape from int_tuple arg */
-  if ((op == POLY_OP_RESHAPE || op == POLY_OP_EXPAND) && u->arg.kind == POLY_ARG_INT_TUPLE) {
-    if (!rank_tuple_valid(u->arg.int_tuple.vals, u->arg.int_tuple.n)) return make_entry_none(ctx);
-    return make_entry_dims(ctx, u->arg.int_tuple.vals, u->arg.int_tuple.n);
+  /* Pinned tinygrad STAGE adds closed-range extents to the front of the
+   * existing value shape. Extents are `range.vmax + 1`, which also handles a
+   * singleton CONST(0) and symbolic RANGE bounds without syntax heuristics. */
+  if (op == POLY_OP_STAGE) {
+    if (u->n_src < 1 || SRC_NDIM(0) < 0) return make_entry_none(ctx);
+    int n_ranges = u->n_src - 1;
+    int source_ndim = SRC_NDIM(0);
+    if (n_ranges > POLY_MAX_DIMS - source_ndim) return make_entry_none(ctx);
+    int out_ndim = n_ranges + source_ndim;
+    int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    for (int i = 0; i < n_ranges; i++) {
+      int64_t vmin = 0, vmax = 0;
+      poly_uop_minmax(ctx, u->src[1 + i], &vmin, &vmax);
+      (void)vmin;
+      if (__builtin_add_overflow(vmax, (int64_t)1, &dims[i])) return make_entry_none(ctx);
+      dim_uops[i] = NULL;
+    }
+    PolyUOp *const *source_dim_uops = SRC_DIM_UOPS(0);
+    for (int i = 0; i < source_ndim; i++) {
+      dims[n_ranges + i] = SRC_DIMS(0)[i];
+      dim_uops[n_ranges + i] = source_dim_uops ? source_dim_uops[i] : NULL;
+    }
+    return make_entry_dims_uops(ctx, dims, dim_uops, out_ndim);
+  }
+
+  /* RESHAPE: pinned tensor form is (value, shape_to_shape_arg(shape)). */
+  if (op == POLY_OP_RESHAPE && u->arg.kind == POLY_ARG_NONE && u->n_src == 2) {
+    int8_t in_ndim = SRC_NDIM(0);
+    if (in_ndim < 0) return make_entry_none(ctx);
+    int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    int n = 0;
+    if (!shape_arg_values(ctx, u->src[1], dims, dim_uops, &n))
+      return make_entry_none(ctx);
+    /* Pinned uop/ops.py:330-333 requires exact input/output cardinality.
+     * Compare canonical products, not products of allocation maxima. */
+    PolyUOp *input_product =
+        exact_shape_product(ctx, SRC_DIMS(0), SRC_DIM_UOPS(0), in_ndim);
+    PolyUOp *output_product = exact_shape_product(ctx, dims, dim_uops, n);
+    if (!input_product || !output_product || input_product != output_product)
+      return make_entry_none(ctx);
+    return make_entry_dims_uops(ctx, dims, dim_uops, n);
+  }
+
+  /* EXPAND: pinned movement form reads src[1].as_shape. The max-shape stores
+   * allocation bounds; dim_uops preserves the public symbolic shape. */
+  if (op == POLY_OP_EXPAND && u->arg.kind == POLY_ARG_NONE && u->n_src == 2) {
+    int8_t in_ndim = SRC_NDIM(0);
+    if (in_ndim < 0) return make_entry_none(ctx);
+    int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    int n = 0;
+    if (!shape_arg_values(ctx, u->src[1], dims, dim_uops, &n) || n != in_ndim)
+      return make_entry_none(ctx);
+    PolyUOp *const *in_dim_uops = SRC_DIM_UOPS(0);
+    for (int i = 0; i < n; i++) {
+      PolyUOp *out_uop = dim_uops[i];
+      if (!expand_dim_compatible(
+              ctx, SRC_DIMS(0)[i], in_dim_uops ? in_dim_uops[i] : NULL, dims[i],
+              out_uop
+          ))
+        return make_entry_none(ctx);
+    }
+    return make_entry_dims_uops(ctx, dims, dim_uops, n);
   }
 
   /* PERMUTE: reorder src[0] shape */
@@ -523,7 +757,26 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
     return make_entry_dims(ctx, dims, in_ndim);
   }
 
-  /* SHRINK: output = end - begin per axis */
+  /* SHRINK: tinygrad-form movement shrink.
+   * src = (tensor, STACK(offsets), STACK(sizes)). Late codegen memory shrink
+   * uses a pointer src[0] and remains a no-shape address node. */
+  if (op == POLY_OP_SHRINK && u->arg.kind == POLY_ARG_NONE && u->n_src >= 3 &&
+      !u->src[0]->dtype.is_ptr) {
+    int8_t in_ndim = SRC_NDIM(0);
+    if (in_ndim < 0) return make_entry_none(ctx);
+    int64_t dims[POLY_MAX_DIMS];
+    PolyUOp *dim_uops[POLY_MAX_DIMS];
+    int n = 0;
+    if (!shape_arg_values(ctx, u->src[2], dims, dim_uops, &n) || n != in_ndim)
+      return make_entry_none(ctx);
+    return make_entry_dims_uops(ctx, dims, dim_uops, n);
+  }
+
+  if (op == POLY_OP_SHRINK && u->arg.kind == POLY_ARG_NONE && u->n_src >= 1 &&
+      u->src[0]->dtype.is_ptr)
+    return make_entry_none(ctx);
+
+  /* SHRINK: legacy pair-tuple movement shrink, output = end - begin per axis */
   if (op == POLY_OP_SHRINK && u->n_src >= 1 && u->arg.kind == POLY_ARG_PAIR_TUPLE) {
     int8_t in_ndim = SRC_NDIM(0);
     if (in_ndim <= 0) {
@@ -669,10 +922,14 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
           merged[ndim - 1 - ax] = a;
           merged_dim_uops[ndim - 1 - ax] = au;
         } else {
-          if (au && bu && au != bu) return make_entry_none(ctx);
-          if ((au && !bu) || (!au && bu)) return make_entry_none(ctx);
+          bool au_static = shape_dim_is_static(au);
+          bool bu_static = shape_dim_is_static(bu);
+          if (!au_static || !bu_static) {
+            if (au && bu && au != bu) return make_entry_none(ctx);
+            if ((au && !bu) || (!au && bu)) return make_entry_none(ctx);
+          }
           merged[ndim - 1 - ax] = a;
-          merged_dim_uops[ndim - 1 - ax] = au ? au : bu;
+          merged_dim_uops[ndim - 1 - ax] = (au_static && bu_static) ? NULL : (au ? au : bu);
         }
       }
       out_ndim = ndim;

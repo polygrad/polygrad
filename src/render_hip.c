@@ -412,6 +412,10 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
   return (PolyRendererCaps){
       .has_mulacc = true,
       .has_threefry = false,
+      .has_exp2 = true,
+      .has_log2 = true,
+      .has_sin = true,
+      .has_int64 = true,
       .has_local = true,
       .global_max = {2147483647, 65535, 65535},
       .tensor_cores = hip_cdna_tc_specs_storage,
@@ -423,7 +427,8 @@ static PolyRendererCaps poly_hip_renderer_caps(void) {
 
 PolyUOp *poly_rewrite_hip(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
-      .optimize = poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
+      .optimize =
+          poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
       .devectorize = -1, /* HIP: no add_loads/devectorize */
       .caps = poly_hip_renderer_caps(),
       .device = POLY_DEVICE_HIP,
@@ -501,7 +506,9 @@ static void hip_scan_used_funcs(PolyUOp **uops, int n, HipUsedFuncs *used) {
       break;
     case POLY_OP_WMMA: {
       used->uses_wmma = true;
-      const char *wn = (u->arg.kind == POLY_ARG_STRING && u->arg.str) ? u->arg.str : NULL;
+      const char *wn = (u->arg.kind == POLY_ARG_TENSOR_CORE) ? u->arg.tensor_core.name
+                       : (u->arg.kind == POLY_ARG_STRING)    ? u->arg.str
+                                                             : NULL;
       if (wn && used->n_wmma_names < 16) {
         bool dup = false;
         for (int j = 0; j < used->n_wmma_names; j++)
@@ -813,16 +820,11 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
       for (int d = 0; d < depth; d++)
         hsb_puts(&body, "  ");
 
-      /* Gated load: LOAD(INDEX(buf, idx), alt, gate) in tinygrad final IR.
-       * Keep accepting INDEX(..., gate) during transition. */
-      PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
+      /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
       PolyUOp *gate_uop =
           (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
               ? u->src[2]
-              : ((idx_uop && idx_uop->n_src >= 3 &&
-                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
-                     ? idx_uop->src[2]
-                     : NULL);
+              : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = hsmap_get(&names, gate_uop);
         char *alt_s = hsmap_get(&names, u->src[1]);
@@ -1005,8 +1007,10 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
 
       /* Emit: wmma0 = __builtin_amdgcn_<name>(A, B, C, 0, 0, 0);
        * MFMA builtins take 6 args: A, B, C, cbsz, abid, blgp. */
-      const char *wmma_name =
-          (u->arg.kind == POLY_ARG_STRING && u->arg.str) ? u->arg.str : "WMMA_UNKNOWN";
+      const char *wmma_name = (u->arg.kind == POLY_ARG_TENSOR_CORE && u->arg.tensor_core.name)
+                                  ? u->arg.tensor_core.name
+                              : (u->arg.kind == POLY_ARG_STRING && u->arg.str) ? u->arg.str
+                                                                               : "WMMA_UNKNOWN";
       hsb_printf(
           &body, "%s = __builtin_amdgcn_%s(%s, %s, %s, 0, 0, 0);\n", name, wmma_name,
           a_s ? a_s : "0", b_s ? b_s : "0", c_s ? c_s : "0"

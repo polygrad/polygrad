@@ -30,9 +30,21 @@ function safetensorNames(bytes) {
   return new Set(Object.keys(header).filter(k => k !== '__metadata__'))
 }
 
+function testFilterFor(pg) {
+  if (pg && pg.testFilter) return String(pg.testFilter)
+  if (typeof globalThis !== 'undefined' && globalThis.__POLY_TEST_FILTER) {
+    return String(globalThis.__POLY_TEST_FILTER)
+  }
+  if (typeof process !== 'undefined' && process.env && process.env.POLY_TEST_FILTER) {
+    return String(process.env.POLY_TEST_FILTER)
+  }
+  return ''
+}
+
 async function runInstanceTests(pg) {
   const Instance = pg.Instance
   const { MLP, TabM, NAM } = pg.models
+  const testFilter = testFilterFor(pg)
   let passed = 0
   let failed = 0
 
@@ -43,6 +55,7 @@ async function runInstanceTests(pg) {
   }
 
   async function test(name, fn) {
+    if (testFilter && !name.includes(testFilter)) return
     try {
       await fn()
       console.log(`  [PASS] ${name}`)
@@ -438,6 +451,7 @@ async function runInstanceTests(pg) {
 async function runInstanceSmokeTests(pg) {
   const Instance = pg.Instance
   const { MLP, TabM, NAM } = pg.models
+  const testFilter = testFilterFor(pg)
   let passed = 0
   let failed = 0
 
@@ -448,6 +462,7 @@ async function runInstanceSmokeTests(pg) {
   }
 
   async function test(name, fn) {
+    if (testFilter && !name.includes(testFilter)) return
     try {
       await fn()
       console.log(`  [PASS] ${name}`)

@@ -303,7 +303,7 @@ static inline int poly_test_realize_buffer_views_vars(
     int n_vars
 ) {
   poly_test_attach_buffer_views(ctx, views, n_views);
-  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *sched = poly_schedule_effect_sink(ctx, sink);
   if (!sched) return -1;
   int ret = poly_run_schedule(ctx, sched, vars, n_vars);
   poly_schedule_free(sched);

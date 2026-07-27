@@ -12,6 +12,7 @@
 #include "../src/frontend.h"
 #include "../src/device.h"
 #include "../src/instance.h"
+#include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/nn.h"
@@ -231,7 +232,9 @@ TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 3);
   float input[3] = {1.0f, 2.0f, 3.0f};
-  poly_buffer_set(ctx, a, input, sizeof(input), POLY_DEVICE_CPU);
+  /* Exercise the same creation AFTER dependency as pinned PYTHON->CPU before
+   * the compute and CPU->CUDA->CPU transfers. */
+  poly_buffer_set(ctx, a, input, sizeof(input), POLY_DEVICE_HOST);
 
   PolyTensor *at = poly_tensor_create(ctx, a, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(at);
@@ -260,6 +263,51 @@ TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
   ASSERT_FLOAT_EQ(got[0], 2.0f, 1e-5f);
   ASSERT_FLOAT_EQ(got[1], 3.0f, 1e-5f);
   ASSERT_FLOAT_EQ(got[2], 4.0f, 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(cuda, placed_host_gather_memory_plan_keeps_cuda_staging) {
+  SKIP_IF_NO_CUDA();
+
+  PolyCtx *ctx = poly_ctx_new();
+  float x_data[] = {1.0f, 2.0f, 3.0f, 4.0f};
+  int32_t index_data[] = {0, 0, 1, 0};
+  int64_t shape[] = {2, 2};
+  PolyUOp *x = poly_buffer_from_host(
+      ctx, x_data, sizeof(x_data), poly_dtype_id_by_name("float32"), shape, 2
+  );
+  PolyUOp *index = poly_buffer_from_host(
+      ctx, index_data, sizeof(index_data), poly_dtype_id_by_name("int32"), shape, 2
+  );
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(index);
+
+  PolyTensor *x_cpu = poly_tensor_create(ctx, x, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *index_cpu = poly_tensor_create(ctx, index, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *x_cuda = poly_tensor_to_device(ctx, x_cpu, POLY_DEVICE_CUDA);
+  PolyTensor *index_cuda = poly_tensor_to_device(ctx, index_cpu, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(x_cuda);
+  ASSERT_NOT_NULL(index_cuda);
+
+  PolyUOp *gathered = poly_gather_dim(ctx, poly_tensor_uop(x_cuda), 1, poly_tensor_uop(index_cuda));
+  ASSERT_NOT_NULL(gathered);
+  PolyTensor *result = poly_tensor_create(ctx, gathered, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(result);
+
+  select_cuda_for_cuda_phase(ctx);
+  PolyTensor *out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &result, 1, &out), 0);
+  ASSERT_PTR_EQ(out, result);
+
+  const PolyUOp *out_buf = poly_uop_get_buffer_identity(poly_tensor_uop(result));
+  ASSERT_NOT_NULL(out_buf);
+  float got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)out_buf, got, sizeof(got)), 0);
+  const float expected[] = {1.0f, 1.0f, 4.0f, 3.0f};
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(got[i], expected[i], 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -629,6 +677,45 @@ TEST(cuda, tensor_place_computed_expression_to_cuda_e2e) {
   PASS();
 }
 
+TEST(cuda, device_less_constant_copy_runs_producer_before_transfer) {
+  SKIP_IF_NO_CUDA();
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  select_cuda_for_cuda_phase(ctx);
+
+  PolyUOp *ones = poly_full(ctx, (int64_t[]){4}, 1, 1.0);
+  PolyUOp *contiguous = poly_contiguous(ctx, ones);
+  PolyTensor *gradient =
+      poly_tensor_create(ctx, contiguous, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(ones);
+  ASSERT_NOT_NULL(contiguous);
+  ASSERT_NOT_NULL(gradient);
+
+  PolyUOp *physical = poly_tensor_physicalize(ctx, gradient);
+  ASSERT_NOT_NULL(physical);
+  ASSERT_INT_EQ(physical->op, POLY_OP_COPY);
+
+  PolyUOp *scheduled_out = NULL;
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, &physical, 1, &scheduled_out);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled_out);
+  ASSERT_INT_EQ(schedule->template->n_calls, 2);
+  ASSERT_FALSE(poly_schedule_call_is_copy(schedule, 0));
+  ASSERT_TRUE(poly_schedule_call_is_copy(schedule, 1));
+  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+
+  float got[4] = {0};
+  const PolyUOp *buf = poly_uop_get_buffer_identity(scheduled_out);
+  ASSERT_NOT_NULL(buf);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)buf, got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++) ASSERT_FLOAT_EQ(got[i], 1.0f, 1e-5f);
+
+  poly_schedule_free(schedule);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(cuda, tensor_place_computed_expression_cuda_cpu_roundtrip_e2e) {
   SKIP_IF_NO_CUDA();
 
@@ -778,23 +865,20 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
       (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(w1_tensor)),
       (PolyUOp *)poly_uop_get_buffer_identity(poly_tensor_uop(b1_tensor)),
   };
-  int64_t param_shapes[4][2] = {
-      {256, 128},
-      {256, 0},
-      {64, 256},
-      {64, 0},
-  };
-  int param_ndims[4] = {2, 1, 2, 1};
   int64_t param_numels[4] = {256 * 128, 256, 64 * 256, 64};
-  PolyUOp *wrts[4];
+  PolyUOp *wrts[4] = {
+      poly_tensor_uop(w0_tensor), poly_tensor_uop(b0_tensor),
+      poly_tensor_uop(w1_tensor), poly_tensor_uop(b1_tensor),
+  };
   for (int i = 0; i < 4; i++) {
     ASSERT_NOT_NULL(param_bufs[i]);
-    wrts[i] = poly_reshape(ctx, param_bufs[i], param_shapes[i], param_ndims[i]);
     ASSERT_NOT_NULL(wrts[i]);
   }
 
   PolyUOp *grads[4] = {0};
-  ASSERT_INT_EQ(poly_grad_many(ctx, loss, NULL, wrts, 4, grads), 0);
+  uint8_t grad_present[4] = {0};
+  ASSERT_INT_EQ(poly_grad_many_ex(ctx, loss, NULL, wrts, 4, grads, grad_present), 0);
+  for (int i = 0; i < 4; i++) ASSERT_INT_EQ(grad_present[i], 1);
 
   PolyUOp *stores[5];
   PolyUOp *loss_out = poly_buffer(ctx, POLY_FLOAT32, 1);
@@ -809,11 +893,12 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
 
   PolyOptimConfig cfg = {
       .kind = POLY_OPTIM_SGD,
-      .lr = 0.01f,
       .momentum = 0.0f,
       .weight_decay = 0.0f,
       .classic = false,
   };
+  PolyUOp *lr = poly_const_float(ctx, 0.01);
+  ASSERT_NOT_NULL(lr);
   for (int i = 0; i < 4; i++) {
     ASSERT_NOT_NULL(grads[i]);
     PolyUOp *grad = grads[i];
@@ -827,7 +912,7 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
     PolyOptimUpdate upd;
     ASSERT_INT_EQ(
         poly_optim_build_update(
-            ctx, &cfg, param_bufs[i], grad, NULL, NULL, NULL, NULL, param_numels[i], &upd
+            ctx, &cfg, lr, param_bufs[i], grad, NULL, NULL, NULL, NULL, param_numels[i], &upd
         ),
         0
     );
@@ -837,12 +922,51 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
 
   PolyUOp *sink = poly_sink_n(ctx, stores, 5);
   ASSERT_NOT_NULL(sink);
-  PolySchedule *sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *sched = poly_schedule_effect_sink(ctx, sink);
   ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(sched->template->n_calls, 12);
+
+  /* Pinned tinygrad retains the first [32,256] linear output as one kernel:
+   * SINK(END(STORE(...), batch_range, output_range)). Assert the exact
+   * operation topology so this codegen test cannot silently bypass callify or
+   * fuse the first two reductions again. */
+  PolyUOp *first_body = poly_schedule_call_body(sched, 0);
+  ASSERT_NOT_NULL(first_body);
+  int n_first = 0;
+  PolyUOp **first_topo = poly_toposort(ctx, first_body, &n_first);
+  ASSERT_NOT_NULL(first_topo);
+  ASSERT_INT_EQ(n_first, 26);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_SINK), 1);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_END), 1);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_STORE), 1);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_REDUCE), 1);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_RANGE), 3);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_PARAM), 4);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_INDEX), 4);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_ADD), 4);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_MUL), 4);
+  ASSERT_INT_EQ(count_lin_ops(first_topo, n_first, POLY_OP_CONST), 3);
+  ASSERT_INT_EQ(first_body->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(first_body->n_src, 1);
+  PolyUOp *first_end = first_body->src[0];
+  ASSERT_NOT_NULL(first_end);
+  ASSERT_INT_EQ(first_end->op, POLY_OP_END);
+  ASSERT_INT_EQ(first_end->n_src, 3);
+  ASSERT_INT_EQ(first_end->src[0]->op, POLY_OP_STORE);
+  ASSERT_INT_EQ(first_end->src[1]->op, POLY_OP_RANGE);
+  ASSERT_INT_EQ(first_end->src[2]->op, POLY_OP_RANGE);
+  ASSERT_INT_EQ(first_end->src[0]->n_src, 2);
+  ASSERT_INT_EQ(first_end->src[0]->src[0]->op, POLY_OP_INDEX);
+  ASSERT_INT_EQ(first_end->src[0]->src[1]->op, POLY_OP_ADD);
 
   int n_rendered = 0;
   for (int i = 0; i < sched->template->n_calls; i++) {
     if (poly_schedule_call_is_copy(sched, i)) continue;
+    int n_body = 0;
+    PolyUOp **body_topo = poly_toposort(ctx, poly_schedule_call_body(sched, i), &n_body);
+    ASSERT_NOT_NULL(body_topo);
+    ASSERT_INT_EQ(count_lin_ops(body_topo, n_body, POLY_OP_BUFFER), 0);
+    ASSERT_INT_EQ(count_lin_ops(body_topo, n_body, POLY_OP_BUFFER_VIEW), 0);
     int n_lin = 0;
     PolyUOp **lin = poly_linearize_cuda(ctx, poly_schedule_call_body(sched, i), &n_lin);
     ASSERT_NOT_NULL(lin);
@@ -907,7 +1031,7 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
     free(src);
     n_rendered++;
   }
-  ASSERT_TRUE(n_rendered > 0);
+  ASSERT_INT_EQ(n_rendered, 12);
 
   poly_schedule_free(sched);
   poly_instance_free(inst);

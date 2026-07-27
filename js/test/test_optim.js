@@ -63,11 +63,41 @@ async function runOptimTests(pg) {
     p._grad = new Tensor([2])
     const opt = new pg.nn.optim.SGD([p], { lr: 0.1, momentum: 0.9 })
     const scheduled = opt.scheduleStep()
-    assert(scheduled.includes(p), 'scheduled effects should include parameter')
-    assert(scheduled.includes(opt.b[0]), 'scheduled effects should include momentum buffer')
+    assert(scheduled.length === 2, 'SGD momentum should schedule state and parameter')
+    assert(scheduled[0] === opt.b[0], 'momentum state should be scheduled first')
+    assert(scheduled[1] === p, 'parameter should be scheduled after momentum state')
     await scheduled[0].realize(...scheduled.slice(1))
     assertClose(await p.toArray(), [0.8])
     assertClose(await opt.b[0].toArray(), [2])
+  })
+
+  await test('SGD momentum commits lazy backward gradient before view state assign', async () => {
+    const p = await new Tensor([1], { requiresGrad: true }).realize()
+    const x = await new Tensor([1]).realize()
+    const opt = new pg.nn.optim.SGD([p], {
+      lr: 0.02, momentum: 0.85, nesterov: true, weightDecay: 0, fused: false
+    })
+    const loss = p.mul(x).sum()
+    opt.zeroGrad()
+    await loss.backward()
+    const scheduled = opt.scheduleStep()
+    await scheduled[0].realize(...scheduled.slice(1))
+    assertClose(await opt.b[0].toArray(), [1])
+    assertClose(await p.toArray(), [0.963])
+  })
+
+  await test('SGD vector momentum state is writable and elementwise', async () => {
+    const p = await new Tensor([1, 2], { requiresGrad: true }).realize()
+    p._grad = new Tensor([0.25, -0.5])
+    const opt = new pg.nn.optim.SGD([p], {
+      lr: 0.1, momentum: 0.9, nesterov: true, weightDecay: 0.1, fused: false
+    })
+    const scheduled = opt.scheduleStep()
+    assert(scheduled[0] === opt.b[0], 'momentum state should be scheduled first')
+    assert(scheduled[1] === p, 'parameter should depend on scheduled momentum state')
+    await scheduled[0].realize(...scheduled.slice(1))
+    assertClose(await opt.b[0].toArray(), [0.35, -0.3])
+    assertClose(await p.toArray(), [0.9335, 2.057])
   })
 
   await test('Adam updates beta-power and moment state in graph', async () => {
@@ -75,10 +105,12 @@ async function runOptimTests(pg) {
     p._grad = new Tensor([1])
     const opt = new pg.nn.optim.Adam([p], { lr: 0.1 })
     const scheduled = opt.scheduleStep()
-    assert(scheduled.includes(opt.m[0]), 'scheduled effects should include Adam m')
-    assert(scheduled.includes(opt.v[0]), 'scheduled effects should include Adam v')
-    assert(scheduled.includes(opt.b1_t), 'scheduled effects should include Adam beta1 power')
-    assert(scheduled.includes(opt.b2_t), 'scheduled effects should include Adam beta2 power')
+    assert(scheduled.length === 5, 'Adam should schedule four state tensors and one parameter')
+    assert(scheduled[0] === opt.b1_t, 'Adam beta1 power should be scheduled first')
+    assert(scheduled[1] === opt.b2_t, 'Adam beta2 power should be scheduled second')
+    assert(scheduled[2] === opt.m[0], 'Adam first moment should precede parameters')
+    assert(scheduled[3] === opt.v[0], 'Adam second moment should precede parameters')
+    assert(scheduled[4] === p, 'Adam parameter should be scheduled after state')
     await scheduled[0].realize(...scheduled.slice(1))
     assertClose(await opt.m[0].toArray(), [0.1])
     assertClose(await opt.v[0].toArray(), [0.001], 1e-6)
@@ -93,6 +125,35 @@ async function runOptimTests(pg) {
     const opt = new pg.nn.optim.AdamW([p], { lr: 0.1, weightDecay: 0.01 })
     await opt.step()
     assertClose(await p.toArray(), [0.999], 1e-4)
+  })
+
+  await test('SGD Adam and AdamW graphs read the current LR Tensor', async () => {
+    const cases = [
+      ['SGD', () => {
+        const p = new Tensor([1], { requiresGrad: true })
+        p._grad = new Tensor([1])
+        return [p, new pg.nn.optim.SGD([p], { lr: 0.1 }), 0.8]
+      }],
+      ['Adam', () => {
+        const p = new Tensor([1], { requiresGrad: true })
+        p._grad = new Tensor([1])
+        return [p, new pg.nn.optim.Adam([p], { lr: 0.1 }), 0.8]
+      }],
+      ['AdamW', () => {
+        const p = new Tensor([1], { requiresGrad: true })
+        p._grad = new Tensor([0])
+        return [p, new pg.nn.optim.AdamW([p], { lr: 0.1, weightDecay: 0.01 }), 0.998]
+      }]
+    ]
+    for (const [name, makeCase] of cases) {
+      const [p, opt, expected] = makeCase()
+      assert(opt.lr instanceof Tensor, `${name} LR must be a Tensor`)
+      const scheduled = opt.scheduleStep()
+      opt.lr.assign([0.2])
+      await opt.lr.realize()
+      await scheduled[0].realize(...scheduled.slice(1))
+      assertClose(await p.toArray(), [expected], 1e-4)
+    }
   })
 
   console.log(`\nOptimizer tests: ${passed} passed, ${failed} failed`)

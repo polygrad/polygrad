@@ -357,16 +357,42 @@ static void mem_store_scalar(void *ptr, InterpLane v, PolyDType s) {
 
 static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src) {
   bool is_flt = poly_dtype_is_float(dt);
+  bool is_uns = poly_dtype_is_unsigned(dt);
 
-  double a = srcs[0].f, b = n_src > 1 ? srcs[1].f : 0, c = n_src > 2 ? srcs[2].f : 0;
-  int64_t ai = srcs[0].i, bi = n_src > 1 ? srcs[1].i : 0;
-  uint64_t au = srcs[0].u, bu = n_src > 1 ? srcs[1].u : 0;
+  /* WHERE's condition has bool dtype while its value operands/result use dt.
+   * Select the already-typed lane before extracting a numeric domain. */
+  if (op == POLY_OP_WHERE) return srcs[0].i ? srcs[1] : srcs[2];
+
+  /* Extract only the active dtype domain. Besides avoiding implementation-
+   * defined uint64 -> int64 conversion, this is required for float NaN/Inf:
+   * C11 makes an out-of-range float -> integer conversion undefined even when
+   * that integer view is never consumed by the selected ALU operation. */
+  double a = 0, b = 0, c = 0;
+  int64_t ai = 0, bi = 0, ci = 0;
+  uint64_t au = 0, bu = 0, cu = 0;
+  if (is_flt) {
+    a = srcs[0].f;
+    if (n_src > 1) b = srcs[1].f;
+    if (n_src > 2) c = srcs[2].f;
+  } else if (is_uns) {
+    au = srcs[0].u;
+    if (n_src > 1) bu = srcs[1].u;
+    if (n_src > 2) cu = srcs[2].u;
+  } else {
+    ai = srcs[0].i;
+    if (n_src > 1) bi = srcs[1].i;
+    if (n_src > 2) ci = srcs[2].i;
+    au = (uint64_t)ai;
+    bu = (uint64_t)bi;
+    cu = (uint64_t)ci;
+  }
 
   switch (op) {
   /* Unary */
   case POLY_OP_NEG:
     if (poly_dtype_is_bool(poly_dtype_scalar(dt))) return il_int(srcs[0].i ? 0 : 1);
-    return is_flt ? il_flt(-a) : il_int(-ai);
+    if (is_flt) return il_flt(-a);
+    return is_uns ? il_uint(UINT64_C(0) - au) : il_int((int64_t)(UINT64_C(0) - (uint64_t)ai));
   case POLY_OP_SQRT:
     return il_flt(sqrt(a));
   case POLY_OP_RECIPROCAL:
@@ -383,51 +409,69 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
   /* Binary arithmetic — wrapping add/sub/mul to avoid signed overflow UB.
    * tinygrad's Python uses arbitrary-precision ints; in C we wrap via unsigned cast. */
   case POLY_OP_ADD:
-    return is_flt ? il_flt(a + b) : il_int((int64_t)((uint64_t)ai + (uint64_t)bi));
+    if (is_flt) return il_flt(a + b);
+    return is_uns ? il_uint(au + bu) : il_int((int64_t)((uint64_t)ai + (uint64_t)bi));
   case POLY_OP_SUB:
-    return is_flt ? il_flt(a - b) : il_int((int64_t)((uint64_t)ai - (uint64_t)bi));
+    if (is_flt) return il_flt(a - b);
+    return is_uns ? il_uint(au - bu) : il_int((int64_t)((uint64_t)ai - (uint64_t)bi));
   case POLY_OP_MUL:
-    return is_flt ? il_flt(a * b) : il_int((int64_t)((uint64_t)ai * (uint64_t)bi));
+    if (is_flt) return il_flt(a * b);
+    return is_uns ? il_uint(au * bu) : il_int((int64_t)((uint64_t)ai * (uint64_t)bi));
   case POLY_OP_FDIV:
     return il_flt(a / b);
   case POLY_OP_IDIV:
-    return bi != 0 ? il_int(ai / bi) : il_int(0);
+    if (is_uns) return il_uint(bu != 0 ? au / bu : 0);
+    return bi == 0 ? il_int(0) : il_int(ai == INT64_MIN && bi == -1 ? INT64_MIN : ai / bi);
   case POLY_OP_MOD:
-    return bi != 0 ? il_int(ai % bi) : il_int(0);
+    if (is_uns) return il_uint(bu != 0 ? au % bu : 0);
+    return bi == 0 ? il_int(0) : il_int(ai == INT64_MIN && bi == -1 ? 0 : ai % bi);
   case POLY_OP_FLOORDIV:
-    return il_int(interp_floor_div_i64(ai, bi));
+    return is_uns ? il_uint(bu != 0 ? au / bu : 0) : il_int(interp_floor_div_i64(ai, bi));
   case POLY_OP_FLOORMOD:
-    return il_int(interp_floor_mod_i64(ai, bi));
+    return is_uns ? il_uint(bu != 0 ? au % bu : 0) : il_int(interp_floor_mod_i64(ai, bi));
   case POLY_OP_MAX:
-    return is_flt ? il_flt(a > b ? a : b) : il_int(ai > bi ? ai : bi);
+    if (is_flt) return il_flt(a > b ? a : b);
+    return is_uns ? il_uint(au > bu ? au : bu) : il_int(ai > bi ? ai : bi);
   case POLY_OP_POW:
     return il_flt(pow(a, b));
 
-  /* Bitwise (always unsigned semantics) */
-  case POLY_OP_SHL:
-    return il_uint(au << (bu & 63));
-  case POLY_OP_SHR:
-    return il_uint(au >> (bu & 63));
+  /* Bitwise operations preserve the operand dtype. SHR is arithmetic for
+   * signed integers and logical for unsigned integers, matching renderers and
+   * poly_exec_alu. */
+  case POLY_OP_SHL: {
+    uint64_t shift = is_uns ? bu : (bi < 0 ? UINT64_MAX : (uint64_t)bi);
+    uint64_t value = shift >= 64 ? 0 : au << shift;
+    return is_uns ? il_uint(value) : il_int((int64_t)value);
+  }
+  case POLY_OP_SHR: {
+    uint64_t shift = is_uns ? bu : (bi < 0 ? UINT64_MAX : (uint64_t)bi);
+    if (is_uns) return il_uint(shift >= 64 ? 0 : au >> shift);
+    if (shift >= 64) return il_int(ai < 0 ? -1 : 0);
+    if (shift == 0 || ai >= 0) return il_int((int64_t)((uint64_t)ai >> shift));
+    return il_int((int64_t)(((uint64_t)ai >> shift) | (~UINT64_C(0) << (64 - shift))));
+  }
   case POLY_OP_AND:
-    return il_uint(au & bu);
+    return is_uns ? il_uint(au & bu) : il_int((int64_t)(au & bu));
   case POLY_OP_OR:
-    return il_uint(au | bu);
+    return is_uns ? il_uint(au | bu) : il_int((int64_t)(au | bu));
   case POLY_OP_XOR:
-    return il_uint(au ^ bu);
+    return is_uns ? il_uint(au ^ bu) : il_int((int64_t)(au ^ bu));
 
   /* Comparison (result is 0 or 1) */
   case POLY_OP_CMPLT:
-    return is_flt ? il_int(a < b ? 1 : 0) : il_int(ai < bi ? 1 : 0);
+    return is_flt ? il_int(a < b ? 1 : 0) : il_int(is_uns ? (au < bu ? 1 : 0) : (ai < bi ? 1 : 0));
   case POLY_OP_CMPNE:
-    return is_flt ? il_int(a != b ? 1 : 0) : il_int(ai != bi ? 1 : 0);
+    return is_flt ? il_int(a != b ? 1 : 0)
+                  : il_int(is_uns ? (au != bu ? 1 : 0) : (ai != bi ? 1 : 0));
   case POLY_OP_CMPEQ:
-    return is_flt ? il_int(a == b ? 1 : 0) : il_int(ai == bi ? 1 : 0);
+    return is_flt ? il_int(a == b ? 1 : 0)
+                  : il_int(is_uns ? (au == bu ? 1 : 0) : (ai == bi ? 1 : 0));
 
   /* Ternary */
-  case POLY_OP_WHERE:
-    return srcs[0].i ? srcs[1] : srcs[2];
   case POLY_OP_MULACC:
-    return is_flt ? il_flt(a * b + c) : il_int(ai * bi + srcs[2].i);
+    if (is_flt) return il_flt(a * b + c);
+    return is_uns ? il_uint(au * bu + cu)
+                  : il_int((int64_t)((uint64_t)ai * (uint64_t)bi + (uint64_t)ci));
 
   /* THREEFRY is decomposed by pm_decomp before linearization.
    * If it somehow survives, XOR is a reasonable fallback. */
@@ -483,6 +527,8 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
     if (poly_dtype_is_float(src_dt)) {
       float fv = (float)src.f;
       memcpy(&bits, &fv, 4);
+    } else if (poly_dtype_is_unsigned(src_dt)) {
+      bits = (uint32_t)src.u;
     } else {
       bits = (uint32_t)src.i;
     }
@@ -490,21 +536,31 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
       float fv;
       memcpy(&fv, &bits, 4);
       return il_flt(fv);
+    } else if (poly_dtype_is_unsigned(dst_dt)) {
+      return il_uint(bits);
     } else {
-      return il_int((int32_t)bits);
+      int32_t value;
+      memcpy(&value, &bits, sizeof(value));
+      return il_int(value);
     }
   } else if (src_dt.bitsize == 64 && dst_dt.bitsize == 64) {
     uint64_t bits;
     if (poly_dtype_is_float(src_dt))
       memcpy(&bits, &src.f, 8);
-    else
+    else if (poly_dtype_is_unsigned(src_dt))
       bits = src.u;
+    else
+      memcpy(&bits, &src.i, sizeof(bits));
     if (poly_dtype_is_float(dst_dt)) {
       double fv;
       memcpy(&fv, &bits, 8);
       return il_flt(fv);
-    } else {
+    } else if (poly_dtype_is_unsigned(dst_dt)) {
       return il_uint(bits);
+    } else {
+      int64_t value;
+      memcpy(&value, &bits, sizeof(value));
+      return il_int(value);
     }
   }
   /* Mismatched sizes: pass through (best effort) */
@@ -826,9 +882,7 @@ static int interp_region(
       }
 
       /* Gated load check */
-      PolyUOp *ld_idx = poly_find_index_through_cast(u->src[0]);
-      PolyUOp *gate_uop =
-          (u->n_src >= 3) ? u->src[2] : ((ld_idx && ld_idx->n_src >= 3) ? ld_idx->src[2] : NULL);
+      PolyUOp *gate_uop = (u->n_src >= 3) ? u->src[2] : NULL;
       if (gate_uop) {
         int gate_i = uop_index_map_get(idx_map, gate_uop);
         if (gate_i >= 0 && !as_int(iv_get(&vals[gate_i], 0), gate_uop->dtype)) {

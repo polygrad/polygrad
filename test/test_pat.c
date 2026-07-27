@@ -33,6 +33,20 @@ static void pat_restore_env(PatEnvSave *s) {
   s->value = NULL;
 }
 
+static PolyUOp *rewrite_accept_a_equal_two(
+    PolyCtx *ctx,
+    PolyUOp *root,
+    const PolyBindings *binds
+) {
+  (void)ctx;
+  (void)root;
+  PolyUOp *a = poly_bind(binds, "a");
+  return a && a->op == POLY_OP_CONST &&
+                 a->arg.kind == POLY_ARG_INT && a->arg.i == 2
+             ? a
+             : NULL;
+}
+
 /* Pattern matching tests */
 
 TEST(pat, match_op_literal) {
@@ -92,6 +106,34 @@ TEST(pat, match_more_than_inline_bindings) {
   ASSERT_PTR_EQ(poly_bind(&b, "x19"), srcs[19]);
 
   poly_bindings_free(&b);
+  poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, failed_match_rolls_back_heap_backed_bindings) {
+  enum { N = POLY_BINDINGS_INLINE + 2 };
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *src[N];
+  PolyPat *pats[N];
+  char names[N - 1][8];
+  for (int i = 0; i < N; i++)
+    src[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(i));
+  for (int i = 0; i < N - 1; i++) {
+    snprintf(names[i], sizeof(names[i]), "x%d", i);
+    pats[i] = poly_pat_any(names[i]);
+  }
+  /* The last source reuses x0 but is a different UOp, after bindings have
+   * crossed the inline/heap boundary. */
+  pats[N - 1] = poly_pat_any("x0");
+  PolyPat *p = poly_pat_op(POLY_OP_SINK, pats, N, NULL);
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, src, N, poly_arg_none());
+
+  PolyBindings binds = {.n = 0};
+  ASSERT_FALSE(poly_pat_match(p, sink, &binds));
+  ASSERT_INT_EQ(binds.n, 0);
+
+  poly_bindings_free(&binds);
   poly_pat_free(p);
   poly_ctx_destroy(ctx);
   PASS();
@@ -165,6 +207,78 @@ TEST(pat, match_commutative) {
   ASSERT_PTR_EQ(poly_bind(&binds, "x"), x);
 
   poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, nested_commutative_backtracks_across_later_binding) {
+  /*
+   * Pinned tinygrad UPat expands commutative lists into every permutation
+   * (uop/ops.py:1237,1310). The inner ADD must retry its other ordering when
+   * the repeated outer "x" binding rejects the first locally valid ordering.
+   */
+  PolyPat *p = poly_pat_op2c(
+      POLY_OP_ADD,
+      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("a"), poly_pat_any("x"), NULL),
+      poly_pat_any("x"), NULL
+  );
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *y = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(7));
+  PolyUOp *inner = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, x, y, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, inner, x, poly_arg_none());
+
+  PolyBindings binds = {.n = 0};
+  ASSERT_TRUE(poly_pat_match(p, root, &binds));
+  ASSERT_PTR_EQ(poly_bind(&binds, "a"), y);
+  ASSERT_PTR_EQ(poly_bind(&binds, "x"), x);
+
+  poly_pat_free(p);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, rewrite_retries_commutative_binding_after_null_callback) {
+  /* Pinned tinygrad/uop/ops.py:1345-1351 tries every structural binding map
+   * until the rewrite callback returns non-None. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, one, two, poly_arg_none());
+  PolyRule rules[] = {{
+      poly_pat_op2c(POLY_OP_ADD, poly_pat_any("a"), poly_pat_any("b"), NULL),
+      rewrite_accept_a_equal_two,
+  }};
+  PolyPatternMatcher *pm = poly_pm_new(rules, 1);
+
+  ASSERT_PTR_EQ(poly_pm_rewrite(pm, ctx, add), two);
+
+  poly_pm_destroy(pm);
+  poly_pat_free(rules[0].pat);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, or_casted_is_direct_first_and_one_wrapper) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(3));
+  PolyUOp *cast1 = poly_uop1(ctx, POLY_OP_CAST, POLY_INT64, value, poly_arg_none());
+  PolyUOp *cast2 = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, cast1, poly_arg_none());
+
+  PolyPat *wild = poly_pat_or_casted(poly_pat_any("x"));
+  PolyBindings binds = {.n = 0};
+  ASSERT_TRUE(poly_pat_match(wild, cast1, &binds));
+  ASSERT_PTR_EQ(poly_bind(&binds, "x"), cast1);
+  poly_pat_free(wild);
+
+  PolyPat *constant =
+      poly_pat_or_casted(poly_pat_op(POLY_OP_CONST, NULL, 0, NULL));
+  binds.n = 0;
+  ASSERT_TRUE(poly_pat_match(constant, cast1, &binds));
+  binds.n = 0;
+  ASSERT_FALSE(poly_pat_match(constant, cast2, &binds));
+
+  poly_pat_free(constant);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -565,17 +679,31 @@ TEST(pat, graph_rewrite_call_args_do_not_inherit_callee_body_gating) {
   PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
   PolyUOp *shared_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
   PolyUOp *callee = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared_neg, c2, poly_arg_none());
-  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee, shared_neg, poly_arg_none());
 
   PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
   PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
-  PolyUOp *result = poly_graph_rewrite_ctx_ex2(ctx, call, pm, NULL, false, false);
-  ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(result->op, POLY_OP_CALL);
-  ASSERT_PTR_EQ(result->src[0], callee);
-  ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
+  const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
+  for (int op_idx = 0; op_idx < 2; op_idx++) {
+    PolyUOp *opaque = poly_uop2(
+        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, shared_neg, poly_arg_none()
+    );
+    PolyUOp *result =
+        poly_graph_rewrite_ctx_ex2(ctx, opaque, pm, NULL, false, false);
+    ASSERT_NOT_NULL(result);
+    ASSERT_INT_EQ(result->op, opaque_ops[op_idx]);
+    ASSERT_PTR_EQ(result->src[0], callee);
+    ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
+
+    PolyUOp *body_only = poly_uop1(
+        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, poly_arg_none()
+    );
+    PolyUOp *body_only_result =
+        poly_graph_rewrite_ctx_ex2(ctx, body_only, pm, NULL, false, false);
+    ASSERT_PTR_EQ(body_only_result, body_only);
+    ASSERT_PTR_EQ(body_only_result->src[0], callee);
+  }
 
   poly_pm_destroy(pm);
   poly_pat_free(neg_pat);
@@ -590,17 +718,30 @@ TEST(pat, walk_rewrite_call_args_do_not_inherit_callee_body_gating) {
   PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
   PolyUOp *shared_neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, c1, poly_arg_none());
   PolyUOp *callee = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, shared_neg, c2, poly_arg_none());
-  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee, shared_neg, poly_arg_none());
 
   PolyPat *neg_pat = poly_pat_op1(POLY_OP_NEG, poly_pat_any("x"), NULL);
   PolyRule rules[] = {{neg_pat, rewrite_neg_to_zero}};
   PolyPatternMatcher *pm = poly_pm_new(rules, 1);
 
-  PolyUOp *result = poly_graph_walk_rewrite(ctx, call, pm, NULL, NULL, false);
-  ASSERT_NOT_NULL(result);
-  ASSERT_INT_EQ(result->op, POLY_OP_CALL);
-  ASSERT_PTR_EQ(result->src[0], callee);
-  ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
+  const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
+  for (int op_idx = 0; op_idx < 2; op_idx++) {
+    PolyUOp *opaque = poly_uop2(
+        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, shared_neg, poly_arg_none()
+    );
+    PolyUOp *result = poly_graph_walk_rewrite(ctx, opaque, pm, NULL, NULL, false);
+    ASSERT_NOT_NULL(result);
+    ASSERT_INT_EQ(result->op, opaque_ops[op_idx]);
+    ASSERT_PTR_EQ(result->src[0], callee);
+    ASSERT_INT_EQ(result->src[1]->op, POLY_OP_CONST);
+
+    PolyUOp *body_only = poly_uop1(
+        ctx, opaque_ops[op_idx], POLY_FLOAT32, callee, poly_arg_none()
+    );
+    PolyUOp *body_only_result =
+        poly_graph_walk_rewrite(ctx, body_only, pm, NULL, NULL, false);
+    ASSERT_PTR_EQ(body_only_result, body_only);
+    ASSERT_PTR_EQ(body_only_result->src[0], callee);
+  }
 
   poly_pm_destroy(pm);
   poly_pat_free(neg_pat);

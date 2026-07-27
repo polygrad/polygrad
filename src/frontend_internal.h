@@ -30,8 +30,16 @@ bool poly_structural_eq(const void *a, const void *b);
 
 /* Buffer ordering */
 
-/* DFS to collect BUFFER nodes in structural order (same order as
- * structural_hash). buf_order written up to POLY_MAX_REALIZE_BUFS.
+/* tinygrad's callified function uses value PARAMs as external storage
+ * identities until rangeify lowers them to kernel pointer PARAMs. */
+static inline bool poly_uop_is_shaped_value_param(const PolyUOp *u) {
+  return u && u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM &&
+         u->arg.param && !u->dtype.is_ptr && !u->arg.param->name &&
+         u->n_src == 1 && u->src[0] && u->src[0]->op == POLY_OP_STACK;
+}
+
+/* DFS to collect BUFFER/BUFFER_VIEW and callified shaped PARAM identities in
+ * structural order. buf_order written up to POLY_MAX_REALIZE_BUFS.
  * visited/n_visited are caller-provided scratch (POLY_MAX_STRUCT_NODES). */
 void poly_collect_buf_order(
     PolyUOp *u,
@@ -50,7 +58,7 @@ bool poly_collect_buf_order_alloc(
     int *out_n_visited
 );
 
-/* Linear scan for a BUFFER UOp in a buf_order array. Returns index or -1. */
+/* Linear scan for an external storage identity in a buf_order array. */
 int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs);
 
 /* Collect ordered external buffers (output-first, then inputs).
@@ -77,13 +85,58 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
 
 /* Graph validation */
 
-/* Validates that all UOps in the kernel graph are owned by ctx and have
- * no NULL sources. Returns true if valid, false with diagnostic on stderr. */
+/* Validates Polygrad ownership/non-NULL-source structure and the integer
+ * INDEX-coordinate predicate from pinned spec_tensor. This is not a complete
+ * spec_tensor implementation. Returns false with a diagnostic on stderr. */
 bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root);
 
 /* Memoized backing helper for poly_uop_device(), matching tinygrad's cached
  * UOp._device property without storing pass-local cache state on every UOp. */
 PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache);
+
+/* Apply one substitution map to several roots with one pass-local rewrite
+ * memo. This is the allocation-free-root equivalent of tinygrad substituting
+ * one temporary SINK: shared UOps are rewritten once, but no aggregate UOp is
+ * interned in Polygrad's ctx-lifetime arena/CSE. */
+int poly_uop_substitute_many(
+    PolyCtx *ctx,
+    PolyUOp **roots,
+    int n_roots,
+    PolyUOp **from,
+    PolyUOp **to,
+    int n,
+    PolyUOp **out
+);
+
+/* Resolve the exact execution device used by the physicalizer for a Tensor. */
+PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor);
+
+/* Physicalize a snapshot of Tensor roots with one pass-local memo. This is the
+ * logical/physical boundary counterpart to tinygrad rewriting one aggregate
+ * SINK: shared UOps are lowered once per exact execution device. When
+ * placement_memo is non-NULL it points to POLY_DEVICE_DISK+1 map slots; the
+ * existing maps are reused and ownership remains with the caller. */
+int poly_tensor_physicalize_many(
+    PolyCtx *ctx,
+    PolyTensor **tensors,
+    int n,
+    PolyUOp **out,
+    PolyMap **placement_memo
+);
+void poly_tensor_physicalize_memo_destroy(PolyMap **placement_memo);
+
+/* Physical-only counterpart to pinned transform_to_call's `(graph,
+ * buffer_map)` return. The caller owns and frees out_map_orig/out_map_repl;
+ * no Tensor, placement, Instance, or residency state is mutated here. */
+PolyUOp *poly_transform_to_call_with_map(
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n,
+    PolyUOp **out_uops,
+    PolyUOp ***out_map_orig,
+    PolyUOp ***out_map_repl,
+    int *out_map_n
+);
 
 #ifdef __cplusplus
 }

@@ -9,6 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifndef __EMSCRIPTEN__
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static _Thread_local PolyFrontendBufferReleaseFn g_frontend_buffer_release = NULL;
 
@@ -41,6 +47,8 @@ PolyBuffer poly_buffer_make_host_view(void *ptr, size_t nbytes) {
       .src = NULL,
       .valid = true,
       .frontend_release = NULL,
+      .memory_accounted = false,
+      .memory_device = POLY_DEVICE_AUTO,
   };
 }
 
@@ -68,7 +76,7 @@ PolyDevice poly_device_default(void) {
 }
 
 bool poly_device_can_execute(PolyDevice dev) {
-  return dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST;
+  return dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST && dev != POLY_DEVICE_DISK;
 }
 
 bool poly_devices_share_storage(PolyDevice a, PolyDevice b) {
@@ -92,16 +100,26 @@ static const PolyDeviceNameEntry POLY_DEVICE_NAMES[] = {
     {"wasm", POLY_DEVICE_WASM},   {"webgpu", POLY_DEVICE_WEBGPU},
     {"cuda", POLY_DEVICE_CUDA},   {"hip", POLY_DEVICE_HIP},
     {"x86", POLY_DEVICE_X86},
+    {"disk", POLY_DEVICE_DISK},
 };
 
 PolyDevice poly_device_by_name(const char *name) {
   if (!name || !name[0]) return POLY_DEVICE_AUTO;
+  /* DISK device strings carry an arbitrary filesystem path. Recognize the
+   * device prefix before copying short execution-device names into the fixed
+   * normalization buffer. */
+  if (tolower((unsigned char)name[0]) == 'd' &&
+      tolower((unsigned char)name[1]) == 'i' &&
+      tolower((unsigned char)name[2]) == 's' &&
+      tolower((unsigned char)name[3]) == 'k' && name[4] == ':')
+    return POLY_DEVICE_DISK;
   char buf[64];
   size_t n = strlen(name);
   if (n >= sizeof(buf)) return POLY_DEVICE_AUTO;
   for (size_t i = 0; i <= n; i++) buf[i] = (char)tolower((unsigned char)name[i]);
   name = buf;
   if (strncmp(name, "cpu:", 4) == 0) name += 4;
+  if (strncmp(name, "disk:", 5) == 0) name = "disk";
   for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
     if (strcmp(name, POLY_DEVICE_NAMES[i].name) == 0) return POLY_DEVICE_NAMES[i].device;
   return POLY_DEVICE_AUTO;
@@ -111,6 +129,122 @@ const char *poly_device_name(PolyDevice device) {
   for (size_t i = 0; i < sizeof(POLY_DEVICE_NAMES) / sizeof(POLY_DEVICE_NAMES[0]); i++)
     if (POLY_DEVICE_NAMES[i].device == device) return POLY_DEVICE_NAMES[i].name;
   return "auto";
+}
+
+static void *disk_alloc(size_t nbytes, void *dev_ctx) {
+  (void)nbytes;
+  (void)dev_ctx;
+  return NULL;
+}
+
+static void disk_free_alloc(const PolyBuffer *buffer, void *dev_ctx) {
+  (void)dev_ctx;
+#ifndef __EMSCRIPTEN__
+  if (buffer && buffer->ptr && buffer->nbytes) munmap(buffer->ptr, buffer->nbytes);
+#else
+  (void)buffer;
+#endif
+}
+
+static int disk_copy_in(
+    const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx
+) {
+  (void)dev_ctx;
+  if (!dst || !dst->ptr || !src || !src->ptr) return -1;
+  memcpy(dst->ptr, src->ptr, n);
+  return 0;
+}
+
+static int disk_copy_out(
+    const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx
+) {
+  (void)dev_ctx;
+  if (!dst || !dst->ptr || !src || !src->ptr) return -1;
+  memcpy(dst->ptr, src->ptr, n);
+  return 0;
+}
+
+static int disk_copy_between(
+    const PolyBuffer *dst, const PolyBuffer *src, size_t n, void *dev_ctx
+) {
+  return disk_copy_in(dst, src, n, dev_ctx);
+}
+
+static const PolyAllocator POLY_DISK_ALLOCATOR = {
+    .alloc = disk_alloc,
+    .free = disk_free_alloc,
+    .copy_in = disk_copy_in,
+    .copy_out = disk_copy_out,
+    .copy_between = disk_copy_between,
+    .host_addressable = true,
+    .dev_ctx = NULL,
+};
+
+const PolyAllocator *poly_disk_get_allocator(void) { return &POLY_DISK_ALLOCATOR; }
+
+PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id) {
+  if (!ctx || !path || !path[0]) return NULL;
+#ifdef __EMSCRIPTEN__
+  (void)dtype_id;
+  return NULL;
+#else
+  PolyDType scalar;
+  if (!poly_dtype_by_id(dtype_id, &scalar)) return NULL;
+  int itemsize = poly_dtype_itemsize(scalar);
+  if (itemsize <= 0) return NULL;
+
+  bool shared = true;
+  int fd = open(path, O_RDWR);
+  if (fd < 0) {
+    shared = false;
+    fd = open(path, O_RDONLY);
+  }
+  if (fd < 0) return NULL;
+
+  struct stat st;
+  if (fstat(fd, &st) != 0 || st.st_size < 0) {
+    close(fd);
+    return NULL;
+  }
+  uint64_t file_bytes = (uint64_t)st.st_size;
+  uint64_t mapped_bytes = file_bytes - (file_bytes % (uint64_t)itemsize);
+  if (mapped_bytes > SIZE_MAX || mapped_bytes / (uint64_t)itemsize > INT64_MAX) {
+    close(fd);
+    return NULL;
+  }
+
+  void *ptr = NULL;
+  if (mapped_bytes > 0) {
+    int flags = shared ? MAP_SHARED : MAP_PRIVATE;
+    ptr = mmap(NULL, (size_t)mapped_bytes, PROT_READ | PROT_WRITE, flags, fd, 0);
+    if (ptr == MAP_FAILED) {
+      close(fd);
+      return NULL;
+    }
+  }
+  close(fd);
+
+  int64_t numel = (int64_t)(mapped_bytes / (uint64_t)itemsize);
+  PolyUOp *buf = poly_buffer_on_device(ctx, scalar, numel, POLY_DEVICE_DISK);
+  if (!buf) {
+    if (ptr) munmap(ptr, (size_t)mapped_bytes);
+    return NULL;
+  }
+  PolyBuffer mapped = {
+      .ptr = ptr,
+      .nbytes = (size_t)mapped_bytes,
+      .device = POLY_DEVICE_DISK,
+      .owned = mapped_bytes > 0,
+      .allocator = &POLY_DISK_ALLOCATOR,
+      .src = NULL,
+      .valid = true,
+      .frontend_release = NULL,
+      .memory_accounted = false,
+      .memory_device = POLY_DEVICE_DISK,
+  };
+  poly_buffer_adopt(ctx, buf, &mapped);
+  return buf;
+#endif
 }
 
 /* Create a BUFFER UOp and attach frontend-owned host bytes in ctx->buffers.
@@ -166,35 +300,40 @@ PolyUOp *poly_buffer_from_host(
   return buf;
 }
 
-void poly_buffer_free(PolyBuffer *b) {
+void poly_buffer_free(PolyCtx *ctx, PolyBuffer *b) {
   if (!b) return;
   if (b->owned && b->allocator && b->allocator->free)
     b->allocator->free(b, b->allocator->dev_ctx);
+  if (b->memory_accounted)
+    poly_ctx_record_memory_free(ctx, b->memory_device, b->nbytes);
   b->ptr = NULL;
   b->owned = false;
   b->valid = false;
+  b->memory_accounted = false;
+  b->memory_device = POLY_DEVICE_AUTO;
 }
 
 /* Free current residency + retained src. Assumes the no-chains invariant
  * (b->src is a root, never another current). Breaks the link before freeing
  * to avoid recursion surprises, and clears ownership to guard against double-
  * free if `src` is somehow shared (which the design forbids, but defense). */
-void poly_buffer_free_chain(PolyBuffer *b) {
+void poly_buffer_free_chain(PolyCtx *ctx, PolyBuffer *b) {
   if (!b) return;
   PolyBuffer *src = b->src;
   b->src = NULL;
-  poly_buffer_free(b);
-  if (src) poly_buffer_free(src);
+  poly_buffer_free(ctx, b);
+  if (src) poly_buffer_free(ctx, src);
 }
 
 void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int device) {
   if (!ctx || !buf) return;
   /* Replacing the whole binding for this UOp: free the entire old chain. */
   PolyBuffer *old = poly_buffer_get(ctx, buf);
-  if (old) poly_buffer_free_chain(old);
+  if (old) poly_buffer_free_chain(ctx, old);
 
   const PolyBackendDesc *be = poly_backend_get((PolyDevice)device);
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
+  if (!h) return;
   *h = (PolyBuffer){
       .ptr = ptr,
       .nbytes = nbytes,
@@ -205,6 +344,8 @@ void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int d
       .valid = true, /* frontend just gave us valid data */
       .frontend_release =
           ((PolyDevice)device == POLY_DEVICE_HOST) ? frontend_buffer_release_for_ctx(ctx) : NULL,
+      .memory_accounted = false,
+      .memory_device = POLY_DEVICE_AUTO,
   };
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, h, poly_ptr_eq);
 }
@@ -212,7 +353,7 @@ void poly_buffer_set(PolyCtx *ctx, PolyUOp *buf, void *ptr, size_t nbytes, int d
 void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
   if (!ctx || !buf || !handle) return;
   PolyBuffer *old = poly_buffer_get(ctx, buf);
-  if (old) poly_buffer_free_chain(old);
+  if (old) poly_buffer_free_chain(ctx, old);
 
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
   *h = *handle;
@@ -220,6 +361,8 @@ void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
   h->src = NULL;
   h->valid = true;
   h->frontend_release = NULL;
+  h->memory_accounted = false;
+  h->memory_device = POLY_DEVICE_AUTO;
   if (!h->allocator) {
     const PolyBackendDesc *be = poly_backend_get(h->device);
     h->allocator = be ? be->get_allocator() : NULL;
@@ -230,7 +373,7 @@ void poly_buffer_attach(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
 void poly_buffer_adopt(PolyCtx *ctx, PolyUOp *buf, const PolyBuffer *handle) {
   if (!ctx || !buf || !handle) return;
   PolyBuffer *old = poly_buffer_get(ctx, buf);
-  if (old) poly_buffer_free_chain(old);
+  if (old) poly_buffer_free_chain(ctx, old);
 
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
   *h = *handle;
@@ -256,13 +399,55 @@ void poly_buffer_remove(PolyCtx *ctx, PolyUOp *buf) {
   if (!ctx || !buf) return;
   /* Fully discarding this logical buffer: free current + src chain. */
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  if (b) poly_buffer_free_chain(b);
+  if (b) poly_buffer_free_chain(ctx, b);
   poly_map_remove(ctx->buffers, poly_ptr_hash(buf), buf, poly_ptr_eq);
 }
 
 bool poly_buffer_is_allocated(PolyCtx *ctx, PolyUOp *buf) {
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  return b != NULL && (b->ptr != NULL || b->device == POLY_DEVICE_HOST);
+  return b != NULL && (b->ptr != NULL || b->nbytes == 0 || b->device == POLY_DEVICE_HOST);
+}
+
+PolyUOp *poly_buffer_view(
+    PolyCtx *ctx,
+    PolyUOp *base,
+    int64_t numel,
+    size_t byte_offset
+) {
+  if (!ctx || !base || numel < 0) return NULL;
+  const PolyUOp *identity = poly_uop_get_buffer_identity(base);
+  if (!identity) return NULL;
+  PolyBuffer *parent = poly_buffer_get(ctx, (PolyUOp *)identity);
+  if (!parent) return NULL;
+  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(identity->dtype));
+  if (itemsize == 0 || (uint64_t)numel > SIZE_MAX / itemsize) return NULL;
+  size_t nbytes = (size_t)numel * itemsize;
+  if (byte_offset > parent->nbytes || nbytes > parent->nbytes - byte_offset) return NULL;
+
+  PolyUOp *unique = poly_uop0(
+      ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx))
+  );
+  int64_t view_arg_values[2] = {numel, (int64_t)byte_offset};
+  PolyArg view_arg = {
+      .kind = POLY_ARG_INT_TUPLE,
+      .int_tuple = {view_arg_values, 2},
+  };
+  PolyUOp *view_src[2] = {(PolyUOp *)identity, unique};
+  PolyUOp *view = poly_uop(
+      ctx, POLY_OP_BUFFER_VIEW, poly_dtype_scalar(identity->dtype), view_src, 2, view_arg
+  );
+  if (!view) return NULL;
+
+  PolyBuffer alias = *parent;
+  alias.ptr = parent->ptr ? (void *)((char *)parent->ptr + byte_offset) : NULL;
+  alias.nbytes = nbytes;
+  alias.owned = false;
+  alias.src = NULL;
+  alias.frontend_release = NULL;
+  alias.memory_accounted = false;
+  alias.memory_device = POLY_DEVICE_AUTO;
+  poly_buffer_attach(ctx, view, &alias);
+  return view;
 }
 
 static const PolyAllocator *buffer_allocator(const PolyBuffer *b) {
@@ -340,6 +525,11 @@ static int poly_buffer_alloc_residency(
   }
 
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
+  if (!h) {
+    PolyBuffer tmp = {.ptr = ptr, .nbytes = nbytes, .device = device, .owned = true, .allocator = alloc};
+    alloc->free(&tmp, alloc->dev_ctx);
+    return -1;
+  }
   *h = (PolyBuffer){
       .ptr = ptr,
       .nbytes = nbytes,
@@ -349,7 +539,10 @@ static int poly_buffer_alloc_residency(
       .src = src,
       .valid = valid,
       .frontend_release = NULL,
+      .memory_accounted = true,
+      .memory_device = device,
   };
+  poly_ctx_record_memory_alloc(ctx, device, nbytes);
   *out = h;
   return 0;
 }
@@ -363,6 +556,11 @@ static int poly_buffer_alloc_host_root(PolyCtx *ctx, size_t nbytes, bool valid, 
   void *ptr = alloc->alloc(nbytes, alloc->dev_ctx);
   if (!ptr) return -1;
   PolyBuffer *h = poly_arena_alloc(ctx->arena, sizeof(PolyBuffer), _Alignof(PolyBuffer));
+  if (!h) {
+    PolyBuffer tmp = {.ptr = ptr, .nbytes = nbytes, .device = device, .owned = true, .allocator = alloc};
+    alloc->free(&tmp, alloc->dev_ctx);
+    return -1;
+  }
   *h = (PolyBuffer){
       .ptr = ptr,
       .nbytes = nbytes,
@@ -372,7 +570,10 @@ static int poly_buffer_alloc_host_root(PolyCtx *ctx, size_t nbytes, bool valid, 
       .src = NULL,
       .valid = valid,
       .frontend_release = NULL,
+      .memory_accounted = true,
+      .memory_device = device,
   };
+  poly_ctx_record_memory_alloc(ctx, device, nbytes);
   *out = h;
   return 0;
 }
@@ -389,11 +590,11 @@ static PolyBuffer *poly_buffer_retained_root(PolyBuffer *b) {
   return poly_device_is_host_addressable(root->device) ? root : NULL;
 }
 
-static void poly_buffer_free_except_root(PolyBuffer *b, PolyBuffer *root) {
+static void poly_buffer_free_except_root(PolyCtx *ctx, PolyBuffer *b, PolyBuffer *root) {
   while (b && b != root) {
     PolyBuffer *next = b->src;
     b->src = NULL;
-    poly_buffer_free(b);
+    poly_buffer_free(ctx, b);
     b = next;
   }
 }
@@ -425,7 +626,7 @@ int poly_buffer_ensure_host_current(PolyCtx *ctx, PolyUOp *buf, PolyBuffer **hos
   if (cur->valid) {
     size_t copied = poly_buffer_copy_nbytes(root, cur);
     if (poly_buffer_copy(root, cur) != 0) {
-      poly_buffer_free(root);
+      poly_buffer_free(ctx, root);
       return -1;
     }
     poly_ctx_record_buffer_copy(ctx, copied);
@@ -505,6 +706,13 @@ int poly_buffer_mark_host_written(PolyCtx *ctx, PolyUOp *buf) {
 
 int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes) {
   if (!ctx || !buf || !src) return -1;
+  PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  if (cur && cur->ptr && cur->allocator && !poly_device_is_host_addressable(cur->device)) {
+    if (poly_buffer_copyin(ctx, buf, src, nbytes) != 0) return -1;
+    ctx->buffer_write_count++;
+    ctx->buffer_write_bytes += nbytes;
+    return 0;
+  }
   PolyBuffer *root = NULL;
   if (poly_buffer_ensure_host_root_for_write(ctx, buf, &root) != 0 || !root || !root->ptr)
     return -1;
@@ -513,7 +721,7 @@ int poly_buffer_write(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes
   root->valid = true;
   ctx->buffer_write_count++;
   ctx->buffer_write_bytes += nbytes;
-  PolyBuffer *cur = poly_buffer_get(ctx, buf);
+  cur = poly_buffer_get(ctx, buf);
   if (cur && cur != root && cur->src == root) cur->valid = false;
   return 0;
 }
@@ -532,7 +740,7 @@ int poly_buffer_ensure_device_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice d
   PolyBuffer *src = poly_buffer_retained_root(existing);
   PolyBuffer *dst = NULL;
   if (poly_buffer_alloc_residency(ctx, buf, device, nbytes, false, src, &dst) != 0) return -1;
-  poly_buffer_free_except_root(existing, src);
+  poly_buffer_free_except_root(ctx, existing, src);
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
   return 0;
 }
@@ -580,11 +788,11 @@ int poly_buffer_ensure_device_current(PolyCtx *ctx, PolyUOp *buf, PolyDevice dev
   if (poly_buffer_alloc_residency(ctx, buf, device, nbytes, false, src_root, &dst) != 0) return -1;
   size_t copied = poly_buffer_copy_nbytes(dst, source);
   if (poly_buffer_copy(dst, source) != 0) {
-    poly_buffer_free(dst);
+    poly_buffer_free(ctx, dst);
     return -1;
   }
   poly_ctx_record_buffer_copy(ctx, copied);
-  poly_buffer_free_except_root(cur, src_root);
+  poly_buffer_free_except_root(ctx, cur, src_root);
   poly_map_set(ctx->buffers, poly_ptr_hash(buf), buf, dst, poly_ptr_eq);
   return 0;
 }
@@ -619,10 +827,13 @@ int poly_buffer_ensure_allocated(PolyCtx *ctx, PolyUOp *buf, PolyDevice device) 
 int poly_buffer_copyin(PolyCtx *ctx, PolyUOp *buf, const void *src, size_t nbytes) {
   if (!ctx || !buf || !src) return -1;
   PolyBuffer *b = poly_buffer_get(ctx, buf);
-  if (!b || !b->ptr || !b->allocator) return -1;
+  if (!b || !b->ptr || !b->allocator || nbytes == 0 || b->nbytes < nbytes) return -1;
   PolyBuffer src_view = poly_buffer_make_host_view((void *)src, nbytes);
   int rc = b->allocator->copy_in(b, &src_view, nbytes, b->allocator->dev_ctx);
-  if (rc == 0) b->valid = true;
+  if (rc == 0) {
+    b->valid = true;
+    if (b->src) b->src->valid = false;
+  }
   return rc;
 }
 

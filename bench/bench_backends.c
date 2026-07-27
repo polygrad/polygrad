@@ -78,7 +78,7 @@ static BenchResult bench_graph(const char *name, PolyCtx *ctx, PolyUOp *sink,
   BenchResult r = { .name = name };
 
   /* Prepare (shared, one-time) */
-  PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  PolySchedule *prep = poly_schedule_effect_sink(ctx, sink);
   if (!prep) { fprintf(stderr, "prepare failed for %s\n", name); return r; }
 
   /* CPU: lower + warmup + bench */
@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
       PolyUOp *sink = make_vecadd(ctx, n, &ua, &ub, &uo);
       void *slot_data[8] = {0};
       /* Find slots by matching buf_uop pointers */
-      PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+      PolySchedule *prep = poly_schedule_effect_sink(ctx, sink);
       for (int s = 0; s < prep->n_buf_slots; s++) {
         if (prep->buf_slots[s].buf_uop == ua) slot_data[s] = a;
         else if (prep->buf_slots[s].buf_uop == ub) slot_data[s] = b;
@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
       PolyUOp *ua, *ub, *uo;
       PolyUOp *sink = make_chain5(ctx, n, &ua, &ub, &uo);
       void *slot_data[8] = {0};
-      PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+      PolySchedule *prep = poly_schedule_effect_sink(ctx, sink);
       for (int s = 0; s < prep->n_buf_slots; s++) {
         if (prep->buf_slots[s].buf_uop == ua) slot_data[s] = a;
         else if (prep->buf_slots[s].buf_uop == ub) slot_data[s] = b;
@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
       PolyUOp *sink = make_reduce(ctx, n, &ua, &uo);
       float reduce_out = 0;
       void *slot_data[8] = {0};
-      PolySchedule *prep = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+      PolySchedule *prep = poly_schedule_effect_sink(ctx, sink);
       for (int s = 0; s < prep->n_buf_slots; s++) {
         if (prep->buf_slots[s].buf_uop == ua) slot_data[s] = a;
         else if (prep->buf_slots[s].buf_uop == uo) slot_data[s] = &reduce_out;

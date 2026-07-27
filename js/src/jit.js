@@ -1,5 +1,7 @@
 'use strict'
 
+const capturing = []
+
 function flattenTensors(value, Tensor, out) {
   if (value instanceof Tensor) {
     out.push(value)
@@ -60,7 +62,8 @@ async function resolveUserReturnAsync(value) {
 function checkDuplicateBuffers(inputs) {
   const seen = new Set()
   for (const t of inputs) {
-    const u = t.uop
+    const input = t.uop
+    const u = input && input.base
     const b = u && u.buffer
     const key = b ? b.key : '0'
     if (key === '0') throw new Error('jit inputs must be real buffers')
@@ -173,7 +176,13 @@ function createBoundJit(runtime) {
       const inputs = inputTensors(args, Tensor)
       if (inputs.length === 0) throw new Error('jit requires at least one Tensor input')
       if (this.cnt > 0 && inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
-      for (const t of inputs) t.realize()
+      // tinygrad/engine/jit.py:233-235 realizes only inputs whose recursive
+      // UOp base is not allocated. An absent Polygrad physical root also
+      // requires requested-device placement even if the logical HOST base is
+      // already allocated.
+      for (const t of inputs) {
+        if (!t.uopPhysical || !t.uop.isRealized) t.realize()
+      }
       checkDuplicateBuffers(inputs)
 
       let ret
@@ -181,6 +190,11 @@ function createBoundJit(runtime) {
         ret = resolveUserReturn(this.fxn(...args))
         realizeReturn(ret, Tensor)
       } else if (this.cnt === 1) {
+        // Match tinygrad/engine/jit.py:278-284: reject nested capture before
+        // allocating or replacing this wrapper's private C JIT.
+        if (capturing.length) {
+          throw new Error(`having TinyJit inside another TinyJit is not supported len(capturing)=${capturing.length}`)
+        }
         const sig = inputSignature(inputs)
         this._jit = ffi.poly_jit_new(ctx)
         if (!this._jit) throw new Error('poly_jit_new failed')
@@ -192,6 +206,7 @@ function createBoundJit(runtime) {
           this._clear()
           throw new Error('poly_jit_begin_capture failed')
         }
+        capturing.push(this)
         try {
           ret = resolveUserReturn(this.fxn(...args))
           realizeReturn(ret, Tensor)
@@ -199,6 +214,8 @@ function createBoundJit(runtime) {
         } catch (err) {
           if (this._jit && ffi.poly_jit_cancel_capture) ffi.poly_jit_cancel_capture(this._jit)
           throw err
+        } finally {
+          capturing.length = 0
         }
         this.ret = ret
         this.signature = sig
@@ -236,7 +253,9 @@ function createBoundJit(runtime) {
       const inputs = inputTensors(args, Tensor)
       if (inputs.length === 0) throw new Error('jit requires at least one Tensor input')
       if (this.cnt > 0 && inputs.some(t => t._ctx !== ctx)) throw new Error('jit inputs must share runtime context')
-      for (const t of inputs) await t.realizeAsync()
+      for (const t of inputs) {
+        if (!t.uopPhysical || !t.uop.isRealized) await t.realizeAsync()
+      }
       checkDuplicateBuffers(inputs)
 
       let ret
@@ -244,6 +263,9 @@ function createBoundJit(runtime) {
         ret = await resolveUserReturnAsync(this.fxn(...args))
         await realizeReturnAsync(ret, Tensor)
       } else if (this.cnt === 1) {
+        if (capturing.length) {
+          throw new Error(`having TinyJit inside another TinyJit is not supported len(capturing)=${capturing.length}`)
+        }
         const sig = inputSignature(inputs)
         this._jit = ffi.poly_jit_new(ctx)
         if (!this._jit) throw new Error('poly_jit_new failed')
@@ -255,6 +277,7 @@ function createBoundJit(runtime) {
           this._clear()
           throw new Error('poly_jit_begin_capture failed')
         }
+        capturing.push(this)
         try {
           ret = await resolveUserReturnAsync(this.fxn(...args))
           await realizeReturnAsync(ret, Tensor)
@@ -262,6 +285,8 @@ function createBoundJit(runtime) {
         } catch (err) {
           if (this._jit && ffi.poly_jit_cancel_capture) ffi.poly_jit_cancel_capture(this._jit)
           throw err
+        } finally {
+          capturing.length = 0
         }
         this.ret = ret
         this.signature = sig

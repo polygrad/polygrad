@@ -30,6 +30,29 @@ static PolyUOp *index_neg_like_tinygrad(PolyCtx *ctx, PolyUOp *u) {
   return poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, to_index_dtype(ctx, u), index_const(ctx, -1), poly_arg_none());
 }
 
+static PolyUOp *shape_stack_get(PolyUOp *stack, int idx) {
+  if (!stack || stack->op != POLY_OP_STACK || idx < 0 || idx >= stack->n_src) return NULL;
+  return stack->src[idx];
+}
+
+static bool expand_target_dim_is_one(PolyCtx *ctx, PolyUOp *movement, PolyArg arg, int dim, bool *is_one) {
+  if (!is_one) return false;
+  *is_one = false;
+  if (!movement || arg.kind != POLY_ARG_NONE || movement->n_src != 2) return false;
+  /* Pinned indexing consumes EXPAND.marg == src[1].as_shape. Shape inference
+   * already preserves that value and its symbolic dimensions. */
+  PolyShape target_shape = poly_uop_max_shape_cached(ctx, movement);
+  if (target_shape.ndim < 0 || dim < 0 || dim >= target_shape.ndim) return false;
+  PolyUOp *target = poly_uop_shape_dim(ctx, movement, dim);
+  int64_t v = target_shape.dims[dim];
+  if (target) {
+    target = poly_graph_rewrite(ctx, target, poly_symbolic_simple());
+    if (poly_uop_const_i64(target, &v) != 0) return true;
+  }
+  *is_one = v == 1;
+  return true;
+}
+
 /* Flat index computation */
 
 PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape) {
@@ -99,36 +122,72 @@ PolyUOp *poly_compute_flat_index_symbolic(
 
 /* Reshape index transform */
 
-void poly_reshape_indices(
+bool poly_reshape_indices(
     PolyCtx *ctx,
+    PolyUOp *reshape,
     PolyUOp **out_ranges,
-    int out_ndim,
-    PolyShape out_shape,
+    int n_out,
     PolyUOp **in_ranges,
-    int in_ndim,
-    PolyShape in_shape
+    int *n_in_out
 ) {
-  PolyUOp *combined = poly_compute_flat_index(ctx, out_ranges, out_ndim, out_shape);
+  if (!ctx || !reshape || reshape->op != POLY_OP_RESHAPE ||
+      reshape->n_src != 2 || n_out < 0 || (n_out > 0 && !out_ranges) ||
+      !in_ranges || !n_in_out)
+    return false;
+  PolyShape out_shape = poly_uop_max_shape_cached(ctx, reshape);
+  PolyShape in_shape = poly_uop_max_shape_cached(ctx, reshape->src[0]);
+  if (out_shape.ndim < n_out || in_shape.ndim < 0 ||
+      out_shape.ndim > POLY_MAX_DIMS || in_shape.ndim > POLY_MAX_DIMS)
+    return false;
 
-  int64_t in_stride = 1;
-  for (int j = in_ndim - 1; j >= 0; j--) {
-    PolyUOp *dim_val = index_const(ctx, in_shape.dims[j]);
-    PolyUOp *shifted;
-    if (in_stride == 1) {
-      shifted = combined;
-    } else {
-      PolyUOp *s = index_const(ctx, in_stride);
-      shifted = poly_uop2(ctx, POLY_OP_IDIV, POLY_INDEX, combined, s, poly_arg_none());
-    }
-    in_ranges[j] = poly_uop2(ctx, POLY_OP_MOD, POLY_INDEX, shifted, dim_val, poly_arg_none());
-    in_stride *= in_shape.dims[j];
+  /* Pinned schedule/rangeify.py:63-77 maps a partial RESHAPE INDEX only when
+   * the unindexed output suffix is exactly the same as an input suffix. */
+  int suffix_ndim = out_shape.ndim - n_out;
+  int n_in = in_shape.ndim - suffix_ndim;
+  if (n_in < 0) return false;
+  for (int i = 0; i < suffix_ndim; i++) {
+    PolyUOp *in_dim = poly_uop_shape_dim(ctx, reshape->src[0], n_in + i);
+    PolyUOp *out_dim = poly_uop_shape_dim(ctx, reshape, n_out + i);
+    in_dim = in_dim ? to_index_dtype(ctx, in_dim)
+                    : index_const(ctx, in_shape.dims[n_in + i]);
+    out_dim = out_dim ? to_index_dtype(ctx, out_dim)
+                      : index_const(ctx, out_shape.dims[n_out + i]);
+    in_dim = poly_graph_rewrite(ctx, in_dim, poly_symbolic_simple());
+    out_dim = poly_graph_rewrite(ctx, out_dim, poly_symbolic_simple());
+    if (!in_dim || !out_dim || in_dim != out_dim) return false;
   }
+
+  /* Pinned _apply_reshape uses the exact symbolic output shape to flatten,
+   * then floor-mod/divides by each exact symbolic input dimension
+   * (schedule/indexing.py:113-127,142-145). Cached PolyShape dimensions are
+   * allocation maxima only, so use them solely for static dimensions. */
+  PolyUOp *out_bounds[POLY_MAX_DIMS];
+  for (int i = 0; i < n_out; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, reshape, i);
+    out_bounds[i] = dim ? to_index_dtype(ctx, dim) : index_const(ctx, out_shape.dims[i]);
+  }
+  PolyUOp *combined =
+      poly_compute_flat_index_symbolic(ctx, out_ranges, out_bounds, n_out);
+  if (!combined) return false;
+
+  for (int j = n_in - 1; j >= 0; j--) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, reshape->src[0], j);
+    PolyUOp *dim_val = dim ? to_index_dtype(ctx, dim) : index_const(ctx, in_shape.dims[j]);
+    in_ranges[j] =
+        poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, combined, dim_val, poly_arg_none());
+    combined =
+        poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, combined, dim_val, poly_arg_none());
+    if (!in_ranges[j] || !combined) return false;
+  }
+  *n_in_out = n_in;
+  return true;
 }
 
 /* apply_movement_op */
 
 bool poly_apply_movement_op(
     PolyCtx *ctx,
+    PolyUOp *movement,
     PolyOps op,
     PolyShape in_shape,
     PolyArg arg,
@@ -144,7 +203,6 @@ bool poly_apply_movement_op(
 
   /* EXPAND: zero out expanded dims where in_dim=1 but out_dim>1 */
   case POLY_OP_EXPAND: {
-    if (arg.kind != POLY_ARG_INT_TUPLE) return false;
     int n = in_shape.ndim;
     PolyUOp *zero = index_const(ctx, 0);
     for (int i = 0; i < n; i++) {
@@ -152,7 +210,9 @@ bool poly_apply_movement_op(
         in_rngs[i] = zero;
         continue;
       }
-      if (in_shape.dims[i] == 1 && arg.int_tuple.vals[i] != 1) {
+      bool target_is_one = false;
+      if (!expand_target_dim_is_one(ctx, movement, arg, i, &target_is_one)) return false;
+      if (in_shape.dims[i] == 1 && !target_is_one) {
         in_rngs[i] = zero;
       } else {
         in_rngs[i] = out_rngs[i];
@@ -179,6 +239,29 @@ bool poly_apply_movement_op(
 
   /* SHRINK: offset range by start value */
   case POLY_OP_SHRINK: {
+    if (movement && movement->arg.kind == POLY_ARG_NONE && movement->n_src >= 3 &&
+        !movement->src[0]->dtype.is_ptr) {
+      int n = in_shape.ndim;
+      PolyUOp *zero = index_const(ctx, 0);
+      for (int i = 0; i < n; i++) {
+        if (i >= n_out) {
+          in_rngs[i] = zero;
+          continue;
+        }
+        PolyUOp *off = shape_stack_get(movement->src[1], i);
+        if (!off) return false;
+        int64_t off_i = 0;
+        if (poly_uop_const_i64(off, &off_i) == 0 && off_i == 0) {
+          in_rngs[i] = out_rngs[i];
+        } else {
+          in_rngs[i] =
+              poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, to_index_dtype(ctx, out_rngs[i]),
+                        to_index_dtype(ctx, off), poly_arg_none());
+        }
+      }
+      *n_in_out = n;
+      return true;
+    }
     if (arg.kind != POLY_ARG_PAIR_TUPLE) return false;
     int n = arg.pair_tuple.n;
     PolyUOp *zero = index_const(ctx, 0);
@@ -231,18 +314,10 @@ bool poly_apply_movement_op(
 
   /* RESHAPE: flatten + decompose */
   case POLY_OP_RESHAPE: {
-    if (arg.kind != POLY_ARG_INT_TUPLE) return false;
-    PolyShape out_shape;
-    out_shape.dims = arg.int_tuple.vals;
-    out_shape.ndim = arg.int_tuple.n;
-
-    /* Use the RESHAPE arg's ndim as the authoritative output ndim,
-     * not n_out (which may differ if range propagation assigned
-     * a different number of ranges to this node). */
-    poly_reshape_indices(
-        ctx, out_rngs, out_shape.ndim, out_shape, in_rngs, in_shape.ndim, in_shape
-    );
-    *n_in_out = in_shape.ndim;
+    if (!movement || movement->arg.kind != POLY_ARG_NONE || movement->n_src != 2)
+      return false;
+    if (!poly_reshape_indices(ctx, movement, out_rngs, n_out, in_rngs, n_in_out))
+      return false;
     return true;
   }
 

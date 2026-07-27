@@ -36,6 +36,12 @@ POLY_AXIS_UNROLL = int(AxisType.UNROLL)
 POLY_AXIS_THREAD = int(AxisType.THREAD)
 POLY_AXIS_PLACEHOLDER = int(AxisType.PLACEHOLDER)
 
+_BASE_OPS = frozenset(
+    _ffi.OPS[name]
+    for name in ('RESHAPE', 'EXPAND', 'PERMUTE', 'PAD', 'SHRINK', 'FLIP', 'MULTI', 'DETACH')
+)
+_DIRECT_REALIZED_OPS = frozenset((_ffi.OPS['BUFFER'], _ffi.OPS['BUFFER_VIEW']))
+
 
 class KernelInfo:
     """Minimal tinygrad KernelInfo carrier for custom-kernel SINK metadata."""
@@ -429,6 +435,14 @@ class UOp:
     # --- Buffer identity ---
 
     @property
+    def base(self):
+        """Recursive storage base, matching tinygrad UOp.base."""
+        if self.op in _BASE_OPS:
+            sources = self.src
+            return sources[0].base if sources else self
+        return self
+
+    @property
     def buffer(self):
         """Terminal buffer-identity UOp (BUFFER/BUFFER_VIEW/PARAM) after
         unwrapping RESHAPE/MULTI. None for expression UOps."""
@@ -446,13 +460,14 @@ class UOp:
 
     @property
     def realized(self):
-        """Mirrors tinygrad's UOp.realized: returns the runtime PolyBuffer
-        pointer if this UOp has a buffer identity AND that buffer is
-        allocated (ptr != NULL in ctx->buffers). Otherwise None.
+        """Runtime buffer for a directly realized storage UOp, otherwise None.
 
-        Callers typically only need the truthiness (is it realized?); the
-        returned pointer can be passed back to the C side for data access.
+        Tinygrad restricts this to BUFFER/MSTACK. Polygrad's physical
+        BUFFER_VIEW is also direct storage; movement/MULTI wrappers are handled
+        only by ``is_realized`` through ``base``.
         """
+        if self.op not in _DIRECT_REALIZED_OPS:
+            return None
         buf = self.buffer
         if buf is None:
             return None
@@ -462,4 +477,6 @@ class UOp:
 
     @property
     def is_realized(self):
-        return self.realized is not None
+        # tinygrad/uop/ops.py:881-891: movement views are realized when their
+        # recursive base buffer is allocated.
+        return self.base.realized is not None

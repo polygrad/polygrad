@@ -17,6 +17,8 @@ extern "C" {
 
 bool poly_jit_is_capturing(PolyJit *jit);
 int poly_jit_record_schedule(PolyJit *jit, PolySchedule *sched);
+/* Pinned CapturedJit.linear analogue for topology tests and graph lowering. */
+PolyUOp *poly_jit_captured_linear(PolyJit *jit);
 
 #ifdef __cplusplus
 }

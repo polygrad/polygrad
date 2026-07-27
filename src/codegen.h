@@ -41,6 +41,10 @@ typedef struct {
 typedef struct {
   bool has_mulacc; /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
   bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
+  bool has_exp2; /* Backend renders EXP2 directly */
+  bool has_log2; /* Backend renders LOG2 directly */
+  bool has_sin; /* Backend renders SIN directly */
+  bool has_int64; /* Backend renders signed/unsigned 64-bit integer values directly */
   bool has_local; /* Backend supports local/workgroup scheduling */
   bool has_threads; /* Backend supports CPU-style core_id runtime threading */
   bool has_simd_int; /* Backend supports packed integer ops in vector regs (vpaddd etc) */
@@ -64,7 +68,7 @@ typedef struct {
   bool optimize; /* tinygrad optimize path (UPCAST/UNROLL + late pipeline) */
   int devectorize; /* tinygrad DEVECTORIZE level (0/1/2) */
   int beam_width; /* BEAM search width (0 = heuristic, >0 = BEAM search) */
-  PolyRendererCaps caps; /* renderer capabilities (zero-init = CPU defaults) */
+  PolyRendererCaps caps; /* renderer capabilities (zero-init = conservative/unsupported) */
   /* Renderer config for unified pipeline (Phase 4) */
   int device; /* PolyDevice from engine/schedule.h (0 = CPU) */
   PolyOptPolicy opt_policy; /* explicit optimization strategy */
@@ -140,9 +144,8 @@ void poly_tc_permute_for_shape_str(
     int max_n
 );
 
-/* Walk through transparent pointer casts to find an INDEX. INDEX src[2], when
- * present, is a validity gate. Do not return late-codegen SHRINK here: its
- * src[2] is width, not a gate. */
+/* Walk through transparent pointer casts to find an INDEX. Do not return
+ * late-codegen SHRINK: it has distinct width semantics. */
 static inline PolyUOp *poly_find_index_through_cast(PolyUOp *u) {
   while (u && (u->op == POLY_OP_CAST || u->op == POLY_OP_BITCAST) && u->n_src > 0 && u->dtype.is_ptr
   )

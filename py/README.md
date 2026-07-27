@@ -205,8 +205,11 @@ print(compiled.stats())
 compiled.dispose()
 ```
 
-`polygrad.stats()` exposes shared C runtime counters. `Jit.stats()` and
-`CompiledCallable.stats()` expose wrapper-level capture and replay counters.
+`polygrad.stats()` exposes shared C runtime counters. The tinygrad-compatible
+top-level `GlobalCounters` provides `global_ops`, `global_mem`, `time_sum_s`,
+`kernel_count`, `mem_used`, `mem_used_per_device`, and `reset()`; reset keeps
+live allocation bytes. `Jit.stats()` and `CompiledCallable.stats()` expose
+wrapper-level capture and replay counters.
 
 `polygrad.can_run(op, dtype="float32", shape=..., shapes=..., device="auto")`
 is an advisory backend capability probe.

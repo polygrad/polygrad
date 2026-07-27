@@ -443,8 +443,13 @@ Runtime inspection:
 const polygrad = require('polygrad')
 
 console.log(polygrad.stats())
+polygrad.resetCounters()
 console.log(polygrad.canRun({ op: 'add', shape: [1024] }))
 ```
+
+`stats().coreStats` includes `globalOps`, `globalMem`, `timeSumS`,
+`kernelCount`, and live `memUsed`. `resetCounters()` clears execution totals
+without clearing live allocation accounting.
 
 `canRun(...)` is conservative. For some compound op/shape queries it throws
 when support cannot be proven statically.

@@ -286,6 +286,9 @@ int poly_cuda_copy_htod(unsigned long long dst, const void *src, size_t bytes) {
 
 int poly_cuda_copy_dtoh(void *dst, unsigned long long src, size_t bytes) {
   if (cuda_state != CUDA_INIT_OK) return -1;
+  /* Match tinygrad CUDAAllocator._copyout: readback is an explicit completion
+   * boundary for all previously enqueued work in this CUDA context. */
+  if (poly_cuda_sync() != 0) return -1;
   CUresult err = cuda_api.cuMemcpyDtoH_v2(dst, (CUdeviceptr)src, bytes);
   if (err != CUDA_SUCCESS) {
     fprintf(stderr, "polygrad: cuda: cuMemcpyDtoH_v2 failed (CUresult=%d)\n", err);

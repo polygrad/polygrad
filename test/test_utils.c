@@ -91,6 +91,12 @@ TEST(utils, device_name_accepts_tinygrad_style_cpu_renderer_aliases) {
   ASSERT_INT_EQ(poly_device_by_name("CPU:X86"), POLY_DEVICE_X86);
   ASSERT_INT_EQ(poly_device_by_name("x64"), POLY_DEVICE_AUTO);
   ASSERT_INT_EQ(poly_device_by_name("CPU:X64"), POLY_DEVICE_AUTO);
+  ASSERT_INT_EQ(
+      poly_device_by_name(
+          "DISK:/home/polygrad/a/repository/path/that/is/longer/than/the/device-parser-buffer.bin"
+      ),
+      POLY_DEVICE_DISK
+  );
   PASS();
 }
 

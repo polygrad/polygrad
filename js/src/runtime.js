@@ -49,6 +49,7 @@ class PolyRuntime {
     const optim = createBoundOptim(this)
     this.nn = {
       Linear: modules.Linear,
+      Conv2d: modules.Conv2d,
       getParameters,
       getStateDict,
       optim,
@@ -81,6 +82,13 @@ class PolyRuntime {
       coreStats,
       jit: this.jit && this.jit.stats ? this.jit.stats() : null
     }
+  }
+
+  resetCounters() {
+    if (!this._core || !this._core.ffi || !this._core.ffi.poly_ctx_reset_counters) {
+      throw new Error('resetCounters requires core counter support')
+    }
+    this._core.ffi.poly_ctx_reset_counters(this._core.ctx)
   }
 
   canRun(query) {

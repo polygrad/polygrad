@@ -11,6 +11,8 @@
 #include "../src/schedule/rangeify.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
+#include "../src/frontend_internal.h"
+#include "../src/tensor.h"
 
 /* Autograd e2e tests compile concrete scheduled kernels, not the earlier
  * pre-codegen kernel graph returned by poly_get_kernel_graph(). */
@@ -103,6 +105,57 @@ static int run_grad_expr(
   do {                                                                                             \
     ASSERT_INT_EQ(run_grad_expr((ctx), (out_buf), (expr), (fn_name), (args), (n_args)), 0);        \
   } while (0)
+
+TEST(autograd, after_store_passes_gradient_to_stored_value) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *target = poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, target, x, poly_arg_none());
+  PolyUOp *after = poly_uop2(ctx, POLY_OP_AFTER, POLY_FLOAT32, target, store, poly_arg_none());
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, after, (int64_t[]){0}, 1);
+  PolyUOp *gx = poly_grad(ctx, loss, x);
+  ASSERT_NOT_NULL(gx);
+
+  float gx_data[4] = {0};
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  void *args[1] = {gx_data};
+  RUN_GRAD_EXPR(ctx, out, gx, "ad_after_store", args, 1);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(gx_data[i], 1.0f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, after_call_splits_data_and_boundary_gradients) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *data = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *body = poly_uop_sink(ctx, &data, 1);
+  PolyUOp *args[] = {data};
+  PolyUOp *call = poly_uop_call(ctx, body, args, 1);
+  PolyUOp *after = poly_uop_after(ctx, data, call);
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, after, (int64_t[]){0}, 1);
+  PolyUOp *gdata = poly_grad(ctx, loss, data);
+  PolyUOp *gafter = poly_grad(ctx, loss, after);
+  ASSERT_NOT_NULL(gdata);
+  ASSERT_NOT_NULL(gafter);
+
+  float gdata_values[4] = {0};
+  float gafter_values[4] = {0};
+  PolyUOp *data_out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *after_out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  void *data_args[] = {gdata_values};
+  void *after_args[] = {gafter_values};
+  RUN_GRAD_EXPR(ctx, data_out, gdata, "ad_after_call_data", data_args, 1);
+  RUN_GRAD_EXPR(ctx, after_out, gafter, "ad_after_call_boundary", after_args, 1);
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(gdata_values[i], 1.0f, 1e-6f);
+    ASSERT_FLOAT_EQ(gafter_values[i], 1.0f, 1e-6f);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 static int compile_expr_program(
     PolyCtx *ctx,
@@ -268,11 +321,31 @@ TEST(autograd, expand_reduce_e2e) {
   PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 1);
   int64_t eshape[] = {5};
   PolyUOp *xs = poly_reshape(ctx, x, NULL, 0);
-  PolyUOp *xe = poly_expand(ctx, xs, eshape, 1);
+  int64_t aligned_shape[] = {1};
+  PolyUOp *aligned = poly_reshape(ctx, xs, aligned_shape, 1);
+  PolyUOp *xe = poly_expand(ctx, aligned, eshape, 1);
+  ASSERT_INT_EQ(xe->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(xe->n_src, 2);
+  ASSERT_INT_EQ(xe->arg.kind, POLY_ARG_NONE);
+  ASSERT_PTR_EQ(xe->src[0], aligned);
+  ASSERT_INT_EQ(aligned->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(aligned->n_src, 2);
   int64_t ax[] = {0};
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, xe, ax, 1);
   PolyUOp *gx = poly_grad(ctx, loss, x);
   ASSERT_NOT_NULL(gx);
+  ASSERT_INT_EQ(gx->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(gx->n_src, 2);
+  ASSERT_INT_EQ(gx->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(gx->src[0]->n_src, 2);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->op, POLY_OP_REDUCE_AXIS);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->arg.kind, POLY_ARG_REDUCE_AXIS);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->arg.reduce_axis.op, POLY_OP_ADD);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->arg.reduce_axis.n, 1);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->arg.reduce_axis.axes[0], 0);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->src[0]->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->src[0]->n_src, 2);
+  ASSERT_INT_EQ(gx->src[0]->src[0]->src[0]->src[0]->op, POLY_OP_RESHAPE);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, 1);
   void *args[2] = {gx_d, x_d};
@@ -381,6 +454,16 @@ TEST(autograd, no_path_zero_e2e) {
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, a, ax, 1);
   PolyUOp *gb = poly_grad(ctx, loss, b);
   ASSERT_NOT_NULL(gb);
+  ASSERT_INT_EQ(gb->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(gb->arg.kind, POLY_ARG_NONE);
+  ASSERT_INT_EQ(gb->n_src, 2);
+  ASSERT_INT_EQ(gb->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(gb->src[0]->n_src, 2);
+  ASSERT_INT_EQ(gb->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(gb->src[1]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(gb->src[1]->n_src, 1);
+  ASSERT_INT_EQ(gb->src[1]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(gb->src[1]->src[0]->arg.i, N);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
   void *args[3] = {gb_d, a_d, b_d};
@@ -388,6 +471,34 @@ TEST(autograd, no_path_zero_e2e) {
 
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(gb_d[i], 0.0f, 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, no_path_zero_preserves_symbolic_shape_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 8);
+  int64_t inner[] = {2};
+  PolyUOp *target = poly_buffer_var(ctx, POLY_FLOAT32, n, inner, 1);
+  PolyUOp *unrelated = poly_buffer_f32(ctx, 1);
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, unrelated, (int64_t[]){0}, 1);
+  PolyUOp *grad = poly_grad(ctx, loss, target);
+  ASSERT_NOT_NULL(grad);
+
+  ASSERT_INT_EQ(grad->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(grad->arg.kind, POLY_ARG_NONE);
+  ASSERT_INT_EQ(grad->n_src, 2);
+  ASSERT_INT_EQ(grad->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(grad->src[0]->n_src, 2);
+  ASSERT_INT_EQ(grad->src[1]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(grad->src[1]->n_src, 2);
+  ASSERT_PTR_EQ(grad->src[1]->src[0], n);
+  ASSERT_INT_EQ(grad->src[1]->src[1]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(grad->src[1]->src[1]->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(grad->src[1]->src[1]->arg.i, 2);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -889,6 +1000,89 @@ TEST(autograd, substitute_nested_replacements_rewrite_replacement_graph) {
   PASS();
 }
 
+TEST(autograd, substitute_keeps_call_and_function_bodies_opaque) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *old = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *new_value = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *body = poly_sink1(ctx, old);
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_NOT_NULL(old);
+  ASSERT_NOT_NULL(new_value);
+  ASSERT_NOT_NULL(body);
+
+  PolyOps opaque_ops[2] = {POLY_OP_CALL, POLY_OP_FUNCTION};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *opaque_src[2] = {body, old};
+    PolyUOp *opaque = poly_uop(ctx, opaque_ops[i], POLY_VOID, opaque_src, 2, poly_arg_none());
+    PolyUOp *root = poly_sink1(ctx, opaque);
+    PolyUOp *from[1] = {old};
+    PolyUOp *to[1] = {new_value};
+    PolyUOp *rewritten = poly_uop_substitute(ctx, root, from, to, 1);
+    ASSERT_NOT_NULL(opaque);
+    ASSERT_NOT_NULL(root);
+    ASSERT_NOT_NULL(rewritten);
+    ASSERT_PTR_NEQ(rewritten, root);
+    ASSERT_INT_EQ(rewritten->op, POLY_OP_SINK);
+    ASSERT_INT_EQ(rewritten->n_src, 1);
+
+    PolyUOp *rewritten_opaque = rewritten->src[0];
+    ASSERT_NOT_NULL(rewritten_opaque);
+    ASSERT_INT_EQ(rewritten_opaque->op, opaque_ops[i]);
+    ASSERT_INT_EQ(rewritten_opaque->n_src, 2);
+    ASSERT_PTR_EQ(rewritten_opaque->src[0], body);
+    ASSERT_PTR_EQ(rewritten_opaque->src[0]->src[0], old);
+    ASSERT_FALSE(poly_uop_reachable(ctx, rewritten_opaque->src[0], new_value));
+    ASSERT_PTR_EQ(rewritten_opaque->src[1], new_value);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, substitute_many_opaque_body_is_root_order_independent) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *old = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *new_value = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *body = poly_sink1(ctx, old);
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_NOT_NULL(old);
+  ASSERT_NOT_NULL(new_value);
+  ASSERT_NOT_NULL(body);
+
+  PolyOps opaque_ops[2] = {POLY_OP_CALL, POLY_OP_FUNCTION};
+  for (int op_index = 0; op_index < 2; op_index++) {
+    PolyUOp *opaque_src[2] = {body, old};
+    PolyUOp *opaque =
+        poly_uop(ctx, opaque_ops[op_index], POLY_VOID, opaque_src, 2, poly_arg_none());
+    ASSERT_NOT_NULL(opaque);
+
+    for (int opaque_first = 0; opaque_first < 2; opaque_first++) {
+      PolyUOp *roots[2] = {
+          opaque_first ? opaque : body,
+          opaque_first ? body : opaque,
+      };
+      PolyUOp *from[1] = {old};
+      PolyUOp *to[1] = {new_value};
+      PolyUOp *out[2] = {NULL, NULL};
+      ASSERT_INT_EQ(poly_uop_substitute_many(ctx, roots, 2, from, to, 1, out), 0);
+
+      PolyUOp *rewritten_body = out[opaque_first ? 1 : 0];
+      PolyUOp *rewritten_opaque = out[opaque_first ? 0 : 1];
+      ASSERT_PTR_EQ(rewritten_body, body);
+      ASSERT_PTR_EQ(rewritten_body->src[0], old);
+      ASSERT_FALSE(poly_uop_reachable(ctx, rewritten_body, new_value));
+      ASSERT_NOT_NULL(rewritten_opaque);
+      ASSERT_INT_EQ(rewritten_opaque->op, opaque_ops[op_index]);
+      ASSERT_INT_EQ(rewritten_opaque->n_src, 2);
+      ASSERT_PTR_EQ(rewritten_opaque->src[0], body);
+      ASSERT_PTR_EQ(rewritten_opaque->src[1], new_value);
+    }
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(autograd, substitute_deep_chain_is_iterative) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 1);
@@ -994,6 +1188,41 @@ TEST(autograd, grad_many_reverse_pass_rewinds_scratch_toposort) {
   ASSERT_NOT_NULL(grads[0]);
   ASSERT_NOT_NULL(grads[1]);
   ASSERT_INT_EQ(poly_arena_used(ctx->scratch), scratch_before);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, grad_many_ex_distinguishes_absent_from_numeric_zero) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[] = {4};
+  int64_t axis[] = {0};
+  PolyUOp *x = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *zero = poly_expand(ctx, poly_const_float(ctx, 0.0), shape, 1);
+  PolyUOp *wrts[] = {x};
+  PolyUOp *grads[] = {NULL};
+  uint8_t present[] = {0};
+
+  PolyUOp *numeric_zero = poly_alu2(ctx, POLY_OP_MUL, x, zero);
+  PolyUOp *zero_loss = poly_reduce_axis(ctx, POLY_OP_ADD, numeric_zero, axis, 1);
+  ASSERT_INT_EQ(poly_grad_many_ex(ctx, zero_loss, NULL, wrts, 1, grads, present), 0);
+  ASSERT_NOT_NULL(grads[0]);
+  ASSERT_INT_EQ(present[0], 1);
+
+  PolyUOp *detached = poly_detach(ctx, x);
+  PolyUOp *detach_loss = poly_reduce_axis(ctx, POLY_OP_ADD, detached, axis, 1);
+  present[0] = 1;
+  ASSERT_INT_EQ(poly_grad_many_ex(ctx, detach_loss, NULL, wrts, 1, grads, present), 0);
+  ASSERT_NOT_NULL(grads[0]);
+  ASSERT_INT_EQ(present[0], 0);
+
+  PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, zero, poly_arg_none());
+  PolyUOp *cmp_float = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, cmp, poly_arg_none());
+  PolyUOp *cmp_loss = poly_reduce_axis(ctx, POLY_OP_ADD, cmp_float, axis, 1);
+  present[0] = 1;
+  ASSERT_INT_EQ(poly_grad_many_ex(ctx, cmp_loss, NULL, wrts, 1, grads, present), 0);
+  ASSERT_NOT_NULL(grads[0]);
+  ASSERT_INT_EQ(present[0], 0);
 
   poly_ctx_destroy(ctx);
   PASS();

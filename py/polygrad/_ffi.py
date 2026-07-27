@@ -16,6 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
+POLYGRAD_ABI_VERSION = 21
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -39,6 +40,9 @@ class PolyBuffer(ctypes.Structure):
         ('allocator', _ptr),
         ('src', _ptr),
         ('valid', ctypes.c_bool),
+        ('frontend_release', _ptr),
+        ('memory_accounted', ctypes.c_bool),
+        ('memory_device', ctypes.c_int),
     ]
 
 class PolyIOBinding(ctypes.Structure):
@@ -61,7 +65,6 @@ class PolyDType(ctypes.Structure):
 class PolyOptimConfig(ctypes.Structure):
     _fields_ = [
         ('kind', ctypes.c_int),
-        ('lr', ctypes.c_float),
         ('beta1', ctypes.c_float),
         ('beta2', ctypes.c_float),
         ('eps', ctypes.c_float),
@@ -104,6 +107,11 @@ class PolyCtxStats(ctypes.Structure):
         ('buffer_write_bytes', ctypes.c_size_t),
         ('buffer_copy_count', ctypes.c_size_t),
         ('buffer_copy_bytes', ctypes.c_size_t),
+        ('global_ops', ctypes.c_uint64),
+        ('global_mem', ctypes.c_uint64),
+        ('time_sum_s', ctypes.c_double),
+        ('kernel_count', ctypes.c_uint64),
+        ('mem_used', ctypes.c_uint64),
     ]
 
 class PolyInstanceOptions(ctypes.Structure):
@@ -238,11 +246,23 @@ def _declare_signatures(lib):
     lib.poly_device_name.restype = ctypes.c_char_p
     lib.poly_device_name.argtypes = [ctypes.c_int]
 
+    lib.poly_device_can_execute.restype = ctypes.c_bool
+    lib.poly_device_can_execute.argtypes = [ctypes.c_int]
+
+    lib.poly_device_is_host_addressable.restype = ctypes.c_bool
+    lib.poly_device_is_host_addressable.argtypes = [ctypes.c_int]
+
     lib.poly_ctx_named_count.restype = ctypes.c_int
     lib.poly_ctx_named_count.argtypes = [_ptr]
 
     lib.poly_ctx_stats.restype = ctypes.c_int
     lib.poly_ctx_stats.argtypes = [_ptr, ctypes.POINTER(PolyCtxStats)]
+
+    lib.poly_ctx_reset_counters.restype = None
+    lib.poly_ctx_reset_counters.argtypes = [_ptr]
+
+    lib.poly_ctx_mem_used_for_device.restype = ctypes.c_uint64
+    lib.poly_ctx_mem_used_for_device.argtypes = [_ptr, ctypes.c_int]
 
     lib.poly_can_run_op.restype = ctypes.c_int
     lib.poly_can_run_op.argtypes = [_ptr, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
@@ -349,9 +369,14 @@ def _declare_signatures(lib):
     lib.poly_buffer_by_id.restype = _ptr
     lib.poly_buffer_by_id.argtypes = [_ptr, ctypes.c_int, ctypes.c_int64]
 
+    lib.poly_buffer_on_device_by_id.restype = _ptr
+    lib.poly_buffer_on_device_by_id.argtypes = [
+        _ptr, ctypes.c_int, ctypes.c_int64, ctypes.c_int,
+    ]
+
     lib.poly_buffer_var_by_id.restype = _ptr
     lib.poly_buffer_var_by_id.argtypes = [
-        _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int
+        _ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int, ctypes.c_int
     ]
 
     lib.poly_buffer_f32.restype = _ptr
@@ -363,11 +388,17 @@ def _declare_signatures(lib):
     lib.poly_uop_op.restype = ctypes.c_int
     lib.poly_uop_op.argtypes = [_ptr]
 
+    lib.poly_uop_device.restype = ctypes.c_int
+    lib.poly_uop_device.argtypes = [_ptr]
+
     lib.poly_uop_dtype_id.restype = ctypes.c_int
     lib.poly_uop_dtype_id.argtypes = [_ptr, _ptr]
 
     lib.poly_cast_by_id.restype = _ptr
     lib.poly_cast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_bitcast_by_id.restype = _ptr
+    lib.poly_bitcast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
 
     # --- Composed elementwise ops (shape-free) ---
     for n in ['poly_exp', 'poly_log', 'poly_log1p', 'poly_expm1',
@@ -533,6 +564,8 @@ def _declare_signatures(lib):
 
     lib.poly_expand.restype = _ptr
     lib.poly_expand.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+    lib.poly_expand_uop.restype = _ptr
+    lib.poly_expand_uop.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_reduce_axis.restype = _ptr
     lib.poly_reduce_axis.argtypes = [_ptr, ctypes.c_int, _ptr, _i64p, ctypes.c_int]
@@ -542,12 +575,41 @@ def _declare_signatures(lib):
 
     lib.poly_shrink.restype = _ptr
     lib.poly_shrink.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
+    lib.poly_shrink_uop.restype = _ptr
+    lib.poly_shrink_uop.argtypes = [_ptr, _ptr, ctypes.POINTER(_ptr), ctypes.POINTER(_ptr), ctypes.c_int]
 
     lib.poly_flip.restype = _ptr
     lib.poly_flip.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 
     lib.poly_pad.restype = _ptr
     lib.poly_pad.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
+
+    lib.poly_pad_value.restype = _ptr
+    lib.poly_pad_value.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_double]
+
+    lib.poly_pool.restype = _ptr
+    lib.poly_pool.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p]
+
+    lib.poly_max_pool2d.restype = _ptr
+    lib.poly_max_pool2d.argtypes = [
+        _ptr, _ptr, _i64p, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
+    ]
+
+    lib.poly_conv2d.restype = _ptr
+    lib.poly_conv2d.argtypes = [
+        _ptr, _ptr, _ptr, _ptr, ctypes.c_int, _i64p, _i64p, _i64p, ctypes.c_int,
+    ]
+
+    lib.poly_batchnorm.restype = _ptr
+    lib.poly_batchnorm.argtypes = [
+        _ptr, _ptr, _ptr, _ptr, _ptr, _ptr, _i64p, ctypes.c_int,
+    ]
+
+    lib.poly_one_hot.restype = _ptr
+    lib.poly_one_hot.argtypes = [_ptr, _ptr, ctypes.c_int64]
+
+    lib.poly_index_select.restype = _ptr
+    lib.poly_index_select.argtypes = [_ptr, _ptr, ctypes.c_int, _ptr]
 
     # --- Autograd ---
     lib.poly_grad.restype = _ptr
@@ -558,6 +620,12 @@ def _declare_signatures(lib):
 
     lib.poly_grad_many.restype = ctypes.c_int
     lib.poly_grad_many.argtypes = [_ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)]
+
+    lib.poly_grad_many_ex.restype = ctypes.c_int
+    lib.poly_grad_many_ex.argtypes = [
+        _ptr, _ptr, _ptr, ctypes.POINTER(_ptr), ctypes.c_int,
+        ctypes.POINTER(_ptr), ctypes.POINTER(ctypes.c_uint8),
+    ]
 
     # --- UOp identity helpers ---
     lib.poly_uop_has_buffer_identity.restype = ctypes.c_bool
@@ -585,6 +653,9 @@ def _declare_signatures(lib):
     lib.poly_buffer_get_key.restype = ctypes.c_uint64
     lib.poly_buffer_get_key.argtypes = [_ptr, _ptr]
 
+    lib.poly_buffer_ensure_device_allocated.restype = ctypes.c_int
+    lib.poly_buffer_ensure_device_allocated.argtypes = [_ptr, _ptr, ctypes.c_int]
+
     lib.poly_buffer_read.restype = ctypes.c_int
     lib.poly_buffer_read.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_size_t]
 
@@ -595,6 +666,9 @@ def _declare_signatures(lib):
     lib.poly_buffer_from_host.argtypes = [
         _ptr, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, _i64p, ctypes.c_int,
     ]
+
+    lib.poly_buffer_from_file.restype = _ptr
+    lib.poly_buffer_from_file.argtypes = [_ptr, ctypes.c_char_p, ctypes.c_int]
 
     lib.poly_set_frontend_buffer_release.restype = None
     lib.poly_set_frontend_buffer_release.argtypes = [PolyFrontendBufferReleaseFn]
@@ -624,6 +698,9 @@ def _declare_signatures(lib):
     lib.poly_tensor_assign.restype = _ptr
     lib.poly_tensor_assign.argtypes = [_ptr, _ptr, _ptr]
 
+    lib.poly_tensor_clone_into.restype = _ptr
+    lib.poly_tensor_clone_into.argtypes = [_ptr, _ptr, _ptr]
+
     lib.poly_tensor_uop.restype = _ptr
     lib.poly_tensor_uop.argtypes = [_ptr]
 
@@ -648,6 +725,10 @@ def _declare_signatures(lib):
     lib.poly_realize_tensors.restype = ctypes.c_int
     lib.poly_realize_tensors.argtypes = [
         _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr)
+    ]
+    lib.poly_realize_tensors_ex.restype = ctypes.c_int
+    lib.poly_realize_tensors_ex.argtypes = [
+        _ptr, ctypes.POINTER(_ptr), ctypes.c_int, ctypes.POINTER(_ptr), ctypes.c_bool
     ]
 
     # --- Raw Tensor JIT capture/replay ---
@@ -688,6 +769,7 @@ def _declare_signatures(lib):
     lib.poly_optim_build_step.argtypes = [
         _ptr,
         ctypes.POINTER(PolyOptimConfig),
+        _ptr,
         ctypes.POINTER(_ptr),
         ctypes.POINTER(_ptr),
         ctypes.c_int,
@@ -918,6 +1000,20 @@ def get_lib():
         )
 
     lib = ctypes.CDLL(lib_path)
+    try:
+        lib.poly_abi_version.restype = ctypes.c_int
+        lib.poly_abi_version.argtypes = []
+        abi = int(lib.poly_abi_version())
+    except AttributeError as exc:
+        raise RuntimeError(
+            f'Polygrad ABI mismatch: expected version {POLYGRAD_ABI_VERSION}, '
+            'but the loaded library has no poly_abi_version symbol. Rebuild the library.'
+        ) from exc
+    if abi != POLYGRAD_ABI_VERSION:
+        raise RuntimeError(
+            f'Polygrad ABI mismatch: expected version {POLYGRAD_ABI_VERSION}, got {abi}. '
+            'Rebuild the library or install a matching polygrad package.'
+        )
     has_cuda = _declare_signatures(lib)
 
     # Build op name -> int mapping

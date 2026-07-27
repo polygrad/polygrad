@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 18
+#define POLYGRAD_ABI_VERSION 21
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,12 +21,19 @@ extern "C" {
 
 /* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);
+PolyUOp *poly_buffer_on_device_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    int64_t size,
+    int device_id
+);
 PolyUOp *poly_buffer_var_by_id(
     PolyCtx *ctx,
     int dtype_id,
     PolyUOp *batch_var,
     const int64_t *inner_dims,
-    int n_inner
+    int n_inner,
+    int device_id
 );
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size);
 PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size);

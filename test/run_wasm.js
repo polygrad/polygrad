@@ -31,7 +31,11 @@ async function main() {
       exp2f: x => Math.pow(2, x),
       log2f: x => Math.log2(x),
       sinf: x => Math.sin(x),
+      exp2: x => Math.pow(2, x),
+      log2: x => Math.log2(x),
+      sin: x => Math.sin(x),
       powf: (a, b) => Math.pow(a, b),
+      pow: (a, b) => Math.pow(a, b),
     },
   };
 
@@ -60,15 +64,18 @@ async function main() {
 
   // Initialize input data
   for (let i = 0; i < N; i++) {
-    view[offA / elemSize + i] = i + 1;       // a = [1, 2, 3, ...]
-    view[offB / elemSize + i] = (i + 1) * 2; // b = [2, 4, 6, ...]
+    const a = baseOp === 'pow' && isF64 ? i + 1.25 : i + 1;
+    const b = baseOp === 'pow' && isF64 ? i * 0.375 + 0.625 : (i + 1) * 2;
+    view[offA / elemSize + i] = a;
+    view[offB / elemSize + i] = b;
     view[offC / elemSize + i] = 0;           // c = [0, ...]
   }
 
   // Call kernel
   if (baseOp === 'add' || baseOp === 'mul' || baseOp === 'sub' || baseOp === 'pow') {
     kernel(offA, offB, offC);
-  } else if (baseOp === 'neg' || baseOp === 'sqrt') {
+  } else if (baseOp === 'neg' || baseOp === 'sqrt' || baseOp === 'exp2' ||
+             baseOp === 'log2' || baseOp === 'sin') {
     kernel(offA, offB); // unary: b = op(a)
   } else {
     console.error('Unknown op:', baseOp);
@@ -77,11 +84,11 @@ async function main() {
 
   // Verify output
   let pass = true;
-  const tol = baseOp === 'pow' ? 2e-3 : (isF64 ? 1e-14 : 1e-5);
+  const tol = baseOp === 'pow' ? (isF64 ? 1e-13 : 2e-3) : (isF64 ? 1e-14 : 1e-5);
 
   for (let i = 0; i < N; i++) {
-    const a = i + 1;
-    const b = (i + 1) * 2;
+    const a = baseOp === 'pow' && isF64 ? i + 1.25 : i + 1;
+    const b = baseOp === 'pow' && isF64 ? i * 0.375 + 0.625 : (i + 1) * 2;
     let expected;
 
     switch (baseOp) {
@@ -91,12 +98,16 @@ async function main() {
       case 'pow': expected = Math.pow(a, b); break;
       case 'neg': expected = -a; break;
       case 'sqrt': expected = Math.sqrt(a); break;
+      case 'exp2': expected = Math.pow(2, a); break;
+      case 'log2': expected = Math.log2(a); break;
+      case 'sin': expected = Math.sin(a); break;
       default: expected = 0;
     }
 
     // Read result from appropriate buffer
     let result;
-    if (baseOp === 'neg' || baseOp === 'sqrt') {
+    if (baseOp === 'neg' || baseOp === 'sqrt' || baseOp === 'exp2' ||
+        baseOp === 'log2' || baseOp === 'sin') {
       result = view[offB / elemSize + i]; // unary: result in b
     } else {
       result = view[offC / elemSize + i]; // binary: result in c

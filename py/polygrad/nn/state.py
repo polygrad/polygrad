@@ -1,33 +1,80 @@
 """nn.state — State dict utilities for polygrad (tinygrad-compatible)."""
 
+import functools
+import io
+import pathlib
+import tarfile
+
+
+class TensorIO(io.RawIOBase):
+    def __init__(self, tensor):
+        from ..dtype import dtypes, to_dtype
+
+        if tensor.ndim != 1 or to_dtype(tensor.dtype) != dtypes.uint8:
+            raise ValueError("Tensor must be 1d and of dtype uint8!")
+        self._position, self._tensor = 0, tensor
+
+    def readable(self):
+        return True
+
+    def read(self, size=-1):
+        buf = super().read(size)
+        if buf is None:
+            raise ValueError("io.RawIOBase.read returned None")
+        return buf
+
+    def readinto(self, buffer):
+        data = self._tensor[self._position:self._position + len(buffer)].data()
+        buffer[:len(data)] = data
+        self._position += len(data)
+        return len(data)
+
+    def seekable(self):
+        return True
+
+    def seek(self, offset, whence=0):
+        self._position = min(
+            len(self._tensor),
+            max(0, [offset, self._position + offset, len(self._tensor) + offset][whence]),
+        )
+        return self._position
+
+    def __enter__(self):
+        return self
+
+    def write(self, value):
+        raise io.UnsupportedOperation("TensorIO.write not supported")
+
+    def writelines(self, lines):
+        raise io.UnsupportedOperation("TensorIO.writelines not supported")
+
+
+def accept_filename(func):
+    @functools.wraps(func)
+    def wrapper(filename):
+        from ..tensor import Tensor
+
+        return func(
+            Tensor(pathlib.Path(filename)) if not isinstance(filename, Tensor) else filename
+        )
+
+    return wrapper
+
+
+@accept_filename
+def tar_extract(tensor):
+    """Return regular tar members as lazy tensor views into the archive."""
+    with tarfile.open(fileobj=TensorIO(tensor), mode="r") as tar:
+        return {
+            member.name: tensor[member.offset_data:member.offset_data + member.size]
+            for member in tar
+            if member.type == tarfile.REGTYPE
+        }
+
 
 def get_parameters(obj):
-    """Recursively collect all Tensor parameters from an object."""
-    from ..tensor import Tensor
-    params = []
-    seen = set()
-
-    def _collect(o, prefix=''):
-        oid = id(o)
-        if oid in seen:
-            return
-        seen.add(oid)
-
-        if isinstance(o, Tensor):
-            if o.requires_grad:
-                params.append(o)
-        elif isinstance(o, (list, tuple)):
-            for item in o:
-                _collect(item)
-        elif isinstance(o, dict):
-            for v in o.values():
-                _collect(v)
-        elif hasattr(o, '__dict__'):
-            for v in o.__dict__.values():
-                _collect(v)
-
-    _collect(obj)
-    return params
+    """Return every Tensor in the state dict; optimizers partition parameters and buffers."""
+    return list(get_state_dict(obj).values())
 
 
 def get_state_dict(obj, prefix=''):

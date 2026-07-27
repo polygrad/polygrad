@@ -41,13 +41,16 @@ const server = http.createServer((req, res) => {
 })
 
 // WebGPU requires: secure context (localhost), real GPU, --enable-unsafe-webgpu.
-// Headed mode under a real display (DISPLAY=:1) or xvfb is needed because
+// Headed mode under the existing real display or Xvfb is needed because
 // Playwright's headless-shell binary doesn't expose navigator.gpu.
 const WEBGPU_ARGS = [
   '--no-sandbox',
   '--enable-unsafe-webgpu',
-  '--enable-features=Vulkan',
+  '--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE',
   '--disable-gpu-sandbox',
+  '--ignore-gpu-blocklist',
+  '--disable-software-rasterizer',
+  '--use-angle=vulkan',
 ]
 
 function executableExists(file) {
@@ -117,6 +120,7 @@ function launchOptionsFor(spec, device) {
       opts.executablePath = '/usr/bin/google-chrome'
     }
     opts.headless = false
+    opts.ignoreDefaultArgs = ['--enable-unsafe-swiftshader']
     opts.args = WEBGPU_ARGS
   }
   return { opts }
@@ -146,7 +150,7 @@ async function runForDevice(browser, port, device, spec) {
     else if (msg.type() === 'log' || msg.type() === 'debug' || msg.type() === 'warning')
       console.log(msg.text())
   })
-  page.on('pageerror', err => console.error('PAGE ERROR:', err.message))
+  page.on('pageerror', err => console.error('PAGE ERROR:', err.stack || err.message))
 
   console.log(`=== browser: ${spec.label}, engine: ${spec.launcherName}, device: ${device} ===`)
   console.log(`[${spec.label}] version: ${browser.version()}`)

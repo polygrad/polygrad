@@ -479,6 +479,7 @@ TEST(ops, op_name) {
   ASSERT_STR_EQ(poly_op_name(POLY_OP_CONST), "CONST");
   ASSERT_STR_EQ(poly_op_name(POLY_OP_SINK), "SINK");
   ASSERT_STR_EQ(poly_op_name(POLY_OP_RESHAPE), "RESHAPE");
+  ASSERT_STR_EQ(poly_op_name(POLY_OP_STAGE), "STAGE");
   PASS();
 }
 
@@ -490,6 +491,7 @@ TEST(ops, op_value_matches_tinygrad_sort_order) {
   ASSERT_INT_EQ(poly_op_value(POLY_OP_STORE), 24);
   ASSERT_INT_EQ(poly_op_value(POLY_OP_ADD), 36);
   ASSERT_INT_EQ(poly_op_value(POLY_OP_CONST), 63);
+  ASSERT_INT_EQ(poly_op_value(POLY_OP_STAGE), 73);
   ASSERT_INT_EQ(poly_op_value(POLY_OP_BUFFER), 3);
   ASSERT_INT_EQ(poly_op_value(POLY_OP_DEFINE_REG), 3);
   PASS();
@@ -531,6 +533,39 @@ TEST(uop, print_const) {
   ASSERT_TRUE(strstr(s, "float") != NULL);
   ASSERT_TRUE(strstr(s, "3.14") != NULL);
   free(s);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(uop, print_preserves_pair_and_reduce_axis_args) {
+  /* Pinned tinygrad UOp.argstr (uop/ops.py:166-168) preserves the complete
+   * REDUCE operation/axes and movement metadata in diagnostic output. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *input = poly_buffer(ctx, POLY_FLOAT32, 6);
+
+  int64_t pairs[][2] = {{1, 0}, {0, 2}};
+  PolyArg pair_arg = {
+      .kind = POLY_ARG_PAIR_TUPLE,
+      .pair_tuple = {.pairs = pairs, .n = 2},
+  };
+  PolyUOp *pad = poly_uop1(ctx, POLY_OP_PAD, POLY_FLOAT32, input, pair_arg);
+  char *pad_s = poly_uop_str(pad);
+  ASSERT_NOT_NULL(pad_s);
+  ASSERT_STR_EQ(pad_s, "UOp(PAD, float, ((1,0),(0,2)), src=1)");
+
+  int64_t axes[] = {0, 2};
+  PolyArg reduce_arg = {
+      .kind = POLY_ARG_REDUCE_AXIS,
+      .reduce_axis = {.op = POLY_OP_ADD, .axes = axes, .n = 2},
+  };
+  PolyUOp *reduce =
+      poly_uop1(ctx, POLY_OP_REDUCE_AXIS, POLY_FLOAT32, input, reduce_arg);
+  char *reduce_s = poly_uop_str(reduce);
+  ASSERT_NOT_NULL(reduce_s);
+  ASSERT_STR_EQ(reduce_s, "UOp(REDUCE_AXIS, float, (ADD,(0,2)), src=1)");
+
+  free(reduce_s);
+  free(pad_s);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -671,34 +706,48 @@ TEST(uop, toposort_gate_skips_subtree) {
 }
 
 TEST(uop, toposort_enter_calls_false) {
-  PolyCtx *ctx = poly_ctx_new();
-  /* Build: CALL(callee_body, arg1)
-   * callee_body = ADD(c1, c2)
-   * arg1 = CONST(42) */
-  PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
-  PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
-  PolyUOp *callee_body = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
-  PolyUOp *arg1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(42.0));
-  PolyUOp *call = poly_uop2(ctx, POLY_OP_CALL, POLY_FLOAT32, callee_body, arg1, poly_arg_none());
+  const PolyOps opaque_ops[] = {POLY_OP_CALL, POLY_OP_FUNCTION};
+  for (int op_idx = 0; op_idx < 2; op_idx++) {
+    PolyCtx *ctx = poly_ctx_new();
+    /* Build: CALL/FUNCTION(callee_body, arg1)
+     * callee_body = ADD(c1, c2), arg1 = CONST(42). */
+    PolyUOp *c1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(1.0));
+    PolyUOp *c2 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(2.0));
+    PolyUOp *callee_body =
+        poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, c1, c2, poly_arg_none());
+    PolyUOp *arg1 = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(42.0));
+    PolyUOp *opaque =
+        poly_uop2(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee_body, arg1, poly_arg_none());
 
-  /* enter_calls=true: should see c1, c2, callee_body, arg1, call */
-  int n_all = 0;
-  PolyUOp **topo_all = poly_toposort_ex(ctx, call, &n_all, NULL, true);
-  ASSERT_INT_EQ(n_all, 5);
+    int n_all = 0;
+    PolyUOp **topo_all = poly_toposort_ex(ctx, opaque, &n_all, NULL, true);
+    ASSERT_NOT_NULL(topo_all);
+    ASSERT_INT_EQ(n_all, 5);
 
-  /* enter_calls=false: should see arg1 and call only (callee body skipped) */
-  int n_no = 0;
-  PolyUOp **topo_no = poly_toposort_ex(ctx, call, &n_no, NULL, false);
-  ASSERT_INT_EQ(n_no, 2);
-  bool found_callee = false;
-  for (int i = 0; i < n_no; i++) {
-    if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2) found_callee = true;
+    int n_no = 0;
+    PolyUOp **topo_no = poly_toposort_ex(ctx, opaque, &n_no, NULL, false);
+    ASSERT_NOT_NULL(topo_no);
+    ASSERT_INT_EQ(n_no, 2);
+    bool found_callee = false;
+    for (int i = 0; i < n_no; i++) {
+      if (topo_no[i] == callee_body || topo_no[i] == c1 || topo_no[i] == c2)
+        found_callee = true;
+    }
+    ASSERT_TRUE(!found_callee);
+    ASSERT_TRUE(topo_no[0] == arg1);
+    ASSERT_TRUE(topo_no[1] == opaque);
+
+    PolyUOp *body_only =
+        poly_uop1(ctx, opaque_ops[op_idx], POLY_FLOAT32, callee_body, poly_arg_none());
+    int n_body_only = 0;
+    PolyUOp **topo_body_only =
+        poly_toposort_ex(ctx, body_only, &n_body_only, NULL, false);
+    ASSERT_NOT_NULL(topo_body_only);
+    ASSERT_INT_EQ(n_body_only, 1);
+    ASSERT_PTR_EQ(topo_body_only[0], body_only);
+
+    poly_ctx_destroy(ctx);
   }
-  ASSERT_TRUE(!found_callee);
-  ASSERT_TRUE(topo_no[0] == arg1);
-  ASSERT_TRUE(topo_no[1] == call);
-
-  poly_ctx_destroy(ctx);
   PASS();
 }
 

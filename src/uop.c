@@ -66,6 +66,13 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     return a.bufferize_opts.device == b.bufferize_opts.device &&
            a.bufferize_opts.addrspace == b.bufferize_opts.addrspace &&
            a.bufferize_opts.removable == b.bufferize_opts.removable;
+  case POLY_ARG_TENSOR_CORE:
+    if (a.tensor_core.threads != b.tensor_core.threads ||
+        memcmp(a.tensor_core.dims, b.tensor_core.dims, sizeof(a.tensor_core.dims)) != 0)
+      return false;
+    if (a.tensor_core.name == b.tensor_core.name) return true;
+    return a.tensor_core.name && b.tensor_core.name &&
+           strcmp(a.tensor_core.name, b.tensor_core.name) == 0;
   case POLY_ARG_PROGRAM_INFO:
     return poly_program_info_eq(a.program_info, b.program_info);
   case POLY_ARG_BYTES:
@@ -73,6 +80,17 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     if (a.bytes.n == 0) return true;
     if (!a.bytes.data || !b.bytes.data) return false;
     return memcmp(a.bytes.data, b.bytes.data, (size_t)a.bytes.n) == 0;
+  case POLY_ARG_PARAM:
+    if (a.param == b.param) return true;
+    if (!a.param || !b.param) return false;
+    if (a.param->slot != b.param->slot || a.param->min_val != b.param->min_val ||
+        a.param->max_val != b.param->max_val ||
+        a.param->has_minmax != b.param->has_minmax ||
+        a.param->addrspace != b.param->addrspace || a.param->axis != b.param->axis ||
+        a.param->has_axis != b.param->has_axis || a.param->device != b.param->device)
+      return false;
+    if (a.param->name == b.param->name) return true;
+    return a.param->name && b.param->name && strcmp(a.param->name, b.param->name) == 0;
   }
   return false;
 }
@@ -144,12 +162,35 @@ uint32_t poly_arg_hash(PolyArg a) {
     h = hash_mix(h, (uint32_t)a.bufferize_opts.addrspace);
     h = hash_mix(h, a.bufferize_opts.removable ? 1u : 0u);
     break;
+  case POLY_ARG_TENSOR_CORE:
+    if (a.tensor_core.name) {
+      for (const char *p = a.tensor_core.name; *p; p++)
+        h = hash_mix(h, (uint32_t)*p);
+    }
+    for (int i = 0; i < 3; i++) h = hash_mix(h, (uint32_t)a.tensor_core.dims[i]);
+    h = hash_mix(h, (uint32_t)a.tensor_core.threads);
+    break;
   case POLY_ARG_PROGRAM_INFO:
     h = hash_mix(h, poly_program_info_hash(a.program_info));
     break;
   case POLY_ARG_BYTES:
     for (int i = 0; i < a.bytes.n; i++)
       h = hash_mix(h, a.bytes.data ? a.bytes.data[i] : 0);
+    break;
+  case POLY_ARG_PARAM:
+    if (a.param) {
+      h = hash_mix(h, (uint32_t)(a.param->slot ^ (a.param->slot >> 32)));
+      h = hash_mix(h, (uint32_t)a.param->device);
+      h = hash_mix(h, (uint32_t)a.param->addrspace);
+      h = hash_mix(h, (uint32_t)a.param->axis);
+      h = hash_mix(h, a.param->has_axis ? 1u : 0u);
+      h = hash_mix(h, a.param->has_minmax ? 1u : 0u);
+      h = hash_mix(h, (uint32_t)(a.param->min_val ^ (a.param->min_val >> 32)));
+      h = hash_mix(h, (uint32_t)(a.param->max_val ^ (a.param->max_val >> 32)));
+      if (a.param->name) {
+        for (const char *p = a.param->name; *p; p++) h = hash_mix(h, (uint32_t)*p);
+      }
+    }
     break;
   }
   return h;
@@ -213,13 +254,27 @@ static bool rank_tuple_valid(const void *data, int n) {
   return n >= 0 && n <= POLY_MAX_DIMS && (n == 0 || data != NULL);
 }
 
-static bool uop_rank_arg_valid(PolyOps op, PolyArg arg) {
+static bool shape_value_rank_valid(PolyUOp *shape) {
+  if (!shape) return false;
+  int rank = shape->op == POLY_OP_STACK
+                 ? shape->n_src
+                 : (shape->op == POLY_OP_CONST ? shape->dtype.count : 1);
+  return rank >= 0 && rank <= POLY_MAX_DIMS;
+}
+
+static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg) {
   switch (op) {
   case POLY_OP_RESHAPE:
-  case POLY_OP_EXPAND:
+    /* Pinned spec.py accepts any shape-value UOp in src[1]. UOp.as_shape
+     * decodes CONST, STACK, and scalar symbolic expressions (ops.py:697-700). */
+    return arg.kind == POLY_ARG_NONE && n_src == 2 && src &&
+           shape_value_rank_valid(src[1]);
   case POLY_OP_PERMUTE:
   case POLY_OP_FLIP:
     return arg.kind == POLY_ARG_INT_TUPLE && rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n);
+  case POLY_OP_EXPAND:
+    return arg.kind == POLY_ARG_NONE && n_src == 2 && src &&
+           shape_value_rank_valid(src[1]);
   case POLY_OP_SHRINK:
     if (arg.kind == POLY_ARG_NONE) return true;
     return arg.kind == POLY_ARG_PAIR_TUPLE &&
@@ -270,10 +325,25 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
     char *s = poly_arena_alloc(arena, len + 1, 1);
     memcpy(s, dst->define_var.name, len + 1);
     dst->define_var.name = s;
+  } else if (dst->kind == POLY_ARG_TENSOR_CORE && dst->tensor_core.name) {
+    size_t len = strlen(dst->tensor_core.name);
+    char *s = poly_arena_alloc(arena, len + 1, 1);
+    memcpy(s, dst->tensor_core.name, len + 1);
+    dst->tensor_core.name = s;
   } else if (dst->kind == POLY_ARG_BYTES && dst->bytes.n > 0 && dst->bytes.data) {
     uint8_t *data = poly_arena_alloc(arena, (size_t)dst->bytes.n, 1);
     memcpy(data, dst->bytes.data, (size_t)dst->bytes.n);
     dst->bytes.data = data;
+  } else if (dst->kind == POLY_ARG_PARAM && dst->param) {
+    PolyParamArg *param = poly_arena_alloc(arena, sizeof(*param), _Alignof(PolyParamArg));
+    *param = *dst->param;
+    if (param->name) {
+      size_t len = strlen(param->name);
+      char *name = poly_arena_alloc(arena, len + 1, 1);
+      memcpy(name, param->name, len + 1);
+      param->name = name;
+    }
+    dst->param = param;
   }
 }
 
@@ -295,7 +365,7 @@ static PolyUOp *poly_uop_internal(
     arg = poly_arg_range(arg.i, POLY_AXIS_LOOP);
   }
 
-  if (!uop_rank_arg_valid(op, arg)) return NULL;
+  if (!uop_rank_arg_valid(op, src, n_src, arg)) return NULL;
 
   /* Build a CSE key on the stack */
   CseKey key = {op, dtype, src, (uint16_t)n_src, arg, tag, tag_arg};
@@ -433,10 +503,10 @@ static PolyUOp **toposort_result_alloc(PolyCtx *ctx, int cap, PolyTopoResultStor
   case POLY_TOPO_RESULT_OWNED:
     return malloc(nbytes);
   case POLY_TOPO_RESULT_SCRATCH:
-    return poly_ctx_scratch_alloc(ctx, nbytes, _Alignof(PolyUOp *));
+    return ctx ? poly_ctx_scratch_alloc(ctx, nbytes, _Alignof(PolyUOp *)) : NULL;
   case POLY_TOPO_RESULT_ARENA:
   default:
-    return poly_arena_alloc(ctx->arena, nbytes, _Alignof(PolyUOp *));
+    return ctx ? poly_arena_alloc(ctx->arena, nbytes, _Alignof(PolyUOp *)) : NULL;
   }
 }
 
@@ -454,7 +524,10 @@ static PolyUOp **toposort_worker(
     PolyTopoResultStorage storage
 ) {
   if (n_out) *n_out = 0;
-  if (!ctx || !root || !n_out) return NULL;
+  /* Owned temporary toposorts only traverse immutable UOps and need no arena.
+   * This permits tinygrad-style topological symbolic evaluation in helpers
+   * whose complete input is already the root UOp. */
+  if (!root || !n_out || (!ctx && storage != POLY_TOPO_RESULT_OWNED)) return NULL;
   int cap = 256;
   int n = 0;
   PolyUOp **result = toposort_result_alloc(ctx, cap, storage);
@@ -505,8 +578,10 @@ static PolyUOp **toposort_worker(
       }
       /* First visit: push children in reverse order */
       state[stack_top - 1] = 1;
-      /* For CALL nodes with enter_calls=false, skip src[0] (the callee body) */
-      int start = (!enter_calls && u->op == POLY_OP_CALL && u->n_src > 1) ? 1 : 0;
+      /* CALL/FUNCTION src[0] is the opaque callee body. External arguments
+       * remain ordinary graph inputs when enter_calls=false. */
+      bool opaque_body = u->op == POLY_OP_CALL || u->op == POLY_OP_FUNCTION;
+      int start = (!enter_calls && opaque_body && u->n_src > 0) ? 1 : 0;
       for (int i = u->n_src - 1; i >= start; i--) {
         uint32_t ch = poly_ptr_hash(u->src[i]);
         if (poly_map_get(visited, ch, u->src[i], poly_ptr_eq) != NULL) continue;
@@ -643,7 +718,7 @@ void poly_toposort_free(PolyUOp **topo) {
  * `range_start` dict (uop/ops.py:29). */
 static int uop_range_start_for_op(PolyOps op) {
   switch (op) {
-  case POLY_OP_BUFFERIZE:
+  case POLY_OP_STAGE:
     return 1;
   case POLY_OP_REDUCE:
     return 1;
@@ -1093,6 +1168,34 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     written = snprintf(buf + *pos, cap - *pos, ", %ld", (long)u->arg.i);
     if (written > 0) *pos += written;
     break;
+  case POLY_ARG_PAIR_TUPLE:
+    written = snprintf(buf + *pos, cap - *pos, ", (");
+    if (written > 0) *pos += written;
+    for (int i = 0; i < u->arg.pair_tuple.n; i++) {
+      written = snprintf(
+          buf + *pos, cap - *pos, "%s(%ld,%ld)", i ? "," : "",
+          (long)u->arg.pair_tuple.pairs[i][0], (long)u->arg.pair_tuple.pairs[i][1]
+      );
+      if (written > 0) *pos += written;
+    }
+    written = snprintf(buf + *pos, cap - *pos, ")");
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_REDUCE_AXIS:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", (%s,(", poly_op_name(u->arg.reduce_axis.op)
+    );
+    if (written > 0) *pos += written;
+    for (int i = 0; i < u->arg.reduce_axis.n; i++) {
+      written = snprintf(
+          buf + *pos, cap - *pos, "%s%ld", i ? "," : "",
+          (long)u->arg.reduce_axis.axes[i]
+      );
+      if (written > 0) *pos += written;
+    }
+    written = snprintf(buf + *pos, cap - *pos, "))");
+    if (written > 0) *pos += written;
+    break;
   case POLY_ARG_FLOAT:
     written = snprintf(buf + *pos, cap - *pos, ", %g", u->arg.f);
     if (written > 0) *pos += written;
@@ -1152,6 +1255,26 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     );
     if (written > 0) *pos += written;
     break;
+  case POLY_ARG_TENSOR_CORE:
+    written = snprintf(
+        buf + *pos, cap - *pos, ", TensorCore(\"%s\",(%d,%d,%d),threads=%d)",
+        u->arg.tensor_core.name ? u->arg.tensor_core.name : "?", u->arg.tensor_core.dims[0],
+        u->arg.tensor_core.dims[1], u->arg.tensor_core.dims[2], u->arg.tensor_core.threads
+    );
+    if (written > 0) *pos += written;
+    break;
+  case POLY_ARG_PARAM:
+    written = snprintf(
+        buf + *pos, cap - *pos,
+        ", ParamArg(slot=%ld,device=%d,addrspace=%d%s%s)",
+        u->arg.param ? (long)u->arg.param->slot : -1L,
+        u->arg.param ? (int)u->arg.param->device : 0,
+        u->arg.param ? (int)u->arg.param->addrspace : 0,
+        u->arg.param && u->arg.param->has_axis ? ",axis" : "",
+        u->arg.param && u->arg.param->name ? ",name" : ""
+    );
+    if (written > 0) *pos += written;
+    break;
   default:
     break;
   }
@@ -1206,6 +1329,24 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
   case POLY_ARG_OPS:
     fprintf(fp, " op=%s", poly_op_name(u->arg.ops));
     break;
+  case POLY_ARG_PAIR_TUPLE:
+    fprintf(fp, " pairs=(");
+    for (int i = 0; i < u->arg.pair_tuple.n; i++)
+      fprintf(
+          fp, "%s(%lld,%lld)", i ? "," : "",
+          (long long)u->arg.pair_tuple.pairs[i][0],
+          (long long)u->arg.pair_tuple.pairs[i][1]
+      );
+    fprintf(fp, ")");
+    break;
+  case POLY_ARG_REDUCE_AXIS:
+    fprintf(fp, " reduce=(%s,(", poly_op_name(u->arg.reduce_axis.op));
+    for (int i = 0; i < u->arg.reduce_axis.n; i++)
+      fprintf(
+          fp, "%s%lld", i ? "," : "", (long long)u->arg.reduce_axis.axes[i]
+      );
+    fprintf(fp, "))");
+    break;
   case POLY_ARG_RANGE:
     fprintf(fp, " axis=%lld", (long long)u->arg.range.axis_id);
     break;
@@ -1220,6 +1361,23 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
         fp, " bufferize_opts=(device=%d,addrspace=%d,removable=%d)",
         (int)u->arg.bufferize_opts.device, (int)u->arg.bufferize_opts.addrspace,
         (int)u->arg.bufferize_opts.removable
+    );
+    break;
+  case POLY_ARG_TENSOR_CORE:
+    fprintf(
+        fp, " tensor_core=%s[(%d,%d,%d),threads=%d]",
+        u->arg.tensor_core.name ? u->arg.tensor_core.name : "?", u->arg.tensor_core.dims[0],
+        u->arg.tensor_core.dims[1], u->arg.tensor_core.dims[2], u->arg.tensor_core.threads
+    );
+    break;
+  case POLY_ARG_PARAM:
+    fprintf(
+        fp, " param=(slot=%lld,device=%d,addrspace=%d%s%s)",
+        u->arg.param ? (long long)u->arg.param->slot : -1LL,
+        u->arg.param ? (int)u->arg.param->device : 0,
+        u->arg.param ? (int)u->arg.param->addrspace : 0,
+        u->arg.param && u->arg.param->has_axis ? ",axis" : "",
+        u->arg.param && u->arg.param->name ? ",name" : ""
     );
     break;
   default:

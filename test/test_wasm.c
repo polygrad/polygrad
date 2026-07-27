@@ -61,6 +61,13 @@ static int wasm_count_simd_opcode(const uint8_t *wasm, int wasm_size, int opcode
   return count;
 }
 
+static int wasm_count_uops(PolyUOp **uops, int n, PolyOps op) {
+  int count = 0;
+  for (int i = 0; i < n; i++)
+    if (uops[i]->op == op) count++;
+  return count;
+}
+
 static bool wasm_file_contains_relaxed_madd(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return false;
@@ -144,6 +151,7 @@ static PolyUOp **wasm_linearize_generic_test(PolyCtx *ctx, PolyUOp *sink, int *n
           {
               .has_mulacc = true,
               .has_threefry = false,
+              .has_int64 = true,
               .has_local = false,
               .has_simd_int = false,
               .has_simd_float = true,
@@ -285,7 +293,7 @@ static int node_run_wasm_broadcast_reduce_relu(const char *path, int n) {
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (!node) return 0;
 
-  const char *js_path = "/tmp/polygrad_test_broadcast_reduce_relu.js";
+  const char *js_path = "temp/polygrad_test_broadcast_reduce_relu.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
   fprintf(
@@ -340,7 +348,7 @@ static int node_run_wasm_matmul_bias_relu(
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (!node) return 0;
 
-  const char *js_path = "/tmp/polygrad_test_matmul_bias_relu.js";
+  const char *js_path = "temp/polygrad_test_matmul_bias_relu.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
   fprintf(
@@ -384,7 +392,7 @@ static int node_run_wasm_matmul_bias_relu(
 static int node_run_wasm_matmul_abt_row1(const char *path, int n, int k) {
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (!node) return 0;
-  const char *js_path = "/tmp/polygrad_test_matmul_abt_row1.js";
+  const char *js_path = "temp/polygrad_test_matmul_abt_row1.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
   fprintf(
@@ -424,7 +432,7 @@ static int node_run_wasm_matmul_abt_row1(const char *path, int n, int k) {
 static int node_run_wasm_matmul_ab(const char *path, int m, int n, int k) {
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (!node) return 0;
-  const char *js_path = "/tmp/polygrad_test_matmul_ab.js";
+  const char *js_path = "temp/polygrad_test_matmul_ab.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
   fprintf(
@@ -464,7 +472,7 @@ static int node_run_wasm_matmul_ab(const char *path, int m, int n, int k) {
 static int node_run_wasm_matmul_abt(const char *path, int m, int n, int k) {
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (!node) return 0;
-  const char *js_path = "/tmp/polygrad_test_matmul_abt.js";
+  const char *js_path = "temp/polygrad_test_matmul_abt.js";
   FILE *f = fopen(js_path, "w");
   if (!f) return -1;
   fprintf(
@@ -1086,7 +1094,7 @@ TEST(wasm, direct_f32x4_alu_ops_emit_simd) {
     ASSERT_INT_EQ(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_REPLACE), 0);
 
     char path[128];
-    snprintf(path, sizeof(path), "/tmp/polygrad_test_f32x4_%s.wasm", cases[i].name);
+    snprintf(path, sizeof(path), "temp/polygrad_test_f32x4_%s.wasm", cases[i].name);
     ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
     ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
 
@@ -1116,16 +1124,16 @@ TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab.wasm"), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab.wasm"), 0);
   free(wasm);
 
   int relaxed_size = 0;
   wasm = poly_render_wasm_matmul(body, &relaxed_size, true);
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(relaxed_size > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_relaxed.wasm", wasm, relaxed_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_relaxed.wasm"), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab_relaxed.wasm", wasm, relaxed_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab_relaxed.wasm"), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1143,15 +1151,15 @@ TEST(wasm, matmul_specialized_modules_validate_and_use_load32_splat) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt.wasm"), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_abt.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_abt.wasm"), 0);
   free(wasm);
 
   wasm = poly_render_wasm_matmul(body_t, &relaxed_size, true);
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(relaxed_size > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_relaxed.wasm", wasm, relaxed_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_relaxed.wasm"), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_abt_relaxed.wasm", wasm, relaxed_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_abt_relaxed.wasm"), 0);
   free(wasm);
 
   poly_schedule_free(sched_t);
@@ -1180,9 +1188,9 @@ TEST(wasm, matmul_ab_specializes_nonmultiple_k_tail) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_k_tail.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_k_tail.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_k_tail.wasm", m, n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab_k_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab_k_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("temp/polygrad_test_matmul_ab_k_tail.wasm", m, n, k), 0);
   free(wasm);
   poly_schedule_free(sched);
 
@@ -1210,9 +1218,9 @@ TEST(wasm, matmul_ab_specializes_all_scalar_epilogue) {
   uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_scalar_epilogue.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_scalar_epilogue.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_scalar_epilogue.wasm", m, n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab_scalar_epilogue.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab_scalar_epilogue.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("temp/polygrad_test_matmul_ab_scalar_epilogue.wasm", m, n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1244,7 +1252,7 @@ TEST(wasm, matmul_ab_row1_nontransposed_uses_generic_fallback) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
-  const char *path = "/tmp/polygrad_test_matmul_ab_row1_generic.wasm";
+  const char *path = "temp/polygrad_test_matmul_ab_row1_generic.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
   ASSERT_INT_EQ(node_run_wasm_matmul_ab(path, m, n, k), 0);
@@ -1277,9 +1285,9 @@ TEST(wasm, matmul_ab_specializes_nonmultiple_m_tail) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_m_tail.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_m_tail.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_m_tail.wasm", m, n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab_m_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab_m_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("temp/polygrad_test_matmul_ab_m_tail.wasm", m, n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1308,9 +1316,9 @@ TEST(wasm, matmul_ab_specializes_nonmultiple_n_tail) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD32_SPLAT) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_n_tail.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_n_tail.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_n_tail.wasm", m, n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab_n_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab_n_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("temp/polygrad_test_matmul_ab_n_tail.wasm", m, n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1338,9 +1346,9 @@ TEST(wasm, matmul_ab_specializes_combined_m_n_k_tails) {
   uint8_t *wasm = poly_render_wasm_matmul(body, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_ab_all_tails.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_ab_all_tails.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_ab("/tmp/polygrad_test_matmul_ab_all_tails.wasm", m, n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_ab_all_tails.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_ab_all_tails.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_ab("temp/polygrad_test_matmul_ab_all_tails.wasm", m, n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1370,9 +1378,9 @@ TEST(wasm, matmul_abt_specializes_nonmultiple_k_tail) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_k_tail.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_k_tail.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_abt("/tmp/polygrad_test_matmul_abt_k_tail.wasm", m, n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_abt_k_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_abt_k_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_abt("temp/polygrad_test_matmul_abt_k_tail.wasm", m, n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1402,9 +1410,9 @@ TEST(wasm, matmul_abt_row1_specializes_nonmultiple_k_tail) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_row1_k_tail.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_row1_k_tail.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_abt_row1("/tmp/polygrad_test_matmul_abt_row1_k_tail.wasm", n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_abt_row1_k_tail.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_abt_row1_k_tail.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_abt_row1("temp/polygrad_test_matmul_abt_row1_k_tail.wasm", n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1434,9 +1442,9 @@ TEST(wasm, matmul_abt_specializes_single_row_token_projection) {
   ASSERT_NOT_NULL(wasm);
   ASSERT_TRUE(wasm_size > 0);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_I8X16_SHUFFLE) > 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_matmul_abt_row1.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_compile_wasm_module("/tmp/polygrad_test_matmul_abt_row1.wasm"), 0);
-  ASSERT_INT_EQ(node_run_wasm_matmul_abt_row1("/tmp/polygrad_test_matmul_abt_row1.wasm", n, k), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_matmul_abt_row1.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module("temp/polygrad_test_matmul_abt_row1.wasm"), 0);
+  ASSERT_INT_EQ(node_run_wasm_matmul_abt_row1("temp/polygrad_test_matmul_abt_row1.wasm", n, k), 0);
   free(wasm);
 
   poly_schedule_free(sched);
@@ -1485,7 +1493,7 @@ TEST(wasm, reg_store_group_executes_without_packed_cache) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
 
-  const char *path = "/tmp/polygrad_test_packed_reg_store_group.wasm";
+  const char *path = "temp/polygrad_test_packed_reg_store_group.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_reg_group_f32(path), 0);
 
@@ -1530,7 +1538,7 @@ TEST(wasm, wide_vector_gep_scalar_consumers_use_selected_lanes) {
   int wasm_size = 0;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
-  const char *path = "/tmp/polygrad_test_wide_vector_gep.wasm";
+  const char *path = "temp/polygrad_test_wide_vector_gep.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_wide_vector_gep_f32(path), 0);
 
@@ -1638,7 +1646,7 @@ TEST(wasm, packed_group_reduce_relu_executes) {
   int wasm_size = 0;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
-  const char *path = "/tmp/polygrad_test_broadcast_reduce_relu.wasm";
+  const char *path = "temp/polygrad_test_broadcast_reduce_relu.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_broadcast_reduce_relu(path, (int)n), 0);
 
@@ -1685,7 +1693,7 @@ TEST(wasm, specialized_row_reduce_relu_executes) {
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_MUL) >= 1);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD) >= 2);
 
-  const char *path = "/tmp/polygrad_test_specialized_row_reduce_relu.wasm";
+  const char *path = "temp/polygrad_test_specialized_row_reduce_relu.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_broadcast_reduce_relu(path, (int)n), 0);
 
@@ -1729,7 +1737,7 @@ TEST(wasm, specialized_row_reduce_relu_tail_executes) {
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_F32X4_ADD) >= 2);
   ASSERT_TRUE(wasm_count_simd_opcode(wasm, wasm_size, WASM_SIMD_V128_LOAD) >= 2);
 
-  const char *path = "/tmp/polygrad_test_specialized_row_reduce_relu_tail.wasm";
+  const char *path = "temp/polygrad_test_specialized_row_reduce_relu_tail.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_broadcast_reduce_relu(path, (int)n), 0);
 
@@ -1761,7 +1769,7 @@ TEST(wasm, row_reduce_f64_uses_generic_renderer) {
   int wasm_size = 0;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
-  const char *path = "/tmp/polygrad_test_f64_row_reduce_generic.wasm";
+  const char *path = "temp/polygrad_test_f64_row_reduce_generic.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
 
@@ -1799,7 +1807,7 @@ TEST(wasm, row_reduce_noncompare_where_uses_generic_renderer) {
   int wasm_size = 0;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
-  const char *path = "/tmp/polygrad_test_noncompare_where_reduce_generic.wasm";
+  const char *path = "temp/polygrad_test_noncompare_where_reduce_generic.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
 
@@ -1835,7 +1843,7 @@ TEST(wasm, matmul_bias_relu_executes_after_packed_reduce) {
   int wasm_size = 0;
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
-  const char *path = "/tmp/polygrad_test_matmul_bias_relu.wasm";
+  const char *path = "temp/polygrad_test_matmul_bias_relu.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(
       node_run_wasm_matmul_bias_relu(path, (int)tokens, (int)d, (int)hidden), 0
@@ -1873,6 +1881,56 @@ TEST(wasm, render_rand_threefry_dag_terminates) {
   PASS();
 }
 
+TEST(wasm, full_rewrite_retains_native_u64_threefry_buffers) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_u64 = poly_dtype_ptr(POLY_UINT64, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_u64, poly_arg_int(0));
+  PolyUOp *xbuf = poly_uop0(ctx, POLY_OP_PARAM, ptr_u64, poly_arg_int(1));
+  PolyUOp *kbuf = poly_uop0(ctx, POLY_OP_PARAM, ptr_u64, poly_arg_int(2));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *oidx = poly_uop2(ctx, POLY_OP_INDEX, ptr_u64, out, zero, poly_arg_none());
+  PolyUOp *xidx = poly_uop2(ctx, POLY_OP_INDEX, ptr_u64, xbuf, zero, poly_arg_none());
+  PolyUOp *kidx = poly_uop2(ctx, POLY_OP_INDEX, ptr_u64, kbuf, zero, poly_arg_none());
+  PolyUOp *x = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT64, xidx, poly_arg_none());
+  PolyUOp *key = poly_uop1(ctx, POLY_OP_LOAD, POLY_UINT64, kidx, poly_arg_none());
+  PolyUOp *value = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, x, key, poly_arg_none());
+  PolyUOp *sink =
+      poly_sink1(ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, oidx, value, poly_arg_none()));
+
+  PolyUOp *rewritten = poly_rewrite_wasm(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  ASSERT_INT_EQ(wasm_count_uops(topo, n_topo, POLY_OP_THREEFRY), 0);
+  ASSERT_INT_EQ(wasm_count_uops(topo, n_topo, POLY_OP_LOAD), 2);
+  ASSERT_INT_EQ(wasm_count_uops(topo, n_topo, POLY_OP_STORE), 1);
+  int n_long = 0;
+  for (int i = 0; i < n_topo; i++) {
+    PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+    if (poly_dtype_is_int(scalar) && scalar.bitsize == 64) n_long++;
+    if (topo[i]->op == POLY_OP_PARAM && topo[i]->dtype.is_ptr) {
+      ASSERT_INT_EQ(poly_dtype_scalar(topo[i]->dtype).bitsize, 64);
+      ASSERT_INT_EQ((int)topo[i]->dtype.ptr_size, 1);
+    }
+  }
+  ASSERT_TRUE(n_long > 0);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(wasm, write_and_validate) {
   /* Render a vecadd kernel and write to /tmp for manual validation */
   WasmVecKernel k = wasm_make_vec_binop(POLY_OP_ADD, 10);
@@ -1884,7 +1942,7 @@ TEST(wasm, write_and_validate) {
   ASSERT_NOT_NULL(wasm);
 
   /* Write to tmp file for external validation */
-  FILE *f = fopen("/tmp/polygrad_test_vecadd.wasm", "wb");
+  FILE *f = fopen("temp/polygrad_test_vecadd.wasm", "wb");
   if (f) {
     fwrite(wasm, 1, wasm_size, f);
     fclose(f);
@@ -1892,7 +1950,7 @@ TEST(wasm, write_and_validate) {
 
   /* Try running wasm-validate if available */
   int rc =
-      system("which wasm-validate > /dev/null 2>&1 && wasm-validate /tmp/polygrad_test_vecadd.wasm"
+      system("which wasm-validate > /dev/null 2>&1 && wasm-validate temp/polygrad_test_vecadd.wasm"
       );
   if (rc == 0) {
     /* wasm-validate passed — great! */
@@ -1956,7 +2014,7 @@ TEST(wasm, sparse_cross_entropy_i64_gather_index_validates) {
     }
 
     char path[128];
-    snprintf(path, sizeof(path), "/tmp/polygrad_test_ce_sparse_item%d.wasm", item);
+    snprintf(path, sizeof(path), "temp/polygrad_test_ce_sparse_item%d.wasm", item);
     FILE *f = fopen(path, "wb");
     ASSERT_NOT_NULL(f);
     fwrite(wasm, 1, (size_t)wasm_size, f);
@@ -2012,9 +2070,9 @@ TEST(wasm, mixed_width_compare_validates) {
   int32_t c_out = 0;
   ASSERT_INT_EQ(wasm_run_c_i32(lin, n_lin, "mixed_width_compare_c", &c_out), 0);
   ASSERT_INT_EQ(
-      wasm_write_module("/tmp/polygrad_test_mixed_width_compare.wasm", wasm, wasm_size), 0
+      wasm_write_module("temp/polygrad_test_mixed_width_compare.wasm", wasm, wasm_size), 0
   );
-  ASSERT_INT_EQ(node_run_wasm_i32("/tmp/polygrad_test_mixed_width_compare.wasm", c_out), 0);
+  ASSERT_INT_EQ(node_run_wasm_i32("temp/polygrad_test_mixed_width_compare.wasm", c_out), 0);
   ASSERT_INT_EQ(c_out, 1);
 
   free(wasm);
@@ -2049,8 +2107,8 @@ TEST(wasm, mixed_width_shift_validates) {
 
   int64_t c_out = 0;
   ASSERT_INT_EQ(wasm_run_c_i64(lin, n_lin, "mixed_width_shift_c", &c_out), 0);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_mixed_width_shift.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_run_wasm_i64("/tmp/polygrad_test_mixed_width_shift.wasm", c_out), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_mixed_width_shift.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_i64("temp/polygrad_test_mixed_width_shift.wasm", c_out), 0);
   ASSERT_INT_EQ(c_out, 28);
 
   free(wasm);
@@ -2099,9 +2157,9 @@ TEST(wasm, unsigned_i64_div_mod_matches_c_renderer) {
   int64_t c_out = 0;
   ASSERT_INT_EQ(wasm_run_c_i64(lin, n_lin, "unsigned_i64_div_mod_c", &c_out), 0);
   ASSERT_INT_EQ(
-      wasm_write_module("/tmp/polygrad_test_unsigned_i64_div_mod.wasm", wasm, wasm_size), 0
+      wasm_write_module("temp/polygrad_test_unsigned_i64_div_mod.wasm", wasm, wasm_size), 0
   );
-  ASSERT_INT_EQ(node_run_wasm_i64("/tmp/polygrad_test_unsigned_i64_div_mod.wasm", c_out), 0);
+  ASSERT_INT_EQ(node_run_wasm_i64("temp/polygrad_test_unsigned_i64_div_mod.wasm", c_out), 0);
   ASSERT_INT_EQ(c_out, 7);
 
   free(wasm);
@@ -2147,10 +2205,10 @@ TEST(wasm, mulacc_operand_order_matches_tinygrad) {
   ASSERT_INT_EQ(wasm_run_c_f32_buffer(lin, n_lin, "mulacc_operand_order_c", c_buf), 0);
   ASSERT_FLOAT_EQ(c_buf[0], 11.0f, 1e-6);
   ASSERT_INT_EQ(
-      wasm_write_module("/tmp/polygrad_test_mulacc_operand_order.wasm", wasm, wasm_size), 0
+      wasm_write_module("temp/polygrad_test_mulacc_operand_order.wasm", wasm, wasm_size), 0
   );
   ASSERT_INT_EQ(
-      node_run_wasm_f32_buffer("/tmp/polygrad_test_mulacc_operand_order.wasm", c_buf[0]), 0
+      node_run_wasm_f32_buffer("temp/polygrad_test_mulacc_operand_order.wasm", c_buf[0]), 0
   );
 
   free(wasm);
@@ -2208,8 +2266,8 @@ TEST(wasm, define_reg_array_constant_indexes_match_c_renderer) {
   float c_buf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   ASSERT_INT_EQ(wasm_run_c_f32_buffer(lin, n_lin, "define_reg_array_c", c_buf), 0);
   ASSERT_FLOAT_EQ(c_buf[0], 7.0f, 1e-6);
-  ASSERT_INT_EQ(wasm_write_module("/tmp/polygrad_test_define_reg_array.wasm", wasm, wasm_size), 0);
-  ASSERT_INT_EQ(node_run_wasm_f32_buffer("/tmp/polygrad_test_define_reg_array.wasm", c_buf[0]), 0);
+  ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_define_reg_array.wasm", wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_run_wasm_f32_buffer("temp/polygrad_test_define_reg_array.wasm", c_buf[0]), 0);
 
   free(wasm);
   free(lin);
@@ -2289,12 +2347,12 @@ TEST(wasm, e2e_node_pow) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
   ASSERT_NOT_NULL(wasm);
 
-  FILE *f = fopen("/tmp/polygrad_e2e_pow.wasm", "wb");
+  FILE *f = fopen("temp/polygrad_e2e_pow.wasm", "wb");
   ASSERT_NOT_NULL(f);
   fwrite(wasm, 1, wasm_size, f);
   fclose(f);
 
-  const char *node = poly_test_node_cmd_for_wasm("/tmp/polygrad_e2e_pow.wasm");
+  const char *node = poly_test_node_cmd_for_wasm("temp/polygrad_e2e_pow.wasm");
   if (!node) {
     free(wasm);
     free(lin);
@@ -2303,7 +2361,7 @@ TEST(wasm, e2e_node_pow) {
   }
 
   char cmd[512];
-  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_pow.wasm pow 4", node);
+  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js temp/polygrad_e2e_pow.wasm pow 4", node);
   int rc = system(cmd);
   ASSERT_INT_EQ(rc, 0);
 
@@ -2324,13 +2382,13 @@ TEST(wasm, e2e_node_vecadd) {
   ASSERT_NOT_NULL(wasm);
 
   /* Write WASM to tmp file */
-  FILE *f = fopen("/tmp/polygrad_e2e_vecadd.wasm", "wb");
+  FILE *f = fopen("temp/polygrad_e2e_vecadd.wasm", "wb");
   ASSERT_NOT_NULL(f);
   fwrite(wasm, 1, wasm_size, f);
   fclose(f);
 
   /* Skip if node is not available */
-  const char *node = poly_test_node_cmd_for_wasm("/tmp/polygrad_e2e_vecadd.wasm");
+  const char *node = poly_test_node_cmd_for_wasm("temp/polygrad_e2e_vecadd.wasm");
   if (!node) {
     free(wasm);
     free(lin);
@@ -2340,7 +2398,7 @@ TEST(wasm, e2e_node_vecadd) {
 
   /* Run the Node.js test runner */
   char cmd[512];
-  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_vecadd.wasm add 8", node);
+  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js temp/polygrad_e2e_vecadd.wasm add 8", node);
   int rc = system(cmd);
   ASSERT_INT_EQ(rc, 0);
 
@@ -2359,13 +2417,13 @@ TEST(wasm, e2e_node_vecadd_simd) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
 
-  const char *path = "/tmp/polygrad_e2e_vecadd_simd.wasm";
+  const char *path = "temp/polygrad_e2e_vecadd_simd.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
 
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (node) {
     char cmd[512];
-    snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_vecadd_simd.wasm add 10", node);
+    snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js temp/polygrad_e2e_vecadd_simd.wasm add 10", node);
     ASSERT_INT_EQ(system(cmd), 0);
   }
 
@@ -2384,7 +2442,7 @@ TEST(wasm, e2e_node_where_simd) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
 
-  const char *path = "/tmp/polygrad_e2e_where_simd.wasm";
+  const char *path = "temp/polygrad_e2e_where_simd.wasm";
   ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_where_f32(path, 10), 0);
 
@@ -2564,14 +2622,14 @@ TEST(wasm_f64, validate_f64_scalar) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
   ASSERT_NOT_NULL(wasm);
 
-  FILE *f = fopen("/tmp/polygrad_test_f64_scalar.wasm", "wb");
+  FILE *f = fopen("temp/polygrad_test_f64_scalar.wasm", "wb");
   if (f) {
     fwrite(wasm, 1, wasm_size, f);
     fclose(f);
   }
 
   int rc = system("which wasm-validate > /dev/null 2>&1 && "
-                  "wasm-validate /tmp/polygrad_test_f64_scalar.wasm");
+                  "wasm-validate temp/polygrad_test_f64_scalar.wasm");
   if (rc == 0) { /* wasm-validate passed */
   }
 
@@ -2591,14 +2649,14 @@ TEST(wasm_f64, validate_f64_simd) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
   ASSERT_NOT_NULL(wasm);
 
-  FILE *f = fopen("/tmp/polygrad_test_f64_simd.wasm", "wb");
+  FILE *f = fopen("temp/polygrad_test_f64_simd.wasm", "wb");
   if (f) {
     fwrite(wasm, 1, wasm_size, f);
     fclose(f);
   }
 
   int rc = system("which wasm-validate > /dev/null 2>&1 && "
-                  "wasm-validate --enable-simd /tmp/polygrad_test_f64_simd.wasm");
+                  "wasm-validate --enable-simd temp/polygrad_test_f64_simd.wasm");
   if (rc == 0) { /* wasm-validate passed */
   }
 
@@ -2618,12 +2676,12 @@ TEST(wasm_f64, e2e_node_vecadd_f64) {
   uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
   ASSERT_NOT_NULL(wasm);
 
-  FILE *f = fopen("/tmp/polygrad_e2e_vecadd_f64.wasm", "wb");
+  FILE *f = fopen("temp/polygrad_e2e_vecadd_f64.wasm", "wb");
   ASSERT_NOT_NULL(f);
   fwrite(wasm, 1, wasm_size, f);
   fclose(f);
 
-  const char *node = poly_test_node_cmd_for_wasm("/tmp/polygrad_e2e_vecadd_f64.wasm");
+  const char *node = poly_test_node_cmd_for_wasm("temp/polygrad_e2e_vecadd_f64.wasm");
   if (!node) {
     free(wasm);
     free(lin);
@@ -2632,12 +2690,100 @@ TEST(wasm_f64, e2e_node_vecadd_f64) {
   }
 
   char cmd[512];
-  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js /tmp/polygrad_e2e_vecadd_f64.wasm add_f64 8", node);
+  snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js temp/polygrad_e2e_vecadd_f64.wasm add_f64 8", node);
   int rc = system(cmd);
   ASSERT_INT_EQ(rc, 0);
 
   free(wasm);
   free(lin);
   poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm_f64, e2e_node_math_imports_f64) {
+  struct {
+    const char *name;
+    PolyOps op;
+    bool binary;
+  } cases[] = {
+      {"exp2", POLY_OP_EXP2, false},
+      {"log2", POLY_OP_LOG2, false},
+      {"sin", POLY_OP_SIN, false},
+      {"pow", POLY_OP_POW, true},
+  };
+
+  for (int i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+    WasmVecKernel k = cases[i].binary ? wasm_make_vec_binop_f64(cases[i].op, 4)
+                                      : wasm_make_vec_unary_f64(cases[i].op, 4);
+    int n_lin = 0;
+    /* Normal full lowering decomposes POW into EXP2+LOG2. Exercise the raw
+     * renderer extension directly so the f64 math.pow ABI is covered too. */
+    PolyUOp **lin = cases[i].binary ? poly_toposort_alloc(k.ctx, k.sink, &n_lin)
+                                    : poly_linearize_wasm(k.ctx, k.sink, &n_lin);
+    ASSERT_NOT_NULL(lin);
+
+    int wasm_size = 0;
+    uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+    ASSERT_NOT_NULL(wasm);
+
+    char path[256];
+    snprintf(path, sizeof(path), "temp/polygrad_e2e_%s_f64.wasm", cases[i].name);
+    ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+    ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+
+    const char *node = poly_test_node_cmd_for_wasm(path);
+    if (node) {
+      char cmd[512];
+      snprintf(cmd, sizeof(cmd), "%s test/run_wasm.js %s %s_f64 4", node, path, cases[i].name);
+      ASSERT_INT_EQ(system(cmd), 0);
+    }
+
+    free(wasm);
+    free(lin);
+    poly_ctx_destroy(k.ctx);
+  }
+  PASS();
+}
+
+TEST(wasm_f64, mixed_f32_f64_unary_import_types_validate) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_GLOBAL);
+  PolyDType ptr_f64 = poly_dtype_ptr(POLY_FLOAT64, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out32 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *in32 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(1));
+  PolyUOp *out64 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(2));
+  PolyUOp *in64 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f64, poly_arg_int(3));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *idx_out32 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out32, zero, poly_arg_none());
+  PolyUOp *idx_in32 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, in32, zero, poly_arg_none());
+  PolyUOp *idx_out64 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, out64, zero, poly_arg_none());
+  PolyUOp *idx_in64 = poly_uop2(ctx, POLY_OP_INDEX, ptr_f64, in64, zero, poly_arg_none());
+  PolyUOp *sin32 = poly_uop1(
+      ctx, POLY_OP_SIN, POLY_FLOAT32,
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx_in32, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *sin64 = poly_uop1(
+      ctx, POLY_OP_SIN, POLY_FLOAT64,
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT64, idx_in64, poly_arg_none()), poly_arg_none()
+  );
+  PolyUOp *stores[] = {
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_out32, sin32, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx_out64, sin64, poly_arg_none()),
+  };
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 2, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "temp/polygrad_mixed_f32_f64_sin.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }

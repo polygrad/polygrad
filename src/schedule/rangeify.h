@@ -88,6 +88,7 @@ PolyRangeEntry *poly_range_map_get(PolyIndexingCtx *ictx, PolyUOp *u);
 PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink);
 
 /* Internal stage helpers kept visible for parity probes and focused tests. */
+PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink);
 PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_map);
 
 /* Tinygrad schedule/rangeify.py analogue: build the kernel graph for a sink. */
@@ -106,6 +107,8 @@ typedef struct {
   int *copy_dst_params;
   int *copy_src_params;
 
+  /* Exact split-time CALL bindings. An entry may retain AFTER for dependency
+   * ordering; schedule creation resolves its existing buffer identity. */
   PolyUOp ***param_to_buf;
   int *kernel_n_params;
 

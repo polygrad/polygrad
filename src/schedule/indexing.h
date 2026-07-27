@@ -34,6 +34,7 @@ extern "C" {
  */
 bool poly_apply_movement_op(
     PolyCtx *ctx,
+    PolyUOp *movement,
     PolyOps op,
     PolyShape in_shape,
     PolyArg arg,
@@ -48,16 +49,17 @@ bool poly_apply_movement_op(
  * Returns a UOp expression: ranges[0]*stride[0] + ranges[1]*stride[1] + ... */
 PolyUOp *poly_compute_flat_index(PolyCtx *ctx, PolyUOp **ranges, int ndim, PolyShape shape);
 
-/* Compute reshape index transform: given output ranges for out_shape,
- * compute input ranges for in_shape via flatten + decompose. */
-void poly_reshape_indices(
+/* Compute the exact RESHAPE index transform from the movement UOp's symbolic
+ * input/output shapes. Partial indexing follows pinned _mop_index: an
+ * unindexed output suffix must exactly match an input suffix, and n_in_out
+ * reports the mapped input-prefix rank. */
+bool poly_reshape_indices(
     PolyCtx *ctx,
+    PolyUOp *reshape,
     PolyUOp **out_ranges,
-    int out_ndim,
-    PolyShape out_shape,
+    int n_out,
     PolyUOp **in_ranges,
-    int in_ndim,
-    PolyShape in_shape
+    int *n_in_out
 );
 
 /* Compute flat index from multi-dimensional ranges and UOp bounds.

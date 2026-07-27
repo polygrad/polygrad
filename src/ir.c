@@ -1,15 +1,15 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@2 format:
+ * poly.ir.uops@3 format:
  *   Header (32 bytes)
  *   String table (variable)
- *   Node table (variable, strict toposort order)
+ *   Node table (variable, strict toposort order; scalar dtype ID + vector count)
  *   Interface table (named buffers with roles)
- *   Entrypoint table (named SINKs plus v2 ABI metadata)
+ *   Entrypoint table (named SINKs plus v2+ ABI metadata)
  *
- * Import remains backward-compatible with v1 payloads, whose entrypoints only
- * contain name + SINK.
+ * Import remains backward-compatible with v1 payloads (entrypoint name + SINK)
+ * and v2 payloads (scalar dtype ID only).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -134,7 +134,7 @@ static double br_f64(ByteReader *r) {
 /* Magic */
 
 #define IR_MAGIC 0x52494750 /* "PGIR" LE */
-#define IR_VERSION 2
+#define IR_VERSION 3
 #define IR_MIN_VERSION 1
 
 /* Dtype index table */
@@ -148,6 +148,7 @@ static const PolyDType *dtype_table[N_DTYPES] = {
 };
 
 static int dtype_to_index(PolyDType dt) {
+  dt = poly_dtype_scalar(dt);
   for (int i = 0; i < N_DTYPES; i++)
     if (poly_dtype_eq(dt, *dtype_table[i])) return i;
   return -1;
@@ -314,11 +315,13 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     _idx;                                                                                          \
   })
 
-  /* Validate: no pointer/vector dtypes */
+  /* Tensor/package IR keeps vector dtypes (notably shape STACK[weakintN])
+   * as scalar dtype ID + existing PolyDType.count. Pointer dtypes remain
+   * lowered/execution state and are not portable tensor IR. */
   for (int i = 0; i < n_nodes; i++) {
     PolyDType dt = topo[i]->dtype;
-    if (dt.is_ptr || dt.count > 1) {
-      fprintf(stderr, "poly_ir_export: node %d has pointer/vector dtype (IR v1)\n", i);
+    if (dt.is_ptr || dt.count == 0) {
+      fprintf(stderr, "poly_ir_export: node %d has unsupported pointer/empty dtype\n", i);
       free(node_map);
       if (topo_is_heap) free(topo);
       return NULL;
@@ -342,6 +345,10 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     PolyArg a = topo[i]->arg;
     if (a.kind == POLY_ARG_STRING && a.str) st_add(&strings, a.str);
     if (a.kind == POLY_ARG_DEFINE_VAR && a.define_var.name) st_add(&strings, a.define_var.name);
+    if (a.kind == POLY_ARG_TENSOR_CORE && a.tensor_core.name)
+      st_add(&strings, a.tensor_core.name);
+    if (a.kind == POLY_ARG_PARAM && a.param && a.param->name)
+      st_add(&strings, a.param->name);
   }
   /* Collect strings from interface + entrypoints */
   for (int i = 0; i < spec->n_bufs; i++)
@@ -383,6 +390,7 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     PolyUOp *u = topo[i];
     bb_u16(&buf, (uint16_t)u->op);
     bb_u8(&buf, (uint8_t)dtype_to_index(u->dtype));
+    bb_u16(&buf, u->dtype.count);
     bb_i32(&buf, u->tag);
     bb_u16(&buf, u->n_src);
     bb_u8(&buf, (uint8_t)u->arg.kind);
@@ -456,6 +464,11 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       bb_u8(&buf, (uint8_t)u->arg.bufferize_opts.addrspace);
       bb_u8(&buf, u->arg.bufferize_opts.removable ? 1 : 0);
       break;
+    case POLY_ARG_TENSOR_CORE:
+      bb_u32(&buf, st_add(&strings, u->arg.tensor_core.name));
+      for (int d = 0; d < 3; d++) bb_i64(&buf, u->arg.tensor_core.dims[d]);
+      bb_i64(&buf, u->arg.tensor_core.threads);
+      break;
     case POLY_ARG_PROGRAM_INFO:
       fprintf(stderr, "poly_ir_export: PROGRAM metadata is not exportable IR\n");
       free(node_map);
@@ -471,6 +484,27 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
       free(buf.data);
       return NULL;
     case POLY_ARG_INVALID:
+      break;
+    case POLY_ARG_PARAM:
+      if (!u->arg.param) {
+        fprintf(stderr, "poly_ir_export: PARAM metadata is NULL\n");
+        free(node_map);
+        if (topo_is_heap) free(topo);
+        st_free(&strings);
+        free(buf.data);
+        return NULL;
+      }
+      bb_i64(&buf, u->arg.param->slot);
+      bb_i32(&buf, u->arg.param->device);
+      bb_u8(&buf, (uint8_t)u->arg.param->addrspace);
+      bb_u8(&buf, u->arg.param->has_axis ? 1 : 0);
+      bb_i32(&buf, u->arg.param->axis);
+      bb_u8(&buf, u->arg.param->has_minmax ? 1 : 0);
+      bb_u32(
+          &buf, u->arg.param->name ? st_add(&strings, u->arg.param->name) : UINT32_MAX
+      );
+      bb_i64(&buf, u->arg.param->min_val);
+      bb_i64(&buf, u->arg.param->max_val);
       break;
     }
   }
@@ -570,10 +604,12 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
 
   /* Node table */
   for (uint32_t i = 0; i < n_nodes; i++) {
-    if (br_remaining(&r) < 10) goto fail_nodes;
+    int node_header_bytes = version >= 3 ? 13 : 11;
+    if (br_remaining(&r) < node_header_bytes) goto fail_nodes;
 
     uint16_t op_val = br_u16(&r);
     uint8_t dtype_idx = br_u8(&r);
+    uint16_t dtype_count = version >= 3 ? br_u16(&r) : 1;
     int32_t tag = br_i32(&r);
     uint16_t n_src = br_u16(&r);
     uint8_t arg_kind = br_u8(&r);
@@ -585,6 +621,13 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     }
     if (dtype_idx >= N_DTYPES) {
       fprintf(stderr, "poly_ir_import: invalid dtype index %u at node %u\n", dtype_idx, i);
+      goto fail_nodes;
+    }
+    if (dtype_count == 0 || (dtype_idx == 0 && dtype_count != 1)) {
+      fprintf(
+          stderr, "poly_ir_import: invalid dtype count %u for dtype index %u at node %u\n",
+          dtype_count, dtype_idx, i
+      );
       goto fail_nodes;
     }
 
@@ -608,6 +651,8 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     PolyArg arg;
     memset(&arg, 0, sizeof(arg));
     arg.kind = (PolyArgKind)arg_kind;
+    PolyParamArg param_arg_tmp;
+    memset(&param_arg_tmp, 0, sizeof(param_arg_tmp));
 
     switch (arg.kind) {
     case POLY_ARG_NONE:
@@ -689,12 +734,33 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
       arg.bufferize_opts.addrspace = (PolyAddrSpace)br_u8(&r);
       arg.bufferize_opts.removable = br_u8(&r) != 0;
       break;
+    case POLY_ARG_TENSOR_CORE: {
+      uint32_t name_idx = br_u32(&r);
+      arg.tensor_core.name = (name_idx < n_strings) ? strings[name_idx] : "";
+      for (int d = 0; d < 3; d++) arg.tensor_core.dims[d] = (int)br_i64(&r);
+      arg.tensor_core.threads = (int)br_i64(&r);
+      break;
+    }
     case POLY_ARG_BYTES:
       fprintf(stderr, "poly_ir_import: BINARY byte payloads are not package IR\n");
       if (srcs) free(srcs);
       goto fail_nodes;
     case POLY_ARG_INVALID:
       break;
+    case POLY_ARG_PARAM: {
+      param_arg_tmp.slot = br_i64(&r);
+      param_arg_tmp.device = br_i32(&r);
+      param_arg_tmp.addrspace = (PolyAddrSpace)br_u8(&r);
+      param_arg_tmp.has_axis = br_u8(&r) != 0;
+      param_arg_tmp.axis = br_i32(&r);
+      param_arg_tmp.has_minmax = br_u8(&r) != 0;
+      uint32_t name_idx = br_u32(&r);
+      param_arg_tmp.name = name_idx < n_strings ? strings[name_idx] : NULL;
+      param_arg_tmp.min_val = br_i64(&r);
+      param_arg_tmp.max_val = br_i64(&r);
+      arg.param = &param_arg_tmp;
+      break;
+    }
     default:
       fprintf(stderr, "poly_ir_import: unknown arg kind %u at node %u\n", arg_kind, i);
       if (srcs) free(srcs);
@@ -702,10 +768,12 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     }
 
     /* Create UOp -- restore tag to preserve BUFFER CSE-distinctness */
+    PolyDType dtype = *dtype_table[dtype_idx];
+    if (dtype_count > 1) dtype = poly_dtype_vec(dtype, dtype_count);
     PolyUOp *u =
         (tag != 0)
-            ? poly_uop_tagged(ctx, (PolyOps)op_val, *dtype_table[dtype_idx], srcs, n_src, arg, tag)
-            : poly_uop(ctx, (PolyOps)op_val, *dtype_table[dtype_idx], srcs, n_src, arg);
+            ? poly_uop_tagged(ctx, (PolyOps)op_val, dtype, srcs, n_src, arg, tag)
+            : poly_uop(ctx, (PolyOps)op_val, dtype, srcs, n_src, arg);
 
     /* Free temporary malloc'd arg buffers (arena has its own copy now) */
     if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.vals)

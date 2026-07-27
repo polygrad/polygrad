@@ -146,7 +146,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
       poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_range(0, POLY_AXIS_LOOP));
   PolyUOp *bsrc[] = {copy, range};
   PolyUOp *bufferize = poly_uop(
-      ctx, POLY_OP_BUFFERIZE, POLY_FLOAT32, bsrc, 2,
+      ctx, POLY_OP_STAGE, POLY_FLOAT32, bsrc, 2,
       poly_arg_bufferize_opts(POLY_DEVICE_CUDA, POLY_ADDR_GLOBAL, false)
   );
   PolyUOp *out = poly_buffer_f32(ctx, 8);
@@ -172,7 +172,7 @@ TEST(ir, round_trip_bufferize_opts_arg) {
   ASSERT_NOT_NULL(topo);
   bool found = false;
   for (int i = 0; i < n_topo; i++) {
-    if (topo[i]->op != POLY_OP_BUFFERIZE) continue;
+    if (topo[i]->op != POLY_OP_STAGE) continue;
     ASSERT_INT_EQ(topo[i]->arg.kind, POLY_ARG_BUFFERIZE_OPTS);
     ASSERT_INT_EQ(poly_bufferize_arg_device(topo[i]->arg), POLY_DEVICE_CUDA);
     ASSERT_INT_EQ(poly_bufferize_arg_addrspace(topo[i]->arg), POLY_ADDR_GLOBAL);
@@ -390,6 +390,73 @@ TEST(ir, round_trip_roles) {
   PASS();
 }
 
+/* Genuine scalar-dtype poly.ir.uops@1/@2 payloads. These fixtures use the
+ * historical 11-byte node header; they are not v3 bytes with a changed version.
+ * Graph: one void SINK named "main", with no interface buffers. */
+static const uint8_t IR_V1_SCALAR_FIXTURE[] = {
+    0x50, 0x47, 0x49, 0x52, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x6d, 0x61, 0x69, 0x6e,
+    0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const uint8_t IR_V2_SCALAR_FIXTURE[] = {
+    0x50, 0x47, 0x49, 0x52, 0x02, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x6d, 0x61, 0x69, 0x6e,
+    0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff,
+};
+
+TEST(ir, import_genuine_v1_scalar_fixture) {
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(
+      poly_ir_import(
+          IR_V1_SCALAR_FIXTURE, (int)sizeof(IR_V1_SCALAR_FIXTURE), &imported),
+      0);
+  ASSERT_NOT_NULL(imported.ctx);
+  ASSERT_INT_EQ(imported.n_bufs, 0);
+  ASSERT_INT_EQ(imported.n_entrypoints, 1);
+  ASSERT_STR_EQ(imported.entrypoints[0].name, "main");
+  ASSERT_INT_EQ(imported.entrypoints[0].flags, 0);
+  ASSERT_NOT_NULL(imported.entrypoints[0].sink);
+  ASSERT_INT_EQ(imported.entrypoints[0].sink->op, POLY_OP_SINK);
+  ASSERT_TRUE(poly_dtype_eq(imported.entrypoints[0].sink->dtype, POLY_VOID));
+  ASSERT_INT_EQ(imported.entrypoints[0].sink->dtype.count, 1);
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  PASS();
+}
+
+TEST(ir, import_genuine_v2_scalar_fixture) {
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(
+      poly_ir_import(
+          IR_V2_SCALAR_FIXTURE, (int)sizeof(IR_V2_SCALAR_FIXTURE), &imported),
+      0);
+  ASSERT_NOT_NULL(imported.ctx);
+  ASSERT_INT_EQ(imported.n_bufs, 0);
+  ASSERT_INT_EQ(imported.n_entrypoints, 1);
+  ASSERT_STR_EQ(imported.entrypoints[0].name, "main");
+  ASSERT_INT_EQ(imported.entrypoints[0].flags, 7);
+  ASSERT_NOT_NULL(imported.entrypoints[0].sink);
+  ASSERT_INT_EQ(imported.entrypoints[0].sink->op, POLY_OP_SINK);
+  ASSERT_TRUE(poly_dtype_eq(imported.entrypoints[0].sink->dtype, POLY_VOID));
+  ASSERT_INT_EQ(imported.entrypoints[0].sink->dtype.count, 1);
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  PASS();
+}
+
 /* Invalid data */
 
 TEST(ir, import_bad_magic) {
@@ -435,6 +502,23 @@ TEST(ir, round_trip_reshape) {
   int ret = poly_ir_import(bytes, out_len, &imported);
   ASSERT_INT_EQ(ret, 0);
   ASSERT_INT_EQ(imported.n_bufs, 2);
+  PolyUOp *imported_sink = imported.entrypoints[0].sink;
+  ASSERT_NOT_NULL(imported_sink);
+  ASSERT_INT_EQ(imported_sink->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(imported_sink->n_src, 1);
+  PolyUOp *imported_store = imported_sink->src[0];
+  ASSERT_INT_EQ(imported_store->op, POLY_OP_STORE);
+  PolyUOp *imported_reshape = imported_store->src[1];
+  ASSERT_INT_EQ(imported_reshape->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(imported_reshape->arg.kind, POLY_ARG_NONE);
+  ASSERT_INT_EQ(imported_reshape->n_src, 2);
+  ASSERT_INT_EQ(imported_reshape->src[1]->op, POLY_OP_STACK);
+  ASSERT_TRUE(
+      poly_dtype_eq(imported_reshape->src[1]->dtype, poly_dtype_vec(POLY_INDEX, 2))
+  );
+  ASSERT_INT_EQ(imported_reshape->src[1]->n_src, 2);
+  ASSERT_INT_EQ(imported_reshape->src[1]->src[0]->arg.i, 2);
+  ASSERT_INT_EQ(imported_reshape->src[1]->src[1]->arg.i, 3);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);

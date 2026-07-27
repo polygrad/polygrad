@@ -1700,6 +1700,198 @@ TEST(shape_uop, buffer_dynamic) {
   PASS();
 }
 
+TEST(shape_uop, shrink_uop_with_bound_start_matches_tinygrad_form) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = make_buf(ctx, (int64_t[]){10, 2}, 2);
+  PolyUOp *i = poly_define_var(ctx, "i", 0, 8);
+  PolyUOp *ib = poly_bind_var(ctx, i, 4);
+  PolyUOp *starts[2] = {ib, poly_const_int(ctx, 0)};
+  PolyUOp *sizes[2] = {poly_const_int(ctx, 2), poly_const_int(ctx, 2)};
+
+  PolyUOp *slice = poly_shrink_uop(ctx, x, starts, sizes, 2);
+  ASSERT_NOT_NULL(slice);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, slice), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, slice)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, slice)[1], 2);
+  PolyUOp *slice_dim0 = poly_uop_shape_dim(ctx, slice, 0);
+  ASSERT_NOT_NULL(slice_dim0);
+  ASSERT_INT_EQ(slice_dim0->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(slice_dim0->arg.i, 2);
+
+  float data[20];
+  for (int j = 0; j < 20; j++) data[j] = (float)j;
+  float out[4] = {0};
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 4);
+  PolyUOp *leaves[1] = {base_buf(x)};
+  float *leaf_data[1] = {data};
+  ASSERT_INT_EQ(realize_uop(ctx, slice, out_buf, out, leaves, leaf_data, 1), 0);
+  ASSERT_FLOAT_EQ(out[0], 8.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[1], 9.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[2], 10.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[3], 11.0f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, shrink_uop_preserves_variable_extent_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = make_buf(ctx, (int64_t[]){10, 2}, 2);
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 8);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+  PolyUOp *starts[2] = {poly_const_int(ctx, 0), poly_const_int(ctx, 0)};
+  PolyUOp *sizes[2] = {nb, poly_const_int(ctx, 2)};
+
+  PolyUOp *slice = poly_shrink_uop(ctx, x, starts, sizes, 2);
+  ASSERT_NOT_NULL(slice);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, slice), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, slice)[0], 8);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, slice)[1], 2);
+  PolyUOp *slice_dim0 = poly_uop_shape_dim(ctx, slice, 0);
+  ASSERT_NOT_NULL(slice_dim0);
+  ASSERT_PTR_EQ(poly_uop_unbind_var(slice_dim0), n);
+  int64_t bound_value = -1;
+  ASSERT_INT_EQ(poly_uop_bind_value(slice_dim0, &bound_value), 0);
+  ASSERT_INT_EQ(bound_value, 3);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, expand_uop_preserves_variable_extent_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *x = make_buf(ctx, (int64_t[]){2}, 1);
+  PolyUOp *xr = poly_reshape(ctx, x, (int64_t[]){1, 2}, 2);
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 4);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+  PolyUOp *dims[2] = {nb, poly_const_int(ctx, 2)};
+
+  PolyUOp *expanded = poly_expand_uop(ctx, xr, dims, 2);
+  ASSERT_NOT_NULL(expanded);
+  ASSERT_INT_EQ(expanded->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, expanded), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, expanded)[0], 4);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, expanded)[1], 2);
+  PolyUOp *dim0 = poly_uop_shape_dim(ctx, expanded, 0);
+  ASSERT_NOT_NULL(dim0);
+  ASSERT_PTR_EQ(poly_uop_unbind_var(dim0), n);
+  int64_t bound_value = -1;
+  ASSERT_INT_EQ(poly_uop_bind_value(dim0, &bound_value), 0);
+  ASSERT_INT_EQ(bound_value, 3);
+  PolyUOp *dim1 = poly_uop_shape_dim(ctx, expanded, 1);
+  ASSERT_NOT_NULL(dim1);
+  ASSERT_INT_EQ(dim1->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(dim1->arg.i, 2);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, alu_after_symbolic_expand_accepts_equal_static_dims) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 4);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+  PolyUOp *lhs = poly_buffer_var(ctx, POLY_FLOAT32, nb, (int64_t[]){10}, 1);
+  ASSERT_NOT_NULL(lhs);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, lhs), 2);
+  ASSERT_PTR_EQ(poly_uop_unbind_var(poly_uop_shape_dim(ctx, lhs, 0)), n);
+
+  PolyUOp *target[2] = {nb, poly_const_int(ctx, 10)};
+
+  PolyUOp *rhs_1x10 = poly_reshape(ctx, poly_buffer_f32(ctx, 10), (int64_t[]){1, 10}, 2);
+  PolyUOp *rhs_1x10_expanded = poly_expand_uop(ctx, rhs_1x10, target, 2);
+  ASSERT_NOT_NULL(rhs_1x10_expanded);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, rhs_1x10_expanded), 2);
+  ASSERT_PTR_EQ(poly_uop_unbind_var(poly_uop_shape_dim(ctx, rhs_1x10_expanded, 0)), n);
+  ASSERT_PTR_NEQ(poly_uop_shape_dim(ctx, lhs, 1), poly_uop_shape_dim(ctx, rhs_1x10_expanded, 1));
+
+  PolyUOp *prod = poly_mul(ctx, lhs, rhs_1x10_expanded);
+  ASSERT_NOT_NULL(prod);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, prod), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, prod)[0], 4);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, prod)[1], 10);
+  ASSERT_PTR_EQ(poly_uop_unbind_var(poly_uop_shape_dim(ctx, prod, 0)), n);
+  int64_t dim_value = -1;
+  ASSERT_INT_EQ(poly_uop_const_i64(poly_uop_shape_dim(ctx, prod, 1), &dim_value), 0);
+  ASSERT_INT_EQ(dim_value, 10);
+
+  PolyUOp *rhs_10 = make_buf(ctx, (int64_t[]){10}, 1);
+  PolyUOp *rhs_10_reshaped = poly_reshape(ctx, rhs_10, (int64_t[]){1, 10}, 2);
+  PolyUOp *rhs_10_expanded = poly_expand_uop(ctx, rhs_10_reshaped, target, 2);
+  ASSERT_NOT_NULL(rhs_10_expanded);
+  ASSERT_PTR_NEQ(poly_uop_shape_dim(ctx, lhs, 1), poly_uop_shape_dim(ctx, rhs_10_expanded, 1));
+
+  PolyUOp *sum = poly_add(ctx, lhs, rhs_10_expanded);
+  ASSERT_NOT_NULL(sum);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, sum), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, sum)[0], 4);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, sum)[1], 10);
+  ASSERT_PTR_EQ(poly_uop_unbind_var(poly_uop_shape_dim(ctx, sum, 0)), n);
+  dim_value = -1;
+  ASSERT_INT_EQ(poly_uop_const_i64(poly_uop_shape_dim(ctx, sum, 1), &dim_value), 0);
+  ASSERT_INT_EQ(dim_value, 10);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, smoothed_bound_slice_multiplies_static_batch_shape) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *labels_all = make_buf(ctx, (int64_t[]){8, 10}, 2);
+  PolyUOp *i = poly_define_var(ctx, "i", 0, 6);
+  PolyUOp *ib = poly_bind_var(ctx, i, 0);
+  PolyUOp *starts[2] = {ib, poly_const_int(ctx, 0)};
+  PolyUOp *sizes[2] = {poly_const_int(ctx, 2), poly_const_int(ctx, 10)};
+  PolyUOp *labels = poly_shrink_uop(ctx, labels_all, starts, sizes, 2);
+  ASSERT_NOT_NULL(labels);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, labels), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, labels)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, labels)[1], 10);
+
+  PolyUOp *smoothed = poly_add(
+      ctx,
+      poly_mul(ctx, labels, poly_const_float(ctx, 0.9f)),
+      poly_const_float(ctx, 0.01f)
+  );
+  PolyUOp *static_logp = make_buf(ctx, (int64_t[]){2, 10}, 2);
+  PolyUOp *prod = poly_mul(ctx, smoothed, static_logp);
+  ASSERT_NOT_NULL(prod);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, prod), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, prod)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, prod)[1], 10);
+
+  PolyUOp *per_row = poly_reduce_axis(ctx, POLY_OP_ADD, prod, (int64_t[]){1}, 1);
+  ASSERT_NOT_NULL(per_row);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, per_row), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, per_row)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, per_row)[1], 1);
+  PolyUOp *loss_rows = poly_reshape(ctx, per_row, (int64_t[]){2}, 1);
+  ASSERT_NOT_NULL(loss_rows);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, loss_rows), 1);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, loss_rows)[0], 2);
+
+  float labels_data[80] = {0};
+  for (int r = 0; r < 8; r++)
+    labels_data[r * 10 + (r % 10)] = 1.0f;
+  float logp_data[20];
+  for (int j = 0; j < 20; j++)
+    logp_data[j] = 1.0f;
+  float out[2] = {0};
+  PolyUOp *leaves[2] = {base_buf(labels_all), base_buf(static_logp)};
+  float *leaf_data[2] = {labels_data, logp_data};
+  ASSERT_INT_EQ(realize_uop(ctx, loss_rows, poly_buffer_f32(ctx, 2), out, leaves, leaf_data, 2), 0);
+  ASSERT_FLOAT_EQ(out[0], 1.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(out[1], 1.0f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(shape_uop, buffer_unique_ids_are_ctx_local) {
   PolyCtx *ctx1 = poly_ctx_new();
   PolyCtx *ctx2 = poly_ctx_new();
@@ -2259,6 +2451,37 @@ TEST(pe, pool_2d_k22_4x4) {
       9, 10, 6, 7, 10, 11, 8, 9, 12, 13, 9, 10, 13, 14, 10, 11, 14, 15,
   };
   for (int i = 0; i < 36; i++)
+    ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, conv2d_padded_3x3_4x4_devectorize_regression) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  /* tinygrad:
+   * Tensor(arange(16).reshape(1,1,4,4)).conv2d(ones(1,1,3,3), padding=1)
+   * -> [[[[10,18,24,18],[27,45,54,39],[51,81,90,63],[42,66,72,50]]]]
+   * This shape creates a 144-lane vectorized INDEX in late codegen. */
+  int64_t x_shape[4] = {1, 1, 4, 4};
+  int64_t w_shape[4] = {1, 1, 3, 3};
+  PolyUOp *x = make_buf(ctx, x_shape, 4);
+  PolyUOp *w = make_buf(ctx, w_shape, 4);
+  int64_t padding[1] = {1};
+  PolyUOp *out_val = poly_conv2d(ctx, x, w, NULL, 1, NULL, NULL, padding, 1);
+  ASSERT_NOT_NULL(out_val);
+
+  PolyUOp *out_buf = poly_buffer_f32(ctx, 16);
+  float x_data[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  float w_data[9] = {1, 1, 1, 1, 1, 1, 1, 1, 1};
+  float out_data[16] = {0};
+  PolyUOp *leaves[] = {base_buf(x), base_buf(w)};
+  float *ld[] = {x_data, w_data};
+  ASSERT_INT_EQ(realize_uop(ctx, out_val, out_buf, out_data, leaves, ld, 2), 0);
+
+  float expected[16] = {10, 18, 24, 18, 27, 45, 54, 39, 51, 81, 90, 63, 42, 66, 72, 50};
+  for (int i = 0; i < 16; i++)
     ASSERT_FLOAT_EQ(out_data[i], expected[i], 1e-5);
 
   poly_ctx_destroy(ctx);

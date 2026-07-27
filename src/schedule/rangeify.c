@@ -105,8 +105,8 @@ static bool rangeify_is_indexable_source(PolyUOp *u) {
          u->op == POLY_OP_MSELECT || u->op == POLY_OP_AFTER;
 }
 
-static int64_t rangeify_indexable_numel(PolyUOp *u) {
-  if (!u) return -1;
+static int64_t rangeify_indexable_numel(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return -1;
   const PolyUOp *identity = NULL;
   if (u->op == POLY_OP_AFTER && u->n_src >= 1)
     identity = poly_uop_get_buffer_identity(u->src[0]);
@@ -115,9 +115,17 @@ static int64_t rangeify_indexable_numel(PolyUOp *u) {
 
   if (identity->op == POLY_OP_BUFFER && identity->arg.kind == POLY_ARG_INT)
     return identity->arg.i;
+  if (identity->op == POLY_OP_BUFFER_VIEW && identity->arg.kind == POLY_ARG_INT_TUPLE &&
+      identity->arg.int_tuple.n > 0 && identity->arg.int_tuple.vals)
+    return identity->arg.int_tuple.vals[0];
   if ((identity->op == POLY_OP_PARAM || identity->op == POLY_OP_BUFFER_VIEW) &&
       identity->dtype.is_ptr && identity->dtype.ptr_size > 0)
     return identity->dtype.ptr_size;
+  if (identity->op == POLY_OP_PARAM && identity->arg.kind == POLY_ARG_PARAM &&
+      identity->arg.param) {
+    PolyShape shape = poly_uop_max_shape_cached(ctx, identity);
+    return shape.ndim >= 0 ? poly_shape_numel(shape) : -1;
+  }
   return -1;
 }
 
@@ -443,15 +451,17 @@ void poly_indexing_ctx_destroy(PolyIndexingCtx *ictx) {
  * goes to a buffer rather than being fused into a consumer's kernel.
  *
  * Rules (simplified for CPU-only, no OUTER ranges yet):
- *  1. SINK sources are always realized (they are final outputs)
- *  2. CONTIGUOUS, COPY, STORE, ASSIGN are always realized
- *  3. Everything else is potentially fusable
+ *  1. CONTIGUOUS, COPY, STORE, ASSIGN are always realized
+ *  2. Sources of COPY/MSELECT/MSTACK are realized when required
+ *  3. A STORE source that reads its destination base is realized for WAR safety
+ *  4. Everything else is potentially fusable
  */
 
 /* Ops that are always contiguous / never need realization */
 static bool is_always_contiguous(PolyOps op) {
   switch (op) {
   case POLY_OP_CONTIGUOUS:
+  case POLY_OP_AFTER:
   case POLY_OP_ASSIGN:
   case POLY_OP_COPY:
   case POLY_OP_BUFFER:
@@ -529,20 +539,10 @@ static PolyUOp *uop_realize_src_base(PolyUOp *u) {
 void poly_realize_map_build(PolyIndexingCtx *ictx, PolyUOp *sink) {
   if (sink->op != POLY_OP_SINK) return;
 
-  /* Rule 1: SINK sources are always realized (unless always-contiguous) */
-  for (int i = 0; i < sink->n_src; i++) {
-    PolyUOp *s = sink->src[i];
-    /* Walk past STORE to find the value being stored */
-    if (s->op == POLY_OP_STORE && s->n_src >= 2) {
-      /* The STORE's value (src[1]) is the thing that needs to be realized
-       * as a kernel. But the STORE itself is a realize point. */
-      realize_mark(ictx, s);
-    } else if (!is_always_contiguous(s->op)) {
-      realize_mark(ictx, s);
-    }
-  }
-
-  /* Rule 2: Walk graph for ops that always realize */
+  /* Walk graph for the exact pm_generate_realize_map rules. Pinned tinygrad
+   * does not blanket-realize SINK sources: earliest_rewrites has already made
+   * the SINK reference each source's base, and explicit STORE/COPY/WAR rules
+   * below define materialization boundaries. */
   int n_uops;
   PolyUOp **topo = poly_toposort_alloc(ictx->ctx, sink, &n_uops);
   if (!topo) return;
@@ -626,11 +626,6 @@ static PolyShape ictx_shape(PolyIndexingCtx *ictx, PolyUOp *u) {
   return s;
 }
 
-static bool ictx_uop_numel_is_one(PolyIndexingCtx *ictx, PolyUOp *u) {
-  PolyShape s = ictx_shape(ictx, u);
-  return poly_shape_numel(s) == 1;
-}
-
 /* Store a range entry in the range map */
 static void range_map_set_valid(
     PolyIndexingCtx *ictx,
@@ -697,20 +692,6 @@ static PolyUOp *new_range_uop(PolyIndexingCtx *ictx, PolyUOp *bound, PolyAxisTyp
   );
 }
 
-static PolyUOp *dynamic_dim0_bound_from_buffer(PolyUOp *u) {
-  if (!u) return NULL;
-  PolyUOp *buf = NULL;
-  if (u->op == POLY_OP_BUFFER) {
-    buf = u;
-  } else if ((u->op == POLY_OP_STORE || u->op == POLY_OP_ASSIGN) && u->n_src >= 1 &&
-             u->src[0]->op == POLY_OP_BUFFER) {
-    buf = u->src[0];
-  }
-  if (!buf || buf->n_src < 2) return NULL;
-  PolyUOp *bound = buf->src[1];
-  return (bound->op == POLY_OP_DEFINE_VAR || bound->op == POLY_OP_BIND) ? bound : NULL;
-}
-
 /* Range propagation */
 /*
  * Port of tinygrad's run_rangeify() (indexing.py:158-276).
@@ -743,6 +724,12 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
 
     /* Skip ops that don't participate in range propagation */
     if (x->op == POLY_OP_DEVICE || x->op == POLY_OP_UNIQUE) continue;
+
+    /* Pinned tinygrad's run_rangeify gives AFTER no range entry. AFTER carries
+     * producer ordering for src[0]; the consumer applies its own range when it
+     * indexes the AFTER value. Giving AFTER an independent range indexes the
+     * underlying buffer twice, so INDEX(INDEX(buf, r), r) becomes buf[2*r]. */
+    if (x->op == POLY_OP_AFTER) continue;
 
     /* Get shape of this UOp */
     PolyShape shape = ictx_shape(ictx, x);
@@ -805,15 +792,14 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
         /* Scalar or no shape — no ranges needed */
         n_out = 0;
       } else {
-        /* Dynamic dim 0 may be DEFINE_VAR or BIND(DEFINE_VAR, value).
-         * Kernel extraction later unbinds BIND to DEFINE_VAR, matching
-         * tinygrad's to_define_global. */
-        PolyUOp *dim0_var = dynamic_dim0_bound_from_buffer(x);
         for (int i = 0; i < shape.ndim; i++) {
-          if (dim0_var && i == 0)
-            out_rngs[i] = new_range_uop(ictx, dim0_var, POLY_AXIS_LOOP);
-          else
-            out_rngs[i] = new_range(ictx, shape.dims[i]);
+          /* tinygrad schedule/indexing.py:184-187 creates realized ranges from
+           * every x.shape element, not from the backing buffer's max allocation.
+           * Keep BIND here so schedule construction can collect its concrete
+           * value; kernel extraction later unbinds it to DEFINE_VAR. */
+          PolyUOp *dim = poly_uop_shape_dim(ctx, x, i);
+          out_rngs[i] = dim ? new_range_uop(ictx, dim, POLY_AXIS_LOOP)
+                            : new_range(ictx, shape.dims[i]);
         }
         n_out = shape.ndim;
       }
@@ -909,12 +895,10 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           n_out = 0;
         } else {
           realize_mark(ictx, x);
-          PolyUOp *dim0_var_c4 = dynamic_dim0_bound_from_buffer(x);
           for (int i = 0; i < shape.ndim; i++) {
-            if (dim0_var_c4 && i == 0)
-              out_rngs[i] = new_range_uop(ictx, dim0_var_c4, POLY_AXIS_LOOP);
-            else
-              out_rngs[i] = new_range(ictx, shape.dims[i]);
+            PolyUOp *dim = poly_uop_shape_dim(ctx, x, i);
+            out_rngs[i] = dim ? new_range_uop(ictx, dim, POLY_AXIS_LOOP)
+                              : new_range(ictx, shape.dims[i]);
           }
           n_out = shape.ndim;
 
@@ -991,14 +975,12 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
           for (int i = 0; i < n_realize_axes; i++)
             ri->axes[i] = realize_axes[i];
         }
-        PolyUOp *dim0_var_c4b = dynamic_dim0_bound_from_buffer(x);
         for (int i = 0; i < n_realize_axes; i++) {
           int ax = realize_axes[i];
           if (ax >= 0 && ax < n_out && ax < shape.ndim) {
-            if (dim0_var_c4b && ax == 0)
-              out_rngs[ax] = new_range_uop(ictx, dim0_var_c4b, POLY_AXIS_LOOP);
-            else
-              out_rngs[ax] = new_range(ictx, shape.dims[ax]);
+            PolyUOp *dim = poly_uop_shape_dim(ctx, x, ax);
+            out_rngs[ax] = dim ? new_range_uop(ictx, dim, POLY_AXIS_LOOP)
+                               : new_range(ictx, shape.dims[ax]);
           }
         }
       }
@@ -1020,7 +1002,7 @@ void poly_range_propagate(PolyIndexingCtx *ictx, PolyUOp *sink) {
         PolyUOp *transformed[POLY_MAX_DIMS];
         int n_transformed = 0;
         if (poly_apply_movement_op(
-                ctx, x->op, src_shape, x->arg, out_rngs, n_out, transformed, &n_transformed,
+                ctx, x, x->op, src_shape, x->arg, out_rngs, n_out, transformed, &n_transformed,
                 &valid_mask
             )) {
           memcpy(in_rngs, transformed, n_transformed * sizeof(PolyUOp *));
@@ -1151,7 +1133,7 @@ static bool map_ranges_through_movement_chain(
     PolyUOp *valid = NULL;
     int n_next = 0;
     if (!poly_apply_movement_op(
-            ctx, cur->op, src_shape, cur->arg, cur_rngs, n_cur, next_rngs, &n_next, &valid
+            ctx, cur, cur->op, src_shape, cur->arg, cur_rngs, n_cur, next_rngs, &n_next, &valid
         ))
       return false;
     if (n_next < 0 || n_next > POLY_MAX_DIMS) return false;
@@ -1177,14 +1159,14 @@ static PolyUOp *movement_chain_base_buffer(PolyUOp *u) {
 }
 
 static PolyUOp *make_bufferize_nonremovable(PolyCtx *ctx, PolyUOp *bufferize) {
-  if (!ctx || !bufferize || bufferize->op != POLY_OP_BUFFERIZE ||
+  if (!ctx || !bufferize || bufferize->op != POLY_OP_STAGE ||
       !poly_bufferize_arg_removable(bufferize->arg))
     return bufferize;
   PolyArg arg = poly_arg_bufferize_opts(
       poly_bufferize_arg_device(bufferize->arg), poly_bufferize_arg_addrspace(bufferize->arg),
       false
   );
-  return poly_uop(ctx, POLY_OP_BUFFERIZE, bufferize->dtype, bufferize->src, bufferize->n_src, arg);
+  return poly_uop(ctx, POLY_OP_STAGE, bufferize->dtype, bufferize->src, bufferize->n_src, arg);
 }
 
 PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
@@ -1202,6 +1184,13 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
     PolyUOp *u = topo[i];
     PolyRangeEntry *u_re = poly_range_map_get(ictx, u);
 
+    /* BUFFER_VIEW is Polygrad's realized storage alias. Like BUFFER/PARAM at
+     * tinygrad's executable boundary, its provenance sources are opaque:
+     * consumers index the alias itself and split_kernel_rewrite turns it into
+     * one PARAM. Descending here would turn the alias base into a LOAD and
+     * leak BUFFER_VIEW into backend value IR. */
+    if (u->op == POLY_OP_BUFFER_VIEW) continue;
+
     /* Remap sources through replace map.
      * Zero-init both paths so the analyzer knows new_src[i] is never garbage
      * even if accessed before the loop fills it (e.g. REDUCE_AXIS with n_src>0). */
@@ -1218,7 +1207,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
        * removable = x.op is not Ops.COPY and s.op not in ALWAYS_CONTIGUOUS.
        * Polygrad creates BUFFERIZE at the realized producer, so preserve the
        * same COPY boundary here when a realized source flows into COPY. */
-      if (u->op == POLY_OP_COPY && new_src[j] && new_src[j]->op == POLY_OP_BUFFERIZE &&
+      if (u->op == POLY_OP_COPY && new_src[j] && new_src[j]->op == POLY_OP_STAGE &&
           poly_bufferize_arg_removable(new_src[j]->arg)) {
         new_src[j] = make_bufferize_nonremovable(ctx, new_src[j]);
         src_changed = true;
@@ -1249,7 +1238,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
     for (int j = 0; j < u->n_src; j++) {
       PolyRangeEntry *re = poly_range_map_get(ictx, u);
 
-      if (new_src[j]->op == POLY_OP_BUFFERIZE) {
+      if (new_src[j]->op == POLY_OP_STAGE) {
         int n_buf_rngs = new_src[j]->n_src - 1;
         if (re) {
           PolyUOp *orig_src = u->src[j];
@@ -1258,10 +1247,15 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
           bool idx_ok = false;
 
           /* Prefer rebuilding consumer indexing from this op's local ranges
-           * through any removed movement chain on the original source. */
+           * through any removed movement chain on the original source.  The
+           * chain terminates at the realized producer wrapped by BUFFERIZE,
+           * matching tinygrad's STAGE(...).index(consumer_ranges) boundary. */
           if (orig_src != new_src[j]) {
+            PolyUOp *chain_base =
+                poly_map_get(ictx->bufferize_to_realized, poly_ptr_hash(new_src[j]), new_src[j], poly_ptr_eq);
+            if (!chain_base) chain_base = new_src[j];
             idx_ok = map_ranges_through_movement_chain(
-                ctx, ictx, orig_src, new_src[j], re->in_rngs, re->n_in, idx_rngs, &n_idx
+                ctx, ictx, orig_src, chain_base, re->in_rngs, re->n_in, idx_rngs, &n_idx
             );
           }
 
@@ -1281,13 +1275,30 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
             }
           }
 
-          if (n_buf_rngs == 0 && n_idx == 0 && ictx_uop_numel_is_one(ictx, orig_src)) {
-            /* tinygrad new_range(1) returns CONST(0), so singleton
-             * BUFFERIZE reads are still INDEXed. Without this, add_buffers can
-             * split a scalar intermediate into a bare PARAM used directly in
-             * ALU, bypassing the later INDEX->LOAD boundary. */
-            idx_rngs[n_idx++] = rangeify_index_const(ctx, 0);
-          } else if (n_idx != n_buf_rngs) {
+          if (n_buf_rngs == 0) {
+            /* Rank-0 materializations have no buffer axes. Keep the read as
+             * INDEX(BUFFERIZE) before remove_bufferize so the arity matches
+             * tinygrad's substitution rule; surviving reads are flattened to
+             * INDEX(..., 0) after remove_bufferize. */
+            n_idx = 0;
+          } else if (n_idx == 0) {
+            /* tinygrad new_range(1) returns CONST(0). If a consumer has no
+             * open ranges but the materialized source carries only singleton
+             * axes, it still reads through INDEX(BUFFERIZE, CONST(0), ...). */
+            bool all_singleton = n_buf_rngs <= POLY_MAX_DIMS;
+            for (int d = 0; d < n_buf_rngs && d < POLY_MAX_DIMS; d++) {
+              if (new_src[j]->src[1 + d]->op != POLY_OP_CONST) {
+                all_singleton = false;
+                break;
+              }
+            }
+            if (all_singleton) {
+              for (int d = 0; d < n_buf_rngs && d < POLY_MAX_DIMS; d++)
+                idx_rngs[n_idx++] = new_src[j]->src[1 + d];
+            }
+          }
+
+          if (n_idx != n_buf_rngs) {
             continue;
           }
 
@@ -1318,6 +1329,35 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
             );
           }
           src_changed = true;
+        } else {
+          PolyUOp *idx_rngs[POLY_MAX_DIMS + 1];
+          int n_idx = 0;
+          if (n_buf_rngs == 0) {
+            n_idx = 0;
+          } else {
+            bool all_singleton = n_buf_rngs <= POLY_MAX_DIMS;
+            for (int d = 0; d < n_buf_rngs && d < POLY_MAX_DIMS; d++) {
+              if (new_src[j]->src[1 + d]->op != POLY_OP_CONST) {
+                all_singleton = false;
+                break;
+              }
+            }
+            if (all_singleton) {
+              for (int d = 0; d < n_buf_rngs && d < POLY_MAX_DIMS; d++)
+                idx_rngs[n_idx++] = new_src[j]->src[1 + d];
+            }
+          }
+          if (n_idx == n_buf_rngs) {
+            PolyUOp *idx_src[POLY_MAX_DIMS + 2];
+            idx_src[0] = new_src[j];
+            for (int d = 0; d < n_idx; d++)
+              idx_src[d + 1] = idx_rngs[d];
+            new_src[j] = poly_uop(
+                ctx, POLY_OP_INDEX, poly_dtype_scalar(new_src[j]->dtype), idx_src, n_idx + 1,
+                poly_arg_none()
+            );
+            src_changed = true;
+          }
         }
       }
 
@@ -1359,7 +1399,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
          * then pm_add_loads turns read INDEX nodes into LOADs. */
         if (n_idx == 0) {
           bool store_target = j == 0 && (u->op == POLY_OP_STORE || u->op == POLY_OP_ASSIGN);
-          bool singleton_read = !store_target && rangeify_indexable_numel(new_src[j]) == 1;
+          bool singleton_read = !store_target && rangeify_indexable_numel(ctx, new_src[j]) == 1;
           if (store_target || singleton_read) {
             idx_rngs[0] = rangeify_index_const(ctx, 0);
             n_idx = 1;
@@ -1497,9 +1537,13 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
       break;
     }
 
-    /* Rule 4: Realized computed ops → BUFFERIZE */
+    /* Rule 4: Realized computed ops → BUFFERIZE.
+     * tinygrad indexing.py gives PARAM/BUFFER/SLICE/MSTACK/MSELECT/AFTER
+     * direct consumer indexing precedence over `s in realize_map`. Since this
+     * port creates BUFFERIZE at the producer, exclude the same direct-source
+     * set here even when range propagation assigned it realize axes. */
     if (poly_is_realized(ictx, u) && u->op != POLY_OP_STORE && u->op != POLY_OP_SINK &&
-        u->op != POLY_OP_BUFFER) {
+        !rangeify_is_indexable_source(u)) {
       /* Check if global context already has a BUFFERIZE for this op
        * (child contexts reuse global BUFFERIZE for intermediate buffer identity) */
       PolyUOp *existing_buf = NULL;
@@ -1549,7 +1593,7 @@ PolyUOp *poly_run_rangeify(PolyIndexingCtx *ictx, PolyUOp *sink) {
            * intermediate to AUTO. */
           PolyDevice bdev = bufferize_device_hint(ctx, u, device_memo);
           result = poly_uop(
-              ctx, POLY_OP_BUFFERIZE, u->dtype, buf_src, n_bsrc,
+              ctx, POLY_OP_STAGE, u->dtype, buf_src, n_bsrc,
               poly_arg_bufferize_opts((int32_t)bdev, POLY_ADDR_GLOBAL, removable)
           );
 
@@ -1613,6 +1657,8 @@ typedef struct {
   int64_t dims[POLY_MAX_DIMS];
 } PolyBufDimsInfo;
 
+static PolyUOp *kernel_after_buffer_identity(PolyUOp *after);
+
 /* Convert a single BUFFERIZE node to a BUFFER+STORE+END+AFTER chain.
  * If buf_dims_map is non-NULL, stores a BUFFER→PolyBufDimsInfo* mapping
  * encoding the BUFFERIZE's full per-dim sizes (including 1 for CONST(0)
@@ -1626,6 +1672,122 @@ static PolyUOp *bufferize_to_store_global(
   /* src[0] = value, src[1:] = range UOps */
   PolyUOp *value = bufferize->src[0];
   int n_ranges = bufferize->n_src - 1;
+
+  /* AFTER branch: reuse the assignment's existing buffer and end its STOREs.
+   * Exact port of pinned tinygrad rangeify.py:409-428. The state AFTER can be
+   * both a requested output and a dependency of another output; allocating a
+   * LUNIQUE here would materialize and then execute the same effect twice. */
+  if (value->op == POLY_OP_AFTER && value->n_src >= 1) {
+    PolyUOp *target_buf = kernel_after_buffer_identity(value);
+    assert(target_buf && "BUFFERIZE(AFTER) requires an existing buffer identity");
+    if (!target_buf) return NULL;
+
+    int64_t size = 1;
+    for (int i = 0; i < n_ranges; i++) {
+      PolyUOp *rng = bufferize->src[1 + i];
+      if (rng->op == POLY_OP_RANGE && rng->n_src > 0 &&
+          rng->src[0]->op == POLY_OP_CONST)
+        size *= rng->src[0]->arg.i;
+    }
+    if (size <= 0) size = 1;
+    PolyDType sdtype = poly_dtype_ptr(
+        bufferize->dtype, size, poly_bufferize_arg_addrspace(bufferize->arg)
+    );
+
+    PolyUOp **after_src = malloc((size_t)value->n_src * sizeof(PolyUOp *));
+    assert(after_src);
+    if (!after_src) return NULL;
+    int n_after_src = 1;
+    after_src[0] = target_buf;
+
+    for (int i = 1; i < value->n_src; i++) {
+      PolyUOp *store = value->src[i];
+      if (store->op != POLY_OP_STORE || store->n_src < 2 ||
+          store->src[0]->op != POLY_OP_INDEX)
+        continue;
+
+      PolyUOp *store_target = store->src[0];
+      /* Pinned tinygrad calls this temporary schedule op STAGE. Polygrad's
+       * existing equivalent is BUFFERIZE: both carry (value, closed ranges)
+       * plus BufferizeOpts and are eliminated by the add-buffers pipeline. */
+      if (store_target->n_src >= 1 && store_target->src[0]->op == POLY_OP_STAGE &&
+          store_target->src[0]->n_src >= 1 &&
+          store_target->src[0]->src[0]->op == POLY_OP_INDEX)
+        store_target = store_target->src[0]->src[0];
+      if (store->src[1] == store_target) continue;
+
+      PolyUOp *target_ranges[POLY_MAX_DIMS];
+      int n_target_ranges =
+          poly_uop_ranges(ctx, store_target, target_ranges, POLY_MAX_DIMS);
+      int merged_cap = n_target_ranges + n_ranges;
+      PolyUOp **merged_ranges =
+          merged_cap > 0 ? malloc((size_t)merged_cap * sizeof(PolyUOp *)) : NULL;
+      assert(merged_cap == 0 || merged_ranges);
+      if (merged_cap > 0 && !merged_ranges) {
+        free(after_src);
+        return NULL;
+      }
+      int n_merged = 0;
+      for (int j = 0; j < n_target_ranges + n_ranges; j++) {
+        PolyUOp *rng =
+            j < n_target_ranges ? target_ranges[j] : bufferize->src[1 + j - n_target_ranges];
+        if (rng->op != POLY_OP_RANGE) continue;
+        bool duplicate = false;
+        for (int k = 0; k < n_merged; k++) {
+          if (merged_ranges[k] == rng) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) merged_ranges[n_merged++] = rng;
+      }
+      for (int j = 0; j < n_merged - 1; j++) {
+        for (int k = j + 1; k < n_merged; k++) {
+          if (poly_range_axis_id(merged_ranges[j]->arg) >
+              poly_range_axis_id(merged_ranges[k]->arg)) {
+            PolyUOp *tmp = merged_ranges[j];
+            merged_ranges[j] = merged_ranges[k];
+            merged_ranges[k] = tmp;
+          }
+        }
+      }
+
+      PolyUOp *typed_target = poly_uop(
+          ctx, POLY_OP_INDEX, sdtype, store_target->src, store_target->n_src,
+          store_target->arg
+      );
+      PolyUOp *ended_store =
+          poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, typed_target, store->src[1], poly_arg_none());
+      if (n_merged > 0) {
+        PolyUOp **end_src = malloc((size_t)(n_merged + 1) * sizeof(PolyUOp *));
+        assert(end_src);
+        if (!end_src) {
+          free(merged_ranges);
+          free(after_src);
+          return NULL;
+        }
+        end_src[0] = ended_store;
+        for (int j = 0; j < n_merged; j++)
+          end_src[1 + j] = merged_ranges[j];
+        ended_store = poly_uop(
+            ctx, POLY_OP_END, POLY_VOID, end_src, n_merged + 1, poly_arg_none()
+        );
+        free(end_src);
+      }
+      free(merged_ranges);
+      after_src[n_after_src++] = ended_store;
+    }
+
+    if (n_after_src == 1) {
+      free(after_src);
+      return target_buf;
+    }
+    PolyUOp *result = poly_uop(
+        ctx, POLY_OP_AFTER, target_buf->dtype, after_src, n_after_src, poly_arg_none()
+    );
+    free(after_src);
+    return result;
+  }
 
   /* ASSIGN branch: write to existing target buffer (no LUNIQUE)   * Matches tinygrad
    * rangeify.py:345-354. BUFFERIZE(ASSIGN(INDEX(BUFFER, flat_idx), computed_value), rngs) →
@@ -1842,7 +2004,7 @@ PolyUOp *poly_apply_add_buffers(PolyCtx *ctx, PolyUOp *sink, PolyMap *buf_dims_m
       if (new_src[i] != u->src[i]) src_changed = true;
     }
 
-    if (u->op == POLY_OP_BUFFERIZE) {
+    if (u->op == POLY_OP_STAGE) {
       /* Create a temporary node with remapped sources for the conversion */
       PolyUOp *remapped =
           src_changed ? poly_uop(ctx, u->op, u->dtype, new_src, u->n_src, u->arg) : u;
@@ -1886,7 +2048,12 @@ typedef struct {
   int var_bufs_cap; /* allocated capacity of var_bufs */
 } PolySplitCtx;
 
-static void split_ctx_add_param(PolySplitCtx *sctx, PolyUOp *buf, PolyUOp *param) {
+static void split_ctx_add_param(
+    PolySplitCtx *sctx,
+    PolyUOp *buf,
+    PolyUOp *binding,
+    PolyUOp *param
+) {
   int idx = sctx->param_count;
   poly_map_set(sctx->buf_to_param, poly_ptr_hash(buf), buf, param, poly_ptr_eq);
   if (idx >= sctx->param_bufs_cap) {
@@ -1896,7 +2063,7 @@ static void split_ctx_add_param(PolySplitCtx *sctx, PolyUOp *buf, PolyUOp *param
     sctx->param_bufs = tmp;
     sctx->param_bufs_cap = new_cap;
   }
-  sctx->param_bufs[idx] = buf;
+  sctx->param_bufs[idx] = binding;
   sctx->param_count++;
 }
 
@@ -1913,20 +2080,36 @@ static void split_ctx_add_var(PolySplitCtx *sctx, PolyUOp *var) {
   sctx->var_bufs[sctx->var_count++] = var;
 }
 
-static PolyUOp *rule_split_debuf(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)b;
-  PolySplitCtx *sctx = (PolySplitCtx *)poly_graph_rewrite_userctx();
-  if (!sctx || !root || root->op != POLY_OP_BUFFER) return NULL;
+static PolyUOp *split_ctx_debuf(
+    PolyCtx *ctx,
+    PolySplitCtx *sctx,
+    PolyUOp *root,
+    PolyUOp *binding
+) {
+  if (!sctx || !root) return NULL;
+  bool shaped_param = root->op == POLY_OP_PARAM && root->arg.kind == POLY_ARG_PARAM &&
+                      root->arg.param && !root->dtype.is_ptr && !root->arg.param->name &&
+                      root->n_src == 1 && root->src[0] && root->src[0]->op == POLY_OP_STACK;
+  if (root->op != POLY_OP_BUFFER && root->op != POLY_OP_BUFFER_VIEW && !shaped_param)
+    return NULL;
 
   PolyUOp *existing = poly_map_get(sctx->buf_to_param, poly_ptr_hash(root), root, poly_ptr_eq);
   if (existing) return existing;
 
   PolyDType scalar = poly_dtype_scalar(root->dtype);
-  int64_t numel = (root->arg.kind == POLY_ARG_INT) ? root->arg.i : 1;
-  PolyDType ptr_dt = poly_dtype_ptr(scalar, numel, POLY_ADDR_GLOBAL);
+  int64_t numel = rangeify_indexable_numel(ctx, root);
+  if (numel < 0) numel = 1;
+  PolyAddrSpace addrspace = shaped_param ? root->arg.param->addrspace : POLY_ADDR_GLOBAL;
+  PolyDType ptr_dt = poly_dtype_ptr(scalar, numel, addrspace);
   PolyUOp *param = poly_uop0(ctx, POLY_OP_PARAM, ptr_dt, poly_arg_int(sctx->param_count));
-  split_ctx_add_param(sctx, root, param);
+  split_ctx_add_param(sctx, root, binding, param);
   return param;
+}
+
+static PolyUOp *rule_split_debuf(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+  PolySplitCtx *sctx = (PolySplitCtx *)poly_graph_rewrite_userctx();
+  return split_ctx_debuf(ctx, sctx, root, root);
 }
 
 static PolyUOp *rule_split_track_define_var(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
@@ -1988,19 +2171,27 @@ static PolyUOp *rule_split_index_define_var(PolyCtx *ctx, PolyUOp *root, const P
 }
 
 static PolyUOp *rule_split_handle_after(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
-  (void)ctx;
   (void)b;
   if (!root || root->op != POLY_OP_AFTER || root->n_src < 1) return NULL;
-  /* tinygrad to_define_global.handle_after returns the AFTER buffer, and the
-   * bottom-up fixed point immediately lets debuf turn that buffer into a PARAM.
-   * It does not descend into the producer END chain while splitting a consumer
-   * kernel. */
-  return root->src[0];
+  PolySplitCtx *sctx = (PolySplitCtx *)poly_graph_rewrite_userctx();
+  PolyUOp *buf = kernel_after_buffer_identity(root);
+  if (!sctx || !buf) return NULL;
+
+  /* Pinned tinygrad schedule/rangeify.py:509-514 records
+   * `ctx.map[buf] = after` only when the buffer has not already been bound,
+   * then rewrites AFTER to the buffer. Preserve that exact first-seen CALL
+   * argument: it is the producer-version edge consumed by create_schedule.
+   * Parameter identity remains keyed by buf; no runtime residency participates. */
+  PolyUOp *existing = poly_map_get(
+      sctx->buf_to_param, poly_ptr_hash(buf), buf, poly_ptr_eq
+  );
+  if (!existing) existing = split_ctx_debuf(ctx, sctx, buf, root);
+  return existing ? existing : NULL;
 }
 
 static PolyUOp *rule_split_bufferize_opts(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
   (void)b;
-  if (!root || root->op != POLY_OP_BUFFERIZE || root->arg.kind != POLY_ARG_BUFFERIZE_OPTS)
+  if (!root || root->op != POLY_OP_STAGE || root->arg.kind != POLY_ARG_BUFFERIZE_OPTS)
     return NULL;
   PolyArg arg = poly_arg_bufferize_opts(
       POLY_DEVICE_AUTO, root->arg.bufferize_opts.addrspace, root->arg.bufferize_opts.removable
@@ -2043,20 +2234,24 @@ static PolyUOp *rule_split_noop(PolyCtx *ctx, PolyUOp *root, const PolyBindings 
 static PolyPatternMatcher *poly_pm_to_define_global_local(void) {
   static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
+  PolyOpSet storage_set = poly_opset_add(
+      poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_BUFFER), POLY_OP_BUFFER_VIEW
+  );
+  storage_set = poly_opset_add(storage_set, POLY_OP_PARAM);
   PolyRule rules[] = {
-      {poly_pat_op(POLY_OP_BUFFER, NULL, 0, "buf"), rule_split_debuf},
+      {poly_pat_ops(storage_set, NULL, 0, "buf"), rule_split_debuf},
       {poly_pat_op(POLY_OP_DEFINE_VAR, NULL, 0, "v"), rule_split_track_define_var},
       {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_split_nested_index_concat},
       {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_split_index_define_var},
       {poly_pat_op(POLY_OP_BIND, NULL, 0, "b"), rule_split_unbind},
       {poly_pat_op(POLY_OP_AFTER, NULL, 0, "after"), rule_split_handle_after},
-      {poly_pat_op(POLY_OP_BUFFERIZE, NULL, 0, "b"), rule_split_bufferize_opts},
+      {poly_pat_op(POLY_OP_STAGE, NULL, 0, "b"), rule_split_bufferize_opts},
       {poly_pat_op(POLY_OP_CONST, NULL, 0, "c"), rule_split_const_strip_src},
       {poly_pat_op(POLY_OP_RANGE, NULL, 0, "r"), rule_split_renumber_range},
       {poly_pat_op(POLY_OP_CONTIGUOUS, NULL, 0, "x"), rule_split_contiguous},
       {poly_pat_op(POLY_OP_NOOP, NULL, 0, "x"), rule_split_noop},
   };
-  pm = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  pm = poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return pm;
 }
 
@@ -2064,7 +2259,7 @@ static PolyPatternMatcher *poly_pm_kernel_split_local(void) {
   static _Thread_local PolyPatternMatcher *pm = NULL;
   if (pm) return pm;
   PolyPatternMatcher *a = poly_pm_concat(poly_pm_to_define_global_local(), poly_pm_flatten_range());
-  pm = a;
+  pm = poly_pm_thread_cache(a);
   return pm;
 }
 
@@ -2244,17 +2439,379 @@ static PolyUOp *normalize_kernel_read_index_dtypes(PolyCtx *ctx, PolyUOp *sink) 
   return ret ? ret : sink;
 }
 
+static bool fix_store_hazard_gate(PolyUOp *u) {
+  return u->op != POLY_OP_CONTIGUOUS;
+}
+
+/* Exact port of tinygrad schedule/rangeify.py:fix_store_hazard. */
+static PolyUOp *poly_fix_store_hazard(PolyCtx *ctx, PolyUOp *target, PolyUOp *src) {
+  bool target_has_shrink =
+      uop_has_op_in_backward_slice(ctx, target, POLY_OP_SHRINK);
+  PolyUOp *base = uop_realize_src_base(target);
+
+  int n_topo = 0;
+  PolyUOp **topo =
+      poly_toposort_ex_alloc(ctx, src, &n_topo, fix_store_hazard_gate, true);
+  PolyMap *reaches_base = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
+  if (!topo || !reaches_base) {
+    poly_toposort_free(topo);
+    if (reaches_base) poly_map_destroy(reaches_base);
+    return NULL;
+  }
+
+  bool hazard = false;
+  for (int i = 0; i < n_topo && !hazard; i++) {
+    PolyUOp *u = topo[i];
+    bool reaches = u == base;
+    for (int j = 0; j < u->n_src && !reaches; j++) {
+      reaches = poly_map_get(
+                    reaches_base, poly_ptr_hash(u->src[j]), u->src[j], poly_ptr_eq
+                ) != NULL;
+    }
+    if (reaches)
+      poly_map_set(
+          reaches_base, poly_ptr_hash(u), u, (void *)(uintptr_t)1, poly_ptr_eq
+      );
+
+    bool unsafe = u->op == POLY_OP_PERMUTE || u->op == POLY_OP_FLIP ||
+                  (target_has_shrink && u->op == POLY_OP_SHRINK);
+    if (reaches && unsafe && !(u == target && u->op == POLY_OP_SHRINK))
+      hazard = true;
+  }
+
+  poly_map_destroy(reaches_base);
+  poly_toposort_free(topo);
+  if (!hazard) return NULL;
+  PolyUOp *contiguous =
+      (src->op == POLY_OP_CONTIGUOUS || poly_uop_has_buffer_identity(src))
+          ? src
+          : poly_uop1(ctx, POLY_OP_CONTIGUOUS, src->dtype, src, poly_arg_none());
+  return poly_store_val(ctx, target, contiguous);
+}
+
+static PolyUOp *rangeify_clone_preserving_metadata(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **src,
+    int n_src
+) {
+  if (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+    return poly_uop_tagged_arg(
+        ctx, u->op, u->dtype, src, n_src, u->arg, u->tag, u->tag_arg
+    );
+  return poly_uop(ctx, u->op, u->dtype, src, n_src, u->arg);
+}
+
+/* Pinned tinygrad schedule/rangeify.py::pm_mops:
+ *
+ *   AFTER(MOVEMENT_OR_INDEX(x, ...), effects...)
+ *     -> MOVEMENT_OR_INDEX(AFTER(x, effects...), ...)
+ *
+ * The fresh outer movement/INDEX intentionally has no tag, matching tinygrad's
+ * direct UOp(...) constructor. AFTER metadata and every effect source are
+ * preserved by the inner replacement. */
+static PolyUOp *rule_mops_move_after(
+    PolyCtx *ctx,
+    PolyUOp *after,
+    const PolyBindings *bindings
+) {
+  PolyUOp *moved = poly_bind(bindings, "moved");
+  if (!ctx || !after || after->op != POLY_OP_AFTER || after->n_src < 1 ||
+      !moved || moved != after->src[0] || moved->n_src < 1)
+    return NULL;
+
+  PolyUOp *after_inline[16];
+  PolyUOp **after_src = after->n_src <= 16
+                            ? after_inline
+                            : malloc((size_t)after->n_src * sizeof(*after_src));
+  if (!after_src) return NULL;
+  after_src[0] = moved->src[0];
+  for (int i = 1; i < after->n_src; i++) after_src[i] = after->src[i];
+  PolyUOp *inner_after =
+      rangeify_clone_preserving_metadata(ctx, after, after_src, after->n_src);
+  if (after_src != after_inline) free(after_src);
+  if (!inner_after) return NULL;
+
+  PolyUOp *moved_inline[16];
+  PolyUOp **moved_src = moved->n_src <= 16
+                            ? moved_inline
+                            : malloc((size_t)moved->n_src * sizeof(*moved_src));
+  if (!moved_src) return NULL;
+  moved_src[0] = inner_after;
+  for (int i = 1; i < moved->n_src; i++) moved_src[i] = moved->src[i];
+  PolyUOp *result =
+      poly_uop(ctx, moved->op, moved->dtype, moved_src, moved->n_src, moved->arg);
+  if (moved_src != moved_inline) free(moved_src);
+  return result;
+}
+
+/* Pinned tinygrad schedule/rangeify.py::pm_mops:
+ * END(MOVEMENT(x, ...), ranges...) -> END(x, ranges...). */
+static PolyUOp *rule_mops_end_movement(
+    PolyCtx *ctx,
+    PolyUOp *end,
+    const PolyBindings *bindings
+) {
+  PolyUOp *movement = poly_bind(bindings, "movement");
+  if (!ctx || !end || end->op != POLY_OP_END || end->n_src < 1 ||
+      !movement || movement != end->src[0] || movement->n_src < 1)
+    return NULL;
+
+  PolyUOp *inline_src[16];
+  PolyUOp **src = end->n_src <= 16
+                      ? inline_src
+                      : malloc((size_t)end->n_src * sizeof(*src));
+  if (!src) return NULL;
+  src[0] = movement->src[0];
+  for (int i = 1; i < end->n_src; i++) src[i] = end->src[i];
+  PolyUOp *result = rangeify_clone_preserving_metadata(ctx, end, src, end->n_src);
+  if (src != inline_src) free(src);
+  return result;
+}
+
+static _Thread_local PolyPatternMatcher *g_pm_rangeify_effect_mops = NULL;
+static PolyPatternMatcher *poly_pm_rangeify_effect_mops(void) {
+  if (g_pm_rangeify_effect_mops) return g_pm_rangeify_effect_mops;
+  PolyOpSet movement_or_index = poly_opset_add(POLY_GROUP_MOVEMENT, POLY_OP_INDEX);
+
+  PolyPat *after_child = poly_pat_ops(movement_or_index, NULL, 0, "moved");
+  PolyPat *after_src[] = {after_child};
+  PolyPat *end_child = poly_pat_ops(POLY_GROUP_MOVEMENT, NULL, 0, "movement");
+  PolyPat *end_src[] = {end_child};
+  PolyRule rules[] = {
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_AFTER, after_src, 1, "after")),
+       rule_mops_move_after},
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_END, end_src, 1, "end")),
+       rule_mops_end_movement},
+  };
+  g_pm_rangeify_effect_mops = poly_pm_thread_cache(
+      poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])))
+  );
+  return g_pm_rangeify_effect_mops;
+}
+
+/* Pinned tinygrad schedule/rangeify.py:102-123 split_reduceop.
+ *
+ * Static shape extraction deliberately requires literal CONST dimensions,
+ * matching tinygrad's all_int(x.shape) gate rather than accepting bound
+ * symbolic maxima. */
+static bool split_reduceop_static_shape(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    int64_t dims[POLY_MAX_DIMS],
+    int *ndim_out
+) {
+  int ndim = poly_uop_ndim(ctx, u);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return false;
+  for (int i = 0; i < ndim; i++) {
+    PolyUOp *dim = poly_uop_shape_dim(ctx, u, i);
+    if (poly_uop_const_i64(dim, &dims[i]) != 0 || dims[i] < 0) return false;
+  }
+  *ndim_out = ndim;
+  return true;
+}
+
+static bool split_reduceop_shape_product(const int64_t *dims, int ndim, int64_t *out) {
+  int64_t product = 1;
+  for (int i = 0; i < ndim; i++) {
+    if (dims[i] == 0) {
+      *out = 0;
+      return true;
+    }
+    if (__builtin_mul_overflow(product, dims[i], &product)) return false;
+  }
+  *out = product;
+  return true;
+}
+
+static PolyUOp *split_reduceop_range(PolyCtx *ctx, int64_t bound, int axis) {
+  PolyUOp *bound_uop =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(bound));
+  return bound_uop
+             ? poly_uop1(
+                   ctx, POLY_OP_RANGE, POLY_INT32, bound_uop,
+                   poly_arg_range(axis, POLY_AXIS_LOOP)
+               )
+             : NULL;
+}
+
+/* Match split_reduceop's INDEX(...).substitute({x.base:NOOP}, pm_mops).ranges
+ * test. Only a top-level movement chain can remove one of x's own range
+ * markers: for an ALU/value base tinygrad substitutes x itself with NOOP, so
+ * every non-singleton output marker remains. */
+static bool split_reduceop_expanded_axes(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *x_dims,
+    int x_ndim,
+    bool expanded[POLY_MAX_DIMS]
+) {
+  PolyUOp *markers[POLY_MAX_DIMS] = {0};
+  PolyUOp *ranges[POLY_MAX_DIMS] = {0};
+  for (int i = 0; i < x_ndim; i++) {
+    if (x_dims[i] > 1) {
+      markers[i] = split_reduceop_range(ctx, x_dims[i], i);
+      if (!markers[i]) return false;
+      ranges[i] = markers[i];
+    } else {
+      ranges[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+      if (!ranges[i]) return false;
+    }
+  }
+
+  PolyUOp *current = x;
+  int n_ranges = x_ndim;
+  while (current && current->n_src > 0 &&
+         poly_opset_has(POLY_GROUP_MOVEMENT, current->op)) {
+    int64_t source_dims[POLY_MAX_DIMS];
+    int source_ndim = 0;
+    if (!split_reduceop_static_shape(ctx, current->src[0], source_dims, &source_ndim))
+      return false;
+    PolyShape source_shape = {.dims = source_dims, .ndim = source_ndim};
+    PolyUOp *transformed[POLY_MAX_DIMS] = {0};
+    PolyUOp *valid = NULL;
+    int n_transformed = 0;
+    if (!poly_apply_movement_op(
+            ctx, current, current->op, source_shape, current->arg, ranges, n_ranges,
+            transformed, &n_transformed, &valid
+        ) ||
+        n_transformed < 0 || n_transformed > POLY_MAX_DIMS)
+      return false;
+    memcpy(ranges, transformed, (size_t)n_transformed * sizeof(*ranges));
+    n_ranges = n_transformed;
+    current = current->src[0];
+  }
+
+  for (int axis = 0; axis < x_ndim; axis++) {
+    expanded[axis] = true;
+    for (int i = 0; markers[axis] && i < n_ranges; i++) {
+      if (poly_uop_reachable(ctx, ranges[i], markers[axis])) {
+        expanded[axis] = false;
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+static PolyUOp *split_reduceop_rewrite(PolyCtx *ctx, PolyUOp *reduce, PolyUOp *x) {
+  if (!ctx || !reduce || reduce->op != POLY_OP_REDUCE_AXIS || !x ||
+      reduce->arg.kind != POLY_ARG_REDUCE_AXIS ||
+      !poly_getenv_flag_default("SPLIT_REDUCEOP", true))
+    return NULL;
+
+  int64_t x_dims[POLY_MAX_DIMS], out_dims[POLY_MAX_DIMS];
+  int x_ndim = 0, out_ndim = 0;
+  if (!split_reduceop_static_shape(ctx, x, x_dims, &x_ndim) ||
+      !split_reduceop_static_shape(ctx, reduce, out_dims, &out_ndim) ||
+      x_ndim >= POLY_MAX_DIMS || out_ndim != x_ndim)
+    return NULL;
+
+  int64_t x_product = 0, out_product = 0;
+  if (!split_reduceop_shape_product(x_dims, x_ndim, &x_product) ||
+      !split_reduceop_shape_product(out_dims, out_ndim, &out_product) ||
+      out_product <= 0)
+    return NULL;
+  int64_t threshold = poly_getenv_int("REDUCEOP_SPLIT_THRESHOLD", 32768);
+  if (x_product / out_product < threshold) return NULL;
+
+  bool expanded[POLY_MAX_DIMS] = {false};
+  if (!split_reduceop_expanded_axes(ctx, x, x_dims, x_ndim, expanded))
+    return NULL;
+
+  int split_size = poly_getenv_int("REDUCEOP_SPLIT_SIZE", 22);
+  int64_t split_budget =
+      split_size < 0 ? 0
+                     : split_size >= 62 ? INT64_MAX : ((int64_t)1 << split_size);
+  int64_t max_divisor = split_budget / out_product;
+  if (max_divisor > 256) max_divisor = 256;
+
+  int split_axis = -1;
+  int64_t divisor = 0;
+  for (int axis_i = 0; axis_i < reduce->arg.reduce_axis.n && split_axis < 0; axis_i++) {
+    int64_t axis64 = reduce->arg.reduce_axis.axes[axis_i];
+    if (axis64 < 0 || axis64 >= x_ndim) return NULL;
+    int axis = (int)axis64;
+    for (int64_t candidate = max_divisor; candidate >= 8; candidate--) {
+      if (x_dims[axis] % candidate == 0 && !expanded[axis]) {
+        split_axis = axis;
+        divisor = candidate;
+        break;
+      }
+    }
+  }
+  if (split_axis < 0) return NULL;
+
+  int64_t split_shape[POLY_MAX_DIMS];
+  int split_ndim = x_ndim + 1;
+  int write = 0;
+  for (int i = 0; i < x_ndim; i++) {
+    if (i == split_axis) {
+      split_shape[write++] = divisor;
+      split_shape[write++] = x_dims[i] / divisor;
+    } else {
+      split_shape[write++] = x_dims[i];
+    }
+  }
+
+  int64_t permutation[POLY_MAX_DIMS];
+  write = 0;
+  for (int i = 0; i < split_ndim; i++)
+    if (i != split_axis) permutation[write++] = i;
+  permutation[write++] = split_axis;
+
+  PolyUOp *reshaped = poly_reshape(ctx, x, split_shape, split_ndim);
+  PolyUOp *permuted =
+      reshaped ? poly_permute(ctx, reshaped, permutation, split_ndim) : NULL;
+  PolyUOp *first =
+      permuted
+          ? poly_reduce_axis(
+                ctx, reduce->arg.reduce_axis.op, permuted,
+                reduce->arg.reduce_axis.axes, reduce->arg.reduce_axis.n
+            )
+          : NULL;
+  PolyUOp *contiguous =
+      first
+          ? poly_uop1(
+                ctx, POLY_OP_CONTIGUOUS, first->dtype, first, poly_arg_none()
+            )
+          : NULL;
+  int64_t second_axis[] = {out_ndim};
+  PolyUOp *second =
+      contiguous
+          ? poly_reduce_axis(
+                ctx, reduce->arg.reduce_axis.op, contiguous, second_axis, 1
+            )
+          : NULL;
+  PolyUOp *result =
+      second ? poly_reshape(ctx, second, out_dims, out_ndim) : NULL;
+
+  if (result && poly_debug_at_least(3)) {
+    fprintf(
+        stderr, "split %lld: axis=%d input=%lld output=%lld\n",
+        (long long)divisor, split_axis, (long long)x_product,
+        (long long)out_product
+    );
+  }
+  return result;
+}
+
 /* Pre-rangeify graph normalization.
  *
- * Port of tinygrad's earliest_rewrites (rangeify.py:101-157), subset:
+ * Runs after the effect-bearing pm_mops rules above. Port of tinygrad's
+ * earliest_rewrites (rangeify.py:101-157), subset:
  *   C1: DETACH / CONTIGUOUS_BACKWARD removal (stops grad flow in backward)
- *   C2: Zero-sized reduce -> identity element (empty tensor edge case)
+ *   C2: Large static reduce split; zero-sized reduce -> identity element
+ *       (empty tensor edge case); general zero-shaped node -> zero constant
  *   C3: Merge adjacent RESHAPEs: RESHAPE(RESHAPE(x, s1), s2) -> RESHAPE(x, s2)
+ *   C4: STORE alias hazard -> materialize the source with CONTIGUOUS
+ *   C5: SINK references only each source's base
  *
  * Applied before rangeify sees the graph, so later passes can assume
  * these ops are already stripped.
  */
-static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
+PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
+  sink = poly_graph_rewrite_ex(ctx, sink, poly_pm_rangeify_effect_mops(), true);
   int n_topo;
   PolyUOp **topo = poly_toposort_alloc(ctx, sink, &n_topo);
   PolyMap *rmap = poly_map_new(n_topo < 16 ? 16 : (uint32_t)n_topo);
@@ -2282,6 +2839,36 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
       result = ns[0];
     }
 
+    /* Pinned earliest_rewrites keeps COPY only for a real device transfer.
+     * A same-device COPY still owns distinct output storage, but becomes
+     * NOOP(source) so the enclosing STORE is emitted as an ordinary compute
+     * SINK rather than an opaque backend COPY. */
+    else if (u->op == POLY_OP_COPY && u->n_src == 2 && ns[1] &&
+             ns[1]->op == POLY_OP_DEVICE) {
+      PolyDevice source_device = poly_uop_device(ns[0]);
+      PolyDevice target_device = poly_device_from_device_uop(ns[1]);
+      if (source_device != POLY_DEVICE_AUTO && source_device == target_device)
+        result = poly_uop1(ctx, POLY_OP_NOOP, u->dtype, ns[0], poly_arg_none());
+    }
+
+    /* C5: SINK only ever references the base.
+     * Exact port of tinygrad rangeify.py:
+     *   SINK(x, ...) -> SINK(x.base, ...)
+     * Movement/MULTI/DETACH are views; effect roots remain AFTER/STORE while
+     * consumer expressions retain their movement topology. */
+    else if (u->op == POLY_OP_SINK) {
+      bool base_changed = false;
+      for (int i = 0; i < u->n_src; i++) {
+        PolyUOp *base = uop_realize_src_base(ns[i]);
+        if (base != ns[i]) {
+          ns[i] = base;
+          base_changed = true;
+        }
+      }
+      if (src_changed || base_changed)
+        result = rangeify_clone_preserving_metadata(ctx, u, ns, u->n_src);
+    }
+
     /* C3: Merge adjacent RESHAPEs.
      * RESHAPE(RESHAPE(x, s1), s2) -> RESHAPE(x, s2).
      * Intermediate shape is irrelevant. Fires on backward graphs where
@@ -2290,15 +2877,22 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
              ns[0]->n_src >= 1) {
       PolyUOp *inner_x = ns[0]->src[0];
       PolyUOp *new_srcs[2] = {inner_x, u->n_src >= 2 ? ns[1] : NULL};
-      result = poly_uop(ctx, POLY_OP_RESHAPE, u->dtype, new_srcs, u->n_src, u->arg);
+      result = rangeify_clone_preserving_metadata(ctx, u, new_srcs, u->n_src);
     }
 
-    /* C2: Zero-sized reduce -> identity element.
-     * Only when input shape is statically known and provably zero. */
+    /* C2: Pinned split_reduceop runs before the zero-sized reduction rules.
+     * It returns NULL for zero output size, symbolic shapes, sub-threshold
+     * reductions, expanded candidate axes, or no valid divisor. */
     else if (u->op == POLY_OP_REDUCE_AXIS && u->n_src >= 1) {
+      result = split_reduceop_rewrite(ctx, u, ns[0]);
+
+      /* Zero-sized reduce -> identity element.
+       * Only when input shape is statically known and provably zero. */
       /* Check if input has a zero dimension in the reduce axes */
       PolyUOp *input = ns[0];
-      if (input->op == POLY_OP_CONST) {
+      if (result) {
+        /* split_reduceop already produced the complete replacement. */
+      } else if (input->op == POLY_OP_CONST) {
         /* Scalar CONST has size 1, not 0 -- skip. Reduce of CONST
          * is handled by sym constant folding, not here. */
       } else if (u->arg.kind == POLY_ARG_REDUCE_AXIS) {
@@ -2327,10 +2921,44 @@ static PolyUOp *poly_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
       }
     }
 
-    /* C4: ASSIGN rules (tinygrad rangeify.py:163-176).
+    /* General zero-sized graph elimination (tinygrad rangeify.py "handle size
+     * 0").  Match the original node before source rewrites, as tinygrad's
+     * bottom-up matcher does, and leave SINK as the graph root.  The specific
+     * empty-reduction identity above must take precedence. */
+    if (!result && u->op != POLY_OP_SINK) {
+      PolyShape sh = poly_uop_max_shape_cached(ctx, u);
+      bool has_zero = false;
+      for (int d = 0; d < sh.ndim; d++) {
+        if (sh.dims[d] == 0) {
+          has_zero = true;
+          break;
+        }
+      }
+      if (has_zero) {
+        PolyDType zero_dtype = u->dtype;
+        if (zero_dtype.is_ptr) {
+          zero_dtype.is_ptr = false;
+          zero_dtype.addrspace = 0;
+          zero_dtype.vcount = 0;
+          zero_dtype.ptr_size = 0;
+        }
+        PolyArg zero_arg = poly_dtype_is_float(zero_dtype) ? poly_arg_float(0.0)
+                           : poly_dtype_is_bool(zero_dtype) ? poly_arg_bool(false)
+                                                           : poly_arg_int(0);
+        result = poly_uop_tagged_arg(
+            ctx, POLY_OP_CONST, zero_dtype, NULL, 0, zero_arg, u->tag, u->tag_arg
+        );
+      }
+    }
+
+    /* C4: STORE hazard rule (tinygrad rangeify.py:93-100, 191-192). */
+    if (!result && u->op == POLY_OP_STORE && u->n_src == 2)
+      result = poly_fix_store_hazard(ctx, ns[0], ns[1]);
+
+    /* Legacy ASSIGN rules.
      * Order: C4a → C4c → C4d → C4e → C4b.
      * Early rules may change target/value, so C4b (hazard check) runs last. */
-    else if (u->op == POLY_OP_ASSIGN && u->n_src >= 2) {
+    if (!result && u->op == POLY_OP_ASSIGN && u->n_src >= 2) {
       PolyUOp *target = ns[0];
       PolyUOp *value = ns[1];
 
@@ -2498,7 +3126,7 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
 
     PolyUOp *result = NULL;
 
-    if (u->op == POLY_OP_INDEX && u->n_src >= 2 && new_src[0]->op == POLY_OP_BUFFERIZE) {
+    if (u->op == POLY_OP_INDEX && u->n_src >= 2 && new_src[0]->op == POLY_OP_STAGE) {
       PolyUOp *bufferize = new_src[0];
       PolyUOp *val = bufferize->src[0];
       int n_buf_rngs = bufferize->n_src - 1;
@@ -2546,7 +3174,7 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
             }
           }
           PolyUOp *new_buf = poly_uop(
-              ctx, POLY_OP_BUFFERIZE, bufferize->dtype, new_buf_src, n_new + 1, bufferize->arg
+              ctx, POLY_OP_STAGE, bufferize->dtype, new_buf_src, n_new + 1, bufferize->arg
           );
           new_idx_src[0] = new_buf;
           result = poly_uop(ctx, POLY_OP_INDEX, u->dtype, new_idx_src, n_new + 1, u->arg);
@@ -2568,18 +3196,10 @@ static PolyUOp *poly_cleanup_dead_bufferize_axes(PolyCtx *ctx, PolyUOp *sink) {
 
 /* Stage 3 helpers */
 
-/* Red-gate traversal (port of tinygrad's red_gate in pm_remove_bufferize).
- *
- * Traverses root's subtree via iterative DFS with a stopping condition:
- *   - BUFFERIZE: counted as accessed buffer, traversal STOPS (sources not explored).
- *   - BUFFER, PARAM, BUFFER_VIEW: counted as accessed buffer, traversal CONTINUES.
- *   - REDUCE: added to reduces[] array, traversal CONTINUES.
- *   - Other nodes: traversal CONTINUES.
- *
- * This ensures that BUFFERIZE nodes are treated as opaque intermediate buffers —
- * their internal computations (REDUCE, BUFFER_A, etc.) are NOT traversed.
- * Without this, BUFFERIZE_2's val would see BUFFERIZE_1's internal REDUCE,
- * incorrectly triggering the buffer_in_reduce gate and preventing removal.
+/* Exact port of tinygrad's red_gate in pm_remove_bufferize.
+ * AFTER contributes one buf_uop and stops, global STAGE/BUFFERIZE and MSTACK
+ * contribute one identity and stop, STORE stops without contributing, and
+ * PARAM contributes its identity while allowing its shape metadata traversal.
  *
  * Parameters:
  *   reduces[0..max_reduces-1]: output array for REDUCE UOps found
@@ -2604,6 +3224,14 @@ static int poly_red_gate_collect(
   int top = 0;
 
   PolyMap *visited = poly_map_new(64);
+  PolyMap *accessed_seen = poly_map_new(16);
+  if (!visited || !accessed_seen) {
+    if (visited) poly_map_destroy(visited);
+    if (accessed_seen) poly_map_destroy(accessed_seen);
+    free(stack);
+    *n_reduces = 0;
+    return 0;
+  }
   int accessed = 0;
   *n_reduces = 0;
 
@@ -2613,28 +3241,67 @@ static int poly_red_gate_collect(
     if (rmap_get(visited, u)) continue;
     rmap_set(visited, u, u);
 
-    if (u->op == POLY_OP_BUFFERIZE) {
-      accessed++; /* count it, but DO NOT recurse into its sources */
+    PolyUOp *access_identity = NULL;
+    if (u->op == POLY_OP_AFTER) {
+      access_identity = kernel_after_buffer_identity(u);
+      if (access_identity &&
+          !poly_map_get(
+              accessed_seen, poly_ptr_hash(access_identity), access_identity, poly_ptr_eq
+          )) {
+        poly_map_set(
+            accessed_seen, poly_ptr_hash(access_identity), access_identity, access_identity,
+            poly_ptr_eq
+        );
+        accessed++;
+      }
       continue;
     }
-    if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM || u->op == POLY_OP_BUFFER_VIEW) {
-      accessed++; /* count it, recurse normally */
+    if ((u->op == POLY_OP_STAGE &&
+         poly_bufferize_arg_addrspace(u->arg) == POLY_ADDR_GLOBAL) ||
+        u->op == POLY_OP_MSTACK) {
+      access_identity = u;
+      if (!poly_map_get(
+              accessed_seen, poly_ptr_hash(access_identity), access_identity, poly_ptr_eq
+          )) {
+        poly_map_set(
+            accessed_seen, poly_ptr_hash(access_identity), access_identity, access_identity,
+            poly_ptr_eq
+        );
+        accessed++;
+      }
+      continue;
+    }
+    if (u->op == POLY_OP_STORE) continue;
+    if (u->op == POLY_OP_PARAM) {
+      access_identity = u;
+      if (!poly_map_get(
+              accessed_seen, poly_ptr_hash(access_identity), access_identity, poly_ptr_eq
+          )) {
+        poly_map_set(
+            accessed_seen, poly_ptr_hash(access_identity), access_identity, access_identity,
+            poly_ptr_eq
+        );
+        accessed++;
+      }
     }
     if (u->op == POLY_OP_REDUCE && *n_reduces < max_reduces) {
       reduces[(*n_reduces)++] = u;
     }
 
-    /* Push sources in reverse order for consistent DFS ordering */
+    /* Push sources in reverse order for consistent DFS ordering. */
     for (int i = u->n_src - 1; i >= 0; i--) {
       PolyUOp *src = u->src[i];
       if (!rmap_get(visited, src)) {
         if (top >= cap) {
           cap *= 2;
-          stack = realloc(stack, cap * sizeof(PolyUOp *));
-          if (!stack) {
+          void *tmp = realloc(stack, cap * sizeof(PolyUOp *));
+          if (!tmp) {
+            free(stack);
             poly_map_destroy(visited);
-            return accessed;
+            poly_map_destroy(accessed_seen);
+            return 4; /* Keep the materialization if the cost proof is incomplete. */
           }
+          stack = tmp;
         }
         stack[top++] = src;
       }
@@ -2643,6 +3310,7 @@ static int poly_red_gate_collect(
 
   free(stack);
   poly_map_destroy(visited);
+  poly_map_destroy(accessed_seen);
   return accessed;
 }
 
@@ -2695,8 +3363,9 @@ static PolyUOp *poly_substitute_ranges(PolyCtx *ctx, PolyUOp *val, PolyMap *sub_
  * Gates (any fires → keep BUFFERIZE):
  *   1. ALWAYS_RUN: val->op in {CONTIGUOUS, COPY, ASSIGN, ENCDEC}
  *   2. removable flag: BufferizeOpts.removable == false
- *   3. accessed_buffers: count distinct {BUFFER,PARAM,BUFFERIZE,BUFFER_VIEW} in val > 3
- *   4. buffer_in_reduce: any REDUCE in val has a buffer op under its value operand
+ *   3. accessed_buffers: more than three unique AFTER identities, global
+ *      BUFFERIZEs/MSTACKs, or PARAMs reached by tinygrad's red_gate
+ *   4. buffer_in_reduce: any REDUCE value reaches PARAM, BUFFERIZE, or AFTER
  *
  * Corresponds to tinygrad's pm_remove_bufferize (PCONTIG<=2 path).
  */
@@ -2730,7 +3399,7 @@ static PolyUOp *poly_remove_bufferize(PolyCtx *ctx, PolyUOp *sink) {
 
     PolyUOp *result = NULL;
 
-    if (u->op == POLY_OP_INDEX && u->n_src >= 1 && ns[0]->op == POLY_OP_BUFFERIZE) {
+    if (u->op == POLY_OP_INDEX && u->n_src >= 1 && ns[0]->op == POLY_OP_STAGE) {
       PolyUOp *bufferize = ns[0];
       int n_buf_rngs = bufferize->n_src - 1;
       int n_idx = u->n_src - 1;
@@ -2794,56 +3463,46 @@ static PolyUOp *poly_remove_bufferize(PolyCtx *ctx, PolyUOp *sink) {
         }
 
         if (!result) {
-          /* B: THREEFRY bypass -- RNG ops skip cost gates and are always
-           * inlined. Buffering RNG state breaks determinism when consumers
-           * execute in different order.
-           * Matches tinygrad rangeify.py:200. */
-          bool skip_cost_gates = (val->op == POLY_OP_THREEFRY);
-
           bool buf_count_ok = true;
           bool buf_in_reduce = false;
           int accessed = 0, n_reduces = 0;
 
-          if (!skip_cost_gates) {
-            /* Gates 3 and 4: traverse val's subtree with red_gate (stopping at BUFFERIZE).
-             * Mirrors tinygrad's accessed_buffers + buffer_in_reduce logic exactly.
-             * Stops at BUFFERIZE so we don't traverse into nested intermediates' internals. */
-            PolyUOp *reduces[POLY_MAX_DIMS];
-            accessed = poly_red_gate_collect(ctx, val, reduces, &n_reduces, POLY_MAX_DIMS);
+          /* Gates 3 and 4 use the same generic traversal for every op,
+           * including THREEFRY. */
+          PolyUOp *reduces[POLY_MAX_DIMS];
+          accessed = poly_red_gate_collect(ctx, val, reduces, &n_reduces, POLY_MAX_DIMS);
 
-            /* Gate 3: too many accessed buffer nodes -> fusing not worth it */
-            buf_count_ok = (accessed <= 3);
+          /* Gate 3: too many accessed buffer nodes -> fusing not worth it */
+          buf_count_ok = (accessed <= 3);
 
-            /* Gate 4: any REDUCE in val's subtree reads from a buffer op under its
-             * value operand (src[0]) -> must keep materialization boundary */
-            for (int ri = 0; ri < n_reduces && !buf_in_reduce; ri++) {
-              PolyUOp *reduce = reduces[ri];
-              if (reduce->n_src >= 1) {
-                int nv;
-                PolyUOp **vtopo = poly_toposort_alloc(ctx, reduce->src[0], &nv);
-                for (int j = 0; j < nv; j++) {
-                  PolyOps op = vtopo[j]->op;
-                  if (op == POLY_OP_BUFFER || op == POLY_OP_PARAM || op == POLY_OP_BUFFERIZE ||
-                      op == POLY_OP_BUFFER_VIEW) {
-                    buf_in_reduce = true;
-                    break;
-                  }
+          /* Gate 4: any REDUCE in val's subtree reads from a buffer op under its
+           * value operand (src[0]) -> must keep materialization boundary */
+          for (int ri = 0; ri < n_reduces && !buf_in_reduce; ri++) {
+            PolyUOp *reduce = reduces[ri];
+            if (reduce->n_src >= 1) {
+              int nv;
+              PolyUOp **vtopo = poly_toposort_alloc(ctx, reduce->src[0], &nv);
+              for (int j = 0; j < nv; j++) {
+                PolyOps op = vtopo[j]->op;
+                if (op == POLY_OP_PARAM || op == POLY_OP_STAGE || op == POLY_OP_AFTER) {
+                  buf_in_reduce = true;
+                  break;
                 }
-                poly_toposort_free(vtopo);
               }
+              poly_toposort_free(vtopo);
             }
-          } /* !skip_cost_gates */
+          }
 
           if (dbg) {
             fprintf(
                 stderr,
                 "[remove_bufferize]   val_op=%s always_run=%d removable=%d (arg.kind=%d "
-                "device=%d addrspace=%d) accessed=%d buf_count_ok=%d buf_in_reduce=%d n_reduces=%d "
-                "skip_cost=%d\n",
+                "device=%d addrspace=%d) accessed=%d buf_count_ok=%d buf_in_reduce=%d "
+                "n_reduces=%d\n",
                 poly_op_name(val->op), always_run, removable, bufferize->arg.kind,
                 poly_bufferize_arg_device(bufferize->arg),
                 (int)poly_bufferize_arg_addrspace(bufferize->arg), accessed, buf_count_ok,
-                buf_in_reduce, n_reduces, skip_cost_gates
+                buf_in_reduce, n_reduces
             );
             fflush(stderr);
           }
@@ -2905,7 +3564,7 @@ static int poly_count_buf_like_nodes(PolyCtx *ctx, PolyUOp *root) {
     rmap_set(visited, u, u);
 
     bool is_gate =
-        (u->op == POLY_OP_BUFFERIZE || u->op == POLY_OP_AFTER || u->op == POLY_OP_BUFFER ||
+        (u->op == POLY_OP_STAGE || u->op == POLY_OP_AFTER || u->op == POLY_OP_BUFFER ||
          u->op == POLY_OP_PARAM || u->op == POLY_OP_DEFINE_VAR);
     if (is_gate) {
       count++;
@@ -2963,7 +3622,7 @@ static int poly_collect_live_ranges(
        * typically a CONST leaf — no further ranges there. */
     }
 
-    if (u->op == POLY_OP_BUFFERIZE) {
+    if (u->op == POLY_OP_STAGE) {
       continue; /* BUFFERIZE ends its ranges — do not recurse */
     }
 
@@ -2993,7 +3652,7 @@ static int poly_collect_live_ranges(
 
 /* Check if an op is in the buffer-like gate set (same as poly_count_buf_like_nodes). */
 static bool poly_is_buf_gate_op(PolyOps op) {
-  return op == POLY_OP_BUFFERIZE || op == POLY_OP_AFTER || op == POLY_OP_BUFFER ||
+  return op == POLY_OP_STAGE || op == POLY_OP_AFTER || op == POLY_OP_BUFFER ||
          op == POLY_OP_PARAM || op == POLY_OP_DEFINE_VAR;
 }
 
@@ -3095,7 +3754,7 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
           for (int d = 0; d < n_rngs; d++)
             buf_src[1 + d] = end_rngs[d];
           PolyUOp *bufferize = poly_uop(
-              ctx, POLY_OP_BUFFERIZE, poly_dtype_scalar(u->dtype), buf_src, n_rngs + 1,
+              ctx, POLY_OP_STAGE, poly_dtype_scalar(u->dtype), buf_src, n_rngs + 1,
               poly_arg_bufferize_opts(
                   (int32_t)bufferize_device_hint(ctx, sub_s, device_memo), POLY_ADDR_GLOBAL, false
               )
@@ -3134,6 +3793,41 @@ static PolyUOp *poly_limit_bufs(PolyCtx *ctx, PolyIndexingCtx *ictx, PolyUOp *si
   poly_map_destroy(rmap);
   poly_toposort_free(topo);
   return new_sink ? new_sink : sink;
+}
+
+static PolyUOp *rangeify_flat_index_for_bufferize(
+    PolyCtx *ctx,
+    PolyUOp *bufferize,
+    PolyDType *ptr_dt_out
+) {
+  if (!ctx || !bufferize || bufferize->op != POLY_OP_STAGE || !ptr_dt_out) return NULL;
+  int n_rngs = bufferize->n_src - 1;
+
+  if (n_rngs == 0) {
+    *ptr_dt_out = poly_dtype_ptr(poly_dtype_scalar(bufferize->dtype), 1, POLY_ADDR_GLOBAL);
+    return rangeify_index_const(ctx, 0);
+  }
+
+  PolyUOp *idx_rngs[POLY_MAX_DIMS];
+  PolyUOp *bounds[POLY_MAX_DIMS];
+  bool all_const = true;
+  int64_t numel = 1;
+  for (int d = 0; d < n_rngs && d < POLY_MAX_DIMS; d++) {
+    PolyUOp *rng = bufferize->src[1 + d];
+    idx_rngs[d] = rng;
+    if (rng->op == POLY_OP_RANGE && rng->n_src > 0)
+      bounds[d] = rng->src[0];
+    else
+      bounds[d] = rangeify_index_const(ctx, 1);
+    if (bounds[d]->op == POLY_OP_CONST)
+      numel *= bounds[d]->arg.i;
+    else
+      all_const = false;
+  }
+
+  *ptr_dt_out =
+      poly_dtype_ptr(poly_dtype_scalar(bufferize->dtype), all_const ? numel : -1, POLY_ADDR_GLOBAL);
+  return poly_compute_flat_index_symbolic(ctx, idx_rngs, bounds, n_rngs);
 }
 
 /* Stage 3.5: Flatten multi-range INDEX(BUFFERIZE) back to flat-scalar form.
@@ -3178,7 +3872,7 @@ static PolyUOp *poly_flatten_bufferize_indices(PolyCtx *ctx, PolyUOp *sink) {
      * producing INDEX(BUFFERIZE(val)) with n_src=1. Stage 3 removes such
      * BUFFERIZEs, leaving arity-1 INDEX(surviving_BUFFERIZE) — we must flatten
      * those too, inserting CONST(0) as the flat index for the scalar case. */
-    if (u->op == POLY_OP_INDEX && u->n_src >= 1 && new_src[0]->op == POLY_OP_BUFFERIZE) {
+    if (u->op == POLY_OP_INDEX && u->n_src >= 1 && new_src[0]->op == POLY_OP_STAGE) {
       PolyUOp *bufferize = new_src[0];
       int n_idx = u->n_src - 1;
       int n_buf_rngs = bufferize->n_src - 1;
@@ -3190,13 +3884,10 @@ static PolyUOp *poly_flatten_bufferize_indices(PolyCtx *ctx, PolyUOp *sink) {
         PolyDType ptr_dt;
 
         if (n_idx == 0) {
-          /* 0-index case: BUFFERIZE has 0 ranges (scalar output after Stage 2).
-           * INDEX(BUFFERIZE(val)) → INDEX(BUFFERIZE(val), CONST(0)) */
-          flat_idx = rangeify_index_const(ctx, 0);
-          ptr_dt = poly_dtype_ptr(poly_dtype_scalar(bufferize->dtype), 1, POLY_ADDR_GLOBAL);
+          flat_idx = rangeify_flat_index_for_bufferize(ctx, bufferize, &ptr_dt);
         } else {
-          /* Multi-range case: extract consumer ranges and compute flat index.
-           * Extract bounds as UOp* (supports both CONST and DEFINE_VAR bounds). */
+          /* Multi-range case: use the consumer's ranges with the BUFFERIZE's
+           * bounds so reindexing survives until remove_bufferize. */
           PolyUOp *idx_rngs[POLY_MAX_DIMS];
           PolyUOp *bounds[POLY_MAX_DIMS];
           bool all_const = true;
@@ -3204,8 +3895,6 @@ static PolyUOp *poly_flatten_bufferize_indices(PolyCtx *ctx, PolyUOp *sink) {
           for (int d = 0; d < n_idx && d < POLY_MAX_DIMS; d++) {
             idx_rngs[d] = new_src[1 + d];
             PolyUOp *rng = bufferize->src[1 + d];
-            /* Extract bound from RANGE node (src[0] is the bound).
-             * After control flow, RANGE may have extra sources; only src[0] is bound. */
             if (rng->op == POLY_OP_RANGE && rng->n_src > 0)
               bounds[d] = rng->src[0];
             else
@@ -3215,14 +3904,14 @@ static PolyUOp *poly_flatten_bufferize_indices(PolyCtx *ctx, PolyUOp *sink) {
             else
               all_const = false;
           }
-
           flat_idx = poly_compute_flat_index_symbolic(ctx, idx_rngs, bounds, n_idx);
           ptr_dt = poly_dtype_ptr(
               poly_dtype_scalar(bufferize->dtype), all_const ? numel : -1, POLY_ADDR_GLOBAL
           );
         }
 
-        result = poly_uop2(ctx, POLY_OP_INDEX, ptr_dt, bufferize, flat_idx, poly_arg_none());
+        if (flat_idx)
+          result = poly_uop2(ctx, POLY_OP_INDEX, ptr_dt, bufferize, flat_idx, poly_arg_none());
       }
     }
 
@@ -3257,7 +3946,7 @@ static PolyPatternMatcher *poly_pm_add_range_tags_local(void) {
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_RANGE, NULL, 0, "x"), rule_add_range_tag},
   };
-  pm = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  pm = poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return pm;
 }
 
@@ -3315,10 +4004,6 @@ static PolyUOp *kernel_copy_source_index_value(PolyUOp *u) {
   return NULL;
 }
 
-static bool kernel_copy_indices_match(PolyUOp *dst_idx, PolyUOp *src_idx) {
-  return dst_idx == src_idx || poly_structural_eq(dst_idx, src_idx);
-}
-
 static int kernel_param_arg_index(PolyUOp *param) {
   if (!param || param->op != POLY_OP_PARAM || param->arg.kind != POLY_ARG_INT) return -1;
   if (param->arg.i < 0 || param->arg.i > INT_MAX) return -1;
@@ -3334,14 +4019,25 @@ static bool kernel_body_copy_info(
   PolyUOp *body = kernel_strip_copy_end_chain(kernel_body);
   if (!body || body->op != POLY_OP_STORE || body->n_src != 2) return false;
 
+  PolyUOp *stored = body->src[1];
+  bool explicit_copy =
+      stored && stored->op == POLY_OP_COPY && stored->n_src == 2 && stored->src[1] &&
+      stored->src[1]->op == POLY_OP_DEVICE;
+  /* Pinned split_store selects the special runtime path only when the stored
+   * value is explicitly COPY (or SLICE, represented by Polygrad's separate
+   * BUFFER_VIEW path). A plain STORE between two parameters remains a compute
+   * SINK even when its indices and dtypes happen to match. */
+  if (!explicit_copy) return false;
+
   PolyUOp *dst_param = NULL, *src_param = NULL;
   PolyUOp *dst_idx = NULL, *src_idx = NULL;
   if (!kernel_copy_param_or_index(body->src[0], &dst_param, &dst_idx)) return false;
-  if (!kernel_copy_param_or_index(kernel_copy_source_index_value(body->src[1]), &src_param, &src_idx))
+  if (!kernel_copy_param_or_index(kernel_copy_source_index_value(stored), &src_param, &src_idx))
     return false;
   if (dst_param == src_param) return false;
-  if ((dst_idx || src_idx) && (!dst_idx || !src_idx || !kernel_copy_indices_match(dst_idx, src_idx)))
-    return false;
+  /* The STORE target is the explicit COPY output, so its indexing does not
+   * need to duplicate the source's indexing. In particular, a scalar target
+   * is INDEX(PARAM, 0) while the one-element COPY source may remain PARAM. */
   if (!poly_dtype_eq(poly_dtype_scalar(dst_param->dtype), poly_dtype_scalar(src_param->dtype)))
     return false;
 
@@ -3349,7 +4045,7 @@ static bool kernel_body_copy_info(
   int src_param_idx = kernel_param_arg_index(src_param);
   if (dst_param_idx < 0 || src_param_idx < 0) return false;
 
-  if (copy_root_out) *copy_root_out = body->src[1];
+  if (copy_root_out) *copy_root_out = stored;
   if (dst_param_out) *dst_param_out = dst_param_idx;
   if (src_param_out) *src_param_out = src_param_idx;
   return true;
@@ -3375,7 +4071,7 @@ PolyUOp *poly_get_kernel_graph(PolyCtx *ctx, PolyUOp *tensor_sink) {
     fprintf(stderr, "[polygrad:get_kernel_graph] stage earliest_rewrites begin\n");
     fflush(stderr);
   }
-  tensor_sink = poly_earliest_rewrites(ctx, tensor_sink);
+  tensor_sink = poly_apply_earliest_rewrites(ctx, tensor_sink);
   double t_earliest = timing ? poly_now_ms() : 0.0;
   if (timing) {
     fprintf(stderr, "[polygrad:get_kernel_graph] stage earliest_rewrites done %.3fms\n", t_earliest - t0);
@@ -3523,6 +4219,43 @@ static bool poly_kernel_body_needs_zero(PolyCtx *ctx, PolyUOp *u) {
   return needs_zero;
 }
 
+static PolyUOp *kernel_after_buffer_identity(PolyUOp *after) {
+  if (!after || after->op != POLY_OP_AFTER || after->n_src < 1) return NULL;
+  PolyUOp *target = after->src[0];
+  while (target && target->n_src >= 1 &&
+         (target->op == POLY_OP_AFTER || target->op == POLY_OP_INDEX))
+    target = target->src[0];
+  return (PolyUOp *)poly_uop_get_buffer_identity(target);
+}
+
+static bool kernel_dep_reaches(
+    const bool *dep,
+    int n,
+    int from,
+    int to,
+    bool *seen,
+    int *stack
+) {
+  if (!dep || n <= 0 || from < 0 || from >= n || to < 0 || to >= n || !seen || !stack)
+    return false;
+  if (from == to) return true;
+  memset(seen, 0, (size_t)n * sizeof(*seen));
+  int top = 0;
+  stack[top++] = from;
+  seen[from] = true;
+  while (top > 0) {
+    int cur = stack[--top];
+    for (int next = 0; next < n; next++) {
+      if (!dep[cur * n + next]) continue;
+      if (next == to) return true;
+      if (seen[next]) continue;
+      seen[next] = true;
+      stack[top++] = next;
+    }
+  }
+  return false;
+}
+
 PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     PolyCtx *ctx,
     PolyUOp *kernel_graph
@@ -3560,7 +4293,18 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   int n_after = 0, after_cap = 0;
   for (int i = 0; i < n_topo; i++) {
     if (topo[i]->op == POLY_OP_AFTER && topo[i]->n_src >= 2 &&
-        topo[i]->src[0]->op == POLY_OP_BUFFER) {
+        kernel_after_buffer_identity(topo[i])) {
+      /* Moving INDEX through AFTER can create several value wrappers around
+       * one exact effect source. tinygrad split_kernels hash-conses those to
+       * one CALL; schedule that effect once here as well. */
+      bool duplicate_effect = false;
+      for (int a = 0; a < n_after; a++) {
+        if (after_nodes[a]->src[1] == topo[i]->src[1]) {
+          duplicate_effect = true;
+          break;
+        }
+      }
+      if (duplicate_effect) continue;
       if (n_after >= after_cap) {
         after_cap = after_cap ? after_cap * 2 : 8;
         void *tmp = realloc(after_nodes, after_cap * sizeof(PolyUOp *));
@@ -3574,16 +4318,10 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
         after_is_assign = tmp3;
       }
       after_nodes[n_after] = topo[i];
-      PolyUOp *after_buf = topo[i]->src[0];
-      /* Intermediate: BUFFER has LUNIQUE child and needs schedule-owned
-       * storage.
-       *
-       * Normal non-LUNIQUE buffers are in-place ASSIGN targets unless they are
-       * freshly allocated materialization buffers. Transform-to-call allocates
-       * those output buffers before scheduling with valid=false, and the STORE
-       * is the producer that first populates them. Codegen-only/model buffers
-       * may have no ctx->buffers entry yet; they are still existing logical
-       * storage identities and must use ASSIGN/WAR ordering. */
+      PolyUOp *after_buf = kernel_after_buffer_identity(topo[i]);
+      /* LUNIQUE marks schedule-owned intermediates. The non-LUNIQUE category
+       * below is used only by the existing WAR/WAW handling; RAW version order
+       * comes from exact AFTER bindings, matching tinygrad create_schedule. */
       after_is_intermediate[n_after] =
           (after_buf->n_src >= 1 && after_buf->src[0]->op == POLY_OP_LUNIQUE);
       PolyBuffer *after_storage = poly_buffer_get(ctx, after_buf);
@@ -3619,20 +4357,6 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     fflush(stderr);
   }
 
-  if (getenv("POLY_DEBUG_FLATTEN")) {
-    int n_assign_after = 0;
-    for (int _i = 0; _i < n_after; _i++)
-      if (after_is_assign[_i]) n_assign_after++;
-    int n_producer_after = n_after - n_assign_after;
-    fprintf(
-        stderr,
-        "[poly_build_kernel_schedule] n_after=%d (inter=%d assign=%d producer=%d) n_consumer=%d total=%d\n",
-        n_after, n_intermediates, n_assign_after, n_producer_after, n_consumer_stores,
-        total_kernels
-    );
-    fflush(stderr);
-  }
-
   /* 4. Allocate result arrays */
   result.kernels = malloc(total_kernels * sizeof(PolyUOp *));
   result.kernel_kinds = calloc(total_kernels, sizeof(int));
@@ -3642,6 +4366,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   result.kernel_n_params = calloc(total_kernels, sizeof(int));
   result.var_to_buf = calloc(total_kernels, sizeof(PolyUOp **));
   result.kernel_n_vars = calloc(total_kernels, sizeof(int));
+  PolyUOp **dependency_roots = calloc((size_t)total_kernels, sizeof(PolyUOp *));
   result.n_intermediates = n_intermediates;
 
   for (int k = 0; k < total_kernels; k++) {
@@ -3678,8 +4403,9 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
       fflush(stderr);
     }
     PolyUOp *after = after_nodes[a];
-    PolyUOp *after_buf = after->src[0];
+    PolyUOp *after_buf = kernel_after_buffer_identity(after);
     PolyUOp *end_chain = after->src[1];
+    dependency_roots[a] = end_chain;
 
     PolySplitCtx sctx;
     memset(&sctx, 0, sizeof(sctx));
@@ -3772,6 +4498,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
       current = normalize_kernel_read_index_dtypes(ctx, current);
 
       int kidx = n_after + consumer_idx;
+      dependency_roots[kidx] = post_store;
       PolyUOp *copy_root = NULL;
       int copy_dst_param = -1, copy_src_param = -1;
       if (kernel_body_copy_info(current, &copy_root, &copy_dst_param, &copy_src_param)) {
@@ -3828,7 +4555,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     PolyMap *buf_to_prod = poly_map_new((size_t)(n_after < 8 ? 8 : n_after));
     for (int b = 0; b < n_after; b++) {
       if (after_is_assign[b]) continue; /* skip in-place overwrite AFTERs */
-      PolyUOp *buf = after_nodes[b]->src[0];
+      PolyUOp *buf = kernel_after_buffer_identity(after_nodes[b]);
       if (!poly_map_get(buf_to_prod, poly_ptr_hash(buf), buf, poly_ptr_eq))
         poly_map_set(
             buf_to_prod, poly_ptr_hash(buf), buf, (PolyUOp *)(intptr_t)(b + 1), poly_ptr_eq
@@ -3838,9 +4565,52 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     /* 5b. Build dep[from*n + to] = true if kernel `from` must run before `to`.
      * RAW edges: producer → consumer (consumer reads intermediate written by producer). */
     bool *dep = calloc((size_t)n * n, sizeof(bool));
+
+    /* Preserve explicit AFTER version dependencies before split_kernel_rewrite
+     * replaces each AFTER with its buffer PARAM. A consumer that reaches an
+     * assignment's exact AFTER node is a post-write reader; a bare reader of
+     * the same storage remains a pre-write reader handled by WAR below. */
+    PolyMap *after_to_index = poly_map_new((size_t)(n_after < 8 ? 8 : n_after));
+    for (int i = 0; i < n_topo; i++) {
+      if (topo[i]->op != POLY_OP_AFTER || topo[i]->n_src < 2) continue;
+      for (int w = 0; w < n_after; w++) {
+        if (topo[i]->src[1] != after_nodes[w]->src[1]) continue;
+        poly_map_set(
+            after_to_index, poly_ptr_hash(topo[i]), topo[i],
+            (PolyUOp *)(intptr_t)(w + 1), poly_ptr_eq
+        );
+        break;
+      }
+    }
+    for (int k = 0; k < n; k++) {
+      if (!dependency_roots[k]) continue;
+      int n_dep_topo = 0;
+      PolyUOp **dep_topo = poly_toposort_alloc(ctx, dependency_roots[k], &n_dep_topo);
+      for (int i = 0; i < n_dep_topo; i++) {
+        PolyUOp *v = poly_map_get(
+            after_to_index, poly_ptr_hash(dep_topo[i]), dep_topo[i], poly_ptr_eq
+        );
+        if (!v) continue;
+        int w = (int)((intptr_t)v - 1);
+        if (w != k) dep[w * n + k] = true;
+      }
+      poly_toposort_free(dep_topo);
+    }
     for (int k = 0; k < n; k++) {
       for (int p = 0; p < result.kernel_n_params[k]; p++) {
-        PolyUOp *buf = result.param_to_buf[k][p];
+        PolyUOp *binding = result.param_to_buf[k][p];
+        if (binding && binding->op == POLY_OP_AFTER) {
+          PolyUOp *v = poly_map_get(
+              after_to_index, poly_ptr_hash(binding), binding, poly_ptr_eq
+          );
+          if (v) {
+            int producer = (int)((intptr_t)v - 1);
+            if (producer != k) dep[producer * n + k] = true;
+          }
+        }
+        PolyUOp *buf = binding && binding->op == POLY_OP_AFTER
+                           ? kernel_after_buffer_identity(binding)
+                           : (PolyUOp *)poly_uop_get_buffer_identity(binding);
         if (!buf) continue;
         PolyUOp *val = poly_map_get(buf_to_prod, poly_ptr_hash(buf), buf, poly_ptr_eq);
         if (!val) continue;
@@ -3848,60 +4618,59 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
         if (b != k) dep[b * n + k] = true; /* producer b before consumer k */
       }
     }
+    poly_map_destroy(after_to_index);
 
-    /* 5c. WAR edges: for each ASSIGN writer W, any NON-ASSIGN kernel K that
-     * reads from W's target buffer must complete before W starts.
-     * Skip WAR between ASSIGN kernels — their ordering is handled by
-     * program-order edges (5c2). Without this skip, WAR creates conflicts:
-     * e.g. weight ASSIGN reads m_buffer, m ASSIGN writes m_buffer →
-     * WAR says weight before m, but program order says m before weight. */
-    for (int w = 0; w < n_after; w++) {
-      if (!after_is_assign[w]) continue; /* WAR only for in-place overwrites */
-      PolyUOp *write_buf = after_nodes[w]->src[0];
-      for (int k = 0; k < n; k++) {
-        if (k == w) continue;
-        /* Skip WAR between ASSIGN kernels — program order handles this */
-        if (k < n_after && after_is_assign[k]) continue;
-        for (int p = 0; p < result.kernel_n_params[k]; p++) {
-          if (result.param_to_buf[k][p] == write_buf) {
-            dep[k * n + w] = true; /* reader k before writer w */
-            break;
-          }
-        }
-      }
-    }
-
-    /* 5c2. Program-order edges for ASSIGN kernels: enforce the order in which
-     * assign().realize() was called during tracing. Essential for Adam where
-     * m/v updates must run before param update (param reads NEW m/v).
-     * ASSIGN kernels appear in after_nodes[] in program order already
-     * (they're added in the order SINK sources appear). */
-    {
-      int prev_assign = -1;
-      for (int k = 0; k < n_after; k++) {
-        if (!after_is_assign[k]) continue; /* only ASSIGN kernels */
-        if (prev_assign >= 0) dep[prev_assign * n + k] = true; /* prev before current */
-        prev_assign = k;
-      }
-    }
-
-    /* 5d. WAW edges: if multiple ASSIGN kernels write the same buffer,
+    /* 5c. WAW edges: if multiple ASSIGN kernels write the same buffer,
      * enforce program order between consecutive writers.
      * Build per-buffer writer lists, add edges between consecutive writes. */
     {
       /* Collect ASSIGN writer indices per buffer */
       for (int w1 = 0; w1 < n_after; w1++) {
         if (!after_is_assign[w1]) continue;
-        PolyUOp *buf1 = after_nodes[w1]->src[0];
+        PolyUOp *buf1 = kernel_after_buffer_identity(after_nodes[w1]);
         for (int w2 = w1 + 1; w2 < n_after; w2++) {
           if (!after_is_assign[w2]) continue;
-          if (after_nodes[w2]->src[0] == buf1) {
+          if (kernel_after_buffer_identity(after_nodes[w2]) == buf1) {
             /* Two ASSIGN writers to same buffer: w1 before w2 (program order) */
             dep[w1 * n + w2] = true;
           }
         }
       }
     }
+
+    /* 5d. WAR edges: a bare storage read must finish before an in-place
+     * writer, while a read reached through an AFTER version is post-write.
+     * Pinned tinygrad preserves that distinction in CALL arguments and adds
+     * WAR dependencies only for bare BUFFER/PARAM reads. Polygrad resolves
+     * CALL parameters to storage identities earlier, so use the already
+     * preserved AFTER/WAW dependency graph: if writer W already reaches reader
+     * K, K consumes a post-write version and adding K->W would manufacture a
+     * cycle. Independent bare reads still receive K->W. */
+    bool *reach_seen = calloc((size_t)n, sizeof(*reach_seen));
+    int *reach_stack = malloc((size_t)n * sizeof(*reach_stack));
+    for (int w = 0; w < n_after; w++) {
+      if (!after_is_assign[w]) continue; /* WAR only for in-place overwrites */
+      PolyUOp *write_buf = kernel_after_buffer_identity(after_nodes[w]);
+      for (int k = 0; k < n; k++) {
+        if (k == w) continue;
+        /* Version ordering between assignment kernels is represented by their
+         * exact AFTER dependencies plus same-buffer WAW edges. */
+        if (k < n_after && after_is_assign[k]) continue;
+        for (int p = 0; p < result.kernel_n_params[k]; p++) {
+          PolyUOp *binding = result.param_to_buf[k][p];
+          PolyUOp *read_buf = binding && binding->op == POLY_OP_AFTER
+                                  ? kernel_after_buffer_identity(binding)
+                                  : (PolyUOp *)poly_uop_get_buffer_identity(binding);
+          if (read_buf != write_buf) continue;
+          if (!kernel_dep_reaches(dep, n, w, k, reach_seen, reach_stack)) {
+            dep[k * n + w] = true; /* bare reader k before writer w */
+          }
+          break;
+        }
+      }
+    }
+    free(reach_seen);
+    free(reach_stack);
 
     poly_map_destroy(buf_to_prod);
 
@@ -4000,14 +4769,17 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
     PolyMap *_btp = poly_map_new((size_t)(n_after < 4 ? 4 : n_after));
     for (int _b = 0; _b < n_after; _b++) {
       if (after_is_assign[_b]) continue; /* skip in-place overwrite AFTERs */
-      PolyUOp *_buf = after_nodes[_b]->src[0];
+      PolyUOp *_buf = kernel_after_buffer_identity(after_nodes[_b]);
       if (!poly_map_get(_btp, poly_ptr_hash(_buf), _buf, poly_ptr_eq))
         poly_map_set(_btp, poly_ptr_hash(_buf), _buf, (PolyUOp *)(intptr_t)(_b + 1), poly_ptr_eq);
     }
     for (int _k = 0; _k < _nk; _k++) {
       if (!result.param_to_buf[_k]) continue;
       for (int _p = 0; _p < result.kernel_n_params[_k]; _p++) {
-        PolyUOp *_buf = result.param_to_buf[_k][_p];
+        PolyUOp *_binding = result.param_to_buf[_k][_p];
+        PolyUOp *_buf = _binding && _binding->op == POLY_OP_AFTER
+                            ? kernel_after_buffer_identity(_binding)
+                            : (PolyUOp *)poly_uop_get_buffer_identity(_binding);
         if (!_buf) continue;
         PolyUOp *_v = poly_map_get(_btp, poly_ptr_hash(_buf), _buf, poly_ptr_eq);
         if (_v) {
@@ -4026,6 +4798,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
   free(after_is_intermediate);
   free(after_is_assign);
   free(intermediate_idx);
+  free(dependency_roots);
   poly_ctx_scratch_rewind(ctx, scratch);
   return result;
 }

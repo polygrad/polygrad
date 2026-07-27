@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #include "frontend.h"
 #include "frontend_internal.h"
+#include "engine/realize.h"
 #include "engine/schedule.h"
 #include "schedule/rangeify.h"
 #include "codegen.h"
@@ -36,16 +37,71 @@ PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size) {
   return poly_buffer(ctx, poly_dtype_scalar(dt), size);
 }
 
+PolyUOp *poly_buffer_on_device_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    int64_t size,
+    int device_id
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  PolyDevice device = (PolyDevice)device_id;
+  if (device <= POLY_DEVICE_HOST || device > POLY_DEVICE_X86) return NULL;
+  return poly_buffer_on_device(ctx, poly_dtype_scalar(dt), size, device);
+}
+
 PolyUOp *poly_buffer_var_by_id(
     PolyCtx *ctx,
     int dtype_id,
     PolyUOp *batch_var,
     const int64_t *inner_dims,
-    int n_inner
+    int n_inner,
+    int device_id
 ) {
+  if (!ctx || !batch_var || n_inner < 0 || n_inner >= POLY_MAX_DIMS ||
+      (n_inner > 0 && !inner_dims))
+    return NULL;
   PolyDType dt;
   if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
-  return poly_buffer_var(ctx, poly_dtype_scalar(dt), batch_var, inner_dims, n_inner);
+  PolyDevice device = (PolyDevice)device_id;
+  if (device != POLY_DEVICE_AUTO &&
+      (device <= POLY_DEVICE_HOST || device > POLY_DEVICE_X86))
+    return NULL;
+
+  PolyUOp *var = poly_uop_unbind_var(batch_var);
+  if (!var || var->arg.kind != POLY_ARG_DEFINE_VAR || var->arg.define_var.max_val < 0)
+    return NULL;
+
+  int ndim = n_inner + 1;
+  int64_t max_shape[POLY_MAX_DIMS];
+  int64_t alloc = var->arg.define_var.max_val;
+  max_shape[0] = alloc;
+  for (int i = 0; i < n_inner; i++) {
+    if (inner_dims[i] < 0 ||
+        (inner_dims[i] != 0 && alloc > INT64_MAX / inner_dims[i]))
+      return NULL;
+    alloc *= inner_dims[i];
+    max_shape[i + 1] = inner_dims[i];
+  }
+
+  PolyUOp *base =
+      poly_buffer_on_device(ctx, poly_dtype_scalar(dt), alloc, device);
+  PolyUOp *reshaped = poly_reshape(ctx, base, max_shape, ndim);
+  if (!base || !reshaped) return NULL;
+
+  PolyUOp *starts[POLY_MAX_DIMS];
+  PolyUOp *sizes[POLY_MAX_DIMS];
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  if (!zero) return NULL;
+  starts[0] = zero;
+  sizes[0] = batch_var;
+  for (int i = 0; i < n_inner; i++) {
+    starts[i + 1] = zero;
+    sizes[i + 1] =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(inner_dims[i]));
+    if (!sizes[i + 1]) return NULL;
+  }
+  return poly_shrink_uop(ctx, reshaped, starts, sizes, ndim);
 }
 
 PolyUOp *poly_buffer_f32(PolyCtx *ctx, int64_t size) {
@@ -524,7 +580,7 @@ int poly_can_run_op(
   PolyUOp *value = canrun_build_probe_graph(probe, op, dt, shape, n_shape);
   PolyUOp *sink = value ? canrun_store_sink(probe, value) : NULL;
   if (!sink) goto cleanup;
-  sched = poly_complete_create_schedule_with_vars(probe, sink, POLY_MODE_CALL);
+  sched = poly_schedule_effect_sink(probe, sink);
   if (!sched) goto cleanup;
   plan = poly_lower_schedule(probe, sched, device);
   if (!plan) goto cleanup;
@@ -596,27 +652,32 @@ static bool collect_input_buffers_postorder(
 
     if (s == 0) {
       state[stack_top - 1] = 1;
-      for (int i = u->n_src - 1; i >= 0; i--) {
-        PolyUOp *src = u->src[i];
-        if (!src) continue;
-        uint32_t sh = poly_ptr_hash(src);
-        if (poly_map_get(visited, sh, src, poly_ptr_eq) != NULL) continue;
-        if (stack_top >= stack_cap) {
-          int new_cap = stack_cap * 2;
-          PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
-          int *new_state = realloc(state, (size_t)new_cap * sizeof(int));
-          if (!new_stack || !new_state) {
-            free(new_stack ? new_stack : stack);
-            free(new_state ? new_state : state);
-            poly_map_destroy(visited);
-            return false;
+      /* BUFFER_VIEW is an executable storage identity, not a value
+       * computation. Its sources describe alias provenance and must not add
+       * the arena/base bookkeeping buffers as separate CALL arguments. */
+      if (u->op != POLY_OP_BUFFER && u->op != POLY_OP_BUFFER_VIEW) {
+        for (int i = u->n_src - 1; i >= 0; i--) {
+          PolyUOp *src = u->src[i];
+          if (!src) continue;
+          uint32_t sh = poly_ptr_hash(src);
+          if (poly_map_get(visited, sh, src, poly_ptr_eq) != NULL) continue;
+          if (stack_top >= stack_cap) {
+            int new_cap = stack_cap * 2;
+            PolyUOp **new_stack = realloc(stack, (size_t)new_cap * sizeof(PolyUOp *));
+            int *new_state = realloc(state, (size_t)new_cap * sizeof(int));
+            if (!new_stack || !new_state) {
+              free(new_stack ? new_stack : stack);
+              free(new_state ? new_state : state);
+              poly_map_destroy(visited);
+              return false;
+            }
+            stack = new_stack;
+            state = new_state;
+            stack_cap = new_cap;
           }
-          stack = new_stack;
-          state = new_state;
-          stack_cap = new_cap;
+          stack[stack_top] = src;
+          state[stack_top++] = 0;
         }
-        stack[stack_top] = src;
-        state[stack_top++] = 0;
       }
       continue;
     }
@@ -624,7 +685,8 @@ static bool collect_input_buffers_postorder(
     stack_top--;
     if (poly_map_get(visited, h, u, poly_ptr_eq) != NULL) continue;
     poly_map_set(visited, h, u, (void *)(uintptr_t)1, poly_ptr_eq);
-    if (u->op == POLY_OP_BUFFER && !collect(u, user_data)) {
+    if ((u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) &&
+        !collect(u, user_data)) {
       free(stack);
       free(state);
       poly_map_destroy(visited);
@@ -687,7 +749,8 @@ bool poly_collect_ordered_buffers_alloc(
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
     if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        store->src[0]->op == POLY_OP_BUFFER) {
+        (store->src[0]->op == POLY_OP_BUFFER ||
+         store->src[0]->op == POLY_OP_BUFFER_VIEW)) {
       PolyUOp *buf = store->src[0];
       if (!uop_vec_contains(ordered, n, buf) && !uop_vec_append(&ordered, &n, &cap, buf)) {
         free(ordered);
@@ -722,7 +785,8 @@ int poly_collect_ordered_buffers(
   for (int i = 0; i < tensor_sink->n_src; i++) {
     PolyUOp *store = tensor_sink->src[i];
     if (store && store->op == POLY_OP_STORE && store->n_src >= 1 &&
-        store->src[0]->op == POLY_OP_BUFFER) {
+        (store->src[0]->op == POLY_OP_BUFFER ||
+         store->src[0]->op == POLY_OP_BUFFER_VIEW)) {
       PolyUOp *buf = store->src[0];
       if (!uop_vec_contains(ordered, n < max_bufs ? n : max_bufs, buf)) {
         if (n < max_bufs) ordered[n] = buf;
@@ -747,8 +811,8 @@ void poly_frontend_ctx_cleanup(PolyCtx *ctx) {
  * Cached schedules/programs need to match computations that are structurally
  * identical but use different BUFFER UOp instances, such as fresh training
  * step buffers. We hash/compare the computation DAG structure: ops, dtypes,
- * args, and connectivity, treating BUFFER
- * nodes as positional placeholders (first encountered = 0, etc.).
+ * args, and connectivity, treating BUFFER and BUFFER_VIEW storage identities
+ * as positional placeholders (first encountered = 0, etc.).
  */
 
 /* POLY_MAX_STRUCT_NODES defined in frontend_internal.h */
@@ -770,8 +834,10 @@ static uint32_t struct_hash_impl(PolyUOp *u, StructHashCtx *ctx) {
 
   uint32_t h = 0x811c9dc5; /* FNV-1a offset basis */
 
-  if (u->op == POLY_OP_BUFFER) {
-    /* BUFFER nodes: use positional ID instead of pointer identity */
+  if (u->op == POLY_OP_BUFFER || u->op == POLY_OP_BUFFER_VIEW) {
+    /* Storage identities: use positional ID instead of pointer identity.
+     * BUFFER_VIEW metadata remains in op/dtype/arg; its provenance sources
+     * are deliberately outside the executable schedule-cache identity. */
     int buf_id = -1;
     for (int i = 0; i < ctx->n_bufs; i++) {
       if (ctx->bufs[i] == u) {
@@ -865,8 +931,11 @@ static bool struct_eq_impl(PolyUOp *a, PolyUOp *b, BufPairs *bp, EqVisited *ev) 
   poly_map_set(ev->a_to_b, poly_ptr_hash(a), a, b, poly_ptr_eq);
   poly_map_set(ev->b_to_a, poly_ptr_hash(b), b, a, poly_ptr_eq);
 
-  /* Both BUFFER? Track correspondence */
-  if (a->op == POLY_OP_BUFFER && b->op == POLY_OP_BUFFER) {
+  /* Both executable storage identities? Track positional correspondence. */
+  bool a_storage = a->op == POLY_OP_BUFFER || a->op == POLY_OP_BUFFER_VIEW;
+  bool b_storage = b->op == POLY_OP_BUFFER || b->op == POLY_OP_BUFFER_VIEW;
+  if (a_storage || b_storage) {
+    if (!a_storage || !b_storage || a->op != b->op) return false;
     if (!poly_dtype_eq(a->dtype, b->dtype)) return false;
     if (!poly_arg_eq(a->arg, b->arg)) return false;
     /* Check existing mapping */
@@ -909,7 +978,8 @@ bool poly_structural_eq(const void *a, const void *b) {
   return ok;
 }
 
-/* DFS to assign positional IDs to BUFFER nodes, matching poly_structural_hash order.
+/* DFS to assign positional IDs to BUFFER/BUFFER_VIEW or shaped call PARAM
+ * storage identities, matching source traversal order.
  * Children are visited left-to-right, same as struct_hash_impl().
  * n_bufs counts total BUFFERs found (may exceed buf_order capacity).
  * buf_order is only written up to POLY_MAX_REALIZE_BUFS entries.
@@ -951,7 +1021,8 @@ void poly_collect_buf_order(
     if (visited && *n_visited < POLY_MAX_STRUCT_NODES) visited[*n_visited] = cur;
     (*n_visited)++;
 
-    if (cur->op == POLY_OP_BUFFER) {
+    if (cur->op == POLY_OP_BUFFER || cur->op == POLY_OP_BUFFER_VIEW ||
+        poly_uop_is_shaped_value_param(cur)) {
       if (buf_order && *n_bufs < POLY_MAX_REALIZE_BUFS) buf_order[*n_bufs] = cur;
       (*n_bufs)++; /* always count, even past capacity */
       continue;
@@ -1008,7 +1079,8 @@ bool poly_collect_buf_order_alloc(
     poly_map_set(seen, poly_ptr_hash(cur), cur, cur, poly_ptr_eq);
     (*out_n_visited)++;
 
-    if (cur->op == POLY_OP_BUFFER) {
+    if (cur->op == POLY_OP_BUFFER || cur->op == POLY_OP_BUFFER_VIEW ||
+        poly_uop_is_shaped_value_param(cur)) {
       ok = uop_vec_append(&buf_order, &n_bufs, &buf_cap, cur);
       continue;
     }
@@ -1048,8 +1120,9 @@ int poly_find_buf_position(PolyUOp *buf, PolyUOp **buf_order, int n_bufs) {
 
 /* Helpers shared by all builds (exec_plan + realize) */
 
-/* Defensive graph validator to avoid crashing in toposort/linearize when
- * a malformed kernel contains NULL sources. */
+/* Structural ownership/source validation plus the INDEX-coordinate predicate
+ * from pinned tinygrad/uop/spec.py:77. This is not a complete spec_tensor
+ * implementation. */
 bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
   if (!root) return false;
   PolyMap *visited = poly_map_new(256);
@@ -1126,6 +1199,22 @@ bool poly_validate_kernel_graph(PolyCtx *ctx, PolyUOp *root) {
       poly_map_destroy(visited);
       return false;
     }
+    if (u->op == POLY_OP_INDEX) {
+      for (int i = 1; i < u->n_src; i++) {
+        if (u->src[i] && !poly_dtype_is_int(u->src[i]->dtype)) {
+          fprintf(
+              stderr,
+              "polygrad: codegen: INDEX src[%d] must have integer dtype, got %s\n",
+              i, u->src[i]->dtype.name ? u->src[i]->dtype.name : "unknown"
+          );
+          free(stack);
+          free(parent_stack);
+          free(parent_src_idx);
+          poly_map_destroy(visited);
+          return false;
+        }
+      }
+    }
     for (int i = 0; i < u->n_src; i++) {
       if (!u->src[i]) {
         fprintf(
@@ -1178,7 +1267,7 @@ int poly_collect_output_buffers_in_sink(PolyUOp *tensor_sink, PolyUOp **out, int
     PolyUOp *store = tensor_sink->src[i];
     if (!store || store->op != POLY_OP_STORE || store->n_src < 1) continue;
     PolyUOp *buf = store->src[0];
-    if (!buf || buf->op != POLY_OP_BUFFER) continue;
+    if (!buf || (buf->op != POLY_OP_BUFFER && buf->op != POLY_OP_BUFFER_VIEW)) continue;
     bool dup = false;
     for (int j = 0; j < n_seen; j++) {
       if (out[j] == buf) {

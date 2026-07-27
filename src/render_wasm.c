@@ -15,6 +15,7 @@
 #include "codegen.h"
 #include "utils.h"
 #include "wasm_builder.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -273,7 +274,11 @@ typedef struct {
   bool need_exp2f;
   bool need_log2f;
   bool need_sinf;
+  bool need_exp2;
+  bool need_log2;
+  bool need_sin;
   bool need_powf;
+  bool need_pow;
   bool need_recip; /* 1/x — not a WASM op, but can use f32.div */
 } MathImports;
 
@@ -296,10 +301,32 @@ static void prescan(
         max_param = (int)u->arg.i;
     }
     if (u->op == POLY_OP_RANGE) nr++;
-    if (u->op == POLY_OP_EXP2) math->need_exp2f = true;
-    if (u->op == POLY_OP_LOG2) math->need_log2f = true;
-    if (u->op == POLY_OP_SIN) math->need_sinf = true;
-    if (u->op == POLY_OP_POW) math->need_powf = true;
+    PolyDType scalar = poly_dtype_scalar(u->dtype);
+    bool f64 = poly_dtype_is_float(scalar) && scalar.bitsize == 64;
+    if (u->op == POLY_OP_EXP2) {
+      if (f64)
+        math->need_exp2 = true;
+      else
+        math->need_exp2f = true;
+    }
+    if (u->op == POLY_OP_LOG2) {
+      if (f64)
+        math->need_log2 = true;
+      else
+        math->need_log2f = true;
+    }
+    if (u->op == POLY_OP_SIN) {
+      if (f64)
+        math->need_sin = true;
+      else
+        math->need_sinf = true;
+    }
+    if (u->op == POLY_OP_POW) {
+      if (f64)
+        math->need_pow = true;
+      else
+        math->need_powf = true;
+    }
   }
   *n_params_out = max_param >= 0 ? max_param + 1 : n_param_nodes;
   *n_ranges_out = nr;
@@ -313,9 +340,12 @@ static void build_type_section(WasmBuf *mod, int n_params, MathImports *math) {
 
   /* Count function types needed */
   int n_types = 1; /* kernel type */
-  bool need_unary_math = math->need_exp2f || math->need_log2f || math->need_sinf;
-  if (need_unary_math) n_types++;
+  bool need_unary_f32 = math->need_exp2f || math->need_log2f || math->need_sinf;
+  bool need_unary_f64 = math->need_exp2 || math->need_log2 || math->need_sin;
+  if (need_unary_f32) n_types++;
+  if (need_unary_f64) n_types++;
   if (math->need_powf) n_types++;
+  if (math->need_pow) n_types++;
 
   wb_uleb128(&sec, n_types);
 
@@ -326,19 +356,23 @@ static void build_type_section(WasmBuf *mod, int n_params, MathImports *math) {
     wb_byte(&sec, WASM_TYPE_I32); /* all params are i32 byte offsets */
   wb_uleb128(&sec, 0); /* no results */
 
-  /* Type 1: unary math — (f32) → f32 */
-  int math_type_idx = 1;
-  if (need_unary_math) {
+  /* Unary math imports preserve the operation dtype. */
+  if (need_unary_f32) {
     wb_byte(&sec, WASM_TYPE_FUNC);
     wb_uleb128(&sec, 1); /* 1 param */
     wb_byte(&sec, WASM_TYPE_F32);
     wb_uleb128(&sec, 1); /* 1 result */
     wb_byte(&sec, WASM_TYPE_F32);
-    math_type_idx = 1;
-    (void)math_type_idx;
+  }
+  if (need_unary_f64) {
+    wb_byte(&sec, WASM_TYPE_FUNC);
+    wb_uleb128(&sec, 1);
+    wb_byte(&sec, WASM_TYPE_F64);
+    wb_uleb128(&sec, 1);
+    wb_byte(&sec, WASM_TYPE_F64);
   }
 
-  /* Type 2 (or 1 if no unary): binary math — (f32, f32) → f32 */
+  /* Binary math imports preserve the operation dtype too. */
   if (math->need_powf) {
     wb_byte(&sec, WASM_TYPE_FUNC);
     wb_uleb128(&sec, 2); /* 2 params */
@@ -346,6 +380,14 @@ static void build_type_section(WasmBuf *mod, int n_params, MathImports *math) {
     wb_byte(&sec, WASM_TYPE_F32);
     wb_uleb128(&sec, 1); /* 1 result */
     wb_byte(&sec, WASM_TYPE_F32);
+  }
+  if (math->need_pow) {
+    wb_byte(&sec, WASM_TYPE_FUNC);
+    wb_uleb128(&sec, 2);
+    wb_byte(&sec, WASM_TYPE_F64);
+    wb_byte(&sec, WASM_TYPE_F64);
+    wb_uleb128(&sec, 1);
+    wb_byte(&sec, WASM_TYPE_F64);
   }
 
   wb_section(mod, WASM_SEC_TYPE, &sec);
@@ -362,7 +404,11 @@ static int build_import_section(WasmBuf *mod, MathImports *math) {
   if (math->need_exp2f) n_imports++;
   if (math->need_log2f) n_imports++;
   if (math->need_sinf) n_imports++;
+  if (math->need_exp2) n_imports++;
+  if (math->need_log2) n_imports++;
+  if (math->need_sin) n_imports++;
   if (math->need_powf) n_imports++;
+  if (math->need_pow) n_imports++;
 
   wb_uleb128(&sec, n_imports);
 
@@ -373,37 +419,72 @@ static int build_import_section(WasmBuf *mod, MathImports *math) {
   wb_byte(&sec, 0x00); /* limits: no max */
   wb_uleb128(&sec, 0); /* initial: 0 pages */
 
-  /* Math function imports — unary: type index 1 (f32→f32) */
+  int next_type = 1;
+  int unary_f32_type = (math->need_exp2f || math->need_log2f || math->need_sinf) ? next_type++ : -1;
+  int unary_f64_type = (math->need_exp2 || math->need_log2 || math->need_sin) ? next_type++ : -1;
+  int powf_type = math->need_powf ? next_type++ : -1;
+  int pow_type = math->need_pow ? next_type++ : -1;
+
+  /* f32 math imports */
   int func_idx = 0;
-  bool need_unary = math->need_exp2f || math->need_log2f || math->need_sinf;
   if (math->need_exp2f) {
     wb_name(&sec, "math");
     wb_name(&sec, "exp2f");
     wb_byte(&sec, 0x00); /* import kind: function */
-    wb_uleb128(&sec, 1); /* type index 1 */
+    wb_uleb128(&sec, unary_f32_type);
     func_idx++;
   }
   if (math->need_log2f) {
     wb_name(&sec, "math");
     wb_name(&sec, "log2f");
     wb_byte(&sec, 0x00);
-    wb_uleb128(&sec, 1);
+    wb_uleb128(&sec, unary_f32_type);
     func_idx++;
   }
   if (math->need_sinf) {
     wb_name(&sec, "math");
     wb_name(&sec, "sinf");
     wb_byte(&sec, 0x00);
-    wb_uleb128(&sec, 1);
+    wb_uleb128(&sec, unary_f32_type);
     func_idx++;
   }
-  /* Math function import — binary: type index 2 (or 1 if no unary) */
+
+  /* f64 math imports */
+  if (math->need_exp2) {
+    wb_name(&sec, "math");
+    wb_name(&sec, "exp2");
+    wb_byte(&sec, 0x00);
+    wb_uleb128(&sec, unary_f64_type);
+    func_idx++;
+  }
+  if (math->need_log2) {
+    wb_name(&sec, "math");
+    wb_name(&sec, "log2");
+    wb_byte(&sec, 0x00);
+    wb_uleb128(&sec, unary_f64_type);
+    func_idx++;
+  }
+  if (math->need_sin) {
+    wb_name(&sec, "math");
+    wb_name(&sec, "sin");
+    wb_byte(&sec, 0x00);
+    wb_uleb128(&sec, unary_f64_type);
+    func_idx++;
+  }
+
+  /* Binary math imports */
   if (math->need_powf) {
-    int powf_type = need_unary ? 2 : 1;
     wb_name(&sec, "math");
     wb_name(&sec, "powf");
     wb_byte(&sec, 0x00);
     wb_uleb128(&sec, powf_type);
+    func_idx++;
+  }
+  if (math->need_pow) {
+    wb_name(&sec, "math");
+    wb_name(&sec, "pow");
+    wb_byte(&sec, 0x00);
+    wb_uleb128(&sec, pow_type);
     func_idx++;
   }
 
@@ -453,6 +534,10 @@ static PolyRendererCaps poly_wasm_renderer_caps(void) {
   return (PolyRendererCaps){
       .has_mulacc = true,
       .has_threefry = false,
+      .has_exp2 = true,
+      .has_log2 = true,
+      .has_sin = true,
+      .has_int64 = true,
       .has_local = false,
       .has_simd_int = false,
       .has_simd_float = true,
@@ -1177,6 +1262,43 @@ static void emit_scalar_where_sources(WasmBuf *body, LocalMap *locals, PolyUOp *
 
 /* Emit scalar ALU opcode */
 
+static int math_import_index(const MathImports *math, PolyOps op, bool f64) {
+  int idx = 0;
+  if (math->need_exp2f) {
+    if (op == POLY_OP_EXP2 && !f64) return idx;
+    idx++;
+  }
+  if (math->need_log2f) {
+    if (op == POLY_OP_LOG2 && !f64) return idx;
+    idx++;
+  }
+  if (math->need_sinf) {
+    if (op == POLY_OP_SIN && !f64) return idx;
+    idx++;
+  }
+  if (math->need_exp2) {
+    if (op == POLY_OP_EXP2 && f64) return idx;
+    idx++;
+  }
+  if (math->need_log2) {
+    if (op == POLY_OP_LOG2 && f64) return idx;
+    idx++;
+  }
+  if (math->need_sin) {
+    if (op == POLY_OP_SIN && f64) return idx;
+    idx++;
+  }
+  if (math->need_powf) {
+    if (op == POLY_OP_POW && !f64) return idx;
+    idx++;
+  }
+  if (math->need_pow) {
+    if (op == POLY_OP_POW && f64) return idx;
+    idx++;
+  }
+  return -1;
+}
+
 static void emit_alu_scalar(
     WasmBuf *code,
     PolyOps op,
@@ -1205,20 +1327,22 @@ static void emit_alu_scalar(
     wb_byte(code, b64 ? WASM_OP_F64_TRUNC : WASM_OP_F32_TRUNC);
     break;
   case POLY_OP_EXP2: {
-    int idx = 0;
-    (void)math;
+    int idx = math_import_index(math, op, b64);
+    assert(idx >= 0);
     wb_byte(code, WASM_OP_CALL);
     wb_uleb128(code, idx);
     break;
   }
   case POLY_OP_LOG2: {
-    int idx = math->need_exp2f ? 1 : 0;
+    int idx = math_import_index(math, op, b64);
+    assert(idx >= 0);
     wb_byte(code, WASM_OP_CALL);
     wb_uleb128(code, idx);
     break;
   }
   case POLY_OP_SIN: {
-    int idx = (math->need_exp2f ? 1 : 0) + (math->need_log2f ? 1 : 0);
+    int idx = math_import_index(math, op, b64);
+    assert(idx >= 0);
     wb_byte(code, WASM_OP_CALL);
     wb_uleb128(code, idx);
     break;
@@ -1322,7 +1446,8 @@ static void emit_alu_scalar(
     break;
 
   case POLY_OP_POW: {
-    int idx = (math->need_exp2f ? 1 : 0) + (math->need_log2f ? 1 : 0) + (math->need_sinf ? 1 : 0);
+    int idx = math_import_index(math, op, b64);
+    assert(idx >= 0);
     wb_byte(code, WASM_OP_CALL);
     wb_uleb128(code, idx);
     break;
@@ -2287,15 +2412,11 @@ static void build_code_scalar(
             alloc_local(u->dtype, &next_i32, &next_i64, &next_f32, &next_f64, &next_v128);
         int addr = lm_get(&locals, u->src[0]);
 
-        /* Gated load: LOAD(INDEX(buf, idx), alt, gate) in tinygrad final IR.
-         * Keep accepting INDEX(..., gate) during transition. */
+        /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
         PolyUOp *gate_uop =
             (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
                 ? u->src[2]
-                : ((ld_idx && ld_idx->n_src >= 3 &&
-                    poly_dtype_is_bool(poly_dtype_scalar(ld_idx->src[2]->dtype)))
-                       ? ld_idx->src[2]
-                       : NULL);
+                : NULL;
         bool gated = gate_uop != NULL;
 
         if (gated) {

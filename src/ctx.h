@@ -30,6 +30,13 @@ struct PolyCtx {
   size_t buffer_write_bytes;
   size_t buffer_copy_count;
   size_t buffer_copy_bytes;
+  uint64_t global_ops;
+  uint64_t global_mem;
+  double time_sum_s;
+  uint64_t kernel_count;
+  uint64_t mem_used;
+  uint64_t mem_used_per_device[POLY_DEVICE_DISK + 1];
+  int stats_suppression_depth;
   PolyMap *shape_cache;
   PolyMap *buffers;
   PolyMap *tensors_by_uop;
@@ -73,6 +80,8 @@ PolyUOp **poly_toposort_ex_user_scratch(
 );
 
 int64_t poly_ctx_next_unique_id(PolyCtx *ctx);
+void poly_ctx_record_memory_alloc(PolyCtx *ctx, PolyDevice device, size_t nbytes);
+void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes);
 void poly_ctx_reserve_unique_id(PolyCtx *ctx, int64_t id);
 void poly_ctx_reserve_buf_tag(PolyCtx *ctx, int32_t tag);
 

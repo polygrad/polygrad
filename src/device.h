@@ -49,6 +49,8 @@ struct PolyBuffer {
   PolyBuffer *src;  /* root source buffer (usually host), or NULL */
   bool valid; /* does ptr contain current logical contents? */
   PolyFrontendBufferReleaseFn frontend_release; /* imported HOST owner release hook */
+  bool memory_accounted; /* contributes to ctx GlobalCounters.mem_used */
+  PolyDevice memory_device; /* allocation device used for per-device accounting */
 };
 
 /* Attach buffer data to a BUFFER UOp.
@@ -71,6 +73,17 @@ PolyUOp *poly_buffer_from_host(
     int64_t *dims, int ndim
 );
 
+/* Create a read/write mmap-backed one-dimensional DISK buffer. The mapped
+ * file owns its lifetime through ctx->buffers and is excluded from mem_used. */
+PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id);
+
+/* Create an attached BUFFER_VIEW alias into an existing realized buffer. */
+PolyUOp *poly_buffer_view(
+    PolyCtx *ctx, PolyUOp *base, int64_t numel, size_t byte_offset
+);
+
+const PolyAllocator *poly_disk_get_allocator(void);
+
 /* Notify the frontend that the given PolyBuffer* key is no longer needed. */
 void poly_frontend_buffer_release_key(uintptr_t buffer_key);
 
@@ -88,11 +101,11 @@ PolyBuffer *poly_buffer_get(PolyCtx *ctx, PolyUOp *buf);
  * Does NOT touch b->src. Does not remove from the side table.
  * Use this when you want to free only the current residency (e.g. during
  * migration where the old current is discarded but src is retained). */
-void poly_buffer_free(PolyBuffer *b);
+void poly_buffer_free(PolyCtx *ctx, PolyBuffer *b);
 
 /* Free this residency AND its src chain. Use when fully discarding a logical
  * buffer (poly_buffer_remove, ctx destroy, full rebinding via poly_buffer_set). */
-void poly_buffer_free_chain(PolyBuffer *b);
+void poly_buffer_free_chain(PolyCtx *ctx, PolyBuffer *b);
 
 /* Remove a buffer from the side table (frees current + src chain). */
 void poly_buffer_remove(PolyCtx *ctx, PolyUOp *buf);

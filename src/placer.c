@@ -15,16 +15,8 @@
 #include <string.h>
 
 typedef struct {
-  PolyUOp *logical;
-  PolyDevice device;
-  PolyUOp *physical;
-} PolyLowerMemoEntry;
-
-typedef struct {
   PolyCtx *ctx;
-  PolyLowerMemoEntry *memo;
-  int n_memo;
-  int memo_cap;
+  PolyMap *memo[POLY_DEVICE_DISK + 1];
   PolyTensor *active_place;
   int suppress_place_facts;
 } PolyPhysicalizer;
@@ -84,6 +76,11 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
   }
 
   PolyDevice result = POLY_DEVICE_AUTO;
+  if (u->op == POLY_OP_DEVICE) {
+    result = poly_device_from_device_uop(u);
+    if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    return result;
+  }
   if (u->op == POLY_OP_COPY && u->n_src >= 2) {
     result = poly_device_from_device_uop(u->src[1]);
     if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
@@ -94,8 +91,20 @@ PolyDevice poly_uop_device_cached(PolyUOp *u, PolyMap *cache) {
     if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
     return result;
   }
+  if (u->op == POLY_OP_PARAM && u->arg.kind == POLY_ARG_PARAM && u->arg.param &&
+      u->arg.param->device != POLY_DEVICE_AUTO) {
+    result = (PolyDevice)u->arg.param->device;
+    if (cache)
+      poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    return result;
+  }
+  if (u->op == POLY_OP_AFTER && u->n_src >= 1) {
+    result = poly_uop_device_cached(u->src[0], cache);
+    if (cache) poly_map_set(cache, poly_ptr_hash(u), u, (void *)(intptr_t)(result + 1), poly_ptr_eq);
+    return result;
+  }
 
-  if (u->op != POLY_OP_CONST && u->op != POLY_OP_VCONST && u->op != POLY_OP_DEVICE) {
+  if (u->op != POLY_OP_CONST && u->op != POLY_OP_VCONST) {
     for (int i = 0; i < u->n_src; i++) {
       PolyDevice child = poly_uop_device_cached(u->src[i], cache);
       if (child == POLY_DEVICE_AUTO) continue;
@@ -128,7 +137,9 @@ static PolyUOp *copy_to_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device) 
 static bool placement_devices_share_storage(PolyDevice a, PolyDevice b) {
   if (a == POLY_DEVICE_AUTO || b == POLY_DEVICE_AUTO) return false;
   if (poly_devices_share_storage(a, b)) return true;
-  if (a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST) return false;
+  if (a == POLY_DEVICE_HOST || b == POLY_DEVICE_HOST ||
+      a == POLY_DEVICE_DISK || b == POLY_DEVICE_DISK)
+    return false;
   return poly_device_is_host_addressable(a) && poly_device_is_host_addressable(b);
 }
 
@@ -136,27 +147,40 @@ static PolyUOp *ensure_on_device(PolyCtx *ctx, PolyUOp *value, PolyDevice device
   if (!ctx || !value || device == POLY_DEVICE_AUTO) return value;
   PolyDevice current = poly_uop_device(value);
   if (current != POLY_DEVICE_AUTO && placement_devices_share_storage(current, device)) return value;
+  const PolyUOp *identity = poly_uop_get_buffer_identity(value);
+  PolyBuffer *storage = identity ? poly_buffer_get(ctx, (PolyUOp *)identity) : NULL;
+  if (storage && storage->ptr && storage->device != POLY_DEVICE_AUTO &&
+      placement_devices_share_storage(storage->device, device))
+    return value;
   if (current == POLY_DEVICE_AUTO && placement_devices_share_storage(poly_device_default(), device))
     return value;
   return copy_to_device(ctx, value, device);
 }
 
 static PolyUOp *memo_get(PolyPhysicalizer *p, PolyUOp *logical, PolyDevice device) {
-  for (int i = 0; i < p->n_memo; i++)
-    if (p->memo[i].logical == logical && p->memo[i].device == device) return p->memo[i].physical;
-  return NULL;
+  if (!p || !logical || device <= POLY_DEVICE_AUTO || device > POLY_DEVICE_DISK ||
+      !p->memo[device])
+    return NULL;
+  return poly_map_get(
+      p->memo[device], poly_ptr_hash(logical), logical, poly_ptr_eq
+  );
 }
 
 static bool memo_put(PolyPhysicalizer *p, PolyUOp *logical, PolyDevice device, PolyUOp *physical) {
-  if (p->n_memo >= p->memo_cap) {
-    int new_cap = p->memo_cap ? p->memo_cap * 2 : 128;
-    PolyLowerMemoEntry *new_memo = realloc(p->memo, (size_t)new_cap * sizeof(PolyLowerMemoEntry));
-    if (!new_memo) return false;
-    p->memo = new_memo;
-    p->memo_cap = new_cap;
-  }
-  p->memo[p->n_memo++] = (PolyLowerMemoEntry){logical, device, physical};
+  if (!p || !logical || !physical || device <= POLY_DEVICE_AUTO ||
+      device > POLY_DEVICE_DISK)
+    return false;
+  if (!p->memo[device]) p->memo[device] = poly_map_new(128);
+  poly_map_set(
+      p->memo[device], poly_ptr_hash(logical), logical, physical, poly_ptr_eq
+  );
   return true;
+}
+
+static void physicalizer_destroy(PolyPhysicalizer *p) {
+  if (!p) return;
+  for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++)
+    poly_map_destroy(p->memo[device]);
 }
 
 static bool placement_rebuilds_sources(PolyUOp *u) {
@@ -168,8 +192,181 @@ static bool placement_rebuilds_sources(PolyUOp *u) {
   return true;
 }
 
+static bool placement_opaque_body_op(PolyOps op) {
+  return op == POLY_OP_CALL || op == POLY_OP_FUNCTION;
+}
+
 static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device);
 static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device);
+
+/* Placement changes sources at the logical->physical boundary, but the
+ * rebuilt UOp keeps tinygrad's original op/dtype/arg/tag identity. */
+static PolyUOp *placement_rebuild_with_sources(
+    PolyPhysicalizer *p,
+    PolyUOp *u,
+    PolyUOp **src
+) {
+  if (!p || !p->ctx || !u || (u->n_src > 0 && !src)) return NULL;
+  return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(
+                   p->ctx, u->op, u->dtype, src, u->n_src, u->arg, u->tag,
+                   u->tag_arg
+               )
+             : poly_uop(p->ctx, u->op, u->dtype, src, u->n_src, u->arg);
+}
+
+/* An assignment destination is an existing storage identity, not an ordinary
+ * value input that placement may replace with COPY(storage, device).  A PLACE
+ * assignment seeds the exact destination mapping before reaching this helper;
+ * otherwise retain a buffer-identity destination and lower only the value
+ * being written.  Nested AFTER versions recurse through lower_value so their
+ * dependency chain remains intact. */
+static PolyUOp *lower_assign_target(
+    PolyPhysicalizer *p,
+    PolyUOp *target,
+    PolyDevice device
+) {
+  if (!p || !target) return NULL;
+  PolyUOp *placed = memo_get(p, target, device);
+  if (placed) return placed;
+  if (poly_uop_has_buffer_identity(target)) return target;
+  return lower_value(p, target, device);
+}
+
+static bool shape_numel_u64(PolyShape shape, uint64_t *out) {
+  if (!out || shape.ndim < 0) return false;
+  uint64_t numel = 1;
+  for (int d = 0; d < shape.ndim; d++) {
+    if (shape.dims[d] < 0 ||
+        (shape.dims[d] != 0 && numel > UINT64_MAX / (uint64_t)shape.dims[d]))
+      return false;
+    numel *= (uint64_t)shape.dims[d];
+  }
+  *out = numel;
+  return true;
+}
+
+/* At a tensor materialization boundary, a contiguous SHRINK of an already
+ * realized buffer is a Buffer view in tinygrad: no kernel is scheduled, and a
+ * later .to(device) copies only the selected byte range. Reuse Polygrad's
+ * existing BUFFER_VIEW identity for that physical fact while retaining the
+ * logical SHRINK/RESHAPE graph. This must not run during recursive value
+ * lowering: tinygrad keeps nested movement logical and parameterizes an
+ * already-realized slice only when it becomes a CALL argument. */
+static PolyUOp *lower_contiguous_realized_view(
+    PolyPhysicalizer *p,
+    PolyUOp *u,
+    PolyDevice device
+) {
+  if (!p || !u) return NULL;
+  int n_steps = 0;
+  bool has_shrink = false;
+  PolyUOp *base = u;
+  while (base && base->n_src >= 1 &&
+         (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK)) {
+    if (base->op == POLY_OP_SHRINK) {
+      if (base->arg.kind != POLY_ARG_PAIR_TUPLE) return NULL;
+      has_shrink = true;
+    }
+    n_steps++;
+    base = base->src[0];
+  }
+  if (!has_shrink || !base || !poly_uop_has_buffer_identity(base)) return NULL;
+  const PolyUOp *identity = poly_uop_get_buffer_identity(base);
+  PolyBuffer *storage = poly_buffer_get(p->ctx, (PolyUOp *)identity);
+  if (!storage || (!storage->ptr && storage->nbytes != 0) || !storage->valid) return NULL;
+  if (!placement_devices_share_storage(storage->device, device)) return NULL;
+
+  PolyUOp **steps = malloc((size_t)n_steps * sizeof(*steps));
+  if (!steps) return NULL;
+  PolyUOp *cur = u;
+  for (int i = 0; i < n_steps; i++, cur = cur->src[0]) steps[i] = cur;
+
+  PolyShape shape = poly_uop_max_shape_cached(p->ctx, base);
+  uint64_t base_numel = 0;
+  if (!shape_numel_u64(shape, &base_numel)) {
+    free(steps);
+    return NULL;
+  }
+  uint64_t element_offset = 0;
+  for (int i = n_steps - 1; i >= 0; i--) {
+    PolyUOp *step = steps[i];
+    PolyShape next = poly_uop_max_shape_cached(p->ctx, step);
+    uint64_t current_numel = 0, next_numel = 0;
+    if (!shape_numel_u64(shape, &current_numel) || !shape_numel_u64(next, &next_numel)) {
+      free(steps);
+      return NULL;
+    }
+    if (step->op == POLY_OP_RESHAPE) {
+      if (current_numel != next_numel) {
+        free(steps);
+        return NULL;
+      }
+      shape = next;
+      continue;
+    }
+
+    if (step->arg.pair_tuple.n != shape.ndim || next.ndim != shape.ndim) {
+      free(steps);
+      return NULL;
+    }
+    uint64_t stride = 1, start = 0, last = 0, selected = 1;
+    bool empty = false, ok = true;
+    for (int d = shape.ndim - 1; d >= 0; d--) {
+      int64_t begin = step->arg.pair_tuple.pairs[d][0];
+      int64_t end = step->arg.pair_tuple.pairs[d][1];
+      int64_t dim = shape.dims[d];
+      if (dim < 0 || begin < 0 || end < begin || end > dim) {
+        ok = false;
+        break;
+      }
+      uint64_t length = (uint64_t)(end - begin);
+      if ((uint64_t)begin > UINT64_MAX / stride ||
+          start > UINT64_MAX - (uint64_t)begin * stride) {
+        ok = false;
+        break;
+      }
+      start += (uint64_t)begin * stride;
+      if (length == 0) {
+        empty = true;
+      } else {
+        uint64_t tail = (uint64_t)(end - 1);
+        if (tail > UINT64_MAX / stride || last > UINT64_MAX - tail * stride ||
+            selected > UINT64_MAX / length) {
+          ok = false;
+          break;
+        }
+        last += tail * stride;
+        selected *= length;
+      }
+      if ((uint64_t)dim != 0 && stride > UINT64_MAX / (uint64_t)dim) {
+        ok = false;
+        break;
+      }
+      stride *= (uint64_t)dim;
+    }
+    if (!ok || (!empty && (last < start || last - start + 1 != selected)) ||
+        element_offset > UINT64_MAX - start) {
+      free(steps);
+      return NULL;
+    }
+    element_offset += start;
+    shape = next;
+  }
+  free(steps);
+
+  uint64_t numel = 0;
+  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(identity->dtype));
+  if (!shape_numel_u64(shape, &numel) || numel > INT64_MAX || itemsize == 0 ||
+      element_offset > SIZE_MAX / itemsize)
+    return NULL;
+  PolyUOp *view = poly_buffer_view(
+      p->ctx, (PolyUOp *)identity, (int64_t)numel, (size_t)element_offset * itemsize
+  );
+  if (!view) return NULL;
+  if (shape.ndim == 1 && shape.dims[0] == (int64_t)numel) return view;
+  return poly_reshape(p->ctx, view, shape.dims, shape.ndim);
+}
 
 static PolyUOp *find_assign_store_for_after(PolyUOp *u) {
   if (!u || u->op != POLY_OP_AFTER || u->n_src < 2 || !u->src[0]) return NULL;
@@ -182,7 +379,41 @@ static PolyUOp *find_assign_store_for_after(PolyUOp *u) {
   return NULL;
 }
 
-static PolyDevice resolve_tensor_device(PolyCtx *ctx, PolyTensor *tensor) {
+static bool assign_chain_contains_version(PolyUOp *root, PolyUOp *version) {
+  for (PolyUOp *u = root; find_assign_store_for_after(u); u = u->src[0])
+    if (u == version) return true;
+  return false;
+}
+
+/* tinygrad's .to() puts COPY in the Tensor UOp before assign creates any
+ * AFTER versions.  Polygrad retains the portable versions in uop_logical and
+ * projects that COPY at the PLACE boundary, so an earlier version can be
+ * reached before the exact current PLACE row.  Resolve only exact members of
+ * a live PLACE's assignment chain; sharing a terminal BUFFER is insufficient
+ * because the source VALUE intentionally shares that provenance. */
+static PolyTensor *find_place_owner_for_assign_version(
+    PolyCtx *ctx,
+    PolyUOp *version,
+    PolyDevice device
+) {
+  if (!ctx || !version || version->op != POLY_OP_AFTER) return NULL;
+  PolyTensor *best = NULL;
+  for (int i = 0; i < ctx->n_tensors; i++) {
+    PolyTensor *tensor = ctx->tensors[i];
+    if (!tensor || tensor->role != POLY_TENSOR_PLACE) continue;
+    /* Assignment-chain ownership is placement identity, not allocator
+     * compatibility: CPU, INTERP, and x86 can share storage while retaining
+     * distinct explicit COPY destinations. */
+    if (device != POLY_DEVICE_AUTO && tensor->device != device) continue;
+    if (!assign_chain_contains_version(tensor->uop_logical, version) &&
+        !assign_chain_contains_version(tensor->uop_physical, version))
+      continue;
+    if (!best || tensor->order > best->order) best = tensor;
+  }
+  return best;
+}
+
+PolyDevice poly_tensor_resolved_device(PolyCtx *ctx, PolyTensor *tensor) {
   PolyDevice device = tensor ? tensor->device : POLY_DEVICE_AUTO;
   if (device == POLY_DEVICE_AUTO) device = poly_ctx_get_preferred_device(ctx);
   if (device == POLY_DEVICE_AUTO) device = poly_device_default();
@@ -207,7 +438,7 @@ static PolyUOp *lower_place_source(PolyPhysicalizer *p, PolyTensor *place) {
 
 static PolyUOp *lower_place(PolyPhysicalizer *p, PolyTensor *place) {
   if (!p || !place) return NULL;
-  PolyDevice target_device = resolve_tensor_device(p->ctx, place);
+  PolyDevice target_device = poly_tensor_resolved_device(p->ctx, place);
 
   if (!place->source || place->source == place) {
     PolyTensor *prev_active = p->active_place;
@@ -216,7 +447,9 @@ static PolyUOp *lower_place(PolyPhysicalizer *p, PolyTensor *place) {
     PolyUOp *base = lower_value(p, root, target_device);
     p->active_place = prev_active;
     if (!base) return NULL;
-    return ensure_on_device(p->ctx, base, target_device);
+    PolyUOp *target = ensure_on_device(p->ctx, base, target_device);
+    if (!target || !memo_put(p, place->uop_logical, target_device, target)) return NULL;
+    return target;
   }
 
   PolyTensor *prev_active = p->active_place;
@@ -233,32 +466,48 @@ static PolyUOp *lower_place(PolyPhysicalizer *p, PolyTensor *place) {
     return NULL;
   }
 
-  PolyUOp *store = find_assign_store_for_after(place->uop_logical);
+  /* A live realize-map substitution may have installed a current physical
+   * alias for dependencies inside this pending PLACE assignment. Project the
+   * complete assignment-version chain onto the placement-owned target COPY,
+   * then lower that chain as one graph. Rebuilding only the outer STORE leaves
+   * nested STOREs writing the portable source BUFFER instead of the placed
+   * value, which can mutate imported host data and replay an old version. */
+  PolyUOp *effect_root = poly_tensor_uop(place);
+  PolyUOp *store = find_assign_store_for_after(effect_root);
+  if (!store && effect_root != place->uop_logical) {
+    effect_root = place->uop_logical;
+    store = find_assign_store_for_after(place->uop_logical);
+  }
   if (store) {
-    PolyUOp *value = lower_value(p, store->src[1], target_device);
-    if (!value) {
+    PolyUOp *effect_base = effect_root;
+    while (find_assign_store_for_after(effect_base)) effect_base = effect_base->src[0];
+    /* Seed the existing physicalizer memo instead of graph-substituting the
+     * base with COPY(base, device). A recursive substitution would enter that
+     * self-containing COPY and reject the cycle; the memo is the placement
+     * pass's canonical logical->physical relation. */
+    if (!memo_put(p, effect_base, target_device, target)) {
       p->active_place = prev_active;
       return NULL;
     }
-    PolyUOp *new_store = poly_store_val(p->ctx, target, value);
-    if (!new_store) {
+    target = lower_value(p, effect_root, target_device);
+    if (!target) {
       p->active_place = prev_active;
       return NULL;
     }
-    PolyUOp *src[2] = {target, new_store};
-    target = poly_uop(p->ctx, POLY_OP_AFTER, target->dtype, src, 2, poly_arg_none());
   }
 
   p->active_place = prev_active;
+  if (!memo_put(p, place->uop_logical, target_device, target)) return NULL;
   return target;
 }
 
 static PolyUOp *lower_tensor(PolyPhysicalizer *p, PolyTensor *tensor) {
   if (!p || !tensor) return NULL;
-  PolyDevice device = resolve_tensor_device(p->ctx, tensor);
+  PolyDevice device = poly_tensor_resolved_device(p->ctx, tensor);
   if (tensor->role == POLY_TENSOR_PLACE) return lower_place(p, tensor);
   PolyUOp *root = poly_tensor_uop(tensor);
-  PolyUOp *base = lower_value(p, root, device);
+  PolyUOp *base = lower_contiguous_realized_view(p, root, device);
+  if (!base) base = lower_value(p, root, device);
   if (!base) return NULL;
   return ensure_on_device(p->ctx, base, device);
 }
@@ -275,8 +524,17 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
                                 ? NULL
                                 : poly_tensor_find_current(p->ctx, u, device, POLY_TENSOR_PLACE);
   if (place_fact && place_fact != p->active_place) {
-    result = lower_place(p, place_fact);
-    if (!result) return NULL;
+    /* A newly-created PLACE can inherit its source's current physical root;
+     * that root still needs the requested placement. A different current
+     * physical root installed by callify is already tinygrad's mapped live
+     * Tensor value and must not replay the retained logical assignment graph. */
+    PolyUOp *source_current = place_fact->source ? poly_tensor_uop(place_fact->source) : NULL;
+    if (place_fact->uop_physical == u && u != source_current) {
+      result = u;
+    } else {
+      result = lower_place(p, place_fact);
+      if (!result) return NULL;
+    }
   }
 
   PolyTensor *fact = NULL;
@@ -287,24 +545,64 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
   }
 
   if (!result && (u->op == POLY_OP_BUFFER || u->op == POLY_OP_PARAM)) {
+    PolyDevice declared = poly_uop_device(u);
     PolyBuffer *buf = poly_buffer_get(p->ctx, u);
-    if (buf && buf->ptr && buf->device != POLY_DEVICE_AUTO &&
-        placement_devices_share_storage(buf->device, device))
+    if ((declared != POLY_DEVICE_AUTO && placement_devices_share_storage(declared, device)) ||
+        (buf && buf->ptr && buf->device != POLY_DEVICE_AUTO &&
+         placement_devices_share_storage(buf->device, device)))
       result = u;
     else
       result = copy_to_device(p->ctx, u, device);
-  } else if (!placement_rebuilds_sources(u) || u->n_src == 0) {
+  } else if (!result && (!placement_rebuilds_sources(u) || u->n_src == 0)) {
     result = u;
-  } else if (u->op == POLY_OP_COPY || u->op == POLY_OP_DEVICE) {
+  } else if (!result && (u->op == POLY_OP_COPY || u->op == POLY_OP_DEVICE)) {
     result = u;
-  } else if (u->op == POLY_OP_AFTER) {
+  } else if (!result && u->op == POLY_OP_AFTER) {
     PolyUOp *assign_store = find_assign_store_for_after(u);
     if (assign_store) {
-      PolyUOp *new_store = lower_effect(p, assign_store, device);
+      /* A saved inner version is no longer an exact tensors_by_uop key after
+       * its PLACE advances to a later assignment.  Before preserving an
+       * ordinary BUFFER destination, establish the owning PLACE's existing
+       * base->COPY memo.  During that recursive lowering active_place prevents
+       * re-entry, and every version retains the same two-source recurrence. */
+      if (!find_assign_store_for_after(u->src[0]) && !p->suppress_place_facts) {
+        PolyTensor *owner = find_place_owner_for_assign_version(p->ctx, u, device);
+        if (owner && owner != p->active_place) {
+          if (!lower_place(p, owner)) return NULL;
+          result = memo_get(p, u, device);
+          if (!result) return NULL;
+        }
+      }
+    }
+    if (assign_store && !result) {
+      PolyUOp *new_target = lower_assign_target(p, u->src[0], device);
+      PolyUOp *value = lower_value(p, assign_store->src[1], device);
+      PolyUOp *store_stack[16];
+      PolyUOp **store_src = assign_store->n_src > 16
+                                ? malloc((size_t)assign_store->n_src * sizeof(*store_src))
+                                : store_stack;
+      if (!new_target || !value || !store_src) {
+        if (store_src && store_src != store_stack) free(store_src);
+        return NULL;
+      }
+      memcpy(store_src, assign_store->src, (size_t)assign_store->n_src * sizeof(*store_src));
+      store_src[0] = new_target;
+      store_src[1] = value;
+      PolyUOp *new_store = placement_rebuild_with_sources(p, assign_store, store_src);
+      if (store_src != store_stack) free(store_src);
       if (!new_store) return NULL;
-      if (new_store != assign_store) {
-        PolyUOp *src[2] = {u->src[0], new_store};
-        result = poly_uop(p->ctx, POLY_OP_AFTER, u->dtype, src, 2, u->arg);
+      if (new_target != u->src[0] || new_store != assign_store) {
+        PolyUOp *after_stack[16];
+        PolyUOp **after_src = u->n_src > 16
+                                  ? malloc((size_t)u->n_src * sizeof(*after_src))
+                                  : after_stack;
+        if (!after_src) return NULL;
+        memcpy(after_src, u->src, (size_t)u->n_src * sizeof(*after_src));
+        after_src[0] = new_target;
+        for (int i = 1; i < u->n_src; i++)
+          if (after_src[i] == assign_store) after_src[i] = new_store;
+        result = placement_rebuild_with_sources(p, u, after_src);
+        if (after_src != after_stack) free(after_src);
       } else {
         result = u;
       }
@@ -337,8 +635,34 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
       }
       if (src[i] != u->src[i]) changed = true;
     }
-    result = changed ? poly_uop(p->ctx, u->op, u->dtype, src, u->n_src, u->arg) : u;
+    result = changed ? placement_rebuild_with_sources(p, u, src) : u;
     if (src != stack_src) free(src);
+  }
+
+  if (!result && placement_opaque_body_op(u->op)) {
+    if (u->n_src == 0) {
+      result = u;
+    } else {
+      PolyUOp *stack_src[16];
+      PolyUOp **src =
+          (u->n_src > 16) ? malloc((size_t)u->n_src * sizeof(PolyUOp *)) : stack_src;
+      if (!src) return NULL;
+      /* Pinned RewriteContext pins CALL/FUNCTION.src[0] by exact identity and
+       * visits src[1:] normally. Placement is Polygrad's boundary adaptation
+       * of that deviceful graph, so it must preserve the same split. */
+      src[0] = u->src[0];
+      bool changed = false;
+      for (int i = 1; i < u->n_src; i++) {
+        src[i] = lower_value(p, u->src[i], device);
+        if (!src[i]) {
+          if (src != stack_src) free(src);
+          return NULL;
+        }
+        if (src[i] != u->src[i]) changed = true;
+      }
+      result = changed ? placement_rebuild_with_sources(p, u, src) : u;
+      if (src != stack_src) free(src);
+    }
   }
 
   if (!result) {
@@ -354,7 +678,7 @@ static PolyUOp *lower_value(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device) 
       }
       if (src[i] != u->src[i]) changed = true;
     }
-    result = changed ? poly_uop(p->ctx, u->op, u->dtype, src, u->n_src, u->arg) : u;
+    result = changed ? placement_rebuild_with_sources(p, u, src) : u;
     if (src != stack_src) free(src);
   }
 
@@ -370,21 +694,32 @@ static PolyUOp *lower_effect(PolyPhysicalizer *p, PolyUOp *u, PolyDevice device)
     PolyUOp *value = lower_value(p, u->src[1], device);
     if (!value) return NULL;
     if (value == u->src[1]) return u;
-    return poly_store_val(p->ctx, u->src[0], value);
+    PolyUOp *stack_src[16];
+    PolyUOp **src = u->n_src > 16
+                        ? malloc((size_t)u->n_src * sizeof(*src))
+                        : stack_src;
+    if (!src) return NULL;
+    memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
+    src[1] = value;
+    PolyUOp *result = placement_rebuild_with_sources(p, u, src);
+    if (src != stack_src) free(src);
+    return result;
   }
 
   if (u->op == POLY_OP_ASSIGN && u->n_src >= 2) {
     PolyUOp *value = lower_value(p, u->src[1], device);
     if (!value) return NULL;
     if (value == u->src[1]) return u;
-    return poly_uop2(p->ctx, POLY_OP_ASSIGN, u->dtype, u->src[0], value, u->arg);
-  }
-
-  if (u->op == POLY_OP_CALL) {
-    /* CALL bodies are opaque effect kernels. Keep their logical body and
-     * logical buffer arguments intact; schedule/runtime slot preparation owns
-     * residency for the call arguments. */
-    return u;
+    PolyUOp *stack_src[16];
+    PolyUOp **src = u->n_src > 16
+                        ? malloc((size_t)u->n_src * sizeof(*src))
+                        : stack_src;
+    if (!src) return NULL;
+    memcpy(src, u->src, (size_t)u->n_src * sizeof(*src));
+    src[1] = value;
+    PolyUOp *result = placement_rebuild_with_sources(p, u, src);
+    if (src != stack_src) free(src);
+    return result;
   }
 
   return lower_value(p, u, device);
@@ -395,8 +730,48 @@ PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor) {
 
   PolyPhysicalizer p = {.ctx = ctx};
   PolyUOp *physical = lower_tensor(&p, tensor);
-  free(p.memo);
+  physicalizer_destroy(&p);
   return physical;
+}
+
+int poly_tensor_physicalize_many(
+    PolyCtx *ctx,
+    PolyTensor **tensors,
+    int n,
+    PolyUOp **out,
+    PolyMap **placement_memo
+) {
+  if (!ctx || n < 0 || (n > 0 && (!tensors || !out))) return -1;
+  PolyPhysicalizer p = {.ctx = ctx};
+  if (placement_memo) {
+    for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++)
+      p.memo[device] = placement_memo[device];
+  }
+  int rc = 0;
+  for (int i = 0; i < n; i++) {
+    out[i] = (tensors[i] && tensors[i]->uop_logical)
+                 ? lower_tensor(&p, tensors[i])
+                 : NULL;
+    if (!out[i]) {
+      rc = -1;
+      break;
+    }
+  }
+  if (placement_memo) {
+    for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++)
+      placement_memo[device] = p.memo[device];
+  } else {
+    physicalizer_destroy(&p);
+  }
+  return rc;
+}
+
+void poly_tensor_physicalize_memo_destroy(PolyMap **placement_memo) {
+  if (!placement_memo) return;
+  for (int device = POLY_DEVICE_AUTO + 1; device <= POLY_DEVICE_DISK; device++) {
+    poly_map_destroy(placement_memo[device]);
+    placement_memo[device] = NULL;
+  }
 }
 
 int poly_tensor_placement_audit(
@@ -414,7 +789,7 @@ int poly_tensor_placement_audit(
   out->selected_logical = poly_tensor_uop_logical(selected);
   out->selected_physical = poly_tensor_uop_physical(selected);
   out->selected_role = selected->role;
-  out->selected_device = resolve_tensor_device(ctx, selected);
+  out->selected_device = poly_tensor_resolved_device(ctx, selected);
   out->selected_source = selected->source;
 
   out->query_current = query_current ? query_current : out->selected_current;

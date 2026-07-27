@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 
-from polygrad import Device, Jit, JitError, Tensor, Variable, can_run, compile as pg_compile, jit, stats as pg_stats
+from polygrad import Device, Jit, JitError, Tensor, Variable, _ffi, can_run, compile as pg_compile, jit, stats as pg_stats
+from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp
 
 
@@ -45,6 +46,101 @@ class TestCreation:
         assert t.uop.has_buffer_identity()
         assert not t.uop.is_realized
 
+    def test_movement_is_realized_through_recursive_base(self):
+        source = Tensor([1.0, 2.0, 3.0, 4.0]).realize()
+        reshaped = source.reshape(2, 2)
+        view = reshaped.flatten().shrink(((1, 3),))
+
+        assert view.uop.op_name == 'SHRINK'
+        assert view.uop.base == source.uop.base
+        assert reshaped.uop.realized is None
+        assert reshaped.uop.is_realized
+        assert view.uop.realized is None
+        assert view.uop.is_realized
+
+    def test_clone_is_lazy_separate_and_preserves_state(self):
+        source = Tensor.empty((4,), dtype='float32', requires_grad=True).is_param_(False)
+        source.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+        source.sum().backward()
+
+        cloned = source.clone()
+        assert cloned.uop_logical.op_name == 'AFTER'
+        assert [u.op_name for u in cloned.uop_logical.src] == ['BUFFER', 'STORE']
+        assert cloned.uop_logical.src[0].buffer.raw != source.uop.buffer.raw
+        assert cloned.requires_grad is True
+        assert cloned.is_param is False
+        assert cloned.grad is not None
+        assert cloned.grad.uop_logical.op_name == 'AFTER'
+        assert cloned.grad.uop_logical.src[0].buffer.raw != source.grad.uop_logical.src[0].buffer.raw
+        np.testing.assert_allclose(cloned.numpy(), [1.0, 2.0, 3.0, 4.0])
+        np.testing.assert_allclose(cloned.grad.numpy(), np.ones(4, dtype=np.float32))
+
+    def test_detach_is_a_lazy_graph_boundary(self):
+        source = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        detached = source.detach()
+
+        assert detached.shape == source.shape
+        assert detached.dtype == source.dtype
+        assert detached.device == source.device
+        assert detached.requires_grad is False
+        assert detached.uop_logical.op_name == 'DETACH'
+        assert detached.uop_logical.src[0].raw == source.uop_logical.raw
+        if detached.uop_physical is not None:
+            assert detached.uop_physical.op_name == 'DETACH'
+            assert detached.uop_physical.src[0].raw == source.uop.raw
+
+        detached.sum().backward()
+        np.testing.assert_allclose(source.grad.numpy(), np.zeros((2, 2), dtype=np.float32))
+
+    def test_clone_preserves_scalar_shape_and_accepts_device(self):
+        source = Tensor.full((), 3.0)
+        cloned = source.clone(device='INTERP')
+        assert cloned.shape == ()
+        assert cloned.device == 'INTERP'
+        assert cloned.uop_logical.op_name == 'AFTER'
+        assert cloned.item() == pytest.approx(3.0)
+
+    def test_backward_clones_deviceless_grad_and_accumulates_in_place(self):
+        x = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        loss = x.sum()
+        loss.backward()
+        first_grad = x.grad
+        first_root = first_grad.uop_logical
+        first_buffer = first_root.src[0].buffer.raw
+        assert first_root.op_name == 'AFTER'
+        assert int(_ffi._lib.poly_uop_device(first_grad.uop_logical.raw)) == int(
+            _ffi._lib.poly_device_by_name(b'auto')
+        )
+        assert first_grad.uop_physical is not None
+        assert int(_ffi._lib.poly_uop_device(first_grad.uop_physical.raw)) == int(
+            _ffi._lib.poly_device_by_name(first_grad.device.lower().encode('utf-8'))
+        )
+
+        loss.backward()
+        assert x.grad is first_grad
+        second_root = x.grad.uop_logical
+        assert second_root.src[0].raw == first_root.raw
+        assert second_root.src[0].src[0].buffer.raw == first_buffer
+        np.testing.assert_allclose(x.grad.numpy(), np.full(4, 2.0, dtype=np.float32))
+
+    def test_backward_through_clone_reaches_source(self):
+        source = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        source.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+        cloned = source.clone()
+        cloned.sum().backward()
+        np.testing.assert_allclose(source.grad.numpy(), np.ones(4, dtype=np.float32))
+        np.testing.assert_allclose(cloned.grad.numpy(), np.ones(4, dtype=np.float32))
+
+    def test_backward_retains_distinct_wrappers_sharing_one_uop(self):
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        y = Tensor(x.uop_logical, requires_grad=True)
+        assert x is not y
+        assert x.uop_logical.raw == y.uop_logical.raw
+
+        x.sum().backward()
+        np.testing.assert_allclose(x.grad.numpy(), np.ones(4, dtype=np.float32))
+        np.testing.assert_allclose(y.grad.numpy(), np.ones(4, dtype=np.float32))
+
     def test_default_context_stats_track_core_work(self):
         before = pg_stats()
         x = Tensor.empty((3,), dtype='float32')
@@ -82,6 +178,8 @@ class TestCreation:
         np.testing.assert_allclose(out.numpy(), [11.0, 22.0, 33.0, 44.0])
 
     def test_custom_kernel_multi_output_backward_like_tinygrad(self):
+        callback = {}
+
         def addmul_kernel(c, d, a, b):
             c, d, a, b = c.flatten(), d.flatten(), a.flatten(), b.flatten()
             i = UOp.range(c.ctx, c.numel(), 0)
@@ -90,6 +188,7 @@ class TestCreation:
             return store_c.group(store_d).end(i).sink(arg=KernelInfo(name='addmul'))
 
         def backward_addmul(grad_c, grad_d, call):
+            callback['call'] = call
             _c, _d, a, b = call.src[1:]
             grad_a = (Tensor(grad_c) + Tensor(grad_d) * Tensor(b)).uop
             grad_b = (Tensor(grad_c) + Tensor(grad_d) * Tensor(a)).uop
@@ -106,12 +205,123 @@ class TestCreation:
         a = Tensor(a_np, requires_grad=True)
         b = Tensor(b_np, requires_grad=True)
         a.realize(b)
+        a_physical, b_physical = a.uop_physical, b.uop_physical
         c, d, _, _ = Tensor.empty((4, 4)).custom_kernel(
             Tensor.empty((4, 4)), a, b, fxn=addmul_kernel, grad_fxn=backward_addmul
         )
         (c.sum() + d.sum()).backward()
+        assert callback['call'].src[3] == a_physical
+        assert callback['call'].src[4] == b_physical
         np.testing.assert_allclose(a.grad.numpy(), a_ref.grad.numpy(), rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(b.grad.numpy(), b_ref.grad.numpy(), rtol=1e-5, atol=1e-6)
+
+    def test_custom_kernel_physical_after_preserves_data_gradient(self):
+        def identity_kernel(x):
+            x = x.flatten()
+            i = UOp.range(x.ctx, x.numel(), 0)
+            return x[i].store(x[i]).end(i).sink(arg=KernelInfo(name='identity'))
+
+        def backward_identity(grad, call):
+            assert call.op_name == 'CALL'
+            return (None,)
+
+        x = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        x.copy_from(np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32))
+        y = x.custom_kernel(fxn=identity_kernel, grad_fxn=backward_identity)[0]
+        assert y.uop_logical.op_name == 'AFTER'
+        assert y.uop_physical.op_name == 'AFTER'
+        y.sum().backward()
+        np.testing.assert_allclose(x.grad.numpy(), np.ones(4, dtype=np.float32))
+        np.testing.assert_allclose(y.grad.numpy(), np.ones(4, dtype=np.float32))
+
+    def test_custom_kernel_separates_output_and_input_gradient_edges(self):
+        def identity_kernel(out, x):
+            out, x = out.flatten(), x.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            return out[i].store(x[i]).end(i).sink(arg=KernelInfo(name='identity_grad_edges'))
+
+        def backward_identity(grad, call):
+            assert call.op_name == 'CALL'
+            return (None, grad)
+
+        out = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        y = out.custom_kernel(x, fxn=identity_kernel, grad_fxn=backward_identity)[0]
+        y.sum().backward()
+
+        np.testing.assert_allclose(out.grad.numpy(), np.ones(4, dtype=np.float32))
+        np.testing.assert_allclose(x.grad.numpy(), np.ones(4, dtype=np.float32))
+        np.testing.assert_allclose(y.grad.numpy(), np.ones(4, dtype=np.float32))
+
+    def test_custom_kernel_duplicate_output_alias_passes_one_accumulated_upstream(self):
+        def identity_kernel(out0, out1, x):
+            out0, out1, x = out0.flatten(), out1.flatten(), x.flatten()
+            i = UOp.range(out0.ctx, out0.numel(), 0)
+            return out0[i].store(x[i]).end(i).sink(arg=KernelInfo(name='duplicate_output_grad'))
+
+        callback_counts = []
+
+        def backward_identity(*args, **kwargs):
+            call = kwargs.get('call')
+            grads = args
+            if call is None:
+                *grads, call = args
+            callback_counts.append(len(grads))
+            return (None, None, grads[0])
+
+        out = Tensor.empty((4,), dtype='float32')
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        y0, y1, _ = out.custom_kernel(
+            out, x, fxn=identity_kernel, grad_fxn=backward_identity
+        )
+        assert y0.uop.raw == y1.uop.raw
+        (y0.sum() + y1.sum()).backward()
+
+        assert callback_counts == [1]
+        np.testing.assert_allclose(x.grad.numpy(), np.full(4, 2.0, dtype=np.float32))
+
+    def test_custom_kernel_without_grad_fxn_rejects_needed_input_gradient(self):
+        def identity_kernel(out, x):
+            out, x = out.flatten(), x.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            return out[i].store(x[i]).end(i).sink(arg=KernelInfo(name='missing_grad_fxn'))
+
+        out = Tensor.empty((4,), dtype='float32')
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        y = out.custom_kernel(x, fxn=identity_kernel)[0]
+        with pytest.raises(
+            AssertionError, match='expected TUPLE body for gradient, got Ops.SINK'
+        ):
+            y.sum().backward()
+        assert x.grad is None
+        assert y.grad is None
+
+    def test_custom_kernel_callback_is_inactive_behind_stop_gradient_ops(self):
+        def identity_kernel(out, x):
+            out, x = out.flatten(), x.flatten()
+            i = UOp.range(out.ctx, out.numel(), 0)
+            return out[i].store(x[i]).end(i).sink(arg=KernelInfo(name='stopped_custom_grad'))
+
+        out = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        y = out.custom_kernel(x, fxn=identity_kernel)[0]
+        y.detach().sum().backward()
+        np.testing.assert_allclose(x.grad.numpy(), np.zeros(4, dtype=np.float32))
+        np.testing.assert_allclose(y.grad.numpy(), np.zeros(4, dtype=np.float32))
+
+        calls = []
+
+        def backward_identity(grad, call):
+            calls.append(grad.op_name)
+            return (None, (Tensor(grad) + 7).uop)
+
+        out = Tensor.empty((4,), dtype='float32', requires_grad=True)
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        y = out.custom_kernel(x, fxn=identity_kernel, grad_fxn=backward_identity)[0]
+        (y < 0).float().sum().backward()
+        assert calls == []
+        np.testing.assert_allclose(x.grad.numpy(), np.zeros(4, dtype=np.float32))
+        np.testing.assert_allclose(y.grad.numpy(), np.zeros(4, dtype=np.float32))
 
     def test_custom_kernel_reuses_buffers_after_input_update(self):
         def add_kernel(c, a, b):
@@ -153,10 +363,196 @@ class TestCreation:
         with pytest.raises(AssertionError, match='no data if shape is symbolic'):
             y.numpy()
 
+    def test_bound_variable_slice_matches_tinygrad_hlb_batcher(self):
+        x = Tensor.arange(20).reshape(10, 2)
+        vi = Variable('i', 0, 8)
+
+        for start in (0, 4, 8):
+            vib = vi.bind(start)
+            y = x[vib:vib + 2]
+            assert y.shape == (2, 2)
+            np.testing.assert_allclose(
+                y.numpy(),
+                np.arange(20).reshape(10, 2)[start:start + 2],
+            )
+
+        vib = vi.bind(4)
+        y = x[vib:vib + 2].realize()
+        assert y.shape == (2, 2)
+        np.testing.assert_allclose((y + 1).numpy(), [[9, 10], [11, 12]])
+
+    def test_symbolic_prefix_slice_keeps_shape_and_rejects_static_broadcast(self):
+        x = Tensor.empty(10, 2)
+        n = Variable('n', 1, 4).bind(3)
+
+        y = x[:n]
+        assert not isinstance(y.shape[0], int)
+        assert y.shape[0] != 3
+        assert x[:n, :].shape == y.shape
+        with pytest.raises(IndexError, match='shape mismatch'):
+            y * Tensor.empty(3, 2)
+
+        i = Variable('i', 0, 6).bind(4)
+        assert x[i:i + 2].shape == (2, 2)
+
+    def test_symbolic_expand_broadcast_into_slice_matches_tinygrad(self):
+        x = Tensor.empty(10, 2)
+        n = Variable('n', 1, 4).bind(3)
+        y = x[:n]
+
+        prod = y * Tensor.empty(1, 2)
+        assert prod.uop.op_name == 'MUL'
+        assert prod.shape == y.shape
+        assert not isinstance(prod.shape[0], int)
+
+        summed = y + Tensor.empty(2)
+        assert summed.uop.op_name == 'ADD'
+        assert summed.shape == y.shape
+        assert not isinstance(summed.shape[0], int)
+
+        expanded = Tensor.empty(1, 2).expand(y.shape)
+        assert expanded.uop.op_name == 'EXPAND'
+        assert expanded.shape == y.shape
+        assert not isinstance(expanded.shape[0], int)
+
+    def test_symbolic_empty_broadcast_alu_has_valid_c_shape_and_realizes(self):
+        n = Variable('n', 1, 4).bind(3)
+        empty = Tensor.empty(n, 10)
+        assert empty.uop.op_name == 'SHRINK'
+        assert empty.uop.src[0].op_name == 'RESHAPE'
+        physical = UOp(
+            empty._ctx, _ffi._lib.poly_tensor_uop_physical(empty._tensor)
+        )
+        assert physical.op_name == 'SHRINK'
+        assert physical.src[0].op_name == 'RESHAPE'
+        cases = (
+            (empty * Tensor.empty(1, 10), 'MUL'),
+            (Tensor.empty(n, 10) + Tensor.empty(10), 'ADD'),
+        )
+        for z, op_name in cases:
+            assert z.uop.op_name == op_name
+            assert z.shape[1] == 10
+            assert not isinstance(z.shape[0], int)
+            assert _ffi._lib.poly_uop_ndim(z._ctx, z.uop.raw) == 2
+            z.realize()
+
+    def test_symbolic_slicing_static_input_preserves_uop_dims(self):
+        x = Tensor.empty(10, 8)
+        n = Variable('n', 1, 4).bind(3)
+        m = Variable('m', 1, 5).bind(4)
+        i = Variable('i', 0, 6).bind(2)
+
+        prefix_prefix = x[:n, :m]
+        assert not isinstance(prefix_prefix.shape[0], int)
+        assert not isinstance(prefix_prefix.shape[1], int)
+
+        prefix_fixed = x[:n, i:i + 2]
+        assert not isinstance(prefix_fixed.shape[0], int)
+        assert prefix_fixed.shape[1] == 2
+
+        first = Variable('first', 0, 1).bind(0)
+        assert x[:n][first:first + 1].shape == (1, 8)
+
+    def test_static_slice_after_symbolic_prefix_uses_vmax_extent(self):
+        x = Tensor.empty(10, 8)
+        n = Variable('n', 1, 4).bind(3)
+        prefix = x[:n]
+
+        assert not isinstance(prefix.shape[0], int)
+        assert prefix[:3].shape == (3, 8)
+        assert prefix[:4].shape == (4, 8)
+        assert prefix[:5].shape == (4, 8)
+        assert prefix[:5].uop.op_name == 'SHRINK'
+
+        later = prefix[:, :4]
+        assert not isinstance(later.shape[0], int)
+        assert later.shape[1] == 4
+        assert later.uop.op_name == 'SHRINK'
+
+        reverse_later = prefix[:, 5:1:-1]
+        assert not isinstance(reverse_later.shape[0], int)
+        assert reverse_later.shape[1] == 4
+        assert reverse_later.uop.op_name == 'FLIP'
+
+        tail = prefix[1:]
+        assert not isinstance(tail.shape[0], int)
+        assert tail.shape[1] == 8
+        assert tail.uop.op_name == 'SHRINK'
+
+        with pytest.raises(RuntimeError, match='symbolic shape not supported'):
+            prefix[:, 1:5:2]
+        with pytest.raises(TypeError, match='not supported for symbolic shape'):
+            prefix[::2]
+        with pytest.raises(TypeError, match='not supported for symbolic shape'):
+            prefix[::-1]
+        with pytest.raises(IndexError, match='out of bounds'):
+            prefix[-2:]
+
+        assert prefix[0:4:2].shape == (2, 8)
+        assert prefix[3:0:-1].shape == (3, 8)
+
+    def test_instance_cat_and_stack_match_tinygrad_binding(self):
+        x = Tensor.arange(6).reshape(2, 3)
+        a = Tensor.arange(6, 12).reshape(2, 3)
+        b = Tensor.arange(12, 18).reshape(2, 3)
+
+        c = x.cat(a, b, dim=0)
+        assert c.shape == (6, 3)
+        np.testing.assert_allclose(c.numpy(), np.arange(18).reshape(6, 3))
+
+        s = Tensor([1, 2]).stack(Tensor([3, 4]), dim=0)
+        assert s.shape == (2, 2)
+        np.testing.assert_allclose(s.numpy(), [[1, 2], [3, 4]])
+
+    def test_hlb_pad_reflect_slice_cat_pattern(self):
+        def pad_reflect(x, size=1):
+            x = x[..., :, 1:size + 1].flip(-1).cat(
+                x,
+                x[..., :, -(size + 1):-1].flip(-1),
+                dim=-1,
+            )
+            x = x[..., 1:size + 1, :].flip(-2).cat(
+                x,
+                x[..., -(size + 1):-1, :].flip(-2),
+                dim=-2,
+            )
+            return x
+
+        x = Tensor.arange(2 * 3 * 4 * 4).reshape(2, 3, 4, 4)
+        y = pad_reflect(x, 1)
+        expected = np.array([
+            [5, 4, 5, 6, 7, 6],
+            [1, 0, 1, 2, 3, 2],
+            [5, 4, 5, 6, 7, 6],
+            [9, 8, 9, 10, 11, 10],
+            [13, 12, 13, 14, 15, 14],
+            [9, 8, 9, 10, 11, 10],
+        ], dtype=np.float32)
+        assert y.shape == (2, 3, 6, 6)
+        np.testing.assert_allclose(y.numpy().reshape(2, 3, 6, 6)[0, 0], expected)
+
+    def test_int_tensor_python_float_scalar_promotes_like_tinygrad(self):
+        x = Tensor([0, 1, 0], dtype='int32')
+        assert (x * 0.25).dtype == 'float32'
+        assert (0.25 * x).dtype == 'float32'
+        assert (x + 0.25).dtype == 'float32'
+        np.testing.assert_allclose((x * 0.25).numpy(), [0.0, 0.25, 0.0])
+        np.testing.assert_allclose((x + 0.25).numpy(), [0.25, 1.25, 0.25])
+
     def test_zeros(self):
         t = Tensor.zeros(3, 4)
         assert t.shape == (3, 4)
         np.testing.assert_allclose(t.numpy(), np.zeros((3, 4)))
+
+    def test_full_defaults_to_writable_buffer_and_supports_buffer_false(self):
+        t = Tensor.full((2,), 3.0).realize()
+        assert t.uop.op_name == 'BUFFER'
+        t.assign(Tensor([4.0, 5.0], dtype=t.dtype)).realize()
+        np.testing.assert_allclose(t.numpy(), [4.0, 5.0])
+
+        broadcast = Tensor.full((2,), 3.0, buffer=False)
+        assert broadcast.uop_logical.op_name == 'EXPAND'
+        np.testing.assert_allclose(broadcast.numpy(), [3.0, 3.0])
 
     def test_ones(self):
         t = Tensor.ones(2, 3)
@@ -842,6 +1238,22 @@ class TestJit:
             [3.0, 4.0, 5.0, 1.0],
         )
 
+    def test_custom_kernel_rejects_bool_index_coordinate_before_codegen(self):
+        # Pinned codegen/__init__.py verifies spec_tensor before preprocess:
+        # UOp.index(bool) constructs, but executing that body is invalid.
+        def invalid_index_kernel(out):
+            out = out.flatten()
+            zero = UOp.const(out.ctx, 0)
+            gate = zero.lt(1)
+            bad = out.index(gate)
+            assert bad is not None
+            return bad.store(out.index(zero)).sink()
+
+        out = Tensor.empty((1,), dtype='float32')
+        invalid = out.custom_kernel(fxn=invalid_index_kernel)[0]
+        with pytest.raises(RuntimeError, match='poly_realize_tensors'):
+            invalid.numpy()
+
     def test_custom_kernel_exposes_uop_floor_div_and_mod(self):
         from polygrad.dtype import dtypes
 
@@ -919,6 +1331,112 @@ class TestElementwise:
         a = Tensor([1, -2, 3])
         np.testing.assert_allclose((-a).numpy(), [-1, 2, -3])
 
+    def test_named_elementwise_methods_match_operator_forms(self):
+        a = Tensor([2.0, 4.0, 8.0])
+        b = Tensor([1.0, 2.0, 3.0])
+        cases = [
+            (a.add(b), a + b),
+            (a.sub(b), a - b),
+            (a.mul(b), a * b),
+            (a.div(b), a / b),
+            (a.pow(b), a ** b),
+            (a.neg(), -a),
+        ]
+        for got, expected in cases:
+            np.testing.assert_allclose(got.numpy(), expected.numpy(), rtol=1e-6, atol=1e-6)
+
+    def test_named_elementwise_reverse_matches_tinygrad(self):
+        x = Tensor([2.0, 4.0])
+        np.testing.assert_allclose(x.add(10.0, reverse=True).numpy(), (10.0 + x).numpy())
+        np.testing.assert_allclose(x.sub(10.0, reverse=True).numpy(), [8.0, 6.0])
+        np.testing.assert_allclose(x.mul(10.0, reverse=True).numpy(), (10.0 * x).numpy())
+        np.testing.assert_allclose(x.div(10.0, reverse=True).numpy(), [5.0, 2.5])
+        np.testing.assert_allclose(x.div(2.0, rounding_mode=None).numpy(), [1.0, 2.0])
+        np.testing.assert_allclose(x.pow(3.0, reverse=True).numpy(), [9.0, 81.0])
+
+    def test_named_elementwise_bool_scalar_matches_tinygrad(self):
+        x = Tensor([True, False], dtype='bool')
+
+        add_int = x.add(2)
+        assert add_int.dtype == 'int32'
+        np.testing.assert_allclose(add_int.numpy(), [3, 2])
+
+        sub_bool = x.sub(True)
+        assert sub_bool.dtype == 'bool'
+        assert sub_bool.uop.op_name == 'ADD'
+        assert any(src.op_name == 'CMPNE' for src in sub_bool.uop.src)
+        np.testing.assert_array_equal(sub_bool.numpy(), [True, False])
+
+        mul_int = x.mul(2)
+        assert mul_int.dtype == 'int32'
+        np.testing.assert_allclose(mul_int.numpy(), [2, 0])
+
+        pow_int = x.pow(2)
+        assert pow_int.dtype == 'int32'
+        np.testing.assert_allclose(pow_int.numpy(), [1, 0])
+
+        neg = x.neg()
+        assert neg.dtype == 'bool'
+        assert neg.uop.op_name == 'CMPNE'
+        assert [src.op_name for src in neg.uop.src] == ['BUFFER', 'EXPAND']
+        np.testing.assert_array_equal(neg.numpy(), [False, True])
+
+        logical_not = x.logical_not()
+        assert logical_not.dtype == 'bool'
+        assert logical_not.uop.op_name == 'CMPNE'
+        assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'EXPAND']
+        np.testing.assert_array_equal(logical_not.numpy(), [False, True])
+
+    def test_named_integer_true_division_matches_tinygrad(self):
+        x = Tensor([3, 4], dtype='int32')
+
+        named = x.div(2)
+        assert named.dtype == 'float32'
+        np.testing.assert_allclose(named.numpy(), [1.5, 2.0], rtol=1e-6, atol=1e-6)
+
+        operator = x / 2
+        assert operator.dtype == 'float32'
+        np.testing.assert_allclose(operator.numpy(), [1.5, 2.0], rtol=1e-6, atol=1e-6)
+
+        reverse = x.div(2, reverse=True)
+        assert reverse.dtype == 'float32'
+        np.testing.assert_allclose(reverse.numpy(), [0.6666667, 0.5], rtol=1e-6, atol=1e-6)
+
+        reverse_operator = 2 / x
+        assert reverse_operator.dtype == 'float32'
+        np.testing.assert_allclose(reverse_operator.numpy(), [0.6666667, 0.5], rtol=1e-6, atol=1e-6)
+
+        tensor_divisor = x.div(Tensor([2, 2], dtype='int32'))
+        assert tensor_divisor.dtype == 'float32'
+        np.testing.assert_allclose(tensor_divisor.numpy(), [1.5, 2.0], rtol=1e-6, atol=1e-6)
+
+    def test_named_pow_int_base_float_exponent_matches_tinygrad(self):
+        x = Tensor([2, 3], dtype='int32')
+
+        named = x.pow(2.0)
+        assert named.dtype == 'int32'
+        np.testing.assert_allclose(named.numpy(), [4, 9])
+
+        operator = x ** 2.0
+        assert operator.dtype == 'int32'
+        np.testing.assert_allclose(operator.numpy(), [4, 9])
+
+        reverse = x.pow(2.0, reverse=True)
+        assert reverse.dtype == 'float32'
+        np.testing.assert_allclose(reverse.numpy(), [4.0, 8.0])
+
+    def test_named_pow_negative_scalar_int_validation_matches_tinygrad(self):
+        x = Tensor([2, 3], dtype='int32')
+
+        with pytest.raises(RuntimeError, match='base needs to be float'):
+            x.pow(-1)
+        with pytest.raises(RuntimeError, match='base needs to be float'):
+            x ** -1
+
+        tensor_exponent = x.pow(Tensor([-1, -2], dtype='int32'))
+        assert tensor_exponent.dtype == 'int32'
+        np.testing.assert_allclose(tensor_exponent.numpy(), [0, 0])
+
     def test_scalar_add(self):
         a = Tensor([1, 2, 3])
         c = a + 2.0
@@ -951,12 +1469,53 @@ class TestMovement:
         assert b.shape == (2, 3)
         np.testing.assert_allclose(b.numpy(), [[1, 2, 3], [4, 5, 6]])
 
+    def test_reshape_keyword_and_argfix_match_tinygrad(self):
+        a = Tensor([1, 2])
+        b = a.reshape(shape=[2, 1, -1])
+        assert b.shape == (2, 1, 1)
+        np.testing.assert_allclose(b.numpy(), [[[1]], [[2]]])
+        assert Tensor.empty(2, 1, 1).reshape((2, 1, 1)).shape == (2, 1, 1)
+        assert Tensor.empty(2, 1, 1).reshape(None, 1, 1).shape == (2, 1, 1)
+        with pytest.raises(ValueError, match="bad arg"):
+            Tensor.empty(2, 1, 1).reshape([2, 1], 1)
+
+    def test_reshape_inference_validation_matches_tinygrad(self):
+        assert Tensor.empty(6).reshape(2, -1).shape == (2, 3)
+        assert Tensor.empty(0).reshape(-1, 3).shape == (0, 3)
+        assert Tensor.empty(0).reshape(1, 0).shape == (1, 0)
+        assert Tensor.empty(2, 3).reshape(None, 3).shape == (2, 3)
+
+        with pytest.raises(ValueError, match="size mismatch"):
+            Tensor.empty(3072, dtype='uint8').reshape(-1, 3073)
+        with pytest.raises(ValueError, match="size mismatch"):
+            Tensor.empty(5).reshape(2, -1)
+        with pytest.raises(RuntimeError, match="only one dimension can be inferred"):
+            Tensor.empty(6).reshape(-1, -1)
+        with pytest.raises(ZeroDivisionError):
+            Tensor.empty(0).reshape(0, -1)
+
     def test_permute(self):
         a = Tensor(np.arange(12, dtype=np.float32).reshape(3, 4).tolist())
         b = a.permute(1, 0)
         assert b.shape == (4, 3)
         expected = np.arange(12, dtype=np.float32).reshape(3, 4).T
         np.testing.assert_allclose(b.numpy(), expected)
+
+    def test_expand_negative_and_none_keep_original_dim_like_tinygrad(self):
+        x = Tensor.arange(2, dtype='int32').reshape(2, 1, 1, 1)
+        y = x.expand(-1, 3, 4, None)
+        assert y.shape == (2, 3, 4, 1)
+        np.testing.assert_allclose(
+            y.numpy().reshape(2, -1)[:, :4],
+            np.array([[0, 0, 0, 0], [1, 1, 1, 1]], dtype=np.int32),
+        )
+
+        img = Tensor.arange(2 * 3 * 34 * 34).reshape(2, 3, 34, 34).float()
+        low_x = Tensor.randint(2, low=0, high=2).reshape(2, 1, 1, 1)
+        idx_x = Tensor.arange(32, dtype='int32').reshape((1, 1, 1, 32))
+        crop_idx = (low_x + idx_x).expand(-1, 3, img.shape[2], -1)
+        assert crop_idx.shape == (2, 3, 34, 32)
+        assert img.gather(-1, crop_idx).shape == (2, 3, 34, 32)
 
     def test_flip(self):
         a = Tensor([1, 2, 3, 4, 5])
@@ -968,6 +1527,14 @@ class TestMovement:
         b = a.pad(((1, 1),))
         assert b.shape == (5,)
         np.testing.assert_allclose(b.numpy(), [0, 1, 2, 3, 0])
+
+        x = Tensor(np.arange(9, dtype=np.float32).reshape(1, 1, 3, 3))
+        y = x.pad((1, 0, 0, 1))
+        assert y.shape == (1, 1, 4, 4)
+        np.testing.assert_allclose(
+            y.numpy(),
+            [[[[0, 0, 1, 2], [0, 3, 4, 5], [0, 6, 7, 8], [0, 0, 0, 0]]]],
+        )
 
     def test_roll_1d(self):
         a = Tensor.arange(5)
@@ -1004,6 +1571,12 @@ class TestMovement:
         out3 = x3.gather(1, idx3)
         assert out3.shape == (2, 2, 2)
         np.testing.assert_allclose(out3.numpy(), [[[0, 9], [4, 1]], [[20, 17], [12, 21]]])
+
+    def test_tensor_index_rows_matches_tinygrad_probe(self):
+        idx = Tensor(np.array([-1, 0, 2], dtype=np.int32), dtype='int32')
+        out = Tensor.arange(12).reshape(3, 4)[idx]
+        assert out.shape == (3, 4)
+        np.testing.assert_allclose(out.numpy(), [[8, 9, 10, 11], [0, 1, 2, 3], [8, 9, 10, 11]])
 
     def test_scatter_matches_tinygrad_probe(self):
         idx0 = Tensor(np.array([[0, 1, 2, 0]], dtype=np.int32), dtype='int32')
@@ -1154,6 +1727,67 @@ class TestReduce:
 
 
 class TestMatmulAndLoss:
+    def test_conv2d_stride_padding_matches_reference(self):
+        x = np.arange(1 * 2 * 4 * 5, dtype=np.float32).reshape(1, 2, 4, 5) / 7
+        w = (np.arange(3 * 2 * 2 * 3, dtype=np.float32).reshape(3, 2, 2, 3) - 5) / 11
+        b = np.array([0.5, -1.0, 2.0], dtype=np.float32)
+
+        out = np.zeros((1, 3, 6, 2), dtype=np.float32)
+        for oc in range(3):
+            for oy in range(6):
+                for ox in range(2):
+                    acc = b[oc]
+                    for ic in range(2):
+                        for ky in range(2):
+                            for kx in range(3):
+                                iy = oy + ky - 2
+                                ix = ox * 2 + kx - 1
+                                if 0 <= iy < 4 and 0 <= ix < 5:
+                                    acc += x[0, ic, iy, ix] * w[oc, ic, ky, kx]
+                    out[0, oc, oy, ox] = acc
+        np.testing.assert_allclose(
+            Tensor(x).conv2d(Tensor(w), Tensor(b), stride=(1, 2), padding=(1, 0, 2, 1)).numpy(),
+            out,
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_conv2d_padded_3x3_4x4_devectorize_regression(self):
+        # tinygrad: arange(16).reshape(1,1,4,4).conv2d(ones(1,1,3,3), padding=1)
+        # This crosses the 128-lane late-devectorize threshold.
+        padded = Tensor(np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)).conv2d(
+            Tensor(np.ones((1, 1, 3, 3), dtype=np.float32)),
+            padding=1,
+        )
+        np.testing.assert_allclose(
+            padded.numpy(),
+            [[[[10, 18, 24, 18], [27, 45, 54, 39], [51, 81, 90, 63], [42, 66, 72, 50]]]],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_max_pool2d_padding_matches_reference(self):
+        pool_x = np.arange(9, dtype=np.float32).reshape(1, 1, 3, 3)
+        np.testing.assert_allclose(
+            Tensor(pool_x).max_pool2d(2, stride=1, padding=1).numpy(),
+            [[[[0, 1, 2, 2], [3, 4, 5, 5], [6, 7, 8, 8], [6, 7, 8, 8]]]],
+        )
+
+    def test_batchnorm_multi_axis_matches_reference(self):
+        bn_x = np.arange(2 * 3 * 4 * 5, dtype=np.float32).reshape(2, 3, 4, 5) / 10
+        mean = np.arange(8, dtype=np.float32).reshape(2, 4) / 20
+        inv = np.ones((2, 4), dtype=np.float32) * 0.25
+        weight = np.linspace(0.5, 1.2, 8, dtype=np.float32).reshape(2, 4)
+        bias = np.linspace(-0.3, 0.4, 8, dtype=np.float32).reshape(2, 4)
+        expected = (((bn_x - mean[:, None, :, None]) * weight[:, None, :, None]) *
+                    inv[:, None, :, None] + bias[:, None, :, None])
+        np.testing.assert_allclose(
+            Tensor(bn_x).batchnorm(Tensor(weight), Tensor(bias), Tensor(mean), Tensor(inv), axis=(0, 2)).numpy(),
+            expected,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
     def test_einsum_c_api_wrapper(self):
         a = Tensor([[1.0, 2.0], [3.0, 4.0]])
         b = Tensor([[5.0, 6.0], [7.0, 8.0]])
@@ -1630,6 +2264,30 @@ class TestMatmulAndLoss:
         assert loss.shape == ()
         np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
 
+    def test_cross_entropy_realized_variable_bound_dense_targets(self):
+        logits_all = Tensor((np.arange(80, dtype=np.float32).reshape(8, 10) / 10.0)).realize()
+        labels_all = Tensor(np.eye(10, dtype=np.float32)[np.arange(8) % 10]).realize()
+        i = Variable('i', 0, 4).bind(0)
+
+        loss = -(labels_all[i:i + 4] * logits_all[i:i + 4].log_softmax(axis=1)).sum(axis=1).mean()
+
+        assert loss.shape == ()
+        np.testing.assert_allclose(loss.numpy(), np.array(2.6434937, dtype=np.float32), rtol=1e-6, atol=1e-6)
+
+    def test_hlb_smoothed_bound_slice_multiplies_static_batch_shape(self):
+        labels_all = Tensor(np.eye(10, dtype=np.float32)[np.arange(4) % 10]).realize()
+        i = Variable('i', 0, 2).bind(0)
+
+        labels = labels_all[i:i + 2]
+        smoothed = labels * 0.9 + 0.01
+        static = Tensor(np.ones((2, 10), dtype=np.float32))
+        loss_rows = (smoothed * static).sum(axis=1).reshape((2,)).realize()
+
+        assert labels.shape == (2, 10)
+        assert smoothed.shape == (2, 10)
+        assert loss_rows.shape == (2,)
+        np.testing.assert_allclose(loss_rows.numpy(), np.ones((2,), dtype=np.float32), rtol=1e-6, atol=1e-6)
+
     def test_cross_entropy_sparse_targets_non_last_axis(self):
         logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
         target = Tensor(np.array([[0.0, 2.0], [1.0, 0.0]], dtype=np.float32))
@@ -1687,6 +2345,24 @@ class TestDevice:
     def test_device_lookup(self):
         assert Device['cpu'] == 'CPU'
         assert Device['CUDA'] == 'CUDA'
+        assert Device['CUDA:0'] == 'CUDA'
+        assert Device['interp'] == 'INTERP'
+        assert Device['cpu:x86'] == 'X86'
+        assert Device['hip'] == 'HIP'
+        assert Device['wasm'] == 'WASM'
+        assert Device['webgpu'] == 'WEBGPU'
+        with pytest.raises(ValueError, match='Unsupported device'):
+            Device['host']
+        with pytest.raises(ValueError, match='Unsupported device'):
+            Device['not-a-device']
+
+    def test_default_device_tracks_dev_context(self):
+        original = Device.DEFAULT
+        with Context(DEV='INTERP'):
+            assert Device.DEFAULT == 'INTERP'
+            assert Device.canonicalize(None) == 'INTERP'
+            assert Tensor.empty(1).device == 'INTERP'
+        assert Device.DEFAULT == original
 
     def test_requires_grad_inplace(self):
         a = Tensor([1.0])
@@ -1733,6 +2409,22 @@ class TestDevice:
         assert a.assign(v) is a
         assert a.device == 'CUDA'
         assert not a.uop.has_buffer_identity()
+
+    def test_shared_storage_to_copies_and_preserves_source_across_assign(self):
+        source = Tensor([1.0, 2.0, 3.0], device='cpu').realize()
+        source_buffer = source.uop.buffer
+        target = source.to('interp').realize()
+        target_buffer = target.uop.buffer
+
+        assert target_buffer != source_buffer
+        np.testing.assert_allclose(source.numpy(), [1.0, 2.0, 3.0])
+        np.testing.assert_allclose(target.numpy(), [1.0, 2.0, 3.0])
+
+        for values in ([9.0, 8.0, 7.0], [4.0, 5.0, 6.0]):
+            target.assign(Tensor(values, device='interp')).realize()
+            assert target.uop.buffer == target_buffer
+            np.testing.assert_allclose(source.numpy(), [1.0, 2.0, 3.0])
+            np.testing.assert_allclose(target.numpy(), values)
 
 
 class TestRepr:
@@ -1950,9 +2642,13 @@ class TestMaterializationParity:
         # must carry the occurrence-specific realized source into placement.
         x1_cuda = x1.to('cuda')
         x2_cuda = x2.to('cuda')
-        assert x1_cuda.uop.buffer == x1.uop.buffer
-        assert x2_cuda.uop.buffer == x2.uop.buffer
-        assert x1_cuda.uop.buffer != x2_cuda.uop.buffer
+        assert x1_cuda.uop.op_name == 'COPY'
+        assert x2_cuda.uop.op_name == 'COPY'
+        assert x1_cuda.uop.buffer is None
+        assert x2_cuda.uop.buffer is None
+        assert x1_cuda.uop.src[0].buffer == x1.uop.buffer
+        assert x2_cuda.uop.src[0].buffer == x2.uop.buffer
+        assert x1_cuda.uop.src[0].buffer != x2_cuda.uop.src[0].buffer
 
         y1 = x1_cuda + 1
         y2 = x2_cuda + 1
@@ -1963,11 +2659,15 @@ class TestMaterializationParity:
         x_cuda = x.to('cuda')
         x_cpu = x_cuda.to('cpu')
 
-        # Polygrad keeps .to() out of the portable logical graph, but the
-        # current/physical root must stay tied to the realized buffer selected
-        # by this tensor occurrence so later ops can physicalize the copy chain.
-        assert x_cpu.uop == x.uop
-        assert x_cpu.uop_physical == x.uop
+        # Pinned Tensor.to (tensor.py:327-335) keeps both device moves as exact
+        # current COPY occurrences. Polygrad additionally preserves the
+        # approved portable logical twin.
+        assert x_cuda.uop.op_name == 'COPY'
+        assert x_cuda.uop.src[0].raw == x.uop.raw
+        assert x_cpu.uop.op_name == 'COPY'
+        assert x_cpu.uop.src[0].raw == x_cuda.uop.raw
+        assert x_cpu.uop != x.uop
+        assert x_cpu.uop_physical == x_cpu.uop
         assert x_cpu.uop_logical == x.uop_logical
 
         y = x_cpu + 1

@@ -84,6 +84,47 @@ async function runWasmOwnershipTests() {
     await pg.dispose()
   })
 
+  await test('gradient bridge reacquires heap views after memory growth', async () => {
+    const pg = await polygrad.create({ core: 'wasm' })
+    let grownPtr = 0
+    try {
+      const Tensor = pg.Tensor
+      const x = new Tensor([1, 2, 3], { requiresGrad: true })
+      const loss = x.detach().sum()
+      const core = pg._core
+      const Module = core.Module
+      const originalGradMany = Module._poly_grad_many_ex
+      const beforeBytes = core.heapU8().buffer.byteLength
+
+      Module._poly_grad_many_ex = (...args) => {
+        const rc = originalGradMany(...args)
+        grownPtr = Module._malloc(beforeBytes)
+        return rc
+      }
+
+      let result
+      try {
+        result = core.ffi.poly_grad_many(
+          core.ctx, loss.uopLogical.raw, 0, [x.uopLogical.raw]
+        )
+      } finally {
+        Module._poly_grad_many_ex = originalGradMany
+      }
+
+      const afterBytes = core.heapU8().buffer.byteLength
+      if (afterBytes <= beforeBytes) throw new Error('forced allocation did not grow WASM memory')
+      if (!result || result.grads.length !== 1 || !result.grads[0]) {
+        throw new Error('gradient bridge lost the zero-gradient UOp after memory growth')
+      }
+      if (result.present.length !== 1 || result.present[0] !== false) {
+        throw new Error('gradient bridge changed an absent gradient to present after memory growth')
+      }
+    } finally {
+      if (grownPtr && pg._core) pg._core.Module._free(grownPtr)
+      await pg.dispose()
+    }
+  })
+
   return { passed, failed }
 }
 

@@ -108,6 +108,10 @@ typedef struct PolyPatternMatcher PolyPatternMatcher;
 
 PolyPatternMatcher *poly_pm_new(const PolyRule *rules, int n_rules);
 PolyPatternMatcher *poly_pm_new_named(const PolyNamedRule *rules, int n_rules);
+/* Internal compiler-cache ownership: register a _Thread_local matcher and its
+ * borrowed pattern tree for automatic cleanup when the constructing thread
+ * exits. Ordinary public matchers retain caller-managed lifetime. */
+PolyPatternMatcher *poly_pm_thread_cache(PolyPatternMatcher *pm);
 void poly_pm_destroy(PolyPatternMatcher *pm);
 PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop);
 PolyPatternMatcher *poly_pm_concat(PolyPatternMatcher *a, PolyPatternMatcher *b);
@@ -131,7 +135,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex(
     void *user_ctx,
     bool bottom_up
 );
-/* Full variant: enter_calls=false skips CALL src[0] (callee body). */
+/* Full variant: enter_calls=false skips CALL/FUNCTION src[0] (callee body). */
 PolyUOp *poly_graph_rewrite_ctx_ex2(
     PolyCtx *ctx,
     PolyUOp *sink,

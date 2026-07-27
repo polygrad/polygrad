@@ -1,0 +1,419 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "project": "tinygrad",
+    "root": "references/tinygrad_latest",
+    "commit": "ba1d3baae81c96b3ed72900cde87bb307933c61f"
+  },
+  "policy": {
+    "accepted_status": "approved",
+    "nonaccepted_statuses": [
+      "open_debt",
+      "pending_evidence"
+    ],
+    "rules": [
+      "A comparator mismatch is allowed only when an exact stage-scoped entry has status approved.",
+      "An open_debt or pending_evidence entry gives a known failure an ID but never turns it into a pass.",
+      "An unregistered mismatch is a hard failure.",
+      "An entry with stale reference evidence cannot suppress a mismatch."
+    ]
+  },
+  "entries": [
+    {
+      "id": "PG-DIV-001",
+      "status": "approved",
+      "stages": ["tensor", "placement", "instance"],
+      "area": "logical-physical roots",
+      "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
+      "polygrad": "PolyTensor retains a deviceless logical graph plus occurrence-aware placement strategy; realize or explicit prepare lowers selected occurrences to a current tinygrad-shaped deviceful physical graph",
+      "rationale": "Portable export, re-placement, and PolyInstance capture are approved Polygrad product capabilities.",
+      "approval": "AGENTS.md Core Invariants and user-approved logical/physical split",
+      "evidence": [
+        "ARCHITECTURE.md:Core Model",
+        "src/polygrad.h:PolyTensor"
+      ],
+      "close_when": null
+    },
+    {
+      "id": "PG-DIV-002",
+      "status": "approved",
+      "stages": ["product", "instance", "export"],
+      "area": "PolyInstance",
+      "tinygrad": "No language-neutral ABI package equivalent",
+      "polygrad": "PolyInstance owns named bindings, entrypoints, objectives, and package metadata",
+      "rationale": "PolyInstance is an intentional Polygrad superset feature.",
+      "approval": "AGENTS.md Core Invariants",
+      "evidence": [
+        "ARCHITECTURE.md:PolyInstance",
+        "src/instance.c"
+      ],
+      "close_when": null
+    },
+    {
+      "id": "PG-DIV-003",
+      "status": "approved",
+      "stages": ["runtime", "buffer"],
+      "area": "runtime storage ownership",
+      "tinygrad": "Python Buffer objects own runtime storage",
+      "polygrad": "PolyCtx owns ctx->buffers residency keyed by BUFFER UOps",
+      "rationale": "The C ABI requires explicit context-owned residency while preserving tinygrad graph semantics.",
+      "approval": "AGENTS.md Core Invariants",
+      "evidence": [
+        "ARCHITECTURE.md:Buffer Residency",
+        "src/ctx.h",
+        "src/device.c"
+      ],
+      "close_when": null
+    },
+    {
+      "id": "PG-DIV-004",
+      "status": "approved",
+      "stages": ["program", "runtime"],
+      "area": "compiled runtime payload ownership",
+      "tinygrad": "PROGRAM may carry SOURCE and BINARY children",
+      "polygrad": "PROGRAM carries source/program metadata while driver and compiled-binary payloads remain in private runtime-cache entries",
+      "rationale": "Non-serializable C driver resources are kept outside the immutable UOp arena.",
+      "approval": "ARCHITECTURE.md Scheduling",
+      "evidence": [
+        "ARCHITECTURE.md:Scheduling",
+        "src/engine/schedule.c"
+      ],
+      "close_when": "Revisit only if immutable serializable BINARY bytes become a product requirement."
+    },
+    {
+      "id": "PG-DIV-005",
+      "status": "approved",
+      "stages": ["export", "bundle"],
+      "area": "portable package surface",
+      "tinygrad": "No language-neutral Polygrad bundle equivalent",
+      "polygrad": "IR, bundle, safetensors, and named Instance export/import",
+      "rationale": "Portable packaging is an intentional Polygrad superset feature.",
+      "approval": "project architecture",
+      "evidence": [
+        "ARCHITECTURE.md:PolyInstance",
+        "src/ir.c",
+        "src/bundle.c"
+      ],
+      "close_when": null
+    },
+    {
+      "id": "PG-DIV-006",
+      "status": "approved",
+      "stages": ["lowered", "wgsl"],
+      "area": "WGSL 64-bit shift lowering",
+      "tinygrad": "Pinned two-i32 lowering fails for dynamic uint32 shift counts and signed SHR",
+      "polygrad": "Two-i32 lowering preserves valid dynamic counts and arithmetic signed SHR, plus the existing raw-C i32,i32 to i64 superset case",
+      "rationale": "This is a correctness-preserving backend superset over a pinned tinygrad failure.",
+      "approval": "documented backend divergence",
+      "evidence": [
+        "ARCHITECTURE.md:Renderers And Codegen",
+        "src/render_wgsl.c"
+      ],
+      "close_when": "Re-evaluate when the pinned tinygrad behavior changes."
+    },
+    {
+      "id": "PG-DIV-007",
+      "status": "approved",
+      "stages": ["ownership"],
+      "area": "host-language object lifetime",
+      "tinygrad": "Python GC and weak references own Tensor/UOp wrapper lifetime",
+      "polygrad": "C arenas and explicit frontend owner hooks own core objects",
+      "rationale": "C object ownership cannot be identical to Python GC; semantic graph lifetime must still satisfy the parity and capture gates.",
+      "approval": "project architecture",
+      "evidence": [
+        "ARCHITECTURE.md:Core Model",
+        "src/arena.c",
+        "src/ctx.c"
+      ],
+      "close_when": null
+    },
+    {
+      "id": "PG-PARITY-001",
+      "status": "open_debt",
+      "stages": ["placement", "realize"],
+      "area": "placement lifecycle",
+      "tinygrad": "Tensor.uop already contains occurrence-specific executable placement when realization begins",
+      "polygrad": "Realization reruns PolyPhysicalizer and consults a pass-local logical-and-device memo",
+      "rationale": "The current key is not an occurrence identity; WS2 replaces the hybrid with occurrence-aware aggregate placement at Tensor realize or explicit Instance prepare.",
+      "approval": null,
+      "evidence": [
+        "src/placer.c:PolyPhysicalizer",
+        "src/engine/realize.c:poly_realize_tensors_impl",
+        "temp/placement_occurrence_collision_probe.py",
+        "temp/shared_rebuild_after_realize_probe.py"
+      ],
+      "close_when": "WS2 default-policy post-placement topology, occurrence, mutation, rebuilt-subexpression, two-policy, JIT, Instance, and broad frontend/backend gates pass without logical-key correspondence or eager frontend physical composition."
+    },
+    {
+      "id": "PG-PARITY-002",
+      "status": "open_debt",
+      "stages": ["tensor", "scheduler", "lowered"],
+      "area": "symbolic variable representation",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEFINE_VAR"]},
+      "tinygrad": "Variables are PARAM(STACK(), ParamArg(slot=-1, name, vmin_vmax, AddrSpace.ALU))",
+      "polygrad": "DEFINE_VAR and BIND remain first-class vocabulary through multiple stages",
+      "rationale": "This is shared IR vocabulary debt, not an approved divergence.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/ops.py",
+        "src/polygrad.h:POLY_OP_DEFINE_VAR"
+      ],
+      "close_when": "The migrated stage-scoped subset uses pinned PARAM/ParamArg/AddrSpace.ALU topology."
+    },
+    {
+      "id": "PG-PARITY-003",
+      "status": "open_debt",
+      "stages": ["scheduler", "lowered"],
+      "area": "local and register staging",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["DEFINE_LOCAL", "DEFINE_REG"]},
+      "tinygrad": "STAGE plus address-space metadata represents staged storage",
+      "polygrad": "DEFINE_LOCAL and DEFINE_REG remain alongside partial STAGE support",
+      "rationale": "Legacy lowering vocabulary must migrate stage by stage.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.STAGE",
+        "src/polygrad.h:POLY_OP_DEFINE_LOCAL",
+        "src/polygrad.h:POLY_OP_DEFINE_REG"
+      ],
+      "close_when": "Reachable lowering uses STAGE with the pinned address-space spelling and legacy ops leave the gated stages."
+    },
+    {
+      "id": "PG-PARITY-004",
+      "status": "open_debt",
+      "stages": ["tensor", "scheduler", "lowered"],
+      "area": "vector constants",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["VCONST"]},
+      "tinygrad": "Vector constants are STACKs of scalar CONST sources",
+      "polygrad": "VCONST is a separate UOp",
+      "rationale": "This is shared IR topology debt.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py",
+        "src/polygrad.h:POLY_OP_VCONST"
+      ],
+      "close_when": "The gated stages emit STACK-of-CONST topology and no reachable VCONST."
+    },
+    {
+      "id": "PG-PARITY-005",
+      "status": "open_debt",
+      "stages": ["tensor", "schedule", "runtime"],
+      "area": "storage slices",
+      "vocabulary": {"tinygrad_only": ["SLICE"], "polygrad_only": ["BUFFER_VIEW"]},
+      "tinygrad": "SLICE is the storage-view identity",
+      "polygrad": "BUFFER_VIEW is the current storage-view identity and SLICE is absent",
+      "rationale": "This is shared storage/view vocabulary debt; it is not the approved deviceless logical graph divergence.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.SLICE",
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.has_buffer_identity",
+        "src/polygrad.h:POLY_OP_BUFFER_VIEW"
+      ],
+      "close_when": "The gated storage-view path has pinned SLICE topology and matching alias/runtime behavior."
+    },
+    {
+      "id": "PG-PARITY-006",
+      "status": "open_debt",
+      "stages": ["tensor"],
+      "area": "tensor reduction spelling",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["REDUCE_AXIS"]},
+      "tinygrad": "Tensor graphs use REDUCE with shape and axes encoded in UOp sources and args",
+      "polygrad": "Tensor graphs still use REDUCE_AXIS scheduler sugar",
+      "rationale": "REDUCE_AXIS is not an approved tensor-graph divergence.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/ops.py",
+        "src/polygrad.h:POLY_OP_REDUCE_AXIS",
+        "src/shape.c:poly_reduce_axis"
+      ],
+      "close_when": "The migrated Tensor subset is node-for-node REDUCE-isomorphic to pinned tinygrad."
+    },
+    {
+      "id": "PG-PARITY-007",
+      "status": "open_debt",
+      "stages": ["tensor"],
+      "area": "movement shape representation",
+      "tinygrad": "RESHAPE/EXPAND carry shape in CONST/STACK sources, PAD/SHRINK carry start/end shape sources, PERMUTE keeps a permutation tuple arg, and FLIP keeps a per-dimension boolean-mask tuple arg",
+      "polygrad": "RESHAPE/EXPAND now carry exact shape-value sources and PERMUTE matches the tuple spelling; PAD/SHRINK still carry pair-tuple metadata, while FLIP carries an axis-index tuple instead of the pinned boolean mask",
+      "rationale": "This is shared Tensor IR topology debt.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._mop",
+        "temp/tensor_graph_oracle_tg.json",
+        "temp/tensor_graph_oracle_pg.json",
+        "temp/reshape_source_correspondence_20260726.md",
+        "src/shape.c:poly_reshape",
+        "src/shape.c:poly_expand",
+        "test/test_shape.c:reshape_expand_accept_scalar_shape_sources",
+        "test/test_realize.c:transform_to_call_preserves_scalar_movement_shape_sources",
+        "src/shape.c:poly_pad",
+        "src/shape.c:poly_shrink"
+      ],
+      "close_when": "PAD/SHRINK use pinned source topology, FLIP uses the pinned boolean mask, and the complete movement shape/rangeify gates pass."
+    },
+    {
+      "id": "PG-PARITY-008",
+      "status": "open_debt",
+      "stages": ["schedule", "multi-device"],
+      "area": "multi-device vocabulary",
+      "vocabulary": {"tinygrad_only": ["WAIT", "GETADDR"], "polygrad_only": []},
+      "tinygrad": "WAIT and GETADDR participate in current multi-device scheduling/lowering",
+      "polygrad": "WAIT and GETADDR are absent",
+      "rationale": "Unused-for-HLB vocabulary remains deferred parity debt, not an approved difference.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.WAIT",
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops.GETADDR",
+        "PLAN_CORE_20260720.md:WS6"
+      ],
+      "close_when": "WS6 ports their construction and lowering with pinned multi-device probes."
+    },
+    {
+      "id": "PG-PARITY-009",
+      "status": "open_debt",
+      "stages": ["rangeify"],
+      "area": "consumer fanout",
+      "tinygrad": "Range propagation collects all consumers",
+      "polygrad": "A fixed 16-consumer collection cap silently forces realization",
+      "rationale": "The cap can change schedule topology and must grow dynamically or fail loudly.",
+      "approval": null,
+      "evidence": [
+        "src/schedule/rangeify.c:poly_range_propagate",
+        "PLAN_CORE_20260720.md:WS3"
+      ],
+      "close_when": "More-than-16-consumer realize sets and schedules match pinned tinygrad."
+    },
+    {
+      "id": "PG-PARITY-010",
+      "status": "open_debt",
+      "stages": ["rangeify"],
+      "area": "PCONTIG configurable partial realization",
+      "tinygrad": "PCONTIG enables partial-axis realization on multi-consumer disagreement",
+      "polygrad": "Default whole-axis behavior exists, but enabled PCONTIG behavior is absent",
+      "rationale": "Default PCONTIG=0 is aligned; the non-default control remains parity debt.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py",
+        "PLAN_CORE_20260720.md:WS3"
+      ],
+      "close_when": "Default and enabled-PCONTIG axis probes match pinned tinygrad."
+    },
+    {
+      "id": "PG-PARITY-011",
+      "status": "open_debt",
+      "stages": ["rangeify"],
+      "area": "EXPAND ending ranges",
+      "tinygrad": "Changed EXPAND ranges add the symbolic guarded ranges closure to ending ranges",
+      "polygrad": "Current path appends raw changed output-range values without the complete symbolic closure",
+      "rationale": "This can alter realization topology on symbolic EXPAND graphs.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/schedule/indexing.py",
+        "src/schedule/rangeify.c:poly_range_propagate",
+        "PLAN_CORE_20260720.md:WS3"
+      ],
+      "close_when": "Symbolic EXPAND ending-range traces match pinned tinygrad."
+    },
+    {
+      "id": "PG-PARITY-012",
+      "status": "open_debt",
+      "stages": ["python-api", "tensor"],
+      "area": "WINO behavior",
+      "tinygrad": "WINO=1 selects the implemented Winograd 3x3 convolution path",
+      "polygrad": "The Python ContextVar exists but has no corresponding core implementation",
+      "rationale": "Frontend name parity without behavior is not complete API parity.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.conv2d",
+        "py/polygrad/helpers.py:WINO",
+        "MEMORY_CIFAR.md:Python frontend and package surface"
+      ],
+      "close_when": "WINO=0 and WINO=1 source/probe behavior is parity-aligned across required frontends/backends."
+    },
+    {
+      "id": "PG-PARITY-013",
+      "status": "open_debt",
+      "stages": ["device", "multi-device"],
+      "area": "device instance identity",
+      "tinygrad": "Device strings distinguish instances such as CUDA:0 and CUDA:1",
+      "polygrad": "Closed PolyDevice enum identifies only backend classes",
+      "rationale": "This blocks true same-backend multi-device placement.",
+      "approval": null,
+      "evidence": [
+        "src/polygrad.h:PolyDevice",
+        "PLAN_CORE_20260720.md:WS6"
+      ],
+      "close_when": "Device identity is backend plus instance and multi-device construction/lowering passes."
+    },
+    {
+      "id": "PG-PARITY-014",
+      "status": "pending_evidence",
+      "stages": ["schedule", "optimizer"],
+      "area": "optimizer CALL topology",
+      "tinygrad": "Current bounded HLB comparator records 20 optimizer-related calls",
+      "polygrad": "The same comparator records 24 calls",
+      "rationale": "The old phrase 'fuses more aggressively' is not an explanation; exact per-node correspondence is still required.",
+      "approval": null,
+      "evidence": [
+        "MEMORY_CIFAR.md:Tinygrad-parity core and HLB semantics",
+        "PLAN_CORE_20260720.md:WS3"
+      ],
+      "close_when": "A pinned TG/PG schedule correspondence either closes the delta or establishes a separately approved boundary."
+    },
+    {
+      "id": "PG-PARITY-015",
+      "status": "open_debt",
+      "stages": ["tensor", "autograd", "placement", "rangeify", "realize"],
+      "area": "assignment IR spelling",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["ASSIGN"]},
+      "tinygrad": "Assignment is AFTER(target, STORE(target, value)); current Ops has no ASSIGN member",
+      "polygrad": "Public Tensor.assign and current optimizers build AFTER/STORE, but raw/imported UOps can still carry POLY_OP_ASSIGN and core handlers preserve it across autograd, placement, rangeify, and realization",
+      "rationale": "Two live spellings for the same mutation semantics prevent exact graph parity and make the moved/view mutation gate ambiguous.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.assign",
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops",
+        "src/ir.c:poly_ir_import",
+        "src/polygrad.h:poly_uop",
+        "src/schedule/rangeify.c"
+      ],
+      "close_when": "Every reachable assignment boundary uses pinned AFTER/STORE topology and POLY_OP_ASSIGN is absent from the gated stages or deleted."
+    },
+    {
+      "id": "PG-PARITY-016",
+      "status": "pending_evidence",
+      "stages": ["ir", "rangeify", "schedule"],
+      "area": "ENCDEC vocabulary",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["ENCDEC"]},
+      "tinygrad": "Current Ops has no ENCDEC member",
+      "polygrad": "POLY_OP_ENCDEC remains in the op vocabulary and rangeify/schedule guards, but no constructor is currently proven reachable",
+      "rationale": "Near-dead vocabulary must be proved unreachable and removed or registered as an approved product boundary; silence is not parity.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops",
+        "src/polygrad.h:POLY_OP_ENCDEC",
+        "src/schedule/rangeify.c",
+        "src/engine/schedule.c"
+      ],
+      "close_when": "A reachable-stage census proves no constructor/import path and ENCDEC is deleted, or exact source/probe evidence establishes a separately approved boundary."
+    },
+    {
+      "id": "PG-PARITY-017",
+      "status": "open_debt",
+      "stages": ["ir", "raw-uop"],
+      "area": "invalid op sentinel exposure",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": ["INVALID"]},
+      "tinygrad": "Current Ops has no INVALID member and cannot construct or import it as a UOp",
+      "polygrad": "POLY_OP_INVALID is reported by poly_op_count/poly_op_name and op value 0 passes the binary IR import range check into generic UOp construction",
+      "rationale": "An internal sentinel must not be accepted as public graph vocabulary.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/__init__.py:Ops",
+        "src/polygrad.h:PolyOps",
+        "src/ops.c:poly_op_name",
+        "src/ir.c:poly_ir_import",
+        "temp/op_vocabulary_probe_20260726.json"
+      ],
+      "close_when": "INVALID is excluded from the public/executable/importable op surface and malformed raw/imported INVALID nodes fail loudly."
+    }
+  ]
+}

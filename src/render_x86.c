@@ -1221,14 +1221,11 @@ static PolyUOp *rule_x86_float_where_mask_legalize(PolyCtx *ctx, PolyUOp *u, con
   if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 || !x86_is_float_dtype(u->dtype)) return NULL;
   PolyUOp *m = u->src[0];
   if (!m || !poly_dtype_is_bool(poly_dtype_scalar(m->dtype))) return NULL;
-  if (x86_op_is_comparison(m->op) && m->n_src == 2 && x86_is_float_dtype(m->src[0]->dtype)) {
-    PolyUOp *mask = poly_uop2(ctx, m->op, u->dtype, m->src[0], m->src[1], m->arg);
-    return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, mask, u->src[1], u->src[2], u->arg);
-  }
   if (m->n_src > 0 && x86_is_float_dtype(m->src[0]->dtype)) return NULL;
   PolyUOp *cast = poly_uop1(ctx, POLY_OP_CAST, u->dtype, m, poly_arg_none());
   PolyUOp *zero = poly_const_like_float(ctx, cast, 0.0);
-  PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, u->dtype, cast, zero, poly_arg_none());
+  PolyDType mask_dtype = u->dtype.count > 1 ? poly_dtype_vec(POLY_BOOL, u->dtype.count) : POLY_BOOL;
+  PolyUOp *mask = poly_uop2(ctx, POLY_OP_CMPNE, mask_dtype, cast, zero, poly_arg_none());
   return poly_uop3(ctx, POLY_OP_WHERE, u->dtype, mask, u->src[1], u->src[2], poly_arg_none());
 }
 
@@ -1244,6 +1241,101 @@ static PolyUOp *rule_x86_cmod_to_cdiv(PolyCtx *ctx, PolyUOp *u, const PolyBindin
   PolyUOp *q = poly_uop2(ctx, POLY_OP_CDIV, u->dtype, u->src[0], u->src[1], poly_arg_none());
   PolyUOp *prod = poly_uop2(ctx, POLY_OP_MUL, u->dtype, u->src[1], q, poly_arg_none());
   return poly_uop2(ctx, POLY_OP_SUB, u->dtype, u->src[0], prod, poly_arg_none());
+}
+
+/* tinygrad intentionally leaves tensor integer POW unsupported, and its X86
+ * renderer consequently treats the remaining POW as a float value. Polygrad's
+ * C renderer already exposes integer tensor POW, so the X86 backend keeps that
+ * superset behavior with exact fixed-width exponentiation rather than a float
+ * round-trip. Negative exponents follow integer cast semantics: +/-1 retain
+ * their exact reciprocal and every other integer base yields zero. */
+static PolyUOp *rule_x86_int_pow_legalize(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+  (void)b;
+  if (!u || u->op != POLY_OP_POW || u->n_src != 2 || u->dtype.count != 1 ||
+      !poly_dtype_is_int(u->dtype) || poly_dtype_is_bool(u->dtype))
+    return NULL;
+
+  PolyUOp *base = u->src[0];
+  PolyUOp *exponent = u->src[1];
+  PolyDType exponent_scalar = poly_dtype_scalar(exponent->dtype);
+  if (exponent->dtype.count != 1 || !poly_dtype_is_int(exponent_scalar) ||
+      poly_dtype_is_bool(exponent_scalar))
+    return NULL;
+
+  PolyDType unsigned_exponent;
+  switch (exponent_scalar.bitsize) {
+  case 8:
+    unsigned_exponent = POLY_UINT8;
+    break;
+  case 16:
+    unsigned_exponent = POLY_UINT16;
+    break;
+  case 32:
+    unsigned_exponent = POLY_UINT32;
+    break;
+  case 64:
+    unsigned_exponent = POLY_UINT64;
+    break;
+  default:
+    return NULL;
+  }
+
+  PolyUOp *zero_exp = poly_const_like_int(ctx, exponent, 0);
+  PolyUOp *negative = NULL;
+  if (!poly_dtype_is_unsigned(exponent_scalar))
+    negative = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, exponent, zero_exp, poly_arg_none());
+  PolyUOp *exponent_unsigned =
+      poly_uop1(ctx, POLY_OP_CAST, unsigned_exponent, exponent, poly_arg_none());
+  PolyUOp *zero_unsigned = poly_const_like_int(ctx, exponent_unsigned, 0);
+  PolyUOp *one_unsigned = poly_const_like_int(ctx, exponent_unsigned, 1);
+  PolyUOp *magnitude = exponent_unsigned;
+  if (!poly_dtype_is_unsigned(exponent_scalar)) {
+    PolyUOp *negated = poly_uop2(
+        ctx, POLY_OP_SUB, unsigned_exponent, zero_unsigned, exponent_unsigned, poly_arg_none()
+    );
+    magnitude = poly_uop3(
+        ctx, POLY_OP_WHERE, unsigned_exponent, negative, negated, exponent_unsigned, poly_arg_none()
+    );
+  }
+
+  PolyUOp *one = poly_const_like_int(ctx, base, 1);
+  PolyUOp *result = one;
+  PolyUOp *factor = base;
+  PolyUOp *remaining = magnitude;
+  for (int bit = 0; bit < exponent_scalar.bitsize; bit++) {
+    PolyUOp *low_bit =
+        poly_uop2(ctx, POLY_OP_AND, unsigned_exponent, remaining, one_unsigned, poly_arg_none());
+    PolyUOp *selected =
+        poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, low_bit, zero_unsigned, poly_arg_none());
+    PolyUOp *product = poly_uop2(ctx, POLY_OP_MUL, u->dtype, result, factor, poly_arg_none());
+    result = poly_uop3(ctx, POLY_OP_WHERE, u->dtype, selected, product, result, poly_arg_none());
+    remaining =
+        poly_uop2(ctx, POLY_OP_SHR, unsigned_exponent, remaining, one_unsigned, poly_arg_none());
+    if (bit + 1 < exponent_scalar.bitsize)
+      factor = poly_uop2(ctx, POLY_OP_MUL, u->dtype, factor, factor, poly_arg_none());
+  }
+
+  if (poly_dtype_is_unsigned(exponent_scalar)) return result;
+
+  PolyUOp *zero = poly_const_like_int(ctx, base, 0);
+  PolyUOp *minus_one = poly_const_like_int(ctx, base, -1);
+  PolyUOp *base_is_one = poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, base, one, poly_arg_none());
+  PolyUOp *base_is_minus_one =
+      poly_uop2(ctx, POLY_OP_CMPEQ, POLY_BOOL, base, minus_one, poly_arg_none());
+  PolyUOp *magnitude_low_bit =
+      poly_uop2(ctx, POLY_OP_AND, unsigned_exponent, magnitude, one_unsigned, poly_arg_none());
+  PolyUOp *magnitude_is_odd =
+      poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, magnitude_low_bit, zero_unsigned, poly_arg_none());
+  PolyUOp *minus_one_power =
+      poly_uop3(ctx, POLY_OP_WHERE, u->dtype, magnitude_is_odd, minus_one, one, poly_arg_none());
+  PolyUOp *negative_result = poly_uop3(
+      ctx, POLY_OP_WHERE, u->dtype, base_is_minus_one, minus_one_power, zero, poly_arg_none()
+  );
+  negative_result =
+      poly_uop3(ctx, POLY_OP_WHERE, u->dtype, base_is_one, one, negative_result, poly_arg_none());
+  return poly_uop3(
+      ctx, POLY_OP_WHERE, u->dtype, negative, negative_result, result, poly_arg_none()
+  );
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_x86_extra = NULL;
@@ -1267,8 +1359,10 @@ static PolyPatternMatcher *poly_pm_x86_extra(void) {
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_float_where_mask_legalize},
       {poly_pat_op(POLY_OP_NEG, NULL, 0, NULL), rule_x86_neg_to_sub},
       {poly_pat_op(POLY_OP_CMOD, NULL, 0, NULL), rule_x86_cmod_to_cdiv},
+      {poly_pat_op(POLY_OP_POW, NULL, 0, NULL), rule_x86_int_pow_legalize},
   };
-  g_pm_x86_extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_x86_extra =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_x86_extra;
 }
 
@@ -1538,7 +1632,8 @@ static PolyPatternMatcher *poly_pm_x86_pre_isel(void) {
       {poly_pat_op(POLY_OP_STORE, NULL, 0, NULL), rule_x86_pre_isel_gated_store},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, NULL), rule_x86_pre_isel_scalar_where_gate_compare},
   };
-  g_pm_x86_pre_isel = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_x86_pre_isel =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_x86_pre_isel;
 }
 
@@ -2428,11 +2523,11 @@ static PolyUOp *rule_x86_isel_where_graph(PolyCtx *ctx, PolyUOp *u, const PolyBi
   if (u->dtype.count <= 1) {
     PolyUOp *flag = x86_graph_flag_compare(ctx, mask);
     if (!flag) return NULL;
-    PolyX86Op op = mask->op == POLY_OP_CMPLT
-                       ? (poly_dtype_is_unsigned(poly_dtype_scalar(mask->src[0]->dtype)) ? POLY_X86_CMOVB
-                                                                                         : POLY_X86_CMOVL)
+    PolyDType mask_src = poly_dtype_scalar(mask->src[0]->dtype);
+    bool signed_int = poly_dtype_is_int(mask_src) && !poly_dtype_is_unsigned(mask_src);
+    PolyX86Op op = mask->op == POLY_OP_CMPLT   ? (signed_int ? POLY_X86_CMOVL : POLY_X86_CMOVB)
                    : mask->op == POLY_OP_CMPEQ ? POLY_X86_CMOVE
-                                                : POLY_X86_CMOVNE;
+                                               : POLY_X86_CMOVNE;
     PolyUOp *srcs[3] = {
         x86_graph_materialize_scalar_int_const(ctx, u->src[2]),
         x86_graph_materialize_scalar_int_const(ctx, u->src[1]),
@@ -2451,19 +2546,22 @@ static PolyUOp *rule_x86_isel_if_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindi
   if (u->tag_arg.kind != POLY_ARG_STRING || !u->tag_arg.str) return NULL;
   PolyUOp *flag = x86_graph_flag_compare(ctx, mask);
   if (!flag) return NULL;
-  PolyX86Op op = mask->op == POLY_OP_CMPLT
-                     ? (poly_dtype_is_unsigned(poly_dtype_scalar(mask->src[0]->dtype)) ? POLY_X86_JB
-                                                                                       : POLY_X86_JL)
+  PolyDType mask_src = poly_dtype_scalar(mask->src[0]->dtype);
+  bool signed_int = poly_dtype_is_int(mask_src) && !poly_dtype_is_unsigned(mask_src);
+  PolyX86Op op = mask->op == POLY_OP_CMPLT   ? (signed_int ? POLY_X86_JL : POLY_X86_JB)
                  : mask->op == POLY_OP_CMPEQ ? POLY_X86_JE
-                                              : POLY_X86_JNE;
+                                             : POLY_X86_JNE;
   PolyUOp *srcs[1] = {flag};
   return x86_ins_jump(ctx, op, srcs, 1, u->tag_arg.str);
 }
 
-static PolyUOp *rule_x86_isel_scalar_int_bin_graph(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
+static PolyUOp *rule_x86_isel_scalar_int_bin_graph(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    const PolyBindings *b
+) {
   (void)b;
-  if (!u || u->n_src != 2 || !x86_is_int_dtype(u->dtype))
-    return NULL;
+  if (!u || u->n_src != 2 || !x86_is_int_dtype(u->dtype)) return NULL;
   if (u->dtype.count > 1) {
     PolyX86Op op = x86_int_bin_op(u->op, u->dtype, false);
     if (!op) return NULL;
@@ -2814,7 +2912,8 @@ static PolyPatternMatcher *poly_pm_x86_graph_readmem(void) {
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_INS, NULL, 0, NULL), rule_x86_isel_readmem_graph},
   };
-  g_pm_x86_graph_readmem = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_x86_graph_readmem =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_x86_graph_readmem;
 }
 
@@ -2877,7 +2976,8 @@ static PolyPatternMatcher *poly_pm_x86_graph_isel_ordered(void) {
       /* X86Op -> X86Op and vreg allocation happen last in tinygrad. */
       {.pat = poly_pat_op(POLY_OP_INS, NULL, 0, NULL), .fn = rule_x86_isel_readmem_graph, .name = "x86.isel.readmem"},
   };
-  g_pm_x86_graph_isel_ordered = poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_x86_graph_isel_ordered =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_x86_graph_isel_ordered;
 }
 
@@ -5701,6 +5801,7 @@ static PolyRendererCaps poly_x86_caps(void) {
        * the MUL is foldable. */
       .has_mulacc = false,
       .has_threefry = false,
+      .has_int64 = true,
       .has_local = false,
       .has_threads = has_threads,
       .has_simd_int = true,

@@ -9,6 +9,9 @@ from .tensor import BoundVariable, Tensor, Variable
 from polygrad.uop.ops import UOp
 
 
+capturing = []
+
+
 class JitError(RuntimeError):
     pass
 
@@ -123,9 +126,14 @@ def _var_binding_array(bindings):
 def _check_duplicate_input_buffers(inputs):
     seen = set()
     lib = _ffi._lib
+    base_ops = {
+        'RESHAPE', 'EXPAND', 'PERMUTE', 'PAD', 'SHRINK', 'FLIP', 'MULTI', 'DETACH',
+    }
     for t in inputs:
-        raw = lib.poly_tensor_uop(t._tensor)
-        buf = lib.poly_uop_get_buffer_identity(raw) if raw else None
+        uop = t.uop
+        while uop and uop.op_name in base_ops and uop.src:
+            uop = uop.src[0]
+        buf = lib.poly_uop_get_buffer_identity(uop.raw) if uop else None
         key = int(buf) if buf else 0
         if key == 0:
             raise JitError('JIT inputs must be real buffers')
@@ -253,7 +261,12 @@ class Jit:
         names, inputs = _input_tensors(args, kwargs)
         explicit_var_bindings = _bound_var_items(args, kwargs)
         for t in inputs:
-            t.realize()
+            # tinygrad/engine/jit.py:233-235 realizes only inputs whose
+            # recursive UOp base is not allocated. Polygrad also needs one
+            # realization when its requested-device physical root is absent;
+            # an allocated logical HOST base is not placement.
+            if t.uop_physical is None or not t.uop.is_realized:
+                t.realize()
         _check_duplicate_input_buffers(inputs)
         sig, var_bindings = _input_info(names, inputs, explicit_var_bindings)
 
@@ -261,6 +274,13 @@ class Jit:
             ret = self.fxn(*args, **kwargs)
             _realize_return(ret)
         elif self.cnt == 1:
+            # Match tinygrad/engine/jit.py:278-284: reject nested capture
+            # before allocating or replacing this wrapper's private C JIT.
+            if capturing:
+                raise RuntimeError(
+                    f'having TinyJit inside another TinyJit is not supported '
+                    f'{len(capturing)=} {capturing=}'
+                )
             if inputs:
                 ctx = inputs[0]._ctx
                 if any(t._ctx != ctx for t in inputs):
@@ -280,6 +300,7 @@ class Jit:
                 _ffi._lib.poly_jit_free(self._jit)
                 self._jit = None
                 raise JitError('poly_jit_begin_capture failed')
+            capturing.append(self)
             try:
                 ret = self.fxn(*args, **kwargs)
                 _realize_return(ret)
@@ -288,6 +309,8 @@ class Jit:
             except Exception:
                 _ffi._lib.poly_jit_cancel_capture(self._jit)
                 raise
+            finally:
+                capturing.clear()
             self.ret = ret
             self.signature = sig
             self.captured = True

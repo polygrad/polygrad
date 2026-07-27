@@ -79,7 +79,7 @@ if sys.platform.startswith('linux'):
 setup(
     name='polygrad',
     version=_read_version(),
-    packages=find_packages(include=['polygrad', 'polygrad.*']),
+    packages=find_packages(include=['polygrad', 'polygrad.*', 'extra', 'extra.*']),
     package_data={'polygrad': ['_native.c']},
     ext_modules=[
         Extension(

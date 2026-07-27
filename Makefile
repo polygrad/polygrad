@@ -1,4 +1,5 @@
 CC ?= gcc
+AR ?= ar
 CFLAGS_COMMON = -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -Wno-unused-parameter -Isrc
 CFLAGS_RELEASE = $(CFLAGS_COMMON) -O2
 CFLAGS_DEBUG = $(CFLAGS_COMMON) -g -O0 -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -60,19 +61,24 @@ ifeq ($(HAS_X86), 1)
   TEST_SRC += test/test_x86.c
   CFLAGS_COMMON += -DPOLY_HAS_X86=1
 endif
+STATIC_OBJS = $(patsubst %.c,build/obj/static/%.o,$(SRC) $(CODEC_SRC))
+STATIC_DEPS = $(STATIC_OBJS:.o=.d)
 PARITY_RUNNER_SRC = test/test_tinygrad_runner.c
 PARITY_SCRIPT = test/test_tinygrad_parity.py
 PARITY_PY ?= $(if $(wildcard references/.venv-tinygrad-py311/bin/python),references/.venv-tinygrad-py311/bin/python,conda run -n tiny python)
 
 # Emscripten WASM build (excludes runtime_cpu.c — no fork/dlopen in WASM)
 WASM_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/selftest.c src/ctx.c src/device.c src/placer.c src/engine/realize.c src/engine/jit.c src/uop.c src/pat.c src/alu.c src/sym.c src/shape.c src/autograd.c src/codegen.c src/render_c.c src/render_wgsl.c src/runtime_wasm.c src/runtime_webgpu.c src/wasm_builder.c src/render_wasm.c src/frontend.c src/tensor.c src/optim.c src/schedule/rangeify.c src/simplify.c src/schedule/indexing.c src/nn.c src/engine/schedule.c src/interp.c vendor/cjson/cJSON.c src/safetensors.c src/ir.c src/bundle.c src/instance.c src/tokenizer.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
-WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_ctx_set_preferred_device,_poly_ctx_set_frontend_buffer_release,_poly_ctx_named_count,_poly_ctx_stats,_poly_can_run_op,_poly_selftest,_poly_selftest_device,_poly_op_count,_poly_op_name,_poly_const_float,_poly_const_double,_poly_const_int,_poly_contiguous,_poly_add,_poly_sub,_poly_mul,_poly_div,_poly_alu1,_poly_alu2,_poly_alu3,_poly_store_val,_poly_sink1,_poly_sink_n,_poly_uop_placeholder_like,_poly_uop_range,_poly_uop_index,_poly_uop_load,_poly_uop_store,_poly_uop_set,_poly_uop_group,_poly_uop_end,_poly_uop_sink,_poly_uop_sink_ex,_poly_uop_call,_poly_uop_after,_poly_uop_reduce,_poly_uop_flatten,_poly_uop_numel,_poly_uop_n_src,_poly_uop_src,_poly_buffer_by_id,_poly_buffer_var_by_id,_poly_buffer_f32,_poly_buffer_f64,_poly_buffer_from_host,_poly_buffer_get_ptr,_poly_buffer_get_key,_poly_buffer_read,_poly_buffer_write,_poly_set_frontend_buffer_release,_poly_realize_uops,_poly_tensor_create,_poly_tensor_create_with_roots,_poly_tensor_update,_poly_tensor_to_device,_poly_tensor_assign,_poly_tensor_uop,_poly_tensor_uop_logical,_poly_tensor_uop_physical,_poly_tensor_device,_poly_realize_tensors,_poly_jit_new,_poly_jit_free,_poly_jit_set_prune,_poly_jit_begin_capture,_poly_jit_end_capture,_poly_jit_cancel_capture,_poly_jit_is_captured,_poly_jit_schedule_count,_poly_jit_run,_poly_jit_run_with_vars,_poly_uop_op,_poly_uop_has_buffer_identity,_poly_uop_get_buffer_identity,_poly_uop_reachable,_poly_uop_substitute,_poly_reshape,_poly_expand,_poly_reduce_axis,_poly_permute,_poly_shrink,_poly_flip,_poly_pad,_poly_grad,_poly_grad_many,_poly_abi_version,_poly_device_by_name,_poly_device_name,_poly_dtype_id_by_name,_poly_uop_dtype_id,_poly_exp,_poly_log,_poly_log1p,_poly_expm1,_poly_sin,_poly_cos,_poly_tan,_poly_erf,_poly_erfc,_poly_erfinv,_poly_ndtri,_poly_digamma,_poly_lgamma,_poly_sigmoid,_poly_tanh_act,_poly_relu,_poly_relu6,_poly_leaky_relu,_poly_gelu,_poly_quick_gelu,_poly_silu,_poly_elu,_poly_softplus,_poly_mish,_poly_hardtanh,_poly_hardswish,_poly_hardsigmoid,_poly_abs,_poly_sign,_poly_square,_poly_rsqrt,_poly_ceil,_poly_floor,_poly_round_f,_poly_isinf,_poly_isnan,_poly_eq,_poly_ne,_poly_gt,_poly_ge,_poly_le,_poly_where_op,_poly_maximum,_poly_minimum,_poly_clamp,_poly_detach,_poly_cast_by_id,_poly_rand,_poly_randn,_poly_arange,_poly_eye,_poly_linspace,_poly_full,_poly_tril,_poly_triu,_poly_cholesky,_poly_cholesky_solve,_poly_triangular_solve,_poly_solve,_poly_lstsq,_poly_sum_reduce,_poly_max_reduce,_poly_mean_reduce,_poly_logsumexp,_poly_dot,_poly_qr,_poly_qr_ex,_poly_cross_entropy,_poly_gather_dim,_poly_scatter,_poly_scatter_reduce,_poly_sort,_poly_argsort,_poly_topk,_poly_einsum,_poly_rearrange,_exp2f,_log2f,_sinf,_powf,_malloc,_free,_poly_instance_from_ir,_poly_instance_free,_poly_instance_set_device,_poly_instance_call,_poly_instance_value_and_grad,_poly_instance_forward,_poly_instance_train_step,_poly_instance_set_optimizer,_poly_instance_set_optimizer_ex,_poly_instance_param_count,_poly_instance_param_name,_poly_instance_param_data,_poly_instance_param_shape,_poly_instance_buf_count,_poly_instance_buf_name,_poly_instance_buf_role,_poly_instance_buf_data,_poly_instance_buf_shape,_poly_instance_export_weights,_poly_instance_export_weights_ex,_poly_instance_import_weights,_poly_instance_export_ir,_poly_mlp_from_json,_poly_tabm_instance,_poly_nam_instance,_poly_instance_save_bundle,_poly_instance_save_bundle_ex,_poly_instance_from_bundle,_poly_uop_ndim,_poly_uop_max_shape_dims,_poly_uop_shape_dim,_poly_uop_const_i64,_poly_uop_unbind_var,_poly_uop_bind_value,_poly_ctx_arena,_poly_ctx_shape_cache,_poly_softmax,_poly_log_softmax,_poly_dot,_poly_qr,_poly_qr_ex,_poly_cross_entropy,_poly_gather,_poly_sum_reduce,_poly_max_reduce,_poly_mean_reduce,_poly_var_reduce,_poly_tril,_poly_triu,_poly_rmsnorm_apply,_poly_sdpa,_poly_rope,_poly_repeat_interleave,_poly_argmax,_poly_mse_loss,_poly_mae_loss,_poly_hf_load,_poly_gguf_load,_poly_gguf_decode,_poly_gguf_decoded_free,_poly_gguf_kv_int,_poly_gguf_kv_float,_poly_gguf_kv_string,_poly_import_last_error_code,_poly_import_last_error_message,_poly_tokenizer_from_gguf,_poly_tokenizer_from_json,_poly_tokenize,_poly_detokenize,_poly_tokenizer_free,_poly_tokenizer_vocab_size,_poly_tokenizer_bos_id,_poly_tokenizer_eos_id,_poly_gpt2,_poly_qwen3
+WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_ctx_set_preferred_device,_poly_ctx_set_frontend_buffer_release,_poly_ctx_named_count,_poly_ctx_stats,_poly_can_run_op,_poly_selftest,_poly_selftest_device,_poly_op_count,_poly_op_name,_poly_const_float,_poly_const_double,_poly_const_int,_poly_contiguous,_poly_add,_poly_sub,_poly_mul,_poly_div,_poly_alu1,_poly_alu2,_poly_alu3,_poly_store_val,_poly_sink1,_poly_sink_n,_poly_uop_placeholder_like,_poly_uop_range,_poly_uop_index,_poly_uop_load,_poly_uop_store,_poly_uop_set,_poly_uop_group,_poly_uop_end,_poly_uop_sink,_poly_uop_sink_ex,_poly_uop_call,_poly_uop_after,_poly_uop_reduce,_poly_uop_flatten,_poly_uop_numel,_poly_uop_n_src,_poly_uop_src,_poly_buffer_by_id,_poly_buffer_var_by_id,_poly_buffer_f32,_poly_buffer_f64,_poly_buffer_from_host,_poly_buffer_get_ptr,_poly_buffer_get_key,_poly_buffer_read,_poly_buffer_write,_poly_set_frontend_buffer_release,_poly_realize_uops,_poly_tensor_create,_poly_tensor_create_with_roots,_poly_tensor_update,_poly_tensor_to_device,_poly_tensor_assign,_poly_tensor_clone_into,_poly_tensor_uop,_poly_tensor_uop_logical,_poly_tensor_uop_physical,_poly_tensor_device,_poly_realize_tensors,_poly_jit_new,_poly_jit_free,_poly_jit_set_prune,_poly_jit_begin_capture,_poly_jit_end_capture,_poly_jit_cancel_capture,_poly_jit_is_captured,_poly_jit_schedule_count,_poly_jit_run,_poly_jit_run_with_vars,_poly_uop_op,_poly_uop_device,_poly_uop_has_buffer_identity,_poly_uop_get_buffer_identity,_poly_uop_reachable,_poly_uop_substitute,_poly_reshape,_poly_expand,_poly_reduce_axis,_poly_permute,_poly_shrink,_poly_shrink_uop,_poly_flip,_poly_pad,_poly_grad,_poly_grad_many,_poly_grad_many_ex,_poly_abi_version,_poly_device_by_name,_poly_device_name,_poly_device_is_host_addressable,_poly_dtype_id_by_name,_poly_uop_dtype_id,_poly_exp,_poly_log,_poly_log1p,_poly_expm1,_poly_sin,_poly_cos,_poly_tan,_poly_erf,_poly_erfc,_poly_erfinv,_poly_ndtri,_poly_digamma,_poly_lgamma,_poly_sigmoid,_poly_tanh_act,_poly_relu,_poly_relu6,_poly_leaky_relu,_poly_gelu,_poly_quick_gelu,_poly_silu,_poly_elu,_poly_softplus,_poly_mish,_poly_hardtanh,_poly_hardswish,_poly_hardsigmoid,_poly_abs,_poly_sign,_poly_square,_poly_rsqrt,_poly_ceil,_poly_floor,_poly_round_f,_poly_isinf,_poly_isnan,_poly_eq,_poly_ne,_poly_gt,_poly_ge,_poly_le,_poly_where_op,_poly_maximum,_poly_minimum,_poly_clamp,_poly_detach,_poly_cast_by_id,_poly_rand,_poly_randn,_poly_arange,_poly_eye,_poly_linspace,_poly_full,_poly_tril,_poly_triu,_poly_cholesky,_poly_cholesky_solve,_poly_triangular_solve,_poly_solve,_poly_lstsq,_poly_sum_reduce,_poly_max_reduce,_poly_mean_reduce,_poly_logsumexp,_poly_dot,_poly_qr,_poly_qr_ex,_poly_cross_entropy,_poly_gather_dim,_poly_scatter,_poly_scatter_reduce,_poly_sort,_poly_argsort,_poly_topk,_poly_einsum,_poly_rearrange,_exp2f,_log2f,_sinf,_powf,_malloc,_free,_poly_instance_from_ir,_poly_instance_free,_poly_instance_set_device,_poly_instance_call,_poly_instance_value_and_grad,_poly_instance_forward,_poly_instance_train_step,_poly_instance_set_optimizer,_poly_instance_set_optimizer_ex,_poly_instance_param_count,_poly_instance_param_name,_poly_instance_param_data,_poly_instance_param_shape,_poly_instance_buf_count,_poly_instance_buf_name,_poly_instance_buf_role,_poly_instance_buf_data,_poly_instance_buf_shape,_poly_instance_export_weights,_poly_instance_export_weights_ex,_poly_instance_import_weights,_poly_instance_export_ir,_poly_mlp_from_json,_poly_tabm_instance,_poly_nam_instance,_poly_instance_save_bundle,_poly_instance_save_bundle_ex,_poly_instance_from_bundle,_poly_uop_ndim,_poly_uop_max_shape_dims,_poly_uop_shape_dim,_poly_uop_const_i64,_poly_uop_unbind_var,_poly_uop_bind_value,_poly_ctx_arena,_poly_ctx_shape_cache,_poly_softmax,_poly_log_softmax,_poly_dot,_poly_qr,_poly_qr_ex,_poly_cross_entropy,_poly_gather,_poly_sum_reduce,_poly_max_reduce,_poly_mean_reduce,_poly_var_reduce,_poly_tril,_poly_triu,_poly_rmsnorm_apply,_poly_sdpa,_poly_rope,_poly_repeat_interleave,_poly_argmax,_poly_mse_loss,_poly_mae_loss,_poly_hf_load,_poly_gguf_load,_poly_gguf_decode,_poly_gguf_decoded_free,_poly_gguf_kv_int,_poly_gguf_kv_float,_poly_gguf_kv_string,_poly_import_last_error_code,_poly_import_last_error_message,_poly_tokenizer_from_gguf,_poly_tokenizer_from_json,_poly_tokenize,_poly_detokenize,_poly_tokenizer_vocab_size,_poly_tokenizer_bos_id,_poly_tokenizer_eos_id,_poly_gpt2,_poly_qwen3
 
-WASM_EXPORTS := $(WASM_EXPORTS),_poly_const_float_by_id,_poly_const_int_by_id
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_const_float_by_id,_poly_const_int_by_id,_poly_ctx_reset_counters,_poly_ctx_mem_used_for_device,_poly_realize_tensors_ex,_poly_buffer_set,_poly_buffer_on_device_by_id,_poly_buffer_ensure_device_allocated
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_buffer_is_allocated
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_requires_grad,_poly_tensor_set_requires_grad,_poly_instance_param_trainable,_poly_instance_set_param_trainable,_poly_instance_buf_trainable,_poly_instance_set_buf_trainable,_poly_instance_readback_param,_poly_instance_readback_buf,_poly_optim_build_step,_poly_register_buffer_by_id,_poly_register_existing_buffer,_poly_instance_from_sinks,_poly_instance_from_binding_arrays
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_pad_value,_poly_pool,_poly_max_pool2d,_poly_conv2d,_poly_batchnorm,_poly_one_hot,_poly_index_select
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_tokenizer_free
 
 WASM_ASYNCIFY_IMPORTS = ['js_webgpu_dispatch','js_webgpu_read_buffer_to_wasm','js_webgpu_read_buffer_to_hostkey']
-WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instance_value_and_grad','poly_instance_train_step','run_instance_sink','poly_instance_param_data','poly_instance_buf_data','poly_instance_export_weights','poly_instance_export_weights_ex','poly_instance_save_bundle','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_jit_run','poly_jit_run_with_vars','poly_run_schedule','poly_schedule_execute_runner_call','poly_webgpu_execute','copy_execute_fn','poly_buffer_copy','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
+WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instance_value_and_grad','poly_instance_train_step','run_instance_sink','poly_instance_param_data','poly_instance_buf_data','poly_instance_export_weights','poly_instance_export_weights_ex','poly_instance_save_bundle','poly_instance_save_bundle_ex','poly_instance_readback_param','poly_instance_readback_buf','poly_realize_uops','poly_realize_tensors','poly_realize_tensors_ex','poly_jit_run','poly_jit_run_with_vars','poly_run_schedule','poly_schedule_execute_runner_call','poly_webgpu_execute','copy_execute_fn','poly_buffer_copy','poly_buffer_ensure_host_current','poly_buffer_read','poly_buffer_write','host_copy_in','webgpu_copy_out']
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
@@ -84,15 +90,20 @@ QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.
 BROWSER_MATRIX ?= chromium,firefox,chrome-system=chromium@/usr/bin/google-chrome,chromium-snap=chromium@/snap/bin/chromium
 BROWSER_MATRIX_DEVICES ?= auto
 
-.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast verify-source-mirrors test-py-x86
+.PHONY: all test test-fast test-common test-common-cpu test-common-cuda test-common-hip test-common-interp test-common-x86 test-specific-cuda test-specific-hip test-specific-x86 test-cuda test-hip test-interp test-x86 test-parity test-parity-opt test-parity-ir test-parity-ir-opt test-parity-graph parity-graph-report test-parity-op-census parity-op-census-report test-parity-cuda test-parity-hip test-symbolic-z3 test-qwen3 test-browser-qwen3 require-qwen3-gguf test-wasm test-wasm-new test-native test-browser test-browser-matrix test-js-browser-matrix test-p2p test-p2p-browser bench bench-cuda bench-model-cuda bench-hip bench-train-py bench-smoke bench-local-baseline bench-update-local-baseline bench-smoke-regression bench-ci-regression bench-ratios bench-ratio-local-baseline bench-update-local-ratio-baseline bench-parity bench-jax-js-wasm bench-jax-js-matmul-wasm bench-jax-js-model-wasm bench-jax-js-browser-wasm bench-jax-js-browser-matmul-wasm bench-jax-js-browser-model-wasm bench-compare bench-compare-global bench-regression bench-update-baseline fuzz fuzz-smoke fuzz-nightly fuzz-symbolic fuzz-symbolic-div wasm wasm-pkg build-py build-py-sdist build-py-wheel build-python test-py-sdist-install publish-py publish-python build-js publish-js clean analyze cppcheck format format-check test-msan test-tsan verify coverage test-full test-js-native-cpu test-js-native-x86 test-js-native-interp test-js-native-cuda test-js-native-hip test-js-package test-filc-interp-fast sync-source-mirrors verify-source-mirrors test-py-x86
 
 all: build/libpolygrad.a build/libpolygrad.so
 
-build/libpolygrad.a: $(SRC) $(CODEC_SRC)
+build/libpolygrad.a: $(STATIC_OBJS)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -c $(SRC) $(CODEC_SRC)
-	ar rcs $@ *.o
-	@rm -f *.o
+	@tmp="$@.$$$$"; \
+		$(AR) rcs "$$tmp" $^ && mv "$$tmp" "$@"
+
+build/obj/static/%.o: %.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS_RELEASE) -MMD -MP -c -o $@ $<
+
+-include $(STATIC_DEPS)
 
 build/libpolygrad.so: $(SRC) $(CODEC_SRC)
 	@mkdir -p build
@@ -163,6 +174,30 @@ test-parity-ir: build/polygrad_parity_runner
 test-parity-ir-opt: build/polygrad_parity_runner
 	$(SAN_RUN) CACHELEVEL=0 POLY_OPTIMIZE=1 $(PARITY_PY) $(PARITY_SCRIPT) --runner build/polygrad_parity_runner --mode full
 
+GRAPH_PARITY_DIR ?= temp/parity_graph
+GRAPH_PARITY_CASE_ARGS ?=
+OP_PARITY_DIR ?= temp/parity_ops
+
+test-parity-graph parity-graph-report: build/libpolygrad.so
+	@mkdir -p $(GRAPH_PARITY_DIR) temp/cc_tmp
+	ENGINE=tinygrad DEV=CPU PYTHONPATH=references/tinygrad_latest $(PARITY_PY) \
+		test/tensor_graph_cases.py $(GRAPH_PARITY_CASE_ARGS) > $(GRAPH_PARITY_DIR)/tinygrad.json
+	ENGINE=polygrad POLY_DEVICE=cpu POLY_TMPDIR=$(abspath temp/cc_tmp) TMPDIR=$(abspath temp/cc_tmp) \
+		POLYGRAD_LIB=$(abspath build/libpolygrad.so) PYTHONPATH=py $(PARITY_PY) \
+		test/tensor_graph_cases.py $(GRAPH_PARITY_CASE_ARGS) > $(GRAPH_PARITY_DIR)/polygrad.json
+	$(PARITY_PY) test/compare_tensor_graphs.py \
+		$(GRAPH_PARITY_DIR)/tinygrad.json $(GRAPH_PARITY_DIR)/polygrad.json \
+		$(if $(filter parity-graph-report,$@),--report-only,) \
+		--output $(GRAPH_PARITY_DIR)/report.json
+
+test-parity-op-census parity-op-census-report: build/libpolygrad.so
+	@mkdir -p $(OP_PARITY_DIR)
+	POLYGRAD_LIB=$(abspath build/libpolygrad.so) \
+		PYTHONPATH=py:references/tinygrad_latest $(PARITY_PY) \
+		test/op_vocabulary_census.py \
+		$(if $(filter parity-op-census-report,$@),--report-only,) \
+		--output $(OP_PARITY_DIR)/report.json
+
 Z3_FUZZ_ITERS ?= 128
 Z3_FUZZ_SEED ?= 0
 test-symbolic-z3: build/libpolygrad.so
@@ -170,6 +205,8 @@ test-symbolic-z3: build/libpolygrad.so
 		test/external/fuzz_symbolic_z3.py --mode general --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
 	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
 		test/external/fuzz_symbolic_z3.py --mode div --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
+	POLYGRAD_LIB=$(abspath build/libpolygrad.so) $(PARITY_PY) \
+		test/external/fuzz_symbolic_z3.py --mode fixed --seed $(Z3_FUZZ_SEED) --iters $(Z3_FUZZ_ITERS)
 
 build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
@@ -324,10 +361,11 @@ FUZZ_SMOKE_ARGS ?= -runs=256 -max_len=512 -timeout=5
 FUZZ_NIGHTLY_ARGS ?= -runs=8192 -max_len=2048 -timeout=10
 FUZZ_WORK_DIR ?= temp/fuzz-corpus
 FUZZ_SEED_DIR ?= test/corpus
-FUZZ_ASAN_OPTIONS ?= symbolize=0
+FUZZ_ASAN_OPTIONS ?= symbolize=0:detect_leaks=1:protect_shadow_gap=0
 FUZZ_RUN_ENV ?= ASAN_OPTIONS=$(FUZZ_ASAN_OPTIONS) UBSAN_OPTIONS=$(UBSAN_OPTIONS)
 FUZZ_CFLAGS = -std=c11 -D_POSIX_C_SOURCE=200809L -g -O1 \
 	-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer \
+	-fno-pie -no-pie \
 	-Wall -Wextra -Wpedantic -Wno-unused-parameter -Isrc
 
 fuzz: fuzz-symbolic fuzz-symbolic-div
@@ -356,6 +394,10 @@ build/fuzz_sym_div: test/fuzz_sym_div.c $(SRC) $(CODEC_SRC)
 
 NODE ?= $(shell which node 2>/dev/null || echo node)
 test-wasm: test-js-browser
+
+sync-source-mirrors:
+	$(PYTHON) py/scripts/sync-csrc.py
+	$(NODE) js/scripts/sync-csrc.js
 
 verify-source-mirrors:
 	$(PYTHON) scripts/verify-source-mirrors.py
@@ -529,7 +571,7 @@ test-py-sdist-install: build-py-sdist
 		. temp/py-sdist-smoke/venv/bin/activate && \
 		TMPDIR=$(abspath temp/py-sdist-smoke/tmp) python -m pip install --no-cache-dir --no-deps py/dist/polygrad-*.tar.gz && \
 		cd temp/py-sdist-smoke/run && \
-		PYTHONPATH= TMPDIR=$(abspath temp/py-sdist-smoke/tmp) python -c "from polygrad import Tensor; print(((Tensor([1,2,3])*2+1).numpy()).tolist())"
+		PYTHONPATH= TMPDIR=$(abspath temp/py-sdist-smoke/tmp) python -c "from extra.bench_log import BenchEvent; from polygrad import Tensor; print(BenchEvent.STEP.value, ((Tensor([1,2,3])*2+1).numpy()).tolist())"
 
 publish-py: build-py-sdist
 	cd py && $(TWINE) upload dist/*.tar.gz

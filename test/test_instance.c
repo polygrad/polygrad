@@ -43,24 +43,28 @@ static uint8_t *make_add_ir(int *out_len) {
   return bytes;
 }
 
-TEST(optim, build_step_sgd_updates_param_with_after_store) {
+TEST(optim, build_step_sgd_uses_current_lr_tensor_with_after_store) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *p_buf = poly_buffer_f32(ctx, 1);
   PolyUOp *g_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *lr_buf = poly_buffer_f32(ctx, 1);
   float p_data[] = {1.0f};
   float g_data[] = {2.0f};
+  float lr_data[] = {0.1f};
   poly_buffer_set(ctx, p_buf, p_data, sizeof(p_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, g_buf, g_data, sizeof(g_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, lr_buf, lr_data, sizeof(lr_data), POLY_DEVICE_CPU);
 
   PolyTensor *param = poly_tensor_create(ctx, p_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *grad = poly_tensor_create(ctx, g_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(param);
   ASSERT_NOT_NULL(grad);
+  ASSERT_NOT_NULL(lr);
 
   PolyOptimConfig cfg = {
       .kind = POLY_OPTIM_SGD,
-      .lr = 0.1f,
       .beta1 = 0.0f,
       .beta2 = 0.0f,
       .eps = 0.0f,
@@ -69,22 +73,367 @@ TEST(optim, build_step_sgd_updates_param_with_after_store) {
       .nesterov = false,
       .classic = false,
   };
-  int need = poly_optim_build_step(ctx, &cfg, &param, &grad, 1, NULL, NULL, NULL, NULL, NULL, 0);
+  int need =
+      poly_optim_build_step(ctx, &cfg, lr, &param, &grad, 1, NULL, NULL, NULL, NULL, NULL, 0);
   ASSERT_INT_EQ(need, 1);
   PolyTensor *outs[1] = {NULL};
   ASSERT_INT_EQ(
-      poly_optim_build_step(ctx, &cfg, &param, &grad, 1, NULL, NULL, NULL, NULL, outs, 1), 1
+      poly_optim_build_step(ctx, &cfg, lr, &param, &grad, 1, NULL, NULL, NULL, NULL, outs, 1), 1
   );
   ASSERT_PTR_EQ(outs[0], param);
   ASSERT_INT_EQ(poly_tensor_uop(param)->op, POLY_OP_AFTER);
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), lr_buf));
+
+  /* The update graph was built while lr contained 0.1. Changing the existing
+   * LR buffer before realization must make the update use 0.2. */
+  lr_data[0] = 0.2f;
+  ASSERT_INT_EQ(poly_buffer_write(ctx, lr_buf, lr_data, sizeof(lr_data)), 0);
 
   PolyTensor *realized = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 1, &realized), 0);
   ASSERT_PTR_EQ(realized, param);
   float p_after = 0.0f;
   ASSERT_INT_EQ(poly_buffer_read(ctx, p_buf, &p_after, sizeof(p_after)), 0);
-  ASSERT_FLOAT_EQ(p_after, 0.8f, 1e-5f);
+  ASSERT_FLOAT_EQ(p_after, 0.6f, 1e-5f);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_step_sgd_realizes_lazy_state_and_gradient_effects) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *p_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *m_buf = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *grad_buf = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *lr_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *g_value_buf = poly_buffer_f32(ctx, 1);
+  ASSERT_NOT_NULL(p_buf);
+  ASSERT_NOT_NULL(m_buf);
+  ASSERT_NOT_NULL(lr_buf);
+  ASSERT_NOT_NULL(grad_buf);
+  ASSERT_NOT_NULL(g_value_buf);
+  float p_data[] = {1.0f};
+  float m_data[] = {0.0f};
+  float lr_data[] = {0.02f};
+  float g_data[] = {1.0f};
+  poly_buffer_set(ctx, p_buf, p_data, sizeof(p_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, m_buf, m_data, sizeof(m_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, lr_buf, lr_data, sizeof(lr_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, g_value_buf, g_data, sizeof(g_data), POLY_DEVICE_CPU);
+
+  PolyUOp *zero = poly_full(ctx, (int64_t[]){1}, 1, 0.0f);
+  PolyUOp *m_init_store = poly_store_val(ctx, m_buf, zero);
+  PolyUOp *m_init_src[2] = {m_buf, m_init_store};
+  PolyUOp *m_init = poly_uop(
+      ctx, POLY_OP_AFTER, POLY_FLOAT32, m_init_src, 2, poly_arg_none()
+  );
+  PolyUOp *grad_store = poly_store_val(ctx, grad_buf, g_value_buf);
+  PolyUOp *grad_src[2] = {grad_buf, grad_store};
+  PolyUOp *grad_effect = poly_uop(
+      ctx, POLY_OP_AFTER, POLY_FLOAT32, grad_src, 2, poly_arg_none()
+  );
+  ASSERT_NOT_NULL(zero);
+  ASSERT_NOT_NULL(m_init_store);
+  ASSERT_NOT_NULL(m_init);
+  ASSERT_NOT_NULL(grad_store);
+  ASSERT_NOT_NULL(grad_effect);
+
+  PolyTensor *param = poly_tensor_create(ctx, p_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *momentum =
+      poly_tensor_create(ctx, m_init, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *grad =
+      poly_tensor_create(ctx, grad_effect, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(param);
+  ASSERT_NOT_NULL(momentum);
+  ASSERT_NOT_NULL(lr);
+  ASSERT_NOT_NULL(grad);
+
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_SGD,
+      .weight_decay = 0.0f,
+      .momentum = 0.85f,
+      .nesterov = true,
+      .classic = false,
+  };
+  PolyTensor *m_state[] = {momentum};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr, &param, &grad, 1, m_state, NULL, NULL, NULL, NULL, 0
+      ),
+      2
+  );
+  PolyTensor *targets[2] = {NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr, &param, &grad, 1, m_state, NULL, NULL, NULL, targets, 2
+      ),
+      2
+  );
+  ASSERT_PTR_EQ(targets[0], momentum);
+  ASSERT_PTR_EQ(targets[1], param);
+  PolyUOp *momentum_logical = poly_tensor_uop_logical(momentum);
+  PolyUOp *param_logical = poly_tensor_uop_logical(param);
+  ASSERT_NOT_NULL(momentum_logical);
+  ASSERT_NOT_NULL(param_logical);
+  ASSERT_EQ(momentum_logical->op, POLY_OP_AFTER);
+  ASSERT_EQ(param_logical->op, POLY_OP_AFTER);
+  ASSERT_TRUE(poly_uop_reachable(ctx, param_logical, momentum_logical));
+
+  PolyTensor *realized[2] = {NULL, NULL};
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, targets, 2, realized), 0);
+  ASSERT_PTR_EQ(realized[0], momentum);
+  ASSERT_PTR_EQ(realized[1], param);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(momentum), momentum_logical);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(param), param_logical);
+  ASSERT_PTR_EQ(poly_tensor_uop(momentum), m_buf);
+  ASSERT_PTR_EQ(poly_tensor_uop(param), p_buf);
+
+  float momentum_after = 0.0f;
+  float param_after = 0.0f;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, m_buf, &momentum_after, sizeof(momentum_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p_buf, &param_after, sizeof(param_after)), 0);
+  ASSERT_FLOAT_EQ(momentum_after, 1.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(param_after, 0.963f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_step_sgd_broadcasts_shape_one_lr_across_vector_param) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *p_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *g_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *lr_buf = poly_buffer_f32(ctx, 1);
+  float p_data[] = {1.0f, 2.0f};
+  float g_data[] = {1.0f, 2.0f};
+  float lr_data[] = {0.1f};
+  poly_buffer_set(ctx, p_buf, p_data, sizeof(p_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, g_buf, g_data, sizeof(g_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, lr_buf, lr_data, sizeof(lr_data), POLY_DEVICE_CPU);
+
+  PolyTensor *param = poly_tensor_create(ctx, p_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *grad = poly_tensor_create(ctx, g_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(param);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_NOT_NULL(lr);
+
+  PolyOptimConfig cfg = {.kind = POLY_OPTIM_SGD};
+  PolyTensor *outs[1] = {NULL};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr, &param, &grad, 1, NULL, NULL, NULL, NULL, outs, 1), 1
+  );
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 1, &realized), 0);
+
+  float p_after[2] = {0.0f, 0.0f};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p_buf, p_after, sizeof(p_after)), 0);
+  ASSERT_FLOAT_EQ(p_after[0], 0.9f, 1e-5f);
+  ASSERT_FLOAT_EQ(p_after[1], 1.8f, 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_step_sgd_realizes_momentum_before_dependent_param) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *p_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *g_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *m_buf = poly_buffer_f32(ctx, 2);
+  PolyUOp *lr_buf = poly_buffer_f32(ctx, 1);
+  float p_data[] = {1.0f, 2.0f};
+  float g_data[] = {0.25f, -0.5f};
+  float m_data[] = {0.0f, 0.0f};
+  float lr_data[] = {0.1f};
+  poly_buffer_set(ctx, p_buf, p_data, sizeof(p_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, g_buf, g_data, sizeof(g_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, m_buf, m_data, sizeof(m_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, lr_buf, lr_data, sizeof(lr_data), POLY_DEVICE_CPU);
+
+  PolyTensor *param = poly_tensor_create(ctx, p_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *grad = poly_tensor_create(ctx, g_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *momentum = poly_tensor_create(ctx, m_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(param);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_NOT_NULL(momentum);
+  ASSERT_NOT_NULL(lr);
+
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_SGD,
+      .weight_decay = 0.1f,
+      .momentum = 0.9f,
+      .nesterov = true,
+  };
+  PolyTensor *m_arr[] = {momentum};
+  PolyTensor *outs[2] = {NULL};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr, &param, &grad, 1, m_arr, NULL, NULL, NULL, outs, 2
+      ),
+      2
+  );
+  ASSERT_PTR_EQ(outs[0], momentum);
+  ASSERT_PTR_EQ(outs[1], param);
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), poly_tensor_uop(momentum)));
+
+  PolyTensor *realized[2] = {NULL};
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 2, realized), 0);
+  float p_after[2] = {0.0f, 0.0f};
+  float m_after[2] = {0.0f, 0.0f};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p_buf, p_after, sizeof(p_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, m_buf, m_after, sizeof(m_after)), 0);
+  ASSERT_FLOAT_EQ(m_after[0], 0.35f, 1e-6f);
+  ASSERT_FLOAT_EQ(m_after[1], -0.3f, 1e-6f);
+  ASSERT_FLOAT_EQ(p_after[0], 0.9335f, 1e-6f);
+  ASSERT_FLOAT_EQ(p_after[1], 2.057f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_step_sgd_lazy_parameter_executes_shared_momentum_effect_once) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *p_values = poly_arange(ctx, 0.0, 6.0, 1.0);
+  ASSERT_NOT_NULL(p_values);
+  p_values = poly_alu2(
+      ctx, POLY_OP_ADD,
+      poly_alu2(ctx, POLY_OP_MUL, p_values, poly_const_float(ctx, 0.5)),
+      poly_const_float(ctx, 1.0)
+  );
+  ASSERT_NOT_NULL(p_values);
+  int64_t param_shape[2] = {2, 3};
+  p_values = poly_reshape(ctx, p_values, param_shape, 2);
+  ASSERT_NOT_NULL(p_values);
+  ASSERT_FALSE(poly_uop_has_buffer_identity(p_values));
+
+  float g_data[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  float lr_data[] = {0.1f};
+  int f32_id = poly_dtype_id_by_name("float32");
+  int64_t grad_shape[1] = {6};
+  int64_t lr_shape[1] = {1};
+  PolyUOp *g_buf = poly_buffer_from_host(
+      ctx, g_data, sizeof(g_data), f32_id, grad_shape, 1
+  );
+  PolyUOp *lr_buf = poly_buffer_from_host(
+      ctx, lr_data, sizeof(lr_data), f32_id, lr_shape, 1
+  );
+  ASSERT_NOT_NULL(g_buf);
+  ASSERT_NOT_NULL(lr_buf);
+
+  PolyTensor *param =
+      poly_tensor_create(ctx, p_values, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *grad = poly_tensor_create(
+      ctx, poly_reshape(ctx, g_buf, param_shape, 2), POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyTensor *momentum_source = poly_tensor_create(
+      ctx, poly_full(ctx, param_shape, 2, 0.0), POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyUOp *m_logical = poly_reshape(
+      ctx, poly_buffer(ctx, POLY_FLOAT32, 6), param_shape, 2
+  );
+  PolyUOp *m_physical = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_FLOAT32, 6, POLY_DEVICE_CPU), param_shape, 2
+  );
+  PolyTensor *momentum = poly_tensor_create_with_roots(
+      ctx, m_logical, m_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(param);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_NOT_NULL(momentum_source);
+  ASSERT_NOT_NULL(m_logical);
+  ASSERT_NOT_NULL(m_physical);
+  ASSERT_NOT_NULL(momentum);
+  ASSERT_NOT_NULL(lr);
+
+  /* Pinned _new_optim_param keeps unfused state shaped like its parameter and
+   * lazy until the first optimizer step. Polygrad's logical/physical split
+   * adapts that same graph only when the requested batch is physicalized. */
+  ASSERT_PTR_EQ(poly_tensor_clone_into(ctx, momentum, momentum_source), momentum);
+  PolyShape momentum_shape = poly_uop_max_shape_cached(ctx, poly_tensor_uop(momentum));
+  ASSERT_INT_EQ(momentum_shape.ndim, 2);
+  ASSERT_INT_EQ(momentum_shape.dims[0], 2);
+  ASSERT_INT_EQ(momentum_shape.dims[1], 3);
+  ASSERT_FALSE(poly_uop_has_buffer_identity(poly_tensor_uop(momentum)));
+
+  PolyOptimConfig cfg = {.kind = POLY_OPTIM_SGD, .momentum = 0.9f};
+  PolyTensor *m_arr[] = {momentum};
+  PolyTensor *outs[2] = {NULL, NULL};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr, &param, &grad, 1, m_arr, NULL, NULL, NULL, outs, 2
+      ),
+      2
+  );
+  ASSERT_PTR_EQ(outs[0], momentum);
+  ASSERT_PTR_EQ(outs[1], param);
+  ASSERT_EQ(poly_tensor_uop(momentum)->op, POLY_OP_AFTER);
+  ASSERT_EQ(poly_tensor_uop(param)->op, POLY_OP_AFTER);
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), poly_tensor_uop(momentum)));
+
+  /* The public batch physicalizes every pending value root before shared
+   * callification. Do that exact boundary here; mixing a logical state AFTER
+   * with the parameter's placed clone would manufacture two distinct versions
+   * of the same effect, a graph that tinygrad never constructs. */
+  PolyUOp *targets[2] = {
+      poly_tensor_physicalize(ctx, outs[0]), poly_tensor_physicalize(ctx, outs[1])
+  };
+  PolyUOp *resolved[2] = {NULL, NULL};
+  ASSERT_NOT_NULL(targets[0]);
+  ASSERT_NOT_NULL(targets[1]);
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, targets, 2, resolved);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(resolved[0]);
+  ASSERT_NOT_NULL(resolved[1]);
+  ASSERT_INT_EQ(schedule->template->n_calls, 5);
+
+  const PolyUOp *m_buf = poly_uop_get_buffer_identity(resolved[0]);
+  ASSERT_NOT_NULL(m_buf);
+  int momentum_slot = -1;
+  for (int i = 0; i < schedule->template->n_buf_slots; i++) {
+    if (schedule->template->buf_slots[i].buf_uop == m_buf) momentum_slot = i;
+  }
+  ASSERT_TRUE(momentum_slot >= 0);
+  int momentum_writes = 0;
+  int momentum_read_writes = 0;
+  for (int k = 0; k < schedule->template->n_calls; k++) {
+    PolyCallIO *io = &schedule->run->call_io[k];
+    ASSERT_NOT_NULL(io->access);
+    for (int i = 0; i < io->n_args; i++) {
+      if (io->arg_to_slot[i] == momentum_slot && io->access->outs[i]) {
+        momentum_writes++;
+        if (io->access->ins[i]) momentum_read_writes++;
+      }
+    }
+  }
+  /* Pinned tinygrad's exact first lazy step has one output-only state
+   * initialization followed by one input/output momentum update. */
+  ASSERT_INT_EQ(momentum_writes, 2);
+  ASSERT_INT_EQ(momentum_read_writes, 1);
+
+  ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+  float m_after[6] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)m_buf, m_after, sizeof(m_after)), 0);
+  const PolyUOp *param_identity = poly_uop_get_buffer_identity(resolved[1]);
+  ASSERT_NOT_NULL(param_identity);
+  float p_after[6] = {0};
+  ASSERT_INT_EQ(
+      poly_buffer_read(ctx, (PolyUOp *)param_identity, p_after, sizeof(p_after)), 0
+  );
+  for (int i = 0; i < 6; i++) {
+    ASSERT_FLOAT_EQ(m_after[i], (float)(i + 1), 1e-6f);
+    ASSERT_FLOAT_EQ(p_after[i], 1.0f + 0.5f * (float)i - 0.1f * (float)(i + 1), 1e-6f);
+  }
+
+  poly_schedule_free(schedule);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -98,14 +447,16 @@ TEST(optim, build_step_adam_updates_beta_power_state_in_graph) {
   PolyUOp *v_buf = poly_buffer_f32(ctx, 1);
   PolyUOp *bc1_buf = poly_buffer_f32(ctx, 1);
   PolyUOp *bc2_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *lr_buf = poly_buffer_f32(ctx, 1);
   float p_data[] = {1.0f}, g_data[] = {1.0f}, m_data[] = {0.0f}, v_data[] = {0.0f};
-  float bc1_data[] = {1.0f}, bc2_data[] = {1.0f};
+  float bc1_data[] = {1.0f}, bc2_data[] = {1.0f}, lr_data[] = {0.1f};
   poly_buffer_set(ctx, p_buf, p_data, sizeof(p_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, g_buf, g_data, sizeof(g_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, m_buf, m_data, sizeof(m_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, v_buf, v_data, sizeof(v_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, bc1_buf, bc1_data, sizeof(bc1_data), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, bc2_buf, bc2_data, sizeof(bc2_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, lr_buf, lr_data, sizeof(lr_data), POLY_DEVICE_CPU);
 
   PolyTensor *param = poly_tensor_create(ctx, p_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *grad = poly_tensor_create(ctx, g_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
@@ -113,16 +464,17 @@ TEST(optim, build_step_adam_updates_beta_power_state_in_graph) {
   PolyTensor *v = poly_tensor_create(ctx, v_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *bc1 = poly_tensor_create(ctx, bc1_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   PolyTensor *bc2 = poly_tensor_create(ctx, bc2_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(param);
   ASSERT_NOT_NULL(grad);
   ASSERT_NOT_NULL(m);
   ASSERT_NOT_NULL(v);
   ASSERT_NOT_NULL(bc1);
   ASSERT_NOT_NULL(bc2);
+  ASSERT_NOT_NULL(lr);
 
   PolyOptimConfig cfg = {
       .kind = POLY_OPTIM_ADAM,
-      .lr = 0.1f,
       .beta1 = 0.9f,
       .beta2 = 0.999f,
       .eps = 1e-8f,
@@ -133,12 +485,23 @@ TEST(optim, build_step_adam_updates_beta_power_state_in_graph) {
   };
   PolyTensor *m_arr[] = {m};
   PolyTensor *v_arr[] = {v};
-  int need = poly_optim_build_step(ctx, &cfg, &param, &grad, 1, m_arr, v_arr, bc1, bc2, NULL, 0);
+  int need =
+      poly_optim_build_step(ctx, &cfg, lr, &param, &grad, 1, m_arr, v_arr, bc1, bc2, NULL, 0);
   ASSERT_INT_EQ(need, 5);
   PolyTensor *outs[5] = {0};
   ASSERT_INT_EQ(
-      poly_optim_build_step(ctx, &cfg, &param, &grad, 1, m_arr, v_arr, bc1, bc2, outs, 5), 5
+      poly_optim_build_step(ctx, &cfg, lr, &param, &grad, 1, m_arr, v_arr, bc1, bc2, outs, 5), 5
   );
+  ASSERT_PTR_EQ(outs[0], bc1);
+  ASSERT_PTR_EQ(outs[1], bc2);
+  ASSERT_PTR_EQ(outs[2], m);
+  ASSERT_PTR_EQ(outs[3], v);
+  ASSERT_PTR_EQ(outs[4], param);
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), lr_buf));
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), poly_tensor_uop(m)));
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), poly_tensor_uop(v)));
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), poly_tensor_uop(bc1)));
+  ASSERT_TRUE(poly_uop_reachable(ctx, poly_tensor_uop(param), poly_tensor_uop(bc2)));
   PolyTensor *realized[5] = {0};
   ASSERT_INT_EQ(poly_realize_tensors(ctx, outs, 5, realized), 0);
 
@@ -154,6 +517,211 @@ TEST(optim, build_step_adam_updates_beta_power_state_in_graph) {
   ASSERT_FLOAT_EQ(bc1_after, 0.9f, 1e-6f);
   ASSERT_FLOAT_EQ(bc2_after, 0.999f, 1e-6f);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_update_adamw_depends_on_lr_uop) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *lr = poly_buffer_f32(ctx, 1);
+  PolyUOp *param = poly_buffer_f32(ctx, 1);
+  PolyUOp *grad = poly_buffer_f32(ctx, 1);
+  PolyUOp *m = poly_buffer_f32(ctx, 1);
+  PolyUOp *v = poly_buffer_f32(ctx, 1);
+  PolyUOp *bc1 = poly_buffer_f32(ctx, 1);
+  PolyUOp *bc2 = poly_buffer_f32(ctx, 1);
+  ASSERT_NOT_NULL(lr);
+
+  PolyOptimConfig cfg = {
+      .kind = POLY_OPTIM_ADAMW,
+      .beta1 = 0.9f,
+      .beta2 = 0.999f,
+      .eps = 1e-8f,
+      .weight_decay = 0.01f,
+  };
+  PolyOptimUpdate upd;
+  ASSERT_INT_EQ(poly_optim_build_update(ctx, &cfg, lr, param, grad, m, v, bc1, bc2, 1, &upd), 0);
+  ASSERT_NOT_NULL(upd.param_new);
+  ASSERT_TRUE(poly_uop_reachable(ctx, upd.param_new, lr));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_step_late_failure_leaves_all_params_and_state_unchanged) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *p0_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *p1_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *g0_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *g1_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *m0_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *m1_buf = poly_buffer_f32(ctx, 1);
+  PolyUOp *lr_buf = poly_buffer_f32(ctx, 1);
+  float p0_data[] = {1.0f}, p1_data[] = {2.0f};
+  float g0_data[] = {1.0f}, g1_data[] = {1.0f};
+  float m0_data[] = {0.3f}, m1_data[] = {0.4f}, lr_data[] = {0.1f};
+  poly_buffer_set(ctx, p0_buf, p0_data, sizeof(p0_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, p1_buf, p1_data, sizeof(p1_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, g0_buf, g0_data, sizeof(g0_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, g1_buf, g1_data, sizeof(g1_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, m0_buf, m0_data, sizeof(m0_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, m1_buf, m1_data, sizeof(m1_data), POLY_DEVICE_CPU);
+  poly_buffer_set(ctx, lr_buf, lr_data, sizeof(lr_data), POLY_DEVICE_CPU);
+
+  PolyTensor *p0 = poly_tensor_create(ctx, p0_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *p1 = poly_tensor_create(ctx, p1_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  PolyTensor *g0 = poly_tensor_create(ctx, g0_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *g1 = poly_tensor_create(ctx, g1_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  PolyTensor *m0 = poly_tensor_create(ctx, m0_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *m1 = poly_tensor_create(ctx, m1_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  PolyTensor *lr = poly_tensor_create(ctx, lr_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(p0);
+  ASSERT_NOT_NULL(p1);
+  ASSERT_NOT_NULL(g0);
+  ASSERT_NOT_NULL(g1);
+  ASSERT_NOT_NULL(m0);
+  ASSERT_NOT_NULL(m1);
+  ASSERT_NOT_NULL(lr);
+
+  PolyUOp *p0_root = poly_tensor_uop(p0);
+  PolyUOp *p1_root = poly_tensor_uop(p1);
+  PolyUOp *m0_root = poly_tensor_uop(m0);
+  PolyUOp *m1_root = poly_tensor_uop(m1);
+  PolyTensor *params[] = {p0, p1};
+  PolyTensor *grads[] = {g0, g1};
+  PolyTensor *momenta[] = {m0, m1};
+  PolyTensor *outs[4] = {NULL};
+  PolyOptimConfig cfg = {.kind = POLY_OPTIM_SGD, .momentum = 0.9f};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr, params, grads, 2, momenta, NULL, NULL, NULL, outs, 4), -1
+  );
+
+  ASSERT_PTR_EQ(poly_tensor_uop(p0), p0_root);
+  ASSERT_PTR_EQ(poly_tensor_uop(p1), p1_root);
+  ASSERT_PTR_EQ(poly_tensor_uop(m0), m0_root);
+  ASSERT_PTR_EQ(poly_tensor_uop(m1), m1_root);
+  for (int i = 0; i < 4; i++)
+    ASSERT_PTR_EQ(outs[i], NULL);
+
+  float p0_after = 0.0f, p1_after = 0.0f, m0_after = 0.0f, m1_after = 0.0f;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p0_buf, &p0_after, sizeof(p0_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p1_buf, &p1_after, sizeof(p1_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, m0_buf, &m0_after, sizeof(m0_after)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, m1_buf, &m1_after, sizeof(m1_after)), 0);
+  ASSERT_FLOAT_EQ(p0_after, 1.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(p1_after, 2.0f, 1e-6f);
+  ASSERT_FLOAT_EQ(m0_after, 0.3f, 1e-6f);
+  ASSERT_FLOAT_EQ(m1_after, 0.4f, 1e-6f);
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &p0, 1, &realized), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, p0_buf, &p0_after, sizeof(p0_after)), 0);
+  ASSERT_FLOAT_EQ(p0_after, 1.0f, 1e-6f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(optim, build_step_rejects_invalid_lr_tensor_metadata) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyCtx *other_ctx = poly_ctx_new();
+  PolyTensor *param =
+      poly_tensor_create(ctx, poly_buffer_f32(ctx, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *grad =
+      poly_tensor_create(ctx, poly_buffer_f32(ctx, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr_int =
+      poly_tensor_create(ctx, poly_buffer(ctx, POLY_INT32, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr_vec =
+      poly_tensor_create(ctx, poly_buffer_f32(ctx, 2), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr_f16 = poly_tensor_create(
+      ctx, poly_buffer(ctx, POLY_FLOAT16, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyTensor *lr_bf16 = poly_tensor_create(
+      ctx, poly_buffer(ctx, POLY_BFLOAT16, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyTensor *lr_vec_dtype = poly_tensor_create(
+      ctx, poly_buffer(ctx, poly_dtype_vec(POLY_FLOAT32, 4), 1), POLY_TENSOR_VALUE,
+      POLY_DEVICE_CPU
+  );
+  PolyTensor *lr_ptr_dtype = poly_tensor_create(
+      ctx, poly_buffer(ctx, poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_GLOBAL), 1),
+      POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyUOp *n = poly_define_var(ctx, "optim_lr_n", 0, 1);
+  PolyUOp *symbolic_dims[] = {n};
+  PolyUOp *lr_symbolic_uop = poly_expand_uop(ctx, poly_buffer_f32(ctx, 1), symbolic_dims, 1);
+  PolyTensor *lr_symbolic =
+      poly_tensor_create(ctx, lr_symbolic_uop, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr_scalar =
+      poly_tensor_create(ctx, poly_const_float(ctx, 0.1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *lr_other = poly_tensor_create(
+      other_ctx, poly_buffer_f32(other_ctx, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  PolyTensor *lr_cuda =
+      poly_tensor_create(ctx, poly_buffer_f32(ctx, 1), POLY_TENSOR_VALUE, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(param);
+  ASSERT_NOT_NULL(grad);
+  ASSERT_NOT_NULL(lr_int);
+  ASSERT_NOT_NULL(lr_vec);
+  ASSERT_NOT_NULL(lr_f16);
+  ASSERT_NOT_NULL(lr_bf16);
+  ASSERT_NOT_NULL(lr_vec_dtype);
+  ASSERT_NOT_NULL(lr_ptr_dtype);
+  ASSERT_NOT_NULL(lr_symbolic);
+  ASSERT_NOT_NULL(lr_scalar);
+  ASSERT_NOT_NULL(lr_other);
+  ASSERT_NOT_NULL(lr_cuda);
+  ASSERT_NOT_NULL(poly_uop_shape_dim(ctx, lr_symbolic_uop, 0));
+
+  PolyOptimConfig cfg = {.kind = POLY_OPTIM_SGD};
+  PolyTensor *out[1] = {NULL};
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr_scalar, &param, &grad, 1, NULL, NULL, NULL, NULL, NULL, 0
+      ),
+      1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr_int, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1), -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr_vec, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1), -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr_f16, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1), -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr_bf16, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1),
+      -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr_vec_dtype, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1
+      ),
+      -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr_ptr_dtype, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1
+      ),
+      -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(
+          ctx, &cfg, lr_symbolic, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1
+      ),
+      -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr_other, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1),
+      -1
+  );
+  ASSERT_INT_EQ(
+      poly_optim_build_step(ctx, &cfg, lr_cuda, &param, &grad, 1, NULL, NULL, NULL, NULL, out, 1),
+      -1
+  );
+
+  poly_ctx_destroy(other_ctx);
   poly_ctx_destroy(ctx);
   PASS();
 }

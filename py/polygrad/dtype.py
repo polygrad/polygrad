@@ -1,13 +1,8 @@
-"""dtypes -- port of tinygrad's dtype.py for polygrad.
-
-Adapted from tinygrad/dtype.py. Uses minimal local helpers to avoid pulling
-in the full tinygrad.helpers module.
-"""
+"""dtypes -- port of tinygrad's dtype.py for polygrad."""
 
 from __future__ import annotations
 from typing import Final, ClassVar, Callable, Literal, Union
 import math
-import os
 import struct
 import ctypes
 import functools
@@ -16,30 +11,14 @@ from dataclasses import dataclass, fields
 from enum import Enum, auto
 
 
-# --- Local helpers (tinygrad.helpers stand-ins) ---
+from .helpers import getenv, prod
+
 
 def ceildiv(a: int, b: int) -> int:
     return -(a // -b)
 
 def round_up(n: int, m: int) -> int:
     return ((n + m - 1) // m) * m
-
-def prod(xs):
-    out = 1
-    for x in xs:
-        out *= x
-    return out
-
-def getenv(key: str, default=0):
-    v = os.environ.get(key, None)
-    if v is None:
-        return default
-    if isinstance(default, str):
-        return v
-    try:
-        return type(default)(v)
-    except (TypeError, ValueError):
-        return default
 
 OSX = sys.platform == "darwin"
 

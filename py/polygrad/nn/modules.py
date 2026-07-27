@@ -157,18 +157,24 @@ class Dropout:
 
 
 class Conv2d:
-    """2D convolution (tensor-op implementation without cat-chains)."""
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
+    """2D convolution."""
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
-        if isinstance(stride, int):
-            stride = (stride, stride)
-        if isinstance(padding, int):
-            padding = (padding, padding)
+        if isinstance(padding, str):
+            if padding.lower() != 'same':
+                raise ValueError(f"Invalid padding string {padding!r}, only 'same' is supported")
+            if stride != 1:
+                raise ValueError("padding='same' is not supported for strided convolutions")
+            dilation_tuple = (dilation, dilation) if isinstance(dilation, int) else tuple(dilation)
+            padding = tuple(v for d, k in zip(dilation_tuple, kernel_size[::-1])
+                            for v in (d * (k - 1) // 2, d * (k - 1) - d * (k - 1) // 2))
         self.stride = stride
+        self.dilation = dilation
+        self.groups = groups
         self.padding = padding
         bound = 1 / math.sqrt(in_channels * kernel_size[0] * kernel_size[1])
-        self.weight = (Tensor.rand(out_channels, in_channels, *kernel_size) * (2 * bound) - bound).realize()
+        self.weight = (Tensor.rand(out_channels, in_channels // groups, *kernel_size) * (2 * bound) - bound).realize()
         self.weight.requires_grad = True
         _mark_param(self.weight)
         self.bias = None
@@ -178,46 +184,7 @@ class Conv2d:
             _mark_param(self.bias)
 
     def __call__(self, x):
-        if len(x.shape) != 4:
-            raise ValueError('Conv2d expects input shape (N, C, H, W)')
-        N, C, H, W = x.shape
-        OC, IC, KH, KW = self.weight.shape
-        if C != IC:
-            raise ValueError(f'Conv2d expected input channels {IC}, got {C}')
-
-        sh, sw = self.stride
-        ph, pw = self.padding
-        if sh <= 0 or sw <= 0:
-            raise ValueError('stride must be positive')
-
-        if ph or pw:
-            x = x.pad(((0, 0), (0, 0), (ph, ph), (pw, pw)))
-
-        Hp, Wp = x.shape[2], x.shape[3]
-        OH = (Hp - KH) // sh + 1
-        OW = (Wp - KW) // sw + 1
-        if OH <= 0 or OW <= 0:
-            raise ValueError('kernel size/stride/padding produce non-positive output shape')
-
-        # Sum per-channel/kernel-offset contributions:
-        # out[n,o,y,x] = sum_{c,kh,kw} x[n,c,y*sh+kh,x*sw+kw] * w[o,c,kh,kw]
-        out = None
-        for c in range(IC):
-            for kh in range(KH):
-                hslice = x[:, c:c + 1, kh:kh + OH * sh, :]  # (N,1,OH*sh,Wp)
-                if sh > 1:
-                    hslice = hslice.reshape(N, 1, OH, sh, Wp)[:, :, :, 0, :]
-                for kw in range(KW):
-                    wslice = hslice[:, :, :, kw:kw + OW * sw]  # (N,1,OH,OW*sw)
-                    if sw > 1:
-                        wslice = wslice.reshape(N, 1, OH, OW, sw)[:, :, :, :, 0]
-                    wterm = self.weight[:, c, kh, kw].reshape(1, OC, 1, 1)  # (1,OC,1,1)
-                    term = wslice * wterm  # (N,OC,OH,OW)
-                    out = term if out is None else (out + term)
-
-        if self.bias is not None:
-            out = out + self.bias.reshape(1, OC, 1, 1)
-        return out
+        return x.conv2d(self.weight, self.bias, self.groups, self.stride, self.dilation, self.padding)
 
 
 class BatchNorm:
@@ -229,8 +196,8 @@ class BatchNorm:
         self.track_running_stats = track_running_stats
         self.weight = Tensor.ones(num_features).realize() if affine else None
         self.bias = Tensor.zeros(num_features).realize() if affine else None
-        self.running_mean = Tensor.zeros(num_features).realize() if track_running_stats else None
-        self.running_var = Tensor.ones(num_features).realize() if track_running_stats else None
+        self.running_mean = Tensor.zeros(num_features).is_param_(False).realize() if track_running_stats else None
+        self.running_var = Tensor.ones(num_features).is_param_(False).realize() if track_running_stats else None
         if self.weight is not None:
             self.weight.requires_grad = True
             _mark_param(self.weight)
@@ -258,10 +225,14 @@ class BatchNorm:
             mean_c, var_c = _channel_stats(x)
             if self.track_running_stats:
                 mom = self.momentum
-                self.running_mean = ((1.0 - mom) * self.running_mean + mom * mean_c.detach()).realize()
+                self.running_mean = (
+                    (1.0 - mom) * self.running_mean + mom * mean_c.detach()
+                ).is_param_(False).realize()
                 denom = x.numel() - x.shape[1]
                 corr = (x.numel() / denom) if denom > 0 else 1.0
-                self.running_var = ((1.0 - mom) * self.running_var + mom * corr * var_c.detach()).realize()
+                self.running_var = (
+                    (1.0 - mom) * self.running_var + mom * corr * var_c.detach()
+                ).is_param_(False).realize()
         else:
             mean_c, var_c = self.running_mean, self.running_var
 

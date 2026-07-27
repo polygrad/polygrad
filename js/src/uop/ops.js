@@ -62,6 +62,18 @@ class UOp {
     return out
   }
 
+  get base() {
+    const ops = this.ffi.__polygradOps || {}
+    const op = this.op
+    if (op === ops.RESHAPE || op === ops.EXPAND || op === ops.PERMUTE ||
+        op === ops.PAD || op === ops.SHRINK || op === ops.FLIP ||
+        op === ops.MULTI || op === ops.DETACH) {
+      const sources = this.src
+      if (sources.length) return sources[0].base
+    }
+    return this
+  }
+
   hasBufferIdentity() {
     if (!this.raw) return false
     return !!this.ffi.poly_uop_has_buffer_identity(this.raw)
@@ -72,6 +84,22 @@ class UOp {
     const r = this.ffi.poly_uop_get_buffer_identity(this.raw)
     return r ? new UOp(this.ctx, this.ffi, r) : null
   }
+
+  get realized() {
+    const ops = this.ffi.__polygradOps || {}
+    if (this.op !== ops.BUFFER && this.op !== ops.BUFFER_VIEW) return null
+    const buf = this.buffer
+    if (!buf || !this.ffi.poly_buffer_is_allocated) return null
+    return this.ffi.poly_buffer_is_allocated(this.ctx, buf.raw) ? buf : null
+  }
+
+  get isRealized() {
+    // tinygrad/uop/ops.py:881-891: movement views are realized when their
+    // recursive base buffer is allocated.
+    return this.base.realized !== null
+  }
+
+  get is_realized() { return this.isRealized }
 
   // --- Factories ---
 

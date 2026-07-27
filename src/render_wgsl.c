@@ -757,9 +757,6 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
     if (u->op == POLY_OP_INDEX) {
       char *buf_s = wsm_get(&names, u->src[0]);
       char *idx_s = wsm_get(&names, u->src[1]);
-      /* 3-source INDEX: gated (buf, idx, gate). Store the gate name
-       * for use by LOAD/STORE handlers. The index expression itself
-       * is still buf[idx]. */
       char expr[256];
       snprintf(expr, sizeof(expr), "%s[%s]", buf_s, idx_s);
       wsm_set(&names, u, strdup(expr));
@@ -1003,23 +1000,11 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         val = owned_val;
       }
 
-      /* Gated store: INDEX with 3rd bool source → if (gate) { store; }
-       * Matches CUDA renderer pattern (render_cuda.c gated STORE). */
       PolyUOp *store_idx = poly_find_index_through_cast(u->src[0]);
       bool store_to_local =
           u->src[0]->op == POLY_OP_DEFINE_LOCAL ||
           (u->src[0]->op == POLY_OP_BUFFER && u->src[0]->dtype.is_ptr &&
            u->src[0]->dtype.addrspace == POLY_ADDR_LOCAL);
-      bool gated_store =
-          (store_idx && store_idx->n_src >= 3 && !store_to_local &&
-           poly_dtype_is_bool(poly_dtype_scalar(store_idx->src[2]->dtype)));
-      if (gated_store) {
-        char *gate_s = wsm_get(&names, store_idx->src[2]);
-        for (int d = 0; d < depth; d++)
-          wsb_puts(&body, "  ");
-        wsb_printf(&body, "if (%s) {\n", gate_s);
-        depth++;
-      }
 
       if (!wgsl_emit_packed_store(&body, &names, store_idx, val, depth)) {
         for (int d = 0; d < depth; d++)
@@ -1027,12 +1012,6 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
         wsb_printf(&body, "%s = %s;\n", target, val);
       }
 
-      if (gated_store) {
-        depth--;
-        for (int d = 0; d < depth; d++)
-          wsb_puts(&body, "  ");
-        wsb_puts(&body, "}\n");
-      }
       free(owned_val);
       continue;
     }
@@ -1250,7 +1229,8 @@ PolyPatternMatcher *poly_pm_wgsl_extra(void) {
       {poly_pat_ops(bool_alu_set, NULL, 0, NULL), rule_wgsl_bool_alu},
   };
 
-  g_pm_wgsl_extra = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_wgsl_extra =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_wgsl_extra;
 }
 
@@ -1276,6 +1256,10 @@ PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
           {
               .has_mulacc = false,
               .has_threefry = false,
+              .has_exp2 = true,
+              .has_log2 = true,
+              .has_sin = true,
+              .has_int64 = false,
               .has_local = true,
               .global_max = {65535, 65535, 65535},
               .local_max = {256, 256, 64},

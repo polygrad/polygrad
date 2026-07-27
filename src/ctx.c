@@ -6,6 +6,7 @@
 #include "utils.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 
 /* Defined in ops.c */
@@ -18,9 +19,9 @@ void poly_schedule_ctx_cleanup(PolyCtx *ctx) __attribute__((weak));
 
 static void free_buffer_entry(const void *key, void *value, void *userdata) {
   (void)key;
-  (void)userdata;
+  PolyCtx *ctx = (PolyCtx *)userdata;
   /* Free current + src chain. PolyBuffer struct itself is arena-allocated. */
-  poly_buffer_free_chain((PolyBuffer *)value);
+  poly_buffer_free_chain(ctx, (PolyBuffer *)value);
 }
 
 PolyCtx *poly_ctx_new(void) {
@@ -46,6 +47,13 @@ PolyCtx *poly_ctx_new(void) {
   ctx->buffer_write_bytes = 0;
   ctx->buffer_copy_count = 0;
   ctx->buffer_copy_bytes = 0;
+  ctx->global_ops = 0;
+  ctx->global_mem = 0;
+  ctx->time_sum_s = 0.0;
+  ctx->kernel_count = 0;
+  ctx->mem_used = 0;
+  memset(ctx->mem_used_per_device, 0, sizeof(ctx->mem_used_per_device));
+  ctx->stats_suppression_depth = 0;
   ctx->shape_cache = poly_map_new(64);
   ctx->buffers = poly_map_new(64);
   ctx->tensors_by_uop = poly_map_new(64);
@@ -100,7 +108,7 @@ void poly_ctx_destroy(PolyCtx *ctx) {
   poly_map_destroy(ctx->runtime_cache);
   poly_map_destroy(ctx->shape_cache);
   /* Free owned buffer ptrs before destroying the map. */
-  poly_map_foreach(ctx->buffers, free_buffer_entry, NULL);
+  poly_map_foreach(ctx->buffers, free_buffer_entry, ctx);
   poly_map_destroy(ctx->buffers);
   poly_map_destroy(ctx->tensors_by_uop);
   free(ctx->tensors);
@@ -191,8 +199,57 @@ int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out) {
   out->buffer_write_bytes = ctx->buffer_write_bytes;
   out->buffer_copy_count = ctx->buffer_copy_count;
   out->buffer_copy_bytes = ctx->buffer_copy_bytes;
+  out->global_ops = ctx->global_ops;
+  out->global_mem = ctx->global_mem;
+  out->time_sum_s = ctx->time_sum_s;
+  out->kernel_count = ctx->kernel_count;
+  out->mem_used = ctx->mem_used;
   return 0;
 }
+
+void poly_ctx_reset_counters(PolyCtx *ctx) {
+  if (!ctx) return;
+  ctx->global_ops = 0;
+  ctx->global_mem = 0;
+  ctx->time_sum_s = 0.0;
+  ctx->kernel_count = 0;
+}
+
+uint64_t poly_ctx_mem_used_for_device(PolyCtx *ctx, PolyDevice device) {
+  if (!ctx || device < POLY_DEVICE_AUTO || device > POLY_DEVICE_DISK) return 0;
+  return ctx->mem_used_per_device[device];
+}
+
+void poly_ctx_record_memory_alloc(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
+  if (!ctx || nbytes == 0) return;
+  uint64_t bytes = (uint64_t)nbytes;
+  ctx->mem_used = UINT64_MAX - ctx->mem_used < bytes ? UINT64_MAX : ctx->mem_used + bytes;
+  if (device >= POLY_DEVICE_AUTO && device <= POLY_DEVICE_DISK) {
+    uint64_t *per_device = &ctx->mem_used_per_device[device];
+    *per_device = UINT64_MAX - *per_device < bytes ? UINT64_MAX : *per_device + bytes;
+  }
+}
+
+void poly_ctx_record_memory_free(PolyCtx *ctx, PolyDevice device, size_t nbytes) {
+  if (!ctx || nbytes == 0) return;
+  uint64_t bytes = (uint64_t)nbytes;
+  ctx->mem_used = ctx->mem_used >= bytes ? ctx->mem_used - bytes : 0;
+  if (device >= POLY_DEVICE_AUTO && device <= POLY_DEVICE_DISK) {
+    uint64_t *per_device = &ctx->mem_used_per_device[device];
+    *per_device = *per_device >= bytes ? *per_device - bytes : 0;
+  }
+}
+
+#ifdef __EMSCRIPTEN__
+/* wasm_common.js reads this public struct manually. Keep the ABI facts
+ * compile-checked instead of relying on an unverified offset table. */
+_Static_assert(offsetof(PolyCtxStats, global_ops) == 128, "wasm PolyCtxStats.global_ops offset");
+_Static_assert(offsetof(PolyCtxStats, global_mem) == 136, "wasm PolyCtxStats.global_mem offset");
+_Static_assert(offsetof(PolyCtxStats, time_sum_s) == 144, "wasm PolyCtxStats.time_sum_s offset");
+_Static_assert(offsetof(PolyCtxStats, kernel_count) == 152, "wasm PolyCtxStats.kernel_count offset");
+_Static_assert(offsetof(PolyCtxStats, mem_used) == 160, "wasm PolyCtxStats.mem_used offset");
+_Static_assert(sizeof(PolyCtxStats) == 168, "wasm PolyCtxStats size");
+#endif
 
 PolyScratchMark poly_ctx_scratch_mark(PolyCtx *ctx) {
   return poly_arena_mark(ctx ? ctx->scratch : NULL);

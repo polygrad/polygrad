@@ -2,6 +2,7 @@
 
 import atexit
 import ctypes
+from collections import defaultdict
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from . import _ffi
@@ -15,6 +16,63 @@ from .dtype import dtypes
 from .device import Device
 from .instance import Instance
 from .jit import CompiledCallable, Jit, JitError, compile, jit
+from . import nn as nn
+
+TinyJit = Jit
+
+
+class _GlobalCountersMeta(type):
+    @property
+    def global_ops(cls):
+        return _stats_for_ctx(cls._ctx)['global_ops']
+
+    @property
+    def global_mem(cls):
+        return _stats_for_ctx(cls._ctx)['global_mem']
+
+    @property
+    def time_sum_s(cls):
+        return _stats_for_ctx(cls._ctx)['time_sum_s']
+
+    @property
+    def kernel_count(cls):
+        return _stats_for_ctx(cls._ctx)['kernel_count']
+
+    @property
+    def mem_used(cls):
+        return _stats_for_ctx(cls._ctx)['mem_used']
+
+    @property
+    def mem_used_per_device(cls):
+        out = defaultdict(int)
+        lib = _ffi.get_lib()
+        for device_id in range(1, 9):
+            used = int(lib.poly_ctx_mem_used_for_device(cls._ctx, device_id))
+            if used:
+                name = lib.poly_device_name(device_id).decode('utf-8').upper()
+                out[name] = used
+        return out
+
+
+def _global_counters_class(ctx):
+    class BoundGlobalCounters(metaclass=_GlobalCountersMeta):
+        _ctx = ctx
+
+        @classmethod
+        def reset(cls):
+            _ffi.get_lib().poly_ctx_reset_counters(cls._ctx)
+
+    BoundGlobalCounters.__name__ = 'GlobalCounters'
+    BoundGlobalCounters.__qualname__ = 'GlobalCounters'
+    return BoundGlobalCounters
+
+
+GlobalCounters = _global_counters_class(_default_ctx)
+
+# tinygrad exposes its canonical counter class from helpers. Keep one counter
+# owner and bind that exact object after the default PolyCtx exists.
+from . import helpers as _helpers
+_helpers.GlobalCounters = GlobalCounters
 
 
 def _stats_for_ctx(ctx):
@@ -148,9 +206,14 @@ def _bound_tensor_class(ctx):
             return Tensor.kaiming_uniform(*shape, **kwargs)
 
         @staticmethod
-        def randint(low, high=None, shape=(1,), **kwargs):
+        def randint(*shape, **kwargs):
             kwargs.setdefault('_ctx', ctx)
-            return Tensor.randint(low, high, shape, **kwargs)
+            return Tensor.randint(*shape, **kwargs)
+
+        @staticmethod
+        def randperm(n, **kwargs):
+            kwargs.setdefault('_ctx', ctx)
+            return Tensor.randperm(n, **kwargs)
 
         @staticmethod
         def linspace(start, stop, steps, **kwargs):
@@ -185,6 +248,7 @@ class Runtime:
       self.Tensor = _bound_tensor_class(self._ctx)
       self.Variable = lambda name, min_val, max_val: Variable(name, min_val, max_val, _ctx=self._ctx)
       self.Instance = Instance
+      self.GlobalCounters = _global_counters_class(self._ctx)
       self.jit = jit
       self.compile = compile
 
@@ -221,8 +285,9 @@ def create(*, device='auto'):
 
 
 __all__ = [
-    'Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance',
-    'CompiledCallable', 'Jit', 'JitError', 'Runtime', 'create',
+    'Tensor', 'Variable', 'BoundVariable', 'dtypes', 'Device', 'Instance', 'nn',
+    'GlobalCounters',
+    'CompiledCallable', 'Jit', 'TinyJit', 'JitError', 'Runtime', 'create',
     'compile', 'jit', 'stats', 'can_run',
 ]
 

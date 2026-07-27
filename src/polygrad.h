@@ -125,7 +125,7 @@ typedef enum {
   POLY_OP_CONTIGUOUS,
   POLY_OP_CONTIGUOUS_BACKWARD,
   POLY_OP_DETACH,
-  POLY_OP_BUFFERIZE,
+  POLY_OP_STAGE,
   POLY_OP_COPY,
   POLY_OP_BUFFER,
   POLY_OP_BUFFER_VIEW,
@@ -281,6 +281,21 @@ typedef enum {
 
 typedef struct PolyProgramInfo PolyProgramInfo;
 
+/* Pinned tinygrad ParamArg metadata. Value-level call PARAMs carry shape in
+ * src[0] and keep slot/device here; rangeify later lowers them to the existing
+ * pointer PARAM form whose arg is the kernel-local integer slot. */
+typedef struct {
+  int64_t slot;
+  const char *name;
+  int64_t min_val;
+  int64_t max_val;
+  bool has_minmax;
+  PolyAddrSpace addrspace;
+  int32_t axis;
+  bool has_axis;
+  int32_t device; /* PolyDevice, declared later; 0 is AUTO/None. */
+} PolyParamArg;
+
 typedef enum {
   POLY_ARG_NONE = 0,
   POLY_ARG_INT,
@@ -294,9 +309,11 @@ typedef enum {
   POLY_ARG_RANGE, /* (axis_id, axis_type, extra...) */
   POLY_ARG_DEFINE_VAR, /* (name, min_val, max_val) */
   POLY_ARG_BUFFERIZE_OPTS, /* (device, addrspace, removable) */
+  POLY_ARG_TENSOR_CORE, /* tinygrad WMMA metadata: (name, dims, threads) */
   POLY_ARG_PROGRAM_INFO, /* PolyProgramInfo* value metadata for PROGRAM */
   POLY_ARG_BYTES, /* immutable runtime bytes for BINARY UOps */
   POLY_ARG_INVALID,
+  POLY_ARG_PARAM, /* pinned tinygrad ParamArg* for shaped value PARAMs */
 } PolyArgKind;
 
 typedef struct {
@@ -336,7 +353,13 @@ typedef struct {
       PolyAddrSpace addrspace;
       bool removable;
     } bufferize_opts;
+    struct {
+      const char *name;
+      int dims[3];
+      int threads;
+    } tensor_core;
     const PolyProgramInfo *program_info;
+    const PolyParamArg *param;
     struct {
       const uint8_t *data;
       int n;
@@ -402,11 +425,23 @@ static inline PolyArg poly_arg_bufferize_opts(
   ){.kind = POLY_ARG_BUFFERIZE_OPTS,
     .bufferize_opts = {.device = device, .addrspace = addrspace, .removable = removable}};
 }
+static inline PolyArg poly_arg_tensor_core(const char *name, const int dims[3], int threads) {
+  return (PolyArg
+  ){.kind = POLY_ARG_TENSOR_CORE,
+    .tensor_core = {
+        .name = name,
+        .dims = {dims ? dims[0] : 0, dims ? dims[1] : 0, dims ? dims[2] : 0},
+        .threads = threads,
+    }};
+}
 static inline PolyArg poly_arg_program_info(const PolyProgramInfo *info) {
   return (PolyArg){.kind = POLY_ARG_PROGRAM_INFO, .program_info = info};
 }
 static inline PolyArg poly_arg_bytes(const uint8_t *data, int n) {
   return (PolyArg){.kind = POLY_ARG_BYTES, .bytes = {.data = data, .n = n}};
+}
+static inline PolyArg poly_arg_param(const PolyParamArg *param) {
+  return (PolyArg){.kind = POLY_ARG_PARAM, .param = param};
 }
 
 bool poly_program_info_eq(const PolyProgramInfo *a, const PolyProgramInfo *b);
@@ -509,6 +544,7 @@ typedef enum {
   POLY_DEVICE_CUDA,
   POLY_DEVICE_HIP,
   POLY_DEVICE_X86,
+  POLY_DEVICE_DISK, /* mmap-backed storage device, never a kernel target */
 } PolyDevice;
 
 /* Default compute backend for the current build */
@@ -595,6 +631,7 @@ int poly_tensor_update(
 );
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
+PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source);
 PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
@@ -606,6 +643,13 @@ PolyTensorProvenance poly_tensor_provenance(PolyTensor *tensor);
 void poly_tensor_set_provenance(PolyTensor *tensor, PolyTensorProvenance provenance);
 PolyUOp *poly_tensor_physicalize(PolyCtx *ctx, PolyTensor *tensor);
 int poly_realize_tensors(PolyCtx *ctx, PolyTensor **inputs, int n, PolyTensor **outputs);
+int poly_realize_tensors_ex(
+    PolyCtx *ctx,
+    PolyTensor **inputs,
+    int n,
+    PolyTensor **outputs,
+    bool update_stats
+);
 
 typedef struct PolyVarBinding {
   PolyUOp *var; /* DEFINE_VAR UOp */
@@ -616,9 +660,15 @@ typedef struct PolyVarBinding {
  *
  * This is deliberately a tensor/schedule-layer object, not an Instance
  * entrypoint plan. Capture records the LINEAR schedules produced by normal
- * poly_realize_tensors calls. Replay rebuilds concrete schedules from those
- * captured parameterized LINEAR templates with current input BUFFER identities,
- * matching tinygrad's CapturedJit input_uops substitution boundary.
+ * poly_realize_tensors calls. The retained physical LINEAR substitutes only
+ * JIT input BUFFERs with shaped PARAMs and replays the same compiled plan with
+ * current input identities, matching tinygrad's CapturedJit input_uops
+ * substitution boundary. Input
+ * compatibility and runtime variable values follow
+ * tinygrad/engine/jit.py:_prepare_jit_inputs: the physical base is replaced by
+ * NOOP, the remaining view is unbound, and current BIND values override the
+ * captured schedule defaults. Polygrad's logical provenance root is not part
+ * of this execution-layer signature.
  */
 PolyJit *poly_jit_new(PolyCtx *ctx);
 void poly_jit_free(PolyJit *jit);
@@ -708,9 +758,16 @@ typedef struct {
   size_t buffer_write_bytes;
   size_t buffer_copy_count;
   size_t buffer_copy_bytes;
+  uint64_t global_ops;
+  uint64_t global_mem;
+  double time_sum_s;
+  uint64_t kernel_count;
+  uint64_t mem_used;
 } PolyCtxStats;
 
 int poly_ctx_stats(PolyCtx *ctx, PolyCtxStats *out);
+void poly_ctx_reset_counters(PolyCtx *ctx);
+uint64_t poly_ctx_mem_used_for_device(PolyCtx *ctx, PolyDevice device);
 
 /* Return the current ctx->buffers entry address for a BUFFER UOp as an opaque
  * frontend key. Returns 0 when no PolyBuffer is attached. */
@@ -767,7 +824,7 @@ PolyUOp *poly_uop3(
 
 /* Toposort: returns arena-allocated array of UOp pointers, sets *n_out.
  * _ex variant: gate callback (NULL=visit all, return false to skip subtree),
- * enter_calls (false = skip CALL src[0], process src[1:] only).
+ * enter_calls (false = skip CALL/FUNCTION src[0], process src[1:] only).
  * _ex_user variant: gate carries user_data (closure-style, mirrors tinygrad's
  * `u.toposort(gate=lambda x: r in x.ranges)` where r is captured). */
 PolyUOp **poly_toposort(PolyCtx *ctx, PolyUOp *root, int *n_out);
@@ -789,7 +846,8 @@ PolyUOp **poly_toposort_ex_user(
 
 /* Owned toposort variants for local scans. These mirror tinygrad's temporary
  * `u.toposort()` result lifetime: the returned array is heap-owned and must be
- * released with poly_toposort_free(). UOp nodes themselves remain ctx-owned. */
+ * released with poly_toposort_free(). UOp nodes themselves remain ctx-owned.
+ * `ctx` may be NULL because owned traversal allocates no arena/scratch data. */
 PolyUOp **poly_toposort_alloc(PolyCtx *ctx, PolyUOp *root, int *n_out);
 PolyUOp **poly_toposort_ex_alloc(
     PolyCtx *ctx,
@@ -1087,6 +1145,20 @@ int poly_grad_many(
     PolyUOp **out_grads
 );
 
+/* Extended multi-target gradient result. out_present is optional; when
+ * supplied, each slot records whether reverse-mode produced a gradient before
+ * the public zero-for-no-path fallback. This preserves tinygrad's distinction
+ * between an absent/NOOP gradient and a numerically zero gradient. */
+int poly_grad_many_ex(
+    PolyCtx *ctx,
+    PolyUOp *loss,
+    PolyUOp *initial_grad,
+    PolyUOp **wrts,
+    int n,
+    PolyUOp **out_grads,
+    uint8_t *out_present
+);
+
 /* Substitute UOps in a graph: replace from[i] with to[i] for i in [0,n).
  * Returns a new root UOp with substitutions applied. Used to reconnect
  * realized intermediate buffers back to their original computation graphs
@@ -1119,11 +1191,55 @@ PolyUOp *poly_buffer_on_device(
 PolyUOp *poly_buffer(PolyCtx *ctx, PolyDType scalar_dtype, int64_t size);
 PolyUOp *poly_reshape(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
 PolyUOp *poly_expand(PolyCtx *ctx, PolyUOp *src, int64_t *dims, int ndim);
+PolyUOp *poly_expand_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **dims, int ndim);
 PolyUOp *poly_permute(PolyCtx *ctx, PolyUOp *src, int64_t *perm, int ndim);
 PolyUOp *poly_shrink(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim);
+PolyUOp *poly_shrink_uop(PolyCtx *ctx, PolyUOp *src, PolyUOp **starts, PolyUOp **sizes, int ndim);
 PolyUOp *poly_flip(PolyCtx *ctx, PolyUOp *src, int64_t *axes, int n_axes);
 PolyUOp *poly_pad(PolyCtx *ctx, PolyUOp *src, int64_t (*pairs)[2], int ndim);
 PolyUOp *poly_reduce_axis(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *src, int64_t *axes, int n_axes);
+PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, double value);
+PolyUOp *poly_pool(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *k_,
+    int nk,
+    const int64_t *stride_,
+    const int64_t *dilation_
+);
+PolyUOp *poly_max_pool2d(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+PolyUOp *poly_conv2d(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *weight,
+    PolyUOp *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+PolyUOp *poly_batchnorm(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *weight,
+    PolyUOp *bias,
+    PolyUOp *mean,
+    PolyUOp *invstd,
+    const int64_t *axes,
+    int n_axes
+);
+PolyUOp *poly_one_hot(PolyCtx *ctx, PolyUOp *x, int64_t num_classes);
+PolyUOp *poly_index_select(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index);
 
 #ifdef __cplusplus
 }

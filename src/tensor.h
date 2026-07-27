@@ -20,6 +20,19 @@ extern "C" {
 int64_t poly_shape_numel_checked(const int64_t *shape, int ndim);
 bool poly_shape_equal(const int64_t *a, int a_ndim, const int64_t *b, int b_ndim);
 
+/* Apply realized replacements to live PolyTensors, preserving logical roots
+ * and updating only executable physical roots. POLY_DEVICE_AUTO applies the
+ * map globally; an exact device keeps placement aliases from retargeting a
+ * distinct source-device tensor that shares the same portable logical root. */
+int poly_tensor_apply_realize_map(
+    PolyCtx *ctx,
+    PolyUOp **from,
+    PolyUOp **to,
+    int n,
+    PolyDevice device,
+    PolyMap **placement_memo
+);
+
 /* Dynamic BUFFER helper used by C tests/probes and low-level callers. The
  * first runtime dimension is a DEFINE_VAR or BIND, while allocation reserves
  * the variable max bound times the fixed inner dimensions. */
@@ -56,6 +69,43 @@ PolyUOp *poly_pool(
     const int64_t *stride_,
     const int64_t *dilation_
 );
+
+PolyUOp *poly_max_pool2d(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+
+PolyUOp *poly_conv2d(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *weight,
+    PolyUOp *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+
+PolyUOp *poly_batchnorm(
+    PolyCtx *ctx,
+    PolyUOp *x,
+    PolyUOp *weight,
+    PolyUOp *bias,
+    PolyUOp *mean,
+    PolyUOp *invstd,
+    const int64_t *axes,
+    int n_axes
+);
+
+PolyUOp *poly_one_hot(PolyCtx *ctx, PolyUOp *x, int64_t num_classes);
+PolyUOp *poly_index_select(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index);
 
 /* Tensor.cat -- tensor.py:1364. Concatenate tensors along `dim`.
  * All tensors must have identical shape except along `dim`. */
@@ -208,6 +258,7 @@ PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x);
 PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target);
 PolyUOp *poly_cast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
+PolyUOp *poly_bitcast_by_id(PolyCtx *ctx, PolyUOp *x, int dtype_id);
 PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y);
 PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b);

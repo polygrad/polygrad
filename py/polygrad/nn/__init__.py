@@ -1,6 +1,6 @@
 """nn — Neural network modules for polygrad (tinygrad-compatible)."""
 
-from . import optim
+from . import datasets, optim
 from .modules import (
     Linear, LayerNorm, GroupNorm, RMSNorm, Embedding, Dropout,
     Conv2d, BatchNorm,
@@ -11,7 +11,7 @@ from .state import get_state_dict, load_state_dict, get_parameters
 __all__ = [
     'Linear', 'LayerNorm', 'GroupNorm', 'RMSNorm', 'Embedding', 'Dropout',
     'Conv2d', 'BatchNorm',
-    'optim',
+    'datasets', 'optim',
     'Optimizer', 'OptimizerGroup', 'SGD', 'Adam', 'AdamW',
     'get_state_dict', 'load_state_dict', 'get_parameters',
 ]

@@ -86,6 +86,52 @@ async function runJitTests(pg) {
     f.dispose()
   })
 
+  await test('rejects nested capture and recovers the runtime context', async () => {
+    const x = new Tensor(new Float32Array([1, 2, 3]))
+    let recurse = false
+    let nested
+    nested = pg.jit((value) => {
+      if (recurse) {
+        recurse = false
+        return nested(value)
+      }
+      return value.add(1).realize()
+    })
+
+    await nested(x)
+    recurse = true
+    await assertThrowsAsync(() => nested(x), 'having TinyJit inside another TinyJit')
+
+    const other = pg.jit((value) => value.mul(2).realize())
+    await other(x)
+    assertClose(await (await other(x)).toArray(), [2, 4, 6])
+    nested.dispose()
+    other.dispose()
+  })
+
+  await test('async rejects nested capture and recovers the runtime context', async () => {
+    const x = new Tensor(new Float32Array([1, 2, 3]))
+    let recurse = false
+    let nested
+    nested = pg.jit.async(async (value) => {
+      if (recurse) {
+        recurse = false
+        return await nested(value)
+      }
+      return value.add(1).realize()
+    })
+
+    await nested(x)
+    recurse = true
+    await assertThrowsAsync(() => nested(x), 'having TinyJit inside another TinyJit')
+
+    const other = pg.jit.async(async (value) => value.mul(2).realize())
+    await other(x)
+    assertClose(await (await other(x)).toArray(), [2, 4, 6])
+    nested.dispose()
+    other.dispose()
+  })
+
   await test('compile warms capture and exposes replay stats', async () => {
     const sample = new Tensor(new Float32Array([1, 2, 3]))
     const compiled = await pg.compile((x) => x.add(1).realize(), [sample])
@@ -124,6 +170,30 @@ async function runJitTests(pg) {
     assertClose(await (await f(x)).toArray(), [2, 3, 4])
     assertClose(await (await f(x)).toArray(), [2, 3, 4])
     await assertThrowsAsync(() => f(y), 'args mismatch')
+  })
+
+  await test('accepts movement-view inputs and replays against their bases', async () => {
+    const f = pg.jit((x) => x.add(1))
+    const a = new Tensor(new Float32Array([1, 2, 3, 4])).shrink([[1, 3]])
+    assertClose(await (await f(a)).toArray(), [3, 4])
+    assert(a.uopPhysical.op === pg._core.ops.SHRINK, 'warm input should remain SHRINK')
+    assertClose(await (await f(a)).toArray(), [3, 4])
+    assert(a.uopPhysical.op === pg._core.ops.SHRINK, 'capture input should remain SHRINK')
+    const b = new Tensor(new Float32Array([10, 20, 30, 40])).shrink([[1, 3]])
+    assertClose(await (await f(b)).toArray(), [21, 31])
+    f.dispose()
+  })
+
+  await test('async accepts movement-view inputs and replays against their bases', async () => {
+    const f = pg.jit.async((x) => x.add(1))
+    const a = new Tensor(new Float32Array([1, 2, 3, 4])).shrink([[1, 3]])
+    assertClose(await (await f(a)).toArray(), [3, 4])
+    assert(a.uopPhysical.op === pg._core.ops.SHRINK, 'async warm input should remain SHRINK')
+    assertClose(await (await f(a)).toArray(), [3, 4])
+    assert(a.uopPhysical.op === pg._core.ops.SHRINK, 'async capture input should remain SHRINK')
+    const b = new Tensor(new Float32Array([10, 20, 30, 40])).shrink([[1, 3]])
+    assertClose(await (await f(b)).toArray(), [21, 31])
+    f.dispose()
   })
 
   await test('jit matmul 64x64 captures and replays', async () => {

@@ -62,13 +62,8 @@ TEST(alu, fold_mod) {
 
 TEST(alu, fold_floordiv_floormod_signed_like_tinygrad) {
   const int64_t vals[][4] = {
-      {-7, 3, -3, 2},
-      {-7, -3, 2, -1},
-      {7, -3, -3, -2},
-      {7, 3, 2, 1},
-      {-1, 4, -1, 3},
-      {1, -4, -1, -3},
-      {0, 3, 0, 0},
+      {-7, 3, -3, 2}, {-7, -3, 2, -1}, {7, -3, -3, -2}, {7, 3, 2, 1},
+      {-1, 4, -1, 3}, {1, -4, -1, -3}, {0, 3, 0, 0},
   };
   for (int i = 0; i < (int)(sizeof(vals) / sizeof(vals[0])); i++) {
     PolyArg ops[2] = {poly_arg_int(vals[i][0]), poly_arg_int(vals[i][1])};
@@ -141,13 +136,13 @@ TEST(sym, vector_compare_uint64_const_fold_uses_operand_dtype) {
   );
   PolyUOp *avec_src[2] = {a0, a1};
   PolyUOp *bvec_src[2] = {b0, b1};
-  PolyUOp *avec = poly_uop(ctx, POLY_OP_VCONST, u64x2, avec_src, 2, poly_arg_none());
-  PolyUOp *bvec = poly_uop(ctx, POLY_OP_VCONST, u64x2, bvec_src, 2, poly_arg_none());
+  PolyUOp *avec = poly_uop(ctx, POLY_OP_STACK, u64x2, avec_src, 2, poly_arg_none());
+  PolyUOp *bvec = poly_uop(ctx, POLY_OP_STACK, u64x2, bvec_src, 2, poly_arg_none());
   PolyUOp *cmp = poly_uop2(ctx, POLY_OP_CMPLT, b2, avec, bvec, poly_arg_none());
 
   PolyUOp *r = poly_graph_rewrite(ctx, cmp, poly_symbolic());
   ASSERT_TRUE(r != NULL);
-  ASSERT_TRUE(r->op == POLY_OP_VCONST);
+  ASSERT_TRUE(r->op == POLY_OP_STACK);
   ASSERT_INT_EQ(r->n_src, 2);
   ASSERT_TRUE(r->src[0]->op == POLY_OP_CONST && r->src[0]->arg.kind == POLY_ARG_BOOL);
   ASSERT_TRUE(r->src[1]->op == POLY_OP_CONST && r->src[1]->arg.kind == POLY_ARG_BOOL);
@@ -173,7 +168,7 @@ TEST(sym, negative_shift_count_does_not_fold_to_invalid_const) {
   PASS();
 }
 
-TEST(sym, vector_negative_shift_count_does_not_fold_to_invalid_vconst) {
+TEST(sym, vector_negative_shift_count_does_not_fold_to_invalid_stack) {
   PolyCtx *ctx = poly_ctx_new();
   PolyDType i32x2 = poly_dtype_vec(POLY_INT32, 2);
   PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
@@ -182,8 +177,8 @@ TEST(sym, vector_negative_shift_count_does_not_fold_to_invalid_vconst) {
   PolyUOp *neg = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(-1));
   PolyUOp *lhs_src[2] = {one, two};
   PolyUOp *rhs_src[2] = {zero, neg};
-  PolyUOp *lhs = poly_uop(ctx, POLY_OP_VCONST, i32x2, lhs_src, 2, poly_arg_none());
-  PolyUOp *rhs = poly_uop(ctx, POLY_OP_VCONST, i32x2, rhs_src, 2, poly_arg_none());
+  PolyUOp *lhs = poly_uop(ctx, POLY_OP_STACK, i32x2, lhs_src, 2, poly_arg_none());
+  PolyUOp *rhs = poly_uop(ctx, POLY_OP_STACK, i32x2, rhs_src, 2, poly_arg_none());
   PolyUOp *shl = poly_uop2(ctx, POLY_OP_SHL, i32x2, lhs, rhs, poly_arg_none());
 
   PolyUOp *r = poly_graph_rewrite(ctx, shl, poly_symbolic());
@@ -407,10 +402,10 @@ TEST(sym, where_logical_not_swaps_branches) {
 /* poly_uop_minmax tinygrad parity tests *
  * Every assertion below corresponds to one row of
  * test/parity_scripts/tg_minmax_gt.py output, captured against
- * tinygrad/uop/ops.py:856-897. To re-verify after a tinygrad bump:
+ * the pinned tinygrad UOp._min_max. To re-verify after a tinygrad bump:
  *
- *   PYTHONPATH=references/tinygrad_latest conda run -n tiny \
- *     python test/parity_scripts/tg_minmax_gt.py
+ *   PYTHONPATH=references/tinygrad_latest \
+ *     references/.venv-tinygrad-py311/bin/python test/parity_scripts/tg_minmax_gt.py
  *
  * Then update the literal values below if tinygrad's semantics changed. */
 
@@ -489,6 +484,15 @@ static bool sym_eval_i64(PolyUOp *u, const SymEvalEnv *env, int64_t *out) {
     if (b == 0) return false;
     *out = a % b;
     return true;
+  case POLY_OP_FLOORDIV:
+  case POLY_OP_FLOORMOD: {
+    if (b == 0) return false;
+    PolyArg args[2] = {poly_arg_int(a), poly_arg_int(b)};
+    PolyArg result = poly_exec_alu(u->op, u->dtype, args, 2);
+    if (result.kind != POLY_ARG_INT) return false;
+    *out = result.i;
+    return true;
+  }
   case POLY_OP_CMPLT:
     *out = a < b;
     return true;
@@ -655,27 +659,31 @@ TEST(sym, add_divmod_recombine_preserves_terms_past_old_cap) {
    * terms, then rebuild after a match, which could drop tail terms. Shape the
    * tree so the div/mod pair appears together only at the root. */
   PolyCtx *ctx = poly_ctx_new();
-  PolyUOp *base = mk_range(ctx, 100, 0);
-  PolyUOp *tail = mk_range(ctx, 11, 1);
-  PolyUOp *c4 = mk_const(ctx, 4);
+  PolyUOp *base_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(100));
+  PolyUOp *tail_bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(11));
+  PolyUOp *base =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, base_bound, poly_arg_range(0, POLY_AXIS_LOOP));
+  PolyUOp *tail =
+      poly_uop1(ctx, POLY_OP_RANGE, POLY_INDEX, tail_bound, poly_arg_range(1, POLY_AXIS_LOOP));
+  PolyUOp *c4 = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
 
-  PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, base, c4, poly_arg_none());
-  PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, base, c4, poly_arg_none());
-  PolyUOp *divmul = poly_uop2(ctx, POLY_OP_MUL, POLY_INT32, div, c4, poly_arg_none());
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, base, c4, poly_arg_none());
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, base, c4, poly_arg_none());
+  PolyUOp *divmul = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, div, c4, poly_arg_none());
 
   PolyUOp *left = mod;
   for (int i = 0; i < 30; i++)
-    left = sym_add(ctx, left, tail);
+    left = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, left, tail, poly_arg_none());
 
   PolyUOp *right = divmul;
   for (int i = 0; i < 20; i++)
-    right = sym_add(ctx, right, tail);
+    right = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, right, tail, poly_arg_none());
 
-  PolyUOp *root = sym_add(ctx, left, right);
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, left, right, poly_arg_none());
   PolyUOp *rewritten = poly_graph_rewrite(ctx, root, poly_symbolic());
   ASSERT_NOT_NULL(rewritten);
-  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_MOD), 0);
-  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_IDIV), 0);
+  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_FLOORMOD), 0);
+  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_FLOORDIV), 0);
 
   for (int r0 = 0; r0 < 100; r0 += 17) {
     for (int r1 = 0; r1 < 11; r1 += 5) {
@@ -696,6 +704,100 @@ TEST(sym, add_divmod_recombine_preserves_terms_past_old_cap) {
       }
     }
   }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, add_divmod_recombine_multiplier_product_overflow_declines) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX, poly_arg_define_var("base", INT64_MIN, INT64_MAX)
+  );
+  PolyUOp *q = poly_uop0(ctx, POLY_OP_PARAM, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *max = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(INT64_MAX));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *mod = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, base, max, poly_arg_none());
+  PolyUOp *mod_scaled = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, mod, two, poly_arg_none());
+  PolyUOp *q_scaled = poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, q, three, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, mod_scaled, q_scaled, poly_arg_none());
+
+  PolyUOp *rewritten = simplify(ctx, root);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_ADD);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, add_divmod_recombine_nested_divisor_product_overflow_declines) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX, poly_arg_define_var("base", INT64_MIN, INT64_MAX)
+  );
+  PolyUOp *max = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(INT64_MAX));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *base_div_max = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, base, max, poly_arg_none());
+  PolyUOp *nested_mod =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, base_div_max, two, poly_arg_none());
+  PolyUOp *base_div_three =
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, base, three, poly_arg_none());
+  PolyUOp *scaled_div =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, base_div_three, two, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, nested_mod, scaled_div, poly_arg_none());
+
+  PolyUOp *rewritten = simplify(ctx, root);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_ADD);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, add_divmod_recombine_modulus_product_overflow_declines) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX, poly_arg_define_var("base", INT64_MIN, INT64_MAX)
+  );
+  PolyUOp *max = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(INT64_MAX));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(2));
+  PolyUOp *base_mod = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, base, max, poly_arg_none());
+  PolyUOp *base_div = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, base, max, poly_arg_none());
+  PolyUOp *nested_mod =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, base_div, two, poly_arg_none());
+  PolyUOp *scaled_nested =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, nested_mod, max, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, base_mod, scaled_nested, poly_arg_none());
+
+  PolyUOp *rewritten = simplify(ctx, root);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_ADD);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, add_divmod_recombine_negative_divisor_stays_add) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INDEX, poly_arg_define_var("x", -12, 12));
+  PolyUOp *three = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(3));
+  PolyUOp *negative_two = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(-2));
+  PolyUOp *negative_six = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(-6));
+  PolyUOp *base = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, x, three, poly_arg_none());
+  PolyUOp *left = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, base, negative_two, poly_arg_none());
+  PolyUOp *right_div =
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, x, negative_six, poly_arg_none());
+  PolyUOp *right =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, right_div, negative_two, poly_arg_none());
+  PolyUOp *root = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, left, right, poly_arg_none());
+
+  PolyUOp *rewritten = simplify(ctx, root);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_FLOORMOD), 1);
+  ASSERT_INT_EQ(sym_count_ops_in_root(ctx, rewritten, POLY_OP_FLOORDIV), 2);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -825,6 +927,76 @@ TEST(sym, minmax_sub_int64_overflow_falls_back_to_dtype) {
   PASS();
 }
 
+TEST(sym, minmax_narrow_integer_wrap_falls_back_to_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *u8 = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_UINT8, poly_arg_define_var("u8", 250, 251));
+  PolyUOp *u8_add = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_UINT8, u8, poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(10)),
+      poly_arg_none()
+  );
+  check_mm(ctx, u8_add, 0, UINT8_MAX, "uint8 wrapping add");
+  PolyUOp *u8_cmp = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, u8_add,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(5)), poly_arg_none()
+  );
+  ASSERT_INT_EQ(simplify(ctx, u8_cmp)->op, POLY_OP_CMPLT);
+
+  PolyUOp *i8 = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT8, poly_arg_define_var("i8", 120, 121));
+  PolyUOp *i8_add = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INT8, i8, poly_uop0(ctx, POLY_OP_CONST, POLY_INT8, poly_arg_int(10)),
+      poly_arg_none()
+  );
+  check_mm(ctx, i8_add, INT8_MIN, INT8_MAX, "int8 wrapping add");
+  PolyUOp *i8_cmp = poly_uop2(
+      ctx, POLY_OP_CMPLT, POLY_BOOL, i8_add,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT8, poly_arg_int(0)), poly_arg_none()
+  );
+  ASSERT_INT_EQ(simplify(ctx, i8_cmp)->op, POLY_OP_CMPLT);
+
+  PolyUOp *u8_sub = poly_uop2(
+      ctx, POLY_OP_SUB, POLY_UINT8,
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_UINT8, poly_arg_define_var("u8s", 0, 1)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(2)), poly_arg_none()
+  );
+  check_mm(ctx, u8_sub, 0, UINT8_MAX, "uint8 wrapping sub");
+
+  PolyUOp *i8_mul = poly_uop2(
+      ctx, POLY_OP_MUL, POLY_INT8,
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT8, poly_arg_define_var("i8m", 64, 65)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT8, poly_arg_int(2)), poly_arg_none()
+  );
+  check_mm(ctx, i8_mul, INT8_MIN, INT8_MAX, "int8 wrapping mul");
+
+  PolyUOp *u8_shl = poly_uop2(
+      ctx, POLY_OP_SHL, POLY_UINT8,
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_UINT8, poly_arg_define_var("u8l", 128, 129)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT8, poly_arg_int(1)), poly_arg_none()
+  );
+  check_mm(ctx, u8_shl, 0, UINT8_MAX, "uint8 wrapping shl");
+
+  PolyArg u8_add_args[2] = {poly_arg_int(250), poly_arg_int(10)};
+  PolyArg i8_add_args[2] = {poly_arg_int(120), poly_arg_int(10)};
+  ASSERT_INT_EQ(poly_exec_alu(POLY_OP_ADD, POLY_UINT8, u8_add_args, 2).i, 4);
+  ASSERT_INT_EQ(poly_exec_alu(POLY_OP_ADD, POLY_INT8, i8_add_args, 2).i, -126);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+TEST(sym, minmax_int64_division_overflow_falls_back_to_dtype) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("x", INT64_MIN, INT64_MIN)
+  );
+  PolyUOp *neg_one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(-1));
+  PolyUOp *cdiv_u = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT64, x, neg_one, poly_arg_none());
+  PolyUOp *floordiv_u = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT64, x, neg_one, poly_arg_none());
+  check_mm(ctx, cdiv_u, INT64_MIN, INT64_MAX, "i64 cdiv overflow fallback");
+  check_mm(ctx, floordiv_u, INT64_MIN, INT64_MAX, "i64 floordiv overflow fallback");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* MUL (4-corner) */
 TEST(sym, minmax_mul_r_3) {
   PolyCtx *ctx = poly_ctx_new();
@@ -902,6 +1074,143 @@ TEST(sym, minmax_floordiv_floormod_dvn_3_mixed) {
   PolyUOp *r = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INT32, dvn, mk_const(ctx, 3), poly_arg_none());
   check_mm(ctx, q, -1, 1, "floor(dvn/3)");
   check_mm(ctx, r, 0, 2, "floor_mod(dvn,3)");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_empty_range_divmod_is_zero_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *empty = mk_range(ctx, 0, 0);
+  PolyUOp *three = mk_const(ctx, 3);
+  PolyUOp *cdiv = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, empty, three, poly_arg_none());
+  PolyUOp *floordiv = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT32, empty, three, poly_arg_none());
+  PolyUOp *floormod = poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INT32, empty, three, poly_arg_none());
+  check_mm(ctx, cdiv, 0, 0, "empty CDIV 3");
+  check_mm(ctx, floordiv, 0, 0, "empty FLOORDIV 3");
+  check_mm(ctx, floormod, 0, 0, "empty FLOORMOD 3");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_negative_int64_divisor_bounds_are_overflow_safe) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *numerator =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("numerator", 0, 1));
+  PolyUOp *divisor = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("negative_divisor", INT64_MIN, -1)
+  );
+  PolyUOp *cmod = poly_uop2(ctx, POLY_OP_MOD, POLY_INT64, numerator, divisor, poly_arg_none());
+  PolyUOp *floormod =
+      poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INT64, numerator, divisor, poly_arg_none());
+  check_mm(ctx, cmod, 0, INT64_MAX, "CMOD([0,1], [INT64_MIN,-1])");
+  check_mm(ctx, floormod, -INT64_MAX, 0, "FLOORMOD([0,1], [INT64_MIN,-1])");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, fold_divmod_uint64_additive_overflow_declines_without_ub) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *max_i64 = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(INT64_MAX));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(1));
+  PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(2));
+  PolyUOp *sum = poly_uop2(ctx, POLY_OP_ADD, POLY_UINT64, max_i64, one, poly_arg_none());
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT64, sum, two, poly_arg_none());
+  PolyUOp *rewritten = simplify(ctx, div);
+  ASSERT_NOT_NULL(rewritten);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, fold_divmod_uint64_congruence_overflow_declines_without_ub) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_UINT64, poly_arg_define_var("base", 0, 4));
+  PolyUOp *factor = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(INT64_MAX / 3));
+  PolyUOp *denominator = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(INT64_MAX));
+  PolyUOp *numerator = poly_uop2(ctx, POLY_OP_MUL, POLY_UINT64, base, factor, poly_arg_none());
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT64, numerator, denominator, poly_arg_none());
+  PolyUOp *rewritten = simplify(ctx, div);
+  ASSERT_NOT_NULL(rewritten);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, uint64_minmax_point_does_not_fold_signed_surrogate_bounds) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_UINT64, poly_arg_define_var("x", INT64_MIN, INT64_MIN + 1)
+  );
+  PolyUOp *denominator = poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_arg_int(INT64_MAX));
+  PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, POLY_UINT64, x, denominator, poly_arg_none());
+  PolyUOp *rewritten = simplify(ctx, div);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_IDIV);
+
+  PolyArg lower_args[2] = {poly_arg_int(INT64_MIN), poly_arg_int(INT64_MAX)};
+  PolyArg upper_args[2] = {poly_arg_int(INT64_MIN + 1), poly_arg_int(INT64_MAX)};
+  ASSERT_INT_EQ(poly_exec_alu(POLY_OP_IDIV, POLY_UINT64, lower_args, 2).i, 1);
+  ASSERT_INT_EQ(poly_exec_alu(POLY_OP_IDIV, POLY_UINT64, upper_args, 2).i, 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, unsigned_div_all_ones_does_not_rewrite_to_negation) {
+  const PolyDType unsigned_dtypes[] = {POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64};
+  for (int i = 0; i < (int)(sizeof(unsigned_dtypes) / sizeof(unsigned_dtypes[0])); i++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyDType dtype = unsigned_dtypes[i];
+    PolyUOp *x = poly_uop0(ctx, POLY_OP_DEFINE_VAR, dtype, poly_arg_define_var("x", 2, 3));
+    PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_int(1));
+    PolyUOp *numerator = poly_uop2(ctx, POLY_OP_SHR, dtype, x, one, poly_arg_none());
+    PolyUOp *all_ones = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_int(-1));
+    PolyUOp *div = poly_uop2(ctx, POLY_OP_IDIV, dtype, numerator, all_ones, poly_arg_none());
+    PolyUOp *mod = poly_uop2(ctx, POLY_OP_MOD, dtype, numerator, all_ones, poly_arg_none());
+    PolyUOp *rewritten_div = simplify(ctx, div);
+    PolyUOp *rewritten_mod = simplify(ctx, mod);
+    ASSERT_NOT_NULL(rewritten_div);
+    ASSERT_NOT_NULL(rewritten_mod);
+    ASSERT_INT_EQ(rewritten_div->op, POLY_OP_IDIV);
+    ASSERT_INT_EQ(rewritten_mod->op, POLY_OP_MOD);
+
+    PolyArg endpoint[2] = {poly_arg_int(1), poly_arg_int(-1)};
+    ASSERT_INT_EQ(poly_exec_alu(POLY_OP_IDIV, dtype, endpoint, 2).i, 0);
+    ASSERT_INT_EQ(poly_exec_alu(POLY_OP_MOD, dtype, endpoint, 2).i, 1);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
+TEST(sym, cdiv_stays_raw_while_floordiv_uses_floor_identities) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("x", 2, 3));
+  PolyUOp *neg_one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(-1));
+  PolyUOp *four = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+
+  PolyUOp *cdiv_neg = poly_uop2(ctx, POLY_OP_CDIV, POLY_INT32, x, neg_one, poly_arg_none());
+  PolyUOp *floordiv_neg = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT32, x, neg_one, poly_arg_none());
+  PolyUOp *cdiv_four = poly_uop2(ctx, POLY_OP_CDIV, POLY_INT32, x, four, poly_arg_none());
+  PolyUOp *floordiv_four = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT32, x, four, poly_arg_none());
+
+  PolyUOp *rewritten_cdiv_neg = simplify(ctx, cdiv_neg);
+  PolyUOp *rewritten_floordiv_neg = simplify(ctx, floordiv_neg);
+  PolyUOp *rewritten_cdiv_four = simplify(ctx, cdiv_four);
+  PolyUOp *rewritten_floordiv_four = simplify(ctx, floordiv_four);
+  ASSERT_INT_EQ(rewritten_cdiv_neg->op, POLY_OP_CDIV);
+  ASSERT_INT_EQ(rewritten_floordiv_neg->op, POLY_OP_NEG);
+  ASSERT_PTR_EQ(rewritten_floordiv_neg->src[0], x);
+  ASSERT_INT_EQ(rewritten_cdiv_four->op, POLY_OP_CDIV);
+  ASSERT_INT_EQ(rewritten_floordiv_four->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(rewritten_floordiv_four->arg.i, 0);
+
+  PolyUOp *min_x = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INT64, poly_arg_define_var("min_x", INT64_MIN, INT64_MIN + 1)
+  );
+  PolyUOp *min_neg_one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(-1));
+  PolyUOp *min_floordiv =
+      poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT64, min_x, min_neg_one, poly_arg_none());
+  ASSERT_INT_EQ(simplify(ctx, min_floordiv)->op, POLY_OP_FLOORDIV);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1090,6 +1399,84 @@ TEST(sym, minmax_cmpne_r_neg1) {
   /* def_ne: (a1<b0)||(b1<a0) = (9<-1)||(-1<0) = false||true = true
    * all_eq: false (a0=0 != a1=9). vmin=1, vmax=1 */
   check_mm(ctx, u, 1, 1, "r!=-1");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_stack_uses_lane_bounds_like_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType i32x4 = poly_dtype_vec(POLY_INT32, 4);
+  PolyUOp *lanes[4] = {
+      mk_const(ctx, -2),
+      mk_const(ctx, 0),
+      mk_const(ctx, 5),
+      mk_const(ctx, 10),
+  };
+  PolyUOp *stack = poly_uop(ctx, POLY_OP_STACK, i32x4, lanes, 4, poly_arg_none());
+  check_mm(ctx, stack, -2, 10, "STACK(-2,0,5,10)");
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_vector_bool_gep_and_gate_stays_dynamic) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType f32x4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyDType b4 = poly_dtype_vec(POLY_BOOL, 4);
+  PolyUOp *base = poly_uop0(ctx, POLY_OP_PARAM, f32x4, poly_arg_int(0));
+  PolyUOp *exponent = poly_uop0(ctx, POLY_OP_PARAM, f32x4, poly_arg_int(1));
+  PolyUOp *zero_lanes[4] = {
+      poly_const_float(ctx, 0.0),
+      poly_const_float(ctx, 0.0),
+      poly_const_float(ctx, 0.0),
+      poly_const_float(ctx, 0.0),
+  };
+  PolyUOp *zero_vec = poly_uop(ctx, POLY_OP_STACK, f32x4, zero_lanes, 4, poly_arg_none());
+  PolyUOp *base_eq = poly_uop2(ctx, POLY_OP_CMPEQ, b4, base, zero_vec, poly_arg_none());
+  PolyUOp *exp_eq = poly_uop2(ctx, POLY_OP_CMPEQ, b4, exponent, zero_vec, poly_arg_none());
+  PolyUOp *base_lane = poly_uop1(ctx, POLY_OP_GEP, POLY_BOOL, base_eq, poly_arg_int(0));
+  PolyUOp *exp_lane = poly_uop1(ctx, POLY_OP_GEP, POLY_BOOL, exp_eq, poly_arg_int(0));
+  PolyUOp *both = poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, base_lane, exp_lane, poly_arg_none());
+  PolyUOp *as_int = poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, both, poly_arg_none());
+  PolyUOp *as_float = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, as_int, poly_arg_none());
+  PolyUOp *gate = poly_uop2(
+      ctx, POLY_OP_CMPNE, POLY_BOOL, as_float, poly_const_float(ctx, 0.0), poly_arg_none()
+  );
+
+  check_mm(ctx, base_eq, 0, 1, "vector CMPEQ");
+  check_mm(ctx, base_lane, 0, 1, "GEP(vector CMPEQ)");
+  check_mm(ctx, both, 0, 1, "AND of vector comparison lanes");
+  check_mm(ctx, gate, 0, 1, "casted bool gate");
+
+  PolyUOp *where = poly_uop3(
+      ctx, POLY_OP_WHERE, POLY_FLOAT32, gate, poly_const_float(ctx, 1.0),
+      poly_const_float(ctx, 8.0), poly_arg_none()
+  );
+  PolyUOp *rewritten = simplify(ctx, where);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_WHERE);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, minmax_float_comparisons_with_infinity_stay_dynamic) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *x = poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT32, poly_arg_int(0));
+  PolyUOp *negative_inf = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(-INFINITY));
+  PolyUOp *positive_inf = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(INFINITY));
+  PolyUOp *reciprocal = poly_uop1(ctx, POLY_OP_RECIPROCAL, POLY_FLOAT32, x, poly_arg_none());
+  PolyUOp *not_negative_inf =
+      poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, reciprocal, negative_inf, poly_arg_none());
+  PolyUOp *below_positive_inf =
+      poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, x, positive_inf, poly_arg_none());
+
+  PolyUOp *rewritten_ne = simplify(ctx, not_negative_inf);
+  PolyUOp *rewritten_lt = simplify(ctx, below_positive_inf);
+  ASSERT_NOT_NULL(rewritten_ne);
+  ASSERT_NOT_NULL(rewritten_lt);
+  ASSERT_INT_EQ(rewritten_ne->op, POLY_OP_CMPNE);
+  ASSERT_INT_EQ(rewritten_lt->op, POLY_OP_CMPLT);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -1434,6 +1821,111 @@ TEST(sym, double_logical_not_idempotent_via_minmax) {
   poly_uop_minmax(ctx, not_not_lt, &lo_b, &hi_b);
   ASSERT_INT_EQ(lo_a, lo_b);
   ASSERT_INT_EQ(hi_a, hi_b);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sym, weak_index_combines_same_base_terms_with_pinned_dtype_topology) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned tinygrad/uop/symbolic.py:242,247 canonicalizes both x+x and
+   * x*c0+x*c1 while retaining the weak-index result dtype. */
+  PolyUOp *n =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("n", 1, 8));
+  PolyUOp *two = poly_const_int(ctx, 2);
+  PolyUOp *three = poly_const_int(ctx, 3);
+  PolyUOp *five = poly_const_int(ctx, 5);
+  ASSERT_NOT_NULL(n);
+  ASSERT_NOT_NULL(two);
+  ASSERT_NOT_NULL(three);
+  ASSERT_NOT_NULL(five);
+
+  PolyUOp *add_self = poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, n, n, poly_arg_none());
+  PolyUOp *expected_two =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, two, poly_arg_none());
+  PolyUOp *rewritten_self = poly_graph_rewrite(ctx, add_self, poly_symbolic());
+  ASSERT_PTR_EQ(rewritten_self, expected_two);
+  ASSERT_TRUE(poly_dtype_eq(rewritten_self->dtype, POLY_INDEX));
+
+  PolyUOp *term_two =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, two, poly_arg_none());
+  PolyUOp *term_three =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, three, poly_arg_none());
+  PolyUOp *sum =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, term_two, term_three, poly_arg_none());
+  PolyUOp *expected_five =
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, five, poly_arg_none());
+  PolyUOp *rewritten_sum = poly_graph_rewrite(ctx, sum, poly_symbolic());
+  ASSERT_PTR_EQ(rewritten_sum, expected_five);
+  ASSERT_EQ(rewritten_sum->op, POLY_OP_MUL);
+  ASSERT_INT_EQ(rewritten_sum->n_src, 2);
+  ASSERT_PTR_EQ(rewritten_sum->src[0], n);
+  ASSERT_PTR_EQ(rewritten_sum->src[1], five);
+  ASSERT_TRUE(poly_dtype_eq(rewritten_sum->dtype, POLY_INDEX));
+
+  PolyUOp *y =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_INT32, poly_arg_define_var("y", 1, 8));
+  PolyUOp *assoc_source = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, y, n, poly_arg_none()), n,
+      poly_arg_none());
+  PolyUOp *assoc_expected = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX, y,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, two, poly_arg_none()),
+      poly_arg_none());
+  PolyUOp *assoc_rewritten =
+      poly_graph_rewrite(ctx, assoc_source, poly_symbolic());
+  ASSERT_PTR_EQ(assoc_rewritten, assoc_expected);
+  ASSERT_INT_EQ(assoc_rewritten->op, POLY_OP_ADD);
+  ASSERT_INT_EQ(assoc_rewritten->src[1]->op, POLY_OP_MUL);
+  ASSERT_TRUE(poly_dtype_eq(assoc_rewritten->src[1]->dtype, POLY_INDEX));
+
+  for (int64_t value = 1; value <= 8; value = value == 1 ? 4 : 8) {
+    PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value));
+    PolyUOp *bound_y =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(value + 1));
+    PolyUOp *from[] = {n, y};
+    PolyUOp *to[] = {bound, bound_y};
+    PolyUOp *original_value =
+        poly_graph_rewrite(ctx, poly_uop_substitute(ctx, sum, from, to, 1), poly_symbolic());
+    PolyUOp *rewritten_value =
+        poly_graph_rewrite(ctx, poly_uop_substitute(ctx, rewritten_sum, from, to, 1),
+                           poly_symbolic());
+    int64_t original_i = 0, rewritten_i = 0;
+    ASSERT_INT_EQ(poly_uop_const_i64(original_value, &original_i), 0);
+    ASSERT_INT_EQ(poly_uop_const_i64(rewritten_value, &rewritten_i), 0);
+    ASSERT_INT_EQ(original_i, value * 5);
+    ASSERT_INT_EQ(rewritten_i, original_i);
+
+    PolyUOp *assoc_original_value =
+        poly_graph_rewrite(ctx, poly_uop_substitute(ctx, assoc_source, from, to, 2),
+                           poly_symbolic());
+    PolyUOp *assoc_rewritten_value =
+        poly_graph_rewrite(ctx, poly_uop_substitute(ctx, assoc_rewritten, from, to, 2),
+                           poly_symbolic());
+    int64_t assoc_original_i = 0, assoc_rewritten_i = 0;
+    ASSERT_INT_EQ(poly_uop_const_i64(assoc_original_value, &assoc_original_i), 0);
+    ASSERT_INT_EQ(poly_uop_const_i64(assoc_rewritten_value, &assoc_rewritten_i), 0);
+    ASSERT_INT_EQ(assoc_original_i, 3 * value + 1);
+    ASSERT_INT_EQ(assoc_rewritten_i, assoc_original_i);
+    if (value == 8) break;
+  }
+
+  PolyUOp *max_coeff =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(INT64_MAX));
+  PolyUOp *index_one =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(1));
+  PolyUOp *overflow_sum = poly_uop2(
+      ctx, POLY_OP_ADD, POLY_INDEX,
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, max_coeff, poly_arg_none()),
+      poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, n, index_one, poly_arg_none()),
+      poly_arg_none());
+  PolyUOp *overflow_rewritten =
+      poly_graph_rewrite(ctx, overflow_sum, poly_symbolic());
+  ASSERT_NOT_NULL(overflow_rewritten);
+  ASSERT_INT_EQ(overflow_rewritten->op, POLY_OP_ADD);
+
   poly_ctx_destroy(ctx);
   PASS();
 }

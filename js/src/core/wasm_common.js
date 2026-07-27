@@ -229,7 +229,7 @@ function createWasmCoreFromModule(Module, device) {
   ]
 
   function readCtxStats(ctx) {
-    const ptr = Module._malloc(ctxStatsFields.length * 4)
+    const ptr = Module._malloc(168)
     try {
       const rc = Module._poly_ctx_stats(ctx, ptr)
       if (rc !== 0) throw new Error('poly_ctx_stats failed (rc=' + rc + ')')
@@ -238,6 +238,17 @@ function createWasmCoreFromModule(Module, device) {
       for (let i = 0; i < ctxStatsFields.length; i++) {
         out[ctxStatsFields[i]] = h32[(ptr >> 2) + i] >>> 0
       }
+      const view = new DataView(heapU8().buffer)
+      const readU64 = (offset) => {
+        const lo = view.getUint32(ptr + offset, true)
+        const hi = view.getUint32(ptr + offset + 4, true)
+        return hi * 0x100000000 + lo
+      }
+      out.globalOps = readU64(128)
+      out.globalMem = readU64(136)
+      out.timeSumS = view.getFloat64(ptr + 144, true)
+      out.kernelCount = readU64(152)
+      out.memUsed = readU64(160)
       return out
     } finally {
       Module._free(ptr)
@@ -257,20 +268,19 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function writeOptimConfig(cfg) {
-    const ptr = Module._malloc(32)
+    const ptr = Module._malloc(28)
     const u8 = heapU8()
     const h32 = heap32()
     const f32 = heapF32()
-    u8.fill(0, ptr, ptr + 32)
+    u8.fill(0, ptr, ptr + 28)
     h32[ptr >> 2] = cfg.kind || 0
-    f32[(ptr >> 2) + 1] = cfg.lr == null ? 0.001 : cfg.lr
-    f32[(ptr >> 2) + 2] = cfg.beta1 == null ? 0.9 : cfg.beta1
-    f32[(ptr >> 2) + 3] = cfg.beta2 == null ? 0.999 : cfg.beta2
-    f32[(ptr >> 2) + 4] = cfg.eps == null ? 1e-8 : cfg.eps
-    f32[(ptr >> 2) + 5] = cfg.weightDecay == null ? 0 : cfg.weightDecay
-    f32[(ptr >> 2) + 6] = cfg.momentum == null ? 0 : cfg.momentum
-    u8[ptr + 28] = cfg.nesterov ? 1 : 0
-    u8[ptr + 29] = cfg.classic ? 1 : 0
+    f32[(ptr >> 2) + 1] = cfg.beta1 == null ? 0.9 : cfg.beta1
+    f32[(ptr >> 2) + 2] = cfg.beta2 == null ? 0.999 : cfg.beta2
+    f32[(ptr >> 2) + 3] = cfg.eps == null ? 1e-8 : cfg.eps
+    f32[(ptr >> 2) + 4] = cfg.weightDecay == null ? 0 : cfg.weightDecay
+    f32[(ptr >> 2) + 5] = cfg.momentum == null ? 0 : cfg.momentum
+    u8[ptr + 24] = cfg.nesterov ? 1 : 0
+    u8[ptr + 25] = cfg.classic ? 1 : 0
     return ptr
   }
 
@@ -312,7 +322,10 @@ function createWasmCoreFromModule(Module, device) {
     return id
   }
 
-  // Public cpu resolves to the wasm execution backend on wasm targets.
+  const AUTO_DEVICE_ID = coreDeviceId('auto')
+
+  // Public cpu and runtime-default auto resolve to the wasm execution backend
+  // on wasm targets. AUTO_DEVICE_ID remains the core's device-less graph value.
   const DEVICE_IDS = {
     auto: coreDeviceId('wasm'),
     cpu: coreDeviceId('wasm'),
@@ -320,6 +333,7 @@ function createWasmCoreFromModule(Module, device) {
     wasm: coreDeviceId('wasm'),
     webgpu: coreDeviceId('webgpu')
   }
+  const HOST_DEVICE_ID = coreDeviceId('host')
   const DTYPE_IDS = {
     bool: coreDTypeId('bool'),
     int8: coreDTypeId('int8'),
@@ -721,6 +735,8 @@ function createWasmCoreFromModule(Module, device) {
       }
     },
     poly_buffer_by_id: (ctx, dtypeId, size) => Module._poly_buffer_by_id(ctx, dtypeId, BigInt(size)),
+    poly_buffer_on_device_by_id: (ctx, dtypeId, size, device) =>
+      Module._poly_buffer_on_device_by_id(ctx, dtypeId, BigInt(size), device),
     poly_buffer_f32: (ctx, size) => Module._poly_buffer_f32(ctx, BigInt(size)),
     poly_buffer_f64: (ctx, size) => Module._poly_buffer_f64(ctx, BigInt(size)),
 
@@ -743,6 +759,7 @@ function createWasmCoreFromModule(Module, device) {
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
     poly_uop_op: (uop) => Module._poly_uop_op(uop),
+    poly_uop_device: (uop) => Module._poly_uop_device(uop),
     poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
     poly_uop_key: (uop) => BigInt(uop || 0),
     poly_uop_n_src: (uop) => Module._poly_uop_n_src(uop || 0),
@@ -765,12 +782,16 @@ function createWasmCoreFromModule(Module, device) {
       return out
     },
     poly_buffer_get_ptr: (ctx, buf) => Module._poly_buffer_get_ptr(ctx, buf),
+    poly_buffer_is_allocated: (ctx, buf) => !!Module._poly_buffer_is_allocated(ctx, buf),
     poly_buffer_get_key: (ctx, buf) => Module._poly_buffer_get_key(ctx, buf),
     poly_device_by_name: (name) => {
       const key = String(name).toLowerCase()
+      if (key === 'auto') return AUTO_DEVICE_ID
       return DEVICE_IDS[key] !== undefined ? DEVICE_IDS[key] : coreDeviceId(key)
     },
     poly_device_name: (device) => coreDeviceName(device),
+    poly_device_is_host_addressable: (device) =>
+      Boolean(Module._poly_device_is_host_addressable(device)),
     poly_tensor_create: (ctx, uop, role, device) =>
       Module._poly_tensor_create(ctx, uop, role, device),
     poly_tensor_create_with_roots: (ctx, logical, physical, role, device) =>
@@ -781,6 +802,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_to_device(ctx, tensor, device),
     poly_tensor_assign: (ctx, target, value) =>
       Module._poly_tensor_assign(ctx, target, value),
+    poly_tensor_clone_into: (ctx, target, source) =>
+      Module._poly_tensor_clone_into(ctx, target, source),
     poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
     poly_tensor_uop_logical: (tensor) => Module._poly_tensor_uop_logical(tensor),
     poly_tensor_uop_physical: (tensor) => Module._poly_tensor_uop_physical(tensor),
@@ -835,7 +858,7 @@ function createWasmCoreFromModule(Module, device) {
     poly_jit_run: jitRunSync,
     poly_jit_run_async: jitRunAsync,
 
-    poly_optim_build_step: (ctx, cfg, params, grads, mTensors, vTensors, bc1, bc2) => {
+    poly_optim_build_step: (ctx, cfg, lr, params, grads, mTensors, vTensors, bc1, bc2) => {
       const n = params.length
       const cfgPtr = writeOptimConfig(cfg || {})
       const paramsPtr = writePtrArray(params)
@@ -848,12 +871,12 @@ function createWasmCoreFromModule(Module, device) {
          * arrays and receives the tensors whose AFTER/STORE effects must be
          * realized together. */
         const needed = Module._poly_optim_build_step(
-          ctx, cfgPtr, paramsPtr, gradsPtr, n, mPtr, vPtr, bc1 || 0, bc2 || 0, 0, 0
+          ctx, cfgPtr, lr, paramsPtr, gradsPtr, n, mPtr, vPtr, bc1 || 0, bc2 || 0, 0, 0
         )
         if (needed < 0) return null
         outPtr = Module._malloc(Math.max(1, needed) * 4)
         const rc = Module._poly_optim_build_step(
-          ctx, cfgPtr, paramsPtr, gradsPtr, n, mPtr, vPtr,
+          ctx, cfgPtr, lr, paramsPtr, gradsPtr, n, mPtr, vPtr,
           bc1 || 0, bc2 || 0, outPtr, needed
         )
         if (rc < 0) return null
@@ -871,6 +894,14 @@ function createWasmCoreFromModule(Module, device) {
     // Backend-aware readback helpers.
     poly_buffer_read: bufferReadSync,
     poly_buffer_read_async: bufferReadAsync,
+    poly_buffer_ensure_device_allocated: (ctx, buf, device) => {
+      if (deviceName === 'webgpu' && device === DEVICE_IDS.webgpu &&
+          !(Module.__polygradWebGpuState && Module.__polygradWebGpuState.device)) return
+      const rc = Module._poly_buffer_ensure_device_allocated(ctx, buf, device)
+      if (rc !== 0) {
+        throw new Error('poly_buffer_ensure_device_allocated failed (rc=' + rc + ')')
+      }
+    },
     poly_buffer_write: (ctx, buf, src) => {
       let bytes
       if (src instanceof Uint8Array) {
@@ -883,39 +914,64 @@ function createWasmCoreFromModule(Module, device) {
         throw new TypeError('poly_buffer_write expects a TypedArray or ArrayBuffer')
       }
       const nbytes = bytes.byteLength
+      const useFrontendHostKey = deviceName === 'webgpu' &&
+        !(Module.__polygradWebGpuState && Module.__polygradWebGpuState.device)
+      const frontendBytes = useFrontendHostKey ? bytes.slice() : null
       const ptr = nbytes ? Module._malloc(nbytes) : 0
       try {
         if (nbytes) heapU8().set(bytes, ptr)
         const rc = Module._poly_buffer_write(ctx, buf, ptr, nbytes)
         if (rc !== 0) throw new Error('poly_buffer_write failed (rc=' + rc + ')')
+        if (frontendBytes) {
+          Module._poly_buffer_set(ctx, buf, 0, nbytes, HOST_DEVICE_ID)
+          const bufferKey = Module._poly_buffer_get_key(ctx, buf)
+          if (!bufferKey) throw new Error('poly_buffer_set did not create a frontend host key')
+          Module.__polygradHostBuffers.set(String(bufferKey), frontendBytes)
+        }
       } finally {
         if (ptr) Module._free(ptr)
       }
     },
     poly_ctx_stats: readCtxStats,
+    poly_ctx_reset_counters: (ctx) => Module._poly_ctx_reset_counters(ctx),
     poly_grad: Module._poly_grad,
     poly_grad_many: (ctx, loss, initialGrad, targets) => {
       const n = targets.length
       const wrtsPtr = Module._malloc(n * 4)
       const outPtr = Module._malloc(n * 4)
+      const presentPtr = Module._malloc(n)
       const h32 = heap32()
+      const u8 = heapU8()
       for (let i = 0; i < n; i++) {
         h32[(wrtsPtr >> 2) + i] = targets[i] || 0
         h32[(outPtr >> 2) + i] = 0
+        u8[presentPtr + i] = 0
       }
       /* Match tinygrad's single gradient pass over all live targets. The
        * pointer arrays are wasm32 handles, so each slot is 4 bytes. */
-      const rc = Module._poly_grad_many(ctx, loss || 0, initialGrad || 0, wrtsPtr, n, outPtr)
+      const rc = Module._poly_grad_many_ex(
+        ctx, loss || 0, initialGrad || 0, wrtsPtr, n, outPtr, presentPtr
+      )
       if (rc !== 0) {
         Module._free(wrtsPtr)
         Module._free(outPtr)
+        Module._free(presentPtr)
         return null
       }
-      const out = new Array(n)
-      for (let i = 0; i < n; i++) out[i] = h32[(outPtr >> 2) + i]
+      /* Any C call may grow Emscripten memory. Reacquire the heap views before
+       * reading result pointers, just as the realization bridges above do. */
+      const h32b = heap32()
+      const u8b = heapU8()
+      const grads = new Array(n)
+      const present = new Array(n)
+      for (let i = 0; i < n; i++) {
+        grads[i] = h32b[(outPtr >> 2) + i]
+        present[i] = u8b[presentPtr + i] !== 0
+      }
       Module._free(wrtsPtr)
       Module._free(outPtr)
-      return out
+      Module._free(presentPtr)
+      return { grads, present }
     },
     poly_detach: Module._poly_detach,
     poly_cast_by_id: Module._poly_cast_by_id,
@@ -950,10 +1006,80 @@ function createWasmCoreFromModule(Module, device) {
       return result
     },
 
+    poly_shrink_uop: (ctx, uop, starts, sizes, ndim) => {
+      const n = Number(ndim)
+      const startsPtr = Module._malloc(n * 4)
+      const sizesPtr = Module._malloc(n * 4)
+      const h32 = heap32()
+      for (let i = 0; i < n; i++) {
+        h32[(startsPtr >> 2) + i] = starts[i] || 0
+        h32[(sizesPtr >> 2) + i] = sizes[i] || 0
+      }
+      const result = Module._poly_shrink_uop(ctx, uop, startsPtr, sizesPtr, n)
+      Module._free(startsPtr)
+      Module._free(sizesPtr)
+      return result
+    },
+
     poly_pad: (ctx, uop, flat, npairs) => {
       const ptr = writeInt64Array(flat)
       const result = cwrapPad(ctx, uop, ptr, npairs)
       Module._free(ptr)
+      return result
+    },
+
+    poly_pad_value: (ctx, uop, flat, npairs, value) => {
+      const ptr = writeInt64Array(flat)
+      const result = Module._poly_pad_value(ctx, uop, ptr, npairs, value)
+      Module._free(ptr)
+      return result
+    },
+
+    poly_pool: (ctx, uop, k, nk, stride, dilation) => {
+      const kPtr = writeInt64Array(k)
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      const result = Module._poly_pool(ctx, uop, kPtr, nk, stridePtr, dilationPtr)
+      Module._free(kPtr)
+      Module._free(stridePtr)
+      Module._free(dilationPtr)
+      return result
+    },
+
+    poly_max_pool2d: (ctx, x, k, nk, stride, dilation, padding, npadding) => {
+      const kPtr = writeInt64Array(k)
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      const paddingPtr = writeInt64Array(padding)
+      const result = Module._poly_max_pool2d(
+        ctx, x, kPtr, nk, stridePtr, dilationPtr, paddingPtr, npadding
+      )
+      Module._free(kPtr)
+      Module._free(stridePtr)
+      Module._free(dilationPtr)
+      Module._free(paddingPtr)
+      return result
+    },
+
+    poly_conv2d: (ctx, x, weight, bias, groups, stride, dilation, padding, npadding) => {
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      const paddingPtr = writeInt64Array(padding)
+      const result = Module._poly_conv2d(
+        ctx, x, weight, bias || 0, groups, stridePtr, dilationPtr, paddingPtr, npadding
+      )
+      Module._free(stridePtr)
+      Module._free(dilationPtr)
+      Module._free(paddingPtr)
+      return result
+    },
+
+    poly_batchnorm: (ctx, x, weight, bias, mean, invstd, axes, naxes) => {
+      const axesPtr = writeInt64Array(axes)
+      const result = Module._poly_batchnorm(
+        ctx, x, weight || 0, bias || 0, mean, invstd, axesPtr, naxes
+      )
+      Module._free(axesPtr)
       return result
     },
 
@@ -971,6 +1097,9 @@ function createWasmCoreFromModule(Module, device) {
     poly_max_reduce: Module._poly_max_reduce,
     poly_mean_reduce: Module._poly_mean_reduce,
     poly_var_reduce: Module._poly_var_reduce,
+    poly_one_hot: (ctx, x, numClasses) =>
+      Module._poly_one_hot(ctx, x, BigInt(numClasses)),
+    poly_index_select: Module._poly_index_select,
     poly_softmax: Module._poly_softmax,
     poly_log_softmax: Module._poly_log_softmax,
     poly_dot: Module._poly_dot,
@@ -1119,7 +1248,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 18
+  const EXPECTED_ABI = 21
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

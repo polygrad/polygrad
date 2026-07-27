@@ -11,6 +11,108 @@
 #include <stdio.h>
 #include <string.h>
 #include "utils.h"
+#ifndef __EMSCRIPTEN__
+#include <pthread.h>
+#endif
+
+/* Cached compiler matchers are thread-local because rule statistics and rewrite
+ * traces are mutable. POSIX destroys the TLS pointer slots when a user thread
+ * exits, but C11 _Thread_local has no destructor for the matcher/pattern
+ * allocations reachable from those slots. Explicitly registered compiler
+ * caches own those allocations; ordinary public patterns and matchers retain
+ * their caller-managed lifetime. The current Emscripten build is single-threaded
+ * and keeps its caches for the lifetime of the module. */
+typedef struct PolyPatThreadOwned {
+  void *ptr;
+  bool matcher;
+  struct PolyPatThreadOwned *next;
+} PolyPatThreadOwned;
+
+typedef struct {
+  PolyPatThreadOwned *head;
+} PolyPatThreadRegistry;
+
+static void pat_free_one(PolyPat *p);
+static void pm_destroy_one(PolyPatternMatcher *pm);
+
+#ifndef __EMSCRIPTEN__
+static pthread_key_t g_pat_thread_key;
+static pthread_once_t g_pat_thread_key_once = PTHREAD_ONCE_INIT;
+static bool g_pat_thread_key_ready = false;
+
+static void pat_thread_registry_destroy(void *opaque) {
+  PolyPatThreadRegistry *registry = opaque;
+  if (!registry) return;
+  for (PolyPatThreadOwned *owned = registry->head; owned; owned = owned->next)
+    if (owned->matcher) pm_destroy_one((PolyPatternMatcher *)owned->ptr);
+  for (PolyPatThreadOwned *owned = registry->head; owned; owned = owned->next)
+    if (!owned->matcher) pat_free_one((PolyPat *)owned->ptr);
+  while (registry->head) {
+    PolyPatThreadOwned *owned = registry->head;
+    registry->head = owned->next;
+    free(owned);
+  }
+  free(registry);
+}
+
+static void pat_thread_key_init(void) {
+  g_pat_thread_key_ready = pthread_key_create(&g_pat_thread_key, pat_thread_registry_destroy) == 0;
+}
+
+static PolyPatThreadRegistry *pat_thread_registry_get(bool create) {
+  if (pthread_once(&g_pat_thread_key_once, pat_thread_key_init) != 0 || !g_pat_thread_key_ready)
+    return NULL;
+  PolyPatThreadRegistry *registry = pthread_getspecific(g_pat_thread_key);
+  if (!registry && create) {
+    registry = calloc(1, sizeof(*registry));
+    if (!registry) return NULL;
+    if (pthread_setspecific(g_pat_thread_key, registry) != 0) {
+      free(registry);
+      return NULL;
+    }
+  }
+  return registry;
+}
+
+static bool pat_thread_register(void *ptr, bool matcher) {
+  if (!ptr) return false;
+  PolyPatThreadRegistry *registry = pat_thread_registry_get(true);
+  if (!registry) return false;
+  for (PolyPatThreadOwned *owned = registry->head; owned; owned = owned->next)
+    if (owned->ptr == ptr && owned->matcher == matcher) return true;
+  PolyPatThreadOwned *owned = malloc(sizeof(*owned));
+  if (!owned) return false;
+  *owned = (PolyPatThreadOwned){.ptr = ptr, .matcher = matcher, .next = registry->head};
+  registry->head = owned;
+  return true;
+}
+
+static void pat_thread_unregister(void *ptr, bool matcher) {
+  if (!ptr) return;
+  PolyPatThreadRegistry *registry = pat_thread_registry_get(false);
+  if (!registry) return;
+  PolyPatThreadOwned **link = &registry->head;
+  while (*link) {
+    PolyPatThreadOwned *owned = *link;
+    if (owned->ptr == ptr && owned->matcher == matcher) {
+      *link = owned->next;
+      free(owned);
+      return;
+    }
+    link = &owned->next;
+  }
+}
+#else
+static bool pat_thread_register(void *ptr, bool matcher) {
+  (void)matcher;
+  return ptr != NULL;
+}
+
+static void pat_thread_unregister(void *ptr, bool matcher) {
+  (void)ptr;
+  (void)matcher;
+}
+#endif
 
 /* OpSet helpers */
 
@@ -27,8 +129,7 @@ static PolyOps opset_first(PolyOpSet s) {
 /* Pattern constructors */
 
 static PolyPat *pat_alloc(void) {
-  PolyPat *p = calloc(1, sizeof(PolyPat));
-  return p;
+  return calloc(1, sizeof(PolyPat));
 }
 
 static PolyOpSet compute_early_reject(PolyPat **src, int n_src) {
@@ -160,15 +261,19 @@ PolyPat *poly_pat_set_early_reject(PolyPat *p, PolyOpSet early_reject) {
   return p;
 }
 
-void poly_pat_free(PolyPat *p) {
+static void pat_free_one(PolyPat *p) {
   if (!p) return;
-  if (p->src) {
-    for (int i = 0; i < p->n_src; i++)
-      poly_pat_free(p->src[i]);
-    free(p->src);
-  }
+  free(p->src);
   free(p->dtypes);
   free(p);
+}
+
+void poly_pat_free(PolyPat *p) {
+  if (!p) return;
+  for (int i = 0; p->src && i < p->n_src; i++)
+    poly_pat_free(p->src[i]);
+  pat_thread_unregister(p, false);
+  pat_free_one(p);
 }
 
 /* Pattern matching */
@@ -226,72 +331,124 @@ static bool bindings_add(PolyBindings *b, const char *name, PolyUOp *uop) {
   return true;
 }
 
-static bool match_sources(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
-  for (int i = 0; i < pat->n_src; i++) {
-    if (!poly_pat_match(pat->src[i], uop->src[i], binds)) return false;
-  }
-  return true;
+typedef bool (*PatMatchContinuation)(PolyBindings *binds, void *opaque);
+
+typedef struct {
+  const PolyPat *pat;
+  PolyUOp *uop;
+  int src_index;
+  bool swapped;
+  PatMatchContinuation continuation;
+  void *opaque;
+} PatSourceMatch;
+
+static bool pat_match_continue(
+    const PolyPat *pat, PolyUOp *uop, PolyBindings *binds,
+    PatMatchContinuation continuation, void *opaque, bool allow_cast
+);
+
+static bool pat_match_sources_continue(PolyBindings *binds, void *opaque) {
+  PatSourceMatch *state = opaque;
+  if (state->src_index == state->pat->n_src)
+    return state->continuation(binds, state->opaque);
+
+  int uop_index = state->swapped ? 1 - state->src_index : state->src_index;
+  PatSourceMatch next = {
+      .pat = state->pat,
+      .uop = state->uop,
+      .src_index = state->src_index + 1,
+      .swapped = state->swapped,
+      .continuation = state->continuation,
+      .opaque = state->opaque,
+  };
+  return pat_match_continue(
+      state->pat->src[state->src_index], state->uop->src[uop_index], binds,
+      pat_match_sources_continue, &next, true
+  );
 }
 
-bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
-  /* CAST-tolerant match: pattern or CAST(pattern). */
-  if (pat->or_casted && uop->op == POLY_OP_CAST && uop->n_src == 1) {
-    int saved = binds->n;
-    if (poly_pat_match(pat, uop->src[0], binds)) return true;
-    binds->n = saved;
-  }
+static bool pat_match_continue(
+    const PolyPat *pat, PolyUOp *uop, PolyBindings *binds,
+    PatMatchContinuation continuation, void *opaque, bool allow_cast
+) {
+  int saved = binds->n;
 
-  /* Op check */
-  if (pat->has_ops && !poly_opset_has(pat->ops, uop->op)) return false;
+  if (pat->has_ops && !poly_opset_has(pat->ops, uop->op)) goto no_match;
 
-  /* Name binding: if already bound, must be same pointer */
+  /* Name binding: if already bound, it must be the same UOp occurrence. */
   if (pat->name) {
     PolyUOp *existing = poly_bind(binds, pat->name);
     if (existing) {
-      if (existing != uop) return false;
-    } else {
-      if (!bindings_add(binds, pat->name, uop)) return false;
+      if (existing != uop) goto no_match;
+    } else if (!bindings_add(binds, pat->name, uop)) {
+      goto no_match;
     }
   }
 
-  /* DType check */
   if (pat->n_dtypes > 0) {
     bool found = false;
     PolyDType scalar = poly_dtype_scalar(uop->dtype);
     for (int i = 0; i < pat->n_dtypes; i++) {
-      if (poly_dtype_eq(pat->dtypes[i], uop->dtype) || poly_dtype_eq(pat->dtypes[i], scalar)) {
+      if (poly_dtype_eq(pat->dtypes[i], uop->dtype) ||
+          poly_dtype_eq(pat->dtypes[i], scalar)) {
         found = true;
         break;
       }
     }
-    if (!found) return false;
+    if (!found) goto no_match;
   }
 
-  /* Arg check */
-  if (pat->match_arg && !poly_arg_eq(pat->arg, uop->arg)) return false;
+  if (pat->match_arg && !poly_arg_eq(pat->arg, uop->arg)) goto no_match;
+  if (uop->n_src < pat->n_src) goto no_match;
+  if (pat->strict_length && uop->n_src != pat->n_src) goto no_match;
 
-  /* Source count */
-  if (uop->n_src < pat->n_src) return false;
-  if (pat->strict_length && uop->n_src != pat->n_src) return false;
+  if (pat->src == NULL) {
+    if (continuation(binds, opaque)) return true;
+    goto no_match;
+  }
 
-  /* No source constraints = done */
-  if (pat->src == NULL) return true;
+  int source_saved = binds->n;
+  PatSourceMatch sources = {
+      .pat = pat,
+      .uop = uop,
+      .src_index = 0,
+      .swapped = false,
+      .continuation = continuation,
+      .opaque = opaque,
+  };
+  if (pat_match_sources_continue(binds, &sources)) return true;
+  binds->n = source_saved;
 
-  /* Commutative: try both orderings */
+  /*
+   * Pinned tinygrad UPat expands commutative source lists into permutations
+   * (uop/ops.py:1237,1310). Keep the alternate ordering available until all
+   * later sibling bindings have matched, rather than accepting a locally
+   * successful nested ordering greedily.
+   */
   if (pat->commutative && pat->n_src == 2) {
-    int saved = binds->n;
-    if (match_sources(pat, uop, binds)) return true;
-    binds->n = saved;
-    /* Swap: match pat->src[0] against uop->src[1] and vice versa */
-    if (poly_pat_match(pat->src[0], uop->src[1], binds) &&
-        poly_pat_match(pat->src[1], uop->src[0], binds))
-      return true;
-    binds->n = saved;
-    return false;
+    sources.swapped = true;
+    if (pat_match_sources_continue(binds, &sources)) return true;
   }
 
-  /* Fixed-order match */
-  return match_sources(pat, uop, binds);
+no_match:
+  binds->n = saved;
+  /* Pinned tinygrad UPat.or_casted is any(self, CAST(self)): direct-first and
+   * exactly one CAST wrapper, not recursively CAST-tolerant. */
+  if (allow_cast && pat->or_casted && uop->op == POLY_OP_CAST && uop->n_src == 1)
+    return pat_match_continue(
+        pat, uop->src[0], binds, continuation, opaque, false
+    );
+  return false;
+}
+
+static bool pat_match_accept(PolyBindings *binds, void *opaque) {
+  (void)binds;
+  (void)opaque;
+  return true;
+}
+
+bool poly_pat_match(const PolyPat *pat, PolyUOp *uop, PolyBindings *binds) {
+  return pat_match_continue(pat, uop, binds, pat_match_accept, NULL, true);
 }
 
 /* PatternMatcher */
@@ -457,7 +614,22 @@ PolyPatternMatcher *poly_pm_new_named(const PolyNamedRule *rules, int n_rules) {
   return pm;
 }
 
-void poly_pm_destroy(PolyPatternMatcher *pm) {
+static void pat_thread_cache_register_pattern(PolyPat *pat) {
+  if (!pat) return;
+  (void)pat_thread_register(pat, false);
+  for (int i = 0; pat->src && i < pat->n_src; i++)
+    pat_thread_cache_register_pattern(pat->src[i]);
+}
+
+PolyPatternMatcher *poly_pm_thread_cache(PolyPatternMatcher *pm) {
+  if (!pm) return NULL;
+  for (int i = 0; i < pm->n_rules; i++)
+    pat_thread_cache_register_pattern(pm->rules[i].pat);
+  (void)pat_thread_register(pm, true);
+  return pm;
+}
+
+static void pm_destroy_one(PolyPatternMatcher *pm) {
   if (!pm) return;
   for (int i = 0; i < POLY_OP_COUNT; i++)
     free(pm->by_op[i].indices);
@@ -465,6 +637,29 @@ void poly_pm_destroy(PolyPatternMatcher *pm) {
   free(pm->stats);
   free(pm->rules);
   free(pm);
+}
+
+void poly_pm_destroy(PolyPatternMatcher *pm) {
+  if (!pm) return;
+  pat_thread_unregister(pm, true);
+  pm_destroy_one(pm);
+}
+
+typedef struct {
+  PolyRule *rule;
+  PolyCtx *ctx;
+  PolyUOp *uop;
+  PolyUOp *result;
+  bool matched;
+} PatRewriteContinuation;
+
+static bool pat_rewrite_continue(PolyBindings *binds, void *opaque) {
+  PatRewriteContinuation *state = opaque;
+  state->matched = true;
+  state->result = state->rule->fn(state->ctx, state->uop, binds);
+  /* Pinned tinygrad/uop/ops.py:1345-1351 retries the next binding map only
+   * when the callback returns None. */
+  return state->result != NULL;
 }
 
 PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
@@ -493,22 +688,28 @@ PolyUOp *poly_pm_rewrite(PolyPatternMatcher *pm, PolyCtx *ctx, PolyUOp *uop) {
     if (st) st->attempts++;
 
     PolyBindings binds = {.n = 0};
-    if (poly_pat_match(rule->pat, uop, &binds)) {
-      if (st) st->pattern_matches++;
-      PolyUOp *result = rule->fn(ctx, uop, &binds);
-      poly_bindings_free(&binds);
-      if (result != NULL && result != uop) {
-        double dt = (st || pm->trace_fp) ? poly_now_ms() - t0 : 0.0;
-        if (st) {
+    PatRewriteContinuation rewrite = {
+        .rule = rule,
+        .ctx = ctx,
+        .uop = uop,
+    };
+    bool accepted = pat_match_continue(
+        rule->pat, uop, &binds, pat_rewrite_continue, &rewrite, true
+    );
+    poly_bindings_free(&binds);
+    if (rewrite.matched && st) st->pattern_matches++;
+    if (accepted && rewrite.result != NULL) {
+      double dt = (st || pm->trace_fp) ? poly_now_ms() - t0 : 0.0;
+      if (st) {
+        if (rewrite.result != uop) {
           st->rewrites++;
           st->rewrite_ms += dt;
-          st->total_ms += dt;
         }
-        pm_trace_emit_rewrite(pm, trace_st, uop, result, dt);
-        return result;
+        st->total_ms += dt;
       }
-    } else {
-      poly_bindings_free(&binds);
+      if (rewrite.result != uop)
+        pm_trace_emit_rewrite(pm, trace_st, uop, rewrite.result, dt);
+      return rewrite.result;
     }
     if (st) st->total_ms += poly_now_ms() - t0;
   }
@@ -762,7 +963,8 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
       /* CALL gating: tinygrad's graph_rewrite treats CALL/FUNCTION bodies as
        * opaque when enter_calls=false by identity-mapping only src[0]. CALL
        * arguments remain normal graph inputs and must still be traversed. */
-      if (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 0) {
+      bool opaque_body = new_n->op == POLY_OP_CALL || new_n->op == POLY_OP_FUNCTION;
+      if (!enter_calls && opaque_body && new_n->n_src > 0) {
         replace_set(replace, new_n->src[0], new_n->src[0]);
       }
 
@@ -772,7 +974,7 @@ PolyUOp *poly_graph_rewrite_ctx_ex2(
         failed = true;
         goto cleanup;
       }
-      int src_start = (!enter_calls && new_n->op == POLY_OP_CALL && new_n->n_src > 1) ? 1 : 0;
+      int src_start = (!enter_calls && opaque_body && new_n->n_src > 0) ? 1 : 0;
       for (int i = new_n->n_src - 1; i >= src_start; i--) {
         PolyUOp *x = new_n->src[i];
         if (poly_map_get(on_stack, poly_ptr_hash(x), x, poly_ptr_eq)) continue;
@@ -945,11 +1147,12 @@ PolyUOp *poly_graph_walk_rewrite(
 
       /* CALL gating: identity-map only the opaque callee root, matching
        * tinygrad RewriteContext.walk_rewrite. */
-      if (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 0) {
+      bool opaque_body = n->op == POLY_OP_CALL || n->op == POLY_OP_FUNCTION;
+      if (!enter_calls && opaque_body && n->n_src > 0) {
         replace_set(replace, n->src[0], n->src[0]);
       }
 
-      int start = (!enter_calls && n->op == POLY_OP_CALL && n->n_src > 1) ? 1 : 0;
+      int start = (!enter_calls && opaque_body && n->n_src > 0) ? 1 : 0;
       for (int i = n->n_src - 1; i >= start; i--) {
         if (!replace_get(replace, n->src[i]) && !ws_push(&ws, n->src[i], 0, n->src[i])) {
           free(ws.items);

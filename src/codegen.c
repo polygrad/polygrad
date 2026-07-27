@@ -12,6 +12,7 @@
 
 #include "codegen.h"
 #include "engine/schedule.h"
+#include "frontend_internal.h"
 #include "schedule/indexing.h"
 #include "simplify.h"
 #include <math.h>
@@ -299,7 +300,7 @@ static PolyUOp *convert_loop_output_ranges_to_global(PolyCtx *ctx, PolyUOp *ast)
     bool globalizable = true;
     for (int ti = 0; ti < n_topo; ti++) {
       PolyUOp *u = topo[ti];
-      if (!u || u->op != POLY_OP_BUFFERIZE) continue;
+      if (!u || u->op != POLY_OP_STAGE) continue;
       if (!poly_uop_in_ranges(ctx, u, r)) {
         globalizable = false;
         break;
@@ -777,7 +778,7 @@ static bool is_true_clause_const(PolyUOp *u) {
 }
 
 /* Tinygrad's UOp.uprod(*clauses) is bool-AND here. Skip literal `true`
- * identity clauses locally so INDEX.valid does not keep `true AND mask`
+ * identity clauses locally so a LOAD gate does not keep `true AND mask`
  * after pm_move_where_on_load. */
 static PolyUOp *and_all_clauses(PolyCtx *ctx, PolyUOp **clauses, int n, PolyUOp *init) {
   PolyUOp *acc = (init && !is_true_clause_const(init)) ? init : NULL;
@@ -1167,10 +1168,11 @@ static bool sched_apply_tc_opt(
 
       if (otype == 'l') {
         PolyUOp *two = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(2));
-        PolyUOp *warp_mod2 = poly_uop2(ctx, POLY_OP_MOD, POLY_INT32, warp, two, poly_arg_none());
+        PolyUOp *warp_mod2 =
+            poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INT32, warp, two, poly_arg_none());
         axes[odim] =
             sched_shift_to_core(s, axes[odim], 2, POLY_AXIS_LOCAL, false, warp_mod2, &new_rng);
-        warp = poly_uop2(ctx, POLY_OP_IDIV, POLY_INT32, warp, two, poly_arg_none());
+        warp = poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INT32, warp, two, poly_arg_none());
       } else if (otype == 'u') {
         axes[odim] = sched_shift_to_core(s, axes[odim], 2, POLY_AXIS_UPCAST, false, NULL, &new_rng);
       }
@@ -1329,7 +1331,8 @@ static bool sched_apply_tc_opt(
 
       PolyUOp *wmma_srcs[3] = {contract_a, contract_b, zero_vec};
       PolyUOp *wmma = poly_uop_tagged(
-          ctx, POLY_OP_WMMA, vec_out, wmma_srcs, 3, poly_arg_str(tc->intrinsic_name), 1
+          ctx, POLY_OP_WMMA, vec_out, wmma_srcs, 3,
+          poly_arg_tensor_core(tc->intrinsic_name, tc->dims, tc->threads), 1
       );
 
       PolyUOp *unroll_src[1] = {wmma};
@@ -1387,7 +1390,7 @@ static PolyUOp *poly_apply_opts_heuristic(PolyCtx *ctx, PolyUOp *sink, PolyRende
     int n_topo = 0;
     PolyUOp **topo = poly_toposort(ctx, sink, &n_topo);
     for (int i = 0; i < n_topo; i++) {
-      if (topo[i]->op == POLY_OP_BUFFERIZE) return sink;
+      if (topo[i]->op == POLY_OP_STAGE) return sink;
     }
   }
 
@@ -2639,7 +2642,7 @@ static PolyPatternMatcher *poly_pm_reduce(void) {
       {poly_pat_ops(reduce_set, NULL, 0, NULL), rule_reduce_to_acc},
       {poly_pat_ops(sink_set, NULL, 0, NULL), rule_merge_reduce_ends},
   };
-  g_pm_reduce = poly_pm_new(rules, 2);
+  g_pm_reduce = poly_pm_thread_cache(poly_pm_new(rules, 2));
   return g_pm_reduce;
 }
 
@@ -3088,6 +3091,712 @@ static PolyUOp *rule_decomp_threefry32(PolyCtx *ctx, PolyUOp *root, const PolyBi
   return poly_uop1(ctx, POLY_OP_CAST, root->dtype, xr0, poly_arg_none());
 }
 
+/* ***** long as two ints *****
+ *
+ * Port of tinygrad decompositions.py::l2i/pm_long_decomp. Renderer capability
+ * controls whether this pass runs: WGSL has only i32/u32, while C, CUDA, HIP,
+ * WASM, and x86 retain native int64 values. A pass-private tag_arg marker
+ * carries low/high lane requests while preserving the complete public tag and
+ * tag_arg; no lane marker may survive this pass. */
+
+typedef struct {
+  PolyUOp *lo;
+  PolyUOp *hi;
+} L2IPair;
+
+typedef struct {
+  uint64_t magic;
+  uintptr_t token;
+  uint64_t generation;
+  int32_t original_tag;
+  int32_t lane;
+  PolyArg original_tag_arg;
+} L2ILaneMarker;
+
+#define L2I_LANE_MAGIC UINT64_C(0x6c32692d6c616e65)
+
+static _Thread_local uintptr_t g_l2i_active_token = 0;
+static _Thread_local uint64_t g_l2i_active_generation = 0;
+static _Thread_local uint64_t g_l2i_generation_counter = 0;
+
+static PolyDType l2i_value_dtype(PolyDType dt) {
+  PolyDType base = poly_dtype_scalar(dt);
+  base.is_ptr = false;
+  base.addrspace = 0;
+  base.vcount = 0;
+  base.ptr_size = 0;
+  return base;
+}
+
+static bool l2i_is_long(PolyDType dt) {
+  if (dt.is_ptr) return false;
+  PolyDType base = l2i_value_dtype(dt);
+  return poly_dtype_is_int(base) && !poly_dtype_is_bool(base) && base.bitsize == 64;
+}
+
+static bool l2i_is_long_ptr(PolyDType dt) {
+  if (!dt.is_ptr) return false;
+  PolyDType base = l2i_value_dtype(dt);
+  return poly_dtype_is_int(base) && !poly_dtype_is_bool(base) && base.bitsize == 64;
+}
+
+static PolyDType l2i_dt(PolyDType dt) {
+  PolyDType base = l2i_value_dtype(dt);
+  PolyDType out = poly_dtype_is_unsigned(base) ? POLY_UINT32 : POLY_INT32;
+  if (!dt.is_ptr && dt.count > 1) out = poly_dtype_vec(out, dt.count);
+  return out;
+}
+
+static PolyUOp *l2i_clone(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dtype,
+    PolyUOp **src,
+    int n_src,
+    PolyArg arg,
+    int32_t tag,
+    PolyArg tag_arg
+) {
+  return (tag != 0 || tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(ctx, op, dtype, src, n_src, arg, tag, tag_arg)
+             : poly_uop(ctx, op, dtype, src, n_src, arg);
+}
+
+static PolyUOp *l2i_replace_dtype(PolyCtx *ctx, PolyUOp *u, PolyDType dtype) {
+  return l2i_clone(ctx, u->op, dtype, u->src, u->n_src, u->arg, u->tag, u->tag_arg);
+}
+
+static bool l2i_lane(PolyUOp *u, int *lane, L2ILaneMarker *decoded) {
+  if (!u || !g_l2i_active_token || !g_l2i_active_generation || u->tag_arg.kind != POLY_ARG_BYTES ||
+      u->tag_arg.bytes.n != (int)sizeof(L2ILaneMarker) || !u->tag_arg.bytes.data)
+    return false;
+  L2ILaneMarker marker = {0};
+  memcpy(&marker, u->tag_arg.bytes.data, sizeof(marker));
+  if (marker.magic != L2I_LANE_MAGIC || marker.token != g_l2i_active_token ||
+      marker.generation != g_l2i_active_generation || (marker.lane != 0 && marker.lane != 1))
+    return false;
+  if (lane) *lane = marker.lane;
+  if (decoded) *decoded = marker;
+  return true;
+}
+
+static PolyUOp *l2i_rtag(PolyCtx *ctx, PolyUOp *u, int lane) {
+  int existing_lane = 0;
+  if (l2i_lane(u, &existing_lane, NULL)) return existing_lane == lane ? u : NULL;
+  if (!u || !g_l2i_active_token || !g_l2i_active_generation || (lane != 0 && lane != 1))
+    return NULL;
+  L2ILaneMarker marker = {
+      .magic = L2I_LANE_MAGIC,
+      .token = g_l2i_active_token,
+      .generation = g_l2i_active_generation,
+      .original_tag = u->tag,
+      .lane = lane,
+      .original_tag_arg = u->tag_arg,
+  };
+  return poly_uop_tagged_arg(
+      ctx, u->op, u->dtype, u->src, u->n_src, u->arg, u->tag,
+      poly_arg_bytes((const uint8_t *)&marker, (int)sizeof(marker))
+  );
+}
+
+static PolyUOp *l2i_finish_lane(PolyCtx *ctx, PolyUOp *request, PolyUOp *value) {
+  int lane = 0;
+  L2ILaneMarker marker = {0};
+  if (!value || !l2i_lane(request, &lane, &marker)) return value;
+  (void)lane;
+  return l2i_clone(
+      ctx, value->op, value->dtype, value->src, value->n_src, value->arg, marker.original_tag,
+      marker.original_tag_arg
+  );
+}
+
+static PolyUOp *l2i_finish_value(PolyCtx *ctx, PolyUOp *original, PolyUOp *value) {
+  if (!value) return NULL;
+  return l2i_clone(
+      ctx, value->op, value->dtype, value->src, value->n_src, value->arg, original->tag,
+      original->tag_arg
+  );
+}
+
+static PolyUOp *l2i_const(PolyCtx *ctx, PolyDType dt, uint32_t bits) {
+  int64_t value = poly_dtype_is_unsigned(dt) ? (int64_t)bits : (int64_t)(int32_t)bits;
+  return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int(value));
+}
+
+static PolyUOp *l2i_cast(PolyCtx *ctx, PolyUOp *u, PolyDType dt) {
+  if (!u) return NULL;
+  return poly_dtype_eq(u->dtype, dt) ? u : poly_uop1(ctx, POLY_OP_CAST, dt, u, poly_arg_none());
+}
+
+static PolyUOp *l2i_bitcast(PolyCtx *ctx, PolyUOp *u, PolyDType dt) {
+  if (!u) return NULL;
+  return poly_dtype_eq(u->dtype, dt) ? u : poly_uop1(ctx, POLY_OP_BITCAST, dt, u, poly_arg_none());
+}
+
+static PolyUOp *l2i_binary(PolyCtx *ctx, PolyOps op, PolyDType dt, PolyUOp *a, PolyUOp *b) {
+  if (!a || !b) return NULL;
+  return poly_uop2(ctx, op, dt, a, b, poly_arg_none());
+}
+
+static PolyUOp *l2i_cmp(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
+  if (!a || !b) return NULL;
+  return poly_uop2(ctx, op, POLY_BOOL, a, b, poly_arg_none());
+}
+
+static PolyUOp *l2i_not(PolyCtx *ctx, PolyUOp *u) {
+  PolyUOp *t = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+  return l2i_cmp(ctx, POLY_OP_CMPNE, u, t);
+}
+
+static PolyUOp *l2i_where(PolyCtx *ctx, PolyDType dt, PolyUOp *cond, PolyUOp *t, PolyUOp *f) {
+  if (!cond || !t || !f) return NULL;
+  return poly_uop3(ctx, POLY_OP_WHERE, dt, cond, t, f, poly_arg_none());
+}
+
+static PolyUOp *l2i_reindex(PolyCtx *ctx, PolyUOp *idx, int lane) {
+  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2 || idx->n_src > 64) return NULL;
+  PolyUOp *offset = idx->src[1];
+  PolyUOp *two = poly_const_like(ctx, offset, poly_arg_int(2));
+  PolyUOp *off = poly_const_like(ctx, offset, poly_arg_int(lane));
+  PolyUOp *scaled = l2i_binary(ctx, POLY_OP_MUL, offset->dtype, offset, two);
+  PolyUOp *lane_offset = l2i_binary(ctx, POLY_OP_ADD, offset->dtype, scaled, off);
+  PolyUOp *src[64];
+  for (int i = 0; i < idx->n_src; i++)
+    src[i] = idx->src[i];
+  src[1] = lane_offset;
+  return l2i_clone(ctx, idx->op, idx->dtype, src, idx->n_src, idx->arg, idx->tag, idx->tag_arg);
+}
+
+static L2IPair l2i_add(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *a0,
+    PolyUOp *a1,
+    PolyUOp *b0,
+    PolyUOp *b1
+) {
+  PolyUOp *low = l2i_binary(ctx, POLY_OP_ADD, dt, a0, b0);
+  PolyUOp *carry = l2i_cmp(
+      ctx, POLY_OP_CMPLT, l2i_bitcast(ctx, low, POLY_UINT32), l2i_bitcast(ctx, a0, POLY_UINT32)
+  );
+  PolyUOp *high = l2i_binary(
+      ctx, POLY_OP_ADD, dt, l2i_binary(ctx, POLY_OP_ADD, dt, a1, b1), l2i_cast(ctx, carry, dt)
+  );
+  return (L2IPair){low, high};
+}
+
+static L2IPair l2i_sub(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *a0,
+    PolyUOp *a1,
+    PolyUOp *b0,
+    PolyUOp *b1
+) {
+  PolyUOp *low = l2i_binary(ctx, POLY_OP_SUB, dt, a0, b0);
+  PolyUOp *borrow = l2i_cmp(
+      ctx, POLY_OP_CMPLT, l2i_bitcast(ctx, a0, POLY_UINT32), l2i_bitcast(ctx, b0, POLY_UINT32)
+  );
+  PolyUOp *high = l2i_binary(
+      ctx, POLY_OP_SUB, dt, l2i_binary(ctx, POLY_OP_SUB, dt, a1, b1), l2i_cast(ctx, borrow, dt)
+  );
+  return (L2IPair){low, high};
+}
+
+static L2IPair l2i_shift(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dt,
+    PolyUOp *a0,
+    PolyUOp *a1,
+    PolyUOp *b0,
+    PolyUOp *b1
+) {
+  PolyUOp *zero = l2i_const(ctx, dt, 0);
+  PolyUOp *one = l2i_const(ctx, dt, 1);
+  PolyUOp *thirty_one = l2i_const(ctx, dt, 31);
+  PolyUOp *thirty_two = l2i_const(ctx, dt, 32);
+  PolyUOp *sixty_four = l2i_const(ctx, POLY_UINT32, 64);
+  PolyUOp *bmod = l2i_binary(ctx, POLY_OP_AND, dt, b0, thirty_one);
+  PolyUOp *inv = l2i_binary(ctx, POLY_OP_SUB, dt, thirty_one, bmod);
+  PolyUOp *b0u = l2i_bitcast(ctx, b0, POLY_UINT32);
+  PolyUOp *b1u = l2i_bitcast(ctx, b1, POLY_UINT32);
+  PolyUOp *high_nonzero = l2i_cmp(ctx, POLY_OP_CMPNE, b1u, l2i_const(ctx, POLY_UINT32, 0));
+  PolyUOp *wide = l2i_binary(
+      ctx, POLY_OP_OR, POLY_BOOL, high_nonzero,
+      l2i_not(ctx, l2i_cmp(ctx, POLY_OP_CMPLT, b0u, l2i_bitcast(ctx, thirty_two, POLY_UINT32)))
+  );
+  PolyUOp *too_wide = l2i_binary(
+      ctx, POLY_OP_OR, POLY_BOOL, high_nonzero,
+      l2i_not(ctx, l2i_cmp(ctx, POLY_OP_CMPLT, b0u, sixty_four))
+  );
+  PolyUOp *a0u = l2i_bitcast(ctx, a0, POLY_UINT32);
+  PolyUOp *a1u = l2i_bitcast(ctx, a1, POLY_UINT32);
+  PolyUOp *bmodu = l2i_bitcast(ctx, bmod, POLY_UINT32);
+  PolyUOp *invu = l2i_bitcast(ctx, inv, POLY_UINT32);
+  PolyUOp *oneu = l2i_bitcast(ctx, one, POLY_UINT32);
+
+  if (op == POLY_OP_SHL) {
+    PolyUOp *low = l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a0u, bmodu), dt);
+    PolyUOp *carry = l2i_binary(
+        ctx, POLY_OP_SHR, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, a0u, oneu), invu
+    );
+    PolyUOp *high = l2i_bitcast(
+        ctx,
+        l2i_binary(
+            ctx, POLY_OP_OR, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a1u, bmodu),
+            carry
+        ),
+        dt
+    );
+    return (L2IPair
+    ){l2i_where(ctx, dt, too_wide, zero, l2i_where(ctx, dt, wide, zero, low)),
+      l2i_where(ctx, dt, too_wide, zero, l2i_where(ctx, dt, wide, low, high))};
+  }
+
+  PolyUOp *carry = l2i_binary(
+      ctx, POLY_OP_SHL, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, a1u, oneu), invu
+  );
+  PolyUOp *low = l2i_bitcast(
+      ctx,
+      l2i_binary(
+          ctx, POLY_OP_OR, POLY_UINT32, l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, a0u, bmodu), carry
+      ),
+      dt
+  );
+  PolyUOp *high = l2i_binary(ctx, POLY_OP_SHR, dt, a1, bmod);
+  PolyUOp *sign =
+      poly_dtype_is_unsigned(dt) ? zero : l2i_binary(ctx, POLY_OP_SHR, dt, a1, thirty_one);
+  return (L2IPair
+  ){l2i_where(ctx, dt, too_wide, sign, l2i_where(ctx, dt, wide, high, low)),
+    l2i_where(ctx, dt, too_wide, sign, l2i_where(ctx, dt, wide, sign, high))};
+}
+
+static void l2i_unpack16(PolyCtx *ctx, PolyUOp *u, PolyUOp **lo, PolyUOp **hi) {
+  PolyUOp *v = l2i_bitcast(ctx, u, POLY_UINT32);
+  *lo = l2i_binary(ctx, POLY_OP_AND, POLY_UINT32, v, l2i_const(ctx, POLY_UINT32, 0xffff));
+  *hi = l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, v, l2i_const(ctx, POLY_UINT32, 16));
+}
+
+static L2IPair l2i_mul(
+    PolyCtx *ctx,
+    PolyDType dt,
+    PolyUOp *a0,
+    PolyUOp *a1,
+    PolyUOp *b0,
+    PolyUOp *b1
+) {
+  PolyUOp *a00 = NULL, *a01 = NULL, *b00 = NULL, *b01 = NULL;
+  l2i_unpack16(ctx, a0, &a00, &a01);
+  l2i_unpack16(ctx, b0, &b00, &b01);
+  PolyUOp *sixteen = l2i_const(ctx, POLY_UINT32, 16);
+  PolyUOp *p01 = l2i_binary(ctx, POLY_OP_MUL, POLY_UINT32, a00, b01);
+  PolyUOp *p10 = l2i_binary(ctx, POLY_OP_MUL, POLY_UINT32, a01, b00);
+  L2IPair mid = l2i_add(
+      ctx, dt, l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, p01, sixteen), dt),
+      l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, p01, sixteen), dt),
+      l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_SHL, POLY_UINT32, p10, sixteen), dt),
+      l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_SHR, POLY_UINT32, p10, sixteen), dt)
+  );
+  PolyUOp *low_product = l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_MUL, POLY_UINT32, a00, b00), dt);
+  PolyUOp *high_product = l2i_binary(
+      ctx, POLY_OP_ADD, dt,
+      l2i_binary(
+          ctx, POLY_OP_ADD, dt,
+          l2i_bitcast(ctx, l2i_binary(ctx, POLY_OP_MUL, POLY_UINT32, a01, b01), dt),
+          l2i_binary(ctx, POLY_OP_MUL, dt, a0, b1)
+      ),
+      l2i_binary(ctx, POLY_OP_MUL, dt, a1, b0)
+  );
+  return l2i_add(ctx, dt, mid.lo, mid.hi, low_product, high_product);
+}
+
+static PolyUOp *l2i_compare(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyUOp *a0,
+    PolyUOp *a1,
+    PolyUOp *b0,
+    PolyUOp *b1
+) {
+  if (op == POLY_OP_CMPEQ) {
+    return l2i_binary(
+        ctx, POLY_OP_AND, POLY_BOOL, l2i_cmp(ctx, POLY_OP_CMPEQ, a0, b0),
+        l2i_cmp(ctx, POLY_OP_CMPEQ, a1, b1)
+    );
+  }
+  if (op == POLY_OP_CMPNE) {
+    return l2i_binary(
+        ctx, POLY_OP_OR, POLY_BOOL, l2i_cmp(ctx, POLY_OP_CMPNE, a0, b0),
+        l2i_cmp(ctx, POLY_OP_CMPNE, a1, b1)
+    );
+  }
+  if (op != POLY_OP_CMPLT) return NULL;
+  PolyUOp *high_lt = l2i_cmp(ctx, POLY_OP_CMPLT, a1, b1);
+  PolyUOp *high_eq = l2i_cmp(ctx, POLY_OP_CMPEQ, a1, b1);
+  PolyUOp *low_lt = l2i_cmp(
+      ctx, POLY_OP_CMPLT, l2i_bitcast(ctx, a0, POLY_UINT32), l2i_bitcast(ctx, b0, POLY_UINT32)
+  );
+  return l2i_binary(
+      ctx, POLY_OP_OR, POLY_BOOL, high_lt, l2i_binary(ctx, POLY_OP_AND, POLY_BOOL, high_eq, low_lt)
+  );
+}
+
+static L2IPair l2i_divmod(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyDType dt,
+    PolyUOp *a0,
+    PolyUOp *a1,
+    PolyUOp *b0,
+    PolyUOp *b1
+) {
+  bool is_signed = !poly_dtype_is_unsigned(dt);
+  PolyUOp *a_negative = NULL, *b_negative = NULL;
+  if (is_signed) {
+    PolyUOp *zero = l2i_const(ctx, dt, 0);
+    a_negative = l2i_cmp(ctx, POLY_OP_CMPLT, a1, zero);
+    b_negative = l2i_cmp(ctx, POLY_OP_CMPLT, b1, zero);
+    a0 = l2i_bitcast(ctx, a0, POLY_UINT32);
+    a1 = l2i_bitcast(ctx, a1, POLY_UINT32);
+    b0 = l2i_bitcast(ctx, b0, POLY_UINT32);
+    b1 = l2i_bitcast(ctx, b1, POLY_UINT32);
+    L2IPair an = l2i_sub(
+        ctx, POLY_UINT32, l2i_const(ctx, POLY_UINT32, 0), l2i_const(ctx, POLY_UINT32, 0), a0, a1
+    );
+    L2IPair bn = l2i_sub(
+        ctx, POLY_UINT32, l2i_const(ctx, POLY_UINT32, 0), l2i_const(ctx, POLY_UINT32, 0), b0, b1
+    );
+    a0 = l2i_where(ctx, POLY_UINT32, a_negative, an.lo, a0);
+    a1 = l2i_where(ctx, POLY_UINT32, a_negative, an.hi, a1);
+    b0 = l2i_where(ctx, POLY_UINT32, b_negative, bn.lo, b0);
+    b1 = l2i_where(ctx, POLY_UINT32, b_negative, bn.hi, b1);
+  }
+
+  PolyUOp *zero = l2i_const(ctx, POLY_UINT32, 0);
+  PolyUOp *one = l2i_const(ctx, POLY_UINT32, 1);
+  L2IPair q = {zero, zero}, r = {zero, zero};
+  for (int i = 63; i >= 0; i--) {
+    r = l2i_shift(ctx, POLY_OP_SHL, POLY_UINT32, r.lo, r.hi, one, zero);
+    L2IPair shifted = l2i_shift(
+        ctx, POLY_OP_SHR, POLY_UINT32, a0, a1, l2i_const(ctx, POLY_UINT32, (uint32_t)i), zero
+    );
+    PolyUOp *incoming = l2i_binary(ctx, POLY_OP_AND, POLY_UINT32, shifted.lo, one);
+    r.lo = l2i_binary(ctx, POLY_OP_OR, POLY_UINT32, r.lo, incoming);
+    PolyUOp *take = l2i_not(ctx, l2i_compare(ctx, POLY_OP_CMPLT, r.lo, r.hi, b0, b1));
+    L2IPair diff = l2i_sub(ctx, POLY_UINT32, r.lo, r.hi, b0, b1);
+    PolyUOp *qbit = l2i_binary(
+        ctx, POLY_OP_SHL, POLY_UINT32, l2i_cast(ctx, take, POLY_UINT32),
+        l2i_const(ctx, POLY_UINT32, (uint32_t)(i % 32))
+    );
+    if (i < 32)
+      q.lo = l2i_binary(ctx, POLY_OP_OR, POLY_UINT32, q.lo, qbit);
+    else
+      q.hi = l2i_binary(ctx, POLY_OP_OR, POLY_UINT32, q.hi, qbit);
+    r.lo = l2i_where(ctx, POLY_UINT32, take, diff.lo, r.lo);
+    r.hi = l2i_where(ctx, POLY_UINT32, take, diff.hi, r.hi);
+  }
+
+  if (!is_signed) {
+    L2IPair ret = op == POLY_OP_CMOD ? r : q;
+    return (L2IPair){l2i_bitcast(ctx, ret.lo, dt), l2i_bitcast(ctx, ret.hi, dt)};
+  }
+
+  L2IPair nq = l2i_sub(ctx, POLY_UINT32, zero, zero, q.lo, q.hi);
+  L2IPair nr = l2i_sub(ctx, POLY_UINT32, zero, zero, r.lo, r.hi);
+  q = (L2IPair){l2i_bitcast(ctx, q.lo, dt), l2i_bitcast(ctx, q.hi, dt)};
+  r = (L2IPair){l2i_bitcast(ctx, r.lo, dt), l2i_bitcast(ctx, r.hi, dt)};
+  nq = (L2IPair){l2i_bitcast(ctx, nq.lo, dt), l2i_bitcast(ctx, nq.hi, dt)};
+  nr = (L2IPair){l2i_bitcast(ctx, nr.lo, dt), l2i_bitcast(ctx, nr.hi, dt)};
+  if (op == POLY_OP_CMOD)
+    return (L2IPair
+    ){l2i_where(ctx, dt, a_negative, nr.lo, r.lo), l2i_where(ctx, dt, a_negative, nr.hi, r.hi)};
+  PolyUOp *quotient_negative = l2i_binary(ctx, POLY_OP_XOR, POLY_BOOL, a_negative, b_negative);
+  return (L2IPair
+  ){l2i_where(ctx, dt, quotient_negative, nq.lo, q.lo),
+    l2i_where(ctx, dt, quotient_negative, nq.hi, q.hi)};
+}
+
+static L2IPair l2i_alu(PolyCtx *ctx, PolyOps op, PolyDType dt, PolyUOp **u, int n) {
+  PolyUOp *zero = l2i_const(ctx, dt, 0);
+  if (op == POLY_OP_NEG && n == 2) return l2i_sub(ctx, dt, zero, zero, u[0], u[1]);
+  if (op == POLY_OP_SHL || op == POLY_OP_SHR) {
+    if (n < 4) return (L2IPair){NULL, NULL};
+    return l2i_shift(ctx, op, dt, u[0], u[1], u[2], u[3]);
+  }
+  if (op == POLY_OP_ADD && n == 4) return l2i_add(ctx, dt, u[0], u[1], u[2], u[3]);
+  if (op == POLY_OP_SUB && n == 4) return l2i_sub(ctx, dt, u[0], u[1], u[2], u[3]);
+  if (op == POLY_OP_MUL && n == 4) return l2i_mul(ctx, dt, u[0], u[1], u[2], u[3]);
+  if ((op == POLY_OP_CDIV || op == POLY_OP_CMOD) && n == 4)
+    return l2i_divmod(ctx, op, dt, u[0], u[1], u[2], u[3]);
+  if ((op == POLY_OP_XOR || op == POLY_OP_OR || op == POLY_OP_AND) && n == 4) {
+    return (L2IPair){l2i_binary(ctx, op, dt, u[0], u[2]), l2i_binary(ctx, op, dt, u[1], u[3])};
+  }
+  if (op == POLY_OP_WHERE && n == 5) {
+    return (L2IPair){l2i_where(ctx, dt, u[0], u[1], u[3]), l2i_where(ctx, dt, u[0], u[2], u[4])};
+  }
+  if (op == POLY_OP_MAX && n == 4) {
+    PolyUOp *cond = l2i_compare(ctx, POLY_OP_CMPLT, u[0], u[1], u[2], u[3]);
+    return (L2IPair){l2i_where(ctx, dt, cond, u[2], u[0]), l2i_where(ctx, dt, cond, u[3], u[1])};
+  }
+  if (op == POLY_OP_BITCAST && n == 2) {
+    return (L2IPair){l2i_bitcast(ctx, u[0], dt), l2i_bitcast(ctx, u[1], dt)};
+  }
+  return (L2IPair){NULL, NULL};
+}
+
+static L2IPair l2i_cast_to_long(PolyCtx *ctx, PolyDType target, PolyUOp *src) {
+  PolyDType dt = l2i_dt(target);
+  PolyUOp *lo = l2i_cast(ctx, src, dt);
+  PolyUOp *zero_src = poly_dtype_is_float(src->dtype)
+                          ? poly_uop0(ctx, POLY_OP_CONST, src->dtype, poly_arg_float(0.0))
+                          : poly_uop0(ctx, POLY_OP_CONST, src->dtype, poly_arg_int(0));
+  PolyUOp *negative = l2i_cmp(ctx, POLY_OP_CMPLT, src, zero_src);
+  if (!poly_dtype_is_float(src->dtype)) {
+    return (L2IPair
+    ){lo, l2i_where(ctx, dt, negative, l2i_const(ctx, dt, UINT32_MAX), l2i_const(ctx, dt, 0))};
+  }
+
+  PolyUOp *scale = poly_uop0(ctx, POLY_OP_CONST, src->dtype, poly_arg_float(4294967296.0));
+  PolyUOp *high_float = l2i_binary(ctx, POLY_OP_FDIV, src->dtype, src, scale);
+  PolyUOp *lo_nonzero = l2i_cmp(ctx, POLY_OP_CMPNE, lo, l2i_const(ctx, dt, 0));
+  PolyUOp *adjust =
+      l2i_cast(ctx, l2i_binary(ctx, POLY_OP_AND, POLY_BOOL, negative, lo_nonzero), dt);
+  return (L2IPair){lo, l2i_binary(ctx, POLY_OP_SUB, dt, l2i_cast(ctx, high_float, dt), adjust)};
+}
+
+static PolyUOp *l2i_cast_from_long(PolyCtx *ctx, PolyDType target, PolyUOp *a0, PolyUOp *a1) {
+  if (!a0 || !a1) return NULL;
+  PolyDType dt = a0->dtype;
+  if (!poly_dtype_is_float(target)) return l2i_cast(ctx, l2i_bitcast(ctx, a0, POLY_UINT32), target);
+
+  PolyUOp *zero = l2i_const(ctx, dt, 0);
+  PolyUOp *minus_one = l2i_const(ctx, dt, UINT32_MAX);
+  PolyUOp *a0_nonnegative = l2i_not(ctx, l2i_cmp(ctx, POLY_OP_CMPLT, a0, zero));
+  PolyUOp *a0_negative = l2i_cmp(ctx, POLY_OP_CMPLT, a0, zero);
+  PolyUOp *small = l2i_binary(
+      ctx, POLY_OP_OR, POLY_BOOL,
+      l2i_binary(
+          ctx, POLY_OP_AND, POLY_BOOL, l2i_cmp(ctx, POLY_OP_CMPEQ, a1, zero), a0_nonnegative
+      ),
+      l2i_binary(
+          ctx, POLY_OP_AND, POLY_BOOL, l2i_cmp(ctx, POLY_OP_CMPEQ, a1, minus_one), a0_negative
+      )
+  );
+  PolyUOp *direct = l2i_cast(ctx, a0, target);
+  PolyUOp *scale = poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(4294967296.0));
+  PolyUOp *wide = l2i_binary(
+      ctx, POLY_OP_ADD, POLY_FLOAT32,
+      l2i_binary(ctx, POLY_OP_MUL, POLY_FLOAT32, l2i_cast(ctx, a1, POLY_FLOAT32), scale),
+      l2i_cast(ctx, l2i_bitcast(ctx, a0, POLY_UINT32), POLY_FLOAT32)
+  );
+  return l2i_where(ctx, target, small, direct, l2i_cast(ctx, wide, target));
+}
+
+static PolyUOp *rule_long_decomp(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {
+  (void)b;
+
+  /* INDEX consumes integer values even when the indexed buffer itself is not
+   * long.  Demand the representable 32-bit address value here so the ordinary
+   * lane-tagged long rules can lower its producer.  WGSL accepts i32/u32
+   * indexes; an address outside both domains remains an unsupported graph. */
+  if (root->op == POLY_OP_INDEX && root->n_src >= 2 && root->n_src <= 64) {
+    PolyUOp *src[64];
+    bool changed = false;
+    for (int i = 0; i < root->n_src; i++)
+      src[i] = root->src[i];
+    for (int i = 1; i < root->n_src; i++) {
+      PolyUOp *offset = root->src[i];
+      if (!offset || !l2i_is_long(offset->dtype)) continue;
+      int64_t vmin = 0, vmax = 0;
+      poly_uop_minmax(ctx, offset, &vmin, &vmax);
+      PolyDType target;
+      if (vmin >= INT32_MIN && vmax <= INT32_MAX)
+        target = POLY_INT32;
+      else if (vmin >= 0 && (uint64_t)vmax <= UINT32_MAX)
+        target = POLY_UINT32;
+      else
+        return NULL;
+      PolyDType lane_dtype = l2i_dt(offset->dtype);
+      PolyUOp *lo = l2i_cast(ctx, l2i_rtag(ctx, offset, 0), lane_dtype);
+      PolyUOp *hi = l2i_cast(ctx, l2i_rtag(ctx, offset, 1), lane_dtype);
+      src[i] = l2i_finish_value(ctx, offset, l2i_cast_from_long(ctx, target, lo, hi));
+      if (!src[i]) return NULL;
+      changed = true;
+    }
+    if (changed)
+      return l2i_clone(
+          ctx, root->op, root->dtype, src, root->n_src, root->arg, root->tag, root->tag_arg
+      );
+  }
+
+  if (l2i_is_long_ptr(root->dtype) &&
+      (root->op == POLY_OP_PARAM || root->op == POLY_OP_BUFFER || root->op == POLY_OP_INDEX)) {
+    int64_t size = root->dtype.ptr_size;
+    if (size > 0) {
+      if (size > INT64_MAX / 2) return NULL;
+      size *= 2;
+    }
+    PolyDType dtype = poly_dtype_ptr(l2i_dt(root->dtype), size, root->dtype.addrspace);
+    dtype.vcount = root->dtype.vcount;
+    return l2i_replace_dtype(ctx, root, dtype);
+  }
+
+  if (root->op == POLY_OP_STORE && root->n_src >= 2 && l2i_is_long(root->src[1]->dtype) &&
+      !l2i_lane(root->src[1], NULL, NULL)) {
+    if (root->n_src > 64) return NULL;
+    PolyUOp *idx0 = l2i_reindex(ctx, root->src[0], 0);
+    PolyUOp *idx1 = l2i_reindex(ctx, root->src[0], 1);
+    PolyUOp *val0 = l2i_rtag(ctx, root->src[1], 0);
+    PolyUOp *val1 = l2i_rtag(ctx, root->src[1], 1);
+    if (!idx0 || !idx1 || !val0 || !val1) return NULL;
+    PolyUOp *src0[64], *src1[64];
+    for (int i = 0; i < root->n_src; i++)
+      src0[i] = src1[i] = root->src[i];
+    src0[0] = idx0;
+    src0[1] = val0;
+    src1[0] = idx1;
+    src1[1] = val1;
+    PolyUOp *stores[2] = {
+        l2i_clone(
+            ctx, root->op, root->dtype, src0, root->n_src, root->arg, root->tag, root->tag_arg
+        ),
+        l2i_clone(
+            ctx, root->op, root->dtype, src1, root->n_src, root->arg, root->tag, root->tag_arg
+        ),
+    };
+    return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, 2, poly_arg_none());
+  }
+
+  if (poly_opset_has(POLY_GROUP_COMPARISON, root->op) && root->n_src == 2 &&
+      l2i_is_long(root->src[0]->dtype) && l2i_is_long(root->src[1]->dtype)) {
+    PolyDType dt = l2i_dt(root->src[0]->dtype);
+    PolyUOp *a0 = l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 0), dt);
+    PolyUOp *a1 = l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 1), dt);
+    PolyUOp *b0 = l2i_cast(ctx, l2i_rtag(ctx, root->src[1], 0), dt);
+    PolyUOp *b1 = l2i_cast(ctx, l2i_rtag(ctx, root->src[1], 1), dt);
+    return l2i_finish_value(ctx, root, l2i_compare(ctx, root->op, a0, a1, b0, b1));
+  }
+
+  if (root->op == POLY_OP_CAST && root->n_src == 1 && !l2i_is_long(root->dtype) &&
+      l2i_is_long(root->src[0]->dtype) && !l2i_lane(root->src[0], NULL, NULL)) {
+    PolyDType dt = l2i_dt(root->src[0]->dtype);
+    PolyUOp *a0 = l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 0), dt);
+    PolyUOp *a1 = l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 1), dt);
+    return l2i_finish_value(ctx, root, l2i_cast_from_long(ctx, root->dtype, a0, a1));
+  }
+
+  int lane = 0;
+  if (!l2i_is_long(root->dtype) || !l2i_lane(root, &lane, NULL)) return NULL;
+  PolyDType dt = l2i_dt(root->dtype);
+
+  if (root->op == POLY_OP_CONST && root->arg.kind == POLY_ARG_INT) {
+    uint64_t bits = (uint64_t)root->arg.i;
+    PolyUOp *value = l2i_const(ctx, dt, lane ? (uint32_t)(bits >> 32) : (uint32_t)bits);
+    return l2i_finish_lane(ctx, root, value);
+  }
+
+  if (root->op == POLY_OP_LOAD && root->n_src >= 1 && root->n_src <= 64) {
+    PolyUOp *src[64];
+    for (int i = 0; i < root->n_src; i++) {
+      src[i] = (i > 0 && l2i_is_long(root->src[i]->dtype)) ? l2i_rtag(ctx, root->src[i], lane)
+                                                           : root->src[i];
+    }
+    src[0] = l2i_reindex(ctx, root->src[0], lane);
+    if (!src[0]) return NULL;
+    PolyUOp *value = poly_uop(ctx, POLY_OP_LOAD, dt, src, root->n_src, root->arg);
+    return l2i_finish_lane(ctx, root, value);
+  }
+
+  if (root->op == POLY_OP_INDEX) {
+    PolyUOp *value = l2i_reindex(ctx, root, lane);
+    if (!value) return NULL;
+    value = l2i_replace_dtype(ctx, value, dt);
+    return l2i_finish_lane(ctx, root, value);
+  }
+
+  if (root->op == POLY_OP_CAST && root->n_src == 1) {
+    L2IPair pair = {NULL, NULL};
+    if (l2i_is_long(root->src[0]->dtype)) {
+      PolyDType src_dt = l2i_dt(root->src[0]->dtype);
+      pair.lo = l2i_bitcast(ctx, l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 0), src_dt), dt);
+      pair.hi = l2i_bitcast(ctx, l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 1), src_dt), dt);
+    } else {
+      pair = l2i_cast_to_long(ctx, root->dtype, root->src[0]);
+    }
+    return l2i_finish_lane(ctx, root, lane ? pair.hi : pair.lo);
+  }
+
+  if ((root->op == POLY_OP_SHL || root->op == POLY_OP_SHR) && root->n_src == 2) {
+    L2IPair value = {NULL, NULL}, shift = {NULL, NULL};
+    if (l2i_is_long(root->src[0]->dtype)) {
+      value.lo = l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 0), dt);
+      value.hi = l2i_cast(ctx, l2i_rtag(ctx, root->src[0], 1), dt);
+    } else {
+      value = l2i_cast_to_long(ctx, root->dtype, root->src[0]);
+    }
+    if (l2i_is_long(root->src[1]->dtype)) {
+      shift.lo = l2i_cast(ctx, l2i_rtag(ctx, root->src[1], 0), dt);
+      shift.hi = l2i_cast(ctx, l2i_rtag(ctx, root->src[1], 1), dt);
+    } else {
+      shift.lo = l2i_cast(ctx, root->src[1], dt);
+      shift.hi = l2i_const(ctx, dt, 0);
+    }
+    L2IPair pair = l2i_shift(ctx, root->op, dt, value.lo, value.hi, shift.lo, shift.hi);
+    return l2i_finish_lane(ctx, root, lane ? pair.hi : pair.lo);
+  }
+
+  if (poly_opset_has(POLY_GROUP_ALU, root->op) || root->op == POLY_OP_BITCAST) {
+    PolyUOp *flat[16];
+    int n_flat = 0;
+    for (int i = 0; i < root->n_src; i++) {
+      if (l2i_is_long(root->src[i]->dtype)) {
+        if (n_flat + 2 > 16) return NULL;
+        flat[n_flat++] = l2i_cast(ctx, l2i_rtag(ctx, root->src[i], 0), dt);
+        flat[n_flat++] = l2i_cast(ctx, l2i_rtag(ctx, root->src[i], 1), dt);
+      } else {
+        if (n_flat + 1 > 16) return NULL;
+        flat[n_flat++] = root->src[i];
+      }
+    }
+    L2IPair pair = l2i_alu(ctx, root->op, dt, flat, n_flat);
+    return l2i_finish_lane(ctx, root, lane ? pair.hi : pair.lo);
+  }
+
+  return NULL;
+}
+
+static _Thread_local PolyPatternMatcher *g_pm_long_decomp = NULL;
+
+static PolyPatternMatcher *poly_pm_long_decomp(void) {
+  if (g_pm_long_decomp) return g_pm_long_decomp;
+  PolyRule rule = {poly_pat_any("x"), rule_long_decomp};
+  g_pm_long_decomp = poly_pm_thread_cache(poly_pm_new(&rule, 1));
+  return g_pm_long_decomp;
+}
+
+static PolyUOp *poly_decompose_int64(PolyCtx *ctx, PolyUOp *sink) {
+  uintptr_t previous_token = g_l2i_active_token;
+  uint64_t previous_generation = g_l2i_active_generation;
+  unsigned char token = 0;
+  uint64_t generation = ++g_l2i_generation_counter;
+  if (!generation) generation = ++g_l2i_generation_counter;
+  g_l2i_active_token = (uintptr_t)&token;
+  g_l2i_active_generation = generation;
+  PolyUOp *rewritten = poly_graph_rewrite_ex(ctx, sink, poly_pm_long_decomp(), true);
+  int n = 0;
+  PolyUOp **topo = rewritten ? poly_toposort(ctx, rewritten, &n) : NULL;
+  for (int i = 0; topo && i < n; i++) {
+    if (l2i_lane(topo[i], NULL, NULL)) {
+      rewritten = NULL;
+      break;
+    }
+  }
+  g_l2i_active_token = previous_token;
+  g_l2i_active_generation = previous_generation;
+  return rewritten;
+}
+
 /*
  * rule_store_dtype_cast — Insert CAST when STORE value dtype mismatches buffer dtype.
  * STORE(INDEX(ptr<T>), value<U>) → STORE(INDEX(ptr<T>), CAST<T>(value)) when T != U.
@@ -3204,7 +3913,9 @@ static PolyPatternMatcher *poly_pm_decomp_with_caps(bool has_mulacc, bool has_th
     rules[n++] = (PolyRule){poly_pat_ops(store_set, NULL, 0, NULL), rule_store_dtype_cast};
   }
 
-  *target = poly_pm_new(rules, n);
+  PolyPatternMatcher *late = poly_pm_new(rules, n);
+  *target = poly_pm_thread_cache(poly_pm_concat(poly_symbolic_simple(), late));
+  poly_pm_destroy(late);
   return *target;
 }
 
@@ -4201,7 +4912,8 @@ PolyPatternMatcher *poly_pm_bf16_non_native(void) {
       {poly_pat_ops(cast_set, NULL, 0, NULL), rule_bf16_cast_via_f32},
   };
 
-  g_pm_bf16_non_native = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_bf16_non_native =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_bf16_non_native;
 }
 
@@ -4215,28 +4927,39 @@ PolyPatternMatcher *poly_pm_c_renderer_extra(void) {
       {poly_pat_ops(cast_set, NULL, 0, NULL), rule_c_renderer_cast_via_f32},
   };
   PolyPatternMatcher *c_pm = poly_pm_new(c_rules, (int)(sizeof(c_rules) / sizeof(c_rules[0])));
-  g_pm_c_renderer_extra = poly_pm_concat(c_pm, poly_pm_bf16_non_native());
+  g_pm_c_renderer_extra = poly_pm_thread_cache(poly_pm_concat(c_pm, poly_pm_bf16_non_native()));
   poly_pm_destroy(c_pm);
   return g_pm_c_renderer_extra;
 }
 
-/* Build the pm_transcendental PatternMatcher */
+/* Build the renderer-capability-specific transcendental matcher. Pinned
+ * tinygrad only decomposes an operation absent from renderer.code_for_op. */
+static _Thread_local PolyPatternMatcher *g_pm_transcendental_caps[2][2][2] = {0};
 
-static _Thread_local PolyPatternMatcher *g_pm_transcendental = NULL;
-
-static PolyPatternMatcher *poly_pm_transcendental(void) {
-  if (g_pm_transcendental) return g_pm_transcendental;
+static PolyPatternMatcher *poly_pm_transcendental(PolyRendererCaps caps) {
+  PolyPatternMatcher **target =
+      &g_pm_transcendental_caps[caps.has_exp2 ? 1 : 0][caps.has_log2 ? 1 : 0][caps.has_sin ? 1 : 0];
+  if (*target) return *target;
 
   PolyOpSet exp2_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_EXP2);
   PolyOpSet log2_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_LOG2);
   PolyOpSet sin_set = poly_opset_add((PolyOpSet){{0, 0}}, POLY_OP_SIN);
-  PolyRule rules[] = {
-      {poly_pat_ops(exp2_set, NULL, 0, NULL), rule_decomp_exp2},
-      {poly_pat_ops(log2_set, NULL, 0, NULL), rule_decomp_log2},
-      {poly_pat_ops(sin_set, NULL, 0, NULL), rule_decomp_sin},
-  };
-  g_pm_transcendental = poly_pm_new(rules, sizeof(rules) / sizeof(rules[0]));
-  return g_pm_transcendental;
+  PolyRule rules[3];
+  int n = 0;
+  if (!caps.has_exp2)
+    rules[n++] = (PolyRule){poly_pat_ops(exp2_set, NULL, 0, NULL), rule_decomp_exp2};
+  if (!caps.has_log2)
+    rules[n++] = (PolyRule){poly_pat_ops(log2_set, NULL, 0, NULL), rule_decomp_log2};
+  if (!caps.has_sin) rules[n++] = (PolyRule){poly_pat_ops(sin_set, NULL, 0, NULL), rule_decomp_sin};
+
+  if (n == 0) {
+    *target = poly_symbolic_simple();
+    return *target;
+  }
+  PolyPatternMatcher *transcendental = poly_pm_new(rules, n);
+  *target = poly_pm_thread_cache(poly_pm_concat(poly_symbolic_simple(), transcendental));
+  poly_pm_destroy(transcendental);
+  return *target;
 }
 
 /* Expander (tinygrad codegen/late/expander.py) */
@@ -4776,7 +5499,8 @@ static PolyPatternMatcher *poly_pm_pre_expander(void) {
       {poly_pat_op(POLY_OP_REDUCE, NULL, 0, "x"), rule_fix_reduce_unroll},
       {poly_pat_op(POLY_OP_STORE, NULL, 0, "x"), rule_fix_store_unroll},
   };
-  g_pm_pre_expander = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_pre_expander =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_pre_expander;
 }
 
@@ -4791,7 +5515,7 @@ static PolyPatternMatcher *poly_pm_expander(void) {
   exp_ops = poly_opset_add(exp_ops, POLY_OP_LOAD);
   exp_ops = poly_opset_add(exp_ops, POLY_OP_STORE);
   exp_ops = poly_opset_add(exp_ops, POLY_OP_INDEX);
-  exp_ops = poly_opset_add(exp_ops, POLY_OP_BUFFERIZE);
+  exp_ops = poly_opset_add(exp_ops, POLY_OP_STAGE);
   exp_ops = poly_opset_add(exp_ops, POLY_OP_VECTORIZE);
   exp_ops = poly_opset_add(exp_ops, POLY_OP_REDUCE);
   exp_ops = poly_opset_add(exp_ops, POLY_OP_END);
@@ -4809,7 +5533,7 @@ static PolyPatternMatcher *poly_pm_expander(void) {
       {poly_pat_op(POLY_OP_CONTRACT, NULL, 0, "con"), do_contract},
       {poly_pat_op(POLY_OP_UNROLL, NULL, 0, "u"), rule_empty_unroll},
   };
-  g_pm_expander = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_expander = poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_expander;
 }
 
@@ -4856,7 +5580,8 @@ static PolyPatternMatcher *poly_pm_add_loads(void) {
        )),
        rule_remove_load_from_store},
   };
-  g_pm_add_loads = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_add_loads =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_add_loads;
 }
 
@@ -5064,9 +5789,8 @@ static PolyUOp *rule_expand_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings
 
   PolyUOp *vec = idx->src[1];
   int cnt = buf_vec->n_src;
-  if (cnt > 128) return NULL;
-
-  PolyUOp *elems[128];
+  PolyUOp **elems = calloc((size_t)cnt, sizeof(*elems));
+  if (!elems) return NULL;
   for (int i = 0; i < cnt; i++) {
     PolyUOp *gi = make_gep_lane(ctx, vec, i);
     /* Build INDEX(buf, gi) with ptr output (same as buf->dtype) */
@@ -5078,7 +5802,9 @@ static PolyUOp *rule_expand_index(PolyCtx *ctx, PolyUOp *idx, const PolyBindings
       idx_srcs[ns++] = idx->src[j];
     elems[i] = poly_uop(ctx, POLY_OP_INDEX, buf->dtype, idx_srcs, ns, idx->arg);
   }
-  return poly_uop(ctx, POLY_OP_STACK, buf->dtype, elems, cnt, poly_arg_none());
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_STACK, buf->dtype, elems, cnt, poly_arg_none());
+  free(elems);
+  return ret;
 }
 
 /* fold_expanded_index (tinygrad devectorizer.py:68-104):
@@ -5110,7 +5836,21 @@ static PolyUOp *rule_fold_expanded_index(PolyCtx *ctx, PolyUOp *midx, const Poly
     int64_t offset;
     int orig_idx;
   } OffsetEntry;
-  OffsetEntry entries[128];
+  OffsetEntry *entries = calloc((size_t)n, sizeof(*entries));
+  int64_t *idxs = malloc((size_t)n * sizeof(*idxs));
+  bool *used = calloc((size_t)n, sizeof(*used));
+  PolyUOp **ret_srcs = calloc((size_t)n, sizeof(*ret_srcs));
+  int *group = malloc((size_t)n * sizeof(*group));
+  int64_t *group_offsets = malloc((size_t)n * sizeof(*group_offsets));
+  if (!entries || !idxs || !used || !ret_srcs || !group || !group_offsets) {
+    free(entries);
+    free(idxs);
+    free(used);
+    free(ret_srcs);
+    free(group);
+    free(group_offsets);
+    return NULL;
+  }
   for (int i = 0; i < n; i++) {
     PolyUOp *idx_expr = midx->src[i]->src[1];
     entries[i].orig_idx = i;
@@ -5130,22 +5870,17 @@ static PolyUOp *rule_fold_expanded_index(PolyCtx *ctx, PolyUOp *midx, const Poly
 
   /* Group entries by root_src, then find contiguous offset sequences */
   /* Simple approach: group entries with same root pointer, sort by offset, find contiguous runs */
-  PolyUOp *ret_srcs[128];
   int n_ret = 0;
-  int64_t idxs[128]; /* remap: original lane → position in PTRCAT output */
   for (int i = 0; i < n; i++)
     idxs[i] = -1;
   int global_offset = 0;
 
-  bool used[128];
   for (int i = 0; i < n; i++)
     used[i] = false;
 
   for (int i = 0; i < n; i++) {
     if (used[i]) continue;
     /* Collect all entries with same root */
-    int group[128];
-    int64_t group_offsets[128];
     int ng = 0;
     for (int j = i; j < n; j++) {
       if (used[j]) continue;
@@ -5193,18 +5928,41 @@ static PolyUOp *rule_fold_expanded_index(PolyCtx *ctx, PolyUOp *midx, const Poly
 
   /* Verify all lanes mapped */
   for (int i = 0; i < n; i++)
-    if (idxs[i] < 0) return NULL;
+    if (idxs[i] < 0) {
+      free(entries);
+      free(idxs);
+      free(used);
+      free(ret_srcs);
+      free(group);
+      free(group_offsets);
+      return NULL;
+    }
 
   /* Build PTRCAT */
+  PolyUOp *out = NULL;
   if (n_ret == 1) {
-    return poly_uop1(ctx, POLY_OP_GEP, midx->dtype, ret_srcs[0], poly_arg_int_tuple_local(idxs, n));
+    out = poly_uop1(ctx, POLY_OP_GEP, midx->dtype, ret_srcs[0], poly_arg_int_tuple_local(idxs, n));
+    free(entries);
+    free(idxs);
+    free(used);
+    free(ret_srcs);
+    free(group);
+    free(group_offsets);
+    return out;
   }
   PolyDType ptrcat_dt = buf->dtype;
   ptrcat_dt.vcount = (uint16_t)global_offset;
   PolyUOp *ptrcat = poly_uop(ctx, POLY_OP_PTRCAT, ptrcat_dt, ret_srcs, n_ret, poly_arg_none());
 
   /* Apply GEP remap */
-  return poly_uop1(ctx, POLY_OP_GEP, midx->dtype, ptrcat, poly_arg_int_tuple_local(idxs, n));
+  out = poly_uop1(ctx, POLY_OP_GEP, midx->dtype, ptrcat, poly_arg_int_tuple_local(idxs, n));
+  free(entries);
+  free(idxs);
+  free(used);
+  free(ret_srcs);
+  free(group);
+  free(group_offsets);
+  return out;
 }
 
 /* GEP after LOAD (tinygrad devectorizer.py:127-128):
@@ -5237,14 +5995,19 @@ static PolyUOp *rule_gep_on_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings
   if (!gep || gep->op != POLY_OP_GEP || gep->n_src < 1) return NULL;
   if (gep->arg.kind != POLY_ARG_INT_TUPLE || gep->arg.int_tuple.n <= 0) return NULL;
   int gn = gep->arg.int_tuple.n;
-  if (gn > 128) return NULL;
   /* Tinygrad's gep_on_store sorts by the original GEP offsets and keeps the
    * source positions, which handles arbitrary offsets like (4,) on tail stores. */
   typedef struct {
     int64_t key;
     int64_t pos;
   } GEPInvPair;
-  GEPInvPair pairs[128];
+  GEPInvPair *pairs = malloc((size_t)gn * sizeof(*pairs));
+  int64_t *new_arg = malloc((size_t)gn * sizeof(*new_arg));
+  if (!pairs || !new_arg) {
+    free(pairs);
+    free(new_arg);
+    return NULL;
+  }
   for (int i = 0; i < gn; i++) {
     pairs[i].key = gep->arg.int_tuple.vals[i];
     pairs[i].pos = i;
@@ -5258,7 +6021,6 @@ static PolyUOp *rule_gep_on_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings
       }
     }
   }
-  int64_t new_arg[128];
   for (int i = 0; i < gn; i++)
     new_arg[i] = pairs[i].pos;
   PolyUOp *st_data = sto->src[1];
@@ -5266,6 +6028,8 @@ static PolyUOp *rule_gep_on_store(PolyCtx *ctx, PolyUOp *sto, const PolyBindings
       ctx, POLY_OP_GEP, dtype_for_gep_result(st_data->dtype, gn), st_data,
       poly_arg_int_tuple_local(new_arg, gn)
   );
+  free(pairs);
+  free(new_arg);
   PolyUOp *st_srcs[64];
   int ns = 0;
   st_srcs[ns++] = gep->src[0];
@@ -5284,10 +6048,11 @@ static PolyUOp *rule_ptrcat_after_load(PolyCtx *ctx, PolyUOp *ld, const PolyBind
   PolyUOp *cat = ld->src[0];
   if (!cat || cat->op != POLY_OP_PTRCAT || cat->n_src <= 0) return NULL;
   int total_count = 0;
-  PolyUOp *loads[128];
+  PolyUOp **loads = calloc((size_t)cat->n_src, sizeof(*loads));
+  if (!loads) return NULL;
   int nl = 0;
   PolyDType sdt = poly_dtype_scalar(ld->dtype);
-  for (int i = 0; i < cat->n_src && nl < 128; i++) {
+  for (int i = 0; i < cat->n_src; i++) {
     PolyUOp *ptr = cat->src[i];
     int ptr_count = poly_ptr_lane_count(ptr->dtype);
     if (ptr_count <= 0) ptr_count = 1;
@@ -5301,7 +6066,9 @@ static PolyUOp *rule_ptrcat_after_load(PolyCtx *ctx, PolyUOp *ld, const PolyBind
     total_count += ptr_count;
   }
   PolyDType cat_dt = poly_dtype_vec(sdt, total_count);
-  return poly_uop(ctx, POLY_OP_VCAT, cat_dt, loads, nl, poly_arg_none());
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_VCAT, cat_dt, loads, nl, poly_arg_none());
+  free(loads);
+  return ret;
 }
 
 /* PTRCAT after STORE (tinygrad devectorizer.py:106-113):
@@ -5313,9 +6080,10 @@ static PolyUOp *rule_ptrcat_after_store(PolyCtx *ctx, PolyUOp *sto, const PolyBi
   if (!cat || cat->op != POLY_OP_PTRCAT || cat->n_src <= 0) return NULL;
   PolyUOp *data = sto->src[1];
   int offset = 0;
-  PolyUOp *stores[128];
+  PolyUOp **stores = calloc((size_t)cat->n_src, sizeof(*stores));
+  if (!stores) return NULL;
   int ns_out = 0;
-  for (int i = 0; i < cat->n_src && ns_out < 128; i++) {
+  for (int i = 0; i < cat->n_src; i++) {
     PolyUOp *ptr = cat->src[i];
     int ptr_count = poly_ptr_lane_count(ptr->dtype);
     if (ptr_count <= 0) ptr_count = 1;
@@ -5335,7 +6103,9 @@ static PolyUOp *rule_ptrcat_after_store(PolyCtx *ctx, PolyUOp *sto, const PolyBi
     stores[ns_out++] = poly_uop(ctx, POLY_OP_STORE, sto->dtype, st_srcs, ns, sto->arg);
     offset += ptr_count;
   }
-  return poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, ns_out, poly_arg_none());
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_GROUP, POLY_VOID, stores, ns_out, poly_arg_none());
+  free(stores);
+  return ret;
 }
 
 static bool codegen_foldable_buffer_dtype(PolyUOp *buf) {
@@ -5514,7 +6284,8 @@ static PolyPatternMatcher *poly_pm_load_store_folding(void) {
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "ls")), rule_split_load_store, "split_load_store_load"},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "ls")), rule_split_load_store, "split_load_store_store"},
   };
-  g_pm_load_store_folding = poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_load_store_folding =
+      poly_pm_thread_cache(poly_pm_new_named(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_load_store_folding;
 }
 
@@ -5677,7 +6448,8 @@ static PolyPatternMatcher *poly_pm_split_ends(void) {
       {poly_pat_op(POLY_OP_SINK, NULL, 0, "sink"), rule_merge_sibling_ends},
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_END, NULL, 0, "end")), rule_split_ends},
   };
-  g_pm_split_ends = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_split_ends =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_split_ends;
 }
 
@@ -5822,10 +6594,11 @@ static PolyUOp *rule_bool_and_to_scalarized_vector(
   return rule_no_vectorized_alu(ctx, alu, b);
 }
 
-/* pm_move_where_on_load (tinygrad uop/symbolic.py line 375-390) * WHERE(cond, LOAD(INDEX(buf,
- * idx)), CONST(0)) → LOAD(INDEX(buf, idx, cond)) Moves validity condition into INDEX gate so
- * renderers can emit conditional loads. Without this, unconditional LOAD on out-of-bounds PAD
- * indices SEGVs in JIT.
+/* pm_move_where_on_load (tinygrad uop/symbolic.py:where_on_load).
+ * WHERE(cond, LOAD(INDEX(buf, idx)), CONST(0))
+ *   -> LOAD(INDEX(buf, idx), CONST(0), cond)
+ * Moves validity to the LOAD gate. Without this, an unconditional LOAD on an
+ * out-of-bounds PAD index can fault in a native backend.
  *
  * Guard: only move conditions that are pure index math (no LOAD in subtree).
  * PAD bounds checks (CMPLT/AND of RANGE/CONST) pass; data-dependent conditions
@@ -5880,11 +6653,12 @@ static bool clause_indexes_subset_of_index_graph(PolyCtx *ctx, PolyUOp *clause, 
 }
 
 /* Port of tinygrad uop/symbolic.py:where_on_load. Move only the safe AND
- * clauses into INDEX.valid and keep the residual clauses outside as WHERE. */
+ * clauses into LOAD.valid and keep the residual clauses outside as WHERE. */
 static PolyUOp *move_where_clauses_into_index(
     PolyCtx *ctx,
     PolyUOp *cond,
     PolyUOp *idx,
+    PolyUOp *existing_load_gate,
     bool has_load,
     PolyUOp *zero,
     PolyDType out_dtype,
@@ -5896,9 +6670,8 @@ static PolyUOp *move_where_clauses_into_index(
   PolyUOp *keep[128];
   PolyUOp *idx_ranges[64];
 
-  PolyUOp *load_valid = (idx->n_src >= 3 && codegen_is_bool_uop(idx->src[2]))
-                             ? idx->src[2]
-                             : poly_const_typed(ctx, POLY_BOOL, 1.0);
+  PolyUOp *load_valid =
+      existing_load_gate ? existing_load_gate : poly_const_typed(ctx, POLY_BOOL, 1.0);
   int n_where = split_uop_and(cond, where_clauses, 128);
   int n_load = split_uop_and(load_valid, load_clauses, 128);
   PolyUOpCache *cache = poly_uop_cache_new();
@@ -5926,17 +6699,14 @@ static PolyUOp *move_where_clauses_into_index(
   PolyUOp *new_valid = and_all_clauses(ctx, moved, n_moved, load_valid);
   PolyUOp *base = NULL;
   if (has_load) {
-    /* Already-loaded patterns can become a real gated LOAD immediately. Pre-load
-     * INDEX patterns stay in tinygrad's weakint invalid-gate form and are lowered
-     * later by pm_lower_index_dtype-style cleanup. */
-    PolyUOp *new_srcs[3] = {idx->src[0], idx->src[1], new_valid};
-    PolyUOp *gated_idx = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, new_srcs, 3, idx->arg);
-    PolyUOp *load_srcs[2] = {gated_idx, zero};
-    base = poly_uop(ctx, POLY_OP_LOAD, out_dtype, load_srcs, 2, load_arg);
+    /* Pinned tinygrad/uop/spec.py:73-77 keeps every INDEX coordinate integer;
+     * LOAD carries its validity predicate as src[2]. */
+    PolyUOp *load_srcs[3] = {idx, zero, new_valid};
+    base = poly_uop(ctx, POLY_OP_LOAD, out_dtype, load_srcs, 3, load_arg);
   } else {
     /* Tinygrad keeps pm_move_where_on_load in the weakint index domain:
      *   INDEX(buf, WHERE(valid, idx, Invalid))
-     * pm_lower_index_dtype then lowers this to INDEX(buf, idx, valid). */
+     * The late gater moves validity to LOAD/STORE after index-dtype lowering. */
     PolyUOp *invalid = poly_uop0(ctx, POLY_OP_CONST, idx->src[1]->dtype, poly_arg_invalid());
     PolyUOp *index_expr = poly_uop3(
         ctx, POLY_OP_WHERE, idx->src[1]->dtype, new_valid, idx->src[1], invalid, poly_arg_none()
@@ -5979,7 +6749,9 @@ static PolyUOp *rule_where_on_load(PolyCtx *ctx, PolyUOp *w, const PolyBindings 
    * false branch. PAD/triu masks use range/index math and still move. */
   if (uop_tree_contains_load(cond) || uop_tree_indexes_buffer(cond, idx->src[0])) return NULL;
   return move_where_clauses_into_index(
-      ctx, cond, idx, has_load, false_val, has_load ? true_val->dtype : idx->dtype,
+      ctx, cond, idx,
+      has_load && true_val->n_src >= 3 ? true_val->src[2] : NULL,
+      has_load, false_val, has_load ? true_val->dtype : idx->dtype,
       has_load ? true_val->arg : poly_arg_none()
   );
 }
@@ -6013,7 +6785,9 @@ static PolyUOp *rule_where_on_load_rev(PolyCtx *ctx, PolyUOp *w, const PolyBindi
       ctx, POLY_OP_CMPNE, cond->dtype, cond, poly_const_like_bool(ctx, cond, true), poly_arg_none()
   );
   return move_where_clauses_into_index(
-      ctx, neg_cond, idx, has_load, true_val, has_load ? false_val->dtype : idx->dtype,
+      ctx, neg_cond, idx,
+      has_load && false_val->n_src >= 3 ? false_val->src[2] : NULL,
+      has_load, true_val, has_load ? false_val->dtype : idx->dtype,
       has_load ? false_val->arg : poly_arg_none()
   );
 }
@@ -6025,18 +6799,8 @@ static PolyPatternMatcher *poly_pm_move_where_on_load(void) {
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_on_load},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_on_load_rev},
   };
-  g_pm_move_where_on_load = poly_pm_new(rules, 2);
+  g_pm_move_where_on_load = poly_pm_thread_cache(poly_pm_new(rules, 2));
   return g_pm_move_where_on_load;
-}
-
-/* INDEX(buf, idx, true) → INDEX(buf, idx) — drop unconditional validity gate */
-static PolyUOp *rule_drop_true_gate(PolyCtx *ctx, PolyUOp *idx, const PolyBindings *b) {
-  (void)b;
-  if (idx->op != POLY_OP_INDEX || idx->n_src < 3) return NULL;
-  PolyUOp *gate = idx->src[2];
-  if (gate->op != POLY_OP_CONST || !poly_dtype_is_bool(gate->dtype)) return NULL;
-  if (gate->arg.kind != POLY_ARG_INT || gate->arg.i != 1) return NULL;
-  return poly_uop2(ctx, POLY_OP_INDEX, idx->dtype, idx->src[0], idx->src[1], idx->arg);
 }
 
 /* no_vectorized_buf: scalarize register/local buffers with vector dtype.
@@ -6235,14 +6999,10 @@ static PolyPatternMatcher *poly_pm_devectorize(void) {
   rules[n++] = (PolyRule
   ){poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_no_vectorized_index};
 
-  /* 4. Drop true gate from INDEX */
-  rules[n++] = (PolyRule
-  ){poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_drop_true_gate};
-
-  /* 5. VECTORIZE(single) → unwrap */
+  /* 4. VECTORIZE(single) → unwrap */
   rules[n++] = (PolyRule){poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single};
 
-  g_pm_devectorize = poly_pm_new(rules, n);
+  g_pm_devectorize = poly_pm_thread_cache(poly_pm_new(rules, n));
   return g_pm_devectorize;
 }
 
@@ -6734,7 +7494,8 @@ static PolyPatternMatcher *poly_pm_full_scalar_load_runs(void) {
       {poly_pat_op(POLY_OP_LOAD, NULL, 0, "u"), rule_replace_full_scalar_load_run},
       {poly_pat_op(POLY_OP_GEP, NULL, 0, "u"), rule_replace_full_scalar_load_run},
   };
-  g_pm_full_scalar_load_runs = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_full_scalar_load_runs =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_full_scalar_load_runs;
 }
 
@@ -6914,9 +7675,6 @@ static PolyUOp *unwrap_casted_load(PolyUOp *u, PolyUOp **cast_out) {
 static bool gated_load_matches_cond(PolyUOp *load, PolyUOp *cond, bool negated) {
   if (!load || load->op != POLY_OP_LOAD || load->n_src < 1 || !cond) return false;
   PolyUOp *gate = (load->n_src >= 3) ? load->src[2] : NULL;
-  PolyUOp *idx = poly_find_index_through_cast(load->src[0]);
-  if (!gate && idx && idx->op == POLY_OP_INDEX && idx->n_src >= 3 && codegen_is_bool_uop(idx->src[2]))
-    gate = idx->src[2];
   if (!gate) return false;
   if (!negated) return gate == cond;
   return gate && gate->op == POLY_OP_NEG && gate->n_src == 1 && gate->src[0] == cond;
@@ -6934,10 +7692,7 @@ static PolyUOp *cast_alt_for_load(PolyCtx *ctx, PolyUOp *alt, PolyDType load_dty
 static PolyUOp *rule_masked_load_add_alt(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->op != POLY_OP_LOAD || u->n_src < 1) return NULL;
-  PolyUOp *idx = poly_find_index_through_cast(u->src[0]);
-  bool has_gate =
-      (u->n_src >= 3 && codegen_is_bool_uop(u->src[2])) ||
-      (idx && idx->op == POLY_OP_INDEX && idx->n_src >= 3 && codegen_is_bool_uop(idx->src[2]));
+  bool has_gate = u->n_src >= 3 && codegen_is_bool_uop(u->src[2]);
   if (!has_gate) return NULL;
 
   bool needs_alt = (u->n_src == 1);
@@ -7031,9 +7786,8 @@ static int infer_scalar_load_lane(PolyCtx *ctx, PolyUOp *idx_expr, PolyUOp *vec_
   return found;
 }
 
-/* Scalar LOAD with gated INDEX can still carry vector alt/gate operands after
- * devectorization. WGSL scalar loads need lane-specific scalar operands, just
- * like tinygrad's scalar string rewrite expects. */
+/* Scalar gated LOAD can still carry vector alt/gate operands after
+ * devectorization. WGSL scalar loads need lane-specific scalar operands. */
 static PolyUOp *rule_scalar_gated_load_operands(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->op != POLY_OP_LOAD || u->dtype.count != 1 || u->n_src < 1) return NULL;
@@ -7041,10 +7795,8 @@ static PolyUOp *rule_scalar_gated_load_operands(PolyCtx *ctx, PolyUOp *u, const 
   PolyUOp *idx = poly_find_index_through_cast(u->src[0]);
   if (!idx || idx->op != POLY_OP_INDEX) return NULL;
 
-  PolyUOp *gate = (u->n_src >= 3 && codegen_is_bool_uop(u->src[2]))
-                      ? u->src[2]
-                      : ((idx->n_src >= 3 && codegen_is_bool_uop(idx->src[2])) ? idx->src[2]
-                                                                               : NULL);
+  PolyUOp *gate =
+      (u->n_src >= 3 && codegen_is_bool_uop(u->src[2])) ? u->src[2] : NULL;
   if (!gate) return NULL;
   PolyUOp *alt = (u->n_src >= 2) ? u->src[1] : NULL;
   bool gate_is_vec = gate && gate->dtype.count > 1;
@@ -7133,7 +7885,8 @@ static PolyPatternMatcher *poly_pm_render_subset(void) {
       {poly_pat_op(POLY_OP_NEG, NULL, 0, "u"), rule_vector_bool_neg_to_scalarized_vector},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
   };
-  g_pm_render_subset = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_render_subset =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_render_subset;
 }
 
@@ -7171,7 +7924,8 @@ static PolyPatternMatcher *poly_pm_render_subset_vec(void) {
       {poly_pat_op(POLY_OP_NEG, NULL, 0, "u"), rule_vector_bool_neg_to_scalarized_vector},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
   };
-  g_pm_render_subset_vec = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_render_subset_vec =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_render_subset_vec;
 }
 
@@ -7194,7 +7948,8 @@ static PolyPatternMatcher *poly_pm_render_subset_packed_int(void) {
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "u"), rule_vector_const_where_to_stack},
       {poly_pat_op(POLY_OP_VECTORIZE, NULL, 0, "u"), rule_vectorize_single},
   };
-  g_pm_render_subset_packed_int = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_render_subset_packed_int =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_render_subset_packed_int;
 }
 
@@ -7235,26 +7990,92 @@ static PolyPatternMatcher *poly_pm_remove_vec_dtypes(void) {
   PolyRule rules[] = {
       {poly_pat_ops(storage_set, NULL, 0, "buf"), rule_remove_vec_dtype_param_buffer},
   };
-  g_pm_remove_vec_dtypes = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_remove_vec_dtypes =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_remove_vec_dtypes;
 }
 
-/* tinygrad codegen/late/gater.py::pm_move_gates_from_index:
- *   LOAD(INDEX(buf, idx, gate), alt) -> LOAD(INDEX(buf, idx), alt, gate)
- * This keeps address arithmetic independent from the validity predicate, so
- * the linearizer orders INDEX before the gate and LOAD after both. */
+static PolyUOp *gater_rebuild(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **src,
+    int n_src
+) {
+  return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(ctx, u->op, u->dtype, src, n_src, u->arg, u->tag, u->tag_arg)
+             : poly_uop(ctx, u->op, u->dtype, src, n_src, u->arg);
+}
+
+static bool gater_invalid_where(PolyUOp *u, PolyUOp **gate, PolyUOp **index) {
+  if (!u || u->op != POLY_OP_WHERE || u->n_src != 3 ||
+      !u->src[2] || u->src[2]->op != POLY_OP_CONST ||
+      u->src[2]->arg.kind != POLY_ARG_INVALID ||
+      !codegen_is_bool_uop(u->src[0]) ||
+      !poly_dtype_is_int(u->src[1]->dtype))
+    return false;
+  if (gate) *gate = u->src[0];
+  if (index) *index = u->src[1];
+  return true;
+}
+
+/* Pinned tinygrad/codegen/late/gater.py:5-17 moves Invalid-carrying integer
+ * coordinates to LOAD/STORE validity sources. */
+static PolyUOp *gater_ungated_index(PolyCtx *ctx, PolyUOp *mop, PolyUOp **gate_out) {
+  if (gate_out) *gate_out = NULL;
+  if (!mop || (mop->op != POLY_OP_INDEX && mop->op != POLY_OP_SHRINK) ||
+      mop->n_src < 2 || mop->n_src > 64)
+    return NULL;
+
+  PolyUOp *src[64];
+  int n_src = 0;
+  src[n_src++] = mop->src[0];
+  PolyUOp *gate = NULL;
+  bool changed = false;
+
+  for (int i = 1; i < mop->n_src; i++) {
+    PolyUOp *coord_gate = NULL;
+    PolyUOp *coord = NULL;
+    if (gater_invalid_where(mop->src[i], &coord_gate, &coord)) {
+      if (gate && gate != coord_gate) return NULL;
+      gate = coord_gate;
+      src[n_src++] = coord;
+      changed = true;
+      continue;
+    }
+    src[n_src++] = mop->src[i];
+  }
+
+  if (!changed || !gate) return NULL;
+  if (gate_out) *gate_out = gate;
+  return gater_rebuild(ctx, mop, src, n_src);
+}
+
 static PolyUOp *rule_move_gated_index_to_load(PolyCtx *ctx, PolyUOp *load, const PolyBindings *b) {
   (void)b;
-  if (!load || load->op != POLY_OP_LOAD || load->n_src < 1) return NULL;
-  if (load->n_src >= 3) return NULL;
-  PolyUOp *idx = load->src[0];
-  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 3) return NULL;
-  if (!codegen_is_bool_uop(idx->src[2])) return NULL;
+  if (!load || load->op != POLY_OP_LOAD || load->n_src < 1 || load->n_src >= 3)
+    return NULL;
+  PolyUOp *gate = NULL;
+  PolyUOp *ungated = gater_ungated_index(ctx, load->src[0], &gate);
+  if (!ungated || !gate) return NULL;
 
-  PolyUOp *ungated = poly_uop2(ctx, POLY_OP_INDEX, idx->dtype, idx->src[0], idx->src[1], idx->arg);
   PolyUOp *alt = (load->n_src >= 2) ? load->src[1] : poly_const_like_int(ctx, load, 0);
-  PolyUOp *srcs[3] = {ungated, alt, idx->src[2]};
-  return poly_uop(ctx, POLY_OP_LOAD, load->dtype, srcs, 3, load->arg);
+  PolyUOp *src[3] = {ungated, alt, gate};
+  return gater_rebuild(ctx, load, src, 3);
+}
+
+static PolyUOp *rule_move_gated_index_to_store(
+    PolyCtx *ctx,
+    PolyUOp *store,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!store || store->op != POLY_OP_STORE || store->n_src != 2) return NULL;
+  PolyUOp *gate = NULL;
+  PolyUOp *ungated = gater_ungated_index(ctx, store->src[0], &gate);
+  if (!ungated || !gate) return NULL;
+
+  PolyUOp *src[3] = {ungated, store->src[1], gate};
+  return gater_rebuild(ctx, store, src, 3);
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_move_gates_from_index = NULL;
@@ -7263,8 +8084,11 @@ static PolyPatternMatcher *poly_pm_move_gates_from_index(void) {
   PolyRule rules[] = {
       {poly_pat_allow_any_len(poly_pat_op(POLY_OP_LOAD, NULL, 0, "load")),
        rule_move_gated_index_to_load},
+      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_STORE, NULL, 0, "store")),
+       rule_move_gated_index_to_store},
   };
-  g_pm_move_gates_from_index = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_move_gates_from_index =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_move_gates_from_index;
 }
 
@@ -7327,7 +8151,8 @@ static PolyPatternMatcher *poly_pm_index_is_shrink(void) {
        rule_index_cast_to_shrink},
       {poly_pat_op(POLY_OP_GEP, NULL, 0, "x"), rule_gep_to_index_codegen},
   };
-  g_pm_index_is_shrink = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_index_is_shrink =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_index_is_shrink;
 }
 
@@ -7346,7 +8171,7 @@ static PolyPatternMatcher *poly_pm_combined_devec(void) {
    * Run the shared symbolic matcher here so newly created invalid LOAD/STORE
    * nodes fold inside the same late devectorize stage, like tinygrad. */
   PolyPatternMatcher *sym_devec = poly_pm_concat(poly_symbolic(), poly_pm_devectorize());
-  g_combined_devec = poly_pm_concat(sym_devec, poly_pm_load_store_folding());
+  g_combined_devec = poly_pm_thread_cache(poly_pm_concat(sym_devec, poly_pm_load_store_folding()));
   poly_pm_destroy(sym_devec); /* g_combined_devec owns copied rules. */
   return g_combined_devec;
 }
@@ -7359,14 +8184,8 @@ static PolyPatternMatcher *poly_pm_combined_nodevec(void) {
    *
    * The full lower-Invalid rewrite belongs to the post-index stage below, after
    * index dtype narrowing has matched tinygrad's pm_lower_index_dtype boundary. */
-  PolyRule indexing_rules[] = {
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_drop_true_gate},
-  };
-  PolyPatternMatcher *pm_indexing = poly_pm_new(indexing_rules, 1);
   PolyPatternMatcher *base = poly_pm_concat(poly_symbolic(), poly_pm_load_store_folding());
-  g_combined_nodevec = poly_pm_concat(base, pm_indexing);
-  poly_pm_destroy(base); /* concat copied rules */
-  poly_pm_destroy(pm_indexing); /* concat copied rules */
+  g_combined_nodevec = poly_pm_thread_cache(base);
   return g_combined_nodevec;
 }
 
@@ -7537,6 +8356,14 @@ static PolyUOp *rule_lower_index_dtype(PolyCtx *ctx, PolyUOp *idx, const PolyBin
   new_srcs[0] = idx->src[0];
   for (int i = 1; i < idx->n_src; i++) {
     new_srcs[i] = lower_index_subtree(ctx, idx->src[i], memo_old, memo_new, &memo_n, 256);
+    /* tinygrad pm_lower_index_dtype removes a hanging CAST around a concrete
+     * integer INDEX coordinate.  The concrete source already carries the
+     * range-selected width; retaining the address-only widening incorrectly
+     * routes it into renderer dtype decomposition. */
+    if (new_srcs[i] && new_srcs[i]->op == POLY_OP_CAST && new_srcs[i]->n_src == 1 &&
+        poly_dtype_is_int(new_srcs[i]->src[0]->dtype) &&
+        !poly_dtype_is_bool(new_srcs[i]->src[0]->dtype))
+      new_srcs[i] = new_srcs[i]->src[0];
     if (new_srcs[i] != idx->src[i]) changed = true;
   }
   if (!changed) return NULL;
@@ -7553,7 +8380,8 @@ static PolyPatternMatcher *poly_pm_lower_index_dtype(void) {
        * together to the same concrete integer dtype. */
       {poly_pat_any("idx"), rule_lower_index_dtype},
   };
-  g_pm_lower_index_dtype = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_lower_index_dtype =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_lower_index_dtype;
 }
 
@@ -7567,56 +8395,6 @@ static bool uop_tree_contains_invalid_const_codegen(PolyUOp *u) {
   for (int i = 0; i < u->n_src; i++)
     if (uop_tree_contains_invalid_const_codegen(u->src[i])) return true;
   return false;
-}
-
-static bool match_invalid_gate_expr(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    PolyUOp **cond_out,
-    PolyUOp **idx_out
-) {
-  if (!u) return false;
-  if (u->op == POLY_OP_WHERE && u->n_src == 3) {
-    if (is_invalid_const_codegen(u->src[2])) {
-      *cond_out = u->src[0];
-      *idx_out = u->src[1];
-      return true;
-    }
-    if (is_invalid_const_codegen(u->src[1])) {
-      PolyUOp *true_uop = poly_const_like_bool(ctx, u->src[0], true);
-      *cond_out =
-          poly_uop2(ctx, POLY_OP_CMPNE, u->src[0]->dtype, u->src[0], true_uop, poly_arg_none());
-      *idx_out = u->src[2];
-      return true;
-    }
-  }
-  if (u->n_src <= 0 || u->n_src > 8) return false;
-
-  PolyUOp *new_srcs[8];
-  PolyUOp *found_cond = NULL;
-  bool found = false;
-  for (int i = 0; i < u->n_src; i++) {
-    PolyUOp *child_cond = NULL;
-    PolyUOp *child_idx = NULL;
-    if (match_invalid_gate_expr(ctx, u->src[i], &child_cond, &child_idx)) {
-      if (found && child_cond != found_cond) return false;
-      found = true;
-      found_cond = child_cond;
-      new_srcs[i] = child_idx;
-    } else {
-      new_srcs[i] = u->src[i];
-    }
-  }
-  if (!found) return false;
-
-  /* Tinygrad's pm_lower_index_dtype pulls Invalid-carrying weakint indexes into
-   * INDEX.valid even when the Invalid is nested under index arithmetic such as
-   * SHL(WHERE(valid, idx, Invalid), 1). Rebuild the same arithmetic with the
-   * valid branch, then let rule_index_invalid_gate_to_valid attach found_cond as
-   * the INDEX gate. */
-  *cond_out = found_cond;
-  *idx_out = rebuild_preserve_tag(ctx, u, u->dtype, new_srcs, u->n_src);
-  return true;
 }
 
 static bool int_const_value_codegen(PolyUOp *u, int64_t *out) {
@@ -7742,35 +8520,6 @@ static PolyUOp *simplify_index_expr_given_gate(
 
 static bool uop_tree_contains_op_codegen(PolyUOp *u, PolyOps op);
 
-static PolyUOp *rule_index_invalid_gate_to_valid(
-    PolyCtx *ctx,
-    PolyUOp *idx,
-    const PolyBindings *b
-) {
-  (void)b;
-  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 2) return NULL;
-
-  PolyUOp *cond = NULL;
-  PolyUOp *index_expr = NULL;
-  if (!match_invalid_gate_expr(ctx, idx->src[1], &cond, &index_expr)) return NULL;
-
-  PolyUOp *memo_old[256], *memo_new[256];
-  int memo_n = 0;
-  PolyUOp *simplified_idx =
-      simplify_index_expr_given_gate(ctx, index_expr, cond, memo_old, memo_new, &memo_n, 256);
-
-  PolyUOp *new_gate = canonicalize_valid_gate_bounds(ctx, cond);
-  if (idx->n_src >= 3 && codegen_is_bool_uop(idx->src[2])) {
-    new_gate = poly_uop2(ctx, POLY_OP_AND, idx->src[2]->dtype, idx->src[2], cond, poly_arg_none());
-    new_gate = canonicalize_valid_gate_bounds(ctx, new_gate);
-  } else if (idx->n_src >= 3) {
-    return NULL;
-  }
-
-  PolyUOp *new_srcs[3] = {idx->src[0], simplified_idx, new_gate};
-  return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, 3);
-}
-
 static PolyUOp *rule_where_branch_given_gate(
     PolyCtx *ctx,
     PolyUOp *w,
@@ -7784,10 +8533,9 @@ static PolyUOp *rule_where_branch_given_gate(
   bool changed = false;
 
   /* tinygrad's symbolic valid simplification (`uop_given_valid`) removes
-   * Invalid-bearing index expressions once the surrounding gate proves the
-   * branch. This catches value-producing index kernels such as gather's
-   * intermediate offset program, where the Invalid is not inside an INDEX
-   * address and therefore rule_index_invalid_gate_to_valid cannot see it. */
+   * Invalid-bearing expressions once the surrounding gate proves the branch.
+   * This catches value-producing index kernels such as gather's intermediate
+   * offset program, where Invalid is not an INDEX coordinate. */
   if (uop_tree_contains_invalid_const_codegen(new_true)) {
     PolyUOp *memo_old[256], *memo_new[256];
     int memo_n = 0;
@@ -7953,48 +8701,21 @@ static PolyUOp *simplify_index_expr_given_gate(
   return result;
 }
 
-static PolyUOp *rule_index_gate_selects_where_branch(
-    PolyCtx *ctx,
-    PolyUOp *idx,
-    const PolyBindings *b
-) {
-  (void)b;
-  if (!idx || idx->op != POLY_OP_INDEX || idx->n_src < 3) return NULL;
-  PolyUOp *memo_old[256], *memo_new[256];
-  int memo_n = 0;
-  PolyUOp *new_idx = simplify_index_expr_given_gate(
-      ctx, idx->src[1], idx->src[2], memo_old, memo_new, &memo_n, 256
-  );
-  if (new_idx == idx->src[1]) return NULL;
-
-  PolyUOp *new_srcs[POLY_MAX_DIMS + 1];
-  if (idx->n_src > (int)(sizeof(new_srcs) / sizeof(new_srcs[0]))) return NULL;
-  for (int i = 0; i < idx->n_src; i++)
-    new_srcs[i] = idx->src[i];
-  new_srcs[1] = new_idx;
-  return rebuild_preserve_tag(ctx, idx, idx->dtype, new_srcs, idx->n_src);
-}
-
 static _Thread_local PolyPatternMatcher *g_pm_post_index_lower = NULL;
 static PolyPatternMatcher *poly_pm_post_index_lower(void) {
   if (g_pm_post_index_lower) return g_pm_post_index_lower;
   PolyRule indexing_rules[] = {
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
-       rule_index_invalid_gate_to_valid},
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")),
-       rule_index_gate_selects_where_branch},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_branch_given_gate},
       {poly_pat_op(POLY_OP_AND, NULL, 0, "valid"), rule_canonicalize_and_valid_bounds},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load},
       {poly_pat_op(POLY_OP_WHERE, NULL, 0, "w"), rule_where_after_gated_load_rev},
-      {poly_pat_allow_any_len(poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx")), rule_drop_true_gate},
   };
   /* Match tinygrad's post-index cleanup shape: lower dtype, push GEP, then only
    * the checked load/store indexing cleanup needed for Invalid-carrying indexes. */
   PolyPatternMatcher *pm_indexing =
       poly_pm_new(indexing_rules, (int)(sizeof(indexing_rules) / sizeof(indexing_rules[0])));
   PolyPatternMatcher *base = poly_pm_concat(poly_pm_lower_index_dtype(), poly_pm_gep_pushing());
-  g_pm_post_index_lower = poly_pm_concat(base, pm_indexing);
+  g_pm_post_index_lower = poly_pm_thread_cache(poly_pm_concat(base, pm_indexing));
   poly_pm_destroy(base);
   poly_pm_destroy(pm_indexing);
   return g_pm_post_index_lower;
@@ -8153,9 +8874,9 @@ static PolyUOp *gpudim_mul_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
   return poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, x, gpudim_const(ctx, v), poly_arg_none());
 }
 
-static PolyUOp *gpudim_idiv_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
+static PolyUOp *gpudim_floordiv_const(PolyCtx *ctx, PolyUOp *x, int64_t v) {
   if (v == 1) return x;
-  return poly_uop2(ctx, POLY_OP_IDIV, POLY_INDEX, x, gpudim_const(ctx, v), poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, x, gpudim_const(ctx, v), poly_arg_none());
 }
 
 static PolyUOp *gpudim_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
@@ -8166,12 +8887,12 @@ static PolyUOp *gpudim_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return poly_uop2(ctx, POLY_OP_MUL, POLY_INDEX, a, b, poly_arg_none());
 }
 
-static PolyUOp *gpudim_mod(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  return poly_uop2(ctx, POLY_OP_MOD, POLY_INDEX, a, b, poly_arg_none());
+static PolyUOp *gpudim_floormod(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_FLOORMOD, POLY_INDEX, a, b, poly_arg_none());
 }
 
-static PolyUOp *gpudim_idiv(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
-  return poly_uop2(ctx, POLY_OP_IDIV, POLY_INDEX, a, b, poly_arg_none());
+static PolyUOp *gpudim_floordiv(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  return poly_uop2(ctx, POLY_OP_FLOORDIV, POLY_INDEX, a, b, poly_arg_none());
 }
 
 static bool gpudim_safe_mul_i64(int64_t a, int64_t b, int64_t *out) {
@@ -8267,7 +8988,7 @@ static bool gpudim_split_dims(
       int next = (i + 1) % 3;
       int64_t next_max = 0;
       if (!gpudim_safe_mul_i64(out[next].max, div, &next_max)) return false;
-      out[i].expr = gpudim_idiv_const(ctx, out[i].expr, div);
+      out[i].expr = gpudim_floordiv_const(ctx, out[i].expr, div);
       out[i].max /= div;
       out[next].expr = gpudim_mul_const(ctx, out[next].expr, div);
       out[next].max = next_max;
@@ -8343,8 +9064,8 @@ static bool gpudim_build_indices(
         int orig = limited[i].orig[j];
         if (orig < 0 || orig >= n_dims) return false;
         if (j + 1 < limited[i].n_orig) {
-          ordered_out[orig] = gpudim_mod(ctx, idx, ordered[orig].expr);
-          idx = gpudim_idiv(ctx, idx, ordered[orig].expr);
+          ordered_out[orig] = gpudim_floormod(ctx, idx, ordered[orig].expr);
+          idx = gpudim_floordiv(ctx, idx, ordered[orig].expr);
         } else {
           ordered_out[orig] = idx;
         }
@@ -8368,15 +9089,16 @@ static bool gpudim_build_indices(
         ordered_out[i] = raw[i];
     } else if (n_dims == 2) {
       PolyUOp *flat = gpudim_add(ctx, gpudim_mul(ctx, raw[0], limited[1].expr), raw[1]);
-      ordered_out[0] = gpudim_idiv(ctx, flat, ordered[1].expr);
-      ordered_out[1] = gpudim_mod(ctx, flat, ordered[1].expr);
+      ordered_out[0] = gpudim_floordiv(ctx, flat, ordered[1].expr);
+      ordered_out[1] = gpudim_floormod(ctx, flat, ordered[1].expr);
     } else if (n_dims == 3) {
       PolyUOp *mul12 = gpudim_mul(ctx, ordered[2].expr, ordered[1].expr);
       PolyUOp *flat01 = gpudim_add(ctx, gpudim_mul(ctx, raw[0], limited[1].expr), raw[1]);
       PolyUOp *flat = gpudim_add(ctx, gpudim_mul(ctx, flat01, limited[2].expr), raw[2]);
-      ordered_out[0] = gpudim_idiv(ctx, flat, mul12);
-      ordered_out[1] = gpudim_mod(ctx, gpudim_idiv(ctx, flat, ordered[2].expr), ordered[1].expr);
-      ordered_out[2] = gpudim_mod(ctx, flat, ordered[2].expr);
+      ordered_out[0] = gpudim_floordiv(ctx, flat, mul12);
+      ordered_out[1] =
+          gpudim_floormod(ctx, gpudim_floordiv(ctx, flat, ordered[2].expr), ordered[1].expr);
+      ordered_out[2] = gpudim_floormod(ctx, flat, ordered[2].expr);
     } else {
       return false;
     }
@@ -8578,27 +9300,31 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
     if (changed) {
       PolyUOp *new_u = poly_uop(ctx, u->op, u->dtype, new_srcs, u->n_src, u->arg);
 
-      /* Gated STORE for GLOBAL buffers missing local dims       *
-       * Matches tinygrad gpudims.py:92-99.  After group_for_reduce, all
+      /* Gated STORE for GLOBAL buffers missing local dims.
+       * Pinned tinygrad/codegen/gpudims.py:92-99. After group_for_reduce, all
        * threads participate in the per-thread accumulation + shared-memory
        * reduction.  But only thread 0 should write the final result to the
        * global output buffer.  Without a guard, every thread STOREs the
        * same scalar → a benign-but-incorrect write race.
        *
-       * Tinygrad solves this by adding a gated INDEX (3-source:
-       * INDEX(ptr, offset, gate)) on the global STORE, where gate =
-       * AND(lidxN == 0 for each missing local).  The renderer later emits
-       * `if (gate) { *ptr = val; }`.
+       * Tinygrad keeps INDEX coordinates integer by replacing the offset with
+       * WHERE(gate, offset, Invalid). The late gater moves that predicate to
+       * STORE.src[2], and linearize emits IF/STORE/ENDIF.
        *
        * We detect: STORE whose src[0] is INDEX with a GLOBAL-addrspace
        * pointer, where the INDEX subtree contains no lidx SPECIAL.  For
-       * those, add gate = CMPLT(lidx0, 1) as 3rd INDEX source. */
+       * those, add gate = CMPLT(lidx0, 1) to the integer coordinate. */
       if (new_u->op == POLY_OP_STORE && n_local > 0 && new_u->n_src >= 2) {
         PolyUOp *idx = new_u->src[0];
-        /* Walk through CAST to find the INDEX */
+        /* Walk through CASTs to find the INDEX and retain the wrapper chain. */
+        PolyUOp *wrappers[16];
+        int n_wrappers = 0;
         PolyUOp *raw_idx = idx;
-        while (raw_idx->op == POLY_OP_CAST && raw_idx->n_src > 0)
+        while (raw_idx->op == POLY_OP_CAST && raw_idx->n_src == 1 &&
+               n_wrappers < (int)(sizeof(wrappers) / sizeof(wrappers[0]))) {
+          wrappers[n_wrappers++] = raw_idx;
           raw_idx = raw_idx->src[0];
+        }
 
         if (raw_idx->op == POLY_OP_INDEX && raw_idx->n_src == 2 && raw_idx->dtype.is_ptr &&
             raw_idx->dtype.addrspace == POLY_ADDR_GLOBAL) {
@@ -8638,18 +9364,39 @@ PolyUOp *poly_add_gpudims_ex(PolyCtx *ctx, PolyUOp *sink, PolyRendererCaps caps)
             }
 
             if (gate) {
-              /* Rebuild INDEX with gate as 3rd source */
-              PolyUOp *gated_srcs[3] = {raw_idx->src[0], raw_idx->src[1], gate};
-              PolyUOp *gated_idx =
-                  poly_uop(ctx, POLY_OP_INDEX, raw_idx->dtype, gated_srcs, 3, raw_idx->arg);
+              PolyUOp *coord = raw_idx->src[1];
+              int lanes = coord->dtype.count > 1 ? coord->dtype.count : 1;
+              PolyUOp *coord_gate = gate;
+              if (lanes > 1) {
+                if (lanes > 64) {
+                  fprintf(stderr, "polygrad: gpudims gate width %d exceeds UOp source cap\n", lanes);
+                  uop_src_scratch_free(new_srcs, stack_new_srcs);
+                  free(sub_old);
+                  free(sub_new);
+                  return NULL;
+                }
+                PolyUOp *gate_lanes[64];
+                for (int lane = 0; lane < lanes; lane++)
+                  gate_lanes[lane] = gate;
+                coord_gate = poly_uop(
+                    ctx, POLY_OP_STACK, poly_dtype_vec(POLY_BOOL, lanes),
+                    gate_lanes, lanes, poly_arg_none()
+                );
+              }
+              PolyUOp *invalid =
+                  poly_uop0(ctx, POLY_OP_CONST, coord->dtype, poly_arg_invalid());
+              PolyUOp *where = poly_uop3(
+                  ctx, POLY_OP_WHERE, coord->dtype, coord_gate, coord, invalid, poly_arg_none()
+              );
+              PolyUOp *gated_src[2] = {raw_idx->src[0], where};
+              PolyUOp *final_idx = gater_rebuild(ctx, raw_idx, gated_src, 2);
 
-              /* If idx was wrapped in CAST, re-wrap */
-              PolyUOp *final_idx = gated_idx;
-              if (idx != raw_idx) {
-                final_idx = poly_uop1(ctx, idx->op, idx->dtype, gated_idx, idx->arg);
+              for (int w = n_wrappers - 1; w >= 0; w--) {
+                PolyUOp *wrapper_src[1] = {final_idx};
+                final_idx = gater_rebuild(ctx, wrappers[w], wrapper_src, 1);
               }
 
-              /* Rebuild STORE with gated INDEX */
+              /* Rebuild STORE with the Invalid-bearing integer coordinate. */
               PolyUOp *stack_store_srcs[64];
               PolyUOp **store_srcs = uop_src_scratch_alloc(new_u->n_src, stack_store_srcs, 64);
               if (store_srcs) {
@@ -9044,7 +9791,8 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
   }
 
   /* Bottom-up graph rebuild: substitute original REDUCE → final_reduce.
-   * No IF/ENDIF here -- the guard moves to add_gpudims (gated INDEX). */
+   * No IF/ENDIF here: pinned gpudims first attaches Invalid-bearing integer
+   * index validity, and the late gater/linearizer emits IF/STORE/ENDIF. */
   PolyUOp *new_sink = sink;
 
   /* Re-toposort since we modified things */
@@ -9085,9 +9833,10 @@ PolyUOp *poly_group_for_reduce(PolyCtx *ctx, PolyUOp *sink, int block_size) {
     }
 
     if (changed) {
-      /* Do NOT create IF/ENDIF here.  Tinygrad's fix_group_for_reduce
-       * (expander.py) never injects IF; the single-writer guard is added
-       * later by add_gpudims as a gated 3-source INDEX on the global STORE.
+      /* Do NOT create IF/ENDIF here. Tinygrad's fix_group_for_reduce
+       * (expander.py) never injects IF; add_gpudims attaches an
+       * Invalid-bearing WHERE coordinate and the late gater/linearizer
+       * converts it to IF/STORE/ENDIF.
        *
        * Creating IF/ENDIF in the DAG causes the IF (linearizer priority 0)
        * to float above the accumulation RANGE (priority 5), wrapping the
@@ -9128,7 +9877,7 @@ PolyPatternMatcher *poly_pm_decomp_pass_caps(PolyRendererCaps caps) {
   return poly_pm_decomp_with_caps(caps.has_mulacc, caps.has_threefry);
 }
 PolyPatternMatcher *poly_pm_transcendental_pass(void) {
-  return poly_pm_transcendental();
+  return poly_pm_transcendental((PolyRendererCaps){0});
 }
 PolyPatternMatcher *poly_pm_pre_expander_pass(void) {
   return poly_pm_pre_expander();
@@ -9217,22 +9966,95 @@ static PolyUOp *rule_codegen_reshape_index(PolyCtx *ctx, PolyUOp *idx, const Pol
 
   int n_idx = idx->n_src - 1;
   if (n_idx <= 0 || n_idx > POLY_MAX_DIMS) return NULL;
-  PolyShape out_shape = poly_uop_max_shape_cached(ctx, reshape);
   PolyShape in_shape = poly_uop_max_shape_cached(ctx, reshape->src[0]);
-  if (out_shape.ndim != n_idx || in_shape.ndim <= 0 || in_shape.ndim > POLY_MAX_DIMS)
-    return NULL;
+  if (in_shape.ndim < 0 || in_shape.ndim > POLY_MAX_DIMS) return NULL;
 
   PolyUOp *out_rngs[POLY_MAX_DIMS];
   for (int i = 0; i < n_idx; i++)
     out_rngs[i] = idx->src[1 + i];
   PolyUOp *in_rngs[POLY_MAX_DIMS];
-  poly_reshape_indices(ctx, out_rngs, n_idx, out_shape, in_rngs, in_shape.ndim, in_shape);
+  int n_in = 0;
+  if (!poly_reshape_indices(ctx, reshape, out_rngs, n_idx, in_rngs, &n_in))
+    return NULL;
+
+  /* Pinned schedule/rangeify.py:68-77 removes a partial RESHAPE INDEX
+   * entirely when the indexed output prefix maps to an empty input prefix. */
+  if (n_in == 0)
+    return poly_dtype_eq(reshape->src[0]->dtype, idx->dtype) ? reshape->src[0] : NULL;
 
   PolyUOp *srcs[POLY_MAX_DIMS + 1];
   srcs[0] = reshape->src[0];
-  for (int i = 0; i < in_shape.ndim; i++)
+  for (int i = 0; i < n_in; i++)
     srcs[1 + i] = in_rngs[i];
-  return poly_uop(ctx, POLY_OP_INDEX, idx->dtype, srcs, in_shape.ndim + 1, idx->arg);
+  PolyUOp *ret = poly_uop(ctx, POLY_OP_INDEX, idx->dtype, srcs, n_in + 1, idx->arg);
+  if (!ret) return NULL;
+
+  /* Pinned returns the partial rewrite only when its remaining Tensor shape
+   * exactly matches the original INDEX shape. Canonicalize dimension UOps
+   * before comparing so static dtype spelling and symbolic maxima are not
+   * mistaken for semantic equality. */
+  PolyShape ret_shape = poly_uop_max_shape_cached(ctx, ret);
+  PolyShape idx_shape = poly_uop_max_shape_cached(ctx, idx);
+  if (ret_shape.ndim != idx_shape.ndim || ret_shape.ndim < 0) return NULL;
+  for (int i = 0; i < ret_shape.ndim; i++) {
+    PolyUOp *ret_dim = poly_uop_shape_dim(ctx, ret, i);
+    PolyUOp *idx_dim = poly_uop_shape_dim(ctx, idx, i);
+    if (!ret_dim)
+      ret_dim =
+          poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(ret_shape.dims[i]));
+    if (!idx_dim)
+      idx_dim =
+          poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(idx_shape.dims[i]));
+    if (!ret_dim || !idx_dim) return NULL;
+    if (!poly_dtype_eq(poly_dtype_scalar(ret_dim->dtype), POLY_INDEX))
+      ret_dim = poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, ret_dim, poly_arg_none());
+    if (!poly_dtype_eq(poly_dtype_scalar(idx_dim->dtype), POLY_INDEX))
+      idx_dim = poly_uop1(ctx, POLY_OP_CAST, POLY_INDEX, idx_dim, poly_arg_none());
+    ret_dim = poly_graph_rewrite(ctx, ret_dim, poly_symbolic_simple());
+    idx_dim = poly_graph_rewrite(ctx, idx_dim, poly_symbolic_simple());
+    if (!ret_dim || !idx_dim || ret_dim != idx_dim) return NULL;
+  }
+  return ret;
+}
+
+/* Pinned schedule/rangeify.py:41-47 pm_syntactic_sugar concatenates the
+ * coordinates of INDEX(INDEX(ptr, ...), ...). This lets the adjacent pm_mops
+ * rules see the complete coordinate tuple and remove any remaining movement
+ * op; it is source concatenation, not flat-offset addition. */
+static PolyUOp *rule_codegen_ptr_index_concat(
+    PolyCtx *ctx,
+    PolyUOp *idx,
+    const PolyBindings *b
+) {
+  (void)b;
+  if (!ctx || !idx || idx->op != POLY_OP_INDEX || idx->n_src < 2 ||
+      idx->dtype.is_ptr)
+    return NULL;
+  PolyUOp *inner = idx->src[0];
+  if (!inner || inner->op != POLY_OP_INDEX || inner->n_src < 2 ||
+      !inner->dtype.is_ptr)
+    return NULL;
+  /* Pinned tinygrad/uop/spec.py:73-77 requires every INDEX coordinate to be
+   * integer. The full-rewrite validator is the failure boundary; this guard
+   * keeps the syntactic concat literal if an unsupported caller bypasses it. */
+  for (int i = 1; i < inner->n_src; i++)
+    if (!inner->src[i] || !poly_dtype_is_int(inner->src[i]->dtype)) return NULL;
+  for (int i = 1; i < idx->n_src; i++)
+    if (!idx->src[i] || !poly_dtype_is_int(idx->src[i]->dtype)) return NULL;
+  if (inner->n_src > UINT16_MAX - (idx->n_src - 1)) return NULL;
+
+  int n_src = inner->n_src + idx->n_src - 1;
+  PolyUOp **srcs = malloc((size_t)n_src * sizeof(*srcs));
+  if (!srcs) return NULL;
+  for (int i = 0; i < inner->n_src; i++)
+    srcs[i] = inner->src[i];
+  for (int i = 1; i < idx->n_src; i++)
+    srcs[inner->n_src + i - 1] = idx->src[i];
+  PolyUOp *ret = poly_uop_tagged_arg(
+      ctx, idx->op, idx->dtype, srcs, n_src, idx->arg, idx->tag, idx->tag_arg
+  );
+  free(srcs);
+  return ret;
 }
 
 static _Thread_local PolyPatternMatcher *g_pm_codegen_mops = NULL;
@@ -9240,8 +10062,10 @@ static PolyPatternMatcher *poly_pm_codegen_mops(void) {
   if (g_pm_codegen_mops) return g_pm_codegen_mops;
   PolyRule rules[] = {
       {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_codegen_reshape_index},
+      {poly_pat_op(POLY_OP_INDEX, NULL, 0, "idx"), rule_codegen_ptr_index_concat},
   };
-  g_pm_codegen_mops = poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0])));
+  g_pm_codegen_mops =
+      poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_codegen_mops;
 }
 
@@ -9249,6 +10073,20 @@ static PolyPatternMatcher *poly_pm_codegen_mops(void) {
 
 static bool device_is_gpu(int device) {
   return device == POLY_DEVICE_CUDA || device == POLY_DEVICE_HIP || device == POLY_DEVICE_WEBGPU;
+}
+
+static bool graph_has_int64(PolyCtx *ctx, PolyUOp *sink, PolyUOp **first) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort(ctx, sink, &n);
+  if (!topo) return true;
+  for (int i = 0; i < n; i++) {
+    PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+    if (poly_dtype_is_int(scalar) && scalar.bitsize == 64) {
+      if (first) *first = topo[i];
+      return true;
+    }
+  }
+  return false;
 }
 
 PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOpts opts) {
@@ -9264,6 +10102,10 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
    *   extra_matcher   — renderer-specific final rewrite patterns (NULL = none)
    */
 
+  /* Pinned tinygrad/codegen/__init__.py:55-61 runs type_verify(spec_tensor)
+   * before pm_mops+pm_syntactic_sugar. Enforce its integer-INDEX-coordinate
+   * predicate here, together with Polygrad's structural checks. */
+  if (!ctx || !poly_validate_kernel_graph(ctx, sink)) return NULL;
   poly_debug_stage_graph("input", sink);
 
 #define POLY_REWRITE_CHECK(stage_name)                                                             \
@@ -9409,7 +10251,23 @@ PolyUOp *poly_full_rewrite_to_sink_ex(PolyCtx *ctx, PolyUOp *sink, PolyRewriteOp
   sink = poly_graph_rewrite(
       ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry)
   );
-  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental());
+  if (!opts.caps.has_int64) {
+    sink = poly_decompose_int64(ctx, sink);
+    POLY_REWRITE_CHECK("decomp int64");
+  }
+  sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental(opts.caps));
+  if (!opts.caps.has_int64) {
+    sink = poly_decompose_int64(ctx, sink);
+    POLY_REWRITE_CHECK("decomp post-transcendental int64");
+    PolyUOp *unsupported = NULL;
+    if (graph_has_int64(ctx, sink, &unsupported)) {
+      fprintf(
+          stderr, "polygrad: int64 decomposition left unsupported %s for renderer\n",
+          unsupported ? poly_op_name(unsupported->op) : "graph"
+      );
+      return NULL;
+    }
+  }
   sink = poly_graph_rewrite(
       ctx, sink, poly_pm_decomp_with_caps(opts.caps.has_mulacc, opts.caps.has_threefry)
   );

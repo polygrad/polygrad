@@ -103,6 +103,119 @@ async function runTensorTests(pg) {
     assert(t.uop.hasBufferIdentity(), 'empty should be backed by a BUFFER UOp')
   })
 
+  await test('movement is realized through recursive base', async () => {
+    const source = await new Tensor([1, 2, 3, 4]).realize()
+    const reshaped = source.reshape(2, 2)
+    const view = reshaped.flatten().shrink([[1, 3]])
+
+    assert(view.uop.op === pg._core.ops.SHRINK, 'expected a SHRINK view')
+    assert(view.uop.base.key === source.uop.base.key, 'movement base should be recursive')
+    assert(reshaped.uop.realized === null, 'RESHAPE is not directly realized')
+    assert(reshaped.uop.isRealized, 'RESHAPE should be realized through its base')
+    assert(view.uop.realized === null, 'movement UOp is not directly realized')
+    assert(view.uop.isRealized, 'allocated recursive base should realize the movement view')
+    assert(view.uop.is_realized, 'snake-case realization alias should match')
+  })
+
+  await test('clone is lazy separate and preserves state', async () => {
+    const source = Tensor.empty([4], { dtype: 'float32', requiresGrad: true }).is_param_(false)
+    source.copyFrom(new Float32Array([1, 2, 3, 4]))
+    await source.sum().backward()
+
+    const cloned = source.clone(pg.device)
+    assert(cloned.uopLogical && cloned.uopLogical.src.length === 2, 'clone should be AFTER')
+    assert(cloned.uopLogical.src[1].src.length === 2, 'clone effect should be STORE')
+    assert(cloned.uopLogical.src[0].buffer.key !== source.uop.buffer.key, 'clone needs a separate buffer')
+    assert(cloned.requiresGrad === true, 'clone should preserve requiresGrad')
+    assert(cloned.isParam === false, 'clone should preserve isParam')
+    assert(cloned.grad && cloned.grad.uopLogical.src.length === 2, 'clone should recursively clone grad')
+    assert(
+      cloned.grad.uopLogical.src[0].buffer.key !== source.grad.uopLogical.src[0].buffer.key,
+      'cloned grad needs a separate buffer'
+    )
+    assertClose(await cloned.toArray(), [1, 2, 3, 4])
+    assertClose(await cloned.grad.toArray(), [1, 1, 1, 1])
+  })
+
+  await test('clone preserves scalar shape across devices', async () => {
+    const source = Tensor.full([], 3, { device: 'cpu' })
+    const cloned = source.clone('interp')
+    assertShape(cloned.shape, [])
+    assert(cloned.device === 'INTERP', `expected INTERP, got ${cloned.device}`)
+    assertClose(await cloned.toArray(), [3])
+  })
+
+  await test('static constructors preserve scalar shape', async () => {
+    const tensors = [Tensor.zeros([]), Tensor.ones([]), Tensor.full([], 3)]
+    for (const tensor of tensors) assertShape(tensor.shape, [])
+    assertClose(await tensors[0].toArray(), [0])
+    assertClose(await tensors[1].toArray(), [1])
+    assertClose(await tensors[2].toArray(), [3])
+  })
+
+  await test('detach is a lazy graph boundary', async () => {
+    const source = new Tensor([[1, 2], [3, 4]], { requiresGrad: true })
+    const detached = source.detach()
+
+    assertShape(detached.shape, source.shape)
+    assert(detached.dtype === source.dtype, 'detach should preserve dtype')
+    assert(detached.device === source.device, 'detach should preserve device')
+    assert(detached.requiresGrad === false, 'detach should clear requiresGrad')
+    assert(detached.uopLogical.op === pg._core.ops.DETACH, 'detach should create a DETACH UOp')
+    assert(detached.uopLogical.src.length === 1, 'detach should retain a unary graph node')
+    assert(
+      detached.uopLogical.src[0].key === source.uopLogical.key,
+      'logical detach should retain the logical source UOp'
+    )
+    if (detached.uopPhysical) {
+      assert(detached.uopPhysical.op === pg._core.ops.DETACH, 'physical detach should retain DETACH')
+      assert(
+        detached.uopPhysical.src[0].key === source.uop.key,
+        'physical detach should retain the current source UOp'
+      )
+    }
+
+    await detached.sum().backward()
+    assertClose(await source.grad.toArray(), [0, 0, 0, 0])
+  })
+
+  await test('backward clones deviceless grad and accumulates in place', async () => {
+    const x = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    const loss = x.sum()
+    await loss.backward()
+    const firstGrad = x.grad
+    const firstRoot = firstGrad.uopLogical
+    const firstBuffer = firstRoot.src[0].buffer.key
+    assert(firstRoot.src.length === 2, 'first grad should be AFTER')
+
+    await loss.backward()
+    assert(x.grad === firstGrad, 'gradient accumulation should preserve Tensor identity')
+    const secondRoot = x.grad.uopLogical
+    assert(secondRoot.src[0].key === firstRoot.key, 'gradient effect root changed')
+    assert(secondRoot.src[0].src[0].buffer.key === firstBuffer, 'gradient buffer identity changed')
+    assertClose(await x.grad.toArray(), [2, 2, 2, 2])
+  })
+
+  await test('backward through clone reaches source', async () => {
+    const source = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    source.copyFrom(new Float32Array([1, 2, 3, 4]))
+    const cloned = source.clone()
+    await cloned.sum().backward()
+    assertClose(await source.grad.toArray(), [1, 1, 1, 1])
+    assertClose(await cloned.grad.toArray(), [1, 1, 1, 1])
+  })
+
+  await test('backward retains distinct wrappers sharing one UOp', async () => {
+    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const y = new Tensor(x.uopLogical, { requiresGrad: true })
+    assert(x !== y, 'expected distinct Tensor wrappers')
+    assert(x.uopLogical.key === y.uopLogical.key, 'expected one shared logical UOp')
+
+    await x.sum().backward()
+    assertClose(await x.grad.toArray(), [1, 1, 1, 1])
+    assertClose(await y.grad.toArray(), [1, 1, 1, 1])
+  })
+
   await test('static constructors accept tinygrad-style shape arrays', async () => {
     const z = Tensor.zeros([2, 3])
     const o = Tensor.ones([2, 3])
@@ -143,6 +256,7 @@ async function runTensorTests(pg) {
   })
 
   await test('customKernel multi-output backward matches tinygrad pattern', async () => {
+    let callbackCall = null
     function addmulKernel(c, d, a, b) {
       c = c.flatten(); d = d.flatten(); a = a.flatten(); b = b.flatten()
       const i = pg.uop.range(c.numel(), 0)
@@ -151,6 +265,7 @@ async function runTensorTests(pg) {
       return storeC.group(storeD).end(i).sink({ arg: new pg.uop.KernelInfo('addmul') })
     }
     function backwardAddmul(gradC, gradD, call) {
+      callbackCall = call
       const [, , , a, b] = call.src
       const gradA = new Tensor(gradC).add(new Tensor(gradD).mul(new Tensor(b))).uop
       const gradB = new Tensor(gradC).add(new Tensor(gradD).mul(new Tensor(a))).uop
@@ -175,12 +290,127 @@ async function runTensorTests(pg) {
     const a = new Tensor(aVals, { requiresGrad: true }).reshape(4, 4)
     const b = new Tensor(bVals, { requiresGrad: true }).reshape(4, 4)
     await a.realize(b)
+    const aPhysical = a.uopPhysical.key
+    const bPhysical = b.uopPhysical.key
     const [c, d] = Tensor.empty([4, 4]).customKernel(
       Tensor.empty([4, 4]), a, b, { fxn: addmulKernel, gradFxn: backwardAddmul }
     )
     await c.sum().add(d.sum()).backward()
+    assert(callbackCall.src[3].key === aPhysical, 'callback must receive physical a CALL slot')
+    assert(callbackCall.src[4].key === bPhysical, 'callback must receive physical b CALL slot')
     assertClose(await a.grad.toArray(), await aRef.grad.toArray(), 1e-4)
     assertClose(await b.grad.toArray(), await bRef.grad.toArray(), 1e-4)
+  })
+
+  await test('customKernel physical AFTER preserves data gradient', async () => {
+    function identityKernel(x) {
+      x = x.flatten()
+      const i = pg.uop.range(x.numel(), 0)
+      return x.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('identity') })
+    }
+    function backwardIdentity(grad, call) {
+      assert(call.src.length === 2, 'expected one-argument custom CALL in backward')
+      return [null]
+    }
+    const x = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    x.copyFrom(new Float32Array([1, 2, 3, 4]))
+    const y = x.customKernel({ fxn: identityKernel, gradFxn: backwardIdentity })[0]
+    assert(y.uopLogical && y.uopLogical.src.length === 2, 'expected logical AFTER')
+    assert(y.uopPhysical && y.uopPhysical.src.length === 2, 'expected physical AFTER')
+    assert(y.uopLogical.op === y.uopPhysical.op, 'logical and physical aliases must both be AFTER')
+    await y.sum().backward()
+    assertClose(await x.grad.toArray(), [1, 1, 1, 1])
+    assertClose(await y.grad.toArray(), [1, 1, 1, 1])
+  })
+
+  await test('customKernel separates output and input gradient edges', async () => {
+    function identityKernel(out, x) {
+      out = out.flatten(); x = x.flatten()
+      const i = pg.uop.range(out.numel(), 0)
+      return out.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('identity_grad_edges') })
+    }
+    function backwardIdentity(grad, call) {
+      assert(call.src.length === 3, 'expected output and input custom CALL arguments')
+      return [null, grad]
+    }
+    const out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0]
+    await y.sum().backward()
+
+    assertClose(await out.grad.toArray(), [1, 1, 1, 1])
+    assertClose(await x.grad.toArray(), [1, 1, 1, 1])
+    assertClose(await y.grad.toArray(), [1, 1, 1, 1])
+  })
+
+  await test('customKernel duplicate output alias passes one accumulated upstream', async () => {
+    function identityKernel(out0, out1, x) {
+      out0 = out0.flatten(); out1 = out1.flatten(); x = x.flatten()
+      const i = pg.uop.range(out0.numel(), 0)
+      return out0.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('duplicate_output_grad') })
+    }
+    const callbackCounts = []
+    function backwardIdentity(...args) {
+      const call = args.pop()
+      callbackCounts.push(args.length)
+      return [null, null, args[0]]
+    }
+    const out = Tensor.empty([4], { dtype: 'float32' })
+    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const [y0, y1] = out.customKernel(out, x, { fxn: identityKernel, gradFxn: backwardIdentity })
+    assert(y0.uop.key === y1.uop.key, 'duplicate output aliases should share one AFTER')
+    await y0.sum().add(y1.sum()).backward()
+
+    assert(callbackCounts.length === 1 && callbackCounts[0] === 1, 'expected one accumulated callback upstream')
+    assertClose(await x.grad.toArray(), [2, 2, 2, 2])
+  })
+
+  await test('customKernel without gradFxn rejects a needed input gradient', async () => {
+    function identityKernel(out, x) {
+      out = out.flatten(); x = x.flatten()
+      const i = pg.uop.range(out.numel(), 0)
+      return out.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('missing_grad_fxn') })
+    }
+    const out = Tensor.empty([4], { dtype: 'float32' })
+    const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    const y = out.customKernel(x, identityKernel)[0]
+    let threw = false
+    try {
+      await y.sum().backward()
+    } catch (e) {
+      threw = String(e.message || e).includes('expected TUPLE body for gradient, got Ops.SINK')
+    }
+    assert(threw, 'missing gradFxn should reject an opaque CALL input gradient')
+    assert(x.grad === null, 'failed backward must not assign x.grad')
+    assert(y.grad === null, 'failed backward must not assign y.grad')
+  })
+
+  await test('customKernel callback is inactive behind stop-gradient ops', async () => {
+    function identityKernel(out, x) {
+      out = out.flatten(); x = x.flatten()
+      const i = pg.uop.range(out.numel(), 0)
+      return out.index(i).store(x.index(i)).end(i).sink({ arg: new pg.uop.KernelInfo('stopped_custom_grad') })
+    }
+
+    let out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    let x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    let y = out.customKernel(x, identityKernel)[0]
+    await y.detach().sum().backward()
+    assertClose(await x.grad.toArray(), [0, 0, 0, 0])
+    assertClose(await y.grad.toArray(), [0, 0, 0, 0])
+
+    const calls = []
+    function backwardIdentity(grad, call) {
+      calls.push(grad.op)
+      return [null, new Tensor(grad).add(7).uop]
+    }
+    out = Tensor.empty([4], { dtype: 'float32', requiresGrad: true })
+    x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
+    y = out.customKernel(x, { fxn: identityKernel, gradFxn: backwardIdentity })[0]
+    await y.lt(0).cast('float32').sum().backward()
+    assert(calls.length === 0, 'stop-gradient ops must not invoke custom callbacks')
+    assertClose(await x.grad.toArray(), [0, 0, 0, 0])
+    assertClose(await y.grad.toArray(), [0, 0, 0, 0])
   })
 
   await test('customKernel reuses buffers after input update', async () => {
@@ -219,6 +449,25 @@ async function runTensorTests(pg) {
     const a = new Tensor([-3, 2, 5, -1])
     const b = new Tensor([1, 4, 3, 9])
     assertClose(await out.customKernel(a, b, selectKernel)[0].toArray(), [3, 4, 5, 1])
+  })
+
+  await test('customKernel rejects bool INDEX coordinate before codegen', async () => {
+    function invalidIndexKernel(out) {
+      out = out.flatten()
+      const zero = pg.uop.constant(0)
+      const gate = zero.lt(1)
+      const bad = out.index(gate)
+      assert(bad !== null, 'UOp.index(bool) construction should match tinygrad')
+      return bad.store(out.index(zero)).sink()
+    }
+    const out = Tensor.empty([1], { dtype: 'float32' })
+    let threw = false
+    try {
+      await out.customKernel(invalidIndexKernel)[0].toArray()
+    } catch (e) {
+      threw = true
+    }
+    assert(threw, 'invalid bool INDEX coordinate must fail before codegen')
   })
 
   await test('customKernel exposes tinygrad-style floor div and mod', async () => {
@@ -667,8 +916,19 @@ async function runTensorTests(pg) {
     assert(stats.core === pg.core, 'runtime stats should include core')
     assert(stats.device === pg.device, 'runtime stats should include device')
     assert(stats.coreStats && typeof stats.coreStats.launchCount === 'number', 'runtime stats should include core counters')
+    assert(typeof stats.coreStats.globalOps === 'number', 'runtime stats should include globalOps')
+    assert(typeof stats.coreStats.globalMem === 'number', 'runtime stats should include globalMem')
+    assert(typeof stats.coreStats.timeSumS === 'number', 'runtime stats should include timeSumS')
+    assert(typeof stats.coreStats.kernelCount === 'number', 'runtime stats should include kernelCount')
+    assert(typeof stats.coreStats.memUsed === 'number', 'runtime stats should include memUsed')
     assert(stats.jit && typeof stats.jit.liveCount === 'number', 'runtime stats should include jit live count')
-    const before = stats.coreStats
+    assert(typeof pg.resetCounters === 'function', 'runtime should expose resetCounters()')
+    const liveMem = stats.coreStats.memUsed
+    pg.resetCounters()
+    const before = pg.stats().coreStats
+    assert(before.globalOps === 0 && before.globalMem === 0 && before.kernelCount === 0,
+      'resetCounters should clear execution counters')
+    assert(before.memUsed === liveMem, 'resetCounters should preserve live memory')
     const x = Tensor.empty([3], { dtype: 'float32' })
     x.copyFrom(new Float32Array([1, 2, 3]))
     const t = await x.add(1).realize()
@@ -677,6 +937,13 @@ async function runTensorTests(pg) {
     assert(after.bufferWriteBytes >= before.bufferWriteBytes + 12, 'stats should count host writes')
     assert(after.bufferReadBytes >= before.bufferReadBytes + 12, 'stats should count host reads')
     assert(after.launchCount >= before.launchCount + 1, 'stats should count backend launches')
+    // Pinned tinygrad CPU:X86 computes estimates after ISA register allocation;
+    // this exact add is therefore 0/0/1 there while value backends are 3/24/1.
+    const expectedOps = pg.device === 'x86' ? 0 : 3
+    const expectedMem = pg.device === 'x86' ? 0 : 24
+    assert(after.globalOps === expectedOps, `expected ${expectedOps} global ops, got ${after.globalOps}`)
+    assert(after.globalMem === expectedMem, `expected ${expectedMem} global memory bytes, got ${after.globalMem}`)
+    assert(after.kernelCount === 1, `expected one tracked call, got ${after.kernelCount}`)
     assert(pg.canRun({ dtype: 'float32' }), 'float32 should be supported by every current runtime')
     if (pg.caps.f64 === false) {
       assert(!pg.canRun({ dtype: 'float64' }), 'canRun should reject f64 when caps.f64 is false')
@@ -728,7 +995,8 @@ async function runTensorTests(pg) {
     assertClose(outs[1], [2, 4, 6])
 
     const i32 = new Tensor(new Int32Array([1, 2, 3]), { dtype: 'int32' })
-    const empty = Tensor.empty([0])
+    const empty = Tensor.zeros([0])
+    assertShape(empty.shape, [0])
     const more = await Tensor.toTypedArrays([i32, empty])
     assert(more[0] instanceof Int32Array, `expected Int32Array, got ${more[0].constructor.name}`)
     assert(more[1] instanceof Float32Array && more[1].length === 0, 'expected empty Float32Array')
@@ -890,6 +1158,24 @@ async function runTensorTests(pg) {
     assertClose(await t.toArray(), [1, 2, 3, 4, 5, 6])
   })
 
+  await test('reshape inference validates cardinality', async () => {
+    assertShape(Tensor.empty(6).reshape(2, -1).shape, [2, 3])
+    assertShape(Tensor.empty(0).reshape(-1, 3).shape, [0, 3])
+    assertShape(Tensor.empty(0).reshape(1, 0).shape, [1, 0])
+    assertShape(Tensor.empty(2, 3).reshape(null, 3).shape, [2, 3])
+
+    for (const [shape, target, message] of [
+      [[3072], [-1, 3073], 'size mismatch'],
+      [[5], [2, -1], 'size mismatch'],
+      [[6], [-1, -1], 'only one dimension can be inferred'],
+      [[0], [0, -1], 'division by zero']
+    ]) {
+      let error = null
+      try { Tensor.empty(...shape).reshape(...target) } catch (e) { error = e }
+      assert(error && error.message.includes(message), `expected ${message}, got ${error && error.message}`)
+    }
+  })
+
   await test('flip', async () => {
     const t = new Tensor([1, 2, 3])
     assertClose(await t.flip(0).toArray(), [3, 2, 1])
@@ -902,11 +1188,31 @@ async function runTensorTests(pg) {
     assertClose(await p.toArray(), [1, 4, 2, 5, 3, 6])
   })
 
+  await test('expand negative and null keep original dim like tinygrad', async () => {
+    const x = Tensor.arange(2, { dtype: 'int32' }).reshape(2, 1, 1, 1)
+    const y = x.expand(-1, 3, 4, null)
+    assertShape(y.shape, [2, 3, 4, 1])
+    assertClose(Array.from(await y.toArray()).slice(0, 4), [0, 0, 0, 0])
+    assertClose(Array.from(await y.toArray()).slice(12, 16), [1, 1, 1, 1])
+
+    const img = Tensor.arange(2 * 3 * 34 * 34).reshape(2, 3, 34, 34)
+    const lowX = Tensor.randint(2, { low: 0, high: 2 }).reshape(2, 1, 1, 1)
+    const idxX = Tensor.arange(32, { dtype: 'int32' }).reshape(1, 1, 1, 32)
+    const cropIdx = lowX.add(idxX).expand(-1, 3, img.shape[2], -1)
+    assertShape(cropIdx.shape, [2, 3, 34, 32])
+    assertShape(img.gather(-1, cropIdx).shape, [2, 3, 34, 32])
+  })
+
   await test('pad', async () => {
     const t = new Tensor([1, 2, 3])
     const p = t.pad([[1, 1]])
     assertShape(p.shape, [5])
     assertClose(await p.toArray(), [0, 1, 2, 3, 0])
+
+    const x = Tensor.arange(9, { dtype: 'float32' }).reshape(1, 1, 3, 3)
+    const flat = x.pad([1, 0, 0, 1])
+    assertShape(flat.shape, [1, 1, 4, 4])
+    assertClose(await flat.toArray(), [0, 0, 1, 2, 0, 3, 4, 5, 0, 6, 7, 8, 0, 0, 0, 0])
   })
 
   await test('pad readback preserves non-float dtype', async () => {
@@ -936,6 +1242,13 @@ async function runTensorTests(pg) {
     const out3 = x3.gather(1, idx3)
     assertShape(out3.shape, [2, 2, 2])
     assertClose(await out3.toArray(), [0, 9, 4, 1, 20, 17, 12, 21])
+  })
+
+  await test('tensor row indexing matches tinygrad probe', async () => {
+    const idx = new Tensor(new Int32Array([-1, 0, 2]), { dtype: 'int32' })
+    const out = Tensor.arange(12).reshape(3, 4).getitem(idx)
+    assertShape(out.shape, [3, 4])
+    assertClose(await out.toArray(), [8, 9, 10, 11, 0, 1, 2, 3, 8, 9, 10, 11])
   })
 
   await test('scatter matches tinygrad probe', async () => {
@@ -1726,6 +2039,21 @@ async function runTensorTests(pg) {
     assertClose(await a.grad.toArray(), [2, 4, 6])
   })
 
+  await test('grad: backward uses current physical value after copyFrom', async () => {
+    const weight = new Tensor([1]).mul(2)
+    await weight.realize()
+    weight.requiresGrad = true
+    const physicalBuffer = weight.uopPhysical.buffer.raw
+    pg._core.ffi.poly_buffer_ensure_device_allocated(
+      weight._ctx, physicalBuffer, pg._core.deviceIds[weight.device.toLowerCase()]
+    )
+    pg._core.ffi.poly_buffer_write(weight._ctx, physicalBuffer, new Float32Array([3]))
+    const loss = weight.square().sum()
+    await loss.backward()
+    assert(weight.grad, 'weight.grad is null')
+    assertClose(await weight.grad.toArray(), [6])
+  })
+
   // -- Assign --
   console.log('\n-- Assign --')
 
@@ -1792,6 +2120,25 @@ async function runTensorTests(pg) {
     assertClose(await x.toArray(), [9])
   })
 
+  await test('shared-storage to copies and preserves source across assign', async () => {
+    const source = await new Tensor([1, 2, 3], { device: 'cpu' }).realize()
+    const sourceBuffer = source.uop.buffer.key
+    const target = await source.to('interp').realize()
+    const targetBuffer = target.uop.buffer.key
+
+    assert(targetBuffer !== sourceBuffer, 'cross-device to should allocate a distinct target buffer')
+    assertClose(await source.toArray(), [1, 2, 3])
+    assertClose(await target.toArray(), [1, 2, 3])
+
+    for (const values of [[9, 8, 7], [4, 5, 6]]) {
+      target.assign(new Tensor(values, { device: 'interp' }))
+      await target.realize()
+      assert(target.uop.buffer.key === targetBuffer, 'assign should retain the copied target buffer')
+      assertClose(await source.toArray(), [1, 2, 3])
+      assertClose(await target.toArray(), values)
+    }
+  })
+
   await test('copyFrom preserves buffer identity and updates JIT replay input', async () => {
     const x = Tensor.empty([3], { dtype: 'float32' })
     const bufferKey = x.uop.buffer.key
@@ -1801,14 +2148,87 @@ async function runTensorTests(pg) {
 
     const f = pg.jit((a) => a.add(1).realize())
     assertClose(await (await f(x)).toArray(), [2, 3, 4])
-    assertClose(await (await f(x)).toArray(), [2, 3, 4])
+    pg.resetCounters()
+    const captured = await f(x)
+    let counterStats = pg.stats().coreStats
+    const expectedOps = pg.device === 'x86' ? 0 : 3
+    const expectedMem = pg.device === 'x86' ? 0 : 24
+    assert(counterStats.globalOps === expectedOps && counterStats.globalMem === expectedMem && counterStats.kernelCount === 1,
+      'JIT capture execution should update counters exactly once')
+    assertClose(await captured.toArray(), [2, 3, 4])
     assert(f.scheduleCount === 1, `expected one captured schedule, got ${f.scheduleCount}`)
 
     const replayBufferKey = x.uop.buffer.key
     x.updateFrom(new Float32Array([10, 20, 30]))
     assert(x.uop.buffer.key === replayBufferKey, 'updateFrom should preserve captured input buffer identity')
-    assertClose(await (await f(x)).toArray(), [11, 21, 31])
+    pg.resetCounters()
+    const replayed = await f(x)
+    counterStats = pg.stats().coreStats
+    assert(counterStats.globalOps === expectedOps && counterStats.globalMem === expectedMem && counterStats.kernelCount === 1,
+      'JIT replay should update counters exactly once')
+    assertClose(await replayed.toArray(), [11, 21, 31])
     f.dispose()
+  })
+
+  await test('pure movement view realize is zero call', async () => {
+    const x = await Tensor.arange(8, { dtype: 'float32' }).realize()
+    const out = x.reshape(2, 4).permute(1, 0)
+    const memBefore = pg.stats().coreStats.memUsed
+
+    pg.resetCounters()
+    await out.realize()
+    const stats = pg.stats().coreStats
+    assert(
+      stats.globalOps === 0 && stats.globalMem === 0 && stats.kernelCount === 0,
+      `pure view realize should execute zero calls, got ${stats.globalOps}/${stats.globalMem}/${stats.kernelCount}`
+    )
+    assert(stats.memUsed === memBefore, 'pure view realize should not allocate storage')
+    assertClose(await out.toArray(), [0, 4, 1, 5, 2, 6, 3, 7])
+  })
+
+  await test('realized contiguous and readback reuse current buffer identity', async () => {
+    const source = await Tensor.arange(8, { dtype: 'float32' }).add(1).realize()
+    const sourceCurrent = source.uop.key
+    const sourceLogical = source.uopLogical.key
+    assert(source.uopLogical.op === pg._core.ops.ADD, 'source logical root should retain ADD provenance')
+    assert(source.uop.hasBufferIdentity(), 'realized source should have buffer identity')
+
+    const out = source.contiguous()
+    assert(out !== source, 'contiguous should return a new Tensor object')
+    assert(out.uopLogical.op === pg._core.ops.CONTIGUOUS, 'logical result should retain CONTIGUOUS')
+    assert(out.uopPhysical && out.uopPhysical.key === sourceCurrent,
+      'physical result should reuse the exact current buffer')
+    assert(out.uop.key === sourceCurrent, 'current result should reuse the exact current buffer')
+    assert(source.uopLogical.key === sourceLogical, 'source logical provenance should be unchanged')
+
+    pg.resetCounters()
+    await out.realize()
+    let stats = pg.stats().coreStats
+    assert(stats.globalOps === 0 && stats.globalMem === 0 && stats.kernelCount === 0,
+      `realized contiguous should execute zero calls, got ${stats.globalOps}/${stats.globalMem}/${stats.kernelCount}`)
+    pg.resetCounters()
+    assertClose(await out.toArray(), [1, 2, 3, 4, 5, 6, 7, 8])
+    stats = pg.stats().coreStats
+    assert(stats.globalOps === 0 && stats.globalMem === 0 && stats.kernelCount === 0,
+      `realized readback should execute zero calls, got ${stats.globalOps}/${stats.globalMem}/${stats.kernelCount}`)
+
+    const reshaped = source.reshape(2, 4)
+    assert(reshaped.uop.hasBufferIdentity(), 'reshape of current buffer should retain identity')
+    pg.resetCounters()
+    assertClose(await reshaped.toArray(), [1, 2, 3, 4, 5, 6, 7, 8])
+    stats = pg.stats().coreStats
+    assert(stats.globalOps === 0 && stats.globalMem === 0 && stats.kernelCount === 0,
+      'reshape readback should execute zero calls')
+
+    const permuted = source.reshape(2, 4).permute(1, 0)
+    pg.resetCounters()
+    assertClose(await permuted.toArray(), [1, 5, 2, 6, 3, 7, 4, 8])
+    assert(pg.stats().coreStats.kernelCount === 1, 'noncontiguous permute should materialize once')
+
+    const casted = source.cast('int32')
+    pg.resetCounters()
+    assertClose(await casted.toArray(), [1, 2, 3, 4, 5, 6, 7, 8])
+    assert(pg.stats().coreStats.kernelCount === 1, 'lazy cast should materialize once')
   })
 
   // -- Static constructors --
@@ -1997,9 +2417,22 @@ async function runTensorTests(pg) {
     // the occurrence-specific realized source when .to(device) creates a fact.
     const x1Cuda = x1.to('cuda')
     const x2Cuda = x2.to('cuda')
-    assert(x1Cuda.uop.buffer.key === x1.uop.buffer.key, 'x1.to(cuda) should point at x1 buffer')
-    assert(x2Cuda.uop.buffer.key === x2.uop.buffer.key, 'x2.to(cuda) should point at x2 buffer')
-    assert(x1Cuda.uop.buffer.key !== x2Cuda.uop.buffer.key, 'to(cuda) occurrences should not alias')
+    assert(x1Cuda.uop.op === pg._core.ops.COPY, 'x1.to(cuda) should be an eager COPY')
+    assert(x2Cuda.uop.op === pg._core.ops.COPY, 'x2.to(cuda) should be an eager COPY')
+    assert(x1Cuda.uop.buffer === null, 'an unrealized COPY should not claim buffer identity')
+    assert(x2Cuda.uop.buffer === null, 'an unrealized COPY should not claim buffer identity')
+    assert(
+      x1Cuda.uop.src[0].buffer.key === x1.uop.buffer.key,
+      'x1.to(cuda) COPY should point at x1 buffer'
+    )
+    assert(
+      x2Cuda.uop.src[0].buffer.key === x2.uop.buffer.key,
+      'x2.to(cuda) COPY should point at x2 buffer'
+    )
+    assert(
+      x1Cuda.uop.src[0].buffer.key !== x2Cuda.uop.src[0].buffer.key,
+      'to(cuda) COPY sources should not alias'
+    )
 
     const y1 = x1Cuda.add(1)
     const y2 = x2Cuda.add(1)
@@ -2011,11 +2444,15 @@ async function runTensorTests(pg) {
     const xCuda = x.to('cuda')
     const xCpu = xCuda.to('cpu')
 
-    // Polygrad's portable logical UOp stays device-free, while current and
-    // physical roots keep the realized buffer selected by this tensor
-    // occurrence for later placement physicalization.
-    assert(xCpu.uop.key === x.uop.key, 'nested to should preserve current realized buffer root')
-    assert(xCpu.uopPhysical.key === x.uop.key, 'nested to should preserve physical buffer root')
+    // Pinned Tensor.to (tensor.py:327-335) keeps both device moves as exact
+    // current COPY occurrences. Polygrad additionally preserves the approved
+    // portable logical twin.
+    assert(xCuda.uop.op === pg._core.ops.COPY, 'CUDA move should be an eager COPY')
+    assert(xCuda.uop.src[0].key === x.uop.key, 'CUDA COPY should use the realized buffer')
+    assert(xCpu.uop.op === pg._core.ops.COPY, 'CPU roundtrip should be an eager COPY')
+    assert(xCpu.uop.src[0].key === xCuda.uop.key, 'CPU COPY should use the CUDA occurrence')
+    assert(xCpu.uop.key !== x.uop.key, 'roundtrip COPY should stay occurrence-distinct')
+    assert(xCpu.uopPhysical.key === xCpu.uop.key, 'physical root should be the current COPY')
     assert(xCpu.uopLogical.key === x.uopLogical.key, 'nested to should preserve export logical root')
 
     const y = xCpu.add(1)
@@ -2097,6 +2534,78 @@ async function runTensorTests(pg) {
   // -- Composed ops --
   console.log('\n-- Composed ops --')
 
+  await test('conv2d stride and padding match reference', async () => {
+    const xData = Float32Array.from({ length: 1 * 2 * 4 * 5 }, (_, i) => i / 7)
+    const wData = Float32Array.from({ length: 3 * 2 * 2 * 3 }, (_, i) => (i - 5) / 11)
+    const bData = Float32Array.from([0.5, -1.0, 2.0])
+    const expected = new Float32Array(1 * 3 * 6 * 2)
+    for (let oc = 0; oc < 3; oc++) {
+      for (let oy = 0; oy < 6; oy++) {
+        for (let ox = 0; ox < 2; ox++) {
+          let acc = bData[oc]
+          for (let ic = 0; ic < 2; ic++) {
+            for (let ky = 0; ky < 2; ky++) {
+              for (let kx = 0; kx < 3; kx++) {
+                const iy = oy + ky - 2
+                const ix = ox * 2 + kx - 1
+                if (iy >= 0 && iy < 4 && ix >= 0 && ix < 5) {
+                  acc += xData[((ic * 4 + iy) * 5) + ix] * wData[((oc * 2 + ic) * 2 + ky) * 3 + kx]
+                }
+              }
+            }
+          }
+          expected[(oc * 6 + oy) * 2 + ox] = acc
+        }
+      }
+    }
+    const conv = new Tensor(xData).reshape(1, 2, 4, 5)
+      .conv2d(new Tensor(wData).reshape(3, 2, 2, 3), new Tensor(bData), 1, [1, 2], 1, [1, 0, 2, 1])
+    assertShape(conv.shape, [1, 3, 6, 2])
+    assertClose(await conv.toArray(), expected, 1e-4)
+  })
+
+  await test('conv2d padded 3x3 4x4 devectorize regression', async () => {
+    // tinygrad: arange(16).reshape(1,1,4,4).conv2d(ones(1,1,3,3), padding=1)
+    // This crosses the 128-lane late-devectorize threshold.
+    const padded = Tensor.arange(16, { dtype: 'float32' }).reshape(1, 1, 4, 4)
+      .conv2d(Tensor.ones(1, 1, 3, 3), null, 1, 1, 1, 1)
+    assertShape(padded.shape, [1, 1, 4, 4])
+    assertClose(await padded.toArray(), [10, 18, 24, 18, 27, 45, 54, 39, 51, 81, 90, 63, 42, 66, 72, 50])
+  })
+
+  await test('max_pool2d padding matches reference', async () => {
+    const pool = Tensor.arange(9, { dtype: 'float32' }).reshape(1, 1, 3, 3).max_pool2d(2, 1, 1, 1)
+    assertShape(pool.shape, [1, 1, 4, 4])
+    assertClose(await pool.toArray(), [0, 1, 2, 2, 3, 4, 5, 5, 6, 7, 8, 8, 6, 7, 8, 8])
+  })
+
+  await test('batchnorm multi-axis matches reference', async () => {
+    const bnX = Float32Array.from({ length: 2 * 3 * 4 * 5 }, (_, i) => i / 10)
+    const mean = Float32Array.from({ length: 8 }, (_, i) => i / 20)
+    const inv = Float32Array.from({ length: 8 }, () => 0.25)
+    const weight = Float32Array.from({ length: 8 }, (_, i) => 0.5 + (0.7 * i) / 7)
+    const bias = Float32Array.from({ length: 8 }, (_, i) => -0.3 + (0.7 * i) / 7)
+    const bnExpected = new Float32Array(bnX.length)
+    for (let n = 0; n < 2; n++) for (let c = 0; c < 3; c++) for (let h = 0; h < 4; h++) for (let w = 0; w < 5; w++) {
+      const ki = n * 4 + h
+      const oi = ((n * 3 + c) * 4 + h) * 5 + w
+      bnExpected[oi] = ((bnX[oi] - mean[ki]) * weight[ki]) * inv[ki] + bias[ki]
+    }
+    const bn = new Tensor(bnX).reshape(2, 3, 4, 5).batchnorm(
+      new Tensor(weight).reshape(2, 4), new Tensor(bias).reshape(2, 4),
+      new Tensor(mean).reshape(2, 4), new Tensor(inv).reshape(2, 4), [0, 2]
+    )
+    assertClose(await bn.toArray(), bnExpected, 1e-5)
+  })
+
+  await test('nn Conv2d backward populates parameters', async () => {
+    const mod = new pg.nn.Conv2d(3, 2, 3, { padding: 1 })
+    const loss = mod.call(Tensor.randn(1, 3, 4, 4)).relu().mean()
+    loss.backward()
+    assert(mod.weight.grad !== null, 'Conv2d weight grad missing')
+    assert(mod.bias.grad !== null, 'Conv2d bias grad missing')
+  })
+
   await test('layernorm', async () => {
     const t = new Tensor([[1, 2, 3], [4, 5, 6]])
     const r = await t.layernorm()
@@ -2134,6 +2643,15 @@ async function runTensorTests(pg) {
     assertClose(arr, [1, 2, 3, 4, 5, 6])
   })
 
+  await test('instance cat matches tinygrad binding', async () => {
+    const a = new Tensor([[1, 2], [3, 4]])
+    const b = new Tensor([[5, 6]])
+    const c = new Tensor([[7, 8]])
+    const r = a.cat(b, c, { dim: 0 })
+    assertShape(r.shape, [4, 2])
+    assertClose(await r.toArray(), [1, 2, 3, 4, 5, 6, 7, 8])
+  })
+
   await test('stack', async () => {
     const a = new Tensor([1, 2, 3])
     const b = new Tensor([4, 5, 6])
@@ -2142,6 +2660,14 @@ async function runTensorTests(pg) {
     const arr = await r.toArray()
     console.log('DEBUG stack', Array.from(arr))
     assertClose(arr, [1, 2, 3, 4, 5, 6])
+  })
+
+  await test('instance stack matches tinygrad binding', async () => {
+    const a = new Tensor([1, 2])
+    const b = new Tensor([3, 4])
+    const r = a.stack(b, { dim: 0 })
+    assertShape(r.shape, [2, 2])
+    assertClose(await r.toArray(), [1, 2, 3, 4])
   })
 
   await test('repeat', async () => {

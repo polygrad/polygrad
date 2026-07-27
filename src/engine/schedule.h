@@ -34,6 +34,10 @@ typedef enum {
 typedef struct {
   PolyRunnerKind kind;
 
+  /* Tinygrad CompiledRunner.p analogue. The prepared PROGRAM carries
+   * immutable launch metadata and symbolic Estimates for this runner. */
+  PolyUOp *program;
+
   void *handle;
   int handle_size;
 
@@ -88,6 +92,14 @@ typedef struct {
   const PolyCallAccess *access;
 } PolyCallIO;
 
+/* tinygrad.renderer.Estimates analogue. Expressions remain symbolic until
+ * execution merges and applies runtime DEFINE_VAR bindings. */
+typedef struct {
+  PolyUOp *ops;
+  PolyUOp *lds;
+  PolyUOp *mem;
+} PolyEstimates;
+
 struct PolyProgramInfo {
   const char *name;
   bool optimize;
@@ -109,6 +121,8 @@ struct PolyProgramInfo {
 
   int *ins;
   int n_ins;
+
+  PolyEstimates estimates;
 };
 
 typedef struct PolyRuntimeCacheEntry PolyRuntimeCacheEntry;
@@ -153,6 +167,7 @@ typedef struct {
 } PolyScheduleTemplate;
 
 typedef struct {
+  PolyCtx *ctx;
   PolyCallRuntime *calls;
   PolyCallIO *call_io;
   PolyDevice device;
@@ -162,6 +177,11 @@ typedef struct {
   void ***kernel_args;
   void **slot_to_data;
   int n_slot_to_data;
+  /* Pinned run_linear(..., input_uops=...) resolves retained shaped PARAM
+   * slots to the current BUFFER UOps before prepare/execute/commit. Concrete
+   * schedules point each slot at the template identity. */
+  PolyUOp **slot_uops;
+  int n_slot_uops;
   PolyBuffer *slot_views;
   int n_slot_views;
   bool *ctx_slots;
@@ -171,6 +191,22 @@ typedef struct {
   int *var_int_storage;
   int var_int_cap;
 } PolyScheduleRuntime;
+
+int poly_estimates_from_uops(
+    PolyCtx *ctx,
+    PolyUOp **uops,
+    int n_uops,
+    bool ignore_indexing,
+    PolyEstimates *out
+);
+int poly_estimates_infer(
+    const PolyEstimates *estimates,
+    const PolyVarBinding *bindings,
+    int n_bindings,
+    uint64_t *ops,
+    uint64_t *lds,
+    uint64_t *mem
+);
 
 typedef struct {
   /* LINEAR/CALL schedule metadata. This is structurally immutable after
@@ -217,7 +253,10 @@ typedef struct {
   int failed_item_index;
 } PolyExecStatus;
 
-/* Tinygrad engine/schedule.py analogue: schedule construction from a tensor sink. */
+/* Tinygrad lower_sink_to_linear analogue for an already-callified function
+ * SINK whose external storage is represented by shaped PARAMs. Concrete
+ * BUFFER effect sinks must enter through poly_schedule_effect_sink so
+ * transform_to_call runs before rangeify. */
 PolySchedule *poly_complete_create_schedule_with_vars(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode mode);
 
 /* Tinygrad engine/schedule.py analogue: create a schedule from a kernel graph. */
@@ -225,6 +264,20 @@ PolySchedule *poly_create_schedule(PolyCtx *ctx, PolyUOp *kernel_graph);
 
 /* Create a concrete schedule from already-formed LINEAR(CALL(...)) effects. */
 PolySchedule *poly_create_schedule_from_linear(PolyCtx *ctx, PolyUOp *linear, PolyCompileMode mode);
+
+/* create_linear_with_vars boundary for an already-resolved LINEAR: variable
+ * use comes from LINEAR while bound defaults come from its pre-resolution
+ * graph. */
+PolySchedule *poly_create_schedule_from_linear_with_vars(
+    PolyCtx *ctx,
+    PolyUOp *linear,
+    PolyUOp *binding_root,
+    PolyCompileMode mode
+);
+
+/* Exact UOp.param(slot, like.dtype, like.shape, like.device) constructor used
+ * at callification and retained TinyJit input-substitution boundaries. */
+PolyUOp *poly_uop_param(PolyCtx *ctx, int slot, PolyUOp *like);
 
 /* Tinygrad engine/schedule.py analogue: lower a sink into LINEAR form. */
 PolyUOp *poly_lower_sink_to_linear(PolyCtx *ctx, PolyUOp *sink, PolyCompileMode mode);
@@ -254,8 +307,13 @@ size_t poly_schedule_runtime_intermediate_bytes(const PolySchedule *schedule);
 PolyUOp *poly_schedule_call(const PolySchedule *schedule, int call_index);
 PolyUOp *poly_schedule_call_body(const PolySchedule *schedule, int call_index);
 bool poly_schedule_call_is_copy(const PolySchedule *schedule, int call_index);
+int poly_call_n_buffer_args(PolyUOp *call);
+PolyUOp *poly_call_buffer_arg(PolyUOp *call, int param_idx);
 int poly_schedule_call_n_buffer_args(const PolySchedule *schedule, int call_index);
 int poly_schedule_call_buffer_slot(const PolySchedule *schedule, int call_index, int arg_index);
+/* Shared CALL access analysis used while constructing LINEAR order and while
+ * resolving runtime slots. Indices address filtered CALL buffer arguments. */
+int poly_call_get_outs_ins(PolyCtx *ctx, PolyUOp *call, bool *outs, bool *ins, int n_args);
 int poly_schedule_external_slot_count(const PolySchedule *schedule);
 PolyUOp *poly_schedule_external_slot_buffer(const PolySchedule *schedule, int external_index);
 PolySchedule *poly_schedule_replay_with_buffers(
@@ -272,11 +330,13 @@ PolySchedule *poly_schedule_replay_many_with_buffers(
     PolyUOp **replay_external_bufs,
     int n_external
 );
-PolySchedule *poly_schedule_prune_for_buffers(
+int poly_schedule_prune_for_buffers(
     PolyCtx *ctx,
     const PolySchedule *captured,
     PolyUOp **needed_bufs,
-    int n_needed
+    int n_needed,
+    PolySchedule **kept_out,
+    PolySchedule **onetime_out
 );
 
 /* Tinygrad ProgramInfo analogue for PROGRAM CALL bodies. Indices are over
@@ -339,6 +399,16 @@ int poly_run_compiled_schedule(
     PolyCompiledSchedule *schedule,
     void **slot_data,
     int n_slots,
+    PolyVarBinding *var_bindings,
+    int n_var_bindings
+);
+
+/* Pinned run_linear(linear, ..., input_uops=...) analogue for a retained
+ * input-parameterized JIT LINEAR. This is private engine/runtime API. */
+int poly_run_compiled_schedule_with_input_uops(
+    PolyCompiledSchedule *schedule,
+    PolyUOp **input_uops,
+    int n_input_uops,
     PolyVarBinding *var_bindings,
     int n_var_bindings
 );

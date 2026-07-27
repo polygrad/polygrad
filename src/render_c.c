@@ -826,6 +826,115 @@ static int *compute_tuplize_ranks(PolyUOp **topo, int n, IntMap *idx) {
   return rank;
 }
 
+static PolyUOp *linear_rebuild_preserve_metadata(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **src,
+    int n_src
+) {
+  return (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE)
+             ? poly_uop_tagged_arg(ctx, u->op, u->dtype, src, n_src, u->arg, u->tag, u->tag_arg)
+             : poly_uop(ctx, u->op, u->dtype, src, n_src, u->arg);
+}
+
+static PolyUOp *linear_replacement(
+    PolyUOp *u,
+    PolyUOp **old_uops,
+    PolyUOp **new_uops,
+    int n
+) {
+  for (int i = n - 1; i >= 0; i--)
+    if (old_uops[i] == u) return new_uops[i];
+  return u;
+}
+
+static bool linear_is_gated_store(PolyUOp *u) {
+  if (!u || u->op != POLY_OP_STORE || u->n_src != 3 ||
+      !poly_dtype_eq(u->src[2]->dtype, POLY_BOOL))
+    return false;
+  PolyUOp *address = u->src[0];
+  if (address && address->op == POLY_OP_CAST && address->n_src == 1)
+    address = address->src[0];
+  return address && (address->op == POLY_OP_INDEX || address->op == POLY_OP_SHRINK);
+}
+
+/* Pinned tinygrad/codegen/__init__.py:152-174 line-rewrites a gated STORE to
+ * IF / ungated STORE / ENDIF after graph linearization. Rebuild later line
+ * sources through the same replacement map so effect dependencies point at the
+ * ungated STORE, matching tinygrad's line_rewrite contract. */
+static PolyUOp **linearize_gated_store_cleanup(
+    PolyCtx *ctx,
+    PolyUOp **linear,
+    int n,
+    int *n_out
+) {
+  int n_gated = 0;
+  for (int i = 0; i < n; i++)
+    if (linear_is_gated_store(linear[i])) n_gated++;
+  if (n_gated == 0) {
+    if (n_out) *n_out = n;
+    return linear;
+  }
+
+  PolyUOp **out = malloc((size_t)(n + 2 * n_gated) * sizeof(*out));
+  PolyUOp **old_uops = malloc((size_t)n * sizeof(*old_uops));
+  PolyUOp **new_uops = malloc((size_t)n * sizeof(*new_uops));
+  if (!out || !old_uops || !new_uops) {
+    free(out);
+    free(old_uops);
+    free(new_uops);
+    return NULL;
+  }
+
+  int n_seen = 0, n_linear = 0;
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = linear[i];
+    PolyUOp *stack_src[64];
+    PolyUOp **src = u->n_src <= 64
+                        ? stack_src
+                        : malloc((size_t)u->n_src * sizeof(*src));
+    if (!src) {
+      free(out);
+      free(old_uops);
+      free(new_uops);
+      return NULL;
+    }
+    bool changed = false;
+    for (int j = 0; j < u->n_src; j++) {
+      src[j] = linear_replacement(u->src[j], old_uops, new_uops, n_seen);
+      if (src[j] != u->src[j]) changed = true;
+    }
+    PolyUOp *rewritten =
+        changed ? linear_rebuild_preserve_metadata(ctx, u, src, u->n_src) : u;
+    if (src != stack_src) free(src);
+
+    old_uops[n_seen] = u;
+    if (linear_is_gated_store(rewritten)) {
+      PolyUOp *store_src[2] = {rewritten->src[0], rewritten->src[1]};
+      PolyUOp *store =
+          linear_rebuild_preserve_metadata(ctx, rewritten, store_src, 2);
+      PolyUOp *if_src[2] = {rewritten->src[2], rewritten->src[0]};
+      PolyUOp *ifu =
+          poly_uop(ctx, POLY_OP_IF, POLY_VOID, if_src, 2, poly_arg_none());
+      PolyUOp *endif =
+          poly_uop1(ctx, POLY_OP_ENDIF, POLY_VOID, ifu, poly_arg_none());
+      new_uops[n_seen++] = store;
+      out[n_linear++] = ifu;
+      out[n_linear++] = store;
+      out[n_linear++] = endif;
+    } else {
+      new_uops[n_seen++] = rewritten;
+      out[n_linear++] = rewritten;
+    }
+  }
+
+  free(old_uops);
+  free(new_uops);
+  free(linear);
+  if (n_out) *n_out = n_linear;
+  return out;
+}
+
 PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   if (n_out) *n_out = 0;
   if (!ctx || !sink) return NULL;
@@ -1035,6 +1144,16 @@ PolyUOp **poly_linearize_rewritten(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
   free(ideal);
   free(nkey);
 
+  int cleaned_n = 0;
+  PolyUOp **cleaned = linearize_gated_store_cleanup(ctx, result, rlen, &cleaned_n);
+  if (!cleaned) {
+    free(result);
+    if (n_out) *n_out = 0;
+    return NULL;
+  }
+  result = cleaned;
+  rlen = cleaned_n;
+
   if (n_out) *n_out = rlen;
   return result;
 }
@@ -1054,6 +1173,10 @@ PolyRendererCaps poly_c_renderer_caps(void) {
   return (PolyRendererCaps){
       .has_mulacc = false,
       .has_threefry = false,
+      .has_exp2 = true,
+      .has_log2 = true,
+      .has_sin = true,
+      .has_int64 = true,
       .has_local = false,
       .has_threads = has_threads,
       /* Clang/C rendering follows tinygrad's CStyle pm_render path, which
@@ -1830,18 +1953,14 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
       for (int d = 0; d < depth; d++)
         sb_puts(&body, "  ");
 
-      /* Gated load: tinygrad final IR is LOAD(INDEX(buf, idx), alt, gate).
-       * Accept the older INDEX(..., gate) form while schedules still exist. */
+      /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
       PolyUOp *idx_uop = poly_find_index_through_cast(u->src[0]);
       bool is_lane_load =
           idx_uop && idx_uop->n_src >= 1 && !poly_is_program_memory_base(idx_uop->src[0]);
       PolyUOp *gate_uop =
           (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
               ? u->src[2]
-              : ((idx_uop && idx_uop->n_src >= 3 &&
-                  poly_dtype_is_bool(poly_dtype_scalar(idx_uop->src[2]->dtype)))
-                     ? idx_uop->src[2]
-                     : NULL);
+              : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = smap_get(&names, gate_uop);
         char *alt_s = smap_get(&names, u->src[1]);

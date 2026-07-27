@@ -2,6 +2,7 @@
 
 #include "polygrad.h"
 #include "device.h"
+#include "engine/realize.h"
 #include "engine/schedule.h"
 #include "pat.h"
 
@@ -57,7 +58,7 @@ int poly_selftest_device(PolyDevice device) {
   PolyUOp *sink = poly_sink1(ctx, store);
   if (!sum || !store || !sink) goto cleanup;
 
-  sched = poly_complete_create_schedule_with_vars(ctx, sink, POLY_MODE_CALL);
+  sched = poly_schedule_effect_sink(ctx, sink);
   if (!sched) goto cleanup;
   if (poly_run_schedule(ctx, sched, NULL, 0) != 0) goto cleanup;
   if (poly_buffer_read(ctx, out, got, sizeof(got)) != 0) goto cleanup;

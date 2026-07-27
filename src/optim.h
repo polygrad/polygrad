@@ -24,7 +24,6 @@ extern "C" {
 
 typedef struct {
   int kind;
-  float lr;
   float beta1;
   float beta2;
   float eps;
@@ -42,13 +41,16 @@ typedef struct {
   PolyUOp *bc2_new;
 } PolyOptimUpdate;
 
-/* Build one parameter's next-value expressions. Adam/AdamW require m/v and
- * beta-power scalar buffers; SGD ignores those inputs. The caller owns
- * optimizer state storage and decides whether to wrap returned values in
- * tinygrad-style AFTER/STORE effects or a compatibility assignment op. */
+/* Build one parameter's tinygrad-style optimizer graph. param_new is the flat
+ * next parameter value. State fields are AFTER(target, STORE(target, value))
+ * assignment roots, and param_new consumes those roots exactly as tinygrad
+ * Optimizer._step does. lr must be an at-least-32-bit floating static scalar
+ * or static shape-[1] UOp owned by ctx. Adam/AdamW require m/v and beta-power
+ * scalar state; SGD ignores those inputs unless momentum is enabled. */
 int poly_optim_build_update(
     PolyCtx *ctx,
     const PolyOptimConfig *cfg,
+    PolyUOp *lr,
     PolyUOp *param,
     PolyUOp *grad,
     PolyUOp *m_buf,
@@ -62,14 +64,19 @@ int poly_optim_build_update(
 /* Tensor-level optimizer step builder shared by frontends and Instance-like
  * callers. This is the C-side graph-construction part of tinygrad's
  * Optimizer.schedule_step(), not the engine scheduler. It owns no state:
- * params, grads, and optional optimizer-state tensors are supplied by the
- * caller. The function mutates target tensors into assignment-effect roots and
- * writes those tensors into out_tensors so callers can realize the whole
- * optimizer step as one batch. If out_tensors is NULL or out_cap is too small,
- * returns the number of output tensors required without mutating anything. */
+ * lr, params, grads, and optional optimizer-state tensors are supplied by the
+ * caller. lr must be an at-least-32-bit floating static scalar or static
+ * shape-[1] Tensor in the same ctx and on the same device as the params. The
+ * function validates and builds the complete batch before mutating target
+ * tensors into assignment-effect roots, then writes those tensors into
+ * out_tensors in tinygrad schedule order (optimizer state, parameters) so
+ * callers can realize the whole optimizer step as one batch. If out_tensors is
+ * NULL or out_cap is too small, returns the number of output tensors required
+ * without mutating anything. */
 int poly_optim_build_step(
     PolyCtx *ctx,
     const PolyOptimConfig *cfg,
+    PolyTensor *lr,
     PolyTensor **params,
     PolyTensor **grads,
     int n_params,

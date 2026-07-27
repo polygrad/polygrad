@@ -26,36 +26,57 @@ class Buffer:
     def numpy(self):
         """Read the buffer bytes as a flat numpy array (copy)."""
         np_dt = _to_np_dtype(self.dtype_name)
-        itemsize = np.dtype(np_dt).itemsize
+        return np.frombuffer(self.as_memoryview(), dtype=np_dt)
+
+    def as_memoryview(self):
+        """Copy realized bytes into a fresh memoryview, matching tinygrad."""
+        itemsize = np.dtype(_to_np_dtype(self.dtype_name)).itemsize
         nbytes = self.numel * itemsize
-        raw_buf = ctypes.create_string_buffer(nbytes)
-        rc = _ffi._lib.poly_buffer_read(self.ctx, self.uop.raw, raw_buf, nbytes)
-        if rc != 0:
-            raise RuntimeError('Buffer.numpy: buffer readback failed')
-        raw = raw_buf.raw
-        return np.frombuffer(raw, dtype=np_dt)
+        out = bytearray(nbytes)
+        if nbytes:
+            raw = (ctypes.c_uint8 * nbytes).from_buffer(out)
+            rc = _ffi._lib.poly_buffer_read(self.ctx, self.uop.raw, raw, nbytes)
+            if rc != 0:
+                raise RuntimeError('Buffer.as_memoryview: buffer readback failed')
+        return memoryview(out)
 
 
-class Device:
-    DEFAULT = 'CPU'
+class _Device:
+    def __init__(self):
+        self._default = 'CPU'
 
-    def __class_getitem__(cls, key):
-        return cls.canonicalize(key)
+    @property
+    def DEFAULT(self):
+        from .helpers import DEV
+        return self.canonicalize(DEV.value) if DEV.value else self._default
 
-    @staticmethod
-    def canonicalize(device):
+    def __getitem__(self, key):
+        return self.canonicalize(key)
+
+    def canonicalize(self, device):
         if device is None:
-            return Device.DEFAULT
-        dev = str(device).upper()
-        if dev not in {'CPU', 'CUDA'}:
+            return self.DEFAULT
+        lib = _ffi.get_lib()
+        value = str(device)
+        if not value.upper().startswith('DISK:') and value.endswith(':0'):
+            value = value[:-2]
+        device_id = int(lib.poly_device_by_name(value.encode('utf-8')))
+        canonical = lib.poly_device_name(device_id).decode('utf-8').upper()
+        if canonical == 'DISK':
+            if ':' not in value or not value.split(':', 1)[1]:
+                raise ValueError(f'Unsupported device: {device!r}')
+            return f"DISK:{value.split(':', 1)[1]}"
+        if not lib.poly_device_can_execute(device_id):
             raise ValueError(f'Unsupported device: {device!r}')
-        return dev
+        return canonical
 
-    @staticmethod
-    def set_default(device):
-        Device.DEFAULT = Device.canonicalize(device)
+    def set_default(self, device):
+        from .helpers import DEV
+        DEV.value = self.canonicalize(device)
 
-    @staticmethod
-    def cuda_available():
+    def cuda_available(self):
         """Check if CUDA is available."""
         return _ffi._has_cuda_ffi and _ffi.get_lib().poly_cuda_available()
+
+
+Device = _Device()

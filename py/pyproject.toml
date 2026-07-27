@@ -33,7 +33,7 @@ Repository = "https://github.com/polygrad/polygrad"
 Issues = "https://github.com/polygrad/polygrad/issues"
 
 [tool.setuptools.packages.find]
-include = ["polygrad*"]
+include = ["polygrad*", "extra*"]
 
 [tool.setuptools.package-data]
 polygrad = ["_native.c"]

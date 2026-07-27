@@ -28,6 +28,7 @@ temp/
 .pytest_cache/
 .obsidian/
 .codex/
+.agents/
 .idea/
 .vscode/
 *.canvas

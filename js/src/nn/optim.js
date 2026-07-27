@@ -33,10 +33,12 @@ function createBoundOptim(runtime) {
       this.params = dedup(allParams.filter(p => p && p.requiresGrad))
       if (!this.params.length) throw new Error('optimizer must have at least one param')
       this.buffers = dedup(allParams.filter(p => p && !p.requiresGrad))
-      this.lr = Number(lr)
       this.device = opts.device || this.params[0].device
       this._ctx = this.params[0]._ctx
       this._rt = this.params[0]._rt
+      this.lr = new Tensor([Number(lr)], {
+        dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false
+      })
     }
 
     zeroGrad() {
@@ -65,9 +67,21 @@ function createBoundOptim(runtime) {
       }
 
       const state = this._stateArgs()
+      if (!(this.lr instanceof Tensor) || this.lr._ctx !== this._ctx) {
+        throw new Error('learning rate Tensor must share the optimizer context')
+      }
+      const lrShape = this.lr.shape
+      if (this.lr.device !== String(this.device).toUpperCase() ||
+          !((lrShape.length === 0) || (lrShape.length === 1 && lrShape[0] === 1))) {
+        throw new Error('learning rate Tensor must be scalar or shape [1] on the optimizer device')
+      }
+      if (this.lr.dtype !== 'float32' && this.lr.dtype !== 'float64') {
+        throw new Error('learning rate Tensor must have at least float32 precision')
+      }
       const result = ffi.poly_optim_build_step(
         this._ctx,
         this._config(),
+        this.lr._tensor,
         this.params.map(t => t._tensor),
         grads.map(t => t._tensor),
         state.m ? state.m.map(t => t._tensor) : null,
@@ -149,7 +163,7 @@ function createBoundOptim(runtime) {
       this.classic = Boolean(opts.classic)
       this.b = this.momentum
         ? this.params.map(p => Tensor.zeros(
-          p.numel(), { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
+          p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
         ))
         : []
       this.velocities = this.b
@@ -158,7 +172,6 @@ function createBoundOptim(runtime) {
     _config() {
       return {
         kind: runtime.OPTIM_SGD,
-        lr: this.lr,
         beta1: 0,
         beta2: 0,
         eps: 0,
@@ -175,9 +188,7 @@ function createBoundOptim(runtime) {
 
     _scheduledEffects() {
       if (!this.momentum) return [...this.params]
-      const out = []
-      for (let i = 0; i < this.params.length; i++) out.push(this.params[i], this.b[i])
-      return out
+      return [...this.b, ...this.params]
     }
   }
 
@@ -206,10 +217,10 @@ function createBoundOptim(runtime) {
       this.eps = Number(opts.eps)
       this.weightDecay = 0
       this.m = this.params.map(p => Tensor.zeros(
-        p.numel(), { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
+        p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
       ))
       this.v = this.params.map(p => Tensor.zeros(
-        p.numel(), { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
+        p.shape, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
       ))
       this.b1_t = Tensor.ones(
         1, { dtype: 'float32', device: this.device, _ctx: this._ctx, requiresGrad: false }
@@ -226,7 +237,6 @@ function createBoundOptim(runtime) {
     _config() {
       return {
         kind: this._kind(),
-        lr: this.lr,
         beta1: this.b1,
         beta2: this.b2,
         eps: this.eps,
@@ -242,10 +252,7 @@ function createBoundOptim(runtime) {
     }
 
     _scheduledEffects() {
-      const out = []
-      for (let i = 0; i < this.params.length; i++) out.push(this.params[i], this.m[i], this.v[i])
-      out.push(this.b1_t, this.b2_t)
-      return out
+      return [this.b1_t, this.b2_t, ...this.m, ...this.v, ...this.params]
     }
   }
 
