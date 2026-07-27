@@ -2624,25 +2624,15 @@ function createBoundTensorClass(runtime) {
       const ctx = (opts && opts._ctx) || _runtime._core.ctx
       const dtype = (opts && opts.dtype) || 'float32'
       const dtypeId = DTYPE_ID[dtype] || DTYPE_ID.float32
-      const numel = shape.reduce((a, b) => a * b, 1)
       const tensorDevice = normalizeDevice(
         (opts && (opts._device || opts.device)) || _runtime.device || 'cpu'
       )
-      let logical = ffi.poly_buffer_by_id(ctx, dtypeId, numel)
-      let physical = ffi.poly_buffer_on_device_by_id(ctx, dtypeId, numel, deviceId(tensorDevice))
-      if (!logical || !physical) throw new Error('poly_buffer_by_id failed')
-      if (shape.length !== 1 || (shape.length === 1 && shape[0] !== numel)) {
-        logical = ffi.poly_reshape(ctx, logical, shape, shape.length)
-        physical = ffi.poly_reshape(ctx, physical, shape, shape.length)
-        if (!logical || !physical) throw new Error('poly_reshape failed')
-      }
-      const tensor = ffi.poly_tensor_create_with_roots(
-        ctx, logical, physical, POLY_TENSOR_VALUE, deviceId(tensorDevice)
+      const tensor = ffi.poly_tensor_empty_by_id(
+        ctx, dtypeId, shape, shape.length, deviceId(tensorDevice)
       )
-      if (!tensor) throw new Error('poly_tensor_create_with_roots failed')
+      if (!tensor) throw new Error('poly_tensor_empty_by_id failed')
       return new Tensor(null, {
         _ctx: ctx,
-        _uop: new UOp(ctx, ffi, logical),
         _tensor: tensor,
         _dtype: dtype,
         _device: tensorDevice,

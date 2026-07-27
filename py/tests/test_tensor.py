@@ -45,6 +45,10 @@ class TestCreation:
         assert t.shape == (2, 3)
         assert t.uop.has_buffer_identity()
         assert not t.uop.is_realized
+        assert t.uop_physical is not None
+        assert t.uop_logical.buffer.src[0].raw == t.uop_physical.buffer.src[0].raw
+        assert t.uop_logical.buffer.src[1:] == ()
+        assert t.uop_physical.buffer.src[1].op_name == 'DEVICE'
 
     def test_movement_is_realized_through_recursive_base(self):
         source = Tensor([1.0, 2.0, 3.0, 4.0]).realize()

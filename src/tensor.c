@@ -700,6 +700,46 @@ PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, 
   return poly_tensor_create_with_roots(ctx, uop, NULL, role, device);
 }
 
+PolyTensor *poly_tensor_empty(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    const int64_t *dims,
+    int ndim,
+    PolyDevice device
+) {
+  /* Pinned tinygrad UOp.empty/new_buffer (uop/ops.py:733-746) allocates one
+   * UNIQUE and builds BUFFER(UNIQUE, DEVICE(device)). Path B retains a
+   * device-free logical BUFFER with that same storage token; it must not
+   * consume a second UNIQUE or influence the physical graph. */
+  if (!ctx || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims) ||
+      device <= POLY_DEVICE_HOST || device > POLY_DEVICE_X86)
+    return NULL;
+
+  int64_t numel = 1;
+  for (int i = 0; i < ndim; i++) {
+    if (dims[i] < 0 || (dims[i] != 0 && numel > INT64_MAX / dims[i])) return NULL;
+    numel *= dims[i];
+  }
+
+  PolyUOp *unique =
+      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+  PolyUOp *device_uop = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+  if (!unique || !device_uop) return NULL;
+
+  PolyUOp *logical = poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(numel));
+  PolyUOp *physical_src[2] = {unique, device_uop};
+  PolyUOp *physical =
+      poly_uop(ctx, POLY_OP_BUFFER, scalar_dtype, physical_src, 2, poly_arg_int(numel));
+  if (!logical || !physical) return NULL;
+
+  if (ndim != 1 || dims[0] != numel) {
+    logical = poly_reshape(ctx, logical, (int64_t *)dims, ndim);
+    physical = poly_reshape(ctx, physical, (int64_t *)dims, ndim);
+    if (!logical || !physical) return NULL;
+  }
+  return poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+}
+
 int poly_tensor_update(
     PolyCtx *ctx,
     PolyTensor *tensor,

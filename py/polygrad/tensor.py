@@ -3055,29 +3055,15 @@ class Tensor:
         shape = tuple(_require_i64(x, 'shape') for x in shape)
         if any(dim < 0 for dim in shape):
             raise ValueError(f'negative dimensions are not allowed: {shape}')
-        numel = 1
-        for dim in shape:
-            numel *= dim
         dtype_id = _dtype_id(dtype_name)
-        logical = _ffi._lib.poly_buffer_by_id(ctx, dtype_id, numel)
-        physical = _ffi._lib.poly_buffer_on_device_by_id(
-            ctx, dtype_id, numel, _device_id(dev)
-        )
-        if not logical or not physical:
-            raise RuntimeError('poly_buffer_by_id failed')
-        if len(shape) != 1 or (shape and shape[0] != numel):
-            dims, ndim = _int64_array(shape)
-            logical = _ffi._lib.poly_reshape(ctx, logical, dims, ndim)
-            physical = _ffi._lib.poly_reshape(ctx, physical, dims, ndim)
-            if not logical or not physical:
-                raise RuntimeError('poly_reshape failed')
-        tensor = _ffi._lib.poly_tensor_create_with_roots(
-            ctx, logical, physical, _POLY_TENSOR_VALUE, _device_id(dev)
+        dims, ndim = _int64_array(shape)
+        tensor = _ffi._lib.poly_tensor_empty_by_id(
+            ctx, dtype_id, dims, ndim, _device_id(dev)
         )
         if not tensor:
-            raise RuntimeError('poly_tensor_create_with_roots failed')
+            raise RuntimeError('poly_tensor_empty_by_id failed')
         return Tensor(
-            _ctx=ctx, _uop=logical, _tensor=tensor, _shape=shape,
+            _ctx=ctx, _tensor=tensor, _shape=shape,
             requires_grad=requires_grad, _dtype=dtype_name, _device=dev,
         )
 

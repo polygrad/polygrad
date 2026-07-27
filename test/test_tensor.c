@@ -83,6 +83,32 @@ static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
 /*  v2 composed op e2e tests (tinygrad-verified reference values)         */
 /* ═══════════════════════════════════════════════════════════════════════ */
 
+TEST(tensor, static_empty_shares_unique_with_deviceful_physical_root) {
+  PolyCtx *ctx = poly_ctx_new();
+  int64_t shape[2] = {2, 3};
+  PolyTensor *tensor = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tensor);
+  ASSERT_NOT_NULL(tensor->uop_logical);
+  ASSERT_NOT_NULL(tensor->uop_physical);
+  ASSERT_INT_EQ(tensor->uop_logical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(tensor->uop_physical->op, POLY_OP_RESHAPE);
+
+  PolyUOp *logical_buffer = base_buf(tensor->uop_logical);
+  PolyUOp *physical_buffer = base_buf(tensor->uop_physical);
+  ASSERT_NOT_NULL(logical_buffer);
+  ASSERT_NOT_NULL(physical_buffer);
+  ASSERT_INT_EQ(logical_buffer->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(physical_buffer->op, POLY_OP_BUFFER);
+  ASSERT_INT_EQ(logical_buffer->n_src, 1);
+  ASSERT_INT_EQ(physical_buffer->n_src, 2);
+  ASSERT_TRUE(logical_buffer->src[0] == physical_buffer->src[0]);
+  ASSERT_INT_EQ(physical_buffer->src[1]->op, POLY_OP_DEVICE);
+  ASSERT_INT_EQ(poly_device_from_device_uop(physical_buffer->src[1]), POLY_DEVICE_CPU);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, einsum_c_api_rejects_oversized_formula_parts) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){1}, 1);

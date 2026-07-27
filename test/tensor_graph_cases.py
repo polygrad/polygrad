@@ -174,6 +174,11 @@ def case_basic_alu():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_empty_storage():
+    out = Tensor.empty(2, 3, device="CPU")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_movement_reduce():
     x = realized_empty(6).reshape(2, 3)
     out = x.permute(1, 0).sum(axis=1, keepdim=True)
@@ -268,6 +273,7 @@ def case_roundtrip_occurrence():
 
 CASES = {
     "basic_alu": ("tensor", case_basic_alu),
+    "empty_storage": ("tensor", case_empty_storage),
     "expand": ("tensor", case_expand),
     "flip": ("tensor", case_flip),
     "flip_scalar_noop": ("tensor", case_flip_scalar_noop),

@@ -112,6 +112,18 @@ PolyUOp *poly_buffer_f64(PolyCtx *ctx, int64_t size) {
   return poly_buffer(ctx, POLY_FLOAT64, size);
 }
 
+PolyTensor *poly_tensor_empty_by_id(
+    PolyCtx *ctx,
+    int dtype_id,
+    const int64_t *dims,
+    int ndim,
+    int device_id
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  return poly_tensor_empty(ctx, poly_dtype_scalar(dt), dims, ndim, (PolyDevice)device_id);
+}
+
 int poly_uop_op(PolyUOp *u) {
   return u ? (int)u->op : 0;
 }

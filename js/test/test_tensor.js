@@ -101,6 +101,16 @@ async function runTensorTests(pg) {
     const t = Tensor.empty([2, 3])
     assertShape(t.shape, [2, 3])
     assert(t.uop.hasBufferIdentity(), 'empty should be backed by a BUFFER UOp')
+    assert(t.uopPhysical, 'empty should have a physical root at construction')
+    assert(
+      t.uopLogical.buffer.src[0].key === t.uopPhysical.buffer.src[0].key,
+      'logical and physical empty storage should share one UNIQUE'
+    )
+    assert(t.uopLogical.buffer.src.length === 1, 'logical BUFFER should stay device-free')
+    assert(
+      t.uopPhysical.buffer.src[1].op === pg._core.ops.DEVICE,
+      'physical BUFFER should carry DEVICE'
+    )
   })
 
   await test('movement is realized through recursive base', async () => {

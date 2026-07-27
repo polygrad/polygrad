@@ -1055,6 +1055,32 @@ static napi_value napi_poly_tensor_create(napi_env env, napi_callback_info info)
   return make_external(env, poly_tensor_create(ctx, uop, (PolyTensorRole)role, (PolyDevice)device));
 }
 
+static napi_value napi_poly_tensor_empty_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  int32_t dtype_id = 0;
+  int32_t ndim = 0;
+  int32_t device = 0;
+  napi_get_value_int32(env, argv[1], &dtype_id);
+  napi_get_value_int32(env, argv[3], &ndim);
+  napi_get_value_int32(env, argv[4], &device);
+  int64_t dims[POLY_MAX_DIMS];
+  int read_ndim = read_int64_array(env, argv[2], dims, POLY_MAX_DIMS);
+  if (ndim != read_ndim) {
+    napi_throw_range_error(env, NULL, "polygrad: shape length does not match ndim");
+    return NULL;
+  }
+  PolyTensor *tensor = poly_tensor_empty_by_id(ctx, dtype_id, dims, ndim, device);
+  if (!tensor) {
+    napi_value null_value;
+    napi_get_null(env, &null_value);
+    return null_value;
+  }
+  return make_external(env, tensor);
+}
+
 static napi_value napi_poly_tensor_create_with_roots(napi_env env, napi_callback_info info) {
   napi_value argv[5];
   size_t argc = 5;
@@ -3931,6 +3957,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_reachable", napi_poly_uop_reachable),
       DECLARE_NAPI_METHOD("poly_realize_uops", napi_poly_realize_uops),
       DECLARE_NAPI_METHOD("poly_tensor_create", napi_poly_tensor_create),
+      DECLARE_NAPI_METHOD("poly_tensor_empty_by_id", napi_poly_tensor_empty_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_create_with_roots", napi_poly_tensor_create_with_roots),
       DECLARE_NAPI_METHOD("poly_tensor_update", napi_poly_tensor_update),
       DECLARE_NAPI_METHOD("poly_tensor_to_device", napi_poly_tensor_to_device),
@@ -3975,9 +4002,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_uop_dtype_id", napi_poly_uop_dtype_id),
       DECLARE_NAPI_METHOD("poly_device_by_name", napi_poly_device_by_name),
       DECLARE_NAPI_METHOD("poly_device_name", napi_poly_device_name),
-      DECLARE_NAPI_METHOD(
-          "poly_device_is_host_addressable", napi_poly_device_is_host_addressable
-      ),
+      DECLARE_NAPI_METHOD("poly_device_is_host_addressable", napi_poly_device_is_host_addressable),
 
       /* Movement ops (shape-taking) */
       DECLARE_NAPI_METHOD("poly_reshape", napi_poly_reshape),

@@ -622,6 +622,13 @@ PolyTensor *poly_tensor_create_with_roots(
     PolyTensorRole role,
     PolyDevice device
 );
+PolyTensor *poly_tensor_empty(
+    PolyCtx *ctx,
+    PolyDType scalar_dtype,
+    const int64_t *dims,
+    int ndim,
+    PolyDevice device
+);
 int poly_tensor_update(
     PolyCtx *ctx,
     PolyTensor *tensor,

@@ -794,6 +794,14 @@ function createWasmCoreFromModule(Module, device) {
       Boolean(Module._poly_device_is_host_addressable(device)),
     poly_tensor_create: (ctx, uop, role, device) =>
       Module._poly_tensor_create(ctx, uop, role, device),
+    poly_tensor_empty_by_id: (ctx, dtypeId, shape, ndim, device) => {
+      const dimsPtr = writeInt64Array(shape || [])
+      try {
+        return Module._poly_tensor_empty_by_id(ctx, dtypeId, dimsPtr, ndim, device)
+      } finally {
+        if (dimsPtr) Module._free(dimsPtr)
+      }
+    },
     poly_tensor_create_with_roots: (ctx, logical, physical, role, device) =>
       Module._poly_tensor_create_with_roots(ctx, logical, physical, role, device),
     poly_tensor_update: (ctx, tensor, logical, physical, role, device) =>
@@ -1254,7 +1262,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 22
+  const EXPECTED_ABI = 23
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(
