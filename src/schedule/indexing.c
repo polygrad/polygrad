@@ -286,11 +286,10 @@ bool poly_apply_movement_op(
   /* FLIP: reverse indices along specified axes */
   case POLY_OP_FLIP: {
     if (arg.kind != POLY_ARG_INT_TUPLE) return false;
+    if (arg.int_tuple.n != in_shape.ndim) return false;
     bool flipped[POLY_MAX_DIMS] = {false};
-    for (int i = 0; i < arg.int_tuple.n; i++) {
-      int ax = (int)arg.int_tuple.vals[i];
-      if (ax >= 0 && ax < in_shape.ndim) flipped[ax] = true;
-    }
+    for (int i = 0; i < arg.int_tuple.n; i++)
+      flipped[i] = arg.int_tuple.vals[i] != 0;
     int n = in_shape.ndim;
     PolyUOp *zero = index_const(ctx, 0);
     for (int i = 0; i < n; i++) {
@@ -323,6 +322,56 @@ bool poly_apply_movement_op(
 
   /* PAD: offset + bounds check */
   case POLY_OP_PAD: {
+    if (movement && movement->arg.kind == POLY_ARG_NONE && movement->n_src == 3 &&
+        !movement->src[0]->dtype.is_ptr) {
+      int n = in_shape.ndim;
+      if (movement->src[1]->op != POLY_OP_STACK || movement->src[1]->n_src != n) return false;
+      PolyUOp *valid = NULL;
+      PolyUOp *zero = index_const(ctx, 0);
+      PolyUOp *falsev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
+      PolyUOp *truev = poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(true));
+
+      for (int i = 0; i < n; i++) {
+        if (i >= n_out) {
+          in_rngs[i] = zero;
+          valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, falsev, poly_arg_none())
+                        : falsev;
+          continue;
+        }
+        PolyUOp *offset = shape_stack_get(movement->src[1], i);
+        if (!offset) return false;
+        PolyUOp *index = to_index_dtype(ctx, out_rngs[i]);
+        PolyUOp *offset_index = to_index_dtype(ctx, offset);
+        int64_t offset_value = 0;
+        PolyUOp *shifted = poly_uop_const_i64(offset, &offset_value) == 0 && offset_value == 0
+                               ? index
+                               : poly_uop2(
+                                     ctx, POLY_OP_ADD, POLY_INDEX, index,
+                                     index_neg_like_tinygrad(ctx, offset_index), poly_arg_none()
+                                 );
+        PolyUOp *input_size = poly_uop_shape_dim(ctx, movement->src[0], i);
+        if (!input_size) input_size = index_const(ctx, in_shape.dims[i]);
+        input_size = to_index_dtype(ctx, input_size);
+        PolyUOp *end =
+            poly_uop2(ctx, POLY_OP_ADD, POLY_INDEX, input_size, offset_index, poly_arg_none());
+        PolyUOp *lt_begin =
+            poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, index, offset_index, poly_arg_none());
+        PolyUOp *ge_begin =
+            poly_uop2(ctx, POLY_OP_CMPNE, POLY_BOOL, lt_begin, truev, poly_arg_none());
+        PolyUOp *lt_end = poly_uop2(ctx, POLY_OP_CMPLT, POLY_BOOL, index, end, poly_arg_none());
+        PolyUOp *dim_valid =
+            poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, ge_begin, lt_end, poly_arg_none());
+        in_rngs[i] =
+            poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, dim_valid, shifted, zero, poly_arg_none());
+        valid = valid ? poly_uop2(ctx, POLY_OP_AND, POLY_BOOL, valid, dim_valid, poly_arg_none())
+                      : dim_valid;
+      }
+      if (valid_out) *valid_out = valid;
+      *n_in_out = n;
+      return true;
+    }
+
+    /* Legacy imported/raw pair-tuple PAD. */
     if (arg.kind != POLY_ARG_PAIR_TUPLE) return false;
     int n = arg.pair_tuple.n;
     PolyUOp *valid = NULL;

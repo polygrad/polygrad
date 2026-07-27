@@ -32,14 +32,6 @@ def classify(case, kind, path, tg_node, pg_node):
     if pair in OP_PAIR_IDS:
         return OP_PAIR_IDS[pair]
     if (
-        kind in {"label", "arity", "missing_source", "extra_source"}
-        and tg_node
-        and pg_node
-        and tg_node["op"] == pg_node["op"]
-        and tg_node["op"] in {"RESHAPE", "EXPAND", "PAD", "SHRINK", "FLIP"}
-    ):
-        return "PG-PARITY-007"
-    if (
         case == "rebuilt_after_realize"
         and kind == "sharing"
         and path == "root.src[1]"
@@ -97,21 +89,15 @@ def compare_graph(case, tg_graph, pg_graph):
         common = min(len(tg_node["src"]), len(pg_node["src"]))
         for i in range(common):
             visit(tg_node["src"][i], pg_node["src"][i], f"{path}.src[{i}]")
-        movement_id = (
-            "PG-PARITY-007"
-            if tg_node["op"] == pg_node["op"]
-            and tg_node["op"] in {"RESHAPE", "EXPAND", "PAD", "SHRINK", "FLIP"}
-            else None
-        )
         for i in range(common, len(tg_node["src"])):
             add(
                 "missing_source", f"{path}.src[{i}]", tg_node["src"][i], None,
-                "missing in Polygrad", movement_id,
+                "missing in Polygrad",
             )
         for i in range(common, len(pg_node["src"])):
             add(
                 "extra_source", f"{path}.src[{i}]", None, pg_node["src"][i],
-                "extra in Polygrad", movement_id,
+                "extra in Polygrad",
             )
 
     visit(tg_graph["root"], pg_graph["root"], "root")

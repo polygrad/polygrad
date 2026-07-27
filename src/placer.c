@@ -265,7 +265,10 @@ static PolyUOp *lower_contiguous_realized_view(
   while (base && base->n_src >= 1 &&
          (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK)) {
     if (base->op == POLY_OP_SHRINK) {
-      if (base->arg.kind != POLY_ARG_PAIR_TUPLE) return NULL;
+      bool canonical = base->arg.kind == POLY_ARG_NONE && base->n_src >= 3 &&
+                       base->src[1]->op == POLY_OP_STACK && base->src[2]->op == POLY_OP_STACK &&
+                       base->src[1]->n_src == base->src[2]->n_src;
+      if (!canonical && base->arg.kind != POLY_ARG_PAIR_TUPLE) return NULL;
       has_shrink = true;
     }
     n_steps++;
@@ -306,15 +309,31 @@ static PolyUOp *lower_contiguous_realized_view(
       continue;
     }
 
-    if (step->arg.pair_tuple.n != shape.ndim || next.ndim != shape.ndim) {
+    bool canonical = step->arg.kind == POLY_ARG_NONE && step->n_src >= 3 &&
+                     step->src[1]->op == POLY_OP_STACK && step->src[2]->op == POLY_OP_STACK &&
+                     step->src[1]->n_src == shape.ndim && step->src[2]->n_src == shape.ndim;
+    if ((!canonical &&
+         (step->arg.kind != POLY_ARG_PAIR_TUPLE || step->arg.pair_tuple.n != shape.ndim)) ||
+        next.ndim != shape.ndim) {
       free(steps);
       return NULL;
     }
     uint64_t stride = 1, start = 0, last = 0, selected = 1;
     bool empty = false, ok = true;
     for (int d = shape.ndim - 1; d >= 0; d--) {
-      int64_t begin = step->arg.pair_tuple.pairs[d][0];
-      int64_t end = step->arg.pair_tuple.pairs[d][1];
+      int64_t begin = 0, end = 0;
+      if (canonical) {
+        int64_t length = 0;
+        if (poly_uop_bind_value(step->src[1]->src[d], &begin) != 0 ||
+            poly_uop_bind_value(step->src[2]->src[d], &length) != 0 ||
+            __builtin_add_overflow(begin, length, &end)) {
+          ok = false;
+          break;
+        }
+      } else {
+        begin = step->arg.pair_tuple.pairs[d][0];
+        end = step->arg.pair_tuple.pairs[d][1];
+      }
       int64_t dim = shape.dims[d];
       if (dim < 0 || begin < 0 || end < begin || end > dim) {
         ok = false;

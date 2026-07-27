@@ -228,29 +228,6 @@
       "close_when": "The migrated Tensor subset is node-for-node REDUCE-isomorphic to pinned tinygrad."
     },
     {
-      "id": "PG-PARITY-007",
-      "status": "open_debt",
-      "stages": ["tensor"],
-      "area": "movement shape representation",
-      "tinygrad": "RESHAPE/EXPAND carry shape in CONST/STACK sources, PAD/SHRINK carry start/end shape sources, PERMUTE keeps a permutation tuple arg, and FLIP keeps a per-dimension boolean-mask tuple arg",
-      "polygrad": "RESHAPE/EXPAND now carry exact shape-value sources and PERMUTE matches the tuple spelling; PAD/SHRINK still carry pair-tuple metadata, while FLIP carries an axis-index tuple instead of the pinned boolean mask",
-      "rationale": "This is shared Tensor IR topology debt.",
-      "approval": null,
-      "evidence": [
-        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._mop",
-        "temp/tensor_graph_oracle_tg.json",
-        "temp/tensor_graph_oracle_pg.json",
-        "temp/reshape_source_correspondence_20260726.md",
-        "src/shape.c:poly_reshape",
-        "src/shape.c:poly_expand",
-        "test/test_shape.c:reshape_expand_accept_scalar_shape_sources",
-        "test/test_realize.c:transform_to_call_preserves_scalar_movement_shape_sources",
-        "src/shape.c:poly_pad",
-        "src/shape.c:poly_shrink"
-      ],
-      "close_when": "PAD/SHRINK use pinned source topology, FLIP uses the pinned boolean mask, and the complete movement shape/rangeify gates pass."
-    },
-    {
       "id": "PG-PARITY-008",
       "status": "open_debt",
       "stages": ["schedule", "multi-device"],

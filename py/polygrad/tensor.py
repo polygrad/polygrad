@@ -2067,10 +2067,12 @@ class Tensor:
     def _pad_constant(self, arg, value):
         arg = tuple((0, 0) if p is None else tuple(p) for p in arg)
         flat, n = _pair_array(arg)
-        if value == 0:
-            uop = _ffi._lib.poly_pad(self._ctx, self._graph_uop, flat, n)
-        else:
-            uop = _ffi._lib.poly_pad_value(self._ctx, self._graph_uop, flat, n, float(value))
+        # Pinned _pad_constant shrinks negative pads before emitting a
+        # non-negative PAD (mixin/__init__.py:359-368). Keep that policy in
+        # the shared C boundary for both zero and nonzero fill values.
+        uop = _ffi._lib.poly_pad_value(
+            self._ctx, self._graph_uop, flat, n, float(value)
+        )
         new_shape = tuple(s + b + a for s, (b, a) in zip(self.shape, arg))
         return self._make_result(uop, new_shape, [self])
 

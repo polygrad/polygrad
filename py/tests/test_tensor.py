@@ -1539,6 +1539,13 @@ class TestMovement:
             [[[[0, 0, 1, 2], [0, 3, 4, 5], [0, 6, 7, 8], [0, 0, 0, 0]]]],
         )
 
+        moved = Tensor.arange(12).reshape(3, 4).pad(((-1, 2), (1, -1)))
+        assert moved.shape == (4, 4)
+        np.testing.assert_allclose(
+            moved.numpy(),
+            [[0, 4, 5, 6], [0, 8, 9, 10], [0, 0, 0, 0], [0, 0, 0, 0]],
+        )
+
     def test_roll_1d(self):
         a = Tensor.arange(5)
         np.testing.assert_allclose(a.roll(2, 0).numpy(), np.roll(np.arange(5, dtype=np.float32), 2))

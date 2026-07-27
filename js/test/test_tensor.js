@@ -1213,6 +1213,10 @@ async function runTensorTests(pg) {
     const flat = x.pad([1, 0, 0, 1])
     assertShape(flat.shape, [1, 1, 4, 4])
     assertClose(await flat.toArray(), [0, 0, 1, 2, 0, 3, 4, 5, 0, 6, 7, 8, 0, 0, 0, 0])
+
+    const moved = Tensor.arange(12).reshape(3, 4).pad([[-1, 2], [1, -1]])
+    assertShape(moved.shape, [4, 4])
+    assertClose(await moved.toArray(), [0, 4, 5, 6, 0, 8, 9, 10, 0, 0, 0, 0, 0, 0, 0, 0])
   })
 
   await test('pad readback preserves non-float dtype', async () => {

@@ -237,7 +237,12 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
           ctx, POLY_OP_EXPAND, step->dtype, expand_src, 2, poly_arg_none());
     } else if (step->op == POLY_OP_PERMUTE && step->arg.kind == POLY_ARG_INT_TUPLE) {
       view = poly_permute(ctx, view, step->arg.int_tuple.vals, step->arg.int_tuple.n);
-    } else if (step->op == POLY_OP_PAD) {
+    } else if (step->op == POLY_OP_PAD && step->arg.kind == POLY_ARG_NONE &&
+               step->n_src == 3 && step->src[1]->op == POLY_OP_STACK &&
+               step->src[2]->op == POLY_OP_STACK &&
+               step->src[1]->n_src == step->src[2]->n_src) {
+      view = poly_pad_uop(ctx, view, step->src[1]->src, step->src[2]->src, step->src[1]->n_src);
+    } else if (step->op == POLY_OP_PAD && step->arg.kind == POLY_ARG_PAIR_TUPLE) {
       view = poly_pad(ctx, view, step->arg.pair_tuple.pairs, step->arg.pair_tuple.n);
     } else if (step->op == POLY_OP_SHRINK && step->arg.kind == POLY_ARG_PAIR_TUPLE) {
       view = poly_shrink(ctx, view, step->arg.pair_tuple.pairs, step->arg.pair_tuple.n);
@@ -246,7 +251,7 @@ static PolyUOp *poly_transform_to_call_rebuild_view(
                step->src[2]->op == POLY_OP_STACK) {
       view = poly_shrink_uop(ctx, view, step->src[1]->src, step->src[2]->src, step->src[1]->n_src);
     } else if (step->op == POLY_OP_FLIP && step->arg.kind == POLY_ARG_INT_TUPLE) {
-      view = poly_flip(ctx, view, step->arg.int_tuple.vals, step->arg.int_tuple.n);
+      view = poly_uop1(ctx, POLY_OP_FLIP, view->dtype, view, step->arg);
     }
   }
   return view;

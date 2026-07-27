@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import math
 import os
 import re
 
@@ -111,6 +112,22 @@ def normalize_arg(node, arg):
         device = _ffi._lib.poly_uop_device(node.raw)
         name = _ffi._lib.poly_device_name(device)
         return name.decode("utf-8").upper() if name else f"DEVICE:{device}"
+    if op == "CONST" and dtype_name(node) in {
+        "half", "float", "double", "bfloat16", "float16", "float32", "float64",
+        "__fp16", "__bf16",
+    }:
+        # tinygrad's diagnostic wraps float constants in ConstFloat(...);
+        # Polygrad prints the same typed value directly. Compare the value,
+        # retaining signed zero and non-finite classes.
+        value_text = arg
+        if value_text.startswith("ConstFloat(") and value_text.endswith(")"):
+            value_text = value_text[len("ConstFloat("):-1]
+        value = float(value_text)
+        if math.isnan(value):
+            return "<float:nan>"
+        if math.isinf(value):
+            return "<float:+inf>" if value > 0 else "<float:-inf>"
+        return f"<float:{value.hex()}>"
     arg = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", arg)
     return arg.replace("Ops.", "").replace(" ", "").replace(",)", ")")
 
@@ -178,8 +195,38 @@ def case_pad():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_pad_negative():
+    out = realized_empty(3, 4).pad(((-1, 2), (1, -1)))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_noop():
+    out = realized_empty(2, 3).pad(((0, 0), (0, 0)))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_value():
+    out = realized_empty(3).pad(((1, 2),), value=5)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_scalar_value():
+    out = realized_empty().pad((), value=5)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_pad_scalar_noop():
+    out = realized_empty().pad(())
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_shrink():
     out = realized_empty(2, 3).shrink(((0, 1), (1, 3)))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_shrink_noop():
+    out = realized_empty(2, 3).shrink(((0, 2), (0, 3)))
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -190,6 +237,16 @@ def case_permute():
 
 def case_flip():
     out = realized_empty(2, 3).flip((1,))
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_shrink_scalar_noop():
+    out = realized_empty().shrink(())
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_flip_scalar_noop():
+    out = realized_empty().flip(())
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -213,13 +270,21 @@ CASES = {
     "basic_alu": ("tensor", case_basic_alu),
     "expand": ("tensor", case_expand),
     "flip": ("tensor", case_flip),
+    "flip_scalar_noop": ("tensor", case_flip_scalar_noop),
     "movement_reduce": ("tensor", case_movement_reduce),
     "pad": ("tensor", case_pad),
+    "pad_negative": ("tensor", case_pad_negative),
+    "pad_noop": ("tensor", case_pad_noop),
+    "pad_scalar_noop": ("tensor", case_pad_scalar_noop),
+    "pad_scalar_value": ("tensor", case_pad_scalar_value),
+    "pad_value": ("tensor", case_pad_value),
     "permute": ("tensor", case_permute),
     "rebuilt_after_realize": ("realize", case_rebuilt_after_realize),
     "reshape": ("tensor", case_reshape),
     "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
     "shrink": ("tensor", case_shrink),
+    "shrink_noop": ("tensor", case_shrink_noop),
+    "shrink_scalar_noop": ("tensor", case_shrink_scalar_noop),
 }
 
 

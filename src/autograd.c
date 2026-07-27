@@ -38,9 +38,11 @@ static PolyUOp *cast_to(PolyCtx *ctx, PolyUOp *u, PolyDType dt) {
   return poly_uop1(ctx, POLY_OP_CAST, dt, u, poly_arg_none());
 }
 
-static PolyUOp *shrink_stack_get(PolyUOp *stack, int idx) {
-  if (!stack || stack->op != POLY_OP_STACK || idx < 0 || idx >= stack->n_src) return NULL;
-  return stack->src[idx];
+static PolyUOp *shape_dim_node(PolyCtx *ctx, PolyUOp *u, PolyShape shape, int idx) {
+  PolyUOp *dim = poly_uop_shape_dim(ctx, u, idx);
+  if (dim) return dim;
+  if (idx < 0 || idx >= shape.ndim) return NULL;
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(shape.dims[idx]));
 }
 
 static PolyUOp *grad_get(PolyMap *grads, PolyUOp *u) {
@@ -665,23 +667,33 @@ static PolyMap *grad_reverse_pass(
     } break;
 
     case POLY_OP_PAD: {
-      if (u->arg.kind != POLY_ARG_PAIR_TUPLE) {
-        fprintf(stderr, "polygrad: autograd: PAD missing pair tuple arg\n");
-        GRAD_REVERSE_FAIL();
-      }
-      int n = u->arg.pair_tuple.n;
+      PolyShape in_shape = poly_uop_max_shape_cached(ctx, u->src[0]);
+      int n = in_shape.ndim;
       if (n < 0 || n > POLY_MAX_DIMS) {
         fprintf(stderr, "polygrad: autograd: PAD rank %d out of bounds\n", n);
         GRAD_REVERSE_FAIL();
       }
-      PolyShape in_shape = poly_uop_max_shape_cached(ctx, u->src[0]);
-      int64_t shrink_pairs[POLY_MAX_DIMS][2];
-      for (int i = 0; i < n; i++) {
-        int64_t before = u->arg.pair_tuple.pairs[i][0];
-        shrink_pairs[i][0] = before;
-        shrink_pairs[i][1] = before + in_shape.dims[i];
+      PolyUOp *gx = NULL;
+      if (u->arg.kind == POLY_ARG_NONE && u->n_src == 3 && u->src[1]->op == POLY_OP_STACK &&
+          u->src[1]->n_src == n) {
+        PolyUOp *sizes[POLY_MAX_DIMS];
+        for (int i = 0; i < n; i++) {
+          sizes[i] = shape_dim_node(ctx, u->src[0], in_shape, i);
+          if (!sizes[i]) GRAD_REVERSE_FAIL();
+        }
+        gx = poly_shrink_uop(ctx, g, u->src[1]->src, sizes, n);
+      } else if (u->arg.kind == POLY_ARG_PAIR_TUPLE && u->arg.pair_tuple.n == n) {
+        int64_t shrink_pairs[POLY_MAX_DIMS][2];
+        for (int i = 0; i < n; i++) {
+          int64_t before = u->arg.pair_tuple.pairs[i][0];
+          shrink_pairs[i][0] = before;
+          shrink_pairs[i][1] = before + in_shape.dims[i];
+        }
+        gx = poly_shrink(ctx, g, shrink_pairs, n);
+      } else {
+        fprintf(stderr, "polygrad: autograd: PAD unsupported form\n");
+        GRAD_REVERSE_FAIL();
       }
-      PolyUOp *gx = poly_shrink(ctx, g, shrink_pairs, n);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
 
@@ -694,36 +706,35 @@ static PolyMap *grad_reverse_pass(
         fprintf(stderr, "polygrad: autograd: SHRINK rank %d out of bounds\n", n);
         GRAD_REVERSE_FAIL();
       }
-      int64_t pad_pairs[POLY_MAX_DIMS][2];
+      PolyUOp *gx = NULL;
       if (u->arg.kind == POLY_ARG_PAIR_TUPLE) {
         if (u->arg.pair_tuple.n != n) {
           fprintf(stderr, "polygrad: autograd: SHRINK pair rank mismatch\n");
           GRAD_REVERSE_FAIL();
         }
+        int64_t pad_pairs[POLY_MAX_DIMS][2];
         for (int i = 0; i < n; i++) {
           int64_t start = u->arg.pair_tuple.pairs[i][0];
           int64_t end = u->arg.pair_tuple.pairs[i][1];
           pad_pairs[i][0] = start;
           pad_pairs[i][1] = in_shape.dims[i] - end;
         }
+        gx = poly_pad(ctx, g, pad_pairs, n);
       } else if (u->arg.kind == POLY_ARG_NONE && u->n_src >= 3 && !u->src[0]->dtype.is_ptr) {
-        for (int i = 0; i < n; i++) {
-          PolyUOp *start_u = shrink_stack_get(u->src[1], i);
-          PolyUOp *size_u = shrink_stack_get(u->src[2], i);
-          int64_t start = 0, size = 0;
-          if (!start_u || !size_u || poly_uop_bind_value(start_u, &start) != 0 ||
-              poly_uop_bind_value(size_u, &size) != 0) {
-            fprintf(stderr, "polygrad: autograd: SHRINK dynamic bound is not currently bound\n");
-            GRAD_REVERSE_FAIL();
-          }
-          pad_pairs[i][0] = start;
-          pad_pairs[i][1] = in_shape.dims[i] - start - size;
+        if (u->src[1]->op != POLY_OP_STACK || u->src[1]->n_src != n) {
+          fprintf(stderr, "polygrad: autograd: SHRINK start rank mismatch\n");
+          GRAD_REVERSE_FAIL();
         }
+        PolyUOp *sizes[POLY_MAX_DIMS];
+        for (int i = 0; i < n; i++) {
+          sizes[i] = shape_dim_node(ctx, u->src[0], in_shape, i);
+          if (!sizes[i]) GRAD_REVERSE_FAIL();
+        }
+        gx = poly_pad_uop(ctx, g, u->src[1]->src, sizes, n);
       } else {
         fprintf(stderr, "polygrad: autograd: SHRINK unsupported form\n");
         GRAD_REVERSE_FAIL();
       }
-      PolyUOp *gx = poly_pad(ctx, g, pad_pairs, n);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
 
@@ -734,7 +745,7 @@ static PolyMap *grad_reverse_pass(
         fprintf(stderr, "polygrad: autograd: FLIP missing int tuple arg\n");
         GRAD_REVERSE_FAIL();
       }
-      PolyUOp *gx = poly_flip(ctx, g, u->arg.int_tuple.vals, u->arg.int_tuple.n);
+      PolyUOp *gx = poly_uop1(ctx, POLY_OP_FLIP, g->dtype, g, u->arg);
       gx = cast_to(ctx, gx, u->src[0]->dtype);
       grad_add(ctx, grads, u->src[0], gx);
     } break;

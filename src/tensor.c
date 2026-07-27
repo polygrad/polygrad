@@ -2422,7 +2422,11 @@ PolyUOp *poly_cat(PolyCtx *ctx, PolyUOp **tensors, int n_tensors, int dim) {
 
 /* Tensor._pad_constant -- tensor.py:1067 */
 PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, double value) {
-  if (!ctx || !x || !pads || ndim <= 0) return NULL;
+  if (!ctx || !x || ndim < 0 || (ndim > 0 && !pads)) return NULL;
+  /* MovementMixin.pad returns a scalar unchanged for an empty movement
+   * argument (uop/ops.py:712-713). _pad_constant returns that base directly
+   * only for zero fill (mixin/__init__.py:359-368). */
+  if (ndim == 0 && value == 0.0) return x;
 
   int64_t sh[POLY_MAX_DIMS];
   int xnd = uop_shape(ctx, x, sh);
@@ -2474,13 +2478,16 @@ PolyUOp *poly_pad_value(PolyCtx *ctx, PolyUOp *x, int64_t (*pads)[2], int ndim, 
   int64_t mask_shape[POLY_MAX_DIMS];
   int mask_ndim = uop_shape(ctx, X, mask_shape);
   if (mask_ndim < 0) return NULL;
-  int64_t mask_ones[POLY_MAX_DIMS];
-  for (int i = 0; i < mask_ndim; i++)
-    mask_ones[i] = 1;
-  PolyUOp *true_const = poly_const_typed(ctx, POLY_BOOL, 1.0);
-  PolyUOp *ones = poly_expand(ctx, poly_reshape(ctx, true_const, mask_ones, mask_ndim), mask_shape, mask_ndim);
-  PolyUOp *padded_ones = poly_pad(ctx, ones, nn_pads, ndim);
   PolyDType dt = poly_dtype_scalar(x->dtype);
+  PolyUOp *ones = poly_const_typed(ctx, dt, 1.0);
+  if (mask_ndim > 0) {
+    int64_t mask_ones[POLY_MAX_DIMS];
+    for (int i = 0; i < mask_ndim; i++)
+      mask_ones[i] = 1;
+    ones = poly_expand(ctx, poly_reshape(ctx, ones, mask_ones, mask_ndim), mask_shape, mask_ndim);
+  }
+  ones = poly_uop1(ctx, POLY_OP_CAST, POLY_BOOL, ones, poly_arg_none());
+  PolyUOp *padded_ones = poly_pad(ctx, ones, nn_pads, ndim);
   PolyUOp *value_c = poly_const_typed(ctx, dt, value);
   return poly_where_op(ctx, padded_ones, padded_X, value_c);
 }

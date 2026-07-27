@@ -270,8 +270,13 @@ static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg
     return arg.kind == POLY_ARG_NONE && n_src == 2 && src &&
            shape_value_rank_valid(src[1]);
   case POLY_OP_PERMUTE:
-  case POLY_OP_FLIP:
     return arg.kind == POLY_ARG_INT_TUPLE && rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n);
+  case POLY_OP_FLIP:
+    if (arg.kind != POLY_ARG_INT_TUPLE || !rank_tuple_valid(arg.int_tuple.vals, arg.int_tuple.n))
+      return false;
+    for (int i = 0; i < arg.int_tuple.n; i++)
+      if (arg.int_tuple.vals[i] != 0 && arg.int_tuple.vals[i] != 1) return false;
+    return true;
   case POLY_OP_EXPAND:
     return arg.kind == POLY_ARG_NONE && n_src == 2 && src &&
            shape_value_rank_valid(src[1]);
@@ -280,6 +285,8 @@ static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg
     return arg.kind == POLY_ARG_PAIR_TUPLE &&
            rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
   case POLY_OP_PAD:
+    if (arg.kind == POLY_ARG_NONE)
+      return n_src == 3 && src && shape_value_rank_valid(src[1]) && shape_value_rank_valid(src[2]);
     return arg.kind == POLY_ARG_PAIR_TUPLE &&
            rank_tuple_valid(arg.pair_tuple.pairs, arg.pair_tuple.n);
   case POLY_OP_REDUCE_AXIS:
@@ -1220,8 +1227,14 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     written = snprintf(buf + *pos, cap - *pos, ", (");
     if (written > 0) *pos += written;
     for (int i = 0; i < u->arg.int_tuple.n; i++) {
-      written =
-          snprintf(buf + *pos, cap - *pos, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
+      if (u->op == POLY_OP_FLIP)
+        written = snprintf(
+            buf + *pos, cap - *pos, "%s%s", i ? "," : "",
+            u->arg.int_tuple.vals[i] ? "True" : "False"
+        );
+      else
+        written =
+            snprintf(buf + *pos, cap - *pos, "%s%ld", i ? "," : "", (long)u->arg.int_tuple.vals[i]);
       if (written > 0) *pos += written;
     }
     written = snprintf(buf + *pos, cap - *pos, ")");

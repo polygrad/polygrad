@@ -4167,6 +4167,7 @@ TEST(realize, transform_to_call_requested_parent_movement_views_reuse_parent_eff
       poly_flip(ctx, parent, (int64_t[]){1}, 1),
   };
   PolyOps expected_ops[] = {POLY_OP_PERMUTE, POLY_OP_SHRINK, POLY_OP_FLIP};
+  int expected_n_src[] = {1, 3, 1};
 
   for (int i = 0; i < 3; i++) {
     PolyUOp *targets[] = {parent, views[i]};
@@ -4182,8 +4183,14 @@ TEST(realize, transform_to_call_requested_parent_movement_views_reuse_parent_eff
     ASSERT_NOT_NULL(callified_out[0]);
     ASSERT_NOT_NULL(callified_out[1]);
     ASSERT_EQ(callified_out[1]->op, expected_ops[i]);
-    ASSERT_INT_EQ(callified_out[1]->n_src, 1);
+    ASSERT_INT_EQ(callified_out[1]->n_src, expected_n_src[i]);
     ASSERT_PTR_EQ(callified_out[1]->src[0], callified_out[0]);
+    if (expected_ops[i] == POLY_OP_SHRINK) {
+      ASSERT_EQ(callified_out[1]->src[1]->op, POLY_OP_STACK);
+      ASSERT_EQ(callified_out[1]->src[2]->op, POLY_OP_STACK);
+      ASSERT_INT_EQ(callified_out[1]->src[1]->n_src, 2);
+      ASSERT_INT_EQ(callified_out[1]->src[2]->n_src, 2);
+    }
 
     PolyUOp *scheduled_out[] = {NULL, NULL};
     PolySchedule *schedule = poly_schedule_with_vars(ctx, targets, 2, scheduled_out);
@@ -4192,8 +4199,12 @@ TEST(realize, transform_to_call_requested_parent_movement_views_reuse_parent_eff
     ASSERT_NOT_NULL(scheduled_out[0]);
     ASSERT_NOT_NULL(scheduled_out[1]);
     ASSERT_EQ(scheduled_out[1]->op, expected_ops[i]);
-    ASSERT_INT_EQ(scheduled_out[1]->n_src, 1);
+    ASSERT_INT_EQ(scheduled_out[1]->n_src, expected_n_src[i]);
     ASSERT_PTR_EQ(scheduled_out[1]->src[0], scheduled_out[0]);
+    if (expected_ops[i] == POLY_OP_SHRINK) {
+      ASSERT_EQ(scheduled_out[1]->src[1]->op, POLY_OP_STACK);
+      ASSERT_EQ(scheduled_out[1]->src[2]->op, POLY_OP_STACK);
+    }
     poly_schedule_free(schedule);
   }
 

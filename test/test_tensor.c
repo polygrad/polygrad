@@ -1951,6 +1951,17 @@ TEST(shape_uop, pad) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *p = poly_pad(ctx, b, (int64_t[][2]){{1, 1}, {2, 0}}, 2);
+  /* Pinned UOp._mop stores PAD offsets and output sizes as shape-value
+   * sources (uop/ops.py:710-721), never as a pair-tuple arg. */
+  ASSERT_INT_EQ(p->op, POLY_OP_PAD);
+  ASSERT_INT_EQ(p->arg.kind, POLY_ARG_NONE);
+  ASSERT_INT_EQ(p->n_src, 3);
+  ASSERT_INT_EQ(p->src[1]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(p->src[2]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(p->src[1]->src[0]->arg.i, 1);
+  ASSERT_INT_EQ(p->src[1]->src[1]->arg.i, 2);
+  ASSERT_INT_EQ(p->src[2]->src[0]->arg.i, 4);
+  ASSERT_INT_EQ(p->src[2]->src[1]->arg.i, 5);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, p)[0], 4);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, p)[1], 5);
   poly_ctx_destroy(ctx);
@@ -1961,8 +1972,62 @@ TEST(shape_uop, shrink) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *b = make_buf(ctx, (int64_t[]){4, 5}, 2);
   PolyUOp *s = poly_shrink(ctx, b, (int64_t[][2]){{1, 3}, {0, 4}}, 2);
+  /* Pinned UOp._mop stores SHRINK starts and sizes as shape-value sources
+   * (uop/ops.py:710-721). */
+  ASSERT_INT_EQ(s->op, POLY_OP_SHRINK);
+  ASSERT_INT_EQ(s->arg.kind, POLY_ARG_NONE);
+  ASSERT_INT_EQ(s->n_src, 3);
+  ASSERT_INT_EQ(s->src[1]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(s->src[2]->op, POLY_OP_STACK);
+  ASSERT_INT_EQ(s->src[1]->src[0]->arg.i, 1);
+  ASSERT_INT_EQ(s->src[1]->src[1]->arg.i, 0);
+  ASSERT_INT_EQ(s->src[2]->src[0]->arg.i, 2);
+  ASSERT_INT_EQ(s->src[2]->src[1]->arg.i, 4);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, s)[0], 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, s)[1], 4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, scalar_pad_and_shrink_are_noops) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *scalar = poly_reshape(ctx, poly_buffer_f32(ctx, 1), NULL, 0);
+  ASSERT_NOT_NULL(scalar);
+  ASSERT_PTR_EQ(poly_pad(ctx, scalar, NULL, 0), scalar);
+  ASSERT_PTR_EQ(poly_pad_value(ctx, scalar, NULL, 0, 0.0), scalar);
+  PolyUOp *filled = poly_pad_value(ctx, scalar, NULL, 0, 5.0);
+  ASSERT_NOT_NULL(filled);
+  ASSERT_INT_EQ(filled->op, POLY_OP_WHERE);
+  ASSERT_INT_EQ(filled->n_src, 3);
+  ASSERT_INT_EQ(filled->src[0]->op, POLY_OP_CAST);
+  ASSERT_INT_EQ(filled->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_PTR_EQ(filled->src[1], scalar);
+  ASSERT_PTR_EQ(poly_shrink(ctx, scalar, NULL, 0), scalar);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, unchanged_pad_and_shrink_are_noops) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *value = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  ASSERT_NOT_NULL(value);
+  ASSERT_PTR_EQ(poly_pad(ctx, value, (int64_t[][2]){{0, 0}, {0, 0}}, 2), value);
+  ASSERT_PTR_EQ(poly_shrink(ctx, value, (int64_t[][2]){{0, 2}, {0, 3}}, 2), value);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(shape_uop, flip_uses_rank_sized_boolean_mask) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *b = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *f = poly_flip(ctx, b, (int64_t[]){1}, 1);
+  ASSERT_NOT_NULL(f);
+  ASSERT_INT_EQ(f->op, POLY_OP_FLIP);
+  ASSERT_INT_EQ(f->arg.kind, POLY_ARG_INT_TUPLE);
+  ASSERT_INT_EQ(f->arg.int_tuple.n, 2);
+  ASSERT_INT_EQ(f->arg.int_tuple.vals[0], 0);
+  ASSERT_INT_EQ(f->arg.int_tuple.vals[1], 1);
+  ASSERT_PTR_EQ(poly_flip(ctx, b, NULL, 0), b);
   poly_ctx_destroy(ctx);
   PASS();
 }

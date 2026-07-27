@@ -1610,9 +1610,12 @@ function createBoundTensorClass(runtime) {
       for (let i = 0; i < arg.length; i++) {
         flat.push(arg[i][0], arg[i][1])
       }
-      const uop = Number(value) === 0
-        ? this._rt._core.ffi.poly_pad(this._ctx, this._graphUopRaw(), flat, arg.length)
-        : this._rt._core.ffi.poly_pad_value(this._ctx, this._graphUopRaw(), flat, arg.length, Number(value))
+      // Pinned _pad_constant shrinks negative pads before emitting a
+      // non-negative PAD (mixin/__init__.py:359-368). The shared C boundary
+      // owns that policy for zero and nonzero fill values alike.
+      const uop = this._rt._core.ffi.poly_pad_value(
+        this._ctx, this._graphUopRaw(), flat, arg.length, Number(value)
+      )
       const newShape = this.shape.map((s, i) => s + arg[i][0] + arg[i][1])
       return this._makeResult(uop, [this])
     }
