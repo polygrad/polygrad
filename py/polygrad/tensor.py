@@ -1428,19 +1428,10 @@ class Tensor:
         if target_name == self._dtype_str:
             return self
         dtype_id = _dtype_id(target_name)
-        uop = _ffi._lib.poly_cast_by_id(self._ctx, self._graph_uop, dtype_id)
-        if not uop:
-            raise RuntimeError(f'poly_cast_by_id failed for dtype {target_name}')
-        return Tensor(
-            _ctx=self._ctx,
-            _tensor=self._core_create_with_roots(
-                uop, self._physicalize_result(uop, [self]), _POLY_TENSOR_VALUE, self._device
-            ),
-            _shape=self.shape,
-            _dtype=target_name,
-            _device=self._device,
-            requires_grad=self._requires_grad,
-        )
+        core = _ffi._lib.poly_tensor_cast_by_id(self._ctx, self._tensor, dtype_id)
+        if not core:
+            raise RuntimeError(f'poly_tensor_cast_by_id failed for dtype {target_name}')
+        return self._make_result_from_core(core, self.shape, [self])
 
     def bitcast(self, dtype):
         """Bit reinterpretation matching tinygrad Tensor.bitcast."""
@@ -1464,10 +1455,12 @@ class Tensor:
                 return combined.bitcast(target)
             parts = [tmp.rshift(8 * i * new_size) for i in range(old_size // new_size)]
             return Tensor.stack(*parts, dim=-1).flatten(-2).cast(new_uint).bitcast(target)
-        uop = _ffi._lib.poly_bitcast_by_id(self._ctx, self._graph_uop, _dtype_id(target))
-        if not uop:
-            raise RuntimeError(f'poly_bitcast_by_id failed for dtype {target}')
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_bitcast_by_id(
+            self._ctx, self._tensor, _dtype_id(target)
+        )
+        if not core:
+            raise RuntimeError(f'poly_tensor_bitcast_by_id failed for dtype {target}')
+        return self._make_result_from_core(core, self.shape, [self])
 
     def half(self):
         """Cast to float16."""
@@ -1800,10 +1793,7 @@ class Tensor:
     def __neg__(self):
         if dtypes.is_bool(to_dtype(self.dtype)):
             return self.logical_not()
-        core = _ffi._lib.poly_tensor_alu1(
-            self._ctx, _ffi.OPS['NEG'], self._tensor
-        )
-        return self._make_result_from_core(core, self.shape, [self])
+        return self * -1
 
     def logical_not(self):
         return self.cast('bool') != True
@@ -2205,12 +2195,8 @@ class Tensor:
             if self.shape[dim] != 1:
                 return self
             new_shape = tuple(s for i, s in enumerate(self.shape) if i != dim)
-            if not new_shape:
-                new_shape = (1,)
             return self.reshape(new_shape)
         new_shape = tuple(s for s in self.shape if s != 1)
-        if not new_shape:
-            new_shape = (1,)
         if new_shape == self.shape:
             return self
         return self.reshape(new_shape)
@@ -3185,8 +3171,8 @@ class Tensor:
     @staticmethod
     def _threefry_random_bits(key, counts0, counts1):
         x = counts1.cast(dtypes.uint64).lshift(32).bitwise_or(counts0.cast(dtypes.uint64))
-        key_low = key[0].expand(x.shape).cast(dtypes.uint64)
-        key_high = key[1].expand(x.shape).cast(dtypes.uint64).lshift(32)
+        key_low = key[0]._broadcast_to_tensor(x.shape).cast(dtypes.uint64)
+        key_high = key[1]._broadcast_to_tensor(x.shape).cast(dtypes.uint64).lshift(32)
         x = x.threefry(key_high.bitwise_or(key_low))
         mask = 0xffffffff
         return x.bitwise_and(mask).cast(dtypes.uint32).cat(
@@ -3218,7 +3204,12 @@ class Tensor:
             8: dtypes.uint64,
         }[dtype.itemsize]
         uint_bits = bits.bitcast(uint_dtype)
-        float_one_bits = uint_bits._ensure_tensor(1).cast(dtype).bitcast(uint_dtype)
+        float_one_bits = (
+            uint_bits._ensure_tensor(1)
+            ._broadcast_to_tensor(uint_bits.shape)
+            .cast(dtype)
+            .bitcast(uint_dtype)
+        )
         return uint_bits.rshift(dtype.bitsize - nmant).bitwise_or(float_one_bits).bitcast(dtype)[:_prod(shape)].sub(1).reshape(shape)
 
     @staticmethod
@@ -3418,8 +3409,13 @@ class Tensor:
         for target, grad_uop in zip(targets, out_grads):
             if not grad_uop:
                 raise RuntimeError('poly_grad_many returned NULL for a live target')
+            grad_handle = Tensor._core_create_with_roots_for(
+                self._ctx, grad_uop, grad_uop, _POLY_TENSOR_VALUE, target._device
+            )
+            if not grad_handle:
+                raise RuntimeError('failed to store backward gradient roots')
             grad_tensor = Tensor(
-                _ctx=self._ctx, _uop=grad_uop, _shape=target.shape,
+                _ctx=self._ctx, _tensor=grad_handle, _shape=target.shape,
                 _dtype=target._dtype_str, _device=target._device,
             )
             if int(_ffi._lib.poly_uop_device(grad_uop)) == 0:

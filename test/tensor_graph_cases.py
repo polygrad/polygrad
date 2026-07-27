@@ -18,9 +18,9 @@ import re
 
 ENGINE = os.environ.get("ENGINE", "tinygrad")
 if ENGINE == "tinygrad":
-    from tinygrad import Tensor
+    from tinygrad import Tensor, dtypes
 elif ENGINE == "polygrad":
-    from polygrad import Tensor, _ffi
+    from polygrad import Tensor, _ffi, dtypes
 else:
     raise RuntimeError(f"unknown ENGINE={ENGINE!r}")
 
@@ -369,8 +369,18 @@ def case_full_const_pair():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_full_singleton():
+    out = Tensor.full((1,), 2, dtype="int32", buffer=False)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_arange():
     out = Tensor.arange(0, 4, 1)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_arange_singleton():
+    out = Tensor.arange(1, dtype="int32")
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -401,8 +411,81 @@ def case_internal_scalar_add():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_integer_index_scalar():
+    out = Tensor.arange(2, dtype="int32")[0]
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_scalar_squeeze():
+    out = Tensor(7).squeeze()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_uint_neg():
+    out = Tensor.arange(2, dtype="uint32").neg()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_uint_sub():
+    out = Tensor.arange(2, dtype="uint32") - 1
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rng_single_counter():
+    key = Tensor([1, 2], dtype="uint32", device="CPU")
+    count = Tensor.arange(1, dtype="uint32")
+    out = Tensor._threefry_random_bits(key, count, count)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rng_two_draw():
+    Tensor.manual_seed(123)
+    draws = []
+    for _ in range(2):
+        key, counter = Tensor._next_counter("CPU", 4)
+        draws.append(Tensor._rand(key, counter, (4,), dtypes.float32))
+    out = draws[0] + draws[1]
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def raw_gradient(loss, target):
+    if ENGINE == "tinygrad":
+        return loss.gradient(target)[0].uop
+    from polygrad.tensor import _uop_wrap
+
+    grad = Tensor._grad_many_raw(
+        target._ctx,
+        Tensor._core_uop_raw(loss._tensor),
+        None,
+        (Tensor._core_uop_raw(target._tensor),),
+    )[0]
+    return _uop_wrap(target._ctx, grad)
+
+
+def case_grad_square():
+    x = Tensor([1.0, 2.0, 3.0, 4.0])
+    out = raw_gradient((x * x).sum(), x)
+    return {"physical": out}
+
+
+def case_grad_scale():
+    x = Tensor([1.0, 2.0, 3.0, 4.0])
+    out = raw_gradient((x * 2).sum(), x)
+    return {"physical": out}
+
+
+def case_backward_square():
+    x = Tensor([1.0, 2.0, 3.0, 4.0])
+    if ENGINE == "polygrad":
+        x.requires_grad = True
+    (x * x).sum().backward()
+    out = x.grad.uop if ENGINE == "tinygrad" else x.grad.uop_physical
+    return {"physical": out}
+
+
 CASES = {
     "arange": ("tensor", case_arange),
+    "arange_singleton": ("tensor", case_arange_singleton),
     "arange_to_cuda": ("tensor", case_arange_to_cuda),
     "basic_alu": ("tensor", case_basic_alu),
     "clone": ("tensor", case_clone),
@@ -413,11 +496,16 @@ CASES = {
     "flip": ("tensor", case_flip),
     "flip_scalar_noop": ("tensor", case_flip_scalar_noop),
     "full_const_pair": ("tensor", case_full_const_pair),
+    "full_singleton": ("tensor", case_full_singleton),
+    "backward_square": ("tensor", case_backward_square),
+    "grad_scale": ("tensor", case_grad_scale),
+    "grad_square": ("tensor", case_grad_square),
     "host_list_2d_cpu": ("tensor", case_host_list_2d_cpu),
     "host_list_2d_cuda": ("tensor", case_host_list_2d_cuda),
     "host_list_cpu": ("tensor", case_host_list_cpu),
     "host_list_cuda": ("tensor", case_host_list_cuda),
     "internal_scalar_add": ("tensor", case_internal_scalar_add),
+    "integer_index_scalar": ("tensor", case_integer_index_scalar),
     "linspace": ("tensor", case_linspace),
     "movement_reduce": ("tensor", case_movement_reduce),
     "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),
@@ -431,17 +519,22 @@ CASES = {
     "rebuilt_after_realize": ("realize", case_rebuilt_after_realize),
     "reshape": ("tensor", case_reshape),
     "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
+    "rng_single_counter": ("tensor", case_rng_single_counter),
+    "rng_two_draw": ("tensor", case_rng_two_draw),
     "scalar_bool": ("tensor", case_scalar_bool),
     "scalar_float": ("tensor", case_scalar_float),
     "scalar_float_cuda": ("tensor", case_scalar_float_cuda),
     "scalar_int": ("tensor", case_scalar_int),
     "scalar_int_cuda": ("tensor", case_scalar_int_cuda),
+    "scalar_squeeze": ("tensor", case_scalar_squeeze),
     "scalar_where_broadcast": ("tensor", case_scalar_where_broadcast),
     "sibling_moves": ("tensor", case_sibling_moves),
     "shrink": ("tensor", case_shrink),
     "shrink_noop": ("tensor", case_shrink_noop),
     "shrink_scalar_noop": ("tensor", case_shrink_scalar_noop),
     "view_assign": ("tensor", case_view_assign),
+    "uint_neg": ("tensor", case_uint_neg),
+    "uint_sub": ("tensor", case_uint_sub),
     "zero_broadcast": ("tensor", case_zero_broadcast),
 }
 

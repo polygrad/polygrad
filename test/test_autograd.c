@@ -265,6 +265,13 @@ TEST(autograd, mul_reduce_sum_1d_e2e) {
   PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, mul, ax, 1);
   PolyUOp *gx = poly_grad(ctx, loss, x);
   ASSERT_NOT_NULL(gx);
+  /* Pinned gradient.py:64 constructs x*ctx for each MUL source, and
+   * compute_gradient:124 accumulates the repeated contribution with ADD.
+   * Preserve both ordered topology and shared-node identity before lowering. */
+  ASSERT_INT_EQ(gx->op, POLY_OP_ADD);
+  ASSERT_TRUE(gx->src[0] == gx->src[1]);
+  ASSERT_INT_EQ(gx->src[0]->op, POLY_OP_MUL);
+  ASSERT_TRUE(gx->src[0]->src[0] == x);
 
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT32, N);
   void *args[2] = {gx_d, x_d};

@@ -1283,16 +1283,21 @@ function createBoundTensorClass(runtime) {
     // --- Element-wise arithmetic ---
 
     add(other) { return this._binop(other, 'ADD') }
-    sub(other) { return this._binop(other, 'SUB') }
+    sub(other) {
+      other = this._ensureTensor(other)
+      const outShape = this._broadcastShape(other.shape)
+      const x = this._broadcastTensor(outShape)
+      const y = other._broadcastTensor(outShape)
+      return x.add(y.neg())
+    }
     mul(other) { return this._binop(other, 'MUL') }
     div(other) { return this._binop(other, 'FDIV') }
     pow(other) { return this._binop(other, 'POW') }
     lt(other) { return this._binop(other, 'CMPLT') }
 
     neg() {
-      const { ffi, ops } = this._rt._core
-      const core = ffi.poly_tensor_alu1(this._ctx, ops.NEG, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      if (this._dtype === 'bool') return this.cast('bool').ne(true)
+      return this.mul(-1)
     }
 
     // --- Comparisons (C core) ---
@@ -1387,9 +1392,26 @@ function createBoundTensorClass(runtime) {
         throw new Error(`float64 is not supported on ${this._rt.device}`)
       }
       const { ffi } = this._rt._core
-      const uop = ffi.poly_cast_by_id(this._ctx, this._graphUopRaw(), id)
-      if (!uop) throw new Error(`poly_cast_by_id failed for dtype ${dtype}`)
-      return this._makeResult(uop, [this], dtype)
+      const core = ffi.poly_tensor_cast_by_id(this._ctx, this._tensor, id)
+      if (!core) throw new Error(`poly_tensor_cast_by_id failed for dtype ${dtype}`)
+      return this._makeResultFromCore(core, [this], dtype)
+    }
+
+    bitcast(dtype) {
+      dtype = String(dtype).toLowerCase()
+      if (dtype === this._dtype) return this
+      const id = DTYPE_ID[dtype]
+      if (id === undefined) throw new Error(`unsupported bitcast target dtype: ${dtype}`)
+      const sourceType = TA_BY_DTYPE[this._dtype]
+      const targetType = TA_BY_DTYPE[dtype]
+      if (!sourceType || !targetType || sourceType.BYTES_PER_ELEMENT !== targetType.BYTES_PER_ELEMENT) {
+        throw new Error('unsupported size in bitcast')
+      }
+      const core = this._rt._core.ffi.poly_tensor_bitcast_by_id(
+        this._ctx, this._tensor, id
+      )
+      if (!core) throw new Error(`poly_tensor_bitcast_by_id failed for dtype ${dtype}`)
+      return this._makeResultFromCore(core, [this], dtype)
     }
 
     half() { return this.cast('float16') }
@@ -1726,11 +1748,9 @@ function createBoundTensorClass(runtime) {
         if (dim < 0) dim += this.shape.length
         if (this.shape[dim] !== 1) return this
         const newShape = this.shape.filter((_, i) => i !== dim)
-        if (!newShape.length) return this.reshape(1)
         return this.reshape(newShape)
       }
       const newShape = this.shape.filter(s => s !== 1)
-      if (!newShape.length) return this.reshape(1)
       if (arraysEqual(newShape, this.shape)) return this
       return this.reshape(newShape)
     }
@@ -2504,9 +2524,13 @@ function createBoundTensorClass(runtime) {
         const leaf = gradLeaves[i]
         const gradUop = gradUops[i]
         if (!gradUop) throw new Error('poly_grad_many returned NULL for a leaf tensor')
+        const gradHandle = tensorCreateWithRoots(
+          this._ctx, gradUop, gradUop, POLY_TENSOR_VALUE, leaf._device
+        )
+        if (!gradHandle) throw new Error('failed to store backward gradient roots')
         let gradTensor = new Tensor(null, {
           _ctx: this._ctx,
-          _uop: gradUop,
+          _tensor: gradHandle,
           _dtype: leaf._dtype,
           _device: leaf._device
         })

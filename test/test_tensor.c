@@ -250,6 +250,16 @@ TEST(tensor, pure_constructors_store_one_device_free_root) {
     ASSERT_INT_EQ(poly_uop_device(values[i]->uop_physical), POLY_DEVICE_AUTO);
   }
 
+  int64_t singleton_shape[] = {1};
+  PolyTensor *singleton_full =
+      poly_tensor_full_int_by_id(ctx, singleton_shape, 1, 2, i32, POLY_DEVICE_CPU);
+  PolyTensor *singleton_arange =
+      poly_tensor_arange_int_by_id(ctx, 0, 1, 1, i32, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(singleton_full);
+  ASSERT_NOT_NULL(singleton_arange);
+  ASSERT_EQ(singleton_full->uop_physical->op, POLY_OP_RESHAPE);
+  ASSERT_EQ(singleton_full->uop_physical->src[0]->op, POLY_OP_CONST);
+
   PolyTensor *moved = poly_tensor_to_device(ctx, values[2], POLY_DEVICE_CUDA);
   ASSERT_PTR_EQ(moved, values[2]);
   ASSERT_PTR_EQ(moved->uop_physical, values[2]->uop_physical);
@@ -305,6 +315,32 @@ TEST(tensor, movement_constructors_use_exact_logical_and_physical_sources) {
   ASSERT_NOT_NULL(legacy_reshape);
   ASSERT_PTR_EQ(legacy_reshape->uop_logical, legacy_reshape->uop_physical);
   ASSERT_PTR_EQ(legacy_reshape->uop_physical->src[0], legacy_uop);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, dtype_constructors_use_exact_logical_and_physical_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[1] = {4};
+  PolyTensor *source = poly_tensor_empty(ctx, POLY_INT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(source);
+  ASSERT_PTR_NEQ(source->uop_logical, source->uop_physical);
+
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *casted = poly_tensor_cast_by_id(ctx, source, f32);
+  PolyTensor *bitcasted = poly_tensor_bitcast_by_id(ctx, source, f32);
+  ASSERT_NOT_NULL(casted);
+  ASSERT_NOT_NULL(bitcasted);
+  ASSERT_EQ(casted->uop_logical->op, POLY_OP_CAST);
+  ASSERT_EQ(casted->uop_physical->op, POLY_OP_CAST);
+  ASSERT_PTR_EQ(casted->uop_logical->src[0], source->uop_logical);
+  ASSERT_PTR_EQ(casted->uop_physical->src[0], source->uop_physical);
+  ASSERT_EQ(bitcasted->uop_logical->op, POLY_OP_BITCAST);
+  ASSERT_EQ(bitcasted->uop_physical->op, POLY_OP_BITCAST);
+  ASSERT_PTR_EQ(bitcasted->uop_logical->src[0], source->uop_logical);
+  ASSERT_PTR_EQ(bitcasted->uop_physical->src[0], source->uop_physical);
 
   poly_ctx_destroy(ctx);
   PASS();

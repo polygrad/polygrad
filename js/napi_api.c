@@ -1353,6 +1353,28 @@ static napi_value napi_poly_tensor_alu3(napi_env env, napi_callback_info info) {
   return make_external(env, poly_tensor_alu3(ctx, (PolyOps)op, a, b, c));
 }
 
+static napi_value napi_poly_tensor_cast_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *src = get_external(env, argv[1]);
+  int32_t dtype_id = 0;
+  napi_get_value_int32(env, argv[2], &dtype_id);
+  return make_external(env, poly_tensor_cast_by_id(ctx, src, dtype_id));
+}
+
+static napi_value napi_poly_tensor_bitcast_by_id(napi_env env, napi_callback_info info) {
+  napi_value argv[3];
+  size_t argc = 3;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *src = get_external(env, argv[1]);
+  int32_t dtype_id = 0;
+  napi_get_value_int32(env, argv[2], &dtype_id);
+  return make_external(env, poly_tensor_bitcast_by_id(ctx, src, dtype_id));
+}
+
 static napi_value napi_poly_tensor_reshape(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -4226,6 +4248,8 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_alu1", napi_poly_tensor_alu1),
       DECLARE_NAPI_METHOD("poly_tensor_alu2", napi_poly_tensor_alu2),
       DECLARE_NAPI_METHOD("poly_tensor_alu3", napi_poly_tensor_alu3),
+      DECLARE_NAPI_METHOD("poly_tensor_cast_by_id", napi_poly_tensor_cast_by_id),
+      DECLARE_NAPI_METHOD("poly_tensor_bitcast_by_id", napi_poly_tensor_bitcast_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_reshape", napi_poly_tensor_reshape),
       DECLARE_NAPI_METHOD("poly_tensor_expand", napi_poly_tensor_expand),
       DECLARE_NAPI_METHOD("poly_tensor_permute", napi_poly_tensor_permute),

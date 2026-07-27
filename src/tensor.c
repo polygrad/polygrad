@@ -903,6 +903,41 @@ PolyTensor *poly_tensor_alu3(
   return tensor_alu(ctx, op, inputs, 3);
 }
 
+/* Pinned tinygrad Tensor.cast/bitcast applies UOp.cast/bitcast directly to the
+ * one current Tensor.uop (tensor.py:862-904, uop/ops.py:513-521). Path B keeps
+ * its retained logical twin, but the executable operation is built directly
+ * from the exact current physical occurrence and stored even when CSE makes
+ * both results pointer-identical. */
+static PolyTensor *tensor_dtype_result(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int dtype_id,
+    bool bitcast
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = bitcast ? poly_bitcast_by_id(ctx, src->uop_logical, dtype_id)
+                             : poly_cast_by_id(ctx, src->uop_logical, dtype_id);
+  PolyUOp *physical = bitcast ? poly_bitcast_by_id(ctx, current, dtype_id)
+                              : poly_cast_by_id(ctx, current, dtype_id);
+  if (!logical || !physical) return NULL;
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, src->device);
+  if (!out) return NULL;
+  out->requires_grad = src->requires_grad;
+  out->requires_grad_set = src->requires_grad_set;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
+PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id) {
+  return tensor_dtype_result(ctx, src, dtype_id, false);
+}
+
+PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id) {
+  return tensor_dtype_result(ctx, src, dtype_id, true);
+}
+
 /* Pinned tinygrad Tensor._apply_uop (tensor.py:128-140) applies movement
  * directly to the current Tensor.uop. Path B applies the same raw movement
  * independently to the retained logical root and exact physical occurrence;
@@ -1279,6 +1314,13 @@ static PolyUOp *poly_full_from_scalar(
   for (int i = 0; i < ndim; i++)
     ones[i] = 1;
   PolyUOp *r = poly_reshape(ctx, scalar, ones, ndim);
+  bool already_expanded = true;
+  for (int i = 0; i < ndim; i++)
+    if (shape[i] != 1) {
+      already_expanded = false;
+      break;
+    }
+  if (already_expanded) return r;
   return poly_expand(ctx, r, (int64_t *)shape, ndim);
 }
 

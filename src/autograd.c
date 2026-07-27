@@ -176,21 +176,12 @@ static PolyUOp *zeros_like(PolyCtx *ctx, PolyUOp *u) {
   return const_like(ctx, u, 0.0);
 }
 
-/* Check if a UOp is effectively constant 1 (possibly through EXPAND/RESHAPE) */
-static bool is_const_one(PolyUOp *u) {
-  while (u->op == POLY_OP_EXPAND || u->op == POLY_OP_RESHAPE)
-    u = u->src[0];
-  if (u->op != POLY_OP_CONST) return false;
-  if (u->arg.kind == POLY_ARG_FLOAT) return u->arg.f == 1.0;
-  if (u->arg.kind == POLY_ARG_INT) return u->arg.i == 1;
-  return false;
-}
-
-/* Multiply value by gradient, skipping when gradient is effectively 1.
- * This matches tinygrad's symbolic simplification of g*x when g=1. */
+/* Pinned gradient.py constructs every product explicitly, including products
+ * by an all-one upstream (lines 51-65). Tensor-graph parity depends on
+ * preserving that construction order; later compiler rewrites remain free to
+ * simplify after scheduling reaches the appropriate stage. */
 static PolyUOp *mul_grad(PolyCtx *ctx, PolyUOp *g, PolyUOp *x, PolyDType dt) {
-  if (is_const_one(g)) return x;
-  return poly_uop2(ctx, POLY_OP_MUL, dt, g, x, poly_arg_none());
+  return poly_uop2(ctx, POLY_OP_MUL, dt, x, g, poly_arg_none());
 }
 
 /* Target-pruned walk (port of tinygrad _deepwalk) */
@@ -842,8 +833,6 @@ PolyUOp *poly_grad(PolyCtx *ctx, PolyUOp *loss, PolyUOp *wrt) {
   PolyUOp *out = grad_get(grads, wrt);
   if (!out) out = zeros_like(ctx, wrt);
 
-  out = poly_graph_rewrite(ctx, out, poly_symbolic_simple());
-
   poly_map_destroy(grads);
   return out;
 }
@@ -867,7 +856,7 @@ int poly_grad_many_ex(
     PolyUOp *g = grad_get(grads, wrts[i]);
     if (out_present) out_present[i] = g ? 1 : 0;
     if (!g) g = zeros_like(ctx, wrts[i]);
-    out_grads[i] = poly_graph_rewrite(ctx, g, poly_symbolic_simple());
+    out_grads[i] = g;
   }
 
   poly_map_destroy(grads);

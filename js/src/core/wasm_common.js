@@ -867,6 +867,10 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_alu2(ctx, op, a, b),
     poly_tensor_alu3: (ctx, op, a, b, c) =>
       Module._poly_tensor_alu3(ctx, op, a, b, c),
+    poly_tensor_cast_by_id: (ctx, tensor, dtypeId) =>
+      Module._poly_tensor_cast_by_id(ctx, tensor, dtypeId),
+    poly_tensor_bitcast_by_id: (ctx, tensor, dtypeId) =>
+      Module._poly_tensor_bitcast_by_id(ctx, tensor, dtypeId),
     poly_tensor_reshape: (ctx, tensor, shape, len) =>
       callWithInt64(Module._poly_tensor_reshape, ctx, tensor, shape, len),
     poly_tensor_expand: (ctx, tensor, shape, len) =>

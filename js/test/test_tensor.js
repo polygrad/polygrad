@@ -1060,7 +1060,10 @@ async function runTensorTests(pg) {
   await test('sub', async () => {
     const a = new Tensor([10, 20, 30])
     const b = new Tensor([1, 2, 3])
-    assertClose(await a.sub(b).toArray(), [9, 18, 27])
+    const out = a.sub(b)
+    assert(out.uop.op === pg._core.ops.ADD, 'subtraction root must be ADD')
+    assert(out.uop.src[1].op === pg._core.ops.MUL, 'subtraction rhs must be negating MUL')
+    assertClose(await out.toArray(), [9, 18, 27])
   })
 
   await test('mul', async () => {
@@ -1077,7 +1080,9 @@ async function runTensorTests(pg) {
 
   await test('neg', async () => {
     const a = new Tensor([1, -2, 3])
-    assertClose(await a.neg().toArray(), [-1, 2, -3])
+    const out = a.neg()
+    assert(out.uop.op === pg._core.ops.MUL, 'negation root must be MUL')
+    assertClose(await out.toArray(), [-1, 2, -3])
   })
 
   await test('scalar add', async () => {
@@ -1290,6 +1295,19 @@ async function runTensorTests(pg) {
     assertClose(await out.toArray(), [8, 9, 10, 11, 0, 1, 2, 3, 8, 9, 10, 11])
   })
 
+  await test('squeeze and integer indexing preserve scalar rank', async () => {
+    const scalar = new Tensor(7)
+    assert(scalar.squeeze() === scalar, 'scalar squeeze must be a no-op')
+    assertShape(Tensor.empty([1]).squeeze(0).shape, [])
+    assertShape(Tensor.empty([1, 1]).squeeze().shape, [])
+    assertShape(Tensor.empty([2, 1]).squeeze(1).shape, [2])
+
+    const indexed = Tensor.arange(2, { dtype: 'int32' }).getitem(0)
+    assertShape(indexed.shape, [])
+    assert(indexed.uop.op === pg._core.ops.RESHAPE, 'integer index must collapse to RESHAPE')
+    assertClose(await indexed.toArray(), [0])
+  })
+
   await test('scatter matches tinygrad probe', async () => {
     const base = Tensor.zeros(3, 5)
     const idx0 = new Tensor(new Int32Array([0, 1, 2, 0]), { dtype: 'int32' }).reshape(1, 4)
@@ -1415,6 +1433,21 @@ async function runTensorTests(pg) {
     const t = new Tensor([1, 2, 3])
     const r = t.cast('float32')
     assertClose(await r.toArray(), [1, 2, 3])
+  })
+
+  await test('cast and bitcast store exact physical roots', async () => {
+    const source = Tensor.arange(4, { dtype: 'uint32' })
+    const casted = source.cast('uint64')
+    const bitcasted = source.bitcast('float32')
+
+    assert(casted.uopLogical.op === pg._core.ops.CAST, 'cast logical root must be CAST')
+    assert(casted.uopPhysical.op === pg._core.ops.CAST, 'cast physical root must be CAST')
+    assert(casted.uopLogical.src[0].key === source.uopLogical.key, 'cast logical source mismatch')
+    assert(casted.uopPhysical.src[0].key === source.uopPhysical.key, 'cast physical source mismatch')
+    assert(bitcasted.uopLogical.op === pg._core.ops.BITCAST, 'bitcast logical root must be BITCAST')
+    assert(bitcasted.uopPhysical.op === pg._core.ops.BITCAST, 'bitcast physical root must be BITCAST')
+    assert(bitcasted.uopLogical.src[0].key === source.uopLogical.key, 'bitcast logical source mismatch')
+    assert(bitcasted.uopPhysical.src[0].key === source.uopPhysical.key, 'bitcast physical source mismatch')
   })
 
   await testIf(supportsF16, 'half and double convenience', async () => {
@@ -2076,6 +2109,9 @@ async function runTensorTests(pg) {
     const loss = a.mul(a).sum()  // d/da(a^2) = 2a
     await loss.backward()
     assert(a.grad, 'grad is null')
+    assert(a.grad.uopPhysical, 'gradient must store its exact physical root')
+    assert(a.grad.uopPhysical.op === pg._core.ops.ADD, 'square gradient physical root must be ADD')
+    assert(a.grad.uopPhysical.key === a.grad.uop.key, 'gradient current root must be physical')
     assertClose(await a.grad.toArray(), [2, 4, 6])
   })
 

@@ -759,6 +759,12 @@ def _declare_signatures(lib):
     lib.poly_tensor_alu3.restype = _ptr
     lib.poly_tensor_alu3.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr, _ptr]
 
+    lib.poly_tensor_cast_by_id.restype = _ptr
+    lib.poly_tensor_cast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
+
+    lib.poly_tensor_bitcast_by_id.restype = _ptr
+    lib.poly_tensor_bitcast_by_id.argtypes = [_ptr, _ptr, ctypes.c_int]
+
     lib.poly_tensor_reshape.restype = _ptr
     lib.poly_tensor_reshape.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
 

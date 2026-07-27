@@ -569,6 +569,20 @@ class TestCreation:
         np.testing.assert_allclose((x * 0.25).numpy(), [0.0, 0.25, 0.0])
         np.testing.assert_allclose((x + 0.25).numpy(), [0.25, 1.25, 0.25])
 
+    def test_cast_and_bitcast_store_exact_physical_roots(self):
+        source = Tensor.arange(4, dtype='uint32')
+        casted = source.cast('uint64')
+        bitcasted = source.bitcast('float32')
+
+        assert casted.uop_logical.op_name == 'CAST'
+        assert casted.uop_physical.op_name == 'CAST'
+        assert casted.uop_logical.src[0] == source.uop_logical
+        assert casted.uop_physical.src[0] == source.uop_physical
+        assert bitcasted.uop_logical.op_name == 'BITCAST'
+        assert bitcasted.uop_physical.op_name == 'BITCAST'
+        assert bitcasted.uop_logical.src[0] == source.uop_logical
+        assert bitcasted.uop_physical.src[0] == source.uop_physical
+
     def test_zeros(self):
         t = Tensor.zeros(3, 4)
         assert t.shape == (3, 4)
@@ -1530,6 +1544,18 @@ class TestMovement:
         with pytest.raises(ZeroDivisionError):
             Tensor.empty(0).reshape(0, -1)
 
+    def test_squeeze_and_integer_index_preserve_scalar_rank(self):
+        scalar = Tensor(7)
+        assert scalar.squeeze() is scalar
+        assert Tensor.empty(1).squeeze(0).shape == ()
+        assert Tensor.empty(1, 1).squeeze().shape == ()
+        assert Tensor.empty(2, 1).squeeze(1).shape == (2,)
+
+        indexed = Tensor.arange(2, dtype="int32")[0]
+        assert indexed.shape == ()
+        assert indexed.uop.op_name == "RESHAPE"
+        np.testing.assert_allclose(indexed.numpy(), 0)
+
     def test_permute(self):
         a = Tensor(np.arange(12, dtype=np.float32).reshape(3, 4).tolist())
         b = a.permute(1, 0)
@@ -2368,6 +2394,9 @@ class TestAutograd:
         loss = (x * x).sum()
         loss.backward()
         assert x.grad is not None
+        assert x.grad.uop_physical is not None
+        assert x.grad.uop_physical.op_name == 'ADD'
+        assert x.grad.uop == x.grad.uop_physical
         np.testing.assert_allclose(x.grad.numpy(), [2, 4, 6, 8])
 
     def test_grad_neg_sum(self):
