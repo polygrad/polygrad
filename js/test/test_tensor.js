@@ -2319,6 +2319,30 @@ async function runTensorTests(pg) {
     assert(moved.uop.key === arange.uop.key, 'device-free Tensor.to must preserve the root')
   })
 
+  await test('internal scalars store typed current roots', async () => {
+    const cases = [
+      [Tensor.empty([2], { dtype: 'bool' }), true, 'bool'],
+      [Tensor.empty([2], { dtype: 'int32' }), 7, 'int32'],
+      [Tensor.empty([2], { dtype: 'float32' }), 1, 'float32']
+    ]
+    for (const [source, value, dtype] of cases) {
+      const scalar = source._ensureTensor(value)
+      assert(scalar.dtype === dtype, `expected ${dtype}, got ${scalar.dtype}`)
+      assert(
+        scalar.uopLogical.op === pg._core.ops.CONST,
+        'internal scalar logical root must be CONST'
+      )
+      assert(
+        scalar.uopPhysical.op === pg._core.ops.CONST,
+        'internal scalar physical root must be CONST'
+      )
+      assert(
+        scalar.uopLogical.key === scalar.uopPhysical.key,
+        'internal scalar roots must be the same UOp'
+      )
+    }
+  })
+
   // -- Lazy RNG --
   console.log('\n-- Lazy RNG --')
 

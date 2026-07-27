@@ -30,6 +30,19 @@ class TestCreation:
             if tensor.device == "CPU":
                 np.testing.assert_allclose(tensor.numpy(), value)
 
+    def test_internal_scalar_stores_typed_current_root(self):
+        cases = [
+            (Tensor.empty(2, dtype="bool"), True, "bool"),
+            (Tensor.empty(2, dtype="int32"), 7, "int32"),
+            (Tensor.empty(2, dtype="float32"), 1, "float32"),
+        ]
+        for source, value, dtype in cases:
+            scalar = source._ensure_tensor(value)
+            assert scalar.dtype == dtype
+            assert scalar.uop_logical.op_name == "CONST"
+            assert scalar.uop_physical.op_name == "CONST"
+            assert scalar.uop_logical.raw == scalar.uop_physical.raw
+
     def test_from_2d(self):
         t = Tensor([[1, 2, 3], [4, 5, 6]])
         assert t.shape == (2, 3)

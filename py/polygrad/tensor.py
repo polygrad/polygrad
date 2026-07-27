@@ -1587,11 +1587,17 @@ class Tensor:
                 int_value = int(bool(normalized)) if dtypes.is_bool(dt) else int(normalized)
                 if int_value < I64_MIN or int_value > I64_MAX:
                     raise ValueError(f'scalar {int_value} is out of int64 range')
-                c = _ffi._lib.poly_const_int_by_id(self._ctx, int_value, dtype_id)
+                tensor = _ffi._lib.poly_tensor_const_int_by_id(
+                    self._ctx, int_value, dtype_id, _device_id(self._device)
+                )
             else:
-                c = _ffi._lib.poly_const_float_by_id(self._ctx, float(normalized), dtype_id)
-            return Tensor(_ctx=self._ctx, _uop=c, _shape=(),
-                          _dtype=const_dtype_name, _device=self._device)
+                tensor = _ffi._lib.poly_tensor_const_float_by_id(
+                    self._ctx, float(normalized), dtype_id, _device_id(self._device)
+                )
+            return _created_tensor(
+                self._ctx, tensor, const_dtype_name, self._device, False,
+                'C-owned internal scalar Tensor construction',
+            )
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
 
     def _broadcast_shape(self, other_shape):

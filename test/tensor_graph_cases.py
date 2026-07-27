@@ -396,6 +396,11 @@ def case_zero_broadcast():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_internal_scalar_add():
+    out = Tensor.empty(2, dtype="int32", device="CPU") + 1
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 CASES = {
     "arange": ("tensor", case_arange),
     "arange_to_cuda": ("tensor", case_arange_to_cuda),
@@ -412,6 +417,7 @@ CASES = {
     "host_list_2d_cuda": ("tensor", case_host_list_2d_cuda),
     "host_list_cpu": ("tensor", case_host_list_cpu),
     "host_list_cuda": ("tensor", case_host_list_cuda),
+    "internal_scalar_add": ("tensor", case_internal_scalar_add),
     "linspace": ("tensor", case_linspace),
     "movement_reduce": ("tensor", case_movement_reduce),
     "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),

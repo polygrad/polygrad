@@ -1190,13 +1190,28 @@ function createBoundTensorClass(runtime) {
 
     _ensureTensor(other) {
       if (other instanceof Tensor) return other
-      if (typeof other === 'number') {
-        const { ffi } = this._rt._core
-        const c = this._dtype === 'float64'
-          ? ffi.poly_const_double(this._ctx, other)
-          : ffi.poly_const_float(this._ctx, other)
-        return new Tensor(null, { _ctx: this._ctx, _uop: c,
-                                  _dtype: this._dtype, _device: this._device })
+      if (typeof other === 'number' || typeof other === 'boolean') {
+        const sourceIsFloat = ['float16', 'bfloat16', 'float32', 'float64'].includes(this._dtype)
+        const sourceKeepsInteger = isIntegerDtype(this._dtype) &&
+          typeof other === 'number' && Number.isInteger(other)
+        const dtype = sourceIsFloat || sourceKeepsInteger
+          ? this._dtype
+          : typeof other === 'boolean' ? 'bool'
+            : Number.isInteger(other) ? 'int32' : 'float32'
+        const dtypeId = DTYPE_ID[dtype]
+        if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dtype}`)
+        const tensor = dtype === 'bool' || isIntegerDtype(dtype)
+          ? ffi.poly_tensor_const_int_by_id(
+              this._ctx, dtype === 'bool' ? (other ? 1 : 0) : Math.trunc(Number(other)),
+              dtypeId, deviceId(this._device)
+            )
+          : ffi.poly_tensor_const_float_by_id(
+              this._ctx, Number(other), dtypeId, deviceId(this._device)
+            )
+        if (!tensor) throw new Error('C-owned internal scalar Tensor construction failed')
+        return new Tensor(null, {
+          _ctx: this._ctx, _tensor: tensor, _dtype: dtype, _device: this._device
+        })
       }
       throw new TypeError(`Cannot convert ${typeof other} to Tensor`)
     }
