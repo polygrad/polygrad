@@ -1246,6 +1246,86 @@ static napi_value napi_poly_tensor_alu3(napi_env env, napi_callback_info info) {
   return make_external(env, poly_tensor_alu3(ctx, (PolyOps)op, a, b, c));
 }
 
+static napi_value napi_poly_tensor_reshape(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  int64_t dims[POLY_MAX_DIMS];
+  int32_t ndim = 0;
+  read_int64_array(env, argv[2], dims, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &ndim);
+  return make_external(env, poly_tensor_reshape(ctx, tensor, dims, ndim));
+}
+
+static napi_value napi_poly_tensor_expand(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  int64_t dims[POLY_MAX_DIMS];
+  int32_t ndim = 0;
+  read_int64_array(env, argv[2], dims, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &ndim);
+  return make_external(env, poly_tensor_expand(ctx, tensor, dims, ndim));
+}
+
+static napi_value napi_poly_tensor_permute(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  int64_t order[POLY_MAX_DIMS];
+  int32_t ndim = 0;
+  read_int64_array(env, argv[2], order, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &ndim);
+  return make_external(env, poly_tensor_permute(ctx, tensor, order, ndim));
+}
+
+static napi_value napi_poly_tensor_shrink(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  int64_t flat[POLY_MAX_DIMS * 2];
+  int32_t ndim = 0;
+  read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2);
+  napi_get_value_int32(env, argv[3], &ndim);
+  return make_external(env, poly_tensor_shrink(ctx, tensor, (int64_t(*)[2])flat, ndim));
+}
+
+static napi_value napi_poly_tensor_flip(napi_env env, napi_callback_info info) {
+  napi_value argv[4];
+  size_t argc = 4;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  int64_t axes[POLY_MAX_DIMS];
+  int32_t n_axes = 0;
+  read_int64_array(env, argv[2], axes, POLY_MAX_DIMS);
+  napi_get_value_int32(env, argv[3], &n_axes);
+  return make_external(env, poly_tensor_flip(ctx, tensor, axes, n_axes));
+}
+
+static napi_value napi_poly_tensor_pad_value(napi_env env, napi_callback_info info) {
+  napi_value argv[5];
+  size_t argc = 5;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  int64_t flat[POLY_MAX_DIMS * 2];
+  int32_t ndim = 0;
+  double value = 0.0;
+  read_int64_array(env, argv[2], flat, POLY_MAX_DIMS * 2);
+  napi_get_value_int32(env, argv[3], &ndim);
+  napi_get_value_double(env, argv[4], &value);
+  return make_external(env, poly_tensor_pad_value(ctx, tensor, (int64_t(*)[2])flat, ndim, value));
+}
+
 static napi_value napi_poly_tensor_clone_into(napi_env env, napi_callback_info info) {
   napi_value argv[3];
   size_t argc = 3;
@@ -4033,6 +4113,12 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_alu1", napi_poly_tensor_alu1),
       DECLARE_NAPI_METHOD("poly_tensor_alu2", napi_poly_tensor_alu2),
       DECLARE_NAPI_METHOD("poly_tensor_alu3", napi_poly_tensor_alu3),
+      DECLARE_NAPI_METHOD("poly_tensor_reshape", napi_poly_tensor_reshape),
+      DECLARE_NAPI_METHOD("poly_tensor_expand", napi_poly_tensor_expand),
+      DECLARE_NAPI_METHOD("poly_tensor_permute", napi_poly_tensor_permute),
+      DECLARE_NAPI_METHOD("poly_tensor_shrink", napi_poly_tensor_shrink),
+      DECLARE_NAPI_METHOD("poly_tensor_flip", napi_poly_tensor_flip),
+      DECLARE_NAPI_METHOD("poly_tensor_pad_value", napi_poly_tensor_pad_value),
       DECLARE_NAPI_METHOD("poly_tensor_clone_into", napi_poly_tensor_clone_into),
       DECLARE_NAPI_METHOD("poly_tensor_uop", napi_poly_tensor_uop),
       DECLARE_NAPI_METHOD("poly_tensor_uop_logical", napi_poly_tensor_uop_logical),

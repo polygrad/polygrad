@@ -1623,22 +1623,30 @@ function createBoundTensorClass(runtime) {
         throw new Error(`size mismatch, can't reshape ((${this.shape})) -> ((${shape}))`)
       }
       if (shape.length === this.shape.length && shape.every((s, i) => s === this.shape[i])) return this
-      const uop = this._rt._core.ffi.poly_reshape(this._ctx, this._graphUopRaw(), shape, shape.length)
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_reshape(
+        this._ctx, this._tensor, shape, shape.length
+      )
+      return this._makeResultFromCore(core, [this])
     }
 
     permute(...order) {
       if (order.length === 1 && Array.isArray(order[0])) order = order[0]
-      const uop = this._rt._core.ffi.poly_permute(this._ctx, this._graphUopRaw(), order, order.length)
-      const newShape = order.map(i => this.shape[i])
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_permute(
+        this._ctx, this._tensor, order, order.length
+      )
+      return this._makeResultFromCore(core, [this])
     }
 
     expand(...shape) {
       if (shape.length === 1 && Array.isArray(shape[0])) shape = shape[0]
       shape = normalizeExpandShape(this.shape, shape)
-      const uop = this._rt._core.ffi.poly_expand(this._ctx, this._graphUopRaw(), shape, shape.length)
-      return this._makeResult(uop, [this])
+      if (arraysEqual(this.shape, shape)) return this
+      const aligned = new Array(shape.length - this.shape.length).fill(1).concat(this.shape)
+      const reshaped = this.reshape(aligned)
+      const core = this._rt._core.ffi.poly_tensor_expand(
+        this._ctx, reshaped._tensor, shape, shape.length
+      )
+      return reshaped._makeResultFromCore(core, [reshaped])
     }
 
     shrink(arg) {
@@ -1646,9 +1654,10 @@ function createBoundTensorClass(runtime) {
       for (let i = 0; i < arg.length; i++) {
         flat.push(arg[i][0], arg[i][1])
       }
-      const uop = this._rt._core.ffi.poly_shrink(this._ctx, this._graphUopRaw(), flat, arg.length)
-      const newShape = arg.map(([s, e]) => e - s)
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_shrink(
+        this._ctx, this._tensor, flat, arg.length
+      )
+      return this._makeResultFromCore(core, [this])
     }
 
     pad(arg, mode = 'constant', value = 0.0) {
@@ -1661,11 +1670,10 @@ function createBoundTensorClass(runtime) {
       // Pinned _pad_constant shrinks negative pads before emitting a
       // non-negative PAD (mixin/__init__.py:359-368). The shared C boundary
       // owns that policy for zero and nonzero fill values alike.
-      const uop = this._rt._core.ffi.poly_pad_value(
-        this._ctx, this._graphUopRaw(), flat, arg.length, Number(value)
+      const core = this._rt._core.ffi.poly_tensor_pad_value(
+        this._ctx, this._tensor, flat, arg.length, Number(value)
       )
-      const newShape = this.shape.map((s, i) => s + arg[i][0] + arg[i][1])
-      return this._makeResult(uop, [this])
+      return this._makeResultFromCore(core, [this])
     }
 
     flip(axis, ...args) {
@@ -1678,8 +1686,10 @@ function createBoundTensorClass(runtime) {
       if (new Set(axes).size !== axes.length) {
         throw new Error(`dim can appear at most once, got ${axes}`)
       }
-      const uop = this._rt._core.ffi.poly_flip(this._ctx, this._graphUopRaw(), axes, axes.length)
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_flip(
+        this._ctx, this._tensor, axes, axes.length
+      )
+      return this._makeResultFromCore(core, [this])
     }
 
     transpose(dim0, dim1) {

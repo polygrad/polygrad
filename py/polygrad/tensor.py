@@ -2086,31 +2086,39 @@ class Tensor:
         if shape == self.shape:
             return self
         arr, n = _int64_array(shape)
-        uop = _ffi._lib.poly_reshape(self._ctx, self._graph_uop, arr, n)
-        return self._make_result(uop, shape, [self])
+        core = _ffi._lib.poly_tensor_reshape(self._ctx, self._tensor, arr, n)
+        return self._make_result_from_core(core, shape, [self])
 
     def permute(self, *order):
         if len(order) == 1 and isinstance(order[0], (tuple, list)):
             order = tuple(order[0])
         arr, n = _int64_array(order)
-        uop = _ffi._lib.poly_permute(self._ctx, self._graph_uop, arr, n)
         new_shape = tuple(self.shape[i] for i in order)
-        return self._make_result(uop, new_shape, [self])
+        core = _ffi._lib.poly_tensor_permute(self._ctx, self._tensor, arr, n)
+        return self._make_result_from_core(core, new_shape, [self])
 
     def expand(self, *shape):
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = tuple(shape[0])
         shape = _normalize_expand_shape(self.shape, shape)
-        uop = self._broadcast_uop(shape)
-        out_shape = _shape_from_uop(self._ctx, uop) if _shape_has_symbolic(shape) else shape
-        return self._make_result(uop, out_shape, [self])
+        if self.shape == shape:
+            return self
+        if _shape_has_symbolic(shape):
+            uop = self._broadcast_uop(shape)
+            out_shape = _shape_from_uop(self._ctx, uop)
+            return self._make_result(uop, out_shape, [self])
+        aligned = (1,) * (len(shape) - self.ndim) + tuple(self.shape)
+        reshaped = self.reshape(aligned)
+        dims, n = _int64_array(shape)
+        core = _ffi._lib.poly_tensor_expand(reshaped._ctx, reshaped._tensor, dims, n)
+        return reshaped._make_result_from_core(core, shape, [reshaped])
 
     def shrink(self, arg):
         """arg is tuple of (start, end) pairs per dimension."""
         flat, n = _pair_array(arg)
-        uop = _ffi._lib.poly_shrink(self._ctx, self._graph_uop, flat, n)
         new_shape = tuple(e - s for s, e in arg)
-        return self._make_result(uop, new_shape, [self])
+        core = _ffi._lib.poly_tensor_shrink(self._ctx, self._tensor, flat, n)
+        return self._make_result_from_core(core, new_shape, [self])
 
     def pad(self, arg, mode="constant", value=0.0):
         """Pad using tinygrad-compatible flat or grouped padding."""
@@ -2125,11 +2133,11 @@ class Tensor:
         # Pinned _pad_constant shrinks negative pads before emitting a
         # non-negative PAD (mixin/__init__.py:359-368). Keep that policy in
         # the shared C boundary for both zero and nonzero fill values.
-        uop = _ffi._lib.poly_pad_value(
-            self._ctx, self._graph_uop, flat, n, float(value)
+        core = _ffi._lib.poly_tensor_pad_value(
+            self._ctx, self._tensor, flat, n, float(value)
         )
         new_shape = tuple(s + b + a for s, (b, a) in zip(self.shape, arg))
-        return self._make_result(uop, new_shape, [self])
+        return self._make_result_from_core(core, new_shape, [self])
 
     def flip(self, axis, *args):
         axes = tuple(axis) if isinstance(axis, (tuple, list)) else (axis,)
@@ -2138,8 +2146,8 @@ class Tensor:
         if len(set(axes)) != len(axes):
             raise RuntimeError(f"dim can appear at most once, getting {axes}")
         arr, n = _int64_array(axes)
-        uop = _ffi._lib.poly_flip(self._ctx, self._graph_uop, arr, n)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_flip(self._ctx, self._tensor, arr, n)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def _pool(self, kernel_size, stride=1, dilation=1):
         k = _make_tuple(kernel_size, len(kernel_size) if not isinstance(kernel_size, int) else 2)

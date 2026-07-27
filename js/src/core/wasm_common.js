@@ -835,6 +835,18 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_alu2(ctx, op, a, b),
     poly_tensor_alu3: (ctx, op, a, b, c) =>
       Module._poly_tensor_alu3(ctx, op, a, b, c),
+    poly_tensor_reshape: (ctx, tensor, shape, len) =>
+      callWithInt64(Module._poly_tensor_reshape, ctx, tensor, shape, len),
+    poly_tensor_expand: (ctx, tensor, shape, len) =>
+      callWithInt64(Module._poly_tensor_expand, ctx, tensor, shape, len),
+    poly_tensor_permute: (ctx, tensor, order, len) =>
+      callWithInt64(Module._poly_tensor_permute, ctx, tensor, order, len),
+    poly_tensor_shrink: (ctx, tensor, flat, npairs) =>
+      callWithInt64(Module._poly_tensor_shrink, ctx, tensor, flat, npairs),
+    poly_tensor_flip: (ctx, tensor, axes, len) =>
+      callWithInt64(Module._poly_tensor_flip, ctx, tensor, axes, len),
+    poly_tensor_pad_value: (ctx, tensor, flat, npairs, value) =>
+      callWithInt64(Module._poly_tensor_pad_value, ctx, tensor, flat, npairs, value),
     poly_tensor_clone_into: (ctx, target, source) =>
       Module._poly_tensor_clone_into(ctx, target, source),
     poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
@@ -1281,7 +1293,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 26
+  const EXPECTED_ABI = 27
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

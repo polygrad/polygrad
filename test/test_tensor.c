@@ -225,6 +225,58 @@ TEST(tensor, scalar_constructors_store_exact_const_as_both_roots) {
   PASS();
 }
 
+TEST(tensor, movement_constructors_use_exact_logical_and_physical_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t source_shape[2] = {1, 3};
+  PolyTensor *source = poly_tensor_empty(ctx, POLY_FLOAT32, source_shape, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(source);
+  ASSERT_PTR_NEQ(source->uop_logical, source->uop_physical);
+
+  int64_t reshape_dims[2] = {3, 1};
+  int64_t expand_dims[2] = {2, 3};
+  int64_t perm[2] = {1, 0};
+  int64_t shrink_pairs[2][2] = {{0, 1}, {1, 3}};
+  int64_t pad_pairs[2][2] = {{1, 0}, {0, 1}};
+  int64_t axes[1] = {1};
+
+  PolyTensor *reshape = poly_tensor_reshape(ctx, source, reshape_dims, 2);
+  PolyTensor *expand = poly_tensor_expand(ctx, source, expand_dims, 2);
+  PolyTensor *permute = poly_tensor_permute(ctx, source, perm, 2);
+  PolyTensor *shrink = poly_tensor_shrink(ctx, source, shrink_pairs, 2);
+  PolyTensor *pad = poly_tensor_pad_value(ctx, source, pad_pairs, 2, 0.0);
+  PolyTensor *flip = poly_tensor_flip(ctx, source, axes, 1);
+  PolyTensor *results[6] = {reshape, expand, permute, shrink, pad, flip};
+  PolyOps ops[6] = {
+      POLY_OP_RESHAPE, POLY_OP_EXPAND, POLY_OP_PERMUTE, POLY_OP_SHRINK, POLY_OP_PAD, POLY_OP_FLIP,
+  };
+
+  for (int i = 0; i < 6; i++) {
+    ASSERT_NOT_NULL(results[i]);
+    ASSERT_INT_EQ(results[i]->uop_logical->op, ops[i]);
+    ASSERT_INT_EQ(results[i]->uop_physical->op, ops[i]);
+    ASSERT_PTR_EQ(results[i]->uop_logical->src[0], source->uop_logical);
+    ASSERT_PTR_EQ(results[i]->uop_physical->src[0], source->uop_physical);
+    ASSERT_PTR_NEQ(results[i]->uop_logical, results[i]->uop_physical);
+  }
+
+  /* Preserved Path A constructors can still omit the physical root. During
+   * bounded migration, movement consumes that exact current root without
+   * placement and makes the result's physical root explicit. */
+  PolyUOp *legacy_uop = poly_buffer_f32(ctx, 3);
+  PolyTensor *legacy = poly_tensor_create(ctx, legacy_uop, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  int64_t legacy_shape[2] = {3, 1};
+  PolyTensor *legacy_reshape = poly_tensor_reshape(ctx, legacy, legacy_shape, 2);
+  ASSERT_NOT_NULL(legacy);
+  ASSERT_EQ(legacy->uop_physical, NULL);
+  ASSERT_NOT_NULL(legacy_reshape);
+  ASSERT_PTR_EQ(legacy_reshape->uop_logical, legacy_reshape->uop_physical);
+  ASSERT_PTR_EQ(legacy_reshape->uop_physical->src[0], legacy_uop);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, einsum_c_api_rejects_oversized_formula_parts) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){1}, 1);

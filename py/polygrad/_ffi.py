@@ -16,7 +16,7 @@ import sys
 _lib = None
 OPS = {}
 _has_cuda_ffi = False
-POLYGRAD_ABI_VERSION = 26
+POLYGRAD_ABI_VERSION = 27
 
 # --- Opaque pointer type (always available) ---
 _ptr = ctypes.c_void_p
@@ -728,6 +728,26 @@ def _declare_signatures(lib):
 
     lib.poly_tensor_alu3.restype = _ptr
     lib.poly_tensor_alu3.argtypes = [_ptr, ctypes.c_int, _ptr, _ptr, _ptr]
+
+    lib.poly_tensor_reshape.restype = _ptr
+    lib.poly_tensor_reshape.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+
+    lib.poly_tensor_expand.restype = _ptr
+    lib.poly_tensor_expand.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+
+    lib.poly_tensor_permute.restype = _ptr
+    lib.poly_tensor_permute.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+
+    lib.poly_tensor_shrink.restype = _ptr
+    lib.poly_tensor_shrink.argtypes = [_ptr, _ptr, ctypes.c_void_p, ctypes.c_int]
+
+    lib.poly_tensor_flip.restype = _ptr
+    lib.poly_tensor_flip.argtypes = [_ptr, _ptr, _i64p, ctypes.c_int]
+
+    lib.poly_tensor_pad_value.restype = _ptr
+    lib.poly_tensor_pad_value.argtypes = [
+        _ptr, _ptr, ctypes.c_void_p, ctypes.c_int, ctypes.c_double,
+    ]
 
     lib.poly_tensor_clone_into.restype = _ptr
     lib.poly_tensor_clone_into.argtypes = [_ptr, _ptr, _ptr]

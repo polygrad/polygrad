@@ -903,6 +903,86 @@ PolyTensor *poly_tensor_alu3(
   return tensor_alu(ctx, op, inputs, 3);
 }
 
+/* Pinned tinygrad Tensor._apply_uop (tensor.py:128-140) applies movement
+ * directly to the current Tensor.uop. Path B applies the same raw movement
+ * independently to the retained logical root and exact physical occurrence;
+ * neither root is derived by substituting logical identities. */
+static PolyTensor *tensor_movement_result(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyUOp *logical,
+    PolyUOp *physical
+) {
+  if (!ctx || !src || !logical || !physical) return NULL;
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, src->device);
+  if (!out) return NULL;
+  out->requires_grad = src->requires_grad;
+  out->requires_grad_set = src->requires_grad_set;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
+PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_movement_result(
+      ctx, src, poly_reshape(ctx, src->uop_logical, dims, ndim),
+      poly_reshape(ctx, current, dims, ndim)
+  );
+}
+
+PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_movement_result(
+      ctx, src, poly_expand(ctx, src->uop_logical, dims, ndim),
+      poly_expand(ctx, current, dims, ndim)
+  );
+}
+
+PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_movement_result(
+      ctx, src, poly_permute(ctx, src->uop_logical, perm, ndim),
+      poly_permute(ctx, current, perm, ndim)
+  );
+}
+
+PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_movement_result(
+      ctx, src, poly_shrink(ctx, src->uop_logical, pairs, ndim),
+      poly_shrink(ctx, current, pairs, ndim)
+  );
+}
+
+PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_movement_result(
+      ctx, src, poly_flip(ctx, src->uop_logical, axes, n_axes),
+      poly_flip(ctx, current, axes, n_axes)
+  );
+}
+
+PolyTensor *poly_tensor_pad_value(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    double value
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_movement_result(
+      ctx, src, poly_pad_value(ctx, src->uop_logical, pairs, ndim, value),
+      poly_pad_value(ctx, current, pairs, ndim, value)
+  );
+}
+
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device) {
   if (!ctx || !tensor || !tensor->uop_logical) return NULL;
   if (tensor->device == device) return tensor;

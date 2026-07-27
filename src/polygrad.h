@@ -651,6 +651,18 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
 PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
 PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
+PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
+PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
+PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim);
+PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim);
+PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes);
+PolyTensor *poly_tensor_pad_value(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t (*pairs)[2],
+    int ndim,
+    double value
+);
 PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
