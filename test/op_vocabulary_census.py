@@ -14,7 +14,9 @@ from tinygrad.uop import Ops
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--register", default="parity_divergences.json")
+    parser.add_argument(
+        "--register", default="test/fixtures/parity_divergences.json",
+    )
     parser.add_argument("--reference-root", default="references/tinygrad_latest")
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--output")
