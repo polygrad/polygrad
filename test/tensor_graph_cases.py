@@ -271,13 +271,48 @@ def case_roundtrip_occurrence():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_moved_assign_occurrence():
+    x = Tensor.empty(2, device="CPU")
+    moved = x.to("CUDA")
+    moved.assign(Tensor.empty(2, device="CUDA"))
+    out = x + moved.to("CPU")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_sibling_moves():
+    x = Tensor.empty(2, device="CPU")
+    cuda = x.to("CUDA").to("CPU")
+    hip = x.to("HIP").to("CPU")
+    out = cuda + hip
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_clone():
+    out = realized_empty(2).clone()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_contiguous():
+    out = Tensor.empty(2, 3, device="CPU").permute(1, 0).contiguous()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_view_assign():
+    x = Tensor.empty(4, device="CPU")
+    x.shrink(((1, 3),)).assign(Tensor.empty(2, device="CPU"))
+    return {"physical": x.uop, "logical": logical(x)}
+
+
 CASES = {
     "basic_alu": ("tensor", case_basic_alu),
+    "clone": ("tensor", case_clone),
+    "contiguous": ("tensor", case_contiguous),
     "empty_storage": ("tensor", case_empty_storage),
     "expand": ("tensor", case_expand),
     "flip": ("tensor", case_flip),
     "flip_scalar_noop": ("tensor", case_flip_scalar_noop),
     "movement_reduce": ("tensor", case_movement_reduce),
+    "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),
     "pad": ("tensor", case_pad),
     "pad_negative": ("tensor", case_pad_negative),
     "pad_noop": ("tensor", case_pad_noop),
@@ -288,9 +323,11 @@ CASES = {
     "rebuilt_after_realize": ("realize", case_rebuilt_after_realize),
     "reshape": ("tensor", case_reshape),
     "roundtrip_occurrence": ("tensor", case_roundtrip_occurrence),
+    "sibling_moves": ("tensor", case_sibling_moves),
     "shrink": ("tensor", case_shrink),
     "shrink_noop": ("tensor", case_shrink_noop),
     "shrink_scalar_noop": ("tensor", case_shrink_scalar_noop),
+    "view_assign": ("tensor", case_view_assign),
 }
 
 

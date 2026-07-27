@@ -712,7 +712,7 @@ PolyTensor *poly_tensor_empty(
    * device-free logical BUFFER with that same storage token; it must not
    * consume a second UNIQUE or influence the physical graph. */
   if (!ctx || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims) ||
-      device <= POLY_DEVICE_HOST || device > POLY_DEVICE_X86)
+      !poly_device_can_execute(device))
     return NULL;
 
   int64_t numel = 1;

@@ -24,23 +24,13 @@ def node_label(node):
     return node["op"], node["dtype"], node["arg"]
 
 
-def classify(case, kind, path, tg_node, pg_node):
+def classify(_case, _kind, _path, tg_node, pg_node):
     pair = (
         tg_node["op"] if tg_node else None,
         pg_node["op"] if pg_node else None,
     )
     if pair in OP_PAIR_IDS:
         return OP_PAIR_IDS[pair]
-    if (
-        case == "rebuilt_after_realize"
-        and kind == "sharing"
-        and path == "root.src[1]"
-        and tg_node
-        and pg_node
-        and tg_node["op"] == "ADD"
-        and pg_node["op"] == "BUFFER"
-    ):
-        return "PG-PARITY-001"
     return None
 
 
@@ -111,9 +101,12 @@ def validate_register(register, reference_root):
     ids = [entry.get("id") for entry in entries]
     if len(ids) != len(set(ids)) or any(not value for value in ids):
         raise RuntimeError("parity register IDs are missing or duplicated")
-    valid_statuses = {"approved", "open_debt", "pending_evidence"}
+    valid_statuses = {"approved", "open_debt", "pending_evidence", "resolved"}
     if any(entry.get("status") not in valid_statuses for entry in entries):
         raise RuntimeError("parity register contains an unknown status")
+    for entry in entries:
+        if entry["status"] == "resolved" and not entry.get("resolution"):
+            raise RuntimeError(f"{entry['id']}: resolved entry lacks closing evidence")
     actual = subprocess.run(
         ["git", "-C", reference_root, "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,

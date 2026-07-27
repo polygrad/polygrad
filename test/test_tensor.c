@@ -86,6 +86,9 @@ static PolyUOp *single_scheduled_root(PolyCtx *ctx, PolyUOp *sink) {
 TEST(tensor, static_empty_shares_unique_with_deviceful_physical_root) {
   PolyCtx *ctx = poly_ctx_new();
   int64_t shape[2] = {2, 3};
+  ASSERT_EQ(poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_AUTO), NULL);
+  ASSERT_EQ(poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_HOST), NULL);
+  ASSERT_EQ(poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_DISK), NULL);
   PolyTensor *tensor = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(tensor);
   ASSERT_NOT_NULL(tensor->uop_logical);

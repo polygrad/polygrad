@@ -9,11 +9,13 @@
     "accepted_status": "approved",
     "nonaccepted_statuses": [
       "open_debt",
-      "pending_evidence"
+      "pending_evidence",
+      "resolved"
     ],
     "rules": [
       "A comparator mismatch is allowed only when an exact stage-scoped entry has status approved.",
       "An open_debt or pending_evidence entry gives a known failure an ID but never turns it into a pass.",
+      "A resolved entry preserves the audit trail but is never assigned to a current finding and never suppresses a recurrence.",
       "An unregistered mismatch is a hard failure.",
       "An entry with stale reference evidence cannot suppress a mismatch."
     ]
@@ -226,6 +228,28 @@
         "src/shape.c:poly_reduce_axis"
       ],
       "close_when": "Path B is promoted, legacy Path-A/raw imports are migrated, and REDUCE_AXIS is removed from the runtime vocabulary."
+    },
+    {
+      "id": "PG-PARITY-007",
+      "status": "resolved",
+      "stages": ["tensor"],
+      "area": "movement shape representation",
+      "tinygrad": "RESHAPE/EXPAND use shape-value sources, PAD/SHRINK use start/size shape-value sources, PERMUTE keeps its permutation tuple, and FLIP keeps a rank-sized boolean-mask tuple",
+      "polygrad": "Tensor construction now uses the same source and argument topology for RESHAPE, EXPAND, PAD, SHRINK, PERMUTE, and FLIP",
+      "rationale": "This was shared Tensor IR topology debt and was closed by the Path-B movement-vocabulary port.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._mop",
+        "temp/path_b_movement_vocabulary_correspondence_20260727.md",
+        "test/tensor_graph_cases.py",
+        "src/shape.c"
+      ],
+      "resolution": {
+        "commit": "381b4dbe0f55ce70651cc6eff83e20d7824429f2",
+        "evidence": "Exact tensor-stage PAD/SHRINK/PERMUTE/FLIP corpus passed with zero findings; native, Python, JS native, and JS WASM gates passed.",
+        "closed_on": "2026-07-27"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-008",

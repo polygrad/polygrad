@@ -27,6 +27,12 @@ def main():
     ids = [entry["id"] for entry in entries]
     if len(ids) != len(set(ids)):
         raise RuntimeError("parity register IDs are duplicated")
+    valid_statuses = {"approved", "open_debt", "pending_evidence", "resolved"}
+    if any(entry.get("status") not in valid_statuses for entry in entries):
+        raise RuntimeError("parity register contains an unknown status")
+    for entry in entries:
+        if entry["status"] == "resolved" and not entry.get("resolution"):
+            raise RuntimeError(f"{entry['id']}: resolved entry lacks closing evidence")
     actual_commit = subprocess.run(
         ["git", "-C", args.reference_root, "rev-parse", "HEAD"],
         check=True, capture_output=True, text=True,
