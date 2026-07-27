@@ -91,7 +91,8 @@ typedef struct {
   uint8_t role;
   uint32_t flags;
   PolyTensor *tensor;
-  PolyUOp *buffer;
+  PolyUOp *buffer; /* portable logical binding identity */
+  PolyUOp *initial_data_buffer; /* exact capture-time residency source */
   int64_t shape[8];
   int ndim;
 } BuildBinding;
@@ -367,6 +368,7 @@ static PolyStatus append_build_binding(
     uint32_t flags,
     PolyTensor *tensor,
     PolyUOp *buffer,
+    PolyUOp *initial_data_buffer,
     const int64_t *shape,
     int ndim,
     bool default_requires_grad,
@@ -414,6 +416,7 @@ static PolyStatus append_build_binding(
   b->flags = flags;
   b->tensor = tensor;
   b->buffer = buffer;
+  b->initial_data_buffer = initial_data_buffer;
   b->ndim = ndim;
   if (ndim > 0) memcpy(b->shape, shape, (size_t)ndim * sizeof(int64_t));
   if (role == POLY_ROLE_OUTPUT) {
@@ -462,7 +465,7 @@ static PolyTensor *make_bound_storage_tensor(
     return NULL;
   }
   if (append_build_binding(
-          inst, name, role, 0, tensor, buf, shape, ndim, default_requires_grad, provenance
+          inst, name, role, 0, tensor, buf, buf, shape, ndim, default_requires_grad, provenance
       ) != POLY_STATUS_OK)
     return NULL;
   return tensor;
@@ -499,8 +502,21 @@ static PolyStatus append_existing_tensor_binding(
     );
     return POLY_STATUS_INVALID;
   }
+  PolyUOp *initial_data_buffer = NULL;
+  if (role != POLY_ROLE_OUTPUT) {
+    const PolyUOp *current_identity =
+        poly_uop_get_buffer_identity(poly_tensor_uop(tensor));
+    if (require_buffer && !current_identity) {
+      poly_instance_set_error(
+          inst, POLY_STATUS_INVALID, __func__, "binding '%s' has no current buffer identity", name
+      );
+      return POLY_STATUS_INVALID;
+    }
+    initial_data_buffer = (PolyUOp *)current_identity;
+  }
   return append_build_binding(
-      inst, name, role, flags, tensor, buffer, shape, ndim, default_requires_grad, provenance
+      inst, name, role, flags, tensor, buffer, initial_data_buffer, shape, ndim,
+      default_requires_grad, provenance
   );
 }
 
@@ -521,13 +537,19 @@ static char **dup_string_array(const char **items, int n) {
   return out;
 }
 
-static int copy_initial_buffer_data(PolyInstance *inst, PolyCtx *ctx) {
-  if (!inst || !ctx) return -1;
+static int copy_initial_buffer_data(
+    PolyInstance *inst,
+    PolyCtx *ctx,
+    const PolyInstanceBuildState *build
+) {
+  if (!inst || !ctx || !build || build->n_bindings != inst->n_bufs) return -1;
   for (int i = 0; i < inst->n_bufs; i++) {
-    PolyBuffer *src = poly_buffer_get(ctx, inst->bufs[i].buffer);
+    PolyUOp *source = build->bindings[i].initial_data_buffer;
+    if (!source) continue;
+    PolyBuffer *src = poly_buffer_get(ctx, source);
     size_t nbytes = named_buf_nbytes(&inst->bufs[i]);
     if (!src || !src->ptr || src->nbytes < nbytes || nbytes == 0) continue;
-    if (poly_buffer_read(ctx, inst->bufs[i].buffer, inst->bufs[i].data, nbytes) != 0 &&
+    if (poly_buffer_read(ctx, source, inst->bufs[i].data, nbytes) != 0 &&
         src->valid && poly_device_is_host_addressable(src->device))
       memcpy(inst->bufs[i].data, src->ptr, nbytes);
   }
@@ -956,7 +978,7 @@ PolyStatus poly_instance_build(PolyInstance *inst, PolyInstanceError *err) {
     st = POLY_STATUS_ERROR;
     goto fail;
   }
-  copy_initial_buffer_data(built, inst->ctx);
+  copy_initial_buffer_data(built, inst->ctx, build);
 
   PolyInstanceOptions opts = build->opts;
   build_state_free(build);

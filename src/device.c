@@ -300,6 +300,44 @@ PolyUOp *poly_buffer_from_host(
   return buf;
 }
 
+PolyUOp *poly_buffer_from_host_unique(
+    PolyCtx *ctx,
+    PolyUOp *unique,
+    PolyDType scalar_dtype,
+    int64_t numel,
+    void *ptr,
+    size_t nbytes,
+    PolyDevice *out_source_device
+) {
+  if (!ctx || !unique || unique->op != POLY_OP_UNIQUE || numel < 0) return NULL;
+#ifdef __EMSCRIPTEN__
+  PolyDevice source_device = ptr ? POLY_DEVICE_WASM : POLY_DEVICE_HOST;
+#else
+  PolyDevice source_device = POLY_DEVICE_HOST;
+#endif
+  PolyUOp *device =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)source_device));
+  PolyUOp *src[2] = {unique, device};
+  PolyUOp *buffer =
+      device ? poly_uop(ctx, POLY_OP_BUFFER, scalar_dtype, src, 2, poly_arg_int(numel)) : NULL;
+  if (!buffer) return NULL;
+
+#ifdef __EMSCRIPTEN__
+  if (ptr) {
+    PolyBuffer imported = poly_buffer_make_host_view(ptr, nbytes);
+    imported.owned = true;
+    poly_buffer_adopt(ctx, buffer, &imported);
+  } else {
+    poly_buffer_set(ctx, buffer, ptr, nbytes, (int)POLY_DEVICE_HOST);
+  }
+#else
+  poly_buffer_set(ctx, buffer, ptr, nbytes, (int)POLY_DEVICE_HOST);
+#endif
+  if (!poly_buffer_get(ctx, buffer)) return NULL;
+  if (out_source_device) *out_source_device = source_device;
+  return buffer;
+}
+
 void poly_buffer_free(PolyCtx *ctx, PolyBuffer *b) {
   if (!b) return;
   if (b->owned && b->allocator && b->allocator->free)

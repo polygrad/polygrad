@@ -73,6 +73,19 @@ PolyUOp *poly_buffer_from_host(
     int64_t *dims, int ndim
 );
 
+/* Build a device-annotated frontend-host BUFFER from an existing UNIQUE and
+ * attach the imported bytes only to that physical BUFFER. Returns the actual
+ * source residency domain (HOST, or WASM for staged Emscripten bytes). */
+PolyUOp *poly_buffer_from_host_unique(
+    PolyCtx *ctx,
+    PolyUOp *unique,
+    PolyDType scalar_dtype,
+    int64_t numel,
+    void *ptr,
+    size_t nbytes,
+    PolyDevice *out_source_device
+);
+
 /* Create a read/write mmap-backed one-dimensional DISK buffer. The mapped
  * file owns its lifetime through ctx->buffers and is excluded from mem_used. */
 PolyUOp *poly_buffer_from_file(PolyCtx *ctx, const char *path, int dtype_id);

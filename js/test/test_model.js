@@ -121,6 +121,33 @@ async function runModelTests(pg) {
     assert(inst.paramTrainable(0) === false, 'state tensor should be frozen when requiresGrad is false')
   })
 
+  await test('fromBindings requires current parameter storage', async () => {
+    const w = new Tensor([[7]], { requiresGrad: true })
+    const x = pg.Tensor.empty([1, 1])
+    const y = x.dot(w)
+    const bindings = [
+      { name: 'x', role: 'input', tensor: x },
+      { name: 'w', role: 'state', tensor: w },
+      { name: 'y', role: 'output', tensor: y }
+    ]
+    const entries = [
+      { name: 'forward', inputs: ['x'], outputs: ['y'] }
+    ]
+    if (pg.core === 'wasm') {
+      const inst = pg.Instance.fromBindings(bindings, entries)
+      const out = await inst.forward({ x: new Float32Array([3]) })
+      assertClose(out.y, [21])
+      return
+    }
+    let error = null
+    try {
+      pg.Instance.fromBindings(bindings, entries)
+    } catch (err) {
+      error = err
+    }
+    assert(error && /w.*has no buffer identity/.test(error.message), 'expected lazy storage rejection')
+  })
+
   await test('fromTensors keeps tinygrad-style plain object', async () => {
     class LinearNet {
       constructor() {

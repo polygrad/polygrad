@@ -375,6 +375,7 @@ function createBoundTensorClass(runtime) {
       this._tensor = opts._tensor || null
       let currentUop = null
       let importedFromHost = false
+      let importedTensorFromHost = false
       const optUop = opts._uop || (this._tensor ? tensorUop(this._tensor) : null)
 
       if (optUop) {
@@ -386,6 +387,7 @@ function createBoundTensorClass(runtime) {
         this._dtype = dtypeNameForUop(this._ctx, raw, opts._dtype)
       } else {
         importedFromHost = true
+        const scalarData = typeof data === 'number'
         // User construction from data. Resolve dtype and flatten to a single
         // TypedArray. Then call UOp.fromHost (one FFI call) which creates
         // the BUFFER UOp, registers a PolyBuffer wrapping the TypedArray's
@@ -414,7 +416,18 @@ function createBoundTensorClass(runtime) {
         // poly_buffer_from_host cannot distinguish an empty vector from an
         // unspecified/scalar host buffer and applies its scalar numel fallback.
         const dims = shape.length ? shape : null
-        currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
+        if (!scalarData && dt !== 'bfloat16' && ffi.poly_tensor_from_host_by_id) {
+          this._tensor = ffi.poly_tensor_from_host_by_id(
+            this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
+          )
+          if (!this._tensor) throw new Error('poly_tensor_from_host_by_id failed')
+          const physical = tensorUopPhysical(this._tensor)
+          if (!physical) throw new Error('host Tensor source has no physical root')
+          currentUop = new UOp(this._ctx, core.ffi, physical)
+          importedTensorFromHost = true
+        } else {
+          currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
+        }
         const buffer = currentUop.buffer ? currentUop.buffer.raw : null
         const needsFrontendHostOwner =
           Boolean(buffer && core.ffi.poly_buffer_get_key) &&
@@ -428,7 +441,14 @@ function createBoundTensorClass(runtime) {
           }
         }
       }
-      if (!this._tensor && currentUop) {
+      if (importedTensorFromHost) {
+        const targetDeviceId = deviceId(this._device)
+        const sourceDeviceId = tensorDevice(this._tensor)
+        if (targetDeviceId !== sourceDeviceId) {
+          this._tensor = ffi.poly_tensor_to_device(this._ctx, this._tensor, targetDeviceId)
+          if (!this._tensor) throw new Error(`poly_tensor_to_device failed for ${this._device}`)
+        }
+      } else if (!this._tensor && currentUop) {
         const sourceDevice = 'cpu'
         const targetDeviceId = deviceId(this._device)
         const sourceDeviceId = deviceId(sourceDevice)

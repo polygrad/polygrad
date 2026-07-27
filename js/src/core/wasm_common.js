@@ -755,6 +755,19 @@ function createWasmCoreFromModule(Module, device) {
       if (dimsPtr) Module._free(dimsPtr)
       return uop
     },
+    poly_tensor_from_host_by_id: (ctx, typedArray, nbytes, dtypeId, dims, ndim) => {
+      let ptr = 0
+      if (deviceName !== 'webgpu') {
+        ptr = Module._malloc(nbytes)
+        heapU8().set(new Uint8Array(typedArray.buffer, typedArray.byteOffset, nbytes), ptr)
+      }
+      const dimsPtr = (dims && ndim > 0) ? writeInt64Array(Array.from(dims)) : 0
+      const tensor = Module._poly_tensor_from_host_by_id(
+        ctx, ptr, nbytes, dtypeId, dimsPtr, ndim
+      )
+      if (dimsPtr) Module._free(dimsPtr)
+      return tensor
+    },
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
@@ -1264,7 +1277,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 24
+  const EXPECTED_ABI = 25
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

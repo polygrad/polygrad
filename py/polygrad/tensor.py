@@ -551,6 +551,7 @@ class Tensor:
         self._shape_override = tuple(_shape) if _shape is not None else None
         current_uop = None
         imported_from_host = False
+        imported_tensor_from_host = False
         imported_from_disk = False
         if self._tensor is not None and _uop is None:
             _uop = self._core_uop_raw(self._tensor)
@@ -588,8 +589,9 @@ class Tensor:
         else:
             # User construction from data
             imported_from_host = True
+            python_scalar = isinstance(data, (int, float))
             _ensure_frontend_buffer_release_registered(self._ctx)
-            if isinstance(data, (int, float)):
+            if python_scalar:
                 data = [data]
             if dtype is None and isinstance(data, np.ndarray):
                 dt = _dtype_name(data.dtype, default='float32')
@@ -615,23 +617,50 @@ class Tensor:
                 dims, ndim = _int64_array(arr.shape)
             else:
                 dims, ndim = None, 0
-            imported = UOp.from_host(
-                self._ctx, self._data.ctypes.data, self._data.nbytes,
-                dtype_id, dims, ndim,
-            )
-            current_uop = imported
-            if post_cast_dt is not None:
-                cast_uop = _ffi._lib.poly_cast_by_id(self._ctx, imported.raw, _dtype_id(post_cast_dt))
-                if not cast_uop:
-                    raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
-                current_uop = UOp(self._ctx, cast_uop)
+            if not python_scalar and arr.ndim > 0 and post_cast_dt is None:
+                # Pinned UOp._frompy builds a deviceful PYTHON source before
+                # Tensor.__init__ adds COPY to the requested device. Keep the
+                # byte owner on that exact C-owned physical source.
+                self._tensor = _ffi._lib.poly_tensor_from_host_by_id(
+                    self._ctx, self._data.ctypes.data, self._data.nbytes,
+                    dtype_id, dims, ndim,
+                )
+                if not self._tensor:
+                    raise RuntimeError('poly_tensor_from_host_by_id failed')
+                current_raw = self._core_uop_physical_raw(self._tensor)
+                if not current_raw:
+                    raise RuntimeError('host Tensor source has no physical root')
+                current_uop = UOp(self._ctx, current_raw)
+                imported_tensor_from_host = True
+            else:
+                imported = UOp.from_host(
+                    self._ctx, self._data.ctypes.data, self._data.nbytes,
+                    dtype_id, dims, ndim,
+                )
+                current_uop = imported
+                if post_cast_dt is not None:
+                    cast_uop = _ffi._lib.poly_cast_by_id(
+                        self._ctx, imported.raw, _dtype_id(post_cast_dt)
+                    )
+                    if not cast_uop:
+                        raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
+                    current_uop = UOp(self._ctx, cast_uop)
             key_uop = current_uop.buffer or current_uop
             key = _buffer_key(self._ctx, key_uop)
             if key:
                 _host_buffers[key] = self._data
 
         self._requires_grad = bool(requires_grad)
-        if self._tensor is None and current_uop is not None:
+        if imported_tensor_from_host:
+            source_device_id = int(_ffi._lib.poly_tensor_device(self._tensor))
+            target_device_id = _device_id(self._device)
+            if target_device_id != source_device_id:
+                self._tensor = _ffi._lib.poly_tensor_to_device(
+                    self._ctx, self._tensor, target_device_id
+                )
+                if not self._tensor:
+                    raise RuntimeError(f'poly_tensor_to_device failed for {self._device}')
+        elif self._tensor is None and current_uop is not None:
             source_device = disk_device if imported_from_disk else 'CPU'
             target_device_id = _device_id(self._device)
             source_device_id = _device_id(source_device)

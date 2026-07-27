@@ -217,9 +217,11 @@ async function runTensorTests(pg) {
 
   await test('backward retains distinct wrappers sharing one UOp', async () => {
     const x = new Tensor([1, 2, 3, 4], { requiresGrad: true })
-    const y = new Tensor(x.uopLogical, { requiresGrad: true })
+    // Pinned Tensor.__init__ wraps an existing current Tensor.uop directly
+    // (tensor.py:92-121); retained logical provenance is not executable state.
+    const y = new Tensor(x.uop, { requiresGrad: true })
     assert(x !== y, 'expected distinct Tensor wrappers')
-    assert(x.uopLogical.key === y.uopLogical.key, 'expected one shared logical UOp')
+    assert(x.uop.key === y.uop.key, 'expected one shared current UOp')
 
     await x.sum().backward()
     assertClose(await x.grad.toArray(), [1, 1, 1, 1])
@@ -248,7 +250,16 @@ async function runTensorTests(pg) {
     assert(pg.uop, 'runtime should expose pg.uop')
     assertShape(pg.uop.shape(t.uop), [2, 2])
     assert(pg.uop.dtype(t.uop) === 'float32', `expected float32, got ${pg.uop.dtype(t.uop)}`)
-    assert(pg.uop.hasBufferIdentity(t.uop), 'host tensor should have buffer identity')
+    // Pinned UOp.has_buffer_identity is false for native's lazy host COPY
+    // (uop/ops.py:825-828). WASM bytes already reside in linear memory, so
+    // that backend intentionally imports an immediately identifiable BUFFER.
+    const wasmLinearMemory = pg.core === 'wasm' && pg.device === 'wasm'
+    assert(
+      pg.uop.hasBufferIdentity(t.uop) === wasmLinearMemory,
+      'host import identity should match the runtime storage boundary'
+    )
+    if (!wasmLinearMemory) await t.realize()
+    assert(pg.uop.hasBufferIdentity(t.uop), 'realized host tensor should have buffer identity')
     assert(pg.uop.buffer(t.uop), 'pg.uop.buffer should return a UOp')
   })
 

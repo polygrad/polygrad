@@ -301,10 +301,12 @@ class Instance:
 
         ctx = parsed[0][2]._ctx
         ctx_key = _ptr_value(ctx)
-        for name, _, tensor, _ in parsed:
+        for name, role, tensor, _ in parsed:
             _check_ctx(name, tensor, ctx, ctx_key)
             if tensor._requires_grad is not None:
                 tensor._sync_core_requires_grad(force=True)
+            if role != ROLE_OUTPUT:
+                _ensure_storage_binding(name, tensor)
 
         keepalive = []
         binding_rows = []

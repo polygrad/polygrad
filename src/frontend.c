@@ -124,6 +124,19 @@ PolyTensor *poly_tensor_empty_by_id(
   return poly_tensor_empty(ctx, poly_dtype_scalar(dt), dims, ndim, (PolyDevice)device_id);
 }
 
+PolyTensor *poly_tensor_from_host_by_id(
+    PolyCtx *ctx,
+    void *ptr,
+    size_t nbytes,
+    int dtype_id,
+    const int64_t *dims,
+    int ndim
+) {
+  PolyDType dt;
+  if (!poly_dtype_by_id(dtype_id, &dt)) return NULL;
+  return poly_tensor_from_host(ctx, ptr, nbytes, poly_dtype_scalar(dt), dims, ndim);
+}
+
 int poly_uop_op(PolyUOp *u) {
   return u ? (int)u->op : 0;
 }

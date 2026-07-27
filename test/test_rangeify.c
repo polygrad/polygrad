@@ -2892,6 +2892,49 @@ TEST(rangeify, scalar_store_of_explicit_copy_is_a_copy_kernel) {
   PASS();
 }
 
+TEST(rangeify, affine_indexed_store_of_copy_keeps_copy_kernel_and_ranges) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *dst = poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_INTERP);
+  PolyUOp *src = poly_buffer_on_device(ctx, POLY_FLOAT32, 4, POLY_DEVICE_CPU);
+  PolyUOp *r0 = poly_uop_range(ctx, 2, 0, POLY_AXIS_LOOP);
+  PolyUOp *r1 = poly_uop_range(ctx, 2, 1, POLY_AXIS_LOOP);
+  PolyUOp *two = poly_const_int(ctx, 2);
+  PolyUOp *idx = poly_add(ctx, poly_mul(ctx, r0, two), r1);
+  PolyDType ptr = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyUOp *dst_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr, dst, idx, poly_arg_none());
+  PolyUOp *src_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr, src, idx, poly_arg_none());
+  PolyUOp *device =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_INTERP));
+  PolyUOp *copy_src[2] = {src_idx, device};
+  PolyUOp *copy =
+      poly_uop(ctx, POLY_OP_COPY, POLY_FLOAT32, copy_src, 2, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, dst_idx, copy, poly_arg_none());
+  PolyUOp *ranges[2] = {r0, r1};
+  PolyUOp *end = poly_uop_end(ctx, store, ranges, 2);
+  PolyUOp *kernel_graph =
+      poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  PolyKernelScheduleResult sr =
+      poly_build_kernel_schedule_from_kernel_graph(ctx, kernel_graph);
+  ASSERT_INT_EQ(sr.n_kernels, 1);
+  ASSERT_INT_EQ(sr.kernel_kinds[0], POLY_KERNEL_ITEM_COPY);
+  ASSERT_INT_EQ(sr.copy_dst_params[0], 0);
+  ASSERT_INT_EQ(sr.copy_src_params[0], 1);
+  ASSERT_EQ(sr.kernels[0]->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(sr.kernels[0]->n_src, 4);
+  ASSERT_EQ(sr.kernels[0]->src[0]->op, POLY_OP_INDEX);
+  ASSERT_EQ(sr.kernels[0]->src[1]->op, POLY_OP_DEVICE);
+  ASSERT_EQ(sr.kernels[0]->src[2]->op, POLY_OP_RANGE);
+  ASSERT_EQ(sr.kernels[0]->src[3]->op, POLY_OP_RANGE);
+
+  poly_kernel_schedule_result_free(&sr);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, split_store_structural_parity) {
   /* Structural parity test for the kernel split pipeline.
    *

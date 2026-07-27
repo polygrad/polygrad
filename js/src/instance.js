@@ -334,6 +334,7 @@ function createBoundInstanceClass(runtime) {
       const ctx = parsed[0].tensor._ctx
       for (const b of parsed) {
         if (b.tensor._ctx !== ctx) throw new Error(`${b.name} belongs to another PolyCtx`)
+        if (b.role !== ROLE_OUTPUT) requireStorageBinding(b.name, b.tensor)
       }
 
       const entries = entrypoints.map(entry => {

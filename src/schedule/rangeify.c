@@ -3970,24 +3970,21 @@ static PolyUOp *kernel_strip_copy_end_chain(PolyUOp *u) {
   return u;
 }
 
-static bool kernel_copy_param_index(PolyUOp *u, PolyUOp **param_out, PolyUOp **idx_out) {
+static bool kernel_copy_param_index(PolyUOp *u, PolyUOp **param_out) {
   if (!u || u->op != POLY_OP_INDEX || u->n_src != 2) return false;
   if (!u->src[0] || u->src[0]->op != POLY_OP_PARAM) return false;
-  if (!u->src[1] || (u->src[1]->op != POLY_OP_RANGE && u->src[1]->op != POLY_OP_CONST))
-    return false;
+  if (!u->src[1]) return false;
   if (param_out) *param_out = u->src[0];
-  if (idx_out) *idx_out = u->src[1];
   return true;
 }
 
-static bool kernel_copy_param_or_index(PolyUOp *u, PolyUOp **param_out, PolyUOp **idx_out) {
+static bool kernel_copy_param_or_index(PolyUOp *u, PolyUOp **param_out) {
   if (!u) return false;
   if (u->op == POLY_OP_PARAM) {
     if (param_out) *param_out = u;
-    if (idx_out) *idx_out = NULL;
     return true;
   }
-  return kernel_copy_param_index(u, param_out, idx_out);
+  return kernel_copy_param_index(u, param_out);
 }
 
 static PolyUOp *kernel_copy_source_index_value(PolyUOp *u) {
@@ -4017,17 +4014,22 @@ static int kernel_param_arg_index(PolyUOp *param) {
 }
 
 static bool kernel_body_copy_info(
+    PolyCtx *ctx,
     PolyUOp *kernel_body,
     PolyUOp **copy_root_out,
     int *dst_param_out,
     int *src_param_out
 ) {
+  int n_ended_ranges = 0;
+  for (PolyUOp *cur = kernel_body; cur && cur->op == POLY_OP_END && cur->n_src >= 1;
+       cur = cur->src[0])
+    n_ended_ranges += cur->n_src - 1;
   PolyUOp *body = kernel_strip_copy_end_chain(kernel_body);
   if (!body || body->op != POLY_OP_STORE || body->n_src != 2) return false;
 
   PolyUOp *stored = body->src[1];
   bool explicit_copy =
-      stored && stored->op == POLY_OP_COPY && stored->n_src == 2 && stored->src[1] &&
+      stored && stored->op == POLY_OP_COPY && stored->n_src >= 2 && stored->src[1] &&
       stored->src[1]->op == POLY_OP_DEVICE;
   /* Pinned split_store selects the special runtime path only when the stored
    * value is explicitly COPY (or SLICE, represented by Polygrad's separate
@@ -4036,9 +4038,8 @@ static bool kernel_body_copy_info(
   if (!explicit_copy) return false;
 
   PolyUOp *dst_param = NULL, *src_param = NULL;
-  PolyUOp *dst_idx = NULL, *src_idx = NULL;
-  if (!kernel_copy_param_or_index(body->src[0], &dst_param, &dst_idx)) return false;
-  if (!kernel_copy_param_or_index(kernel_copy_source_index_value(stored), &src_param, &src_idx))
+  if (!kernel_copy_param_or_index(body->src[0], &dst_param)) return false;
+  if (!kernel_copy_param_or_index(kernel_copy_source_index_value(stored), &src_param))
     return false;
   if (dst_param == src_param) return false;
   /* The STORE target is the explicit COPY output, so its indexing does not
@@ -4051,7 +4052,21 @@ static bool kernel_body_copy_info(
   int src_param_idx = kernel_param_arg_index(src_param);
   if (dst_param_idx < 0 || src_param_idx < 0) return false;
 
-  if (copy_root_out) *copy_root_out = stored;
+  PolyUOp *copy_root = stored;
+  if (n_ended_ranges > 0) {
+    int n_src = stored->n_src + n_ended_ranges;
+    PolyUOp **src = malloc((size_t)n_src * sizeof(*src));
+    if (!src) return false;
+    memcpy(src, stored->src, (size_t)stored->n_src * sizeof(*src));
+    int at = stored->n_src;
+    for (PolyUOp *cur = kernel_body; cur && cur->op == POLY_OP_END && cur->n_src >= 1;
+         cur = cur->src[0])
+      for (int i = 1; i < cur->n_src; i++) src[at++] = cur->src[i];
+    copy_root = rangeify_clone_preserving_metadata(ctx, stored, src, n_src);
+    free(src);
+    if (!copy_root) return false;
+  }
+  if (copy_root_out) *copy_root_out = copy_root;
   if (dst_param_out) *dst_param_out = dst_param_idx;
   if (src_param_out) *src_param_out = src_param_idx;
   return true;
@@ -4428,7 +4443,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
 
     PolyUOp *copy_root = NULL;
     int copy_dst_param = -1, copy_src_param = -1;
-    if (kernel_body_copy_info(rewritten, &copy_root, &copy_dst_param, &copy_src_param)) {
+    if (kernel_body_copy_info(ctx, rewritten, &copy_root, &copy_dst_param, &copy_src_param)) {
       result.kernels[a] = copy_root;
       result.kernel_kinds[a] = POLY_KERNEL_ITEM_COPY;
       result.copy_dst_params[a] = copy_dst_param;
@@ -4507,7 +4522,7 @@ PolyKernelScheduleResult poly_build_kernel_schedule_from_kernel_graph(
       dependency_roots[kidx] = post_store;
       PolyUOp *copy_root = NULL;
       int copy_dst_param = -1, copy_src_param = -1;
-      if (kernel_body_copy_info(current, &copy_root, &copy_dst_param, &copy_src_param)) {
+      if (kernel_body_copy_info(ctx, current, &copy_root, &copy_dst_param, &copy_src_param)) {
         result.kernels[kidx] = copy_root;
         result.kernel_kinds[kidx] = POLY_KERNEL_ITEM_COPY;
         result.copy_dst_params[kidx] = copy_dst_param;

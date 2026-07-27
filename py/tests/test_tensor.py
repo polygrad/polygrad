@@ -137,9 +137,11 @@ class TestCreation:
 
     def test_backward_retains_distinct_wrappers_sharing_one_uop(self):
         x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
-        y = Tensor(x.uop_logical, requires_grad=True)
+        # Pinned Tensor.__init__ wraps an existing current Tensor.uop directly
+        # (tensor.py:92-121); retained logical provenance is not executable.
+        y = Tensor(x.uop, requires_grad=True)
         assert x is not y
-        assert x.uop_logical.raw == y.uop_logical.raw
+        assert x.uop.raw == y.uop.raw
 
         x.sum().backward()
         np.testing.assert_allclose(x.grad.numpy(), np.ones(4, dtype=np.float32))

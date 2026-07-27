@@ -740,6 +740,55 @@ PolyTensor *poly_tensor_empty(
   return poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
 }
 
+PolyTensor *poly_tensor_from_host(
+    PolyCtx *ctx,
+    void *ptr,
+    size_t nbytes,
+    PolyDType scalar_dtype,
+    const int64_t *dims,
+    int ndim
+) {
+  /* Pinned tinygrad UOp._frompy (uop/ops.py:747-765) creates
+   * BUFFER(UNIQUE, DEVICE(PYTHON)), applies the input shape, then lets the
+   * Tensor constructor COPY that exact source occurrence to its target.
+   * Path B keeps a device-free logical twin but attaches bytes only to the
+   * deviceful physical source. */
+  if (!ctx || ndim < 1 || ndim > POLY_MAX_DIMS || !dims) return NULL;
+
+  int64_t numel = 1;
+  for (int i = 0; i < ndim; i++) {
+    if (dims[i] < 0 || (dims[i] != 0 && numel > INT64_MAX / dims[i])) return NULL;
+    numel *= dims[i];
+  }
+  int itemsize = poly_dtype_itemsize(scalar_dtype);
+  if (itemsize <= 0 || (uint64_t)numel > SIZE_MAX / (size_t)itemsize ||
+      nbytes != (size_t)numel * (size_t)itemsize)
+    return NULL;
+
+  PolyUOp *unique =
+      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+  PolyUOp *logical =
+      unique ? poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(numel)) : NULL;
+  PolyDevice source_device = POLY_DEVICE_AUTO;
+  PolyUOp *physical = unique
+                          ? poly_buffer_from_host_unique(
+                                ctx, unique, scalar_dtype, numel, ptr, nbytes, &source_device
+                            )
+                          : NULL;
+  if (!logical || !physical) return NULL;
+
+  if (ndim != 1 || dims[0] != numel) {
+    logical = poly_reshape(ctx, logical, (int64_t *)dims, ndim);
+    physical = poly_reshape(ctx, physical, (int64_t *)dims, ndim);
+    if (!logical || !physical) return NULL;
+  }
+  PolyTensor *tensor = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, source_device
+  );
+  if (tensor) tensor->provenance = POLY_TENSOR_PROVENANCE_CONST_INIT;
+  return tensor;
+}
+
 int poly_tensor_replace_roots(
     PolyCtx *ctx,
     PolyTensor *tensor,

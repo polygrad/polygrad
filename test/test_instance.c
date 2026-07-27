@@ -1522,6 +1522,79 @@ TEST(instance, from_binding_arrays_forward_e2e) {
   PASS();
 }
 
+TEST(instance, from_bindings_snapshots_realized_path_b_host_parameter) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int64_t shape[] = {2};
+  float w_init[] = {2.0f, 3.0f};
+  PolyTensor *host_w =
+      poly_tensor_from_host(ctx, w_init, sizeof(w_init), POLY_FLOAT32, shape, 1);
+  ASSERT_NOT_NULL(host_w);
+  PolyTensor *w = poly_tensor_to_device(ctx, host_w, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(w);
+  ASSERT_FALSE(poly_uop_has_buffer_identity(poly_tensor_uop_physical(w)));
+
+  PolyTensor *x = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_alu2(ctx, POLY_OP_MUL, x, w);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(out);
+
+  const char *binding_names[] = {"x", "w", "output"};
+  int binding_roles[] = {POLY_ROLE_INPUT, POLY_ROLE_PARAM, POLY_ROLE_OUTPUT};
+  PolyTensor *binding_tensors[] = {x, w, out};
+  uint32_t binding_flags[] = {0, 0, 0};
+  const char *entry_names[] = {"forward"};
+  const char *entry_inputs[] = {"x"};
+  int entry_input_counts[] = {1};
+  const char *entry_outputs[] = {"output"};
+  int entry_output_counts[] = {1};
+  const char *entry_objectives[] = {NULL};
+  uint32_t entry_flags[] = {0};
+
+  PolyInstanceError err = {0};
+  PolyInstance *inst = poly_instance_from_binding_arrays(
+      ctx, binding_names, binding_roles, binding_tensors, binding_flags, 3, entry_names,
+      entry_inputs, entry_input_counts, entry_outputs, entry_output_counts, entry_objectives,
+      entry_flags, 1, NULL, &err
+  );
+  ASSERT_TRUE(inst == NULL);
+  ASSERT_NOT_NULL(strstr(err.message, "has no current buffer identity"));
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &w, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, w);
+  const PolyUOp *w_physical =
+      poly_uop_get_buffer_identity(poly_tensor_uop_physical(w));
+  const PolyUOp *w_logical =
+      poly_uop_get_buffer_identity(poly_tensor_uop_logical(w));
+  ASSERT_NOT_NULL(w_physical);
+  ASSERT_NOT_NULL(w_logical);
+  ASSERT_PTR_NEQ(w_physical, w_logical);
+
+  memset(&err, 0, sizeof(err));
+  inst = poly_instance_from_binding_arrays(
+      ctx, binding_names, binding_roles, binding_tensors, binding_flags, 3, entry_names,
+      entry_inputs, entry_input_counts, entry_outputs, entry_output_counts, entry_objectives,
+      entry_flags, 1, NULL, &err
+  );
+  ASSERT_NOT_NULL(inst);
+
+  float x_data[] = {10.0f, 20.0f};
+  PolyIOBinding io[] = {{"x", x_data}};
+  ASSERT_INT_EQ(poly_instance_forward(inst, io, 1), 0);
+  int64_t numel = 0;
+  float *y = poly_instance_buf_data_named(inst, "output", &numel);
+  ASSERT_NOT_NULL(y);
+  ASSERT_INT_EQ((int)numel, 2);
+  ASSERT_FLOAT_EQ(y[0], 20.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(y[1], 60.0f, 1e-5f);
+
+  poly_instance_free(inst);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(instance, from_binding_arrays_train_after_set_device_auto_updates_param) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

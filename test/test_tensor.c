@@ -13,6 +13,7 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
+#include "../src/device.h"
 #include "../src/engine/schedule.h"
 #include "../src/schedule/rangeify.h"
 #include "../src/nn.h"
@@ -142,6 +143,57 @@ TEST(tensor, root_mutators_make_physical_clear_explicit) {
   ASSERT_PTR_EQ(tensor->uop_logical, next_logical);
   ASSERT_EQ(tensor->uop_physical, NULL);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, host_array_uses_deviceful_source_and_real_cpu_copy) {
+  PolyCtx *ctx = poly_ctx_new();
+  float data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  int64_t shape[2] = {2, 2};
+  PolyTensor *source =
+      poly_tensor_from_host(ctx, data, sizeof(data), POLY_FLOAT32, shape, 2);
+  ASSERT_NOT_NULL(source);
+  ASSERT_INT_EQ(source->device, POLY_DEVICE_HOST);
+  ASSERT_INT_EQ(source->uop_logical->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(source->uop_physical->op, POLY_OP_RESHAPE);
+
+  PolyUOp *logical_buffer = base_buf(source->uop_logical);
+  PolyUOp *physical_buffer = base_buf(source->uop_physical);
+  ASSERT_NOT_NULL(logical_buffer);
+  ASSERT_NOT_NULL(physical_buffer);
+  ASSERT_INT_EQ(logical_buffer->n_src, 1);
+  ASSERT_INT_EQ(physical_buffer->n_src, 2);
+  ASSERT_PTR_EQ(logical_buffer->src[0], physical_buffer->src[0]);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(physical_buffer->src[1]), POLY_DEVICE_HOST
+  );
+  ASSERT_EQ(poly_buffer_get_ptr(ctx, logical_buffer), NULL);
+  ASSERT_PTR_EQ(poly_buffer_get_ptr(ctx, physical_buffer), data);
+
+  PolyTensor *moved = poly_tensor_to_device(ctx, source, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(moved);
+  ASSERT_INT_EQ(moved->uop_physical->op, POLY_OP_COPY);
+  ASSERT_PTR_EQ(moved->uop_physical->src[0], source->uop_physical);
+  ASSERT_INT_EQ(
+      poly_device_from_device_uop(moved->uop_physical->src[1]), POLY_DEVICE_CPU
+  );
+
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &moved, 1, &realized), 0);
+  ASSERT_NOT_NULL(realized);
+  PolyUOp *realized_buffer =
+      (PolyUOp *)poly_uop_get_buffer_identity(realized->uop_physical);
+  ASSERT_NOT_NULL(realized_buffer);
+  ASSERT_PTR_NEQ(realized_buffer, physical_buffer);
+  float out[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, realized_buffer, out, sizeof(out)), 0);
+  for (int i = 0; i < 4; i++) ASSERT_FLOAT_NEAR(out[i], data[i], 4, 1e-6);
+
+  ASSERT_EQ(
+      poly_tensor_from_host(ctx, data, sizeof(data) - 1, POLY_FLOAT32, shape, 2),
+      NULL
+  );
   poly_ctx_destroy(ctx);
   PASS();
 }

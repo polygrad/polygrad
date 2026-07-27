@@ -108,10 +108,15 @@ def normalize_arg(node, arg):
         return "<unique>"
     if op == "DEVICE":
         if ENGINE == "tinygrad":
-            return arg.strip("'\"").upper()
-        device = _ffi._lib.poly_uop_device(node.raw)
-        name = _ffi._lib.poly_device_name(device)
-        return name.decode("utf-8").upper() if name else f"DEVICE:{device}"
+            name = arg.strip("'\"").upper()
+        else:
+            device = _ffi._lib.poly_uop_device(node.raw)
+            raw_name = _ffi._lib.poly_device_name(device)
+            name = raw_name.decode("utf-8").upper() if raw_name else f"DEVICE:{device}"
+        # Both are the frontend-owned, creation-only source domain. Polygrad's
+        # C runtime calls it HOST because no Python executor exists in core;
+        # pinned tinygrad calls the same graph role PYTHON.
+        return "PYTHON" if name in {"HOST", "PYTHON"} else name
     if op == "CONST" and dtype_name(node) in {
         "half", "float", "double", "bfloat16", "float16", "float32", "float64",
         "__fp16", "__bf16",
@@ -176,6 +181,26 @@ def case_basic_alu():
 
 def case_empty_storage():
     out = Tensor.empty(2, 3, device="CPU")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_host_list_cpu():
+    out = Tensor([1.0, 2.0], device="CPU")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_host_list_cuda():
+    out = Tensor([1.0, 2.0], device="CUDA")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_host_list_2d_cpu():
+    out = Tensor([[1.0, 2.0], [3.0, 4.0]], device="CPU")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_host_list_2d_cuda():
+    out = Tensor([[1.0, 2.0], [3.0, 4.0]], device="CUDA")
     return {"physical": out.uop, "logical": logical(out)}
 
 
@@ -311,6 +336,10 @@ CASES = {
     "expand": ("tensor", case_expand),
     "flip": ("tensor", case_flip),
     "flip_scalar_noop": ("tensor", case_flip_scalar_noop),
+    "host_list_2d_cpu": ("tensor", case_host_list_2d_cpu),
+    "host_list_2d_cuda": ("tensor", case_host_list_2d_cuda),
+    "host_list_cpu": ("tensor", case_host_list_cpu),
+    "host_list_cuda": ("tensor", case_host_list_cuda),
     "movement_reduce": ("tensor", case_movement_reduce),
     "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),
     "pad": ("tensor", case_pad),

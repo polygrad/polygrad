@@ -629,6 +629,14 @@ PolyTensor *poly_tensor_empty(
     int ndim,
     PolyDevice device
 );
+PolyTensor *poly_tensor_from_host(
+    PolyCtx *ctx,
+    void *ptr,
+    size_t nbytes,
+    PolyDType scalar_dtype,
+    const int64_t *dims,
+    int ndim
+);
 int poly_tensor_replace_roots(
     PolyCtx *ctx,
     PolyTensor *tensor,

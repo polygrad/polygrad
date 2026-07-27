@@ -438,6 +438,23 @@ class TestInstanceExport:
 
         assert inst.param_trainable(0) is False
 
+    def test_from_bindings_rejects_lazy_parameter_without_current_storage(self):
+        w = Tensor([[7.0]], requires_grad=True)
+        x = Tensor.empty((1, 1))
+        y = x.dot(w)
+
+        with pytest.raises(RuntimeError, match="w.*has no buffer identity"):
+            Instance.from_bindings(
+                bindings=[
+                    {"name": "x", "role": "input", "tensor": x},
+                    {"name": "w", "role": "state", "tensor": w},
+                    {"name": "y", "role": "output", "tensor": y},
+                ],
+                entrypoints=[
+                    {"name": "forward", "inputs": ["x"], "outputs": ["y"]},
+                ],
+            )
+
     def test_from_tensors_keeps_tinygrad_style_plain_object(self):
         class LinearNet:
             def __init__(self):
