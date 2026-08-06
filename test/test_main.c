@@ -1,10 +1,12 @@
 /*
  * test_main.c — Test runner for polygrad
  *
- * Usage: polygrad_test [--fast] [--common] [suite_filter|suite.test]
- *   --fast    Skip slow suites (nn)
- *   --common  Only run tests marked portable across execution backends
- *   filter    Only run suites/tests matching substring, or exact suite.test
+ * Usage: polygrad_test [--fast] [--common] [--specific SUITE] [suite_filter|suite.test]
+ *   --fast            Skip slow suites (nn)
+ *   --common          Run the large backend-portable suite. POLY_DEVICE selects
+ *                     the execution backend.
+ *   --specific SUITE  Run only TEST_BACKEND entries in the exact suite.
+ *   filter            Match a suite/test substring, or exact suite.test.
  */
 
 #include "test_harness.h"
@@ -32,6 +34,7 @@ int main(int argc, char **argv) {
   atexit(cleanup_caches);
   int fast = 0;
   int common = 0;
+  const char *specific_suite = NULL;
   const char *filter = NULL;
   const char *filter_name = NULL;
   char filter_suite[128] = {0};
@@ -41,6 +44,8 @@ int main(int argc, char **argv) {
       fast = 1;
     else if (strcmp(argv[i], "--common") == 0)
       common = 1;
+    else if (strcmp(argv[i], "--specific") == 0 && i + 1 < argc)
+      specific_suite = argv[++i];
     else
       filter = argv[i];
   }
@@ -58,11 +63,11 @@ int main(int argc, char **argv) {
   printf(
       "\n  polygrad test suite%s%s\n",
       fast ? " (fast)" : "",
-      common ? " (common backend)" : ""
+      common ? " (common backend)" : specific_suite ? " (backend-specific)" : ""
   );
   printf("  ================\n");
 
-  if (!fast && !common && !filter) return poly_test_run_all();
+  if (!fast && !common && !specific_suite && !filter) return poly_test_run_all();
 
   /* Filtered run */
   int total_passed = 0, total_failed = 0, skipped = 0;
@@ -74,6 +79,12 @@ int main(int argc, char **argv) {
       continue;
     }
     if (common && !(g_tests[i].flags & POLY_TEST_COMMON)) {
+      skipped++;
+      continue;
+    }
+    if (specific_suite &&
+        ((g_tests[i].flags & POLY_TEST_COMMON) ||
+         strcmp(g_tests[i].suite, specific_suite) != 0)) {
       skipped++;
       continue;
     }
@@ -120,6 +131,10 @@ int main(int argc, char **argv) {
   }
   if (common && total_passed == 0 && total_failed == 0) {
     printf("  ERROR: no tests are marked common backend\n\n");
+    return 1;
+  }
+  if (specific_suite && total_passed == 0 && total_failed == 0) {
+    printf("  ERROR: no backend-specific tests matched suite '%s'\n\n", specific_suite);
     return 1;
   }
   return total_failed > 0 ? 1 : 0;

@@ -8,6 +8,7 @@
  */
 
 #include "codegen.h"
+#include "bigint.h"
 #include "ctx.h"
 #include "engine/schedule.h"
 #include "utils.h"
@@ -852,6 +853,10 @@ static bool x86_const_as_i64(PolyUOp *u, int64_t *out) {
     if (out) *out = u->arg.b ? 1 : 0;
     return true;
   }
+  if (u->arg.kind == POLY_ARG_BIGINT) {
+    if (out) *out = (int64_t)poly_arg_integer_to_u64_mod(u->arg);
+    return true;
+  }
   return false;
 }
 
@@ -1232,7 +1237,14 @@ static PolyUOp *rule_x86_float_where_mask_legalize(PolyCtx *ctx, PolyUOp *u, con
 static PolyUOp *rule_x86_neg_to_sub(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
   (void)b;
   if (!u || u->op != POLY_OP_NEG || u->n_src != 1) return NULL;
-  return poly_uop2(ctx, POLY_OP_SUB, u->dtype, poly_const_like_int(ctx, u, 0), u->src[0], poly_arg_none());
+  /* tinygrad UOp.const_like uses dtype.base, so a vector NEG is legalized with
+   * a scalar zero that graph isel broadcasts before linearization. */
+  PolyDType zero_dtype = poly_dtype_scalar(u->dtype);
+  PolyArg zero_arg = poly_dtype_is_float(zero_dtype) ? poly_arg_float(0.0)
+                     : poly_dtype_is_bool(zero_dtype) ? poly_arg_bool(false)
+                                                      : poly_arg_int(0);
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, zero_dtype, zero_arg);
+  return poly_uop2(ctx, POLY_OP_SUB, u->dtype, zero, u->src[0], poly_arg_none());
 }
 
 static PolyUOp *rule_x86_cmod_to_cdiv(PolyCtx *ctx, PolyUOp *u, const PolyBindings *b) {
@@ -1361,6 +1373,9 @@ static PolyPatternMatcher *poly_pm_x86_extra(void) {
       {poly_pat_op(POLY_OP_CMOD, NULL, 0, NULL), rule_x86_cmod_to_cdiv},
       {poly_pat_op(POLY_OP_POW, NULL, 0, NULL), rule_x86_int_pow_legalize},
   };
+  /* Pinned tinygrad renderer/isa/x86.py:933 excludes bfloat16 from X86
+   * supported_dtypes, and codegen/__init__.py:121 runs pm_dtype_decomps
+   * before renderer-specific legalization. */
   g_pm_x86_extra =
       poly_pm_thread_cache(poly_pm_new(rules, (int)(sizeof(rules) / sizeof(rules[0]))));
   return g_pm_x86_extra;
@@ -2426,8 +2441,12 @@ static PolyUOp *x86_graph_cmp_mask_as_value(PolyCtx *ctx, PolyUOp *mask) {
 static PolyUOp *x86_graph_materialize_scalar_int_const(PolyCtx *ctx, PolyUOp *u) {
   if (!u || u->op != POLY_OP_CONST || u->dtype.count > 1 || !x86_is_int_dtype(u->dtype))
     return u;
-  if (u->arg.kind != POLY_ARG_INT && u->arg.kind != POLY_ARG_BOOL) return u;
-  int64_t v = u->arg.kind == POLY_ARG_BOOL ? (u->arg.b ? 1 : 0) : u->arg.i;
+  if (u->arg.kind != POLY_ARG_INT && u->arg.kind != POLY_ARG_BIGINT &&
+      u->arg.kind != POLY_ARG_BOOL)
+    return u;
+  int64_t v = u->arg.kind == POLY_ARG_BOOL
+                  ? (u->arg.b ? 1 : 0)
+                  : (int64_t)poly_arg_integer_to_u64_mod(u->arg);
   PolyUOp *imm = x86_const_i(ctx, u->dtype, v);
   PolyUOp *srcs[1] = {imm};
   PolyX86Op op = x86_value_size(u->dtype, false) == 8 ? POLY_X86_MOVABS : POLY_X86_MOVi;
@@ -4034,18 +4053,40 @@ static void x86_stack_address(PolyCtx *ctx, int offset, int size, PolyUOp *out[4
 }
 
 static PolyUOp *x86_fill_from_slot(PolyCtx *ctx, const X86SpillSlot *slot, int32_t real) {
+  PolyDType dtype = slot->buffer_value ? x86_u64() : slot->dtype;
+  if (!slot->buffer_value && poly_dtype_eq(poly_dtype_scalar(dtype), POLY_FLOAT16) &&
+      dtype.count == 1) {
+    /* tinygrad x86.py:881-889 runs fills through typed LOAD isel; its
+     * dt_16bit LOAD rule uses VPINSRW and keeps the two-byte spill slot. */
+    PolyUOp *srcs[6] = {
+        x86_define_reg(ctx, dtype, real), NULL, NULL, NULL, NULL, x86_const_i(ctx, POLY_UINT8, 0),
+    };
+    x86_stack_address(ctx, slot->offset, slot->size, &srcs[1]);
+    return x86_ins(ctx, POLY_X86_VPINSRW, dtype, srcs, 6, real);
+  }
   PolyUOp *srcs[4];
   x86_stack_address(ctx, slot->offset, slot->size, srcs);
-  PolyX86Op op = x86_mov_op_for_dtype(slot->buffer_value ? x86_u64() : slot->dtype, false);
-  return x86_ins(ctx, op, slot->buffer_value ? x86_u64() : slot->dtype, srcs, 4, real);
+  return x86_ins(ctx, x86_mov_op_for_dtype(dtype, false), dtype, srcs, 4, real);
 }
 
 static PolyUOp *x86_spill_to_slot(PolyCtx *ctx, const X86SpillSlot *slot, PolyUOp *value) {
-  PolyUOp *srcs[5];
+  PolyDType dtype = slot->buffer_value ? x86_u64() : slot->dtype;
+  PolyUOp *srcs[6];
   x86_stack_address(ctx, slot->offset, slot->size, srcs);
   srcs[4] = value;
-  PolyX86Op op = x86_mov_op_for_dtype(slot->buffer_value ? x86_u64() : slot->dtype, true);
-  return x86_ins_nodef(ctx, op, POLY_VOID, srcs, 5);
+  int n_src = 5;
+  PolyX86Op op;
+  if (!slot->buffer_value && poly_dtype_eq(poly_dtype_scalar(dtype), POLY_FLOAT16) &&
+      dtype.count == 1) {
+    /* tinygrad x86.py:881-885 runs spills through typed STORE isel; its
+     * dt_16bit STORE rule extracts lane zero with VPEXTRW. */
+    op = POLY_X86_VPEXTRW;
+    srcs[5] = x86_const_i(ctx, POLY_UINT8, 0);
+    n_src = 6;
+  } else {
+    op = x86_mov_op_for_dtype(dtype, true);
+  }
+  return x86_ins_nodef(ctx, op, POLY_VOID, srcs, n_src);
 }
 
 static PolyUOp *x86_copy_to_reg(PolyCtx *ctx, PolyUOp *src, int32_t real);
@@ -5028,9 +5069,13 @@ static X86LoopLabel *x86_loop_label_add(X86LoopLabels *ls, PolyUOp *range, int o
 
 static PolyUOp *x86_copy_to_reg(PolyCtx *ctx, PolyUOp *src, int32_t real) {
   PolyDType dt = src->dtype;
-  if (src->op == POLY_OP_CONST && (src->arg.kind == POLY_ARG_INT || src->arg.kind == POLY_ARG_BOOL) &&
+  if (src->op == POLY_OP_CONST &&
+      (src->arg.kind == POLY_ARG_INT || src->arg.kind == POLY_ARG_BIGINT ||
+       src->arg.kind == POLY_ARG_BOOL) &&
       dt.count <= 1 && x86_is_int_dtype(dt)) {
-    int64_t v = src->arg.kind == POLY_ARG_BOOL ? (src->arg.b ? 1 : 0) : src->arg.i;
+    int64_t v = src->arg.kind == POLY_ARG_BOOL
+                    ? (src->arg.b ? 1 : 0)
+                    : (int64_t)poly_arg_integer_to_u64_mod(src->arg);
     PolyUOp *imm = x86_const_i(ctx, dt, v);
     PolyUOp *srcs[1] = {imm};
     PolyX86Op op = x86_value_size(dt, false) == 8 ? POLY_X86_MOVABS : POLY_X86_MOVi;
@@ -5801,6 +5846,7 @@ static PolyRendererCaps poly_x86_caps(void) {
        * the MUL is foldable. */
       .has_mulacc = false,
       .has_threefry = false,
+      .has_fdiv = true,
       .has_int64 = true,
       .has_local = false,
       .has_threads = has_threads,
@@ -5833,6 +5879,7 @@ PolyUOp *poly_rewrite_x86(PolyCtx *ctx, PolyUOp *sink) {
       .caps = poly_x86_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_x86_extra(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);

@@ -185,7 +185,11 @@ class TestOverheadVsNumpy:
             c_pg = ((a + b) * (a - b) + a * b).numpy()
         pg_us = (time.perf_counter() - t0) / iters * 1e6
 
-        np.testing.assert_allclose(c_pg, c_np, rtol=1e-4)
+        # Pinned tinygrad and Polygrad emit the same fused C expression and
+        # Clang contracts its final multiply/add. NumPy materializes each
+        # intermediate, so a relative-only comparison fails near cancellation
+        # despite bit-exact TG/PG/FMA agreement.
+        np.testing.assert_allclose(c_pg, c_np, rtol=1e-4, atol=1e-5)
         ratio = pg_us / np_us
         print(f'\n  5-op chain({n}): numpy={np_us:.0f}us, polygrad={pg_us:.0f}us, '
               f'ratio={ratio:.2f}x {"POLYGRAD WINS" if ratio < 1 else ""}')

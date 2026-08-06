@@ -8,6 +8,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "bigint.h"
 #include "ctx.h"
 #include "utils.h"
 #include "pat.h"
@@ -1173,9 +1174,13 @@ PolyRendererCaps poly_c_renderer_caps(void) {
   return (PolyRendererCaps){
       .has_mulacc = false,
       .has_threefry = false,
-      .has_exp2 = true,
-      .has_log2 = true,
-      .has_sin = true,
+      /* Pinned ClangRenderer removes EXP2, LOG2, and SIN from code_for_op;
+       * the shared codegen decomposition handles them before C rendering
+       * (tinygrad/renderer/cstyle.py:246-269). */
+      .has_exp2 = false,
+      .has_log2 = false,
+      .has_sin = false,
+      .has_fdiv = true,
       .has_int64 = true,
       .has_local = false,
       .has_threads = has_threads,
@@ -1207,6 +1212,7 @@ PolyUOp **poly_linearize(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .caps = poly_c_direct_call_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_c_renderer_extra(),
   };
   return poly_linearize_ex(ctx, sink, opts, n_out);
@@ -1234,6 +1240,7 @@ PolyUOp **poly_linearize_env(PolyCtx *ctx, PolyUOp *sink, int *n_out) {
       .caps = poly_c_direct_call_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_c_renderer_extra(),
   };
   return poly_linearize_ex(ctx, sink, opts, n_out);
@@ -1251,19 +1258,32 @@ static char *render_int64_const(int64_t v, char *buf, int cap) {
   return buf;
 }
 
-/* Render a float constant, dtype-aware: f64 gets full precision with no suffix,
- * f32 (and all other float types) get %.9g with the 'f' suffix. */
+/* Render a float constant, dtype-aware. Pinned cstyle.py:40-43 renders half
+ * constants through a larger float literal and explicitly casts to half. */
 static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
-  bool is_f64 = poly_dtype_eq(poly_dtype_scalar(dt), POLY_FLOAT64);
+  PolyDType scalar = poly_dtype_scalar(dt);
+  bool is_f64 = poly_dtype_eq(scalar, POLY_FLOAT64);
+  bool is_f16 = poly_dtype_eq(scalar, POLY_FLOAT16);
+  char literal[96];
   if (isinf(v)) {
     if (is_f64)
       snprintf(buf, cap, v > 0 ? "__builtin_inf()" : "(-__builtin_inf())");
+    else if (is_f16)
+      snprintf(
+          buf, cap, v > 0 ? "((__fp16)(__builtin_inff()))"
+                          : "((__fp16)(-__builtin_inff()))"
+      );
     else
       snprintf(buf, cap, v > 0 ? "__builtin_inff()" : "(-__builtin_inff())");
     return buf;
   }
   if (isnan(v)) {
-    snprintf(buf, cap, is_f64 ? "__builtin_nan(\"\")" : "__builtin_nanf(\"\")");
+    if (is_f64)
+      snprintf(buf, cap, "__builtin_nan(\"\")");
+    else if (is_f16)
+      snprintf(buf, cap, "((__fp16)(__builtin_nanf(\"\")))");
+    else
+      snprintf(buf, cap, "__builtin_nanf(\"\")");
     return buf;
   }
   if (is_f64) {
@@ -1279,22 +1299,59 @@ static char *render_float_const(double v, PolyDType dt, char *buf, int cap) {
     }
     return buf;
   }
-  /* Float32 (and other float types): truncate to float32, add 'f' suffix. */
-  snprintf(buf, cap, "%.9g", (double)(float)v);
-  if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E')) {
-    int len = (int)strlen(buf);
-    if (len + 2 < cap) {
-      buf[len] = '.';
-      buf[len + 1] = '0';
-      buf[len + 2] = '\0';
+  if (is_f16) {
+    /* A double round-trip literal is harmlessly rounded to f32 by the suffix,
+     * then to f16 by the explicit cast, matching tinygrad's emitted C type
+     * boundary without pre-rounding the argument in the renderer. */
+    snprintf(literal, sizeof(literal), "%.17g", v);
+    if (!strchr(literal, '.') && !strchr(literal, 'e') && !strchr(literal, 'E')) {
+      int len = (int)strlen(literal);
+      if (len + 2 < (int)sizeof(literal)) {
+        literal[len] = '.';
+        literal[len + 1] = '0';
+        literal[len + 2] = '\0';
+      }
+    }
+    snprintf(buf, cap, "((__fp16)(%sf))", literal);
+    return buf;
+  }
+  /* Float32: truncate to float32, add the 'f' suffix. */
+  snprintf(literal, sizeof(literal), "%.9g", (double)(float)v);
+  if (!strchr(literal, '.') && !strchr(literal, 'e') && !strchr(literal, 'E')) {
+    int len = (int)strlen(literal);
+    if (len + 2 < (int)sizeof(literal)) {
+      literal[len] = '.';
+      literal[len + 1] = '0';
+      literal[len + 2] = '\0';
     }
   }
-  int len = (int)strlen(buf);
+  int len = (int)strlen(literal);
   if (len + 1 < cap) {
-    buf[len] = 'f';
-    buf[len + 1] = '\0';
+    snprintf(buf, cap, "%sf", literal);
   }
   return buf;
+}
+
+/* Exact C equivalent of helpers.strip_parens used by pinned
+ * cstyle.py:62-63: remove one balanced outer pair, not merely the first and
+ * last characters. */
+static char *render_strip_parens(const char *expr) {
+  if (!expr) return strdup("");
+  size_t len = strlen(expr);
+  if (len < 2 || expr[0] != '(' || expr[len - 1] != ')') return strdup(expr);
+  int depth = 0;
+  for (size_t i = 1; i + 1 < len; i++) {
+    if (expr[i] == '(')
+      depth++;
+    else if (expr[i] == ')' && --depth < 0)
+      return strdup(expr);
+  }
+  if (depth != 0) return strdup(expr);
+  char *stripped = malloc(len - 1);
+  if (!stripped) return strdup(expr);
+  memcpy(stripped, expr + 1, len - 2);
+  stripped[len - 2] = '\0';
+  return stripped;
 }
 
 /* Render a C type for a PolyDType, including vector and pointer forms. */
@@ -1380,7 +1437,7 @@ static void render_vector_load_expr(
 
 /* Render an ALU expression.
  * For vec4 types, GCC vector extensions handle +, -, *, /, <<, >>, &, |, ^,
- * <, !=, == natively.  WHERE/MAX/NEG-bool need special handling. */
+ * <, !=, == natively. WHERE/MAX need special handling. */
 static void render_alu(
     char *buf,
     int cap,
@@ -1395,14 +1452,9 @@ static void render_alu(
   switch (op) {
   /* unary */
   case POLY_OP_NEG:
-    if (poly_dtype_is_bool(sdt)) {
-      if (is_vec)
-        snprintf(buf, cap, "(~%s)", s0); /* vec bool NEG: bitwise NOT */
-      else
-        snprintf(buf, cap, "(!%s)", s0);
-    } else {
-      snprintf(buf, cap, "(-%s)", s0); /* works on vectors */
-    }
+    /* Pinned CStyleLanguage.code_for_op renders every NEG as arithmetic -x
+     * (renderer/cstyle.py:128-130). Assignment to bool normalizes the result. */
+    snprintf(buf, cap, "(-%s)", s0); /* works on vectors */
     break;
   case POLY_OP_SQRT:
     if (is_vec) {
@@ -1568,6 +1620,22 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   StrMap names;
   smap_init(&names, n);
 
+  /* Pinned cstyle.py:194 counts direct consumers once, then :232-237 uses
+   * that count to inline single-consumer expressions unless EXPAND_SSA. */
+  IntMap uop_indices;
+  imap_init(&uop_indices, n);
+  int *child_count = calloc((size_t)n, sizeof(*child_count));
+  if (!child_count) goto fail;
+  for (int i = 0; i < n; i++) imap_set(&uop_indices, uops[i], i);
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < uops[i]->n_src; j++) {
+      int source_index = imap_try_get(&uop_indices, uops[i]->src[j]);
+      if (source_index >= 0) child_count[source_index]++;
+    }
+  }
+  bool expand_ssa =
+      poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
+
   /* function parameter entries: (type_str, name_str, sort_key) */
   RenderParam params[POLY_RENDER_MAX_PARAMS];
   int n_params = 0;
@@ -1664,6 +1732,7 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
     /* --- CONST: inline literal -------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char val[64];
+      char *wide = NULL;
       PolyDType sdt = poly_dtype_scalar(u->dtype);
       if (poly_dtype_is_float(sdt)) {
         render_float_const(u->arg.f, sdt, val, sizeof(val));
@@ -1675,14 +1744,37 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         else
           snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(sdt, POLY_INT64)) {
-        render_int64_const(u->arg.i, val, sizeof(val));
+        if (u->arg.kind == POLY_ARG_BIGINT) {
+          char *decimal = poly_arg_integer_to_decimal(u->arg);
+          if (!decimal) return NULL;
+          size_t n = strlen(decimal) + 3;
+          wide = malloc(n);
+          if (!wide) {
+            free(decimal);
+            return NULL;
+          }
+          snprintf(wide, n, "%sll", decimal);
+          free(decimal);
+        } else {
+          render_int64_const(u->arg.i, val, sizeof(val));
+        }
       } else if (poly_dtype_eq(sdt, POLY_UINT64)) {
-        snprintf(val, sizeof(val), "%lluull", (unsigned long long)(uint64_t)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%lluull",
+            (unsigned long long)poly_arg_integer_to_u64_mod(u->arg)
+        );
       } else if (poly_dtype_eq(sdt, POLY_UINT32)) {
-        snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%uu",
+            (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(u->arg)
+        );
+      } else if (u->arg.kind == POLY_ARG_BIGINT) {
+        wide = poly_arg_integer_to_decimal(u->arg);
+        if (!wide) return NULL;
       } else {
         snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
       }
+      const char *literal = wide ? wide : val;
       /* Vec CONST: broadcast scalar to all lanes */
       if (u->dtype.count > 1) {
         char dtype_s[128];
@@ -1691,12 +1783,13 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
         sb_init(&vexpr);
         sb_printf(&vexpr, "((%s){", dtype_s);
         for (int j = 0; j < u->dtype.count; j++)
-          sb_printf(&vexpr, "%s%s", j > 0 ? "," : "", val);
+          sb_printf(&vexpr, "%s%s", j > 0 ? "," : "", literal);
         sb_puts(&vexpr, "})");
         smap_set(&names, u, vexpr.buf);
       } else {
-        smap_set(&names, u, strdup(val));
+        smap_set(&names, u, strdup(literal));
       }
+      free(wide);
       continue;
     }
 
@@ -2094,13 +2187,33 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 
     /* --- ALU ops: arithmetic expressions ---------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      const char *s0 = (u->n_src > 0) ? smap_get(&names, u->src[0]) : "";
-      const char *s1 = (u->n_src > 1) ? smap_get(&names, u->src[1]) : "";
-      const char *s2 = (u->n_src > 2) ? smap_get(&names, u->src[2]) : "";
+      const bool associative =
+          u->op == POLY_OP_ADD || u->op == POLY_OP_MUL || u->op == POLY_OP_XOR ||
+          u->op == POLY_OP_OR || u->op == POLY_OP_AND;
+      char *stripped[3] = {NULL, NULL, NULL};
+      const char *sources[3] = {"", "", ""};
+      for (int j = 0; j < u->n_src && j < 3; j++) {
+        const char *source = smap_get(&names, u->src[j]);
+        if (associative && u->src[j]->op == u->op) {
+          stripped[j] = render_strip_parens(source);
+          sources[j] = stripped[j];
+        } else {
+          sources[j] = source ? source : "";
+        }
+      }
+      const char *s0 = sources[0], *s1 = sources[1], *s2 = sources[2];
       size_t expr_cap = strlen(s0 ? s0 : "") + strlen(s1 ? s1 : "") + strlen(s2 ? s2 : "") + 1024;
       char *expr = malloc(expr_cap);
       if (!expr) expr = strdup("0");
       else render_alu(expr, (int)expr_cap, u->op, u->dtype, s0 ? s0 : "", s1 ? s1 : "", s2 ? s2 : "");
+      for (int j = 0; j < 3; j++) free(stripped[j]);
+
+      /* Pinned cstyle.py:232-237 keeps WHERE materialized but directly embeds
+       * a one-use ALU expression in its consumer by default. */
+      if (u->op != POLY_OP_WHERE && child_count[i] == 1 && !expand_ssa) {
+        smap_set(&names, u, expr);
+        continue;
+      }
 
       char name[32];
       snprintf(name, sizeof(name), "alu%d", c_alu++);
@@ -2252,6 +2365,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
   /* cleanup */
   free(decls.buf);
   free(body.buf);
+  free(child_count);
+  imap_destroy(&uop_indices);
   smap_destroy(&names);
 
   return out.buf;
@@ -2259,6 +2374,8 @@ char *poly_render_c(PolyUOp **uops, int n, const char *fn_name) {
 fail:
   free(decls.buf);
   free(body.buf);
+  free(child_count);
+  imap_destroy(&uop_indices);
   smap_destroy(&names);
   return NULL;
 }

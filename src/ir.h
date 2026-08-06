@@ -1,7 +1,7 @@
 /*
  * poly_ir.h -- Binary IR codec for tensor-level UOp graphs
  *
- * Current format: poly.ir.uops@3 (v1/v2 import remains supported).
+ * Current format: poly.ir.uops@4 (v1-v3 import remains supported).
  * Scope: tensor-level graphs only (pre-scheduling).
  *        Pointer dtypes are rejected. Vector count is serialized explicitly
  *        because pinned tensor movement shape sources are weakint vectors.

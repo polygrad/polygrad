@@ -268,19 +268,23 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   function writeOptimConfig(cfg) {
-    const ptr = Module._malloc(28)
+    /* PolyOptimConfig: int32 + 4-byte alignment, five float64 values,
+     * two bools, then 8-byte struct alignment. Keep Python/Native/WASM
+     * optimizer constants bit-identical to pinned Python ConstFloat values. */
+    const ptr = Module._malloc(56)
     const u8 = heapU8()
     const h32 = heap32()
-    const f32 = heapF32()
-    u8.fill(0, ptr, ptr + 28)
+    const f64 = heapF64()
+    u8.fill(0, ptr, ptr + 56)
     h32[ptr >> 2] = cfg.kind || 0
-    f32[(ptr >> 2) + 1] = cfg.beta1 == null ? 0.9 : cfg.beta1
-    f32[(ptr >> 2) + 2] = cfg.beta2 == null ? 0.999 : cfg.beta2
-    f32[(ptr >> 2) + 3] = cfg.eps == null ? 1e-8 : cfg.eps
-    f32[(ptr >> 2) + 4] = cfg.weightDecay == null ? 0 : cfg.weightDecay
-    f32[(ptr >> 2) + 5] = cfg.momentum == null ? 0 : cfg.momentum
-    u8[ptr + 24] = cfg.nesterov ? 1 : 0
-    u8[ptr + 25] = cfg.classic ? 1 : 0
+    const base = ptr >> 3
+    f64[base + 1] = cfg.beta1 == null ? 0.9 : cfg.beta1
+    f64[base + 2] = cfg.beta2 == null ? 0.999 : cfg.beta2
+    f64[base + 3] = cfg.eps == null ? 1e-8 : cfg.eps
+    f64[base + 4] = cfg.weightDecay == null ? 0 : cfg.weightDecay
+    f64[base + 5] = cfg.momentum == null ? 0 : cfg.momentum
+    u8[ptr + 48] = cfg.nesterov ? 1 : 0
+    u8[ptr + 49] = cfg.classic ? 1 : 0
     return ptr
   }
 
@@ -807,6 +811,7 @@ function createWasmCoreFromModule(Module, device) {
 
     poly_uop_has_buffer_identity: (uop) => !!Module._poly_uop_has_buffer_identity(uop),
     poly_uop_get_buffer_identity: (uop) => Module._poly_uop_get_buffer_identity(uop),
+    poly_uop_buffer: (ctx, uop) => Module._poly_uop_buffer(ctx, uop),
     poly_uop_op: (uop) => Module._poly_uop_op(uop),
     poly_uop_device: (uop) => Module._poly_uop_device(uop),
     poly_uop_dtype_id: (ctx, uop) => Module._poly_uop_dtype_id(ctx, uop),
@@ -867,6 +872,44 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_alu2(ctx, op, a, b),
     poly_tensor_alu3: (ctx, op, a, b, c) =>
       Module._poly_tensor_alu3(ctx, op, a, b, c),
+    poly_tensor_div: (ctx, dividend, divisor) =>
+      Module._poly_tensor_div(ctx, dividend, divisor),
+    poly_tensor_exp: (ctx, src) =>
+      Module._poly_tensor_exp(ctx, src),
+    poly_tensor_log: (ctx, src) =>
+      Module._poly_tensor_log(ctx, src),
+    poly_tensor_gelu: (ctx, src) =>
+      Module._poly_tensor_gelu(ctx, src),
+    poly_tensor_quick_gelu: (ctx, src) =>
+      Module._poly_tensor_quick_gelu(ctx, src),
+    poly_tensor_detach: (ctx, src) =>
+      Module._poly_tensor_detach(ctx, src),
+    poly_tensor_sum: (ctx, src, axes, len, keepdim) =>
+      callWithInt64(Module._poly_tensor_sum, ctx, src, axes, len, keepdim ? 1 : 0),
+    poly_tensor_max: (ctx, src, axes, len, keepdim) =>
+      callWithInt64(Module._poly_tensor_max, ctx, src, axes, len, keepdim ? 1 : 0),
+    poly_tensor_argmax: (ctx, src, axis, keepdim) =>
+      Module._poly_tensor_argmax(ctx, src, axis, keepdim ? 1 : 0),
+    poly_tensor_minimum: (ctx, a, b) =>
+      Module._poly_tensor_minimum(ctx, a, b),
+    poly_tensor_dot: (ctx, src, weight) =>
+      Module._poly_tensor_dot(ctx, src, weight),
+    poly_tensor_sort: (ctx, src, dim, descending) =>
+      callUopPair(
+        Module._poly_tensor_sort,
+        [ctx, src, dim, descending ? 1 : 0],
+        'poly_tensor_sort'
+      ),
+    poly_tensor_topk: (ctx, src, k, dim, largest, sorted) =>
+      callUopPair(
+        Module._poly_tensor_topk,
+        [ctx, src, BigInt(k), dim, largest ? 1 : 0, sorted ? 1 : 0],
+        'poly_tensor_topk'
+      ),
+    poly_tensor_softmax: (ctx, src, axis) =>
+      Module._poly_tensor_softmax(ctx, src, axis),
+    poly_tensor_log_softmax: (ctx, src, axis) =>
+      Module._poly_tensor_log_softmax(ctx, src, axis),
     poly_tensor_cast_by_id: (ctx, tensor, dtypeId) =>
       Module._poly_tensor_cast_by_id(ctx, tensor, dtypeId),
     poly_tensor_bitcast_by_id: (ctx, tensor, dtypeId) =>
@@ -883,6 +926,72 @@ function createWasmCoreFromModule(Module, device) {
       callWithInt64(Module._poly_tensor_flip, ctx, tensor, axes, len),
     poly_tensor_pad_value: (ctx, tensor, flat, npairs, value) =>
       callWithInt64(Module._poly_tensor_pad_value, ctx, tensor, flat, npairs, value),
+    poly_tensor_pool: (ctx, tensor, kernel, nKernel, stride, dilation) => {
+      const kernelPtr = writeInt64Array(kernel)
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      try {
+        return Module._poly_tensor_pool(
+          ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr
+        )
+      } finally {
+        if (kernelPtr) Module._free(kernelPtr)
+        if (stridePtr) Module._free(stridePtr)
+        if (dilationPtr) Module._free(dilationPtr)
+      }
+    },
+    poly_tensor_max_pool2d: (
+      ctx, tensor, kernel, nKernel, stride, dilation, padding, nPadding
+    ) => {
+      const kernelPtr = writeInt64Array(kernel)
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      const paddingPtr = writeInt64Array(padding)
+      try {
+        return Module._poly_tensor_max_pool2d(
+          ctx, tensor, kernelPtr, nKernel, stridePtr, dilationPtr, paddingPtr, nPadding
+        )
+      } finally {
+        if (kernelPtr) Module._free(kernelPtr)
+        if (stridePtr) Module._free(stridePtr)
+        if (dilationPtr) Module._free(dilationPtr)
+        if (paddingPtr) Module._free(paddingPtr)
+      }
+    },
+    poly_tensor_conv2d: (
+      ctx, tensor, weight, bias, groups, stride, dilation, padding, nPadding
+    ) => {
+      const stridePtr = writeInt64Array(stride)
+      const dilationPtr = writeInt64Array(dilation)
+      const paddingPtr = writeInt64Array(padding)
+      try {
+        return Module._poly_tensor_conv2d(
+          ctx, tensor, weight, bias || 0, groups, stridePtr, dilationPtr, paddingPtr, nPadding
+        )
+      } finally {
+        if (stridePtr) Module._free(stridePtr)
+        if (dilationPtr) Module._free(dilationPtr)
+        if (paddingPtr) Module._free(paddingPtr)
+      }
+    },
+    poly_tensor_batchnorm: (
+      ctx, tensor, weight, bias, mean, invstd, axes, nAxes
+    ) => {
+      const axesPtr = writeInt64Array(axes)
+      try {
+        return Module._poly_tensor_batchnorm(
+          ctx, tensor, weight || 0, bias || 0, mean, invstd, axesPtr, nAxes
+        )
+      } finally {
+        if (axesPtr) Module._free(axesPtr)
+      }
+    },
+    poly_tensor_one_hot: (ctx, tensor, numClasses) =>
+      Module._poly_tensor_one_hot(ctx, tensor, BigInt(numClasses)),
+    poly_tensor_gather_dim: (ctx, tensor, dim, index) =>
+      Module._poly_tensor_gather_dim(ctx, tensor, dim, index),
+    poly_tensor_index_select: (ctx, tensor, dim, index) =>
+      Module._poly_tensor_index_select(ctx, tensor, dim, index),
     poly_tensor_clone_into: (ctx, target, source) =>
       Module._poly_tensor_clone_into(ctx, target, source),
     poly_tensor_uop: (tensor) => Module._poly_tensor_uop(tensor),
@@ -1200,7 +1309,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._free(reducePtr)
       return result
     },
-    poly_argmax: Module._poly_argmax,
+    poly_argmax: (ctx, uop, axis, keepdim) =>
+      Module._poly_argmax(ctx, uop, axis, keepdim ? 1 : 0),
     poly_argsort: Module._poly_argsort,
     poly_sort: (ctx, uop, dim, descending) =>
       callUopPair(Module._poly_sort, [ctx, uop, dim, descending ? 1 : 0], 'poly_sort'),
@@ -1329,7 +1439,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 28
+  const EXPECTED_ABI = 40
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

@@ -8,6 +8,7 @@
 #ifdef POLY_HAS_CUDA
 
 #include "test_harness.h"
+#include "../src/bigint.h"
 #include "../src/codegen.h"
 #include "../src/frontend.h"
 #include "../src/device.h"
@@ -84,7 +85,7 @@ static bool cuda_source_has_illegal_wide_f32_vector(const char *src) {
 
 /* Render tests */
 
-TEST(cuda, render_vecadd) {
+TEST_BACKEND(cuda, render_vecadd) {
   /* Test CUDA source generation — no GPU needed */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
@@ -128,9 +129,56 @@ TEST(cuda, render_vecadd) {
   PASS();
 }
 
-TEST(cuda, render_mulacc_fma) {
-  /* CUDA renderer must emit __fmaf_rn for MULACC -- no GPU needed.
-   * Build MUL+ADD pattern; CUDA pipeline fuses to MULACC; renderer emits FMA. */
+TEST_BACKEND(cuda, exact_uint64_bigint_const_renders_and_executes_like_tinygrad) {
+  /* Pinned CUDARenderer keeps the exact Python integer in the UOp and emits
+   * the uint64 literal at the fixed-width render boundary
+   * (renderer/cstyle.py:37, dtype.py:92-100). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyInt value = {0};
+  ASSERT_TRUE(poly_int_from_decimal(&value, "18446744073709550593"));
+  PolyUOp *constant =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_int_as_arg(&value));
+  poly_int_free(&value);
+
+  PolyDType ptr = poly_dtype_ptr(POLY_UINT64, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, ptr, out, zero, poly_arg_none());
+  PolyUOp *sink = poly_sink1(
+      ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, constant, poly_arg_none())
+  );
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *src = poly_render_cuda(lin, n_lin, "store_exact_uint64", 1);
+  ASSERT_NOT_NULL(src);
+  ASSERT_NOT_NULL(strstr(src, "18446744073709550593ull"));
+
+  if (poly_cuda_available()) {
+    PolyCudaProgram *prog = poly_compile_cuda(src, "store_exact_uint64");
+    ASSERT_NOT_NULL(prog);
+    unsigned long long device = poly_cuda_alloc(sizeof(uint64_t));
+    ASSERT_TRUE(device != 0);
+    void *args[1] = {&device};
+    ASSERT_INT_EQ(poly_cuda_launch(prog, args, 1, 1, 1, 1, 1, 1, 1), 0);
+    ASSERT_INT_EQ(poly_cuda_sync(), 0);
+    uint64_t output = 0;
+    ASSERT_INT_EQ(poly_cuda_copy_dtoh(&output, device, sizeof(output)), 0);
+    ASSERT_TRUE(output == UINT64_C(18446744073709550593));
+    poly_cuda_free(device);
+    poly_cuda_program_destroy(prog);
+  }
+
+  free(src);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, render_muladd_matches_pinned_cudastyle) {
+  /* Pinned CUDARenderer does not advertise Ops.MULACC in code_for_op
+   * (renderer/cstyle.py:389-426), so MUL+ADD remains ordered MUL+ADD. */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
@@ -146,7 +194,7 @@ TEST(cuda, render_mulacc_fma) {
   PolyUOp *ld0 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx0, poly_arg_none());
   PolyUOp *ld1 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx1, poly_arg_none());
   PolyUOp *ld2 = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, idx2, poly_arg_none());
-  /* Build MUL+ADD (no MULACC in input) -- CUDA pipeline should fuse */
+  /* Build MUL+ADD (no MULACC in input). */
   PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, ld0, ld1, poly_arg_none());
   PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, mul, ld2, poly_arg_none());
   PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx3, add, poly_arg_none());
@@ -157,18 +205,75 @@ TEST(cuda, render_mulacc_fma) {
   int n_lin;
   PolyUOp **lin = poly_linearize_cuda(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
+  ASSERT_INT_EQ(count_lin_ops(lin, n_lin, POLY_OP_MULACC), 0);
+  ASSERT_TRUE(count_lin_ops(lin, n_lin, POLY_OP_MUL) >= 1);
+  ASSERT_TRUE(count_lin_ops(lin, n_lin, POLY_OP_ADD) >= 1);
   char *src = poly_render_cuda(lin, n_lin, "fma_test", 256);
   free(lin);
   ASSERT_NOT_NULL(src);
-  /* Only assert presence -- don't negative-check for decomposed patterns,
-   * source will contain * and + for indexing/gpudims/etc. */
-  ASSERT_TRUE(strstr(src, "__fmaf_rn(") != NULL);
+  ASSERT_TRUE(strstr(src, "__fmaf_rn(") == NULL);
   free(src);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(cuda, linearize_reduce_merge_shared_end) {
+TEST_BACKEND(cuda, render_half_reciprocal_and_single_consumer_match_pinned) {
+  /* A non-cancelling reciprocal isolates the renderer contract. Pinned CUDA
+   * keeps four devectorized float16 RECIPROCAL lanes as hrcp, and
+   * CStyleLanguage._render inlines one-consumer non-WHERE ALU unless
+   * EXPAND_SSA=1 (renderer/cstyle.py:127-134,232-237,411-426). The separate
+   * shared-symbolic regression covers x * reciprocal(x) -> 1. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr_f16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *pin = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(0));
+  PolyUOp *pout = poly_uop0(ctx, POLY_OP_PARAM, ptr_f16, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pin, range, poly_arg_none());
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_f16, pout, range, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, in_idx, poly_arg_none());
+  PolyUOp *recip =
+      poly_uop1(ctx, POLY_OP_RECIPROCAL, POLY_FLOAT16, load, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, recip, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin;
+  PolyUOp **lin = poly_linearize_cuda(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  ASSERT_INT_EQ(count_lin_ops(lin, n_lin, POLY_OP_RECIPROCAL), 4);
+  ASSERT_INT_EQ(count_lin_ops(lin, n_lin, POLY_OP_FDIV), 0);
+
+  const char *old_expand_ssa = getenv("EXPAND_SSA");
+  char *saved_expand_ssa = old_expand_ssa ? strdup(old_expand_ssa) : NULL;
+  unsetenv("EXPAND_SSA");
+  char *src = poly_render_cuda(lin, n_lin, "reciprocal_test", 256);
+  ASSERT_NOT_NULL(src);
+  ASSERT_TRUE(strstr(src, "hrcp(") != NULL);
+  ASSERT_TRUE(strstr(src, "half alu") == NULL);
+  free(src);
+
+  setenv("EXPAND_SSA", "1", 1);
+  src = poly_render_cuda(lin, n_lin, "reciprocal_test", 256);
+  ASSERT_NOT_NULL(src);
+  ASSERT_TRUE(strstr(src, "hrcp(") != NULL);
+  ASSERT_TRUE(strstr(src, "half alu") != NULL);
+  free(src);
+  if (saved_expand_ssa) {
+    setenv("EXPAND_SSA", saved_expand_ssa, 1);
+    free(saved_expand_ssa);
+  } else {
+    unsetenv("EXPAND_SSA");
+  }
+
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, linearize_reduce_merge_shared_end) {
   /* CUDA rewrite path should merge shared reduce END chains exactly once. */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
@@ -228,7 +333,7 @@ static void select_cuda_for_cuda_phase(PolyCtx *ctx) {
 
 /* E2E tests (require GPU) */
 
-TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
+TEST_BACKEND(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer_f32(ctx, 3);
   float input[3] = {1.0f, 2.0f, 3.0f};
@@ -268,7 +373,7 @@ TEST(cuda, tensor_realize_cuda_lazy_opens_backend_without_availability_probe) {
   PASS();
 }
 
-TEST(cuda, placed_host_gather_memory_plan_keeps_cuda_staging) {
+TEST_BACKEND(cuda, placed_host_gather_memory_plan_keeps_cuda_staging) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -313,7 +418,7 @@ TEST(cuda, placed_host_gather_memory_plan_keeps_cuda_staging) {
   PASS();
 }
 
-TEST(cuda, direct_alloc_lazy_opens_backend_without_availability_probe) {
+TEST_BACKEND(cuda, direct_alloc_lazy_opens_backend_without_availability_probe) {
   unsigned long long dptr = poly_cuda_alloc(sizeof(float));
   if (!dptr) {
     if (!poly_cuda_available()) PASS();
@@ -323,7 +428,59 @@ TEST(cuda, direct_alloc_lazy_opens_backend_without_availability_probe) {
   PASS();
 }
 
-TEST(cuda, e2e_vecadd) {
+TEST_BACKEND(cuda, gated_output_store_preserves_current_residency) {
+  SKIP_IF_NO_CUDA();
+
+  /*
+   * Pinned UOp.store keeps the gate as STORE.src[2] (uop/ops.py:531-533),
+   * and exec_kernel passes the already allocated Buffer to the runtime
+   * (engine/realize.py:172-180). A false gate therefore preserves the
+   * existing value instead of turning an output-only argument into a fresh
+   * uninitialized allocation.
+   */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *out =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CUDA);
+  ASSERT_NOT_NULL(out);
+  float initial = 11.0f;
+  poly_buffer_set(ctx, out, &initial, sizeof(initial), POLY_DEVICE_CPU);
+
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *index =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, p0, zero, poly_arg_none());
+  PolyUOp *value =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(42.0));
+  PolyUOp *gate =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BOOL, poly_arg_bool(false));
+  PolyUOp *store = poly_uop3(
+      ctx, POLY_OP_STORE, POLY_VOID, index, value, gate, poly_arg_none()
+  );
+  PolyUOp *body = poly_sink1(ctx, store);
+  PolyUOp *call_src[] = {body, out};
+  PolyUOp *call =
+      poly_uop(ctx, POLY_OP_CALL, POLY_VOID, call_src, 2, poly_arg_none());
+  PolyUOp *linear =
+      poly_uop1(ctx, POLY_OP_LINEAR, POLY_VOID, call, poly_arg_none());
+  ASSERT_NOT_NULL(linear);
+
+  PolySchedule *sched =
+      poly_create_schedule_from_linear(ctx, linear, POLY_MODE_CALL);
+  ASSERT_NOT_NULL(sched);
+  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+
+  float got = 0.0f;
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, &got, sizeof(got)), 0);
+  ASSERT_FLOAT_EQ(got, 11.0f, 0.0f);
+
+  poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(cuda, e2e_vecadd) {
   SKIP_IF_NO_CUDA();
 
   int n = 1024;
@@ -369,7 +526,7 @@ TEST(cuda, e2e_vecadd) {
   PASS();
 }
 
-TEST(cuda, e2e_neg) {
+TEST_BACKEND(cuda, e2e_neg) {
   SKIP_IF_NO_CUDA();
 
   int n = 512;
@@ -408,7 +565,7 @@ TEST(cuda, e2e_neg) {
   PASS();
 }
 
-TEST(cuda, e2e_chain) {
+TEST_BACKEND(cuda, e2e_chain) {
   SKIP_IF_NO_CUDA();
 
   int n = 256;
@@ -456,7 +613,7 @@ TEST(cuda, e2e_chain) {
   PASS();
 }
 
-TEST(cuda, e2e_exp2) {
+TEST_BACKEND(cuda, e2e_exp2) {
   SKIP_IF_NO_CUDA();
 
   int n = 256;
@@ -495,7 +652,7 @@ TEST(cuda, e2e_exp2) {
   PASS();
 }
 
-TEST(cuda, e2e_reduce_sum) {
+TEST_BACKEND(cuda, e2e_reduce_sum) {
   SKIP_IF_NO_CUDA();
 
   int n = 512;
@@ -531,7 +688,7 @@ TEST(cuda, e2e_reduce_sum) {
   PASS();
 }
 
-TEST(cuda, e2e_reduce_sum_parallel) {
+TEST_BACKEND(cuda, e2e_reduce_sum_parallel) {
   SKIP_IF_NO_CUDA();
 
   /* Large N triggers parallel reduction (N > block_size * 2 = 512) */
@@ -599,7 +756,7 @@ static void readback_cuda_binding(PolyTestBufferView *b, void *host_dst, size_t 
   poly_cuda_copy_dtoh(host_dst, (unsigned long long)(uintptr_t)b->handle.ptr, nbytes);
 }
 
-TEST(cuda, realize_unified_vecadd) {
+TEST_BACKEND(cuda, realize_unified_vecadd) {
   SKIP_IF_NO_CUDA();
 
   int n = 1024;
@@ -643,7 +800,7 @@ TEST(cuda, realize_unified_vecadd) {
   PASS();
 }
 
-TEST(cuda, tensor_place_computed_expression_to_cuda_e2e) {
+TEST_BACKEND(cuda, tensor_place_computed_expression_to_cuda_e2e) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -677,7 +834,7 @@ TEST(cuda, tensor_place_computed_expression_to_cuda_e2e) {
   PASS();
 }
 
-TEST(cuda, device_less_constant_copy_runs_producer_before_transfer) {
+TEST_BACKEND(cuda, device_less_constant_copy_runs_producer_before_transfer) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -716,7 +873,7 @@ TEST(cuda, device_less_constant_copy_runs_producer_before_transfer) {
   PASS();
 }
 
-TEST(cuda, tensor_place_computed_expression_cuda_cpu_roundtrip_e2e) {
+TEST_BACKEND(cuda, tensor_place_computed_expression_cuda_cpu_roundtrip_e2e) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -751,7 +908,7 @@ TEST(cuda, tensor_place_computed_expression_cuda_cpu_roundtrip_e2e) {
   PASS();
 }
 
-TEST(cuda, realize_unified_reduce) {
+TEST_BACKEND(cuda, realize_unified_reduce) {
   SKIP_IF_NO_CUDA();
 
   int n = 256;
@@ -811,7 +968,7 @@ static PolyInstance *make_test_mlp(int n_in, int n_out) {
   return poly_mlp_from_json(spec, (int)strlen(spec));
 }
 
-TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
+TEST_BACKEND(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   /* Codegen-only regression for the larger MLP train step. tinygrad lowers
    * this graph without render-visible f32 vector typedefs like float128 or
    * float512; CUDA C has no such vector names, so they must be scalarized or
@@ -1039,7 +1196,7 @@ TEST(cuda, large_mlp_train_cuda_codegen_no_wide_f32_vectors) {
   PASS();
 }
 
-TEST(cuda, instance_set_device_cuda) {
+TEST_BACKEND(cuda, instance_set_device_cuda) {
   SKIP_IF_NO_CUDA();
 
   PolyInstance *inst = make_test_mlp(2, 3);
@@ -1068,7 +1225,7 @@ TEST(cuda, instance_set_device_cuda) {
   PASS();
 }
 
-TEST(cuda, instance_cuda_forward_parity) {
+TEST_BACKEND(cuda, instance_cuda_forward_parity) {
   SKIP_IF_NO_CUDA();
 
   int n_in = 2, n_out = 3;
@@ -1122,7 +1279,7 @@ TEST(cuda, instance_cuda_forward_parity) {
   PASS();
 }
 
-TEST(cuda, instance_cuda_roundtrip) {
+TEST_BACKEND(cuda, instance_cuda_roundtrip) {
   SKIP_IF_NO_CUDA();
 
   PolyInstance *inst = make_test_mlp(2, 1);
@@ -1179,7 +1336,7 @@ TEST(cuda, instance_cuda_roundtrip) {
   PASS();
 }
 
-TEST(cuda, buffer_residency_keeps_single_host_root) {
+TEST_BACKEND(cuda, buffer_residency_keeps_single_host_root) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -1222,7 +1379,7 @@ TEST(cuda, buffer_residency_keeps_single_host_root) {
   PASS();
 }
 
-TEST(cuda, buffer_allocate_preserves_valid_cuda_only_residency) {
+TEST_BACKEND(cuda, buffer_allocate_preserves_valid_cuda_only_residency) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -1255,7 +1412,7 @@ TEST(cuda, buffer_allocate_preserves_valid_cuda_only_residency) {
   PASS();
 }
 
-TEST(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_input) {
+TEST_BACKEND(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_input) {
   SKIP_IF_NO_CUDA();
 
   PolyCtx *ctx = poly_ctx_new();
@@ -1328,7 +1485,7 @@ TEST(cuda, instance_host_write_after_set_device_reacquire_updates_cuda_input) {
   PASS();
 }
 
-TEST(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
+TEST_BACKEND(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
   SKIP_IF_NO_CUDA();
 
   const char *spec = "{\"layers\":[128,256,64],\"activation\":\"relu\",\"bias\":true,"
@@ -1359,7 +1516,7 @@ TEST(cuda, instance_cuda_large_mlp_train_no_wide_vector_types) {
   PASS();
 }
 
-TEST(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) {
+TEST_BACKEND(cuda, instance_cuda_adam_train_lazily_created_state_stays_on_cuda) {
   SKIP_IF_NO_CUDA();
 
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\",\"bias\":true,"

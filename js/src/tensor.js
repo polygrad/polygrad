@@ -201,6 +201,21 @@ function isIntegerDtype(dtype) {
   return ['int8', 'uint8', 'int16', 'uint16', 'int32', 'uint32', 'int64', 'uint64'].includes(dtype)
 }
 
+function isFloatDtype(dtype) {
+  return ['float16', 'bfloat16', 'float32', 'float64'].includes(dtype)
+}
+
+// Pinned tinygrad dtype.py:274-278. This is the induced sum_acc_dtype
+// lattice over Polygrad's currently supported scalar dtypes.
+function sumAccumulatorDtype(dtype) {
+  if (dtype === 'uint64') return 'uint64'
+  if (['uint8', 'uint16', 'uint32'].includes(dtype)) return 'uint32'
+  if (dtype === 'int64') return 'int64'
+  if (dtype === 'bool' || ['int8', 'int16', 'int32'].includes(dtype)) return 'int32'
+  if (dtype === 'float64') return 'float64'
+  return 'float32'
+}
+
 function createBoundTensorClass(runtime) {
   const _runtime = runtime
   const DTYPE_ID = _runtime._core.dtypeIds
@@ -212,11 +227,8 @@ function createBoundTensorClass(runtime) {
   const ffi = _runtime._core.ffi
   const ops = _runtime._core.ops || {}
   const POLY_TENSOR_VALUE = 0
-  const POLY_TENSOR_PLACE = 1
   const normalizeDevice = (device) => String(device || _runtime.device || 'cpu').toLowerCase()
   const deviceId = (device) => ffi.poly_device_by_name(normalizeDevice(device))
-  const tensorCreate = (ctx, uop, role, device) =>
-    ffi.poly_tensor_create(ctx, uop, role, deviceId(device))
   const tensorCreateWithRoots = (ctx, logical, physical, role, device) =>
     ffi.poly_tensor_create_with_roots(
       ctx, rawUop(logical), physical ? rawUop(physical) : null, role, deviceId(device)
@@ -361,11 +373,17 @@ function createBoundTensorClass(runtime) {
      */
     constructor(data, opts) {
       if (!opts) opts = {}
+      const core = _runtime._core
       if (data instanceof UOp && !opts._uop) {
-        opts = Object.assign({}, opts, { _uop: data, _ctx: opts._ctx || data.ctx })
+        if (data.ctx !== core.ctx || data.ffi !== core.ffi) {
+          throw new Error('Tensor UOp must belong to the same Polygrad context')
+        }
+        if (opts._ctx && opts._ctx !== data.ctx) {
+          throw new Error('Tensor UOp must belong to the same Polygrad context')
+        }
+        opts = Object.assign({}, opts, { _uop: data, _ctx: data.ctx })
         data = null
       }
-      const core = _runtime._core
       this._rt = _runtime
       this._ctx = opts._ctx || core.ctx
       this._requiresGrad = Boolean(opts.requiresGrad)
@@ -417,7 +435,7 @@ function createBoundTensorClass(runtime) {
           currentUop = new UOp(this._ctx, core.ffi, physical)
           this._dtype = dt
           this._data = null
-        } else if (data instanceof Float64Array) {
+        } else if (data instanceof Float64Array && (!opts.dtype || opts.dtype === 'float64')) {
           importedFromHost = true
           dt = 'float64'; flat = new Float64Array(data); shape = [data.length]
         } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
@@ -426,25 +444,31 @@ function createBoundTensorClass(runtime) {
         } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
           importedFromHost = true
           dt = (opts && opts.dtype) || 'float32'
-          const ArrayType = TA_BY_DTYPE[dt] || Float32Array
+          // Pinned UOp._frompy stages numeric BF16 values as float32 bytes and
+          // then casts the Tensor graph (uop/ops.py:752-764). Uint16Array here
+          // would truncate the numeric values before the graph-level cast.
+          const ArrayType = dt === 'bfloat16' ? Float32Array : (TA_BY_DTYPE[dt] || Float32Array)
           flat = new ArrayType(data)
           shape = [data.length]
         } else {
           importedFromHost = true
           dt = (opts && opts.dtype) || 'float32'
-          const r = flattenArray(data, dt)
+          const r = flattenArray(data, dt === 'bfloat16' ? 'float32' : dt)
           flat = r.data; shape = r.shape
         }
         if (!scalarData) {
           this._dtype = dt
+          const postCastDtype = dt === 'bfloat16' ? dt : null
           this._data = flat
-          const dtypeId = DTYPE_ID[dt]
+          const importDtype = postCastDtype ? 'float32' : dt
+          const dtypeId = DTYPE_ID[importDtype]
           if (dtypeId === undefined) throw new Error(`unsupported dtype: ${dt}`)
           // Preserve one-dimensional zero shapes. Without the explicit [0],
           // poly_buffer_from_host cannot distinguish an empty vector from an
           // unspecified/scalar host buffer and applies its scalar numel fallback.
           const dims = shape.length ? shape : null
-          if (dt !== 'bfloat16' && ffi.poly_tensor_from_host_by_id) {
+          let ownerUop = null
+          if (ffi.poly_tensor_from_host_by_id) {
             this._tensor = ffi.poly_tensor_from_host_by_id(
               this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
             )
@@ -452,11 +476,24 @@ function createBoundTensorClass(runtime) {
             const physical = tensorUopPhysical(this._tensor)
             if (!physical) throw new Error('host Tensor source has no physical root')
             currentUop = new UOp(this._ctx, core.ffi, physical)
+            ownerUop = currentUop
+            if (postCastDtype) {
+              this._tensor = ffi.poly_tensor_cast_by_id(
+                this._ctx, this._tensor, DTYPE_ID[postCastDtype]
+              )
+              if (!this._tensor) {
+                throw new Error(`poly_tensor_cast_by_id failed for dtype ${postCastDtype}`)
+              }
+              const castPhysical = tensorUopPhysical(this._tensor)
+              if (!castPhysical) throw new Error('cast host Tensor has no physical root')
+              currentUop = new UOp(this._ctx, core.ffi, castPhysical)
+            }
             importedTensorFromHost = true
           } else {
             currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
+            ownerUop = currentUop
           }
-          const buffer = currentUop.buffer ? currentUop.buffer.raw : null
+          const buffer = ownerUop && ownerUop.buffer ? ownerUop.buffer.raw : null
           const needsFrontendHostOwner =
             Boolean(buffer && core.ffi.poly_buffer_get_key) &&
             (!core.caps || core.caps.core !== 'wasm' || core.caps.device === 'webgpu')
@@ -502,7 +539,11 @@ function createBoundTensorClass(runtime) {
     }
 
     _coreCreate(uop, role, device) {
-      return tensorCreate(this._ctx, uop, role, device || this._device)
+      // Pinned Tensor.__init__ stores a supplied UOp directly
+      // (tensor.py:76-121). Path B records that exact current root.
+      return tensorCreateWithRoots(
+        this._ctx, uop, uop, role, device || this._device
+      )
     }
 
     _coreCreateWithRoots(logical, physical, role, device) {
@@ -767,7 +808,12 @@ function createBoundTensorClass(runtime) {
       }
       let t = this
       if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
-      if (!t.uop.hasBufferIdentity()) t = t.contiguous()
+      t = t.contiguous()
+      // Pinned tensor.py:259-266 clones a device-free source to CPU for
+      // readback. Wrapper device metadata is not executable UOp placement.
+      if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
+        t = t.clone('cpu')
+      }
       t.realize()
       return t._readBufferBytes()
     }
@@ -780,7 +826,10 @@ function createBoundTensorClass(runtime) {
       }
       let t = this
       if (this._dtype === 'float16' || this._dtype === 'bfloat16') t = t.cast('float32')
-      if (!t.uop.hasBufferIdentity()) t = t.contiguous()
+      t = t.contiguous()
+      if (Number(ffi.poly_uop_device(this._currentUopRaw())) === deviceId('auto')) {
+        t = t.clone('cpu')
+      }
       await t.realizeAsync()
       return await t._readBufferBytesAsync()
     }
@@ -805,7 +854,10 @@ function createBoundTensorClass(runtime) {
         if (t.numel() === 0) return t
         let out = t
         if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
-        if (!out.uop.hasBufferIdentity()) out = out.contiguous()
+        out = out.contiguous()
+        if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
+          out = out.clone('cpu')
+        }
         return out
       })
       const targets = prepared.filter(t => t.numel() !== 0)
@@ -832,7 +884,10 @@ function createBoundTensorClass(runtime) {
         if (t.numel() === 0) return t
         let out = t
         if (out._dtype === 'float16' || out._dtype === 'bfloat16') out = out.cast('float32')
-        if (!out.uop.hasBufferIdentity()) out = out.contiguous()
+        out = out.contiguous()
+        if (Number(ffi.poly_uop_device(t._currentUopRaw())) === deviceId('auto')) {
+          out = out.clone('cpu')
+        }
         return out
       })
       const targets = prepared.filter(t => t.numel() !== 0)
@@ -876,17 +931,12 @@ function createBoundTensorClass(runtime) {
     }
 
     detach() {
+      // Pinned mixin/elementwise.py:33-37 is one DETACH Tensor ALU.
       const { ffi } = this._rt._core
-      const uop = ffi.poly_detach(this._ctx, this._graphUopRaw())
-      if (!uop) throw new Error('poly_detach failed')
-      const physical = this._physicalizeResult(uop, [this])
-      return new Tensor(null, {
-        _ctx: this._ctx,
-        _tensor: this._coreCreateWithRoots(uop, physical, POLY_TENSOR_VALUE, this._device),
-        _dtype: this._dtype,
-        _device: this._device,
-        requiresGrad: false
-      })
+      const core = ffi.poly_tensor_detach(this._ctx, this._tensor)
+      const ret = this._makeResultFromCore(core, [this])
+      ret.requiresGrad = false
+      return ret
     }
 
     async detachAsync() {
@@ -1216,6 +1266,17 @@ function createBoundTensorClass(runtime) {
       throw new TypeError(`Cannot convert ${typeof other} to Tensor`)
     }
 
+    constLike(value) {
+      // Pinned creation.py:13 and uop/ops.py:496-507: same-dtype CONST with
+      // this Tensor's shape, not a materialized full BUFFER. Polygrad's
+      // multi-context wrapper must allocate that CONST in the receiver's ctx.
+      return new Tensor(value, {
+        _ctx: this._ctx, dtype: this._dtype, device: this._device
+      })._broadcastTensor(this.shape)
+    }
+
+    const_like(value) { return this.constLike(value) }
+
     _broadcastShape(otherShape) {
       const a = this.shape
       const b = otherShape
@@ -1270,28 +1331,38 @@ function createBoundTensorClass(runtime) {
       return arraysEqual(expanded.shape, reshaped.shape) ? reshaped : expanded
     }
 
-    _binop(other, opName) {
+    _binop(other, opName, reverse = false) {
       const { ffi, ops } = this._rt._core
       other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const x = this._broadcastTensor(outShape)
-      const y = other._broadcastTensor(outShape)
+      let x = reverse ? other : this
+      let y = reverse ? this : other
+      const outShape = x._broadcastShape(y.shape)
+      x = x._broadcastTensor(outShape)
+      y = y._broadcastTensor(outShape)
       const core = ffi.poly_tensor_alu2(this._ctx, ops[opName], x._tensor, y._tensor)
       return this._makeResultFromCore(core, [x, y])
     }
 
     // --- Element-wise arithmetic ---
 
-    add(other) { return this._binop(other, 'ADD') }
+    // Pinned named add/mul preserve the optional reverse operand order
+    // (mixin/elementwise.py:72-88,110-126).
+    add(other, reverse = false) { return this._binop(other, 'ADD', reverse) }
     sub(other) {
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const x = this._broadcastTensor(outShape)
-      const y = other._broadcastTensor(outShape)
-      return x.add(y.neg())
+      // C owns tinygrad's `a + (-b)` topology for every frontend
+      // (mixin/elementwise.py:90-109).
+      return this._binop(other, 'SUB')
     }
-    mul(other) { return this._binop(other, 'MUL') }
-    div(other) { return this._binop(other, 'FDIV') }
+    mul(other, reverse = false) { return this._binop(other, 'MUL', reverse) }
+    div(other) {
+      // Pinned mixin/elementwise.py:219-234: true division is multiply by
+      // the reciprocal after both operands are broadcast and promoted.
+      other = this._ensureTensor(other)
+      const core = this._rt._core.ffi.poly_tensor_div(
+        this._ctx, this._tensor, other._tensor
+      )
+      return this._makeResultFromCore(core, [this, other])
+    }
     pow(other) { return this._binop(other, 'POW') }
     lt(other) { return this._binop(other, 'CMPLT') }
 
@@ -1303,56 +1374,51 @@ function createBoundTensorClass(runtime) {
     // --- Comparisons (C core) ---
 
     eq(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_eq(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      // Pinned mixin/elementwise.py:315-322: promoted CMPNE + logical_not.
+      return this._binop(other, 'CMPNE').ne(true)
     }
 
     ne(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_ne(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      return this._binop(other, 'CMPNE')
     }
 
     gt(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_gt(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      // Pinned mixin/elementwise.py:312-313: reversed promoted CMPLT.
+      return this._binop(other, 'CMPLT', true)
     }
 
     ge(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_ge(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      return this.lt(other).ne(true)
     }
 
     le(other) {
-      const { ffi } = this._rt._core
-      other = this._ensureTensor(other)
-      const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_le(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      return this.gt(other).ne(true)
     }
 
     where(x, y) {
-      const { ffi } = this._rt._core
-      x = this._ensureTensor(x)
-      y = this._ensureTensor(y)
-      let outShape = _broadcastShapes(this.shape, x.shape)
-      outShape = _broadcastShapes(outShape, y.shape)
-      const cUop = this._broadcastUop(outShape)
-      const xUop = x._broadcastUop(outShape)
-      const yUop = y._broadcastUop(outShape)
-      const uop = ffi.poly_where_op(this._ctx, cUop, xUop, yUop)
-      return this._makeResult(uop, [this, x, y])
+      const { ffi, ops } = this._rt._core
+      // Pinned tensor.py:750-772 anchors branch promotion on an existing
+      // branch Tensor, not on the boolean condition.
+      let branchShape
+      if (x instanceof Tensor) {
+        y = x._ensureTensor(y)
+        branchShape = _broadcastShapes(x.shape, y.shape)
+      } else if (y instanceof Tensor) {
+        x = y._ensureTensor(x)
+        branchShape = _broadcastShapes(x.shape, y.shape)
+      } else {
+        x = this._ensureTensor(x)
+        y = x._ensureTensor(y)
+        branchShape = _broadcastShapes(x.shape, y.shape)
+      }
+      x = x._broadcastTensor(branchShape)
+      y = y._broadcastTensor(branchShape)
+      const outShape = _broadcastShapes(this.shape, branchShape)
+      const cond = this.cast('bool')._broadcastTensor(outShape)
+      x = x._broadcastTensor(outShape)
+      y = y._broadcastTensor(outShape)
+      const core = ffi.poly_tensor_alu3(this._ctx, ops.WHERE, cond._tensor, x._tensor, y._tensor)
+      return this._makeResultFromCore(core, [cond, x, y])
     }
 
     maximum(other) {
@@ -1363,19 +1429,21 @@ function createBoundTensorClass(runtime) {
       const { ffi } = this._rt._core
       other = this._ensureTensor(other)
       const outShape = this._broadcastShape(other.shape)
-      const uop = ffi.poly_minimum(this._ctx, this._broadcastUop(outShape), other._broadcastUop(outShape))
-      return this._makeResult(uop, [this, other])
+      const x = this._broadcastTensor(outShape)
+      const y = other._broadcastTensor(outShape)
+      const core = ffi.poly_tensor_minimum(this._ctx, x._tensor, y._tensor)
+      return this._makeResultFromCore(core, [x, y])
     }
 
     clamp(lo, hi) {
       if (lo === undefined && hi === undefined) {
         throw new Error("at least one of 'lo' or 'hi' must not be undefined")
       }
-      const { ffi } = this._rt._core
-      lo = lo !== undefined ? lo : -1e38
-      hi = hi !== undefined ? hi : 1e38
-      const uop = ffi.poly_clamp(this._ctx, this._graphUopRaw(), lo, hi)
-      return this._makeResult(uop, [this])
+      // Pinned clamp conditionally composes comparison/WHERE Tensor
+      // operations; an omitted bound is not a finite sentinel
+      // (mixin/elementwise.py:569-580).
+      const ret = lo !== undefined ? this.lt(lo).where(lo, this) : this
+      return hi !== undefined ? ret.gt(hi).where(hi, ret) : ret
     }
 
     // --- Cast ---
@@ -1453,8 +1521,9 @@ function createBoundTensorClass(runtime) {
 
     reciprocal() {
       const { ffi, ops } = this._rt._core
-      const core = ffi.poly_tensor_alu1(this._ctx, ops.RECIPROCAL, this._tensor)
-      return this._makeResultFromCore(core, [this])
+      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
+      const core = ffi.poly_tensor_alu1(base._ctx, ops.RECIPROCAL, base._tensor)
+      return base._makeResultFromCore(core, [base])
     }
 
     trunc() {
@@ -1464,13 +1533,13 @@ function createBoundTensorClass(runtime) {
     }
 
     exp() {
-      const uop = this._rt._core.ffi.poly_exp(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_exp(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     log() {
-      const uop = this._rt._core.ffi.poly_log(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_log(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     log1p() {
@@ -1484,114 +1553,151 @@ function createBoundTensorClass(runtime) {
     }
 
     sin() {
-      const uop = this._rt._core.ffi.poly_sin(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned _ensure_float().alu(SIN), consuming the exact current Tensor
+      // occurrence (mixin/elementwise.py:437-478; tensor.py:128-140).
+      const base = isFloatDtype(this._dtype) ? this : this.cast('float32')
+      const { ffi, ops } = this._rt._core
+      const core = ffi.poly_tensor_alu1(this._ctx, ops.SIN, base._tensor)
+      return base._makeResultFromCore(core, [base])
     }
 
     cos() {
-      const uop = this._rt._core.ffi.poly_cos(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned floating COS promotes against float32, subtracts from pi/2,
+      // applies SIN, then casts back (mixin/elementwise.py:480-489).
+      if (isFloatDtype(this._dtype)) {
+        const work = this.cast(this._dtype === 'float64' ? 'float64' : 'float32')
+        return work._binop(Math.PI / 2, 'SUB', true).sin().cast(this._dtype)
+      }
+      return this._binop(Math.PI / 2, 'SUB', true).sin()
     }
 
     tan() {
-      const uop = this._rt._core.ffi.poly_tan(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned tan is the high-level SIN/COS quotient
+      // (mixin/elementwise.py:902-910).
+      return this.sin().div(this.cos())
     }
 
     sigmoid() {
-      const uop = this._rt._core.ffi.poly_sigmoid(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:667-677.
+      return this.mul(-1 / Math.log(2)).exp2().add(1, true).reciprocal()
     }
 
     tanh() {
-      const uop = this._rt._core.ffi.poly_tanh_act(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:739-749.
+      return this.mul(2, true).sigmoid().mul(2, true).sub(1)
     }
 
     abs() {
-      const uop = this._rt._core.ffi.poly_abs(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:892-900.
+      return this.mul(this.sign())
     }
 
     sign() {
-      const uop = this._rt._core.ffi.poly_sign(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:882-890.
+      return this.ne(0).where(
+        this.lt(0).where(this.constLike(-1), this.constLike(1)),
+        this.constLike(0)
+      )
     }
 
     square() {
-      const uop = this._rt._core.ffi.poly_square(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:558-566.
+      return this.mul(this)
     }
 
     rsqrt() {
-      const uop = this._rt._core.ffi.poly_rsqrt(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:802-810.
+      return this.sqrt().reciprocal()
     }
 
     ceil() {
-      const uop = this._rt._core.ffi.poly_ceil(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:636-644.
+      const b = this.trunc()
+      return this.gt(b).where(b.add(1), b)
     }
 
     floor() {
-      const uop = this._rt._core.ffi.poly_floor(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:646-654.
+      const b = this.trunc()
+      return this.lt(b).where(b.sub(1), b)
     }
 
     round() {
-      const uop = this._rt._core.ffi.poly_round_f(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:872-880 implements round-half-to-even
+      // through ordinary Tensor primitives and their scalar broadcast rules.
+      // JavaScript Number erases the source spelling distinction between 2
+      // and 2.0. Pinned UOp.ufix keeps it in the receiver dtype for floating
+      // inputs and uses from_py(float)==float32 for integer/bool inputs
+      // (uop/ops.py:504-508).
+      const two = new Tensor(2.0, {
+        _ctx: this._ctx,
+        dtype: isFloatDtype(this._dtype) ? this._dtype : 'float32',
+        device: this._device
+      })
+      const b = this.trunc().div(two)
+      return this.gt(0).eq(b.trunc().eq(b)).where(
+        this.sub(0.5).ceil(), this.add(0.5).floor()
+      )
     }
 
-    isinf() {
-      const uop = this._rt._core.ffi.poly_isinf(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+    isinf(detectPositive = true, detectNegative = true) {
+      // Pinned mixin/elementwise.py:596-604 independently gates positive
+      // and negative infinity before adding the boolean results.
+      return this.eq(Infinity).mul(detectPositive)
+        .add(this.eq(-Infinity).mul(detectNegative))
     }
 
     isnan() {
-      const uop = this._rt._core.ffi.poly_isnan(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:586-594.
+      return this.ne(this)
     }
 
     // --- Activations (C core composed ops) ---
 
     relu() {
-      const uop = this._rt._core.ffi.poly_relu(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:656-666. Tensor comparison/where keeps
+      // scalar-zero broadcasting and exact ordered physical occurrences.
+      return this.gt(0).where(this, 0)
     }
 
     relu6() {
-      const uop = this._rt._core.ffi.poly_relu6(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:679-689.
+      return this.relu().sub(this.sub(6).relu())
     }
 
     leakyRelu(negSlope) {
       if (negSlope === undefined) negSlope = 0.01
-      const uop = this._rt._core.ffi.poly_leaky_relu(this._ctx, this._graphUopRaw(), negSlope)
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:726-737.
+      return this.lt(0).where(this.mul(negSlope, true), this)
     }
 
     gelu() {
-      const uop = this._rt._core.ffi.poly_gelu(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:761-776. C owns retained/current roots.
+      const core = this._rt._core.ffi.poly_tensor_gelu(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     quickGelu() {
-      const uop = this._rt._core.ffi.poly_quick_gelu(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:751-759 builds the broadcasted scalar
+      // formula from the one current Tensor.uop. C owns both Path-B roots.
+      const core = this._rt._core.ffi.poly_tensor_quick_gelu(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     silu() {
-      const uop = this._rt._core.ffi.poly_silu(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:790-800.
+      return this.swish()
     }
 
-    swish() { return this.silu() }
+    swish() {
+      // Pinned mixin/elementwise.py:778-788.
+      return this.mul(this.sigmoid())
+    }
 
     elu(alpha) {
       if (alpha === undefined) alpha = 1.0
-      const uop = this._rt._core.ffi.poly_elu(this._ctx, this._graphUopRaw(), alpha)
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:945-955.
+      return this.relu().sub(this.exp()._binop(1, 'SUB', true).relu().mul(alpha, true))
     }
 
     softplus(beta) {
@@ -1608,36 +1714,33 @@ function createBoundTensorClass(runtime) {
     hardtanh(minVal, maxVal) {
       if (minVal === undefined) minVal = -1
       if (maxVal === undefined) maxVal = 1
-      const uop = this._rt._core.ffi.poly_hardtanh(this._ctx, this._graphUopRaw(), minVal, maxVal)
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:716-724.
+      return this.clamp(minVal, maxVal)
     }
 
     hardswish() {
-      const uop = this._rt._core.ffi.poly_hardswish(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+      // Pinned mixin/elementwise.py:691-701.
+      return this.mul(this.add(3).relu6()).mul(1 / 6)
     }
 
-    hardsigmoid() {
-      const uop = this._rt._core.ffi.poly_hardsigmoid(this._ctx, this._graphUopRaw())
-      return this._makeResult(uop, [this])
+    hardsigmoid(alpha = 1 / 6, beta = 0.5) {
+      // Pinned mixin/elementwise.py:703-714.
+      const y = this.mul(alpha, true).add(beta)
+      return y.relu().sub(y.sub(1).relu())
     }
 
     // --- Softmax ---
 
     softmax(axis) {
       if (axis === undefined) axis = -1
-      // Keep softmax lazy so backward sees the same current UOp graph as
-      // tinygrad; scheduling decides where kernel boundaries belong.
-      const uop = this._rt._core.ffi.poly_softmax(this._ctx, this._graphUopRaw(), axis)
-      if (!uop) throw new Error('poly_softmax failed')
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_softmax(this._ctx, this._tensor, axis)
+      return this._makeResultFromCore(core, [this])
     }
 
     logSoftmax(axis) {
       if (axis === undefined) axis = -1
-      const uop = this._rt._core.ffi.poly_log_softmax(this._ctx, this._graphUopRaw(), axis)
-      if (!uop) throw new Error('poly_log_softmax failed')
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_log_softmax(this._ctx, this._tensor, axis)
+      return this._makeResultFromCore(core, [this])
     }
 
     // --- Movement ops ---
@@ -1808,25 +1911,17 @@ function createBoundTensorClass(runtime) {
       }
       const nd = this.shape.length
       axis = axis.map(a => a < 0 ? a + nd : a)
-
-      const { ffi, ops } = this._rt._core
-      let uop = ffi.poly_reduce_axis(this._ctx, ops.ADD, this._graphUopRaw(), axis, axis.length)
-
-      // REDUCE_AXIS keeps all dims (reduced→1). If !keepdim, reshape to squeeze.
-      if (!keepdim && axis.length > 0) {
-        const axisSet = new Set(axis)
-        const newShape = this.shape.filter((_, i) => !axisSet.has(i))
-        if (newShape.length > 0) {
-          uop = ffi.poly_reshape(this._ctx, uop, newShape, newShape.length)
-        } else {
-          uop = ffi.poly_reshape(this._ctx, uop, [], 0)
-        }
+      for (const a of axis) {
+        if (a < 0 || a >= nd) throw new RangeError(`axis ${a} out of range for ndim ${nd}`)
       }
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_sum(
+        this._ctx, this._tensor, axis, axis.length, Boolean(keepdim)
+      )
+      return this._makeResultFromCore(core, [this])
     }
 
     max(opts) {
-      if (!opts) opts = {}
+      if (opts === undefined || opts === null) opts = {}
       let axis, keepdim
       if (typeof opts === 'object' && !Array.isArray(opts)) {
         axis = opts.axis
@@ -1837,39 +1932,22 @@ function createBoundTensorClass(runtime) {
       }
 
       const { ffi } = this._rt._core
-
-      if (axis === undefined || axis === null) {
-        let result = this
-        for (let i = this.shape.length - 1; i >= 0; i--) {
-          const uop = ffi.poly_max_reduce(this._ctx, result._graphUopRaw(), i, keepdim ? 1 : 0)
-          result = this._makeResult(uop, [result])
+      const rawAxes = axis === undefined || axis === null
+        ? this.shape.map((_, i) => i)
+        : (Array.isArray(axis) ? axis : [axis])
+      const axes = rawAxes.map(a => {
+        a = Number(a)
+        return a < 0 ? a + this.shape.length : a
+      })
+      for (const a of axes) {
+        if (a < 0 || a >= this.shape.length) {
+          throw new RangeError(`axis ${a} out of range for ndim ${this.shape.length}`)
         }
-        return result
       }
-
-      if (Array.isArray(axis)) {
-        const axes = axis.map(a => {
-          a = Number(a)
-          return a < 0 ? a + this.shape.length : a
-        })
-        let result = this
-        if (keepdim) {
-          for (const ax of axes) {
-            const uop = ffi.poly_max_reduce(this._ctx, result._graphUopRaw(), ax, 1)
-            result = result._makeResult(uop, [result])
-          }
-          return result
-        }
-        for (const ax of axes.slice().sort((a, b) => b - a)) {
-          const uop = ffi.poly_max_reduce(this._ctx, result._graphUopRaw(), ax, 0)
-          result = result._makeResult(uop, [result])
-        }
-        return result
-      }
-
-      if (axis < 0) axis += this.shape.length
-      const uop = ffi.poly_max_reduce(this._ctx, this._graphUopRaw(), axis, keepdim ? 1 : 0)
-      return this._makeResult(uop, [this])
+      const core = ffi.poly_tensor_max(
+        this._ctx, this._tensor, axes, axes.length, Boolean(keepdim)
+      )
+      return this._makeResultFromCore(core, [this])
     }
 
     argmax(axis, keepdim) {
@@ -1877,14 +1955,10 @@ function createBoundTensorClass(runtime) {
       if (axis === undefined || axis === null) return this.flatten().argmax(0, false)
       if (axis < 0) axis += this.shape.length
       const { ffi } = this._rt._core
-      const uop = ffi.poly_argmax(this._ctx, this._graphUopRaw(), axis)
-      if (!uop) throw new Error('poly_argmax failed')
-      let result = this._makeResult(uop, [this])
-      if (keepdim) {
-        const keepShape = [...this.shape]
-        keepShape[axis] = 1
-        result = result.reshape(keepShape)
-      }
+      if (!ffi.poly_tensor_argmax) throw new Error('poly_tensor_argmax is required for Tensor.argmax')
+      const core = ffi.poly_tensor_argmax(this._ctx, this._tensor, axis, Boolean(keepdim))
+      const result = this._makeResultFromCore(core, [this], 'int32')
+      result.requiresGrad = false
       return result
     }
 
@@ -1893,19 +1967,14 @@ function createBoundTensorClass(runtime) {
       if (descending === undefined) descending = false
       if (dim < 0) dim += this.shape.length
       const { ffi } = this._rt._core
-      if (!ffi.poly_sort) throw new Error('poly_sort is required for Tensor.sort')
-      const pair = ffi.poly_sort(this._ctx, this._graphUopRaw(), dim, descending ? 1 : 0)
-      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('poly_sort failed')
-      const values = this._makeResult(pair[0], [this])
-      const indices = new Tensor(null, {
-        _ctx: this._ctx,
-        _tensor: this._coreCreateWithRoots(
-          pair[1], this._physicalizeResult(pair[1], [this]), POLY_TENSOR_VALUE, this._device
-        ),
-        _device: this._device,
-        _dtype: dtypeNameForUop(this._ctx, pair[1], 'int32'),
-        requiresGrad: false
-      })
+      if (!ffi.poly_tensor_sort) throw new Error('poly_tensor_sort is required for Tensor.sort')
+      const pair = ffi.poly_tensor_sort(this._ctx, this._tensor, dim, descending ? 1 : 0)
+      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) {
+        throw new Error('poly_tensor_sort failed')
+      }
+      const values = this._makeResultFromCore(pair[0], [this])
+      const indices = this._makeResultFromCore(pair[1], [this], 'int32')
+      indices.requiresGrad = false
       return [values, indices]
     }
 
@@ -1921,19 +1990,16 @@ function createBoundTensorClass(runtime) {
       if (dim < 0) dim += this.shape.length
       if (k > this.shape[dim]) throw new Error(`selected index k=${k} is out of range`)
       const { ffi } = this._rt._core
-      if (!ffi.poly_topk) throw new Error('poly_topk is required for Tensor.topk')
-      const pair = ffi.poly_topk(this._ctx, this._graphUopRaw(), k, dim, largest ? 1 : 0, sorted_ ? 1 : 0)
-      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) throw new Error('poly_topk failed')
-      const values = this._makeResult(pair[0], [this])
-      const indices = new Tensor(null, {
-        _ctx: this._ctx,
-        _tensor: this._coreCreateWithRoots(
-          pair[1], this._physicalizeResult(pair[1], [this]), POLY_TENSOR_VALUE, this._device
-        ),
-        _device: this._device,
-        _dtype: dtypeNameForUop(this._ctx, pair[1], 'int32'),
-        requiresGrad: false
-      })
+      if (!ffi.poly_tensor_topk) throw new Error('poly_tensor_topk is required for Tensor.topk')
+      const pair = ffi.poly_tensor_topk(
+        this._ctx, this._tensor, k, dim, largest ? 1 : 0, sorted_ ? 1 : 0
+      )
+      if (!pair || pair.length !== 2 || !pair[0] || !pair[1]) {
+        throw new Error('poly_tensor_topk failed')
+      }
+      const values = this._makeResultFromCore(pair[0], [this])
+      const indices = this._makeResultFromCore(pair[1], [this], 'int32')
+      indices.requiresGrad = false
       return [values, indices]
     }
 
@@ -1944,20 +2010,19 @@ function createBoundTensorClass(runtime) {
 
     mean(axis, keepdim) {
       if (keepdim === undefined) keepdim = false
+      let axes
       if (axis === undefined || axis === null) {
-        return this.sum(null, keepdim).div(this.numel())
-      }
-      if (Array.isArray(axis)) {
-        const axes = axis.map(a => {
+        axes = this.shape.map((_, i) => i)
+      } else {
+        axes = (Array.isArray(axis) ? axis : [axis]).map(a => {
           a = Number(a)
           return a < 0 ? a + this.shape.length : a
         })
-        return this.sum(axes, keepdim).div(product(axes.map(a => this.shape[a])))
       }
-      if (axis < 0) axis += this.shape.length
-      const { ffi } = this._rt._core
-      const uop = ffi.poly_mean_reduce(this._ctx, this._graphUopRaw(), axis, keepdim ? 1 : 0)
-      return this._makeResult(uop, [this])
+      const numerator = this.cast(sumAccumulatorDtype(this._dtype)).sum(axes, keepdim)
+      const denominator = product(axes.map(a => this.shape[a]))
+      const outputDtype = isFloatDtype(this._dtype) ? this._dtype : 'float32'
+      return numerator.div(denominator).cast(outputDtype)
     }
 
     var(axis, keepdim, correction) {
@@ -2001,9 +2066,11 @@ function createBoundTensorClass(runtime) {
         }
       }
 
-      const uop = this._rt._core.ffi.poly_gather_dim(this._ctx, this._graphUopRaw(), dim, index._graphUopRaw())
-      if (!uop) throw new Error('poly_gather_dim failed')
-      return this._makeResult(uop, [this, index])
+      const core = this._rt._core.ffi.poly_tensor_gather_dim(
+        this._ctx, this._tensor, dim, index._tensor
+      )
+      if (!core) throw new Error('poly_tensor_gather_dim failed')
+      return this._makeResultFromCore(core, [this, index])
     }
 
     takeAlongAxis(index, axis) {
@@ -2011,9 +2078,11 @@ function createBoundTensorClass(runtime) {
     }
 
     oneHot(numClasses) {
-      const uop = this._rt._core.ffi.poly_one_hot(this._ctx, this._graphUopRaw(), Number(numClasses))
-      if (!uop) throw new Error('poly_one_hot failed')
-      return this._makeResult(uop, [this])
+      const core = this._rt._core.ffi.poly_tensor_one_hot(
+        this._ctx, this._tensor, Number(numClasses)
+      )
+      if (!core) throw new Error('poly_tensor_one_hot failed')
+      return this._makeResultFromCore(core, [this])
     }
 
     one_hot(numClasses) { return this.oneHot(numClasses) }
@@ -2086,11 +2155,11 @@ function createBoundTensorClass(runtime) {
         throw new TypeError(`Expected Tensor, got ${typeof w}`)
       }
       const { ffi } = this._rt._core
-      const uop = ffi.poly_dot(this._ctx, this._graphUopRaw(), w._graphUopRaw())
-      if (!uop) {
+      const core = ffi.poly_tensor_dot(this._ctx, this._tensor, w._tensor)
+      if (!core) {
         throw new Error(`cannot dot ${JSON.stringify(this.shape)} and ${JSON.stringify(w.shape)}`)
       }
-      return this._makeResult(uop, [this, w])
+      return this._makeResultFromCore(core, [this, w])
     }
 
     matmul(other) { return this.dot(other) }
@@ -2193,6 +2262,23 @@ function createBoundTensorClass(runtime) {
       return result
     }
 
+    _pool(kernelSize, stride = 1, dilation = 1) {
+      const k = makeTuple(kernelSize, Array.isArray(kernelSize) ? kernelSize.length : 2)
+      const strideTuple = makeTuple(stride, k.length)
+      const dilationTuple = makeTuple(dilation, k.length)
+      const core = this._rt._core.ffi.poly_tensor_pool(
+        this._ctx, this._tensor, k, k.length, strideTuple, dilationTuple
+      )
+      if (!core) {
+        throw new Error(
+          `poly_pool failed for shape=${JSON.stringify(this.shape)}, ` +
+          `kernel=${JSON.stringify(k)}, stride=${JSON.stringify(strideTuple)}, ` +
+          `dilation=${JSON.stringify(dilationTuple)}`
+        )
+      }
+      return this._makeResultFromCore(core, [this])
+    }
+
     maxPool2d(kernelSize = [2, 2], opts = {}) {
       if (typeof opts !== 'object' || Array.isArray(opts)) opts = { stride: opts }
       if (opts.ceilMode || opts.ceil_mode) {
@@ -2205,11 +2291,11 @@ function createBoundTensorClass(runtime) {
       const stride = opts.stride == null ? k : makeTuple(opts.stride, k.length)
       const dilation = opts.dilation == null ? makeTuple(1, k.length) : makeTuple(opts.dilation, k.length)
       const padding = resolvePoolPads(opts.padding == null ? 0 : opts.padding, k.length)
-      const uop = this._rt._core.ffi.poly_max_pool2d(
-        this._ctx, this._graphUopRaw(), k, k.length, stride, dilation, padding, padding.length
+      const core = this._rt._core.ffi.poly_tensor_max_pool2d(
+        this._ctx, this._tensor, k, k.length, stride, dilation, padding, padding.length
       )
-      if (!uop) throw new Error('poly_max_pool2d failed')
-      return this._makeResult(uop, [this])
+      if (!core) throw new Error('poly_max_pool2d failed')
+      return this._makeResultFromCore(core, [this])
     }
 
     max_pool2d(kernelSize, stride, dilation, padding, ceilMode, returnIndices) {
@@ -2234,14 +2320,14 @@ function createBoundTensorClass(runtime) {
       const dilationTuple = opts.dilation == null ? makeTuple(1, hw.length) : makeTuple(opts.dilation, hw.length)
       const paddingTuple = resolvePoolPads(opts.padding == null ? 0 : opts.padding, hw.length)
       const groups = opts.groups == null ? 1 : Number(opts.groups)
-      const uop = this._rt._core.ffi.poly_conv2d(
-        this._ctx, this._graphUopRaw(), weight._graphUopRaw(),
-        bias ? bias._graphUopRaw() : null,
+      const core = this._rt._core.ffi.poly_tensor_conv2d(
+        this._ctx, this._tensor, weight._tensor,
+        bias ? bias._tensor : null,
         groups, strideTuple, dilationTuple, paddingTuple, paddingTuple.length
       )
-      if (!uop) throw new Error('poly_conv2d failed')
+      if (!core) throw new Error('poly_conv2d failed')
       const inputs = bias ? [this, weight, bias] : [this, weight]
-      return this._makeResult(uop, inputs)
+      return this._makeResultFromCore(core, inputs)
     }
 
     batchnorm(weight, bias, mean, invstd, axis = 1) {
@@ -2249,17 +2335,17 @@ function createBoundTensorClass(runtime) {
         a = Number(a)
         return a < 0 ? a + this.shape.length : a
       })
-      const uop = this._rt._core.ffi.poly_batchnorm(
-        this._ctx, this._graphUopRaw(),
-        weight ? weight._graphUopRaw() : null,
-        bias ? bias._graphUopRaw() : null,
-        mean._graphUopRaw(), invstd._graphUopRaw(), axes, axes.length
+      const core = this._rt._core.ffi.poly_tensor_batchnorm(
+        this._ctx, this._tensor,
+        weight ? weight._tensor : null,
+        bias ? bias._tensor : null,
+        mean._tensor, invstd._tensor, axes, axes.length
       )
-      if (!uop) throw new Error('poly_batchnorm failed')
+      if (!core) throw new Error('poly_batchnorm failed')
       const inputs = [this, mean, invstd]
       if (weight) inputs.push(weight)
       if (bias) inputs.push(bias)
-      return this._makeResult(uop, inputs)
+      return this._makeResultFromCore(core, inputs)
     }
 
     // --- Loss functions ---
@@ -2319,11 +2405,11 @@ function createBoundTensorClass(runtime) {
           if (i._device !== result._device) {
             throw new Error(`expected index and self on the same device, index.device=${i.device}, self.device=${result.device}`)
           }
-          const uop = this._rt._core.ffi.poly_index_select(
-            result._ctx, result._graphUopRaw(), dim, i._graphUopRaw()
+          const core = this._rt._core.ffi.poly_tensor_index_select(
+            result._ctx, result._tensor, dim, i._tensor
           )
-          if (!uop) throw new Error('poly_index_select failed')
-          result = result._makeResult(uop, [result, i])
+          if (!core) throw new Error('poly_tensor_index_select failed')
+          result = result._makeResultFromCore(core, [result, i])
           dim += i.shape.length
         } else if (typeof i === 'object' && i !== null && 'step' in i) {
           // Slice with step: {start, stop, step}
@@ -2387,8 +2473,14 @@ function createBoundTensorClass(runtime) {
     static einsum(formula, ...operands) {
       if (operands.length === 1 && Array.isArray(operands[0])) operands = operands[0]
       if (!operands.length) throw new Error('einsum requires at least one operand')
+      if (operands.some(t => !t || typeof t._graphUopRaw !== 'function' || !t._ctx)) {
+        throw new TypeError('einsum operands must be Tensors')
+      }
       const { ffi } = _runtime._core
       const ctx = operands[0]._ctx
+      if (operands.some(t => t._ctx !== ctx)) {
+        throw new Error('einsum operands must belong to the same Polygrad context')
+      }
       const graphOperands = operands.map(t => ({ _uop: t._graphUopRaw() }))
       const r = ffi.poly_einsum(ctx, formula, graphOperands)
       if (!r.uop) throw new Error(`poly_einsum failed for formula: ${formula}`)

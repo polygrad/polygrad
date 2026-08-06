@@ -15,6 +15,7 @@
 #include "../src/frontend.h"
 #include "../src/models/tabm.h"
 #include "../src/nn.h"
+#include "../src/schedule/rangeify.h"
 #include "../src/tensor.h"
 
 #include <math.h>
@@ -468,6 +469,12 @@ static PolyUOp *x86_expr_f16_alu(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *
   return poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT16, mul, a, poly_arg_none());
 }
 
+static PolyUOp *x86_expr_f16_exp2(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
+  (void)b;
+  (void)range;
+  return poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT16, a, poly_arg_none());
+}
+
 static PolyUOp *x86_expr_f16_where(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
   (void)b;
   (void)range;
@@ -477,6 +484,11 @@ static PolyUOp *x86_expr_f16_where(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp
   PolyUOp *plus = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT16, a, ten, poly_arg_none());
   PolyUOp *srcs[3] = {mask, a, plus};
   return poly_uop(ctx, POLY_OP_WHERE, POLY_FLOAT16, srcs, 3, poly_arg_none());
+}
+
+static PolyUOp *x86_expr_bf16_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b, PolyUOp *range) {
+  (void)range;
+  return poly_uop2(ctx, POLY_OP_ADD, POLY_BFLOAT16, a, b, poly_arg_none());
 }
 
 static PolyUOp *x86_make_cast_i32_f32(PolyCtx *ctx, int n) {
@@ -987,6 +999,46 @@ static int x86_run_rewritten_direct(PolyCtx *ctx, PolyUOp *sink, void **args, in
   return rc;
 }
 
+static uint64_t x86_topology_signature(PolyCtx *ctx, PolyUOp *root, int *n_out) {
+  int n = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, root, &n);
+  if (!topo) return 0;
+  uint64_t signature = UINT64_C(1469598103934665603);
+#define MIX(v)                                                                                      \
+  do {                                                                                              \
+    signature ^= (uint64_t)(v);                                                                     \
+    signature *= UINT64_C(1099511628211);                                                           \
+  } while (0)
+  MIX(n);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = topo[i];
+    MIX(u->op);
+    MIX((uint8_t)u->dtype.priority);
+    MIX(u->dtype.bitsize);
+    MIX((uint8_t)u->dtype.fmt);
+    MIX(u->dtype.count);
+    MIX(u->dtype.is_ptr);
+    MIX(u->dtype.addrspace);
+    MIX(u->dtype.vcount);
+    MIX((uint64_t)u->dtype.ptr_size);
+    MIX(poly_arg_hash(u->arg));
+    MIX(u->n_src);
+    for (int j = 0; j < u->n_src; j++) {
+      int src_id = -1;
+      for (int k = 0; k < n; k++)
+        if (topo[k] == u->src[j]) {
+          src_id = k;
+          break;
+        }
+      MIX((uint32_t)src_id);
+    }
+  }
+#undef MIX
+  free(topo);
+  if (n_out) *n_out = n;
+  return signature;
+}
+
 static PolyUOp *x86_make_tagged_if_sink(
     PolyCtx *ctx,
     PolyDType dtype,
@@ -1120,6 +1172,7 @@ enum {
   TX86_OP_MOV = 5,
   TX86_OP_MOVm = 6,
   TX86_OP_MOVi = 7,
+  TX86_OP_VMOVSS = 9,
   TX86_OP_VMOVSSm = 12,
   TX86_OP_VMOVSDm = 13,
   TX86_OP_VMOVUPSm = 14,
@@ -1128,6 +1181,7 @@ enum {
   TX86_OP_VBLENDVPS = 71,
   TX86_OP_VPEXTRW = 84,
   TX86_OP_VPEXTRD = 85,
+  TX86_OP_VPINSRW = 88,
   TX86_OP_IMULi = 103,
   TX86_OP_CMP = 116,
   TX86_OP_VADDSS = 126,
@@ -1152,6 +1206,28 @@ enum {
 
 static int32_t tx86_tag_real(int cls, int reg) {
   return TX86_TAG_REAL | ((int32_t)cls << TX86_TAG_CLASS_SHIFT) | (reg & TX86_TAG_ID_MASK);
+}
+
+static int tx86_count_stack_memory_op(PolyUOp **lin, int n, int op, int memory_src, int width) {
+  int count = 0;
+  int32_t rsp = tx86_tag_real(TX86_REG_CLASS_WGPR, TX86_REG_RSP);
+  for (int i = 0; i < n; i++) {
+    PolyUOp *u = lin[i];
+    if (!u || u->op != POLY_OP_INS || u->arg.kind != POLY_ARG_INT || u->arg.i != op ||
+        memory_src < 0 || memory_src + 3 >= u->n_src)
+      continue;
+    PolyUOp *base = u->src[memory_src];
+    PolyUOp *size = u->src[memory_src + 3];
+    int32_t base_reg =
+        base && base->tag_arg.kind == POLY_ARG_INT_TUPLE && base->tag_arg.int_tuple.n > 0
+            ? (int32_t)base->tag_arg.int_tuple.vals[0]
+        : base ? base->tag
+               : 0;
+    if (base_reg == rsp && size && size->op == POLY_OP_CONST && size->arg.kind == POLY_ARG_INT &&
+        size->arg.i == width)
+      count++;
+  }
+  return count;
 }
 
 static PolyArg tx86_arg_int_tuple(int64_t *vals, int n) {
@@ -1253,7 +1329,7 @@ static void tx86_assert_render_hex(
   free(code);
 }
 
-TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
+TEST_BACKEND(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *load_base_srcs[] = {
@@ -1390,7 +1466,7 @@ TEST(x86, direct_encoder_matches_tinygrad_addressing_and_legacy_bytes) {
   PASS();
 }
 
-TEST(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
+TEST_BACKEND(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *xmm0 = tx86_def_reg(ctx, POLY_FLOAT32, TX86_REG_RAX);
@@ -1458,7 +1534,7 @@ TEST(x86, direct_encoder_matches_tinygrad_vex_and_cmove_bytes) {
   PASS();
 }
 
-TEST(x86, feature_stamp_is_stable_for_runtime_cache_key) {
+TEST_BACKEND(x86, feature_stamp_is_stable_for_runtime_cache_key) {
   uint32_t a = poly_x86_feature_stamp();
   uint32_t b = poly_x86_feature_stamp();
   ASSERT_INT_EQ((int)(a & 1u), 1);
@@ -1466,7 +1542,7 @@ TEST(x86, feature_stamp_is_stable_for_runtime_cache_key) {
   PASS();
 }
 
-TEST(x86, rewritten_const_isel_keeps_range_bounds_structural) {
+TEST_BACKEND(x86, rewritten_const_isel_keeps_range_bounds_structural) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = x86_make_vecadd(ctx, 8);
   int n_lin = 0;
@@ -1478,7 +1554,7 @@ TEST(x86, rewritten_const_isel_keeps_range_bounds_structural) {
   PASS();
 }
 
-TEST(x86, rewritten_float_const_isel_matches_tinygrad_bitcast_path) {
+TEST_BACKEND(x86, rewritten_float_const_isel_matches_tinygrad_bitcast_path) {
   enum { N = 4 };
   float a[N], out[N];
   for (int i = 0; i < N; i++) {
@@ -1501,7 +1577,7 @@ TEST(x86, rewritten_float_const_isel_matches_tinygrad_bitcast_path) {
   PASS();
 }
 
-TEST(x86, rewritten_f32_vector_index_lane0_noop_matches_tinygrad) {
+TEST_BACKEND(x86, rewritten_f32_vector_index_lane0_noop_matches_tinygrad) {
   float in[4] = {3.5f, -2.0f, 7.0f, 8.0f};
   float out[1] = {-99.0f};
   PolyCtx *ctx = poly_ctx_new();
@@ -1513,7 +1589,7 @@ TEST(x86, rewritten_f32_vector_index_lane0_noop_matches_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_vecadd_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_vecadd_matches_tinygrad_probe_class) {
   enum { N = 8 };
   float a[N], b[N], out[N];
   for (int i = 0; i < N; i++) {
@@ -1531,7 +1607,7 @@ TEST(x86, direct_vecadd_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_scalar_vecadd_matches_tinygrad_readmem2nd_probe) {
+TEST_BACKEND(x86, direct_scalar_vecadd_matches_tinygrad_readmem2nd_probe) {
   enum { N = 1 };
   float a[N] = {2.0f}, b[N] = {3.0f}, out[N] = {-99.0f};
   PolyCtx *ctx = poly_ctx_new();
@@ -1543,7 +1619,7 @@ TEST(x86, direct_scalar_vecadd_matches_tinygrad_readmem2nd_probe) {
   PASS();
 }
 
-TEST(x86, direct_f32_broadcast4_matches_tinygrad_vbroadcastss_probe) {
+TEST_BACKEND(x86, direct_f32_broadcast4_matches_tinygrad_vbroadcastss_probe) {
   float x[1] = {2.0f};
   float out[4] = {-99.0f, -99.0f, -99.0f, -99.0f};
   PolyCtx *ctx = poly_ctx_new();
@@ -1556,7 +1632,7 @@ TEST(x86, direct_f32_broadcast4_matches_tinygrad_vbroadcastss_probe) {
   PASS();
 }
 
-TEST(x86, direct_f16_broadcast4_matches_tinygrad_vpinsrw_probe) {
+TEST_BACKEND(x86, direct_f16_broadcast4_matches_tinygrad_vpinsrw_probe) {
   uint16_t x[1] = {x86_f32_to_f16_bits(2.0f)};
   uint16_t out[4] = {0, 0, 0, 0};
   PolyCtx *ctx = poly_ctx_new();
@@ -1569,7 +1645,7 @@ TEST(x86, direct_f16_broadcast4_matches_tinygrad_vpinsrw_probe) {
   PASS();
 }
 
-TEST(x86, direct_i32_broadcast4_matches_tinygrad_vpbroadcastd_probe) {
+TEST_BACKEND(x86, direct_i32_broadcast4_matches_tinygrad_vpbroadcastd_probe) {
   int32_t x[1] = {7};
   int32_t out[4] = {0, 0, 0, 0};
   PolyCtx *ctx = poly_ctx_new();
@@ -1582,7 +1658,7 @@ TEST(x86, direct_i32_broadcast4_matches_tinygrad_vpbroadcastd_probe) {
   PASS();
 }
 
-TEST(x86, rewritten_i32_broadcast4_isel_matches_tinygrad_vpbroadcastd_probe) {
+TEST_BACKEND(x86, rewritten_i32_broadcast4_isel_matches_tinygrad_vpbroadcastd_probe) {
   int32_t x[1] = {7};
   int32_t out[4] = {0, 0, 0, 0};
   PolyCtx *ctx = poly_ctx_new();
@@ -1595,7 +1671,7 @@ TEST(x86, rewritten_i32_broadcast4_isel_matches_tinygrad_vpbroadcastd_probe) {
   PASS();
 }
 
-TEST(x86, direct_float_where_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_float_where_matches_tinygrad_probe_class) {
   enum { N = 8 };
   float a[N], b[N], out[N];
   for (int i = 0; i < N; i++) {
@@ -1615,7 +1691,7 @@ TEST(x86, direct_float_where_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_scalar_float_where_uses_compare_mask_like_tinygrad) {
+TEST_BACKEND(x86, direct_scalar_float_where_uses_compare_mask_like_tinygrad) {
   float a[1] = {2.0f};
   float b[1] = {10.0f};
   float out[1] = {-99.0f};
@@ -1628,7 +1704,7 @@ TEST(x86, direct_scalar_float_where_uses_compare_mask_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_float_compare_selects_integer_with_tinygrad_cmovb) {
+TEST_BACKEND(x86, direct_float_compare_selects_integer_with_tinygrad_cmovb) {
   enum { N = 1 };
   float in[N] = {1.0f};
   int16_t out[N] = {0};
@@ -1667,7 +1743,7 @@ TEST(x86, direct_float_compare_selects_integer_with_tinygrad_cmovb) {
   PASS();
 }
 
-TEST(x86, rewritten_float_neg_pre_isel_matches_tinygrad_sub_zero_probe) {
+TEST_BACKEND(x86, rewritten_float_neg_pre_isel_matches_tinygrad_sub_zero_probe) {
   /* tinygrad CPU:X86 probe: NEG lowers before isel to SUB(0, x), emitted as VSUBSS. */
   float a[3] = {1.0f, -2.0f, 3.0f};
   float b[3] = {0.25f, 0.5f, 0.75f};
@@ -1684,7 +1760,52 @@ TEST(x86, rewritten_float_neg_pre_isel_matches_tinygrad_sub_zero_probe) {
   PASS();
 }
 
-TEST(x86, direct_f32_bool_compare_store_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, rewritten_vector_neg_const_like_uses_scalar_base_dtype) {
+  /* tinygrad UOp.const_like uses dtype.base: vector NEG becomes
+   * SUB(floatx4, CONST(float, 0), value), not CONST(floatx4, 0). */
+  enum { N = 8 };
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *a = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *b = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *c = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out1 = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *out2 = poly_buffer(ctx, POLY_FLOAT32, N);
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_FLOAT32, a, poly_arg_none());
+  PolyUOp *add = poly_uop2(ctx, POLY_OP_ADD, POLY_FLOAT32, neg, b, poly_arg_none());
+  PolyUOp *mul = poly_uop2(ctx, POLY_OP_MUL, POLY_FLOAT32, neg, c, poly_arg_none());
+  PolyUOp *s1 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out1, add, poly_arg_none());
+  PolyUOp *s2 = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out2, mul, poly_arg_none());
+  PolyUOp *stores[] = {s1, s2};
+  PolyUOp *sink = poly_uop(ctx, POLY_OP_SINK, POLY_VOID, stores, 2, poly_arg_none());
+
+  PolyKernelScheduleResult sr = poly_build_kernel_schedule(ctx, sink);
+  ASSERT_INT_EQ(sr.n_kernels, 2);
+  int found_vector_sub_zero = 0;
+  for (int k = 0; k < sr.n_kernels; k++) {
+    PolyUOp *rewritten = poly_rewrite_x86(ctx, sr.kernels[k]);
+    ASSERT_NOT_NULL(rewritten);
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort_alloc(ctx, rewritten, &n_topo);
+    ASSERT_NOT_NULL(topo);
+    for (int i = 0; i < n_topo; i++) {
+      PolyUOp *u = topo[i];
+      if (!u || u->op != POLY_OP_SUB || u->dtype.count <= 1 || u->n_src != 2 ||
+          !u->src[0] || u->src[0]->op != POLY_OP_CONST)
+        continue;
+      found_vector_sub_zero++;
+      ASSERT_TRUE(poly_dtype_eq(u->src[0]->dtype, poly_dtype_scalar(u->dtype)));
+      ASSERT_INT_EQ(u->src[0]->dtype.count, 1);
+    }
+    poly_toposort_free(topo);
+  }
+  ASSERT_TRUE(found_vector_sub_zero > 0);
+
+  poly_kernel_schedule_result_free(&sr);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(x86, direct_f32_bool_compare_store_matches_tinygrad_probe_class) {
   enum { N = 3 };
   float a[N] = {1.0f, 3.0f, 2.0f};
   float b[N] = {2.0f, 2.0f, 2.0f};
@@ -1710,7 +1831,7 @@ TEST(x86, direct_f32_bool_compare_store_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_f64_bool_compare_uses_imm32_mask_like_tinygrad) {
+TEST_BACKEND(x86, direct_f64_bool_compare_uses_imm32_mask_like_tinygrad) {
   enum { N = 3 };
   double a[N] = {0.0, 3.0, -2.0};
   double b[N] = {1.0, 2.0, -2.0};
@@ -1736,7 +1857,7 @@ TEST(x86, direct_f64_bool_compare_uses_imm32_mask_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_mixed_float_int_compare_matches_python_embedding_mask) {
+TEST_BACKEND(x86, direct_mixed_float_int_compare_matches_python_embedding_mask) {
   enum { N = 5 };
   float idx[1] = {2.0f};
   uint8_t out[N] = {0xba, 0xba, 0xba, 0xba, 0xba};
@@ -1767,7 +1888,7 @@ TEST(x86, direct_mixed_float_int_compare_matches_python_embedding_mask) {
   PASS();
 }
 
-TEST(x86, direct_negative_step2_sign_extends_address_index_like_tinygrad) {
+TEST_BACKEND(x86, direct_negative_step2_sign_extends_address_index_like_tinygrad) {
   float in[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   float out[3] = {0.0f, 0.0f, 0.0f};
   PolyCtx *ctx = poly_ctx_new();
@@ -1781,7 +1902,7 @@ TEST(x86, direct_negative_step2_sign_extends_address_index_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_stack_args_follow_tinygrad_sysv_x86_abi) {
+TEST_BACKEND(x86, direct_stack_args_follow_tinygrad_sysv_x86_abi) {
   enum { N = 4, IN = 7 };
   float in[IN][N];
   float out[N] = {0};
@@ -1802,7 +1923,7 @@ TEST(x86, direct_stack_args_follow_tinygrad_sysv_x86_abi) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_tabm_forward_preserves_callee_saved_stack_args) {
+TEST_BACKEND(x86, schedule_runtime_tabm_forward_preserves_callee_saved_stack_args) {
   const char *spec = "{\"layers\":[2,4,1],\"activation\":\"relu\","
                      "\"loss\":\"mse\",\"batch_size\":1,\"seed\":42,\"n_ensemble\":4}";
   PolyInstance *inst = poly_tabm_instance(spec, (int)strlen(spec));
@@ -1823,7 +1944,7 @@ TEST(x86, schedule_runtime_tabm_forward_preserves_callee_saved_stack_args) {
   PASS();
 }
 
-TEST(x86, direct_f64_where_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_f64_where_matches_tinygrad_probe_class) {
   enum { N = 4 };
   double a[N] = {-1.0, 1.5, 2.0, -2.0};
   double b[N] = {0.5, 0.5, 4.0, 4.0};
@@ -1840,7 +1961,7 @@ TEST(x86, direct_f64_where_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_f32_max_uses_tinygrad_vmax_pattern) {
+TEST_BACKEND(x86, direct_f32_max_uses_tinygrad_vmax_pattern) {
   enum { N = 4 };
   float a[N] = {1.0f, -2.0f, 3.0f, -4.0f};
   float b[N] = {0.5f, 0.5f, 0.5f, 0.5f};
@@ -1857,7 +1978,7 @@ TEST(x86, direct_f32_max_uses_tinygrad_vmax_pattern) {
   PASS();
 }
 
-TEST(x86, rewritten_f32_min_where_uses_tinygrad_vmin_pattern) {
+TEST_BACKEND(x86, rewritten_f32_min_where_uses_tinygrad_vmin_pattern) {
   enum { N = 4 };
   float a[N] = {1.0f, -2.0f, 3.0f, -4.0f};
   float b[N] = {0.5f, 0.5f, 0.5f, 0.5f};
@@ -1875,7 +1996,7 @@ TEST(x86, rewritten_f32_min_where_uses_tinygrad_vmin_pattern) {
   PASS();
 }
 
-TEST(x86, direct_i32_mix_matches_polygrad_probe_class) {
+TEST_BACKEND(x86, direct_i32_mix_matches_polygrad_probe_class) {
   enum { N = 8 };
   int32_t a[N] = {1, -2, 3, -4, 5, -6, 7, -8};
   int32_t b[N] = {6, 7, -6, -7, 2, -1, 1, -3};
@@ -1892,7 +2013,7 @@ TEST(x86, direct_i32_mix_matches_polygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, rewritten_reused_mul_does_not_fuse_vfmadd_like_tinygrad) {
+TEST_BACKEND(x86, rewritten_reused_mul_does_not_fuse_vfmadd_like_tinygrad) {
   float a[1] = {2.0f};
   float b[1] = {3.0f};
   float out[1] = {0};
@@ -1913,7 +2034,7 @@ TEST(x86, rewritten_reused_mul_does_not_fuse_vfmadd_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, rewritten_complex_address_folds_index_plus_const_like_tinygrad) {
+TEST_BACKEND(x86, rewritten_complex_address_folds_index_plus_const_like_tinygrad) {
   int32_t in[8] = {3, 5, 7, 11, 13, 17, 19, 23};
   int32_t out[1] = {0};
   int32_t i = 2;
@@ -1931,7 +2052,7 @@ TEST(x86, rewritten_complex_address_folds_index_plus_const_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, rewritten_single_use_load_folds_into_integer_add_like_tinygrad) {
+TEST_BACKEND(x86, rewritten_single_use_load_folds_into_integer_add_like_tinygrad) {
   int32_t in[2] = {10, 32};
   int32_t out[1] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -1948,7 +2069,7 @@ TEST(x86, rewritten_single_use_load_folds_into_integer_add_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, rewritten_multiuse_load_does_not_fold_like_tinygrad) {
+TEST_BACKEND(x86, rewritten_multiuse_load_does_not_fold_like_tinygrad) {
   int32_t in[1] = {7};
   int32_t out[1] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -1976,7 +2097,7 @@ TEST(x86, rewritten_multiuse_load_does_not_fold_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_i32_where_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_i32_where_matches_tinygrad_probe_class) {
   enum { N = 8 };
   int32_t a[N] = {1, -2, 3, -4, 5, -6, 7, -8};
   int32_t b[N] = {8, 7, -6, -5, 4, 3, -2, -1};
@@ -1993,7 +2114,7 @@ TEST(x86, direct_i32_where_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_i32_where_rematerializes_flags_after_clobber_like_tinygrad) {
+TEST_BACKEND(x86, direct_i32_where_rematerializes_flags_after_clobber_like_tinygrad) {
   enum { N = 4 };
   int32_t a[N] = {1, 3, -2, 5};
   int32_t b[N] = {2, 2, -1, 5};
@@ -2010,7 +2131,7 @@ TEST(x86, direct_i32_where_rematerializes_flags_after_clobber_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, rewritten_if_compare_selects_tinygrad_jump_family) {
+TEST_BACKEND(x86, rewritten_if_compare_selects_tinygrad_jump_family) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *cases[4] = {
       x86_make_tagged_if_sink(ctx, POLY_UINT32, POLY_OP_CMPLT, ".IF_OUT_ult"),
@@ -2037,7 +2158,7 @@ TEST(x86, rewritten_if_compare_selects_tinygrad_jump_family) {
   PASS();
 }
 
-TEST(x86, direct_cast_i32_f32_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_cast_i32_f32_matches_tinygrad_probe_class) {
   enum { N = 4 };
   int32_t a[N] = {1, 2, 3, 4};
   float out[N] = {0};
@@ -2051,7 +2172,7 @@ TEST(x86, direct_cast_i32_f32_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_vector_f32_to_i32_cast_uses_tinygrad_vcvttps2dq) {
+TEST_BACKEND(x86, direct_vector_f32_to_i32_cast_uses_tinygrad_vcvttps2dq) {
   enum { V = 2, LANES = 4, N = V * LANES };
   float a[N] = {-2.8f, -1.1f, 0.0f, 1.9f, 2.2f, 3.8f, 127.9f, -128.4f};
   int32_t out[N] = {0};
@@ -2066,7 +2187,7 @@ TEST(x86, direct_vector_f32_to_i32_cast_uses_tinygrad_vcvttps2dq) {
   PASS();
 }
 
-TEST(x86, direct_vector_f64_to_i32_cast_uses_tinygrad_vcvttpd2dq) {
+TEST_BACKEND(x86, direct_vector_f64_to_i32_cast_uses_tinygrad_vcvttpd2dq) {
   enum { V = 2, LANES = 2, N = V * LANES };
   double a[N] = {-2.8, -1.1, 1.9, 127.9};
   int32_t out[N] = {0};
@@ -2081,7 +2202,7 @@ TEST(x86, direct_vector_f64_to_i32_cast_uses_tinygrad_vcvttpd2dq) {
   PASS();
 }
 
-TEST(x86, direct_vector_f64_to_f32_cast_uses_tinygrad_vcvtpd2ps) {
+TEST_BACKEND(x86, direct_vector_f64_to_f32_cast_uses_tinygrad_vcvtpd2ps) {
   enum { V = 2, LANES = 2, N = V * LANES };
   double a[N] = {-2.5, -1.25, 1.75, 127.5};
   float out[N] = {0};
@@ -2095,7 +2216,7 @@ TEST(x86, direct_vector_f64_to_f32_cast_uses_tinygrad_vcvtpd2ps) {
   PASS();
 }
 
-TEST(x86, direct_vector_i32_to_f64_cast_uses_tinygrad_vcvtdq2pd) {
+TEST_BACKEND(x86, direct_vector_i32_to_f64_cast_uses_tinygrad_vcvtdq2pd) {
   enum { V = 2, IN_LANES = 4, OUT_LANES = 4, N = V * IN_LANES };
   int32_t a[N] = {-3, -1, 0, 2, 4, 8, 16, 32};
   double out[N] = {0};
@@ -2109,7 +2230,7 @@ TEST(x86, direct_vector_i32_to_f64_cast_uses_tinygrad_vcvtdq2pd) {
   PASS();
 }
 
-TEST(x86, direct_vector_f32_to_f64_cast_uses_tinygrad_vcvtps2pd) {
+TEST_BACKEND(x86, direct_vector_f32_to_f64_cast_uses_tinygrad_vcvtps2pd) {
   enum { V = 2, IN_LANES = 4, OUT_LANES = 4, N = V * IN_LANES };
   float a[N] = {-3.5f, -1.25f, 0.0f, 2.5f, 4.25f, 8.5f, 16.75f, 32.125f};
   double out[N] = {0};
@@ -2123,7 +2244,7 @@ TEST(x86, direct_vector_f32_to_f64_cast_uses_tinygrad_vcvtps2pd) {
   PASS();
 }
 
-TEST(x86, direct_shrink_load_width_matches_tinygrad_pre_isel) {
+TEST_BACKEND(x86, direct_shrink_load_width_matches_tinygrad_pre_isel) {
   float a[4] = {1.25f, -2.5f, 3.75f, 9.0f};
   float out[4] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -2136,7 +2257,7 @@ TEST(x86, direct_shrink_load_width_matches_tinygrad_pre_isel) {
   PASS();
 }
 
-TEST(x86, direct_gated_load_false_uses_scratch_alt_like_tinygrad) {
+TEST_BACKEND(x86, direct_gated_load_false_uses_scratch_alt_like_tinygrad) {
   float a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float out[1] = {0.0f};
   PolyCtx *ctx = poly_ctx_new();
@@ -2148,7 +2269,7 @@ TEST(x86, direct_gated_load_false_uses_scratch_alt_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_gated_store_false_uses_scratch_like_tinygrad) {
+TEST_BACKEND(x86, direct_gated_store_false_uses_scratch_like_tinygrad) {
   float out[1] = {11.0f};
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = x86_make_gated_store_false_uses_scratch(ctx);
@@ -2159,7 +2280,7 @@ TEST(x86, direct_gated_store_false_uses_scratch_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, direct_u32_to_i64_cast_matches_tinygrad_pre_isel_noop) {
+TEST_BACKEND(x86, direct_u32_to_i64_cast_matches_tinygrad_pre_isel_noop) {
   enum { N = 4 };
   uint32_t a[N] = {1u, 2147483651u, 17u, 123u};
   int64_t out[N] = {0};
@@ -2173,7 +2294,7 @@ TEST(x86, direct_u32_to_i64_cast_matches_tinygrad_pre_isel_noop) {
   PASS();
 }
 
-TEST(x86, direct_i64_to_i32_cast_matches_tinygrad_pre_isel_noop) {
+TEST_BACKEND(x86, direct_i64_to_i32_cast_matches_tinygrad_pre_isel_noop) {
   enum { N = 4 };
   int64_t a[N] = {1, -2, 3, -4};
   int32_t out[N] = {0};
@@ -2187,7 +2308,7 @@ TEST(x86, direct_i64_to_i32_cast_matches_tinygrad_pre_isel_noop) {
   PASS();
 }
 
-TEST(x86, direct_vector_u8_to_i32_cast_uses_tinygrad_vpmov_rule) {
+TEST_BACKEND(x86, direct_vector_u8_to_i32_cast_uses_tinygrad_vpmov_rule) {
   enum { N = 8, V = 2 };
   uint8_t a[N] = {1, 2, 3, 4, 5, 6, 7, 255};
   int32_t out[N] = {0};
@@ -2201,7 +2322,7 @@ TEST(x86, direct_vector_u8_to_i32_cast_uses_tinygrad_vpmov_rule) {
   PASS();
 }
 
-TEST(x86, direct_i32x4_addsub_matches_tinygrad_readmem2nd_group) {
+TEST_BACKEND(x86, direct_i32x4_addsub_matches_tinygrad_readmem2nd_group) {
   enum { N = 8, V = 2 };
   int32_t a[N] = {1, -2, 3, -4, 5, -6, 7, -8};
   int32_t b[N] = {8, 7, -6, -5, 4, 3, -2, -1};
@@ -2216,7 +2337,7 @@ TEST(x86, direct_i32x4_addsub_matches_tinygrad_readmem2nd_group) {
   PASS();
 }
 
-TEST(x86, rewritten_i32x4_addsub_isel_uses_tinygrad_packed_ops) {
+TEST_BACKEND(x86, rewritten_i32x4_addsub_isel_uses_tinygrad_packed_ops) {
   enum { N = 8, V = 2 };
   int32_t a[N] = {1, -2, 3, -4, 5, -6, 7, -8};
   int32_t b[N] = {8, 7, -6, -5, 4, 3, -2, -1};
@@ -2231,7 +2352,7 @@ TEST(x86, rewritten_i32x4_addsub_isel_uses_tinygrad_packed_ops) {
   PASS();
 }
 
-TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
+TEST_BACKEND(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   enum { N = 8, V4 = 2 };
 
   float f32_in[N] = {1.0f, -2.0f, 3.5f, 4.25f, -5.0f, 6.0f, 7.75f, -8.5f};
@@ -2294,7 +2415,7 @@ TEST(x86, rewritten_store_family_uses_tinygrad_memory_ops) {
   PASS();
 }
 
-TEST(x86, rewritten_int_vector_bitwise_isel_uses_tinygrad_packed_ops) {
+TEST_BACKEND(x86, rewritten_int_vector_bitwise_isel_uses_tinygrad_packed_ops) {
   enum { N = 8, V = 2 };
   int32_t a[N] = {0x13, 0x24, 0x35, 0x46, 0x57, 0x68, 0x79, 0x8a};
   int32_t b[N] = {0x0f, 0x33, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa};
@@ -2325,7 +2446,7 @@ TEST(x86, rewritten_int_vector_bitwise_isel_uses_tinygrad_packed_ops) {
   PASS();
 }
 
-TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
+TEST_BACKEND(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
   enum { N32 = 8, V32 = 2, N16 = 16, V16 = 2, N64 = 4, V64 = 2 };
 
   int16_t a16[N16] = {1, 2, -3, 4, 5, -6, 7, 8, 2, -3, 4, 5, -6, 7, 8, 9};
@@ -2406,7 +2527,7 @@ TEST(x86, rewritten_int_vector_mul_shift_isel_uses_tinygrad_packed_ops) {
   PASS();
 }
 
-TEST(x86, rewritten_i8_add_and_i64_sub_use_tinygrad_packed_ops) {
+TEST_BACKEND(x86, rewritten_i8_add_and_i64_sub_use_tinygrad_packed_ops) {
   enum { N8 = 16, V8 = 1, N64 = 4, V64 = 2 };
   int8_t a8[N8] = {1, 2, 3, 4, 5, 6, 7, 8, -1, -2, -3, -4, 9, 10, 11, 12};
   int8_t b8[N8] = {12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, -1, -2, -3, -4};
@@ -2435,7 +2556,7 @@ TEST(x86, rewritten_i8_add_and_i64_sub_use_tinygrad_packed_ops) {
   PASS();
 }
 
-TEST(x86, rewritten_f32_stack_index_lanes_uses_tinygrad_vshufps) {
+TEST_BACKEND(x86, rewritten_f32_stack_index_lanes_uses_tinygrad_vshufps) {
   float a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float b[4] = {5.0f, 6.0f, 7.0f, 8.0f};
   float out[4] = {0};
@@ -2451,7 +2572,7 @@ TEST(x86, rewritten_f32_stack_index_lanes_uses_tinygrad_vshufps) {
   PASS();
 }
 
-TEST(x86, rewritten_f64_stack_index_lanes_uses_tinygrad_vshufpd) {
+TEST_BACKEND(x86, rewritten_f64_stack_index_lanes_uses_tinygrad_vshufpd) {
   double a[2] = {1.0, 2.0};
   double b[2] = {5.0, 6.0};
   double out[2] = {0};
@@ -2465,7 +2586,7 @@ TEST(x86, rewritten_f64_stack_index_lanes_uses_tinygrad_vshufpd) {
   PASS();
 }
 
-TEST(x86, rewritten_f32_stack_unmatched_index_lanes_uses_tinygrad_vinsertps) {
+TEST_BACKEND(x86, rewritten_f32_stack_unmatched_index_lanes_uses_tinygrad_vinsertps) {
   float a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float b[4] = {5.0f, 6.0f, 7.0f, 8.0f};
   float c[4] = {9.0f, 10.0f, 11.0f, 12.0f};
@@ -2483,7 +2604,7 @@ TEST(x86, rewritten_f32_stack_unmatched_index_lanes_uses_tinygrad_vinsertps) {
   PASS();
 }
 
-TEST(x86, rewritten_f32_vector_index_extract_uses_tinygrad_vpsrldq) {
+TEST_BACKEND(x86, rewritten_f32_vector_index_extract_uses_tinygrad_vpsrldq) {
   float f32[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   float f32_out[1] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -2499,7 +2620,7 @@ TEST(x86, rewritten_f32_vector_index_extract_uses_tinygrad_vpsrldq) {
   PASS();
 }
 
-TEST(x86, rewritten_f64_vector_index_extract_uses_tinygrad_vpsrldq) {
+TEST_BACKEND(x86, rewritten_f64_vector_index_extract_uses_tinygrad_vpsrldq) {
   double f64[2] = {5.0, 6.0};
   double f64_out[1] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -2511,7 +2632,7 @@ TEST(x86, rewritten_f64_vector_index_extract_uses_tinygrad_vpsrldq) {
   PASS();
 }
 
-TEST(x86, rewritten_int_vector_index_extract_uses_tinygrad_vpextr_family) {
+TEST_BACKEND(x86, rewritten_int_vector_index_extract_uses_tinygrad_vpextr_family) {
   int8_t i8[16] = {0, 1, 2, -3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
   int8_t i8_out[1] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -2553,7 +2674,7 @@ TEST(x86, rewritten_int_vector_index_extract_uses_tinygrad_vpextr_family) {
   PASS();
 }
 
-TEST(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
+TEST_BACKEND(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
   int8_t i8[4] = {1, -2, 3, -4};
   int8_t i8_out[4] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -2599,7 +2720,7 @@ TEST(x86, rewritten_int_stack_scalar_lanes_uses_tinygrad_vpins_family) {
   PASS();
 }
 
-TEST(x86, direct_f32_unary_div_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_f32_unary_div_matches_tinygrad_probe_class) {
   enum { N = 8 };
   float f[N] = {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f, 49.0f, 64.0f};
   float g[N] = {2.0f, -3.0f, 4.0f, -5.0f, 6.0f, -7.0f, 8.0f, -9.0f};
@@ -2617,7 +2738,7 @@ TEST(x86, direct_f32_unary_div_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_f64_unary_div_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_f64_unary_div_matches_tinygrad_probe_class) {
   enum { N = 4 };
   double d[N] = {1.5, 4.0, 9.0, 16.0};
   double e[N] = {0.5, -2.0, 3.0, -4.0};
@@ -2634,7 +2755,7 @@ TEST(x86, direct_f64_unary_div_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_i64_mix_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_i64_mix_matches_tinygrad_probe_class) {
   enum { N = 4 };
   int64_t a[N] = {1, -2, 3, -4};
   int64_t b[N] = {8, 7, -6, -5};
@@ -2651,7 +2772,7 @@ TEST(x86, direct_i64_mix_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_i64_where_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_i64_where_matches_tinygrad_probe_class) {
   enum { N = 4 };
   int64_t a[N] = {1, -2, 3, -4};
   int64_t b[N] = {8, 7, -6, -5};
@@ -2668,7 +2789,7 @@ TEST(x86, direct_i64_where_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_u32_where_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_u32_where_matches_tinygrad_probe_class) {
   enum { N = 4 };
   uint32_t a[N] = {1, 2, 3, 4};
   uint32_t b[N] = {4, 3, 2, 1};
@@ -2685,7 +2806,7 @@ TEST(x86, direct_u32_where_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_u64_cdiv_matches_tinygrad_scalar_idiv_path) {
+TEST_BACKEND(x86, direct_u64_cdiv_matches_tinygrad_scalar_idiv_path) {
   enum { N = 4 };
   uint64_t a[N] = {10, 100, 0x123456789abcdef0ULL, 0xfffffffffffffff0ULL};
   uint64_t b[N] = {2, 7, 0x12345, 0x1000};
@@ -2701,7 +2822,7 @@ TEST(x86, direct_u64_cdiv_matches_tinygrad_scalar_idiv_path) {
   PASS();
 }
 
-TEST(x86, rewritten_u64_cdiv_all_ones_matches_tinygrad_unsigned_semantics) {
+TEST_BACKEND(x86, rewritten_u64_cdiv_all_ones_matches_tinygrad_unsigned_semantics) {
   enum { N = 4 };
   uint64_t a[N] = {1, 2, 3, UINT64_MAX - 1};
   uint64_t unused[N] = {0};
@@ -2719,7 +2840,7 @@ TEST(x86, rewritten_u64_cdiv_all_ones_matches_tinygrad_unsigned_semantics) {
   PASS();
 }
 
-TEST(x86, direct_i64_cdiv_matches_tinygrad_scalar_idiv_path) {
+TEST_BACKEND(x86, direct_i64_cdiv_matches_tinygrad_scalar_idiv_path) {
   enum { N = 4 };
   int64_t a[N] = {10, -100, 0x123456789LL, -0x123456789LL};
   int64_t b[N] = {2, 7, -12345, -4096};
@@ -2735,7 +2856,7 @@ TEST(x86, direct_i64_cdiv_matches_tinygrad_scalar_idiv_path) {
   PASS();
 }
 
-TEST(x86, direct_u8_cdiv_matches_tinygrad_movzx_div_path) {
+TEST_BACKEND(x86, direct_u8_cdiv_matches_tinygrad_movzx_div_path) {
   enum { N = 4 };
   uint8_t a[N] = {10, 100, 255, 128};
   uint8_t b[N] = {2, 7, 15, 3};
@@ -2751,7 +2872,7 @@ TEST(x86, direct_u8_cdiv_matches_tinygrad_movzx_div_path) {
   PASS();
 }
 
-TEST(x86, direct_i8_cdiv_matches_tinygrad_movsx_idiv_path) {
+TEST_BACKEND(x86, direct_i8_cdiv_matches_tinygrad_movsx_idiv_path) {
   enum { N = 4 };
   int8_t a[N] = {10, -100, 99, -128};
   int8_t b[N] = {2, 7, -9, -8};
@@ -2767,7 +2888,7 @@ TEST(x86, direct_i8_cdiv_matches_tinygrad_movsx_idiv_path) {
   PASS();
 }
 
-TEST(x86, direct_i8_mul_and_where_match_tinygrad_extra_matcher) {
+TEST_BACKEND(x86, direct_i8_mul_and_where_match_tinygrad_extra_matcher) {
   enum { N = 4 };
   int8_t a[N] = {2, -3, 4, -5};
   int8_t b[N] = {3, 4, -5, -6};
@@ -2792,7 +2913,7 @@ TEST(x86, direct_i8_mul_and_where_match_tinygrad_extra_matcher) {
   PASS();
 }
 
-TEST(x86, direct_f16_alu_and_where_match_tinygrad_extra_matcher) {
+TEST_BACKEND(x86, direct_f16_alu_and_where_match_tinygrad_extra_matcher) {
   enum { N = 4 };
   float vals[N] = {1.0f, -2.0f, 3.0f, -4.0f};
   uint16_t a[N], out_alu[N], out_where[N];
@@ -2819,7 +2940,165 @@ TEST(x86, direct_f16_alu_and_where_match_tinygrad_extra_matcher) {
   PASS();
 }
 
-TEST(x86, direct_unsigned_to_float_casts_match_tinygrad_extra_matcher) {
+TEST_BACKEND(x86, f16_exp2_decomposes_before_extra_matcher_like_tinygrad) {
+  /* Pinned tinygrad uop/decompositions.py:xexp2 accepts float16 and builds the
+   * exponent with int16 before renderer/isa/x86.py promotes each half ALU to
+   * float32. A raw EXP2 must therefore never reach X86 graph isel. */
+  enum { N = 13 };
+  const float values[N] = {
+      -INFINITY, -23.0f, -22.5f, -22.0f, -21.5f, 0.0f, 15.0f,
+      15.5f, 16.0f, 22.5f, 23.0f, INFINITY, NAN,
+  };
+  const float expected[N] = {
+      0.0f, 0.0f, 0.0f, 2.384185791015625e-7f, 3.5762786865234375e-7f,
+      1.0f, 32768.0f, 46336.0f, INFINITY, INFINITY, INFINITY, INFINITY, NAN,
+  };
+  uint16_t input[N], output[N];
+  for (int i = 0; i < N; i++) {
+    input[i] = x86_f32_to_f16_bits(values[i]);
+    output[i] = 0;
+  }
+  input[N - 1] = 0x7e00u;
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *param =
+      poly_uop0(ctx, POLY_OP_PARAM, POLY_FLOAT16, poly_arg_int(0));
+  PolyUOp *raw =
+      poly_uop1(ctx, POLY_OP_EXP2, POLY_FLOAT16, param, poly_arg_none());
+  PolyUOp *transcendental =
+      poly_graph_rewrite(ctx, raw, poly_pm_transcendental_pass());
+  ASSERT_NOT_NULL(transcendental);
+  int n_transcendental = 0;
+  ASSERT_TRUE(
+      x86_topology_signature(ctx, transcendental, &n_transcendental) ==
+      UINT64_C(0x293cde36cf9280e7)
+  );
+  ASSERT_INT_EQ(n_transcendental, 62);
+  int n_transcendental_topo = 0;
+  int floor_div_short = 0, early_cdiv = 0, early_cmod = 0;
+  PolyUOp **transcendental_topo =
+      poly_toposort_alloc(ctx, transcendental, &n_transcendental_topo);
+  ASSERT_NOT_NULL(transcendental_topo);
+  for (int i = 0; i < n_transcendental_topo; i++) {
+    PolyUOp *u = transcendental_topo[i];
+    if (u->op == POLY_OP_FLOORDIV && poly_dtype_eq(u->dtype, POLY_INT16))
+      floor_div_short++;
+    if (u->op == POLY_OP_CDIV) early_cdiv++;
+    if (u->op == POLY_OP_CMOD) early_cmod++;
+  }
+  ASSERT_INT_EQ(floor_div_short, 1);
+  ASSERT_INT_EQ(early_cdiv, 0);
+  ASSERT_INT_EQ(early_cmod, 0);
+  poly_toposort_free(transcendental_topo);
+
+  PolyDType pf16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *sink = x86_make_one_range(ctx, pf16, POLY_FLOAT16, N, x86_expr_f16_exp2);
+  PolyUOp *rewritten = poly_rewrite_x86(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_rewritten = 0;
+  ASSERT_TRUE(
+      x86_topology_signature(ctx, rewritten, &n_rewritten) ==
+      UINT64_C(0x03985a50393c78d6)
+  );
+  ASSERT_INT_EQ(n_rewritten, 133);
+
+  int n_topo = 0, raw_exp2 = 0, half_from_short_bitcasts = 0, half_alu = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (u->op == POLY_OP_EXP2) raw_exp2++;
+    if (poly_opset_has(POLY_GROUP_ALU, u->op) &&
+        poly_dtype_eq(poly_dtype_scalar(u->dtype), POLY_FLOAT16))
+      half_alu++;
+    if (u->op == POLY_OP_BITCAST && poly_dtype_eq(u->dtype, POLY_FLOAT16) &&
+        u->n_src == 1 && poly_dtype_eq(u->src[0]->dtype, POLY_INT16))
+      half_from_short_bitcasts++;
+  }
+  ASSERT_INT_EQ(raw_exp2, 0);
+  ASSERT_INT_EQ(half_from_short_bitcasts, 2);
+  ASSERT_INT_EQ(half_alu, 0);
+  poly_toposort_free(topo);
+
+  void *args[3] = {input, input, output};
+  ASSERT_INT_EQ(x86_run_rewritten_direct(ctx, rewritten, args, 3), 0);
+  for (int i = 0; i < N; i++) {
+    float got = x86_f16_bits_to_f32(output[i]);
+    if (isnan(expected[i]))
+      ASSERT_TRUE(isnan(got));
+    else if (isinf(expected[i]))
+      ASSERT_TRUE(isinf(got) && !signbit(got));
+    else
+      ASSERT_FLOAT_EQ(got, expected[i], 0.0f);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(x86, rewrite_emulates_unsupported_bf16_before_instruction_selection) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType pbf16 = poly_dtype_ptr(POLY_BFLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *sink = x86_make_one_range(ctx, pbf16, POLY_BFLOAT16, 4, x86_expr_bf16_add);
+  PolyUOp *rewritten = poly_rewrite_x86(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+
+  int n_topo = 0, f32_adds = 0, bitwise_ops = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    PolyDType scalar = poly_dtype_scalar(u->dtype);
+    if (poly_opset_has(POLY_GROUP_ALU, u->op))
+      ASSERT_FALSE(poly_dtype_eq(scalar, POLY_BFLOAT16));
+    if (u->op == POLY_OP_CAST) {
+      ASSERT_FALSE(poly_dtype_eq(scalar, POLY_BFLOAT16));
+      if (u->n_src > 0)
+        ASSERT_FALSE(poly_dtype_eq(poly_dtype_scalar(u->src[0]->dtype), POLY_BFLOAT16));
+    }
+    if (u->op == POLY_OP_ADD && poly_dtype_eq(scalar, POLY_FLOAT32)) f32_adds++;
+    if (u->op == POLY_OP_BITCAST || u->op == POLY_OP_SHL || u->op == POLY_OP_SHR) bitwise_ops++;
+  }
+  ASSERT_TRUE(f32_adds > 0);
+  ASSERT_TRUE(bitwise_ops > 0);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(x86, scalar_f16_spills_use_typed_16bit_memory_ops) {
+  /* tinygrad x86.py:881-889 sends spills through typed STORE/LOAD isel;
+   * scalar F16 therefore uses VPEXTRW/VPINSRW with a two-byte slot. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType pf16 = poly_dtype_ptr(POLY_FLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyDType pbf16 = poly_dtype_ptr(POLY_BFLOAT16, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *f16_in = poly_uop0(ctx, POLY_OP_PARAM, pf16, poly_arg_int(0));
+  PolyUOp *bf16_out = poly_uop0(ctx, POLY_OP_PARAM, pbf16, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(5));
+  PolyUOp *range = poly_uop1(ctx, POLY_OP_RANGE, POLY_INT32, bound, poly_arg_int(0));
+  PolyUOp *f16_index = poly_uop2(ctx, POLY_OP_INDEX, pf16, f16_in, range, poly_arg_none());
+  PolyUOp *bf16_index = poly_uop2(ctx, POLY_OP_INDEX, pbf16, bf16_out, range, poly_arg_none());
+  PolyUOp *f16_value = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT16, f16_index, poly_arg_none());
+  PolyUOp *to_bf16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, f16_value, poly_arg_none());
+  PolyUOp *store = poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, bf16_index, to_bf16, poly_arg_none());
+  PolyUOp *end_srcs[2] = {store, range};
+  PolyUOp *end = poly_uop(ctx, POLY_OP_END, POLY_VOID, end_srcs, 2, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, end, poly_arg_none());
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_x86_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  ASSERT_TRUE(tx86_count_stack_memory_op(lin, n_lin, TX86_OP_VPEXTRW, 0, 2) > 0);
+  ASSERT_TRUE(tx86_count_stack_memory_op(lin, n_lin, TX86_OP_VPINSRW, 1, 2) > 0);
+  ASSERT_INT_EQ(tx86_count_stack_memory_op(lin, n_lin, TX86_OP_VMOVSSm, 0, 2), 0);
+  ASSERT_INT_EQ(tx86_count_stack_memory_op(lin, n_lin, TX86_OP_VMOVSS, 0, 2), 0);
+
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST_BACKEND(x86, direct_unsigned_to_float_casts_match_tinygrad_extra_matcher) {
   enum { N = 4 };
   uint32_t u32[N] = {1u, 0x00020003u, 0x7fffffffu, 0xfedcba98u};
   uint64_t u64[N] = {1, 2, 3, 4};
@@ -2847,7 +3126,7 @@ TEST(x86, direct_unsigned_to_float_casts_match_tinygrad_extra_matcher) {
   PASS();
 }
 
-TEST(x86, direct_bitcast_u32_f32_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_bitcast_u32_f32_matches_tinygrad_probe_class) {
   enum { N = 4 };
   uint32_t bits[N] = {0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u};
   float out[N] = {0};
@@ -2865,7 +3144,7 @@ TEST(x86, direct_bitcast_u32_f32_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, direct_bitcast_f32_i32_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, direct_bitcast_f32_i32_matches_tinygrad_probe_class) {
   enum { N = 4 };
   float vals[N] = {1.0f, -2.0f, 3.5f, -4.25f};
   int32_t out[N] = {0};
@@ -2883,7 +3162,7 @@ TEST(x86, direct_bitcast_f32_i32_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, to_program_attaches_linear_source_hex_and_binary_children) {
+TEST_BACKEND(x86, to_program_attaches_linear_source_hex_and_binary_children) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
   poly_program_source_render_count_reset();
@@ -2933,7 +3212,7 @@ TEST(x86, to_program_attaches_linear_source_hex_and_binary_children) {
   PASS();
 }
 
-TEST(x86, to_program_allows_f16_after_x86_extra_legalization) {
+TEST_BACKEND(x86, to_program_allows_f16_after_x86_extra_legalization) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *a = poly_buffer(ctx, POLY_FLOAT16, 4);
   PolyUOp *out = poly_buffer(ctx, POLY_FLOAT16, 4);
@@ -2955,7 +3234,7 @@ TEST(x86, to_program_allows_f16_after_x86_extra_legalization) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_vecadd_uses_x86_device) {
+TEST_BACKEND(x86, schedule_runtime_vecadd_uses_x86_device) {
   enum { N = 8 };
   float a_data[N], b_data[N], out[N];
   for (int i = 0; i < N; i++) {
@@ -2981,7 +3260,7 @@ TEST(x86, schedule_runtime_vecadd_uses_x86_device) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_reduce_sum_axis1_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, schedule_runtime_reduce_sum_axis1_matches_tinygrad_probe_class) {
   enum { N = 16, OUT = 4 };
   float a_data[N], out[OUT];
   for (int i = 0; i < N; i++)
@@ -3007,7 +3286,7 @@ TEST(x86, schedule_runtime_reduce_sum_axis1_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_dot_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, schedule_runtime_dot_matches_tinygrad_probe_class) {
   enum { XN = 8, WN = 8, OUT = 4 };
   float x_data[XN] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   float w_data[WN] = {0.5f, 1.0f, 1.5f, 2.0f, 2.0f, 1.5f, 1.0f, 0.5f};
@@ -3036,7 +3315,7 @@ TEST(x86, schedule_runtime_dot_matches_tinygrad_probe_class) {
   PASS();
 }
 
-TEST(x86, threaded_vecadd_program_core_id_shards_match_tinygrad_cpu_x86) {
+TEST_BACKEND(x86, threaded_vecadd_program_core_id_shards_match_tinygrad_cpu_x86) {
   enum { N = 262144 };
   float *a = malloc((size_t)N * sizeof(float));
   float *b = malloc((size_t)N * sizeof(float));
@@ -3093,7 +3372,7 @@ TEST(x86, threaded_vecadd_program_core_id_shards_match_tinygrad_cpu_x86) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_cross_entropy_dense_axis1_keeps_fifth_arg_live) {
+TEST_BACKEND(x86, schedule_runtime_cross_entropy_dense_axis1_keeps_fifth_arg_live) {
   PolyCtx *ctx = poly_ctx_new();
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_X86);
 
@@ -3123,7 +3402,7 @@ TEST(x86, schedule_runtime_cross_entropy_dense_axis1_keeps_fifth_arg_live) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_computed_log2_keeps_loop_live_ins_like_tinygrad) {
+TEST_BACKEND(x86, schedule_runtime_computed_log2_keeps_loop_live_ins_like_tinygrad) {
   enum { N = 16 };
   float out[N] = {0};
   PolyCtx *ctx = poly_ctx_new();
@@ -3150,7 +3429,7 @@ TEST(x86, schedule_runtime_computed_log2_keeps_loop_live_ins_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_pow_const_exponents_match_tinygrad) {
+TEST_BACKEND(x86, schedule_runtime_pow_const_exponents_match_tinygrad) {
   enum { N = 4 };
   float in[N] = {1.0f, 2.0f, 3.0f, 4.0f};
   float out_i[N] = {0}, out_h[N] = {0}, out_n[N] = {0};
@@ -3189,7 +3468,7 @@ TEST(x86, schedule_runtime_pow_const_exponents_match_tinygrad) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_pow_dynamic_exponent_uses_xpow_like_tinygrad) {
+TEST_BACKEND(x86, schedule_runtime_pow_dynamic_exponent_uses_xpow_like_tinygrad) {
   enum { N = 4 };
   float base[N] = {2.0f, 3.0f, 4.0f, 5.0f};
   float expv[N] = {3.0f, 2.0f, 0.5f, 1.0f};
@@ -3215,7 +3494,7 @@ TEST(x86, schedule_runtime_pow_dynamic_exponent_uses_xpow_like_tinygrad) {
   PASS();
 }
 
-TEST(x86, schedule_runtime_integer_pow_is_exact_backend_superset) {
+TEST_BACKEND(x86, schedule_runtime_integer_pow_is_exact_backend_superset) {
   enum { N = 10 };
   int32_t base[N] = {2, 3, -2, -1, 0, 1, 11, 0, -1, 2};
   int32_t expv[N] = {3, 2, 3, -3, -1, -2, 7, 0, INT32_MIN, INT32_MIN};
@@ -3249,7 +3528,7 @@ static void x86_make_data(float *data, int n, uint32_t seed, float scale) {
   }
 }
 
-TEST(x86, schedule_runtime_qwen_ffn_fused_large_matches_tinygrad_probe_class) {
+TEST_BACKEND(x86, schedule_runtime_qwen_ffn_fused_large_matches_tinygrad_probe_class) {
   enum { D = 256, H = 1536 };
   setenv("CPU_COUNT", "1", 1);
   setenv("THREADS", "0", 1);

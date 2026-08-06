@@ -6,6 +6,7 @@
 
 #define _GNU_SOURCE
 #include "tensor.h"
+#include "bigint.h"
 #include "ctx.h"
 #include "device.h"
 #include "engine/schedule.h"
@@ -51,8 +52,7 @@ PolyUOp *poly_buffer_var(
    * src[2..] = fixed inner dimension CONSTs. */
   int n_src = 2 + n_inner;
   PolyUOp *src[POLY_MAX_DIMS + 2];
-  src[0] =
-      poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
+  src[0] = poly_uop0(ctx, POLY_OP_UNIQUE, POLY_VOID, poly_arg_int(poly_ctx_next_unique_id(ctx)));
   src[1] = batch_var;
   for (int i = 0; i < n_inner; i++) {
     if (inner_dims[i] < 0) return NULL;
@@ -92,6 +92,14 @@ typedef struct {
 
 static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
   return tensor ? (tensor->uop_physical ? tensor->uop_physical : tensor->uop_logical) : NULL;
+}
+
+static bool tensor_roots_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
+  /* Polygrad-specific arena boundary: never intern a destination DAG whose
+   * sources point into another context. Path B requires both exact roots. */
+  return ctx && tensor && tensor->uop_logical && tensor->uop_physical &&
+         poly_ctx_owns_ptr(ctx, tensor->uop_logical) &&
+         poly_ctx_owns_ptr(ctx, tensor->uop_physical);
 }
 
 static PolyTensorList *tensor_list_for_uop(PolyCtx *ctx, PolyUOp *uop) {
@@ -258,8 +266,7 @@ static int tensor_retarget_logical_uops(
     /* View assign is a semantic effect rewrite, not a runtime materialization
      * retarget. Keep it in logical IR as AFTER/STORE, matching tinygrad's
      * Tensor.assign graph shape. */
-    if (poly_tensor_replace_roots(ctx, t, new_current, NULL, t->role, t->device) != 0)
-      return -1;
+    if (poly_tensor_replace_roots(ctx, t, new_current, NULL, t->role, t->device) != 0) return -1;
   }
   return 0;
 }
@@ -275,8 +282,7 @@ static int tensor_map_scope_node(PolyUOp *logical, PolyMap *exact, PolyMap *plac
   if (poly_map_get(exact, poly_ptr_hash(logical), logical, poly_ptr_eq))
     scope |= TENSOR_MAP_SCOPE_EXACT;
   if (placement_memo) {
-    PolyUOp *placed =
-        poly_map_get(placement_memo, poly_ptr_hash(logical), logical, poly_ptr_eq);
+    PolyUOp *placed = poly_map_get(placement_memo, poly_ptr_hash(logical), logical, poly_ptr_eq);
     if (placed && poly_map_get(exact, poly_ptr_hash(placed), placed, poly_ptr_eq))
       scope |= TENSOR_MAP_SCOPE_PLACED;
   }
@@ -380,10 +386,10 @@ int poly_tensor_apply_realize_map(
   int rc = -1;
   PolyMap *exact = NULL;
   PolyMap *scope_maps[POLY_DEVICE_DISK + 1] = {0};
-  if (!updates || !snapshot_tensors || !snapshot_roots || !snapshot_devices ||
-      !snapshot_indices || !ordinary_results || !project_tensors || !project_slots ||
-      !project_roots || !project_results || !rewrite_roots || !rewrite_results ||
-      !rewrite_slots || !rewrite_aux || !rewrite_kind)
+  if (!updates || !snapshot_tensors || !snapshot_roots || !snapshot_devices || !snapshot_indices ||
+      !ordinary_results || !project_tensors || !project_slots || !project_roots ||
+      !project_results || !rewrite_roots || !rewrite_results || !rewrite_slots || !rewrite_aux ||
+      !rewrite_kind)
     goto cleanup;
 
   int n_snapshot = 0;
@@ -437,8 +443,7 @@ int poly_tensor_apply_realize_map(
      * preserved logical root. Admit only that existing per-device exact
      * logical->physical proof; ordinary substitution scope remains current. */
     int logical_placement_scope =
-        tensor_map_scope_node(tensor->uop_logical, exact, device_memo) &
-        TENSOR_MAP_SCOPE_PLACED;
+        tensor_map_scope_node(tensor->uop_logical, exact, device_memo) & TENSOR_MAP_SCOPE_PLACED;
     root_scope |= logical_placement_scope;
     scope |= logical_placement_scope;
     ordinary_results[slot] = current;
@@ -454,10 +459,9 @@ int poly_tensor_apply_realize_map(
      * memo correspondence when only that physical root is a callify map key. */
     bool exact_root_placement =
         (root_scope & TENSOR_MAP_SCOPE_PLACED) && !(root_scope & TENSOR_MAP_SCOPE_EXACT);
-    bool needs_placed_map =
-        exact_root_placement || !(scope & TENSOR_MAP_SCOPE_EXACT) ||
-        (current->op == POLY_OP_AFTER && current->n_src >= 1 &&
-         !poly_uop_has_buffer_identity(current->src[0]));
+    bool needs_placed_map = exact_root_placement || !(scope & TENSOR_MAP_SCOPE_EXACT) ||
+                            (current->op == POLY_OP_AFTER && current->n_src >= 1 &&
+                             !poly_uop_has_buffer_identity(current->src[0]));
     /* tinygrad stores placement COPYs directly in Tensor.uop. Polygrad keeps
      * portable logical roots, so retry only roots with map-derived placement
      * evidence. PLACE role by itself is intentionally insufficient: unrelated
@@ -468,10 +472,9 @@ int poly_tensor_apply_realize_map(
     }
   }
 
-  if (n_project > 0 &&
-      poly_tensor_physicalize_many(
-          ctx, project_tensors, n_project, project_roots, placement_memo
-      ) != 0)
+  if (n_project > 0 && poly_tensor_physicalize_many(
+                           ctx, project_tensors, n_project, project_roots, placement_memo
+                       ) != 0)
     goto cleanup;
 
   for (int projection = 0; projection < n_project; projection++) {
@@ -516,15 +519,13 @@ int poly_tensor_apply_realize_map(
     PolyDevice resolved_device = snapshot_devices[slot];
     PolyMap *device_memo = placement_memo ? placement_memo[resolved_device] : NULL;
     int root_scope = tensor_map_scope_node(current, exact, device_memo);
-    root_scope |=
-        tensor_map_scope_node(snapshot_tensors[slot]->uop_logical, exact, device_memo) &
-        TENSOR_MAP_SCOPE_PLACED;
+    root_scope |= tensor_map_scope_node(snapshot_tensors[slot]->uop_logical, exact, device_memo) &
+                  TENSOR_MAP_SCOPE_PLACED;
     bool exact_root_placement =
         (root_scope & TENSOR_MAP_SCOPE_PLACED) && !(root_scope & TENSOR_MAP_SCOPE_EXACT);
-    bool needs_placed_map =
-        exact_root_placement || ordinary_results[slot] == current ||
-        (current->op == POLY_OP_AFTER && current->n_src >= 1 &&
-         !poly_uop_has_buffer_identity(current->src[0]));
+    bool needs_placed_map = exact_root_placement || ordinary_results[slot] == current ||
+                            (current->op == POLY_OP_AFTER && current->n_src >= 1 &&
+                             !poly_uop_has_buffer_identity(current->src[0]));
     if (needs_placed_map && placed_realized != placed && placed_realized != current)
       updates[snapshot_indices[slot]] = placed_realized;
   }
@@ -572,8 +573,7 @@ int poly_tensor_apply_realize_map(
   rc = 0;
 
 cleanup:
-  for (int resolved_device = POLY_DEVICE_AUTO + 1;
-       resolved_device <= POLY_DEVICE_DISK;
+  for (int resolved_device = POLY_DEVICE_AUTO + 1; resolved_device <= POLY_DEVICE_DISK;
        resolved_device++)
     poly_map_destroy(scope_maps[resolved_device]);
   poly_map_destroy(exact);
@@ -770,11 +770,10 @@ PolyTensor *poly_tensor_from_host(
   PolyUOp *logical =
       unique ? poly_uop1(ctx, POLY_OP_BUFFER, scalar_dtype, unique, poly_arg_int(numel)) : NULL;
   PolyDevice source_device = POLY_DEVICE_AUTO;
-  PolyUOp *physical = unique
-                          ? poly_buffer_from_host_unique(
-                                ctx, unique, scalar_dtype, numel, ptr, nbytes, &source_device
-                            )
-                          : NULL;
+  PolyUOp *physical = unique ? poly_buffer_from_host_unique(
+                                   ctx, unique, scalar_dtype, numel, ptr, nbytes, &source_device
+                               )
+                             : NULL;
   if (!logical || !physical) return NULL;
 
   if (ndim != 1 || dims[0] != numel) {
@@ -782,9 +781,8 @@ PolyTensor *poly_tensor_from_host(
     physical = poly_reshape(ctx, physical, (int64_t *)dims, ndim);
     if (!logical || !physical) return NULL;
   }
-  PolyTensor *tensor = poly_tensor_create_with_roots(
-      ctx, logical, physical, POLY_TENSOR_VALUE, source_device
-  );
+  PolyTensor *tensor =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, source_device);
   if (tensor) tensor->provenance = POLY_TENSOR_PROVENANCE_CONST_INIT;
   return tensor;
 }
@@ -803,9 +801,7 @@ int poly_tensor_replace_roots(
 
   bool reindex = old_current != new_current;
   if (reindex && !tensor_index_add(ctx, new_current, tensor)) return -1;
-  tensor_replace_roots_commit_reserved(
-      ctx, tensor, uop_logical, uop_physical, role, device
-  );
+  tensor_replace_roots_commit_reserved(ctx, tensor, uop_logical, uop_physical, role, device);
   return 0;
 }
 
@@ -855,6 +851,33 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
     requires_grad_set |= input->requires_grad_set;
   }
 
+  /*
+   * Pinned tinygrad mixin/__init__.py:439-449 promotes broadcast operands
+   * before ALU construction. Keep that once in the C Tensor bridge so Python,
+   * JS, WASM, and direct C callers construct identical logical and physical
+   * CAST topology.
+   */
+  int promote_from = 0;
+  if (op == POLY_OP_WHERE) {
+    if (!poly_dtype_is_bool(logical_src[0]->dtype)) {
+      logical_src[0] = poly_cast(ctx, logical_src[0], POLY_BOOL);
+      physical_src[0] = poly_cast(ctx, physical_src[0], POLY_BOOL);
+      if (!logical_src[0] || !physical_src[0]) return NULL;
+    }
+    promote_from = 1;
+  }
+  if (n - promote_from >= 2) {
+    PolyDType common = logical_src[promote_from]->dtype;
+    for (int i = promote_from + 1; i < n; i++)
+      if (!poly_dtype_least_upper(common, logical_src[i]->dtype, &common)) return NULL;
+    for (int i = promote_from; i < n; i++) {
+      if (poly_dtype_eq(poly_dtype_scalar(logical_src[i]->dtype), common)) continue;
+      logical_src[i] = poly_cast(ctx, logical_src[i], common);
+      physical_src[i] = poly_cast(ctx, physical_src[i], common);
+      if (!logical_src[i] || !physical_src[i]) return NULL;
+    }
+  }
+
   PolyUOp *logical = NULL;
   PolyUOp *physical = NULL;
   switch (n) {
@@ -863,8 +886,13 @@ static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int
     physical = poly_alu1(ctx, op, physical_src[0]);
     break;
   case 2:
-    logical = poly_alu2(ctx, op, logical_src[0], logical_src[1]);
-    physical = poly_alu2(ctx, op, physical_src[0], physical_src[1]);
+    /* Pinned Tensor.sub is composed ADD/MUL, not a raw SUB UOp
+     * (mixin/elementwise.py:90-109). Keep raw SUB available for imported IR,
+     * but make the Tensor constructor use the high-level spelling. */
+    logical = op == POLY_OP_SUB ? poly_sub(ctx, logical_src[0], logical_src[1])
+                                : poly_alu2(ctx, op, logical_src[0], logical_src[1]);
+    physical = op == POLY_OP_SUB ? poly_sub(ctx, physical_src[0], physical_src[1])
+                                 : poly_alu2(ctx, op, physical_src[0], physical_src[1]);
     break;
   case 3:
     logical = poly_alu3(ctx, op, logical_src[0], logical_src[1], logical_src[2]);
@@ -908,12 +936,7 @@ PolyTensor *poly_tensor_alu3(
  * its retained logical twin, but the executable operation is built directly
  * from the exact current physical occurrence and stored even when CSE makes
  * both results pointer-identical. */
-static PolyTensor *tensor_dtype_result(
-    PolyCtx *ctx,
-    PolyTensor *src,
-    int dtype_id,
-    bool bitcast
-) {
+static PolyTensor *tensor_dtype_result(PolyCtx *ctx, PolyTensor *src, int dtype_id, bool bitcast) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
   PolyUOp *logical = bitcast ? poly_bitcast_by_id(ctx, src->uop_logical, dtype_id)
@@ -942,7 +965,7 @@ PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_i
  * directly to the current Tensor.uop. Path B applies the same raw movement
  * independently to the retained logical root and exact physical occurrence;
  * neither root is derived by substituting logical identities. */
-static PolyTensor *tensor_movement_result(
+static PolyTensor *tensor_unary_result(
     PolyCtx *ctx,
     PolyTensor *src,
     PolyUOp *logical,
@@ -961,7 +984,7 @@ static PolyTensor *tensor_movement_result(
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_movement_result(
+  return tensor_unary_result(
       ctx, src, poly_reshape(ctx, src->uop_logical, dims, ndim),
       poly_reshape(ctx, current, dims, ndim)
   );
@@ -970,7 +993,7 @@ PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, in
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_movement_result(
+  return tensor_unary_result(
       ctx, src, poly_expand(ctx, src->uop_logical, dims, ndim),
       poly_expand(ctx, current, dims, ndim)
   );
@@ -979,7 +1002,7 @@ PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int
 PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_movement_result(
+  return tensor_unary_result(
       ctx, src, poly_permute(ctx, src->uop_logical, perm, ndim),
       poly_permute(ctx, current, perm, ndim)
   );
@@ -988,7 +1011,7 @@ PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, in
 PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_movement_result(
+  return tensor_unary_result(
       ctx, src, poly_shrink(ctx, src->uop_logical, pairs, ndim),
       poly_shrink(ctx, current, pairs, ndim)
   );
@@ -997,7 +1020,7 @@ PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2
 PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_movement_result(
+  return tensor_unary_result(
       ctx, src, poly_flip(ctx, src->uop_logical, axes, n_axes),
       poly_flip(ctx, current, axes, n_axes)
   );
@@ -1012,7 +1035,7 @@ PolyTensor *poly_tensor_pad_value(
 ) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
-  return tensor_movement_result(
+  return tensor_unary_result(
       ctx, src, poly_pad_value(ctx, src->uop_logical, pairs, ndim, value),
       poly_pad_value(ctx, current, pairs, ndim, value)
   );
@@ -1027,11 +1050,12 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   if (tensor->uop_physical && poly_uop_device(tensor->uop_physical) == POLY_DEVICE_AUTO)
     return tensor;
   /* Pinned tinygrad Tensor.to (tensor.py:327-335) stores
-   * self.uop.copy_to_device(device) immediately. Preserve Polygrad's portable
-   * logical twin, but make the executable occurrence the same eager COPY. */
-  PolyUOp *source_physical = poly_tensor_physicalize(ctx, tensor);
-  PolyUOp *target_device =
-      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
+   * self.uop.copy_to_device(device) immediately. Path B therefore consumes
+   * the exact stored physical occurrence directly. Keep physicalization only
+   * as migration fallback for raw/unmigrated Tensors without that root. */
+  PolyUOp *source_physical =
+      tensor->uop_physical ? tensor->uop_physical : poly_tensor_physicalize(ctx, tensor);
+  PolyUOp *target_device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)device));
   PolyUOp *copy_src[2] = {source_physical, target_device};
   PolyUOp *physical =
       (source_physical && target_device)
@@ -1122,7 +1146,12 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
   PolyUOp *source_logical = source->uop_logical;
   if (source_logical && source_logical->op == POLY_OP_AFTER && source->uop_physical)
     source_logical = source->uop_physical;
-  PolyUOp *source_physical = poly_tensor_physicalize(ctx, source);
+  /* Pinned UOp.clone (uop/ops.py:765-769) decides from self.device and
+   * stores a device-free source directly. Path B's stored current root is
+   * that self UOp; wrapper preferred-device metadata must not manufacture a
+   * COPY. Preserve the Path-A fallback only for a missing physical root. */
+  PolyUOp *source_physical =
+      source->uop_physical ? source->uop_physical : poly_tensor_physicalize(ctx, source);
   if (!target_logical || !target_physical || !source_logical || !source_physical) return NULL;
   if (!poly_dtype_eq(
           poly_dtype_scalar(target_logical->dtype), poly_dtype_scalar(source_logical->dtype)
@@ -1137,7 +1166,8 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
           : NULL;
 
   PolyUOp *placed_source = source_physical;
-  if (source->device != POLY_DEVICE_AUTO && source->device != target->device) {
+  PolyDevice source_device = poly_uop_device(source_physical);
+  if (source_device != POLY_DEVICE_AUTO && source_device != target->device) {
     PolyUOp *device =
         poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int((int64_t)target->device));
     PolyUOp *copy_src[2] = {source_physical, device};
@@ -1269,8 +1299,21 @@ static bool poly_dtype_bound_const(PolyCtx *ctx, PolyDType dt, bool use_min, Pol
   }
   if (!poly_dtype_is_int(dt)) return false;
   if (poly_dtype_is_unsigned(dt)) {
-    *out = poly_const_exact_int(ctx, dt, use_min ? 0 : -1);
-    return *out != NULL;
+    if (use_min) {
+      *out = poly_const_exact_int(ctx, dt, 0);
+      return *out != NULL;
+    }
+    /* Pinned DType.max is the positive Python integer 2**bits-1
+     * (dtype.py:84-100). Preserve that exact UOp arg; fixed-width renderers
+     * apply the dtype bits only at their backend boundary. */
+    PolyInt neg_one = {0}, maximum = {0};
+    bool ok = poly_int_from_i64(&neg_one, -1) &&
+              poly_int_truncate(&maximum, &neg_one, dt.bitsize, true);
+    if (ok)
+      *out = poly_uop0(ctx, POLY_OP_CONST, dt, poly_int_as_arg(&maximum));
+    poly_int_free(&maximum);
+    poly_int_free(&neg_one);
+    return ok && *out != NULL;
   }
 
   int64_t v = 0;
@@ -1637,6 +1680,97 @@ bool poly_broadcast_pair(
   return *a != NULL && *b != NULL;
 }
 
+/* Pinned true division broadcasts/promotes the pair, applies reciprocal to
+ * the divisor, then multiplies (mixin/elementwise.py:219-234, :440-448).
+ * Build that exact graph independently from ordered retained/current roots;
+ * tensor-stage FDIV remains available only as raw/imported IR vocabulary. */
+PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor) {
+  if (!ctx || !dividend || !divisor || !dividend->uop_logical || !divisor->uop_logical) return NULL;
+  PolyUOp *logical_a = dividend->uop_logical;
+  PolyUOp *logical_b = divisor->uop_logical;
+  PolyUOp *physical_a = tensor_current_uop(dividend);
+  PolyUOp *physical_b = tensor_current_uop(divisor);
+  if (!physical_a || !physical_b) return NULL;
+
+  int64_t logical_shape[POLY_MAX_DIMS], physical_shape[POLY_MAX_DIMS];
+  int logical_ndim = 0, physical_ndim = 0;
+  if (!poly_broadcast_pair(ctx, &logical_a, &logical_b, logical_shape, &logical_ndim) ||
+      !poly_broadcast_pair(ctx, &physical_a, &physical_b, physical_shape, &physical_ndim))
+    return NULL;
+
+  PolyDType common;
+  if (!poly_dtype_least_upper(logical_a->dtype, logical_b->dtype, &common)) return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(logical_a->dtype), common)) {
+    logical_a = poly_cast(ctx, logical_a, common);
+    physical_a = poly_cast(ctx, physical_a, common);
+  }
+  if (!poly_dtype_eq(poly_dtype_scalar(logical_b->dtype), common)) {
+    logical_b = poly_cast(ctx, logical_b, common);
+    physical_b = poly_cast(ctx, physical_b, common);
+  }
+  if (!logical_a || !logical_b || !physical_a || !physical_b) return NULL;
+
+  if (!poly_dtype_is_float(common)) {
+    logical_a = poly_cast(ctx, logical_a, POLY_FLOAT32);
+    logical_b = poly_cast(ctx, logical_b, POLY_FLOAT32);
+    physical_a = poly_cast(ctx, physical_a, POLY_FLOAT32);
+    physical_b = poly_cast(ctx, physical_b, POLY_FLOAT32);
+  }
+  if (!logical_a || !logical_b || !physical_a || !physical_b) return NULL;
+
+  PolyUOp *logical =
+      poly_alu2(ctx, POLY_OP_MUL, logical_a, poly_alu1(ctx, POLY_OP_RECIPROCAL, logical_b));
+  PolyUOp *physical =
+      poly_alu2(ctx, POLY_OP_MUL, physical_a, poly_alu1(ctx, POLY_OP_RECIPROCAL, physical_b));
+  if (!logical || !physical) return NULL;
+
+  PolyDevice device = dividend->device;
+  if (device == POLY_DEVICE_AUTO) device = divisor->device;
+  if (divisor->device != POLY_DEVICE_AUTO && device != divisor->device) return NULL;
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  if (!out) return NULL;
+  out->requires_grad = dividend->requires_grad || divisor->requires_grad;
+  out->requires_grad_set = dividend->requires_grad_set || divisor->requires_grad_set;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
+}
+
+/* Pinned tinygrad _broadcast_to (mixin/movement.py:116-128) reshapes a scalar
+ * to rank-many ones, then expands it using the exact destination shape UOps.
+ * Keep symbolic dimensions as UOps instead of freezing their max-shape values. */
+static PolyUOp *broadcast_scalar_like(PolyCtx *ctx, PolyUOp *scalar, PolyUOp *like) {
+  if (!ctx || !scalar || !like) return NULL;
+  int ndim = poly_uop_ndim(ctx, like);
+  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
+  if (ndim == 0) return scalar;
+
+  int64_t ones[POLY_MAX_DIMS];
+  for (int i = 0; i < ndim; i++)
+    ones[i] = 1;
+  PolyUOp *shaped = poly_reshape(ctx, scalar, ones, ndim);
+  if (!shaped) return NULL;
+
+  PolyUOp *dims[POLY_MAX_DIMS];
+  bool all_one = true;
+  for (int i = 0; i < ndim; i++) {
+    int64_t value = 0;
+    PolyUOp *dim = poly_uop_shape_dim(ctx, like, i);
+    if (!dim) return NULL;
+    if (poly_uop_const_i64(dim, &value) == 0) {
+      /* Pinned shape_to_shape_arg turns Python integer dimensions back into
+       * weakint CONST lanes (uop/ops.py:85-88). This also lets CSE reuse an
+       * existing movement shape STACK instead of introducing long lanes. */
+      dims[i] = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(value));
+      if (value != 1) all_one = false;
+    } else {
+      dims[i] = dim;
+      all_one = false;
+    }
+  }
+  return all_one ? shaped : poly_expand_uop(ctx, shaped, dims, ndim);
+}
+
 /* Broadcasting binary ops */
 
 PolyUOp *poly_add(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
@@ -1650,7 +1784,24 @@ PolyUOp *poly_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t shape[POLY_MAX_DIMS];
   int ndim;
   if (!poly_broadcast_pair(ctx, &a, &b, shape, &ndim)) return NULL;
-  return poly_alu2(ctx, POLY_OP_SUB, a, b);
+
+  /* Pinned ElementwiseMixin.sub is `a + (-b)`, and negation is
+   * multiplication by a broadcast `-1` except for bool logical-not
+   * (mixin/elementwise.py:57-66,90-109). */
+  PolyDType common;
+  if (!poly_dtype_least_upper(a->dtype, b->dtype, &common)) return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(a->dtype), common)) a = poly_cast(ctx, a, common);
+  if (!poly_dtype_eq(poly_dtype_scalar(b->dtype), common)) b = poly_cast(ctx, b, common);
+  if (!a || !b) return NULL;
+
+  PolyUOp *neg_b = NULL;
+  if (poly_dtype_is_bool(common)) {
+    neg_b = poly_logical_not(ctx, b);
+  } else {
+    PolyUOp *minus_one = broadcast_scalar_like(ctx, poly_const_typed(ctx, common, -1.0), b);
+    neg_b = minus_one ? poly_alu2(ctx, POLY_OP_MUL, b, minus_one) : NULL;
+  }
+  return neg_b ? poly_alu2(ctx, POLY_OP_ADD, a, neg_b) : NULL;
 }
 
 PolyUOp *poly_mul(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
@@ -1667,6 +1818,67 @@ PolyUOp *poly_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return poly_alu2(ctx, POLY_OP_FDIV, a, b);
 }
 
+/* Pinned Tensor._broadcasted broadcasts first, then applies
+ * least_upper_dtype unless either operand is a pointer
+ * (mixin/__init__.py:439-449). This is Tensor-expression construction, not a
+ * rewrite of imported raw ALU graphs. */
+static bool poly_broadcasted_pair(PolyCtx *ctx, PolyUOp **a, PolyUOp **b) {
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = 0;
+  if (!poly_broadcast_pair(ctx, a, b, shape, &ndim)) return false;
+  if (poly_dtype_eq((*a)->dtype, (*b)->dtype) || (*a)->dtype.is_ptr || (*b)->dtype.is_ptr)
+    return true;
+
+  PolyDType common;
+  if (!poly_dtype_least_upper((*a)->dtype, (*b)->dtype, &common)) return false;
+  if (!poly_dtype_eq(poly_dtype_scalar((*a)->dtype), common)) *a = poly_cast(ctx, *a, common);
+  if (!poly_dtype_eq(poly_dtype_scalar((*b)->dtype), common)) *b = poly_cast(ctx, *b, common);
+  return *a != NULL && *b != NULL;
+}
+
+/* Pinned UOp.ufix keeps every Python scalar in a floating receiver's dtype,
+ * keeps integer literals in an integer receiver's dtype, and otherwise uses
+ * dtypes.from_py. const_like supplies the receiver shape
+ * (uop/ops.py:496-508). */
+static PolyUOp *poly_ufix_const(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    PolyDType from_py_dtype,
+    double value
+) {
+  if (!ctx || !self) return NULL;
+  PolyDType self_dtype = poly_dtype_scalar(self->dtype);
+  PolyDType scalar_dtype = poly_dtype_scalar(from_py_dtype);
+  PolyDType dtype =
+      (poly_dtype_is_float(self_dtype) ||
+       (poly_dtype_is_int(self_dtype) && poly_dtype_is_int(scalar_dtype)))
+          ? self_dtype
+          : scalar_dtype;
+  PolyUOp *scalar = poly_const_typed(ctx, dtype, value);
+  return scalar ? broadcast_scalar_like(ctx, scalar, self) : NULL;
+}
+
+static PolyUOp *poly_broadcasted_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b) {
+  /* Pinned subtraction is ADD(a, MUL(b, -1)), which poly_sub owns. */
+  if (op == POLY_OP_SUB) return poly_sub(ctx, a, b);
+  if (!poly_broadcasted_pair(ctx, &a, &b)) return NULL;
+  return poly_alu2(ctx, op, a, b);
+}
+
+static PolyUOp *poly_scalar_binop(
+    PolyCtx *ctx,
+    PolyOps op,
+    PolyUOp *self,
+    PolyDType from_py_dtype,
+    double value,
+    bool reverse
+) {
+  PolyUOp *scalar = poly_ufix_const(ctx, self, from_py_dtype, value);
+  if (!scalar) return NULL;
+  return reverse ? poly_broadcasted_alu2(ctx, op, scalar, self)
+                 : poly_broadcasted_alu2(ctx, op, self, scalar);
+}
+
 /* Contiguous (realize barrier) */
 
 PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
@@ -1679,15 +1891,36 @@ PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
 /* Math */
 
 PolyUOp *poly_exp(PolyCtx *ctx, PolyUOp *x) {
-  /* exp(x) = exp2(x * (1/ln2)) */
-  PolyDType dt = poly_dtype_scalar(x->dtype);
-  return poly_alu1(ctx, POLY_OP_EXP2, poly_alu2(ctx, POLY_OP_MUL, x, cdt(ctx, dt, 1.0 / M_LN2)));
+  if (!ctx || !x) return NULL;
+  /* Pinned exp promotes floating inputs to at least float32 and casts the
+   * result back; non-floats stay at least default-float
+   * (mixin/elementwise.py:491-503). */
+  PolyDType input_dt = poly_dtype_scalar(x->dtype);
+  PolyDType compute_dt;
+  if (!poly_dtype_least_upper(input_dt, POLY_FLOAT32, &compute_dt)) return NULL;
+  PolyUOp *compute_x = poly_dtype_eq(input_dt, compute_dt) ? x : poly_cast(ctx, x, compute_dt);
+  PolyUOp *scale =
+      compute_x ? broadcast_scalar_like(ctx, cdt(ctx, compute_dt, 1.0 / M_LN2), compute_x) : NULL;
+  PolyUOp *out =
+      scale ? poly_alu1(ctx, POLY_OP_EXP2, poly_alu2(ctx, POLY_OP_MUL, compute_x, scale)) : NULL;
+  if (out && poly_dtype_is_float(input_dt) && !poly_dtype_eq(input_dt, compute_dt))
+    out = poly_cast(ctx, out, input_dt);
+  return out;
 }
 
 PolyUOp *poly_log(PolyCtx *ctx, PolyUOp *x) {
-  /* log(x) = log2(x) * ln2 */
-  PolyDType dt = poly_dtype_scalar(x->dtype);
-  return poly_alu2(ctx, POLY_OP_MUL, poly_alu1(ctx, POLY_OP_LOG2, x), cdt(ctx, dt, M_LN2));
+  if (!ctx || !x) return NULL;
+  /* Pinned log2 promotes only non-floats; log then multiplies by a
+   * broadcast same-dtype ln(2) (mixin/elementwise.py:505-527,812-823). */
+  PolyDType input_dt = poly_dtype_scalar(x->dtype);
+  PolyDType compute_dt = input_dt;
+  if (!poly_dtype_is_float(input_dt) &&
+      !poly_dtype_least_upper(input_dt, POLY_FLOAT32, &compute_dt))
+    return NULL;
+  PolyUOp *compute_x = poly_dtype_eq(input_dt, compute_dt) ? x : poly_cast(ctx, x, compute_dt);
+  PolyUOp *log2_x = compute_x ? poly_alu1(ctx, POLY_OP_LOG2, compute_x) : NULL;
+  PolyUOp *scale = log2_x ? broadcast_scalar_like(ctx, cdt(ctx, compute_dt, M_LN2), log2_x) : NULL;
+  return scale ? poly_alu2(ctx, POLY_OP_MUL, log2_x, scale) : NULL;
 }
 
 PolyUOp *poly_log1p(PolyCtx *ctx, PolyUOp *x) {
@@ -1832,19 +2065,29 @@ PolyUOp *poly_lgamma(PolyCtx *ctx, PolyUOp *x) {
 }
 
 PolyUOp *poly_sigmoid(PolyCtx *ctx, PolyUOp *x) {
-  /* sigmoid(x) = (1 + exp2(x * (-1/ln2)))^-1 */
-  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, x, cf(ctx, x, -1.0 / M_LN2));
-  PolyUOp *e = poly_alu1(ctx, POLY_OP_EXP2, scaled);
-  return poly_alu1(ctx, POLY_OP_RECIPROCAL, poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), e));
+  /* Pinned sigmoid:
+   * (1 + (x * (-1/log(2))).exp2()).reciprocal()
+   * (mixin/elementwise.py:667-679). UOp.ufix keeps float16/float64 receivers
+   * in their own dtype; integer/bool receivers promote at the multiplication. */
+  if (!ctx || !x) return NULL;
+  PolyUOp *scaled =
+      poly_scalar_binop(ctx, POLY_OP_MUL, x, POLY_FLOAT32, -1.0 / M_LN2, false);
+  PolyUOp *e = scaled ? poly_alu1(ctx, POLY_OP_EXP2, scaled) : NULL;
+  PolyUOp *denom = e ? poly_scalar_binop(ctx, POLY_OP_ADD, e, POLY_INT32, 1.0, true) : NULL;
+  return denom ? poly_alu1(ctx, POLY_OP_RECIPROCAL, denom) : NULL;
 }
 
 PolyUOp *poly_tanh_act(PolyCtx *ctx, PolyUOp *x) {
-  /* tanh(x) = 2*sigmoid(2x) - 1 */
-  PolyUOp *two_x = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), x);
-  return poly_alu2(
-      ctx, POLY_OP_SUB, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 2.0), poly_sigmoid(ctx, two_x)),
-      cf(ctx, x, 1.0)
-  );
+  /* Pinned tanh(x) = 2.0 * sigmoid(2.0 * x) - 1.0
+   * (mixin/elementwise.py:739-749). */
+  if (!ctx || !x) return NULL;
+  PolyUOp *two_x = poly_scalar_binop(ctx, POLY_OP_MUL, x, POLY_FLOAT32, 2.0, true);
+  PolyUOp *sigmoid = two_x ? poly_sigmoid(ctx, two_x) : NULL;
+  PolyUOp *twice =
+      sigmoid ? poly_scalar_binop(ctx, POLY_OP_MUL, sigmoid, POLY_FLOAT32, 2.0, true)
+              : NULL;
+  return twice ? poly_scalar_binop(ctx, POLY_OP_SUB, twice, POLY_FLOAT32, 1.0, false)
+               : NULL;
 }
 
 PolyUOp *poly_abs(PolyCtx *ctx, PolyUOp *x) {
@@ -1946,27 +2189,41 @@ PolyUOp *poly_leaky_relu(PolyCtx *ctx, PolyUOp *x, double neg_slope) {
 }
 
 PolyUOp *poly_gelu(PolyCtx *ctx, PolyUOp *x) {
-  PolyUOp *x3 = poly_alu2(ctx, POLY_OP_MUL, x, poly_alu2(ctx, POLY_OP_MUL, x, x));
-  PolyUOp *inner =
-      poly_alu2(ctx, POLY_OP_ADD, x, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 0.044715), x3));
-  PolyUOp *scaled = poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, sqrt(2.0 / M_PI)), inner);
-  return poly_alu2(
-      ctx, POLY_OP_MUL, cf(ctx, x, 0.5),
-      poly_alu2(
-          ctx, POLY_OP_MUL, x,
-          poly_alu2(ctx, POLY_OP_ADD, cf(ctx, x, 1.0), poly_tanh_act(ctx, scaled))
-      )
-  );
+  /* Pinned tanh GELU:
+   * 0.5*x*(1 + (sqrt(2/pi)*(x + 0.044715*x**3)).tanh())
+   * (mixin/elementwise.py:761-776). Keep every source operation's own ufix
+   * and promotion boundary: integer x**3 remains integer until multiplied by
+   * the floating coefficient. */
+  if (!ctx || !x) return NULL;
+  PolyUOp *half_x = poly_scalar_binop(ctx, POLY_OP_MUL, x, POLY_FLOAT32, 0.5, true);
+  PolyUOp *x3 = poly_scalar_binop(ctx, POLY_OP_POW, x, POLY_INT32, 3.0, false);
+  PolyUOp *cubic =
+      x3 ? poly_scalar_binop(ctx, POLY_OP_MUL, x3, POLY_FLOAT32, 0.044715, true) : NULL;
+  PolyUOp *inner = cubic ? poly_broadcasted_alu2(ctx, POLY_OP_ADD, x, cubic) : NULL;
+  PolyUOp *scaled =
+      inner ? poly_scalar_binop(
+                  ctx, POLY_OP_MUL, inner, POLY_FLOAT32, sqrt(2.0 / M_PI), true
+              )
+            : NULL;
+  PolyUOp *tanh = scaled ? poly_tanh_act(ctx, scaled) : NULL;
+  PolyUOp *one_plus =
+      tanh ? poly_scalar_binop(ctx, POLY_OP_ADD, tanh, POLY_INT32, 1.0, true) : NULL;
+  return half_x && one_plus ? poly_broadcasted_alu2(ctx, POLY_OP_MUL, half_x, one_plus)
+                           : NULL;
 }
 
 PolyUOp *poly_quick_gelu(PolyCtx *ctx, PolyUOp *x) {
-  return poly_alu2(
-      ctx, POLY_OP_MUL, x, poly_sigmoid(ctx, poly_alu2(ctx, POLY_OP_MUL, cf(ctx, x, 1.702), x))
-  );
+  /* Pinned quick_gelu is self * (self * 1.702).sigmoid()
+   * (mixin/elementwise.py:751-759). */
+  if (!ctx || !x) return NULL;
+  PolyUOp *inner = poly_scalar_binop(ctx, POLY_OP_MUL, x, POLY_FLOAT32, 1.702, false);
+  PolyUOp *sigmoid = inner ? poly_sigmoid(ctx, inner) : NULL;
+  return sigmoid ? poly_broadcasted_alu2(ctx, POLY_OP_MUL, x, sigmoid) : NULL;
 }
 
 PolyUOp *poly_silu(PolyCtx *ctx, PolyUOp *x) {
-  return poly_alu2(ctx, POLY_OP_MUL, x, poly_sigmoid(ctx, x));
+  PolyUOp *sigmoid = poly_sigmoid(ctx, x);
+  return sigmoid ? poly_broadcasted_alu2(ctx, POLY_OP_MUL, x, sigmoid) : NULL;
 }
 
 PolyUOp *poly_elu(PolyCtx *ctx, PolyUOp *x, double alpha) {
@@ -2019,14 +2276,10 @@ PolyUOp *poly_hardsigmoid(PolyCtx *ctx, PolyUOp *x) {
 
 /* Comparisons (broadcasting) */
 
-/* Logical NOT — polygrad's canonical form is `CMPNE(x, CONST(true))` for
+/* Logical NOT — `CMPNE(x, CONST(true))` for
  * bool inputs, matching tinygrad's `logical_not()` after CAST elision
- * (mixin/elementwise.py:25-33 + symbolic.py:126).
- *
- * Polygrad ALSO supports `NEG(bool_uop)` at the kernel level (alu.c:169
- * maps NEG-on-bool to `!a`). Both forms are accepted by codegen, but
- * tensor-level helpers should produce the CMPNE form for tinygrad parity
- * so Phase D's reduce_collapse rules can match the IR shape verbatim. */
+ * (mixin/elementwise.py:39-47 + symbolic.py:93-131). Raw `NEG(bool)` retains
+ * arithmetic NEG semantics and is not a second logical-NOT spelling. */
 PolyUOp *poly_logical_not(PolyCtx *ctx, PolyUOp *x) {
   PolyUOp *t = poly_const_typed(ctx, POLY_BOOL, 1);
   int64_t shape[POLY_MAX_DIMS];
@@ -2086,6 +2339,11 @@ PolyUOp *poly_le(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 }
 
 PolyUOp *poly_cast(PolyCtx *ctx, PolyUOp *x, PolyDType target) {
+  if (!ctx || !x) return NULL;
+  /* Pinned UOp.cast propagates the source vector count when given a scalar
+   * target, then returns self for an exact dtype match (uop/ops.py:513-518). */
+  if (target.count == 1 && x->dtype.count != 1) target = poly_dtype_vec(target, x->dtype.count);
+  if (poly_dtype_eq(x->dtype, target)) return x;
   return poly_uop1(ctx, POLY_OP_CAST, target, x, poly_arg_none());
 }
 
@@ -2112,6 +2370,10 @@ PolyUOp *poly_where_op(PolyCtx *ctx, PolyUOp *cond, PolyUOp *x, PolyUOp *y) {
    * CMPNE(cond, 0) node in helper graphs such as nonzero-value padding. */
   if (!poly_dtype_is_bool(poly_dtype_scalar(cond->dtype))) cond = poly_cast(ctx, cond, POLY_BOOL);
   if (!poly_broadcast_pair(ctx, &cond, &x, s, &nd)) return NULL;
+  /* UOp.alu broadcasts every shaped source to the final common shape
+   * (uop/ops.py:543-551). The condition may enlarge x after the first x/y
+   * pair, so complete y against that final shape too. */
+  if (!poly_broadcast_pair(ctx, &x, &y, s, &nd)) return NULL;
   return poly_alu3(ctx, POLY_OP_WHERE, cond, x, y);
 }
 
@@ -2122,14 +2384,41 @@ PolyUOp *poly_maximum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return poly_alu2(ctx, POLY_OP_MAX, a, b);
 }
 
+/* Pinned ElementwiseMixin._inverse is ordinary broadcasted negation for
+ * floating values and bitwise-not for integer/bool values
+ * (mixin/elementwise.py:57-69,131-143,379-393). */
+static PolyUOp *minimum_inverse(PolyCtx *ctx, PolyUOp *x) {
+  if (!ctx || !x) return NULL;
+  PolyDType dt = poly_dtype_scalar(x->dtype);
+  if (poly_dtype_is_float(dt)) {
+    PolyUOp *minus_one = broadcast_scalar_like(ctx, poly_const_exact_float(ctx, dt, -1.0), x);
+    return minus_one ? poly_alu2(ctx, POLY_OP_MUL, x, minus_one) : NULL;
+  }
+  if (poly_dtype_is_bool(dt)) return poly_logical_not(ctx, x);
+  if (!poly_dtype_is_int(dt)) return NULL;
+  PolyUOp *mask = NULL;
+  if (poly_dtype_is_unsigned(dt)) {
+    if (!poly_dtype_bound_const(ctx, dt, false, &mask)) return NULL;
+  } else {
+    mask = poly_const_exact_int(ctx, dt, -1);
+  }
+  mask = mask ? broadcast_scalar_like(ctx, mask, x) : NULL;
+  return mask ? poly_alu2(ctx, POLY_OP_XOR, x, mask) : NULL;
+}
+
 PolyUOp *poly_minimum(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   int64_t s[POLY_MAX_DIMS];
   int nd;
   if (!poly_broadcast_pair(ctx, &a, &b, s, &nd)) return NULL;
-  return poly_alu1(
-      ctx, POLY_OP_NEG,
-      poly_alu2(ctx, POLY_OP_MAX, poly_alu1(ctx, POLY_OP_NEG, a), poly_alu1(ctx, POLY_OP_NEG, b))
-  );
+  PolyDType common;
+  if (!poly_dtype_least_upper(a->dtype, b->dtype, &common)) return NULL;
+  if (!poly_dtype_eq(poly_dtype_scalar(a->dtype), common)) a = poly_cast(ctx, a, common);
+  if (!poly_dtype_eq(poly_dtype_scalar(b->dtype), common)) b = poly_cast(ctx, b, common);
+  PolyUOp *inverse_a = minimum_inverse(ctx, a);
+  PolyUOp *inverse_b = minimum_inverse(ctx, b);
+  PolyUOp *maximum =
+      (inverse_a && inverse_b) ? poly_alu2(ctx, POLY_OP_MAX, inverse_a, inverse_b) : NULL;
+  return maximum ? minimum_inverse(ctx, maximum) : NULL;
 }
 
 PolyUOp *poly_clamp(PolyCtx *ctx, PolyUOp *x, double lo, double hi) {
@@ -2312,11 +2601,13 @@ PolyUOp *poly_pool(
 static bool resolve_pool_padding(const int64_t *padding, int n_padding, int nk, int64_t *out) {
   if (nk < 0 || nk > POLY_MAX_DIMS || !out) return false;
   if (!padding || n_padding == 0) {
-    for (int i = 0; i < 2 * nk; i++) out[i] = 0;
+    for (int i = 0; i < 2 * nk; i++)
+      out[i] = 0;
     return true;
   }
   if (n_padding == 1) {
-    for (int i = 0; i < 2 * nk; i++) out[i] = padding[0];
+    for (int i = 0; i < 2 * nk; i++)
+      out[i] = padding[0];
     return true;
   }
   if (n_padding == nk) {
@@ -2327,7 +2618,8 @@ static bool resolve_pool_padding(const int64_t *padding, int n_padding, int nk, 
     return true;
   }
   if (n_padding == 2 * nk) {
-    for (int i = 0; i < 2 * nk; i++) out[i] = padding[i];
+    for (int i = 0; i < 2 * nk; i++)
+      out[i] = padding[i];
     return true;
   }
   return false;
@@ -2389,14 +2681,16 @@ PolyUOp *poly_max_pool2d(
   PolyUOp *pooled = poly_pool(ctx, padded, k, nk, s, d);
   if (!pooled) return NULL;
   int64_t axes[POLY_MAX_DIMS];
-  for (int i = 0; i < nk; i++) axes[i] = ndim + i;
+  for (int i = 0; i < nk; i++)
+    axes[i] = ndim + i;
   PolyUOp *r = poly_reduce_axis(ctx, POLY_OP_MAX, pooled, axes, nk);
   int64_t pshape[POLY_MAX_DIMS];
   int pndim = uop_shape(ctx, pooled, pshape);
   if (pndim < nk) return NULL;
   int out_ndim = pndim - nk;
   int64_t out_shape[POLY_MAX_DIMS];
-  for (int i = 0; i < out_ndim; i++) out_shape[i] = pshape[i];
+  for (int i = 0; i < out_ndim; i++)
+    out_shape[i] = pshape[i];
   return poly_reshape(ctx, r, out_shape, out_ndim);
 }
 
@@ -2449,20 +2743,29 @@ PolyUOp *poly_conv2d(
   xr_shape[pos++] = groups;
   xr_shape[pos++] = cin;
   xr_shape[pos++] = 1;
-  for (int i = 0; i < oyx_ndim; i++) xr_shape[pos++] = pshape[2 + i];
-  for (int i = 0; i < hw_ndim; i++) xr_shape[pos++] = w_shape[2 + i];
+  for (int i = 0; i < oyx_ndim; i++)
+    xr_shape[pos++] = pshape[2 + i];
+  for (int i = 0; i < hw_ndim; i++)
+    xr_shape[pos++] = w_shape[2 + i];
   PolyUOp *xr = poly_reshape(ctx, pooled, xr_shape, xrw_ndim);
   memcpy(xe_shape, xr_shape, sizeof(int64_t) * xrw_ndim);
   xe_shape[3] = rcout;
-  PolyUOp *xe = poly_expand(ctx, xr, xe_shape, xrw_ndim);
+  /* Pinned _broadcast_to returns self when the requested shape is unchanged
+   * (mixin/movement.py:116-128). This occurs for one output channel and must
+   * not leave a high-level no-op EXPAND in the Tensor graph. */
+  PolyUOp *xe = poly_shape_equal(xr_shape, xrw_ndim, xe_shape, xrw_ndim)
+                    ? xr
+                    : poly_expand(ctx, xr, xe_shape, xrw_ndim);
 
   pos = 0;
   perm[pos++] = 0;
   perm[pos++] = 1;
   perm[pos++] = 3;
-  for (int i = 0; i < oyx_ndim; i++) perm[pos++] = 4 + i;
+  for (int i = 0; i < oyx_ndim; i++)
+    perm[pos++] = 4 + i;
   perm[pos++] = 2;
-  for (int i = 0; i < hw_ndim; i++) perm[pos++] = 4 + oyx_ndim + i;
+  for (int i = 0; i < hw_ndim; i++)
+    perm[pos++] = 4 + oyx_ndim + i;
   xe = poly_permute(ctx, xe, perm, xrw_ndim);
 
   int64_t wr_shape[POLY_MAX_DIMS];
@@ -2470,27 +2773,32 @@ PolyUOp *poly_conv2d(
   wr_shape[pos++] = 1;
   wr_shape[pos++] = groups;
   wr_shape[pos++] = rcout;
-  for (int i = 0; i < oyx_ndim; i++) wr_shape[pos++] = 1;
+  for (int i = 0; i < oyx_ndim; i++)
+    wr_shape[pos++] = 1;
   wr_shape[pos++] = cin;
-  for (int i = 0; i < hw_ndim; i++) wr_shape[pos++] = w_shape[2 + i];
+  for (int i = 0; i < hw_ndim; i++)
+    wr_shape[pos++] = w_shape[2 + i];
   PolyUOp *wr = poly_reshape(ctx, weight, wr_shape, xrw_ndim);
 
   PolyUOp *mul = poly_mul(ctx, xe, wr);
   int64_t sum_axes[POLY_MAX_DIMS];
   int n_sum = 1 + oyx_ndim;
-  for (int i = 0; i < n_sum; i++) sum_axes[i] = xrw_ndim - 1 - i;
+  for (int i = 0; i < n_sum; i++)
+    sum_axes[i] = xrw_ndim - 1 - i;
   PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_ADD, mul, sum_axes, n_sum);
   int64_t out_shape[POLY_MAX_DIMS];
   int out_ndim = 2 + oyx_ndim;
   out_shape[0] = bs;
   out_shape[1] = cout;
-  for (int i = 0; i < oyx_ndim; i++) out_shape[2 + i] = pshape[2 + i];
+  for (int i = 0; i < oyx_ndim; i++)
+    out_shape[2 + i] = pshape[2 + i];
   PolyUOp *ret = poly_reshape(ctx, reduced, out_shape, out_ndim);
   if (bias) {
     int64_t bshape[POLY_MAX_DIMS];
     bshape[0] = 1;
     bshape[1] = cout;
-    for (int i = 0; i < hw_ndim; i++) bshape[2 + i] = 1;
+    for (int i = 0; i < hw_ndim; i++)
+      bshape[2 + i] = 1;
     PolyUOp *br = poly_reshape(ctx, bias, bshape, out_ndim);
     ret = poly_add(ctx, ret, br);
   }
@@ -2519,64 +2827,287 @@ PolyUOp *poly_batchnorm(
     keep[ax] = true;
   }
   int64_t rshape[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++) rshape[i] = keep[i] ? shape[i] : 1;
+  for (int i = 0; i < ndim; i++)
+    rshape[i] = keep[i] ? shape[i] : 1;
   PolyUOp *m = poly_reshape(ctx, mean, rshape, ndim);
   PolyUOp *centered = poly_sub(ctx, x, m);
   if (weight) centered = poly_mul(ctx, centered, poly_reshape(ctx, weight, rshape, ndim));
-  PolyUOp *inv = (poly_uop_ndim(ctx, invstd) == n_axes) ? poly_reshape(ctx, invstd, rshape, ndim) : invstd;
+  PolyUOp *inv =
+      (poly_uop_ndim(ctx, invstd) == n_axes) ? poly_reshape(ctx, invstd, rshape, ndim) : invstd;
   PolyUOp *ret = poly_mul(ctx, centered, inv);
   if (bias) ret = poly_add(ctx, ret, poly_reshape(ctx, bias, rshape, ndim));
   return ret;
 }
 
-PolyUOp *poly_one_hot(PolyCtx *ctx, PolyUOp *x, int64_t num_classes) {
-  if (!ctx || !x || num_classes < 0) return NULL;
-  if (!poly_dtype_is_int(poly_dtype_scalar(x->dtype))) return NULL;
-  int64_t shape[POLY_MAX_DIMS];
-  int ndim = uop_shape(ctx, x, shape);
-  if (ndim < 0 || ndim + 1 > POLY_MAX_DIMS) return NULL;
-  PolyUOp *idx = poly_dtype_eq(poly_dtype_scalar(x->dtype), POLY_INT32) ? x : poly_cast(ctx, x, POLY_INT32);
-  int64_t us_shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS], class_shape[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++) {
-    us_shape[i] = shape[i];
-    out_shape[i] = shape[i];
-    class_shape[i] = 1;
+/* Path B applies pinned composite Tensor programs independently to the
+ * retained logical roots and exact ordered current occurrences. The physical
+ * result is never reconstructed by substituting logical identities. */
+static PolyTensor *tensor_composite_result(
+    PolyCtx *ctx,
+    PolyUOp *logical,
+    PolyUOp *physical,
+    PolyTensor **inputs,
+    int n_inputs
+) {
+  if (!ctx || !logical || !physical || !inputs || n_inputs <= 0) return NULL;
+  PolyDevice device = POLY_DEVICE_AUTO;
+  bool requires_grad = false;
+  bool requires_grad_set = false;
+  for (int i = 0; i < n_inputs; i++) {
+    PolyTensor *input = inputs[i];
+    if (!input) continue;
+    if (input->device != POLY_DEVICE_AUTO) {
+      if (device != POLY_DEVICE_AUTO && input->device != device) return NULL;
+      device = input->device;
+    }
+    requires_grad |= input->requires_grad;
+    requires_grad_set |= input->requires_grad_set;
   }
-  us_shape[ndim] = 1;
-  out_shape[ndim] = num_classes;
-  class_shape[ndim] = num_classes;
-  PolyUOp *idx_us = poly_reshape(ctx, idx, us_shape, ndim + 1);
-  PolyUOp *classes = poly_arange_int_by_id(ctx, 0, num_classes, 1, poly_dtype_id_by_name("int32"));
-  classes = poly_reshape(ctx, classes, class_shape, ndim + 1);
-  PolyUOp *eq = poly_eq(ctx, poly_expand(ctx, idx_us, out_shape, ndim + 1), poly_expand(ctx, classes, out_shape, ndim + 1));
-  return poly_cast(ctx, eq, POLY_INT32);
+  PolyTensor *out =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, device);
+  if (!out) return NULL;
+  out->requires_grad = requires_grad;
+  out->requires_grad_set = requires_grad_set;
+  out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  return out;
 }
 
-PolyUOp *poly_index_select(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
-  if (!ctx || !x || !index) return NULL;
-  int64_t shape[POLY_MAX_DIMS], ishape[POLY_MAX_DIMS];
-  int ndim = uop_shape(ctx, x, shape);
-  int ind_ndim = uop_shape(ctx, index, ishape);
-  if (ndim <= 0 || ind_ndim < 0) return NULL;
-  if (dim < 0) dim += ndim;
-  if (dim < 0 || dim >= ndim || ndim + ind_ndim - 1 > POLY_MAX_DIMS) return NULL;
-  PolyUOp *idx = poly_dtype_eq(poly_dtype_scalar(index->dtype), POLY_INT32) ? index : poly_cast(ctx, index, POLY_INT32);
-  PolyUOp *neg = poly_alu2(ctx, POLY_OP_CMPLT, idx, poly_const_exact_int(ctx, POLY_INT32, 0));
-  idx = poly_where_op(ctx, neg, poly_alu2(ctx, POLY_OP_ADD, idx, poly_const_exact_int(ctx, POLY_INT32, shape[dim])), idx);
+PolyTensor *poly_tensor_pool(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_unary_result(
+      ctx, src, poly_pool(ctx, src->uop_logical, kernel, n_kernel, stride, dilation),
+      poly_pool(ctx, current, kernel, n_kernel, stride, dilation)
+  );
+}
 
-  int64_t out_shape[POLY_MAX_DIMS], idx_shape[POLY_MAX_DIMS];
-  int pos = 0;
-  for (int i = 0; i < dim; i++) out_shape[pos++] = shape[i];
-  for (int i = 0; i < ind_ndim; i++) out_shape[pos++] = ishape[i];
-  for (int i = dim + 1; i < ndim; i++) out_shape[pos++] = shape[i];
-  int out_ndim = pos;
-  pos = 0;
-  for (int i = 0; i < dim; i++) idx_shape[pos++] = 1;
-  for (int i = 0; i < ind_ndim; i++) idx_shape[pos++] = ishape[i];
-  for (int i = dim + 1; i < ndim; i++) idx_shape[pos++] = 1;
-  idx = poly_reshape(ctx, idx, idx_shape, out_ndim);
-  idx = poly_expand(ctx, idx, out_shape, out_ndim);
-  return poly_gather_dim(ctx, x, dim, idx);
+PolyTensor *poly_tensor_max_pool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  return tensor_unary_result(
+      ctx, src,
+      poly_max_pool2d(
+          ctx, src->uop_logical, kernel, n_kernel, stride, dilation, padding, n_padding
+      ),
+      poly_max_pool2d(ctx, current, kernel, n_kernel, stride, dilation, padding, n_padding)
+  );
+}
+
+PolyTensor *poly_tensor_conv2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+) {
+  PolyUOp *src_current = tensor_current_uop(src);
+  PolyUOp *weight_current = tensor_current_uop(weight);
+  PolyUOp *bias_current = tensor_current_uop(bias);
+  if (!ctx || !src || !weight || !src->uop_logical || !weight->uop_logical || !src_current ||
+      !weight_current || (bias && (!bias->uop_logical || !bias_current)))
+    return NULL;
+  PolyUOp *logical = poly_conv2d(
+      ctx, src->uop_logical, weight->uop_logical, bias ? bias->uop_logical : NULL, groups, stride,
+      dilation, padding, n_padding
+  );
+  PolyUOp *physical = poly_conv2d(
+      ctx, src_current, weight_current, bias_current, groups, stride, dilation, padding, n_padding
+  );
+  PolyTensor *inputs[3] = {src, weight, bias};
+  return tensor_composite_result(ctx, logical, physical, inputs, bias ? 3 : 2);
+}
+
+PolyTensor *poly_tensor_batchnorm(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    PolyTensor *mean,
+    PolyTensor *invstd,
+    const int64_t *axes,
+    int n_axes
+) {
+  PolyUOp *src_current = tensor_current_uop(src);
+  PolyUOp *weight_current = tensor_current_uop(weight);
+  PolyUOp *bias_current = tensor_current_uop(bias);
+  PolyUOp *mean_current = tensor_current_uop(mean);
+  PolyUOp *invstd_current = tensor_current_uop(invstd);
+  if (!ctx || !src || !mean || !invstd || !src->uop_logical || !mean->uop_logical ||
+      !invstd->uop_logical || !src_current || !mean_current || !invstd_current ||
+      (weight && (!weight->uop_logical || !weight_current)) ||
+      (bias && (!bias->uop_logical || !bias_current)))
+    return NULL;
+  PolyUOp *logical = poly_batchnorm(
+      ctx, src->uop_logical, weight ? weight->uop_logical : NULL, bias ? bias->uop_logical : NULL,
+      mean->uop_logical, invstd->uop_logical, axes, n_axes
+  );
+  PolyUOp *physical = poly_batchnorm(
+      ctx, src_current, weight_current, bias_current, mean_current, invstd_current, axes, n_axes
+  );
+  PolyTensor *inputs[5] = {src, mean, invstd, weight, bias};
+  return tensor_composite_result(ctx, logical, physical, inputs, 5);
+}
+
+static PolyUOp *poly_unsqueeze_axis(PolyCtx *ctx, PolyUOp *x, int axis);
+
+/* Pinned `_one_hot_along_dim` compares the integer index directly with a
+ * right-aligned arange (mixin/__init__.py:1086-1091). Keep this helper as the
+ * shared graph spelling for one_hot, gather, and single-Tensor indexing. */
+static PolyUOp *one_hot_along_dim(PolyCtx *ctx, PolyUOp *index, int64_t num_classes, int dim) {
+  if (!ctx || !index || num_classes < 0 || !poly_dtype_is_int(poly_dtype_scalar(index->dtype)))
+    return NULL;
+  int64_t shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, index, shape);
+  if (ndim <= 0) return NULL;
+  if (dim < 0) dim += ndim;
+  if (dim < 0 || dim >= ndim) return NULL;
+  int offset = ndim - dim - 1;
+  int dtype_id = num_classes > (int64_t)INT32_MAX ? poly_dtype_id_by_name("int64")
+                                                  : poly_dtype_id_by_name("int32");
+  PolyUOp *classes = poly_arange_int_by_id(ctx, 0, num_classes, 1, dtype_id);
+  if (!classes) return NULL;
+  int64_t class_shape[POLY_MAX_DIMS];
+  class_shape[0] = num_classes;
+  for (int i = 0; i < offset; i++)
+    class_shape[i + 1] = 1;
+  /* `_broadcast_to` returns self for the unchanged one-dimensional arange.
+   * Avoid an extra no-op RESHAPE when offset is zero. */
+  if (offset > 0) classes = poly_reshape(ctx, classes, class_shape, offset + 1);
+  return classes ? poly_eq(ctx, index, classes) : NULL;
+}
+
+/* Pinned `.sum(axis, dtype=x.dtype)` does not apply default accumulator
+ * promotion (mixin/__init__.py:180 and reduce.py:_reduce). */
+static PolyUOp *sum_axis_keep_dtype(PolyCtx *ctx, PolyUOp *x, int axis) {
+  if (!ctx || !x) return NULL;
+  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim <= 0) return NULL;
+  if (axis < 0) axis += ndim;
+  if (axis < 0 || axis >= ndim) return NULL;
+  int64_t reduce_axis[1] = {axis};
+  PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_ADD, x, reduce_axis, 1);
+  if (!reduced) return NULL;
+  int out_ndim = 0;
+  for (int i = 0; i < ndim; i++)
+    if (i != axis) out_shape[out_ndim++] = shape[i];
+  return poly_reshape(ctx, reduced, out_shape, out_ndim);
+}
+
+PolyUOp *poly_one_hot(PolyCtx *ctx, PolyUOp *x, int64_t num_classes) {
+  if (!ctx || !x || num_classes < 0 || !poly_dtype_is_int(poly_dtype_scalar(x->dtype))) return NULL;
+  PolyUOp *index = poly_unsqueeze_axis(ctx, x, -1);
+  PolyUOp *mask = index ? one_hot_along_dim(ctx, index, num_classes, -1) : NULL;
+  if (!mask) return NULL;
+  /* Pinned one_hot is comparison.where(1, 0), not CAST(bool, int32)
+   * (mixin/__init__.py:1093-1104). */
+  return poly_where_op(
+      ctx, mask, poly_const_exact_int(ctx, POLY_INT32, 1), poly_const_exact_int(ctx, POLY_INT32, 0)
+  );
+}
+
+PolyTensor *poly_tensor_one_hot(PolyCtx *ctx, PolyTensor *x, int64_t num_classes) {
+  PolyUOp *current = tensor_current_uop(x);
+  if (!ctx || !x || !x->uop_logical || !current) return NULL;
+  PolyUOp *logical = poly_one_hot(ctx, x->uop_logical, num_classes);
+  PolyUOp *physical = poly_one_hot(ctx, current, num_classes);
+  PolyTensor *inputs[1] = {x};
+  return tensor_composite_result(ctx, logical, physical, inputs, 1);
+}
+
+/* Port the one-Tensor-index branch of pinned `_getitem` literally
+ * (mixin/__init__.py:134-180). It retains index insertion order and reduces
+ * the inserted source axis instead of expressing indexing through gather's
+ * transpose/sum-last graph. */
+PolyUOp *poly_index_select(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
+  if (!ctx || !x || !index || !poly_dtype_is_int(poly_dtype_scalar(index->dtype))) return NULL;
+  int64_t shape[POLY_MAX_DIMS], index_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  int index_ndim = uop_shape(ctx, index, index_shape);
+  if (ndim <= 0 || index_ndim <= 0 || ndim + index_ndim > POLY_MAX_DIMS) return NULL;
+  if (dim < 0) dim += ndim;
+  if (dim < 0 || dim >= ndim) return NULL;
+
+  PolyDType index_dtype = poly_dtype_scalar(index->dtype);
+  PolyUOp *zero = broadcast_scalar_like(ctx, poly_const_typed(ctx, index_dtype, 0.0), index);
+  PolyUOp *size =
+      broadcast_scalar_like(ctx, poly_const_typed(ctx, index_dtype, (double)shape[dim]), index);
+  PolyUOp *negative = (zero && size) ? poly_alu2(ctx, POLY_OP_CMPLT, index, zero) : NULL;
+  PolyUOp *plus_size = (zero && size) ? poly_alu2(ctx, POLY_OP_ADD, index, size) : NULL;
+  PolyUOp *normalized =
+      (negative && plus_size) ? poly_where_op(ctx, negative, plus_size, index) : NULL;
+  if (!normalized) return NULL;
+
+  int64_t pre_reduce_shape[POLY_MAX_DIMS];
+  int pre_ndim = 0;
+  for (int i = 0; i < dim; i++)
+    pre_reduce_shape[pre_ndim++] = shape[i];
+  for (int i = 0; i < index_ndim; i++)
+    pre_reduce_shape[pre_ndim++] = index_shape[i];
+  for (int i = dim; i < ndim; i++)
+    pre_reduce_shape[pre_ndim++] = shape[i];
+
+  int64_t reshaped_index_shape[POLY_MAX_DIMS];
+  int reshaped_index_ndim = 0;
+  for (int i = 0; i < index_ndim; i++)
+    reshaped_index_shape[reshaped_index_ndim++] = index_shape[i];
+  for (int i = 0; i < ndim - dim; i++)
+    reshaped_index_shape[reshaped_index_ndim++] = 1;
+  PolyUOp *expanded_index =
+      poly_reshape(ctx, normalized, reshaped_index_shape, reshaped_index_ndim);
+  expanded_index =
+      expanded_index ? poly_expand(ctx, expanded_index, pre_reduce_shape, pre_ndim) : NULL;
+  PolyUOp *mask =
+      expanded_index ? one_hot_along_dim(ctx, expanded_index, shape[dim], dim - ndim) : NULL;
+  if (!mask) return NULL;
+
+  int64_t reshaped_x_shape[POLY_MAX_DIMS];
+  int reshaped_x_ndim = 0;
+  for (int i = 0; i < dim; i++)
+    reshaped_x_shape[reshaped_x_ndim++] = shape[i];
+  for (int i = 0; i < index_ndim; i++)
+    reshaped_x_shape[reshaped_x_ndim++] = 1;
+  for (int i = dim; i < ndim; i++)
+    reshaped_x_shape[reshaped_x_ndim++] = shape[i];
+  PolyUOp *reshaped_x = poly_reshape(ctx, x, reshaped_x_shape, reshaped_x_ndim);
+  PolyUOp *selected = reshaped_x ? poly_where_op(
+                                       ctx, mask, reshaped_x,
+                                       poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 0.0)
+                                   )
+                                 : NULL;
+  return selected ? sum_axis_keep_dtype(ctx, selected, dim + index_ndim) : NULL;
+}
+
+PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index) {
+  PolyUOp *x_current = tensor_current_uop(x);
+  PolyUOp *index_current = tensor_current_uop(index);
+  if (!ctx || !x || !index || !x->uop_logical || !index->uop_logical || !x_current ||
+      !index_current)
+    return NULL;
+  PolyUOp *logical = poly_index_select(ctx, x->uop_logical, dim, index->uop_logical);
+  PolyUOp *physical = poly_index_select(ctx, x_current, dim, index_current);
+  PolyTensor *inputs[2] = {x, index};
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
 /* Pad with arbitrary value / circular / reflect / replicate */
@@ -3072,7 +3603,10 @@ PolyUOp *poly_arange_int_by_id(
 
   int64_t n = poly_arange_len((long double)start, (long double)stop, (long double)step);
   if (n < 0) return NULL;
-  if (n == 0) return poly_buffer(ctx, dt, 0);
+  if (n == 0) {
+    int64_t empty_shape[1] = {0};
+    return poly_full_int_by_id(ctx, empty_shape, 1, 0, dtype_id);
+  }
 
   int64_t shape[1] = {n};
   PolyUOp *base = poly_full_int_by_id(ctx, shape, 1, step, dtype_id);
@@ -3097,7 +3631,10 @@ PolyUOp *poly_arange_float_by_id(
 
   int64_t n = poly_arange_len((long double)start, (long double)stop, (long double)step);
   if (n < 0) return NULL;
-  if (n == 0) return poly_buffer(ctx, dt, 0);
+  if (n == 0) {
+    int64_t empty_shape[1] = {0};
+    return poly_full_float_by_id(ctx, empty_shape, 1, 0.0, dtype_id);
+  }
 
   int64_t shape[1] = {n};
   PolyUOp *base = poly_full_float_by_id(ctx, shape, 1, step, dtype_id);
@@ -3169,16 +3706,14 @@ PolyUOp *poly_eye(PolyCtx *ctx, int64_t n) {
   return poly_eye_by_id(ctx, n, n, 12);
 }
 
-/* tinygrad Tensor._tri -- tensor.py:2128
+/* tinygrad Tensor._tri -- mixin/__init__.py:310-311
  *   arange(r).unsqueeze(-1) + diagonal <= arange(c)
  *   Returns a bool mask of shape (r, c). */
 static PolyUOp *poly_tri_mask(PolyCtx *ctx, int64_t r, int64_t c, int diagonal) {
   PolyUOp *rows = poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, r, 1, 6), (int64_t[]){r, 1}, 2);
   PolyUOp *cols = poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, c, 1, 6), (int64_t[]){1, c}, 2);
   PolyUOp *rows_shifted =
-      (diagonal == 0)
-          ? rows
-          : poly_alu2(ctx, POLY_OP_ADD, rows, poly_const_exact_int(ctx, POLY_INT32, diagonal));
+      (diagonal == 0) ? rows : poly_add(ctx, rows, poly_const_exact_int(ctx, POLY_INT32, diagonal));
   return poly_le(ctx, rows_shifted, cols);
 }
 
@@ -3237,13 +3772,36 @@ static PolyUOp *poly_rand_compute(
   PolyUOp *counter_t = reshape_logical_input(ctx, counter_flat, shape, ndim);
   PolyUOp *key_t = poly_const_exact_int(ctx, POLY_UINT32, (int64_t)mixed_key);
 
+  /* Pinned tinygrad/mixin/rand.py:12-15 constructs THREEFRY on packed uint64
+   * values, then extracts uint32 lanes. This C helper uses the low lane for
+   * its existing stateless counter/key convention. */
+  PolyUOp *counter_u64 =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_UINT64, counter_t, poly_arg_none());
+  PolyUOp *key_u64 =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_UINT64, key_t, poly_arg_none());
+  PolyUOp *bits_u64 =
+      poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT64, counter_u64, key_u64, poly_arg_none());
+  PolyUOp *mask_u64 = poly_const_exact_int(ctx, POLY_UINT64, INT64_C(0xffffffff));
+  PolyUOp *bits = poly_uop1(
+      ctx, POLY_OP_CAST, POLY_UINT32,
+      poly_uop2(ctx, POLY_OP_AND, POLY_UINT64, bits_u64, mask_u64, poly_arg_none()),
+      poly_arg_none()
+  );
+
   if (poly_dtype_eq(out_dt, POLY_FLOAT64)) {
-    PolyUOp *bits_hi =
-        poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
     PolyUOp *key2_t = poly_const_exact_int(ctx, POLY_UINT32, (int64_t)(mixed_key ^ 0x9E3779B9u));
-    PolyUOp *bits_lo =
-        poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key2_t, poly_arg_none());
-    PolyUOp *hi27 = poly_alu2(ctx, POLY_OP_SHR, bits_hi, poly_const_exact_int(ctx, POLY_UINT32, 5));
+    PolyUOp *key2_u64 =
+        poly_uop1(ctx, POLY_OP_CAST, POLY_UINT64, key2_t, poly_arg_none());
+    PolyUOp *bits2_u64 = poly_uop2(
+        ctx, POLY_OP_THREEFRY, POLY_UINT64, counter_u64, key2_u64, poly_arg_none()
+    );
+    PolyUOp *bits_lo = poly_uop1(
+        ctx, POLY_OP_CAST, POLY_UINT32,
+        poly_uop2(ctx, POLY_OP_AND, POLY_UINT64, bits2_u64, mask_u64, poly_arg_none()),
+        poly_arg_none()
+    );
+    PolyUOp *hi27 =
+        poly_alu2(ctx, POLY_OP_SHR, bits, poly_const_exact_int(ctx, POLY_UINT32, 5));
     PolyUOp *lo26 = poly_alu2(ctx, POLY_OP_SHR, bits_lo, poly_const_exact_int(ctx, POLY_UINT32, 6));
     PolyUOp *hi_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, hi27, poly_arg_none());
     PolyUOp *lo_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT64, lo26, poly_arg_none());
@@ -3254,7 +3812,6 @@ static PolyUOp *poly_rand_compute(
     return poly_alu2(ctx, POLY_OP_MUL, mant, cdt(ctx, POLY_FLOAT64, 1.0 / 9007199254740992.0));
   }
 
-  PolyUOp *bits = poly_uop2(ctx, POLY_OP_THREEFRY, POLY_UINT32, counter_t, key_t, poly_arg_none());
   PolyUOp *hi24 = poly_alu2(ctx, POLY_OP_SHR, bits, poly_const_exact_int(ctx, POLY_UINT32, 8));
   PolyUOp *as_f = poly_uop1(ctx, POLY_OP_CAST, out_dt, hi24, poly_arg_none());
   return poly_alu2(ctx, POLY_OP_MUL, as_f, cdt(ctx, out_dt, 1.0 / 16777216.0));
@@ -3333,12 +3890,7 @@ static PolyUOp *poly_linalg_full(
   return poly_full_from_scalar(ctx, shape, ndim, poly_const_typed(ctx, dt, value));
 }
 
-static PolyUOp *poly_linalg_eye_like(
-    PolyCtx *ctx,
-    const int64_t *shape,
-    int ndim,
-    PolyDType dt
-) {
+static PolyUOp *poly_linalg_eye_like(PolyCtx *ctx, const int64_t *shape, int ndim, PolyDType dt) {
   if (!ctx || !shape || ndim < 2 || shape[ndim - 2] != shape[ndim - 1]) return NULL;
   int64_t n = shape[ndim - 1];
   PolyUOp *rows = poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, n, 1, 7), (int64_t[]){n, 1}, 2);
@@ -3397,11 +3949,7 @@ static PolyUOp *poly_linalg_position_mask(
   return poly_alu2(ctx, POLY_OP_AND, rm_bc, cm_bc);
 }
 
-static PolyUOp *poly_linalg_onehot_pivot_mask(
-    PolyCtx *ctx,
-    PolyUOp *u,
-    int64_t k
-) {
+static PolyUOp *poly_linalg_onehot_pivot_mask(PolyCtx *ctx, PolyUOp *u, int64_t k) {
   int64_t shape[POLY_MAX_DIMS];
   int ndim = uop_shape(ctx, u, shape);
   if (ndim < 2 || shape[ndim - 2] != shape[ndim - 1]) return NULL;
@@ -3457,8 +4005,7 @@ static bool poly_linalg_broadcast_batch_shape(
     int *out_ndim
 ) {
   if (!a_shape || !b_shape || !out_shape || !out_ndim) return false;
-  if (a_ndim < 0 || b_ndim < 0 || a_ndim > POLY_MAX_DIMS || b_ndim > POLY_MAX_DIMS)
-    return false;
+  if (a_ndim < 0 || b_ndim < 0 || a_ndim > POLY_MAX_DIMS || b_ndim > POLY_MAX_DIMS) return false;
   int nd = a_ndim > b_ndim ? a_ndim : b_ndim;
   if (nd > POLY_MAX_DIMS) return false;
   for (int i = 0; i < nd; i++) {
@@ -3529,10 +4076,8 @@ static bool poly_linalg_prepare_system_inputs(
   int64_t a_shape[POLY_MAX_DIMS], b_shape[POLY_MAX_DIMS];
   int a_ndim = uop_shape(ctx, *a_io, a_shape);
   int b_ndim = uop_shape(ctx, *b_io, b_shape);
-  if (a_ndim < 2 || b_ndim < 1 || a_ndim > POLY_MAX_DIMS || b_ndim > POLY_MAX_DIMS)
-    return false;
-  if (a_shape[a_ndim - 2] != rhs_rows || a_shape[a_ndim - 1] != solution_rows)
-    return false;
+  if (a_ndim < 2 || b_ndim < 1 || a_ndim > POLY_MAX_DIMS || b_ndim > POLY_MAX_DIMS) return false;
+  if (a_shape[a_ndim - 2] != rhs_rows || a_shape[a_ndim - 1] != solution_rows) return false;
 
   int a_batch_ndim = a_ndim - 2;
   bool can_vector = b_shape[b_ndim - 1] == rhs_rows;
@@ -3556,8 +4101,7 @@ static bool poly_linalg_prepare_system_inputs(
   if (batch_ndim + 2 > POLY_MAX_DIMS) return false;
 
   int64_t a_tail[2] = {rhs_rows, solution_rows};
-  PolyUOp *a_bc =
-      poly_linalg_broadcast_last(ctx, *a_io, batch_shape, batch_ndim, a_tail, 2);
+  PolyUOp *a_bc = poly_linalg_broadcast_last(ctx, *a_io, batch_shape, batch_ndim, a_tail, 2);
   if (!a_bc) return false;
 
   int64_t nrhs = as_vector ? 1 : b_shape[b_ndim - 1];
@@ -3624,12 +4168,15 @@ static PolyUOp *poly_linalg_jacobi_rotation(
   PolyUOp *theta = poly_div(ctx, poly_sub(ctx, aqq, app), poly_mul(ctx, two, apq));
   PolyUOp *sign_theta = poly_where_op(ctx, poly_ge(ctx, theta, zero), one, neg_one);
   PolyUOp *t = poly_div(
-      ctx,
-      sign_theta,
-      poly_add(ctx, poly_abs(ctx, theta), poly_alu1(ctx, POLY_OP_SQRT, poly_add(ctx, poly_mul(ctx, theta, theta), one)))
+      ctx, sign_theta,
+      poly_add(
+          ctx, poly_abs(ctx, theta),
+          poly_alu1(ctx, POLY_OP_SQRT, poly_add(ctx, poly_mul(ctx, theta, theta), one))
+      )
   );
   t = poly_where_op(ctx, active, t, zero);
-  PolyUOp *c = poly_div(ctx, one, poly_alu1(ctx, POLY_OP_SQRT, poly_add(ctx, one, poly_mul(ctx, t, t))));
+  PolyUOp *c =
+      poly_div(ctx, one, poly_alu1(ctx, POLY_OP_SQRT, poly_add(ctx, one, poly_mul(ctx, t, t))));
   PolyUOp *s = poly_mul(ctx, t, c);
   c = poly_where_op(ctx, active, c, one);
   s = poly_where_op(ctx, active, s, zero);
@@ -3905,20 +4452,92 @@ PolyUOp *poly_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper)
 
 /* Reductions */
 
-PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
-  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
-  int ndim, out_ndim;
-  ndim = uop_shape(ctx, x, shape);
+/* Pinned ReduceMixin.sum casts to sum_acc_dtype, emits one REDUCE over the
+ * normalized axis tuple, reshapes away reduced axes when keepdim is false,
+ * then casts half/bfloat results back (mixin/reduce.py:13-23,
+ * dtype.py:274-278). Keep this root-level spelling reusable by the raw
+ * one-axis API and the Path-B Tensor-handle boundary. */
+static PolyUOp *sum_axes_root(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim) {
+  if (!ctx || !x || n_axes < 0 || n_axes > POLY_MAX_DIMS || (n_axes > 0 && !axes)) return NULL;
+  int64_t shape[POLY_MAX_DIMS], normalized[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
-  return do_reduce(ctx, POLY_OP_ADD, x, shape, ndim, axis, keepdim, out_shape, &out_ndim);
+  for (int i = 0; i < n_axes; i++) {
+    int64_t axis = axes[i] < 0 ? axes[i] + ndim : axes[i];
+    if (axis < 0 || axis >= ndim) return NULL;
+    normalized[i] = axis;
+  }
+
+  PolyDType input_dt = poly_dtype_scalar(x->dtype);
+  PolyDType acc_dt;
+  PolyDType floor_dt = poly_dtype_is_unsigned(input_dt) ? POLY_UINT32
+                       : (poly_dtype_is_int(input_dt) || poly_dtype_is_bool(input_dt))
+                           ? POLY_INT32
+                           : POLY_FLOAT32;
+  if (!poly_dtype_least_upper(input_dt, floor_dt, &acc_dt)) return NULL;
+  PolyUOp *acc_x = poly_dtype_eq(input_dt, acc_dt) ? x : poly_cast(ctx, x, acc_dt);
+  if (!acc_x) return NULL;
+
+  PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_ADD, acc_x, normalized, n_axes);
+  if (!reduced) return NULL;
+  if (!keepdim && n_axes > 0) {
+    int out_ndim = 0;
+    for (int i = 0; i < ndim; i++) {
+      bool reduced_axis = false;
+      for (int j = 0; j < n_axes; j++)
+        if (normalized[j] == i) {
+          reduced_axis = true;
+          break;
+        }
+      if (!reduced_axis) out_shape[out_ndim++] = shape[i];
+    }
+    reduced = poly_reshape(ctx, reduced, out_shape, out_ndim);
+  }
+  if (reduced && poly_dtype_is_float(input_dt) && !poly_dtype_eq(input_dt, acc_dt))
+    reduced = poly_cast(ctx, reduced, input_dt);
+  return reduced;
+}
+
+/* Pinned ReduceMixin._reduce normalizes the full axis tuple once, emits one
+ * UOp._rop REDUCE, and only then reshapes away reduced dimensions
+ * (mixin/reduce.py:12-17, tensor.py:552, uop/ops.py:567-569). */
+static PolyUOp *max_axes_root(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim) {
+  if (!ctx || !x || n_axes < 0 || n_axes > POLY_MAX_DIMS || (n_axes > 0 && !axes)) return NULL;
+  int64_t shape[POLY_MAX_DIMS], normalized[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
+  int ndim = uop_shape(ctx, x, shape);
+  if (ndim < 0) return NULL;
+  for (int i = 0; i < n_axes; i++) {
+    int64_t axis = axes[i] < 0 ? axes[i] + ndim : axes[i];
+    if (axis < 0 || axis >= ndim) return NULL;
+    normalized[i] = axis;
+  }
+
+  PolyUOp *reduced = poly_reduce_axis(ctx, POLY_OP_MAX, x, normalized, n_axes);
+  if (!reduced) return NULL;
+  if (!keepdim && n_axes > 0) {
+    int out_ndim = 0;
+    for (int i = 0; i < ndim; i++) {
+      bool reduced_axis = false;
+      for (int j = 0; j < n_axes; j++)
+        if (normalized[j] == i) {
+          reduced_axis = true;
+          break;
+        }
+      if (!reduced_axis) out_shape[out_ndim++] = shape[i];
+    }
+    reduced = poly_reshape(ctx, reduced, out_shape, out_ndim);
+  }
+  return reduced;
+}
+
+PolyUOp *poly_sum_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
+  int64_t axis64 = axis;
+  return sum_axes_root(ctx, x, &axis64, 1, keepdim != 0);
 }
 
 PolyUOp *poly_max_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
-  int64_t shape[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
-  int ndim, out_ndim;
-  ndim = uop_shape(ctx, x, shape);
-  if (ndim < 0) return NULL;
-  return do_reduce(ctx, POLY_OP_MAX, x, shape, ndim, axis, keepdim, out_shape, &out_ndim);
+  int64_t axis64 = axis;
+  return max_axes_root(ctx, x, &axis64, 1, keepdim != 0);
 }
 
 PolyUOp *poly_mean_reduce(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
@@ -4122,8 +4741,6 @@ static PolyUOp *poly_qr_column(PolyCtx *ctx, PolyUOp *r, int64_t col) {
   return poly_reshape(ctx, s, out_shape, ndim - 1);
 }
 
-static PolyUOp *poly_unsqueeze_axis(PolyCtx *ctx, PolyUOp *x, int axis);
-
 /* tinygrad Tensor.qr -- mixin/__init__.py:1703
  * Householder QR in tensor composition form.  For integer input tinygrad's
  * sqrt/div path promotes to float; Polygrad mirrors that by casting to f32. */
@@ -4151,8 +4768,7 @@ static int poly_qr_complete(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp *
   q_shape[ndim - 1] = m;
 
   PolyUOp *eye_bool = poly_eq(
-      ctx,
-      poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, m, 1, 7), (int64_t[]){m, 1}, 2),
+      ctx, poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, m, 1, 7), (int64_t[]){m, 1}, 2),
       poly_reshape(ctx, poly_arange_int_by_id(ctx, 0, m, 1, 7), (int64_t[]){1, m}, 2)
   );
   PolyUOp *q = poly_dtype_is_bool(dt) ? eye_bool : poly_cast(ctx, eye_bool, dt);
@@ -4196,11 +4812,8 @@ static int poly_qr_complete(PolyCtx *ctx, PolyUOp *x, PolyUOp **out_q, PolyUOp *
 
     PolyUOp *safe_norm = poly_where_op(ctx, active, norm, one);
     PolyUOp *w_scale = poly_div(ctx, poly_mul(ctx, sgn, u0), safe_norm);
-    PolyUOp *w = poly_mul(
-        ctx,
-        poly_unsqueeze_axis(ctx, poly_where_op(ctx, active, w_scale, zero), -1),
-        v
-    );
+    PolyUOp *w =
+        poly_mul(ctx, poly_unsqueeze_axis(ctx, poly_where_op(ctx, active, w_scale, zero), -1), v);
 
     PolyUOp *v_t = poly_transpose_last2(ctx, v);
     PolyUOp *w_t = poly_transpose_last2(ctx, w);
@@ -4391,59 +5004,173 @@ PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
 /* Softmax */
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
+  if (!ctx || !x) return NULL;
   int64_t shape[POLY_MAX_DIMS];
   int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
-  PolyUOp *x_view = reshape_logical_input(ctx, x, shape, ndim);
-  if (!x_view) return NULL;
+  if (axis < 0 || axis >= ndim) return NULL;
 
   int64_t max_shape[8];
   int max_ndim;
-  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1, max_shape, &max_ndim);
-  PolyUOp *m_exp = poly_expand(ctx, m, (int64_t *)shape, ndim);
-  /* tinygrad Tensor._softmax builds subtraction through Tensor.sub, which is
-   * `a + (b * -1)`. Preserve that high-level graph shape here instead of
-   * emitting a direct SUB: vector/broadcast lowering keeps the repeated
-   * multiply-by-minus-one form through the final renderer pass. */
-  PolyUOp *neg_m = poly_alu2(
-      ctx, POLY_OP_MUL, m_exp, poly_uop0(ctx, POLY_OP_CONST, m_exp->dtype, poly_arg_float(-1.0))
-  );
-  PolyUOp *shifted = poly_alu2(ctx, POLY_OP_ADD, x_view, neg_m);
+  /* Pinned _softmax detaches the keepdim MAX before subtraction
+   * (mixin/__init__.py:743-747). */
+  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x, shape, ndim, axis, 1, max_shape, &max_ndim);
+  m = m ? poly_detach(ctx, m) : NULL;
+  PolyUOp *m_exp = m ? poly_expand(ctx, m, (int64_t *)shape, ndim) : NULL;
+  PolyUOp *shifted = m_exp ? poly_sub(ctx, x, m_exp) : NULL;
   PolyUOp *e = poly_exp(ctx, shifted);
+  if (!e) return NULL;
 
-  int64_t sum_shape[8];
-  int sum_ndim;
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1, sum_shape, &sum_ndim);
-  PolyUOp *s_exp = poly_expand(ctx, s, (int64_t *)shape, ndim);
-
-  return poly_alu2(ctx, POLY_OP_FDIV, e, s_exp);
+  PolyUOp *s = poly_sum_reduce(ctx, e, axis, 1);
+  /* Pinned softmax is e * ss.reciprocal(), with ordinary broadcast
+   * (mixin/__init__.py:749-770). */
+  PolyUOp *reciprocal = s ? poly_alu1(ctx, POLY_OP_RECIPROCAL, s) : NULL;
+  return reciprocal ? poly_mul(ctx, e, reciprocal) : NULL;
 }
 
 PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
+  if (!ctx || !x) return NULL;
   int64_t shape[POLY_MAX_DIMS];
   int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
   if (axis < 0) axis += ndim;
-  PolyUOp *x_view = reshape_logical_input(ctx, x, shape, ndim);
-  if (!x_view) return NULL;
+  if (axis < 0 || axis >= ndim) return NULL;
 
   int64_t max_shape[8];
   int max_ndim;
-  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x_view, shape, ndim, axis, 1, max_shape, &max_ndim);
-  PolyUOp *m_exp = poly_expand(ctx, m, (int64_t *)shape, ndim);
-  PolyUOp *shifted = poly_alu2(ctx, POLY_OP_SUB, x_view, m_exp);
+  PolyUOp *m = do_reduce(ctx, POLY_OP_MAX, x, shape, ndim, axis, 1, max_shape, &max_ndim);
+  m = m ? poly_detach(ctx, m) : NULL;
+  PolyUOp *m_exp = m ? poly_expand(ctx, m, (int64_t *)shape, ndim) : NULL;
+  PolyUOp *shifted = m_exp ? poly_sub(ctx, x, m_exp) : NULL;
   PolyUOp *e = poly_exp(ctx, shifted);
+  if (!e) return NULL;
 
-  int64_t sum_shape[8];
-  int sum_ndim;
-  PolyUOp *s = do_reduce(ctx, POLY_OP_ADD, e, shape, ndim, axis, 1, sum_shape, &sum_ndim);
+  PolyUOp *s = poly_sum_reduce(ctx, e, axis, 1);
   PolyUOp *log_s = poly_log(ctx, s);
-  PolyUOp *log_s_exp = poly_expand(ctx, log_s, (int64_t *)shape, ndim);
+  /* Pinned log_softmax is m - ss.log(), with subtraction and broadcasting
+   * supplied by the same high-level helpers (mixin/__init__.py:772-793). */
+  return log_s ? poly_sub(ctx, shifted, log_s) : NULL;
+}
 
-  return poly_alu2(ctx, POLY_OP_SUB, shifted, log_s_exp);
+/* Path B applies composed Tensor methods independently to the retained logical
+ * root and exact current physical occurrence. This is the same ordered
+ * Tensor.uop construction as tinygrad's _apply_uop (tensor.py:128-140);
+ * frontends receive a complete PolyTensor and perform no identity
+ * substitution. */
+PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = poly_exp(ctx, src->uop_logical);
+  PolyUOp *physical = poly_exp(ctx, current);
+  return tensor_unary_result(ctx, src, logical, physical);
+}
+
+PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = poly_log(ctx, src->uop_logical);
+  PolyUOp *physical = poly_log(ctx, current);
+  return tensor_unary_result(ctx, src, logical, physical);
+}
+
+PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, poly_gelu(ctx, src->uop_logical), poly_gelu(ctx, src->uop_physical)
+  );
+}
+
+PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, poly_quick_gelu(ctx, src->uop_logical), poly_quick_gelu(ctx, src->uop_physical)
+  );
+}
+
+PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyTensor *out =
+      tensor_unary_result(ctx, src, poly_detach(ctx, src->uop_logical), poly_detach(ctx, current));
+  if (!out) return NULL;
+  out->requires_grad = false;
+  out->requires_grad_set = true;
+  return out;
+}
+
+PolyTensor *poly_tensor_sum(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = sum_axes_root(ctx, src->uop_logical, axes, n_axes, keepdim);
+  PolyUOp *physical = sum_axes_root(ctx, current, axes, n_axes, keepdim);
+  return tensor_unary_result(ctx, src, logical, physical);
+}
+
+PolyTensor *poly_tensor_max(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t *axes,
+    int n_axes,
+    bool keepdim
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = max_axes_root(ctx, src->uop_logical, axes, n_axes, keepdim);
+  PolyUOp *physical = max_axes_root(ctx, current, axes, n_axes, keepdim);
+  return tensor_unary_result(ctx, src, logical, physical);
+}
+
+PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
+  PolyUOp *a_current = tensor_current_uop(a);
+  PolyUOp *b_current = tensor_current_uop(b);
+  if (!ctx || !a || !b || !a->uop_logical || !b->uop_logical || !a_current || !b_current)
+    return NULL;
+  /* Pinned Tensor._apply_uop consumes ordered current Tensor.uop operands and
+   * minimum is inverse -> maximum -> inverse
+   * (tensor.py:128-140; mixin/elementwise.py:366-393). Path B builds that
+   * program independently for each retained/executable root. */
+  PolyUOp *logical = poly_minimum(ctx, a->uop_logical, b->uop_logical);
+  PolyUOp *physical = poly_minimum(ctx, a_current, b_current);
+  if (!logical || !physical) return NULL;
+  PolyTensor *inputs[2] = {a, b};
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
+}
+
+PolyTensor *poly_tensor_dot(PolyCtx *ctx, PolyTensor *src, PolyTensor *weight) {
+  PolyUOp *current = tensor_current_uop(src);
+  PolyUOp *weight_current = tensor_current_uop(weight);
+  if (!ctx || !src || !weight || !src->uop_logical || !weight->uop_logical || !current ||
+      !weight_current)
+    return NULL;
+  PolyUOp *logical = poly_dot(ctx, src->uop_logical, weight->uop_logical);
+  PolyUOp *physical = poly_dot(ctx, current, weight_current);
+  PolyTensor *inputs[2] = {src, weight};
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
+}
+
+PolyTensor *poly_tensor_softmax(PolyCtx *ctx, PolyTensor *src, int axis) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = poly_softmax(ctx, src->uop_logical, axis);
+  PolyUOp *physical = poly_softmax(ctx, current, axis);
+  return tensor_unary_result(ctx, src, logical, physical);
+}
+
+PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  PolyUOp *logical = poly_log_softmax(ctx, src->uop_logical, axis);
+  PolyUOp *physical = poly_log_softmax(ctx, current, axis);
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyUOp *poly_cross_entropy(PolyCtx *ctx, PolyUOp *logits, PolyUOp *target, int axis) {
@@ -4638,12 +5365,9 @@ static PolyUOp *poly_pad_with_scalar_nonnegative(
   int64_t shape[POLY_MAX_DIMS];
   int xndim = uop_shape(ctx, x, shape);
   if (xndim != ndim) return NULL;
-  bool any_pad = false;
   for (int i = 0; i < ndim; i++) {
     if (pads[i][0] < 0 || pads[i][1] < 0) return NULL;
-    any_pad = any_pad || pads[i][0] != 0 || pads[i][1] != 0;
   }
-  if (!any_pad) return x;
 
   PolyUOp *padded_x = poly_pad(ctx, x, pads, ndim);
   if (!padded_x) return NULL;
@@ -4651,8 +5375,11 @@ static PolyUOp *poly_pad_with_scalar_nonnegative(
   int64_t ones_shape[POLY_MAX_DIMS];
   for (int i = 0; i < ndim; i++)
     ones_shape[i] = 1;
-  PolyUOp *one = poly_const_typed(ctx, POLY_BOOL, 1.0);
+  PolyUOp *one = poly_const_typed(ctx, poly_dtype_scalar(x->dtype), 1.0);
   PolyUOp *mask = poly_expand(ctx, poly_reshape(ctx, one, ones_shape, ndim), shape, ndim);
+  if (mask && !poly_dtype_is_bool(poly_dtype_scalar(mask->dtype)))
+    mask = poly_cast(ctx, mask, POLY_BOOL);
+  if (!mask) return NULL;
   PolyUOp *padded_mask = poly_pad(ctx, mask, pads, ndim);
   return poly_where_op(ctx, padded_mask, padded_x, value);
 }
@@ -4792,8 +5519,10 @@ int poly_sort(
   PolyUOp *sorted_us = poly_unsqueeze_axis(ctx, cur, dim);
   if (!orig_us || !sorted_us) return -1;
   PolyUOp *value_eq = poly_eq(ctx, orig_us, sorted_us);
-  PolyUOp *count_eq =
-      poly_eq(ctx, poly_unsqueeze_axis(ctx, count_orig, dim + 1), poly_unsqueeze_axis(ctx, count_sorted, dim));
+  PolyUOp *count_eq = poly_eq(
+      ctx, poly_unsqueeze_axis(ctx, count_orig, dim + 1),
+      poly_unsqueeze_axis(ctx, count_sorted, dim)
+  );
   if (!value_eq || !count_eq) return -1;
   int64_t cond_shape[POLY_MAX_DIMS];
   int cond_ndim = 0;
@@ -4808,7 +5537,14 @@ int poly_sort(
   int64_t idx_shape[POLY_MAX_DIMS];
   for (int i = 0; i < orig_ndim; i++)
     idx_shape[i] = (i == dim) ? orig_len : 1;
-  idx = poly_reshape(ctx, idx, idx_shape, orig_ndim);
+  /* tinygrad/mixin/movement.py:145-165: Tensor.reshape returns the input when
+   * the requested shape is unchanged. */
+  int64_t current_idx_shape[POLY_MAX_DIMS];
+  int current_idx_ndim = uop_shape(ctx, idx, current_idx_shape);
+  bool idx_shape_matches = current_idx_ndim == orig_ndim;
+  for (int i = 0; idx_shape_matches && i < orig_ndim; i++)
+    idx_shape_matches = current_idx_shape[i] == idx_shape[i];
+  if (!idx_shape_matches) idx = poly_reshape(ctx, idx, idx_shape, orig_ndim);
   idx = poly_unsqueeze_axis(ctx, idx, dim + 1);
   if (!idx) return -1;
 
@@ -4823,6 +5559,41 @@ int poly_sort(
 
   *out_values = cur;
   *out_indices = idx_sum;
+  return 0;
+}
+
+int poly_tensor_sort(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int dim,
+    int descending,
+    PolyTensor **out_values,
+    PolyTensor **out_indices
+) {
+  if (!out_values || !out_indices) return -1;
+  *out_values = NULL;
+  *out_indices = NULL;
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
+
+  /* tinygrad/mixin/__init__.py:994-1044 constructs both sort results from
+   * the exact input Tensor.uop. Path B applies that program independently to
+   * the retained logical root and mandatory physical occurrence. */
+  PolyUOp *logical_values = NULL, *logical_indices = NULL;
+  PolyUOp *physical_values = NULL, *physical_indices = NULL;
+  if (poly_sort(ctx, src->uop_logical, dim, descending, &logical_values, &logical_indices) != 0 ||
+      poly_sort(ctx, src->uop_physical, dim, descending, &physical_values, &physical_indices) != 0)
+    return -1;
+
+  PolyTensor *values = tensor_unary_result(ctx, src, logical_values, physical_values);
+  PolyTensor *indices = poly_tensor_create_with_roots(
+      ctx, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
+  );
+  if (!values || !indices) return -1;
+  indices->requires_grad = false;
+  indices->requires_grad_set = true;
+  indices->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  *out_values = values;
+  *out_indices = indices;
   return 0;
 }
 
@@ -4862,18 +5633,62 @@ int poly_topk(
   return (*out_values && *out_indices) ? 0 : -1;
 }
 
+int poly_tensor_topk(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t k,
+    int dim,
+    int largest,
+    int sorted,
+    PolyTensor **out_values,
+    PolyTensor **out_indices
+) {
+  if (!out_values || !out_indices) return -1;
+  *out_values = NULL;
+  *out_indices = NULL;
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
+
+  /* Pinned tinygrad/mixin/__init__.py:1057-1077 applies sort+shrink_to to the
+   * exact current Tensor.uop. Path B applies that unchanged program
+   * independently to the retained logical root and mandatory physical
+   * occurrence, exactly like poly_tensor_sort above. */
+  PolyUOp *logical_values = NULL, *logical_indices = NULL;
+  PolyUOp *physical_values = NULL, *physical_indices = NULL;
+  if (poly_topk(
+          ctx, src->uop_logical, k, dim, largest, sorted, &logical_values, &logical_indices
+      ) != 0 ||
+      poly_topk(
+          ctx, src->uop_physical, k, dim, largest, sorted, &physical_values,
+          &physical_indices
+      ) != 0)
+    return -1;
+
+  PolyTensor *values = tensor_unary_result(ctx, src, logical_values, physical_values);
+  PolyTensor *indices = poly_tensor_create_with_roots(
+      ctx, logical_indices, physical_indices, POLY_TENSOR_VALUE, src->device
+  );
+  if (!values || !indices) return -1;
+  indices->requires_grad = false;
+  indices->requires_grad_set = true;
+  indices->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  *out_values = values;
+  *out_indices = indices;
+  return 0;
+}
+
 /* Einsum */
 
 #define MAX_EINSUM_TENSORS 8
 
 PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n_tensors) {
-  if (!formula || n_tensors <= 0 || n_tensors > MAX_EINSUM_TENSORS) return NULL;
+  if (!ctx || !formula || !tensors || n_tensors <= 0 || n_tensors > MAX_EINSUM_TENSORS) return NULL;
 
   /* Read shapes from UOps */
   int64_t shape_store[MAX_EINSUM_TENSORS][POLY_MAX_DIMS];
   const int64_t *shapes[MAX_EINSUM_TENSORS];
   int ndims[MAX_EINSUM_TENSORS];
   for (int t = 0; t < n_tensors; t++) {
+    if (!tensors[t] || !poly_ctx_owns_ptr(ctx, tensors[t])) return NULL;
     ndims[t] = uop_shape(ctx, tensors[t], shape_store[t]);
     shapes[t] = shape_store[t];
     if (ndims[t] < 0) return NULL;
@@ -5166,15 +5981,17 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
 
 /* Rearrange (einops) */
 
-#define MAX_REARRANGE_TOKENS 32
+#define MAX_REARRANGE_TOKENS POLY_MAX_DIMS
+#define MAX_REARRANGE_TOKEN_BYTES 256
 
 static int parse_rearrange_side(
     const char *s,
-    char tokens[][32],
+    char tokens[][MAX_REARRANGE_TOKEN_BYTES],
     int *n_tokens,
     int groups[][2],
     int *n_groups
 ) {
+  if (!s || !tokens || !n_tokens || !groups || !n_groups) return -1;
   *n_tokens = 0;
   *n_groups = 0;
   int paren_start = -1;
@@ -5186,28 +6003,31 @@ static int parse_rearrange_side(
     if (!*p) break;
 
     if (*p == '(') {
+      if (paren_start >= 0) return -1;
       paren_start = *n_tokens;
       p++;
       continue;
     }
     if (*p == ')') {
-      if (paren_start >= 0) {
-        groups[*n_groups][0] = paren_start;
-        groups[*n_groups][1] = *n_tokens;
-        (*n_groups)++;
-      }
+      if (paren_start < 0 || *n_groups >= MAX_REARRANGE_TOKENS) return -1;
+      groups[*n_groups][0] = paren_start;
+      groups[*n_groups][1] = *n_tokens;
+      (*n_groups)++;
       paren_start = -1;
       p++;
       continue;
     }
 
-    int ti = 0;
-    while (*p && *p != ' ' && *p != '\t' && *p != '(' && *p != ')' && ti < 31)
+    if (*n_tokens >= MAX_REARRANGE_TOKENS) return -1;
+    size_t ti = 0;
+    while (*p && *p != ' ' && *p != '\t' && *p != '(' && *p != ')') {
+      if (ti + 1 >= MAX_REARRANGE_TOKEN_BYTES) return -1;
       tokens[*n_tokens][ti++] = *p++;
+    }
     tokens[*n_tokens][ti] = '\0';
     (*n_tokens)++;
-    if (*n_tokens >= MAX_REARRANGE_TOKENS) break;
   }
+  if (paren_start >= 0) return -1;
   return *n_tokens;
 }
 
@@ -5242,27 +6062,47 @@ PolyUOp *poly_rearrange(
     const int64_t *axis_values,
     int n_axis_sizes
 ) {
-  if (!formula || !x) return NULL;
+  if (!ctx || !formula || !x || !poly_ctx_owns_ptr(ctx, x) || n_axis_sizes < 0 ||
+      n_axis_sizes > POLY_MAX_DIMS || (n_axis_sizes > 0 && (!axis_names || !axis_values)))
+    return NULL;
+  for (int i = 0; i < n_axis_sizes; i++)
+    if (axis_values[i] <= 0) return NULL;
   int64_t shape[POLY_MAX_DIMS];
   int ndim;
   ndim = uop_shape(ctx, x, shape);
   if (ndim < 0) return NULL;
 
   const char *arrow_pos = strstr(formula, "->");
-  if (!arrow_pos) return NULL;
+  if (!arrow_pos || strstr(arrow_pos + 2, "->")) return NULL;
 
   char lhs_str[256], rhs_str[256];
-  int lhs_len = (int)(arrow_pos - formula);
+  size_t lhs_len = (size_t)(arrow_pos - formula);
+  size_t rhs_len = strlen(arrow_pos + 2);
+  if (lhs_len >= sizeof(lhs_str) || rhs_len >= sizeof(rhs_str)) return NULL;
   memcpy(lhs_str, formula, lhs_len);
   lhs_str[lhs_len] = '\0';
-  strcpy(rhs_str, arrow_pos + 2);
+  memcpy(rhs_str, arrow_pos + 2, rhs_len + 1);
 
-  char lhs_tok[MAX_REARRANGE_TOKENS][32], rhs_tok[MAX_REARRANGE_TOKENS][32];
-  int lhs_grp[8][2], rhs_grp[8][2];
+  char lhs_tok[MAX_REARRANGE_TOKENS][MAX_REARRANGE_TOKEN_BYTES];
+  char rhs_tok[MAX_REARRANGE_TOKENS][MAX_REARRANGE_TOKEN_BYTES];
+  int lhs_grp[MAX_REARRANGE_TOKENS][2], rhs_grp[MAX_REARRANGE_TOKENS][2];
   int n_lt = 0, n_rt = 0, n_lg = 0, n_rg = 0;
 
-  parse_rearrange_side(lhs_str, lhs_tok, &n_lt, lhs_grp, &n_lg);
-  parse_rearrange_side(rhs_str, rhs_tok, &n_rt, rhs_grp, &n_rg);
+  if (parse_rearrange_side(lhs_str, lhs_tok, &n_lt, lhs_grp, &n_lg) < 0 ||
+      parse_rearrange_side(rhs_str, rhs_tok, &n_rt, rhs_grp, &n_rg) < 0)
+    return NULL;
+  if (n_lt != n_rt) return NULL;
+  bool used_lhs[MAX_REARRANGE_TOKENS] = {0};
+  for (int i = 0; i < n_rt; i++) {
+    int match = -1;
+    for (int j = 0; j < n_lt; j++) {
+      if (strcmp(rhs_tok[i], lhs_tok[j]) != 0) continue;
+      if (match >= 0 || used_lhs[j]) return NULL;
+      match = j;
+    }
+    if (match < 0) return NULL;
+    used_lhs[match] = true;
+  }
 
   PolyUOp *result = x;
   int64_t cur_shape[POLY_MAX_DIMS];
@@ -5307,12 +6147,15 @@ PolyUOp *poly_rearrange(
               sub[i] = -1;
             }
           }
-          if (sub[i] > 0) known *= sub[i];
+          if (sub[i] > 0 && __builtin_mul_overflow(known, sub[i], &known)) return NULL;
         }
         if (unk >= 0) {
-          if (input_dim >= cur_ndim) return NULL;
+          if (input_dim >= cur_ndim || known <= 0 || cur_shape[input_dim] < 0 ||
+              cur_shape[input_dim] % known != 0)
+            return NULL;
           sub[unk] = cur_shape[input_dim] / known;
         }
+        if (new_ndim > POLY_MAX_DIMS - gc) return NULL;
         for (int i = 0; i < gc; i++)
           new_shape[new_ndim++] = sub[i];
         input_dim++;
@@ -5328,15 +6171,18 @@ PolyUOp *poly_rearrange(
         ti++;
       }
     }
+    if (input_dim != cur_ndim || new_ndim != n_lt) return NULL;
 
     if (new_ndim != cur_ndim || memcmp(new_shape, cur_shape, cur_ndim * sizeof(int64_t)) != 0) {
       result = poly_reshape(ctx, result, new_shape, new_ndim);
+      if (!result) return NULL;
       memcpy(cur_shape, new_shape, new_ndim * sizeof(int64_t));
       cur_ndim = new_ndim;
     }
   }
 
   /* Phase 2: Permute (lhs order -> rhs order) */
+  if (cur_ndim != n_lt) return NULL;
   int64_t perm[POLY_MAX_DIMS];
   bool need_perm = false;
   for (int i = 0; i < n_rt; i++) {
@@ -5351,6 +6197,7 @@ PolyUOp *poly_rearrange(
   }
   if (need_perm) {
     result = poly_permute(ctx, result, perm, n_rt);
+    if (!result) return NULL;
     int64_t ps[POLY_MAX_DIMS];
     for (int i = 0; i < n_rt; i++)
       ps[i] = cur_shape[perm[i]];
@@ -5363,8 +6210,9 @@ PolyUOp *poly_rearrange(
     int gs = rhs_grp[g][0], ge = rhs_grp[g][1];
     if (ge - gs <= 1) continue;
     int64_t flat = 1;
-    for (int i = gs; i < ge && i < cur_ndim; i++)
-      flat *= cur_shape[i];
+    if (gs < 0 || ge > cur_ndim) return NULL;
+    for (int i = gs; i < ge; i++)
+      if (cur_shape[i] < 0 || __builtin_mul_overflow(flat, cur_shape[i], &flat)) return NULL;
     int64_t ns[POLY_MAX_DIMS];
     int nn = 0;
     for (int i = 0; i < gs; i++)
@@ -5373,6 +6221,7 @@ PolyUOp *poly_rearrange(
     for (int i = ge; i < cur_ndim; i++)
       ns[nn++] = cur_shape[i];
     result = poly_reshape(ctx, result, ns, nn);
+    if (!result) return NULL;
     memcpy(cur_shape, ns, nn * sizeof(int64_t));
     cur_ndim = nn;
   }
@@ -5410,28 +6259,28 @@ PolyUOp *poly_gather_dim(PolyCtx *ctx, PolyUOp *x, int dim, PolyUOp *index) {
   PolyUOp *xg = poly_permute(ctx, xu, perm, xu_ndim);
   if (!xg) return NULL;
 
-  int arange_dtype_id = (shape[dim] > (int64_t)INT32_MAX) ? poly_dtype_id_by_name("int64")
-                                                          : poly_dtype_id_by_name("int32");
-  PolyUOp *ar = poly_arange_int_by_id(ctx, 0, shape[dim], 1, arange_dtype_id);
-  if (!ar) return NULL;
-
   PolyUOp *index_u = poly_unsqueeze_axis(ctx, index, -1);
   if (!index_u) return NULL;
-
-  int64_t ar_shape[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++)
-    ar_shape[i] = 1;
-  ar_shape[ndim] = shape[dim];
-  PolyUOp *ar_r = poly_reshape(ctx, ar, ar_shape, ndim + 1);
-  if (!ar_r) return NULL;
-
-  PolyUOp *mask = poly_eq(ctx, index_u, ar_r);
+  PolyUOp *mask = one_hot_along_dim(ctx, index_u, shape[dim], -1);
   if (!mask) return NULL;
-  PolyUOp *zero = poly_alu2(ctx, POLY_OP_MUL, xg, cf(ctx, xg, 0.0));
-  if (!zero) return NULL;
-  PolyUOp *selected = poly_where_op(ctx, mask, xg, zero);
+  /* Pinned gather spells this as `mask.where(x, 0)` and explicitly retains
+   * x.dtype through the reduction (mixin/__init__.py:1123-1124). */
+  PolyUOp *selected =
+      poly_where_op(ctx, mask, xg, poly_const_typed(ctx, poly_dtype_scalar(xg->dtype), 0.0));
   if (!selected) return NULL;
-  return poly_sum_reduce(ctx, selected, -1, 0);
+  return sum_axis_keep_dtype(ctx, selected, -1);
+}
+
+PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index) {
+  PolyUOp *x_current = tensor_current_uop(x);
+  PolyUOp *index_current = tensor_current_uop(index);
+  if (!ctx || !x || !index || !x->uop_logical || !index->uop_logical || !x_current ||
+      !index_current)
+    return NULL;
+  PolyUOp *logical = poly_gather_dim(ctx, x->uop_logical, dim, index->uop_logical);
+  PolyUOp *physical = poly_gather_dim(ctx, x_current, dim, index_current);
+  PolyTensor *inputs[2] = {x, index};
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
 }
 
 typedef struct {
@@ -5637,7 +6486,10 @@ PolyUOp *poly_scatter_reduce(
   PolyUOp *one = poly_const_typed(ctx, dt, 1.0);
   if (!zero || !one) return NULL;
 
-  PolyUOp *mask_i = poly_where_op(ctx, p.mask, poly_const_exact_int(ctx, POLY_INT32, 1), poly_const_exact_int(ctx, POLY_INT32, 0));
+  PolyUOp *mask_i = poly_where_op(
+      ctx, p.mask, poly_const_exact_int(ctx, POLY_INT32, 1),
+      poly_const_exact_int(ctx, POLY_INT32, 0)
+  );
   PolyUOp *count = poly_reduce_last_drop(ctx, POLY_OP_ADD, mask_i, p.self_shape, p.ndim);
   if (!count) return NULL;
   PolyUOp *no_hit = poly_eq(ctx, count, poly_const_exact_int(ctx, POLY_INT32, 0));
@@ -5652,8 +6504,10 @@ PolyUOp *poly_scatter_reduce(
     if (strcmp(reduce, "sum") == 0) return total;
 
     PolyUOp *inc = include_self ? poly_const_exact_int(ctx, POLY_INT32, 1)
-                                : poly_where_op(ctx, no_hit, poly_const_exact_int(ctx, POLY_INT32, 1),
-                                                poly_const_exact_int(ctx, POLY_INT32, 0));
+                                : poly_where_op(
+                                      ctx, no_hit, poly_const_exact_int(ctx, POLY_INT32, 1),
+                                      poly_const_exact_int(ctx, POLY_INT32, 0)
+                                  );
     PolyUOp *den = poly_add(ctx, count, inc);
     den = poly_cast(ctx, den, dt);
     return poly_div(ctx, total, den);
@@ -5674,9 +6528,16 @@ PolyUOp *poly_scatter_reduce(
     PolyUOp *selected = poly_where_op(ctx, p.mask, p.src, fill);
     PolyUOp *reduced = NULL;
     if (is_min) {
-      PolyUOp *neg = poly_alu1(ctx, POLY_OP_NEG, selected);
-      PolyUOp *max_neg = poly_reduce_last_drop(ctx, POLY_OP_MAX, neg, p.self_shape, p.ndim);
-      reduced = max_neg ? poly_alu1(ctx, POLY_OP_NEG, max_neg) : NULL;
+      /* Pinned scatter amin calls Tensor.min, whose integer path is
+       * inverse/MAX/inverse (mixin/__init__.py:1206-1211,
+       * mixin/elementwise.py:379-393). */
+      PolyUOp *inverse = minimum_inverse(ctx, selected);
+      PolyUOp *max_inverse =
+          inverse ? poly_reduce_last_drop(
+                        ctx, POLY_OP_MAX, inverse, p.self_shape, p.ndim
+                    )
+                  : NULL;
+      reduced = max_inverse ? minimum_inverse(ctx, max_inverse) : NULL;
     } else
       reduced = poly_reduce_last_drop(ctx, POLY_OP_MAX, selected, p.self_shape, p.ndim);
     if (!reduced) return NULL;
@@ -5688,7 +6549,14 @@ PolyUOp *poly_scatter_reduce(
   return NULL;
 }
 
-PolyUOp *poly_scatter(PolyCtx *ctx, PolyUOp *self, int dim, PolyUOp *index, PolyUOp *src, const char *reduce) {
+PolyUOp *poly_scatter(
+    PolyCtx *ctx,
+    PolyUOp *self,
+    int dim,
+    PolyUOp *index,
+    PolyUOp *src,
+    const char *reduce
+) {
   if (reduce && strcmp(reduce, "add") == 0)
     return poly_scatter_reduce(ctx, self, dim, index, src, "sum", 1);
   if (reduce && strcmp(reduce, "multiply") == 0)
@@ -5856,7 +6724,7 @@ PolyUOp *poly_repeat_interleave(PolyCtx *ctx, PolyUOp *x, int repeats, int dim) 
   return poly_reshape(ctx, r, flat, ndim);
 }
 
-PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis) {
+PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis, int keepdim) {
   int64_t shape[POLY_MAX_DIMS];
   int ndim;
   ndim = uop_shape(ctx, x, shape);
@@ -5869,29 +6737,49 @@ PolyUOp *poly_argmax(PolyCtx *ctx, PolyUOp *x, int axis) {
   int64_t max_shape[POLY_MAX_DIMS];
   int max_ndim;
   PolyUOp *x_max = do_reduce(ctx, POLY_OP_MAX, x, shape, ndim, axis, 1, max_shape, &max_ndim);
-  PolyUOp *x_max_bc = poly_expand(ctx, x_max, shape, ndim);
-  PolyUOp *m = poly_eq(ctx, x, x_max_bc);
+  /* Pinned `self.eq(self.max(..., keepdim=True))` delegates broadcast to
+   * `_broadcast_to`, which returns the reduced root unchanged when a
+   * singleton axis already gives the input shape (mixin/__init__.py:959,
+   * mixin/movement.py:116-128). */
+  PolyUOp *m = poly_eq(ctx, x, x_max);
 
-  PolyUOp *m_f = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, m, poly_arg_none());
-
-  PolyUOp *rng = poly_arange(ctx, 0.0, (double)N, 1.0);
-  PolyUOp *desc = poly_alu2(ctx, POLY_OP_SUB, poly_const_float(ctx, (double)N), rng);
-
-  int64_t bc[POLY_MAX_DIMS];
-  for (int i = 0; i < ndim; i++)
-    bc[i] = 1;
-  bc[axis] = N;
-  desc = poly_reshape(ctx, desc, bc, ndim);
-  desc = poly_expand(ctx, desc, shape, ndim);
-
-  PolyUOp *idx = poly_alu2(ctx, POLY_OP_MUL, m_f, desc);
+  /* Pinned tinygrad/mixin/__init__.py:944-963:
+   *   m = self.eq(self.max(axis=axis, keepdim=True))
+   *   idx = m * arange(N, 0, -1).reshape(N, *[1] * trailing)
+   *   (N - idx.max(axis=axis, keepdim=keepdim)).cast(int32)
+   * `arange` is default_int and Tensor promotion casts the bool mask to it. */
+  PolyUOp *m_i = poly_cast(ctx, m, POLY_INT32);
+  PolyUOp *desc = poly_arange_int_by_id(ctx, N, 0, -1, 6);
+  int desc_ndim = ndim - axis;
+  int64_t desc_shape[POLY_MAX_DIMS];
+  desc_shape[0] = N;
+  for (int i = 1; i < desc_ndim; i++)
+    desc_shape[i] = 1;
+  /* Tensor.reshape returns self when the requested shape is unchanged
+   * (mixin/movement.py:145-161). arange already has shape (N,). */
+  if (desc_ndim != 1) desc = poly_reshape(ctx, desc, desc_shape, desc_ndim);
+  PolyUOp *idx = poly_mul(ctx, m_i, desc);
+  if (!idx) return NULL;
 
   int64_t idx_max_shape[POLY_MAX_DIMS];
   int idx_max_ndim;
-  PolyUOp *idx_max =
-      do_reduce(ctx, POLY_OP_MAX, idx, shape, ndim, axis, 0, idx_max_shape, &idx_max_ndim);
-  PolyUOp *result = poly_alu2(ctx, POLY_OP_SUB, poly_const_float(ctx, (double)N), idx_max);
-  return poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, result, poly_arg_none());
+  PolyUOp *idx_max = do_reduce(
+      ctx, POLY_OP_MAX, idx, shape, ndim, axis, keepdim != 0, idx_max_shape, &idx_max_ndim
+  );
+  PolyUOp *result = poly_sub(ctx, poly_const_int(ctx, N), idx_max);
+  return poly_cast(ctx, result, POLY_INT32);
+}
+
+PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  PolyUOp *logical = poly_argmax(ctx, src->uop_logical, axis, keepdim);
+  PolyUOp *physical = poly_argmax(ctx, src->uop_physical, axis, keepdim);
+  if (!logical || !physical) return NULL;
+  PolyTensor *out = tensor_unary_result(ctx, src, logical, physical);
+  if (!out) return NULL;
+  out->requires_grad = false;
+  out->requires_grad_set = true;
+  return out;
 }
 
 PolyUOp *poly_mse_loss(PolyCtx *ctx, PolyUOp *pred, PolyUOp *target) {

@@ -2853,8 +2853,26 @@ PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
              ns[1]->op == POLY_OP_DEVICE) {
       PolyDevice source_device = poly_uop_device(ns[0]);
       PolyDevice target_device = poly_device_from_device_uop(ns[1]);
-      if (source_device != POLY_DEVICE_AUTO && source_device == target_device)
+      if (source_device != POLY_DEVICE_AUTO && source_device == target_device) {
         result = poly_uop1(ctx, POLY_OP_NOOP, u->dtype, ns[0], poly_arg_none());
+      } else if (poly_opset_has(POLY_GROUP_MOVEMENT, ns[0]->op)) {
+        /* Pinned rangeify.py:179-181 makes COPY source and destination
+         * extents equal before split_store. Unknown/symbolic sizes leave the
+         * graph unchanged, matching resolve(..., False). */
+        PolyUOp *base = uop_realize_src_base(ns[0]);
+        PolyShape source_shape = poly_uop_max_shape_cached(ctx, ns[0]);
+        PolyShape base_shape = poly_uop_max_shape_cached(ctx, base);
+        int64_t source_numel =
+            source_shape.ndim >= 0 ? poly_shape_numel(source_shape) : -1;
+        int64_t base_numel = base_shape.ndim >= 0 ? poly_shape_numel(base_shape) : -1;
+        if (source_numel >= 0 && base_numel >= 0 && source_numel != base_numel) {
+          PolyUOp *contiguous =
+              poly_uop1(ctx, POLY_OP_CONTIGUOUS, ns[0]->dtype, ns[0], poly_arg_none());
+          PolyUOp *copy_src[2] = {contiguous, ns[1]};
+          if (contiguous)
+            result = rangeify_clone_preserving_metadata(ctx, u, copy_src, 2);
+        }
+      }
     }
 
     /* C5: SINK only ever references the base.
@@ -2892,37 +2910,32 @@ PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
     else if (is_tensor_reduce(u)) {
       result = split_reduceop_rewrite(ctx, u, ns[0]);
 
-      /* Zero-sized reduce -> identity element.
-       * Only when input shape is statically known and provably zero. */
-      /* Check if input has a zero dimension in the reduce axes */
-      PolyUOp *input = ns[0];
+      /* Zero-sized reduce -> a shaped identity element.
+       * Exact port of rangeify.py:204-207:
+       *   reduce.const_like(identity_element(...))
+       *     if 0 in x.shape and 0 not in reduce.shape else None
+       * The bottom-up child rewrite retains x.shape through const_like, so
+       * inspect the rewritten source rather than recovering the old graph. */
       if (result) {
         /* split_reduceop already produced the complete replacement. */
-      } else if (input->op == POLY_OP_CONST) {
-        /* Scalar CONST has size 1, not 0 -- skip. Reduce of CONST
-         * is handled by sym constant folding, not here. */
       } else if (u->arg.kind == POLY_ARG_REDUCE_AXIS) {
-        /* Check shape of input -- if any reduce axis has size 0 */
-        PolyShape sh = poly_uop_max_shape(ctx, input);
-        bool has_zero = false;
-        if (sh.ndim > 0) {
-          int n_axes = u->arg.reduce_axis.n;
-          for (int a = 0; a < n_axes; a++) {
-            int axis = u->arg.reduce_axis.axes[a];
-            if (axis >= 0 && axis < sh.ndim && sh.dims[axis] == 0) {
-              has_zero = true;
-              break;
-            }
+        PolyShape input_shape = poly_uop_max_shape_cached(ctx, ns[0]);
+        PolyShape output_shape = poly_uop_max_shape_cached(ctx, u);
+        bool input_has_zero = false, output_has_zero = false;
+        for (int d = 0; d < input_shape.ndim; d++)
+          if (input_shape.dims[d] == 0) {
+            input_has_zero = true;
+            break;
           }
-        }
-        if (sh.ndim > 0 && sh.dims) free(sh.dims);
-        if (has_zero) {
+        for (int d = 0; d < output_shape.ndim; d++)
+          if (output_shape.dims[d] == 0) {
+            output_has_zero = true;
+            break;
+          }
+        if (input_has_zero && !output_has_zero) {
           PolyOps rop = u->arg.reduce_axis.op;
-          double ident = (rop == POLY_OP_ADD)   ? 0.0
-                         : (rop == POLY_OP_MUL) ? 1.0
-                         : (rop == POLY_OP_MAX) ? -INFINITY
-                                                : 0.0;
-          result = poly_uop(ctx, POLY_OP_CONST, u->dtype, NULL, 0, poly_arg_float(ident));
+          PolyUOp *identity = poly_identity_element(ctx, rop, u->dtype);
+          if (identity) result = poly_const_like(ctx, u, identity->arg);
         }
       }
     }
@@ -2941,19 +2954,23 @@ PolyUOp *poly_apply_earliest_rewrites(PolyCtx *ctx, PolyUOp *sink) {
         }
       }
       if (has_zero) {
-        PolyDType zero_dtype = u->dtype;
-        if (zero_dtype.is_ptr) {
-          zero_dtype.is_ptr = false;
-          zero_dtype.addrspace = 0;
-          zero_dtype.vcount = 0;
-          zero_dtype.ptr_size = 0;
-        }
-        PolyArg zero_arg = poly_dtype_is_float(zero_dtype) ? poly_arg_float(0.0)
-                           : poly_dtype_is_bool(zero_dtype) ? poly_arg_bool(false)
-                                                           : poly_arg_int(0);
-        result = poly_uop_tagged_arg(
-            ctx, POLY_OP_CONST, zero_dtype, NULL, 0, zero_arg, u->tag, u->tag_arg
-        );
+        PolyArg zero_arg = poly_dtype_is_float(u->dtype) ? poly_arg_float(0.0)
+                           : poly_dtype_is_bool(u->dtype) ? poly_arg_bool(false)
+                                                         : poly_arg_int(0);
+        result = poly_const_like(ctx, u, zero_arg);
+        /* Pinned x.const_like(0).rtag(x.tag) applies the original tag only to
+         * the shaped replacement root (rangeify.py:208-210). */
+        if (result && (u->tag != 0 || u->tag_arg.kind != POLY_ARG_NONE))
+          result = poly_uop_tagged_arg(
+              ctx,
+              result->op,
+              result->dtype,
+              result->src,
+              result->n_src,
+              result->arg,
+              u->tag,
+              u->tag_arg
+          );
       }
     }
 
@@ -4042,11 +4059,10 @@ static bool kernel_body_copy_info(
   if (!kernel_copy_param_or_index(kernel_copy_source_index_value(stored), &src_param))
     return false;
   if (dst_param == src_param) return false;
-  /* The STORE target is the explicit COPY output, so its indexing does not
-   * need to duplicate the source's indexing. In particular, a scalar target
-   * is INDEX(PARAM, 0) while the one-element COPY source may remain PARAM. */
-  if (!poly_dtype_eq(poly_dtype_scalar(dst_param->dtype), poly_dtype_scalar(src_param->dtype)))
-    return false;
+  /* Pinned split_store (rangeify.py:573-590) needs no second dtype check:
+   * UOp spec.py:160-161 already requires COPY.dtype == COPY.src[0].dtype.
+   * Comparing PARAM structs here also compares pointer extent metadata, so a
+   * valid uint8 DISK[30720] -> CPU[3073] COPY is falsely rejected. */
 
   int dst_param_idx = kernel_param_arg_index(dst_param);
   int src_param_idx = kernel_param_arg_index(src_param);

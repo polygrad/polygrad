@@ -255,6 +255,7 @@ bool poly_dtype_is_index(PolyDType dt);
 bool poly_dtype_is_unsigned(PolyDType dt);
 bool poly_dtype_is_bool(PolyDType dt);
 PolyDType poly_dtype_scalar(PolyDType dt);
+bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out);
 PolyDType poly_dtype_vec(PolyDType dt, int sz);
 PolyDType poly_dtype_ptr(PolyDType dt, int64_t size, PolyAddrSpace addrspace);
 int poly_dtype_itemsize(PolyDType dt);
@@ -297,6 +298,15 @@ typedef struct {
   int32_t device; /* PolyDevice, declared later; 0 is AUTO/None. */
 } PolyParamArg;
 
+/* Exact Python-int-compatible CONST argument. Limbs are little-endian base
+ * 2**32 magnitude; sign is -1 or +1 and zero remains POLY_ARG_INT(0).
+ * poly_uop copies limbs into the owning context arena. */
+typedef struct {
+  int8_t sign;
+  uint32_t n_limbs;
+  const uint32_t *limbs;
+} PolyBigInt;
+
 typedef enum {
   POLY_ARG_NONE = 0,
   POLY_ARG_INT,
@@ -315,12 +325,14 @@ typedef enum {
   POLY_ARG_BYTES, /* immutable runtime bytes for BINARY UOps */
   POLY_ARG_INVALID,
   POLY_ARG_PARAM, /* pinned tinygrad ParamArg* for shaped value PARAMs */
+  POLY_ARG_BIGINT, /* exact signed arbitrary-precision integer CONST */
 } PolyArgKind;
 
 typedef struct {
   PolyArgKind kind;
   union {
     int64_t i;
+    PolyBigInt bigint;
     double f;
     bool b;
     struct {
@@ -373,6 +385,11 @@ static inline PolyArg poly_arg_none(void) {
 }
 static inline PolyArg poly_arg_int(int64_t v) {
   return (PolyArg){.kind = POLY_ARG_INT, .i = v};
+}
+static inline PolyArg poly_arg_bigint(int sign, const uint32_t *limbs, uint32_t n_limbs) {
+  return (PolyArg
+  ){.kind = POLY_ARG_BIGINT,
+    .bigint = {.sign = sign < 0 ? -1 : 1, .n_limbs = n_limbs, .limbs = limbs}};
 }
 static inline PolyArg poly_arg_float(double v) {
   return (PolyArg){.kind = POLY_ARG_FLOAT, .f = v};
@@ -651,6 +668,37 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
 PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
 PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
+PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor);
+PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_sum(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+PolyTensor *poly_tensor_max(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes, bool keepdim);
+PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
+PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_dot(PolyCtx *ctx, PolyTensor *src, PolyTensor *weight);
+int poly_tensor_sort(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int dim,
+    int descending,
+    PolyTensor **out_values,
+    PolyTensor **out_indices
+);
+int poly_tensor_topk(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int64_t k,
+    int dim,
+    int largest,
+    int sorted,
+    PolyTensor **out_values,
+    PolyTensor **out_indices
+);
+PolyTensor *poly_tensor_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
+PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
 PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
@@ -665,6 +713,48 @@ PolyTensor *poly_tensor_pad_value(
     int ndim,
     double value
 );
+PolyTensor *poly_tensor_pool(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation
+);
+PolyTensor *poly_tensor_max_pool2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    const int64_t *kernel,
+    int n_kernel,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+PolyTensor *poly_tensor_conv2d(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    int groups,
+    const int64_t *stride,
+    const int64_t *dilation,
+    const int64_t *padding,
+    int n_padding
+);
+PolyTensor *poly_tensor_batchnorm(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyTensor *weight,
+    PolyTensor *bias,
+    PolyTensor *mean,
+    PolyTensor *invstd,
+    const int64_t *axes,
+    int n_axes
+);
+PolyTensor *poly_tensor_one_hot(PolyCtx *ctx, PolyTensor *x, int64_t num_classes);
+PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
+PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
 PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);
@@ -961,6 +1051,12 @@ const PolyUOp *poly_uop_get_buffer_identity(const PolyUOp *u);
  * (matches tinygrad's UOp.has_buffer_identity). */
 bool poly_uop_has_buffer_identity(const PolyUOp *u);
 
+/* tinygrad UOp.buffer analogue. Returns a direct buffer identity, or the exact
+ * movement UOp with an attached runtime view when a contiguous movement over
+ * realized storage is provable. It does not create/rewrite graph topology or
+ * change a Tensor root. */
+PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u);
+
 /* True when target appears in root's source graph. Frontends use this to match
  * tinygrad's backward discovery rule: live tensors with t.uop in loss.toposort. */
 bool poly_uop_reachable(PolyCtx *ctx, PolyUOp *root, PolyUOp *target);
@@ -1206,6 +1302,7 @@ PolyUOp *poly_const_float(PolyCtx *ctx, double value);
 PolyUOp *poly_const_double(PolyCtx *ctx, double value);
 PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value);
 PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value);
+PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype);
 
 PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src);
 PolyUOp *poly_alu2(PolyCtx *ctx, PolyOps op, PolyUOp *a, PolyUOp *b);

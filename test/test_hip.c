@@ -44,7 +44,7 @@ static HipTensorVecadd hip_make_tensor_vecadd(int n) {
 
 /* Render tests (no GPU needed) */
 
-TEST(hip, render_vecadd) {
+TEST_BACKEND(hip, render_vecadd) {
   /* Test HIP source generation -- no GPU needed */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
@@ -92,8 +92,11 @@ TEST(hip, render_vecadd) {
   PASS();
 }
 
-TEST(hip, render_mulacc_fma) {
-  /* HIP renderer must emit __builtin_fmaf for MULACC -- no GPU needed. */
+TEST_BACKEND(hip, render_muladd_matches_pinned_hipstyle) {
+  /* Pinned HIPRenderer does not advertise Ops.MULACC
+   * (renderer/cstyle.py:128-136,472-508), so ordinary MUL+ADD must not be
+   * fused by the shared late matcher. Explicit WMMA/MULACC rendering remains
+   * a separate renderer ability. */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
   PolyUOp *p0 = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
@@ -119,18 +122,26 @@ TEST(hip, render_mulacc_fma) {
   int n_lin;
   PolyUOp **lin = poly_linearize_hip(ctx, sink, &n_lin);
   ASSERT_NOT_NULL(lin);
+  int mulacc_count = 0, mul_count = 0, add_count = 0;
+  for (int i = 0; i < n_lin; i++) {
+    mulacc_count += lin[i]->op == POLY_OP_MULACC;
+    mul_count += lin[i]->op == POLY_OP_MUL;
+    add_count += lin[i]->op == POLY_OP_ADD;
+  }
+  ASSERT_INT_EQ(mulacc_count, 0);
+  ASSERT_TRUE(mul_count >= 1);
+  ASSERT_TRUE(add_count >= 1);
   char *src = poly_render_hip(lin, n_lin, "fma_test", 256);
   free(lin);
   ASSERT_NOT_NULL(src);
-  ASSERT_TRUE(strstr(src, "__builtin_fmaf(") != NULL);
-  /* Must NOT contain CUDA FMA */
+  ASSERT_TRUE(strstr(src, "__builtin_fmaf(") == NULL);
   ASSERT_TRUE(strstr(src, "__fmaf_rn(") == NULL);
   free(src);
   poly_ctx_destroy(ctx);
   PASS();
 }
 
-TEST(hip, render_math_intrinsics) {
+TEST_BACKEND(hip, render_math_intrinsics) {
   /* HIP renderer must emit __ocml_* for transcendentals -- no GPU needed. */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
@@ -159,7 +170,7 @@ TEST(hip, render_math_intrinsics) {
   PASS();
 }
 
-TEST(hip, render_shared_mem) {
+TEST_BACKEND(hip, render_shared_mem) {
   /* HIP renderer must emit __attribute__((shared, aligned(16))) for DEFINE_LOCAL. */
   PolyCtx *ctx = poly_ctx_new();
   PolyDType smem_ptr = poly_dtype_ptr(POLY_FLOAT32, 64, POLY_ADDR_LOCAL);
@@ -212,7 +223,7 @@ static void readback_hip_binding(PolyTestBufferView *b, void *host_dst, size_t n
 
 /* E2E tests (require GPU) */
 
-TEST(hip, e2e_vecadd) {
+TEST_BACKEND(hip, e2e_vecadd) {
   SKIP_IF_NO_HIP();
 
   int n = 1024;
@@ -257,7 +268,7 @@ TEST(hip, e2e_vecadd) {
   PASS();
 }
 
-TEST(hip, e2e_neg) {
+TEST_BACKEND(hip, e2e_neg) {
   SKIP_IF_NO_HIP();
 
   int n = 512;
@@ -295,7 +306,7 @@ TEST(hip, e2e_neg) {
   PASS();
 }
 
-TEST(hip, e2e_exp2) {
+TEST_BACKEND(hip, e2e_exp2) {
   SKIP_IF_NO_HIP();
 
   int n = 256;
@@ -333,7 +344,7 @@ TEST(hip, e2e_exp2) {
   PASS();
 }
 
-TEST(hip, e2e_reduce_sum) {
+TEST_BACKEND(hip, e2e_reduce_sum) {
   SKIP_IF_NO_HIP();
 
   int n = 512;
@@ -384,7 +395,7 @@ static PolyInstance *hip_make_test_mlp(int n_in, int n_out) {
   return poly_mlp_from_json(spec, (int)strlen(spec));
 }
 
-TEST(hip, instance_set_device_hip) {
+TEST_BACKEND(hip, instance_set_device_hip) {
   SKIP_IF_NO_HIP();
 
   PolyInstance *inst = hip_make_test_mlp(2, 3);
@@ -413,7 +424,7 @@ TEST(hip, instance_set_device_hip) {
   PASS();
 }
 
-TEST(hip, instance_hip_forward_parity) {
+TEST_BACKEND(hip, instance_hip_forward_parity) {
   SKIP_IF_NO_HIP();
 
   int n_in = 2, n_out = 3;
@@ -467,7 +478,7 @@ TEST(hip, instance_hip_forward_parity) {
   PASS();
 }
 
-TEST(hip, instance_hip_roundtrip) {
+TEST_BACKEND(hip, instance_hip_roundtrip) {
   SKIP_IF_NO_HIP();
 
   PolyInstance *inst = hip_make_test_mlp(2, 1);
@@ -533,7 +544,7 @@ TEST(hip, instance_hip_roundtrip) {
  * const-registry entirely, so this test now exercises a different code
  * path entirely: the only HIP smoke that runs poly_test_realize_buffer_views_vars with a
  * DEFINE_VAR'd dynamic shape. Renamed accordingly. */
-TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
+TEST_BACKEND(hip, realize_ex_full_plus_buffer_dyn_shape) {
   SKIP_IF_NO_HIP();
   PolyCtx *ctx = poly_ctx_new();
 
@@ -567,7 +578,7 @@ TEST(hip, realize_ex_full_plus_buffer_dyn_shape) {
 }
 
 /* WMMA rendering smoke test (no GPU needed) */
-TEST(hip, render_wmma_mfma) {
+TEST_BACKEND(hip, render_wmma_mfma) {
   /* Build minimal linearized IR with a WMMA op and verify the HIP
    * renderer emits the MFMA macro and vector type declarations. */
   PolyCtx *ctx = poly_ctx_new();
@@ -633,8 +644,88 @@ TEST(hip, render_wmma_mfma) {
   PASS();
 }
 
+TEST_BACKEND(hip, rewrite_bf16_wmma_preserves_native_fragments) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyDType bf16x4 = poly_dtype_vec(POLY_BFLOAT16, 4);
+  PolyDType f32x4 = poly_dtype_vec(POLY_FLOAT32, 4);
+
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *bound =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *special =
+      poly_uop1(ctx, POLY_OP_SPECIAL, POLY_INT32, bound, poly_arg_str("gidx0"));
+  PolyUOp *out_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, out, special, poly_arg_none());
+
+  PolyUOp *one =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0));
+  PolyUOp *bf16_lanes[] = {one, one, one, one};
+  PolyUOp *a =
+      poly_uop(ctx, POLY_OP_STACK, bf16x4, bf16_lanes, 4, poly_arg_none());
+  PolyUOp *b =
+      poly_uop(ctx, POLY_OP_STACK, bf16x4, bf16_lanes, 4, poly_arg_none());
+  PolyUOp *zero =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_FLOAT32, poly_arg_float(0.0));
+  PolyUOp *f32_lanes[] = {zero, zero, zero, zero};
+  PolyUOp *acc =
+      poly_uop(ctx, POLY_OP_STACK, f32x4, f32_lanes, 4, poly_arg_none());
+  PolyUOp *wmma_src[] = {a, b, acc};
+  PolyUOp *wmma = poly_uop(
+      ctx, POLY_OP_WMMA, f32x4, wmma_src, 3,
+      poly_arg_str("mfma_f32_16x16x16bf16_1k")
+  );
+  PolyUOp *lane =
+      poly_uop1(ctx, POLY_OP_GEP, POLY_FLOAT32, wmma, poly_arg_int(0));
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, lane, poly_arg_none());
+  PolyUOp *sink_src[] = {store};
+  PolyUOp *sink =
+      poly_uop_sink_ex(ctx, sink_src, 1, "bf16_wmma_rewrite", 0);
+
+  PolyUOp *rewritten = poly_rewrite_hip(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *rewritten_wmma = NULL;
+  int n_wmma = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op != POLY_OP_WMMA) continue;
+    rewritten_wmma = topo[i];
+    n_wmma++;
+  }
+  ASSERT_INT_EQ(n_wmma, 1);
+  ASSERT_NOT_NULL(rewritten_wmma);
+  ASSERT_INT_EQ(rewritten_wmma->n_src, 3);
+  ASSERT_TRUE(poly_dtype_eq(rewritten_wmma->src[0]->dtype, bf16x4));
+  ASSERT_TRUE(poly_dtype_eq(rewritten_wmma->src[1]->dtype, bf16x4));
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  char *source =
+      poly_render_hip(lin, n_lin, "bf16_wmma_rewrite", 64);
+  free(lin);
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(
+      strstr(source, "__builtin_amdgcn_mfma_f32_16x16x16bf16_1k")
+  );
+
+  if (poly_hip_available()) {
+    PolyHipProgram *program =
+        poly_compile_hip(source, "bf16_wmma_rewrite");
+    ASSERT_NOT_NULL(program);
+    poly_hip_program_destroy(program);
+  }
+  free(source);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* E2E MFMA smoke test: all-ones matmul on GPU */
-TEST(hip, wmma_mfma_e2e) {
+TEST_BACKEND(hip, wmma_mfma_e2e) {
   SKIP_IF_NO_HIP();
   if (poly_hip_wave_size() != 64) {
     PASS();
@@ -791,7 +882,7 @@ static uint16_t f32_to_f16(float f) {
 
 /* Automatic TC E2E: 16x16x16 f16 matmul through poly_test_realize_buffer_views */
 
-TEST(hip, tc_auto_matmul_e2e) {
+TEST_BACKEND(hip, tc_auto_matmul_e2e) {
   SKIP_IF_NO_HIP();
   if (poly_hip_wave_size() != 64) {
     PASS();
@@ -900,7 +991,7 @@ TEST(hip, tc_auto_matmul_e2e) {
   PASS();
 }
 
-TEST(hip, tc_auto_matmul_unique_values) {
+TEST_BACKEND(hip, tc_auto_matmul_unique_values) {
   SKIP_IF_NO_HIP();
   if (poly_hip_wave_size() != 64) {
     PASS();

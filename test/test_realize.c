@@ -470,6 +470,36 @@ TEST(realize, tensor_clone_into_separates_logical_and_cross_device_physical_grap
   PASS();
 }
 
+TEST(realize, tensor_clone_into_keeps_deviceless_source_without_copy) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *one = poly_const_float(ctx, 1.0f);
+  PolyUOp *two = poly_const_float(ctx, 2.0f);
+  PolyUOp *source_root = poly_add(ctx, one, two);
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, source_root, source_root, POLY_TENSOR_VALUE, POLY_DEVICE_WEBGPU
+  );
+  PolyUOp *target_logical = poly_buffer(ctx, POLY_FLOAT32, 1);
+  PolyUOp *target_physical = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyTensor *target = poly_tensor_create_with_roots(
+      ctx, target_logical, target_physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(source);
+  ASSERT_NOT_NULL(target);
+  ASSERT_PTR_EQ(poly_tensor_clone_into(ctx, target, source), target);
+
+  PolyUOp *physical = poly_tensor_uop_physical(target);
+  ASSERT_NOT_NULL(physical);
+  ASSERT_INT_EQ(physical->op, POLY_OP_AFTER);
+  ASSERT_PTR_EQ(physical->src[0], target_physical);
+  ASSERT_INT_EQ(physical->src[1]->op, POLY_OP_STORE);
+  ASSERT_PTR_EQ(physical->src[1]->src[1], source_root);
+  ASSERT_INT_EQ(physical->src[1]->src[1]->op, POLY_OP_ADD);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, tensor_assign_chains_logical_and_physical_versions_separately) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -1912,6 +1942,46 @@ TEST(realize, tensor_alu_preserves_ordered_roundtrip_occurrences) {
   PASS();
 }
 
+TEST(realize, tensor_minimum_preserves_ordered_roundtrip_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical = poly_buffer_f32(ctx, 2);
+  PolyUOp *physical = poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyTensor *x =
+      poly_tensor_create_with_roots(ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *x_cuda = poly_tensor_to_device(ctx, x, POLY_DEVICE_CUDA);
+  PolyTensor *x_cpu = poly_tensor_to_device(ctx, x_cuda, POLY_DEVICE_CPU);
+  PolyTensor *out = poly_tensor_minimum(ctx, x, x_cpu);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(x_cuda);
+  ASSERT_NOT_NULL(x_cpu);
+  ASSERT_NOT_NULL(out);
+
+  /* Pinned minimum builds inverse -> MAX -> inverse from ordered Tensor.uop
+   * operands (tensor.py:128-140; mixin/elementwise.py:366-393). */
+  PolyUOp *out_logical = poly_tensor_uop_logical(out);
+  PolyUOp *out_physical = poly_tensor_uop_physical(out);
+  PolyUOp *expected_logical = poly_minimum(ctx, logical, logical);
+  PolyUOp *expected_physical = poly_minimum(ctx, physical, poly_tensor_uop_physical(x_cpu));
+  ASSERT_PTR_EQ(out_logical, expected_logical);
+  ASSERT_PTR_EQ(out_physical, expected_physical);
+  ASSERT_EQ(out_logical->op, POLY_OP_MUL);
+  ASSERT_EQ(out_logical->src[0]->op, POLY_OP_MAX);
+  ASSERT_PTR_EQ(out_logical->src[0]->src[0], out_logical->src[0]->src[1]);
+  ASSERT_EQ(out_physical->op, POLY_OP_MUL);
+  ASSERT_EQ(out_physical->src[0]->op, POLY_OP_MAX);
+  ASSERT_EQ(out_physical->src[0]->src[0]->op, POLY_OP_MUL);
+  ASSERT_EQ(out_physical->src[0]->src[1]->op, POLY_OP_MUL);
+  ASSERT_PTR_EQ(out_physical->src[0]->src[0]->src[0], physical);
+  ASSERT_PTR_EQ(out_physical->src[0]->src[1]->src[0], poly_tensor_uop_physical(x_cpu));
+  ASSERT_EQ(out_physical->src[0]->src[1]->src[0]->op, POLY_OP_COPY);
+  ASSERT_EQ(out_physical->src[0]->src[1]->src[0]->src[0]->op, POLY_OP_COPY);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, tensor_alu_rejects_wrong_operation_arity) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -2108,8 +2178,7 @@ TEST(realize, tensor_placement_audit_prefers_nested_place_over_value_fact) {
   poly_buffer_set(ctx, a, da, sizeof(da), POLY_DEVICE_CPU);
 
   PolyUOp *x_expr = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
-  PolyUOp *x_buf =
-      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *x_buf = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
   float dx[] = {2.0f};
   poly_buffer_set(ctx, x_buf, dx, sizeof(dx), POLY_DEVICE_CPU);
   PolyTensor *x_cpu =
@@ -2209,8 +2278,7 @@ TEST(realize, tensor_nested_place_fact_feeds_later_value_from_realized_source) {
   poly_buffer_set(ctx, a, da, sizeof(da), POLY_DEVICE_CPU);
 
   PolyUOp *x_expr = poly_alu2(ctx, POLY_OP_ADD, a, poly_const_float(ctx, 1.0f));
-  PolyUOp *x_buf =
-      poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
+  PolyUOp *x_buf = poly_buffer_on_device(ctx, POLY_FLOAT32, 1, POLY_DEVICE_CPU);
   float dx[] = {2.0f};
   poly_buffer_set(ctx, x_buf, dx, sizeof(dx), POLY_DEVICE_CPU);
 
@@ -2648,6 +2716,7 @@ TEST(realize, tensor_assign_host_buffer_updates_original_storage) {
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &assigned, 1, &out_tensor), 0);
   ASSERT_NOT_NULL(out_tensor);
   ASSERT_PTR_EQ(poly_uop_get_buffer_identity(poly_tensor_uop(out_tensor)), a);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, a, da, 3 * sizeof(float)), 0);
 
   ASSERT_FLOAT_EQ(da[0], 11.0f, 1e-5f);
   ASSERT_FLOAT_EQ(da[1], 12.0f, 1e-5f);
@@ -2662,7 +2731,7 @@ TEST(realize, tensor_assign_shrink_view_updates_base_storage) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *base = poly_buffer_f32(ctx, 8);
-  float data[8] = {0};
+  float data[8] = {0.0f, 0.0f, 0.0f, 0.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   poly_buffer_set(ctx, base, data, sizeof(data), POLY_DEVICE_CPU);
   PolyTensor *base_tensor = poly_tensor_create(ctx, base, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(base_tensor);
@@ -2688,12 +2757,13 @@ TEST(realize, tensor_assign_shrink_view_updates_base_storage) {
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &base_tensor, 1, &out), 0);
   ASSERT_PTR_EQ(out, base_tensor);
   ASSERT_PTR_EQ(poly_uop_get_buffer_identity(poly_tensor_uop(base_tensor)), base);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, base, data, sizeof(data)), 0);
   ASSERT_FLOAT_EQ(data[0], 1.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[1], 2.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[2], 3.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[3], 4.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(data[4], 0.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(data[7], 0.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(data[4], 5.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(data[7], 8.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -2703,7 +2773,7 @@ TEST(realize, tensor_assign_shrink_view_realize_view_updates_base_storage) {
   PolyCtx *ctx = poly_ctx_new();
 
   PolyUOp *base = poly_buffer_f32(ctx, 8);
-  float data[8] = {0};
+  float data[8] = {0.0f, 0.0f, 0.0f, 0.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   poly_buffer_set(ctx, base, data, sizeof(data), POLY_DEVICE_CPU);
   PolyTensor *base_tensor = poly_tensor_create(ctx, base, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
   ASSERT_NOT_NULL(base_tensor);
@@ -2723,11 +2793,13 @@ TEST(realize, tensor_assign_shrink_view_realize_view_updates_base_storage) {
   PolyTensor *out = NULL;
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &view_tensor, 1, &out), 0);
   ASSERT_PTR_EQ(out, view_tensor);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, base, data, sizeof(data)), 0);
   ASSERT_FLOAT_EQ(data[0], 9.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[1], 8.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[2], 7.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[3], 6.0f, 1e-5f);
-  ASSERT_FLOAT_EQ(data[4], 0.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(data[4], 5.0f, 1e-5f);
+  ASSERT_FLOAT_EQ(data[7], 8.0f, 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -2762,6 +2834,7 @@ TEST(realize, tensor_assign_permute_view_updates_base_storage) {
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &matrix_tensor, 1, &out), 0);
   ASSERT_PTR_EQ(out, matrix_tensor);
   ASSERT_PTR_EQ(poly_uop_get_buffer_identity(poly_tensor_uop(matrix_tensor)), base);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, base, data, sizeof(data)), 0);
   /* Assigning to m.T writes source[r,c] into m[c,r]. */
   ASSERT_FLOAT_EQ(data[0], 1.0f, 1e-5f);
   ASSERT_FLOAT_EQ(data[1], 3.0f, 1e-5f);
@@ -2878,6 +2951,7 @@ TEST(realize, tensor_realized_current_feeds_later_ops_after_source_mutation) {
   ASSERT_NOT_NULL(tent);
   ASSERT_PTR_EQ(poly_tensor_assign(ctx, at, tent), at);
   ASSERT_INT_EQ(poly_realize_tensors(ctx, &at, 1, &out), 0);
+  READ_REALIZED_F32(ctx, poly_tensor_uop(at), da, 1);
   ASSERT_FLOAT_EQ(da[0], 10.0f, 1e-5f);
 
   PolyUOp *b_expr = poly_alu2(ctx, POLY_OP_ADD, poly_tensor_uop(ar), one);
@@ -2999,10 +3073,7 @@ TEST(realize, tensor_shared_lazy_retarget_keeps_distinct_tensor_records) {
   PolyUOp *shared_buf = poly_tensor_uop(x1);
   ASSERT_TRUE(poly_uop_has_buffer_identity(shared_buf));
   ASSERT_INT_EQ(
-      poly_tensor_set_physical(
-          ctx, x2, shared_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
-      ),
-      0
+      poly_tensor_set_physical(ctx, x2, shared_buf, POLY_TENSOR_VALUE, POLY_DEVICE_CPU), 0
   );
   ASSERT_PTR_NEQ(x1, x2);
   ASSERT_PTR_EQ(poly_tensor_uop(x1), poly_tensor_uop(x2));
@@ -3644,8 +3715,8 @@ TEST(realize, nested_after_store_consumer_indexes_producer_buffer_once) {
 
   int64_t shape[1] = {4};
   int64_t singleton[1] = {1};
-  PolyUOp *ones = poly_expand(
-      ctx, poly_reshape(ctx, poly_const_float(ctx, 1.0), singleton, 1), shape, 1);
+  PolyUOp *ones =
+      poly_expand(ctx, poly_reshape(ctx, poly_const_float(ctx, 1.0), singleton, 1), shape, 1);
   PolyUOp *inner_store = poly_store_val(ctx, inner_buffer, ones);
   PolyUOp *inner_after_src[2] = {inner_buffer, inner_store};
   PolyUOp *inner_after =
@@ -4135,8 +4206,7 @@ TEST(realize, transform_to_call_requested_parent_feeds_requested_descendant) {
     bool has_parent_buffer = false;
     ASSERT_NOT_NULL(call);
     for (int i = 1; i < call->n_src; i++)
-      if (poly_uop_get_buffer_identity(call->src[i]) == parent_buffer)
-        has_parent_buffer = true;
+      if (poly_uop_get_buffer_identity(call->src[i]) == parent_buffer) has_parent_buffer = true;
     ASSERT_TRUE(has_parent_buffer);
   }
   ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
@@ -4281,20 +4351,14 @@ TEST(realize, transform_to_call_preserves_symbolic_reshape_shape_source) {
   PolyUOp *n = poly_define_var(ctx, "n", 1, 8);
   PolyUOp *two = poly_const_int(ctx, 2);
   PolyUOp *shape_srcs[] = {n, two};
-  PolyUOp *shape = poly_uop(
-      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 2),
-      shape_srcs, 2, poly_arg_none());
+  PolyUOp *shape =
+      poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 2), shape_srcs, 2, poly_arg_none());
   PolyUOp *expand_srcs[] = {source, shape};
-  PolyUOp *expanded = poly_uop(
-      ctx, POLY_OP_EXPAND, POLY_FLOAT32,
-      expand_srcs, 2, poly_arg_none());
+  PolyUOp *expanded = poly_uop(ctx, POLY_OP_EXPAND, POLY_FLOAT32, expand_srcs, 2, poly_arg_none());
   ASSERT_NOT_NULL(expanded);
-  PolyUOp *value =
-      poly_alu2(ctx, POLY_OP_ADD, expanded, poly_const_float(ctx, 1.0f));
+  PolyUOp *value = poly_alu2(ctx, POLY_OP_ADD, expanded, poly_const_float(ctx, 1.0f));
   PolyUOp *reshape_srcs[] = {value, shape};
-  PolyUOp *root = poly_uop(
-      ctx, POLY_OP_RESHAPE, POLY_FLOAT32,
-      reshape_srcs, 2, poly_arg_none());
+  PolyUOp *root = poly_uop(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, reshape_srcs, 2, poly_arg_none());
   ASSERT_NOT_NULL(root);
   PolyShape root_shape = poly_uop_max_shape_cached(ctx, root);
   ASSERT_INT_EQ(root_shape.ndim, 2);
@@ -4337,27 +4401,20 @@ TEST(realize, symbolic_reshape_callify_runs_nonmax_binding) {
   PolyUOp *source = poly_reshape(ctx, base, (int64_t[]){1, 2}, 2);
   PolyUOp *n = poly_define_var(ctx, "n_nonmax", 1, 8);
   PolyUOp *shape_srcs[] = {n, poly_const_int(ctx, 2)};
-  PolyUOp *shape = poly_uop(
-      ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 2),
-      shape_srcs, 2, poly_arg_none());
+  PolyUOp *shape =
+      poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INDEX, 2), shape_srcs, 2, poly_arg_none());
   PolyUOp *expand_srcs[] = {source, shape};
-  PolyUOp *expanded = poly_uop(
-      ctx, POLY_OP_EXPAND, POLY_FLOAT32,
-      expand_srcs, 2, poly_arg_none());
-  PolyUOp *value =
-      poly_alu2(ctx, POLY_OP_ADD, expanded, poly_const_float(ctx, 1.0f));
+  PolyUOp *expanded = poly_uop(ctx, POLY_OP_EXPAND, POLY_FLOAT32, expand_srcs, 2, poly_arg_none());
+  PolyUOp *value = poly_alu2(ctx, POLY_OP_ADD, expanded, poly_const_float(ctx, 1.0f));
   PolyUOp *reshape_srcs[] = {value, shape};
-  PolyUOp *root = poly_uop(
-      ctx, POLY_OP_RESHAPE, POLY_FLOAT32,
-      reshape_srcs, 2, poly_arg_none());
+  PolyUOp *root = poly_uop(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, reshape_srcs, 2, poly_arg_none());
   ASSERT_NOT_NULL(root);
   ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, root).ndim, 2);
 
   float input[2] = {1.0f, 2.0f};
   poly_buffer_set(ctx, base, input, sizeof(input), POLY_DEVICE_CPU);
   PolyUOp *scheduled_out = NULL;
-  PolySchedule *schedule =
-      poly_schedule_with_vars(ctx, &root, 1, &scheduled_out);
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, &root, 1, &scheduled_out);
   ASSERT_NOT_NULL(schedule);
   ASSERT_NOT_NULL(scheduled_out);
   ASSERT_INT_EQ(poly_uop_max_shape_cached(ctx, scheduled_out).ndim, 2);
@@ -4370,12 +4427,10 @@ TEST(realize, symbolic_reshape_callify_runs_nonmax_binding) {
    * view instead of broadening Polygrad's buffer-identity contract. */
   ASSERT_INT_EQ(scheduled_out->op, POLY_OP_RESHAPE);
   ASSERT_INT_EQ(scheduled_out->src[0]->op, POLY_OP_SHRINK);
-  const PolyUOp *identity =
-      poly_uop_get_buffer_identity(scheduled_out->src[0]->src[0]);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(scheduled_out->src[0]->src[0]);
   ASSERT_NOT_NULL(identity);
   float output[8] = {0};
-  ASSERT_INT_EQ(
-      poly_buffer_read(ctx, (PolyUOp *)identity, output, sizeof(output)), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)identity, output, sizeof(output)), 0);
   for (int i = 0; i < 4; i++) {
     ASSERT_FLOAT_EQ(output[2 * i], 2.0f, 1e-5f);
     ASSERT_FLOAT_EQ(output[2 * i + 1], 3.0f, 1e-5f);
@@ -4394,13 +4449,11 @@ TEST(realize, transform_to_call_preserves_scalar_movement_shape_sources) {
       poly_alu2(ctx, POLY_OP_ADD, poly_buffer_f32(ctx, 8), poly_const_float(ctx, 1.0f));
   PolyUOp *n = poly_define_var(ctx, "n", 1, 8);
   PolyUOp *reshape_src[] = {reshape_value, n};
-  PolyUOp *reshape = poly_uop(
-      ctx, POLY_OP_RESHAPE, POLY_FLOAT32, reshape_src, 2, poly_arg_none());
+  PolyUOp *reshape = poly_uop(ctx, POLY_OP_RESHAPE, POLY_FLOAT32, reshape_src, 2, poly_arg_none());
   ASSERT_NOT_NULL(reshape);
 
   PolyUOp *realized_reshape = NULL;
-  PolyUOp *reshape_call =
-      poly_transform_to_call(ctx, &reshape, 1, &realized_reshape);
+  PolyUOp *reshape_call = poly_transform_to_call(ctx, &reshape, 1, &realized_reshape);
   ASSERT_NOT_NULL(reshape_call);
   ASSERT_NOT_NULL(realized_reshape);
   ASSERT_INT_EQ(realized_reshape->op, POLY_OP_RESHAPE);
@@ -4408,16 +4461,13 @@ TEST(realize, transform_to_call_preserves_scalar_movement_shape_sources) {
   ASSERT_PTR_EQ(realized_reshape->src[1], n);
 
   PolyUOp *unit = poly_reshape(ctx, poly_buffer_f32(ctx, 1), (int64_t[]){1}, 1);
-  PolyUOp *expand_value =
-      poly_alu2(ctx, POLY_OP_ADD, unit, poly_const_float(ctx, 1.0f));
+  PolyUOp *expand_value = poly_alu2(ctx, POLY_OP_ADD, unit, poly_const_float(ctx, 1.0f));
   PolyUOp *expand_src[] = {expand_value, n};
-  PolyUOp *expand = poly_uop(
-      ctx, POLY_OP_EXPAND, POLY_FLOAT32, expand_src, 2, poly_arg_none());
+  PolyUOp *expand = poly_uop(ctx, POLY_OP_EXPAND, POLY_FLOAT32, expand_src, 2, poly_arg_none());
   ASSERT_NOT_NULL(expand);
 
   PolyUOp *realized_expand = NULL;
-  PolyUOp *expand_call =
-      poly_transform_to_call(ctx, &expand, 1, &realized_expand);
+  PolyUOp *expand_call = poly_transform_to_call(ctx, &expand, 1, &realized_expand);
   ASSERT_NOT_NULL(expand_call);
   ASSERT_NOT_NULL(realized_expand);
   ASSERT_INT_EQ(realized_expand->op, POLY_OP_EXPAND);
@@ -4576,6 +4626,7 @@ TEST(realize, run_schedule_uses_bind_default_from_ctx_buffers) {
   ASSERT_PTR_EQ(sched->template->default_vars[0].var, N);
   ASSERT_INT_EQ(sched->template->default_vars[0].value, 4);
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, out_data, sizeof(out_data)), 0);
 
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
@@ -4621,6 +4672,7 @@ TEST(realize, run_schedule_dynamic_var_override_from_ctx_buffers) {
 
   PolyVarBinding bind = {.var = N, .value = 6};
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, out_data, sizeof(out_data)), 0);
   for (int i = 0; i < 6; i++)
     ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
   ASSERT_FLOAT_EQ(out_data[6], -999.0f, 1e-5f);
@@ -5128,6 +5180,7 @@ TEST(realize, schedule_with_vars_assign_in_place) {
   ASSERT_PTR_EQ(realized[0], a);
 
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, a, da, sizeof(da)), 0);
   ASSERT_FLOAT_EQ(da[0], 2.0f, 1e-5f);
   ASSERT_FLOAT_EQ(da[1], 4.0f, 1e-5f);
   ASSERT_FLOAT_EQ(da[2], 6.0f, 1e-5f);
@@ -5167,6 +5220,8 @@ TEST(realize, schedule_batched_dependent_assign_executes_shared_effect_once) {
     ASSERT_NOT_NULL(schedule);
     ASSERT_INT_EQ(schedule->template->n_calls, 2);
     ASSERT_INT_EQ(poly_run_schedule(ctx, schedule, NULL, 0), 0);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, a, da, sizeof(da)), 0);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, b, db, sizeof(db)), 0);
     ASSERT_FLOAT_EQ(da[0], 1.0f, 1e-5f);
     ASSERT_FLOAT_EQ(db[0], 1.0f, 1e-5f);
 
@@ -6148,6 +6203,7 @@ TEST(realize, poly_jit_replays_with_bind_default_and_runtime_var_override) {
   ASSERT_INT_EQ(poly_realize_uops(ctx, &assign, 1, realized), 0);
   ASSERT_PTR_EQ(realized[0], out_buf);
   ASSERT_INT_EQ(poly_jit_end_capture(jit), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out_buf, out_data, sizeof(out_data)), 0);
 
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
@@ -6254,7 +6310,7 @@ TEST(realize, global_counters_track_calls_and_preserve_live_memory_on_reset) {
 
   PolyCtxStats stats = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
-  ASSERT_TRUE(stats.mem_used == 32);
+  ASSERT_INT_EQ(stats.mem_used, 32);
   poly_ctx_reset_counters(ctx);
   PolyTensor *out_inputs[] = {out};
   PolyTensor *out_outputs[] = {NULL};
@@ -6263,13 +6319,13 @@ TEST(realize, global_counters_track_calls_and_preserve_live_memory_on_reset) {
   ASSERT_TRUE(stats.global_ops == 8);
   ASSERT_TRUE(stats.global_mem == 64);
   ASSERT_TRUE(stats.kernel_count == 1);
-  ASSERT_TRUE(stats.mem_used == 64);
+  ASSERT_INT_EQ(stats.mem_used, 64);
 
   poly_ctx_reset_counters(ctx);
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.global_ops == 0 && stats.global_mem == 0 && stats.kernel_count == 0);
   ASSERT_TRUE(stats.time_sum_s == 0.0);
-  ASSERT_TRUE(stats.mem_used == 64);
+  ASSERT_INT_EQ(stats.mem_used, 64);
 
   PolyTensor *suppressed = poly_tensor_create(
       ctx, poly_alu2(ctx, POLY_OP_ADD, x_buf, poly_const_float(ctx, 2.0)), POLY_TENSOR_VALUE,
@@ -6281,7 +6337,7 @@ TEST(realize, global_counters_track_calls_and_preserve_live_memory_on_reset) {
   ASSERT_INT_EQ(poly_realize_tensors_ex(ctx, suppressed_inputs, 1, suppressed_outputs, false), 0);
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
   ASSERT_TRUE(stats.global_ops == 0 && stats.global_mem == 0 && stats.kernel_count == 0);
-  ASSERT_TRUE(stats.mem_used == 96);
+  ASSERT_INT_EQ(stats.mem_used, 96);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -6333,15 +6389,11 @@ TEST(realize, bound_view_materialization_executes_runtime_extent) {
   ASSERT_INT_EQ(physical->src[2]->n_src, 1);
   ASSERT_PTR_EQ(physical->src[2]->src[0], bound_n);
   ASSERT_TRUE(poly_uop_get_buffer_identity(physical) == NULL);
-  const PolyUOp *physical_storage =
-      poly_uop_get_buffer_identity(physical->src[0]);
+  const PolyUOp *physical_storage = poly_uop_get_buffer_identity(physical->src[0]);
   ASSERT_NOT_NULL(physical_storage);
 
   float values[4] = {0};
-  ASSERT_INT_EQ(
-      poly_buffer_read(
-          ctx, (PolyUOp *)physical_storage, values, sizeof(values)),
-      0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)physical_storage, values, sizeof(values)), 0);
   for (int i = 0; i < 4; i++)
     ASSERT_FLOAT_EQ(values[i], (float)(i + 1), 1e-5f);
 
@@ -6523,6 +6575,103 @@ TEST(realize, contiguous_realized_view_is_only_physical_at_tensor_boundary) {
   PASS();
 }
 
+TEST(realize, direct_deviceless_root_realize_matches_pinned_noop) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *root =
+      poly_alu2(ctx, POLY_OP_ADD, poly_const_float(ctx, 2.0), poly_const_float(ctx, 3.0));
+  ASSERT_NOT_NULL(root);
+  ASSERT_INT_EQ(poly_uop_device(root), POLY_DEVICE_AUTO);
+  ASSERT_FALSE(poly_uop_has_buffer_identity(root));
+  PolyTensor *tensor =
+      poly_tensor_create_with_roots(ctx, root, root, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tensor);
+
+  poly_ctx_reset_counters(ctx);
+  PolyTensor *out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &tensor, 1, &out), 0);
+  ASSERT_PTR_EQ(out, tensor);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(out), root);
+  ASSERT_FALSE(poly_uop_has_buffer_identity(poly_tensor_uop_physical(out)));
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.global_ops == 0);
+  ASSERT_TRUE(stats.global_mem == 0);
+  ASSERT_TRUE(stats.kernel_count == 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  float data[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  PolyUOp *base = poly_buffer_on_device(ctx, POLY_FLOAT32, 8, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(base);
+  PolyBuffer handle = poly_buffer_make_host_view(data, sizeof(data));
+  poly_buffer_attach(ctx, base, &handle);
+
+  int64_t bounds[1][2] = {{2, 6}};
+  PolyUOp *slice = poly_shrink(ctx, base, bounds, 1);
+  PolyUOp *contiguous = poly_contiguous(ctx, slice);
+  ASSERT_NOT_NULL(slice);
+  ASSERT_NOT_NULL(contiguous);
+  ASSERT_FALSE(poly_uop_has_buffer_identity(slice));
+  ASSERT_FALSE(poly_uop_has_buffer_identity(contiguous));
+  ASSERT_TRUE(poly_buffer_get(ctx, slice) == NULL);
+
+  PolyTensor *tensor = poly_tensor_create_with_roots(
+      ctx, contiguous, contiguous, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(tensor);
+  int64_t unique_before = ctx->next_unique_id;
+
+  poly_ctx_reset_counters(ctx);
+  PolyTensor *out = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &tensor, 1, &out), 0);
+  ASSERT_PTR_EQ(out, tensor);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(out), contiguous);
+  ASSERT_INT_EQ(ctx->next_unique_id, unique_before);
+
+  /* Pinned UOp.buffer returns a runtime Buffer.view without rewriting the
+   * movement graph (uop/ops.py:838-852). Polygrad keys that runtime alias by
+   * the exact immutable SHRINK and refreshes the same side-table row. */
+  PolyUOp *view_key = poly_uop_buffer(ctx, contiguous);
+  ASSERT_PTR_EQ(view_key, slice);
+  PolyBuffer *view = poly_buffer_get(ctx, view_key);
+  ASSERT_NOT_NULL(view);
+  ASSERT_PTR_EQ(view->ptr, data + 2);
+  ASSERT_TRUE(view->nbytes == 4 * sizeof(float));
+  ASSERT_FALSE(view->owned);
+
+  PolyCtxStats first = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &first), 0);
+  for (int i = 0; i < 100; i++)
+    ASSERT_PTR_EQ(poly_uop_buffer(ctx, contiguous), view_key);
+  PolyCtxStats replay = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &replay), 0);
+  ASSERT_INT_EQ(ctx->next_unique_id, unique_before);
+  ASSERT_TRUE(replay.arena_bytes == first.arena_bytes);
+  ASSERT_TRUE(replay.buffer_entries == first.buffer_entries);
+  ASSERT_PTR_EQ(poly_buffer_get(ctx, view_key), view);
+
+  float got[4] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, view_key, got, sizeof(got)), 0);
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_NEAR(got[i], (float)(i + 2), 1, 1e-6f);
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &replay), 0);
+  ASSERT_TRUE(replay.global_ops == 0);
+  ASSERT_TRUE(replay.global_mem == 0);
+  ASSERT_TRUE(replay.kernel_count == 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, disk_reshaped_views_batch_copy_preserves_offsets_and_counts) {
   char path[256];
   snprintf(path, sizeof(path), "temp/polygrad_disk_batch_%ld.bin", (long)getpid());
@@ -6630,6 +6779,87 @@ TEST(realize, disk_reshaped_views_batch_copy_preserves_offsets_and_counts) {
   ASSERT_TRUE(stats.global_mem == 14);
   ASSERT_TRUE(stats.kernel_count == 4);
   ASSERT_TRUE(stats.mem_used == 14);
+
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(unlink(path), 0);
+  PASS();
+}
+
+TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
+  char path[256];
+  snprintf(path, sizeof(path), "temp/polygrad_disk_direct_%ld.bin", (long)getpid());
+  FILE *file = fopen(path, "wb");
+  ASSERT_NOT_NULL(file);
+  uint8_t file_data[32];
+  for (int i = 0; i < 32; i++)
+    file_data[i] = (uint8_t)i;
+  ASSERT_TRUE(fwrite(file_data, 1, sizeof(file_data), file) == sizeof(file_data));
+  ASSERT_INT_EQ(fclose(file), 0);
+
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int uint8_id = poly_dtype_id_by_name("uint8");
+  ASSERT_TRUE(uint8_id >= 0);
+  PolyUOp *disk_buffer = poly_buffer_from_file(ctx, path, uint8_id);
+  ASSERT_NOT_NULL(disk_buffer);
+
+  int64_t bounds[1][2] = {{4, 10}};
+  int64_t shape[2] = {2, 3};
+  PolyUOp *movement = poly_reshape(ctx, poly_shrink(ctx, disk_buffer, bounds, 1), shape, 2);
+  ASSERT_NOT_NULL(movement);
+  PolyUOp *device = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *copy_src[2] = {movement, device};
+  PolyUOp *copy = poly_uop(ctx, POLY_OP_COPY, movement->dtype, copy_src, 2, poly_arg_none());
+  ASSERT_NOT_NULL(copy);
+
+  /* Pinned Tensor.to builds COPY(RESHAPE(SHRINK(BUFFER@DISK)), DEVICE)
+   * directly (tensor.py:3661-3663). This is the Path-B stored execution root:
+   * no placement call or BUFFER_VIEW projection is involved. */
+  ASSERT_INT_EQ(copy->op, POLY_OP_COPY);
+  ASSERT_INT_EQ(copy->n_src, 2);
+  ASSERT_INT_EQ(copy->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(copy->src[0]->src[0]->op, POLY_OP_SHRINK);
+  ASSERT_PTR_EQ(copy->src[0]->src[0]->src[0], disk_buffer);
+  ASSERT_INT_EQ(copy->src[1]->op, POLY_OP_DEVICE);
+  ASSERT_INT_EQ(poly_device_from_device_uop(copy->src[1]), POLY_DEVICE_CPU);
+  ASSERT_INT_EQ(count_root_ops(ctx, copy, POLY_OP_BUFFER_VIEW), 0);
+
+  /* Pinned rangeify.py:179-181 first materializes a movement whose extent
+   * differs from its base, then split_store (rangeify.py:573-590) emits the
+   * special COPY. Preserve the exact ordered two-CALL topology. */
+  PolyUOp *scheduled_out = NULL;
+  PolySchedule *schedule = poly_schedule_with_vars(ctx, &copy, 1, &scheduled_out);
+  ASSERT_NOT_NULL(schedule);
+  ASSERT_NOT_NULL(scheduled_out);
+  ASSERT_INT_EQ(schedule->template->n_calls, 2);
+  ASSERT_FALSE(poly_schedule_call_is_copy(schedule, 0));
+  ASSERT_TRUE(poly_schedule_call_is_copy(schedule, 1));
+  ASSERT_INT_EQ(poly_schedule_call_body(schedule, 0)->op, POLY_OP_SINK);
+  ASSERT_INT_EQ(poly_schedule_call_body(schedule, 1)->op, POLY_OP_COPY);
+  poly_schedule_free(schedule);
+
+  PolyTensor *tensor =
+      poly_tensor_create_with_roots(ctx, movement, copy, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tensor);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(tensor), copy);
+
+  poly_ctx_reset_counters(ctx);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &tensor, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, tensor);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(poly_tensor_uop_physical(realized));
+  ASSERT_NOT_NULL(identity);
+  ASSERT_INT_EQ(poly_uop_device((PolyUOp *)identity), POLY_DEVICE_CPU);
+  uint8_t values[6] = {0};
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)identity, values, sizeof(values)), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_INT_EQ(values[i], i + 4);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.global_ops == 0);
+  ASSERT_TRUE(stats.global_mem == 18);
+  ASSERT_TRUE(stats.kernel_count == 2);
 
   poly_ctx_destroy(ctx);
   ASSERT_INT_EQ(unlink(path), 0);

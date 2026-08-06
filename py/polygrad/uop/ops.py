@@ -444,11 +444,15 @@ class UOp:
 
     @property
     def buffer(self):
-        """Terminal buffer-identity UOp (BUFFER/BUFFER_VIEW/PARAM) after
-        unwrapping RESHAPE/MULTI. None for expression UOps."""
+        """tinygrad-style runtime buffer for this UOp.
+
+        Direct identities are returned unchanged; a statically contiguous
+        movement over realized storage returns its exact movement UOp with a
+        C-owned zero-copy runtime view, without rewriting graph topology.
+        """
         if self.raw is None:
             return None
-        raw = _ffi._lib.poly_uop_get_buffer_identity(self.raw)
+        raw = _ffi._lib.poly_uop_buffer(self.ctx, self.raw)
         return UOp(self.ctx, raw) if raw else None
 
     def has_buffer_identity(self):

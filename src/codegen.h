@@ -40,10 +40,12 @@ typedef struct {
  * max_vec_width is a polygrad extension (tinygrad uses boolean supports_float4). */
 typedef struct {
   bool has_mulacc; /* Backend supports fused multiply-add (MULACC -> fmaf/fma) */
+  bool has_max; /* Backend renders MAX directly */
   bool has_threefry; /* Backend supports native THREEFRY op without decomposition */
   bool has_exp2; /* Backend renders EXP2 directly */
   bool has_log2; /* Backend renders LOG2 directly */
   bool has_sin; /* Backend renders SIN directly */
+  bool has_fdiv; /* Backend renders FDIV and therefore lowers RECIPROCAL to it */
   bool has_int64; /* Backend renders signed/unsigned 64-bit integer values directly */
   bool has_local; /* Backend supports local/workgroup scheduling */
   bool has_threads; /* Backend supports CPU-style core_id runtime threading */
@@ -72,6 +74,9 @@ typedef struct {
   /* Renderer config for unified pipeline (Phase 4) */
   int device; /* PolyDevice from engine/schedule.h (0 = CPU) */
   PolyOptPolicy opt_policy; /* explicit optimization strategy */
+  /* Pinned tinygrad pm_dtype_decomps: unsupported dtype legalization runs
+   * bottom-up before transcendental and renderer-final rewrites. */
+  PolyPatternMatcher *dtype_matcher;
   PolyPatternMatcher *extra_matcher; /* renderer-specific final rewrite (NULL = none) */
   int gpu_block_size; /* group_for_reduce block size (0 = skip) */
 } PolyRewriteOpts;
@@ -189,6 +194,8 @@ PolyPatternMatcher *poly_pm_move_where_on_load_pass(void);
  * post-gpudims add-loads boundary before render/devectorize. */
 PolyPatternMatcher *poly_pm_add_loads_pass(void);
 PolyPatternMatcher *poly_pm_bf16_non_native(void);
+PolyPatternMatcher *poly_pm_f16_non_native(void);
+PolyPatternMatcher *poly_pm_bf16_renderer_extra(void);
 PolyPatternMatcher *poly_pm_c_renderer_extra(void);
 PolyPatternMatcher *poly_pm_pre_expander_pass(void);
 PolyPatternMatcher *poly_pm_expander_pass(void);

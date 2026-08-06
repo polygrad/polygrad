@@ -45,9 +45,12 @@ extern int g_n_tests;
   } \
   static void test_##suite##_##name(int *_passed, int *_failed)
 
-#define TEST(suite, name) POLY_TEST_REGISTER(suite, name, 0)
-
-#define TEST_COMMON(suite, name) POLY_TEST_REGISTER(suite, name, POLY_TEST_COMMON)
+/* Backend portability is the default. Only tests that exercise one backend's
+ * private renderer/runtime use TEST_BACKEND and remain additive through the
+ * test-specific-* Make targets. */
+#define TEST(suite, name) POLY_TEST_REGISTER(suite, name, POLY_TEST_COMMON)
+#define TEST_COMMON(suite, name) TEST(suite, name)
+#define TEST_BACKEND(suite, name) POLY_TEST_REGISTER(suite, name, 0)
 
 #define PASS() do { (*_passed)++; return; } while(0)
 
@@ -285,13 +288,51 @@ static inline void poly_test_attach_buffer_views(
   }
 }
 
+static inline int poly_test_readback_buffer_views(
+    PolyCtx *ctx, PolyTestBufferView *views, int n_views
+) {
+  for (int i = 0; i < n_views; i++) {
+    /* Explicit CUDA/HIP test bindings already carry device pointers and
+     * perform their own backend readback. Only mirror host-addressable views. */
+    if (!poly_device_is_host_addressable(views[i].handle.device)) continue;
+    PolyBuffer *current = poly_buffer_get(ctx, views[i].buffer);
+    if (!current || !views[i].handle.ptr) return -1;
+    size_t nbytes =
+        views[i].handle.nbytes ? views[i].handle.nbytes
+                               : poly_test_buffer_nbytes(ctx, views[i].buffer);
+    if (nbytes > 0 &&
+        poly_buffer_read(ctx, views[i].buffer, views[i].handle.ptr, nbytes) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+static inline int poly_test_run_schedule_buffer_views(
+    PolyCtx *ctx,
+    PolySchedule *sched,
+    PolyTestBufferView *views,
+    int n_views,
+    PolyVarBinding *vars,
+    int n_vars
+) {
+  poly_test_attach_buffer_views(ctx, views, n_views);
+  int ret = poly_run_schedule(ctx, sched, vars, n_vars);
+  if (ret != 0) return ret;
+  return poly_test_readback_buffer_views(ctx, views, n_views);
+}
+
 static inline int poly_test_realize_buffer_views(
     PolyCtx *ctx, PolyUOp *sink, PolyTestBufferView *views, int n_views
 ) {
   poly_test_attach_buffer_views(ctx, views, n_views);
   /* Test helpers pass schedule-ready STORE/ASSIGN sinks. Keep them on the
    * effect-sink layer instead of treating the sink itself as a tensor value. */
-  return poly_realize_sink(ctx, sink);
+  int ret = poly_realize_sink(ctx, sink);
+  if (ret != 0) return ret;
+  /* CPU execution aliases these host views directly. Device backends own a
+   * separate current residency, so mirror the observable post-run state back
+   * through the public ctx buffer API before tests inspect their arrays. */
+  return poly_test_readback_buffer_views(ctx, views, n_views);
 }
 
 static inline int poly_test_realize_buffer_views_vars(
@@ -305,7 +346,7 @@ static inline int poly_test_realize_buffer_views_vars(
   poly_test_attach_buffer_views(ctx, views, n_views);
   PolySchedule *sched = poly_schedule_effect_sink(ctx, sink);
   if (!sched) return -1;
-  int ret = poly_run_schedule(ctx, sched, vars, n_vars);
+  int ret = poly_test_run_schedule_buffer_views(ctx, sched, views, n_views, vars, n_vars);
   poly_schedule_free(sched);
   return ret;
 }

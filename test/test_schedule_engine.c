@@ -183,6 +183,7 @@ TEST(sched, direct_sink_store_uses_compute_call_like_tinygrad) {
   poly_buffer_set(ctx, dst, dst_d, sizeof(dst_d), POLY_DEVICE_CPU);
   poly_buffer_set(ctx, src, src_d, sizeof(src_d), POLY_DEVICE_CPU);
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, dst, dst_d, sizeof(dst_d)), 0);
   for (int i = 0; i < N; i++)
     ASSERT_FLOAT_EQ(dst_d[i], src_d[i], 1e-6);
 
@@ -2025,6 +2026,34 @@ TEST(sched, estimate_inference_visits_shared_dag_once) {
   uint64_t ops = 0, lds = 0, mem = 0;
   ASSERT_INT_EQ(poly_estimates_infer(&estimates, &binding, 1, &ops, &lds, &mem), 0);
   ASSERT_TRUE(ops == 32 && lds == 32 && mem == 32);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(sched, estimate_inference_uses_unwrapped_host_symbolic_arithmetic) {
+  /* Pinned tinygrad ops.py:1021-1035 renders sym_infer through host Python
+   * arithmetic. int32 intermediates and CASTs are not width-wrapped. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *max =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(INT32_MAX));
+  PolyUOp *one = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(1));
+  PolyUOp *sum =
+      poly_uop2(ctx, POLY_OP_ADD, POLY_INT32, max, one, poly_arg_none());
+  PolyUOp *cast =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_INT32, sum, poly_arg_none());
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyEstimates estimates = {.ops = sum, .lds = zero, .mem = zero};
+  uint64_t ops = 0, lds = 0, mem = 0;
+
+  ASSERT_INT_EQ(poly_estimates_infer(&estimates, NULL, 0, &ops, &lds, &mem), 0);
+  ASSERT_TRUE(ops == UINT64_C(2147483648));
+  ASSERT_TRUE(lds == 0 && mem == 0);
+
+  estimates.ops = cast;
+  ASSERT_INT_EQ(poly_estimates_infer(&estimates, NULL, 0, &ops, &lds, &mem), 0);
+  ASSERT_TRUE(ops == UINT64_C(2147483648));
 
   poly_ctx_destroy(ctx);
   PASS();

@@ -95,6 +95,19 @@ PolyUOp *poly_buffer_view(
     PolyCtx *ctx, PolyUOp *base, int64_t numel, size_t byte_offset
 );
 
+/* Prove the currently supported static contiguous movement-view subset
+ * (RESHAPE/SHRINK over valid realized storage) without creating a UOp.
+ * This is shared by tinygrad-style UOp.buffer access and the preserved
+ * Path-A placement boundary. */
+bool poly_uop_contiguous_view_info(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **out_identity,
+    PolyShape *out_shape,
+    int64_t *out_numel,
+    size_t *out_byte_offset
+);
+
 const PolyAllocator *poly_disk_get_allocator(void);
 
 /* Notify the frontend that the given PolyBuffer* key is no longer needed. */

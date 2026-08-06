@@ -35,6 +35,7 @@
 
 #include "interp.h"
 #include "codegen.h"
+#include "bigint.h"
 #include "utils.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -156,10 +157,22 @@ static uint16_t interp_f32_to_bf16_bits(float v) {
   return (uint16_t)(bits >> 16);
 }
 
-static float interp_f16_bits_to_f32(uint16_t bits) {
+static double interp_f16_bits_to_f64(uint16_t bits) {
+  /* Python's native half unpack returns a double-precision Python float.
+   * Construct half NaNs directly as double NaNs so a signaling payload is not
+   * quieted by an intermediate binary32 -> binary64 conversion
+   * (tinygrad/dtype.py:280-282). */
+  uint32_t exp = (bits >> 10) & 0x1f;
+  uint32_t mant = bits & 0x3ff;
+  if (exp == 0x1f && mant != 0) {
+    uint64_t f64 = ((uint64_t)(bits & 0x8000u) << 48) | (UINT64_C(0x7ff) << 52) |
+                   ((uint64_t)mant << 42);
+    double out;
+    memcpy(&out, &f64, sizeof(out));
+    return out;
+  }
+
   uint32_t sign = (uint32_t)(bits >> 15) << 31;
-  uint32_t exp = (bits >> 10) & 0x1F;
-  uint32_t mant = bits & 0x3FF;
   uint32_t f32;
   if (exp == 0) {
     if (mant == 0) {
@@ -175,18 +188,65 @@ static float interp_f16_bits_to_f32(uint16_t bits) {
   }
   float out;
   memcpy(&out, &f32, sizeof(out));
-  return out;
+  return (double)out;
 }
 
 static uint16_t interp_f32_to_f16_bits(float v) {
+  /* Pinned tinygrad dtype.py:280-282 uses IEEE half pack/unpack for native
+   * float16. Preserve subnormals and round to nearest, ties to even. */
   uint32_t f32;
   memcpy(&f32, &v, sizeof(f32));
-  uint32_t sign = (f32 >> 16) & 0x8000;
-  int32_t exp = ((f32 >> 23) & 0xFF) - 127 + 15;
-  uint32_t mant = (f32 >> 13) & 0x3FF;
-  if (exp <= 0) return (uint16_t)sign;
-  if (exp >= 31) return (uint16_t)(sign | 0x7C00);
-  return (uint16_t)(sign | ((uint32_t)exp << 10) | mant);
+  uint32_t sign = (f32 >> 16) & 0x8000u;
+  uint32_t exp = (f32 >> 23) & 0xffu;
+  uint32_t mant = f32 & 0x007fffffu;
+
+  if (exp == 0xffu) {
+    uint16_t half_mant = (uint16_t)(mant >> 13);
+    if (mant && half_mant == 0) half_mant = 1;
+    return (uint16_t)(sign | 0x7c00u | half_mant);
+  }
+
+  int32_t half_exp = (int32_t)exp - 127 + 15;
+  if (half_exp >= 31) return (uint16_t)(sign | 0x7c00u);
+  if (half_exp <= 0) {
+    if (half_exp < -10) return (uint16_t)sign;
+    mant |= 0x00800000u;
+    uint32_t shift = (uint32_t)(14 - half_exp);
+    uint32_t half_mant = mant >> shift;
+    uint32_t round_bit = UINT32_C(1) << (shift - 1);
+    uint32_t remainder = mant & (round_bit - 1);
+    if ((mant & round_bit) && (remainder || (half_mant & 1u))) half_mant++;
+    return (uint16_t)(sign | half_mant);
+  }
+
+  uint32_t half_mant = mant >> 13;
+  uint32_t round_bit = 0x00001000u;
+  uint32_t remainder = mant & (round_bit - 1);
+  if ((mant & round_bit) && (remainder || (half_mant & 1u))) {
+    half_mant++;
+    if (half_mant == 0x0400u) {
+      half_mant = 0;
+      half_exp++;
+      if (half_exp >= 31) return (uint16_t)(sign | 0x7c00u);
+    }
+  }
+  return (uint16_t)(sign | ((uint32_t)half_exp << 10) | half_mant);
+}
+
+static uint16_t interp_f64_to_f16_bits(double v) {
+  /* Python float is binary64. Preserve representable NaN sign/payload bits
+   * before finite values take the already-proven binary32 RNE path. */
+  uint64_t f64;
+  memcpy(&f64, &v, sizeof(f64));
+  uint16_t sign = (uint16_t)((f64 >> 48) & 0x8000u);
+  uint64_t exp = (f64 >> 52) & 0x7ffu;
+  uint64_t mant = f64 & UINT64_C(0x000fffffffffffff);
+  if (exp == 0x7ffu) {
+    uint16_t half_mant = (uint16_t)(mant >> 42);
+    if (mant && half_mant == 0) half_mant = 1;
+    return (uint16_t)(sign | 0x7c00u | half_mant);
+  }
+  return interp_f32_to_f16_bits((float)v);
 }
 
 /* Memory access (per scalar lane) */
@@ -268,7 +328,7 @@ static InterpLane mem_load_scalar(void *ptr, PolyDType s) {
   if (is_flt && bs == 16) {
     uint16_t bits;
     memcpy(&bits, ptr, 2);
-    return il_flt(interp_f16_bits_to_f32(bits));
+    return il_flt(interp_f16_bits_to_f64(bits));
   }
   return il_int(0);
 }
@@ -339,7 +399,7 @@ static void mem_store_scalar(void *ptr, InterpLane v, PolyDType s) {
   }
   /* float16 */
   if (is_flt && bs == 16) {
-    uint16_t h = interp_f32_to_f16_bits((float)v.f);
+    uint16_t h = interp_f64_to_f16_bits(v.f);
     memcpy(ptr, &h, 2);
     return;
   }
@@ -390,7 +450,6 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
   switch (op) {
   /* Unary */
   case POLY_OP_NEG:
-    if (poly_dtype_is_bool(poly_dtype_scalar(dt))) return il_int(srcs[0].i ? 0 : 1);
     if (is_flt) return il_flt(-a);
     return is_uns ? il_uint(UINT64_C(0) - au) : il_int((int64_t)(UINT64_C(0) - (uint64_t)ai));
   case POLY_OP_SQRT:
@@ -486,7 +545,20 @@ static InterpLane eval_alu(PolyOps op, PolyDType dt, InterpLane *srcs, int n_src
 
 /* Truncate integer lane to dtype width (matches alu.c truncate_result). */
 static InterpLane interp_truncate_lane(InterpLane v, PolyDType dt) {
-  if (poly_dtype_is_float(dt) || poly_dtype_is_bool(dt)) return v;
+  if (poly_dtype_is_float(dt)) {
+    PolyDType s = poly_dtype_scalar(dt);
+    if (interp_is_bf16(s)) {
+      uint16_t bits = interp_f32_to_bf16_bits((float)v.f);
+      return il_flt(interp_bf16_bits_to_f32(bits));
+    }
+    if (s.bitsize == 16) {
+      uint16_t bits = interp_f64_to_f16_bits(v.f);
+      return il_flt(interp_f16_bits_to_f64(bits));
+    }
+    if (s.bitsize == 32) return il_flt((double)(float)v.f);
+    return v;
+  }
+  if (poly_dtype_is_bool(dt)) return v;
   int bits = dt.bitsize;
   if (bits <= 0 || bits >= 64) return v;
   if (poly_dtype_is_unsigned(dt)) {
@@ -506,7 +578,7 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
     if (interp_is_bf16(src_dt)) {
       bits = interp_f32_to_bf16_bits((float)src.f);
     } else if (poly_dtype_is_float(src_dt)) {
-      bits = interp_f32_to_f16_bits((float)src.f);
+      bits = interp_f64_to_f16_bits(src.f);
     } else if (poly_dtype_is_unsigned(src_dt)) {
       bits = (uint16_t)src.u;
     } else {
@@ -516,7 +588,7 @@ static InterpLane bitcast_lane(InterpLane src, PolyDType src_dt, PolyDType dst_d
     if (interp_is_bf16(dst_dt)) {
       return il_flt(interp_bf16_bits_to_f32(bits));
     } else if (poly_dtype_is_float(dst_dt)) {
-      return il_flt(interp_f16_bits_to_f32(bits));
+      return il_flt(interp_f16_bits_to_f64(bits));
     } else if (poly_dtype_is_unsigned(dst_dt)) {
       return il_uint(bits);
     } else {
@@ -762,8 +834,10 @@ static int interp_region(
         lane = il_flt(u->arg.f);
       else if (poly_dtype_is_bool(u->dtype))
         lane = il_int(u->arg.b ? 1 : 0);
+      else if (poly_dtype_is_unsigned(u->dtype))
+        lane = il_uint(poly_arg_integer_to_u64_mod(u->arg));
       else
-        lane = il_int(u->arg.i);
+        lane = il_int((int64_t)poly_arg_integer_to_u64_mod(u->arg));
       /* Fill all lanes with the same value */
       int cnt = u->dtype.count > 0 ? u->dtype.count : 1;
       vals[i].count = (uint16_t)cnt;

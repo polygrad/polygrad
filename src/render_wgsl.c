@@ -23,6 +23,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "bigint.h"
 #include "engine/schedule.h" /* POLY_DEVICE_WEBGPU */
 #include <stdio.h>
 #include <stdlib.h>
@@ -495,7 +496,9 @@ static void render_alu_wgsl(
   /* unary */
   case POLY_OP_NEG:
     if (poly_dtype_is_bool(dtype))
-      snprintf(buf, cap, "(!%s)", s0);
+      /* Raw NEG(bool) is typed bool identity after arithmetic negation and
+       * bool conversion. Standard logical NOT is CMPNE(x,true). */
+      snprintf(buf, cap, "(%s)", s0);
     else if (poly_dtype_is_unsigned(dtype))
       /* WGSL doesn't support unary minus on unsigned (tinygrad wgsl.py:69) */
       snprintf(buf, cap, "(0-%s)", s0);
@@ -741,13 +744,24 @@ char *poly_render_wgsl(PolyUOp **uops, int n, const char *fn_name) {
       } else if (poly_dtype_is_unsigned(u->dtype)) {
         /* Unsigned consts: negative → bitcast, positive → Nu suffix
          * (tinygrad wgsl.py:72) */
-        int64_t v = u->arg.i;
-        if (v < 0)
-          snprintf(val, sizeof(val), "bitcast<u32>(%lld)", (long long)v);
-        else
-          snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)(v & 0xFFFFFFFF));
+        bool negative = u->arg.kind == POLY_ARG_BIGINT ? u->arg.bigint.sign < 0
+                                                       : u->arg.i < 0;
+        if (negative) {
+          char *decimal = poly_arg_integer_to_decimal(u->arg);
+          if (!decimal) return NULL;
+          snprintf(val, sizeof(val), "bitcast<u32>(%s)", decimal);
+          free(decimal);
+        } else {
+          snprintf(
+              val, sizeof(val), "%uu",
+              (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(u->arg)
+          );
+        }
       } else {
-        snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%d",
+            (int32_t)poly_arg_integer_to_u64_mod(u->arg)
+        );
       }
       wsm_set(&names, u, strdup(val));
       continue;
@@ -1259,6 +1273,9 @@ PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
               .has_exp2 = true,
               .has_log2 = true,
               .has_sin = true,
+              /* Pinned WGSLRenderer inherits RECIPROCAL and does not
+               * advertise FDIV (renderer/wgsl.py:56-66). */
+              .has_fdiv = false,
               .has_int64 = false,
               .has_local = true,
               .global_max = {65535, 65535, 65535},
@@ -1267,6 +1284,9 @@ PolyUOp *poly_rewrite_webgpu(PolyCtx *ctx, PolyUOp *sink) {
           },
       .device = POLY_DEVICE_WEBGPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      /* Pinned codegen/__init__.py:120-140 runs pm_dtype_decomps before the
+       * WGSL renderer's final extra_matcher. WGSL has no native BF16. */
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_wgsl_extra(),
       .gpu_block_size = 256, /* WebGPU local_max[0] */
   };

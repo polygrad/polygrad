@@ -839,6 +839,7 @@ TEST(regression, sin_decomp_large_e2e) {
       .caps = caps,
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_c_renderer_extra(),
   };
   PolyUOp *rewritten = poly_full_rewrite_to_sink_ex(ctx, sink, opts);
@@ -943,7 +944,7 @@ TEST(regression, fdiv_e2e) {
  * SECTION 6: Pass-order audit tests — validate multi-pass dependencies
  *
  * The codegen pipeline is: sym → pm_decomp → pm_transcendental → pm_decomp.
- * pm_transcendental creates ops (RECIPROCAL, IDIV) that the second pm_decomp
+ * pm_transcendental creates ops (RECIPROCAL, FLOORDIV) that the second pm_decomp
  * must clean up.  These tests catch regressions where stages are reordered
  * or removed.
  * ════════════════════════════════════════════════════════════════════════ */
@@ -978,10 +979,10 @@ TEST(pass_order, log2_reciprocal_lifecycle) {
 }
 
 /*
- * EXP2 creates IDIV(q, 2) in ldexp2k (codegen.c:1061).
- * The second pm_decomp converts IDIV → SHR.
+ * Pinned tinygrad uop/decompositions.py:18,49-52 creates FLOORDIV(q, 2)
+ * in ldexp2k. The second pm_decomp owns its target-independent lowering.
  */
-TEST(pass_order, exp2_idiv_lifecycle) {
+TEST(pass_order, exp2_floordiv_lifecycle) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_EXP2, 4);
 
@@ -991,22 +992,27 @@ TEST(pass_order, exp2_idiv_lifecycle) {
   sink = poly_graph_rewrite(ctx, sink, poly_pm_transcendental_pass());
 
   int n_exp2 = count_ops_in(ctx, sink, POLY_OP_EXP2);
-  int n_idiv = count_ops_in(ctx, sink, POLY_OP_IDIV);
+  int n_floordiv = count_ops_in(ctx, sink, POLY_OP_FLOORDIV);
+  int n_cdiv = count_ops_in(ctx, sink, POLY_OP_CDIV);
+  int n_cmod = count_ops_in(ctx, sink, POLY_OP_CMOD);
 
   /* Apply second pm_decomp */
   sink = poly_graph_rewrite(ctx, sink, poly_pm_decomp_pass());
-  int n_idiv_after = count_ops_in(ctx, sink, POLY_OP_IDIV);
+  int n_floordiv_after = count_ops_in(ctx, sink, POLY_OP_FLOORDIV);
 
   poly_ctx_destroy(ctx);
 
   ASSERT_INT_EQ(n_exp2, 0);
-  ASSERT_TRUE(n_idiv > 0);
-  ASSERT_INT_EQ(n_idiv_after, 0);
+  ASSERT_TRUE(n_floordiv > 0);
+  ASSERT_INT_EQ(n_cdiv, 0);
+  ASSERT_INT_EQ(n_cmod, 0);
+  ASSERT_INT_EQ(n_floordiv_after, 0);
   PASS();
 }
 
-/* The C renderer advertises native SIN, so the full pipeline preserves it
- * while still removing unsupported internal operations. */
+/* Pinned ClangRenderer removes SIN from code_for_op
+ * (cstyle.py:246-269), so the full CPU pipeline must decompose it together
+ * with unsupported internal operations. */
 TEST(pass_order, full_pipeline_no_residual) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *sink = make_unary_kernel(ctx, POLY_OP_SIN, 4);
@@ -1018,9 +1024,7 @@ TEST(pass_order, full_pipeline_no_residual) {
 
   poly_ctx_destroy(ctx);
 
-  /* The length-four kernel can be scalarized into four native SIN nodes.
-   * Preservation is the pass-order contract; scalarization count is not. */
-  ASSERT_TRUE(n_sin > 0);
+  ASSERT_INT_EQ(n_sin, 0);
   ASSERT_INT_EQ(n_recip, 0);
   ASSERT_INT_EQ(n_max, 0);
   PASS();

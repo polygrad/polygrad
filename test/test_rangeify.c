@@ -3511,6 +3511,146 @@ TEST(rangeify, zero_size_sum_folds_to_identity_e2e) {
   PASS();
 }
 
+TEST(rangeify, zero_size_max_folds_to_typed_identity_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *empty = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){1, 0}, 2
+  );
+  PolyUOp *maximum = poly_reduce_axis(ctx, POLY_OP_MAX, empty, (int64_t[]){0, 1}, 2);
+  PolyUOp *scalar = poly_reshape(ctx, maximum, NULL, 0);
+  PolyUOp *out = poly_buffer(ctx, POLY_INT32, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, scalar));
+
+  int32_t empty_storage[1] = {0};
+  int32_t out_d[1] = {0};
+  const PolyUOp *empty_buf = poly_uop_get_buffer_identity(empty);
+  ASSERT_NOT_NULL(empty_buf);
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW((PolyUOp *)empty_buf, empty_storage),
+      POLY_TEST_HOST_VIEW(out, out_d),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 2);
+  poly_ctx_destroy(ctx);
+  ASSERT_INT_EQ(ret, 0);
+  ASSERT_INT_EQ(out_d[0], INT32_MIN);
+  PASS();
+}
+
+TEST(rangeify, zero_size_max_fills_every_output_with_typed_identity_e2e) {
+  /* Pinned rangeify.py:204-207 uses reduce.const_like(identity), not a scalar
+   * CONST. A (2,0,3)->(2,1,3) MAX must therefore fill all six outputs. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *empty_i = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){2, 0, 3}, 3
+  );
+  PolyUOp *max_i = poly_reduce_axis(ctx, POLY_OP_MAX, empty_i, (int64_t[]){1}, 1);
+  PolyUOp *out_i = poly_buffer(ctx, POLY_INT32, 6);
+  PolyUOp *store_i = poly_store_val(ctx, out_i, max_i);
+
+  PolyUOp *empty_f = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_FLOAT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){2, 0, 3}, 3
+  );
+  PolyUOp *max_f = poly_reduce_axis(ctx, POLY_OP_MAX, empty_f, (int64_t[]){1}, 1);
+  PolyUOp *out_f = poly_buffer(ctx, POLY_FLOAT32, 6);
+  PolyUOp *store_f = poly_store_val(ctx, out_f, max_f);
+  PolyUOp *sink_src[] = {store_i, store_f};
+  PolyUOp *sink = poly_sink_n(ctx, sink_src, 2);
+
+  int32_t empty_i_storage[1] = {0}, out_i_data[6] = {0};
+  float empty_f_storage[1] = {0.0f}, out_f_data[6] = {0.0f};
+  const PolyUOp *empty_i_buf = poly_uop_get_buffer_identity(empty_i);
+  const PolyUOp *empty_f_buf = poly_uop_get_buffer_identity(empty_f);
+  ASSERT_NOT_NULL(empty_i_buf);
+  ASSERT_NOT_NULL(empty_f_buf);
+  PolyTestBufferView bindings[] = {
+      POLY_TEST_HOST_VIEW((PolyUOp *)empty_i_buf, empty_i_storage),
+      POLY_TEST_HOST_VIEW(out_i, out_i_data),
+      POLY_TEST_HOST_VIEW((PolyUOp *)empty_f_buf, empty_f_storage),
+      POLY_TEST_HOST_VIEW(out_f, out_f_data),
+  };
+  int ret = poly_test_realize_buffer_views(ctx, sink, bindings, 4);
+  ASSERT_INT_EQ(ret, 0);
+  for (int i = 0; i < 6; i++) {
+    ASSERT_INT_EQ(out_i_data[i], INT32_MIN);
+    ASSERT_TRUE(isinf(out_f_data[i]) && signbit(out_f_data[i]));
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, zero_size_rewrites_preserve_const_like_shape_topology) {
+  /* Exact pinned predicates:
+   * - nonzero output: shaped typed identity;
+   * - zero output: the general shaped-zero rule, not REDUCE identity. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *empty = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){2, 0, 3}, 3
+  );
+  PolyUOp *maximum = poly_reduce_axis(ctx, POLY_OP_MAX, empty, (int64_t[]){1}, 1);
+  PolyUOp *rewritten = poly_apply_earliest_rewrites(ctx, maximum);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_EQ(rewritten->op, POLY_OP_EXPAND);
+  ASSERT_EQ(rewritten->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_EQ(rewritten->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(rewritten->src[0]->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(rewritten->src[0]->src[0]->arg.i, INT32_MIN);
+  PolyShape shape = poly_uop_max_shape_cached(ctx, rewritten);
+  ASSERT_INT_EQ(shape.ndim, 3);
+  ASSERT_INT_EQ(shape.dims[0], 2);
+  ASSERT_INT_EQ(shape.dims[1], 1);
+  ASSERT_INT_EQ(shape.dims[2], 3);
+
+  PolyUOp *zero_output = poly_reshape(
+      ctx, poly_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){0, 0, 3}, 3
+  );
+  PolyUOp *zero_max = poly_reduce_axis(ctx, POLY_OP_MAX, zero_output, (int64_t[]){1}, 1);
+  PolyUOp *zero_rewritten = poly_apply_earliest_rewrites(ctx, zero_max);
+  ASSERT_NOT_NULL(zero_rewritten);
+  ASSERT_EQ(zero_rewritten->op, POLY_OP_EXPAND);
+  ASSERT_EQ(zero_rewritten->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_EQ(zero_rewritten->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(zero_rewritten->src[0]->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(zero_rewritten->src[0]->src[0]->arg.i, 0);
+  shape = poly_uop_max_shape_cached(ctx, zero_rewritten);
+  ASSERT_INT_EQ(shape.ndim, 3);
+  ASSERT_INT_EQ(shape.dims[0], 0);
+  ASSERT_INT_EQ(shape.dims[1], 1);
+  ASSERT_INT_EQ(shape.dims[2], 3);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(rangeify, zero_size_general_rule_strips_pointer_and_retags_only_root) {
+  /* Pinned x.const_like(0).rtag(x.tag) uses dtype.base, preserves the
+   * zero-extent shape, and applies metadata only to the replacement root. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType ptr0 = poly_dtype_ptr(POLY_FLOAT32, 0, POLY_ADDR_GLOBAL);
+  PolyUOp *tagged =
+      poly_uop_tagged(ctx, POLY_OP_PARAM, ptr0, NULL, 0, poly_arg_int(0), 77);
+  PolyUOp *rewritten = poly_apply_earliest_rewrites(ctx, tagged);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_EQ(rewritten->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(rewritten->tag, 77);
+  ASSERT_TRUE(poly_dtype_eq(rewritten->dtype, POLY_FLOAT32));
+  ASSERT_FALSE(rewritten->dtype.is_ptr);
+  PolyShape shape = poly_uop_max_shape_cached(ctx, rewritten);
+  ASSERT_INT_EQ(shape.ndim, 1);
+  ASSERT_INT_EQ(shape.dims[0], 0);
+  ASSERT_EQ(rewritten->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(rewritten->src[0]->tag, 0);
+  ASSERT_EQ(rewritten->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(rewritten->src[0]->src[0]->tag, 0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(rangeify, zero_size_graph_eliminates_kernel) {
   PolyCtx *ctx = poly_ctx_new();
 
@@ -4309,8 +4449,8 @@ TEST(rangeify, define_var_1d_e2e) {
   ASSERT_FLOAT_EQ(result[1], 21.0f, 1e-5);
   ASSERT_FLOAT_EQ(result[2], 31.0f, 1e-5);
   ASSERT_FLOAT_EQ(result[3], 41.0f, 1e-5);
-  /* Elements beyond N=4 should be untouched (still 0.0) */
-  ASSERT_FLOAT_EQ(result[4], 0.0f, 1e-5);
+  /* Elements beyond the bound N are outside the runtime Tensor shape and are
+   * not observable. Device allocators need not preserve their staging bytes. */
   PASS();
 }
 
@@ -4359,8 +4499,7 @@ TEST(rangeify, define_var_2d_e2e) {
   for (int i = 0; i < 12; i++) {
     ASSERT_FLOAT_EQ(result[i], (float)(i + 2), 1e-5);
   }
-  /* Element 12 should be untouched */
-  ASSERT_FLOAT_EQ(result[12], 0.0f, 1e-5);
+  /* Elements beyond the bound N are outside the runtime Tensor shape. */
   PASS();
 }
 
@@ -4410,8 +4549,7 @@ TEST(rangeify, bind_auto_extract) {
   ASSERT_FLOAT_EQ(result[1], 21.0f, 1e-5);
   ASSERT_FLOAT_EQ(result[2], 31.0f, 1e-5);
   ASSERT_FLOAT_EQ(result[3], 41.0f, 1e-5);
-  /* Element 4 should be untouched */
-  ASSERT_FLOAT_EQ(result[4], 0.0f, 1e-5);
+  /* Elements beyond the bound N are outside the runtime Tensor shape. */
   PASS();
 }
 
@@ -4461,13 +4599,11 @@ TEST(rangeify, define_var_cache_hit) {
   ASSERT_FLOAT_EQ(r1[1], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(r1[2], 21.0f, 1e-5);
   ASSERT_FLOAT_EQ(r1[3], 31.0f, 1e-5);
-  ASSERT_FLOAT_EQ(r1[4], 0.0f, 1e-5); /* untouched */
 
   ASSERT_INT_EQ(ret2, 0);
   /* First 8 elements correct for N=8 */
   ASSERT_FLOAT_EQ(r2[0], 1.0f, 1e-5);
   ASSERT_FLOAT_EQ(r2[7], 71.0f, 1e-5);
-  ASSERT_FLOAT_EQ(r2[8], 0.0f, 1e-5); /* untouched */
   PASS();
 }
 

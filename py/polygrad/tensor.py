@@ -33,7 +33,6 @@ _host_buffers: dict[int, np.ndarray] = {}
 _frontend_buffer_release_cb = None
 
 _POLY_TENSOR_VALUE = 0
-_POLY_TENSOR_PLACE = 1
 
 
 def frontend_buffer_release(buffer_key):
@@ -278,6 +277,15 @@ def _dtype_min_value(dtype_name):
         return float(np.iinfo(_to_np_dtype(dt)).min)
     except Exception:
         return -math.inf
+
+
+def _sum_acc_dtype(dtype):
+    """Pinned tinygrad dtype.py:274-278 default sum accumulation dtype."""
+    dt = to_dtype(dtype).scalar()
+    floor = dtypes.uint32 if dtypes.is_unsigned(dt) else (
+        dtypes.int32 if dtypes.is_int(dt) or dtypes.is_bool(dt) else dtypes.float32
+    )
+    return least_upper_dtype(dt, floor)
 
 
 def _uop_dtype_name(ctx, uop, default='float32'):
@@ -591,16 +599,21 @@ class Tensor:
             current_uop = UOp(self._ctx, raw)
         else:
             # User construction from data
-            python_scalar = isinstance(data, (bool, int, float))
+            numpy_scalar = isinstance(data, np.ndarray) and data.shape == ()
+            scalar_value = data.item() if numpy_scalar else data
+            python_scalar = numpy_scalar or isinstance(data, (bool, int, float))
             if python_scalar:
-                default_dt = (
-                    'bool' if isinstance(data, bool)
-                    else 'int32' if isinstance(data, int)
-                    else 'float32'
-                )
+                if numpy_scalar:
+                    default_dt = _dtype_name(data.dtype, default='float32')
+                else:
+                    default_dt = (
+                        'bool' if isinstance(data, bool)
+                        else 'int32' if isinstance(data, int)
+                        else 'float32'
+                    )
                 dt = _dtype_name(dtype, default=default_dt)
                 scalar_dt = to_dtype(dt)
-                normalized = scalar_dt.const(data)
+                normalized = scalar_dt.const(scalar_value)
                 dtype_id = _dtype_id(dt)
                 target_device_id = _device_id(self._device)
                 if dtypes.is_bool(scalar_dt) or dtypes.is_int(scalar_dt):
@@ -649,10 +662,12 @@ class Tensor:
                     dims, ndim = _int64_array(arr.shape)
                 else:
                     dims, ndim = None, 0
-                if arr.ndim > 0 and post_cast_dt is None:
+                owner_uop = None
+                if arr.ndim > 0:
                     # Pinned UOp._frompy builds a deviceful PYTHON source before
-                    # Tensor.__init__ adds COPY to the requested device. Keep the
-                    # byte owner on that exact C-owned physical source.
+                    # casting BF16/FP8 staging bytes and adding COPY to the
+                    # requested device (uop/ops.py:752-764). Keep the byte owner
+                    # on that exact C-owned physical source.
                     self._tensor = _ffi._lib.poly_tensor_from_host_by_id(
                         self._ctx, self._data.ctypes.data, self._data.nbytes,
                         dtype_id, dims, ndim,
@@ -663,6 +678,19 @@ class Tensor:
                     if not current_raw:
                         raise RuntimeError('host Tensor source has no physical root')
                     current_uop = UOp(self._ctx, current_raw)
+                    owner_uop = current_uop
+                    if post_cast_dt is not None:
+                        self._tensor = _ffi._lib.poly_tensor_cast_by_id(
+                            self._ctx, self._tensor, _dtype_id(post_cast_dt)
+                        )
+                        if not self._tensor:
+                            raise RuntimeError(
+                                f'poly_tensor_cast_by_id failed for dtype {post_cast_dt}'
+                            )
+                        current_raw = self._core_uop_physical_raw(self._tensor)
+                        if not current_raw:
+                            raise RuntimeError('cast host Tensor has no physical root')
+                        current_uop = UOp(self._ctx, current_raw)
                     imported_tensor_from_host = True
                 else:
                     imported = UOp.from_host(
@@ -677,7 +705,8 @@ class Tensor:
                         if not cast_uop:
                             raise RuntimeError(f'poly_cast_by_id failed for dtype {post_cast_dt}')
                         current_uop = UOp(self._ctx, cast_uop)
-                key_uop = current_uop.buffer or current_uop
+                    owner_uop = imported
+                key_uop = owner_uop.buffer or owner_uop
                 key = _buffer_key(self._ctx, key_uop)
                 if key:
                     _host_buffers[key] = self._data
@@ -733,16 +762,12 @@ class Tensor:
 
     # --- Core PolyTensor bridge ---
 
-    @staticmethod
-    def _core_create_for(ctx, uop, role, device):
-        raw = _uop_raw(uop)
-        if not raw:
-            return None
-        return _ffi._lib.poly_tensor_create(ctx, raw, int(role), _device_id(device))
-
     def _core_create(self, uop, role=_POLY_TENSOR_VALUE, device=None):
-        return Tensor._core_create_for(
-            self._ctx, uop, role, self._device if device is None else device
+        # Pinned Tensor.__init__ stores a supplied UOp directly
+        # (tensor.py:76-121). Path B makes that exact current root explicit;
+        # the legacy raw-C constructor remains available to Path A callers.
+        return Tensor._core_create_with_roots_for(
+            self._ctx, uop, uop, role, self._device if device is None else device
         )
 
     @staticmethod
@@ -1237,18 +1262,19 @@ class Tensor:
 
     def _buffer(self) -> Buffer:
         """Return the runtime Buffer backing this tensor.
-        Casts to the base dtype, materializes only when the current root lacks
-        buffer identity, then wraps the realized UOp's terminal buffer."""
+        Matches tinygrad's temporary base-dtype/contiguous readback path."""
         if str(self._device).upper().startswith('DISK:'):
             self.realize()
             identity = self.uop.buffer
             if identity is not None:
                 return Buffer(self._ctx, identity, self._dtype_str, self.numel())
-        x = self.cast(to_dtype(self._dtype_str).base)
-        if not x.uop.has_buffer_identity():
-            x = x.contiguous()
-        if isinstance(self._device, tuple):
-            x = x.to("CPU")
+        # Pinned tensor.py:259-266 clones a device-free source (or MULTI
+        # source) to CPU for readback. Path B must not recover the old implicit
+        # realize-time placement merely because wrapper metadata names a
+        # preferred execution backend.
+        x = self.cast(to_dtype(self._dtype_str).base).contiguous()
+        if int(_ffi._lib.poly_uop_device(self.uop.raw)) == 0 or isinstance(self._device, tuple):
+            x = x.clone("CPU")
         x.realize()
         return Buffer(self._ctx, x.uop.buffer, x._dtype_str, x.numel())
 
@@ -1308,24 +1334,19 @@ class Tensor:
         return arr.flat[0].item()
 
     def tolist(self):
+        # Pinned tensor.py:285-300 widens half through the graph before
+        # returning Python values. This is distinct from widening values after
+        # reading rounded float16 storage through numpy().
+        if to_dtype(self._dtype_str).base == dtypes.half:
+            return self.float().tolist()
         return self.numpy().tolist()
 
     def detach(self):
-        # Match tinygrad's graph-level detach: preserve the current value UOp,
-        # but cut autograd flow without forcing a host readback/materialization.
-        uop = _ffi._lib.poly_detach(self._ctx, self._graph_uop)
-        if not uop:
-            raise RuntimeError('poly_detach failed')
-        return Tensor(
-            _ctx=self._ctx,
-            _tensor=self._core_create_with_roots(
-                uop, self._physicalize_result(uop, [self]), _POLY_TENSOR_VALUE, self._device
-            ),
-            _shape=self.shape,
-            _dtype=self._dtype_str,
-            _device=self._device,
-            requires_grad=False,
-        )
+        # Pinned mixin/elementwise.py:33-37 is one DETACH Tensor ALU.
+        core = _ffi._lib.poly_tensor_detach(self._ctx, self._tensor)
+        ret = self._make_result_from_core(core, self.shape, [self])
+        ret.requires_grad = False
+        return ret
 
     def clone(self, device=None):
         from .device import Device
@@ -1593,6 +1614,12 @@ class Tensor:
             )
         raise TypeError(f'Cannot convert {type(other)} to Tensor')
 
+    def const_like(self, value):
+        """Pinned CreationMixin.const_like: typed CONST broadcast to this shape."""
+        return Tensor(
+            value, dtype=self.dtype, device=self.device, _ctx=self._ctx
+        )._broadcast_to_tensor(self.shape)
+
     def _broadcast_shape(self, other_shape):
         """Compute broadcast shape between self.shape and other_shape."""
         a, b = self.shape, other_shape
@@ -1754,10 +1781,12 @@ class Tensor:
         return self._binop(other, 'ADD')
 
     def __radd__(self, other):
-        return self.__add__(other)
+        # Pinned __radd__ preserves scalar-first source order through
+        # add(..., reverse=True) (mixin/elementwise.py:72-88,267-268).
+        return self.add(other, True)
 
     def add(self, other, reverse=False):
-        return self.__radd__(other) if reverse else self.__add__(other)
+        return self._binop(other, 'ADD', reverse)
 
     def __sub__(self, other):
         return self.sub(other)
@@ -1766,17 +1795,20 @@ class Tensor:
         return self.sub(other, reverse=True)
 
     def sub(self, other, reverse=False):
-        a, b, _ = self._broadcasted(other, reverse)
-        return a + (-b)
+        # C owns tinygrad's `a + (-b)` topology so every frontend receives
+        # the same ordered physical graph (mixin/elementwise.py:90-109).
+        return self._binop(other, 'SUB', reverse)
 
     def __mul__(self, other):
         return self._binop(other, 'MUL')
 
     def __rmul__(self, other):
-        return self.__mul__(other)
+        # Pinned __rmul__ preserves scalar-first source order through
+        # mul(..., reverse=True) (mixin/elementwise.py:110-126,273-274).
+        return self.mul(other, True)
 
     def mul(self, other, reverse=False):
-        return self.__rmul__(other) if reverse else self.__mul__(other)
+        return self._binop(other, 'MUL', reverse)
 
     def __truediv__(self, other):
         return self.div(other)
@@ -1788,7 +1820,12 @@ class Tensor:
         if rounding_mode is not None:
             raise NotImplementedError(f"rounding_mode={rounding_mode!r} is not supported")
         other = self._ensure_tensor(other)
-        return other * self.reciprocal() if reverse else self * other.reciprocal()
+        dividend, divisor = (other, self) if reverse else (self, other)
+        out_shape = dividend._broadcast_shape(divisor.shape)
+        core = _ffi._lib.poly_tensor_div(
+            self._ctx, dividend._tensor, divisor._tensor
+        )
+        return self._make_result_from_core(core, out_shape, [dividend, divisor])
 
     def __neg__(self):
         if dtypes.is_bool(to_dtype(self.dtype)):
@@ -1828,39 +1865,23 @@ class Tensor:
         return self._binop(other, 'CMPLT')
 
     def __eq__(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_eq(self._ctx, self._broadcast_uop(out_shape),
-                                 other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        # Pinned mixin/elementwise.py:315-322: equality is promoted CMPNE
+        # followed by logical_not, not a raw mixed-dtype UOp helper.
+        return self._binop(other, 'CMPNE').logical_not()
 
     def __ne__(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_ne(self._ctx, self._broadcast_uop(out_shape),
-                                 other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        return self._binop(other, 'CMPNE')
 
     def __gt__(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_gt(self._ctx, self._broadcast_uop(out_shape),
-                                 other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        # Pinned mixin/elementwise.py:312-313 swaps promoted operands and uses
+        # CMPLT because tinygrad has no distinct greater-than UOp.
+        return self._binop(other, 'CMPLT', reverse=True)
 
     def __ge__(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_ge(self._ctx, self._broadcast_uop(out_shape),
-                                 other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        return (self < other).logical_not()
 
     def __le__(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_le(self._ctx, self._broadcast_uop(out_shape),
-                                 other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        return (self > other).logical_not()
 
     def ne(self, other):
         return self.__ne__(other)
@@ -1870,32 +1891,42 @@ class Tensor:
 
     def where(self, x, y):
         """self is condition: where(cond, x, y)."""
-        x = self._ensure_tensor(x)
-        y = self._ensure_tensor(y)
-        out_shape = _broadcast_shapes(_broadcast_shapes(self.shape, x.shape), y.shape)
-        c_uop = self._broadcast_uop(out_shape)
-        x_uop = x._broadcast_uop(out_shape)
-        y_uop = y._broadcast_uop(out_shape)
-        uop = _ffi._lib.poly_where_op(self._ctx, c_uop, x_uop, y_uop)
-        return self._make_result(uop, out_shape, [self, x, y])
+        # Pinned tensor.py:750-772 anchors branch promotion on an existing
+        # branch Tensor, not on the boolean condition.
+        if isinstance(x, Tensor):
+            x, y, branch_shape = x._broadcasted(y)
+        elif isinstance(y, Tensor):
+            y, x, branch_shape = y._broadcasted(x)
+        else:
+            x, y, branch_shape = self._ensure_tensor(x)._broadcasted(y)
+        out_shape = _broadcast_shapes(self.shape, branch_shape)
+        cond = self.cast('bool')._broadcast_to_tensor(out_shape)
+        x = x._broadcast_to_tensor(out_shape)
+        y = y._broadcast_to_tensor(out_shape)
+        core = _ffi._lib.poly_tensor_alu3(
+            self._ctx, _ffi.OPS['WHERE'], cond._tensor, x._tensor, y._tensor
+        )
+        return self._make_result_from_core(core, out_shape, [cond, x, y])
 
     def maximum(self, other):
         return self._binop(other, 'MAX')
 
     def minimum(self, other):
-        other = self._ensure_tensor(other)
-        out_shape = self._broadcast_shape(other.shape)
-        uop = _ffi._lib.poly_minimum(self._ctx, self._broadcast_uop(out_shape),
-                                      other._broadcast_uop(out_shape))
-        return self._make_result(uop, out_shape, [self, other])
+        # Pinned _broadcasted constructs ordered movement/cast Tensor
+        # occurrences before minimum's inverse/maximum/inverse program
+        # (mixin/__init__.py:439-449; mixin/elementwise.py:381-393).
+        x, y, out_shape = self._broadcasted(other)
+        core = _ffi._lib.poly_tensor_minimum(self._ctx, x._tensor, y._tensor)
+        return self._make_result_from_core(core, out_shape, [x, y])
 
     def clamp(self, min_=None, max_=None):
         if min_ is None and max_ is None:
             raise RuntimeError("at least one of 'min_' or 'max_' must not be None")
-        lo = min_ if min_ is not None else -1e38
-        hi = max_ if max_ is not None else 1e38
-        uop = _ffi._lib.poly_clamp(self._ctx, self._graph_uop, float(lo), float(hi))
-        return self._make_result(uop, self.shape, [self])
+        # Pinned clamp conditionally composes comparison/WHERE Tensor
+        # operations; an omitted bound is not a finite sentinel
+        # (mixin/elementwise.py:569-580).
+        ret = (self < min_).where(min_, self) if min_ is not None else self
+        return (ret > max_).where(max_, ret) if max_ is not None else ret
 
     # --- Unary math (C core composed ops) ---
 
@@ -1931,101 +1962,131 @@ class Tensor:
         return self._make_result_from_core(core, self.shape, [self])
 
     def exp(self):
-        uop = _ffi._lib.poly_exp(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_exp(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def log(self):
-        uop = _ffi._lib.poly_log(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_log(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def sin(self):
-        uop = _ffi._lib.poly_sin(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned _ensure_float().alu(SIN), consuming the exact current Tensor
+        # occurrence (mixin/elementwise.py:437-478; tensor.py:128-140).
+        base = self if dtypes.is_float(self.dtype) else self.cast(least_upper_float(to_dtype(self.dtype)))
+        core = _ffi._lib.poly_tensor_alu1(
+            base._ctx, _ffi.OPS['SIN'], base._tensor
+        )
+        return base._make_result_from_core(core, base.shape, [base])
 
     def cos(self):
-        uop = _ffi._lib.poly_cos(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned floating COS promotes against float32, subtracts from pi/2,
+        # applies SIN, then casts back (mixin/elementwise.py:480-489).
+        if dtypes.is_float(self.dtype):
+            work = self.cast(least_upper_dtype(to_dtype(self.dtype), dtypes.float32))
+            return (math.pi / 2 - work).sin().cast(self.dtype)
+        return (math.pi / 2 - self).sin()
 
     def tan(self):
-        uop = _ffi._lib.poly_tan(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned tan is the high-level SIN/COS quotient
+        # (mixin/elementwise.py:902-910).
+        return self.sin() / self.cos()
 
     def sigmoid(self):
-        uop = _ffi._lib.poly_sigmoid(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:667-677.
+        return (1 + (self * (-1 / math.log(2))).exp2()).reciprocal()
 
     def tanh(self):
-        uop = _ffi._lib.poly_tanh_act(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:739-749.
+        return 2.0 * (2.0 * self).sigmoid() - 1.0
 
     def abs(self):
-        uop = _ffi._lib.poly_abs(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:892-900.
+        return self * self.sign()
 
     def sign(self):
-        uop = _ffi._lib.poly_sign(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:882-890 uses typed const_like branches.
+        return self.ne(0).where(
+            (self < 0).where(self.const_like(-1), self.const_like(1)),
+            self.const_like(0),
+        )
 
     def square(self):
-        uop = _ffi._lib.poly_square(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:558-566.
+        return self * self
 
     def rsqrt(self):
-        uop = _ffi._lib.poly_rsqrt(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:802-810.
+        return self.sqrt().reciprocal()
 
     def ceil(self):
-        uop = _ffi._lib.poly_ceil(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:636-644.
+        b = self.trunc()
+        return (self > b).where(b + 1, b)
 
     def floor(self):
-        uop = _ffi._lib.poly_floor(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:646-654.
+        b = self.trunc()
+        return (self < b).where(b - 1, b)
 
     def round(self):
-        uop = _ffi._lib.poly_round_f(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:872-880 implements round-half-to-even
+        # through ordinary Tensor primitives and their scalar broadcast rules.
+        b = self.trunc() / 2.0
+        return ((self > 0).eq(b.trunc().eq(b))).where(
+            (self - 0.5).ceil(), (self + 0.5).floor()
+        )
 
-    def isinf(self):
-        uop = _ffi._lib.poly_isinf(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+    def isinf(self, detect_positive=True, detect_negative=True):
+        # Pinned mixin/elementwise.py:596-604 independently gates positive
+        # and negative infinity before adding the boolean results.
+        return (
+            self.eq(float("inf")) * detect_positive
+            + self.eq(float("-inf")) * detect_negative
+        )
 
     def isnan(self):
-        uop = _ffi._lib.poly_isnan(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:586-594.
+        return self != self
 
     # --- Activations (C core composed ops) ---
 
     def relu(self):
-        uop = _ffi._lib.poly_relu(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:656-666. Tensor comparison/where keeps
+        # the scalar-zero RESHAPE/EXPAND topology and ordered physical roots.
+        return (self > 0).where(self, 0)
 
     def relu6(self):
-        uop = _ffi._lib.poly_relu6(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:679-689.
+        return self.relu() - (self - 6).relu()
 
     def leaky_relu(self, neg_slope=0.01):
-        uop = _ffi._lib.poly_leaky_relu(self._ctx, self._graph_uop, neg_slope)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:726-737.
+        return (self < 0).where(neg_slope * self, self)
 
     def gelu(self):
-        uop = _ffi._lib.poly_gelu(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:761-776. C applies the exact formula
+        # independently to retained/current Path-B roots.
+        core = _ffi._lib.poly_tensor_gelu(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def quick_gelu(self):
-        uop = _ffi._lib.poly_quick_gelu(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:751-759 builds the broadcasted scalar
+        # formula from the one current Tensor.uop. The C Tensor boundary does
+        # the same independently for retained/current Path-B roots.
+        core = _ffi._lib.poly_tensor_quick_gelu(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     def silu(self):
-        uop = _ffi._lib.poly_silu(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:790-800.
+        return self.swish()
 
     def swish(self):
-        return self.silu()
+        # Pinned mixin/elementwise.py:778-788.
+        return self * self.sigmoid()
 
     def elu(self, alpha=1.0):
-        uop = _ffi._lib.poly_elu(self._ctx, self._graph_uop, alpha)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:945-955.
+        return self.relu() - alpha * (1 - self.exp()).relu()
 
     def softplus(self, beta=1.0):
         uop = _ffi._lib.poly_softplus(self._ctx, self._graph_uop, beta)
@@ -2036,32 +2097,26 @@ class Tensor:
         return self._make_result(uop, self.shape, [self])
 
     def hardtanh(self, min_val=-1, max_val=1):
-        uop = _ffi._lib.poly_hardtanh(self._ctx, self._graph_uop, min_val, max_val)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:716-724.
+        return self.clamp(min_val, max_val)
 
     def hardswish(self):
-        uop = _ffi._lib.poly_hardswish(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:691-701.
+        return self * (self + 3).relu6() * (1 / 6)
 
-    def hardsigmoid(self):
-        uop = _ffi._lib.poly_hardsigmoid(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+    def hardsigmoid(self, alpha=1 / 6, beta=0.5):
+        # Pinned mixin/elementwise.py:703-714.
+        return (alpha * self + beta).relu() - (alpha * self + beta - 1).relu()
 
     # --- Softmax ---
 
     def softmax(self, axis=-1):
-        # Keep softmax lazy so backward sees the same current UOp graph as
-        # tinygrad; scheduling decides where kernel boundaries belong.
-        uop = _ffi._lib.poly_softmax(self._ctx, self._graph_uop, int(axis))
-        if not uop:
-            raise RuntimeError('poly_softmax failed')
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_softmax(self._ctx, self._tensor, int(axis))
+        return self._make_result_from_core(core, self.shape, [self])
 
     def log_softmax(self, axis=-1):
-        uop = _ffi._lib.poly_log_softmax(self._ctx, self._graph_uop, int(axis))
-        if not uop:
-            raise RuntimeError('poly_log_softmax failed')
-        return self._make_result(uop, self.shape, [self])
+        core = _ffi._lib.poly_tensor_log_softmax(self._ctx, self._tensor, int(axis))
+        return self._make_result_from_core(core, self.shape, [self])
 
     # --- Movement ops ---
 
@@ -2157,10 +2212,15 @@ class Tensor:
         k_arr, nk = _int64_array(k)
         s_arr, _ = _int64_array(s)
         d_arr, _ = _int64_array(d)
-        uop = _ffi._lib.poly_pool(self._ctx, self._graph_uop, k_arr, nk, s_arr, d_arr)
-        if not uop:
+        core = _ffi._lib.poly_tensor_pool(
+            self._ctx, self._tensor, k_arr, nk, s_arr, d_arr
+        )
+        if not core:
             raise RuntimeError(f'poly_pool failed for shape={self.shape}, kernel={k}, stride={s}, dilation={d}')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self]
+        )
 
     def transpose(self, dim0=-2, dim1=-1):
         nd = len(self.shape)
@@ -2270,96 +2330,65 @@ class Tensor:
             axis = tuple(range(self.ndim))
         elif isinstance(axis, int):
             axis = (axis,)
-        # Normalize negative axes
-        nd = self.ndim
-        axis = tuple(a + nd if a < 0 else a for a in axis)
-
+        axis = tuple(self._resolve_dim(int(a)) for a in axis)
         arr, n = _int64_array(axis)
-        uop = _ffi._lib.poly_reduce_axis(self._ctx, _ffi.OPS['ADD'], self._graph_uop, arr, n)
-
-        # REDUCE_AXIS keeps all dims (reduced→1). If keepdim=False, reshape to squeeze.
-        if not keepdim and axis:
-            new_shape = tuple(s for i, s in enumerate(self.shape) if i not in axis)
-            if not new_shape:
-                new_shape = ()
-            dims, ndim = _int64_array(new_shape) if new_shape else (None, 0)
-            uop = _ffi._lib.poly_reshape(self._ctx, uop, dims, ndim)
-            return self._make_result(uop, new_shape, [self])
-
-        # keepdim=True: shape has 1 at reduced axes
-        new_shape = tuple(1 if i in axis else s for i, s in enumerate(self.shape))
-        return self._make_result(uop, new_shape, [self])
+        core = _ffi._lib.poly_tensor_sum(
+            self._ctx, self._tensor, arr, n, bool(keepdim)
+        )
+        new_shape = (
+            tuple(1 if i in axis else s for i, s in enumerate(self.shape))
+            if keepdim else
+            tuple(s for i, s in enumerate(self.shape) if i not in axis)
+        )
+        return self._make_result_from_core(core, new_shape, [self])
 
     def max(self, axis=None, keepdim=False):
-        if axis is None:
-            # Reduce all
-            result = self
-            for i in range(len(self.shape) - 1, -1, -1):
-                uop = _ffi._lib.poly_max_reduce(self._ctx, result._graph_uop,
-                                                  i, int(keepdim))
-                new_shape = _shape_from_uop(self._ctx, uop)
-                result = self._make_result(uop, new_shape, [result])
-            return result
-        if isinstance(axis, (tuple, list)):
-            axes = tuple(self._resolve_dim(int(a)) for a in axis)
-            result = self
-            if keepdim:
-                for ax in axes:
-                    uop = _ffi._lib.poly_max_reduce(result._ctx, result._graph_uop, ax, 1)
-                    result = result._make_result(uop, _shape_from_uop(result._ctx, uop), [result])
-                return result
-            for ax in sorted(axes, reverse=True):
-                uop = _ffi._lib.poly_max_reduce(result._ctx, result._graph_uop, ax, 0)
-                result = result._make_result(uop, _shape_from_uop(result._ctx, uop), [result])
-            return result
-        # Normalize negative axis
-        nd = len(self.shape)
-        if axis < 0:
-            axis = axis + nd
-        uop = _ffi._lib.poly_max_reduce(self._ctx, self._graph_uop,
-                                          axis, int(keepdim))
-        new_shape = _shape_from_uop(self._ctx, uop)
-        result = self._make_result(uop, new_shape, [self])
-        return result
+        # Pinned ReduceMixin._reduce emits one REDUCE over the complete
+        # normalized axis tuple (mixin/reduce.py:12-17, uop/ops.py:567-569).
+        axes = tuple(range(self.ndim)) if axis is None else (
+            (self._resolve_dim(int(axis)),) if isinstance(axis, int) else
+            tuple(self._resolve_dim(int(a)) for a in axis)
+        )
+        arr, n = _int64_array(axes)
+        core = _ffi._lib.poly_tensor_max(
+            self._ctx, self._tensor, arr, n, bool(keepdim)
+        )
+        new_shape = (
+            tuple(1 if i in axes else s for i, s in enumerate(self.shape))
+            if keepdim else
+            tuple(s for i, s in enumerate(self.shape) if i not in axes)
+        )
+        return self._make_result_from_core(core, new_shape, [self])
 
     def argmax(self, axis=None, keepdim=False):
         if axis is None:
             return self.flatten().argmax(0)
         axis = self._resolve_dim(int(axis))
-        uop = _ffi._lib.poly_argmax(self._ctx, self._graph_uop, axis)
-        if not uop:
-            raise RuntimeError('poly_argmax failed')
-        shape = _shape_from_uop(self._ctx, uop)
-        result = self._make_result(uop, shape, [self])
-        if keepdim:
-            keep_shape = list(self.shape)
-            keep_shape[axis] = 1
-            result = result.reshape(tuple(keep_shape))
+        core = _ffi._lib.poly_tensor_argmax(
+            self._ctx, self._tensor, axis, bool(keepdim)
+        )
+        shape = (
+            tuple(1 if i == axis else s for i, s in enumerate(self.shape))
+            if keepdim else
+            tuple(s for i, s in enumerate(self.shape) if i != axis)
+        )
+        result = self._make_result_from_core(core, shape, [self])
+        result.requires_grad = False
         return result
 
     def sort(self, dim=-1, descending=False):
         dim = self._resolve_dim(int(dim))
         values = _ffi._ptr()
         indices = _ffi._ptr()
-        rc = _ffi._lib.poly_sort(
-            self._ctx, self._graph_uop, dim, int(bool(descending)),
+        rc = _ffi._lib.poly_tensor_sort(
+            self._ctx, self._tensor, dim, int(bool(descending)),
             ctypes.byref(values), ctypes.byref(indices)
         )
         if rc != 0 or not values or not indices:
-            raise RuntimeError('poly_sort failed')
-        val_shape = _shape_from_uop(self._ctx, values)
-        idx_shape = _shape_from_uop(self._ctx, indices)
-        vals = self._make_result(values, val_shape, [self])
-        idx = Tensor(
-            _ctx=self._ctx,
-            _tensor=self._core_create_with_roots(
-                indices, self._physicalize_result(indices, [self]), _POLY_TENSOR_VALUE, self._device
-            ),
-            _shape=idx_shape,
-            _dtype=_uop_dtype_name(self._ctx, indices, 'int32'),
-            _device=self._device,
-            requires_grad=False,
-        )
+            raise RuntimeError('poly_tensor_sort failed')
+        vals = self._make_result_from_core(values, self.shape, [self])
+        idx = self._make_result_from_core(indices, self.shape, [self])
+        idx.requires_grad = False
         return vals, idx
 
     def argsort(self, dim=-1, descending=False):
@@ -2373,41 +2402,35 @@ class Tensor:
             raise ValueError(f'selected index k={int(k)} is out of range')
         values = _ffi._ptr()
         indices = _ffi._ptr()
-        rc = _ffi._lib.poly_topk(
-            self._ctx, self._graph_uop, int(k), dim, int(bool(largest)), int(bool(sorted_)),
+        rc = _ffi._lib.poly_tensor_topk(
+            self._ctx, self._tensor, int(k), dim, int(bool(largest)), int(bool(sorted_)),
             ctypes.byref(values), ctypes.byref(indices)
         )
         if rc != 0 or not values or not indices:
-            raise RuntimeError('poly_topk failed')
-        val_shape = _shape_from_uop(self._ctx, values)
-        idx_shape = _shape_from_uop(self._ctx, indices)
-        vals = self._make_result(values, val_shape, [self])
-        idx = Tensor(
-            _ctx=self._ctx,
-            _tensor=self._core_create_with_roots(
-                indices, self._physicalize_result(indices, [self]), _POLY_TENSOR_VALUE, self._device
-            ),
-            _shape=idx_shape,
-            _dtype=_uop_dtype_name(self._ctx, indices, 'int32'),
-            _device=self._device,
-            requires_grad=False,
-        )
+            raise RuntimeError('poly_tensor_topk failed')
+        out_shape = list(self.shape)
+        out_shape[dim] = int(k)
+        vals = self._make_result_from_core(values, tuple(out_shape), [self])
+        idx = self._make_result_from_core(indices, tuple(out_shape), [self])
+        idx.requires_grad = False
         return vals, idx
 
     def min(self, axis=None, keepdim=False):
         return (-self).max(axis=axis, keepdim=keepdim).__neg__()
 
     def mean(self, axis=None, keepdim=False):
-        if axis is None:
-            return self.sum(keepdim=keepdim) / self.numel()
-        if isinstance(axis, (tuple, list)):
-            axes = tuple(self._resolve_dim(int(a)) for a in axis)
-            denom = _prod(self.shape[a] for a in axes)
-            return self.sum(axis=axes, keepdim=keepdim) / denom
-        uop = _ffi._lib.poly_mean_reduce(self._ctx, self._graph_uop,
-                                           axis, int(keepdim))
-        new_shape = _shape_from_uop(self._ctx, uop)
-        return self._make_result(uop, new_shape, [self])
+        axes = tuple(range(self.ndim)) if axis is None else (
+            (self._resolve_dim(int(axis)),) if isinstance(axis, int) else
+            tuple(self._resolve_dim(int(a)) for a in axis)
+        )
+        # Pinned mixin/__init__.py:581-599 casts before sum, divides through
+        # Tensor reciprocal/multiply, then casts to the public output dtype.
+        numerator = self.cast(_sum_acc_dtype(self.dtype)).sum(
+            axis=axes, keepdim=keepdim
+        )
+        denominator = _prod(self.shape[a] for a in axes)
+        output_dtype = self.dtype if dtypes.is_float(self.dtype) else dtypes.float32
+        return numerator.div(denominator).cast(output_dtype)
 
     def var(self, axis=None, keepdim=False, correction=1):
         if axis is None:
@@ -2445,19 +2468,29 @@ class Tensor:
             if d != dim and s < i:
                 raise AssertionError('requires self.shape[d] >= index.shape[d] for all d != dim')
 
-        uop = _ffi._lib.poly_gather_dim(self._ctx, self._graph_uop, dim, index._graph_uop)
-        if not uop:
-            raise RuntimeError('poly_gather_dim failed')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, index])
+        core = _ffi._lib.poly_tensor_gather_dim(
+            self._ctx, self._tensor, dim, index._tensor
+        )
+        if not core:
+            raise RuntimeError('poly_tensor_gather_dim failed')
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, index]
+        )
 
     def take_along_axis(self, index, axis):
         return self.gather(axis, index)
 
     def one_hot(self, num_classes):
-        uop = _ffi._lib.poly_one_hot(self._ctx, self._graph_uop, int(num_classes))
-        if not uop:
-            raise RuntimeError('poly_one_hot failed')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
+        core = _ffi._lib.poly_tensor_one_hot(
+            self._ctx, self._tensor, int(num_classes)
+        )
+        if not core:
+            raise RuntimeError('poly_tensor_one_hot failed')
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self]
+        )
 
     def _pre_scatter_validate(self, dim, index, src):
         if not isinstance(index, Tensor):
@@ -2523,11 +2556,13 @@ class Tensor:
     def dot(self, w):
         if not isinstance(w, Tensor):
             raise TypeError(f'Expected Tensor, got {type(w)}')
-        uop = _ffi._lib.poly_dot(self._ctx, self._graph_uop, w._graph_uop)
-        if not uop:
+        core = _ffi._lib.poly_tensor_dot(self._ctx, self._tensor, w._tensor)
+        if not core:
             raise ValueError(f'cannot dot {self.shape} and {w.shape}')
-        new_shape = _shape_from_uop(self._ctx, uop)
-        return self._make_result(uop, new_shape, [self, w])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, w]
+        )
 
     def matmul(self, other):
         return self.dot(other)
@@ -2627,10 +2662,15 @@ class Tensor:
         s_arr, _ = _int64_array(s)
         d_arr, _ = _int64_array(d)
         p_arr, npad = _int64_array(pads)
-        uop = _ffi._lib.poly_max_pool2d(self._ctx, self._graph_uop, k_arr, nk, s_arr, d_arr, p_arr, npad)
-        if not uop:
+        core = _ffi._lib.poly_tensor_max_pool2d(
+            self._ctx, self._tensor, k_arr, nk, s_arr, d_arr, p_arr, npad
+        )
+        if not core:
             raise RuntimeError('poly_max_pool2d failed')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self]
+        )
 
     def conv2d(self, weight, bias=None, groups=1, stride=1, dilation=1, padding=0, dtype=None):
         if not isinstance(weight, Tensor):
@@ -2645,34 +2685,40 @@ class Tensor:
         s_arr, _ = _int64_array(s)
         d_arr, _ = _int64_array(d)
         p_arr, npad = _int64_array(pads)
-        uop = _ffi._lib.poly_conv2d(
-            self._ctx, self._graph_uop, weight._graph_uop,
-            bias._graph_uop if bias is not None else None,
+        core = _ffi._lib.poly_tensor_conv2d(
+            self._ctx, self._tensor, weight._tensor,
+            bias._tensor if bias is not None else None,
             int(groups), s_arr, d_arr, p_arr, npad,
         )
-        if not uop:
+        if not core:
             raise RuntimeError('poly_conv2d failed')
         inputs = [self, weight] + ([bias] if bias is not None else [])
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), inputs)
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), inputs
+        )
 
     def batchnorm(self, weight, bias, mean, invstd, axis=1):
         axis_ = tuple(axis) if isinstance(axis, (tuple, list)) else (axis,)
         axis_ = tuple(self._resolve_dim(int(a)) for a in axis_)
         axes, n_axes = _int64_array(axis_)
-        uop = _ffi._lib.poly_batchnorm(
-            self._ctx, self._graph_uop,
-            weight._graph_uop if weight is not None else None,
-            bias._graph_uop if bias is not None else None,
-            mean._graph_uop, invstd._graph_uop, axes, n_axes,
+        core = _ffi._lib.poly_tensor_batchnorm(
+            self._ctx, self._tensor,
+            weight._tensor if weight is not None else None,
+            bias._tensor if bias is not None else None,
+            mean._tensor, invstd._tensor, axes, n_axes,
         )
-        if not uop:
+        if not core:
             raise RuntimeError('poly_batchnorm failed')
         inputs = [self, mean, invstd]
         if weight is not None:
             inputs.append(weight)
         if bias is not None:
             inputs.append(bias)
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), inputs)
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), inputs
+        )
 
     # --- Loss functions ---
 
@@ -2753,10 +2799,15 @@ class Tensor:
                     raise RuntimeError(
                         f"expected index and self on the same device, index.device={i.device}, self.device={result.device}"
                     )
-                uop = _ffi._lib.poly_index_select(result._ctx, result._graph_uop, dim, i._graph_uop)
-                if not uop:
-                    raise RuntimeError('poly_index_select failed')
-                result = result._make_result(uop, _shape_from_uop(result._ctx, uop), [result, i])
+                core = _ffi._lib.poly_tensor_index_select(
+                    result._ctx, result._tensor, dim, i._tensor
+                )
+                if not core:
+                    raise RuntimeError('poly_tensor_index_select failed')
+                current = result._core_uop_raw(core)
+                result = result._make_result_from_core(
+                    core, _shape_from_uop(result._ctx, current), [result, i]
+                )
                 dim += len(i.shape)
             elif isinstance(i, slice):
                 size = result.shape[dim]
@@ -2868,7 +2919,11 @@ class Tensor:
             operands = tuple(operands[0])
         if not operands:
             raise ValueError('einsum requires at least one operand')
+        if any(not isinstance(t, Tensor) for t in operands):
+            raise TypeError('einsum operands must be Tensors')
         ctx = operands[0]._ctx
+        if any(t._ctx != ctx for t in operands):
+            raise ValueError('einsum operands must belong to the same Polygrad context')
         n = len(operands)
 
         tensor_arr = (_ffi._ptr * n)(*[_uop_raw(t._graph_uop) for t in operands])

@@ -19,6 +19,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "bigint.h"
 #include "engine/schedule.h"
 #include "pat.h"
 #include <stdio.h>
@@ -226,7 +227,8 @@ static void hip_render_alu(
 ) {
   switch (op) {
   case POLY_OP_NEG:
-    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0);
+    /* Pinned CStyleLanguage/HIPRenderer inherits arithmetic NEG. */
+    snprintf(buf, cap, "(-%s)", s0);
     break;
   case POLY_OP_SQRT:
     snprintf(
@@ -410,13 +412,20 @@ static void init_hip_cdna_tc_specs(void) {
 static PolyRendererCaps poly_hip_renderer_caps(void) {
   init_hip_cdna_tc_specs();
   return (PolyRendererCaps){
-      .has_mulacc = true,
+      /* Pinned HIPRenderer inherits CStyleLanguage.code_for_op and advertises
+       * neither MULACC nor FDIV (renderer/cstyle.py:128-136,472-508). */
+      .has_mulacc = false,
       .has_threefry = false,
       .has_exp2 = true,
       .has_log2 = true,
       .has_sin = true,
+      .has_fdiv = false,
       .has_int64 = true,
       .has_local = true,
+      /* Pinned Renderer.supports_float4=True and split_load_store keeps
+       * aligned float32/float16 memory operations at width four. BF16 remains
+       * scalar through the shared dtype allowlist (devectorizer.py:155-177). */
+      .max_vec_width = 4,
       .global_max = {2147483647, 65535, 65535},
       .tensor_cores = hip_cdna_tc_specs_storage,
       .n_tensor_cores = 2,
@@ -429,11 +438,18 @@ PolyUOp *poly_rewrite_hip(PolyCtx *ctx, PolyUOp *sink) {
   PolyRewriteOpts opts = {
       .optimize =
           poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
-      .devectorize = -1, /* HIP: no add_loads/devectorize */
+      /* Pinned tinygrad codegen/__init__.py:105-107 runs devectorize_alu for
+       * every renderer. HIP WMMA remains opaque unless its output grouping
+       * requires the existing devectorizer split. */
+      .devectorize = 1,
       .caps = poly_hip_renderer_caps(),
       .device = POLY_DEVICE_HIP,
       .opt_policy = POLY_OPT_TC_ONLY,
-      .extra_matcher = poly_pm_bf16_non_native(),
+      /* Pinned HIPRenderer keeps BF16 in supported_dtypes, so BF16 storage
+       * and WMMA fragments bypass pm_dtype_decomps. Ordinary BF16 ALU/casts
+       * are handled only by the renderer-final matcher
+       * (renderer/cstyle.py:472-486,515,574-575). */
+      .extra_matcher = poly_pm_bf16_renderer_extra(),
       .gpu_block_size = 256,
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
@@ -625,20 +641,44 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
     /* --- CONST -------------------------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char val[64];
+      char *wide = NULL;
       if (poly_dtype_is_float(u->dtype)) {
         hip_render_float_const(u->arg.f, u->dtype, val, sizeof(val));
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {
-        hip_render_int64_const(u->arg.i, val, sizeof(val));
+        if (u->arg.kind == POLY_ARG_BIGINT) {
+          char *decimal = poly_arg_integer_to_decimal(u->arg);
+          if (!decimal) return NULL;
+          size_t n = strlen(decimal) + 3;
+          wide = malloc(n);
+          if (!wide) {
+            free(decimal);
+            return NULL;
+          }
+          snprintf(wide, n, "%sll", decimal);
+          free(decimal);
+        } else {
+          hip_render_int64_const(u->arg.i, val, sizeof(val));
+        }
       } else if (poly_dtype_eq(u->dtype, POLY_UINT64)) {
-        snprintf(val, sizeof(val), "%lluull", (unsigned long long)(uint64_t)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%lluull",
+            (unsigned long long)poly_arg_integer_to_u64_mod(u->arg)
+        );
       } else if (poly_dtype_eq(u->dtype, POLY_UINT32)) {
-        snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%uu",
+            (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(u->arg)
+        );
+      } else if (u->arg.kind == POLY_ARG_BIGINT) {
+        wide = poly_arg_integer_to_decimal(u->arg);
+        if (!wide) return NULL;
       } else {
         snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
       }
-      hsmap_set(&names, u, strdup(val));
+      hsmap_set(&names, u, strdup(wide ? wide : val));
+      free(wide);
       continue;
     }
 
@@ -821,10 +861,9 @@ char *poly_render_hip(PolyUOp **uops, int n, const char *fn_name, int launch_bou
         hsb_puts(&body, "  ");
 
       /* Pinned tinygrad final IR: LOAD(INDEX(buf, idx), alt, gate). */
-      PolyUOp *gate_uop =
-          (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
-              ? u->src[2]
-              : NULL;
+      PolyUOp *gate_uop = (u->n_src >= 3 && poly_dtype_is_bool(poly_dtype_scalar(u->src[2]->dtype)))
+                              ? u->src[2]
+                              : NULL;
       if (gate_uop && u->n_src >= 2) {
         char *gate_s = hsmap_get(&names, gate_uop);
         char *alt_s = hsmap_get(&names, u->src[1]);

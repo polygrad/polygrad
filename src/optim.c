@@ -33,42 +33,88 @@ static PolyUOp *optim_lr_uop(PolyCtx *ctx, PolyUOp *lr) {
   return lr;
 }
 
-static PolyUOp *optim_lr_for_param(PolyCtx *ctx, PolyUOp *lr, PolyUOp *param) {
-  lr = optim_lr_uop(ctx, lr);
-  if (!lr || !param) return NULL;
-  if (poly_uop_ndim(ctx, lr) == 0) return lr;
-
-  int ndim = poly_uop_ndim(ctx, param);
-  if (ndim < 0 || ndim > POLY_MAX_DIMS) return NULL;
-  if (ndim == 0) return poly_reshape(ctx, lr, NULL, 0);
-
-  const int64_t *dims = poly_uop_max_shape_dims(ctx, param);
-  if (!dims) return NULL;
-  PolyUOp *shaped = lr;
-  if (ndim > 1) {
-    int64_t singleton[POLY_MAX_DIMS];
-    for (int i = 0; i < ndim; i++) singleton[i] = 1;
-    shaped = poly_reshape(ctx, lr, singleton, ndim);
-    if (!shaped) return NULL;
-  }
-  return poly_expand(ctx, shaped, (int64_t *)dims, ndim);
+static bool optim_same_shape(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!ctx || !a || !b) return false;
+  int a_ndim = poly_uop_ndim(ctx, a);
+  int b_ndim = poly_uop_ndim(ctx, b);
+  if (a_ndim < 0 || a_ndim != b_ndim) return false;
+  const int64_t *a_dims = poly_uop_max_shape_dims(ctx, a);
+  const int64_t *b_dims = poly_uop_max_shape_dims(ctx, b);
+  if (a_ndim > 0 && (!a_dims || !b_dims)) return false;
+  for (int i = 0; i < a_ndim; i++)
+    if (a_dims[i] != b_dims[i]) return false;
+  return true;
 }
 
-static PolyUOp *optim_flatten(PolyCtx *ctx, PolyUOp *u, int64_t numel) {
-  if (!ctx || !u || numel <= 0) return NULL;
-  int ndim = poly_uop_ndim(ctx, u);
-  const int64_t *dims = poly_uop_max_shape_dims(ctx, u);
-  if (ndim == 1 && dims && dims[0] == numel) return u;
-  int64_t flat[1] = {numel};
-  return poly_reshape(ctx, u, flat, 1);
+/* Pinned OpMixin._broadcasted/_broadcast_to
+ * (mixin/__init__.py:439-450): align dimensions on the right, introduce
+ * leading singleton dimensions with RESHAPE, then EXPAND only when a
+ * singleton actually broadcasts. Optimizer scalar constants use this exact
+ * Tensor spelling instead of relying on implicit scheduler broadcasting. */
+static PolyUOp *optim_broadcast_like(PolyCtx *ctx, PolyUOp *value, PolyUOp *like) {
+  if (!ctx || !value || !like) return NULL;
+  if (optim_same_shape(ctx, value, like)) return value;
+  int value_ndim = poly_uop_ndim(ctx, value);
+  int like_ndim = poly_uop_ndim(ctx, like);
+  if (value_ndim < 0 || like_ndim < 0 || value_ndim > like_ndim ||
+      like_ndim > POLY_MAX_DIMS)
+    return NULL;
+  const int64_t *value_dims = poly_uop_max_shape_dims(ctx, value);
+  const int64_t *like_dims = poly_uop_max_shape_dims(ctx, like);
+  if ((value_ndim > 0 && !value_dims) || (like_ndim > 0 && !like_dims)) return NULL;
+
+  PolyUOp *shaped = value;
+  int64_t aligned[POLY_MAX_DIMS];
+  bool needs_reshape = value_ndim != like_ndim;
+  for (int i = 0; i < like_ndim; i++) {
+    int source_axis = i - (like_ndim - value_ndim);
+    aligned[i] = source_axis >= 0 ? value_dims[source_axis] : 1;
+    if (aligned[i] != 1 && aligned[i] != like_dims[i]) return NULL;
+  }
+  if (needs_reshape) {
+    shaped = poly_reshape(ctx, value, aligned, like_ndim);
+    if (!shaped) return NULL;
+  }
+  if (optim_same_shape(ctx, shaped, like)) return shaped;
+  return poly_expand(ctx, shaped, (int64_t *)like_dims, like_ndim);
+}
+
+static PolyUOp *optim_float_like(PolyCtx *ctx, double value, PolyUOp *like) {
+  if (!ctx || !like) return NULL;
+  PolyDType dtype = poly_dtype_scalar(like->dtype);
+  if (!poly_dtype_is_float(dtype)) return NULL;
+  return optim_broadcast_like(ctx, poly_const_typed(ctx, dtype, value), like);
+}
+
+static PolyUOp *optim_lr_for_param(PolyCtx *ctx, PolyUOp *lr, PolyUOp *param) {
+  lr = optim_lr_uop(ctx, lr);
+  return (lr && param) ? optim_broadcast_like(ctx, lr, param) : NULL;
 }
 
 static PolyUOp *optim_reshape_like(PolyCtx *ctx, PolyUOp *value, PolyUOp *like) {
   if (!ctx || !value || !like) return NULL;
+  if (optim_same_shape(ctx, value, like)) return value;
   int ndim = poly_uop_ndim(ctx, like);
   if (ndim < 0) return value;
   const int64_t *dims = poly_uop_max_shape_dims(ctx, like);
   return poly_reshape(ctx, value, (int64_t *)dims, ndim);
+}
+
+/* Pinned ElementwiseMixin.sub (mixin/elementwise.py:90-109) is
+ * `a + (-b)`, and negation is `b * -1` (elementwise.py:57-67). */
+static PolyUOp *optim_sub(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!ctx || !a || !b) return NULL;
+  PolyUOp *minus_one = optim_float_like(ctx, -1.0, b);
+  PolyUOp *negative = minus_one ? poly_alu2(ctx, POLY_OP_MUL, b, minus_one) : NULL;
+  return negative ? poly_alu2(ctx, POLY_OP_ADD, a, negative) : NULL;
+}
+
+/* Pinned ElementwiseMixin.div performs `a * b.reciprocal()` after
+ * broadcasting (mixin/elementwise.py:206-231). */
+static PolyUOp *optim_div(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
+  if (!ctx || !a || !b) return NULL;
+  PolyUOp *reciprocal = poly_alu1(ctx, POLY_OP_RECIPROCAL, b);
+  return reciprocal ? poly_alu2(ctx, POLY_OP_MUL, a, reciprocal) : NULL;
 }
 
 static PolyUOp *optim_assign_uop_target(PolyCtx *ctx, PolyUOp *target_uop, PolyUOp *value) {
@@ -106,63 +152,75 @@ int poly_optim_build_update(
     return -1;
   memset(out, 0, sizeof(*out));
 
-  PolyUOp *param_flat = optim_flatten(ctx, param, numel);
-  PolyUOp *grad_flat = optim_flatten(ctx, grad, numel);
-  if (!param_flat || !grad_flat || !(lr = optim_lr_for_param(ctx, lr, param_flat))) return -1;
+  PolyUOp *param_value = param;
+  PolyUOp *grad_value = optim_reshape_like(ctx, grad, param);
+  PolyUOp *lr_value = optim_lr_uop(ctx, lr);
+  if (!grad_value || !lr_value) return -1;
 
   switch (cfg->kind) {
   case POLY_OPTIM_SGD: {
-    PolyUOp *base = poly_detach(ctx, param_flat);
-    PolyUOp *g = grad_flat;
+    PolyUOp *base = poly_detach(ctx, param_value);
+    PolyUOp *g = grad_value;
+    PolyUOp *lr_param = optim_lr_for_param(ctx, lr_value, param_value);
+    if (!base || !lr_param) return -1;
     if (cfg->weight_decay > 0.0f) {
-      PolyUOp *wd = poly_const_float(ctx, (double)cfg->weight_decay);
+      PolyUOp *wd = optim_float_like(ctx, cfg->weight_decay, base);
       g = poly_alu2(ctx, POLY_OP_ADD, g, poly_alu2(ctx, POLY_OP_MUL, wd, base));
     }
-    if (cfg->classic) g = poly_alu2(ctx, POLY_OP_MUL, lr, g);
+    if (cfg->classic) {
+      PolyUOp *r = optim_float_like(ctx, 1.0, g);
+      g = r ? poly_alu2(ctx, POLY_OP_MUL, g, r) : NULL;
+      g = g ? poly_alu2(ctx, POLY_OP_MUL, g, lr_param) : NULL;
+    }
     if (cfg->momentum > 0.0f) {
       if (!m_buf) return -1;
-      PolyUOp *m_flat = optim_flatten(ctx, m_buf, numel);
-      if (!m_flat) return -1;
-      PolyUOp *mom = poly_const_float(ctx, (double)cfg->momentum);
+      PolyUOp *m_value_root = optim_reshape_like(ctx, m_buf, param_value);
+      PolyUOp *mom = optim_float_like(ctx, cfg->momentum, m_value_root);
+      if (!m_value_root || !mom) return -1;
       PolyUOp *m_value =
-          poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, mom, m_flat), g);
-      m_value = optim_reshape_like(ctx, m_value, m_buf);
+          poly_alu2(ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, mom, m_value_root), g);
       out->m_new = optim_assign_uop_target(ctx, m_buf, m_value);
-      PolyUOp *m_current = optim_flatten(ctx, out->m_new, numel);
+      PolyUOp *m_current = out->m_new;
       if (!m_value || !out->m_new || !m_current) return -1;
       g = cfg->nesterov ? poly_alu2(ctx, POLY_OP_ADD, g, poly_alu2(ctx, POLY_OP_MUL, mom, m_current))
                         : m_current;
     }
-    if (!cfg->classic) g = poly_alu2(ctx, POLY_OP_MUL, lr, g);
-    out->param_new = poly_alu2(ctx, POLY_OP_SUB, base, g);
+    if (!cfg->classic) {
+      PolyUOp *r = optim_float_like(ctx, 1.0, g);
+      g = r ? poly_alu2(ctx, POLY_OP_MUL, g, r) : NULL;
+      g = g ? poly_alu2(ctx, POLY_OP_MUL, g, lr_param) : NULL;
+    }
+    out->param_new = optim_sub(ctx, base, g);
     return (out->param_new && (cfg->momentum <= 0.0f || out->m_new)) ? 0 : -1;
   }
   case POLY_OPTIM_ADAM:
   case POLY_OPTIM_ADAMW: {
     if (!m_buf || !v_buf || !bc1_buf || !bc2_buf) return -1;
-    PolyUOp *m_flat = optim_flatten(ctx, m_buf, numel);
-    PolyUOp *v_flat = optim_flatten(ctx, v_buf, numel);
-    if (!m_flat || !v_flat) return -1;
+    PolyUOp *m_value_root = optim_reshape_like(ctx, m_buf, param_value);
+    PolyUOp *v_value_root = optim_reshape_like(ctx, v_buf, param_value);
+    if (!m_value_root || !v_value_root) return -1;
 
-    PolyUOp *b1 = poly_const_float(ctx, (double)cfg->beta1);
-    PolyUOp *b2 = poly_const_float(ctx, (double)cfg->beta2);
-    PolyUOp *one_minus_b1 = poly_const_float(ctx, 1.0 - (double)cfg->beta1);
-    PolyUOp *one_minus_b2 = poly_const_float(ctx, 1.0 - (double)cfg->beta2);
-    PolyUOp *eps = poly_const_float(ctx, (double)cfg->eps);
-    PolyUOp *one = poly_const_float(ctx, 1.0);
+    PolyUOp *b1 = optim_float_like(ctx, cfg->beta1, m_value_root);
+    PolyUOp *b2 = optim_float_like(ctx, cfg->beta2, v_value_root);
+    PolyUOp *one_minus_b1 = optim_float_like(ctx, 1.0 - cfg->beta1, grad_value);
+    PolyUOp *one_minus_b2 = optim_float_like(ctx, 1.0 - cfg->beta2, grad_value);
+    PolyUOp *bc1_scale = optim_float_like(ctx, cfg->beta1, bc1_buf);
+    PolyUOp *bc2_scale = optim_float_like(ctx, cfg->beta2, bc2_buf);
+    if (!b1 || !b2 || !one_minus_b1 || !one_minus_b2 || !bc1_scale || !bc2_scale)
+      return -1;
 
     PolyUOp *m_value = poly_alu2(
-        ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, b1, m_flat),
-        poly_alu2(ctx, POLY_OP_MUL, one_minus_b1, grad_flat)
+        ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, b1, m_value_root),
+        poly_alu2(ctx, POLY_OP_MUL, one_minus_b1, grad_value)
     );
-    PolyUOp *g_sq = poly_alu2(ctx, POLY_OP_MUL, grad_flat, grad_flat);
+    PolyUOp *g_sq = poly_alu2(ctx, POLY_OP_MUL, grad_value, grad_value);
     PolyUOp *v_value = poly_alu2(
-        ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, b2, v_flat),
+        ctx, POLY_OP_ADD, poly_alu2(ctx, POLY_OP_MUL, b2, v_value_root),
         poly_alu2(ctx, POLY_OP_MUL, one_minus_b2, g_sq)
     );
 
-    PolyUOp *bc1_value = poly_alu2(ctx, POLY_OP_MUL, bc1_buf, b1);
-    PolyUOp *bc2_value = poly_alu2(ctx, POLY_OP_MUL, bc2_buf, b2);
+    PolyUOp *bc1_value = poly_alu2(ctx, POLY_OP_MUL, bc1_buf, bc1_scale);
+    PolyUOp *bc2_value = poly_alu2(ctx, POLY_OP_MUL, bc2_buf, bc2_scale);
     m_value = optim_reshape_like(ctx, m_value, m_buf);
     v_value = optim_reshape_like(ctx, v_value, v_buf);
     bc1_value = optim_reshape_like(ctx, bc1_value, bc1_buf);
@@ -171,35 +229,39 @@ int poly_optim_build_update(
     out->v_new = optim_assign_uop_target(ctx, v_buf, v_value);
     out->bc1_new = optim_assign_uop_target(ctx, bc1_buf, bc1_value);
     out->bc2_new = optim_assign_uop_target(ctx, bc2_buf, bc2_value);
-    PolyUOp *m_current = optim_flatten(ctx, out->m_new, numel);
-    PolyUOp *v_current = optim_flatten(ctx, out->v_new, numel);
+    PolyUOp *m_current = out->m_new;
+    PolyUOp *v_current = out->v_new;
     if (!m_value || !v_value || !bc1_value || !bc2_value || !out->m_new || !out->v_new ||
         !out->bc1_new || !out->bc2_new || !m_current || !v_current)
       return -1;
 
-    PolyUOp *bc1_corr = poly_alu1(
-        ctx, POLY_OP_RECIPROCAL, poly_alu2(ctx, POLY_OP_SUB, one, out->bc1_new)
-    );
-    PolyUOp *bc2_corr = poly_alu1(
-        ctx, POLY_OP_RECIPROCAL, poly_alu2(ctx, POLY_OP_SUB, one, out->bc2_new)
-    );
-    int64_t param_shape[1] = {numel};
-    bc1_corr = poly_expand(ctx, bc1_corr, param_shape, 1);
-    bc2_corr = poly_expand(ctx, bc2_corr, param_shape, 1);
-    if (!bc1_corr || !bc2_corr) return -1;
-
-    PolyUOp *m_hat = poly_alu2(ctx, POLY_OP_MUL, m_current, bc1_corr);
-    PolyUOp *v_hat = poly_alu2(ctx, POLY_OP_MUL, v_current, bc2_corr);
-    PolyUOp *denom = poly_alu2(ctx, POLY_OP_ADD, poly_alu1(ctx, POLY_OP_SQRT, v_hat), eps);
-    PolyUOp *up = poly_alu2(ctx, POLY_OP_MUL, m_hat, poly_alu1(ctx, POLY_OP_RECIPROCAL, denom));
-    if (cfg->kind == POLY_OPTIM_ADAMW && cfg->weight_decay > 0.0f) {
-      PolyUOp *wd = poly_const_float(ctx, (double)cfg->weight_decay);
-      up = poly_alu2(
-          ctx, POLY_OP_ADD, up, poly_alu2(ctx, POLY_OP_MUL, wd, poly_detach(ctx, param_flat))
-      );
-    }
-    PolyUOp *step = poly_alu2(ctx, POLY_OP_MUL, lr, up);
-    out->param_new = poly_alu2(ctx, POLY_OP_SUB, poly_detach(ctx, param_flat), step);
+    PolyUOp *one_bc1 = optim_float_like(ctx, 1.0, out->bc1_new);
+    PolyUOp *one_bc2 = optim_float_like(ctx, 1.0, out->bc2_new);
+    PolyUOp *bc1_denom = optim_sub(ctx, one_bc1, out->bc1_new);
+    PolyUOp *bc2_denom = optim_sub(ctx, one_bc2, out->bc2_new);
+    bc1_denom = optim_broadcast_like(ctx, bc1_denom, m_current);
+    bc2_denom = optim_broadcast_like(ctx, bc2_denom, v_current);
+    PolyUOp *m_hat = optim_div(ctx, m_current, bc1_denom);
+    PolyUOp *v_hat = optim_div(ctx, v_current, bc2_denom);
+    PolyUOp *eps = optim_float_like(ctx, cfg->eps, v_hat);
+    PolyUOp *denom =
+        (v_hat && eps) ? poly_alu2(ctx, POLY_OP_ADD, poly_alu1(ctx, POLY_OP_SQRT, v_hat), eps)
+                       : NULL;
+    PolyUOp *up = denom ? optim_div(ctx, m_hat, denom) : NULL;
+    PolyUOp *base = poly_detach(ctx, param_value);
+    PolyUOp *wd = optim_float_like(ctx, cfg->weight_decay, base);
+    up = (up && wd) ? poly_alu2(
+                          ctx, POLY_OP_ADD, up, poly_alu2(ctx, POLY_OP_MUL, wd, base)
+                      )
+                    : NULL;
+    /* Pinned LAMB returns `self.lr * r * up` even when Adam fixes r=1.0
+     * (nn/optim.py:171-178). Keep the shape-[1] LR multiplication before
+     * broadcasting that product to the parameter shape. */
+    PolyUOp *r = optim_float_like(ctx, 1.0, lr_value);
+    PolyUOp *lr_scaled = r ? poly_alu2(ctx, POLY_OP_MUL, lr_value, r) : NULL;
+    lr_scaled = lr_scaled ? optim_broadcast_like(ctx, lr_scaled, up) : NULL;
+    PolyUOp *step = lr_scaled ? poly_alu2(ctx, POLY_OP_MUL, lr_scaled, up) : NULL;
+    out->param_new = optim_sub(ctx, poly_detach(ctx, param_value), step);
     return (out->param_new && out->m_new && out->v_new && out->bc1_new && out->bc2_new) ? 0 : -1;
   }
   default:
@@ -338,11 +400,15 @@ int poly_optim_build_step(
     if (!targets[i] || !effects[i]) goto done;
 
   /* No PolyTensor root is changed until the whole batch has validated and all
-   * assignment-effect UOps have been constructed successfully. Match
-   * tinygrad Optimizer.schedule_step ordering: optimizer state, parameters. */
+   * assignment-effect UOps have been constructed successfully. Pinned
+   * Optimizer.schedule_step mutates each current Tensor.uop through assign
+   * (nn/optim.py:41-57, tensor.py:230-257), so Path B stores that exact
+   * current-derived AFTER/STORE effect as the physical root. The same pointer
+   * remains in the mandatory hybrid logical slot until retained optimizer
+   * export is specified. */
   for (int i = 0; i < needed; i++) {
     if (poly_tensor_replace_roots(
-            ctx, targets[i], effects[i], NULL, targets[i]->role, targets[i]->device
+            ctx, targets[i], effects[i], effects[i], targets[i]->role, targets[i]->device
         ) != 0)
       goto done;
   }

@@ -81,7 +81,9 @@ class UOp {
 
   get buffer() {
     if (!this.raw) return null
-    const r = this.ffi.poly_uop_get_buffer_identity(this.raw)
+    const r = this.ffi.poly_uop_buffer
+      ? this.ffi.poly_uop_buffer(this.ctx, this.raw)
+      : this.ffi.poly_uop_get_buffer_identity(this.raw)
     return r ? new UOp(this.ctx, this.ffi, r) : null
   }
 

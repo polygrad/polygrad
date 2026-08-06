@@ -1266,16 +1266,31 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
 
   /* Pinned callify tags COPYs from creation devices and rewrites the COPY
    * itself to AFTER(buffer, STORE(buffer, COPY)) before rewriting its parent.
-   * HOST/DISK residency is Polygrad's physical-boundary counterpart to
-   * tinygrad's PYTHON/NPY/DISK/TINYFS source-device test. */
+   * Match callify.py:19-25 by reading COPY.src[0].device through movement
+   * nodes. Requiring buffer identity here misses
+   * COPY(RESHAPE(SHRINK(BUFFER@DISK)), DEVICE), leaking DEVICE into ordinary
+   * scalar codegen. HOST/DISK are Polygrad's creation-device counterparts to
+   * tinygrad's PYTHON/NPY/DISK/TINYFS set. */
   if (ret->op == POLY_OP_COPY && ret->n_src >= 2) {
-    const PolyUOp *creation_identity = poly_uop_get_buffer_identity(ret->src[0]);
-    PolyBuffer *creation_buffer =
-        creation_identity ? poly_buffer_get(ctx, (PolyUOp *)creation_identity) : NULL;
+    PolyDevice source_device = poly_uop_device(ret->src[0]);
     PolyDevice copy_device = poly_uop_device(ret);
     bool from_creation =
-        creation_buffer && (creation_buffer->device == POLY_DEVICE_HOST ||
-                            creation_buffer->device == POLY_DEVICE_DISK);
+        source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK;
+    /* The preserved Path-A/raw-UOp route can still carry BUFFER(UNIQUE) with
+     * device=AUTO and express HOST/DISK only in ctx->buffers. Keep that
+     * boundary fallback solely for an incomplete graph. Complete Path-B
+     * roots take the pinned graph-device branch above, including movement-
+     * wrapped DISK sources that the old identity-only rule missed. */
+    if (!from_creation && source_device == POLY_DEVICE_AUTO) {
+      const PolyUOp *legacy_identity =
+          poly_uop_get_buffer_identity(ret->src[0]);
+      PolyBuffer *legacy_storage =
+          legacy_identity ? poly_buffer_get(ctx, (PolyUOp *)legacy_identity) : NULL;
+      from_creation =
+          legacy_storage &&
+          (legacy_storage->device == POLY_DEVICE_HOST ||
+           legacy_storage->device == POLY_DEVICE_DISK);
+    }
     if (from_creation && copy_device != POLY_DEVICE_AUTO && copy_device != POLY_DEVICE_HOST &&
         copy_device != POLY_DEVICE_DISK) {
       PolyUOp *contiguous = poly_contiguous(ctx, ret);
@@ -2029,6 +2044,30 @@ static int poly_realize_schedule(PolyCtx *ctx, PolySchedule *sched) {
   return ret;
 }
 
+static bool poly_tensor_root_has_unplaced_buffer(PolyCtx *ctx, PolyUOp *root) {
+  if (!ctx || !root) return true;
+  PolyScratchMark scratch = poly_ctx_scratch_mark(ctx);
+  int n = 0;
+  /* CALL/FUNCTION bodies contain placeholders, not Tensor storage. Their
+   * caller-visible arguments remain part of the traversal. */
+  PolyUOp **topo =
+      poly_toposort_ex_user_scratch(ctx, root, &n, NULL, NULL, false);
+  if (!topo) {
+    poly_ctx_scratch_rewind(ctx, scratch);
+    return true;
+  }
+  bool unplaced = false;
+  for (int i = 0; i < n; i++) {
+    if (topo[i] && topo[i]->op == POLY_OP_BUFFER &&
+        poly_uop_device(topo[i]) == POLY_DEVICE_AUTO) {
+      unplaced = true;
+      break;
+    }
+  }
+  poly_ctx_scratch_rewind(ctx, scratch);
+  return unplaced;
+}
+
 int poly_realize_uops(PolyCtx *ctx, PolyUOp **uops, int n, PolyUOp **out_uops) {
   if (!ctx || !uops || !out_uops || n < 0) return -1;
   if (n == 0) return 0;
@@ -2056,6 +2095,7 @@ static int poly_realize_tensors_impl(
   PolySchedule *sched = NULL;
   int rc = -1;
   int n_pending = 0;
+  bool used_placement = false;
   if (!physical_roots || !pending_tensors || !pending_roots || !pending_out ||
       !pending_indices)
     goto cleanup;
@@ -2063,20 +2103,48 @@ static int poly_realize_tensors_impl(
   for (int i = 0; i < n; i++) {
     outputs[i] = NULL;
     if (!inputs[i]) goto cleanup;
+    if (!inputs[i]->uop_physical ||
+        poly_tensor_root_has_unplaced_buffer(ctx, inputs[i]->uop_physical))
+      used_placement = true;
   }
 
-  /* Pinned Tensor.realize filters an already-placed Tensor.uop
-   * (tensor.py:214-219). Polygrad must first cross its approved placement
-   * boundary, then apply the same structural identity test to the physical
-   * root; testing portable uop_logical here loses zero-size COPY and DISK-view
-   * projections. */
-  if (poly_tensor_physicalize_many(
-          ctx, inputs, n, physical_roots, placement_memo
-      ) != 0)
-    goto cleanup;
+  /* Pinned Tensor.realize filters its already-deviceful Tensor.uop directly
+   * (tensor.py:214-219), then applies transform_to_call's exact becomes-map.
+   * Path B stores a complete graph in uop_physical at construction. During
+   * migration, a legacy non-NULL graph can still contain device-free BUFFERs;
+   * keep the preserved Path-A aggregate placer for that entire batch and
+   * never mix placement and direct roots within one realization. */
+  if (used_placement) {
+    if (poly_tensor_physicalize_many(
+            ctx, inputs, n, physical_roots, placement_memo
+        ) != 0)
+      goto cleanup;
+  } else {
+    for (int i = 0; i < n; i++)
+      physical_roots[i] = inputs[i]->uop_physical;
+  }
 
   for (int i = 0; i < n; i++) {
     PolyUOp *physical = physical_roots[i];
+    /* Pinned Tensor.realize skips roots whose UOp.device is None
+     * (tensor.py:214-219). Path B represents that state as AUTO; wrapper
+     * device metadata must not force a pure CONST graph through callify. */
+    if (!used_placement && poly_uop_device(physical) == POLY_DEVICE_AUTO) {
+      outputs[i] = inputs[i];
+      continue;
+    }
+    /* Pinned callify.py:60-95 proves CONTIGUOUS(movement(BUFFER)) as a
+     * zero-copy view, so transform_to_call emits no work and UOp.buffer
+     * returns Buffer.view (uop/ops.py:838-852). Ask the actual accessor so a
+     * backend that cannot represent this offset falls through to ordinary
+     * materialization. The stored Tensor root remains unchanged. */
+    if (!used_placement && physical->op == POLY_OP_CONTIGUOUS &&
+        physical->n_src == 1) {
+      if (poly_uop_buffer(ctx, physical)) {
+        outputs[i] = inputs[i];
+        continue;
+      }
+    }
     const PolyUOp *identity = poly_uop_get_buffer_identity(physical);
     if (identity) {
       /* tinygrad uop/ops.py:825-829 passes BUFFER/SLICE/PARAM identities
@@ -2114,7 +2182,7 @@ static int poly_realize_tensors_impl(
   if (!big_call) goto cleanup;
   if (map_n > 0 && poly_tensor_apply_realize_map(
                        ctx, map_orig, map_repl, map_n, POLY_DEVICE_AUTO,
-                       placement_memo
+                       used_placement ? placement_memo : NULL
                    ) != 0)
     goto cleanup;
 

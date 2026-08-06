@@ -13,6 +13,7 @@
  */
 
 #include "codegen.h"
+#include "bigint.h"
 #include "utils.h"
 #include "wasm_builder.h"
 #include <assert.h>
@@ -205,6 +206,12 @@ static bool wasm_const_index_checked(PolyUOp *u, int *out) {
   if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return false;
   if (out) *out = (int)u->arg.i;
   return true;
+}
+
+static int64_t wasm_const_integer_bits(PolyUOp *u) {
+  if (!u) return 0;
+  if (u->arg.kind == POLY_ARG_BOOL) return u->arg.b ? 1 : 0;
+  return (int64_t)poly_arg_integer_to_u64_mod(u->arg);
 }
 
 static PolyDType wasm_reg_base_dtype(PolyDType ptr_dt) {
@@ -537,6 +544,7 @@ static PolyRendererCaps poly_wasm_renderer_caps(void) {
       .has_exp2 = true,
       .has_log2 = true,
       .has_sin = true,
+      .has_fdiv = true,
       .has_int64 = true,
       .has_local = false,
       .has_simd_int = false,
@@ -1313,6 +1321,9 @@ static void emit_alu_scalar(
   /* Unary */
   case POLY_OP_NEG:
     if (poly_dtype_is_bool(dtype)) {
+      /* Arithmetic NEG followed by bool conversion is identity. Canonicalize
+       * the already-bool lane to 0/1; logical NOT is CMPNE(x,true). */
+      wb_byte(code, WASM_OP_I32_EQZ);
       wb_byte(code, WASM_OP_I32_EQZ);
     } else if (is_int) {
       wb_byte(code, b64 ? WASM_OP_I64_SUB : WASM_OP_I32_SUB);
@@ -2020,10 +2031,10 @@ static void build_code_scalar(
           wb_f32(&body, (float)u->arg.f);
         } else if (scalar.bitsize == 64) {
           wb_byte(&body, WASM_OP_I64_CONST);
-          wb_sleb128(&body, u->arg.i);
+          wb_sleb128(&body, wasm_const_integer_bits(u));
         } else {
           wb_byte(&body, WASM_OP_I32_CONST);
-          wb_sleb128(&body, (int32_t)u->arg.i);
+          wb_sleb128(&body, (int32_t)wasm_const_integer_bits(u));
         }
         emit_v128_splat(&body, u->dtype);
       } else if (dt_is_f64(u->dtype)) {
@@ -2034,10 +2045,10 @@ static void build_code_scalar(
         wb_f32(&body, (float)u->arg.f);
       } else if (dt_is_i64(u->dtype)) {
         wb_byte(&body, WASM_OP_I64_CONST);
-        wb_sleb128(&body, u->arg.i);
+        wb_sleb128(&body, wasm_const_integer_bits(u));
       } else {
         wb_byte(&body, WASM_OP_I32_CONST);
-        wb_sleb128(&body, (int32_t)u->arg.i);
+        wb_sleb128(&body, (int32_t)wasm_const_integer_bits(u));
       }
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, local_idx);
@@ -2654,7 +2665,8 @@ static void build_code_scalar(
         }
       }
 
-      /* Integer NEG (non-bool): emit 0 before src */
+      /* Integer NEG: emit 0 before src. Bool NEG is typed identity and is
+       * normalized by two eqz instructions in emit_alu_scalar. */
       if (!vector_alu && !vector_lane_fallback && u->op == POLY_OP_NEG &&
           !poly_dtype_is_float(u->dtype) && !poly_dtype_is_bool(u->dtype)) {
         if (dt_is_i64(u->dtype)) {
@@ -2887,7 +2899,7 @@ static void build_code_simd(
       } else {
         local_idx = next_i32++;
         wb_byte(&body, WASM_OP_I32_CONST);
-        wb_sleb128(&body, (int32_t)u->arg.i);
+        wb_sleb128(&body, (int32_t)wasm_const_integer_bits(u));
       }
       wb_byte(&body, WASM_OP_LOCAL_SET);
       wb_uleb128(&body, local_idx);
@@ -3165,9 +3177,14 @@ static void build_code_simd(
 }
 
 static bool wasm_const_i64(PolyUOp *u, int64_t *out) {
-  if (!u || u->op != POLY_OP_CONST || u->arg.kind != POLY_ARG_INT) return false;
-  if (out) *out = u->arg.i;
-  return true;
+  if (!u || u->op != POLY_OP_CONST) return false;
+  if (u->arg.kind == POLY_ARG_INT) {
+    if (out) *out = u->arg.i;
+    return true;
+  }
+  if (u->arg.kind == POLY_ARG_BIGINT)
+    return poly_arg_integer_to_i64(u->arg, out);
+  return false;
 }
 
 static bool wasm_range_bound(PolyUOp *u, int64_t *out) {
@@ -3300,6 +3317,10 @@ static bool wasm_const_f32(PolyUOp *u, float *out) {
   }
   if (u->arg.kind == POLY_ARG_INT) {
     if (out) *out = (float)u->arg.i;
+    return true;
+  }
+  if (u->arg.kind == POLY_ARG_BIGINT) {
+    if (out) *out = (float)poly_arg_integer_to_double(u->arg);
     return true;
   }
   return false;
@@ -4735,6 +4756,10 @@ PolyUOp *poly_rewrite_wasm(PolyCtx *ctx, PolyUOp *sink) {
       .caps = poly_wasm_renderer_caps_for_sink(ctx, sink),
       .device = POLY_DEVICE_WASM,
       .opt_policy = POLY_OPT_HEURISTIC,
+      /* Pinned tinygrad do_dtype_decomps lowers every float dtype unsupported
+       * by the selected renderer before final rendering
+       * (codegen/__init__.py:120-140). Core WASM has no BF16 instructions. */
+      .dtype_matcher = poly_pm_bf16_non_native(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }
@@ -4761,6 +4786,7 @@ PolyUOp *poly_rewrite_wasm_env(PolyCtx *ctx, PolyUOp *sink) {
       .caps = poly_wasm_renderer_caps_for_sink(ctx, sink),
       .device = POLY_DEVICE_WASM,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
 }

@@ -98,6 +98,19 @@ TEST(dtype, scalar) {
   PASS();
 }
 
+TEST(dtype, least_upper_matches_tinygrad_promotion_lattice) {
+  PolyDType out;
+  ASSERT_TRUE(poly_dtype_least_upper(POLY_INT32, POLY_FLOAT32, &out));
+  ASSERT_TRUE(poly_dtype_eq(out, POLY_FLOAT32));
+  ASSERT_TRUE(poly_dtype_least_upper(POLY_INT32, POLY_UINT32, &out));
+  ASSERT_TRUE(poly_dtype_eq(out, POLY_INT64));
+  ASSERT_TRUE(poly_dtype_least_upper(POLY_UINT64, POLY_FLOAT16, &out));
+  ASSERT_TRUE(poly_dtype_eq(out, POLY_FLOAT16));
+  ASSERT_TRUE(poly_dtype_least_upper(POLY_BOOL, POLY_INT8, &out));
+  ASSERT_TRUE(poly_dtype_eq(out, POLY_INT8));
+  PASS();
+}
+
 TEST(dtype, ptr) {
   PolyDType p = poly_dtype_ptr(POLY_FLOAT32, 1024, POLY_ADDR_GLOBAL);
   ASSERT_TRUE(p.is_ptr);

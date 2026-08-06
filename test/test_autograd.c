@@ -320,6 +320,134 @@ TEST(autograd, fdiv_const_reduce_sum_1d_e2e) {
   PASS();
 }
 
+TEST(autograd, pow_zero_base_gradients_match_pinned) {
+  float base_data[4] = {0.0f, 0.0f, 2.0f, 4.0f};
+  float exponent_data[4] = {0.0f, 2.0f, 3.0f, 0.5f};
+  float base_grad_data[4] = {0};
+  float exponent_grad_data[4] = {0};
+
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *base = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *exponent = poly_buffer(ctx, POLY_FLOAT32, 4);
+  PolyUOp *power =
+      poly_uop2(ctx, POLY_OP_POW, POLY_FLOAT32, base, exponent, poly_arg_none());
+  PolyUOp *loss = poly_reduce_axis(ctx, POLY_OP_ADD, power, (int64_t[]){0}, 1);
+  PolyUOp *base_grad = poly_grad(ctx, loss, base);
+  PolyUOp *exponent_grad = poly_grad(ctx, loss, exponent);
+  ASSERT_NOT_NULL(base_grad);
+  ASSERT_NOT_NULL(exponent_grad);
+
+  PolyUOp *base_out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  void *base_args[3] = {base_grad_data, base_data, exponent_data};
+  RUN_GRAD_EXPR(ctx, base_out, base_grad, "ad_pow_zero_base", base_args, 3);
+
+  PolyUOp *exponent_out = poly_buffer(ctx, POLY_FLOAT32, 4);
+  void *exponent_args[3] = {exponent_grad_data, base_data, exponent_data};
+  RUN_GRAD_EXPR(
+      ctx, exponent_out, exponent_grad, "ad_pow_zero_exponent", exponent_args, 3
+  );
+
+  float expected_base[4] = {0.0f, 0.0f, 12.0f, 0.25f};
+  float expected_exponent[4] = {0.0f, 0.0f, 5.54517746f, 2.77258873f};
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(base_grad_data[i], expected_base[i], 1e-5f);
+    ASSERT_FLOAT_EQ(exponent_grad_data[i], expected_exponent[i], 1e-5f);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(autograd, raw_pow_broadcasts_zero_masks_before_and) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  /* Pinned UOp.alu broadcasts shaped operands before every ALU construction
+   * (tinygrad/uop/ops.py:543-551). Exercise the raw/import boundary where the
+   * POW operands have broadcast-compatible but unequal shapes. */
+  PolyUOp *base_storage = poly_buffer(ctx, POLY_FLOAT32, 2);
+  PolyUOp *exponent_storage = poly_buffer(ctx, POLY_FLOAT32, 3);
+  PolyUOp *base = poly_reshape(ctx, base_storage, (int64_t[]){2, 1}, 2);
+  PolyUOp *exponent =
+      poly_reshape(ctx, exponent_storage, (int64_t[]){1, 3}, 2);
+  PolyUOp *power =
+      poly_uop2(ctx, POLY_OP_POW, POLY_FLOAT32, base, exponent, poly_arg_none());
+  PolyUOp *loss =
+      poly_reduce_axis(ctx, POLY_OP_ADD, power, (int64_t[]){0, 1}, 2);
+  PolyUOp *base_grad = poly_grad(ctx, loss, base_storage);
+  PolyUOp *exponent_grad = poly_grad(ctx, loss, exponent_storage);
+  ASSERT_NOT_NULL(base_grad);
+  ASSERT_NOT_NULL(exponent_grad);
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, base_grad, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *both_zero = NULL;
+  PolyUOp *derivative_pow = NULL;
+  int and_count = 0;
+  int pow_count = 0;
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op == POLY_OP_AND) {
+      both_zero = topo[i];
+      and_count++;
+    }
+    if (topo[i]->op == POLY_OP_POW) {
+      derivative_pow = topo[i];
+      pow_count++;
+    }
+  }
+  ASSERT_INT_EQ(and_count, 1);
+  ASSERT_NOT_NULL(both_zero);
+  ASSERT_INT_EQ(both_zero->n_src, 2);
+  ASSERT_INT_EQ(both_zero->src[0]->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(both_zero->src[1]->op, POLY_OP_EXPAND);
+  for (int i = 0; i < 2; i++) {
+    PolyShape shape = poly_uop_max_shape_cached(ctx, both_zero->src[i]);
+    ASSERT_INT_EQ(shape.ndim, 2);
+    ASSERT_INT_EQ(shape.dims[0], 2);
+    ASSERT_INT_EQ(shape.dims[1], 3);
+  }
+
+  /* Pinned gradient.py:60-61 calls b.pow(e-1), and UOp.alu broadcasts both
+   * shaped sources first (uop/ops.py:543-551). */
+  ASSERT_INT_EQ(pow_count, 1);
+  ASSERT_NOT_NULL(derivative_pow);
+  ASSERT_INT_EQ(derivative_pow->n_src, 2);
+  ASSERT_INT_EQ(derivative_pow->src[0]->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(derivative_pow->src[1]->op, POLY_OP_EXPAND);
+  for (int i = 0; i < 2; i++) {
+    PolyShape shape = poly_uop_max_shape_cached(ctx, derivative_pow->src[i]);
+    ASSERT_INT_EQ(shape.ndim, 2);
+    ASSERT_INT_EQ(shape.dims[0], 2);
+    ASSERT_INT_EQ(shape.dims[1], 3);
+  }
+
+  /* Match temp/pow_broadcast_vjp_values_20260731.py exactly. The paired
+   * pinned/current probe records the expected gradients below. */
+  float base_data[2] = {0.5f, 2.0f};
+  float exponent_data[3] = {2.0f, 3.0f, 0.5f};
+  float base_grad_data[2] = {0};
+  float exponent_grad_data[3] = {0};
+  PolyUOp *base_out = poly_buffer(ctx, POLY_FLOAT32, 2);
+  void *base_args[3] = {base_grad_data, base_data, exponent_data};
+  RUN_GRAD_EXPR(ctx, base_out, base_grad, "ad_raw_pow_broadcast_base", base_args, 3);
+  PolyUOp *exponent_out = poly_buffer(ctx, POLY_FLOAT32, 3);
+  void *exponent_args[3] = {exponent_grad_data, base_data, exponent_data};
+  RUN_GRAD_EXPR(
+      ctx, exponent_out, exponent_grad, "ad_raw_pow_broadcast_exponent", exponent_args, 3
+  );
+
+  const float expected_base[2] = {2.45710683f, 16.35355377f};
+  const float expected_exponent[3] = {2.59930182f, 5.45853424f, 0.49012905f};
+  for (int i = 0; i < 2; i++)
+    ASSERT_FLOAT_EQ(base_grad_data[i], expected_base[i], 1e-5f);
+  for (int i = 0; i < 3; i++)
+    ASSERT_FLOAT_EQ(exponent_grad_data[i], expected_exponent[i], 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(autograd, expand_reduce_e2e) {
   float x_d[1] = {3};
   float gx_d[1] = {0};

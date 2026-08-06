@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "codegen.h"
+#include "bigint.h"
 #include "utils.h"
 #include "engine/schedule.h"
 #include "pat.h"
@@ -393,9 +394,30 @@ static bool cuda_is_half(PolyDType dt) {
   return s.priority == POLY_FLOAT16.priority || s.priority == POLY_BFLOAT16.priority;
 }
 
-static void cuda_render_alu(
-    char *buf,
-    int cap,
+/* Exact C equivalent of helpers.strip_parens for the same-op associative
+ * rendering rule in pinned CStyleLanguage.base_rewrite. */
+static char *cuda_strip_parens(const char *expr) {
+  if (!expr) return strdup("");
+  size_t n = strlen(expr);
+  if (n < 2 || expr[0] != '(' || expr[n - 1] != ')') return strdup(expr);
+  int depth = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (expr[i] == '(')
+      depth++;
+    else if (expr[i] == ')')
+      depth--;
+    if (depth == 0 && i != n - 1) return strdup(expr);
+    if (depth < 0) return strdup(expr);
+  }
+  if (depth != 0) return strdup(expr);
+  char *ret = malloc(n - 1);
+  if (!ret) return NULL;
+  memcpy(ret, expr + 1, n - 2);
+  ret[n - 2] = '\0';
+  return ret;
+}
+
+static char *cuda_render_alu(
     PolyOps op,
     PolyDType dtype,
     const char *s0,
@@ -403,13 +425,16 @@ static void cuda_render_alu(
     const char *s2
 ) {
   bool is_half = cuda_is_half(dtype);
+  CudaStrBuf out;
+  csb_init(&out);
   switch (op) {
   case POLY_OP_NEG:
-    snprintf(buf, cap, poly_dtype_is_bool(dtype) ? "(!%s)" : "(-%s)", s0);
+    /* Pinned CStyleLanguage/CUDARenderer inherits arithmetic NEG. */
+    csb_printf(&out, "(-%s)", s0);
     break;
   case POLY_OP_SQRT:
-    snprintf(
-        buf, cap,
+    csb_printf(
+        &out,
         is_half                              ? "hsqrt(%s)"
         : poly_dtype_eq(dtype, POLY_FLOAT64) ? "sqrt(%s)"
                                              : "sqrtf(%s)",
@@ -417,8 +442,8 @@ static void cuda_render_alu(
     );
     break;
   case POLY_OP_TRUNC:
-    snprintf(
-        buf, cap,
+    csb_printf(
+        &out,
         is_half                              ? "htrunc(%s)"
         : poly_dtype_eq(dtype, POLY_FLOAT64) ? "trunc(%s)"
                                              : "truncf(%s)",
@@ -426,8 +451,8 @@ static void cuda_render_alu(
     );
     break;
   case POLY_OP_EXP2:
-    snprintf(
-        buf, cap,
+    csb_printf(
+        &out,
         is_half                              ? "hexp2(%s)"
         : poly_dtype_eq(dtype, POLY_FLOAT64) ? "exp2(%s)"
                                              : "exp2f(%s)",
@@ -435,8 +460,8 @@ static void cuda_render_alu(
     );
     break;
   case POLY_OP_LOG2:
-    snprintf(
-        buf, cap,
+    csb_printf(
+        &out,
         is_half                              ? "hlog2(%s)"
         : poly_dtype_eq(dtype, POLY_FLOAT64) ? "log2(%s)"
                                              : "log2f(%s)",
@@ -444,8 +469,8 @@ static void cuda_render_alu(
     );
     break;
   case POLY_OP_SIN:
-    snprintf(
-        buf, cap,
+    csb_printf(
+        &out,
         is_half                              ? "hsin(%s)"
         : poly_dtype_eq(dtype, POLY_FLOAT64) ? "sin(%s)"
                                              : "sinf(%s)",
@@ -453,62 +478,64 @@ static void cuda_render_alu(
     );
     break;
   case POLY_OP_RECIPROCAL:
-    snprintf(buf, cap, is_half ? "hrcp(%s)" : "(1/%s)", s0);
+    csb_printf(&out, is_half ? "hrcp(%s)" : "(1/%s)", s0);
     break;
   case POLY_OP_ADD:
-    snprintf(buf, cap, "(%s+%s)", s0, s1);
+    csb_printf(&out, "(%s+%s)", s0, s1);
     break;
   case POLY_OP_SUB:
-    snprintf(buf, cap, "(%s-%s)", s0, s1);
+    csb_printf(&out, "(%s-%s)", s0, s1);
     break;
   case POLY_OP_MUL:
-    snprintf(buf, cap, "(%s*%s)", s0, s1);
+    csb_printf(&out, "(%s*%s)", s0, s1);
     break;
   case POLY_OP_FDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    csb_printf(&out, "(%s/%s)", s0, s1);
     break;
   case POLY_OP_IDIV:
-    snprintf(buf, cap, "(%s/%s)", s0, s1);
+    csb_printf(&out, "(%s/%s)", s0, s1);
     break;
   case POLY_OP_MOD:
-    snprintf(buf, cap, "(%s%%%s)", s0, s1);
+    csb_printf(&out, "(%s%%%s)", s0, s1);
     break;
   case POLY_OP_SHL:
-    snprintf(buf, cap, "(%s<<%s)", s0, s1);
+    csb_printf(&out, "(%s<<%s)", s0, s1);
     break;
   case POLY_OP_SHR:
-    snprintf(buf, cap, "(%s>>%s)", s0, s1);
+    csb_printf(&out, "(%s>>%s)", s0, s1);
     break;
   case POLY_OP_AND:
-    snprintf(buf, cap, "(%s&%s)", s0, s1);
+    csb_printf(&out, "(%s&%s)", s0, s1);
     break;
   case POLY_OP_OR:
-    snprintf(buf, cap, "(%s|%s)", s0, s1);
+    csb_printf(&out, "(%s|%s)", s0, s1);
     break;
   case POLY_OP_XOR:
-    snprintf(buf, cap, "(%s^%s)", s0, s1);
+    csb_printf(&out, "(%s^%s)", s0, s1);
     break;
   case POLY_OP_CMPLT:
-    snprintf(buf, cap, "(%s<%s)", s0, s1);
+    csb_printf(&out, "(%s<%s)", s0, s1);
     break;
   case POLY_OP_CMPNE:
-    snprintf(buf, cap, "(%s!=%s)", s0, s1);
+    csb_printf(&out, "(%s!=%s)", s0, s1);
     break;
   case POLY_OP_CMPEQ:
-    snprintf(buf, cap, "(%s==%s)", s0, s1);
+    csb_printf(&out, "(%s==%s)", s0, s1);
     break;
   case POLY_OP_MAX:
-    snprintf(buf, cap, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
+    csb_printf(&out, "((%s>%s)?%s:%s)", s0, s1, s0, s1);
     break;
   case POLY_OP_POW:
-    snprintf(buf, cap, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1);
+    csb_printf(
+        &out, poly_dtype_eq(dtype, POLY_FLOAT64) ? "pow(%s, %s)" : "powf(%s, %s)", s0, s1
+    );
     break;
   case POLY_OP_WHERE:
-    snprintf(buf, cap, "(%s?%s:%s)", s0, s1, s2);
+    csb_printf(&out, "(%s?%s:%s)", s0, s1, s2);
     break;
   case POLY_OP_MULACC:
-    snprintf(
-        buf, cap,
+    csb_printf(
+        &out,
         is_half                              ? "__hfma(%s,%s,%s)"
         : poly_dtype_eq(dtype, POLY_FLOAT64) ? "fma(%s,%s,%s)"
         : poly_dtype_is_float(dtype)         ? "__fmaf_rn(%s,%s,%s)"
@@ -517,9 +544,10 @@ static void cuda_render_alu(
     );
     break;
   default:
-    snprintf(buf, cap, "/* unknown op %d */0", op);
+    csb_printf(&out, "/* unknown op %d */0", op);
     break;
   }
+  return out.buf;
 }
 
 static int cuda_range_slot(PolyUOp **ranges, int *n_ranges, PolyUOp *r, bool create) {
@@ -539,10 +567,10 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
   /* tinygrad CUDA still uses the normal postrange apply_opts path for
    * non-TC kernels. Tensor core matching is only the first branch inside
    * that heuristic. Keep CUDA on the shared heuristic policy so LOCAL/UNROLL
-   * scheduling still happens on ordinary kernels such as broadcast matmul. */
+  * scheduling still happens on ordinary kernels such as broadcast matmul. */
   /* bf16: native on sm_80+ (nv_bfloat16 + h* intrinsics), non-native on older */
-  PolyPatternMatcher *extra = NULL;
-  if (poly_cuda_arch_major() < 8) extra = poly_pm_bf16_non_native();
+  PolyPatternMatcher *dtype_matcher = NULL;
+  if (poly_cuda_arch_major() < 8) dtype_matcher = poly_pm_bf16_non_native();
   PolyRewriteOpts opts = {
       .optimize =
           poly_kernel_optimize_enabled(sink), /* shared optimized pipeline (tinygrad parity) */
@@ -553,7 +581,9 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
       .devectorize = 1,
       .caps =
           {
-              .has_mulacc = true,
+              /* Pinned CUDARenderer inherits RECIPROCAL from CStyleLanguage
+               * but does not advertise MULACC in code_for_op. */
+              .has_mulacc = false,
               .has_exp2 = true,
               .has_log2 = true,
               .has_sin = true,
@@ -564,7 +594,7 @@ PolyUOp *poly_rewrite_cuda(PolyCtx *ctx, PolyUOp *sink) {
           },
       .device = POLY_DEVICE_CUDA,
       .opt_policy = POLY_OPT_HEURISTIC,
-      .extra_matcher = extra,
+      .dtype_matcher = dtype_matcher,
       .gpu_block_size = 256,
   };
   return poly_full_rewrite_to_sink_ex(ctx, sink, opts);
@@ -667,6 +697,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
     /* --- CONST -------------------------------------------------------- */
     if (u->op == POLY_OP_CONST) {
       char val[64];
+      char *wide = NULL;
       if (poly_dtype_eq(u->dtype, POLY_FLOAT16)) {
         char tmp[32];
         cuda_render_float_const(u->arg.f, POLY_FLOAT32, tmp, sizeof(tmp));
@@ -680,15 +711,38 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       } else if (poly_dtype_is_bool(u->dtype)) {
         snprintf(val, sizeof(val), "%d", u->arg.b ? 1 : 0);
       } else if (poly_dtype_eq(u->dtype, POLY_INT64)) {
-        cuda_render_int64_const(u->arg.i, val, sizeof(val));
+        if (u->arg.kind == POLY_ARG_BIGINT) {
+          char *decimal = poly_arg_integer_to_decimal(u->arg);
+          if (!decimal) return NULL;
+          size_t n = strlen(decimal) + 3;
+          wide = malloc(n);
+          if (!wide) {
+            free(decimal);
+            return NULL;
+          }
+          snprintf(wide, n, "%sll", decimal);
+          free(decimal);
+        } else {
+          cuda_render_int64_const(u->arg.i, val, sizeof(val));
+        }
       } else if (poly_dtype_eq(u->dtype, POLY_UINT64)) {
-        snprintf(val, sizeof(val), "%lluull", (unsigned long long)(uint64_t)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%lluull",
+            (unsigned long long)poly_arg_integer_to_u64_mod(u->arg)
+        );
       } else if (poly_dtype_eq(u->dtype, POLY_UINT32)) {
-        snprintf(val, sizeof(val), "%uu", (unsigned)(uint32_t)u->arg.i);
+        snprintf(
+            val, sizeof(val), "%uu",
+            (unsigned)(uint32_t)poly_arg_integer_to_u64_mod(u->arg)
+        );
+      } else if (u->arg.kind == POLY_ARG_BIGINT) {
+        wide = poly_arg_integer_to_decimal(u->arg);
+        if (!wide) return NULL;
       } else {
         snprintf(val, sizeof(val), "%lld", (long long)u->arg.i);
       }
-      csmap_set(&names, u, strdup(val));
+      csmap_set(&names, u, strdup(wide ? wide : val));
+      free(wide);
       continue;
     }
 
@@ -979,11 +1033,40 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
 
     /* --- ALU ---------------------------------------------------------- */
     if (poly_opset_has(POLY_GROUP_ALU, u->op)) {
-      char expr[512];
-      const char *s0 = (u->n_src > 0) ? csmap_get(&names, u->src[0]) : "";
-      const char *s1 = (u->n_src > 1) ? csmap_get(&names, u->src[1]) : "";
-      const char *s2 = (u->n_src > 2) ? csmap_get(&names, u->src[2]) : "";
-      cuda_render_alu(expr, sizeof(expr), u->op, u->dtype, s0, s1, s2);
+      const char *rendered[3] = {"", "", ""};
+      char *stripped[3] = {NULL, NULL, NULL};
+      bool associative =
+          u->op == POLY_OP_ADD || u->op == POLY_OP_MUL || u->op == POLY_OP_XOR ||
+          u->op == POLY_OP_OR || u->op == POLY_OP_AND;
+      for (int j = 0; j < u->n_src && j < 3; j++) {
+        const char *source = csmap_get(&names, u->src[j]);
+        if (!source) source = "";
+        if (associative && u->src[j]->op == u->op) {
+          stripped[j] = cuda_strip_parens(source);
+          rendered[j] = stripped[j] ? stripped[j] : source;
+        } else {
+          rendered[j] = source;
+        }
+      }
+      char *expr =
+          cuda_render_alu(u->op, u->dtype, rendered[0], rendered[1], rendered[2]);
+      for (int j = 0; j < 3; j++)
+        free(stripped[j]);
+      if (!expr) {
+        free(decls.buf);
+        free(body.buf);
+        csmap_destroy(&names);
+        return NULL;
+      }
+
+      /* Pinned CStyleLanguage._render: one-consumer non-WHERE ALU remains an
+       * expression unless EXPAND_SSA requests explicit statements. */
+      bool expand_ssa =
+          poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA");
+      if (u->op != POLY_OP_WHERE && cuda_child_count(uops, n, u) == 1 && !expand_ssa) {
+        csmap_set(&names, u, expr);
+        continue;
+      }
 
       char name[32];
       snprintf(name, sizeof(name), "alu%d", c_alu++);
@@ -997,6 +1080,7 @@ char *poly_render_cuda(PolyUOp **uops, int n, const char *fn_name, int launch_bo
       for (int d = 0; d < depth; d++)
         csb_puts(&body, "  ");
       csb_printf(&body, "%s = %s;\n", name, expr);
+      free(expr);
       continue;
     }
 

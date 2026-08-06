@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from polygrad import Device, Jit, JitError, Tensor, Variable, _ffi, can_run, compile as pg_compile, jit, stats as pg_stats
+from polygrad import Device, Jit, JitError, Runtime, Tensor, Variable, _ffi, can_run, compile as pg_compile, jit, stats as pg_stats
 from polygrad.helpers import Context
 from polygrad.uop.ops import AxisType, KernelInfo, UOp
 
@@ -614,6 +614,19 @@ class TestCreation:
         out = y.numpy()
         assert out.dtype == np.float32
         np.testing.assert_allclose(out, [2.0, 4.0, 6.0, 8.0])
+
+    def test_numpy_zero_dim_constructs_scalar_const(self):
+        cases = [
+            (np.array(7, dtype=np.int32), None, 'int32', 7.0),
+            (np.array(1.5, dtype=np.float64), None, 'float64', 1.5),
+            (np.array(2.0, dtype=np.float64), 'bfloat16', 'bfloat16', 2.0),
+        ]
+        for data, dtype, expected_dtype, expected in cases:
+            t = Tensor(data, dtype=dtype)
+            assert t.shape == ()
+            assert t.dtype == expected_dtype
+            assert t.uop.op_name == 'CONST'
+            np.testing.assert_allclose(t.cast('float32').numpy(), expected)
 
     def test_numpy_many_batches_realize_and_readback(self):
         t = Tensor([1.0, 2.0, 3.0])
@@ -1404,6 +1417,27 @@ class TestElementwise:
         np.testing.assert_allclose(x.div(2.0, rounding_mode=None).numpy(), [1.0, 2.0])
         np.testing.assert_allclose(x.pow(3.0, reverse=True).numpy(), [9.0, 81.0])
 
+        moved = Tensor.empty(2, 2, device='cpu').realize().to('cuda').to('cpu')
+        for out in (
+            3.0 + moved,
+            moved.add(3.0, reverse=True),
+            3.0 * moved,
+            moved.mul(3.0, reverse=True),
+        ):
+            assert out.uop.src[0].op_name == 'EXPAND'
+            assert out.uop.src[1].raw == moved.uop.raw
+
+        class Override(Tensor):
+            def add(self, other, reverse=False):
+                return ('add', reverse)
+
+            def mul(self, other, reverse=False):
+                return ('mul', reverse)
+
+        override = Override([1.0])
+        assert 3.0 + override == ('add', True)
+        assert 3.0 * override == ('mul', True)
+
     def test_named_elementwise_bool_scalar_matches_tinygrad(self):
         x = Tensor([True, False], dtype='bool')
 
@@ -1436,6 +1470,13 @@ class TestElementwise:
         assert logical_not.uop.op_name == 'CMPNE'
         assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'EXPAND']
         np.testing.assert_array_equal(logical_not.numpy(), [False, True])
+
+    def test_mixed_dtype_comparison_where_promotes_like_tinygrad(self):
+        x = Tensor(np.arange(16, dtype=np.float32).reshape(4, 4))
+        out = (Tensor.full((4, 4), 7, dtype='int32') > x).where(
+            x, Tensor.full((4, 4), -2, dtype='int32')
+        ).sum(axis=0)
+        np.testing.assert_allclose(out.numpy(), [0, 2, 4, -3])
 
     def test_named_integer_true_division_matches_tinygrad(self):
         x = Tensor([3, 4], dtype='int32')
@@ -1641,6 +1682,15 @@ class TestMovement:
         assert out3.shape == (2, 2, 2)
         np.testing.assert_allclose(out3.numpy(), [[[0, 9], [4, 1]], [[20, 17], [12, 21]]])
 
+    def test_one_hot_matches_tinygrad_probe(self):
+        out = Tensor(np.array([0, 2, 1], dtype=np.int32), dtype='int32').one_hot(4)
+        assert out.shape == (3, 4)
+        assert out.dtype == 'int32'
+        np.testing.assert_array_equal(
+            out.numpy(),
+            [[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0]],
+        )
+
     def test_tensor_index_rows_matches_tinygrad_probe(self):
         idx = Tensor(np.array([-1, 0, 2], dtype=np.int32), dtype='int32')
         out = Tensor.arange(12).reshape(3, 4)[idx]
@@ -1765,6 +1815,13 @@ class TestReduce:
         np.testing.assert_allclose(a.argmax(axis=1).numpy(), [0, 0])
         np.testing.assert_allclose(a.argmax(axis=1, keepdim=True).numpy(), [[0], [0]])
         assert a.argmax().item() == 3
+        singleton = Tensor(np.arange(6, dtype=np.float32).reshape(2, 1, 3))
+        np.testing.assert_array_equal(singleton.argmax(axis=1).numpy(), np.zeros((2, 3)))
+        empty = Tensor.empty(2, 0, 3, device="CPU")
+        np.testing.assert_array_equal(
+            empty.argmax(axis=1).numpy(),
+            np.full((2, 3), np.iinfo(np.int32).min, dtype=np.int32),
+        )
 
     def test_sort_argsort_topk_match_tinygrad_probe(self):
         x = Tensor([[0.1, 0.5, 1.2, 3.4, 2.1], [2.2, 1.9, 0.3, 4.5, 0.8]])
@@ -1866,6 +1923,20 @@ class TestMatmulAndLoss:
 
         with pytest.raises(ValueError, match='poly_einsum failed'):
             Tensor.einsum('a->' + ('a' * 80), Tensor([1.0]))
+
+        with Runtime(device='cpu') as runtime_a, Runtime(device='cpu') as runtime_b:
+            with pytest.raises(ValueError, match='same Polygrad context'):
+                runtime_a.Tensor.einsum(
+                    'i,i->',
+                    runtime_a.Tensor([1.0, 2.0, 3.0]),
+                    runtime_b.Tensor([4.0, 5.0, 6.0]),
+                )
+
+    def test_rearrange_rejects_malformed_formula(self):
+        x = Tensor([1.0, 2.0, 3.0])
+        for formula in ('invalid', 'a' * 300 + '->a', 'a->a->a', '((a))->a'):
+            with pytest.raises(ValueError, match='poly_rearrange failed'):
+                x.rearrange(formula)
 
     def test_matmul_shape_mismatch_raises(self):
         a = Tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -2758,3 +2829,306 @@ class TestMaterializationParity:
         assert mixed.uop_logical.op_name == 'ADD'
         assert mixed.uop_logical.src[0].raw == x.uop_logical.raw
         assert mixed.uop_logical.src[1].raw == x.uop_logical.raw
+
+    def test_minimum_keeps_ordered_roundtrip_occurrence(self):
+        x = Tensor([1.0], device='cpu').realize()
+        x_cuda = x.to('cuda')
+        x_cpu = x_cuda.to('cpu')
+        out = x.minimum(x_cpu)
+
+        # Pinned minimum consumes ordered current Tensor.uop operands through
+        # inverse -> maximum -> inverse (mixin/elementwise.py:366-393).
+        assert out.uop.op_name == 'MUL'
+        maximum = out.uop.src[0]
+        assert maximum.op_name == 'MAX'
+        assert maximum.src[0].op_name == 'MUL'
+        assert maximum.src[1].op_name == 'MUL'
+        assert maximum.src[0].src[0].raw == x.uop.raw
+        assert maximum.src[1].src[0].raw == x_cpu.uop.raw
+        assert maximum.src[1].src[0].op_name == 'COPY'
+        assert maximum.src[1].src[0].src[0].raw == x_cuda.uop.raw
+
+    def test_clamp_matches_pinned_optional_bounds_and_occurrence(self):
+        values = Tensor([-float('inf'), -2.0, 2.0, float('inf')], device='cpu')
+        np.testing.assert_equal(
+            values.clamp(min_=-1.0).numpy(),
+            np.array([-1.0, -1.0, 2.0, np.inf], dtype=np.float32),
+        )
+        np.testing.assert_equal(
+            values.clamp(max_=1.0).numpy(),
+            np.array([-np.inf, -2.0, 1.0, 1.0], dtype=np.float32),
+        )
+
+        x = Tensor([1.0], device='cpu').realize()
+        x_cuda = x.to('cuda')
+        x_cpu = x_cuda.to('cpu')
+        out = x_cpu.clamp(-1.0, 1.0)
+
+        def count_op(root, name):
+            seen, stack, count = set(), [root], 0
+            while stack:
+                node = stack.pop()
+                if node.raw in seen:
+                    continue
+                seen.add(node.raw)
+                count += node.op_name == name
+                stack.extend(node.src)
+            return count
+
+        # Pinned clamp is the conditional comparison/WHERE program over the
+        # exact current Tensor.uop (mixin/elementwise.py:569-580).
+        assert out.uop.op_name == 'WHERE'
+        assert count_op(out.uop, 'WHERE') == 2
+        assert count_op(out.uop, 'COPY') == 2
+
+    def test_trig_matches_pinned_promotion_and_occurrence(self):
+        integer = Tensor([0, 1, 2], dtype='int32', device='cpu')
+        np.testing.assert_allclose(
+            integer.sin().numpy(),
+            np.sin(np.array([0, 1, 2], dtype=np.float32)),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        assert integer.sin().dtype == 'float32'
+        np.testing.assert_allclose(
+            Tensor([False, True], dtype='bool').sin().numpy(),
+            np.sin(np.array([0, 1], dtype=np.float32)),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+        half = Tensor([0.0, 1.0], dtype='float16')
+        assert half.cos().dtype == 'float16'
+        np.testing.assert_allclose(
+            half.cos().float().numpy(),
+            np.cos(np.array([0.0, 1.0], dtype=np.float32)),
+            rtol=2e-3,
+            atol=2e-3,
+        )
+
+        angles32 = Tensor([0.0, 0.25, 0.5], dtype='float32')
+        angles64 = Tensor([0.0, 0.25, 0.5], dtype='float64')
+        for angles, expected_dtype, numpy_dtype, tolerance in (
+            (angles32, 'float32', np.float32, 1e-6),
+            (angles64, 'float64', np.float64, 1e-12),
+        ):
+            expected = np.array([0.0, 0.25, 0.5], dtype=numpy_dtype)
+            assert angles.cos().dtype == expected_dtype
+            assert angles.tan().dtype == expected_dtype
+            np.testing.assert_allclose(
+                angles.cos().numpy(), np.cos(expected),
+                rtol=tolerance, atol=tolerance,
+            )
+            np.testing.assert_allclose(
+                angles.tan().numpy(), np.tan(expected),
+                rtol=tolerance, atol=tolerance,
+            )
+
+        x = Tensor([0.25], device='cpu').realize()
+        moved = x.to('cuda').to('cpu')
+
+        def count_op(root, name):
+            seen, stack, count = set(), [root], 0
+            while stack:
+                node = stack.pop()
+                if node.raw in seen:
+                    continue
+                seen.add(node.raw)
+                count += node.op_name == name
+                stack.extend(node.src)
+            return count
+
+        assert count_op(moved.cos().uop, 'COPY') == 2
+        assert count_op(moved.tan().uop, 'COPY') == 2
+
+    def test_literal_elementwise_composites_match_pinned(self):
+        values = np.array([-2.5, -1.0, 0.0, 0.5, 2.5], dtype=np.float32)
+        x = Tensor(values)
+        sigmoid = 1 / (1 + np.exp(-values))
+        gelu = 0.5 * values * (
+            1
+            + np.tanh(
+                np.sqrt(2 / np.pi) * (values + 0.044715 * values**3)
+            )
+        )
+        expected = {
+            'square': values * values,
+            'ceil': np.ceil(values),
+            'floor': np.floor(values),
+            'sigmoid': sigmoid,
+            'tanh': np.tanh(values),
+            'gelu': gelu,
+            'quick_gelu': values / (1 + np.exp(-(1.702 * values))),
+            'relu6': np.minimum(np.maximum(values, 0), 6),
+            'leaky_relu': np.where(values < 0, 0.01 * values, values),
+            'hardswish': values * np.minimum(np.maximum(values + 3, 0), 6) / 6,
+            'hardsigmoid': np.minimum(np.maximum(values / 6 + 0.5, 0), 1),
+            'hardtanh': np.minimum(np.maximum(values, -1), 1),
+            'silu': values * sigmoid,
+            'elu': np.where(values > 0, values, np.exp(values) - 1),
+            'sign': np.sign(values),
+            'abs': np.abs(values),
+            'isnan': np.isnan(values),
+        }
+        for method, wanted in expected.items():
+            got = getattr(x, method)().numpy()
+            np.testing.assert_allclose(got, wanted, rtol=2e-6, atol=2e-6)
+
+        custom = x.hardsigmoid(alpha=0.2, beta=0.3)
+        np.testing.assert_allclose(
+            custom.numpy(),
+            np.minimum(np.maximum(0.2 * values + 0.3, 0), 1),
+            rtol=2e-6,
+            atol=2e-6,
+        )
+
+        half = Tensor(values, dtype='float16')
+        assert half.sigmoid().dtype == 'float16'
+        assert half.tanh().dtype == 'float16'
+        assert half.gelu().dtype == 'float16'
+        assert half.quick_gelu().dtype == 'float16'
+        np.testing.assert_allclose(
+            half.tanh().float().numpy(), np.tanh(values), rtol=2e-3, atol=2e-3
+        )
+        np.testing.assert_allclose(
+            half.gelu().float().numpy(), gelu, rtol=2e-3, atol=2e-3
+        )
+        np.testing.assert_allclose(
+            half.quick_gelu().float().numpy(),
+            expected['quick_gelu'],
+            rtol=2e-3,
+            atol=2e-3,
+        )
+
+        ints = Tensor([-2, 0, 3], dtype='int32')
+        np.testing.assert_array_equal(ints.sign().numpy(), [-1, 0, 1])
+        np.testing.assert_array_equal(ints.abs().numpy(), [2, 0, 3])
+        assert ints.gelu().dtype == 'float32'
+        assert ints.quick_gelu().dtype == 'float32'
+        int_values = np.array([-2, 0, 3], dtype=np.float32)
+        np.testing.assert_allclose(
+            ints.quick_gelu().numpy(),
+            int_values / (1 + np.exp(-(1.702 * int_values))),
+            rtol=2e-6,
+            atol=2e-6,
+        )
+        boolean = Tensor([False, True], dtype='bool')
+        np.testing.assert_array_equal(boolean.sign().numpy(), [False, True])
+        np.testing.assert_array_equal(boolean.abs().numpy(), [False, True])
+        assert boolean.gelu().dtype == 'float32'
+        assert boolean.quick_gelu().dtype == 'float32'
+        bool_values = np.array([0, 1], dtype=np.float32)
+        np.testing.assert_allclose(
+            boolean.quick_gelu().numpy(),
+            bool_values / (1 + np.exp(-(1.702 * bool_values))),
+            rtol=2e-6,
+            atol=2e-6,
+        )
+
+        const = x.const_like(1)
+        assert const.dtype == x.dtype
+        assert const.shape == x.shape
+        assert const.uop.op_name == 'EXPAND'
+        np.testing.assert_array_equal(const.numpy(), np.ones_like(values))
+
+        for method in ('ceil', 'floor'):
+            grad_input = Tensor(values, requires_grad=True)
+            getattr(grad_input, method)().sum().backward()
+            np.testing.assert_array_equal(grad_input.grad.numpy(), np.zeros_like(values))
+
+    def test_saturated_float16_gelu_family_backward_matches_pinned_cpu(self):
+        # Pinned mixin/elementwise.py:751-759 constructs these composites;
+        # symbolic.py:478-480 stabilizes the reciprocal products, and
+        # cstyle.py:40-43,62-63,194,232-237 defines the exact half rendering.
+        inputs = [-10.0, -8.0, -7.0, -6.0, -5.0]
+        expected_bits = {
+            'gelu': np.array([0x0000, 0x0000, 0x0000, 0x0000, 0x0000], dtype=np.uint16),
+            'quick_gelu': np.array(
+                [0x0000, 0x0000, 0x0000, 0x8D8A, 0x9636], dtype=np.uint16
+            ),
+        }
+        expected_lists = {
+            'gelu': [-0.0, -0.0, -0.0, -0.0, -0.0],
+            'quick_gelu': [
+                -0.0,
+                -0.0,
+                -0.0,
+                -0.00022019156313035637,
+                -0.0010094891767948866,
+            ],
+        }
+        for method, wanted in expected_bits.items():
+            x = Tensor(inputs, dtype='float16', requires_grad=True)
+            activated = getattr(x, method)()
+            activated.sum().backward()
+            gradient = np.asarray(x.grad.numpy(), dtype=np.float16)
+            assert np.isfinite(gradient).all()
+            np.testing.assert_array_equal(gradient.view(np.uint16), wanted)
+            assert activated.tolist() == expected_lists[method]
+
+    def test_round_and_isinf_match_pinned_compositions(self):
+        # Pinned mixin/elementwise.py:872-880 is round-half-to-even.
+        values = np.array(
+            [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5], dtype=np.float32
+        )
+        expected_round = np.array([-2, -2, 0, 0, 2, 2], dtype=np.float32)
+        for dtype, expected_dtype in (
+            ('float16', 'float16'),
+            ('float32', 'float32'),
+            ('float64', 'float64'),
+        ):
+            rounded = Tensor(values, dtype=dtype).round()
+            assert rounded.dtype == expected_dtype
+            np.testing.assert_array_equal(rounded.numpy(), expected_round)
+
+        rounded_int = Tensor([-2, -1, 0, 1, 2], dtype='int32').round()
+        assert rounded_int.dtype == 'float32'
+        np.testing.assert_array_equal(rounded_int.numpy(), [-2, -1, 0, 1, 2])
+
+        rounded_bool = Tensor([False, True], dtype='bool').round()
+        assert rounded_bool.dtype == 'float32'
+        np.testing.assert_array_equal(rounded_bool.numpy(), [0, 1])
+
+        # Pinned mixin/elementwise.py:596-604 independently gates each sign.
+        infinity_values = Tensor(
+            [-float('inf'), -1.0, -0.0, 0.0, 1.0, float('inf'), float('nan')]
+        )
+        for detect_positive, detect_negative, expected in (
+            (False, False, [False, False, False, False, False, False, False]),
+            (False, True, [True, False, False, False, False, False, False]),
+            (True, False, [False, False, False, False, False, True, False]),
+            (True, True, [True, False, False, False, False, True, False]),
+        ):
+            result = infinity_values.isinf(
+                detect_positive=detect_positive,
+                detect_negative=detect_negative,
+            )
+            assert result.dtype == 'bool'
+            np.testing.assert_array_equal(result.numpy(), expected)
+
+        for dtype in ('float16', 'float32', 'float64', 'int32', 'bool'):
+            result = Tensor([0, 1], dtype=dtype).isinf()
+            assert result.dtype == 'bool'
+            np.testing.assert_array_equal(result.numpy(), [False, False])
+
+        def count_op(root, name):
+            seen, stack, count = set(), [root], 0
+            while stack:
+                node = stack.pop()
+                if node.raw in seen:
+                    continue
+                seen.add(node.raw)
+                count += node.op_name == name
+                stack.extend(node.src)
+            return count
+
+        moved = Tensor.empty(2, device='cpu').realize().to('cuda').to('cpu')
+        assert count_op(moved.round().uop, 'COPY') == 2
+        for detect_positive, detect_negative in (
+            (False, False), (False, True), (True, False), (True, True)
+        ):
+            result = moved.isinf(
+                detect_positive=detect_positive,
+                detect_negative=detect_negative,
+            )
+            assert count_op(result.uop, 'COPY') == 2

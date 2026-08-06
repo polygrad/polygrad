@@ -11,6 +11,7 @@
 #include "test_harness.h"
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
+#include "../src/codegen.h"
 #include "../src/engine/schedule.h"
 
 /* Helper: f32 <-> f16 bit conversion (IEEE 754 half-precision) */
@@ -97,6 +98,45 @@ TEST(f16, cast_f32_to_f16_e2e) {
   ASSERT_INT_EQ(out_data[1], f32_to_f16_bits(2.0f));
   ASSERT_INT_EQ(out_data[2], f32_to_f16_bits(-0.5f));
   ASSERT_INT_EQ(out_data[3], f32_to_f16_bits(0.0f));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Pinned native float16 conversion uses IEEE half pack/unpack
+ * (tinygrad/dtype.py:280-282), including subnormals and ties-to-even. */
+TEST(f16, cast_f32_to_f16_ieee_edges_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *in = poly_buffer_f32(ctx, 9);
+  PolyUOp *casted = poly_cast(ctx, in, POLY_FLOAT16);
+  PolyUOp *out = poly_buffer(ctx, POLY_FLOAT16, 9);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+
+  float in_data[] = {
+      0x1p-24f,
+      -0x1p-24f,
+      0x1.ff8p-15f,
+      0x1p-14f,
+      1.0f + 0x1p-11f,
+      1.0f + 0x3p-11f,
+      INFINITY,
+      -INFINITY,
+      NAN,
+  };
+  uint16_t out_data[9] = {0};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(in, in_data),
+      POLY_TEST_HOST_VIEW(out, out_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
+
+  const uint16_t expected[] = {
+      0x0001u, 0x8001u, 0x03ffu, 0x0400u, 0x3c00u, 0x3c02u, 0x7c00u, 0xfc00u,
+  };
+  for (int i = 0; i < 8; i++)
+    ASSERT_INT_EQ(out_data[i], expected[i]);
+  ASSERT_TRUE((out_data[8] & 0x7c00u) == 0x7c00u && (out_data[8] & 0x03ffu) != 0);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -317,6 +357,29 @@ TEST(f16, cast_f32_to_bf16_e2e) {
   PASS();
 }
 
+/* Pinned tinygrad f2f_store decomposes vector results lane-by-lane before
+ * BF16 storage (uop/decompositions.py:423-429, 533-562). Four elements force
+ * the CPU codegen upcast/STACK path that scalar and three-lane cases miss. */
+TEST(f16, cast_f32_to_bf16_vector4_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *in = poly_buffer_f32(ctx, 4);
+  PolyUOp *casted = poly_cast(ctx, in, POLY_BFLOAT16);
+  PolyUOp *out = poly_buffer(ctx, POLY_BFLOAT16, 4);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, casted));
+
+  float in_data[] = {1.0f, -2.0f, 0.5f, 3.25f};
+  uint16_t out_data[4] = {0};
+  PolyTestBufferView binds[] = {POLY_TEST_HOST_VIEW(in, in_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
+
+  for (int i = 0; i < 4; i++)
+    ASSERT_INT_EQ(out_data[i], f32_to_bf16_bits(in_data[i]));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* bf16 cast bf16 -> f32 e2e */
 
 TEST(f16, cast_bf16_to_f32_e2e) {
@@ -342,6 +405,134 @@ TEST(f16, cast_bf16_to_f32_e2e) {
   PASS();
 }
 
+/* Pinned pm_float_decomp keeps BITCAST as raw same-width reinterpretation for
+ * every 16-bit destination/source, not only uint16
+ * (tinygrad/uop/decompositions.py:541-545). */
+TEST(f16, bitcast_bf16_int16_roundtrip_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *bf16_in = poly_buffer(ctx, POLY_BFLOAT16, 5);
+  PolyUOp *int16_out = poly_buffer(ctx, POLY_INT16, 5);
+  PolyUOp *to_i16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT16, bf16_in, poly_arg_none());
+  PolyUOp *first_sink = poly_sink1(ctx, poly_store_val(ctx, int16_out, to_i16));
+  uint16_t bf16_data[] = {
+      f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-2.0f), f32_to_bf16_bits(0.5f), 0x0001u, 0x8001u,
+  };
+  int16_t int16_data[5] = {0};
+  PolyTestBufferView first_binds[] = {
+      POLY_TEST_HOST_VIEW(bf16_in, bf16_data),
+      POLY_TEST_HOST_VIEW(int16_out, int16_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, first_sink, first_binds, 2), 0);
+  for (int i = 0; i < 5; i++)
+    ASSERT_INT_EQ((uint16_t)int16_data[i], bf16_data[i]);
+
+  PolyUOp *int16_in = poly_buffer(ctx, POLY_INT16, 5);
+  PolyUOp *bf16_out = poly_buffer(ctx, POLY_BFLOAT16, 5);
+  PolyUOp *to_bf16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, int16_in, poly_arg_none());
+  PolyUOp *second_sink = poly_sink1(ctx, poly_store_val(ctx, bf16_out, to_bf16));
+  int16_t reverse_input[5];
+  for (int i = 0; i < 5; i++)
+    reverse_input[i] = (int16_t)bf16_data[i];
+  uint16_t roundtrip[5] = {0};
+  PolyTestBufferView second_binds[] = {
+      POLY_TEST_HOST_VIEW(int16_in, reverse_input),
+      POLY_TEST_HOST_VIEW(bf16_out, roundtrip),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, second_sink, second_binds, 2), 0);
+  for (int i = 0; i < 3; i++)
+    ASSERT_INT_EQ(roundtrip[i], bf16_data[i]);
+  /* Pinned pm_float_decomp applies only when BF16 is unsupported. CUDA SM80+
+   * and HIP keep the native same-width BITCAST and preserve the raw words;
+   * emulated renderers numerically convert the ordinary untagged STORE and
+   * flush BF16 subnormals to signed zero
+   * (uop/decompositions.py:533-562, renderer/cstyle.py:463). */
+  bool native_bf16 = false;
+#ifdef POLY_HAS_CUDA
+  native_bf16 |=
+      poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
+#endif
+  native_bf16 |= poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_HIP;
+  ASSERT_INT_EQ(roundtrip[3], native_bf16 ? 0x0001u : 0x0000u);
+  ASSERT_INT_EQ(roundtrip[4], native_bf16 ? 0x8001u : 0x8000u);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(f16, bitcast_bf16_float16_roundtrip_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *bf16_in = poly_buffer(ctx, POLY_BFLOAT16, 5);
+  PolyUOp *f16_out = poly_buffer(ctx, POLY_FLOAT16, 5);
+  PolyUOp *to_f16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT16, bf16_in, poly_arg_none());
+  PolyUOp *first_sink = poly_sink1(ctx, poly_store_val(ctx, f16_out, to_f16));
+  uint16_t bf16_data[] = {
+      f32_to_bf16_bits(1.0f), f32_to_bf16_bits(-2.0f), f32_to_bf16_bits(0.5f), 0x0001u, 0x8001u,
+  };
+  uint16_t f16_data[5] = {0};
+  PolyTestBufferView first_binds[] = {
+      POLY_TEST_HOST_VIEW(bf16_in, bf16_data),
+      POLY_TEST_HOST_VIEW(f16_out, f16_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, first_sink, first_binds, 2), 0);
+  for (int i = 0; i < 5; i++)
+    ASSERT_INT_EQ(f16_data[i], bf16_data[i]);
+
+  PolyUOp *f16_in = poly_buffer(ctx, POLY_FLOAT16, 5);
+  PolyUOp *bf16_out = poly_buffer(ctx, POLY_BFLOAT16, 5);
+  PolyUOp *to_bf16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, f16_in, poly_arg_none());
+  PolyUOp *second_sink = poly_sink1(ctx, poly_store_val(ctx, bf16_out, to_bf16));
+  uint16_t reverse_input[5];
+  memcpy(reverse_input, bf16_data, sizeof(reverse_input));
+  uint16_t roundtrip[5] = {0};
+  PolyTestBufferView second_binds[] = {
+      POLY_TEST_HOST_VIEW(f16_in, reverse_input),
+      POLY_TEST_HOST_VIEW(bf16_out, roundtrip),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, second_sink, second_binds, 2), 0);
+  bool native_bf16 = false;
+#ifdef POLY_HAS_CUDA
+  native_bf16 |=
+      poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
+#endif
+  native_bf16 |= poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_HIP;
+  for (int i = 0; i < 3; i++)
+    ASSERT_INT_EQ(roundtrip[i], bf16_data[i]);
+  ASSERT_INT_EQ(roundtrip[3], native_bf16 ? 0x0001u : 0x0000u);
+  ASSERT_INT_EQ(roundtrip[4], native_bf16 ? 0x8001u : 0x8000u);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Pinned native same-width BITCAST preserves representable destination-half
+ * NaN payload/signaling bits (uop/ops.py:1199-1208). These words are finite
+ * BF16 inputs, so the assertion isolates the destination F16 encoder. */
+TEST(f16, bitcast_bf16_to_float16_preserves_nan_payload_bits_e2e) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *bf16_in = poly_buffer(ctx, POLY_BFLOAT16, 6);
+  PolyUOp *f16_out = poly_buffer(ctx, POLY_FLOAT16, 6);
+  PolyUOp *to_f16 = poly_uop1(ctx, POLY_OP_BITCAST, POLY_FLOAT16, bf16_in, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, f16_out, to_f16));
+  uint16_t input[] = {0x7c01u, 0x7d55u, 0x7e55u, 0xfc01u, 0xfd55u, 0xfe55u};
+  uint16_t output[6] = {0};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(bf16_in, input),
+      POLY_TEST_HOST_VIEW(f16_out, output),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
+  for (int i = 0; i < 6; i++)
+    ASSERT_INT_EQ(output[i], input[i]);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* bf16 add (via f32 emulation) e2e */
 
 TEST(f16, add_bf16_e2e) {
@@ -358,8 +549,8 @@ TEST(f16, add_bf16_e2e) {
   uint16_t out_data[3] = {0};
 
   PolyTestBufferView binds[] = {
-      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
-  };
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -387,8 +578,8 @@ TEST(f16, mul_bf16_e2e) {
   uint16_t out_data[3] = {0};
 
   PolyTestBufferView binds[] = {
-      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data), POLY_TEST_HOST_VIEW(out, out_data)
-  };
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data)};
   int rc = poly_test_realize_buffer_views(ctx, sink, binds, 3);
   ASSERT_INT_EQ(rc, 0);
 
@@ -397,5 +588,110 @@ TEST(f16, mul_bf16_e2e) {
   ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[2]), -8.0f, 0.2f);
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+/* Pinned CUDA SM80+ uses native BF16 and HIPRenderer.extra_matcher inserts a
+ * BF16 cast after each ordinary ALU (renderer/cstyle.py:472-486,515-520).
+ * Unsupported-renderer emulation rounds once when materializing storage. */
+TEST(f16, bf16_chain_matches_native_or_emulated_renderer_rounding) {
+  PolyCtx *ctx = poly_ctx_new();
+
+  PolyUOp *a = poly_buffer(ctx, POLY_BFLOAT16, 1);
+  PolyUOp *b = poly_buffer(ctx, POLY_BFLOAT16, 1);
+  PolyUOp *c = poly_buffer(ctx, POLY_BFLOAT16, 1);
+  PolyUOp *ab = poly_alu2(ctx, POLY_OP_ADD, a, b);
+  PolyUOp *sum = poly_alu2(ctx, POLY_OP_ADD, ab, c);
+  PolyUOp *out = poly_buffer(ctx, POLY_BFLOAT16, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, sum));
+
+  uint16_t a_data[] = {f32_to_bf16_bits(1.0f)};
+  uint16_t b_data[] = {f32_to_bf16_bits(1.0f / 256.0f)};
+  uint16_t c_data[] = {f32_to_bf16_bits(1.0f / 256.0f)};
+  uint16_t out_data[1] = {0};
+  PolyTestBufferView binds[] = {
+      POLY_TEST_HOST_VIEW(a, a_data), POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(c, c_data), POLY_TEST_HOST_VIEW(out, out_data)};
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 4), 0);
+  PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
+  bool per_op_bf16_rounding = preferred == POLY_DEVICE_HIP;
+#ifdef POLY_HAS_CUDA
+  per_op_bf16_rounding |= preferred == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
+#endif
+  ASSERT_FLOAT_EQ(bf16_bits_to_f32(out_data[0]), per_op_bf16_rounding ? 1.0f : 1.0078125f, 0.0f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(f16, saturated_gelu_family_backward_matches_pinned_backend) {
+  /* Exact final-f16-STORE references are recorded by the backend probes.
+   * Tensor.tolist() instead inserts CAST(f32) before realization and therefore
+   * has a distinct, also pinned, observation boundary. Shared symbolic
+   * stabilization is symbolic.py:478-480; renderer-supported ops and dtype
+   * legalization then intentionally produce backend-specific stored bits. */
+  uint16_t input_data[5] = {
+      f32_to_f16_bits(-10.0f),
+      f32_to_f16_bits(-8.0f),
+      f32_to_f16_bits(-7.0f),
+      f32_to_f16_bits(-6.0f),
+      f32_to_f16_bits(-5.0f),
+  };
+  uint16_t expected_cpu[2][5] = {
+      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
+      {0x0000u, 0x0000u, 0x0000u, 0x8d8au, 0x9636u},
+  };
+  uint16_t expected_x86[2][5] = {
+      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
+      {0x0000u, 0x0000u, 0x0000u, 0x8d89u, 0x9636u},
+  };
+  uint16_t expected_cuda[2][5] = {
+      {0x0000u, 0x0000u, 0x0000u, 0x0000u, 0x0000u},
+      {0x0000u, 0x0000u, 0x0000u, 0x8d88u, 0x9636u},
+  };
+  uint16_t expected_interp[2][5] = {
+      {0x8000u, 0x8000u, 0x8000u, 0x8000u, 0x8000u},
+      {0x8000u, 0x8000u, 0x84cau, 0x8d8bu, 0x9632u},
+  };
+  const char *device = getenv("POLY_DEVICE");
+  uint16_t(*expected)[5] = expected_cpu;
+  if (device && strcmp(device, "interp") == 0)
+    expected = expected_interp;
+  else if (device && strcmp(device, "x86") == 0)
+    expected = expected_x86;
+  else if (device && strcmp(device, "cuda") == 0)
+    expected = expected_cuda;
+
+  for (int quick = 0; quick < 2; quick++) {
+    PolyCtx *ctx = poly_ctx_new();
+    ASSERT_NOT_NULL(ctx);
+    PolyUOp *input = poly_buffer(ctx, POLY_FLOAT16, 5);
+    PolyUOp *activated =
+        quick ? poly_quick_gelu(ctx, input) : poly_gelu(ctx, input);
+    PolyUOp *loss =
+        poly_reduce_axis(ctx, POLY_OP_ADD, activated, (int64_t[]){0}, 1);
+    PolyUOp *gradient = poly_grad(ctx, loss, input);
+    PolyUOp *output = poly_buffer(ctx, POLY_FLOAT16, 5);
+    PolyUOp *sink =
+        gradient ? poly_sink1(ctx, poly_store_val(ctx, output, gradient)) : NULL;
+    ASSERT_NOT_NULL(activated);
+    ASSERT_NOT_NULL(loss);
+    ASSERT_NOT_NULL(gradient);
+    ASSERT_NOT_NULL(output);
+    ASSERT_NOT_NULL(sink);
+
+    uint16_t output_data[5] = {0};
+    PolyTestBufferView binds[] = {
+        POLY_TEST_HOST_VIEW(input, input_data),
+        POLY_TEST_HOST_VIEW(output, output_data),
+    };
+    ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
+    for (int i = 0; i < 5; i++) {
+      ASSERT_TRUE(isfinite(f16_bits_to_f32(output_data[i])));
+      ASSERT_INT_EQ(output_data[i], expected[quick][i]);
+    }
+
+    poly_ctx_destroy(ctx);
+  }
   PASS();
 }

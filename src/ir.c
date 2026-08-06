@@ -1,7 +1,7 @@
 /*
  * poly_ir.c -- Binary IR codec for tensor-level UOp graphs
  *
- * poly.ir.uops@3 format:
+ * poly.ir.uops@4 format:
  *   Header (32 bytes)
  *   String table (variable)
  *   Node table (variable, strict toposort order; scalar dtype ID + vector count)
@@ -15,6 +15,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "ir.h"
 #include "ctx.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -134,7 +135,7 @@ static double br_f64(ByteReader *r) {
 /* Magic */
 
 #define IR_MAGIC 0x52494750 /* "PGIR" LE */
-#define IR_VERSION 3
+#define IR_VERSION 4
 #define IR_MIN_VERSION 1
 
 /* Dtype index table */
@@ -417,6 +418,12 @@ uint8_t *poly_ir_export(const PolyIrSpec *spec, int *out_len) {
     case POLY_ARG_INT:
       bb_i64(&buf, u->arg.i);
       break;
+    case POLY_ARG_BIGINT:
+      bb_u8(&buf, u->arg.bigint.sign < 0 ? 1 : 0);
+      bb_u32(&buf, u->arg.bigint.n_limbs);
+      for (uint32_t limb = 0; limb < u->arg.bigint.n_limbs; limb++)
+        bb_u32(&buf, u->arg.bigint.limbs[limb]);
+      break;
     case POLY_ARG_FLOAT:
       bb_f64(&buf, u->arg.f);
       break;
@@ -660,6 +667,29 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     case POLY_ARG_INT:
       arg.i = br_i64(&r);
       break;
+    case POLY_ARG_BIGINT: {
+      if (version < 4 || br_remaining(&r) < 5) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      bool negative = br_u8(&r) != 0;
+      uint32_t n_limbs = br_u32(&r);
+      if (n_limbs == 0 || n_limbs > (uint32_t)(INT_MAX / (int)sizeof(uint32_t)) ||
+          br_remaining(&r) < (int)(n_limbs * sizeof(uint32_t))) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      uint32_t *limbs = malloc((size_t)n_limbs * sizeof(uint32_t));
+      if (!limbs) {
+        if (srcs) free(srcs);
+        goto fail_nodes;
+      }
+      for (uint32_t limb = 0; limb < n_limbs; limb++) limbs[limb] = br_u32(&r);
+      arg.bigint.sign = negative ? -1 : 1;
+      arg.bigint.n_limbs = n_limbs;
+      arg.bigint.limbs = limbs;
+      break;
+    }
     case POLY_ARG_FLOAT:
       arg.f = br_f64(&r);
       break;
@@ -778,6 +808,8 @@ int poly_ir_import(const uint8_t *data, int len, PolyIrSpec *out) {
     /* Free temporary malloc'd arg buffers (arena has its own copy now) */
     if (arg.kind == POLY_ARG_INT_TUPLE && arg.int_tuple.vals)
       free(arg.int_tuple.vals);
+    else if (arg.kind == POLY_ARG_BIGINT && arg.bigint.limbs)
+      free((void *)arg.bigint.limbs);
     else if (arg.kind == POLY_ARG_PAIR_TUPLE && arg.pair_tuple.pairs)
       free(arg.pair_tuple.pairs);
     else if (arg.kind == POLY_ARG_REDUCE_AXIS && arg.reduce_axis.axes)

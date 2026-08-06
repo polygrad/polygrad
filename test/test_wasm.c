@@ -3,6 +3,7 @@
  */
 
 #include "test_harness.h"
+#include "../src/bigint.h"
 #include "../src/codegen.h"
 #include "../src/engine/realize.h"
 #include "../src/engine/schedule.h"
@@ -194,6 +195,26 @@ static int node_run_wasm_i32(const char *path, int32_t expected) {
   return system(cmd);
 }
 
+static int node_run_wasm_bool_neg_identity(const char *path) {
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
+  char cmd[2048];
+  snprintf(
+      cmd, sizeof(cmd),
+      "%s -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math:{}});"
+      "const bytes=new Uint8Array(mem.buffer);"
+      "bytes[4]=0;inst.exports.kernel(0,4);"
+      "if(bytes[0]!==0){console.error('NEG(false) got '+bytes[0]);process.exit(2)}"
+      "bytes[4]=1;inst.exports.kernel(0,4);"
+      "if(bytes[0]!==1){console.error('NEG(true) got '+bytes[0]);process.exit(3)}\"",
+      node, path
+  );
+  return system(cmd);
+}
+
 static int node_run_wasm_f32_buffer(const char *path, float expected) {
   const char *node = poly_test_node_cmd_for_wasm(path);
   if (!node) return 0;
@@ -212,6 +233,48 @@ static int node_run_wasm_f32_buffer(const char *path, float expected) {
       "if(Math.abs(got-expected)>1e-6){console.error('got '+got+' expected "
       "'+expected);process.exit(2)}\"",
       node, path, (double)expected
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_bf16_vector_load(const char *path) {
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
+  char cmd[4096];
+  snprintf(
+      cmd, sizeof(cmd),
+      "%s -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math:{}});"
+      "const input=256,output=512,expected=[2,4,6,8];"
+      "new Uint16Array(mem.buffer,input,4).set([0x4000,0x4080,0x40c0,0x4100]);"
+      "inst.exports.kernel(output,input);"
+      "const got=Array.from(new Float32Array(mem.buffer,output,4));"
+      "if(got.some((x,i)=>x!==expected[i])){"
+      "console.error('got '+got+' expected '+expected);process.exit(2)}\"",
+      node, path
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_bf16_vector_store(const char *path) {
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
+  char cmd[4096];
+  snprintf(
+      cmd, sizeof(cmd),
+      "%s -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math:{}});"
+      "const input=256,output=512,expected=[0x4000,0x4080,0x40c0,0x4100];"
+      "new Float32Array(mem.buffer,input,4).set([1,2,3,4]);"
+      "inst.exports.kernel(input,output);"
+      "const got=Array.from(new Uint16Array(mem.buffer,output,4));"
+      "if(got.some((x,i)=>x!==expected[i])){"
+      "console.error('got '+got+' expected '+expected);process.exit(2)}\"",
+      node, path
   );
   return system(cmd);
 }
@@ -525,6 +588,26 @@ static int node_run_wasm_i64(const char *path, int64_t expected) {
       "const expected=BigInt('%lld');"
       "if(got!==expected){console.error('got '+got+' expected '+expected);process.exit(2)}\"",
       node, path, (long long)expected
+  );
+  return system(cmd);
+}
+
+static int node_run_wasm_u64(const char *path, const char *expected) {
+  const char *node = poly_test_node_cmd_for_wasm(path);
+  if (!node) return 0;
+  char cmd[2048];
+  snprintf(
+      cmd, sizeof(cmd),
+      "%s -e \"const fs=require('fs');"
+      "const mem=new WebAssembly.Memory({initial:1});"
+      "const math={exp2f:x=>Math.pow(2,x),log2f:Math.log2,sinf:Math.sin,powf:Math.pow};"
+      "const mod=new WebAssembly.Module(fs.readFileSync('%s'));"
+      "const inst=new WebAssembly.Instance(mod,{env:{memory:mem},math});"
+      "inst.exports.kernel(0);"
+      "const got=new DataView(mem.buffer).getBigUint64(0,true);"
+      "const expected=BigInt('%s');"
+      "if(got!==expected){console.error('got '+got+' expected '+expected);process.exit(2)}\"",
+      node, path, expected
   );
   return system(cmd);
 }
@@ -850,6 +933,468 @@ TEST(wasm, render_vecmul) {
   free(wasm);
   free(lin);
   poly_ctx_destroy(k.ctx);
+  PASS();
+}
+
+TEST(wasm, raw_bool_neg_is_typed_identity_not_logical_not) {
+  /* Pinned raw NEG(bool) is arithmetic NEG followed by bool truncation
+   * (uop/ops.py:1182-1197), so False/True remain False/True. */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_bool = poly_dtype_ptr(POLY_BOOL, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr_bool, poly_arg_int(0));
+  PolyUOp *in = poly_uop0(ctx, POLY_OP_PARAM, ptr_bool, poly_arg_int(1));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *out_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_bool, out, zero, poly_arg_none());
+  PolyUOp *in_idx = poly_uop2(ctx, POLY_OP_INDEX, ptr_bool, in, zero, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_BOOL, in_idx, poly_arg_none());
+  PolyUOp *neg = poly_uop1(ctx, POLY_OP_NEG, POLY_BOOL, load, poly_arg_none());
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, out_idx, neg, poly_arg_none());
+  PolyUOp *sink = poly_sink1(ctx, store);
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_wasm(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "temp/polygrad_test_raw_bool_neg.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+  ASSERT_INT_EQ(node_run_wasm_bool_neg_identity(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, bf16_vector_load_decomposition_matches_tinygrad_reindex) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_bf16 = poly_dtype_ptr(POLY_BFLOAT16, 16, POLY_ADDR_GLOBAL);
+  PolyDType bf16x4 = poly_dtype_vec(POLY_BFLOAT16, 4);
+  PolyDType f32x4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyUOp *input = poly_uop0(ctx, POLY_OP_PARAM, ptr_bf16, poly_arg_int(0));
+  PolyUOp *offset = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(7));
+  PolyUOp *index =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_bf16, input, offset, poly_arg_none());
+  PolyUOp *cast_index =
+      poly_uop1(ctx, POLY_OP_CAST, ptr_bf16, index, poly_arg_none());
+  PolyUOp *load =
+      poly_uop1(ctx, POLY_OP_LOAD, bf16x4, cast_index, poly_arg_none());
+
+  PolyUOp *rewritten =
+      poly_graph_rewrite_ex(ctx, load, poly_pm_bf16_non_native(), true);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(rewritten->dtype, f32x4));
+  ASSERT_INT_EQ(rewritten->n_src, 4);
+
+  for (int lane = 0; lane < 4; lane++) {
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, rewritten->src[lane], &n_topo);
+    ASSERT_NOT_NULL(topo);
+    PolyUOp *lane_load = NULL;
+    int n_loads = 0;
+    for (int i = 0; i < n_topo; i++) {
+      if (topo[i]->op != POLY_OP_LOAD) continue;
+      lane_load = topo[i];
+      n_loads++;
+    }
+    ASSERT_INT_EQ(n_loads, 1);
+    ASSERT_NOT_NULL(lane_load);
+    ASSERT_TRUE(poly_dtype_eq(lane_load->dtype, POLY_UINT16));
+    ASSERT_INT_EQ(lane_load->n_src, 1);
+    PolyUOp *lane_index = lane_load->src[0];
+    ASSERT_INT_EQ(lane_index->op, POLY_OP_INDEX);
+    ASSERT_INT_EQ(lane_index->n_src, 2);
+    PolyUOp *lane_offset = lane_index->src[1];
+    ASSERT_INT_EQ(lane_offset->op, POLY_OP_ADD);
+    ASSERT_INT_EQ(lane_offset->n_src, 2);
+    ASSERT_INT_EQ(lane_offset->src[0]->op, POLY_OP_MUL);
+    ASSERT_INT_EQ(lane_offset->src[0]->n_src, 2);
+    ASSERT_TRUE(lane_offset->src[0]->src[0] == offset);
+    ASSERT_INT_EQ(lane_offset->src[0]->src[1]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(lane_offset->src[0]->src[1]->arg.i, 1);
+    ASSERT_INT_EQ(lane_offset->src[1]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(lane_offset->src[1]->arg.i, lane);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, bf16_vector_dtype_decomposition_preserves_lane_count) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType bf16x4 = poly_dtype_vec(POLY_BFLOAT16, 4);
+  PolyDType f32x4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyDType boolx4 = poly_dtype_vec(POLY_BOOL, 4);
+
+  PolyUOp *a = poly_uop0(ctx, POLY_OP_CONST, bf16x4, poly_arg_float(1.0));
+  PolyUOp *b = poly_uop0(ctx, POLY_OP_CONST, bf16x4, poly_arg_float(2.0));
+  PolyUOp *cond = poly_uop0(ctx, POLY_OP_CONST, boolx4, poly_arg_bool(true));
+  PolyUOp *scalar_lanes[] = {
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.0)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(2.0)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(3.0)),
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(4.0)),
+  };
+  PolyUOp *stack = poly_uop(
+      ctx, POLY_OP_STACK, bf16x4, scalar_lanes, 4, poly_arg_none()
+  );
+  PolyUOp *roots[] = {
+      a,
+      poly_uop3(ctx, POLY_OP_WHERE, bf16x4, cond, a, b, poly_arg_none()),
+      poly_uop1(
+          ctx, POLY_OP_CAST, bf16x4,
+          poly_uop0(ctx, POLY_OP_CONST, f32x4, poly_arg_float(1.0)), poly_arg_none()
+      ),
+      poly_uop2(ctx, POLY_OP_CMPEQ, boolx4, a, b, poly_arg_none()),
+      stack,
+      poly_uop1(ctx, POLY_OP_GEP, POLY_BFLOAT16, stack, poly_arg_int(2)),
+      poly_uop0(ctx, POLY_OP_VCONST, bf16x4, poly_arg_float(3.0)),
+  };
+  PolyDType expected[] = {
+      f32x4, f32x4, f32x4, boolx4, f32x4, POLY_FLOAT32, f32x4,
+  };
+
+  for (int r = 0; r < (int)(sizeof(roots) / sizeof(roots[0])); r++) {
+    PolyUOp *rewritten =
+        poly_graph_rewrite_ex(ctx, roots[r], poly_pm_bf16_non_native(), true);
+    ASSERT_NOT_NULL(rewritten);
+    ASSERT_TRUE(poly_dtype_eq(rewritten->dtype, expected[r]));
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+    ASSERT_NOT_NULL(topo);
+    for (int i = 0; i < n_topo; i++) {
+      PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+      ASSERT_FALSE(
+          scalar.priority == POLY_BFLOAT16.priority &&
+          strcmp(scalar.name, POLY_BFLOAT16.name) == 0
+      );
+      if (topo[i]->dtype.count > 1) ASSERT_INT_EQ(topo[i]->dtype.count, 4);
+    }
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, bf16_same_width_bitcasts_match_tinygrad) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType scalar_types[] = {POLY_UINT16, POLY_INT16, POLY_FLOAT16};
+
+  for (int i = 0; i < 3; i++) {
+    PolyDType dst = scalar_types[i];
+    PolyUOp *bf16 =
+        poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(1.5));
+    PolyUOp *from = poly_uop1(
+        ctx, POLY_OP_BITCAST, dst, bf16, poly_arg_none()
+    );
+    PolyUOp *from_rewritten =
+        poly_graph_rewrite_ex(ctx, from, poly_pm_bf16_non_native(), true);
+    ASSERT_NOT_NULL(from_rewritten);
+    ASSERT_INT_EQ(from_rewritten->op, POLY_OP_BITCAST);
+    ASSERT_TRUE(poly_dtype_eq(from_rewritten->dtype, dst));
+    ASSERT_INT_EQ(from_rewritten->n_src, 1);
+    ASSERT_TRUE(poly_dtype_eq(from_rewritten->src[0]->dtype, POLY_UINT16));
+
+    PolyArg src_arg = poly_dtype_is_float(dst) ? poly_arg_float(1.5)
+                                               : poly_arg_int(0x3fc0);
+    PolyUOp *raw = poly_uop0(ctx, POLY_OP_CONST, dst, src_arg);
+    PolyUOp *to = poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, raw, poly_arg_none());
+    PolyUOp *to_rewritten = poly_graph_rewrite_ex(ctx, to, poly_pm_bf16_non_native(), true);
+    ASSERT_NOT_NULL(to_rewritten);
+    ASSERT_INT_EQ(to_rewritten->op, POLY_OP_BITCAST);
+    ASSERT_TRUE(poly_dtype_eq(to_rewritten->dtype, POLY_FLOAT32));
+
+    PolyUOp *roots[] = {from_rewritten, to_rewritten};
+    for (int r = 0; r < 2; r++) {
+      int n_topo = 0;
+      PolyUOp **topo = poly_toposort(ctx, roots[r], &n_topo);
+      ASSERT_NOT_NULL(topo);
+      for (int j = 0; j < n_topo; j++) {
+        PolyDType scalar = poly_dtype_scalar(topo[j]->dtype);
+        ASSERT_FALSE(
+            scalar.priority == POLY_BFLOAT16.priority && scalar.bitsize == POLY_BFLOAT16.bitsize
+        );
+      }
+    }
+  }
+
+  PolyDType ptr_bf16 = poly_dtype_ptr(POLY_BFLOAT16, 1, POLY_ADDR_GLOBAL);
+  PolyDType ptr_u16 = poly_dtype_ptr(POLY_UINT16, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *param = poly_uop0(ctx, POLY_OP_PARAM, ptr_bf16, poly_arg_int(0));
+  PolyUOp *offset = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(0));
+  PolyUOp *index = poly_uop2(ctx, POLY_OP_INDEX, ptr_bf16, param, offset, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_BFLOAT16, index, poly_arg_none());
+  PolyUOp *bitcasted_load = poly_graph_rewrite_ex(
+      ctx, poly_uop1(ctx, POLY_OP_BITCAST, POLY_INT16, load, poly_arg_none()),
+      poly_pm_bf16_non_native(), true
+  );
+  ASSERT_NOT_NULL(bitcasted_load);
+  ASSERT_INT_EQ(bitcasted_load->op, POLY_OP_BITCAST);
+  ASSERT_TRUE(poly_dtype_eq(bitcasted_load->dtype, POLY_INT16));
+  ASSERT_INT_EQ(bitcasted_load->src[0]->op, POLY_OP_LOAD);
+  ASSERT_TRUE(poly_dtype_eq(bitcasted_load->src[0]->dtype, POLY_UINT16));
+  ASSERT_TRUE(poly_dtype_eq(bitcasted_load->src[0]->src[0]->dtype, ptr_u16));
+
+  PolyUOp *raw_i16 = poly_uop0(ctx, POLY_OP_CONST, POLY_INT16, poly_arg_int(1));
+  PolyUOp *bitcasted_value =
+      poly_uop1(ctx, POLY_OP_BITCAST, POLY_BFLOAT16, raw_i16, poly_arg_none());
+  PolyUOp *numeric_store = poly_graph_rewrite_ex(
+      ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, bitcasted_value, poly_arg_none()),
+      poly_pm_bf16_non_native(), true
+  );
+  ASSERT_NOT_NULL(numeric_store);
+  ASSERT_INT_EQ(numeric_store->op, POLY_OP_STORE);
+  ASSERT_TRUE(poly_dtype_eq(numeric_store->src[0]->dtype, ptr_u16));
+  /* Pinned do_dtype_decomps is bottom-up: the BITCAST child is converted
+   * before the syntactic raw-STORE rule can match an ordinary INDEX
+   * (uop/decompositions.py:533-554). */
+  ASSERT_INT_EQ(numeric_store->src[1]->op, POLY_OP_WHERE);
+  ASSERT_TRUE(poly_dtype_eq(numeric_store->src[1]->dtype, POLY_UINT16));
+
+  PolyDType bf16x4 = poly_dtype_vec(POLY_BFLOAT16, 4);
+  PolyDType i16x4 = poly_dtype_vec(POLY_INT16, 4);
+  PolyUOp *bf16v = poly_uop0(ctx, POLY_OP_CONST, bf16x4, poly_arg_float(1.0));
+  PolyUOp *vector_from_root = poly_uop1(ctx, POLY_OP_BITCAST, i16x4, bf16v, poly_arg_none());
+  PolyUOp *vector_from_direct =
+      poly_graph_rewrite_ex(ctx, vector_from_root, poly_pm_bf16_non_native(), true);
+  ASSERT_NOT_NULL(vector_from_direct);
+  /* Pinned pm_float_decomp's BITCAST predicates are scalar-only
+   * (uop/decompositions.py:538-545). Its earlier devectorizer.py:238-247
+   * splits vector BITCAST into scalar lanes. */
+  ASSERT_INT_EQ(vector_from_direct->op, POLY_OP_BITCAST);
+  ASSERT_TRUE(poly_dtype_eq(vector_from_direct->dtype, i16x4));
+  ASSERT_TRUE(poly_dtype_eq(vector_from_direct->src[0]->dtype, poly_dtype_vec(POLY_FLOAT32, 4)));
+
+  PolyRendererCaps caps = {0};
+  PolyUOp *vector_from_devectorized = poly_apply_devectorize_stage(ctx, vector_from_root, 1, caps);
+  PolyUOp *vector_from_staged =
+      poly_graph_rewrite_ex(ctx, vector_from_devectorized, poly_pm_bf16_non_native(), true);
+  ASSERT_NOT_NULL(vector_from_staged);
+  ASSERT_INT_EQ(vector_from_staged->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(vector_from_staged->dtype, i16x4));
+
+  PolyUOp *raw_i16v = poly_uop0(ctx, POLY_OP_CONST, i16x4, poly_arg_int(0x3fc0));
+  PolyUOp *vector_to_root = poly_uop1(ctx, POLY_OP_BITCAST, bf16x4, raw_i16v, poly_arg_none());
+  PolyUOp *vector_to_direct =
+      poly_graph_rewrite_ex(ctx, vector_to_root, poly_pm_bf16_non_native(), true);
+  ASSERT_NOT_NULL(vector_to_direct);
+  ASSERT_INT_EQ(vector_to_direct->op, POLY_OP_BITCAST);
+  ASSERT_TRUE(poly_dtype_eq(vector_to_direct->dtype, bf16x4));
+
+  PolyUOp *vector_to_devectorized = poly_apply_devectorize_stage(ctx, vector_to_root, 1, caps);
+  PolyUOp *vector_to_staged =
+      poly_graph_rewrite_ex(ctx, vector_to_devectorized, poly_pm_bf16_non_native(), true);
+  ASSERT_NOT_NULL(vector_to_staged);
+  ASSERT_INT_EQ(vector_to_staged->op, POLY_OP_STACK);
+  ASSERT_TRUE(poly_dtype_eq(vector_to_staged->dtype, poly_dtype_vec(POLY_FLOAT32, 4)));
+
+  PolyUOp *staged_roots[] = {vector_from_staged, vector_to_staged};
+  for (int r = 0; r < 2; r++) {
+    int n_topo = 0;
+    PolyUOp **topo = poly_toposort(ctx, staged_roots[r], &n_topo);
+    ASSERT_NOT_NULL(topo);
+    for (int i = 0; i < n_topo; i++) {
+      PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+      ASSERT_FALSE(
+          scalar.priority == POLY_BFLOAT16.priority && scalar.bitsize == POLY_BFLOAT16.bitsize
+      );
+    }
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, bf16_vector_store_decomposition_matches_tinygrad_group) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_bf16 = poly_dtype_ptr(POLY_BFLOAT16, 32, POLY_ADDR_GLOBAL);
+  PolyDType ptr_u16 = poly_dtype_ptr(POLY_UINT16, 32, POLY_ADDR_GLOBAL);
+  PolyDType bf16x4 = poly_dtype_vec(POLY_BFLOAT16, 4);
+  PolyDType f32x4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyUOp *output = poly_uop0(ctx, POLY_OP_PARAM, ptr_bf16, poly_arg_int(0));
+  PolyUOp *offset = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(7));
+  PolyUOp *index =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_bf16, output, offset, poly_arg_none());
+  PolyUOp *value = poly_uop1(
+      ctx, POLY_OP_CAST, bf16x4,
+      poly_uop0(ctx, POLY_OP_CONST, f32x4, poly_arg_float(2.0)), poly_arg_none()
+  );
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, index, value, poly_arg_none());
+
+  PolyUOp *rewritten =
+      poly_graph_rewrite_ex(ctx, store, poly_pm_bf16_non_native(), true);
+  ASSERT_NOT_NULL(rewritten);
+  ASSERT_INT_EQ(rewritten->op, POLY_OP_GROUP);
+  ASSERT_INT_EQ(rewritten->n_src, 4);
+
+  for (int lane = 0; lane < 4; lane++) {
+    PolyUOp *lane_store = rewritten->src[lane];
+    ASSERT_INT_EQ(lane_store->op, POLY_OP_STORE);
+    ASSERT_INT_EQ(lane_store->n_src, 2);
+    ASSERT_TRUE(poly_dtype_eq(lane_store->src[0]->dtype, ptr_u16));
+    ASSERT_TRUE(poly_dtype_eq(lane_store->src[1]->dtype, POLY_UINT16));
+
+    PolyUOp *lane_index = lane_store->src[0];
+    ASSERT_INT_EQ(lane_index->op, POLY_OP_INDEX);
+    ASSERT_INT_EQ(lane_index->n_src, 2);
+    PolyUOp *lane_offset = lane_index->src[1];
+    ASSERT_INT_EQ(lane_offset->op, POLY_OP_ADD);
+    ASSERT_INT_EQ(lane_offset->n_src, 2);
+    ASSERT_INT_EQ(lane_offset->src[0]->op, POLY_OP_MUL);
+    ASSERT_INT_EQ(lane_offset->src[0]->n_src, 2);
+    ASSERT_TRUE(lane_offset->src[0]->src[0] == offset);
+    ASSERT_INT_EQ(lane_offset->src[0]->src[1]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(lane_offset->src[0]->src[1]->arg.i, 1);
+    ASSERT_INT_EQ(lane_offset->src[1]->op, POLY_OP_CONST);
+    ASSERT_INT_EQ(lane_offset->src[1]->arg.i, lane);
+    int64_t lo = 0, hi = 0;
+    poly_uop_minmax(ctx, lane_offset, &lo, &hi);
+    ASSERT_INT_EQ(lo, 7 + lane);
+    ASSERT_INT_EQ(hi, 7 + lane);
+  }
+
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+    ASSERT_FALSE(
+        scalar.priority == POLY_BFLOAT16.priority &&
+        strcmp(scalar.name, POLY_BFLOAT16.name) == 0
+    );
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, rewrite_emulates_bf16_vector_load_before_render) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyDType ptr_bf16 = poly_dtype_ptr(POLY_BFLOAT16, 4, POLY_ADDR_GLOBAL);
+  PolyUOp *output = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *input = poly_uop0(ctx, POLY_OP_PARAM, ptr_bf16, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_LOOP)
+  );
+  PolyUOp *output_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, output, range, poly_arg_none());
+  PolyUOp *input_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_bf16, input, range, poly_arg_none());
+  PolyUOp *value = poly_uop1(
+      ctx, POLY_OP_CAST, POLY_FLOAT32,
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_BFLOAT16, input_idx, poly_arg_none()),
+      poly_arg_none()
+  );
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, output_idx, value, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *sink = poly_sink1(
+      ctx, poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none())
+  );
+
+  PolyUOp *rewritten = poly_rewrite_wasm(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+    ASSERT_FALSE(
+        scalar.priority == POLY_BFLOAT16.priority &&
+        strcmp(scalar.name, POLY_BFLOAT16.name) == 0
+    );
+  }
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+  const char *path = "temp/polygrad_test_bf16_vector_load.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+  ASSERT_INT_EQ(node_run_wasm_bf16_vector_load(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, rewrite_emulates_bf16_vector_store_before_render) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, 4, POLY_ADDR_GLOBAL);
+  PolyDType ptr_bf16 = poly_dtype_ptr(POLY_BFLOAT16, 4, POLY_ADDR_GLOBAL);
+  PolyUOp *input = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *output = poly_uop0(ctx, POLY_OP_PARAM, ptr_bf16, poly_arg_int(1));
+  PolyUOp *bound = poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(4));
+  PolyUOp *range = poly_uop1(
+      ctx, POLY_OP_RANGE, POLY_INDEX, bound, poly_arg_range(0, POLY_AXIS_LOOP)
+  );
+  PolyUOp *input_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, input, range, poly_arg_none());
+  PolyUOp *output_idx =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_bf16, output, range, poly_arg_none());
+  PolyUOp *loaded =
+      poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, input_idx, poly_arg_none());
+  PolyUOp *as_bf16 =
+      poly_uop1(ctx, POLY_OP_CAST, POLY_BFLOAT16, loaded, poly_arg_none());
+  PolyUOp *doubled = poly_uop2(
+      ctx, POLY_OP_MUL, POLY_BFLOAT16, as_bf16,
+      poly_uop0(ctx, POLY_OP_CONST, POLY_BFLOAT16, poly_arg_float(2.0)), poly_arg_none()
+  );
+  PolyUOp *value = doubled;
+  PolyUOp *store =
+      poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, output_idx, value, poly_arg_none());
+  PolyUOp *end_src[2] = {store, range};
+  PolyUOp *sink = poly_sink1(
+      ctx, poly_uop(ctx, POLY_OP_END, POLY_VOID, end_src, 2, poly_arg_none())
+  );
+
+  PolyUOp *rewritten = poly_rewrite_wasm(ctx, sink);
+  ASSERT_NOT_NULL(rewritten);
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, rewritten, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyDType scalar = poly_dtype_scalar(topo[i]->dtype);
+    ASSERT_FALSE(
+        scalar.priority == POLY_BFLOAT16.priority &&
+        strcmp(scalar.name, POLY_BFLOAT16.name) == 0
+    );
+  }
+
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, rewritten, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, true);
+  ASSERT_NOT_NULL(wasm);
+  ASSERT_TRUE(wasm_size > 8);
+  const char *path = "temp/polygrad_test_bf16_vector_store.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+  ASSERT_INT_EQ(node_run_wasm_bf16_vector_store(path), 0);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
   PASS();
 }
 
@@ -2110,6 +2655,41 @@ TEST(wasm, mixed_width_shift_validates) {
   ASSERT_INT_EQ(wasm_write_module("temp/polygrad_test_mixed_width_shift.wasm", wasm, wasm_size), 0);
   ASSERT_INT_EQ(node_run_wasm_i64("temp/polygrad_test_mixed_width_shift.wasm", c_out), 0);
   ASSERT_INT_EQ(c_out, 28);
+
+  free(wasm);
+  free(lin);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(wasm, exact_uint64_bigint_const_executes_as_fixed_width_bits) {
+  /* Pinned tinygrad retains this value as a Python-int UOp argument and
+   * truncates only at a fixed-width backend boundary
+   * (uop/ops.py:1176-1197, dtype.py:92-100). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyInt value = {0};
+  ASSERT_TRUE(poly_int_from_decimal(&value, "18446744073709550593"));
+  PolyUOp *constant =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_int_as_arg(&value));
+  poly_int_free(&value);
+  PolyDType ptr = poly_dtype_ptr(POLY_UINT64, 1, POLY_ADDR_GLOBAL);
+  PolyUOp *out = poly_uop0(ctx, POLY_OP_PARAM, ptr, poly_arg_int(0));
+  PolyUOp *zero = poly_uop0(ctx, POLY_OP_CONST, POLY_INT32, poly_arg_int(0));
+  PolyUOp *idx = poly_uop2(ctx, POLY_OP_INDEX, ptr, out, zero, poly_arg_none());
+  PolyUOp *sink = poly_sink1(
+      ctx, poly_uop2(ctx, POLY_OP_STORE, POLY_VOID, idx, constant, poly_arg_none())
+  );
+  int n_lin = 0;
+  PolyUOp **lin = poly_linearize_rewritten(ctx, sink, &n_lin);
+  ASSERT_NOT_NULL(lin);
+  int wasm_size = 0;
+  uint8_t *wasm = poly_render_wasm(lin, n_lin, &wasm_size, false);
+  ASSERT_NOT_NULL(wasm);
+  const char *path = "temp/polygrad_test_exact_uint64_bigint.wasm";
+  ASSERT_INT_EQ(wasm_write_module(path, wasm, wasm_size), 0);
+  ASSERT_INT_EQ(node_compile_wasm_module(path), 0);
+  ASSERT_INT_EQ(node_run_wasm_u64(path, "18446744073709550593"), 0);
 
   free(wasm);
   free(lin);

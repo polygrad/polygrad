@@ -579,6 +579,76 @@ TEST(pat, graph_rewrite_nested) {
   PASS();
 }
 
+TEST(pat, const_like_preserves_reference_shape) {
+  /* Pinned UOp.const_like -> UOp.const(..., shape=self._shape)
+   * (uop/ops.py:496-497,553-561). A scalar constant matching a shaped
+   * reference must be RESHAPEd to ones and EXPANDed to the exact shape. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *ref = poly_reshape(
+      ctx,
+      poly_buffer_on_device(ctx, POLY_INT32, 0, POLY_DEVICE_CPU),
+      (int64_t[]){2, 0, 3},
+      3
+  );
+  PolyUOp *like = poly_const_like_int(ctx, ref, -7);
+  ASSERT_NOT_NULL(like);
+  ASSERT_EQ(like->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(like->n_src, 2);
+  ASSERT_EQ(like->src[0]->op, POLY_OP_RESHAPE);
+  ASSERT_INT_EQ(like->src[0]->n_src, 2);
+  ASSERT_EQ(like->src[0]->src[0]->op, POLY_OP_CONST);
+  ASSERT_INT_EQ(like->src[0]->src[0]->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(like->src[0]->src[0]->arg.i, -7);
+  PolyShape shape = poly_uop_max_shape_cached(ctx, like);
+  ASSERT_INT_EQ(shape.ndim, 3);
+  ASSERT_INT_EQ(shape.dims[0], 2);
+  ASSERT_INT_EQ(shape.dims[1], 0);
+  ASSERT_INT_EQ(shape.dims[2], 3);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pat, const_like_preserves_vector_pointer_base_and_symbolic_shape) {
+  /* Pinned const_like uses dtype.base and the exact `_shape`: ordinary vector
+   * constants stay vector constants, pointer metadata is removed, and
+   * symbolic dimensions remain the same UOps. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyDType vec4 = poly_dtype_vec(POLY_FLOAT32, 4);
+  PolyUOp *vector_ref = poly_uop0(ctx, POLY_OP_CONST, vec4, poly_arg_float(2.0));
+  PolyUOp *vector_like = poly_const_like_int(ctx, vector_ref, 0);
+  ASSERT_NOT_NULL(vector_like);
+  ASSERT_EQ(vector_like->op, POLY_OP_CONST);
+  ASSERT_TRUE(poly_dtype_eq(vector_like->dtype, vec4));
+
+  PolyDType ptr_vec = poly_dtype_ptr(vec4, 7, POLY_ADDR_GLOBAL);
+  ptr_vec.vcount = 4;
+  PolyUOp *pointer_ref = poly_uop0(ctx, POLY_OP_PARAM, ptr_vec, poly_arg_int(0));
+  PolyUOp *pointer_like = poly_const_like_int(ctx, pointer_ref, 0);
+  ASSERT_NOT_NULL(pointer_like);
+  ASSERT_EQ(pointer_like->op, POLY_OP_EXPAND);
+  ASSERT_TRUE(poly_dtype_eq(pointer_like->dtype, vec4));
+  ASSERT_FALSE(pointer_like->dtype.is_ptr);
+  PolyShape shape = poly_uop_max_shape_cached(ctx, pointer_like);
+  ASSERT_INT_EQ(shape.ndim, 1);
+  ASSERT_INT_EQ(shape.dims[0], 7);
+
+  PolyUOp *n = poly_uop0(
+      ctx, POLY_OP_DEFINE_VAR, POLY_INDEX,
+      poly_arg_define_var("const_like_n", 1, 8)
+  );
+  PolyUOp *dynamic = poly_buffer_var(ctx, POLY_FLOAT32, n, NULL, 0);
+  PolyUOp *dynamic_like = poly_const_like_int(ctx, dynamic, 3);
+  ASSERT_NOT_NULL(dynamic_like);
+  ASSERT_EQ(dynamic_like->op, POLY_OP_EXPAND);
+  shape = poly_uop_max_shape_cached(ctx, dynamic_like);
+  ASSERT_INT_EQ(shape.ndim, 1);
+  ASSERT_INT_EQ(shape.dims[0], 8);
+  ASSERT_PTR_EQ(poly_uop_shape_dim(ctx, dynamic_like, 0), n);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 /* pm_concat test */
 
 static PolyUOp *test_rewrite_div_self(PolyCtx *ctx, PolyUOp *root, const PolyBindings *b) {

@@ -35,6 +35,30 @@
           throw new Error(`shape mismatch: got [${actual}], expected [${expected}]`);
         }
       }
+      function countGraphOp(root, op) {
+        const seen = /* @__PURE__ */ new Set();
+        const stack = [root];
+        let count = 0;
+        while (stack.length) {
+          const node = stack.pop();
+          if (!node || seen.has(node.key)) continue;
+          seen.add(node.key);
+          if (node.op === op) count++;
+          for (const src of node.src) stack.push(src);
+        }
+        return count;
+      }
+      function countGraphNodes(root) {
+        const seen = /* @__PURE__ */ new Set();
+        const stack = [root];
+        while (stack.length) {
+          const node = stack.pop();
+          if (!node || seen.has(node.key)) continue;
+          seen.add(node.key);
+          for (const src of node.src) stack.push(src);
+        }
+        return seen.size;
+      }
       async function runTensorTests(pg) {
         const Tensor = pg.Tensor;
         const caps = pg.caps || {};
@@ -59,6 +83,7 @@
             passed++;
           } catch (e) {
             console.log(`  [FAIL] ${name}: ${e.message}`);
+            if (e && e.stack) console.log(e.stack);
             failed++;
           }
         }
@@ -78,10 +103,36 @@
           assertShape(t.shape, [3]);
           assertClose(await t.toArray(), [1, 2, 3]);
         });
+        await test("bfloat16 host values stage through float32", async () => {
+          const t = new Tensor([1, 2, 3, 4], { dtype: "bfloat16" });
+          const y = await t.add(t).realize();
+          assert(y.dtype === "bfloat16", `expected bfloat16, got ${y.dtype}`);
+          assertClose(await y.toArray(), [2, 4, 6, 8]);
+        });
+        await test("explicit bfloat16 overrides Float64Array source dtype", async () => {
+          const t = new Tensor(new Float64Array([1, 2]), { dtype: "bfloat16" });
+          assert(t.dtype === "bfloat16", `expected bfloat16, got ${t.dtype}`);
+          assertShape(t.shape, [2]);
+          assertClose(await t.toArray(), [1, 2]);
+        });
         await test("from scalar", async () => {
-          const t = new Tensor(42);
-          const v = await t.item();
-          assert(Math.abs(v - 42) < 1e-4, `Expected 42, got ${v}`);
+          const cases = [
+            [new Tensor(true), "bool", true],
+            [new Tensor(42), "int32", 42],
+            [new Tensor(42, { dtype: "float32" }), "float32", 42],
+            [new Tensor(7, { device: "cuda" }), "int32", 7],
+            [new Tensor(1.5, { device: "cuda" }), "float32", 1.5]
+          ];
+          for (const [tensor, dtype, value] of cases) {
+            assertShape(tensor.shape, []);
+            assert(tensor.dtype === dtype, `expected ${dtype}, got ${tensor.dtype}`);
+            assert(tensor.uop.op === pg._core.ops.CONST, "expected scalar CONST root");
+            assert(tensor.uop.key === tensor.uopLogical.key, "expected shared scalar roots");
+            if (tensor.device === "CPU") {
+              const actual = await tensor.item();
+              assert(Math.abs(Number(actual) - Number(value)) < 1e-4, `Expected ${value}, got ${actual}`);
+            }
+          }
         });
         await test("from 2D", async () => {
           const t = new Tensor([[1, 2], [3, 4]]);
@@ -92,6 +143,16 @@
           const t = Tensor.empty([2, 3]);
           assertShape(t.shape, [2, 3]);
           assert(t.uop.hasBufferIdentity(), "empty should be backed by a BUFFER UOp");
+          assert(t.uopPhysical, "empty should have a physical root at construction");
+          assert(
+            t.uopLogical.buffer.src[0].key === t.uopPhysical.buffer.src[0].key,
+            "logical and physical empty storage should share one UNIQUE"
+          );
+          assert(t.uopLogical.buffer.src.length === 1, "logical BUFFER should stay device-free");
+          assert(
+            t.uopPhysical.buffer.src[1].op === pg._core.ops.DEVICE,
+            "physical BUFFER should carry DEVICE"
+          );
         });
         await test("movement is realized through recursive base", async () => {
           const source = await new Tensor([1, 2, 3, 4]).realize();
@@ -185,9 +246,9 @@
         });
         await test("backward retains distinct wrappers sharing one UOp", async () => {
           const x = new Tensor([1, 2, 3, 4], { requiresGrad: true });
-          const y = new Tensor(x.uopLogical, { requiresGrad: true });
+          const y = new Tensor(x.uop, { requiresGrad: true });
           assert(x !== y, "expected distinct Tensor wrappers");
-          assert(x.uopLogical.key === y.uopLogical.key, "expected one shared logical UOp");
+          assert(x.uop.key === y.uop.key, "expected one shared current UOp");
           await x.sum().backward();
           assertClose(await x.grad.toArray(), [1, 1, 1, 1]);
           assertClose(await y.grad.toArray(), [1, 1, 1, 1]);
@@ -203,7 +264,17 @@
           assertClose(await o.toArray(), [1, 1, 1, 1, 1, 1]);
         });
         await test("arange follows tinygrad start stop order", async () => {
-          assertClose(await Tensor.arange(6).toArray(), [0, 1, 2, 3, 4, 5]);
+          const deviceFree = Tensor.arange(6);
+          const deviceFreeRoot = deviceFree.uop.key;
+          assert(
+            Number(pg._core.ffi.poly_uop_device(deviceFree.uop.raw)) === 0,
+            "pure arange should remain device-free before readback"
+          );
+          assertClose(await deviceFree.toArray(), [0, 1, 2, 3, 4, 5]);
+          assert(
+            deviceFree.uop.key === deviceFreeRoot,
+            "device-free readback must realize a temporary without rewriting the source root"
+          );
           assertClose(await Tensor.arange(0, 6).toArray(), [0, 1, 2, 3, 4, 5]);
           assertClose(await Tensor.arange(2, 8, 2).toArray(), [2, 4, 6]);
         });
@@ -212,7 +283,13 @@
           assert(pg.uop, "runtime should expose pg.uop");
           assertShape(pg.uop.shape(t.uop), [2, 2]);
           assert(pg.uop.dtype(t.uop) === "float32", `expected float32, got ${pg.uop.dtype(t.uop)}`);
-          assert(pg.uop.hasBufferIdentity(t.uop), "host tensor should have buffer identity");
+          const wasmLinearMemory = pg.core === "wasm" && pg.device === "wasm";
+          assert(
+            pg.uop.hasBufferIdentity(t.uop) === wasmLinearMemory,
+            "host import identity should match the runtime storage boundary"
+          );
+          if (!wasmLinearMemory) await t.realize();
+          assert(pg.uop.hasBufferIdentity(t.uop), "realized host tensor should have buffer identity");
           assert(pg.uop.buffer(t.uop), "pg.uop.buffer should return a UOp");
         });
         await test("customKernel executes UOp CALL body", async () => {
@@ -450,6 +527,24 @@
           const a = new Tensor([-3, 2, 5, -1]);
           const b = new Tensor([1, 4, 3, 9]);
           assertClose(await out.customKernel(a, b, selectKernel)[0].toArray(), [3, 4, 5, 1]);
+        });
+        await test("customKernel rejects bool INDEX coordinate before codegen", async () => {
+          function invalidIndexKernel(out2) {
+            out2 = out2.flatten();
+            const zero = pg.uop.constant(0);
+            const gate = zero.lt(1);
+            const bad = out2.index(gate);
+            assert(bad !== null, "UOp.index(bool) construction should match tinygrad");
+            return bad.store(out2.index(zero)).sink();
+          }
+          const out = Tensor.empty([1], { dtype: "float32" });
+          let threw = false;
+          try {
+            await out.customKernel(invalidIndexKernel)[0].toArray();
+          } catch (e) {
+            threw = true;
+          }
+          assert(threw, "invalid bool INDEX coordinate must fail before codegen");
         });
         await test("customKernel exposes tinygrad-style floor div and mod", async () => {
           function divKernel(out2, x2, y2) {
@@ -1017,7 +1112,10 @@
         await test("sub", async () => {
           const a = new Tensor([10, 20, 30]);
           const b = new Tensor([1, 2, 3]);
-          assertClose(await a.sub(b).toArray(), [9, 18, 27]);
+          const out = a.sub(b);
+          assert(out.uop.op === pg._core.ops.ADD, "subtraction root must be ADD");
+          assert(out.uop.src[1].op === pg._core.ops.MUL, "subtraction rhs must be negating MUL");
+          assertClose(await out.toArray(), [9, 18, 27]);
         });
         await test("mul", async () => {
           const a = new Tensor([2, 3, 4]);
@@ -1031,7 +1129,9 @@
         });
         await test("neg", async () => {
           const a = new Tensor([1, -2, 3]);
-          assertClose(await a.neg().toArray(), [-1, 2, -3]);
+          const out = a.neg();
+          assert(out.uop.op === pg._core.ops.MUL, "negation root must be MUL");
+          assertClose(await out.toArray(), [-1, 2, -3]);
         });
         await test("scalar add", async () => {
           const a = new Tensor([1, 2, 3]);
@@ -1057,6 +1157,55 @@
           const arr = await a.log().toArray();
           assertClose(arr, [0, 1], 1e-3);
         });
+        await test("sin cos tan match pinned promotion", async () => {
+          const integer = new Tensor([0, 1, 2], { dtype: "int32" });
+          assertClose(
+            await integer.sin().toArray(),
+            [0, Math.sin(1), Math.sin(2)],
+            1e-6
+          );
+          assert(integer.sin().dtype === "float32", "integer sin should promote to float32");
+          const bool = new Tensor([false, true], { dtype: "bool" });
+          assertClose(await bool.sin().toArray(), [0, Math.sin(1)], 1e-6);
+          const half = new Tensor([0, 1]).cast("float16");
+          const halfCos = half.cos();
+          assert(halfCos.dtype === "float16", "float16 cos should cast back to float16");
+          assertClose(await halfCos.cast("float32").toArray(), [1, Math.cos(1)], 2e-3);
+          for (const dtype of ["float32", "float64"]) {
+            const angles = new Tensor([0, 0.25, 0.5], { dtype });
+            const cos = angles.cos();
+            const tan = angles.tan();
+            assert(cos.dtype === dtype, `${dtype} cos should retain dtype`);
+            assert(tan.dtype === dtype, `${dtype} tan should retain dtype`);
+            const tolerance = dtype === "float64" ? 1e-12 : 1e-6;
+            assertClose(
+              await cos.toArray(),
+              [Math.cos(0), Math.cos(0.25), Math.cos(0.5)],
+              tolerance
+            );
+            assertClose(
+              await tan.toArray(),
+              [Math.tan(0), Math.tan(0.25), Math.tan(0.5)],
+              tolerance
+            );
+          }
+        });
+        await test("sin cos tan preserve nested current occurrence", async () => {
+          const x = await new Tensor([0.25], { device: "cpu" }).realize();
+          const moved = x.to("cuda").to("cpu");
+          assert(
+            countGraphOp(moved.sin().uop, pg._core.ops.COPY) === 2,
+            "sin should retain the nested COPY source occurrence"
+          );
+          assert(
+            countGraphOp(moved.cos().uop, pg._core.ops.COPY) === 2,
+            "cos should retain the nested COPY source occurrence"
+          );
+          assert(
+            countGraphOp(moved.tan().uop, pg._core.ops.COPY) === 2,
+            "tan should retain the nested COPY source occurrence"
+          );
+        });
         await test("sqrt", async () => {
           const a = new Tensor([1, 4, 9, 16]);
           assertClose(await a.sqrt().toArray(), [1, 2, 3, 4]);
@@ -1069,6 +1218,211 @@
           const a = new Tensor([2, 3, 4]);
           assertClose(await a.square().toArray(), [4, 9, 16]);
         });
+        await test("named reverse add and mul preserve scalar-first ordering", async () => {
+          const moved = (await new Tensor([1, 2], { device: "cpu" }).realize()).to("cuda").to("cpu");
+          for (const out of [moved.add(3, true), moved.mul(3, true)]) {
+            assert(
+              out.uop.src[0].op === pg._core.ops.EXPAND,
+              "reverse scalar should be the first broadcast operand"
+            );
+            assert(
+              out.uop.src[1].key === moved.uop.key,
+              "nested current occurrence should be the second operand"
+            );
+          }
+          const values = new Tensor([1, 2], { device: "cpu" });
+          assertClose(await values.add(3, true).toArray(), [4, 5]);
+          assertClose(await values.mul(3, true).toArray(), [3, 6]);
+        });
+        await test("literal elementwise composites match pinned", async () => {
+          const values = [-2.5, -1, 0, 0.5, 2.5];
+          const x = new Tensor(values);
+          const sigmoid = (v) => 1 / (1 + Math.exp(-v));
+          const expected = {
+            square: values.map((v) => v * v),
+            ceil: values.map(Math.ceil),
+            floor: values.map(Math.floor),
+            sigmoid: values.map(sigmoid),
+            tanh: values.map(Math.tanh),
+            relu6: values.map((v) => Math.min(Math.max(v, 0), 6)),
+            leakyRelu: values.map((v) => v < 0 ? 0.01 * v : v),
+            hardswish: values.map((v) => v * Math.min(Math.max(v + 3, 0), 6) / 6),
+            hardsigmoid: values.map((v) => Math.min(Math.max(v / 6 + 0.5, 0), 1)),
+            hardtanh: values.map((v) => Math.min(Math.max(v, -1), 1)),
+            silu: values.map((v) => v * sigmoid(v)),
+            elu: values.map((v) => v > 0 ? v : Math.exp(v) - 1),
+            sign: values.map(Math.sign),
+            abs: values.map(Math.abs),
+            isnan: values.map(Number.isNaN)
+          };
+          for (const [method, wanted] of Object.entries(expected)) {
+            assertClose(await x[method]().toArray(), wanted, 2e-6);
+          }
+          assertClose(
+            await x.hardsigmoid(0.2, 0.3).toArray(),
+            values.map((v) => Math.min(Math.max(0.2 * v + 0.3, 0), 1)),
+            2e-6
+          );
+          const half = x.cast("float16");
+          assert(half.sigmoid().dtype === "float16", "float16 sigmoid should retain dtype");
+          assert(half.tanh().dtype === "float16", "float16 tanh should retain dtype");
+          assertClose(await half.tanh().cast("float32").toArray(), values.map(Math.tanh), 2e-3);
+          const ints = new Tensor(new Int32Array([-2, 0, 3]), { dtype: "int32" });
+          assertClose(await ints.sign().toArray(), [-1, 0, 1]);
+          assertClose(await ints.abs().toArray(), [2, 0, 3]);
+          const bools = new Tensor([false, true], { dtype: "bool" });
+          assertClose(await bools.sign().toArray(), [0, 1]);
+          assertClose(await bools.abs().toArray(), [0, 1]);
+          const constant = x.constLike(1);
+          assert(constant.dtype === x.dtype, "constLike should retain dtype");
+          assertShape(constant.shape, x.shape);
+          assert(constant.uop.op === pg._core.ops.EXPAND, "constLike should remain a CONST graph");
+          assertClose(await constant.toArray(), values.map(() => 1));
+          for (const method of ["ceil", "floor"]) {
+            const gradInput = new Tensor(values, { requiresGrad: true });
+            await gradInput[method]().sum().backward();
+            assertClose(await gradInput.grad.toArray(), values.map(() => 0));
+          }
+          const moved = (await new Tensor([0.5], { device: "cpu" }).realize()).to("cuda").to("cpu");
+          for (const method of ["square", "sigmoid", "tanh", "relu6", "sign", "abs"]) {
+            assert(
+              countGraphOp(moved[method]().uop, pg._core.ops.COPY) === 2,
+              `${method} should retain the nested current occurrence`
+            );
+          }
+        });
+        await test("round and isinf match pinned compositions", async () => {
+          const values = [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5];
+          const expectedRound = [-2, -2, 0, 0, 2, 2];
+          const rounded32 = new Tensor(values).round();
+          assert(rounded32.dtype === "float32", `expected float32, got ${rounded32.dtype}`);
+          assertClose(await rounded32.toArray(), expectedRound);
+          if (supportsF16) {
+            const rounded16 = new Tensor(values).cast("float16").round();
+            assert(rounded16.dtype === "float16", `expected float16, got ${rounded16.dtype}`);
+            assertClose(await rounded16.cast("float32").toArray(), expectedRound);
+          }
+          if (supportsF64) {
+            const rounded64 = new Tensor(values).cast("float64").round();
+            assert(rounded64.dtype === "float64", `expected float64, got ${rounded64.dtype}`);
+            assertClose(await rounded64.toArray(), expectedRound);
+          }
+          const roundedInt = new Tensor(
+            new Int32Array([-2, -1, 0, 1, 2]),
+            { dtype: "int32" }
+          ).round();
+          assert(roundedInt.dtype === "float32", `expected float32, got ${roundedInt.dtype}`);
+          assertClose(await roundedInt.toArray(), [-2, -1, 0, 1, 2]);
+          const roundedBool = new Tensor([false, true], { dtype: "bool" }).round();
+          assert(roundedBool.dtype === "float32", `expected float32, got ${roundedBool.dtype}`);
+          assertClose(await roundedBool.toArray(), [0, 1]);
+          const topologyInt = (await Tensor.empty(
+            [2, 2],
+            { dtype: "int32", device: "cpu" }
+          ).realize()).round();
+          const topologyBool = (await Tensor.empty(
+            [2, 2],
+            { dtype: "bool", device: "cpu" }
+          ).realize()).round();
+          assert(
+            countGraphNodes(topologyInt.uop) === 50,
+            "round(int32) should match pinned 50-node topology"
+          );
+          assert(
+            countGraphNodes(topologyBool.uop) === 51,
+            "round(bool) should match pinned 51-node topology"
+          );
+          assert(
+            countGraphOp(topologyInt.uop, pg._core.ops.CAST) === 2,
+            "round(int32) should not cast an integer spelling of pinned 2.0"
+          );
+          assert(
+            countGraphOp(topologyBool.uop, pg._core.ops.CAST) === 3,
+            "round(bool) should not add integer promotion before pinned 2.0"
+          );
+          assert(
+            countGraphOp(topologyInt.uop, pg._core.ops.EXPAND) === 6,
+            "round(int32) should retain pinned scalar broadcasts"
+          );
+          assert(
+            countGraphOp(topologyBool.uop, pg._core.ops.EXPAND) === 6,
+            "round(bool) should retain pinned scalar broadcasts"
+          );
+          const floatingTopologyDtypes = ["float32", "bfloat16"];
+          if (supportsF16) floatingTopologyDtypes.push("float16");
+          if (supportsF64) floatingTopologyDtypes.push("float64");
+          for (const dtype of floatingTopologyDtypes) {
+            const topology = (await Tensor.empty(
+              [2, 2],
+              { dtype, device: "cpu" }
+            ).realize()).round();
+            assert(
+              countGraphNodes(topology.uop) === 48,
+              `round(${dtype}) should match pinned 48-node topology`
+            );
+            assert(
+              countGraphOp(topology.uop, pg._core.ops.CAST) === 0,
+              `round(${dtype}) should keep scalar literals in the receiver dtype`
+            );
+          }
+          let intLiteralPath = topologyInt.uop;
+          for (const index of [0, 0, 1, 0, 0, 0, 1, 0]) {
+            intLiteralPath = intLiteralPath.src[index];
+          }
+          assert(
+            intLiteralPath.op === pg._core.ops.EXPAND,
+            "round(int32) pinned 2.0 path should be a direct float EXPAND"
+          );
+          let boolLiteralPath = topologyBool.uop;
+          for (const index of [0, 0, 1, 0, 0, 0, 0, 0]) {
+            boolLiteralPath = boolLiteralPath.src[index];
+          }
+          assert(
+            boolLiteralPath.op === pg._core.ops.TRUNC,
+            "round(bool) path should reach TRUNC without an extra int32 CAST"
+          );
+          const infinityValues = new Tensor(
+            [-Infinity, -1, -0, 0, 1, Infinity, Number.NaN]
+          );
+          for (const [detectPositive, detectNegative, expected] of [
+            [false, false, [false, false, false, false, false, false, false]],
+            [false, true, [true, false, false, false, false, false, false]],
+            [true, false, [false, false, false, false, false, true, false]],
+            [true, true, [true, false, false, false, false, true, false]]
+          ]) {
+            const result = infinityValues.isinf(detectPositive, detectNegative);
+            assert(result.dtype === "bool", `expected bool, got ${result.dtype}`);
+            assertClose(await result.toArray(), expected);
+          }
+          for (const tensor of [
+            new Tensor([0, 1]),
+            new Tensor(new Int32Array([0, 1]), { dtype: "int32" }),
+            new Tensor([false, true], { dtype: "bool" })
+          ]) {
+            const result = tensor.isinf();
+            assert(result.dtype === "bool", `expected bool, got ${result.dtype}`);
+            assertClose(await result.toArray(), [false, false]);
+          }
+          const moved = (await new Tensor([0.5], { device: "cpu" }).realize()).to("cuda").to("cpu");
+          assert(
+            countGraphOp(moved.round().uop, pg._core.ops.COPY) === 2,
+            "round should retain the nested current occurrence"
+          );
+          for (const [detectPositive, detectNegative] of [
+            [false, false],
+            [false, true],
+            [true, false],
+            [true, true]
+          ]) {
+            assert(
+              countGraphOp(
+                moved.isinf(detectPositive, detectNegative).uop,
+                pg._core.ops.COPY
+              ) === 2,
+              "isinf should retain the nested current occurrence"
+            );
+          }
+        });
         await test("sigmoid", async () => {
           const a = new Tensor([0]);
           const arr = await a.sigmoid().toArray();
@@ -1080,9 +1434,36 @@
           assertClose(await a.relu().toArray(), [0, 0, 1, 2]);
         });
         await test("gelu", async () => {
-          const a = new Tensor([0]);
-          const arr = await a.gelu().toArray();
-          assert(Math.abs(arr[0]) < 0.01, `gelu(0) should be ~0, got ${arr[0]}`);
+          const values = [-2.5, -1, 0, 0.5, 2.5];
+          const expected = values.map(
+            (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)))
+          );
+          assertClose(await new Tensor(values).gelu().toArray(), expected, 2e-6);
+          if (supportsF16) {
+            const half = new Tensor(values).cast("float16").gelu();
+            assert(half.dtype === "float16", `expected float16, got ${half.dtype}`);
+            assertClose(await half.cast("float32").toArray(), expected, 2e-3);
+          }
+          const moved = (await new Tensor(values, { device: "cpu" }).realize()).to("cuda").to("cpu").gelu();
+          assert(
+            countGraphOp(moved.uop, pg._core.ops.COPY) === 2,
+            "gelu should retain the nested current occurrence"
+          );
+        });
+        await test("quick gelu", async () => {
+          const values = [-2.5, -1, 0, 0.5, 2.5];
+          const expected = values.map((x) => x / (1 + Math.exp(-(1.702 * x))));
+          assertClose(await new Tensor(values).quickGelu().toArray(), expected, 2e-6);
+          if (supportsF16) {
+            const half = new Tensor(values).cast("float16").quickGelu();
+            assert(half.dtype === "float16", `expected float16, got ${half.dtype}`);
+            assertClose(await half.cast("float32").toArray(), expected, 25e-4);
+          }
+          const moved = (await new Tensor(values, { device: "cpu" }).realize()).to("cuda").to("cpu").quickGelu();
+          assert(
+            countGraphOp(moved.uop, pg._core.ops.COPY) === 2,
+            "quickGelu should retain the nested current occurrence"
+          );
         });
         await test("silu", async () => {
           const a = new Tensor([0]);
@@ -1100,6 +1481,16 @@
           const b = new Tensor([2, 3, 3]);
           assertClose(await a.gt(b).toArray(), [0, 1, 0]);
         });
+        await test("mixed dtype comparison and where promote like tinygrad", async () => {
+          const x = new Tensor([
+            [0, 1, 2, 3],
+            [4, 5, 6, 7],
+            [8, 9, 10, 11],
+            [12, 13, 14, 15]
+          ]);
+          const out = Tensor.full([4, 4], 7).gt(x).where(x, Tensor.full([4, 4], -2)).sum(0);
+          assertClose(await out.toArray(), [0, 2, 4, -3]);
+        });
         await test("where with optimized-away middle input keeps param slots", async () => {
           const idx = Tensor.arange(2);
           const out = idx.ge(0).where(new Tensor([1, 3]), new Tensor([7, 8]));
@@ -1113,6 +1504,29 @@
         await test("clamp", async () => {
           const a = new Tensor([1, 5, 3]);
           assertClose(await a.clamp(2, 4).toArray(), [2, 4, 3]);
+          const values = new Tensor([-Infinity, -2, 2, Infinity]);
+          const minOnly = await values.clamp(-1, void 0).toArray();
+          const maxOnly = await values.clamp(void 0, 1).toArray();
+          assert(
+            minOnly[0] === -1 && minOnly[1] === -1 && minOnly[2] === 2 && minOnly[3] === Infinity,
+            `clamp min-only mismatch: ${minOnly}`
+          );
+          assert(
+            maxOnly[0] === -Infinity && maxOnly[1] === -2 && maxOnly[2] === 1 && maxOnly[3] === 1,
+            `clamp max-only mismatch: ${maxOnly}`
+          );
+        });
+        await test("clamp preserves nested current occurrence", async () => {
+          const x = await new Tensor([1], { device: "cpu" }).realize();
+          const clamped = x.to("cuda").to("cpu").clamp(-1, 1);
+          assert(
+            countGraphOp(clamped.uop, pg._core.ops.COPY) === 2,
+            "clamp should retain the nested COPY source occurrence"
+          );
+          assert(
+            countGraphOp(clamped.uop, pg._core.ops.WHERE) === 2,
+            "two-bound clamp should contain two conditional WHERE nodes"
+          );
         });
         console.log("\n-- Movement --");
         await test("reshape", async () => {
@@ -1172,6 +1586,9 @@
           const flat = x.pad([1, 0, 0, 1]);
           assertShape(flat.shape, [1, 1, 4, 4]);
           assertClose(await flat.toArray(), [0, 0, 1, 2, 0, 3, 4, 5, 0, 6, 7, 8, 0, 0, 0, 0]);
+          const moved = Tensor.arange(12).reshape(3, 4).pad([[-1, 2], [1, -1]]);
+          assertShape(moved.shape, [4, 4]);
+          assertClose(await moved.toArray(), [0, 4, 5, 6, 0, 8, 9, 10, 0, 0, 0, 0, 0, 0, 0, 0]);
         });
         await test("pad readback preserves non-float dtype", async () => {
           const p = new Tensor([1, 2, 3], { dtype: "int32" }).pad([[1, 1]]);
@@ -1199,11 +1616,28 @@
           assertShape(out3.shape, [2, 2, 2]);
           assertClose(await out3.toArray(), [0, 9, 4, 1, 20, 17, 12, 21]);
         });
+        await test("oneHot matches tinygrad probe", async () => {
+          const out = new Tensor(new Int32Array([0, 2, 1]), { dtype: "int32" }).oneHot(4);
+          assertShape(out.shape, [3, 4]);
+          assert(out.dtype === "int32", `expected int32, got ${out.dtype}`);
+          assertClose(await out.toArray(), [1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0]);
+        });
         await test("tensor row indexing matches tinygrad probe", async () => {
           const idx = new Tensor(new Int32Array([-1, 0, 2]), { dtype: "int32" });
           const out = Tensor.arange(12).reshape(3, 4).getitem(idx);
           assertShape(out.shape, [3, 4]);
           assertClose(await out.toArray(), [8, 9, 10, 11, 0, 1, 2, 3, 8, 9, 10, 11]);
+        });
+        await test("squeeze and integer indexing preserve scalar rank", async () => {
+          const scalar = new Tensor(7);
+          assert(scalar.squeeze() === scalar, "scalar squeeze must be a no-op");
+          assertShape(Tensor.empty([1]).squeeze(0).shape, []);
+          assertShape(Tensor.empty([1, 1]).squeeze().shape, []);
+          assertShape(Tensor.empty([2, 1]).squeeze(1).shape, [2]);
+          const indexed = Tensor.arange(2, { dtype: "int32" }).getitem(0);
+          assertShape(indexed.shape, []);
+          assert(indexed.uop.op === pg._core.ops.RESHAPE, "integer index must collapse to RESHAPE");
+          assertClose(await indexed.toArray(), [0]);
         });
         await test("scatter matches tinygrad probe", async () => {
           const base = Tensor.zeros(3, 5);
@@ -1217,8 +1651,9 @@
           const dupSrc = new Tensor([7, 9, 8]).reshape(1, 3);
           assertClose(await new Tensor([[0, 0, 0, 0]]).scatter(1, dupIdx, dupSrc).toArray(), [0, 9, 8, 0]);
           const scalarIdx = new Tensor(new Int32Array([2, 3]), { dtype: "int32" }).reshape(2, 1);
-          assertClose(await Tensor.full([2, 4], 2).scatter(1, scalarIdx, 1.23, "add").toArray(), [2, 2, 3.23, 2, 2, 2, 2, 3.23]);
-          assertClose(await Tensor.full([2, 4], 2).scatter(1, scalarIdx, 1.23, "multiply").toArray(), [2, 2, 2.46, 2, 2, 2, 2, 2.46]);
+          const floatBase = Tensor.full([2, 4], 2, { dtype: "float32" });
+          assertClose(await floatBase.scatter(1, scalarIdx, 1.23, "add").toArray(), [2, 2, 3.23, 2, 2, 2, 2, 3.23]);
+          assertClose(await floatBase.scatter(1, scalarIdx, 1.23, "multiply").toArray(), [2, 2, 2.46, 2, 2, 2, 2, 2.46]);
           let threw = false;
           try {
             base.scatter(1, idx1, src1, "sum");
@@ -1322,6 +1757,19 @@
           const r = t.cast("float32");
           assertClose(await r.toArray(), [1, 2, 3]);
         });
+        await test("cast and bitcast store exact physical roots", async () => {
+          const source = Tensor.arange(4, { dtype: "uint32" });
+          const casted = source.cast("uint64");
+          const bitcasted = source.bitcast("float32");
+          assert(casted.uopLogical.op === pg._core.ops.CAST, "cast logical root must be CAST");
+          assert(casted.uopPhysical.op === pg._core.ops.CAST, "cast physical root must be CAST");
+          assert(casted.uopLogical.src[0].key === source.uopLogical.key, "cast logical source mismatch");
+          assert(casted.uopPhysical.src[0].key === source.uopPhysical.key, "cast physical source mismatch");
+          assert(bitcasted.uopLogical.op === pg._core.ops.BITCAST, "bitcast logical root must be BITCAST");
+          assert(bitcasted.uopPhysical.op === pg._core.ops.BITCAST, "bitcast physical root must be BITCAST");
+          assert(bitcasted.uopLogical.src[0].key === source.uopLogical.key, "bitcast logical source mismatch");
+          assert(bitcasted.uopPhysical.src[0].key === source.uopPhysical.key, "bitcast physical source mismatch");
+        });
         await testIf(supportsF16, "half and double convenience", async () => {
           const t = new Tensor([1, 2, 3]);
           const h = t.half();
@@ -1406,6 +1854,13 @@
           assertClose(await t.argmax(1, true).toArray(), [0, 0]);
           const flat = await t.argmax().item();
           assert(flat === 3, `expected flattened argmax 3, got ${flat}`);
+          const singleton = Tensor.arange(6, { dtype: "float32" }).reshape(2, 1, 3);
+          assertClose(await singleton.argmax(1).toArray(), [0, 0, 0, 0, 0, 0]);
+          const empty = Tensor.empty(2, 0, 3, { device: "cpu" });
+          assertClose(
+            await empty.argmax(1).toArray(),
+            [-2147483648, -2147483648, -2147483648, -2147483648, -2147483648, -2147483648]
+          );
         });
         await test("sort argsort topk match tinygrad probe", async () => {
           const x = new Tensor([[0.1, 0.5, 1.2, 3.4, 2.1], [2.2, 1.9, 0.3, 4.5, 0.8]]);
@@ -1558,6 +2013,40 @@
             ok = true;
           }
           assert(ok, "expected dot to fail on broadcast-mismatched shapes");
+        });
+        await test("einsum uses the shared native/WASM adapter contract", async () => {
+          const a = new Tensor([[1, 2], [3, 4]]);
+          const b = new Tensor([[5, 6], [7, 8]]);
+          const out = Tensor.einsum("ij,jk->ik", a, b);
+          assertShape(out.shape, [2, 2]);
+          assertClose(await out.toArray(), [19, 22, 43, 50]);
+        });
+        await test("rearrange forwards named axis sizes on native and WASM", async () => {
+          const out = Tensor.arange(6).rearrange("(h w) -> h w", { h: 2, w: 3 });
+          assertShape(out.shape, [2, 3]);
+          assertClose(await out.toArray(), [0, 1, 2, 3, 4, 5]);
+        });
+        await test("einsum and rearrange reject malformed core inputs", async () => {
+          const x = new Tensor([1, 2, 3]);
+          let message = "";
+          try {
+            Tensor.einsum("i->z", x);
+          } catch (error) {
+            message = String(error && error.message ? error.message : error);
+          }
+          assert(/poly_einsum failed/.test(message), `unexpected einsum error: ${message}`);
+          for (const formula of ["invalid", `${"a".repeat(300)}->a`, "a->a->a", "((a))->a"]) {
+            message = "";
+            try {
+              x.rearrange(formula);
+            } catch (error) {
+              message = String(error && error.message ? error.message : error);
+            }
+            assert(
+              /poly_rearrange failed/.test(message),
+              `unexpected rearrange error for ${formula.slice(0, 24)}: ${message}`
+            );
+          }
         });
         await test("qr matches tinygrad probe", async () => {
           const cases = [
@@ -1939,6 +2428,9 @@
           const loss = a.mul(a).sum();
           await loss.backward();
           assert(a.grad, "grad is null");
+          assert(a.grad.uopPhysical, "gradient must store its exact physical root");
+          assert(a.grad.uopPhysical.op === pg._core.ops.ADD, "square gradient physical root must be ADD");
+          assert(a.grad.uopPhysical.key === a.grad.uop.key, "gradient current root must be physical");
           assertClose(await a.grad.toArray(), [2, 4, 6]);
         });
         await test("grad: backward uses current physical value after copyFrom", async () => {
@@ -2075,7 +2567,7 @@
           assertClose(await out.toArray(), [0, 4, 1, 5, 2, 6, 3, 7]);
         });
         await test("realized contiguous and readback reuse current buffer identity", async () => {
-          const source = await Tensor.arange(8, { dtype: "float32" }).add(1).realize();
+          const source = await new Tensor([0, 1, 2, 3, 4, 5, 6, 7], { dtype: "float32" }).add(1).realize();
           const sourceCurrent = source.uop.key;
           const sourceLogical = source.uopLogical.key;
           assert(source.uopLogical.op === pg._core.ops.ADD, "source logical root should retain ADD provenance");
@@ -2141,6 +2633,48 @@
         await test("eye", async () => {
           const t = Tensor.eye(2);
           assertClose(await t.toArray(), [1, 0, 0, 1]);
+        });
+        await test("pure constructors store the pinned device-free root", async () => {
+          const values = [
+            Tensor.full([2, 3], 2, { buffer: false }),
+            Tensor.arange(4),
+            Tensor.linspace(0, 1, 4),
+            Tensor.eye(3)
+          ];
+          for (const value of values) {
+            assert(value.uopPhysical, "pure constructor must store a physical root");
+            assert(value.uopLogical, "pure constructor must store a logical root");
+            assert(
+              value.uopPhysical.key === value.uopLogical.key,
+              "pure constructor roots must be the same UOp"
+            );
+          }
+          const arange = values[1];
+          const moved = arange.to("cuda");
+          assert(moved.uop.key === arange.uop.key, "device-free Tensor.to must preserve the root");
+        });
+        await test("internal scalars store typed current roots", async () => {
+          const cases = [
+            [Tensor.empty([2], { dtype: "bool" }), true, "bool"],
+            [Tensor.empty([2], { dtype: "int32" }), 7, "int32"],
+            [Tensor.empty([2], { dtype: "float32" }), 1, "float32"]
+          ];
+          for (const [source, value, dtype] of cases) {
+            const scalar = source._ensureTensor(value);
+            assert(scalar.dtype === dtype, `expected ${dtype}, got ${scalar.dtype}`);
+            assert(
+              scalar.uopLogical.op === pg._core.ops.CONST,
+              "internal scalar logical root must be CONST"
+            );
+            assert(
+              scalar.uopPhysical.op === pg._core.ops.CONST,
+              "internal scalar physical root must be CONST"
+            );
+            assert(
+              scalar.uopLogical.key === scalar.uopPhysical.key,
+              "internal scalar roots must be the same UOp"
+            );
+          }
         });
         console.log("\n-- Lazy RNG --");
         await test("rand uniform [0,1)", async () => {
@@ -2260,7 +2794,7 @@
           assertClose(await y2.toArray(), [2]);
         });
         await test("to keeps separate realized same-logical occurrences", async () => {
-          const a = new Tensor([1]);
+          const a = new Tensor([1], { device: "cpu" });
           await a.realize();
           const x1 = await a.add(1).realize();
           const x2 = await a.add(1).realize();
@@ -2289,10 +2823,11 @@
         });
         await test("nested to keeps realized current and export logical separate", async () => {
           const x = await new Tensor([1]).add(1).realize();
-          const xCuda = x.to("cuda");
+          const xBase = x.to("cpu");
+          const xCuda = xBase.to("cuda");
           const xCpu = xCuda.to("cpu");
           assert(xCuda.uop.op === pg._core.ops.COPY, "CUDA move should be an eager COPY");
-          assert(xCuda.uop.src[0].key === x.uop.key, "CUDA COPY should use the realized buffer");
+          assert(xCuda.uop.src[0].key === xBase.uop.key, "CUDA COPY should use the CPU occurrence");
           assert(xCpu.uop.op === pg._core.ops.COPY, "CPU roundtrip should be an eager COPY");
           assert(xCpu.uop.src[0].key === xCuda.uop.key, "CPU COPY should use the CUDA occurrence");
           assert(xCpu.uop.key !== x.uop.key, "roundtrip COPY should stay occurrence-distinct");
@@ -2301,6 +2836,50 @@
           const y = xCpu.add(1);
           assert(y.device === "CPU", "downstream value should keep selected CPU placement");
           assert(y.uop.key !== xCpu.uop.key, "downstream value should build a new current graph");
+          const mixed = xBase.add(xCpu);
+          assert(mixed.uop.op === pg._core.ops.ADD, "mixed result should be ADD");
+          assert(mixed.uop.src[0].key === xBase.uop.key, "first ADD input should be CPU occurrence");
+          assert(mixed.uop.src[1].key === xCpu.uop.key, "second ADD input should be CPU COPY");
+          assert(mixed.uop.src[1].src[0].key === xCuda.uop.key, "CPU COPY should contain CUDA COPY");
+          assert(
+            mixed.uop.src[1].src[0].src[0].key === xBase.uop.key,
+            "CUDA COPY should contain CPU occurrence"
+          );
+          assert(mixed.uopLogical.src[0].key === x.uopLogical.key, "logical lhs should be X");
+          assert(mixed.uopLogical.src[1].key === x.uopLogical.key, "logical rhs should be X");
+        });
+        await test("composite ops preserve repeated logical physical occurrences", async () => {
+          const x = await new Tensor([0, 0, 0, 0], { device: "cpu" }).reshape(1, 1, 2, 2).realize();
+          const movedWeight = x.to("cuda").to("cpu");
+          const conv = x.conv2d(movedWeight);
+          assert(
+            countGraphOp(conv.uop, pg._core.ops.COPY) === 2,
+            "conv2d should retain the nested COPY weight occurrence"
+          );
+          assert(
+            countGraphOp(conv.uop, pg._core.ops.EXPAND) === 1,
+            "single-output conv2d should elide the no-op channel EXPAND"
+          );
+          const bnX = await new Tensor([0, 0, 0], { device: "cpu" }).reshape(1, 3, 1, 1).realize();
+          const stat = await new Tensor([0, 0, 0], { device: "cpu" }).realize();
+          const movedInvstd = stat.to("cuda").to("cpu");
+          const bn = bnX.batchnorm(null, null, stat, movedInvstd, 1);
+          assert(
+            countGraphOp(bn.uop, pg._core.ops.COPY) === 2,
+            "batchnorm should retain the nested COPY invstd occurrence"
+          );
+          const minX = await new Tensor([1], { device: "cpu" }).realize();
+          const minMoved = minX.to("cuda").to("cpu");
+          const minimum = minX.minimum(minMoved);
+          assert(
+            countGraphOp(minimum.uop, pg._core.ops.COPY) === 2,
+            "minimum should retain the nested COPY right occurrence"
+          );
+          assert(minimum.uop.op === pg._core.ops.MUL, "minimum should end with inverse MUL");
+          const maximum = minimum.uop.src[0];
+          assert(maximum.op === pg._core.ops.MAX, "minimum should contain ordered MAX");
+          assert(maximum.src[0].src[0].key === minX.uop.key, "minimum lhs occurrence mismatch");
+          assert(maximum.src[1].src[0].key === minMoved.uop.key, "minimum rhs occurrence mismatch");
         });
         await test("repeated fused chain produces identical results", async () => {
           const a = [2, 3, 4];

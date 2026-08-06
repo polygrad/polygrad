@@ -170,7 +170,15 @@ PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val);
 
 /* ALU constant-fold executor */
 
-PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *operands, int n_ops);
+/* Pinned tinygrad exec_alu exposes truncate_output: symbolic constant folding
+ * passes false, while execution-style callers pass true. */
+PolyArg poly_exec_alu(
+    PolyOps op,
+    PolyDType dtype,
+    PolyArg *operands,
+    int n_ops,
+    bool truncate_output
+);
 
 /* Symbolic simplification rules */
 

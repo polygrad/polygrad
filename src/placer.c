@@ -233,19 +233,6 @@ static PolyUOp *lower_assign_target(
   return lower_value(p, target, device);
 }
 
-static bool shape_numel_u64(PolyShape shape, uint64_t *out) {
-  if (!out || shape.ndim < 0) return false;
-  uint64_t numel = 1;
-  for (int d = 0; d < shape.ndim; d++) {
-    if (shape.dims[d] < 0 ||
-        (shape.dims[d] != 0 && numel > UINT64_MAX / (uint64_t)shape.dims[d]))
-      return false;
-    numel *= (uint64_t)shape.dims[d];
-  }
-  *out = numel;
-  return true;
-}
-
 /* At a tensor materialization boundary, a contiguous SHRINK of an already
  * realized buffer is a Buffer view in tinygrad: no kernel is scheduled, and a
  * later .to(device) copies only the selected byte range. Reuse Polygrad's
@@ -259,131 +246,21 @@ static PolyUOp *lower_contiguous_realized_view(
     PolyDevice device
 ) {
   if (!p || !u) return NULL;
-  int n_steps = 0;
-  bool has_shrink = false;
-  PolyUOp *base = u;
-  while (base && base->n_src >= 1 &&
-         (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK)) {
-    if (base->op == POLY_OP_SHRINK) {
-      bool canonical = base->arg.kind == POLY_ARG_NONE && base->n_src >= 3 &&
-                       base->src[1]->op == POLY_OP_STACK && base->src[2]->op == POLY_OP_STACK &&
-                       base->src[1]->n_src == base->src[2]->n_src;
-      if (!canonical && base->arg.kind != POLY_ARG_PAIR_TUPLE) return NULL;
-      has_shrink = true;
-    }
-    n_steps++;
-    base = base->src[0];
-  }
-  if (!has_shrink || !base || !poly_uop_has_buffer_identity(base)) return NULL;
-  const PolyUOp *identity = poly_uop_get_buffer_identity(base);
-  PolyBuffer *storage = poly_buffer_get(p->ctx, (PolyUOp *)identity);
-  if (!storage || (!storage->ptr && storage->nbytes != 0) || !storage->valid) return NULL;
+  PolyUOp *identity = NULL;
+  PolyShape shape = {.ndim = -1};
+  int64_t numel = -1;
+  size_t byte_offset = 0;
+  if (!poly_uop_contiguous_view_info(
+          p->ctx, u, &identity, &shape, &numel, &byte_offset
+      ))
+    return NULL;
+  PolyBuffer *storage = poly_buffer_get(p->ctx, identity);
+  if (!storage) return NULL;
   if (!placement_devices_share_storage(storage->device, device)) return NULL;
 
-  PolyUOp **steps = malloc((size_t)n_steps * sizeof(*steps));
-  if (!steps) return NULL;
-  PolyUOp *cur = u;
-  for (int i = 0; i < n_steps; i++, cur = cur->src[0]) steps[i] = cur;
-
-  PolyShape shape = poly_uop_max_shape_cached(p->ctx, base);
-  uint64_t base_numel = 0;
-  if (!shape_numel_u64(shape, &base_numel)) {
-    free(steps);
-    return NULL;
-  }
-  uint64_t element_offset = 0;
-  for (int i = n_steps - 1; i >= 0; i--) {
-    PolyUOp *step = steps[i];
-    PolyShape next = poly_uop_max_shape_cached(p->ctx, step);
-    uint64_t current_numel = 0, next_numel = 0;
-    if (!shape_numel_u64(shape, &current_numel) || !shape_numel_u64(next, &next_numel)) {
-      free(steps);
-      return NULL;
-    }
-    if (step->op == POLY_OP_RESHAPE) {
-      if (current_numel != next_numel) {
-        free(steps);
-        return NULL;
-      }
-      shape = next;
-      continue;
-    }
-
-    bool canonical = step->arg.kind == POLY_ARG_NONE && step->n_src >= 3 &&
-                     step->src[1]->op == POLY_OP_STACK && step->src[2]->op == POLY_OP_STACK &&
-                     step->src[1]->n_src == shape.ndim && step->src[2]->n_src == shape.ndim;
-    if ((!canonical &&
-         (step->arg.kind != POLY_ARG_PAIR_TUPLE || step->arg.pair_tuple.n != shape.ndim)) ||
-        next.ndim != shape.ndim) {
-      free(steps);
-      return NULL;
-    }
-    uint64_t stride = 1, start = 0, last = 0, selected = 1;
-    bool empty = false, ok = true;
-    for (int d = shape.ndim - 1; d >= 0; d--) {
-      int64_t begin = 0, end = 0;
-      if (canonical) {
-        int64_t length = 0;
-        if (poly_uop_bind_value(step->src[1]->src[d], &begin) != 0 ||
-            poly_uop_bind_value(step->src[2]->src[d], &length) != 0 ||
-            __builtin_add_overflow(begin, length, &end)) {
-          ok = false;
-          break;
-        }
-      } else {
-        begin = step->arg.pair_tuple.pairs[d][0];
-        end = step->arg.pair_tuple.pairs[d][1];
-      }
-      int64_t dim = shape.dims[d];
-      if (dim < 0 || begin < 0 || end < begin || end > dim) {
-        ok = false;
-        break;
-      }
-      uint64_t length = (uint64_t)(end - begin);
-      if ((uint64_t)begin > UINT64_MAX / stride ||
-          start > UINT64_MAX - (uint64_t)begin * stride) {
-        ok = false;
-        break;
-      }
-      start += (uint64_t)begin * stride;
-      if (length == 0) {
-        empty = true;
-      } else {
-        uint64_t tail = (uint64_t)(end - 1);
-        if (tail > UINT64_MAX / stride || last > UINT64_MAX - tail * stride ||
-            selected > UINT64_MAX / length) {
-          ok = false;
-          break;
-        }
-        last += tail * stride;
-        selected *= length;
-      }
-      if ((uint64_t)dim != 0 && stride > UINT64_MAX / (uint64_t)dim) {
-        ok = false;
-        break;
-      }
-      stride *= (uint64_t)dim;
-    }
-    if (!ok || (!empty && (last < start || last - start + 1 != selected)) ||
-        element_offset > UINT64_MAX - start) {
-      free(steps);
-      return NULL;
-    }
-    element_offset += start;
-    shape = next;
-  }
-  free(steps);
-
-  uint64_t numel = 0;
-  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(identity->dtype));
-  if (!shape_numel_u64(shape, &numel) || numel > INT64_MAX || itemsize == 0 ||
-      element_offset > SIZE_MAX / itemsize)
-    return NULL;
-  PolyUOp *view = poly_buffer_view(
-      p->ctx, (PolyUOp *)identity, (int64_t)numel, (size_t)element_offset * itemsize
-  );
+  PolyUOp *view = poly_buffer_view(p->ctx, identity, numel, byte_offset);
   if (!view) return NULL;
-  if (shape.ndim == 1 && shape.dims[0] == (int64_t)numel) return view;
+  if (shape.ndim == 1 && shape.dims[0] == numel) return view;
   return poly_reshape(p->ctx, view, shape.dims, shape.ndim);
 }
 

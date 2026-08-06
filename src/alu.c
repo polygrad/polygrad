@@ -6,6 +6,7 @@
  */
 
 #include "pat.h"
+#include "bigint.h"
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
@@ -52,7 +53,7 @@ static int64_t cdiv(int64_t a, int64_t b) {
 
 /* C-style modulo */
 static int64_t cmod(int64_t a, int64_t b) {
-  if (b == 0) return 0;
+  if (b == 0) return a;
   if (a == INT64_MIN && b == -1) return 0;
   return a % b;
 }
@@ -68,15 +69,66 @@ static int64_t floor_div_i64(int64_t a, int64_t b) {
 }
 
 static int64_t floor_mod_i64(int64_t a, int64_t b) {
-  if (b == 0) return 0;
+  if (b == 0) return a;
   if (a == INT64_MIN && b == -1) return 0;
-  return a - floor_div_i64(a, b) * b;
+  int64_t r = a % b;
+  return r != 0 && ((r < 0) != (b < 0)) ? r + b : r;
 }
 
 static int64_t i64_from_u64(uint64_t v) {
   int64_t out;
   memcpy(&out, &v, sizeof(out));
   return out;
+}
+
+static bool i64_add_checked(int64_t a, int64_t b, int64_t *out) {
+  return !__builtin_add_overflow(a, b, out);
+}
+
+static bool i64_sub_checked(int64_t a, int64_t b, int64_t *out) {
+  return !__builtin_sub_overflow(a, b, out);
+}
+
+static bool i64_mul_checked(int64_t a, int64_t b, int64_t *out) {
+  return !__builtin_mul_overflow(a, b, out);
+}
+
+static bool i64_shl_checked(int64_t value, int64_t shift, int64_t *out) {
+  if (shift < 0) return false;
+  if (value == 0) {
+    *out = 0;
+    return true;
+  }
+  if (shift > 63) return false;
+  for (int64_t i = 0; i < shift; i++) {
+    if (!i64_add_checked(value, value, &value)) return false;
+  }
+  *out = value;
+  return true;
+}
+
+static bool i64_pow_checked(int64_t base, int64_t exponent, int64_t *out) {
+  if (exponent < 0) return false;
+  int64_t result = 1;
+  while (exponent) {
+    if (exponent & 1) {
+      if (!i64_mul_checked(result, base, &result)) return false;
+    }
+    exponent >>= 1;
+    if (exponent && !i64_mul_checked(base, base, &base)) return false;
+  }
+  *out = result;
+  return true;
+}
+
+static uint64_t u64_pow_wrapping(uint64_t base, uint64_t exponent) {
+  uint64_t result = 1;
+  while (exponent) {
+    if (exponent & 1) result *= base;
+    exponent >>= 1;
+    if (exponent) base *= base;
+  }
+  return result;
 }
 
 /* Get numeric value from PolyArg */
@@ -87,6 +139,8 @@ static double arg_to_float(PolyArg a) {
     return a.f;
   case POLY_ARG_INT:
     return (double)a.i;
+  case POLY_ARG_BIGINT:
+    return poly_arg_integer_to_double(a);
   case POLY_ARG_BOOL:
     return a.b ? 1.0 : 0.0;
   default:
@@ -98,6 +152,8 @@ static int64_t arg_to_int(PolyArg a) {
   switch (a.kind) {
   case POLY_ARG_INT:
     return a.i;
+  case POLY_ARG_BIGINT:
+    return (int64_t)poly_arg_integer_to_u64_mod(a);
   case POLY_ARG_FLOAT:
     return (int64_t)a.f;
   case POLY_ARG_BOOL:
@@ -113,6 +169,8 @@ static bool arg_to_bool(PolyArg a) {
     return a.b;
   case POLY_ARG_INT:
     return a.i != 0;
+  case POLY_ARG_BIGINT:
+    return a.bigint.n_limbs != 0;
   case POLY_ARG_FLOAT:
     return a.f != 0.0;
   default:
@@ -211,6 +269,8 @@ static double round_to_bf16(double x) {
 
 static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
   if (poly_dtype_is_bool(dtype)) return poly_arg_bool(arg_to_bool(val));
+  /* Pinned weakint has no entry in dtype.truncate (dtype.py:351-355). */
+  if (poly_dtype_is_index(dtype)) return val;
 
   if (poly_dtype_is_int(dtype)) {
     int64_t v = arg_to_int(val);
@@ -244,19 +304,30 @@ static PolyArg truncate_result(PolyArg val, PolyDType dtype) {
 
 /* exec_alu: evaluate an ALU op on constant operands */
 
-PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
+PolyArg poly_exec_alu(
+    PolyOps op,
+    PolyDType dtype,
+    PolyArg *ops,
+    int n_ops,
+    bool truncate_output
+) {
   if (op == POLY_OP_CAST && n_ops == 1) {
     if (poly_dtype_is_bool(dtype)) return poly_arg_bool(arg_to_bool(ops[0]));
-    if (poly_dtype_is_int(dtype)) return truncate_result(poly_arg_int(arg_to_int(ops[0])), dtype);
+    if (poly_dtype_is_int(dtype)) {
+      PolyArg result = poly_arg_int(arg_to_int(ops[0]));
+      return truncate_output ? truncate_result(result, dtype) : result;
+    }
     if (poly_dtype_is_float(dtype))
-      return truncate_result(poly_arg_float(arg_to_float(ops[0])), dtype);
+      return truncate_output ? truncate_result(poly_arg_float(arg_to_float(ops[0])), dtype)
+                             : poly_arg_float(arg_to_float(ops[0]));
     return ops[0];
   }
 
   /* Tinygrad exec_alu keeps WHERE branch values as-is, which matters for
    * Invalid-carrying index masks. Do this before any numeric coercion. */
   if (op == POLY_OP_WHERE && n_ops == 3) {
-    return arg_to_bool(ops[0]) ? ops[1] : ops[2];
+    PolyArg selected = arg_to_bool(ops[0]) ? ops[1] : ops[2];
+    return truncate_output ? truncate_result(selected, dtype) : selected;
   }
 
   /* Tinygrad preserves Invalid through integer/index binary ALU instead of
@@ -269,9 +340,7 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
   }
 
   if (is_cmp_op(op) && n_ops >= 2) {
-    PolyDType cmp_dtype = poly_dtype_scalar(dtype);
-    bool use_float = poly_dtype_is_float(cmp_dtype) || ops[0].kind == POLY_ARG_FLOAT ||
-                     ops[1].kind == POLY_ARG_FLOAT;
+    bool use_float = ops[0].kind == POLY_ARG_FLOAT || ops[1].kind == POLY_ARG_FLOAT;
     if (use_float) {
       double a = arg_to_float(ops[0]);
       double b = arg_to_float(ops[1]);
@@ -279,15 +348,20 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
       if (op == POLY_OP_CMPNE) return poly_arg_bool(a != b);
       return poly_arg_bool(a == b);
     }
-    if (poly_dtype_is_unsigned(cmp_dtype)) {
-      uint64_t a = (uint64_t)truncate_result(ops[0], cmp_dtype).i;
-      uint64_t b = (uint64_t)truncate_result(ops[1], cmp_dtype).i;
-      if (op == POLY_OP_CMPLT) return poly_arg_bool(a < b);
-      if (op == POLY_OP_CMPNE) return poly_arg_bool(a != b);
-      return poly_arg_bool(a == b);
+    if ((ops[0].kind == POLY_ARG_INT || ops[0].kind == POLY_ARG_BIGINT ||
+         ops[0].kind == POLY_ARG_BOOL) &&
+        (ops[1].kind == POLY_ARG_INT || ops[1].kind == POLY_ARG_BIGINT ||
+         ops[1].kind == POLY_ARG_BOOL)) {
+      bool valid = false;
+      int cmp = poly_arg_integer_cmp(ops[0], ops[1], &valid);
+      if (valid) {
+        if (op == POLY_OP_CMPLT) return poly_arg_bool(cmp < 0);
+        if (op == POLY_OP_CMPNE) return poly_arg_bool(cmp != 0);
+        return poly_arg_bool(cmp == 0);
+      }
     }
-    int64_t a = poly_dtype_is_bool(cmp_dtype) ? arg_to_int(ops[0]) : truncate_result(ops[0], cmp_dtype).i;
-    int64_t b = poly_dtype_is_bool(cmp_dtype) ? arg_to_int(ops[1]) : truncate_result(ops[1], cmp_dtype).i;
+    int64_t a = arg_to_int(ops[0]);
+    int64_t b = arg_to_int(ops[1]);
     if (op == POLY_OP_CMPLT) return poly_arg_bool(a < b);
     if (op == POLY_OP_CMPNE) return poly_arg_bool(a != b);
     return poly_arg_bool(a == b);
@@ -354,7 +428,8 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
       return poly_arg_float(0.0);
     }
 
-    return truncate_result(poly_arg_float(r), dtype);
+    PolyArg result = poly_arg_float(r);
+    return truncate_output ? truncate_result(result, dtype) : result;
   }
 
   /* Integer path */
@@ -364,68 +439,53 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
   int64_t r = 0;
 
   switch (op) {
-  /* Bool NEG = logical NOT (matches C renderer's !x), not arithmetic -x.
-   * Without this, NEG(false) folds to -0=0=false instead of true,
-   * breaking PAD validity masks when a dimension has (0,0) padding. */
   case POLY_OP_NEG:
-    r = poly_dtype_is_bool(dtype) ? !a : i64_from_u64(0u - (uint64_t)a);
+    if (!truncate_output && a == INT64_MIN) return poly_arg_invalid();
+    r = i64_from_u64(0u - (uint64_t)a);
     break;
   case POLY_OP_TRUNC:
     r = a;
     break;
   case POLY_OP_ADD:
-    r = i64_from_u64((uint64_t)a + (uint64_t)b);
+    if (!truncate_output && !i64_add_checked(a, b, &r)) return poly_arg_invalid();
+    if (truncate_output) r = i64_from_u64((uint64_t)a + (uint64_t)b);
     break;
   case POLY_OP_SUB:
-    r = i64_from_u64((uint64_t)a - (uint64_t)b);
+    if (!truncate_output && !i64_sub_checked(a, b, &r)) return poly_arg_invalid();
+    if (truncate_output) r = i64_from_u64((uint64_t)a - (uint64_t)b);
     break;
   case POLY_OP_MUL:
-    r = i64_from_u64((uint64_t)a * (uint64_t)b);
+    if (!truncate_output && !i64_mul_checked(a, b, &r)) return poly_arg_invalid();
+    if (truncate_output) r = i64_from_u64((uint64_t)a * (uint64_t)b);
     break;
   case POLY_OP_IDIV:
-    if (poly_dtype_is_unsigned(dtype)) {
-      uint64_t ub = (uint64_t)b;
-      r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a / ub);
-    } else {
-      r = cdiv(a, b);
-    }
+    if (!truncate_output && a == INT64_MIN && b == -1) return poly_arg_invalid();
+    r = cdiv(a, b);
     break;
   case POLY_OP_MOD:
-    if (poly_dtype_is_unsigned(dtype)) {
-      uint64_t ub = (uint64_t)b;
-      r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a % ub);
-    } else {
-      r = cmod(a, b);
-    }
+    r = cmod(a, b);
     break;
   case POLY_OP_FLOORDIV:
-    if (poly_dtype_is_unsigned(dtype)) {
-      uint64_t ub = (uint64_t)b;
-      r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a / ub);
-    } else {
-      r = floor_div_i64(a, b);
-    }
+    if (!truncate_output && a == INT64_MIN && b == -1) return poly_arg_invalid();
+    r = floor_div_i64(a, b);
     break;
   case POLY_OP_FLOORMOD:
-    if (poly_dtype_is_unsigned(dtype)) {
-      uint64_t ub = (uint64_t)b;
-      r = i64_from_u64(ub == 0 ? 0 : (uint64_t)a % ub);
-    } else {
-      r = floor_mod_i64(a, b);
-    }
+    r = floor_mod_i64(a, b);
     break;
   case POLY_OP_MAX:
     r = a > b ? a : b;
     break;
   case POLY_OP_SHL:
     if (b < 0) return poly_arg_invalid();
-    r = (b >= 64) ? 0 : i64_from_u64((uint64_t)a << b);
+    if (!truncate_output) {
+      if (!i64_shl_checked(a, b, &r)) return poly_arg_invalid();
+    } else {
+      r = (b >= 64) ? 0 : i64_from_u64((uint64_t)a << b);
+    }
     break;
   case POLY_OP_SHR:
     if (b < 0) return poly_arg_invalid();
-    if (poly_dtype_is_unsigned(dtype)) {
-      r = (b >= 64) ? 0 : i64_from_u64((uint64_t)a >> b);
-    } else if (b >= 64) {
+    if (b >= 64) {
       r = a < 0 ? -1 : 0;
     } else if (b == 0 || a >= 0) {
       r = i64_from_u64((uint64_t)a >> b);
@@ -450,11 +510,32 @@ PolyArg poly_exec_alu(PolyOps op, PolyDType dtype, PolyArg *ops, int n_ops) {
   case POLY_OP_CMPEQ:
     return poly_arg_bool(a == b);
   case POLY_OP_MULACC:
-    r = i64_from_u64((uint64_t)a * (uint64_t)b + (uint64_t)c);
+    if (!truncate_output) {
+      int64_t product;
+      if (!i64_mul_checked(a, b, &product) || !i64_add_checked(product, c, &r))
+        return poly_arg_invalid();
+    } else {
+      r = i64_from_u64((uint64_t)a * (uint64_t)b + (uint64_t)c);
+    }
+    break;
+  case POLY_OP_POW:
+    if (b < 0) {
+      double value = safe_pow((double)a, (double)b);
+      /* Pinned exec_alu first returns Python's float result. Fixed-width
+       * integer truncation rejects it; weakint has no truncation function. */
+      if (truncate_output && !poly_dtype_is_index(dtype)) return poly_arg_invalid();
+      return poly_arg_float(value);
+    }
+    if (!truncate_output) {
+      if (!i64_pow_checked(a, b, &r)) return poly_arg_invalid();
+    } else {
+      r = i64_from_u64(u64_pow_wrapping((uint64_t)a, (uint64_t)b));
+    }
     break;
   default:
     return poly_arg_int(0);
   }
 
-  return truncate_result(poly_arg_int(r), dtype);
+  PolyArg result = poly_arg_int(r);
+  return truncate_output ? truncate_result(result, dtype) : result;
 }

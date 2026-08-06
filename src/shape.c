@@ -498,7 +498,9 @@ static ShapeCacheEntry *make_entry_scalar(PolyCtx *ctx) {
 }
 
 static PolyUOp *shape_dim_const(PolyCtx *ctx, int64_t value) {
-  return poly_uop0(ctx, POLY_OP_CONST, POLY_INT64, poly_arg_int(value));
+  /* Pinned shape_to_shape_arg/sint_to_uop use weakint for every Python
+   * integer dimension (uop/ops.py:85-89,1652). */
+  return poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(value));
 }
 
 static ShapeCacheEntry *make_entry_dims_uops(

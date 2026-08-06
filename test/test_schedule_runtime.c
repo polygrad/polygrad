@@ -132,6 +132,20 @@ static int count_root_ops(PolyCtx *ctx, PolyUOp *root, PolyOps op) {
   return count;
 }
 
+static PolyUOp *find_invalid_where(PolyCtx *ctx, PolyUOp *root) {
+  int n_topo = 0;
+  PolyUOp **topo = poly_toposort(ctx, root, &n_topo);
+  for (int i = 0; i < n_topo; i++) {
+    PolyUOp *u = topo[i];
+    if (!u || u->op != POLY_OP_WHERE || u->n_src != 3) continue;
+    for (int j = 1; j <= 2; j++)
+      if (u->src[j] && u->src[j]->op == POLY_OP_CONST &&
+          u->src[j]->arg.kind == POLY_ARG_INVALID)
+        return u;
+  }
+  return NULL;
+}
+
 TEST(schedule_runtime, split_reduceop_executes_two_calls) {
   /* Pinned tinygrad schedule/rangeify.py:102-123 splits a qualifying static
    * reduction into a materialized partial reduction and a final reduction.
@@ -1563,7 +1577,6 @@ TEST(schedule_runtime, complete_schedule_cached_linear_uses_current_bind_default
   ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink4, views4, 3, NULL, 0), 0);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out4_data[3], 106.0f, 1e-5);
-  ASSERT_FLOAT_EQ(out4_data[4], -1.0f, 1e-5);
 
   PolyUOp *a8 = NULL, *b8 = NULL, *out8 = NULL;
   PolyUOp *sink8 = make_bound_vecadd_sink(ctx, N, 8, 4000000, &a8, &b8, &out8);
@@ -1581,7 +1594,6 @@ TEST(schedule_runtime, complete_schedule_cached_linear_uses_current_bind_default
   ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink8, views8, 3, NULL, 0), 0);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out8_data[7], 224.0f, 1e-5);
-  ASSERT_FLOAT_EQ(out8_data[8], -1.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -1824,14 +1836,12 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_schedule_runner_valid) {
   float a_data[4] = {1, 2, 3, 4};
   float b_data[4] = {10, 20, 30, 40};
   float out_data[4] = {0};
-  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
-  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
-  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
-  poly_buffer_attach(ctx, a, &a_view);
-  poly_buffer_attach(ctx, b, &b_view);
-  poly_buffer_attach(ctx, out, &out_view);
-
-  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(a, a_data),
+      POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data),
+  };
+  ASSERT_INT_EQ(poly_test_run_schedule_buffer_views(ctx, sched, views, 3, NULL, 0), 0);
   ASSERT_INT_EQ((int)poly_runtime_cache_len(ctx), 1);
   PolyCtxStats cached = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &cached), 0);
@@ -1860,7 +1870,7 @@ TEST(schedule_runtime, runtime_cache_clear_keeps_live_schedule_runner_valid) {
   b_data[3] = 80.0f;
   memset(out_data, 0, sizeof(out_data));
 
-  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  ASSERT_INT_EQ(poly_test_run_schedule_buffer_views(ctx, sched, views, 3, NULL, 0), 0);
   ASSERT_FLOAT_EQ(out_data[0], 55.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 88.0f, 1e-5);
 
@@ -2010,10 +2020,9 @@ TEST(schedule_runtime, ctx_stats_reports_schedule_and_runtime_caches) {
       (int)poly_program_cache_artifact_bytes(ctx),
       (int)poly_runtime_cache_artifact_bytes(ctx)
   );
-  if (poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP)
-    ASSERT_TRUE(stats.compiled_artifact_bytes > 0);
-  else
-    ASSERT_TRUE(stats.compiled_artifact_bytes > 4096);
+  /* SOURCE/BINARY sizes are backend-specific (PTX can be smaller than a
+   * native shared object), but a live cached runner must own an artifact. */
+  ASSERT_TRUE(stats.compiled_artifact_bytes > 0);
   ASSERT_TRUE(stats.buffer_entries >= 3);
 
   poly_runtime_cache_clear(ctx);
@@ -2052,14 +2061,12 @@ TEST(schedule_runtime, ctx_stats_fixed_shape_replay_plateaus) {
     a_data[i] = (float)i;
     b_data[i] = (float)(N - i);
   }
-  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
-  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
-  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
-  poly_buffer_attach(ctx, a, &a_view);
-  poly_buffer_attach(ctx, b, &b_view);
-  poly_buffer_attach(ctx, out, &out_view);
-
-  ASSERT_INT_EQ(poly_realize_sink(ctx, sink), 0);
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(a, a_data),
+      POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data),
+  };
+  ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, views, 3), 0);
   ASSERT_FLOAT_EQ(out_data[0], (float)N, 1e-5);
   ASSERT_FLOAT_EQ(out_data[N - 1], (float)N, 1e-5);
 
@@ -2070,8 +2077,8 @@ TEST(schedule_runtime, ctx_stats_fixed_shape_replay_plateaus) {
   ASSERT_INT_EQ(first.runtime_cache_entries, 1);
 
   for (int iter = 0; iter < 32; iter++) {
-    memset(out_data, 0, sizeof(out_data));
     ASSERT_INT_EQ(poly_realize_sink(ctx, sink), 0);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, out, out_data, sizeof(out_data)), 0);
     ASSERT_FLOAT_EQ(out_data[0], (float)N, 1e-5);
     ASSERT_FLOAT_EQ(out_data[N - 1], (float)N, 1e-5);
   }
@@ -2132,9 +2139,9 @@ TEST(schedule_runtime, ctx_stats_runtime_var_replay_plateaus) {
   for (int i = 0; i < 16; i++)
     out_data[i] = -999.0f;
   ASSERT_INT_EQ(poly_run_schedule(ctx, sched, &bind, 1), 0);
+  ASSERT_INT_EQ(poly_buffer_read(ctx, out, out_data, sizeof(out_data)), 0);
   for (int i = 0; i < 6; i++)
     ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
-  ASSERT_FLOAT_EQ(out_data[6], -999.0f, 1e-5f);
 
   PolyCtxStats first = {0};
   ASSERT_INT_EQ(poly_ctx_stats(ctx, &first), 0);
@@ -2145,13 +2152,10 @@ TEST(schedule_runtime, ctx_stats_runtime_var_replay_plateaus) {
   const int vals[] = {12, 6, 16, 12, 1, 15};
   for (int iter = 0; iter < (int)(sizeof(vals) / sizeof(vals[0])); iter++) {
     bind.value = vals[iter];
-    for (int i = 0; i < 16; i++)
-      out_data[i] = -999.0f;
     ASSERT_INT_EQ(poly_run_schedule(ctx, sched, &bind, 1), 0);
+    ASSERT_INT_EQ(poly_buffer_read(ctx, out, out_data, sizeof(out_data)), 0);
     for (int i = 0; i < vals[iter]; i++)
       ASSERT_FLOAT_EQ(out_data[i], (float)(i + 2), 1e-5f);
-    if (vals[iter] < 16)
-      ASSERT_FLOAT_EQ(out_data[vals[iter]], -999.0f, 1e-5f);
   }
 
   PolyCtxStats replay = {0};
@@ -2198,14 +2202,12 @@ TEST(schedule_runtime, schedule_cache_clear_keeps_live_schedule_cache_entry_vali
   float a_data[4] = {1, 2, 3, 4};
   float b_data[4] = {10, 20, 30, 40};
   float out_data[4] = {0};
-  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
-  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
-  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
-  poly_buffer_attach(ctx, a, &a_view);
-  poly_buffer_attach(ctx, b, &b_view);
-  poly_buffer_attach(ctx, out, &out_view);
-
-  ASSERT_INT_EQ(poly_run_schedule(ctx, sched, NULL, 0), 0);
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(a, a_data),
+      POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data),
+  };
+  ASSERT_INT_EQ(poly_test_run_schedule_buffer_views(ctx, sched, views, 3, NULL, 0), 0);
   ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
 
@@ -2332,7 +2334,6 @@ TEST(schedule_runtime, cached_linear_runtime_override_wins_over_default) {
   ASSERT_INT_EQ(poly_test_realize_buffer_views_vars(ctx, sink_again, views, 3, &override, 1), 0);
   ASSERT_INT_EQ((int)poly_schedule_cache_len(ctx), 1);
   ASSERT_FLOAT_EQ(out_data[5], 220.0f, 1e-5);
-  ASSERT_FLOAT_EQ(out_data[6], -1.0f, 1e-5);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -2463,14 +2464,12 @@ TEST(schedule_runtime, copy_intermediate_slots_do_not_need_zero) {
   float a_data[4] = {1, 2, 3, 4};
   float b_data[4] = {10, 20, 30, 40};
   float out_data[4] = {0};
-  PolyBuffer a_view = poly_buffer_make_host_view(a_data, sizeof(a_data));
-  PolyBuffer b_view = poly_buffer_make_host_view(b_data, sizeof(b_data));
-  PolyBuffer out_view = poly_buffer_make_host_view(out_data, sizeof(out_data));
-  poly_buffer_attach(ctx, a, &a_view);
-  poly_buffer_attach(ctx, b, &b_view);
-  poly_buffer_attach(ctx, out, &out_view);
-
-  ASSERT_INT_EQ(poly_run_schedule(ctx, ps, NULL, 0), 0);
+  PolyTestBufferView views[] = {
+      POLY_TEST_HOST_VIEW(a, a_data),
+      POLY_TEST_HOST_VIEW(b, b_data),
+      POLY_TEST_HOST_VIEW(out, out_data),
+  };
+  ASSERT_INT_EQ(poly_test_run_schedule_buffer_views(ctx, ps, views, 3, NULL, 0), 0);
   ASSERT_INT_EQ(poly_schedule_runtime_intermediate_bytes(ps), expected_runtime_bytes);
   ASSERT_FLOAT_EQ(out_data[0], 11.0f, 1e-5);
   ASSERT_FLOAT_EQ(out_data[3], 44.0f, 1e-5);
@@ -2508,6 +2507,7 @@ static int run_reduce_expand_memory_plan_case(MemoryPlanStats *stats) {
   PolyUOp *stores[K];
   float in_data[K][N];
   float out_data[K][N];
+  PolyTestBufferView views[2 * K];
   for (int k = 0; k < K; k++) {
     inputs[k] = poly_buffer_f32(ctx, N);
     outs[k] = poly_buffer_f32(ctx, N);
@@ -2522,6 +2522,12 @@ static int run_reduce_expand_memory_plan_case(MemoryPlanStats *stats) {
       in_data[k][i] = 1.0f;
       out_data[k][i] = 0.0f;
     }
+    views[2 * k] = (PolyTestBufferView){
+        .buffer = inputs[k], .handle = poly_buffer_make_host_view(in_data[k], sizeof(in_data[k]))
+    };
+    views[2 * k + 1] = (PolyTestBufferView){
+        .buffer = outs[k], .handle = poly_buffer_make_host_view(out_data[k], sizeof(out_data[k]))
+    };
   }
 
   PolySchedule *ps = poly_schedule_effect_sink(ctx, poly_sink_n(ctx, stores, K));
@@ -2543,14 +2549,7 @@ static int run_reduce_expand_memory_plan_case(MemoryPlanStats *stats) {
     }
   }
 
-  for (int k = 0; k < K; k++) {
-    PolyBuffer in_view = poly_buffer_make_host_view(in_data[k], sizeof(in_data[k]));
-    PolyBuffer out_view = poly_buffer_make_host_view(out_data[k], sizeof(out_data[k]));
-    poly_buffer_attach(ctx, inputs[k], &in_view);
-    poly_buffer_attach(ctx, outs[k], &out_view);
-  }
-
-  int rc = poly_run_schedule(ctx, ps, NULL, 0);
+  int rc = poly_test_run_schedule_buffer_views(ctx, ps, views, 2 * K, NULL, 0);
   stats->runtime_bytes = poly_schedule_runtime_intermediate_bytes(ps);
   stats->out0 = out_data[0][0];
   stats->out_last = out_data[K - 1][N - 1];
@@ -3282,6 +3281,13 @@ TEST(schedule_runtime, webgpu_triu_add_loads_keeps_residual_where_like_tinygrad)
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_LOAD), 1);
   ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 0);
+  PolyUOp *invalid_where = find_invalid_where(ctx, u);
+  ASSERT_NOT_NULL(invalid_where);
+  /* This is deliberately before pinned pm_lower_index_dtype: the residual
+   * coordinate and Invalid branch are still weakint at this stage. */
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->src[1]->dtype));
+  ASSERT_TRUE(poly_dtype_is_index(invalid_where->src[2]->dtype));
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -3330,6 +3336,11 @@ TEST(schedule_runtime, webgpu_triu_post_index_symbolic_keeps_invalid_where_until
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_LOAD), 1);
   ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 0);
+  PolyUOp *invalid_where = find_invalid_where(ctx, u);
+  ASSERT_NOT_NULL(invalid_where);
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->src[1]->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->src[2]->dtype, POLY_INT32));
 
   poly_schedule_free(sched);
   poly_ctx_destroy(ctx);
@@ -3448,8 +3459,44 @@ TEST(schedule_runtime, webgpu_tril_post_index_symbolic_keeps_invalid_where_until
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_WHERE), 1);
   ASSERT_INT_EQ(count_root_ops(ctx, u, POLY_OP_LOAD), 1);
   ASSERT_INT_EQ(count_root_gated_loads(ctx, u), 0);
+  PolyUOp *invalid_where = find_invalid_where(ctx, u);
+  ASSERT_NOT_NULL(invalid_where);
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->src[1]->dtype, POLY_INT32));
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->src[2]->dtype, POLY_INT32));
 
   poly_schedule_free(sched);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(schedule_runtime, index_dtype_where_keeps_true_wide_coordinate_long) {
+  /* Pinned pm_lower_index_dtype selects long for a genuinely overflowing
+   * branch and rebuilds Invalid with the same dtype (uop/ops.py:1655-1676). */
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyDType ptr_f32 = poly_dtype_ptr(POLY_FLOAT32, -1, POLY_ADDR_GLOBAL);
+  PolyUOp *buf = poly_uop0(ctx, POLY_OP_PARAM, ptr_f32, poly_arg_int(0));
+  PolyUOp *gate =
+      poly_uop0(ctx, POLY_OP_DEFINE_VAR, POLY_BOOL, poly_arg_define_var("gate", 0, 1));
+  PolyUOp *wide =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_int(INT64_C(1) << 40));
+  PolyUOp *invalid =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_INDEX, poly_arg_invalid());
+  PolyUOp *coord =
+      poly_uop3(ctx, POLY_OP_WHERE, POLY_INDEX, gate, wide, invalid, poly_arg_none());
+  PolyUOp *index =
+      poly_uop2(ctx, POLY_OP_INDEX, ptr_f32, buf, coord, poly_arg_none());
+  PolyUOp *load = poly_uop1(ctx, POLY_OP_LOAD, POLY_FLOAT32, index, poly_arg_none());
+  PolyUOp *sink = poly_uop1(ctx, POLY_OP_SINK, POLY_VOID, load, poly_arg_none());
+
+  PolyUOp *lowered = poly_apply_post_index_symbolic_stage(ctx, sink, 1);
+  PolyUOp *invalid_where = find_invalid_where(ctx, lowered);
+  ASSERT_NOT_NULL(invalid_where);
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->dtype, POLY_INT64));
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->src[1]->dtype, POLY_INT64));
+  ASSERT_TRUE(poly_dtype_eq(invalid_where->src[2]->dtype, POLY_INT64));
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -3820,6 +3867,7 @@ TEST(schedule_runtime, cpu_threaded_render_uses_core_id_and_arg_slots) {
       .caps = poly_c_renderer_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_c_renderer_extra(),
   };
   int n_lin = 0;

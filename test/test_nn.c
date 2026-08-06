@@ -1268,7 +1268,8 @@ TEST(nn, c5_full) {
 /* C2c: RNG determinism + cross-backend parity */
 
 TEST(nn, c2c_rand_bitpattern_8) {
-  /* Tier 1 bit-exact: full poly_rand pipeline (THREEFRY -> SHR 8 -> CAST f32 -> MUL 2^-24).
+  /* Tier 1 bit-exact: full poly_rand pipeline
+   * (THREEFRY<uint64> -> low uint32 -> SHR 8 -> CAST f32 -> MUL 2^-24).
    * seed=1337 -> key_lo=1337, key_hi=0, mixed_key=1337.
    * counter=[0..7], THREEFRY outputs match threefry_reference_vector_cpu. */
   const uint32_t thr_ref[8] = {2732499619u, 3322027265u, 2482432314u, 3871860445u,
@@ -1281,6 +1282,17 @@ TEST(nn, c2c_rand_bitpattern_8) {
   int64_t shape[1] = {8};
   PolyUOp *r = poly_rand(ctx, shape, 1, 1337u);
   ASSERT_NOT_NULL(r);
+  int n_topo = 0, threefry_u32 = 0, threefry_u64 = 0;
+  PolyUOp **topo = poly_toposort_alloc(ctx, r, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  for (int i = 0; i < n_topo; i++) {
+    if (topo[i]->op != POLY_OP_THREEFRY) continue;
+    if (poly_dtype_eq(topo[i]->dtype, POLY_UINT32)) threefry_u32++;
+    if (poly_dtype_eq(topo[i]->dtype, POLY_UINT64)) threefry_u64++;
+  }
+  ASSERT_INT_EQ(threefry_u32, 0);
+  ASSERT_INT_EQ(threefry_u64, 1);
+  poly_toposort_free(topo);
   PolyUOp *out = poly_buffer_f32(ctx, 8);
   PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, r));
   float result[8] = {0};

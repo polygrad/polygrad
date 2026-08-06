@@ -4,6 +4,7 @@
 #include "ctx.h"
 #include "utils.h"
 #include "engine/schedule.h"
+#include "runtime_webgpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -446,6 +447,171 @@ bool poly_buffer_is_allocated(PolyCtx *ctx, PolyUOp *buf) {
   return b != NULL && (b->ptr != NULL || b->nbytes == 0 || b->device == POLY_DEVICE_HOST);
 }
 
+static bool contiguous_view_shape_numel(PolyShape shape, uint64_t *out) {
+  if (!out || shape.ndim < 0) return false;
+  uint64_t numel = 1;
+  for (int d = 0; d < shape.ndim; d++) {
+    if (shape.dims[d] < 0 ||
+        (shape.dims[d] != 0 && numel > UINT64_MAX / (uint64_t)shape.dims[d]))
+      return false;
+    numel *= (uint64_t)shape.dims[d];
+  }
+  *out = numel;
+  return true;
+}
+
+bool poly_uop_contiguous_view_info(
+    PolyCtx *ctx,
+    PolyUOp *u,
+    PolyUOp **out_identity,
+    PolyShape *out_shape,
+    int64_t *out_numel,
+    size_t *out_byte_offset
+) {
+  if (!ctx || !u || !out_identity || !out_shape || !out_numel || !out_byte_offset)
+    return false;
+  *out_identity = NULL;
+  *out_shape = (PolyShape){.ndim = -1};
+  *out_numel = -1;
+  *out_byte_offset = 0;
+
+  int n_steps = 0;
+  bool has_shrink = false;
+  PolyUOp *base = u;
+  while (base && base->n_src >= 1 &&
+         (base->op == POLY_OP_RESHAPE || base->op == POLY_OP_SHRINK)) {
+    if (base->op == POLY_OP_SHRINK) {
+      bool canonical =
+          base->arg.kind == POLY_ARG_NONE && base->n_src >= 3 &&
+          base->src[1]->op == POLY_OP_STACK && base->src[2]->op == POLY_OP_STACK &&
+          base->src[1]->n_src == base->src[2]->n_src;
+      if (!canonical && base->arg.kind != POLY_ARG_PAIR_TUPLE) return false;
+      has_shrink = true;
+    }
+    n_steps++;
+    base = base->src[0];
+  }
+  if (!has_shrink || !base || !poly_uop_has_buffer_identity(base)) return false;
+  PolyUOp *identity = (PolyUOp *)poly_uop_get_buffer_identity(base);
+  PolyBuffer *storage = poly_buffer_get(ctx, identity);
+  if (!storage || (!storage->ptr && storage->nbytes != 0) || !storage->valid)
+    return false;
+
+  PolyUOp **steps = malloc((size_t)n_steps * sizeof(*steps));
+  if (!steps) return false;
+  PolyUOp *cur = u;
+  for (int i = 0; i < n_steps; i++, cur = cur->src[0]) steps[i] = cur;
+
+  PolyShape shape = poly_uop_max_shape_cached(ctx, base);
+  uint64_t base_numel = 0;
+  if (!contiguous_view_shape_numel(shape, &base_numel)) {
+    free(steps);
+    return false;
+  }
+  uint64_t element_offset = 0;
+  for (int i = n_steps - 1; i >= 0; i--) {
+    PolyUOp *step = steps[i];
+    PolyShape next = poly_uop_max_shape_cached(ctx, step);
+    uint64_t current_numel = 0, next_numel = 0;
+    if (!contiguous_view_shape_numel(shape, &current_numel) ||
+        !contiguous_view_shape_numel(next, &next_numel)) {
+      free(steps);
+      return false;
+    }
+    if (step->op == POLY_OP_RESHAPE) {
+      if (current_numel != next_numel) {
+        free(steps);
+        return false;
+      }
+      shape = next;
+      continue;
+    }
+
+    bool canonical =
+        step->arg.kind == POLY_ARG_NONE && step->n_src >= 3 &&
+        step->src[1]->op == POLY_OP_STACK && step->src[2]->op == POLY_OP_STACK &&
+        step->src[1]->n_src == shape.ndim && step->src[2]->n_src == shape.ndim;
+    if ((!canonical &&
+         (step->arg.kind != POLY_ARG_PAIR_TUPLE ||
+          step->arg.pair_tuple.n != shape.ndim)) ||
+        next.ndim != shape.ndim) {
+      free(steps);
+      return false;
+    }
+    uint64_t stride = 1, start = 0, last = 0, selected = 1;
+    bool empty = false, ok = true;
+    for (int d = shape.ndim - 1; d >= 0; d--) {
+      int64_t begin = 0, end = 0;
+      if (canonical) {
+        int64_t length = 0;
+        if (poly_uop_bind_value(step->src[1]->src[d], &begin) != 0 ||
+            poly_uop_bind_value(step->src[2]->src[d], &length) != 0 ||
+            __builtin_add_overflow(begin, length, &end)) {
+          ok = false;
+          break;
+        }
+      } else {
+        begin = step->arg.pair_tuple.pairs[d][0];
+        end = step->arg.pair_tuple.pairs[d][1];
+      }
+      int64_t dim = shape.dims[d];
+      if (dim < 0 || begin < 0 || end < begin || end > dim) {
+        ok = false;
+        break;
+      }
+      uint64_t length = (uint64_t)(end - begin);
+      if ((uint64_t)begin > UINT64_MAX / stride ||
+          start > UINT64_MAX - (uint64_t)begin * stride) {
+        ok = false;
+        break;
+      }
+      start += (uint64_t)begin * stride;
+      if (length == 0) {
+        empty = true;
+      } else {
+        uint64_t tail = (uint64_t)(end - 1);
+        if (tail > UINT64_MAX / stride || last > UINT64_MAX - tail * stride ||
+            selected > UINT64_MAX / length) {
+          ok = false;
+          break;
+        }
+        last += tail * stride;
+        selected *= length;
+      }
+      if ((uint64_t)dim != 0 && stride > UINT64_MAX / (uint64_t)dim) {
+        ok = false;
+        break;
+      }
+      stride *= (uint64_t)dim;
+    }
+    if (!ok || (!empty && (last < start || last - start + 1 != selected)) ||
+        element_offset > UINT64_MAX - start) {
+      free(steps);
+      return false;
+    }
+    element_offset += start;
+    shape = next;
+  }
+  free(steps);
+
+  uint64_t numel = 0;
+  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(identity->dtype));
+  if (!contiguous_view_shape_numel(shape, &numel) || numel > INT64_MAX ||
+      itemsize == 0 || element_offset > SIZE_MAX / itemsize)
+    return false;
+  size_t byte_offset = (size_t)element_offset * itemsize;
+  if (byte_offset > storage->nbytes ||
+      numel > SIZE_MAX / itemsize ||
+      (size_t)numel * itemsize > storage->nbytes - byte_offset)
+    return false;
+
+  *out_identity = identity;
+  *out_shape = shape;
+  *out_numel = (int64_t)numel;
+  *out_byte_offset = byte_offset;
+  return true;
+}
+
 PolyUOp *poly_buffer_view(
     PolyCtx *ctx,
     PolyUOp *base,
@@ -486,6 +652,68 @@ PolyUOp *poly_buffer_view(
   alias.memory_device = POLY_DEVICE_AUTO;
   poly_buffer_attach(ctx, view, &alias);
   return view;
+}
+
+PolyUOp *poly_uop_buffer(PolyCtx *ctx, PolyUOp *u) {
+  if (!ctx || !u) return NULL;
+  if ((u->op == POLY_OP_CONTIGUOUS || u->op == POLY_OP_RESHAPE ||
+       u->op == POLY_OP_DETACH || u->op == POLY_OP_AFTER) &&
+      u->n_src >= 1)
+    return poly_uop_buffer(ctx, u->src[0]);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(u);
+  if (identity) return (PolyUOp *)identity;
+
+  PolyUOp *view_base = NULL;
+  PolyShape view_shape = {.ndim = -1};
+  int64_t view_numel = -1;
+  size_t byte_offset = 0;
+  if (!poly_uop_contiguous_view_info(
+          ctx, u, &view_base, &view_shape, &view_numel, &byte_offset
+      ))
+    return NULL;
+  PolyBuffer *parent = poly_buffer_get(ctx, view_base);
+  size_t itemsize = poly_dtype_itemsize(poly_dtype_scalar(view_base->dtype));
+  if (!parent || itemsize == 0 || view_numel < 0 ||
+      (uint64_t)view_numel > SIZE_MAX / itemsize)
+    return NULL;
+  size_t nbytes = (size_t)view_numel * itemsize;
+
+  /* Pinned UOp.buffer returns Buffer.view for a contiguous movement
+   * (uop/ops.py:838-852); it does not create a UOp. Attach that runtime view
+   * to the exact immutable movement node instead of manufacturing a
+   * BUFFER_VIEW/UNIQUE. Repeated access refreshes one ctx->buffers row. */
+  PolyBuffer alias = *parent;
+  alias.nbytes = nbytes;
+  alias.owned = false;
+  alias.src = NULL;
+  alias.frontend_release = NULL;
+  alias.memory_accounted = false;
+  alias.memory_device = POLY_DEVICE_AUTO;
+  if (parent->device == POLY_DEVICE_WEBGPU && byte_offset != 0) {
+#ifdef __EMSCRIPTEN__
+    uintptr_t view = poly_webgpu_create_buffer_view(
+        (uintptr_t)parent->ptr, byte_offset, nbytes
+    );
+    if (!view) return NULL;
+    alias.ptr = (void *)view;
+    alias.owned = true;
+#else
+    return NULL;
+#endif
+  } else {
+    alias.ptr = parent->ptr ? (void *)((char *)parent->ptr + byte_offset) : NULL;
+  }
+
+  PolyBuffer *cached = poly_buffer_get(ctx, u);
+  if (cached) {
+    poly_buffer_free_chain(ctx, cached);
+    *cached = alias;
+  } else if (alias.owned) {
+    poly_buffer_adopt(ctx, u, &alias);
+  } else {
+    poly_buffer_attach(ctx, u, &alias);
+  }
+  return poly_buffer_get(ctx, u) ? u : NULL;
 }
 
 static const PolyAllocator *buffer_allocator(const PolyBuffer *b) {

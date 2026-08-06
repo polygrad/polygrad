@@ -125,6 +125,85 @@ PolyDType poly_dtype_scalar(PolyDType dt) {
   return s;
 }
 
+/*
+ * Pinned tinygrad dtype.py:235-249 defines the JAX-style promotion lattice
+ * and least_upper_dtype over scalar dtypes. Polygrad does not yet expose fp8,
+ * so this is the exact induced subgraph over its supported scalar vocabulary.
+ */
+bool poly_dtype_least_upper(PolyDType a, PolyDType b, PolyDType *out) {
+  if (!out || a.is_ptr || b.is_ptr) return false;
+  a = poly_dtype_scalar(a);
+  b = poly_dtype_scalar(b);
+  if (poly_dtype_eq(a, b)) {
+    *out = a;
+    return true;
+  }
+
+  enum {
+    PROMO_BOOL,
+    PROMO_WEAKINT,
+    PROMO_INT8,
+    PROMO_UINT8,
+    PROMO_INT16,
+    PROMO_UINT16,
+    PROMO_INT32,
+    PROMO_UINT32,
+    PROMO_INT64,
+    PROMO_UINT64,
+    PROMO_FLOAT16,
+    PROMO_BFLOAT16,
+    PROMO_FLOAT32,
+    PROMO_FLOAT64,
+    PROMO_COUNT,
+  };
+  static const PolyDType *const types[PROMO_COUNT] = {
+      &POLY_BOOL,    &POLY_INDEX,    &POLY_INT8,    &POLY_UINT8,
+      &POLY_INT16,   &POLY_UINT16,   &POLY_INT32,   &POLY_UINT32,
+      &POLY_INT64,   &POLY_UINT64,   &POLY_FLOAT16, &POLY_BFLOAT16,
+      &POLY_FLOAT32, &POLY_FLOAT64,
+  };
+  static const uint16_t parents[PROMO_COUNT] = {
+      [PROMO_BOOL] = 1u << PROMO_WEAKINT,
+      [PROMO_WEAKINT] = (1u << PROMO_INT8) | (1u << PROMO_UINT8),
+      [PROMO_INT8] = 1u << PROMO_INT16,
+      [PROMO_UINT8] = (1u << PROMO_INT16) | (1u << PROMO_UINT16),
+      [PROMO_INT16] = 1u << PROMO_INT32,
+      [PROMO_UINT16] = (1u << PROMO_INT32) | (1u << PROMO_UINT32),
+      [PROMO_INT32] = 1u << PROMO_INT64,
+      [PROMO_UINT32] = (1u << PROMO_INT64) | (1u << PROMO_UINT64),
+      [PROMO_INT64] = 1u << PROMO_UINT64,
+      [PROMO_UINT64] = (1u << PROMO_FLOAT16) | (1u << PROMO_BFLOAT16),
+      [PROMO_FLOAT16] = 1u << PROMO_FLOAT32,
+      [PROMO_BFLOAT16] = 1u << PROMO_FLOAT32,
+      [PROMO_FLOAT32] = 1u << PROMO_FLOAT64,
+  };
+
+  int ai = -1, bi = -1;
+  for (int i = 0; i < PROMO_COUNT; i++) {
+    if (poly_dtype_eq(a, *types[i])) ai = i;
+    if (poly_dtype_eq(b, *types[i])) bi = i;
+  }
+  if (ai < 0 || bi < 0) return false;
+
+  uint16_t closures[2] = {(uint16_t)(1u << ai), (uint16_t)(1u << bi)};
+  for (int c = 0; c < 2; c++) {
+    for (;;) {
+      uint16_t expanded = closures[c];
+      for (int i = 0; i < PROMO_COUNT; i++)
+        if (closures[c] & (1u << i)) expanded |= parents[i];
+      if (expanded == closures[c]) break;
+      closures[c] = expanded;
+    }
+  }
+  uint16_t common = closures[0] & closures[1];
+  for (int i = 0; i < PROMO_COUNT; i++) {
+    if (!(common & (1u << i))) continue;
+    *out = *types[i];
+    return true;
+  }
+  return false;
+}
+
 PolyDType poly_dtype_vec(PolyDType dt, int sz) {
   if (sz == 1 || poly_dtype_eq(dt, POLY_VOID)) return dt;
   PolyDType v = dt;

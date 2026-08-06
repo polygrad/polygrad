@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 28
+#define POLYGRAD_ABI_VERSION 40
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,12 +21,7 @@ extern "C" {
 
 /* FFI buffer constructors for bindings that cannot pass PolyDType by value. */
 PolyUOp *poly_buffer_by_id(PolyCtx *ctx, int dtype_id, int64_t size);
-PolyUOp *poly_buffer_on_device_by_id(
-    PolyCtx *ctx,
-    int dtype_id,
-    int64_t size,
-    int device_id
-);
+PolyUOp *poly_buffer_on_device_by_id(PolyCtx *ctx, int dtype_id, int64_t size, int device_id);
 PolyUOp *poly_buffer_var_by_id(
     PolyCtx *ctx,
     int dtype_id,
@@ -52,18 +47,8 @@ PolyTensor *poly_tensor_from_host_by_id(
     const int64_t *dims,
     int ndim
 );
-PolyTensor *poly_tensor_const_int_by_id(
-    PolyCtx *ctx,
-    int64_t value,
-    int dtype_id,
-    int device_id
-);
-PolyTensor *poly_tensor_const_float_by_id(
-    PolyCtx *ctx,
-    double value,
-    int dtype_id,
-    int device_id
-);
+PolyTensor *poly_tensor_const_int_by_id(PolyCtx *ctx, int64_t value, int dtype_id, int device_id);
+PolyTensor *poly_tensor_const_float_by_id(PolyCtx *ctx, double value, int dtype_id, int device_id);
 PolyTensor *poly_tensor_full_int_by_id(
     PolyCtx *ctx,
     const int64_t *dims,
@@ -104,13 +89,7 @@ PolyTensor *poly_tensor_linspace_by_id(
     int dtype_id,
     int device_id
 );
-PolyTensor *poly_tensor_eye_by_id(
-    PolyCtx *ctx,
-    int64_t n,
-    int64_t m,
-    int dtype_id,
-    int device_id
-);
+PolyTensor *poly_tensor_eye_by_id(PolyCtx *ctx, int64_t n, int64_t m, int dtype_id, int device_id);
 int poly_uop_op(PolyUOp *u);
 int poly_uop_dtype_id(PolyCtx *ctx, PolyUOp *u);
 int poly_uop_n_src(PolyUOp *u);
@@ -120,7 +99,13 @@ PolyUOp *poly_uop_src(PolyUOp *u, int idx);
  * These only build UOps; execution still flows through normal CALL scheduling. */
 PolyUOp *poly_uop_placeholder_like(PolyCtx *ctx, PolyUOp *like, int slot);
 PolyUOp *poly_uop_range(PolyCtx *ctx, int64_t bound, int64_t axis_id, int axis_type);
-PolyUOp *poly_uop_index(PolyCtx *ctx, PolyUOp *base, PolyUOp **indices, int n_indices, int keep_ptr);
+PolyUOp *poly_uop_index(
+    PolyCtx *ctx,
+    PolyUOp *base,
+    PolyUOp **indices,
+    int n_indices,
+    int keep_ptr
+);
 PolyUOp *poly_uop_load(PolyCtx *ctx, PolyUOp *addr);
 PolyUOp *poly_uop_store(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value);
 PolyUOp *poly_uop_set(PolyCtx *ctx, PolyUOp *addr, PolyUOp *value, PolyUOp **ranges, int n_ranges);
@@ -130,7 +115,13 @@ PolyUOp *poly_uop_sink(PolyCtx *ctx, PolyUOp **srcs, int n_src);
 PolyUOp *poly_uop_sink_ex(PolyCtx *ctx, PolyUOp **srcs, int n_src, const char *name, int optimize);
 PolyUOp *poly_uop_call(PolyCtx *ctx, PolyUOp *body, PolyUOp **args, int n_args);
 PolyUOp *poly_uop_after(PolyCtx *ctx, PolyUOp *target, PolyUOp *effect);
-PolyUOp *poly_uop_reduce(PolyCtx *ctx, PolyOps reduce_op, PolyUOp *expr, PolyUOp **ranges, int n_ranges);
+PolyUOp *poly_uop_reduce(
+    PolyCtx *ctx,
+    PolyOps reduce_op,
+    PolyUOp *expr,
+    PolyUOp **ranges,
+    int n_ranges
+);
 PolyUOp *poly_uop_flatten(PolyCtx *ctx, PolyUOp *u);
 int64_t poly_uop_numel(PolyCtx *ctx, PolyUOp *u);
 

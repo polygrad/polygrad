@@ -36,8 +36,51 @@ async function runNativeDeviceSelectionSmoke() {
   await expectNativeDeviceReject('webgpu')
 }
 
+async function runNativeCrossContextEinsumReject() {
+  const pgA = await polygrad.create({ core: 'native', device: 'cpu' })
+  const pgB = await polygrad.create({ core: 'native', device: 'cpu' })
+  try {
+    const a = new pgA.Tensor([1, 2, 3])
+    const b = new pgB.Tensor([4, 5, 6])
+    assert.throws(
+      () => pgA.Tensor.einsum('i,i->', a, b),
+      /same Polygrad context/
+    )
+  } finally {
+    await pgA.dispose()
+    await pgB.dispose()
+  }
+}
+
+async function runNativeTensorUOpContextOwnership() {
+  const pgA = await polygrad.create({ core: 'native', device: 'cpu' })
+  const pgB = await polygrad.create({ core: 'native', device: 'cpu' })
+  try {
+    const source = new pgA.Tensor([-2, 0, 3])
+    const wrapped = new pgA.Tensor(source.uop)
+    assert.strictEqual(wrapped._ctx, source._ctx)
+    assert.strictEqual(wrapped.constLike(1)._ctx, wrapped._ctx)
+    assert.deepStrictEqual(Array.from(await wrapped.sign().toArray()), [-1, 0, 1])
+    assert.throws(
+      () => new pgA.Tensor(source.uop, { _ctx: pgB._core.ctx }),
+      /same Polygrad context/
+    )
+
+    const foreign = new pgB.Tensor([-2, 0, 3])
+    assert.throws(
+      () => new pgA.Tensor(foreign.uop),
+      /same Polygrad context/
+    )
+  } finally {
+    await pgA.dispose()
+    await pgB.dispose()
+  }
+}
+
 async function main() {
   await runNativeDeviceSelectionSmoke()
+  await runNativeCrossContextEinsumReject()
+  await runNativeTensorUOpContextOwnership()
   const pg = await polygrad.create({ core: 'native' })
   const syncResult = await runSyncContractTests(polygrad, pg, { core: 'native' })
   const tensorResult = await runTensorTests(pg)

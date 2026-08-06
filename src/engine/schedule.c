@@ -2205,7 +2205,13 @@ static bool poly_eval_launch_expr(
     PolyUOp *node = topo[i];
     PolyArg value = poly_arg_invalid();
     if (node->op == POLY_OP_CONST) {
-      value = node->arg;
+      /* Launch dimensions and binding values are signed-64 API values.
+       * Reject an exact Python-int CONST outside that domain rather than
+       * reading its union storage as int64_t. */
+      if (node->arg.kind == POLY_ARG_BIGINT)
+        ok = false;
+      else
+        value = node->arg;
     } else if (node->op == POLY_OP_DEFINE_VAR) {
       ok = poly_lookup_var_value(node, bindings, n_bindings, &value);
     } else if (node->op == POLY_OP_CAST) {
@@ -2215,7 +2221,9 @@ static bool poly_eval_launch_expr(
       if (!operand)
         ok = false;
       else
-        value = poly_exec_alu(POLY_OP_CAST, node->dtype, operand, 1);
+        /* Pinned tinygrad ops.py:1021-1035 evaluates symbolic CAST through
+         * renderer_infer host conversion, without narrowing to dtype width. */
+        value = poly_exec_alu(POLY_OP_CAST, node->dtype, operand, 1, false);
     } else if (poly_opset_has(POLY_GROUP_ALU, node->op) && node->n_src <= 3) {
       PolyArg operands[3];
       for (int j = 0; j < node->n_src; j++) {
@@ -2228,7 +2236,10 @@ static bool poly_eval_launch_expr(
         }
         operands[j] = *operand;
       }
-      if (ok) value = poly_exec_alu(node->op, node->dtype, operands, node->n_src);
+      if (ok)
+        /* sym_infer evaluates host arithmetic first; launch/estimate range
+         * checks consume that value instead of a dtype-wrapped surrogate. */
+        value = poly_exec_alu(node->op, node->dtype, operands, node->n_src, false);
     } else {
       ok = false;
     }
@@ -2251,15 +2262,20 @@ static bool poly_eval_launch_expr(
   return ok;
 }
 
-static int64_t poly_launch_arg_to_i64(PolyArg arg) {
+static bool poly_launch_arg_to_i64(PolyArg arg, int64_t *out) {
+  if (!out) return false;
   switch (arg.kind) {
   case POLY_ARG_BOOL:
-    return arg.b ? 1 : 0;
+    *out = arg.b ? 1 : 0;
+    return true;
   case POLY_ARG_FLOAT:
-    return (int64_t)arg.f;
+    *out = (int64_t)arg.f;
+    return true;
   case POLY_ARG_INT:
+    *out = arg.i;
+    return true;
   default:
-    return arg.i;
+    return false;
   }
 }
 
@@ -2272,7 +2288,8 @@ static int poly_estimate_expr_infer(
   if (!expr || !out) return -1;
   PolyArg value;
   if (!poly_eval_launch_expr(expr, bindings, n_bindings, &value)) return -1;
-  int64_t signed_value = poly_launch_arg_to_i64(value);
+  int64_t signed_value = 0;
+  if (!poly_launch_arg_to_i64(value, &signed_value)) return -1;
   if (signed_value < 0) return -1;
   *out = (uint64_t)signed_value;
   return 0;
@@ -2316,13 +2333,15 @@ static int poly_resolve_runner_launch_dims(
     if (runner->grid_exprs[dim]) {
       PolyArg value;
       if (!poly_eval_launch_expr(runner->grid_exprs[dim], bindings, n_bindings, &value)) return -1;
-      int64_t resolved = poly_launch_arg_to_i64(value);
+      int64_t resolved = 0;
+      if (!poly_launch_arg_to_i64(value, &resolved)) return -1;
       runner->grid[dim] = (resolved > 0 && resolved <= INT32_MAX) ? (int)resolved : 1;
     }
     if (runner->block_exprs[dim]) {
       PolyArg value;
       if (!poly_eval_launch_expr(runner->block_exprs[dim], bindings, n_bindings, &value)) return -1;
-      int64_t resolved = poly_launch_arg_to_i64(value);
+      int64_t resolved = 0;
+      if (!poly_launch_arg_to_i64(value, &resolved)) return -1;
       runner->block[dim] = (resolved > 0 && resolved <= INT32_MAX) ? (int)resolved : 1;
     }
   }
@@ -2576,18 +2595,9 @@ static PolyDevice poly_schedule_slot_declared_execution_device(
     int slot_idx,
     PolyDevice fallback
 ) {
+  (void)fallback;
   if (!sched || slot_idx < 0 || slot_idx >= sched->template->n_buf_slots) return POLY_DEVICE_AUTO;
   PolyDevice dev = sched->template->buf_slots[slot_idx].device;
-  if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST &&
-      fallback != POLY_DEVICE_AUTO && fallback != POLY_DEVICE_HOST &&
-      dev != fallback && poly_device_can_execute(fallback) &&
-      poly_device_is_host_addressable(dev) && poly_device_is_host_addressable(fallback))
-    return POLY_DEVICE_AUTO;
-  if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST &&
-      poly_device_is_host_addressable(dev) && fallback != POLY_DEVICE_AUTO &&
-      fallback != POLY_DEVICE_HOST && poly_device_can_execute(fallback) &&
-      !poly_device_is_host_addressable(fallback))
-    return POLY_DEVICE_AUTO;
   if (dev != POLY_DEVICE_AUTO && dev != POLY_DEVICE_HOST && poly_device_can_execute(dev))
     return dev;
   return POLY_DEVICE_AUTO;
@@ -5936,6 +5946,7 @@ static PolyRewriteOpts cpu_schedule_rewrite_opts(void) {
       .caps = poly_c_renderer_caps(),
       .device = POLY_DEVICE_CPU,
       .opt_policy = POLY_OPT_HEURISTIC,
+      .dtype_matcher = poly_pm_bf16_non_native(),
       .extra_matcher = poly_pm_c_renderer_extra(),
   };
 }
@@ -6103,7 +6114,32 @@ static int interp_lower_item(
     if (n_lin > 0) memcpy(copy, lin, (size_t)n_lin * sizeof(PolyUOp *));
     lin = copy;
   } else {
-    lin = poly_linearize(ctx, scheduled_root, &n_lin);
+    /* Pinned PythonRenderer uses python_alu as its supported op set and, on
+     * Python 3.11, emulates unsupported float16 through float32 before
+     * transcendental lowering (ops_python.py:203-223;
+     * codegen/__init__.py:116-137). INTERP is that execution contract, not a
+     * ClangRenderer program, so it must not inherit poly_linearize's C caps. */
+    PolyRewriteOpts opts = {
+        .optimize = poly_kernel_optimize_enabled(scheduled_root),
+        .devectorize = 1,
+        .caps =
+            {
+                .has_mulacc = true,
+                .has_max = true,
+                .has_threefry = false,
+                .has_exp2 = true,
+                .has_log2 = true,
+                .has_sin = true,
+                .has_fdiv = false,
+                .has_int64 = true,
+                .has_local = false,
+                .max_vec_width = 4,
+            },
+        .device = POLY_DEVICE_INTERP,
+        .opt_policy = POLY_OPT_HEURISTIC,
+        .dtype_matcher = poly_pm_f16_non_native(),
+    };
+    lin = poly_linearize_ex(ctx, scheduled_root, opts, &n_lin);
     if (lin) {
       PolyUOp *linear = poly_uop(ctx, POLY_OP_LINEAR, POLY_VOID, lin, n_lin, poly_arg_none());
       final_program = linear ? poly_program_with_linear(ctx, program, linear) : NULL;
@@ -7080,11 +7116,6 @@ cleanup:
 /* Infer the execution device from attached runtime buffers, matching the
  * graph-driven realize path. HOST buffers never force the executor. */
 PolyDevice poly_schedule_infer_device(PolyCtx *ctx, const PolySchedule *sched) {
-  PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
-  if (preferred != POLY_DEVICE_AUTO && preferred != POLY_DEVICE_HOST &&
-      poly_device_can_execute(preferred))
-    return preferred;
-
   PolyDevice device = POLY_DEVICE_AUTO;
   for (int s = 0; sched && s < sched->template->n_buf_slots; s++) {
     PolyDevice hinted = sched->template->buf_slots[s].device;
@@ -7094,6 +7125,14 @@ PolyDevice poly_schedule_infer_device(PolyCtx *ctx, const PolySchedule *sched) {
       break;
     }
   }
+  /* Pinned tinygrad stores the canonicalized device in BUFFER/DEVICE/COPY
+   * UOps (tensor.py:77-120,327-335; uop/ops.py:664-667,733-746). DEV selects
+   * only an unspecified device; it never overrides an explicit graph device.
+   * Polygrad's ctx preference has the same fallback role. */
+  PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
+  if (device == POLY_DEVICE_AUTO && preferred != POLY_DEVICE_AUTO &&
+      preferred != POLY_DEVICE_HOST && poly_device_can_execute(preferred))
+    device = preferred;
   for (int s = 0; sched && s < sched->template->n_buf_slots; s++) {
     if (device != POLY_DEVICE_AUTO) break;
     if (sched->template->buf_slots[s].is_intermediate) continue;
@@ -7187,6 +7226,11 @@ static PolyBuffer *poly_call_host_slot_residency(PolyCtx *ctx, PolyUOp *buf_uop,
   return cur->src;
 }
 
+static bool poly_buffer_has_current_value(PolyCtx *ctx, PolyUOp *buf_uop) {
+  PolyBuffer *cur = poly_buffer_get(ctx, buf_uop);
+  return cur && (cur->valid || (cur->src && cur->src->valid));
+}
+
 static int poly_mark_call_host_residency_written(
     PolyCtx *ctx,
     PolyUOp *buf_uop,
@@ -7241,9 +7285,17 @@ static int poly_prepare_call_buffer_slots_common(
     PolyUOp *buf_uop = poly_schedule_runtime_slot_uop(sched, slot);
     PolyDevice slot_device =
         poly_call_arg_runtime_device(ctx, sched, call, slot, access->outs[i], access->ins[i], device);
+    bool needs_current = access->ins[i];
+    /* Pinned exec_kernel passes each already-allocated Buffer directly to the
+     * runtime (engine/realize.py:172-180). ProgramInfo.outs is write-access
+     * metadata, not proof that every byte is unconditionally overwritten.
+     * Preserve Polygrad's current residency for any existing output; fresh
+     * outputs still allocate without migration. */
+    if (!needs_current && access->outs[i])
+      needs_current = poly_buffer_has_current_value(ctx, buf_uop);
     PolyBuffer *b = NULL;
     if (slot_device == POLY_DEVICE_HOST) {
-      b = poly_call_host_slot_residency(ctx, buf_uop, access->ins[i]);
+      b = poly_call_host_slot_residency(ctx, buf_uop, needs_current);
       bool allow_keyed_host =
           poly_call_is_copy(call) && b && b->device == POLY_DEVICE_HOST && !b->ptr;
       if (!b || (!b->ptr && !allow_keyed_host)) {
@@ -7257,7 +7309,7 @@ static int poly_prepare_call_buffer_slots_common(
       goto prepared;
     }
 
-    if (access->ins[i]) {
+    if (needs_current) {
       int migration_rc = poly_buffer_ensure_device_current(ctx, buf_uop, slot_device);
       if (migration_rc != 0) {
         if (poly_debug_at_least(7)) {
@@ -7617,6 +7669,12 @@ static uint32_t poly_schedule_lower_env_stamp(void) {
       (uint8_t)(poly_getenv_int("POLY_DEVECTORIZE", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("POLY_TC_OPT", 0) & 0xFF),
       (uint8_t)(poly_getenv_int("POLY_USE_TC", 1) & 0xFF),
+      /* Pinned cstyle.py:232-237 changes generated source topology when
+       * EXPAND_SSA is enabled, so expanded and inlined programs cannot share
+       * a runtime-cache entry. */
+      (uint8_t)(
+          poly_getenv_flag("EXPAND_SSA") || poly_getenv_flag("POLY_EXPAND_SSA")
+      ),
       wasm_features,
       (uint8_t)(x86_features & 0xFF),
       (uint8_t)((x86_features >> 8) & 0xFF),

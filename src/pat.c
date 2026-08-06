@@ -7,6 +7,8 @@
 
 #include "pat.h"
 #include "arena.h"
+#include "bigint.h"
+#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -1239,7 +1241,19 @@ PolyUOp *poly_graph_rewrite_ex(
 /* UOp helpers for rewrite callbacks */
 
 PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
-  /* Normalise the arg kind to match ref->dtype.
+  if (!ctx || !ref) return NULL;
+
+  /* UOp.const_like uses dtype.base, which removes pointer metadata but keeps
+   * an ordinary vector dtype intact (uop/ops.py:496-497, dtype.py:79,106). */
+  PolyDType dtype = ref->dtype;
+  if (dtype.is_ptr) {
+    dtype.is_ptr = false;
+    dtype.addrspace = 0;
+    dtype.vcount = 0;
+    dtype.ptr_size = 0;
+  }
+
+  /* Normalise the arg kind to match the const dtype.
    *
    * Tinygrad parity: every const construction goes through DType.const(b)
    * which converts to ConstFloat(float(b)) / bool(b) / int(b) based on the
@@ -1248,46 +1262,87 @@ PolyUOp *poly_const_like(PolyCtx *ctx, PolyUOp *ref, PolyArg val) {
    * a CONST_INT(5) into a float-tagged CONST and the codegen would mis-
    * interpret arg.i as arg.f, lowering it to a denormal/zero. Verified
    * against test/parity_scripts/tg_cast_const_fold_gt.py cases A-E. */
-  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_FLOAT || val.kind == POLY_ARG_BOOL) {
-    if (poly_dtype_is_float(ref->dtype)) {
-      double dval = (val.kind == POLY_ARG_INT)    ? (double)val.i
+  PolyUOp *scalar = NULL;
+  if (val.kind == POLY_ARG_INT || val.kind == POLY_ARG_BIGINT ||
+      val.kind == POLY_ARG_FLOAT || val.kind == POLY_ARG_BOOL) {
+    if (poly_dtype_is_float(dtype)) {
+      double dval = (val.kind == POLY_ARG_BIGINT) ? poly_arg_integer_to_double(val)
+                    : (val.kind == POLY_ARG_INT)  ? (double)val.i
                     : (val.kind == POLY_ARG_BOOL) ? (val.b ? 1.0 : 0.0)
                                                   : val.f;
-      return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_float(dval));
-    }
-    if (poly_dtype_is_bool(ref->dtype)) {
-      bool bval = (val.kind == POLY_ARG_INT)    ? (val.i != 0)
+      scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(dval));
+    } else if (poly_dtype_is_bool(dtype)) {
+      bool bval = (val.kind == POLY_ARG_BIGINT)
+                      ? poly_arg_integer_to_u64_mod(val) != 0 ||
+                            val.bigint.n_limbs > 2
+                    : (val.kind == POLY_ARG_INT) ? (val.i != 0)
                   : (val.kind == POLY_ARG_BOOL) ? val.b
                                                 : (val.f != 0.0);
-      return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(bval));
+      scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_bool(bval));
+    } else {
+      /* Pinned DType.const uses int(val), which raises for NaN/Inf
+       * (dtype.py:92-100). C has no exception carrier, so decline this
+       * rewrite and retain the original ALU instead of casting nonfinite
+       * floating storage to int64_t. */
+      if (val.kind == POLY_ARG_FLOAT && !isfinite(val.f)) return NULL;
+      PolyArg ival =
+          val.kind == POLY_ARG_BIGINT
+              ? val
+              : poly_arg_int(
+                    val.kind == POLY_ARG_INT     ? val.i
+                    : val.kind == POLY_ARG_BOOL ? (val.b ? 1 : 0)
+                                                : (int64_t)val.f
+                );
+      scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, ival);
     }
-    int64_t ival = (val.kind == POLY_ARG_INT)    ? val.i
-                   : (val.kind == POLY_ARG_BOOL) ? (val.b ? 1 : 0)
-                                                 : (int64_t)val.f;
-    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_int(ival));
+  } else {
+    /* Non-numeric arg kinds (NONE, OPS, RANGE, etc.) are passed through as-is
+     * for callers like rule_const_fold_unary that synthesize the right kind
+     * via poly_exec_alu. */
+    scalar = poly_uop0(ctx, POLY_OP_CONST, dtype, val);
   }
-  /* Non-numeric arg kinds (NONE, OPS, RANGE, etc.) are passed through as-is
-   * for callers like rule_const_fold_unary that synthesise the right kind
-   * via poly_exec_alu. */
-  return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, val);
+  if (!scalar) return NULL;
+
+  /* Exact UOp.const(..., shape=ref._shape) topology
+   * (uop/ops.py:553-561): keep a matching CONST shape, otherwise reshape to
+   * rank-many ones and expand to the reference's exact symbolic dimensions. */
+  int ref_ndim = poly_uop_ndim(ctx, ref);
+  if (ref_ndim <= 0) return scalar; /* shape None or scalar */
+  if (ref_ndim > POLY_MAX_DIMS) return NULL;
+
+  bool same_shape = poly_uop_ndim(ctx, scalar) == ref_ndim;
+  for (int i = 0; same_shape && i < ref_ndim; i++) {
+    PolyUOp *a = poly_uop_shape_dim(ctx, scalar, i);
+    PolyUOp *b = poly_uop_shape_dim(ctx, ref, i);
+    int64_t av = 0, bv = 0;
+    if (a != b &&
+        !(poly_uop_const_i64(a, &av) == 0 && poly_uop_const_i64(b, &bv) == 0 && av == bv))
+      same_shape = false;
+  }
+  if (same_shape) return scalar;
+
+  int64_t ones[POLY_MAX_DIMS];
+  PolyUOp *dims[POLY_MAX_DIMS];
+  bool all_one = true;
+  for (int i = 0; i < ref_ndim; i++) {
+    ones[i] = 1;
+    dims[i] = poly_uop_shape_dim(ctx, ref, i);
+    if (!dims[i]) return NULL;
+    int64_t dim = 0;
+    if (poly_uop_const_i64(dims[i], &dim) != 0 || dim != 1) all_one = false;
+  }
+  PolyUOp *reshaped = poly_reshape(ctx, scalar, ones, ref_ndim);
+  return !reshaped || all_one ? reshaped : poly_expand_uop(ctx, reshaped, dims, ref_ndim);
 }
 
 PolyUOp *poly_const_like_int(PolyCtx *ctx, PolyUOp *ref, int64_t val) {
-  if (poly_dtype_is_float(ref->dtype))
-    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_float((double)val));
-  if (poly_dtype_is_bool(ref->dtype))
-    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(val != 0));
-  return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_int(val));
+  return poly_const_like(ctx, ref, poly_arg_int(val));
 }
 
 PolyUOp *poly_const_like_float(PolyCtx *ctx, PolyUOp *ref, double val) {
-  if (poly_dtype_is_int(ref->dtype))
-    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_int((int64_t)val));
-  if (poly_dtype_is_bool(ref->dtype))
-    return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(val != 0.0));
-  return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_float(val));
+  return poly_const_like(ctx, ref, poly_arg_float(val));
 }
 
 PolyUOp *poly_const_like_bool(PolyCtx *ctx, PolyUOp *ref, bool val) {
-  return poly_uop0(ctx, POLY_OP_CONST, ref->dtype, poly_arg_bool(val));
+  return poly_const_like(ctx, ref, poly_arg_bool(val));
 }

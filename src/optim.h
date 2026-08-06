@@ -24,11 +24,11 @@ extern "C" {
 
 typedef struct {
   int kind;
-  float beta1;
-  float beta2;
-  float eps;
-  float weight_decay;
-  float momentum;
+  double beta1;
+  double beta2;
+  double eps;
+  double weight_decay;
+  double momentum;
   bool nesterov;
   bool classic;
 } PolyOptimConfig;

@@ -6,8 +6,10 @@
  */
 
 #include "polygrad.h"
+#include "bigint.h"
 #include "utils.h"
 #include "ctx.h"
+#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +25,14 @@ bool poly_arg_eq(PolyArg a, PolyArg b) {
     return true;
   case POLY_ARG_INT:
     return a.i == b.i;
+  case POLY_ARG_BIGINT:
+    return a.bigint.sign == b.bigint.sign && a.bigint.n_limbs == b.bigint.n_limbs &&
+           (a.bigint.n_limbs == 0 ||
+            (a.bigint.limbs && b.bigint.limbs &&
+             memcmp(
+                 a.bigint.limbs, b.bigint.limbs,
+                 (size_t)a.bigint.n_limbs * sizeof(uint32_t)
+             ) == 0));
   case POLY_ARG_FLOAT: /* bitwise compare to distinguish -0.0 from 0.0 */
   {
     uint64_t ba, bb;
@@ -110,6 +120,12 @@ uint32_t poly_arg_hash(PolyArg a) {
     break;
   case POLY_ARG_INT:
     h = hash_mix(h, (uint32_t)(a.i ^ (a.i >> 32)));
+    break;
+  case POLY_ARG_BIGINT:
+    h = hash_mix(h, (uint32_t)(int32_t)a.bigint.sign);
+    h = hash_mix(h, a.bigint.n_limbs);
+    for (uint32_t i = 0; i < a.bigint.n_limbs; i++)
+      h = hash_mix(h, a.bigint.limbs ? a.bigint.limbs[i] : 0);
     break;
   case POLY_ARG_FLOAT: {
     uint64_t bits;
@@ -303,6 +319,31 @@ static bool uop_rank_arg_valid(PolyOps op, PolyUOp **src, int n_src, PolyArg arg
   }
 }
 
+static bool poly_arg_canonicalize_bigint(PolyArg *arg) {
+  if (!arg || arg->kind != POLY_ARG_BIGINT) return true;
+  if (arg->bigint.n_limbs > 0 && !arg->bigint.limbs) return false;
+  while (arg->bigint.n_limbs > 0 &&
+         arg->bigint.limbs[arg->bigint.n_limbs - 1] == 0)
+    arg->bigint.n_limbs--;
+  if (arg->bigint.n_limbs == 0) {
+    *arg = poly_arg_int(0);
+    return true;
+  }
+  arg->bigint.sign = arg->bigint.sign < 0 ? -1 : 1;
+  if (arg->bigint.n_limbs > 2) return true;
+  uint64_t magnitude = arg->bigint.limbs[0];
+  if (arg->bigint.n_limbs == 2)
+    magnitude |= (uint64_t)arg->bigint.limbs[1] << 32;
+  if (arg->bigint.sign > 0 && magnitude <= INT64_MAX) {
+    *arg = poly_arg_int((int64_t)magnitude);
+  } else if (arg->bigint.sign < 0 && magnitude <= (UINT64_C(1) << 63)) {
+    *arg = poly_arg_int(
+        magnitude == (UINT64_C(1) << 63) ? INT64_MIN : -(int64_t)magnitude
+    );
+  }
+  return true;
+}
+
 static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
   if (!arena || !dst) return;
   if (dst->kind == POLY_ARG_INT_TUPLE && dst->int_tuple.n > 0) {
@@ -310,6 +351,15 @@ static void poly_arg_copy_to_arena(PolyArena *arena, PolyArg *dst) {
         poly_arena_alloc(arena, dst->int_tuple.n * sizeof(int64_t), _Alignof(int64_t));
     memcpy(vals, dst->int_tuple.vals, dst->int_tuple.n * sizeof(int64_t));
     dst->int_tuple.vals = vals;
+  } else if (dst->kind == POLY_ARG_BIGINT && dst->bigint.n_limbs > 0 &&
+             dst->bigint.limbs) {
+    uint32_t *limbs = poly_arena_alloc(
+        arena, (size_t)dst->bigint.n_limbs * sizeof(uint32_t), _Alignof(uint32_t)
+    );
+    memcpy(
+        limbs, dst->bigint.limbs, (size_t)dst->bigint.n_limbs * sizeof(uint32_t)
+    );
+    dst->bigint.limbs = limbs;
   } else if (dst->kind == POLY_ARG_PAIR_TUPLE && dst->pair_tuple.n > 0) {
     int64_t(*pairs)[2] =
         poly_arena_alloc(arena, dst->pair_tuple.n * 2 * sizeof(int64_t), _Alignof(int64_t));
@@ -369,6 +419,12 @@ static PolyUOp *poly_uop_internal(
     PolyArg tag_arg
 ) {
   if (!ctx || n_src < 0 || n_src > UINT16_MAX || (n_src > 0 && !src)) return NULL;
+  /* Python ints have one value identity regardless of construction history.
+   * Canonicalize the C carrier before hashing so signed-64 values cannot
+   * acquire a second BIGINT CSE identity. */
+  if (!poly_arg_canonicalize_bigint(&arg) ||
+      !poly_arg_canonicalize_bigint(&tag_arg))
+    return NULL;
   /* Canonicalize legacy RANGE(axis_id as INT) at the UOp boundary. tinygrad
    * stores RANGE args as (axis_id, AxisType, ...); keeping the legacy form out
    * of CSE lets PolyArg equality stay exact by kind. */
@@ -1179,6 +1235,12 @@ static void uop_print_one(PolyUOp *u, char *buf, int *pos, int cap) {
     written = snprintf(buf + *pos, cap - *pos, ", %ld", (long)u->arg.i);
     if (written > 0) *pos += written;
     break;
+  case POLY_ARG_BIGINT: {
+    char *decimal = poly_arg_integer_to_decimal(u->arg);
+    written = snprintf(buf + *pos, cap - *pos, ", %s", decimal ? decimal : "0");
+    free(decimal);
+    if (written > 0) *pos += written;
+  } break;
   case POLY_ARG_PAIR_TUPLE:
     written = snprintf(buf + *pos, cap - *pos, ", (");
     if (written > 0) *pos += written;
@@ -1340,6 +1402,11 @@ void poly_uop_dump_tree(FILE *fp, PolyUOp *u, int depth, int max_depth) {
   case POLY_ARG_INT:
     fprintf(fp, " i=%lld", (long long)u->arg.i);
     break;
+  case POLY_ARG_BIGINT: {
+    char *decimal = poly_arg_integer_to_decimal(u->arg);
+    fprintf(fp, " i=%s", decimal ? decimal : "0");
+    free(decimal);
+  } break;
   case POLY_ARG_FLOAT:
     fprintf(fp, " f=%g", u->arg.f);
     break;
@@ -1821,7 +1888,35 @@ PolyUOp *poly_const_int(PolyCtx *ctx, int64_t value) {
 
 PolyUOp *poly_const_typed(PolyCtx *ctx, PolyDType dt, double value) {
   if (poly_dtype_is_float(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_float(value));
+  /* tinygrad/uop/ops.py:553-561: dtype.const owns the canonical scalar
+   * representation, so a bool CONST has one identity regardless of caller. */
+  if (poly_dtype_is_bool(dt)) return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_bool(value != 0.0));
   return poly_uop0(ctx, POLY_OP_CONST, dt, poly_arg_int((int64_t)value));
+}
+
+PolyUOp *poly_identity_element(PolyCtx *ctx, PolyOps op, PolyDType dtype) {
+  /* Pinned identity_element returns dtype.const({ADD:0, MUL:1,
+   * MAX:dtype.min}) (uop/ops.py:47, dtype.py:82-92). Keep the identity typed;
+   * routing floating -infinity through an integer cast is not equivalent. */
+  if (!ctx || (op != POLY_OP_ADD && op != POLY_OP_MUL && op != POLY_OP_MAX) ||
+      dtype.is_ptr)
+    return NULL;
+  PolyDType scalar = poly_dtype_scalar(dtype);
+  if (poly_dtype_is_float(scalar)) {
+    double value = op == POLY_OP_ADD ? 0.0 : op == POLY_OP_MUL ? 1.0 : -INFINITY;
+    return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_float(value));
+  }
+  if (poly_dtype_is_bool(scalar)) {
+    bool value = op == POLY_OP_MUL;
+    return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_bool(value));
+  }
+  if (!poly_dtype_is_int(scalar)) return NULL;
+  int64_t value = op == POLY_OP_MUL ? 1 : 0;
+  if (op == POLY_OP_MAX && !poly_dtype_is_unsigned(scalar)) {
+    int bits = (int)scalar.bitsize;
+    value = bits >= 64 ? INT64_MIN : -(INT64_C(1) << (bits - 1));
+  }
+  return poly_uop0(ctx, POLY_OP_CONST, dtype, poly_arg_int(value));
 }
 
 PolyUOp *poly_alu1(PolyCtx *ctx, PolyOps op, PolyUOp *src) {

@@ -50,7 +50,9 @@ def test_tinyjit_rejects_nested_capture_and_recovers_context():
 
 def test_top_level_nn_and_global_counters_match_tinygrad_surface():
     assert nn.SGD is SGD
-    x = Tensor.arange(8, dtype='float32').realize(do_update_stats=False)
+    # Pinned Tensor.arange is device-free and realize() is a no-op. Use the
+    # host-backed path to exercise one real CPU call and its counters.
+    x = Tensor(np.arange(8, dtype=np.float32)).realize(do_update_stats=False)
     before_mem = GlobalCounters.mem_used
     GlobalCounters.reset()
     assert GlobalCounters.global_ops == 0
@@ -68,7 +70,8 @@ def test_top_level_nn_and_global_counters_match_tinygrad_surface():
 
 
 def test_global_counters_count_tinyjit_capture_and_replay_once():
-    x = Tensor.arange(8, dtype='float32').realize(do_update_stats=False)
+    # TinyJit rejects pinned device-free arange inputs as non-buffer values.
+    x = Tensor(np.arange(8, dtype=np.float32)).realize(do_update_stats=False)
 
     @TinyJit
     def add_one(value):
@@ -139,7 +142,9 @@ def test_tinyjit_movement_view_replays_against_new_base():
 
 
 def test_bound_view_executes_and_counts_runtime_extent():
-    x = Tensor.arange(8, dtype='float32').realize(do_update_stats=False)
+    # A host-backed input is deviceful; pinned pure arange remains lazy and
+    # executes no bound-view kernel.
+    x = Tensor(np.arange(8, dtype=np.float32)).realize(do_update_stats=False)
     n = Variable('n', 1, 8)
     out = x[:n.bind(4)] + 1
 
@@ -152,6 +157,7 @@ def test_bound_view_executes_and_counts_runtime_extent():
 
 def test_pure_view_realize_is_zero_call():
     x = Tensor.arange(8, dtype='float32').realize(do_update_stats=False)
+    source_root = x.uop.raw
     out = x.reshape(2, 4).permute(1, 0)
 
     GlobalCounters.reset()
@@ -163,10 +169,13 @@ def test_pure_view_realize_is_zero_call():
         out.numpy(),
         np.array([[0, 4], [1, 5], [2, 6], [3, 7]], dtype=np.float32),
     )
+    assert x.uop.raw == source_root
 
 
 def test_realized_contiguous_and_readback_reuse_current_buffer_identity():
-    source = (Tensor.arange(8, dtype='float32') + 1).realize()
+    # Host-backed input makes the ADD deviceful in pinned tinygrad. A pure
+    # arange+1 root is device-free and realize() is intentionally a no-op.
+    source = (Tensor(np.arange(8, dtype=np.float32)) + 1).realize()
     source_current = source.uop.raw
     source_logical = source.uop_logical.raw
     assert source.uop_logical.op_name == 'ADD'
@@ -201,8 +210,17 @@ def test_realized_contiguous_and_readback_reuse_current_buffer_identity():
         0, 0, 0,
     )
 
-    sliced = source[2:6].realize()
-    assert sliced.uop.has_buffer_identity()
+    sliced = source[2:6]
+    sliced_current = sliced.uop.raw
+    assert sliced.uop.op_name == 'SHRINK'
+    assert not sliced.uop.has_buffer_identity()
+    sliced.realize()
+    # Pinned Tensor.realize keeps a pure SHRINK(BUFFER) view unchanged:
+    # tensor.py:214-219 filters only roots without buffer identity, while
+    # callify.py:169-181 maps a realized movement view back to that view.
+    assert sliced.uop.raw == sliced_current
+    assert sliced.uop.op_name == 'SHRINK'
+    assert not sliced.uop.has_buffer_identity()
     GlobalCounters.reset()
     np.testing.assert_array_equal(sliced.numpy(), np.arange(3, 7, dtype=np.float32))
     assert (GlobalCounters.global_ops, GlobalCounters.global_mem, GlobalCounters.kernel_count) == (
@@ -328,7 +346,7 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 28
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 40
 
 
 def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkeypatch):
@@ -345,7 +363,7 @@ def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkey
     monkeypatch.setattr(_ffi, '_lib', None)
     monkeypatch.setattr(_ffi, '_find_lib', lambda: 'fake-libpolygrad.so')
     monkeypatch.setattr(_ffi.ctypes, 'CDLL', lambda _path: FakeLibrary())
-    with pytest.raises(RuntimeError, match='expected version 28, got 20'):
+    with pytest.raises(RuntimeError, match='expected version 40, got 20'):
         _ffi.get_lib()
     assert _ffi._lib is None
 

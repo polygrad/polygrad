@@ -4,6 +4,7 @@
 
 #include "test_harness.h"
 #include "../src/ir.h"
+#include "../src/bigint.h"
 #include "../src/ctx.h"
 #include "../src/frontend.h"
 #include "../src/engine/schedule.h"
@@ -127,6 +128,56 @@ TEST(ir, round_trip_const) {
   ASSERT_INT_EQ(imported.n_bufs, 2);
   ASSERT_STR_EQ(imported.bufs[0].name, "input");
   ASSERT_STR_EQ(imported.bufs[1].name, "output");
+
+  poly_ir_spec_free(&imported);
+  poly_ctx_destroy(imported.ctx);
+  poly_ctx_destroy(ctx);
+  free(bytes);
+  PASS();
+}
+
+TEST(ir, round_trip_exact_bigint_arg_v4) {
+  /* Pinned tinygrad UOp args retain positive uint64 values above INT64_MAX.
+   * poly.ir.uops@4 must preserve the same exact identity, not a signed
+   * surrogate. */
+  PolyCtx *ctx = poly_ctx_new();
+  PolyInt value = {0};
+  ASSERT_TRUE(poly_int_from_decimal(&value, "18446744073709550593"));
+  PolyUOp *constant =
+      poly_uop0(ctx, POLY_OP_CONST, POLY_UINT64, poly_int_as_arg(&value));
+  poly_int_free(&value);
+  ASSERT_NOT_NULL(constant);
+
+  PolyUOp *out = poly_buffer(ctx, POLY_UINT64, 1);
+  PolyUOp *sink = poly_sink1(ctx, poly_store_val(ctx, out, constant));
+  PolyIrBufEntry bufs[] = {
+      {.name = "output", .role = POLY_IR_ROLE_OUTPUT, .buffer = out, .shape = {1}, .ndim = 1},
+  };
+  PolyIrEntrypoint eps[] = {{.name = "forward", .sink = sink}};
+  PolyIrSpec spec = {ctx, bufs, 1, eps, 1};
+
+  int out_len = 0;
+  uint8_t *bytes = poly_ir_export(&spec, &out_len);
+  ASSERT_NOT_NULL(bytes);
+  ASSERT_TRUE(out_len > 32);
+  ASSERT_INT_EQ(bytes[4], 4);
+  ASSERT_INT_EQ(bytes[5], 0);
+
+  PolyIrSpec imported;
+  ASSERT_INT_EQ(poly_ir_import(bytes, out_len, &imported), 0);
+  int n_topo = 0;
+  PolyUOp **topo =
+      poly_toposort_alloc(imported.ctx, imported.entrypoints[0].sink, &n_topo);
+  ASSERT_NOT_NULL(topo);
+  PolyUOp *imported_big = NULL;
+  for (int i = 0; i < n_topo; i++)
+    if (topo[i]->op == POLY_OP_CONST && topo[i]->arg.kind == POLY_ARG_BIGINT)
+      imported_big = topo[i];
+  ASSERT_NOT_NULL(imported_big);
+  char *decimal = poly_arg_integer_to_decimal(imported_big->arg);
+  ASSERT_STR_EQ(decimal, "18446744073709550593");
+  free(decimal);
+  poly_toposort_free(topo);
 
   poly_ir_spec_free(&imported);
   poly_ctx_destroy(imported.ctx);

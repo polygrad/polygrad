@@ -24,12 +24,12 @@
     {
       "id": "PG-DIV-001",
       "status": "approved",
-      "stages": ["tensor", "placement", "instance"],
-      "area": "logical-physical roots",
+      "stages": ["logical", "placement", "instance", "export"],
+      "area": "retained logical and explicit re-placement capability",
       "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
-      "polygrad": "PolyTensor retains a deviceless logical graph plus occurrence-aware placement strategy; realize or explicit prepare lowers selected occurrences to a current tinygrad-shaped deviceful physical graph",
-      "rationale": "Portable export, re-placement, and PolyInstance capture are approved Polygrad product capabilities.",
-      "approval": "AGENTS.md Core Invariants and user-approved logical/physical split",
+      "polygrad": "On Path B, default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit re_place outside default realization",
+      "rationale": "Portable logical retention, export, explicit re-placement, and PolyInstance capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
+      "approval": "AGENTS.md Path-B Core Invariants and user-approved logical/physical split",
       "evidence": [
         "ARCHITECTURE.md:Core Model",
         "src/polygrad.h:PolyTensor"
@@ -347,18 +347,27 @@
     },
     {
       "id": "PG-PARITY-014",
-      "status": "pending_evidence",
-      "stages": ["schedule", "optimizer"],
-      "area": "optimizer CALL topology",
-      "tinygrad": "Current bounded HLB comparator records 20 optimizer-related calls",
-      "polygrad": "The same comparator records 24 calls",
-      "rationale": "The old phrase 'fuses more aggressively' is not an explanation; exact per-node correspondence is still required.",
+      "status": "resolved",
+      "stages": ["schedule", "autograd", "model"],
+      "area": "bounded train model/backward CALL topology",
+      "tinygrad": "Current bounded HLB-style train comparator captures 20 LINEAR CALLs",
+      "polygrad": "The same comparator now captures 20 LINEAR CALLs",
+      "rationale": "The former four-call delta came from high-level SUB, EXP/LOG, reduction accumulation, and softmax/log-softmax topology rather than optimizer or Rangeify behavior. C-owned construction now follows pinned tinygrad and closes the bounded schedule mismatch.",
       "approval": null,
       "evidence": [
         "MEMORY_CIFAR.md:Tinygrad-parity core and HLB semantics",
-        "PLAN_CORE_20260720.md:WS3"
+        "PLAN_CORE_20260720.md:WS3",
+        "temp/path_b_optimizer_jit_schedule_{tinygrad,polygrad}_20260728.json",
+        "temp/path_b_optimizer_group_jit_schedule_{tinygrad,polygrad}_20260728.json",
+        "temp/path_b_elementwise_softmax_correspondence_20260728.md",
+        "temp/path_b_model_backward_jit_schedule_polygrad_post_softmax_20260729.json",
+        "temp/hlb_train_eval_ema_jit_compare_path_b_softmax_20260729.json"
       ],
-      "close_when": "A pinned TG/PG schedule correspondence either closes the delta or establishes a separately approved boundary."
+      "resolution": {
+        "evidence": "The permanent graph oracle passes 69/69 with zero suppressions; isolated model backward is 8/8 CALLs and bounded HLB train/eval/eval-EMA/EMA is 20/8/8/3 in both engines with maximum value error 5.96046448e-08.",
+        "closed_on": "2026-07-29"
+      },
+      "close_when": null
     },
     {
       "id": "PG-PARITY-015",
@@ -415,6 +424,99 @@
         "temp/op_vocabulary_probe_20260726.json"
       ],
       "close_when": "INVALID is excluded from the public/executable/importable op surface and malformed raw/imported INVALID nodes fail loudly."
+    },
+    {
+      "id": "PG-PARITY-018",
+      "status": "resolved",
+      "stages": ["tensor", "realize"],
+      "area": "unsigned maximum constants and scatter amin",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "Unsigned inverse/minimum use an exact positive dtype.max CONST and scatter amin reduces with inverse/MAX/inverse",
+      "polygrad": "Unsigned inverse/minimum use the exact positive dtype.max argument, and scatter amin reduces with the same inverse/MAX/inverse topology and zero-sensitive values",
+      "rationale": "The exact integer carrier closes both the graph-argument debt and the reachable unsigned scatter-amin value bug without a dtype-local surrogate.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/dtype.py:DType.max",
+        "references/tinygrad_latest/tinygrad/mixin/elementwise.py:ElementwiseMixin.minimum",
+        "references/tinygrad_latest/tinygrad/mixin/__init__.py:_scatter_reduce",
+        "src/tensor.c:poly_dtype_bound_const",
+        "src/tensor.c:poly_scatter_reduce",
+        "temp/path_b_unsigned_minimum_bounds_correspondence_20260730.md",
+        "temp/path_b_unsigned_minimum_bounds_20260731/summary_post.json",
+        "test/test_tensor.c:unsigned_scatter_amin_matches_pinned_inverse_max_inverse"
+      ],
+      "resolution": {
+        "evidence": "Unsigned minimum has zero graph findings for uint8/16/32/64. Scatter amin contains the exact positive maximum and inverse/MAX/inverse reducer, has no unary NEG, and returns [[0,100]] for every width.",
+        "closed_on": "2026-07-31"
+      },
+      "close_when": null
+    },
+    {
+      "id": "PG-PARITY-019",
+      "status": "open_debt",
+      "stages": ["frontend", "tensor"],
+      "area": "JavaScript numeric float16 host staging",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "Numeric host values are staged as numeric source values and converted to the requested dtype in the Tensor graph",
+      "polygrad": "JavaScript plain numeric arrays requested as float16 are flattened through Uint16Array, so numeric values are reinterpreted as half storage bits before graph construction",
+      "rationale": "The current route corrupts input before elementwise execution; operations must not compensate for invalid host staging.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._frompy",
+        "js/src/tensor.js:flattenArray",
+        "js/src/tensor.js:Tensor",
+        "temp/path_b_trig_js_probe_20260731.js"
+      ],
+      "close_when": "Plain JavaScript numeric float16 arrays stage numeric values and match the float32-then-cast Tensor graph/value behavior across native, Wasm, and browser frontends."
+    },
+    {
+      "id": "PG-PARITY-020",
+      "status": "resolved",
+      "stages": ["symbolic", "tensor"],
+      "area": "unbounded symbolic integer constant representation",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "Non-truncating symbolic constant folding stores arbitrary-precision Python integers in CONST args, including results above INT64_MAX",
+      "polygrad": "PolyArg stores canonical exact signed integers outside int64 as immutable base-2^32 magnitudes; symbolic folding keeps Python-style exact results and fixed-width renderers truncate only at their backend boundary",
+      "rationale": "This closes the former carrier debt with the same semantic boundary as tinygrad rather than suppressing or locally special-casing high-bit constants.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/symbolic.py:fold_const_alu",
+        "references/tinygrad_latest/tinygrad/uop/ops.py:exec_alu",
+        "references/tinygrad_latest/tinygrad/dtype.py:DType.const",
+        "src/bigint.c",
+        "src/polygrad.h:PolyArg",
+        "temp/path_b_raw_const_eval_correspondence_20260731.md",
+        "temp/path_b_bigint_symbolic_{tg,pg}_probe_20260731.json",
+        "temp/path_b_bigint_alu_{tg,pg}_probe_20260731.out",
+        "test/test_bigint.c",
+        "test/test_codegen.c",
+        "test/test_cuda.c",
+        "test/test_wasm.c"
+      ],
+      "resolution": {
+        "evidence": "Direct, associative, distributive, unary, ternary, weakint-vector, high-bit chained-shift, and large-divisor graphs match pinned tinygrad. Exact C/interpreter, WebGPU long decomposition, CUDA render/runtime, Wasm runtime, IR-v4 round-trip, RNG, and float64x2 SIN gates pass; the full ASan/UBSan/LSan native matrix is 1422/1422.",
+        "closed_on": "2026-07-31"
+      },
+      "close_when": null
+    },
+    {
+      "id": "PG-PARITY-021",
+      "status": "open_debt",
+      "stages": ["tensor"],
+      "area": "scatter pre-scatter construction topology",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "_pre_scatter constructs shrink, unsqueeze/expand/transpose, one-hot, and pad_to graphs with three retained PAD nodes in the focused rank-two case",
+      "polygrad": "The same focused amax/amin values pass, but the shared pre-scatter graph has one PAD plus additional EXPAND, RESHAPE, CMPNE, WHERE, and one fewer STACK node",
+      "rationale": "This whole-graph construction mismatch affects amax and amin equally and remains after the unsigned maximum/reducer bug is closed; it is not an approved divergence.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/mixin/__init__.py:_pre_scatter",
+        "src/tensor.c:poly_prepare_scatter",
+        "src/tensor.c:poly_scatter_one_hot",
+        "temp/path_b_unsigned_minimum_bounds_20260731/summary_post.json",
+        "temp/path_b_unsigned_minimum_bounds_correspondence_20260730.md"
+      ],
+      "close_when": "Focused rank-two and generalized scatter/scatter-reduce construction graphs match pinned tinygrad for shrink, one-hot, transpose, pad_to, include_self, and all five reducers without suppressions."
     }
   ]
 }

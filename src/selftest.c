@@ -11,18 +11,18 @@
 
 static int selftest_alu(void) {
   PolyArg add_ops[2] = {poly_arg_int(2), poly_arg_int(3)};
-  PolyArg add = poly_exec_alu(POLY_OP_ADD, POLY_INT32, add_ops, 2);
+  PolyArg add = poly_exec_alu(POLY_OP_ADD, POLY_INT32, add_ops, 2, true);
   if (add.kind != POLY_ARG_INT || add.i != 5) return -1;
 
   PolyArg cmp_ops[2] = {
       poly_arg_int(INT64_C(9007199254740992)),
       poly_arg_int(INT64_C(9007199254740993)),
   };
-  PolyArg cmp = poly_exec_alu(POLY_OP_CMPNE, POLY_INT64, cmp_ops, 2);
+  PolyArg cmp = poly_exec_alu(POLY_OP_CMPNE, POLY_INT64, cmp_ops, 2, true);
   if (cmp.kind != POLY_ARG_BOOL || !cmp.b) return -1;
 
   PolyArg div_ops[2] = {poly_arg_float(0.0), poly_arg_float(0.0)};
-  PolyArg div = poly_exec_alu(POLY_OP_FDIV, POLY_FLOAT32, div_ops, 2);
+  PolyArg div = poly_exec_alu(POLY_OP_FDIV, POLY_FLOAT32, div_ops, 2, true);
   if (div.kind != POLY_ARG_FLOAT || !isnan(div.f)) return -1;
 
   return 0;

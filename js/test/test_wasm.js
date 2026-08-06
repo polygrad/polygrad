@@ -65,6 +65,50 @@ async function runWasmOwnershipTests() {
     }
   })
 
+  await test('Tensor(UOp) rejects a different WASM runtime context', async () => {
+    const pgA = await polygrad.create({ core: 'wasm' })
+    const pgB = await polygrad.create({ core: 'wasm' })
+    try {
+      const local = new pgA.Tensor([-2, 0, 3])
+      const source = new pgB.Tensor([-2, 0, 3])
+      let threw = false
+      try {
+        new pgA.Tensor(source.uop)
+      } catch (e) {
+        threw = String(e.message || e).includes('same Polygrad context')
+      }
+      if (!threw) throw new Error('cross-runtime Tensor(UOp) should be rejected')
+      threw = false
+      try {
+        new pgA.Tensor(local.uop, { _ctx: pgB._core.ctx })
+      } catch (e) {
+        threw = String(e.message || e).includes('same Polygrad context')
+      }
+      if (!threw) throw new Error('Tensor(UOp) should reject a foreign _ctx override')
+    } finally {
+      await pgA.dispose()
+      await pgB.dispose()
+    }
+  })
+
+  await test('Tensor(UOp) rejects a different async WASM runtime', async () => {
+    const pgA = await polygrad.createAsync({ core: 'wasm' })
+    const pgB = await polygrad.createAsync({ core: 'wasm' })
+    try {
+      const source = new pgB.Tensor([-2, 0, 3])
+      let threw = false
+      try {
+        new pgA.Tensor(source.uop)
+      } catch (e) {
+        threw = String(e.message || e).includes('same Polygrad context')
+      }
+      if (!threw) throw new Error('cross-runtime async Tensor(UOp) should be rejected')
+    } finally {
+      await pgA.dispose()
+      await pgB.dispose()
+    }
+  })
+
   await test('typed-array input survives jit replay and runtime disposal', async () => {
     const data = new Float32Array([1, 2, 3, 4])
     let pg = await polygrad.create({ core: 'wasm' })

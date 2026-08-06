@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "test_harness.h"
+#include "../src/bigint.h"
 #include "../src/polygrad.h"
 #include "../src/frontend.h"
 #include "../src/device.h"
@@ -64,6 +65,26 @@ static PolyUOp *base_buf(PolyUOp *u) {
   while (u->op == POLY_OP_RESHAPE && u->n_src > 0)
     u = u->src[0];
   return u;
+}
+
+static void set_unsigned_values(void *dst, PolyDType dtype, const uint64_t *values, int n) {
+  for (int i = 0; i < n; i++) {
+    if (dtype.bitsize == 8)
+      ((uint8_t *)dst)[i] = (uint8_t)values[i];
+    else if (dtype.bitsize == 16)
+      ((uint16_t *)dst)[i] = (uint16_t)values[i];
+    else if (dtype.bitsize == 32)
+      ((uint32_t *)dst)[i] = (uint32_t)values[i];
+    else
+      ((uint64_t *)dst)[i] = values[i];
+  }
+}
+
+static uint64_t get_unsigned_value(const void *src, PolyDType dtype, int i) {
+  if (dtype.bitsize == 8) return ((const uint8_t *)src)[i];
+  if (dtype.bitsize == 16) return ((const uint16_t *)src)[i];
+  if (dtype.bitsize == 32) return ((const uint32_t *)src)[i];
+  return ((const uint64_t *)src)[i];
 }
 
 /* Structural constructor tests that count LOAD/RANGE/STORE ops need the
@@ -387,6 +408,57 @@ TEST(tensor, einsum_c_api_matmul_shape_matches_tinygrad) {
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, out)[0], 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, out)[1], 2);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, einsum_rearrange_reject_invalid_and_foreign_inputs) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyCtx *foreign_ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_NOT_NULL(foreign_ctx);
+  PolyUOp *x = make_buf(ctx, (int64_t[]){6}, 1);
+  PolyUOp *foreign = make_buf(foreign_ctx, (int64_t[]){6}, 1);
+  ASSERT_NOT_NULL(x);
+  ASSERT_NOT_NULL(foreign);
+
+  PolyUOp *foreign_inputs[] = {foreign};
+  ASSERT_EQ(poly_einsum(ctx, "a->a", foreign_inputs, 1), NULL);
+  ASSERT_EQ(poly_rearrange(ctx, "a->a", foreign, NULL, NULL, 0), NULL);
+
+  int64_t axis_values[] = {2, 3};
+  PolyUOp *valid = poly_rearrange(ctx, "(h w)->h w", x, "h w", axis_values, 2);
+  ASSERT_NOT_NULL(valid);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, valid), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[1], 3);
+
+  char long_formula[320];
+  memset(long_formula, 'a', sizeof(long_formula) - 1);
+  memcpy(long_formula + sizeof(long_formula) - 5, "->a", 4);
+  long_formula[sizeof(long_formula) - 1] = '\0';
+  ASSERT_EQ(poly_rearrange(ctx, long_formula, x, NULL, NULL, 0), NULL);
+  ASSERT_EQ(poly_rearrange(ctx, "a", x, NULL, NULL, 0), NULL);
+  ASSERT_EQ(poly_rearrange(ctx, "a->a->a", x, NULL, NULL, 0), NULL);
+  ASSERT_EQ(poly_rearrange(ctx, "((a))->a", x, NULL, NULL, 0), NULL);
+  ASSERT_EQ(poly_rearrange(ctx, "(a->a", x, NULL, NULL, 0), NULL);
+  ASSERT_EQ(
+      poly_rearrange(
+          ctx,
+          "a b c d e f g h i j k l m n o p q->"
+          "a b c d e f g h i j k l m n o p q",
+          x, NULL, NULL, 0
+      ),
+      NULL
+  );
+
+  int64_t overflow_values[] = {INT64_MAX, 2};
+  ASSERT_EQ(
+      poly_rearrange(ctx, "(h w)->h w", x, "h w", overflow_values, 2),
+      NULL
+  );
+
+  poly_ctx_destroy(foreign_ctx);
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -813,7 +885,7 @@ TEST(pe, argmax_e2e) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = poly_buffer_f32(ctx, 5);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 1);
-  PolyUOp *r = poly_argmax(ctx, x, 0);
+  PolyUOp *r = poly_argmax(ctx, x, 0, 0);
   /* Cast int32 result to float for output */
   r = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r, poly_arg_none());
 
@@ -831,7 +903,7 @@ TEST(pe, argmax_2d_e2e) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 3}, 2);
   PolyUOp *out_buf = poly_buffer_f32(ctx, 2);
-  PolyUOp *r = poly_argmax(ctx, x, 1);
+  PolyUOp *r = poly_argmax(ctx, x, 1, 0);
   r = poly_uop1(ctx, POLY_OP_CAST, POLY_FLOAT32, r, poly_arg_none());
 
   float dx[] = {1, 5, 3, 4, 2, 6}, dout[2] = {0};
@@ -840,6 +912,122 @@ TEST(pe, argmax_2d_e2e) {
   ASSERT_INT_EQ(realize_uop(ctx, r, out_buf, dout, leaves, ld, 1), 0);
   ASSERT_FLOAT_EQ(dout[0], 1.0f, 1e-4);
   ASSERT_FLOAT_EQ(dout[1], 2.0f, 1e-4);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_argmax_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){2, 3}, 2);
+  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *to_cuda =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
+  PolyUOp *physical =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, to_cuda, cpu, poly_arg_none());
+  PolyTensor *src = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(src);
+  poly_tensor_set_requires_grad(src, true);
+
+  PolyUOp *expected_logical = poly_argmax(ctx, logical, 1, 1);
+  PolyUOp *expected_physical = poly_argmax(ctx, physical, 1, 1);
+  ASSERT_NOT_NULL(expected_logical);
+  ASSERT_NOT_NULL(expected_physical);
+
+  PolyTensor *out = poly_tensor_argmax(ctx, src, 1, true);
+  ASSERT_NOT_NULL(out);
+  ASSERT_EQ(poly_tensor_uop_logical(out), expected_logical);
+  ASSERT_EQ(poly_tensor_uop_physical(out), expected_physical);
+  ASSERT_INT_EQ(poly_uop_ndim(ctx, poly_tensor_uop_physical(out)), 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, poly_tensor_uop_physical(out))[0], 2);
+  ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, poly_tensor_uop_physical(out))[1], 1);
+  ASSERT_FALSE(poly_tensor_requires_grad(out));
+  ASSERT_TRUE(poly_tensor_requires_grad_is_set(out));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_argmax_rejects_foreign_context) {
+  PolyCtx *owner = poly_ctx_new();
+  PolyCtx *foreign = poly_ctx_new();
+  ASSERT_NOT_NULL(owner);
+  ASSERT_NOT_NULL(foreign);
+  PolyTensor *src =
+      poly_tensor_empty(owner, POLY_FLOAT32, (int64_t[]){2, 3}, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(src);
+  ASSERT_EQ(poly_tensor_argmax(foreign, src, 1, false), NULL);
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(owner);
+  PASS();
+}
+
+TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyCtx *foreign = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_NOT_NULL(foreign);
+
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){2, 2}, 2);
+  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *to_cuda =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
+  PolyUOp *physical =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, to_cuda, cpu, poly_arg_none());
+  PolyTensor *src = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(src);
+  poly_tensor_set_requires_grad(src, true);
+
+  PolyUOp *expected_gelu_logical = poly_gelu(ctx, logical);
+  PolyUOp *expected_gelu_physical = poly_gelu(ctx, physical);
+  PolyTensor *gelu = poly_tensor_gelu(ctx, src);
+  ASSERT_NOT_NULL(expected_gelu_logical);
+  ASSERT_NOT_NULL(expected_gelu_physical);
+  ASSERT_NOT_NULL(gelu);
+  ASSERT_EQ(poly_tensor_uop_logical(gelu), expected_gelu_logical);
+  ASSERT_EQ(poly_tensor_uop_physical(gelu), expected_gelu_physical);
+  ASSERT_TRUE(poly_tensor_requires_grad(gelu));
+  ASSERT_TRUE(poly_tensor_requires_grad_is_set(gelu));
+
+  PolyUOp *expected_quick_logical = poly_quick_gelu(ctx, logical);
+  PolyUOp *expected_quick_physical = poly_quick_gelu(ctx, physical);
+  PolyTensor *quick = poly_tensor_quick_gelu(ctx, src);
+  ASSERT_NOT_NULL(expected_quick_logical);
+  ASSERT_NOT_NULL(expected_quick_physical);
+  ASSERT_NOT_NULL(quick);
+  ASSERT_EQ(poly_tensor_uop_logical(quick), expected_quick_logical);
+  ASSERT_EQ(poly_tensor_uop_physical(quick), expected_quick_physical);
+  ASSERT_TRUE(poly_tensor_requires_grad(quick));
+  ASSERT_TRUE(poly_tensor_requires_grad_is_set(quick));
+
+  ASSERT_EQ(poly_tensor_gelu(foreign, src), NULL);
+  ASSERT_EQ(poly_tensor_quick_gelu(foreign, src), NULL);
+
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, cast_same_dtype_elides_and_scalar_target_preserves_vector_lanes) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *scalar = poly_const_int(ctx, 3);
+  ASSERT_EQ(poly_cast(ctx, scalar, POLY_INT32), scalar);
+
+  PolyUOp *lanes[2] = {poly_const_int(ctx, 1), poly_const_int(ctx, 2)};
+  PolyUOp *vector =
+      poly_uop(ctx, POLY_OP_STACK, poly_dtype_vec(POLY_INT32, 2), lanes, 2, poly_arg_none());
+  PolyUOp *cast = poly_cast(ctx, vector, POLY_FLOAT32);
+  ASSERT_NOT_NULL(cast);
+  ASSERT_INT_EQ(cast->op, POLY_OP_CAST);
+  ASSERT_INT_EQ(cast->dtype.count, 2);
+  ASSERT_TRUE(poly_dtype_eq(poly_dtype_scalar(cast->dtype), POLY_FLOAT32));
+  ASSERT_EQ(cast->src[0], vector);
+
   poly_ctx_destroy(ctx);
   PASS();
 }
@@ -962,6 +1150,69 @@ TEST(pe, scatter_reduce_e2e_matches_tinygrad_probe) {
   PASS();
 }
 
+TEST(pe, unsigned_scatter_amin_matches_pinned_inverse_max_inverse) {
+  /* Pinned scatter amin fills with the positive dtype.max and reduces through
+   * Tensor.min's inverse/MAX/inverse program
+   * (mixin/__init__.py:1206-1211, mixin/elementwise.py:379-393). */
+  PolyDType dtypes[] = {POLY_UINT8, POLY_UINT16, POLY_UINT32, POLY_UINT64};
+  const char *maxima[] = {
+      "255", "65535", "4294967295", "18446744073709551615",
+  };
+  for (int d = 0; d < 4; d++) {
+    PolyCtx *ctx = poly_ctx_new();
+    PolyDType dtype = dtypes[d];
+    PolyUOp *self =
+        poly_reshape(ctx, poly_buffer(ctx, dtype, 2), (int64_t[]){1, 2}, 2);
+    PolyUOp *idx =
+        poly_reshape(ctx, poly_buffer(ctx, POLY_INT32, 2), (int64_t[]){1, 2}, 2);
+    PolyUOp *src =
+        poly_reshape(ctx, poly_buffer(ctx, dtype, 2), (int64_t[]){1, 2}, 2);
+    PolyUOp *result = poly_scatter_reduce(ctx, self, 1, idx, src, "amin", 0);
+    ASSERT_NOT_NULL(result);
+
+    int n_topo = 0, neg_count = 0;
+    bool saw_positive_max = false;
+    PolyUOp **topo = poly_toposort_alloc(ctx, result, &n_topo);
+    ASSERT_NOT_NULL(topo);
+    for (int i = 0; i < n_topo; i++) {
+      PolyUOp *u = topo[i];
+      if (u->op == POLY_OP_NEG) neg_count++;
+      if (u->op != POLY_OP_CONST || !poly_dtype_eq(u->dtype, dtype) ||
+          (u->arg.kind != POLY_ARG_INT && u->arg.kind != POLY_ARG_BIGINT))
+        continue;
+      char *decimal = poly_arg_integer_to_decimal(u->arg);
+      if (decimal && strcmp(decimal, maxima[d]) == 0) saw_positive_max = true;
+      free(decimal);
+    }
+    ASSERT_INT_EQ(neg_count, 0);
+    ASSERT_TRUE(saw_positive_max);
+    poly_toposort_free(topo);
+
+    union {
+      uint64_t align;
+      uint8_t bytes[16];
+    } self_data = {0}, src_data = {0}, output = {0};
+    uint64_t self_values[2] = {100, 100}, src_values[2] = {0, 1};
+    int32_t idx_data[2] = {0, 0};
+    set_unsigned_values(self_data.bytes, dtype, self_values, 2);
+    set_unsigned_values(src_data.bytes, dtype, src_values, 2);
+    PolyUOp *leaves[] = {base_buf(self), base_buf(idx), base_buf(src)};
+    float *data[] = {
+        (float *)self_data.bytes, (float *)idx_data, (float *)src_data.bytes,
+    };
+    ASSERT_INT_EQ(
+        realize_uop(
+            ctx, result, poly_buffer(ctx, dtype, 2), output.bytes, leaves, data, 3
+        ),
+        0
+    );
+    ASSERT_TRUE(get_unsigned_value(output.bytes, dtype, 0) == 0);
+    ASSERT_TRUE(get_unsigned_value(output.bytes, dtype, 1) == 100);
+    poly_ctx_destroy(ctx);
+  }
+  PASS();
+}
+
 TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *x = make_buf(ctx, (int64_t[]){2, 5}, 2);
@@ -1011,6 +1262,81 @@ TEST(pe, sort_topk_e2e_matches_tinygrad_probe) {
   }
 
   poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_topk_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){4}, 1);
+  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *to_cuda =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
+  PolyUOp *physical =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, to_cuda, cpu, poly_arg_none());
+  PolyTensor *src = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(src);
+
+  PolyUOp *expected_logical_values = NULL, *expected_logical_indices = NULL;
+  PolyUOp *expected_physical_values = NULL, *expected_physical_indices = NULL;
+  ASSERT_INT_EQ(
+      poly_topk(
+          ctx, logical, 2, 0, 1, 1, &expected_logical_values, &expected_logical_indices
+      ),
+      0
+  );
+  ASSERT_INT_EQ(
+      poly_topk(
+          ctx, physical, 2, 0, 1, 1, &expected_physical_values, &expected_physical_indices
+      ),
+      0
+  );
+
+  PolyTensor *values = NULL, *indices = NULL;
+  ASSERT_INT_EQ(poly_tensor_topk(ctx, src, 2, 0, 1, 1, &values, &indices), 0);
+  ASSERT_NOT_NULL(values);
+  ASSERT_NOT_NULL(indices);
+  ASSERT_EQ(poly_tensor_uop_logical(values), expected_logical_values);
+  ASSERT_EQ(poly_tensor_uop_physical(values), expected_physical_values);
+  ASSERT_EQ(poly_tensor_uop_logical(indices), expected_logical_indices);
+  ASSERT_EQ(poly_tensor_uop_physical(indices), expected_physical_indices);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_sort_topk_reject_foreign_context) {
+  PolyCtx *owner = poly_ctx_new();
+  PolyCtx *foreign = poly_ctx_new();
+  ASSERT_NOT_NULL(owner);
+  ASSERT_NOT_NULL(foreign);
+  PolyTensor *src =
+      poly_tensor_empty(owner, POLY_FLOAT32, (int64_t[]){4}, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(src);
+
+  PolyTensor *sort_values = NULL, *sort_indices = NULL;
+  PolyTensor *topk_values = NULL, *topk_indices = NULL;
+  int sort_rc = poly_tensor_sort(
+      foreign, src, 0, 0, &sort_values, &sort_indices
+  );
+  int topk_rc = poly_tensor_topk(
+      foreign, src, 2, 0, 1, 1, &topk_values, &topk_indices
+  );
+
+  /* Destroy the contaminated destination first on the pre-fix run: its CSE
+   * can contain source pointers into owner. Assertions follow cleanup so the
+   * failing evidence does not leak either context. */
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(owner);
+
+  ASSERT_INT_EQ(sort_rc, -1);
+  ASSERT_EQ(sort_values, NULL);
+  ASSERT_EQ(sort_indices, NULL);
+  ASSERT_INT_EQ(topk_rc, -1);
+  ASSERT_EQ(topk_values, NULL);
+  ASSERT_EQ(topk_indices, NULL);
   PASS();
 }
 
@@ -3507,6 +3833,56 @@ TEST(pe, arange_pure_uop_simple) {
   for (int i = 0; i < 5; i++)
     ASSERT_FLOAT_EQ(out[i], expected[i], 1e-5);
 
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, arange_empty_uses_pinned_pure_full_topology) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int i32 = poly_dtype_id_by_name("int32");
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyUOp *empty_i = poly_arange_int_by_id(ctx, 0, 0, -1, i32);
+  PolyUOp *empty_f = poly_arange_float_by_id(ctx, 0.0, 0.0, -1.0, f32);
+  PolyUOp *roots[2] = {empty_i, empty_f};
+  for (int i = 0; i < 2; i++) {
+    PolyUOp *root = roots[i];
+    ASSERT_NOT_NULL(root);
+    ASSERT_EQ(root->op, POLY_OP_EXPAND);
+    ASSERT_INT_EQ(poly_uop_ndim(ctx, root), 1);
+    ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, root)[0], 0);
+    ASSERT_INT_EQ(root->n_src, 2);
+    ASSERT_EQ(root->src[0]->op, POLY_OP_RESHAPE);
+    ASSERT_EQ(root->src[0]->src[0]->op, POLY_OP_CONST);
+  }
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, reduce_identity_element_is_typed_like_pinned) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  PolyUOp *i32 = poly_identity_element(ctx, POLY_OP_MAX, POLY_INT32);
+  PolyUOp *i64 = poly_identity_element(ctx, POLY_OP_MAX, POLY_INT64);
+  PolyUOp *u32 = poly_identity_element(ctx, POLY_OP_MAX, POLY_UINT32);
+  PolyUOp *f32 = poly_identity_element(ctx, POLY_OP_MAX, POLY_FLOAT32);
+  PolyUOp *mul = poly_identity_element(ctx, POLY_OP_MUL, POLY_INT32);
+  PolyUOp *add = poly_identity_element(ctx, POLY_OP_ADD, POLY_FLOAT32);
+  ASSERT_NOT_NULL(i32);
+  ASSERT_NOT_NULL(i64);
+  ASSERT_NOT_NULL(u32);
+  ASSERT_NOT_NULL(f32);
+  ASSERT_NOT_NULL(mul);
+  ASSERT_NOT_NULL(add);
+  ASSERT_INT_EQ(i32->arg.kind, POLY_ARG_INT);
+  ASSERT_INT_EQ(i32->arg.i, INT32_MIN);
+  ASSERT_INT_EQ(i64->arg.i, INT64_MIN);
+  ASSERT_INT_EQ(u32->arg.i, 0);
+  ASSERT_INT_EQ(f32->arg.kind, POLY_ARG_FLOAT);
+  ASSERT_TRUE(isinf(f32->arg.f) && f32->arg.f < 0.0);
+  ASSERT_INT_EQ(mul->arg.i, 1);
+  ASSERT_INT_EQ(add->arg.kind, POLY_ARG_FLOAT);
+  ASSERT_FLOAT_EQ(add->arg.f, 0.0, 0.0);
   poly_ctx_destroy(ctx);
   PASS();
 }
