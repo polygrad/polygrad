@@ -1,5 +1,4 @@
 {
-  "schema_version": 2,
   "project": "polygrad",
   "description": "C11 tensor compiler/runtime with Python, JavaScript, browser/WASM, and R surfaces.",
   "exclude": [
@@ -348,6 +347,7 @@
       "case_extractors": [
         {"kind": "c_macro", "call": "TEST", "selector_arguments": [0, 1], "separator": "."},
         {"kind": "c_macro", "call": "TEST_COMMON", "selector_arguments": [0, 1], "separator": "."},
+        {"kind": "c_macro", "call": "TEST_BACKEND", "selector_arguments": [0, 1], "separator": "."},
         {"kind": "named_dispatch", "name": "CASES", "selector_argument": 0}
       ]
     },
@@ -633,11 +633,13 @@
         "poly_ctx_new",
         "poly_tensor_create"
       ],
+      "forbid_unregistered": true,
+      "forbid_unresolved": true,
       "forbid_ambiguous": true,
       "kind": "provider_surface",
       "surface": "javascript-napi",
       "owner": "architecture",
-      "rationale": "The reviewed provider surface remains declared and resolvable."
+      "rationale": "The complete registered N-API provider surface remains declared and resolvable."
     },
     "PROVIDER-SURFACE-R-CALL": {
       "declared": [
