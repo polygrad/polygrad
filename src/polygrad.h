@@ -734,6 +734,7 @@ PolyTensor *poly_tensor_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
 PolyTensor *poly_tensor_log_softmax(PolyCtx *ctx, PolyTensor *src, int axis);
 PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
+PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_expand_uop(

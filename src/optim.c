@@ -402,7 +402,7 @@ int poly_optim_build_step(
   /* No PolyTensor root is changed until the whole batch has validated and all
    * assignment-effect UOps have been constructed successfully. Pinned
    * Optimizer.schedule_step mutates each current Tensor.uop through assign
-   * (nn/optim.py:41-57, tensor.py:230-257), so Path B stores that exact
+   * (nn/optim.py:41-57, tensor.py:230-257), so the Tensor boundary stores that exact
    * current-derived AFTER/STORE effect as the physical root. The same pointer
    * remains in the mandatory hybrid logical slot until retained optimizer
    * export is specified. */

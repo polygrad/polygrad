@@ -96,7 +96,7 @@ static PolyUOp *tensor_current_uop(PolyTensor *tensor) {
 
 static bool tensor_roots_owned_by_ctx(PolyCtx *ctx, const PolyTensor *tensor) {
   /* Polygrad-specific arena boundary: never intern a destination DAG whose
-   * sources point into another context. Path B requires both exact roots. */
+   * sources point into another context. Dual-root construction requires both exact roots. */
   return ctx && tensor && tensor->uop_logical && tensor->uop_physical &&
          poly_ctx_owns_ptr(ctx, tensor->uop_logical) &&
          poly_ctx_owns_ptr(ctx, tensor->uop_physical);
@@ -732,7 +732,7 @@ int poly_tensor_custom_kernel(
 
   /* Pinned UOp.custom_kernel creates one opaque CALL over the exact ordered
    * contiguous Tensor.uop sources, then returns AFTER(source, same_call) for
-   * every source (uop/ops.py:1093-1097). Path B performs that construction
+   * every source (uop/ops.py:1093-1097). The Tensor boundary performs that construction
    * independently for retained logical and mandatory physical occurrences. */
   PolyUOp *logical_call = poly_uop(
       ctx, POLY_OP_CALL, POLY_VOID, logical_src, n_inputs + 1, poly_arg_none()
@@ -781,7 +781,7 @@ PolyTensor *poly_tensor_empty(
     PolyDevice device
 ) {
   /* Pinned tinygrad UOp.empty/new_buffer (uop/ops.py:733-746) allocates one
-   * UNIQUE and builds BUFFER(UNIQUE, DEVICE(device)). Path B retains a
+   * UNIQUE and builds BUFFER(UNIQUE, DEVICE(device)). Polygrad retains a
    * device-free logical BUFFER with that same storage token; it must not
    * consume a second UNIQUE or influence the physical graph. */
   if (!ctx || ndim < 0 || ndim > POLY_MAX_DIMS || (ndim > 0 && !dims) ||
@@ -824,7 +824,7 @@ PolyTensor *poly_tensor_from_host(
   /* Pinned tinygrad UOp._frompy (uop/ops.py:747-765) creates
    * BUFFER(UNIQUE, DEVICE(PYTHON)), applies the input shape, then lets the
    * Tensor constructor COPY that exact source occurrence to its target.
-   * Path B keeps a device-free logical twin but attaches bytes only to the
+   * Polygrad keeps a device-free logical twin but attaches bytes only to the
    * deviceful physical source. */
   if (!ctx || ndim < 1 || ndim > POLY_MAX_DIMS || !dims) return NULL;
 
@@ -896,7 +896,7 @@ int poly_tensor_set_physical(
 
 /* Pinned tinygrad Tensor._apply_uop/Tensor.alu builds an operation directly
  * from the ordered current Tensor.uop operands (tensor.py:128-140). Keep the
- * active Path A logical twin independent, but never derive the executable
+ * active retained logical twin independent, but never derive the executable
  * result by substituting logical pointers: two ordered occurrences may share
  * one logical UOp and still have different current physical roots. */
 static PolyTensor *tensor_alu(PolyCtx *ctx, PolyOps op, PolyTensor **inputs, int n) {
@@ -1005,7 +1005,7 @@ PolyTensor *poly_tensor_alu3(
 }
 
 /* Pinned tinygrad Tensor.cast/bitcast applies UOp.cast/bitcast directly to the
- * one current Tensor.uop (tensor.py:862-904, uop/ops.py:513-521). Path B keeps
+ * one current Tensor.uop (tensor.py:862-904, uop/ops.py:513-521). Polygrad keeps
  * its retained logical twin, but the executable operation is built directly
  * from the exact current physical occurrence and stored even when CSE makes
  * both results pointer-identical. */
@@ -1035,7 +1035,7 @@ PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_i
 }
 
 /* Pinned tinygrad Tensor._apply_uop (tensor.py:128-140) applies movement
- * directly to the current Tensor.uop. Path B applies the same raw movement
+ * directly to the current Tensor.uop. The Tensor boundary applies the same raw movement
  * independently to the retained logical root and exact physical occurrence;
  * neither root is derived by substituting logical identities. */
 static PolyTensor *tensor_unary_result(
@@ -1052,6 +1052,22 @@ static PolyTensor *tensor_unary_result(
   out->requires_grad_set = src->requires_grad_set;
   out->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
   return out;
+}
+
+PolyTensor *poly_tensor_contiguous(PolyCtx *ctx, PolyTensor *src) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  /* Pinned Tensor.contiguous applies UOp.contiguous to its current UOp
+   * (tensor.py:742-746, uop/ops.py:587-591). The Tensor boundary applies that exact fold
+   * independently to the retained logical root and physical occurrence. */
+  /* Retained logical provenance records the explicit materialization request.
+   * It is a Polygrad export/re-placement boundary, not the tinygrad execution
+   * surface, and remains device-free. */
+  PolyUOp *logical = poly_contiguous(ctx, src->uop_logical);
+  PolyUOp *physical = current;
+  if (poly_uop_device(physical) != POLY_DEVICE_AUTO) physical = poly_contiguous(ctx, physical);
+  if (!logical || !physical) return NULL;
+  return tensor_unary_result(ctx, src, logical, physical);
 }
 
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim) {
@@ -1120,7 +1136,7 @@ PolyTensor *poly_tensor_shrink_uop(
   /* Pinned tinygrad movement._mop builds
    * SHRINK(value, shape_to_shape_arg(starts), shape_to_shape_arg(sizes))
    * directly from Tensor.uop (mixin/movement.py:173-193,
-   * uop/ops.py:710-722). Path B applies that same raw constructor to the
+   * uop/ops.py:710-722). The Tensor boundary applies that same raw constructor to the
    * exact ordered logical and physical occurrences. */
   return tensor_unary_result(
       ctx, src,
@@ -1162,7 +1178,7 @@ PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice d
   if (tensor->uop_physical && poly_uop_device(tensor->uop_physical) == POLY_DEVICE_AUTO)
     return tensor;
   /* Pinned tinygrad Tensor.to (tensor.py:327-335) stores
-   * self.uop.copy_to_device(device) immediately. Path B therefore consumes
+   * self.uop.copy_to_device(device) immediately. This boundary therefore consumes
    * the exact stored physical occurrence directly. Keep physicalization only
    * as migration fallback for raw/unmigrated Tensors without that root. */
   PolyUOp *source_physical =
@@ -1258,9 +1274,9 @@ PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor 
   if (source_logical && source_logical->op == POLY_OP_AFTER && source->uop_physical)
     source_logical = source->uop_physical;
   /* Pinned UOp.clone (uop/ops.py:765-769) decides from self.device and
-   * stores a device-free source directly. Path B's stored current root is
+   * stores a device-free source directly. The stored current root is
    * that self UOp; wrapper preferred-device metadata must not manufacture a
-   * COPY. Preserve the Path-A fallback only for a missing physical root. */
+   * COPY. Preserve the legacy fallback only for a missing physical root. */
   PolyUOp *source_physical =
       source->uop_physical ? source->uop_physical : poly_tensor_physicalize(ctx, source);
   if (!target_logical || !target_physical || !source_logical || !source_physical) return NULL;
@@ -1995,6 +2011,9 @@ static PolyUOp *poly_scalar_binop(
 PolyUOp *poly_contiguous(PolyCtx *ctx, PolyUOp *x) {
   if (!ctx || !x) return NULL;
   if (x->op == POLY_OP_CONTIGUOUS) return x;
+  /* The device-free fold from pinned UOp.contiguous currently lives at the
+   * Tensor boundary above. This raw helper still serves preserved legacy
+   * logical builders; removing their explicit barrier is PG-PARITY-022. */
   if (poly_uop_has_buffer_identity(x)) return x;
   return poly_uop1(ctx, POLY_OP_CONTIGUOUS, x->dtype, x, poly_arg_none());
 }
@@ -2950,7 +2969,7 @@ PolyUOp *poly_batchnorm(
   return ret;
 }
 
-/* Path B applies pinned composite Tensor programs independently to the
+/* The Tensor boundary applies pinned composite programs independently to the
  * retained logical roots and exact ordered current occurrences. The physical
  * result is never reconstructed by substituting logical identities. */
 static PolyTensor *tensor_composite_result(
@@ -4567,7 +4586,7 @@ PolyUOp *poly_cholesky_solve(PolyCtx *ctx, PolyUOp *chol, PolyUOp *b, int upper)
  * normalized axis tuple, reshapes away reduced axes when keepdim is false,
  * then casts half/bfloat results back (mixin/reduce.py:13-23,
  * dtype.py:274-278). Keep this root-level spelling reusable by the raw
- * one-axis API and the Path-B Tensor-handle boundary. */
+ * one-axis API and the Tensor-handle boundary. */
 static PolyUOp *sum_axes_root(PolyCtx *ctx, PolyUOp *x, int64_t *axes, int n_axes, bool keepdim) {
   if (!ctx || !x || n_axes < 0 || n_axes > POLY_MAX_DIMS || (n_axes > 0 && !axes)) return NULL;
   int64_t shape[POLY_MAX_DIMS], normalized[POLY_MAX_DIMS], out_shape[POLY_MAX_DIMS];
@@ -5126,7 +5145,7 @@ int poly_tensor_qr_ex(
 
   /* Pinned Tensor.qr delegates to the exact current Tensor.uop program
    * (mixin/__init__.py:1703-1719; test/null/test_tensor_uop_mixin.py:414-424).
-   * Path B applies the unchanged raw program independently to the retained
+   * The Tensor boundary applies the unchanged raw program independently to the retained
    * logical root and mandatory physical occurrence. */
   PolyUOp *logical_q = NULL, *logical_r = NULL;
   PolyUOp *physical_q = NULL, *physical_r = NULL;
@@ -5261,7 +5280,7 @@ PolyUOp *poly_log_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
   return log_s ? poly_sub(ctx, shifted, log_s) : NULL;
 }
 
-/* Path B applies composed Tensor methods independently to the retained logical
+/* The Tensor boundary applies composed Tensor methods independently to the retained logical
  * root and exact current physical occurrence. This is the same ordered
  * Tensor.uop construction as tinygrad's _apply_uop (tensor.py:128-140);
  * frontends receive a complete PolyTensor and perform no identity
@@ -5356,7 +5375,7 @@ PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
     return NULL;
   /* Pinned Tensor._apply_uop consumes ordered current Tensor.uop operands and
    * minimum is inverse -> maximum -> inverse
-   * (tensor.py:128-140; mixin/elementwise.py:366-393). Path B builds that
+   * (tensor.py:128-140; mixin/elementwise.py:366-393). The Tensor boundary builds that
    * program independently for each retained/executable root. */
   PolyUOp *logical = poly_minimum(ctx, a->uop_logical, b->uop_logical);
   PolyUOp *physical = poly_minimum(ctx, a_current, b_current);
@@ -5796,7 +5815,7 @@ int poly_tensor_sort(
   if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
 
   /* tinygrad/mixin/__init__.py:994-1044 constructs both sort results from
-   * the exact input Tensor.uop. Path B applies that program independently to
+   * the exact input Tensor.uop. The Tensor boundary applies that program independently to
    * the retained logical root and mandatory physical occurrence. */
   PolyUOp *logical_values = NULL, *logical_indices = NULL;
   PolyUOp *physical_values = NULL, *physical_indices = NULL;
@@ -5869,7 +5888,7 @@ int poly_tensor_topk(
   if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
 
   /* Pinned tinygrad/mixin/__init__.py:1057-1077 applies sort+shrink_to to the
-   * exact current Tensor.uop. Path B applies that unchanged program
+   * exact current Tensor.uop. The Tensor boundary applies that unchanged program
    * independently to the retained logical root and mandatory physical
    * occurrence, exactly like poly_tensor_sort above. */
   PolyUOp *logical_values = NULL, *logical_indices = NULL;
@@ -6218,7 +6237,7 @@ PolyTensor *poly_tensor_einsum(
   }
 
   /* Pinned Tensor.einsum applies one formula to its ordered Tensor.uop
-   * operands (mixin/__init__.py:496-535). Path B applies the unchanged raw
+   * operands (mixin/__init__.py:496-535). The Tensor boundary applies the unchanged raw
    * program independently to retained logical roots and mandatory physical
    * occurrences; it never recovers physical output by logical substitution. */
   PolyUOp *logical_result = poly_einsum(ctx, formula, logical, n_tensors);
@@ -6488,7 +6507,7 @@ PolyTensor *poly_tensor_rearrange(
 ) {
   if (!tensor_roots_owned_by_ctx(ctx, tensor)) return NULL;
   /* Pinned rearrange is unflatten -> permute -> flatten on Tensor.uop
-   * (mixin/movement.py:340-383). Path B runs that unchanged raw program on
+   * (mixin/movement.py:340-383). The Tensor boundary runs that unchanged raw program on
    * each exact root; frontends never reconstruct the physical occurrence. */
   PolyUOp *logical = poly_rearrange(
       ctx, formula, tensor->uop_logical, axis_names, axis_values, n_axis_sizes
@@ -6851,7 +6870,7 @@ PolyTensor *poly_tensor_scatter(
     return NULL;
   /* Pinned scatter composes _pre_scatter + _masked_merge directly from the
    * ordered Tensor.uop inputs (mixin/__init__.py:1158-1174,1217-1258).
-   * Path B applies the unchanged raw program independently to both roots. */
+   * The Tensor boundary applies the unchanged raw program independently to both roots. */
   PolyUOp *logical =
       poly_scatter(ctx, self->uop_logical, dim, index->uop_logical, src->uop_logical, reduce);
   PolyUOp *physical = poly_scatter(

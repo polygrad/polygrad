@@ -13,7 +13,7 @@
 
 /* Public C/frontend ABI version. Bump when exported symbols or public struct
  * layouts used by frontends change. */
-#define POLYGRAD_ABI_VERSION 45
+#define POLYGRAD_ABI_VERSION 46
 
 #ifdef __cplusplus
 extern "C" {

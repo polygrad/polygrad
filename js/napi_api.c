@@ -1677,6 +1677,15 @@ static napi_value napi_poly_tensor_bitcast_by_id(napi_env env, napi_callback_inf
   return make_external(env, poly_tensor_bitcast_by_id(ctx, src, dtype_id));
 }
 
+static napi_value napi_poly_tensor_contiguous(napi_env env, napi_callback_info info) {
+  napi_value argv[2];
+  size_t argc = 2;
+  NAPI_CALL(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL));
+  PolyCtx *ctx = get_external(env, argv[0]);
+  PolyTensor *tensor = get_external(env, argv[1]);
+  return make_external(env, poly_tensor_contiguous(ctx, tensor));
+}
+
 static napi_value napi_poly_tensor_reshape(napi_env env, napi_callback_info info) {
   napi_value argv[4];
   size_t argc = 4;
@@ -4987,6 +4996,7 @@ NAPI_MODULE_INIT() {
       DECLARE_NAPI_METHOD("poly_tensor_log_softmax", napi_poly_tensor_log_softmax),
       DECLARE_NAPI_METHOD("poly_tensor_cast_by_id", napi_poly_tensor_cast_by_id),
       DECLARE_NAPI_METHOD("poly_tensor_bitcast_by_id", napi_poly_tensor_bitcast_by_id),
+      DECLARE_NAPI_METHOD("poly_tensor_contiguous", napi_poly_tensor_contiguous),
       DECLARE_NAPI_METHOD("poly_tensor_reshape", napi_poly_tensor_reshape),
       DECLARE_NAPI_METHOD("poly_tensor_expand", napi_poly_tensor_expand),
       DECLARE_NAPI_METHOD("poly_tensor_permute", napi_poly_tensor_permute),

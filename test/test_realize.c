@@ -5048,7 +5048,7 @@ TEST(realize, tensor_zero_size_placement_copy_adds_no_call) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
-  /* This is a preserved Path-A placement canary. Use explicit unplaced
+  /* This is a preserved legacy-placement canary. Use explicit unplaced
    * storage; pinned full(buffer=False) is a pure CONST movement graph
    * (mixin/__init__.py:55-77) and must not be made storage for the fixture. */
   PolyUOp *logical = poly_buffer(ctx, POLY_FLOAT32, 0);
@@ -5085,7 +5085,7 @@ TEST(realize, tensor_zero_size_placement_copy_adds_no_call) {
   PASS();
 }
 
-TEST(realize, path_b_admission_gate_rejects_explicit_path_a_logical_only_tensor) {
+TEST(realize, physical_root_gate_rejects_logical_only_tensor) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 
@@ -5101,20 +5101,20 @@ TEST(realize, path_b_admission_gate_rejects_explicit_path_a_logical_only_tensor)
   ASSERT_NOT_NULL(legacy);
   ASSERT_EQ(legacy->uop_physical, NULL);
 
-  const char *existing = getenv("POLY_PATH_B_REQUIRE_PHYSICAL");
+  const char *existing = getenv("POLY_REQUIRE_PHYSICAL_ROOTS");
   char *saved = existing ? strdup(existing) : NULL;
   ASSERT_TRUE(!existing || saved != NULL);
-  ASSERT_INT_EQ(setenv("POLY_PATH_B_REQUIRE_PHYSICAL", "1", 1), 0);
+  ASSERT_INT_EQ(setenv("POLY_REQUIRE_PHYSICAL_ROOTS", "1", 1), 0);
   PolyTensor *direct_out = NULL;
   PolyTensor *legacy_out = NULL;
   int direct_rc = poly_realize_tensors(ctx, &direct, 1, &direct_out);
   int rejected_rc = poly_realize_tensors(ctx, &legacy, 1, &legacy_out);
   bool rejected_kept_logical_only = legacy->uop_physical == NULL;
 
-  ASSERT_INT_EQ(unsetenv("POLY_PATH_B_REQUIRE_PHYSICAL"), 0);
+  ASSERT_INT_EQ(unsetenv("POLY_REQUIRE_PHYSICAL_ROOTS"), 0);
   int fallback_rc = poly_realize_tensors(ctx, &legacy, 1, &legacy_out);
-  int restore_rc = saved ? setenv("POLY_PATH_B_REQUIRE_PHYSICAL", saved, 1)
-                         : unsetenv("POLY_PATH_B_REQUIRE_PHYSICAL");
+  int restore_rc = saved ? setenv("POLY_REQUIRE_PHYSICAL_ROOTS", saved, 1)
+                         : unsetenv("POLY_REQUIRE_PHYSICAL_ROOTS");
   free(saved);
 
   ASSERT_INT_EQ(restore_rc, 0);
@@ -6912,7 +6912,7 @@ TEST(realize, direct_movement_disk_copy_matches_pinned_creation_pipeline) {
   ASSERT_NOT_NULL(copy);
 
   /* Pinned Tensor.to builds COPY(RESHAPE(SHRINK(BUFFER@DISK)), DEVICE)
-   * directly (tensor.py:3661-3663). This is the Path-B stored execution root:
+   * directly (tensor.py:3661-3663). This is the stored execution root:
    * no placement call or BUFFER_VIEW projection is involved. */
   ASSERT_INT_EQ(copy->op, POLY_OP_COPY);
   ASSERT_INT_EQ(copy->n_src, 2);

@@ -894,7 +894,7 @@ static ShapeCacheEntry *compute_and_cache(PolyCtx *ctx, PolyUOp *u) {
   }
 
   /* Tensor REDUCE: dims at reduction axes become 1. Accept legacy
-   * REDUCE_AXIS raw/import graphs while Path B is experimental. */
+   * REDUCE_AXIS raw/import graphs while their migration is incomplete. */
   if ((op == POLY_OP_REDUCE || op == POLY_OP_REDUCE_AXIS) && u->n_src >= 1 &&
       u->arg.kind == POLY_ARG_REDUCE_AXIS) {
     int8_t in_ndim = SRC_NDIM(0);

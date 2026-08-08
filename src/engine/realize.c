@@ -1276,9 +1276,9 @@ static PolyUOp *poly_transform_to_call_rewrite_nested_contiguous(
     PolyDevice copy_device = poly_uop_device(ret);
     bool from_creation =
         source_device == POLY_DEVICE_HOST || source_device == POLY_DEVICE_DISK;
-    /* The preserved Path-A/raw-UOp route can still carry BUFFER(UNIQUE) with
+    /* The preserved legacy raw-UOp route can still carry BUFFER(UNIQUE) with
      * device=AUTO and express HOST/DISK only in ctx->buffers. Keep that
-     * boundary fallback solely for an incomplete graph. Complete Path-B
+     * boundary fallback solely for an incomplete graph. Complete eager physical
      * roots take the pinned graph-device branch above, including movement-
      * wrapped DISK sources that the old identity-only rule missed. */
     if (!from_creation && source_device == POLY_DEVICE_AUTO) {
@@ -2110,9 +2110,9 @@ static int poly_realize_tensors_impl(
 
   /* Pinned Tensor.realize consumes its sole deviceful Tensor.uop directly
    * (tensor.py:202-218); it has no logical->physical admission fallback.
-   * Keep Path A available while Path B is experimental, but make every
-   * remaining admission observable and fail-loud under the migration gate. */
-  if (used_placement && poly_getenv_flag("POLY_PATH_B_REQUIRE_PHYSICAL")) {
+   * Keep the legacy projection available during migration, but make every
+   * remaining admission observable and fail-loud under the invariant gate. */
+  if (used_placement && poly_getenv_flag("POLY_REQUIRE_PHYSICAL_ROOTS")) {
     for (int i = 0; i < n; i++) {
       PolyUOp *physical = inputs[i]->uop_physical;
       bool missing = physical == NULL;
@@ -2120,7 +2120,7 @@ static int poly_realize_tensors_impl(
       if (!missing && !unplaced) continue;
       fprintf(
           stderr,
-          "PATH_B_ADMISSION_FAIL target=%d reason=%s logical_op=%s "
+          "PHYSICAL_ROOT_ADMISSION_FAIL target=%d reason=%s logical_op=%s "
           "physical_op=%s role=%d device=%d\n",
           i, missing ? "missing_physical" : "unplaced_buffer",
           inputs[i]->uop_logical ? poly_op_name(inputs[i]->uop_logical->op) : "NULL",
@@ -2133,9 +2133,9 @@ static int poly_realize_tensors_impl(
 
   /* Pinned Tensor.realize filters its already-deviceful Tensor.uop directly
    * (tensor.py:214-219), then applies transform_to_call's exact becomes-map.
-   * Path B stores a complete graph in uop_physical at construction. During
+   * Default Tensor construction stores a complete graph in uop_physical. During
    * migration, a legacy non-NULL graph can still contain device-free BUFFERs;
-   * keep the preserved Path-A aggregate placer for that entire batch and
+   * keep the preserved aggregate placer for that entire batch and
    * never mix placement and direct roots within one realization. */
   if (used_placement) {
     if (poly_tensor_physicalize_many(
@@ -2150,7 +2150,7 @@ static int poly_realize_tensors_impl(
   for (int i = 0; i < n; i++) {
     PolyUOp *physical = physical_roots[i];
     /* Pinned Tensor.realize skips roots whose UOp.device is None
-     * (tensor.py:214-219). Path B represents that state as AUTO; wrapper
+     * (tensor.py:214-219). Polygrad represents that state as AUTO; wrapper
      * device metadata must not force a pure CONST graph through callify. */
     if (!used_placement && poly_uop_device(physical) == POLY_DEVICE_AUTO) {
       outputs[i] = inputs[i];

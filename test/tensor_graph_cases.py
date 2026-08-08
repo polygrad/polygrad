@@ -1141,6 +1141,11 @@ def case_contiguous():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_contiguous_deviceless():
+    out = Tensor.arange(4).contiguous()
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_view_assign():
     x = Tensor.empty(4, device="CPU")
     x.shrink(((1, 3),)).assign(Tensor.empty(2, device="CPU"))
@@ -1373,7 +1378,7 @@ def optimizer_step_graph(construct):
         roots = [tensor.uop_physical for tensor in scheduled]
         if any(root is None for root in roots):
             raise RuntimeError(
-                "Path B requires stored physical optimizer roots; "
+                "Default execution requires stored physical optimizer roots; "
                 f"observed {[root is not None for root in roots]}"
             )
     out = scheduled[0]
@@ -1427,6 +1432,7 @@ CASES = {
     "clamp_min_only": ("tensor", case_clamp_min_only),
     "clamp_occurrence": ("tensor", case_clamp_occurrence),
     "contiguous": ("tensor", case_contiguous),
+    "contiguous_deviceless": ("tensor", case_contiguous_deviceless),
     "conv2d_float32": ("tensor", case_conv2d_float32),
     "conv2d_occurrence": ("tensor", case_conv2d_occurrence),
     "cos_bfloat16": ("tensor", case_cos_bfloat16),

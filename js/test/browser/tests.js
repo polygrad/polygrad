@@ -1941,7 +1941,7 @@
             const moved = (await new Tensor([
               [1, 2, 3, 4],
               [5, 6, 7, 8]
-            ]).realize()).to("cuda").to("cpu");
+            ], { device: "cpu" }).realize()).to("cuda").to("cpu");
             assert(
               countGraphOp(moved.triu().uop, pg._core.ops.COPY) === 2,
               "triu lost moved occurrence"

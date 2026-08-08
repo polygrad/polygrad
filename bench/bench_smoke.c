@@ -11,6 +11,7 @@
 
 #include "polygrad.h"
 #include "device.h"
+#include "frontend.h"
 #include "tensor.h"
 
 #include <math.h>
@@ -65,16 +66,14 @@ static double mad_of(const double *vals, int n, double median) {
 }
 
 static PolyTensor *make_host_tensor(PolyCtx *ctx, float *data, size_t n, int64_t *shape, int ndim) {
-  int dtype_id = poly_dtype_id_by_name("float32");
-  PolyUOp *u = poly_buffer_from_host(ctx, data, n * sizeof(float), dtype_id, shape, ndim);
-  if (!u) return NULL;
-  return poly_tensor_create(ctx, u, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+  PolyTensor *source =
+      poly_tensor_from_host(ctx, data, n * sizeof(float), POLY_FLOAT32, shape, ndim);
+  return source ? poly_tensor_to_device(ctx, source, POLY_DEVICE_CPU) : NULL;
 }
 
-static void realize_or_die(PolyCtx *ctx, PolyUOp *u, const char *name) {
-  PolyTensor *t = poly_tensor_create(ctx, u, POLY_TENSOR_VALUE, POLY_DEVICE_CPU);
+static void realize_or_die(PolyCtx *ctx, PolyTensor *tensor, const char *name) {
   PolyTensor *out = NULL;
-  if (!t || poly_realize_tensors(ctx, &t, 1, &out) != 0) {
+  if (!tensor || poly_realize_tensors(ctx, &tensor, 1, &out) != 0) {
     fprintf(stderr, "bench_smoke: %s realize failed\n", name);
     exit(2);
   }
@@ -95,13 +94,13 @@ static double bench_sum_1024(int iters, int warmup) {
   int64_t axes[1] = {0};
 
   for (int i = 0; i < warmup; i++) {
-    PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, poly_tensor_uop(a), axes, 1);
+    PolyTensor *sum = poly_tensor_sum(ctx, a, axes, 1, false);
     realize_or_die(ctx, sum, "sum_1024 warmup");
   }
 
   double t0 = now_us();
   for (int i = 0; i < iters; i++) {
-    PolyUOp *sum = poly_reduce_axis(ctx, POLY_OP_ADD, poly_tensor_uop(a), axes, 1);
+    PolyTensor *sum = poly_tensor_sum(ctx, a, axes, 1, false);
     realize_or_die(ctx, sum, "sum_1024");
   }
   double ret = (now_us() - t0) / (double)iters;
@@ -126,17 +125,17 @@ static double bench_movement_1024(int iters, int warmup) {
   int64_t perm[2] = {1, 0};
 
   for (int i = 0; i < warmup; i++) {
-    PolyUOp *r = poly_reshape(ctx, poly_tensor_uop(a), reshaped, 2);
-    PolyUOp *p = poly_permute(ctx, r, perm, 2);
-    PolyUOp *c = poly_contiguous(ctx, p);
+    PolyTensor *r = poly_tensor_reshape(ctx, a, reshaped, 2);
+    PolyTensor *p = poly_tensor_permute(ctx, r, perm, 2);
+    PolyTensor *c = poly_tensor_contiguous(ctx, p);
     realize_or_die(ctx, c, "movement_1024 warmup");
   }
 
   double t0 = now_us();
   for (int i = 0; i < iters; i++) {
-    PolyUOp *r = poly_reshape(ctx, poly_tensor_uop(a), reshaped, 2);
-    PolyUOp *p = poly_permute(ctx, r, perm, 2);
-    PolyUOp *c = poly_contiguous(ctx, p);
+    PolyTensor *r = poly_tensor_reshape(ctx, a, reshaped, 2);
+    PolyTensor *p = poly_tensor_permute(ctx, r, perm, 2);
+    PolyTensor *c = poly_tensor_contiguous(ctx, p);
     realize_or_die(ctx, c, "movement_1024");
   }
   double ret = (now_us() - t0) / (double)iters;
@@ -161,27 +160,21 @@ static double bench_chain_1024(int iters, int warmup) {
   poly_ctx_set_preferred_device(ctx, POLY_DEVICE_CPU);
   PolyTensor *a = make_host_tensor(ctx, a_data, (size_t)n, shape, 1);
   PolyTensor *b = make_host_tensor(ctx, b_data, (size_t)n, shape, 1);
+  int f32 = poly_dtype_id_by_name("float32");
+  PolyTensor *two = poly_tensor_const_float_by_id(ctx, 2.0, f32, POLY_DEVICE_CPU);
 
   for (int i = 0; i < warmup; i++) {
-    PolyUOp *expr = poly_sub(
-        ctx,
-        poly_mul(
-            ctx, poly_add(ctx, poly_tensor_uop(a), poly_tensor_uop(b)), poly_const_float(ctx, 2.0)
-        ),
-        poly_tensor_uop(b)
-    );
+    PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+    PolyTensor *scaled = poly_tensor_alu2(ctx, POLY_OP_MUL, sum, two);
+    PolyTensor *expr = poly_tensor_alu2(ctx, POLY_OP_SUB, scaled, b);
     realize_or_die(ctx, expr, "chain_1024 warmup");
   }
 
   double t0 = now_us();
   for (int i = 0; i < iters; i++) {
-    PolyUOp *expr = poly_sub(
-        ctx,
-        poly_mul(
-            ctx, poly_add(ctx, poly_tensor_uop(a), poly_tensor_uop(b)), poly_const_float(ctx, 2.0)
-        ),
-        poly_tensor_uop(b)
-    );
+    PolyTensor *sum = poly_tensor_alu2(ctx, POLY_OP_ADD, a, b);
+    PolyTensor *scaled = poly_tensor_alu2(ctx, POLY_OP_MUL, sum, two);
+    PolyTensor *expr = poly_tensor_alu2(ctx, POLY_OP_SUB, scaled, b);
     realize_or_die(ctx, expr, "chain_1024");
   }
   double ret = (now_us() - t0) / (double)iters;
@@ -212,13 +205,13 @@ static double bench_matmul_16(int iters, int warmup) {
   PolyTensor *b = make_host_tensor(ctx, b_data, numel, shape, 2);
 
   for (int i = 0; i < warmup; i++) {
-    PolyUOp *dot = poly_dot(ctx, poly_tensor_uop(a), poly_tensor_uop(b));
+    PolyTensor *dot = poly_tensor_dot(ctx, a, b);
     realize_or_die(ctx, dot, "matmul_16 warmup");
   }
 
   double t0 = now_us();
   for (int i = 0; i < iters; i++) {
-    PolyUOp *dot = poly_dot(ctx, poly_tensor_uop(a), poly_tensor_uop(b));
+    PolyTensor *dot = poly_tensor_dot(ctx, a, b);
     realize_or_die(ctx, dot, "matmul_16");
   }
   double ret = (now_us() - t0) / (double)iters;

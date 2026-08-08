@@ -1522,7 +1522,7 @@ TEST(instance, from_binding_arrays_forward_e2e) {
   PASS();
 }
 
-TEST(instance, from_bindings_snapshots_realized_path_b_host_parameter) {
+TEST(instance, from_bindings_snapshots_realized_host_parameter) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
 

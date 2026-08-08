@@ -926,7 +926,7 @@ class TestJit:
         assert f.captured
         # Pinned TinyJit captures two linears for this exact expression:
         # the explicit realize and its returned symbolic SHRINK view
-        # (engine/jit.py:267-293; temp/path_b_probe/tinygrad_symbolic_realize.json).
+        # (engine/jit.py:267-293; paired tinygrad symbolic-realize probe).
         assert f.schedule_count == 2
         assert not isinstance(y1.shape[0], int)
 

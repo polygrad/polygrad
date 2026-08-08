@@ -513,7 +513,7 @@ function createBoundTensorClass(runtime) {
 
     _coreCreate(uop, role, device) {
       // Pinned Tensor.__init__ stores a supplied UOp directly
-      // (tensor.py:76-121). Path B records that exact current root.
+      // (tensor.py:76-121). The C boundary records that exact current root.
       return tensorCreateWithRoots(
         this._ctx, uop, uop, role, device || this._device
       )
@@ -1068,23 +1068,10 @@ function createBoundTensorClass(runtime) {
 
     contiguous() {
       const { ffi } = this._rt._core
-      /* tinygrad applies UOp.contiguous to its one current Tensor.uop, where
-       * an existing BUFFER identity is returned unchanged. Keep Polygrad's
-       * logical provenance, but run the same existing fold independently on
-       * the executable current root instead of substituting into a prebuilt
-       * CONTIGUOUS(logical) graph. */
-      const logical = ffi.poly_contiguous(this._ctx, this._graphUopRaw())
-      const current = ffi.poly_contiguous(this._ctx, this._currentUopRaw())
-      if (!logical || !current) throw new Error('poly_contiguous failed')
-      return new Tensor(null, {
-        _ctx: this._ctx,
-        _tensor: this._coreCreateWithRoots(
-          logical, current, POLY_TENSOR_VALUE, this._device
-        ),
-        _dtype: this._dtype,
-        _device: this._device,
-        requiresGrad: this._requiresGrad
-      })
+      /* Pinned Tensor.contiguous -> UOp.contiguous (tensor.py:742-746,
+       * uop/ops.py:587-591). C owns both retained/current roots. */
+      const core = ffi.poly_tensor_contiguous(this._ctx, this._tensor)
+      return this._makeResultFromCore(core, [this])
     }
 
     // --- Internal helpers ---
@@ -1627,7 +1614,7 @@ function createBoundTensorClass(runtime) {
 
     quickGelu() {
       // Pinned mixin/elementwise.py:751-759 builds the broadcasted scalar
-      // formula from the one current Tensor.uop. C owns both Path-B roots.
+      // formula from the one current Tensor.uop. C owns both retained/current roots.
       const core = this._rt._core.ffi.poly_tensor_quick_gelu(this._ctx, this._tensor)
       return this._makeResultFromCore(core, [this])
     }
@@ -1988,7 +1975,7 @@ function createBoundTensorClass(runtime) {
       if (correction === undefined) correction = 1
       // Pinned Tensor.var is this exact lazy Tensor expression
       // (mixin/__init__.py:608-635), including tuple axes and RELU on the
-      // denominator. Every constituent operation is C-owned on Path B.
+      // denominator. Every constituent operation is C-owned.
       const squares = this.sub(this.mean(axis, true)).square()
       const reducedShape = squares.sum(axis, true).shape
       const n = product(this.shape.filter((si, i) => Number(si) !== Number(reducedShape[i])))

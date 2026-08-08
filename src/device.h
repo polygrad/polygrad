@@ -98,7 +98,7 @@ PolyUOp *poly_buffer_view(
 /* Prove the currently supported static contiguous movement-view subset
  * (RESHAPE/SHRINK over valid realized storage) without creating a UOp.
  * This is shared by tinygrad-style UOp.buffer access and the preserved
- * Path-A placement boundary. */
+ * legacy placement boundary. */
 bool poly_uop_contiguous_view_info(
     PolyCtx *ctx,
     PolyUOp *u,

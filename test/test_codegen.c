@@ -1898,7 +1898,7 @@ TEST(codegen, bf16_scalar_and_vector_transcendentals_share_f32_widening) {
         if (dts[d].count == 2) {
           /* Pinned codegen/__init__.py:119 composes symbolic_simple with the
            * transcendental matcher. The exact normalized BF16x2 body is
-           * recorded by temp/path_b_vector_sin_fingerprint_20260731.py. */
+           * recorded by the paired vector-sine fingerprint probe. */
           ASSERT_INT_EQ(n_topo, 207);
           ASSERT_TRUE(
               normalized_topology_fingerprint(topo, n_topo, rewritten) ==

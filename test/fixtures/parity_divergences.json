@@ -27,9 +27,9 @@
       "stages": ["logical", "placement", "instance", "export"],
       "area": "retained logical and explicit re-placement capability",
       "tinygrad": "Tensor owns one mutable, deviceful Tensor.uop",
-      "polygrad": "On Path B, default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit re_place outside default realization",
+      "polygrad": "Default uop_physical is eagerly constructed in C and must match tinygrad Tensor.uop; Polygrad may additionally retain a deviceless logical graph and physical template for Instance, export, and explicit re_place outside default realization",
       "rationale": "Portable logical retention, export, explicit re-placement, and PolyInstance capture are approved Polygrad superset capabilities; default physical construction and execution are parity surfaces.",
-      "approval": "AGENTS.md Path-B Core Invariants and user-approved logical/physical split",
+      "approval": "AGENTS.md Core Invariants and user-approved logical/physical split",
       "evidence": [
         "ARCHITECTURE.md:Core Model",
         "src/polygrad.h:PolyTensor"
@@ -219,7 +219,7 @@
       "area": "legacy reduction spelling",
       "vocabulary": {"tinygrad_only": [], "polygrad_only": ["REDUCE_AXIS"]},
       "tinygrad": "Tensor graphs use REDUCE with axes encoded in the UOp argument",
-      "polygrad": "Normal Tensor construction now matches REDUCE; REDUCE_AXIS remains only for legacy raw/import and preserved Path-A compatibility while Path B is experimental",
+      "polygrad": "Normal Tensor construction now matches REDUCE; REDUCE_AXIS remains only for legacy raw/import compatibility while that migration is incomplete",
       "rationale": "The extra enum is not an approved permanent shared-IR divergence.",
       "approval": null,
       "evidence": [
@@ -227,7 +227,7 @@
         "src/polygrad.h:POLY_OP_REDUCE_AXIS",
         "src/shape.c:poly_reduce_axis"
       ],
-      "close_when": "Path B is promoted, legacy Path-A/raw imports are migrated, and REDUCE_AXIS is removed from the runtime vocabulary."
+      "close_when": "Legacy raw/import construction is migrated to the default physical Tensor lifecycle and REDUCE_AXIS is removed from the runtime vocabulary."
     },
     {
       "id": "PG-PARITY-007",
@@ -236,11 +236,10 @@
       "area": "movement shape representation",
       "tinygrad": "RESHAPE/EXPAND use shape-value sources, PAD/SHRINK use start/size shape-value sources, PERMUTE keeps its permutation tuple, and FLIP keeps a rank-sized boolean-mask tuple",
       "polygrad": "Tensor construction now uses the same source and argument topology for RESHAPE, EXPAND, PAD, SHRINK, PERMUTE, and FLIP",
-      "rationale": "This was shared Tensor IR topology debt and was closed by the Path-B movement-vocabulary port.",
+      "rationale": "This was shared Tensor IR topology debt and was closed by the movement-vocabulary port.",
       "approval": null,
       "evidence": [
         "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._mop",
-        "temp/path_b_movement_vocabulary_correspondence_20260727.md",
         "test/tensor_graph_cases.py",
         "src/shape.c"
       ],
@@ -357,11 +356,8 @@
       "evidence": [
         "MEMORY_CIFAR.md:Tinygrad-parity core and HLB semantics",
         "PLAN_CORE_20260720.md:WS3",
-        "temp/path_b_optimizer_jit_schedule_{tinygrad,polygrad}_20260728.json",
-        "temp/path_b_optimizer_group_jit_schedule_{tinygrad,polygrad}_20260728.json",
-        "temp/path_b_elementwise_softmax_correspondence_20260728.md",
-        "temp/path_b_model_backward_jit_schedule_polygrad_post_softmax_20260729.json",
-        "temp/hlb_train_eval_ema_jit_compare_path_b_softmax_20260729.json"
+        "test/tensor_graph_cases.py",
+        "test/compare_tensor_graphs.py"
       ],
       "resolution": {
         "evidence": "The permanent graph oracle passes 69/69 with zero suppressions; isolated model backward is 8/8 CALLs and bounded HLB train/eval/eval-EMA/EMA is 20/8/8/3 in both engines with maximum value error 5.96046448e-08.",
@@ -441,8 +437,6 @@
         "references/tinygrad_latest/tinygrad/mixin/__init__.py:_scatter_reduce",
         "src/tensor.c:poly_dtype_bound_const",
         "src/tensor.c:poly_scatter_reduce",
-        "temp/path_b_unsigned_minimum_bounds_correspondence_20260730.md",
-        "temp/path_b_unsigned_minimum_bounds_20260731/summary_post.json",
         "test/test_tensor.c:unsigned_scatter_amin_matches_pinned_inverse_max_inverse"
       ],
       "resolution": {
@@ -465,7 +459,7 @@
         "references/tinygrad_latest/tinygrad/uop/ops.py:UOp._frompy",
         "js/src/tensor.js:flattenArray",
         "js/src/tensor.js:Tensor",
-        "temp/path_b_trig_js_probe_20260731.js"
+        "js/test/test_tensor.js"
       ],
       "close_when": "Plain JavaScript numeric float16 arrays stage numeric values and match the float32-then-cast Tensor graph/value behavior across native, Wasm, and browser frontends."
     },
@@ -485,9 +479,6 @@
         "references/tinygrad_latest/tinygrad/dtype.py:DType.const",
         "src/bigint.c",
         "src/polygrad.h:PolyArg",
-        "temp/path_b_raw_const_eval_correspondence_20260731.md",
-        "temp/path_b_bigint_symbolic_{tg,pg}_probe_20260731.json",
-        "temp/path_b_bigint_alu_{tg,pg}_probe_20260731.out",
         "test/test_bigint.c",
         "test/test_codegen.c",
         "test/test_cuda.c",
@@ -513,10 +504,29 @@
         "references/tinygrad_latest/tinygrad/mixin/__init__.py:_pre_scatter",
         "src/tensor.c:poly_prepare_scatter",
         "src/tensor.c:poly_scatter_one_hot",
-        "temp/path_b_unsigned_minimum_bounds_20260731/summary_post.json",
-        "temp/path_b_unsigned_minimum_bounds_correspondence_20260730.md"
+        "test/test_tensor.c"
       ],
       "close_when": "Focused rank-two and generalized scatter/scatter-reduce construction graphs match pinned tinygrad for shrink, one-hot, transpose, pad_to, include_self, and all five reducers without suppressions."
+    },
+    {
+      "id": "PG-PARITY-022",
+      "status": "open_debt",
+      "stages": ["raw-uop", "placement", "realize"],
+      "area": "device-free raw contiguous folding",
+      "vocabulary": {"tinygrad_only": [], "polygrad_only": []},
+      "tinygrad": "UOp.contiguous returns the original UOp when device is None",
+      "polygrad": "Tensor.contiguous has the exact device-free fold, but raw poly_contiguous still creates a CONTIGUOUS barrier for device-free graphs consumed by preserved legacy logical builders",
+      "rationale": "Changing the overloaded raw helper before those builders migrate removes deliberate pre-placement materialization barriers. The default Tensor parity surface must remain exact while the legacy raw/import route stays visible as migration debt.",
+      "approval": null,
+      "evidence": [
+        "references/tinygrad_latest/tinygrad/uop/ops.py:UOp.contiguous",
+        "references/tinygrad_latest/tinygrad/tensor.py:Tensor.contiguous",
+        "src/tensor.c:poly_tensor_contiguous",
+        "src/tensor.c:poly_contiguous",
+        "test/test_tensor.c:contiguous_tensor_matches_pinned_device_rules",
+        "test/tensor_graph_cases.py:case_contiguous_deviceless"
+      ],
+      "close_when": "All executable raw/import callers carry complete physical device facts or cross explicit re_place, the device-free fold moves into poly_contiguous itself, and the native realization matrix remains green."
     }
   ]
 }

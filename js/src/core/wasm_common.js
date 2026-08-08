@@ -981,6 +981,8 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_cast_by_id(ctx, tensor, dtypeId),
     poly_tensor_bitcast_by_id: (ctx, tensor, dtypeId) =>
       Module._poly_tensor_bitcast_by_id(ctx, tensor, dtypeId),
+    poly_tensor_contiguous: (ctx, tensor) =>
+      Module._poly_tensor_contiguous(ctx, tensor),
     poly_tensor_reshape: (ctx, tensor, shape, len) =>
       callWithInt64(Module._poly_tensor_reshape, ctx, tensor, shape, len),
     poly_tensor_expand: (ctx, tensor, shape, len) =>
@@ -1525,7 +1527,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 45
+  const EXPECTED_ABI = 46
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

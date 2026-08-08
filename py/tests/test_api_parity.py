@@ -1,3 +1,6 @@
+from pathlib import Path
+import re
+
 import numpy as np
 import pytest
 
@@ -346,7 +349,18 @@ def test_random_crop_indices_remain_consistent_after_readback():
 
 
 def test_python_loader_checks_current_abi_before_use():
-    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 45
+    assert _ffi.get_lib().poly_abi_version() == _ffi.POLYGRAD_ABI_VERSION == 46
+
+
+@pytest.mark.parametrize('relative', [
+    'js/src/core/native.js',
+    'js/src/core/wasm_common.js',
+])
+def test_javascript_loaders_expect_the_current_frontend_abi(relative):
+    source = (Path(__file__).resolve().parents[2] / relative).read_text()
+    match = re.search(r'const EXPECTED_ABI = (\d+)', source)
+    assert match is not None
+    assert int(match.group(1)) == _ffi.POLYGRAD_ABI_VERSION
 
 
 def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkeypatch):
@@ -363,7 +377,7 @@ def test_python_loader_rejects_mismatched_abi_before_declaring_signatures(monkey
     monkeypatch.setattr(_ffi, '_lib', None)
     monkeypatch.setattr(_ffi, '_find_lib', lambda: 'fake-libpolygrad.so')
     monkeypatch.setattr(_ffi.ctypes, 'CDLL', lambda _path: FakeLibrary())
-    with pytest.raises(RuntimeError, match='expected version 45, got 20'):
+    with pytest.raises(RuntimeError, match='expected version 46, got 20'):
         _ffi.get_lib()
     assert _ffi._lib is None
 

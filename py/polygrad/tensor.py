@@ -426,7 +426,7 @@ def _require_i64(value, what):
 
 def _created_tensor(ctx, tensor, dtype_name, device, requires_grad, op_name):
     # Constructors should trust the core for final shape metadata so Python
-    # does not grow a second copy of shape or Path-B root-ownership logic.
+    # does not grow a second copy of shape or dual-root ownership logic.
     if not tensor:
         raise RuntimeError(f'{op_name} failed')
     uop = _ffi._lib.poly_tensor_uop(tensor)
@@ -746,8 +746,8 @@ class Tensor:
 
     def _core_create(self, uop, role=_POLY_TENSOR_VALUE, device=None):
         # Pinned Tensor.__init__ stores a supplied UOp directly
-        # (tensor.py:76-121). Path B makes that exact current root explicit;
-        # the legacy raw-C constructor remains available to Path A callers.
+        # (tensor.py:76-121). The C boundary makes that exact current root explicit;
+        # the legacy raw-C constructor remains available to logical/import callers.
         return Tensor._core_create_with_roots_for(
             self._ctx, uop, uop, role, self._device if device is None else device
         )
@@ -1255,7 +1255,7 @@ class Tensor:
             if identity is not None:
                 return Buffer(self._ctx, identity, self._dtype_str, self.numel())
         # Pinned tensor.py:259-266 clones a device-free source (or MULTI
-        # source) to CPU for readback. Path B must not recover the old implicit
+        # source) to CPU for readback. Default execution must not recover the old implicit
         # realize-time placement merely because wrapper metadata names a
         # preferred execution backend.
         x = self.cast(to_dtype(self._dtype_str).base).contiguous()
@@ -1406,25 +1406,10 @@ class Tensor:
         """Returns a contiguous tensor."""
         if args or kwargs:
             return self._apply_uop(UOp.contiguous, extra_args=args, **kwargs)
-        # tinygrad applies UOp.contiguous to its one current Tensor.uop, where
-        # an existing BUFFER identity is returned unchanged. Preserve
-        # Polygrad's logical provenance, but run that same existing fold on the
-        # executable current root instead of substituting it into a prebuilt
-        # CONTIGUOUS(logical) graph.
-        logical = self._graph_uop.contiguous()
-        current = self.uop.contiguous()
-        if not logical or not current:
-            raise RuntimeError('poly_contiguous failed')
-        return Tensor(
-            _ctx=self._ctx,
-            _tensor=self._core_create_with_roots(
-                logical, current, _POLY_TENSOR_VALUE, self._device
-            ),
-            _shape=self.shape,
-            _dtype=self._dtype_str,
-            _device=self._device,
-            requires_grad=self._requires_grad,
-        )
+        # Pinned Tensor.contiguous -> UOp.contiguous (tensor.py:742-746,
+        # uop/ops.py:587-591). C owns both retained/current roots.
+        core = _ffi._lib.poly_tensor_contiguous(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
 
     # --- Dtype casting ---
 
@@ -2058,14 +2043,14 @@ class Tensor:
 
     def gelu(self):
         # Pinned mixin/elementwise.py:761-776. C applies the exact formula
-        # independently to retained/current Path-B roots.
+        # independently to retained/current roots.
         core = _ffi._lib.poly_tensor_gelu(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape, [self])
 
     def quick_gelu(self):
         # Pinned mixin/elementwise.py:751-759 builds the broadcasted scalar
         # formula from the one current Tensor.uop. The C Tensor boundary does
-        # the same independently for retained/current Path-B roots.
+        # the same independently for retained/current roots.
         core = _ffi._lib.poly_tensor_quick_gelu(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape, [self])
 
@@ -2453,7 +2438,7 @@ class Tensor:
     def var(self, axis=None, keepdim=False, correction=1):
         # Pinned Tensor.var is this exact lazy Tensor expression
         # (mixin/__init__.py:608-635), including tuple axes and RELU on the
-        # denominator. Every constituent operation is C-owned on Path B.
+        # denominator. Every constituent operation is C-owned.
         squares = (self - self.mean(axis=axis, keepdim=True)).square()
         reduced_shape = squares.sum(axis=axis, keepdim=True).shape
         n = _prod(

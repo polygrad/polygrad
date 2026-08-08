@@ -546,7 +546,7 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   /* Build same model via registry API and manual PolyIrSpec, compare results */
   int N = 4;
 
-  /* Path A: registry API */
+  /* Registry API fixture. */
   PolyCtx *ctx_a = poly_ctx_new();
   int64_t s[] = {N};
   PolyUOp *wa = poly_param(ctx_a, POLY_FLOAT32, s, 1, "w");
@@ -560,7 +560,7 @@ TEST(registry, instance_from_ctx_parity_with_ir) {
   PolyInstance *inst_a = poly_instance_from_ctx(ctx_a);
   ASSERT_TRUE(inst_a != NULL);
 
-  /* Path B: manual PolyIrSpec */
+  /* Manual PolyIrSpec fixture. */
   PolyCtx *ctx_b = poly_ctx_new();
   PolyUOp *wb = poly_buffer_f32(ctx_b, N);
   PolyUOp *xb = poly_buffer_f32(ctx_b, N);

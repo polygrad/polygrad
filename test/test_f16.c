@@ -131,9 +131,17 @@ TEST(f16, cast_f32_to_f16_ieee_edges_e2e) {
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
 
-  const uint16_t expected[] = {
+  const uint16_t native_expected[] = {
       0x0001u, 0x8001u, 0x03ffu, 0x0400u, 0x3c00u, 0x3c02u, 0x7c00u, 0xfc00u,
   };
+  /* Pinned PythonRenderer excludes float16 on Python 3.11 and applies
+   * pm_float_decomp, while the other tested renderers keep native IEEE half
+   * (`runtime/ops_python.py:203-223`). */
+  const uint16_t interp_expected[] = {
+      0x0000u, 0x8000u, 0x0000u, 0x0400u, 0x3c00u, 0x3c02u, 0x7c00u, 0xfc00u,
+  };
+  const uint16_t *expected =
+      poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP ? interp_expected : native_expected;
   for (int i = 0; i < 8; i++)
     ASSERT_INT_EQ(out_data[i], expected[i]);
   ASSERT_TRUE((out_data[8] & 0x7c00u) == 0x7c00u && (out_data[8] & 0x03ffu) != 0);
@@ -448,7 +456,9 @@ TEST(f16, bitcast_bf16_int16_roundtrip_e2e) {
    * emulated renderers numerically convert the ordinary untagged STORE and
    * flush BF16 subnormals to signed zero
    * (uop/decompositions.py:533-562, renderer/cstyle.py:463). */
-  bool native_bf16 = false;
+  /* Pinned PythonRenderer supports BF16 natively and its BITCAST operates on
+   * the exact uint16 storage words (`ops_python.py:125`, `uop/ops.py:1199-1208`). */
+  bool native_bf16 = poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
   native_bf16 |=
       poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
@@ -478,8 +488,11 @@ TEST(f16, bitcast_bf16_float16_roundtrip_e2e) {
       POLY_TEST_HOST_VIEW(f16_out, f16_data),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, first_sink, first_binds, 2), 0);
-  for (int i = 0; i < 5; i++)
+  for (int i = 0; i < 3; i++)
     ASSERT_INT_EQ(f16_data[i], bf16_data[i]);
+  bool non_native_f16 = poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
+  ASSERT_INT_EQ(f16_data[3], non_native_f16 ? 0x0000u : bf16_data[3]);
+  ASSERT_INT_EQ(f16_data[4], non_native_f16 ? 0x8000u : bf16_data[4]);
 
   PolyUOp *f16_in = poly_buffer(ctx, POLY_FLOAT16, 5);
   PolyUOp *bf16_out = poly_buffer(ctx, POLY_BFLOAT16, 5);
@@ -493,7 +506,7 @@ TEST(f16, bitcast_bf16_float16_roundtrip_e2e) {
       POLY_TEST_HOST_VIEW(bf16_out, roundtrip),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, second_sink, second_binds, 2), 0);
-  bool native_bf16 = false;
+  bool native_bf16 = poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
   native_bf16 |=
       poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
@@ -526,8 +539,13 @@ TEST(f16, bitcast_bf16_to_float16_preserves_nan_payload_bits_e2e) {
       POLY_TEST_HOST_VIEW(f16_out, output),
   };
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 2), 0);
+  const uint16_t interp_expected[] = {
+      0x7e01u, 0x7f55u, 0x7e55u, 0xfe01u, 0xff55u, 0xfe55u,
+  };
+  const uint16_t *expected =
+      poly_ctx_get_preferred_device(ctx) == POLY_DEVICE_INTERP ? interp_expected : input;
   for (int i = 0; i < 6; i++)
-    ASSERT_INT_EQ(output[i], input[i]);
+    ASSERT_INT_EQ(output[i], expected[i]);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -614,7 +632,7 @@ TEST(f16, bf16_chain_matches_native_or_emulated_renderer_rounding) {
       POLY_TEST_HOST_VIEW(c, c_data), POLY_TEST_HOST_VIEW(out, out_data)};
   ASSERT_INT_EQ(poly_test_realize_buffer_views(ctx, sink, binds, 4), 0);
   PolyDevice preferred = poly_ctx_get_preferred_device(ctx);
-  bool per_op_bf16_rounding = preferred == POLY_DEVICE_HIP;
+  bool per_op_bf16_rounding = preferred == POLY_DEVICE_HIP || preferred == POLY_DEVICE_INTERP;
 #ifdef POLY_HAS_CUDA
   per_op_bf16_rounding |= preferred == POLY_DEVICE_CUDA && poly_cuda_arch_major() >= 8;
 #endif

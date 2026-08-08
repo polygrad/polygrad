@@ -249,7 +249,7 @@ TEST(tensor, scalar_constructors_store_exact_const_as_both_roots) {
 TEST(tensor, pure_constructors_store_one_device_free_root) {
   /* Pinned Tensor.__init__ stores a device-free constructor UOp directly, and
    * Tensor.to returns self while UOp.device is None (tensor.py:76-119,
-   * 327-335). Path B stores that exact root as both twins; no placement map is
+   * 327-335). The Tensor boundary stores that exact root as both twins; no placement map is
    * involved. */
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -324,7 +324,7 @@ TEST(tensor, movement_constructors_use_exact_logical_and_physical_sources) {
     ASSERT_PTR_NEQ(results[i]->uop_logical, results[i]->uop_physical);
   }
 
-  /* Preserved Path A constructors can still omit the physical root. During
+  /* Preserved legacy constructors can still omit the physical root. During
    * bounded migration, movement consumes that exact current root without
    * placement and makes the result's physical root explicit. */
   PolyUOp *legacy_uop = poly_buffer_f32(ctx, 3);
@@ -3357,6 +3357,36 @@ TEST(pe, v2_reduce_shape) {
 }
 
 /* Contiguous */
+
+TEST(tensor, contiguous_tensor_matches_pinned_device_rules) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int i32 = poly_dtype_id_by_name("int32");
+
+  PolyTensor *pure = poly_tensor_arange_int_by_id(ctx, 0, 4, 1, i32, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(pure);
+  PolyUOp *pure_physical = poly_tensor_uop_physical(pure);
+  PolyTensor *pure_contiguous = poly_tensor_contiguous(ctx, pure);
+  ASSERT_NOT_NULL(pure_contiguous);
+  ASSERT_INT_EQ(poly_tensor_uop_logical(pure_contiguous)->op, POLY_OP_CONTIGUOUS);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(pure_contiguous)->src[0], poly_tensor_uop_logical(pure));
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(pure_contiguous), pure_physical);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(pure_contiguous)->op, POLY_OP_ADD);
+
+  int64_t shape[2] = {2, 3};
+  int64_t order[2] = {1, 0};
+  PolyTensor *storage = poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *permuted = poly_tensor_permute(ctx, storage, order, 2);
+  PolyTensor *materialized = poly_tensor_contiguous(ctx, permuted);
+  ASSERT_NOT_NULL(materialized);
+  ASSERT_INT_EQ(poly_tensor_uop_logical(materialized)->op, POLY_OP_CONTIGUOUS);
+  ASSERT_PTR_EQ(poly_tensor_uop_logical(materialized)->src[0], poly_tensor_uop_logical(permuted));
+  ASSERT_INT_EQ(poly_tensor_uop_physical(materialized)->op, POLY_OP_CONTIGUOUS);
+  ASSERT_PTR_EQ(poly_tensor_uop_physical(materialized)->src[0], poly_tensor_uop_physical(permuted));
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
 
 TEST(tensor, contiguous_passthrough) {
   PolyCtx *ctx = poly_ctx_new();
