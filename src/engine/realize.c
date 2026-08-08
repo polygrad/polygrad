@@ -2108,6 +2108,29 @@ static int poly_realize_tensors_impl(
       used_placement = true;
   }
 
+  /* Pinned Tensor.realize consumes its sole deviceful Tensor.uop directly
+   * (tensor.py:202-218); it has no logical->physical admission fallback.
+   * Keep Path A available while Path B is experimental, but make every
+   * remaining admission observable and fail-loud under the migration gate. */
+  if (used_placement && poly_getenv_flag("POLY_PATH_B_REQUIRE_PHYSICAL")) {
+    for (int i = 0; i < n; i++) {
+      PolyUOp *physical = inputs[i]->uop_physical;
+      bool missing = physical == NULL;
+      bool unplaced = !missing && poly_tensor_root_has_unplaced_buffer(ctx, physical);
+      if (!missing && !unplaced) continue;
+      fprintf(
+          stderr,
+          "PATH_B_ADMISSION_FAIL target=%d reason=%s logical_op=%s "
+          "physical_op=%s role=%d device=%d\n",
+          i, missing ? "missing_physical" : "unplaced_buffer",
+          inputs[i]->uop_logical ? poly_op_name(inputs[i]->uop_logical->op) : "NULL",
+          physical ? poly_op_name(physical->op) : "NULL", (int)inputs[i]->role,
+          (int)inputs[i]->device
+      );
+    }
+    goto cleanup;
+  }
+
   /* Pinned Tensor.realize filters its already-deviceful Tensor.uop directly
    * (tensor.py:214-219), then applies transform_to_call's exact becomes-map.
    * Path B stores a complete graph in uop_physical at construction. During

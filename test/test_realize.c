@@ -5085,6 +5085,51 @@ TEST(realize, tensor_zero_size_placement_copy_adds_no_call) {
   PASS();
 }
 
+TEST(realize, path_b_admission_gate_rejects_explicit_path_a_logical_only_tensor) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int64_t dims[1] = {2};
+  PolyTensor *direct =
+      poly_tensor_empty(ctx, POLY_FLOAT32, dims, 1, POLY_DEVICE_CPU);
+  PolyUOp *legacy_root = poly_buffer(ctx, POLY_FLOAT32, 2);
+  PolyTensor *legacy = poly_tensor_create_with_roots(
+      ctx, legacy_root, NULL, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(direct);
+  ASSERT_NOT_NULL(direct->uop_physical);
+  ASSERT_NOT_NULL(legacy);
+  ASSERT_EQ(legacy->uop_physical, NULL);
+
+  const char *existing = getenv("POLY_PATH_B_REQUIRE_PHYSICAL");
+  char *saved = existing ? strdup(existing) : NULL;
+  ASSERT_TRUE(!existing || saved != NULL);
+  ASSERT_INT_EQ(setenv("POLY_PATH_B_REQUIRE_PHYSICAL", "1", 1), 0);
+  PolyTensor *direct_out = NULL;
+  PolyTensor *legacy_out = NULL;
+  int direct_rc = poly_realize_tensors(ctx, &direct, 1, &direct_out);
+  int rejected_rc = poly_realize_tensors(ctx, &legacy, 1, &legacy_out);
+  bool rejected_kept_logical_only = legacy->uop_physical == NULL;
+
+  ASSERT_INT_EQ(unsetenv("POLY_PATH_B_REQUIRE_PHYSICAL"), 0);
+  int fallback_rc = poly_realize_tensors(ctx, &legacy, 1, &legacy_out);
+  int restore_rc = saved ? setenv("POLY_PATH_B_REQUIRE_PHYSICAL", saved, 1)
+                         : unsetenv("POLY_PATH_B_REQUIRE_PHYSICAL");
+  free(saved);
+
+  ASSERT_INT_EQ(restore_rc, 0);
+  ASSERT_INT_EQ(direct_rc, 0);
+  ASSERT_PTR_EQ(direct_out, direct);
+  ASSERT_INT_EQ(rejected_rc, -1);
+  ASSERT_TRUE(rejected_kept_logical_only);
+  ASSERT_INT_EQ(fallback_rc, 0);
+  ASSERT_PTR_EQ(legacy_out, legacy);
+  ASSERT_NOT_NULL(legacy->uop_physical);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, tensor_zero_axis_short_circuits_earlier_numel_overflow) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
