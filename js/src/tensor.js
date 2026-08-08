@@ -392,7 +392,6 @@ function createBoundTensorClass(runtime) {
       this._device = normalizeDevice(opts._device || opts.device || _runtime.device || 'cpu')
       this._tensor = opts._tensor || null
       let currentUop = null
-      let importedFromHost = false
       let importedTensorFromHost = false
       const optUop = opts._uop || (this._tensor ? tensorUop(this._tensor) : null)
 
@@ -436,13 +435,10 @@ function createBoundTensorClass(runtime) {
           this._dtype = dt
           this._data = null
         } else if (data instanceof Float64Array && (!opts.dtype || opts.dtype === 'float64')) {
-          importedFromHost = true
           dt = 'float64'; flat = new Float64Array(data); shape = [data.length]
         } else if (data instanceof Float32Array && (!opts.dtype || opts.dtype === 'float32')) {
-          importedFromHost = true
           dt = 'float32'; flat = new Float32Array(data); shape = [data.length]
         } else if (ArrayBuffer.isView(data) && !(data instanceof DataView)) {
-          importedFromHost = true
           dt = (opts && opts.dtype) || 'float32'
           // Pinned UOp._frompy stages numeric BF16 values as float32 bytes and
           // then casts the Tensor graph (uop/ops.py:752-764). Uint16Array here
@@ -451,7 +447,6 @@ function createBoundTensorClass(runtime) {
           flat = new ArrayType(data)
           shape = [data.length]
         } else {
-          importedFromHost = true
           dt = (opts && opts.dtype) || 'float32'
           const r = flattenArray(data, dt === 'bfloat16' ? 'float32' : dt)
           flat = r.data; shape = r.shape
@@ -468,31 +463,26 @@ function createBoundTensorClass(runtime) {
           // unspecified/scalar host buffer and applies its scalar numel fallback.
           const dims = shape.length ? shape : null
           let ownerUop = null
-          if (ffi.poly_tensor_from_host_by_id) {
-            this._tensor = ffi.poly_tensor_from_host_by_id(
-              this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
+          this._tensor = ffi.poly_tensor_from_host_by_id(
+            this._ctx, flat, flat.byteLength, dtypeId, dims, dims ? dims.length : 0
+          )
+          if (!this._tensor) throw new Error('poly_tensor_from_host_by_id failed')
+          const physical = tensorUopPhysical(this._tensor)
+          if (!physical) throw new Error('host Tensor source has no physical root')
+          currentUop = new UOp(this._ctx, core.ffi, physical)
+          ownerUop = currentUop
+          if (postCastDtype) {
+            this._tensor = ffi.poly_tensor_cast_by_id(
+              this._ctx, this._tensor, DTYPE_ID[postCastDtype]
             )
-            if (!this._tensor) throw new Error('poly_tensor_from_host_by_id failed')
-            const physical = tensorUopPhysical(this._tensor)
-            if (!physical) throw new Error('host Tensor source has no physical root')
-            currentUop = new UOp(this._ctx, core.ffi, physical)
-            ownerUop = currentUop
-            if (postCastDtype) {
-              this._tensor = ffi.poly_tensor_cast_by_id(
-                this._ctx, this._tensor, DTYPE_ID[postCastDtype]
-              )
-              if (!this._tensor) {
-                throw new Error(`poly_tensor_cast_by_id failed for dtype ${postCastDtype}`)
-              }
-              const castPhysical = tensorUopPhysical(this._tensor)
-              if (!castPhysical) throw new Error('cast host Tensor has no physical root')
-              currentUop = new UOp(this._ctx, core.ffi, castPhysical)
+            if (!this._tensor) {
+              throw new Error(`poly_tensor_cast_by_id failed for dtype ${postCastDtype}`)
             }
-            importedTensorFromHost = true
-          } else {
-            currentUop = UOp.fromHost(this._ctx, core.ffi, flat, dtypeId, dims)
-            ownerUop = currentUop
+            const castPhysical = tensorUopPhysical(this._tensor)
+            if (!castPhysical) throw new Error('cast host Tensor has no physical root')
+            currentUop = new UOp(this._ctx, core.ffi, castPhysical)
           }
+          importedTensorFromHost = true
           const buffer = ownerUop && ownerUop.buffer ? ownerUop.buffer.raw : null
           const needsFrontendHostOwner =
             Boolean(buffer && core.ffi.poly_buffer_get_key) &&
@@ -515,24 +505,7 @@ function createBoundTensorClass(runtime) {
           if (!this._tensor) throw new Error(`poly_tensor_to_device failed for ${this._device}`)
         }
       } else if (!this._tensor && currentUop) {
-        const sourceDevice = 'cpu'
-        const targetDeviceId = deviceId(this._device)
-        const sourceDeviceId = deviceId(sourceDevice)
-        const targetUsesHostStorage = Boolean(
-          ffi.poly_device_is_host_addressable(targetDeviceId)
-        )
-        if (importedFromHost && targetDeviceId !== sourceDeviceId && !targetUsesHostStorage) {
-          // Match pinned tinygrad's direct PYTHON -> target-device creation
-          // COPY. Explicit CPU construction followed by .to(device) still
-          // retains its separate CPU COPY boundary.
-          const source = ffi.poly_tensor_create(
-            this._ctx, currentUop.raw, POLY_TENSOR_VALUE, deviceId('host')
-          )
-          this._tensor = ffi.poly_tensor_to_device(this._ctx, source, targetDeviceId)
-          if (!this._tensor) throw new Error(`poly_tensor_to_device failed for ${this._device}`)
-        } else {
-          this._tensor = this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
-        }
+        this._tensor = this._coreCreate(currentUop.raw, POLY_TENSOR_VALUE, this._device)
       }
       this._syncCoreRequiresGrad()
       registerTensor(this)

@@ -561,7 +561,6 @@ class Tensor:
         self._tensor = _tensor
         self._shape_override = tuple(_shape) if _shape is not None else None
         current_uop = None
-        imported_from_host = False
         imported_tensor_from_host = False
         imported_from_disk = False
         if self._tensor is not None and _uop is None:
@@ -636,7 +635,6 @@ class Tensor:
                 self._data = None
                 self._dtype_str = dt
             else:
-                imported_from_host = True
                 _ensure_frontend_buffer_release_registered(self._ctx)
                 if dtype is None and isinstance(data, np.ndarray):
                     dt = _dtype_name(data.dtype, default='float32')
@@ -725,24 +723,8 @@ class Tensor:
             source_device = disk_device if imported_from_disk else 'CPU'
             target_device_id = _device_id(self._device)
             source_device_id = _device_id(source_device)
-            target_uses_host_storage = bool(
-                _ffi._lib.poly_device_is_host_addressable(target_device_id)
-            )
-            if (imported_from_disk and target_device_id != source_device_id) or (
-                    imported_from_host and target_device_id != source_device_id and
-                    not target_uses_host_storage):
-                if imported_from_host:
-                    # Pinned tinygrad constructs Tensor(data, device=CUDA) as a
-                    # direct PYTHON -> CUDA COPY. POLY_DEVICE_HOST is
-                    # Polygrad's existing PYTHON/NPY boundary; keep explicit
-                    # Tensor(data, device=CPU).to(CUDA) on the separate CPU
-                    # source route.
-                    host_device_id = int(_ffi._lib.poly_device_by_name(b'host'))
-                    source = _ffi._lib.poly_tensor_create(
-                        self._ctx, current_uop.raw, _POLY_TENSOR_VALUE, host_device_id
-                    )
-                else:
-                    source = self._core_create(current_uop, _POLY_TENSOR_VALUE, source_device)
+            if imported_from_disk and target_device_id != source_device_id:
+                source = self._core_create(current_uop, _POLY_TENSOR_VALUE, source_device)
                 self._tensor = _ffi._lib.poly_tensor_to_device(
                     self._ctx, source, target_device_id
                 )
