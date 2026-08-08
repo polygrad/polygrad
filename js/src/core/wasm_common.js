@@ -848,6 +848,25 @@ function createWasmCoreFromModule(Module, device) {
       Boolean(Module._poly_device_is_host_addressable(device)),
     poly_tensor_create: (ctx, uop, role, device) =>
       Module._poly_tensor_create(ctx, uop, role, device),
+    poly_tensor_custom_kernel: (ctx, body, inputs) => {
+      const n = inputs.length
+      if (n <= 0) return null
+      const inputsPtr = Module._malloc(n * 4)
+      const outputsPtr = Module._malloc(n * 4)
+      const h32 = heap32()
+      try {
+        for (let i = 0; i < n; i++) h32[(inputsPtr >> 2) + i] = inputs[i] || 0
+        if (Module._poly_tensor_custom_kernel(ctx, body, inputsPtr, n, outputsPtr) !== 0) {
+          return null
+        }
+        return Array.from(
+          { length: n }, (_, i) => h32[(outputsPtr >> 2) + i] >>> 0
+        )
+      } finally {
+        Module._free(inputsPtr)
+        Module._free(outputsPtr)
+      }
+    },
     poly_tensor_empty_by_id: (ctx, dtypeId, shape, ndim, device) => {
       const dimsPtr = writeInt64Array(shape || [])
       try {
@@ -878,6 +897,10 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_exp(ctx, src),
     poly_tensor_log: (ctx, src) =>
       Module._poly_tensor_log(ctx, src),
+    poly_tensor_log1p: (ctx, src) =>
+      Module._poly_tensor_log1p(ctx, src),
+    poly_tensor_expm1: (ctx, src) =>
+      Module._poly_tensor_expm1(ctx, src),
     poly_tensor_gelu: (ctx, src) =>
       Module._poly_tensor_gelu(ctx, src),
     poly_tensor_quick_gelu: (ctx, src) =>
@@ -894,6 +917,50 @@ function createWasmCoreFromModule(Module, device) {
       Module._poly_tensor_minimum(ctx, a, b),
     poly_tensor_dot: (ctx, src, weight) =>
       Module._poly_tensor_dot(ctx, src, weight),
+    poly_tensor_qr_ex: (ctx, src, mode) =>
+      callUopPair(
+        Module._poly_tensor_qr_ex,
+        [ctx, src, mode],
+        'poly_tensor_qr_ex'
+      ),
+    poly_tensor_triangular_solve: (ctx, a, b, upper, transposeA, unitDiagonal) =>
+      Module._poly_tensor_triangular_solve(
+        ctx, a, b, upper ? 1 : 0, transposeA ? 1 : 0, unitDiagonal ? 1 : 0
+      ),
+    poly_tensor_cholesky: (ctx, src, upper) =>
+      Module._poly_tensor_cholesky(ctx, src, upper ? 1 : 0),
+    poly_tensor_cholesky_solve: (ctx, chol, b, upper) =>
+      Module._poly_tensor_cholesky_solve(ctx, chol, b, upper ? 1 : 0),
+    poly_tensor_solve: (ctx, a, b) =>
+      Module._poly_tensor_solve(ctx, a, b),
+    poly_tensor_lstsq: (ctx, a, b) =>
+      Module._poly_tensor_lstsq(ctx, a, b),
+    poly_tensor_scatter: (ctx, self, dim, index, src, reduce) => {
+      const reducePtr = allocString(reduce)
+      const result = Module._poly_tensor_scatter(ctx, self, dim, index, src, reducePtr)
+      Module._free(reducePtr)
+      return result
+    },
+    poly_tensor_scatter_reduce: (ctx, self, dim, index, src, reduce, includeSelf) => {
+      const reducePtr = allocString(reduce)
+      const result = Module._poly_tensor_scatter_reduce(
+        ctx, self, dim, index, src, reducePtr, includeSelf ? 1 : 0
+      )
+      Module._free(reducePtr)
+      return result
+    },
+    poly_tensor_einsum: (ctx, formula, operands) => {
+      const n = operands.length
+      const tensorPtrs = Module._malloc(Math.max(1, n) * 4)
+      for (let i = 0; i < n; i++) {
+        heap32()[(tensorPtrs >> 2) + i] = operands[i]
+      }
+      const formulaPtr = allocString(formula)
+      const result = Module._poly_tensor_einsum(ctx, formulaPtr, tensorPtrs, n)
+      Module._free(formulaPtr)
+      Module._free(tensorPtrs)
+      return result
+    },
     poly_tensor_sort: (ctx, src, dim, descending) =>
       callUopPair(
         Module._poly_tensor_sort,
@@ -1351,6 +1418,25 @@ function createWasmCoreFromModule(Module, device) {
       if (valuesPtr) Module._free(valuesPtr)
       return { uop: result, shape: readUopShape(ctx, result) }
     },
+    poly_tensor_rearrange: (ctx, formula, tensor, kwargs) => {
+      const names = Object.keys(kwargs)
+      const values = names.map(k => kwargs[k])
+      const n = names.length
+      const formulaPtr = allocString(formula)
+      let namesPtr = 0
+      let valuesPtr = 0
+      if (n > 0) {
+        namesPtr = allocString(names.join(' '))
+        valuesPtr = writeInt64Array(values)
+      }
+      const result = Module._poly_tensor_rearrange(
+        ctx, formulaPtr, tensor, namesPtr, valuesPtr, n
+      )
+      Module._free(formulaPtr)
+      if (namesPtr) Module._free(namesPtr)
+      if (valuesPtr) Module._free(valuesPtr)
+      return result
+    },
 
     // Composed elementwise ops
     poly_exp: Module._poly_exp,
@@ -1439,7 +1525,7 @@ function createWasmCoreFromModule(Module, device) {
   }
 
   // ABI version check
-  const EXPECTED_ABI = 40
+  const EXPECTED_ABI = 45
   const abi = ffi.poly_abi_version()
   if (abi !== EXPECTED_ABI) {
     throw new Error(

@@ -1471,6 +1471,76 @@ class TestElementwise:
         assert [src.op_name for src in logical_not.uop.src] == ['BUFFER', 'EXPAND']
         np.testing.assert_array_equal(logical_not.numpy(), [False, True])
 
+    def test_logaddexp_softplus_mish_match_pinned_graph(self, monkeypatch):
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('elementwise construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        x = Tensor([
+            [-20.0, -3.0, -0.0, 2.0, 20.0],
+            [1.0, -1.0, 4.0, -4.0, 0.5],
+        ])
+        other = Tensor([[-2.0], [3.0]])
+
+        def pinned_logaddexp(a, b):
+            a, b, _ = a._broadcasted(b)
+            m = a.maximum(b)
+            return ((a - m).exp() + (b - m).exp()).log() + m
+
+        def pinned_softplus(value, beta=1.0):
+            return (1 / beta) * pinned_logaddexp(value * beta, 0.0)
+
+        pairs = [
+            (x.logaddexp(0.0), pinned_logaddexp(x, 0.0)),
+            (x.logaddexp(other), pinned_logaddexp(x, other)),
+            (x.softplus(), pinned_softplus(x)),
+            (x.softplus(beta=2.0), pinned_softplus(x, 2.0)),
+            (x.mish(), x * pinned_softplus(x).tanh()),
+        ]
+        for actual, expected in pairs:
+            assert actual.uop.raw == expected.uop.raw
+            assert actual.uop_logical.raw == expected.uop_logical.raw
+            np.testing.assert_allclose(
+                actual.numpy(), expected.numpy(), rtol=1e-6, atol=1e-6
+            )
+
+    def test_log1p_expm1_use_core_tensor_roots(self, monkeypatch):
+        from polygrad.tensor import _uop_wrap
+
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('superset construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        x = Tensor([-1e-6, 0.0, 1e-6, 0.25], device='cpu')
+        for name, expected_values in (
+            ('log1p', np.log1p(np.asarray([-1e-6, 0.0, 1e-6, 0.25]))),
+            ('expm1', np.expm1(np.asarray([-1e-6, 0.0, 1e-6, 0.25]))),
+        ):
+            actual = getattr(x, name)()
+            raw_fn = getattr(_ffi._lib, f'poly_{name}')
+            expected_logical = _uop_wrap(
+                x._ctx, raw_fn(x._ctx, x.uop_logical.raw)
+            )
+            expected_physical = _uop_wrap(x._ctx, raw_fn(x._ctx, x.uop.raw))
+            assert actual.uop_logical.raw == expected_logical.raw
+            assert actual.uop.raw == expected_physical.raw
+            np.testing.assert_allclose(
+                actual.numpy(), expected_values, rtol=1e-6, atol=1e-7
+            )
+
+        moved = Tensor.empty((4,), device='cpu').realize().to('cuda').to('cpu')
+        for name in ('log1p', 'expm1'):
+            actual = getattr(moved, name)()
+            raw_fn = getattr(_ffi._lib, f'poly_{name}')
+            expected_physical = _uop_wrap(
+                moved._ctx, raw_fn(moved._ctx, moved.uop.raw)
+            )
+            assert actual.uop.raw == expected_physical.raw
+
     def test_mixed_dtype_comparison_where_promotes_like_tinygrad(self):
         x = Tensor(np.arange(16, dtype=np.float32).reshape(4, 4))
         out = (Tensor.full((4, 4), 7, dtype='int32') > x).where(
@@ -1734,6 +1804,24 @@ class TestMovement:
         with pytest.raises(RuntimeError, match="must be one of"):
             base.scatter_reduce(1, idx, src, 'max')
 
+    def test_scatter_construction_bypasses_frontend_substitution(self, monkeypatch):
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('scatter construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        base = Tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
+        idx = Tensor(np.array([[0, 1, 1, 3, 4]], dtype=np.int32), dtype='int32')
+        src = Tensor([[6.0, 7.0, 8.0, 9.0, 10.0]])
+        np.testing.assert_allclose(
+            base.scatter(1, idx, src).numpy(), [[6, 8, 3, 9, 10]]
+        )
+        np.testing.assert_allclose(
+            base.scatter_reduce(1, idx, src, 'sum').numpy(),
+            [[7, 17, 3, 13, 15]],
+        )
+
 
 class TestStepSlicing:
     def test_step2_1d(self):
@@ -1809,6 +1897,37 @@ class TestReduce:
         a = Tensor([[1, 2, 3], [4, 5, 6]])
         s = a.reshape(2, 3).sum(axis=1)
         np.testing.assert_allclose(s.numpy(), [6, 15])
+
+    def test_var_matches_pinned_expression_without_substitution(self, monkeypatch):
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('variance construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        x = Tensor([[1.0, 2.0, 4.0], [3.0, 5.0, 9.0]])
+
+        def pinned_expression(axis, keepdim=False, correction=1):
+            squares = (x - x.mean(axis=axis, keepdim=True)).square()
+            reduced_shape = squares.sum(axis=axis, keepdim=True).shape
+            n = np.prod([
+                si for si, so in zip(x.shape, reduced_shape) if si != so
+            ], dtype=np.int64).item()
+            reduced = squares.sum(axis=axis, keepdim=keepdim)
+            return reduced.div((reduced.const_like(n) - correction).relu())
+
+        for axis, keepdim, correction in [
+            (1, False, 1),
+            (0, True, 0),
+            (None, False, 1),
+            ((0, 1), False, 1),
+            (1, False, 3),
+        ]:
+            actual = x.var(axis=axis, keepdim=keepdim, correction=correction)
+            expected = pinned_expression(axis, keepdim, correction)
+            assert actual.uop.raw == expected.uop.raw
+            assert actual.uop_logical.raw == expected.uop_logical.raw
+            np.testing.assert_allclose(actual.numpy(), expected.numpy())
 
     def test_argmax_matches_tinygrad_probe(self):
         a = Tensor([[1.2, 0.5, 1.2], [2.2, 1.9, 0.0]])
@@ -1914,11 +2033,29 @@ class TestMatmulAndLoss:
             atol=1e-6,
         )
 
-    def test_einsum_c_api_wrapper(self):
+    def test_einsum_c_api_wrapper(self, monkeypatch):
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('einsum construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
         a = Tensor([[1.0, 2.0], [3.0, 4.0]])
         b = Tensor([[5.0, 6.0], [7.0, 8.0]])
+        logical_inputs = (_ffi._ptr * 2)(
+            a.uop_logical.raw, b.uop_logical.raw
+        )
+        physical_inputs = (_ffi._ptr * 2)(a.uop.raw, b.uop.raw)
+        expected_logical = _ffi._lib.poly_einsum(
+            a._ctx, b'ij,jk->ik', logical_inputs, 2
+        )
+        expected_physical = _ffi._lib.poly_einsum(
+            a._ctx, b'ij,jk->ik', physical_inputs, 2
+        )
         out = Tensor.einsum('ij,jk->ik', a, b)
         assert out.shape == (2, 2)
+        assert out.uop_logical.raw == expected_logical
+        assert out.uop.raw == expected_physical
         np.testing.assert_allclose(out.numpy(), np.array([[19.0, 22.0], [43.0, 50.0]], dtype=np.float32))
 
         with pytest.raises(ValueError, match='poly_einsum failed'):
@@ -1931,6 +2068,47 @@ class TestMatmulAndLoss:
                     runtime_a.Tensor([1.0, 2.0, 3.0]),
                     runtime_b.Tensor([4.0, 5.0, 6.0]),
                 )
+
+    def test_rearrange_uses_core_tensor_roots(self, monkeypatch):
+        from polygrad.tensor import _uop_wrap
+
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('rearrange construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        source = Tensor.arange(6).reshape(2, 3)
+        out = source.rearrange('h w -> w h')
+        expected_logical = _uop_wrap(
+            source._ctx,
+            _ffi._lib.poly_rearrange(
+                source._ctx, b'h w -> w h', source.uop_logical.raw,
+                None, None, 0,
+            ),
+        )
+        expected_physical = _uop_wrap(
+            source._ctx,
+            _ffi._lib.poly_rearrange(
+                source._ctx, b'h w -> w h', source.uop.raw,
+                None, None, 0,
+            ),
+        )
+        assert out.uop_logical.raw == expected_logical.raw
+        assert out.uop.raw == expected_physical.raw
+        np.testing.assert_array_equal(out.numpy(), [[0, 3], [1, 4], [2, 5]])
+
+        moved = Tensor.empty((6,), device='cpu').realize().to('cuda').to('cpu')
+        moved = moved.reshape(2, 3)
+        moved_out = moved.rearrange('h w -> w h')
+        expected_moved = _uop_wrap(
+            moved._ctx,
+            _ffi._lib.poly_rearrange(
+                moved._ctx, b'h w -> w h', moved.uop.raw,
+                None, None, 0,
+            ),
+        )
+        assert moved_out.uop.raw == expected_moved.raw
 
     def test_rearrange_rejects_malformed_formula(self):
         x = Tensor([1.0, 2.0, 3.0])
@@ -1961,6 +2139,27 @@ class TestMatmulAndLoss:
         b = Tensor(np.zeros((5, 4, 6), dtype=np.float32))
         with pytest.raises(ValueError, match='cannot dot'):
             a @ b
+
+    def test_linalg_construction_bypasses_frontend_substitution(self, monkeypatch):
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('linalg construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        a = Tensor([[4.0, 2.0], [2.0, 5.0]])
+        b = Tensor([1.0, 3.0])
+        lower = Tensor([[2.0, 0.0], [1.0, 3.0]])
+        q, r = a.qr()
+        assert q.shape == r.shape == (2, 2)
+        assert lower.triangular_solve(b).shape == (2,)
+        chol = a.cholesky()
+        assert chol.shape == (2, 2)
+        assert chol.cholesky_solve(b).shape == (2,)
+        assert a.solve(b).shape == (2,)
+        assert Tensor([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]]).lstsq(
+            Tensor([1.0, 2.0, 3.0])
+        ).shape == (2,)
 
     def test_qr_matches_tinygrad_probe(self):
         cases = [
@@ -2392,7 +2591,7 @@ class TestMatmulAndLoss:
 
     def test_cross_entropy_sparse_targets(self):
         logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
-        target = Tensor([0.0, 2.0])
+        target = Tensor([0, 2], dtype='int32')
         loss = logits.cross_entropy(target)
         assert loss.shape == ()
         np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
@@ -2403,6 +2602,54 @@ class TestMatmulAndLoss:
         loss = logits.cross_entropy(target)
         assert loss.shape == ()
         np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
+
+    def test_cross_entropy_matches_pinned_expression_without_substitution(self, monkeypatch):
+        def forbidden_substitution(*_args, **_kwargs):
+            raise AssertionError('cross-entropy construction entered frontend substitution')
+
+        monkeypatch.setattr(
+            Tensor, '_physicalize_result_for', staticmethod(forbidden_substitution)
+        )
+        logits = Tensor([[-1.0, 2.0, -3.0], [1.0, -2.0, 3.0]])
+        sparse = Tensor([1, 2], dtype='int32')
+        dense = Tensor([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+        def pinned_expression(target, reduction='mean', label_smoothing=0.0):
+            classes_dim = 1
+            if logits.shape != target.shape:
+                target = target.unsqueeze(classes_dim)._one_hot_along_dim(
+                    logits.shape[classes_dim], classes_dim
+                )
+            target = (
+                (1 - label_smoothing) * target
+                + label_smoothing / int(target.shape[classes_dim])
+            )
+            reduced = logits.log_softmax(classes_dim).mul(target).sum(classes_dim)
+            if reduction == 'none':
+                return -reduced
+            if reduction == 'sum':
+                return -reduced.sum()
+            if reduction == 'mean':
+                return -reduced.mean()
+            raise ValueError(reduction)
+
+        pairs = []
+        for target, reduction, label_smoothing in [
+            (sparse, 'mean', 0.0),
+            (dense, 'mean', 0.0),
+            (dense, 'none', 0.0),
+            (dense, 'sum', 0.0),
+            (dense, 'mean', 0.2),
+        ]:
+            actual = logits.cross_entropy(
+                target, reduction=reduction, label_smoothing=label_smoothing
+            )
+            expected = pinned_expression(target, reduction, label_smoothing)
+            assert actual.uop.raw == expected.uop.raw
+            assert actual.uop_logical.raw == expected.uop_logical.raw
+            pairs.append((actual, expected))
+        for actual, expected in pairs:
+            np.testing.assert_allclose(actual.numpy(), expected.numpy())
 
     def test_cross_entropy_realized_variable_bound_dense_targets(self):
         logits_all = Tensor((np.arange(80, dtype=np.float32).reshape(8, 10) / 10.0)).realize()
@@ -2430,14 +2677,14 @@ class TestMatmulAndLoss:
 
     def test_cross_entropy_sparse_targets_non_last_axis(self):
         logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
-        target = Tensor(np.array([[0.0, 2.0], [1.0, 0.0]], dtype=np.float32))
+        target = Tensor(np.array([[0, 2], [1, 0]], dtype=np.int32))
         loss = logits.cross_entropy(target, axis=-2)
         assert loss.shape == ()
         np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
 
     def test_cross_entropy_default_matches_tinygrad_class_axis(self):
         logits = Tensor(np.zeros((2, 3, 2), dtype=np.float32))
-        target = Tensor(np.array([[0.0, 2.0], [1.0, 0.0]], dtype=np.float32))
+        target = Tensor(np.array([[0, 2], [1, 0]], dtype=np.int32))
         loss = logits.cross_entropy(target)
         assert loss.shape == ()
         np.testing.assert_allclose(loss.numpy(), np.log(3.0), rtol=1e-6)
@@ -2455,7 +2702,7 @@ class TestMatmulAndLoss:
     def test_cross_entropy_shape_mismatch_raises(self):
         logits = Tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
         target = Tensor([[1.0, 0.0], [0.0, 1.0]])
-        with pytest.raises(ValueError, match='shape mismatch'):
+        with pytest.raises(RuntimeError, match='shape mismatch'):
             logits.cross_entropy(target)
 
 

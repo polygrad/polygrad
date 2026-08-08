@@ -35,6 +35,7 @@ FILC_SRC = src/ops.c src/dtype.c src/arena.c src/hashmap.c src/utils.c src/bigin
 LOADER_SRC = src/loaders/decoded.c src/loaders/import_error.c src/loaders/bind.c src/loaders/hf_decode.c src/loaders/gguf_decode.c src/loaders/gguf_loader.c src/loaders/import_desc.c
 CODEC_SRC = vendor/cjson/cJSON.c src/safetensors.c src/wlrn.c src/ir.c src/bundle.c src/instance.c src/tokenizer.c src/models/mlp.c src/models/tabm.c src/models/nam.c src/models/registry.c src/models/gpt2.c src/models/qwen3.c src/models/hf_loader.c $(LOADER_SRC)
 TEST_SRC = test/test_main.c test/test_uop.c test/test_utils.c test/test_dtype.c test/test_bigint.c test/test_pat.c test/test_sym.c test/test_shape.c test/test_schedule_engine.c test/test_autograd.c test/test_codegen.c test/test_wasm.c test/test_rangeify.c test/test_reduce_simplify.c test/test_nn.c test/test_tensor.c test/test_fusion_fuzzer.c test/test_future_passes.c test/test_safetensors.c test/test_wlrn.c test/test_ir.c test/test_instance.c test/test_mlp.c test/test_tabm.c test/test_nam.c test/test_hf.c test/test_qwen3.c test/test_f16.c test/test_schedule_runtime.c test/test_bundle.c test/test_registry.c test/test_realize.c test/test_threading.c
+PROJECT_HEADERS := $(shell find src test bench vendor -type f -name '*.h' -print | sort)
 
 ifeq ($(HAS_CUDA), 1)
   SRC += src/render_cuda.c src/runtime_cuda.c
@@ -73,7 +74,7 @@ WASM_EXPORTS = _poly_ctx_new,_poly_ctx_destroy,_poly_ctx_set_preferred_device,_p
 
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_const_float_by_id,_poly_const_int_by_id,_poly_ctx_reset_counters,_poly_ctx_mem_used_for_device,_poly_realize_tensors_ex,_poly_buffer_set,_poly_buffer_on_device_by_id,_poly_buffer_ensure_device_allocated
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_buffer_is_allocated,_poly_tensor_empty_by_id,_poly_tensor_from_host_by_id,_poly_tensor_const_int_by_id,_poly_tensor_const_float_by_id,_poly_tensor_full_int_by_id,_poly_tensor_full_float_by_id,_poly_tensor_arange_int_by_id,_poly_tensor_arange_float_by_id,_poly_tensor_linspace_by_id,_poly_tensor_eye_by_id
-WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_alu1,_poly_tensor_alu2,_poly_tensor_alu3,_poly_tensor_div,_poly_tensor_exp,_poly_tensor_log,_poly_tensor_gelu,_poly_tensor_quick_gelu,_poly_tensor_detach,_poly_tensor_sum,_poly_tensor_max,_poly_tensor_argmax,_poly_tensor_minimum,_poly_tensor_dot,_poly_tensor_sort,_poly_tensor_topk,_poly_tensor_softmax,_poly_tensor_log_softmax,_poly_tensor_cast_by_id,_poly_tensor_bitcast_by_id,_poly_tensor_reshape,_poly_tensor_expand,_poly_tensor_permute,_poly_tensor_shrink,_poly_tensor_flip,_poly_tensor_pad_value,_poly_tensor_pool,_poly_tensor_max_pool2d,_poly_tensor_conv2d,_poly_tensor_batchnorm,_poly_tensor_one_hot,_poly_tensor_gather_dim,_poly_tensor_index_select
+WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_custom_kernel,_poly_tensor_alu1,_poly_tensor_alu2,_poly_tensor_alu3,_poly_tensor_div,_poly_tensor_exp,_poly_tensor_log,_poly_tensor_log1p,_poly_tensor_expm1,_poly_tensor_gelu,_poly_tensor_quick_gelu,_poly_tensor_detach,_poly_tensor_sum,_poly_tensor_max,_poly_tensor_argmax,_poly_tensor_minimum,_poly_tensor_dot,_poly_tensor_qr_ex,_poly_tensor_triangular_solve,_poly_tensor_cholesky,_poly_tensor_cholesky_solve,_poly_tensor_solve,_poly_tensor_lstsq,_poly_tensor_scatter,_poly_tensor_scatter_reduce,_poly_tensor_einsum,_poly_tensor_rearrange,_poly_tensor_sort,_poly_tensor_topk,_poly_tensor_softmax,_poly_tensor_log_softmax,_poly_tensor_cast_by_id,_poly_tensor_bitcast_by_id,_poly_tensor_reshape,_poly_tensor_expand,_poly_tensor_permute,_poly_tensor_shrink,_poly_tensor_flip,_poly_tensor_pad_value,_poly_tensor_pool,_poly_tensor_max_pool2d,_poly_tensor_conv2d,_poly_tensor_batchnorm,_poly_tensor_one_hot,_poly_tensor_gather_dim,_poly_tensor_index_select
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_tensor_requires_grad,_poly_tensor_set_requires_grad,_poly_instance_param_trainable,_poly_instance_set_param_trainable,_poly_instance_buf_trainable,_poly_instance_set_buf_trainable,_poly_instance_readback_param,_poly_instance_readback_buf,_poly_optim_build_step,_poly_register_buffer_by_id,_poly_register_existing_buffer,_poly_instance_from_sinks,_poly_instance_from_binding_arrays
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_pad_value,_poly_pool,_poly_max_pool2d,_poly_conv2d,_poly_batchnorm,_poly_one_hot,_poly_index_select
 WASM_EXPORTS := $(WASM_EXPORTS),_poly_tokenizer_free
@@ -83,6 +84,18 @@ WASM_ASYNCIFY_ONLY = ['poly_instance_call','poly_instance_forward','poly_instanc
 WASM_ASYNCIFY_FLAGS = -s ASYNCIFY=1 \
 	-s "ASYNCIFY_IMPORTS=$(WASM_ASYNCIFY_IMPORTS)" \
 	-s "ASYNCIFY_ONLY=$(WASM_ASYNCIFY_ONLY)"
+
+# These targets compile and link source files directly rather than through the
+# dependency-emitting static-object rule. Keep them sensitive to every project
+# header and filter non-C prerequisites out of their compiler argument lists.
+DIRECT_C_BUILDS = build/libpolygrad.so build/polygrad_test build/polygrad_test_filc \
+	build/polygrad_parity_runner build/bench_polygrad build/bench_smoke \
+	build/bench_cuda build/polygrad_parity_runner_cuda \
+	build/polygrad_parity_runner_hip build/bench_hip build/fuzz_sym \
+	build/fuzz_sym_div build/test_p2p build/polygrad_test_cov \
+	build/polygrad_test_msan build/polygrad_test_tsan build/polygrad.js \
+	build/polygrad.wasm build/core.async.js build/core.sync.js
+$(DIRECT_C_BUILDS): $(PROJECT_HEADERS) Makefile
 
 QWEN3_GGUF ?= $(if $(POLY_QWEN3_GGUF),$(POLY_QWEN3_GGUF),$(CURDIR)/temp/Qwen3-0.6B-Q8_0.gguf)
 # Broader Playwright browser matrix. The default target stays Chromium-only;
@@ -108,7 +121,7 @@ build/obj/static/%.o: %.c
 
 build/libpolygrad.so: $(SRC) $(CODEC_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -fPIC -shared -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -fPIC -shared -o $@ $(filter %.c,$^) -lm -ldl
 
 test: build/polygrad_test
 	$(SAN_RUN) ./build/polygrad_test
@@ -213,25 +226,25 @@ test-symbolic-z3: build/libpolygrad.so
 
 build/polygrad_test: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_DEBUG) -o $@ $^ $(LDFLAGS_DEBUG)
+	$(CC) $(CFLAGS_DEBUG) -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
 
 build/polygrad_test_filc: $(FILC_SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
-	$(FILC) $(FILC_CFLAGS_DEBUG) -o $@ $^ -lm -ldl
+	$(FILC) $(FILC_CFLAGS_DEBUG) -o $@ $(filter %.c,$^) -lm -ldl
 
 test-filc-interp-fast: build/polygrad_test_filc
 	POLY_DEVICE=interp CC=$(FILC) ./build/polygrad_test_filc --fast
 
 build/polygrad_parity_runner: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) $(LDFLAGS)
 
 bench: build/bench_polygrad
 	./build/bench_polygrad
 
 build/bench_polygrad: $(SRC) $(CODEC_SRC) bench/bench_polygrad.c
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
 
 BENCH_SMOKE_JSON ?= bench/results/smoke-latest.json
 BENCH_LOCAL_BASELINE ?= bench/baselines/local/$(shell hostname -s)-cpu.json
@@ -242,7 +255,7 @@ BENCH_COMPARE_ARGS ?=
 
 build/bench_smoke: $(SRC) $(CODEC_SRC) bench/bench_smoke.c
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
 
 bench-smoke: build/bench_smoke
 	$(PYTHON) bench/bench_smoke.py --runner $< --output $(BENCH_SMOKE_JSON) $(BENCH_SMOKE_ARGS)
@@ -272,7 +285,7 @@ bench-model-cuda: build/libpolygrad.so js/build/Release/polygrad_napi.node
 
 build/bench_cuda: $(SRC) $(CODEC_SRC) bench/bench_cuda.c
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
 
 test-parity-cuda: build/polygrad_parity_runner_cuda
 	CACHELEVEL=0 $(PARITY_PY) $(PARITY_SCRIPT) \
@@ -280,7 +293,7 @@ test-parity-cuda: build/polygrad_parity_runner_cuda
 
 build/polygrad_parity_runner_cuda: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
 endif
 
 ifeq ($(HAS_HIP), 1)
@@ -291,14 +304,14 @@ test-parity-hip: build/polygrad_parity_runner_hip
 
 build/polygrad_parity_runner_hip: $(SRC) $(CODEC_SRC) $(PARITY_RUNNER_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
 
 bench-hip: build/bench_hip
 	./build/bench_hip
 
 build/bench_hip: bench/bench_hip.c $(SRC) $(CODEC_SRC)
 	@mkdir -p build
-	$(CC) $(CFLAGS_RELEASE) -o $@ $^ -lm -ldl
+	$(CC) $(CFLAGS_RELEASE) -o $@ $(filter %.c,$^) -lm -ldl
 endif
 
 BENCH_JSON = $(shell ls -t bench/results/2*.json 2>/dev/null | head -1)
@@ -385,7 +398,7 @@ fuzz-symbolic: build/fuzz_sym
 
 build/fuzz_sym: test/fuzz_sym.c $(SRC) $(CODEC_SRC)
 	@mkdir -p build
-	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^ $(LDFLAGS_DEBUG)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
 
 fuzz-symbolic-div: build/fuzz_sym_div
 	@mkdir -p $(FUZZ_WORK_DIR)/symbolic-div
@@ -393,7 +406,7 @@ fuzz-symbolic-div: build/fuzz_sym_div
 
 build/fuzz_sym_div: test/fuzz_sym_div.c $(SRC) $(CODEC_SRC)
 	@mkdir -p build
-	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^ $(LDFLAGS_DEBUG)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
 
 NODE ?= $(shell which node 2>/dev/null || echo node)
 test-wasm: test-js-browser
@@ -594,7 +607,7 @@ test-p2p: build/test_p2p
 
 build/test_p2p: $(SRC) $(P2P_SRC) $(VENDOR_SRC) test/test_p2p.c
 	@mkdir -p build
-	$(CC) $(CFLAGS_DEBUG) -Ivendor/dht -Ivendor/stun -o $@ $^ $(LDFLAGS_DEBUG)
+	$(CC) $(CFLAGS_DEBUG) -Ivendor/dht -Ivendor/stun -o $@ $(filter %.c,$^) $(LDFLAGS_DEBUG)
 
 test-p2p-browser:
 	$(NODE) browser/test/test_p2p.js
@@ -615,7 +628,7 @@ coverage: build/polygrad_test_cov
 build/polygrad_test_cov: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	$(CC) -std=c11 -g -O0 -fprofile-arcs -ftest-coverage \
-		-o $@ $^ -lm -ldl -lgcov
+		-o $@ $(filter %.c,$^) -lm -ldl -lgcov
 
 clean:
 	rm -rf build/ *.o
@@ -648,7 +661,7 @@ test-msan: build/polygrad_test_msan
 build/polygrad_test_msan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	clang -std=c11 -g -O1 -fsanitize=memory -fno-omit-frame-pointer \
-		-o $@ $^ -lm -ldl -fsanitize=memory
+		-o $@ $(filter %.c,$^) -lm -ldl -fsanitize=memory
 
 # ThreadSanitizer focused smoke. The current threading contract permits
 # independent contexts on separate threads; one PolyCtx remains thread-confined.
@@ -658,7 +671,7 @@ test-tsan: build/polygrad_test_tsan
 build/polygrad_test_tsan: $(SRC) $(CODEC_SRC) $(TEST_SRC)
 	@mkdir -p build
 	$(TSAN_CC) $(CFLAGS_COMMON) -g -O1 -fsanitize=thread -fno-omit-frame-pointer \
-		-o $@ $^ -lm -ldl -pthread -fsanitize=thread
+		-o $@ $(filter %.c,$^) -lm -ldl -pthread -fsanitize=thread
 
 # ── Full verification ──────────────────────────────────────────────────
 

@@ -6605,6 +6605,60 @@ TEST(realize, direct_deviceless_root_realize_matches_pinned_noop) {
   PASS();
 }
 
+TEST(realize, direct_lazy_contiguous_after_runs_producer_and_maps_storage) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int f32 = poly_dtype_id_by_name("float32");
+  int64_t shape[] = {3, 4};
+  PolyTensor *value =
+      poly_tensor_full_float_by_id(ctx, shape, 2, 0.0, f32, POLY_DEVICE_CPU);
+  PolyTensor *source =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(value);
+  ASSERT_NOT_NULL(source);
+  ASSERT_PTR_EQ(poly_tensor_clone_into(ctx, source, value), source);
+  ASSERT_INT_EQ(poly_tensor_uop_physical(source)->op, POLY_OP_AFTER);
+
+  PolyUOp *logical = poly_contiguous(ctx, poly_tensor_uop_logical(source));
+  PolyUOp *physical = poly_contiguous(ctx, poly_tensor_uop_physical(source));
+  ASSERT_NOT_NULL(logical);
+  ASSERT_NOT_NULL(physical);
+  ASSERT_INT_EQ(physical->op, POLY_OP_CONTIGUOUS);
+  ASSERT_INT_EQ(physical->src[0]->op, POLY_OP_AFTER);
+  PolyTensor *out = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(out);
+
+  /* Pinned Tensor.realize schedules deviceful roots without buffer identity
+   * (tensor.py:214-219). callify removes CONTIGUOUS(AFTER) only after retaining
+   * the AFTER effects and maps the original root to final storage
+   * (callify.py:32-52,142-180,204-220). */
+  poly_ctx_reset_counters(ctx);
+  PolyTensor *realized = NULL;
+  ASSERT_INT_EQ(poly_realize_tensors(ctx, &out, 1, &realized), 0);
+  ASSERT_PTR_EQ(realized, out);
+  PolyUOp *realized_root = poly_tensor_uop_physical(realized);
+  ASSERT_NOT_NULL(realized_root);
+  ASSERT_PTR_NEQ(realized_root, physical);
+  ASSERT_INT_EQ(realized_root->op, POLY_OP_RESHAPE);
+  const PolyUOp *identity = poly_uop_get_buffer_identity(realized_root);
+  ASSERT_NOT_NULL(identity);
+
+  float got[12];
+  ASSERT_INT_EQ(poly_buffer_read(ctx, (PolyUOp *)identity, got, sizeof(got)), 0);
+  for (int i = 0; i < 12; i++)
+    ASSERT_FLOAT_EQ(got[i], 0.0, 0.0);
+
+  PolyCtxStats stats = {0};
+  ASSERT_INT_EQ(poly_ctx_stats(ctx, &stats), 0);
+  ASSERT_TRUE(stats.kernel_count == 1);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(realize, direct_contiguous_view_buffer_accessor_is_zero_call_and_bounded) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);

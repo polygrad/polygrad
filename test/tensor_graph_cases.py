@@ -538,6 +538,47 @@ def case_abs_occurrence():
     return elementwise_occurrence("abs")
 
 
+def case_logaddexp_scalar_occurrence():
+    return elementwise_occurrence("logaddexp", 0.0)
+
+
+def case_logaddexp_broadcast_occurrence():
+    x = realized_empty(2, 2).to("CUDA").to("CPU")
+    other = realized_empty(2, 1).to("CUDA").to("CPU")
+    out = x.logaddexp(other)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_softplus_occurrence():
+    return elementwise_occurrence("softplus")
+
+
+def case_softplus_beta2_occurrence():
+    return elementwise_occurrence("softplus", 2.0)
+
+
+def case_mish_occurrence():
+    return elementwise_occurrence("mish")
+
+
+def case_triu_host():
+    out = Tensor(
+        [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+        device="CPU",
+    ).triu(0)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_triu_nondefault_device():
+    out = Tensor.empty(2, 4, device="CPU").to("CUDA").triu(0)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_tril_occurrence():
+    out = realized_empty(2, 4).to("CUDA").to("CPU").tril(1)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def elementwise_typed(method, dtype, *args):
     out = getattr(typed_realized_empty(dtype), method)(*args)
     return {"physical": out.uop, "logical": logical(out)}
@@ -1012,6 +1053,28 @@ def case_permute():
     return {"physical": out.uop, "logical": logical(out)}
 
 
+def case_rearrange_flatten():
+    out = Tensor.arange(6).reshape(2, 3).rearrange("h w -> (h w)")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rearrange_unflatten():
+    out = Tensor.arange(6).rearrange("(h w) -> h w", h=2, w=3)
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rearrange_permute():
+    out = Tensor.arange(24).reshape(2, 3, 4).rearrange("b c h -> h b c")
+    return {"physical": out.uop, "logical": logical(out)}
+
+
+def case_rearrange_combined():
+    out = Tensor.arange(24).reshape(2, 12).rearrange(
+        "b (h w) -> (b h) w", h=3, w=4,
+    )
+    return {"physical": out.uop, "logical": logical(out)}
+
+
 def case_flip():
     out = realized_empty(2, 3).flip((1,))
     return {"physical": out.uop, "logical": logical(out)}
@@ -1459,6 +1522,8 @@ CASES = {
     "log_float16": ("tensor", case_log_float16),
     "log_float32": ("tensor", case_log_float32),
     "log_int32": ("tensor", case_log_int32),
+    "logaddexp_broadcast_occurrence": ("tensor", case_logaddexp_broadcast_occurrence),
+    "logaddexp_scalar_occurrence": ("tensor", case_logaddexp_scalar_occurrence),
     "log_softmax_float16": ("tensor", case_log_softmax_float16),
     "log_softmax_float32": ("tensor", case_log_softmax_float32),
     "mean_axis_float32": ("tensor", case_mean_axis_float32),
@@ -1470,6 +1535,7 @@ CASES = {
     "max_axes_float32": ("tensor", case_max_axes_float32),
     "max_pool2d_float32": ("tensor", case_max_pool2d_float32),
     "movement_reduce": ("tensor", case_movement_reduce),
+    "mish_occurrence": ("tensor", case_mish_occurrence),
     "moved_assign_occurrence": ("tensor", case_moved_assign_occurrence),
     "pad": ("tensor", case_pad),
     "pad_negative": ("tensor", case_pad_negative),
@@ -1486,6 +1552,10 @@ CASES = {
     "radd_named_mixed_broadcast": ("tensor", case_radd_named_mixed_broadcast),
     "radd_named_occurrence": ("tensor", case_radd_named_occurrence),
     "radd_operator_occurrence": ("tensor", case_radd_operator_occurrence),
+    "rearrange_combined": ("tensor", case_rearrange_combined),
+    "rearrange_flatten": ("tensor", case_rearrange_flatten),
+    "rearrange_permute": ("tensor", case_rearrange_permute),
+    "rearrange_unflatten": ("tensor", case_rearrange_unflatten),
     "reshape": ("tensor", case_reshape),
     "rmul_named_mixed_broadcast": ("tensor", case_rmul_named_mixed_broadcast),
     "rmul_named_occurrence": ("tensor", case_rmul_named_occurrence),
@@ -1508,6 +1578,8 @@ CASES = {
     "scalar_int": ("tensor", case_scalar_int),
     "scalar_int_cuda": ("tensor", case_scalar_int_cuda),
     "scalar_squeeze": ("tensor", case_scalar_squeeze),
+    "softplus_beta2_occurrence": ("tensor", case_softplus_beta2_occurrence),
+    "softplus_occurrence": ("tensor", case_softplus_occurrence),
     "scalar_where_broadcast": ("tensor", case_scalar_where_broadcast),
     "sgd_momentum_step": ("optimizer", case_sgd_momentum_step),
     "sgd_step": ("optimizer", case_sgd_step),
@@ -1540,6 +1612,9 @@ CASES = {
     "tan_uint64": ("tensor", case_tan_uint64),
     "tanh_float16": ("tensor", case_tanh_float16),
     "tanh_occurrence": ("tensor", case_tanh_occurrence),
+    "tril_occurrence": ("tensor", case_tril_occurrence),
+    "triu_host": ("tensor", case_triu_host),
+    "triu_nondefault_device": ("tensor", case_triu_nondefault_device),
     "topk_occurrence": ("tensor", case_topk_occurrence),
     "where_reduce_mixed_dtype": ("tensor", case_where_reduce_mixed_dtype),
     "sibling_moves": ("tensor", case_sibling_moves),

@@ -665,12 +665,21 @@ int poly_tensor_replace_roots(
 PolyTensor *poly_tensor_to_device(PolyCtx *ctx, PolyTensor *tensor, PolyDevice device);
 PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *value);
 PolyTensor *poly_tensor_clone_into(PolyCtx *ctx, PolyTensor *target, PolyTensor *source);
+int poly_tensor_custom_kernel(
+    PolyCtx *ctx,
+    PolyUOp *body,
+    PolyTensor **inputs,
+    int n_inputs,
+    PolyTensor **outputs
+);
 PolyTensor *poly_tensor_alu1(PolyCtx *ctx, PolyOps op, PolyTensor *src);
 PolyTensor *poly_tensor_alu2(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_alu3(PolyCtx *ctx, PolyOps op, PolyTensor *a, PolyTensor *b, PolyTensor *c);
 PolyTensor *poly_tensor_div(PolyCtx *ctx, PolyTensor *dividend, PolyTensor *divisor);
 PolyTensor *poly_tensor_exp(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src);
+PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_quick_gelu(PolyCtx *ctx, PolyTensor *src);
 PolyTensor *poly_tensor_detach(PolyCtx *ctx, PolyTensor *src);
@@ -679,6 +688,30 @@ PolyTensor *poly_tensor_max(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_
 PolyTensor *poly_tensor_argmax(PolyCtx *ctx, PolyTensor *src, int axis, bool keepdim);
 PolyTensor *poly_tensor_minimum(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
 PolyTensor *poly_tensor_dot(PolyCtx *ctx, PolyTensor *src, PolyTensor *weight);
+int poly_tensor_qr_ex(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int mode,
+    PolyTensor **out_q,
+    PolyTensor **out_r
+);
+PolyTensor *poly_tensor_triangular_solve(
+    PolyCtx *ctx,
+    PolyTensor *a,
+    PolyTensor *b,
+    int upper,
+    int transpose_a,
+    int unit_diagonal
+);
+PolyTensor *poly_tensor_cholesky(PolyCtx *ctx, PolyTensor *src, int upper);
+PolyTensor *poly_tensor_cholesky_solve(
+    PolyCtx *ctx,
+    PolyTensor *chol,
+    PolyTensor *b,
+    int upper
+);
+PolyTensor *poly_tensor_solve(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
+PolyTensor *poly_tensor_lstsq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b);
 int poly_tensor_sort(
     PolyCtx *ctx,
     PolyTensor *src,
@@ -703,8 +736,21 @@ PolyTensor *poly_tensor_cast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_bitcast_by_id(PolyCtx *ctx, PolyTensor *src, int dtype_id);
 PolyTensor *poly_tensor_reshape(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
 PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int ndim);
+PolyTensor *poly_tensor_expand_uop(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyUOp **dims,
+    int ndim
+);
 PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim);
 PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2], int ndim);
+PolyTensor *poly_tensor_shrink_uop(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    int ndim
+);
 PolyTensor *poly_tensor_flip(PolyCtx *ctx, PolyTensor *src, int64_t *axes, int n_axes);
 PolyTensor *poly_tensor_pad_value(
     PolyCtx *ctx,
@@ -755,6 +801,37 @@ PolyTensor *poly_tensor_batchnorm(
 PolyTensor *poly_tensor_one_hot(PolyCtx *ctx, PolyTensor *x, int64_t num_classes);
 PolyTensor *poly_tensor_gather_dim(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
 PolyTensor *poly_tensor_index_select(PolyCtx *ctx, PolyTensor *x, int dim, PolyTensor *index);
+PolyTensor *poly_tensor_scatter(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    int dim,
+    PolyTensor *index,
+    PolyTensor *src,
+    const char *reduce
+);
+PolyTensor *poly_tensor_scatter_reduce(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    int dim,
+    PolyTensor *index,
+    PolyTensor *src,
+    const char *reduce,
+    int include_self
+);
+PolyTensor *poly_tensor_einsum(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyTensor **tensors,
+    int n_tensors
+);
+PolyTensor *poly_tensor_rearrange(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyTensor *tensor,
+    const char *axis_names,
+    const int64_t *axis_values,
+    int n_axis_sizes
+);
 PolyUOp *poly_tensor_uop(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_logical(PolyTensor *tensor);
 PolyUOp *poly_tensor_uop_physical(PolyTensor *tensor);

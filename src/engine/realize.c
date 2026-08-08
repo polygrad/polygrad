@@ -2133,14 +2133,21 @@ static int poly_realize_tensors_impl(
       outputs[i] = inputs[i];
       continue;
     }
-    /* Pinned callify.py:60-95 proves CONTIGUOUS(movement(BUFFER)) as a
-     * zero-copy view, so transform_to_call emits no work and UOp.buffer
-     * returns Buffer.view (uop/ops.py:838-852). Ask the actual accessor so a
-     * backend that cannot represent this offset falls through to ordinary
-     * materialization. The stored Tensor root remains unchanged. */
+    /* Pinned callify.py:60-95 keeps only a provable contiguous movement view
+     * over already-valid storage as a zero-CALL Buffer.view. Do not use the
+     * recursive UOp.buffer accessor as the proof: it also walks through
+     * AFTER, whose STORE effects must first run through callify. */
     if (!used_placement && physical->op == POLY_OP_CONTIGUOUS &&
         physical->n_src == 1) {
-      if (poly_uop_buffer(ctx, physical)) {
+      PolyUOp *view_identity = NULL;
+      PolyShape view_shape = {.ndim = -1};
+      int64_t view_numel = -1;
+      size_t view_byte_offset = 0;
+      if (poly_uop_contiguous_view_info(
+              ctx, physical->src[0], &view_identity, &view_shape,
+              &view_numel, &view_byte_offset
+          ) &&
+          poly_uop_buffer(ctx, physical)) {
         outputs[i] = inputs[i];
         continue;
       }

@@ -1005,34 +1005,38 @@ class Tensor:
             t if t._graph_uop and t._graph_uop.op == _ffi.OPS.get('AFTER') else t.contiguous()
             for t in srcs
         )
-        placeholders = [UOp.placeholder_like(t._graph_uop, slot=i) for i, t in enumerate(contig)]
+        placeholders = [UOp.placeholder_like(t.uop, slot=i) for i, t in enumerate(contig)]
         body = fxn(*placeholders)
         if not isinstance(body, UOp):
             raise TypeError('custom_kernel fxn must return a UOp SINK body')
-        call = body.call(*[t._graph_uop for t in contig])
+        input_arr = (_ffi._ptr * len(contig))(*[t._tensor for t in contig])
+        output_arr = (_ffi._ptr * len(contig))()
+        if _ffi._lib.poly_tensor_custom_kernel(
+            self._ctx, body.raw, input_arr, len(contig), output_arr
+        ) != 0:
+            raise RuntimeError('poly_tensor_custom_kernel failed')
         outs = []
         afters = []
         physical_afters = []
-        for t in contig:
-            logical = t._graph_uop.after(call)
-            physical = t._physicalize_result(logical, contig)
+        for t, core in zip(contig, output_arr):
+            logical = _uop_wrap(t._ctx, self._core_uop_logical_raw(core))
+            physical = _uop_wrap(t._ctx, self._core_uop_physical_raw(core))
             afters.append(logical)
             physical_afters.append(physical)
             out = Tensor(
                 _ctx=t._ctx,
-                _tensor=Tensor._core_create_with_roots_for(
-                    t._ctx, logical, physical, _POLY_TENSOR_VALUE, t._device
-                ),
+                _tensor=core,
                 _dtype=t._dtype_str,
                 _device=t._device,
             )
             if t._requires_grad:
                 out.requires_grad = True
             outs.append(out)
+        call = afters[0].src[1]
         _custom_kernel_grad_records.append({
             'ctx': _ptr_value(self._ctx),
             'call': call,
-            'args': tuple(t._graph_uop for t in contig),
+            'args': tuple(call.src[1:]),
             'afters': tuple(afters),
             'physical_afters': tuple(physical_afters),
             'grad_fxn': grad_fxn,
@@ -1429,11 +1433,10 @@ class Tensor:
         current = self.uop.contiguous()
         if not logical or not current:
             raise RuntimeError('poly_contiguous failed')
-        physical = current if current.raw != logical.raw else None
         return Tensor(
             _ctx=self._ctx,
             _tensor=self._core_create_with_roots(
-                logical, physical, _POLY_TENSOR_VALUE, self._device
+                logical, current, _POLY_TENSOR_VALUE, self._device
             ),
             _shape=self.shape,
             _dtype=self._dtype_str,
@@ -1969,6 +1972,14 @@ class Tensor:
         core = _ffi._lib.poly_tensor_log(self._ctx, self._tensor)
         return self._make_result_from_core(core, self.shape, [self])
 
+    def log1p(self):
+        core = _ffi._lib.poly_tensor_log1p(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
+    def expm1(self):
+        core = _ffi._lib.poly_tensor_expm1(self._ctx, self._tensor)
+        return self._make_result_from_core(core, self.shape, [self])
+
     def sin(self):
         # Pinned _ensure_float().alu(SIN), consuming the exact current Tensor
         # occurrence (mixin/elementwise.py:437-478; tensor.py:128-140).
@@ -2088,13 +2099,19 @@ class Tensor:
         # Pinned mixin/elementwise.py:945-955.
         return self.relu() - alpha * (1 - self.exp()).relu()
 
+    def logaddexp(self, other):
+        # Pinned mixin/elementwise.py:403-410.
+        a, b, _ = self._broadcasted(other)
+        m = a.maximum(b)
+        return ((a - m).exp() + (b - m).exp()).log() + m
+
     def softplus(self, beta=1.0):
-        uop = _ffi._lib.poly_softplus(self._ctx, self._graph_uop, beta)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:981-989.
+        return (1 / beta) * (self * beta).logaddexp(0.0)
 
     def mish(self):
-        uop = _ffi._lib.poly_mish(self._ctx, self._graph_uop)
-        return self._make_result(uop, self.shape, [self])
+        # Pinned mixin/elementwise.py:991-1001.
+        return self * self.softplus().tanh()
 
     def hardtanh(self, min_val=-1, max_val=1):
         # Pinned mixin/elementwise.py:716-724.
@@ -2158,9 +2175,23 @@ class Tensor:
         if self.shape == shape:
             return self
         if _shape_has_symbolic(shape):
-            uop = self._broadcast_uop(shape)
-            out_shape = _shape_from_uop(self._ctx, uop)
-            return self._make_result(uop, out_shape, [self])
+            aligned = (1,) * (len(shape) - self.ndim) + tuple(self.shape)
+            if aligned != self.shape:
+                if not _shape_all_int(aligned):
+                    raise NotImplementedError('symbolic movement reshape is not implemented')
+                reshaped = self.reshape(aligned)
+            else:
+                reshaped = self
+            dims = _shape_uop_array(self._ctx, shape)
+            core = _ffi._lib.poly_tensor_expand_uop(
+                self._ctx, reshaped._tensor, dims, len(shape)
+            )
+            if not core:
+                raise RuntimeError('poly_tensor_expand_uop failed')
+            current = self._core_uop_raw(core)
+            return reshaped._make_result_from_core(
+                core, _shape_from_uop(self._ctx, current), [reshaped]
+            )
         aligned = (1,) * (len(shape) - self.ndim) + tuple(self.shape)
         reshaped = self.reshape(aligned)
         dims, n = _int64_array(shape)
@@ -2235,18 +2266,23 @@ class Tensor:
         return self.permute(*order)
 
     @staticmethod
-    def _tri(r, c, diagonal=0):
-        return (Tensor.arange(r).unsqueeze(-1) + diagonal) <= Tensor.arange(c)
+    def _tri(r, c, diagonal=0, device=None):
+        # Pinned mixin/__init__.py:310-311. Polygrad's optional device is
+        # wrapper placement metadata only; arange remains a deviceless UOp.
+        opts = {} if device is None else {'device': device}
+        return (
+            Tensor.arange(r, **opts).unsqueeze(-1) + diagonal
+        ) <= Tensor.arange(c, **opts)
 
     def triu(self, diagonal=0):
         r, c = self.shape[-2], self.shape[-1]
-        mask = Tensor._tri(r, c, diagonal=diagonal)
-        return mask.where(self, Tensor(0.0))
+        mask = Tensor._tri(r, c, diagonal=diagonal, device=self.device)
+        return mask.where(self, self.const_like(0))
 
     def tril(self, diagonal=0):
         r, c = self.shape[-2], self.shape[-1]
-        mask = Tensor._tri(r, c, diagonal=diagonal + 1)
-        return mask.where(Tensor(0.0), self)
+        mask = Tensor._tri(r, c, diagonal=diagonal + 1, device=self.device)
+        return mask.where(self.const_like(0), self)
 
     def squeeze(self, dim=None):
         if dim is not None:
@@ -2433,23 +2469,17 @@ class Tensor:
         return numerator.div(denominator).cast(output_dtype)
 
     def var(self, axis=None, keepdim=False, correction=1):
-        if axis is None:
-            m = self.mean()
-            diff = self - m
-            sq = diff * diff
-            return sq.sum() / (self.numel() - correction)
-        if isinstance(axis, int):
-            if axis < 0:
-                axis += len(self.shape)
-        # Keep variance construction lazy like tinygrad. The old frontend
-        # realized the mean as a scheduler workaround, which made var/layernorm
-        # invisible to backward across that forced materialization boundary.
-        uop = _ffi._lib.poly_var_reduce(
-            self._ctx, self._graph_uop, int(axis), int(keepdim), int(correction)
+        # Pinned Tensor.var is this exact lazy Tensor expression
+        # (mixin/__init__.py:608-635), including tuple axes and RELU on the
+        # denominator. Every constituent operation is C-owned on Path B.
+        squares = (self - self.mean(axis=axis, keepdim=True)).square()
+        reduced_shape = squares.sum(axis=axis, keepdim=True).shape
+        n = _prod(
+            si for si, so in zip(self.shape, reduced_shape) if int(si) != int(so)
         )
-        if not uop:
-            raise RuntimeError('poly_var_reduce failed')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
+        reduced = squares.sum(axis=axis, keepdim=keepdim)
+        denominator = reduced.const_like(n) - correction
+        return reduced.div(denominator.relu())
 
     def std(self, axis=None, keepdim=False, correction=1):
         return self.var(axis=axis, keepdim=keepdim, correction=correction).sqrt()
@@ -2492,6 +2522,21 @@ class Tensor:
             core, _shape_from_uop(self._ctx, current), [self]
         )
 
+    def _one_hot_along_dim(self, num_classes, dim=-1):
+        # Pinned tinygrad compares the integer index directly with a
+        # right-aligned arange (mixin/__init__.py:1086-1091).
+        if not dtypes.is_int(to_dtype(self.dtype)):
+            raise RuntimeError(
+                f"_one_hot_along_dim expects int index tensor, getting {self.dtype}"
+            )
+        dim = self._resolve_dim(int(dim))
+        offset = self.ndim - dim - 1
+        dtype = dtypes.int64 if int(num_classes) > np.iinfo(np.int32).max else dtypes.int32
+        classes = Tensor.arange(
+            int(num_classes), dtype=dtype, _ctx=self._ctx
+        ).reshape((int(num_classes),) + (1,) * offset)
+        return self.eq(classes)
+
     def _pre_scatter_validate(self, dim, index, src):
         if not isinstance(index, Tensor):
             index = Tensor(index, dtype='int32', device=self._device)
@@ -2527,13 +2572,16 @@ class Tensor:
         if not isinstance(src, Tensor):
             src = Tensor(src, dtype=self._dtype_str, device=self._device)
         dim, index, src = self._pre_scatter_validate(dim, index, src)
-        uop = _ffi._lib.poly_scatter_reduce(
-            self._ctx, self._graph_uop, dim, index._graph_uop, src._graph_uop,
+        core = _ffi._lib.poly_tensor_scatter_reduce(
+            self._ctx, self._tensor, dim, index._tensor, src._tensor,
             reduce.encode('utf-8'), int(bool(include_self))
         )
-        if not uop:
-            raise RuntimeError('poly_scatter_reduce failed')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, index, src])
+        if not core:
+            raise RuntimeError('poly_tensor_scatter_reduce failed')
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, index, src]
+        )
 
     def scatter(self, dim, index, src, reduce=None):
         if reduce not in {None, 'add', 'multiply'}:
@@ -2546,10 +2594,15 @@ class Tensor:
             raise TypeError('non-scalar src is not supported with reduce arg. use scatter_reduce')
         dim, index, src = self._pre_scatter_validate(dim, index, src)
         reduce_arg = b'' if reduce is None else reduce.encode('utf-8')
-        uop = _ffi._lib.poly_scatter(self._ctx, self._graph_uop, dim, index._graph_uop, src._graph_uop, reduce_arg)
-        if not uop:
-            raise RuntimeError('poly_scatter failed')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, index, src])
+        core = _ffi._lib.poly_tensor_scatter(
+            self._ctx, self._tensor, dim, index._tensor, src._tensor, reduce_arg
+        )
+        if not core:
+            raise RuntimeError('poly_tensor_scatter failed')
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, index, src]
+        )
 
     # --- Matmul (C core dot) ---
 
@@ -2573,63 +2626,93 @@ class Tensor:
             raise ValueError("qr mode must be 'complete', 'reduced', or 'r'")
         q = _ffi._ptr()
         r = _ffi._ptr()
-        rc = _ffi._lib.poly_qr_ex(self._ctx, self._graph_uop, mode_id, ctypes.byref(q), ctypes.byref(r))
+        rc = _ffi._lib.poly_tensor_qr_ex(
+            self._ctx, self._tensor, mode_id, ctypes.byref(q), ctypes.byref(r)
+        )
         if rc != 0 or not r or (mode_id != 2 and not q):
-            raise RuntimeError('poly_qr_ex failed')
+            raise RuntimeError('poly_tensor_qr_ex failed')
         if mode_id == 2:
-            return self._make_result(r, _shape_from_uop(self._ctx, r), [self])
+            r_current = self._core_uop_raw(r)
+            return self._make_result_from_core(
+                r, _shape_from_uop(self._ctx, r_current), [self]
+            )
+        q_current = self._core_uop_raw(q)
+        r_current = self._core_uop_raw(r)
         return (
-            self._make_result(q, _shape_from_uop(self._ctx, q), [self]),
-            self._make_result(r, _shape_from_uop(self._ctx, r), [self]),
+            self._make_result_from_core(
+                q, _shape_from_uop(self._ctx, q_current), [self]
+            ),
+            self._make_result_from_core(
+                r, _shape_from_uop(self._ctx, r_current), [self]
+            ),
         )
 
     def triangular_solve(self, b, upper=False, transpose_a=False, unit_diagonal=False):
         if not isinstance(b, Tensor):
             b = self._ensure_tensor(b)
-        uop = _ffi._lib.poly_triangular_solve(
-            self._ctx, self._graph_uop, b._graph_uop,
+        core = _ffi._lib.poly_tensor_triangular_solve(
+            self._ctx, self._tensor, b._tensor,
             int(bool(upper)), int(bool(transpose_a)), int(bool(unit_diagonal))
         )
-        if not uop:
+        if not core:
             raise ValueError(
                 f'cannot triangular_solve A.shape={self.shape} and b.shape={b.shape}'
             )
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, b]
+        )
 
     def solve_triangular(self, b, upper=False, transpose_a=False, unit_diagonal=False):
         return self.triangular_solve(b, upper, transpose_a, unit_diagonal)
 
     def cholesky(self, upper=False):
-        uop = _ffi._lib.poly_cholesky(self._ctx, self._graph_uop, int(bool(upper)))
-        if not uop:
+        core = _ffi._lib.poly_tensor_cholesky(
+            self._ctx, self._tensor, int(bool(upper))
+        )
+        if not core:
             raise ValueError(f'cannot cholesky shape={self.shape}')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self]
+        )
 
     def cholesky_solve(self, b, upper=False):
         if not isinstance(b, Tensor):
             b = self._ensure_tensor(b)
-        uop = _ffi._lib.poly_cholesky_solve(self._ctx, self._graph_uop, b._graph_uop, int(bool(upper)))
-        if not uop:
+        core = _ffi._lib.poly_tensor_cholesky_solve(
+            self._ctx, self._tensor, b._tensor, int(bool(upper))
+        )
+        if not core:
             raise ValueError(
                 f'cannot cholesky_solve factor.shape={self.shape} and b.shape={b.shape}'
             )
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, b]
+        )
 
     def solve(self, b):
         if not isinstance(b, Tensor):
             b = self._ensure_tensor(b)
-        uop = _ffi._lib.poly_solve(self._ctx, self._graph_uop, b._graph_uop)
-        if not uop:
+        core = _ffi._lib.poly_tensor_solve(self._ctx, self._tensor, b._tensor)
+        if not core:
             raise ValueError(f'cannot solve A.shape={self.shape} and b.shape={b.shape}')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, b]
+        )
 
     def lstsq(self, b):
         if not isinstance(b, Tensor):
             b = self._ensure_tensor(b)
-        uop = _ffi._lib.poly_lstsq(self._ctx, self._graph_uop, b._graph_uop)
-        if not uop:
+        core = _ffi._lib.poly_tensor_lstsq(self._ctx, self._tensor, b._tensor)
+        if not core:
             raise ValueError(f'cannot lstsq A.shape={self.shape} and b.shape={b.shape}')
-        return self._make_result(uop, _shape_from_uop(self._ctx, uop), [self, b])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self, b]
+        )
 
     def __matmul__(self, other):
         return self.dot(other)
@@ -2722,20 +2805,43 @@ class Tensor:
 
     # --- Loss functions ---
 
-    def cross_entropy(self, target, axis=None):
-        """Cross-entropy loss for class-index or same-shape probability targets."""
+    def cross_entropy(
+        self, target, reduction="mean", label_smoothing=0.0, *, axis=None
+    ):
+        """Cross-entropy loss with tinygrad's API and graph spelling."""
+        assert 0.0 <= label_smoothing <= 1.0, (
+            "label_smoothing must be in [0.0, 1.0]"
+        )
         if not isinstance(target, Tensor):
             target = Tensor(target, device=self._device)
-        target = target.to(self._device)
-        if axis is None:
-            axis = 0 if self.ndim == 1 else 1
-        uop = _ffi._lib.poly_cross_entropy(
-            self._ctx, self._graph_uop, target._graph_uop, axis
+        classes_dim = (
+            self._resolve_dim(int(axis))
+            if axis is not None
+            else (0 if self.ndim == 1 else 1)
         )
-        if not uop:
-            raise ValueError(f'shape mismatch: self.shape={self.shape}, target.shape={target.shape}')
-        new_shape = _shape_from_uop(self._ctx, uop)
-        return self._make_result(uop, new_shape, [self, target])
+        if self.shape != target.shape:
+            expected = self.shape[:classes_dim] + self.shape[classes_dim + 1:]
+            if expected != target.shape:
+                raise RuntimeError(
+                    f"shape mismatch: self.shape={self.shape}, target.shape={target.shape}"
+                )
+            target = target.unsqueeze(classes_dim)._one_hot_along_dim(
+                num_classes=self.shape[classes_dim], dim=classes_dim
+            )
+        target = (
+            (1 - label_smoothing) * target
+            + label_smoothing / int(target.shape[classes_dim])
+        )
+        reduced = self.log_softmax(classes_dim).mul(target).sum(classes_dim)
+        if reduction == "none":
+            return -reduced
+        if reduction == "sum":
+            return -reduced.sum()
+        if reduction == "mean":
+            return -reduced.mean()
+        raise ValueError(
+            f"reduction={reduction!r} must be one of ('none', 'sum', 'mean')"
+        )
 
     def sparse_categorical_crossentropy(self, target, axis=None):
         """tinygrad name for class-index cross entropy."""
@@ -2761,12 +2867,15 @@ class Tensor:
         def _apply_uop_shrink(tensor, starts, sizes):
             start_arr = (_ffi._ptr * len(starts))(*starts)
             size_arr = (_ffi._ptr * len(sizes))(*sizes)
-            uop = _ffi._lib.poly_shrink_uop(
-                tensor._ctx, tensor._graph_uop, start_arr, size_arr, len(starts)
+            core = _ffi._lib.poly_tensor_shrink_uop(
+                tensor._ctx, tensor._tensor, start_arr, size_arr, len(starts)
             )
-            if not uop:
-                raise RuntimeError('poly_shrink_uop failed')
-            return tensor._make_result(uop, _shape_from_uop(tensor._ctx, uop), [tensor])
+            if not core:
+                raise RuntimeError('poly_tensor_shrink_uop failed')
+            current = tensor._core_uop_raw(core)
+            return tensor._make_result_from_core(
+                core, _shape_from_uop(tensor._ctx, current), [tensor]
+            )
 
         # Expand Ellipsis
         n_ellipsis = sum(1 for i in idx if i is Ellipsis)
@@ -2926,24 +3035,15 @@ class Tensor:
             raise ValueError('einsum operands must belong to the same Polygrad context')
         n = len(operands)
 
-        tensor_arr = (_ffi._ptr * n)(*[_uop_raw(t._graph_uop) for t in operands])
-
-        uop = _ffi._lib.poly_einsum(
+        tensor_arr = (_ffi._ptr * n)(*[t._tensor for t in operands])
+        core = _ffi._lib.poly_tensor_einsum(
             ctx, formula.encode('utf-8'),
             tensor_arr, n)
-        if not uop:
+        if not core:
             raise ValueError(f'poly_einsum failed for formula: {formula}')
-        shape = _shape_from_uop(ctx, uop)
-        dev = operands[0]._infer_device(list(operands))
-        physical = Tensor._physicalize_result_for(ctx, uop, operands)
-        return Tensor(
-            _ctx=ctx,
-            _tensor=Tensor._core_create_with_roots_for(
-                ctx, uop, physical, _POLY_TENSOR_VALUE, dev
-            ),
-            _shape=shape, _device=dev,
-            requires_grad=any(t._requires_grad for t in operands),
-            _dtype=_uop_dtype_name(ctx, uop, operands[0]._dtype_str),
+        current = operands[0]._core_uop_raw(core)
+        return operands[0]._make_result_from_core(
+            core, _shape_from_uop(ctx, current), list(operands)
         )
 
     # --- Rearrange (C core, einops-style) ---
@@ -2957,14 +3057,16 @@ class Tensor:
         axis_names = ' '.join(names).encode('utf-8') if names else None
         axis_values = (ctypes.c_int64 * n)(*values) if n > 0 else None
 
-        uop = _ffi._lib.poly_rearrange(
+        core = _ffi._lib.poly_tensor_rearrange(
             self._ctx, formula.encode('utf-8'),
-            self._graph_uop,
+            self._tensor,
             axis_names, axis_values, n)
-        if not uop:
+        if not core:
             raise ValueError(f'poly_rearrange failed for formula: {formula}')
-        shape = _shape_from_uop(self._ctx, uop)
-        return self._make_result(uop, shape, [self])
+        current = self._core_uop_raw(core)
+        return self._make_result_from_core(
+            core, _shape_from_uop(self._ctx, current), [self]
+        )
 
     # --- Static constructors ---
 

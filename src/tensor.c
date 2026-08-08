@@ -700,6 +700,79 @@ PolyTensor *poly_tensor_create(PolyCtx *ctx, PolyUOp *uop, PolyTensorRole role, 
   return poly_tensor_create_with_roots(ctx, uop, NULL, role, device);
 }
 
+int poly_tensor_custom_kernel(
+    PolyCtx *ctx,
+    PolyUOp *body,
+    PolyTensor **inputs,
+    int n_inputs,
+    PolyTensor **outputs
+) {
+  if (!ctx || !body || !poly_ctx_owns_ptr(ctx, body) || n_inputs <= 0 || !inputs || !outputs)
+    return -1;
+
+  PolyUOp **logical_src = malloc((size_t)(n_inputs + 1) * sizeof(*logical_src));
+  PolyUOp **physical_src = malloc((size_t)(n_inputs + 1) * sizeof(*physical_src));
+  if (!logical_src || !physical_src) {
+    free(logical_src);
+    free(physical_src);
+    return -1;
+  }
+  logical_src[0] = body;
+  physical_src[0] = body;
+  for (int i = 0; i < n_inputs; i++) {
+    outputs[i] = NULL;
+    if (!tensor_roots_owned_by_ctx(ctx, inputs[i])) {
+      free(logical_src);
+      free(physical_src);
+      return -1;
+    }
+    logical_src[i + 1] = inputs[i]->uop_logical;
+    physical_src[i + 1] = inputs[i]->uop_physical;
+  }
+
+  /* Pinned UOp.custom_kernel creates one opaque CALL over the exact ordered
+   * contiguous Tensor.uop sources, then returns AFTER(source, same_call) for
+   * every source (uop/ops.py:1093-1097). Path B performs that construction
+   * independently for retained logical and mandatory physical occurrences. */
+  PolyUOp *logical_call = poly_uop(
+      ctx, POLY_OP_CALL, POLY_VOID, logical_src, n_inputs + 1, poly_arg_none()
+  );
+  PolyUOp *physical_call = poly_uop(
+      ctx, POLY_OP_CALL, POLY_VOID, physical_src, n_inputs + 1, poly_arg_none()
+  );
+  if (!logical_call || !physical_call) {
+    free(logical_src);
+    free(physical_src);
+    return -1;
+  }
+
+  int rc = 0;
+  for (int i = 0; i < n_inputs; i++) {
+    PolyUOp *logical_after_src[2] = {logical_src[i + 1], logical_call};
+    PolyUOp *physical_after_src[2] = {physical_src[i + 1], physical_call};
+    PolyUOp *logical_after = poly_uop(
+        ctx, POLY_OP_AFTER, logical_src[i + 1]->dtype, logical_after_src, 2,
+        poly_arg_none()
+    );
+    PolyUOp *physical_after = poly_uop(
+        ctx, POLY_OP_AFTER, physical_src[i + 1]->dtype, physical_after_src, 2,
+        poly_arg_none()
+    );
+    if (!logical_after || !physical_after ||
+        !(outputs[i] = poly_tensor_create_with_roots(
+              ctx, logical_after, physical_after, POLY_TENSOR_VALUE, inputs[i]->device
+          ))) {
+      rc = -1;
+      break;
+    }
+    outputs[i]->provenance = POLY_TENSOR_PROVENANCE_COMPUTED;
+  }
+
+  free(logical_src);
+  free(physical_src);
+  return rc;
+}
+
 PolyTensor *poly_tensor_empty(
     PolyCtx *ctx,
     PolyDType scalar_dtype,
@@ -999,6 +1072,24 @@ PolyTensor *poly_tensor_expand(PolyCtx *ctx, PolyTensor *src, int64_t *dims, int
   );
 }
 
+PolyTensor *poly_tensor_expand_uop(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyUOp **dims,
+    int ndim
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  /* Pinned tinygrad _broadcast_to/_mop constructs
+   * EXPAND(value, shape_to_shape_arg(new_shape)) directly from Tensor.uop
+   * (mixin/movement.py:116-143, uop/ops.py:710-722). */
+  return tensor_unary_result(
+      ctx, src,
+      poly_expand_uop(ctx, src->uop_logical, dims, ndim),
+      poly_expand_uop(ctx, current, dims, ndim)
+  );
+}
+
 PolyTensor *poly_tensor_permute(PolyCtx *ctx, PolyTensor *src, int64_t *perm, int ndim) {
   PolyUOp *current = tensor_current_uop(src);
   if (!ctx || !src || !src->uop_logical || !current) return NULL;
@@ -1014,6 +1105,27 @@ PolyTensor *poly_tensor_shrink(PolyCtx *ctx, PolyTensor *src, int64_t (*pairs)[2
   return tensor_unary_result(
       ctx, src, poly_shrink(ctx, src->uop_logical, pairs, ndim),
       poly_shrink(ctx, current, pairs, ndim)
+  );
+}
+
+PolyTensor *poly_tensor_shrink_uop(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    PolyUOp **starts,
+    PolyUOp **sizes,
+    int ndim
+) {
+  PolyUOp *current = tensor_current_uop(src);
+  if (!ctx || !src || !src->uop_logical || !current) return NULL;
+  /* Pinned tinygrad movement._mop builds
+   * SHRINK(value, shape_to_shape_arg(starts), shape_to_shape_arg(sizes))
+   * directly from Tensor.uop (mixin/movement.py:173-193,
+   * uop/ops.py:710-722). Path B applies that same raw constructor to the
+   * exact ordered logical and physical occurrences. */
+  return tensor_unary_result(
+      ctx, src,
+      poly_shrink_uop(ctx, src->uop_logical, starts, sizes, ndim),
+      poly_shrink_uop(ctx, current, starts, sizes, ndim)
   );
 }
 
@@ -1128,9 +1240,8 @@ PolyTensor *poly_tensor_assign(PolyCtx *ctx, PolyTensor *target, PolyTensor *val
    * tinygrad has one UOp, so its second assign naturally chains from the first
    * AFTER. Preserve that same value-version chain independently in both roots
    * instead of leaking target_current into uop_logical. */
-  PolyUOp *physical_after = current_after != logical_after ? current_after : NULL;
   if (poly_tensor_replace_roots(
-          ctx, target, logical_after, physical_after, target->role, target->device
+          ctx, target, logical_after, current_after, target->role, target->device
       ) != 0)
     return NULL;
   return target;
@@ -5001,6 +5112,101 @@ PolyUOp *poly_lstsq(PolyCtx *ctx, PolyUOp *a, PolyUOp *b) {
   return vector_rhs ? poly_reshape(ctx, x, vector_out_shape, vector_out_ndim) : x;
 }
 
+int poly_tensor_qr_ex(
+    PolyCtx *ctx,
+    PolyTensor *src,
+    int mode,
+    PolyTensor **out_q,
+    PolyTensor **out_r
+) {
+  if (!out_r || (mode != POLY_QR_R_ONLY && !out_q)) return -1;
+  if (out_q) *out_q = NULL;
+  *out_r = NULL;
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return -1;
+
+  /* Pinned Tensor.qr delegates to the exact current Tensor.uop program
+   * (mixin/__init__.py:1703-1719; test/null/test_tensor_uop_mixin.py:414-424).
+   * Path B applies the unchanged raw program independently to the retained
+   * logical root and mandatory physical occurrence. */
+  PolyUOp *logical_q = NULL, *logical_r = NULL;
+  PolyUOp *physical_q = NULL, *physical_r = NULL;
+  if (poly_qr_ex(ctx, src->uop_logical, mode, &logical_q, &logical_r) != 0 ||
+      poly_qr_ex(ctx, src->uop_physical, mode, &physical_q, &physical_r) != 0)
+    return -1;
+
+  PolyTensor *r = tensor_unary_result(ctx, src, logical_r, physical_r);
+  if (!r) return -1;
+  if (mode == POLY_QR_R_ONLY) {
+    *out_r = r;
+    return 0;
+  }
+  PolyTensor *q = tensor_unary_result(ctx, src, logical_q, physical_q);
+  if (!q) return -1;
+  *out_q = q;
+  *out_r = r;
+  return 0;
+}
+
+PolyTensor *poly_tensor_triangular_solve(
+    PolyCtx *ctx,
+    PolyTensor *a,
+    PolyTensor *b,
+    int upper,
+    int transpose_a,
+    int unit_diagonal
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
+  PolyUOp *logical = poly_triangular_solve(
+      ctx, a->uop_logical, b->uop_logical, upper, transpose_a, unit_diagonal
+  );
+  PolyUOp *physical = poly_triangular_solve(
+      ctx, a->uop_physical, b->uop_physical, upper, transpose_a, unit_diagonal
+  );
+  PolyTensor *inputs[2] = {a, b};
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
+}
+
+PolyTensor *poly_tensor_cholesky(PolyCtx *ctx, PolyTensor *src, int upper) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, poly_cholesky(ctx, src->uop_logical, upper),
+      poly_cholesky(ctx, src->uop_physical, upper)
+  );
+}
+
+PolyTensor *poly_tensor_cholesky_solve(
+    PolyCtx *ctx,
+    PolyTensor *chol,
+    PolyTensor *b,
+    int upper
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, chol) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
+  PolyUOp *logical =
+      poly_cholesky_solve(ctx, chol->uop_logical, b->uop_logical, upper);
+  PolyUOp *physical =
+      poly_cholesky_solve(ctx, chol->uop_physical, b->uop_physical, upper);
+  PolyTensor *inputs[2] = {chol, b};
+  return tensor_composite_result(ctx, logical, physical, inputs, 2);
+}
+
+PolyTensor *poly_tensor_solve(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
+  if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
+  PolyTensor *inputs[2] = {a, b};
+  return tensor_composite_result(
+      ctx, poly_solve(ctx, a->uop_logical, b->uop_logical),
+      poly_solve(ctx, a->uop_physical, b->uop_physical), inputs, 2
+  );
+}
+
+PolyTensor *poly_tensor_lstsq(PolyCtx *ctx, PolyTensor *a, PolyTensor *b) {
+  if (!tensor_roots_owned_by_ctx(ctx, a) || !tensor_roots_owned_by_ctx(ctx, b)) return NULL;
+  PolyTensor *inputs[2] = {a, b};
+  return tensor_composite_result(
+      ctx, poly_lstsq(ctx, a->uop_logical, b->uop_logical),
+      poly_lstsq(ctx, a->uop_physical, b->uop_physical), inputs, 2
+  );
+}
+
 /* Softmax */
 
 PolyUOp *poly_softmax(PolyCtx *ctx, PolyUOp *x, int axis) {
@@ -5074,6 +5280,20 @@ PolyTensor *poly_tensor_log(PolyCtx *ctx, PolyTensor *src) {
   PolyUOp *logical = poly_log(ctx, src->uop_logical);
   PolyUOp *physical = poly_log(ctx, current);
   return tensor_unary_result(ctx, src, logical, physical);
+}
+
+PolyTensor *poly_tensor_log1p(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, poly_log1p(ctx, src->uop_logical), poly_log1p(ctx, src->uop_physical)
+  );
+}
+
+PolyTensor *poly_tensor_expm1(PolyCtx *ctx, PolyTensor *src) {
+  if (!tensor_roots_owned_by_ctx(ctx, src)) return NULL;
+  return tensor_unary_result(
+      ctx, src, poly_expm1(ctx, src->uop_logical), poly_expm1(ctx, src->uop_physical)
+  );
 }
 
 PolyTensor *poly_tensor_gelu(PolyCtx *ctx, PolyTensor *src) {
@@ -5979,6 +6199,35 @@ PolyUOp *poly_einsum(PolyCtx *ctx, const char *formula, PolyUOp **tensors, int n
   return result;
 }
 
+PolyTensor *poly_tensor_einsum(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyTensor **tensors,
+    int n_tensors
+) {
+  if (!ctx || !formula || !tensors || n_tensors <= 0 ||
+      n_tensors > MAX_EINSUM_TENSORS)
+    return NULL;
+
+  PolyUOp *logical[MAX_EINSUM_TENSORS];
+  PolyUOp *physical[MAX_EINSUM_TENSORS];
+  for (int i = 0; i < n_tensors; i++) {
+    if (!tensor_roots_owned_by_ctx(ctx, tensors[i])) return NULL;
+    logical[i] = tensors[i]->uop_logical;
+    physical[i] = tensors[i]->uop_physical;
+  }
+
+  /* Pinned Tensor.einsum applies one formula to its ordered Tensor.uop
+   * operands (mixin/__init__.py:496-535). Path B applies the unchanged raw
+   * program independently to retained logical roots and mandatory physical
+   * occurrences; it never recovers physical output by logical substitution. */
+  PolyUOp *logical_result = poly_einsum(ctx, formula, logical, n_tensors);
+  PolyUOp *physical_result = poly_einsum(ctx, formula, physical, n_tensors);
+  return tensor_composite_result(
+      ctx, logical_result, physical_result, tensors, n_tensors
+  );
+}
+
 /* Rearrange (einops) */
 
 #define MAX_REARRANGE_TOKENS POLY_MAX_DIMS
@@ -6227,6 +6476,27 @@ PolyUOp *poly_rearrange(
   }
 
   return result;
+}
+
+PolyTensor *poly_tensor_rearrange(
+    PolyCtx *ctx,
+    const char *formula,
+    PolyTensor *tensor,
+    const char *axis_names,
+    const int64_t *axis_values,
+    int n_axis_sizes
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, tensor)) return NULL;
+  /* Pinned rearrange is unflatten -> permute -> flatten on Tensor.uop
+   * (mixin/movement.py:340-383). Path B runs that unchanged raw program on
+   * each exact root; frontends never reconstruct the physical occurrence. */
+  PolyUOp *logical = poly_rearrange(
+      ctx, formula, tensor->uop_logical, axis_names, axis_values, n_axis_sizes
+  );
+  PolyUOp *physical = poly_rearrange(
+      ctx, formula, tensor->uop_physical, axis_names, axis_values, n_axis_sizes
+  );
+  return tensor_unary_result(ctx, tensor, logical, physical);
 }
 
 /* Gather (embedding lookup) */
@@ -6566,6 +6836,53 @@ PolyUOp *poly_scatter(
   PolyScatterPrepared p = {0};
   if (!poly_prepare_scatter(ctx, self, dim, index, src, &p)) return NULL;
   return poly_scatter_masked_merge(ctx, self, p.src, p.mask, p.self_shape, p.ndim);
+}
+
+PolyTensor *poly_tensor_scatter(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    int dim,
+    PolyTensor *index,
+    PolyTensor *src,
+    const char *reduce
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, self) || !tensor_roots_owned_by_ctx(ctx, index) ||
+      !tensor_roots_owned_by_ctx(ctx, src))
+    return NULL;
+  /* Pinned scatter composes _pre_scatter + _masked_merge directly from the
+   * ordered Tensor.uop inputs (mixin/__init__.py:1158-1174,1217-1258).
+   * Path B applies the unchanged raw program independently to both roots. */
+  PolyUOp *logical =
+      poly_scatter(ctx, self->uop_logical, dim, index->uop_logical, src->uop_logical, reduce);
+  PolyUOp *physical = poly_scatter(
+      ctx, self->uop_physical, dim, index->uop_physical, src->uop_physical, reduce
+  );
+  PolyTensor *inputs[3] = {self, index, src};
+  return tensor_composite_result(ctx, logical, physical, inputs, 3);
+}
+
+PolyTensor *poly_tensor_scatter_reduce(
+    PolyCtx *ctx,
+    PolyTensor *self,
+    int dim,
+    PolyTensor *index,
+    PolyTensor *src,
+    const char *reduce,
+    int include_self
+) {
+  if (!tensor_roots_owned_by_ctx(ctx, self) || !tensor_roots_owned_by_ctx(ctx, index) ||
+      !tensor_roots_owned_by_ctx(ctx, src))
+    return NULL;
+  /* Pinned scatter_reduce runs the same reducer over exact ordered Tensor.uop
+   * inputs (mixin/__init__.py:1176-1215). Keep the raw program identical. */
+  PolyUOp *logical = poly_scatter_reduce(
+      ctx, self->uop_logical, dim, index->uop_logical, src->uop_logical, reduce, include_self
+  );
+  PolyUOp *physical = poly_scatter_reduce(
+      ctx, self->uop_physical, dim, index->uop_physical, src->uop_physical, reduce, include_self
+  );
+  PolyTensor *inputs[3] = {self, index, src};
+  return tensor_composite_result(ctx, logical, physical, inputs, 3);
 }
 
 PolyUOp *poly_gather(PolyCtx *ctx, PolyUOp *table, PolyUOp *indices) {

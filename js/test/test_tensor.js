@@ -1163,6 +1163,88 @@ async function runTensorTests(pg) {
     assertClose(arr, [0, 1], 1e-3)
   })
 
+  await test('logaddexp softplus mish match pinned graph', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('elementwise construction entered frontend substitution')
+    }
+    try {
+      const x = new Tensor([
+        [-20, -3, -0, 2, 20],
+        [1, -1, 4, -4, 0.5]
+      ])
+      const other = new Tensor([[-2], [3]])
+      const pinnedLogaddexp = (lhs, rhs) => {
+        let b = lhs._ensureTensor(rhs)
+        const shape = lhs._broadcastShape(b.shape)
+        const a = lhs._broadcastTensor(shape)
+        b = b._broadcastTensor(shape)
+        const m = a.maximum(b)
+        return a.sub(m).exp().add(b.sub(m).exp()).log().add(m)
+      }
+      const pinnedSoftplus = (value, beta = 1) =>
+        pinnedLogaddexp(value.mul(beta), 0).mul(1 / beta, true)
+      const pairs = [
+        [x.logaddexp(0), pinnedLogaddexp(x, 0)],
+        [x.logaddexp(other), pinnedLogaddexp(x, other)],
+        [x.softplus(), pinnedSoftplus(x)],
+        [x.softplus(2), pinnedSoftplus(x, 2)],
+        [x.mish(), x.mul(pinnedSoftplus(x).tanh())]
+      ]
+      for (const [actual, expected] of pairs) {
+        assert(actual.uop.key === expected.uop.key, 'physical graph differs')
+        assert(actual.uopLogical.key === expected.uopLogical.key, 'logical graph differs')
+        assertClose(await actual.toArray(), await expected.toArray(), 1e-6)
+      }
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
+  })
+
+  await test('log1p expm1 use core tensor roots', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('superset construction entered frontend substitution')
+    }
+    try {
+      const x = new Tensor([-1e-6, 0, 1e-6, 0.25], { device: 'cpu' })
+      const rows = [
+        ['log1p', x.log1p(), [-1e-6, 0, 1e-6, 0.25].map(Math.log1p)],
+        ['expm1', x.expm1(), [-1e-6, 0, 1e-6, 0.25].map(Math.expm1)]
+      ]
+      for (const [name, actual, expectedValues] of rows) {
+        const rawFn = pg._core.ffi[`poly_${name}`]
+        const expectedLogical = rawFn(x._ctx, x.uopLogical.raw)
+        const expectedPhysical = rawFn(x._ctx, x.uop.raw)
+        assert(
+          actual.uopLogical.key === String(pg._core.ffi.poly_uop_key(expectedLogical)),
+          `${name} logical graph differs`
+        )
+        assert(
+          actual.uop.key === String(pg._core.ffi.poly_uop_key(expectedPhysical)),
+          `${name} physical graph differs`
+        )
+        assertClose(await actual.toArray(), expectedValues, 1e-6)
+      }
+
+      const moved = (await Tensor.empty([4], {
+        device: 'cpu'
+      }).realize()).to('cuda').to('cpu')
+      for (const [name, actual] of [
+        ['log1p', moved.log1p()],
+        ['expm1', moved.expm1()]
+      ]) {
+        const expected = pg._core.ffi[`poly_${name}`](moved._ctx, moved.uop.raw)
+        assert(
+          actual.uop.key === String(pg._core.ffi.poly_uop_key(expected)),
+          `${name} lost the nested physical occurrence`
+        )
+      }
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
+  })
+
   await test('sin cos tan match pinned promotion', async () => {
     const integer = new Tensor([0, 1, 2], { dtype: 'int32' })
     assertClose(
@@ -1729,6 +1811,22 @@ async function runTensorTests(pg) {
     assert(threw, 'expected invalid scatterReduce reduction to throw')
   })
 
+  await test('scatter construction bypasses frontend substitution', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('scatter construction entered frontend substitution')
+    }
+    try {
+      const base = new Tensor([[1, 2, 3, 4, 5]])
+      const idx = new Tensor(new Int32Array([0, 1, 1, 3, 4]), { dtype: 'int32' }).reshape(1, 5)
+      const src = new Tensor([[6, 7, 8, 9, 10]])
+      assertClose(await base.scatter(1, idx, src).toArray(), [6, 8, 3, 9, 10])
+      assertClose(await base.scatterReduce(1, idx, src, 'sum').toArray(), [7, 17, 3, 13, 15])
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
+  })
+
   // -- Step slicing --
   console.log('\n-- Step slicing --')
 
@@ -1893,6 +1991,40 @@ async function runTensorTests(pg) {
     assertClose(await z.triu().toArray(), [])
   })
 
+  await test('triu/tril use pinned composition without substitution', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('triu/tril construction entered frontend substitution')
+    }
+    try {
+      const x = new Tensor([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8]
+      ])
+      const upper = x.triu(-1)
+      const lower = x.tril(1)
+      const expectedUpper = Tensor._tri(2, 4, -1, x.device).where(x, x.constLike(0))
+      const expectedLower = Tensor._tri(2, 4, 2, x.device).where(x.constLike(0), x)
+      assert(upper.uop.key === expectedUpper.uop.key, 'triu physical graph differs')
+      assert(lower.uop.key === expectedLower.uop.key, 'tril physical graph differs')
+      assert(upper.uopLogical.key === expectedUpper.uopLogical.key, 'triu logical graph differs')
+      assert(lower.uopLogical.key === expectedLower.uopLogical.key, 'tril logical graph differs')
+      assertClose(await upper.toArray(), [1, 2, 3, 4, 5, 6, 7, 8])
+      assertClose(await lower.toArray(), [1, 2, 0, 0, 5, 6, 7, 0])
+
+      const moved = (await new Tensor([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8]
+      ]).realize()).to('cuda').to('cpu')
+      assert(countGraphOp(moved.triu().uop, pg._core.ops.COPY) === 2,
+        'triu lost moved occurrence')
+      assert(countGraphOp(moved.tril().uop, pg._core.ops.COPY) === 2,
+        'tril lost moved occurrence')
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
+  })
+
   // -- Reduction --
   console.log('\n-- Reduction --')
 
@@ -1913,6 +2045,44 @@ async function runTensorTests(pg) {
     const t = new Tensor([2, 4, 6])
     const v = await t.mean().item()
     assert(Math.abs(v - 4) < 1e-4, `Expected 4, got ${v}`)
+  })
+
+  await test('var matches pinned expression without substitution', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('variance construction entered frontend substitution')
+    }
+    try {
+      const x = new Tensor([[1, 2, 4], [3, 5, 9]])
+      const pinnedExpression = (axis, keepdim = false, correction = 1) => {
+        const squares = x.sub(x.mean(axis, true)).square()
+        const reducedShape = squares.sum(axis, true).shape
+        const n = x.shape.filter((si, i) => si !== reducedShape[i]).reduce((a, b) => a * b, 1)
+        const reduced = squares.sum(axis, keepdim)
+        return reduced.div(reduced.constLike(n).sub(correction).relu())
+      }
+      for (const [axis, keepdim, correction] of [
+        [1, false, 1], [0, true, 0], [null, false, 1], [[0, 1], false, 1], [1, false, 3]
+      ]) {
+        const actual = x.var(axis, keepdim, correction)
+        const expected = pinnedExpression(axis, keepdim, correction)
+        assert(actual.uop.key === expected.uop.key, 'variance physical graph differs')
+        assert(actual.uopLogical.key === expected.uopLogical.key, 'variance logical graph differs')
+        const actualValues = await actual.toArray()
+        const expectedValues = await expected.toArray()
+        if (correction === 3) {
+          assert(
+            actualValues.length === expectedValues.length &&
+            actualValues.every((value, i) => value === expectedValues[i]),
+            'variance non-finite values differ'
+          )
+        } else {
+          assertClose(actualValues, expectedValues)
+        }
+      }
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
   })
 
   await test('max', async () => {
@@ -2110,17 +2280,76 @@ async function runTensorTests(pg) {
   })
 
   await test('einsum uses the shared native/WASM adapter contract', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('einsum construction entered frontend substitution')
+    }
     const a = new Tensor([[1, 2], [3, 4]])
     const b = new Tensor([[5, 6], [7, 8]])
-    const out = Tensor.einsum('ij,jk->ik', a, b)
-    assertShape(out.shape, [2, 2])
-    assertClose(await out.toArray(), [19, 22, 43, 50])
+    try {
+      const formula = 'ij,jk->ik'
+      const logical = pg._core.ffi.poly_einsum(
+        a._ctx, formula, [{ _uop: a._graphUopRaw() }, { _uop: b._graphUopRaw() }]
+      ).uop
+      const physical = pg._core.ffi.poly_einsum(
+        a._ctx, formula, [{ _uop: a._currentUopRaw() }, { _uop: b._currentUopRaw() }]
+      ).uop
+      const out = Tensor.einsum(formula, a, b)
+      assertShape(out.shape, [2, 2])
+      assert(
+        out.uopLogical.key === String(pg._core.ffi.poly_uop_key(logical)),
+        'einsum logical graph differs'
+      )
+      assert(
+        out.uop.key === String(pg._core.ffi.poly_uop_key(physical)),
+        'einsum physical graph differs'
+      )
+      assertClose(await out.toArray(), [19, 22, 43, 50])
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
   })
 
   await test('rearrange forwards named axis sizes on native and WASM', async () => {
-    const out = Tensor.arange(6).rearrange('(h w) -> h w', { h: 2, w: 3 })
-    assertShape(out.shape, [2, 3])
-    assertClose(await out.toArray(), [0, 1, 2, 3, 4, 5])
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('rearrange construction entered frontend substitution')
+    }
+    try {
+      const source = Tensor.arange(6)
+      const out = source.rearrange('(h w) -> h w', { h: 2, w: 3 })
+      const expectedLogical = pg._core.ffi.poly_rearrange(
+        source._ctx, '(h w) -> h w', source.uopLogical.raw, source.shape,
+        { h: 2, w: 3 }
+      )
+      const expectedPhysical = pg._core.ffi.poly_rearrange(
+        source._ctx, '(h w) -> h w', source.uop.raw, source.shape,
+        { h: 2, w: 3 }
+      )
+      assert(
+        out.uopLogical.key === String(pg._core.ffi.poly_uop_key(expectedLogical.uop)),
+        'rearrange logical graph differs'
+      )
+      assert(
+        out.uop.key === String(pg._core.ffi.poly_uop_key(expectedPhysical.uop)),
+        'rearrange physical graph differs'
+      )
+      assertShape(out.shape, [2, 3])
+      assertClose(await out.toArray(), [0, 1, 2, 3, 4, 5])
+
+      const moved = (await Tensor.empty([6], { device: 'cpu' }).realize())
+        .to('cuda').to('cpu').reshape([2, 3])
+      const movedOut = moved.rearrange('h w -> w h')
+      const expectedMoved = pg._core.ffi.poly_rearrange(
+        moved._ctx, 'h w -> w h', moved.uop.raw, moved.shape, {}
+      )
+      assert(
+        movedOut.uop.key === String(pg._core.ffi.poly_uop_key(expectedMoved.uop)),
+        'rearrange lost the nested physical occurrence'
+      )
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
   })
 
   await test('einsum and rearrange reject malformed core inputs', async () => {
@@ -2142,6 +2371,33 @@ async function runTensorTests(pg) {
       }
       assert(/poly_rearrange failed/.test(message),
         `unexpected rearrange error for ${formula.slice(0, 24)}: ${message}`)
+    }
+  })
+
+  await test('linalg construction bypasses frontend substitution', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('linalg construction entered frontend substitution')
+    }
+    try {
+      const a = new Tensor([[4, 2], [2, 5]])
+      const b = new Tensor([1, 3])
+      const lower = new Tensor([[2, 0], [1, 3]])
+      const [q, r] = a.qr()
+      assertShape(q.shape, [2, 2])
+      assertShape(r.shape, [2, 2])
+      assert(Number.isFinite(await q.sum().item()), 'qr result must execute')
+      assertShape(lower.triangularSolve(b).shape, [2])
+      const chol = a.cholesky()
+      assertShape(chol.shape, [2, 2])
+      assertShape(chol.choleskySolve(b).shape, [2])
+      assertShape(a.solve(b).shape, [2])
+      assertShape(
+        new Tensor([[1, 0], [1, 1], [1, 2]]).lstsq(new Tensor([1, 2, 3])).shape,
+        [2]
+      )
+    } finally {
+      Tensor.prototype._physicalizeResult = original
     }
   })
 
@@ -2420,7 +2676,7 @@ async function runTensorTests(pg) {
 
   await test('crossEntropy with sparse targets', async () => {
     const logits = new Tensor([[0, 0, 0], [0, 0, 0]])
-    const target = new Tensor([0, 2])
+    const target = new Tensor([0, 2], { dtype: 'int32' })
     const loss = await logits.crossEntropy(target)
     assertShape(loss.shape, [])
     assertClose(await loss.toArray(), [Math.log(3)])
@@ -2434,6 +2690,53 @@ async function runTensorTests(pg) {
     assertClose(await loss.toArray(), [Math.log(3)])
   })
 
+  await test('crossEntropy matches pinned expression without substitution', async () => {
+    const original = Tensor.prototype._physicalizeResult
+    Tensor.prototype._physicalizeResult = () => {
+      throw new Error('cross-entropy construction entered frontend substitution')
+    }
+    try {
+      const logits = new Tensor([[-1, 2, -3], [1, -2, 3]])
+      const sparse = new Tensor([1, 2], { dtype: 'int32' })
+      const dense = new Tensor([[0, 1, 0], [0, 0, 1]])
+      const pinnedExpression = (target, reduction = 'mean', labelSmoothing = 0) => {
+        const classesDim = 1
+        if (JSON.stringify(logits.shape) !== JSON.stringify(target.shape)) {
+          target = target.unsqueeze(classesDim)._oneHotAlongDim(
+            logits.shape[classesDim], classesDim
+          )
+        }
+        target = target.mul(1 - labelSmoothing).add(
+          labelSmoothing / target.shape[classesDim]
+        )
+        const reduced = logits.logSoftmax(classesDim).mul(target).sum(classesDim)
+        if (reduction === 'none') return reduced.neg()
+        if (reduction === 'sum') return reduced.sum().neg()
+        if (reduction === 'mean') return reduced.mean().neg()
+        throw new Error(`invalid reduction ${reduction}`)
+      }
+      const pairs = []
+      for (const [target, reduction, labelSmoothing] of [
+        [sparse, 'mean', 0],
+        [dense, 'mean', 0],
+        [dense, 'none', 0],
+        [dense, 'sum', 0],
+        [dense, 'mean', 0.2]
+      ]) {
+        const actual = logits.crossEntropy(target, reduction, labelSmoothing)
+        const expected = pinnedExpression(target, reduction, labelSmoothing)
+        assert(actual.uop.key === expected.uop.key, 'crossEntropy physical graph differs')
+        assert(actual.uopLogical.key === expected.uopLogical.key, 'crossEntropy logical graph differs')
+        pairs.push([actual, expected])
+      }
+      for (const [actual, expected] of pairs) {
+        assertClose(await actual.toArray(), await expected.toArray())
+      }
+    } finally {
+      Tensor.prototype._physicalizeResult = original
+    }
+  })
+
   await test('crossEntropy with sparse targets on non-last axis', async () => {
     const logits = new Tensor([
       [[0, 0], [0, 0], [0, 0]],
@@ -2442,8 +2745,8 @@ async function runTensorTests(pg) {
     const target = new Tensor([
       [0, 2],
       [1, 0]
-    ])
-    const loss = await logits.crossEntropy(target, -2)
+    ], { dtype: 'int32' })
+    const loss = await logits.crossEntropy(target, 'mean', 0, -2)
     assertShape(loss.shape, [])
     assertClose(await loss.toArray(), [Math.log(3)])
   })
@@ -2456,7 +2759,7 @@ async function runTensorTests(pg) {
     const target = new Tensor([
       [0, 2],
       [1, 0]
-    ])
+    ], { dtype: 'int32' })
     const loss = await logits.crossEntropy(target)
     assertShape(loss.shape, [])
     assertClose(await loss.toArray(), [Math.log(3)])
@@ -2471,7 +2774,7 @@ async function runTensorTests(pg) {
       [[1, 0], [0, 0], [0, 1]],
       [[0, 1], [1, 0], [0, 0]]
     ])
-    const loss = await logits.crossEntropy(target, 1)
+    const loss = await logits.crossEntropy(target, 'mean', 0, 1)
     assertShape(loss.shape, [])
     assertClose(await loss.toArray(), [Math.log(3)])
   })

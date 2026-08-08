@@ -341,6 +341,200 @@ TEST(tensor, movement_constructors_use_exact_logical_and_physical_sources) {
   PASS();
 }
 
+TEST(tensor, symbolic_shrink_uses_exact_logical_and_physical_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){10, 2}, 2);
+  PolyUOp *physical_buffer =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 20, POLY_DEVICE_CPU);
+  PolyUOp *physical =
+      poly_reshape(ctx, physical_buffer, (int64_t[]){10, 2}, 2);
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(source);
+  ASSERT_PTR_NEQ(source->uop_logical, source->uop_physical);
+
+  float data[20];
+  for (int i = 0; i < 20; i++) data[i] = (float)i;
+
+  PolyUOp *i = poly_define_var(ctx, "i", 0, 8);
+  PolyUOp *ib = poly_bind_var(ctx, i, 4);
+  PolyUOp *starts[2] = {ib, poly_const_int(ctx, 0)};
+  PolyUOp *sizes[2] = {poly_const_int(ctx, 2), poly_const_int(ctx, 2)};
+  PolyUOp *expected_logical =
+      poly_shrink_uop(ctx, source->uop_logical, starts, sizes, 2);
+  PolyUOp *expected_physical =
+      poly_shrink_uop(ctx, source->uop_physical, starts, sizes, 2);
+
+  PolyTensor *slice =
+      poly_tensor_shrink_uop(ctx, source, starts, sizes, 2);
+  ASSERT_NOT_NULL(slice);
+  ASSERT_PTR_EQ(slice->uop_logical, expected_logical);
+  ASSERT_PTR_EQ(slice->uop_physical, expected_physical);
+  ASSERT_INT_EQ(slice->uop_logical->op, POLY_OP_SHRINK);
+  ASSERT_INT_EQ(slice->uop_physical->op, POLY_OP_SHRINK);
+  ASSERT_PTR_EQ(slice->uop_logical->src[0], source->uop_logical);
+  ASSERT_PTR_EQ(slice->uop_physical->src[0], source->uop_physical);
+
+  float out[4] = {0};
+  PolyUOp *leaf_buffers[1] = {physical_buffer};
+  float *leaf_data[1] = {data};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, slice->uop_physical, poly_buffer_f32(ctx, 4), out,
+          leaf_buffers, leaf_data, 1
+      ),
+      0
+  );
+  ASSERT_FLOAT_EQ(out[0], 8.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[1], 9.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[2], 10.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[3], 11.0f, 0.0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, symbolic_expand_uses_exact_logical_and_physical_sources) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){1, 2}, 2);
+  PolyUOp *physical_buffer =
+      poly_buffer_on_device(ctx, POLY_FLOAT32, 2, POLY_DEVICE_CPU);
+  PolyUOp *physical =
+      poly_reshape(ctx, physical_buffer, (int64_t[]){1, 2}, 2);
+  PolyTensor *source = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(source);
+  ASSERT_PTR_NEQ(source->uop_logical, source->uop_physical);
+
+  PolyUOp *n = poly_define_var(ctx, "n", 1, 4);
+  PolyUOp *nb = poly_bind_var(ctx, n, 3);
+  PolyUOp *dims[2] = {nb, poly_const_int(ctx, 2)};
+  PolyUOp *expected_logical =
+      poly_expand_uop(ctx, source->uop_logical, dims, 2);
+  PolyUOp *expected_physical =
+      poly_expand_uop(ctx, source->uop_physical, dims, 2);
+
+  PolyTensor *expanded =
+      poly_tensor_expand_uop(ctx, source, dims, 2);
+  ASSERT_NOT_NULL(expanded);
+  ASSERT_PTR_EQ(expanded->uop_logical, expected_logical);
+  ASSERT_PTR_EQ(expanded->uop_physical, expected_physical);
+  ASSERT_INT_EQ(expanded->uop_logical->op, POLY_OP_EXPAND);
+  ASSERT_INT_EQ(expanded->uop_physical->op, POLY_OP_EXPAND);
+  ASSERT_PTR_EQ(expanded->uop_logical->src[0], source->uop_logical);
+  ASSERT_PTR_EQ(expanded->uop_physical->src[0], source->uop_physical);
+
+  PolyUOp *starts[2] = {poly_const_int(ctx, 0), poly_const_int(ctx, 0)};
+  PolyUOp *sizes[2] = {poly_const_int(ctx, 3), poly_const_int(ctx, 2)};
+  PolyUOp *static_view =
+      poly_shrink_uop(ctx, expanded->uop_physical, starts, sizes, 2);
+  ASSERT_NOT_NULL(static_view);
+  float data[2] = {1.0f, 2.0f};
+  float out[6] = {0};
+  PolyUOp *leaf_buffers[1] = {physical_buffer};
+  float *leaf_data[1] = {data};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, static_view, poly_buffer_f32(ctx, 6), out,
+          leaf_buffers, leaf_data, 1
+      ),
+      0
+  );
+  for (int row = 0; row < 3; row++) {
+    ASSERT_FLOAT_EQ(out[row * 2], 1.0f, 0.0);
+    ASSERT_FLOAT_EQ(out[row * 2 + 1], 2.0f, 0.0);
+  }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(tensor, custom_kernel_uses_ordered_roots_and_one_call_per_graph) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+
+  int64_t shape[1] = {4};
+  PolyTensor *c =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *a =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  PolyTensor *b =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(c);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyUOp *pc = poly_uop_placeholder_like(ctx, c->uop_physical, 0);
+  PolyUOp *pa = poly_uop_placeholder_like(ctx, a->uop_physical, 1);
+  PolyUOp *pb = poly_uop_placeholder_like(ctx, b->uop_physical, 2);
+  PolyUOp *r = poly_uop_range(ctx, 4, 0, POLY_AXIS_LOOP);
+  PolyUOp *idxs[1] = {r};
+  PolyUOp *ci = poly_uop_index(ctx, pc, idxs, 1, 0);
+  PolyUOp *ai = poly_uop_index(ctx, pa, idxs, 1, 0);
+  PolyUOp *bi = poly_uop_index(ctx, pb, idxs, 1, 0);
+  PolyUOp *sum = poly_alu2(
+      ctx, POLY_OP_ADD, poly_uop_load(ctx, ai), poly_uop_load(ctx, bi)
+  );
+  PolyUOp *store = poly_uop_store(ctx, ci, sum);
+  PolyUOp *end = poly_uop_end(ctx, store, &r, 1);
+  PolyUOp *body = poly_uop_sink(ctx, &end, 1);
+  ASSERT_NOT_NULL(body);
+
+  PolyTensor *inputs[3] = {c, a, b};
+  PolyTensor *outputs[3] = {0};
+  ASSERT_INT_EQ(poly_tensor_custom_kernel(ctx, body, inputs, 3, outputs), 0);
+  for (int i = 0; i < 3; i++) {
+    ASSERT_NOT_NULL(outputs[i]);
+    ASSERT_INT_EQ(outputs[i]->uop_logical->op, POLY_OP_AFTER);
+    ASSERT_INT_EQ(outputs[i]->uop_physical->op, POLY_OP_AFTER);
+    ASSERT_PTR_EQ(outputs[i]->uop_logical->src[0], inputs[i]->uop_logical);
+    ASSERT_PTR_EQ(outputs[i]->uop_physical->src[0], inputs[i]->uop_physical);
+    ASSERT_PTR_EQ(outputs[i]->uop_logical->src[1], outputs[0]->uop_logical->src[1]);
+    ASSERT_PTR_EQ(outputs[i]->uop_physical->src[1], outputs[0]->uop_physical->src[1]);
+  }
+  PolyUOp *logical_call = outputs[0]->uop_logical->src[1];
+  PolyUOp *physical_call = outputs[0]->uop_physical->src[1];
+  ASSERT_INT_EQ(logical_call->op, POLY_OP_CALL);
+  ASSERT_INT_EQ(physical_call->op, POLY_OP_CALL);
+  ASSERT_INT_EQ(logical_call->n_src, 4);
+  ASSERT_INT_EQ(physical_call->n_src, 4);
+  ASSERT_PTR_EQ(logical_call->src[0], body);
+  ASSERT_PTR_EQ(physical_call->src[0], body);
+  for (int i = 0; i < 3; i++) {
+    ASSERT_PTR_EQ(logical_call->src[i + 1], inputs[i]->uop_logical);
+    ASSERT_PTR_EQ(physical_call->src[i + 1], inputs[i]->uop_physical);
+  }
+
+  float c_data[4] = {0};
+  float a_data[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  float b_data[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  float out[4] = {0};
+  PolyUOp *leaf_buffers[3] = {
+      c->uop_physical, a->uop_physical, b->uop_physical
+  };
+  float *leaf_data[3] = {c_data, a_data, b_data};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, outputs[0]->uop_physical, c->uop_physical, out,
+          leaf_buffers, leaf_data, 3
+      ),
+      0
+  );
+  ASSERT_FLOAT_EQ(out[0], 11.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[1], 22.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[2], 33.0f, 0.0);
+  ASSERT_FLOAT_EQ(out[3], 44.0f, 0.0);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(tensor, dtype_constructors_use_exact_logical_and_physical_sources) {
   PolyCtx *ctx = poly_ctx_new();
   ASSERT_NOT_NULL(ctx);
@@ -433,6 +627,35 @@ TEST(tensor, einsum_rearrange_reject_invalid_and_foreign_inputs) {
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[0], 2);
   ASSERT_INT_EQ(poly_uop_max_shape_dims(ctx, valid)[1], 3);
 
+  PolyUOp *cuda =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *cpu =
+      poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *to_cuda =
+      poly_uop2(ctx, POLY_OP_COPY, x->dtype, x, cuda, poly_arg_none());
+  PolyUOp *physical =
+      poly_uop2(ctx, POLY_OP_COPY, x->dtype, to_cuda, cpu, poly_arg_none());
+  PolyTensor *tensor = poly_tensor_create_with_roots(
+      ctx, x, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(tensor);
+  PolyUOp *expected_logical =
+      poly_rearrange(ctx, "(h w)->h w", x, "h w", axis_values, 2);
+  PolyUOp *expected_physical =
+      poly_rearrange(ctx, "(h w)->h w", physical, "h w", axis_values, 2);
+  PolyTensor *tensor_valid = poly_tensor_rearrange(
+      ctx, "(h w)->h w", tensor, "h w", axis_values, 2
+  );
+  ASSERT_NOT_NULL(tensor_valid);
+  ASSERT_EQ(poly_tensor_uop_logical(tensor_valid), expected_logical);
+  ASSERT_EQ(poly_tensor_uop_physical(tensor_valid), expected_physical);
+  ASSERT_EQ(
+      poly_tensor_rearrange(
+          foreign_ctx, "(h w)->h w", tensor, "h w", axis_values, 2
+      ),
+      NULL
+  );
+
   char long_formula[320];
   memset(long_formula, 'a', sizeof(long_formula) - 1);
   memcpy(long_formula + sizeof(long_formula) - 5, "->a", 4);
@@ -442,6 +665,7 @@ TEST(tensor, einsum_rearrange_reject_invalid_and_foreign_inputs) {
   ASSERT_EQ(poly_rearrange(ctx, "a->a->a", x, NULL, NULL, 0), NULL);
   ASSERT_EQ(poly_rearrange(ctx, "((a))->a", x, NULL, NULL, 0), NULL);
   ASSERT_EQ(poly_rearrange(ctx, "(a->a", x, NULL, NULL, 0), NULL);
+  ASSERT_EQ(poly_tensor_rearrange(ctx, "(a->a", tensor, NULL, NULL, 0), NULL);
   ASSERT_EQ(
       poly_rearrange(
           ctx,
@@ -1013,6 +1237,55 @@ TEST(pe, tensor_gelu_family_builds_both_roots_from_exact_occurrences) {
   PASS();
 }
 
+TEST(pe, tensor_log1p_expm1_build_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  PolyCtx *foreign = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  ASSERT_NOT_NULL(foreign);
+
+  PolyUOp *logical = make_buf(ctx, (int64_t[]){4}, 1);
+  PolyUOp *cuda = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CUDA));
+  PolyUOp *cpu = poly_uop0(ctx, POLY_OP_DEVICE, POLY_VOID, poly_arg_int(POLY_DEVICE_CPU));
+  PolyUOp *to_cuda =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, logical, cuda, poly_arg_none());
+  PolyUOp *physical =
+      poly_uop2(ctx, POLY_OP_COPY, logical->dtype, to_cuda, cpu, poly_arg_none());
+  PolyTensor *src = poly_tensor_create_with_roots(
+      ctx, logical, physical, POLY_TENSOR_VALUE, POLY_DEVICE_CPU
+  );
+  ASSERT_NOT_NULL(src);
+  poly_tensor_set_requires_grad(src, true);
+
+  PolyUOp *expected_log1p_logical = poly_log1p(ctx, logical);
+  PolyUOp *expected_log1p_physical = poly_log1p(ctx, physical);
+  PolyTensor *log1p = poly_tensor_log1p(ctx, src);
+  ASSERT_NOT_NULL(expected_log1p_logical);
+  ASSERT_NOT_NULL(expected_log1p_physical);
+  ASSERT_NOT_NULL(log1p);
+  ASSERT_EQ(poly_tensor_uop_logical(log1p), expected_log1p_logical);
+  ASSERT_EQ(poly_tensor_uop_physical(log1p), expected_log1p_physical);
+  ASSERT_TRUE(poly_tensor_requires_grad(log1p));
+  ASSERT_TRUE(poly_tensor_requires_grad_is_set(log1p));
+
+  PolyUOp *expected_expm1_logical = poly_expm1(ctx, logical);
+  PolyUOp *expected_expm1_physical = poly_expm1(ctx, physical);
+  PolyTensor *expm1 = poly_tensor_expm1(ctx, src);
+  ASSERT_NOT_NULL(expected_expm1_logical);
+  ASSERT_NOT_NULL(expected_expm1_physical);
+  ASSERT_NOT_NULL(expm1);
+  ASSERT_EQ(poly_tensor_uop_logical(expm1), expected_expm1_logical);
+  ASSERT_EQ(poly_tensor_uop_physical(expm1), expected_expm1_physical);
+  ASSERT_TRUE(poly_tensor_requires_grad(expm1));
+  ASSERT_TRUE(poly_tensor_requires_grad_is_set(expm1));
+
+  ASSERT_EQ(poly_tensor_log1p(foreign, src), NULL);
+  ASSERT_EQ(poly_tensor_expm1(foreign, src), NULL);
+
+  poly_ctx_destroy(foreign);
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
 TEST(pe, cast_same_dtype_elides_and_scalar_target_preserves_vector_lanes) {
   PolyCtx *ctx = poly_ctx_new();
   PolyUOp *scalar = poly_const_int(ctx, 3);
@@ -1145,6 +1418,131 @@ TEST(pe, scatter_reduce_e2e_matches_tinygrad_probe) {
     for (int i = 0; i < 5; i++)
       ASSERT_FLOAT_EQ(got[i], cases[c].expected[i], 1e-5f);
   }
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_scatter_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[2] = {1, 5};
+  PolyTensor *self =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *index =
+      poly_tensor_empty(ctx, POLY_INT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *src =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(self);
+  ASSERT_NOT_NULL(index);
+  ASSERT_NOT_NULL(src);
+
+  PolyUOp *logical_scatter = poly_scatter(
+      ctx, self->uop_logical, 1, index->uop_logical, src->uop_logical, NULL
+  );
+  PolyUOp *physical_scatter = poly_scatter(
+      ctx, self->uop_physical, 1, index->uop_physical, src->uop_physical, NULL
+  );
+  PolyTensor *scatter = poly_tensor_scatter(ctx, self, 1, index, src, NULL);
+  ASSERT_NOT_NULL(scatter);
+  ASSERT_PTR_EQ(scatter->uop_logical, logical_scatter);
+  ASSERT_PTR_EQ(scatter->uop_physical, physical_scatter);
+
+  PolyUOp *logical_sum = poly_scatter_reduce(
+      ctx, self->uop_logical, 1, index->uop_logical, src->uop_logical, "sum", 1
+  );
+  PolyUOp *physical_sum = poly_scatter_reduce(
+      ctx, self->uop_physical, 1, index->uop_physical, src->uop_physical, "sum", 1
+  );
+  PolyTensor *sum =
+      poly_tensor_scatter_reduce(ctx, self, 1, index, src, "sum", 1);
+  ASSERT_NOT_NULL(sum);
+  ASSERT_PTR_EQ(sum->uop_logical, logical_sum);
+  ASSERT_PTR_EQ(sum->uop_physical, physical_sum);
+
+  float self_data[5] = {1, 2, 3, 4, 5};
+  int32_t index_data[5] = {0, 1, 1, 3, 4};
+  float src_data[5] = {6, 7, 8, 9, 10};
+  PolyUOp *leaves[3] = {
+      base_buf(self->uop_physical),
+      base_buf(index->uop_physical),
+      base_buf(src->uop_physical),
+  };
+  float *leaf_data[3] = {
+      self_data,
+      (float *)index_data,
+      src_data,
+  };
+  float scatter_values[5] = {0};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, scatter->uop_physical, poly_buffer_f32(ctx, 5), scatter_values,
+          leaves, leaf_data, 3
+      ),
+      0
+  );
+  const float expected_scatter[5] = {6, 8, 3, 9, 10};
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(scatter_values[i], expected_scatter[i], 1e-5f);
+
+  float sum_values[5] = {0};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, sum->uop_physical, poly_buffer_f32(ctx, 5), sum_values,
+          leaves, leaf_data, 3
+      ),
+      0
+  );
+  const float expected_sum[5] = {7, 17, 3, 13, 15};
+  for (int i = 0; i < 5; i++)
+    ASSERT_FLOAT_EQ(sum_values[i], expected_sum[i], 1e-5f);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_einsum_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t shape[2] = {2, 2};
+  PolyTensor *a =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *b =
+      poly_tensor_empty(ctx, POLY_FLOAT32, shape, 2, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyUOp *logical_inputs[2] = {a->uop_logical, b->uop_logical};
+  PolyUOp *physical_inputs[2] = {a->uop_physical, b->uop_physical};
+  PolyUOp *logical =
+      poly_einsum(ctx, "ij,jk->ik", logical_inputs, 2);
+  PolyUOp *physical =
+      poly_einsum(ctx, "ij,jk->ik", physical_inputs, 2);
+  PolyTensor *inputs[2] = {a, b};
+  PolyTensor *out =
+      poly_tensor_einsum(ctx, "ij,jk->ik", inputs, 2);
+  ASSERT_NOT_NULL(out);
+  ASSERT_PTR_EQ(out->uop_logical, logical);
+  ASSERT_PTR_EQ(out->uop_physical, physical);
+
+  float a_data[4] = {1, 2, 3, 4};
+  float b_data[4] = {5, 6, 7, 8};
+  PolyUOp *leaves[2] = {
+      base_buf(a->uop_physical),
+      base_buf(b->uop_physical),
+  };
+  float *leaf_data[2] = {a_data, b_data};
+  float values[4] = {0};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, out->uop_physical, poly_buffer_f32(ctx, 4), values,
+          leaves, leaf_data, 2
+      ),
+      0
+  );
+  const float expected[4] = {19, 22, 43, 50};
+  for (int i = 0; i < 4; i++)
+    ASSERT_FLOAT_EQ(values[i], expected[i], 1e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
@@ -1302,6 +1700,142 @@ TEST(pe, tensor_topk_builds_both_roots_from_exact_occurrences) {
   ASSERT_EQ(poly_tensor_uop_physical(values), expected_physical_values);
   ASSERT_EQ(poly_tensor_uop_logical(indices), expected_logical_indices);
   ASSERT_EQ(poly_tensor_uop_physical(indices), expected_physical_indices);
+
+  poly_ctx_destroy(ctx);
+  PASS();
+}
+
+TEST(pe, tensor_linalg_builds_both_roots_from_exact_occurrences) {
+  PolyCtx *ctx = poly_ctx_new();
+  ASSERT_NOT_NULL(ctx);
+  int64_t matrix_shape[2] = {2, 2};
+  int64_t vector_shape[1] = {2};
+  PolyTensor *a =
+      poly_tensor_empty(ctx, POLY_FLOAT32, matrix_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *b =
+      poly_tensor_empty(ctx, POLY_FLOAT32, vector_shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(a);
+  ASSERT_NOT_NULL(b);
+
+  PolyUOp *logical_q = NULL, *logical_r = NULL;
+  PolyUOp *physical_q = NULL, *physical_r = NULL;
+  ASSERT_INT_EQ(
+      poly_qr_ex(
+          ctx, a->uop_logical, POLY_QR_COMPLETE, &logical_q, &logical_r
+      ),
+      0
+  );
+  ASSERT_INT_EQ(
+      poly_qr_ex(
+          ctx, a->uop_physical, POLY_QR_COMPLETE, &physical_q, &physical_r
+      ),
+      0
+  );
+  PolyTensor *q = NULL, *r = NULL;
+  ASSERT_INT_EQ(
+      poly_tensor_qr_ex(ctx, a, POLY_QR_COMPLETE, &q, &r),
+      0
+  );
+  ASSERT_NOT_NULL(q);
+  ASSERT_NOT_NULL(r);
+  ASSERT_PTR_EQ(q->uop_logical, logical_q);
+  ASSERT_PTR_EQ(q->uop_physical, physical_q);
+  ASSERT_PTR_EQ(r->uop_logical, logical_r);
+  ASSERT_PTR_EQ(r->uop_physical, physical_r);
+
+  PolyUOp *logical_tri =
+      poly_triangular_solve(ctx, a->uop_logical, b->uop_logical, 0, 0, 0);
+  PolyUOp *physical_tri =
+      poly_triangular_solve(ctx, a->uop_physical, b->uop_physical, 0, 0, 0);
+  PolyTensor *tri = poly_tensor_triangular_solve(ctx, a, b, 0, 0, 0);
+  ASSERT_NOT_NULL(tri);
+  ASSERT_PTR_EQ(tri->uop_logical, logical_tri);
+  ASSERT_PTR_EQ(tri->uop_physical, physical_tri);
+
+  PolyUOp *logical_chol = poly_cholesky(ctx, a->uop_logical, 0);
+  PolyUOp *physical_chol = poly_cholesky(ctx, a->uop_physical, 0);
+  PolyTensor *chol = poly_tensor_cholesky(ctx, a, 0);
+  ASSERT_NOT_NULL(chol);
+  ASSERT_PTR_EQ(chol->uop_logical, logical_chol);
+  ASSERT_PTR_EQ(chol->uop_physical, physical_chol);
+
+  PolyUOp *logical_chol_solve =
+      poly_cholesky_solve(ctx, chol->uop_logical, b->uop_logical, 0);
+  PolyUOp *physical_chol_solve =
+      poly_cholesky_solve(ctx, chol->uop_physical, b->uop_physical, 0);
+  PolyTensor *chol_solve = poly_tensor_cholesky_solve(ctx, chol, b, 0);
+  ASSERT_NOT_NULL(chol_solve);
+  ASSERT_PTR_EQ(chol_solve->uop_logical, logical_chol_solve);
+  ASSERT_PTR_EQ(chol_solve->uop_physical, physical_chol_solve);
+
+  PolyUOp *logical_solve = poly_solve(ctx, a->uop_logical, b->uop_logical);
+  PolyUOp *physical_solve = poly_solve(ctx, a->uop_physical, b->uop_physical);
+  PolyTensor *solve = poly_tensor_solve(ctx, a, b);
+  ASSERT_NOT_NULL(solve);
+  ASSERT_PTR_EQ(solve->uop_logical, logical_solve);
+  ASSERT_PTR_EQ(solve->uop_physical, physical_solve);
+
+  int64_t tall_shape[2] = {3, 2};
+  int64_t tall_rhs_shape[1] = {3};
+  PolyTensor *tall =
+      poly_tensor_empty(ctx, POLY_FLOAT32, tall_shape, 2, POLY_DEVICE_CPU);
+  PolyTensor *tall_rhs =
+      poly_tensor_empty(ctx, POLY_FLOAT32, tall_rhs_shape, 1, POLY_DEVICE_CPU);
+  ASSERT_NOT_NULL(tall);
+  ASSERT_NOT_NULL(tall_rhs);
+  PolyUOp *logical_lstsq =
+      poly_lstsq(ctx, tall->uop_logical, tall_rhs->uop_logical);
+  PolyUOp *physical_lstsq =
+      poly_lstsq(ctx, tall->uop_physical, tall_rhs->uop_physical);
+  PolyTensor *lstsq = poly_tensor_lstsq(ctx, tall, tall_rhs);
+  ASSERT_NOT_NULL(lstsq);
+  ASSERT_PTR_EQ(lstsq->uop_logical, logical_lstsq);
+  ASSERT_PTR_EQ(lstsq->uop_physical, physical_lstsq);
+
+  float a_data[4] = {4.0f, 2.0f, 2.0f, 5.0f};
+  float b_data[2] = {1.0f, 3.0f};
+  PolyUOp *a_leaf = base_buf(a->uop_physical);
+  PolyUOp *b_leaf = base_buf(b->uop_physical);
+  float *a_leaf_data[1] = {a_data};
+  PolyUOp *a_leaves[1] = {a_leaf};
+  float q_values[4] = {0}, r_values[4] = {0};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, q->uop_physical, poly_buffer_f32(ctx, 4), q_values,
+          a_leaves, a_leaf_data, 1
+      ),
+      0
+  );
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, r->uop_physical, poly_buffer_f32(ctx, 4), r_values,
+          a_leaves, a_leaf_data, 1
+      ),
+      0
+  );
+  float expected_q[4] = {
+      -0.89442706f, 0.44721359f, -0.44721359f, -0.89442718f
+  };
+  float expected_r[4] = {
+      -4.47213554f, -4.02492189f, 5.4168083e-9f, -3.57770872f
+  };
+  for (int i = 0; i < 4; i++) {
+    ASSERT_FLOAT_EQ(q_values[i], expected_q[i], 2e-5f);
+    ASSERT_FLOAT_EQ(r_values[i], expected_r[i], 2e-5f);
+  }
+
+  float solve_values[2] = {0};
+  PolyUOp *solve_leaves[2] = {a_leaf, b_leaf};
+  float *solve_leaf_data[2] = {a_data, b_data};
+  ASSERT_INT_EQ(
+      realize_uop(
+          ctx, solve->uop_physical, poly_buffer_f32(ctx, 2),
+          solve_values, solve_leaves, solve_leaf_data, 2
+      ),
+      0
+  );
+  ASSERT_FLOAT_EQ(solve_values[0], -0.0625f, 2e-5f);
+  ASSERT_FLOAT_EQ(solve_values[1], 0.625f, 2e-5f);
 
   poly_ctx_destroy(ctx);
   PASS();
